@@ -11,7 +11,8 @@ import {
   getChannelMessages,
   insertMessage,
 } from '../db/index.js';
-import { sendToDaemon } from '../daemon/connections.js';
+import { isMachineOnline, sendToDaemon } from '../daemon/connections.js';
+import { requestFromDaemon } from '../daemon/index.js';
 import { broadcast } from '../realtime/broadcast.js';
 import { formatMessage } from '../internal/index.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -24,6 +25,7 @@ import {
 
 const DEFAULT_SERVER_ID = process.env.DEFAULT_SERVER_ID ?? 'server-001';
 const DEFAULT_USER_NAME = process.env.DEFAULT_USER_NAME ?? 'Admin';
+const DEFAULT_DAEMON_REQUEST_TIMEOUT_MS = 10_000;
 
 const ALLOWED_CHANNEL_TYPES = new Set(['xhs-creator']);
 const ALLOWED_MEMBER_TYPES = new Set(['human', 'channel_agent', 'sub_agent', 'worker']);
@@ -88,12 +90,43 @@ function defaultSenderName(senderType, senderId) {
   }
 }
 
+function formatDaemonMessagePayload(message) {
+  const senderType = message?.senderType ?? message?.sender_type ?? 'human';
+  const senderId = message?.senderId ?? message?.sender_id ?? '';
+  return {
+    id: message?.messageId ?? message?.message_id ?? null,
+    seq: null,
+    teamId: null,
+    channelId: message?.channelId ?? message?.channel_id ?? null,
+    senderType,
+    senderId,
+    senderName: message?.senderName ?? message?.sender_name ?? defaultSenderName(senderType, senderId),
+    messageType: message?.messageType ?? message?.message_type ?? 'chat',
+    content: String(message?.content ?? ''),
+    threadId: null,
+    mentions: null,
+    taskStatus: null,
+    taskNumber: null,
+    taskAssigneeType: null,
+    taskAssigneeId: null,
+    taskAssigneeName: null,
+    taskClaimedAt: null,
+    taskCompletedAt: null,
+    createdAt: message?.createdAt ?? message?.created_at ?? new Date().toISOString(),
+    updatedAt: null,
+    attachments: Array.isArray(message?.attachments) ? message.attachments : [],
+  };
+}
+
 export async function appendDaemonChannelMessage({
   requestId,
   channelId,
   senderType,
   senderId,
+  senderName,
   content,
+  messageId,
+  messageType = 'chat',
 }) {
   if (!ALLOWED_MEMBER_TYPES.has(senderType) && senderType !== 'human') {
     throw new Error(`Unsupported sender_type: ${senderType}`);
@@ -103,13 +136,13 @@ export async function appendDaemonChannelMessage({
   }
 
   const msg = await insertMessage(getDb(), {
-    id: uuidv4(),
+    id: messageId ?? uuidv4(),
     teamId: null,
     channelId,
     senderType,
     senderId,
-    senderName: defaultSenderName(senderType, senderId),
-    messageType: 'chat',
+    senderName: senderName ?? defaultSenderName(senderType, senderId),
+    messageType,
     content: String(content),
   });
 
@@ -129,6 +162,8 @@ export function createChannelsRouter({
   getChannelMessagesImpl = getChannelMessages,
   insertMessageImpl = insertMessage,
   sendToDaemonImpl = sendToDaemon,
+  isMachineOnlineImpl = isMachineOnline,
+  requestFromDaemonImpl = requestFromDaemon,
   broadcastImpl = broadcast,
   formatMessageImpl = formatMessage,
   requireAuthImpl = requireAuth,
@@ -139,6 +174,7 @@ export function createChannelsRouter({
   uuidv4Impl = uuidv4,
   defaultServerId = DEFAULT_SERVER_ID,
   defaultUserName = DEFAULT_USER_NAME,
+  daemonRequestTimeoutMs = DEFAULT_DAEMON_REQUEST_TIMEOUT_MS,
 } = {}) {
   const router = Router();
 
@@ -338,43 +374,41 @@ export function createChannelsRouter({
     if (!content) return res.status(400).json({ error: 'content required' });
 
     const userId = getRequestUserIdImpl(req);
-    const msg = await insertMessageImpl(getDbImpl(), {
-      id: uuidv4Impl(),
-      teamId: null,
-      channelId: req.channel.id,
-      senderType: 'human',
-      senderId: userId,
-      senderName: req.user?.name ?? defaultUserName,
-      messageType: 'chat',
-      content,
-    });
-
-    const payload = formatMessageImpl(msg);
-    broadcastImpl.channelMessage(req.channel.id, payload);
-    if (req.channel.daemon_id) {
-      pushChannelEvent(req.channel.daemon_id, {
-        type: 'channel:event',
-        channelId: req.channel.id,
-        event: {
-          type: 'user.message.posted',
-          created_at: new Date().toISOString(),
-          source: 'server',
-          payload: {
-            message: {
-              messageId: msg.id,
-              channelId: req.channel.id,
-              senderType: 'human',
-              senderId: userId,
-              senderName: req.user?.name ?? defaultUserName,
-              content,
-              attachments: [],
-              createdAt: msg.created_at,
-            },
-          },
-        },
-      });
+    const daemonId = String(req.channel.daemon_id ?? '').trim();
+    if (!daemonId) {
+      return res.status(503).json({ error: 'Channel daemon unavailable' });
     }
-    res.status(201).json(payload);
+    if (!isMachineOnlineImpl(daemonId)) {
+      return res.status(503).json({ error: 'Channel daemon offline' });
+    }
+
+    const requestId = uuidv4Impl();
+    try {
+      const result = await requestFromDaemonImpl(
+        daemonId,
+        {
+          type: 'channel:message.send',
+          requestId,
+          channelId: req.channel.id,
+          senderType: 'human',
+          senderId: userId,
+          senderName: req.user?.name ?? defaultUserName,
+          messageType: 'chat',
+          content,
+          attachments: [],
+        },
+        requestId,
+        daemonRequestTimeoutMs,
+      );
+
+      if (!result?.ok) {
+        return res.status(503).json({ error: result?.error ?? 'Channel daemon failed to persist message' });
+      }
+
+      res.status(201).json(formatDaemonMessagePayload(result.message));
+    } catch (err) {
+      res.status(503).json({ error: `Channel daemon unavailable: ${err.message}` });
+    }
   });
 
   return router;

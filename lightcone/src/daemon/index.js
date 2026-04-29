@@ -256,9 +256,12 @@ async function handleDaemonMessage(machineId, serverId, msg) {
     case 'message.append': {
       const requestId = msg.requestId ?? null;
       try {
+        const messageId = String(msg.message_id ?? randomUUID());
         const channelId = msg.channel_id ?? msg.channelId;
         const senderType = msg.sender_type ?? msg.senderType;
         const senderId = msg.sender_id ?? msg.senderId;
+        const senderName = String(msg.sender_name ?? formatChannelSenderName(senderType, senderId));
+        const messageType = String(msg.message_type ?? 'chat');
         const content = String(msg.content ?? '');
         if (!requestId) throw new Error('requestId required');
         if (!channelId) throw new Error('channel_id required');
@@ -275,13 +278,13 @@ async function handleDaemonMessage(machineId, serverId, msg) {
         }
 
         const message = await insertMessage(db, {
-          id: randomUUID(),
+          id: messageId,
           teamId: null,
           channelId,
           senderType,
           senderId,
-          senderName: formatChannelSenderName(senderType, senderId),
-          messageType: 'chat',
+          senderName,
+          messageType,
           content: appendAttachmentReferences(content, msg.attachments),
         });
 
@@ -351,6 +354,7 @@ async function handleDaemonMessage(machineId, serverId, msg) {
     case 'agent:workspace:file_content':
     case 'machine:workspace:scan_result':
     case 'machine:workspace:delete_result':
+    case 'channel:message.send.result':
     case 'runtime:preflight:result': {
       const key = msg.requestId ?? msg.agentId;
       const resolve = pendingRequests.get(key);

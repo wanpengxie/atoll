@@ -22,7 +22,16 @@ const workspaceMembers = new Set([
 ]);
 
 const channelFixtures = new Map([
-  ['channel-a', { id: 'channel-a', workspace_id: 'ws-a', name: 'Channel A', type: 'xhs-creator', capability_set: { cli_binaries: [] }, status: 'active', archived_at: null }],
+  ['channel-a', {
+    id: 'channel-a',
+    workspace_id: 'ws-a',
+    name: 'Channel A',
+    type: 'xhs-creator',
+    capability_set: { cli_binaries: [] },
+    daemon_id: 'machine-a',
+    status: 'active',
+    archived_at: null,
+  }],
 ]);
 
 const channelMembers = new Set([
@@ -211,5 +220,119 @@ test('channel creation stays allowed in own workspace and returns 403 across use
     });
     assert.equal(forbiddenResponse.status, 403);
     assert.deepEqual(forbiddenResponse.json, { error: 'Forbidden: workspace membership required' });
+  });
+});
+
+test('POST /api/channels/:id/messages returns 503 when bound daemon is offline', async () => {
+  const auth = buildChannelAuth();
+  let rpcCalled = false;
+  const router = createChannelsRouter({
+    getDbImpl: () => ({}),
+    broadcastImpl: { channelUpdated: noop, channelMessage: noop },
+    isMachineOnlineImpl: () => false,
+    requestFromDaemonImpl: async () => {
+      rpcCalled = true;
+      return { ok: true };
+    },
+    requireChannelReadImpl: auth.requireChannelRead,
+    requireChannelWriteImpl: auth.requireChannelWrite,
+    getRequestUserIdImpl: auth.getRequestUserId,
+  });
+
+  await withServer(createApp('/api/channels', router, { id: 'user-a', name: 'User A' }), async (baseUrl) => {
+    const response = await requestJson(baseUrl, '/api/channels/channel-a/messages', {
+      method: 'POST',
+      body: { content: 'hello offline daemon' },
+    });
+
+    assert.equal(response.status, 503);
+    assert.deepEqual(response.json, { error: 'Channel daemon offline' });
+    assert.equal(rpcCalled, false);
+  });
+});
+
+test('POST /api/channels/:id/messages proxies to daemon-first path and does not write MySQL directly', async () => {
+  const auth = buildChannelAuth();
+  const daemonRequests = [];
+  let insertMessageCalled = false;
+  const router = createChannelsRouter({
+    getDbImpl: () => ({}),
+    broadcastImpl: { channelUpdated: noop, channelMessage: noop },
+    insertMessageImpl: async () => {
+      insertMessageCalled = true;
+      throw new Error('insertMessage should not be called for human channel POST');
+    },
+    isMachineOnlineImpl: () => true,
+    requestFromDaemonImpl: async (machineId, request, responseKey, timeoutMs) => {
+      daemonRequests.push({ machineId, request, responseKey, timeoutMs });
+      return {
+        ok: true,
+        message: {
+          messageId: 'msg-daemon-1',
+          channelId: request.channelId,
+          senderType: request.senderType,
+          senderId: request.senderId,
+          senderName: request.senderName,
+          messageType: request.messageType,
+          content: request.content,
+          attachments: [],
+          createdAt: '2026-04-30T00:00:00.000Z',
+        },
+      };
+    },
+    requireChannelReadImpl: auth.requireChannelRead,
+    requireChannelWriteImpl: auth.requireChannelWrite,
+    getRequestUserIdImpl: auth.getRequestUserId,
+    uuidv4Impl: () => 'req-daemon-1',
+  });
+
+  await withServer(createApp('/api/channels', router, { id: 'user-a', name: 'User A' }), async (baseUrl) => {
+    const response = await requestJson(baseUrl, '/api/channels/channel-a/messages', {
+      method: 'POST',
+      body: { content: 'hello daemon path' },
+    });
+
+    assert.equal(response.status, 201);
+    assert.equal(insertMessageCalled, false);
+    assert.equal(daemonRequests.length, 1);
+    assert.deepEqual(daemonRequests[0], {
+      machineId: 'machine-a',
+      request: {
+        type: 'channel:message.send',
+        requestId: 'req-daemon-1',
+        channelId: 'channel-a',
+        senderType: 'human',
+        senderId: 'user-a',
+        senderName: 'User A',
+        messageType: 'chat',
+        content: 'hello daemon path',
+        attachments: [],
+      },
+      responseKey: 'req-daemon-1',
+      timeoutMs: 10000,
+    });
+    assert.deepEqual(response.json, {
+      id: 'msg-daemon-1',
+      seq: null,
+      teamId: null,
+      channelId: 'channel-a',
+      senderType: 'human',
+      senderId: 'user-a',
+      senderName: 'User A',
+      messageType: 'chat',
+      content: 'hello daemon path',
+      threadId: null,
+      mentions: null,
+      taskStatus: null,
+      taskNumber: null,
+      taskAssigneeType: null,
+      taskAssigneeId: null,
+      taskAssigneeName: null,
+      taskClaimedAt: null,
+      taskCompletedAt: null,
+      createdAt: '2026-04-30T00:00:00.000Z',
+      updatedAt: null,
+      attachments: [],
+    });
   });
 });

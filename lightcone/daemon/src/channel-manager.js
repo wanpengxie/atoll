@@ -200,6 +200,7 @@ export class ChannelManager {
       'channel:resume',
       'channel:archive',
       'channel:event',
+      'channel:message.send',
     ].includes(message?.type);
   }
 
@@ -249,6 +250,8 @@ export class ChannelManager {
         return this.archiveChannel(message.channelId ?? message.channel_id ?? message.id);
       case 'channel:event':
         return this.handleEvent(message);
+      case 'channel:message.send':
+        return this.handleServerMessageSend(message, connection);
       default:
         return false;
     }
@@ -509,19 +512,61 @@ export class ChannelManager {
     return node.capabilitySet;
   }
 
-  async sendChannelMessage(params) {
+  async sendChannelMessage(params, options = {}) {
     const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
     const node = this._requireNode(channelId);
     const message = normalizeMessage(channelId, params, {
-      senderType: 'channel_agent',
-      senderId: node.agentName,
-      senderName: node.agentName,
-      source: 'daemon',
+      senderType: options.senderType ?? 'channel_agent',
+      senderId: options.senderId ?? node.agentName,
+      senderName: options.senderName ?? node.agentName,
+      source: options.source ?? 'daemon',
     });
 
     await this._appendMessage(node, message);
-    await this._appendToServerView(node, message);
+    await this._appendToServerView(node, message, { requestId: options.requestId });
     return message;
+  }
+
+  async handleServerMessageSend(message, connection = this.connection) {
+    const requestId = String(message?.requestId ?? '').trim();
+    if (!requestId) {
+      throw toRpcError('bad_request', 'requestId is required');
+    }
+
+    try {
+      const sent = await this.sendChannelMessage({
+        channelId: message.channelId ?? message.channel_id,
+        senderType: message.senderType ?? message.sender_type ?? 'human',
+        senderId: message.senderId ?? message.sender_id,
+        senderName: message.senderName ?? message.sender_name,
+        messageType: message.messageType ?? message.message_type ?? 'chat',
+        content: message.content,
+        attachments: message.attachments,
+      }, {
+        requestId,
+        senderType: 'human',
+        senderId: String(message.senderId ?? message.sender_id ?? '').trim(),
+        senderName: String(message.senderName ?? message.sender_name ?? '').trim(),
+        source: 'server',
+      });
+
+      connection?.send({
+        type: 'channel:message.send.result',
+        requestId,
+        ok: true,
+        message: sent,
+      });
+      return sent;
+    } catch (err) {
+      connection?.send({
+        type: 'channel:message.send.result',
+        requestId,
+        ok: false,
+        error: err.message,
+        code: err.code ?? 'rpc_error',
+      });
+      return null;
+    }
   }
 
   async listMessages(channelId, limit = 50) {
@@ -832,19 +877,21 @@ export class ChannelManager {
     return sortByCreatedAt(messages);
   }
 
-  async _appendToServerView(node, message) {
+  async _appendToServerView(node, message, { requestId = randomUUID() } = {}) {
     if (!this.connection) {
       throw toRpcError('unavailable', 'daemon connection is not ready');
     }
 
-    const requestId = randomUUID();
     const response = await this.connection.request({
       message: {
         type: 'message.append',
         requestId,
+        message_id: message.messageId,
         channel_id: node.channelId,
         sender_type: message.senderType,
         sender_id: message.senderId,
+        sender_name: message.senderName,
+        message_type: message.messageType,
         content: message.content,
         attachments: message.attachments,
       },
