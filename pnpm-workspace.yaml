@@ -1,7 +1,6 @@
 packages:
   - 'cli'
   - 'agent-binary'
-  - 'mcp-servers/*'
   - 'lightcone'
   - 'lightcone/daemon'
   - 'lightcone/mcp-servers/*'
