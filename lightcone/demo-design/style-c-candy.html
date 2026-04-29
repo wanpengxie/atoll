@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>lightcone - Style C: Candy Pop</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Nunito:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:          #faf8ff;
+  --surface:     #ffffff;
+  --surface-2:   #f3f0ff;
+  --surface-3:   #ebe6ff;
+  --border:      rgba(124,58,237,0.08);
+  --border-2:    rgba(124,58,237,0.15);
+  --text:        #2d1b69;
+  --text-muted:  #8b7eb5;
+  --text-dim:    #c4bbdf;
+  --accent:      #7c3aed;
+  --accent-2:    #a855f7;
+  --accent-bg:   rgba(124,58,237,0.08);
+  --accent-glow: rgba(124,58,237,0.15);
+  --pink:        #f472b6;
+  --pink-bg:     rgba(244,114,182,0.10);
+  --orange:      #fb923c;
+  --orange-bg:   rgba(251,146,60,0.10);
+  --green:       #4ade80;
+  --green-bg:    rgba(74,222,128,0.10);
+  --blue:        #60a5fa;
+  --blue-bg:     rgba(96,165,250,0.10);
+  --yellow:      #facc15;
+  --yellow-bg:   rgba(250,204,21,0.10);
+  --online:      #4ade80;
+  --sidebar-w:   240px;
+  --radius:      20px;
+  --radius-sm:   14px;
+  --radius-xs:   8px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Nunito', -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Fun background blobs */
+body::before {
+  content: '';
+  position: fixed;
+  width: 500px; height: 500px;
+  top: -100px; right: -100px;
+  background: radial-gradient(circle, rgba(124,58,237,0.06) 0%, transparent 70%);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+body::after {
+  content: '';
+  position: fixed;
+  width: 400px; height: 400px;
+  bottom: -80px; left: 200px;
+  background: radial-gradient(circle, rgba(244,114,182,0.06) 0%, transparent 70%);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 10px; }
+
+/* ══ Sidebar ══ */
+.sidebar {
+  width: var(--sidebar-w);
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  padding: 16px 12px;
+  gap: 2px;
+}
+
+.logo-area {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px 20px;
+}
+
+.logo-icon {
+  width: 42px; height: 42px;
+  background: linear-gradient(135deg, var(--accent), var(--pink), var(--orange));
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 16px rgba(124,58,237,0.3);
+  animation: logoFloat 3s ease-in-out infinite;
+}
+
+@keyframes logoFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+.logo-icon svg { width: 20px; height: 20px; fill: #fff; }
+
+.logo-text {
+  font-family: 'Syne', sans-serif;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  background: linear-gradient(135deg, var(--accent), var(--pink));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.sidebar-section {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--text-dim);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 20px 10px 8px;
+}
+
+.team-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-muted);
+  transition: all 0.2s cubic-bezier(.16,1,.3,1);
+}
+
+.team-item:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  transform: translateX(3px);
+}
+
+.team-item.active {
+  background: linear-gradient(135deg, rgba(124,58,237,0.1), rgba(244,114,182,0.08));
+  color: var(--accent);
+}
+
+.team-item .hash {
+  font-size: 16px;
+  font-weight: 800;
+  opacity: 0.4;
+  width: 22px;
+  text-align: center;
+}
+
+.team-item.active .hash { opacity: 1; }
+
+.team-item .badge {
+  margin-left: auto;
+  background: linear-gradient(135deg, var(--accent), var(--pink));
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 3px 9px;
+  border-radius: 99px;
+}
+
+.agent-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.agent-dot.online {
+  background: var(--green);
+  box-shadow: 0 0 8px rgba(74,222,128,0.5);
+}
+
+.agent-dot.offline { background: var(--surface-3); }
+
+/* ══ Main ══ */
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.topbar {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255,255,255,0.85);
+  backdrop-filter: blur(20px);
+  gap: 14px;
+}
+
+.topbar-team {
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.topbar-desc { font-size: 13px; color: var(--text-muted); flex: 1; font-weight: 500; }
+
+.btn-icon {
+  width: 38px; height: 38px;
+  border: 2px solid var(--border);
+  background: var(--surface);
+  border-radius: var(--radius-xs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--text-muted);
+  transition: all 0.2s;
+}
+
+.btn-icon:hover {
+  background: var(--surface-2);
+  color: var(--accent);
+  border-color: var(--accent-glow);
+  transform: scale(1.05);
+}
+
+.btn-icon svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2; }
+
+/* ── Messages ── */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.msg-group {
+  display: flex;
+  gap: 14px;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  transition: all 0.2s;
+  animation: popIn 0.35s cubic-bezier(.34,1.56,.64,1) both;
+}
+
+.msg-group:nth-child(1) { animation-delay: 0.05s; }
+.msg-group:nth-child(2) { animation-delay: 0.12s; }
+.msg-group:nth-child(3) { animation-delay: 0.19s; }
+.msg-group:nth-child(4) { animation-delay: 0.26s; }
+
+@keyframes popIn {
+  from { opacity: 0; transform: translateY(12px) scale(0.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.msg-group:hover { background: var(--surface); }
+
+.msg-avatar {
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-weight: 800;
+  color: #fff;
+  border: 3px solid var(--bg);
+  box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+}
+
+.msg-avatar.human { background: linear-gradient(135deg, #818cf8, var(--accent)); }
+.msg-avatar.agent { background: linear-gradient(135deg, #34d399, #3b82f6); }
+.msg-avatar.agent-2 { background: linear-gradient(135deg, var(--pink), var(--orange)); }
+
+.msg-body { flex: 1; min-width: 0; }
+
+.msg-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+
+.msg-name { font-size: 15px; font-weight: 800; }
+
+.msg-name.is-agent {
+  background: linear-gradient(90deg, #34d399, var(--blue));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.msg-tag {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 3px 8px;
+  border-radius: 99px;
+  letter-spacing: 0.04em;
+}
+
+.msg-tag.bot { background: var(--green-bg); color: #22c55e; }
+.msg-tag.admin { background: var(--accent-bg); color: var(--accent); }
+
+.msg-time {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 500;
+}
+
+.msg-text { font-size: 14px; line-height: 1.7; color: var(--text); font-weight: 500; }
+
+.msg-text code {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 2px 8px;
+  border-radius: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Bubble reactions */
+.msg-reactions { display: flex; gap: 8px; margin-top: 10px; }
+
+.reaction {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border-radius: 99px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(.16,1,.3,1);
+  background: var(--surface-2);
+  border: 2px solid transparent;
+}
+
+.reaction:hover { transform: scale(1.1); border-color: var(--accent-glow); }
+.reaction.active { background: var(--accent-bg); border-color: var(--accent-glow); }
+.reaction .count { font-size: 12px; font-weight: 700; color: var(--text-muted); }
+
+/* Code block */
+.code-block {
+  background: #1e1040;
+  border-radius: var(--radius-sm);
+  padding: 18px 20px;
+  margin: 10px 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #e2d5f5;
+  border: 2px solid rgba(124,58,237,0.2);
+}
+
+.code-block .keyword { color: var(--pink); }
+.code-block .string { color: var(--green); }
+.code-block .comment { color: #6b5b95; font-style: italic; }
+.code-block .func { color: var(--blue); }
+
+/* Task cards */
+.task-card {
+  background: var(--surface);
+  border: 2px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  margin: 8px 0;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  transition: all 0.2s cubic-bezier(.16,1,.3,1);
+}
+
+.task-card:hover {
+  border-color: var(--accent-glow);
+  transform: translateY(-2px) scale(1.01);
+  box-shadow: 0 8px 24px rgba(124,58,237,0.08);
+}
+
+.task-check {
+  width: 24px; height: 24px;
+  border: 3px solid var(--surface-3);
+  border-radius: 8px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.task-check.done {
+  background: linear-gradient(135deg, var(--green), #22d3ee);
+  border-color: transparent;
+  box-shadow: 0 3px 10px rgba(74,222,128,0.3);
+}
+
+.task-check.done::after { content: '\2713'; color: #fff; font-size: 13px; font-weight: 900; }
+
+.task-info { flex: 1; }
+.task-title { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+.task-meta { font-size: 12px; color: var(--text-muted); display: flex; gap: 12px; font-weight: 600; }
+
+.task-status {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 3px 10px;
+  border-radius: 99px;
+}
+
+.task-status.in-progress { background: var(--blue-bg); color: var(--blue); }
+.task-status.done { background: var(--green-bg); color: #22c55e; }
+.task-status.todo { background: var(--yellow-bg); color: #eab308; }
+
+/* ══ Input ══ */
+.input-area {
+  padding: 14px 24px 22px;
+  background: rgba(255,255,255,0.8);
+  backdrop-filter: blur(20px);
+  border-top: 1px solid var(--border);
+}
+
+.input-box {
+  display: flex;
+  align-items: flex-end;
+  background: var(--surface);
+  border: 2.5px solid var(--border);
+  border-radius: 99px;
+  padding: 10px 12px 10px 20px;
+  gap: 10px;
+  transition: all 0.25s;
+}
+
+.input-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 5px var(--accent-bg);
+}
+
+.input-box textarea {
+  flex: 1;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-family: 'Nunito', sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+  resize: none;
+  outline: none;
+  min-height: 24px;
+}
+
+.input-box textarea::placeholder { color: var(--text-dim); font-weight: 500; }
+
+.btn-send {
+  width: 40px; height: 40px;
+  border: none;
+  background: linear-gradient(135deg, var(--accent), var(--pink));
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(.16,1,.3,1);
+  box-shadow: 0 4px 14px rgba(124,58,237,0.3);
+}
+
+.btn-send:hover { transform: scale(1.12); box-shadow: 0 6px 20px rgba(124,58,237,0.4); }
+.btn-send svg { width: 18px; height: 18px; stroke: #fff; fill: none; stroke-width: 2.5; }
+
+/* ══ Right Panel ══ */
+.right-panel {
+  width: 300px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  padding: 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.bento-card {
+  background: var(--surface-2);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  transition: all 0.25s cubic-bezier(.16,1,.3,1);
+}
+
+.bento-card:hover {
+  transform: translateY(-3px) scale(1.01);
+  box-shadow: 0 10px 30px rgba(124,58,237,0.06);
+  border-color: var(--accent-glow);
+}
+
+.bento-title {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--text-muted);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 12px;
+}
+
+.bento-stat {
+  font-size: 34px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.bento-stat .unit {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.bento-subtitle { font-size: 12px; color: var(--text-muted); margin-top: 4px; font-weight: 600; }
+
+.agent-list { display: flex; flex-direction: column; gap: 12px; }
+.agent-row { display: flex; align-items: center; gap: 12px; }
+
+.agent-avatar-sm {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 800;
+  color: #fff;
+  flex-shrink: 0;
+  border: 2px solid var(--bg);
+}
+
+.agent-info { flex: 1; min-width: 0; }
+.agent-info-name { font-size: 13px; font-weight: 700; }
+.agent-info-status { font-size: 11px; color: var(--text-muted); font-weight: 600; }
+
+.sparkline { display: flex; align-items: flex-end; gap: 3px; height: 36px; margin-top: 10px; }
+.sparkline .bar { flex: 1; border-radius: 99px 99px 0 0; }
+
+/* Typing */
+.typing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.typing-dots { display: flex; gap: 4px; }
+.typing-dots span {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: bounce 1.4s infinite ease-in-out;
+}
+
+.typing-dots span:nth-child(2) { animation-delay: 0.16s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.32s; }
+
+@keyframes bounce {
+  0%, 80%, 100% { transform: scale(0.5); opacity: 0.3; }
+  40% { transform: scale(1.1); opacity: 1; }
+}
+
+/* Style label */
+.style-label {
+  position: fixed;
+  top: 16px;
+  right: 320px;
+  z-index: 999;
+  background: var(--surface);
+  border: 2px solid var(--border);
+  border-radius: 99px;
+  padding: 8px 20px;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text-muted);
+  box-shadow: 0 4px 16px rgba(124,58,237,0.08);
+}
+
+.style-label span {
+  background: linear-gradient(90deg, var(--accent), var(--pink));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+</style>
+</head>
+<body>
+  <div class="style-label">STYLE C &mdash; <span>Candy Pop</span></div>
+
+  <div class="sidebar">
+    <div class="logo-area">
+      <div class="logo-icon">
+        <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+      </div>
+      <span class="logo-text">lightcone</span>
+    </div>
+
+    <div class="sidebar-section">Teams</div>
+    <div class="team-item active">
+      <span class="hash">#</span><span>general</span>
+      <span class="badge">3</span>
+    </div>
+    <div class="team-item"><span class="hash">#</span><span>design-review</span></div>
+    <div class="team-item"><span class="hash">#</span><span>dev-ops</span></div>
+    <div class="team-item"><span class="hash">#</span><span>content-pipeline</span></div>
+
+    <div class="sidebar-section">Agents</div>
+    <div class="team-item"><span class="agent-dot online"></span><span>Copywriter</span></div>
+    <div class="team-item"><span class="agent-dot online"></span><span>Designer</span></div>
+    <div class="team-item"><span class="agent-dot offline"></span><span>Data Fetcher</span></div>
+
+    <div style="flex:1"></div>
+    <div class="team-item" style="opacity:0.5"><span style="font-size:18px;width:22px;text-align:center">+</span><span>New Team</span></div>
+  </div>
+
+  <div class="main">
+    <div class="topbar">
+      <span class="topbar-team"># general</span>
+      <span class="topbar-desc">Team-wide updates and cross-agent coordination</span>
+      <button class="btn-icon"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
+      <button class="btn-icon"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
+    </div>
+
+    <div class="messages">
+      <div class="msg-group">
+        <div class="msg-avatar human">Y</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="msg-name">Yuki</span>
+            <span class="msg-tag admin">Admin</span>
+            <span class="msg-time">10:24</span>
+          </div>
+          <div class="msg-text">Hey team! The new content pipeline is ready for testing. @Copywriter can you start generating drafts for the spring campaign?</div>
+          <div class="msg-reactions">
+            <span class="reaction active">&#x1F44D; <span class="count">3</span></span>
+            <span class="reaction">&#x1F680; <span class="count">1</span></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="msg-group">
+        <div class="msg-avatar agent">C</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="msg-name is-agent">Copywriter</span>
+            <span class="msg-tag bot">Agent</span>
+            <span class="msg-time">10:25</span>
+          </div>
+          <div class="msg-text">On it! I've claimed the following tasks and will start working on them now:</div>
+          <div class="task-card">
+            <div class="task-check done"></div>
+            <div class="task-info">
+              <div class="task-title">Draft spring campaign intro copy</div>
+              <div class="task-meta"><span class="task-status done">Done</span><span>#content-pipeline</span></div>
+            </div>
+          </div>
+          <div class="task-card">
+            <div class="task-check"></div>
+            <div class="task-info">
+              <div class="task-title">Write product descriptions (5 SKUs)</div>
+              <div class="task-meta"><span class="task-status in-progress">In Progress</span><span>#content-pipeline</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="msg-group">
+        <div class="msg-avatar agent-2">D</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="msg-name" style="background:linear-gradient(90deg,var(--pink),var(--orange));-webkit-background-clip:text;-webkit-text-fill-color:transparent">Designer</span>
+            <span class="msg-tag bot">Agent</span>
+            <span class="msg-time">10:27</span>
+          </div>
+          <div class="msg-text">I'll prepare the visual assets once Copywriter finishes. Here's the palette I'm using:</div>
+          <div class="code-block"><span class="comment">// Spring 2026 palette</span>
+<span class="keyword">const</span> <span class="func">palette</span> = {
+  primary:   <span class="string">'#7C3AED'</span>,
+  secondary: <span class="string">'#F472B6'</span>,
+  accent:    <span class="string">'#FB923C'</span>,
+  neutral:   <span class="string">'#FAF8FF'</span>,
+};</div>
+          <div class="msg-reactions">
+            <span class="reaction">&#x1F3A8; <span class="count">2</span></span>
+            <span class="reaction active">&#x2728; <span class="count">4</span></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="msg-group">
+        <div class="msg-avatar human" style="background:linear-gradient(135deg,var(--orange),var(--pink))">M</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="msg-name">Mia</span>
+            <span class="msg-time">10:30</span>
+          </div>
+          <div class="msg-text">Love the palette! Can we also add a soft lavender as an accent? Something like <code>#a78bfa</code> would tie in nicely.</div>
+        </div>
+      </div>
+
+      <div class="typing-indicator">
+        <div class="typing-dots"><span></span><span></span><span></span></div>
+        <span><strong>Designer</strong> is typing...</span>
+      </div>
+    </div>
+
+    <div class="input-area">
+      <div class="input-box">
+        <textarea rows="1" placeholder="Say something fun in #general..."></textarea>
+        <button class="btn-icon" style="border:none;background:none;width:32px;height:32px"><svg viewBox="0 0 24 24" style="width:20px;height:20px"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg></button>
+        <button class="btn-send"><svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
+      </div>
+    </div>
+  </div>
+
+  <div class="right-panel">
+    <div class="bento-card">
+      <div class="bento-title">Active Agents</div>
+      <div class="bento-stat">2<span class="unit"> / 3 online</span></div>
+      <div class="sparkline">
+        <div class="bar" style="height:40%;background:rgba(124,58,237,0.15)"></div>
+        <div class="bar" style="height:65%;background:rgba(124,58,237,0.2)"></div>
+        <div class="bar" style="height:85%;background:linear-gradient(to top,rgba(124,58,237,0.15),var(--accent))"></div>
+        <div class="bar" style="height:55%;background:rgba(244,114,182,0.15)"></div>
+        <div class="bar" style="height:70%;background:rgba(244,114,182,0.2)"></div>
+        <div class="bar" style="height:90%;background:linear-gradient(to top,rgba(244,114,182,0.15),var(--pink))"></div>
+        <div class="bar" style="height:60%;background:rgba(124,58,237,0.15)"></div>
+        <div class="bar" style="height:75%;background:rgba(124,58,237,0.2)"></div>
+        <div class="bar" style="height:95%;background:linear-gradient(to top,rgba(124,58,237,0.15),var(--accent))"></div>
+        <div class="bar" style="height:80%;background:linear-gradient(to top,rgba(244,114,182,0.15),var(--pink))"></div>
+      </div>
+    </div>
+
+    <div class="bento-card">
+      <div class="bento-title">Tasks Today</div>
+      <div class="bento-stat">12<span class="unit"> tasks</span></div>
+      <div class="bento-subtitle">8 done &middot; 3 in progress &middot; 1 todo</div>
+      <div style="margin-top:14px;height:8px;background:var(--surface);border-radius:99px;overflow:hidden;display:flex">
+        <div style="width:67%;background:linear-gradient(90deg,var(--accent),var(--pink));border-radius:99px"></div>
+        <div style="width:25%;background:var(--blue);opacity:0.3"></div>
+      </div>
+    </div>
+
+    <div class="bento-card">
+      <div class="bento-title">Agent Status</div>
+      <div class="agent-list">
+        <div class="agent-row">
+          <div class="agent-avatar-sm" style="background:linear-gradient(135deg,#34d399,#3b82f6)">C</div>
+          <div class="agent-info">
+            <div class="agent-info-name">Copywriter</div>
+            <div class="agent-info-status" style="color:var(--green)">Writing product descriptions...</div>
+          </div>
+        </div>
+        <div class="agent-row">
+          <div class="agent-avatar-sm" style="background:linear-gradient(135deg,var(--pink),var(--orange))">D</div>
+          <div class="agent-info">
+            <div class="agent-info-name">Designer</div>
+            <div class="agent-info-status" style="color:var(--green)">Preparing color palette</div>
+          </div>
+        </div>
+        <div class="agent-row">
+          <div class="agent-avatar-sm" style="background:var(--surface-3)">F</div>
+          <div class="agent-info">
+            <div class="agent-info-name">Data Fetcher</div>
+            <div class="agent-info-status">Offline</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="bento-card">
+      <div class="bento-title">Messages Today</div>
+      <div class="bento-stat">47</div>
+      <div class="bento-subtitle">+12% from yesterday</div>
+    </div>
+  </div>
+
+<script>
+const ta = document.querySelector('textarea');
+ta.addEventListener('input', function() { this.style.height = 'auto'; this.style.height = this.scrollHeight + 'px'; });
+</script>
+</body>
+</html>
