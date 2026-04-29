@@ -70,6 +70,7 @@ export class DaemonConnection {
     this.ws = null;
     this.reconnectDelay = RECONNECT_INITIAL;
     this.stopped = false;
+    this.pendingRequests = new Map();
   }
 
   connect() {
@@ -87,6 +88,7 @@ export class DaemonConnection {
       let msg;
       try { msg = JSON.parse(raw.toString()); }
       catch { return; }
+      if (this._resolvePending(msg)) return;
       if (msg.type !== 'pong') {
         console.log(`[Connection] ← ${msg.type}${msg.agentId ? ` agent=${msg.agentId.slice(0,8)}` : ''}${msg.teamId ? ` team=${msg.teamId.slice(0,8)}` : ''}${msg.seq != null ? ` seq=${msg.seq}` : ''}`);
       }
@@ -109,6 +111,29 @@ export class DaemonConnection {
     }
   }
 
+  async request({ message, expect, timeoutMs = 10000 }) {
+    if (!expect?.type || !expect?.requestId) {
+      throw new Error('request expect.type and expect.requestId are required');
+    }
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(expect.requestId);
+        reject(new Error(`daemon request timeout: ${expect.type}:${expect.requestId}`));
+      }, timeoutMs);
+
+      this.pendingRequests.set(expect.requestId, {
+        type: expect.type,
+        resolve: (payload) => {
+          clearTimeout(timer);
+          resolve(payload);
+        },
+      });
+
+      this.send(message);
+    });
+  }
+
   stop() {
     this.stopped = true;
     this.ws?.close();
@@ -127,6 +152,19 @@ export class DaemonConnection {
       modelsByRuntime,
       daemonVersion: DAEMON_VERSION,
     });
+  }
+
+  _resolvePending(msg) {
+    const requestId = msg?.requestId;
+    if (!requestId) return false;
+
+    const pending = this.pendingRequests.get(requestId);
+    if (!pending) return false;
+    if (pending.type !== msg.type) return false;
+
+    this.pendingRequests.delete(requestId);
+    pending.resolve(msg);
+    return true;
   }
 
   _scheduleReconnect() {

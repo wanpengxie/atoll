@@ -11,6 +11,7 @@ import {
   getChannelMessages,
   insertMessage,
 } from '../db/index.js';
+import { sendToDaemon } from '../daemon/connections.js';
 import { broadcast } from '../realtime/broadcast.js';
 import { formatMessage } from '../internal/index.js';
 import {
@@ -57,6 +58,27 @@ function formatChannel(channel) {
     createdAt: channel.created_at,
     archivedAt: channel.archived_at ?? null,
   };
+}
+
+async function buildDaemonChannelPayload(channel) {
+  const members = await getChannelMembers(getDb(), channel.id);
+  return {
+    channelId: channel.id,
+    workspaceId: channel.workspace_id,
+    daemonId: channel.daemon_id ?? null,
+    type: channel.type,
+    status: channel.status,
+    capabilitySet: typeof channel.capability_set === 'string'
+      ? JSON.parse(channel.capability_set)
+      : (channel.capability_set ?? { cli_binaries: [] }),
+    members: members.map(formatChannelMember),
+    archivedAt: channel.archived_at ?? null,
+  };
+}
+
+function pushChannelEvent(daemonId, payload) {
+  if (!daemonId) return;
+  sendToDaemon(daemonId, payload);
 }
 
 function formatChannelMember(member) {
@@ -128,6 +150,14 @@ router.post('/', requireWorkspaceRead, async (req, res) => {
     await addChannelMember(getDb(), channel.id, 'channel_agent', channel.channel_agent_id);
   }
 
+  if (channel.daemon_id) {
+    const daemonChannel = await buildDaemonChannelPayload(channel);
+    pushChannelEvent(channel.daemon_id, { type: 'channel:create', channel: daemonChannel });
+    if (channel.status === 'active') {
+      pushChannelEvent(channel.daemon_id, { type: 'channel:start', channel: daemonChannel });
+    }
+  }
+
   broadcast.channelUpdated(DEFAULT_SERVER_ID, req.workspace.id);
   res.status(201).json(formatChannel(channel));
 });
@@ -167,6 +197,29 @@ router.patch('/:id', requireChannelRead, async (req, res) => {
   if (req.body?.channelAgentId !== undefined) fields.channel_agent_id = req.body.channelAgentId;
 
   const channel = await updateChannel(getDb(), req.channel.id, fields);
+  const daemonId = channel.daemon_id ?? req.channel.daemon_id ?? null;
+  if (daemonId) {
+    const daemonChannel = await buildDaemonChannelPayload(channel);
+    if (req.body?.archive === true || (fields.status === 'archived' && req.channel.status !== 'archived')) {
+      pushChannelEvent(daemonId, { type: 'channel:archive', channelId: channel.id });
+    } else if (req.body?.pause === true || (fields.status === 'paused' && req.channel.status !== 'paused')) {
+      pushChannelEvent(daemonId, { type: 'channel:pause', channelId: channel.id });
+    } else if (req.body?.resume === true || (channel.status === 'active' && req.channel.status !== 'active')) {
+      pushChannelEvent(daemonId, { type: 'channel:resume', channel: daemonChannel });
+    } else {
+      pushChannelEvent(daemonId, {
+        type: 'channel:event',
+        channelId: channel.id,
+        channel: daemonChannel,
+        event: {
+          type: 'channel.config.updated',
+          created_at: new Date().toISOString(),
+          source: 'server',
+          payload: { channel: daemonChannel },
+        },
+      });
+    }
+  }
   broadcast.channelUpdated(DEFAULT_SERVER_ID, req.workspace.id);
   res.json(formatChannel(channel));
 });
@@ -193,6 +246,21 @@ router.post('/:id/members', requireChannelRead, async (req, res) => {
   await addChannelMember(getDb(), req.channel.id, memberType, memberId);
   const members = await getChannelMembers(getDb(), req.channel.id);
   const added = members.find(row => row.member_type === memberType && row.member_id === memberId);
+
+  if (req.channel.daemon_id && added) {
+    pushChannelEvent(req.channel.daemon_id, {
+      type: 'channel:event',
+      channelId: req.channel.id,
+      event: {
+        type: 'channel.member.joined',
+        created_at: new Date().toISOString(),
+        source: 'server',
+        payload: {
+          member: formatChannelMember(added),
+        },
+      },
+    });
+  }
 
   broadcast.channelUpdated(DEFAULT_SERVER_ID, req.workspace.id);
   res.status(201).json(formatChannelMember(added));
@@ -226,6 +294,29 @@ router.post('/:id/messages', requireChannelWrite, async (req, res) => {
 
   const payload = formatMessage(msg);
   broadcast.channelMessage(req.channel.id, payload);
+  if (req.channel.daemon_id) {
+    pushChannelEvent(req.channel.daemon_id, {
+      type: 'channel:event',
+      channelId: req.channel.id,
+      event: {
+        type: 'user.message.posted',
+        created_at: new Date().toISOString(),
+        source: 'server',
+        payload: {
+          message: {
+            messageId: msg.id,
+            channelId: req.channel.id,
+            senderType: 'human',
+            senderId: userId,
+            senderName: req.user?.name ?? DEFAULT_USER_NAME,
+            content,
+            attachments: [],
+            createdAt: msg.created_at,
+          },
+        },
+      },
+    });
+  }
   res.status(201).json(payload);
 });
 

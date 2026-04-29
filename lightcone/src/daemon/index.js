@@ -3,7 +3,7 @@ import {
   getDb, getMachineByApiKey, updateMachine, updateAgent, getAgents,
   getAgentById, getTeamById, getMemberTeamIds,
   getTeamSession, upsertTeamSession, getAgentByApiKey,
-  getChannelById, insertMessage,
+  getChannelById, getChannelMembers, insertMessage, updateChannel,
   insertCredential, getCredentialsByOwner, deleteCredential,
 } from '../db/index.js';
 import { encrypt } from '../crypto.js';
@@ -41,6 +41,31 @@ function appendAttachmentReferences(content, attachments) {
     return ref ? `- ${name}: ${ref}` : `- ${name}`;
   });
   return `${content}\n\nAttachments:\n${lines.join('\n')}`;
+}
+
+function parseChannelCapabilitySet(channel) {
+  return typeof channel.capability_set === 'string'
+    ? JSON.parse(channel.capability_set)
+    : (channel.capability_set ?? { cli_binaries: [] });
+}
+
+async function buildDaemonChannelPayload(db, channel) {
+  const members = await getChannelMembers(db, channel.id);
+  return {
+    channelId: channel.id,
+    workspaceId: channel.workspace_id,
+    daemonId: channel.daemon_id ?? null,
+    type: channel.type,
+    status: channel.status,
+    capabilitySet: parseChannelCapabilitySet(channel),
+    archivedAt: channel.archived_at ?? null,
+    members: members.map((member) => ({
+      memberType: member.member_type,
+      memberId: member.member_id,
+      displayName: member.human_name ?? member.agent_display_name ?? member.agent_name ?? member.member_id,
+      joinedAt: member.joined_at,
+    })),
+  };
 }
 
 export function setPendingBrowserLogin(machineId, userId, platform) {
@@ -168,6 +193,20 @@ async function handleDaemonMessage(machineId, serverId, msg) {
           });
         });
       }
+
+      const [channelRows] = await db.execute(
+        `SELECT * FROM channels
+         WHERE daemon_id = ? AND is_del = 0 AND deleted_at IS NULL`,
+        [machineId]
+      );
+      for (const channel of channelRows) {
+        if (channel.status === 'archived') continue;
+        const daemonChannel = await buildDaemonChannelPayload(db, channel);
+        sendToDaemon(machineId, { type: 'channel:create', channel: daemonChannel });
+        if (channel.status === 'active') {
+          sendToDaemon(machineId, { type: 'channel:start', channel: daemonChannel });
+        }
+      }
       break;
     }
 
@@ -253,6 +292,25 @@ async function handleDaemonMessage(machineId, serverId, msg) {
           sendToDaemon(machineId, { type: 'message.append.ack', requestId, ok: false, error: err.message });
         }
       }
+      break;
+    }
+
+    case 'channel.status': {
+      const channelId = msg.channelId ?? msg.channel_id;
+      if (!channelId) break;
+
+      const channel = await getChannelById(db, channelId);
+      if (!channel || channel.is_del || channel.deleted_at) break;
+
+      const fields = {
+        status: msg.status ?? channel.status,
+      };
+      if ('archivedAt' in msg || 'archived_at' in msg) {
+        fields.archived_at = msg.archivedAt ?? msg.archived_at ?? null;
+      }
+
+      await updateChannel(db, channelId, fields);
+      broadcast.channelUpdated(serverId, channel.workspace_id);
       break;
     }
 
