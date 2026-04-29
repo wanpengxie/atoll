@@ -1,10 +1,13 @@
 #!/usr/bin/env node
-import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
+import { importDistEntry } from './lib/dist-entry.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const distEntry = path.join(here, '../dist/index.js');
-const srcEntry = path.join(here, '../src/index.ts');
 
-await import(pathToFileURL(existsSync(distEntry) ? distEntry : srcEntry).href);
+await importDistEntry({
+  binDir: here,
+  relativeDistPath: '../dist/index.js',
+  packageName: '@coagent/cli',
+  buildCommand: 'pnpm --filter @coagent/cli build',
+});

@@ -4,7 +4,14 @@ dev:
 	pnpm -r --parallel dev
 
 build:
-	pnpm -r build
+	pnpm --filter @coagent/agent-binary build
+	pnpm --filter @coagent/cli build
+	pnpm --filter lightcone build
+	pnpm --filter @lightcone-ai/daemon build
+	pnpm --filter feishu-bridge build
+	pnpm --filter mysql-mcp-server build
+	pnpm --filter platform-actions-mcp-server build
+	pnpm --filter publisher-mcp-server build
 
 test:
 	pnpm -r test

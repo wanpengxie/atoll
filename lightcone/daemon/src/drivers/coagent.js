@@ -5,48 +5,29 @@ import { fileURLToPath } from 'url';
 
 const DEFAULT_AGENT_NAME = 'channel-agent';
 
-const INLINE_AGENT_STUB = `
-  import { mkdirSync, writeFileSync } from 'fs';
-  import path from 'path';
-  const sessionId = process.env.SESSION_ID || process.env.COAGENT_SESSION_ID || '${randomUUID()}';
-  const sessionIdPath = process.env.SESSION_ID_PATH || process.env.COAGENT_SESSION_ID_PATH || '';
-  if (sessionIdPath) {
-    mkdirSync(path.dirname(sessionIdPath), { recursive: true });
-    writeFileSync(sessionIdPath, sessionId + '\\n', 'utf8');
-  }
-  process.stdin.setEncoding('utf8');
-  process.stdin.resume();
-  process.stdin.on('data', () => {});
-  const timer = setInterval(() => {}, 60_000);
-  timer.unref?.();
-`;
-
 function repoRoot() {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
 }
 
-function resolveAgentRuntime() {
-  const root = repoRoot();
+function missingBuildArtifactError({ packageName, entry, buildCommand }) {
+  const err = new Error(
+    `Missing build artifact for ${packageName}: ${entry}\n`
+    + `Run "${buildCommand}" or "pnpm -r build" before starting the daemon.`,
+  );
+  err.code = 'missing_build_artifact';
+  return err;
+}
+
+export function resolveAgentRuntime(root = repoRoot()) {
   const distEntry = path.join(root, 'agent-binary', 'dist', 'index.js');
   if (existsSync(distEntry)) {
     return { command: 'node', args: [distEntry], entry: distEntry };
   }
-
-  const srcTsEntry = path.join(root, 'agent-binary', 'src', 'index.ts');
-  if (existsSync(srcTsEntry)) {
-    return { command: 'node', args: [srcTsEntry], entry: srcTsEntry };
-  }
-
-  const srcJsEntry = path.join(root, 'agent-binary', 'src', 'index.js');
-  if (existsSync(srcJsEntry)) {
-    return { command: 'node', args: [srcJsEntry], entry: srcJsEntry };
-  }
-
-  return {
-    command: 'node',
-    args: ['--input-type=module', '-e', INLINE_AGENT_STUB],
-    entry: '<inline-agent-stub>',
-  };
+  throw missingBuildArtifactError({
+    packageName: '@coagent/agent-binary',
+    entry: distEntry,
+    buildCommand: 'pnpm --filter @coagent/agent-binary build',
+  });
 }
 
 function normalizeCliBinaries(capabilitySet) {
@@ -57,8 +38,8 @@ function normalizeCliBinaries(capabilitySet) {
   return [...new Set(items.map((item) => String(item).trim()).filter(Boolean))];
 }
 
-function resolveMountedCliBinaries(cliBinaries) {
-  const cliBinDir = path.join(repoRoot(), 'cli', 'bin');
+function resolveMountedCliBinaries(cliBinaries, root = repoRoot()) {
+  const cliBinDir = path.join(root, 'cli', 'bin');
   const mounted = cliBinaries.filter((binary) => existsSync(path.join(cliBinDir, binary)));
   return {
     cliBinDir,
@@ -91,10 +72,11 @@ export function buildCoagentSpawn({
   sessionIdPath,
   agentName = DEFAULT_AGENT_NAME,
   extraEnv = {},
+  repoRootDir = repoRoot(),
 }) {
-  const runtime = resolveAgentRuntime();
+  const runtime = resolveAgentRuntime(repoRootDir);
   const cliBinaries = normalizeCliBinaries(capabilitySet);
-  const { cliBinDir, mounted } = resolveMountedCliBinaries(cliBinaries);
+  const { cliBinDir, mounted } = resolveMountedCliBinaries(cliBinaries, repoRootDir);
   const sessionId = ensureSessionId(sessionIdPath);
   const pathParts = mounted.length > 0
     ? [cliBinDir, process.env.PATH ?? '']
