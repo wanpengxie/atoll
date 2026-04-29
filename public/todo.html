@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Todo List · 清华紫</title>
+  <style>
+    /* ── CSS Variables ─────────────────────────────────────────────────────── */
+    :root {
+      --purple-dark:   #3d0050;
+      --purple-main:   #660874;
+      --purple-mid:    #8b1a9c;
+      --purple-light:  #b44fc5;
+      --purple-pale:   #f5e6f8;
+      --purple-ghost:  #faf0fc;
+      --accent:        #e040fb;
+      --red:           #e53e3e;
+      --green:         #38a169;
+      --orange:        #dd6b20;
+      --blue:          #3182ce;
+      --text-dark:     #1a1a2e;
+      --text-mid:      #4a4a6a;
+      --text-light:    #9e9eb8;
+      --border:        #ede0f0;
+      --white:         #ffffff;
+      --shadow-sm:     0 2px 8px rgba(102,8,116,0.10);
+      --shadow-md:     0 8px 32px rgba(102,8,116,0.18);
+      --shadow-lg:     0 20px 60px rgba(61,0,80,0.28);
+      --radius:        14px;
+      --radius-sm:     8px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, sans-serif;
+      background: linear-gradient(145deg, var(--purple-dark) 0%, var(--purple-main) 50%, var(--purple-mid) 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 40px 16px 80px;
+    }
+
+    /* ── App Shell ─────────────────────────────────────────────────────────── */
+    .app {
+      background: var(--white);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-lg);
+      width: 100%;
+      max-width: 560px;
+      overflow: hidden;
+    }
+
+    /* ── Header ────────────────────────────────────────────────────────────── */
+    .app-header {
+      background: linear-gradient(135deg, var(--purple-dark) 0%, var(--purple-main) 60%, var(--purple-mid) 100%);
+      color: var(--white);
+      padding: 28px 28px 20px;
+      position: relative;
+      overflow: hidden;
+    }
+    .app-header::before {
+      content: '';
+      position: absolute;
+      top: -40px; right: -40px;
+      width: 160px; height: 160px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.06);
+    }
+    .app-header::after {
+      content: '';
+      position: absolute;
+      bottom: -30px; left: 30px;
+      width: 100px; height: 100px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.04);
+    }
+    .header-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      position: relative; z-index: 1;
+    }
+    .header-title h1 {
+      font-size: 1.75rem;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+    }
+    .header-title p {
+      font-size: 0.82rem;
+      opacity: 0.75;
+      margin-top: 3px;
+    }
+    .header-stats {
+      display: flex;
+      gap: 16px;
+      margin-top: 18px;
+      position: relative; z-index: 1;
+    }
+    .stat-item {
+      text-align: center;
+    }
+    .stat-num {
+      font-size: 1.4rem;
+      font-weight: 700;
+      line-height: 1;
+    }
+    .stat-label {
+      font-size: 0.7rem;
+      opacity: 0.7;
+      margin-top: 2px;
+    }
+    .stat-divider {
+      width: 1px;
+      background: rgba(255,255,255,0.2);
+      align-self: stretch;
+    }
+
+    /* Progress bar */
+    .progress-wrap {
+      margin-top: 16px;
+      position: relative; z-index: 1;
+    }
+    .progress-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.72rem;
+      opacity: 0.75;
+      margin-bottom: 5px;
+    }
+    .progress-bar {
+      height: 6px;
+      background: rgba(255,255,255,0.2);
+      border-radius: 99px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #e040fb, #ff80ff);
+      border-radius: 99px;
+      transition: width 0.4s ease;
+      width: 0%;
+    }
+
+    /* ── Input Area ────────────────────────────────────────────────────────── */
+    .input-section { padding: 20px 24px 8px; }
+    .input-row {
+      display: flex;
+      gap: 10px;
+    }
+    .todo-input {
+      flex: 1;
+      padding: 11px 16px;
+      border: 2px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-size: 0.95rem;
+      color: var(--text-dark);
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      background: var(--purple-ghost);
+    }
+    .todo-input:focus {
+      border-color: var(--purple-main);
+      box-shadow: 0 0 0 3px rgba(102,8,116,0.12);
+      background: var(--white);
+    }
+    .btn-add {
+      padding: 11px 22px;
+      background: linear-gradient(135deg, var(--purple-main), var(--purple-mid));
+      color: var(--white);
+      border: none;
+      border-radius: var(--radius-sm);
+      font-size: 0.95rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s, box-shadow 0.2s;
+      white-space: nowrap;
+      box-shadow: var(--shadow-sm);
+    }
+    .btn-add:hover  { opacity: 0.9; box-shadow: var(--shadow-md); }
+    .btn-add:active { transform: scale(0.97); }
+
+    /* Priority picker */
+    .input-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .priority-label {
+      font-size: 0.78rem;
+      color: var(--text-mid);
+      white-space: nowrap;
+    }
+    .priority-btns {
+      display: flex;
+      gap: 6px;
+    }
+    .pri-btn {
+      padding: 3px 12px;
+      border-radius: 20px;
+      border: 1.5px solid transparent;
+      font-size: 0.75rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      background: #f5f5f5;
+      color: var(--text-mid);
+    }
+    .pri-btn[data-p="high"]   { border-color: #fca5a5; color: var(--red); background: #fff5f5; }
+    .pri-btn[data-p="medium"] { border-color: #fcd34d; color: var(--orange); background: #fffbeb; }
+    .pri-btn[data-p="low"]    { border-color: #6ee7b7; color: var(--green); background: #f0fdf4; }
+    .pri-btn.selected[data-p="high"]   { background: var(--red);    color: #fff; border-color: var(--red); }
+    .pri-btn.selected[data-p="medium"] { background: var(--orange); color: #fff; border-color: var(--orange); }
+    .pri-btn.selected[data-p="low"]    { background: var(--green);  color: #fff; border-color: var(--green); }
+
+    .error-msg {
+      color: var(--red);
+      font-size: 0.78rem;
+      min-height: 1.2em;
+      margin-top: 6px;
+    }
+
+    /* ── Filters ───────────────────────────────────────────────────────────── */
+    .filters {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 24px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .filter-btn {
+      padding: 5px 14px;
+      border: 1.5px solid var(--border);
+      border-radius: 20px;
+      background: var(--white);
+      font-size: 0.8rem;
+      cursor: pointer;
+      color: var(--text-mid);
+      transition: all 0.15s;
+    }
+    .filter-btn:hover { border-color: var(--purple-main); color: var(--purple-main); }
+    .filter-btn.active {
+      background: var(--purple-main);
+      border-color: var(--purple-main);
+      color: var(--white);
+      font-weight: 700;
+    }
+    .filter-spacer { flex: 1; }
+    .sort-label { font-size: 0.75rem; color: var(--text-light); }
+    .sort-select {
+      font-size: 0.75rem;
+      border: 1.5px solid var(--border);
+      border-radius: 6px;
+      padding: 3px 6px;
+      color: var(--text-mid);
+      background: var(--white);
+      cursor: pointer;
+      outline: none;
+    }
+
+    /* ── Todo List ─────────────────────────────────────────────────────────── */
+    .todo-list { list-style: none; }
+    .todo-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 14px 24px;
+      border-bottom: 1px solid #fafafa;
+      transition: background 0.12s;
+      animation: slideIn 0.22s ease;
+      position: relative;
+    }
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateX(-10px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+    .todo-item:hover { background: var(--purple-ghost); }
+    .todo-item:last-child { border-bottom: none; }
+
+    /* Priority stripe */
+    .todo-item::before {
+      content: '';
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 3px;
+      border-radius: 0 2px 2px 0;
+      background: transparent;
+    }
+    .todo-item.pri-high::before   { background: var(--red); }
+    .todo-item.pri-medium::before { background: var(--orange); }
+    .todo-item.pri-low::before    { background: var(--green); }
+
+    .todo-check {
+      width: 18px; height: 18px;
+      cursor: pointer;
+      accent-color: var(--purple-main);
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+
+    .todo-body { flex: 1; min-width: 0; }
+    .todo-title {
+      font-size: 0.95rem;
+      color: var(--text-dark);
+      word-break: break-word;
+      line-height: 1.45;
+      transition: color 0.18s;
+    }
+    .todo-title[contenteditable="true"] {
+      outline: none;
+      border-bottom: 2px solid var(--purple-main);
+      padding-bottom: 1px;
+    }
+    .todo-item.done .todo-title {
+      text-decoration: line-through;
+      color: var(--text-light);
+    }
+    .todo-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .pri-tag {
+      font-size: 0.68rem;
+      font-weight: 700;
+      padding: 1px 7px;
+      border-radius: 20px;
+      letter-spacing: 0.5px;
+    }
+    .pri-tag.high   { background: #fff5f5; color: var(--red); }
+    .pri-tag.medium { background: #fffbeb; color: var(--orange); }
+    .pri-tag.low    { background: #f0fdf4; color: var(--green); }
+    .todo-time {
+      font-size: 0.68rem;
+      color: var(--text-light);
+    }
+    .edit-hint {
+      font-size: 0.68rem;
+      color: var(--purple-light);
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+    .todo-item:hover .edit-hint { opacity: 1; }
+
+    .todo-actions {
+      display: flex;
+      gap: 4px;
+      flex-shrink: 0;
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+    .todo-item:hover .todo-actions { opacity: 1; }
+    .action-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 4px 6px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      transition: background 0.12s, color 0.12s;
+      color: var(--text-light);
+    }
+    .action-btn:hover       { background: var(--purple-pale); color: var(--purple-main); }
+    .action-btn.del:hover   { background: #fff5f5; color: var(--red); }
+    .action-btn.save:hover  { background: #f0fdf4; color: var(--green); }
+
+    /* ── Empty ─────────────────────────────────────────────────────────────── */
+    .empty {
+      text-align: center;
+      padding: 40px 16px;
+    }
+    .empty-icon { font-size: 2.5rem; margin-bottom: 10px; }
+    .empty-text { font-size: 0.9rem; color: var(--text-light); }
+
+    /* ── Footer ────────────────────────────────────────────────────────────── */
+    .app-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 24px;
+      border-top: 1px solid var(--border);
+      background: var(--purple-ghost);
+    }
+    .footer-count { font-size: 0.8rem; color: var(--text-mid); }
+    .footer-actions { display: flex; gap: 12px; }
+    .btn-text {
+      background: none;
+      border: none;
+      font-size: 0.8rem;
+      cursor: pointer;
+      color: var(--text-light);
+      transition: color 0.15s;
+      text-decoration: underline;
+    }
+    .btn-text:hover { color: var(--red); }
+    .btn-text.purple:hover { color: var(--purple-main); }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-top">
+      <div class="header-title">
+        <h1>✅ 我的待办</h1>
+        <p>专注当下，逐一完成</p>
+      </div>
+    </div>
+    <div class="header-stats">
+      <div class="stat-item">
+        <div class="stat-num" id="stat-total">0</div>
+        <div class="stat-label">全部</div>
+      </div>
+      <div class="stat-divider"></div>
+      <div class="stat-item">
+        <div class="stat-num" id="stat-active">0</div>
+        <div class="stat-label">未完成</div>
+      </div>
+      <div class="stat-divider"></div>
+      <div class="stat-item">
+        <div class="stat-num" id="stat-done">0</div>
+        <div class="stat-label">已完成</div>
+      </div>
+    </div>
+    <div class="progress-wrap">
+      <div class="progress-label">
+        <span>完成进度</span>
+        <span id="progress-pct">0%</span>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Input -->
+  <div class="input-section">
+    <div class="input-row">
+      <input id="todo-input" class="todo-input" type="text"
+             placeholder="添加新的待办事项..." maxlength="100" autocomplete="off" />
+      <button id="btn-add" class="btn-add">＋ 添加</button>
+    </div>
+    <div class="input-meta">
+      <span class="priority-label">优先级：</span>
+      <div class="priority-btns">
+        <button class="pri-btn" data-p="high">🔴 高</button>
+        <button class="pri-btn selected" data-p="medium">🟡 中</button>
+        <button class="pri-btn" data-p="low">🟢 低</button>
+      </div>
+    </div>
+    <p id="error-msg" class="error-msg"></p>
+  </div>
+
+  <!-- Filters -->
+  <div class="filters">
+    <button class="filter-btn active" data-f="all">全部</button>
+    <button class="filter-btn" data-f="active">未完成</button>
+    <button class="filter-btn" data-f="done">已完成</button>
+    <div class="filter-spacer"></div>
+    <span class="sort-label">排序：</span>
+    <select id="sort-select" class="sort-select">
+      <option value="newest">最新</option>
+      <option value="oldest">最早</option>
+      <option value="priority">优先级</option>
+    </select>
+  </div>
+
+  <!-- List -->
+  <ul id="todo-list" class="todo-list"></ul>
+  <div id="empty-msg" class="empty hidden">
+    <div class="empty-icon">🎉</div>
+    <div class="empty-text">暂无待办事项，添加一个吧！</div>
+  </div>
+
+  <!-- Footer -->
+  <div id="footer" class="app-footer hidden">
+    <span id="footer-count" class="footer-count"></span>
+    <div class="footer-actions">
+      <button id="btn-check-all" class="btn-text purple">全部完成</button>
+      <button id="btn-clear" class="btn-text hidden">清除已完成</button>
+    </div>
+  </div>
+
+</div>
+<script>
+// ── Constants & State ──────────────────────────────────────────────────────────
+const KEY = 'todo_app_v2';
+const PRI_ORDER = { high: 0, medium: 1, low: 2 };
+
+let todos  = loadTodos();
+let filter = 'all';
+let sort   = 'newest';
+let selectedPriority = 'medium';
+let editingId = null;
+
+// ── Storage ────────────────────────────────────────────────────────────────────
+function loadTodos() {
+  try { return JSON.parse(localStorage.getItem(KEY)) || []; }
+  catch { return []; }
+}
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(todos)); }
+  catch (e) {
+    if (e.name === 'QuotaExceededError' || e.code === 22)
+      showError('存储空间已满，请清理已完成项后重试。');
+  }
+}
+
+// ── CRUD ───────────────────────────────────────────────────────────────────────
+function addTodo(title) {
+  todos.unshift({ id: Date.now(), title, done: false, priority: selectedPriority, createdAt: Date.now() });
+  save();
+}
+function deleteTodo(id)   { todos = todos.filter(t => t.id !== id); save(); }
+function toggleTodo(id)   { const t = todos.find(t => t.id === id); if (t) { t.done = !t.done; save(); } }
+function updateTitle(id, title) { const t = todos.find(t => t.id === id); if (t && title.trim()) { t.title = title.trim(); save(); } }
+function clearDone()      { todos = todos.filter(t => !t.done); save(); }
+function checkAll()       { todos.forEach(t => t.done = true); save(); }
+
+// ── Filtering & Sorting ────────────────────────────────────────────────────────
+function getVisible() {
+  let list = todos.filter(t =>
+    filter === 'all' ? true : filter === 'active' ? !t.done : t.done
+  );
+  if (sort === 'newest')   list = [...list].sort((a,b) => b.createdAt - a.createdAt);
+  if (sort === 'oldest')   list = [...list].sort((a,b) => a.createdAt - b.createdAt);
+  if (sort === 'priority') list = [...list].sort((a,b) => PRI_ORDER[a.priority] - PRI_ORDER[b.priority]);
+  return list;
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────────
+const listEl    = document.getElementById('todo-list');
+const emptyEl   = document.getElementById('empty-msg');
+const footerEl  = document.getElementById('footer');
+const footerCnt = document.getElementById('footer-count');
+const btnClear  = document.getElementById('btn-clear');
+const btnChkAll = document.getElementById('btn-check-all');
+const fillEl    = document.getElementById('progress-fill');
+const pctEl     = document.getElementById('progress-pct');
+
+function formatTime(ts) {
+  const d = new Date(ts);
+  const mo = d.getMonth()+1, da = d.getDate(),
+        h  = d.getHours(), mi = String(d.getMinutes()).padStart(2,'0');
+  return `${mo}/${da} ${h}:${mi}`;
+}
+
+function render() {
+  const visible = getVisible();
+  const total   = todos.length;
+  const doneN   = todos.filter(t => t.done).length;
+  const activeN = total - doneN;
+  const pct     = total ? Math.round(doneN/total*100) : 0;
+
+  // Stats
+  document.getElementById('stat-total').textContent  = total;
+  document.getElementById('stat-active').textContent = activeN;
+  document.getElementById('stat-done').textContent   = doneN;
+  fillEl.style.width = pct + '%';
+  pctEl.textContent  = pct + '%';
+
+  // List
+  listEl.innerHTML = '';
+  visible.forEach(todo => {
+    const li = document.createElement('li');
+    li.className = `todo-item pri-${todo.priority}` + (todo.done ? ' done' : '');
+    li.dataset.id = todo.id;
+
+    // Checkbox
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.className = 'todo-check'; cb.checked = todo.done;
+    cb.addEventListener('change', () => { toggleTodo(todo.id); render(); });
+
+    // Body
+    const body = document.createElement('div');
+    body.className = 'todo-body';
+
+    const titleEl = document.createElement('div');
+    titleEl.className = 'todo-title';
+    titleEl.textContent = todo.title;
+    titleEl.title = '双击编辑';
+
+    const metaEl = document.createElement('div');
+    metaEl.className = 'todo-meta';
+
+    const priMap = { high:'🔴 高', medium:'🟡 中', low:'🟢 低' };
+    const priTag = document.createElement('span');
+    priTag.className = `pri-tag ${todo.priority}`;
+    priTag.textContent = priMap[todo.priority] || '';
+
+    const timeEl = document.createElement('span');
+    timeEl.className = 'todo-time';
+    timeEl.textContent = formatTime(todo.createdAt);
+
+    const hint = document.createElement('span');
+    hint.className = 'edit-hint';
+    hint.textContent = '双击编辑';
+
+    metaEl.append(priTag, timeEl, hint);
+    body.append(titleEl, metaEl);
+
+    // Actions
+    const actions = document.createElement('div');
+    actions.className = 'todo-actions';
+
+    const editBtn = document.createElement('button');
+    editBtn.className = 'action-btn'; editBtn.textContent = '✏️';
+    editBtn.title = '编辑'; editBtn.setAttribute('aria-label', '编辑');
+    editBtn.addEventListener('click', e => { e.stopPropagation(); startEdit(todo.id, titleEl, editBtn, saveBtn); });
+
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'action-btn save hidden'; saveBtn.textContent = '💾';
+    saveBtn.title = '保存'; saveBtn.setAttribute('aria-label', '保存');
+    saveBtn.addEventListener('click', e => { e.stopPropagation(); commitEdit(todo.id, titleEl, editBtn, saveBtn); });
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'action-btn del'; delBtn.textContent = '🗑️';
+    delBtn.title = '删除'; delBtn.setAttribute('aria-label', '删除');
+    delBtn.addEventListener('click', () => { deleteTodo(todo.id); render(); });
+
+    actions.append(editBtn, saveBtn, delBtn);
+
+    // Double-click to edit
+    titleEl.addEventListener('dblclick', () => startEdit(todo.id, titleEl, editBtn, saveBtn));
+
+    li.append(cb, body, actions);
+    listEl.appendChild(li);
+  });
+
+  emptyEl.classList.toggle('hidden', visible.length > 0);
+  footerEl.classList.toggle('hidden', total === 0);
+  footerCnt.textContent = `${activeN} 项未完成 / 共 ${total} 项`;
+  btnClear.classList.toggle('hidden', doneN === 0);
+  btnChkAll.classList.toggle('hidden', activeN === 0);
+}
+
+// ── Inline Edit ────────────────────────────────────────────────────────────────
+function startEdit(id, titleEl, editBtn, saveBtn) {
+  if (editingId === id) return;
+  if (editingId !== null) cancelEdit();
+  editingId = id;
+  titleEl.contentEditable = 'true';
+  titleEl.focus();
+  // Place cursor at end
+  const range = document.createRange();
+  range.selectNodeContents(titleEl);
+  range.collapse(false);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  editBtn.classList.add('hidden');
+  saveBtn.classList.remove('hidden');
+
+  // BUG #1 fix: Enter key saves, Esc cancels
+  titleEl._editKeydown = e => {
+    if (e.key === 'Enter') { e.preventDefault(); commitEdit(id, titleEl, editBtn, saveBtn); }
+    if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+  };
+  titleEl.addEventListener('keydown', titleEl._editKeydown);
+
+  // UX fix: blur auto-commits (e.g. clicking filter/sort while editing)
+  titleEl._editBlur = () => {
+    // Small delay so that saveBtn click fires before blur
+    setTimeout(() => { if (editingId === id) commitEdit(id, titleEl, editBtn, saveBtn); }, 150);
+  };
+  titleEl.addEventListener('blur', titleEl._editBlur);
+}
+
+function removeEditListeners(titleEl) {
+  if (titleEl._editKeydown) { titleEl.removeEventListener('keydown', titleEl._editKeydown); delete titleEl._editKeydown; }
+  if (titleEl._editBlur)    { titleEl.removeEventListener('blur',    titleEl._editBlur);    delete titleEl._editBlur; }
+}
+
+function commitEdit(id, titleEl, editBtn, saveBtn) {
+  removeEditListeners(titleEl);
+  const newTitle = titleEl.textContent.trim();
+  if (newTitle) { updateTitle(id, newTitle); }
+  else { const t = todos.find(t => t.id === id); if (t) titleEl.textContent = t.title; }
+  titleEl.contentEditable = 'false';
+  editBtn.classList.remove('hidden');
+  saveBtn.classList.add('hidden');
+  editingId = null;
+}
+
+function cancelEdit() {
+  if (editingId === null) return;
+  render(); // re-render resets everything
+  editingId = null;
+}
+
+// ── Priority Selector ──────────────────────────────────────────────────────────
+document.querySelectorAll('.pri-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    selectedPriority = btn.dataset.p;
+    document.querySelectorAll('.pri-btn').forEach(b => b.classList.remove('selected'));
+    btn.classList.add('selected');
+  });
+});
+
+// ── Add Todo ───────────────────────────────────────────────────────────────────
+const inputEl  = document.getElementById('todo-input');
+const errorEl  = document.getElementById('error-msg');
+
+function showError(msg) { errorEl.textContent = msg; }
+function clearError()   { errorEl.textContent = ''; }
+
+function handleAdd() {
+  const title = inputEl.value.trim();
+  if (!title) { showError('请输入待办事项内容！'); inputEl.focus(); return; }
+  clearError();
+  addTodo(title);
+  inputEl.value = '';
+  render();
+}
+
+document.getElementById('btn-add').addEventListener('click', handleAdd);
+inputEl.addEventListener('keydown', e => { if (e.key === 'Enter') handleAdd(); });
+inputEl.addEventListener('input',   () => { if (inputEl.value.trim()) clearError(); });
+
+// ── Filters & Sort ─────────────────────────────────────────────────────────────
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    filter = btn.dataset.f;
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    render();
+  });
+});
+
+document.getElementById('sort-select').addEventListener('change', e => {
+  sort = e.target.value;
+  render();
+});
+
+// ── Footer Actions ─────────────────────────────────────────────────────────────
+btnClear.addEventListener('click',  () => { clearDone(); render(); });
+btnChkAll.addEventListener('click', () => { checkAll();  render(); });
+
+// ── Keyboard: Escape to cancel edit ───────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && editingId !== null) cancelEdit();
+});
+
+// ── Init ───────────────────────────────────────────────────────────────────────
+render();
+</script>
+</body>
+</html>

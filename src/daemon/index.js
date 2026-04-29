@@ -1,0 +1,374 @@
+import { WebSocketServer } from 'ws';
+import {
+  getDb, getMachineByApiKey, updateMachine, updateAgent, getAgents,
+  getAgentById, getTeamById, getMemberTeamIds,
+  getTeamSession, upsertTeamSession, getAgentByApiKey,
+  insertCredential, getCredentialsByOwner, deleteCredential,
+} from '../db/index.js';
+import { encrypt } from '../crypto.js';
+import { registerDaemon, unregisterDaemon, sendToDaemon } from './connections.js';
+import { broadcast } from '../realtime/broadcast.js';
+import { flushInbox } from '../scheduler/inbox.js';
+
+const pendingRequests = new Map();
+// machineId → { userId, platform }: tracks who initiated browser login
+const pendingBrowserLogins = new Map();
+
+export function setPendingBrowserLogin(machineId, userId, platform) {
+  pendingBrowserLogins.set(machineId, { userId, platform });
+}
+
+export function setupDaemonServer(httpServer) {
+  const wss = new WebSocketServer({ noServer: true });
+
+  httpServer.on('upgrade', async (req, socket, head) => {
+    const url = new URL(req.url, `http://localhost`);
+    if (!url.pathname.startsWith('/daemon/connect')) return;
+
+    const apiKey = url.searchParams.get('key');
+    const machine = await getMachineByApiKey(getDb(), apiKey);
+
+    if (!machine) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      console.warn('[Daemon] Rejected connection: invalid API key');
+      return;
+    }
+
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req, machine);
+    });
+  });
+
+  wss.on('connection', (ws, req, machine) => {
+    const machineId = machine.id;
+    const serverId  = machine.server_id;
+    console.log(`[Daemon] Machine ${machine.name} (${machineId}) connected`);
+
+    registerDaemon(machineId, ws);
+
+    ws.on('message', async (raw) => {
+      let msg;
+      try { msg = JSON.parse(raw.toString()); } catch { return; }
+      await handleDaemonMessage(machineId, serverId, msg, ws);
+    });
+
+    ws.on('close', async (code) => {
+      console.log(`[Daemon] Machine ${machine.name} disconnected (code=${code})`);
+      unregisterDaemon(machineId);
+      const db = getDb();
+      await updateMachine(db, machineId, { status: 'offline' });
+      broadcast.machineStatus(serverId, machineId, 'offline');
+      const agents = (await getAgents(db, serverId)).filter(a => a.machine_id === machineId);
+      for (const agent of agents) {
+        await updateAgent(db, agent.id, { status: 'inactive', activity: null, activity_detail: '' });
+        broadcast.agentActivity(serverId, agent.id, 'offline', 'Machine disconnected', []);
+      }
+    });
+
+    ws.on('error', (err) => {
+      console.error(`[Daemon] WS error for machine ${machineId}:`, err.message);
+    });
+  });
+
+  setInterval(() => {
+    for (const [machineId] of (global._daemonConnections ?? new Map())) {
+      sendToDaemon(machineId, { type: 'ping' });
+    }
+  }, 30000);
+
+  console.log('[Daemon] WebSocket server ready at /daemon/connect');
+}
+
+async function handleDaemonMessage(machineId, serverId, msg) {
+  const db = getDb();
+  const { type } = msg;
+
+  switch (type) {
+    case 'ready': {
+      console.log(`[Daemon] ${machineId} ready — runtimes: ${msg.runtimes?.join(', ')}, version: ${msg.daemonVersion}`);
+      await updateMachine(db, machineId, {
+        status: 'online',
+        hostname: msg.hostname ?? null,
+        os: msg.os ?? null,
+        runtimes: JSON.stringify(msg.runtimes ?? []),
+        models_by_runtime: msg.modelsByRuntime ? JSON.stringify(msg.modelsByRuntime) : null,
+        daemon_version: msg.daemonVersion ?? null,
+        last_heartbeat: new Date().toISOString().slice(0,19).replace('T',' '),
+      });
+      broadcast.machineStatus(serverId, machineId, 'online');
+      broadcast.machineCapabilities(serverId, machineId, msg.runtimes ?? [], msg.hostname, msg.os, msg.daemonVersion);
+
+      const serverUrl = process.env.SERVER_URL ?? `http://localhost:${process.env.PORT ?? 3001}`;
+      const allAgents = (await getAgents(db, serverId)).filter(a => a.machine_id === machineId && !a.is_del && !a.deleted_at);
+      for (const agent of allAgents) {
+        await updateAgent(db, agent.id, { status: 'active', activity: null, activity_detail: '' });
+        broadcast.agentActivity(serverId, agent.id, 'idle', '', []);
+        const teamIds = await getMemberTeamIds(db, agent.id);
+        for (const teamId of teamIds) {
+          const sessionId = await getTeamSession(db, agent.id, teamId);
+          const team = await getTeamById(db, teamId);
+          const [memberRows] = await db.execute(
+            `SELECT role_prompt FROM team_members WHERE team_id = ? AND member_id = ?`,
+            [teamId, agent.id]
+          );
+          const rolePrompt = memberRows[0]?.role_prompt ?? '';
+          sendToDaemon(machineId, {
+            type: 'agent:start', agentId: agent.id, teamId,
+            teamName: team?.name ?? teamId,
+            config: {
+              runtime: agent.runtime ?? 'claude', model: agent.model ?? null,
+              sessionId: sessionId ?? null, name: agent.name,
+              displayName: agent.display_name, description: agent.description ?? '',
+              feishuBotName: agent.feishu_bot_name ?? null,
+              rolePrompt,
+              serverUrl, authToken: agent.agent_api_key ?? process.env.ADMIN_TOKEN ?? 'demo-token',
+              envVars: agent.env_vars ? JSON.parse(agent.env_vars) : {},
+            },
+          });
+          console.log(`[Daemon] Sent agent:start to ${agent.name} (#${team?.name ?? teamId})`);
+        }
+      }
+
+      for (const agent of allAgents) {
+        flushInbox(agent.id, async (message) => {
+          sendToDaemon(machineId, {
+            type: 'agent:deliver', agentId: agent.id,
+            teamId: message.team_id,
+            seq: message.seq, message: await formatMessageForDaemon(message),
+          });
+        });
+      }
+      break;
+    }
+
+    case 'agent:status': {
+      const { agentId, status } = msg;
+      await updateAgent(db, agentId, { status });
+      broadcast.agentActivity(serverId, agentId, status === 'active' ? 'online' : 'offline', '', []);
+      console.log(`[Daemon] Agent ${agentId} status → ${status}`);
+      if (status === 'active') {
+        flushInbox(agentId, async (message) => {
+          const agent = await getAgentById(db, agentId);
+          if (agent?.machine_id) {
+            sendToDaemon(agent.machine_id, {
+              type: 'agent:deliver', agentId,
+              teamId: message.team_id,
+              seq: message.seq, message: await formatMessageForDaemon(message),
+            });
+          }
+        });
+      }
+      break;
+    }
+
+    case 'agent:activity': {
+      const { agentId, activity, detail, entries } = msg;
+      await updateAgent(db, agentId, { activity, activity_detail: detail ?? '' });
+      broadcast.agentActivity(serverId, agentId, activity, detail ?? '', entries ?? []);
+      break;
+    }
+
+    case 'agent:session': {
+      const { agentId, teamId, sessionId } = msg;
+      if (teamId) {
+        await upsertTeamSession(db, agentId, teamId, sessionId);
+      } else {
+        await updateAgent(db, agentId, { session_id: sessionId });
+      }
+      console.log(`[Daemon] Agent ${agentId} team=${teamId ?? 'none'} session → ${sessionId}`);
+      break;
+    }
+
+    case 'agent:deliver:ack':
+      console.log(`[Daemon] Deliver ack: agent=${msg.agentId} seq=${msg.seq}`);
+      break;
+
+    case 'agent:request_start': {
+      const { agentId, teamId } = msg;
+      const agent = await getAgentById(db, agentId);
+      if (!agent || agent.is_del || agent.deleted_at || agent.machine_id !== machineId) break;
+      const sessionId = teamId ? await getTeamSession(db, agentId, teamId) : agent.session_id;
+      const team = teamId ? await getTeamById(db, teamId) : null;
+      const serverUrl = process.env.SERVER_URL ?? `http://localhost:${process.env.PORT ?? 3001}`;
+      let rolePrompt = '';
+      if (teamId) {
+        const [memberRows] = await db.execute(
+          `SELECT role_prompt FROM team_members WHERE team_id = ? AND member_id = ?`,
+          [teamId, agentId]
+        );
+        rolePrompt = memberRows[0]?.role_prompt ?? '';
+      }
+      sendToDaemon(machineId, {
+        type: 'agent:start', agentId, teamId,
+        teamName: team?.name ?? teamId,
+        config: {
+          runtime: agent.runtime ?? 'claude', model: agent.model ?? null,
+          sessionId: sessionId ?? null, name: agent.name,
+          displayName: agent.display_name, description: agent.description ?? '',
+          feishuBotName: agent.feishu_bot_name ?? null,
+          rolePrompt,
+          serverUrl, authToken: agent.agent_api_key ?? process.env.ADMIN_TOKEN ?? 'demo-token',
+          envVars: agent.env_vars ? JSON.parse(agent.env_vars) : {},
+        },
+      });
+      console.log(`[Daemon] Re-sent agent:start for ${agent.name} (#${team?.name ?? teamId})`);
+      break;
+    }
+
+    case 'agent:workspace:file_tree':
+    case 'agent:workspace:file_content':
+    case 'machine:workspace:scan_result':
+    case 'machine:workspace:delete_result':
+    case 'runtime:preflight:result': {
+      const key = msg.requestId ?? msg.agentId;
+      const resolve = pendingRequests.get(key);
+      if (resolve) { resolve(msg); pendingRequests.delete(key); }
+      break;
+    }
+
+    case 'browser:screenshot':
+      broadcast.custom(serverId, 'browser:screenshot', { platform: msg.platform, screenshot: msg.screenshot });
+      break;
+
+    case 'browser:login_status':
+      broadcast.custom(serverId, 'browser:login_status', { platform: msg.platform, status: msg.status, message: msg.message });
+      break;
+
+    case 'browser:login_complete': {
+      const pending = pendingBrowserLogins.get(machineId);
+      pendingBrowserLogins.delete(machineId);
+      if (pending) {
+        const { userId, platform } = pending;
+        const { v4: uuidv4 } = await import('uuid');
+        const envKey = `${platform.toUpperCase()}_PROFILE_DIR`;
+        const displayNames = { xhs: '小红书账号', douyin: '抖音账号', kuaishou: '快手账号' };
+        const displayName = displayNames[platform] ?? `${platform} 账号`;
+        const { iv, data } = encrypt({ [envKey]: msg.profileDir });
+        const newCredId = uuidv4();
+
+        // Find old active credentials to migrate their grants
+        const [oldCreds] = await db.execute(
+          `SELECT id FROM platform_credentials WHERE owner_id = ? AND platform = ? AND is_del = 0 AND deleted_at IS NULL`,
+          [userId, platform]
+        );
+
+        // Soft-delete old credentials
+        await db.execute(
+          `UPDATE platform_credentials
+           SET is_del = 1, deleted_at = COALESCE(deleted_at, NOW())
+           WHERE owner_id = ? AND platform = ? AND is_del = 0 AND deleted_at IS NULL`,
+          [userId, platform]
+        );
+
+        await db.execute(
+          `INSERT INTO platform_credentials (id, server_id, owner_id, platform, display_name, credential_type, encrypted_data, iv, scopes)
+           VALUES (?, ?, ?, ?, ?, 'browser_profile', ?, ?, ?)`,
+          [newCredId, serverId, userId, platform, displayName, data, iv, JSON.stringify([envKey])]
+        );
+
+        // Migrate grants from old credentials to new one
+        if (oldCreds.length > 0) {
+          const oldIds = oldCreds.map(c => c.id);
+          for (const oldId of oldIds) {
+            await db.execute(
+              `UPDATE credential_grants SET credential_id = ? WHERE credential_id = ? COLLATE utf8mb4_unicode_ci`,
+              [newCredId, oldId]
+            );
+          }
+          console.log(`[Daemon] Migrated grants from ${oldIds.length} old credential(s) to ${newCredId}`);
+        }
+
+        console.log(`[Daemon] Browser login complete: platform=${platform} user=${userId}, profile saved`);
+
+        // Restart agents that now have grants to the new credential so they pick up new env vars
+        const [grantedAgentRows] = await db.execute(
+          `SELECT DISTINCT cg.grantee_id FROM credential_grants cg
+           WHERE cg.credential_id = ? AND cg.grantee_type = 'agent' AND cg.revoked_at IS NULL`,
+          [newCredId]
+        );
+        const serverUrl = process.env.SERVER_URL ?? `http://localhost:${process.env.PORT ?? 3001}`;
+        for (const row of grantedAgentRows) {
+          const agent = await getAgentById(db, row.grantee_id);
+          if (!agent || agent.is_del || agent.deleted_at || agent.machine_id !== machineId) continue;
+          const teamIds = await getMemberTeamIds(db, agent.id);
+          for (const teamId of teamIds) {
+            sendToDaemon(machineId, { type: 'agent:stop', agentId: agent.id, teamId });
+          }
+          await new Promise(r => setTimeout(r, 500));
+          for (const teamId of teamIds) {
+            const sessionId = await getTeamSession(db, agent.id, teamId);
+            const team = await getTeamById(db, teamId);
+            const [memberRows] = await db.execute(
+              `SELECT role_prompt FROM team_members WHERE team_id = ? AND member_id = ?`,
+              [teamId, agent.id]
+            );
+            const rolePrompt = memberRows[0]?.role_prompt ?? '';
+            sendToDaemon(machineId, {
+              type: 'agent:start', agentId: agent.id, teamId,
+              teamName: team?.name ?? teamId,
+              config: {
+                runtime: agent.runtime ?? 'claude', model: agent.model ?? null,
+                sessionId: sessionId ?? null, name: agent.name,
+                displayName: agent.display_name, description: agent.description ?? '',
+                feishuBotName: agent.feishu_bot_name ?? null,
+                rolePrompt,
+                serverUrl, authToken: agent.agent_api_key ?? process.env.ADMIN_TOKEN ?? 'demo-token',
+                envVars: agent.env_vars ? JSON.parse(agent.env_vars) : {},
+              },
+            });
+            console.log(`[Daemon] Restarted agent ${agent.name} (#${team?.name ?? teamId}) after credential update`);
+          }
+        }
+      } else {
+        console.warn(`[Daemon] browser:login_complete from machine ${machineId} but no pending login`);
+      }
+      broadcast.custom(serverId, 'browser:login_complete', { platform: msg.platform });
+      break;
+    }
+
+    case 'browser:login_error':
+      broadcast.custom(serverId, 'browser:login_error', { platform: msg.platform, error: msg.error });
+      break;
+
+    case 'pong':
+      await updateMachine(db, machineId, { last_heartbeat: new Date().toISOString().slice(0,19).replace('T',' ') });
+      break;
+
+    default:
+      console.log(`[Daemon] Unhandled message type: ${type}`);
+  }
+}
+
+export async function formatMessageForDaemon(msg) {
+  const db = getDb();
+  const ch = await getTeamById(db, msg.team_id);
+  return {
+    team_type: ch?.type ?? 'team',
+    team_name: ch?.name ?? 'all',
+    sender_name: msg.sender_name,
+    sender_type: msg.sender_type,
+    content: msg.content,
+    message_id: msg.id,
+    timestamp: msg.created_at,
+    attachments: [],
+    task_status: msg.task_status ?? null,
+    task_number: msg.task_number ?? null,
+    task_assignee_type: msg.task_assignee_type ?? null,
+    task_assignee_id: msg.task_assignee_id ?? null,
+  };
+}
+
+export async function requestFromDaemon(machineId, request, responseKey, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingRequests.delete(responseKey);
+      reject(new Error('Daemon request timeout'));
+    }, timeoutMs);
+    pendingRequests.set(responseKey, (result) => {
+      clearTimeout(timer);
+      resolve(result);
+    });
+    sendToDaemon(machineId, request);
+  });
+}
