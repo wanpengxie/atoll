@@ -8,7 +8,18 @@ importers:
 
   .: {}
 
-  agent-binary: {}
+  agent-binary:
+    dependencies:
+      yaml:
+        specifier: ^2.8.3
+        version: 2.8.3
+    devDependencies:
+      '@types/node':
+        specifier: ^25.6.0
+        version: 25.6.0
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
 
   cli:
     dependencies:

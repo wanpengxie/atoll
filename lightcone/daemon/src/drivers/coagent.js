@@ -32,9 +32,14 @@ function resolveAgentRuntime() {
     return { command: 'node', args: [distEntry], entry: distEntry };
   }
 
-  const srcEntry = path.join(root, 'agent-binary', 'src', 'index.js');
-  if (existsSync(srcEntry)) {
-    return { command: 'node', args: [srcEntry], entry: srcEntry };
+  const srcTsEntry = path.join(root, 'agent-binary', 'src', 'index.ts');
+  if (existsSync(srcTsEntry)) {
+    return { command: 'node', args: [srcTsEntry], entry: srcTsEntry };
+  }
+
+  const srcJsEntry = path.join(root, 'agent-binary', 'src', 'index.js');
+  if (existsSync(srcJsEntry)) {
+    return { command: 'node', args: [srcJsEntry], entry: srcJsEntry };
   }
 
   return {
@@ -76,6 +81,7 @@ function ensureSessionId(sessionIdPath) {
 
 export function buildCoagentSpawn({
   channelId,
+  channelName = '',
   workspaceId,
   workdir,
   capabilitySet,
@@ -100,11 +106,15 @@ export function buildCoagentSpawn({
     NO_COLOR: '1',
     PATH: pathParts.filter(Boolean).join(path.delimiter),
     CHANNEL_ID: channelId,
+    CHANNEL_NAME: channelName,
     WORKSPACE_ID: workspaceId ?? '',
+    CAPABILITY_SET: JSON.stringify({ cli_binaries: cliBinaries }),
     SESSION_ID: sessionId,
     SESSION_ID_PATH: sessionIdPath,
     COAGENT_CHANNEL_ID: channelId,
+    COAGENT_CHANNEL_NAME: channelName,
     COAGENT_WORKSPACE_ID: workspaceId ?? '',
+    COAGENT_CAPABILITY_SET: JSON.stringify({ cli_binaries: cliBinaries }),
     COAGENT_SESSION_ID: sessionId,
     COAGENT_SESSION_ID_PATH: sessionIdPath,
     COAGENT_AGENT_NAME: agentName,

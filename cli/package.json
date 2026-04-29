@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "bin": {
-    "xhs": "./bin/xhs"
+    "xhs": "./bin/xhs",
+    "coagent-kernel": "./bin/coagent-kernel",
+    "coagent-msg": "./bin/coagent-msg"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

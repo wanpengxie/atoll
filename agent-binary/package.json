@@ -4,10 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node -e \"console.log('agent-binary: placeholder build')\"",
-    "dev": "node -e \"console.log('agent-binary: placeholder dev')\"",
-    "test": "node -e \"console.log('agent-binary: placeholder test')\"",
-    "lint": "node -e \"console.log('agent-binary: placeholder lint')\"",
-    "clean": "node -e \"console.log('agent-binary: placeholder clean')\""
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "dev": "tsc -p tsconfig.json --watch",
+    "test": "pnpm build && node --test test/*.test.mjs",
+    "lint": "pnpm build",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "yaml": "^2.8.3"
   }
 }

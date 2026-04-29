@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const distEntry = path.join(here, '../dist/index.js');
-const srcEntry = path.join(here, '../src/index.ts');
+const distEntry = path.join(here, '../dist/kernel/index.js');
+const srcEntry = path.join(here, '../src/kernel/index.ts');
 
 await import(pathToFileURL(existsSync(distEntry) ? distEntry : srcEntry).href);

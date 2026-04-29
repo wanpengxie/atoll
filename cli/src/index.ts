@@ -1,30 +1,10 @@
-import { Command, CommanderError, InvalidArgumentError } from 'commander';
+import { Command, CommanderError } from 'commander';
 import { resolveBackend } from './lib/backends/index.js';
+import { parseCsv, parsePositiveInteger } from './lib/arg-parsers.js';
 import { CliError, toCliError } from './lib/errors.js';
 import { writeFailure, writeSuccess } from './lib/output.js';
 
 const DEFAULT_LIMIT = 10;
-
-function parsePositiveInteger(value: string): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new InvalidArgumentError('must be a positive integer');
-  }
-  return parsed;
-}
-
-function parseCsv(value: string): string[] {
-  const items = value
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean);
-
-  if (items.length === 0) {
-    throw new InvalidArgumentError('must contain at least one comma-separated value');
-  }
-
-  return items;
-}
 
 async function main(): Promise<void> {
   const backend = resolveBackend();

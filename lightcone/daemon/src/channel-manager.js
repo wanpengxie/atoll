@@ -76,6 +76,7 @@ function normalizeChannelPayload(input) {
     channelId,
     workspaceId: String(input?.workspaceId ?? input?.workspace_id ?? '').trim(),
     daemonId: String(input?.daemonId ?? input?.daemon_id ?? '').trim(),
+    name: String(input?.name ?? '').trim(),
     type: String(input?.type ?? 'xhs-creator').trim(),
     status: String(input?.status ?? 'created').trim(),
     capabilitySet: normalizeCapabilitySet(input?.capabilitySet ?? input?.capability_set ?? {}),
@@ -295,6 +296,7 @@ export class ChannelManager {
       channelId: normalized.channelId,
       workspaceId: normalized.workspaceId || existing?.workspaceId || '',
       daemonId: normalized.daemonId || existing?.daemonId || '',
+      name: normalized.name || existing?.name || normalized.channelId,
       type: normalized.type || existing?.type || 'xhs-creator',
       status: initialStatus || existing?.status || 'created',
       capabilitySet: normalized.capabilitySet.cli_binaries.length > 0
@@ -340,6 +342,7 @@ export class ChannelManager {
     const sessionIdPath = this._sessionIdPath(node);
     const spawnConfig = buildCoagentSpawn({
       channelId: node.channelId,
+      channelName: node.name,
       workspaceId: node.workspaceId,
       workdir: node.workdir,
       capabilitySet: node.capabilitySet,
@@ -544,6 +547,7 @@ export class ChannelManager {
   _channelInfo(node) {
     return {
       channel_id: node.channelId,
+      name: node.name,
       workspace_id: node.workspaceId,
       daemon_id: node.daemonId,
       type: node.type,
@@ -555,6 +559,7 @@ export class ChannelManager {
       session_id: node.sessionId,
       mounted_cli_binaries: node.mountedCliBinaries,
       members: node.members,
+      members_count: node.members.length,
       created_at: node.createdAt,
       archived_at: node.archivedAt,
     };
@@ -603,6 +608,7 @@ export class ChannelManager {
     ensureDirectory(path.dirname(this._sessionIdPath(node)));
     writeStructuredFile(this._channelMetaPath(node.workdir), {
       channel_id: node.channelId,
+      name: node.name,
       workspace_id: node.workspaceId,
       daemon_id: node.daemonId,
       type: node.type,
@@ -623,6 +629,7 @@ export class ChannelManager {
       channelId: payload.channelId,
       workspaceId: payload.workspaceId,
       daemonId: payload.daemonId,
+      name: payload.name || payload.channelId,
       type: payload.type,
       status: payload.status,
       capabilitySet: payload.capabilitySet,

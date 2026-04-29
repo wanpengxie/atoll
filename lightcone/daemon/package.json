@@ -16,7 +16,7 @@
     "dev": "node --watch src/index.js",
     "smoke:channel-runtime": "node scripts/smoke-channel-runtime.mjs",
     "build": "node -e \"console.log('lightcone-daemon: no build step')\"",
-    "test": "node -e \"console.log('lightcone-daemon: no tests')\"",
+    "test": "node scripts/smoke-channel-runtime.mjs",
     "lint": "node -e \"console.log('lightcone-daemon: no lint step')\"",
     "clean": "node -e \"console.log('lightcone-daemon: nothing to clean')\""
   },

@@ -66,6 +66,7 @@ async function buildDaemonChannelPayload(channel) {
     channelId: channel.id,
     workspaceId: channel.workspace_id,
     daemonId: channel.daemon_id ?? null,
+    name: channel.name,
     type: channel.type,
     status: channel.status,
     capabilitySet: typeof channel.capability_set === 'string'

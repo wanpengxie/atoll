@@ -1,16 +1,40 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { ChannelManager } from '../src/channel-manager.js';
 import { RpcServer } from '../src/rpc-server.js';
 
 const execFileAsync = promisify(execFile);
 const tempHome = mkdtempSync(path.join(os.tmpdir(), 'lightcone-daemon-smoke-'));
 process.env.HOME = tempHome;
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+const cliBinDir = path.join(repoRoot, 'cli', 'bin');
+const fakeBinDir = path.join(tempHome, 'bin');
+mkdirSync(fakeBinDir, { recursive: true });
+writeFileSync(path.join(fakeBinDir, 'claude'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const args = process.argv.slice(2);
+const getValue = (flag) => {
+  const index = args.indexOf(flag);
+  return index >= 0 ? args[index + 1] : '';
+};
+const mode = args.includes('--resume') ? 'resume' : 'session-id';
+const sessionId = getValue('--resume') || getValue('--session-id') || 'unknown';
+const stdin = fs.readFileSync(0, 'utf8');
+const projectSlug = process.cwd().replace(/[/.]/g, '-');
+const sessionFile = path.join(process.env.HOME, '.claude', 'projects', projectSlug, sessionId + '.jsonl');
+fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+fs.appendFileSync(sessionFile, stdin);
+process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId }) + '\\n');
+process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'smoke:' + mode, session_id: sessionId }) + '\\n');
+`, { mode: 0o755 });
+process.env.PATH = `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ''}`;
 
 const httpPort = 24000 + Math.floor(Math.random() * 1000);
 const socketPath = path.join(tempHome, '.coagent', 'daemon.sock');
@@ -44,6 +68,18 @@ async function curlHttpRpc(payload) {
     '--header', 'Content-Type: application/json',
     '--data', JSON.stringify(payload),
   ], { encoding: 'utf8' });
+  return JSON.parse(stdout);
+}
+
+async function runCli(binary, args, env = {}, cwd = repoRoot) {
+  const { stdout } = await execFileAsync(path.join(cliBinDir, binary), args, {
+    cwd,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      ...env,
+    },
+  });
   return JSON.parse(stdout);
 }
 
@@ -97,11 +133,12 @@ const rpcServer = new RpcServer({
 try {
   const created = await channelManager.createChannel({
     channelId,
+    name: 'Smoke Channel',
     workspaceId: 'workspace-smoke',
     daemonId: 'machine-smoke',
     type: 'xhs-creator',
     status: 'active',
-    capabilitySet: { cli_binaries: ['xhs', 'missing-binary'] },
+    capabilitySet: { cli_binaries: ['xhs', 'coagent-kernel', 'coagent-msg'] },
     members: [{ memberType: 'human', memberId: 'user-smoke', displayName: 'Smoke User' }],
   });
   assert.equal(created.status, 'created');
@@ -110,9 +147,17 @@ try {
   assert.equal(started.status, 'active');
   assert.ok(started.agent_pid, 'channel agent pid should exist after start');
   assert.equal(readFileSync(started.session_id_path, 'utf8').trim(), started.session_id);
-  assert.deepEqual(started.mounted_cli_binaries, ['xhs']);
+  assert.deepEqual(started.mounted_cli_binaries, ['xhs', 'coagent-kernel', 'coagent-msg']);
 
   await rpcServer.start();
+
+  const cliEnv = {
+    COAGENT_WORKDIR: started.workdir,
+    COAGENT_CHANNEL_ID: channelId,
+    COAGENT_DAEMON_SOCKET: socketPath,
+    COAGENT_DAEMON_HTTP: `http://127.0.0.1:${httpPort}`,
+    COAGENT_DAEMON_TOKEN: daemonToken,
+  };
 
   const infoResponse = await curlSocketRpc({
     method: 'channel.info',
@@ -121,20 +166,28 @@ try {
   assert.equal(infoResponse.ok, true);
   assert.equal(infoResponse.result.channel_id, channelId);
 
+  const kernelInfo = await runCli('coagent-kernel', ['channel-info'], cliEnv, started.workdir);
+  assert.equal(kernelInfo.ok, true);
+  assert.equal(kernelInfo.data.channel_id ?? kernelInfo.data.id, channelId);
+
   const now = new Date();
   const cronExpression = `${now.getMinutes()} ${now.getHours()} ${now.getDate()} ${now.getMonth() + 1} ${now.getDay()}`;
-  const scheduleResponse = await curlSocketRpc({
-    method: 'schedule.cron',
-    params: {
-      channel_id: channelId,
-      id: 'cron-now',
-      cron: cronExpression,
-      reason: 'smoke-cron',
-      payload: { source: 'smoke' },
-    },
-  });
+  const scheduleResponse = await runCli('coagent-kernel', [
+    'schedule-cron',
+    '--cron',
+    cronExpression,
+    '--reason',
+    'smoke-cron',
+    '--payload',
+    '{"source":"smoke"}',
+  ], cliEnv, started.workdir);
   assert.equal(scheduleResponse.ok, true);
-  assert.ok(existsSync(path.join(started.workdir, 'schedules', 'cron-now.yaml')));
+  assert.equal(typeof scheduleResponse.data.schedule_id, 'string');
+  assert.ok(existsSync(path.join(started.workdir, 'schedules', `${scheduleResponse.data.schedule_id}.yaml`)));
+
+  const listSchedules = await runCli('coagent-kernel', ['list-schedules'], cliEnv, started.workdir);
+  assert.equal(listSchedules.ok, true);
+  assert.ok(listSchedules.data.schedules.some((schedule) => schedule.id === scheduleResponse.data.schedule_id));
 
   await channelManager.cronScheduler._poll();
   await delay(50);
@@ -159,23 +212,38 @@ try {
     'heartbeat should be blocked by trigger gateway',
   );
 
-  const messageResponse = await curlHttpRpc({
-    method: 'message.send',
-    params: {
-      channel_id: channelId,
-      content: 'smoke message',
-    },
-  });
+  const messageResponse = await runCli('coagent-msg', [
+    'send',
+    '--content',
+    'smoke message',
+  ], cliEnv, started.workdir);
   assert.equal(messageResponse.ok, true);
   assert.equal(requestLog.length, 1);
   assert.equal(requestLog[0].message.type, 'message.append');
 
-  const listResponse = await curlSocketRpc({
-    method: 'message.list',
-    params: { channel_id: channelId, limit: 10 },
-  });
-  assert.equal(listResponse.ok, true);
-  assert.ok(listResponse.result.messages.some((message) => message.content === 'smoke message'));
+  const checkResponse = await runCli('coagent-msg', ['check', '--limit', '10'], cliEnv, started.workdir);
+  assert.equal(checkResponse.ok, true);
+  assert.ok(checkResponse.data.messages.some((message) => message.content === 'smoke message'));
+
+  const searchResponse = await runCli('coagent-msg', ['search', '--keyword', 'smoke', '--limit', '10'], cliEnv, started.workdir);
+  assert.equal(searchResponse.ok, true);
+  assert.ok(searchResponse.data.messages.some((message) => message.content === 'smoke message'));
+
+  const contentPath = path.join(started.workdir, 'smoke-note.md');
+  writeFileSync(contentPath, '# smoke note\n', 'utf8');
+  const xhsResponse = await runCli('xhs', [
+    'publish',
+    '--title',
+    'Smoke Title',
+    '--content',
+    contentPath,
+    '--images',
+    '/tmp/a.png,/tmp/b.png',
+    '--tags',
+    'smoke,cli',
+  ], cliEnv, started.workdir);
+  assert.equal(xhsResponse.ok, true);
+  assert.equal(typeof xhsResponse.data.note_id, 'string');
 
   const originalPid = started.agent_pid;
   process.kill(originalPid, 'SIGTERM');
@@ -212,6 +280,8 @@ try {
     archivedWorkdir: archived.workdir,
     sessionId: started.session_id,
     sentMessages: requestLog.length,
+    scheduleId: scheduleResponse.data.schedule_id,
+    xhsNoteId: xhsResponse.data.note_id,
     daemonStatusEvents: sentLog.filter((message) => message.type === 'channel.status').map((message) => message.status),
     traceFiles: readdirSync(path.join(archived.workdir, 'agents', 'channel-agent', 'trace')),
   }, null, 2));
