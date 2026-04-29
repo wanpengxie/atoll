@@ -166,7 +166,6 @@ export class CronScheduler {
 
     for (const [key, entry] of this.entries) {
       if (entry.kind === 'cron') {
-        if (now.getSeconds() > 1) continue;
         if (entry.lastFiredMinute === currentMinute) continue;
         if (!entry.matcher(now)) continue;
 
