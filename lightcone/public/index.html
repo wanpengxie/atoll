@@ -1761,13 +1761,17 @@ body::after {
       <div id="sidebar-chat">
         <div class="sidebar-section">
           <div class="section-header-row">
-            <div class="sidebar-label">团队</div>
-            <button class="inline-add-btn" onclick="showNewTeam()" title="添加团队">＋</button>
+            <div class="sidebar-label">Workspaces</div>
+            <button class="inline-add-btn" onclick="showNewWorkspace()" title="创建 workspace">＋</button>
           </div>
           <div id="team-list"></div>
         </div>
         <div class="sidebar-section">
-          <div id="dm-list" style="display:none"></div>
+          <div class="section-header-row">
+            <div class="sidebar-label">Channels</div>
+            <button class="inline-add-btn" onclick="showNewChannel()" title="创建 channel">＋</button>
+          </div>
+          <div id="dm-list"></div>
         </div>
       </div>
 
@@ -1815,6 +1819,7 @@ body::after {
 <script>
 const API = '';
 let currentTeam = null;
+let currentWorkspace = null;
 let currentTab = 'messages';
 
 function setSidebarMode(mode) {
@@ -1825,10 +1830,10 @@ function setSidebarMode(mode) {
   );
 }
 let socket = null;
-let teams = [], dms = [], agents = [], machines = [];
+let teams = [], dms = [], workspaces = [], workspaceChannels = [], agents = [], machines = [];
 let currentTeamMembers = { agents: [], humans: [] };
 let currentUser = null;
-const messageCache = new Map(); // teamId → { msgs: [...], lastSeq: number }
+const messageCache = new Map(); // channelId → { msgs: [...], lastSeq: number }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
@@ -1846,15 +1851,12 @@ async function init() {
   const name = currentUser.name || 'User';
   document.getElementById('user-avatar').textContent = currentUser.isGuest ? '访' : name[0].toUpperCase();
 
-  await Promise.all([loadTeams(), loadDMs(), loadAgents(), loadMachines(), loadPlanInfo()]);
+  await Promise.all([loadTeams(), loadDMs(), loadWorkspaces(), loadAgents(), loadMachines(), loadPlanInfo()]);
   setupSocket();
   checkOAuthCallback();
 
-  if (agents.length === 0) showEmptyState();
-  else {
-    restoreMain();
-    await selectInitialTeam();
-  }
+  restoreMain();
+  await selectInitialTeam();
 
   // Show guest bar if guest user
   if (currentUser.isGuest) {
@@ -1913,7 +1915,7 @@ function restoreMain() {
   const main = document.getElementById('main');
   main.innerHTML = `
     <div id="team-header">
-      <span id="team-name" style="font-family:'IBM Plex Mono',monospace;font-size:13px"># 选择团队</span>
+      <span id="team-name" style="font-family:'IBM Plex Mono',monospace;font-size:13px">选择频道</span>
       <span id="team-desc"></span>
       <span id="guest-bar">剩余 <span class="remaining" id="guest-remaining">20</span> 条 · <span class="register-link" onclick="showGuestRegister()">注册</span></span>
       <button id="team-agents-toggle" onclick="toggleTeamAgentsBar()" style="display:none;background:none;border:none;cursor:pointer;color:var(--text-dim);font-size:11px;padding:2px 6px;border-radius:4px;border:1px solid var(--border);margin-left:auto;white-space:nowrap"></button>
@@ -1921,25 +1923,17 @@ function restoreMain() {
     <div id="team-agents-bar" style="display:none;padding:8px 20px;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:6px 14px;background:var(--surface);flex-shrink:0"></div>
     <div id="tabs">
       <div class="tab active" onclick="switchTab('messages')">消息</div>
-      <div class="tab" onclick="switchTab('tasks')">任务<span id="task-count" style="display:none;font-size:10px;background:var(--surface-2);padding:1px 6px;border-radius:8px;margin-left:4px;font-family:'IBM Plex Mono',monospace"></span></div>
-      <div class="tab" onclick="switchTab('files')">团队知识库</div>
     </div>
     <div id="messages-pane"></div>
-    <div id="tasks-pane"></div>
-    <div id="files-pane"></div>
+    <div id="tasks-pane" style="display:none"></div>
+    <div id="files-pane" style="display:none"></div>
     <div id="input-area">
       <div class="composer">
         <div id="mention-popup"></div>
         <div id="input-row">
           <textarea id="msg-input" placeholder="发送消息…" rows="1" oninput="autoResize(this);checkMention(this)" onkeydown="handleKey(event)" oncompositionstart="setMessageComposing(true)" oncompositionend="setMessageComposing(false)"></textarea>
-          <label class="as-task-toggle" title="勾选后发送的消息将作为任务创建">
-            <input type="checkbox" id="as-task-cb" onchange="toggleAsTask(this.checked)"> 📌 任务
-          </label>
           <button id="send-btn" onclick="sendMessage()">发送 ↵</button>
         </div>
-      </div>
-      <div id="task-input-row">
-        <button id="new-task-btn" onclick="showNewTaskModal()">＋ 新建任务</button>
       </div>
     </div>`;
   renderCurrentTeamHeader();
@@ -1947,11 +1941,22 @@ function restoreMain() {
 }
 
 async function selectInitialTeam() {
-  const lastTeamId = localStorage.getItem('lastTeamId');
-  const allTeams = [...teams, ...dms];
-  const target = lastTeamId && allTeams.find(c => c.id === lastTeamId);
-  const fallback = teams[0] ?? allTeams[0];
-  if (target || fallback) await selectTeam((target ?? fallback).id);
+  const lastWorkspaceId = localStorage.getItem('lastWorkspaceId');
+  const lastChannelId = localStorage.getItem('lastChannelId');
+  const targetWorkspace = lastWorkspaceId && workspaces.find(w => w.id === lastWorkspaceId);
+  const fallbackWorkspace = workspaces[0] ?? null;
+  if (targetWorkspace || fallbackWorkspace) {
+    await selectWorkspace((targetWorkspace ?? fallbackWorkspace).id, { preferredChannelId: lastChannelId });
+    return;
+  }
+  currentWorkspace = null;
+  currentTeam = null;
+  currentTeamMembers = { agents: [], humans: [] };
+  renderWorkspaces();
+  renderWorkspaceChannels();
+  renderCurrentTeamHeader();
+  const pane = document.getElementById('messages-pane');
+  if (pane) pane.innerHTML = `<div class="files-empty" style="padding:24px 20px">先创建一个 workspace，再创建 channel 开始协作。</div>`;
 }
 
 async function logout() {
@@ -1987,12 +1992,10 @@ async function submitLogin() {
     document.getElementById('landing').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
     document.getElementById('user-avatar').textContent = (currentUser.name[0] ?? 'U').toUpperCase();
-    await Promise.all([loadTeams(), loadDMs(), loadAgents(), loadMachines(), loadPlanInfo()]);
+    await Promise.all([loadTeams(), loadDMs(), loadWorkspaces(), loadAgents(), loadMachines(), loadPlanInfo()]);
     setupSocket();
-    if (agents.length > 0) {
-      restoreMain();
-      await selectInitialTeam();
-    } else showEmptyState();
+    restoreMain();
+    await selectInitialTeam();
   } catch { errEl.textContent = '网络错误，请重试'; }
 }
 
@@ -2015,9 +2018,10 @@ async function submitRegister() {
     document.getElementById('landing').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
     document.getElementById('user-avatar').textContent = (currentUser.name[0] ?? 'U').toUpperCase();
-    await Promise.all([loadTeams(), loadDMs(), loadAgents(), loadMachines(), loadPlanInfo()]);
+    await Promise.all([loadTeams(), loadDMs(), loadWorkspaces(), loadAgents(), loadMachines(), loadPlanInfo()]);
     setupSocket();
-    showEmptyState();
+    restoreMain();
+    await selectInitialTeam();
   } catch { errEl.textContent = '网络错误，请重试'; }
 }
 
@@ -2034,7 +2038,7 @@ async function startGuestTrial() {
     document.getElementById('landing').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
     document.getElementById('user-avatar').textContent = '访';
-    await Promise.all([loadTeams(), loadDMs(), loadAgents(), loadMachines(), loadPlanInfo()]);
+    await Promise.all([loadTeams(), loadDMs(), loadWorkspaces(), loadAgents(), loadMachines(), loadPlanInfo()]);
     setupSocket();
     restoreMain();
     await selectInitialTeam();
@@ -2095,47 +2099,144 @@ async function api(path, opts = {}) {
 // ── Teams ──────────────────────────────────────────────────────────────────
 async function loadTeams() {
   teams = await api('/api/teams');
-  renderTeams();
 }
 
 async function loadDMs() {
   dms = await api('/api/teams/dm');
-  renderDMs();
 }
 
-function renderTeams() {
-  document.getElementById('team-list').innerHTML = teams.map(c => `
-    <div class="team-item${currentTeam?.id===c.id?' active':''}" style="padding-right:6px">
-      <span class="ch-prefix" onclick="selectTeam('${c.id}')">#</span>
-      <span style="flex:1;cursor:pointer" onclick="selectTeam('${c.id}')">${escHtml(c.name)}</span>
-      <button onclick="manageTeamAgents('${escAttr(c.id)}')" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:24px;padding:0 2px;opacity:0;line-height:1" class="del-btn" title="管理成员">⚙</button>
+async function loadWorkspaces() {
+  workspaces = await api('/api/workspaces');
+  if (currentWorkspace) {
+    currentWorkspace = workspaces.find(item => item.id === currentWorkspace.id) ?? currentWorkspace;
+  }
+  renderWorkspaces();
+}
+
+async function loadWorkspaceChannels(workspaceId) {
+  if (!workspaceId) {
+    workspaceChannels = [];
+    renderWorkspaceChannels();
+    return;
+  }
+  const data = await api(`/api/workspaces/${workspaceId}/channels`);
+  workspaceChannels = data.channels ?? [];
+  if (currentTeam) {
+    currentTeam = workspaceChannels.find(item => item.id === currentTeam.id) ?? currentTeam;
+  }
+  renderWorkspaceChannels();
+}
+
+function renderWorkspaces() {
+  const list = document.getElementById('team-list');
+  if (!list) return;
+  if (workspaces.length === 0) {
+    list.innerHTML = `<div class="files-empty" style="padding:8px 16px;color:rgba(245,240,232,0.45)">暂无 workspace</div>`;
+    return;
+  }
+  list.innerHTML = workspaces.map(workspace => `
+    <div class="team-item${currentWorkspace?.id===workspace.id?' active':''}" style="padding-right:6px">
+      <span class="ch-prefix" onclick="selectWorkspace('${workspace.id}')">◦</span>
+      <span style="flex:1;cursor:pointer" onclick="selectWorkspace('${workspace.id}')">${escHtml(workspace.name)}</span>
+      <button onclick="manageWorkspace('${escAttr(workspace.id)}')" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:24px;padding:0 2px;opacity:0;line-height:1" class="del-btn" title="管理 workspace">⚙</button>
     </div>`).join('');
+}
+
+function renderWorkspaceChannels() {
+  const list = document.getElementById('dm-list');
+  if (!list) return;
+  if (!currentWorkspace) {
+    list.innerHTML = `<div class="files-empty" style="padding:8px 16px;color:rgba(245,240,232,0.45)">先选择 workspace</div>`;
+    return;
+  }
+  if (workspaceChannels.length === 0) {
+    list.innerHTML = `<div class="files-empty" style="padding:8px 16px;color:rgba(245,240,232,0.45)">暂无 channel</div>`;
+    return;
+  }
+  list.innerHTML = workspaceChannels.map(channel => `
+    <div class="team-item${currentTeam?.id===channel.id?' active':''}" style="padding-right:6px">
+      <span class="ch-prefix" onclick="selectChannel('${channel.id}')">#</span>
+      <span style="flex:1;cursor:pointer" onclick="selectChannel('${channel.id}')">${escHtml(channel.name)}</span>
+      <span style="font-size:9px;padding:2px 6px;border-radius:999px;background:rgba(245,240,232,0.08);font-family:'IBM Plex Mono',monospace">${escHtml(channel.status)}</span>
+      <button onclick="manageChannel('${escAttr(channel.id)}')" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:24px;padding:0 2px;opacity:0;line-height:1" class="del-btn" title="管理 channel">⚙</button>
+    </div>`).join('');
+}
+
+async function selectWorkspace(id, { preferredChannelId = null } = {}) {
+  const workspace = workspaces.find(item => item.id === id);
+  if (!workspace) return;
+  currentWorkspace = workspace;
+  localStorage.setItem('lastWorkspaceId', id);
+  renderWorkspaces();
+  await loadWorkspaceChannels(id);
+
+  const target = (preferredChannelId && workspaceChannels.find(channel => channel.id === preferredChannelId))
+    || (currentTeam && workspaceChannels.find(channel => channel.id === currentTeam.id))
+    || workspaceChannels[0];
+
+  if (target) {
+    await selectChannel(target.id);
+    return;
+  }
+
+  if (currentTeam) socket?.emit('channel:leave', currentTeam.id);
+  currentTeam = null;
+  currentTeamMembers = { agents: [], humans: [] };
+  renderWorkspaceChannels();
+  renderCurrentTeamHeader();
+  renderTeamAgentsBar();
+  const pane = document.getElementById('messages-pane');
+  if (pane) pane.innerHTML = `<div class="files-empty" style="padding:24px 20px">这个 workspace 还没有 channel。</div>`;
+}
+
+async function selectChannel(id) {
+  const channel = workspaceChannels.find(item => item.id === id);
+  if (!channel) return;
+  if (currentTeam) socket?.emit('channel:leave', currentTeam.id);
+  currentTeam = { ...channel, type: 'channel' };
+  localStorage.setItem('lastChannelId', id);
+  socket?.emit('channel:join', id);
+  renderCurrentTeamHeader();
+  renderWorkspaces();
+  renderWorkspaceChannels();
+
+  const [detail] = await Promise.all([
+    api(`/api/channels/${id}`),
+    loadMessages(),
+  ]);
+
+  const members = detail.members ?? [];
+  currentTeamMembers = {
+    agents: members
+      .filter(member => member.memberType !== 'human')
+      .map(member => ({
+        id: member.memberId,
+        name: member.displayName,
+        displayName: member.displayName,
+        status: 'active',
+        activity: 'idle',
+      })),
+    humans: members
+      .filter(member => member.memberType === 'human')
+      .map(member => ({
+        id: member.memberId,
+        name: member.displayName,
+        displayName: member.displayName,
+        avatarUrl: member.avatarUrl ?? null,
+      })),
+  };
+  renderTeamAgentsBar();
+}
+
+async function selectTeam(id) {
+  await selectChannel(id);
 }
 
 function renderDMs() {
   document.getElementById('dm-list').innerHTML = dms.map(d => `
-    <div class="team-item${currentTeam?.id===d.id?' active':''}" onclick="selectTeam('${d.id}')">
+    <div class="team-item${currentTeam?.id===d.id?' active':''}" onclick="selectChannel('${d.id}')">
       <span class="ch-prefix">@</span><span>${d.peerDisplayName ?? d.name}</span>
     </div>`).join('');
-}
-
-async function selectTeam(id) {
-  const ch = [...teams, ...dms].find(c => c.id === id);
-  if (!ch) return;
-  if (currentTeam) socket?.emit('team:leave', currentTeam.id);
-  currentTeam = ch;
-  localStorage.setItem('lastTeamId', id);
-  socket?.emit('team:join', id);
-  renderCurrentTeamHeader();
-  renderTeams(); renderDMs();
-  // Fire members + messages in parallel
-  const [membersResult] = await Promise.all([
-    api(`/api/teams/${id}/members`).catch(() => ({ agents: [], humans: [] })),
-    loadMessages(),
-  ]);
-  currentTeamMembers = membersResult;
-  renderTeamAgentsBar();
-  if (currentTab === 'tasks') await loadTasks();
 }
 
 function renderCurrentTeamHeader() {
@@ -2143,30 +2244,36 @@ function renderCurrentTeamHeader() {
   const descEl = document.getElementById('team-desc');
   const inputEl = document.getElementById('msg-input');
   const ch = currentTeam;
-  if (!ch) {
-    if (nameEl) nameEl.textContent = '# 选择团队';
+  if (!currentWorkspace) {
+    if (nameEl) nameEl.textContent = '选择 workspace';
     if (descEl) descEl.textContent = '';
-    if (inputEl) inputEl.placeholder = '发送消息…';
+    if (inputEl) inputEl.placeholder = '创建 workspace 后开始协作…';
     return;
   }
-  if (nameEl) nameEl.textContent = (ch.type==='dm' ? '@ ' : '# ') + (ch.peerDisplayName ?? ch.name);
-  if (descEl) descEl.textContent = ch.description ?? '';
-  if (inputEl) inputEl.placeholder = `发送消息到 ${ch.type==='dm'?ch.peerDisplayName??ch.name:'#'+ch.name}…`;
+  if (!ch) {
+    if (nameEl) nameEl.textContent = `${currentWorkspace.name} / 选择频道`;
+    if (descEl) descEl.textContent = '请选择一个 channel';
+    if (inputEl) inputEl.placeholder = `在 ${currentWorkspace.name} 中选择频道后发送消息…`;
+    return;
+  }
+  if (nameEl) nameEl.textContent = `# ${ch.name}`;
+  if (descEl) descEl.textContent = `${currentWorkspace.name} · ${ch.type} · ${ch.status ?? 'active'}`;
+  if (inputEl) inputEl.placeholder = `发送消息到 #${ch.name}…`;
 }
 
 // ── Messages ──────────────────────────────────────────────────────────────────
 async function loadMessages() {
   if (!currentTeam) return;
-  const teamId = currentTeam.id;
+  const channelId = currentTeam.id;
   const pane = document.getElementById('messages-pane');
   if (!pane) return;
 
-  const cached = messageCache.get(teamId);
+  const cached = messageCache.get(channelId);
   if (cached) {
     // Render from cache immediately (no network wait) — single DocumentFragment insertion
     renderMessages(cached.msgs, pane);
     // Fetch only new messages since last cached seq
-    const { messages: newMsgs } = await api(`/api/messages/team/${teamId}?limit=30&after=${cached.lastSeq}`);
+    const { messages: newMsgs } = await api(`/api/channels/${channelId}/messages?limit=30&after=${cached.lastSeq}`);
     if (newMsgs.length > 0) {
       const frag = document.createDocumentFragment();
       newMsgs.forEach(m => frag.appendChild(buildMessageNode(m, false)));
@@ -2176,16 +2283,17 @@ async function loadMessages() {
       cached.lastSeq = newMsgs[newMsgs.length - 1].seq;
     }
   } else {
-    const { messages } = await api(`/api/messages/team/${teamId}?limit=30`);
+    const { messages } = await api(`/api/channels/${channelId}/messages?limit=30`);
     renderMessages(messages, pane);
     if (messages.length > 0) {
-      messageCache.set(teamId, { msgs: [...messages], lastSeq: messages[messages.length - 1].seq });
+      messageCache.set(channelId, { msgs: [...messages], lastSeq: messages[messages.length - 1].seq });
     }
   }
 }
 
 function buildMessageNode(msg, animate = true) {
-  const isAgent = msg.senderType === 'agent';
+  const senderType = msg.senderType ?? 'human';
+  const isAgent = senderType !== 'human' && senderType !== 'user';
   const isSystem = msg.messageType === 'system';
   const isTask = msg.messageType === 'task';
   const isActionRequest = msg.messageType === 'action_request';
@@ -2210,17 +2318,26 @@ function buildMessageNode(msg, animate = true) {
 
   const initial = (msg.senderName?.[0] ?? '?').toUpperCase();
   const time = new Date(msg.createdAt).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit'});
+  const senderMeta = {
+    human: { label: 'human', avatarClass: 'is-human', nameClass: '', color: 'var(--brown)' },
+    user: { label: 'human', avatarClass: 'is-human', nameClass: '', color: 'var(--brown)' },
+    channel_agent: { label: 'channel_agent', avatarClass: 'is-agent', nameClass: ' agent', color: 'var(--blue)' },
+    agent: { label: 'channel_agent', avatarClass: 'is-agent', nameClass: ' agent', color: 'var(--blue)' },
+    sub_agent: { label: 'sub_agent', avatarClass: 'is-agent', nameClass: '', color: 'var(--orange)' },
+    worker: { label: 'worker', avatarClass: 'is-agent', nameClass: '', color: 'var(--green)' },
+  }[senderType] ?? { label: senderType, avatarClass: 'is-agent', nameClass: '', color: 'var(--blue)' };
   div.className = 'msg' + (animate ? ' msg-enter' : '');
   div.innerHTML = `
-    <div class="msg-avatar ${isAgent?'is-agent':'is-human'}">${initial}</div>
+    <div class="msg-avatar ${senderMeta.avatarClass}" style="background:${senderMeta.color}">${initial}</div>
     <div class="msg-body">
       <div class="msg-header">
-        <span class="msg-name${isAgent?' agent':''}">${escHtml(msg.senderName)}</span>
+        <span class="msg-name${senderMeta.nameClass}" style="color:${senderMeta.color}">${escHtml(msg.senderName)}</span>
         <span class="msg-time">${time}</span>
+        <span class="msg-badge">${escHtml(senderMeta.label)}</span>
         ${isTask ? `<span class="msg-badge">task #${msg.taskNumber}</span>` : ''}
       </div>
       <div class="msg-content">${formatContent(msg.content)}</div>
-      ${!isTask && msg.id ? `<div class="msg-actions-hover"><button class="msg-action-btn" onclick="convertToTask('${msg.id}')" title="转为任务">📌</button></div>` : ''}
+      ${!isTask && msg.id && msg.teamId ? `<div class="msg-actions-hover"><button class="msg-action-btn" onclick="convertToTask('${msg.id}')" title="转为任务">📌</button></div>` : ''}
     </div>`;
   return div;
 }
@@ -2797,7 +2914,7 @@ function setupSocket() {
   socket.on('connect', () => {
     const b = document.getElementById('conn-badge');
     b.className = 'connected'; b.textContent = '◉ 已连接';
-    if (currentTeam) socket.emit('team:join', currentTeam.id);
+    if (currentTeam) socket.emit('channel:join', currentTeam.id);
   });
 
   socket.on('disconnect', () => {
@@ -2809,12 +2926,13 @@ function setupSocket() {
 
   socket.on('message:new', msg => {
     // Keep cache up to date regardless of which team is currently visible
-    const cached = messageCache.get(msg.teamId);
+    const roomId = msg.channelId ?? msg.teamId;
+    const cached = messageCache.get(roomId);
     if (cached && msg.seq != null) {
       cached.msgs.push(msg);
       cached.lastSeq = msg.seq;
     }
-    if (msg.teamId === currentTeam?.id && currentTab === 'messages') {
+    if (roomId === currentTeam?.id && currentTab === 'messages') {
       appendMessage(msg, true);
       const pane = document.getElementById('messages-pane');
       if (pane) pane.scrollTop = pane.scrollHeight;
@@ -2849,6 +2967,33 @@ function setupSocket() {
 
   socket.on('team:updated', () => loadTeams());
   socket.on('dm:new', () => loadDMs());
+  socket.on('workspace:updated', async () => {
+    await loadWorkspaces();
+    if (currentWorkspace && !workspaces.find(w => w.id === currentWorkspace.id)) {
+      await selectInitialTeam();
+    } else {
+      renderWorkspaces();
+    }
+  });
+  socket.on('channel:updated', async ({ workspaceId } = {}) => {
+    if (!currentWorkspace) return;
+    if (workspaceId && workspaceId !== currentWorkspace.id) return;
+    await loadWorkspaceChannels(currentWorkspace.id);
+    if (currentTeam && !workspaceChannels.find(ch => ch.id === currentTeam.id)) {
+      const first = workspaceChannels[0] ?? null;
+      if (first) await selectChannel(first.id);
+      else {
+        currentTeam = null;
+        currentTeamMembers = { agents: [], humans: [] };
+        renderCurrentTeamHeader();
+        renderTeamAgentsBar();
+        const pane = document.getElementById('messages-pane');
+        if (pane) pane.innerHTML = `<div class="files-empty" style="padding:24px 20px">这个 workspace 还没有 channel。</div>`;
+      }
+    } else {
+      renderWorkspaceChannels();
+    }
+  });
   socket.on('ping', () => socket.emit('pong'));
 
   // Browser login events from daemon (via server broadcast)
@@ -2905,18 +3050,11 @@ async function sendMessage() {
   const inp = document.getElementById('msg-input');
   const content = inp.value.trim();
   if (!content) return;
-  const asTaskCb = document.getElementById('as-task-cb');
-  const isTask = asTaskCb && asTaskCb.checked;
   inp.value = ''; autoResize(inp);
-  if (asTaskCb && asTaskCb.checked) { asTaskCb.checked = false; const i = document.getElementById('msg-input'); if (i) i.placeholder = '发送消息…'; }
   const btn = document.getElementById('send-btn');
   if (btn) btn.disabled = true;
   try {
-    if (isTask) {
-      await api('/api/tasks', { method: 'POST', body: { teamId: currentTeam.id, content } });
-    } else {
-      await api('/api/messages', { method: 'POST', body: { teamId: currentTeam.id, content } });
-    }
+    await api(`/api/channels/${currentTeam.id}/messages`, { method: 'POST', body: { content } });
     if (currentUser?.isGuest) { guestMessagesSent++; updateGuestRemaining(); }
   } catch (err) {
     if (err.message === 'trial_limit') { showGuestRegister(); return; }
@@ -2931,6 +3069,113 @@ let isMessageComposing = false;
 
 function setMessageComposing(value) {
   isMessageComposing = value;
+}
+
+async function showNewWorkspace() {
+  const name = prompt('Workspace 名称');
+  if (!name || !name.trim()) return;
+  try {
+    const workspace = await api('/api/workspaces', {
+      method: 'POST',
+      body: { name: name.trim() },
+    });
+    await loadWorkspaces();
+    await selectWorkspace(workspace.id);
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+async function showNewChannel() {
+  if (!currentWorkspace) {
+    alert('先选择一个 workspace');
+    return;
+  }
+  const name = prompt('Channel 名称');
+  if (!name || !name.trim()) return;
+  const rawCli = prompt('CLI binaries（逗号分隔）', 'xhs,coagent-kernel,coagent-msg') ?? '';
+  const cliBinaries = rawCli.split(',').map(item => item.trim()).filter(Boolean);
+  try {
+    const channel = await api('/api/channels', {
+      method: 'POST',
+      body: {
+        workspaceId: currentWorkspace.id,
+        name: name.trim(),
+        type: 'xhs-creator',
+        capabilitySet: { cli_binaries: cliBinaries },
+        status: 'active',
+      },
+    });
+    await loadWorkspaceChannels(currentWorkspace.id);
+    await selectChannel(channel.id);
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+async function manageWorkspace(workspaceId) {
+  try {
+    const workspace = await api(`/api/workspaces/${workspaceId}`);
+    const members = workspace.members?.map(member => `${member.name} (${member.role})`).join('\n') || '暂无成员';
+    const action = prompt(
+      `Workspace: ${workspace.name}\n成员:\n${members}\n\n输入：\nnew:<名称> 重命名\nmember:<userId或name> 邀请成员`,
+      `new:${workspace.name}`
+    );
+    if (!action) return;
+    if (action.startsWith('new:')) {
+      const name = action.slice(4).trim();
+      if (!name) return;
+      await api(`/api/workspaces/${workspaceId}`, { method: 'PATCH', body: { name } });
+      await loadWorkspaces();
+      renderCurrentTeamHeader();
+      return;
+    }
+    if (action.startsWith('member:')) {
+      const identifier = action.slice(7).trim();
+      if (!identifier) return;
+      await api(`/api/workspaces/${workspaceId}/members`, {
+        method: 'POST',
+        body: { identifier },
+      });
+      alert(`已邀请 ${identifier} 加入 workspace`);
+    }
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+async function manageChannel(channelId) {
+  try {
+    const detail = await api(`/api/channels/${channelId}`);
+    const members = detail.members?.map(member => `${member.displayName} (${member.memberType})`).join('\n') || '暂无成员';
+    const action = prompt(
+      `Channel: ${detail.name}\n成员:\n${members}\n\n输入：\nnew:<名称> 重命名\nmember:<userId或name> 邀请 human 成员\npause / resume / archive 管理状态`,
+      `new:${detail.name}`
+    );
+    if (!action) return;
+    if (action === 'pause' || action === 'resume' || action === 'archive') {
+      const body = action === 'archive' ? { archive: true } : { [action]: true };
+      await api(`/api/channels/${channelId}`, { method: 'PATCH', body });
+    } else if (action.startsWith('new:')) {
+      const name = action.slice(4).trim();
+      if (!name) return;
+      await api(`/api/channels/${channelId}`, { method: 'PATCH', body: { name } });
+    } else if (action.startsWith('member:')) {
+      const identifier = action.slice(7).trim();
+      if (!identifier) return;
+      await api(`/api/channels/${channelId}/members`, {
+        method: 'POST',
+        body: { memberType: 'human', identifier },
+      });
+      alert(`已邀请 ${identifier} 加入 channel`);
+    }
+    if (currentWorkspace) {
+      await loadWorkspaceChannels(currentWorkspace.id);
+      if (currentTeam?.id === channelId) await selectChannel(channelId);
+    }
+  } catch (err) {
+    alert(err.message);
+  }
 }
 
 function isInputComposing(e) {

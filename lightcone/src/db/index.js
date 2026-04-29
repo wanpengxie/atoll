@@ -150,7 +150,8 @@ export async function initDb() {
     CREATE TABLE IF NOT EXISTS messages (
       seq                  BIGINT       AUTO_INCREMENT PRIMARY KEY,
       id                   VARCHAR(36)  NOT NULL UNIQUE,
-      team_id              VARCHAR(36)  NOT NULL,
+      team_id              VARCHAR(36)  DEFAULT NULL,
+      channel_id           VARCHAR(36)  DEFAULT NULL,
       sender_type          VARCHAR(16)  NOT NULL,
       sender_id            VARCHAR(36)  NOT NULL,
       sender_name          VARCHAR(255) NOT NULL DEFAULT '',
@@ -166,6 +167,52 @@ export async function initDb() {
       mentions             TEXT         DEFAULT NULL,
       created_at           DATETIME     DEFAULT NOW(),
       updated_at           DATETIME     DEFAULT NOW()
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS workspaces (
+      id             VARCHAR(36)  PRIMARY KEY,
+      name           VARCHAR(255) NOT NULL,
+      owner_user_id  VARCHAR(36)  NOT NULL,
+      created_at     DATETIME     DEFAULT NOW(),
+      archived_at    DATETIME     DEFAULT NULL
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS workspace_members (
+      workspace_id   VARCHAR(36)  NOT NULL,
+      user_id        VARCHAR(36)  NOT NULL,
+      role           VARCHAR(32)  NOT NULL DEFAULT 'member',
+      joined_at      DATETIME     DEFAULT NOW(),
+      PRIMARY KEY (workspace_id, user_id)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS channels (
+      id               VARCHAR(36)  PRIMARY KEY,
+      workspace_id     VARCHAR(36)  NOT NULL,
+      name             VARCHAR(255) NOT NULL,
+      type             VARCHAR(64)  NOT NULL,
+      capability_set   JSON         NOT NULL,
+      channel_agent_id VARCHAR(36)  DEFAULT NULL,
+      daemon_id        VARCHAR(36)  DEFAULT NULL,
+      status           VARCHAR(32)  NOT NULL DEFAULT 'created',
+      created_at       DATETIME     DEFAULT NOW(),
+      archived_at      DATETIME     DEFAULT NULL,
+      KEY idx_workspace_status (workspace_id, status)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS channel_members (
+      channel_id      VARCHAR(36)  NOT NULL,
+      member_type     VARCHAR(32)  NOT NULL,
+      member_id       VARCHAR(36)  NOT NULL,
+      joined_at       DATETIME     DEFAULT NOW(),
+      PRIMARY KEY (channel_id, member_type, member_id)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
 
@@ -252,6 +299,32 @@ export async function initDb() {
     if (cols.length === 0) {
       await db.execute(`ALTER TABLE messages ADD COLUMN deleted_at DATETIME DEFAULT NULL`);
       console.log('[DB] Added deleted_at column to messages');
+    }
+  }
+
+  // ── messages.channel_id migration + view-cache support ─────────────────────
+  {
+    const [cols] = await db.execute(
+      `SELECT COLUMN_NAME, IS_NULLABLE
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'messages' AND COLUMN_NAME IN ('team_id', 'channel_id')`
+    );
+    const columnMap = new Map(cols.map(row => [row.COLUMN_NAME, row]));
+    if (!columnMap.has('channel_id')) {
+      await db.execute(`ALTER TABLE messages ADD COLUMN channel_id VARCHAR(36) DEFAULT NULL AFTER team_id`);
+      console.log('[DB] Added channel_id column to messages (view cache for channels)');
+    }
+    if (columnMap.get('team_id')?.IS_NULLABLE !== 'YES') {
+      await db.execute(`ALTER TABLE messages MODIFY team_id VARCHAR(36) DEFAULT NULL`);
+      console.log('[DB] Altered messages.team_id to allow NULL for channel-only view-cache rows');
+    }
+    const [indexes] = await db.execute(
+      `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'messages' AND INDEX_NAME = 'idx_channel_id'`
+    );
+    if (indexes.length === 0) {
+      await db.execute(`ALTER TABLE messages ADD INDEX idx_channel_id (channel_id, seq)`);
+      console.log('[DB] Added idx_channel_id on messages(channel_id, seq)');
     }
   }
 
@@ -633,11 +706,11 @@ export async function nextTaskNumber(db, teamId) {
 export async function insertMessage(db, msg) {
   const [result] = await db.execute(
     `INSERT INTO messages
-      (id, team_id, sender_type, sender_id, sender_name, message_type, content,
+      (id, team_id, channel_id, sender_type, sender_id, sender_name, message_type, content,
        thread_id, task_status, task_number, task_assignee_type, task_assignee_id,
        task_claimed_at, task_completed_at, mentions)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [msg.id, msg.teamId, msg.senderType, msg.senderId, msg.senderName,
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [msg.id, msg.teamId ?? null, msg.channelId ?? null, msg.senderType, msg.senderId, msg.senderName,
      msg.messageType ?? 'chat', msg.content, msg.threadId ?? null,
      msg.taskStatus ?? null, msg.taskNumber ?? null,
      msg.taskAssigneeType ?? null, msg.taskAssigneeId ?? null,
@@ -684,6 +757,29 @@ export async function getMessagesSince(db, sinceSeq, teamId) {
     [sinceSeq]
   );
   return rows;
+}
+
+export async function getChannelMessages(db, channelId, { limit = 50, before, after } = {}) {
+  const n = Math.max(1, Math.min(parseInt(limit) || 50, 500));
+  if (after != null) {
+    const [rows] = await db.execute(
+      `SELECT * FROM messages WHERE channel_id = ? AND seq > ? AND is_del = 0 ORDER BY seq ASC LIMIT ${n}`,
+      [channelId, after]
+    );
+    return rows;
+  }
+  if (before != null) {
+    const [rows] = await db.execute(
+      `SELECT * FROM messages WHERE channel_id = ? AND seq < ? AND is_del = 0 ORDER BY seq DESC LIMIT ${n}`,
+      [channelId, before]
+    );
+    return rows.reverse();
+  }
+  const [rows] = await db.execute(
+    `SELECT * FROM messages WHERE channel_id = ? AND is_del = 0 ORDER BY seq DESC LIMIT ${n}`,
+    [channelId]
+  );
+  return rows.reverse();
 }
 
 export async function searchMessages(db, agentTeamIds, query, { teamId, limit = 10 } = {}) {
@@ -856,6 +952,180 @@ export async function getMemberTeamIds(db, memberId) {
     [memberId]
   );
   return rows.map(r => r.team_id);
+}
+
+// ─── workspaces & channels ────────────────────────────────────────────────────
+
+export async function insertWorkspace(db, workspace) {
+  await db.execute(
+    `INSERT INTO workspaces (id, name, owner_user_id) VALUES (?,?,?)`,
+    [workspace.id, workspace.name, workspace.ownerUserId]
+  );
+  const [rows] = await db.execute(`SELECT * FROM workspaces WHERE id = ?`, [workspace.id]);
+  return rows[0] ?? null;
+}
+
+export async function getWorkspaceById(db, id) {
+  const [rows] = await db.execute(`SELECT * FROM workspaces WHERE id = ?`, [id]);
+  return rows[0] ?? null;
+}
+
+export async function getWorkspaceByName(db, name) {
+  const [rows] = await db.execute(
+    `SELECT * FROM workspaces WHERE name = ? AND is_del = 0 AND deleted_at IS NULL LIMIT 1`,
+    [name]
+  );
+  return rows[0] ?? null;
+}
+
+export async function getUserWorkspaces(db, userId, { includeArchived = false } = {}) {
+  const [rows] = await db.execute(
+    `SELECT w.* FROM workspaces w
+     JOIN workspace_members wm ON wm.workspace_id = w.id
+     WHERE wm.user_id = ? AND wm.is_del = 0
+       AND w.is_del = 0 AND w.deleted_at IS NULL
+       ${includeArchived ? '' : 'AND w.archived_at IS NULL'}
+     ORDER BY w.created_at ASC`,
+    [userId]
+  );
+  return rows;
+}
+
+export async function addWorkspaceMember(db, workspaceId, userId, role = 'member') {
+  await db.execute(
+    `INSERT INTO workspace_members (workspace_id, user_id, role)
+     VALUES (?,?,?)
+     ON DUPLICATE KEY UPDATE role = VALUES(role), joined_at = NOW(), is_del = 0, deleted_at = NULL`,
+    [workspaceId, userId, role]
+  );
+}
+
+export async function getWorkspaceMembers(db, workspaceId) {
+  const [rows] = await db.execute(
+    `SELECT wm.*, u.name AS user_name, u.avatar AS user_avatar
+     FROM workspace_members wm
+     LEFT JOIN users u ON u.id = wm.user_id
+     WHERE wm.workspace_id = ? AND wm.is_del = 0
+     ORDER BY wm.joined_at ASC`,
+    [workspaceId]
+  );
+  return rows;
+}
+
+export async function isWorkspaceMember(db, workspaceId, userId) {
+  const [rows] = await db.execute(
+    `SELECT 1 FROM workspace_members
+     WHERE workspace_id = ? AND user_id = ? AND is_del = 0`,
+    [workspaceId, userId]
+  );
+  return rows.length > 0;
+}
+
+export async function isWorkspaceOwner(db, workspaceId, userId) {
+  const [rows] = await db.execute(
+    `SELECT 1 FROM workspaces
+     WHERE id = ? AND owner_user_id = ? AND is_del = 0 AND deleted_at IS NULL`,
+    [workspaceId, userId]
+  );
+  return rows.length > 0;
+}
+
+export async function updateWorkspace(db, id, fields) {
+  const allowed = ['name', 'archived_at'];
+  const updates = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (allowed.includes(key)) updates[key] = value;
+  }
+  if (Object.keys(updates).length === 0) return getWorkspaceById(db, id);
+  const sets = Object.keys(updates).map(key => `${key} = ?`).join(', ');
+  await db.execute(`UPDATE workspaces SET ${sets} WHERE id = ?`, [...Object.values(updates), id]);
+  return getWorkspaceById(db, id);
+}
+
+export async function insertChannel(db, channel) {
+  await db.execute(
+    `INSERT INTO channels
+      (id, workspace_id, name, type, capability_set, channel_agent_id, daemon_id, status)
+     VALUES (?,?,?,?,?,?,?,?)`,
+    [
+      channel.id,
+      channel.workspaceId,
+      channel.name,
+      channel.type,
+      JSON.stringify(channel.capabilitySet ?? { cli_binaries: [] }),
+      channel.channelAgentId ?? null,
+      channel.daemonId ?? null,
+      channel.status ?? 'created',
+    ]
+  );
+  const [rows] = await db.execute(`SELECT * FROM channels WHERE id = ?`, [channel.id]);
+  return rows[0] ?? null;
+}
+
+export async function getChannelById(db, id) {
+  const [rows] = await db.execute(`SELECT * FROM channels WHERE id = ?`, [id]);
+  return rows[0] ?? null;
+}
+
+export async function getWorkspaceChannels(db, workspaceId, { includeArchived = false } = {}) {
+  const [rows] = await db.execute(
+    `SELECT * FROM channels
+     WHERE workspace_id = ? AND is_del = 0 AND deleted_at IS NULL
+       ${includeArchived ? '' : "AND archived_at IS NULL AND status IN ('created','active','paused','failed')"}
+     ORDER BY created_at ASC`,
+    [workspaceId]
+  );
+  return rows;
+}
+
+export async function addChannelMember(db, channelId, memberType, memberId) {
+  await db.execute(
+    `INSERT INTO channel_members (channel_id, member_type, member_id)
+     VALUES (?,?,?)
+     ON DUPLICATE KEY UPDATE joined_at = NOW(), is_del = 0, deleted_at = NULL`,
+    [channelId, memberType, memberId]
+  );
+}
+
+export async function getChannelMembers(db, channelId) {
+  const [rows] = await db.execute(
+    `SELECT cm.*,
+            u.name AS human_name,
+            u.avatar AS human_avatar,
+            a.name AS agent_name,
+            a.display_name AS agent_display_name
+     FROM channel_members cm
+     LEFT JOIN users u
+       ON cm.member_type = 'human' AND u.id = cm.member_id
+     LEFT JOIN agents a
+       ON cm.member_type IN ('channel_agent', 'sub_agent', 'worker') AND a.id = cm.member_id
+     WHERE cm.channel_id = ? AND cm.is_del = 0
+     ORDER BY cm.joined_at ASC`,
+    [channelId]
+  );
+  return rows;
+}
+
+export async function isChannelMember(db, channelId, memberType, memberId) {
+  const [rows] = await db.execute(
+    `SELECT 1 FROM channel_members
+     WHERE channel_id = ? AND member_type = ? AND member_id = ? AND is_del = 0`,
+    [channelId, memberType, memberId]
+  );
+  return rows.length > 0;
+}
+
+export async function updateChannel(db, id, fields) {
+  const allowed = ['name', 'type', 'capability_set', 'channel_agent_id', 'daemon_id', 'status', 'archived_at'];
+  const updates = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (!allowed.includes(key)) continue;
+    updates[key] = key === 'capability_set' ? JSON.stringify(value) : value;
+  }
+  if (Object.keys(updates).length === 0) return getChannelById(db, id);
+  const sets = Object.keys(updates).map(key => `${key} = ?`).join(', ');
+  await db.execute(`UPDATE channels SET ${sets} WHERE id = ?`, [...Object.values(updates), id]);
+  return getChannelById(db, id);
 }
 
 // ─── agents ───────────────────────────────────────────────────────────────────
@@ -1261,6 +1531,49 @@ export async function deleteMachine(db, id) {
 }
 
 // ─── users & auth ─────────────────────────────────────────────────────────────
+
+export async function getUserById(db, userId) {
+  const [rows] = await db.execute(
+    `SELECT * FROM users WHERE id = ? AND is_del = 0 AND deleted_at IS NULL`,
+    [userId]
+  );
+  return rows[0] ?? null;
+}
+
+export async function findUserByIdOrName(db, identifier) {
+  const [rows] = await db.execute(
+    `SELECT * FROM users
+     WHERE (id = ? OR name = ?)
+       AND is_del = 0 AND deleted_at IS NULL
+     ORDER BY created_at ASC
+     LIMIT 1`,
+    [identifier, identifier]
+  );
+  return rows[0] ?? null;
+}
+
+export async function getUsers(db, { query = '', limit = 20 } = {}) {
+  const n = Math.max(1, Math.min(parseInt(limit) || 20, 100));
+  const trimmed = query.trim();
+  if (trimmed) {
+    const [rows] = await db.execute(
+      `SELECT * FROM users
+       WHERE is_del = 0 AND deleted_at IS NULL
+         AND (id = ? OR name LIKE ?)
+       ORDER BY created_at ASC
+       LIMIT ${n}`,
+      [trimmed, `%${trimmed}%`]
+    );
+    return rows;
+  }
+  const [rows] = await db.execute(
+    `SELECT * FROM users
+     WHERE is_del = 0 AND deleted_at IS NULL
+     ORDER BY created_at ASC
+     LIMIT ${n}`
+  );
+  return rows;
+}
 
 export async function findUserByIdentity(db, provider, providerUid) {
   const [rows] = await db.execute(

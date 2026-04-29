@@ -864,6 +864,7 @@ router.post('/:agentId/actions/:actionId/complete', async (req, res) => {
 export function formatMessage(msg) {
   return {
     id: msg.id, seq: msg.seq, teamId: msg.team_id,
+    channelId: msg.channel_id ?? null,
     senderType: msg.sender_type, senderId: msg.sender_id, senderName: msg.sender_name,
     messageType: msg.message_type, content: msg.content,
     threadId: msg.thread_id ?? null,

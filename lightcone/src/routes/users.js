@@ -1,12 +1,27 @@
 import { Router } from 'express';
 import {
   getDb,
+  getUsers,
   findUserByIdentity,
   createUserWithIdentity,
   resolveUser,
 } from '../db/index.js';
 
 const router = Router();
+
+router.get('/', async (req, res) => {
+  const users = await getUsers(getDb(), {
+    query: String(req.query.q ?? ''),
+    limit: Number(req.query.limit ?? 20),
+  });
+  res.json(users.map(user => ({
+    id: user.id,
+    name: user.name,
+    avatarUrl: user.avatar ?? null,
+    isGuest: !!user.is_guest,
+    createdAt: user.created_at,
+  })));
+});
 
 /**
  * POST /api/users/feishu-register

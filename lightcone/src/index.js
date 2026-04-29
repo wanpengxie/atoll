@@ -11,6 +11,8 @@ import { formatMessageForDaemon } from './daemon/index.js';
 import { loadUser } from './middleware/auth.js';
 import authRouter    from './routes/auth.js';
 import usersRouter   from './routes/users.js';
+import workspacesRouter from './routes/workspaces.js';
+import channelsRouter from './routes/channels.js';
 import serversRouter from './routes/servers.js';
 import teamsRouter from './routes/teams.js';
 import messagesRouter from './routes/messages.js';
@@ -35,6 +37,8 @@ app.use(express.static('public'));
 // ── API Routes ────────────────────────────────────────────────────────────────
 app.use('/api/auth',     authRouter);
 app.use('/api/users',    usersRouter);
+app.use('/api/workspaces', workspacesRouter);
+app.use('/api/channels', channelsRouter);
 app.use('/api/servers',  serversRouter);
 app.use('/api/teams', teamsRouter);
 app.use('/api/messages', messagesRouter);

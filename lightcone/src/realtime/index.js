@@ -18,6 +18,8 @@ export function setupSocketIO(httpServer) {
 
     socket.on('team:join',  (teamId) => { socket.join(`team:${teamId}`); });
     socket.on('team:leave', (teamId) => { socket.leave(`team:${teamId}`); });
+    socket.on('channel:join',  (channelId) => { socket.join(`channel:${channelId}`); });
+    socket.on('channel:leave', (channelId) => { socket.leave(`channel:${channelId}`); });
 
     socket.on('sync:resume', async ({ since, teamId } = {}) => {
       const db = getDb();

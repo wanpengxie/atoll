@@ -3,16 +3,45 @@ import {
   getDb, getMachineByApiKey, updateMachine, updateAgent, getAgents,
   getAgentById, getTeamById, getMemberTeamIds,
   getTeamSession, upsertTeamSession, getAgentByApiKey,
+  getChannelById, insertMessage,
   insertCredential, getCredentialsByOwner, deleteCredential,
 } from '../db/index.js';
 import { encrypt } from '../crypto.js';
+import { randomUUID } from 'crypto';
 import { registerDaemon, unregisterDaemon, sendToDaemon } from './connections.js';
 import { broadcast } from '../realtime/broadcast.js';
 import { flushInbox } from '../scheduler/inbox.js';
+import { formatMessage } from '../internal/index.js';
 
 const pendingRequests = new Map();
 // machineId → { userId, platform }: tracks who initiated browser login
 const pendingBrowserLogins = new Map();
+
+function formatChannelSenderName(senderType, senderId) {
+  switch (senderType) {
+    case 'human':
+      return senderId;
+    case 'channel_agent':
+      return `channel-agent:${senderId}`;
+    case 'sub_agent':
+      return `sub-agent:${senderId}`;
+    case 'worker':
+      return `worker:${senderId}`;
+    default:
+      return senderId;
+  }
+}
+
+function appendAttachmentReferences(content, attachments) {
+  if (!Array.isArray(attachments) || attachments.length === 0) return content;
+  const lines = attachments.map((attachment, index) => {
+    if (typeof attachment === 'string') return `- ${attachment}`;
+    const name = attachment?.name ?? attachment?.path ?? attachment?.url ?? `attachment-${index + 1}`;
+    const ref = attachment?.path ?? attachment?.url ?? '';
+    return ref ? `- ${name}: ${ref}` : `- ${name}`;
+  });
+  return `${content}\n\nAttachments:\n${lines.join('\n')}`;
+}
 
 export function setPendingBrowserLogin(machineId, userId, platform) {
   pendingBrowserLogins.set(machineId, { userId, platform });
@@ -183,6 +212,49 @@ async function handleDaemonMessage(machineId, serverId, msg) {
     case 'agent:deliver:ack':
       console.log(`[Daemon] Deliver ack: agent=${msg.agentId} seq=${msg.seq}`);
       break;
+
+    case 'message.append': {
+      const requestId = msg.requestId ?? null;
+      try {
+        const channelId = msg.channel_id ?? msg.channelId;
+        const senderType = msg.sender_type ?? msg.senderType;
+        const senderId = msg.sender_id ?? msg.senderId;
+        const content = String(msg.content ?? '');
+        if (!requestId) throw new Error('requestId required');
+        if (!channelId) throw new Error('channel_id required');
+        if (!senderType) throw new Error('sender_type required');
+        if (!senderId) throw new Error('sender_id required');
+        if (!content.trim()) throw new Error('content required');
+
+        const channel = await getChannelById(db, channelId);
+        if (!channel || channel.is_del || channel.deleted_at) {
+          throw new Error(`channel not found: ${channelId}`);
+        }
+        if (channel.daemon_id && channel.daemon_id !== machineId) {
+          throw new Error(`channel ${channelId} is bound to daemon ${channel.daemon_id}, not ${machineId}`);
+        }
+
+        const message = await insertMessage(db, {
+          id: randomUUID(),
+          teamId: null,
+          channelId,
+          senderType,
+          senderId,
+          senderName: formatChannelSenderName(senderType, senderId),
+          messageType: 'chat',
+          content: appendAttachmentReferences(content, msg.attachments),
+        });
+
+        broadcast.channelMessage(channelId, formatMessage(message));
+        sendToDaemon(machineId, { type: 'message.append.ack', requestId, ok: true });
+      } catch (err) {
+        console.error(`[Daemon] message.append failed: ${err.message}`);
+        if (requestId) {
+          sendToDaemon(machineId, { type: 'message.append.ack', requestId, ok: false, error: err.message });
+        }
+      }
+      break;
+    }
 
     case 'agent:request_start': {
       const { agentId, teamId } = msg;

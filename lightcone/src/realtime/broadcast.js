@@ -13,6 +13,8 @@ function emit(room, event, data) {
 export const broadcast = {
   message:         (teamId, msg)                             => emit(`team:${teamId}`,      'message:new',            msg),
   messageUpdated:  (teamId, msg)                             => emit(`team:${teamId}`,      'message:updated',        msg),
+  channelMessage:  (channelId, msg)                          => emit(`channel:${channelId}`, 'message:new',           msg),
+  channelMessageUpdated: (channelId, msg)                    => emit(`channel:${channelId}`, 'message:updated',       msg),
   taskCreated:     (teamId, tasks)                           => emit(`team:${teamId}`,      'task:created',           { tasks }),
   taskUpdated:     (teamId, task)                            => emit(`team:${teamId}`,      'task:updated',           { task }),
   taskDeleted:     (teamId, taskId)                          => emit(`team:${teamId}`,      'task:deleted',           { taskId }),
@@ -21,6 +23,8 @@ export const broadcast = {
   agentCreated:    (serverId, agent)                         => emit(`server:${serverId}`,  'agent:created',          { agent }),
   agentDeleted:    (serverId, agentId)                       => emit(`server:${serverId}`,  'agent:deleted',          { agentId }),
   teamUpdated:     (serverId)                                => emit(`server:${serverId}`,  'team:updated',           {}),
+  workspaceUpdated:(serverId)                                => emit(`server:${serverId}`,  'workspace:updated',      {}),
+  channelUpdated:  (serverId, workspaceId = null)            => emit(`server:${serverId}`,  'channel:updated',        { workspaceId }),
   dmNew:           (serverId, teamId)                        => emit(`server:${serverId}`,  'dm:new',                 { teamId }),
   machineStatus:   (serverId, machineId, status)             => emit(`server:${serverId}`,  'machine:status',         { machineId, status }),
   machineCapabilities: (serverId, machineId, runtimes, hostname, os, daemonVersion) =>
