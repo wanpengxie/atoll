@@ -14,6 +14,7 @@ import {
 import { sendToDaemon } from '../daemon/connections.js';
 import { broadcast } from '../realtime/broadcast.js';
 import { formatMessage } from '../internal/index.js';
+import { requireAuth } from '../middleware/auth.js';
 import {
   requireWorkspaceRead,
   requireChannelRead,
@@ -21,7 +22,6 @@ import {
   getRequestUserId,
 } from '../middleware/channel-auth.js';
 
-const router = Router();
 const DEFAULT_SERVER_ID = process.env.DEFAULT_SERVER_ID ?? 'server-001';
 const DEFAULT_USER_NAME = process.env.DEFAULT_USER_NAME ?? 'Admin';
 
@@ -60,28 +60,6 @@ function formatChannel(channel) {
   };
 }
 
-async function buildDaemonChannelPayload(channel) {
-  const members = await getChannelMembers(getDb(), channel.id);
-  return {
-    channelId: channel.id,
-    workspaceId: channel.workspace_id,
-    daemonId: channel.daemon_id ?? null,
-    name: channel.name,
-    type: channel.type,
-    status: channel.status,
-    capabilitySet: typeof channel.capability_set === 'string'
-      ? JSON.parse(channel.capability_set)
-      : (channel.capability_set ?? { cli_binaries: [] }),
-    members: members.map(formatChannelMember),
-    archivedAt: channel.archived_at ?? null,
-  };
-}
-
-function pushChannelEvent(daemonId, payload) {
-  if (!daemonId) return;
-  sendToDaemon(daemonId, payload);
-}
-
 function formatChannelMember(member) {
   const displayName = member.member_type === 'human'
     ? (member.human_name ?? member.member_id)
@@ -109,217 +87,6 @@ function defaultSenderName(senderType, senderId) {
       return senderId;
   }
 }
-
-async function requireWorkspaceOwnerForChannel(req, res) {
-  const owner = await isWorkspaceOwner(getDb(), req.workspace.id, getRequestUserId(req));
-  if (!owner) {
-    res.status(403).json({ error: 'Forbidden: workspace owner required' });
-    return false;
-  }
-  return true;
-}
-
-router.post('/', requireWorkspaceRead, async (req, res) => {
-  const name = String(req.body?.name ?? '').trim();
-  const type = String(req.body?.type ?? '').trim();
-  if (!name) return res.status(400).json({ error: 'Channel name is required' });
-  if (!ALLOWED_CHANNEL_TYPES.has(type)) {
-    return res.status(400).json({ error: `channel.type must be one of: ${[...ALLOWED_CHANNEL_TYPES].join(', ')}` });
-  }
-
-  let capabilitySet;
-  try {
-    capabilitySet = normalizeCapabilitySet(req.body?.capabilitySet ?? req.body?.capability_set);
-  } catch (err) {
-    return res.status(400).json({ error: err.message });
-  }
-
-  const userId = getRequestUserId(req);
-  const channel = await insertChannel(getDb(), {
-    id: uuidv4(),
-    workspaceId: req.workspace.id,
-    name,
-    type,
-    capabilitySet,
-    channelAgentId: req.body?.channelAgentId ?? null,
-    daemonId: req.body?.daemonId ?? null,
-    status: String(req.body?.status ?? 'active'),
-  });
-
-  await addChannelMember(getDb(), channel.id, 'human', userId);
-  if (channel.channel_agent_id) {
-    await addChannelMember(getDb(), channel.id, 'channel_agent', channel.channel_agent_id);
-  }
-
-  if (channel.daemon_id) {
-    const daemonChannel = await buildDaemonChannelPayload(channel);
-    pushChannelEvent(channel.daemon_id, { type: 'channel:create', channel: daemonChannel });
-    if (channel.status === 'active') {
-      pushChannelEvent(channel.daemon_id, { type: 'channel:start', channel: daemonChannel });
-    }
-  }
-
-  broadcast.channelUpdated(DEFAULT_SERVER_ID, req.workspace.id);
-  res.status(201).json(formatChannel(channel));
-});
-
-router.get('/:id', requireChannelRead, async (req, res) => {
-  const members = await getChannelMembers(getDb(), req.channel.id);
-  res.json({
-    ...formatChannel(req.channel),
-    workspace: {
-      id: req.workspace.id,
-      name: req.workspace.name,
-      ownerUserId: req.workspace.owner_user_id,
-    },
-    members: members.map(formatChannelMember),
-  });
-});
-
-router.patch('/:id', requireChannelRead, async (req, res) => {
-  if (!(await requireWorkspaceOwnerForChannel(req, res))) return;
-
-  const fields = {};
-  if (typeof req.body?.name === 'string' && req.body.name.trim()) {
-    fields.name = req.body.name.trim();
-  }
-  if (typeof req.body?.status === 'string' && req.body.status.trim()) {
-    fields.status = req.body.status.trim();
-  }
-  if (req.body?.pause === true) fields.status = 'paused';
-  if (req.body?.resume === true) fields.status = 'active';
-  if (req.body?.archive === true) {
-    fields.status = 'archived';
-    fields.archived_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
-  } else if (req.body?.archive === false) {
-    fields.archived_at = null;
-  }
-  if (req.body?.daemonId !== undefined) fields.daemon_id = req.body.daemonId;
-  if (req.body?.channelAgentId !== undefined) fields.channel_agent_id = req.body.channelAgentId;
-
-  const channel = await updateChannel(getDb(), req.channel.id, fields);
-  const daemonId = channel.daemon_id ?? req.channel.daemon_id ?? null;
-  if (daemonId) {
-    const daemonChannel = await buildDaemonChannelPayload(channel);
-    if (req.body?.archive === true || (fields.status === 'archived' && req.channel.status !== 'archived')) {
-      pushChannelEvent(daemonId, { type: 'channel:archive', channelId: channel.id });
-    } else if (req.body?.pause === true || (fields.status === 'paused' && req.channel.status !== 'paused')) {
-      pushChannelEvent(daemonId, { type: 'channel:pause', channelId: channel.id });
-    } else if (req.body?.resume === true || (channel.status === 'active' && req.channel.status !== 'active')) {
-      pushChannelEvent(daemonId, { type: 'channel:resume', channel: daemonChannel });
-    } else {
-      pushChannelEvent(daemonId, {
-        type: 'channel:event',
-        channelId: channel.id,
-        channel: daemonChannel,
-        event: {
-          type: 'channel.config.updated',
-          created_at: new Date().toISOString(),
-          source: 'server',
-          payload: { channel: daemonChannel },
-        },
-      });
-    }
-  }
-  broadcast.channelUpdated(DEFAULT_SERVER_ID, req.workspace.id);
-  res.json(formatChannel(channel));
-});
-
-router.post('/:id/members', requireChannelRead, async (req, res) => {
-  if (!(await requireWorkspaceOwnerForChannel(req, res))) return;
-
-  const memberType = String(req.body?.memberType ?? req.body?.member_type ?? 'human').trim();
-  if (!ALLOWED_MEMBER_TYPES.has(memberType)) {
-    return res.status(400).json({ error: `memberType must be one of: ${[...ALLOWED_MEMBER_TYPES].join(', ')}` });
-  }
-
-  let memberId = String(req.body?.memberId ?? req.body?.userId ?? '').trim();
-  if (memberType === 'human') {
-    const identifier = memberId || String(req.body?.userName ?? req.body?.identifier ?? '').trim();
-    if (!identifier) return res.status(400).json({ error: 'memberId or userName is required' });
-    const member = await findUserByIdOrName(getDb(), identifier);
-    if (!member) return res.status(404).json({ error: 'User not found' });
-    memberId = member.id;
-  } else if (!memberId) {
-    return res.status(400).json({ error: 'memberId is required' });
-  }
-
-  await addChannelMember(getDb(), req.channel.id, memberType, memberId);
-  const members = await getChannelMembers(getDb(), req.channel.id);
-  const added = members.find(row => row.member_type === memberType && row.member_id === memberId);
-
-  if (req.channel.daemon_id && added) {
-    pushChannelEvent(req.channel.daemon_id, {
-      type: 'channel:event',
-      channelId: req.channel.id,
-      event: {
-        type: 'channel.member.joined',
-        created_at: new Date().toISOString(),
-        source: 'server',
-        payload: {
-          member: formatChannelMember(added),
-        },
-      },
-    });
-  }
-
-  broadcast.channelUpdated(DEFAULT_SERVER_ID, req.workspace.id);
-  res.status(201).json(formatChannelMember(added));
-});
-
-router.get('/:id/messages', requireChannelRead, async (req, res) => {
-  const { limit = 50, before, after } = req.query;
-  const messages = await getChannelMessages(getDb(), req.channel.id, {
-    limit: Number(limit),
-    before: before != null ? Number(before) : undefined,
-    after: after != null ? Number(after) : undefined,
-  });
-  res.json({ messages: messages.map(formatMessage), hasMore: messages.length === Number(limit) });
-});
-
-router.post('/:id/messages', requireChannelWrite, async (req, res) => {
-  const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
-  if (!content) return res.status(400).json({ error: 'content required' });
-
-  const userId = getRequestUserId(req);
-  const msg = await insertMessage(getDb(), {
-    id: uuidv4(),
-    teamId: null,
-    channelId: req.channel.id,
-    senderType: 'human',
-    senderId: userId,
-    senderName: req.user?.name ?? DEFAULT_USER_NAME,
-    messageType: 'chat',
-    content,
-  });
-
-  const payload = formatMessage(msg);
-  broadcast.channelMessage(req.channel.id, payload);
-  if (req.channel.daemon_id) {
-    pushChannelEvent(req.channel.daemon_id, {
-      type: 'channel:event',
-      channelId: req.channel.id,
-      event: {
-        type: 'user.message.posted',
-        created_at: new Date().toISOString(),
-        source: 'server',
-        payload: {
-          message: {
-            messageId: msg.id,
-            channelId: req.channel.id,
-            senderType: 'human',
-            senderId: userId,
-            senderName: req.user?.name ?? DEFAULT_USER_NAME,
-            content,
-            attachments: [],
-            createdAt: msg.created_at,
-          },
-        },
-      },
-    });
-  }
-  res.status(201).json(payload);
-});
 
 export async function appendDaemonChannelMessage({
   requestId,
@@ -350,5 +117,269 @@ export async function appendDaemonChannelMessage({
   payload.requestId = requestId;
   return payload;
 }
+
+export function createChannelsRouter({
+  getDbImpl = getDb,
+  insertChannelImpl = insertChannel,
+  addChannelMemberImpl = addChannelMember,
+  getChannelMembersImpl = getChannelMembers,
+  updateChannelImpl = updateChannel,
+  isWorkspaceOwnerImpl = isWorkspaceOwner,
+  findUserByIdOrNameImpl = findUserByIdOrName,
+  getChannelMessagesImpl = getChannelMessages,
+  insertMessageImpl = insertMessage,
+  sendToDaemonImpl = sendToDaemon,
+  broadcastImpl = broadcast,
+  formatMessageImpl = formatMessage,
+  requireAuthImpl = requireAuth,
+  requireWorkspaceReadImpl = requireWorkspaceRead,
+  requireChannelReadImpl = requireChannelRead,
+  requireChannelWriteImpl = requireChannelWrite,
+  getRequestUserIdImpl = getRequestUserId,
+  uuidv4Impl = uuidv4,
+  defaultServerId = DEFAULT_SERVER_ID,
+  defaultUserName = DEFAULT_USER_NAME,
+} = {}) {
+  const router = Router();
+
+  async function buildDaemonChannelPayload(channel) {
+    const members = await getChannelMembersImpl(getDbImpl(), channel.id);
+    return {
+      channelId: channel.id,
+      workspaceId: channel.workspace_id,
+      daemonId: channel.daemon_id ?? null,
+      name: channel.name,
+      type: channel.type,
+      status: channel.status,
+      capabilitySet: typeof channel.capability_set === 'string'
+        ? JSON.parse(channel.capability_set)
+        : (channel.capability_set ?? { cli_binaries: [] }),
+      members: members.map(formatChannelMember),
+      archivedAt: channel.archived_at ?? null,
+    };
+  }
+
+  function pushChannelEvent(daemonId, payload) {
+    if (!daemonId) return;
+    sendToDaemonImpl(daemonId, payload);
+  }
+
+  async function requireWorkspaceOwnerForChannel(req, res) {
+    const owner = await isWorkspaceOwnerImpl(getDbImpl(), req.workspace.id, getRequestUserIdImpl(req));
+    if (!owner) {
+      res.status(403).json({ error: 'Forbidden: workspace owner required' });
+      return false;
+    }
+    return true;
+  }
+
+  router.use(requireAuthImpl);
+
+  router.post('/', requireWorkspaceReadImpl, async (req, res) => {
+    const name = String(req.body?.name ?? '').trim();
+    const type = String(req.body?.type ?? '').trim();
+    if (!name) return res.status(400).json({ error: 'Channel name is required' });
+    if (!ALLOWED_CHANNEL_TYPES.has(type)) {
+      return res.status(400).json({ error: `channel.type must be one of: ${[...ALLOWED_CHANNEL_TYPES].join(', ')}` });
+    }
+
+    let capabilitySet;
+    try {
+      capabilitySet = normalizeCapabilitySet(req.body?.capabilitySet ?? req.body?.capability_set);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+
+    const userId = getRequestUserIdImpl(req);
+    const channel = await insertChannelImpl(getDbImpl(), {
+      id: uuidv4Impl(),
+      workspaceId: req.workspace.id,
+      name,
+      type,
+      capabilitySet,
+      channelAgentId: req.body?.channelAgentId ?? null,
+      daemonId: req.body?.daemonId ?? null,
+      status: String(req.body?.status ?? 'active'),
+    });
+
+    await addChannelMemberImpl(getDbImpl(), channel.id, 'human', userId);
+    if (channel.channel_agent_id) {
+      await addChannelMemberImpl(getDbImpl(), channel.id, 'channel_agent', channel.channel_agent_id);
+    }
+
+    if (channel.daemon_id) {
+      const daemonChannel = await buildDaemonChannelPayload(channel);
+      pushChannelEvent(channel.daemon_id, { type: 'channel:create', channel: daemonChannel });
+      if (channel.status === 'active') {
+        pushChannelEvent(channel.daemon_id, { type: 'channel:start', channel: daemonChannel });
+      }
+    }
+
+    broadcastImpl.channelUpdated(defaultServerId, req.workspace.id);
+    res.status(201).json(formatChannel(channel));
+  });
+
+  router.get('/:id', requireChannelReadImpl, async (req, res) => {
+    const members = await getChannelMembersImpl(getDbImpl(), req.channel.id);
+    res.json({
+      ...formatChannel(req.channel),
+      workspace: {
+        id: req.workspace.id,
+        name: req.workspace.name,
+        ownerUserId: req.workspace.owner_user_id,
+      },
+      members: members.map(formatChannelMember),
+    });
+  });
+
+  router.patch('/:id', requireChannelReadImpl, async (req, res) => {
+    if (!(await requireWorkspaceOwnerForChannel(req, res))) return;
+
+    const fields = {};
+    if (typeof req.body?.name === 'string' && req.body.name.trim()) {
+      fields.name = req.body.name.trim();
+    }
+    if (typeof req.body?.status === 'string' && req.body.status.trim()) {
+      fields.status = req.body.status.trim();
+    }
+    if (req.body?.pause === true) fields.status = 'paused';
+    if (req.body?.resume === true) fields.status = 'active';
+    if (req.body?.archive === true) {
+      fields.status = 'archived';
+      fields.archived_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    } else if (req.body?.archive === false) {
+      fields.archived_at = null;
+    }
+    if (req.body?.daemonId !== undefined) fields.daemon_id = req.body.daemonId;
+    if (req.body?.channelAgentId !== undefined) fields.channel_agent_id = req.body.channelAgentId;
+
+    const channel = await updateChannelImpl(getDbImpl(), req.channel.id, fields);
+    const daemonId = channel.daemon_id ?? req.channel.daemon_id ?? null;
+    if (daemonId) {
+      const daemonChannel = await buildDaemonChannelPayload(channel);
+      if (req.body?.archive === true || (fields.status === 'archived' && req.channel.status !== 'archived')) {
+        pushChannelEvent(daemonId, { type: 'channel:archive', channelId: channel.id });
+      } else if (req.body?.pause === true || (fields.status === 'paused' && req.channel.status !== 'paused')) {
+        pushChannelEvent(daemonId, { type: 'channel:pause', channelId: channel.id });
+      } else if (req.body?.resume === true || (channel.status === 'active' && req.channel.status !== 'active')) {
+        pushChannelEvent(daemonId, { type: 'channel:resume', channel: daemonChannel });
+      } else {
+        pushChannelEvent(daemonId, {
+          type: 'channel:event',
+          channelId: channel.id,
+          channel: daemonChannel,
+          event: {
+            type: 'channel.config.updated',
+            created_at: new Date().toISOString(),
+            source: 'server',
+            payload: { channel: daemonChannel },
+          },
+        });
+      }
+    }
+    broadcastImpl.channelUpdated(defaultServerId, req.workspace.id);
+    res.json(formatChannel(channel));
+  });
+
+  router.post('/:id/members', requireChannelReadImpl, async (req, res) => {
+    if (!(await requireWorkspaceOwnerForChannel(req, res))) return;
+
+    const memberType = String(req.body?.memberType ?? req.body?.member_type ?? 'human').trim();
+    if (!ALLOWED_MEMBER_TYPES.has(memberType)) {
+      return res.status(400).json({ error: `memberType must be one of: ${[...ALLOWED_MEMBER_TYPES].join(', ')}` });
+    }
+
+    let memberId = String(req.body?.memberId ?? req.body?.userId ?? '').trim();
+    if (memberType === 'human') {
+      const identifier = memberId || String(req.body?.userName ?? req.body?.identifier ?? '').trim();
+      if (!identifier) return res.status(400).json({ error: 'memberId or userName is required' });
+      const member = await findUserByIdOrNameImpl(getDbImpl(), identifier);
+      if (!member) return res.status(404).json({ error: 'User not found' });
+      memberId = member.id;
+    } else if (!memberId) {
+      return res.status(400).json({ error: 'memberId is required' });
+    }
+
+    await addChannelMemberImpl(getDbImpl(), req.channel.id, memberType, memberId);
+    const members = await getChannelMembersImpl(getDbImpl(), req.channel.id);
+    const added = members.find(row => row.member_type === memberType && row.member_id === memberId);
+
+    if (req.channel.daemon_id && added) {
+      pushChannelEvent(req.channel.daemon_id, {
+        type: 'channel:event',
+        channelId: req.channel.id,
+        event: {
+          type: 'channel.member.joined',
+          created_at: new Date().toISOString(),
+          source: 'server',
+          payload: {
+            member: formatChannelMember(added),
+          },
+        },
+      });
+    }
+
+    broadcastImpl.channelUpdated(defaultServerId, req.workspace.id);
+    res.status(201).json(formatChannelMember(added));
+  });
+
+  router.get('/:id/messages', requireChannelReadImpl, async (req, res) => {
+    const { limit = 50, before, after } = req.query;
+    const messages = await getChannelMessagesImpl(getDbImpl(), req.channel.id, {
+      limit: Number(limit),
+      before: before != null ? Number(before) : undefined,
+      after: after != null ? Number(after) : undefined,
+    });
+    res.json({ messages: messages.map(formatMessageImpl), hasMore: messages.length === Number(limit) });
+  });
+
+  router.post('/:id/messages', requireChannelWriteImpl, async (req, res) => {
+    const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
+    if (!content) return res.status(400).json({ error: 'content required' });
+
+    const userId = getRequestUserIdImpl(req);
+    const msg = await insertMessageImpl(getDbImpl(), {
+      id: uuidv4Impl(),
+      teamId: null,
+      channelId: req.channel.id,
+      senderType: 'human',
+      senderId: userId,
+      senderName: req.user?.name ?? defaultUserName,
+      messageType: 'chat',
+      content,
+    });
+
+    const payload = formatMessageImpl(msg);
+    broadcastImpl.channelMessage(req.channel.id, payload);
+    if (req.channel.daemon_id) {
+      pushChannelEvent(req.channel.daemon_id, {
+        type: 'channel:event',
+        channelId: req.channel.id,
+        event: {
+          type: 'user.message.posted',
+          created_at: new Date().toISOString(),
+          source: 'server',
+          payload: {
+            message: {
+              messageId: msg.id,
+              channelId: req.channel.id,
+              senderType: 'human',
+              senderId: userId,
+              senderName: req.user?.name ?? defaultUserName,
+              content,
+              attachments: [],
+              createdAt: msg.created_at,
+            },
+          },
+        },
+      });
+    }
+    res.status(201).json(payload);
+  });
+
+  return router;
+}
+
+const router = createChannelsRouter();
 
 export default router;
