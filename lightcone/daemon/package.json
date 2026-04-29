@@ -13,7 +13,11 @@
   ],
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "build": "node -e \"console.log('lightcone-daemon: no build step')\"",
+    "test": "node -e \"console.log('lightcone-daemon: no tests')\"",
+    "lint": "node -e \"console.log('lightcone-daemon: no lint step')\"",
+    "clean": "node -e \"console.log('lightcone-daemon: nothing to clean')\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

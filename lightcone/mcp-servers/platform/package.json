@@ -3,6 +3,13 @@
   "version": "0.1.0",
   "type": "module",
   "main": "index.js",
+  "scripts": {
+    "build": "node -e \"console.log('platform-actions-mcp-server: no build step')\"",
+    "dev": "node -e \"console.log('platform-actions-mcp-server: no dev step')\"",
+    "test": "node -e \"console.log('platform-actions-mcp-server: no tests')\"",
+    "lint": "node -e \"console.log('platform-actions-mcp-server: no lint step')\"",
+    "clean": "node -e \"console.log('platform-actions-mcp-server: nothing to clean')\""
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.3.6"

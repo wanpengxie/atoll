@@ -1,0 +1,12 @@
+{
+  "name": "coagent",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "make build",
+    "dev": "make dev",
+    "test": "make test",
+    "lint": "make lint",
+    "clean": "make clean"
+  }
+}

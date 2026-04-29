@@ -5,7 +5,11 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "build": "node -e \"console.log('lightcone: no build step')\"",
+    "test": "node -e \"console.log('lightcone: no tests')\"",
+    "lint": "node -e \"console.log('lightcone: no lint step')\"",
+    "clean": "node -e \"console.log('lightcone: nothing to clean')\""
   },
   "dependencies": {
     "bcrypt": "^6.0.0",

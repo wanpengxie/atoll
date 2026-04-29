@@ -1,0 +1,13 @@
+{
+  "name": "@coagent/coagent-kernel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node -e \"console.log('coagent-kernel: placeholder build')\"",
+    "dev": "node -e \"console.log('coagent-kernel: placeholder dev')\"",
+    "test": "node -e \"console.log('coagent-kernel: placeholder test')\"",
+    "lint": "node -e \"console.log('coagent-kernel: placeholder lint')\"",
+    "clean": "node -e \"console.log('coagent-kernel: placeholder clean')\""
+  }
+}
