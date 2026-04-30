@@ -626,6 +626,7 @@ export class ChannelManager {
     ensureDirectory(path.join(workdir, 'messages'));
     ensureDirectory(path.join(workdir, 'artifacts'));
     ensureDirectory(path.join(workdir, 'schedules'));
+    ensureDirectory(path.join(workdir, 'pending-view-sync'));
     ensureDirectory(path.join(workdir, 'agents', DEFAULT_AGENT_NAME, 'trace'));
   }
 
@@ -878,30 +879,55 @@ export class ChannelManager {
   }
 
   async _appendToServerView(node, message, { requestId = randomUUID() } = {}) {
+    const payload = {
+      type: 'message.append',
+      requestId,
+      message_id: message.messageId,
+      channel_id: node.channelId,
+      sender_type: message.senderType,
+      sender_id: message.senderId,
+      sender_name: message.senderName,
+      message_type: message.messageType,
+      content: message.content,
+      attachments: message.attachments,
+    };
+
     if (!this.connection) {
-      throw toRpcError('unavailable', 'daemon connection is not ready');
+      this._enqueuePendingViewSync(node, message, payload, 'daemon connection is not ready');
+      return;
     }
 
-    const response = await this.connection.request({
-      message: {
-        type: 'message.append',
-        requestId,
-        message_id: message.messageId,
-        channel_id: node.channelId,
-        sender_type: message.senderType,
-        sender_id: message.senderId,
-        sender_name: message.senderName,
-        message_type: message.messageType,
-        content: message.content,
-        attachments: message.attachments,
-      },
-      expect: { type: 'message.append.ack', requestId },
-      timeoutMs: 10_000,
-    });
+    let response;
+    try {
+      response = await this.connection.request({
+        message: payload,
+        expect: { type: 'message.append.ack', requestId },
+        timeoutMs: 10_000,
+      });
+    } catch (err) {
+      this._enqueuePendingViewSync(node, message, payload, err?.message ?? String(err));
+      return;
+    }
 
     if (!response?.ok) {
-      throw toRpcError('message_append_failed', response?.error ?? 'message.append ack failed');
+      this._enqueuePendingViewSync(node, message, payload, response?.error ?? 'message.append ack failed');
     }
+  }
+
+  _enqueuePendingViewSync(node, message, payload, reason) {
+    const pendingDir = ensureDirectory(path.join(node.workdir, 'pending-view-sync'));
+    const filePath = path.join(pendingDir, `${message.messageId}.json`);
+    writeFileSync(
+      filePath,
+      JSON.stringify({ enqueuedAt: nowIso(), reason, payload }, null, 2),
+      'utf8',
+    );
+    this._recordTrace(node, {
+      type: 'view_sync_failed',
+      messageId: message.messageId,
+      requestId: payload.requestId,
+      reason,
+    });
   }
 
   async _recordTrace(node, record) {

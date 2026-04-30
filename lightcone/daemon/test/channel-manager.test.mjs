@@ -91,3 +91,160 @@ test('channel:message.send writes local truth before view sync and reports succe
     message: result,
   }]);
 });
+
+test('channel:message.send keeps daemon truth and reports ok when view sync ack fails', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-view-sync-fail-'));
+  const previousHome = process.env.HOME;
+  process.env.HOME = tempHome;
+
+  t.after(() => {
+    process.env.HOME = previousHome;
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const sentLog = [];
+  const connection = {
+    send(message) {
+      sentLog.push(message);
+    },
+    async request({ expect }) {
+      return {
+        type: expect.type,
+        requestId: expect.requestId,
+        ok: false,
+        error: 'simulated view sync failure',
+      };
+    },
+  };
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+  });
+  channelManager.setConnection(connection);
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-2',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Channel Two',
+    type: 'xhs-creator',
+    status: 'active',
+    members: [{ memberType: 'human', memberId: 'user-a', displayName: 'User A' }],
+  });
+  const { workdir } = created;
+
+  const result = await channelManager.handle({
+    type: 'channel:message.send',
+    requestId: 'req-ack-fail',
+    channelId: 'channel-2',
+    senderType: 'human',
+    senderId: 'user-a',
+    senderName: 'User A',
+    content: 'message survives ack failure',
+    attachments: [],
+  }, connection);
+
+  assert.equal(result.content, 'message survives ack failure');
+
+  const messageFiles = readdirSync(path.join(workdir, 'messages')).filter((entry) => entry.endsWith('.jsonl'));
+  assert.equal(messageFiles.length, 1);
+  const stored = readFileSync(path.join(workdir, 'messages', messageFiles[0]), 'utf8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].content, 'message survives ack failure');
+
+  const pendingDir = path.join(workdir, 'pending-view-sync');
+  const pendingFiles = readdirSync(pendingDir).filter((entry) => entry.endsWith('.json'));
+  assert.equal(pendingFiles.length, 1);
+  const pending = JSON.parse(readFileSync(path.join(pendingDir, pendingFiles[0]), 'utf8'));
+  assert.equal(pending.reason, 'simulated view sync failure');
+  assert.equal(pending.payload.type, 'message.append');
+  assert.equal(pending.payload.message_id, result.messageId);
+  assert.equal(pending.payload.content, 'message survives ack failure');
+
+  assert.deepEqual(sentLog, [{
+    type: 'channel:message.send.result',
+    requestId: 'req-ack-fail',
+    ok: true,
+    message: result,
+  }]);
+});
+
+test('channel:message.send keeps daemon truth and reports ok when view sync request throws', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-view-sync-throw-'));
+  const previousHome = process.env.HOME;
+  process.env.HOME = tempHome;
+
+  t.after(() => {
+    process.env.HOME = previousHome;
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const sentLog = [];
+  const connection = {
+    send(message) {
+      sentLog.push(message);
+    },
+    async request() {
+      throw new Error('connection lost mid-request');
+    },
+  };
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+  });
+  channelManager.setConnection(connection);
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-3',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Channel Three',
+    type: 'xhs-creator',
+    status: 'active',
+    members: [{ memberType: 'human', memberId: 'user-a', displayName: 'User A' }],
+  });
+  const { workdir } = created;
+
+  const result = await channelManager.handle({
+    type: 'channel:message.send',
+    requestId: 'req-throw',
+    channelId: 'channel-3',
+    senderType: 'human',
+    senderId: 'user-a',
+    senderName: 'User A',
+    content: 'survives connection error',
+    attachments: [],
+  }, connection);
+
+  assert.equal(result.content, 'survives connection error');
+
+  const stored = readFileSync(
+    path.join(workdir, 'messages', readdirSync(path.join(workdir, 'messages')).find((entry) => entry.endsWith('.jsonl'))),
+    'utf8',
+  ).trim();
+  assert.match(stored, /survives connection error/);
+
+  const pendingFiles = readdirSync(path.join(workdir, 'pending-view-sync')).filter((entry) => entry.endsWith('.json'));
+  assert.equal(pendingFiles.length, 1);
+  const pending = JSON.parse(readFileSync(path.join(workdir, 'pending-view-sync', pendingFiles[0]), 'utf8'));
+  assert.equal(pending.reason, 'connection lost mid-request');
+
+  assert.deepEqual(sentLog, [{
+    type: 'channel:message.send.result',
+    requestId: 'req-throw',
+    ok: true,
+    message: result,
+  }]);
+});
