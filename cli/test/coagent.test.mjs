@@ -68,6 +68,14 @@ test('build artifacts exist for coagent', () => {
   assert.doesNotThrow(() => execFileSync(process.execPath, ['-e', `require('fs').accessSync(${JSON.stringify(distEntry)})`]));
 });
 
+test('coagent help lists the business command tree', () => {
+  const help = execFileSync(binShim, ['--help'], { cwd: cliDir, encoding: 'utf8' });
+  assert.match(help, /channel\s+Manage coagent channels/);
+  assert.match(help, /message\s+Send and inspect channel messages/);
+  assert.match(help, /admin\s+Inspect the local daemon/);
+  assert.match(help, /xhs\s+Run Xiaohongshu business commands/);
+});
+
 test('coagent admin status calls daemon RPC', async () => {
   const { server, port, requests } = await withRpcServer(() => ({
     ok: true,

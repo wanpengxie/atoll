@@ -27,6 +27,7 @@ async function main(): Promise<void> {
   registerChannelCommands(program);
   registerMessageCommands(program);
   registerAdminCommands(program);
+  program.command('xhs').description('Run Xiaohongshu business commands');
 
   if (process.argv.length <= 2) {
     program.outputHelp();

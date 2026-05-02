@@ -20,11 +20,22 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../
 const cliBinDir = path.join(repoRoot, 'cli', 'bin');
 const fakeBinDir = path.join(tempRoot, 'bin');
 
+function exitPreflight(message) {
+  console.error(message);
+  rmSync(tempRoot, { recursive: true, force: true });
+  process.exit(1);
+}
+
 if (realMode) {
   if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY is required for --real smoke');
+    exitPreflight('ANTHROPIC_API_KEY is required for --real smoke. Set ANTHROPIC_API_KEY and retry.');
   }
-  await execFileAsync('claude', ['--version'], { timeout: 5000 });
+  try {
+    await execFileAsync('claude', ['--version'], { timeout: 5000 });
+  } catch (err) {
+    const detail = [err.stdout, err.stderr, err.message].filter(Boolean).join('\n');
+    exitPreflight(`claude CLI is required for --real smoke. Install/authenticate Claude Code and retry.${detail ? `\n${detail}` : ''}`);
+  }
 } else {
   mkdirSync(fakeBinDir, { recursive: true });
   writeFileSync(path.join(fakeBinDir, 'claude'), `#!/usr/bin/env node
