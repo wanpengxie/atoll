@@ -8,6 +8,7 @@ import { ChannelManager } from './channel-manager.js';
 import { releaseProfileLocksForProcess } from './profile-lock.js';
 import { RpcServer } from './rpc-server.js';
 import { daemonSocketPath, machineKeyPath, normalizeProjectKey, readMachineKeyFile } from './paths.js';
+import { missingMachineApiKeyErrorLines, resolveMachineApiKey } from './machine-api-key.js';
 
 const { version } = createRequire(import.meta.url)('../package.json');
 
@@ -29,8 +30,13 @@ for (let i = 0; i < args.length; i++) {
 
 const PROJECT_KEY      = normalizeProjectKey(cliProjectKey || process.env.COAGENT_PROJECT_KEY);
 const SERVER_URL      = cliServerUrl || process.env.SERVER_URL      || 'http://localhost:8779';
-const MACHINE_API_KEY = cliApiKey || process.env.MACHINE_API_KEY || readMachineKeyFile(PROJECT_KEY);
 const MACHINE_KEY_PATH = machineKeyPath(PROJECT_KEY);
+const { value: MACHINE_API_KEY } = resolveMachineApiKey({
+  cliApiKey,
+  env: process.env,
+  projectKey: PROJECT_KEY,
+  readMachineKeyFileImpl: readMachineKeyFile,
+});
 const DAEMON_SOCKET   = daemonSocketPath(PROJECT_KEY);
 const HTTP_PORT_RAW   = process.env.COAGENT_DAEMON_HTTP_PORT ?? '';
 const HTTP_PORT       = HTTP_PORT_RAW ? Number(HTTP_PORT_RAW) : null;
@@ -38,9 +44,9 @@ const DAEMON_HTTP_URL = Number.isInteger(HTTP_PORT) ? `http://127.0.0.1:${HTTP_P
 const DAEMON_TOKEN    = process.env.COAGENT_DAEMON_TOKEN || randomUUID();
 
 if (!MACHINE_API_KEY) {
-  console.error('Error: API key is required.');
-  console.error(`Checked CLI --api-key, MACHINE_API_KEY, and ${MACHINE_KEY_PATH}.`);
-  console.error('Run "make register" to create the machine key file.');
+  for (const line of missingMachineApiKeyErrorLines(MACHINE_KEY_PATH)) {
+    console.error(line);
+  }
   process.exit(1);
 }
 

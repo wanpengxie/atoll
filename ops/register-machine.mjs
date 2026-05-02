@@ -58,7 +58,7 @@ function requestTimeoutMs(env) {
 }
 
 function timeoutSeconds(timeoutMs) {
-  return Number.isInteger(timeoutMs / 1000) ? String(timeoutMs / 1000) : String(timeoutMs / 1000);
+  return String(timeoutMs / 1000);
 }
 
 async function fetchJson(url, options = {}, { timeoutMs = 10_000, serverUrl = '' } = {}) {
@@ -89,49 +89,46 @@ async function fetchJson(url, options = {}, { timeoutMs = 10_000, serverUrl = ''
   return body;
 }
 
+async function probeDaemonAdminStatus(env, key, { socketTimeoutMs = 5_000 } = {}) {
+  const socketPath = daemonSocketPath(env);
+  if (!existsSync(socketPath)) return { ok: false };
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    const finish = (status) => {
+      if (settled) return;
+      settled = true;
+      resolve(status);
+    };
+
+    const req = http.request({
+      socketPath,
+      path: '/admin/status',
+      method: 'GET',
+      headers: { Authorization: `Bearer ${key}` },
+      timeout: socketTimeoutMs,
+    }, (res) => {
+      res.resume();
+      res.on('end', () => {
+        finish({ ok: res.statusCode === 200 });
+      });
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      finish({ ok: false });
+    });
+    req.on('error', () => finish({ ok: false }));
+    req.end();
+  });
+}
+
 export async function existingKeyLooksRegistered(env, key, {
   targetServerId = String(env.DEFAULT_SERVER_ID || 'server-001'),
   targetServerUrl = normalizeServerUrl(env.SERVER_URL),
-  projectKey: targetProjectKey = projectKey(env),
   timeoutMs = requestTimeoutMs(env),
+  socketTimeoutMs = 5_000,
 } = {}) {
   const serverUrl = normalizeServerUrl(targetServerUrl);
-
-  const socketPath = daemonSocketPath(env);
-  if (existsSync(socketPath)) {
-    const status = await new Promise((resolve) => {
-      const req = http.request({
-        socketPath,
-        path: '/admin/status',
-        method: 'GET',
-        headers: { Authorization: `Bearer ${key}` },
-        timeout: 5000,
-      }, (res) => {
-        let raw = '';
-        res.setEncoding('utf8');
-        res.on('data', (chunk) => { raw += chunk; });
-        res.on('end', () => {
-          resolve({ ok: res.statusCode === 200, raw });
-        });
-      });
-      req.on('error', () => resolve({ ok: false }));
-      req.end();
-    });
-    if (status.ok) {
-      try {
-        const body = JSON.parse(status.raw || '{}');
-        const statusServerUrl = body.server_url ? normalizeServerUrl(body.server_url) : '';
-        if (
-          statusServerUrl === serverUrl
-          && String(body.project_key ?? '') === String(targetProjectKey)
-        ) {
-          return { valid: true, via: '/admin/status' };
-        }
-      } catch {
-        // Fall through and let the server whoami path verify the key.
-      }
-    }
-  }
 
   try {
     const body = await fetchJson(`${serverUrl}/api/machines/whoami`, {
@@ -146,6 +143,10 @@ export async function existingKeyLooksRegistered(env, key, {
   } catch {
     // Fall through and let registration create a fresh key.
   }
+
+  // Local daemon status is not authoritative for registration validity.
+  await probeDaemonAdminStatus(env, key, { socketTimeoutMs });
+
   return { valid: false, via: null };
 }
 

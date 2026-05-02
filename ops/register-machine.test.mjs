@@ -105,42 +105,22 @@ test('existingKeyLooksRegistered accepts whoami key from target server', async (
   });
 });
 
-test('existingKeyLooksRegistered accepts matching daemon admin status', async (t) => {
+test('existingKeyLooksRegistered ignores local daemon and validates only via server whoami', async (t) => {
   const dir = tempDir(t);
   const socketPath = path.join(dir, 'daemon.sock');
 
-  await withSocketServer(socketPath, (req, res) => {
-    assert.equal(req.url, '/admin/status');
+  await withTcpServer((req, res) => {
+    assert.equal(req.url, '/api/machines/whoami');
     assert.equal(req.headers.authorization, 'Bearer sk_machine_valid');
-    writeJson(res, 200, {
-      ok: true,
-      server_url: 'http://server.local/',
-      project_key: 'project-a',
-    });
-  }, async () => {
-    const result = await existingKeyLooksRegistered({
-      SERVER_URL: 'http://server.local',
-      DEFAULT_SERVER_ID: 'server-a',
-      COAGENT_DAEMON_SOCKET: socketPath,
-      COAGENT_PROJECT_KEY: 'project-a',
-    }, 'sk_machine_valid');
-
-    assert.deepEqual(result, { valid: true, via: '/admin/status' });
-  });
-});
-
-test('existingKeyLooksRegistered rejects daemon admin status for another project', async (t) => {
-  const dir = tempDir(t);
-  const socketPath = path.join(dir, 'daemon.sock');
-
-  await withTcpServer((_req, res) => {
     writeJson(res, 401, { error: 'Invalid machine API key' });
   }, async (baseUrl) => {
-    await withSocketServer(socketPath, (_req, res) => {
+    await withSocketServer(socketPath, (req, res) => {
+      assert.equal(req.url, '/admin/status');
+      assert.equal(req.headers.authorization, 'Bearer sk_machine_valid');
       writeJson(res, 200, {
         ok: true,
         server_url: baseUrl,
-        project_key: 'project-b',
+        project_key: 'project-a',
       });
     }, async () => {
       const result = await existingKeyLooksRegistered({
@@ -151,6 +131,35 @@ test('existingKeyLooksRegistered rejects daemon admin status for another project
       }, 'sk_machine_valid');
 
       assert.deepEqual(result, { valid: false, via: null });
+    });
+  });
+});
+
+test('existingKeyLooksRegistered times out wedged daemon socket after whoami rejects', async (t) => {
+  const dir = tempDir(t);
+  const socketPath = path.join(dir, 'daemon.sock');
+  let whoamiRequests = 0;
+
+  await withTcpServer((req, res) => {
+    whoamiRequests += 1;
+    assert.equal(req.url, '/api/machines/whoami');
+    assert.equal(req.headers.authorization, 'Bearer sk_machine_valid');
+    writeJson(res, 401, { error: 'Invalid machine API key' });
+  }, async (baseUrl) => {
+    await withSocketServer(socketPath, (_req, _res) => {
+      // Intentionally leave the daemon response open until the client timeout destroys it.
+    }, async () => {
+      const startedAt = Date.now();
+      const result = await existingKeyLooksRegistered({
+        SERVER_URL: baseUrl,
+        DEFAULT_SERVER_ID: 'server-a',
+        COAGENT_DAEMON_SOCKET: socketPath,
+        COAGENT_PROJECT_KEY: 'project-a',
+      }, 'sk_machine_valid', { socketTimeoutMs: 25 });
+
+      assert.deepEqual(result, { valid: false, via: null });
+      assert.equal(whoamiRequests, 1);
+      assert.ok(Date.now() - startedAt < 1000);
     });
   });
 });
