@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import http from 'node:http';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const offline = process.argv.includes('--offline');
 const expectedTables = ['users', 'machines', 'channels', 'messages'];
+const pm2LogTailLineLimit = 200;
+const pm2LogTailInitialBytes = 64 * 1024;
+const pm2LogTailMaxBytes = 1024 * 1024;
+const pm2LogTailMaxLineChars = 64 * 1024;
 
 function parseEnvFile(filePath) {
   if (!existsSync(filePath)) return {};
@@ -204,6 +207,7 @@ async function checkPm2(tools) {
 }
 
 async function checkDaemonHealth() {
+  const http = await import('node:http');
   const keyPath = machineKeyPath();
   if (!existsSync(keyPath)) {
     skipped('daemon_admin_status', 'machine_key');
@@ -253,6 +257,50 @@ function checkFilesystem() {
   add('daemon_socket_file', 'warn', existsSync(daemonSocketPath()), 'daemon socket file check', 'Start coagent-daemon.');
 }
 
+function readFileWindow(filePath, start, length) {
+  const fd = openSync(filePath, 'r');
+  try {
+    const buffer = Buffer.allocUnsafe(length);
+    let totalRead = 0;
+    while (totalRead < length) {
+      const bytesRead = readSync(fd, buffer, totalRead, length - totalRead, start + totalRead);
+      if (bytesRead === 0) break;
+      totalRead += bytesRead;
+    }
+    return buffer.subarray(0, totalRead).toString('utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function truncateTailLine(line) {
+  if (line.length <= pm2LogTailMaxLineChars) return line;
+  return `[truncated] ${line.slice(-pm2LogTailMaxLineChars)}`;
+}
+
+function tailLogLines(filePath, lineLimit = pm2LogTailLineLimit) {
+  const fileSize = statSync(filePath).size;
+  if (fileSize === 0) return [];
+
+  const maxBytes = Math.min(fileSize, pm2LogTailMaxBytes);
+  let windowBytes = Math.min(fileSize, pm2LogTailInitialBytes);
+
+  while (true) {
+    const start = fileSize - windowBytes;
+    const text = readFileWindow(filePath, start, windowBytes);
+    const rawLines = text.split('\n');
+    if (start > 0 && rawLines.length === 1) {
+      return [truncateTailLine(rawLines[0])];
+    }
+    if (start > 0) rawLines.shift();
+    const lines = rawLines.filter(Boolean);
+    if (lines.length >= lineLimit || start === 0 || windowBytes >= maxBytes) {
+      return lines.slice(-lineLimit).map(truncateTailLine);
+    }
+    windowBytes = Math.min(maxBytes, windowBytes * 2);
+  }
+}
+
 function tailPm2LogFiles() {
   const logDir = path.join(homedir(), '.pm2', 'logs');
   if (!existsSync(logDir)) return { lines: [], files: [], error: `${logDir} does not exist` };
@@ -260,10 +308,7 @@ function tailPm2LogFiles() {
   const files = readdirSync(logDir)
     .filter((fileName) => /coagent-(daemon|server).*\.log$/.test(fileName))
     .map((fileName) => path.join(logDir, fileName));
-  const lines = files.flatMap((filePath) => readFileSync(filePath, 'utf8')
-    .split('\n')
-    .filter(Boolean)
-    .slice(-200)
+  const lines = files.flatMap((filePath) => tailLogLines(filePath)
     .map((line) => `${path.basename(filePath)}: ${line}`));
   return { lines, files };
 }
@@ -295,10 +340,10 @@ async function main() {
   const tools = await checkPathTools();
   checkEnv();
   checkFilesystem();
-  await checkPm2(tools);
   if (offline) {
     await checkOfflineSignals();
   } else {
+    await checkPm2(tools);
     await checkMysql(tools);
     await checkDaemonHealth();
   }
