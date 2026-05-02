@@ -333,7 +333,7 @@ initDb().then(() => {
   setupSocketIO(httpServer);
   setupDaemonServer(httpServer);
   httpServer.listen(PORT, '0.0.0.0', async () => {
-    console.log(`[Server] lightcone running on http://0.0.0.0:${PORT}`);
+    console.error(`[Server] lightcone running on http://0.0.0.0:${PORT}`);
     // ── Feishu bridge (embedded mode) ──────────────────────────────────────
     if (process.env.FEISHU_BRIDGE !== 'off') {
       try {
@@ -371,7 +371,7 @@ initDb().then(() => {
             [guest.id]
           );
         }
-        if (guests.length > 0) console.log(`[GuestCleanup] Cleaned ${guests.length} expired guest accounts`);
+        if (guests.length > 0) console.error(`[GuestCleanup] Cleaned ${guests.length} expired guest accounts`);
       } catch (err) {
         console.error('[GuestCleanup] Error:', err.message);
       }

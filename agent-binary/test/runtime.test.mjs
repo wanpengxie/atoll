@@ -84,6 +84,10 @@ async function runRuntimeTurn(env, eventLine, logPath, tracePath, expectedEntrie
     env,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
+  const stdoutChunks = [];
+  proc.stdout.on('data', (chunk) => {
+    stdoutChunks.push(chunk.toString());
+  });
 
   proc.stdin.write(`${eventLine}\n`);
 
@@ -101,6 +105,12 @@ async function runRuntimeTurn(env, eventLine, logPath, tracePath, expectedEntrie
 
   proc.kill('SIGTERM');
   await new Promise((resolve) => proc.once('exit', resolve));
+
+  return stdoutChunks.join('')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
 
 test('build artifacts exist for agent runtime', () => {
@@ -108,7 +118,7 @@ test('build artifacts exist for agent runtime', () => {
 });
 
 test('stdout writer emits JSON Lines with event field instead of type', async (t) => {
-  const { writeStatus } = await import(path.join(packageDir, 'dist', 'ipc', 'stdout-writer.js'));
+  const { setStdoutContext, writeActivity, writeSession, writeStatus } = await import(path.join(packageDir, 'dist', 'ipc', 'stdout-writer.js'));
   const previousWrite = process.stdout.write;
   const writes = [];
   process.stdout.write = (chunk, encoding, callback) => {
@@ -121,12 +131,30 @@ test('stdout writer emits JSON Lines with event field instead of type', async (t
     process.stdout.write = previousWrite;
   });
 
+  setStdoutContext({ channelId: 'channel-schema', agentPid: 4321, sessionId: 'session-schema' });
+  writeSession('session-schema');
   writeStatus('ready', 'schema-test');
-  const entry = JSON.parse(writes.join('').trim());
-  assert.equal(entry.event, 'agent.status');
-  assert.equal(entry.status, 'ready');
-  assert.equal(entry.detail, 'schema-test');
-  assert.equal('type' in entry, false);
+  writeActivity('processing', 'event-test', { correlation_id: 'req-schema' });
+
+  const entries = writes.join('')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+
+  assert.equal(entries.length, 3);
+  for (const entry of entries) {
+    assert.equal(entry.channel_id, 'channel-schema');
+    assert.equal(entry.agent_pid, 4321);
+    assert.equal(entry.session_id, 'session-schema');
+    assert.equal('type' in entry, false);
+  }
+  assert.equal(entries[0].event, 'agent.session');
+  assert.equal(entries[1].event, 'agent.status');
+  assert.equal(entries[1].status, 'ready');
+  assert.equal(entries[1].detail, 'schema-test');
+  assert.equal(entries[2].event, 'agent.activity');
+  assert.equal(entries[2].correlation_id, 'req-schema');
 });
 
 test('system prompt exposes required CLI commands without the banned keyword', async () => {
@@ -180,13 +208,15 @@ test('runtime creates a session on the first turn and resumes it on the second t
     type: 'event',
     event: {
       type: 'user.message.posted',
+      requestId: 'req-runtime',
       source: 'test',
       payload: { message: { content: 'hello' } },
     },
   });
 
-  await runRuntimeTurn(env, eventLine, logPath, tracePath, 1);
-  await runRuntimeTurn(env, eventLine, logPath, tracePath, 2);
+  const firstStdout = await runRuntimeTurn(env, eventLine, logPath, tracePath, 1);
+  const secondStdout = await runRuntimeTurn(env, eventLine, logPath, tracePath, 2);
+  const stdoutEntries = [...firstStdout, ...secondStdout];
 
   const logEntries = readFileSync(logPath, 'utf8')
     .trim()
@@ -212,4 +242,13 @@ test('runtime creates a session on the first turn and resumes it on the second t
     .map((entry) => entry.mode);
   assert.equal(completedModes.includes('session-id'), true);
   assert.equal(completedModes.includes('resume'), true);
+
+  assert.equal(stdoutEntries.length > 0, true);
+  for (const entry of stdoutEntries) {
+    assert.equal(entry.channel_id, 'channel-agent');
+    assert.equal(entry.session_id, sessionId);
+    assert.equal(typeof entry.agent_pid, 'number');
+  }
+  const processingEntry = stdoutEntries.find((entry) => entry.event === 'agent.activity' && entry.activity === 'processing');
+  assert.equal(processingEntry?.correlation_id, 'req-runtime');
 });

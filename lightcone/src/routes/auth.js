@@ -140,7 +140,7 @@ router.get('/feishu/callback', async (req, res) => {
         await addIdentityToUser(db, keepUserId, {
           provider: 'feishu', providerUid, meta: { open_id, union_id },
         });
-        console.log(`[Auth] Linked feishu ${providerUid} to user ${keepUserId}`);
+        console.error(`[Auth] Linked feishu ${providerUid} to user ${keepUserId}`);
         return res.redirect('/?linked=feishu');
       }
       if (existingFeishuUser.id === keepUserId) {
@@ -149,7 +149,7 @@ router.get('/feishu/callback', async (req, res) => {
       }
       // Feishu identity belongs to a different user — merge
       const result = await mergeUsers(db, keepUserId, existingFeishuUser.id);
-      console.log(`[Auth] Merged user ${existingFeishuUser.id} into ${keepUserId}:`, result.transferred);
+      console.error(`[Auth] Merged user ${existingFeishuUser.id} into ${keepUserId}:`, result.transferred);
       return res.redirect('/?linked=feishu&merged=true');
     }
 
@@ -372,7 +372,7 @@ router.post('/link/password', async (req, res) => {
     await addIdentityToUser(db, req.user.id, {
       provider: 'password', providerUid: username, credential: hash,
     });
-    console.log(`[Auth] Linked password identity "${username}" to user ${req.user.id}`);
+    console.error(`[Auth] Linked password identity "${username}" to user ${req.user.id}`);
     return res.json({ ok: true });
   }
 
@@ -389,7 +389,7 @@ router.post('/link/password', async (req, res) => {
   if (!ok) return res.status(401).json({ error: '密码错误' });
 
   const result = await mergeUsers(db, req.user.id, existing.id);
-  console.log(`[Auth] Merged user ${existing.id} into ${req.user.id} via password link:`, result.transferred);
+  console.error(`[Auth] Merged user ${existing.id} into ${req.user.id} via password link:`, result.transferred);
   return res.json({ ok: true, merged: true, transferred: result.transferred });
 });
 

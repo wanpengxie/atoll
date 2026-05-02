@@ -286,7 +286,7 @@ export async function initDb() {
     );
     if (indexes.length === 0) {
       await db.execute(`ALTER TABLE messages ADD FULLTEXT INDEX ft_content (content) WITH PARSER ngram`);
-      console.log('[DB] Added fulltext index ft_content on messages');
+      console.error('[DB] Added fulltext index ft_content on messages');
     }
   }
 
@@ -298,7 +298,7 @@ export async function initDb() {
     );
     if (cols.length === 0) {
       await db.execute(`ALTER TABLE messages ADD COLUMN deleted_at DATETIME DEFAULT NULL`);
-      console.log('[DB] Added deleted_at column to messages');
+      console.error('[DB] Added deleted_at column to messages');
     }
   }
 
@@ -312,11 +312,11 @@ export async function initDb() {
     const columnMap = new Map(cols.map(row => [row.COLUMN_NAME, row]));
     if (!columnMap.has('channel_id')) {
       await db.execute(`ALTER TABLE messages ADD COLUMN channel_id VARCHAR(36) DEFAULT NULL AFTER team_id`);
-      console.log('[DB] Added channel_id column to messages (view cache for channels)');
+      console.error('[DB] Added channel_id column to messages (view cache for channels)');
     }
     if (columnMap.get('team_id')?.IS_NULLABLE !== 'YES') {
       await db.execute(`ALTER TABLE messages MODIFY team_id VARCHAR(36) DEFAULT NULL`);
-      console.log('[DB] Altered messages.team_id to allow NULL for channel-only view-cache rows');
+      console.error('[DB] Altered messages.team_id to allow NULL for channel-only view-cache rows');
     }
     const [indexes] = await db.execute(
       `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
@@ -324,7 +324,7 @@ export async function initDb() {
     );
     if (indexes.length === 0) {
       await db.execute(`ALTER TABLE messages ADD INDEX idx_channel_id (channel_id, seq)`);
-      console.log('[DB] Added idx_channel_id on messages(channel_id, seq)');
+      console.error('[DB] Added idx_channel_id on messages(channel_id, seq)');
     }
   }
 
@@ -336,7 +336,7 @@ export async function initDb() {
     );
     if (cols.length === 0) {
       await db.execute(`ALTER TABLE team_members ADD COLUMN role_prompt TEXT DEFAULT NULL`);
-      console.log('[DB] Added role_prompt column to team_members');
+      console.error('[DB] Added role_prompt column to team_members');
     }
   }
 
@@ -348,7 +348,7 @@ export async function initDb() {
     );
     if (cols.length === 0) {
       await db.execute(`ALTER TABLE machines ADD COLUMN deleted_at DATETIME DEFAULT NULL`);
-      console.log('[DB] Added deleted_at column to machines');
+      console.error('[DB] Added deleted_at column to machines');
     }
   }
 
@@ -360,7 +360,7 @@ export async function initDb() {
     );
     if (cols.length === 0) {
       await db.execute(`ALTER TABLE agents ADD COLUMN agent_api_key VARCHAR(80) DEFAULT NULL UNIQUE`);
-      console.log('[DB] Added agent_api_key column to agents');
+      console.error('[DB] Added agent_api_key column to agents');
       // Backfill existing agents
       const { randomBytes } = await import('crypto');
       const [existing] = await db.execute(`SELECT id FROM agents WHERE deleted_at IS NULL`);
@@ -368,7 +368,7 @@ export async function initDb() {
         const key = 'sk_agent_' + randomBytes(32).toString('hex');
         await db.execute(`UPDATE agents SET agent_api_key = ? WHERE id = ?`, [key, row.id]);
       }
-      console.log(`[DB] Backfilled agent_api_key for ${existing.length} agents`);
+      console.error(`[DB] Backfilled agent_api_key for ${existing.length} agents`);
     }
   }
 
@@ -508,7 +508,7 @@ export async function initDb() {
         AND is_del = 0
     `);
     if (result.affectedRows > 0)
-      console.log(`[DB] Deleted ${result.affectedRows} guest-owned agent(s)`);
+      console.error(`[DB] Deleted ${result.affectedRows} guest-owned agent(s)`);
   }
 
   // Cleanup: soft-delete teams owned by guest users
@@ -537,13 +537,13 @@ export async function initDb() {
         AND is_del = 0
     `);
     if (result.affectedRows > 0)
-      console.log(`[DB] Deleted ${result.affectedRows} guest-owned team(s)`);
+      console.error(`[DB] Deleted ${result.affectedRows} guest-owned team(s)`);
   }
 
   // Seed platform skills from src/skills/platform/
   await seedPlatformSkills(db);
 
-  console.log('[DB] MySQL ready');
+  console.error('[DB] MySQL ready');
 }
 
 async function ensureSoftDeleteColumns(db) {
@@ -564,11 +564,11 @@ async function ensureSoftDeleteColumns(db) {
     const names = new Set(cols.map(c => c.COLUMN_NAME));
     if (!names.has('is_del')) {
       await db.execute(`ALTER TABLE \`${table}\` ADD COLUMN is_del TINYINT NOT NULL DEFAULT 0`);
-      console.log(`[DB] Added is_del column to ${table}`);
+      console.error(`[DB] Added is_del column to ${table}`);
     }
     if (!names.has('deleted_at')) {
       await db.execute(`ALTER TABLE \`${table}\` ADD COLUMN deleted_at DATETIME DEFAULT NULL`);
-      console.log(`[DB] Added deleted_at column to ${table}`);
+      console.error(`[DB] Added deleted_at column to ${table}`);
     }
     await db.execute(`UPDATE \`${table}\` SET is_del = 1 WHERE deleted_at IS NOT NULL AND is_del = 0`);
   }
@@ -604,7 +604,7 @@ async function ensureUtf8mb4UnicodeCollation(db) {
     );
     if (cols.length === 0) continue;
     await db.execute(`ALTER TABLE \`${table}\` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
-    console.log(`[DB] Converted ${table} to utf8mb4_unicode_ci`);
+    console.error(`[DB] Converted ${table} to utf8mb4_unicode_ci`);
   }
 }
 
@@ -640,7 +640,7 @@ async function ensureAgentMemoryScopedByTeam(db) {
       DROP PRIMARY KEY,
       ADD PRIMARY KEY (agent_id, team_id, path(200))
   `);
-  console.log('[DB] Migrated agent_memory primary key to include team_id');
+  console.error('[DB] Migrated agent_memory primary key to include team_id');
 }
 
 async function seedPlatformSkills(db) {

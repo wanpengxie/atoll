@@ -400,7 +400,7 @@ export class ChannelManager {
 
     emitJsonEvent('agent.spawn', { channel_id: node.channelId, pid: node.agentPid, session_id: node.sessionId });
     emitJsonEvent('channel.start', { channel_id: node.channelId, status: node.status, pid: node.agentPid });
-    console.log(`[ChannelManager] Started ${channelId} pid=${node.agentPid ?? 'n/a'} entry=${spawnConfig.entry}`);
+    console.error(`[ChannelManager] Started ${channelId} pid=${node.agentPid ?? 'n/a'} entry=${spawnConfig.entry}`);
     return this._channelInfo(node);
   }
 
@@ -802,18 +802,18 @@ export class ChannelManager {
     });
 
     proc.on('exit', async (code, signal) => {
-      if (this.channels.get(node.channelId)?.proc !== proc) return;
-
       if (stdoutBuffer) {
         process.stdout.write(`${stdoutBuffer}\n`);
         stdoutBuffer = '';
       }
 
+      if (this.channels.get(node.channelId)?.proc !== proc) return;
+
       node.proc = null;
       node.agentPid = null;
 
       emitJsonEvent('agent.exit', { channel_id: node.channelId, code, signal });
-      console.log(`[ChannelManager] Channel ${node.channelId} process exited code=${code ?? 'n/a'} signal=${signal ?? 'n/a'}`);
+      console.error(`[ChannelManager] Channel ${node.channelId} process exited code=${code ?? 'n/a'} signal=${signal ?? 'n/a'}`);
 
       if (node.intentionalStop) {
         node.intentionalStop = false;

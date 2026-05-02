@@ -7,6 +7,46 @@ import test from 'node:test';
 
 import { ChannelManager } from '../src/channel-manager.js';
 
+function captureStdoutWrites(t) {
+  const previousWrite = process.stdout.write;
+  const writes = [];
+  process.stdout.write = (chunk, encoding, callback) => {
+    writes.push(String(chunk));
+    if (typeof encoding === 'function') encoding();
+    if (typeof callback === 'function') callback();
+    return true;
+  };
+
+  t.after(() => {
+    process.stdout.write = previousWrite;
+  });
+
+  return writes;
+}
+
+function createStdoutHarness(t, channelId) {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-stdout-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+  });
+  const proc = new EventEmitter();
+  proc.stdout = new EventEmitter();
+  proc.stderr = new EventEmitter();
+  const node = { channelId };
+
+  channelManager._wireProcess(node, proc, { restoring: false });
+  return { channelManager, proc, node };
+}
+
 test('channel:message.send writes local truth before view sync and reports success', async (t) => {
   const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-human-message-'));
   const previousHome = process.env.HOME;
@@ -251,40 +291,52 @@ test('channel:message.send keeps daemon truth and reports ok when view sync requ
 });
 
 test('agent stdout is forwarded as raw JSON Lines without prefix or truncation', (t) => {
-  const previousWrite = process.stdout.write;
-  const writes = [];
-  process.stdout.write = (chunk, encoding, callback) => {
-    writes.push(String(chunk));
-    if (typeof encoding === 'function') encoding();
-    if (typeof callback === 'function') callback();
-    return true;
-  };
-
-  t.after(() => {
-    process.stdout.write = previousWrite;
-  });
-
-  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-stdout-'));
-  t.after(() => {
-    rmSync(tempHome, { recursive: true, force: true });
-  });
-
-  const channelManager = new ChannelManager({
-    serverUrl: 'http://localhost:3001',
-    machineApiKey: 'machine-key',
-    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
-    daemonHttpUrl: 'http://127.0.0.1:3002',
-    daemonToken: 'daemon-token',
-  });
-  const proc = new EventEmitter();
-  proc.stdout = new EventEmitter();
-  proc.stderr = new EventEmitter();
-  const node = { channelId: 'channel-stdout' };
+  const writes = captureStdoutWrites(t);
+  const { proc } = createStdoutHarness(t, 'channel-stdout');
   const longDetail = 'x'.repeat(800);
   const line = JSON.stringify({ event: 'agent.status', detail: longDetail });
 
-  channelManager._wireProcess(node, proc, { restoring: false });
   proc.stdout.emit('data', `${line}\n`);
 
   assert.equal(writes.join(''), `${line}\n`);
+});
+
+test('agent stdout split across chunks is buffered until a full JSON Line arrives', (t) => {
+  const writes = captureStdoutWrites(t);
+  const { proc } = createStdoutHarness(t, 'channel-stdout-chunks');
+  const line = JSON.stringify({ event: 'agent.activity', detail: 'chunked' });
+  const cut = Math.floor(line.length / 2);
+
+  proc.stdout.emit('data', line.slice(0, cut));
+  assert.deepEqual(writes, []);
+
+  proc.stdout.emit('data', `${line.slice(cut)}\n`);
+  assert.deepEqual(writes, [`${line}\n`]);
+});
+
+test('agent stdout forwards multiple JSON Lines from a single chunk separately', (t) => {
+  const writes = captureStdoutWrites(t);
+  const { proc } = createStdoutHarness(t, 'channel-stdout-multiline');
+  const lines = [
+    JSON.stringify({ event: 'agent.status', detail: 'a' }),
+    JSON.stringify({ event: 'agent.status', detail: 'b' }),
+    JSON.stringify({ event: 'agent.status', detail: 'c' }),
+  ];
+
+  proc.stdout.emit('data', `${lines.join('\n')}\n`);
+
+  assert.deepEqual(writes, lines.map((line) => `${line}\n`));
+});
+
+test('agent stdout flushes an unterminated line on exit even when proc was replaced', (t) => {
+  const writes = captureStdoutWrites(t);
+  const { channelManager, proc, node } = createStdoutHarness(t, 'channel-stdout-exit-flush');
+  const line = JSON.stringify({ event: 'agent.status', detail: 'unterminated' });
+  const replacementProc = new EventEmitter();
+
+  proc.stdout.emit('data', line);
+  channelManager.channels.set(node.channelId, { ...node, proc: replacementProc });
+  proc.emit('exit', 1, null);
+
+  assert.deepEqual(writes, [`${line}\n`]);
 });

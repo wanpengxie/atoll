@@ -25,10 +25,10 @@ export async function deliverMessageToAgents(teamId, message) {
 
     if (isMachineOnline(agent.machine_id)) {
       sendToDaemon(agent.machine_id, daemonMsg);
-      console.log(`[Scheduler] Delivered msg seq=${message.seq} to agent ${agent.name}`);
+      console.error(`[Scheduler] Delivered msg seq=${message.seq} to agent ${agent.name}`);
     } else {
       pushToInbox(agent.id, message);
-      console.log(`[Scheduler] Machine offline, queued msg seq=${message.seq} for agent ${agent.name}`);
+      console.error(`[Scheduler] Machine offline, queued msg seq=${message.seq} for agent ${agent.name}`);
     }
   }
 }

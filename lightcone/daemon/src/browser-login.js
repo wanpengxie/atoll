@@ -187,7 +187,7 @@ export class BrowserLoginSession {
       });
 
       this._proc.on('exit', (code, signal) => {
-        console.log(`[BrowserLogin][${this._platform}] Chrome exited (code=${code} signal=${signal})`);
+        console.error(`[BrowserLogin][${this._platform}] Chrome exited (code=${code} signal=${signal})`);
         this._stopTimers();
         if (this._profileLock) { this._profileLock.release(); this._profileLock = null; }
       });
@@ -228,7 +228,7 @@ export class BrowserLoginSession {
       if (this._config.qrTabSelector) {
         try {
           const qrResult = await this._switchToQrLogin();
-          console.log(`[BrowserLogin][${this._platform}] QR switch result: ${qrResult?.via ?? 'not-found'}`);
+          console.error(`[BrowserLogin][${this._platform}] QR switch result: ${qrResult?.via ?? 'not-found'}`);
           await sleep(1000);
         } catch (err) {
           console.error(`[BrowserLogin][${this._platform}] QR switch failed: ${err.message}`);
@@ -397,7 +397,7 @@ export class BrowserLoginSession {
               c.domain.includes(baseDomain)
             );
             writeFileSync(path.join(this._profileDir, 'cookies.json'), JSON.stringify(cookies));
-            console.log(`[BrowserLogin][${this._platform}] Saved ${cookies.length} cookies to cookies.json`);
+            console.error(`[BrowserLogin][${this._platform}] Saved ${cookies.length} cookies to cookies.json`);
           } catch (err) {
             console.error(`[BrowserLogin][${this._platform}] Failed to save cookies: ${err.message}`);
           }

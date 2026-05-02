@@ -30,7 +30,7 @@ export async function ensurePlatformMachine() {
   );
 
   if (existing.length > 0) {
-    console.log(`[HostedDaemon] Platform machine exists: ${existing[0].id}`);
+    console.error(`[HostedDaemon] Platform machine exists: ${existing[0].id}`);
     return existing[0].api_key;
   }
 
@@ -44,8 +44,8 @@ export async function ensurePlatformMachine() {
     apiKeyPrefix: apiKey.slice(0, 18),
     isPlatform: true,
   });
-  console.log(`[HostedDaemon] Created platform machine: ${machine.id}`);
-  console.log(`[HostedDaemon] Platform machine API key: ${apiKey}`);
+  console.error(`[HostedDaemon] Created platform machine: ${machine.id}`);
+  console.error(`[HostedDaemon] Platform machine API key: ${apiKey}`);
   return apiKey;
 }
 
@@ -60,7 +60,7 @@ export async function startHostedDaemon(port) {
   const apiKey = await ensurePlatformMachine();
 
   if (mode === 'remote') {
-    console.log('[HostedDaemon] Remote mode — platform machine ready, daemon runs on external VPS');
+    console.error('[HostedDaemon] Remote mode — platform machine ready, daemon runs on external VPS');
     return;
   }
 
@@ -78,7 +78,7 @@ export async function startHostedDaemon(port) {
   });
 
   connection.connect();
-  console.log('[HostedDaemon] Embedded daemon started');
+  console.error('[HostedDaemon] Embedded daemon started');
 }
 
 export function stopHostedDaemon() {

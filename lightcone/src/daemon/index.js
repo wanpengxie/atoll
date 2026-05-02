@@ -99,7 +99,7 @@ export function setupDaemonServer(httpServer) {
   wss.on('connection', (ws, req, machine) => {
     const machineId = machine.id;
     const serverId  = machine.server_id;
-    console.log(`[Daemon] Machine ${machine.name} (${machineId}) connected`);
+    console.error(`[Daemon] Machine ${machine.name} (${machineId}) connected`);
     emitJsonEvent('machine.connect', { machine_id: machineId, server_id: serverId });
 
     registerDaemon(machineId, ws);
@@ -111,7 +111,7 @@ export function setupDaemonServer(httpServer) {
     });
 
     ws.on('close', async (code) => {
-      console.log(`[Daemon] Machine ${machine.name} disconnected (code=${code})`);
+      console.error(`[Daemon] Machine ${machine.name} disconnected (code=${code})`);
       emitJsonEvent('machine.disconnect', { machine_id: machineId, server_id: serverId, code });
       unregisterDaemon(machineId);
       const db = getDb();
@@ -135,7 +135,7 @@ export function setupDaemonServer(httpServer) {
     }
   }, 30000);
 
-  console.log('[Daemon] WebSocket server ready at /daemon/connect');
+  console.error('[Daemon] WebSocket server ready at /daemon/connect');
 }
 
 async function handleDaemonMessage(machineId, serverId, msg) {
@@ -144,7 +144,7 @@ async function handleDaemonMessage(machineId, serverId, msg) {
 
   switch (type) {
     case 'ready': {
-      console.log(`[Daemon] ${machineId} ready — runtimes: ${msg.runtimes?.join(', ')}, version: ${msg.daemonVersion}`);
+      console.error(`[Daemon] ${machineId} ready — runtimes: ${msg.runtimes?.join(', ')}, version: ${msg.daemonVersion}`);
       await updateMachine(db, machineId, {
         status: 'online',
         hostname: msg.hostname ?? null,
@@ -184,7 +184,7 @@ async function handleDaemonMessage(machineId, serverId, msg) {
               envVars: agent.env_vars ? JSON.parse(agent.env_vars) : {},
             },
           });
-          console.log(`[Daemon] Sent agent:start to ${agent.name} (#${team?.name ?? teamId})`);
+          console.error(`[Daemon] Sent agent:start to ${agent.name} (#${team?.name ?? teamId})`);
         }
       }
 
@@ -218,7 +218,7 @@ async function handleDaemonMessage(machineId, serverId, msg) {
       const { agentId, status } = msg;
       await updateAgent(db, agentId, { status });
       broadcast.agentActivity(serverId, agentId, status === 'active' ? 'online' : 'offline', '', []);
-      console.log(`[Daemon] Agent ${agentId} status → ${status}`);
+      console.error(`[Daemon] Agent ${agentId} status → ${status}`);
       if (status === 'active') {
         flushInbox(agentId, async (message) => {
           const agent = await getAgentById(db, agentId);
@@ -248,12 +248,12 @@ async function handleDaemonMessage(machineId, serverId, msg) {
       } else {
         await updateAgent(db, agentId, { session_id: sessionId });
       }
-      console.log(`[Daemon] Agent ${agentId} team=${teamId ?? 'none'} session → ${sessionId}`);
+      console.error(`[Daemon] Agent ${agentId} team=${teamId ?? 'none'} session → ${sessionId}`);
       break;
     }
 
     case 'agent:deliver:ack':
-      console.log(`[Daemon] Deliver ack: agent=${msg.agentId} seq=${msg.seq}`);
+      console.error(`[Daemon] Deliver ack: agent=${msg.agentId} seq=${msg.seq}`);
       break;
 
     case 'message.append': {
@@ -361,7 +361,7 @@ async function handleDaemonMessage(machineId, serverId, msg) {
           envVars: agent.env_vars ? JSON.parse(agent.env_vars) : {},
         },
       });
-      console.log(`[Daemon] Re-sent agent:start for ${agent.name} (#${team?.name ?? teamId})`);
+      console.error(`[Daemon] Re-sent agent:start for ${agent.name} (#${team?.name ?? teamId})`);
       break;
     }
 
@@ -426,10 +426,10 @@ async function handleDaemonMessage(machineId, serverId, msg) {
               [newCredId, oldId]
             );
           }
-          console.log(`[Daemon] Migrated grants from ${oldIds.length} old credential(s) to ${newCredId}`);
+          console.error(`[Daemon] Migrated grants from ${oldIds.length} old credential(s) to ${newCredId}`);
         }
 
-        console.log(`[Daemon] Browser login complete: platform=${platform} user=${userId}, profile saved`);
+        console.error(`[Daemon] Browser login complete: platform=${platform} user=${userId}, profile saved`);
 
         // Restart agents that now have grants to the new credential so they pick up new env vars
         const [grantedAgentRows] = await db.execute(
@@ -467,7 +467,7 @@ async function handleDaemonMessage(machineId, serverId, msg) {
                 envVars: agent.env_vars ? JSON.parse(agent.env_vars) : {},
               },
             });
-            console.log(`[Daemon] Restarted agent ${agent.name} (#${team?.name ?? teamId}) after credential update`);
+            console.error(`[Daemon] Restarted agent ${agent.name} (#${team?.name ?? teamId}) after credential update`);
           }
         }
       } else {
@@ -486,7 +486,7 @@ async function handleDaemonMessage(machineId, serverId, msg) {
       break;
 
     default:
-      console.log(`[Daemon] Unhandled message type: ${type}`);
+      console.error(`[Daemon] Unhandled message type: ${type}`);
   }
 }
 

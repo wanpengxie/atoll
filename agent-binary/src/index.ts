@@ -4,7 +4,7 @@ import { initializeWorkspace } from './bootstrap/workspace-init.js';
 import { runPostTurn } from './hooks/post-turn.js';
 import { appendTrace } from './hooks/trace.js';
 import { startStdinReader } from './ipc/stdin-reader.js';
-import { writeActivity, writeSession, writeStatus } from './ipc/stdout-writer.js';
+import { setStdoutContext, writeActivity, writeSession, writeStatus } from './ipc/stdout-writer.js';
 import { buildSystemPrompt, buildUserTurn } from './prompt/system-prompt.js';
 import { runAgentTurn } from './sdk/agent.js';
 import type { AgentEvent, StdinEnvelope } from './types/ipc.js';
@@ -28,6 +28,7 @@ async function main(): Promise<void> {
   const session = ensureSessionState(env);
   const systemPrompt = buildSystemPrompt(env);
 
+  setStdoutContext({ channelId: env.channelId, agentPid: process.pid, sessionId: session.sessionId });
   writeSession(session.sessionId);
   writeStatus('ready', session.existed ? 'session_restored' : 'session_initialized');
   appendTrace(env.workdir, env.agentName, session.sessionId, {
@@ -46,7 +47,7 @@ async function main(): Promise<void> {
     if (!next) return;
 
     processing = true;
-    writeActivity('processing', next.type);
+    writeActivity('processing', next.type, { correlation_id: next.requestId ?? next.id });
     appendTrace(env.workdir, env.agentName, session.sessionId, {
       kind: 'event.received',
       event: next,

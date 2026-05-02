@@ -44,7 +44,7 @@ if (!MACHINE_API_KEY) {
   process.exit(1);
 }
 
-console.log(`[Daemon] v${version} Server: ${SERVER_URL} project=${PROJECT_KEY}`);
+console.error(`[Daemon] v${version} Server: ${SERVER_URL} project=${PROJECT_KEY}`);
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 const agentManager = new AgentManager({ serverUrl: SERVER_URL, machineApiKey: MACHINE_API_KEY });
@@ -81,7 +81,7 @@ let shuttingDown = false;
 async function shutdown(signal, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`[Daemon] Shutting down (${signal})`);
+  console.error(`[Daemon] Shutting down (${signal})`);
   connection.stop();
   try { await rpcServer.stop(); } catch (err) { console.error('[Daemon] RPC shutdown error:', err.message); }
   try { await channelManager.stopAll(); } catch (err) { console.error('[Daemon] Channel shutdown error:', err.message); }
@@ -95,7 +95,7 @@ async function main() {
   await rpcServer.start();
   channelManager.setConnection(connection);
   connection.connect();
-  console.log(`[Daemon] RPC ready at unix://${DAEMON_SOCKET}${DAEMON_HTTP_URL ? ` and ${DAEMON_HTTP_URL}` : ''}`);
+  console.error(`[Daemon] RPC ready at unix://${DAEMON_SOCKET}${DAEMON_HTTP_URL ? ` and ${DAEMON_HTTP_URL}` : ''}`);
 }
 
 main().catch(async (err) => {

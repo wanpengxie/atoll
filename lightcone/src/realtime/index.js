@@ -14,7 +14,7 @@ export function setupSocketIO(httpServer) {
 
   io.on('connection', (socket) => {
     const { serverId } = socket.handshake.auth ?? {};
-    console.log(`[SocketIO] Client connected: ${socket.id}, server=${serverId}`);
+    console.error(`[SocketIO] Client connected: ${socket.id}, server=${serverId}`);
     emitJsonEvent('socket.connection', { socket_id: socket.id, server_id: serverId ?? null });
     if (serverId) socket.join(`server:${serverId}`);
 
@@ -33,13 +33,13 @@ export function setupSocketIO(httpServer) {
     });
 
     socket.on('disconnect', () => {
-      console.log(`[SocketIO] Client disconnected: ${socket.id}`);
+      console.error(`[SocketIO] Client disconnected: ${socket.id}`);
       emitJsonEvent('socket.disconnect', { socket_id: socket.id, server_id: serverId ?? null });
     });
     socket.on('ping', () => socket.emit('pong'));
   });
 
   setInterval(() => { io.emit('ping'); }, 25_000);
-  console.log('[SocketIO] Ready');
+  console.error('[SocketIO] Ready');
   return io;
 }

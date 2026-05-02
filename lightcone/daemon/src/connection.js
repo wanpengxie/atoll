@@ -75,11 +75,11 @@ export class DaemonConnection {
 
   connect() {
     const url = `${this.serverUrl}/daemon/connect?key=${this.machineApiKey}`;
-    console.log(`[Connection] Connecting to ${url}`);
+    console.error(`[Connection] Connecting to ${url}`);
     this.ws = new WebSocket(url);
 
     this.ws.on('open', () => {
-      console.log(`[Connection] Connected (daemon v${DAEMON_VERSION})`);
+      console.error(`[Connection] Connected (daemon v${DAEMON_VERSION})`);
       this.reconnectDelay = RECONNECT_INITIAL;
       this._sendReady();
     });
@@ -90,13 +90,13 @@ export class DaemonConnection {
       catch { return; }
       if (this._resolvePending(msg)) return;
       if (msg.type !== 'pong') {
-        console.log(`[Connection] ← ${msg.type}${msg.agentId ? ` agent=${msg.agentId.slice(0,8)}` : ''}${msg.teamId ? ` team=${msg.teamId.slice(0,8)}` : ''}${msg.seq != null ? ` seq=${msg.seq}` : ''}`);
+        console.error(`[Connection] ← ${msg.type}${msg.agentId ? ` agent=${msg.agentId.slice(0,8)}` : ''}${msg.teamId ? ` team=${msg.teamId.slice(0,8)}` : ''}${msg.seq != null ? ` seq=${msg.seq}` : ''}`);
       }
       this.onMessage(msg);
     });
 
     this.ws.on('close', (code) => {
-      console.log(`[Connection] Disconnected (code=${code})`);
+      console.error(`[Connection] Disconnected (code=${code})`);
       if (!this.stopped) this._scheduleReconnect();
     });
 
@@ -143,7 +143,7 @@ export class DaemonConnection {
     const runtimes = detectRuntimes();
     const modelsByRuntime = probeModelsByRuntime(runtimes);
     const summary = runtimes.map(r => `${r}[${modelsByRuntime[r]?.length ?? 0}]`).join(',');
-    console.log(`[Connection] Ready — host=${os.hostname()} runtimes=${summary} v${DAEMON_VERSION}`);
+    console.error(`[Connection] Ready — host=${os.hostname()} runtimes=${summary} v${DAEMON_VERSION}`);
     this.send({
       type: 'ready',
       hostname: os.hostname(),
@@ -168,7 +168,7 @@ export class DaemonConnection {
   }
 
   _scheduleReconnect() {
-    console.log(`[Connection] Reconnecting in ${this.reconnectDelay}ms...`);
+    console.error(`[Connection] Reconnecting in ${this.reconnectDelay}ms...`);
     setTimeout(() => this.connect(), this.reconnectDelay);
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX);
   }

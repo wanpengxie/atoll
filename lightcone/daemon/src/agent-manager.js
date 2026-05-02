@@ -32,17 +32,17 @@ export class AgentManager {
       case 'browser:stop_login':  return this._stopBrowserLogin(msg);
       case 'ping':              return connection.send({ type: 'pong' });
       default:
-        console.log(`[AgentManager] Unhandled: ${msg.type}`);
+        console.error(`[AgentManager] Unhandled: ${msg.type}`);
     }
   }
 
   async _preflight(msg, connection) {
     const { preflight } = await import('./preflight.js');
     const { runtime, model, requestId } = msg;
-    console.log(`[Preflight] runtime=${runtime} model=${model ?? '(default)'}`);
+    console.error(`[Preflight] runtime=${runtime} model=${model ?? '(default)'}`);
     const result = await preflight({ runtime, model });
-    if (result.ok) console.log(`[Preflight] OK`);
-    else           console.log(`[Preflight] FAIL: ${result.error?.slice(0, 200)}`);
+    if (result.ok) console.error(`[Preflight] OK`);
+    else           console.error(`[Preflight] FAIL: ${result.error?.slice(0, 200)}`);
     connection.send({ type: 'runtime:preflight:result', requestId, ok: result.ok, error: result.error ?? null });
   }
 
@@ -104,7 +104,7 @@ export class AgentManager {
   async _startAgent({ agentId, teamId, teamName, config }, connection) {
     const key = this._key(agentId, teamId);
     if (this.agents.has(key) || this.starting.has(key)) {
-      console.log(`[AgentManager] Agent ${config?.displayName ?? agentId} in team ${teamName ?? teamId} already registered`);
+      console.error(`[AgentManager] Agent ${config?.displayName ?? agentId} in team ${teamName ?? teamId} already registered`);
       return;
     }
     this.starting.add(key);
@@ -123,9 +123,9 @@ export class AgentManager {
       });
       if (res.ok) skills = await res.json();
       const mcpSkills = skills.filter(s => s.mcpConfig);
-      console.log(`[AgentManager] Skills loaded for ${config.displayName ?? agentId}: ${skills.length} total, ${mcpSkills.length} with MCP (${mcpSkills.map(s => s.name).join(', ') || 'none'})`);
+      console.error(`[AgentManager] Skills loaded for ${config.displayName ?? agentId}: ${skills.length} total, ${mcpSkills.length} with MCP (${mcpSkills.map(s => s.name).join(', ') || 'none'})`);
     } catch (err) {
-      console.log(`[AgentManager] Skills fetch failed for ${agentId} (non-fatal): ${err.message}`);
+      console.error(`[AgentManager] Skills fetch failed for ${agentId} (non-fatal): ${err.message}`);
     }
 
     // Fetch credential grants for this agent (non-blocking on failure)
@@ -135,9 +135,9 @@ export class AgentManager {
         headers: { 'Authorization': `Bearer ${this.machineApiKey}` },
       });
       if (res.ok) credentialGrants = await res.json();
-      console.log(`[AgentManager] Credential grants for ${config.displayName ?? agentId}: ${credentialGrants.map(g => `${g.platform}(${Object.keys(g.envVars ?? {}).join(',')})`).join(', ') || 'none'}`);
+      console.error(`[AgentManager] Credential grants for ${config.displayName ?? agentId}: ${credentialGrants.map(g => `${g.platform}(${Object.keys(g.envVars ?? {}).join(',')})`).join(', ') || 'none'}`);
     } catch (err) {
-      console.log(`[AgentManager] Credential grants fetch failed for ${agentId} (non-fatal): ${err.message}`);
+      console.error(`[AgentManager] Credential grants fetch failed for ${agentId} (non-fatal): ${err.message}`);
     }
 
     // Materialize bound skills into .skills/ directory
@@ -153,7 +153,7 @@ export class AgentManager {
         credentialGrants,
       });
 
-      console.log(`[AgentManager] Spawning kimi for ${config.displayName ?? agentId} team=${teamName ?? teamId ?? 'none'} (session=${kimiSpawn.sessionId})`);
+      console.error(`[AgentManager] Spawning kimi for ${config.displayName ?? agentId} team=${teamName ?? teamId ?? 'none'} (session=${kimiSpawn.sessionId})`);
 
       proc = spawn('kimi', kimiSpawn.args, {
         cwd: workspaceDir,
@@ -204,7 +204,7 @@ export class AgentManager {
         credentialGrants,
       });
 
-      console.log(`[AgentManager] Spawning codex for ${config.displayName ?? agentId} team=${teamName ?? teamId ?? 'none'} (session=${config.sessionId ?? 'new'})`);
+      console.error(`[AgentManager] Spawning codex for ${config.displayName ?? agentId} team=${teamName ?? teamId ?? 'none'} (session=${config.sessionId ?? 'new'})`);
 
       proc = spawn('codex', codexSpawn.args, {
         cwd: workspaceDir,
@@ -256,9 +256,9 @@ export class AgentManager {
       }));
 
       const mcpConfig = { mcpServers };
-      console.log(`[AgentManager] MCP servers for ${config.displayName ?? agentId}: ${Object.keys(mcpServers).join(', ')}`);
+      console.error(`[AgentManager] MCP servers for ${config.displayName ?? agentId}: ${Object.keys(mcpServers).join(', ')}`);
       for (const [name, mc] of Object.entries(mcpServers)) {
-        console.log(`[AgentManager]   mcp:${name} → ${mc.command} ${(mc.args ?? []).join(' ')}`);
+        console.error(`[AgentManager]   mcp:${name} → ${mc.command} ${(mc.args ?? []).join(' ')}`);
       }
 
       const args = [
@@ -281,14 +281,14 @@ export class AgentManager {
           statSync(sessionFile);
           args.push('--resume', config.sessionId);
         } catch {
-          console.log(`[AgentManager] Session ${config.sessionId} not found locally, starting fresh`);
+          console.error(`[AgentManager] Session ${config.sessionId} not found locally, starting fresh`);
         }
       }
 
       const spawnEnv = { ...process.env, FORCE_COLOR: '0', ...(config.envVars ?? {}) };
       delete spawnEnv.CLAUDECODE;
 
-      console.log(`[AgentManager] Spawning claude for ${config.displayName ?? agentId} team=${teamName ?? teamId ?? 'none'} (session=${config.sessionId ?? 'new'})`);
+      console.error(`[AgentManager] Spawning claude for ${config.displayName ?? agentId} team=${teamName ?? teamId ?? 'none'} (session=${config.sessionId ?? 'new'})`);
 
       proc = spawn('claude', args, {
         cwd: workspaceDir,
@@ -319,7 +319,7 @@ export class AgentManager {
 
     proc.on('exit', (code) => {
       const agent = this.agents.get(key);
-      console.log(`[AgentManager] Agent ${config.displayName ?? agentId} team=${teamName ?? teamId ?? 'none'} exited (code=${code})`);
+      console.error(`[AgentManager] Agent ${config.displayName ?? agentId} team=${teamName ?? teamId ?? 'none'} exited (code=${code})`);
       this.agents.delete(key);
 
       if (code === 0 && runtime === 'codex' && this._pendingMessages?.get(key)?.length) {
@@ -332,7 +332,7 @@ export class AgentManager {
       if (code !== 0 && config.sessionId && !this._retried?.has(key)) {
         if (!this._retried) this._retried = new Set();
         this._retried.add(key);
-        console.log(`[AgentManager] Retrying ${agentId} team=${teamId} without session (session may not exist locally)`);
+        console.error(`[AgentManager] Retrying ${agentId} team=${teamId} without session (session may not exist locally)`);
         const retryConfig = { ...config, sessionId: null };
         this._startAgent({ agentId, teamId, config: retryConfig }, connection);
         return;
@@ -349,7 +349,7 @@ export class AgentManager {
       this._write(key, 'You have just started. Follow your startup sequence: first call read_memory with path="MEMORY.md" to load your memory index, then call check_messages.');
     }
 
-    console.log(`[AgentManager] Agent ${config.displayName ?? agentId} is now active (team=${teamName ?? teamId ?? 'none'})`);
+    console.error(`[AgentManager] Agent ${config.displayName ?? agentId} is now active (team=${teamName ?? teamId ?? 'none'})`);
     connection.send({ type: 'agent:status', agentId, teamId, status: 'active' });
     connection.send({ type: 'agent:activity', agentId, teamId, activity: 'online', detail: '', entries: [] });
 
@@ -359,7 +359,7 @@ export class AgentManager {
 
   async _startBrowserLogin(msg, connection) {
     const platform = msg.platform ?? 'xhs';
-    console.log(`[AgentManager] Starting browser login for platform=${platform}`);
+    console.error(`[AgentManager] Starting browser login for platform=${platform}`);
     try {
       await startSession(platform, connection, msg.userId ?? 'default');
     } catch (err) {
@@ -370,7 +370,7 @@ export class AgentManager {
 
   _stopBrowserLogin(msg) {
     const platform = msg.platform ?? 'xhs';
-    console.log(`[AgentManager] Stopping browser login for platform=${platform}`);
+    console.error(`[AgentManager] Stopping browser login for platform=${platform}`);
     return stopSession(platform);
   }
 
@@ -378,7 +378,7 @@ export class AgentManager {
     const key = this._key(agentId, teamId);
     const agent = this.agents.get(key);
     if (!agent) return;
-    console.log(`[AgentManager] Stopping agent ${agentId} team=${teamId ?? 'none'}`);
+    console.error(`[AgentManager] Stopping agent ${agentId} team=${teamId ?? 'none'}`);
     agent.proc?.kill();
     // exit handler will report status
   }
@@ -390,7 +390,7 @@ export class AgentManager {
 
     if (!this.agents.has(key) && !this.starting.has(key)) {
       // Agent not running — queue the message and request config to spawn it
-      console.log(`[AgentManager] Agent ${agentId.slice(0,8)} team=${message.team_name ?? teamId} not running, requesting start for seq=${seq}`);
+      console.error(`[AgentManager] Agent ${agentId.slice(0,8)} team=${message.team_name ?? teamId} not running, requesting start for seq=${seq}`);
       if (!this._pendingMessages) this._pendingMessages = new Map();
       const pending = this._pendingMessages.get(key) ?? [];
       pending.push(msg);
@@ -401,7 +401,7 @@ export class AgentManager {
 
     if (this.starting.has(key)) {
       // Spawn in progress — queue the message for delivery after start
-      console.log(`[AgentManager] Agent ${agentId.slice(0,8)} team=${message.team_name ?? teamId} still starting, queuing seq=${seq}`);
+      console.error(`[AgentManager] Agent ${agentId.slice(0,8)} team=${message.team_name ?? teamId} still starting, queuing seq=${seq}`);
       if (!this._pendingMessages) this._pendingMessages = new Map();
       const pending = this._pendingMessages.get(key) ?? [];
       pending.push(msg);
@@ -411,7 +411,7 @@ export class AgentManager {
 
     const text = this._formatDeliveryText(message);
     const agent = this.agents.get(key);
-    console.log(`[AgentManager] Delivering seq=${seq} to agent ${agent?.config?.displayName ?? agentId.slice(0,8)} team=${message.team_name ?? teamId}`);
+    console.error(`[AgentManager] Delivering seq=${seq} to agent ${agent?.config?.displayName ?? agentId.slice(0,8)} team=${message.team_name ?? teamId}`);
     if (agent?.runtime === 'codex') {
       if (!this._pendingMessages) this._pendingMessages = new Map();
       const pending = this._pendingMessages.get(key) ?? [];
@@ -432,7 +432,7 @@ export class AgentManager {
       const { agentId, teamId, seq, message } = msg;
       const text = this._formatDeliveryText(message);
       const agent = this.agents.get(key);
-      console.log(`[AgentManager] Flushing queued seq=${seq} to agent ${agent?.config?.displayName ?? agentId.slice(0,8)} team=${message.team_name ?? teamId}`);
+      console.error(`[AgentManager] Flushing queued seq=${seq} to agent ${agent?.config?.displayName ?? agentId.slice(0,8)} team=${message.team_name ?? teamId}`);
       this._write(key, text);
     }
   }
@@ -542,11 +542,11 @@ export class AgentManager {
       const content = event.message?.content ?? [];
       for (const block of content) {
         if (block.type === 'thinking') {
-          console.log(`[AgentManager][${displayName}] <thinking> ${block.thinking?.slice(0, 500)}`);
+          console.error(`[AgentManager][${displayName}] <thinking> ${block.thinking?.slice(0, 500)}`);
         } else if (block.type === 'text') {
-          console.log(`[AgentManager][${displayName}] <text> ${block.text?.slice(0, 500)}`);
+          console.error(`[AgentManager][${displayName}] <text> ${block.text?.slice(0, 500)}`);
         } else if (block.type === 'tool_use') {
-          console.log(`[AgentManager][${displayName}] <tool_use> ${block.name} params=${JSON.stringify(block.input ?? {}).slice(0, 500)}`);
+          console.error(`[AgentManager][${displayName}] <tool_use> ${block.name} params=${JSON.stringify(block.input ?? {}).slice(0, 500)}`);
           connection.send({ type: 'agent:activity', agentId, teamId, activity: 'working', detail: block.name, entries: [] });
         }
       }
@@ -558,7 +558,7 @@ export class AgentManager {
       const resultStr = Array.isArray(content)
         ? content.map(c => c.text ?? c.content ?? JSON.stringify(c)).join('').slice(0, 1000)
         : JSON.stringify(content ?? event).slice(0, 1000);
-      console.log(`[AgentManager][${displayName}] <tool_result> id=${event.tool_use_id ?? '?'} → ${resultStr}`);
+      console.error(`[AgentManager][${displayName}] <tool_result> id=${event.tool_use_id ?? '?'} → ${resultStr}`);
     } else if (event.type === 'user') {
       // Tool results come back as user-turn messages in stream-json
       const toolResults = (event.message?.content ?? []).filter(c => c.type === 'tool_result');
@@ -566,10 +566,10 @@ export class AgentManager {
         const resultStr = Array.isArray(tr.content)
           ? tr.content.map(c => c.text ?? c.content ?? JSON.stringify(c)).join('').slice(0, 1000)
           : JSON.stringify(tr.content ?? tr).slice(0, 1000);
-        console.log(`[AgentManager][${displayName}] <tool_result> id=${tr.tool_use_id ?? '?'} → ${resultStr}`);
+        console.error(`[AgentManager][${displayName}] <tool_result> id=${tr.tool_use_id ?? '?'} → ${resultStr}`);
       }
     } else if (event.type === 'result') {
-      console.log(`[AgentManager][${displayName}] turn done (stop_reason=${event.stop_reason ?? '?'})`);
+      console.error(`[AgentManager][${displayName}] turn done (stop_reason=${event.stop_reason ?? '?'})`);
       connection.send({ type: 'agent:activity', agentId, teamId, activity: 'online', detail: '', entries: [] });
     }
   }
