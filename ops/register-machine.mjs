@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, readFileSync, chmodSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, hostname, platform } from 'node:os';
-import http from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -46,12 +45,6 @@ function machineKeyPath(env) {
     : path.join(homedir(), '.coagent', projectKey(env), 'machine.key');
 }
 
-function daemonSocketPath(env) {
-  return env.COAGENT_DAEMON_SOCKET
-    ? path.resolve(env.COAGENT_DAEMON_SOCKET)
-    : path.join(homedir(), '.coagent', projectKey(env), 'daemon.sock');
-}
-
 function requestTimeoutMs(env) {
   const configured = Number(env.REGISTER_MACHINE_TIMEOUT_MS);
   return Number.isFinite(configured) && configured > 0 ? configured : 10_000;
@@ -80,53 +73,33 @@ async function fetchJson(url, options = {}, { timeoutMs = 10_000, serverUrl = ''
     try {
       body = JSON.parse(text);
     } catch {
+      if (res.ok) {
+        throw new Error(`server returned invalid JSON: ${text.slice(0, 200)}`);
+      }
       body = { raw: text };
     }
   }
   if (!res.ok) {
-    throw new Error(`${res.status} ${res.statusText}: ${body.error ?? body.raw ?? text}`);
+    const err = new Error(`${res.status} ${res.statusText}: ${body.error ?? body.raw ?? text}`);
+    err.status = res.status;
+    err.statusText = res.statusText;
+    throw err;
   }
   return body;
 }
 
-async function probeDaemonAdminStatus(env, key, { socketTimeoutMs = 5_000 } = {}) {
-  const socketPath = daemonSocketPath(env);
-  if (!existsSync(socketPath)) return { ok: false };
+function errorMessage(err) {
+  return err instanceof Error && err.message ? err.message : String(err);
+}
 
-  return await new Promise((resolve) => {
-    let settled = false;
-    const finish = (status) => {
-      if (settled) return;
-      settled = true;
-      resolve(status);
-    };
-
-    const req = http.request({
-      socketPath,
-      path: '/admin/status',
-      method: 'GET',
-      headers: { Authorization: `Bearer ${key}` },
-      timeout: socketTimeoutMs,
-    }, (res) => {
-      res.resume();
-      res.on('end', () => {
-        finish({ ok: res.statusCode === 200 });
-      });
-    });
-    req.on('timeout', () => {
-      req.destroy();
-      finish({ ok: false });
-    });
-    req.on('error', () => finish({ ok: false }));
-    req.end();
-  });
+function isAuthoritativeAuthFailure(err) {
+  return err?.status === 401 || err?.status === 403;
 }
 
 export async function existingKeyLooksRegistered(env, key, {
   targetServerId = String(env.DEFAULT_SERVER_ID || 'server-001'),
   targetServerUrl = normalizeServerUrl(env.SERVER_URL),
   timeoutMs = requestTimeoutMs(env),
-  socketTimeoutMs = 5_000,
 } = {}) {
   const serverUrl = normalizeServerUrl(targetServerUrl);
 
@@ -140,14 +113,13 @@ export async function existingKeyLooksRegistered(env, key, {
     if (body.key_valid === true && String(body.server_id ?? '') === String(targetServerId)) {
       return { valid: true, via: '/api/machines/whoami' };
     }
-  } catch {
-    // Fall through and let registration create a fresh key.
+    return { valid: false, via: null, reason: 'invalid_authoritative' };
+  } catch (err) {
+    if (isAuthoritativeAuthFailure(err)) {
+      return { valid: false, via: null, reason: 'invalid_authoritative' };
+    }
+    return { valid: false, via: null, reason: 'unknown', error: errorMessage(err) };
   }
-
-  // Local daemon status is not authoritative for registration validity.
-  await probeDaemonAdminStatus(env, key, { socketTimeoutMs });
-
-  return { valid: false, via: null };
 }
 
 export async function main() {
@@ -163,7 +135,6 @@ export async function main() {
       ? await existingKeyLooksRegistered(env, existing, {
         targetServerId: serverId,
         targetServerUrl: serverUrl,
-        projectKey: currentProjectKey,
         timeoutMs,
       })
       : { valid: false };
@@ -178,6 +149,12 @@ export async function main() {
         projectKey: currentProjectKey,
       }));
       return;
+    }
+    if (existingStatus.reason === 'unknown') {
+      throw new Error(
+        `cannot validate existing machine key (${existingStatus.error}); ` +
+        `keeping ${keyPath} intact. retry once server is reachable.`
+      );
     }
     unlinkSync(keyPath);
   }

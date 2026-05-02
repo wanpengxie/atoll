@@ -49,6 +49,15 @@ async function withTcpServer(handler, run) {
   }
 }
 
+async function closedTcpServerUrl() {
+  const server = createServer((_req, res) => res.end());
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address();
+  await closeServer(server);
+  return `http://127.0.0.1:${port}`;
+}
+
 async function withSocketServer(socketPath, handler, run) {
   const server = createServer(handler);
   server.listen(socketPath);
@@ -60,10 +69,29 @@ async function withSocketServer(socketPath, handler, run) {
   }
 }
 
-test('existingKeyLooksRegistered rejects whoami key from another server', async (t) => {
-  const dir = tempDir(t);
-  const missingSocket = path.join(dir, 'missing.sock');
+async function runRegisterMachine(env, options = {}) {
+  return await execFileAsync(process.execPath, ['ops/register-machine.mjs'], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      ...env,
+    },
+    ...options,
+  });
+}
 
+async function expectRegisterMachineFailure(env, options = {}) {
+  let failure;
+  try {
+    await runRegisterMachine(env, options);
+  } catch (err) {
+    failure = err;
+  }
+  assert.ok(failure, 'register-machine should fail');
+  return failure;
+}
+
+test('existingKeyLooksRegistered rejects whoami key from another server', async () => {
   await withTcpServer((req, res) => {
     assert.equal(req.url, '/api/machines/whoami');
     assert.equal(req.headers.authorization, 'Bearer sk_machine_valid');
@@ -76,18 +104,13 @@ test('existingKeyLooksRegistered rejects whoami key from another server', async 
     const result = await existingKeyLooksRegistered({
       SERVER_URL: baseUrl,
       DEFAULT_SERVER_ID: 'server-a',
-      COAGENT_DAEMON_SOCKET: missingSocket,
-      COAGENT_PROJECT_KEY: 'project-a',
     }, 'sk_machine_valid');
 
-    assert.deepEqual(result, { valid: false, via: null });
+    assert.deepEqual(result, { valid: false, via: null, reason: 'invalid_authoritative' });
   });
 });
 
-test('existingKeyLooksRegistered accepts whoami key from target server', async (t) => {
-  const dir = tempDir(t);
-  const missingSocket = path.join(dir, 'missing.sock');
-
+test('existingKeyLooksRegistered accepts whoami key from target server', async () => {
   await withTcpServer((_req, res) => {
     writeJson(res, 200, {
       key_valid: true,
@@ -97,8 +120,6 @@ test('existingKeyLooksRegistered accepts whoami key from target server', async (
     const result = await existingKeyLooksRegistered({
       SERVER_URL: baseUrl,
       DEFAULT_SERVER_ID: 'server-a',
-      COAGENT_DAEMON_SOCKET: missingSocket,
-      COAGENT_PROJECT_KEY: 'project-a',
     }, 'sk_machine_valid');
 
     assert.deepEqual(result, { valid: true, via: '/api/machines/whoami' });
@@ -108,6 +129,7 @@ test('existingKeyLooksRegistered accepts whoami key from target server', async (
 test('existingKeyLooksRegistered ignores local daemon and validates only via server whoami', async (t) => {
   const dir = tempDir(t);
   const socketPath = path.join(dir, 'daemon.sock');
+  let daemonRequests = 0;
 
   await withTcpServer((req, res) => {
     assert.equal(req.url, '/api/machines/whoami');
@@ -115,8 +137,7 @@ test('existingKeyLooksRegistered ignores local daemon and validates only via ser
     writeJson(res, 401, { error: 'Invalid machine API key' });
   }, async (baseUrl) => {
     await withSocketServer(socketPath, (req, res) => {
-      assert.equal(req.url, '/admin/status');
-      assert.equal(req.headers.authorization, 'Bearer sk_machine_valid');
+      daemonRequests += 1;
       writeJson(res, 200, {
         ok: true,
         server_url: baseUrl,
@@ -130,36 +151,8 @@ test('existingKeyLooksRegistered ignores local daemon and validates only via ser
         COAGENT_PROJECT_KEY: 'project-a',
       }, 'sk_machine_valid');
 
-      assert.deepEqual(result, { valid: false, via: null });
-    });
-  });
-});
-
-test('existingKeyLooksRegistered times out wedged daemon socket after whoami rejects', async (t) => {
-  const dir = tempDir(t);
-  const socketPath = path.join(dir, 'daemon.sock');
-  let whoamiRequests = 0;
-
-  await withTcpServer((req, res) => {
-    whoamiRequests += 1;
-    assert.equal(req.url, '/api/machines/whoami');
-    assert.equal(req.headers.authorization, 'Bearer sk_machine_valid');
-    writeJson(res, 401, { error: 'Invalid machine API key' });
-  }, async (baseUrl) => {
-    await withSocketServer(socketPath, (_req, _res) => {
-      // Intentionally leave the daemon response open until the client timeout destroys it.
-    }, async () => {
-      const startedAt = Date.now();
-      const result = await existingKeyLooksRegistered({
-        SERVER_URL: baseUrl,
-        DEFAULT_SERVER_ID: 'server-a',
-        COAGENT_DAEMON_SOCKET: socketPath,
-        COAGENT_PROJECT_KEY: 'project-a',
-      }, 'sk_machine_valid', { socketTimeoutMs: 25 });
-
-      assert.deepEqual(result, { valid: false, via: null });
-      assert.equal(whoamiRequests, 1);
-      assert.ok(Date.now() - startedAt < 1000);
+      assert.deepEqual(result, { valid: false, via: null, reason: 'invalid_authoritative' });
+      assert.equal(daemonRequests, 0);
     });
   });
 });
@@ -167,7 +160,6 @@ test('existingKeyLooksRegistered times out wedged daemon socket after whoami rej
 test('register-machine CLI skips existing key when whoami matches target server without ADMIN_TOKEN', async (t) => {
   const dir = tempDir(t);
   const keyPath = path.join(dir, 'machine.key');
-  const missingSocket = path.join(dir, 'missing.sock');
   writeFileSync(keyPath, 'sk_machine_valid\n', { mode: 0o600 });
 
   await withTcpServer((_req, res) => {
@@ -176,17 +168,12 @@ test('register-machine CLI skips existing key when whoami matches target server 
       server_id: 'server-a',
     });
   }, async (baseUrl) => {
-    const { stdout, stderr } = await execFileAsync(process.execPath, ['ops/register-machine.mjs'], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        SERVER_URL: baseUrl,
-        DEFAULT_SERVER_ID: 'server-a',
-        COAGENT_PROJECT_KEY: 'project-a',
-        COAGENT_MACHINE_KEY_PATH: keyPath,
-        COAGENT_DAEMON_SOCKET: missingSocket,
-        ADMIN_TOKEN: '',
-      },
+    const { stdout, stderr } = await runRegisterMachine({
+      SERVER_URL: baseUrl,
+      DEFAULT_SERVER_ID: 'server-a',
+      COAGENT_PROJECT_KEY: 'project-a',
+      COAGENT_MACHINE_KEY_PATH: keyPath,
+      ADMIN_TOKEN: '',
     });
 
     assert.equal(stderr, '');
@@ -197,13 +184,99 @@ test('register-machine CLI skips existing key when whoami matches target server 
     assert.equal(body.keyPath, keyPath);
     assert.equal(body.projectKey, 'project-a');
     assert.equal(Object.hasOwn(body, 'machineId'), false);
+    assert.equal(readFileSync(keyPath, 'utf8'), 'sk_machine_valid\n');
+  });
+});
+
+test('register-machine CLI keeps existing key when whoami is unreachable without ADMIN_TOKEN', async (t) => {
+  const dir = tempDir(t);
+  const keyPath = path.join(dir, 'machine.key');
+  const originalKey = 'sk_machine_existing\n';
+  writeFileSync(keyPath, originalKey, { mode: 0o600 });
+  const serverUrl = await closedTcpServerUrl();
+
+  const failure = await expectRegisterMachineFailure({
+    SERVER_URL: serverUrl,
+    DEFAULT_SERVER_ID: 'server-a',
+    COAGENT_PROJECT_KEY: 'project-a',
+    COAGENT_MACHINE_KEY_PATH: keyPath,
+    ADMIN_TOKEN: '',
+    REGISTER_MACHINE_TIMEOUT_MS: '50',
+  }, { timeout: 2000 });
+
+  assert.equal(failure.code, 1);
+  const body = JSON.parse(failure.stderr);
+  assert.equal(body.ok, false);
+  assert.match(body.error, /cannot validate existing machine key/);
+  assert.match(body.error, /keeping .*machine\.key intact/);
+  assert.match(body.error, /retry once server is reachable/);
+  assert.equal(existsSync(keyPath), true);
+  assert.equal(readFileSync(keyPath, 'utf8'), originalKey);
+});
+
+test('register-machine CLI keeps existing key when whoami returns 5xx without ADMIN_TOKEN', async (t) => {
+  const dir = tempDir(t);
+  const keyPath = path.join(dir, 'machine.key');
+  const originalKey = 'sk_machine_existing\n';
+  const requests = [];
+  writeFileSync(keyPath, originalKey, { mode: 0o600 });
+
+  await withTcpServer((req, res) => {
+    requests.push({ method: req.method, url: req.url });
+    assert.equal(req.url, '/api/machines/whoami');
+    writeJson(res, 503, { error: 'temporarily unavailable' });
+  }, async (baseUrl) => {
+    const failure = await expectRegisterMachineFailure({
+      SERVER_URL: baseUrl,
+      DEFAULT_SERVER_ID: 'server-a',
+      COAGENT_PROJECT_KEY: 'project-a',
+      COAGENT_MACHINE_KEY_PATH: keyPath,
+      ADMIN_TOKEN: '',
+    });
+
+    assert.equal(failure.code, 1);
+    const body = JSON.parse(failure.stderr);
+    assert.equal(body.ok, false);
+    assert.match(body.error, /cannot validate existing machine key/);
+    assert.match(body.error, /503/);
+    assert.match(body.error, /retry once server is reachable/);
+    assert.equal(existsSync(keyPath), true);
+    assert.equal(readFileSync(keyPath, 'utf8'), originalKey);
+    assert.deepEqual(requests.map((request) => request.url), ['/api/machines/whoami']);
+  });
+});
+
+test('register-machine CLI deletes existing key when whoami returns 401 without ADMIN_TOKEN', async (t) => {
+  const dir = tempDir(t);
+  const keyPath = path.join(dir, 'machine.key');
+  const requests = [];
+  writeFileSync(keyPath, 'sk_machine_stale\n', { mode: 0o600 });
+
+  await withTcpServer((req, res) => {
+    requests.push({ method: req.method, url: req.url });
+    assert.equal(req.url, '/api/machines/whoami');
+    writeJson(res, 401, { error: 'Invalid machine API key' });
+  }, async (baseUrl) => {
+    const failure = await expectRegisterMachineFailure({
+      SERVER_URL: baseUrl,
+      DEFAULT_SERVER_ID: 'server-a',
+      COAGENT_PROJECT_KEY: 'project-a',
+      COAGENT_MACHINE_KEY_PATH: keyPath,
+      ADMIN_TOKEN: '',
+    });
+
+    assert.equal(failure.code, 1);
+    const body = JSON.parse(failure.stderr);
+    assert.equal(body.ok, false);
+    assert.equal(body.error, 'ADMIN_TOKEN is required in .env before registering a machine');
+    assert.equal(existsSync(keyPath), false);
+    assert.deepEqual(requests.map((request) => request.url), ['/api/machines/whoami']);
   });
 });
 
 test('register-machine CLI deletes stale key and registers with ADMIN_TOKEN', async (t) => {
   const dir = tempDir(t);
   const keyPath = path.join(dir, 'machine.key');
-  const missingSocket = path.join(dir, 'missing.sock');
   writeFileSync(keyPath, 'sk_machine_stale\n', { mode: 0o600 });
 
   const requests = [];
@@ -222,17 +295,12 @@ test('register-machine CLI deletes stale key and registers with ADMIN_TOKEN', as
       apiKeyPrefix: 'sk_machine_new',
     });
   }, async (baseUrl) => {
-    const { stdout, stderr } = await execFileAsync(process.execPath, ['ops/register-machine.mjs'], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        SERVER_URL: baseUrl,
-        DEFAULT_SERVER_ID: 'server-a',
-        COAGENT_PROJECT_KEY: 'project-a',
-        COAGENT_MACHINE_KEY_PATH: keyPath,
-        COAGENT_DAEMON_SOCKET: missingSocket,
-        ADMIN_TOKEN: 'admin-secret',
-      },
+    const { stdout, stderr } = await runRegisterMachine({
+      SERVER_URL: baseUrl,
+      DEFAULT_SERVER_ID: 'server-a',
+      COAGENT_PROJECT_KEY: 'project-a',
+      COAGENT_MACHINE_KEY_PATH: keyPath,
+      ADMIN_TOKEN: 'admin-secret',
     });
 
     assert.equal(stderr, '');
@@ -251,32 +319,21 @@ test('register-machine CLI deletes stale key and registers with ADMIN_TOKEN', as
 test('register-machine CLI times out registration request with clear SERVER_URL error', async (t) => {
   const dir = tempDir(t);
   const keyPath = path.join(dir, 'machine.key');
-  const missingSocket = path.join(dir, 'missing.sock');
 
   await withTcpServer((_req, _res) => {
     // Intentionally keep the request open until AbortSignal.timeout aborts fetch.
   }, async (baseUrl) => {
-    let failure;
-    try {
-      await execFileAsync(process.execPath, ['ops/register-machine.mjs'], {
-        cwd: repoRoot,
-        env: {
-          ...process.env,
-          SERVER_URL: baseUrl,
-          DEFAULT_SERVER_ID: 'server-a',
-          COAGENT_PROJECT_KEY: 'project-a',
-          COAGENT_MACHINE_KEY_PATH: keyPath,
-          COAGENT_DAEMON_SOCKET: missingSocket,
-          ADMIN_TOKEN: 'admin-secret',
-          REGISTER_MACHINE_TIMEOUT_MS: '50',
-        },
-        timeout: 2000,
-      });
-    } catch (err) {
-      failure = err;
-    }
+    const failure = await expectRegisterMachineFailure({
+      SERVER_URL: baseUrl,
+      DEFAULT_SERVER_ID: 'server-a',
+      COAGENT_PROJECT_KEY: 'project-a',
+      COAGENT_MACHINE_KEY_PATH: keyPath,
+      ADMIN_TOKEN: 'admin-secret',
+      REGISTER_MACHINE_TIMEOUT_MS: '50',
+    }, {
+      timeout: 2000,
+    });
 
-    assert.ok(failure, 'register-machine should fail');
     assert.equal(failure.code, 1);
     const body = JSON.parse(failure.stderr);
     assert.equal(body.ok, false);
