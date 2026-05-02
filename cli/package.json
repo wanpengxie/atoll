@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "bin": {
+    "coagent": "./bin/coagent",
     "xhs": "./bin/xhs",
     "coagent-kernel": "./bin/coagent-kernel",
     "coagent-msg": "./bin/coagent-msg"

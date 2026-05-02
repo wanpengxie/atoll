@@ -2,13 +2,12 @@
 import 'dotenv/config';
 import { randomUUID } from 'crypto';
 import { createRequire } from 'module';
-import { homedir } from 'os';
-import path from 'path';
 import { DaemonConnection } from './connection.js';
 import { AgentManager } from './agent-manager.js';
 import { ChannelManager } from './channel-manager.js';
 import { releaseProfileLocksForProcess } from './profile-lock.js';
 import { RpcServer } from './rpc-server.js';
+import { daemonSocketPath, machineKeyPath, normalizeProjectKey, readMachineKeyFile } from './paths.js';
 
 const { version } = createRequire(import.meta.url)('../package.json');
 
@@ -16,19 +15,23 @@ const { version } = createRequire(import.meta.url)('../package.json');
 const args = process.argv.slice(2);
 let cliServerUrl = '';
 let cliApiKey    = '';
+let cliProjectKey = '';
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--server-url' && args[i + 1]) cliServerUrl = args[++i];
   if (args[i] === '--api-key'    && args[i + 1]) cliApiKey    = args[++i];
+  if (args[i] === '--project-key' && args[i + 1]) cliProjectKey = args[++i];
   if (args[i] === '--help' || args[i] === '-h') {
-    console.log('Usage: lightcone-daemon --server-url <url> --api-key <key>');
+    console.log('Usage: lightcone-daemon --server-url <url> [--api-key <key>] [--project-key <key>]');
     process.exit(0);
   }
 }
 
+const PROJECT_KEY      = normalizeProjectKey(cliProjectKey || process.env.COAGENT_PROJECT_KEY);
 const SERVER_URL      = cliServerUrl || process.env.SERVER_URL      || 'http://localhost:8779';
-const MACHINE_API_KEY = cliApiKey    || process.env.MACHINE_API_KEY || '';
-const DAEMON_SOCKET   = process.env.COAGENT_DAEMON_SOCKET || path.join(homedir(), '.coagent', 'daemon.sock');
+const MACHINE_API_KEY = cliApiKey || process.env.MACHINE_API_KEY || readMachineKeyFile(PROJECT_KEY);
+const MACHINE_KEY_PATH = machineKeyPath(PROJECT_KEY);
+const DAEMON_SOCKET   = daemonSocketPath(PROJECT_KEY);
 const HTTP_PORT_RAW   = process.env.COAGENT_DAEMON_HTTP_PORT ?? '';
 const HTTP_PORT       = HTTP_PORT_RAW ? Number(HTTP_PORT_RAW) : null;
 const DAEMON_HTTP_URL = Number.isInteger(HTTP_PORT) ? `http://127.0.0.1:${HTTP_PORT}` : '';
@@ -36,11 +39,12 @@ const DAEMON_TOKEN    = process.env.COAGENT_DAEMON_TOKEN || randomUUID();
 
 if (!MACHINE_API_KEY) {
   console.error('Error: API key is required.');
-  console.error('Usage: lightcone-daemon --server-url <url> --api-key <key>');
+  console.error(`Checked CLI --api-key, MACHINE_API_KEY, and ${MACHINE_KEY_PATH}.`);
+  console.error('Run "make register" to create the machine key file.');
   process.exit(1);
 }
 
-console.log(`[Daemon] v${version} Server: ${SERVER_URL}`);
+console.log(`[Daemon] v${version} Server: ${SERVER_URL} project=${PROJECT_KEY}`);
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 const agentManager = new AgentManager({ serverUrl: SERVER_URL, machineApiKey: MACHINE_API_KEY });
@@ -50,12 +54,14 @@ const channelManager = new ChannelManager({
   daemonSocketPath: DAEMON_SOCKET,
   daemonHttpUrl: DAEMON_HTTP_URL,
   daemonToken: DAEMON_TOKEN,
+  projectKey: PROJECT_KEY,
 });
 const rpcServer = new RpcServer({
   channelManager,
   socketPath: DAEMON_SOCKET,
   httpPort: Number.isInteger(HTTP_PORT) ? HTTP_PORT : null,
   authToken: DAEMON_TOKEN,
+  authTokens: [DAEMON_TOKEN, MACHINE_API_KEY],
 });
 
 const connection = new DaemonConnection({

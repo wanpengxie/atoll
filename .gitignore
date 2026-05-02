@@ -5,3 +5,5 @@ dist/
 *.local.*
 .logs/
 .dalek/
+.env
+.coagent-local/

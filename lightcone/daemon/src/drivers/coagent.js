@@ -83,6 +83,8 @@ export function buildCoagentSpawn({
     : [process.env.PATH ?? ''];
 
   const env = {
+    // ANTHROPIC_API_KEY and other runtime secrets are intentionally inherited
+    // from the daemon process. pm2 loads them from .env via ecosystem.config.cjs.
     ...process.env,
     FORCE_COLOR: '0',
     NO_COLOR: '1',

@@ -17,6 +17,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { HEALTHY_UPTIME_MS, CronScheduler } from './cron-scheduler.js';
 import { buildCoagentSpawn } from './drivers/coagent.js';
+import { emitJsonEvent } from './events.js';
+import { coagentProjectDir, normalizeProjectKey } from './paths.js';
 import { TriggerGateway } from './trigger-gateway.js';
 
 const DEFAULT_AGENT_NAME = 'channel-agent';
@@ -150,15 +152,18 @@ export class ChannelManager {
     daemonSocketPath,
     daemonHttpUrl = '',
     daemonToken = '',
+    projectKey = process.env.COAGENT_PROJECT_KEY,
+    baseDir = null,
   }) {
     this.serverUrl = serverUrl;
     this.machineApiKey = machineApiKey;
+    this.projectKey = normalizeProjectKey(projectKey);
     this.daemonSocketPath = daemonSocketPath;
     this.daemonHttpUrl = daemonHttpUrl;
     this.daemonToken = daemonToken;
     this.connection = null;
     this.channels = new Map();
-    this.baseDir = ensureDirectory(path.join(homedir(), '.coagent'));
+    this.baseDir = ensureDirectory(baseDir ?? coagentProjectDir(this.projectKey));
     this.channelsDir = ensureDirectory(path.join(this.baseDir, 'channels'));
     this.archivedDir = ensureDirectory(path.join(this.baseDir, 'archived'));
     this.workspaceTemplateDir = path.join(repoRoot(), 'workspace-template');
@@ -273,12 +278,26 @@ export class ChannelManager {
         return this.getChannelMembers(params.channel_id ?? params.channelId);
       case 'channel.capability.list':
         return this.getChannelCapabilities(params.channel_id ?? params.channelId);
+      case 'channel.list':
+        return this.listChannels();
+      case 'channel.start':
+        return this.startChannel(params.channel_id ?? params.channelId);
+      case 'channel.restart':
+        return this.restartChannel(params.channel_id ?? params.channelId);
+      case 'channel.stop':
+        return this.stopChannel(params.channel_id ?? params.channelId);
+      case 'channel.archive':
+        return this.archiveChannel(params.channel_id ?? params.channelId);
       case 'message.send':
         return this.sendChannelMessage(params);
       case 'message.list':
         return this.listMessages(params.channel_id ?? params.channelId, params.limit ?? 50);
       case 'message.search':
         return this.searchMessages(params.channel_id ?? params.channelId, params.query ?? '', params.limit ?? 20);
+      case 'admin.status':
+        return this.getAdminStatus();
+      case 'admin.machines':
+        return this.listMachines();
       default:
         throw toRpcError('not_implemented', `unsupported RPC method: ${method}`);
     }
@@ -321,6 +340,7 @@ export class ChannelManager {
 
     this.channels.set(node.channelId, node);
     this._persistNode(node);
+    emitJsonEvent('channel.create', { channel_id: node.channelId, status: node.status, project_key: this.projectKey });
     return this._channelInfo(node);
   }
 
@@ -378,6 +398,8 @@ export class ChannelManager {
       this._notifyChannelStatus(node);
     }
 
+    emitJsonEvent('agent.spawn', { channel_id: node.channelId, pid: node.agentPid, session_id: node.sessionId });
+    emitJsonEvent('channel.start', { channel_id: node.channelId, status: node.status, pid: node.agentPid });
     console.log(`[ChannelManager] Started ${channelId} pid=${node.agentPid ?? 'n/a'} entry=${spawnConfig.entry}`);
     return this._channelInfo(node);
   }
@@ -389,6 +411,7 @@ export class ChannelManager {
     this._persistNode(node);
     await this._stopProcess(node, 'SIGTERM');
     this._notifyChannelStatus(node);
+    emitJsonEvent('channel.stop', { channel_id: node.channelId, status: node.status });
     return this._channelInfo(node);
   }
 
@@ -398,6 +421,25 @@ export class ChannelManager {
       throw toRpcError('invalid_state', `channel ${channelId} is archived`);
     }
     return this.startChannel({ channelId }, { notifyStatus: true });
+  }
+
+  async stopChannel(channelId) {
+    return this.pauseChannel(channelId);
+  }
+
+  async restartChannel(channelId) {
+    const node = this._requireNode(channelId);
+    if (node.status === 'archived') {
+      throw toRpcError('invalid_state', `channel ${channelId} is archived`);
+    }
+    await this._stopProcess(node, 'SIGTERM');
+    node.proc = null;
+    node.agentPid = null;
+    node.status = 'created';
+    this._persistNode(node);
+    const info = await this.startChannel({ channelId }, { notifyStatus: true });
+    emitJsonEvent('channel.restart', { channel_id: node.channelId, status: info.status, pid: info.agent_pid });
+    return info;
   }
 
   async archiveChannel(channelId) {
@@ -414,6 +456,7 @@ export class ChannelManager {
     this._persistNode(node);
     this.channels.delete(channelId);
     this._notifyChannelStatus(node);
+    emitJsonEvent('channel.archive', { channel_id: node.channelId, archived_at: node.archivedAt });
     return this._channelInfo(node);
   }
 
@@ -441,7 +484,13 @@ export class ChannelManager {
 
     if (event.type === 'user.message.posted') {
       const message = event.payload?.message ?? event.payload;
-      await this._appendMessage(node, normalizeMessage(node.channelId, message, { source: 'server' }));
+      const normalized = normalizeMessage(node.channelId, message, { source: 'server' });
+      await this._appendMessage(node, normalized);
+      emitJsonEvent('message.receive', {
+        channel_id: node.channelId,
+        message_id: normalized.messageId,
+        sender_type: normalized.senderType,
+      });
     }
 
     return this.triggerGateway.dispatch({ channel: node, event });
@@ -523,6 +572,11 @@ export class ChannelManager {
     });
 
     await this._appendMessage(node, message);
+    emitJsonEvent('message.send', {
+      channel_id: node.channelId,
+      message_id: message.messageId,
+      sender_type: message.senderType,
+    });
     await this._appendToServerView(node, message, { requestId: options.requestId });
     return message;
   }
@@ -587,6 +641,38 @@ export class ChannelManager {
       .slice(-Number(limit || 20))
       .reverse();
     return { messages };
+  }
+
+  async listChannels() {
+    return { channels: [...this.channels.values()].map((node) => this._channelInfo(node)) };
+  }
+
+  async getAdminStatus() {
+    const channels = [...this.channels.values()];
+    return {
+      ok: true,
+      project_key: this.projectKey,
+      server_url: this.serverUrl,
+      daemon_socket: this.daemonSocketPath,
+      daemon_http: this.daemonHttpUrl || null,
+      connected_to_server: Boolean(this.connection?.ws?.readyState === 1),
+      channels_count: channels.length,
+      active_channels_count: channels.filter((node) => node.status === 'active').length,
+      active_agent_pids: channels.filter((node) => node.agentPid).map((node) => node.agentPid),
+    };
+  }
+
+  async listMachines() {
+    return {
+      machines: [{
+        id: 'local',
+        project_key: this.projectKey,
+        server_url: this.serverUrl,
+        api_key_prefix: this.machineApiKey ? this.machineApiKey.slice(0, 18) : null,
+        status: this.connection?.ws?.readyState === 1 ? 'online' : 'local',
+        channels_count: this.channels.size,
+      }],
+    };
   }
 
   _channelInfo(node) {
@@ -717,6 +803,7 @@ export class ChannelManager {
       node.proc = null;
       node.agentPid = null;
 
+      emitJsonEvent('agent.exit', { channel_id: node.channelId, code, signal });
       console.log(`[ChannelManager] Channel ${node.channelId} process exited code=${code ?? 'n/a'} signal=${signal ?? 'n/a'}`);
 
       if (node.intentionalStop) {
@@ -740,6 +827,7 @@ export class ChannelManager {
           await this.startChannel({ channelId: node.channelId }, { restoring, notifyStatus: false });
         } catch (err) {
           console.error(`[ChannelManager] Respawn failed for ${node.channelId}:`, err.message);
+          emitJsonEvent('agent.error', { channel_id: node.channelId, message: err.message });
           node.status = 'failed';
           this._persistNode(node);
           this._notifyChannelStatus(node);
@@ -750,6 +838,7 @@ export class ChannelManager {
       node.status = 'failed';
       this._persistNode(node);
       this._notifyChannelStatus(node);
+      emitJsonEvent('agent.error', { channel_id: node.channelId, reason: 'unexpected_exit_twice', code, signal });
       await this._recordTrace(node, {
         kind: 'agent.exit',
         decision: 'failed',
@@ -911,7 +1000,9 @@ export class ChannelManager {
 
     if (!response?.ok) {
       this._enqueuePendingViewSync(node, message, payload, response?.error ?? 'message.append ack failed');
+      return;
     }
+    emitJsonEvent('message.deliver', { channel_id: node.channelId, message_id: message.messageId, request_id: requestId });
   }
 
   _enqueuePendingViewSync(node, message, payload, reason) {

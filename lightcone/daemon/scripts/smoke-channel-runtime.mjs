@@ -10,13 +10,24 @@ import { ChannelManager } from '../src/channel-manager.js';
 import { RpcServer } from '../src/rpc-server.js';
 
 const execFileAsync = promisify(execFile);
-const tempHome = mkdtempSync(path.join(os.tmpdir(), 'lightcone-daemon-smoke-'));
-process.env.HOME = tempHome;
+const realMode = process.argv.includes('--real');
+const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'lightcone-daemon-smoke-'));
+const originalHome = process.env.HOME;
+if (!realMode) {
+  process.env.HOME = tempRoot;
+}
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const cliBinDir = path.join(repoRoot, 'cli', 'bin');
-const fakeBinDir = path.join(tempHome, 'bin');
-mkdirSync(fakeBinDir, { recursive: true });
-writeFileSync(path.join(fakeBinDir, 'claude'), `#!/usr/bin/env node
+const fakeBinDir = path.join(tempRoot, 'bin');
+
+if (realMode) {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error('ANTHROPIC_API_KEY is required for --real smoke');
+  }
+  await execFileAsync('claude', ['--version'], { timeout: 5000 });
+} else {
+  mkdirSync(fakeBinDir, { recursive: true });
+  writeFileSync(path.join(fakeBinDir, 'claude'), `#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
 const args = process.argv.slice(2);
@@ -34,10 +45,14 @@ fs.appendFileSync(sessionFile, stdin);
 process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId }) + '\\n');
 process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'smoke:' + mode, session_id: sessionId }) + '\\n');
 `, { mode: 0o755 });
-process.env.PATH = `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ''}`;
+  process.env.PATH = `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ''}`;
+}
 
 const httpPort = 24000 + Math.floor(Math.random() * 1000);
-const socketPath = path.join(tempHome, '.coagent', 'daemon.sock');
+const projectKey = `smoke-${process.pid}-${Date.now()}`;
+process.env.COAGENT_PROJECT_KEY = projectKey;
+const runtimeHome = realMode ? os.homedir() : tempRoot;
+const socketPath = path.join(runtimeHome, '.coagent', projectKey, 'daemon.sock');
 const daemonToken = 'smoke-token';
 const channelId = 'smoke-channel';
 const requestLog = [];
@@ -104,6 +119,26 @@ async function waitFor(label, fn, timeoutMs = 5_000) {
   throw new Error(`timed out waiting for ${label}`);
 }
 
+function recentLines(filePath, limit = 100) {
+  if (!existsSync(filePath)) return [];
+  return readFileSync(filePath, 'utf8').split('\n').filter(Boolean).slice(-limit);
+}
+
+function printRecentAgentLogs(workdir, sessionId) {
+  const tracePath = path.join(workdir, 'agents', 'channel-agent', 'trace', `${sessionId}.jsonl`);
+  const messagesDir = path.join(workdir, 'messages');
+  const messageLines = existsSync(messagesDir)
+    ? readdirSync(messagesDir)
+      .filter((entry) => entry.endsWith('.jsonl'))
+      .flatMap((entry) => recentLines(path.join(messagesDir, entry), 100))
+      .slice(-100)
+    : [];
+  console.error('--- recent agent trace ---');
+  console.error(recentLines(tracePath, 100).join('\n'));
+  console.error('--- recent channel messages ---');
+  console.error(messageLines.join('\n'));
+}
+
 const connection = {
   send(message) {
     sentLog.push(message);
@@ -120,6 +155,7 @@ const channelManager = new ChannelManager({
   daemonSocketPath: socketPath,
   daemonHttpUrl: `http://127.0.0.1:${httpPort}`,
   daemonToken,
+  projectKey,
 });
 channelManager.setConnection(connection);
 
@@ -169,6 +205,51 @@ try {
   const kernelInfo = await runCli('coagent-kernel', ['channel-info'], cliEnv, started.workdir);
   assert.equal(kernelInfo.ok, true);
   assert.equal(kernelInfo.data.channel_id ?? kernelInfo.data.id, channelId);
+
+  if (realMode) {
+    await channelManager.handleEvent({
+      channelId,
+      event: {
+        type: 'user.message.posted',
+        source: 'smoke-real',
+        created_at: new Date().toISOString(),
+        payload: {
+          message: {
+            senderType: 'human',
+            senderId: 'smoke-user',
+            senderName: 'Smoke User',
+            content: 'Reply with exactly hello by running: coagent-msg send --content hello',
+          },
+        },
+      },
+    });
+
+    let llmReply;
+    try {
+      llmReply = await waitFor('real LLM reply', async () => {
+        return requestLog.find((entry) => {
+          const message = entry.message ?? {};
+          return message.type === 'message.append'
+            && message.channel_id === channelId
+            && /hello/i.test(String(message.content ?? ''));
+        });
+      }, 30_000);
+    } catch (err) {
+      printRecentAgentLogs(started.workdir, started.session_id);
+      throw err;
+    }
+
+    const archived = await channelManager.archiveChannel(channelId);
+    assert.equal(archived.status, 'archived');
+    console.log(JSON.stringify({
+      ok: true,
+      mode: 'real',
+      channelId,
+      sessionId: started.session_id,
+      llmReply: llmReply.message.content,
+      archivedWorkdir: archived.workdir,
+    }, null, 2));
+  } else {
 
   const now = new Date();
   const cronExpression = `${now.getMinutes()} ${now.getHours()} ${now.getDate()} ${now.getMonth() + 1} ${now.getDay()}`;
@@ -264,7 +345,7 @@ try {
   const archived = await channelManager.archiveChannel(channelId);
   assert.equal(archived.status, 'archived');
   assert.ok(archived.archived_at);
-  assert.ok(archived.workdir.includes(`${path.sep}.coagent${path.sep}archived${path.sep}`));
+  assert.ok(archived.workdir.includes(`${path.sep}.coagent${path.sep}${projectKey}${path.sep}archived${path.sep}`));
 
   let archivedLookupFailed = false;
   try {
@@ -276,6 +357,7 @@ try {
 
   console.log(JSON.stringify({
     ok: true,
+    mode: 'fake',
     workdir: started.workdir,
     archivedWorkdir: archived.workdir,
     sessionId: started.session_id,
@@ -285,8 +367,17 @@ try {
     daemonStatusEvents: sentLog.filter((message) => message.type === 'channel.status').map((message) => message.status),
     traceFiles: readdirSync(path.join(archived.workdir, 'agents', 'channel-agent', 'trace')),
   }, null, 2));
+  }
 } finally {
   await rpcServer.stop().catch(() => {});
   await channelManager.stopAll().catch(() => {});
-  rmSync(tempHome, { recursive: true, force: true });
+  rmSync(tempRoot, { recursive: true, force: true });
+  if (realMode) {
+    rmSync(path.join(os.homedir(), '.coagent', projectKey), { recursive: true, force: true });
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+  }
 }

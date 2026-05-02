@@ -1,5 +1,6 @@
 import http from 'http';
-import { chmodSync, existsSync, unlinkSync } from 'fs';
+import path from 'path';
+import { chmodSync, existsSync, mkdirSync, unlinkSync } from 'fs';
 
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
@@ -31,12 +32,13 @@ function writeJson(res, statusCode, payload) {
 }
 
 export class RpcServer {
-  constructor({ channelManager, socketPath, httpPort = null, httpHost = '127.0.0.1', authToken = '' }) {
+  constructor({ channelManager, socketPath, httpPort = null, httpHost = '127.0.0.1', authToken = '', authTokens = [] }) {
     this.channelManager = channelManager;
     this.socketPath = socketPath;
     this.httpPort = httpPort;
     this.httpHost = httpHost;
     this.authToken = authToken;
+    this.authTokens = [...new Set([authToken, ...authTokens].filter(Boolean))];
     this.socketServer = null;
     this.httpServer = null;
   }
@@ -51,6 +53,7 @@ export class RpcServer {
     if (existsSync(this.socketPath)) {
       unlinkSync(this.socketPath);
     }
+    mkdirSync(path.dirname(this.socketPath), { recursive: true });
 
     await new Promise((resolve, reject) => {
       this.socketServer.once('error', reject);
@@ -85,14 +88,20 @@ export class RpcServer {
   }
 
   async _handleRequest(req, res, context) {
-    if (req.method !== 'POST' || req.url !== '/rpc') {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+
+    if (url.pathname.startsWith('/admin/')) {
+      await this._handleAdminRequest(req, res, url);
+      return;
+    }
+
+    if (req.method !== 'POST' || url.pathname !== '/rpc') {
       writeJson(res, 404, { ok: false, error: { code: 'not_found', message: 'POST /rpc required' } });
       return;
     }
 
-    if (context.transport === 'http' && this.authToken) {
-      const auth = req.headers.authorization ?? '';
-      if (auth !== `Bearer ${this.authToken}`) {
+    if (context.transport === 'http' && this.authTokens.length > 0) {
+      if (!this._isAuthorized(req)) {
         writeJson(res, 401, { ok: false, error: { code: 'unauthorized', message: 'invalid bearer token' } });
         return;
       }
@@ -121,6 +130,53 @@ export class RpcServer {
         ok: false,
         error: {
           code: err.code ?? 'rpc_error',
+          message: err.message,
+        },
+      });
+    }
+  }
+
+  _isAuthorized(req) {
+    if (this.authTokens.length === 0) return true;
+    const auth = req.headers.authorization ?? '';
+    if (!auth.startsWith('Bearer ')) return false;
+    return this.authTokens.includes(auth.slice(7));
+  }
+
+  async _handleAdminRequest(req, res, url) {
+    if (req.method !== 'GET') {
+      writeJson(res, 405, { ok: false, error: { code: 'method_not_allowed', message: 'GET required' } });
+      return;
+    }
+    if (!this._isAuthorized(req)) {
+      writeJson(res, 401, { ok: false, error: { code: 'unauthorized', message: 'invalid bearer token' } });
+      return;
+    }
+
+    try {
+      if (url.pathname === '/admin/status') {
+        writeJson(res, 200, await this.channelManager.getAdminStatus());
+        return;
+      }
+      if (url.pathname === '/admin/channels') {
+        writeJson(res, 200, await this.channelManager.listChannels());
+        return;
+      }
+      if (url.pathname.startsWith('/admin/channels/')) {
+        const channelId = decodeURIComponent(url.pathname.slice('/admin/channels/'.length));
+        writeJson(res, 200, await this.channelManager.getChannelInfo(channelId));
+        return;
+      }
+      if (url.pathname === '/admin/machines') {
+        writeJson(res, 200, await this.channelManager.listMachines());
+        return;
+      }
+      writeJson(res, 404, { ok: false, error: { code: 'not_found', message: 'unknown admin endpoint' } });
+    } catch (err) {
+      writeJson(res, 400, {
+        ok: false,
+        error: {
+          code: err.code ?? 'admin_error',
           message: err.message,
         },
       });
