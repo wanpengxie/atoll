@@ -68,6 +68,39 @@ const daemonToken = 'smoke-token';
 const channelId = 'smoke-channel';
 const requestLog = [];
 const sentLog = [];
+const stdoutChunks = [];
+const originalStdoutWrite = process.stdout.write;
+
+process.stdout.write = function captureStdout(chunk, encoding, callback) {
+  stdoutChunks.push(String(chunk));
+  return originalStdoutWrite.call(this, chunk, encoding, callback);
+};
+
+function capturedJsonLineEvents() {
+  return stdoutChunks.join('')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter((entry) => entry?.event);
+}
+
+function assertJsonLineEvents(expectedEvents) {
+  const events = capturedJsonLineEvents();
+  for (const eventName of expectedEvents) {
+    assert.ok(
+      events.some((entry) => entry.event === eventName),
+      `daemon stdout should contain JSON Lines event ${eventName}`,
+    );
+  }
+  return events.map((entry) => entry.event);
+}
 
 async function curlSocketRpc(payload, { token = daemonToken } = {}) {
   const headers = ['--header', 'Content-Type: application/json'];
@@ -263,6 +296,7 @@ try {
 
     const archived = await channelManager.archiveChannel(channelId);
     assert.equal(archived.status, 'archived');
+    const jsonLineEvents = assertJsonLineEvents(['channel.create', 'channel.start', 'message.deliver']);
     console.log(JSON.stringify({
       ok: true,
       mode: 'real',
@@ -270,7 +304,8 @@ try {
       sessionId: started.session_id,
       llmReply: llmReply.message.content,
       archivedWorkdir: archived.workdir,
-    }, null, 2));
+      jsonLineEvents,
+    }));
   } else {
 
   const now = new Date();
@@ -377,6 +412,7 @@ try {
   }
   assert.equal(archivedLookupFailed, true);
 
+  const jsonLineEvents = assertJsonLineEvents(['channel.create', 'channel.start', 'message.deliver']);
   console.log(JSON.stringify({
     ok: true,
     mode: 'fake',
@@ -387,10 +423,12 @@ try {
     scheduleId: scheduleResponse.data.schedule_id,
     xhsNoteId: xhsResponse.data.note_id,
     daemonStatusEvents: sentLog.filter((message) => message.type === 'channel.status').map((message) => message.status),
+    jsonLineEvents,
     traceFiles: readdirSync(path.join(archived.workdir, 'agents', 'channel-agent', 'trace')),
-  }, null, 2));
+  }));
   }
 } finally {
+  process.stdout.write = originalStdoutWrite;
   await rpcServer.stop().catch(() => {});
   await channelManager.stopAll().catch(() => {});
   rmSync(tempRoot, { recursive: true, force: true });

@@ -15,7 +15,7 @@ check-l0:
 
 install: check-l0
 	pnpm install
-	pm2 install pm2-logrotate >/dev/null 2>&1 || echo "[warn] pm2-logrotate install failed; logs will not rotate"
+	pm2 install pm2-logrotate >/dev/null 2>&1 || true
 
 logrotate-config: check-l0
 	pm2 set pm2-logrotate:max_size 100M

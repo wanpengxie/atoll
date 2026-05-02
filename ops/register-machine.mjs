@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, readFileSync, chmodSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, chmodSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, hostname, platform } from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+const PLACEHOLDERS = new Set(['', 'change-me', 'changeme', 'your-token-here', 'todo']);
 
 function parseEnvFile(filePath) {
   if (!existsSync(filePath)) return {};
@@ -50,8 +52,28 @@ function daemonSocketPath(env) {
     : path.join(homedir(), '.coagent', projectKey(env), 'daemon.sock');
 }
 
-async function fetchJson(url, options = {}) {
-  const res = await fetch(url, options);
+function requestTimeoutMs(env) {
+  const configured = Number(env.REGISTER_MACHINE_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : 10_000;
+}
+
+function timeoutSeconds(timeoutMs) {
+  return Number.isInteger(timeoutMs / 1000) ? String(timeoutMs / 1000) : String(timeoutMs / 1000);
+}
+
+async function fetchJson(url, options = {}, { timeoutMs = 10_000, serverUrl = '' } = {}) {
+  let res;
+  try {
+    res = await fetch(url, {
+      ...options,
+      signal: options.signal ?? AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+      throw new Error(`注册请求 ${timeoutSeconds(timeoutMs)} 秒超时，请检查 SERVER_URL=${serverUrl || normalizeServerUrl(url)} 是否可达`);
+    }
+    throw err;
+  }
   const text = await res.text();
   let body = {};
   if (text.trim()) {
@@ -71,6 +93,7 @@ export async function existingKeyLooksRegistered(env, key, {
   targetServerId = String(env.DEFAULT_SERVER_ID || 'server-001'),
   targetServerUrl = normalizeServerUrl(env.SERVER_URL),
   projectKey: targetProjectKey = projectKey(env),
+  timeoutMs = requestTimeoutMs(env),
 } = {}) {
   const serverUrl = normalizeServerUrl(targetServerUrl);
 
@@ -113,6 +136,9 @@ export async function existingKeyLooksRegistered(env, key, {
   try {
     const body = await fetchJson(`${serverUrl}/api/machines/whoami`, {
       headers: { Authorization: `Bearer ${key}` },
+    }, {
+      timeoutMs,
+      serverUrl,
     });
     if (body.key_valid === true && String(body.server_id ?? '') === String(targetServerId)) {
       return { valid: true, via: '/api/machines/whoami' };
@@ -129,6 +155,7 @@ export async function main() {
   const serverId = String(env.DEFAULT_SERVER_ID || 'server-001');
   const currentProjectKey = projectKey(env);
   const keyPath = machineKeyPath(env);
+  const timeoutMs = requestTimeoutMs(env);
   if (existsSync(keyPath)) {
     const existing = readFileSync(keyPath, 'utf8').trim();
     const existingStatus = existing
@@ -136,6 +163,7 @@ export async function main() {
         targetServerId: serverId,
         targetServerUrl: serverUrl,
         projectKey: currentProjectKey,
+        timeoutMs,
       })
       : { valid: false };
     if (existingStatus.valid) {
@@ -150,10 +178,11 @@ export async function main() {
       }));
       return;
     }
+    unlinkSync(keyPath);
   }
 
   const adminToken = String(env.ADMIN_TOKEN || '').trim();
-  if (!adminToken || adminToken === 'change-me') {
+  if (PLACEHOLDERS.has(adminToken.toLowerCase())) {
     throw new Error('ADMIN_TOKEN is required in .env before registering a machine');
   }
 
@@ -165,6 +194,9 @@ export async function main() {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ name }),
+  }, {
+    timeoutMs,
+    serverUrl,
   });
 
   if (!body.apiKey || !String(body.apiKey).startsWith('sk_machine_')) {

@@ -77,6 +77,12 @@ pm2 startup
 
 `make logrotate-config` installs the pm2-logrotate module settings used by deployment: `max_size=100M`, `retain=10`, and `compress=true`. `pm2 startup` prints the platform-specific command for boot persistence and may require sudo. The app itself does not require sudo.
 
+Manual equivalent:
+
+```bash
+pm2 install pm2-logrotate && pm2 set pm2-logrotate:max_size 100M && pm2 set pm2-logrotate:retain 10 && pm2 set pm2-logrotate:compress true
+```
+
 ## Troubleshooting
 
 `make doctor` checks PATH tools, env, MySQL connectivity, schema presence, pm2 state, daemon health, file permissions, and project runtime files. `make doctor-offline` and `make doctor -- --offline` skip daemon and database reads; offline mode tails `~/.pm2/logs/*.log` files directly and uses `ps` output so it still works when pm2 or the daemon is down.
@@ -84,5 +90,7 @@ pm2 startup
 Key server, daemon, and agent events are JSON Lines on stdout using the `event` field and can be inspected with:
 
 ```bash
-pm2 logs coagent-daemon --raw --lines 500 | jq 'select(.event)'
+pm2 logs coagent-daemon --raw --lines 500 | jq -R 'fromjson? | select(.event)'
 ```
+
+Critical event JSON Lines and plain string logs are mixed on stdout; use `jq -R 'fromjson?'` to skip non-JSON lines.

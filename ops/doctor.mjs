@@ -3,11 +3,16 @@ import { execFile } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const offline = process.argv.includes('--offline');
-const expectedTables = ['users', 'machines', 'channels', 'messages'];
+const lenient = process.argv.includes('--lenient');
+const opsDir = path.dirname(fileURLToPath(import.meta.url));
+const expectedTables = JSON.parse(readFileSync(path.join(opsDir, 'schema-sentinel.json'), 'utf8')).tables;
+const PLACEHOLDERS = new Set(['', 'change-me', 'changeme', 'your-token-here', 'todo']);
+const secretEnvKeys = new Set(['ADMIN_TOKEN', 'ANTHROPIC_API_KEY']);
 const pm2LogTailLineLimit = 200;
 const pm2LogTailInitialBytes = 64 * 1024;
 const pm2LogTailMaxBytes = 1024 * 1024;
@@ -87,6 +92,14 @@ function mode(filePath) {
   return existsSync(filePath) ? (statSync(filePath).mode & 0o777) : null;
 }
 
+function envValueOk(key, value) {
+  const normalized = String(value ?? '').trim();
+  if (secretEnvKeys.has(key)) {
+    return !PLACEHOLDERS.has(normalized.toLowerCase());
+  }
+  return Boolean(normalized);
+}
+
 async function checkPathTools() {
   const tools = {};
 
@@ -111,16 +124,18 @@ function checkEnv() {
   add('.env', 'blocker', existsSync('.env'), `.env file ${existsSync('.env') ? 'present' : 'missing'}`, 'cp ops/env.example .env && chmod 600 .env');
   if (existsSync('.env')) {
     const envMode = mode('.env');
-    add('.env_mode', 'warn', envMode === 0o600, `.env mode is ${envMode?.toString(8)}`, 'chmod 600 .env');
+    add('.env_mode', lenient ? 'warn' : 'blocker', envMode === 0o600, `.env mode is ${envMode?.toString(8)}`, 'chmod 600 .env');
   }
 
   for (const key of ['SERVER_URL', 'ADMIN_TOKEN', 'DB_HOST', 'DB_PORT', 'DB_USER', 'DB_NAME', 'COAGENT_PROJECT_KEY']) {
-    add(`env_${key}`, 'blocker', Boolean(String(env[key] ?? '').trim()), `${key} ${env[key] ? 'is set' : 'is missing'}`, `Set ${key} in .env.`);
+    const ok = envValueOk(key, env[key]);
+    add(`env_${key}`, 'blocker', ok, `${key} ${ok ? 'is set' : 'is missing or placeholder'}`, `Set ${key} in .env.`);
   }
+  const anthropicOk = envValueOk('ANTHROPIC_API_KEY', env.ANTHROPIC_API_KEY);
   add(
     'env_ANTHROPIC_API_KEY',
     offline ? 'warn' : 'blocker',
-    Boolean(String(env.ANTHROPIC_API_KEY ?? '').trim()),
+    anthropicOk,
     offline ? 'ANTHROPIC_API_KEY is optional in --offline mode' : 'ANTHROPIC_API_KEY is required for --real smoke',
     'Set ANTHROPIC_API_KEY in .env or shell.',
   );
@@ -129,14 +144,16 @@ function checkEnv() {
 async function checkMysql(tools) {
   if (!tools.mysql?.ok) {
     skipped('mysql_connectivity', 'mysql binary');
-    skipped('mysql_schema', 'mysql binary');
+    skipped('mysql_schema_missing', 'mysql binary');
+    skipped('mysql_schema_extra', 'mysql binary');
     return;
   }
 
   const dbOk = ['DB_HOST', 'DB_PORT', 'DB_USER', 'DB_NAME'].every((key) => String(env[key] ?? '').trim());
   if (!dbOk) {
     skipped('mysql_connectivity', 'env_DB_*');
-    skipped('mysql_schema', 'mysql_connectivity');
+    skipped('mysql_schema_missing', 'mysql_connectivity');
+    skipped('mysql_schema_extra', 'mysql_connectivity');
     return;
   }
 
@@ -156,7 +173,8 @@ async function checkMysql(tools) {
     add('mysql_connectivity', 'blocker', true, 'mysql client can connect');
   } catch (err) {
     add('mysql_connectivity', 'blocker', false, err.message, 'Start MySQL and verify DB_HOST/PORT/USER/PASSWORD/NAME.');
-    skipped('mysql_schema', 'mysql_connectivity');
+    skipped('mysql_schema_missing', 'mysql_connectivity');
+    skipped('mysql_schema_extra', 'mysql_connectivity');
     return;
   }
 
@@ -168,15 +186,24 @@ async function checkMysql(tools) {
     );
     const tables = stdout.split('\n').map((line) => line.trim()).filter(Boolean).sort();
     const missing = expectedTables.filter((table) => !tables.includes(table));
-    add('mysql_schema', 'warn', missing.length === 0, missing.length ? `missing tables: ${missing.join(', ')}` : 'expected tables present', 'Start coagent-server once so lightcone initDb() creates schema.', {
+    const extra = tables.filter((table) => !expectedTables.includes(table));
+    add('mysql_schema_missing', 'blocker', missing.length === 0, missing.length ? `missing tables: ${missing.join(', ')}` : 'sentinel tables present', 'Start coagent-server once so lightcone initDb() creates schema.', {
       schema: {
         tables,
         expected_present: expectedTables,
         missing,
       },
     });
+    add('mysql_schema_extra', 'warn', extra.length === 0, extra.length ? `extra tables: ${extra.join(', ')}` : 'no unexpected tables', 'Review ops/schema-sentinel.json when schema intentionally evolves.', {
+      schema: {
+        tables,
+        expected_present: expectedTables,
+        extra,
+      },
+    });
   } catch (err) {
-    add('mysql_schema', 'warn', false, err.message, 'Inspect INFORMATION_SCHEMA permissions and DB_NAME.');
+    add('mysql_schema_missing', 'blocker', false, err.message, 'Inspect INFORMATION_SCHEMA permissions and DB_NAME.');
+    skipped('mysql_schema_extra', 'mysql_schema_missing');
   }
 }
 
@@ -250,7 +277,7 @@ function checkFilesystem() {
   const keyExists = add('machine_key', 'blocker', existsSync(keyPath), `${keyPath} ${existsSync(keyPath) ? 'exists' : 'missing'}`, 'make register');
   if (keyExists) {
     const keyMode = mode(keyPath);
-    add('machine_key_mode', 'warn', keyMode === 0o600, `${keyPath} mode is ${keyMode?.toString(8)}`, `chmod 600 ${keyPath}`);
+    add('machine_key_mode', lenient ? 'warn' : 'blocker', keyMode === 0o600, `${keyPath} mode is ${keyMode?.toString(8)}`, `chmod 600 ${keyPath}`);
   }
   add('project_dir', 'warn', existsSync(dir), `${dir} ${existsSync(dir) ? 'exists' : 'missing'}`, 'make register or start the daemon');
   add('channels_dir', 'warn', existsSync(path.join(dir, 'channels')), 'channels directory check', 'Start the daemon once to create channels/.');

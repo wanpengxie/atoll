@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { resolveDaemonSocketPath, resolveProjectKey } from './coagent-env.js';
 import { CliError } from './errors.js';
 import type { DaemonRpcConfig } from './coagent-env.js';
 
@@ -83,6 +84,13 @@ function daemonRequestOptions(config: DaemonRpcConfig = {}) {
   };
 }
 
+function daemonConnectionHint(config: DaemonRpcConfig = {}): string {
+  const projectKey = resolveProjectKey();
+  const socketPath = String(config.socketPath ?? process.env.COAGENT_DAEMON_SOCKET ?? '').trim()
+    || resolveDaemonSocketPath();
+  return `Hint: PROJECT_KEY=${projectKey}, socket=${socketPath}. Start the daemon or run make register if machine.key is missing.`;
+}
+
 export async function callDaemonRpc<T>(method: string, params: Record<string, unknown>, config: DaemonRpcConfig = {}): Promise<T> {
   const request = daemonRequestOptions(config);
   const payload = JSON.stringify({ method, params });
@@ -106,7 +114,7 @@ export async function callDaemonRpc<T>(method: string, params: Record<string, un
     req.on('error', (error) => {
       reject(new CliError(
         'daemon_request_failed',
-        `Failed to reach daemon over ${request.transport}: ${error.message}`,
+        `Failed to reach daemon over ${request.transport}: ${error.message}. ${daemonConnectionHint(config)}`,
         1,
       ));
     });

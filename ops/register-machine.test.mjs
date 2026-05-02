@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -155,7 +155,7 @@ test('existingKeyLooksRegistered rejects daemon admin status for another project
   });
 });
 
-test('register-machine CLI skips existing key when whoami matches target server', async (t) => {
+test('register-machine CLI skips existing key when whoami matches target server without ADMIN_TOKEN', async (t) => {
   const dir = tempDir(t);
   const keyPath = path.join(dir, 'machine.key');
   const missingSocket = path.join(dir, 'missing.sock');
@@ -176,7 +176,7 @@ test('register-machine CLI skips existing key when whoami matches target server'
         COAGENT_PROJECT_KEY: 'project-a',
         COAGENT_MACHINE_KEY_PATH: keyPath,
         COAGENT_DAEMON_SOCKET: missingSocket,
-        ADMIN_TOKEN: 'unused-for-skip',
+        ADMIN_TOKEN: '',
       },
     });
 
@@ -188,5 +188,91 @@ test('register-machine CLI skips existing key when whoami matches target server'
     assert.equal(body.keyPath, keyPath);
     assert.equal(body.projectKey, 'project-a');
     assert.equal(Object.hasOwn(body, 'machineId'), false);
+  });
+});
+
+test('register-machine CLI deletes stale key and registers with ADMIN_TOKEN', async (t) => {
+  const dir = tempDir(t);
+  const keyPath = path.join(dir, 'machine.key');
+  const missingSocket = path.join(dir, 'missing.sock');
+  writeFileSync(keyPath, 'sk_machine_stale\n', { mode: 0o600 });
+
+  const requests = [];
+  await withTcpServer((req, res) => {
+    requests.push({ method: req.method, url: req.url, authorization: req.headers.authorization });
+    if (req.url === '/api/machines/whoami') {
+      writeJson(res, 401, { error: 'Invalid machine API key' });
+      return;
+    }
+    assert.equal(req.method, 'POST');
+    assert.equal(req.url, '/api/servers/server-a/machines');
+    assert.equal(req.headers.authorization, 'Bearer admin-secret');
+    writeJson(res, 200, {
+      id: 'machine-new',
+      apiKey: 'sk_machine_new_valid',
+      apiKeyPrefix: 'sk_machine_new',
+    });
+  }, async (baseUrl) => {
+    const { stdout, stderr } = await execFileAsync(process.execPath, ['ops/register-machine.mjs'], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        SERVER_URL: baseUrl,
+        DEFAULT_SERVER_ID: 'server-a',
+        COAGENT_PROJECT_KEY: 'project-a',
+        COAGENT_MACHINE_KEY_PATH: keyPath,
+        COAGENT_DAEMON_SOCKET: missingSocket,
+        ADMIN_TOKEN: 'admin-secret',
+      },
+    });
+
+    assert.equal(stderr, '');
+    const body = JSON.parse(stdout);
+    assert.equal(body.ok, true);
+    assert.equal(body.skipped, false);
+    assert.equal(body.machineId, 'machine-new');
+    assert.equal(readFileSync(keyPath, 'utf8'), 'sk_machine_new_valid\n');
+    assert.deepEqual(requests.map((request) => request.url), [
+      '/api/machines/whoami',
+      '/api/servers/server-a/machines',
+    ]);
+  });
+});
+
+test('register-machine CLI times out registration request with clear SERVER_URL error', async (t) => {
+  const dir = tempDir(t);
+  const keyPath = path.join(dir, 'machine.key');
+  const missingSocket = path.join(dir, 'missing.sock');
+
+  await withTcpServer((_req, _res) => {
+    // Intentionally keep the request open until AbortSignal.timeout aborts fetch.
+  }, async (baseUrl) => {
+    let failure;
+    try {
+      await execFileAsync(process.execPath, ['ops/register-machine.mjs'], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          SERVER_URL: baseUrl,
+          DEFAULT_SERVER_ID: 'server-a',
+          COAGENT_PROJECT_KEY: 'project-a',
+          COAGENT_MACHINE_KEY_PATH: keyPath,
+          COAGENT_DAEMON_SOCKET: missingSocket,
+          ADMIN_TOKEN: 'admin-secret',
+          REGISTER_MACHINE_TIMEOUT_MS: '50',
+        },
+        timeout: 2000,
+      });
+    } catch (err) {
+      failure = err;
+    }
+
+    assert.ok(failure, 'register-machine should fail');
+    assert.equal(failure.code, 1);
+    const body = JSON.parse(failure.stderr);
+    assert.equal(body.ok, false);
+    assert.match(body.error, /注册请求 0\.05 秒超时/);
+    assert.match(body.error, new RegExp(`SERVER_URL=${baseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.equal(existsSync(keyPath), false);
   });
 });
