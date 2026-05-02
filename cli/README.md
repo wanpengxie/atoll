@@ -27,4 +27,4 @@ Mock fixtures live in `cli/src/mock/fixtures/`.
 ## Status
 
 - Mock backend implemented with fixed CLI contract (input args + JSON output envelope).
-- Real backend (live xhs.com integration) is **out of scope for M1.0** and will be re-evaluated post-dogfood.
+- Real backend (live xhs.com integration) is **out of scope for M1.0** and will be re-evaluated after real-usage feedback.
