@@ -50,6 +50,7 @@ smoke: check-l0
 	node lightcone/daemon/scripts/smoke-channel-runtime.mjs $(PASS_ARGS)
 
 test: check-l0
+	node --test ops/*.test.mjs
 	pnpm -r test
 
 lint:

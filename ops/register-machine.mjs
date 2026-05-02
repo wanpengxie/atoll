@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, chmodSync, writeFileSync } from 'n
 import { homedir, hostname, platform } from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 function parseEnvFile(filePath) {
   if (!existsSync(filePath)) return {};
@@ -31,6 +32,10 @@ function projectKey(env) {
     .trim()
     .replace(/[^a-zA-Z0-9._-]/g, '-')
     .replace(/^-+|-+$/g, '') || 'default';
+}
+
+function normalizeServerUrl(value) {
+  return String(value || 'http://localhost:8779').replace(/\/+$/, '');
 }
 
 function machineKeyPath(env) {
@@ -62,8 +67,12 @@ async function fetchJson(url, options = {}) {
   return body;
 }
 
-async function existingKeyLooksRegistered(env, key) {
-  const serverUrl = String(env.SERVER_URL || 'http://localhost:8779').replace(/\/+$/, '');
+export async function existingKeyLooksRegistered(env, key, {
+  targetServerId = String(env.DEFAULT_SERVER_ID || 'server-001'),
+  targetServerUrl = normalizeServerUrl(env.SERVER_URL),
+  projectKey: targetProjectKey = projectKey(env),
+} = {}) {
+  const serverUrl = normalizeServerUrl(targetServerUrl);
 
   const socketPath = daemonSocketPath(env);
   if (existsSync(socketPath)) {
@@ -85,28 +94,50 @@ async function existingKeyLooksRegistered(env, key) {
       req.on('error', () => resolve({ ok: false }));
       req.end();
     });
-    if (status.ok) return { valid: true, via: '/admin/status' };
+    if (status.ok) {
+      try {
+        const body = JSON.parse(status.raw || '{}');
+        const statusServerUrl = body.server_url ? normalizeServerUrl(body.server_url) : '';
+        if (
+          statusServerUrl === serverUrl
+          && String(body.project_key ?? '') === String(targetProjectKey)
+        ) {
+          return { valid: true, via: '/admin/status' };
+        }
+      } catch {
+        // Fall through and let the server whoami path verify the key.
+      }
+    }
   }
 
   try {
     const body = await fetchJson(`${serverUrl}/api/machines/whoami`, {
       headers: { Authorization: `Bearer ${key}` },
     });
-    if (body.key_valid === true) return { valid: true, via: '/api/machines/whoami', machineId: body.machine_id };
+    if (body.key_valid === true && String(body.server_id ?? '') === String(targetServerId)) {
+      return { valid: true, via: '/api/machines/whoami' };
+    }
   } catch {
     // Fall through and let registration create a fresh key.
   }
   return { valid: false, via: null };
 }
 
-async function main() {
+export async function main() {
   const env = mergedEnv();
-  const serverUrl = String(env.SERVER_URL || 'http://localhost:8779').replace(/\/+$/, '');
+  const serverUrl = normalizeServerUrl(env.SERVER_URL);
   const serverId = String(env.DEFAULT_SERVER_ID || 'server-001');
+  const currentProjectKey = projectKey(env);
   const keyPath = machineKeyPath(env);
   if (existsSync(keyPath)) {
     const existing = readFileSync(keyPath, 'utf8').trim();
-    const existingStatus = existing ? await existingKeyLooksRegistered(env, existing) : { valid: false };
+    const existingStatus = existing
+      ? await existingKeyLooksRegistered(env, existing, {
+        targetServerId: serverId,
+        targetServerUrl: serverUrl,
+        projectKey: currentProjectKey,
+      })
+      : { valid: false };
     if (existingStatus.valid) {
       chmodSync(keyPath, 0o600);
       console.log(JSON.stringify({
@@ -115,7 +146,7 @@ async function main() {
         reason: `already registered, key valid via ${existingStatus.via}`,
         machineId: existingStatus.machineId,
         keyPath,
-        projectKey: projectKey(env),
+        projectKey: currentProjectKey,
       }));
       return;
     }
@@ -149,11 +180,13 @@ async function main() {
     machineId: body.id,
     apiKeyPrefix: body.apiKeyPrefix ?? body.apiKey.slice(0, 18),
     keyPath,
-    projectKey: projectKey(env),
+    projectKey: currentProjectKey,
   }));
 }
 
-main().catch((err) => {
-  console.error(JSON.stringify({ ok: false, error: err.message }));
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main().catch((err) => {
+    console.error(JSON.stringify({ ok: false, error: err.message }));
+    process.exit(1);
+  });
+}
