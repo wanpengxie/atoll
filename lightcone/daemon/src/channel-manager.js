@@ -783,10 +783,14 @@ export class ChannelManager {
   }
 
   _wireProcess(node, proc, { restoring }) {
+    let stdoutBuffer = '';
+
     proc.stdout.on('data', (chunk) => {
-      const text = chunk.toString().trim();
-      if (text) {
-        console.log(`[ChannelManager][${node.channelId}] stdout: ${text.slice(0, 500)}`);
+      stdoutBuffer += chunk.toString();
+      const lines = stdoutBuffer.split('\n');
+      stdoutBuffer = lines.pop() ?? '';
+      for (const line of lines) {
+        process.stdout.write(`${line}\n`);
       }
     });
 
@@ -799,6 +803,11 @@ export class ChannelManager {
 
     proc.on('exit', async (code, signal) => {
       if (this.channels.get(node.channelId)?.proc !== proc) return;
+
+      if (stdoutBuffer) {
+        process.stdout.write(`${stdoutBuffer}\n`);
+        stdoutBuffer = '';
+      }
 
       node.proc = null;
       node.agentPid = null;

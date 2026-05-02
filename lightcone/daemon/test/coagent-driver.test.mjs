@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { buildCoagentSpawn } from '../src/drivers/coagent.js';
+import { buildAgentInheritedEnv, buildCoagentSpawn } from '../src/drivers/coagent.js';
 
 function createRepoRoot(prefix) {
   return path.join(os.tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
@@ -53,4 +53,66 @@ test('buildCoagentSpawn resolves dist runtime and mounted cli shims', () => {
   assert.equal(spawnConfig.args[0], path.join(agentDistDir, 'index.js'));
   assert.equal(spawnConfig.entry, path.join(agentDistDir, 'index.js'));
   assert.deepEqual(spawnConfig.mountedCliBinaries, ['xhs']);
+});
+
+test('buildCoagentSpawn whitelists agent env and excludes daemon/server secrets', () => {
+  const repoRootDir = createRepoRoot('coagent-driver-env-whitelist');
+  const agentDistDir = path.join(repoRootDir, 'agent-binary', 'dist');
+  const sessionIdPath = path.join(repoRootDir, 'tmp', 'session.id');
+
+  mkdirSync(agentDistDir, { recursive: true });
+  writeFileSync(path.join(agentDistDir, 'index.js'), 'export {};\n', 'utf8');
+
+  const previousEnv = { ...process.env };
+  Object.assign(process.env, {
+    HOME: '/tmp/home',
+    USER: 'tester',
+    LANG: 'en_US.UTF-8',
+    LC_ALL: 'en_US.UTF-8',
+    PATH: '/usr/bin',
+    TERM: 'xterm-256color',
+    ANTHROPIC_API_KEY: 'anthropic-key',
+    DEEPSEEK_API_KEY: 'deepseek-key',
+    CLAUDE_CODE_MAX_OUTPUT: '20000',
+    NODE_OPTIONS: '--no-warnings',
+    ADMIN_TOKEN: 'admin-secret',
+    DB_PASSWORD: 'db-secret',
+    DB_USER: 'db-user',
+    DB_HOST: 'db-host',
+    DB_NAME: 'db-name',
+    MACHINE_API_KEY: 'machine-secret',
+    RANDOM_TOKEN: 'random-secret',
+  });
+
+  try {
+    const inherited = buildAgentInheritedEnv(process.env);
+    assert.equal(inherited.ANTHROPIC_API_KEY, 'anthropic-key');
+    assert.equal(inherited.DEEPSEEK_API_KEY, 'deepseek-key');
+    assert.equal(inherited.LC_ALL, 'en_US.UTF-8');
+    assert.equal(inherited.CLAUDE_CODE_MAX_OUTPUT, '20000');
+    assert.equal(inherited.NODE_OPTIONS, '--no-warnings');
+    assert.equal('ADMIN_TOKEN' in inherited, false);
+    assert.equal('DB_PASSWORD' in inherited, false);
+    assert.equal('DB_USER' in inherited, false);
+    assert.equal('DB_HOST' in inherited, false);
+    assert.equal('DB_NAME' in inherited, false);
+    assert.equal('MACHINE_API_KEY' in inherited, false);
+    assert.equal('RANDOM_TOKEN' in inherited, false);
+
+    const spawnConfig = buildCoagentSpawn({
+      channelId: 'channel-env',
+      workdir: repoRootDir,
+      capabilitySet: { cli_binaries: [] },
+      daemonToken: 'explicit-daemon-token',
+      sessionIdPath,
+      repoRootDir,
+    });
+    assert.equal(spawnConfig.env.ANTHROPIC_API_KEY, 'anthropic-key');
+    assert.equal(spawnConfig.env.COAGENT_DAEMON_TOKEN, 'explicit-daemon-token');
+    assert.equal('ADMIN_TOKEN' in spawnConfig.env, false);
+    assert.equal('DB_PASSWORD' in spawnConfig.env, false);
+    assert.equal('MACHINE_API_KEY' in spawnConfig.env, false);
+  } finally {
+    process.env = previousEnv;
+  }
 });

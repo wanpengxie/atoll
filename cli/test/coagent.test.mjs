@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -91,6 +91,42 @@ test('coagent admin status calls daemon RPC', async () => {
     assert.equal(body.data.channels_count, 0);
     assert.equal(requests[0].payload.method, 'admin.status');
     assert.equal(requests[0].headers.authorization, 'Bearer test-token');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('coagent daemon RPC reads machine.key token without mutating env', async (t) => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'coagent-main-token-'));
+  t.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+  const keyPath = path.join(tempDir, 'machine.key');
+  writeFileSync(keyPath, 'machine-key-from-file\n', 'utf8');
+
+  const { configureDaemonRpcEnv } = await import(path.join(cliDir, 'dist', 'lib', 'coagent-env.js'));
+  const env = {
+    COAGENT_DAEMON_HTTP: 'http://127.0.0.1:12345',
+    COAGENT_DAEMON_SOCKET: '',
+    COAGENT_MACHINE_KEY_PATH: keyPath,
+  };
+  const config = configureDaemonRpcEnv(env);
+  assert.equal(config.token, 'machine-key-from-file');
+  assert.equal('COAGENT_DAEMON_TOKEN' in env, false);
+
+  const { server, port, requests } = await withRpcServer(() => ({
+    ok: true,
+    result: { ok: true },
+  }));
+  try {
+    const body = await runCliAsync(['admin', 'status'], {
+      COAGENT_DAEMON_HTTP: `http://127.0.0.1:${port}`,
+      COAGENT_DAEMON_SOCKET: '',
+      COAGENT_MACHINE_KEY_PATH: keyPath,
+      COAGENT_DAEMON_TOKEN: '',
+    });
+    assert.equal(body.ok, true);
+    assert.equal(requests[0].headers.authorization, 'Bearer machine-key-from-file');
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

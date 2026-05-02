@@ -100,11 +100,9 @@ export class RpcServer {
       return;
     }
 
-    if (context.transport === 'http' && this.authTokens.length > 0) {
-      if (!this._isAuthorized(req)) {
-        writeJson(res, 401, { ok: false, error: { code: 'unauthorized', message: 'invalid bearer token' } });
-        return;
-      }
+    if (this.authTokens.length > 0 && !this._isAuthorized(req, context)) {
+      writeJson(res, 401, { ok: false, error: { code: 'unauthorized', message: 'invalid bearer token' } });
+      return;
     }
 
     let body;
@@ -136,7 +134,7 @@ export class RpcServer {
     }
   }
 
-  _isAuthorized(req) {
+  _isAuthorized(req, _context = {}) {
     if (this.authTokens.length === 0) return true;
     const auth = req.headers.authorization ?? '';
     if (!auth.startsWith('Bearer ')) return false;

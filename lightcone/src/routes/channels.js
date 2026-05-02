@@ -16,6 +16,7 @@ import { requestFromDaemon } from '../daemon/index.js';
 import { broadcast } from '../realtime/broadcast.js';
 import { formatMessage } from '../internal/index.js';
 import { requireAuth } from '../middleware/auth.js';
+import { emitJsonEvent } from '../events.js';
 import {
   requireWorkspaceRead,
   requireChannelRead,
@@ -251,6 +252,12 @@ export function createChannelsRouter({
       }
     }
 
+    emitJsonEvent('channel.create', {
+      channel_id: channel.id,
+      workspace_id: channel.workspace_id,
+      daemon_id: channel.daemon_id ?? null,
+      status: channel.status,
+    });
     broadcastImpl.channelUpdated(defaultServerId, req.workspace.id);
     res.status(201).json(formatChannel(channel));
   });
@@ -405,6 +412,11 @@ export function createChannelsRouter({
         return res.status(503).json({ error: result?.error ?? 'Channel daemon failed to persist message' });
       }
 
+      emitJsonEvent('message.deliver', {
+        message_id: result.message?.messageId ?? result.message?.message_id ?? null,
+        channel_id: req.channel.id,
+        request_id: requestId,
+      });
       res.status(201).json(formatDaemonMessagePayload(result.message));
     } catch (err) {
       res.status(503).json({ error: `Channel daemon unavailable: ${err.message}` });

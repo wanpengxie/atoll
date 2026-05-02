@@ -107,6 +107,28 @@ test('build artifacts exist for agent runtime', () => {
   accessSync(distEntry, fsConstants.F_OK);
 });
 
+test('stdout writer emits JSON Lines with event field instead of type', async (t) => {
+  const { writeStatus } = await import(path.join(packageDir, 'dist', 'ipc', 'stdout-writer.js'));
+  const previousWrite = process.stdout.write;
+  const writes = [];
+  process.stdout.write = (chunk, encoding, callback) => {
+    writes.push(String(chunk));
+    if (typeof encoding === 'function') encoding();
+    if (typeof callback === 'function') callback();
+    return true;
+  };
+  t.after(() => {
+    process.stdout.write = previousWrite;
+  });
+
+  writeStatus('ready', 'schema-test');
+  const entry = JSON.parse(writes.join('').trim());
+  assert.equal(entry.event, 'agent.status');
+  assert.equal(entry.status, 'ready');
+  assert.equal(entry.detail, 'schema-test');
+  assert.equal('type' in entry, false);
+});
+
 test('system prompt exposes required CLI commands without the banned keyword', async () => {
   const { buildSystemPrompt } = await import(path.join(packageDir, 'dist', 'prompt', 'system-prompt.js'));
   const prompt = buildSystemPrompt({

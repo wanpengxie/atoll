@@ -20,15 +20,15 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../
 const cliBinDir = path.join(repoRoot, 'cli', 'bin');
 const fakeBinDir = path.join(tempRoot, 'bin');
 
-function exitPreflight(message) {
+function exitPreflight(message, exitCode = 1) {
   console.error(message);
   rmSync(tempRoot, { recursive: true, force: true });
-  process.exit(1);
+  process.exit(exitCode);
 }
 
 if (realMode) {
   if (!process.env.ANTHROPIC_API_KEY) {
-    exitPreflight('ANTHROPIC_API_KEY is required for --real smoke. Set ANTHROPIC_API_KEY and retry.');
+    exitPreflight('ANTHROPIC_API_KEY is required for --real smoke. Set ANTHROPIC_API_KEY and retry.', 0);
   }
   try {
     await execFileAsync('claude', ['--version'], { timeout: 5000 });
@@ -69,7 +69,11 @@ const channelId = 'smoke-channel';
 const requestLog = [];
 const sentLog = [];
 
-async function curlSocketRpc(payload) {
+async function curlSocketRpc(payload, { token = daemonToken } = {}) {
+  const headers = ['--header', 'Content-Type: application/json'];
+  if (token) {
+    headers.push('--header', `Authorization: Bearer ${token}`);
+  }
   const { stdout } = await execFileAsync('curl', [
     '--silent',
     '--show-error',
@@ -77,7 +81,7 @@ async function curlSocketRpc(payload) {
     '--unix-socket', socketPath,
     '--request', 'POST',
     'http://localhost/rpc',
-    '--header', 'Content-Type: application/json',
+    ...headers,
     '--data', JSON.stringify(payload),
   ], { encoding: 'utf8' });
   return JSON.parse(stdout);
@@ -205,6 +209,13 @@ try {
     COAGENT_DAEMON_HTTP: `http://127.0.0.1:${httpPort}`,
     COAGENT_DAEMON_TOKEN: daemonToken,
   };
+
+  const unauthorizedResponse = await curlSocketRpc({
+    method: 'channel.info',
+    params: { channel_id: channelId },
+  }, { token: '' });
+  assert.equal(unauthorizedResponse.ok, false);
+  assert.equal(unauthorizedResponse.error?.code, 'unauthorized');
 
   const infoResponse = await curlSocketRpc({
     method: 'channel.info',

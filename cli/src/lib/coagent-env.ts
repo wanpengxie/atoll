@@ -35,13 +35,21 @@ export function readMachineKey(env = process.env): string {
   return readFileSync(keyPath, 'utf8').trim();
 }
 
-export function configureDaemonRpcEnv(env = process.env): void {
-  if (!env.COAGENT_DAEMON_SOCKET && !env.COAGENT_DAEMON_HTTP) {
-    env.COAGENT_DAEMON_SOCKET = resolveDaemonSocketPath(env);
-  }
+export interface DaemonRpcConfig {
+  socketPath?: string;
+  daemonHttp?: string;
+  token?: string;
+}
 
-  if (env.COAGENT_DAEMON_HTTP && !env.COAGENT_DAEMON_TOKEN) {
-    const key = readMachineKey(env);
-    if (key) env.COAGENT_DAEMON_TOKEN = key;
-  }
+export function configureDaemonRpcEnv(env = process.env): DaemonRpcConfig {
+  const daemonHttp = String(env.COAGENT_DAEMON_HTTP ?? '').trim();
+  const configuredSocket = String(env.COAGENT_DAEMON_SOCKET ?? '').trim();
+  const socketPath = configuredSocket || (!daemonHttp ? resolveDaemonSocketPath(env) : '');
+  const token = String(env.COAGENT_DAEMON_TOKEN ?? '').trim() || readMachineKey(env);
+
+  return {
+    ...(socketPath ? { socketPath } : {}),
+    ...(daemonHttp ? { daemonHttp } : {}),
+    ...(token ? { token } : {}),
+  };
 }

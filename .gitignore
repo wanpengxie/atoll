@@ -1,9 +1,11 @@
 node_modules/
 .codex
 dist/
-.dalek/runtime/
+.dalek/*
+!.dalek/pm/
+!.dalek/pm/*.md
 *.local.*
 .logs/
-.dalek/
+.dalek/runtime/
 .env
 .coagent-local/

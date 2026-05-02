@@ -7,6 +7,7 @@ cp ops/env.example .env
 chmod 600 .env
 # edit .env: ANTHROPIC_API_KEY, SERVER_URL, ADMIN_TOKEN, DB_*, COAGENT_PROJECT_KEY
 make deploy
+make logrotate-config
 make register
 make doctor
 pm2 start ecosystem.config.cjs
@@ -22,8 +23,10 @@ The lightcone server creates and updates its MySQL schema through `initDb()` on 
 make install
 make build
 make deploy
+make logrotate-config
 make register
 make doctor
+make doctor-offline
 make doctor -- --offline
 make smoke
 make smoke -- --real
@@ -55,6 +58,8 @@ Runtime daemon state lives under `~/.coagent/{COAGENT_PROJECT_KEY}/`:
 
 Project-local scratch state should use `.coagent-local/`; it is ignored by git.
 
+Planning documents under `.dalek/pm/` are kept in git; `.dalek/runtime/` and worker-local dalek state are managed by dalek and ignored.
+
 ## Operations
 
 Use pm2 directly for process lifecycle:
@@ -64,18 +69,19 @@ pm2 start ecosystem.config.cjs
 pm2 list
 pm2 jlist
 pm2 reload coagent-daemon
+pm2 conf pm2-logrotate
 pm2 logs coagent-daemon --raw --lines 200
 pm2 save
 pm2 startup
 ```
 
-`pm2 startup` prints the platform-specific command for boot persistence and may require sudo. The app itself does not require sudo.
+`make logrotate-config` installs the pm2-logrotate module settings used by deployment: `max_size=100M`, `retain=10`, and `compress=true`. `pm2 startup` prints the platform-specific command for boot persistence and may require sudo. The app itself does not require sudo.
 
 ## Troubleshooting
 
-`make doctor` checks PATH tools, env, MySQL connectivity, schema presence, pm2 state, daemon health, file permissions, and project runtime files. `make doctor -- --offline` skips daemon and database reads; it uses `.env`, pm2 state/logs, `~/.coagent/{COAGENT_PROJECT_KEY}/`, and `ps` output so it still works when the daemon is down.
+`make doctor` checks PATH tools, env, MySQL connectivity, schema presence, pm2 state, daemon health, file permissions, and project runtime files. `make doctor-offline` and `make doctor -- --offline` skip daemon and database reads; offline mode tails `~/.pm2/logs/*.log` files directly and uses `ps` output so it still works when pm2 or the daemon is down.
 
-Key daemon events are JSON Lines on stdout and can be inspected with:
+Key server, daemon, and agent events are JSON Lines on stdout using the `event` field and can be inspected with:
 
 ```bash
 pm2 logs coagent-daemon --raw --lines 500 | jq 'select(.event)'

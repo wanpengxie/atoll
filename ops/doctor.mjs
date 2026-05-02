@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const offline = process.argv.includes('--offline');
+const expectedTables = ['users', 'machines', 'channels', 'messages'];
 
 function parseEnvFile(filePath) {
   if (!existsSync(filePath)) return {};
@@ -59,12 +60,12 @@ function add(name, level, ok, message, fix = '', extra = {}) {
   return ok;
 }
 
-function skipped(name, level, blockedBy) {
+function skipped(name, blockedBy) {
   checks.push({
     name,
-    level,
+    level: 'skipped',
     ok: false,
-    message: `skipped because ${blockedBy} failed`,
+    message: `blocked by ${blockedBy}`,
     fix: `Fix ${blockedBy} first, then rerun make doctor.`,
     skipped: `blocked by ${blockedBy}`,
   });
@@ -84,16 +85,23 @@ function mode(filePath) {
 }
 
 async function checkPathTools() {
+  const tools = {};
+
   const node = await commandOk('node', ['--version']);
+  tools.node = node;
   add('node', 'blocker', node.ok && /^v(2[0-9]|[3-9][0-9])\./.test(node.output), node.ok ? `found ${node.output}` : node.error, 'Install Node.js 20+.');
 
   const pnpm = await commandOk('pnpm', ['--version']);
+  tools.pnpm = pnpm;
   add('pnpm', 'blocker', pnpm.ok && Number(pnpm.output.split('.')[0]) >= 9, pnpm.ok ? `found ${pnpm.output}` : pnpm.error, 'Install pnpm 9+.');
 
   for (const binary of ['pm2', 'claude', 'mysql']) {
     const result = await commandOk(binary, ['--version']);
-    add(binary, binary === 'claude' ? 'blocker' : 'blocker', result.ok, result.ok ? `found ${result.output || binary}` : result.error, `Install ${binary} and ensure it is on PATH.`);
+    tools[binary] = result;
+    add(binary, 'blocker', result.ok, result.ok ? `found ${result.output || binary}` : result.error, `Install ${binary} and ensure it is on PATH.`);
   }
+
+  return tools;
 }
 
 function checkEnv() {
@@ -106,14 +114,26 @@ function checkEnv() {
   for (const key of ['SERVER_URL', 'ADMIN_TOKEN', 'DB_HOST', 'DB_PORT', 'DB_USER', 'DB_NAME', 'COAGENT_PROJECT_KEY']) {
     add(`env_${key}`, 'blocker', Boolean(String(env[key] ?? '').trim()), `${key} ${env[key] ? 'is set' : 'is missing'}`, `Set ${key} in .env.`);
   }
-  add('env_ANTHROPIC_API_KEY', 'blocker', Boolean(String(env.ANTHROPIC_API_KEY ?? '').trim()), 'ANTHROPIC_API_KEY is required for --real smoke', 'Set ANTHROPIC_API_KEY in .env or shell.');
+  add(
+    'env_ANTHROPIC_API_KEY',
+    offline ? 'warn' : 'blocker',
+    Boolean(String(env.ANTHROPIC_API_KEY ?? '').trim()),
+    offline ? 'ANTHROPIC_API_KEY is optional in --offline mode' : 'ANTHROPIC_API_KEY is required for --real smoke',
+    'Set ANTHROPIC_API_KEY in .env or shell.',
+  );
 }
 
-async function checkMysql() {
+async function checkMysql(tools) {
+  if (!tools.mysql?.ok) {
+    skipped('mysql_connectivity', 'mysql binary');
+    skipped('mysql_schema', 'mysql binary');
+    return;
+  }
+
   const dbOk = ['DB_HOST', 'DB_PORT', 'DB_USER', 'DB_NAME'].every((key) => String(env[key] ?? '').trim());
   if (!dbOk) {
-    skipped('mysql_connectivity', 'blocker', 'env_DB_*');
-    skipped('mysql_schema', 'blocker', 'mysql_connectivity');
+    skipped('mysql_connectivity', 'env_DB_*');
+    skipped('mysql_schema', 'mysql_connectivity');
     return;
   }
 
@@ -122,62 +142,77 @@ async function checkMysql() {
     '-h', env.DB_HOST,
     '-P', String(env.DB_PORT || '3306'),
     '-u', env.DB_USER,
+    '--batch',
+    '--skip-column-names',
     env.DB_NAME,
   ];
   const mysqlEnv = { ...process.env, MYSQL_PWD: env.DB_PASSWORD ?? '' };
 
-  let connected = false;
   try {
     await execFileAsync('mysql', [...baseArgs, '-e', 'SELECT 1'], { env: mysqlEnv, timeout: 10000 });
-    connected = true;
+    add('mysql_connectivity', 'blocker', true, 'mysql client can connect');
   } catch (err) {
     add('mysql_connectivity', 'blocker', false, err.message, 'Start MySQL and verify DB_HOST/PORT/USER/PASSWORD/NAME.');
-  }
-  if (!connected) {
-    skipped('mysql_schema', 'blocker', 'mysql_connectivity');
+    skipped('mysql_schema', 'mysql_connectivity');
     return;
   }
-  add('mysql_connectivity', 'blocker', true, 'mysql client can connect');
 
-  for (const table of ['users', 'machines', 'channels', 'messages']) {
-    try {
-      await execFileAsync('mysql', [...baseArgs, '-e', `SELECT 1 FROM ${table} LIMIT 1`], { env: mysqlEnv, timeout: 10000 });
-      add(`schema_${table}`, 'blocker', true, `${table} table exists`);
-    } catch (err) {
-      add(`schema_${table}`, 'blocker', false, err.message, 'Start coagent-server once so lightcone initDb() creates schema.');
-    }
+  try {
+    const { stdout } = await execFileAsync(
+      'mysql',
+      [...baseArgs, '-e', 'SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE()'],
+      { env: mysqlEnv, timeout: 10000 },
+    );
+    const tables = stdout.split('\n').map((line) => line.trim()).filter(Boolean).sort();
+    const missing = expectedTables.filter((table) => !tables.includes(table));
+    add('mysql_schema', 'warn', missing.length === 0, missing.length ? `missing tables: ${missing.join(', ')}` : 'expected tables present', 'Start coagent-server once so lightcone initDb() creates schema.', {
+      schema: {
+        tables,
+        expected_present: expectedTables,
+        missing,
+      },
+    });
+  } catch (err) {
+    add('mysql_schema', 'warn', false, err.message, 'Inspect INFORMATION_SCHEMA permissions and DB_NAME.');
   }
 }
 
-async function checkPm2() {
-  const pm2 = await commandOk('pm2', ['jlist']);
-  if (!pm2.ok) {
-    add('pm2_jlist', 'blocker', false, pm2.error, 'Install pm2 and run pm2 start ecosystem.config.cjs.');
+async function checkPm2(tools) {
+  if (!tools.pm2?.ok) {
+    skipped('pm2_processes', 'pm2 binary');
+    skipped('pm2_logs', 'pm2 binary');
     return;
   }
+
   let apps = [];
   try {
-    apps = JSON.parse(pm2.output.startsWith('[') ? pm2.output : (await execFileAsync('pm2', ['jlist'], { encoding: 'utf8' })).stdout);
-  } catch {
-    const { stdout } = await execFileAsync('pm2', ['jlist'], { encoding: 'utf8' });
+    const { stdout } = await execFileAsync('pm2', ['jlist'], { encoding: 'utf8', timeout: 10000 });
     apps = JSON.parse(stdout);
+  } catch (err) {
+    add('pm2_processes', 'blocker', false, err.message, 'Run pm2 start ecosystem.config.cjs && pm2 save.');
+    skipped('pm2_logs', 'pm2_processes');
+    return;
   }
-  for (const name of ['coagent-server', 'coagent-daemon']) {
+
+  const expectedApps = ['coagent-server', 'coagent-daemon'];
+  const details = expectedApps.map((name) => {
     const app = apps.find((item) => item.name === name);
-    add(`pm2_${name}`, 'blocker', app?.pm2_env?.status === 'online', app ? `${name} is ${app.pm2_env?.status}` : `${name} not found`, 'pm2 start ecosystem.config.cjs && pm2 save');
-  }
+    return { name, status: app?.pm2_env?.status ?? 'missing' };
+  });
+  const ok = details.every((item) => item.status === 'online');
+  add('pm2_processes', 'blocker', ok, details.map((item) => `${item.name}=${item.status}`).join(', '), 'pm2 start ecosystem.config.cjs && pm2 save', { processes: details });
 }
 
 async function checkDaemonHealth() {
   const keyPath = machineKeyPath();
   if (!existsSync(keyPath)) {
-    skipped('daemon_admin_status', 'blocker', 'machine_key');
+    skipped('daemon_admin_status', 'machine_key');
     return;
   }
   const token = readFileSync(keyPath, 'utf8').trim();
   const socketPath = daemonSocketPath();
   if (!existsSync(socketPath)) {
-    add('daemon_admin_status', 'blocker', false, `${socketPath} does not exist`, 'pm2 start coagent-daemon or pm2 reload coagent-daemon');
+    skipped('daemon_admin_status', 'daemon_socket_file');
     return;
   }
 
@@ -218,42 +253,59 @@ function checkFilesystem() {
   add('daemon_socket_file', 'warn', existsSync(daemonSocketPath()), 'daemon socket file check', 'Start coagent-daemon.');
 }
 
+function tailPm2LogFiles() {
+  const logDir = path.join(homedir(), '.pm2', 'logs');
+  if (!existsSync(logDir)) return { lines: [], files: [], error: `${logDir} does not exist` };
+
+  const files = readdirSync(logDir)
+    .filter((fileName) => /coagent-(daemon|server).*\.log$/.test(fileName))
+    .map((fileName) => path.join(logDir, fileName));
+  const lines = files.flatMap((filePath) => readFileSync(filePath, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .slice(-200)
+    .map((line) => `${path.basename(filePath)}: ${line}`));
+  return { lines, files };
+}
+
 async function checkOfflineSignals() {
-  try {
-    const { stdout } = await execFileAsync('pm2', ['logs', 'coagent-daemon', '--raw', '--lines', '200', '--nostream'], { timeout: 10000 });
-    const errorLines = stdout.split('\n').filter((line) => /error|failed|exception/i.test(line)).slice(-10);
-    add('pm2_recent_errors', 'warn', errorLines.length === 0, errorLines.length ? errorLines.join('\n') : 'no recent daemon error lines');
-  } catch (err) {
-    add('pm2_recent_errors', 'warn', false, err.message, 'Use pm2 logs coagent-daemon --raw --lines 200.');
-  }
+  const { lines, files, error } = tailPm2LogFiles();
+  const errorLines = lines.filter((line) => /error|failed|exception/i.test(line)).slice(-10);
+  add('pm2_file_logs', 'warn', !error && errorLines.length === 0, error ?? (errorLines.length ? errorLines.join('\n') : 'no recent daemon/server error lines'), 'Inspect ~/.pm2/logs/*.log directly.', {
+    log_files: files,
+  });
 
   try {
     const { stdout } = await execFileAsync('ps', ['-ef'], { timeout: 5000 });
-    const lines = stdout.split('\n').filter((line) => /coagent|lightcone/.test(line) && !/doctor\.mjs/.test(line));
-    add('ps_coagent', 'warn', lines.length > 0, lines.slice(0, 10).join('\n') || 'no coagent/lightcone process found', 'Start services with pm2 start ecosystem.config.cjs.');
+    const lines = stdout.split('\n').filter((line) => /node.*lightcone|coagent-daemon/.test(line) && !/doctor\.mjs/.test(line));
+    add('ps_coagent', 'warn', lines.length > 0, lines.slice(0, 10).join('\n') || 'no node lightcone/coagent-daemon process found', 'Start services with pm2 start ecosystem.config.cjs.');
   } catch (err) {
     add('ps_coagent', 'warn', false, err.message, 'Run ps -ef manually.');
   }
 }
 
+function summary() {
+  return {
+    blocker_count: checks.filter((check) => check.level === 'blocker' && !check.ok).length,
+    warn_count: checks.filter((check) => check.level === 'warn' && !check.ok).length,
+  };
+}
+
 async function main() {
-  await checkPathTools();
+  const tools = await checkPathTools();
   checkEnv();
   checkFilesystem();
-  await checkPm2();
+  await checkPm2(tools);
   if (offline) {
     await checkOfflineSignals();
   } else {
-    await checkMysql();
+    await checkMysql(tools);
     await checkDaemonHealth();
   }
 
-  const summary = {
-    blocker_count: checks.filter((check) => check.level === 'blocker' && !check.ok && !check.skipped).length,
-    warn_count: checks.filter((check) => check.level === 'warn' && !check.ok && !check.skipped).length,
-  };
-  console.log(JSON.stringify({ mode: offline ? 'offline' : 'online', checks, summary }, null, 2));
-  process.exitCode = summary.blocker_count > 0 ? 1 : 0;
+  const result = summary();
+  console.log(JSON.stringify({ mode: offline ? 'offline' : 'online', checks, summary: result }, null, 2));
+  process.exitCode = result.blocker_count > 0 ? 1 : 0;
 }
 
 main().catch((err) => {
@@ -261,10 +313,7 @@ main().catch((err) => {
   console.log(JSON.stringify({
     mode: offline ? 'offline' : 'online',
     checks,
-    summary: {
-      blocker_count: checks.filter((check) => check.level === 'blocker' && !check.ok && !check.skipped).length,
-      warn_count: checks.filter((check) => check.level === 'warn' && !check.ok && !check.skipped).length,
-    },
+    summary: summary(),
   }, null, 2));
   process.exit(1);
 });

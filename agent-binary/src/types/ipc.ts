@@ -12,7 +12,7 @@ export interface StdinEnvelope {
 }
 
 export interface StdoutEnvelope {
-  type: string;
+  event: string;
   ts: string;
   [key: string]: unknown;
 }

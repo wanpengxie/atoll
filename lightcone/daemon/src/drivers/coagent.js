@@ -4,6 +4,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const DEFAULT_AGENT_NAME = 'channel-agent';
+const ALLOWED_ENV_KEYS = new Set(['HOME', 'USER', 'LOGNAME', 'LANG', 'PATH', 'TERM']);
+const ALLOWED_SECRET_ENV_KEYS = new Set(['ANTHROPIC_API_KEY', 'DEEPSEEK_API_KEY']);
+const ALLOWED_ENV_PREFIXES = ['LC_', 'ANTHROPIC_', 'DEEPSEEK_', 'CLAUDE_CODE_', 'NODE_'];
 
 function repoRoot() {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
@@ -60,6 +63,27 @@ function ensureSessionId(sessionIdPath) {
   return sessionId;
 }
 
+function isSensitiveEnvKey(key) {
+  return key === 'ADMIN_TOKEN'
+    || key.endsWith('_TOKEN')
+    || key.endsWith('_KEY')
+    || key.endsWith('_PASSWORD');
+}
+
+function shouldInheritEnvKey(key) {
+  if (isSensitiveEnvKey(key) && !ALLOWED_SECRET_ENV_KEYS.has(key)) return false;
+  return ALLOWED_ENV_KEYS.has(key) || ALLOWED_ENV_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
+
+export function buildAgentInheritedEnv(sourceEnv = process.env) {
+  const env = {};
+  for (const [key, value] of Object.entries(sourceEnv)) {
+    if (value == null) continue;
+    if (shouldInheritEnvKey(key)) env[key] = value;
+  }
+  return env;
+}
+
 export function buildCoagentSpawn({
   channelId,
   channelName = '',
@@ -83,9 +107,8 @@ export function buildCoagentSpawn({
     : [process.env.PATH ?? ''];
 
   const env = {
-    // ANTHROPIC_API_KEY and other runtime secrets are intentionally inherited
-    // from the daemon process. pm2 loads them from .env via ecosystem.config.cjs.
-    ...process.env,
+    ...buildAgentInheritedEnv(process.env),
+    ...buildAgentInheritedEnv(extraEnv),
     FORCE_COLOR: '0',
     NO_COLOR: '1',
     PATH: pathParts.filter(Boolean).join(path.delimiter),
@@ -106,7 +129,6 @@ export function buildCoagentSpawn({
     COAGENT_DAEMON_HTTP: daemonHttpUrl ?? '',
     COAGENT_DAEMON_TOKEN: daemonToken ?? '',
     COAGENT_WORKDIR: workdir,
-    ...extraEnv,
   };
 
   return {

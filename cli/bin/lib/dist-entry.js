@@ -22,8 +22,7 @@ export function resolveDistEntry({ binDir, relativeDistPath, packageName, buildC
 export async function importDistEntry(options) {
   try {
     const entry = resolveDistEntry(options);
-    await import(pathToFileURL(entry).href);
-    return true;
+    return await import(pathToFileURL(entry).href);
   } catch (err) {
     if (err?.code !== 'missing_build_artifact') {
       throw err;

@@ -4,8 +4,7 @@ import { callDaemonRpc } from '../../lib/rpc.js';
 import { writeSuccess } from '../../lib/output.js';
 
 async function rpc<T>(method: string, params: Record<string, unknown>): Promise<T> {
-  configureDaemonRpcEnv();
-  return callDaemonRpc<T>(method, params);
+  return callDaemonRpc<T>(method, params, configureDaemonRpcEnv());
 }
 
 export function registerChannelCommands(program: Command): void {

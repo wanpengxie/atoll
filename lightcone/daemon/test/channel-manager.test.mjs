@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -247,4 +248,43 @@ test('channel:message.send keeps daemon truth and reports ok when view sync requ
     ok: true,
     message: result,
   }]);
+});
+
+test('agent stdout is forwarded as raw JSON Lines without prefix or truncation', (t) => {
+  const previousWrite = process.stdout.write;
+  const writes = [];
+  process.stdout.write = (chunk, encoding, callback) => {
+    writes.push(String(chunk));
+    if (typeof encoding === 'function') encoding();
+    if (typeof callback === 'function') callback();
+    return true;
+  };
+
+  t.after(() => {
+    process.stdout.write = previousWrite;
+  });
+
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-stdout-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+  });
+  const proc = new EventEmitter();
+  proc.stdout = new EventEmitter();
+  proc.stderr = new EventEmitter();
+  const node = { channelId: 'channel-stdout' };
+  const longDetail = 'x'.repeat(800);
+  const line = JSON.stringify({ event: 'agent.status', detail: longDetail });
+
+  channelManager._wireProcess(node, proc, { restoring: false });
+  proc.stdout.emit('data', `${line}\n`);
+
+  assert.equal(writes.join(''), `${line}\n`);
 });

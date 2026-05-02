@@ -8,8 +8,8 @@ import { writeFailure } from '../lib/output.js';
 async function routeXhsIfNeeded(): Promise<boolean> {
   const args = process.argv.slice(2);
   if (args[0] !== 'xhs') return false;
-  process.argv = [process.argv[0] ?? 'node', 'xhs', ...args.slice(1)];
-  await import('../index.js');
+  const { runXhs } = await import('../index.js');
+  await runXhs(args.slice(1));
   return true;
 }
 

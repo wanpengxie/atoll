@@ -12,6 +12,7 @@ import { registerDaemon, unregisterDaemon, sendToDaemon } from './connections.js
 import { broadcast } from '../realtime/broadcast.js';
 import { flushInbox } from '../scheduler/inbox.js';
 import { formatMessage } from '../internal/index.js';
+import { emitJsonEvent } from '../events.js';
 
 const pendingRequests = new Map();
 // machineId → { userId, platform }: tracks who initiated browser login
@@ -99,6 +100,7 @@ export function setupDaemonServer(httpServer) {
     const machineId = machine.id;
     const serverId  = machine.server_id;
     console.log(`[Daemon] Machine ${machine.name} (${machineId}) connected`);
+    emitJsonEvent('machine.connect', { machine_id: machineId, server_id: serverId });
 
     registerDaemon(machineId, ws);
 
@@ -110,6 +112,7 @@ export function setupDaemonServer(httpServer) {
 
     ws.on('close', async (code) => {
       console.log(`[Daemon] Machine ${machine.name} disconnected (code=${code})`);
+      emitJsonEvent('machine.disconnect', { machine_id: machineId, server_id: serverId, code });
       unregisterDaemon(machineId);
       const db = getDb();
       await updateMachine(db, machineId, { status: 'offline' });
@@ -289,7 +292,19 @@ async function handleDaemonMessage(machineId, serverId, msg) {
         });
 
         broadcast.channelMessage(channelId, formatMessage(message));
+        emitJsonEvent('message.create', {
+          message_id: message.id,
+          channel_id: channelId,
+          machine_id: machineId,
+          sender_type: senderType,
+        });
         sendToDaemon(machineId, { type: 'message.append.ack', requestId, ok: true });
+        emitJsonEvent('message.deliver', {
+          message_id: message.id,
+          channel_id: channelId,
+          machine_id: machineId,
+          request_id: requestId,
+        });
       } catch (err) {
         console.error(`[Daemon] message.append failed: ${err.message}`);
         if (requestId) {

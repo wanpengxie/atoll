@@ -5,9 +5,13 @@ import { importDistEntry } from './lib/dist-entry.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-await importDistEntry({
+const entry = await importDistEntry({
   binDir: here,
   relativeDistPath: '../dist/index.js',
   packageName: '@coagent/cli',
   buildCommand: 'pnpm --filter @coagent/cli build',
 });
+
+if (entry?.main) {
+  await entry.main();
+}

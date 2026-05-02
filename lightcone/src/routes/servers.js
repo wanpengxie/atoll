@@ -8,6 +8,7 @@ import {
 import { getUsageSummary, checkQuota } from '../plans.js';
 import { sendToDaemon, isMachineOnline, unregisterDaemon } from '../daemon/connections.js';
 import { requireAuth } from '../middleware/auth.js';
+import { emitJsonEvent } from '../events.js';
 
 const router = Router();
 
@@ -119,6 +120,11 @@ router.post('/:id/machines', requireAuth, async (req, res) => {
   const m = await insertMachine(db, {
     id: uuidv4(), serverId: req.params.id, ownerId: req.user.id,
     name, apiKey, apiKeyPrefix: apiKey.slice(0, 18),
+  });
+  emitJsonEvent('machine.register', {
+    machine_id: m.id,
+    server_id: m.server_id,
+    api_key_prefix: m.api_key_prefix,
   });
   res.json({ ...formatMachine(m), apiKey });
 });

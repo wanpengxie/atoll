@@ -1,4 +1,6 @@
 import { Command, CommanderError } from 'commander';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { resolveBackend } from './lib/backends/index.js';
 import { parseCsv, parsePositiveInteger } from './lib/arg-parsers.js';
 import { CliError, toCliError } from './lib/errors.js';
@@ -6,7 +8,7 @@ import { writeFailure, writeSuccess } from './lib/output.js';
 
 const DEFAULT_LIMIT = 10;
 
-async function main(): Promise<void> {
+export async function runXhs(args = process.argv.slice(2)): Promise<void> {
   const backend = resolveBackend();
   const program = new Command();
 
@@ -84,15 +86,15 @@ async function main(): Promise<void> {
       writeSuccess(data);
     });
 
-  if (process.argv.length <= 2) {
+  if (args.length === 0) {
     program.outputHelp();
     return;
   }
 
-  await program.parseAsync(process.argv);
+  await program.parseAsync(args, { from: 'user' });
 }
 
-main().catch((error: unknown) => {
+function handleError(error: unknown): void {
   if (error instanceof CommanderError) {
     if (error.code === 'commander.helpDisplayed') {
       process.exitCode = 0;
@@ -104,4 +106,20 @@ main().catch((error: unknown) => {
   }
 
   writeFailure(toCliError(error));
-});
+}
+
+function isDirectEntrypoint(): boolean {
+  return Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+}
+
+export async function main(): Promise<void> {
+  try {
+    await runXhs();
+  } catch (error) {
+    handleError(error);
+  }
+}
+
+if (isDirectEntrypoint()) {
+  await main();
+}

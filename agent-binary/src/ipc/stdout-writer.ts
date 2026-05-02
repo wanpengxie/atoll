@@ -9,13 +9,13 @@ function emit(payload: Omit<StdoutEnvelope, 'ts'>): void {
 }
 
 export function writeStatus(status: string, detail = ''): void {
-  emit({ type: 'agent.status', status, detail });
+  emit({ event: 'agent.status', status, detail });
 }
 
 export function writeActivity(activity: string, detail = ''): void {
-  emit({ type: 'agent.activity', activity, detail });
+  emit({ event: 'agent.activity', activity, detail });
 }
 
 export function writeSession(sessionId: string): void {
-  emit({ type: 'agent.session', session_id: sessionId });
+  emit({ event: 'agent.session', session_id: sessionId });
 }

@@ -4,13 +4,10 @@ const root = __dirname;
 
 const common = {
   cwd: root,
-  env_file: './.env',
   interpreter: 'node',
   exec_mode: 'fork',
   autorestart: true,
   max_restarts: 10,
-  max_size: '100M',
-  retain: 10,
 };
 
 module.exports = {

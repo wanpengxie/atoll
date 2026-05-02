@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { CliError } from './errors.js';
+import type { DaemonRpcConfig } from './coagent-env.js';
 
 interface RpcSuccess<T> {
   ok: true;
@@ -28,8 +29,9 @@ function readJsonResponse<T>(raw: string): T {
   }
 }
 
-function daemonRequestOptions() {
-  const socketPath = String(process.env.COAGENT_DAEMON_SOCKET ?? '').trim();
+function daemonRequestOptions(config: DaemonRpcConfig = {}) {
+  const authToken = String(config.token ?? process.env.COAGENT_DAEMON_TOKEN ?? '').trim();
+  const socketPath = String(config.socketPath ?? process.env.COAGENT_DAEMON_SOCKET ?? '').trim();
   if (socketPath) {
     return {
       transport: 'socket' as const,
@@ -39,12 +41,13 @@ function daemonRequestOptions() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
         },
       },
     };
   }
 
-  const daemonHttp = String(process.env.COAGENT_DAEMON_HTTP ?? '').trim();
+  const daemonHttp = String(config.daemonHttp ?? process.env.COAGENT_DAEMON_HTTP ?? '').trim();
   if (!daemonHttp) {
     throw new CliError(
       'daemon_unavailable',
@@ -64,7 +67,6 @@ function daemonRequestOptions() {
     );
   }
 
-  const authToken = String(process.env.COAGENT_DAEMON_TOKEN ?? '').trim();
   return {
     transport: 'http' as const,
     options: {
@@ -81,8 +83,8 @@ function daemonRequestOptions() {
   };
 }
 
-export async function callDaemonRpc<T>(method: string, params: Record<string, unknown>): Promise<T> {
-  const request = daemonRequestOptions();
+export async function callDaemonRpc<T>(method: string, params: Record<string, unknown>, config: DaemonRpcConfig = {}): Promise<T> {
+  const request = daemonRequestOptions(config);
   const payload = JSON.stringify({ method, params });
 
   const body = await new Promise<string>((resolve, reject) => {

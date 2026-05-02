@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, readFileSync, chmodSync, writeFileSync } from 'node:fs';
 import { homedir, hostname, platform } from 'node:os';
+import http from 'node:http';
 import path from 'node:path';
 
 function parseEnvFile(filePath) {
@@ -38,6 +39,12 @@ function machineKeyPath(env) {
     : path.join(homedir(), '.coagent', projectKey(env), 'machine.key');
 }
 
+function daemonSocketPath(env) {
+  return env.COAGENT_DAEMON_SOCKET
+    ? path.resolve(env.COAGENT_DAEMON_SOCKET)
+    : path.join(homedir(), '.coagent', projectKey(env), 'daemon.sock');
+}
+
 async function fetchJson(url, options = {}) {
   const res = await fetch(url, options);
   const text = await res.text();
@@ -57,38 +64,66 @@ async function fetchJson(url, options = {}) {
 
 async function existingKeyLooksRegistered(env, key) {
   const serverUrl = String(env.SERVER_URL || 'http://localhost:8779').replace(/\/+$/, '');
-  const serverId = String(env.DEFAULT_SERVER_ID || 'server-001');
-  const adminToken = String(env.ADMIN_TOKEN || '').trim();
-  if (!adminToken || adminToken === 'change-me') return false;
+
+  const socketPath = daemonSocketPath(env);
+  if (existsSync(socketPath)) {
+    const status = await new Promise((resolve) => {
+      const req = http.request({
+        socketPath,
+        path: '/admin/status',
+        method: 'GET',
+        headers: { Authorization: `Bearer ${key}` },
+        timeout: 5000,
+      }, (res) => {
+        let raw = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { raw += chunk; });
+        res.on('end', () => {
+          resolve({ ok: res.statusCode === 200, raw });
+        });
+      });
+      req.on('error', () => resolve({ ok: false }));
+      req.end();
+    });
+    if (status.ok) return { valid: true, via: '/admin/status' };
+  }
 
   try {
-    const body = await fetchJson(`${serverUrl}/api/servers/${encodeURIComponent(serverId)}/machines`, {
-      headers: { Authorization: `Bearer ${adminToken}` },
+    const body = await fetchJson(`${serverUrl}/api/machines/whoami`, {
+      headers: { Authorization: `Bearer ${key}` },
     });
-    const prefix = key.slice(0, 18);
-    return Array.isArray(body.machines) && body.machines.some((machine) => machine.apiKeyPrefix === prefix);
+    if (body.key_valid === true) return { valid: true, via: '/api/machines/whoami', machineId: body.machine_id };
   } catch {
-    return false;
+    // Fall through and let registration create a fresh key.
   }
+  return { valid: false, via: null };
 }
 
 async function main() {
   const env = mergedEnv();
   const serverUrl = String(env.SERVER_URL || 'http://localhost:8779').replace(/\/+$/, '');
   const serverId = String(env.DEFAULT_SERVER_ID || 'server-001');
-  const adminToken = String(env.ADMIN_TOKEN || '').trim();
-  if (!adminToken || adminToken === 'change-me') {
-    throw new Error('ADMIN_TOKEN is required in .env before registering a machine');
-  }
-
   const keyPath = machineKeyPath(env);
   if (existsSync(keyPath)) {
     const existing = readFileSync(keyPath, 'utf8').trim();
-    if (existing && await existingKeyLooksRegistered(env, existing)) {
+    const existingStatus = existing ? await existingKeyLooksRegistered(env, existing) : { valid: false };
+    if (existingStatus.valid) {
       chmodSync(keyPath, 0o600);
-      console.log(JSON.stringify({ ok: true, skipped: true, keyPath, projectKey: projectKey(env) }));
+      console.log(JSON.stringify({
+        ok: true,
+        skipped: true,
+        reason: `already registered, key valid via ${existingStatus.via}`,
+        machineId: existingStatus.machineId,
+        keyPath,
+        projectKey: projectKey(env),
+      }));
       return;
     }
+  }
+
+  const adminToken = String(env.ADMIN_TOKEN || '').trim();
+  if (!adminToken || adminToken === 'change-me') {
+    throw new Error('ADMIN_TOKEN is required in .env before registering a machine');
   }
 
   const name = env.MACHINE_NAME || `${hostname()}-${platform()}`;

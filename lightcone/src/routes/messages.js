@@ -7,6 +7,7 @@ import {
 import { broadcast } from '../realtime/broadcast.js';
 import { deliverMessageToAgents } from '../scheduler/deliver.js';
 import { formatMessage, parseMentions } from '../internal/index.js';
+import { emitJsonEvent } from '../events.js';
 
 const router = Router();
 const DEFAULT_USER_ID   = process.env.DEFAULT_USER_ID   ?? 'user-001';
@@ -56,9 +57,18 @@ router.post('/', async (req, res) => {
     messageType: 'chat', content, threadId: threadId ?? null,
     mentions: mentions !== null ? JSON.stringify(mentions) : null,
   });
+  emitJsonEvent('message.create', {
+    message_id: msg.id,
+    team_id: teamId,
+    sender_type: msg.sender_type,
+  });
 
   broadcast.message(teamId, formatMessage(msg));
   await deliverMessageToAgents(teamId, msg);
+  emitJsonEvent('message.deliver', {
+    message_id: msg.id,
+    team_id: teamId,
+  });
   res.json(formatMessage(msg));
 });
 

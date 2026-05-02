@@ -2,6 +2,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import { setIo } from './broadcast.js';
 import { getDb, getMessagesSince, maxSeq } from '../db/index.js';
 import { formatMessage } from '../internal/index.js';
+import { emitJsonEvent } from '../events.js';
 
 export function setupSocketIO(httpServer) {
   const io = new SocketIOServer(httpServer, {
@@ -14,6 +15,7 @@ export function setupSocketIO(httpServer) {
   io.on('connection', (socket) => {
     const { serverId } = socket.handshake.auth ?? {};
     console.log(`[SocketIO] Client connected: ${socket.id}, server=${serverId}`);
+    emitJsonEvent('socket.connection', { socket_id: socket.id, server_id: serverId ?? null });
     if (serverId) socket.join(`server:${serverId}`);
 
     socket.on('team:join',  (teamId) => { socket.join(`team:${teamId}`); });
@@ -32,6 +34,7 @@ export function setupSocketIO(httpServer) {
 
     socket.on('disconnect', () => {
       console.log(`[SocketIO] Client disconnected: ${socket.id}`);
+      emitJsonEvent('socket.disconnect', { socket_id: socket.id, server_id: serverId ?? null });
     });
     socket.on('ping', () => socket.emit('pong'));
   });
