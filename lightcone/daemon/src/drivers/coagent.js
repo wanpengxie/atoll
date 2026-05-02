@@ -108,7 +108,7 @@ export function buildCoagentSpawn({
 
   const env = {
     ...buildAgentInheritedEnv(process.env),
-    ...buildAgentInheritedEnv(extraEnv),
+    ...extraEnv,
     FORCE_COLOR: '0',
     NO_COLOR: '1',
     PATH: pathParts.filter(Boolean).join(path.delimiter),

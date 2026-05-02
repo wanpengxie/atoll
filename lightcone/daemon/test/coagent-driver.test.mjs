@@ -55,6 +55,26 @@ test('buildCoagentSpawn resolves dist runtime and mounted cli shims', () => {
   assert.deepEqual(spawnConfig.mountedCliBinaries, ['xhs']);
 });
 
+test('buildCoagentSpawn passes explicit extraEnv without inherited-env filtering', () => {
+  const repoRootDir = createRepoRoot('coagent-driver-extra-env');
+  const agentDistDir = path.join(repoRootDir, 'agent-binary', 'dist');
+  const sessionIdPath = path.join(repoRootDir, 'tmp', 'session.id');
+
+  mkdirSync(agentDistDir, { recursive: true });
+  writeFileSync(path.join(agentDistDir, 'index.js'), 'export {};\n', 'utf8');
+
+  const spawnConfig = buildCoagentSpawn({
+    channelId: 'channel-extra-env',
+    workdir: repoRootDir,
+    capabilitySet: { cli_binaries: [] },
+    sessionIdPath,
+    repoRootDir,
+    extraEnv: { CUSTOM_FOO: 'bar' },
+  });
+
+  assert.equal(spawnConfig.env.CUSTOM_FOO, 'bar');
+});
+
 test('buildCoagentSpawn whitelists agent env and excludes daemon/server secrets', () => {
   const repoRootDir = createRepoRoot('coagent-driver-env-whitelist');
   const agentDistDir = path.join(repoRootDir, 'agent-binary', 'dist');
