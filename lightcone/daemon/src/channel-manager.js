@@ -24,6 +24,7 @@ import {
   appendMessageToStore,
   getStoredTask,
   markMessageDeliveryAttempt,
+  markMessageDeliveryFailed,
   markMessageDelivered,
   openMessageStore,
   queryStoredMessages,
@@ -1875,23 +1876,31 @@ export class ChannelManager {
           continue;
         }
 
+        const lastError = delivery.reason ?? outcome.reason ?? 'delivery failed';
         const failedMessage = markMessageDeliveryAttempt(db, stored.id, {
           attemptedAt: nowMs,
-          error: delivery.reason ?? outcome.reason ?? 'delivery failed',
+          error: lastError,
         });
         const attempts = failedMessage?.delivery_attempts ?? ((stored.delivery_attempts ?? 0) + 1);
-        const failure = {
+        let failure = {
           message_id: stored.id,
           channel_id: node.channelId,
           decision: outcome.decision,
-          reason: delivery.reason ?? outcome.reason,
+          reason: lastError,
+          last_error: failedMessage?.last_error ?? lastError,
           attempts,
           ok: false,
         };
-        failed.push(failure);
-        if (attempts >= DEFAULT_DELIVERY_FAILURE_LIMIT) {
-          await this._recordDeliveryFailure(node, message, failure);
+        if (attempts === DEFAULT_DELIVERY_FAILURE_LIMIT) {
+          const deadLetteredMessage = markMessageDeliveryFailed(db, stored.id, nowMs);
+          failure = {
+            ...failure,
+            delivery_failed_at: deadLetteredMessage?.delivery_failed_at ?? toEpochMs(nowMs),
+            last_error: deadLetteredMessage?.last_error ?? failure.last_error,
+          };
+          await this._recordDeliveryDeadLetter(node, message, failure);
         }
+        failed.push(failure);
       }
     }
     return { delivered, failed };
@@ -1925,17 +1934,35 @@ export class ChannelManager {
     return { ok: false, reason: outcome.reason ?? 'blocked' };
   }
 
-  async _recordDeliveryFailure(node, message, failure) {
+  async _recordDeliveryDeadLetter(node, message, failure) {
+    const lastError = failure.last_error ?? failure.reason ?? 'delivery failed';
     await this._recordTrace(node, {
-      kind: 'delivery_failed',
-      type: 'delivery_failed',
+      kind: 'delivery_dead_letter',
+      type: 'delivery_dead_letter',
+      event: 'delivery_dead_letter',
       messageId: message.messageId,
+      message_id: message.messageId,
+      channel_id: node.channelId,
       decision: failure.decision,
       reason: failure.reason,
+      last_error: lastError,
       attempts: failure.attempts,
+      delivery_failed_at: failure.delivery_failed_at,
+    });
+    emitJsonEvent('inbox.created', {
+      channel_id: node.channelId,
+      severity: 'blocker',
+      reason: 'incident',
+      ticket_id: null,
+      body: {
+        message_id: message.messageId,
+        channel_id: node.channelId,
+        attempts: failure.attempts,
+        last_error: lastError,
+      },
     });
     console.error(
-      `[ChannelManager] Message delivery failed channel=${node.channelId} message=${message.messageId} attempts=${failure.attempts}: ${failure.reason}`,
+      `[ChannelManager] Message delivery dead-lettered channel=${node.channelId} message=${message.messageId} attempts=${failure.attempts}: ${lastError}`,
     );
   }
 

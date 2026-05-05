@@ -202,6 +202,7 @@ export function openMessageStore(workdir) {
       not_before INTEGER DEFAULT NULL,
       expires_at INTEGER DEFAULT NULL,
       delivered_at INTEGER DEFAULT NULL,
+      delivery_failed_at INTEGER DEFAULT NULL,
       delivery_attempts INTEGER NOT NULL DEFAULT 0,
       last_attempt_at INTEGER DEFAULT NULL,
       last_error TEXT DEFAULT NULL,
@@ -238,10 +239,12 @@ export function openMessageStore(workdir) {
     CREATE INDEX IF NOT EXISTS idx_tasks_last_event_at ON tasks(last_event_at);
   `);
   ensureColumn(db, 'messages', 'delivered_at', 'INTEGER DEFAULT NULL');
+  ensureColumn(db, 'messages', 'delivery_failed_at', 'INTEGER DEFAULT NULL');
   ensureColumn(db, 'messages', 'delivery_attempts', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'messages', 'last_attempt_at', 'INTEGER DEFAULT NULL');
   ensureColumn(db, 'messages', 'last_error', 'TEXT DEFAULT NULL');
   db.exec('CREATE INDEX IF NOT EXISTS idx_messages_due ON messages(not_before, delivered_at)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_messages_due_pending ON messages(not_before, delivered_at, delivery_failed_at)');
   return db;
 }
 
@@ -543,6 +546,7 @@ export function readDueMessages(db, nowMs = Date.now(), limit = 50) {
     WHERE not_before IS NOT NULL
       AND not_before <= @nowMs
       AND delivered_at IS NULL
+      AND delivery_failed_at IS NULL
     ORDER BY not_before ASC, ts_received ASC
     LIMIT @limit
   `).all({
@@ -563,6 +567,21 @@ export function markMessageDelivered(db, messageId, deliveredAt = Date.now()) {
   `).run({
     id: messageId,
     delivered_at: deliveredAtMs,
+  });
+  const row = db.prepare('SELECT rowid AS seq, * FROM messages WHERE id = @id').get({ id: messageId });
+  return row ? rowToMessage(row) : null;
+}
+
+export function markMessageDeliveryFailed(db, messageId, failedAt = Date.now()) {
+  const failedAtMs = toEpochMs(failedAt);
+  db.prepare(`
+    UPDATE messages
+    SET delivery_failed_at = @delivery_failed_at
+    WHERE id = @id
+      AND delivery_failed_at IS NULL
+  `).run({
+    id: messageId,
+    delivery_failed_at: failedAtMs,
   });
   const row = db.prepare('SELECT rowid AS seq, * FROM messages WHERE id = @id').get({ id: messageId });
   return row ? rowToMessage(row) : null;

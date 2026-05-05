@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { ChannelManager } from '../src/channel-manager.js';
-import { getStoredTask, readAgentCursor, readStoredMessages } from '../src/message-store.js';
+import { getStoredTask, readAgentCursor, readDueMessages, readStoredMessages } from '../src/message-store.js';
 
 function captureStdoutWrites(t) {
   const previousWrite = process.stdout.write;
@@ -525,6 +525,98 @@ test('due processing keeps inactive channel messages unread and records failed a
   assert.equal(stored.delivered_at, null);
   assert.equal(stored.delivery_attempts, 1);
   assert.equal(stored.last_error, 'channel_inactive');
+});
+
+test('due processing dead-letters permanent delivery failures after the retry limit', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-due-dead-letter-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const stdoutWrites = captureStdoutWrites(t);
+  const previousError = console.error;
+  const errorLines = [];
+  console.error = (...args) => {
+    errorLines.push(args.map((item) => String(item)).join(' '));
+  };
+  t.after(() => {
+    console.error = previousError;
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-due-dead-letter',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Due Dead Letter Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  node.status = 'active';
+
+  let deliveryCalls = 0;
+  channelManager._deliverEvent = async () => {
+    deliveryCalls += 1;
+    return { ok: false, reason: 'permanent_failure' };
+  };
+
+  const now = Date.UTC(2026, 4, 6, 1, 0, 0);
+  await channelManager.scheduleChannelMessage({
+    channelId: node.channelId,
+    messageId: 'message-dead-letter',
+    notBefore: now - 1,
+    correlationId: 'corr-dead-letter',
+    payloadBody: { reason: 'permanent failure' },
+  });
+
+  const attemptsByPoll = [];
+  for (let index = 0; index < 6; index += 1) {
+    const result = await channelManager.processDueMessages(node.channelId, now + index);
+    attemptsByPoll.push(result.failed[0]?.attempts ?? null);
+  }
+
+  assert.deepEqual(attemptsByPoll, [1, 2, 3, 4, 5, null]);
+  assert.equal(deliveryCalls, 5);
+
+  const stored = readStoredMessages(node.messageStore).find((message) => message.id === 'message-dead-letter');
+  assert.equal(stored.delivered_at, null);
+  assert.equal(stored.delivery_attempts, 5);
+  assert.equal(stored.last_error, 'permanent_failure');
+  assert.equal(typeof stored.delivery_failed_at, 'number');
+  assert.equal(readDueMessages(node.messageStore, now + 6, 100).some((message) => message.id === 'message-dead-letter'), false);
+
+  const tracePath = path.join(node.workdir, 'agents', node.agentName, 'trace', 'pending.jsonl');
+  const traceEntries = readFileSync(tracePath, 'utf8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const deadLetterEntries = traceEntries.filter((entry) => entry.event === 'delivery_dead_letter');
+  assert.equal(deadLetterEntries.length, 1);
+  assert.equal(deadLetterEntries[0].message_id, 'message-dead-letter');
+  assert.equal(deadLetterEntries[0].last_error, 'permanent_failure');
+  assert.equal(deadLetterEntries[0].attempts, 5);
+
+  const stdoutEvents = stdoutWrites
+    .flatMap((chunk) => chunk.split('\n').map((line) => line.trim()).filter(Boolean))
+    .map((line) => JSON.parse(line));
+  const inboxEvents = stdoutEvents.filter((entry) => entry.event === 'inbox.created');
+  assert.equal(inboxEvents.length, 1);
+  assert.equal(inboxEvents[0].severity, 'blocker');
+  assert.equal(inboxEvents[0].reason, 'incident');
+  assert.equal(inboxEvents[0].body.message_id, 'message-dead-letter');
+  assert.equal(inboxEvents[0].body.last_error, 'permanent_failure');
+  assert.equal(errorLines.filter((line) => line.includes('Message delivery dead-lettered')).length, 1);
 });
 
 test('message.query --unread advances per-agent cursor and does not repeat messages', async (t) => {
