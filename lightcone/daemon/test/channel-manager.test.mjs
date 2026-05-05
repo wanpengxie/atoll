@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { ChannelManager } from '../src/channel-manager.js';
-import { readStoredMessages } from '../src/message-store.js';
+import { readAgentCursor, readStoredMessages } from '../src/message-store.js';
 
 function captureStdoutWrites(t) {
   const previousWrite = process.stdout.write;
@@ -258,6 +258,139 @@ test('message.schedule and due processing deliver only due D messages once', asy
   const later = stored.find((message) => message.correlation_id === 'corr-later');
   assert.equal(typeof due.delivered_at, 'number');
   assert.equal(later.delivered_at, null);
+});
+
+test('due processing keeps inactive channel messages unread and records failed attempt', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-due-inactive-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-due-inactive',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Due Inactive Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const now = Date.UTC(2026, 4, 6, 1, 0, 0);
+  await channelManager.scheduleChannelMessage({
+    channelId: node.channelId,
+    notBefore: now - 1,
+    correlationId: 'corr-inactive',
+    payloadBody: { reason: 'due while inactive' },
+  });
+
+  const result = await channelManager.processDueMessages(node.channelId, now);
+
+  assert.equal(result.delivered.length, 0);
+  assert.equal(result.failed.length, 1);
+  assert.equal(result.failed[0].reason, 'channel_inactive');
+  const stored = readStoredMessages(node.messageStore).find((message) => message.correlation_id === 'corr-inactive');
+  assert.equal(stored.delivered_at, null);
+  assert.equal(stored.delivery_attempts, 1);
+  assert.equal(stored.last_error, 'channel_inactive');
+});
+
+test('message.query --unread advances per-agent cursor and does not repeat messages', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-unread-cursor-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-unread',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Unread Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  await channelManager._appendMessage(node, {
+    messageId: 'message-unread-1',
+    channelId: node.channelId,
+    senderType: 'human',
+    senderId: 'user-a',
+    senderName: 'User A',
+    content: 'first unread',
+    createdAt: new Date(Date.UTC(2026, 4, 6, 1, 0, 0)).toISOString(),
+    source: 'test',
+  });
+
+  const first = await channelManager.queryChannelMessages({ channelId: node.channelId, unread: true, order: 'asc' });
+  const second = await channelManager.queryChannelMessages({ channelId: node.channelId, unread: true, order: 'asc' });
+
+  assert.deepEqual(first.messages.map((message) => message.id), ['message-unread-1']);
+  assert.equal(second.messages.length, 0);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, first.messages[0].seq);
+});
+
+test('message.query --unread hides future D messages unless include_future is set', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-unread-future-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-future',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Future Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const now = Date.UTC(2026, 4, 6, 1, 0, 0);
+  await channelManager.scheduleChannelMessage({
+    channelId: node.channelId,
+    notBefore: now + 3_600_000,
+    correlationId: 'corr-future',
+    payloadBody: { reason: 'later' },
+  });
+
+  const hidden = await channelManager.queryChannelMessages({ channelId: node.channelId, unread: true, nowMs: now });
+  const visible = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    includeFuture: true,
+    nowMs: now,
+  });
+
+  assert.equal(hidden.messages.length, 0);
+  assert.deepEqual(visible.messages.map((message) => message.correlation_id), ['corr-future']);
 });
 
 test('dispatch and memo RPC helpers write and summarize sqlite protocol messages', async (t) => {
@@ -572,6 +705,138 @@ test('channel:message.send keeps daemon truth and reports ok when view sync requ
     ok: true,
     message: result,
   }]);
+});
+
+test('pending view sync is replayed on reconnect and removed after ack', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-view-sync-replay-'));
+  const previousHome = process.env.HOME;
+  process.env.HOME = tempHome;
+
+  t.after(() => {
+    process.env.HOME = previousHome;
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const sentLog = [];
+  const failingConnection = {
+    send(message) {
+      sentLog.push(message);
+    },
+    async request({ expect }) {
+      return {
+        type: expect.type,
+        requestId: expect.requestId,
+        ok: false,
+        error: 'server unavailable',
+      };
+    },
+  };
+  const replayedRequests = [];
+  const healthyConnection = {
+    send(message) {
+      sentLog.push(message);
+    },
+    async request({ message, expect }) {
+      replayedRequests.push(message);
+      return { type: expect.type, requestId: expect.requestId, ok: true };
+    },
+  };
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+  });
+  channelManager.setConnection(failingConnection);
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-replay',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Replay Channel',
+    type: 'xhs-creator',
+    status: 'active',
+    members: [{ memberType: 'human', memberId: 'user-a', displayName: 'User A' }],
+  });
+  const { workdir } = created;
+
+  const result = await channelManager.handle({
+    type: 'channel:message.send',
+    requestId: 'req-replay',
+    channelId: 'channel-replay',
+    senderType: 'human',
+    senderId: 'user-a',
+    senderName: 'User A',
+    content: 'message replayed after reconnect',
+    attachments: [],
+  }, failingConnection);
+
+  assert.equal(result.content, 'message replayed after reconnect');
+  assert.equal(readdirSync(path.join(workdir, 'pending-view-sync')).filter((entry) => entry.endsWith('.json')).length, 1);
+
+  channelManager.setConnection(healthyConnection);
+  await channelManager.pendingViewSyncReplay;
+
+  assert.equal(readdirSync(path.join(workdir, 'pending-view-sync')).filter((entry) => entry.endsWith('.json')).length, 0);
+  assert.equal(replayedRequests.length, 1);
+  assert.equal(replayedRequests[0].requestId, 'req-replay');
+  assert.equal(replayedRequests[0].message_id, result.messageId);
+
+  channelManager.setConnection(healthyConnection);
+  await channelManager.pendingViewSyncReplay;
+  assert.equal(replayedRequests.length, 1);
+});
+
+test('_recordTrace failures do not abort handleEvent delivery path', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-trace-fail-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-trace-fail',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Trace Fail Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const deliveredLines = [];
+  node.status = 'active';
+  node.proc = { stdin: { write: (line) => deliveredLines.push(JSON.parse(line)) } };
+  const traceDir = path.join(node.workdir, 'agents', node.agentName, 'trace');
+  rmSync(traceDir, { recursive: true, force: true });
+  writeFileSync(traceDir, 'not a directory', 'utf8');
+
+  await channelManager.handleEvent({
+    channelId: node.channelId,
+    event: {
+      type: 'user.message.posted',
+      source: 'test',
+      payload: {
+        senderType: 'human',
+        senderId: 'user-a',
+        senderName: 'User A',
+        content: 'trace failure should not abort',
+      },
+    },
+  });
+
+  assert.equal(deliveredLines.length, 1);
+  assert.equal(deliveredLines[0].event.payload.content, 'trace failure should not abort');
 });
 
 test('agent stdout is forwarded as raw JSON Lines without prefix or truncation', (t) => {

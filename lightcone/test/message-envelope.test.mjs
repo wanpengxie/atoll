@@ -55,6 +55,55 @@ test('insertMessage keeps legacy message writes valid when envelope fields are a
   assert.equal(formatted.envelope, null);
 });
 
+test('insertMessage dedupes daemon message.append retries by request id', async () => {
+  const row = {
+    seq: 9,
+    id: 'msg-existing',
+    channel_id: 'channel-a',
+    daemon_request_id: 'req-existing',
+    sender_type: 'human',
+    sender_id: 'user-a',
+    sender_name: 'User A',
+    message_type: 'chat',
+    content: 'hello once',
+    created_at: '2026-05-06 00:00:00',
+    updated_at: '2026-05-06 00:00:00',
+  };
+  const calls = [];
+  const db = {
+    async execute(sql, params = []) {
+      calls.push({ sql, params });
+      if (sql.trim().startsWith('INSERT INTO messages')) {
+        const err = new Error('Duplicate entry');
+        err.code = 'ER_DUP_ENTRY';
+        err.errno = 1062;
+        throw err;
+      }
+      if (sql.includes('daemon_request_id')) {
+        return [[row]];
+      }
+      return [[]];
+    },
+  };
+
+  const inserted = await insertMessage(db, {
+    id: 'msg-retry',
+    channelId: 'channel-a',
+    senderType: 'human',
+    senderId: 'user-a',
+    senderName: 'User A',
+    messageType: 'chat',
+    content: 'hello once',
+    daemonRequestId: 'req-existing',
+  });
+
+  assert.equal(inserted.id, 'msg-existing');
+  assert.equal(inserted.__deduped, true);
+  assert.match(calls[0].sql, /daemon_request_id/);
+  assert.equal(calls[0].params.at(-1), 'req-existing');
+  assert.match(calls[1].sql, /daemon_request_id/);
+});
+
 test('formatMessage exposes envelope fields from the server view cache', () => {
   const formatted = formatMessage({
     seq: 7,

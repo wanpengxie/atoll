@@ -138,6 +138,7 @@ export function registerProtocolCommands(program: Command): void {
     .option('--tag <tag>', 'filter self.memo tag')
     .option('--status <status>', 'filter self.memo status')
     .option('--unread', 'filter rows without delivered_at')
+    .option('--include-future', 'include unread messages scheduled for the future')
     .option('--limit <number>', 'maximum number of messages', parsePositiveInteger, DEFAULT_LIMIT)
     .action(async (options) => {
       writeSuccess(await rpc('message.query', {
@@ -152,6 +153,7 @@ export function registerProtocolCommands(program: Command): void {
         tag: options.tag,
         status: options.status,
         unread: options.unread === true,
+        ...(options.includeFuture === true ? { include_future: true } : {}),
         limit: options.limit,
       }));
     });

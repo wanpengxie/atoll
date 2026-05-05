@@ -192,6 +192,16 @@ test('coagent business subcommands call expected daemon RPC methods', async () =
       },
     },
     {
+      args: ['query', '--channel', 'channel-a', '--unread', '--include-future'],
+      method: 'message.query',
+      params: {
+        channel_id: 'channel-a',
+        unread: true,
+        include_future: true,
+        limit: 20,
+      },
+    },
+    {
       args: ['schedule', '--channel', 'channel-a', '--not-before', '1760000000000', '--payload', '{"reason":"check"}'],
       method: 'message.schedule',
       params: {

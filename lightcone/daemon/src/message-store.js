@@ -1,6 +1,9 @@
 import Database from 'better-sqlite3';
+import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { PayloadType } from '@coagent/payload-types';
+
+const DEFAULT_AGENT_NAME = 'channel-agent';
 
 function toJson(value) {
   return JSON.stringify(value ?? null);
@@ -30,6 +33,17 @@ function optionalEpochMs(value) {
   if (value == null || value === '') return null;
   const parsed = toEpochMs(value, null);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function toBoolean(value) {
+  if (value === true) return true;
+  if (value === false || value == null) return false;
+  return String(value).trim().toLowerCase() === 'true';
+}
+
+function toSeq(value, fallback = 0) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function ensureColumn(db, table, column, definition) {
@@ -89,6 +103,44 @@ export function messageStorePath(workdir) {
   return path.join(workdir, 'messages.sqlite');
 }
 
+export function agentCursorPath(workdir, agentName = DEFAULT_AGENT_NAME) {
+  return path.join(workdir, 'agents', String(agentName || DEFAULT_AGENT_NAME), 'cursor.json');
+}
+
+export function readAgentCursor(workdir, agentName = DEFAULT_AGENT_NAME) {
+  const filePath = agentCursorPath(workdir, agentName);
+  try {
+    const raw = JSON.parse(readFileSync(filePath, 'utf8'));
+    return {
+      last_seen_seq: toSeq(raw?.last_seen_seq ?? raw?.lastSeenSeq, 0),
+      updated_at: raw?.updated_at ?? null,
+    };
+  } catch {
+    return { last_seen_seq: 0, updated_at: null };
+  }
+}
+
+export function writeAgentCursor(workdir, agentName = DEFAULT_AGENT_NAME, cursor = {}) {
+  const filePath = agentCursorPath(workdir, agentName);
+  mkdirSync(path.dirname(filePath), { recursive: true });
+  const next = {
+    last_seen_seq: toSeq(cursor.last_seen_seq ?? cursor.lastSeenSeq, 0),
+    updated_at: cursor.updated_at ?? new Date().toISOString(),
+  };
+  writeFileSync(filePath, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+  return next;
+}
+
+export function advanceAgentCursor(workdir, agentName = DEFAULT_AGENT_NAME, seq) {
+  const current = readAgentCursor(workdir, agentName);
+  const nextSeq = toSeq(seq, current.last_seen_seq);
+  if (nextSeq <= current.last_seen_seq) return current;
+  return writeAgentCursor(workdir, agentName, {
+    last_seen_seq: nextSeq,
+    updated_at: new Date().toISOString(),
+  });
+}
+
 export function openMessageStore(workdir) {
   const db = new Database(messageStorePath(workdir));
   db.pragma('foreign_keys = ON');
@@ -115,6 +167,8 @@ export function openMessageStore(workdir) {
       expires_at INTEGER DEFAULT NULL,
       delivered_at INTEGER DEFAULT NULL,
       delivery_attempts INTEGER NOT NULL DEFAULT 0,
+      last_attempt_at INTEGER DEFAULT NULL,
+      last_error TEXT DEFAULT NULL,
       envelope_json TEXT NOT NULL,
       payload_json TEXT NOT NULL,
       legacy_json TEXT NOT NULL,
@@ -149,6 +203,8 @@ export function openMessageStore(workdir) {
   `);
   ensureColumn(db, 'messages', 'delivered_at', 'INTEGER DEFAULT NULL');
   ensureColumn(db, 'messages', 'delivery_attempts', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'messages', 'last_attempt_at', 'INTEGER DEFAULT NULL');
+  ensureColumn(db, 'messages', 'last_error', 'TEXT DEFAULT NULL');
   db.exec('CREATE INDEX IF NOT EXISTS idx_messages_due ON messages(not_before, delivered_at)');
   return db;
 }
@@ -281,7 +337,7 @@ export function projectTaskFromMessageRow(db, row) {
 }
 
 export function readStoredMessages(db) {
-  return db.prepare('SELECT * FROM messages ORDER BY ts_received ASC').all().map(rowToMessage);
+  return db.prepare('SELECT rowid AS seq, * FROM messages ORDER BY ts_received ASC').all().map(rowToMessage);
 }
 
 export function queryStoredMessages(db, filters = {}) {
@@ -317,7 +373,17 @@ export function queryStoredMessages(db, filters = {}) {
     params.not_before_gte = notBeforeGte;
   }
 
-  if (filters.unread === true || filters.delivered === false) {
+  if (toBoolean(filters.unread)) {
+    params.cursor_seq = toSeq(
+      filters.cursor_seq ?? filters.cursorSeq ?? filters.last_seen_seq ?? filters.lastSeenSeq,
+      0,
+    );
+    where.push('rowid > @cursor_seq');
+    if (!toBoolean(filters.include_future ?? filters.includeFuture)) {
+      params.now_ms = optionalEpochMs(filters.now_ms ?? filters.nowMs) ?? Date.now();
+      where.push('(not_before IS NULL OR not_before <= @now_ms)');
+    }
+  } else if (filters.delivered === false) {
     where.push('delivered_at IS NULL');
   } else if (filters.delivered === true) {
     where.push('delivered_at IS NOT NULL');
@@ -326,7 +392,7 @@ export function queryStoredMessages(db, filters = {}) {
   const order = String(filters.order ?? 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
   const limit = Math.max(1, Math.min(Number.parseInt(filters.limit, 10) || 50, 500));
   const sql = [
-    'SELECT * FROM messages',
+    'SELECT rowid AS seq, * FROM messages',
     where.length > 0 ? `WHERE ${where.join(' AND ')}` : '',
     `ORDER BY ts_received ${order}`,
   ].filter(Boolean).join(' ');
@@ -411,7 +477,7 @@ export function getStoredTask(db, taskId, channelId = null) {
 
 export function readDueMessages(db, nowMs = Date.now(), limit = 50) {
   return db.prepare(`
-    SELECT * FROM messages
+    SELECT rowid AS seq, * FROM messages
     WHERE not_before IS NOT NULL
       AND not_before <= @nowMs
       AND delivered_at IS NULL
@@ -424,13 +490,37 @@ export function readDueMessages(db, nowMs = Date.now(), limit = 50) {
 }
 
 export function markMessageDelivered(db, messageId, deliveredAt = Date.now()) {
+  const deliveredAtMs = toEpochMs(deliveredAt);
   db.prepare(`
     UPDATE messages
     SET delivered_at = @delivered_at,
-        delivery_attempts = delivery_attempts + 1
+        delivery_attempts = delivery_attempts + 1,
+        last_attempt_at = @delivered_at,
+        last_error = NULL
     WHERE id = @id
   `).run({
     id: messageId,
-    delivered_at: toEpochMs(deliveredAt),
+    delivered_at: deliveredAtMs,
   });
+  const row = db.prepare('SELECT rowid AS seq, * FROM messages WHERE id = @id').get({ id: messageId });
+  return row ? rowToMessage(row) : null;
+}
+
+export function markMessageDeliveryAttempt(db, messageId, {
+  attemptedAt = Date.now(),
+  error = 'delivery failed',
+} = {}) {
+  db.prepare(`
+    UPDATE messages
+    SET delivery_attempts = delivery_attempts + 1,
+        last_attempt_at = @last_attempt_at,
+        last_error = @last_error
+    WHERE id = @id
+  `).run({
+    id: messageId,
+    last_attempt_at: toEpochMs(attemptedAt),
+    last_error: String(error ?? 'delivery failed').slice(0, 1000),
+  });
+  const row = db.prepare('SELECT rowid AS seq, * FROM messages WHERE id = @id').get({ id: messageId });
+  return row ? rowToMessage(row) : null;
 }

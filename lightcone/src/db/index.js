@@ -177,6 +177,7 @@ export async function initDb() {
       expires_at           BIGINT       DEFAULT NULL,
       ts_received          BIGINT       DEFAULT NULL,
       envelope_json        JSON         DEFAULT NULL,
+      daemon_request_id    VARCHAR(128) DEFAULT NULL,
       created_at           DATETIME     DEFAULT NOW(),
       updated_at           DATETIME     DEFAULT NOW()
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
@@ -680,6 +681,7 @@ async function ensureMessageEnvelopeColumns(db) {
     ['expires_at', 'BIGINT DEFAULT NULL'],
     ['ts_received', 'BIGINT DEFAULT NULL'],
     ['envelope_json', 'JSON DEFAULT NULL'],
+    ['daemon_request_id', 'VARCHAR(128) DEFAULT NULL'],
   ];
   const [cols] = await db.execute(
     `SELECT COLUMN_NAME
@@ -698,6 +700,7 @@ async function ensureMessageEnvelopeColumns(db) {
     ['idx_messages_correlation', 'correlation_id, seq'],
     ['idx_messages_task', 'task_id, seq'],
     ['idx_messages_not_before', 'not_before, seq'],
+    ['idx_messages_daemon_request_id', 'daemon_request_id', 'UNIQUE'],
   ];
   const [existingIndexes] = await db.execute(
     `SELECT INDEX_NAME
@@ -705,9 +708,10 @@ async function ensureMessageEnvelopeColumns(db) {
      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'messages'`
   );
   const indexNames = new Set(existingIndexes.map((row) => row.INDEX_NAME));
-  for (const [name, columns] of indexes) {
+  for (const [name, columns, kind] of indexes) {
     if (indexNames.has(name)) continue;
-    await db.execute(`ALTER TABLE messages ADD INDEX ${name} (${columns})`);
+    const indexType = kind === 'UNIQUE' ? 'ADD UNIQUE KEY' : 'ADD INDEX';
+    await db.execute(`ALTER TABLE messages ${indexType} ${name} (${columns})`);
     console.error(`[DB] Added ${name} on messages(${columns})`);
   }
 }
@@ -782,29 +786,76 @@ function normalizeJsonText(value) {
   return typeof value === 'string' ? value : JSON.stringify(value);
 }
 
+function isDuplicateMessageError(err) {
+  return err?.code === 'ER_DUP_ENTRY'
+    || err?.errno === 1062
+    || String(err?.message ?? '').includes('Duplicate entry');
+}
+
+function markDeduped(row) {
+  if (row && typeof row === 'object') {
+    Object.defineProperty(row, '__deduped', {
+      value: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  return row;
+}
+
+async function findExistingMessageForDuplicate(db, msg, daemonRequestId) {
+  if (daemonRequestId) {
+    const [rows] = await db.execute(
+      `SELECT * FROM messages WHERE daemon_request_id = ? AND is_del = 0 LIMIT 1`,
+      [daemonRequestId],
+    );
+    if (rows[0]) return markDeduped(rows[0]);
+  }
+
+  if (msg.id) {
+    const [rows] = await db.execute(
+      `SELECT * FROM messages WHERE id = ? AND is_del = 0 LIMIT 1`,
+      [msg.id],
+    );
+    if (rows[0]) return markDeduped(rows[0]);
+  }
+
+  return null;
+}
+
 export async function insertMessage(db, msg) {
-  const [result] = await db.execute(
-    `INSERT INTO messages
-      (id, team_id, channel_id, sender_type, sender_id, sender_name, message_type,
-       sender_kind, payload_type, payload_body, content, parent_id, correlation_id, task_id,
-       thread_id, audience, task_status, task_number, task_assignee_type, task_assignee_id,
-       task_claimed_at, task_completed_at, mentions, not_before, origin, expires_at,
-       ts_received, envelope_json)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [msg.id, msg.teamId ?? null, msg.channelId ?? null, msg.senderType, msg.senderId, msg.senderName,
-     msg.messageType ?? 'chat', msg.senderKind ?? msg.sender_kind ?? null,
-     msg.payloadType ?? msg.payload_type ?? null, jsonOrNull(msg.payloadBody ?? msg.payload_body ?? msg.payload?.body),
-     msg.content, msg.parentId ?? msg.parent_id ?? null, msg.correlationId ?? msg.correlation_id ?? null,
-     msg.taskId ?? msg.task_id ?? null, msg.threadId ?? msg.thread_id ?? null,
-     jsonOrNull(msg.audience ?? msg.envelope?.audience),
-     msg.taskStatus ?? null, msg.taskNumber ?? null,
-     msg.taskAssigneeType ?? null, msg.taskAssigneeId ?? null,
-     msg.taskClaimedAt ?? null, msg.taskCompletedAt ?? null,
-     normalizeJsonText(msg.mentions ?? msg.envelope?.mentions), msg.notBefore ?? msg.not_before ?? null,
-     msg.origin ?? msg.envelope?.origin ?? null, msg.expiresAt ?? msg.expires_at ?? null,
-     msg.tsReceived ?? msg.ts_received ?? msg.envelope?.ts_received ?? null,
-     jsonOrNull(msg.envelope ?? msg.envelope_json)]
-  );
+  const daemonRequestId = msg.daemonRequestId ?? msg.daemon_request_id ?? null;
+  let result;
+  try {
+    [result] = await db.execute(
+      `INSERT INTO messages
+        (id, team_id, channel_id, sender_type, sender_id, sender_name, message_type,
+         sender_kind, payload_type, payload_body, content, parent_id, correlation_id, task_id,
+         thread_id, audience, task_status, task_number, task_assignee_type, task_assignee_id,
+         task_claimed_at, task_completed_at, mentions, not_before, origin, expires_at,
+         ts_received, envelope_json, daemon_request_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [msg.id, msg.teamId ?? null, msg.channelId ?? null, msg.senderType, msg.senderId, msg.senderName,
+       msg.messageType ?? 'chat', msg.senderKind ?? msg.sender_kind ?? null,
+       msg.payloadType ?? msg.payload_type ?? null, jsonOrNull(msg.payloadBody ?? msg.payload_body ?? msg.payload?.body),
+       msg.content, msg.parentId ?? msg.parent_id ?? null, msg.correlationId ?? msg.correlation_id ?? null,
+       msg.taskId ?? msg.task_id ?? null, msg.threadId ?? msg.thread_id ?? null,
+       jsonOrNull(msg.audience ?? msg.envelope?.audience),
+       msg.taskStatus ?? null, msg.taskNumber ?? null,
+       msg.taskAssigneeType ?? null, msg.taskAssigneeId ?? null,
+       msg.taskClaimedAt ?? null, msg.taskCompletedAt ?? null,
+       normalizeJsonText(msg.mentions ?? msg.envelope?.mentions), msg.notBefore ?? msg.not_before ?? null,
+       msg.origin ?? msg.envelope?.origin ?? null, msg.expiresAt ?? msg.expires_at ?? null,
+       msg.tsReceived ?? msg.ts_received ?? msg.envelope?.ts_received ?? null,
+       jsonOrNull(msg.envelope ?? msg.envelope_json), daemonRequestId]
+    );
+  } catch (err) {
+    if (isDuplicateMessageError(err)) {
+      const existing = await findExistingMessageForDuplicate(db, msg, daemonRequestId);
+      if (existing) return existing;
+    }
+    throw err;
+  }
   const [rows] = await db.execute(`SELECT * FROM messages WHERE seq = ?`, [result.insertId]);
   return rows[0];
 }

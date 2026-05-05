@@ -20,12 +20,15 @@ import { HEALTHY_UPTIME_MS, CronScheduler } from './cron-scheduler.js';
 import { buildCoagentSpawn } from './drivers/coagent.js';
 import { emitJsonEvent } from './events.js';
 import {
+  advanceAgentCursor,
   appendMessageToStore,
   getStoredTask,
+  markMessageDeliveryAttempt,
   markMessageDelivered,
   openMessageStore,
   queryStoredMessages,
   queryStoredTasks,
+  readAgentCursor,
   readDueMessages,
 } from './message-store.js';
 import { coagentProjectDir, normalizeProjectKey } from './paths.js';
@@ -35,6 +38,8 @@ import { WorkdirWatcher } from './workdir-watcher.js';
 const DEFAULT_AGENT_NAME = 'channel-agent';
 const SHUTDOWN_GRACE_MS = 5_000;
 const DEFAULT_DUE_MESSAGE_POLL_MS = 1_000;
+const DEFAULT_DELIVERY_FAILURE_LIMIT = 5;
+const VIEW_SYNC_RETRY_LIMIT = 10;
 
 function nowIso() {
   return new Date().toISOString();
@@ -431,6 +436,7 @@ export class ChannelManager {
     this.workspaceTemplateDir = path.join(repoRoot(), 'workspace-template');
     this.dueMessagePollMs = dueMessagePollMs;
     this.dueMessageTimer = null;
+    this.pendingViewSyncReplay = null;
     this.cronScheduler = new CronScheduler({
       onTick: async (tick) => {
         await this._handleCronTick(tick);
@@ -444,7 +450,7 @@ export class ChannelManager {
           reason: outcome.reason,
           event,
         });
-        await this._deliverEvent(channel, event);
+        return this._deliverEvent(channel, event);
       },
       onLogOnly: async (channel, event, outcome) => {
         await this._recordTrace(channel, {
@@ -467,6 +473,20 @@ export class ChannelManager {
 
   setConnection(connection) {
     this.connection = connection;
+    if (connection) {
+      this._schedulePendingViewSyncReplay();
+    }
+  }
+
+  _schedulePendingViewSyncReplay() {
+    if (this.pendingViewSyncReplay) return;
+    this.pendingViewSyncReplay = this._replayPendingViewSyncForAll()
+      .catch((err) => {
+        console.error('[ChannelManager] Pending view sync replay failed:', err.message);
+      })
+      .finally(() => {
+        this.pendingViewSyncReplay = null;
+      });
   }
 
   canHandle(message) {
@@ -710,6 +730,10 @@ export class ChannelManager {
 
     if (notifyStatus) {
       this._notifyChannelStatus(node);
+    }
+
+    if (this.connection) {
+      await this._replayPendingViewSync(node);
     }
 
     emitJsonEvent('agent.spawn', { channel_id: node.channelId, pid: node.agentPid, session_id: node.sessionId });
@@ -1009,10 +1033,24 @@ export class ChannelManager {
   async queryChannelMessages(params) {
     const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
     const node = this._requireNode(channelId);
-    const messages = queryStoredMessages(this._openMessageStore(node), {
+    const filters = {
       ...params,
       channel_id: node.channelId,
+    };
+    if (params.unread === true || String(params.unread).trim().toLowerCase() === 'true') {
+      const cursor = readAgentCursor(node.workdir, node.agentName);
+      filters.cursor_seq = cursor.last_seen_seq;
+      filters.now_ms = params.now_ms ?? params.nowMs ?? Date.now();
+    }
+    const messages = queryStoredMessages(this._openMessageStore(node), {
+      ...filters,
     });
+    if (filters.unread === true || String(filters.unread).trim().toLowerCase() === 'true') {
+      const maxSeq = messages.reduce((max, message) => Math.max(max, Number(message.seq) || 0), 0);
+      if (maxSeq > 0) {
+        advanceAgentCursor(node.workdir, node.agentName, maxSeq);
+      }
+    }
     return { messages };
   }
 
@@ -1555,21 +1593,27 @@ export class ChannelManager {
   }
 
   _persistNode(node) {
-    ensureDirectory(path.dirname(this._sessionIdPath(node)));
-    writeStructuredFile(this._channelMetaPath(node.workdir), {
-      channel_id: node.channelId,
-      name: node.name,
-      workspace_id: node.workspaceId,
-      daemon_id: node.daemonId,
-      type: node.type,
-      ...(node.channelTypeConfig ? { channel_type_config: node.channelTypeConfig } : {}),
-      status: node.status,
-      capability_set: node.capabilitySet,
-      members: node.members,
-      agent_name: node.agentName,
-      created_at: node.createdAt,
-      archived_at: node.archivedAt,
-    });
+    try {
+      ensureDirectory(path.dirname(this._sessionIdPath(node)));
+      writeStructuredFile(this._channelMetaPath(node.workdir), {
+        channel_id: node.channelId,
+        name: node.name,
+        workspace_id: node.workspaceId,
+        daemon_id: node.daemonId,
+        type: node.type,
+        ...(node.channelTypeConfig ? { channel_type_config: node.channelTypeConfig } : {}),
+        status: node.status,
+        capability_set: node.capabilitySet,
+        members: node.members,
+        agent_name: node.agentName,
+        created_at: node.createdAt,
+        archived_at: node.archivedAt,
+      });
+      return true;
+    } catch (err) {
+      console.error(`[ChannelManager] Failed to persist channel ${node.channelId}:`, err.message);
+      return false;
+    }
   }
 
   _loadNodeFromDisk(workdir) {
@@ -1698,9 +1742,10 @@ export class ChannelManager {
 
   async processDueMessages(channelId = null, nowMs = Date.now()) {
     const nodes = [...this.channels.values()]
-      .filter((node) => node.status === 'active' && (!channelId || node.channelId === channelId));
+      .filter((node) => (!channelId || node.channelId === channelId) && (channelId || node.status === 'active'));
 
     const delivered = [];
+    const failed = [];
     for (const node of nodes) {
       const db = this._openMessageStore(node);
       const dueMessages = readDueMessages(db, nowMs, 100);
@@ -1708,17 +1753,84 @@ export class ChannelManager {
         const message = this._messageFromStoredMessage(node, stored);
         const event = this._eventFromMessage(message);
         const outcome = this.triggerGateway.evaluate(event, node);
-        await this.triggerGateway.dispatch({ channel: node, event, outcome });
-        markMessageDelivered(db, stored.id, nowMs);
-        delivered.push({
+        const delivery = await this._dispatchDueMessage(node, event, outcome);
+        if (delivery.ok && outcome.decision !== 'block') {
+          const deliveredMessage = markMessageDelivered(db, stored.id, nowMs);
+          if (deliveredMessage?.seq != null) {
+            advanceAgentCursor(node.workdir, node.agentName, deliveredMessage.seq);
+          }
+          delivered.push({
+            message_id: stored.id,
+            channel_id: node.channelId,
+            decision: outcome.decision,
+            reason: outcome.reason,
+            ok: true,
+          });
+          continue;
+        }
+
+        const failedMessage = markMessageDeliveryAttempt(db, stored.id, {
+          attemptedAt: nowMs,
+          error: delivery.reason ?? outcome.reason ?? 'delivery failed',
+        });
+        const attempts = failedMessage?.delivery_attempts ?? ((stored.delivery_attempts ?? 0) + 1);
+        const failure = {
           message_id: stored.id,
           channel_id: node.channelId,
           decision: outcome.decision,
-          reason: outcome.reason,
-        });
+          reason: delivery.reason ?? outcome.reason,
+          attempts,
+          ok: false,
+        };
+        failed.push(failure);
+        if (attempts >= DEFAULT_DELIVERY_FAILURE_LIMIT) {
+          await this._recordDeliveryFailure(node, message, failure);
+        }
       }
     }
-    return { delivered };
+    return { delivered, failed };
+  }
+
+  async _dispatchDueMessage(node, event, outcome) {
+    if (outcome.decision === 'react') {
+      await this._recordTrace(node, {
+        kind: 'trigger',
+        decision: 'react',
+        reason: outcome.reason,
+        event,
+      });
+      return this._deliverEvent(node, event);
+    }
+    if (outcome.decision === 'log_only') {
+      await this._recordTrace(node, {
+        kind: 'trigger',
+        decision: 'log_only',
+        reason: outcome.reason,
+        event,
+      });
+      return { ok: true };
+    }
+    await this._recordTrace(node, {
+      kind: 'trigger',
+      decision: 'block',
+      reason: outcome.reason,
+      event,
+    });
+    return { ok: false, reason: outcome.reason ?? 'blocked' };
+  }
+
+  async _recordDeliveryFailure(node, message, failure) {
+    await this._recordTrace(node, {
+      kind: 'delivery_failed',
+      type: 'delivery_failed',
+      messageId: message.messageId,
+      decision: failure.decision,
+      reason: failure.reason,
+      attempts: failure.attempts,
+    });
+    console.error(
+      `[ChannelManager] Message delivery failed channel=${node.channelId} message=${message.messageId} attempts=${failure.attempts}: ${failure.reason}`,
+    );
   }
 
   _startWorkdirWatcher(node) {
@@ -1849,13 +1961,22 @@ export class ChannelManager {
 
   async _deliverEvent(node, event) {
     if (node.status !== 'active' || !node.proc?.stdin) {
-      return;
+      return {
+        ok: false,
+        reason: node.status !== 'active' ? 'channel_inactive' : 'agent_stdin_unavailable',
+      };
+    }
+
+    if (node.proc.stdin.destroyed || node.proc.stdin.writableEnded) {
+      return { ok: false, reason: 'agent_stdin_closed' };
     }
 
     try {
       node.proc.stdin.write(`${JSON.stringify({ type: 'event', event })}\n`);
+      return { ok: true };
     } catch (err) {
       console.error(`[ChannelManager] Failed to deliver event to ${node.channelId}:`, err.message);
+      return { ok: false, reason: err.message };
     }
   }
 
@@ -1971,56 +2092,182 @@ export class ChannelManager {
       payload: message.payload,
     };
 
-    if (!this.connection) {
-      this._enqueuePendingViewSync(node, message, payload, 'daemon connection is not ready');
-      return;
-    }
-
-    let response;
-    try {
-      response = await this.connection.request({
-        message: payload,
-        expect: { type: 'message.append.ack', requestId },
-        timeoutMs: 10_000,
-      });
-    } catch (err) {
-      this._enqueuePendingViewSync(node, message, payload, err?.message ?? String(err));
-      return;
-    }
-
-    if (!response?.ok) {
-      this._enqueuePendingViewSync(node, message, payload, response?.error ?? 'message.append ack failed');
+    const result = await this._sendViewSyncPayload(payload);
+    if (!result.ok) {
+      this._enqueuePendingViewSync(node, message, payload, result.reason);
       return;
     }
     emitJsonEvent('message.deliver', { channel_id: node.channelId, message_id: message.messageId, request_id: requestId });
   }
 
+  async _sendViewSyncPayload(payload) {
+    const requestId = String(payload?.requestId ?? '').trim();
+    if (!this.connection) {
+      return { ok: false, reason: 'daemon connection is not ready' };
+    }
+    if (!requestId) {
+      return { ok: false, reason: 'message.append requestId is missing' };
+    }
+
+    try {
+      const response = await this.connection.request({
+        message: payload,
+        expect: { type: 'message.append.ack', requestId },
+        timeoutMs: 10_000,
+      });
+      if (!response?.ok) {
+        return { ok: false, reason: response?.error ?? 'message.append ack failed' };
+      }
+      return { ok: true, response };
+    } catch (err) {
+      return { ok: false, reason: err?.message ?? String(err) };
+    }
+  }
+
+  async _replayPendingViewSyncForAll() {
+    for (const node of this.channels.values()) {
+      await this._replayPendingViewSync(node);
+    }
+  }
+
+  async _replayPendingViewSync(node) {
+    const pendingDir = path.join(node.workdir, 'pending-view-sync');
+    if (!existsSync(pendingDir)) return { replayed: 0, failed: 0 };
+
+    const records = [];
+    for (const fileName of readdirSync(pendingDir).filter((entry) => entry.endsWith('.json'))) {
+      const filePath = path.join(pendingDir, fileName);
+      try {
+        const record = JSON.parse(readFileSync(filePath, 'utf8'));
+        if (!record?.payload) {
+          throw new Error('pending view sync payload is missing');
+        }
+        records.push({
+          fileName,
+          filePath,
+          enqueuedAt: record.enqueuedAt ?? record.enqueued_at ?? '',
+          attempts: Number.parseInt(record.attempts, 10) || 0,
+          record,
+        });
+      } catch (err) {
+        await this._recordTrace(node, {
+          kind: 'view_sync_replay',
+          type: 'view_sync_replay_invalid',
+          fileName,
+          reason: err.message,
+        });
+      }
+    }
+
+    records.sort((left, right) => String(left.enqueuedAt).localeCompare(String(right.enqueuedAt)));
+    let replayed = 0;
+    let failed = 0;
+    for (const item of records) {
+      if (item.attempts >= VIEW_SYNC_RETRY_LIMIT) {
+        failed += 1;
+        continue;
+      }
+
+      const result = await this._sendViewSyncPayload(item.record.payload);
+      if (result.ok) {
+        try {
+          unlinkSync(item.filePath);
+          replayed += 1;
+          emitJsonEvent('message.deliver', {
+            channel_id: item.record.payload.channel_id,
+            message_id: item.record.payload.message_id,
+            request_id: item.record.payload.requestId,
+            replayed: true,
+          });
+        } catch (err) {
+          failed += 1;
+          console.error(`[ChannelManager] Failed to remove pending view sync ${item.filePath}:`, err.message);
+        }
+        continue;
+      }
+
+      failed += 1;
+      const attempts = item.attempts + 1;
+      this._writePendingViewSyncFailure(item.filePath, item.record, result.reason, attempts);
+      if (attempts >= VIEW_SYNC_RETRY_LIMIT) {
+        await this._recordTrace(node, {
+          kind: 'view_sync_replay',
+          type: 'view_sync_replay_give_up',
+          messageId: item.record.payload.message_id,
+          requestId: item.record.payload.requestId,
+          attempts,
+          reason: result.reason,
+        });
+        console.error(
+          `[ChannelManager] Pending view sync reached retry limit channel=${node.channelId} message=${item.record.payload.message_id}: ${result.reason}`,
+        );
+      }
+    }
+
+    return { replayed, failed };
+  }
+
+  _writePendingViewSyncFailure(filePath, record, reason, attempts) {
+    try {
+      writeFileSync(
+        filePath,
+        `${JSON.stringify({
+          ...record,
+          enqueuedAt: record.enqueuedAt ?? nowIso(),
+          attempts,
+          lastAttemptAt: nowIso(),
+          reason,
+        }, null, 2)}\n`,
+        'utf8',
+      );
+    } catch (err) {
+      console.error(`[ChannelManager] Failed to update pending view sync ${filePath}:`, err.message);
+    }
+  }
+
   _enqueuePendingViewSync(node, message, payload, reason) {
-    const pendingDir = ensureDirectory(path.join(node.workdir, 'pending-view-sync'));
-    const filePath = path.join(pendingDir, `${message.messageId}.json`);
-    writeFileSync(
-      filePath,
-      JSON.stringify({ enqueuedAt: nowIso(), reason, payload }, null, 2),
-      'utf8',
-    );
-    this._recordTrace(node, {
-      type: 'view_sync_failed',
-      messageId: message.messageId,
-      requestId: payload.requestId,
-      reason,
-    });
+    try {
+      const pendingDir = ensureDirectory(path.join(node.workdir, 'pending-view-sync'));
+      const filePath = path.join(pendingDir, `${message.messageId}.json`);
+      let existing = null;
+      try {
+        existing = existsSync(filePath) ? JSON.parse(readFileSync(filePath, 'utf8')) : null;
+      } catch {}
+      writeFileSync(
+        filePath,
+        `${JSON.stringify({
+          enqueuedAt: existing?.enqueuedAt ?? nowIso(),
+          attempts: existing?.attempts ?? 0,
+          reason,
+          payload,
+        }, null, 2)}\n`,
+        'utf8',
+      );
+      this._recordTrace(node, {
+        type: 'view_sync_failed',
+        messageId: message.messageId,
+        requestId: payload.requestId,
+        reason,
+      });
+    } catch (err) {
+      console.error(`[ChannelManager] Failed to enqueue pending view sync for ${node.channelId}:`, err.message);
+    }
   }
 
   async _recordTrace(node, record) {
-    const sessionId = node.sessionId
-      || (existsSync(this._sessionIdPath(node)) ? readFileSync(this._sessionIdPath(node), 'utf8').trim() : '')
-      || 'pending';
-    const traceDir = ensureDirectory(this._traceDir(node));
-    appendFileSync(
-      path.join(traceDir, `${sessionId}.jsonl`),
-      `${JSON.stringify({ ts: nowIso(), ...record })}\n`,
-      'utf8',
-    );
+    try {
+      const sessionId = node.sessionId
+        || (existsSync(this._sessionIdPath(node)) ? readFileSync(this._sessionIdPath(node), 'utf8').trim() : '')
+        || 'pending';
+      const traceDir = ensureDirectory(this._traceDir(node));
+      appendFileSync(
+        path.join(traceDir, `${sessionId}.jsonl`),
+        `${JSON.stringify({ ts: nowIso(), ...record })}\n`,
+        'utf8',
+      );
+    } catch (err) {
+      console.error(`[ChannelManager] Failed to record trace for ${node?.channelId ?? 'unknown'}:`, err.message);
+    }
   }
 
   _notifyChannelStatus(node) {

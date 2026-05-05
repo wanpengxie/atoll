@@ -339,15 +339,18 @@ async function handleDaemonMessage(machineId, serverId, msg) {
           expiresAt: msg.expires_at ?? msg.expiresAt ?? msg.envelope?.expires_at ?? null,
           tsReceived: msg.ts_received ?? msg.tsReceived ?? msg.envelope?.ts_received ?? null,
           envelope: msg.envelope ?? null,
+          daemonRequestId: requestId,
         });
 
-        broadcast.channelMessage(channelId, formatMessage(message));
-        emitJsonEvent('message.create', {
-          message_id: message.id,
-          channel_id: channelId,
-          machine_id: machineId,
-          sender_type: senderType,
-        });
+        if (!message.__deduped) {
+          broadcast.channelMessage(channelId, formatMessage(message));
+          emitJsonEvent('message.create', {
+            message_id: message.id,
+            channel_id: channelId,
+            machine_id: machineId,
+            sender_type: senderType,
+          });
+        }
         sendToDaemon(machineId, { type: 'message.append.ack', requestId, ok: true });
         emitJsonEvent('message.deliver', {
           message_id: message.id,
