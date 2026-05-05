@@ -64,7 +64,7 @@ function env(overrides = {}) {
   return {
     channelId: 'channel-mock',
     channelName: 'Mock Channel',
-    channelType: 'mock',
+    channelType: 'echo',
     workspaceId: 'workspace-1',
     workdir: '/tmp/channel-mock',
     agentName: 'channel-agent',
@@ -79,11 +79,13 @@ function env(overrides = {}) {
   };
 }
 
-test('system prompt renders complete snapshot for mock channel-type config', async () => {
+test('system prompt renders static channel-type config from repo YAML', async () => {
   const { buildSystemPrompt } = await import(path.join(packageDir, 'dist', 'prompt', 'system-prompt.js'));
-  const snapshot = readFileSync(path.join(testDir, 'fixtures', 'system-prompt.mock.snap'), 'utf8');
+  const prompt = buildSystemPrompt(env());
 
-  assert.equal(`${buildSystemPrompt(env())}\n`, snapshot);
+  assert.match(prompt, /Echo Channel/);
+  assert.match(prompt, /echo\.ping/);
+  assert.doesNotMatch(prompt, /Mock Channel|handle_mock_user_text|mockctl/);
 });
 
 test('system prompt excludes dynamic channel context while user turn injects it', async () => {
@@ -118,6 +120,40 @@ test('system prompt excludes dynamic channel context while user turn injects it'
   assert.match(turn, /workdir: \/tmp\/channel-a/);
 });
 
+test('system prompt is stable across dynamic channel-type config payloads for the same channel type', async () => {
+  const { buildSystemPrompt } = await import(path.join(packageDir, 'dist', 'prompt', 'system-prompt.js'));
+  const alternateConfig = {
+    ...mockConfig,
+    channel_type: 'mock-alt',
+    display_name: 'Alternate Mock Channel',
+    description: 'Alternate dynamic fixture that must not enter system prompt.',
+    dispatch_table: [{
+      ...mockConfig.dispatch_table[0],
+      handler: 'handle_alternate_mock',
+      description: 'Alternate handler that would break prompt cache if injected.',
+    }],
+  };
+
+  const first = buildSystemPrompt(env({ channelId: 'channel-a', channelTypeConfig: mockConfig }));
+  const second = buildSystemPrompt(env({ channelId: 'channel-b', channelTypeConfig: alternateConfig }));
+
+  assert.equal(first, second);
+  assert.match(first, /Echo Channel/);
+  assert.doesNotMatch(first, /Mock Channel|Alternate Mock Channel|handle_alternate_mock|mockctl/);
+});
+
+test('bootstrap parser remains available for explicit channel-type config unit coverage', async () => {
+  const { parseChannelTypeConfig } = await import(path.join(packageDir, 'dist', 'bootstrap', 'env.js'));
+
+  assert.equal(parseChannelTypeConfig(''), undefined);
+  assert.equal(parseChannelTypeConfig('  '), undefined);
+  assert.equal(parseChannelTypeConfig(JSON.stringify(mockConfig)).channel_type, 'mock');
+  assert.throws(
+    () => parseChannelTypeConfig('not: [valid'),
+    /Invalid channel type config/,
+  );
+});
+
 test('channel-type config validator accepts shipped fixtures and rejects malformed entries', async () => {
   const {
     parseChannelTypeConfigText,
@@ -144,7 +180,7 @@ test('channel-type config validator accepts shipped fixtures and rejects malform
   );
 });
 
-test('xhs-creator channel type renders business prompt and missing configs fail fast', async () => {
+test('xhs-creator channel type renders business prompt and missing channel types/configs fail fast', async () => {
   const { buildSystemPrompt } = await import(path.join(packageDir, 'dist', 'prompt', 'system-prompt.js'));
   const { genericChannelTypeConfig, loadChannelTypeConfig } = await import(path.join(packageDir, 'dist', 'prompt', 'channel-type-config.js'));
 
@@ -159,6 +195,22 @@ test('xhs-creator channel type renders business prompt and missing configs fail 
   const genericFixture = genericChannelTypeConfig('unit-fixture');
   assert.equal(genericFixture.channel_type, 'unit-fixture');
   assert.match(genericFixture.description, /Generic channel type fallback/);
+
+  for (const load of [
+    () => loadChannelTypeConfig(''),
+    () => loadChannelTypeConfig(null),
+    () => buildSystemPrompt(env({ channelType: '', channelTypeConfig: undefined })),
+    () => buildSystemPrompt(env({ channelType: null, channelTypeConfig: undefined })),
+  ]) {
+    assert.throws(
+      load,
+      (error) => {
+        assert.equal(error.name, 'ChannelTypeMissing');
+        assert.equal(error.code, 'channel_type_missing');
+        return true;
+      },
+    );
+  }
 
   for (const load of [
     () => loadChannelTypeConfig('unknown'),

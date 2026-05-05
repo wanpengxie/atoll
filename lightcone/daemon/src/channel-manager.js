@@ -792,7 +792,6 @@ export class ChannelManager {
       channelId: node.channelId,
       channelName: node.name,
       channelType: node.type,
-      channelTypeConfig: node.channelTypeConfig,
       workspaceId: node.workspaceId,
       workdir: node.workdir,
       capabilitySet: node.capabilitySet,

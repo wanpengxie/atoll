@@ -71,6 +71,15 @@ export class ChannelTypeConfigNotFound extends Error {
   }
 }
 
+export class ChannelTypeMissing extends Error {
+  code = 'channel_type_missing';
+
+  constructor() {
+    super('Channel type is required to load channel type config');
+    this.name = 'ChannelTypeMissing';
+  }
+}
+
 const PROTOCOLS = new Set<HandlerProtocol>(['deterministic', 'agentic', 'hybrid']);
 const SENDER_KINDS = new Set<SenderKindSelector>(['human', 'agent', 'system', 'external', '*']);
 
@@ -208,8 +217,12 @@ export function genericChannelTypeConfig(channelType: string): ChannelTypeConfig
   };
 }
 
-export function loadChannelTypeConfig(channelType: string): ChannelTypeConfig {
-  const normalized = String(channelType ?? '').trim() || 'echo';
+export function loadChannelTypeConfig(channelType: string | null | undefined): ChannelTypeConfig {
+  const normalized = String(channelType ?? '').trim();
+  if (!normalized) {
+    throw new ChannelTypeMissing();
+  }
+
   const path = configPath(normalized);
   try {
     return parseChannelTypeConfigText(readFileSync(path, 'utf8'));

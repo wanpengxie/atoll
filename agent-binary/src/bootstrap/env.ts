@@ -32,7 +32,7 @@ function requireValue(value: string, key: string): string {
   return trimmed;
 }
 
-function parseChannelTypeConfig(raw: string): unknown {
+export function parseChannelTypeConfig(raw: string): unknown {
   const trimmed = raw.trim();
   if (!trimmed) return undefined;
 
@@ -91,6 +91,5 @@ export function parseEnv(env = process.env): AgentEnv {
     daemonHttp,
     daemonToken: String(env.COAGENT_DAEMON_TOKEN ?? '').trim(),
     capabilitySet,
-    channelTypeConfig: parseChannelTypeConfig(String(env.COAGENT_CHANNEL_TYPE_CONFIG ?? env.CHANNEL_TYPE_CONFIG ?? '')),
   };
 }

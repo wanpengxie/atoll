@@ -15,5 +15,4 @@ export interface AgentEnv {
   daemonHttp: string;
   daemonToken: string;
   capabilitySet: CapabilitySet;
-  channelTypeConfig?: unknown;
 }

@@ -6,7 +6,6 @@ import {
   type BusinessCli,
   type ChannelTypeConfig,
   loadChannelTypeConfig,
-  validateChannelTypeConfig,
 } from './channel-type-config.js';
 
 export interface PromptParts {
@@ -35,10 +34,7 @@ function renderBusinessCli(cli: BusinessCli): string[] {
 }
 
 function channelTypeConfigForEnv(env: AgentEnv): ChannelTypeConfig {
-  if (env.channelTypeConfig) {
-    return validateChannelTypeConfig(env.channelTypeConfig);
-  }
-  return loadChannelTypeConfig(env.channelType || 'echo');
+  return loadChannelTypeConfig(env.channelType);
 }
 
 function renderChannelTypeConfigPrompt(config: ChannelTypeConfig): string {
