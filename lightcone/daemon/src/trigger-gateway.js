@@ -78,7 +78,6 @@ function mentionsSelf(mentions, channel) {
     channel?.channelAgentId,
     channel?.channel_agent_id,
     channel?.agentName ? `agent:${channel.agentName}` : null,
-    'agent:channel-agent',
   ].filter(Boolean).map(String));
   return mentions.some((mention) => ids.has(mention));
 }

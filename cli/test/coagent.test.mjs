@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -491,6 +491,41 @@ test('coagent task open writes date-slug doc and emits task.open RPC', async (t)
   }
 });
 
+test('coagent task open does not leave a task doc when RPC fails', async (t) => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'coagent-task-open-rpc-fail-'));
+  t.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+  writeFileSync(path.join(tempDir, 'channel.yaml'), JSON.stringify({ channel_id: 'channel-task' }), 'utf8');
+
+  const { server, port, requests } = await withRpcServer(() => ({
+    ok: false,
+    error: { code: 'conflict', message: 'task already exists' },
+  }));
+  try {
+    const body = await runCliFailure([
+      'task',
+      'open',
+      '--type',
+      'note.publish',
+      '--title',
+      'Publish Launch Note!',
+    ], {
+      COAGENT_DAEMON_HTTP: `http://127.0.0.1:${port}`,
+      COAGENT_DAEMON_SOCKET: '',
+    }, tempDir);
+
+    assert.equal(body.code, 1);
+    assert.equal(body.body.ok, false);
+    assert.equal(body.body.error.code, 'conflict');
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].payload.method, 'task.open');
+    assert.equal(existsSync(path.join(tempDir, 'notes')), false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('coagent task append and close edit the task document around RPC calls', async (t) => {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'coagent-task-edit-'));
   t.after(() => {
@@ -548,6 +583,40 @@ test('coagent task append and close edit the task document around RPC calls', as
       summary: 'Finished',
       result_ref: 'artifact://note',
     });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('coagent task close rejects invalid status before daemon RPC', async (t) => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'coagent-task-close-status-'));
+  t.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+  writeFileSync(path.join(tempDir, 'channel.yaml'), JSON.stringify({ channel_id: 'channel-task' }), 'utf8');
+
+  const { server, port, requests } = await withRpcServer(() => ({
+    ok: true,
+    result: {},
+  }));
+  try {
+    const body = await runCliFailure([
+      'task',
+      'close',
+      'task-a',
+      '--channel',
+      'channel-task',
+      '--status',
+      'weird',
+    ], {
+      COAGENT_DAEMON_HTTP: `http://127.0.0.1:${port}`,
+      COAGENT_DAEMON_SOCKET: '',
+    }, tempDir);
+
+    assert.equal(body.code, 2);
+    assert.equal(body.body.ok, false);
+    assert.equal(body.body.error.code, 'invalid_arguments');
+    assert.equal(requests.length, 0);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

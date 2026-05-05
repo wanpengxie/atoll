@@ -345,3 +345,91 @@ test('POST /api/channels/:id/messages proxies to daemon-first path and does not 
     });
   });
 });
+
+test('GET /api/channels/:id/tasks proxies task list and show to the channel daemon', async () => {
+  const auth = buildChannelAuth();
+  const daemonRequests = [];
+  const requestIds = ['req-task-list', 'req-task-show'];
+  const router = createChannelsRouter({
+    getDbImpl: () => ({}),
+    broadcastImpl: { channelUpdated: noop, channelMessage: noop },
+    isMachineOnlineImpl: () => true,
+    requestFromDaemonImpl: async (machineId, request, responseKey, timeoutMs) => {
+      daemonRequests.push({ machineId, request, responseKey, timeoutMs });
+      if (request.method === 'task.list') {
+        return {
+          ok: true,
+          result: {
+            tasks: [{
+              task_id: 'task-a',
+              channel_id: request.params.channel_id,
+              title: 'Task A',
+              status: 'opened',
+            }],
+          },
+        };
+      }
+      return {
+        ok: true,
+        result: {
+          task: {
+            task_id: request.params.task_id,
+            channel_id: request.params.channel_id,
+            title: 'Task A',
+            status: 'opened',
+          },
+          doc: { ref: 'notes/tasks/task-a.md', content: '# Task A\n' },
+          messages: [],
+        },
+      };
+    },
+    requireChannelReadImpl: auth.requireChannelRead,
+    requireChannelWriteImpl: auth.requireChannelWrite,
+    getRequestUserIdImpl: auth.getRequestUserId,
+    uuidv4Impl: () => requestIds.shift(),
+  });
+
+  await withServer(createApp('/api/channels', router, { id: 'user-a', name: 'User A' }), async (baseUrl) => {
+    const listResponse = await requestJson(baseUrl, '/api/channels/channel-a/tasks?status=active&mine=true&parent=task-parent');
+    const showResponse = await requestJson(baseUrl, '/api/channels/channel-a/tasks/task-a');
+
+    assert.equal(listResponse.status, 200);
+    assert.deepEqual(listResponse.json.tasks.map((task) => task.task_id), ['task-a']);
+    assert.equal(showResponse.status, 200);
+    assert.equal(showResponse.json.task.task_id, 'task-a');
+    assert.deepEqual(daemonRequests, [
+      {
+        machineId: 'machine-a',
+        request: {
+          type: 'channel:rpc',
+          requestId: 'req-task-list',
+          method: 'task.list',
+          channelId: 'channel-a',
+          params: {
+            status: 'active',
+            mine: true,
+            parent_task_id: 'task-parent',
+            channel_id: 'channel-a',
+          },
+        },
+        responseKey: 'req-task-list',
+        timeoutMs: 10000,
+      },
+      {
+        machineId: 'machine-a',
+        request: {
+          type: 'channel:rpc',
+          requestId: 'req-task-show',
+          method: 'task.show',
+          channelId: 'channel-a',
+          params: {
+            task_id: 'task-a',
+            channel_id: 'channel-a',
+          },
+        },
+        responseKey: 'req-task-show',
+        timeoutMs: 10000,
+      },
+    ]);
+  });
+});

@@ -423,6 +423,7 @@ async function handleDaemonMessage(machineId, serverId, msg) {
     case 'machine:workspace:scan_result':
     case 'machine:workspace:delete_result':
     case 'channel:message.send.result':
+    case 'channel:rpc.result':
     case 'runtime:preflight:result': {
       const key = msg.requestId ?? msg.agentId;
       const resolve = pendingRequests.get(key);

@@ -2553,9 +2553,33 @@ function renderMessages(msgs, pane) {
 }
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────
+function shouldUseTaskFixtures() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('demo') === '1'
+    || window.LIGHTCONE_USE_TASK_FIXTURES === true
+    || window.LightconeTaskPanel?.useFixtures === true;
+}
+
 async function loadTasks() {
-  const tasks = window.LightconeTaskPanel?.fixtureTasks ?? window.LIGHTCONE_TASK_FIXTURES ?? [];
-  renderTasks(tasks);
+  if (!currentTeam) {
+    renderTasks([]);
+    return;
+  }
+  const pane = document.getElementById('tasks-pane');
+  try {
+    const tasks = window.LightconeTaskPanel?.loadChannelTasks
+      ? await window.LightconeTaskPanel.loadChannelTasks({
+        channelId: currentTeam.id,
+        selectedTaskId: currentTaskDetailId,
+        fetchImpl: fetch,
+        useFixtures: shouldUseTaskFixtures(),
+      })
+      : [];
+    renderTasks(tasks);
+  } catch (err) {
+    renderTasks([]);
+    if (pane) pane.innerHTML = `<div class="task-empty">${escHtml(err.message || 'Tasks unavailable')}</div>`;
+  }
 }
 
 // ── Files tab ─────────────────────────────────────────────────────────────────
@@ -2725,10 +2749,13 @@ function toggleTaskMineFilter() {
   renderTasks(_cachedTasks);
 }
 
-function selectMockTask(taskId) {
+function selectTask(taskId) {
   currentTaskDetailId = taskId;
   renderTasks(_cachedTasks);
+  if (!shouldUseTaskFixtures()) loadTasks();
 }
+
+const selectMockTask = selectTask;
 
 function showNewTaskModal() {
   if (!currentTeam) return;

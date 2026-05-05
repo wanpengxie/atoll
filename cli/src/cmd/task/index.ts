@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { configureDaemonRpcEnv } from '../../lib/coagent-env.js';
 import { requireChannelId, resolveWorkdir } from '../../lib/channel-fs.js';
 import { CliError } from '../../lib/errors.js';
@@ -117,9 +117,8 @@ function taskTemplate({ taskId, type, title, parent, rationale }: {
 function writeTaskDoc(docRef: string, content: string): void {
   const absoluteDocPath = path.join(resolveWorkdir(), validateRelativeDocRef(docRef));
   mkdirSync(path.dirname(absoluteDocPath), { recursive: true });
-  if (!existsSync(absoluteDocPath)) {
-    writeFileSync(absoluteDocPath, content, 'utf8');
-  }
+  if (existsSync(absoluteDocPath)) return;
+  writeTaskDocAtomic(docRef, content, { overwrite: false });
 }
 
 function readTaskDoc(docRef: string): string {
@@ -128,9 +127,28 @@ function readTaskDoc(docRef: string): string {
 }
 
 function overwriteTaskDoc(docRef: string, content: string): void {
+  writeTaskDocAtomic(docRef, content, { overwrite: true });
+}
+
+function writeTaskDocAtomic(docRef: string, content: string, { overwrite }: { overwrite: boolean }): void {
   const absoluteDocPath = path.join(resolveWorkdir(), validateRelativeDocRef(docRef));
   mkdirSync(path.dirname(absoluteDocPath), { recursive: true });
-  writeFileSync(absoluteDocPath, content, 'utf8');
+  const tmpPath = `${absoluteDocPath}.tmp-${process.pid}-${Date.now()}-${randomUUID()}`;
+  try {
+    writeFileSync(tmpPath, content, 'utf8');
+    if (!overwrite && existsSync(absoluteDocPath)) {
+      unlinkSync(tmpPath);
+      return;
+    }
+    renameSync(tmpPath, absoluteDocPath);
+  } catch (error) {
+    try {
+      if (existsSync(tmpPath)) unlinkSync(tmpPath);
+    } catch {
+      // Best-effort cleanup; preserve the original write failure.
+    }
+    throw error;
+  }
 }
 
 function appendTimeline(content: string, summary: string): string {
@@ -185,15 +203,8 @@ export function registerTaskCommands(program: Command): void {
       if (!type) throw new CliError('invalid_arguments', 'type is required', 2);
       const taskId = randomUUID();
       const docRef = validateRelativeDocRef(String(options.doc ?? defaultDocRefForNewTask(title, taskId)));
-      writeTaskDoc(docRef, taskTemplate({
-        taskId,
-        type,
-        title,
-        parent: options.parent ? String(options.parent) : undefined,
-        rationale: options.rationale ? String(options.rationale) : undefined,
-      }));
 
-      await rpc<Record<string, unknown>>('task.open', {
+      const opened = await rpc<Record<string, unknown>>('task.open', {
         channel_id: channelId,
         task_id: taskId,
         type,
@@ -202,16 +213,27 @@ export function registerTaskCommands(program: Command): void {
         doc_ref: docRef,
         rationale: options.rationale,
       });
+      const openedTaskId = String(opened.task_id ?? taskId);
+      const openedDocRef = validateRelativeDocRef(String(opened.doc_ref ?? docRef));
+      writeTaskDoc(openedDocRef, taskTemplate({
+        taskId: openedTaskId,
+        type,
+        title,
+        parent: options.parent ? String(options.parent) : undefined,
+        rationale: options.rationale ? String(options.rationale) : undefined,
+      }));
 
       writeSuccess({
-        task_id: taskId,
-        doc_ref: docRef,
+        task_id: openedTaskId,
+        doc_ref: openedDocRef,
       });
     });
 
   task.command('close')
     .argument('<task_id>', 'task id')
-    .requiredOption('--status <status>', 'completed, failed, or abandoned')
+    .addOption(new Option('--status <status>', 'completed, failed, or abandoned')
+      .choices(['completed', 'failed', 'abandoned'])
+      .makeOptionMandatory())
     .option('--channel <channelId>', 'channel ID')
     .option('--summary <markdown>', 'closing summary')
     .option('--result-ref <ref>', 'result reference')
@@ -229,7 +251,13 @@ export function registerTaskCommands(program: Command): void {
         summary,
         result_ref: resultRef,
       });
-      overwriteTaskDoc(docRef, appendClosedStatus(readTaskDoc(docRef), status, summary, resultRef));
+      try {
+        overwriteTaskDoc(docRef, appendClosedStatus(readTaskDoc(docRef), status, summary, resultRef));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        process.stderr.write(`task closed but failed to update doc ${docRef}: ${message}\n`);
+        throw error;
+      }
       writeSuccess({ task_id: taskId, doc_ref: docRef, status });
     });
 

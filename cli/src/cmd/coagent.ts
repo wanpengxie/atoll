@@ -47,7 +47,7 @@ main().catch((error: unknown) => {
       process.exitCode = 0;
       return;
     }
-    writeFailure(new CliError('invalid_arguments', error.message, error.exitCode || 2));
+    writeFailure(new CliError('invalid_arguments', error.message, 2));
     return;
   }
 

@@ -54,3 +54,23 @@ test('trigger gateway applies the V0 default three-state rules', () => {
     assert.equal(gateway.evaluate(event, channel).decision, expected, name);
   }
 });
+
+test('trigger gateway does not treat channel-agent literal as self for custom agent names', () => {
+  const gateway = new TriggerGateway();
+  const customChannel = { agentName: 'alice' };
+
+  assert.equal(
+    gateway.evaluate(
+      messageEvent(SenderKind.AGENT, PayloadType.DISPATCH_START, { mentions: ['agent:channel-agent'] }),
+      customChannel,
+    ).decision,
+    TriggerDecision.LOG_ONLY,
+  );
+  assert.equal(
+    gateway.evaluate(
+      messageEvent(SenderKind.AGENT, PayloadType.DISPATCH_START, { mentions: ['agent:alice'] }),
+      customChannel,
+    ).decision,
+    TriggerDecision.REACT,
+  );
+});

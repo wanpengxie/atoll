@@ -102,6 +102,21 @@ function defaultSenderName(senderType, senderId) {
   }
 }
 
+function daemonErrorStatus(code) {
+  switch (code) {
+    case 'bad_request':
+      return 400;
+    case 'unauthorized':
+      return 401;
+    case 'not_found':
+      return 404;
+    case 'conflict':
+      return 409;
+    default:
+      return 503;
+  }
+}
+
 function formatDaemonMessagePayload(message) {
   const senderType = message?.senderType ?? message?.sender_type ?? 'human';
   const senderId = message?.senderId ?? message?.sender_id ?? '';
@@ -212,6 +227,45 @@ export function createChannelsRouter({
   function pushChannelEvent(daemonId, payload) {
     if (!daemonId) return;
     sendToDaemonImpl(daemonId, payload);
+  }
+
+  async function proxyTaskRpc(req, res, method, params = {}) {
+    const daemonId = String(req.channel.daemon_id ?? '').trim();
+    if (!daemonId) {
+      return res.status(503).json({ error: 'Channel daemon unavailable' });
+    }
+    if (!isMachineOnlineImpl(daemonId)) {
+      return res.status(503).json({ error: 'Channel daemon offline' });
+    }
+
+    const requestId = uuidv4Impl();
+    try {
+      const result = await requestFromDaemonImpl(
+        daemonId,
+        {
+          type: 'channel:rpc',
+          requestId,
+          method,
+          channelId: req.channel.id,
+          params: {
+            ...params,
+            channel_id: req.channel.id,
+          },
+        },
+        requestId,
+        daemonRequestTimeoutMs,
+      );
+
+      if (!result?.ok) {
+        return res.status(daemonErrorStatus(result?.code)).json({
+          error: result?.error ?? `Channel daemon RPC failed: ${method}`,
+        });
+      }
+
+      return res.json(result.result ?? {});
+    } catch (err) {
+      return res.status(503).json({ error: `Channel daemon unavailable: ${err.message}` });
+    }
   }
 
   async function requireWorkspaceOwnerForChannel(req, res) {
@@ -418,6 +472,19 @@ export function createChannelsRouter({
     });
     res.json({ messages: messages.map(formatMessageImpl), hasMore: messages.length === Number(limit) });
   });
+
+  router.get('/:id/tasks', requireChannelReadImpl, async (req, res) => {
+    const { status, mine, parent, parent_task_id: parentTaskId } = req.query;
+    return proxyTaskRpc(req, res, 'task.list', {
+      ...(status != null ? { status } : {}),
+      ...(mine != null ? { mine: mine === true || mine === 'true' } : {}),
+      ...(parent != null || parentTaskId != null ? { parent_task_id: parentTaskId ?? parent } : {}),
+    });
+  });
+
+  router.get('/:id/tasks/:taskId', requireChannelReadImpl, async (req, res) => (
+    proxyTaskRpc(req, res, 'task.show', { task_id: req.params.taskId })
+  ));
 
   router.post('/:id/messages', requireChannelWriteImpl, async (req, res) => {
     const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';

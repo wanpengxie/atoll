@@ -555,6 +555,7 @@ export class ChannelManager {
       'channel:archive',
       'channel:event',
       'channel:message.send',
+      'channel:rpc',
     ].includes(message?.type);
   }
 
@@ -609,8 +610,45 @@ export class ChannelManager {
         return this.handleEvent(message);
       case 'channel:message.send':
         return this.handleServerMessageSend(message, connection);
+      case 'channel:rpc':
+        return this.handleServerRpc(message, connection);
       default:
         return false;
+    }
+  }
+
+  async handleServerRpc(message, connection = this.connection) {
+    const requestId = String(message?.requestId ?? '').trim();
+    const method = String(message?.method ?? '').trim();
+    if (!requestId) {
+      throw toRpcError('bad_request', 'requestId is required');
+    }
+
+    try {
+      if (!['task.list', 'task.show'].includes(method)) {
+        throw toRpcError('bad_request', `unsupported channel RPC method: ${method || '(empty)'}`);
+      }
+      const params = {
+        ...(message.params && typeof message.params === 'object' ? message.params : {}),
+        channel_id: message.params?.channel_id ?? message.params?.channelId ?? message.channelId ?? message.channel_id,
+      };
+      const result = await this.rpcCall(method, params);
+      connection?.send({
+        type: 'channel:rpc.result',
+        requestId,
+        ok: true,
+        result,
+      });
+      return result;
+    } catch (err) {
+      connection?.send({
+        type: 'channel:rpc.result',
+        requestId,
+        ok: false,
+        error: err.message,
+        code: err.code ?? 'rpc_error',
+      });
+      return null;
     }
   }
 

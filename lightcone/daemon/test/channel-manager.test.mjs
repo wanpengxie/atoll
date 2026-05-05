@@ -857,6 +857,22 @@ test('task RPC helpers project task rows and expose show/tree views', async (t) 
   const listed = await channelManager.listTasks({ channelId: node.channelId, status: 'completed' });
   assert.deepEqual(listed.tasks.map((task) => task.task_id), ['task-parent']);
 
+  const rpcResponses = [];
+  await channelManager.handle({
+    type: 'channel:rpc',
+    requestId: 'req-task-list',
+    method: 'task.list',
+    channelId: node.channelId,
+    params: { status: 'completed' },
+  }, {
+    send(message) {
+      rpcResponses.push(message);
+    },
+  });
+  assert.equal(rpcResponses[0].type, 'channel:rpc.result');
+  assert.equal(rpcResponses[0].ok, true);
+  assert.deepEqual(rpcResponses[0].result.tasks.map((task) => task.task_id), ['task-parent']);
+
   const shown = await channelManager.showTask({ channelId: node.channelId, taskId: 'task-parent' });
   assert.equal(shown.doc.content, '# Publish plan\n');
   assert.equal(shown.children[0].task_id, 'task-child');

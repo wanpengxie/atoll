@@ -146,6 +146,77 @@
     return counts;
   }
 
+  async function fetchJson(fetchImpl, url) {
+    const response = await fetchImpl(url, { credentials: 'include' });
+    if (!response.ok) {
+      let body = {};
+      try { body = await response.json(); } catch { /* ignore */ }
+      throw new Error(body.error || response.statusText || `Request failed: ${url}`);
+    }
+    return response.json();
+  }
+
+  function normalizeTaskMessage(message) {
+    const payloadBody = message.payload_body ?? message.payload?.body ?? {};
+    return {
+      ...message,
+      id: message.id ?? message.message_id ?? message.messageId ?? null,
+      payload_type: message.payload_type ?? message.payloadType ?? message.payload?.type ?? '',
+      summary: message.summary ?? payloadBody.summary ?? payloadBody.text ?? message.content ?? message.legacy?.content ?? '',
+      ts_received: message.ts_received ?? message.ts ?? message.created_at ?? message.createdAt ?? null,
+    };
+  }
+
+  function mergeTaskDetail(tasks, detail) {
+    const task = detail?.task;
+    const taskId = task?.task_id;
+    if (!taskId) return tasks;
+
+    const detailedTask = {
+      ...task,
+      doc: detail.doc?.content ?? task.doc ?? '',
+      messages: Array.isArray(detail.messages) ? detail.messages.map(normalizeTaskMessage) : [],
+    };
+    const seen = new Set();
+    const merged = tasks.map((item) => {
+      seen.add(item.task_id);
+      return item.task_id === taskId ? { ...item, ...detailedTask } : item;
+    });
+
+    for (const child of detail.children ?? []) {
+      if (!seen.has(child.task_id)) {
+        seen.add(child.task_id);
+        merged.push(child);
+      }
+    }
+    return seen.has(taskId) ? merged : [detailedTask, ...merged];
+  }
+
+  async function loadTaskDetail({ channelId, taskId, tasks = [], fetchImpl = global.fetch } = {}) {
+    if (!channelId || !taskId) return tasks;
+    const detail = await fetchJson(
+      fetchImpl,
+      `/api/channels/${encodeURIComponent(channelId)}/tasks/${encodeURIComponent(taskId)}`,
+    );
+    return mergeTaskDetail(tasks, detail);
+  }
+
+  async function loadChannelTasks({
+    channelId,
+    selectedTaskId = null,
+    fetchImpl = global.fetch,
+    useFixtures = false,
+  } = {}) {
+    if (useFixtures) return fixtureTasks;
+    if (!channelId) return [];
+    const data = await fetchJson(fetchImpl, `/api/channels/${encodeURIComponent(channelId)}/tasks`);
+    const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+    const taskId = selectedTaskId && tasks.some((task) => task.task_id === selectedTaskId)
+      ? selectedTaskId
+      : tasks[0]?.task_id;
+    return taskId ? loadTaskDetail({ channelId, taskId, tasks, fetchImpl }) : tasks;
+  }
+
   function markdownToHtml(markdown) {
     const lines = String(markdown || '').split('\n');
     const html = [];
@@ -198,7 +269,7 @@
     if (!rows.length) {
       return '<div class="task-empty">No tasks</div>';
     }
-    return rows.map(({ task, depth }) => `<button class="task-tree-row${task.task_id === selectedTaskId ? ' selected' : ''}" data-task-id="${esc(task.task_id)}" onclick="selectMockTask('${esc(task.task_id)}')" style="--task-depth:${depth}">
+    return rows.map(({ task, depth }) => `<button class="task-tree-row${task.task_id === selectedTaskId ? ' selected' : ''}" data-task-id="${esc(task.task_id)}" onclick="selectTask('${esc(task.task_id)}')" style="--task-depth:${depth}">
       <span class="task-status status-${esc(task.status)}">${esc(statusLabels[task.status] || task.status)}</span>
       <span class="task-row-main">
         <span class="task-title">${esc(task.title)}</span>
@@ -234,7 +305,7 @@
       <div class="task-timeline">${timeline || '<div class="task-empty">No messages</div>'}</div>
       <div class="task-section-title">Child Tasks</div>
       <div class="task-child-list">${children.length ? children.map((child) =>
-        `<button class="task-child-link" onclick="selectMockTask('${esc(child.task_id)}')">${esc(child.title)}<span>${esc(statusLabels[child.status] || child.status)}</span></button>`
+        `<button class="task-child-link" onclick="selectTask('${esc(child.task_id)}')">${esc(child.title)}<span>${esc(statusLabels[child.status] || child.status)}</span></button>`
       ).join('') : '<div class="task-empty">No child tasks</div>'}</div>
     </section>`;
   }
@@ -260,6 +331,8 @@
   global.LIGHTCONE_TASK_FIXTURES = fixtureTasks;
   global.LightconeTaskPanel = {
     fixtureTasks,
+    loadChannelTasks,
+    loadTaskDetail,
     renderTasksPanelHtml,
     activeCount,
     statusCounts,

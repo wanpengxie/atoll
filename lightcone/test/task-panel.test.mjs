@@ -43,3 +43,78 @@ test('mock task panel supports status and mine filters', () => {
   assert.doesNotMatch(mineHtml, /Collect creator references/);
   assert.equal(panel.activeCount(), 3);
 });
+
+test('task panel loads daemon task projection through channel fetch', async () => {
+  const panel = loadPanel();
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    if (url === '/api/channels/channel-real/tasks') {
+      return {
+        ok: true,
+        json: async () => ({
+          tasks: [{
+            task_id: 'task-real',
+            channel_id: 'channel-real',
+            parent_task_id: null,
+            type: 'note.publish',
+            title: 'Real daemon task',
+            initiator_kind: 'agent',
+            initiator_id: 'alice',
+            status: 'opened',
+            opened_at: 1778025600000,
+            last_event_at: 1778025600000,
+            closed_at: null,
+            doc_ref: 'notes/tasks/real.md',
+            primary_correlation: 'corr-real',
+          }],
+        }),
+      };
+    }
+    if (url === '/api/channels/channel-real/tasks/task-real') {
+      return {
+        ok: true,
+        json: async () => ({
+          task: {
+            task_id: 'task-real',
+            channel_id: 'channel-real',
+            parent_task_id: null,
+            type: 'note.publish',
+            title: 'Real daemon task',
+            initiator_kind: 'agent',
+            initiator_id: 'alice',
+            status: 'opened',
+            opened_at: 1778025600000,
+            last_event_at: 1778025600000,
+            closed_at: null,
+            doc_ref: 'notes/tasks/real.md',
+            primary_correlation: 'corr-real',
+          },
+          doc: { ref: 'notes/tasks/real.md', content: '# Real daemon task\n\n## Brief\nLoaded from daemon.' },
+          messages: [{
+            id: 'msg-real-open',
+            payload_type: 'task.opened',
+            content: 'Opened real task',
+            ts_received: 1778025600000,
+          }],
+          children: [],
+        }),
+      };
+    }
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  const tasks = await panel.loadChannelTasks({ channelId: 'channel-real', fetchImpl, useFixtures: false });
+  const html = panel.renderTasksPanelHtml({ tasks });
+
+  assert.deepEqual(calls.map((call) => call.url), [
+    '/api/channels/channel-real/tasks',
+    '/api/channels/channel-real/tasks/task-real',
+  ]);
+  assert.equal(calls[0].options.credentials, 'include');
+  assert.equal(tasks[0].task_id, 'task-real');
+  assert.equal(tasks[0].doc, '# Real daemon task\n\n## Brief\nLoaded from daemon.');
+  assert.match(html, /Real daemon task/);
+  assert.match(html, /Loaded from daemon/);
+  assert.doesNotMatch(html, /Q2 creator campaign plan/);
+});
