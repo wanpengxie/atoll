@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Outfit:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script src="/tasks-fixture.js"></script>
 <style>
 :root {
   --bg:         #D4C5A9;
@@ -1227,58 +1228,48 @@ body::after {
   content:'';flex:1;height:1px;background:var(--border);
 }
 
-/* task cards */
-.task-card {
-  background:var(--surface);
-  border:1px solid var(--border);
-  border-radius:14px;
-  padding:14px 16px;
-  display:flex;
-  gap:12px;
-  align-items:flex-start;
-  transition:all .2s;
-}
-
-.task-card:hover{border-color:var(--border-2);box-shadow:0 4px 16px rgba(0,0,0,0.04);transform:translateY(-1px)}
-
-.task-status {
+/* task entity panel */
+.tab-count {
+  display:inline-flex;
+  min-width:16px;
+  height:16px;
+  align-items:center;
+  justify-content:center;
+  margin-left:6px;
+  padding:0 4px;
+  border-radius:999px;
+  background:var(--accent-bg);
+  color:var(--accent);
   font-size:10px;
-  padding:2px 8px;
-  border-radius:5px;
-  font-weight:600;
-  flex-shrink:0;
-  margin-top:1px;
   font-family:'IBM Plex Mono',monospace;
-  letter-spacing:.03em;
-  text-transform:uppercase;
 }
 
-.status-open,
-.status-todo        { background:rgba(255,209,0,.10); color:#d97706 }
-.status-in_progress { background:rgba(0,114,206,.10);  color:var(--blue) }
-.status-in_review   { background:rgba(255,209,0,.10);  color:var(--warning) }
-.status-done        { background:rgba(0,166,81,.10);  color:var(--green) }
-.status-cancelled   { background:var(--surface-2);     color:var(--text-dim);text-decoration:line-through }
+.task-entity-toolbar {
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:10px;
+  flex-wrap:wrap;
+  flex-shrink:0;
+}
 
-/* task filter bar */
 .task-filter-bar {
   display:flex;
   gap:6px;
-  margin-bottom:12px;
   flex-wrap:wrap;
   flex-shrink:0;
 }
 
 .task-filter-pill {
   font-size:11px;
-  padding:4px 12px;
-  border-radius:12px;
+  padding:4px 10px;
+  border-radius:8px;
   border:1px solid var(--border);
-  background:none;
+  background:var(--surface);
   color:var(--text-muted);
   cursor:pointer;
   font-family:'Outfit',sans-serif;
-  transition:all .15s;
+  transition:color .15s,border-color .15s,background .15s;
 }
 
 .task-filter-pill:hover { border-color:var(--border-2); color:var(--text) }
@@ -1287,12 +1278,221 @@ body::after {
 .task-filter-pill .pill-count {
   font-size:10px;
   margin-left:4px;
-  opacity:.7;
+  opacity:.75;
   font-family:'IBM Plex Mono',monospace;
 }
 
-/* task delete button */
-.task-btn.task-btn-danger:hover { border-color:var(--accent); color:var(--accent); background:rgba(228,0,43,.08) }
+.task-entity-layout {
+  display:grid;
+  grid-template-columns:minmax(260px,34%) minmax(0,1fr);
+  gap:14px;
+  min-height:0;
+  flex:1;
+}
+
+.task-tree {
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  min-width:0;
+  overflow:auto;
+}
+
+.task-tree-row {
+  width:100%;
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:var(--surface);
+  color:var(--text);
+  padding:10px 10px 10px calc(10px + var(--task-depth,0) * 18px);
+  display:flex;
+  align-items:flex-start;
+  gap:8px;
+  text-align:left;
+  cursor:pointer;
+  transition:background .15s,border-color .15s;
+}
+
+.task-tree-row:hover,
+.task-tree-row.selected {
+  border-color:var(--accent);
+  background:var(--accent-bg);
+}
+
+.task-row-main {
+  display:flex;
+  flex-direction:column;
+  min-width:0;
+  gap:3px;
+}
+
+.task-status {
+  font-size:10px;
+  padding:2px 7px;
+  border-radius:6px;
+  font-weight:600;
+  flex-shrink:0;
+  margin-top:1px;
+  font-family:'IBM Plex Mono',monospace;
+  text-transform:uppercase;
+}
+
+.status-opened,
+.status-active { background:rgba(255,209,0,.10); color:#a65f00 }
+.status-blocked { background:rgba(228,0,43,.10); color:var(--accent) }
+.status-completed { background:rgba(0,166,81,.10); color:var(--green) }
+.status-failed { background:rgba(228,0,43,.12); color:var(--accent) }
+.status-abandoned,
+.status-archived { background:var(--surface-2); color:var(--text-dim) }
+
+.task-title {
+  font-size:13px;
+  color:var(--text);
+  line-height:1.35;
+  overflow-wrap:anywhere;
+}
+
+.task-meta {
+  font-size:11px;
+  color:var(--text-dim);
+  font-family:'IBM Plex Mono',monospace;
+  overflow-wrap:anywhere;
+}
+
+.task-detail {
+  min-width:0;
+  overflow:auto;
+  border-left:1px solid var(--border);
+  padding-left:16px;
+}
+
+.task-detail-header {
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:12px;
+  margin-bottom:12px;
+}
+
+.task-detail-title {
+  font-size:18px;
+  font-weight:600;
+  color:var(--text);
+  line-height:1.25;
+}
+
+.task-detail-meta {
+  margin-top:4px;
+  font-size:11px;
+  color:var(--text-dim);
+  font-family:'IBM Plex Mono',monospace;
+  overflow-wrap:anywhere;
+}
+
+.task-detail-grid {
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:8px;
+  margin-bottom:14px;
+}
+
+.task-detail-grid div {
+  border:1px solid var(--border);
+  border-radius:8px;
+  padding:8px 10px;
+  background:var(--surface);
+  min-width:0;
+}
+
+.task-detail-grid span {
+  display:block;
+  color:var(--text-dim);
+  font-size:10px;
+  font-family:'IBM Plex Mono',monospace;
+  margin-bottom:3px;
+}
+
+.task-detail-grid b {
+  display:block;
+  color:var(--text);
+  font-size:12px;
+  font-weight:500;
+  overflow-wrap:anywhere;
+}
+
+.task-doc {
+  color:var(--text);
+  font-size:13px;
+  line-height:1.55;
+  margin-bottom:16px;
+}
+
+.task-doc h3,
+.task-doc h4 {
+  margin:12px 0 6px;
+  font-size:13px;
+}
+
+.task-doc p,
+.task-doc ul {
+  margin:0 0 8px;
+}
+
+.task-section-title {
+  margin:14px 0 8px;
+  color:var(--text-dim);
+  font-size:11px;
+  font-weight:600;
+  text-transform:uppercase;
+  font-family:'IBM Plex Mono',monospace;
+}
+
+.task-timeline,
+.task-child-list {
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+
+.task-timeline-item,
+.task-child-link {
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:var(--surface);
+  padding:8px 10px;
+  color:var(--text);
+  font-size:12px;
+}
+
+.task-timeline-type {
+  display:inline-block;
+  min-width:110px;
+  color:var(--text-dim);
+  font-family:'IBM Plex Mono',monospace;
+  font-size:11px;
+}
+
+.task-child-link {
+  display:flex;
+  justify-content:space-between;
+  gap:8px;
+  cursor:pointer;
+  text-align:left;
+}
+
+.task-child-link:hover { border-color:var(--accent); background:var(--accent-bg) }
+
+.task-empty {
+  color:var(--text-dim);
+  font-size:12px;
+  padding:12px;
+}
+
+@media (max-width: 860px) {
+  .task-entity-layout { grid-template-columns:1fr; }
+  .task-detail { border-left:none; padding-left:0; border-top:1px solid var(--border); padding-top:12px; }
+  .task-detail-grid { grid-template-columns:1fr; }
+}
 
 /* as-task toggle in composer */
 .as-task-toggle {
@@ -1308,26 +1508,6 @@ body::after {
 }
 
 .as-task-toggle input { accent-color:var(--accent); width:13px; height:13px; cursor:pointer }
-
-.task-body{flex:1;min-width:0}
-.task-title{font-size:13.5px;color:var(--text);margin-bottom:4px;line-height:1.4}
-.task-meta{font-size:11px;color:var(--text-dim);font-family:'IBM Plex Mono',monospace}
-
-.task-actions{display:flex;gap:4px;margin-top:8px}
-
-.task-btn {
-  font-size:11px;
-  padding:3px 10px;
-  border-radius:5px;
-  border:1px solid var(--border-2);
-  background:none;
-  color:var(--text-muted);
-  cursor:pointer;
-  font-family:'Outfit',sans-serif;
-  transition:color .1s, border-color .1s, background .1s;
-}
-
-.task-btn:hover{color:var(--text);border-color:var(--accent);background:var(--accent-bg)}
 
 /* ── INPUT AREA ── */
 #input-area {
@@ -1923,6 +2103,8 @@ function restoreMain() {
     <div id="team-agents-bar" style="display:none;padding:8px 20px;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:6px 14px;background:var(--surface);flex-shrink:0"></div>
     <div id="tabs">
       <div class="tab active" onclick="switchTab('messages')">消息</div>
+      <div class="tab" onclick="switchTab('tasks')">Tasks <span id="task-count" class="tab-count" style="display:none"></span></div>
+      <div class="tab" onclick="switchTab('files')">Files</div>
     </div>
     <div id="messages-pane"></div>
     <div id="tasks-pane" style="display:none"></div>
@@ -2372,8 +2554,7 @@ function renderMessages(msgs, pane) {
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────
 async function loadTasks() {
-  if (!currentTeam) return;
-  const { tasks } = await api(`/api/tasks/team/${currentTeam.id}`);
+  const tasks = window.LightconeTaskPanel?.fixtureTasks ?? window.LIGHTCONE_TASK_FIXTURES ?? [];
   renderTasks(tasks);
 }
 
@@ -2505,69 +2686,47 @@ async function saveBrief() {
 }
 
 let currentTaskFilter = 'all';
+let currentTaskMineOnly = false;
+let currentTaskDetailId = null;
 let _cachedTasks = [];
-
-const TASK_STATUS_LABELS = {
-  open: '待办', todo: '待办', in_progress: '进行中', in_review: '审核中', done: '已完成', cancelled: '已取消'
-};
-
-function normalizeTaskStatus(s) { return s === 'open' ? 'todo' : s; }
 
 function renderTasks(tasks) {
   _cachedTasks = tasks;
   const pane = document.getElementById('tasks-pane');
   if (!pane) return;
-  const open = tasks.filter(t => normalizeTaskStatus(t.taskStatus) !== 'done' && normalizeTaskStatus(t.taskStatus) !== 'cancelled');
   const cnt = document.getElementById('task-count');
-  if (cnt) { cnt.textContent = open.length; cnt.style.display = open.length ? '' : 'none'; }
+  const activeCount = window.LightconeTaskPanel?.activeCount?.(tasks) ?? 0;
+  if (cnt) { cnt.textContent = activeCount; cnt.style.display = activeCount ? '' : 'none'; }
 
-  // compute counts per status
-  const counts = { all: tasks.length, todo: 0, in_progress: 0, in_review: 0, done: 0, cancelled: 0 };
-  tasks.forEach(t => { const s = normalizeTaskStatus(t.taskStatus); if (counts[s] !== undefined) counts[s]++; });
-
-  const filters = [
-    ['all', '全部'], ['todo', '待办'], ['in_progress', '进行中'],
-    ['in_review', '审核中'], ['done', '已完成'], ['cancelled', '已取消']
-  ];
-  const filterBar = `<div class="task-filter-bar">${filters.map(([k, label]) =>
-    `<button class="task-filter-pill${currentTaskFilter===k?' active':''}" onclick="setTaskFilter('${k}')">${label}<span class="pill-count">${counts[k]}</span></button>`
-  ).join('')}</div>`;
-
-  const filtered = currentTaskFilter === 'all' ? tasks : tasks.filter(t => normalizeTaskStatus(t.taskStatus) === currentTaskFilter);
-
-  if (!filtered.length) {
-    pane.innerHTML = filterBar + '<div style="color:var(--text-dim);font-size:12px;margin-top:24px;text-align:center;font-family:\'JetBrains Mono\',monospace">// 暂无任务</div>';
+  if (!window.LightconeTaskPanel) {
+    pane.innerHTML = '<div class="task-empty">Tasks unavailable</div>';
     return;
   }
 
-  pane.innerHTML = filterBar + filtered.map(t => {
-    const ns = normalizeTaskStatus(t.taskStatus);
-    const assignee = t.taskAssigneeId
-      ? (t.taskAssigneeType==='agent' ? '🤖 ' + (t.taskAssigneeName || t.taskAssigneeId.slice(0,8)) : '👤 ' + (t.taskAssigneeName || '我'))
-      : '未分配';
-    const statusLabel = TASK_STATUS_LABELS[t.taskStatus] || t.taskStatus;
-    return `<div class="task-card">
-      <span class="task-status status-${ns}">${statusLabel}</span>
-      <div class="task-body">
-        <div class="task-title">#${t.taskNumber} &nbsp;${escHtml(t.content)}</div>
-        <div class="task-meta">${assignee} · ${new Date(t.createdAt).toLocaleDateString('zh-CN')}</div>
-        <div class="task-actions">
-          ${ns==='todo'?`<button class="task-btn" onclick="claimTask('${t.id}')">认领</button>`:''}
-          ${ns==='in_progress'?`<button class="task-btn" onclick="updateTaskStatus('${t.id}','in_review')">提交审核</button>
-            <button class="task-btn" onclick="updateTaskStatus('${t.id}','done')">完成</button>
-            <button class="task-btn" onclick="unclaimTask('${t.id}')">取消认领</button>`:''}
-          ${ns==='in_review'?`<button class="task-btn" onclick="updateTaskStatus('${t.id}','done')">通过</button>
-            <button class="task-btn" onclick="updateTaskStatus('${t.id}','in_progress')">打回</button>`:''}
-          ${ns!=='done'&&ns!=='cancelled'?`<button class="task-btn" onclick="updateTaskStatus('${t.id}','cancelled')">取消</button>`:''}
-          <button class="task-btn task-btn-danger" onclick="deleteTask('${t.id}')">删除</button>
-        </div>
-      </div>
-    </div>`;
-  }).join('');
+  pane.innerHTML = window.LightconeTaskPanel.renderTasksPanelHtml({
+    tasks,
+    state: {
+      status: currentTaskFilter,
+      mineOnly: currentTaskMineOnly,
+      selectedTaskId: currentTaskDetailId,
+    },
+  });
 }
 
 function setTaskFilter(filter) {
   currentTaskFilter = filter;
+  currentTaskDetailId = null;
+  renderTasks(_cachedTasks);
+}
+
+function toggleTaskMineFilter() {
+  currentTaskMineOnly = !currentTaskMineOnly;
+  currentTaskDetailId = null;
+  renderTasks(_cachedTasks);
+}
+
+function selectMockTask(taskId) {
+  currentTaskDetailId = taskId;
   renderTasks(_cachedTasks);
 }
 

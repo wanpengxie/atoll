@@ -3,6 +3,7 @@ import { registerAdminCommands } from './admin/index.js';
 import { registerChannelCommands } from './channel/index.js';
 import { registerMessageCommands } from './message/index.js';
 import { registerProtocolCommands } from './protocol/index.js';
+import { registerTaskCommands } from './task/index.js';
 import { CliError, toCliError } from '../lib/errors.js';
 import { writeFailure } from '../lib/output.js';
 
@@ -28,6 +29,7 @@ async function main(): Promise<void> {
   registerChannelCommands(program);
   registerMessageCommands(program);
   registerProtocolCommands(program);
+  registerTaskCommands(program);
   registerAdminCommands(program);
   program.command('xhs').description('Run Xiaohongshu business commands');
 

@@ -92,6 +92,7 @@ test('coagent help lists the business command tree', () => {
   assert.match(help, /emit \[options\]\s+Emit an envelope message/);
   assert.match(help, /query \[options\]\s+Query channel messages/);
   assert.match(help, /dispatch\s+Dispatch promise-chain helpers/);
+  assert.match(help, /task\s+Open and inspect task entities/);
   assert.match(help, /admin\s+Inspect the local daemon/);
   assert.match(help, /xhs\s+Run Xiaohongshu business commands/);
 });
@@ -201,6 +202,17 @@ test('coagent business subcommands call expected daemon RPC methods', async () =
       },
     },
     {
+      args: ['schedule', '--channel', 'channel-a', '--not-before', '1760000000000', '--payload', '{"reason":"check"}', '--in-task', 'task-a'],
+      method: 'message.schedule',
+      params: {
+        channel_id: 'channel-a',
+        not_before: 1760000000000,
+        payload_type: 'dispatch.self_check_due',
+        payload_body: { reason: 'check' },
+        task_id: 'task-a',
+      },
+    },
+    {
       args: ['dispatch', 'start', '--channel', 'channel-a', '--target', 'external:device:x', '--type', 'xhs.publish', '--params', '{"title":"hi"}', '--in-task', 'task-a', '--check-after', '5m'],
       method: 'dispatch.start',
       params: {
@@ -216,7 +228,7 @@ test('coagent business subcommands call expected daemon RPC methods', async () =
     { args: ['dispatch', 'renew', '--channel', 'channel-a', '--correlation-id', 'corr-a', '--check-after', '30s'], method: 'dispatch.renew', params: { channel_id: 'channel-a', correlation_id: 'corr-a', check_after_ms: 30000 } },
     { args: ['dispatch', 'ls', '--channel', 'channel-a', '--task-id', 'task-a', '--status', 'pending'], method: 'dispatch.list', params: { channel_id: 'channel-a', task_id: 'task-a', status: 'pending' } },
     {
-      args: ['memo', '--channel', 'channel-a', '--tag', 'rule', '--scope', 'forever', '--doc', 'notes/rule.md', '--correlation-id', 'corr-a', 'Remember this'],
+      args: ['memo', '--channel', 'channel-a', '--tag', 'rule', '--scope', 'forever', '--doc', 'notes/rule.md', '--correlation-id', 'corr-a', '--in-task', 'task-a', 'Remember this'],
       method: 'memo.create',
       params: {
         channel_id: 'channel-a',
@@ -224,9 +236,13 @@ test('coagent business subcommands call expected daemon RPC methods', async () =
         scope: 'forever',
         doc: 'notes/rule.md',
         correlation_id: 'corr-a',
+        task_id: 'task-a',
         summary: 'Remember this',
       },
     },
+    { args: ['task', 'ls', '--channel', 'channel-a', '--status', 'active', '--mine', '--parent', 'task-parent'], method: 'task.list', params: { channel_id: 'channel-a', status: 'active', mine: true, parent_task_id: 'task-parent' } },
+    { args: ['task', 'show', '--channel', 'channel-a', 'task-a'], method: 'task.show', params: { channel_id: 'channel-a', task_id: 'task-a' } },
+    { args: ['task', 'tree', '--channel', 'channel-a', '--root', 'task-a'], method: 'task.tree', params: { channel_id: 'channel-a', root_task_id: 'task-a' } },
     { args: ['recall', '--channel', 'channel-a', '--tag', 'rule', '--limit', '3', '--status', 'all'], method: 'memo.recall', params: { channel_id: 'channel-a', tag: 'rule', limit: 3, status: 'all' } },
     { args: ['admin', 'machines'], method: 'admin.machines', params: {} },
   ];
@@ -318,6 +334,120 @@ test('coagent memo-write writes a local doc and emits a memo RPC', async (t) => 
       scope: 'channel',
       doc: 'notes/tasks/task.md',
       summary: 'Task Title',
+    });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('coagent task open writes date-slug doc and emits task.open RPC', async (t) => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'coagent-task-open-'));
+  t.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+  writeFileSync(path.join(tempDir, 'channel.yaml'), JSON.stringify({ channel_id: 'channel-task' }), 'utf8');
+
+  const { server, port, requests } = await withRpcServer((request) => ({
+    ok: true,
+    result: { echoed_method: request.payload.method, echoed_params: request.payload.params },
+  }));
+  try {
+    const body = await runCliAsync([
+      'task',
+      'open',
+      '--type',
+      'note.publish',
+      '--title',
+      'Publish Launch Note!',
+      '--rationale',
+      'needs tracking',
+    ], {
+      COAGENT_DAEMON_HTTP: `http://127.0.0.1:${port}`,
+      COAGENT_DAEMON_SOCKET: '',
+    }, tempDir);
+
+    assert.equal(body.ok, true);
+    assert.match(body.data.task_id, /^[0-9a-f-]{36}$/);
+    assert.match(body.data.doc_ref, /^notes\/tasks\/\d{4}-\d{2}-\d{2}-publish-launch-note\.md$/);
+    const doc = readFileSync(path.join(tempDir, body.data.doc_ref), 'utf8');
+    assert.match(doc, /^# Publish Launch Note!/);
+    assert.match(doc, /## Brief/);
+    assert.match(doc, /## Stakeholders/);
+    assert.match(doc, /## Decisions/);
+    assert.match(doc, /## Constraints/);
+    assert.match(doc, /## Refs/);
+    assert.match(doc, /## Timeline/);
+    assert.match(doc, /Status: opened/);
+    assert.equal(requests[0].payload.method, 'task.open');
+    assert.deepEqual(requests[0].payload.params, {
+      channel_id: 'channel-task',
+      task_id: body.data.task_id,
+      type: 'note.publish',
+      title: 'Publish Launch Note!',
+      doc_ref: body.data.doc_ref,
+      rationale: 'needs tracking',
+    });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('coagent task append and close edit the task document around RPC calls', async (t) => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'coagent-task-edit-'));
+  t.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+  writeFileSync(path.join(tempDir, 'channel.yaml'), JSON.stringify({ channel_id: 'channel-task' }), 'utf8');
+  const docRef = 'notes/tasks/2026-05-06-existing.md';
+  mkdirSync(path.dirname(path.join(tempDir, docRef)), { recursive: true });
+  writeFileSync(path.join(tempDir, docRef), '# Existing\n\n## Timeline\n\n- opened\n\n## Status\n\nStatus: opened\n', 'utf8');
+
+  const { server, port, requests } = await withRpcServer((request) => {
+    if (request.payload.method === 'task.show') {
+      return { ok: true, result: { task: { task_id: 'task-a', doc_ref: docRef } } };
+    }
+    return { ok: true, result: { echoed_method: request.payload.method, echoed_params: request.payload.params } };
+  });
+  const env = {
+    COAGENT_DAEMON_HTTP: `http://127.0.0.1:${port}`,
+    COAGENT_DAEMON_SOCKET: '',
+  };
+  try {
+    const appended = await runCliAsync(['task', 'append', 'task-a', 'Draft ready'], env, tempDir);
+    assert.equal(appended.ok, true);
+    assert.match(readFileSync(path.join(tempDir, docRef), 'utf8'), /Draft ready/);
+    assert.equal(requests[0].payload.method, 'task.show');
+    assert.equal(requests[1].payload.method, 'task.append');
+    assert.deepEqual(requests[1].payload.params, {
+      channel_id: 'channel-task',
+      task_id: 'task-a',
+      summary: 'Draft ready',
+    });
+
+    const closed = await runCliAsync([
+      'task',
+      'close',
+      'task-a',
+      '--status',
+      'completed',
+      '--summary',
+      'Finished',
+      '--result-ref',
+      'artifact://note',
+    ], env, tempDir);
+    assert.equal(closed.ok, true);
+    const closedDoc = readFileSync(path.join(tempDir, docRef), 'utf8');
+    assert.match(closedDoc, /Summary: Finished/);
+    assert.match(closedDoc, /Result ref: artifact:\/\/note/);
+    assert.equal(closedDoc.trim().endsWith('Status: completed'), true);
+    assert.equal(requests[2].payload.method, 'task.show');
+    assert.equal(requests[3].payload.method, 'task.close');
+    assert.deepEqual(requests[3].payload.params, {
+      channel_id: 'channel-task',
+      task_id: 'task-a',
+      status: 'completed',
+      summary: 'Finished',
+      result_ref: 'artifact://note',
     });
   } finally {
     await new Promise((resolve) => server.close(resolve));

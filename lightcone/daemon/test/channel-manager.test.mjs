@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -341,6 +341,80 @@ test('dispatch and memo RPC helpers write and summarize sqlite protocol messages
   });
   assert.equal(recalled.memos.length, 1);
   assert.equal(recalled.memos[0].doc_ref, 'notes/tasks/publish.md');
+});
+
+test('task RPC helpers project task rows and expose show/tree views', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-task-family-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-task-family',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Task Family Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const docRef = 'notes/tasks/2026-05-06-publish-plan.md';
+  mkdirSync(path.dirname(path.join(created.workdir, docRef)), { recursive: true });
+  writeFileSync(path.join(created.workdir, docRef), '# Publish plan\n', 'utf8');
+
+  const opened = await channelManager.openTask({
+    channelId: node.channelId,
+    taskId: 'task-parent',
+    type: 'note.publish',
+    title: 'Publish plan',
+    docRef,
+    rationale: 'track launch',
+  });
+  assert.equal(opened.task_id, 'task-parent');
+  assert.equal(opened.task.status, 'opened');
+
+  await channelManager.openTask({
+    channelId: node.channelId,
+    taskId: 'task-child',
+    type: 'research',
+    title: 'Collect refs',
+    parentTaskId: 'task-parent',
+    docRef: 'notes/tasks/2026-05-06-collect-refs.md',
+  });
+  await channelManager.appendTask({
+    channelId: node.channelId,
+    taskId: 'task-parent',
+    summary: 'Draft completed',
+  });
+  const closed = await channelManager.closeTask({
+    channelId: node.channelId,
+    taskId: 'task-parent',
+    status: 'completed',
+    summary: 'Published',
+  });
+  assert.equal(closed.task.status, 'completed');
+
+  const listed = await channelManager.listTasks({ channelId: node.channelId, status: 'completed' });
+  assert.deepEqual(listed.tasks.map((task) => task.task_id), ['task-parent']);
+
+  const shown = await channelManager.showTask({ channelId: node.channelId, taskId: 'task-parent' });
+  assert.equal(shown.doc.content, '# Publish plan\n');
+  assert.equal(shown.children[0].task_id, 'task-child');
+  assert.equal(shown.messages.some((message) => message.payload_type === 'task.appended'), true);
+
+  const tree = await channelManager.taskTree({ channelId: node.channelId });
+  assert.equal(tree.tasks[0].task_id, 'task-parent');
+  assert.equal(tree.tasks[0].children[0].task_id, 'task-child');
 });
 
 test('channel:message.send keeps daemon truth and reports ok when view sync ack fails', async (t) => {

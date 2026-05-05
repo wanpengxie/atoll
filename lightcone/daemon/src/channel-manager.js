@@ -21,9 +21,11 @@ import { buildCoagentSpawn } from './drivers/coagent.js';
 import { emitJsonEvent } from './events.js';
 import {
   appendMessageToStore,
+  getStoredTask,
   markMessageDelivered,
   openMessageStore,
   queryStoredMessages,
+  queryStoredTasks,
   readDueMessages,
 } from './message-store.js';
 import { coagentProjectDir, normalizeProjectKey } from './paths.js';
@@ -137,6 +139,46 @@ function optionalEpochMs(value) {
   if (value == null || value === '') return null;
   const parsed = toEpochMs(value, null);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function safeRelativePath(value) {
+  const text = String(value ?? '').trim();
+  if (!text || path.isAbsolute(text)) return null;
+  const parts = text.split(/[\\/]+/);
+  if (parts.includes('..')) return null;
+  return parts.join(path.sep);
+}
+
+function readDocIfPresent(workdir, docRef) {
+  const relative = safeRelativePath(docRef);
+  if (!relative) return null;
+  const absolute = path.resolve(workdir, relative);
+  const root = path.resolve(workdir);
+  if (absolute !== root && !absolute.startsWith(`${root}${path.sep}`)) return null;
+  if (!existsSync(absolute)) return null;
+  return readFileSync(absolute, 'utf8');
+}
+
+function buildTaskTree(tasks, rootTaskId = null) {
+  const byParent = new Map();
+  for (const task of tasks) {
+    const parent = task.parent_task_id ?? null;
+    const children = byParent.get(parent) ?? [];
+    children.push(task);
+    byParent.set(parent, children);
+  }
+
+  const makeNode = (task) => ({
+    ...task,
+    children: (byParent.get(task.task_id) ?? []).map(makeNode),
+  });
+
+  if (rootTaskId) {
+    const root = tasks.find((task) => task.task_id === rootTaskId);
+    return root ? [makeNode(root)] : [];
+  }
+
+  return (byParent.get(null) ?? []).map(makeNode);
 }
 
 function parseDurationMs(value, fallback = 10 * 60 * 1000) {
@@ -539,6 +581,18 @@ export class ChannelManager {
         return this.createMemo(params);
       case 'memo.recall':
         return this.recallMemo(params);
+      case 'task.open':
+        return this.openTask(params);
+      case 'task.close':
+        return this.closeTask(params);
+      case 'task.append':
+        return this.appendTask(params);
+      case 'task.list':
+        return this.listTasks(params);
+      case 'task.show':
+        return this.showTask(params);
+      case 'task.tree':
+        return this.taskTree(params);
       case 'admin.status':
         return this.getAdminStatus();
       case 'admin.machines':
@@ -1195,6 +1249,189 @@ export class ChannelManager {
         status: message.payload_body?.status ?? 'active',
         correlation_id: message.correlation_id ?? null,
       })),
+    };
+  }
+
+  async openTask(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const node = this._requireNode(channelId);
+    const taskId = String(params.task_id ?? params.taskId ?? randomUUID()).trim();
+    const type = String(params.type ?? 'free').trim() || 'free';
+    const title = String(params.title ?? '').trim();
+    const docRef = String(params.doc_ref ?? params.docRef ?? params.doc ?? '').trim();
+    const parentTaskId = String(params.parent_task_id ?? params.parentTaskId ?? params.parent ?? '').trim();
+    const db = this._openMessageStore(node);
+    if (!taskId) throw toRpcError('bad_request', 'task_id is required');
+    if (!title) throw toRpcError('bad_request', 'title is required');
+    if (!docRef) throw toRpcError('bad_request', 'doc_ref is required');
+    if (getStoredTask(db, taskId, node.channelId)) throw toRpcError('conflict', `task already exists: ${taskId}`);
+    if (parentTaskId && !getStoredTask(db, parentTaskId, node.channelId)) {
+      throw toRpcError('not_found', `parent task not found: ${parentTaskId}`);
+    }
+
+    const body = {
+      type,
+      title,
+      doc_ref: docRef,
+      ...(parentTaskId ? { parent_task_id: parentTaskId } : {}),
+      ...(params.rationale ? { rationale: String(params.rationale) } : {}),
+    };
+
+    const message = await this.sendChannelMessage({
+      channelId: node.channelId,
+      messageId: params.message_id ?? params.messageId,
+      senderType: 'channel_agent',
+      senderKind: SenderKind.AGENT,
+      senderId: node.agentName,
+      senderName: node.agentName,
+      messageType: PayloadType.TASK_OPENED,
+      payload: { type: PayloadType.TASK_OPENED, body },
+      content: title,
+      correlationId: params.correlation_id ?? params.correlationId,
+      taskId,
+      audience: ['self'],
+      origin: 'self',
+      source: 'task',
+    });
+
+    return {
+      task_id: taskId,
+      doc_ref: docRef,
+      message,
+      task: getStoredTask(db, taskId, node.channelId),
+    };
+  }
+
+  async closeTask(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const node = this._requireNode(channelId);
+    const taskId = String(params.task_id ?? params.taskId ?? params.id ?? '').trim();
+    const status = String(params.status ?? '').trim();
+    if (!taskId) throw toRpcError('bad_request', 'task_id is required');
+    if (!['completed', 'failed', 'abandoned'].includes(status)) {
+      throw toRpcError('bad_request', 'status must be completed, failed, or abandoned');
+    }
+    const db = this._openMessageStore(node);
+    if (!getStoredTask(db, taskId, node.channelId)) throw toRpcError('not_found', `task not found: ${taskId}`);
+
+    const body = {
+      status,
+      ...(params.summary ? { summary: String(params.summary) } : {}),
+      ...(params.result_ref ?? params.resultRef ? { result_ref: params.result_ref ?? params.resultRef } : {}),
+    };
+
+    const message = await this.sendChannelMessage({
+      channelId: node.channelId,
+      senderType: 'channel_agent',
+      senderKind: SenderKind.AGENT,
+      senderId: node.agentName,
+      senderName: node.agentName,
+      messageType: PayloadType.TASK_CLOSED,
+      payload: { type: PayloadType.TASK_CLOSED, body },
+      content: String(params.summary ?? `task ${taskId} ${status}`),
+      correlationId: params.correlation_id ?? params.correlationId,
+      taskId,
+      audience: ['self'],
+      origin: 'self',
+      source: 'task',
+    });
+
+    return {
+      task_id: taskId,
+      status,
+      message,
+      task: getStoredTask(db, taskId, node.channelId),
+    };
+  }
+
+  async appendTask(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const node = this._requireNode(channelId);
+    const taskId = String(params.task_id ?? params.taskId ?? params.id ?? '').trim();
+    const summary = String(params.summary ?? params.event_summary ?? params.eventSummary ?? '').trim();
+    if (!taskId) throw toRpcError('bad_request', 'task_id is required');
+    if (!summary) throw toRpcError('bad_request', 'summary is required');
+    const db = this._openMessageStore(node);
+    if (!getStoredTask(db, taskId, node.channelId)) throw toRpcError('not_found', `task not found: ${taskId}`);
+
+    const message = await this.sendChannelMessage({
+      channelId: node.channelId,
+      senderType: 'channel_agent',
+      senderKind: SenderKind.AGENT,
+      senderId: node.agentName,
+      senderName: node.agentName,
+      messageType: PayloadType.TASK_APPENDED,
+      payload: { type: PayloadType.TASK_APPENDED, body: { summary } },
+      content: summary,
+      correlationId: params.correlation_id ?? params.correlationId,
+      taskId,
+      audience: ['self'],
+      origin: 'self',
+      source: 'task',
+    });
+
+    return {
+      task_id: taskId,
+      message,
+      task: getStoredTask(db, taskId, node.channelId),
+    };
+  }
+
+  async listTasks(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const node = this._requireNode(channelId);
+    const tasks = queryStoredTasks(this._openMessageStore(node), {
+      channel_id: node.channelId,
+      status: params.status,
+      parent_task_id: params.parent_task_id ?? params.parentTaskId ?? params.parent,
+      mine: params.mine === true || params.mine === 'true',
+      initiator_id: node.agentName,
+    });
+    return { tasks };
+  }
+
+  async showTask(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const taskId = String(params.task_id ?? params.taskId ?? params.id ?? '').trim();
+    if (!taskId) throw toRpcError('bad_request', 'task_id is required');
+    const node = this._requireNode(channelId);
+    const db = this._openMessageStore(node);
+    const task = getStoredTask(db, taskId, node.channelId);
+    if (!task) throw toRpcError('not_found', `task not found: ${taskId}`);
+    const messages = queryStoredMessages(db, {
+      channel_id: node.channelId,
+      task_id: taskId,
+      order: 'asc',
+      limit: 500,
+    });
+    return {
+      task,
+      doc: {
+        ref: task.doc_ref,
+        content: readDocIfPresent(node.workdir, task.doc_ref),
+      },
+      messages,
+      children: queryStoredTasks(db, {
+        channel_id: node.channelId,
+        parent_task_id: taskId,
+        order: 'opened_asc',
+        limit: 500,
+      }),
+      dispatches: messages.filter((message) => String(message.payload_type).startsWith('dispatch.')),
+    };
+  }
+
+  async taskTree(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const node = this._requireNode(channelId);
+    const rootTaskId = String(params.root ?? params.root_task_id ?? params.rootTaskId ?? '').trim();
+    const tasks = queryStoredTasks(this._openMessageStore(node), {
+      channel_id: node.channelId,
+      order: 'opened_asc',
+      limit: 500,
+    });
+    return {
+      tasks: buildTaskTree(tasks, rootTaskId || null),
     };
   }
 

@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import path from 'path';
+import { PayloadType } from '@coagent/payload-types';
 
 function toJson(value) {
   return JSON.stringify(value ?? null);
@@ -48,6 +49,24 @@ function rowToMessage(row) {
   };
 }
 
+function rowToTask(row) {
+  return {
+    task_id: row.task_id,
+    channel_id: row.channel_id,
+    parent_task_id: row.parent_task_id,
+    type: row.type,
+    title: row.title,
+    initiator_kind: row.initiator_kind,
+    initiator_id: row.initiator_id,
+    status: row.status,
+    opened_at: row.opened_at,
+    last_event_at: row.last_event_at,
+    closed_at: row.closed_at,
+    doc_ref: row.doc_ref,
+    primary_correlation: row.primary_correlation,
+  };
+}
+
 function hasText(message, needle) {
   if (!needle) return true;
   const haystacks = [
@@ -72,6 +91,7 @@ export function messageStorePath(workdir) {
 
 export function openMessageStore(workdir) {
   const db = new Database(messageStorePath(workdir));
+  db.pragma('foreign_keys = ON');
   db.pragma('journal_mode = WAL');
   db.exec(`
     CREATE TABLE IF NOT EXISTS messages (
@@ -107,6 +127,25 @@ export function openMessageStore(workdir) {
     CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, ts_received);
     CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id);
     CREATE INDEX IF NOT EXISTS idx_messages_not_before ON messages(not_before, ts_received);
+
+    CREATE TABLE IF NOT EXISTS tasks (
+      task_id TEXT PRIMARY KEY,
+      channel_id TEXT NOT NULL,
+      parent_task_id TEXT DEFAULT NULL REFERENCES tasks(task_id),
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      initiator_kind TEXT NOT NULL,
+      initiator_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      opened_at INTEGER NOT NULL,
+      last_event_at INTEGER NOT NULL,
+      closed_at INTEGER DEFAULT NULL,
+      doc_ref TEXT NOT NULL,
+      primary_correlation TEXT DEFAULT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tasks_channel_status ON tasks(channel_id, status);
+    CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
+    CREATE INDEX IF NOT EXISTS idx_tasks_last_event_at ON tasks(last_event_at);
   `);
   ensureColumn(db, 'messages', 'delivered_at', 'INTEGER DEFAULT NULL');
   ensureColumn(db, 'messages', 'delivery_attempts', 'INTEGER NOT NULL DEFAULT 0');
@@ -122,20 +161,7 @@ export function appendMessageToStore(db, message) {
     ? envelope.audience[0]
     : (envelope.audience ?? message.audience ?? 'channel');
 
-  db.prepare(`
-    INSERT INTO messages (
-      id, channel_id, ts, ts_received, sender_kind, sender_id, sender_name,
-      payload_type, payload_body, parent_id, correlation_id, task_id, thread_id,
-      audience, mentions, origin, not_before, expires_at, envelope_json,
-      payload_json, legacy_json, created_at
-    )
-    VALUES (
-      @id, @channel_id, @ts, @ts_received, @sender_kind, @sender_id, @sender_name,
-      @payload_type, @payload_body, @parent_id, @correlation_id, @task_id, @thread_id,
-      @audience, @mentions, @origin, @not_before, @expires_at, @envelope_json,
-      @payload_json, @legacy_json, @created_at
-    )
-  `).run({
+  const row = {
     id: envelope.id ?? message.messageId,
     channel_id: message.channelId,
     ts: toEpochMs(envelope.ts ?? message.createdAt),
@@ -158,7 +184,100 @@ export function appendMessageToStore(db, message) {
     payload_json: toJson(payload),
     legacy_json: toJson(message),
     created_at: message.createdAt,
-  });
+  };
+
+  const insertMessage = db.prepare(`
+    INSERT INTO messages (
+      id, channel_id, ts, ts_received, sender_kind, sender_id, sender_name,
+      payload_type, payload_body, parent_id, correlation_id, task_id, thread_id,
+      audience, mentions, origin, not_before, expires_at, envelope_json,
+      payload_json, legacy_json, created_at
+    )
+    VALUES (
+      @id, @channel_id, @ts, @ts_received, @sender_kind, @sender_id, @sender_name,
+      @payload_type, @payload_body, @parent_id, @correlation_id, @task_id, @thread_id,
+      @audience, @mentions, @origin, @not_before, @expires_at, @envelope_json,
+      @payload_json, @legacy_json, @created_at
+    )
+  `);
+
+  db.transaction(() => {
+    insertMessage.run(row);
+    projectTaskFromMessageRow(db, row);
+  })();
+}
+
+export function projectTaskFromMessageRow(db, row) {
+  const payloadBody = fromJson(row.payload_body, {});
+  const envelope = fromJson(row.envelope_json, {});
+  const rawAudience = envelope?.audience ?? row.audience;
+  const audience = Array.isArray(rawAudience)
+    ? rawAudience.map((item) => String(item))
+    : [String(rawAudience ?? row.audience ?? '')];
+  const isSelfAudience = audience.includes('self');
+  const taskId = row.task_id ? String(row.task_id) : '';
+
+  if (row.payload_type === PayloadType.TASK_OPENED && isSelfAudience) {
+    if (!taskId) throw new Error('task.opened requires envelope.task_id');
+    const title = String(payloadBody?.title ?? '').trim();
+    const docRef = String(payloadBody?.doc_ref ?? payloadBody?.doc ?? '').trim();
+    if (!title) throw new Error('task.opened requires payload.body.title');
+    if (!docRef) throw new Error('task.opened requires payload.body.doc_ref');
+
+    db.prepare(`
+      INSERT INTO tasks (
+        task_id, channel_id, parent_task_id, type, title, initiator_kind, initiator_id,
+        status, opened_at, last_event_at, closed_at, doc_ref, primary_correlation
+      )
+      VALUES (
+        @task_id, @channel_id, @parent_task_id, @type, @title, @initiator_kind, @initiator_id,
+        @status, @opened_at, @last_event_at, NULL, @doc_ref, @primary_correlation
+      )
+    `).run({
+      task_id: taskId,
+      channel_id: row.channel_id,
+      parent_task_id: payloadBody?.parent_task_id ?? payloadBody?.parentTaskId ?? null,
+      type: String(payloadBody?.type ?? 'free').trim() || 'free',
+      title,
+      initiator_kind: row.sender_kind,
+      initiator_id: row.sender_id,
+      status: String(payloadBody?.status ?? 'opened').trim() || 'opened',
+      opened_at: row.ts_received,
+      last_event_at: row.ts_received,
+      doc_ref: docRef,
+      primary_correlation: row.correlation_id ?? null,
+    });
+  }
+
+  if (row.payload_type === PayloadType.TASK_CLOSED && isSelfAudience && taskId) {
+    const status = String(payloadBody?.status ?? '').trim();
+    if (!status) throw new Error('task.closed requires payload.body.status');
+    db.prepare(`
+      UPDATE tasks
+      SET status = @status,
+          closed_at = @closed_at
+      WHERE task_id = @task_id
+        AND channel_id = @channel_id
+    `).run({
+      status,
+      closed_at: row.ts_received,
+      task_id: taskId,
+      channel_id: row.channel_id,
+    });
+  }
+
+  if (taskId) {
+    db.prepare(`
+      UPDATE tasks
+      SET last_event_at = @last_event_at
+      WHERE task_id = @task_id
+        AND channel_id = @channel_id
+    `).run({
+      last_event_at: row.ts_received,
+      task_id: taskId,
+      channel_id: row.channel_id,
+    });
+  }
 }
 
 export function readStoredMessages(db) {
@@ -222,6 +341,72 @@ export function queryStoredMessages(db, filters = {}) {
     .filter((message) => hasPayloadBodyField(message, 'status', status));
 
   return rows.slice(0, limit);
+}
+
+export function queryStoredTasks(db, filters = {}) {
+  const where = [];
+  const params = {};
+
+  const channelId = filters.channel_id ?? filters.channelId;
+  if (channelId != null && channelId !== '') {
+    where.push('channel_id = @channel_id');
+    params.channel_id = String(channelId);
+  }
+
+  const parentTaskId = filters.parent_task_id ?? filters.parentTaskId ?? filters.parent;
+  if (parentTaskId === null) {
+    where.push('parent_task_id IS NULL');
+  } else if (parentTaskId != null && parentTaskId !== '') {
+    where.push('parent_task_id = @parent_task_id');
+    params.parent_task_id = String(parentTaskId);
+  }
+
+  const status = String(filters.status ?? '').trim();
+  if (status === 'active') {
+    where.push("status IN ('opened', 'active', 'blocked') AND closed_at IS NULL");
+  } else if (status) {
+    where.push('status = @status');
+    params.status = status;
+  }
+
+  if (filters.mine === true || filters.mine === 'true') {
+    where.push('initiator_kind = @initiator_kind');
+    params.initiator_kind = String(filters.initiator_kind ?? filters.initiatorKind ?? 'agent');
+    const initiatorId = filters.initiator_id ?? filters.initiatorId;
+    if (initiatorId != null && initiatorId !== '') {
+      where.push('initiator_id = @initiator_id');
+      params.initiator_id = String(initiatorId);
+    }
+  }
+
+  const order = String(filters.order ?? 'last_event_desc').toLowerCase();
+  const orderSql = order === 'opened_asc'
+    ? 'opened_at ASC'
+    : order === 'last_event_asc'
+      ? 'last_event_at ASC'
+      : 'last_event_at DESC';
+  const limit = Math.max(1, Math.min(Number.parseInt(filters.limit, 10) || 200, 500));
+
+  const sql = [
+    'SELECT * FROM tasks',
+    where.length > 0 ? `WHERE ${where.join(' AND ')}` : '',
+    `ORDER BY ${orderSql}`,
+    'LIMIT @limit',
+  ].filter(Boolean).join(' ');
+
+  return db.prepare(sql).all({ ...params, limit }).map(rowToTask);
+}
+
+export function getStoredTask(db, taskId, channelId = null) {
+  const id = String(taskId ?? '').trim();
+  if (!id) return null;
+  const row = channelId == null || channelId === ''
+    ? db.prepare('SELECT * FROM tasks WHERE task_id = @task_id').get({ task_id: id })
+    : db.prepare('SELECT * FROM tasks WHERE task_id = @task_id AND channel_id = @channel_id').get({
+      task_id: id,
+      channel_id: String(channelId),
+    });
+  return row ? rowToTask(row) : null;
 }
 
 export function readDueMessages(db, nowMs = Date.now(), limit = 50) {

@@ -164,6 +164,7 @@ export function registerProtocolCommands(program: Command): void {
     .option('--payload-type <type>', 'payload.type', PayloadType.DISPATCH_SELF_CHECK_DUE)
     .option('--correlation-id <id>', 'correlation id')
     .option('--task-id <id>', 'task id')
+    .option('--in-task <taskId>', 'task id to attach to')
     .action(async (options) => {
       writeSuccess(await rpc('message.schedule', {
         channel_id: channelIdFromOptions(options),
@@ -171,7 +172,7 @@ export function registerProtocolCommands(program: Command): void {
         payload_type: options.payloadType,
         payload_body: options.payload,
         correlation_id: options.correlationId,
-        task_id: options.taskId,
+        task_id: options.inTask ?? options.taskId,
       }));
     });
 
@@ -236,6 +237,7 @@ export function registerProtocolCommands(program: Command): void {
     .option('--scope <scope>', 'channel or forever', 'channel')
     .option('--doc <path>', 'doc_ref path')
     .option('--correlation-id <id>', 'correlation id')
+    .option('--in-task <taskId>', 'task id to attach to')
     .argument('<summary...>', 'self-contained memo summary')
     .action(async (summaryParts: string[], options: any) => {
       const summary = summaryParts.join(' ').trim();
@@ -246,6 +248,7 @@ export function registerProtocolCommands(program: Command): void {
         scope: options.scope,
         doc: options.doc,
         correlation_id: options.correlationId,
+        task_id: options.inTask,
         summary,
       }));
     });
@@ -274,6 +277,7 @@ export function registerProtocolCommands(program: Command): void {
     .option('--scope <scope>', 'channel or forever', 'channel')
     .option('--summary <summary>', 'memo summary; defaults to first markdown heading')
     .option('--correlation-id <id>', 'correlation id')
+    .option('--in-task <taskId>', 'task id to attach to')
     .action(async (options) => {
       const docPath = String(options.doc ?? '').trim();
       if (!docPath || path.isAbsolute(docPath) || docPath.split(path.sep).includes('..')) {
@@ -289,6 +293,7 @@ export function registerProtocolCommands(program: Command): void {
         scope: options.scope,
         doc: docPath,
         correlation_id: options.correlationId,
+        task_id: options.inTask,
         summary: options.summary ?? deriveSummary(content, docPath),
       }));
     });
