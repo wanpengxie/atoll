@@ -3,6 +3,8 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   getDb,
   insertChannel,
+  insertAgent,
+  getMachines,
   addChannelMember,
   getChannelMembers,
   updateChannel,
@@ -30,6 +32,14 @@ const DEFAULT_DAEMON_REQUEST_TIMEOUT_MS = 10_000;
 
 const ALLOWED_CHANNEL_TYPES = new Set(['xhs-creator']);
 const ALLOWED_MEMBER_TYPES = new Set(['human', 'channel_agent', 'sub_agent', 'worker']);
+
+const CAPABILITY_DEFAULTS_BY_TYPE = {
+  'xhs-creator': { cli_binaries: ['xhs', 'coagent-kernel', 'coagent-msg'] },
+};
+
+const PM_DESCRIPTION_BY_TYPE = {
+  'xhs-creator': '小红书内容运营 PM。负责协调 channel 内的工作，理解需求，调用 xhs 等 CLI 工具完成发布、查询、管理任务。',
+};
 
 function normalizeCapabilitySet(raw) {
   const value = raw ?? { cli_binaries: [] };
@@ -155,6 +165,8 @@ export async function appendDaemonChannelMessage({
 export function createChannelsRouter({
   getDbImpl = getDb,
   insertChannelImpl = insertChannel,
+  insertAgentImpl = insertAgent,
+  getMachinesImpl = getMachines,
   addChannelMemberImpl = addChannelMember,
   getChannelMembersImpl = getChannelMembers,
   updateChannelImpl = updateChannel,
@@ -222,27 +234,57 @@ export function createChannelsRouter({
 
     let capabilitySet;
     try {
-      capabilitySet = normalizeCapabilitySet(req.body?.capabilitySet ?? req.body?.capability_set);
+      const rawCap = req.body?.capabilitySet ?? req.body?.capability_set ?? CAPABILITY_DEFAULTS_BY_TYPE[type];
+      capabilitySet = normalizeCapabilitySet(rawCap);
     } catch (err) {
       return res.status(400).json({ error: err.message });
     }
 
     const userId = getRequestUserIdImpl(req);
-    const channel = await insertChannelImpl(getDbImpl(), {
+    const db = getDbImpl();
+
+    // Resolve daemon machine: explicit daemonId > first online machine > first machine > error
+    let daemonId = req.body?.daemonId ?? null;
+    if (!daemonId) {
+      const allMachines = await getMachinesImpl(db, defaultServerId);
+      if (!allMachines.length) {
+        return res.status(400).json({
+          error: 'No machine registered. Run `make register` before creating a channel.',
+        });
+      }
+      const online = allMachines.find(m => m.status === 'online');
+      daemonId = (online ?? allMachines[0]).id;
+    }
+
+    // Auto-provision PM agent (every channel must have one)
+    let channelAgentId = req.body?.channelAgentId ?? null;
+    if (!channelAgentId) {
+      const agentRow = await insertAgentImpl(db, {
+        id: uuidv4Impl(),
+        serverId: defaultServerId,
+        ownerId: userId,
+        name: `${name}-pm-${Date.now().toString(36)}`,
+        displayName: `${name} PM`,
+        description: PM_DESCRIPTION_BY_TYPE[type] ?? `${type} channel PM agent`,
+        runtime: 'claude',
+        machineId: daemonId,
+      });
+      channelAgentId = agentRow.id;
+    }
+
+    const channel = await insertChannelImpl(db, {
       id: uuidv4Impl(),
       workspaceId: req.workspace.id,
       name,
       type,
       capabilitySet,
-      channelAgentId: req.body?.channelAgentId ?? null,
-      daemonId: req.body?.daemonId ?? null,
+      channelAgentId,
+      daemonId,
       status: String(req.body?.status ?? 'active'),
     });
 
-    await addChannelMemberImpl(getDbImpl(), channel.id, 'human', userId);
-    if (channel.channel_agent_id) {
-      await addChannelMemberImpl(getDbImpl(), channel.id, 'channel_agent', channel.channel_agent_id);
-    }
+    await addChannelMemberImpl(db, channel.id, 'human', userId);
+    await addChannelMemberImpl(db, channel.id, 'channel_agent', channelAgentId);
 
     if (channel.daemon_id) {
       const daemonChannel = await buildDaemonChannelPayload(channel);

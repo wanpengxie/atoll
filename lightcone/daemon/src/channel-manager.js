@@ -578,6 +578,16 @@ export class ChannelManager {
       sender_type: message.senderType,
     });
     await this._appendToServerView(node, message, { requestId: options.requestId });
+
+    // Server-pushed human messages must trigger the channel agent.
+    // Without this, agent-binary stays idle even though the message file exists.
+    if (message.senderType === 'human' && (options.source === 'server' || message.source === 'server')) {
+      await this.triggerGateway.dispatch({
+        channel: node,
+        event: { type: 'user.message.posted', payload: { message } },
+      });
+    }
+
     return message;
   }
 

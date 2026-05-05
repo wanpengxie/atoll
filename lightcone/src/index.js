@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { createServer } from 'http';
 import cors from 'cors';
@@ -33,7 +35,7 @@ app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
 app.use(loadUser);
-app.use(express.static('public'));
+app.use(express.static(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')));
 
 // ── API Routes ────────────────────────────────────────────────────────────────
 app.use('/api/auth',     authRouter);

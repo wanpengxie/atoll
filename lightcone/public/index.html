@@ -3093,8 +3093,6 @@ async function showNewChannel() {
   }
   const name = prompt('Channel 名称');
   if (!name || !name.trim()) return;
-  const rawCli = prompt('CLI binaries（逗号分隔）', 'xhs,coagent-kernel,coagent-msg') ?? '';
-  const cliBinaries = rawCli.split(',').map(item => item.trim()).filter(Boolean);
   try {
     const channel = await api('/api/channels', {
       method: 'POST',
@@ -3102,7 +3100,6 @@ async function showNewChannel() {
         workspaceId: currentWorkspace.id,
         name: name.trim(),
         type: 'xhs-creator',
-        capabilitySet: { cli_binaries: cliBinaries },
         status: 'active',
       },
     });

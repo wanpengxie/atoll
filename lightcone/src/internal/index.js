@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { fileURLToPath } from 'node:url';
 import { v4 as uuidv4 } from 'uuid';
 import { writeFileSync, mkdirSync } from 'fs';
 import {
@@ -510,7 +511,7 @@ router.post('/:agentId/upload', async (req, res) => {
     return res.status(400).json({ error: 'Only image files allowed' });
 
   const safeFilename = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
-  const dir = path.join(process.cwd(), 'public', 'generated');
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'public', 'generated');
   mkdirSync(dir, { recursive: true });
   try {
     writeFileSync(path.join(dir, safeFilename), Buffer.from(data, 'base64'));
