@@ -152,16 +152,8 @@ Need a task lifetime -> coagent task show <task_id>.
 Need a dispatch chain -> coagent query --correlation-id <id>.
 </capability_index>
 
-<channel_context>
-channel_id: channel-mock
-channel_name: Mock Channel
-agent_name: channel-agent
-workspace_id: workspace-1
-workdir: /tmp/channel-mock
-channel_type: mock
-</channel_context>
-
 <channel_type_config>
+channel_type: mock
 display_name: Mock Channel
 description: Snapshot fixture channel type.
 

@@ -86,13 +86,45 @@ test('system prompt renders complete snapshot for mock channel-type config', asy
   assert.equal(`${buildSystemPrompt(env())}\n`, snapshot);
 });
 
+test('system prompt excludes dynamic channel context while user turn injects it', async () => {
+  const { buildSystemPrompt, buildUserTurn } = await import(path.join(packageDir, 'dist', 'prompt', 'system-prompt.js'));
+  const firstEnv = env({
+    channelId: 'channel-a',
+    channelName: 'Channel A',
+    workspaceId: 'workspace-a',
+    workdir: '/tmp/channel-a',
+    agentName: 'agent-a',
+  });
+  const secondEnv = env({
+    channelId: 'channel-b',
+    channelName: 'Channel B',
+    workspaceId: 'workspace-b',
+    workdir: '/var/tmp/channel-b',
+    agentName: 'agent-b',
+  });
+
+  const first = buildSystemPrompt(firstEnv);
+  const second = buildSystemPrompt(secondEnv);
+
+  assert.equal(first, second);
+  assert.doesNotMatch(first, /(?:^|\n)(?:channel_id|channel_name|agent_name|workspace_id|workdir):/);
+  assert.doesNotMatch(first, /channel-a|Channel A|workspace-a|\/tmp\/channel-a|agent-a/);
+
+  const turn = buildUserTurn({ type: 'user.message.posted', payload: { text: 'hello' } }, firstEnv);
+  assert.match(turn, /<channel_context>\nchannel_id: channel-a/);
+  assert.match(turn, /channel_name: Channel A/);
+  assert.match(turn, /agent_name: agent-a/);
+  assert.match(turn, /workspace_id: workspace-a/);
+  assert.match(turn, /workdir: \/tmp\/channel-a/);
+});
+
 test('channel-type config validator accepts shipped fixtures and rejects malformed entries', async () => {
   const {
     parseChannelTypeConfigText,
     validateChannelTypeConfig,
   } = await import(path.join(packageDir, 'dist', 'prompt', 'channel-type-config.js'));
 
-  for (const channelType of ['echo', 'demo']) {
+  for (const channelType of ['echo', 'demo', 'xhs-creator']) {
     const raw = readFileSync(path.join(packageDir, 'dist', 'prompt', 'channel-types', `${channelType}.yaml`), 'utf8');
     const config = parseChannelTypeConfigText(raw);
     assert.equal(config.channel_type, channelType);
@@ -110,6 +142,38 @@ test('channel-type config validator accepts shipped fixtures and rejects malform
     }),
     /protocol/,
   );
+});
+
+test('xhs-creator channel type renders business prompt and missing configs fail fast', async () => {
+  const { buildSystemPrompt } = await import(path.join(packageDir, 'dist', 'prompt', 'system-prompt.js'));
+  const { genericChannelTypeConfig, loadChannelTypeConfig } = await import(path.join(packageDir, 'dist', 'prompt', 'channel-type-config.js'));
+
+  const prompt = buildSystemPrompt(env({ channelType: 'xhs-creator', channelTypeConfig: undefined }));
+  assert.match(prompt, /XHS Creator Channel/);
+  assert.match(prompt, /xhs publish --title/);
+  assert.match(prompt, /xhs\.record_note/);
+  assert.match(prompt, /note\.publish/);
+  assert.match(prompt, /topic\.series/);
+  assert.doesNotMatch(prompt, /Generic channel type fallback/);
+
+  const genericFixture = genericChannelTypeConfig('unit-fixture');
+  assert.equal(genericFixture.channel_type, 'unit-fixture');
+  assert.match(genericFixture.description, /Generic channel type fallback/);
+
+  for (const load of [
+    () => loadChannelTypeConfig('unknown'),
+    () => buildSystemPrompt(env({ channelType: 'unknown', channelTypeConfig: undefined })),
+  ]) {
+    assert.throws(
+      load,
+      (error) => {
+        assert.equal(error.name, 'ChannelTypeConfigNotFound');
+        assert.equal(error.code, 'channel_type_config_not_found');
+        assert.match(error.message, /unknown/);
+        return true;
+      },
+    );
+  }
 });
 
 test('base prompt is identical across echo and demo channel types', async () => {

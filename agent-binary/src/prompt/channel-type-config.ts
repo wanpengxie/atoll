@@ -59,6 +59,18 @@ export class ChannelTypeConfigError extends Error {
   }
 }
 
+export class ChannelTypeConfigNotFound extends Error {
+  code = 'channel_type_config_not_found';
+
+  constructor(
+    public readonly channelType: string,
+    public readonly path: string,
+  ) {
+    super(`Channel type config not found for "${channelType}": ${path}`);
+    this.name = 'ChannelTypeConfigNotFound';
+  }
+}
+
 const PROTOCOLS = new Set<HandlerProtocol>(['deterministic', 'agentic', 'hybrid']);
 const SENDER_KINDS = new Set<SenderKindSelector>(['human', 'agent', 'system', 'external', '*']);
 
@@ -173,7 +185,7 @@ export function parseChannelTypeConfigText(raw: string): ChannelTypeConfig {
   return validateChannelTypeConfig(parse(raw));
 }
 
-function genericChannelTypeConfig(channelType: string): ChannelTypeConfig {
+export function genericChannelTypeConfig(channelType: string): ChannelTypeConfig {
   return {
     channel_type: channelType,
     display_name: `${channelType} Channel`,
@@ -198,11 +210,12 @@ function genericChannelTypeConfig(channelType: string): ChannelTypeConfig {
 
 export function loadChannelTypeConfig(channelType: string): ChannelTypeConfig {
   const normalized = String(channelType ?? '').trim() || 'echo';
+  const path = configPath(normalized);
   try {
-    return parseChannelTypeConfigText(readFileSync(configPath(normalized), 'utf8'));
+    return parseChannelTypeConfigText(readFileSync(path, 'utf8'));
   } catch (error) {
     if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
-      return genericChannelTypeConfig(normalized);
+      throw new ChannelTypeConfigNotFound(normalized, path);
     }
     throw error;
   }

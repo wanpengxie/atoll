@@ -41,18 +41,10 @@ function channelTypeConfigForEnv(env: AgentEnv): ChannelTypeConfig {
   return loadChannelTypeConfig(env.channelType || 'echo');
 }
 
-function renderChannelConfigPrompt(env: AgentEnv, config: ChannelTypeConfig): string {
+function renderChannelTypeConfigPrompt(config: ChannelTypeConfig): string {
   const lines = [
-    '<channel_context>',
-    `channel_id: ${env.channelId}`,
-    `channel_name: ${env.channelName || env.channelId}`,
-    `agent_name: ${env.agentName}`,
-    `workspace_id: ${env.workspaceId || '<none>'}`,
-    `workdir: ${path.resolve(env.workdir)}`,
-    `channel_type: ${config.channel_type}`,
-    '</channel_context>',
-    '',
     '<channel_type_config>',
+    `channel_type: ${config.channel_type}`,
     `display_name: ${config.display_name}`,
     `description: ${config.description}`,
     '',
@@ -107,10 +99,23 @@ function renderChannelConfigPrompt(env: AgentEnv, config: ChannelTypeConfig): st
   return lines.join('\n');
 }
 
+function renderChannelContextPrompt(env: AgentEnv): string {
+  return [
+    '<channel_context>',
+    `channel_id: ${env.channelId}`,
+    `channel_name: ${env.channelName || env.channelId}`,
+    `agent_name: ${env.agentName}`,
+    `workspace_id: ${env.workspaceId || '<none>'}`,
+    `workdir: ${path.resolve(env.workdir)}`,
+    `channel_type: ${env.channelType || 'echo'}`,
+    '</channel_context>',
+  ].join('\n');
+}
+
 export function buildPromptParts(env: AgentEnv): PromptParts {
   const basePrompt = readTemplate('base.md');
   const config = channelTypeConfigForEnv(env);
-  const channelConfigPrompt = renderChannelConfigPrompt(env, config);
+  const channelConfigPrompt = renderChannelTypeConfigPrompt(config);
   return {
     basePrompt,
     channelConfigPrompt,
@@ -122,8 +127,10 @@ export function buildSystemPrompt(env: AgentEnv): string {
   return buildPromptParts(env).systemPrompt;
 }
 
-export function buildUserTurn(event: unknown): string {
+export function buildUserTurn(event: unknown, env: AgentEnv): string {
   return [
+    renderChannelContextPrompt(env),
+    '',
     'Handle the following daemon trigger event.',
     'Use channel CLI commands when you need to send a reply, inspect channel state, schedule work, or run business actions.',
     'Follow the injected dispatch table for the event sender.kind and payload.type.',

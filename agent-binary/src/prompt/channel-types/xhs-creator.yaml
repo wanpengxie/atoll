@@ -1,0 +1,114 @@
+channel_type: xhs-creator
+display_name: XHS Creator Channel
+description: XiaoHongShu creator operations channel for planning, publishing, searching, and recording notes through mock-only M1.0 business CLIs.
+dispatch_table:
+  - sender_kind: human
+    payload_type: user.text
+    protocol: agentic
+    handler: handle_user_text
+    description: Classify the user request as direct answer, XHS search, note publish, note record, or tracked topic series work.
+  - sender_kind: agent
+    payload_type: dispatch.self_check_due
+    protocol: hybrid
+    handler: handle_dispatch_self_check
+    description: Check the pending XHS dispatch, renew if still pending, or record terminal publish/search facts.
+  - sender_kind: system
+    payload_type: cron.tick
+    protocol: hybrid
+    handler: handle_recurring_review
+    description: Review active publishing and topic-series tasks, then schedule the next useful check only when needed.
+  - sender_kind: external
+    payload_type: dispatch.completed
+    protocol: hybrid
+    handler: handle_external_dispatch_completed
+    description: Fold completed external XHS work into the channel timeline, task document, and note records.
+  - sender_kind: external
+    payload_type: dispatch.failed
+    protocol: hybrid
+    handler: handle_external_dispatch_failed
+    description: Record the failure, update the linked task, and ask the human for the missing decision when recovery is unsafe.
+business_clis:
+  - name: xhs
+    purpose: Mock-only M1.0 XiaoHongShu business CLI for publish, search, lookup, and recent-note inspection.
+    commands:
+      - xhs publish --title <title> --content <note.md> --images <paths> --tags <tags>
+      - xhs search <keyword> --limit <n>
+      - xhs get-my-recent --limit <n>
+      - xhs get-note --note-id <note_id>
+      - xhs publish-status --note-id <note_id>
+  - name: coagent-record
+    purpose: Durable channel recording helpers for xhs.record_note outcomes and task timelines.
+    commands:
+      - coagent memo-write --tag xhs.note --doc notes/xhs/<note_id>.md --content-file <note.md> --summary <summary>
+      - coagent memo --tag xhs.record_note --doc <doc_ref> <summary>
+      - coagent task append <task_id> <event_summary>
+dispatch_types:
+  - type: xhs.publish
+    description: Publish an XHS note through the mock-only xhs CLI or external XHS worker.
+    target: external:xhs
+    params:
+      - title
+      - content_doc
+      - images
+      - tags
+  - type: xhs.search
+    description: Search XHS notes by keyword and return bounded mock results.
+    target: external:xhs
+    params:
+      - keyword
+      - limit
+  - type: xhs.record_note
+    description: Record a published, discovered, or manually supplied XHS note as durable channel memory.
+    target: self
+    params:
+      - note_id
+      - url
+      - status
+      - doc_ref
+  - type: xhs.get_my_recent
+    description: Fetch recent notes for the connected mock XHS account.
+    target: external:xhs
+    params:
+      - limit
+  - type: xhs.publish_status
+    description: Check the publish status for a known note id.
+    target: external:xhs
+    params:
+      - note_id
+task_types:
+  - type: note.publish
+    description: Tracked single-note publishing workflow with draft, assets, publish result, and final record.
+  - type: topic.series
+    description: Multi-note topic series with planning, publishing cadence, and recurring review.
+invariants:
+  - XHS business CLI behavior is mock-only in M1.0; never claim a live xhs.com publish from this channel-type prompt alone.
+  - Open a note.publish task before multi-step publishing work, asset preparation, approval coordination, or delayed publish checks.
+  - Every xhs.publish dispatch must have a self-check and a terminal xhs.record_note or task update.
+  - Store long drafts, asset lists, and note records in workdir markdown documents; keep emitted messages concise with doc_ref links.
+business_sop:
+  - name: handle_user_text
+    protocol: agentic
+    steps:
+      - Query unread context, recent xhs.note memos, and active note.publish/topic.series tasks before acting.
+      - If the user asks for a short answer or lookup, use xhs search/get-my-recent/get-note directly and emit a concise result.
+      - If the user asks to publish or prepare a note, create or update a note.publish task with a markdown draft and asset checklist.
+      - For asynchronous publish work, start xhs.publish dispatch with --in-task and a self-check, then stop after emitting durable state.
+      - Record terminal note_id, url, status, and doc_ref with xhs.record_note semantics before closing related work.
+  - name: when_to_open_task
+    protocol: deterministic
+    steps:
+      - Open note.publish when the request needs draft iteration, media preparation, approval, dispatch self-check, or final record keeping.
+      - Open topic.series when the request covers multiple notes, recurring content planning, or a publishing cadence.
+      - Do not open a task for a one-off xhs search, recent-note lookup, or simple status check unless the human asks for tracking.
+  - name: handle_dispatch_self_check
+    protocol: hybrid
+    steps:
+      - Run coagent dispatch check --correlation-id <id> before reading or guessing terminal status.
+      - If pending, renew once with a short check-after while keeping the linked task unchanged except for useful timeline facts.
+      - If completed, fetch or trust the returned note metadata, record it, update the task document, then close or continue the series.
+      - If failed, append the failure and ask the human only when the recovery path changes the requested content or account action.
+capabilities:
+  - cli/bin/xhs: xhs publish/search/get-my-recent/get-note/publish-status mock-only commands.
+  - cli/bin/coagent: dispatch, task, memo, memo-write, query, and emit durable channel operations.
+  - cli/bin/coagent-kernel: channel-info, member-list, and capability-list metadata queries.
+  - cli/bin/coagent-msg: local channel message check, history, and search helpers.

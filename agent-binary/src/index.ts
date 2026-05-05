@@ -58,7 +58,7 @@ async function main(): Promise<void> {
         cwd: env.workdir,
         sessionId: session.sessionId,
         systemPrompt,
-        userPrompt: buildUserTurn(next),
+        userPrompt: buildUserTurn(next, env),
         onEvent: (event) => {
           appendTrace(env.workdir, env.agentName, session.sessionId, {
             kind: 'claude.event',
