@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -199,6 +199,42 @@ test('appendMessage double-writes 100 messages to jsonl and sqlite consistently'
     assert.equal(sqliteMessages[index].payload_type, jsonlMessages[index].payloadType);
     assert.deepEqual(sqliteMessages[index].payload.body, jsonlMessages[index].payload.body);
   }
+});
+
+test('emitChannelMessage rejects unknown payload types before writing local truth', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-unknown-payload-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-unknown-payload',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Unknown Payload Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+
+  await assert.rejects(
+    () => channelManager.emitChannelMessage({
+      channelId: created.channel_id,
+      payloadType: 'whatever.unknown',
+      payloadBody: { text: 'unsupported' },
+      content: 'unsupported',
+    }),
+    (err) => err.code === 'bad_request' && /unsupported payload_type/.test(err.message),
+  );
+  assert.deepEqual(readdirSync(path.join(created.workdir, 'messages')).filter((entry) => entry.endsWith('.jsonl')), []);
 });
 
 test('message.schedule and due processing deliver only due D messages once', async (t) => {
@@ -474,6 +510,100 @@ test('dispatch and memo RPC helpers write and summarize sqlite protocol messages
   });
   assert.equal(recalled.memos.length, 1);
   assert.equal(recalled.memos[0].doc_ref, 'notes/tasks/publish.md');
+});
+
+test('registerSchedule rejects unsafe IDs before writing outside schedules', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-schedule-unsafe-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-schedule-unsafe',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Schedule Unsafe Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+
+  await assert.rejects(
+    () => channelManager.registerSchedule({
+      channelId: created.channel_id,
+      id: '../foo',
+      cron: '0 9 * * *',
+      reason: 'unsafe',
+    }, 'cron'),
+    (err) => err.code === 'bad_request' && /schedule id/.test(err.message),
+  );
+
+  assert.equal(existsSync(path.join(created.workdir, 'foo.yaml')), false);
+  assert.deepEqual(readdirSync(path.join(created.workdir, 'schedules')).filter((entry) => entry.endsWith('.yaml')), []);
+  await assert.rejects(
+    () => channelManager.cancelSchedule(created.channel_id, '../foo'),
+    (err) => err.code === 'bad_request' && /schedule id/.test(err.message),
+  );
+});
+
+test('registerSchedule rejects duplicate IDs unless upsert is explicit', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-schedule-upsert-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-schedule-upsert',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Schedule Upsert Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const schedulePath = path.join(created.workdir, 'schedules', 'daily.yaml');
+
+  await channelManager.registerSchedule({
+    channelId: created.channel_id,
+    id: 'daily',
+    cron: '0 9 * * *',
+    reason: 'first',
+  }, 'cron');
+  await assert.rejects(
+    () => channelManager.registerSchedule({
+      channelId: created.channel_id,
+      id: 'daily',
+      cron: '0 10 * * *',
+      reason: 'second',
+    }, 'cron'),
+    (err) => err.code === 'schedule_exists' && err.statusCode === 409,
+  );
+  assert.equal(JSON.parse(readFileSync(schedulePath, 'utf8')).reason, 'first');
+
+  await channelManager.registerSchedule({
+    channelId: created.channel_id,
+    id: 'daily',
+    cron: '0 10 * * *',
+    reason: 'second',
+    upsert: true,
+  }, 'cron');
+  assert.equal(JSON.parse(readFileSync(schedulePath, 'utf8')).reason, 'second');
 });
 
 test('task RPC helpers project task rows and expose show/tree views', async (t) => {

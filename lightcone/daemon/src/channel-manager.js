@@ -15,7 +15,7 @@ import {
 import { homedir } from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { PayloadType, SenderKind } from '@coagent/payload-types';
+import { PayloadType, SenderKind, isPayloadType } from '@coagent/payload-types';
 import { HEALTHY_UPTIME_MS, CronScheduler } from './cron-scheduler.js';
 import { buildCoagentSpawn } from './drivers/coagent.js';
 import { emitJsonEvent } from './events.js';
@@ -40,14 +40,16 @@ const SHUTDOWN_GRACE_MS = 5_000;
 const DEFAULT_DUE_MESSAGE_POLL_MS = 1_000;
 const DEFAULT_DELIVERY_FAILURE_LIMIT = 5;
 const VIEW_SYNC_RETRY_LIMIT = 10;
+const SCHEDULE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 function nowIso() {
   return new Date().toISOString();
 }
 
-function toRpcError(code, message) {
+function toRpcError(code, message, statusCode = 400) {
   const err = new Error(message);
   err.code = code;
+  err.statusCode = statusCode;
   return err;
 }
 
@@ -150,6 +152,27 @@ function optionalEpochMs(value) {
   if (value == null || value === '') return null;
   const parsed = toEpochMs(value, null);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isTruthyOption(value) {
+  return value === true || String(value ?? '').trim().toLowerCase() === 'true';
+}
+
+function normalizeScheduleId(value) {
+  const scheduleId = String(value ?? '').trim();
+  if (!SCHEDULE_ID_PATTERN.test(scheduleId)) {
+    throw toRpcError('bad_request', 'schedule id must match ^[A-Za-z0-9_-]{1,128}$');
+  }
+  return scheduleId;
+}
+
+function assertPathInsideDirectory(rootDir, candidatePath) {
+  const root = path.resolve(rootDir);
+  const candidate = path.resolve(candidatePath);
+  const relative = path.relative(root, candidate);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw toRpcError('bad_request', 'schedule path must stay inside schedules directory');
+  }
 }
 
 function safeRelativePath(value) {
@@ -276,6 +299,12 @@ function inferPayloadType(message, senderKind, messageType) {
   return legacyType;
 }
 
+function assertKnownPayloadType(payloadType) {
+  if (!isPayloadType(payloadType)) {
+    throw toRpcError('bad_request', `unsupported payload_type: ${payloadType}`);
+  }
+}
+
 function normalizePayloadBody(message, content, attachments) {
   const explicit = message?.payload?.body ?? message?.payloadBody ?? message?.payload_body;
   if (explicit != null) return parseJsonString(explicit, explicit);
@@ -307,6 +336,7 @@ function normalizeMessage(channelId, message, defaults = {}) {
   const senderName = String(sender.name ?? message?.senderName ?? message?.sender_name ?? defaults.senderName ?? defaults.senderId ?? senderId);
   const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
   const payloadType = inferPayloadType(message, senderKind, message?.messageType ?? message?.message_type);
+  assertKnownPayloadType(payloadType);
   const payloadBody = normalizePayloadBody(message, String(message?.content ?? message?.payload?.body?.text ?? '').trim(), attachments);
   const content = String(message?.content ?? payloadBody?.text ?? '').trim()
     || (message?.payload ? JSON.stringify(payloadBody) : '');
@@ -385,7 +415,10 @@ function parseStructuredFile(filePath) {
   return JSON.parse(readFileSync(filePath, 'utf8'));
 }
 
-function writeStructuredFile(filePath, data) {
+function writeStructuredFile(filePath, data, options = {}) {
+  if (options.rootDir) {
+    assertPathInsideDirectory(options.rootDir, filePath);
+  }
   writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
 }
 
@@ -844,7 +877,10 @@ export class ChannelManager {
   async registerSchedule(params, kind) {
     const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
     const node = this._requireNode(channelId);
-    const scheduleId = String(params.id ?? params.schedule_id ?? randomUUID());
+    const scheduleId = normalizeScheduleId(params.id ?? params.schedule_id ?? randomUUID());
+    const scheduleDir = this._scheduleDir(node);
+    const schedulePath = this._schedulePath(node, scheduleId);
+    const upsert = isTruthyOption(params.upsert);
     const schedule = {
       id: scheduleId,
       channel_id: node.channelId,
@@ -863,8 +899,11 @@ export class ChannelManager {
     if (kind === 'at' && !schedule.at) {
       throw toRpcError('bad_request', 'at timestamp is required');
     }
+    if (existsSync(schedulePath) && !upsert) {
+      throw toRpcError('schedule_exists', `schedule already exists: ${scheduleId}`, 409);
+    }
 
-    writeStructuredFile(this._schedulePath(node, scheduleId), schedule);
+    writeStructuredFile(schedulePath, schedule, { rootDir: scheduleDir });
     if (node.status === 'active') {
       this.cronScheduler.register(schedule);
     }
@@ -879,16 +918,17 @@ export class ChannelManager {
   async cancelSchedule(channelId, scheduleId, options = {}) {
     if (!scheduleId) throw toRpcError('bad_request', 'schedule id is required');
     const node = this._requireNode(channelId);
-    const schedulePath = this._schedulePath(node, scheduleId);
+    const normalizedScheduleId = normalizeScheduleId(scheduleId);
+    const schedulePath = this._schedulePath(node, normalizedScheduleId);
 
     if (existsSync(schedulePath)) {
       unlinkSync(schedulePath);
     }
-    this.cronScheduler.cancel(node.channelId, scheduleId);
+    this.cronScheduler.cancel(node.channelId, normalizedScheduleId);
 
     return options.silent
       ? { canceled: true }
-      : { channel_id: node.channelId, schedule_id: scheduleId, canceled: true };
+      : { channel_id: node.channelId, schedule_id: normalizedScheduleId, canceled: true };
   }
 
   async getChannelInfo(channelId) {
@@ -2028,6 +2068,7 @@ export class ChannelManager {
     const normalized = message?.envelope && message?.payload
       ? message
       : normalizeMessage(node.channelId, message);
+    assertKnownPayloadType(normalized.payload?.type ?? normalized.payloadType);
     const createdAt = new Date(normalized.createdAt);
     const bucket = Number.isNaN(createdAt.getTime())
       ? nowIso().slice(0, 10)

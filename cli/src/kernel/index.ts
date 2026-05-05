@@ -21,13 +21,17 @@ async function main(): Promise<void> {
     .command('schedule-cron')
     .requiredOption('--cron <expr>', 'cron expression')
     .requiredOption('--reason <reason>', 'schedule reason')
+    .option('--id <scheduleId>', 'explicit schedule ID')
+    .option('--upsert', 'replace an existing schedule with the same ID')
     .option('--payload <json>', 'JSON payload', parseJsonOption, {})
     .action(async (options) => {
       const result = await callDaemonRpc<Record<string, unknown>>('schedule.cron', {
         channel_id: requireChannelId(),
+        ...(options.id != null ? { id: options.id } : {}),
         cron: options.cron,
         reason: options.reason,
         payload: options.payload,
+        ...(options.upsert === true ? { upsert: true } : {}),
       });
       writeSuccess({
         schedule_id: String(result.schedule_id ?? result.id ?? ''),
@@ -39,13 +43,17 @@ async function main(): Promise<void> {
     .command('schedule-at')
     .requiredOption('--at <iso8601>', 'scheduled timestamp')
     .requiredOption('--reason <reason>', 'schedule reason')
+    .option('--id <scheduleId>', 'explicit schedule ID')
+    .option('--upsert', 'replace an existing schedule with the same ID')
     .option('--payload <json>', 'JSON payload', parseJsonOption, {})
     .action(async (options) => {
       const result = await callDaemonRpc<Record<string, unknown>>('schedule.at', {
         channel_id: requireChannelId(),
+        ...(options.id != null ? { id: options.id } : {}),
         at: options.at,
         reason: options.reason,
         payload: options.payload,
+        ...(options.upsert === true ? { upsert: true } : {}),
       });
       writeSuccess({
         schedule_id: String(result.schedule_id ?? result.id ?? ''),

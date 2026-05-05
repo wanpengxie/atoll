@@ -124,7 +124,7 @@ export class RpcServer {
       const result = await this.channelManager.rpcCall(method, params, context);
       writeJson(res, 200, { ok: true, result });
     } catch (err) {
-      writeJson(res, 400, {
+      writeJson(res, err.statusCode ?? 400, {
         ok: false,
         error: {
           code: err.code ?? 'rpc_error',

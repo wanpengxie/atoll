@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
-import { PayloadType } from '@coagent/payload-types';
+import { PayloadType, isPayloadType } from '@coagent/payload-types';
 
 const DEFAULT_AGENT_NAME = 'channel-agent';
 
@@ -44,6 +44,18 @@ function toBoolean(value) {
 function toSeq(value, fallback = 0) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function badRequest(message) {
+  const err = new Error(message);
+  err.code = 'bad_request';
+  return err;
+}
+
+function assertKnownPayloadType(payloadType) {
+  if (!isPayloadType(payloadType)) {
+    throw badRequest(`unsupported payload_type: ${payloadType}`);
+  }
 }
 
 function ensureColumn(db, table, column, definition) {
@@ -241,6 +253,7 @@ export function appendMessageToStore(db, message) {
     legacy_json: toJson(message),
     created_at: message.createdAt,
   };
+  assertKnownPayloadType(row.payload_type);
 
   const insertMessage = db.prepare(`
     INSERT INTO messages (

@@ -137,3 +137,36 @@ test('http /admin routes still require bearer token', async (t) => {
   assert.equal(authorized.statusCode, 200);
   assert.deepEqual(authorized.body, { machines: [{ id: 'local' }] });
 });
+
+test('socket /rpc uses explicit error statusCode when provided', async (t) => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'rpc-server-error-status-'));
+  t.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const socketPath = path.join(tempDir, 'daemon.sock');
+  const rpcServer = new RpcServer({
+    socketPath,
+    channelManager: {
+      async rpcCall() {
+        const err = new Error('schedule already exists: daily');
+        err.code = 'schedule_exists';
+        err.statusCode = 409;
+        throw err;
+      },
+    },
+  });
+
+  await rpcServer.start();
+  t.after(async () => {
+    await rpcServer.stop();
+  });
+
+  const response = await socketRequest(socketPath, {
+    method: 'schedule.cron',
+    params: { channel_id: 'channel-a', id: 'daily' },
+  });
+  assert.equal(response.statusCode, 409);
+  assert.equal(response.body.ok, false);
+  assert.equal(response.body.error.code, 'schedule_exists');
+});

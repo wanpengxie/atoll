@@ -119,6 +119,20 @@ test('task projection creates schema rows and updates last_event_at on task mess
   assert.equal(queryStoredTasks(db, { channel_id: 'channel-tasks', status: 'completed' }).length, 1);
 });
 
+test('appendMessageToStore rejects unknown payload types', (t) => {
+  const db = withStore(t);
+
+  assert.throws(
+    () => appendMessageToStore(db, makeMessage({
+      id: 'msg-unknown',
+      payloadType: 'whatever.unknown',
+      body: { text: 'unsupported' },
+    })),
+    (err) => err.code === 'bad_request' && /unsupported payload_type/.test(err.message),
+  );
+  assert.equal(readStoredMessages(db).length, 0);
+});
+
 test('tasks table enforces parent FK and unique task_id atomically with message insert', (t) => {
   const db = withStore(t);
 

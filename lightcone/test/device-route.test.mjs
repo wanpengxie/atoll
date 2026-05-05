@@ -50,8 +50,10 @@ test('POST /api/device/result bridges device status to daemon dispatch message',
   const daemonRequests = [];
   const router = createDeviceRouter({
     getDbImpl: () => ({}),
-    getMachineByApiKeyImpl: async (_db, token) => (token === 'machine-key' ? { id: 'device-machine' } : null),
-    getChannelByIdImpl: async () => ({ id: 'channel-a', daemon_id: 'daemon-a' }),
+    getMachineByApiKeyImpl: async (_db, token) => (
+      token === 'machine-key' ? { id: 'daemon-a', server_id: 'workspace-a' } : null
+    ),
+    getChannelByIdImpl: async () => ({ id: 'channel-a', workspace_id: 'workspace-a', daemon_id: 'daemon-a' }),
     isMachineOnlineImpl: (daemonId) => daemonId === 'daemon-a',
     requestFromDaemonImpl: async (daemonId, request, responseKey, timeoutMs) => {
       daemonRequests.push({ daemonId, request, responseKey, timeoutMs });
@@ -82,19 +84,19 @@ test('POST /api/device/result bridges device status to daemon dispatch message',
         channelId: 'channel-a',
         senderType: 'external',
         senderKind: 'external',
-        senderId: 'external:device:chrome-ext',
-        senderName: 'chrome-ext',
+        senderId: 'external:device:daemon-a',
+        senderName: 'daemon-a',
         messageType: 'dispatch.completed',
         payloadType: 'dispatch.completed',
         payloadBody: {
           status: 'completed',
-          device_id: 'chrome-ext',
+          device_id: 'daemon-a',
           correlation_id: 'corr-a',
           result: { url: 'https://example.test/note' },
         },
         content: JSON.stringify({
           status: 'completed',
-          device_id: 'chrome-ext',
+          device_id: 'daemon-a',
           correlation_id: 'corr-a',
           result: { url: 'https://example.test/note' },
         }),
@@ -107,6 +109,62 @@ test('POST /api/device/result bridges device status to daemon dispatch message',
       responseKey: 'req-device-1',
       timeoutMs: 10000,
     });
+  });
+});
+
+test('POST /api/device/result rejects a valid machine that is not the channel daemon', async () => {
+  let requestCalled = false;
+  const router = createDeviceRouter({
+    getDbImpl: () => ({}),
+    getMachineByApiKeyImpl: async () => ({ id: 'daemon-b', server_id: 'workspace-a' }),
+    getChannelByIdImpl: async () => ({ id: 'channel-a', workspace_id: 'workspace-a', daemon_id: 'daemon-a' }),
+    isMachineOnlineImpl: () => true,
+    requestFromDaemonImpl: async () => {
+      requestCalled = true;
+      return { ok: true };
+    },
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const response = await requestJson(baseUrl, '/api/device/result', {
+      body: {
+        channelId: 'channel-a',
+        correlationId: 'corr-a',
+        status: 'accepted',
+      },
+    });
+
+    assert.equal(response.status, 403);
+    assert.deepEqual(response.json, { error: 'Machine is not authorized for this channel' });
+    assert.equal(requestCalled, false);
+  });
+});
+
+test('POST /api/device/result rejects a channel outside the machine server workspace', async () => {
+  let requestCalled = false;
+  const router = createDeviceRouter({
+    getDbImpl: () => ({}),
+    getMachineByApiKeyImpl: async () => ({ id: 'daemon-a', server_id: 'workspace-b' }),
+    getChannelByIdImpl: async () => ({ id: 'channel-a', workspace_id: 'workspace-a', daemon_id: 'daemon-a' }),
+    isMachineOnlineImpl: () => true,
+    requestFromDaemonImpl: async () => {
+      requestCalled = true;
+      return { ok: true };
+    },
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const response = await requestJson(baseUrl, '/api/device/result', {
+      body: {
+        channelId: 'channel-a',
+        correlationId: 'corr-a',
+        status: 'completed',
+      },
+    });
+
+    assert.equal(response.status, 403);
+    assert.deepEqual(response.json, { error: 'Machine is not authorized for this workspace' });
+    assert.equal(requestCalled, false);
   });
 });
 

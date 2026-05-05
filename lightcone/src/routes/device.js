@@ -17,8 +17,12 @@ function bearerToken(req) {
   return auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
 }
 
-function defaultDeviceId(machine, body) {
-  return String(body.deviceId ?? body.device_id ?? machine?.id ?? 'unknown').trim();
+function defaultDeviceId(machine) {
+  return String(machine?.id ?? 'unknown').trim() || 'unknown';
+}
+
+function defaultDeviceName(machine, deviceId) {
+  return String(machine?.name ?? '').trim() || deviceId;
 }
 
 export function createDeviceRouter({
@@ -56,10 +60,20 @@ export function createDeviceRouter({
     }
     const daemonId = String(channel.daemon_id ?? '').trim();
     if (!daemonId) return res.status(503).json({ error: 'Channel daemon unavailable' });
+    const machineId = String(machine.id ?? '').trim();
+    if (machineId !== daemonId) {
+      return res.status(403).json({ error: 'Machine is not authorized for this channel' });
+    }
+    const channelWorkspaceId = String(channel.workspace_id ?? '').trim();
+    const machineServerId = String(machine.server_id ?? '').trim();
+    if (channelWorkspaceId && machineServerId && channelWorkspaceId !== machineServerId) {
+      return res.status(403).json({ error: 'Machine is not authorized for this workspace' });
+    }
     if (!isMachineOnlineImpl(daemonId)) return res.status(503).json({ error: 'Channel daemon offline' });
 
     const requestId = uuidv4Impl();
-    const deviceId = defaultDeviceId(machine, req.body ?? {});
+    const deviceId = defaultDeviceId(machine);
+    const deviceName = defaultDeviceName(machine, deviceId);
     const payloadBody = {
       ...(req.body?.payload && typeof req.body.payload === 'object' ? req.body.payload : {}),
       status,
@@ -78,7 +92,7 @@ export function createDeviceRouter({
         senderType: 'external',
         senderKind: SenderKind.EXTERNAL,
         senderId: `external:device:${deviceId}`,
-        senderName: req.body?.deviceName ?? req.body?.device_name ?? deviceId,
+        senderName: deviceName,
         messageType: payloadType,
         payloadType,
         payloadBody,

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { Command, InvalidArgumentError } from 'commander';
 import { PayloadType, SenderKind } from '@coagent/payload-types';
@@ -11,8 +11,27 @@ import { writeSuccess } from '../../lib/output.js';
 
 const DEFAULT_LIMIT = 20;
 
-function resolveText(input: string): string {
-  return existsSync(input) ? readFileSync(input, 'utf8') : input;
+function readExplicitTextFile(input: string, flag: string): string {
+  const filePath = String(input ?? '').trim();
+  if (!filePath) throw new CliError('invalid_arguments', `${flag} requires a file path`, 2);
+  try {
+    return readFileSync(filePath, 'utf8');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'unknown error';
+    throw new CliError('invalid_arguments', `${flag} could not be read: ${message}`, 2);
+  }
+}
+
+function rejectBothOptions(
+  options: Record<string, unknown>,
+  literalKey: string,
+  fileKey: string,
+  literalFlag: string,
+  fileFlag: string,
+): void {
+  if (options[literalKey] != null && options[fileKey] != null) {
+    throw new CliError('invalid_arguments', `${literalFlag} and ${fileFlag} cannot be used together`, 2);
+  }
 }
 
 function parseDurationMs(value: string): number {
@@ -94,14 +113,18 @@ export function registerProtocolCommands(program: Command): void {
     .option('--not-before <time>', 'epoch ms, ISO time, or relative duration', parseTimeMs)
     .option('--expires-at <time>', 'epoch ms, ISO time, or relative duration', parseTimeMs)
     .option('--message-id <id>', 'explicit envelope id')
-    .option('--text <textOrPath>', 'content text or path; defaults to payload.body.text')
+    .option('--text <text>', 'content text; defaults to payload.body.text')
+    .option('--text-file <path>', 'read content text from a file')
     .action(async (options) => {
+      rejectBothOptions(options, 'text', 'textFile', '--text', '--text-file');
       const senderKind = String(options.senderKind ?? SenderKind.AGENT);
       const defaults = senderDefaults(senderKind);
       const payloadBody = options.payload as Record<string, unknown>;
-      const content = options.text != null
-        ? resolveText(String(options.text))
-        : String(payloadBody?.text ?? JSON.stringify(payloadBody));
+      const content = options.textFile != null
+        ? readExplicitTextFile(String(options.textFile), '--text-file')
+        : options.text != null
+          ? String(options.text)
+          : String(payloadBody?.text ?? JSON.stringify(payloadBody));
       writeSuccess(await rpc('message.emit', {
         channel_id: channelIdFromOptions(options),
         message_id: options.messageId,
@@ -273,7 +296,8 @@ export function registerProtocolCommands(program: Command): void {
   program.command('memo-write')
     .description('Write a markdown doc in the channel workdir and emit a self.memo')
     .requiredOption('--doc <path>', 'doc path relative to channel workdir')
-    .requiredOption('--content <markdownOrPath>', 'markdown content or path')
+    .option('--content <markdown>', 'markdown content')
+    .option('--content-file <path>', 'read markdown content from a file')
     .option('--channel <channelId>', 'channel ID')
     .option('--tag <tag>', 'memo tag', 'pending_action')
     .option('--scope <scope>', 'channel or forever', 'channel')
@@ -285,7 +309,13 @@ export function registerProtocolCommands(program: Command): void {
       if (!docPath || path.isAbsolute(docPath) || docPath.split(path.sep).includes('..')) {
         throw new CliError('invalid_arguments', 'doc must be a relative path inside the channel workdir', 2);
       }
-      const content = resolveText(String(options.content));
+      rejectBothOptions(options, 'content', 'contentFile', '--content', '--content-file');
+      if (options.content == null && options.contentFile == null) {
+        throw new CliError('invalid_arguments', '--content or --content-file is required', 2);
+      }
+      const content = options.contentFile != null
+        ? readExplicitTextFile(String(options.contentFile), '--content-file')
+        : String(options.content);
       const absoluteDocPath = path.join(resolveWorkdir(), docPath);
       mkdirSync(path.dirname(absoluteDocPath), { recursive: true });
       writeFileSync(absoluteDocPath, content, 'utf8');

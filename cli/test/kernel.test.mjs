@@ -151,12 +151,15 @@ test('schedule-cron and cancel-schedule call daemon RPC and map responses', asyn
 
     const createResult = parseJson((await runCliAsync([
       'schedule-cron',
+      '--id',
+      'sched-rpc',
       '--cron',
       '0 9 * * *',
       '--reason',
       'wake up',
       '--payload',
       '{"kind":"demo"}',
+      '--upsert',
     ], env, workdir)).stdout);
     assert.equal(createResult.ok, true);
     assert.equal(createResult.data.schedule_id, 'sched-rpc');
@@ -171,6 +174,14 @@ test('schedule-cron and cancel-schedule call daemon RPC and map responses', asyn
 
     assert.equal(requests.length, 2);
     assert.equal(requests[0].payload.method, 'schedule.cron');
+    assert.deepEqual(requests[0].payload.params, {
+      channel_id: 'channel-kernel',
+      id: 'sched-rpc',
+      cron: '0 9 * * *',
+      reason: 'wake up',
+      payload: { kind: 'demo' },
+      upsert: true,
+    });
     assert.equal(requests[1].payload.method, 'schedule.cancel');
   });
 });

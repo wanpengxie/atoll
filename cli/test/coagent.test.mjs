@@ -312,6 +312,41 @@ test('coagent daemon RPC reads machine.key token without mutating env', async (t
   }
 });
 
+test('coagent emit --text treats file-like values as literal text', async (t) => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'coagent-emit-text-literal-'));
+  t.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+  writeFileSync(path.join(tempDir, 'README.md'), 'file contents should not be used\n', 'utf8');
+
+  const { server, port, requests } = await withRpcServer((request) => ({
+    ok: true,
+    result: { echoed_method: request.payload.method, echoed_params: request.payload.params },
+  }));
+  try {
+    const body = await runCliAsync([
+      'emit',
+      '--channel',
+      'channel-a',
+      '--payload-type',
+      'agent.text',
+      '--payload',
+      '{}',
+      '--text',
+      'README.md',
+    ], {
+      COAGENT_DAEMON_HTTP: `http://127.0.0.1:${port}`,
+      COAGENT_DAEMON_SOCKET: '',
+    }, tempDir);
+
+    assert.equal(body.ok, true);
+    assert.equal(requests[0].payload.method, 'message.emit');
+    assert.equal(requests[0].payload.params.content, 'README.md');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('coagent memo-write writes a local doc and emits a memo RPC', async (t) => {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'coagent-memo-write-'));
   t.after(() => {
@@ -345,6 +380,49 @@ test('coagent memo-write writes a local doc and emits a memo RPC', async (t) => 
       doc: 'notes/tasks/task.md',
       summary: 'Task Title',
     });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('coagent memo-write --content is literal and --content-file reads explicitly', async (t) => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'coagent-memo-write-content-file-'));
+  t.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+  writeFileSync(path.join(tempDir, 'channel.yaml'), JSON.stringify({ channel_id: 'channel-memo' }), 'utf8');
+  writeFileSync(path.join(tempDir, 'README.md'), '# File Title\n\nfile body\n', 'utf8');
+
+  const { server, port, requests } = await withRpcServer((request) => ({
+    ok: true,
+    result: { echoed_method: request.payload.method, echoed_params: request.payload.params },
+  }));
+  try {
+    const env = {
+      COAGENT_DAEMON_HTTP: `http://127.0.0.1:${port}`,
+      COAGENT_DAEMON_SOCKET: '',
+    };
+    const literal = await runCliAsync([
+      'memo-write',
+      '--doc',
+      'notes/tasks/literal.md',
+      '--content',
+      'README.md',
+    ], env, tempDir);
+    const fromFile = await runCliAsync([
+      'memo-write',
+      '--doc',
+      'notes/tasks/from-file.md',
+      '--content-file',
+      'README.md',
+    ], env, tempDir);
+
+    assert.equal(literal.ok, true);
+    assert.equal(fromFile.ok, true);
+    assert.equal(readFileSync(path.join(tempDir, 'notes', 'tasks', 'literal.md'), 'utf8'), 'README.md');
+    assert.equal(readFileSync(path.join(tempDir, 'notes', 'tasks', 'from-file.md'), 'utf8'), '# File Title\n\nfile body\n');
+    assert.equal(requests[0].payload.params.summary, 'README.md');
+    assert.equal(requests[1].payload.params.summary, 'File Title');
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
