@@ -51,9 +51,9 @@ test('POST /api/device/result bridges device status to daemon dispatch message',
   const router = createDeviceRouter({
     getDbImpl: () => ({}),
     getMachineByApiKeyImpl: async (_db, token) => (
-      token === 'machine-key' ? { id: 'daemon-a', server_id: 'workspace-a' } : null
+      token === 'machine-key' ? { id: 'daemon-a', server_id: 'server-001' } : null
     ),
-    getChannelByIdImpl: async () => ({ id: 'channel-a', workspace_id: 'workspace-a', daemon_id: 'daemon-a' }),
+    getChannelByIdImpl: async () => ({ id: 'channel-a', workspace_id: 'ws-uuid-a', daemon_id: 'daemon-a' }),
     isMachineOnlineImpl: (daemonId) => daemonId === 'daemon-a',
     requestFromDaemonImpl: async (daemonId, request, responseKey, timeoutMs) => {
       daemonRequests.push({ daemonId, request, responseKey, timeoutMs });
@@ -136,34 +136,6 @@ test('POST /api/device/result rejects a valid machine that is not the channel da
 
     assert.equal(response.status, 403);
     assert.deepEqual(response.json, { error: 'Machine is not authorized for this channel' });
-    assert.equal(requestCalled, false);
-  });
-});
-
-test('POST /api/device/result rejects a channel outside the machine server workspace', async () => {
-  let requestCalled = false;
-  const router = createDeviceRouter({
-    getDbImpl: () => ({}),
-    getMachineByApiKeyImpl: async () => ({ id: 'daemon-a', server_id: 'workspace-b' }),
-    getChannelByIdImpl: async () => ({ id: 'channel-a', workspace_id: 'workspace-a', daemon_id: 'daemon-a' }),
-    isMachineOnlineImpl: () => true,
-    requestFromDaemonImpl: async () => {
-      requestCalled = true;
-      return { ok: true };
-    },
-  });
-
-  await withServer(createApp(router), async (baseUrl) => {
-    const response = await requestJson(baseUrl, '/api/device/result', {
-      body: {
-        channelId: 'channel-a',
-        correlationId: 'corr-a',
-        status: 'completed',
-      },
-    });
-
-    assert.equal(response.status, 403);
-    assert.deepEqual(response.json, { error: 'Machine is not authorized for this workspace' });
     assert.equal(requestCalled, false);
   });
 });

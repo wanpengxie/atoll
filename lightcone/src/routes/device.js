@@ -64,11 +64,6 @@ export function createDeviceRouter({
     if (machineId !== daemonId) {
       return res.status(403).json({ error: 'Machine is not authorized for this channel' });
     }
-    const channelWorkspaceId = String(channel.workspace_id ?? '').trim();
-    const machineServerId = String(machine.server_id ?? '').trim();
-    if (channelWorkspaceId && machineServerId && channelWorkspaceId !== machineServerId) {
-      return res.status(403).json({ error: 'Machine is not authorized for this workspace' });
-    }
     if (!isMachineOnlineImpl(daemonId)) return res.status(503).json({ error: 'Channel daemon offline' });
 
     const requestId = uuidv4Impl();
