@@ -4,6 +4,7 @@ import path from 'path';
 import { PayloadType, isPayloadType } from '@coagent/payload-types';
 
 const DEFAULT_AGENT_NAME = 'channel-agent';
+const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'abandoned', 'archived']);
 
 function toJson(value) {
   return JSON.stringify(value ?? null);
@@ -52,10 +53,42 @@ function badRequest(message) {
   return err;
 }
 
+function conflict(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  err.statusCode = 409;
+  return err;
+}
+
 function assertKnownPayloadType(payloadType) {
   if (!isPayloadType(payloadType)) {
     throw badRequest(`unsupported payload_type: ${payloadType}`);
   }
+}
+
+function isTerminalTask(row) {
+  if (!row) return false;
+  return row.closed_at != null || TERMINAL_TASK_STATUSES.has(String(row.status ?? '').trim());
+}
+
+function getTaskProjectionRow(db, taskId, channelId) {
+  return db.prepare(`
+    SELECT * FROM tasks
+    WHERE task_id = @task_id
+      AND channel_id = @channel_id
+  `).get({
+    task_id: taskId,
+    channel_id: channelId,
+  }) ?? null;
+}
+
+function assertTaskProjectionMutable(db, taskId, channelId) {
+  const task = getTaskProjectionRow(db, taskId, channelId);
+  if (!task) return null;
+  if (isTerminalTask(task)) {
+    throw conflict('task_already_terminal', `task already terminal: ${taskId}`);
+  }
+  return task;
 }
 
 function ensureColumn(db, table, column, definition) {
@@ -73,6 +106,15 @@ function rowToMessage(row) {
     payload: fromJson(row.payload_json, {}),
     legacy: fromJson(row.legacy_json, {}),
   };
+}
+
+function rowToAppendResult(row, inserted) {
+  const message = rowToMessage(row);
+  Object.defineProperty(message, 'inserted', {
+    value: inserted,
+    enumerable: false,
+  });
+  return message;
 }
 
 function rowToTask(row) {
@@ -255,6 +297,7 @@ export function appendMessageToStore(db, message) {
   };
   assertKnownPayloadType(row.payload_type);
 
+  const selectMessage = db.prepare('SELECT rowid AS seq, * FROM messages WHERE id = @id');
   const insertMessage = db.prepare(`
     INSERT INTO messages (
       id, channel_id, ts, ts_received, sender_kind, sender_id, sender_name,
@@ -270,9 +313,12 @@ export function appendMessageToStore(db, message) {
     )
   `);
 
-  db.transaction(() => {
+  return db.transaction(() => {
+    const existing = selectMessage.get({ id: row.id });
+    if (existing) return rowToAppendResult(existing, false);
     insertMessage.run(row);
     projectTaskFromMessageRow(db, row);
+    return rowToAppendResult(selectMessage.get({ id: row.id }), true);
   })();
 }
 
@@ -319,6 +365,7 @@ export function projectTaskFromMessageRow(db, row) {
   }
 
   if (row.payload_type === PayloadType.TASK_CLOSED && isSelfAudience && taskId) {
+    assertTaskProjectionMutable(db, taskId, row.channel_id);
     const status = String(payloadBody?.status ?? '').trim();
     if (!status) throw new Error('task.closed requires payload.body.status');
     db.prepare(`
@@ -333,6 +380,10 @@ export function projectTaskFromMessageRow(db, row) {
       task_id: taskId,
       channel_id: row.channel_id,
     });
+  }
+
+  if (row.payload_type === PayloadType.TASK_APPENDED && isSelfAudience && taskId) {
+    assertTaskProjectionMutable(db, taskId, row.channel_id);
   }
 
   if (taskId) {

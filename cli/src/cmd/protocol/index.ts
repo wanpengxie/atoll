@@ -187,6 +187,7 @@ export function registerProtocolCommands(program: Command): void {
     .requiredOption('--not-before <time>', 'epoch ms, ISO time, or relative duration', parseTimeMs)
     .requiredOption('--payload <json>', 'payload body JSON', parseJsonOption)
     .option('--payload-type <type>', 'payload.type', PayloadType.DISPATCH_SELF_CHECK_DUE)
+    .option('--audience <items>', 'comma-separated audience values', parseCsv)
     .option('--correlation-id <id>', 'correlation id')
     .option('--task-id <id>', 'task id')
     .option('--in-task <taskId>', 'task id to attach to')
@@ -196,6 +197,7 @@ export function registerProtocolCommands(program: Command): void {
         not_before: options.notBefore,
         payload_type: options.payloadType,
         payload_body: options.payload,
+        audience: options.audience,
         correlation_id: options.correlationId,
         task_id: options.inTask ?? options.taskId,
       }));

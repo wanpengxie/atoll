@@ -133,6 +133,26 @@ test('appendMessageToStore rejects unknown payload types', (t) => {
   assert.equal(readStoredMessages(db).length, 0);
 });
 
+test('appendMessageToStore treats duplicate message ids as idempotent', (t) => {
+  const db = withStore(t);
+
+  const first = appendMessageToStore(db, makeMessage({
+    id: 'msg-once',
+    body: { text: 'first' },
+  }));
+  const second = appendMessageToStore(db, makeMessage({
+    id: 'msg-once',
+    body: { text: 'retry with different body ignored' },
+  }));
+
+  assert.equal(first.inserted, true);
+  assert.equal(second.inserted, false);
+  const messages = readStoredMessages(db);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].id, 'msg-once');
+  assert.equal(messages[0].payload_body.text, 'first');
+});
+
 test('tasks table enforces parent FK and unique task_id atomically with message insert', (t) => {
   const db = withStore(t);
 
@@ -186,5 +206,61 @@ test('tasks table enforces parent FK and unique task_id atomically with message 
     },
     audience: ['self'],
   })), /UNIQUE|constraint/i);
+  assert.equal(readStoredMessages(db).length, 2);
+});
+
+test('task projection refuses terminal task close and append mutations', (t) => {
+  const db = withStore(t);
+  const openedAt = Date.UTC(2026, 4, 6, 0, 0, 0);
+  const closedAt = openedAt + 30_000;
+
+  appendMessageToStore(db, makeMessage({
+    id: 'msg-open-terminal',
+    taskId: 'task-terminal',
+    payloadType: 'task.opened',
+    body: {
+      type: 'research',
+      title: 'Terminal task',
+      doc_ref: 'notes/tasks/2026-05-06-terminal.md',
+    },
+    audience: ['self'],
+    ts: openedAt,
+  }));
+  appendMessageToStore(db, makeMessage({
+    id: 'msg-close-terminal',
+    taskId: 'task-terminal',
+    payloadType: 'task.closed',
+    body: { status: 'completed', summary: 'done' },
+    audience: ['self'],
+    ts: closedAt,
+  }));
+
+  assert.throws(
+    () => appendMessageToStore(db, makeMessage({
+      id: 'msg-close-terminal-again',
+      taskId: 'task-terminal',
+      payloadType: 'task.closed',
+      body: { status: 'failed', summary: 'late failure' },
+      audience: ['self'],
+      ts: closedAt + 30_000,
+    })),
+    (err) => err.code === 'task_already_terminal' && err.statusCode === 409,
+  );
+  assert.throws(
+    () => appendMessageToStore(db, makeMessage({
+      id: 'msg-append-terminal',
+      taskId: 'task-terminal',
+      payloadType: 'task.appended',
+      body: { summary: 'late append' },
+      audience: ['self'],
+      ts: closedAt + 60_000,
+    })),
+    (err) => err.code === 'task_already_terminal' && err.statusCode === 409,
+  );
+
+  const task = getStoredTask(db, 'task-terminal', 'channel-tasks');
+  assert.equal(task.status, 'completed');
+  assert.equal(task.closed_at, closedAt);
+  assert.equal(task.last_event_at, closedAt);
   assert.equal(readStoredMessages(db).length, 2);
 });

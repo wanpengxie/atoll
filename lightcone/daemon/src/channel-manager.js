@@ -41,6 +41,7 @@ const DEFAULT_DUE_MESSAGE_POLL_MS = 1_000;
 const DEFAULT_DELIVERY_FAILURE_LIMIT = 5;
 const VIEW_SYNC_RETRY_LIMIT = 10;
 const SCHEDULE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'abandoned', 'archived']);
 
 function nowIso() {
   return new Date().toISOString();
@@ -288,6 +289,10 @@ function normalizeAudience(value) {
   return normalized.length > 0 ? normalized : ['channel'];
 }
 
+function isSelfAudienceOnly(audience) {
+  return Array.isArray(audience) && audience.length === 1 && audience[0] === 'self';
+}
+
 function inferPayloadType(message, senderKind, messageType) {
   const explicit = message?.payload?.type ?? message?.payloadType ?? message?.payload_type;
   if (explicit) return String(explicit).trim();
@@ -409,6 +414,25 @@ function normalizeMessage(channelId, message, defaults = {}) {
     envelope,
     payload,
   };
+}
+
+function assertDeferredMessageEnvelope(message) {
+  if (message.notBefore == null) return;
+  if (isSelfAudienceOnly(message.audience) || message.origin === 'system') return;
+  throw toRpcError(
+    'invalid_envelope',
+    'not_before requires audience=[self] or origin=system',
+  );
+}
+
+function isTerminalTask(task) {
+  return task?.closed_at != null || TERMINAL_TASK_STATUSES.has(String(task?.status ?? '').trim());
+}
+
+function assertTaskMutable(task, taskId) {
+  if (isTerminalTask(task)) {
+    throw toRpcError('task_already_terminal', `task already terminal: ${taskId}`, 409);
+  }
 }
 
 function parseStructuredFile(filePath) {
@@ -955,6 +979,7 @@ export class ChannelManager {
       senderName: options.senderName ?? node.agentName,
       source: options.source ?? 'daemon',
     });
+    assertDeferredMessageEnvelope(message);
     const event = this._eventFromMessage(message);
     const shouldDefer = message.notBefore != null && message.notBefore > Date.now();
     const outcome = options.trigger === false || shouldDefer
@@ -1399,7 +1424,9 @@ export class ChannelManager {
       throw toRpcError('bad_request', 'status must be completed, failed, or abandoned');
     }
     const db = this._openMessageStore(node);
-    if (!getStoredTask(db, taskId, node.channelId)) throw toRpcError('not_found', `task not found: ${taskId}`);
+    const task = getStoredTask(db, taskId, node.channelId);
+    if (!task) throw toRpcError('not_found', `task not found: ${taskId}`);
+    assertTaskMutable(task, taskId);
 
     const body = {
       status,
@@ -1439,7 +1466,9 @@ export class ChannelManager {
     if (!taskId) throw toRpcError('bad_request', 'task_id is required');
     if (!summary) throw toRpcError('bad_request', 'summary is required');
     const db = this._openMessageStore(node);
-    if (!getStoredTask(db, taskId, node.channelId)) throw toRpcError('not_found', `task not found: ${taskId}`);
+    const task = getStoredTask(db, taskId, node.channelId);
+    if (!task) throw toRpcError('not_found', `task not found: ${taskId}`);
+    assertTaskMutable(task, taskId);
 
     const message = await this.sendChannelMessage({
       channelId: node.channelId,
@@ -2074,8 +2103,20 @@ export class ChannelManager {
       ? nowIso().slice(0, 10)
       : createdAt.toISOString().slice(0, 10);
     const filePath = path.join(node.workdir, 'messages', `${bucket}.jsonl`);
-    appendFileSync(filePath, `${JSON.stringify(normalized)}\n`, 'utf8');
-    appendMessageToStore(this._openMessageStore(node), normalized);
+    const stored = appendMessageToStore(this._openMessageStore(node), normalized);
+    if (stored?.inserted === false) return normalized;
+    try {
+      appendFileSync(filePath, `${JSON.stringify(normalized)}\n`, 'utf8');
+    } catch (err) {
+      await this._recordTrace(node, {
+        kind: 'message_log_write_failed',
+        type: 'message_log_write_failed',
+        messageId: normalized.messageId,
+        filePath,
+        reason: err.message,
+      });
+      console.error(`[ChannelManager] Failed to append JSONL message log for ${node.channelId}:`, err.message);
+    }
     return normalized;
   }
 

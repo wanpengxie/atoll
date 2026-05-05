@@ -223,6 +223,17 @@ test('coagent business subcommands call expected daemon RPC methods', async () =
       },
     },
     {
+      args: ['schedule', '--channel', 'channel-a', '--not-before', '1760000000000', '--payload', '{"reason":"check"}', '--audience', 'channel'],
+      method: 'message.schedule',
+      params: {
+        channel_id: 'channel-a',
+        not_before: 1760000000000,
+        payload_type: 'dispatch.self_check_due',
+        payload_body: { reason: 'check' },
+        audience: ['channel'],
+      },
+    },
+    {
       args: ['dispatch', 'start', '--channel', 'channel-a', '--target', 'external:device:x', '--type', 'xhs.publish', '--params', '{"title":"hi"}', '--in-task', 'task-a', '--check-after', '5m'],
       method: 'dispatch.start',
       params: {

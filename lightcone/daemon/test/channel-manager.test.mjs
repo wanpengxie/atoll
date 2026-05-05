@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { ChannelManager } from '../src/channel-manager.js';
-import { readAgentCursor, readStoredMessages } from '../src/message-store.js';
+import { getStoredTask, readAgentCursor, readStoredMessages } from '../src/message-store.js';
 
 function captureStdoutWrites(t) {
   const previousWrite = process.stdout.write;
@@ -46,6 +46,18 @@ function createStdoutHarness(t, channelId) {
 
   channelManager._wireProcess(node, proc, { restoring: false });
   return { channelManager, proc, node };
+}
+
+function readJsonlMessages(workdir) {
+  const messagesDir = path.join(workdir, 'messages');
+  if (!existsSync(messagesDir)) return [];
+  return readdirSync(messagesDir)
+    .filter((entry) => entry.endsWith('.jsonl'))
+    .flatMap((fileName) => readFileSync(path.join(messagesDir, fileName), 'utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line)));
 }
 
 test('channel:message.send writes local truth before view sync and reports success', async (t) => {
@@ -201,6 +213,64 @@ test('appendMessage double-writes 100 messages to jsonl and sqlite consistently'
   }
 });
 
+test('_appendMessage keeps jsonl and sqlite aligned when sqlite projection fails', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-sqlite-projection-failure-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-projection-failure',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Projection Failure Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+
+  await assert.rejects(
+    () => channelManager._appendMessage(node, {
+      messageId: 'msg-orphan-task',
+      channelId: node.channelId,
+      senderType: 'channel_agent',
+      senderKind: 'agent',
+      senderId: node.agentName,
+      senderName: node.agentName,
+      messageType: 'task.opened',
+      payload: {
+        type: 'task.opened',
+        body: {
+          type: 'research',
+          title: 'Orphan child',
+          parent_task_id: 'missing-parent',
+          doc_ref: 'notes/tasks/2026-05-06-orphan-child.md',
+        },
+      },
+      content: 'Orphan child',
+      taskId: 'task-orphan',
+      audience: ['self'],
+      origin: 'self',
+      createdAt: new Date(Date.UTC(2026, 4, 6, 0, 0, 0)).toISOString(),
+      source: 'test',
+    }),
+    /FOREIGN KEY|constraint/i,
+  );
+
+  assert.equal(readJsonlMessages(created.workdir).length, 0);
+  assert.equal(readStoredMessages(channelManager._openMessageStore(node)).length, 0);
+});
+
 test('emitChannelMessage rejects unknown payload types before writing local truth', async (t) => {
   const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-unknown-payload-'));
   t.after(() => {
@@ -235,6 +305,123 @@ test('emitChannelMessage rejects unknown payload types before writing local trut
     (err) => err.code === 'bad_request' && /unsupported payload_type/.test(err.message),
   );
   assert.deepEqual(readdirSync(path.join(created.workdir, 'messages')).filter((entry) => entry.endsWith('.jsonl')), []);
+});
+
+test('delayed channel-audience messages are rejected before local writes', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-invalid-delayed-envelope-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-invalid-delayed-envelope',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Invalid Delayed Envelope Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+
+  await assert.rejects(
+    () => channelManager.scheduleChannelMessage({
+      channelId: node.channelId,
+      notBefore: Date.now() + 3_600_000,
+      payloadBody: { reason: 'broadcast later' },
+      audience: ['channel'],
+    }),
+    (err) => err.code === 'invalid_envelope' && err.statusCode === 400,
+  );
+
+  assert.equal(readJsonlMessages(created.workdir).length, 0);
+  assert.equal(readStoredMessages(channelManager._openMessageStore(node)).length, 0);
+});
+
+test('task close and append reject terminal tasks and direct emit cannot mutate projection', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-terminal-task-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-terminal-task',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Terminal Task Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+
+  await channelManager.openTask({
+    channelId: node.channelId,
+    taskId: 'task-terminal',
+    type: 'research',
+    title: 'Terminal task',
+    docRef: 'notes/tasks/2026-05-06-terminal.md',
+  });
+  await channelManager.closeTask({
+    channelId: node.channelId,
+    taskId: 'task-terminal',
+    status: 'completed',
+    summary: 'done',
+  });
+  const closedTask = getStoredTask(node.messageStore, 'task-terminal', node.channelId);
+
+  await assert.rejects(
+    () => channelManager.closeTask({
+      channelId: node.channelId,
+      taskId: 'task-terminal',
+      status: 'failed',
+      summary: 'late failure',
+    }),
+    (err) => err.code === 'task_already_terminal' && err.statusCode === 409,
+  );
+  await assert.rejects(
+    () => channelManager.appendTask({
+      channelId: node.channelId,
+      taskId: 'task-terminal',
+      summary: 'late append',
+    }),
+    (err) => err.code === 'task_already_terminal' && err.statusCode === 409,
+  );
+  await assert.rejects(
+    () => channelManager.emitChannelMessage({
+      channelId: node.channelId,
+      messageId: 'msg-direct-terminal-close',
+      payloadType: 'task.closed',
+      payloadBody: { status: 'failed', summary: 'direct close' },
+      content: 'direct close',
+      taskId: 'task-terminal',
+      audience: ['self'],
+      origin: 'self',
+    }),
+    (err) => err.code === 'task_already_terminal' && err.statusCode === 409,
+  );
+
+  const task = getStoredTask(node.messageStore, 'task-terminal', node.channelId);
+  assert.equal(task.status, 'completed');
+  assert.equal(task.closed_at, closedTask.closed_at);
+  assert.equal(task.last_event_at, closedTask.last_event_at);
+  assert.equal(readStoredMessages(node.messageStore).length, 2);
 });
 
 test('message.schedule and due processing deliver only due D messages once', async (t) => {
