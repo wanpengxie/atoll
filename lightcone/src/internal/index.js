@@ -863,13 +863,31 @@ router.post('/:agentId/actions/:actionId/complete', async (req, res) => {
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 export function formatMessage(msg) {
+  const parseJson = (value, fallback = null) => {
+    if (value == null) return fallback;
+    if (typeof value !== 'string') return value;
+    try { return JSON.parse(value); } catch { return fallback; }
+  };
+
   return {
     id: msg.id, seq: msg.seq, teamId: msg.team_id,
     channelId: msg.channel_id ?? null,
     senderType: msg.sender_type, senderId: msg.sender_id, senderName: msg.sender_name,
     messageType: msg.message_type, content: msg.content,
+    senderKind: msg.sender_kind ?? null,
+    payloadType: msg.payload_type ?? null,
+    payloadBody: parseJson(msg.payload_body, null),
+    parentId: msg.parent_id ?? null,
+    correlationId: msg.correlation_id ?? null,
+    taskId: msg.task_id ?? null,
     threadId: msg.thread_id ?? null,
-    mentions: msg.mentions ? JSON.parse(msg.mentions) : null,
+    audience: parseJson(msg.audience, null),
+    mentions: parseJson(msg.mentions, null),
+    notBefore: msg.not_before ?? null,
+    origin: msg.origin ?? null,
+    expiresAt: msg.expires_at ?? null,
+    tsReceived: msg.ts_received ?? null,
+    envelope: parseJson(msg.envelope_json, null),
     taskStatus: msg.task_status ?? null, taskNumber: msg.task_number ?? null,
     taskAssigneeType: msg.task_assignee_type ?? null, taskAssigneeId: msg.task_assignee_id ?? null,
     taskAssigneeName: msg.task_assignee_name ?? null,

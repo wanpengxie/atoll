@@ -23,6 +23,9 @@ importers:
 
   cli:
     dependencies:
+      '@coagent/payload-types':
+        specifier: workspace:*
+        version: link:../packages/payload-types
       commander:
         specifier: ^14.0.3
         version: 14.0.3
@@ -42,6 +45,9 @@ importers:
 
   lightcone:
     dependencies:
+      '@coagent/payload-types':
+        specifier: workspace:*
+        version: link:../packages/payload-types
       bcrypt:
         specifier: ^6.0.0
         version: 6.0.0
@@ -78,9 +84,15 @@ importers:
 
   lightcone/daemon:
     dependencies:
+      '@coagent/payload-types':
+        specifier: workspace:*
+        version: link:../../packages/payload-types
       '@modelcontextprotocol/sdk':
         specifier: ^1.12.0
         version: 1.29.0(zod@3.25.76)
+      better-sqlite3:
+        specifier: ^12.8.0
+        version: 12.9.0
       dotenv:
         specifier: ^17.4.0
         version: 17.4.2
@@ -127,17 +139,7 @@ importers:
         specifier: ^4.3.6
         version: 4.3.6
 
-  lightcone/mcp-servers/publisher:
-    dependencies:
-      '@modelcontextprotocol/sdk':
-        specifier: ^1.29.0
-        version: 1.29.0(zod@4.3.6)
-      ws:
-        specifier: ^8.20.0
-        version: 8.20.0
-      zod:
-        specifier: ^4.3.6
-        version: 4.3.6
+  packages/payload-types: {}
 
 packages:
 

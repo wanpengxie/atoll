@@ -1,4 +1,5 @@
 import { WebSocketServer } from 'ws';
+import { PayloadType, SenderKind } from '@coagent/payload-types';
 import {
   getDb, getMachineByApiKey, updateMachine, updateAgent, getAgents,
   getAgentById, getTeamById, getMemberTeamIds,
@@ -31,6 +32,38 @@ function formatChannelSenderName(senderType, senderId) {
     default:
       return senderId;
   }
+}
+
+function normalizeSenderKind(rawKind, senderType) {
+  const kind = String(rawKind ?? '').trim();
+  if (Object.values(SenderKind).includes(kind)) return kind;
+  switch (String(senderType ?? '').trim()) {
+    case 'human':
+    case 'user':
+      return SenderKind.HUMAN;
+    case 'agent':
+    case 'channel_agent':
+    case 'sub_agent':
+    case 'worker':
+      return SenderKind.AGENT;
+    case 'system':
+      return SenderKind.SYSTEM;
+    case 'external':
+    case 'device':
+      return SenderKind.EXTERNAL;
+    default:
+      return null;
+  }
+}
+
+function inferPayloadType(msg, senderKind, messageType) {
+  const explicit = msg.payload_type ?? msg.payloadType ?? msg.payload?.type;
+  if (explicit) return String(explicit).trim();
+  if (messageType && String(messageType).includes('.')) return String(messageType);
+  if (!messageType || messageType === 'chat') {
+    return senderKind === SenderKind.AGENT ? PayloadType.AGENT_TEXT : PayloadType.USER_TEXT;
+  }
+  return String(messageType);
 }
 
 function appendAttachmentReferences(content, attachments) {
@@ -263,14 +296,17 @@ async function handleDaemonMessage(machineId, serverId, msg) {
         const channelId = msg.channel_id ?? msg.channelId;
         const senderType = msg.sender_type ?? msg.senderType;
         const senderId = msg.sender_id ?? msg.senderId;
-        const senderName = String(msg.sender_name ?? formatChannelSenderName(senderType, senderId));
+        const senderKind = normalizeSenderKind(msg.sender_kind ?? msg.envelope?.sender?.kind, senderType);
+        const senderName = String(msg.sender_name ?? msg.envelope?.sender?.name ?? formatChannelSenderName(senderType, senderId));
         const messageType = String(msg.message_type ?? 'chat');
-        const content = String(msg.content ?? '');
+        const payloadBody = msg.payload_body ?? msg.payloadBody ?? msg.payload?.body ?? null;
+        const payloadType = inferPayloadType(msg, senderKind, messageType);
+        const content = String(msg.content ?? payloadBody?.text ?? (payloadBody ? JSON.stringify(payloadBody) : ''));
         if (!requestId) throw new Error('requestId required');
         if (!channelId) throw new Error('channel_id required');
         if (!senderType) throw new Error('sender_type required');
         if (!senderId) throw new Error('sender_id required');
-        if (!content.trim()) throw new Error('content required');
+        if (!content.trim() && payloadBody == null) throw new Error('content required');
 
         const channel = await getChannelById(db, channelId);
         if (!channel || channel.is_del || channel.deleted_at) {
@@ -288,7 +324,21 @@ async function handleDaemonMessage(machineId, serverId, msg) {
           senderId,
           senderName,
           messageType,
+          senderKind,
+          payloadType,
+          payloadBody,
           content: appendAttachmentReferences(content, msg.attachments),
+          parentId: msg.parent_id ?? msg.parentId ?? msg.envelope?.parent_id ?? null,
+          correlationId: msg.correlation_id ?? msg.correlationId ?? msg.envelope?.correlation_id ?? null,
+          taskId: msg.task_id ?? msg.taskId ?? msg.envelope?.task_id ?? null,
+          threadId: msg.thread_id ?? msg.threadId ?? msg.envelope?.thread_id ?? null,
+          audience: msg.audience ?? msg.envelope?.audience ?? null,
+          mentions: msg.mentions ?? msg.envelope?.mentions ?? null,
+          notBefore: msg.not_before ?? msg.notBefore ?? msg.envelope?.not_before ?? null,
+          origin: msg.origin ?? msg.envelope?.origin ?? null,
+          expiresAt: msg.expires_at ?? msg.expiresAt ?? msg.envelope?.expires_at ?? null,
+          tsReceived: msg.ts_received ?? msg.tsReceived ?? msg.envelope?.ts_received ?? null,
+          envelope: msg.envelope ?? null,
         });
 
         broadcast.channelMessage(channelId, formatMessage(message));
@@ -493,14 +543,33 @@ async function handleDaemonMessage(machineId, serverId, msg) {
 export async function formatMessageForDaemon(msg) {
   const db = getDb();
   const ch = await getTeamById(db, msg.team_id);
+  const parseJson = (value, fallback = null) => {
+    if (value == null) return fallback;
+    if (typeof value !== 'string') return value;
+    try { return JSON.parse(value); } catch { return fallback; }
+  };
   return {
     team_type: ch?.type ?? 'team',
     team_name: ch?.name ?? 'all',
     sender_name: msg.sender_name,
     sender_type: msg.sender_type,
+    sender_kind: msg.sender_kind ?? null,
     content: msg.content,
     message_id: msg.id,
     timestamp: msg.created_at,
+    payload_type: msg.payload_type ?? null,
+    payload_body: parseJson(msg.payload_body, null),
+    parent_id: msg.parent_id ?? null,
+    correlation_id: msg.correlation_id ?? null,
+    task_id: msg.task_id ?? null,
+    thread_id: msg.thread_id ?? null,
+    audience: parseJson(msg.audience, null),
+    mentions: parseJson(msg.mentions, null),
+    not_before: msg.not_before ?? null,
+    origin: msg.origin ?? null,
+    expires_at: msg.expires_at ?? null,
+    ts_received: msg.ts_received ?? null,
+    envelope: parseJson(msg.envelope_json, null),
     attachments: [],
     task_status: msg.task_status ?? null,
     task_number: msg.task_number ?? null,

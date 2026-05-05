@@ -15,9 +15,11 @@ import {
 import { homedir } from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { PayloadType, SenderKind } from '@coagent/payload-types';
 import { HEALTHY_UPTIME_MS, CronScheduler } from './cron-scheduler.js';
 import { buildCoagentSpawn } from './drivers/coagent.js';
 import { emitJsonEvent } from './events.js';
+import { appendMessageToStore, openMessageStore } from './message-store.js';
 import { coagentProjectDir, normalizeProjectKey } from './paths.js';
 import { TriggerGateway } from './trigger-gateway.js';
 
@@ -102,21 +104,189 @@ function normalizeEvent(rawEvent) {
   };
 }
 
+function parseJsonString(value, fallback) {
+  if (typeof value !== 'string') return value ?? fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function toEpochMs(value, fallback = Date.now()) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.getTime();
+  if (typeof value === 'string' && value.trim()) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return fallback;
+}
+
+function optionalEpochMs(value) {
+  if (value == null || value === '') return null;
+  const parsed = toEpochMs(value, null);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeSenderKind(rawKind, rawSenderType) {
+  const kind = String(rawKind ?? '').trim();
+  if (Object.values(SenderKind).includes(kind)) return kind;
+
+  switch (String(rawSenderType ?? '').trim()) {
+    case 'human':
+    case 'user':
+      return SenderKind.HUMAN;
+    case 'agent':
+    case 'channel_agent':
+    case 'sub_agent':
+    case 'worker':
+      return SenderKind.AGENT;
+    case 'system':
+      return SenderKind.SYSTEM;
+    case 'external':
+    case 'device':
+      return SenderKind.EXTERNAL;
+    default:
+      return SenderKind.HUMAN;
+  }
+}
+
+function normalizeLegacySenderType(senderKind, provided) {
+  const senderType = String(provided ?? '').trim();
+  if (senderType) return senderType;
+  if (senderKind === SenderKind.AGENT) return 'channel_agent';
+  if (senderKind === SenderKind.HUMAN) return 'human';
+  return senderKind;
+}
+
+function normalizeMentions(value) {
+  const parsed = parseJsonString(value, value);
+  return Array.isArray(parsed) ? parsed.map((item) => String(item).trim()).filter(Boolean) : null;
+}
+
+function normalizeAudience(value) {
+  const parsed = parseJsonString(value, value);
+  const values = Array.isArray(parsed) ? parsed : [parsed ?? 'channel'];
+  const normalized = values.map((item) => String(item).trim()).filter(Boolean);
+  return normalized.length > 0 ? normalized : ['channel'];
+}
+
+function inferPayloadType(message, senderKind, messageType) {
+  const explicit = message?.payload?.type ?? message?.payloadType ?? message?.payload_type;
+  if (explicit) return String(explicit).trim();
+  const legacyType = String(messageType ?? '').trim();
+  if (legacyType.includes('.')) return legacyType;
+  if (!legacyType || legacyType === 'chat') {
+    return senderKind === SenderKind.AGENT ? PayloadType.AGENT_TEXT : PayloadType.USER_TEXT;
+  }
+  return legacyType;
+}
+
+function normalizePayloadBody(message, content, attachments) {
+  const explicit = message?.payload?.body ?? message?.payloadBody ?? message?.payload_body;
+  if (explicit != null) return parseJsonString(explicit, explicit);
+  return {
+    text: content,
+    ...(attachments.length > 0 ? { attachments } : {}),
+  };
+}
+
+function inferOrigin(message, senderKind) {
+  const explicit = message?.envelope?.origin ?? message?.origin;
+  if (explicit) return String(explicit).trim();
+  if (senderKind === SenderKind.SYSTEM) return 'system';
+  if (senderKind === SenderKind.AGENT) return 'self';
+  return 'external';
+}
+
 function normalizeMessage(channelId, message, defaults = {}) {
-  const content = String(message?.content ?? '').trim();
-  if (!content) throw toRpcError('bad_request', 'message content is required');
+  const sender = message?.envelope?.sender ?? {};
+  const senderKind = normalizeSenderKind(
+    sender.kind ?? message?.senderKind ?? message?.sender_kind,
+    message?.senderType ?? message?.sender_type ?? defaults.senderType,
+  );
+  const senderType = normalizeLegacySenderType(
+    senderKind,
+    message?.senderType ?? message?.sender_type ?? defaults.senderType,
+  );
+  const senderId = String(sender.id ?? message?.senderId ?? message?.sender_id ?? defaults.senderId ?? DEFAULT_AGENT_NAME);
+  const senderName = String(sender.name ?? message?.senderName ?? message?.sender_name ?? defaults.senderName ?? defaults.senderId ?? senderId);
+  const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+  const payloadType = inferPayloadType(message, senderKind, message?.messageType ?? message?.message_type);
+  const payloadBody = normalizePayloadBody(message, String(message?.content ?? message?.payload?.body?.text ?? '').trim(), attachments);
+  const content = String(message?.content ?? payloadBody?.text ?? '').trim()
+    || (message?.payload ? JSON.stringify(payloadBody) : '');
+  if (!content && !message?.payload && message?.payloadBody == null && message?.payload_body == null) {
+    throw toRpcError('bad_request', 'message content is required');
+  }
+
+  const nowMs = Date.now();
+  const ts = toEpochMs(message?.envelope?.ts ?? message?.ts ?? message?.createdAt ?? message?.created_at, nowMs);
+  const tsReceived = toEpochMs(message?.envelope?.ts_received ?? message?.tsReceived ?? message?.ts_received, nowMs);
+  const createdAt = message?.createdAt ?? message?.created_at ?? new Date(ts).toISOString();
+  const messageId = String(message?.envelope?.id ?? message?.messageId ?? message?.message_id ?? randomUUID());
+  const mentions = normalizeMentions(message?.envelope?.mentions ?? message?.mentions);
+  const audience = normalizeAudience(message?.envelope?.audience ?? message?.audience);
+  const parentId = message?.envelope?.parent_id ?? message?.parentId ?? message?.parent_id ?? null;
+  const correlationId = message?.envelope?.correlation_id ?? message?.correlationId ?? message?.correlation_id ?? null;
+  const taskId = message?.envelope?.task_id ?? message?.taskId ?? message?.task_id ?? null;
+  const threadId = message?.envelope?.thread_id ?? message?.threadId ?? message?.thread_id ?? null;
+  const notBefore = optionalEpochMs(message?.envelope?.not_before ?? message?.notBefore ?? message?.not_before);
+  const expiresAt = optionalEpochMs(message?.envelope?.expires_at ?? message?.expiresAt ?? message?.expires_at);
+  const origin = inferOrigin(message, senderKind);
+  const envelope = {
+    id: messageId,
+    ts,
+    ts_received: tsReceived,
+    sender: {
+      kind: senderKind,
+      id: senderId,
+      ...(senderName ? { name: senderName } : {}),
+    },
+    audience,
+    origin,
+    ...(parentId ? { parent_id: parentId } : {}),
+    ...(correlationId ? { correlation_id: correlationId } : {}),
+    ...(taskId ? { task_id: taskId } : {}),
+    ...(threadId ? { thread_id: threadId } : {}),
+    ...(mentions ? { mentions } : {}),
+    ...(notBefore != null ? { not_before: notBefore } : {}),
+    ...(expiresAt != null ? { expires_at: expiresAt } : {}),
+  };
+  const payload = {
+    type: payloadType,
+    body: payloadBody,
+  };
 
   return {
-    messageId: String(message?.messageId ?? message?.message_id ?? randomUUID()),
+    messageId,
     channelId,
-    senderType: String(message?.senderType ?? message?.sender_type ?? defaults.senderType ?? 'channel_agent'),
-    senderId: String(message?.senderId ?? message?.sender_id ?? defaults.senderId ?? DEFAULT_AGENT_NAME),
-    senderName: String(message?.senderName ?? message?.sender_name ?? defaults.senderName ?? defaults.senderId ?? DEFAULT_AGENT_NAME),
+    senderType,
+    senderId,
+    senderName,
     content,
-    attachments: Array.isArray(message?.attachments) ? message.attachments : [],
+    attachments,
     messageType: String(message?.messageType ?? message?.message_type ?? 'chat'),
-    createdAt: message?.createdAt ?? message?.created_at ?? nowIso(),
+    createdAt,
     source: message?.source ?? defaults.source ?? 'daemon',
+    senderKind,
+    payloadType,
+    payloadBody,
+    parentId,
+    correlationId,
+    taskId,
+    threadId,
+    audience,
+    mentions,
+    origin,
+    notBefore,
+    expiresAt,
+    tsReceived,
+    envelope,
+    payload,
   };
 }
 
@@ -173,14 +343,22 @@ export class ChannelManager {
       },
     });
     this.triggerGateway = new TriggerGateway({
-      onPass: async (channel, event, outcome) => {
+      onReact: async (channel, event, outcome) => {
         await this._recordTrace(channel, {
           kind: 'trigger',
-          decision: 'pass',
+          decision: 'react',
           reason: outcome.reason,
           event,
         });
         await this._deliverEvent(channel, event);
+      },
+      onLogOnly: async (channel, event, outcome) => {
+        await this._recordTrace(channel, {
+          kind: 'trigger',
+          decision: 'log_only',
+          reason: outcome.reason,
+          event,
+        });
       },
       onBlock: async (channel, event, outcome) => {
         await this._recordTrace(channel, {
@@ -233,6 +411,7 @@ export class ChannelManager {
 
     for (const node of this.channels.values()) {
       await this._stopProcess(node, 'SIGTERM');
+      this._closeMessageStore(node);
     }
   }
 
@@ -336,6 +515,7 @@ export class ChannelManager {
       crashCount: existing?.crashCount ?? 0,
       intentionalStop: false,
       mountedCliBinaries: existing?.mountedCliBinaries ?? [],
+      messageStore: existing?.messageStore ?? null,
     };
 
     this.channels.set(node.channelId, node);
@@ -361,6 +541,8 @@ export class ChannelManager {
     if (node.proc) {
       return this._channelInfo(node);
     }
+
+    this._openMessageStore(node);
 
     const sessionIdPath = this._sessionIdPath(node);
     const spawnConfig = buildCoagentSpawn({
@@ -410,6 +592,7 @@ export class ChannelManager {
     node.status = 'paused';
     this._persistNode(node);
     await this._stopProcess(node, 'SIGTERM');
+    this._closeMessageStore(node);
     this._notifyChannelStatus(node);
     emitJsonEvent('channel.stop', { channel_id: node.channelId, status: node.status });
     return this._channelInfo(node);
@@ -449,6 +632,7 @@ export class ChannelManager {
     node.archivedAt = nowIso();
     this._persistNode(node);
     await this._stopProcess(node, 'SIGTERM');
+    this._closeMessageStore(node);
 
     const archivedWorkdir = path.join(this.archivedDir, `${channelId}-${Date.now()}`);
     renameSync(node.workdir, archivedWorkdir);
@@ -482,18 +666,21 @@ export class ChannelManager {
       await this.createChannel({ ...payload.channel, status: node.status });
     }
 
-    if (event.type === 'user.message.posted') {
-      const message = event.payload?.message ?? event.payload;
-      const normalized = normalizeMessage(node.channelId, message, { source: 'server' });
-      await this._appendMessage(node, normalized);
-      emitJsonEvent('message.receive', {
-        channel_id: node.channelId,
-        message_id: normalized.messageId,
-        sender_type: normalized.senderType,
-      });
+    const outcome = this.triggerGateway.evaluate(event, node);
+    const eventMessage = this._messageFromEvent(node, event);
+
+    if (eventMessage && outcome.decision !== 'block') {
+      const normalized = await this._appendMessage(node, eventMessage);
+      if (event.type === 'user.message.posted') {
+        emitJsonEvent('message.receive', {
+          channel_id: node.channelId,
+          message_id: normalized.messageId,
+          sender_type: normalized.senderType,
+        });
+      }
     }
 
-    return this.triggerGateway.dispatch({ channel: node, event });
+    return this.triggerGateway.dispatch({ channel: node, event, outcome });
   }
 
   async registerSchedule(params, kind) {
@@ -714,6 +901,21 @@ export class ChannelManager {
     return node;
   }
 
+  _openMessageStore(node) {
+    if (node.messageStore?.open) return node.messageStore;
+    node.messageStore = openMessageStore(node.workdir);
+    return node.messageStore;
+  }
+
+  _closeMessageStore(node) {
+    if (!node.messageStore?.open) {
+      node.messageStore = null;
+      return;
+    }
+    node.messageStore.close();
+    node.messageStore = null;
+  }
+
   _materializeWorkdir(workdir) {
     mkdirSync(workdir, { recursive: true });
     if (existsSync(this.workspaceTemplateDir)) {
@@ -789,6 +991,43 @@ export class ChannelManager {
       crashCount: 0,
       intentionalStop: false,
       mountedCliBinaries: [],
+      messageStore: null,
+    };
+  }
+
+  _messageFromEvent(node, event) {
+    if (event.type === 'user.message.posted') {
+      return {
+        ...(event.payload?.message ?? event.payload),
+        source: event.source ?? 'server',
+      };
+    }
+
+    const payloadTypeByEventType = new Map([
+      ['cron.tick', PayloadType.CRON_TICK],
+      ['channel.config.updated', PayloadType.CHANNEL_CONFIG_UPDATED],
+      ['channel.presence_changed', PayloadType.CHANNEL_PRESENCE_CHANGED],
+      ['channel.member.joined', PayloadType.CHANNEL_PRESENCE_CHANGED],
+      ['workdir.changed', PayloadType.WORKDIR_CHANGED],
+      ['dispatch.self_check_due', PayloadType.DISPATCH_SELF_CHECK_DUE],
+    ]);
+    const payloadType = payloadTypeByEventType.get(event.type) ?? (String(event.type).includes('.') ? event.type : null);
+    if (!payloadType) return null;
+
+    const body = event.payload ?? {};
+    return {
+      messageId: randomUUID(),
+      channelId: node.channelId,
+      senderKind: SenderKind.SYSTEM,
+      senderType: 'system',
+      senderId: 'system:daemon',
+      senderName: 'daemon',
+      messageType: payloadType,
+      content: typeof body?.text === 'string' ? body.text : JSON.stringify(body),
+      payload: { type: payloadType, body },
+      createdAt: event.createdAt ?? event.created_at ?? nowIso(),
+      source: event.source ?? 'daemon',
+      origin: 'system',
     };
   }
 
@@ -956,13 +1195,17 @@ export class ChannelManager {
   }
 
   async _appendMessage(node, message) {
-    const createdAt = new Date(message.createdAt);
+    const normalized = message?.envelope && message?.payload
+      ? message
+      : normalizeMessage(node.channelId, message);
+    const createdAt = new Date(normalized.createdAt);
     const bucket = Number.isNaN(createdAt.getTime())
       ? nowIso().slice(0, 10)
       : createdAt.toISOString().slice(0, 10);
     const filePath = path.join(node.workdir, 'messages', `${bucket}.jsonl`);
-    appendFileSync(filePath, `${JSON.stringify(message)}\n`, 'utf8');
-    return message;
+    appendFileSync(filePath, `${JSON.stringify(normalized)}\n`, 'utf8');
+    appendMessageToStore(this._openMessageStore(node), normalized);
+    return normalized;
   }
 
   _readMessages(node) {
@@ -987,6 +1230,10 @@ export class ChannelManager {
   }
 
   async _appendToServerView(node, message, { requestId = randomUUID() } = {}) {
+    if (message.audience?.includes?.('self')) {
+      return;
+    }
+
     const payload = {
       type: 'message.append',
       requestId,
@@ -998,6 +1245,21 @@ export class ChannelManager {
       message_type: message.messageType,
       content: message.content,
       attachments: message.attachments,
+      sender_kind: message.senderKind,
+      payload_type: message.payloadType,
+      payload_body: message.payloadBody,
+      parent_id: message.parentId,
+      correlation_id: message.correlationId,
+      task_id: message.taskId,
+      thread_id: message.threadId,
+      audience: message.audience,
+      mentions: message.mentions,
+      not_before: message.notBefore,
+      origin: message.origin,
+      expires_at: message.expiresAt,
+      ts_received: message.tsReceived,
+      envelope: message.envelope,
+      payload: message.payload,
     };
 
     if (!this.connection) {

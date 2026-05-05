@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import { PayloadType, SenderKind } from '@coagent/payload-types';
 import {
   getDb,
   insertChannel,
@@ -440,9 +441,12 @@ export function createChannelsRouter({
           requestId,
           channelId: req.channel.id,
           senderType: 'human',
+          senderKind: SenderKind.HUMAN,
           senderId: userId,
           senderName: req.user?.name ?? defaultUserName,
           messageType: 'chat',
+          payloadType: PayloadType.USER_TEXT,
+          payloadBody: { text: content, attachments: [] },
           content,
           attachments: [],
         },

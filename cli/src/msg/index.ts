@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { Command, CommanderError } from 'commander';
+import { PayloadType, SenderKind } from '@coagent/payload-types';
 import { parseCsv, parseIsoTimestamp, parsePositiveInteger } from '../lib/arg-parsers.js';
 import { readMessages, requireChannelId, resolveWorkdir } from '../lib/channel-fs.js';
 import { CliError, toCliError } from '../lib/errors.js';
@@ -40,10 +41,14 @@ async function main(): Promise<void> {
     .requiredOption('--content <textOrPath>', 'message content or a path to a text file')
     .option('--attachments <paths>', 'comma-separated attachment paths', parseCsv, [])
     .action(async (options) => {
+      const content = resolveContent(options.content);
       const result = await callDaemonRpc<Record<string, unknown>>('message.send', {
         channel_id: requireChannelId(),
-        content: resolveContent(options.content),
+        content,
         attachments: options.attachments,
+        sender_kind: SenderKind.AGENT,
+        payload_type: PayloadType.AGENT_TEXT,
+        payload_body: { text: content, attachments: options.attachments },
       });
       writeSuccess(result);
     });

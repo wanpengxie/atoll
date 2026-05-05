@@ -150,5 +150,11 @@ test('send resolves file content and calls daemon RPC', async () => {
     assert.equal(requests.length, 1);
     assert.equal(requests[0].payload.method, 'message.send');
     assert.equal(requests[0].payload.params.attachments.length, 2);
+    assert.equal(requests[0].payload.params.sender_kind, 'agent');
+    assert.equal(requests[0].payload.params.payload_type, 'agent.text');
+    assert.deepEqual(requests[0].payload.params.payload_body, {
+      text: 'reply from file\n',
+      attachments: ['/tmp/a.png', '/tmp/b.png'],
+    });
   });
 });

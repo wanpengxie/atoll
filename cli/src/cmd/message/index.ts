@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { Command } from 'commander';
+import { PayloadType, SenderKind } from '@coagent/payload-types';
 import { parseCsv, parsePositiveInteger } from '../../lib/arg-parsers.js';
 import { configureDaemonRpcEnv } from '../../lib/coagent-env.js';
 import { callDaemonRpc } from '../../lib/rpc.js';
@@ -23,13 +24,17 @@ export function registerMessageCommands(program: Command): void {
     .requiredOption('--text <textOrPath>', 'message text or a path to a text file')
     .option('--attachments <paths>', 'comma-separated attachment paths', parseCsv, [])
     .action(async (options) => {
+      const content = resolveText(options.text);
       writeSuccess(await rpc('message.send', {
         channel_id: options.channel,
-        content: resolveText(options.text),
+        content,
         attachments: options.attachments,
         sender_type: 'human',
+        sender_kind: SenderKind.HUMAN,
         sender_id: 'cli',
         sender_name: 'CLI',
+        payload_type: PayloadType.USER_TEXT,
+        payload_body: { text: content, attachments: options.attachments },
       }));
     });
 

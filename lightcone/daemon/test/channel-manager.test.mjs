@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { ChannelManager } from '../src/channel-manager.js';
+import { readStoredMessages } from '../src/message-store.js';
 
 function captureStdoutWrites(t) {
   const previousWrite = process.stdout.write;
@@ -70,6 +71,12 @@ test('channel:message.send writes local truth before view sync and reports succe
 
       const contents = readFileSync(path.join(workdir, 'messages', files[0]), 'utf8');
       persistedBeforeViewSync = contents.includes('"content":"hello from server"');
+      assert.equal(message.sender_kind, 'human');
+      assert.equal(message.payload_type, 'user.text');
+      assert.equal(message.payload_body.text, 'hello from server');
+      assert.equal(message.envelope.sender.kind, 'human');
+      assert.equal(message.envelope.sender.id, 'user-a');
+      assert.equal(typeof message.ts_received, 'number');
 
       return { type: expect.type, requestId: expect.requestId, ok: true, echoedType: message.type };
     },
@@ -124,6 +131,9 @@ test('channel:message.send writes local truth before view sync and reports succe
   assert.equal(stored[0].senderType, 'human');
   assert.equal(stored[0].senderId, 'user-a');
   assert.equal(stored[0].senderName, 'User A');
+  assert.equal(stored[0].senderKind, 'human');
+  assert.equal(stored[0].payloadType, 'user.text');
+  assert.equal(stored[0].payload.body.text, 'hello from server');
 
   assert.deepEqual(sentLog, [{
     type: 'channel:message.send.result',
@@ -131,6 +141,64 @@ test('channel:message.send writes local truth before view sync and reports succe
     ok: true,
     message: result,
   }]);
+});
+
+test('appendMessage double-writes 100 messages to jsonl and sqlite consistently', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-sqlite-double-write-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-sqlite',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'SQLite Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+
+  for (let index = 0; index < 100; index += 1) {
+    await channelManager._appendMessage(node, {
+      messageId: `message-${index}`,
+      channelId: node.channelId,
+      senderType: 'human',
+      senderId: 'user-a',
+      senderName: 'User A',
+      content: `message ${index}`,
+      createdAt: new Date(Date.UTC(2026, 4, 6, 0, 0, index)).toISOString(),
+      source: 'test',
+    });
+  }
+
+  const jsonlMessages = readdirSync(path.join(created.workdir, 'messages'))
+    .filter((entry) => entry.endsWith('.jsonl'))
+    .flatMap((fileName) => readFileSync(path.join(created.workdir, 'messages', fileName), 'utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line)));
+  const sqliteMessages = readStoredMessages(node.messageStore);
+
+  assert.equal(jsonlMessages.length, 100);
+  assert.equal(sqliteMessages.length, 100);
+  for (let index = 0; index < 100; index += 1) {
+    assert.equal(sqliteMessages[index].id, jsonlMessages[index].messageId);
+    assert.equal(sqliteMessages[index].legacy.content, jsonlMessages[index].content);
+    assert.equal(sqliteMessages[index].sender_kind, jsonlMessages[index].senderKind);
+    assert.equal(sqliteMessages[index].payload_type, jsonlMessages[index].payloadType);
+    assert.deepEqual(sqliteMessages[index].payload.body, jsonlMessages[index].payload.body);
+  }
 });
 
 test('channel:message.send keeps daemon truth and reports ok when view sync ack fails', async (t) => {

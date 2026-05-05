@@ -181,8 +181,11 @@ test('GET and POST /api/channels/:id/messages require auth', async () => {
 
 test('channel creation stays allowed in own workspace and returns 403 across users', async () => {
   const auth = buildChannelAuth();
+  let idCounter = 0;
   const router = createChannelsRouter({
     getDbImpl: () => ({}),
+    getMachinesImpl: async () => [{ id: 'machine-a', status: 'online' }],
+    insertAgentImpl: async (_db, agent) => ({ id: agent.id }),
     insertChannelImpl: async (_db, channel) => ({
       id: channel.id,
       workspace_id: channel.workspaceId,
@@ -203,7 +206,10 @@ test('channel creation stays allowed in own workspace and returns 403 across use
     requireChannelReadImpl: auth.requireChannelRead,
     requireChannelWriteImpl: auth.requireChannelWrite,
     getRequestUserIdImpl: auth.getRequestUserId,
-    uuidv4Impl: () => 'channel-new',
+    uuidv4Impl: () => {
+      idCounter += 1;
+      return idCounter === 1 ? 'agent-new' : 'channel-new';
+    },
   });
 
   await withServer(createApp('/api/channels', router, { id: 'user-a', name: 'User A' }), async (baseUrl) => {
@@ -302,9 +308,12 @@ test('POST /api/channels/:id/messages proxies to daemon-first path and does not 
         requestId: 'req-daemon-1',
         channelId: 'channel-a',
         senderType: 'human',
+        senderKind: 'human',
         senderId: 'user-a',
         senderName: 'User A',
         messageType: 'chat',
+        payloadType: 'user.text',
+        payloadBody: { text: 'hello daemon path', attachments: [] },
         content: 'hello daemon path',
         attachments: [],
       },

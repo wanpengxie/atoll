@@ -155,9 +155,16 @@ export async function initDb() {
       sender_type          VARCHAR(16)  NOT NULL,
       sender_id            VARCHAR(36)  NOT NULL,
       sender_name          VARCHAR(255) NOT NULL DEFAULT '',
-      message_type         VARCHAR(16)  DEFAULT 'chat',
+      message_type         VARCHAR(128) DEFAULT 'chat',
+      sender_kind          VARCHAR(16)  DEFAULT NULL,
+      payload_type         VARCHAR(128) DEFAULT NULL,
+      payload_body         JSON         DEFAULT NULL,
       content              MEDIUMTEXT,
+      parent_id            VARCHAR(64)  DEFAULT NULL,
+      correlation_id       VARCHAR(64)  DEFAULT NULL,
+      task_id              VARCHAR(64)  DEFAULT NULL,
       thread_id            VARCHAR(36),
+      audience             JSON         DEFAULT NULL,
       task_status          VARCHAR(32)  DEFAULT NULL,
       task_number          INT          DEFAULT NULL,
       task_assignee_type   VARCHAR(16)  DEFAULT NULL,
@@ -165,6 +172,11 @@ export async function initDb() {
       task_claimed_at      DATETIME     DEFAULT NULL,
       task_completed_at    DATETIME     DEFAULT NULL,
       mentions             TEXT         DEFAULT NULL,
+      not_before           BIGINT       DEFAULT NULL,
+      origin               VARCHAR(16)  DEFAULT NULL,
+      expires_at           BIGINT       DEFAULT NULL,
+      ts_received          BIGINT       DEFAULT NULL,
+      envelope_json        JSON         DEFAULT NULL,
       created_at           DATETIME     DEFAULT NOW(),
       updated_at           DATETIME     DEFAULT NOW()
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
@@ -327,6 +339,7 @@ export async function initDb() {
       console.error('[DB] Added idx_channel_id on messages(channel_id, seq)');
     }
   }
+  await ensureMessageEnvelopeColumns(db);
 
   // ── team_members.role_prompt migration ──────────────────────────────────────
   {
@@ -643,6 +656,62 @@ async function ensureAgentMemoryScopedByTeam(db) {
   console.error('[DB] Migrated agent_memory primary key to include team_id');
 }
 
+async function ensureMessageEnvelopeColumns(db) {
+  const [messageTypeCols] = await db.execute(
+    `SELECT CHARACTER_MAXIMUM_LENGTH
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'messages' AND COLUMN_NAME = 'message_type'`
+  );
+  if (Number(messageTypeCols[0]?.CHARACTER_MAXIMUM_LENGTH ?? 0) < 128) {
+    await db.execute(`ALTER TABLE messages MODIFY message_type VARCHAR(128) DEFAULT 'chat'`);
+    console.error('[DB] Expanded messages.message_type to VARCHAR(128)');
+  }
+
+  const desired = [
+    ['sender_kind', 'VARCHAR(16) DEFAULT NULL'],
+    ['payload_type', 'VARCHAR(128) DEFAULT NULL'],
+    ['payload_body', 'JSON DEFAULT NULL'],
+    ['parent_id', 'VARCHAR(64) DEFAULT NULL'],
+    ['correlation_id', 'VARCHAR(64) DEFAULT NULL'],
+    ['task_id', 'VARCHAR(64) DEFAULT NULL'],
+    ['audience', 'JSON DEFAULT NULL'],
+    ['not_before', 'BIGINT DEFAULT NULL'],
+    ['origin', 'VARCHAR(16) DEFAULT NULL'],
+    ['expires_at', 'BIGINT DEFAULT NULL'],
+    ['ts_received', 'BIGINT DEFAULT NULL'],
+    ['envelope_json', 'JSON DEFAULT NULL'],
+  ];
+  const [cols] = await db.execute(
+    `SELECT COLUMN_NAME
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'messages'`
+  );
+  const existing = new Set(cols.map((row) => row.COLUMN_NAME));
+  for (const [name, definition] of desired) {
+    if (existing.has(name)) continue;
+    await db.execute(`ALTER TABLE messages ADD COLUMN ${name} ${definition}`);
+    console.error(`[DB] Added messages.${name} envelope column`);
+  }
+
+  const indexes = [
+    ['idx_messages_payload_type', 'payload_type, seq'],
+    ['idx_messages_correlation', 'correlation_id, seq'],
+    ['idx_messages_task', 'task_id, seq'],
+    ['idx_messages_not_before', 'not_before, seq'],
+  ];
+  const [existingIndexes] = await db.execute(
+    `SELECT INDEX_NAME
+     FROM INFORMATION_SCHEMA.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'messages'`
+  );
+  const indexNames = new Set(existingIndexes.map((row) => row.INDEX_NAME));
+  for (const [name, columns] of indexes) {
+    if (indexNames.has(name)) continue;
+    await db.execute(`ALTER TABLE messages ADD INDEX ${name} (${columns})`);
+    console.error(`[DB] Added ${name} on messages(${columns})`);
+  }
+}
+
 async function seedPlatformSkills(db) {
   const __dirname = dirname(fileURLToPath(import.meta.url));
   const skillsDir = join(__dirname, '..', 'skills', 'platform');
@@ -703,19 +772,38 @@ export async function nextTaskNumber(db, teamId) {
 
 // ─── messages ─────────────────────────────────────────────────────────────────
 
+function jsonOrNull(value) {
+  if (value == null) return null;
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+function normalizeJsonText(value) {
+  if (value == null) return null;
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
 export async function insertMessage(db, msg) {
   const [result] = await db.execute(
     `INSERT INTO messages
-      (id, team_id, channel_id, sender_type, sender_id, sender_name, message_type, content,
-       thread_id, task_status, task_number, task_assignee_type, task_assignee_id,
-       task_claimed_at, task_completed_at, mentions)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      (id, team_id, channel_id, sender_type, sender_id, sender_name, message_type,
+       sender_kind, payload_type, payload_body, content, parent_id, correlation_id, task_id,
+       thread_id, audience, task_status, task_number, task_assignee_type, task_assignee_id,
+       task_claimed_at, task_completed_at, mentions, not_before, origin, expires_at,
+       ts_received, envelope_json)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [msg.id, msg.teamId ?? null, msg.channelId ?? null, msg.senderType, msg.senderId, msg.senderName,
-     msg.messageType ?? 'chat', msg.content, msg.threadId ?? null,
+     msg.messageType ?? 'chat', msg.senderKind ?? msg.sender_kind ?? null,
+     msg.payloadType ?? msg.payload_type ?? null, jsonOrNull(msg.payloadBody ?? msg.payload_body ?? msg.payload?.body),
+     msg.content, msg.parentId ?? msg.parent_id ?? null, msg.correlationId ?? msg.correlation_id ?? null,
+     msg.taskId ?? msg.task_id ?? null, msg.threadId ?? msg.thread_id ?? null,
+     jsonOrNull(msg.audience ?? msg.envelope?.audience),
      msg.taskStatus ?? null, msg.taskNumber ?? null,
      msg.taskAssigneeType ?? null, msg.taskAssigneeId ?? null,
      msg.taskClaimedAt ?? null, msg.taskCompletedAt ?? null,
-     msg.mentions ?? null]
+     normalizeJsonText(msg.mentions ?? msg.envelope?.mentions), msg.notBefore ?? msg.not_before ?? null,
+     msg.origin ?? msg.envelope?.origin ?? null, msg.expiresAt ?? msg.expires_at ?? null,
+     msg.tsReceived ?? msg.ts_received ?? msg.envelope?.ts_received ?? null,
+     jsonOrNull(msg.envelope ?? msg.envelope_json)]
   );
   const [rows] = await db.execute(`SELECT * FROM messages WHERE seq = ?`, [result.insertId]);
   return rows[0];
