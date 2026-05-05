@@ -135,24 +135,6 @@ function rowToTask(row) {
   };
 }
 
-function hasText(message, needle) {
-  if (!needle) return true;
-  const haystacks = [
-    message.legacy?.content,
-    message.payload?.body?.text,
-    message.payload_body?.text,
-    message.payload_body,
-  ];
-  return haystacks.some((value) => String(
-    typeof value === 'object' && value !== null ? JSON.stringify(value) : (value ?? ''),
-  ).toLowerCase().includes(needle));
-}
-
-function hasPayloadBodyField(message, field, expected) {
-  if (expected == null || expected === '') return true;
-  return String(message.payload_body?.[field] ?? '').trim() === String(expected).trim();
-}
-
 export function messageStorePath(workdir) {
   return path.join(workdir, 'messages.sqlite');
 }
@@ -407,6 +389,7 @@ export function readStoredMessages(db) {
 export function queryStoredMessages(db, filters = {}) {
   const where = [];
   const params = {};
+  const unread = toBoolean(filters.unread);
 
   const equals = [
     ['channel_id', 'channelId', 'channel_id'],
@@ -437,7 +420,7 @@ export function queryStoredMessages(db, filters = {}) {
     params.not_before_gte = notBeforeGte;
   }
 
-  if (toBoolean(filters.unread)) {
+  if (unread) {
     params.cursor_seq = toSeq(
       filters.cursor_seq ?? filters.cursorSeq ?? filters.last_seen_seq ?? filters.lastSeenSeq,
       0,
@@ -453,24 +436,39 @@ export function queryStoredMessages(db, filters = {}) {
     where.push('delivered_at IS NOT NULL');
   }
 
+  const text = String(filters.text ?? filters.query ?? '').trim().toLowerCase();
+  if (text) {
+    where.push(`(
+      instr(lower(coalesce(legacy_json, '')), @text) > 0
+      OR instr(lower(coalesce(payload_json, '')), @text) > 0
+      OR instr(lower(coalesce(payload_body, '')), @text) > 0
+    )`);
+    params.text = text;
+  }
+
+  const tag = filters.tag;
+  if (tag != null && tag !== '') {
+    where.push("trim(CAST(json_extract(payload_body, '$.tag') AS TEXT)) = @payload_tag");
+    params.payload_tag = String(tag).trim();
+  }
+
+  const status = filters.status && filters.status !== 'all' ? filters.status : null;
+  if (status != null && status !== '') {
+    where.push("trim(CAST(json_extract(payload_body, '$.status') AS TEXT)) = @payload_status");
+    params.payload_status = String(status).trim();
+  }
+
   const order = String(filters.order ?? 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
   const limit = Math.max(1, Math.min(Number.parseInt(filters.limit, 10) || 50, 500));
+  const orderBy = unread ? 'rowid ASC' : `ts_received ${order}`;
   const sql = [
     'SELECT rowid AS seq, * FROM messages',
     where.length > 0 ? `WHERE ${where.join(' AND ')}` : '',
-    `ORDER BY ts_received ${order}`,
+    `ORDER BY ${orderBy}`,
+    'LIMIT @limit',
   ].filter(Boolean).join(' ');
 
-  const text = String(filters.text ?? filters.query ?? '').trim().toLowerCase();
-  const tag = filters.tag;
-  const status = filters.status && filters.status !== 'all' ? filters.status : null;
-  const rows = db.prepare(sql).all(params)
-    .map(rowToMessage)
-    .filter((message) => hasText(message, text))
-    .filter((message) => hasPayloadBodyField(message, 'tag', tag))
-    .filter((message) => hasPayloadBodyField(message, 'status', status));
-
-  return rows.slice(0, limit);
+  return db.prepare(sql).all({ ...params, limit }).map(rowToMessage);
 }
 
 export function queryStoredTasks(db, filters = {}) {
