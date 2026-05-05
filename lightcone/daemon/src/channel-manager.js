@@ -19,12 +19,20 @@ import { PayloadType, SenderKind } from '@coagent/payload-types';
 import { HEALTHY_UPTIME_MS, CronScheduler } from './cron-scheduler.js';
 import { buildCoagentSpawn } from './drivers/coagent.js';
 import { emitJsonEvent } from './events.js';
-import { appendMessageToStore, openMessageStore } from './message-store.js';
+import {
+  appendMessageToStore,
+  markMessageDelivered,
+  openMessageStore,
+  queryStoredMessages,
+  readDueMessages,
+} from './message-store.js';
 import { coagentProjectDir, normalizeProjectKey } from './paths.js';
 import { TriggerGateway } from './trigger-gateway.js';
+import { WorkdirWatcher } from './workdir-watcher.js';
 
 const DEFAULT_AGENT_NAME = 'channel-agent';
 const SHUTDOWN_GRACE_MS = 5_000;
+const DEFAULT_DUE_MESSAGE_POLL_MS = 1_000;
 
 function nowIso() {
   return new Date().toISOString();
@@ -129,6 +137,36 @@ function optionalEpochMs(value) {
   if (value == null || value === '') return null;
   const parsed = toEpochMs(value, null);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseDurationMs(value, fallback = 10 * 60 * 1000) {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+  const text = String(value ?? '').trim();
+  if (!text) return fallback;
+  const numeric = Number(text);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  const match = text.match(/^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/i);
+  if (!match) return fallback;
+  const amount = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  const multipliers = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+  return Math.round(amount * multipliers[unit]);
+}
+
+function normalizePayloadInput(input, defaultType = PayloadType.AGENT_TEXT) {
+  const payload = input?.payload ?? {};
+  const payloadType = String(
+    payload.type
+      ?? input?.payloadType
+      ?? input?.payload_type
+      ?? defaultType,
+  ).trim();
+  const payloadBody = payload.body
+    ?? input?.payloadBody
+    ?? input?.payload_body
+    ?? (payload.type || payload.body ? {} : payload)
+    ?? {};
+  return { payloadType, payloadBody };
 }
 
 function normalizeSenderKind(rawKind, rawSenderType) {
@@ -315,6 +353,11 @@ function sortByCreatedAt(items) {
   });
 }
 
+function legacyMessageOutput(stored) {
+  if (stored?.legacy && Object.keys(stored.legacy).length > 0) return stored.legacy;
+  return stored;
+}
+
 export class ChannelManager {
   constructor({
     serverUrl,
@@ -324,6 +367,7 @@ export class ChannelManager {
     daemonToken = '',
     projectKey = process.env.COAGENT_PROJECT_KEY,
     baseDir = null,
+    dueMessagePollMs = DEFAULT_DUE_MESSAGE_POLL_MS,
   }) {
     this.serverUrl = serverUrl;
     this.machineApiKey = machineApiKey;
@@ -337,6 +381,8 @@ export class ChannelManager {
     this.channelsDir = ensureDirectory(path.join(this.baseDir, 'channels'));
     this.archivedDir = ensureDirectory(path.join(this.baseDir, 'archived'));
     this.workspaceTemplateDir = path.join(repoRoot(), 'workspace-template');
+    this.dueMessagePollMs = dueMessagePollMs;
+    this.dueMessageTimer = null;
     this.cronScheduler = new CronScheduler({
       onTick: async (tick) => {
         await this._handleCronTick(tick);
@@ -408,8 +454,10 @@ export class ChannelManager {
 
   async stopAll() {
     this.cronScheduler.stop();
+    this._stopDueMessageLoop();
 
     for (const node of this.channels.values()) {
+      this._stopWorkdirWatcher(node);
       await this._stopProcess(node, 'SIGTERM');
       this._closeMessageStore(node);
     }
@@ -469,10 +517,28 @@ export class ChannelManager {
         return this.archiveChannel(params.channel_id ?? params.channelId);
       case 'message.send':
         return this.sendChannelMessage(params);
+      case 'message.emit':
+        return this.emitChannelMessage(params);
       case 'message.list':
         return this.listMessages(params.channel_id ?? params.channelId, params.limit ?? 50);
       case 'message.search':
         return this.searchMessages(params.channel_id ?? params.channelId, params.query ?? '', params.limit ?? 20);
+      case 'message.query':
+        return this.queryChannelMessages(params);
+      case 'message.schedule':
+        return this.scheduleChannelMessage(params);
+      case 'dispatch.start':
+        return this.dispatchStart(params);
+      case 'dispatch.check':
+        return this.dispatchCheck(params);
+      case 'dispatch.renew':
+        return this.dispatchRenew(params);
+      case 'dispatch.list':
+        return this.dispatchList(params);
+      case 'memo.create':
+        return this.createMemo(params);
+      case 'memo.recall':
+        return this.recallMemo(params);
       case 'admin.status':
         return this.getAdminStatus();
       case 'admin.machines':
@@ -516,6 +582,7 @@ export class ChannelManager {
       intentionalStop: false,
       mountedCliBinaries: existing?.mountedCliBinaries ?? [],
       messageStore: existing?.messageStore ?? null,
+      workdirWatcher: existing?.workdirWatcher ?? null,
     };
 
     this.channels.set(node.channelId, node);
@@ -574,6 +641,8 @@ export class ChannelManager {
     node.archivedAt = null;
     this._persistNode(node);
     this._loadSchedulesIntoMemory(node);
+    this._startWorkdirWatcher(node);
+    this._startDueMessageLoop();
     this._wireProcess(node, proc, { restoring });
 
     if (notifyStatus) {
@@ -591,6 +660,7 @@ export class ChannelManager {
     this.cronScheduler.clearChannel(channelId);
     node.status = 'paused';
     this._persistNode(node);
+    this._stopWorkdirWatcher(node);
     await this._stopProcess(node, 'SIGTERM');
     this._closeMessageStore(node);
     this._notifyChannelStatus(node);
@@ -631,6 +701,7 @@ export class ChannelManager {
     node.status = 'archived';
     node.archivedAt = nowIso();
     this._persistNode(node);
+    this._stopWorkdirWatcher(node);
     await this._stopProcess(node, 'SIGTERM');
     this._closeMessageStore(node);
 
@@ -757,6 +828,20 @@ export class ChannelManager {
       senderName: options.senderName ?? node.agentName,
       source: options.source ?? 'daemon',
     });
+    const event = this._eventFromMessage(message);
+    const shouldDefer = message.notBefore != null && message.notBefore > Date.now();
+    const outcome = options.trigger === false || shouldDefer
+      ? null
+      : this.triggerGateway.evaluate(event, node);
+
+    if (outcome?.decision === 'block') {
+      await this.triggerGateway.dispatch({ channel: node, event, outcome });
+      return {
+        ...message,
+        blocked: true,
+        trigger: { decision: outcome.decision, reason: outcome.reason },
+      };
+    }
 
     await this._appendMessage(node, message);
     emitJsonEvent('message.send', {
@@ -766,16 +851,18 @@ export class ChannelManager {
     });
     await this._appendToServerView(node, message, { requestId: options.requestId });
 
-    // Server-pushed human messages must trigger the channel agent.
-    // Without this, agent-binary stays idle even though the message file exists.
-    if (message.senderType === 'human' && (options.source === 'server' || message.source === 'server')) {
-      await this.triggerGateway.dispatch({
-        channel: node,
-        event: { type: 'user.message.posted', payload: { message } },
-      });
+    if (outcome) {
+      await this.triggerGateway.dispatch({ channel: node, event, outcome });
     }
 
-    return message;
+    return {
+      ...message,
+      ...(outcome ? { trigger: { decision: outcome.decision, reason: outcome.reason } } : {}),
+    };
+  }
+
+  async emitChannelMessage(params) {
+    return this.sendChannelMessage(params);
   }
 
   async handleServerMessageSend(message, connection = this.connection) {
@@ -791,11 +878,23 @@ export class ChannelManager {
         senderId: message.senderId ?? message.sender_id,
         senderName: message.senderName ?? message.sender_name,
         messageType: message.messageType ?? message.message_type ?? 'chat',
+        senderKind: message.senderKind ?? message.sender_kind,
+        payloadType: message.payloadType ?? message.payload_type,
+        payloadBody: message.payloadBody ?? message.payload_body,
         content: message.content,
         attachments: message.attachments,
+        parentId: message.parentId ?? message.parent_id,
+        correlationId: message.correlationId ?? message.correlation_id,
+        taskId: message.taskId ?? message.task_id,
+        threadId: message.threadId ?? message.thread_id,
+        audience: message.audience,
+        mentions: message.mentions,
+        notBefore: message.notBefore ?? message.not_before,
+        origin: message.origin,
+        expiresAt: message.expiresAt ?? message.expires_at,
       }, {
         requestId,
-        senderType: 'human',
+        senderType: message.senderType ?? message.sender_type ?? 'human',
         senderId: String(message.senderId ?? message.sender_id ?? '').trim(),
         senderName: String(message.senderName ?? message.sender_name ?? '').trim(),
         source: 'server',
@@ -822,9 +921,11 @@ export class ChannelManager {
 
   async listMessages(channelId, limit = 50) {
     const node = this._requireNode(channelId);
-    const messages = this._readMessages(node)
-      .slice(-Number(limit || 50))
-      .reverse();
+    const messages = queryStoredMessages(this._openMessageStore(node), {
+      channel_id: node.channelId,
+      limit,
+      order: 'desc',
+    }).map(legacyMessageOutput);
     return { messages };
   }
 
@@ -833,11 +934,268 @@ export class ChannelManager {
     const needle = String(query ?? '').trim().toLowerCase();
     if (!needle) throw toRpcError('bad_request', 'query is required');
 
-    const messages = this._readMessages(node)
-      .filter((message) => String(message.content ?? '').toLowerCase().includes(needle))
-      .slice(-Number(limit || 20))
-      .reverse();
+    const messages = queryStoredMessages(this._openMessageStore(node), {
+      channel_id: node.channelId,
+      text: needle,
+      limit,
+      order: 'desc',
+    }).map(legacyMessageOutput);
     return { messages };
+  }
+
+  async queryChannelMessages(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const node = this._requireNode(channelId);
+    const messages = queryStoredMessages(this._openMessageStore(node), {
+      ...params,
+      channel_id: node.channelId,
+    });
+    return { messages };
+  }
+
+  async scheduleChannelMessage(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const node = this._requireNode(channelId);
+    const notBefore = optionalEpochMs(params.not_before ?? params.notBefore);
+    if (notBefore == null) throw toRpcError('bad_request', 'not_before is required');
+    const { payloadType, payloadBody } = normalizePayloadInput(params, PayloadType.DISPATCH_SELF_CHECK_DUE);
+    const content = String(params.content ?? payloadBody?.text ?? JSON.stringify(payloadBody ?? {}));
+
+    return this.sendChannelMessage({
+      channelId: node.channelId,
+      messageId: params.id ?? params.message_id ?? params.messageId,
+      senderType: params.sender_type ?? params.senderType ?? 'channel_agent',
+      senderKind: params.sender_kind ?? params.senderKind ?? SenderKind.AGENT,
+      senderId: params.sender_id ?? params.senderId ?? node.agentName,
+      senderName: params.sender_name ?? params.senderName ?? node.agentName,
+      messageType: payloadType,
+      content,
+      payload: { type: payloadType, body: payloadBody },
+      parentId: params.parent_id ?? params.parentId,
+      correlationId: params.correlation_id ?? params.correlationId,
+      taskId: params.task_id ?? params.taskId,
+      threadId: params.thread_id ?? params.threadId,
+      audience: params.audience ?? ['self'],
+      origin: params.origin ?? 'self',
+      notBefore,
+      expiresAt: params.expires_at ?? params.expiresAt,
+      source: params.source ?? 'schedule',
+    }, { trigger: false });
+  }
+
+  async dispatchStart(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const node = this._requireNode(channelId);
+    const target = String(params.target ?? '').trim();
+    const type = String(params.type ?? params.dispatch_type ?? '').trim();
+    if (!target) throw toRpcError('bad_request', 'target is required');
+    if (!type) throw toRpcError('bad_request', 'type is required');
+
+    const correlationId = String(params.correlation_id ?? params.correlationId ?? randomUUID());
+    const body = {
+      type,
+      params: params.params ?? {},
+    };
+    const mentions = target.startsWith('agent:') ? [target] : null;
+    const startMessage = await this.sendChannelMessage({
+      channelId: node.channelId,
+      senderType: 'channel_agent',
+      senderKind: SenderKind.AGENT,
+      senderId: node.agentName,
+      senderName: node.agentName,
+      messageType: PayloadType.DISPATCH_START,
+      payload: { type: PayloadType.DISPATCH_START, body },
+      content: JSON.stringify(body),
+      correlationId,
+      taskId: params.in_task ?? params.inTask ?? params.task_id ?? params.taskId,
+      audience: [target],
+      mentions,
+      origin: 'self',
+      source: 'dispatch',
+    });
+    const checkAfterMs = parseDurationMs(params.check_after_ms ?? params.checkAfterMs ?? params.check_after ?? params.checkAfter);
+    const checkMessage = await this.scheduleChannelMessage({
+      channelId: node.channelId,
+      payloadType: PayloadType.DISPATCH_SELF_CHECK_DUE,
+      payloadBody: {
+        type,
+        target,
+        correlation_id: correlationId,
+        reason: `check ${type} ${correlationId}`,
+      },
+      correlationId,
+      taskId: params.in_task ?? params.inTask ?? params.task_id ?? params.taskId,
+      notBefore: Date.now() + checkAfterMs,
+      source: 'dispatch',
+    });
+
+    return {
+      correlation_id: correlationId,
+      dispatch: startMessage,
+      self_check: checkMessage,
+    };
+  }
+
+  async dispatchCheck(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const correlationId = String(params.correlation_id ?? params.correlationId ?? '').trim();
+    if (!correlationId) throw toRpcError('bad_request', 'correlation_id is required');
+    const node = this._requireNode(channelId);
+    const messages = queryStoredMessages(this._openMessageStore(node), {
+      channel_id: node.channelId,
+      correlation_id: correlationId,
+      order: 'asc',
+      limit: 500,
+    });
+    const dispatchMessages = messages.filter((message) => String(message.payload_type).startsWith('dispatch.'));
+    const terminal = [...dispatchMessages].reverse().find((message) => [
+      PayloadType.DISPATCH_COMPLETED,
+      PayloadType.DISPATCH_FAILED,
+      PayloadType.DISPATCH_REJECTED,
+    ].includes(message.payload_type));
+    const accepted = dispatchMessages.some((message) => message.payload_type === PayloadType.DISPATCH_ACCEPTED);
+    const lastSeen = dispatchMessages.at(-1)?.ts_received ?? null;
+
+    if (terminal) {
+      const status = terminal.payload_type.replace('dispatch.', '');
+      return {
+        correlation_id: correlationId,
+        status,
+        last_seen: terminal.ts_received,
+        result: terminal.payload_body?.result ?? terminal.payload_body,
+        message: terminal,
+      };
+    }
+
+    return {
+      correlation_id: correlationId,
+      status: accepted ? 'accepted_pending' : 'no_response',
+      last_seen: lastSeen,
+      messages: dispatchMessages,
+    };
+  }
+
+  async dispatchRenew(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const correlationId = String(params.correlation_id ?? params.correlationId ?? '').trim();
+    if (!correlationId) throw toRpcError('bad_request', 'correlation_id is required');
+    const checkAfterMs = parseDurationMs(params.check_after_ms ?? params.checkAfterMs ?? params.check_after ?? params.checkAfter);
+    const message = await this.scheduleChannelMessage({
+      channelId,
+      payloadType: PayloadType.DISPATCH_SELF_CHECK_DUE,
+      payloadBody: {
+        correlation_id: correlationId,
+        reason: `renew dispatch check ${correlationId}`,
+      },
+      correlationId,
+      taskId: params.task_id ?? params.taskId,
+      notBefore: Date.now() + checkAfterMs,
+      source: 'dispatch',
+    });
+    return { correlation_id: correlationId, self_check: message };
+  }
+
+  async dispatchList(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const node = this._requireNode(channelId);
+    const messages = queryStoredMessages(this._openMessageStore(node), {
+      channel_id: node.channelId,
+      task_id: params.task_id ?? params.taskId,
+      order: 'asc',
+      limit: 500,
+    }).filter((message) => String(message.payload_type).startsWith('dispatch.'));
+    const chains = new Map();
+    for (const message of messages) {
+      const correlationId = message.correlation_id ?? '<none>';
+      const chain = chains.get(correlationId) ?? {
+        correlation_id: correlationId,
+        task_id: message.task_id ?? null,
+        type: null,
+        status: 'pending',
+        last_seen: null,
+        messages: [],
+      };
+      chain.messages.push(message);
+      chain.last_seen = message.ts_received;
+      if (message.payload_type === PayloadType.DISPATCH_START) {
+        chain.type = message.payload_body?.type ?? chain.type;
+      }
+      if ([
+        PayloadType.DISPATCH_COMPLETED,
+        PayloadType.DISPATCH_FAILED,
+        PayloadType.DISPATCH_REJECTED,
+      ].includes(message.payload_type)) {
+        chain.status = 'terminal';
+        chain.terminal_type = message.payload_type;
+      }
+      chains.set(correlationId, chain);
+    }
+
+    const status = String(params.status ?? '').trim();
+    const dispatches = [...chains.values()].filter((chain) => {
+      if (!status) return true;
+      return status === chain.status;
+    });
+    return { dispatches };
+  }
+
+  async createMemo(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const node = this._requireNode(channelId);
+    const tag = String(params.tag ?? '').trim();
+    const summary = String(params.summary ?? '').trim();
+    if (!tag) throw toRpcError('bad_request', 'tag is required');
+    if (!summary) throw toRpcError('bad_request', 'summary is required');
+    const body = {
+      tag,
+      scope: String(params.scope ?? 'channel').trim() || 'channel',
+      summary,
+      ...(params.doc ?? params.doc_ref ?? params.docRef ? { doc_ref: params.doc ?? params.doc_ref ?? params.docRef } : {}),
+      status: String(params.status ?? 'active').trim() || 'active',
+    };
+
+    return this.sendChannelMessage({
+      channelId: node.channelId,
+      senderType: 'channel_agent',
+      senderKind: SenderKind.AGENT,
+      senderId: node.agentName,
+      senderName: node.agentName,
+      messageType: PayloadType.SELF_MEMO,
+      payload: { type: PayloadType.SELF_MEMO, body },
+      content: summary,
+      correlationId: params.correlation_id ?? params.correlationId,
+      taskId: params.task_id ?? params.taskId,
+      audience: ['self'],
+      origin: 'self',
+      source: 'memo',
+    });
+  }
+
+  async recallMemo(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const node = this._requireNode(channelId);
+    const tag = String(params.tag ?? '').trim();
+    if (!tag) throw toRpcError('bad_request', 'tag is required');
+    const messages = queryStoredMessages(this._openMessageStore(node), {
+      channel_id: node.channelId,
+      payload_type: PayloadType.SELF_MEMO,
+      tag,
+      status: params.status ?? 'active',
+      limit: params.limit ?? 20,
+      order: 'desc',
+    });
+    return {
+      memos: messages.map((message) => ({
+        id: message.id,
+        ts: message.ts,
+        summary: message.payload_body?.summary ?? '',
+        tag: message.payload_body?.tag ?? tag,
+        scope: message.payload_body?.scope ?? 'channel',
+        doc_ref: message.payload_body?.doc_ref ?? null,
+        status: message.payload_body?.status ?? 'active',
+        correlation_id: message.correlation_id ?? null,
+      })),
+    };
   }
 
   async listChannels() {
@@ -923,6 +1281,7 @@ export class ChannelManager {
     }
     ensureDirectory(path.join(workdir, 'messages'));
     ensureDirectory(path.join(workdir, 'artifacts'));
+    ensureDirectory(path.join(workdir, 'notes'));
     ensureDirectory(path.join(workdir, 'schedules'));
     ensureDirectory(path.join(workdir, 'pending-view-sync'));
     ensureDirectory(path.join(workdir, 'agents', DEFAULT_AGENT_NAME, 'trace'));
@@ -992,6 +1351,7 @@ export class ChannelManager {
       intentionalStop: false,
       mountedCliBinaries: [],
       messageStore: null,
+      workdirWatcher: null,
     };
   }
 
@@ -1029,6 +1389,106 @@ export class ChannelManager {
       source: event.source ?? 'daemon',
       origin: 'system',
     };
+  }
+
+  _eventFromMessage(message) {
+    return {
+      type: message.payloadType ?? message.payload?.type ?? message.messageType ?? 'message',
+      source: message.source ?? 'daemon',
+      createdAt: message.createdAt ?? nowIso(),
+      payload: { message },
+    };
+  }
+
+  _messageFromStoredMessage(node, stored) {
+    const legacy = stored.legacy ?? {};
+    return {
+      ...legacy,
+      messageId: stored.id,
+      channelId: stored.channel_id ?? node.channelId,
+      senderKind: stored.sender_kind,
+      senderType: legacy.senderType ?? legacy.sender_type ?? stored.sender_kind,
+      senderId: stored.sender_id,
+      senderName: stored.sender_name,
+      messageType: legacy.messageType ?? legacy.message_type ?? stored.payload_type,
+      payloadType: stored.payload_type,
+      payloadBody: stored.payload_body,
+      payload: stored.payload,
+      content: legacy.content ?? stored.payload_body?.text ?? JSON.stringify(stored.payload_body ?? {}),
+      parentId: stored.parent_id,
+      correlationId: stored.correlation_id,
+      taskId: stored.task_id,
+      threadId: stored.thread_id,
+      audience: stored.audience ? [stored.audience] : null,
+      mentions: stored.mentions,
+      origin: stored.origin,
+      notBefore: stored.not_before,
+      expiresAt: stored.expires_at,
+      tsReceived: stored.ts_received,
+      envelope: stored.envelope,
+      createdAt: legacy.createdAt ?? legacy.created_at ?? new Date(stored.ts).toISOString(),
+      source: 'sqlite-scheduler',
+    };
+  }
+
+  _startDueMessageLoop() {
+    if (this.dueMessageTimer || this.dueMessagePollMs <= 0) return;
+    this.dueMessageTimer = setInterval(() => {
+      this.processDueMessages().catch((err) => {
+        console.error('[ChannelManager] Due message loop failed:', err.message);
+      });
+    }, this.dueMessagePollMs);
+    this.dueMessageTimer.unref?.();
+  }
+
+  _stopDueMessageLoop() {
+    if (!this.dueMessageTimer) return;
+    clearInterval(this.dueMessageTimer);
+    this.dueMessageTimer = null;
+  }
+
+  async processDueMessages(channelId = null, nowMs = Date.now()) {
+    const nodes = [...this.channels.values()]
+      .filter((node) => node.status === 'active' && (!channelId || node.channelId === channelId));
+
+    const delivered = [];
+    for (const node of nodes) {
+      const db = this._openMessageStore(node);
+      const dueMessages = readDueMessages(db, nowMs, 100);
+      for (const stored of dueMessages) {
+        const message = this._messageFromStoredMessage(node, stored);
+        const event = this._eventFromMessage(message);
+        const outcome = this.triggerGateway.evaluate(event, node);
+        await this.triggerGateway.dispatch({ channel: node, event, outcome });
+        markMessageDelivered(db, stored.id, nowMs);
+        delivered.push({
+          message_id: stored.id,
+          channel_id: node.channelId,
+          decision: outcome.decision,
+          reason: outcome.reason,
+        });
+      }
+    }
+    return { delivered };
+  }
+
+  _startWorkdirWatcher(node) {
+    if (node.workdirWatcher) return;
+    node.workdirWatcher = new WorkdirWatcher({
+      workdir: node.workdir,
+      onEvent: (event) => {
+        this.handleEvent({ channelId: node.channelId, event }).catch((err) => {
+          console.error(`[ChannelManager] Workdir watcher failed for ${node.channelId}:`, err.message);
+        });
+      },
+    });
+    node.workdirWatcher.start();
+  }
+
+  _stopWorkdirWatcher(node) {
+    if (!node.workdirWatcher) return;
+    node.workdirWatcher.stop();
+    node.workdirWatcher = null;
   }
 
   _wireProcess(node, proc, { restoring }) {

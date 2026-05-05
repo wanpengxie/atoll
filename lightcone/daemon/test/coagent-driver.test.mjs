@@ -53,6 +53,7 @@ test('buildCoagentSpawn resolves dist runtime and mounted cli shims', () => {
   assert.equal(spawnConfig.args[0], path.join(agentDistDir, 'index.js'));
   assert.equal(spawnConfig.entry, path.join(agentDistDir, 'index.js'));
   assert.deepEqual(spawnConfig.mountedCliBinaries, ['xhs']);
+  assert.doesNotMatch(JSON.stringify(spawnConfig), /chat-bridge|mcp_servers|mcpServers/);
 });
 
 test('buildCoagentSpawn passes explicit extraEnv without inherited-env filtering', () => {

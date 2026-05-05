@@ -21,9 +21,14 @@ function renderTemplate(template: string, values: Record<string, string>): strin
 
 function commandList(env: AgentEnv): string {
   const commands = [
-    '- `coagent-msg send --content <text-or-path> [--attachments <a,b>]`',
-    '- `coagent-msg check [--since <iso8601>] [--limit N]`',
-    '- `coagent-msg search --keyword <kw> [--limit N]`',
+    '- `coagent emit --payload-type agent.text --payload <json>`',
+    '- `coagent query [--unread] [--correlation-id <id>] [--payload-type <type>] [--text <kw>] [--limit N]`',
+    '- `coagent schedule --not-before <time-or-duration> --payload <json>`',
+    '- `coagent dispatch start --target <target> --type <type> --params <json> --check-after <duration>`',
+    '- `coagent dispatch check --correlation-id <id>`',
+    '- `coagent memo --tag <tag> [--doc <path>] <summary>`',
+    '- `coagent recall --tag <tag> [--limit N]`',
+    '- `coagent memo-write --doc <path> --content <markdown-or-path>`',
     '- `coagent-kernel schedule-cron --cron <expr> --reason <text> [--payload <json>]`',
     '- `coagent-kernel schedule-at --at <iso8601> --reason <text> [--payload <json>]`',
     '- `coagent-kernel list-schedules`',

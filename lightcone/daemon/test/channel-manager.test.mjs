@@ -201,6 +201,148 @@ test('appendMessage double-writes 100 messages to jsonl and sqlite consistently'
   }
 });
 
+test('message.schedule and due processing deliver only due D messages once', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-due-messages-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-due',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Due Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const deliveredLines = [];
+  node.status = 'active';
+  node.proc = { stdin: { write: (line) => deliveredLines.push(JSON.parse(line)) } };
+
+  const now = Date.UTC(2026, 4, 6, 1, 0, 0);
+  await channelManager.scheduleChannelMessage({
+    channelId: node.channelId,
+    notBefore: now - 1,
+    correlationId: 'corr-due',
+    payloadBody: { reason: 'due now' },
+  });
+  await channelManager.scheduleChannelMessage({
+    channelId: node.channelId,
+    notBefore: now + 60_000,
+    correlationId: 'corr-later',
+    payloadBody: { reason: 'later' },
+  });
+
+  const first = await channelManager.processDueMessages(node.channelId, now);
+  const second = await channelManager.processDueMessages(node.channelId, now);
+
+  assert.equal(first.delivered.length, 1);
+  assert.equal(first.delivered[0].decision, 'react');
+  assert.equal(second.delivered.length, 0);
+  assert.equal(deliveredLines.length, 1);
+  assert.equal(deliveredLines[0].event.payload.message.correlationId, 'corr-due');
+
+  const stored = readStoredMessages(node.messageStore);
+  const due = stored.find((message) => message.correlation_id === 'corr-due');
+  const later = stored.find((message) => message.correlation_id === 'corr-later');
+  assert.equal(typeof due.delivered_at, 'number');
+  assert.equal(later.delivered_at, null);
+});
+
+test('dispatch and memo RPC helpers write and summarize sqlite protocol messages', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-pattern-cli-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-pattern',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Pattern Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+
+  const started = await channelManager.dispatchStart({
+    channelId: node.channelId,
+    target: 'external:device:test',
+    type: 'xhs.publish',
+    params: { title: 'hello' },
+    inTask: 'task-1',
+    checkAfterMs: 60_000,
+  });
+  assert.equal(typeof started.correlation_id, 'string');
+
+  const afterStart = readStoredMessages(node.messageStore);
+  assert.equal(afterStart.filter((message) => message.correlation_id === started.correlation_id).length, 2);
+  assert.equal(afterStart.some((message) => message.payload_type === 'dispatch.start' && message.task_id === 'task-1'), true);
+  assert.equal(afterStart.some((message) => message.payload_type === 'dispatch.self_check_due' && message.not_before > Date.now()), true);
+
+  const noResponse = await channelManager.dispatchCheck({
+    channelId: node.channelId,
+    correlationId: started.correlation_id,
+  });
+  assert.equal(noResponse.status, 'no_response');
+
+  await channelManager.emitChannelMessage({
+    channelId: node.channelId,
+    senderKind: 'external',
+    senderType: 'external',
+    senderId: 'external:device:test',
+    senderName: 'device',
+    payloadType: 'dispatch.completed',
+    payloadBody: { result: { url: 'https://example.test/note' } },
+    content: 'completed',
+    correlationId: started.correlation_id,
+    origin: 'external',
+  });
+  const completed = await channelManager.dispatchCheck({
+    channelId: node.channelId,
+    correlationId: started.correlation_id,
+  });
+  assert.equal(completed.status, 'completed');
+  assert.deepEqual(completed.result, { url: 'https://example.test/note' });
+
+  const memo = await channelManager.createMemo({
+    channelId: node.channelId,
+    tag: 'pending_action',
+    summary: 'Publish note result is ready',
+    doc: 'notes/tasks/publish.md',
+    correlationId: started.correlation_id,
+  });
+  assert.equal(memo.payloadType, 'self.memo');
+
+  const recalled = await channelManager.recallMemo({
+    channelId: node.channelId,
+    tag: 'pending_action',
+  });
+  assert.equal(recalled.memos.length, 1);
+  assert.equal(recalled.memos[0].doc_ref, 'notes/tasks/publish.md');
+});
+
 test('channel:message.send keeps daemon truth and reports ok when view sync ack fails', async (t) => {
   const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-view-sync-fail-'));
   const previousHome = process.env.HOME;

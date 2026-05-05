@@ -35,7 +35,7 @@ const ALLOWED_CHANNEL_TYPES = new Set(['xhs-creator']);
 const ALLOWED_MEMBER_TYPES = new Set(['human', 'channel_agent', 'sub_agent', 'worker']);
 
 const CAPABILITY_DEFAULTS_BY_TYPE = {
-  'xhs-creator': { cli_binaries: ['xhs', 'coagent-kernel', 'coagent-msg'] },
+  'xhs-creator': { cli_binaries: ['coagent', 'xhs', 'coagent-kernel', 'coagent-msg'] },
 };
 
 const PM_DESCRIPTION_BY_TYPE = {

@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { AgentEnv } from '../types/env.js';
 import { CliError } from '../util/simple-error.js';
 
-const REQUIRED_DIRS = ['messages', 'artifacts', 'schedules'];
+const REQUIRED_DIRS = ['messages', 'artifacts', 'notes', 'schedules'];
 
 export function initializeWorkspace(env: AgentEnv): void {
   const cwd = path.resolve(process.cwd());

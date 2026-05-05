@@ -145,12 +145,14 @@ export class TriggerGateway {
       return { decision: TriggerDecision.LOG_ONLY, reason: 'dispatch_accepted_log_only', context };
     }
 
-    if (senderKind === SenderKind.AGENT && payloadType === PayloadType.DISPATCH_START && selfMentioned) {
-      return { decision: TriggerDecision.REACT, reason: 'agent_dispatch_start_mentions_self', context };
+    if (payloadType === PayloadType.DISPATCH_SELF_CHECK_DUE) {
+      return { decision: TriggerDecision.REACT, reason: 'dispatch_self_check_due_react', context };
     }
 
-    if (senderKind === SenderKind.SYSTEM && payloadType === PayloadType.DISPATCH_SELF_CHECK_DUE) {
-      return { decision: TriggerDecision.REACT, reason: 'dispatch_self_check_due_react', context };
+    if (senderKind === SenderKind.AGENT && payloadType === PayloadType.DISPATCH_START) {
+      return selfMentioned
+        ? { decision: TriggerDecision.REACT, reason: 'agent_dispatch_start_mentions_self', context }
+        : { decision: TriggerDecision.LOG_ONLY, reason: 'agent_dispatch_start_log_only', context };
     }
 
     if (senderKind === SenderKind.SYSTEM && payloadType === PayloadType.CRON_TICK) {
@@ -180,6 +182,10 @@ export class TriggerGateway {
 
     if (senderKind === SenderKind.AGENT && isTaskPayloadType(payloadType)) {
       return { decision: TriggerDecision.LOG_ONLY, reason: 'agent_task_signal_log_only', context };
+    }
+
+    if (senderKind === SenderKind.AGENT && payloadType === PayloadType.SELF_MEMO) {
+      return { decision: TriggerDecision.LOG_ONLY, reason: 'agent_self_memo_log_only', context };
     }
 
     return { decision: TriggerDecision.BLOCK, reason: 'default_ruleset_unknown', context };

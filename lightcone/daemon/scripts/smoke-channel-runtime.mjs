@@ -331,8 +331,8 @@ try {
   await delay(50);
   let traceEntries = readTraceEntries(started.workdir, started.session_id);
   assert.ok(
-    traceEntries.some((entry) => entry.kind === 'trigger' && entry.decision === 'pass' && entry.event?.type === 'cron.tick'),
-    'cron.tick should pass trigger gateway',
+    traceEntries.some((entry) => entry.kind === 'trigger' && entry.decision === 'react' && entry.event?.type === 'cron.tick'),
+    'cron.tick should react through trigger gateway',
   );
 
   await channelManager.handleEvent({

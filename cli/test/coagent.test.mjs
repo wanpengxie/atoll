@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -89,6 +89,9 @@ test('coagent help lists the business command tree', () => {
   const help = execFileSync(binShim, ['--help'], { cwd: cliDir, encoding: 'utf8' });
   assert.match(help, /channel\s+Manage coagent channels/);
   assert.match(help, /message\s+Send and inspect channel messages/);
+  assert.match(help, /emit \[options\]\s+Emit an envelope message/);
+  assert.match(help, /query \[options\]\s+Query channel messages/);
+  assert.match(help, /dispatch\s+Dispatch promise-chain helpers/);
   assert.match(help, /admin\s+Inspect the local daemon/);
   assert.match(help, /xhs\s+Run Xiaohongshu business commands/);
 });
@@ -147,6 +150,84 @@ test('coagent business subcommands call expected daemon RPC methods', async () =
     },
     { args: ['message', 'history', '--channel', 'channel-a', '--limit', '7'], method: 'message.list', params: { channel_id: 'channel-a', limit: 7 } },
     { args: ['message', 'search', '--channel', 'channel-a', '--query', 'hello', '--limit', '3'], method: 'message.search', params: { channel_id: 'channel-a', query: 'hello', limit: 3 } },
+    {
+      args: ['emit', '--channel', 'channel-a', '--payload-type', 'agent.text', '--payload', '{"text":"hi"}'],
+      method: 'message.emit',
+      params: {
+        channel_id: 'channel-a',
+        sender_kind: 'agent',
+        sender_type: 'channel_agent',
+        sender_id: 'channel-agent',
+        sender_name: 'channel-agent',
+        message_type: 'agent.text',
+        payload_type: 'agent.text',
+        payload_body: { text: 'hi' },
+        content: 'hi',
+        audience: ['channel'],
+      },
+    },
+    {
+      args: [
+        'query',
+        '--channel', 'channel-a',
+        '--correlation-id', 'corr-a',
+        '--payload-type', 'dispatch.completed',
+        '--sender-kind', 'external',
+        '--not-before', '2026-05-06T00:00:00.000Z',
+        '--text', 'done',
+        '--unread',
+        '--limit', '5',
+      ],
+      method: 'message.query',
+      params: {
+        channel_id: 'channel-a',
+        correlation_id: 'corr-a',
+        payload_type: 'dispatch.completed',
+        sender_kind: 'external',
+        not_before_lte: Date.parse('2026-05-06T00:00:00.000Z'),
+        text: 'done',
+        unread: true,
+        limit: 5,
+      },
+    },
+    {
+      args: ['schedule', '--channel', 'channel-a', '--not-before', '1760000000000', '--payload', '{"reason":"check"}'],
+      method: 'message.schedule',
+      params: {
+        channel_id: 'channel-a',
+        not_before: 1760000000000,
+        payload_type: 'dispatch.self_check_due',
+        payload_body: { reason: 'check' },
+      },
+    },
+    {
+      args: ['dispatch', 'start', '--channel', 'channel-a', '--target', 'external:device:x', '--type', 'xhs.publish', '--params', '{"title":"hi"}', '--in-task', 'task-a', '--check-after', '5m'],
+      method: 'dispatch.start',
+      params: {
+        channel_id: 'channel-a',
+        target: 'external:device:x',
+        type: 'xhs.publish',
+        params: { title: 'hi' },
+        in_task: 'task-a',
+        check_after_ms: 300000,
+      },
+    },
+    { args: ['dispatch', 'check', '--channel', 'channel-a', '--correlation-id', 'corr-a'], method: 'dispatch.check', params: { channel_id: 'channel-a', correlation_id: 'corr-a' } },
+    { args: ['dispatch', 'renew', '--channel', 'channel-a', '--correlation-id', 'corr-a', '--check-after', '30s'], method: 'dispatch.renew', params: { channel_id: 'channel-a', correlation_id: 'corr-a', check_after_ms: 30000 } },
+    { args: ['dispatch', 'ls', '--channel', 'channel-a', '--task-id', 'task-a', '--status', 'pending'], method: 'dispatch.list', params: { channel_id: 'channel-a', task_id: 'task-a', status: 'pending' } },
+    {
+      args: ['memo', '--channel', 'channel-a', '--tag', 'rule', '--scope', 'forever', '--doc', 'notes/rule.md', '--correlation-id', 'corr-a', 'Remember this'],
+      method: 'memo.create',
+      params: {
+        channel_id: 'channel-a',
+        tag: 'rule',
+        scope: 'forever',
+        doc: 'notes/rule.md',
+        correlation_id: 'corr-a',
+        summary: 'Remember this',
+      },
+    },
+    { args: ['recall', '--channel', 'channel-a', '--tag', 'rule', '--limit', '3', '--status', 'all'], method: 'memo.recall', params: { channel_id: 'channel-a', tag: 'rule', limit: 3, status: 'all' } },
     { args: ['admin', 'machines'], method: 'admin.machines', params: {} },
   ];
 
@@ -200,6 +281,44 @@ test('coagent daemon RPC reads machine.key token without mutating env', async (t
     });
     assert.equal(body.ok, true);
     assert.equal(requests[0].headers.authorization, 'Bearer machine-key-from-file');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('coagent memo-write writes a local doc and emits a memo RPC', async (t) => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'coagent-memo-write-'));
+  t.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+  writeFileSync(path.join(tempDir, 'channel.yaml'), JSON.stringify({ channel_id: 'channel-memo' }), 'utf8');
+
+  const { server, port, requests } = await withRpcServer((request) => ({
+    ok: true,
+    result: { echoed_method: request.payload.method, echoed_params: request.payload.params },
+  }));
+  try {
+    const body = await runCliAsync([
+      'memo-write',
+      '--doc',
+      'notes/tasks/task.md',
+      '--content',
+      '# Task Title\n\nbody\n',
+    ], {
+      COAGENT_DAEMON_HTTP: `http://127.0.0.1:${port}`,
+      COAGENT_DAEMON_SOCKET: '',
+    }, tempDir);
+
+    assert.equal(body.ok, true);
+    assert.equal(readFileSync(path.join(tempDir, 'notes', 'tasks', 'task.md'), 'utf8'), '# Task Title\n\nbody\n');
+    assert.equal(requests[0].payload.method, 'memo.create');
+    assert.deepEqual(requests[0].payload.params, {
+      channel_id: 'channel-memo',
+      tag: 'pending_action',
+      scope: 'channel',
+      doc: 'notes/tasks/task.md',
+      summary: 'Task Title',
+    });
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

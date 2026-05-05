@@ -25,6 +25,47 @@ function toEpochMs(value, fallback = Date.now()) {
   return fallback;
 }
 
+function optionalEpochMs(value) {
+  if (value == null || value === '') return null;
+  const parsed = toEpochMs(value, null);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function ensureColumn(db, table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (columns.some((row) => row.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
+function rowToMessage(row) {
+  return {
+    ...row,
+    payload_body: fromJson(row.payload_body, {}),
+    mentions: fromJson(row.mentions, null),
+    envelope: fromJson(row.envelope_json, {}),
+    payload: fromJson(row.payload_json, {}),
+    legacy: fromJson(row.legacy_json, {}),
+  };
+}
+
+function hasText(message, needle) {
+  if (!needle) return true;
+  const haystacks = [
+    message.legacy?.content,
+    message.payload?.body?.text,
+    message.payload_body?.text,
+    message.payload_body,
+  ];
+  return haystacks.some((value) => String(
+    typeof value === 'object' && value !== null ? JSON.stringify(value) : (value ?? ''),
+  ).toLowerCase().includes(needle));
+}
+
+function hasPayloadBodyField(message, field, expected) {
+  if (expected == null || expected === '') return true;
+  return String(message.payload_body?.[field] ?? '').trim() === String(expected).trim();
+}
+
 export function messageStorePath(workdir) {
   return path.join(workdir, 'messages.sqlite');
 }
@@ -52,6 +93,8 @@ export function openMessageStore(workdir) {
       origin TEXT DEFAULT NULL,
       not_before INTEGER DEFAULT NULL,
       expires_at INTEGER DEFAULT NULL,
+      delivered_at INTEGER DEFAULT NULL,
+      delivery_attempts INTEGER NOT NULL DEFAULT 0,
       envelope_json TEXT NOT NULL,
       payload_json TEXT NOT NULL,
       legacy_json TEXT NOT NULL,
@@ -65,6 +108,9 @@ export function openMessageStore(workdir) {
     CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id);
     CREATE INDEX IF NOT EXISTS idx_messages_not_before ON messages(not_before, ts_received);
   `);
+  ensureColumn(db, 'messages', 'delivered_at', 'INTEGER DEFAULT NULL');
+  ensureColumn(db, 'messages', 'delivery_attempts', 'INTEGER NOT NULL DEFAULT 0');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_messages_due ON messages(not_before, delivered_at)');
   return db;
 }
 
@@ -116,12 +162,90 @@ export function appendMessageToStore(db, message) {
 }
 
 export function readStoredMessages(db) {
-  return db.prepare('SELECT * FROM messages ORDER BY ts_received ASC').all().map((row) => ({
-    ...row,
-    payload_body: fromJson(row.payload_body, {}),
-    mentions: fromJson(row.mentions, null),
-    envelope: fromJson(row.envelope_json, {}),
-    payload: fromJson(row.payload_json, {}),
-    legacy: fromJson(row.legacy_json, {}),
-  }));
+  return db.prepare('SELECT * FROM messages ORDER BY ts_received ASC').all().map(rowToMessage);
+}
+
+export function queryStoredMessages(db, filters = {}) {
+  const where = [];
+  const params = {};
+
+  const equals = [
+    ['channel_id', 'channelId', 'channel_id'],
+    ['correlation_id', 'correlationId', 'correlation_id'],
+    ['task_id', 'taskId', 'task_id'],
+    ['payload_type', 'payloadType', 'payload_type'],
+    ['sender_kind', 'senderKind', 'sender_kind'],
+    ['sender_id', 'senderId', 'sender_id'],
+    ['audience', 'audience', 'audience'],
+  ];
+
+  for (const [column, camelKey, snakeKey] of equals) {
+    const value = filters[snakeKey] ?? filters[camelKey];
+    if (value == null || value === '') continue;
+    where.push(`${column} = @${column}`);
+    params[column] = String(value);
+  }
+
+  const notBeforeLte = optionalEpochMs(filters.not_before_lte ?? filters.notBeforeLte ?? filters.not_before_before);
+  if (notBeforeLte != null) {
+    where.push('not_before IS NOT NULL AND not_before <= @not_before_lte');
+    params.not_before_lte = notBeforeLte;
+  }
+
+  const notBeforeGte = optionalEpochMs(filters.not_before_gte ?? filters.notBeforeGte ?? filters.not_before_after);
+  if (notBeforeGte != null) {
+    where.push('not_before IS NOT NULL AND not_before >= @not_before_gte');
+    params.not_before_gte = notBeforeGte;
+  }
+
+  if (filters.unread === true || filters.delivered === false) {
+    where.push('delivered_at IS NULL');
+  } else if (filters.delivered === true) {
+    where.push('delivered_at IS NOT NULL');
+  }
+
+  const order = String(filters.order ?? 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+  const limit = Math.max(1, Math.min(Number.parseInt(filters.limit, 10) || 50, 500));
+  const sql = [
+    'SELECT * FROM messages',
+    where.length > 0 ? `WHERE ${where.join(' AND ')}` : '',
+    `ORDER BY ts_received ${order}`,
+  ].filter(Boolean).join(' ');
+
+  const text = String(filters.text ?? filters.query ?? '').trim().toLowerCase();
+  const tag = filters.tag;
+  const status = filters.status && filters.status !== 'all' ? filters.status : null;
+  const rows = db.prepare(sql).all(params)
+    .map(rowToMessage)
+    .filter((message) => hasText(message, text))
+    .filter((message) => hasPayloadBodyField(message, 'tag', tag))
+    .filter((message) => hasPayloadBodyField(message, 'status', status));
+
+  return rows.slice(0, limit);
+}
+
+export function readDueMessages(db, nowMs = Date.now(), limit = 50) {
+  return db.prepare(`
+    SELECT * FROM messages
+    WHERE not_before IS NOT NULL
+      AND not_before <= @nowMs
+      AND delivered_at IS NULL
+    ORDER BY not_before ASC, ts_received ASC
+    LIMIT @limit
+  `).all({
+    nowMs: toEpochMs(nowMs),
+    limit: Math.max(1, Math.min(Number.parseInt(limit, 10) || 50, 500)),
+  }).map(rowToMessage);
+}
+
+export function markMessageDelivered(db, messageId, deliveredAt = Date.now()) {
+  db.prepare(`
+    UPDATE messages
+    SET delivered_at = @delivered_at,
+        delivery_attempts = delivery_attempts + 1
+    WHERE id = @id
+  `).run({
+    id: messageId,
+    delivered_at: toEpochMs(deliveredAt),
+  });
 }

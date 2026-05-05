@@ -34,7 +34,8 @@ test('trigger gateway applies the V0 default three-state rules', () => {
     ['dispatch rejected', messageEvent(SenderKind.EXTERNAL, PayloadType.DISPATCH_REJECTED), TriggerDecision.REACT],
     ['dispatch accepted', messageEvent(SenderKind.EXTERNAL, PayloadType.DISPATCH_ACCEPTED), TriggerDecision.LOG_ONLY],
     ['agent dispatch start mentions self', messageEvent(SenderKind.AGENT, PayloadType.DISPATCH_START, { mentions: ['agent:channel-agent'] }), TriggerDecision.REACT],
-    ['self check due', messageEvent(SenderKind.SYSTEM, PayloadType.DISPATCH_SELF_CHECK_DUE), TriggerDecision.REACT],
+    ['agent dispatch start to external', messageEvent(SenderKind.AGENT, PayloadType.DISPATCH_START), TriggerDecision.LOG_ONLY],
+    ['self check due', messageEvent(SenderKind.AGENT, PayloadType.DISPATCH_SELF_CHECK_DUE), TriggerDecision.REACT],
     ['cron tick', { type: 'cron.tick', payload: { schedule_id: 'schedule-1' } }, TriggerDecision.REACT],
     ['channel config updated', { type: 'channel.config.updated', payload: { diff: {} } }, TriggerDecision.REACT],
     ['workdir artifacts change', { type: 'workdir.changed', payload: { path: 'artifacts/a.png' } }, TriggerDecision.LOG_ONLY],
@@ -44,6 +45,7 @@ test('trigger gateway applies the V0 default three-state rules', () => {
     ['task opened', messageEvent(SenderKind.AGENT, PayloadType.TASK_OPENED), TriggerDecision.LOG_ONLY],
     ['task closed', messageEvent(SenderKind.AGENT, PayloadType.TASK_CLOSED), TriggerDecision.LOG_ONLY],
     ['task appended', messageEvent(SenderKind.AGENT, PayloadType.TASK_APPENDED), TriggerDecision.LOG_ONLY],
+    ['self memo', messageEvent(SenderKind.AGENT, PayloadType.SELF_MEMO), TriggerDecision.LOG_ONLY],
     ['heartbeat', { type: 'heartbeat', payload: {} }, TriggerDecision.BLOCK],
     ['metric', { type: 'metric.cpu', payload: {} }, TriggerDecision.BLOCK],
   ];
