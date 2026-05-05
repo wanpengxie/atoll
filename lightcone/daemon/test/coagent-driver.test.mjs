@@ -3,7 +3,11 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { buildAgentInheritedEnv, buildCoagentSpawn } from '../src/drivers/coagent.js';
+
+const testDir = path.dirname(fileURLToPath(import.meta.url));
+const actualRepoRootDir = path.resolve(testDir, '../../..');
 
 function createRepoRoot(prefix) {
   return path.join(os.tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
@@ -74,6 +78,74 @@ test('buildCoagentSpawn passes explicit extraEnv without inherited-env filtering
   });
 
   assert.equal(spawnConfig.env.CUSTOM_FOO, 'bar');
+});
+
+test('buildCoagentSpawn injects channel-type config consumable by agent prompt builder', async () => {
+  const repoRootDir = createRepoRoot('coagent-driver-channel-type-config');
+  const agentDistDir = path.join(repoRootDir, 'agent-binary', 'dist');
+  const sessionIdPath = path.join(repoRootDir, 'tmp', 'session.id');
+
+  mkdirSync(agentDistDir, { recursive: true });
+  writeFileSync(path.join(agentDistDir, 'index.js'), 'export {};\n', 'utf8');
+
+  const channelTypeConfig = {
+    channel_type: 'spawn-mock',
+    display_name: 'Spawn Mock Channel',
+    description: 'Daemon spawn injection fixture.',
+    dispatch_table: [{
+      sender_kind: 'human',
+      payload_type: 'user.text',
+      protocol: 'agentic',
+      handler: 'handle_spawn_mock',
+      description: 'Handle a mock spawn prompt event.',
+    }],
+    business_clis: [{
+      name: 'spawnctl',
+      purpose: 'Spawn fixture CLI.',
+      commands: ['spawnctl run --id <id>'],
+    }],
+    dispatch_types: [{ type: 'spawn.run', description: 'Run a spawn fixture.' }],
+    task_types: [{ type: 'spawn.task', description: 'Tracked spawn fixture task.' }],
+    invariants: ['Spawn fixtures must stay inside prompt tests.'],
+    business_sop: [],
+    capabilities: ['Verify daemon-to-agent config prompt injection.'],
+  };
+
+  const spawnConfig = buildCoagentSpawn({
+    channelId: 'channel-spawn',
+    channelName: 'Spawn Channel',
+    channelType: 'spawn-mock',
+    channelTypeConfig,
+    workspaceId: 'workspace-1',
+    workdir: repoRootDir,
+    capabilitySet: { cli_binaries: [] },
+    sessionIdPath,
+    repoRootDir,
+  });
+
+  assert.equal(spawnConfig.env.COAGENT_CHANNEL_TYPE, 'spawn-mock');
+  assert.deepEqual(JSON.parse(spawnConfig.env.COAGENT_CHANNEL_TYPE_CONFIG), channelTypeConfig);
+
+  const { buildSystemPrompt } = await import(path.join(actualRepoRootDir, 'agent-binary', 'dist', 'prompt', 'system-prompt.js'));
+  const prompt = buildSystemPrompt({
+    channelId: spawnConfig.env.COAGENT_CHANNEL_ID,
+    channelName: spawnConfig.env.COAGENT_CHANNEL_NAME,
+    channelType: spawnConfig.env.COAGENT_CHANNEL_TYPE,
+    workspaceId: spawnConfig.env.COAGENT_WORKSPACE_ID,
+    workdir: spawnConfig.env.COAGENT_WORKDIR,
+    agentName: spawnConfig.env.COAGENT_AGENT_NAME,
+    sessionId: spawnConfig.env.COAGENT_SESSION_ID,
+    sessionIdPath: spawnConfig.env.COAGENT_SESSION_ID_PATH,
+    daemonSocket: spawnConfig.env.COAGENT_DAEMON_SOCKET,
+    daemonHttp: spawnConfig.env.COAGENT_DAEMON_HTTP,
+    daemonToken: spawnConfig.env.COAGENT_DAEMON_TOKEN,
+    capabilitySet: JSON.parse(spawnConfig.env.COAGENT_CAPABILITY_SET),
+    channelTypeConfig: JSON.parse(spawnConfig.env.COAGENT_CHANNEL_TYPE_CONFIG),
+  });
+
+  assert.match(prompt, /Spawn Mock Channel/);
+  assert.match(prompt, /handle_spawn_mock/);
+  assert.match(prompt, /spawnctl run --id <id>/);
 });
 
 test('buildCoagentSpawn whitelists agent env and excludes daemon/server secrets', () => {

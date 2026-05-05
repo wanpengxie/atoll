@@ -1,0 +1,60 @@
+channel_type: demo
+display_name: Self-Trampolining Demo Channel
+description: Demo channel type for promise self-check and long-running task examples.
+dispatch_table:
+  - sender_kind: human
+    payload_type: user.text
+    protocol: agentic
+    handler: handle_demo_request
+    description: Convert a user request into a task only when it needs multi-turn tracking.
+  - sender_kind: agent
+    payload_type: dispatch.self_check_due
+    protocol: hybrid
+    handler: handle_demo_self_check
+    description: Always run dispatch check first, then renew, close, or escalate from the result.
+  - sender_kind: system
+    payload_type: cron.tick
+    protocol: hybrid
+    handler: handle_demo_recurring_review
+    description: Review active demo tasks, update docs, and schedule the next review only when useful.
+  - sender_kind: external
+    payload_type: dispatch.failed
+    protocol: agentic
+    handler: handle_demo_dispatch_failed
+    description: Read the failure payload and decide whether to retry, renew, or ask the human.
+business_clis:
+  - name: demo-runner
+    commands:
+      - coagent dispatch start --target external:demo --type demo.step --params <json> --check-after 30s
+      - coagent task open --type demo.series --title <title> --doc <path>
+    purpose: Simulate self-trampolining work with generic dispatch and task commands.
+dispatch_types:
+  - type: demo.step
+    description: One asynchronous demo step that must be checked later.
+    target: external:demo
+    params:
+      - step
+      - input
+  - type: demo.review
+    description: Ask the demo runtime to summarize progress for a recurring review.
+    target: external:demo
+    params:
+      - task_id
+task_types:
+  - type: demo.series
+    description: Multi-turn demo series with a task document and recurring reviews.
+  - type: demo.investigation
+    description: Bounded investigation that may dispatch demo.step promises.
+invariants:
+  - Demo promises must always have a self-check no longer than 30 seconds unless the human asks otherwise.
+  - Demo tasks must update their task document before closing.
+business_sop:
+  - name: handle_demo_self_check
+    protocol: hybrid
+    steps:
+      - Run coagent dispatch check --correlation-id <id>.
+      - If pending, renew once with a short check-after.
+      - If terminal, append the linked task timeline and decide whether to continue the series.
+capabilities:
+  - Demonstrate self-trampolining through dispatch start and self-check.
+  - Demonstrate task documents for multi-turn work.

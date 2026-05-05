@@ -2,6 +2,18 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import type { AgentEnv } from '../types/env.js';
+import {
+  type BusinessCli,
+  type ChannelTypeConfig,
+  loadChannelTypeConfig,
+  validateChannelTypeConfig,
+} from './channel-type-config.js';
+
+export interface PromptParts {
+  basePrompt: string;
+  channelConfigPrompt: string;
+  systemPrompt: string;
+}
 
 function templatePath(filename: string): string {
   return fileURLToPath(new URL(`./templates/${filename}`, import.meta.url));
@@ -11,67 +23,110 @@ function readTemplate(filename: string): string {
   return readFileSync(templatePath(filename), 'utf8').trim();
 }
 
-function renderTemplate(template: string, values: Record<string, string>): string {
-  let output = template;
-  for (const [key, value] of Object.entries(values)) {
-    output = output.replaceAll(`{{${key}}}`, value);
-  }
-  return output;
+function indentLines(lines: string[], indent = '  '): string[] {
+  return lines.map((line) => `${indent}${line}`);
 }
 
-function commandList(env: AgentEnv): string {
-  const commands = [
-    '- `coagent emit --payload-type agent.text --payload <json>`',
-    '- `coagent query [--unread] [--correlation-id <id>] [--payload-type <type>] [--text <kw>] [--limit N]`',
-    '- `coagent schedule --not-before <time-or-duration> --payload <json>`',
-    '- `coagent dispatch start --target <target> --type <type> --params <json> --check-after <duration>`',
-    '- `coagent dispatch check --correlation-id <id>`',
-    '- `coagent memo --tag <tag> [--doc <path>] <summary>`',
-    '- `coagent recall --tag <tag> [--limit N]`',
-    '- `coagent memo-write --doc <path> --content <markdown-or-path>`',
-    '- `coagent-kernel schedule-cron --cron <expr> --reason <text> [--payload <json>]`',
-    '- `coagent-kernel schedule-at --at <iso8601> --reason <text> [--payload <json>]`',
-    '- `coagent-kernel list-schedules`',
-    '- `coagent-kernel cancel-schedule --id <schedule_id>`',
-    '- `coagent-kernel channel-info`',
-    '- `coagent-kernel member-list`',
-    '- `coagent-kernel capability-list`',
+function renderBusinessCli(cli: BusinessCli): string[] {
+  return [
+    `- ${cli.name}${cli.purpose ? `: ${cli.purpose}` : ''}`,
+    ...indentLines(cli.commands.map((command) => `- ${command}`), '  '),
+  ];
+}
+
+function channelTypeConfigForEnv(env: AgentEnv): ChannelTypeConfig {
+  if (env.channelTypeConfig) {
+    return validateChannelTypeConfig(env.channelTypeConfig);
+  }
+  return loadChannelTypeConfig(env.channelType || 'echo');
+}
+
+function renderChannelConfigPrompt(env: AgentEnv, config: ChannelTypeConfig): string {
+  const lines = [
+    '<channel_context>',
+    `channel_id: ${env.channelId}`,
+    `channel_name: ${env.channelName || env.channelId}`,
+    `agent_name: ${env.agentName}`,
+    `workspace_id: ${env.workspaceId || '<none>'}`,
+    `workdir: ${path.resolve(env.workdir)}`,
+    `channel_type: ${config.channel_type}`,
+    '</channel_context>',
+    '',
+    '<channel_type_config>',
+    `display_name: ${config.display_name}`,
+    `description: ${config.description}`,
+    '',
+    '<dispatch_table>',
+    ...config.dispatch_table.map((entry) => (
+      `- (${entry.sender_kind} x ${entry.payload_type}) -> ${entry.protocol} ${entry.handler}: ${entry.description}`
+    )),
+    '</dispatch_table>',
+    '',
+    '<business_cli_list>',
+    ...(config.business_clis.length > 0
+      ? config.business_clis.flatMap(renderBusinessCli)
+      : ['- none']),
+    '</business_cli_list>',
+    '',
+    '<business_dispatch_types>',
+    ...(config.dispatch_types.length > 0
+      ? config.dispatch_types.map((entry) => (
+        `- ${entry.type}: ${entry.description}`
+        + `${entry.target ? ` target=${entry.target}` : ''}`
+        + `${entry.params && entry.params.length > 0 ? ` params=${entry.params.join(',')}` : ''}`
+      ))
+      : ['- none']),
+    '</business_dispatch_types>',
+    '',
+    '<business_task_types>',
+    ...(config.task_types.length > 0
+      ? config.task_types.map((entry) => `- ${entry.type}: ${entry.description}`)
+      : ['- none']),
+    '</business_task_types>',
+    '',
+    '<channel_type_invariants>',
+    ...(config.invariants.length > 0 ? config.invariants.map((item) => `- ${item}`) : ['- none']),
+    '</channel_type_invariants>',
+    '',
+    '<business_sop>',
+    ...(config.business_sop.length > 0
+      ? config.business_sop.flatMap((entry) => [
+        `<${entry.name} protocol="${entry.protocol}">`,
+        ...entry.steps.map((step, index) => `${index + 1}. ${step}`),
+        `</${entry.name}>`,
+      ])
+      : ['none']),
+    '</business_sop>',
+    '',
+    '<business_capability_index>',
+    ...(config.capabilities.length > 0 ? config.capabilities.map((item) => `- ${item}`) : ['- none']),
+    '</business_capability_index>',
+    '</channel_type_config>',
   ];
 
-  if (env.capabilitySet.cli_binaries.includes('xhs')) {
-    commands.push('- `xhs publish --title <title> --content <path> --images <a,b> [--tags <a,b>]`');
-    commands.push('- `xhs search <keyword> [--limit N]`');
-    commands.push('- `xhs get-my-recent [--limit N]`');
-    commands.push('- `xhs get-note --note-id <id>`');
-    commands.push('- `xhs publish-status --note-id <id>`');
-  }
+  return lines.join('\n');
+}
 
-  return commands.join('\n');
+export function buildPromptParts(env: AgentEnv): PromptParts {
+  const basePrompt = readTemplate('base.md');
+  const config = channelTypeConfigForEnv(env);
+  const channelConfigPrompt = renderChannelConfigPrompt(env, config);
+  return {
+    basePrompt,
+    channelConfigPrompt,
+    systemPrompt: `${basePrompt}\n\n${channelConfigPrompt}`,
+  };
 }
 
 export function buildSystemPrompt(env: AgentEnv): string {
-  const values = {
-    AGENT_NAME: env.agentName,
-    CHANNEL_NAME: env.channelName || env.channelId,
-    CLI_COMMANDS: commandList(env),
-    WORKDIR: path.resolve(env.workdir),
-  };
-
-  const sections = [
-    renderTemplate(readTemplate('identity.md'), values),
-    renderTemplate(readTemplate('workspace-guide.md'), values),
-    renderTemplate(readTemplate('protocol.md'), values),
-    renderTemplate(readTemplate('xhs-flow.md'), values),
-    renderTemplate(readTemplate('reflection.md'), values),
-  ];
-
-  return sections.join('\n\n');
+  return buildPromptParts(env).systemPrompt;
 }
 
 export function buildUserTurn(event: unknown): string {
   return [
     'Handle the following daemon trigger event.',
     'Use channel CLI commands when you need to send a reply, inspect channel state, schedule work, or run business actions.',
+    'Follow the injected dispatch table for the event sender.kind and payload.type.',
     'If no visible action is needed, finish quietly after checking the event.',
     '',
     JSON.stringify(event, null, 2),

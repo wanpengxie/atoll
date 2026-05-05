@@ -5,6 +5,7 @@ export interface CapabilitySet {
 export interface AgentEnv {
   channelId: string;
   channelName: string;
+  channelType: string;
   workspaceId: string;
   workdir: string;
   agentName: string;
@@ -14,4 +15,5 @@ export interface AgentEnv {
   daemonHttp: string;
   daemonToken: string;
   capabilitySet: CapabilitySet;
+  channelTypeConfig?: unknown;
 }

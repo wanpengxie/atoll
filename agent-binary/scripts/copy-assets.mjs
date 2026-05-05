@@ -3,10 +3,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const rootDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
-const sourceTemplates = path.join(rootDir, 'src', 'prompt', 'templates');
-const distTemplates = path.join(rootDir, 'dist', 'prompt', 'templates');
+const assetDirs = ['templates', 'channel-types'];
 
-if (existsSync(sourceTemplates)) {
-  mkdirSync(path.dirname(distTemplates), { recursive: true });
-  cpSync(sourceTemplates, distTemplates, { recursive: true });
+for (const assetDir of assetDirs) {
+  const source = path.join(rootDir, 'src', 'prompt', assetDir);
+  const destination = path.join(rootDir, 'dist', 'prompt', assetDir);
+  if (existsSync(source)) {
+    mkdirSync(path.dirname(destination), { recursive: true });
+    cpSync(source, destination, { recursive: true });
+  }
 }

@@ -1,0 +1,46 @@
+channel_type: echo
+display_name: Echo Channel
+description: Minimal channel type for verifying message handling and visible replies.
+dispatch_table:
+  - sender_kind: human
+    payload_type: user.text
+    protocol: agentic
+    handler: handle_echo_user_text
+    description: Reply visibly with the same intent after checking unread context.
+  - sender_kind: system
+    payload_type: cron.tick
+    protocol: hybrid
+    handler: handle_echo_tick
+    description: Inspect the schedule payload, emit a concise self memo when it matters, otherwise finish quietly.
+  - sender_kind: external
+    payload_type: dispatch.completed
+    protocol: hybrid
+    handler: handle_echo_dispatch_completed
+    description: Query the dispatch chain, summarize the terminal result, and update any linked task.
+business_clis:
+  - name: echo
+    commands:
+      - coagent emit --payload-type agent.text --payload '{"text":"<reply>"}'
+    purpose: Visible echo-style replies through the generic coagent CLI.
+dispatch_types:
+  - type: echo.ping
+    description: Ask an external echo endpoint or demo worker to acknowledge a payload.
+    target: external:echo
+    params:
+      - text
+task_types:
+  - type: echo.followup
+    description: Tracked multi-turn echo follow-up.
+invariants:
+  - Echo channels should prefer short visible replies unless the user explicitly asks for tracked work.
+  - Do not create tasks for a single echo reply.
+business_sop:
+  - name: handle_echo_user_text
+    protocol: agentic
+    steps:
+      - Query unread messages and recent self memos.
+      - Decide whether a direct reply is enough or a tracked follow-up is needed.
+      - Emit one visible agent.text reply when appropriate.
+capabilities:
+  - Echo a human request as a durable channel reply.
+  - Demonstrate dispatch and task patterns without a business integration.

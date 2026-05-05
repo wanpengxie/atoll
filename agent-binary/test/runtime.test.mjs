@@ -162,6 +162,7 @@ test('system prompt exposes required CLI commands without the banned keyword', a
   const prompt = buildSystemPrompt({
     channelId: 'channel-agent',
     channelName: 'Agent Channel',
+    channelType: 'echo',
     workspaceId: 'workspace-1',
     workdir: '/tmp/channel-agent',
     agentName: 'channel-agent',
@@ -174,8 +175,10 @@ test('system prompt exposes required CLI commands without the banned keyword', a
   });
 
   assert.equal(prompt.includes('coagent-kernel'), true);
-  assert.equal(prompt.includes('coagent-msg'), true);
-  assert.equal(prompt.includes('xhs publish'), true);
+  assert.equal(prompt.includes('coagent emit'), true);
+  assert.equal(prompt.includes('coagent dispatch start'), true);
+  assert.equal(prompt.includes('coagent task open'), true);
+  assert.equal(prompt.includes('echo.ping'), true);
   assert.equal(prompt.toLowerCase().includes('m' + 'cp'), false);
 });
 
@@ -195,6 +198,7 @@ test('runtime creates a session on the first turn and resumes it on the second t
     FAKE_CLAUDE_LOG: logPath,
     COAGENT_CHANNEL_ID: 'channel-agent',
     COAGENT_CHANNEL_NAME: 'Agent Channel',
+    COAGENT_CHANNEL_TYPE: 'echo',
     COAGENT_WORKSPACE_ID: 'workspace-1',
     COAGENT_WORKDIR: workdir,
     COAGENT_AGENT_NAME: 'channel-agent',

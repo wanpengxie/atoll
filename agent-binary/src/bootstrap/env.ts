@@ -1,5 +1,6 @@
 import { accessSync, constants as fsConstants } from 'node:fs';
 import path from 'node:path';
+import { parseChannelTypeConfigText } from '../prompt/channel-type-config.js';
 import { CliError } from '../util/simple-error.js';
 import type { AgentEnv, CapabilitySet } from '../types/env.js';
 
@@ -29,6 +30,20 @@ function requireValue(value: string, key: string): string {
     throw new CliError('missing_env', `Missing required environment variable: ${key}`);
   }
   return trimmed;
+}
+
+function parseChannelTypeConfig(raw: string): unknown {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+
+  try {
+    return parseChannelTypeConfigText(trimmed);
+  } catch (error) {
+    throw new CliError(
+      'invalid_channel_type_config',
+      error instanceof Error ? `Invalid channel type config: ${error.message}` : 'Invalid channel type config',
+    );
+  }
 }
 
 function assertBinaryOnPath(binary: string): void {
@@ -66,6 +81,7 @@ export function parseEnv(env = process.env): AgentEnv {
   return {
     channelId: requireValue(String(env.COAGENT_CHANNEL_ID ?? env.CHANNEL_ID ?? ''), 'COAGENT_CHANNEL_ID'),
     channelName: String(env.COAGENT_CHANNEL_NAME ?? env.CHANNEL_NAME ?? '').trim(),
+    channelType: String(env.COAGENT_CHANNEL_TYPE ?? env.CHANNEL_TYPE ?? 'echo').trim() || 'echo',
     workspaceId: String(env.COAGENT_WORKSPACE_ID ?? env.WORKSPACE_ID ?? '').trim(),
     workdir,
     agentName: requireValue(String(env.COAGENT_AGENT_NAME ?? 'channel-agent'), 'COAGENT_AGENT_NAME'),
@@ -75,5 +91,6 @@ export function parseEnv(env = process.env): AgentEnv {
     daemonHttp,
     daemonToken: String(env.COAGENT_DAEMON_TOKEN ?? '').trim(),
     capabilitySet,
+    channelTypeConfig: parseChannelTypeConfig(String(env.COAGENT_CHANNEL_TYPE_CONFIG ?? env.CHANNEL_TYPE_CONFIG ?? '')),
   };
 }
