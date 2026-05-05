@@ -23,6 +23,27 @@ function walkDirectories(root) {
   return dirs;
 }
 
+const WATCHED_DIRECTORIES = ['artifacts', 'notes', 'schedules'];
+
+function isIgnoredPath(relativePath) {
+  if (relativePath === 'pending-view-sync' || relativePath.startsWith('pending-view-sync/')) return true;
+  if (!relativePath.startsWith('agents/')) return false;
+
+  const segments = relativePath.split('/');
+  const agentPathSegments = segments.slice(2);
+  return agentPathSegments.some((segment) => (
+    segment === 'trace'
+    || segment === 'cursor.json'
+    || segment.startsWith('session')
+  ));
+}
+
+function isWatchableDirectory(relativePath) {
+  return WATCHED_DIRECTORIES.some((topLevel) => (
+    relativePath === topLevel || relativePath.startsWith(`${topLevel}/`)
+  ));
+}
+
 export class WorkdirWatcher {
   constructor({ workdir, onEvent, debounceMs = 50 }) {
     this.workdir = workdir;
@@ -33,10 +54,10 @@ export class WorkdirWatcher {
   }
 
   start() {
-    this._watchDirectory(this.workdir);
-    for (const topLevel of ['artifacts', 'notes', 'agents']) {
+    this._watchPath(path.join(this.workdir, 'channel.yaml'));
+    for (const topLevel of WATCHED_DIRECTORIES) {
       for (const dir of walkDirectories(path.join(this.workdir, topLevel))) {
-        this._watchDirectory(dir);
+        this._watchPath(dir);
       }
     }
   }
@@ -56,10 +77,11 @@ export class WorkdirWatcher {
     const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(this.workdir, filePath);
     const relativePath = toPosixPath(path.relative(this.workdir, absolutePath));
     if (!relativePath || relativePath.startsWith('..')) return null;
+    if (isIgnoredPath(relativePath)) return null;
 
     const stat = safeStat(absolutePath);
-    if (stat?.isDirectory()) {
-      this._watchDirectory(absolutePath);
+    if (stat?.isDirectory() && isWatchableDirectory(relativePath)) {
+      this._watchPath(absolutePath);
     }
 
     if (relativePath === 'channel.yaml') {
@@ -79,6 +101,7 @@ export class WorkdirWatcher {
     if (
       relativePath.startsWith('artifacts/')
       || relativePath.startsWith('notes/')
+      || relativePath.startsWith('schedules/')
       || relativePath.startsWith('agents/')
     ) {
       return this._emit({
@@ -97,11 +120,13 @@ export class WorkdirWatcher {
     return null;
   }
 
-  _watchDirectory(dir) {
-    if (!existsSync(dir) || this.watchers.has(dir)) return;
-    const watcher = watch(dir, { persistent: false }, (eventType, fileName) => {
-      if (!fileName) return;
-      const changedPath = path.join(dir, String(fileName));
+  _watchPath(targetPath) {
+    const stat = safeStat(targetPath);
+    if (!stat || this.watchers.has(targetPath)) return;
+    const isDirectory = stat.isDirectory();
+    const watcher = watch(targetPath, { persistent: false }, (eventType, fileName) => {
+      if (!fileName && isDirectory) return;
+      const changedPath = isDirectory ? path.join(targetPath, String(fileName)) : targetPath;
       const key = `${eventType}:${changedPath}`;
       if (this.pending.has(key)) clearTimeout(this.pending.get(key));
       this.pending.set(key, setTimeout(() => {
@@ -110,9 +135,9 @@ export class WorkdirWatcher {
       }, this.debounceMs));
     });
     watcher.on('error', () => {
-      this.watchers.delete(dir);
+      this.watchers.delete(targetPath);
     });
-    this.watchers.set(dir, watcher);
+    this.watchers.set(targetPath, watcher);
   }
 
   _emit(event) {

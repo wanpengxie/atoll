@@ -839,6 +839,55 @@ test('_recordTrace failures do not abort handleEvent delivery path', async (t) =
   assert.equal(deliveredLines[0].event.payload.content, 'trace failure should not abort');
 });
 
+test('agents workdir change events stay blocked and recorded in trace', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-agents-block-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-agents-block',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Agents Block Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+
+  await channelManager.handleEvent({
+    channelId: node.channelId,
+    event: {
+      type: 'workdir.changed',
+      source: 'test',
+      payload: {
+        op: 'change',
+        path: 'agents/channel-agent/notes/note.md',
+      },
+    },
+  });
+
+  const tracePath = path.join(node.workdir, 'agents', node.agentName, 'trace', 'pending.jsonl');
+  const traceEntries = readFileSync(tracePath, 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(traceEntries.map((entry) => [entry.kind, entry.decision, entry.reason]), [
+    ['trigger', 'block', 'workdir_agents_block'],
+  ]);
+  assert.equal(traceEntries[0].event.payload.path, 'agents/channel-agent/notes/note.md');
+});
+
 test('agent stdout is forwarded as raw JSON Lines without prefix or truncation', (t) => {
   const writes = captureStdoutWrites(t);
   const { proc } = createStdoutHarness(t, 'channel-stdout');
