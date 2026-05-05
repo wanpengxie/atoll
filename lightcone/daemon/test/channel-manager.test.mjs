@@ -346,6 +346,73 @@ test('delayed channel-audience messages are rejected before local writes', async
   assert.equal(readStoredMessages(channelManager._openMessageStore(node)).length, 0);
 });
 
+test('scheduled task lifecycle payloads are rejected before local writes', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-scheduled-task-lifecycle-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-scheduled-task-lifecycle',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Scheduled Task Lifecycle Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+
+  const notBefore = Date.now() + 3_600_000;
+  const cases = [
+    {
+      payloadType: 'task.opened',
+      taskId: 'task-open-later',
+      payloadBody: {
+        type: 'research',
+        title: 'Open later',
+        doc_ref: 'notes/tasks/2026-05-06-open-later.md',
+      },
+    },
+    {
+      payloadType: 'task.appended',
+      taskId: 'task-append-later',
+      payloadBody: { summary: 'append later' },
+    },
+    {
+      payloadType: 'task.closed',
+      taskId: 'task-close-later',
+      payloadBody: { status: 'completed', summary: 'close later' },
+    },
+  ];
+
+  for (const item of cases) {
+    await assert.rejects(
+      () => channelManager.scheduleChannelMessage({
+        channelId: node.channelId,
+        notBefore,
+        payloadType: item.payloadType,
+        payloadBody: item.payloadBody,
+        taskId: item.taskId,
+      }),
+      (err) => err.code === 'invalid_envelope'
+        && err.statusCode === 400
+        && /task lifecycle payload cannot be scheduled/.test(err.message),
+    );
+  }
+
+  assert.equal(readJsonlMessages(created.workdir).length, 0);
+  assert.equal(readStoredMessages(channelManager._openMessageStore(node)).length, 0);
+});
+
 test('task close and append reject terminal tasks and direct emit cannot mutate projection', async (t) => {
   const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-terminal-task-'));
   t.after(() => {

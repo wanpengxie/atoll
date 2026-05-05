@@ -419,6 +419,12 @@ function normalizeMessage(channelId, message, defaults = {}) {
 
 function assertDeferredMessageEnvelope(message) {
   if (message.notBefore == null) return;
+  if (message.payloadType?.startsWith?.('task.')) {
+    throw toRpcError(
+      'invalid_envelope',
+      'task lifecycle payload cannot be scheduled (not_before forbidden)',
+    );
+  }
   if (isSelfAudienceOnly(message.audience) || message.origin === 'system') return;
   throw toRpcError(
     'invalid_envelope',
