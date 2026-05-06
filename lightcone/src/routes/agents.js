@@ -10,6 +10,7 @@ import { isMachineOnline, sendToDaemon } from '../daemon/connections.js';
 import { requestFromDaemon } from '../daemon/index.js';
 import { requireAuth } from '../middleware/auth.js';
 import { checkQuota } from '../plans.js';
+import { nowMysqlDatetime } from '../time.js';
 
 const router = Router();
 const DEFAULT_SERVER_ID = process.env.DEFAULT_SERVER_ID ?? 'server-001';
@@ -262,7 +263,7 @@ router.delete('/:id', async (req, res) => {
   await deleteAgentTeamSessions(db, agent.id);
 
   // Soft delete
-  await updateAgent(db, req.params.id, { is_del: 1, deleted_at: new Date().toISOString().slice(0,19).replace('T',' '), status: 'inactive' });
+  await updateAgent(db, req.params.id, { is_del: 1, deleted_at: nowMysqlDatetime(), status: 'inactive' });
   broadcast.agentDeleted(DEFAULT_SERVER_ID, req.params.id);
   res.json({ ok: true });
 });

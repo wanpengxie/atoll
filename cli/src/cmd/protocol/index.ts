@@ -65,20 +65,8 @@ function channelIdFromOptions(options: Record<string, unknown>): string {
   return String(options.channel ?? '').trim() || requireChannelId();
 }
 
-function senderDefaults(kind: string) {
-  switch (kind) {
-    case SenderKind.HUMAN:
-      return { sender_type: 'human', sender_id: 'cli', sender_name: 'CLI' };
-    case SenderKind.SYSTEM:
-      return { sender_type: 'system', sender_id: 'system:cli', sender_name: 'system' };
-    case SenderKind.EXTERNAL:
-      return { sender_type: 'external', sender_id: 'external:cli', sender_name: 'external' };
-    case SenderKind.AGENT:
-    default: {
-      const agentName = String(process.env.COAGENT_AGENT_NAME ?? 'channel-agent').trim() || 'channel-agent';
-      return { sender_type: 'channel_agent', sender_id: agentName, sender_name: agentName };
-    }
-  }
+function agentName(): string {
+  return String(process.env.COAGENT_AGENT_NAME ?? 'channel-agent').trim() || 'channel-agent';
 }
 
 function deriveSummary(markdown: string, docPath: string): string {
@@ -94,31 +82,47 @@ async function rpc<T>(method: string, params: Record<string, unknown>): Promise<
 }
 
 export function registerProtocolCommands(program: Command): void {
-  program.command('emit')
-    .description('Emit an envelope message into the channel engine')
+  program.command('reply <text>')
+    .description('Append a visible agent.text reply to the current channel')
     .option('--channel <channelId>', 'channel ID')
-    .requiredOption('--payload-type <type>', 'payload.type')
-    .option('--payload <json>', 'payload body JSON', parseJsonOption, {})
-    .option('--sender-kind <kind>', 'sender kind', SenderKind.AGENT)
-    .option('--sender-id <id>', 'sender id')
-    .option('--sender-name <name>', 'sender display name')
-    .option('--sender-type <type>', 'legacy sender_type')
-    .option('--audience <items>', 'comma-separated audience values', parseCsv)
-    .option('--mentions <items>', 'comma-separated mention IDs', parseCsv)
-    .option('--origin <origin>', 'message origin')
     .option('--parent-id <id>', 'parent message id')
     .option('--correlation-id <id>', 'correlation id')
     .option('--task-id <id>', 'task id')
     .option('--thread-id <id>', 'thread id')
-    .option('--not-before <time>', 'epoch ms, ISO time, or relative duration', parseTimeMs)
+    .action(async (text, options) => {
+      writeSuccess(await rpc('message.emit', {
+        channel_id: channelIdFromOptions(options),
+        sender_kind: SenderKind.AGENT,
+        sender_id: agentName(),
+        sender_name: agentName(),
+        payload_type: PayloadType.AGENT_TEXT,
+        payload_body: { text: String(text) },
+        content: String(text),
+        audience: ['channel'],
+        origin: 'self',
+        parent_id: options.parentId,
+        correlation_id: options.correlationId,
+        task_id: options.taskId,
+        thread_id: options.threadId,
+      }));
+    });
+
+  program.command('emit', { hidden: true })
+    .description('Emit an internal agent.text envelope into the channel engine')
+    .option('--channel <channelId>', 'channel ID')
+    .option('--payload <json>', 'payload body JSON', parseJsonOption, {})
+    .option('--audience <items>', 'comma-separated audience values', parseCsv)
+    .option('--mentions <items>', 'comma-separated mention IDs', parseCsv)
+    .option('--parent-id <id>', 'parent message id')
+    .option('--correlation-id <id>', 'correlation id')
+    .option('--task-id <id>', 'task id')
+    .option('--thread-id <id>', 'thread id')
     .option('--expires-at <time>', 'epoch ms, ISO time, or relative duration', parseTimeMs)
     .option('--message-id <id>', 'explicit envelope id')
     .option('--text <text>', 'content text; defaults to payload.body.text')
     .option('--text-file <path>', 'read content text from a file')
     .action(async (options) => {
       rejectBothOptions(options, 'text', 'textFile', '--text', '--text-file');
-      const senderKind = String(options.senderKind ?? SenderKind.AGENT);
-      const defaults = senderDefaults(senderKind);
       const payloadBody = options.payload as Record<string, unknown>;
       const content = options.textFile != null
         ? readExplicitTextFile(String(options.textFile), '--text-file')
@@ -128,22 +132,19 @@ export function registerProtocolCommands(program: Command): void {
       writeSuccess(await rpc('message.emit', {
         channel_id: channelIdFromOptions(options),
         message_id: options.messageId,
-        sender_kind: senderKind,
-        sender_type: options.senderType ?? defaults.sender_type,
-        sender_id: options.senderId ?? defaults.sender_id,
-        sender_name: options.senderName ?? defaults.sender_name,
-        message_type: options.payloadType,
-        payload_type: options.payloadType,
+        sender_kind: SenderKind.AGENT,
+        sender_id: agentName(),
+        sender_name: agentName(),
+        payload_type: PayloadType.AGENT_TEXT,
         payload_body: payloadBody,
         content,
         audience: options.audience ?? ['channel'],
         mentions: options.mentions,
-        origin: options.origin,
+        origin: 'self',
         parent_id: options.parentId,
         correlation_id: options.correlationId,
         task_id: options.taskId,
         thread_id: options.threadId,
-        not_before: options.notBefore,
         expires_at: options.expiresAt,
       }));
     });
@@ -204,7 +205,6 @@ export function registerProtocolCommands(program: Command): void {
     .option('--channel <channelId>', 'channel ID')
     .requiredOption('--not-before <time>', 'epoch ms, ISO time, or relative duration', parseTimeMs)
     .requiredOption('--payload <json>', 'payload body JSON', parseJsonOption)
-    .option('--payload-type <type>', 'payload.type', PayloadType.DISPATCH_SELF_CHECK_DUE)
     .option('--audience <items>', 'comma-separated audience values', parseCsv)
     .option('--correlation-id <id>', 'correlation id')
     .option('--task-id <id>', 'task id')
@@ -213,7 +213,7 @@ export function registerProtocolCommands(program: Command): void {
       writeSuccess(await rpc('message.schedule', {
         channel_id: channelIdFromOptions(options),
         not_before: options.notBefore,
-        payload_type: options.payloadType,
+        payload_type: PayloadType.DISPATCH_SELF_CHECK_DUE,
         payload_body: options.payload,
         audience: options.audience,
         correlation_id: options.correlationId,

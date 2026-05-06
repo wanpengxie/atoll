@@ -14,6 +14,7 @@ import {
 import { broadcast } from '../realtime/broadcast.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspaceRead, getRequestUserId } from '../middleware/channel-auth.js';
+import { nowMysqlDatetime } from '../time.js';
 
 const DEFAULT_SERVER_ID = process.env.DEFAULT_SERVER_ID ?? 'server-001';
 
@@ -117,7 +118,7 @@ export function createWorkspacesRouter({
       fields.name = req.body.name.trim();
     }
     if (req.body?.archive === true) {
-      fields.archived_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      fields.archived_at = nowMysqlDatetime();
     } else if (req.body?.archive === false) {
       fields.archived_at = null;
     }

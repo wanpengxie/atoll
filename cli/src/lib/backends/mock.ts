@@ -13,6 +13,7 @@ import type {
 } from '../backend.js';
 import { CliError } from '../errors.js';
 import { MockFixtureRepository } from '../mock-fixtures.js';
+import { nowIso } from '../time.js';
 
 export class MockXhsBackend implements XhsBackend {
   private readonly fixtures: MockFixtureRepository;
@@ -26,7 +27,7 @@ export class MockXhsBackend implements XhsBackend {
     return {
       note_id: noteId,
       url: `https://xhs.com/explore/${noteId}`,
-      published_at: new Date().toISOString(),
+      published_at: nowIso(),
     };
   }
 

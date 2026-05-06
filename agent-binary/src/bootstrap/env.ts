@@ -73,7 +73,7 @@ export function parseEnv(env = process.env): AgentEnv {
   const capabilitySet = parseCapabilitySet(
     String(env.COAGENT_CAPABILITY_SET ?? env.CAPABILITY_SET ?? '{"cli_binaries":[]}'),
   );
-  const requiredBinaries = [...new Set(['claude', 'coagent-kernel', 'coagent-msg', ...capabilitySet.cli_binaries])];
+  const requiredBinaries = [...new Set(['claude', 'coagent-kernel', ...capabilitySet.cli_binaries])];
   requiredBinaries.forEach(assertBinaryOnPath);
 
   const workdir = path.resolve(String(env.COAGENT_WORKDIR ?? process.cwd()));

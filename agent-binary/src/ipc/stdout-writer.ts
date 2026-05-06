@@ -1,12 +1,9 @@
 import type { StdoutEnvelope } from '../types/ipc.js';
+import { nowIso } from '../util/time.js';
 
 type StdoutContext = Partial<Pick<StdoutEnvelope, 'channel_id' | 'agent_pid' | 'session_id'>>;
 
 let stdoutContext: StdoutContext = {};
-
-function nowIso(): string {
-  return new Date().toISOString();
-}
 
 export function setStdoutContext({
   channelId,

@@ -16,43 +16,46 @@ function fakeDbReturning(row, calls) {
   };
 }
 
-test('insertMessage keeps legacy message writes valid when envelope fields are absent', async () => {
+test('insertMessage writes canonical envelope fields only', async () => {
   const row = {
     seq: 42,
-    id: 'legacy-msg',
+    id: 'msg-canonical',
     team_id: 'team-a',
     channel_id: null,
-    sender_type: 'user',
     sender_id: 'user-a',
-    sender_name: 'User A',
-    message_type: 'chat',
-    content: 'legacy hello',
+    sender_kind: 'human',
+    payload_type: 'user.text',
+    payload_body: JSON.stringify({ text: 'hello' }),
+    content: 'hello',
     thread_id: null,
-    mentions: null,
+    envelope_json: JSON.stringify({ sender: { kind: 'human', id: 'user-a', name: 'User A' } }),
     created_at: '2026-05-06 00:00:00',
     updated_at: '2026-05-06 00:00:00',
   };
   const calls = [];
   const inserted = await insertMessage(fakeDbReturning(row, calls), {
-    id: 'legacy-msg',
+    id: 'msg-canonical',
     teamId: 'team-a',
-    senderType: 'user',
+    senderKind: 'human',
     senderId: 'user-a',
-    senderName: 'User A',
-    messageType: 'chat',
-    content: 'legacy hello',
+    payloadType: 'user.text',
+    payloadBody: { text: 'hello' },
+    envelope: { sender: { kind: 'human', id: 'user-a', name: 'User A' } },
+    content: 'hello',
   });
 
-  assert.equal(inserted.id, 'legacy-msg');
+  assert.equal(inserted.id, 'msg-canonical');
   assert.match(calls[0].sql, /sender_kind, payload_type, payload_body/);
-  assert.equal(calls[0].params[7], null);
-  assert.equal(calls[0].params[8], null);
-  assert.equal(calls[0].params[9], null);
+  assert.equal(calls[0].params[3], 'user-a');
+  assert.equal(calls[0].params[4], 'human');
+  assert.equal(calls[0].params[5], 'user.text');
 
   const formatted = formatMessage(row);
-  assert.equal(formatted.content, 'legacy hello');
-  assert.equal(formatted.payloadType, null);
-  assert.equal(formatted.envelope, null);
+  assert.equal(formatted.content, 'hello');
+  assert.equal(formatted.senderKind, 'human');
+  assert.equal(formatted.payloadType, 'user.text');
+  assert.deepEqual(formatted.payloadBody, { text: 'hello' });
+  assert.equal(formatted.envelope.sender.name, 'User A');
 });
 
 test('insertMessage dedupes daemon message.append retries by request id', async () => {
@@ -61,11 +64,12 @@ test('insertMessage dedupes daemon message.append retries by request id', async 
     id: 'msg-existing',
     channel_id: 'channel-a',
     daemon_request_id: 'req-existing',
-    sender_type: 'human',
     sender_id: 'user-a',
-    sender_name: 'User A',
-    message_type: 'chat',
+    sender_kind: 'human',
+    payload_type: 'user.text',
+    payload_body: JSON.stringify({ text: 'hello once' }),
     content: 'hello once',
+    envelope_json: JSON.stringify({ sender: { kind: 'human', id: 'user-a', name: 'User A' } }),
     created_at: '2026-05-06 00:00:00',
     updated_at: '2026-05-06 00:00:00',
   };
@@ -89,10 +93,11 @@ test('insertMessage dedupes daemon message.append retries by request id', async 
   const inserted = await insertMessage(db, {
     id: 'msg-retry',
     channelId: 'channel-a',
-    senderType: 'human',
+    senderKind: 'human',
     senderId: 'user-a',
-    senderName: 'User A',
-    messageType: 'chat',
+    payloadType: 'user.text',
+    payloadBody: { text: 'hello once' },
+    envelope: { sender: { kind: 'human', id: 'user-a', name: 'User A' } },
     content: 'hello once',
     daemonRequestId: 'req-existing',
   });
@@ -110,11 +115,8 @@ test('formatMessage exposes envelope fields from the server view cache', () => {
     id: 'msg-envelope',
     team_id: null,
     channel_id: 'channel-a',
-    sender_type: 'human',
     sender_id: 'user-a',
-    sender_name: 'User A',
     sender_kind: 'human',
-    message_type: 'chat',
     payload_type: 'user.text',
     payload_body: JSON.stringify({ text: 'hello' }),
     content: 'hello',
@@ -123,12 +125,15 @@ test('formatMessage exposes envelope fields from the server view cache', () => {
     task_id: 'task-a',
     thread_id: 'thread-a',
     audience: JSON.stringify(['channel']),
-    mentions: JSON.stringify(['agent:channel-agent']),
     not_before: null,
     origin: 'external',
     expires_at: 1770000000000,
     ts_received: 1760000000000,
-    envelope_json: JSON.stringify({ id: 'msg-envelope', sender: { kind: 'human', id: 'user-a' } }),
+    envelope_json: JSON.stringify({
+      id: 'msg-envelope',
+      sender: { kind: 'human', id: 'user-a', name: 'User A' },
+      mentions: ['agent:channel-agent'],
+    }),
     created_at: '2026-05-06 00:00:00',
     updated_at: '2026-05-06 00:00:00',
   });
@@ -136,6 +141,6 @@ test('formatMessage exposes envelope fields from the server view cache', () => {
   assert.equal(formatted.payloadType, 'user.text');
   assert.deepEqual(formatted.payloadBody, { text: 'hello' });
   assert.equal(formatted.correlationId, 'corr-a');
-  assert.deepEqual(formatted.mentions, ['agent:channel-agent']);
+  assert.deepEqual(formatted.envelope.mentions, ['agent:channel-agent']);
   assert.equal(formatted.envelope.sender.kind, 'human');
 });

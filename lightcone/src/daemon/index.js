@@ -1,5 +1,5 @@
 import { WebSocketServer } from 'ws';
-import { PayloadType, SenderKind } from '@coagent/payload-types';
+import { SenderKind } from '@coagent/payload-types';
 import {
   getDb, getMachineByApiKey, updateMachine, updateAgent, getAgents,
   getAgentById, getTeamById, getMemberTeamIds,
@@ -13,57 +13,17 @@ import { registerDaemon, unregisterDaemon, sendToDaemon } from './connections.js
 import { broadcast } from '../realtime/broadcast.js';
 import { flushInbox } from '../scheduler/inbox.js';
 import { formatMessage } from '../internal/index.js';
+import { nowMysqlDatetime } from '../time.js';
 import { emitJsonEvent } from '../events.js';
 
 const pendingRequests = new Map();
 // machineId → { userId, platform }: tracks who initiated browser login
 const pendingBrowserLogins = new Map();
 
-function formatChannelSenderName(senderType, senderId) {
-  switch (senderType) {
-    case 'human':
-      return senderId;
-    case 'channel_agent':
-      return `channel-agent:${senderId}`;
-    case 'sub_agent':
-      return `sub-agent:${senderId}`;
-    case 'worker':
-      return `worker:${senderId}`;
-    default:
-      return senderId;
-  }
-}
-
-function normalizeSenderKind(rawKind, senderType) {
+function normalizeSenderKind(rawKind) {
   const kind = String(rawKind ?? '').trim();
   if (Object.values(SenderKind).includes(kind)) return kind;
-  switch (String(senderType ?? '').trim()) {
-    case 'human':
-    case 'user':
-      return SenderKind.HUMAN;
-    case 'agent':
-    case 'channel_agent':
-    case 'sub_agent':
-    case 'worker':
-      return SenderKind.AGENT;
-    case 'system':
-      return SenderKind.SYSTEM;
-    case 'external':
-    case 'device':
-      return SenderKind.EXTERNAL;
-    default:
-      return null;
-  }
-}
-
-function inferPayloadType(msg, senderKind, messageType) {
-  const explicit = msg.payload_type ?? msg.payloadType ?? msg.payload?.type;
-  if (explicit) return String(explicit).trim();
-  if (messageType && String(messageType).includes('.')) return String(messageType);
-  if (!messageType || messageType === 'chat') {
-    return senderKind === SenderKind.AGENT ? PayloadType.AGENT_TEXT : PayloadType.USER_TEXT;
-  }
-  return String(messageType);
+  return null;
 }
 
 function appendAttachmentReferences(content, attachments) {
@@ -185,7 +145,7 @@ async function handleDaemonMessage(machineId, serverId, msg) {
         runtimes: JSON.stringify(msg.runtimes ?? []),
         models_by_runtime: msg.modelsByRuntime ? JSON.stringify(msg.modelsByRuntime) : null,
         daemon_version: msg.daemonVersion ?? null,
-        last_heartbeat: new Date().toISOString().slice(0,19).replace('T',' '),
+        last_heartbeat: nowMysqlDatetime(),
       });
       broadcast.machineStatus(serverId, machineId, 'online');
       broadcast.machineCapabilities(serverId, machineId, msg.runtimes ?? [], msg.hostname, msg.os, msg.daemonVersion);
@@ -294,18 +254,16 @@ async function handleDaemonMessage(machineId, serverId, msg) {
       try {
         const messageId = String(msg.message_id ?? randomUUID());
         const channelId = msg.channel_id ?? msg.channelId;
-        const senderType = msg.sender_type ?? msg.senderType;
         const senderId = msg.sender_id ?? msg.senderId;
-        const senderKind = normalizeSenderKind(msg.sender_kind ?? msg.envelope?.sender?.kind, senderType);
-        const senderName = String(msg.sender_name ?? msg.envelope?.sender?.name ?? formatChannelSenderName(senderType, senderId));
-        const messageType = String(msg.message_type ?? 'chat');
+        const senderKind = normalizeSenderKind(msg.sender_kind ?? msg.envelope?.sender?.kind);
         const payloadBody = msg.payload_body ?? msg.payloadBody ?? msg.payload?.body ?? null;
-        const payloadType = inferPayloadType(msg, senderKind, messageType);
+        const payloadType = String(msg.payload_type ?? msg.payloadType ?? msg.payload?.type ?? '').trim();
         const content = String(msg.content ?? payloadBody?.text ?? (payloadBody ? JSON.stringify(payloadBody) : ''));
         if (!requestId) throw new Error('requestId required');
         if (!channelId) throw new Error('channel_id required');
-        if (!senderType) throw new Error('sender_type required');
+        if (!senderKind) throw new Error('sender_kind required');
         if (!senderId) throw new Error('sender_id required');
+        if (!payloadType) throw new Error('payload_type required');
         if (!content.trim() && payloadBody == null) throw new Error('content required');
 
         const channel = await getChannelById(db, channelId);
@@ -320,10 +278,7 @@ async function handleDaemonMessage(machineId, serverId, msg) {
           id: messageId,
           teamId: null,
           channelId,
-          senderType,
           senderId,
-          senderName,
-          messageType,
           senderKind,
           payloadType,
           payloadBody,
@@ -333,7 +288,6 @@ async function handleDaemonMessage(machineId, serverId, msg) {
           taskId: msg.task_id ?? msg.taskId ?? msg.envelope?.task_id ?? null,
           threadId: msg.thread_id ?? msg.threadId ?? msg.envelope?.thread_id ?? null,
           audience: msg.audience ?? msg.envelope?.audience ?? null,
-          mentions: msg.mentions ?? msg.envelope?.mentions ?? null,
           notBefore: msg.not_before ?? msg.notBefore ?? msg.envelope?.not_before ?? null,
           origin: msg.origin ?? msg.envelope?.origin ?? null,
           expiresAt: msg.expires_at ?? msg.expiresAt ?? msg.envelope?.expires_at ?? null,
@@ -348,7 +302,7 @@ async function handleDaemonMessage(machineId, serverId, msg) {
             message_id: message.id,
             channel_id: channelId,
             machine_id: machineId,
-            sender_type: senderType,
+            sender_kind: senderKind,
           });
         }
         sendToDaemon(machineId, { type: 'message.append.ack', requestId, ok: true });
@@ -536,7 +490,7 @@ async function handleDaemonMessage(machineId, serverId, msg) {
       break;
 
     case 'pong':
-      await updateMachine(db, machineId, { last_heartbeat: new Date().toISOString().slice(0,19).replace('T',' ') });
+      await updateMachine(db, machineId, { last_heartbeat: nowMysqlDatetime() });
       break;
 
     default:
@@ -555,9 +509,9 @@ export async function formatMessageForDaemon(msg) {
   return {
     team_type: ch?.type ?? 'team',
     team_name: ch?.name ?? 'all',
-    sender_name: msg.sender_name,
-    sender_type: msg.sender_type,
-    sender_kind: msg.sender_kind ?? null,
+    sender_id: msg.sender_id,
+    sender_name: parseJson(msg.envelope_json, {})?.sender?.name ?? msg.sender_id,
+    sender_kind: msg.sender_kind,
     content: msg.content,
     message_id: msg.id,
     timestamp: msg.created_at,
@@ -568,17 +522,12 @@ export async function formatMessageForDaemon(msg) {
     task_id: msg.task_id ?? null,
     thread_id: msg.thread_id ?? null,
     audience: parseJson(msg.audience, null),
-    mentions: parseJson(msg.mentions, null),
     not_before: msg.not_before ?? null,
     origin: msg.origin ?? null,
     expires_at: msg.expires_at ?? null,
     ts_received: msg.ts_received ?? null,
     envelope: parseJson(msg.envelope_json, null),
     attachments: [],
-    task_status: msg.task_status ?? null,
-    task_number: msg.task_number ?? null,
-    task_assignee_type: msg.task_assignee_type ?? null,
-    task_assignee_id: msg.task_assignee_id ?? null,
   };
 }
 

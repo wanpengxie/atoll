@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { ChannelManager } from '../src/channel-manager.js';
+import { readStoredMessages } from '../src/message-store.js';
 import { RpcServer } from '../src/rpc-server.js';
 
 const execFileAsync = promisify(execFile);
@@ -157,6 +158,34 @@ function readTraceEntries(workdir, sessionId) {
     .map((line) => JSON.parse(line));
 }
 
+function readAgentCmdline(pid) {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean).join(' ');
+  } catch {
+    return '';
+  }
+}
+
+function jsonlMessageFiles(workdir) {
+  const messagesDir = path.join(workdir, 'messages');
+  if (!existsSync(messagesDir)) return [];
+  return readdirSync(messagesDir).filter((entry) => entry.endsWith('.jsonl'));
+}
+
+function sqliteFilesUnder(dir) {
+  if (!existsSync(dir)) return [];
+  const results = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...sqliteFilesUnder(fullPath));
+    } else if (/\.(sqlite|sqlite3|db)$/i.test(entry.name)) {
+      results.push(fullPath);
+    }
+  }
+  return results;
+}
+
 async function waitFor(label, fn, timeoutMs = 5_000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -222,7 +251,7 @@ try {
     daemonId: 'machine-smoke',
     type: 'xhs-creator',
     status: 'active',
-    capabilitySet: { cli_binaries: ['xhs', 'coagent-kernel', 'coagent-msg'] },
+    capabilitySet: { cli_binaries: ['xhs', 'coagent-kernel'] },
     members: [{ memberType: 'human', memberId: 'user-smoke', displayName: 'Smoke User' }],
   });
   assert.equal(created.status, 'created');
@@ -231,7 +260,8 @@ try {
   assert.equal(started.status, 'active');
   assert.ok(started.agent_pid, 'channel agent pid should exist after start');
   assert.equal(readFileSync(started.session_id_path, 'utf8').trim(), started.session_id);
-  assert.deepEqual(started.mounted_cli_binaries, ['xhs', 'coagent-kernel', 'coagent-msg']);
+  assert.deepEqual(started.mounted_cli_binaries, ['xhs', 'coagent-kernel']);
+  assert.doesNotMatch(readAgentCmdline(started.agent_pid), /chat-bridge|mcp-config/);
 
   await rpcServer.start();
 
@@ -241,6 +271,7 @@ try {
     COAGENT_DAEMON_SOCKET: socketPath,
     COAGENT_DAEMON_HTTP: `http://127.0.0.1:${httpPort}`,
     COAGENT_DAEMON_TOKEN: daemonToken,
+    COAGENT_AGENT_NAME: started.agent_name ?? 'channel-agent',
   };
 
   const unauthorizedResponse = await curlSocketRpc({
@@ -270,10 +301,12 @@ try {
         created_at: new Date().toISOString(),
         payload: {
           message: {
-            senderType: 'human',
-            senderId: 'smoke-user',
-            senderName: 'Smoke User',
-            content: 'Reply with exactly hello by running: coagent-msg send --content hello',
+            sender_kind: 'human',
+            sender_id: 'smoke-user',
+            sender_name: 'Smoke User',
+            payload_type: 'user.text',
+            payload_body: { text: 'Reply with exactly hello by running: coagent reply hello' },
+            content: 'Reply with exactly hello by running: coagent reply hello',
           },
         },
       },
@@ -307,6 +340,52 @@ try {
       jsonLineEvents,
     }));
   } else {
+
+  await channelManager.handleEvent({
+    channelId,
+    event: {
+      type: 'user.message.posted',
+      source: 'smoke',
+      created_at: new Date().toISOString(),
+      payload: {
+        message: {
+          sender_kind: 'human',
+          sender_id: 'user-smoke',
+          sender_name: 'Smoke User',
+          payload_type: 'user.text',
+          payload_body: { text: '你好' },
+          content: '你好',
+        },
+      },
+    },
+  });
+
+  const messageResponse = await runCli('coagent', [
+    'reply',
+    'smoke message',
+  ], cliEnv, started.workdir);
+  assert.equal(messageResponse.ok, true);
+  assert.equal(messageResponse.data.payloadType, 'agent.text');
+  assert.equal(messageResponse.data.senderKind, 'agent');
+  assert.equal(requestLog.length, 1);
+  assert.equal(requestLog[0].message.type, 'message.append');
+  assert.equal(requestLog[0].message.payload_type, 'agent.text');
+
+  const smokeNode = channelManager._requireNode(channelId);
+  const schemaColumns = smokeNode.messageStore.prepare('PRAGMA table_info(messages)').all().map((column) => column.name);
+  assert.ok(schemaColumns.includes('payload_type'));
+  assert.equal(schemaColumns.includes('legacy_json'), false);
+  const initialRows = readStoredMessages(smokeNode.messageStore);
+  const coreRows = initialRows.filter((message) => (message.payload_type === 'user.text' && message.payload_body?.text === '你好')
+    || (message.payload_type === 'agent.text' && message.payload_body?.text === 'smoke message'));
+  assert.equal(coreRows.length, 2);
+  assert.equal(initialRows.every((message) => /\+08:00$/.test(message.created_at)), true);
+  assert.deepEqual(jsonlMessageFiles(started.workdir), []);
+
+  const checkResponse = await runCli('coagent', ['query', '--text', 'smoke', '--limit', '10'], cliEnv, started.workdir);
+  assert.equal(checkResponse.ok, true);
+  assert.ok(checkResponse.data.messages.some((message) => message.payload_type === 'agent.text'
+    && message.payload_body?.text === 'smoke message'));
 
   const now = new Date();
   const cronExpression = `${now.getMinutes()} ${now.getHours()} ${now.getDate()} ${now.getMonth() + 1} ${now.getDay()}`;
@@ -350,23 +429,6 @@ try {
     'heartbeat should be blocked by trigger gateway',
   );
 
-  const messageResponse = await runCli('coagent-msg', [
-    'send',
-    '--content',
-    'smoke message',
-  ], cliEnv, started.workdir);
-  assert.equal(messageResponse.ok, true);
-  assert.equal(requestLog.length, 1);
-  assert.equal(requestLog[0].message.type, 'message.append');
-
-  const checkResponse = await runCli('coagent-msg', ['check', '--limit', '10'], cliEnv, started.workdir);
-  assert.equal(checkResponse.ok, true);
-  assert.ok(checkResponse.data.messages.some((message) => message.content === 'smoke message'));
-
-  const searchResponse = await runCli('coagent-msg', ['search', '--keyword', 'smoke', '--limit', '10'], cliEnv, started.workdir);
-  assert.equal(searchResponse.ok, true);
-  assert.ok(searchResponse.data.messages.some((message) => message.content === 'smoke message'));
-
   const contentPath = path.join(started.workdir, 'smoke-note.md');
   writeFileSync(contentPath, '# smoke note\n', 'utf8');
   const xhsResponse = await runCli('xhs', [
@@ -382,6 +444,7 @@ try {
   ], cliEnv, started.workdir);
   assert.equal(xhsResponse.ok, true);
   assert.equal(typeof xhsResponse.data.note_id, 'string');
+  assert.deepEqual(sqliteFilesUnder(path.join(started.workdir, 'artifacts')), []);
 
   const originalPid = started.agent_pid;
   process.kill(originalPid, 'SIGTERM');

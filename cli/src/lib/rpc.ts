@@ -32,6 +32,14 @@ function readJsonResponse<T>(raw: string): T {
 
 function daemonRequestOptions(config: DaemonRpcConfig = {}) {
   const authToken = String(config.token ?? process.env.COAGENT_DAEMON_TOKEN ?? '').trim();
+  const agentName = String(process.env.COAGENT_AGENT_NAME ?? '').trim();
+  const channelId = String(process.env.COAGENT_CHANNEL_ID ?? process.env.CHANNEL_ID ?? '').trim();
+  const sessionId = String(process.env.COAGENT_SESSION_ID ?? process.env.SESSION_ID ?? '').trim();
+  const identityHeaders = {
+    ...(agentName ? { 'X-Coagent-Agent-Name': agentName } : {}),
+    ...(channelId ? { 'X-Coagent-Channel-Id': channelId } : {}),
+    ...(sessionId ? { 'X-Coagent-Session-Id': sessionId } : {}),
+  };
   const socketPath = String(config.socketPath ?? process.env.COAGENT_DAEMON_SOCKET ?? '').trim();
   if (socketPath) {
     return {
@@ -43,6 +51,7 @@ function daemonRequestOptions(config: DaemonRpcConfig = {}) {
         headers: {
           'Content-Type': 'application/json',
           ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+          ...identityHeaders,
         },
       },
     };
@@ -79,6 +88,7 @@ function daemonRequestOptions(config: DaemonRpcConfig = {}) {
       headers: {
         'Content-Type': 'application/json',
         ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        ...identityHeaders,
       },
     },
   };

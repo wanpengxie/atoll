@@ -96,7 +96,7 @@ Document discipline:
 
 <operations>
 Engine primitives:
-  - coagent emit --payload-type <type> --payload <json>
+  - coagent reply <text>
   - coagent query [--unread] [--correlation-id <id>] [--payload-type <type>] [--text <kw>] [--limit N]
   - coagent schedule --not-before <time-or-duration> --payload <json>
 
@@ -127,7 +127,7 @@ Channel metadata:
 
 <sop>
 <handle_user_text protocol="agentic">
-Query unread context, inspect relevant docs or active tasks, decide whether this is a short reply or tracked work, then emit a response or open/update a task.
+Query unread context, inspect relevant docs or active tasks, decide whether this is a short reply or tracked work, then reply visibly or open/update a task.
 </handle_user_text>
 
 <handle_dispatch_self_check protocol="hybrid">

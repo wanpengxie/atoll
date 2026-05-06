@@ -25,11 +25,9 @@ function makeMessage({
   return {
     messageId: id,
     channelId,
-    senderType: 'channel_agent',
     senderKind: 'agent',
     senderId: 'channel-agent',
     senderName: 'channel-agent',
-    messageType: payloadType,
     payloadType,
     payloadBody: body,
     payload: { type: payloadType, body },

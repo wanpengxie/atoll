@@ -7,6 +7,7 @@ import {
   type ChannelTypeConfig,
   loadChannelTypeConfig,
 } from './channel-type-config.js';
+import { nowIso } from '../util/time.js';
 
 export interface PromptParts {
   basePrompt: string;
@@ -104,6 +105,7 @@ function renderChannelContextPrompt(env: AgentEnv): string {
     `workspace_id: ${env.workspaceId || '<none>'}`,
     `workdir: ${path.resolve(env.workdir)}`,
     `channel_type: ${env.channelType || 'echo'}`,
+    `current_time: ${nowIso()}`,
     '</channel_context>',
   ].join('\n');
 }

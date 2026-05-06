@@ -152,12 +152,9 @@ export async function initDb() {
       id                   VARCHAR(36)  NOT NULL UNIQUE,
       team_id              VARCHAR(36)  DEFAULT NULL,
       channel_id           VARCHAR(36)  DEFAULT NULL,
-      sender_type          VARCHAR(16)  NOT NULL,
       sender_id            VARCHAR(36)  NOT NULL,
-      sender_name          VARCHAR(255) NOT NULL DEFAULT '',
-      message_type         VARCHAR(128) DEFAULT 'chat',
-      sender_kind          VARCHAR(16)  DEFAULT NULL,
-      payload_type         VARCHAR(128) DEFAULT NULL,
+      sender_kind          VARCHAR(16)  NOT NULL,
+      payload_type         VARCHAR(128) NOT NULL,
       payload_body         JSON         DEFAULT NULL,
       content              MEDIUMTEXT,
       parent_id            VARCHAR(64)  DEFAULT NULL,
@@ -165,13 +162,6 @@ export async function initDb() {
       task_id              VARCHAR(64)  DEFAULT NULL,
       thread_id            VARCHAR(36),
       audience             JSON         DEFAULT NULL,
-      task_status          VARCHAR(32)  DEFAULT NULL,
-      task_number          INT          DEFAULT NULL,
-      task_assignee_type   VARCHAR(16)  DEFAULT NULL,
-      task_assignee_id     VARCHAR(36)  DEFAULT NULL,
-      task_claimed_at      DATETIME     DEFAULT NULL,
-      task_completed_at    DATETIME     DEFAULT NULL,
-      mentions             TEXT         DEFAULT NULL,
       not_before           BIGINT       DEFAULT NULL,
       origin               VARCHAR(16)  DEFAULT NULL,
       expires_at           BIGINT       DEFAULT NULL,
@@ -657,20 +647,38 @@ async function ensureAgentMemoryScopedByTeam(db) {
   console.error('[DB] Migrated agent_memory primary key to include team_id');
 }
 
-async function ensureMessageEnvelopeColumns(db) {
-  const [messageTypeCols] = await db.execute(
-    `SELECT CHARACTER_MAXIMUM_LENGTH
+async function dropColumnIfExists(db, table, column) {
+  const [cols] = await db.execute(
+    `SELECT COLUMN_NAME
      FROM INFORMATION_SCHEMA.COLUMNS
-     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'messages' AND COLUMN_NAME = 'message_type'`
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+    [table, column],
   );
-  if (Number(messageTypeCols[0]?.CHARACTER_MAXIMUM_LENGTH ?? 0) < 128) {
-    await db.execute(`ALTER TABLE messages MODIFY message_type VARCHAR(128) DEFAULT 'chat'`);
-    console.error('[DB] Expanded messages.message_type to VARCHAR(128)');
+  if (cols.length === 0) return;
+  await db.execute(`ALTER TABLE \`${table}\` DROP COLUMN \`${column}\``);
+  console.error(`[DB] Dropped ${table}.${column}`);
+}
+
+async function ensureMessageEnvelopeColumns(db) {
+  const legacyColumns = [
+    'sender_type',
+    'sender_name',
+    'message_type',
+    'task_status',
+    'task_number',
+    'task_assignee_type',
+    'task_assignee_id',
+    'task_claimed_at',
+    'task_completed_at',
+    'mentions',
+  ];
+  for (const column of legacyColumns) {
+    await dropColumnIfExists(db, 'messages', column);
   }
 
   const desired = [
-    ['sender_kind', 'VARCHAR(16) DEFAULT NULL'],
-    ['payload_type', 'VARCHAR(128) DEFAULT NULL'],
+    ['sender_kind', 'VARCHAR(16) NOT NULL'],
+    ['payload_type', 'VARCHAR(128) NOT NULL'],
     ['payload_body', 'JSON DEFAULT NULL'],
     ['parent_id', 'VARCHAR(64) DEFAULT NULL'],
     ['correlation_id', 'VARCHAR(64) DEFAULT NULL'],
@@ -760,28 +768,9 @@ export async function maxSeq(db) {
   return rows[0].s ?? 0;
 }
 
-// ─── task number ──────────────────────────────────────────────────────────────
-
-export async function nextTaskNumber(db, teamId) {
-  await db.execute(
-    `INSERT INTO task_counter (team_id, current_number) VALUES (?,1)
-     ON DUPLICATE KEY UPDATE current_number = current_number + 1`,
-    [teamId]
-  );
-  const [rows] = await db.execute(
-    `SELECT current_number FROM task_counter WHERE team_id = ?`, [teamId]
-  );
-  return rows[0].current_number;
-}
-
 // ─── messages ─────────────────────────────────────────────────────────────────
 
 function jsonOrNull(value) {
-  if (value == null) return null;
-  return typeof value === 'string' ? value : JSON.stringify(value);
-}
-
-function normalizeJsonText(value) {
   if (value == null) return null;
   return typeof value === 'string' ? value : JSON.stringify(value);
 }
@@ -825,26 +814,26 @@ async function findExistingMessageForDuplicate(db, msg, daemonRequestId) {
 
 export async function insertMessage(db, msg) {
   const daemonRequestId = msg.daemonRequestId ?? msg.daemon_request_id ?? null;
+  const senderKind = msg.senderKind ?? msg.sender_kind ?? msg.envelope?.sender?.kind;
+  const senderId = msg.senderId ?? msg.sender_id ?? msg.envelope?.sender?.id;
+  const payloadType = msg.payloadType ?? msg.payload_type ?? msg.payload?.type;
+  if (!senderKind) throw new Error('sender_kind required');
+  if (!senderId) throw new Error('sender_id required');
+  if (!payloadType) throw new Error('payload_type required');
   let result;
   try {
     [result] = await db.execute(
       `INSERT INTO messages
-        (id, team_id, channel_id, sender_type, sender_id, sender_name, message_type,
-         sender_kind, payload_type, payload_body, content, parent_id, correlation_id, task_id,
-         thread_id, audience, task_status, task_number, task_assignee_type, task_assignee_id,
-         task_claimed_at, task_completed_at, mentions, not_before, origin, expires_at,
-         ts_received, envelope_json, daemon_request_id)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [msg.id, msg.teamId ?? null, msg.channelId ?? null, msg.senderType, msg.senderId, msg.senderName,
-       msg.messageType ?? 'chat', msg.senderKind ?? msg.sender_kind ?? null,
-       msg.payloadType ?? msg.payload_type ?? null, jsonOrNull(msg.payloadBody ?? msg.payload_body ?? msg.payload?.body),
+        (id, team_id, channel_id, sender_id, sender_kind, payload_type, payload_body,
+         content, parent_id, correlation_id, task_id, thread_id, audience, not_before,
+         origin, expires_at, ts_received, envelope_json, daemon_request_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [msg.id, msg.teamId ?? null, msg.channelId ?? null, senderId, senderKind, payloadType,
+       jsonOrNull(msg.payloadBody ?? msg.payload_body ?? msg.payload?.body),
        msg.content, msg.parentId ?? msg.parent_id ?? null, msg.correlationId ?? msg.correlation_id ?? null,
        msg.taskId ?? msg.task_id ?? null, msg.threadId ?? msg.thread_id ?? null,
        jsonOrNull(msg.audience ?? msg.envelope?.audience),
-       msg.taskStatus ?? null, msg.taskNumber ?? null,
-       msg.taskAssigneeType ?? null, msg.taskAssigneeId ?? null,
-       msg.taskClaimedAt ?? null, msg.taskCompletedAt ?? null,
-       normalizeJsonText(msg.mentions ?? msg.envelope?.mentions), msg.notBefore ?? msg.not_before ?? null,
+       msg.notBefore ?? msg.not_before ?? null,
        msg.origin ?? msg.envelope?.origin ?? null, msg.expiresAt ?? msg.expires_at ?? null,
        msg.tsReceived ?? msg.ts_received ?? msg.envelope?.ts_received ?? null,
        jsonOrNull(msg.envelope ?? msg.envelope_json), daemonRequestId]
@@ -960,28 +949,6 @@ export async function updateMessage(db, id, fields) {
 
 export async function deleteMessage(db, id) {
   await softDeleteRows(db, 'messages', `id = ?`, [id]);
-}
-
-export async function getTasksByTeam(db, teamId, status) {
-  const base = `SELECT m.*,
-    CASE m.task_assignee_type
-      WHEN 'agent' THEN (SELECT a.display_name FROM agents a WHERE a.id = m.task_assignee_id)
-      WHEN 'user'  THEN (SELECT u.name FROM users u WHERE u.id = m.task_assignee_id)
-      ELSE NULL
-    END AS task_assignee_name
-    FROM messages m WHERE m.team_id = ? AND m.is_del = 0 AND m.task_status IS NOT NULL`;
-  if (status && status !== 'all') {
-    const [rows] = await db.execute(
-      `${base} AND m.task_status = ? ORDER BY m.task_number ASC`,
-      [teamId, status]
-    );
-    return rows;
-  }
-  const [rows] = await db.execute(
-    `${base} ORDER BY m.task_number ASC`,
-    [teamId]
-  );
-  return rows;
 }
 
 // ─── teams ────────────────────────────────────────────────────────────────────
@@ -1844,9 +1811,6 @@ export async function mergeUsers(db, keepUserId, removeUserId) {
   try {
     await conn.beginTransaction();
 
-    const [keepUser] = await conn.execute(`SELECT name FROM users WHERE id = ?`, [keepUserId]);
-    const keepName = keepUser[0]?.name ?? '';
-
     const [agentResult] = await conn.execute(
       `UPDATE agents SET owner_id = ? WHERE owner_id = ?`, [keepUserId, removeUserId]
     );
@@ -1871,8 +1835,8 @@ export async function mergeUsers(db, keepUserId, removeUserId) {
     );
 
     const [msgResult] = await conn.execute(
-      `UPDATE messages SET sender_id = ?, sender_name = ? WHERE sender_id = ? AND sender_type = 'user'`,
-      [keepUserId, keepName, removeUserId]
+      `UPDATE messages SET sender_id = ? WHERE sender_id = ? AND sender_kind = 'human'`,
+      [keepUserId, removeUserId]
     );
     const [idResult] = await conn.execute(
       `UPDATE user_identities SET user_id = ? WHERE user_id = ?`, [keepUserId, removeUserId]

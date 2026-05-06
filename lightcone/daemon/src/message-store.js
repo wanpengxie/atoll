@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { PayloadType, isPayloadType } from '@coagent/payload-types';
+import { nowIso } from './time.js';
 
 const DEFAULT_AGENT_NAME = 'channel-agent';
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'abandoned', 'archived']);
@@ -104,7 +105,6 @@ function rowToMessage(row) {
     mentions: fromJson(row.mentions, null),
     envelope: fromJson(row.envelope_json, {}),
     payload: fromJson(row.payload_json, {}),
-    legacy: fromJson(row.legacy_json, {}),
   };
 }
 
@@ -161,7 +161,7 @@ export function writeAgentCursor(workdir, agentName = DEFAULT_AGENT_NAME, cursor
   mkdirSync(path.dirname(filePath), { recursive: true });
   const next = {
     last_seen_seq: toSeq(cursor.last_seen_seq ?? cursor.lastSeenSeq, 0),
-    updated_at: cursor.updated_at ?? new Date().toISOString(),
+    updated_at: cursor.updated_at ?? nowIso(),
   };
   writeFileSync(filePath, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
   return next;
@@ -173,7 +173,7 @@ export function advanceAgentCursor(workdir, agentName = DEFAULT_AGENT_NAME, seq)
   if (nextSeq <= current.last_seen_seq) return current;
   return writeAgentCursor(workdir, agentName, {
     last_seen_seq: nextSeq,
-    updated_at: new Date().toISOString(),
+    updated_at: nowIso(),
   });
 }
 
@@ -208,7 +208,6 @@ export function openMessageStore(workdir) {
       last_error TEXT DEFAULT NULL,
       envelope_json TEXT NOT NULL,
       payload_json TEXT NOT NULL,
-      legacy_json TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_messages_channel_ts_received ON messages(channel_id, ts_received);
@@ -277,7 +276,6 @@ export function appendMessageToStore(db, message) {
     expires_at: envelope.expires_at ?? message.expiresAt ?? null,
     envelope_json: toJson(envelope),
     payload_json: toJson(payload),
-    legacy_json: toJson(message),
     created_at: message.createdAt,
   };
   assertKnownPayloadType(row.payload_type);
@@ -288,13 +286,13 @@ export function appendMessageToStore(db, message) {
       id, channel_id, ts, ts_received, sender_kind, sender_id, sender_name,
       payload_type, payload_body, parent_id, correlation_id, task_id, thread_id,
       audience, mentions, origin, not_before, expires_at, envelope_json,
-      payload_json, legacy_json, created_at
+      payload_json, created_at
     )
     VALUES (
       @id, @channel_id, @ts, @ts_received, @sender_kind, @sender_id, @sender_name,
       @payload_type, @payload_body, @parent_id, @correlation_id, @task_id, @thread_id,
       @audience, @mentions, @origin, @not_before, @expires_at, @envelope_json,
-      @payload_json, @legacy_json, @created_at
+      @payload_json, @created_at
     )
   `);
 
@@ -371,7 +369,7 @@ export function projectTaskFromMessageRow(db, row) {
     assertTaskProjectionMutable(db, taskId, row.channel_id);
   }
 
-  if (taskId) {
+  if ([PayloadType.TASK_OPENED, PayloadType.TASK_CLOSED, PayloadType.TASK_APPENDED].includes(row.payload_type) && taskId) {
     db.prepare(`
       UPDATE tasks
       SET last_event_at = @last_event_at
@@ -454,8 +452,7 @@ export function queryStoredMessages(db, filters = {}) {
   const text = String(filters.text ?? filters.query ?? '').trim().toLowerCase();
   if (text) {
     where.push(`(
-      instr(lower(coalesce(legacy_json, '')), @text) > 0
-      OR instr(lower(coalesce(payload_json, '')), @text) > 0
+      instr(lower(coalesce(payload_json, '')), @text) > 0
       OR instr(lower(coalesce(payload_body, '')), @text) > 0
     )`);
     params.text = text;

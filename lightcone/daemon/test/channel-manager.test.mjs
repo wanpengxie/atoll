@@ -48,16 +48,14 @@ function createStdoutHarness(t, channelId) {
   return { channelManager, proc, node };
 }
 
-function readJsonlMessages(workdir) {
+function readJsonlMessageFiles(workdir) {
   const messagesDir = path.join(workdir, 'messages');
   if (!existsSync(messagesDir)) return [];
-  return readdirSync(messagesDir)
-    .filter((entry) => entry.endsWith('.jsonl'))
-    .flatMap((fileName) => readFileSync(path.join(messagesDir, fileName), 'utf8')
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => JSON.parse(line)));
+  return readdirSync(messagesDir).filter((entry) => entry.endsWith('.jsonl'));
+}
+
+function removedViewSyncQueueDir(workdir) {
+  return path.join(workdir, ['pending', 'view', 'sync'].join('-'));
 }
 
 function readTraceEntries(node) {
@@ -84,7 +82,11 @@ function parseStdoutEvents(writes) {
     .map((line) => JSON.parse(line));
 }
 
-function insertLegacyDueMessage(db, node, {
+function sentPayloadType(params) {
+  return params?.payload?.type ?? params?.payloadType;
+}
+
+function insertDueMessage(db, node, {
   id,
   now,
   notBefore = now - 1,
@@ -105,40 +107,20 @@ function insertLegacyDueMessage(db, node, {
     ts: now,
     ts_received: now,
   };
-  const legacy = {
-    messageId: id,
-    channelId: node.channelId,
-    senderKind: 'agent',
-    senderType: 'channel_agent',
-    senderId: node.agentName,
-    senderName: node.agentName,
-    messageType: payload.type,
-    payloadType: payload.type,
-    payloadBody,
-    payload,
-    content: JSON.stringify(payloadBody),
-    correlationId,
-    audience: ['self'],
-    origin: 'self',
-    notBefore,
-    createdAt,
-    source: 'test',
-  };
-
   db.prepare(`
     INSERT INTO messages (
       id, channel_id, ts, ts_received, sender_kind, sender_id, sender_name,
       payload_type, payload_body, parent_id, correlation_id, task_id, thread_id,
       audience, mentions, origin, not_before, expires_at, delivered_at,
       delivery_failed_at, delivery_attempts, last_attempt_at, last_error,
-      envelope_json, payload_json, legacy_json, created_at
+      envelope_json, payload_json, created_at
     )
     VALUES (
       @id, @channel_id, @ts, @ts_received, @sender_kind, @sender_id, @sender_name,
       @payload_type, @payload_body, @parent_id, @correlation_id, @task_id, @thread_id,
       @audience, @mentions, @origin, @not_before, @expires_at, @delivered_at,
       @delivery_failed_at, @delivery_attempts, @last_attempt_at, @last_error,
-      @envelope_json, @payload_json, @legacy_json, @created_at
+      @envelope_json, @payload_json, @created_at
     )
   `).run({
     id,
@@ -166,7 +148,6 @@ function insertLegacyDueMessage(db, node, {
     last_error: lastError,
     envelope_json: JSON.stringify(envelope),
     payload_json: JSON.stringify(payload),
-    legacy_json: JSON.stringify(legacy),
     created_at: createdAt,
   });
 }
@@ -209,15 +190,13 @@ async function appendUnreadQueryRows(channelManager, node, rows, baseTs) {
     await channelManager._appendMessage(node, {
       messageId: row.id,
       channelId: node.channelId,
-      senderType: row.senderType ?? (isDeferred ? 'channel_agent' : 'human'),
-      senderKind: row.senderKind ?? (isDeferred ? 'agent' : undefined),
+      senderKind: row.senderKind ?? (isDeferred ? 'agent' : 'human'),
       senderId: row.senderId ?? (isDeferred ? node.agentName : 'user-a'),
       senderName: row.senderName ?? (isDeferred ? node.agentName : 'User A'),
-      messageType: payloadType,
       payloadType,
       payloadBody: row.payloadBody ?? (row.status != null
         ? { text: row.content ?? row.id, status: row.status }
-        : undefined),
+        : { text: row.content ?? row.id }),
       content: row.content ?? row.id,
       audience: row.audience ?? (isDeferred ? ['self'] : undefined),
       origin: row.origin ?? (isDeferred ? 'self' : undefined),
@@ -247,11 +226,9 @@ test('channel:message.send writes local truth before view sync and reports succe
       sentLog.push(message);
     },
     async request({ message, expect }) {
-      const files = readdirSync(path.join(workdir, 'messages')).filter((entry) => entry.endsWith('.jsonl'));
-      assert.equal(files.length, 1);
-
-      const contents = readFileSync(path.join(workdir, 'messages', files[0]), 'utf8');
-      persistedBeforeViewSync = contents.includes('"content":"hello from server"');
+      const node = channelManager._requireNode('channel-1');
+      persistedBeforeViewSync = readStoredMessages(node.messageStore)
+        .some((entry) => entry.payload_body.text === 'hello from server');
       assert.equal(message.sender_kind, 'human');
       assert.equal(message.payload_type, 'user.text');
       assert.equal(message.payload_body.text, 'hello from server');
@@ -287,7 +264,9 @@ test('channel:message.send writes local truth before view sync and reports succe
     type: 'channel:message.send',
     requestId: 'req-1',
     channelId: 'channel-1',
-    senderType: 'human',
+    senderKind: 'human',
+    payloadType: 'user.text',
+    payloadBody: { text: 'hello from server' },
     senderId: 'user-a',
     senderName: 'User A',
     content: 'hello from server',
@@ -296,24 +275,19 @@ test('channel:message.send writes local truth before view sync and reports succe
 
   assert.equal(persistedBeforeViewSync, true);
   assert.equal(result.content, 'hello from server');
-  assert.equal(result.senderType, 'human');
+  assert.equal(result.senderKind, 'human');
   assert.equal(result.senderId, 'user-a');
   assert.equal(result.senderName, 'User A');
 
-  const files = readdirSync(path.join(workdir, 'messages')).filter((entry) => entry.endsWith('.jsonl'));
-  assert.equal(files.length, 1);
-  const stored = readFileSync(path.join(workdir, 'messages', files[0]), 'utf8')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
+  assert.deepEqual(readJsonlMessageFiles(workdir), []);
+  const node = channelManager._requireNode('channel-1');
+  const stored = readStoredMessages(node.messageStore);
   assert.equal(stored.length, 1);
-  assert.equal(stored[0].content, 'hello from server');
-  assert.equal(stored[0].senderType, 'human');
-  assert.equal(stored[0].senderId, 'user-a');
-  assert.equal(stored[0].senderName, 'User A');
-  assert.equal(stored[0].senderKind, 'human');
-  assert.equal(stored[0].payloadType, 'user.text');
+  assert.equal(stored[0].payload_body.text, 'hello from server');
+  assert.equal(stored[0].sender_kind, 'human');
+  assert.equal(stored[0].sender_id, 'user-a');
+  assert.equal(stored[0].sender_name, 'User A');
+  assert.equal(stored[0].payload_type, 'user.text');
   assert.equal(stored[0].payload.body.text, 'hello from server');
 
   assert.deepEqual(sentLog, [{
@@ -324,8 +298,8 @@ test('channel:message.send writes local truth before view sync and reports succe
   }]);
 });
 
-test('appendMessage double-writes 100 messages to jsonl and sqlite consistently', async (t) => {
-  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-sqlite-double-write-'));
+test('appendMessage writes 100 messages to sqlite without jsonl side files', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-sqlite-only-'));
   t.after(() => {
     rmSync(tempHome, { recursive: true, force: true });
   });
@@ -353,36 +327,30 @@ test('appendMessage double-writes 100 messages to jsonl and sqlite consistently'
     await channelManager._appendMessage(node, {
       messageId: `message-${index}`,
       channelId: node.channelId,
-      senderType: 'human',
+      senderKind: 'human',
       senderId: 'user-a',
       senderName: 'User A',
+      payloadType: 'user.text',
+      payloadBody: { text: `message ${index}` },
       content: `message ${index}`,
       createdAt: new Date(Date.UTC(2026, 4, 6, 0, 0, index)).toISOString(),
       source: 'test',
     });
   }
 
-  const jsonlMessages = readdirSync(path.join(created.workdir, 'messages'))
-    .filter((entry) => entry.endsWith('.jsonl'))
-    .flatMap((fileName) => readFileSync(path.join(created.workdir, 'messages', fileName), 'utf8')
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => JSON.parse(line)));
   const sqliteMessages = readStoredMessages(node.messageStore);
 
-  assert.equal(jsonlMessages.length, 100);
+  assert.deepEqual(readJsonlMessageFiles(created.workdir), []);
   assert.equal(sqliteMessages.length, 100);
   for (let index = 0; index < 100; index += 1) {
-    assert.equal(sqliteMessages[index].id, jsonlMessages[index].messageId);
-    assert.equal(sqliteMessages[index].legacy.content, jsonlMessages[index].content);
-    assert.equal(sqliteMessages[index].sender_kind, jsonlMessages[index].senderKind);
-    assert.equal(sqliteMessages[index].payload_type, jsonlMessages[index].payloadType);
-    assert.deepEqual(sqliteMessages[index].payload.body, jsonlMessages[index].payload.body);
+    assert.equal(sqliteMessages[index].id, `message-${index}`);
+    assert.equal(sqliteMessages[index].sender_kind, 'human');
+    assert.equal(sqliteMessages[index].payload_type, 'user.text');
+    assert.deepEqual(sqliteMessages[index].payload.body, { text: `message ${index}` });
   }
 });
 
-test('_appendMessage keeps jsonl and sqlite aligned when sqlite projection fails', async (t) => {
+test('_appendMessage does not leave sqlite rows when sqlite projection fails', async (t) => {
   const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-sqlite-projection-failure-'));
   t.after(() => {
     rmSync(tempHome, { recursive: true, force: true });
@@ -412,7 +380,6 @@ test('_appendMessage keeps jsonl and sqlite aligned when sqlite projection fails
     () => channelManager._appendMessage(node, {
       messageId: 'msg-orphan-task',
       channelId: node.channelId,
-      senderType: 'channel_agent',
       senderKind: 'agent',
       senderId: node.agentName,
       senderName: node.agentName,
@@ -436,11 +403,11 @@ test('_appendMessage keeps jsonl and sqlite aligned when sqlite projection fails
     /FOREIGN KEY|constraint/i,
   );
 
-  assert.equal(readJsonlMessages(created.workdir).length, 0);
+  assert.deepEqual(readJsonlMessageFiles(created.workdir), []);
   assert.equal(readStoredMessages(channelManager._openMessageStore(node)).length, 0);
 });
 
-test('emitChannelMessage rejects unknown payload types before writing local truth', async (t) => {
+test('emitChannelMessage requires current agent identity before writing local truth', async (t) => {
   const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-unknown-payload-'));
   t.after(() => {
     rmSync(tempHome, { recursive: true, force: true });
@@ -467,13 +434,12 @@ test('emitChannelMessage rejects unknown payload types before writing local trut
   await assert.rejects(
     () => channelManager.emitChannelMessage({
       channelId: created.channel_id,
-      payloadType: 'whatever.unknown',
-      payloadBody: { text: 'unsupported' },
-      content: 'unsupported',
+      text: 'forged reply',
     }),
-    (err) => err.code === 'bad_request' && /unsupported payload_type/.test(err.message),
+    (err) => err.code === 'forbidden' && /current channel agent identity/.test(err.message),
   );
-  assert.deepEqual(readdirSync(path.join(created.workdir, 'messages')).filter((entry) => entry.endsWith('.jsonl')), []);
+  assert.deepEqual(readJsonlMessageFiles(created.workdir), []);
+  assert.equal(readStoredMessages(channelManager._openMessageStore(channelManager._requireNode(created.channel_id))).length, 0);
 });
 
 test('delayed channel-audience messages are rejected before local writes', async (t) => {
@@ -511,7 +477,7 @@ test('delayed channel-audience messages are rejected before local writes', async
     (err) => err.code === 'invalid_envelope' && err.statusCode === 400,
   );
 
-  assert.equal(readJsonlMessages(created.workdir).length, 0);
+  assert.deepEqual(readJsonlMessageFiles(created.workdir), []);
   assert.equal(readStoredMessages(channelManager._openMessageStore(node)).length, 0);
 });
 
@@ -578,7 +544,7 @@ test('scheduled task lifecycle payloads are rejected before local writes', async
     );
   }
 
-  assert.equal(readJsonlMessages(created.workdir).length, 0);
+  assert.deepEqual(readJsonlMessageFiles(created.workdir), []);
   assert.equal(readStoredMessages(channelManager._openMessageStore(node)).length, 0);
 });
 
@@ -639,25 +605,23 @@ test('task close and append reject terminal tasks and direct emit cannot mutate 
     }),
     (err) => err.code === 'task_already_terminal' && err.statusCode === 409,
   );
-  await assert.rejects(
-    () => channelManager.emitChannelMessage({
-      channelId: node.channelId,
-      messageId: 'msg-direct-terminal-close',
-      payloadType: 'task.closed',
-      payloadBody: { status: 'failed', summary: 'direct close' },
-      content: 'direct close',
-      taskId: 'task-terminal',
-      audience: ['self'],
-      origin: 'self',
-    }),
-    (err) => err.code === 'task_already_terminal' && err.statusCode === 409,
-  );
+  const directReply = await channelManager.emitChannelMessage({
+    channelId: node.channelId,
+    messageId: 'msg-direct-terminal-close',
+    payloadType: 'task.closed',
+    payloadBody: { status: 'failed', summary: 'direct close' },
+    content: 'direct close',
+    taskId: 'task-terminal',
+    audience: ['self'],
+    origin: 'self',
+  }, { channelId: node.channelId, agentName: node.agentName });
+  assert.equal(directReply.payloadType, 'agent.text');
 
   const task = getStoredTask(node.messageStore, 'task-terminal', node.channelId);
   assert.equal(task.status, 'completed');
   assert.equal(task.closed_at, closedTask.closed_at);
   assert.equal(task.last_event_at, closedTask.last_event_at);
-  assert.equal(readStoredMessages(node.messageStore).length, 2);
+  assert.equal(readStoredMessages(node.messageStore).length, 3);
 });
 
 test('message.schedule and due processing deliver only due D messages once', async (t) => {
@@ -755,10 +719,14 @@ test('react delivery advances per-agent cursor after stdin accepts the event', a
       type: 'user.message.posted',
       source: 'test',
       payload: {
-        senderType: 'human',
-        senderId: 'user-a',
-        senderName: 'User A',
-        content: 'wake the agent',
+        message: {
+          senderKind: 'human',
+          senderId: 'user-a',
+          senderName: 'User A',
+          payloadType: 'user.text',
+          payloadBody: { text: 'wake the agent' },
+          content: 'wake the agent',
+        },
       },
     },
   });
@@ -1016,8 +984,8 @@ test('due processing dead-letters permanent delivery failures after the retry li
   assert.equal(errorLines.filter((line) => line.includes('Message delivery dead-lettered')).length, 1);
 });
 
-test('due processing dead-letters legacy over-limit messages on the next poll', async (t) => {
-  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-due-dead-letter-legacy-'));
+test('due processing dead-letters over-limit sqlite messages on the next poll', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-due-dead-letter-over-limit-'));
   t.after(() => {
     rmSync(tempHome, { recursive: true, force: true });
   });
@@ -1043,10 +1011,10 @@ test('due processing dead-letters legacy over-limit messages on the next poll', 
   });
 
   const created = await channelManager.createChannel({
-    channelId: 'channel-due-dead-letter-legacy',
+    channelId: 'channel-due-dead-letter-over-limit',
     workspaceId: 'workspace-1',
     daemonId: 'machine-a',
-    name: 'Due Dead Letter Legacy Channel',
+    name: 'Due Dead Letter Over Limit Channel',
     type: 'xhs-creator',
     status: 'created',
   });
@@ -1060,8 +1028,8 @@ test('due processing dead-letters legacy over-limit messages on the next poll', 
   };
 
   const now = Date.UTC(2026, 4, 6, 1, 0, 0);
-  insertLegacyDueMessage(channelManager._openMessageStore(node), node, {
-    id: 'message-dead-letter-legacy',
+  insertDueMessage(channelManager._openMessageStore(node), node, {
+    id: 'message-dead-letter-over-limit',
     now,
     deliveryAttempts: 7,
     lastError: 'legacy_failure',
@@ -1082,22 +1050,22 @@ test('due processing dead-letters legacy over-limit messages on the next poll', 
   assert.equal(typeof result.failed[0].delivery_failed_at, 'number');
   assert.equal(deliveryCalls, 1);
 
-  const stored = readStoredMessages(node.messageStore).find((message) => message.id === 'message-dead-letter-legacy');
+  const stored = readStoredMessages(node.messageStore).find((message) => message.id === 'message-dead-letter-over-limit');
   assert.equal(stored.delivered_at, null);
   assert.equal(stored.delivery_attempts, 8);
   assert.equal(stored.last_error, 'permanent_failure');
   assert.equal(typeof stored.delivery_failed_at, 'number');
-  assert.equal(readDueMessages(node.messageStore, now + 1, 100).some((message) => message.id === 'message-dead-letter-legacy'), false);
+  assert.equal(readDueMessages(node.messageStore, now + 1, 100).some((message) => message.id === 'message-dead-letter-over-limit'), false);
 
   const deadLetterEntries = readTraceEntries(node).filter((entry) => entry.event === 'delivery_dead_letter');
   assert.equal(deadLetterEntries.length, 1);
-  assert.equal(deadLetterEntries[0].message_id, 'message-dead-letter-legacy');
+  assert.equal(deadLetterEntries[0].message_id, 'message-dead-letter-over-limit');
   assert.equal(deadLetterEntries[0].last_error, 'permanent_failure');
   assert.equal(deadLetterEntries[0].attempts, 8);
 
   const inboxEvents = parseStdoutEvents(stdoutWrites).filter((entry) => entry.event === 'inbox.created');
   assert.equal(inboxEvents.length, 1);
-  assert.equal(inboxEvents[0].body.message_id, 'message-dead-letter-legacy');
+  assert.equal(inboxEvents[0].body.message_id, 'message-dead-letter-over-limit');
   assert.equal(inboxEvents[0].body.last_error, 'permanent_failure');
   assert.equal(errorLines.filter((line) => line.includes('Message delivery dead-lettered')).length, 1);
 });
@@ -1151,7 +1119,7 @@ test('due processing dead-letter side effects fire exactly once across overlappi
   };
 
   const now = Date.UTC(2026, 4, 6, 1, 0, 0);
-  insertLegacyDueMessage(channelManager._openMessageStore(node), node, {
+  insertDueMessage(channelManager._openMessageStore(node), node, {
     id: 'message-dead-letter-once',
     now,
     deliveryAttempts: 7,
@@ -1216,9 +1184,11 @@ test('message.query --unread does not advance cursor and repeats until explicit 
   await channelManager._appendMessage(node, {
     messageId: 'message-unread-1',
     channelId: node.channelId,
-    senderType: 'human',
+    senderKind: 'human',
     senderId: 'user-a',
     senderName: 'User A',
+    payloadType: 'user.text',
+    payloadBody: { text: 'first unread' },
     content: 'first unread',
     createdAt: new Date(Date.UTC(2026, 4, 6, 1, 0, 0)).toISOString(),
     source: 'test',
@@ -1273,9 +1243,11 @@ test('message.query --unread limit is peek-only until explicit ack advances curs
     await channelManager._appendMessage(node, {
       messageId: `message-unread-limit-${index}`,
       channelId: node.channelId,
-      senderType: 'human',
+      senderKind: 'human',
       senderId: 'user-a',
       senderName: 'User A',
+      payloadType: 'user.text',
+      payloadBody: { text: `unread ${index}` },
       content: `unread ${index}`,
       createdAt: new Date(baseTs + index).toISOString(),
       tsReceived: baseTs + index,
@@ -1486,11 +1458,11 @@ test('message.query --unread with content filters peeks without advancing cursor
     await channelManager._appendMessage(node, {
       messageId: row.id,
       channelId: node.channelId,
-      senderType: 'human',
+      senderKind: 'human',
       senderId: 'user-a',
       senderName: 'User A',
-      messageType: row.payloadType,
       payloadType: row.payloadType,
+      payloadBody: { text: row.content },
       content: row.content,
       createdAt: new Date(baseTs + index).toISOString(),
       tsReceived: baseTs + index,
@@ -1867,10 +1839,10 @@ test('dispatch and memo RPC helpers write and summarize sqlite protocol messages
   });
   assert.equal(noResponse.status, 'no_response');
 
-  await channelManager.emitChannelMessage({
+  await channelManager._appendMessage(node, {
+    messageId: 'message-dispatch-completed',
     channelId: node.channelId,
     senderKind: 'external',
-    senderType: 'external',
     senderId: 'external:device:test',
     senderName: 'device',
     payloadType: 'dispatch.completed',
@@ -1878,6 +1850,8 @@ test('dispatch and memo RPC helpers write and summarize sqlite protocol messages
     content: 'completed',
     correlationId: started.correlation_id,
     origin: 'external',
+    createdAt: new Date(Date.UTC(2026, 4, 6, 1, 0, 0)).toISOString(),
+    source: 'test',
   });
   const completed = await channelManager.dispatchCheck({
     channelId: node.channelId,
@@ -2236,7 +2210,7 @@ test('task append doc write failure does not leave daemon append projection', as
   };
   const originalSendChannelMessage = channelManager.sendChannelMessage.bind(channelManager);
   channelManager.sendChannelMessage = async (params, options) => {
-    if (params.messageType === 'task.appended') sentAppend = true;
+    if (sentPayloadType(params) === 'task.appended') sentAppend = true;
     return originalSendChannelMessage(params, options);
   };
 
@@ -2296,7 +2270,7 @@ test('task append restores doc when RPC send fails after doc write', async (t) =
   const originalSendChannelMessage = channelManager.sendChannelMessage.bind(channelManager);
   let appendSendAttempted = false;
   channelManager.sendChannelMessage = async (params, options) => {
-    if (params.messageType === 'task.appended') {
+    if (sentPayloadType(params) === 'task.appended') {
       appendSendAttempted = true;
       throw new Error('mock append send failed');
     }
@@ -2358,7 +2332,7 @@ test('concurrent task appends serialize doc writes and projections', async (t) =
   const appendSendOrder = [];
   const originalSendChannelMessage = channelManager.sendChannelMessage.bind(channelManager);
   channelManager.sendChannelMessage = async (params, options) => {
-    if (params.messageType === 'task.appended') {
+    if (sentPayloadType(params) === 'task.appended') {
       appendSendOrder.push(params.content);
       if (params.content === 'First concurrent append') {
         firstEntered.resolve();
@@ -2437,7 +2411,7 @@ test('concurrent task append failed first send does not restore over successful 
   const appendSendOrder = [];
   const originalSendChannelMessage = channelManager.sendChannelMessage.bind(channelManager);
   channelManager.sendChannelMessage = async (params, options) => {
-    if (params.messageType === 'task.appended') {
+    if (sentPayloadType(params) === 'task.appended') {
       appendSendOrder.push(params.content);
       if (params.content === 'First append will fail') {
         firstEntered.resolve();
@@ -2518,7 +2492,7 @@ test('concurrent task appends both failing sends restore the initial doc', async
   const firstRelease = createDeferred();
   const appendSendOrder = [];
   channelManager.sendChannelMessage = async (params) => {
-    if (params.messageType === 'task.appended') {
+    if (sentPayloadType(params) === 'task.appended') {
       appendSendOrder.push(params.content);
       if (params.content === 'First failing append') {
         firstEntered.resolve();
@@ -2594,12 +2568,12 @@ test('concurrent task append and close serialize on the shared doc ref', async (
   const sendOrder = [];
   const originalSendChannelMessage = channelManager.sendChannelMessage.bind(channelManager);
   channelManager.sendChannelMessage = async (params, options) => {
-    if (params.messageType === 'task.appended') {
+    if (sentPayloadType(params) === 'task.appended') {
       sendOrder.push('append');
       appendEntered.resolve();
       await appendRelease.promise;
     }
-    if (params.messageType === 'task.closed') {
+    if (sentPayloadType(params) === 'task.closed') {
       sendOrder.push('close');
     }
     return originalSendChannelMessage(params, options);
@@ -2825,7 +2799,9 @@ test('channel:message.send keeps daemon truth and reports ok when view sync ack 
     type: 'channel:message.send',
     requestId: 'req-ack-fail',
     channelId: 'channel-2',
-    senderType: 'human',
+    senderKind: 'human',
+    payloadType: 'user.text',
+    payloadBody: { text: 'message survives ack failure' },
     senderId: 'user-a',
     senderName: 'User A',
     content: 'message survives ack failure',
@@ -2834,24 +2810,17 @@ test('channel:message.send keeps daemon truth and reports ok when view sync ack 
 
   assert.equal(result.content, 'message survives ack failure');
 
-  const messageFiles = readdirSync(path.join(workdir, 'messages')).filter((entry) => entry.endsWith('.jsonl'));
-  assert.equal(messageFiles.length, 1);
-  const stored = readFileSync(path.join(workdir, 'messages', messageFiles[0]), 'utf8')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
+  assert.deepEqual(readJsonlMessageFiles(workdir), []);
+  const stored = readStoredMessages(channelManager._requireNode('channel-2').messageStore);
   assert.equal(stored.length, 1);
-  assert.equal(stored[0].content, 'message survives ack failure');
+  assert.equal(stored[0].payload_body.text, 'message survives ack failure');
 
-  const pendingDir = path.join(workdir, 'pending-view-sync');
-  const pendingFiles = readdirSync(pendingDir).filter((entry) => entry.endsWith('.json'));
-  assert.equal(pendingFiles.length, 1);
-  const pending = JSON.parse(readFileSync(path.join(pendingDir, pendingFiles[0]), 'utf8'));
-  assert.equal(pending.reason, 'simulated view sync failure');
-  assert.equal(pending.payload.type, 'message.append');
-  assert.equal(pending.payload.message_id, result.messageId);
-  assert.equal(pending.payload.content, 'message survives ack failure');
+  const pendingDir = removedViewSyncQueueDir(workdir);
+  assert.equal(existsSync(pendingDir), false);
+  const viewSyncFailures = readTraceEntries(channelManager._requireNode('channel-2'))
+    .filter((entry) => entry.type === 'view_sync_failed');
+  assert.equal(viewSyncFailures.length, 1);
+  assert.equal(viewSyncFailures[0].reason, 'simulated view sync failure');
 
   assert.deepEqual(sentLog, [{
     type: 'channel:message.send.result',
@@ -2905,7 +2874,9 @@ test('channel:message.send keeps daemon truth and reports ok when view sync requ
     type: 'channel:message.send',
     requestId: 'req-throw',
     channelId: 'channel-3',
-    senderType: 'human',
+    senderKind: 'human',
+    payloadType: 'user.text',
+    payloadBody: { text: 'survives connection error' },
     senderId: 'user-a',
     senderName: 'User A',
     content: 'survives connection error',
@@ -2914,16 +2885,15 @@ test('channel:message.send keeps daemon truth and reports ok when view sync requ
 
   assert.equal(result.content, 'survives connection error');
 
-  const stored = readFileSync(
-    path.join(workdir, 'messages', readdirSync(path.join(workdir, 'messages')).find((entry) => entry.endsWith('.jsonl'))),
-    'utf8',
-  ).trim();
-  assert.match(stored, /survives connection error/);
+  assert.deepEqual(readJsonlMessageFiles(workdir), []);
+  const stored = readStoredMessages(channelManager._requireNode('channel-3').messageStore);
+  assert.equal(stored[0].payload_body.text, 'survives connection error');
 
-  const pendingFiles = readdirSync(path.join(workdir, 'pending-view-sync')).filter((entry) => entry.endsWith('.json'));
-  assert.equal(pendingFiles.length, 1);
-  const pending = JSON.parse(readFileSync(path.join(workdir, 'pending-view-sync', pendingFiles[0]), 'utf8'));
-  assert.equal(pending.reason, 'connection lost mid-request');
+  assert.equal(existsSync(removedViewSyncQueueDir(workdir)), false);
+  const viewSyncFailures = readTraceEntries(channelManager._requireNode('channel-3'))
+    .filter((entry) => entry.type === 'view_sync_failed');
+  assert.equal(viewSyncFailures.length, 1);
+  assert.equal(viewSyncFailures[0].reason, 'connection lost mid-request');
 
   assert.deepEqual(sentLog, [{
     type: 'channel:message.send.result',
@@ -2933,8 +2903,8 @@ test('channel:message.send keeps daemon truth and reports ok when view sync requ
   }]);
 });
 
-test('pending view sync is replayed on reconnect and removed after ack', async (t) => {
-  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-view-sync-replay-'));
+test('view sync failures are not persisted or replayed on reconnect', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-view-sync-no-replay-'));
   const previousHome = process.env.HOME;
   process.env.HOME = tempHome;
 
@@ -2990,29 +2960,26 @@ test('pending view sync is replayed on reconnect and removed after ack', async (
 
   const result = await channelManager.handle({
     type: 'channel:message.send',
-    requestId: 'req-replay',
+    requestId: 'req-no-replay',
     channelId: 'channel-replay',
-    senderType: 'human',
+    senderKind: 'human',
+    payloadType: 'user.text',
+    payloadBody: { text: 'message not replayed after reconnect' },
     senderId: 'user-a',
     senderName: 'User A',
-    content: 'message replayed after reconnect',
+    content: 'message not replayed after reconnect',
     attachments: [],
   }, failingConnection);
 
-  assert.equal(result.content, 'message replayed after reconnect');
-  assert.equal(readdirSync(path.join(workdir, 'pending-view-sync')).filter((entry) => entry.endsWith('.json')).length, 1);
+  assert.equal(result.content, 'message not replayed after reconnect');
+  assert.equal(existsSync(removedViewSyncQueueDir(workdir)), false);
 
   channelManager.setConnection(healthyConnection);
-  await channelManager.pendingViewSyncReplay;
 
-  assert.equal(readdirSync(path.join(workdir, 'pending-view-sync')).filter((entry) => entry.endsWith('.json')).length, 0);
-  assert.equal(replayedRequests.length, 1);
-  assert.equal(replayedRequests[0].requestId, 'req-replay');
-  assert.equal(replayedRequests[0].message_id, result.messageId);
+  assert.equal(replayedRequests.length, 0);
 
   channelManager.setConnection(healthyConnection);
-  await channelManager.pendingViewSyncReplay;
-  assert.equal(replayedRequests.length, 1);
+  assert.equal(replayedRequests.length, 0);
 });
 
 test('_recordTrace failures do not abort handleEvent delivery path', async (t) => {
@@ -3053,16 +3020,20 @@ test('_recordTrace failures do not abort handleEvent delivery path', async (t) =
       type: 'user.message.posted',
       source: 'test',
       payload: {
-        senderType: 'human',
-        senderId: 'user-a',
-        senderName: 'User A',
-        content: 'trace failure should not abort',
+        message: {
+          senderKind: 'human',
+          senderId: 'user-a',
+          senderName: 'User A',
+          payloadType: 'user.text',
+          payloadBody: { text: 'trace failure should not abort' },
+          content: 'trace failure should not abort',
+        },
       },
     },
   });
 
   assert.equal(deliveredLines.length, 1);
-  assert.equal(deliveredLines[0].event.payload.content, 'trace failure should not abort');
+  assert.equal(deliveredLines[0].event.payload.message.content, 'trace failure should not abort');
 });
 
 test('agents workdir change events stay blocked and recorded in trace', async (t) => {

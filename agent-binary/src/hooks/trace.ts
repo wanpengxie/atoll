@@ -1,9 +1,6 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
-
-function nowIso(): string {
-  return new Date().toISOString();
-}
+import { nowIso } from '../util/time.js';
 
 export function tracePath(workdir: string, agentName: string, sessionId: string): string {
   return path.join(workdir, 'agents', agentName, 'trace', `${sessionId}.jsonl`);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { accessSync, constants as fsConstants, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -38,7 +38,7 @@ function prepareWorkdir(rootDir) {
     name: 'Agent Channel',
     type: 'xhs-creator',
     status: 'active',
-    capability_set: { cli_binaries: ['xhs', 'coagent-kernel', 'coagent-msg'] },
+    capability_set: { cli_binaries: ['xhs', 'coagent-kernel'] },
     members: [],
     created_at: '2026-04-29T12:00:00.000Z',
   }, null, 2)}\n`);
@@ -72,7 +72,6 @@ process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result
 
   writeExecutable(path.join(binDir, 'claude'), fakeClaude);
   writeExecutable(path.join(binDir, 'coagent-kernel'), '#!/bin/sh\nexit 0\n');
-  writeExecutable(path.join(binDir, 'coagent-msg'), '#!/bin/sh\nexit 0\n');
   writeExecutable(path.join(binDir, 'xhs'), '#!/bin/sh\nexit 0\n');
 
   return binDir;
@@ -115,6 +114,25 @@ async function runRuntimeTurn(env, eventLine, logPath, tracePath, expectedEntrie
 
 test('build artifacts exist for agent runtime', () => {
   accessSync(distEntry, fsConstants.F_OK);
+});
+
+test('artifact archive leaves sqlite stores in place', async () => {
+  const { archiveLargeArtifacts } = await import(path.join(packageDir, 'dist', 'hooks', 'artifact-archive.js'));
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), 'coagent-artifact-archive-'));
+  const sqlitePath = path.join(rootDir, 'messages.sqlite');
+  const sqliteWalPath = path.join(rootDir, 'messages.sqlite-wal');
+  const reportPath = path.join(rootDir, 'report.txt');
+  writeFileSync(sqlitePath, 's'.repeat(2048));
+  writeFileSync(sqliteWalPath, 'w'.repeat(2048));
+  writeFileSync(reportPath, 'r'.repeat(2048));
+
+  const archived = archiveLargeArtifacts(rootDir);
+
+  assert.equal(existsSync(sqlitePath), true);
+  assert.equal(existsSync(sqliteWalPath), true);
+  assert.equal(existsSync(reportPath), false);
+  assert.deepEqual(archived.filter((entry) => /sqlite/.test(entry)), []);
+  rmSync(rootDir, { recursive: true, force: true });
 });
 
 test('stdout writer emits JSON Lines with event field instead of type', async (t) => {
@@ -171,11 +189,12 @@ test('system prompt exposes required CLI commands without the banned keyword', a
     daemonSocket: '/tmp/daemon.sock',
     daemonHttp: '',
     daemonToken: '',
-    capabilitySet: { cli_binaries: ['xhs', 'coagent-kernel', 'coagent-msg'] },
+    capabilitySet: { cli_binaries: ['xhs', 'coagent-kernel'] },
   });
 
   assert.equal(prompt.includes('coagent-kernel'), true);
-  assert.equal(prompt.includes('coagent emit'), true);
+  assert.equal(prompt.includes('coagent reply'), true);
+  assert.equal(prompt.includes('coagent emit'), false);
   assert.equal(prompt.includes('coagent dispatch start'), true);
   assert.equal(prompt.includes('coagent task open'), true);
   assert.equal(prompt.includes('echo.ping'), true);
@@ -205,7 +224,7 @@ test('runtime creates a session on the first turn and resumes it on the second t
     COAGENT_SESSION_ID: sessionId,
     COAGENT_SESSION_ID_PATH: sessionIdPath,
     COAGENT_DAEMON_SOCKET: path.join(rootDir, 'daemon.sock'),
-    COAGENT_CAPABILITY_SET: JSON.stringify({ cli_binaries: ['xhs', 'coagent-kernel', 'coagent-msg'] }),
+    COAGENT_CAPABILITY_SET: JSON.stringify({ cli_binaries: ['xhs', 'coagent-kernel'] }),
   };
 
   const eventLine = JSON.stringify({

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import { PayloadType, SenderKind } from '@coagent/payload-types';
 import {
   getDb, getMessages, insertMessage, getMessageById, updateMessage,
   getMessagesSince, maxSeq, getTeamById, deleteMessage,
@@ -35,7 +36,7 @@ router.post('/', async (req, res) => {
   // Guest message limit check
   if (req.user?.is_guest) {
     const [[{ cnt }]] = await db.execute(
-      `SELECT COUNT(*) AS cnt FROM messages WHERE sender_id = ? AND sender_type = 'user'`,
+      `SELECT COUNT(*) AS cnt FROM messages WHERE sender_id = ? AND sender_kind = 'human'`,
       [req.user.id]
     );
     if (cnt >= GUEST_MESSAGE_LIMIT) {
@@ -53,14 +54,21 @@ router.post('/', async (req, res) => {
   const mentions = await parseMentions(db, content, teamId);
   const msg = await insertMessage(db, {
     id: uuidv4(), teamId,
-    senderType: 'user', senderId, senderName,
-    messageType: 'chat', content, threadId: threadId ?? null,
-    mentions: mentions !== null ? JSON.stringify(mentions) : null,
+    senderKind: SenderKind.HUMAN,
+    senderId,
+    payloadType: PayloadType.USER_TEXT,
+    payloadBody: { text: content },
+    content,
+    threadId: threadId ?? null,
+    envelope: {
+      sender: { kind: SenderKind.HUMAN, id: senderId, name: senderName },
+      ...(mentions !== null ? { mentions } : {}),
+    },
   });
   emitJsonEvent('message.create', {
     message_id: msg.id,
     team_id: teamId,
-    sender_type: msg.sender_type,
+    sender_kind: msg.sender_kind,
   });
 
   broadcast.message(teamId, formatMessage(msg));

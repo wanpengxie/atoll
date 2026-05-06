@@ -12,13 +12,13 @@ import {
   isWorkspaceOwner,
   findUserByIdOrName,
   getChannelMessages,
-  insertMessage,
 } from '../db/index.js';
 import { isMachineOnline, sendToDaemon } from '../daemon/connections.js';
 import { requestFromDaemon } from '../daemon/index.js';
 import { broadcast } from '../realtime/broadcast.js';
 import { formatMessage } from '../internal/index.js';
 import { requireAuth } from '../middleware/auth.js';
+import { nowIso, nowMysqlDatetime } from '../time.js';
 import { emitJsonEvent } from '../events.js';
 import {
   requireWorkspaceRead,
@@ -35,7 +35,7 @@ const ALLOWED_CHANNEL_TYPES = new Set(['xhs-creator']);
 const ALLOWED_MEMBER_TYPES = new Set(['human', 'channel_agent', 'sub_agent', 'worker']);
 
 const CAPABILITY_DEFAULTS_BY_TYPE = {
-  'xhs-creator': { cli_binaries: ['coagent', 'xhs', 'coagent-kernel', 'coagent-msg'] },
+  'xhs-creator': { cli_binaries: ['coagent', 'xhs', 'coagent-kernel'] },
 };
 
 const PM_DESCRIPTION_BY_TYPE = {
@@ -87,21 +87,6 @@ function formatChannelMember(member) {
   };
 }
 
-function defaultSenderName(senderType, senderId) {
-  switch (senderType) {
-    case 'human':
-      return senderId;
-    case 'channel_agent':
-      return `channel-agent:${senderId}`;
-    case 'sub_agent':
-      return `sub-agent:${senderId}`;
-    case 'worker':
-      return `worker:${senderId}`;
-    default:
-      return senderId;
-  }
-}
-
 function explicitStatusCode(value) {
   const statusCode = Number(value);
   return Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599
@@ -148,64 +133,23 @@ function daemonRpcErrorBody(result, method) {
 }
 
 function formatDaemonMessagePayload(message) {
-  const senderType = message?.senderType ?? message?.sender_type ?? 'human';
-  const senderId = message?.senderId ?? message?.sender_id ?? '';
+  const senderId = message?.senderId ?? message?.sender_id ?? message?.envelope?.sender?.id ?? '';
   return {
     id: message?.messageId ?? message?.message_id ?? null,
     seq: null,
     teamId: null,
     channelId: message?.channelId ?? message?.channel_id ?? null,
-    senderType,
     senderId,
-    senderName: message?.senderName ?? message?.sender_name ?? defaultSenderName(senderType, senderId),
-    messageType: message?.messageType ?? message?.message_type ?? 'chat',
+    senderName: message?.senderName ?? message?.sender_name ?? message?.envelope?.sender?.name ?? senderId,
+    senderKind: message?.senderKind ?? message?.sender_kind ?? message?.envelope?.sender?.kind ?? null,
+    payloadType: message?.payloadType ?? message?.payload_type ?? message?.payload?.type ?? null,
+    payloadBody: message?.payloadBody ?? message?.payload_body ?? message?.payload?.body ?? null,
     content: String(message?.content ?? ''),
     threadId: null,
-    mentions: null,
-    taskStatus: null,
-    taskNumber: null,
-    taskAssigneeType: null,
-    taskAssigneeId: null,
-    taskAssigneeName: null,
-    taskClaimedAt: null,
-    taskCompletedAt: null,
-    createdAt: message?.createdAt ?? message?.created_at ?? new Date().toISOString(),
+    createdAt: message?.createdAt ?? message?.created_at ?? nowIso(),
     updatedAt: null,
     attachments: Array.isArray(message?.attachments) ? message.attachments : [],
   };
-}
-
-export async function appendDaemonChannelMessage({
-  requestId,
-  channelId,
-  senderType,
-  senderId,
-  senderName,
-  content,
-  messageId,
-  messageType = 'chat',
-}) {
-  if (!ALLOWED_MEMBER_TYPES.has(senderType) && senderType !== 'human') {
-    throw new Error(`Unsupported sender_type: ${senderType}`);
-  }
-  if (!content || !String(content).trim()) {
-    throw new Error('content required');
-  }
-
-  const msg = await insertMessage(getDb(), {
-    id: messageId ?? uuidv4(),
-    teamId: null,
-    channelId,
-    senderType,
-    senderId,
-    senderName: senderName ?? defaultSenderName(senderType, senderId),
-    messageType,
-    content: String(content),
-  });
-
-  const payload = formatMessage(msg);
-  payload.requestId = requestId;
-  return payload;
 }
 
 export function createChannelsRouter({
@@ -219,7 +163,6 @@ export function createChannelsRouter({
   isWorkspaceOwnerImpl = isWorkspaceOwner,
   findUserByIdOrNameImpl = findUserByIdOrName,
   getChannelMessagesImpl = getChannelMessages,
-  insertMessageImpl = insertMessage,
   sendToDaemonImpl = sendToDaemon,
   isMachineOnlineImpl = isMachineOnline,
   requestFromDaemonImpl = requestFromDaemon,
@@ -351,7 +294,7 @@ export function createChannelsRouter({
         name: `${name}-pm-${Date.now().toString(36)}`,
         displayName: `${name} PM`,
         description: PM_DESCRIPTION_BY_TYPE[type] ?? `${type} channel PM agent`,
-        runtime: 'claude',
+        runtime: 'coagent',
         machineId: daemonId,
       });
       channelAgentId = agentRow.id;
@@ -416,7 +359,7 @@ export function createChannelsRouter({
     if (req.body?.resume === true) fields.status = 'active';
     if (req.body?.archive === true) {
       fields.status = 'archived';
-      fields.archived_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      fields.archived_at = nowMysqlDatetime();
     } else if (req.body?.archive === false) {
       fields.archived_at = null;
     }
@@ -440,7 +383,7 @@ export function createChannelsRouter({
           channel: daemonChannel,
           event: {
             type: 'channel.config.updated',
-            created_at: new Date().toISOString(),
+            created_at: nowIso(),
             source: 'server',
             payload: { channel: daemonChannel },
           },
@@ -480,7 +423,7 @@ export function createChannelsRouter({
         channelId: req.channel.id,
         event: {
           type: 'channel.member.joined',
-          created_at: new Date().toISOString(),
+          created_at: nowIso(),
           source: 'server',
           payload: {
             member: formatChannelMember(added),
@@ -537,13 +480,13 @@ export function createChannelsRouter({
           type: 'channel:message.send',
           requestId,
           channelId: req.channel.id,
-          senderType: 'human',
           senderKind: SenderKind.HUMAN,
           senderId: userId,
-          senderName: req.user?.name ?? defaultUserName,
-          messageType: 'chat',
           payloadType: PayloadType.USER_TEXT,
           payloadBody: { text: content, attachments: [] },
+          envelope: {
+            sender: { kind: SenderKind.HUMAN, id: userId, name: req.user?.name ?? defaultUserName },
+          },
           content,
           attachments: [],
         },
