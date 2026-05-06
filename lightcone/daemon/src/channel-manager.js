@@ -41,7 +41,7 @@ import { WorkdirWatcher } from './workdir-watcher.js';
 
 const DEFAULT_AGENT_NAME = 'channel-agent';
 const SHUTDOWN_GRACE_MS = 5_000;
-const DEFAULT_DUE_MESSAGE_POLL_MS = 1_000;
+const DEFAULT_DUE_MESSAGE_POLL_MS = 30_000;
 const DEFAULT_DELIVERY_FAILURE_LIMIT = 5;
 const SCHEDULE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'abandoned', 'archived']);
