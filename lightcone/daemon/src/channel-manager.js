@@ -648,6 +648,7 @@ export class ChannelManager {
     this.dueMessagePollMs = dueMessagePollMs;
     this.dueMessageTimer = null;
     this.pendingViewSyncReplay = null;
+    this._taskDocMutex = new Map();
     this.cronScheduler = new CronScheduler({
       onTick: async (tick) => {
         await this._handleCronTick(tick);
@@ -699,6 +700,32 @@ export class ChannelManager {
 
   _restoreTaskDoc(workdir, docRef, previous) {
     restoreTaskDoc(workdir, docRef, previous);
+  }
+
+  _taskDocLockKey(channelId, docRef) {
+    const relativeDocRef = safeRelativePath(docRef) ?? String(docRef ?? '').trim();
+    return `${String(channelId ?? '').trim()}\0${relativeDocRef}`;
+  }
+
+  async _withTaskDocLock(channelId, docRef, fn) {
+    const key = this._taskDocLockKey(channelId, docRef);
+    const previous = this._taskDocMutex.get(key) ?? Promise.resolve();
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.catch(() => {}).then(() => gate);
+    this._taskDocMutex.set(key, tail);
+
+    await previous.catch(() => {});
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this._taskDocMutex.get(key) === tail) {
+        this._taskDocMutex.delete(key);
+      }
+    }
   }
 
   _schedulePendingViewSyncReplay() {
@@ -1585,60 +1612,63 @@ export class ChannelManager {
     const title = String(params.title ?? '').trim();
     const docRef = String(params.doc_ref ?? params.docRef ?? params.doc ?? '').trim();
     const parentTaskId = String(params.parent_task_id ?? params.parentTaskId ?? params.parent ?? '').trim();
-    const db = this._openMessageStore(node);
     if (!taskId) throw toRpcError('bad_request', 'task_id is required');
     if (!title) throw toRpcError('bad_request', 'title is required');
     if (!docRef) throw toRpcError('bad_request', 'doc_ref is required');
-    if (getStoredTask(db, taskId, node.channelId)) throw toRpcError('conflict', `task already exists: ${taskId}`);
-    if (parentTaskId && !getStoredTask(db, parentTaskId, node.channelId)) {
-      throw toRpcError('not_found', `parent task not found: ${parentTaskId}`);
-    }
 
-    const docWrite = writeTaskDocAtomic(node.workdir, docRef, taskDocTemplate({
-      taskId,
-      type,
-      title,
-      parentTaskId,
-      rationale: params.rationale ? String(params.rationale) : undefined,
-    }), { overwrite: false });
+    return this._withTaskDocLock(node.channelId, docRef, async () => {
+      const db = this._openMessageStore(node);
+      if (getStoredTask(db, taskId, node.channelId)) throw toRpcError('conflict', `task already exists: ${taskId}`);
+      if (parentTaskId && !getStoredTask(db, parentTaskId, node.channelId)) {
+        throw toRpcError('not_found', `parent task not found: ${parentTaskId}`);
+      }
 
-    const body = {
-      type,
-      title,
-      doc_ref: docRef,
-      ...(parentTaskId ? { parent_task_id: parentTaskId } : {}),
-      ...(params.rationale ? { rationale: String(params.rationale) } : {}),
-    };
-
-    let message;
-    try {
-      message = await this.sendChannelMessage({
-        channelId: node.channelId,
-        messageId: params.message_id ?? params.messageId,
-        senderType: 'channel_agent',
-        senderKind: SenderKind.AGENT,
-        senderId: node.agentName,
-        senderName: node.agentName,
-        messageType: PayloadType.TASK_OPENED,
-        payload: { type: PayloadType.TASK_OPENED, body },
-        content: title,
-        correlationId: params.correlation_id ?? params.correlationId,
+      const docWrite = this._writeTaskDocAtomic(node.workdir, docRef, taskDocTemplate({
         taskId,
-        audience: ['self'],
-        origin: 'self',
-        source: 'task',
-      });
-    } catch (err) {
-      removeCreatedTaskDoc(docWrite);
-      throw err;
-    }
+        type,
+        title,
+        parentTaskId,
+        rationale: params.rationale ? String(params.rationale) : undefined,
+      }), { overwrite: false });
 
-    return {
-      task_id: taskId,
-      doc_ref: docRef,
-      message,
-      task: getStoredTask(db, taskId, node.channelId),
-    };
+      const body = {
+        type,
+        title,
+        doc_ref: docRef,
+        ...(parentTaskId ? { parent_task_id: parentTaskId } : {}),
+        ...(params.rationale ? { rationale: String(params.rationale) } : {}),
+      };
+
+      let message;
+      try {
+        message = await this.sendChannelMessage({
+          channelId: node.channelId,
+          messageId: params.message_id ?? params.messageId,
+          senderType: 'channel_agent',
+          senderKind: SenderKind.AGENT,
+          senderId: node.agentName,
+          senderName: node.agentName,
+          messageType: PayloadType.TASK_OPENED,
+          payload: { type: PayloadType.TASK_OPENED, body },
+          content: title,
+          correlationId: params.correlation_id ?? params.correlationId,
+          taskId,
+          audience: ['self'],
+          origin: 'self',
+          source: 'task',
+        });
+      } catch (err) {
+        removeCreatedTaskDoc(docWrite);
+        throw err;
+      }
+
+      return {
+        task_id: taskId,
+        doc_ref: docRef,
+        message,
+        task: getStoredTask(db, taskId, node.channelId),
+      };
+    });
   }
 
   async closeTask(params) {
@@ -1651,56 +1681,62 @@ export class ChannelManager {
       throw toRpcError('bad_request', 'status must be completed, failed, or abandoned');
     }
     const db = this._openMessageStore(node);
-    const task = getStoredTask(db, taskId, node.channelId);
-    if (!task) throw toRpcError('not_found', `task not found: ${taskId}`);
-    assertTaskMutable(task, taskId);
+    const existingTask = getStoredTask(db, taskId, node.channelId);
+    if (!existingTask) throw toRpcError('not_found', `task not found: ${taskId}`);
     const summary = params.summary ? String(params.summary) : undefined;
     const resultRefValue = params.result_ref ?? params.resultRef;
     const resultRef = resultRefValue ? String(resultRefValue) : undefined;
-    const docRef = task.doc_ref;
+    const docRef = existingTask.doc_ref;
 
-    const docWrite = writeTaskDocAtomic(
-      node.workdir,
-      docRef,
-      appendClosedStatus(readDocIfPresent(node.workdir, docRef) ?? '', status, summary, resultRef),
-      { overwrite: true },
-    );
+    return this._withTaskDocLock(node.channelId, docRef, async () => {
+      const task = getStoredTask(db, taskId, node.channelId);
+      if (!task) throw toRpcError('not_found', `task not found: ${taskId}`);
+      assertTaskMutable(task, taskId);
+      const lockedDocRef = task.doc_ref;
 
-    const body = {
-      status,
-      ...(summary ? { summary } : {}),
-      ...(resultRef ? { result_ref: resultRef } : {}),
-    };
+      const docWrite = this._writeTaskDocAtomic(
+        node.workdir,
+        lockedDocRef,
+        appendClosedStatus(this._readTaskDocIfPresent(node.workdir, lockedDocRef) ?? '', status, summary, resultRef),
+        { overwrite: true },
+      );
 
-    let message;
-    try {
-      message = await this.sendChannelMessage({
-        channelId: node.channelId,
-        senderType: 'channel_agent',
-        senderKind: SenderKind.AGENT,
-        senderId: node.agentName,
-        senderName: node.agentName,
-        messageType: PayloadType.TASK_CLOSED,
-        payload: { type: PayloadType.TASK_CLOSED, body },
-        content: String(summary ?? `task ${taskId} ${status}`),
-        correlationId: params.correlation_id ?? params.correlationId,
-        taskId,
-        audience: ['self'],
-        origin: 'self',
-        source: 'task',
-      });
-    } catch (err) {
-      restoreTaskDoc(node.workdir, docRef, docWrite.previous);
-      throw err;
-    }
+      const body = {
+        status,
+        ...(summary ? { summary } : {}),
+        ...(resultRef ? { result_ref: resultRef } : {}),
+      };
 
-    return {
-      task_id: taskId,
-      doc_ref: docRef,
-      status,
-      message,
-      task: getStoredTask(db, taskId, node.channelId),
-    };
+      let message;
+      try {
+        message = await this.sendChannelMessage({
+          channelId: node.channelId,
+          senderType: 'channel_agent',
+          senderKind: SenderKind.AGENT,
+          senderId: node.agentName,
+          senderName: node.agentName,
+          messageType: PayloadType.TASK_CLOSED,
+          payload: { type: PayloadType.TASK_CLOSED, body },
+          content: String(summary ?? `task ${taskId} ${status}`),
+          correlationId: params.correlation_id ?? params.correlationId,
+          taskId,
+          audience: ['self'],
+          origin: 'self',
+          source: 'task',
+        });
+      } catch (err) {
+        this._restoreTaskDoc(node.workdir, lockedDocRef, docWrite.previous);
+        throw err;
+      }
+
+      return {
+        task_id: taskId,
+        doc_ref: lockedDocRef,
+        status,
+        message,
+        task: getStoredTask(db, taskId, node.channelId),
+      };
+    });
   }
 
   async appendTask(params) {
@@ -1711,46 +1747,52 @@ export class ChannelManager {
     if (!taskId) throw toRpcError('bad_request', 'task_id is required');
     if (!summary) throw toRpcError('bad_request', 'summary is required');
     const db = this._openMessageStore(node);
-    const task = getStoredTask(db, taskId, node.channelId);
-    if (!task) throw toRpcError('not_found', `task not found: ${taskId}`);
-    assertTaskMutable(task, taskId);
-    const docRef = task.doc_ref;
+    const existingTask = getStoredTask(db, taskId, node.channelId);
+    if (!existingTask) throw toRpcError('not_found', `task not found: ${taskId}`);
+    const docRef = existingTask.doc_ref;
 
-    const docWrite = this._writeTaskDocAtomic(
-      node.workdir,
-      docRef,
-      appendTimeline(this._readTaskDocIfPresent(node.workdir, docRef) ?? '', summary),
-      { overwrite: true },
-    );
+    return this._withTaskDocLock(node.channelId, docRef, async () => {
+      const task = getStoredTask(db, taskId, node.channelId);
+      if (!task) throw toRpcError('not_found', `task not found: ${taskId}`);
+      assertTaskMutable(task, taskId);
+      const lockedDocRef = task.doc_ref;
 
-    let message;
-    try {
-      message = await this.sendChannelMessage({
-        channelId: node.channelId,
-        senderType: 'channel_agent',
-        senderKind: SenderKind.AGENT,
-        senderId: node.agentName,
-        senderName: node.agentName,
-        messageType: PayloadType.TASK_APPENDED,
-        payload: { type: PayloadType.TASK_APPENDED, body: { summary } },
-        content: summary,
-        correlationId: params.correlation_id ?? params.correlationId,
-        taskId,
-        audience: ['self'],
-        origin: 'self',
-        source: 'task',
-      });
-    } catch (err) {
-      this._restoreTaskDoc(node.workdir, docRef, docWrite.previous);
-      throw err;
-    }
+      const docWrite = this._writeTaskDocAtomic(
+        node.workdir,
+        lockedDocRef,
+        appendTimeline(this._readTaskDocIfPresent(node.workdir, lockedDocRef) ?? '', summary),
+        { overwrite: true },
+      );
 
-    return {
-      task_id: taskId,
-      doc_ref: docRef,
-      message,
-      task: getStoredTask(db, taskId, node.channelId),
-    };
+      let message;
+      try {
+        message = await this.sendChannelMessage({
+          channelId: node.channelId,
+          senderType: 'channel_agent',
+          senderKind: SenderKind.AGENT,
+          senderId: node.agentName,
+          senderName: node.agentName,
+          messageType: PayloadType.TASK_APPENDED,
+          payload: { type: PayloadType.TASK_APPENDED, body: { summary } },
+          content: summary,
+          correlationId: params.correlation_id ?? params.correlationId,
+          taskId,
+          audience: ['self'],
+          origin: 'self',
+          source: 'task',
+        });
+      } catch (err) {
+        this._restoreTaskDoc(node.workdir, lockedDocRef, docWrite.previous);
+        throw err;
+      }
+
+      return {
+        task_id: taskId,
+        doc_ref: lockedDocRef,
+        message,
+        task: getStoredTask(db, taskId, node.channelId),
+      };
+    });
   }
 
   async listTasks(params) {

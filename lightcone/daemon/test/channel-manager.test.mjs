@@ -70,6 +70,14 @@ function readTraceEntries(node) {
     .map((line) => JSON.parse(line));
 }
 
+function createDeferred() {
+  let resolve;
+  const promise = new Promise((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 function parseStdoutEvents(writes) {
   return writes
     .flatMap((chunk) => chunk.split('\n').map((line) => line.trim()).filter(Boolean))
@@ -1891,6 +1899,323 @@ test('task append restores doc when RPC send fails after doc write', async (t) =
   assert.equal(readFileSync(docPath, 'utf8'), originalDoc);
   assert.equal(readStoredMessages(node.messageStore)
     .filter((message) => message.payload_type === 'task.appended').length, 0);
+});
+
+test('concurrent task appends serialize doc writes and projections', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-task-append-concurrent-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-task-append-concurrent',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Task Append Concurrent Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const docRef = 'notes/tasks/2026-05-06-append-concurrent.md';
+  const docPath = path.join(created.workdir, docRef);
+
+  await channelManager.openTask({
+    channelId: node.channelId,
+    taskId: 'task-append-concurrent',
+    type: 'research',
+    title: 'Append concurrent',
+    docRef,
+  });
+
+  const firstEntered = createDeferred();
+  const firstRelease = createDeferred();
+  const appendSendOrder = [];
+  const originalSendChannelMessage = channelManager.sendChannelMessage.bind(channelManager);
+  channelManager.sendChannelMessage = async (params, options) => {
+    if (params.messageType === 'task.appended') {
+      appendSendOrder.push(params.content);
+      if (params.content === 'First concurrent append') {
+        firstEntered.resolve();
+        await firstRelease.promise;
+      }
+    }
+    return originalSendChannelMessage(params, options);
+  };
+
+  const firstAppend = channelManager.appendTask({
+    channelId: node.channelId,
+    taskId: 'task-append-concurrent',
+    summary: 'First concurrent append',
+  });
+  await firstEntered.promise;
+  const secondAppend = channelManager.appendTask({
+    channelId: node.channelId,
+    taskId: 'task-append-concurrent',
+    summary: 'Second concurrent append',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(appendSendOrder, ['First concurrent append']);
+
+  firstRelease.resolve();
+  await Promise.all([firstAppend, secondAppend]);
+
+  const doc = readFileSync(docPath, 'utf8');
+  assert.match(doc, /- .* - First concurrent append/);
+  assert.match(doc, /- .* - Second concurrent append/);
+  assert.equal(doc.indexOf('First concurrent append') < doc.indexOf('Second concurrent append'), true);
+  const appends = readStoredMessages(node.messageStore)
+    .filter((message) => message.payload_type === 'task.appended');
+  assert.equal(appends.length, 2);
+  assert.equal(appends.some((message) => message.payload_body.summary === 'First concurrent append'), true);
+  assert.equal(appends.some((message) => message.payload_body.summary === 'Second concurrent append'), true);
+  assert.equal(channelManager._taskDocMutex.size, 0);
+});
+
+test('concurrent task append failed first send does not restore over successful second append', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-task-append-first-fails-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-task-append-first-fails',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Task Append First Fails Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const docRef = 'notes/tasks/2026-05-06-append-first-fails.md';
+  const docPath = path.join(created.workdir, docRef);
+
+  await channelManager.openTask({
+    channelId: node.channelId,
+    taskId: 'task-append-first-fails',
+    type: 'research',
+    title: 'Append first fails',
+    docRef,
+  });
+
+  const firstEntered = createDeferred();
+  const firstRelease = createDeferred();
+  const appendSendOrder = [];
+  const originalSendChannelMessage = channelManager.sendChannelMessage.bind(channelManager);
+  channelManager.sendChannelMessage = async (params, options) => {
+    if (params.messageType === 'task.appended') {
+      appendSendOrder.push(params.content);
+      if (params.content === 'First append will fail') {
+        firstEntered.resolve();
+        await firstRelease.promise;
+        throw new Error('mock first append send failed');
+      }
+    }
+    return originalSendChannelMessage(params, options);
+  };
+
+  const firstAppend = channelManager.appendTask({
+    channelId: node.channelId,
+    taskId: 'task-append-first-fails',
+    summary: 'First append will fail',
+  });
+  await firstEntered.promise;
+  const secondAppend = channelManager.appendTask({
+    channelId: node.channelId,
+    taskId: 'task-append-first-fails',
+    summary: 'Second append survives',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(appendSendOrder, ['First append will fail']);
+
+  firstRelease.resolve();
+  const results = await Promise.allSettled([firstAppend, secondAppend]);
+  assert.equal(results[0].status, 'rejected');
+  assert.match(results[0].reason.message, /mock first append send failed/);
+  assert.equal(results[1].status, 'fulfilled');
+
+  const doc = readFileSync(docPath, 'utf8');
+  assert.equal(doc.includes('First append will fail'), false);
+  assert.match(doc, /- .* - Second append survives/);
+  const appends = readStoredMessages(node.messageStore)
+    .filter((message) => message.payload_type === 'task.appended');
+  assert.equal(appends.length, 1);
+  assert.equal(appends[0].payload_body.summary, 'Second append survives');
+  assert.equal(channelManager._taskDocMutex.size, 0);
+});
+
+test('concurrent task appends both failing sends restore the initial doc', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-task-append-both-fail-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-task-append-both-fail',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Task Append Both Fail Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const docRef = 'notes/tasks/2026-05-06-append-both-fail.md';
+  const docPath = path.join(created.workdir, docRef);
+
+  await channelManager.openTask({
+    channelId: node.channelId,
+    taskId: 'task-append-both-fail',
+    type: 'research',
+    title: 'Append both fail',
+    docRef,
+  });
+  const originalDoc = readFileSync(docPath, 'utf8');
+
+  const firstEntered = createDeferred();
+  const firstRelease = createDeferred();
+  const appendSendOrder = [];
+  channelManager.sendChannelMessage = async (params) => {
+    if (params.messageType === 'task.appended') {
+      appendSendOrder.push(params.content);
+      if (params.content === 'First failing append') {
+        firstEntered.resolve();
+        await firstRelease.promise;
+      }
+      throw new Error(`mock send failed for ${params.content}`);
+    }
+    throw new Error('unexpected message send in test');
+  };
+
+  const firstAppend = channelManager.appendTask({
+    channelId: node.channelId,
+    taskId: 'task-append-both-fail',
+    summary: 'First failing append',
+  });
+  await firstEntered.promise;
+  const secondAppend = channelManager.appendTask({
+    channelId: node.channelId,
+    taskId: 'task-append-both-fail',
+    summary: 'Second failing append',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(appendSendOrder, ['First failing append']);
+
+  firstRelease.resolve();
+  const results = await Promise.allSettled([firstAppend, secondAppend]);
+  assert.equal(results[0].status, 'rejected');
+  assert.equal(results[1].status, 'rejected');
+
+  assert.equal(readFileSync(docPath, 'utf8'), originalDoc);
+  assert.equal(readStoredMessages(node.messageStore)
+    .filter((message) => message.payload_type === 'task.appended').length, 0);
+  assert.equal(channelManager._taskDocMutex.size, 0);
+});
+
+test('concurrent task append and close serialize on the shared doc ref', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-task-append-close-concurrent-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-task-append-close-concurrent',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Task Append Close Concurrent Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const docRef = 'notes/tasks/2026-05-06-append-close-concurrent.md';
+  const docPath = path.join(created.workdir, docRef);
+
+  await channelManager.openTask({
+    channelId: node.channelId,
+    taskId: 'task-append-close-concurrent',
+    type: 'research',
+    title: 'Append close concurrent',
+    docRef,
+  });
+
+  const appendEntered = createDeferred();
+  const appendRelease = createDeferred();
+  const sendOrder = [];
+  const originalSendChannelMessage = channelManager.sendChannelMessage.bind(channelManager);
+  channelManager.sendChannelMessage = async (params, options) => {
+    if (params.messageType === 'task.appended') {
+      sendOrder.push('append');
+      appendEntered.resolve();
+      await appendRelease.promise;
+    }
+    if (params.messageType === 'task.closed') {
+      sendOrder.push('close');
+    }
+    return originalSendChannelMessage(params, options);
+  };
+
+  const appendPromise = channelManager.appendTask({
+    channelId: node.channelId,
+    taskId: 'task-append-close-concurrent',
+    summary: 'Append before close',
+  });
+  await appendEntered.promise;
+  const closePromise = channelManager.closeTask({
+    channelId: node.channelId,
+    taskId: 'task-append-close-concurrent',
+    status: 'completed',
+    summary: 'Closed after append',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sendOrder, ['append']);
+
+  appendRelease.resolve();
+  await Promise.all([appendPromise, closePromise]);
+
+  const doc = readFileSync(docPath, 'utf8');
+  assert.match(doc, /- .* - Append before close/);
+  assert.match(doc, /Summary: Closed after append/);
+  assert.equal(doc.trim().endsWith('Status: completed'), true);
+  assert.equal(doc.indexOf('Append before close') < doc.indexOf('Status: completed'), true);
+  assert.equal(getStoredTask(node.messageStore, 'task-append-close-concurrent', node.channelId).status, 'completed');
+  const messages = readStoredMessages(node.messageStore);
+  assert.equal(messages.filter((message) => message.payload_type === 'task.appended').length, 1);
+  assert.equal(messages.filter((message) => message.payload_type === 'task.closed').length, 1);
+  assert.equal(channelManager._taskDocMutex.size, 0);
 });
 
 test('task open doc write failure does not leave daemon task projection', async (t) => {
