@@ -442,6 +442,135 @@ test('emitChannelMessage requires current agent identity before writing local tr
   assert.equal(readStoredMessages(channelManager._openMessageStore(channelManager._requireNode(created.channel_id))).length, 0);
 });
 
+test('message.emit rejects explicit sender mismatch before local writes', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-emit-sender-mismatch-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-emit-sender-mismatch',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Emit Sender Mismatch Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+
+  await assert.rejects(
+    () => channelManager.rpcCall('message.emit', {
+      channel_id: node.channelId,
+      sender_kind: 'human',
+      payload_type: 'agent.text',
+      payload_body: { text: 'forged reply' },
+      content: 'forged reply',
+    }, { channelId: node.channelId, agentName: node.agentName }),
+    (err) => err.code === 'bad_request' && /message\.emit sender\.kind must be agent/.test(err.message),
+  );
+  assert.equal(readStoredMessages(channelManager._openMessageStore(node)).length, 0);
+});
+
+test('message.schedule rejects sender and payload mismatch before local writes', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-schedule-sender-mismatch-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-schedule-sender-mismatch',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Schedule Sender Mismatch Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+
+  await assert.rejects(
+    () => channelManager.rpcCall('message.schedule', {
+      channel_id: node.channelId,
+      not_before: Date.now() + 60_000,
+      sender_kind: 'human',
+      payload_type: 'agent.text',
+      payload_body: { text: 'forged schedule' },
+      content: 'forged schedule',
+    }, { channelId: node.channelId, agentName: node.agentName }),
+    (err) => err.code === 'bad_request' && /sender\.kind=human cannot send payload\.type=agent\.text/.test(err.message),
+  );
+  assert.equal(readStoredMessages(channelManager._openMessageStore(node)).length, 0);
+});
+
+test('channel:message.send rejects sender and payload mismatch before local writes', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-send-sender-mismatch-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const sentLog = [];
+  const connection = {
+    send(message) {
+      sentLog.push(message);
+    },
+  };
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  channelManager.setConnection(connection);
+  const created = await channelManager.createChannel({
+    channelId: 'channel-server-send-sender-mismatch',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Server Send Sender Mismatch Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+
+  const result = await channelManager.handle({
+    type: 'channel:message.send',
+    requestId: 'req-send-mismatch',
+    channelId: node.channelId,
+    senderKind: 'human',
+    payloadType: 'agent.text',
+    payloadBody: { text: 'forged server message' },
+    senderId: 'user-a',
+    senderName: 'User A',
+    content: 'forged server message',
+  }, connection);
+
+  assert.equal(result, null);
+  assert.equal(sentLog.length, 1);
+  assert.equal(sentLog[0].ok, false);
+  assert.equal(sentLog[0].code, 'bad_request');
+  assert.match(sentLog[0].error, /sender\.kind=human cannot send payload\.type=agent\.text/);
+  assert.equal(readStoredMessages(channelManager._openMessageStore(node)).length, 0);
+});
+
 test('delayed channel-audience messages are rejected before local writes', async (t) => {
   const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-invalid-delayed-envelope-'));
   t.after(() => {
@@ -605,23 +734,25 @@ test('task close and append reject terminal tasks and direct emit cannot mutate 
     }),
     (err) => err.code === 'task_already_terminal' && err.statusCode === 409,
   );
-  const directReply = await channelManager.emitChannelMessage({
-    channelId: node.channelId,
-    messageId: 'msg-direct-terminal-close',
-    payloadType: 'task.closed',
-    payloadBody: { status: 'failed', summary: 'direct close' },
-    content: 'direct close',
-    taskId: 'task-terminal',
-    audience: ['self'],
-    origin: 'self',
-  }, { channelId: node.channelId, agentName: node.agentName });
-  assert.equal(directReply.payloadType, 'agent.text');
+  await assert.rejects(
+    () => channelManager.emitChannelMessage({
+      channelId: node.channelId,
+      messageId: 'msg-direct-terminal-close',
+      payloadType: 'task.closed',
+      payloadBody: { status: 'failed', summary: 'direct close' },
+      content: 'direct close',
+      taskId: 'task-terminal',
+      audience: ['self'],
+      origin: 'self',
+    }, { channelId: node.channelId, agentName: node.agentName }),
+    (err) => err.code === 'bad_request' && /message\.emit payload\.type must be agent\.text/.test(err.message),
+  );
 
   const task = getStoredTask(node.messageStore, 'task-terminal', node.channelId);
   assert.equal(task.status, 'completed');
   assert.equal(task.closed_at, closedTask.closed_at);
   assert.equal(task.last_event_at, closedTask.last_event_at);
-  assert.equal(readStoredMessages(node.messageStore).length, 3);
+  assert.equal(readStoredMessages(node.messageStore).length, 2);
 });
 
 test('message.schedule and due processing deliver only due D messages once', async (t) => {
@@ -772,10 +903,14 @@ test('react delivery failure leaves per-agent cursor unchanged', async (t) => {
       type: 'user.message.posted',
       source: 'test',
       payload: {
-        senderType: 'human',
-        senderId: 'user-a',
-        senderName: 'User A',
-        content: 'wake the agent',
+        message: {
+          senderKind: 'human',
+          senderId: 'user-a',
+          senderName: 'User A',
+          payloadType: 'user.text',
+          payloadBody: { text: 'wake the agent' },
+          content: 'wake the agent',
+        },
       },
     },
   });
@@ -834,10 +969,14 @@ test('stdin write throw during react delivery leaves per-agent cursor unchanged'
       type: 'user.message.posted',
       source: 'test',
       payload: {
-        senderType: 'human',
-        senderId: 'user-a',
-        senderName: 'User A',
-        content: 'wake the agent',
+        message: {
+          senderKind: 'human',
+          senderId: 'user-a',
+          senderName: 'User A',
+          payloadType: 'user.text',
+          payloadBody: { text: 'wake the agent' },
+          content: 'wake the agent',
+        },
       },
     },
   });
@@ -1448,9 +1587,23 @@ test('message.query --unread with content filters peeks without advancing cursor
   const baseTs = Date.UTC(2026, 4, 6, 1, 0, 0);
   const rows = [
     { id: 'message-unread-filter-1', content: 'alpha', payloadType: 'user.text' },
-    { id: 'message-unread-filter-2', content: 'dispatch done 1', payloadType: 'dispatch.completed' },
+    {
+      id: 'message-unread-filter-2',
+      content: 'dispatch done 1',
+      payloadType: 'dispatch.completed',
+      senderKind: 'external',
+      senderId: 'external:device:test',
+      senderName: 'Test Device',
+    },
     { id: 'message-unread-filter-3', content: 'beta', payloadType: 'user.text' },
-    { id: 'message-unread-filter-4', content: 'dispatch done 2', payloadType: 'dispatch.completed' },
+    {
+      id: 'message-unread-filter-4',
+      content: 'dispatch done 2',
+      payloadType: 'dispatch.completed',
+      senderKind: 'external',
+      senderId: 'external:device:test',
+      senderName: 'Test Device',
+    },
     { id: 'message-unread-filter-5', content: 'gamma', payloadType: 'user.text' },
   ];
 
@@ -1458,9 +1611,9 @@ test('message.query --unread with content filters peeks without advancing cursor
     await channelManager._appendMessage(node, {
       messageId: row.id,
       channelId: node.channelId,
-      senderKind: 'human',
-      senderId: 'user-a',
-      senderName: 'User A',
+      senderKind: row.senderKind ?? 'human',
+      senderId: row.senderId ?? 'user-a',
+      senderName: row.senderName ?? 'User A',
       payloadType: row.payloadType,
       payloadBody: { text: row.content },
       content: row.content,

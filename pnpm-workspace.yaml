@@ -4,7 +4,6 @@ packages:
   - 'agent-binary'
   - 'lightcone'
   - 'lightcone/daemon'
-  - 'lightcone/mcp-servers/*'
   - 'lightcone/feishu-bridge'
 
 allowBuilds:

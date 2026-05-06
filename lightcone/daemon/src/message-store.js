@@ -6,17 +6,55 @@ import { nowIso } from './time.js';
 
 const DEFAULT_AGENT_NAME = 'channel-agent';
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'abandoned', 'archived']);
+const REMOVED_MESSAGE_COLUMN = ['legacy', 'json'].join('_');
+const MESSAGE_COLUMNS = Object.freeze([
+  'id',
+  'channel_id',
+  'ts',
+  'ts_received',
+  'sender_kind',
+  'sender_id',
+  'sender_name',
+  'payload_type',
+  'payload_body',
+  'parent_id',
+  'correlation_id',
+  'task_id',
+  'thread_id',
+  'audience',
+  'mentions',
+  'origin',
+  'not_before',
+  'expires_at',
+  'delivered_at',
+  'delivery_failed_at',
+  'delivery_attempts',
+  'last_attempt_at',
+  'last_error',
+  'envelope_json',
+  'payload_json',
+  'created_at',
+]);
 
 function toJson(value) {
   return JSON.stringify(value ?? null);
 }
 
-function fromJson(value, fallback = null) {
-  if (value == null) return fallback;
+function parseJsonStrict(value, fieldName) {
+  if (value == null) throw badRequest(`${fieldName} is required`);
+  try {
+    return JSON.parse(value);
+  } catch (err) {
+    throw badRequest(`invalid ${fieldName} JSON: ${err.message}`);
+  }
+}
+
+function parseJsonNullable(value) {
+  if (value == null) return null;
   try {
     return JSON.parse(value);
   } catch {
-    return fallback;
+    return null;
   }
 }
 
@@ -98,13 +136,111 @@ function ensureColumn(db, table, column, definition) {
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
+function quoteIdentifier(identifier) {
+  const name = String(identifier ?? '').trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    throw new Error(`invalid sqlite identifier: ${identifier}`);
+  }
+  return `"${name}"`;
+}
+
+function tableColumns(db, table) {
+  return db.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all();
+}
+
+function createMessagesTableSql(tableName = 'messages', { ifNotExists = true } = {}) {
+  return `
+    CREATE TABLE ${ifNotExists ? 'IF NOT EXISTS ' : ''}${quoteIdentifier(tableName)} (
+      id TEXT PRIMARY KEY,
+      channel_id TEXT NOT NULL,
+      ts INTEGER NOT NULL,
+      ts_received INTEGER NOT NULL,
+      sender_kind TEXT NOT NULL,
+      sender_id TEXT NOT NULL,
+      sender_name TEXT DEFAULT '',
+      payload_type TEXT NOT NULL,
+      payload_body TEXT NOT NULL,
+      parent_id TEXT DEFAULT NULL,
+      correlation_id TEXT DEFAULT NULL,
+      task_id TEXT DEFAULT NULL,
+      thread_id TEXT DEFAULT NULL,
+      audience TEXT NOT NULL DEFAULT 'channel',
+      mentions TEXT DEFAULT NULL,
+      origin TEXT DEFAULT NULL,
+      not_before INTEGER DEFAULT NULL,
+      expires_at INTEGER DEFAULT NULL,
+      delivered_at INTEGER DEFAULT NULL,
+      delivery_failed_at INTEGER DEFAULT NULL,
+      delivery_attempts INTEGER NOT NULL DEFAULT 0,
+      last_attempt_at INTEGER DEFAULT NULL,
+      last_error TEXT DEFAULT NULL,
+      envelope_json TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `;
+}
+
+function createMessageIndexes(db) {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_messages_channel_ts_received ON messages(channel_id, ts_received);
+    CREATE INDEX IF NOT EXISTS idx_messages_payload_type ON messages(payload_type, ts_received);
+    CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_kind, sender_id, ts_received);
+    CREATE INDEX IF NOT EXISTS idx_messages_correlation ON messages(correlation_id, ts_received);
+    CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, ts_received);
+    CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id);
+    CREATE INDEX IF NOT EXISTS idx_messages_not_before ON messages(not_before, ts_received);
+    CREATE INDEX IF NOT EXISTS idx_messages_due ON messages(not_before, delivered_at);
+    CREATE INDEX IF NOT EXISTS idx_messages_due_pending ON messages(not_before, delivered_at, delivery_failed_at);
+  `);
+}
+
+function rebuildMessagesTableWithoutColumn(db, columnName) {
+  const existingColumns = new Set(tableColumns(db, 'messages').map((row) => row.name));
+  const missingColumns = MESSAGE_COLUMNS.filter((column) => !existingColumns.has(column));
+  if (missingColumns.length > 0) {
+    throw new Error(`messages table is missing required columns: ${missingColumns.join(', ')}`);
+  }
+
+  const tempTable = `messages_rebuild_${Date.now()}`;
+  const columnsSql = MESSAGE_COLUMNS.map(quoteIdentifier).join(', ');
+  db.transaction(() => {
+    db.exec(createMessagesTableSql(tempTable, { ifNotExists: false }));
+    db.exec(`
+      INSERT INTO ${quoteIdentifier(tempTable)} (${columnsSql})
+      SELECT ${columnsSql}
+      FROM messages
+    `);
+    db.exec('DROP TABLE messages');
+    db.exec(`ALTER TABLE ${quoteIdentifier(tempTable)} RENAME TO messages`);
+  })();
+  if (tableColumns(db, 'messages').some((row) => row.name === columnName)) {
+    throw new Error('failed to remove obsolete messages column');
+  }
+}
+
+function dropRemovedMessageColumn(db) {
+  const columnName = REMOVED_MESSAGE_COLUMN;
+  if (!tableColumns(db, 'messages').some((row) => row.name === columnName)) return;
+
+  try {
+    db.exec(`ALTER TABLE messages DROP COLUMN ${quoteIdentifier(columnName)}`);
+  } catch {
+    rebuildMessagesTableWithoutColumn(db, columnName);
+  }
+
+  if (tableColumns(db, 'messages').some((row) => row.name === columnName)) {
+    throw new Error('failed to remove obsolete messages column');
+  }
+}
+
 function rowToMessage(row) {
   return {
     ...row,
-    payload_body: fromJson(row.payload_body, {}),
-    mentions: fromJson(row.mentions, null),
-    envelope: fromJson(row.envelope_json, {}),
-    payload: fromJson(row.payload_json, {}),
+    payload_body: parseJsonStrict(row.payload_body, 'payload_body'),
+    mentions: parseJsonNullable(row.mentions),
+    envelope: parseJsonStrict(row.envelope_json, 'envelope_json'),
+    payload: parseJsonStrict(row.payload_json, 'payload_json'),
   };
 }
 
@@ -182,41 +318,7 @@ export function openMessageStore(workdir) {
   db.pragma('foreign_keys = ON');
   db.pragma('journal_mode = WAL');
   db.exec(`
-    CREATE TABLE IF NOT EXISTS messages (
-      id TEXT PRIMARY KEY,
-      channel_id TEXT NOT NULL,
-      ts INTEGER NOT NULL,
-      ts_received INTEGER NOT NULL,
-      sender_kind TEXT NOT NULL,
-      sender_id TEXT NOT NULL,
-      sender_name TEXT DEFAULT '',
-      payload_type TEXT NOT NULL,
-      payload_body TEXT NOT NULL,
-      parent_id TEXT DEFAULT NULL,
-      correlation_id TEXT DEFAULT NULL,
-      task_id TEXT DEFAULT NULL,
-      thread_id TEXT DEFAULT NULL,
-      audience TEXT NOT NULL DEFAULT 'channel',
-      mentions TEXT DEFAULT NULL,
-      origin TEXT DEFAULT NULL,
-      not_before INTEGER DEFAULT NULL,
-      expires_at INTEGER DEFAULT NULL,
-      delivered_at INTEGER DEFAULT NULL,
-      delivery_failed_at INTEGER DEFAULT NULL,
-      delivery_attempts INTEGER NOT NULL DEFAULT 0,
-      last_attempt_at INTEGER DEFAULT NULL,
-      last_error TEXT DEFAULT NULL,
-      envelope_json TEXT NOT NULL,
-      payload_json TEXT NOT NULL,
-      created_at TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_messages_channel_ts_received ON messages(channel_id, ts_received);
-    CREATE INDEX IF NOT EXISTS idx_messages_payload_type ON messages(payload_type, ts_received);
-    CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_kind, sender_id, ts_received);
-    CREATE INDEX IF NOT EXISTS idx_messages_correlation ON messages(correlation_id, ts_received);
-    CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, ts_received);
-    CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id);
-    CREATE INDEX IF NOT EXISTS idx_messages_not_before ON messages(not_before, ts_received);
+    ${createMessagesTableSql()}
 
     CREATE TABLE IF NOT EXISTS tasks (
       task_id TEXT PRIMARY KEY,
@@ -242,8 +344,8 @@ export function openMessageStore(workdir) {
   ensureColumn(db, 'messages', 'delivery_attempts', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'messages', 'last_attempt_at', 'INTEGER DEFAULT NULL');
   ensureColumn(db, 'messages', 'last_error', 'TEXT DEFAULT NULL');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_messages_due ON messages(not_before, delivered_at)');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_messages_due_pending ON messages(not_before, delivered_at, delivery_failed_at)');
+  dropRemovedMessageColumn(db);
+  createMessageIndexes(db);
   return db;
 }
 
@@ -306,8 +408,8 @@ export function appendMessageToStore(db, message) {
 }
 
 export function projectTaskFromMessageRow(db, row) {
-  const payloadBody = fromJson(row.payload_body, {});
-  const envelope = fromJson(row.envelope_json, {});
+  const payloadBody = parseJsonStrict(row.payload_body, 'payload_body');
+  const envelope = parseJsonStrict(row.envelope_json, 'envelope_json');
   const rawAudience = envelope?.audience ?? row.audience;
   const audience = Array.isArray(rawAudience)
     ? rawAudience.map((item) => String(item))

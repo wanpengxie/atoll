@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import Database from 'better-sqlite3';
 
 import {
   appendMessageToStore,
@@ -149,6 +150,71 @@ test('appendMessageToStore treats duplicate message ids as idempotent', (t) => {
   assert.equal(messages.length, 1);
   assert.equal(messages[0].id, 'msg-once');
   assert.equal(messages[0].payload_body.text, 'first');
+});
+
+test('openMessageStore physically removes existing legacy_json column', (t) => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'message-store-legacy-column-'));
+  t.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const dbPath = path.join(tempDir, 'messages.sqlite');
+  const legacyDb = new Database(dbPath);
+  legacyDb.exec(`
+    CREATE TABLE messages (
+      id TEXT PRIMARY KEY,
+      channel_id TEXT NOT NULL,
+      ts INTEGER NOT NULL,
+      ts_received INTEGER NOT NULL,
+      sender_kind TEXT NOT NULL,
+      sender_id TEXT NOT NULL,
+      sender_name TEXT DEFAULT '',
+      payload_type TEXT NOT NULL,
+      payload_body TEXT NOT NULL,
+      parent_id TEXT DEFAULT NULL,
+      correlation_id TEXT DEFAULT NULL,
+      task_id TEXT DEFAULT NULL,
+      thread_id TEXT DEFAULT NULL,
+      audience TEXT NOT NULL DEFAULT 'channel',
+      mentions TEXT DEFAULT NULL,
+      origin TEXT DEFAULT NULL,
+      not_before INTEGER DEFAULT NULL,
+      expires_at INTEGER DEFAULT NULL,
+      delivered_at INTEGER DEFAULT NULL,
+      delivery_failed_at INTEGER DEFAULT NULL,
+      delivery_attempts INTEGER NOT NULL DEFAULT 0,
+      last_attempt_at INTEGER DEFAULT NULL,
+      last_error TEXT DEFAULT NULL,
+      envelope_json TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      legacy_json TEXT DEFAULT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+  legacyDb.close();
+
+  const migrated = openMessageStore(tempDir);
+  t.after(() => migrated.close());
+  const columns = migrated.prepare('PRAGMA table_info(messages)').all().map((row) => row.name);
+  assert.equal(columns.includes('legacy_json'), false);
+  assert.equal(columns.includes('payload_json'), true);
+});
+
+test('readStoredMessages fails fast on corrupted canonical JSON fields', (t) => {
+  const db = withStore(t);
+  appendMessageToStore(db, makeMessage({
+    id: 'msg-corrupt-json',
+    body: { text: 'valid before corruption' },
+  }));
+  db.prepare('UPDATE messages SET payload_body = @payload_body WHERE id = @id').run({
+    id: 'msg-corrupt-json',
+    payload_body: '{"text":',
+  });
+
+  assert.throws(
+    () => readStoredMessages(db),
+    (err) => err.code === 'bad_request' && /invalid payload_body JSON/.test(err.message),
+  );
 });
 
 test('tasks table enforces parent FK and unique task_id atomically with message insert', (t) => {

@@ -620,7 +620,12 @@
   // Initialize quick date buttons
   function initQuickBtns() {
     const today = new Date();
-    const fmt = d => d.toISOString().slice(0,10);
+    const fmt = d => {
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
     const yesterday = new Date(today); yesterday.setDate(today.getDate()-1);
     const w7ago = new Date(today); w7ago.setDate(today.getDate()-7);
     const m1ago = new Date(today); m1ago.setDate(today.getDate()-30);

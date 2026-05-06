@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { ChannelManager } from '../src/channel-manager.js';
 import { readStoredMessages } from '../src/message-store.js';
 import { RpcServer } from '../src/rpc-server.js';
+import { nowIso } from '../src/time.js';
 
 const execFileAsync = promisify(execFile);
 const realMode = process.argv.includes('--real');
@@ -288,6 +289,21 @@ try {
   assert.equal(infoResponse.ok, true);
   assert.equal(infoResponse.result.channel_id, channelId);
 
+  const senderMismatchResponse = await curlSocketRpc({
+    method: 'message.schedule',
+    params: {
+      channel_id: channelId,
+      not_before: Date.now() + 60_000,
+      sender_kind: 'human',
+      payload_type: 'agent.text',
+      payload_body: { text: 'forged raw rpc message' },
+      content: 'forged raw rpc message',
+    },
+  });
+  assert.equal(senderMismatchResponse.ok, false);
+  assert.equal(senderMismatchResponse.error?.code, 'bad_request');
+  assert.match(senderMismatchResponse.error?.message ?? '', /sender\.kind=human cannot send payload\.type=agent\.text/);
+
   const kernelInfo = await runCli('coagent-kernel', ['channel-info'], cliEnv, started.workdir);
   assert.equal(kernelInfo.ok, true);
   assert.equal(kernelInfo.data.channel_id ?? kernelInfo.data.id, channelId);
@@ -298,7 +314,7 @@ try {
       event: {
         type: 'user.message.posted',
         source: 'smoke-real',
-        created_at: new Date().toISOString(),
+        created_at: nowIso(),
         payload: {
           message: {
             sender_kind: 'human',
@@ -346,7 +362,7 @@ try {
     event: {
       type: 'user.message.posted',
       source: 'smoke',
-      created_at: new Date().toISOString(),
+      created_at: nowIso(),
       payload: {
         message: {
           sender_kind: 'human',
@@ -419,7 +435,7 @@ try {
     event: {
       type: 'heartbeat',
       source: 'smoke',
-      created_at: new Date().toISOString(),
+      created_at: nowIso(),
       payload: {},
     },
   });

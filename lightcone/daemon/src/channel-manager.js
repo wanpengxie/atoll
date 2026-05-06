@@ -45,6 +45,35 @@ const DEFAULT_DUE_MESSAGE_POLL_MS = 30_000;
 const DEFAULT_DELIVERY_FAILURE_LIMIT = 5;
 const SCHEDULE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'abandoned', 'archived']);
+const PAYLOAD_TYPES_BY_SENDER_KIND = new Map([
+  [SenderKind.HUMAN, new Set([
+    PayloadType.USER_TEXT,
+  ])],
+  [SenderKind.AGENT, new Set([
+    PayloadType.AGENT_TEXT,
+    PayloadType.DISPATCH_START,
+    PayloadType.DISPATCH_SELF_CHECK_DUE,
+    PayloadType.TASK_OPENED,
+    PayloadType.TASK_CLOSED,
+    PayloadType.TASK_APPENDED,
+    PayloadType.SELF_MEMO,
+  ])],
+  [SenderKind.SYSTEM, new Set([
+    PayloadType.SYSTEM_NOTICE,
+    PayloadType.SYSTEM_HEARTBEAT,
+    PayloadType.CHANNEL_PRESENCE_CHANGED,
+    PayloadType.CHANNEL_CONFIG_UPDATED,
+    PayloadType.CRON_TICK,
+    PayloadType.WORKDIR_CHANGED,
+    PayloadType.DISPATCH_SELF_CHECK_DUE,
+  ])],
+  [SenderKind.EXTERNAL, new Set([
+    PayloadType.DISPATCH_ACCEPTED,
+    PayloadType.DISPATCH_REJECTED,
+    PayloadType.DISPATCH_COMPLETED,
+    PayloadType.DISPATCH_FAILED,
+  ])],
+]);
 
 function toRpcError(code, message, statusCode = 400) {
   const err = new Error(message);
@@ -423,6 +452,68 @@ function assertKnownPayloadType(payloadType) {
   }
 }
 
+function assertSenderPayloadPair(senderKind, payloadType) {
+  assertKnownPayloadType(payloadType);
+  const allowedPayloadTypes = PAYLOAD_TYPES_BY_SENDER_KIND.get(senderKind);
+  if (!allowedPayloadTypes) {
+    throw toRpcError('bad_request', `unsupported sender.kind: ${senderKind}`);
+  }
+  if (!allowedPayloadTypes.has(payloadType)) {
+    throw toRpcError('bad_request', `sender.kind=${senderKind} cannot send payload.type=${payloadType}`);
+  }
+}
+
+function explicitSenderKind(input) {
+  return input?.envelope?.sender?.kind ?? input?.senderKind ?? input?.sender_kind;
+}
+
+function explicitSenderId(input) {
+  return input?.envelope?.sender?.id ?? input?.senderId ?? input?.sender_id;
+}
+
+function explicitPayloadType(input) {
+  return input?.payload?.type ?? input?.payloadType ?? input?.payload_type;
+}
+
+function assertExplicitMessagePair(input, expectedSenderKind, expectedPayloadType, operation) {
+  const rawSenderKind = explicitSenderKind(input);
+  if (rawSenderKind != null) {
+    const senderKind = normalizeSenderKind(rawSenderKind);
+    if (senderKind !== expectedSenderKind) {
+      throw toRpcError('bad_request', `${operation} sender.kind must be ${expectedSenderKind}`);
+    }
+  }
+
+  const rawPayloadType = explicitPayloadType(input);
+  if (rawPayloadType != null) {
+    const payloadType = String(rawPayloadType).trim();
+    assertKnownPayloadType(payloadType);
+    if (payloadType !== expectedPayloadType) {
+      throw toRpcError('bad_request', `${operation} payload.type must be ${expectedPayloadType}`);
+    }
+  }
+
+  assertSenderPayloadPair(expectedSenderKind, expectedPayloadType);
+}
+
+function assertRpcCallerMatchesMessage(context, node, message, operation) {
+  const agentName = String(context?.agentName ?? '').trim();
+  if (!agentName) return;
+  const channelId = String(context?.channelId ?? '').trim();
+  if (agentName !== node.agentName) {
+    throw toRpcError('forbidden', `${operation} requires the current channel agent identity`, 403);
+  }
+  if (channelId && channelId !== node.channelId) {
+    throw toRpcError('forbidden', `${operation} channel identity mismatch`, 403);
+  }
+  if (message.senderKind !== SenderKind.AGENT) {
+    throw toRpcError('bad_request', `${operation} sender.kind must be agent for agent RPC caller`);
+  }
+  if (String(message.senderId ?? '').trim() !== node.agentName) {
+    throw toRpcError('bad_request', `${operation} sender.id must match the current channel agent`);
+  }
+}
+
 function normalizePayloadBody(message, content, attachments) {
   const explicit = message?.payload?.body ?? message?.payloadBody ?? message?.payload_body;
   if (explicit != null) return parseJsonString(explicit, explicit);
@@ -501,6 +592,7 @@ function normalizeMessage(channelId, message, defaults = {}) {
     type: payloadType,
     body: payloadBody,
   };
+  assertSenderPayloadPair(senderKind, payloadType);
 
   return {
     messageId,
@@ -830,7 +922,7 @@ export class ChannelManager {
       case 'channel.archive':
         return this.archiveChannel(params.channel_id ?? params.channelId);
       case 'message.send':
-        return this.sendChannelMessage(params);
+        return this.sendChannelMessage(params, { callerIdentity: context, source: 'rpc' });
       case 'message.emit':
         return this.emitChannelMessage(params, context);
       case 'message.list':
@@ -842,7 +934,7 @@ export class ChannelManager {
       case 'message.ack':
         return this.ackChannelMessages(params);
       case 'message.schedule':
-        return this.scheduleChannelMessage(params);
+        return this.scheduleChannelMessage(params, context);
       case 'dispatch.start':
         return this.dispatchStart(params);
       case 'dispatch.check':
@@ -1175,6 +1267,7 @@ export class ChannelManager {
       payloadType: options.payloadType,
       source: options.source ?? 'daemon',
     });
+    assertRpcCallerMatchesMessage(options.callerIdentity, node, message, 'message.send');
     assertDeferredMessageEnvelope(message);
     const event = this._eventFromMessage(message);
     const shouldDefer = message.notBefore != null && message.notBefore > Date.now();
@@ -1213,6 +1306,11 @@ export class ChannelManager {
     const channelId = String(params.channel_id ?? params.channelId ?? context.channelId ?? '').trim();
     const node = this._requireNode(channelId);
     assertAgentRpcIdentity(context, node);
+    assertExplicitMessagePair(params, SenderKind.AGENT, PayloadType.AGENT_TEXT, 'message.emit');
+    const senderId = explicitSenderId(params);
+    if (senderId != null && String(senderId).trim() !== node.agentName) {
+      throw toRpcError('bad_request', 'message.emit sender.id must match the current channel agent');
+    }
     const parsedBody = parseJsonString(params.payload_body ?? params.payloadBody ?? params.payload ?? {}, {});
     const payloadBody = parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)
       ? parsedBody
@@ -1391,18 +1489,19 @@ export class ChannelManager {
     };
   }
 
-  async scheduleChannelMessage(params) {
+  async scheduleChannelMessage(params, context = {}) {
     const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
     const node = this._requireNode(channelId);
     const notBefore = optionalEpochMs(params.not_before ?? params.notBefore);
     if (notBefore == null) throw toRpcError('bad_request', 'not_before is required');
     const { payloadType, payloadBody } = normalizePayloadInput(params, PayloadType.DISPATCH_SELF_CHECK_DUE);
+    const senderKind = normalizeSenderKind(params.sender_kind ?? params.senderKind ?? SenderKind.AGENT);
     const content = String(params.content ?? payloadBody?.text ?? JSON.stringify(payloadBody ?? {}));
 
     return this.sendChannelMessage({
       channelId: node.channelId,
       messageId: params.id ?? params.message_id ?? params.messageId,
-      senderKind: params.sender_kind ?? params.senderKind ?? SenderKind.AGENT,
+      senderKind,
       senderId: params.sender_id ?? params.senderId ?? node.agentName,
       senderName: params.sender_name ?? params.senderName ?? node.agentName,
       content,
@@ -1416,7 +1515,7 @@ export class ChannelManager {
       notBefore,
       expiresAt: params.expires_at ?? params.expiresAt,
       source: params.source ?? 'schedule',
-    }, { trigger: false });
+    }, { trigger: false, callerIdentity: context });
   }
 
   async dispatchStart(params) {
@@ -2490,7 +2589,10 @@ export class ChannelManager {
     const normalized = message?.envelope && message?.payload
       ? message
       : normalizeMessage(node.channelId, message);
-    assertKnownPayloadType(normalized.payload?.type ?? normalized.payloadType);
+    assertSenderPayloadPair(
+      normalized.senderKind ?? normalized.envelope?.sender?.kind,
+      normalized.payload?.type ?? normalized.payloadType,
+    );
     const stored = appendMessageToStore(this._openMessageStore(node), normalized);
     if (stored?.inserted === false) return normalized;
     return normalized;

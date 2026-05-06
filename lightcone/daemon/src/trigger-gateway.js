@@ -117,6 +117,7 @@ export class TriggerGateway {
       return { decision: TriggerDecision.BLOCK, reason: 'default_ruleset_noise', context };
     }
 
+    // V0 decision: DM channel user messages default to react; multi-member channels can move to channel-type config later.
     if (payloadType === PayloadType.USER_TEXT) {
       return {
         decision: TriggerDecision.REACT,
