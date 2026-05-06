@@ -109,6 +109,5 @@ business_sop:
       - If failed, append the failure and ask the human only when the recovery path changes the requested content or account action.
 capabilities:
   - cli/bin/xhs: xhs publish/search/get-my-recent/get-note/publish-status mock-only commands.
-  - cli/bin/coagent: dispatch, task, memo, memo-write, query, and emit durable channel operations.
+  - cli/bin/coagent: dispatch, task, memo, memo-write, query, reply, and durable channel operations.
   - cli/bin/coagent-kernel: channel-info, member-list, and capability-list metadata queries.
-  - cli/bin/coagent-msg: local channel message check, history, and search helpers.

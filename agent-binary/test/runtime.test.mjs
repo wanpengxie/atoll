@@ -38,7 +38,7 @@ function prepareWorkdir(rootDir) {
     name: 'Agent Channel',
     type: 'xhs-creator',
     status: 'active',
-    capability_set: { cli_binaries: ['xhs', 'coagent-kernel', 'coagent-msg'] },
+    capability_set: { cli_binaries: ['xhs', 'coagent-kernel'] },
     members: [],
     created_at: '2026-04-29T12:00:00.000Z',
   }, null, 2)}\n`);
@@ -72,7 +72,6 @@ process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result
 
   writeExecutable(path.join(binDir, 'claude'), fakeClaude);
   writeExecutable(path.join(binDir, 'coagent-kernel'), '#!/bin/sh\nexit 0\n');
-  writeExecutable(path.join(binDir, 'coagent-msg'), '#!/bin/sh\nexit 0\n');
   writeExecutable(path.join(binDir, 'xhs'), '#!/bin/sh\nexit 0\n');
 
   return binDir;
@@ -171,11 +170,12 @@ test('system prompt exposes required CLI commands without the banned keyword', a
     daemonSocket: '/tmp/daemon.sock',
     daemonHttp: '',
     daemonToken: '',
-    capabilitySet: { cli_binaries: ['xhs', 'coagent-kernel', 'coagent-msg'] },
+    capabilitySet: { cli_binaries: ['xhs', 'coagent-kernel'] },
   });
 
   assert.equal(prompt.includes('coagent-kernel'), true);
-  assert.equal(prompt.includes('coagent emit'), true);
+  assert.equal(prompt.includes('coagent reply'), true);
+  assert.equal(prompt.includes('coagent emit'), false);
   assert.equal(prompt.includes('coagent dispatch start'), true);
   assert.equal(prompt.includes('coagent task open'), true);
   assert.equal(prompt.includes('echo.ping'), true);
@@ -205,7 +205,7 @@ test('runtime creates a session on the first turn and resumes it on the second t
     COAGENT_SESSION_ID: sessionId,
     COAGENT_SESSION_ID_PATH: sessionIdPath,
     COAGENT_DAEMON_SOCKET: path.join(rootDir, 'daemon.sock'),
-    COAGENT_CAPABILITY_SET: JSON.stringify({ cli_binaries: ['xhs', 'coagent-kernel', 'coagent-msg'] }),
+    COAGENT_CAPABILITY_SET: JSON.stringify({ cli_binaries: ['xhs', 'coagent-kernel'] }),
   };
 
   const eventLine = JSON.stringify({

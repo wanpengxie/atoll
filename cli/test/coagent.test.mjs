@@ -88,8 +88,9 @@ test('build artifacts exist for coagent', () => {
 test('coagent help lists the business command tree', () => {
   const help = execFileSync(binShim, ['--help'], { cwd: cliDir, encoding: 'utf8' });
   assert.match(help, /channel\s+Manage coagent channels/);
-  assert.match(help, /message\s+Send and inspect channel messages/);
-  assert.match(help, /emit \[options\]\s+Emit an envelope message/);
+  assert.match(help, /reply \[options\] <text>\s+Append a visible agent\.text reply/);
+  assert.doesNotMatch(help, /message\s+Send and inspect channel messages/);
+  assert.doesNotMatch(help, /emit \[options\]/);
   assert.match(help, /query \[options\]\s+Query channel messages/);
   assert.match(help, /ack \[options\]\s+Advance the unread cursor explicitly/);
   assert.match(help, /dispatch\s+Dispatch promise-chain helpers/);
@@ -127,6 +128,8 @@ test('coagent business subcommands call expected daemon RPC methods', async () =
     COAGENT_DAEMON_HTTP: `http://127.0.0.1:${port}`,
     COAGENT_DAEMON_TOKEN: 'test-token',
     COAGENT_DAEMON_SOCKET: '',
+    COAGENT_AGENT_NAME: 'channel-agent',
+    COAGENT_CHANNEL_ID: 'channel-a',
   };
   const cases = [
     { args: ['channel', 'ls'], method: 'channel.list', params: {} },
@@ -136,36 +139,18 @@ test('coagent business subcommands call expected daemon RPC methods', async () =
     { args: ['channel', 'stop', 'channel-a'], method: 'channel.stop', params: { channel_id: 'channel-a' } },
     { args: ['channel', 'archive', 'channel-a'], method: 'channel.archive', params: { channel_id: 'channel-a' } },
     {
-      args: ['message', 'send', '--channel', 'channel-a', '--text', 'hello', '--attachments', '/tmp/a.png,/tmp/b.png'],
-      method: 'message.send',
-      params: {
-        channel_id: 'channel-a',
-        content: 'hello',
-        attachments: ['/tmp/a.png', '/tmp/b.png'],
-        sender_type: 'human',
-        sender_kind: 'human',
-        sender_id: 'cli',
-        sender_name: 'CLI',
-        payload_type: 'user.text',
-        payload_body: { text: 'hello', attachments: ['/tmp/a.png', '/tmp/b.png'] },
-      },
-    },
-    { args: ['message', 'history', '--channel', 'channel-a', '--limit', '7'], method: 'message.list', params: { channel_id: 'channel-a', limit: 7 } },
-    { args: ['message', 'search', '--channel', 'channel-a', '--query', 'hello', '--limit', '3'], method: 'message.search', params: { channel_id: 'channel-a', query: 'hello', limit: 3 } },
-    {
-      args: ['emit', '--channel', 'channel-a', '--payload-type', 'agent.text', '--payload', '{"text":"hi"}'],
+      args: ['reply', 'hi', '--channel', 'channel-a'],
       method: 'message.emit',
       params: {
         channel_id: 'channel-a',
         sender_kind: 'agent',
-        sender_type: 'channel_agent',
         sender_id: 'channel-agent',
         sender_name: 'channel-agent',
-        message_type: 'agent.text',
         payload_type: 'agent.text',
         payload_body: { text: 'hi' },
         content: 'hi',
         audience: ['channel'],
+        origin: 'self',
       },
     },
     {
@@ -342,8 +327,6 @@ test('coagent emit --text treats file-like values as literal text', async (t) =>
       'emit',
       '--channel',
       'channel-a',
-      '--payload-type',
-      'agent.text',
       '--payload',
       '{}',
       '--text',
@@ -351,6 +334,8 @@ test('coagent emit --text treats file-like values as literal text', async (t) =>
     ], {
       COAGENT_DAEMON_HTTP: `http://127.0.0.1:${port}`,
       COAGENT_DAEMON_SOCKET: '',
+      COAGENT_AGENT_NAME: 'channel-agent',
+      COAGENT_CHANNEL_ID: 'channel-a',
     }, tempDir);
 
     assert.equal(body.ok, true);

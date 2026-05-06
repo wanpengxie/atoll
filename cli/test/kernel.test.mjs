@@ -49,7 +49,7 @@ function createChannelWorkdir() {
     name: 'Kernel Channel',
     type: 'xhs-creator',
     status: 'active',
-    capability_set: { cli_binaries: ['xhs', 'coagent-kernel', 'coagent-msg'] },
+    capability_set: { cli_binaries: ['xhs', 'coagent-kernel'] },
     members: [
       {
         member_type: 'human',
@@ -122,7 +122,7 @@ test('channel-info/member-list/capability-list/list-schedules read local workdir
 
   const capabilities = parseJson(runCli(['capability-list'], env, workdir).stdout);
   assert.equal(capabilities.ok, true);
-  assert.deepEqual(capabilities.data.cli_binaries, ['xhs', 'coagent-kernel', 'coagent-msg']);
+  assert.deepEqual(capabilities.data.cli_binaries, ['xhs', 'coagent-kernel']);
 
   const schedules = parseJson(runCli(['list-schedules'], env, workdir).stdout);
   assert.equal(schedules.ok, true);

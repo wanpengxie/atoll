@@ -1,3 +1,5 @@
+import { formatLocalIso, nowIso } from './time.js';
+
 const POLL_INTERVAL_MS = 1_000;
 const HEALTHY_UPTIME_MS = 10_000;
 
@@ -97,7 +99,7 @@ function normalizeSchedule(schedule) {
     at: schedule.at ?? schedule.next_run_at ?? null,
     reason: String(schedule.reason ?? ''),
     payload: schedule.payload ?? {},
-    createdAt: schedule.createdAt ?? schedule.created_at ?? new Date().toISOString(),
+    createdAt: schedule.createdAt ?? schedule.created_at ?? nowIso(),
     createdBy: schedule.createdBy ?? schedule.created_by ?? 'unknown',
   };
 
@@ -190,7 +192,7 @@ export class CronScheduler {
       if (entry.firedAt) continue;
       if (atTime.getTime() > now.getTime()) continue;
 
-      entry.firedAt = now.toISOString();
+      entry.firedAt = formatLocalIso(now);
       await this.onTick({
         channelId: entry.channelId,
         scheduleId: entry.id,

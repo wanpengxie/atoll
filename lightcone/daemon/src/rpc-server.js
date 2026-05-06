@@ -31,6 +31,12 @@ function writeJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload));
 }
 
+function headerValue(req, name) {
+  const value = req.headers[name.toLowerCase()];
+  if (Array.isArray(value)) return String(value[0] ?? '').trim();
+  return String(value ?? '').trim();
+}
+
 export class RpcServer {
   constructor({ channelManager, socketPath, httpPort = null, httpHost = '127.0.0.1', authToken = '', authTokens = [] }) {
     this.channelManager = channelManager;
@@ -121,7 +127,12 @@ export class RpcServer {
     }
 
     try {
-      const result = await this.channelManager.rpcCall(method, params, context);
+      const result = await this.channelManager.rpcCall(method, params, {
+        ...context,
+        agentName: headerValue(req, 'x-coagent-agent-name'),
+        channelId: headerValue(req, 'x-coagent-channel-id'),
+        sessionId: headerValue(req, 'x-coagent-session-id'),
+      });
       writeJson(res, 200, { ok: true, result });
     } catch (err) {
       writeJson(res, err.statusCode ?? 400, {

@@ -2,23 +2,6 @@ import { execSync } from 'child_process';
 import { existsSync } from 'fs';
 import path from 'path';
 import { buildSystemPrompt as buildClaudeSystemPrompt } from './claude.js';
-import { buildSkillMcpServers } from '../mcp-config.js';
-
-function buildChatBridgeArgs(chatBridgePath, { agentId, teamId, serverUrl, authToken, workspaceDir }) {
-  const args = [
-    chatBridgePath,
-    '--agent-id', agentId,
-    '--server-url', serverUrl,
-    '--auth-token', authToken,
-    '--workspace-dir', workspaceDir,
-  ];
-  if (teamId) args.push('--team-id', teamId);
-  return args;
-}
-
-function quote(value) {
-  return JSON.stringify(value);
-}
 
 function normalizeCodexModel(model) {
   if (!model) return 'gpt-5.2';
@@ -64,7 +47,7 @@ export function buildCodexSystemPrompt(config, agentId) {
 }
 
 export function buildCodexSpawn({
-  config, agentId, teamId, workspaceDir, chatBridgePath, serverUrl, machineApiKey, prompt, skills, credentialGrants,
+  config, agentId, workspaceDir, prompt,
 }) {
   ensureGitRepo(workspaceDir);
 
@@ -73,52 +56,10 @@ export function buildCodexSpawn({
     args.push('resume', config.sessionId);
   }
 
-  const bridgeArgs = buildChatBridgeArgs(chatBridgePath, {
-    agentId,
-    teamId,
-    serverUrl,
-    authToken: config.authToken || machineApiKey,
-    workspaceDir,
-  });
-
   args.push(
     '--dangerously-bypass-approvals-and-sandbox',
     '--json',
-    '-c', `mcp_servers.chat.command=${quote('node')}`,
-    '-c', `mcp_servers.chat.args=${quote(bridgeArgs)}`,
-    '-c', 'mcp_servers.chat.enabled=true',
-    '-c', 'mcp_servers.chat.required=true',
-    '-c', 'mcp_servers.chat.startup_timeout_sec=30',
-    '-c', 'mcp_servers.chat.tool_timeout_sec=300',
   );
-
-  const skillMcpServers = buildSkillMcpServers({
-    skills,
-    credentialGrants,
-    config,
-    agentId,
-    teamId,
-    workspaceDir,
-    serverUrl,
-    authToken: config.authToken || machineApiKey,
-  });
-
-  for (const [serverKey, mc] of Object.entries(skillMcpServers)) {
-    const envPairs = Object.entries(mc.env ?? {}).map(([k, v]) => `${k}=${v ?? ''}`);
-    if (envPairs.length > 0) {
-      args.push(
-        '-c', `mcp_servers.${quote(serverKey)}.command=${quote('env')}`,
-        '-c', `mcp_servers.${quote(serverKey)}.args=${quote([...envPairs, mc.command, ...(mc.args ?? [])])}`,
-        '-c', `mcp_servers.${quote(serverKey)}.enabled=true`
-      );
-      continue;
-    }
-    args.push(
-      '-c', `mcp_servers.${quote(serverKey)}.command=${quote(mc.command)}`,
-      '-c', `mcp_servers.${quote(serverKey)}.args=${quote(mc.args ?? [])}`,
-      '-c', `mcp_servers.${quote(serverKey)}.enabled=true`
-    );
-  }
 
   const model = normalizeCodexModel(config.model);
   if (model) {

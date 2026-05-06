@@ -21,27 +21,11 @@ function normalizeMentions(value) {
   return Array.isArray(parsed) ? parsed.map((item) => String(item).trim()).filter(Boolean) : [];
 }
 
-function normalizeSenderKind(rawKind, rawSenderType, eventType) {
+function normalizeSenderKind(rawKind, eventType) {
   const kind = String(rawKind ?? '').trim();
   if (Object.values(SenderKind).includes(kind)) return kind;
 
-  switch (String(rawSenderType ?? '').trim()) {
-    case 'human':
-    case 'user':
-      return SenderKind.HUMAN;
-    case 'agent':
-    case 'channel_agent':
-    case 'sub_agent':
-    case 'worker':
-      return SenderKind.AGENT;
-    case 'system':
-      return SenderKind.SYSTEM;
-    case 'external':
-    case 'device':
-      return SenderKind.EXTERNAL;
-    default:
-      return String(eventType ?? '').startsWith('user.') ? SenderKind.HUMAN : SenderKind.SYSTEM;
-  }
+  return String(eventType ?? '').startsWith('user.') ? SenderKind.HUMAN : SenderKind.SYSTEM;
 }
 
 function inferPayloadType(event, message) {
@@ -92,7 +76,6 @@ function eventContext(event, channel) {
   const sender = envelope.sender ?? {};
   const senderKind = normalizeSenderKind(
     sender.kind ?? message?.senderKind ?? message?.sender_kind,
-    message?.senderType ?? message?.sender_type,
     event?.type,
   );
   const payloadType = inferPayloadType(event, message);

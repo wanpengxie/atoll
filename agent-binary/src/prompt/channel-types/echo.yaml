@@ -20,7 +20,7 @@ dispatch_table:
 business_clis:
   - name: echo
     commands:
-      - coagent emit --payload-type agent.text --payload '{"text":"<reply>"}'
+      - coagent reply "<reply>"
     purpose: Visible echo-style replies through the generic coagent CLI.
 dispatch_types:
   - type: echo.ping
@@ -40,7 +40,7 @@ business_sop:
     steps:
       - Query unread messages and recent self memos.
       - Decide whether a direct reply is enough or a tracked follow-up is needed.
-      - Emit one visible agent.text reply when appropriate.
+      - Reply once with visible agent.text when appropriate.
 capabilities:
   - Echo a human request as a durable channel reply.
   - Demonstrate dispatch and task patterns without a business integration.

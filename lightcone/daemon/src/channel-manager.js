@@ -34,6 +34,7 @@ import {
   readDueMessages,
 } from './message-store.js';
 import { coagentProjectDir, normalizeProjectKey } from './paths.js';
+import { formatLocalIso, nowIso } from './time.js';
 import { TriggerGateway } from './trigger-gateway.js';
 import { WorkdirWatcher } from './workdir-watcher.js';
 
@@ -41,13 +42,8 @@ const DEFAULT_AGENT_NAME = 'channel-agent';
 const SHUTDOWN_GRACE_MS = 5_000;
 const DEFAULT_DUE_MESSAGE_POLL_MS = 1_000;
 const DEFAULT_DELIVERY_FAILURE_LIMIT = 5;
-const VIEW_SYNC_RETRY_LIMIT = 10;
 const SCHEDULE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'abandoned', 'archived']);
-
-function nowIso() {
-  return new Date().toISOString();
-}
 
 function toRpcError(code, message, statusCode = 400) {
   const err = new Error(message);
@@ -383,35 +379,21 @@ function normalizePayloadInput(input, defaultType = PayloadType.AGENT_TEXT) {
   return { payloadType, payloadBody };
 }
 
-function normalizeSenderKind(rawKind, rawSenderType) {
+function normalizeSenderKind(rawKind) {
   const kind = String(rawKind ?? '').trim();
   if (Object.values(SenderKind).includes(kind)) return kind;
-
-  switch (String(rawSenderType ?? '').trim()) {
-    case 'human':
-    case 'user':
-      return SenderKind.HUMAN;
-    case 'agent':
-    case 'channel_agent':
-    case 'sub_agent':
-    case 'worker':
-      return SenderKind.AGENT;
-    case 'system':
-      return SenderKind.SYSTEM;
-    case 'external':
-    case 'device':
-      return SenderKind.EXTERNAL;
-    default:
-      return SenderKind.HUMAN;
-  }
+  throw toRpcError('bad_request', 'sender.kind is required');
 }
 
-function normalizeLegacySenderType(senderKind, provided) {
-  const senderType = String(provided ?? '').trim();
-  if (senderType) return senderType;
-  if (senderKind === SenderKind.AGENT) return 'channel_agent';
-  if (senderKind === SenderKind.HUMAN) return 'human';
-  return senderKind;
+function assertAgentRpcIdentity(context, node) {
+  const agentName = String(context?.agentName ?? '').trim();
+  const channelId = String(context?.channelId ?? '').trim();
+  if (!agentName || agentName !== node.agentName) {
+    throw toRpcError('forbidden', 'message.emit requires the current channel agent identity', 403);
+  }
+  if (channelId && channelId !== node.channelId) {
+    throw toRpcError('forbidden', 'message.emit channel identity mismatch', 403);
+  }
 }
 
 function normalizeMentions(value) {
@@ -428,17 +410,6 @@ function normalizeAudience(value) {
 
 function isSelfAudienceOnly(audience) {
   return Array.isArray(audience) && audience.length === 1 && audience[0] === 'self';
-}
-
-function inferPayloadType(message, senderKind, messageType) {
-  const explicit = message?.payload?.type ?? message?.payloadType ?? message?.payload_type;
-  if (explicit) return String(explicit).trim();
-  const legacyType = String(messageType ?? '').trim();
-  if (legacyType.includes('.')) return legacyType;
-  if (!legacyType || legacyType === 'chat') {
-    return senderKind === SenderKind.AGENT ? PayloadType.AGENT_TEXT : PayloadType.USER_TEXT;
-  }
-  return legacyType;
 }
 
 function assertKnownPayloadType(payloadType) {
@@ -468,16 +439,18 @@ function normalizeMessage(channelId, message, defaults = {}) {
   const sender = message?.envelope?.sender ?? {};
   const senderKind = normalizeSenderKind(
     sender.kind ?? message?.senderKind ?? message?.sender_kind,
-    message?.senderType ?? message?.sender_type ?? defaults.senderType,
-  );
-  const senderType = normalizeLegacySenderType(
-    senderKind,
-    message?.senderType ?? message?.sender_type ?? defaults.senderType,
   );
   const senderId = String(sender.id ?? message?.senderId ?? message?.sender_id ?? defaults.senderId ?? DEFAULT_AGENT_NAME);
   const senderName = String(sender.name ?? message?.senderName ?? message?.sender_name ?? defaults.senderName ?? defaults.senderId ?? senderId);
   const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
-  const payloadType = inferPayloadType(message, senderKind, message?.messageType ?? message?.message_type);
+  const payloadType = String(
+    message?.payload?.type
+      ?? message?.payloadType
+      ?? message?.payload_type
+      ?? defaults.payloadType
+      ?? '',
+  ).trim();
+  if (!payloadType) throw toRpcError('bad_request', 'payload.type is required');
   assertKnownPayloadType(payloadType);
   const payloadBody = normalizePayloadBody(message, String(message?.content ?? message?.payload?.body?.text ?? '').trim(), attachments);
   const content = String(message?.content ?? payloadBody?.text ?? '').trim()
@@ -489,7 +462,7 @@ function normalizeMessage(channelId, message, defaults = {}) {
   const nowMs = Date.now();
   const ts = toEpochMs(message?.envelope?.ts ?? message?.ts ?? message?.createdAt ?? message?.created_at, nowMs);
   const tsReceived = toEpochMs(message?.envelope?.ts_received ?? message?.tsReceived ?? message?.ts_received, nowMs);
-  const createdAt = message?.createdAt ?? message?.created_at ?? new Date(ts).toISOString();
+  const createdAt = message?.createdAt ?? message?.created_at ?? formatLocalIso(ts);
   const messageId = String(message?.envelope?.id ?? message?.messageId ?? message?.message_id ?? randomUUID());
   const mentions = normalizeMentions(message?.envelope?.mentions ?? message?.mentions);
   const audience = normalizeAudience(message?.envelope?.audience ?? message?.audience);
@@ -527,12 +500,10 @@ function normalizeMessage(channelId, message, defaults = {}) {
   return {
     messageId,
     channelId,
-    senderType,
     senderId,
     senderName,
     content,
     attachments,
-    messageType: String(message?.messageType ?? message?.message_type ?? 'chat'),
     createdAt,
     source: message?.source ?? defaults.source ?? 'daemon',
     senderKind,
@@ -606,11 +577,6 @@ function sortByCreatedAt(items) {
   });
 }
 
-function legacyMessageOutput(stored) {
-  if (stored?.legacy && Object.keys(stored.legacy).length > 0) return stored.legacy;
-  return stored;
-}
-
 export class ChannelManager {
   constructor({
     serverUrl,
@@ -636,7 +602,6 @@ export class ChannelManager {
     this.workspaceTemplateDir = path.join(repoRoot(), 'workspace-template');
     this.dueMessagePollMs = dueMessagePollMs;
     this.dueMessageTimer = null;
-    this.pendingViewSyncReplay = null;
     this._taskDocMutex = new Map();
     this.cronScheduler = new CronScheduler({
       onTick: async (tick) => {
@@ -678,9 +643,6 @@ export class ChannelManager {
 
   setConnection(connection) {
     this.connection = connection;
-    if (connection) {
-      this._schedulePendingViewSyncReplay();
-    }
   }
 
   _readTaskDocIfPresent(workdir, docRef) {
@@ -719,17 +681,6 @@ export class ChannelManager {
         this._taskDocMutex.delete(key);
       }
     }
-  }
-
-  _schedulePendingViewSyncReplay() {
-    if (this.pendingViewSyncReplay) return;
-    this.pendingViewSyncReplay = this._replayPendingViewSyncForAll()
-      .catch((err) => {
-        console.error('[ChannelManager] Pending view sync replay failed:', err.message);
-      })
-      .finally(() => {
-        this.pendingViewSyncReplay = null;
-      });
   }
 
   canHandle(message) {
@@ -845,7 +796,7 @@ export class ChannelManager {
     }
   }
 
-  async rpcCall(method, params) {
+  async rpcCall(method, params, context = {}) {
     switch (method) {
       case 'schedule.cron':
         return this.registerSchedule(params, 'cron');
@@ -874,7 +825,7 @@ export class ChannelManager {
       case 'message.send':
         return this.sendChannelMessage(params);
       case 'message.emit':
-        return this.emitChannelMessage(params);
+        return this.emitChannelMessage(params, context);
       case 'message.list':
         return this.listMessages(params.channel_id ?? params.channelId, params.limit ?? 50);
       case 'message.search':
@@ -1021,10 +972,6 @@ export class ChannelManager {
       this._notifyChannelStatus(node);
     }
 
-    if (this.connection) {
-      await this._replayPendingViewSync(node);
-    }
-
     emitJsonEvent('agent.spawn', { channel_id: node.channelId, pid: node.agentPid, session_id: node.sessionId });
     emitJsonEvent('channel.start', { channel_id: node.channelId, status: node.status, pid: node.agentPid });
     console.error(`[ChannelManager] Started ${channelId} pid=${node.agentPid ?? 'n/a'} entry=${spawnConfig.entry}`);
@@ -1124,7 +1071,7 @@ export class ChannelManager {
         emitJsonEvent('message.receive', {
           channel_id: node.channelId,
           message_id: normalized.messageId,
-          sender_type: normalized.senderType,
+          sender_kind: normalized.senderKind,
         });
       }
     }
@@ -1212,9 +1159,9 @@ export class ChannelManager {
     const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
     const node = this._requireNode(channelId);
     const message = normalizeMessage(channelId, params, {
-      senderType: options.senderType ?? 'channel_agent',
       senderId: options.senderId ?? node.agentName,
       senderName: options.senderName ?? node.agentName,
+      payloadType: options.payloadType,
       source: options.source ?? 'daemon',
     });
     assertDeferredMessageEnvelope(message);
@@ -1237,7 +1184,7 @@ export class ChannelManager {
     emitJsonEvent('message.send', {
       channel_id: node.channelId,
       message_id: message.messageId,
-      sender_type: message.senderType,
+      sender_kind: message.senderKind,
     });
     await this._appendToServerView(node, message, { requestId: options.requestId });
 
@@ -1251,8 +1198,43 @@ export class ChannelManager {
     };
   }
 
-  async emitChannelMessage(params) {
-    return this.sendChannelMessage(params);
+  async emitChannelMessage(params, context = {}) {
+    const channelId = String(params.channel_id ?? params.channelId ?? context.channelId ?? '').trim();
+    const node = this._requireNode(channelId);
+    assertAgentRpcIdentity(context, node);
+    const parsedBody = parseJsonString(params.payload_body ?? params.payloadBody ?? params.payload ?? {}, {});
+    const payloadBody = parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)
+      ? parsedBody
+      : { value: parsedBody };
+    const text = String(params.text ?? params.content ?? payloadBody.text ?? '').trim();
+    if (!text) throw toRpcError('bad_request', 'reply text is required');
+    const envelope = params.envelope && typeof params.envelope === 'object' ? { ...params.envelope } : {};
+    return this.sendChannelMessage({
+      channelId: node.channelId,
+      messageId: params.message_id ?? params.messageId,
+      senderKind: SenderKind.AGENT,
+      senderId: node.agentName,
+      senderName: node.agentName,
+      content: text,
+      payload: {
+        type: PayloadType.AGENT_TEXT,
+        body: { ...payloadBody, text },
+      },
+      envelope: {
+        ...envelope,
+        sender: { kind: SenderKind.AGENT, id: node.agentName, name: node.agentName },
+      },
+      attachments: params.attachments,
+      parentId: params.parent_id ?? params.parentId,
+      correlationId: params.correlation_id ?? params.correlationId,
+      taskId: params.task_id ?? params.taskId,
+      threadId: params.thread_id ?? params.threadId,
+      audience: params.audience ?? ['channel'],
+      mentions: params.mentions,
+      origin: 'self',
+      expiresAt: params.expires_at ?? params.expiresAt,
+      source: 'agent-reply',
+    });
   }
 
   async handleServerMessageSend(message, connection = this.connection) {
@@ -1264,13 +1246,12 @@ export class ChannelManager {
     try {
       const sent = await this.sendChannelMessage({
         channelId: message.channelId ?? message.channel_id,
-        senderType: message.senderType ?? message.sender_type ?? 'human',
         senderId: message.senderId ?? message.sender_id,
         senderName: message.senderName ?? message.sender_name,
-        messageType: message.messageType ?? message.message_type ?? 'chat',
         senderKind: message.senderKind ?? message.sender_kind,
         payloadType: message.payloadType ?? message.payload_type,
         payloadBody: message.payloadBody ?? message.payload_body,
+        envelope: message.envelope,
         content: message.content,
         attachments: message.attachments,
         parentId: message.parentId ?? message.parent_id,
@@ -1278,15 +1259,14 @@ export class ChannelManager {
         taskId: message.taskId ?? message.task_id,
         threadId: message.threadId ?? message.thread_id,
         audience: message.audience,
-        mentions: message.mentions,
         notBefore: message.notBefore ?? message.not_before,
         origin: message.origin,
         expiresAt: message.expiresAt ?? message.expires_at,
       }, {
         requestId,
-        senderType: message.senderType ?? message.sender_type ?? 'human',
         senderId: String(message.senderId ?? message.sender_id ?? '').trim(),
         senderName: String(message.senderName ?? message.sender_name ?? '').trim(),
+        payloadType: message.payloadType ?? message.payload_type,
         source: 'server',
       });
 
@@ -1315,7 +1295,7 @@ export class ChannelManager {
       channel_id: node.channelId,
       limit,
       order: 'desc',
-    }).map(legacyMessageOutput);
+    });
     return { messages };
   }
 
@@ -1329,7 +1309,7 @@ export class ChannelManager {
       text: needle,
       limit,
       order: 'desc',
-    }).map(legacyMessageOutput);
+    });
     return { messages };
   }
 
@@ -1396,11 +1376,9 @@ export class ChannelManager {
     return this.sendChannelMessage({
       channelId: node.channelId,
       messageId: params.id ?? params.message_id ?? params.messageId,
-      senderType: params.sender_type ?? params.senderType ?? 'channel_agent',
       senderKind: params.sender_kind ?? params.senderKind ?? SenderKind.AGENT,
       senderId: params.sender_id ?? params.senderId ?? node.agentName,
       senderName: params.sender_name ?? params.senderName ?? node.agentName,
-      messageType: payloadType,
       content,
       payload: { type: payloadType, body: payloadBody },
       parentId: params.parent_id ?? params.parentId,
@@ -1431,11 +1409,9 @@ export class ChannelManager {
     const mentions = target.startsWith('agent:') ? [target] : null;
     const startMessage = await this.sendChannelMessage({
       channelId: node.channelId,
-      senderType: 'channel_agent',
       senderKind: SenderKind.AGENT,
       senderId: node.agentName,
       senderName: node.agentName,
-      messageType: PayloadType.DISPATCH_START,
       payload: { type: PayloadType.DISPATCH_START, body },
       content: JSON.stringify(body),
       correlationId,
@@ -1588,11 +1564,9 @@ export class ChannelManager {
 
     return this.sendChannelMessage({
       channelId: node.channelId,
-      senderType: 'channel_agent',
       senderKind: SenderKind.AGENT,
       senderId: node.agentName,
       senderName: node.agentName,
-      messageType: PayloadType.SELF_MEMO,
       payload: { type: PayloadType.SELF_MEMO, body },
       content: summary,
       correlationId: params.correlation_id ?? params.correlationId,
@@ -1670,11 +1644,9 @@ export class ChannelManager {
         message = await this.sendChannelMessage({
           channelId: node.channelId,
           messageId: params.message_id ?? params.messageId,
-          senderType: 'channel_agent',
           senderKind: SenderKind.AGENT,
           senderId: node.agentName,
           senderName: node.agentName,
-          messageType: PayloadType.TASK_OPENED,
           payload: { type: PayloadType.TASK_OPENED, body },
           content: title,
           correlationId: params.correlation_id ?? params.correlationId,
@@ -1737,11 +1709,9 @@ export class ChannelManager {
       try {
         message = await this.sendChannelMessage({
           channelId: node.channelId,
-          senderType: 'channel_agent',
           senderKind: SenderKind.AGENT,
           senderId: node.agentName,
           senderName: node.agentName,
-          messageType: PayloadType.TASK_CLOSED,
           payload: { type: PayloadType.TASK_CLOSED, body },
           content: String(summary ?? `task ${taskId} ${status}`),
           correlationId: params.correlation_id ?? params.correlationId,
@@ -1794,11 +1764,9 @@ export class ChannelManager {
       try {
         message = await this.sendChannelMessage({
           channelId: node.channelId,
-          senderType: 'channel_agent',
           senderKind: SenderKind.AGENT,
           senderId: node.agentName,
           senderName: node.agentName,
-          messageType: PayloadType.TASK_APPENDED,
           payload: { type: PayloadType.TASK_APPENDED, body: { summary } },
           content: summary,
           correlationId: params.correlation_id ?? params.correlationId,
@@ -1965,7 +1933,6 @@ export class ChannelManager {
     ensureDirectory(path.join(workdir, 'artifacts'));
     ensureDirectory(path.join(workdir, 'notes'));
     ensureDirectory(path.join(workdir, 'schedules'));
-    ensureDirectory(path.join(workdir, 'pending-view-sync'));
     ensureDirectory(path.join(workdir, 'agents', DEFAULT_AGENT_NAME, 'trace'));
   }
 
@@ -2069,10 +2036,8 @@ export class ChannelManager {
       messageId: randomUUID(),
       channelId: node.channelId,
       senderKind: SenderKind.SYSTEM,
-      senderType: 'system',
       senderId: 'system:daemon',
       senderName: 'daemon',
-      messageType: payloadType,
       content: typeof body?.text === 'string' ? body.text : JSON.stringify(body),
       payload: { type: payloadType, body },
       createdAt: event.createdAt ?? event.created_at ?? nowIso(),
@@ -2083,7 +2048,7 @@ export class ChannelManager {
 
   _eventFromMessage(message) {
     return {
-      type: message.payloadType ?? message.payload?.type ?? message.messageType ?? 'message',
+      type: message.payloadType ?? message.payload?.type ?? 'message',
       source: message.source ?? 'daemon',
       createdAt: message.createdAt ?? nowIso(),
       payload: { message },
@@ -2091,20 +2056,16 @@ export class ChannelManager {
   }
 
   _messageFromStoredMessage(node, stored) {
-    const legacy = stored.legacy ?? {};
     return {
-      ...legacy,
       messageId: stored.id,
       channelId: stored.channel_id ?? node.channelId,
       senderKind: stored.sender_kind,
-      senderType: legacy.senderType ?? legacy.sender_type ?? stored.sender_kind,
       senderId: stored.sender_id,
       senderName: stored.sender_name,
-      messageType: legacy.messageType ?? legacy.message_type ?? stored.payload_type,
       payloadType: stored.payload_type,
       payloadBody: stored.payload_body,
       payload: stored.payload,
-      content: legacy.content ?? stored.payload_body?.text ?? JSON.stringify(stored.payload_body ?? {}),
+      content: stored.payload_body?.text ?? JSON.stringify(stored.payload_body ?? {}),
       parentId: stored.parent_id,
       correlationId: stored.correlation_id,
       taskId: stored.task_id,
@@ -2116,7 +2077,7 @@ export class ChannelManager {
       expiresAt: stored.expires_at,
       tsReceived: stored.ts_received,
       envelope: stored.envelope,
-      createdAt: legacy.createdAt ?? legacy.created_at ?? new Date(stored.ts).toISOString(),
+      createdAt: stored.created_at ?? formatLocalIso(stored.ts),
       source: 'sqlite-scheduler',
     };
   }
@@ -2474,47 +2435,9 @@ export class ChannelManager {
       ? message
       : normalizeMessage(node.channelId, message);
     assertKnownPayloadType(normalized.payload?.type ?? normalized.payloadType);
-    const createdAt = new Date(normalized.createdAt);
-    const bucket = Number.isNaN(createdAt.getTime())
-      ? nowIso().slice(0, 10)
-      : createdAt.toISOString().slice(0, 10);
-    const filePath = path.join(node.workdir, 'messages', `${bucket}.jsonl`);
     const stored = appendMessageToStore(this._openMessageStore(node), normalized);
     if (stored?.inserted === false) return normalized;
-    try {
-      appendFileSync(filePath, `${JSON.stringify(normalized)}\n`, 'utf8');
-    } catch (err) {
-      await this._recordTrace(node, {
-        kind: 'message_log_write_failed',
-        type: 'message_log_write_failed',
-        messageId: normalized.messageId,
-        filePath,
-        reason: err.message,
-      });
-      console.error(`[ChannelManager] Failed to append JSONL message log for ${node.channelId}:`, err.message);
-    }
     return normalized;
-  }
-
-  _readMessages(node) {
-    const messagesDir = path.join(node.workdir, 'messages');
-    if (!existsSync(messagesDir)) return [];
-
-    const messages = [];
-    for (const fileName of readdirSync(messagesDir).filter((entry) => entry.endsWith('.jsonl')).sort()) {
-      const filePath = path.join(messagesDir, fileName);
-      const lines = readFileSync(filePath, 'utf8')
-        .split('\n')
-        .map((line) => line.trim())
-        .filter(Boolean);
-
-      for (const line of lines) {
-        try {
-          messages.push(JSON.parse(line));
-        } catch {}
-      }
-    }
-    return sortByCreatedAt(messages);
   }
 
   async _appendToServerView(node, message, { requestId = randomUUID() } = {}) {
@@ -2527,10 +2450,7 @@ export class ChannelManager {
       requestId,
       message_id: message.messageId,
       channel_id: node.channelId,
-      sender_type: message.senderType,
       sender_id: message.senderId,
-      sender_name: message.senderName,
-      message_type: message.messageType,
       content: message.content,
       attachments: message.attachments,
       sender_kind: message.senderKind,
@@ -2541,7 +2461,6 @@ export class ChannelManager {
       task_id: message.taskId,
       thread_id: message.threadId,
       audience: message.audience,
-      mentions: message.mentions,
       not_before: message.notBefore,
       origin: message.origin,
       expires_at: message.expiresAt,
@@ -2552,7 +2471,13 @@ export class ChannelManager {
 
     const result = await this._sendViewSyncPayload(payload);
     if (!result.ok) {
-      this._enqueuePendingViewSync(node, message, payload, result.reason);
+      await this._recordTrace(node, {
+        type: 'view_sync_failed',
+        messageId: message.messageId,
+        requestId: payload.requestId,
+        reason: result.reason,
+      });
+      console.error(`[ChannelManager] View sync failed channel=${node.channelId} message=${message.messageId}: ${result.reason}`);
       return;
     }
     emitJsonEvent('message.deliver', { channel_id: node.channelId, message_id: message.messageId, request_id: requestId });
@@ -2579,136 +2504,6 @@ export class ChannelManager {
       return { ok: true, response };
     } catch (err) {
       return { ok: false, reason: err?.message ?? String(err) };
-    }
-  }
-
-  async _replayPendingViewSyncForAll() {
-    for (const node of this.channels.values()) {
-      await this._replayPendingViewSync(node);
-    }
-  }
-
-  async _replayPendingViewSync(node) {
-    const pendingDir = path.join(node.workdir, 'pending-view-sync');
-    if (!existsSync(pendingDir)) return { replayed: 0, failed: 0 };
-
-    const records = [];
-    for (const fileName of readdirSync(pendingDir).filter((entry) => entry.endsWith('.json'))) {
-      const filePath = path.join(pendingDir, fileName);
-      try {
-        const record = JSON.parse(readFileSync(filePath, 'utf8'));
-        if (!record?.payload) {
-          throw new Error('pending view sync payload is missing');
-        }
-        records.push({
-          fileName,
-          filePath,
-          enqueuedAt: record.enqueuedAt ?? record.enqueued_at ?? '',
-          attempts: Number.parseInt(record.attempts, 10) || 0,
-          record,
-        });
-      } catch (err) {
-        await this._recordTrace(node, {
-          kind: 'view_sync_replay',
-          type: 'view_sync_replay_invalid',
-          fileName,
-          reason: err.message,
-        });
-      }
-    }
-
-    records.sort((left, right) => String(left.enqueuedAt).localeCompare(String(right.enqueuedAt)));
-    let replayed = 0;
-    let failed = 0;
-    for (const item of records) {
-      if (item.attempts >= VIEW_SYNC_RETRY_LIMIT) {
-        failed += 1;
-        continue;
-      }
-
-      const result = await this._sendViewSyncPayload(item.record.payload);
-      if (result.ok) {
-        try {
-          unlinkSync(item.filePath);
-          replayed += 1;
-          emitJsonEvent('message.deliver', {
-            channel_id: item.record.payload.channel_id,
-            message_id: item.record.payload.message_id,
-            request_id: item.record.payload.requestId,
-            replayed: true,
-          });
-        } catch (err) {
-          failed += 1;
-          console.error(`[ChannelManager] Failed to remove pending view sync ${item.filePath}:`, err.message);
-        }
-        continue;
-      }
-
-      failed += 1;
-      const attempts = item.attempts + 1;
-      this._writePendingViewSyncFailure(item.filePath, item.record, result.reason, attempts);
-      if (attempts >= VIEW_SYNC_RETRY_LIMIT) {
-        await this._recordTrace(node, {
-          kind: 'view_sync_replay',
-          type: 'view_sync_replay_give_up',
-          messageId: item.record.payload.message_id,
-          requestId: item.record.payload.requestId,
-          attempts,
-          reason: result.reason,
-        });
-        console.error(
-          `[ChannelManager] Pending view sync reached retry limit channel=${node.channelId} message=${item.record.payload.message_id}: ${result.reason}`,
-        );
-      }
-    }
-
-    return { replayed, failed };
-  }
-
-  _writePendingViewSyncFailure(filePath, record, reason, attempts) {
-    try {
-      writeFileSync(
-        filePath,
-        `${JSON.stringify({
-          ...record,
-          enqueuedAt: record.enqueuedAt ?? nowIso(),
-          attempts,
-          lastAttemptAt: nowIso(),
-          reason,
-        }, null, 2)}\n`,
-        'utf8',
-      );
-    } catch (err) {
-      console.error(`[ChannelManager] Failed to update pending view sync ${filePath}:`, err.message);
-    }
-  }
-
-  _enqueuePendingViewSync(node, message, payload, reason) {
-    try {
-      const pendingDir = ensureDirectory(path.join(node.workdir, 'pending-view-sync'));
-      const filePath = path.join(pendingDir, `${message.messageId}.json`);
-      let existing = null;
-      try {
-        existing = existsSync(filePath) ? JSON.parse(readFileSync(filePath, 'utf8')) : null;
-      } catch {}
-      writeFileSync(
-        filePath,
-        `${JSON.stringify({
-          enqueuedAt: existing?.enqueuedAt ?? nowIso(),
-          attempts: existing?.attempts ?? 0,
-          reason,
-          payload,
-        }, null, 2)}\n`,
-        'utf8',
-      );
-      this._recordTrace(node, {
-        type: 'view_sync_failed',
-        messageId: message.messageId,
-        requestId: payload.requestId,
-        reason,
-      });
-    } catch (err) {
-      console.error(`[ChannelManager] Failed to enqueue pending view sync for ${node.channelId}:`, err.message);
     }
   }
 

@@ -10,10 +10,7 @@ import { runAgentTurn } from './sdk/agent.js';
 import type { AgentEvent, StdinEnvelope } from './types/ipc.js';
 import { logError, logInfo } from './util/logger.js';
 import { CliError } from './util/simple-error.js';
-
-function nowIso(): string {
-  return new Date().toISOString();
-}
+import { nowIso } from './util/time.js';
 
 function normalizeEvent(event: AgentEvent): AgentEvent {
   return {

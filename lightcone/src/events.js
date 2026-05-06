@@ -1,6 +1,8 @@
+import { nowIso } from './time.js';
+
 export function emitJsonEvent(event, fields = {}) {
   console.log(JSON.stringify({
-    ts: new Date().toISOString(),
+    ts: nowIso(),
     event,
     ...fields,
   }));

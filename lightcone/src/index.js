@@ -5,7 +5,9 @@ import express from 'express';
 import { createServer } from 'http';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
+import { PayloadType, SenderKind } from '@coagent/payload-types';
 import { initDb } from './db/index.js';
+import { nowIso, nowMysqlDatetime } from './time.js';
 import { setupSocketIO } from './realtime/index.js';
 import { setupDaemonServer } from './daemon/index.js';
 import { isMachineOnline, sendToDaemon } from './daemon/connections.js';
@@ -20,7 +22,6 @@ import machinesRouter from './routes/machines.js';
 import teamsRouter from './routes/teams.js';
 import messagesRouter from './routes/messages.js';
 import deviceRouter from './routes/device.js';
-import tasksRouter   from './routes/tasks.js';
 import agentsRouter  from './routes/agents.js';
 import skillsRouter       from './routes/skills.js';
 import credentialsRouter  from './routes/credentials.js';
@@ -48,7 +49,6 @@ app.use('/api/machines', machinesRouter);
 app.use('/api/teams', teamsRouter);
 app.use('/api/messages', messagesRouter);
 app.use('/api/device',   deviceRouter);
-app.use('/api/tasks',    tasksRouter);
 app.use('/api/agents',   agentsRouter);
 app.use('/api/skills',       skillsRouter);
 app.use('/api/credentials', credentialsRouter);
@@ -175,12 +175,13 @@ async function notifyAgentAboutAction(action, content) {
     id: `action-${action.id}-${Date.now()}`,
     team_id: action.team_id,
     seq: null,
-    sender_type: 'system',
+    sender_kind: SenderKind.SYSTEM,
     sender_id: 'system',
-    sender_name: 'System',
-    message_type: 'system',
+    payload_type: PayloadType.SYSTEM_NOTICE,
+    payload_body: JSON.stringify({ text: content }),
     content,
-    created_at: new Date().toISOString(),
+    envelope_json: JSON.stringify({ sender: { kind: SenderKind.SYSTEM, id: 'system', name: 'System' } }),
+    created_at: nowIso(),
   };
 
   if (agent?.machine_id && isMachineOnline(agent.machine_id)) {
@@ -199,7 +200,7 @@ async function notifyAgentAboutAction(action, content) {
     team_id: action.team_id,
     team_name: null,
     team_type: 'system',
-    sender_name: 'System',
+    sender_kind: SenderKind.SYSTEM,
   });
 }
 
@@ -222,12 +223,15 @@ async function postActionDecisionMessage(action, user, decision) {
   const msg = await insertMessage(db, {
     id: uuidv4(),
     teamId: action.team_id,
-    senderType: 'user',
+    senderKind: SenderKind.HUMAN,
     senderId: user.id,
-    senderName,
-    messageType: 'chat',
+    payloadType: PayloadType.USER_TEXT,
+    payloadBody: { text: content },
     content,
-    mentions: JSON.stringify([action.agent_id]),
+    envelope: {
+      sender: { kind: SenderKind.HUMAN, id: user.id, name: senderName },
+      mentions: [action.agent_id],
+    },
   });
 
   _broadcast.message(action.team_id, formatMessage(msg));
@@ -248,7 +252,7 @@ app.post('/api/actions/:id/approve', async (req, res) => {
   await updatePendingAction(db, action.id, {
     status: 'approved',
     decided_by: req.user.id,
-    decided_at: new Date().toISOString().slice(0, 19).replace('T', ' '),
+    decided_at: nowMysqlDatetime(),
   });
   const updated = await getPendingActionById(db, action.id);
   _broadcast.actionUpdated(updated);
@@ -282,7 +286,7 @@ app.post('/api/actions/:id/reject', async (req, res) => {
   await updatePendingAction(db, action.id, {
     status: 'rejected',
     decided_by: req.user.id,
-    decided_at: new Date().toISOString().slice(0, 19).replace('T', ' '),
+    decided_at: nowMysqlDatetime(),
   });
   const updated = await getPendingActionById(db, action.id);
   _broadcast.actionUpdated(updated);
@@ -365,7 +369,7 @@ initDb().then(() => {
             const teamIds = await getMemberTeamIds(db, agent.id);
             for (const cid of teamIds) await removeTeamMember(db, cid, agent.id);
             await deleteAgentTeamSessions(db, agent.id);
-            await updateAgent(db, agent.id, { is_del: 1, deleted_at: new Date().toISOString().slice(0,19).replace('T',' '), status: 'inactive' });
+            await updateAgent(db, agent.id, { is_del: 1, deleted_at: nowMysqlDatetime(), status: 'inactive' });
           }
           // Soft-delete guest user
           await db.execute(`UPDATE users SET is_del = 1, deleted_at = COALESCE(deleted_at, NOW()) WHERE id = ?`, [guest.id]);

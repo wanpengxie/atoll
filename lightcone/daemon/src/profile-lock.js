@@ -2,6 +2,7 @@ import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync } 
 import { homedir } from 'os';
 import path from 'path';
 import { randomUUID } from 'crypto';
+import { nowIso } from './time.js';
 
 const LOCK_ROOT = path.join(homedir(), '.lightcone', 'profile-locks');
 const DEFAULT_STALE_MS = 20 * 60 * 1000;
@@ -85,7 +86,7 @@ export async function acquireProfileLock(platform, profileDir, {
         owner,
         pid: process.pid,
         token,
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso(),
       }, null, 2));
       heldLocks.set(dir, token);
       return { release, dir };

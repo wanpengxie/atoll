@@ -53,7 +53,6 @@ test('workdir watcher maps channel workdir paths to protocol events', () => {
     assert.equal(watcher.handleChange(path.join(workdir, 'agents', 'channel-agent', 'session.id'), 'change'), null);
     assert.equal(watcher.handleChange(path.join(workdir, 'agents', 'channel-agent', 'trace', 'session.jsonl'), 'change'), null);
     assert.equal(watcher.handleChange(path.join(workdir, 'agents', 'channel-agent', 'cursor.json'), 'change'), null);
-    assert.equal(watcher.handleChange(path.join(workdir, 'pending-view-sync', 'message.json'), 'change'), null);
     assert.equal(watcher.handleChange(path.join(workdir, 'messages', 'ignored.jsonl'), 'change'), null);
 
     assert.deepEqual(events.map((event) => [event.type, event.payload.path]), [
@@ -77,7 +76,6 @@ test('workdir watcher does not emit events for agent trace writes after start', 
     mkdirSync(path.join(workdir, 'artifacts'), { recursive: true });
     mkdirSync(path.join(workdir, 'notes', 'tasks'), { recursive: true });
     mkdirSync(path.join(workdir, 'schedules'), { recursive: true });
-    mkdirSync(path.join(workdir, 'pending-view-sync'), { recursive: true });
     mkdirSync(path.join(workdir, 'agents', 'channel-agent', 'trace'), { recursive: true });
     writeFileSync(path.join(workdir, 'channel.yaml'), 'channel_id: channel-a\n', 'utf8');
 

@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, statSync, watch } from 'fs';
 import path from 'path';
+import { nowIso } from './time.js';
 
 function toPosixPath(value) {
   return value.split(path.sep).join('/');
@@ -26,7 +27,6 @@ function walkDirectories(root) {
 const WATCHED_DIRECTORIES = ['artifacts', 'notes', 'schedules'];
 
 function isIgnoredPath(relativePath) {
-  if (relativePath === 'pending-view-sync' || relativePath.startsWith('pending-view-sync/')) return true;
   if (!relativePath.startsWith('agents/')) return false;
 
   const segments = relativePath.split('/');
@@ -88,7 +88,7 @@ export class WorkdirWatcher {
       return this._emit({
         type: 'channel.config.updated',
         source: 'workdir-watcher',
-        created_at: new Date().toISOString(),
+        created_at: nowIso(),
         payload: {
           op: eventType,
           path: relativePath,
@@ -107,7 +107,7 @@ export class WorkdirWatcher {
       return this._emit({
         type: 'workdir.changed',
         source: 'workdir-watcher',
-        created_at: new Date().toISOString(),
+        created_at: nowIso(),
         payload: {
           op: eventType,
           path: relativePath,

@@ -5,6 +5,7 @@ import {
   insertSkillBinding, deleteSkillBinding, getSkillBindings,
 } from '../db/index.js';
 import { requireAuth } from '../middleware/auth.js';
+import { nowMysqlDatetime } from '../time.js';
 
 const router = Router();
 
@@ -73,7 +74,7 @@ router.delete('/:id', async (req, res) => {
   if (skill.type === 'platform') return res.status(403).json({ error: 'Cannot delete platform skills' });
   if (skill.owner_id !== req.user.id) return res.status(403).json({ error: 'Not your skill' });
 
-  await updateSkill(getDb(), req.params.id, { is_del: 1, deleted_at: new Date().toISOString().slice(0, 19).replace('T', ' ') });
+  await updateSkill(getDb(), req.params.id, { is_del: 1, deleted_at: nowMysqlDatetime() });
   res.json({ ok: true });
 });
 

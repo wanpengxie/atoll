@@ -1,4 +1,5 @@
 import { InvalidArgumentError } from 'commander';
+import { formatLocalIso } from './time.js';
 
 export function parsePositiveInteger(value: string): number {
   const parsed = Number.parseInt(value, 10);
@@ -36,5 +37,5 @@ export function parseIsoTimestamp(value: string): string {
   if (Number.isNaN(date.getTime())) {
     throw new InvalidArgumentError('must be a valid ISO-8601 timestamp');
   }
-  return date.toISOString();
+  return formatLocalIso(date);
 }

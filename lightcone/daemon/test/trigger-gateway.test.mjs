@@ -12,7 +12,6 @@ function messageEvent(senderKind, payloadType, options = {}) {
     payload: {
       message: {
         senderKind,
-        senderType: senderKind === SenderKind.AGENT ? 'channel_agent' : senderKind,
         senderId: options.senderId ?? `${senderKind}:sender`,
         payload: {
           type: payloadType,

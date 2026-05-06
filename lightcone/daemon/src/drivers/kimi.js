@@ -2,24 +2,21 @@ import { randomUUID } from 'crypto';
 import { existsSync, writeFileSync } from 'fs';
 import path from 'path';
 import { buildSystemPrompt as buildClaudeSystemPrompt } from './claude.js';
-import { buildSkillMcpServers } from '../mcp-config.js';
 
 const KIMI_WIRE_PROTOCOL_VERSION = '1.3';
 const KIMI_SYSTEM_PROMPT_FILE = '.lightcone-kimi-system.md';
 const KIMI_AGENT_FILE = '.lightcone-kimi-agent.yaml';
-const KIMI_MCP_FILE = '.lightcone-kimi-mcp.json';
 
 /**
  * Build Kimi CLI spawn args and config files.
  * Returns { args, env, setupFiles() } ready for spawn('kimi', args, { env }).
  */
-export function buildKimiSpawn({ config, agentId, teamId, workspaceDir, chatBridgePath, serverUrl, machineApiKey, skills, credentialGrants }) {
+export function buildKimiSpawn({ config, agentId, workspaceDir }) {
   const isResume = !!config.sessionId;
   const sessionId = config.sessionId || randomUUID();
 
   const systemPromptPath = path.join(workspaceDir, KIMI_SYSTEM_PROMPT_FILE);
   const agentFilePath = path.join(workspaceDir, KIMI_AGENT_FILE);
-  const mcpConfigPath = path.join(workspaceDir, KIMI_MCP_FILE);
 
   // Build system prompt (reuse claude's prompt builder)
   const prompt = buildClaudeSystemPrompt(config, agentId);
@@ -38,40 +35,11 @@ export function buildKimiSpawn({ config, agentId, teamId, workspaceDir, chatBrid
     '',
   ].join('\n'), 'utf8');
 
-  // Build MCP config
-  const mcpServers = {
-    chat: {
-      command: 'node',
-      args: [chatBridgePath],
-      env: {
-        SERVER_URL: serverUrl,
-        MACHINE_API_KEY: config.authToken,
-        AGENT_ID: agentId,
-        TEAM_ID: teamId ?? '',
-        WORKSPACE_DIR: workspaceDir,
-      },
-    },
-  };
-
-  Object.assign(mcpServers, buildSkillMcpServers({
-    skills,
-    credentialGrants,
-    config,
-    agentId,
-    teamId,
-    workspaceDir,
-    serverUrl,
-    authToken: config.authToken || machineApiKey,
-  }));
-
-  writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers }), 'utf8');
-
   // Build CLI args
   const args = [
     '--wire',
     '--yolo',
     '--agent-file', agentFilePath,
-    '--mcp-config-file', mcpConfigPath,
     '--session', sessionId,
   ];
 

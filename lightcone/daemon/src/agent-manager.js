@@ -5,13 +5,16 @@ import path from 'path';
 import { buildSystemPrompt } from './drivers/claude.js';
 import { buildCodexSpawn, buildCodexSystemPrompt, parseCodexLine } from './drivers/codex.js';
 import { buildKimiSpawn, buildKimiInitMessages, parseKimiLine, encodeKimiStdin } from './drivers/kimi.js';
+import { buildCoagentSpawn } from './drivers/coagent.js';
 import { startSession, stopSession, stopAllSessions } from './browser-login.js';
-import { buildSkillMcpServers } from './mcp-config.js';
 
 export class AgentManager {
-  constructor({ serverUrl, machineApiKey }) {
+  constructor({ serverUrl, machineApiKey, daemonSocketPath = process.env.COAGENT_DAEMON_SOCKET, daemonHttpUrl = process.env.COAGENT_DAEMON_HTTP, daemonToken = process.env.COAGENT_DAEMON_TOKEN }) {
     this.serverUrl = serverUrl;
     this.machineApiKey = machineApiKey;
+    this.daemonSocketPath = daemonSocketPath ?? '';
+    this.daemonHttpUrl = daemonHttpUrl ?? '';
+    this.daemonToken = daemonToken ?? '';
     // key: `teamId:agentId` → { config, teamId, agentId, sessionId, proc }
     this.agents = new Map();
     // key → true (spawn in progress)
@@ -109,48 +112,56 @@ export class AgentManager {
     }
     this.starting.add(key);
 
-    const runtime = config.runtime ?? 'claude';
-    const teamWorkspaceDir = this._teamWorkspaceDir(teamId);
+    const runtime = config.runtime ?? 'coagent';
+    this._teamWorkspaceDir(teamId);
     const workspaceDir = this._workspaceDir(agentId, teamId);
-    const chatBridgePath = new URL('./chat-bridge.js', import.meta.url).pathname;
     const startupMsg = runtime === 'codex' ? this._takePendingMessage(key) : null;
 
-    // Fetch skills for system prompt + MCP derivation (non-blocking on failure)
-    let skills = [];
-    try {
-      const res = await fetch(`${this.serverUrl}/internal/agent/${agentId}/skills`, {
-        headers: { 'Authorization': `Bearer ${this.machineApiKey}` },
-      });
-      if (res.ok) skills = await res.json();
-      const mcpSkills = skills.filter(s => s.mcpConfig);
-      console.error(`[AgentManager] Skills loaded for ${config.displayName ?? agentId}: ${skills.length} total, ${mcpSkills.length} with MCP (${mcpSkills.map(s => s.name).join(', ') || 'none'})`);
-    } catch (err) {
-      console.error(`[AgentManager] Skills fetch failed for ${agentId} (non-fatal): ${err.message}`);
-    }
+    const skills = [];
 
-    // Fetch credential grants for this agent (non-blocking on failure)
-    let credentialGrants = [];
-    try {
-      const res = await fetch(`${this.serverUrl}/internal/agent/${agentId}/credential-grants`, {
-        headers: { 'Authorization': `Bearer ${this.machineApiKey}` },
-      });
-      if (res.ok) credentialGrants = await res.json();
-      console.error(`[AgentManager] Credential grants for ${config.displayName ?? agentId}: ${credentialGrants.map(g => `${g.platform}(${Object.keys(g.envVars ?? {}).join(',')})`).join(', ') || 'none'}`);
-    } catch (err) {
-      console.error(`[AgentManager] Credential grants fetch failed for ${agentId} (non-fatal): ${err.message}`);
-    }
-
-    // Materialize bound skills into .skills/ directory
+    // Historical runtimes can still read static skill files if provided locally.
     this._materializeSkills(workspaceDir, skills);
 
     let proc;
 
-    if (runtime === 'kimi') {
+    if (runtime === 'coagent') {
+      const sessionIdPath = path.join(workspaceDir, 'session.id');
+      const coagentSpawn = buildCoagentSpawn({
+        channelId: config.channelId ?? config.channel_id ?? teamId ?? agentId,
+        channelName: teamName ?? config.channelName ?? config.channel_name ?? agentId,
+        channelType: config.channelType ?? config.channel_type ?? config.type ?? 'echo',
+        workspaceId: config.workspaceId ?? config.workspace_id ?? '',
+        workdir: workspaceDir,
+        capabilitySet: config.capabilitySet ?? config.capability_set ?? { cli_binaries: ['coagent', 'coagent-kernel'] },
+        daemonSocketPath: config.daemonSocketPath ?? config.daemon_socket_path ?? this.daemonSocketPath,
+        daemonHttpUrl: config.daemonHttpUrl ?? config.daemon_http_url ?? this.daemonHttpUrl,
+        daemonToken: config.daemonToken ?? config.daemon_token ?? this.daemonToken,
+        sessionIdPath,
+        agentName: config.agentName ?? config.agent_name ?? agentId,
+      });
+
+      console.error(`[AgentManager] Spawning coagent for ${config.displayName ?? agentId} team=${teamName ?? teamId ?? 'none'} (session=${coagentSpawn.sessionId})`);
+
+      proc = spawn(coagentSpawn.command, coagentSpawn.args, {
+        cwd: workspaceDir,
+        env: coagentSpawn.env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      this.agents.set(key, {
+        config, teamId, agentId, sessionId: coagentSpawn.sessionId, proc,
+        runtime: 'coagent',
+      });
+      this.starting.delete(key);
+
+      proc.stdout.on('data', (chunk) => {
+        const text = chunk.toString();
+        if (text.trim()) process.stdout.write(text);
+      });
+    } else if (runtime === 'kimi') {
       // ── Kimi CLI ──────────────────────────────────────────────────────────
       const kimiSpawn = buildKimiSpawn({
-        config, agentId, teamId, workspaceDir, chatBridgePath,
-        serverUrl: this.serverUrl, machineApiKey: this.machineApiKey, skills,
-        credentialGrants,
+        config, agentId, workspaceDir,
       });
 
       console.error(`[AgentManager] Spawning kimi for ${config.displayName ?? agentId} team=${teamName ?? teamId ?? 'none'} (session=${kimiSpawn.sessionId})`);
@@ -194,14 +205,8 @@ export class AgentManager {
       const codexSpawn = buildCodexSpawn({
         config,
         agentId,
-        teamId,
         workspaceDir,
-        chatBridgePath,
-        serverUrl: this.serverUrl,
-        machineApiKey: this.machineApiKey,
         prompt: startupPrompt,
-        skills,
-        credentialGrants,
       });
 
       console.error(`[AgentManager] Spawning codex for ${config.displayName ?? agentId} team=${teamName ?? teamId ?? 'none'} (session=${config.sessionId ?? 'new'})`);
@@ -230,37 +235,6 @@ export class AgentManager {
       });
     } else {
       // ── Claude CLI (default) ──────────────────────────────────────────────
-      const mcpServers = {
-        chat: {
-          command: 'node',
-          args: [chatBridgePath],
-          env: {
-            SERVER_URL: this.serverUrl,
-            MACHINE_API_KEY: config.authToken,
-            AGENT_ID: agentId,
-            TEAM_ID: teamId ?? '',
-            WORKSPACE_DIR: workspaceDir,
-          },
-        },
-      };
-
-      Object.assign(mcpServers, buildSkillMcpServers({
-        skills,
-        credentialGrants,
-        config,
-        agentId,
-        teamId,
-        workspaceDir,
-        serverUrl: this.serverUrl,
-        authToken: config.authToken,
-      }));
-
-      const mcpConfig = { mcpServers };
-      console.error(`[AgentManager] MCP servers for ${config.displayName ?? agentId}: ${Object.keys(mcpServers).join(', ')}`);
-      for (const [name, mc] of Object.entries(mcpServers)) {
-        console.error(`[AgentManager]   mcp:${name} → ${mc.command} ${(mc.args ?? []).join(' ')}`);
-      }
-
       const args = [
         '--print',
         '--allow-dangerously-skip-permissions',
@@ -268,7 +242,6 @@ export class AgentManager {
         '--verbose',
         '--output-format', 'stream-json',
         '--input-format', 'stream-json',
-        '--mcp-config', JSON.stringify(mcpConfig),
         '--system-prompt', buildSystemPrompt(config, agentId, skills),
         '--disallowed-tools', 'EnterPlanMode,ExitPlanMode',
       ];
@@ -343,8 +316,8 @@ export class AgentManager {
     });
 
     // Send startup prompt
-    if (runtime === 'kimi' || runtime === 'codex') {
-      // Kimi already received its prompt via the initialize + prompt JSON-RPC messages
+    if (runtime === 'kimi' || runtime === 'codex' || runtime === 'coagent') {
+      // These runtimes receive turn events through their own stdin protocol.
     } else {
       this._write(key, 'You have just started. Follow your startup sequence: first call read_memory with path="MEMORY.md" to load your memory index, then call check_messages.');
     }
@@ -450,6 +423,22 @@ export class AgentManager {
       line = encodeKimiStdin(text, mode) + '\n';
     } else if (agent.runtime === 'codex') {
       return;
+    } else if (agent.runtime === 'coagent') {
+      line = JSON.stringify({
+        type: 'event',
+        event: {
+          type: 'user.message.posted',
+          source: 'agent-manager',
+          payload: {
+            message: {
+              channelId: agent.teamId ?? '',
+              content: text,
+              senderKind: 'human',
+              payload: { type: 'user.text', body: { text } },
+            },
+          },
+        },
+      }) + '\n';
     } else {
       // Claude uses stream-json
       line = JSON.stringify({

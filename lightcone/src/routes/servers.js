@@ -9,6 +9,7 @@ import { getUsageSummary, checkQuota } from '../plans.js';
 import { sendToDaemon, isMachineOnline, unregisterDaemon } from '../daemon/connections.js';
 import { requireAuth } from '../middleware/auth.js';
 import { emitJsonEvent } from '../events.js';
+import { formatLocalIso, nowIso } from '../time.js';
 
 const router = Router();
 
@@ -16,7 +17,7 @@ const FIXED_SERVER = {
   id: process.env.DEFAULT_SERVER_ID ?? 'server-001',
   name: 'Demo', slug: 'demo',
   ownerId: process.env.DEFAULT_USER_ID ?? 'user-001',
-  plan: 'free', role: 'owner', createdAt: new Date().toISOString(),
+  plan: 'free', role: 'owner', createdAt: nowIso(),
 };
 
 const FIXED_MEMBER = {
@@ -24,7 +25,7 @@ const FIXED_MEMBER = {
   email: 'admin@demo.local',
   name: process.env.DEFAULT_USER_NAME ?? 'Admin',
   displayName: process.env.DEFAULT_USER_NAME ?? 'Admin',
-  avatarUrl: null, role: 'owner', joinedAt: new Date().toISOString(),
+  avatarUrl: null, role: 'owner', joinedAt: nowIso(),
 };
 
 function genApiKey() {
@@ -98,7 +99,7 @@ router.post('/:id/upgrade', requireAuth, async (req, res) => {
 router.get('/:id/invites', (req, res) => res.json([]));
 router.post('/:id/invites', (req, res) => res.json({
   id: uuidv4(), invitedEmail: req.body.email,
-  expiresAt: new Date(Date.now() + 7 * 86400000).toISOString(),
+  expiresAt: formatLocalIso(Date.now() + 7 * 86400000),
 }));
 router.delete('/:id/invites/:inviteId', (req, res) => res.json({ ok: true }));
 
