@@ -102,19 +102,49 @@ function defaultSenderName(senderType, senderId) {
   }
 }
 
-function daemonErrorStatus(code) {
+function explicitStatusCode(value) {
+  const statusCode = Number(value);
+  return Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599
+    ? statusCode
+    : null;
+}
+
+function daemonErrorStatus(result) {
+  const explicit = explicitStatusCode(result?.error?.statusCode ?? result?.statusCode);
+  if (explicit) return explicit;
+
+  const code = typeof result === 'string'
+    ? result
+    : (result?.error?.code ?? result?.code);
   switch (code) {
     case 'bad_request':
+    case 'invalid_envelope':
       return 400;
     case 'unauthorized':
       return 401;
     case 'not_found':
+    case 'channel_type_config_not_found':
       return 404;
     case 'conflict':
+    case 'task_already_terminal':
+    case 'schedule_exists':
       return 409;
     default:
       return 503;
   }
+}
+
+function daemonRpcErrorBody(result, method) {
+  const error = result?.error;
+  if (error && typeof error === 'object' && !Array.isArray(error)) {
+    const code = String(error.code ?? result?.code ?? 'daemon_rpc_failed');
+    const message = String(error.message ?? `Channel daemon RPC failed: ${method}`);
+    return { code, message };
+  }
+  return {
+    code: String(result?.code ?? 'daemon_rpc_failed'),
+    message: String(error ?? `Channel daemon RPC failed: ${method}`),
+  };
 }
 
 function formatDaemonMessagePayload(message) {
@@ -257,8 +287,8 @@ export function createChannelsRouter({
       );
 
       if (!result?.ok) {
-        return res.status(daemonErrorStatus(result?.code)).json({
-          error: result?.error ?? `Channel daemon RPC failed: ${method}`,
+        return res.status(daemonErrorStatus(result)).json({
+          error: daemonRpcErrorBody(result, method),
         });
       }
 

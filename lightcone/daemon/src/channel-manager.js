@@ -195,6 +195,118 @@ function readDocIfPresent(workdir, docRef) {
   return readFileSync(absolute, 'utf8');
 }
 
+function resolveDocPath(workdir, docRef) {
+  const relative = safeRelativePath(docRef);
+  if (!relative) {
+    throw toRpcError('bad_request', 'doc_ref must be a relative path inside the channel workdir');
+  }
+  const absolute = path.resolve(workdir, relative);
+  const root = path.resolve(workdir);
+  if (absolute === root || !absolute.startsWith(`${root}${path.sep}`)) {
+    throw toRpcError('bad_request', 'doc_ref must stay inside the channel workdir');
+  }
+  return absolute;
+}
+
+function writeTaskDocAtomic(workdir, docRef, content, { overwrite }) {
+  const absolute = resolveDocPath(workdir, docRef);
+  mkdirSync(path.dirname(absolute), { recursive: true });
+  const existedBefore = existsSync(absolute);
+  if (!overwrite && existedBefore) {
+    return { absolute, wrote: false, created: false, previous: null };
+  }
+
+  const previous = overwrite && existedBefore ? readFileSync(absolute, 'utf8') : null;
+  const tmpPath = `${absolute}.tmp-${process.pid}-${Date.now()}-${randomUUID()}`;
+  try {
+    writeFileSync(tmpPath, content, 'utf8');
+    if (!overwrite && existsSync(absolute)) {
+      unlinkSync(tmpPath);
+      return { absolute, wrote: false, created: false, previous: null };
+    }
+    renameSync(tmpPath, absolute);
+    return { absolute, wrote: true, created: !existedBefore, previous };
+  } catch (err) {
+    try {
+      if (existsSync(tmpPath)) unlinkSync(tmpPath);
+    } catch {
+      // Preserve the original filesystem failure.
+    }
+    throw err;
+  }
+}
+
+function removeCreatedTaskDoc(writeResult) {
+  if (!writeResult?.created) return;
+  try {
+    if (existsSync(writeResult.absolute)) unlinkSync(writeResult.absolute);
+  } catch {
+    // Best-effort rollback; surface the original RPC failure.
+  }
+}
+
+function restoreTaskDoc(workdir, docRef, previous) {
+  try {
+    if (previous == null) {
+      const absolute = resolveDocPath(workdir, docRef);
+      if (existsSync(absolute)) unlinkSync(absolute);
+      return;
+    }
+    writeTaskDocAtomic(workdir, docRef, previous, { overwrite: true });
+  } catch {
+    // Best-effort rollback; surface the original RPC failure.
+  }
+}
+
+function taskDocTemplate({ taskId, type, title, parentTaskId, rationale }) {
+  const timestamp = nowIso();
+  return [
+    `# ${title}`,
+    '',
+    '## Brief',
+    '',
+    rationale || 'TBD',
+    '',
+    '## Stakeholders',
+    '',
+    '- Initiator: channel-agent',
+    '',
+    '## Decisions',
+    '',
+    '- TBD',
+    '',
+    '## Constraints',
+    '',
+    '- TBD',
+    '',
+    '## Refs',
+    '',
+    `- Task ID: ${taskId}`,
+    `- Type: ${type}`,
+    ...(parentTaskId ? [`- Parent Task: ${parentTaskId}`] : []),
+    '',
+    '## Timeline',
+    '',
+    `- ${timestamp} - Task opened.`,
+    '',
+    '## Status',
+    '',
+    'Status: opened',
+    '',
+  ].join('\n');
+}
+
+function appendClosedStatus(content, status, summary, resultRef) {
+  const lines = [
+    '## Status',
+    '',
+    ...(summary ? [`Summary: ${summary}`] : []),
+    ...(resultRef ? [`Result ref: ${resultRef}`] : []),
+    `Status: ${status}`,
+  ];
+  return `${content.trimEnd()}\n\n${lines.join('\n')}\n`;
+}
+
 function buildTaskTree(tasks, rootTaskId = null) {
   const byParent = new Map();
   for (const task of tasks) {
@@ -648,12 +760,19 @@ export class ChannelManager {
       });
       return result;
     } catch (err) {
+      const code = err.code ?? 'rpc_error';
+      const statusCode = Number.isInteger(err.statusCode) ? err.statusCode : undefined;
       connection?.send({
         type: 'channel:rpc.result',
         requestId,
         ok: false,
-        error: err.message,
-        code: err.code ?? 'rpc_error',
+        error: {
+          code,
+          message: err.message,
+          ...(statusCode ? { statusCode } : {}),
+        },
+        code,
+        ...(statusCode ? { statusCode } : {}),
       });
       return null;
     }
@@ -1425,6 +1544,14 @@ export class ChannelManager {
       throw toRpcError('not_found', `parent task not found: ${parentTaskId}`);
     }
 
+    const docWrite = writeTaskDocAtomic(node.workdir, docRef, taskDocTemplate({
+      taskId,
+      type,
+      title,
+      parentTaskId,
+      rationale: params.rationale ? String(params.rationale) : undefined,
+    }), { overwrite: false });
+
     const body = {
       type,
       title,
@@ -1433,22 +1560,28 @@ export class ChannelManager {
       ...(params.rationale ? { rationale: String(params.rationale) } : {}),
     };
 
-    const message = await this.sendChannelMessage({
-      channelId: node.channelId,
-      messageId: params.message_id ?? params.messageId,
-      senderType: 'channel_agent',
-      senderKind: SenderKind.AGENT,
-      senderId: node.agentName,
-      senderName: node.agentName,
-      messageType: PayloadType.TASK_OPENED,
-      payload: { type: PayloadType.TASK_OPENED, body },
-      content: title,
-      correlationId: params.correlation_id ?? params.correlationId,
-      taskId,
-      audience: ['self'],
-      origin: 'self',
-      source: 'task',
-    });
+    let message;
+    try {
+      message = await this.sendChannelMessage({
+        channelId: node.channelId,
+        messageId: params.message_id ?? params.messageId,
+        senderType: 'channel_agent',
+        senderKind: SenderKind.AGENT,
+        senderId: node.agentName,
+        senderName: node.agentName,
+        messageType: PayloadType.TASK_OPENED,
+        payload: { type: PayloadType.TASK_OPENED, body },
+        content: title,
+        correlationId: params.correlation_id ?? params.correlationId,
+        taskId,
+        audience: ['self'],
+        origin: 'self',
+        source: 'task',
+      });
+    } catch (err) {
+      removeCreatedTaskDoc(docWrite);
+      throw err;
+    }
 
     return {
       task_id: taskId,
@@ -1471,31 +1604,49 @@ export class ChannelManager {
     const task = getStoredTask(db, taskId, node.channelId);
     if (!task) throw toRpcError('not_found', `task not found: ${taskId}`);
     assertTaskMutable(task, taskId);
+    const summary = params.summary ? String(params.summary) : undefined;
+    const resultRefValue = params.result_ref ?? params.resultRef;
+    const resultRef = resultRefValue ? String(resultRefValue) : undefined;
+    const docRef = task.doc_ref;
+
+    const docWrite = writeTaskDocAtomic(
+      node.workdir,
+      docRef,
+      appendClosedStatus(readDocIfPresent(node.workdir, docRef) ?? '', status, summary, resultRef),
+      { overwrite: true },
+    );
 
     const body = {
       status,
-      ...(params.summary ? { summary: String(params.summary) } : {}),
-      ...(params.result_ref ?? params.resultRef ? { result_ref: params.result_ref ?? params.resultRef } : {}),
+      ...(summary ? { summary } : {}),
+      ...(resultRef ? { result_ref: resultRef } : {}),
     };
 
-    const message = await this.sendChannelMessage({
-      channelId: node.channelId,
-      senderType: 'channel_agent',
-      senderKind: SenderKind.AGENT,
-      senderId: node.agentName,
-      senderName: node.agentName,
-      messageType: PayloadType.TASK_CLOSED,
-      payload: { type: PayloadType.TASK_CLOSED, body },
-      content: String(params.summary ?? `task ${taskId} ${status}`),
-      correlationId: params.correlation_id ?? params.correlationId,
-      taskId,
-      audience: ['self'],
-      origin: 'self',
-      source: 'task',
-    });
+    let message;
+    try {
+      message = await this.sendChannelMessage({
+        channelId: node.channelId,
+        senderType: 'channel_agent',
+        senderKind: SenderKind.AGENT,
+        senderId: node.agentName,
+        senderName: node.agentName,
+        messageType: PayloadType.TASK_CLOSED,
+        payload: { type: PayloadType.TASK_CLOSED, body },
+        content: String(summary ?? `task ${taskId} ${status}`),
+        correlationId: params.correlation_id ?? params.correlationId,
+        taskId,
+        audience: ['self'],
+        origin: 'self',
+        source: 'task',
+      });
+    } catch (err) {
+      restoreTaskDoc(node.workdir, docRef, docWrite.previous);
+      throw err;
+    }
 
     return {
       task_id: taskId,
+      doc_ref: docRef,
       status,
       message,
       task: getStoredTask(db, taskId, node.channelId),

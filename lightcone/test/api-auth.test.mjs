@@ -433,3 +433,56 @@ test('GET /api/channels/:id/tasks proxies task list and show to the channel daem
     ]);
   });
 });
+
+test('GET /api/channels/:id/tasks maps daemon RPC task errors to their HTTP status', async () => {
+  const auth = buildChannelAuth();
+  const cases = [
+    {
+      daemonResult: {
+        ok: false,
+        error: { code: 'task_already_terminal', message: 'task already terminal', statusCode: 409 },
+        code: 'task_already_terminal',
+      },
+      status: 409,
+      code: 'task_already_terminal',
+    },
+    {
+      daemonResult: {
+        ok: false,
+        error: { code: 'invalid_envelope', message: 'not_before requires audience=[self]' },
+        code: 'invalid_envelope',
+      },
+      status: 400,
+      code: 'invalid_envelope',
+    },
+    {
+      daemonResult: {
+        ok: false,
+        error: 'schedule already exists: daily',
+        code: 'schedule_exists',
+      },
+      status: 409,
+      code: 'schedule_exists',
+    },
+  ];
+  let index = 0;
+  const router = createChannelsRouter({
+    getDbImpl: () => ({}),
+    broadcastImpl: { channelUpdated: noop, channelMessage: noop },
+    isMachineOnlineImpl: () => true,
+    requestFromDaemonImpl: async () => cases[index++].daemonResult,
+    requireChannelReadImpl: auth.requireChannelRead,
+    requireChannelWriteImpl: auth.requireChannelWrite,
+    getRequestUserIdImpl: auth.getRequestUserId,
+    uuidv4Impl: () => `req-error-${index}`,
+  });
+
+  await withServer(createApp('/api/channels', router, { id: 'user-a', name: 'User A' }), async (baseUrl) => {
+    for (const item of cases) {
+      const response = await requestJson(baseUrl, '/api/channels/channel-a/tasks');
+      assert.equal(response.status, item.status);
+      assert.equal(response.json.error.code, item.code);
+      assert.equal(typeof response.json.error.message, 'string');
+    }
+  });
+});

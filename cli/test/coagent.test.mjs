@@ -439,7 +439,7 @@ test('coagent memo-write --content is literal and --content-file reads explicitl
   }
 });
 
-test('coagent task open writes date-slug doc and emits task.open RPC', async (t) => {
+test('coagent task open emits task.open RPC and leaves doc writes to daemon', async (t) => {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'coagent-task-open-'));
   t.after(() => {
     rmSync(tempDir, { recursive: true, force: true });
@@ -468,15 +468,7 @@ test('coagent task open writes date-slug doc and emits task.open RPC', async (t)
     assert.equal(body.ok, true);
     assert.match(body.data.task_id, /^[0-9a-f-]{36}$/);
     assert.match(body.data.doc_ref, /^notes\/tasks\/\d{4}-\d{2}-\d{2}-publish-launch-note\.md$/);
-    const doc = readFileSync(path.join(tempDir, body.data.doc_ref), 'utf8');
-    assert.match(doc, /^# Publish Launch Note!/);
-    assert.match(doc, /## Brief/);
-    assert.match(doc, /## Stakeholders/);
-    assert.match(doc, /## Decisions/);
-    assert.match(doc, /## Constraints/);
-    assert.match(doc, /## Refs/);
-    assert.match(doc, /## Timeline/);
-    assert.match(doc, /Status: opened/);
+    assert.equal(existsSync(path.join(tempDir, body.data.doc_ref)), false);
     assert.equal(requests[0].payload.method, 'task.open');
     assert.deepEqual(requests[0].payload.params, {
       channel_id: 'channel-task',
@@ -526,7 +518,7 @@ test('coagent task open does not leave a task doc when RPC fails', async (t) => 
   }
 });
 
-test('coagent task append and close edit the task document around RPC calls', async (t) => {
+test('coagent task append edits docs and close delegates doc update to daemon', async (t) => {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'coagent-task-edit-'));
   t.after(() => {
     rmSync(tempDir, { recursive: true, force: true });
@@ -539,6 +531,17 @@ test('coagent task append and close edit the task document around RPC calls', as
   const { server, port, requests } = await withRpcServer((request) => {
     if (request.payload.method === 'task.show') {
       return { ok: true, result: { task: { task_id: 'task-a', doc_ref: docRef } } };
+    }
+    if (request.payload.method === 'task.close') {
+      return {
+        ok: true,
+        result: {
+          task_id: request.payload.params.task_id,
+          doc_ref: docRef,
+          status: request.payload.params.status,
+          task: { task_id: request.payload.params.task_id, doc_ref: docRef },
+        },
+      };
     }
     return { ok: true, result: { echoed_method: request.payload.method, echoed_params: request.payload.params } };
   });
@@ -570,13 +573,12 @@ test('coagent task append and close edit the task document around RPC calls', as
       'artifact://note',
     ], env, tempDir);
     assert.equal(closed.ok, true);
+    assert.equal(closed.data.doc_ref, docRef);
     const closedDoc = readFileSync(path.join(tempDir, docRef), 'utf8');
-    assert.match(closedDoc, /Summary: Finished/);
-    assert.match(closedDoc, /Result ref: artifact:\/\/note/);
-    assert.equal(closedDoc.trim().endsWith('Status: completed'), true);
-    assert.equal(requests[2].payload.method, 'task.show');
-    assert.equal(requests[3].payload.method, 'task.close');
-    assert.deepEqual(requests[3].payload.params, {
+    assert.doesNotMatch(closedDoc, /Summary: Finished/);
+    assert.doesNotMatch(closedDoc, /Status: completed/);
+    assert.equal(requests[2].payload.method, 'task.close');
+    assert.deepEqual(requests[2].payload.params, {
       channel_id: 'channel-task',
       task_id: 'task-a',
       status: 'completed',

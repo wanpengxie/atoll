@@ -1090,13 +1090,211 @@ test('task RPC helpers project task rows and expose show/tree views', async (t) 
   assert.deepEqual(rpcResponses[0].result.tasks.map((task) => task.task_id), ['task-parent']);
 
   const shown = await channelManager.showTask({ channelId: node.channelId, taskId: 'task-parent' });
-  assert.equal(shown.doc.content, '# Publish plan\n');
+  assert.match(shown.doc.content, /^# Publish plan\n/);
+  assert.match(shown.doc.content, /Status: completed/);
   assert.equal(shown.children[0].task_id, 'task-child');
   assert.equal(shown.messages.some((message) => message.payload_type === 'task.appended'), true);
 
   const tree = await channelManager.taskTree({ channelId: node.channelId });
   assert.equal(tree.tasks[0].task_id, 'task-parent');
   assert.equal(tree.tasks[0].children[0].task_id, 'task-child');
+});
+
+test('task open and close write task docs inside daemon RPC boundary', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-task-docs-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-task-docs',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Task Docs Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const docRef = 'notes/tasks/2026-05-06-daemon-doc.md';
+  const docPath = path.join(created.workdir, docRef);
+
+  const opened = await channelManager.openTask({
+    channelId: node.channelId,
+    taskId: 'task-docs',
+    type: 'note.publish',
+    title: 'Daemon doc task',
+    docRef,
+    rationale: 'track daemon doc writes',
+  });
+  assert.equal(opened.doc_ref, docRef);
+  const openedDoc = readFileSync(docPath, 'utf8');
+  assert.match(openedDoc, /^# Daemon doc task/);
+  assert.match(openedDoc, /track daemon doc writes/);
+  assert.match(openedDoc, /Status: opened/);
+
+  const closed = await channelManager.closeTask({
+    channelId: node.channelId,
+    taskId: 'task-docs',
+    status: 'completed',
+    summary: 'Finished',
+    resultRef: 'artifact://note',
+  });
+  assert.equal(closed.doc_ref, docRef);
+  const closedDoc = readFileSync(docPath, 'utf8');
+  assert.match(closedDoc, /Summary: Finished/);
+  assert.match(closedDoc, /Result ref: artifact:\/\/note/);
+  assert.equal(closedDoc.trim().endsWith('Status: completed'), true);
+  assert.equal(getStoredTask(node.messageStore, 'task-docs', node.channelId).status, 'completed');
+});
+
+test('task open doc write failure does not leave daemon task projection', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-task-doc-open-fail-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-task-doc-open-fail',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Task Doc Open Fail Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  writeFileSync(path.join(created.workdir, 'notes', 'tasks'), 'not a directory', 'utf8');
+
+  await assert.rejects(
+    () => channelManager.openTask({
+      channelId: node.channelId,
+      taskId: 'task-doc-fail',
+      type: 'research',
+      title: 'Doc fail',
+      docRef: 'notes/tasks/fail.md',
+    }),
+    /not a directory|ENOTDIR|EEXIST/,
+  );
+
+  const db = channelManager._openMessageStore(node);
+  assert.equal(getStoredTask(db, 'task-doc-fail', node.channelId), null);
+  assert.equal(readStoredMessages(db).length, 0);
+});
+
+test('task close doc write failure leaves daemon task non-terminal', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-task-doc-close-fail-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-task-doc-close-fail',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Task Doc Close Fail Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const docRef = 'notes/tasks/2026-05-06-close-fail.md';
+  const docPath = path.join(created.workdir, docRef);
+
+  await channelManager.openTask({
+    channelId: node.channelId,
+    taskId: 'task-close-doc-fail',
+    type: 'research',
+    title: 'Close doc fail',
+    docRef,
+  });
+  rmSync(docPath, { force: true });
+  mkdirSync(docPath);
+
+  await assert.rejects(
+    () => channelManager.closeTask({
+      channelId: node.channelId,
+      taskId: 'task-close-doc-fail',
+      status: 'completed',
+      summary: 'done',
+    }),
+    /illegal operation on a directory|EISDIR|ENOTDIR/,
+  );
+
+  const task = getStoredTask(node.messageStore, 'task-close-doc-fail', node.channelId);
+  assert.equal(task.status, 'opened');
+  assert.equal(task.closed_at, null);
+  assert.equal(readStoredMessages(node.messageStore).length, 1);
+});
+
+test('channel RPC result includes structured error statusCode from daemon errors', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-rpc-status-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  channelManager.rpcCall = async () => {
+    const err = new Error('task already terminal: task-a');
+    err.code = 'task_already_terminal';
+    err.statusCode = 409;
+    throw err;
+  };
+
+  const rpcResponses = [];
+  await channelManager.handle({
+    type: 'channel:rpc',
+    requestId: 'req-terminal-task',
+    method: 'task.list',
+    channelId: 'channel-a',
+    params: {},
+  }, {
+    send(message) {
+      rpcResponses.push(message);
+    },
+  });
+
+  assert.equal(rpcResponses[0].type, 'channel:rpc.result');
+  assert.equal(rpcResponses[0].ok, false);
+  assert.equal(rpcResponses[0].code, 'task_already_terminal');
+  assert.equal(rpcResponses[0].statusCode, 409);
+  assert.deepEqual(rpcResponses[0].error, {
+    code: 'task_already_terminal',
+    message: 'task already terminal: task-a',
+    statusCode: 409,
+  });
 });
 
 test('channel:message.send keeps daemon truth and reports ok when view sync ack fails', async (t) => {

@@ -70,57 +70,6 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function taskTemplate({ taskId, type, title, parent, rationale }: {
-  taskId: string;
-  type: string;
-  title: string;
-  parent?: string;
-  rationale?: string;
-}): string {
-  const timestamp = nowIso();
-  return [
-    `# ${title}`,
-    '',
-    '## Brief',
-    '',
-    rationale || 'TBD',
-    '',
-    '## Stakeholders',
-    '',
-    '- Initiator: channel-agent',
-    '',
-    '## Decisions',
-    '',
-    '- TBD',
-    '',
-    '## Constraints',
-    '',
-    '- TBD',
-    '',
-    '## Refs',
-    '',
-    `- Task ID: ${taskId}`,
-    `- Type: ${type}`,
-    ...(parent ? [`- Parent Task: ${parent}`] : []),
-    '',
-    '## Timeline',
-    '',
-    `- ${timestamp} - Task opened.`,
-    '',
-    '## Status',
-    '',
-    'Status: opened',
-    '',
-  ].join('\n');
-}
-
-function writeTaskDoc(docRef: string, content: string): void {
-  const absoluteDocPath = path.join(resolveWorkdir(), validateRelativeDocRef(docRef));
-  mkdirSync(path.dirname(absoluteDocPath), { recursive: true });
-  if (existsSync(absoluteDocPath)) return;
-  writeTaskDocAtomic(docRef, content, { overwrite: false });
-}
-
 function readTaskDoc(docRef: string): string {
   const absoluteDocPath = path.join(resolveWorkdir(), validateRelativeDocRef(docRef));
   return existsSync(absoluteDocPath) ? readFileSync(absoluteDocPath, 'utf8') : '';
@@ -160,17 +109,6 @@ function appendTimeline(content: string, summary: string): string {
       .replace(/\n?$/, '\n');
   }
   return `${content.trimEnd()}\n\n## Timeline\n\n${line}\n`;
-}
-
-function appendClosedStatus(content: string, status: string, summary?: string, resultRef?: string): string {
-  const lines = [
-    '## Status',
-    '',
-    ...(summary ? [`Summary: ${summary}`] : []),
-    ...(resultRef ? [`Result ref: ${resultRef}`] : []),
-    `Status: ${status}`,
-  ];
-  return `${content.trimEnd()}\n\n${lines.join('\n')}\n`;
 }
 
 async function loadTaskView(channelId: string, taskId: string): Promise<TaskView> {
@@ -215,13 +153,6 @@ export function registerTaskCommands(program: Command): void {
       });
       const openedTaskId = String(opened.task_id ?? taskId);
       const openedDocRef = validateRelativeDocRef(String(opened.doc_ref ?? docRef));
-      writeTaskDoc(openedDocRef, taskTemplate({
-        taskId: openedTaskId,
-        type,
-        title,
-        parent: options.parent ? String(options.parent) : undefined,
-        rationale: options.rationale ? String(options.rationale) : undefined,
-      }));
 
       writeSuccess({
         task_id: openedTaskId,
@@ -239,26 +170,25 @@ export function registerTaskCommands(program: Command): void {
     .option('--result-ref <ref>', 'result reference')
     .action(async (taskId: string, options: Record<string, unknown>) => {
       const channelId = channelIdFromOptions(options);
-      const view = await loadTaskView(channelId, taskId);
-      const docRef = docRefFromTaskView(view, taskId);
       const status = String(options.status ?? '').trim();
       const summary = options.summary ? String(options.summary) : undefined;
       const resultRef = options.resultRef ? String(options.resultRef) : undefined;
-      await rpc<Record<string, unknown>>('task.close', {
+      const closed = await rpc<Record<string, unknown>>('task.close', {
         channel_id: channelId,
         task_id: taskId,
         status,
         summary,
         result_ref: resultRef,
       });
-      try {
-        overwriteTaskDoc(docRef, appendClosedStatus(readTaskDoc(docRef), status, summary, resultRef));
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        process.stderr.write(`task closed but failed to update doc ${docRef}: ${message}\n`);
-        throw error;
-      }
-      writeSuccess({ task_id: taskId, doc_ref: docRef, status });
+      const closedTask = closed.task && typeof closed.task === 'object'
+        ? (closed.task as Record<string, unknown>)
+        : {};
+      const docRef = String(closed.doc_ref ?? closedTask.doc_ref ?? '').trim();
+      writeSuccess({
+        task_id: String(closed.task_id ?? taskId),
+        ...(docRef ? { doc_ref: validateRelativeDocRef(docRef) } : {}),
+        status: String(closed.status ?? status),
+      });
     });
 
   task.command('append')
