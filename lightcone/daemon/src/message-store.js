@@ -396,6 +396,11 @@ export function getStoredMessage(db, messageId) {
   return row ? rowToMessage(row) : null;
 }
 
+export function getMaxStoredMessageSeq(db) {
+  const row = db.prepare('SELECT max(rowid) AS seq FROM messages').get();
+  return toSeq(row?.seq, 0);
+}
+
 export function queryStoredMessages(db, filters = {}) {
   const where = [];
   const params = {};

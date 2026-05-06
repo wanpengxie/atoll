@@ -22,6 +22,7 @@ import { emitJsonEvent } from './events.js';
 import {
   advanceAgentCursor,
   appendMessageToStore,
+  getMaxStoredMessageSeq,
   getStoredMessage,
   getStoredTask,
   markMessageDeliveryAttempt,
@@ -356,8 +357,12 @@ function parseDurationMs(value, fallback = 10 * 60 * 1000) {
 }
 
 function parsePositiveSeq(value, fieldName = 'seq') {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
+  const text = String(value ?? '').trim();
+  if (!/^[1-9]\d*$/.test(text)) {
+    throw toRpcError('bad_request', `${fieldName} must be a positive integer`);
+  }
+  const parsed = Number(text);
+  if (!Number.isSafeInteger(parsed)) {
     throw toRpcError('bad_request', `${fieldName} must be a positive integer`);
   }
   return parsed;
@@ -652,9 +657,11 @@ export class ChannelManager {
           event,
         });
         const delivery = await this._deliverEvent(channel, event);
-        if (delivery.ok) {
-          this._advanceCursorForDeliveredEvent(channel, event);
-        }
+        this._recordSuccessfulDelivery({
+          node: channel,
+          messageId: this._messageIdFromEvent(event),
+          deliveryAck: delivery,
+        });
         return delivery;
       },
       onLogOnly: async (channel, event, outcome) => {
@@ -1130,10 +1137,14 @@ export class ChannelManager {
     }
 
     const dispatchResult = await this.triggerGateway.dispatch({ channel: node, event, outcome });
-    if (appendedMessage && outcome.decision === 'react' && dispatchResult?.ok) {
-      this._advanceCursorForDeliveredMessage(node, appendedMessage.messageId);
+    if (appendedMessage && dispatchResult.outcome.decision === 'react') {
+      this._recordSuccessfulDelivery({
+        node,
+        messageId: appendedMessage.messageId,
+        deliveryAck: dispatchResult.delivery,
+      });
     }
-    return outcome;
+    return dispatchResult.outcome;
   }
 
   async registerSchedule(params, kind) {
@@ -1351,34 +1362,49 @@ export class ChannelManager {
     return { messages };
   }
 
+  /**
+   * Cumulative ack RPC. Exactly one of:
+   * - until_seq: ack all messages with seq <= until_seq
+   * - through_message_id: ack all messages with seq <= that message's seq
+   */
   async ackChannelMessages(params) {
     const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
     const node = this._requireNode(channelId);
     const untilSeqValue = params.until_seq ?? params.untilSeq;
-    const messageId = String(params.message_id ?? params.messageId ?? '').trim();
+    const throughMessageId = String(params.through_message_id ?? params.throughMessageId ?? '').trim();
     const hasUntilSeq = hasAckValue(untilSeqValue);
-    if (hasUntilSeq === Boolean(messageId)) {
-      throw toRpcError('bad_request', 'exactly one of until_seq or message_id is required');
+    if (hasUntilSeq === Boolean(throughMessageId)) {
+      throw toRpcError('bad_request', 'exactly one of until_seq or through_message_id is required');
     }
 
-    let ackedSeq;
+    const db = this._openMessageStore(node);
+    let ackedThroughSeq;
     if (hasUntilSeq) {
-      ackedSeq = parsePositiveSeq(untilSeqValue, 'until_seq');
+      ackedThroughSeq = parsePositiveSeq(untilSeqValue, 'until_seq');
+      const maxSeq = getMaxStoredMessageSeq(db);
+      if (ackedThroughSeq > maxSeq) {
+        throw toRpcError('bad_request', `until_seq must not exceed current max seq (${maxSeq})`);
+      }
     } else {
-      const stored = getStoredMessage(this._openMessageStore(node), messageId);
-      if (!stored) throw toRpcError('not_found', `message not found: ${messageId}`, 404);
-      ackedSeq = parsePositiveSeq(stored.seq, 'message seq');
+      const stored = getStoredMessage(db, throughMessageId);
+      if (!stored) throw toRpcError('not_found', `message not found: ${throughMessageId}`, 404);
+      ackedThroughSeq = parsePositiveSeq(stored.seq, 'message seq');
     }
 
     const agentName = String(params.agent_name ?? params.agentName ?? node.agentName ?? DEFAULT_AGENT_NAME).trim()
       || DEFAULT_AGENT_NAME;
     const previous = readAgentCursor(node.workdir, agentName);
-    const cursor = advanceAgentCursor(node.workdir, agentName, ackedSeq);
+    const cursor = this._recordSuccessfulDelivery({
+      node,
+      agentName,
+      storedMessage: { seq: ackedThroughSeq },
+      deliveryAck: { ok: true },
+    });
     return {
       channel_id: node.channelId,
       agent_name: agentName,
-      ...(messageId ? { message_id: messageId } : {}),
-      acked_seq: ackedSeq,
+      ...(throughMessageId ? { through_message_id: throughMessageId } : {}),
+      acked_through_seq: ackedThroughSeq,
       previous_last_seen_seq: previous.last_seen_seq,
       last_seen_seq: cursor.last_seen_seq,
       advanced: cursor.last_seen_seq > previous.last_seen_seq,
@@ -2150,23 +2176,31 @@ export class ChannelManager {
         const message = this._messageFromStoredMessage(node, stored);
         const event = this._eventFromMessage(message);
         const outcome = this.triggerGateway.evaluate(event, node);
-        const delivery = await this._dispatchDueMessage(node, event, outcome);
-        if (delivery.ok && outcome.decision !== 'block') {
+        const rawDispatchResult = await this._dispatchDueMessage(node, event, outcome);
+        const dispatchResult = rawDispatchResult?.outcome
+          ? rawDispatchResult
+          : { outcome, delivery: rawDispatchResult ?? null };
+        const delivery = dispatchResult.delivery ?? { ok: false, reason: dispatchResult.outcome.reason ?? 'delivery failed' };
+        if (delivery.ok && dispatchResult.outcome.decision !== 'block') {
           const deliveredMessage = markMessageDelivered(db, stored.id, nowMs);
           if (deliveredMessage?.seq != null) {
-            advanceAgentCursor(node.workdir, node.agentName, deliveredMessage.seq);
+            this._recordSuccessfulDelivery({
+              node,
+              storedMessage: deliveredMessage,
+              deliveryAck: delivery,
+            });
           }
           delivered.push({
             message_id: stored.id,
             channel_id: node.channelId,
-            decision: outcome.decision,
-            reason: outcome.reason,
+            decision: dispatchResult.outcome.decision,
+            reason: dispatchResult.outcome.reason,
             ok: true,
           });
           continue;
         }
 
-        const lastError = delivery.reason ?? outcome.reason ?? 'delivery failed';
+        const lastError = delivery.reason ?? dispatchResult.outcome.reason ?? 'delivery failed';
         const failedMessage = markMessageDeliveryAttempt(db, stored.id, {
           attemptedAt: nowMs,
           error: lastError,
@@ -2175,7 +2209,7 @@ export class ChannelManager {
         let failure = {
           message_id: stored.id,
           channel_id: node.channelId,
-          decision: outcome.decision,
+          decision: dispatchResult.outcome.decision,
           reason: lastError,
           last_error: failedMessage?.last_error ?? lastError,
           attempts,
@@ -2206,7 +2240,10 @@ export class ChannelManager {
         reason: outcome.reason,
         event,
       });
-      return this._deliverEvent(node, event);
+      return {
+        outcome,
+        delivery: await this._deliverEvent(node, event),
+      };
     }
     if (outcome.decision === 'log_only') {
       await this._recordTrace(node, {
@@ -2215,7 +2252,10 @@ export class ChannelManager {
         reason: outcome.reason,
         event,
       });
-      return { ok: true };
+      return {
+        outcome,
+        delivery: { ok: true },
+      };
     }
     await this._recordTrace(node, {
       kind: 'trigger',
@@ -2223,7 +2263,10 @@ export class ChannelManager {
       reason: outcome.reason,
       event,
     });
-    return { ok: false, reason: outcome.reason ?? 'blocked' };
+    return {
+      outcome,
+      delivery: { ok: false, reason: outcome.reason ?? 'blocked' },
+    };
   }
 
   async _recordDeliveryDeadLetter(node, message, failure) {
@@ -2405,24 +2448,37 @@ export class ChannelManager {
     }
   }
 
-  _advanceCursorForDeliveredEvent(node, event) {
+  _messageIdFromEvent(event) {
     const message = event?.payload?.message ?? event?.payload;
-    const messageId = String(
+    return String(
       message?.envelope?.id
         ?? message?.messageId
         ?? message?.message_id
         ?? message?.id
         ?? '',
     ).trim();
-    if (!messageId) return null;
-
-    return this._advanceCursorForDeliveredMessage(node, messageId);
   }
 
-  _advanceCursorForDeliveredMessage(node, messageId) {
-    const stored = getStoredMessage(this._openMessageStore(node), messageId);
+  _recordSuccessfulDelivery({
+    node,
+    storedMessage = null,
+    messageId = null,
+    deliveryAck = null,
+    agentName = null,
+  } = {}) {
+    if (!node || deliveryAck?.ok !== true) return null;
+
+    let stored = storedMessage;
+    if (!stored) {
+      const id = String(messageId ?? '').trim();
+      if (!id) return null;
+      stored = getStoredMessage(this._openMessageStore(node), id);
+    }
     if (!stored?.seq) return null;
-    return advanceAgentCursor(node.workdir, node.agentName, stored.seq);
+
+    const seq = parsePositiveSeq(stored.seq, 'message seq');
+    const cursorAgentName = String(agentName ?? node.agentName ?? DEFAULT_AGENT_NAME).trim() || DEFAULT_AGENT_NAME;
+    return advanceAgentCursor(node.workdir, cursorAgentName, seq);
   }
 
   async _handleCronTick(tick) {

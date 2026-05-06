@@ -74,3 +74,47 @@ test('trigger gateway does not treat channel-agent literal as self for custom ag
     TriggerDecision.REACT,
   );
 });
+
+test('trigger gateway dispatch returns stable outcome and delivery shape', async () => {
+  const calls = [];
+  const gateway = new TriggerGateway({
+    onReact: async (_channel, _event, outcome) => {
+      calls.push(['react', outcome.reason]);
+      return { ok: false, reason: 'delivery refused' };
+    },
+    onLogOnly: async (_channel, _event, outcome) => {
+      calls.push(['log_only', outcome.reason]);
+      return { ok: true };
+    },
+    onBlock: async (_channel, _event, outcome) => {
+      calls.push(['block', outcome.reason]);
+      return { ok: true };
+    },
+  });
+
+  const reactOutcome = { decision: TriggerDecision.REACT, reason: 'test_react' };
+  const logOnlyOutcome = { decision: TriggerDecision.LOG_ONLY, reason: 'test_log_only' };
+  const blockOutcome = { decision: TriggerDecision.BLOCK, reason: 'test_block' };
+
+  const reactResult = await gateway.dispatch({ channel, event: { type: 'user.message.posted' }, outcome: reactOutcome });
+  const logOnlyResult = await gateway.dispatch({ channel, event: { type: 'agent.text' }, outcome: logOnlyOutcome });
+  const blockResult = await gateway.dispatch({ channel, event: { type: 'metric.cpu' }, outcome: blockOutcome });
+
+  assert.deepEqual(reactResult, {
+    outcome: reactOutcome,
+    delivery: { ok: false, reason: 'delivery refused' },
+  });
+  assert.deepEqual(logOnlyResult, {
+    outcome: logOnlyOutcome,
+    delivery: null,
+  });
+  assert.deepEqual(blockResult, {
+    outcome: blockOutcome,
+    delivery: null,
+  });
+  assert.deepEqual(calls, [
+    ['react', 'test_react'],
+    ['log_only', 'test_log_only'],
+    ['block', 'test_block'],
+  ]);
+});

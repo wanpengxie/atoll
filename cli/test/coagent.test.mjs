@@ -91,7 +91,7 @@ test('coagent help lists the business command tree', () => {
   assert.match(help, /message\s+Send and inspect channel messages/);
   assert.match(help, /emit \[options\]\s+Emit an envelope message/);
   assert.match(help, /query \[options\]\s+Query channel messages/);
-  assert.match(help, /ack \[options\]\s+Advance the unread cursor explicitly/);
+  assert.match(help, /ack \[options\]\s+Advance the unread cursor explicitly \(cumulative\s+ack\)/);
   assert.match(help, /dispatch\s+Dispatch promise-chain helpers/);
   assert.match(help, /task\s+Open and inspect task entities/);
   assert.match(help, /admin\s+Inspect the local daemon/);
@@ -203,7 +203,7 @@ test('coagent business subcommands call expected daemon RPC methods', async () =
       },
     },
     { args: ['ack', '--channel', 'channel-a', '--until-seq', '42'], method: 'message.ack', params: { channel_id: 'channel-a', until_seq: 42 } },
-    { args: ['ack', '--channel', 'channel-a', '--message-id', 'message-1'], method: 'message.ack', params: { channel_id: 'channel-a', message_id: 'message-1' } },
+    { args: ['ack', '--channel', 'channel-a', '--through-message-id', 'message-1'], method: 'message.ack', params: { channel_id: 'channel-a', through_message_id: 'message-1' } },
     {
       args: ['schedule', '--channel', 'channel-a', '--not-before', '1760000000000', '--payload', '{"reason":"check"}'],
       method: 'message.schedule',
@@ -285,6 +285,26 @@ test('coagent business subcommands call expected daemon RPC methods', async () =
       assert.deepEqual(requests[index].payload.params, item.params);
       assert.equal(requests[index].headers.authorization, 'Bearer test-token');
     }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('coagent ack rejects malformed seq before daemon RPC', async () => {
+  const { server, port, requests } = await withRpcServer(() => ({
+    ok: true,
+    result: {},
+  }));
+  try {
+    const body = await runCliFailure(['ack', '--channel', 'channel-a', '--until-seq', '42abc'], {
+      COAGENT_DAEMON_HTTP: `http://127.0.0.1:${port}`,
+      COAGENT_DAEMON_SOCKET: '',
+    });
+
+    assert.equal(body.code, 2);
+    assert.equal(body.body.ok, false);
+    assert.equal(body.body.error.code, 'invalid_arguments');
+    assert.equal(requests.length, 0);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

@@ -1,8 +1,12 @@
 import { InvalidArgumentError } from 'commander';
 
 export function parsePositiveInteger(value: string): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
+  const text = String(value ?? '').trim();
+  if (!/^[1-9]\d*$/.test(text)) {
+    throw new InvalidArgumentError('must be a positive integer');
+  }
+  const parsed = Number(text);
+  if (!Number.isSafeInteger(parsed)) {
     throw new InvalidArgumentError('must be a positive integer');
   }
   return parsed;

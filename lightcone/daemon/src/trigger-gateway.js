@@ -109,6 +109,12 @@ function eventContext(event, channel) {
 }
 
 export class TriggerGateway {
+  /**
+   * Hook contract:
+   * - onReact returns a delivery ack: { ok: boolean, reason?: string }
+   * - onLogOnly/onBlock perform side effects; their return values are ignored
+   * - dispatch always returns: { outcome, delivery: { ok, reason? } | null }
+   */
   constructor({ onReact, onLogOnly, onBlock, onPass } = {}) {
     this.onReact = onReact ?? onPass;
     this.onLogOnly = onLogOnly;
@@ -194,16 +200,16 @@ export class TriggerGateway {
     const evaluated = outcome ?? this.evaluate(event, channel);
 
     if (evaluated.decision === TriggerDecision.REACT) {
-      const result = await this.onReact?.(channel, event, evaluated);
-      return result ?? evaluated;
+      const delivery = await this.onReact?.(channel, event, evaluated);
+      return { outcome: evaluated, delivery: delivery ?? null };
     }
 
     if (evaluated.decision === TriggerDecision.LOG_ONLY) {
-      const result = await this.onLogOnly?.(channel, event, evaluated);
-      return result ?? evaluated;
+      await this.onLogOnly?.(channel, event, evaluated);
+      return { outcome: evaluated, delivery: null };
     }
 
-    const result = await this.onBlock?.(channel, event, evaluated);
-    return result ?? evaluated;
+    await this.onBlock?.(channel, event, evaluated);
+    return { outcome: evaluated, delivery: null };
   }
 }

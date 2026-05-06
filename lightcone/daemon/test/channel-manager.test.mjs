@@ -770,6 +770,116 @@ test('react delivery advances per-agent cursor after stdin accepts the event', a
   assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, stored[0].seq);
 });
 
+test('react delivery failure leaves per-agent cursor unchanged', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-react-cursor-failed-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-react-cursor-failed',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'React Cursor Failed Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  node.status = 'active';
+  node.proc = {};
+
+  const result = await channelManager.handleEvent({
+    channelId: node.channelId,
+    event: {
+      type: 'user.message.posted',
+      source: 'test',
+      payload: {
+        senderType: 'human',
+        senderId: 'user-a',
+        senderName: 'User A',
+        content: 'wake the agent',
+      },
+    },
+  });
+
+  assert.equal(result.decision, 'react');
+  assert.equal(readStoredMessages(node.messageStore).length, 1);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
+});
+
+test('stdin write throw during react delivery leaves per-agent cursor unchanged', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-react-cursor-throw-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const previousError = console.error;
+  const errorLines = [];
+  console.error = (...args) => {
+    errorLines.push(args.map((item) => String(item)).join(' '));
+  };
+  t.after(() => {
+    console.error = previousError;
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-react-cursor-throw',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'React Cursor Throw Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  node.status = 'active';
+  node.proc = {
+    stdin: {
+      write: () => {
+        throw new Error('stdin boom');
+      },
+    },
+  };
+
+  const result = await channelManager.handleEvent({
+    channelId: node.channelId,
+    event: {
+      type: 'user.message.posted',
+      source: 'test',
+      payload: {
+        senderType: 'human',
+        senderId: 'user-a',
+        senderName: 'User A',
+        content: 'wake the agent',
+      },
+    },
+  });
+
+  assert.equal(result.decision, 'react');
+  assert.match(errorLines.join('\n'), /stdin boom/);
+  assert.equal(readStoredMessages(node.messageStore).length, 1);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
+});
+
 test('due processing keeps inactive channel messages unread and records failed attempt', async (t) => {
   const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-due-inactive-'));
   t.after(() => {
@@ -1198,16 +1308,17 @@ test('message.query --unread limit is peek-only until explicit ack advances curs
   assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, first.messages.at(-1).seq);
 });
 
-test('message.ack --message-id advances cursor to the stored message sequence', async (t) => {
+test('message.ack through_message_id cumulatively advances cursor to the stored message sequence', async (t) => {
   const { channelManager, node } = await createUnreadQueryHarness(
     t,
-    'channel-ack-message-id',
-    'channel-manager-ack-message-id',
+    'channel-ack-through-message-id',
+    'channel-manager-ack-through-message-id',
   );
   const baseTs = Date.UTC(2026, 4, 6, 1, 0, 0);
   const rows = [
     { id: 'message-ack-id-1' },
     { id: 'message-ack-id-2' },
+    { id: 'message-ack-id-3' },
   ];
   await appendUnreadQueryRows(channelManager, node, rows, baseTs);
   const beforeAck = await channelManager.queryChannelMessages({
@@ -1219,7 +1330,7 @@ test('message.ack --message-id advances cursor to the stored message sequence', 
 
   const ack = await channelManager.ackChannelMessages({
     channelId: node.channelId,
-    messageId: 'message-ack-id-2',
+    throughMessageId: 'message-ack-id-2',
   });
   const unread = await channelManager.queryChannelMessages({
     channelId: node.channelId,
@@ -1227,10 +1338,114 @@ test('message.ack --message-id advances cursor to the stored message sequence', 
     limit: 10,
   });
 
-  assert.equal(ack.message_id, 'message-ack-id-2');
+  assert.equal(ack.through_message_id, 'message-ack-id-2');
+  assert.equal(ack.acked_through_seq, targetSeq);
   assert.equal(ack.previous_last_seen_seq, 0);
   assert.equal(ack.last_seen_seq, targetSeq);
-  assert.equal(unread.messages.length, 0);
+  assert.deepEqual(unread.messages.map((message) => message.id), ['message-ack-id-3']);
+});
+
+test('message.ack rejects malformed until_seq values without advancing cursor', async (t) => {
+  const { channelManager, node } = await createUnreadQueryHarness(
+    t,
+    'channel-ack-bad-seq',
+    'channel-manager-ack-bad-seq',
+  );
+  const baseTs = Date.UTC(2026, 4, 6, 1, 0, 0);
+  await appendUnreadQueryRows(channelManager, node, [{ id: 'message-ack-bad-seq-1' }], baseTs);
+
+  const cases = [
+    ['zero', 0],
+    ['negative', -1],
+    ['fraction', '1.5'],
+    ['suffix', '1abc'],
+  ];
+
+  for (const [name, untilSeq] of cases) {
+    await assert.rejects(
+      () => channelManager.ackChannelMessages({
+        channelId: node.channelId,
+        untilSeq,
+      }),
+      (err) => {
+        assert.equal(err.code, 'bad_request', name);
+        assert.match(err.message, /until_seq must be a positive integer/, name);
+        return true;
+      },
+    );
+    assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0, name);
+  }
+});
+
+test('message.ack rejects future until_seq without advancing cursor', async (t) => {
+  const { channelManager, node } = await createUnreadQueryHarness(
+    t,
+    'channel-ack-future-seq',
+    'channel-manager-ack-future-seq',
+  );
+  const baseTs = Date.UTC(2026, 4, 6, 1, 0, 0);
+  await appendUnreadQueryRows(channelManager, node, [{ id: 'message-ack-future-seq-1' }], baseTs);
+  const existing = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    limit: 10,
+  });
+
+  await assert.rejects(
+    () => channelManager.ackChannelMessages({
+      channelId: node.channelId,
+      untilSeq: existing.messages[0].seq + 1,
+    }),
+    (err) => {
+      assert.equal(err.code, 'bad_request');
+      assert.match(err.message, /until_seq must not exceed current max seq/);
+      return true;
+    },
+  );
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
+});
+
+test('message.ack rejects invalid argument combinations and unknown through_message_id', async (t) => {
+  const { channelManager, node } = await createUnreadQueryHarness(
+    t,
+    'channel-ack-invalid-args',
+    'channel-manager-ack-invalid-args',
+  );
+  const baseTs = Date.UTC(2026, 4, 6, 1, 0, 0);
+  await appendUnreadQueryRows(channelManager, node, [{ id: 'message-ack-invalid-args-1' }], baseTs);
+
+  await assert.rejects(
+    () => channelManager.ackChannelMessages({ channelId: node.channelId }),
+    (err) => {
+      assert.equal(err.code, 'bad_request');
+      assert.match(err.message, /exactly one of until_seq or through_message_id is required/);
+      return true;
+    },
+  );
+  await assert.rejects(
+    () => channelManager.ackChannelMessages({
+      channelId: node.channelId,
+      untilSeq: 1,
+      throughMessageId: 'message-ack-invalid-args-1',
+    }),
+    (err) => {
+      assert.equal(err.code, 'bad_request');
+      assert.match(err.message, /exactly one of until_seq or through_message_id is required/);
+      return true;
+    },
+  );
+  await assert.rejects(
+    () => channelManager.ackChannelMessages({
+      channelId: node.channelId,
+      throughMessageId: 'message-ack-missing',
+    }),
+    (err) => {
+      assert.equal(err.code, 'not_found');
+      assert.match(err.message, /message not found: message-ack-missing/);
+      return true;
+    },
+  );
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
 });
 
 test('message.query --unread with content filters peeks without advancing cursor', async (t) => {
