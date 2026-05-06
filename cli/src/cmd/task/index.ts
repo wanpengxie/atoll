@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Command, Option } from 'commander';
@@ -7,15 +7,6 @@ import { requireChannelId, resolveWorkdir } from '../../lib/channel-fs.js';
 import { CliError } from '../../lib/errors.js';
 import { callDaemonRpc } from '../../lib/rpc.js';
 import { writeSuccess } from '../../lib/output.js';
-
-interface TaskView {
-  task?: {
-    task_id?: string;
-    doc_ref?: string;
-    [key: string]: unknown;
-  };
-  [key: string]: unknown;
-}
 
 function channelIdFromOptions(options: Record<string, unknown>): string {
   return String(options.channel ?? '').trim() || requireChannelId();
@@ -64,63 +55,6 @@ function defaultDocRefForNewTask(title: string, taskId: string): string {
   if (!docRefExists(base)) return base;
   const parsed = path.posix.parse(base);
   return path.posix.join(parsed.dir, `${parsed.name}-${taskId.slice(0, 8)}${parsed.ext}`);
-}
-
-function nowIso(): string {
-  return new Date().toISOString();
-}
-
-function readTaskDoc(docRef: string): string {
-  const absoluteDocPath = path.join(resolveWorkdir(), validateRelativeDocRef(docRef));
-  return existsSync(absoluteDocPath) ? readFileSync(absoluteDocPath, 'utf8') : '';
-}
-
-function overwriteTaskDoc(docRef: string, content: string): void {
-  writeTaskDocAtomic(docRef, content, { overwrite: true });
-}
-
-function writeTaskDocAtomic(docRef: string, content: string, { overwrite }: { overwrite: boolean }): void {
-  const absoluteDocPath = path.join(resolveWorkdir(), validateRelativeDocRef(docRef));
-  mkdirSync(path.dirname(absoluteDocPath), { recursive: true });
-  const tmpPath = `${absoluteDocPath}.tmp-${process.pid}-${Date.now()}-${randomUUID()}`;
-  try {
-    writeFileSync(tmpPath, content, 'utf8');
-    if (!overwrite && existsSync(absoluteDocPath)) {
-      unlinkSync(tmpPath);
-      return;
-    }
-    renameSync(tmpPath, absoluteDocPath);
-  } catch (error) {
-    try {
-      if (existsSync(tmpPath)) unlinkSync(tmpPath);
-    } catch {
-      // Best-effort cleanup; preserve the original write failure.
-    }
-    throw error;
-  }
-}
-
-function appendTimeline(content: string, summary: string): string {
-  const line = `- ${nowIso()} - ${summary}`;
-  const statusMarker = '\n## Status';
-  const statusIndex = content.lastIndexOf(statusMarker);
-  if (statusIndex >= 0) {
-    return `${content.slice(0, statusIndex).trimEnd()}\n${line}\n${content.slice(statusIndex)}`
-      .replace(/\n?$/, '\n');
-  }
-  return `${content.trimEnd()}\n\n## Timeline\n\n${line}\n`;
-}
-
-async function loadTaskView(channelId: string, taskId: string): Promise<TaskView> {
-  return rpc<TaskView>('task.show', { channel_id: channelId, task_id: taskId });
-}
-
-function docRefFromTaskView(view: TaskView, taskId: string): string {
-  const docRef = String(view.task?.doc_ref ?? '').trim();
-  if (!docRef) {
-    throw new CliError('task_doc_missing', `task ${taskId} does not have a doc_ref`, 1);
-  }
-  return validateRelativeDocRef(docRef);
 }
 
 export function registerTaskCommands(program: Command): void {
@@ -199,15 +133,16 @@ export function registerTaskCommands(program: Command): void {
       const summary = summaryParts.join(' ').trim();
       if (!summary) throw new CliError('invalid_arguments', 'event summary is required', 2);
       const channelId = channelIdFromOptions(options);
-      const view = await loadTaskView(channelId, taskId);
-      const docRef = docRefFromTaskView(view, taskId);
-      await rpc<Record<string, unknown>>('task.append', {
+      const appended = await rpc<Record<string, unknown>>('task.append', {
         channel_id: channelId,
         task_id: taskId,
         summary,
       });
-      overwriteTaskDoc(docRef, appendTimeline(readTaskDoc(docRef), summary));
-      writeSuccess({ task_id: taskId, doc_ref: docRef });
+      const docRef = String(appended.doc_ref ?? '').trim();
+      writeSuccess({
+        task_id: String(appended.task_id ?? taskId),
+        ...(docRef ? { doc_ref: validateRelativeDocRef(docRef) } : {}),
+      });
     });
 
   task.command('ls')

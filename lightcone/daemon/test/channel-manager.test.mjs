@@ -1236,6 +1236,180 @@ test('task open and close write task docs inside daemon RPC boundary', async (t)
   assert.equal(getStoredTask(node.messageStore, 'task-docs', node.channelId).status, 'completed');
 });
 
+test('task append writes task doc inside daemon RPC boundary', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-task-doc-append-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-task-doc-append',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Task Doc Append Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const docRef = 'notes/tasks/2026-05-06-append.md';
+  const docPath = path.join(created.workdir, docRef);
+
+  await channelManager.openTask({
+    channelId: node.channelId,
+    taskId: 'task-append-doc',
+    type: 'research',
+    title: 'Append doc task',
+    docRef,
+  });
+
+  const appended = await channelManager.appendTask({
+    channelId: node.channelId,
+    taskId: 'task-append-doc',
+    summary: 'Draft ready',
+  });
+
+  assert.equal(appended.doc_ref, docRef);
+  const appendedDoc = readFileSync(docPath, 'utf8');
+  assert.match(appendedDoc, /- .* - Draft ready/);
+  assert.equal(appendedDoc.indexOf('Draft ready') < appendedDoc.indexOf('## Status'), true);
+  assert.equal(readStoredMessages(node.messageStore)
+    .filter((message) => message.payload_type === 'task.appended').length, 1);
+});
+
+test('task append doc write failure does not leave daemon append projection', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-task-doc-append-fail-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-task-doc-append-fail',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Task Doc Append Fail Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const docRef = 'notes/tasks/2026-05-06-append-fail.md';
+  const docPath = path.join(created.workdir, docRef);
+
+  await channelManager.openTask({
+    channelId: node.channelId,
+    taskId: 'task-append-doc-fail',
+    type: 'research',
+    title: 'Append doc fail',
+    docRef,
+  });
+  const originalDoc = readFileSync(docPath, 'utf8');
+  const originalTask = getStoredTask(node.messageStore, 'task-append-doc-fail', node.channelId);
+  const originalWriteTaskDocAtomic = channelManager._writeTaskDocAtomic;
+  let sentAppend = false;
+  channelManager._writeTaskDocAtomic = () => {
+    throw new Error('mock doc write failed');
+  };
+  const originalSendChannelMessage = channelManager.sendChannelMessage.bind(channelManager);
+  channelManager.sendChannelMessage = async (params, options) => {
+    if (params.messageType === 'task.appended') sentAppend = true;
+    return originalSendChannelMessage(params, options);
+  };
+
+  await assert.rejects(
+    () => channelManager.appendTask({
+      channelId: node.channelId,
+      taskId: 'task-append-doc-fail',
+      summary: 'should not persist',
+    }),
+    /mock doc write failed/,
+  );
+  channelManager._writeTaskDocAtomic = originalWriteTaskDocAtomic;
+
+  assert.equal(sentAppend, false);
+  assert.equal(readFileSync(docPath, 'utf8'), originalDoc);
+  assert.equal(readStoredMessages(node.messageStore)
+    .filter((message) => message.payload_type === 'task.appended').length, 0);
+  const task = getStoredTask(node.messageStore, 'task-append-doc-fail', node.channelId);
+  assert.equal(task.last_event_at, originalTask.last_event_at);
+});
+
+test('task append restores doc when RPC send fails after doc write', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-task-doc-append-rollback-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+  const created = await channelManager.createChannel({
+    channelId: 'channel-task-doc-append-rollback',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Task Doc Append Rollback Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const docRef = 'notes/tasks/2026-05-06-append-rollback.md';
+  const docPath = path.join(created.workdir, docRef);
+
+  await channelManager.openTask({
+    channelId: node.channelId,
+    taskId: 'task-append-doc-rollback',
+    type: 'research',
+    title: 'Append doc rollback',
+    docRef,
+  });
+  const originalDoc = readFileSync(docPath, 'utf8');
+  const originalSendChannelMessage = channelManager.sendChannelMessage.bind(channelManager);
+  let appendSendAttempted = false;
+  channelManager.sendChannelMessage = async (params, options) => {
+    if (params.messageType === 'task.appended') {
+      appendSendAttempted = true;
+      throw new Error('mock append send failed');
+    }
+    return originalSendChannelMessage(params, options);
+  };
+
+  await assert.rejects(
+    () => channelManager.appendTask({
+      channelId: node.channelId,
+      taskId: 'task-append-doc-rollback',
+      summary: 'rolled back',
+    }),
+    /mock append send failed/,
+  );
+
+  assert.equal(appendSendAttempted, true);
+  assert.equal(readFileSync(docPath, 'utf8'), originalDoc);
+  assert.equal(readStoredMessages(node.messageStore)
+    .filter((message) => message.payload_type === 'task.appended').length, 0);
+});
+
 test('task open doc write failure does not leave daemon task projection', async (t) => {
   const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-task-doc-open-fail-'));
   t.after(() => {

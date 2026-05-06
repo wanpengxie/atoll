@@ -518,19 +518,26 @@ test('coagent task open does not leave a task doc when RPC fails', async (t) => 
   }
 });
 
-test('coagent task append edits docs and close delegates doc update to daemon', async (t) => {
+test('coagent task append and close delegate doc updates to daemon', async (t) => {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'coagent-task-edit-'));
   t.after(() => {
     rmSync(tempDir, { recursive: true, force: true });
   });
   writeFileSync(path.join(tempDir, 'channel.yaml'), JSON.stringify({ channel_id: 'channel-task' }), 'utf8');
   const docRef = 'notes/tasks/2026-05-06-existing.md';
+  const initialDoc = '# Existing\n\n## Timeline\n\n- opened\n\n## Status\n\nStatus: opened\n';
   mkdirSync(path.dirname(path.join(tempDir, docRef)), { recursive: true });
-  writeFileSync(path.join(tempDir, docRef), '# Existing\n\n## Timeline\n\n- opened\n\n## Status\n\nStatus: opened\n', 'utf8');
+  writeFileSync(path.join(tempDir, docRef), initialDoc, 'utf8');
 
   const { server, port, requests } = await withRpcServer((request) => {
-    if (request.payload.method === 'task.show') {
-      return { ok: true, result: { task: { task_id: 'task-a', doc_ref: docRef } } };
+    if (request.payload.method === 'task.append') {
+      return {
+        ok: true,
+        result: {
+          task_id: request.payload.params.task_id,
+          doc_ref: docRef,
+        },
+      };
     }
     if (request.payload.method === 'task.close') {
       return {
@@ -552,10 +559,10 @@ test('coagent task append edits docs and close delegates doc update to daemon', 
   try {
     const appended = await runCliAsync(['task', 'append', 'task-a', 'Draft ready'], env, tempDir);
     assert.equal(appended.ok, true);
-    assert.match(readFileSync(path.join(tempDir, docRef), 'utf8'), /Draft ready/);
-    assert.equal(requests[0].payload.method, 'task.show');
-    assert.equal(requests[1].payload.method, 'task.append');
-    assert.deepEqual(requests[1].payload.params, {
+    assert.equal(appended.data.doc_ref, docRef);
+    assert.equal(readFileSync(path.join(tempDir, docRef), 'utf8'), initialDoc);
+    assert.equal(requests[0].payload.method, 'task.append');
+    assert.deepEqual(requests[0].payload.params, {
       channel_id: 'channel-task',
       task_id: 'task-a',
       summary: 'Draft ready',
@@ -577,8 +584,8 @@ test('coagent task append edits docs and close delegates doc update to daemon', 
     const closedDoc = readFileSync(path.join(tempDir, docRef), 'utf8');
     assert.doesNotMatch(closedDoc, /Summary: Finished/);
     assert.doesNotMatch(closedDoc, /Status: completed/);
-    assert.equal(requests[2].payload.method, 'task.close');
-    assert.deepEqual(requests[2].payload.params, {
+    assert.equal(requests[1].payload.method, 'task.close');
+    assert.deepEqual(requests[1].payload.params, {
       channel_id: 'channel-task',
       task_id: 'task-a',
       status: 'completed',

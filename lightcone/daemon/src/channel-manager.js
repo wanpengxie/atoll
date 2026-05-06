@@ -307,6 +307,17 @@ function appendClosedStatus(content, status, summary, resultRef) {
   return `${content.trimEnd()}\n\n${lines.join('\n')}\n`;
 }
 
+function appendTimeline(content, summary) {
+  const line = `- ${nowIso()} - ${summary}`;
+  const statusMarker = '\n## Status';
+  const statusIndex = content.lastIndexOf(statusMarker);
+  if (statusIndex >= 0) {
+    return `${content.slice(0, statusIndex).trimEnd()}\n${line}\n${content.slice(statusIndex)}`
+      .replace(/\n?$/, '\n');
+  }
+  return `${content.trimEnd()}\n\n## Timeline\n\n${line}\n`;
+}
+
 function buildTaskTree(tasks, rootTaskId = null) {
   const byParent = new Map();
   for (const task of tasks) {
@@ -672,6 +683,18 @@ export class ChannelManager {
     if (connection) {
       this._schedulePendingViewSyncReplay();
     }
+  }
+
+  _readTaskDocIfPresent(workdir, docRef) {
+    return readDocIfPresent(workdir, docRef);
+  }
+
+  _writeTaskDocAtomic(workdir, docRef, content, options) {
+    return writeTaskDocAtomic(workdir, docRef, content, options);
+  }
+
+  _restoreTaskDoc(workdir, docRef, previous) {
+    restoreTaskDoc(workdir, docRef, previous);
   }
 
   _schedulePendingViewSyncReplay() {
@@ -1687,25 +1710,40 @@ export class ChannelManager {
     const task = getStoredTask(db, taskId, node.channelId);
     if (!task) throw toRpcError('not_found', `task not found: ${taskId}`);
     assertTaskMutable(task, taskId);
+    const docRef = task.doc_ref;
 
-    const message = await this.sendChannelMessage({
-      channelId: node.channelId,
-      senderType: 'channel_agent',
-      senderKind: SenderKind.AGENT,
-      senderId: node.agentName,
-      senderName: node.agentName,
-      messageType: PayloadType.TASK_APPENDED,
-      payload: { type: PayloadType.TASK_APPENDED, body: { summary } },
-      content: summary,
-      correlationId: params.correlation_id ?? params.correlationId,
-      taskId,
-      audience: ['self'],
-      origin: 'self',
-      source: 'task',
-    });
+    const docWrite = this._writeTaskDocAtomic(
+      node.workdir,
+      docRef,
+      appendTimeline(this._readTaskDocIfPresent(node.workdir, docRef) ?? '', summary),
+      { overwrite: true },
+    );
+
+    let message;
+    try {
+      message = await this.sendChannelMessage({
+        channelId: node.channelId,
+        senderType: 'channel_agent',
+        senderKind: SenderKind.AGENT,
+        senderId: node.agentName,
+        senderName: node.agentName,
+        messageType: PayloadType.TASK_APPENDED,
+        payload: { type: PayloadType.TASK_APPENDED, body: { summary } },
+        content: summary,
+        correlationId: params.correlation_id ?? params.correlationId,
+        taskId,
+        audience: ['self'],
+        origin: 'self',
+        source: 'task',
+      });
+    } catch (err) {
+      this._restoreTaskDoc(node.workdir, docRef, docWrite.previous);
+      throw err;
+    }
 
     return {
       task_id: taskId,
+      doc_ref: docRef,
       message,
       task: getStoredTask(db, taskId, node.channelId),
     };
