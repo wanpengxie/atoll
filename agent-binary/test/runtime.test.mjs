@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { accessSync, constants as fsConstants, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -114,6 +114,25 @@ async function runRuntimeTurn(env, eventLine, logPath, tracePath, expectedEntrie
 
 test('build artifacts exist for agent runtime', () => {
   accessSync(distEntry, fsConstants.F_OK);
+});
+
+test('artifact archive leaves sqlite stores in place', async () => {
+  const { archiveLargeArtifacts } = await import(path.join(packageDir, 'dist', 'hooks', 'artifact-archive.js'));
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), 'coagent-artifact-archive-'));
+  const sqlitePath = path.join(rootDir, 'messages.sqlite');
+  const sqliteWalPath = path.join(rootDir, 'messages.sqlite-wal');
+  const reportPath = path.join(rootDir, 'report.txt');
+  writeFileSync(sqlitePath, 's'.repeat(2048));
+  writeFileSync(sqliteWalPath, 'w'.repeat(2048));
+  writeFileSync(reportPath, 'r'.repeat(2048));
+
+  const archived = archiveLargeArtifacts(rootDir);
+
+  assert.equal(existsSync(sqlitePath), true);
+  assert.equal(existsSync(sqliteWalPath), true);
+  assert.equal(existsSync(reportPath), false);
+  assert.deepEqual(archived.filter((entry) => /sqlite/.test(entry)), []);
+  rmSync(rootDir, { recursive: true, force: true });
 });
 
 test('stdout writer emits JSON Lines with event field instead of type', async (t) => {

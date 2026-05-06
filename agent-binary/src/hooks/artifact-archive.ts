@@ -9,10 +9,11 @@ import path from 'node:path';
 
 const INLINE_LIMIT_BYTES = 1024;
 const SKIP_TOP_LEVEL = new Set(['messages', 'artifacts', 'schedules', 'agents']);
+const SQLITE_FILE_PATTERN = /\.(sqlite|sqlite3|db)(?:-(?:wal|shm))?$/i;
 
 function shouldSkip(relPath: string): boolean {
   const [topLevel] = relPath.split(path.sep);
-  return SKIP_TOP_LEVEL.has(topLevel);
+  return SKIP_TOP_LEVEL.has(topLevel) || SQLITE_FILE_PATTERN.test(path.basename(relPath));
 }
 
 function collectCandidates(rootDir: string, currentDir: string, files: string[]): void {

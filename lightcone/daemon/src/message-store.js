@@ -369,7 +369,7 @@ export function projectTaskFromMessageRow(db, row) {
     assertTaskProjectionMutable(db, taskId, row.channel_id);
   }
 
-  if (taskId) {
+  if ([PayloadType.TASK_OPENED, PayloadType.TASK_CLOSED, PayloadType.TASK_APPENDED].includes(row.payload_type) && taskId) {
     db.prepare(`
       UPDATE tasks
       SET last_event_at = @last_event_at
