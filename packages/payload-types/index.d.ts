@@ -5,6 +5,7 @@ export type TriggerDecisionValue = 'react' | 'log_only' | 'block';
 export type PayloadTypeValue =
   | 'user.text'
   | 'agent.text'
+  | 'agent.progress'
   | 'system.notice'
   | 'system.heartbeat'
   | 'channel.presence_changed'
@@ -37,6 +38,7 @@ export const Audience: Readonly<{
 export const PayloadType: Readonly<{
   USER_TEXT: 'user.text';
   AGENT_TEXT: 'agent.text';
+  AGENT_PROGRESS: 'agent.progress';
   SYSTEM_NOTICE: 'system.notice';
   SYSTEM_HEARTBEAT: 'system.heartbeat';
   CHANNEL_PRESENCE_CHANGED: 'channel.presence_changed';

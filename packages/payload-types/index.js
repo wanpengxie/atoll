@@ -13,6 +13,7 @@ export const Audience = Object.freeze({
 export const PayloadType = Object.freeze({
   USER_TEXT: 'user.text',
   AGENT_TEXT: 'agent.text',
+  AGENT_PROGRESS: 'agent.progress',
   SYSTEM_NOTICE: 'system.notice',
   SYSTEM_HEARTBEAT: 'system.heartbeat',
   CHANNEL_PRESENCE_CHANGED: 'channel.presence_changed',

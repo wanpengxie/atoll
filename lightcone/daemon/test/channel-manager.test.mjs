@@ -3288,3 +3288,194 @@ test('agent stdout flushes an unterminated line on exit even when proc was repla
 
   assert.deepEqual(writes, [`${line}\n`]);
 });
+
+test('claude_turn_failed records failures and dead-letters event_type at the limit', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-turn-dead-letter-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const previousError = console.error;
+  const errorLines = [];
+  console.error = (...args) => {
+    errorLines.push(args.map((item) => String(item)).join(' '));
+  };
+  t.after(() => {
+    console.error = previousError;
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-turn-dead-letter',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Turn Dead Letter Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+
+  for (let i = 0; i < 3; i += 1) {
+    await channelManager._recordTurnFailure(node, 'user.message.posted', { message: 'claude exited with code 1' });
+  }
+
+  assert.equal(channelManager._isEventTypeDeadLettered(node.channelId, 'user.message.posted'), true);
+  assert.equal(
+    errorLines.some((line) => line.includes('Dead-lettering') && line.includes('user.message.posted')),
+    true,
+  );
+
+  const traceEntries = readTraceEntries(node);
+  const failureTraces = traceEntries.filter((entry) => entry.kind === 'turn.failed.observed');
+  assert.equal(failureTraces.length, 3);
+  assert.equal(failureTraces[2].attempts, 3);
+
+  const deadLetterTraces = traceEntries.filter((entry) => entry.kind === 'turn.dead_letter');
+  assert.equal(deadLetterTraces.length, 1);
+  assert.equal(deadLetterTraces[0].event_type, 'user.message.posted');
+  assert.equal(deadLetterTraces[0].attempts, 3);
+
+  channelManager._recordTurnSuccess(node, 'cron.tick');
+  for (let i = 0; i < 2; i += 1) {
+    await channelManager._recordTurnFailure(node, 'cron.tick', { message: 'flaky' });
+  }
+  assert.equal(channelManager._isEventTypeDeadLettered(node.channelId, 'cron.tick'), false);
+  channelManager._recordTurnSuccess(node, 'cron.tick');
+  for (let i = 0; i < 2; i += 1) {
+    await channelManager._recordTurnFailure(node, 'cron.tick', { message: 'flaky' });
+  }
+  assert.equal(channelManager._isEventTypeDeadLettered(node.channelId, 'cron.tick'), false);
+});
+
+test('claude_turn_failed parses turn signals from agent stdout JSON lines', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-turn-stdout-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const previousError = console.error;
+  console.error = () => {};
+  t.after(() => {
+    console.error = previousError;
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-turn-stdout',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Turn Stdout Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+
+  await channelManager._inspectAgentStdoutLine(node, '{"event":"agent.activity","activity":"turn.failed","detail":"claude_turn_failed","event_type":"user.message.posted","message":"claude exited"}');
+  await channelManager._inspectAgentStdoutLine(node, '{"event":"agent.activity","activity":"turn.failed","detail":"claude_turn_failed","event_type":"user.message.posted","message":"claude exited"}');
+  await channelManager._inspectAgentStdoutLine(node, '{"event":"agent.activity","activity":"turn.completed","detail":"","event_type":"user.message.posted"}');
+  assert.equal(channelManager._isEventTypeDeadLettered(node.channelId, 'user.message.posted'), false);
+
+  for (let i = 0; i < 3; i += 1) {
+    await channelManager._inspectAgentStdoutLine(node, '{"event":"agent.activity","activity":"turn.failed","detail":"claude_turn_failed","event_type":"user.message.posted","message":"claude exited"}');
+  }
+  assert.equal(channelManager._isEventTypeDeadLettered(node.channelId, 'user.message.posted'), true);
+
+  await channelManager._inspectAgentStdoutLine(node, '');
+  await channelManager._inspectAgentStdoutLine(node, 'not json');
+  await channelManager._inspectAgentStdoutLine(node, '{"event":"agent.status","status":"ready"}');
+  await channelManager._inspectAgentStdoutLine(node, '{"event":"agent.activity","activity":"turn.failed","detail":"other_error","event_type":"cron.tick"}');
+  assert.equal(channelManager._isEventTypeDeadLettered(node.channelId, 'cron.tick'), false);
+});
+
+test('claude_turn_failed dead-lettered events are dropped before agent dispatch', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-turn-drop-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const previousError = console.error;
+  console.error = () => {};
+  t.after(() => {
+    console.error = previousError;
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-turn-drop',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Turn Drop Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  node.status = 'active';
+
+  let stdinWrites = 0;
+  node.proc = {
+    stdin: {
+      destroyed: false,
+      writableEnded: false,
+      write: () => {
+        stdinWrites += 1;
+        return true;
+      },
+    },
+  };
+
+  for (let i = 0; i < 3; i += 1) {
+    await channelManager._recordTurnFailure(node, 'user.message.posted', { message: 'claude exited' });
+  }
+  assert.equal(channelManager._isEventTypeDeadLettered(node.channelId, 'user.message.posted'), true);
+
+  await channelManager.handleEvent({
+    channelId: node.channelId,
+    event: {
+      type: 'user.message.posted',
+      source: 'test',
+      payload: {
+        message: {
+          senderKind: 'human',
+          senderId: 'user-a',
+          senderName: 'User A',
+          payloadType: 'user.text',
+          payloadBody: { text: 'still here after dead-letter' },
+          content: 'still here after dead-letter',
+        },
+      },
+    },
+  });
+
+  assert.equal(stdinWrites, 0);
+  const traceEntries = readTraceEntries(node);
+  const dropEntries = traceEntries.filter((entry) => entry.kind === 'event.dropped_dead_letter');
+  assert.equal(dropEntries.length, 1);
+  assert.equal(dropEntries[0].event_type, 'user.message.posted');
+});

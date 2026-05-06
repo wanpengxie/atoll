@@ -7,6 +7,7 @@ import { startStdinReader } from './ipc/stdin-reader.js';
 import { setStdoutContext, writeActivity, writeSession, writeStatus } from './ipc/stdout-writer.js';
 import { buildSystemPrompt, buildUserTurn } from './prompt/system-prompt.js';
 import { runAgentTurn } from './sdk/agent.js';
+import { emitAgentProgress } from './sdk/daemon-rpc.js';
 import type { AgentEvent, StdinEnvelope } from './types/ipc.js';
 import { logError, logInfo } from './util/logger.js';
 import { CliError } from './util/simple-error.js';
@@ -61,6 +62,28 @@ async function main(): Promise<void> {
             kind: 'claude.event',
             event,
           });
+
+          if (event.type === 'assistant') {
+            const message = (event as { message?: { content?: unknown } }).message;
+            const blocks = Array.isArray(message?.content) ? message.content : [];
+            for (const block of blocks) {
+              if (
+                block
+                && typeof block === 'object'
+                && (block as { type?: unknown }).type === 'text'
+                && typeof (block as { text?: unknown }).text === 'string'
+              ) {
+                const text = String((block as { text: string }).text).trim();
+                if (!text) continue;
+                emitAgentProgress(env, text).catch((err: unknown) => {
+                  appendTrace(env.workdir, env.agentName, session.sessionId, {
+                    kind: 'agent.progress.emit_failed',
+                    message: err instanceof Error ? err.message : String(err),
+                  });
+                });
+              }
+            }
+          }
         },
         onStderr: (line) => {
           appendTrace(env.workdir, env.agentName, session.sessionId, {
@@ -90,11 +113,13 @@ async function main(): Promise<void> {
         result: turn.result,
         archived_artifacts: postTurn.archivedArtifacts,
       });
+      writeActivity('turn.completed', '', { event_type: next.type });
     } catch (error) {
       const cliError = error instanceof CliError
         ? error
         : new CliError('agent_turn_failed', error instanceof Error ? error.message : 'Unknown agent turn failure');
       writeStatus('error', `${cliError.code}: ${cliError.message}`);
+      writeActivity('turn.failed', cliError.code, { event_type: next.type, message: cliError.message });
       appendTrace(env.workdir, env.agentName, session.sessionId, {
         kind: 'turn.failed',
         event_type: next.type,

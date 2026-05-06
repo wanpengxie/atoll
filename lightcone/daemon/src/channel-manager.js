@@ -43,6 +43,7 @@ const DEFAULT_AGENT_NAME = 'channel-agent';
 const SHUTDOWN_GRACE_MS = 5_000;
 const DEFAULT_DUE_MESSAGE_POLL_MS = 30_000;
 const DEFAULT_DELIVERY_FAILURE_LIMIT = 5;
+const TURN_FAILURE_DEAD_LETTER_LIMIT = 3;
 const SCHEDULE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'abandoned', 'archived']);
 const PAYLOAD_TYPES_BY_SENDER_KIND = new Map([
@@ -51,6 +52,7 @@ const PAYLOAD_TYPES_BY_SENDER_KIND = new Map([
   ])],
   [SenderKind.AGENT, new Set([
     PayloadType.AGENT_TEXT,
+    PayloadType.AGENT_PROGRESS,
     PayloadType.DISPATCH_START,
     PayloadType.DISPATCH_SELF_CHECK_DUE,
     PayloadType.TASK_OPENED,
@@ -700,6 +702,8 @@ export class ChannelManager {
     this.dueMessagePollMs = dueMessagePollMs;
     this.dueMessageTimer = null;
     this._taskDocMutex = new Map();
+    this.turnFailureCounts = new Map();
+    this.deadLetteredEventTypes = new Map();
     this.cronScheduler = new CronScheduler({
       onTick: async (tick) => {
         await this._handleCronTick(tick);
@@ -713,6 +717,15 @@ export class ChannelManager {
           reason: outcome.reason,
           event,
         });
+        const eventType = String(event?.type ?? '').trim();
+        if (eventType && this._isEventTypeDeadLettered(channel.channelId, eventType)) {
+          await this._recordTrace(channel, {
+            kind: 'event.dropped_dead_letter',
+            event_type: eventType,
+            event,
+          });
+          return { ok: false, reason: 'event_type_dead_lettered' };
+        }
         const delivery = await this._deliverEvent(channel, event);
         this._recordSuccessfulDelivery({
           node: channel,
@@ -1306,7 +1319,17 @@ export class ChannelManager {
     const channelId = String(params.channel_id ?? params.channelId ?? context.channelId ?? '').trim();
     const node = this._requireNode(channelId);
     assertAgentRpcIdentity(context, node);
-    assertExplicitMessagePair(params, SenderKind.AGENT, PayloadType.AGENT_TEXT, 'message.emit');
+    const requestedPayloadType = String(explicitPayloadType(params) ?? PayloadType.AGENT_TEXT).trim();
+    if (
+      requestedPayloadType !== PayloadType.AGENT_TEXT
+      && requestedPayloadType !== PayloadType.AGENT_PROGRESS
+    ) {
+      throw toRpcError(
+        'bad_request',
+        `message.emit payload.type must be ${PayloadType.AGENT_TEXT} or ${PayloadType.AGENT_PROGRESS}`,
+      );
+    }
+    assertExplicitMessagePair(params, SenderKind.AGENT, requestedPayloadType, 'message.emit');
     const senderId = explicitSenderId(params);
     if (senderId != null && String(senderId).trim() !== node.agentName) {
       throw toRpcError('bad_request', 'message.emit sender.id must match the current channel agent');
@@ -1326,7 +1349,7 @@ export class ChannelManager {
       senderName: node.agentName,
       content: text,
       payload: {
-        type: PayloadType.AGENT_TEXT,
+        type: requestedPayloadType,
         body: { ...payloadBody, text },
       },
       envelope: {
@@ -1342,7 +1365,7 @@ export class ChannelManager {
       mentions: params.mentions,
       origin: 'self',
       expiresAt: params.expires_at ?? params.expiresAt,
-      source: 'agent-reply',
+      source: requestedPayloadType === PayloadType.AGENT_PROGRESS ? 'agent-progress' : 'agent-reply',
     });
   }
 
@@ -2389,6 +2412,9 @@ export class ChannelManager {
       stdoutBuffer = lines.pop() ?? '';
       for (const line of lines) {
         process.stdout.write(`${line}\n`);
+        this._inspectAgentStdoutLine(node, line).catch((err) => {
+          console.error(`[ChannelManager] turn signal inspect failed for ${node.channelId}:`, err.message);
+        });
       }
     });
 
@@ -2679,6 +2705,103 @@ export class ChannelManager {
     } catch (err) {
       console.error(`[ChannelManager] Failed to record trace for ${node?.channelId ?? 'unknown'}:`, err.message);
     }
+  }
+
+  _turnFailureKey(channelId, eventType) {
+    return `${channelId} ${eventType}`;
+  }
+
+  _isEventTypeDeadLettered(channelId, eventType) {
+    return this.deadLetteredEventTypes.has(this._turnFailureKey(channelId, eventType));
+  }
+
+  async _inspectAgentStdoutLine(node, line) {
+    const trimmed = String(line ?? '').trim();
+    if (!trimmed) return;
+    if (!trimmed.startsWith('{')) return;
+    let entry;
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      return;
+    }
+    if (!entry || typeof entry !== 'object') return;
+    if (entry.event !== 'agent.activity') return;
+    const eventType = String(entry.event_type ?? '').trim();
+    if (!eventType) return;
+
+    if (entry.activity === 'turn.failed') {
+      const detail = String(entry.detail ?? '').trim();
+      if (detail !== 'claude_turn_failed') return;
+      await this._recordTurnFailure(node, eventType, {
+        message: String(entry.message ?? '').trim(),
+      });
+      return;
+    }
+
+    if (entry.activity === 'turn.completed') {
+      this._recordTurnSuccess(node, eventType);
+    }
+  }
+
+  async _recordTurnFailure(node, eventType, { message = '' } = {}) {
+    const key = this._turnFailureKey(node.channelId, eventType);
+    const count = (this.turnFailureCounts.get(key) ?? 0) + 1;
+    this.turnFailureCounts.set(key, count);
+
+    await this._recordTrace(node, {
+      kind: 'turn.failed.observed',
+      event_type: eventType,
+      attempts: count,
+      message,
+    });
+
+    if (count >= TURN_FAILURE_DEAD_LETTER_LIMIT) {
+      await this._deadLetterEventType(node, eventType, { attempts: count, message });
+    }
+  }
+
+  _recordTurnSuccess(node, eventType) {
+    const key = this._turnFailureKey(node.channelId, eventType);
+    this.turnFailureCounts.delete(key);
+  }
+
+  async _deadLetterEventType(node, eventType, { attempts, message }) {
+    const key = this._turnFailureKey(node.channelId, eventType);
+    if (this.deadLetteredEventTypes.has(key)) return;
+    this.deadLetteredEventTypes.set(key, {
+      channelId: node.channelId,
+      eventType,
+      attempts,
+      message,
+      deadLetteredAt: nowIso(),
+    });
+
+    await this._recordTrace(node, {
+      kind: 'turn.dead_letter',
+      event_type: eventType,
+      attempts,
+      reason: 'claude_turn_failed_repeated',
+      message,
+    });
+
+    emitJsonEvent('inbox.created', {
+      channel_id: node.channelId,
+      severity: 'blocker',
+      reason: 'incident',
+      ticket_id: null,
+      body: {
+        channel_id: node.channelId,
+        event_type: eventType,
+        attempts,
+        reason: 'claude_turn_failed_repeated',
+        message,
+      },
+    });
+
+    console.error(
+      `[ChannelManager] Dead-lettering channel=${node.channelId} event_type=${eventType} after ${attempts} consecutive claude_turn_failed`,
+    );
   }
 
   _notifyChannelStatus(node) {
