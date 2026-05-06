@@ -370,24 +370,28 @@ function normalizePayloadInput(input, defaultType = PayloadType.AGENT_TEXT) {
   return { payloadType, payloadBody };
 }
 
-const MESSAGE_QUERY_CONTENT_FILTER_KEYS = [
-  ['correlation_id', 'correlationId'],
-  ['task_id', 'taskId'],
-  ['payload_type', 'payloadType'],
-  ['sender_kind', 'senderKind'],
-  ['sender_id', 'senderId'],
-  ['text', 'query'],
-  ['tag'],
-  ['status'],
-];
+const UNFILTERED_UNREAD_CURSOR_ADVANCE_KEYS = new Set([
+  'channel_id',
+  'channelId',
+  'unread',
+  'include_future',
+  'includeFuture',
+  'limit',
+  'order',
+  'cursor_seq',
+  'cursorSeq',
+  'now_ms',
+  'nowMs',
+]);
 
-function hasMessageQueryContentFilter(params = {}) {
-  return MESSAGE_QUERY_CONTENT_FILTER_KEYS.some((keys) => {
-    const value = keys.map((key) => params[key]).find((item) => item != null);
-    if (value == null || String(value).trim() === '') return false;
-    if (keys.includes('status') && value === 'all') return false;
-    return true;
-  });
+function hasNonEmptyQueryValue(value) {
+  return value != null && String(value).trim() !== '';
+}
+
+function isUnreadFullScanQuery(params = {}) {
+  return Object.entries(params).every(([key, value]) => (
+    UNFILTERED_UNREAD_CURSOR_ADVANCE_KEYS.has(key) || !hasNonEmptyQueryValue(value)
+  ));
 }
 
 function normalizeSenderKind(rawKind, rawSenderType) {
@@ -1318,7 +1322,7 @@ export class ChannelManager {
     });
     if (
       (filters.unread === true || String(filters.unread).trim().toLowerCase() === 'true')
-      && !hasMessageQueryContentFilter(filters)
+      && isUnreadFullScanQuery(filters)
     ) {
       const maxSeq = messages.reduce((max, message) => Math.max(max, Number(message.seq) || 0), 0);
       if (maxSeq > 0) {

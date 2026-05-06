@@ -163,6 +163,61 @@ function insertLegacyDueMessage(db, node, {
   });
 }
 
+async function createUnreadQueryHarness(t, channelId, tempPrefix) {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), `${tempPrefix}-`));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId,
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Unread Query Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+
+  return {
+    channelManager,
+    node: channelManager._requireNode(created.channel_id),
+  };
+}
+
+async function appendUnreadQueryRows(channelManager, node, rows, baseTs) {
+  for (const [index, row] of rows.entries()) {
+    const isDeferred = row.notBefore != null;
+    const payloadType = row.payloadType ?? (isDeferred ? 'agent.text' : 'user.text');
+    await channelManager._appendMessage(node, {
+      messageId: row.id,
+      channelId: node.channelId,
+      senderType: row.senderType ?? (isDeferred ? 'channel_agent' : 'human'),
+      senderKind: row.senderKind ?? (isDeferred ? 'agent' : undefined),
+      senderId: row.senderId ?? (isDeferred ? node.agentName : 'user-a'),
+      senderName: row.senderName ?? (isDeferred ? node.agentName : 'User A'),
+      messageType: payloadType,
+      payloadType,
+      content: row.content ?? row.id,
+      audience: row.audience ?? (isDeferred ? ['self'] : undefined),
+      origin: row.origin ?? (isDeferred ? 'self' : undefined),
+      notBefore: row.notBefore,
+      createdAt: new Date(baseTs + index).toISOString(),
+      tsReceived: baseTs + index,
+      source: 'test',
+    });
+  }
+}
+
 test('channel:message.send writes local truth before view sync and reports success', async (t) => {
   const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-human-message-'));
   const previousHome = process.env.HOME;
@@ -1131,6 +1186,159 @@ test('message.query --unread with content filters peeks without advancing cursor
     limit: 10,
   });
   assert.deepEqual(alphaMessages.messages.map((message) => message.id), ['message-unread-filter-1']);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
+
+  const allUnread = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    limit: 10,
+  });
+  assert.deepEqual(allUnread.messages.map((message) => message.id), rows.map((row) => row.id));
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, allUnread.messages.at(-1).seq);
+});
+
+test('message.query --unread with audience peeks without advancing cursor', async (t) => {
+  const { channelManager, node } = await createUnreadQueryHarness(
+    t,
+    'channel-unread-audience-filter',
+    'channel-manager-unread-audience-filter',
+  );
+  const baseTs = Date.UTC(2026, 4, 6, 1, 0, 0);
+  const rows = [
+    { id: 'message-unread-audience-1', audience: ['*'] },
+    { id: 'message-unread-audience-2', audience: ['agent:foo'] },
+    { id: 'message-unread-audience-3', audience: ['*'] },
+    { id: 'message-unread-audience-4', audience: ['agent:foo'] },
+    { id: 'message-unread-audience-5', audience: ['*'] },
+  ];
+  await appendUnreadQueryRows(channelManager, node, rows, baseTs);
+
+  const audienceMessages = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    audience: 'agent:foo',
+    limit: 10,
+  });
+  assert.deepEqual(
+    audienceMessages.messages.map((message) => message.id),
+    ['message-unread-audience-2', 'message-unread-audience-4'],
+  );
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
+
+  const allUnread = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    limit: 10,
+  });
+  assert.deepEqual(allUnread.messages.map((message) => message.id), rows.map((row) => row.id));
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, allUnread.messages.at(-1).seq);
+});
+
+test('message.query --unread with not_before_lte peeks without advancing cursor', async (t) => {
+  const { channelManager, node } = await createUnreadQueryHarness(
+    t,
+    'channel-unread-not-before-lte-filter',
+    'channel-manager-unread-not-before-lte-filter',
+  );
+  const baseTs = Date.UTC(2026, 4, 6, 1, 0, 0);
+  const now = baseTs + 10_000;
+  const rows = [
+    { id: 'message-unread-not-before-lte-1', notBefore: now - 3_000 },
+    { id: 'message-unread-not-before-lte-2', notBefore: now - 2_000 },
+    { id: 'message-unread-not-before-lte-3', notBefore: now + 1_000 },
+    { id: 'message-unread-not-before-lte-4', notBefore: now - 1_000 },
+    { id: 'message-unread-not-before-lte-5', notBefore: now + 2_000 },
+  ];
+  await appendUnreadQueryRows(channelManager, node, rows, baseTs);
+
+  const dueMessages = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    not_before_lte: now,
+    nowMs: now,
+    limit: 10,
+  });
+  assert.deepEqual(
+    dueMessages.messages.map((message) => message.id),
+    [
+      'message-unread-not-before-lte-1',
+      'message-unread-not-before-lte-2',
+      'message-unread-not-before-lte-4',
+    ],
+  );
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
+
+  const allUnreadLater = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    nowMs: now + 3_000,
+    limit: 10,
+  });
+  assert.deepEqual(allUnreadLater.messages.map((message) => message.id), rows.map((row) => row.id));
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, allUnreadLater.messages.at(-1).seq);
+});
+
+test('message.query --unread with not_before_gte peeks without advancing cursor', async (t) => {
+  const { channelManager, node } = await createUnreadQueryHarness(
+    t,
+    'channel-unread-not-before-gte-filter',
+    'channel-manager-unread-not-before-gte-filter',
+  );
+  const baseTs = Date.UTC(2026, 4, 6, 1, 0, 0);
+  const now = baseTs + 10_000;
+  const rows = [
+    { id: 'message-unread-not-before-gte-1', notBefore: now - 3_000 },
+    { id: 'message-unread-not-before-gte-2', notBefore: now + 1_000 },
+    { id: 'message-unread-not-before-gte-3', notBefore: now - 2_000 },
+    { id: 'message-unread-not-before-gte-4', notBefore: now + 2_000 },
+    { id: 'message-unread-not-before-gte-5', notBefore: now - 1_000 },
+  ];
+  await appendUnreadQueryRows(channelManager, node, rows, baseTs);
+
+  const futureMessages = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    not_before_gte: now,
+    nowMs: now + 3_000,
+    limit: 10,
+  });
+  assert.deepEqual(
+    futureMessages.messages.map((message) => message.id),
+    ['message-unread-not-before-gte-2', 'message-unread-not-before-gte-4'],
+  );
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
+
+  const allUnreadLater = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    nowMs: now + 3_000,
+    limit: 10,
+  });
+  assert.deepEqual(allUnreadLater.messages.map((message) => message.id), rows.map((row) => row.id));
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, allUnreadLater.messages.at(-1).seq);
+});
+
+test('message.query --unread with unknown filter key peeks without advancing cursor', async (t) => {
+  const { channelManager, node } = await createUnreadQueryHarness(
+    t,
+    'channel-unread-unknown-filter',
+    'channel-manager-unread-unknown-filter',
+  );
+  const baseTs = Date.UTC(2026, 4, 6, 1, 0, 0);
+  const rows = [
+    { id: 'message-unread-unknown-1' },
+    { id: 'message-unread-unknown-2' },
+    { id: 'message-unread-unknown-3' },
+  ];
+  await appendUnreadQueryRows(channelManager, node, rows, baseTs);
+
+  const peek = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    __future_filter: 'agent:foo',
+    limit: 10,
+  });
+  assert.deepEqual(peek.messages.map((message) => message.id), rows.map((row) => row.id));
   assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
 
   const allUnread = await channelManager.queryChannelMessages({
