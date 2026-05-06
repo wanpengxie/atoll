@@ -787,6 +787,86 @@ test('message.query --unread consumes rows older than limit before advancing cur
   assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, second.messages.at(-1).seq);
 });
 
+test('message.query --unread with content filters peeks without advancing cursor', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-unread-filter-cursor-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-unread-filter',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Unread Filter Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const baseTs = Date.UTC(2026, 4, 6, 1, 0, 0);
+  const rows = [
+    { id: 'message-unread-filter-1', content: 'alpha', payloadType: 'user.text' },
+    { id: 'message-unread-filter-2', content: 'dispatch done 1', payloadType: 'dispatch.completed' },
+    { id: 'message-unread-filter-3', content: 'beta', payloadType: 'user.text' },
+    { id: 'message-unread-filter-4', content: 'dispatch done 2', payloadType: 'dispatch.completed' },
+    { id: 'message-unread-filter-5', content: 'gamma', payloadType: 'user.text' },
+  ];
+
+  for (const [index, row] of rows.entries()) {
+    await channelManager._appendMessage(node, {
+      messageId: row.id,
+      channelId: node.channelId,
+      senderType: 'human',
+      senderId: 'user-a',
+      senderName: 'User A',
+      messageType: row.payloadType,
+      payloadType: row.payloadType,
+      content: row.content,
+      createdAt: new Date(baseTs + index).toISOString(),
+      tsReceived: baseTs + index,
+      source: 'test',
+    });
+  }
+
+  const dispatchMessages = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    payload_type: 'dispatch.completed',
+    limit: 10,
+  });
+  assert.deepEqual(
+    dispatchMessages.messages.map((message) => message.id),
+    ['message-unread-filter-2', 'message-unread-filter-4'],
+  );
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
+
+  const alphaMessages = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    text: 'alpha',
+    limit: 10,
+  });
+  assert.deepEqual(alphaMessages.messages.map((message) => message.id), ['message-unread-filter-1']);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
+
+  const allUnread = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    limit: 10,
+  });
+  assert.deepEqual(allUnread.messages.map((message) => message.id), rows.map((row) => row.id));
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, allUnread.messages.at(-1).seq);
+});
+
 test('message.query --unread hides future D messages unless include_future is set', async (t) => {
   const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-unread-future-'));
   t.after(() => {
