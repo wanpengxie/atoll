@@ -82,6 +82,12 @@ export class DaemonConnection {
       console.error(`[Connection] Connected (daemon v${DAEMON_VERSION})`);
       this.reconnectDelay = RECONNECT_INITIAL;
       this._sendReady();
+      // WS ping 心跳：远程代理 idle timeout 60-100 秒，30 秒发 ping 防止断
+      this.pingTimer = setInterval(() => {
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          try { this.ws.ping(); } catch {}
+        }
+      }, 30_000);
     });
 
     this.ws.on('message', (raw) => {
@@ -97,6 +103,10 @@ export class DaemonConnection {
 
     this.ws.on('close', (code) => {
       console.error(`[Connection] Disconnected (code=${code})`);
+      if (this.pingTimer) {
+        clearInterval(this.pingTimer);
+        this.pingTimer = null;
+      }
       if (!this.stopped) this._scheduleReconnect();
     });
 
