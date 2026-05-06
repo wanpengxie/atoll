@@ -2109,14 +2109,16 @@ export class ChannelManager {
           attempts,
           ok: false,
         };
-        if (attempts === DEFAULT_DELIVERY_FAILURE_LIMIT) {
+        if (attempts >= DEFAULT_DELIVERY_FAILURE_LIMIT) {
           const deadLetteredMessage = markMessageDeliveryFailed(db, stored.id, nowMs);
           failure = {
             ...failure,
             delivery_failed_at: deadLetteredMessage?.delivery_failed_at ?? toEpochMs(nowMs),
             last_error: deadLetteredMessage?.last_error ?? failure.last_error,
           };
-          await this._recordDeliveryDeadLetter(node, message, failure);
+          if (deadLetteredMessage?.deliveryFailedChanged === true) {
+            await this._recordDeliveryDeadLetter(node, message, failure);
+          }
         }
         failed.push(failure);
       }

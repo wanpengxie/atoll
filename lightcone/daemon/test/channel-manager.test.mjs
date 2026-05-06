@@ -60,6 +60,109 @@ function readJsonlMessages(workdir) {
       .map((line) => JSON.parse(line)));
 }
 
+function readTraceEntries(node) {
+  const tracePath = path.join(node.workdir, 'agents', node.agentName, 'trace', 'pending.jsonl');
+  if (!existsSync(tracePath)) return [];
+  return readFileSync(tracePath, 'utf8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+function parseStdoutEvents(writes) {
+  return writes
+    .flatMap((chunk) => chunk.split('\n').map((line) => line.trim()).filter(Boolean))
+    .map((line) => JSON.parse(line));
+}
+
+function insertLegacyDueMessage(db, node, {
+  id,
+  now,
+  notBefore = now - 1,
+  deliveryAttempts = 7,
+  lastError = 'legacy_failure',
+  correlationId = `corr-${id}`,
+  payloadBody = { reason: 'legacy over limit' },
+} = {}) {
+  const createdAt = new Date(now).toISOString();
+  const payload = { type: 'dispatch.self_check_due', body: payloadBody };
+  const envelope = {
+    id,
+    sender: { kind: 'agent', id: node.agentName, name: node.agentName },
+    audience: ['self'],
+    correlation_id: correlationId,
+    origin: 'self',
+    not_before: notBefore,
+    ts: now,
+    ts_received: now,
+  };
+  const legacy = {
+    messageId: id,
+    channelId: node.channelId,
+    senderKind: 'agent',
+    senderType: 'channel_agent',
+    senderId: node.agentName,
+    senderName: node.agentName,
+    messageType: payload.type,
+    payloadType: payload.type,
+    payloadBody,
+    payload,
+    content: JSON.stringify(payloadBody),
+    correlationId,
+    audience: ['self'],
+    origin: 'self',
+    notBefore,
+    createdAt,
+    source: 'test',
+  };
+
+  db.prepare(`
+    INSERT INTO messages (
+      id, channel_id, ts, ts_received, sender_kind, sender_id, sender_name,
+      payload_type, payload_body, parent_id, correlation_id, task_id, thread_id,
+      audience, mentions, origin, not_before, expires_at, delivered_at,
+      delivery_failed_at, delivery_attempts, last_attempt_at, last_error,
+      envelope_json, payload_json, legacy_json, created_at
+    )
+    VALUES (
+      @id, @channel_id, @ts, @ts_received, @sender_kind, @sender_id, @sender_name,
+      @payload_type, @payload_body, @parent_id, @correlation_id, @task_id, @thread_id,
+      @audience, @mentions, @origin, @not_before, @expires_at, @delivered_at,
+      @delivery_failed_at, @delivery_attempts, @last_attempt_at, @last_error,
+      @envelope_json, @payload_json, @legacy_json, @created_at
+    )
+  `).run({
+    id,
+    channel_id: node.channelId,
+    ts: now,
+    ts_received: now,
+    sender_kind: 'agent',
+    sender_id: node.agentName,
+    sender_name: node.agentName,
+    payload_type: payload.type,
+    payload_body: JSON.stringify(payloadBody),
+    parent_id: null,
+    correlation_id: correlationId,
+    task_id: null,
+    thread_id: null,
+    audience: 'self',
+    mentions: JSON.stringify(null),
+    origin: 'self',
+    not_before: notBefore,
+    expires_at: null,
+    delivered_at: null,
+    delivery_failed_at: null,
+    delivery_attempts: deliveryAttempts,
+    last_attempt_at: null,
+    last_error: lastError,
+    envelope_json: JSON.stringify(envelope),
+    payload_json: JSON.stringify(payload),
+    legacy_json: JSON.stringify(legacy),
+    created_at: createdAt,
+  });
+}
+
 test('channel:message.send writes local truth before view sync and reports success', async (t) => {
   const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-human-message-'));
   const previousHome = process.env.HOME;
@@ -683,6 +786,178 @@ test('due processing dead-letters permanent delivery failures after the retry li
   assert.equal(inboxEvents[0].reason, 'incident');
   assert.equal(inboxEvents[0].body.message_id, 'message-dead-letter');
   assert.equal(inboxEvents[0].body.last_error, 'permanent_failure');
+  assert.equal(errorLines.filter((line) => line.includes('Message delivery dead-lettered')).length, 1);
+});
+
+test('due processing dead-letters legacy over-limit messages on the next poll', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-due-dead-letter-legacy-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const stdoutWrites = captureStdoutWrites(t);
+  const previousError = console.error;
+  const errorLines = [];
+  console.error = (...args) => {
+    errorLines.push(args.map((item) => String(item)).join(' '));
+  };
+  t.after(() => {
+    console.error = previousError;
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-due-dead-letter-legacy',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Due Dead Letter Legacy Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  node.status = 'active';
+
+  let deliveryCalls = 0;
+  channelManager._deliverEvent = async () => {
+    deliveryCalls += 1;
+    return { ok: false, reason: 'permanent_failure' };
+  };
+
+  const now = Date.UTC(2026, 4, 6, 1, 0, 0);
+  insertLegacyDueMessage(channelManager._openMessageStore(node), node, {
+    id: 'message-dead-letter-legacy',
+    now,
+    deliveryAttempts: 7,
+    lastError: 'legacy_failure',
+  });
+
+  const result = await channelManager.processDueMessages(node.channelId, now);
+  const second = await channelManager.processDueMessages(node.channelId, now + 1);
+  const third = await channelManager.processDueMessages(node.channelId, now + 2);
+
+  assert.equal(result.delivered.length, 0);
+  assert.equal(result.failed.length, 1);
+  assert.equal(second.delivered.length, 0);
+  assert.equal(second.failed.length, 0);
+  assert.equal(third.delivered.length, 0);
+  assert.equal(third.failed.length, 0);
+  assert.equal(result.failed[0].attempts, 8);
+  assert.equal(result.failed[0].last_error, 'permanent_failure');
+  assert.equal(typeof result.failed[0].delivery_failed_at, 'number');
+  assert.equal(deliveryCalls, 1);
+
+  const stored = readStoredMessages(node.messageStore).find((message) => message.id === 'message-dead-letter-legacy');
+  assert.equal(stored.delivered_at, null);
+  assert.equal(stored.delivery_attempts, 8);
+  assert.equal(stored.last_error, 'permanent_failure');
+  assert.equal(typeof stored.delivery_failed_at, 'number');
+  assert.equal(readDueMessages(node.messageStore, now + 1, 100).some((message) => message.id === 'message-dead-letter-legacy'), false);
+
+  const deadLetterEntries = readTraceEntries(node).filter((entry) => entry.event === 'delivery_dead_letter');
+  assert.equal(deadLetterEntries.length, 1);
+  assert.equal(deadLetterEntries[0].message_id, 'message-dead-letter-legacy');
+  assert.equal(deadLetterEntries[0].last_error, 'permanent_failure');
+  assert.equal(deadLetterEntries[0].attempts, 8);
+
+  const inboxEvents = parseStdoutEvents(stdoutWrites).filter((entry) => entry.event === 'inbox.created');
+  assert.equal(inboxEvents.length, 1);
+  assert.equal(inboxEvents[0].body.message_id, 'message-dead-letter-legacy');
+  assert.equal(inboxEvents[0].body.last_error, 'permanent_failure');
+  assert.equal(errorLines.filter((line) => line.includes('Message delivery dead-lettered')).length, 1);
+});
+
+test('due processing dead-letter side effects fire exactly once across overlapping polls', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-due-dead-letter-once-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const stdoutWrites = captureStdoutWrites(t);
+  const previousError = console.error;
+  const errorLines = [];
+  console.error = (...args) => {
+    errorLines.push(args.map((item) => String(item)).join(' '));
+  };
+  t.after(() => {
+    console.error = previousError;
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-due-dead-letter-once',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'Due Dead Letter Once Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  node.status = 'active';
+
+  let releaseDelivery;
+  let deliveryCalls = 0;
+  const deliveryGate = new Promise((resolve) => {
+    releaseDelivery = resolve;
+  });
+  channelManager._dispatchDueMessage = async () => {
+    deliveryCalls += 1;
+    await deliveryGate;
+    return { ok: false, reason: 'permanent_failure' };
+  };
+
+  const now = Date.UTC(2026, 4, 6, 1, 0, 0);
+  insertLegacyDueMessage(channelManager._openMessageStore(node), node, {
+    id: 'message-dead-letter-once',
+    now,
+    deliveryAttempts: 7,
+    lastError: 'legacy_failure',
+  });
+
+  const polls = [
+    channelManager.processDueMessages(node.channelId, now),
+    channelManager.processDueMessages(node.channelId, now + 1),
+    channelManager.processDueMessages(node.channelId, now + 2),
+  ];
+  assert.equal(deliveryCalls, 3);
+  releaseDelivery();
+  const results = await Promise.all(polls);
+
+  assert.equal(results.flatMap((result) => result.delivered).length, 0);
+  assert.equal(results.flatMap((result) => result.failed).length, 3);
+  assert.equal(deliveryCalls, 3);
+
+  const stored = readStoredMessages(node.messageStore).find((message) => message.id === 'message-dead-letter-once');
+  assert.equal(stored.delivered_at, null);
+  assert.equal(stored.delivery_attempts, 10);
+  assert.equal(stored.last_error, 'permanent_failure');
+  assert.equal(typeof stored.delivery_failed_at, 'number');
+  assert.equal(readDueMessages(node.messageStore, now + 3, 100).some((message) => message.id === 'message-dead-letter-once'), false);
+
+  const deadLetterEntries = readTraceEntries(node).filter((entry) => entry.event === 'delivery_dead_letter');
+  assert.equal(deadLetterEntries.length, 1);
+  assert.equal(deadLetterEntries[0].message_id, 'message-dead-letter-once');
+
+  const inboxEvents = parseStdoutEvents(stdoutWrites).filter((entry) => entry.event === 'inbox.created');
+  assert.equal(inboxEvents.length, 1);
+  assert.equal(inboxEvents[0].body.message_id, 'message-dead-letter-once');
   assert.equal(errorLines.filter((line) => line.includes('Message delivery dead-lettered')).length, 1);
 });
 

@@ -574,7 +574,7 @@ export function markMessageDelivered(db, messageId, deliveredAt = Date.now()) {
 
 export function markMessageDeliveryFailed(db, messageId, failedAt = Date.now()) {
   const failedAtMs = toEpochMs(failedAt);
-  db.prepare(`
+  const result = db.prepare(`
     UPDATE messages
     SET delivery_failed_at = @delivery_failed_at
     WHERE id = @id
@@ -584,7 +584,23 @@ export function markMessageDeliveryFailed(db, messageId, failedAt = Date.now()) 
     delivery_failed_at: failedAtMs,
   });
   const row = db.prepare('SELECT rowid AS seq, * FROM messages WHERE id = @id').get({ id: messageId });
-  return row ? rowToMessage(row) : null;
+  if (!row) return null;
+  const message = rowToMessage(row);
+  Object.defineProperties(message, {
+    deliveryFailedChanged: {
+      value: result.changes > 0,
+      enumerable: false,
+    },
+    delivery_failed_changed: {
+      value: result.changes > 0,
+      enumerable: false,
+    },
+    delivery_failed_changes: {
+      value: result.changes,
+      enumerable: false,
+    },
+  });
+  return message;
 }
 
 export function markMessageDeliveryAttempt(db, messageId, {
