@@ -7,9 +7,7 @@
     "lightcone-daemon": "src/index.js"
   },
   "files": [
-    "src",
-    "mcp-servers",
-    "!mcp-servers/**/node_modules"
+    "src"
   ],
   "scripts": {
     "pretest": "pnpm -C ../.. --filter @coagent/agent-binary build && pnpm -C ../.. --filter @coagent/cli build",
@@ -23,7 +21,6 @@
   },
   "dependencies": {
     "@coagent/payload-types": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.12.0",
     "better-sqlite3": "^12.8.0",
     "dotenv": "^17.4.0",
     "mysql2": "^3.14.0",
