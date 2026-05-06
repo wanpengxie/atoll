@@ -22,6 +22,7 @@ import { emitJsonEvent } from './events.js';
 import {
   advanceAgentCursor,
   appendMessageToStore,
+  getStoredMessage,
   getStoredTask,
   markMessageDeliveryAttempt,
   markMessageDeliveryFailed,
@@ -354,6 +355,18 @@ function parseDurationMs(value, fallback = 10 * 60 * 1000) {
   return Math.round(amount * multipliers[unit]);
 }
 
+function parsePositiveSeq(value, fieldName = 'seq') {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw toRpcError('bad_request', `${fieldName} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function hasAckValue(value) {
+  return value != null && String(value).trim() !== '';
+}
+
 function normalizePayloadInput(input, defaultType = PayloadType.AGENT_TEXT) {
   const payload = input?.payload ?? {};
   const payloadType = String(
@@ -368,34 +381,6 @@ function normalizePayloadInput(input, defaultType = PayloadType.AGENT_TEXT) {
     ?? (payload.type || payload.body ? {} : payload)
     ?? {};
   return { payloadType, payloadBody };
-}
-
-const UNFILTERED_UNREAD_CURSOR_ADVANCE_KEYS = new Set([
-  'channel_id',
-  'channelId',
-  'unread',
-  'include_future',
-  'includeFuture',
-  'limit',
-  'order',
-  'cursor_seq',
-  'cursorSeq',
-  'now_ms',
-  'nowMs',
-]);
-
-function hasNonEmptyQueryValue(value, key) {
-  if (value == null) return false;
-  const trimmed = String(value).trim();
-  if (trimmed === '') return false;
-  if (key === 'status' && trimmed.toLowerCase() === 'all') return false;
-  return true;
-}
-
-function isUnreadFullScanQuery(params = {}) {
-  return Object.entries(params).every(([key, value]) => (
-    UNFILTERED_UNREAD_CURSOR_ADVANCE_KEYS.has(key) || !hasNonEmptyQueryValue(value, key)
-  ));
 }
 
 function normalizeSenderKind(rawKind, rawSenderType) {
@@ -666,7 +651,11 @@ export class ChannelManager {
           reason: outcome.reason,
           event,
         });
-        return this._deliverEvent(channel, event);
+        const delivery = await this._deliverEvent(channel, event);
+        if (delivery.ok) {
+          this._advanceCursorForDeliveredEvent(channel, event);
+        }
+        return delivery;
       },
       onLogOnly: async (channel, event, outcome) => {
         await this._recordTrace(channel, {
@@ -892,6 +881,8 @@ export class ChannelManager {
         return this.searchMessages(params.channel_id ?? params.channelId, params.query ?? '', params.limit ?? 20);
       case 'message.query':
         return this.queryChannelMessages(params);
+      case 'message.ack':
+        return this.ackChannelMessages(params);
       case 'message.schedule':
         return this.scheduleChannelMessage(params);
       case 'dispatch.start':
@@ -1124,9 +1115,11 @@ export class ChannelManager {
 
     const outcome = this.triggerGateway.evaluate(event, node);
     const eventMessage = this._messageFromEvent(node, event);
+    let appendedMessage = null;
 
     if (eventMessage && outcome.decision !== 'block') {
       const normalized = await this._appendMessage(node, eventMessage);
+      appendedMessage = normalized;
       if (event.type === 'user.message.posted') {
         emitJsonEvent('message.receive', {
           channel_id: node.channelId,
@@ -1136,7 +1129,11 @@ export class ChannelManager {
       }
     }
 
-    return this.triggerGateway.dispatch({ channel: node, event, outcome });
+    const dispatchResult = await this.triggerGateway.dispatch({ channel: node, event, outcome });
+    if (appendedMessage && outcome.decision === 'react' && dispatchResult?.ok) {
+      this._advanceCursorForDeliveredMessage(node, appendedMessage.messageId);
+    }
+    return outcome;
   }
 
   async registerSchedule(params, kind) {
@@ -1351,16 +1348,41 @@ export class ChannelManager {
     const messages = queryStoredMessages(this._openMessageStore(node), {
       ...filters,
     });
-    if (
-      (filters.unread === true || String(filters.unread).trim().toLowerCase() === 'true')
-      && isUnreadFullScanQuery(filters)
-    ) {
-      const maxSeq = messages.reduce((max, message) => Math.max(max, Number(message.seq) || 0), 0);
-      if (maxSeq > 0) {
-        advanceAgentCursor(node.workdir, node.agentName, maxSeq);
-      }
-    }
     return { messages };
+  }
+
+  async ackChannelMessages(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const node = this._requireNode(channelId);
+    const untilSeqValue = params.until_seq ?? params.untilSeq;
+    const messageId = String(params.message_id ?? params.messageId ?? '').trim();
+    const hasUntilSeq = hasAckValue(untilSeqValue);
+    if (hasUntilSeq === Boolean(messageId)) {
+      throw toRpcError('bad_request', 'exactly one of until_seq or message_id is required');
+    }
+
+    let ackedSeq;
+    if (hasUntilSeq) {
+      ackedSeq = parsePositiveSeq(untilSeqValue, 'until_seq');
+    } else {
+      const stored = getStoredMessage(this._openMessageStore(node), messageId);
+      if (!stored) throw toRpcError('not_found', `message not found: ${messageId}`, 404);
+      ackedSeq = parsePositiveSeq(stored.seq, 'message seq');
+    }
+
+    const agentName = String(params.agent_name ?? params.agentName ?? node.agentName ?? DEFAULT_AGENT_NAME).trim()
+      || DEFAULT_AGENT_NAME;
+    const previous = readAgentCursor(node.workdir, agentName);
+    const cursor = advanceAgentCursor(node.workdir, agentName, ackedSeq);
+    return {
+      channel_id: node.channelId,
+      agent_name: agentName,
+      ...(messageId ? { message_id: messageId } : {}),
+      acked_seq: ackedSeq,
+      previous_last_seen_seq: previous.last_seen_seq,
+      last_seen_seq: cursor.last_seen_seq,
+      advanced: cursor.last_seen_seq > previous.last_seen_seq,
+    };
   }
 
   async scheduleChannelMessage(params) {
@@ -2381,6 +2403,26 @@ export class ChannelManager {
       console.error(`[ChannelManager] Failed to deliver event to ${node.channelId}:`, err.message);
       return { ok: false, reason: err.message };
     }
+  }
+
+  _advanceCursorForDeliveredEvent(node, event) {
+    const message = event?.payload?.message ?? event?.payload;
+    const messageId = String(
+      message?.envelope?.id
+        ?? message?.messageId
+        ?? message?.message_id
+        ?? message?.id
+        ?? '',
+    ).trim();
+    if (!messageId) return null;
+
+    return this._advanceCursorForDeliveredMessage(node, messageId);
+  }
+
+  _advanceCursorForDeliveredMessage(node, messageId) {
+    const stored = getStoredMessage(this._openMessageStore(node), messageId);
+    if (!stored?.seq) return null;
+    return advanceAgentCursor(node.workdir, node.agentName, stored.seq);
   }
 
   async _handleCronTick(tick) {

@@ -181,6 +181,24 @@ export function registerProtocolCommands(program: Command): void {
       }));
     });
 
+  program.command('ack')
+    .description('Advance the unread cursor explicitly')
+    .option('--channel <channelId>', 'channel ID')
+    .option('--until-seq <seq>', 'ack all messages through seq', parsePositiveInteger)
+    .option('--message-id <id>', 'ack through the sequence of a message id')
+    .action(async (options) => {
+      const hasUntilSeq = options.untilSeq != null;
+      const messageId = String(options.messageId ?? '').trim();
+      if (hasUntilSeq === Boolean(messageId)) {
+        throw new CliError('invalid_arguments', 'exactly one of --until-seq or --message-id is required', 2);
+      }
+      writeSuccess(await rpc('message.ack', {
+        channel_id: channelIdFromOptions(options),
+        ...(hasUntilSeq ? { until_seq: options.untilSeq } : {}),
+        ...(messageId ? { message_id: messageId } : {}),
+      }));
+    });
+
   program.command('schedule')
     .description('Schedule a self D message by writing not_before into the message engine')
     .option('--channel <channelId>', 'channel ID')

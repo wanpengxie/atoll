@@ -194,16 +194,16 @@ export class TriggerGateway {
     const evaluated = outcome ?? this.evaluate(event, channel);
 
     if (evaluated.decision === TriggerDecision.REACT) {
-      await this.onReact?.(channel, event, evaluated);
-      return evaluated;
+      const result = await this.onReact?.(channel, event, evaluated);
+      return result ?? evaluated;
     }
 
     if (evaluated.decision === TriggerDecision.LOG_ONLY) {
-      await this.onLogOnly?.(channel, event, evaluated);
-      return evaluated;
+      const result = await this.onLogOnly?.(channel, event, evaluated);
+      return result ?? evaluated;
     }
 
-    await this.onBlock?.(channel, event, evaluated);
-    return evaluated;
+    const result = await this.onBlock?.(channel, event, evaluated);
+    return result ?? evaluated;
   }
 }

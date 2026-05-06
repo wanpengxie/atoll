@@ -717,6 +717,57 @@ test('message.schedule and due processing deliver only due D messages once', asy
   const later = stored.find((message) => message.correlation_id === 'corr-later');
   assert.equal(typeof due.delivered_at, 'number');
   assert.equal(later.delivered_at, null);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, due.seq);
+});
+
+test('react delivery advances per-agent cursor after stdin accepts the event', async (t) => {
+  const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-react-cursor-'));
+  t.after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const channelManager = new ChannelManager({
+    serverUrl: 'http://localhost:3001',
+    machineApiKey: 'machine-key',
+    daemonSocketPath: path.join(tempHome, '.coagent', 'daemon.sock'),
+    daemonHttpUrl: 'http://127.0.0.1:3002',
+    daemonToken: 'daemon-token',
+    baseDir: path.join(tempHome, 'coagent'),
+    dueMessagePollMs: 0,
+  });
+
+  const created = await channelManager.createChannel({
+    channelId: 'channel-react-cursor',
+    workspaceId: 'workspace-1',
+    daemonId: 'machine-a',
+    name: 'React Cursor Channel',
+    type: 'xhs-creator',
+    status: 'created',
+  });
+  const node = channelManager._requireNode(created.channel_id);
+  const deliveredLines = [];
+  node.status = 'active';
+  node.proc = { stdin: { write: (line) => deliveredLines.push(JSON.parse(line)) } };
+
+  const result = await channelManager.handleEvent({
+    channelId: node.channelId,
+    event: {
+      type: 'user.message.posted',
+      source: 'test',
+      payload: {
+        senderType: 'human',
+        senderId: 'user-a',
+        senderName: 'User A',
+        content: 'wake the agent',
+      },
+    },
+  });
+
+  assert.equal(result.decision, 'react');
+  assert.equal(deliveredLines.length, 1);
+  const stored = readStoredMessages(node.messageStore);
+  assert.equal(stored.length, 1);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, stored[0].seq);
 });
 
 test('due processing keeps inactive channel messages unread and records failed attempt', async (t) => {
@@ -1027,7 +1078,7 @@ test('due processing dead-letter side effects fire exactly once across overlappi
   assert.equal(errorLines.filter((line) => line.includes('Message delivery dead-lettered')).length, 1);
 });
 
-test('message.query --unread advances per-agent cursor and does not repeat messages', async (t) => {
+test('message.query --unread does not advance cursor and repeats until explicit ack', async (t) => {
   const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-unread-cursor-'));
   t.after(() => {
     rmSync(tempHome, { recursive: true, force: true });
@@ -1067,11 +1118,21 @@ test('message.query --unread advances per-agent cursor and does not repeat messa
   const second = await channelManager.queryChannelMessages({ channelId: node.channelId, unread: true, order: 'asc' });
 
   assert.deepEqual(first.messages.map((message) => message.id), ['message-unread-1']);
-  assert.equal(second.messages.length, 0);
-  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, first.messages[0].seq);
+  assert.deepEqual(second.messages.map((message) => message.id), ['message-unread-1']);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
+
+  const ack = await channelManager.ackChannelMessages({
+    channelId: node.channelId,
+    untilSeq: first.messages[0].seq,
+  });
+  const afterAck = await channelManager.queryChannelMessages({ channelId: node.channelId, unread: true, order: 'asc' });
+
+  assert.equal(ack.last_seen_seq, first.messages[0].seq);
+  assert.equal(ack.advanced, true);
+  assert.equal(afterAck.messages.length, 0);
 });
 
-test('message.query --unread consumes rows older than limit before advancing cursor past them', async (t) => {
+test('message.query --unread limit is peek-only until explicit ack advances cursor', async (t) => {
   const tempHome = mkdtempSync(path.join(os.tmpdir(), 'channel-manager-unread-limit-cursor-'));
   t.after(() => {
     rmSync(tempHome, { recursive: true, force: true });
@@ -1114,7 +1175,6 @@ test('message.query --unread consumes rows older than limit before advancing cur
 
   const first = await channelManager.queryChannelMessages({ channelId: node.channelId, unread: true, limit: 20 });
   const second = await channelManager.queryChannelMessages({ channelId: node.channelId, unread: true, limit: 20 });
-  const third = await channelManager.queryChannelMessages({ channelId: node.channelId, unread: true, limit: 20 });
 
   assert.deepEqual(
     first.messages.map((message) => message.id),
@@ -1122,10 +1182,55 @@ test('message.query --unread consumes rows older than limit before advancing cur
   );
   assert.deepEqual(
     second.messages.map((message) => message.id),
+    Array.from({ length: 20 }, (_, index) => `message-unread-limit-${index}`),
+  );
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
+
+  await channelManager.ackChannelMessages({
+    channelId: node.channelId,
+    untilSeq: first.messages.at(-1).seq,
+  });
+  const afterAck = await channelManager.queryChannelMessages({ channelId: node.channelId, unread: true, limit: 20 });
+  assert.deepEqual(
+    afterAck.messages.map((message) => message.id),
     Array.from({ length: 5 }, (_, index) => `message-unread-limit-${index + 20}`),
   );
-  assert.equal(third.messages.length, 0);
-  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, second.messages.at(-1).seq);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, first.messages.at(-1).seq);
+});
+
+test('message.ack --message-id advances cursor to the stored message sequence', async (t) => {
+  const { channelManager, node } = await createUnreadQueryHarness(
+    t,
+    'channel-ack-message-id',
+    'channel-manager-ack-message-id',
+  );
+  const baseTs = Date.UTC(2026, 4, 6, 1, 0, 0);
+  const rows = [
+    { id: 'message-ack-id-1' },
+    { id: 'message-ack-id-2' },
+  ];
+  await appendUnreadQueryRows(channelManager, node, rows, baseTs);
+  const beforeAck = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    limit: 10,
+  });
+  const targetSeq = beforeAck.messages.find((message) => message.id === 'message-ack-id-2').seq;
+
+  const ack = await channelManager.ackChannelMessages({
+    channelId: node.channelId,
+    messageId: 'message-ack-id-2',
+  });
+  const unread = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    limit: 10,
+  });
+
+  assert.equal(ack.message_id, 'message-ack-id-2');
+  assert.equal(ack.previous_last_seen_seq, 0);
+  assert.equal(ack.last_seen_seq, targetSeq);
+  assert.equal(unread.messages.length, 0);
 });
 
 test('message.query --unread with content filters peeks without advancing cursor', async (t) => {
@@ -1205,10 +1310,10 @@ test('message.query --unread with content filters peeks without advancing cursor
     limit: 10,
   });
   assert.deepEqual(allUnread.messages.map((message) => message.id), rows.map((row) => row.id));
-  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, allUnread.messages.at(-1).seq);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
 });
 
-test('message.query --unread with status all advances cursor', async (t) => {
+test('message.query --unread with status all does not advance cursor', async (t) => {
   const { channelManager, node } = await createUnreadQueryHarness(
     t,
     'channel-unread-status-all',
@@ -1229,7 +1334,7 @@ test('message.query --unread with status all advances cursor', async (t) => {
     limit: 10,
   });
   assert.deepEqual(allStatusMessages.messages.map((message) => message.id), rows.map((row) => row.id));
-  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, allStatusMessages.messages.at(-1).seq);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
 
   const repeated = await channelManager.queryChannelMessages({
     channelId: node.channelId,
@@ -1237,7 +1342,7 @@ test('message.query --unread with status all advances cursor', async (t) => {
     status: 'all',
     limit: 10,
   });
-  assert.equal(repeated.messages.length, 0);
+  assert.deepEqual(repeated.messages.map((message) => message.id), rows.map((row) => row.id));
 });
 
 test('message.query --unread with status filter peeks without advancing cursor', async (t) => {
@@ -1272,10 +1377,10 @@ test('message.query --unread with status filter peeks without advancing cursor',
     limit: 10,
   });
   assert.deepEqual(allUnread.messages.map((message) => message.id), rows.map((row) => row.id));
-  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, allUnread.messages.at(-1).seq);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
 });
 
-test('message.query --unread with empty status values advances cursor', async (t) => {
+test('message.query --unread with empty status values does not advance cursor', async (t) => {
   for (const [label, status] of [['empty', ''], ['null', null]]) {
     const { channelManager, node } = await createUnreadQueryHarness(
       t,
@@ -1297,7 +1402,7 @@ test('message.query --unread with empty status values advances cursor', async (t
       limit: 10,
     });
     assert.deepEqual(messages.messages.map((message) => message.id), rows.map((row) => row.id));
-    assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, messages.messages.at(-1).seq);
+    assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
   }
 });
 
@@ -1335,7 +1440,7 @@ test('message.query --unread with audience peeks without advancing cursor', asyn
     limit: 10,
   });
   assert.deepEqual(allUnread.messages.map((message) => message.id), rows.map((row) => row.id));
-  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, allUnread.messages.at(-1).seq);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
 });
 
 test('message.query --unread with not_before_lte peeks without advancing cursor', async (t) => {
@@ -1379,7 +1484,7 @@ test('message.query --unread with not_before_lte peeks without advancing cursor'
     limit: 10,
   });
   assert.deepEqual(allUnreadLater.messages.map((message) => message.id), rows.map((row) => row.id));
-  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, allUnreadLater.messages.at(-1).seq);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
 });
 
 test('message.query --unread with not_before_gte peeks without advancing cursor', async (t) => {
@@ -1419,7 +1524,7 @@ test('message.query --unread with not_before_gte peeks without advancing cursor'
     limit: 10,
   });
   assert.deepEqual(allUnreadLater.messages.map((message) => message.id), rows.map((row) => row.id));
-  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, allUnreadLater.messages.at(-1).seq);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
 });
 
 test('message.query --unread with unknown filter key peeks without advancing cursor', async (t) => {
@@ -1451,7 +1556,7 @@ test('message.query --unread with unknown filter key peeks without advancing cur
     limit: 10,
   });
   assert.deepEqual(allUnread.messages.map((message) => message.id), rows.map((row) => row.id));
-  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, allUnread.messages.at(-1).seq);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
 });
 
 test('message.query --unread hides future D messages unless include_future is set', async (t) => {
@@ -1497,6 +1602,7 @@ test('message.query --unread hides future D messages unless include_future is se
 
   assert.equal(hidden.messages.length, 0);
   assert.deepEqual(visible.messages.map((message) => message.correlation_id), ['corr-future']);
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
 });
 
 test('dispatch and memo RPC helpers write and summarize sqlite protocol messages', async (t) => {

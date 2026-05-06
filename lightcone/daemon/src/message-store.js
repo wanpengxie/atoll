@@ -389,6 +389,13 @@ export function readStoredMessages(db) {
   return db.prepare('SELECT rowid AS seq, * FROM messages ORDER BY ts_received ASC').all().map(rowToMessage);
 }
 
+export function getStoredMessage(db, messageId) {
+  const id = String(messageId ?? '').trim();
+  if (!id) return null;
+  const row = db.prepare('SELECT rowid AS seq, * FROM messages WHERE id = @id').get({ id });
+  return row ? rowToMessage(row) : null;
+}
+
 export function queryStoredMessages(db, filters = {}) {
   const where = [];
   const params = {};

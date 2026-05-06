@@ -91,6 +91,7 @@ test('coagent help lists the business command tree', () => {
   assert.match(help, /message\s+Send and inspect channel messages/);
   assert.match(help, /emit \[options\]\s+Emit an envelope message/);
   assert.match(help, /query \[options\]\s+Query channel messages/);
+  assert.match(help, /ack \[options\]\s+Advance the unread cursor explicitly/);
   assert.match(help, /dispatch\s+Dispatch promise-chain helpers/);
   assert.match(help, /task\s+Open and inspect task entities/);
   assert.match(help, /admin\s+Inspect the local daemon/);
@@ -201,6 +202,8 @@ test('coagent business subcommands call expected daemon RPC methods', async () =
         limit: 20,
       },
     },
+    { args: ['ack', '--channel', 'channel-a', '--until-seq', '42'], method: 'message.ack', params: { channel_id: 'channel-a', until_seq: 42 } },
+    { args: ['ack', '--channel', 'channel-a', '--message-id', 'message-1'], method: 'message.ack', params: { channel_id: 'channel-a', message_id: 'message-1' } },
     {
       args: ['schedule', '--channel', 'channel-a', '--not-before', '1760000000000', '--payload', '{"reason":"check"}'],
       method: 'message.schedule',
