@@ -384,13 +384,17 @@ const UNFILTERED_UNREAD_CURSOR_ADVANCE_KEYS = new Set([
   'nowMs',
 ]);
 
-function hasNonEmptyQueryValue(value) {
-  return value != null && String(value).trim() !== '';
+function hasNonEmptyQueryValue(value, key) {
+  if (value == null) return false;
+  const trimmed = String(value).trim();
+  if (trimmed === '') return false;
+  if (key === 'status' && trimmed.toLowerCase() === 'all') return false;
+  return true;
 }
 
 function isUnreadFullScanQuery(params = {}) {
   return Object.entries(params).every(([key, value]) => (
-    UNFILTERED_UNREAD_CURSOR_ADVANCE_KEYS.has(key) || !hasNonEmptyQueryValue(value)
+    UNFILTERED_UNREAD_CURSOR_ADVANCE_KEYS.has(key) || !hasNonEmptyQueryValue(value, key)
   ));
 }
 

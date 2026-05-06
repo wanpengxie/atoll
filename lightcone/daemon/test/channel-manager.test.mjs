@@ -215,6 +215,9 @@ async function appendUnreadQueryRows(channelManager, node, rows, baseTs) {
       senderName: row.senderName ?? (isDeferred ? node.agentName : 'User A'),
       messageType: payloadType,
       payloadType,
+      payloadBody: row.payloadBody ?? (row.status != null
+        ? { text: row.content ?? row.id, status: row.status }
+        : undefined),
       content: row.content ?? row.id,
       audience: row.audience ?? (isDeferred ? ['self'] : undefined),
       origin: row.origin ?? (isDeferred ? 'self' : undefined),
@@ -1203,6 +1206,99 @@ test('message.query --unread with content filters peeks without advancing cursor
   });
   assert.deepEqual(allUnread.messages.map((message) => message.id), rows.map((row) => row.id));
   assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, allUnread.messages.at(-1).seq);
+});
+
+test('message.query --unread with status all advances cursor', async (t) => {
+  const { channelManager, node } = await createUnreadQueryHarness(
+    t,
+    'channel-unread-status-all',
+    'channel-manager-unread-status-all',
+  );
+  const baseTs = Date.UTC(2026, 4, 6, 1, 0, 0);
+  const rows = [
+    { id: 'message-unread-status-all-1', status: 'active' },
+    { id: 'message-unread-status-all-2', status: 'done' },
+    { id: 'message-unread-status-all-3', status: 'active' },
+  ];
+  await appendUnreadQueryRows(channelManager, node, rows, baseTs);
+
+  const allStatusMessages = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    status: 'all',
+    limit: 10,
+  });
+  assert.deepEqual(allStatusMessages.messages.map((message) => message.id), rows.map((row) => row.id));
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, allStatusMessages.messages.at(-1).seq);
+
+  const repeated = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    status: 'all',
+    limit: 10,
+  });
+  assert.equal(repeated.messages.length, 0);
+});
+
+test('message.query --unread with status filter peeks without advancing cursor', async (t) => {
+  const { channelManager, node } = await createUnreadQueryHarness(
+    t,
+    'channel-unread-status-active',
+    'channel-manager-unread-status-active',
+  );
+  const baseTs = Date.UTC(2026, 4, 6, 1, 0, 0);
+  const rows = [
+    { id: 'message-unread-status-active-1', status: 'active' },
+    { id: 'message-unread-status-active-2', status: 'done' },
+    { id: 'message-unread-status-active-3', status: 'active' },
+  ];
+  await appendUnreadQueryRows(channelManager, node, rows, baseTs);
+
+  const activeMessages = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    status: 'active',
+    limit: 10,
+  });
+  assert.deepEqual(
+    activeMessages.messages.map((message) => message.id),
+    ['message-unread-status-active-1', 'message-unread-status-active-3'],
+  );
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, 0);
+
+  const allUnread = await channelManager.queryChannelMessages({
+    channelId: node.channelId,
+    unread: true,
+    limit: 10,
+  });
+  assert.deepEqual(allUnread.messages.map((message) => message.id), rows.map((row) => row.id));
+  assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, allUnread.messages.at(-1).seq);
+});
+
+test('message.query --unread with empty status values advances cursor', async (t) => {
+  for (const [label, status] of [['empty', ''], ['null', null]]) {
+    const { channelManager, node } = await createUnreadQueryHarness(
+      t,
+      `channel-unread-status-${label}`,
+      `channel-manager-unread-status-${label}`,
+    );
+    const baseTs = Date.UTC(2026, 4, 6, 1, 0, 0);
+    const rows = [
+      { id: `message-unread-status-${label}-1` },
+      { id: `message-unread-status-${label}-2` },
+      { id: `message-unread-status-${label}-3` },
+    ];
+    await appendUnreadQueryRows(channelManager, node, rows, baseTs);
+
+    const messages = await channelManager.queryChannelMessages({
+      channelId: node.channelId,
+      unread: true,
+      status,
+      limit: 10,
+    });
+    assert.deepEqual(messages.messages.map((message) => message.id), rows.map((row) => row.id));
+    assert.equal(readAgentCursor(node.workdir, node.agentName).last_seen_seq, messages.messages.at(-1).seq);
+  }
 });
 
 test('message.query --unread with audience peeks without advancing cursor', async (t) => {
