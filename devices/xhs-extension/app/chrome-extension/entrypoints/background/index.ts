@@ -1,5 +1,14 @@
+// Background entrypoint — coagent xhs-extension service worker。
+//
+// M1.1-T2 起：
+//   - 启动 tools registry（既有 1studio 工具实现的 5 大类，复用）
+//   - 启动 coagent device WS 客户端（services/coagent-device.ts）
+//   - chrome.storage.local 保存 device 配置（serverUrl/apiKey/daemonHttpBase/deviceId/userId）
+//   - chrome.runtime.onMessage 仍提供 popup ↔ background 桥（连接 / 断开 / 状态查询 / 配置存取
+//     / 手动 cookie sync / 直接 EXECUTE_TOOL 调试）。1studio backend MCP 协议（HELLO/TOOL_CALL/
+//     V2 EVENT/TASK_CONTROL/PENDING_ACK 等）已切断。
+
 import { initToolsRegistry, handleCallTool } from './tools';
-import { websocketClient } from './websocket-client';
 import {
   ConnectionConfig,
   getConnectionConfig,
@@ -7,21 +16,11 @@ import {
   getStoredConnectionStatus,
 } from './connection-state';
 import { cookieSyncService } from './tools/sync-cookies';
-import { metricsCollectorService } from './services/metrics-collector';
-import { TaskRuntimeManager } from './task-runtime';
-import type { DumasAsyncEvent, TaskEventMessage } from 'xiaohongshu-mcp-shared';
-import { TASK_EVENT_MESSAGE_TYPE } from 'xiaohongshu-mcp-shared';
+import { coagentDeviceClient } from './services/coagent-device';
 
 interface ExecuteToolPayload {
   name: string;
   args: any;
-}
-
-interface MetricsCapturedPayload {
-  dataType: 'list' | 'detail';
-  data: any;
-  timestamp: number;
-  sourceUrl: string;
 }
 
 type BackgroundRequest =
@@ -29,37 +28,32 @@ type BackgroundRequest =
   | { type: 'CHECK_CONNECTION' }
   | { type: 'GET_STATUS' }
   | { type: 'TOOL_RESULT'; payload: any }
-  | { type: 'CONNECT_WEBSOCKET'; payload?: { url?: string; apiKey?: string } }
-  | { type: 'DISCONNECT_WEBSOCKET' }
+  | { type: 'CONNECT_DEVICE'; payload?: Partial<ConnectionConfig> }
+  | { type: 'DISCONNECT_DEVICE' }
   | { type: 'GET_CONNECTION_CONFIG' }
   | { type: 'SAVE_CONNECTION_CONFIG'; payload: Partial<ConnectionConfig> }
-  | { type: 'SYNC_COOKIES' }
-  | { type: 'METRICS_CAPTURED'; payload: MetricsCapturedPayload }
-  | { type: typeof TASK_EVENT_MESSAGE_TYPE; event: DumasAsyncEvent };
+  | { type: 'SYNC_COOKIES' };
 
 let connectionConfig: ConnectionConfig;
-const taskRuntimeManager = new TaskRuntimeManager();
 
 export default defineBackground(() => {
-  console.log('🚀 XiaoHongShu MCP Background script initialized');
+  console.log('🚀 Coagent xhs-extension Background script initialized');
 
   initToolsRegistry();
 
-  // Bind TaskRuntimeManager to WebSocketClient
-  taskRuntimeManager.bindSendEvent((event) => websocketClient.sendEvent(event));
-  websocketClient.setOnEventAck((eventId, _taskId) => taskRuntimeManager.handleEventAck(eventId));
-  websocketClient.setOnTaskControl((taskId, action, payload) =>
-    taskRuntimeManager.handleTaskControl(taskId, action, payload)
-  );
-  websocketClient.setOnReconnect(() => taskRuntimeManager.onReconnect());
-
-  // 异步初始化，不阻塞 Service Worker 启动
+  // 异步初始化，不阻塞 Service Worker 启动。
   (async () => {
     connectionConfig = await getConnectionConfig();
-    websocketClient.updateConfig(connectionConfig);
-    // Restore pending ACK queue from storage before connecting
-    await taskRuntimeManager.initialize();
-    await websocketClient.initialize();
+    coagentDeviceClient.updateConfig(connectionConfig);
+    if (connectionConfig.autoReconnect && hasMinimalDeviceConfig(connectionConfig)) {
+      void coagentDeviceClient.connect();
+    } else {
+      console.log('[Background] device config incomplete, skip auto-connect', {
+        hasUrl: Boolean(connectionConfig.serverUrl),
+        hasKey: Boolean(connectionConfig.apiKey),
+        hasDeviceId: Boolean(connectionConfig.deviceId),
+      });
+    }
   })();
 
   chrome.runtime.onMessage.addListener((request: BackgroundRequest, sender, sendResponse) => {
@@ -84,53 +78,24 @@ export default defineBackground(() => {
             sendResponse({ success: true });
             break;
           }
-          case 'CONNECT_WEBSOCKET': {
-            // 如果前端没传地址或 API Key，从最新保存的配置中读取
-            let url = request.payload?.url;
-            let apiKey = request.payload?.apiKey;
-
-            if (!url || !apiKey) {
-              connectionConfig = await getConnectionConfig();
-              url = url || connectionConfig.serverUrl;
-              apiKey = apiKey || connectionConfig.apiKey;
-            }
-
-            console.log('[Background] CONNECT_WEBSOCKET triggered', {
-              url,
-              hasApiKey: !!apiKey,
-              fromPayload: !!request.payload?.url,
-            });
-
-            // 验证必需参数
-            if (!apiKey) {
-              console.error('[Background] Missing API Key');
+          case 'CONNECT_DEVICE': {
+            const patch = request.payload ?? {};
+            connectionConfig = await saveConnectionConfig(patch);
+            coagentDeviceClient.updateConfig(connectionConfig);
+            if (!hasMinimalDeviceConfig(connectionConfig)) {
               sendResponse({
                 success: false,
-                error: 'API Key 未设置，请先在设置中保存 API Key',
+                error:
+                  'Device 配置不完整：需要 daemon WS URL、device api key、device id。',
               });
               break;
             }
-
-            // 连接时自动保存配置，这样 metrics-collector 也能读取到
-            connectionConfig = await saveConnectionConfig({
-              serverUrl: url,
-              apiKey: apiKey,
-            });
-
-            // 更新 WebSocket 客户端配置并连接
-            websocketClient.updateConfig({
-              serverUrl: url,
-              apiKey: apiKey,
-            });
-
-            const result = await websocketClient.connect(url);
-            console.log('[Background] CONNECT_WEBSOCKET result', result);
+            const result = await coagentDeviceClient.connect();
             sendResponse(result);
             break;
           }
-          case 'DISCONNECT_WEBSOCKET': {
-            console.log('[Background] DISCONNECT_WEBSOCKET');
-            websocketClient.disconnect();
+          case 'DISCONNECT_DEVICE': {
+            coagentDeviceClient.disconnect();
             sendResponse({ success: true });
             break;
           }
@@ -140,16 +105,16 @@ export default defineBackground(() => {
             break;
           }
           case 'SAVE_CONNECTION_CONFIG': {
-            // 保存配置到 storage
             connectionConfig = await saveConnectionConfig(request.payload);
-
-            // 断开当前连接（包括停止自动重连定时器）
-            websocketClient.disconnect();
-
-            // 更新 websocketClient 的配置（不触发连接）
-            websocketClient.updateConfig(connectionConfig);
-
-            console.log('[Background] Configuration saved and updated', connectionConfig);
+            // 配置变更：先断开旧连接，再用新配置（不自动重连，由 popup 触发）。
+            coagentDeviceClient.disconnect();
+            coagentDeviceClient.updateConfig(connectionConfig);
+            console.log('[Background] device config saved', {
+              serverUrl: connectionConfig.serverUrl,
+              hasKey: Boolean(connectionConfig.apiKey),
+              deviceId: connectionConfig.deviceId,
+              userId: connectionConfig.userId,
+            });
             sendResponse({ success: true, config: connectionConfig });
             break;
           }
@@ -157,21 +122,6 @@ export default defineBackground(() => {
             console.log('[Background] Manual cookie sync requested');
             const result = await cookieSyncService.syncNow();
             sendResponse({ success: !result.isError, result });
-            break;
-          }
-          case 'METRICS_CAPTURED': {
-            console.log('[Background] Metrics captured from content script');
-            const metricsResult = await metricsCollectorService.handleCapturedMetrics(request.payload);
-            sendResponse(metricsResult);
-            break;
-          }
-          case TASK_EVENT_MESSAGE_TYPE: {
-            // V2: Generic event entry point from content_script relay
-            const taskEvent = (request as TaskEventMessage).event;
-            if (taskEvent) {
-              taskRuntimeManager.handleTaskEvent(taskEvent, sender.tab?.id);
-            }
-            sendResponse({ success: true });
             break;
           }
           default:
@@ -191,9 +141,9 @@ export default defineBackground(() => {
 
   chrome.runtime.onInstalled.addListener((details) => {
     if (details.reason === 'install') {
-      console.log('Extension installed');
+      console.log('Coagent xhs-extension installed');
     } else if (details.reason === 'update') {
-      console.log('Extension updated');
+      console.log('Coagent xhs-extension updated');
     }
   });
 });
@@ -203,4 +153,12 @@ function handleToolResult(payload: any) {
   chrome.runtime.sendMessage({ type: 'TOOL_RESULT_UPDATE', payload }).catch(() => {
     // No listeners registered
   });
+}
+
+function hasMinimalDeviceConfig(cfg: ConnectionConfig): boolean {
+  return Boolean(
+    (cfg.serverUrl ?? '').trim() &&
+      (cfg.apiKey ?? '').trim() &&
+      (cfg.deviceId ?? '').trim()
+  );
 }

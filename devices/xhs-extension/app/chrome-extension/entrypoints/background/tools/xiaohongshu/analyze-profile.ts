@@ -3,7 +3,13 @@ import type { ToolResult } from 'xiaohongshu-mcp-shared';
 import { XIAOHONGSHU_URLS } from 'xiaohongshu-mcp-shared';
 import { runInMainWorld } from '../inject-script';
 import { validateXhsProfileUrl } from './xhs-url';
-import { websocketClient } from '../../websocket-client';
+// M1.1-T2: 1studio backend websocket-client 已切断；中间状态报告改为无操作。
+// 后续如需把进度推回 coagent daemon，由 services/coagent-device.ts 统一桥接。
+const websocketClient = {
+  sendStatus(_requestId: string, _payload: unknown): void {
+    // no-op: coagent device 协议不暴露 in-flight 进度上报
+  },
+};
 
 const DEFAULT_SAMPLE_COUNT = 20;
 const DEFAULT_MAX_COMMENTS_PER_NOTE = 30;

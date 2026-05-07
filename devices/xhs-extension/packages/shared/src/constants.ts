@@ -10,7 +10,8 @@ export const XIAOHONGSHU_URLS = {
 } as const;
 
 /**
- * 工具名称常量
+ * 工具名称常量（chrome.runtime.onMessage 内部 EXECUTE_TOOL 仍使用，
+ * 仅作 background 内部 dispatch；不再对外暴露 1studio MCP 协议）。
  */
 export const XIAOHONGSHU_TOOL_NAMES = {
   CHECK_LOGIN_STATUS: 'xhs_check_login_status',
@@ -20,29 +21,71 @@ export const XIAOHONGSHU_TOOL_NAMES = {
   INJECT_SCRIPT: 'xhs_inject_script',
   READ_PAGE_DATA: 'xhs_read_page_data',
   SYNC_COOKIES: 'xhs_sync_cookies',
+  GET_NOTE: 'xhs_get_note',
   GET_NOTE_COMMENTS: 'xhs_get_note_comments',
   GET_TRENDING_TOPICS: 'xhs_get_trending_topics',
   ANALYZE_MY_PROFILE: 'xhs_analyze_my_profile',
   ANALYZE_PROFILE: 'xhs_analyze_profile',
+  PUBLISH_STATUS: 'xhs_publish_status',
+  GET_MY_RECENT: 'xhs_get_my_recent',
 } as const;
 
 /**
- * Chrome插件常量
+ * Chrome 插件常量。
+ *
+ * M1.1-T2 起 extension 直接连 coagent daemon 的 device 通道，不再走 1studio backend。
+ * STORAGE_KEYS / 默认值同步为 device 形态。
  */
 export const EXTENSION_CONSTANTS = {
-  NATIVE_HOST_NAME: 'com.xiaohongshu.mcp',
+  NATIVE_HOST_NAME: 'ai.coagent.xhs.device',
   STORAGE_KEYS: {
-    SERVER_STATUS: 'server_status',
-    USER_CONFIG: 'user_config',
-    AUTH_TOKEN: 'auth_token',
-    CONNECTION_CONFIG: 'connection_config',
+    /** 上一次连接快照（serverUrl/connected/lastError）。 */
+    SERVER_STATUS: 'coagent_device_status',
+    /** Device 配置：daemon WS / HTTP base / api key / device id / userId。 */
+    CONNECTION_CONFIG: 'coagent_device_config',
   },
-  DEFAULT_PORT: 18040, // Go Backend 端口
-  DEFAULT_WS_PATH: '/ws',
+  /** Default coagent daemon HTTP port（WS 与 HTTP 单端口共享，via /device/{id} upgrade）。 */
+  DEFAULT_DAEMON_HTTP_PORT: 9501,
+  /** Default coagent daemon WS path prefix；deviceId 由 storage 读取拼接。 */
+  DEFAULT_DEVICE_WS_PATH_PREFIX: '/device/',
 } as const;
 
 /**
- * WebSocket通信常量
+ * Coagent device 协议常量（与 spec §四 align）。
+ */
+export const COAGENT_DEVICE_PROTOCOL = {
+  /** WS frame from daemon → extension. */
+  COMMAND_FRAME_TYPE: 'command',
+  /** Optional WS frame from extension → daemon (heartbeat-style). */
+  ACK_FRAME_TYPE: 'ack',
+  /** Final result is delivered via HTTP callback, not WS. */
+  CALLBACK_PATH_PREFIX: '/api/device/',
+  /** Cookie / login_state sync endpoint suffix. */
+  CALLBACK_PATH_SUFFIX_CALLBACK: '/callback',
+  CALLBACK_PATH_SUFFIX_SESSION: '/session',
+  /** Reconnect backoff: 1s, 2s, 4s, 8s, 16s, ... up to MAX. */
+  RECONNECT_BASE_MS: 1_000,
+  RECONNECT_MAX_MS: 30_000,
+  /** Default heartbeat from daemon side is 30s; client doesn't ping. */
+  COMMAND_DISPATCH_TIMEOUT_MS: 180_000,
+} as const;
+
+/**
+ * 5 个 device cmd 名称（spec §6.2.3）。
+ */
+export const COAGENT_DEVICE_COMMANDS = {
+  PUBLISH: 'publish',
+  SEARCH: 'search',
+  GET_MY_RECENT: 'get-my-recent',
+  GET_NOTE: 'get-note',
+  PUBLISH_STATUS: 'publish-status',
+} as const;
+
+export type CoagentDeviceCommand =
+  (typeof COAGENT_DEVICE_COMMANDS)[keyof typeof COAGENT_DEVICE_COMMANDS];
+
+/**
+ * WebSocket 通信常量
  */
 export const SOCKET_MESSAGE_TIMEOUT_MS = 180_000; // 3分钟，足够发布任务完成
 
@@ -58,6 +101,8 @@ export const ERROR_MESSAGES = {
   ELEMENT_NOT_FOUND: 'Required element not found on page',
   INVALID_ARGUMENTS: 'Invalid arguments provided',
   NETWORK_ERROR: 'Network error occurred',
+  DEVICE_NOT_CONFIGURED: 'Device not configured (daemon URL / api key / device id missing)',
+  DEVICE_CALLBACK_FAILED: 'Device callback POST to daemon failed',
 } as const;
 
 /**
@@ -80,52 +125,5 @@ export const TIMEOUTS = {
   NETWORK_REQUEST: 30000,
   TOOL_EXECUTION: 60000,
   NAVIGATION_WAIT: 30000,
-  SCRIPT_INJECTION: 30000, // 增加到 30 秒，支持多标签逐字符输入
+  SCRIPT_INJECTION: 30000, // 30 秒，支持多标签逐字符输入
 } as const;
-
-// ─── V2 Event Protocol Constants ────────────────────────────────────────────
-
-/**
- * ACK 超时时间（毫秒）。超过此时间未收到 ACK 则触发重试。
- */
-export const ACK_TIMEOUT_MS = 5_000;
-
-/**
- * 最大 ACK 重试次数。超过后事件标记为 dropped。
- */
-export const MAX_ACK_RETRIES = 3;
-
-/**
- * chrome.storage.local 中 pendingAck 队列的存储 key。
- */
-export const PENDING_ACK_STORAGE_KEY = 'dumas_pending_ack_queue';
-
-/**
- * pendingAck 队列最大容量。超过后新事件按 FIFO 丢弃最旧条目。
- */
-export const MAX_PENDING_ACK_SIZE = 100;
-
-/**
- * ACK 重试退避基数（毫秒）。实际间隔 = base * 2^retryCount，上限 MAX_ACK_RETRY_INTERVAL_MS。
- */
-export const ACK_RETRY_BASE_MS = 5_000;
-
-/**
- * ACK 重试退避上限（毫秒）。
- */
-export const MAX_ACK_RETRY_INTERVAL_MS = 60_000;
-
-/**
- * 页面 postMessage 事件类型标识。content_script 据此过滤。
- */
-export const DUMAS_ASYNC_EVENT_TYPE = 'DUMAS_ASYNC_EVENT' as const;
-
-/**
- * Background -> content_script -> 页面 runtime 的控制消息类型。
- */
-export const DUMAS_TASK_CONTROL_TYPE = 'DUMAS_TASK_CONTROL' as const;
-
-/**
- * content_script → Background 的内部消息类型。
- */
-export const TASK_EVENT_MESSAGE_TYPE = 'TASK_EVENT' as const;
