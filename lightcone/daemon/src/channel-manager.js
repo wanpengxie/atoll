@@ -86,6 +86,88 @@ function toRpcError(code, message, statusCode = 400) {
   return err;
 }
 
+// device.command.send payload allowlist + per-type schema (Fix-T2 §3 /
+// round-1 review codex#12). Keep validators minimal — they reject unknown
+// types and surface obvious shape mismatches without locking down every
+// optional XHS field. Exported for unit tests.
+export const DEVICE_COMMAND_TYPES = Object.freeze([
+  'xhs.publish',
+  'xhs.search',
+  'xhs.get-my-recent',
+  'xhs.get-note',
+  'xhs.publish-status',
+]);
+
+function _isPlainObject(v) {
+  return v != null && typeof v === 'object' && !Array.isArray(v);
+}
+
+function _requireNonEmptyString(params, field, type) {
+  const value = params?.[field];
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw toRpcError('bad_request', `${type} requires ${field} (non-empty string)`);
+  }
+}
+
+export function validateDeviceCommand(type, params) {
+  if (typeof type !== 'string' || !DEVICE_COMMAND_TYPES.includes(type)) {
+    throw toRpcError(
+      'bad_request',
+      `unsupported device command type: ${type ?? '(empty)'} — allowed: ${DEVICE_COMMAND_TYPES.join('|')}`,
+    );
+  }
+  if (!_isPlainObject(params)) {
+    throw toRpcError('bad_request', `${type} params must be an object`);
+  }
+  switch (type) {
+    case 'xhs.publish': {
+      _requireNonEmptyString(params, 'title', type);
+      const hasInline = typeof params.content === 'string' && params.content.length > 0;
+      const hasPath = typeof params.content_path === 'string' && params.content_path.length > 0;
+      if (!hasInline && !hasPath) {
+        throw toRpcError('bad_request', `${type} requires content or content_path`);
+      }
+      if ('images' in params && params.images != null && !Array.isArray(params.images)) {
+        throw toRpcError('bad_request', `${type} images must be an array`);
+      }
+      if ('tags' in params && params.tags != null && !Array.isArray(params.tags)) {
+        throw toRpcError('bad_request', `${type} tags must be an array`);
+      }
+      break;
+    }
+    case 'xhs.search': {
+      _requireNonEmptyString(params, 'keyword', type);
+      if ('limit' in params && params.limit != null) {
+        const n = Number(params.limit);
+        if (!Number.isFinite(n) || n <= 0) throw toRpcError('bad_request', `${type} limit must be a positive number`);
+      }
+      break;
+    }
+    case 'xhs.get-my-recent': {
+      if ('limit' in params && params.limit != null) {
+        const n = Number(params.limit);
+        if (!Number.isFinite(n) || n <= 0) throw toRpcError('bad_request', `${type} limit must be a positive number`);
+      }
+      break;
+    }
+    case 'xhs.get-note': {
+      const hasUrl = typeof params.url === 'string' && params.url.length > 0;
+      const hasToken = typeof params.xsec_token === 'string' && params.xsec_token.length > 0;
+      if (!hasUrl && !hasToken) {
+        throw toRpcError('bad_request', `${type} requires url or xsec_token`);
+      }
+      break;
+    }
+    case 'xhs.publish-status': {
+      _requireNonEmptyString(params, 'correlation_id', type);
+      break;
+    }
+    default: {
+      throw toRpcError('bad_request', `unsupported device command type: ${type}`);
+    }
+  }
+}
+
 function normalizeCapabilitySet(raw) {
   const cliBinaries = Array.isArray(raw?.cli_binaries)
     ? raw.cli_binaries
@@ -1745,11 +1827,13 @@ export class ChannelManager {
     const node = this._requireNode(channelId);
     const type = String(params.type ?? params.command_type ?? '').trim();
     if (!type) throw toRpcError('bad_request', 'type is required');
+    const cmdParams = _isPlainObject(params.params) ? params.params : {};
+    // Allowlist + per-type schema (Fix-T2 §3 / round-1 codex#12).
+    validateDeviceCommand(type, cmdParams);
     const deviceId = this._resolveDeviceId(node, params.device_id ?? params.deviceId);
     const userId = this._resolveUserId(node, params.user_id ?? params.userId);
 
     const correlationId = String(params.correlation_id ?? params.correlationId ?? randomUUID());
-    const cmdParams = params.params ?? {};
     const targetAudience = `external:device:${deviceId}`;
 
     const startBody = {
@@ -1824,11 +1908,47 @@ export class ChannelManager {
       push = this.deviceWsServer.pushCommand(deviceId, wsPayload);
     }
     if (!push.ok) {
+      // Fix-T2 §2 / round-1 codex#4: device push failure is a first-class RPC error.
+      // Emit a `dispatch.failed` audit message + drop the router entry, then throw
+      // so callers (CLI real_provider) get `{ok:false, error:{code:"device_offline"}}`.
       emitJsonEvent('device.command.push_failed', {
         device_id: deviceId,
         correlation_id: correlationId,
         reason: push.reason ?? 'unknown',
       });
+      try {
+        await this.sendChannelMessage({
+          channelId: node.channelId,
+          senderKind: SenderKind.EXTERNAL,
+          senderId: `device:${deviceId}`,
+          senderName: `device:${deviceId}`,
+          payload: {
+            type: PayloadType.DISPATCH_FAILED,
+            body: {
+              error: { code: 'device_offline', reason: push.reason ?? 'unknown' },
+              device_id: deviceId,
+              user_id: userId,
+            },
+          },
+          content: JSON.stringify({ error: { code: 'device_offline', reason: push.reason ?? 'unknown' } }),
+          correlationId,
+          audience: ['channel'],
+          origin: 'external',
+          source: 'device',
+        });
+      } catch (recordErr) {
+        emitJsonEvent('device.command.failed_record_error', {
+          device_id: deviceId,
+          correlation_id: correlationId,
+          error: recordErr?.message ?? String(recordErr),
+        });
+      }
+      this.dispatchRouter.remove(correlationId);
+      throw toRpcError(
+        'device_offline',
+        `device ${deviceId} is offline (${push.reason ?? 'unknown'})`,
+        503,
+      );
     }
 
     return {
@@ -1845,10 +1965,16 @@ export class ChannelManager {
     const userId = String(params.user_id ?? params.userId ?? '').trim();
     if (!userId) throw toRpcError('bad_request', 'user_id is required');
     const session = this.sessionManager.getSession(userId);
-    if (!session) {
-      return { user_id: userId, session: null, exists: false };
-    }
-    return { user_id: userId, session, exists: true };
+    // Spec §4.1 / Fix-T2 §4: existing session → flat payload; missing → null
+    // (envelope will write `{ok:true, result:null}`, mirrors publish-status).
+    if (!session) return null;
+    return {
+      cookies: Array.isArray(session.cookies) ? session.cookies : [],
+      user_id: session.user_id ?? userId,
+      login_state: session.login_state ?? 'unknown',
+      last_updated_at: session.last_updated_at ?? null,
+      expires_at: session.expires_at ?? null,
+    };
   }
 
   async deviceSessionUpdate(params) {

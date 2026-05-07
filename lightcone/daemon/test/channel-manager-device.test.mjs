@@ -129,20 +129,25 @@ test('deviceCommandSend forwards stored session to ws frame', async (t) => {
   assert.equal(result.push.ok, true);
 });
 
-test('deviceCommandSend returns push.reason device_offline when ws not connected', async (t) => {
+test('deviceCommandSend throws device_offline when ws not connected (Fix-T2 §2)', async (t) => {
   const ctx = await createHarness(t);
-  // ws.online is empty → pushCommand returns offline
-  const result = await ctx.cm.deviceCommandSend({
-    channel_id: 'ch-xhs-1',
-    type: 'xhs.publish',
-    params: {},
-  });
-  assert.equal(result.push.ok, false);
-  assert.equal(result.push.reason, 'device_offline');
-  // Still emitted dispatch.start and registered router (so eventual reconnect can retry)
+  // ws.online is empty → pushCommand returns offline → RPC must error.
+  await assert.rejects(
+    ctx.cm.deviceCommandSend({
+      channel_id: 'ch-xhs-1',
+      type: 'xhs.publish',
+      params: { title: 'hi', content: 'body' },
+    }),
+    (err) => err.code === 'device_offline' && err.statusCode === 503,
+  );
+  // Audit trail: dispatch.start emitted + dispatch.failed audit message
+  // recorded; router entry cleaned up so future correlation_id reuse is safe.
   const dispatched = readDispatchMessages(ctx.node);
   assert.ok(dispatched.some((m) => m.payload_type === 'dispatch.start'));
-  assert.ok(ctx.cm.dispatchRouter.lookup(result.correlation_id));
+  const failed = dispatched.find((m) => m.payload_type === 'dispatch.failed');
+  assert.ok(failed, 'dispatch.failed audit message expected on offline');
+  assert.equal(failed.payload_body?.error?.code, 'device_offline');
+  assert.equal(ctx.cm.dispatchRouter.lookup(failed.correlation_id), null);
 });
 
 test('deviceCommandSend allows explicit override device_id / user_id', async (t) => {
@@ -151,7 +156,7 @@ test('deviceCommandSend allows explicit override device_id / user_id', async (t)
   const result = await ctx.cm.deviceCommandSend({
     channel_id: 'ch-xhs-1',
     type: 'xhs.publish',
-    params: {},
+    params: { title: 'hi', content: 'body' },
     device_id: 'device-X',
     user_id: 'user-other',
   });
@@ -180,12 +185,12 @@ test('deviceCommandSend errors when channel has no device member and no env defa
     status: 'created',
   });
   await assert.rejects(
-    cm.deviceCommandSend({ channel_id: 'ch-empty', type: 'xhs.publish', params: {} }),
+    cm.deviceCommandSend({ channel_id: 'ch-empty', type: 'xhs.publish', params: { title: 'hi', content: 'body' } }),
     (err) => err.code === 'device_unavailable',
   );
 });
 
-test('deviceSessionUpdate persists patch and deviceSessionGet returns it', async (t) => {
+test('deviceSessionUpdate persists patch and deviceSessionGet returns flat shape (spec §4.1)', async (t) => {
   const ctx = await createHarness(t);
   const upd = await ctx.cm.deviceSessionUpdate({
     user_id: 'user-001',
@@ -198,12 +203,17 @@ test('deviceSessionUpdate persists patch and deviceSessionGet returns it', async
   assert.equal(upd.session.cookies.length, 1);
 
   const got = await ctx.cm.deviceSessionGet({ user_id: 'user-001' });
-  assert.equal(got.exists, true);
-  assert.equal(got.session.login_state, 'logged_in');
+  // Fix-T2 §4: flat shape, no `{exists, session}` wrapper.
+  assert.equal(got.user_id, 'user-001');
+  assert.equal(got.login_state, 'logged_in');
+  assert.equal(Array.isArray(got.cookies), true);
+  assert.equal(got.cookies.length, 1);
+  assert.equal(got.expires_at, 1234567890);
+  assert.equal(typeof got.last_updated_at, 'number');
 
+  // Missing → null (envelope writes {ok:true,result:null}, mirrors publish-status).
   const missing = await ctx.cm.deviceSessionGet({ user_id: 'user-999' });
-  assert.equal(missing.exists, false);
-  assert.equal(missing.session, null);
+  assert.equal(missing, null);
 });
 
 test('deviceSessionUpdate accepts the HTTP-forwarded {deviceId,userId,patch} shape', async (t) => {
@@ -223,7 +233,7 @@ test('deviceCallback emits dispatch.completed and clears router', async (t) => {
   const send = await ctx.cm.deviceCommandSend({
     channel_id: 'ch-xhs-1',
     type: 'xhs.publish',
-    params: { title: 't' },
+    params: { title: 't', content: 'body' },
   });
 
   const cb = await ctx.cm.deviceCallback({
@@ -250,7 +260,7 @@ test('deviceCallback emits dispatch.failed when status=error', async (t) => {
   const send = await ctx.cm.deviceCommandSend({
     channel_id: 'ch-xhs-1',
     type: 'xhs.publish',
-    params: {},
+    params: { title: 'hi', content: 'body' },
   });
   const cb = await ctx.cm.deviceCallback({
     deviceId: 'device-A',
@@ -279,7 +289,7 @@ test('deviceCallback rejects mismatched device_id (403)', async (t) => {
   const send = await ctx.cm.deviceCommandSend({
     channel_id: 'ch-xhs-1',
     type: 'xhs.publish',
-    params: {},
+    params: { title: 'hi', content: 'body' },
   });
   await assert.rejects(
     ctx.cm.deviceCallback({ deviceId: 'rogue-device', correlationId: send.correlation_id, status: 'ok' }),
@@ -293,11 +303,11 @@ test('rpcCall switch dispatches device.* methods', async (t) => {
   const send = await ctx.cm.rpcCall('device.command.send', {
     channel_id: 'ch-xhs-1',
     type: 'xhs.publish',
-    params: { title: 't' },
+    params: { title: 't', content: 'body' },
   });
   assert.ok(send.correlation_id);
   const got = await ctx.cm.rpcCall('device.session.get', { user_id: 'user-001' });
-  assert.equal(got.exists, false);
+  assert.equal(got, null); // Fix-T2 §4: missing → null (no wrapper)
   const upd = await ctx.cm.rpcCall('device.session.update', {
     user_id: 'user-001',
     cookies: [{ name: 'k', value: 'v' }],

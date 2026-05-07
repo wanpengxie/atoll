@@ -55,12 +55,22 @@ console.error(`[Daemon] v${version} Server: ${SERVER_URL} project=${PROJECT_KEY}
 
 // ── Device endpoint config ────────────────────────────────────────────────────
 // Per-device api keys: env COAGENT_DEVICE_KEYS = "id1:key1,id2:key2" (or JSON
-// object form). When empty, fall back to MACHINE_API_KEY (debug mode — every
-// device shares the daemon machine key; convenient for local single-device
-// setups, hardened in M1.x+).
+// object form). MACHINE_API_KEY is **never** silently reused as a device key —
+// the daemon admin credential must remain disjoint from device-side trust
+// boundary (see Fix-T2 §1, round-1 review codex#2 / claude-C1).
+// For local-dev convenience an explicit opt-in env can be supplied:
+//   COAGENT_DEVICE_DEV_FALLBACK_KEY=<key>
+// When set, any device id authenticates with that key (dev only — never set in
+// production deployments).
 const DEVICE_KEYS = parseDeviceKeysEnv(process.env.COAGENT_DEVICE_KEYS ?? '');
-const DEVICE_FALLBACK_KEY = DEVICE_KEYS.size === 0 ? MACHINE_API_KEY : '';
+const DEVICE_FALLBACK_KEY = String(process.env.COAGENT_DEVICE_DEV_FALLBACK_KEY ?? '').trim();
 const verifyDeviceKey = makeKeyVerifier({ deviceKeys: DEVICE_KEYS, fallbackKey: DEVICE_FALLBACK_KEY });
+if (DEVICE_KEYS.size === 0 && !DEVICE_FALLBACK_KEY) {
+  console.error('[Daemon] WARN device endpoints disabled — no device keys configured (set COAGENT_DEVICE_KEYS or COAGENT_DEVICE_DEV_FALLBACK_KEY)');
+}
+if (DEVICE_FALLBACK_KEY) {
+  console.error('[Daemon] WARN COAGENT_DEVICE_DEV_FALLBACK_KEY is set — every device id authenticates with the same key (dev-only)');
+}
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 const agentManager = new AgentManager({ serverUrl: SERVER_URL, machineApiKey: MACHINE_API_KEY });
@@ -90,6 +100,7 @@ const rpcServer = new RpcServer({
   authTokens: [DAEMON_TOKEN, MACHINE_API_KEY],
   deviceWsServer,
   verifyDeviceKey,
+  defaultUserId: process.env.COAGENT_DEFAULT_USER_ID || '',
 });
 
 const connection = new DaemonConnection({

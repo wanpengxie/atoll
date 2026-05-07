@@ -47,6 +47,7 @@ export class RpcServer {
     authTokens = [],
     deviceWsServer = null,
     verifyDeviceKey = null,
+    defaultUserId = '',
   }) {
     this.channelManager = channelManager;
     this.socketPath = socketPath;
@@ -58,9 +59,13 @@ export class RpcServer {
     this.httpServer = null;
     this.deviceWsServer = deviceWsServer;
     this.verifyDeviceKey = typeof verifyDeviceKey === 'function' ? verifyDeviceKey : null;
+    this.defaultUserId = String(defaultUserId ?? '').trim();
   }
 
   async start() {
+    if (this.authTokens.length === 0) {
+      console.error('[RpcServer] WARN /rpc accepts unauthenticated requests — no auth tokens configured');
+    }
     this.socketServer = http.createServer((req, res) => {
       this._handleRequest(req, res, { transport: 'socket' }).catch((err) => {
         writeJson(res, 500, { ok: false, error: { code: 'internal_error', message: err.message } });
@@ -247,10 +252,12 @@ export class RpcServer {
       }
 
       if (action === 'session') {
-        // body must contain user_id (caller provides which xhs login this device represents).
-        const userId = String(body.user_id ?? body.userId ?? '').trim();
+        // user_id is optional in body; daemon falls back to COAGENT_DEFAULT_USER_ID
+        // (Fix-T2 §5 / round-1 review codex#7). When neither is available we still 400.
+        const bodyUserId = String(body.user_id ?? body.userId ?? '').trim();
+        const userId = bodyUserId || this.defaultUserId;
         if (!userId) {
-          writeJson(res, 400, { ok: false, error: { code: 'bad_request', message: 'user_id is required' } });
+          writeJson(res, 400, { ok: false, error: { code: 'bad_request', message: 'user_id is required (no body.user_id and no COAGENT_DEFAULT_USER_ID)' } });
           return;
         }
         const patch = { ...body };

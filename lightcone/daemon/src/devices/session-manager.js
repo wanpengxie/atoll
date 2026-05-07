@@ -124,8 +124,11 @@ export class SessionManager {
     }
     if (merged.login_state == null) merged.login_state = 'unknown';
 
+    // Restrict baseDir + per-user dirs to owner only — these files contain
+    // xhs cookies and login state. Fix-T2 §7 / round-1 review claude-M6.
     const dir = this.userDir(safeUserId);
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(this.baseDir, { recursive: true, mode: 0o700 });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     const finalPath = this.sessionPath(safeUserId);
     const tmpPath = `${finalPath}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
     const json = JSON.stringify(merged, null, 2);
