@@ -9,6 +9,7 @@ import { releaseProfileLocksForProcess } from './profile-lock.js';
 import { RpcServer } from './rpc-server.js';
 import { daemonSocketPath, machineKeyPath, normalizeProjectKey, readMachineKeyFile } from './paths.js';
 import { missingMachineApiKeyErrorLines, resolveMachineApiKey } from './machine-api-key.js';
+import { DeviceWsServer, makeKeyVerifier, parseDeviceKeysEnv } from './devices/ws-server.js';
 
 const { version } = createRequire(import.meta.url)('../package.json');
 
@@ -52,8 +53,26 @@ if (!MACHINE_API_KEY) {
 
 console.error(`[Daemon] v${version} Server: ${SERVER_URL} project=${PROJECT_KEY}`);
 
+// ── Device endpoint config ────────────────────────────────────────────────────
+// Per-device api keys: env COAGENT_DEVICE_KEYS = "id1:key1,id2:key2" (or JSON
+// object form). When empty, fall back to MACHINE_API_KEY (debug mode — every
+// device shares the daemon machine key; convenient for local single-device
+// setups, hardened in M1.x+).
+const DEVICE_KEYS = parseDeviceKeysEnv(process.env.COAGENT_DEVICE_KEYS ?? '');
+const DEVICE_FALLBACK_KEY = DEVICE_KEYS.size === 0 ? MACHINE_API_KEY : '';
+const verifyDeviceKey = makeKeyVerifier({ deviceKeys: DEVICE_KEYS, fallbackKey: DEVICE_FALLBACK_KEY });
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 const agentManager = new AgentManager({ serverUrl: SERVER_URL, machineApiKey: MACHINE_API_KEY });
+const deviceWsServer = new DeviceWsServer({
+  verifyKey: verifyDeviceKey,
+  // Inbound frames from extension are surfaced into channel-manager only when
+  // explicitly wired; current set ack/log handler kept lightweight.
+  onMessage: ({ deviceId, frame }) => {
+    if (frame?.type === 'ack') return; // ack is fire-and-forget for now
+    console.error(`[Daemon] device ${deviceId} → ${frame?.type ?? '<unknown>'} frame`);
+  },
+});
 const channelManager = new ChannelManager({
   serverUrl: SERVER_URL,
   machineApiKey: MACHINE_API_KEY,
@@ -61,6 +80,7 @@ const channelManager = new ChannelManager({
   daemonHttpUrl: DAEMON_HTTP_URL,
   daemonToken: DAEMON_TOKEN,
   projectKey: PROJECT_KEY,
+  deviceWsServer,
 });
 const rpcServer = new RpcServer({
   channelManager,
@@ -68,6 +88,8 @@ const rpcServer = new RpcServer({
   httpPort: Number.isInteger(HTTP_PORT) ? HTTP_PORT : null,
   authToken: DAEMON_TOKEN,
   authTokens: [DAEMON_TOKEN, MACHINE_API_KEY],
+  deviceWsServer,
+  verifyDeviceKey,
 });
 
 const connection = new DaemonConnection({

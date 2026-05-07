@@ -38,6 +38,8 @@ import { coagentProjectDir, normalizeProjectKey } from './paths.js';
 import { formatLocalIso, nowIso } from './time.js';
 import { TriggerGateway } from './trigger-gateway.js';
 import { WorkdirWatcher } from './workdir-watcher.js';
+import { DispatchRouter } from './devices/dispatch-router.js';
+import { SessionManager } from './devices/session-manager.js';
 
 const DEFAULT_AGENT_NAME = 'channel-agent';
 const SHUTDOWN_GRACE_MS = 5_000;
@@ -686,6 +688,11 @@ export class ChannelManager {
     projectKey = process.env.COAGENT_PROJECT_KEY,
     baseDir = null,
     dueMessagePollMs = DEFAULT_DUE_MESSAGE_POLL_MS,
+    deviceWsServer = null,
+    sessionManager = null,
+    dispatchRouter = null,
+    defaultDeviceId = process.env.COAGENT_DEFAULT_DEVICE_ID || '',
+    defaultUserId = process.env.COAGENT_DEFAULT_USER_ID || '',
   }) {
     this.serverUrl = serverUrl;
     this.machineApiKey = machineApiKey;
@@ -698,6 +705,16 @@ export class ChannelManager {
     this.baseDir = ensureDirectory(baseDir ?? coagentProjectDir(this.projectKey));
     this.channelsDir = ensureDirectory(path.join(this.baseDir, 'channels'));
     this.archivedDir = ensureDirectory(path.join(this.baseDir, 'archived'));
+    this.deviceWsServer = deviceWsServer;
+    // Default session base dir = <ChannelManager baseDir>/users so test
+    // harnesses with isolated tempHome dirs don't leak across tests through
+    // ~/.coagent/{projectKey}/users.
+    this.sessionManager = sessionManager ?? new SessionManager({
+      baseDir: path.join(this.baseDir, 'users'),
+    });
+    this.dispatchRouter = dispatchRouter ?? new DispatchRouter();
+    this.defaultDeviceId = String(defaultDeviceId ?? '').trim();
+    this.defaultUserId = String(defaultUserId ?? '').trim();
     this.workspaceTemplateDir = path.join(repoRoot(), 'workspace-template');
     this.dueMessagePollMs = dueMessagePollMs;
     this.dueMessageTimer = null;
@@ -956,6 +973,12 @@ export class ChannelManager {
         return this.dispatchRenew(params);
       case 'dispatch.list':
         return this.dispatchList(params);
+      case 'device.command.send':
+        return this.deviceCommandSend(params);
+      case 'device.session.get':
+        return this.deviceSessionGet(params);
+      case 'device.session.update':
+        return this.deviceSessionUpdate(params);
       case 'memo.create':
         return this.createMemo(params);
       case 'memo.recall':
@@ -1693,6 +1716,211 @@ export class ChannelManager {
       return status === chain.status;
     });
     return { dispatches };
+  }
+
+  // ── device.* RPC ──────────────────────────────────────────────────────────
+  // device.command.send / device.session.get / device.session.update
+  // 行为契约见 .dalek/pm/m1.1-xhs-real-onboarding-spec.md §4.1。
+
+  _resolveDeviceId(channelNode, explicitDeviceId) {
+    const explicit = String(explicitDeviceId ?? '').trim();
+    if (explicit) return explicit;
+    const member = channelNode?.members?.find?.((m) => m.memberType === 'device');
+    if (member?.memberId) return String(member.memberId).trim();
+    if (this.defaultDeviceId) return this.defaultDeviceId;
+    throw toRpcError('device_unavailable', 'no device_id resolvable for channel; configure channel members or COAGENT_DEFAULT_DEVICE_ID');
+  }
+
+  _resolveUserId(channelNode, explicitUserId) {
+    const explicit = String(explicitUserId ?? '').trim();
+    if (explicit) return explicit;
+    const member = channelNode?.members?.find?.((m) => m.memberType === 'human');
+    if (member?.memberId) return String(member.memberId).trim();
+    if (this.defaultUserId) return this.defaultUserId;
+    throw toRpcError('user_unavailable', 'no user_id resolvable for channel; configure channel members or COAGENT_DEFAULT_USER_ID');
+  }
+
+  async deviceCommandSend(params) {
+    const channelId = String(params.channel_id ?? params.channelId ?? '').trim();
+    const node = this._requireNode(channelId);
+    const type = String(params.type ?? params.command_type ?? '').trim();
+    if (!type) throw toRpcError('bad_request', 'type is required');
+    const deviceId = this._resolveDeviceId(node, params.device_id ?? params.deviceId);
+    const userId = this._resolveUserId(node, params.user_id ?? params.userId);
+
+    const correlationId = String(params.correlation_id ?? params.correlationId ?? randomUUID());
+    const cmdParams = params.params ?? {};
+    const targetAudience = `external:device:${deviceId}`;
+
+    const startBody = {
+      type,
+      params: cmdParams,
+      device_id: deviceId,
+      user_id: userId,
+    };
+    const startMessage = await this.sendChannelMessage({
+      channelId: node.channelId,
+      senderKind: SenderKind.AGENT,
+      senderId: node.agentName,
+      senderName: node.agentName,
+      payload: { type: PayloadType.DISPATCH_START, body: startBody },
+      content: JSON.stringify(startBody),
+      correlationId,
+      taskId: params.in_task ?? params.inTask ?? params.task_id ?? params.taskId,
+      audience: [targetAudience],
+      origin: 'self',
+      source: 'dispatch',
+    });
+
+    const checkAfterMs = parseDurationMs(
+      params.check_after_ms ?? params.checkAfterMs ?? params.check_after ?? params.checkAfter,
+    );
+    const checkMessage = await this.scheduleChannelMessage({
+      channelId: node.channelId,
+      payloadType: PayloadType.DISPATCH_SELF_CHECK_DUE,
+      payloadBody: {
+        type,
+        target: targetAudience,
+        correlation_id: correlationId,
+        device_id: deviceId,
+        user_id: userId,
+        reason: `check ${type} ${correlationId}`,
+      },
+      correlationId,
+      taskId: params.in_task ?? params.inTask ?? params.task_id ?? params.taskId,
+      notBefore: Date.now() + checkAfterMs,
+      source: 'dispatch',
+    });
+
+    this.dispatchRouter.register({
+      correlationId,
+      channelId: node.channelId,
+      deviceId,
+      userId,
+    });
+
+    let session = null;
+    try {
+      session = this.sessionManager.getSession(userId);
+    } catch (err) {
+      // session corruption shouldn't block dispatch — log and continue with null.
+      emitJsonEvent('device.session.read_failed', {
+        user_id: userId,
+        device_id: deviceId,
+        error: err?.message ?? String(err),
+      });
+    }
+
+    const cmd = type.startsWith('xhs.') ? type.slice('xhs.'.length) : type;
+    const wsPayload = {
+      type: 'command',
+      correlation_id: correlationId,
+      cmd,
+      params: cmdParams,
+      session,
+    };
+    let push = { ok: false, reason: 'no_ws_server' };
+    if (this.deviceWsServer && typeof this.deviceWsServer.pushCommand === 'function') {
+      push = this.deviceWsServer.pushCommand(deviceId, wsPayload);
+    }
+    if (!push.ok) {
+      emitJsonEvent('device.command.push_failed', {
+        device_id: deviceId,
+        correlation_id: correlationId,
+        reason: push.reason ?? 'unknown',
+      });
+    }
+
+    return {
+      correlation_id: correlationId,
+      dispatch: startMessage,
+      self_check: checkMessage,
+      device_id: deviceId,
+      user_id: userId,
+      push,
+    };
+  }
+
+  async deviceSessionGet(params) {
+    const userId = String(params.user_id ?? params.userId ?? '').trim();
+    if (!userId) throw toRpcError('bad_request', 'user_id is required');
+    const session = this.sessionManager.getSession(userId);
+    if (!session) {
+      return { user_id: userId, session: null, exists: false };
+    }
+    return { user_id: userId, session, exists: true };
+  }
+
+  async deviceSessionUpdate(params) {
+    // 用法 1（RPC 直接调用）：{user_id, cookies, login_state, expires_at}
+    // 用法 2（来自 HTTP /api/device/{id}/session 转发）：{deviceId, userId, patch}
+    const userId = String(params.user_id ?? params.userId ?? '').trim();
+    const patch = params.patch && typeof params.patch === 'object'
+      ? params.patch
+      : (() => {
+          const p = { ...params };
+          delete p.user_id;
+          delete p.userId;
+          delete p.deviceId;
+          return p;
+        })();
+    if (!userId) throw toRpcError('bad_request', 'user_id is required');
+    const merged = this.sessionManager.updateSession(userId, patch);
+    emitJsonEvent('device.session.updated', {
+      user_id: userId,
+      device_id: params.deviceId ?? null,
+      login_state: merged.login_state ?? null,
+    });
+    return { user_id: userId, session: merged };
+  }
+
+  async deviceCallback({ deviceId, correlationId, status, result, error }) {
+    const correlation = String(correlationId ?? '').trim();
+    if (!correlation) throw toRpcError('bad_request', 'correlation_id is required');
+    const route = this.dispatchRouter.lookup(correlation);
+    if (!route) {
+      throw toRpcError('correlation_unknown', `no active dispatch for correlation_id=${correlation}`, 404);
+    }
+    if (deviceId && route.device_id && deviceId !== route.device_id) {
+      throw toRpcError('forbidden', `device_id mismatch for correlation_id=${correlation}`, 403);
+    }
+    const node = this.channels.get(route.channel_id);
+    if (!node) {
+      throw toRpcError('channel_not_found', `channel ${route.channel_id} no longer exists`, 404);
+    }
+    const isOk = status === 'ok';
+    const payloadType = isOk ? PayloadType.DISPATCH_COMPLETED : PayloadType.DISPATCH_FAILED;
+    const body = isOk
+      ? { result: result ?? null, device_id: route.device_id, user_id: route.user_id }
+      : { error: error ?? null, device_id: route.device_id, user_id: route.user_id };
+
+    const callbackMessage = await this.sendChannelMessage({
+      channelId: node.channelId,
+      senderKind: SenderKind.EXTERNAL,
+      senderId: `device:${route.device_id}`,
+      senderName: `device:${route.device_id}`,
+      payload: { type: payloadType, body },
+      content: JSON.stringify(body),
+      correlationId: correlation,
+      audience: ['channel'],
+      origin: 'external',
+      source: 'device',
+    });
+
+    emitJsonEvent('device.callback', {
+      device_id: route.device_id,
+      correlation_id: correlation,
+      status: isOk ? 'completed' : 'failed',
+    });
+
+    // Dispatch finalized — drop router entry; idempotent even if extension retries.
+    this.dispatchRouter.remove(correlation);
+
+    return {
+      correlation_id: correlation,
+      payload_type: payloadType,
+      message: callbackMessage,
+    };
   }
 
   async createMemo(params) {
