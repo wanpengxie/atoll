@@ -1,6 +1,6 @@
 // services/coagent-device.ts — coagent daemon device WS client。
 //
-// 协议（spec §4.2 / §4.3）：
+// 协议（spec §4.2 / §4.3 + M1.1 Fix-T3）：
 //   - WS:  ws://{daemon-host}/device/{deviceId}?key={device_api_key}
 //   - 入站 frame：{type:"command", correlation_id, cmd, params, session}
 //   - 可选回 ack frame：{type:"ack", correlation_id}
@@ -13,6 +13,12 @@
 //   - 收 command frame → registerCommandHandler 路由 → 完成发 callback
 //   - command handler 异常 → callback `{status:"error", error:{code,message}}`
 //   - daemon 心跳：daemon 端发 ping，浏览器 WebSocket 自动 pong（不需手动）
+//
+// 韧性（M1.1 Fix-T3）：
+//   - postCallback 每次 fetch 加 AbortController 10s 超时
+//   - 失败指数退避 3 次（1s / 2s / 4s）
+//   - 仍失败 → 序列化进 chrome.storage.local 暂存表 pendingCallbacks
+//   - WS 重连 open 时 drain outbox 并通过 {type:"callback_replay", payloads:[...]} frame 重发
 //
 // 此模块不直接连 chrome.cookies；cookie sync 由 tools/sync-cookies.ts 单独处理。
 
@@ -34,11 +40,68 @@ export interface ConnectResult {
   error?: string;
 }
 
-interface CallbackBody {
+export interface CallbackBody {
   correlation_id: string;
   status: 'ok' | 'error';
   result: Record<string, unknown> | null;
   error: { code: string; message: string } | null;
+}
+
+/** Storage entry shape for the pending-callbacks outbox. */
+export interface PendingCallbackEntry {
+  body: CallbackBody;
+  /** Timestamp of the original failure (epoch ms); helpful for log forensics. */
+  enqueued_at: number;
+}
+
+/** Minimal chrome.storage.local typing — keeps unit tests / mocks simple. */
+interface StorageLike {
+  get(key: string): Promise<Record<string, unknown>>;
+  set(items: Record<string, unknown>): Promise<void>;
+}
+
+function getStorage(): StorageLike | null {
+  // `chrome` is only present in the SW context. Tests inject a mock via
+  // (globalThis as any).chrome.
+  const c: any = (globalThis as any).chrome;
+  if (!c?.storage?.local) return null;
+  return c.storage.local as StorageLike;
+}
+
+/** Read outbox; return [] when storage is unavailable or value is malformed. */
+export async function readPendingCallbacks(): Promise<PendingCallbackEntry[]> {
+  const storage = getStorage();
+  if (!storage) return [];
+  try {
+    const stored = await storage.get(COAGENT_DEVICE_PROTOCOL.CALLBACK_OUTBOX_STORAGE_KEY);
+    const raw = stored[COAGENT_DEVICE_PROTOCOL.CALLBACK_OUTBOX_STORAGE_KEY];
+    if (!Array.isArray(raw)) return [];
+    return raw.filter(isPendingCallbackEntry);
+  } catch (err) {
+    console.warn('[CoagentDevice] readPendingCallbacks failed', err);
+    return [];
+  }
+}
+
+export async function writePendingCallbacks(entries: PendingCallbackEntry[]): Promise<void> {
+  const storage = getStorage();
+  if (!storage) return;
+  try {
+    const trimmed = entries.slice(-COAGENT_DEVICE_PROTOCOL.CALLBACK_OUTBOX_MAX_SIZE);
+    await storage.set({
+      [COAGENT_DEVICE_PROTOCOL.CALLBACK_OUTBOX_STORAGE_KEY]: trimmed,
+    });
+  } catch (err) {
+    console.warn('[CoagentDevice] writePendingCallbacks failed', err);
+  }
+}
+
+function isPendingCallbackEntry(value: unknown): value is PendingCallbackEntry {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  if (!v.body || typeof v.body !== 'object') return false;
+  const body = v.body as Record<string, unknown>;
+  return typeof body.correlation_id === 'string' && (body.status === 'ok' || body.status === 'error');
 }
 
 class CoagentDeviceClient {
@@ -49,6 +112,19 @@ class CoagentDeviceClient {
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private connectInFlight: Promise<ConnectResult> | null = null;
+  /** Test seam — overridden in unit tests via setFetchImpl. */
+  private fetchImpl: typeof fetch = (...args) => fetch(...args);
+
+  /** Test-only: replace the fetch implementation used by postCallback. */
+  setFetchImpl(impl: typeof fetch): void {
+    this.fetchImpl = impl;
+  }
+
+  /** Test-only: replace the WebSocket constructor used by connect(). */
+  private wsCtor: typeof WebSocket = WebSocket;
+  setWebSocketImpl(impl: typeof WebSocket): void {
+    this.wsCtor = impl;
+  }
 
   updateConfig(config: ConnectionConfig): void {
     this.config = { ...config };
@@ -132,7 +208,7 @@ class CoagentDeviceClient {
 
       let socket: WebSocket;
       try {
-        socket = new WebSocket(url);
+        socket = new this.wsCtor(url);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         void saveConnectionStatus({
@@ -158,6 +234,8 @@ class CoagentDeviceClient {
           serverUrl: url,
           lastError: undefined,
         });
+        // M1.1 Fix-T3: drain pending-callbacks outbox via callback_replay frame.
+        void this.drainPendingCallbacks(socket);
         settle({ success: true });
       });
 
@@ -325,7 +403,15 @@ class CoagentDeviceClient {
 
   // ─── Callback HTTP ────────────────────────────────────────────────────────
 
-  private async postCallback(
+  /**
+   * POST a callback to the daemon. M1.1 Fix-T3:
+   *   - per-attempt AbortController 10s timeout
+   *   - exponential backoff 1s / 2s / 4s, 3 retries on transport / 5xx errors
+   *   - 4xx (except 429) is terminal — body shape is wrong, retrying won't help
+   *   - if all retries fail, push entry into chrome.storage.local outbox to be
+   *     replayed via WS callback_replay frame on next reconnect
+   */
+  async postCallback(
     correlationId: string,
     payload: Omit<CallbackBody, 'correlation_id'>
   ): Promise<void> {
@@ -357,28 +443,137 @@ class CoagentDeviceClient {
       ...payload,
     };
 
+    const result = await this.sendCallbackWithRetry(url, apiKey, body);
+    if (result === 'ok' || result === 'terminal') return;
+    // 'exhausted' — transport / 5xx kept failing; queue for WS replay.
+    console.error('[CoagentDevice] callback exhausted retries — queuing for WS replay', {
+      correlationId,
+    });
+    await this.enqueuePendingCallback(body);
+  }
+
+  /**
+   * Inner retry loop.
+   *  - 'ok'        → first 2xx response (no further action).
+   *  - 'terminal'  → 4xx (non-429) — daemon refused this body; replaying won't
+   *                  help, drop the callback (caller must NOT queue).
+   *  - 'exhausted' → transport / 5xx / 429 / abort timed out across all retries.
+   *
+   * Total attempts: `1 + CALLBACK_RETRY_BACKOFF_MS_LIST.length`.
+   */
+  private async sendCallbackWithRetry(
+    url: string,
+    apiKey: string,
+    body: CallbackBody,
+  ): Promise<'ok' | 'terminal' | 'exhausted'> {
+    const backoff = COAGENT_DEVICE_PROTOCOL.CALLBACK_RETRY_BACKOFF_MS_LIST;
+    const totalAttempts = 1 + backoff.length;
+    for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
+      const outcome = await this.attemptCallbackOnce(url, apiKey, body);
+      if (outcome === 'ok') return 'ok';
+      if (outcome === 'terminal') return 'terminal';
+      // 'retry' branch — schedule next attempt unless we've exhausted.
+      const nextDelay = backoff[attempt];
+      if (nextDelay == null) break;
+      console.warn('[CoagentDevice] callback attempt failed, retrying', {
+        attempt: attempt + 1,
+        nextDelayMs: nextDelay,
+        correlationId: body.correlation_id,
+      });
+      await sleep(nextDelay);
+    }
+    return 'exhausted';
+  }
+
+  /** One HTTP attempt. Returns 'ok' / 'retry' / 'terminal'. */
+  private async attemptCallbackOnce(
+    url: string,
+    apiKey: string,
+    body: CallbackBody,
+  ): Promise<'ok' | 'retry' | 'terminal'> {
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(),
+      COAGENT_DEVICE_PROTOCOL.CALLBACK_RETRY_TIMEOUT_MS,
+    );
     try {
-      const resp = await fetch(url, {
+      const resp = await this.fetchImpl(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
-      if (!resp.ok) {
+      if (resp.ok) return 'ok';
+      // 429 / 5xx → retry; everything else (4xx auth/validation) → terminal.
+      if (resp.status === 429 || resp.status >= 500) {
         const text = await resp.text().catch(() => '');
-        console.error('[CoagentDevice] callback non-2xx', {
+        console.warn('[CoagentDevice] callback non-2xx (retryable)', {
           status: resp.status,
           text,
-          correlationId,
+          correlationId: body.correlation_id,
         });
+        return 'retry';
       }
-    } catch (err) {
-      console.error('[CoagentDevice] callback fetch failed', {
-        correlationId,
-        error: err instanceof Error ? err.message : String(err),
+      const text = await resp.text().catch(() => '');
+      console.error('[CoagentDevice] callback non-2xx (terminal)', {
+        status: resp.status,
+        text,
+        correlationId: body.correlation_id,
       });
+      return 'terminal';
+    } catch (err: any) {
+      // AbortError (timeout) and network errors are retryable.
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('[CoagentDevice] callback fetch failed (will retry)', {
+        correlationId: body.correlation_id,
+        error: message,
+      });
+      return 'retry';
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Append a callback body to the chrome.storage.local outbox. Bounded by
+   * COAGENT_DEVICE_PROTOCOL.CALLBACK_OUTBOX_MAX_SIZE — older entries are
+   * dropped FIFO-style when the cap is hit.
+   */
+  private async enqueuePendingCallback(body: CallbackBody): Promise<void> {
+    const existing = await readPendingCallbacks();
+    const entry: PendingCallbackEntry = { body, enqueued_at: Date.now() };
+    // Replace any earlier entry for the same correlation_id (extension may
+    // re-attempt the same callback after a SW restart) — last-writer-wins.
+    const filtered = existing.filter((e) => e.body.correlation_id !== body.correlation_id);
+    filtered.push(entry);
+    await writePendingCallbacks(filtered);
+  }
+
+  /**
+   * Drain the outbox by sending one `callback_replay` WS frame containing all
+   * pending payloads. On send failure (socket closed mid-call etc.) the entries
+   * remain in storage so the next reconnect retries.
+   */
+  private async drainPendingCallbacks(socket: WebSocket): Promise<void> {
+    const pending = await readPendingCallbacks();
+    if (pending.length === 0) return;
+    if (socket.readyState !== WebSocket.OPEN) return;
+    const payloads = pending.map((entry) => entry.body);
+    const frame = JSON.stringify({
+      type: COAGENT_DEVICE_PROTOCOL.CALLBACK_REPLAY_FRAME_TYPE,
+      payloads,
+    });
+    try {
+      socket.send(frame);
+      console.info('[CoagentDevice] drained pending callbacks via WS replay', {
+        count: payloads.length,
+      });
+      await writePendingCallbacks([]);
+    } catch (err) {
+      console.warn('[CoagentDevice] callback_replay send failed; keeping outbox', err);
     }
   }
 }
@@ -394,6 +589,10 @@ function stripTrailingSlash(s: string): string {
   return s.endsWith('/') ? s.slice(0, -1) : s;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Fallback: ws://host:port/device/{id}?key=... → http://host:port. */
 export function deriveHttpBaseFromWsUrl(wsUrl: string): string {
   if (!wsUrl) return '';
@@ -407,3 +606,5 @@ export function deriveHttpBaseFromWsUrl(wsUrl: string): string {
 }
 
 export const coagentDeviceClient = new CoagentDeviceClient();
+/** Test-only export — lets vitest exercise retry + outbox without singleton state. */
+export { CoagentDeviceClient as CoagentDeviceClientForTest };

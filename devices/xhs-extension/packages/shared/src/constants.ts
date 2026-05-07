@@ -58,6 +58,14 @@ export const COAGENT_DEVICE_PROTOCOL = {
   COMMAND_FRAME_TYPE: 'command',
   /** Optional WS frame from extension → daemon (heartbeat-style). */
   ACK_FRAME_TYPE: 'ack',
+  /**
+   * WS frame from extension → daemon, after a reconnect, carrying the entries
+   * accumulated in `chrome.storage.local[CALLBACK_OUTBOX_STORAGE_KEY]` while
+   * the connection was down. Daemon dispatches each payload through
+   * `deviceCallback` with built-in dedupe (M1.1 Fix-T3).
+   * Payload shape: { type: 'callback_replay', payloads: CallbackBody[] }.
+   */
+  CALLBACK_REPLAY_FRAME_TYPE: 'callback_replay',
   /** Final result is delivered via HTTP callback, not WS. */
   CALLBACK_PATH_PREFIX: '/api/device/',
   /** Cookie / login_state sync endpoint suffix. */
@@ -68,6 +76,14 @@ export const COAGENT_DEVICE_PROTOCOL = {
   RECONNECT_MAX_MS: 30_000,
   /** Default heartbeat from daemon side is 30s; client doesn't ping. */
   COMMAND_DISPATCH_TIMEOUT_MS: 180_000,
+  /** Per-attempt callback HTTP timeout (AbortController). */
+  CALLBACK_RETRY_TIMEOUT_MS: 10_000,
+  /** Backoff schedule between retry attempts (3 retries: 1s/2s/4s). */
+  CALLBACK_RETRY_BACKOFF_MS_LIST: [1_000, 2_000, 4_000] as readonly number[],
+  /** chrome.storage.local key used to stash callbacks pending replay. */
+  CALLBACK_OUTBOX_STORAGE_KEY: 'coagent_device_pending_callbacks',
+  /** Hard cap on outbox size — drops oldest entries beyond this. */
+  CALLBACK_OUTBOX_MAX_SIZE: 200,
 } as const;
 
 /**

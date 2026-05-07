@@ -21,7 +21,8 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "test": "vitest run"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
@@ -39,6 +40,7 @@
     "terser": "^5.44.0",
     "typescript": "^5.8.3",
     "vite-plugin-static-copy": "^3.0.0",
+    "vitest": "^2.1.9",
     "vue-tsc": "^2.2.8",
     "wxt": "^0.20.0"
   }
