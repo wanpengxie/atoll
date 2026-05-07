@@ -74,16 +74,35 @@ if (DEVICE_FALLBACK_KEY) {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 const agentManager = new AgentManager({ serverUrl: SERVER_URL, machineApiKey: MACHINE_API_KEY });
+// `channelManager` is referenced inside the deviceWsServer onMessage closure
+// below (callback_replay routing — M1.1 Fix-T3); hoist via let so the closure
+// reads the live binding.
+let channelManager;
 const deviceWsServer = new DeviceWsServer({
   verifyKey: verifyDeviceKey,
-  // Inbound frames from extension are surfaced into channel-manager only when
-  // explicitly wired; current set ack/log handler kept lightweight.
+  // Inbound frames from extension:
+  //   - `ack`             — fire-and-forget heartbeat ack (drop)
+  //   - `callback_replay` — extension drained its chrome.storage.local outbox
+  //                         after WS reconnect; payloads must be replayed via
+  //                         channelManager.deviceCallback (with dedupe).
+  //   - any other         — log only (forward-compat for future frames)
   onMessage: ({ deviceId, frame }) => {
-    if (frame?.type === 'ack') return; // ack is fire-and-forget for now
+    if (frame?.type === 'ack') return;
+    if (frame?.type === 'callback_replay' && Array.isArray(frame?.payloads)) {
+      if (!channelManager || typeof channelManager.handleCallbackReplay !== 'function') {
+        console.error(`[Daemon] callback_replay dropped — channelManager not ready (device=${deviceId})`);
+        return;
+      }
+      Promise.resolve(channelManager.handleCallbackReplay({ deviceId, payloads: frame.payloads }))
+        .catch((err) => {
+          console.error(`[Daemon] callback_replay handler failed for ${deviceId}: ${err?.message ?? err}`);
+        });
+      return;
+    }
     console.error(`[Daemon] device ${deviceId} → ${frame?.type ?? '<unknown>'} frame`);
   },
 });
-const channelManager = new ChannelManager({
+channelManager = new ChannelManager({
   serverUrl: SERVER_URL,
   machineApiKey: MACHINE_API_KEY,
   daemonSocketPath: DAEMON_SOCKET,

@@ -4,11 +4,14 @@
 // the right channel without scanning sqlite.
 //
 // 设计取舍：
-//   - 进程内 Map，重启即丢；T3 范围内 PM 接受。后续 V0.5+ 若要持久化可换实现。
+//   - 进程内 Map，重启即丢；启动时由 channel-manager.start() 调用
+//     `recoverFromRows` 从 messages.sqlite 重建 in-flight 路由（M1.1 Fix-T3）。
 //   - TTL 默认 24h，远长于 self_check 默认 10min；过期 entry 在 register/lookup
 //     时 lazy 扫除。
 
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
+/** Recovery 默认窗口：30 分钟内的 dispatch.start 才会被重新装载（spec §Fix-T3）。 */
+export const DEFAULT_RECOVERY_WINDOW_MS = 30 * 60 * 1000;
 
 export class DispatchRouter {
   constructor({ ttlMs = DEFAULT_TTL_MS, now = () => Date.now() } = {}) {
@@ -57,5 +60,59 @@ export class DispatchRouter {
     for (const [id, entry] of this.entries) {
       if (entry.expires_at < now) this.entries.delete(id);
     }
+  }
+
+  /**
+   * Restart recovery — register a batch of in-flight dispatch contexts that
+   * were observed in messages.sqlite but lost when the daemon process died.
+   *
+   * @param {Array<{
+   *   correlation_id?: string,
+   *   correlationId?: string,
+   *   channel_id?: string,
+   *   channelId?: string,
+   *   device_id?: string,
+   *   deviceId?: string,
+   *   user_id?: string,
+   *   userId?: string,
+   *   ttlMs?: number,
+   * }>} rows
+   * @returns {{ recovered: number, skipped: number }} count summary; rows that
+   *   collide with an existing entry (already re-registered by a more recent
+   *   `register()` call) are silently skipped to keep recovery idempotent.
+   */
+  recoverFromRows(rows) {
+    if (!Array.isArray(rows)) return { recovered: 0, skipped: 0 };
+    let recovered = 0;
+    let skipped = 0;
+    for (const raw of rows) {
+      if (!raw || typeof raw !== 'object') {
+        skipped += 1;
+        continue;
+      }
+      const correlationId = String(raw.correlation_id ?? raw.correlationId ?? '').trim();
+      const channelId = String(raw.channel_id ?? raw.channelId ?? '').trim();
+      const deviceId = String(raw.device_id ?? raw.deviceId ?? '').trim();
+      const userId = String(raw.user_id ?? raw.userId ?? '').trim();
+      if (!correlationId || !channelId) {
+        skipped += 1;
+        continue;
+      }
+      // Skip if already registered (deviceCommandSend may have raced ahead, or
+      // a previous recovery pass already covered this correlation).
+      if (this.entries.has(correlationId)) {
+        skipped += 1;
+        continue;
+      }
+      this.register({
+        correlationId,
+        channelId,
+        deviceId,
+        userId,
+        ttlMs: raw.ttlMs,
+      });
+      recovered += 1;
+    }
+    return { recovered, skipped };
   }
 }

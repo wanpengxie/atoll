@@ -403,3 +403,148 @@ test('deviceCommandSend bubbles up payload_serialization_failed reason as device
     (err) => err.code === 'device_offline' && /payload_serialization_failed/.test(err.message),
   );
 });
+
+// ── M1.1 Fix-T3 §3 daemon callback dedupe + replay ───────────────────────────
+
+test('deviceCallback: duplicate after success returns 200 with deduped:true (no second emit)', async (t) => {
+  const ctx = await createHarness(t);
+  ctx.ws.goOnline('device-A');
+  const send = await ctx.cm.deviceCommandSend({
+    channel_id: 'ch-xhs-1',
+    type: 'xhs.publish',
+    params: { title: 't', content: 'body' },
+  });
+
+  // First callback wins → emits dispatch.completed.
+  const first = await ctx.cm.deviceCallback({
+    deviceId: 'device-A',
+    correlationId: send.correlation_id,
+    status: 'ok',
+    result: { url: 'https://xhs.com/note/abc', note_id: 'abc' },
+  });
+  assert.equal(first.payload_type, 'dispatch.completed');
+  assert.notEqual(first.deduped, true);
+
+  // Second callback (extension retry / replay) finds router empty AND
+  // dispatch.completed in store → returns deduped:true.
+  const second = await ctx.cm.deviceCallback({
+    deviceId: 'device-A',
+    correlationId: send.correlation_id,
+    status: 'ok',
+    result: { url: 'https://xhs.com/note/abc', note_id: 'abc' },
+  });
+  assert.equal(second.deduped, true);
+  assert.equal(second.payload_type, 'dispatch.completed');
+  assert.equal(second.correlation_id, send.correlation_id);
+
+  // Only one dispatch.completed in the store — no duplicate emit.
+  const dispatched = readDispatchMessages(ctx.node);
+  const completions = dispatched.filter((m) => m.payload_type === 'dispatch.completed');
+  assert.equal(completions.length, 1);
+});
+
+test('deviceCallback: duplicate after failure returns deduped:true with dispatch.failed', async (t) => {
+  const ctx = await createHarness(t);
+  ctx.ws.goOnline('device-A');
+  const send = await ctx.cm.deviceCommandSend({
+    channel_id: 'ch-xhs-1',
+    type: 'xhs.publish',
+    params: { title: 't', content: 'body' },
+  });
+  await ctx.cm.deviceCallback({
+    deviceId: 'device-A',
+    correlationId: send.correlation_id,
+    status: 'error',
+    error: { code: 'auth_expired', message: 'login required' },
+  });
+  const second = await ctx.cm.deviceCallback({
+    deviceId: 'device-A',
+    correlationId: send.correlation_id,
+    status: 'error',
+    error: { code: 'auth_expired', message: 'login required' },
+  });
+  assert.equal(second.deduped, true);
+  assert.equal(second.payload_type, 'dispatch.failed');
+});
+
+test('deviceCallback: dedupe with mismatched device_id refuses (falls through to correlation_unknown 404)', async (t) => {
+  const ctx = await createHarness(t);
+  ctx.ws.goOnline('device-A');
+  const send = await ctx.cm.deviceCommandSend({
+    channel_id: 'ch-xhs-1',
+    type: 'xhs.publish',
+    params: { title: 't', content: 'body' },
+  });
+  await ctx.cm.deviceCallback({
+    deviceId: 'device-A',
+    correlationId: send.correlation_id,
+    status: 'ok',
+    result: { note_id: 'a' },
+  });
+  // Different device retrying — must not be granted dedupe.
+  await assert.rejects(
+    ctx.cm.deviceCallback({
+      deviceId: 'rogue-device',
+      correlationId: send.correlation_id,
+      status: 'ok',
+      result: { note_id: 'a' },
+    }),
+    (err) => err.code === 'correlation_unknown' && err.statusCode === 404,
+  );
+});
+
+test('handleCallbackReplay: dispatches each payload through deviceCallback (mix of new + dedupe + unknown)', async (t) => {
+  const ctx = await createHarness(t);
+  ctx.ws.goOnline('device-A');
+  // 1) Unfinished dispatch → replay payload completes it.
+  const a = await ctx.cm.deviceCommandSend({
+    channel_id: 'ch-xhs-1',
+    type: 'xhs.publish',
+    params: { title: 't', content: 'body' },
+  });
+  // 2) Already-completed dispatch → replay payload deduped.
+  const b = await ctx.cm.deviceCommandSend({
+    channel_id: 'ch-xhs-1',
+    type: 'xhs.publish',
+    params: { title: 't2', content: 'body' },
+  });
+  await ctx.cm.deviceCallback({
+    deviceId: 'device-A',
+    correlationId: b.correlation_id,
+    status: 'ok',
+    result: { note_id: 'b' },
+  });
+
+  const summary = await ctx.cm.handleCallbackReplay({
+    deviceId: 'device-A',
+    payloads: [
+      { correlation_id: a.correlation_id, status: 'ok', result: { note_id: 'a' } },
+      { correlation_id: b.correlation_id, status: 'ok', result: { note_id: 'b' } },
+      { correlation_id: 'never-existed', status: 'ok', result: {} },
+      'not-an-object',
+    ],
+  });
+
+  assert.equal(summary.accepted, 1);
+  assert.equal(summary.deduped, 1);
+  assert.equal(summary.failed, 2);
+  assert.equal(summary.results.length, 4);
+  // Original dispatch.completed for `a` exists exactly once.
+  const dispatched = readDispatchMessages(ctx.node);
+  const completedForA = dispatched.filter(
+    (m) => m.payload_type === 'dispatch.completed' && m.correlation_id === a.correlation_id,
+  );
+  assert.equal(completedForA.length, 1);
+});
+
+test('handleCallbackReplay: empty / non-array payloads short-circuit', async (t) => {
+  const ctx = await createHarness(t);
+  assert.deepEqual(
+    await ctx.cm.handleCallbackReplay({ deviceId: 'device-A', payloads: [] }),
+    { accepted: 0, deduped: 0, failed: 0, results: [] },
+  );
+  assert.deepEqual(
+    await ctx.cm.handleCallbackReplay({ deviceId: 'device-A', payloads: undefined }),
+    { accepted: 0, deduped: 0, failed: 0, results: [] },
+  );
+});

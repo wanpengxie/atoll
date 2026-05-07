@@ -38,7 +38,7 @@ import { coagentProjectDir, normalizeProjectKey } from './paths.js';
 import { formatLocalIso, nowIso } from './time.js';
 import { TriggerGateway } from './trigger-gateway.js';
 import { WorkdirWatcher } from './workdir-watcher.js';
-import { DispatchRouter } from './devices/dispatch-router.js';
+import { DispatchRouter, DEFAULT_RECOVERY_WINDOW_MS } from './devices/dispatch-router.js';
 import { SessionManager } from './devices/session-manager.js';
 
 const DEFAULT_AGENT_NAME = 'channel-agent';
@@ -919,6 +919,18 @@ export class ChannelManager {
         this.channels.set(node.channelId, node);
         if (node.status === 'active') {
           await this.startChannel({ channelId: node.channelId }, { restoring: true, notifyStatus: false });
+        }
+        // M1.1 Fix-T3: rebuild dispatch-router from messages.sqlite so any
+        // in-flight callback (extension already POSTing) is routed back to the
+        // right channel after a daemon restart. Failure here must not abort
+        // channel restore — log and continue.
+        try {
+          this._recoverDispatchRouter(node);
+        } catch (err) {
+          emitJsonEvent('dispatch.router.recover_failed', {
+            channel_id: node.channelId,
+            error: err?.message ?? String(err),
+          });
         }
       } catch (err) {
         console.error(`[ChannelManager] Failed to restore ${entry}:`, err.message);
@@ -2005,6 +2017,26 @@ export class ChannelManager {
     if (!correlation) throw toRpcError('bad_request', 'correlation_id is required');
     const route = this.dispatchRouter.lookup(correlation);
     if (!route) {
+      // M1.1 Fix-T3 dedupe: extension may retry / replay the same callback
+      // after a transient failure. If a `dispatch.completed | dispatch.failed |
+      // dispatch.rejected` row already exists for this correlation_id we treat
+      // the second arrival as idempotent → 200 OK with `deduped:true`. Only
+      // when the message store has *no* trace of the dispatch do we fall back
+      // to the legacy `correlation_unknown` 404.
+      const dedupe = this._lookupDispatchTerminalAcrossChannels(correlation, deviceId);
+      if (dedupe) {
+        emitJsonEvent('device.callback.dedupe', {
+          device_id: deviceId ?? null,
+          correlation_id: correlation,
+          payload_type: dedupe.message.payload_type,
+        });
+        return {
+          correlation_id: correlation,
+          payload_type: dedupe.message.payload_type,
+          message: dedupe.message,
+          deduped: true,
+        };
+      }
       throw toRpcError('correlation_unknown', `no active dispatch for correlation_id=${correlation}`, 404);
     }
     if (deviceId && route.device_id && deviceId !== route.device_id) {
@@ -2047,6 +2079,124 @@ export class ChannelManager {
       payload_type: payloadType,
       message: callbackMessage,
     };
+  }
+
+  /**
+   * M1.1 Fix-T3 — replay a batch of pending callbacks delivered over the WS
+   * `callback_replay` frame. Each payload is dispatched through
+   * `deviceCallback` independently; per-payload errors are swallowed (logged
+   * via `device.callback.replay_error`) so one bad entry can't block the rest.
+   *
+   * @param {{ deviceId: string, payloads: Array<object> }} args
+   * @returns {Promise<{
+   *   accepted: number,
+   *   deduped: number,
+   *   failed: number,
+   *   results: Array<{ correlation_id: string, ok: boolean, deduped?: boolean, error?: string }>,
+   * }>}
+   */
+  async handleCallbackReplay({ deviceId, payloads }) {
+    if (!Array.isArray(payloads) || payloads.length === 0) {
+      return { accepted: 0, deduped: 0, failed: 0, results: [] };
+    }
+    let accepted = 0;
+    let deduped = 0;
+    let failed = 0;
+    const results = [];
+    for (const raw of payloads) {
+      if (!raw || typeof raw !== 'object') {
+        failed += 1;
+        results.push({ correlation_id: '', ok: false, error: 'invalid_payload' });
+        continue;
+      }
+      const correlationId = String(raw.correlation_id ?? raw.correlationId ?? '').trim();
+      const status = String(raw.status ?? '').trim().toLowerCase();
+      try {
+        const out = await this.deviceCallback({
+          deviceId,
+          correlationId,
+          status,
+          result: raw.result ?? null,
+          error: raw.error ?? null,
+        });
+        if (out?.deduped) {
+          deduped += 1;
+          results.push({ correlation_id: correlationId, ok: true, deduped: true });
+        } else {
+          accepted += 1;
+          results.push({ correlation_id: correlationId, ok: true });
+        }
+      } catch (err) {
+        failed += 1;
+        const code = err?.code ?? 'replay_error';
+        results.push({ correlation_id: correlationId, ok: false, error: code });
+        emitJsonEvent('device.callback.replay_error', {
+          device_id: deviceId ?? null,
+          correlation_id: correlationId,
+          error: code,
+          message: err?.message ?? String(err),
+        });
+      }
+    }
+    emitJsonEvent('device.callback.replay', {
+      device_id: deviceId ?? null,
+      total: payloads.length,
+      accepted,
+      deduped,
+      failed,
+    });
+    return { accepted, deduped, failed, results };
+  }
+
+  /**
+   * Find an existing `dispatch.completed | dispatch.failed | dispatch.rejected`
+   * row across all loaded channels for `correlationId`. Returns `null` when
+   * there is no terminal record yet (caller should 404). Used for dedupe in
+   * `deviceCallback` after router miss.
+   *
+   * If `expectedDeviceId` is provided, the device_id stamped on the existing
+   * dispatch.start (or terminal payload body) must match — otherwise we treat
+   * the device as untrusted and return null so the legacy `correlation_unknown`
+   * path runs.
+   */
+  _lookupDispatchTerminalAcrossChannels(correlationId, expectedDeviceId = '') {
+    const correlation = String(correlationId ?? '').trim();
+    if (!correlation) return null;
+    const expectDevice = String(expectedDeviceId ?? '').trim();
+    for (const node of this.channels.values()) {
+      let db;
+      try {
+        db = this._openMessageStore(node);
+      } catch {
+        continue;
+      }
+      // queryStoredMessages requires a single payload_type filter at a time;
+      // probe terminal types in priority order.
+      for (const terminalType of [
+        PayloadType.DISPATCH_COMPLETED,
+        PayloadType.DISPATCH_FAILED,
+        PayloadType.DISPATCH_REJECTED,
+      ]) {
+        const rows = queryStoredMessages(db, {
+          channel_id: node.channelId,
+          correlation_id: correlation,
+          payload_type: terminalType,
+          order: 'desc',
+          limit: 1,
+        });
+        if (rows.length === 0) continue;
+        const message = rows[0];
+        if (expectDevice) {
+          const recordedDeviceId = String(message.payload_body?.device_id ?? '').trim();
+          if (recordedDeviceId && recordedDeviceId !== expectDevice) {
+            // Device mismatch — refuse dedupe; caller will throw forbidden later.
+            return null;
+          }
+        }
+        return { node, message };
+      }
+    }
+    return null;
   }
 
   async createMemo(params) {
@@ -2424,6 +2574,91 @@ export class ChannelManager {
     }
     node.messageStore.close();
     node.messageStore = null;
+  }
+
+  /**
+   * M1.1 Fix-T3 — restart recovery for in-flight dispatches.
+   *
+   * Scan messages.sqlite for `dispatch.start` rows in the last 30 minutes that
+   * have **no** paired `dispatch.completed | dispatch.failed | dispatch.rejected`
+   * and re-register them in the in-memory DispatchRouter. Without this, an
+   * in-flight extension callback arriving after a daemon restart would be
+   * rejected with `correlation_unknown` 404 (the router map is process-local).
+   *
+   * messages.sqlite remains the source of truth — this method only rebuilds
+   * the router cache. It runs at the end of `start()` for each restored
+   * channel; failures are non-fatal.
+   *
+   * @param {object} node — channel node (must already be loaded via
+   *   `_loadNodeFromDisk` and registered in `this.channels`).
+   * @param {object} [opts]
+   * @param {number} [opts.windowMs] — recovery window in ms (default 30min).
+   * @param {number} [opts.nowMs]     — clock injection for tests.
+   * @returns {{ recovered: number, scanned: number }}
+   */
+  _recoverDispatchRouter(node, { windowMs = DEFAULT_RECOVERY_WINDOW_MS, nowMs = Date.now() } = {}) {
+    const db = this._openMessageStore(node);
+    const startRows = queryStoredMessages(db, {
+      channel_id: node.channelId,
+      payload_type: PayloadType.DISPATCH_START,
+      not_before_gte: undefined,
+      order: 'desc',
+      limit: 500,
+    }).filter((row) => Number(row.ts_received) >= nowMs - windowMs);
+
+    if (startRows.length === 0) return { recovered: 0, scanned: 0 };
+
+    const candidates = [];
+    for (const row of startRows) {
+      const correlationId = String(row.correlation_id ?? '').trim();
+      if (!correlationId) continue;
+      // Reject if any terminal (completed/failed/rejected) row exists for the
+      // same correlation_id — that dispatch has already finalized and the
+      // router doesn't need to track it. Probe each terminal type separately
+      // since queryStoredMessages filters on a single payload_type.
+      const completed = queryStoredMessages(db, {
+        channel_id: node.channelId,
+        correlation_id: correlationId,
+        payload_type: PayloadType.DISPATCH_COMPLETED,
+        order: 'desc',
+        limit: 1,
+      });
+      if (completed.length > 0) continue;
+      const failed = queryStoredMessages(db, {
+        channel_id: node.channelId,
+        correlation_id: correlationId,
+        payload_type: PayloadType.DISPATCH_FAILED,
+        order: 'desc',
+        limit: 1,
+      });
+      if (failed.length > 0) continue;
+      const rejected = queryStoredMessages(db, {
+        channel_id: node.channelId,
+        correlation_id: correlationId,
+        payload_type: PayloadType.DISPATCH_REJECTED,
+        order: 'desc',
+        limit: 1,
+      });
+      if (rejected.length > 0) continue;
+
+      const body = row.payload_body ?? {};
+      candidates.push({
+        correlation_id: correlationId,
+        channel_id: node.channelId,
+        device_id: String(body.device_id ?? '').trim(),
+        user_id: String(body.user_id ?? '').trim(),
+      });
+    }
+
+    const summary = this.dispatchRouter.recoverFromRows(candidates);
+    if (summary.recovered > 0) {
+      emitJsonEvent('dispatch.router.recovered', {
+        channel_id: node.channelId,
+        recovered: summary.recovered,
+        scanned: startRows.length,
+      });
+    }
+    return { recovered: summary.recovered, scanned: startRows.length };
   }
 
   _materializeWorkdir(workdir) {
