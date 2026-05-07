@@ -169,6 +169,10 @@ export class TriggerGateway {
       return { decision: TriggerDecision.LOG_ONLY, reason: 'agent_text_echo_log_only', context };
     }
 
+    if (senderKind === SenderKind.AGENT && payloadType === PayloadType.AGENT_PROGRESS) {
+      return { decision: TriggerDecision.LOG_ONLY, reason: 'agent_progress_log_only', context };
+    }
+
     if (senderKind === SenderKind.AGENT && isTaskPayloadType(payloadType)) {
       return { decision: TriggerDecision.LOG_ONLY, reason: 'agent_task_signal_log_only', context };
     }
