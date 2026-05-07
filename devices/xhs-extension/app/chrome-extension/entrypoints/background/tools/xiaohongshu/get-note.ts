@@ -80,7 +80,8 @@ export class XhsGetNoteTool extends BaseTool {
 
       const note = await runInMainWorld<GetNoteResult | null>(
         tab.id,
-        (injected: { noteId: string }) => {
+        (injectedArgs: Record<string, any>) => {
+          const noteIdInjected = String(injectedArgs?.noteId ?? '');
           const unwrap = (v: any) => {
             if (!v || typeof v !== 'object') return v;
             return (v as any)._rawValue ?? (v as any)._value ?? v;
@@ -88,10 +89,10 @@ export class XhsGetNoteTool extends BaseTool {
 
           const state = unwrap((window as any).__INITIAL_STATE__);
           const note =
-            unwrap(state?.note?.noteDetailMap?.[injected.noteId]) ??
-            unwrap(state?.note?.firstNoteId)
-              ? unwrap(state?.note?.noteDetailMap?.[injected.noteId])
-              : null;
+            unwrap(state?.note?.noteDetailMap?.[noteIdInjected]) ??
+            (unwrap(state?.note?.firstNoteId)
+              ? unwrap(state?.note?.noteDetailMap?.[noteIdInjected])
+              : null);
           const candidate = unwrap(note?.note ?? note);
           if (!candidate || typeof candidate !== 'object') return null;
 
@@ -103,7 +104,7 @@ export class XhsGetNoteTool extends BaseTool {
             : [];
 
           return {
-            note_id: String(noteCard.noteId ?? injected.noteId),
+            note_id: String(noteCard.noteId ?? noteIdInjected),
             url: window.location.href,
             title: String(noteCard.title ?? ''),
             content: String(noteCard.desc ?? noteCard.content ?? ''),

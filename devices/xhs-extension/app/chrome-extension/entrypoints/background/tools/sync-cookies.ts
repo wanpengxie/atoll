@@ -1,8 +1,6 @@
 import {
   XIAOHONGSHU_TOOL_NAMES,
   ToolResult,
-  XIAOHONGSHU_URLS,
-  EXTENSION_CONSTANTS,
   COAGENT_DEVICE_PROTOCOL,
 } from 'xiaohongshu-mcp-shared';
 import { BaseTool } from './base-tool';

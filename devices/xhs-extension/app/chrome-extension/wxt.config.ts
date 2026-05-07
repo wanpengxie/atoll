@@ -17,8 +17,8 @@ export default defineConfig({
   },
 
   manifest: {
-    name: '小红书MCP助手',
-    description: '通过MCP协议控制小红书操作',
+    name: 'Coagent · 小红书 Device',
+    description: 'Coagent daemon 的小红书 device 端：长连 daemon WS，承载 publish / search / get-note 等命令',
     version: '1.1.0',
 
     icons: {

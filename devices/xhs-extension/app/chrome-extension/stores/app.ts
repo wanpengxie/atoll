@@ -1,6 +1,5 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import { EXTENSION_CONSTANTS } from 'xiaohongshu-mcp-shared';
 
 export interface ConnectionStatus {
   connected: boolean;
@@ -31,10 +30,10 @@ export interface ToolExecution {
 }
 
 export const useAppStore = defineStore('app', () => {
-  // 连接状态
+  // 连接状态（默认空，由 popup 侧从 storage 加载真实 device 配置后回填）
   const connectionStatus = ref<ConnectionStatus>({
     connected: false,
-    serverUrl: `ws://127.0.0.1:${EXTENSION_CONSTANTS.DEFAULT_PORT}${EXTENSION_CONSTANTS.DEFAULT_WS_PATH}`,
+    serverUrl: '',
   });
 
   // 用户信息
