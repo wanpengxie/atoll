@@ -229,27 +229,53 @@ function stripTrailingSlash(s: string): string {
 /**
  * Cookie 同步服务
  * 提供自动同步和监听功能
+ *
+ * M1.1 Fix-T4 §2 修复：listener bind(this) 泄漏。`bind` 每次产生新函数引用，
+ * `add/removeListener` 在不同引用下视为不同 listener，导致 stop() 无法卸载，
+ * SW 唤醒重启时 listener 累计 N 份。修复：构造时一次性 bind 存到实例字段，
+ * add/remove 都用同一引用。
  */
 export class CookieSyncService {
   private syncInterval: ReturnType<typeof setInterval> | null = null;
   private lastSyncTime: number = 0;
   private syncTool: SyncCookiesTool;
 
+  // M1.1 Fix-T4 §2: 必须使用稳定的 bound handler 引用，否则 removeListener 失效。
+  private readonly boundHandleTabUpdate: (
+    tabId: number,
+    changeInfo: chrome.tabs.TabChangeInfo,
+    tab: chrome.tabs.Tab
+  ) => void;
+  private readonly boundHandleCookieChange: (
+    changeInfo: chrome.cookies.CookieChangeInfo
+  ) => void;
+  private started = false;
+
   constructor() {
     this.syncTool = new SyncCookiesTool();
+    this.boundHandleTabUpdate = this.handleTabUpdate.bind(this) as typeof this.boundHandleTabUpdate;
+    this.boundHandleCookieChange = this.handleCookieChange.bind(this) as typeof this.boundHandleCookieChange;
   }
 
   /**
    * 启动自动同步服务
    * 监听创作者平台页面访问 + xhs cookie 变化，自动 POST 到 coagent daemon /api/device/{id}/session。
    * spec §6.2.4：启动时主动 sync 一次。
+   *
+   * 幂等：重复 start() 不重复添加 listener，避免 SW 唤醒后重复挂载。
    */
   start() {
+    if (this.started) {
+      console.log('[CookieSyncService] already started, skip duplicate start');
+      return;
+    }
+    this.started = true;
+
     // 监听页面更新，当用户访问创作者平台时自动同步
-    chrome.tabs.onUpdated.addListener(this.handleTabUpdate.bind(this));
+    chrome.tabs.onUpdated.addListener(this.boundHandleTabUpdate);
 
     // 监听 Cookie 变化
-    chrome.cookies.onChanged.addListener(this.handleCookieChange.bind(this));
+    chrome.cookies.onChanged.addListener(this.boundHandleCookieChange);
 
     console.log('[CookieSyncService] Started');
 
@@ -267,8 +293,9 @@ export class CookieSyncService {
       clearInterval(this.syncInterval);
       this.syncInterval = null;
     }
-    chrome.tabs.onUpdated.removeListener(this.handleTabUpdate.bind(this));
-    chrome.cookies.onChanged.removeListener(this.handleCookieChange.bind(this));
+    chrome.tabs.onUpdated.removeListener(this.boundHandleTabUpdate);
+    chrome.cookies.onChanged.removeListener(this.boundHandleCookieChange);
+    this.started = false;
     console.log('[CookieSyncService] Stopped');
   }
 

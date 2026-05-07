@@ -7,6 +7,132 @@ import {
 import { BaseTool } from './base-tool';
 import { runInMainWorld } from './inject-script';
 
+// ─── M1.1 Fix-T4 §1: publish 等真发布完成 (P0 critical) ──────────────────────
+//
+// 旧实现把表单填完即视为成功 → daemon 收到 ok callback 但用户根本没点
+// publish。修复方式：runInMainWorld 仍然 fill-only，但在 background SW 这一层
+// 挂 `chrome.tabs.onUpdated` + `chrome.tabs.onRemoved` 监听 publish tab：
+//   - URL 离开 `/publish/publish` 页面 → resolve {url, note_id?}
+//   - tab 被关闭 → reject `publish_canceled`
+//   - 10 min 没有任何变化 → reject `publish_timeout`
+//
+// `waitForPublishCompletion` 抽成顶层 export 是为了 vitest 可注入 chromeApi
+// hook，单测里用 fake event 驱动完整生命周期。
+
+/** 完成发布后回吐给 daemon 的最小载荷。 */
+export interface PublishCompletionResult {
+  /** 跳转到的最终 URL（通常是创作者中心或笔记详情）。 */
+  url: string;
+  /** 从 URL 解析出的笔记 ID（hex）；无法解析时为 null，不阻塞 ok。 */
+  note_id: string | null;
+}
+
+/** 等待选项；chromeApi 仅供单测注入。 */
+export interface PublishWaitOptions {
+  /** 最长等待时间，默认 10 分钟（spec §Fix-T4-1）。 */
+  timeoutMs?: number;
+  chromeApi?: {
+    tabsOnUpdated: Pick<chrome.tabs.TabUpdatedEvent, 'addListener' | 'removeListener'>;
+    tabsOnRemoved: Pick<chrome.tabs.TabRemovedEvent, 'addListener' | 'removeListener'>;
+  };
+}
+
+/** 抛给上层 callback 的取消错误，code 透传到 daemon。 */
+export class PublishCanceledError extends Error {
+  readonly code = 'publish_canceled';
+  constructor(message = 'publish tab closed before completion') {
+    super(message);
+    this.name = 'PublishCanceledError';
+  }
+}
+
+/** 抛给上层 callback 的超时错误，code 透传到 daemon。 */
+export class PublishTimeoutError extends Error {
+  readonly code = 'publish_timeout';
+  constructor(message = 'publish wait timed out') {
+    super(message);
+    this.name = 'PublishTimeoutError';
+  }
+}
+
+/**
+ * publish 表单 URL 模式 —— 用户停留在该页面意味着尚未发布。
+ * 离开此模式视为完成（成功或被用户主动跳走，UX 上等价）。
+ */
+export const PUBLISH_PAGE_PATTERN = /creator\.xiaohongshu\.com\/(?:publish|new)\/(?:publish|note)/i;
+
+/**
+ * XHS 笔记详情 URL 模式，用于提取 note_id（hex 24 位）。
+ * 兼容 `/explore/<id>` 与 `/discovery/item/<id>` 两种形态。
+ */
+export const NOTE_ID_URL_PATTERN = /\/(?:explore|discovery\/item)\/([0-9a-f]{20,})/i;
+
+/** 默认 publish 等待超时：10 分钟。 */
+export const DEFAULT_PUBLISH_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * 等待 publish tab 真正发布完成。
+ * 失败时抛 `PublishCanceledError` / `PublishTimeoutError`，code 字段会被
+ * cmd-handlers-init.wrapTool 透传到 daemon callback envelope。
+ */
+export function waitForPublishCompletion(
+  tabId: number,
+  opts: PublishWaitOptions = {}
+): Promise<PublishCompletionResult> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_PUBLISH_WAIT_TIMEOUT_MS;
+  const tabsOnUpdated = opts.chromeApi?.tabsOnUpdated ?? chrome.tabs.onUpdated;
+  const tabsOnRemoved = opts.chromeApi?.tabsOnRemoved ?? chrome.tabs.onRemoved;
+
+  return new Promise<PublishCompletionResult>((resolve, reject) => {
+    let settled = false;
+
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      try {
+        tabsOnUpdated.removeListener(onUpdated);
+      } catch {
+        /* ignore */
+      }
+      try {
+        tabsOnRemoved.removeListener(onRemoved);
+      } catch {
+        /* ignore */
+      }
+      clearTimeout(timer);
+      fn();
+    };
+
+    const onUpdated = (
+      id: number,
+      changeInfo: chrome.tabs.TabChangeInfo,
+      tab?: chrome.tabs.Tab
+    ) => {
+      if (id !== tabId) return;
+      const url = (changeInfo.url ?? tab?.url ?? '').trim();
+      if (!url) return;
+      // 仍在 publish 表单页 → 还没点 publish。
+      if (PUBLISH_PAGE_PATTERN.test(url)) return;
+      // 离开 publish 表单 → 视为发布完成（XHS 通常跳到创作者中心或笔记详情）。
+      const match = url.match(NOTE_ID_URL_PATTERN);
+      const note_id = match ? match[1] : null;
+      settle(() => resolve({ url, note_id }));
+    };
+
+    const onRemoved = (id: number) => {
+      if (id !== tabId) return;
+      settle(() => reject(new PublishCanceledError()));
+    };
+
+    const timer = setTimeout(() => {
+      settle(() => reject(new PublishTimeoutError(`publish wait timed out after ${timeoutMs}ms`)));
+    }, timeoutMs);
+
+    tabsOnUpdated.addListener(onUpdated);
+    tabsOnRemoved.addListener(onRemoved);
+  });
+}
+
 type PublishDebugLog = {
   ts: string;
   step: string;
@@ -824,8 +950,14 @@ const publishContentExecutor = async (args: Record<string, any>): Promise<Publis
     }
   };
 
-  // 注入发布按钮 click 事件监听器（try-catch 包裹，silent fail，不干扰原有功能）
-  // V2: 统一上报 DUMAS_ASYNC_EVENT，由 dumas-event-relay content script 中继到 Background
+  // 注入发布按钮 click 事件监听器（try-catch 包裹，silent fail，不干扰原有功能）。
+  //
+  // 注意：M1.1 Fix-T4 §1 之前这里发出的 DUMAS_ASYNC_EVENT 期望由
+  // `dumas-event-relay.content.ts` 中继到 Background；该 content script 在当前
+  // 代码库里**未实现**，相关代码处于 V0.5 待办。Fix-T4 之后真正的"等点击 + 等
+  // 发布完成"由 background 端 `waitForPublishCompletion(tabId)` 通过监听
+  // chrome.tabs.onUpdated 完成；此处保留 postMessage 仅作为未来 relay 落地后的
+  // 观测埋点，**不再是发布完成判定的关键路径**。
   const injectPublishButtonListener = (button: HTMLElement, isScheduled: boolean) => {
     try {
       button.addEventListener(
@@ -1124,8 +1256,17 @@ export class PublishContentTool extends BaseTool {
           throw new Error(result.message || 'Unknown error in page script');
         }
 
-        // V2: 页面脚本已直接发送 DUMAS_ASYNC_EVENT，由常驻 dumas-event-relay.content.ts 中继，
-        // 无需再注入 ISOLATED world relay 脚本。
+        // M1.1 Fix-T4 §1: 表单填好之后才进入"等真发布完成"阶段。
+        // runInMainWorld 已经返回 → publish 按钮 listener 已注入。
+        // 这里在 background SW 长期挂监听等用户真点击 + 后端跳转。
+        pushToolLog('tool.wait_publish.start', `tabId=${tab.id}`);
+        const completion = await waitForPublishCompletion(tab.id, {
+          timeoutMs: DEFAULT_PUBLISH_WAIT_TIMEOUT_MS,
+        });
+        pushToolLog(
+          'tool.wait_publish.done',
+          `url=${completion.url}, note_id=${completion.note_id ?? 'null'}`
+        );
 
         return {
           content: [
@@ -1140,7 +1281,9 @@ export class PublishContentTool extends BaseTool {
                 tagCount: safeTags.length,
                 isScheduled: Boolean(result.isScheduled),
                 publishAt: result.publishAt || null,
-                manualPublishPending: true,
+                manualPublishPending: false,
+                url: completion.url,
+                note_id: completion.note_id,
                 toolLogs,
                 scriptLogs,
               }),
@@ -1158,15 +1301,23 @@ export class PublishContentTool extends BaseTool {
     } catch (error) {
       console.error('PublishContent error:', error);
       const errorMessage = error instanceof Error ? error.message : '未知错误';
-      pushToolLog('tool.failed', errorMessage);
+      // 透传 publish_canceled / publish_timeout 等结构化 code 给 daemon callback。
+      const errorCode =
+        typeof (error as any)?.code === 'string' ? ((error as any).code as string) : 'publish_failed';
+      pushToolLog('tool.failed', `${errorCode}: ${errorMessage}`);
       return {
         content: [
           {
             type: 'error',
-            text: `发布内容失败: ${errorMessage}\n调试日志: ${JSON.stringify({
-              toolLogs,
-              scriptLogs: scriptLogs.slice(-80),
-            })}`,
+            text: JSON.stringify({
+              success: false,
+              code: errorCode,
+              message: errorMessage,
+              debug: {
+                toolLogs,
+                scriptLogs: scriptLogs.slice(-80),
+              },
+            }),
           },
         ],
         isError: true,

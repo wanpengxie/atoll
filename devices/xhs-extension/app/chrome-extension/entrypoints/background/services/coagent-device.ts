@@ -104,6 +104,21 @@ function isPendingCallbackEntry(value: unknown): value is PendingCallbackEntry {
   return typeof body.correlation_id === 'string' && (body.status === 'ok' || body.status === 'error');
 }
 
+/**
+ * M1.1 Fix-T4 §4: 把 WS URL 中的 `?key=...` / `&key=...` 替换为 `key=***`。
+ *
+ * WebSocket 构造仍需要原始 URL 走握手鉴权；脱敏版本只用于：
+ *   - `saveConnectionStatus({serverUrl})` 持久化进 chrome.storage.local
+ *   - `console.info / warn / error` 日志输出
+ *
+ * 不依赖 URL 解析失败时回退原串（保守处理：解析不通过仍然 regex redact）。
+ */
+export function redactKey(url: string): string {
+  if (!url) return url;
+  // 同时覆盖 `?key=…` / `&key=…` 与 URL 编码后的形态。
+  return url.replace(/([?&])key=[^&#]*/gi, '$1key=***');
+}
+
 class CoagentDeviceClient {
   private socket: WebSocket | null = null;
   private currentUrl: string | null = null;
@@ -191,10 +206,13 @@ class CoagentDeviceClient {
       this.socket = null;
     }
 
+    // M1.1 Fix-T4 §4: 持久化 / 日志只用脱敏 URL；socket 构造仍用带 key 的原始 url。
+    const safeUrl = redactKey(url);
+
     await saveConnectionStatus({
       connected: false,
       reconnecting: this.shouldReconnect,
-      serverUrl: url,
+      serverUrl: safeUrl,
       lastError: undefined,
     });
 
@@ -214,7 +232,7 @@ class CoagentDeviceClient {
         void saveConnectionStatus({
           connected: false,
           reconnecting: false,
-          serverUrl: url,
+          serverUrl: safeUrl,
           lastError: message,
         });
         settle({ success: false, error: message });
@@ -222,16 +240,16 @@ class CoagentDeviceClient {
       }
 
       this.socket = socket;
-      console.info('[CoagentDevice] connecting', { url });
+      console.info('[CoagentDevice] connecting', { url: safeUrl });
 
       socket.addEventListener('open', () => {
         if (this.socket !== socket) return;
-        console.info('[CoagentDevice] WS opened', { url });
+        console.info('[CoagentDevice] WS opened', { url: safeUrl });
         this.reconnectAttempt = 0;
         void saveConnectionStatus({
           connected: true,
           reconnecting: false,
-          serverUrl: url,
+          serverUrl: safeUrl,
           lastError: undefined,
         });
         // M1.1 Fix-T3: drain pending-callbacks outbox via callback_replay frame.
@@ -248,7 +266,7 @@ class CoagentDeviceClient {
         if (this.socket !== socket) return;
         const reason = event.reason || 'WebSocket closed';
         console.warn('[CoagentDevice] WS closed', {
-          url,
+          url: safeUrl,
           code: event.code,
           wasClean: event.wasClean,
           reason,
@@ -257,7 +275,7 @@ class CoagentDeviceClient {
         void saveConnectionStatus({
           connected: false,
           reconnecting: this.shouldReconnect,
-          serverUrl: url,
+          serverUrl: safeUrl,
           lastError: event.wasClean ? undefined : reason,
         });
         if (!resolved) settle({ success: false, error: reason });
@@ -266,14 +284,21 @@ class CoagentDeviceClient {
 
       socket.addEventListener('error', (event) => {
         if (this.socket !== socket) return;
-        const message = event instanceof ErrorEvent ? event.message : 'WebSocket error';
-        console.error('[CoagentDevice] WS error', { url, message });
+        // ErrorEvent 仅在浏览器环境下存在；vitest 跑在 node 环境时直接读 message 字段。
+        const message =
+          typeof ErrorEvent !== 'undefined' && event instanceof ErrorEvent
+            ? event.message
+            : (event && (event as any).message) || 'WebSocket error';
+        console.error('[CoagentDevice] WS error', { url: safeUrl, message });
         void saveConnectionStatus({
           connected: false,
           reconnecting: this.shouldReconnect,
-          serverUrl: url,
+          serverUrl: safeUrl,
           lastError: message,
         });
+        // Fix-T4 §7 covers connectOnce open+error race: error 之前未 settle 时
+        // 应明确告知调用方失败，避免长 pending。
+        if (!resolved) settle({ success: false, error: message });
       });
     });
   }

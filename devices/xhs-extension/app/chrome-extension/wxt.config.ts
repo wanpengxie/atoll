@@ -91,9 +91,13 @@ export default defineConfig({
       ...(env.mode === 'production' && {
         terserOptions: {
           compress: {
-            drop_console: true, // 移除所有 console
+            // M1.1 Fix-T4 §3: 保留 console.error / console.warn（故障期可观测）。
+            // terser ≥ 5.7 支持 drop_console 数组形式，仅 drop 列出的 console 方法。
+            drop_console: ['log', 'info', 'debug'],
             drop_debugger: true, // 移除 debugger
-            pure_funcs: ['console.log', 'console.info', 'console.debug', 'console.warn'],
+            // pure_funcs 与 drop_console 配合，进一步标记副作用安全；
+            // 同样不再列入 console.warn / console.error，让它们留在生产包里。
+            pure_funcs: ['console.log', 'console.info', 'console.debug'],
             // 启用更多压缩选项
             passes: 2, // 多次压缩以获得更好的效果
             unsafe: false, // 不使用不安全的优化

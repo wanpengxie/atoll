@@ -54,16 +54,17 @@ vi.mock('../connection-state', () => ({
   getDefaultWebSocketUrl: vi.fn(() => ''),
 }));
 
-// cmd-handlers is irrelevant here (postCallback / drain don't touch handlers).
+// cmd-handlers stub: tests that exercise handleCommand override these per-case.
 vi.mock('./cmd-handlers', () => ({
   getCommandHandler: vi.fn(),
-  isKnownCommand: vi.fn(),
+  isKnownCommand: vi.fn().mockReturnValue(true),
 }));
 
 import {
   CoagentDeviceClientForTest,
   readPendingCallbacks,
   writePendingCallbacks,
+  redactKey,
   type PendingCallbackEntry,
 } from './coagent-device';
 
@@ -427,5 +428,150 @@ describe('WS callback_replay drain on reconnect', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(captured!.sent).toEqual([]);
+  });
+});
+
+// ── M1.1 Fix-T4 §4: WS URL key redact ────────────────────────────────────
+
+describe('redactKey helper', () => {
+  it('replaces ?key=… with ?key=*** ', () => {
+    expect(redactKey('ws://127.0.0.1:9501/device/dev-A?key=secret-123')).toBe(
+      'ws://127.0.0.1:9501/device/dev-A?key=***'
+    );
+  });
+
+  it('replaces &key=… mid-query without touching other params', () => {
+    expect(redactKey('ws://h:1/device/A?foo=bar&key=secret&baz=qux')).toBe(
+      'ws://h:1/device/A?foo=bar&key=***&baz=qux'
+    );
+  });
+
+  it('returns the original URL when no key= present', () => {
+    expect(redactKey('ws://h:1/device/A')).toBe('ws://h:1/device/A');
+    expect(redactKey('')).toBe('');
+  });
+});
+
+// ── M1.1 Fix-T4 §7: connectOnce open+error race ──────────────────────────
+
+describe('connectOnce open+error race', () => {
+  it('error before open settles connect() with success:false', async () => {
+    installFakeChromeStorage();
+    const client = makeClient();
+    let captured: FakeWebSocket | null = null;
+    const SocketCtor: any = function (this: any, url: string) {
+      const ws = new FakeWebSocket(url);
+      captured = ws;
+      return ws;
+    };
+    SocketCtor.OPEN = 1;
+    client.setWebSocketImpl(SocketCtor as unknown as typeof WebSocket);
+
+    const connectPromise = client.connect();
+    await Promise.resolve();
+    expect(captured).not.toBeNull();
+    // Fire error before open — must settle false (was prone to hang before fix).
+    captured!.fire('error', { message: 'ECONNREFUSED' });
+    const result = await connectPromise;
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('ECONNREFUSED');
+  });
+});
+
+// ── M1.1 Fix-T4 §7: handleCommand unknown_cmd → error callback ───────────
+
+describe('handleCommand unknown_cmd path', () => {
+  it('posts error envelope with code=unknown_cmd', async () => {
+    const cmdMod = await import('./cmd-handlers');
+    (cmdMod.isKnownCommand as any).mockReturnValueOnce(false);
+
+    installFakeChromeStorage();
+    const client = makeClient();
+
+    let captured: FakeWebSocket | null = null;
+    const SocketCtor: any = function (this: any, url: string) {
+      const ws = new FakeWebSocket(url);
+      captured = ws;
+      return ws;
+    };
+    SocketCtor.OPEN = 1;
+    client.setWebSocketImpl(SocketCtor as unknown as typeof WebSocket);
+
+    const fetchImpl = vi.fn(async () => fakeResponse(200, { ok: true })) as unknown as typeof fetch;
+    client.setFetchImpl(fetchImpl);
+
+    const connectPromise = client.connect();
+    await Promise.resolve();
+    captured!.triggerOpen();
+    await connectPromise;
+
+    // Drive a fake command frame through onMessage by firing a 'message' event.
+    captured!.fire('message', {
+      data: JSON.stringify({
+        type: 'command',
+        correlation_id: 'corr-unk-1',
+        cmd: 'mystery-cmd',
+        params: {},
+      }),
+    });
+
+    // Allow async dispatch + fetch to flush.
+    await new Promise((r) => setTimeout(r, 5));
+
+    expect(fetchImpl).toHaveBeenCalled();
+    const args = (fetchImpl as any).mock.calls[0];
+    expect(args[0]).toBe('http://127.0.0.1:9501/api/device/dev-A/callback');
+    const body = JSON.parse(args[1].body);
+    expect(body.correlation_id).toBe('corr-unk-1');
+    expect(body.status).toBe('error');
+    expect(body.error.code).toBe('unknown_cmd');
+  });
+
+  it('handler throw is propagated with structured code', async () => {
+    const cmdMod = await import('./cmd-handlers');
+    (cmdMod.isKnownCommand as any).mockReturnValueOnce(true);
+    (cmdMod.getCommandHandler as any).mockReturnValueOnce(async () => {
+      const err = new Error('publish wait timed out');
+      (err as any).code = 'publish_timeout';
+      throw err;
+    });
+
+    installFakeChromeStorage();
+    const client = makeClient();
+
+    let captured: FakeWebSocket | null = null;
+    const SocketCtor: any = function (this: any, url: string) {
+      const ws = new FakeWebSocket(url);
+      captured = ws;
+      return ws;
+    };
+    SocketCtor.OPEN = 1;
+    client.setWebSocketImpl(SocketCtor as unknown as typeof WebSocket);
+
+    const fetchImpl = vi.fn(async () => fakeResponse(200, { ok: true })) as unknown as typeof fetch;
+    client.setFetchImpl(fetchImpl);
+
+    const connectPromise = client.connect();
+    await Promise.resolve();
+    captured!.triggerOpen();
+    await connectPromise;
+
+    captured!.fire('message', {
+      data: JSON.stringify({
+        type: 'command',
+        correlation_id: 'corr-pubt',
+        cmd: 'publish',
+        params: {},
+      }),
+    });
+    await new Promise((r) => setTimeout(r, 5));
+
+    expect(fetchImpl).toHaveBeenCalled();
+    const args = (fetchImpl as any).mock.calls[0];
+    const body = JSON.parse(args[1].body);
+    expect(body.correlation_id).toBe('corr-pubt');
+    expect(body.status).toBe('error');
+    expect(body.error.code).toBe('publish_timeout');
+    expect(body.error.message).toBe('publish wait timed out');
   });
 });

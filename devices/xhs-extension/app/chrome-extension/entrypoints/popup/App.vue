@@ -57,10 +57,13 @@
             />
           </el-form-item>
 
-          <el-form-item label="主人 user_id（可选）" class="server-url-item">
+          <el-form-item
+            label="主人 user_id（可选 - 留空使用 daemon 默认）"
+            class="server-url-item"
+          >
             <el-input
               v-model="connectionForm.userId"
-              placeholder="例 user-001（用于 session sync 标识）"
+              placeholder="例 user-001（留空时由 daemon 解析当前主人）"
             />
           </el-form-item>
 
