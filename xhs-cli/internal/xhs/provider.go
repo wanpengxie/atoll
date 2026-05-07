@@ -37,12 +37,18 @@ type Provider interface {
 // ---- args ----
 
 // PublishArgs 是 publish 命令的参数。
+//
+// 字段约定（mock vs real）：
+//   - mock 模式：CLI 读 ContentPath 文件 → Content；Images 用 string paths（mock 不消费）；ImageData 留空。
+//   - real 模式：CLI 不读 content 文件，只把 ContentPath 解析为 absolute path 传给 daemon；Content 留空；
+//     Images 留空；ImageData 是逐个 base64 编码后的归一化对象数组，对齐 extension publish-content.ts 期望。
 type PublishArgs struct {
-	Title       string   `json:"title"`
-	ContentPath string   `json:"content_path,omitempty"` // 文件路径
-	Content     string   `json:"content,omitempty"`      // 内联正文（mock 用；real 一律读 contentPath 后传）
-	Images      []string `json:"images,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
+	Title       string           `json:"title"`
+	ContentPath string           `json:"content_path,omitempty"` // 文件路径（real 模式必填且为 absolute）
+	Content     string           `json:"content,omitempty"`      // 内联正文（仅 mock 用，real 模式不发）
+	Images      []string         `json:"images,omitempty"`       // 文件路径数组（仅 mock 用）
+	ImageData   []map[string]any `json:"image_data,omitempty"`   // 归一化后的图片对象（仅 real 用，发到 RPC）
+	Tags        []string         `json:"tags,omitempty"`
 }
 
 // SearchArgs 是 search 命令的参数。
@@ -57,8 +63,15 @@ type GetMyRecentArgs struct {
 }
 
 // GetNoteArgs 是 get-note 命令的参数。
+//
+// 字段约定：
+//   - mock 模式：仅消费 NoteID（fixture 路径）。
+//   - real 模式：URL / XsecToken 至少其一非空，CLI 会把三者一起塞 RPC params；
+//     daemon → extension 由 extension 决定如何 fallback（见 spec §4.1 xhs.get-note）。
 type GetNoteArgs struct {
-	NoteID string `json:"note_id"`
+	NoteID    string `json:"note_id,omitempty"`
+	URL       string `json:"url,omitempty"`
+	XsecToken string `json:"xsec_token,omitempty"`
 }
 
 // PublishStatusArgs 是 publish-status 命令的参数。

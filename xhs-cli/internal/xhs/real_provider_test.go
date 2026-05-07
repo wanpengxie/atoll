@@ -303,3 +303,62 @@ func TestLoadRealConfigFromEnv_RequiresAllVars(t *testing.T) {
 		t.Fatalf("config mismatch: %+v", cfg)
 	}
 }
+
+// TestLoadRealConfigFromEnv_RequiresAbsoluteURL（fix-spec.md §Fix-T1.5）：
+// 写错的 DaemonHTTP（没有 scheme/host）应在 LoadRealConfigFromEnv 直接被拒，
+// 而不是后续 http.Client 时报奇怪错。
+func TestLoadRealConfigFromEnv_RequiresAbsoluteURL(t *testing.T) {
+	t.Setenv(EnvDaemonToken, "tok")
+	t.Setenv(EnvChannelID, "ch-1")
+
+	bad := []string{
+		"not-a-url",            // 无 scheme
+		"127.0.0.1:7070",       // 容易被解析成 scheme=127.0.0.1
+		"//127.0.0.1:7070",     // 缺 scheme
+		"/relative/path",       // 相对路径
+	}
+	for _, raw := range bad {
+		t.Setenv(EnvDaemonHTTP, raw)
+		_, err := LoadRealConfigFromEnv()
+		if err == nil {
+			t.Fatalf("expected error for non-absolute %q", raw)
+		}
+		var ce *CodeError
+		if !errors.As(err, &ce) || ce.Code != "config_invalid" {
+			t.Fatalf("expected config_invalid for %q, got %v", raw, err)
+		}
+	}
+
+	// 合法 absolute URL 通过。
+	t.Setenv(EnvDaemonHTTP, "http://127.0.0.1:7070")
+	if _, err := LoadRealConfigFromEnv(); err != nil {
+		t.Fatalf("expected ok for absolute URL, got %v", err)
+	}
+}
+
+// TestPublishRealMode_NoContentInline（fix-spec.md §Fix-T1.1）：
+// real 模式 RPC 不应携带 inline content，只发 absolute content_path。
+func TestPublishRealMode_NoContentInline(t *testing.T) {
+	d := newFakeDaemon()
+	defer d.server.Close()
+	p := newRealProviderForTest(d)
+
+	_, err := p.Publish(context.Background(), PublishArgs{
+		Title:       "T",
+		ContentPath: "/abs/path/to/note.md",
+		Content:     "INLINE-SHOULD-NOT-BE-SENT",
+	})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	inner, ok := d.lastParams["params"].(map[string]any)
+	if !ok {
+		t.Fatalf("inner params missing: %T", d.lastParams["params"])
+	}
+	if _, has := inner["content"]; has {
+		t.Fatalf("real RPC params must NOT contain 'content', got: %v", inner)
+	}
+	if inner["content_path"] != "/abs/path/to/note.md" {
+		t.Fatalf("content_path mismatch: %v", inner["content_path"])
+	}
+}

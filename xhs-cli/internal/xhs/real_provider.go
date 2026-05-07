@@ -59,8 +59,13 @@ func LoadRealConfigFromEnv() (RealConfig, error) {
 	if cfg.ChannelID == "" {
 		return cfg, &CodeError{Code: "config_missing", Msg: fmt.Sprintf("%s is required for real backend", EnvChannelID)}
 	}
-	if _, err := url.Parse(cfg.DaemonHTTP); err != nil {
+	u, err := url.Parse(cfg.DaemonHTTP)
+	if err != nil {
 		return cfg, &CodeError{Code: "config_invalid", Msg: fmt.Sprintf("invalid %s: %s", EnvDaemonHTTP, err)}
+	}
+	// url.Parse 几乎不会返回 error；显式校验 absolute URL（scheme + host 非空）。
+	if u.Scheme == "" || u.Host == "" {
+		return cfg, &CodeError{Code: "config_invalid", Msg: fmt.Sprintf("invalid %s: must be absolute URL with scheme and host (got %q)", EnvDaemonHTTP, cfg.DaemonHTTP)}
 	}
 	return cfg, nil
 }
@@ -94,14 +99,21 @@ func NewRealProvider(cfg RealConfig) *RealProvider {
 func (p *RealProvider) Name() string { return "real" }
 
 // Publish dispatch xhs.publish。返回 DispatchAck（含 correlation_id）。
+//
+// real 模式契约（spec §5.1.5）：
+//   - 不发 inline content；只发 absolute content_path（daemon 端按需读盘）。
+//   - images 已由 CLI 层归一化为 []{type:data, value:data:..., fileName} 塞 ImageData，
+//     RPC 字段名 "images" 对齐 extension publish-content.ts 期望。
 func (p *RealProvider) Publish(ctx context.Context, args PublishArgs) (any, error) {
-	return p.dispatch(ctx, cmdTypePublish, map[string]any{
+	params := map[string]any{
 		"title":        args.Title,
-		"content":      args.Content,
 		"content_path": args.ContentPath,
-		"images":       args.Images,
 		"tags":         args.Tags,
-	})
+	}
+	if len(args.ImageData) > 0 {
+		params["images"] = args.ImageData
+	}
+	return p.dispatch(ctx, cmdTypePublish, params)
 }
 
 // Search dispatch xhs.search。
@@ -120,10 +132,21 @@ func (p *RealProvider) GetMyRecent(ctx context.Context, args GetMyRecentArgs) (a
 }
 
 // GetNote dispatch xhs.get-note。
+//
+// real 模式 RPC 至少需要 url 或 xsec_token 之一（CLI 层校验）；
+// note_id 仍可作为 fallback 一并下发，由 daemon/extension 决定如何使用。
 func (p *RealProvider) GetNote(ctx context.Context, args GetNoteArgs) (any, error) {
-	return p.dispatch(ctx, cmdTypeGetNote, map[string]any{
-		"note_id": args.NoteID,
-	})
+	params := map[string]any{}
+	if args.NoteID != "" {
+		params["note_id"] = args.NoteID
+	}
+	if args.URL != "" {
+		params["url"] = args.URL
+	}
+	if args.XsecToken != "" {
+		params["xsec_token"] = args.XsecToken
+	}
+	return p.dispatch(ctx, cmdTypeGetNote, params)
 }
 
 // PublishStatus dispatch xhs.publish-status。

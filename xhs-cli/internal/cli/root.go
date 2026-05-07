@@ -5,7 +5,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io"
 
 	"github.com/spf13/cobra"
 )
@@ -36,4 +38,29 @@ real 模式必填 env：%s / %s / %s`,
 	)
 
 	return root
+}
+
+// RunCLI 是 coagent-xhs binary 的可测入口。
+//
+// 把 cobra 解析失败 / RunE 返回错误统一转成 stdout JSON envelope（永不再写 stderr）：
+//   - RunE 返回 *CLIError → envelope 用其 Code/Message
+//   - cobra parse / unknown command / 其他 plain error → envelope code="usage_error"
+//   - 成功 → 返回 ExitOK
+//
+// 注意：runWithProvider 内部走 os.Exit；那条路径不会回到这里。本函数只负责入口/解析层。
+func RunCLI(args []string, stdout io.Writer) int {
+	root := NewRootCommand()
+	root.SetOut(stdout)
+	root.SetErr(stdout)
+	root.SetArgs(args)
+	if err := root.Execute(); err != nil {
+		var ce *CLIError
+		if errors.As(err, &ce) && ce != nil {
+			_ = WriteErr(stdout, ce.Code, ce.Message)
+		} else {
+			_ = WriteErr(stdout, "usage_error", err.Error())
+		}
+		return ExitUsageError
+	}
+	return ExitOK
 }

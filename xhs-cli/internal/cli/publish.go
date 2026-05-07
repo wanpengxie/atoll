@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/coagent-ai/xhs-cli/internal/xhs"
@@ -14,10 +15,10 @@ import (
 //	coagent-xhs publish --title <T> --content <path> [--images <paths>] [--tags <tags>]
 //
 // `--content` 是 markdown 文件路径；mock/real 行为：
-//   - mock：读文件为 string 后塞 PublishArgs.Content，note_id 用新 ulid
-//   - real：把文件路径塞 PublishArgs.ContentPath，daemon 端去读
-//
-// 注：因为目前 daemon 端 RPC 还没实现（T3），real 路径仅 dispatch 一个 ack。
+//   - mock：CLI 端读文件为 string 后塞 PublishArgs.Content；Images 用 string paths（mock 不消费）。
+//   - real：CLI 端不读 content 文件，把 content 路径解析成 absolute 后塞 PublishArgs.ContentPath；
+//     Images 逐个 base64 编码归一化为 ImageData = [{type:data, value:data:..., fileName}]，
+//     daemon 端按 abs path 读盘 + 把 images 透传给 extension（spec §5.1.5）。
 func newPublishCmd() *cobra.Command {
 	var (
 		title       string
@@ -37,20 +38,39 @@ func newPublishCmd() *cobra.Command {
 				return NewCLIError("invalid_argument", "--content is required")
 			}
 
-			content, err := os.ReadFile(contentPath)
-			if err != nil {
-				return NewCLIError("content_read_failed", "read content: %s", err)
-			}
-
-			pubArgs := xhs.PublishArgs{
-				Title:       title,
-				ContentPath: contentPath,
-				Content:     string(content),
-				Images:      splitCSV(imagesCSV),
-				Tags:        splitCSV(tagsCSV),
-			}
+			images := splitCSV(imagesCSV)
+			tags := splitCSV(tagsCSV)
 
 			runWithProvider(cmd, func(ctx context.Context, p xhs.Provider) (any, error) {
+				pubArgs := xhs.PublishArgs{
+					Title: title,
+					Tags:  tags,
+				}
+
+				if p.Name() == "real" {
+					// real 模式：abs path + image data 归一化；不发 inline content。
+					abs, err := filepath.Abs(contentPath)
+					if err != nil {
+						return nil, NewCLIError("invalid_argument", "resolve absolute content path %q: %s", contentPath, err)
+					}
+					pubArgs.ContentPath = abs
+
+					normalized, err := normalizeImagesForRPC(images)
+					if err != nil {
+						return nil, err
+					}
+					pubArgs.ImageData = normalized
+				} else {
+					// mock 模式：CLI 读文件 + 直接传 paths（mock 不消费 images）。
+					content, err := os.ReadFile(contentPath)
+					if err != nil {
+						return nil, NewCLIError("content_read_failed", "read content: %s", err)
+					}
+					pubArgs.ContentPath = contentPath
+					pubArgs.Content = string(content)
+					pubArgs.Images = images
+				}
+
 				return p.Publish(ctx, pubArgs)
 			})
 			return nil

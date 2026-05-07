@@ -15,10 +15,14 @@ import (
 //   3. 成功把返回 data 写成成功 envelope。
 //
 // 命令实现只关心如何拼参数 + 选哪个 Provider 方法。
+//
+// 输出走 cmd.OutOrStdout() 而非直接 os.Stdout，便于测试中通过 root.SetOut 截获。
 func runWithProvider(cmd *cobra.Command, fn func(ctx context.Context, p xhs.Provider) (any, error)) {
+	out := cmd.OutOrStdout()
+
 	provider, err := xhs.NewProviderFromEnv()
 	if err != nil {
-		_ = WriteErrFrom(os.Stdout, err)
+		_ = WriteErrFrom(out, err)
 		os.Exit(ExitRuntime)
 	}
 
@@ -29,11 +33,11 @@ func runWithProvider(cmd *cobra.Command, fn func(ctx context.Context, p xhs.Prov
 
 	data, err := fn(ctx, provider)
 	if err != nil {
-		_ = WriteErrFrom(os.Stdout, err)
+		_ = WriteErrFrom(out, err)
 		os.Exit(ExitRuntime)
 	}
 
-	if err := WriteOK(os.Stdout, data); err != nil {
+	if err := WriteOK(out, data); err != nil {
 		// 写 stdout 都失败的话已经无能为力，仅以 ExitRuntime 退出。
 		os.Exit(ExitRuntime)
 	}

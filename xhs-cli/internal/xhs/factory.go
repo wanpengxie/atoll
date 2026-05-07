@@ -40,6 +40,13 @@ func NewProviderFromEnv() (Provider, error) {
 	}
 }
 
+// IsRealBackendFromEnv 仅检查 EnvBackend 是否被显式设置为 real，
+// 不构造 Provider、不读其它依赖 env。用于 CLI 校验早期分支判断。
+func IsRealBackendFromEnv() bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(EnvBackend)))
+	return raw == string(BackendReal)
+}
+
 // NewProvider 按显式 backend 构造 Provider（测试方便）。
 func NewProvider(b Backend) (Provider, error) {
 	switch b {
