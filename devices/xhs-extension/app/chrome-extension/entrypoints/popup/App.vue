@@ -5,43 +5,62 @@
       <div class="header-content">
         <img src="/icon-128.png" alt="Logo" class="logo" />
         <div class="header-text">
-          <h1>小红书MCP助手</h1>
+          <h1>Coagent · 小红书 Device</h1>
         </div>
       </div>
     </header>
 
     <!-- 主体内容 -->
     <main class="popup-main">
-      <!-- API Key 配置 -->
+      <!-- Daemon 设备配置 -->
       <section class="connection-card">
         <div class="connection-card__header">
           <div>
-            <h2>🔑 API Key 配置</h2>
+            <h2>🛰️ Coagent Daemon Device</h2>
             <p>
-              配置你的 API Key 以使用服务。
-              <a href="https://x.zouying.work" target="_blank" class="api-key-link">
-                从这里获取 →
-              </a>
+              填写 daemon 地址、device api key、device id，点击 "连接" 与 daemon
+              建立 WebSocket 长连。
             </p>
           </div>
           <StatusIndicator :status="connectionStatus" :text="connectionStatusText" />
         </div>
 
         <el-form label-position="top" class="connection-form">
-          <el-form-item label="服务器地址" class="server-url-item">
+          <el-form-item label="Daemon WebSocket URL" class="server-url-item">
             <el-input
               v-model="connectionForm.serverUrl"
-              placeholder="ws://127.0.0.1:18040/ws"
+              placeholder="ws://127.0.0.1:9501/device/{deviceId}"
             />
           </el-form-item>
 
-          <el-form-item label="API Key" class="api-key-item">
+          <el-form-item label="Daemon HTTP base" class="server-url-item">
+            <el-input
+              v-model="connectionForm.daemonHttpBase"
+              :placeholder="defaultDaemonHttpBase"
+            />
+          </el-form-item>
+
+          <el-form-item label="Device ID" class="server-url-item">
+            <el-input
+              v-model="connectionForm.deviceId"
+              placeholder="例 xhs-laptop-001"
+            />
+          </el-form-item>
+
+          <el-form-item label="Device API Key" class="api-key-item">
             <el-input
               v-model="connectionForm.apiKey"
               type="password"
               show-password
-              placeholder="输入你的 API Key"
+              placeholder="device api key（与 daemon DEVICE_KEYS 一致）"
               class="api-key-input"
+            />
+          </el-form-item>
+
+          <el-form-item label="主人 user_id（可选）" class="server-url-item">
+            <el-input
+              v-model="connectionForm.userId"
+              placeholder="例 user-001（用于 session sync 标识）"
             />
           </el-form-item>
 
@@ -49,14 +68,14 @@
             <el-button
               type="primary"
               :loading="connecting"
-              @click="connectWebSocket"
+              @click="connectDevice"
               class="action-btn action-btn--primary"
             >
               连接
             </el-button>
             <el-button
               :disabled="!store.connectionStatus.connected"
-              @click="disconnectWebSocket"
+              @click="disconnectDevice"
               class="action-btn"
             >
               断开
@@ -102,7 +121,10 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
 import { useAppStore } from '@/stores/app';
 import StatusIndicator from '@/components/StatusIndicator.vue';
-import { getDefaultWebSocketUrl } from '@/entrypoints/background/connection-state';
+import {
+  getDefaultWebSocketUrl,
+  getDefaultDaemonHttpBase,
+} from '@/entrypoints/background/connection-state';
 import {
   HomeFilled,
   Link,
@@ -111,11 +133,16 @@ import { ElMessage } from 'element-plus';
 
 const store = useAppStore();
 
-// 状态
+const defaultDaemonHttpBase = getDefaultDaemonHttpBase();
+
+// 状态：5 字段 device 配置（spec §6.2.5）
 const connectionForm = ref({
   serverUrl: getDefaultWebSocketUrl(),
   autoReconnect: true,
   apiKey: '',
+  daemonHttpBase: defaultDaemonHttpBase,
+  deviceId: '',
+  userId: '',
 });
 const connecting = ref(false);
 const savingConnection = ref(false);
@@ -147,42 +174,48 @@ const loadConnectionConfig = async () => {
     connectionForm.value.serverUrl = response.config.serverUrl || getDefaultWebSocketUrl();
     connectionForm.value.autoReconnect = response.config.autoReconnect;
     connectionForm.value.apiKey = response.config.apiKey || '';
+    connectionForm.value.daemonHttpBase =
+      response.config.daemonHttpBase || defaultDaemonHttpBase;
+    connectionForm.value.deviceId = response.config.deviceId || '';
+    connectionForm.value.userId = response.config.userId || '';
   }
   configLoaded.value = true;
 };
 
-const connectWebSocket = async () => {
+const buildPayload = () => ({
+  serverUrl: connectionForm.value.serverUrl,
+  autoReconnect: connectionForm.value.autoReconnect,
+  apiKey: connectionForm.value.apiKey,
+  daemonHttpBase: connectionForm.value.daemonHttpBase || defaultDaemonHttpBase,
+  deviceId: connectionForm.value.deviceId,
+  userId: connectionForm.value.userId,
+});
+
+const connectDevice = async () => {
   connecting.value = true;
   const response = await chrome.runtime.sendMessage({
-    type: 'CONNECT_WEBSOCKET',
-    payload: {
-      url: connectionForm.value.serverUrl || getDefaultWebSocketUrl(),
-      apiKey: connectionForm.value.apiKey || undefined,
-    },
+    type: 'CONNECT_DEVICE',
+    payload: buildPayload(),
   });
   connecting.value = false;
 
   if (response?.success) {
-    ElMessage.success('已发起连接');
+    ElMessage.success('已发起 device 连接');
   } else {
-    ElMessage.error(response?.error || '连接失败');
+    ElMessage.error(response?.error || 'device 连接失败');
   }
 };
 
-const disconnectWebSocket = async () => {
-  await chrome.runtime.sendMessage({ type: 'DISCONNECT_WEBSOCKET' });
-  ElMessage.success('连接已断开');
+const disconnectDevice = async () => {
+  await chrome.runtime.sendMessage({ type: 'DISCONNECT_DEVICE' });
+  ElMessage.success('已断开 daemon');
 };
 
 const saveConnectionSettings = async () => {
   savingConnection.value = true;
   const response = await chrome.runtime.sendMessage({
     type: 'SAVE_CONNECTION_CONFIG',
-    payload: {
-      serverUrl: connectionForm.value.serverUrl || getDefaultWebSocketUrl(),
-      autoReconnect: connectionForm.value.autoReconnect,
-      apiKey: connectionForm.value.apiKey,
-    },
+    payload: buildPayload(),
   });
   savingConnection.value = false;
 
@@ -190,7 +223,11 @@ const saveConnectionSettings = async () => {
     connectionForm.value.serverUrl = response.config.serverUrl || getDefaultWebSocketUrl();
     connectionForm.value.autoReconnect = response.config.autoReconnect;
     connectionForm.value.apiKey = response.config.apiKey || '';
-    ElMessage.success('连接配置已保存');
+    connectionForm.value.daemonHttpBase =
+      response.config.daemonHttpBase || defaultDaemonHttpBase;
+    connectionForm.value.deviceId = response.config.deviceId || '';
+    connectionForm.value.userId = response.config.userId || '';
+    ElMessage.success('device 配置已保存');
   } else {
     ElMessage.error(response?.error || '保存失败');
   }
