@@ -31,7 +31,7 @@ function makeFakeChannelManager() {
   };
 }
 
-async function startServer({ verifyDeviceKey, authToken = 'token-rpc' } = {}) {
+async function startServer({ verifyDeviceKey, authToken = 'token-rpc', defaultUserId = '' } = {}) {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'rpc-device-'));
   const socketPath = path.join(tmp, 'd.sock');
   const channelManager = makeFakeChannelManager();
@@ -42,6 +42,7 @@ async function startServer({ verifyDeviceKey, authToken = 'token-rpc' } = {}) {
     httpHost: '127.0.0.1',
     authToken,
     verifyDeviceKey,
+    defaultUserId,
   });
   await server.start();
   const port = server.httpServer.address().port;
@@ -236,5 +237,116 @@ test('non-POST device endpoint returns 405', async () => {
       path: '/api/device/dev-1/callback',
     });
     assert.equal(res.statusCode, 405);
+  } finally { await stopServer(ctx); }
+});
+
+// ── Fix-T2 §1 regression: device key MUST NOT authorize /rpc or /admin/* ────
+
+test('valid device key cannot call /rpc (only daemon/machine tokens are admitted)', async () => {
+  // verifyDeviceKey returns true for ('dev-1','device-key'); RPC authToken is
+  // 'token-rpc'. A request to /rpc bearing the device key must 401.
+  const ctx = await startServer({
+    verifyDeviceKey: ({ deviceId, key }) => deviceId === 'dev-1' && key === 'device-key',
+    authToken: 'token-rpc',
+  });
+  try {
+    const res = await httpJson(ctx.port, {
+      path: '/rpc',
+      headers: { Authorization: 'Bearer device-key' },
+      body: { method: 'channel.list', params: {} },
+    });
+    assert.equal(res.statusCode, 401);
+    assert.equal(res.body.error.code, 'unauthorized');
+  } finally { await stopServer(ctx); }
+});
+
+test('valid device key cannot call /admin/status', async () => {
+  const ctx = await startServer({
+    verifyDeviceKey: ({ deviceId, key }) => deviceId === 'dev-1' && key === 'device-key',
+    authToken: 'token-rpc',
+  });
+  try {
+    const res = await httpJson(ctx.port, {
+      method: 'GET',
+      path: '/admin/status',
+      headers: { Authorization: 'Bearer device-key' },
+    });
+    assert.equal(res.statusCode, 401);
+  } finally { await stopServer(ctx); }
+});
+
+test('callback: rejects empty status (400)', async () => {
+  const ctx = await startServer({ verifyDeviceKey: () => true });
+  try {
+    const res = await httpJson(ctx.port, {
+      path: '/api/device/dev-1/callback',
+      headers: { Authorization: 'Bearer x' },
+      body: { correlation_id: 'c', status: '' },
+    });
+    assert.equal(res.statusCode, 400);
+    assert.match(res.body.error.message, /status must be/);
+  } finally { await stopServer(ctx); }
+});
+
+// ── Fix-T2 §5: /api/device/{id}/session user_id optional via defaultUserId ──
+
+test('session: falls back to defaultUserId when body omits user_id', async () => {
+  const ctx = await startServer({
+    verifyDeviceKey: () => true,
+    defaultUserId: 'user-default',
+  });
+  try {
+    const res = await httpJson(ctx.port, {
+      path: '/api/device/dev-1/session',
+      headers: { Authorization: 'Bearer x' },
+      body: { cookies: [{ name: 'sid', value: 'v1' }] },
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(ctx.channelManager.calls.session.length, 1);
+    const call = ctx.channelManager.calls.session[0];
+    assert.equal(call.userId, 'user-default');
+    assert.deepEqual(call.patch.cookies, [{ name: 'sid', value: 'v1' }]);
+  } finally { await stopServer(ctx); }
+});
+
+test('session: rejects when neither body.user_id nor defaultUserId provided', async () => {
+  const ctx = await startServer({ verifyDeviceKey: () => true, defaultUserId: '' });
+  try {
+    const res = await httpJson(ctx.port, {
+      path: '/api/device/dev-1/session',
+      headers: { Authorization: 'Bearer x' },
+      body: { cookies: [] },
+    });
+    assert.equal(res.statusCode, 400);
+    assert.match(res.body.error.message, /user_id is required/);
+  } finally { await stopServer(ctx); }
+});
+
+test('session: explicit body.user_id wins over defaultUserId', async () => {
+  const ctx = await startServer({
+    verifyDeviceKey: () => true,
+    defaultUserId: 'user-default',
+  });
+  try {
+    const res = await httpJson(ctx.port, {
+      path: '/api/device/dev-1/session',
+      headers: { Authorization: 'Bearer x' },
+      body: { user_id: 'user-override', cookies: [] },
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(ctx.channelManager.calls.session[0].userId, 'user-override');
+  } finally { await stopServer(ctx); }
+});
+
+test('callback: rejects when Authorization is not a Bearer (401)', async () => {
+  const ctx = await startServer({ verifyDeviceKey: () => true });
+  try {
+    const res = await httpJson(ctx.port, {
+      path: '/api/device/dev-1/callback',
+      headers: { Authorization: 'Basic dXNlcjpwYXNz' },
+      body: { correlation_id: 'c', status: 'ok' },
+    });
+    assert.equal(res.statusCode, 401);
   } finally { await stopServer(ctx); }
 });

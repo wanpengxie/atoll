@@ -189,3 +189,146 @@ test('replacing a connection closes the previous one', async () => {
     await closeTestServer(ctx);
   }
 });
+
+// ── Fix-T2 §1: makeKeyVerifier without fallback rejects every unconfigured device ─
+
+test('makeKeyVerifier without fallback rejects unconfigured devices', () => {
+  const verifier = makeKeyVerifier({ deviceKeys: new Map([['device-a', 'key-a']]) });
+  assert.equal(verifier({ deviceId: 'device-a', key: 'key-a' }), true);
+  assert.equal(verifier({ deviceId: 'device-a', key: 'wrong' }), false);
+  // unconfigured device: no fallback → must reject regardless of key value
+  assert.equal(verifier({ deviceId: 'device-b', key: 'key-a' }), false);
+  assert.equal(verifier({ deviceId: 'device-b', key: 'random-key' }), false);
+});
+
+test('makeKeyVerifier rejects empty deviceId / key', () => {
+  const verifier = makeKeyVerifier({ deviceKeys: new Map([['d1', 'good']]) });
+  assert.equal(verifier({}), false);
+  assert.equal(verifier({ deviceId: 'd1', key: '' }), false);
+  assert.equal(verifier({ deviceId: '', key: 'good' }), false);
+  assert.equal(verifier({ deviceId: 'd1' }), false);
+});
+
+// ── parseDeviceIdFromPath edge cases (covered indirectly via handshake) ─
+
+test('rejects connection on multi-segment device path (404)', async () => {
+  const verifier = makeKeyVerifier({ deviceKeys: new Map([['d1', 'good']]) });
+  const ctx = await startTestServer(verifier);
+  try {
+    // /device/foo/bar should not match /device/{id}/?$ → 404
+    const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/device/foo/bar?key=good`);
+    const info = await awaitHandshakeRejection(ws);
+    if (info.kind === 'unexpected-response') {
+      assert.equal(info.status, 404);
+    } else {
+      assert.notEqual(info.code, 1000);
+    }
+  } finally {
+    await closeTestServer(ctx);
+  }
+});
+
+test('accepts trailing slash in device path', async () => {
+  const verifier = makeKeyVerifier({ deviceKeys: new Map([['dx', 'k']]) });
+  const ctx = await startTestServer(verifier);
+  try {
+    const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/device/dx/?key=k`);
+    await once(ws, 'open');
+    for (let i = 0; i < 50 && !ctx.wss.isOnline('dx'); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.equal(ctx.wss.isOnline('dx'), true);
+    ws.close(1000);
+    await once(ws, 'close');
+  } finally {
+    await closeTestServer(ctx);
+  }
+});
+
+test('accepts URL-encoded device id with special chars', async () => {
+  const verifier = makeKeyVerifier({ deviceKeys: new Map([['dev/A', 'k']]) });
+  const ctx = await startTestServer(verifier);
+  try {
+    const ws = connectClient(ctx.port, 'dev/A', 'k');
+    await once(ws, 'open');
+    for (let i = 0; i < 50 && !ctx.wss.isOnline('dev/A'); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.equal(ctx.wss.isOnline('dev/A'), true);
+    ws.close(1000);
+    await once(ws, 'close');
+  } finally {
+    await closeTestServer(ctx);
+  }
+});
+
+// ── pushCommand error branches ─
+
+test('pushCommand returns payload_serialization_failed for cyclic structures', async () => {
+  const verifier = makeKeyVerifier({ deviceKeys: new Map([['d1', 'good']]) });
+  const ctx = await startTestServer(verifier);
+  try {
+    const ws = connectClient(ctx.port, 'd1', 'good');
+    await once(ws, 'open');
+    for (let i = 0; i < 50 && !ctx.wss.isOnline('d1'); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const payload = {};
+    payload.self = payload; // cycle → JSON.stringify throws
+    const result = ctx.wss.pushCommand('d1', payload);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'payload_serialization_failed');
+    ws.close(1000);
+    await once(ws, 'close');
+  } finally {
+    await closeTestServer(ctx);
+  }
+});
+
+test('listOnline only includes OPEN sockets', async () => {
+  const verifier = makeKeyVerifier({ deviceKeys: new Map([['d1', 'good'], ['d2', 'good']]) });
+  const ctx = await startTestServer(verifier);
+  try {
+    assert.deepEqual(ctx.wss.listOnline(), []);
+    const a = connectClient(ctx.port, 'd1', 'good');
+    await once(a, 'open');
+    for (let i = 0; i < 50 && !ctx.wss.isOnline('d1'); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.deepEqual(ctx.wss.listOnline().sort(), ['d1']);
+    a.close(1000);
+    await once(a, 'close');
+    for (let i = 0; i < 50 && ctx.wss.isOnline('d1'); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.deepEqual(ctx.wss.listOnline(), []);
+  } finally {
+    await closeTestServer(ctx);
+  }
+});
+
+test('non-json frames are dropped without affecting onMessage', async () => {
+  const verifier = makeKeyVerifier({ deviceKeys: new Map([['d1', 'good']]) });
+  const inboundFrames = [];
+  const ctx = await startTestServer(verifier, {
+    onMessage: ({ frame }) => inboundFrames.push(frame),
+  });
+  try {
+    const ws = connectClient(ctx.port, 'd1', 'good');
+    await once(ws, 'open');
+    for (let i = 0; i < 50 && !ctx.wss.isOnline('d1'); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    ws.send('not json at all');
+    ws.send(JSON.stringify({ type: 'valid', n: 1 }));
+    for (let i = 0; i < 80 && inboundFrames.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.equal(inboundFrames.length, 1);
+    assert.equal(inboundFrames[0].type, 'valid');
+    ws.close(1000);
+    await once(ws, 'close');
+  } finally {
+    await closeTestServer(ctx);
+  }
+});

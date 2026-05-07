@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { ChannelManager } from '../src/channel-manager.js';
+import { ChannelManager, validateDeviceCommand, DEVICE_COMMAND_TYPES } from '../src/channel-manager.js';
 import { queryStoredMessages, openMessageStore } from '../src/message-store.js';
 
 class FakeWsServer {
@@ -314,4 +314,92 @@ test('rpcCall switch dispatches device.* methods', async (t) => {
     login_state: 'logged_in',
   });
   assert.equal(upd.session.login_state, 'logged_in');
+});
+
+// ── Fix-T2 §3 payload allowlist + per-type schema ────────────────────────────
+
+test('validateDeviceCommand: rejects unknown / non-allowlisted types', () => {
+  for (const bad of ['', 'xhs.unknown', 'foo', 'XHS.PUBLISH', null, undefined]) {
+    assert.throws(() => validateDeviceCommand(bad, {}), (err) => err.code === 'bad_request');
+  }
+  // Snapshot the full allowlist so future drift is loud.
+  assert.deepEqual([...DEVICE_COMMAND_TYPES], [
+    'xhs.publish', 'xhs.search', 'xhs.get-my-recent', 'xhs.get-note', 'xhs.publish-status',
+  ]);
+});
+
+test('validateDeviceCommand: rejects non-object params', () => {
+  for (const bad of [null, 'a string', 42, true, []]) {
+    assert.throws(() => validateDeviceCommand('xhs.search', bad), (err) => err.code === 'bad_request');
+  }
+});
+
+test('validateDeviceCommand: xhs.publish needs title + (content|content_path)', () => {
+  assert.throws(() => validateDeviceCommand('xhs.publish', {}), /title/);
+  assert.throws(() => validateDeviceCommand('xhs.publish', { title: 'hi' }), /content or content_path/);
+  // valid via inline content
+  validateDeviceCommand('xhs.publish', { title: 'hi', content: 'body' });
+  // valid via path
+  validateDeviceCommand('xhs.publish', { title: 'hi', content_path: '/abs/path.md' });
+  // images / tags must be arrays when present
+  assert.throws(() => validateDeviceCommand('xhs.publish', { title: 'hi', content: 'b', images: 'nope' }), /images must be an array/);
+  assert.throws(() => validateDeviceCommand('xhs.publish', { title: 'hi', content: 'b', tags: {} }), /tags must be an array/);
+});
+
+test('validateDeviceCommand: xhs.search / xhs.get-note / xhs.publish-status', () => {
+  assert.throws(() => validateDeviceCommand('xhs.search', {}), /keyword/);
+  validateDeviceCommand('xhs.search', { keyword: 'foo' });
+  validateDeviceCommand('xhs.search', { keyword: 'foo', limit: 5 });
+  assert.throws(() => validateDeviceCommand('xhs.search', { keyword: 'foo', limit: -1 }), /limit/);
+
+  // get-my-recent only checks limit type.
+  validateDeviceCommand('xhs.get-my-recent', {});
+  assert.throws(() => validateDeviceCommand('xhs.get-my-recent', { limit: 'lots' }), /limit/);
+
+  // get-note: url OR xsec_token required
+  assert.throws(() => validateDeviceCommand('xhs.get-note', {}), /url or xsec_token/);
+  validateDeviceCommand('xhs.get-note', { url: 'https://xhs.com/note/x' });
+  validateDeviceCommand('xhs.get-note', { xsec_token: 'abc' });
+
+  // publish-status: correlation_id required
+  assert.throws(() => validateDeviceCommand('xhs.publish-status', {}), /correlation_id/);
+  validateDeviceCommand('xhs.publish-status', { correlation_id: 'corr-1' });
+});
+
+test('deviceCommandSend rejects unknown type before resolving device/user', async (t) => {
+  const ctx = await createHarness(t);
+  await assert.rejects(
+    ctx.cm.deviceCommandSend({ channel_id: 'ch-xhs-1', type: 'xhs.bogus', params: {} }),
+    (err) => err.code === 'bad_request' && /allowed/.test(err.message),
+  );
+  // No dispatch.start should be emitted on schema rejection.
+  const dispatched = readDispatchMessages(ctx.node);
+  assert.equal(dispatched.length, 0);
+});
+
+test('deviceCommandSend rejects xhs.publish missing title', async (t) => {
+  const ctx = await createHarness(t);
+  ctx.ws.goOnline('device-A');
+  await assert.rejects(
+    ctx.cm.deviceCommandSend({
+      channel_id: 'ch-xhs-1',
+      type: 'xhs.publish',
+      params: { content: 'body' },
+    }),
+    (err) => err.code === 'bad_request' && /title/.test(err.message),
+  );
+});
+
+test('deviceCommandSend bubbles up payload_serialization_failed reason as device_offline', async (t) => {
+  const ctx = await createHarness(t);
+  ctx.ws.goOnline('device-A');
+  ctx.ws.nextResult = { ok: false, reason: 'payload_serialization_failed', message: 'cyclic' };
+  await assert.rejects(
+    ctx.cm.deviceCommandSend({
+      channel_id: 'ch-xhs-1',
+      type: 'xhs.search',
+      params: { keyword: 'q' },
+    }),
+    (err) => err.code === 'device_offline' && /payload_serialization_failed/.test(err.message),
+  );
 });

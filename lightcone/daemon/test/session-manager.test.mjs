@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -110,5 +110,45 @@ test('getSession throws session_corrupted on malformed json', () => {
     assert.throws(() => sm.getSession('user-010'), (err) => err.code === 'session_corrupted');
   } finally {
     rmSync(baseDir, { recursive: true, force: true });
+  }
+});
+
+// ── Fix-T2 §7: per-user dirs locked down 0o700 (claude-M6) ─
+
+test('updateSession creates baseDir + per-user dirs with mode 0o700', () => {
+  // mkdtempSync drops a temp dir at default umask, so use a fresh nested baseDir
+  // we never created so the SessionManager is responsible for both levels.
+  const root = mkdtempSync(path.join(os.tmpdir(), 'coagent-session-mode-'));
+  const baseDir = path.join(root, 'users');
+  try {
+    const sm = new SessionManager({ baseDir });
+    sm.updateSession('user-mode', { cookies: [] });
+    const baseStat = statSync(baseDir);
+    const userStat = statSync(sm.userDir('user-mode'));
+    // mask & 0o777 to ignore S_IFDIR bits
+    assert.equal((baseStat.mode & 0o777), 0o700, `baseDir mode=${(baseStat.mode & 0o777).toString(8)}, want 0o700`);
+    assert.equal((userStat.mode & 0o777), 0o700, `userDir mode=${(userStat.mode & 0o777).toString(8)}, want 0o700`);
+    // session file mode 0o600 is the existing contract — verify still holds.
+    const fileStat = statSync(sm.sessionPath('user-mode'));
+    assert.equal((fileStat.mode & 0o777), 0o600);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── Extra defensive cases for assertUserId ─
+
+test('assertUserId rejects exactly 65 chars but accepts 64', () => {
+  const sm = new SessionManager({ baseDir: tmpBase() });
+  const sixtyFour = 'a'.repeat(64);
+  const sixtyFive = 'a'.repeat(65);
+  assert.equal(SessionManager.assertUserId(sixtyFour), sixtyFour);
+  assert.throws(() => SessionManager.assertUserId(sixtyFive), /invalid user_id/);
+});
+
+test('assertUserId rejects directory-like strings', () => {
+  const sm = new SessionManager({ baseDir: tmpBase() });
+  for (const bad of ['../escape', './self', '..', '.', 'a/b', 'a\\b', 'a b', '#anchor', '?q=1']) {
+    assert.throws(() => sm.userDir(bad), /invalid user_id/);
   }
 });
