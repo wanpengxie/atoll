@@ -38,7 +38,16 @@ function headerValue(req, name) {
 }
 
 export class RpcServer {
-  constructor({ channelManager, socketPath, httpPort = null, httpHost = '127.0.0.1', authToken = '', authTokens = [] }) {
+  constructor({
+    channelManager,
+    socketPath,
+    httpPort = null,
+    httpHost = '127.0.0.1',
+    authToken = '',
+    authTokens = [],
+    deviceWsServer = null,
+    verifyDeviceKey = null,
+  }) {
     this.channelManager = channelManager;
     this.socketPath = socketPath;
     this.httpPort = httpPort;
@@ -47,6 +56,8 @@ export class RpcServer {
     this.authTokens = [...new Set([authToken, ...authTokens].filter(Boolean))];
     this.socketServer = null;
     this.httpServer = null;
+    this.deviceWsServer = deviceWsServer;
+    this.verifyDeviceKey = typeof verifyDeviceKey === 'function' ? verifyDeviceKey : null;
   }
 
   async start() {
@@ -78,10 +89,19 @@ export class RpcServer {
         this.httpServer.once('error', reject);
         this.httpServer.listen(this.httpPort, this.httpHost, () => resolve());
       });
+
+      // Attach device WS server (if configured) to the same http port —
+      // shares the listener via 'upgrade' event interception (see DeviceWsServer.attach).
+      if (this.deviceWsServer && typeof this.deviceWsServer.attach === 'function') {
+        this.deviceWsServer.attach(this.httpServer);
+      }
     }
   }
 
   async stop() {
+    if (this.deviceWsServer && typeof this.deviceWsServer.close === 'function') {
+      try { await this.deviceWsServer.close(); } catch {}
+    }
     await Promise.all([
       this._closeServer(this.socketServer),
       this._closeServer(this.httpServer),
@@ -98,6 +118,11 @@ export class RpcServer {
 
     if (url.pathname.startsWith('/admin/')) {
       await this._handleAdminRequest(req, res, url);
+      return;
+    }
+
+    if (url.pathname.startsWith('/api/device/')) {
+      await this._handleDeviceRequest(req, res, url);
       return;
     }
 
@@ -150,6 +175,104 @@ export class RpcServer {
     const auth = req.headers.authorization ?? '';
     if (!auth.startsWith('Bearer ')) return false;
     return this.authTokens.includes(auth.slice(7));
+  }
+
+  _bearerKey(req) {
+    const auth = req.headers.authorization ?? '';
+    if (typeof auth !== 'string' || !auth.startsWith('Bearer ')) return '';
+    return auth.slice(7).trim();
+  }
+
+  async _handleDeviceRequest(req, res, url) {
+    // Routes:
+    //   POST /api/device/{deviceId}/callback
+    //   POST /api/device/{deviceId}/session
+    const m = /^\/api\/device\/([^/]+)\/(callback|session)\/?$/.exec(url.pathname);
+    if (!m) {
+      writeJson(res, 404, { ok: false, error: { code: 'not_found', message: 'unknown device endpoint' } });
+      return;
+    }
+    if (req.method !== 'POST') {
+      writeJson(res, 405, { ok: false, error: { code: 'method_not_allowed', message: 'POST required' } });
+      return;
+    }
+    let deviceId;
+    try {
+      deviceId = decodeURIComponent(m[1]);
+    } catch {
+      writeJson(res, 400, { ok: false, error: { code: 'bad_request', message: 'invalid device id' } });
+      return;
+    }
+    const action = m[2];
+
+    const key = this._bearerKey(req);
+    if (!key) {
+      writeJson(res, 401, { ok: false, error: { code: 'unauthorized', message: 'Bearer token required' } });
+      return;
+    }
+    if (!this.verifyDeviceKey || !this.verifyDeviceKey({ deviceId, key })) {
+      writeJson(res, 401, { ok: false, error: { code: 'unauthorized', message: 'invalid device api key' } });
+      return;
+    }
+
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (err) {
+      writeJson(res, 400, { ok: false, error: { code: 'bad_request', message: err.message } });
+      return;
+    }
+
+    try {
+      if (action === 'callback') {
+        const correlationId = String(body.correlation_id ?? body.correlationId ?? '').trim();
+        if (!correlationId) {
+          writeJson(res, 400, { ok: false, error: { code: 'bad_request', message: 'correlation_id is required' } });
+          return;
+        }
+        const status = String(body.status ?? '').trim().toLowerCase();
+        if (!['ok', 'error'].includes(status)) {
+          writeJson(res, 400, { ok: false, error: { code: 'bad_request', message: 'status must be ok|error' } });
+          return;
+        }
+        const result = await this.channelManager.deviceCallback({
+          deviceId,
+          correlationId,
+          status,
+          result: body.result ?? null,
+          error: body.error ?? null,
+        });
+        writeJson(res, 200, { ok: true, result });
+        return;
+      }
+
+      if (action === 'session') {
+        // body must contain user_id (caller provides which xhs login this device represents).
+        const userId = String(body.user_id ?? body.userId ?? '').trim();
+        if (!userId) {
+          writeJson(res, 400, { ok: false, error: { code: 'bad_request', message: 'user_id is required' } });
+          return;
+        }
+        const patch = { ...body };
+        delete patch.user_id;
+        delete patch.userId;
+        const result = await this.channelManager.deviceSessionUpdate({
+          deviceId,
+          userId,
+          patch,
+        });
+        writeJson(res, 200, { ok: true, result });
+        return;
+      }
+    } catch (err) {
+      writeJson(res, err.statusCode ?? 400, {
+        ok: false,
+        error: {
+          code: err.code ?? 'device_error',
+          message: err.message,
+        },
+      });
+    }
   }
 
   async _handleAdminRequest(req, res, url) {
