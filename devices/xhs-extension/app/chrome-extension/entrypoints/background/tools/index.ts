@@ -23,11 +23,18 @@ import { XhsGetNoteAnalyticsTool } from './xiaohongshu/get-note-analytics';
 import { XhsGetNoteCommentsTool } from './xiaohongshu/get-note-comments';
 import { XhsGetTrendingTopicsTool } from './xiaohongshu/get-trending-topics';
 import { XhsAnalyzeMyProfileTool, XhsAnalyzeProfileTool } from './xiaohongshu/analyze-profile';
+// M1.1-T2 新增：5 个 daemon cmd 直接对应的工具实现
+import { XhsGetNoteTool } from './xiaohongshu/get-note';
+import { XhsGetMyRecentTool } from './xiaohongshu/get-my-recent';
+import { XhsPublishStatusTool } from './xiaohongshu/publish-status';
 
 // 抖音工具
 import { DouyinGetCreatorInfoTool } from './douyin/get-creator-info';
 import { DouyinCheckLoginTool } from './douyin/check-login';
 import { DouyinPublishContentTool } from './douyin/publish-content';
+
+// coagent device cmd handler 注册
+import { initCoagentDeviceCmdHandlers } from '../services/cmd-handlers-init';
 
 // 工具注册表
 const toolsRegistry = new Map<string, any>();
@@ -64,6 +71,11 @@ export function initToolsRegistry() {
   registerTool(new XhsAnalyzeMyProfileTool());
   registerTool(new XhsAnalyzeProfileTool());
 
+  // M1.1-T2: 5 个 daemon cmd 直对工具
+  registerTool(new XhsGetNoteTool());
+  registerTool(new XhsGetMyRecentTool());
+  registerTool(new XhsPublishStatusTool());
+
   // 注册 CDP 通用工具
   registerTool(new ExecuteCdpScriptTool());
 
@@ -74,6 +86,9 @@ export function initToolsRegistry() {
 
   // 启动 Cookie 自动同步服务
   cookieSyncService.start();
+
+  // 注册 coagent daemon device cmd handlers（5 个 cmd → 工具实现的桥）
+  initCoagentDeviceCmdHandlers();
 
   console.log(`Registered ${toolsRegistry.size} tools`);
 }
