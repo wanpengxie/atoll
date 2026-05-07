@@ -1,0 +1,7 @@
+# 编译产物
+/coagent-xhs
+/bin/
+
+# 临时
+*.test
+*.out
