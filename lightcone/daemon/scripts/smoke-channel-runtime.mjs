@@ -273,6 +273,10 @@ try {
     COAGENT_DAEMON_HTTP: `http://127.0.0.1:${httpPort}`,
     COAGENT_DAEMON_TOKEN: daemonToken,
     COAGENT_AGENT_NAME: started.agent_name ?? 'channel-agent',
+    // Channel runtime smoke is asserting agent + dispatch infrastructure, not the
+    // M1.1 Go xhs binary. Pin xhs to the ts-mock path so this smoke does not
+    // require coagent-xhs to be built.
+    COAGENT_XHS_PROVIDER: 'ts-mock',
   };
 
   const unauthorizedResponse = await curlSocketRpc({
