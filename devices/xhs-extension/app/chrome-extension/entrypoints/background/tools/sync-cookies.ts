@@ -1,6 +1,13 @@
-import { XIAOHONGSHU_TOOL_NAMES, ToolResult, XIAOHONGSHU_URLS, EXTENSION_CONSTANTS } from 'xiaohongshu-mcp-shared';
+import {
+  XIAOHONGSHU_TOOL_NAMES,
+  ToolResult,
+  XIAOHONGSHU_URLS,
+  EXTENSION_CONSTANTS,
+  COAGENT_DEVICE_PROTOCOL,
+} from 'xiaohongshu-mcp-shared';
 import { BaseTool } from './base-tool';
 import { getConnectionConfig } from '../connection-state';
+import { deriveHttpBaseFromWsUrl } from '../services/coagent-device';
 
 /**
  * 需要同步的小红书 Cookie 名称
@@ -145,42 +152,68 @@ export class SyncCookiesTool extends BaseTool {
   }
 
   /**
-   * 同步 Cookie 到后端 API
+   * 同步 Cookie 到 coagent daemon device session 端点（spec §4.3）。
+   * URL: POST {daemonHttpBase}/api/device/{deviceId}/session
+   * Header: Authorization: Bearer {device_api_key}
+   * Body: {cookies:[{name,value,domain,path,expires,httpOnly,secure,sameSite}], login_state}
    */
   private async syncToBackend(cookies: any[]): Promise<{ success: boolean; message: string }> {
     const config = await getConnectionConfig();
+    const apiKey = (config.apiKey ?? '').trim();
+    const deviceId = (config.deviceId ?? '').trim();
+    const httpBase =
+      (config.daemonHttpBase ?? '').trim() || deriveHttpBaseFromWsUrl(config.serverUrl ?? '');
 
-    // 从 WebSocket URL 提取 HTTP base URL
-    // ws://127.0.0.1:18040/ws -> http://127.0.0.1:18040
-    let baseUrl = config.serverUrl
-      .replace('ws://', 'http://')
-      .replace('wss://', 'https://')
-      .replace('/ws', '');
+    if (!httpBase || !deviceId || !apiKey) {
+      return {
+        success: false,
+        message: 'Device 配置不完整（缺少 daemon HTTP base / device id / device api key）',
+      };
+    }
 
-    const apiUrl = `${baseUrl}/api/xhs/credentials/sync`;
+    // login_state 用必备 cookie 的存在性近似判断；准确判定请走 check-login.ts。
+    const cookieNames = cookies.map((c) => c.name);
+    const isLoggedIn =
+      cookieNames.includes('web_session') || cookieNames.includes('access-token');
+
+    const apiUrl =
+      stripTrailingSlash(httpBase) +
+      COAGENT_DEVICE_PROTOCOL.CALLBACK_PATH_PREFIX +
+      encodeURIComponent(deviceId) +
+      COAGENT_DEVICE_PROTOCOL.CALLBACK_PATH_SUFFIX_SESSION;
 
     try {
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${config.apiKey}`,
+          Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({ cookies }),
+        body: JSON.stringify({
+          user_id: (config.userId ?? '').trim() || undefined,
+          cookies,
+          login_state: isLoggedIn ? 'logged_in' : 'unknown',
+        }),
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
+        const errorText = await response.text().catch(() => '');
         return {
           success: false,
-          message: `同步失败 (${response.status}): ${errorText}`,
+          message: `device session 上报失败 (${response.status}): ${errorText}`,
         };
       }
 
-      const result = await response.json();
+      // daemon 端 200 即视为成功；body 可能含 {ok:true,...}
+      let bodyText = '';
+      try {
+        bodyText = await response.text();
+      } catch {
+        // ignore
+      }
       return {
-        success: result.success,
-        message: result.message || 'Cookie 同步成功',
+        success: true,
+        message: bodyText ? `device session 已上报: ${bodyText}` : 'device session 已上报',
       };
     } catch (error) {
       return {
@@ -189,6 +222,10 @@ export class SyncCookiesTool extends BaseTool {
       };
     }
   }
+}
+
+function stripTrailingSlash(s: string): string {
+  return s.endsWith('/') ? s.slice(0, -1) : s;
 }
 
 /**
@@ -206,7 +243,8 @@ export class CookieSyncService {
 
   /**
    * 启动自动同步服务
-   * 监听创作者平台页面访问，自动同步 Cookie
+   * 监听创作者平台页面访问 + xhs cookie 变化，自动 POST 到 coagent daemon /api/device/{id}/session。
+   * spec §6.2.4：启动时主动 sync 一次。
    */
   start() {
     // 监听页面更新，当用户访问创作者平台时自动同步
@@ -216,6 +254,11 @@ export class CookieSyncService {
     chrome.cookies.onChanged.addListener(this.handleCookieChange.bind(this));
 
     console.log('[CookieSyncService] Started');
+
+    // 启动时主动 sync 一次（spec §6.2.4）；不阻塞启动，错误吞掉。
+    void this.syncNow().then((result) => {
+      console.log('[CookieSyncService] initial sync result:', { isError: result.isError });
+    });
   }
 
   /**
