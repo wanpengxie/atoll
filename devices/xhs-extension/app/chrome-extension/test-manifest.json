@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "Test IIFE Service Worker",
+  "version": "1.0.0",
+  "background": {
+    "service_worker": "test-background.js"
+  }
+}

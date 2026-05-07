@@ -1,0 +1,45 @@
+{
+  "name": "xiaohongshu-mcp-extension",
+  "displayName": "小红书MCP助手",
+  "version": "1.1.0",
+  "description": "通过MCP协议控制小红书操作的Chrome插件",
+  "author": "XHS MCP Team",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "dev:firefox": "wxt -b firefox",
+    "build": "wxt build",
+    "build:firefox": "wxt build -b firefox",
+    "build:zip": "wxt zip",
+    "zip": "wxt zip",
+    "zip:firefox": "wxt zip -b firefox",
+    "compile": "vue-tsc --noEmit",
+    "postinstall": "wxt prepare",
+    "clean": "rm -rf dist .output",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@vueuse/core": "^10.7.0",
+    "element-plus": "^2.4.4",
+    "pinia": "^2.1.7",
+    "vue": "^3.5.13",
+    "xiaohongshu-mcp-shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.318",
+    "@wxt-dev/module-vue": "^1.0.2",
+    "dotenv": "^16.5.0",
+    "terser": "^5.44.0",
+    "typescript": "^5.8.3",
+    "vite-plugin-static-copy": "^3.0.0",
+    "vue-tsc": "^2.2.8",
+    "wxt": "^0.20.0"
+  }
+}
