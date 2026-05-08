@@ -2,11 +2,18 @@
 //
 // M1.1-T2 起 extension 直连 coagent daemon `/device/{deviceId}` WS，
 // 不再连 1studio backend；本模块持有 device 配置：
-//   - serverUrl       (= daemon WS URL，例 ws://127.0.0.1:9501/device/{deviceId})
-//   - apiKey          (= device api key，header 与 WS 鉴权共用)
-//   - daemonHttpBase  (= daemon HTTP base，例 http://127.0.0.1:9501)
-//   - deviceId        (= 设备唯一 ID；与 WS path 中的 deviceId 一致)
-//   - userId          (= 当前主人 user_id；session sync / callback 上报使用)
+//   - serverUrl          (= daemon WS URL，例 ws://127.0.0.1:9501/device/{deviceId})
+//   - apiKey             (= device api key，header 与 WS 鉴权共用)
+//   - daemonHttpBase     (= daemon HTTP base，例 http://127.0.0.1:9501)
+//   - deviceId           (= 设备唯一 ID；与 WS path 中的 deviceId 一致)
+//   - userId             (= 当前主人 user_id；session sync / callback 上报使用)
+//   - lightconeServerUrl (M1.2-T3) lightcone server URL，popup 主入口调
+//                        `/api/device/resolve` 反查 device 全套配置时使用。
+//   - channelId/daemonId (M1.2-T3) resolve 返回的元数据，备用。
+//   - wsUrl/httpBase     (M1.2-T3) 描述 storage 形态对齐用的别名字段；运行时
+//                        coagent-device.ts/sync-cookies.ts 仍然只读 serverUrl/
+//                        daemonHttpBase 这两个 canonical 字段；写入侧把同样的
+//                        值再以 wsUrl/httpBase 写一份方便外部读取与未来 rename。
 //
 // `serverUrl` / `apiKey` 命名沿用，方便最少改动 tools/sync-cookies.ts 等下游；
 // 在 phase-5 cookie sync 完成后这两个字段语义统一为 device 形态。
@@ -16,6 +23,12 @@
 import { EXTENSION_CONSTANTS } from 'coagent-xhs-shared';
 
 const DEFAULT_DAEMON_HTTP_BASE = 'http://127.0.0.1:9501';
+/**
+ * M1.2-T3 — popup 主入口默认 lightcone server URL。ticket 描述明确指定
+ * `https://lightcone-server` 作为 placeholder；用户必须改成真实部署域名才能
+ * 让 resolve 调用走通。
+ */
+const DEFAULT_LIGHTCONE_SERVER_URL = 'https://lightcone-server';
 
 /** Device 连接状态快照（持久化到 chrome.storage.local；popup 也读它）。 */
 export interface ExtensionConnectionStatus {
@@ -40,6 +53,34 @@ export interface ConnectionConfig {
   deviceId?: string;
   /** 主人 user_id，session sync / callback 携带；空则后端取默认。 */
   userId?: string;
+
+  // ── M1.2-T3 新增字段 ────────────────────────────────────────────────────
+  /**
+   * Lightcone server URL（popup 主入口走 1-key 流程时使用）。
+   * 例 `https://lightcone.example.com`。POST `${lightconeServerUrl}/api/device/resolve`
+   * 反查 device 全套配置（ws_url/http_url/device_id/user_id/channel_id/daemon_id）。
+   *
+   * 注意：与 `serverUrl`（= daemon WS URL）不是同一个东西。
+   *   - lightconeServerUrl: lightcone backend HTTP，每次 popup connect 时被请求。
+   *   - serverUrl:          daemon WS，service worker 长连保持。
+   */
+  lightconeServerUrl?: string;
+  /**
+   * `serverUrl` 的别名（与 ticket 描述里给的 storage shape 对齐）。
+   * 写入时双写以便未来 reader 直接读 `wsUrl`；运行时 coagent-device.ts 仍然
+   * 读 `serverUrl` 作为 canonical 源。
+   */
+  wsUrl?: string;
+  /**
+   * `daemonHttpBase` 的别名（与 ticket 描述里给的 storage shape 对齐）。
+   * 写入时双写；运行时 coagent-device.ts/sync-cookies.ts 仍然读
+   * `daemonHttpBase` 作为 canonical 源。
+   */
+  httpBase?: string;
+  /** Resolve 返回的 channel_id 元数据（暂时不被运行时消费，方便 debug）。 */
+  channelId?: string;
+  /** Resolve 返回的 daemon_id 元数据（暂时不被运行时消费，方便 debug）。 */
+  daemonId?: string;
 }
 
 const DEFAULT_STATUS: ExtensionConnectionStatus = {
@@ -55,6 +96,12 @@ const DEFAULT_CONFIG: ConnectionConfig = {
   daemonHttpBase: DEFAULT_DAEMON_HTTP_BASE,
   deviceId: '',
   userId: '',
+  // M1.2-T3：主入口 lightcone server URL 默认值（用户必须改成真实域名）。
+  lightconeServerUrl: DEFAULT_LIGHTCONE_SERVER_URL,
+  wsUrl: '',
+  httpBase: DEFAULT_DAEMON_HTTP_BASE,
+  channelId: '',
+  daemonId: '',
 };
 
 export async function getStoredConnectionStatus(): Promise<ExtensionConnectionStatus> {
@@ -115,10 +162,43 @@ export async function saveConnectionConfig(
 ): Promise<ConnectionConfig> {
   const current = await getConnectionConfig();
   const updated: ConnectionConfig = { ...current, ...partial };
+  // M1.2-T3：双向镜像 serverUrl/wsUrl 与 daemonHttpBase/httpBase，保证存储里
+  // 两套字段始终一致，无论 patch 用哪一边写入。
+  syncFieldAliases(updated, partial);
   await chrome.storage.local.set({
     [EXTENSION_CONSTANTS.STORAGE_KEYS.CONNECTION_CONFIG]: updated,
   });
   return updated;
+}
+
+/**
+ * 把 `serverUrl ↔ wsUrl`、`daemonHttpBase ↔ httpBase` 双写镜像。
+ *
+ * 规则：
+ *   - 如果 patch 里只显式写了别名（wsUrl / httpBase），把它复制到 canonical 字段。
+ *   - 如果 patch 里只显式写了 canonical（serverUrl / daemonHttpBase），把它复制到别名。
+ *   - 两边都写：以 patch 显式提供为准，canonical 优先（避免 popup 同时填两份不一致）。
+ *
+ * 仅在 partial 里的字段触发同步；纯加载场景由 getConnectionConfig 的 fallback 处理。
+ */
+function syncFieldAliases(
+  updated: ConnectionConfig,
+  partial: Partial<ConnectionConfig>,
+): void {
+  const hasServerUrl = Object.prototype.hasOwnProperty.call(partial, 'serverUrl');
+  const hasWsUrl = Object.prototype.hasOwnProperty.call(partial, 'wsUrl');
+  if (hasServerUrl && !hasWsUrl) {
+    updated.wsUrl = updated.serverUrl;
+  } else if (hasWsUrl && !hasServerUrl) {
+    updated.serverUrl = String(updated.wsUrl ?? '');
+  }
+  const hasHttpBase = Object.prototype.hasOwnProperty.call(partial, 'daemonHttpBase');
+  const hasHttpBaseAlias = Object.prototype.hasOwnProperty.call(partial, 'httpBase');
+  if (hasHttpBase && !hasHttpBaseAlias) {
+    updated.httpBase = updated.daemonHttpBase;
+  } else if (hasHttpBaseAlias && !hasHttpBase) {
+    updated.daemonHttpBase = updated.httpBase;
+  }
 }
 
 export function broadcastConnectionStatus(status: ExtensionConnectionStatus): void {
@@ -137,4 +217,15 @@ export function getDefaultWebSocketUrl(): string {
 /** 默认 daemon HTTP base（popup 用以 hint 占位符）。 */
 export function getDefaultDaemonHttpBase(): string {
   return DEFAULT_DAEMON_HTTP_BASE;
+}
+
+/**
+ * M1.2-T3 — 默认 lightcone server URL（popup 主入口的 placeholder）。
+ *
+ * ticket 描述明确指定 `https://lightcone-server` 作为默认值；它是 placeholder，
+ * 用户必须改成真实部署域名（例 `https://lightcone.example.com`）才能让
+ * `/api/device/resolve` 调用走通。
+ */
+export function getDefaultLightconeServerUrl(): string {
+  return DEFAULT_LIGHTCONE_SERVER_URL;
 }
