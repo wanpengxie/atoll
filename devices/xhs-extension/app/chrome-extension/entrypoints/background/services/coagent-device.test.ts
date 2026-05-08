@@ -16,6 +16,7 @@ vi.mock('xiaohongshu-mcp-shared', () => ({
     COMMAND_FRAME_TYPE: 'command',
     ACK_FRAME_TYPE: 'ack',
     CALLBACK_REPLAY_FRAME_TYPE: 'callback_replay',
+    CALLBACK_REPLAY_ACK_FRAME_TYPE: 'callback_replay_ack',
     CALLBACK_PATH_PREFIX: '/api/device/',
     CALLBACK_PATH_SUFFIX_CALLBACK: '/callback',
     CALLBACK_PATH_SUFFIX_SESSION: '/session',
@@ -26,6 +27,7 @@ vi.mock('xiaohongshu-mcp-shared', () => ({
     CALLBACK_RETRY_BACKOFF_MS_LIST: [10, 20, 40] as readonly number[],
     CALLBACK_OUTBOX_STORAGE_KEY: 'coagent_device_pending_callbacks',
     CALLBACK_OUTBOX_MAX_SIZE: 200,
+    CALLBACK_OUTBOX_MAX_AGE_MS: 7 * 24 * 60 * 60 * 1000,
   },
   ERROR_MESSAGES: {
     DEVICE_NOT_CONFIGURED: 'Device not configured',
@@ -358,11 +360,13 @@ class FakeWebSocket {
 describe('WS callback_replay drain on reconnect', () => {
   it('open event sends one callback_replay frame containing all pending payloads', async () => {
     const { store } = installFakeChromeStorage();
-    // Pre-populate outbox with 2 entries.
+    // Pre-populate outbox with 2 entries (timestamps fresh enough to skip the
+    // R3-T3 GC pass — see CALLBACK_OUTBOX_MAX_AGE_MS).
+    const now = Date.now();
     const seed: PendingCallbackEntry[] = [
       {
         body: { correlation_id: 'p1', status: 'ok', result: { a: 1 }, error: null },
-        enqueued_at: 1,
+        enqueued_at: now,
       },
       {
         body: {
@@ -371,7 +375,7 @@ describe('WS callback_replay drain on reconnect', () => {
           result: null,
           error: { code: 'x', message: 'y' },
         },
-        enqueued_at: 2,
+        enqueued_at: now,
       },
     ];
     store[STORAGE_KEY] = seed;
@@ -404,9 +408,15 @@ describe('WS callback_replay drain on reconnect', () => {
     expect(frame.payloads[0].correlation_id).toBe('p1');
     expect(frame.payloads[1].correlation_id).toBe('p2');
 
-    // Outbox cleared after a successful drain.
+    // R3-T3 (FX5): outbox is **not** cleared on socket.send anymore — it is
+    // only cleared after the daemon's callback_replay_ack frame arrives. The
+    // entries should however now carry a refreshed last_attempt_at.
     const pending = await readPendingCallbacks();
-    expect(pending).toEqual([]);
+    expect(pending.map((e) => e.body.correlation_id)).toEqual(['p1', 'p2']);
+    for (const entry of pending) {
+      expect(typeof entry.last_attempt_at).toBe('number');
+      expect(entry.last_attempt_at!).toBeGreaterThanOrEqual(entry.enqueued_at);
+    }
   });
 
   it('skips drain when outbox empty (no WS frame sent)', async () => {
@@ -428,6 +438,175 @@ describe('WS callback_replay drain on reconnect', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(captured!.sent).toEqual([]);
+  });
+});
+
+// ── R3-T3 (FX5): callback_replay_ack consumes outbox ──────────────────────
+
+describe('callback_replay_ack frame', () => {
+  /**
+   * Helper: spin up a client, seed outbox with `seed`, complete the WS open
+   * handshake, and return the captured FakeWebSocket so the test can fire
+   * `message` / `error` events directly.
+   */
+  async function bootClient(seed: PendingCallbackEntry[]): Promise<{
+    client: ReturnType<typeof makeClient>;
+    socket: FakeWebSocket;
+    store: Record<string, unknown>;
+  }> {
+    const { store } = installFakeChromeStorage();
+    if (seed.length) store[STORAGE_KEY] = seed;
+    const client = makeClient();
+    let captured: FakeWebSocket | null = null;
+    const SocketCtor: any = function (this: any, url: string) {
+      const ws = new FakeWebSocket(url);
+      captured = ws;
+      return ws;
+    };
+    SocketCtor.OPEN = 1;
+    client.setWebSocketImpl(SocketCtor as unknown as typeof WebSocket);
+
+    const connectPromise = client.connect();
+    await Promise.resolve();
+    captured!.triggerOpen();
+    await connectPromise;
+    // Allow drainPendingCallbacks → writePendingCallbacks to flush.
+    await new Promise((r) => setTimeout(r, 0));
+    return { client, socket: captured!, store };
+  }
+
+  it('removes only accepted entries when daemon acks accepted=[p1] rejected=[]', async () => {
+    const now = Date.now();
+    const seed: PendingCallbackEntry[] = [
+      { body: { correlation_id: 'p1', status: 'ok', result: { a: 1 }, error: null }, enqueued_at: now },
+      { body: { correlation_id: 'p2', status: 'ok', result: { b: 2 }, error: null }, enqueued_at: now },
+    ];
+    const { socket } = await bootClient(seed);
+
+    socket.fire('message', {
+      data: JSON.stringify({
+        type: 'callback_replay_ack',
+        accepted: ['p1'],
+        rejected: [],
+      }),
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const remaining = await readPendingCallbacks();
+    expect(remaining.map((e) => e.body.correlation_id)).toEqual(['p2']);
+  });
+
+  it('removes both accepted and rejected entries (rejected = drop + warn)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const now = Date.now();
+      const seed: PendingCallbackEntry[] = [
+        { body: { correlation_id: 'p1', status: 'ok', result: { a: 1 }, error: null }, enqueued_at: now },
+        { body: { correlation_id: 'p2', status: 'ok', result: { b: 2 }, error: null }, enqueued_at: now },
+        { body: { correlation_id: 'p3', status: 'ok', result: { c: 3 }, error: null }, enqueued_at: now },
+      ];
+      const { socket } = await bootClient(seed);
+
+      socket.fire('message', {
+        data: JSON.stringify({
+          type: 'callback_replay_ack',
+          accepted: ['p1'],
+          rejected: [{ correlation_id: 'p2', code: 'invalid_payload', message: 'bad' }],
+        }),
+      });
+      await new Promise((r) => setTimeout(r, 0));
+
+      const remaining = await readPendingCallbacks();
+      expect(remaining.map((e) => e.body.correlation_id)).toEqual(['p3']);
+      // The rejected log call must surface the code/message.
+      const droppedLog = warn.mock.calls.find(
+        (args) => args[0] === '[CoagentDevice] device.callback.outbox.dropped',
+      );
+      expect(droppedLog).toBeDefined();
+      expect(droppedLog![1]).toMatchObject({
+        correlation_id: 'p2',
+        code: 'invalid_payload',
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('ignores ack frames with empty / malformed lists', async () => {
+    const seed: PendingCallbackEntry[] = [
+      { body: { correlation_id: 'p1', status: 'ok', result: {}, error: null }, enqueued_at: Date.now() },
+    ];
+    const { socket } = await bootClient(seed);
+
+    socket.fire('message', {
+      data: JSON.stringify({ type: 'callback_replay_ack', accepted: [], rejected: [] }),
+    });
+    socket.fire('message', {
+      data: JSON.stringify({ type: 'callback_replay_ack' }),
+    });
+    socket.fire('message', {
+      data: JSON.stringify({ type: 'callback_replay_ack', accepted: 'wrong', rejected: 7 }),
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const remaining = await readPendingCallbacks();
+    expect(remaining.map((e) => e.body.correlation_id)).toEqual(['p1']);
+  });
+
+  it('outbox stays intact when daemon never sends an ack (5s+ silence)', async () => {
+    const seed: PendingCallbackEntry[] = [
+      { body: { correlation_id: 'p1', status: 'ok', result: {}, error: null }, enqueued_at: Date.now() },
+    ];
+    const { socket } = await bootClient(seed);
+    // Replay frame must have gone out, but no ack from daemon → outbox holds.
+    expect(socket.sent.find((s) => JSON.parse(s).type === 'callback_replay')).toBeDefined();
+    // Simulate "wait 5s" — we don't actually sleep; just confirm the post-drain
+    // state hasn't been mutated by anything other than last_attempt_at refresh.
+    const remaining = await readPendingCallbacks();
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].body.correlation_id).toBe('p1');
+    expect(typeof remaining[0].last_attempt_at).toBe('number');
+  });
+
+  it('GC drops entries older than CALLBACK_OUTBOX_MAX_AGE_MS before sending replay', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const eightDaysAgo = Date.now() - 8 * 24 * 60 * 60 * 1000;
+      const seed: PendingCallbackEntry[] = [
+        // Stale: enqueued 8 days ago, never re-attempted.
+        {
+          body: { correlation_id: 'old', status: 'ok', result: {}, error: null },
+          enqueued_at: eightDaysAgo,
+        },
+        // Fresh: enqueued just now.
+        {
+          body: { correlation_id: 'fresh', status: 'ok', result: {}, error: null },
+          enqueued_at: Date.now(),
+        },
+      ];
+      const { socket } = await bootClient(seed);
+
+      // Replay frame should only carry the fresh entry.
+      const replay = socket.sent.map((s) => JSON.parse(s)).find((f) => f.type === 'callback_replay');
+      expect(replay).toBeDefined();
+      expect(replay.payloads.map((p: any) => p.correlation_id)).toEqual(['fresh']);
+
+      // Outbox storage now holds only the fresh entry.
+      const remaining = await readPendingCallbacks();
+      expect(remaining.map((e) => e.body.correlation_id)).toEqual(['fresh']);
+
+      // GC log line for the stale entry.
+      const gcLog = warn.mock.calls.find(
+        (args) => args[0] === '[CoagentDevice] device.callback.outbox.dropped',
+      );
+      expect(gcLog).toBeDefined();
+      expect(gcLog![1]).toMatchObject({
+        correlation_id: 'old',
+        reason: 'gc_max_age_exceeded',
+      });
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

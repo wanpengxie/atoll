@@ -20,6 +20,13 @@
 //   - 仍失败 → 序列化进 chrome.storage.local 暂存表 pendingCallbacks
 //   - WS 重连 open 时 drain outbox 并通过 {type:"callback_replay", payloads:[...]} frame 重发
 //
+// R3-T3 (FX5) — callback_replay_ack 闭环：
+//   - drain 后 *不清* outbox；只刷新 last_attempt_at
+//   - 收到 daemon `{type:'callback_replay_ack', accepted, rejected}` frame 才
+//     按 correlation_id 删 outbox entry
+//   - rejected 项也删除（最简实现）+ console.warn `device.callback.outbox.dropped`
+//   - 兜底：超过 7 天未 ack 的 entry 在下次 drain 时 GC，防 daemon 永不 ack 时无限增长
+//
 // 此模块不直接连 chrome.cookies；cookie sync 由 tools/sync-cookies.ts 单独处理。
 
 import {
@@ -52,6 +59,20 @@ export interface PendingCallbackEntry {
   body: CallbackBody;
   /** Timestamp of the original failure (epoch ms); helpful for log forensics. */
   enqueued_at: number;
+  /**
+   * R3-T3 (FX5) — epoch ms of the most recent `callback_replay` send attempt.
+   * Used by the GC pass to drop entries the daemon has never ack'd within
+   * `CALLBACK_OUTBOX_MAX_AGE_MS`. Optional so older stored entries (pre-FX5)
+   * remain readable; readers fall back to `enqueued_at`.
+   */
+  last_attempt_at?: number;
+}
+
+/** Shape of the daemon → extension ack frame for a callback_replay batch. */
+interface CallbackReplayAckFrame {
+  type: 'callback_replay_ack';
+  accepted?: unknown;
+  rejected?: unknown;
 }
 
 /** Minimal chrome.storage.local typing — keeps unit tests / mocks simple. */
@@ -346,11 +367,62 @@ class CoagentDeviceClient {
       return;
     }
     if (!frame || typeof frame !== 'object') return;
+    if (frame.type === COAGENT_DEVICE_PROTOCOL.CALLBACK_REPLAY_ACK_FRAME_TYPE) {
+      // R3-T3 (FX5) — daemon confirmed which replay entries it accepted /
+      // rejected; clear those outbox rows (and only those).
+      await this.handleCallbackReplayAck(frame as CallbackReplayAckFrame);
+      return;
+    }
     if (frame.type !== COAGENT_DEVICE_PROTOCOL.COMMAND_FRAME_TYPE) {
       console.debug('[CoagentDevice] unhandled frame type', frame.type);
       return;
     }
     await this.handleCommand(frame as CommandFrame);
+  }
+
+  /**
+   * R3-T3 (FX5) — handle daemon's `callback_replay_ack` reply. accepted +
+   * rejected together form the "daemon has decided this entry's fate" set
+   * — both are removed from the outbox. rejected entries also get a
+   * `device.callback.outbox.dropped` log line carrying the daemon's
+   * `{code, message}` for forensics.
+   */
+  private async handleCallbackReplayAck(frame: CallbackReplayAckFrame): Promise<void> {
+    const accepted = Array.isArray(frame.accepted)
+      ? frame.accepted.filter((v): v is string => typeof v === 'string' && v.length > 0)
+      : [];
+    const rejected = Array.isArray(frame.rejected)
+      ? frame.rejected.filter(
+          (v): v is { correlation_id: string; code?: string; message?: string } =>
+            !!v && typeof v === 'object' && typeof (v as any).correlation_id === 'string',
+        )
+      : [];
+    if (accepted.length === 0 && rejected.length === 0) return;
+
+    // Surface rejected entries so an operator can see them after the fact.
+    for (const r of rejected) {
+      console.warn('[CoagentDevice] device.callback.outbox.dropped', {
+        correlation_id: r.correlation_id,
+        code: r.code ?? 'unknown',
+        message: r.message ?? '',
+      });
+    }
+
+    const toRemove = new Set<string>([
+      ...accepted,
+      ...rejected.map((r) => r.correlation_id).filter((id) => typeof id === 'string' && id.length > 0),
+    ]);
+    if (toRemove.size === 0) return;
+    const existing = await readPendingCallbacks();
+    const survivors = existing.filter((entry) => !toRemove.has(entry.body.correlation_id));
+    if (survivors.length !== existing.length) {
+      await writePendingCallbacks(survivors);
+      console.info('[CoagentDevice] callback_replay_ack consumed outbox entries', {
+        accepted: accepted.length,
+        rejected: rejected.length,
+        outbox_remaining: survivors.length,
+      });
+    }
   }
 
   private async handleCommand(frame: CommandFrame): Promise<void> {
@@ -569,7 +641,8 @@ class CoagentDeviceClient {
    */
   private async enqueuePendingCallback(body: CallbackBody): Promise<void> {
     const existing = await readPendingCallbacks();
-    const entry: PendingCallbackEntry = { body, enqueued_at: Date.now() };
+    const now = Date.now();
+    const entry: PendingCallbackEntry = { body, enqueued_at: now, last_attempt_at: now };
     // Replace any earlier entry for the same correlation_id (extension may
     // re-attempt the same callback after a SW restart) — last-writer-wins.
     const filtered = existing.filter((e) => e.body.correlation_id !== body.correlation_id);
@@ -579,14 +652,54 @@ class CoagentDeviceClient {
 
   /**
    * Drain the outbox by sending one `callback_replay` WS frame containing all
-   * pending payloads. On send failure (socket closed mid-call etc.) the entries
-   * remain in storage so the next reconnect retries.
+   * pending payloads.
+   *
+   * R3-T3 (FX5): outbox is **not** cleared after a successful socket.send —
+   * `socket.send` only writes into the browser's local WS buffer and does not
+   * imply the daemon processed the entries. The daemon will respond with a
+   * `callback_replay_ack` frame; `handleCallbackReplayAck` is the only place
+   * that removes entries from storage. We do however refresh `last_attempt_at`
+   * so the GC pass below has a stable signal.
+   *
+   * GC: entries whose newest attempt timestamp is older than
+   * `CALLBACK_OUTBOX_MAX_AGE_MS` are dropped here (with a `device.callback.
+   * outbox.dropped` log line) — bounds unbounded outbox growth when the daemon
+   * never ack's (e.g. wedged service / lost device id).
    */
   private async drainPendingCallbacks(socket: WebSocket): Promise<void> {
     const pending = await readPendingCallbacks();
     if (pending.length === 0) return;
-    if (socket.readyState !== WebSocket.OPEN) return;
-    const payloads = pending.map((entry) => entry.body);
+
+    const now = Date.now();
+    const maxAge = COAGENT_DEVICE_PROTOCOL.CALLBACK_OUTBOX_MAX_AGE_MS;
+    const live: PendingCallbackEntry[] = [];
+    for (const entry of pending) {
+      const lastAttempt = entry.last_attempt_at ?? entry.enqueued_at;
+      if (Number.isFinite(lastAttempt) && now - lastAttempt > maxAge) {
+        console.warn('[CoagentDevice] device.callback.outbox.dropped', {
+          correlation_id: entry.body.correlation_id,
+          age_ms: now - lastAttempt,
+          reason: 'gc_max_age_exceeded',
+        });
+        continue;
+      }
+      live.push(entry);
+    }
+
+    if (live.length === 0) {
+      // All entries aged out — persist the empty outbox before short-circuiting.
+      if (live.length !== pending.length) await writePendingCallbacks(live);
+      return;
+    }
+
+    if (socket.readyState !== WebSocket.OPEN) {
+      // Connection raced shut after open fired; persist the GC outcome but
+      // skip the send — next reconnect's drain will pick up.
+      if (live.length !== pending.length) await writePendingCallbacks(live);
+      return;
+    }
+
+    const payloads = live.map((entry) => entry.body);
     const frame = JSON.stringify({
       type: COAGENT_DEVICE_PROTOCOL.CALLBACK_REPLAY_FRAME_TYPE,
       payloads,
@@ -596,9 +709,15 @@ class CoagentDeviceClient {
       console.info('[CoagentDevice] drained pending callbacks via WS replay', {
         count: payloads.length,
       });
-      await writePendingCallbacks([]);
+      // Refresh last_attempt_at so the next GC tick measures from this send,
+      // not from the original failed POST. Crucially we *do not* clear the
+      // outbox — `handleCallbackReplayAck` is responsible for removal.
+      const stamped = live.map((entry) => ({ ...entry, last_attempt_at: now }));
+      await writePendingCallbacks(stamped);
     } catch (err) {
       console.warn('[CoagentDevice] callback_replay send failed; keeping outbox', err);
+      // Still persist any GC pruning we did before the send attempt.
+      if (live.length !== pending.length) await writePendingCallbacks(live);
     }
   }
 }

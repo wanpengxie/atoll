@@ -66,6 +66,13 @@ export const COAGENT_DEVICE_PROTOCOL = {
    * Payload shape: { type: 'callback_replay', payloads: CallbackBody[] }.
    */
   CALLBACK_REPLAY_FRAME_TYPE: 'callback_replay',
+  /**
+   * R3-T3 (FX5) — daemon → extension ack for a `callback_replay` batch.
+   * Daemon pushes `{type:'callback_replay_ack', accepted:string[],
+   * rejected:Array<{correlation_id,code,message}>}`. Extension only deletes
+   * outbox entries listed in `accepted` ∪ `rejected.map(r=>r.correlation_id)`.
+   */
+  CALLBACK_REPLAY_ACK_FRAME_TYPE: 'callback_replay_ack',
   /** Final result is delivered via HTTP callback, not WS. */
   CALLBACK_PATH_PREFIX: '/api/device/',
   /** Cookie / login_state sync endpoint suffix. */
@@ -84,6 +91,12 @@ export const COAGENT_DEVICE_PROTOCOL = {
   CALLBACK_OUTBOX_STORAGE_KEY: 'coagent_device_pending_callbacks',
   /** Hard cap on outbox size — drops oldest entries beyond this. */
   CALLBACK_OUTBOX_MAX_SIZE: 200,
+  /**
+   * R3-T3 (FX5) — outbox entries older than this without ever receiving a
+   * daemon ack are GC'd (logged via `device.callback.outbox.dropped`). Bounds
+   * unbounded growth when the daemon never replies (e.g. wedged service).
+   */
+  CALLBACK_OUTBOX_MAX_AGE_MS: 7 * 24 * 60 * 60 * 1000, // 7 days
 } as const;
 
 /**
