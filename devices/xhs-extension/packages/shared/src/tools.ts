@@ -1,12 +1,26 @@
-import { type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { XIAOHONGSHU_TOOL_NAMES } from './constants';
 
 export { XIAOHONGSHU_TOOL_NAMES };
 
 /**
+ * 本地工具 schema 类型（不依赖外部 SDK）。
+ * `inputSchema.properties` 用 `Record<string, unknown>` 容纳现有 schema 的
+ * enum/default/maxLength/items/additionalProperties 等子字段。
+ */
+export type ToolSchema = {
+  name: string;
+  description: string;
+  inputSchema: {
+    type: 'object';
+    properties: Record<string, unknown>;
+    required?: string[];
+  };
+};
+
+/**
  * 工具Schema定义
  */
-export const TOOL_SCHEMAS: Tool[] = [
+export const TOOL_SCHEMAS: ToolSchema[] = [
   {
     name: XIAOHONGSHU_TOOL_NAMES.CHECK_LOGIN_STATUS,
     description: '检查小红书登录状态',
