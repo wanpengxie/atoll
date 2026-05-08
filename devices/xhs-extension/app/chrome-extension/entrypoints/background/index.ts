@@ -17,6 +17,7 @@ import {
 } from './connection-state';
 import { cookieSyncService } from './tools/sync-cookies';
 import { coagentDeviceClient } from './services/coagent-device';
+import { resolveDeviceConfig } from './services/resolve';
 import { recoverPublishWaitStates } from './tools/publish-content';
 
 interface ExecuteToolPayload {
@@ -33,6 +34,12 @@ type BackgroundRequest =
   | { type: 'DISCONNECT_DEVICE' }
   | { type: 'GET_CONNECTION_CONFIG' }
   | { type: 'SAVE_CONNECTION_CONFIG'; payload: Partial<ConnectionConfig> }
+  | {
+      // M1.2-T3: popup 主入口 1-key 流程。Background 调 lightcone resolve API
+      // 拿全套连接信息，落 storage，再触发 coagent device WS connect。
+      type: 'RESOLVE_AND_CONNECT';
+      payload: { lightconeServerUrl: string; apiKey: string };
+    }
   | { type: 'SYNC_COOKIES' };
 
 let connectionConfig: ConnectionConfig;
@@ -132,6 +139,53 @@ export default defineBackground(() => {
               userId: connectionConfig.userId,
             });
             sendResponse({ success: true, config: connectionConfig });
+            break;
+          }
+          case 'RESOLVE_AND_CONNECT': {
+            // M1.2-T3 popup 主入口 1-key 流程。
+            const { lightconeServerUrl, apiKey } = request.payload ?? ({} as any);
+            const result = await resolveDeviceConfig({
+              serverUrl: String(lightconeServerUrl ?? ''),
+              apiKey: String(apiKey ?? ''),
+            });
+            if (!result.ok) {
+              // resolve 失败 → 不写 storage，把错误透给 popup 显示。
+              console.warn('[Background] device.resolve failed', {
+                kind: result.error.kind,
+                status: result.error.status,
+                message: result.error.message,
+              });
+              sendResponse({ success: false, error: result.error.message, errorKind: result.error.kind });
+              break;
+            }
+            // 写完整 device config（含 wsUrl/httpBase 别名）。
+            const patch: Partial<ConnectionConfig> = {
+              lightconeServerUrl: String(lightconeServerUrl ?? '').trim(),
+              apiKey: String(apiKey ?? '').trim(),
+              serverUrl: result.data.ws_url,        // canonical（被 coagent-device.ts 读）
+              wsUrl: result.data.ws_url,            // 别名（与描述里 storage shape 对齐）
+              daemonHttpBase: result.data.http_url, // canonical（callback / sync-cookies）
+              httpBase: result.data.http_url,       // 别名
+              deviceId: result.data.device_id,
+              userId: result.data.user_id,
+              channelId: result.data.channel_id,
+              daemonId: result.data.daemon_id,
+            };
+            connectionConfig = await saveConnectionConfig(patch);
+            // 切换连接：先断旧再用新配置 connect。
+            coagentDeviceClient.disconnect();
+            coagentDeviceClient.updateConfig(connectionConfig);
+            console.info('[Background] device.resolve ok', {
+              deviceId: connectionConfig.deviceId,
+              channelId: connectionConfig.channelId,
+              daemonId: connectionConfig.daemonId,
+            });
+            const connectResult = await coagentDeviceClient.connect();
+            sendResponse({
+              success: connectResult.success,
+              error: connectResult.error,
+              config: connectionConfig,
+            });
             break;
           }
           case 'SYNC_COOKIES': {
