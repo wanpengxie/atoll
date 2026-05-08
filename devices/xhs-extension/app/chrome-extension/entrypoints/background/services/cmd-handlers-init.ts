@@ -85,9 +85,19 @@ function wrapTool(tool: ToolLike, cmd: CoagentDeviceCommand): CommandHandler {
     // daemon SessionManager 推送 cookies 后，extension 应当通过 chrome.cookies.set
     // 主动写入；当前 V0.1 已登录状态由用户自己维护，故显式忽略。
     // PM 跟进 ticket 占位：V0.5 device-session-injection。
-    _session
+    _session,
+    context,
   ): Promise<CommandResultEnvelope> => {
-    const inner = await tool.execute(params ?? {});
+    // R3-T4 FX9：把 dispatch correlation_id 注入 tool args，让
+    // PublishContentTool.execute 能在 chrome.storage.local 持久化 publish-wait
+    // state（SW evict 时由 background recovery 兜底重发 callback）。
+    // 字段命名 `__correlationId` 表明是平台注入元数据，工具实现读完即用，
+    // 不会跑到页面侧脚本。
+    const augmented =
+      context?.correlationId
+        ? { ...(params ?? {}), __correlationId: context.correlationId }
+        : params ?? {};
+    const inner = await tool.execute(augmented);
     if (inner.isError) {
       const text = String(inner.content?.[0]?.text ?? `${tool.name} failed`);
       // 优先把 text 当结构化错误 envelope 解（{code, message, ...}），允许工具自定义

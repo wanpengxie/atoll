@@ -39,7 +39,36 @@ import {
   NOTE_DETAIL_PATTERN,
   PUBLISH_API_URL_PATTERN,
   PUBLISH_API_FILTER_URLS,
+  PUBLISH_WAIT_KEY_PREFIX,
+  type PublishWaitState,
+  type StorageLocalLike,
+  writePublishWaitState,
+  removePublishWaitState,
+  listPublishWaitStates,
+  recoverPublishWaitStates,
 } from './publish-content';
+
+// Fake chrome.storage.local for FX9 persistence + recovery tests.
+function makeFakeStorage(): StorageLocalLike & { _data: Record<string, unknown> } {
+  const data: Record<string, unknown> = {};
+  return {
+    _data: data,
+    async get(keys?: string | string[] | null) {
+      if (keys == null) return { ...data };
+      const list = Array.isArray(keys) ? keys : [keys];
+      const out: Record<string, unknown> = {};
+      for (const k of list) if (k in data) out[k] = data[k];
+      return out;
+    },
+    async set(items: Record<string, unknown>) {
+      Object.assign(data, items);
+    },
+    async remove(keys: string | string[]) {
+      const list = Array.isArray(keys) ? keys : [keys];
+      for (const k of list) delete data[k];
+    },
+  };
+}
 
 // Minimal fake of `chrome.tabs.onUpdated` / `chrome.tabs.onRemoved` /
 // `chrome.webRequest.onCompleted` that lets us drive event firing from inside
@@ -349,5 +378,343 @@ describe('PUBLISH_API_URL_PATTERN (R3-T4 FX6)', () => {
       '*://creator.xiaohongshu.com/api/galaxy/note/*',
       '*://edith.xiaohongshu.com/api/galaxy/note/*',
     ]);
+  });
+});
+
+// ─── R3-T4 FX9：publish-wait 持久化 + SW evict 恢复 ────────────────────────────
+
+describe('publish-wait persistence (R3-T4 FX9)', () => {
+  it('writePublishWaitState writes under publish_wait:<correlationId>', async () => {
+    const storage = makeFakeStorage();
+    const state: PublishWaitState = {
+      correlationId: 'corr-A',
+      tabId: 42,
+      startedAt: 1700_000_000_000,
+      timeoutMs: 600_000,
+    };
+    await writePublishWaitState(state, storage);
+    expect(storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-A`]).toEqual(state);
+  });
+
+  it('listPublishWaitStates returns only well-shaped publish_wait:* entries', async () => {
+    const storage = makeFakeStorage();
+    storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-1`] = {
+      correlationId: 'corr-1',
+      tabId: 1,
+      startedAt: 1,
+      timeoutMs: 1,
+    };
+    storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-2`] = {
+      correlationId: 'corr-2',
+      tabId: 2,
+      startedAt: 2,
+      timeoutMs: 2,
+    };
+    // Mismatched / malformed entries must be ignored.
+    storage._data['unrelated_key'] = { foo: 'bar' };
+    storage._data[`${PUBLISH_WAIT_KEY_PREFIX}bad`] = { correlationId: 'bad', tabId: 'NaN' };
+
+    const states = await listPublishWaitStates(storage);
+    expect(states.map((s) => s.correlationId).sort()).toEqual(['corr-1', 'corr-2']);
+  });
+
+  it('removePublishWaitState removes the entry; idempotent', async () => {
+    const storage = makeFakeStorage();
+    storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-X`] = {
+      correlationId: 'corr-X',
+      tabId: 1,
+      startedAt: 1,
+      timeoutMs: 1,
+    };
+    await removePublishWaitState('corr-X', storage);
+    expect(storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-X`]).toBeUndefined();
+    // second call is a no-op
+    await removePublishWaitState('corr-X', storage);
+  });
+
+  it('waitForPublishCompletion writes state on entry and removes on success exit', async () => {
+    const api = makeFakeTabsApi();
+    const storage = makeFakeStorage();
+    const correlationId = 'corr-entry-exit-1';
+    const startedAt = 1_700_000_000_000;
+    const resultP = waitForPublishCompletion(200, {
+      timeoutMs: 5_000,
+      chromeApi: chromeApiOf(api),
+      correlationId,
+      startedAt,
+      storageLocal: storage,
+    });
+
+    // After Promise body runs the persist write is enqueued; flush microtasks.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(storage._data[`${PUBLISH_WAIT_KEY_PREFIX}${correlationId}`]).toEqual({
+      correlationId,
+      tabId: 200,
+      startedAt,
+      timeoutMs: 5_000,
+    });
+
+    // Drive a successful completion via NOTE_DETAIL navigation.
+    const noteId = '0123456789abcdef01234567';
+    api.fireUpdated(200, { url: `https://www.xiaohongshu.com/discovery/item/${noteId}` });
+    await resultP;
+
+    // Storage entry must be removed on settle.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(storage._data[`${PUBLISH_WAIT_KEY_PREFIX}${correlationId}`]).toBeUndefined();
+  });
+
+  it('waitForPublishCompletion removes state on cancel + timeout exits', async () => {
+    // canceled
+    const api1 = makeFakeTabsApi();
+    const storage1 = makeFakeStorage();
+    const p1 = waitForPublishCompletion(201, {
+      timeoutMs: 5_000,
+      chromeApi: chromeApiOf(api1),
+      correlationId: 'corr-cancel',
+      storageLocal: storage1,
+    });
+    await Promise.resolve();
+    expect(storage1._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-cancel`]).toBeDefined();
+    api1.fireRemoved(201);
+    await expect(p1).rejects.toBeInstanceOf(PublishCanceledError);
+    await Promise.resolve();
+    expect(storage1._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-cancel`]).toBeUndefined();
+
+    // timeout
+    const api2 = makeFakeTabsApi();
+    const storage2 = makeFakeStorage();
+    const p2 = waitForPublishCompletion(202, {
+      timeoutMs: 30,
+      chromeApi: chromeApiOf(api2),
+      correlationId: 'corr-timeout',
+      storageLocal: storage2,
+    });
+    await Promise.resolve();
+    expect(storage2._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-timeout`]).toBeDefined();
+    await expect(p2).rejects.toBeInstanceOf(PublishTimeoutError);
+    await Promise.resolve();
+    expect(storage2._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-timeout`]).toBeUndefined();
+  });
+});
+
+describe('recoverPublishWaitStates (R3-T4 FX9 SW evict recovery)', () => {
+  it('returns empty when no publish_wait state present', async () => {
+    const storage = makeFakeStorage();
+    const calls: any[] = [];
+    const summaries = await recoverPublishWaitStates({
+      storageLocal: storage,
+      tabsGet: async () => null,
+      postCallback: async (...args) => {
+        calls.push(args);
+      },
+      now: () => 1_700_000_000_000,
+    });
+    expect(summaries).toEqual([]);
+    expect(calls.length).toBe(0);
+  });
+
+  it('emits publish_timeout when state has aged past startedAt + timeoutMs', async () => {
+    const storage = makeFakeStorage();
+    const state: PublishWaitState = {
+      correlationId: 'corr-old',
+      tabId: 300,
+      startedAt: 1_000,
+      timeoutMs: 60_000,
+    };
+    storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-old`] = state;
+
+    const callbacks: any[] = [];
+    const summaries = await recoverPublishWaitStates({
+      storageLocal: storage,
+      tabsGet: async () => ({ id: 300, url: 'https://creator.xiaohongshu.com/publish/publish' } as any),
+      postCallback: async (correlationId, payload) => {
+        callbacks.push({ correlationId, payload });
+      },
+      now: () => 999_999_999, // way past 1_000 + 60_000
+    });
+    expect(summaries).toEqual([{ correlationId: 'corr-old', outcome: 'timeout' }]);
+    expect(callbacks).toEqual([
+      {
+        correlationId: 'corr-old',
+        payload: {
+          status: 'error',
+          result: null,
+          error: { code: 'publish_timeout', message: expect.stringContaining('publish wait timed out') },
+        },
+      },
+    ]);
+    expect(storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-old`]).toBeUndefined();
+  });
+
+  it('emits publish_canceled when chrome.tabs.get returns null (tab gone)', async () => {
+    const storage = makeFakeStorage();
+    storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-gone`] = {
+      correlationId: 'corr-gone',
+      tabId: 301,
+      startedAt: 1_000_000_000_000,
+      timeoutMs: 600_000,
+    };
+    const callbacks: any[] = [];
+    const now = 1_000_000_010_000; // within deadline
+    const summaries = await recoverPublishWaitStates({
+      storageLocal: storage,
+      tabsGet: async () => null,
+      postCallback: async (correlationId, payload) => {
+        callbacks.push({ correlationId, payload });
+      },
+      now: () => now,
+    });
+    expect(summaries).toEqual([{ correlationId: 'corr-gone', outcome: 'canceled_tab_missing' }]);
+    expect(callbacks[0].payload.status).toBe('error');
+    expect(callbacks[0].payload.error.code).toBe('publish_canceled');
+    expect(storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-gone`]).toBeUndefined();
+  });
+
+  it('emits ok with note_id when tab landed on NOTE_DETAIL_PATTERN', async () => {
+    const noteId = 'abcdef0123456789abcdef01';
+    const storage = makeFakeStorage();
+    storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-detail`] = {
+      correlationId: 'corr-detail',
+      tabId: 302,
+      startedAt: 1_000_000_000_000,
+      timeoutMs: 600_000,
+    };
+    const callbacks: any[] = [];
+    const summaries = await recoverPublishWaitStates({
+      storageLocal: storage,
+      tabsGet: async () => ({
+        id: 302,
+        url: `https://www.xiaohongshu.com/discovery/item/${noteId}?from=publish`,
+      } as any),
+      postCallback: async (correlationId, payload) => {
+        callbacks.push({ correlationId, payload });
+      },
+      now: () => 1_000_000_010_000,
+    });
+    expect(summaries).toEqual([{ correlationId: 'corr-detail', outcome: 'completed_detail' }]);
+    expect(callbacks[0].payload.status).toBe('ok');
+    expect(callbacks[0].payload.result.note_id).toBe(noteId);
+    expect(callbacks[0].payload.result.url).toContain(`/discovery/item/${noteId}`);
+    expect(storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-detail`]).toBeUndefined();
+  });
+
+  it('emits publish_canceled when tab navigated away to non-detail page', async () => {
+    const storage = makeFakeStorage();
+    storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-nav-away`] = {
+      correlationId: 'corr-nav-away',
+      tabId: 303,
+      startedAt: 1_000_000_000_000,
+      timeoutMs: 600_000,
+    };
+    const callbacks: any[] = [];
+    const summaries = await recoverPublishWaitStates({
+      storageLocal: storage,
+      tabsGet: async () => ({ id: 303, url: 'https://creator.xiaohongshu.com/post/list' } as any),
+      postCallback: async (correlationId, payload) => {
+        callbacks.push({ correlationId, payload });
+      },
+      now: () => 1_000_000_010_000,
+    });
+    expect(summaries).toEqual([{ correlationId: 'corr-nav-away', outcome: 'canceled_navigated_away' }]);
+    expect(callbacks[0].payload.status).toBe('error');
+    expect(callbacks[0].payload.error.code).toBe('publish_canceled');
+    expect(callbacks[0].payload.error.message).toContain('/post/list');
+    expect(storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-nav-away`]).toBeUndefined();
+  });
+
+  it('re-arms listener when tab still on PUBLISH_PAGE; success path posts callback + cleans storage', async () => {
+    const storage = makeFakeStorage();
+    storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-rearm`] = {
+      correlationId: 'corr-rearm',
+      tabId: 304,
+      startedAt: 1_000_000_000_000,
+      timeoutMs: 600_000,
+    };
+    const api = makeFakeTabsApi();
+    const callbacks: any[] = [];
+
+    const summaries = await recoverPublishWaitStates({
+      storageLocal: storage,
+      tabsGet: async () => ({
+        id: 304,
+        url: 'https://creator.xiaohongshu.com/publish/publish',
+      } as any),
+      postCallback: async (correlationId, payload) => {
+        callbacks.push({ correlationId, payload });
+      },
+      now: () => 1_000_000_010_000,
+      chromeApi: chromeApiOf(api),
+    });
+
+    // Recovery scan summary: rearmed (callback comes async).
+    expect(summaries).toEqual([{ correlationId: 'corr-rearm', outcome: 'rearmed_listener' }]);
+    expect(callbacks.length).toBe(0);
+
+    // Listener should have been registered on all 3 surfaces.
+    expect(api.listenerCounts()).toMatchObject({ updated: 1, removed: 1, webreq: 1 });
+
+    // Drive a successful completion: webRequest 200 settles. Then onApiCompleted
+    // → resolve → postCallback fires asynchronously.
+    api.fireWebReqCompleted({
+      tabId: 304,
+      url: 'https://creator.xiaohongshu.com/api/galaxy/note/publish',
+      statusCode: 200,
+      method: 'POST',
+    } as any);
+
+    // Drain microtasks for the async chain (.then(postCallback) inside recovery).
+    for (let i = 0; i < 20 && callbacks.length === 0; i += 1) await Promise.resolve();
+
+    expect(callbacks.length).toBe(1);
+    expect(callbacks[0].payload.status).toBe('ok');
+    expect(callbacks[0].correlationId).toBe('corr-rearm');
+    // Storage cleaned up by waitForPublishCompletion settle path.
+    await Promise.resolve();
+    expect(storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-rearm`]).toBeUndefined();
+  });
+
+  it('processes multiple states independently', async () => {
+    const storage = makeFakeStorage();
+    storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-1`] = {
+      correlationId: 'corr-1',
+      tabId: 401,
+      startedAt: 1_000,
+      timeoutMs: 60_000,
+    };
+    storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-2`] = {
+      correlationId: 'corr-2',
+      tabId: 402,
+      startedAt: 1_000_000_000_000,
+      timeoutMs: 600_000,
+    };
+    const callbacks: any[] = [];
+    const summaries = await recoverPublishWaitStates({
+      storageLocal: storage,
+      tabsGet: async (id) => {
+        if (id === 401) return null;
+        if (id === 402) {
+          return {
+            id: 402,
+            url: 'https://www.xiaohongshu.com/discovery/item/0123456789abcdef01234567',
+          } as any;
+        }
+        return null;
+      },
+      postCallback: async (correlationId, payload) => {
+        callbacks.push({ correlationId, payload });
+      },
+      now: () => 1_000_000_010_000, // corr-1 aged out, corr-2 fresh
+    });
+    // corr-1 aged out → timeout; corr-2 → completed via detail.
+    const byId = new Map(summaries.map((s) => [s.correlationId, s.outcome]));
+    expect(byId.get('corr-1')).toBe('timeout');
+    expect(byId.get('corr-2')).toBe('completed_detail');
+    expect(callbacks.length).toBe(2);
+    const cbBy = new Map(callbacks.map((c) => [c.correlationId, c.payload]));
+    expect(cbBy.get('corr-1').error.code).toBe('publish_timeout');
+    expect(cbBy.get('corr-2').status).toBe('ok');
   });
 });

@@ -466,7 +466,12 @@ class CoagentDeviceClient {
     }
 
     try {
-      const envelope: CommandResultEnvelope = await handler(params, session);
+      // R3-T4 FX9：把 correlationId 作为 context 传给 handler，PublishContentTool
+      // 据此在 chrome.storage.local 持久化 publish-wait state，使 SW evict 后
+      // background recoverPublishWaitStates 能恢复发送 callback。
+      const envelope: CommandResultEnvelope = await handler(params, session, {
+        correlationId,
+      });
       await this.postCallback(correlationId, {
         status: 'ok',
         result: envelope.result ?? {},

@@ -17,6 +17,7 @@ import {
 } from './connection-state';
 import { cookieSyncService } from './tools/sync-cookies';
 import { coagentDeviceClient } from './services/coagent-device';
+import { recoverPublishWaitStates } from './tools/publish-content';
 
 interface ExecuteToolPayload {
   name: string;
@@ -54,6 +55,21 @@ export default defineBackground(() => {
         hasDeviceId: Boolean(connectionConfig.deviceId),
       });
     }
+    // R3-T4 FX9：MV3 SW evict 后，由 publish_wait:* storage 条目恢复
+    // publish-wait 收尾。recovery 走的 callback 复用 coagentDeviceClient
+    // 已有的 retry / outbox 兜底（无网时入队，下次连上自动 replay）。
+    void recoverPublishWaitStates({
+      postCallback: (correlationId, payload) =>
+        coagentDeviceClient.postCallback(correlationId, payload),
+    })
+      .then((summaries) => {
+        if (summaries.length > 0) {
+          console.info('[Background] publish-wait recovery summaries', summaries);
+        }
+      })
+      .catch((err) => {
+        console.warn('[Background] publish-wait recovery failed', err);
+      });
   })();
 
   chrome.runtime.onMessage.addListener((request: BackgroundRequest, sender, sendResponse) => {

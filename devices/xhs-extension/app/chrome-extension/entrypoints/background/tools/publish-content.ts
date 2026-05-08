@@ -50,7 +50,7 @@ export interface WebRequestOnCompletedLike {
   removeListener(callback: (details: chrome.webRequest.WebResponseCacheDetails) => void): void;
 }
 
-/** 等待选项；chromeApi 仅供单测注入。 */
+/** 等待选项；chromeApi / storageLocal / 时间钩子仅供单测注入。 */
 export interface PublishWaitOptions {
   /** 最长等待时间，默认 10 分钟（spec §Fix-T4-1）。 */
   timeoutMs?: number;
@@ -60,6 +60,112 @@ export interface PublishWaitOptions {
     /** R3-T4 FX6: publish-result API watch；测试可注入 fake。 */
     webRequestOnCompleted?: WebRequestOnCompletedLike;
   };
+  /**
+   * R3-T4 FX9：correlation_id 用于 chrome.storage.local 持久化 wait state。
+   * 不传时只在内存里运行（与 R3 之前的行为一致），SW evict 后丢失。
+   */
+  correlationId?: string;
+  /**
+   * R3-T4 FX9：wait 起始时间（ms epoch）。recovery re-arm 路径需要传原始
+   * startedAt 以保留全局 deadline 不变；普通 dispatch 路径默认 Date.now()。
+   */
+  startedAt?: number;
+  /** R3-T4 FX9：测试可注入 fake storage；缺省走 chrome.storage.local。 */
+  storageLocal?: StorageLocalLike;
+}
+
+/**
+ * R3-T4 FX9：publish-wait 持久化 state。SW evict 后由 background startup hook
+ * 扫 publish_wait:* 重建发布完成判定，避免 daemon 永远收不到 callback。
+ */
+export interface PublishWaitState {
+  correlationId: string;
+  tabId: number;
+  /** ms epoch */
+  startedAt: number;
+  /** publish wait 的最长等待时间（ms）。recovery 据此判超时。 */
+  timeoutMs: number;
+}
+
+/** R3-T4 FX9：chrome.storage.local 抽象，单测可替换。 */
+export interface StorageLocalLike {
+  get(keys?: string | string[] | null): Promise<Record<string, unknown>>;
+  set(items: Record<string, unknown>): Promise<void>;
+  remove(keys: string | string[]): Promise<void>;
+}
+
+/** R3-T4 FX9：publish-wait state 在 chrome.storage.local 的 key 前缀。 */
+export const PUBLISH_WAIT_KEY_PREFIX = 'publish_wait:';
+
+function publishWaitKey(correlationId: string): string {
+  return `${PUBLISH_WAIT_KEY_PREFIX}${correlationId}`;
+}
+
+/** R3-T4 FX9：默认 storage 抽象，从 chrome.storage.local 读写。 */
+function defaultStorageLocal(): StorageLocalLike | null {
+  const c: any = (globalThis as any).chrome;
+  if (!c?.storage?.local) return null;
+  return c.storage.local as StorageLocalLike;
+}
+
+/** R3-T4 FX9：写入 publish-wait state（覆盖式）。storage 缺失时静默跳过。 */
+export async function writePublishWaitState(
+  state: PublishWaitState,
+  storage?: StorageLocalLike,
+): Promise<void> {
+  const target = storage ?? defaultStorageLocal();
+  if (!target) return;
+  try {
+    await target.set({ [publishWaitKey(state.correlationId)]: state });
+  } catch (err) {
+    console.warn('[publish-content] writePublishWaitState failed', err);
+  }
+}
+
+/** R3-T4 FX9：删除 publish-wait state；幂等。 */
+export async function removePublishWaitState(
+  correlationId: string,
+  storage?: StorageLocalLike,
+): Promise<void> {
+  const target = storage ?? defaultStorageLocal();
+  if (!target) return;
+  try {
+    await target.remove(publishWaitKey(correlationId));
+  } catch (err) {
+    console.warn('[publish-content] removePublishWaitState failed', err);
+  }
+}
+
+/** R3-T4 FX9：列出全部 publish-wait state。SW restart 时由 recovery 调用。 */
+export async function listPublishWaitStates(
+  storage?: StorageLocalLike,
+): Promise<PublishWaitState[]> {
+  const target = storage ?? defaultStorageLocal();
+  if (!target) return [];
+  try {
+    const all = await target.get(null);
+    const out: PublishWaitState[] = [];
+    for (const [k, v] of Object.entries(all)) {
+      if (!k.startsWith(PUBLISH_WAIT_KEY_PREFIX)) continue;
+      if (!isPublishWaitState(v)) continue;
+      out.push(v);
+    }
+    return out;
+  } catch (err) {
+    console.warn('[publish-content] listPublishWaitStates failed', err);
+    return [];
+  }
+}
+
+function isPublishWaitState(v: unknown): v is PublishWaitState {
+  if (!v || typeof v !== 'object') return false;
+  const r = v as Record<string, unknown>;
+  return (
+    typeof r.correlationId === 'string' &&
+    typeof r.tabId === 'number' &&
+    typeof r.startedAt === 'number' &&
+    typeof r.timeoutMs === 'number'
+  );
 }
 
 /** 抛给上层 callback 的取消错误，code 透传到 daemon。 */
@@ -145,6 +251,18 @@ export function waitForPublishCompletion(
     (typeof chrome !== 'undefined' && chrome?.webRequest?.onCompleted
       ? (chrome.webRequest.onCompleted as unknown as WebRequestOnCompletedLike)
       : undefined);
+  // R3-T4 FX9: 持久化 publish-wait state 到 chrome.storage.local，SW evict 时
+  // 由 recoverPublishWaitStates 兜底。仅当 correlationId 提供时启用（背景 init
+  // 之外的纯单测路径不强制）。
+  const correlationId = opts.correlationId ?? null;
+  const startedAt = opts.startedAt ?? Date.now();
+  const storage = opts.storageLocal ?? defaultStorageLocal();
+  if (correlationId && storage) {
+    void writePublishWaitState(
+      { correlationId, tabId, startedAt, timeoutMs },
+      storage,
+    );
+  }
 
   return new Promise<PublishCompletionResult>((resolve, reject) => {
     let settled = false;
@@ -173,6 +291,10 @@ export function waitForPublishCompletion(
         }
       }
       clearTimeout(timer);
+      // R3-T4 FX9：出口删 storage 条目；SW 没 evict 走的就是这里。
+      if (correlationId && storage) {
+        void removePublishWaitState(correlationId, storage);
+      }
       fn();
     };
 
@@ -249,6 +371,182 @@ export function waitForPublishCompletion(
       });
     }
   });
+}
+
+// ─── R3-T4 FX9：MV3 SW evict 后的 publish-wait 恢复 ────────────────────────────
+//
+// MV3 service worker 在 ~5min idle 后会被 evict；如果用户此时还在 publish 表单
+// 上没点 publish，原本挂在 SW 内存里的 promise + listener 全部丢失，daemon 永远
+// 收不到 callback（dispatch 卡死）。本函数由 background entrypoint 在 SW 启动
+// 时调用一次，扫 chrome.storage.local 中所有 `publish_wait:*` 条目并据当前 tab
+// 状态恢复语义：
+//
+//   - 已超时        → postCallback `publish_timeout`
+//   - tab 不存在    → postCallback `publish_canceled`
+//   - tab 命中详情  → postCallback ok（带 url + note_id）
+//   - tab 仍在表单页 → 重新 register listener 续命，settle 时再 postCallback
+//   - tab 跳到其他 → postCallback `publish_canceled`
+//
+// 重 register 路径不卡 recovery 主循环（fire-and-forget）；listener settle
+// 后会通过 storage remove 自身，避免重复恢复。
+
+/** Recovery 入口依赖。chrome.tabs.get / postCallback / now 都可注入便于单测。 */
+export interface PublishWaitRecoveryDeps {
+  /** chrome.storage.local 抽象；测试可换 fake。 */
+  storageLocal?: StorageLocalLike;
+  /** chrome.tabs.get 抽象；测试可换 fake。 */
+  tabsGet?: (tabId: number) => Promise<chrome.tabs.Tab | null | undefined>;
+  /** 必填：把恢复结论送给 daemon 的 callback。封装 coagentDeviceClient.postCallback。 */
+  postCallback: (
+    correlationId: string,
+    payload: { status: 'ok' | 'error'; result: Record<string, unknown> | null; error: { code: string; message: string } | null },
+  ) => Promise<void>;
+  /** 当前时间（ms epoch）；测试注入便于断言超时分支。 */
+  now?: () => number;
+  /** 重 register listener 时复用的 chromeApi（默认走真实 chrome.* API）。 */
+  chromeApi?: PublishWaitOptions['chromeApi'];
+}
+
+/** Recovery 单条状态的处理结果，便于 background 日志 / 单测断言。 */
+export type PublishWaitRecoveryOutcome =
+  | 'timeout'
+  | 'canceled_tab_missing'
+  | 'canceled_navigated_away'
+  | 'completed_detail'
+  | 'rearmed_listener';
+
+export interface PublishWaitRecoverySummary {
+  correlationId: string;
+  outcome: PublishWaitRecoveryOutcome;
+}
+
+/**
+ * Default chrome.tabs.get wrapper — async / null on missing tab. chrome.tabs.get
+ * 在 tab 不存在时通常会通过 callback 抛 `Error: No tab with id`，这里统一吞成
+ * null 让上层走 canceled 分支。
+ */
+function defaultTabsGet(tabId: number): Promise<chrome.tabs.Tab | null | undefined> {
+  if (typeof chrome === 'undefined' || !chrome?.tabs?.get) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    try {
+      chrome.tabs.get(tabId, (tab) => {
+        const lastError = (chrome.runtime as any)?.lastError;
+        if (lastError) {
+          resolve(null);
+          return;
+        }
+        resolve(tab ?? null);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * R3-T4 FX9：扫描 chrome.storage.local 中残留的 publish-wait state，按当前 tab
+ * 状态恢复语义。返回每条的处理结论（main 流程不消费，主要给单测和日志看）。
+ */
+export async function recoverPublishWaitStates(
+  deps: PublishWaitRecoveryDeps,
+): Promise<PublishWaitRecoverySummary[]> {
+  const storage = deps.storageLocal ?? defaultStorageLocal();
+  const states = await listPublishWaitStates(storage ?? undefined);
+  if (states.length === 0) return [];
+  const now = (deps.now ?? Date.now)();
+  const tabsGet = deps.tabsGet ?? defaultTabsGet;
+  const summaries: PublishWaitRecoverySummary[] = [];
+
+  for (const state of states) {
+    try {
+      // 1) 已超时 → publish_timeout
+      const deadline = state.startedAt + state.timeoutMs;
+      if (now > deadline) {
+        await deps.postCallback(state.correlationId, {
+          status: 'error',
+          result: null,
+          error: { code: 'publish_timeout', message: `publish wait timed out (recovered after deadline ${deadline})` },
+        });
+        await removePublishWaitState(state.correlationId, storage ?? undefined);
+        summaries.push({ correlationId: state.correlationId, outcome: 'timeout' });
+        continue;
+      }
+      // 2) 取 tab 状态
+      let tab: chrome.tabs.Tab | null | undefined = null;
+      try {
+        tab = await tabsGet(state.tabId);
+      } catch {
+        tab = null;
+      }
+      const tabUrl = (tab?.url ?? '').trim();
+      if (!tab || !tabUrl) {
+        await deps.postCallback(state.correlationId, {
+          status: 'error',
+          result: null,
+          error: { code: 'publish_canceled', message: `publish tab no longer exists (tabId=${state.tabId})` },
+        });
+        await removePublishWaitState(state.correlationId, storage ?? undefined);
+        summaries.push({ correlationId: state.correlationId, outcome: 'canceled_tab_missing' });
+        continue;
+      }
+      // 3) tab 命中详情页 → success
+      const detailMatch = tabUrl.match(NOTE_DETAIL_PATTERN);
+      if (detailMatch) {
+        await deps.postCallback(state.correlationId, {
+          status: 'ok',
+          result: { url: tabUrl, note_id: detailMatch[1] },
+          error: null,
+        });
+        await removePublishWaitState(state.correlationId, storage ?? undefined);
+        summaries.push({ correlationId: state.correlationId, outcome: 'completed_detail' });
+        continue;
+      }
+      // 4) tab 仍在 publish 表单 → 重 register listener 续命
+      if (PUBLISH_PAGE_PATTERN.test(tabUrl)) {
+        const remaining = Math.max(1_000, deadline - now);
+        // fire-and-forget；listener settle 时会自行 remove storage 条目并 postCallback。
+        void waitForPublishCompletion(state.tabId, {
+          timeoutMs: remaining,
+          correlationId: state.correlationId,
+          startedAt: state.startedAt,
+          chromeApi: deps.chromeApi,
+          storageLocal: storage ?? undefined,
+        })
+          .then((completion) =>
+            deps.postCallback(state.correlationId, {
+              status: 'ok',
+              result: { url: completion.url, note_id: completion.note_id },
+              error: null,
+            }),
+          )
+          .catch((err: any) =>
+            deps.postCallback(state.correlationId, {
+              status: 'error',
+              result: null,
+              error: {
+                code: typeof err?.code === 'string' ? err.code : 'publish_failed',
+                message: err instanceof Error ? err.message : String(err),
+              },
+            }),
+          );
+        summaries.push({ correlationId: state.correlationId, outcome: 'rearmed_listener' });
+        continue;
+      }
+      // 5) tab 跳到其他 url → 用户已离开 publish 流程，视为取消
+      await deps.postCallback(state.correlationId, {
+        status: 'error',
+        result: null,
+        error: { code: 'publish_canceled', message: `publish tab navigated away to non-detail page during SW evict: ${tabUrl}` },
+      });
+      await removePublishWaitState(state.correlationId, storage ?? undefined);
+      summaries.push({ correlationId: state.correlationId, outcome: 'canceled_navigated_away' });
+    } catch (err) {
+      console.warn('[publish-content] recovery failed for', state.correlationId, err);
+    }
+  }
+  return summaries;
 }
 
 type PublishDebugLog = {
@@ -1377,9 +1675,19 @@ export class PublishContentTool extends BaseTool {
         // M1.1 Fix-T4 §1: 表单填好之后才进入"等真发布完成"阶段。
         // runInMainWorld 已经返回 → publish 按钮 listener 已注入。
         // 这里在 background SW 长期挂监听等用户真点击 + 后端跳转。
-        pushToolLog('tool.wait_publish.start', `tabId=${tab.id}`);
+        // R3-T4 FX9：把 daemon 注入的 __correlationId 传给 wait，启用 storage
+        // 持久化；SW evict 后由 background recoverPublishWaitStates 恢复。
+        const correlationId =
+          typeof (args as any)?.__correlationId === 'string'
+            ? ((args as any).__correlationId as string)
+            : undefined;
+        pushToolLog(
+          'tool.wait_publish.start',
+          `tabId=${tab.id} corr=${correlationId ?? 'n/a'}`,
+        );
         const completion = await waitForPublishCompletion(tab.id, {
           timeoutMs: DEFAULT_PUBLISH_WAIT_TIMEOUT_MS,
+          correlationId,
         });
         pushToolLog(
           'tool.wait_publish.done',

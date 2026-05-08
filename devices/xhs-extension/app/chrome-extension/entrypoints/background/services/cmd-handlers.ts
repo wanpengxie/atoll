@@ -32,9 +32,19 @@ export interface CommandResultEnvelope {
   result: Record<string, unknown>;
 }
 
+/**
+ * R3-T4 FX9：handler 第三个可选参数携带 dispatch 元数据（目前只有
+ * correlation_id，用于 PublishContentTool 在 chrome.storage.local 持久化
+ * publish-wait state，使 SW evict 后 background 启动 hook 能恢复发送 callback）。
+ */
+export interface CommandContext {
+  correlationId?: string;
+}
+
 export type CommandHandler = (
   params: Record<string, unknown>,
-  session: CommandFrame['session']
+  session: CommandFrame['session'],
+  context?: CommandContext,
 ) => Promise<CommandResultEnvelope>;
 
 const handlerRegistry = new Map<CoagentDeviceCommand, CommandHandler>();
