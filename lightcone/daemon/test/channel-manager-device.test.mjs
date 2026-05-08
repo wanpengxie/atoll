@@ -3,7 +3,7 @@
 // stand-alone tmp baseDir so persistence is isolated.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -361,9 +361,28 @@ test('validateDeviceCommand: xhs.search / xhs.get-note / xhs.publish-status', ()
   validateDeviceCommand('xhs.get-note', { url: 'https://xhs.com/note/x' });
   validateDeviceCommand('xhs.get-note', { xsec_token: 'abc' });
 
-  // publish-status: correlation_id required
-  assert.throws(() => validateDeviceCommand('xhs.publish-status', {}), /correlation_id/);
-  validateDeviceCommand('xhs.publish-status', { correlation_id: 'corr-1' });
+  // publish-status: note_id required (FX3 round-2 codex#t57.1).
+  // correlation_id 是 dispatch envelope 字段（外层），不是 device-command params 字段。
+  assert.throws(() => validateDeviceCommand('xhs.publish-status', {}), /note_id/);
+  assert.throws(
+    () => validateDeviceCommand('xhs.publish-status', { correlation_id: 'corr-1' }),
+    /note_id/,
+  );
+  validateDeviceCommand('xhs.publish-status', { note_id: 'n1' });
+});
+
+test('validateDeviceCommand: xhs.publish content_path must be absolute', () => {
+  // FX1: real-mode CLI 只发 absolute path；relative 拒绝。
+  assert.throws(
+    () => validateDeviceCommand('xhs.publish', { title: 'hi', content_path: 'relative/path.md' }),
+    /content_path must be an absolute path/,
+  );
+  assert.throws(
+    () => validateDeviceCommand('xhs.publish', { title: 'hi', content_path: './path.md' }),
+    /content_path must be an absolute path/,
+  );
+  // 绝对路径校验通过（不读盘）。
+  validateDeviceCommand('xhs.publish', { title: 'hi', content_path: '/abs/path.md' });
 });
 
 test('deviceCommandSend rejects unknown type before resolving device/user', async (t) => {
@@ -388,6 +407,118 @@ test('deviceCommandSend rejects xhs.publish missing title', async (t) => {
     }),
     (err) => err.code === 'bad_request' && /title/.test(err.message),
   );
+});
+
+// ── FX1 (round-2 codex#t56.1): content_path materialize ─────────────────────
+
+test('deviceCommandSend: xhs.publish materializes content_path → content before push', async (t) => {
+  const ctx = await createHarness(t);
+  ctx.ws.goOnline('device-A');
+  // 写一个临时 markdown 作 content 源。
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'cm-publish-content-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const contentPath = path.join(tmp, 'note.md');
+  const expectedBody = '# 标题\n\n正文内容来自文件\n';
+  writeFileSync(contentPath, expectedBody, 'utf8');
+
+  const result = await ctx.cm.deviceCommandSend({
+    channel_id: 'ch-xhs-1',
+    type: 'xhs.publish',
+    params: { title: '物化', content_path: contentPath, tags: ['t1'] },
+  });
+  assert.equal(result.push.ok, true);
+
+  // ws push 收到 inline content（非 path）。
+  assert.equal(ctx.ws.calls.length, 1);
+  const pushed = ctx.ws.calls[0].payload.params;
+  assert.equal(pushed.content, expectedBody, 'device 端应收到 inline content');
+  assert.equal(pushed.content_path, undefined, 'device 端不应再带 content_path');
+  assert.equal(pushed.title, '物化');
+  assert.deepEqual(pushed.tags, ['t1']);
+});
+
+test('deviceCommandSend: xhs.publish ENOENT → dispatch.failed + content_read_failed (no push)', async (t) => {
+  const ctx = await createHarness(t);
+  ctx.ws.goOnline('device-A');
+  const missing = path.join(os.tmpdir(), `cm-missing-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
+
+  await assert.rejects(
+    ctx.cm.deviceCommandSend({
+      channel_id: 'ch-xhs-1',
+      type: 'xhs.publish',
+      params: { title: 'oops', content_path: missing },
+    }),
+    (err) => err.code === 'content_read_failed' && err.statusCode === 400,
+  );
+
+  // dispatch.start emitted（先于物化）+ dispatch.failed 审计 + 没有 push 给 device。
+  const dispatched = readDispatchMessages(ctx.node);
+  const failed = dispatched.find((m) => m.payload_type === 'dispatch.failed');
+  assert.ok(failed, 'dispatch.failed 审计 should be emitted on content_read_failed');
+  assert.equal(failed.payload_body?.error?.code, 'content_read_failed');
+  assert.equal(ctx.ws.calls.length, 0, 'pushCommand 不应被调用');
+  // router 已清；correlation_id 可被复用。
+  assert.equal(ctx.cm.dispatchRouter.lookup(failed.correlation_id), null);
+});
+
+test('deviceCommandSend: xhs.publish content + content_path 双给时取 content（back-compat）', async (t) => {
+  const ctx = await createHarness(t);
+  ctx.ws.goOnline('device-A');
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'cm-publish-both-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const contentPath = path.join(tmp, 'note.md');
+  writeFileSync(contentPath, 'FROM_FILE_SHOULD_NOT_BE_USED', 'utf8');
+
+  const result = await ctx.cm.deviceCommandSend({
+    channel_id: 'ch-xhs-1',
+    type: 'xhs.publish',
+    params: { title: 'hi', content: 'INLINE_WINS', content_path: contentPath },
+  });
+  assert.equal(result.push.ok, true);
+  const pushed = ctx.ws.calls[0].payload.params;
+  assert.equal(pushed.content, 'INLINE_WINS');
+  assert.equal(pushed.content_path, undefined, 'path 应被剥离，device 端只见 inline');
+});
+
+test('deviceCommandSend: xhs.publish content_path 必须 absolute（validator 层早拒绝）', async (t) => {
+  const ctx = await createHarness(t);
+  ctx.ws.goOnline('device-A');
+  await assert.rejects(
+    ctx.cm.deviceCommandSend({
+      channel_id: 'ch-xhs-1',
+      type: 'xhs.publish',
+      params: { title: 'hi', content_path: 'relative/path.md' },
+    }),
+    (err) => err.code === 'bad_request' && /content_path must be an absolute path/.test(err.message),
+  );
+  // validator 阶段拒绝 → 没有 dispatch.start 也没有 push。
+  assert.equal(ctx.ws.calls.length, 0);
+  const dispatched = readDispatchMessages(ctx.node);
+  assert.equal(dispatched.length, 0);
+});
+
+test('deviceCommandSend: xhs.publish-status note_id required（FX3）', async (t) => {
+  const ctx = await createHarness(t);
+  ctx.ws.goOnline('device-A');
+  // 不带 note_id → 400 bad_request
+  await assert.rejects(
+    ctx.cm.deviceCommandSend({
+      channel_id: 'ch-xhs-1',
+      type: 'xhs.publish-status',
+      params: {},
+    }),
+    (err) => err.code === 'bad_request' && /note_id/.test(err.message),
+  );
+  // 带 note_id 通过；ws 收到 cmd='publish-status' + params.note_id。
+  const result = await ctx.cm.deviceCommandSend({
+    channel_id: 'ch-xhs-1',
+    type: 'xhs.publish-status',
+    params: { note_id: 'n-abc' },
+  });
+  assert.equal(result.push.ok, true);
+  const pushed = ctx.ws.calls.at(-1);
+  assert.equal(pushed.payload.cmd, 'publish-status');
+  assert.equal(pushed.payload.params.note_id, 'n-abc');
 });
 
 test('deviceCommandSend bubbles up payload_serialization_failed reason as device_offline', async (t) => {

@@ -127,6 +127,11 @@ export function validateDeviceCommand(type, params) {
       if (!hasInline && !hasPath) {
         throw toRpcError('bad_request', `${type} requires content or content_path`);
       }
+      // FX1 (round-2 codex#t56.1): real-mode CLI 只发 absolute content_path，
+      // 拒绝相对路径以避免 daemon cwd 漂移导致的歧义。
+      if (hasPath && !path.isAbsolute(params.content_path)) {
+        throw toRpcError('bad_request', `${type} content_path must be an absolute path (got ${params.content_path})`);
+      }
       if ('images' in params && params.images != null && !Array.isArray(params.images)) {
         throw toRpcError('bad_request', `${type} images must be an array`);
       }
@@ -159,7 +164,11 @@ export function validateDeviceCommand(type, params) {
       break;
     }
     case 'xhs.publish-status': {
-      _requireNonEmptyString(params, 'correlation_id', type);
+      // FX3 (round-2 codex#t57.1): publish-status device-command params 是
+      // {note_id}，与 CLI real_provider.go 和 extension publish-status.ts 对齐。
+      // correlation_id 是 dispatch envelope 字段（外层 sendChannelMessage），
+      // 不是 device command params 字段。
+      _requireNonEmptyString(params, 'note_id', type);
       break;
     }
     default: {
@@ -1907,12 +1916,82 @@ export class ChannelManager {
       });
     }
 
+    // FX1 (round-2 codex#t56.1): materialize content_path → content before
+    // pushing to device. CLI real mode 只发 absolute content_path（不发 inline
+    // content），daemon 在此读盘并把 file body 塞进 params.content；device side
+    // 永远拿到 inline content（path 字段被剥离）。读失败走 dispatch.failed 审计 +
+    // throw RPC error code='content_read_failed'，永不 push 给 device。
+    let pushParams = cmdParams;
+    if (type === 'xhs.publish') {
+      const hasInlineContent = typeof cmdParams.content === 'string' && cmdParams.content.length > 0;
+      const hasContentPath = typeof cmdParams.content_path === 'string' && cmdParams.content_path.length > 0;
+      if (!hasInlineContent && hasContentPath) {
+        try {
+          const body = readFileSync(cmdParams.content_path, 'utf8');
+          pushParams = { ...cmdParams, content: body };
+          delete pushParams.content_path;
+        } catch (readErr) {
+          emitJsonEvent('device.command.content_read_failed', {
+            device_id: deviceId,
+            correlation_id: correlationId,
+            content_path: cmdParams.content_path,
+            error: readErr?.message ?? String(readErr),
+          });
+          try {
+            await this.sendChannelMessage({
+              channelId: node.channelId,
+              senderKind: SenderKind.EXTERNAL,
+              senderId: `device:${deviceId}`,
+              senderName: `device:${deviceId}`,
+              payload: {
+                type: PayloadType.DISPATCH_FAILED,
+                body: {
+                  error: {
+                    code: 'content_read_failed',
+                    reason: readErr?.message ?? String(readErr),
+                  },
+                  device_id: deviceId,
+                  user_id: userId,
+                },
+              },
+              content: JSON.stringify({
+                error: {
+                  code: 'content_read_failed',
+                  reason: readErr?.message ?? String(readErr),
+                },
+              }),
+              correlationId,
+              audience: ['channel'],
+              origin: 'external',
+              source: 'device',
+            });
+          } catch (recordErr) {
+            emitJsonEvent('device.command.failed_record_error', {
+              device_id: deviceId,
+              correlation_id: correlationId,
+              error: recordErr?.message ?? String(recordErr),
+            });
+          }
+          this.dispatchRouter.remove(correlationId);
+          throw toRpcError(
+            'content_read_failed',
+            `failed to read content_path ${cmdParams.content_path}: ${readErr?.message ?? readErr}`,
+            400,
+          );
+        }
+      } else if (hasInlineContent && hasContentPath) {
+        // Back-compat: 双给时取 inline content，剥离 path（device side 永远 inline）。
+        pushParams = { ...cmdParams };
+        delete pushParams.content_path;
+      }
+    }
+
     const cmd = type.startsWith('xhs.') ? type.slice('xhs.'.length) : type;
     const wsPayload = {
       type: 'command',
       correlation_id: correlationId,
       cmd,
-      params: cmdParams,
+      params: pushParams,
       session,
     };
     let push = { ok: false, reason: 'no_ws_server' };
