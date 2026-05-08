@@ -47,6 +47,22 @@ const HTTP_PORT       = HTTP_PORT_RAW ? Number(HTTP_PORT_RAW) : null;
 const DAEMON_HTTP_URL = Number.isInteger(HTTP_PORT) ? `http://127.0.0.1:${HTTP_PORT}` : '';
 const DAEMON_TOKEN    = process.env.COAGENT_DAEMON_TOKEN || randomUUID();
 
+// ── Public endpoint announced to server at register time ────────────────────
+// T77 (M1.2-FIX-B): the extension contacts the daemon's HTTP/WS port directly,
+// so the server needs the publicly routable host/port (not the internal
+// 127.0.0.1 + os.hostname()). Operators inject these in production
+// (TLS-terminating reverse proxy → wss://daemon.example.com:443); dev clusters
+// keep `os.hostname()` + HTTP_PORT + ws/http as before.
+const PUBLIC_HOST_RAW = String(process.env.COAGENT_DAEMON_PUBLIC_HOST ?? '').trim();
+const PUBLIC_HOST     = PUBLIC_HOST_RAW || os.hostname();
+const PUBLIC_PORT_RAW = String(process.env.COAGENT_DAEMON_PUBLIC_PORT ?? '').trim();
+const PUBLIC_PORT     = PUBLIC_PORT_RAW
+  ? (Number.isInteger(Number(PUBLIC_PORT_RAW)) ? Number(PUBLIC_PORT_RAW) : null)
+  : (Number.isInteger(HTTP_PORT) ? HTTP_PORT : null);
+const PUBLIC_SCHEME_RAW = String(process.env.COAGENT_DAEMON_PUBLIC_SCHEME ?? '').toLowerCase().trim();
+const ALLOWED_PUBLIC_SCHEMES = new Set(['http', 'https', 'ws', 'wss']);
+const PUBLIC_SCHEME = ALLOWED_PUBLIC_SCHEMES.has(PUBLIC_SCHEME_RAW) ? PUBLIC_SCHEME_RAW : null;
+
 if (!MACHINE_API_KEY) {
   for (const line of missingMachineApiKeyErrorLines(MACHINE_KEY_PATH)) {
     console.error(line);
@@ -55,6 +71,7 @@ if (!MACHINE_API_KEY) {
 }
 
 console.error(`[Daemon] v${version} Server: ${SERVER_URL} project=${PROJECT_KEY}`);
+console.error(`[Daemon] public-endpoint host=${PUBLIC_HOST} port=${PUBLIC_PORT ?? '(none)'} scheme=${PUBLIC_SCHEME ?? '(default)'}`);
 
 // ── Device endpoint config ────────────────────────────────────────────────────
 // Device api-key sources (T74):
@@ -182,12 +199,22 @@ async function bootstrapDeviceSync() {
     console.error(`[Daemon] device source=env — skipping register+pull (env-entries=${ENV_DEVICE_KEYS.size})`);
     return;
   }
+  // T77 (M1.2-FIX-B): announce the publicly routable endpoint so
+  // /api/device/resolve can hand the extension a usable ws_url/http_url.
+  // PUBLIC_PORT defaults to HTTP_PORT (already listening — main() awaits
+  // rpcServer.start() before connection.connect() fires onReady, so HTTP +
+  // device-WS are both up by the time we reach this register call).
+  if (PUBLIC_PORT == null) {
+    console.error('[Daemon] WARN register without public port — extension /resolve will return 503 until COAGENT_DAEMON_HTTP_PORT or COAGENT_DAEMON_PUBLIC_PORT is set');
+  }
   try {
     const reg = await registerDaemon({
       serverUrl: SERVER_URL,
       machineApiKey: MACHINE_API_KEY,
       daemonId: resolvedDaemonId || '',
-      host: os.hostname(),
+      host: PUBLIC_HOST,
+      port: PUBLIC_PORT,
+      scheme: PUBLIC_SCHEME,
       capabilities: ['xhs-creator'],
     });
     const daemonId = String(reg?.daemon_id ?? '').trim();

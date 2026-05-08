@@ -2,9 +2,13 @@
 // (lightcone/src/routes/daemon.js).
 //
 //   POST /api/daemon/register
-//     body: {machine_api_key, daemon_id, host?, port?, capabilities?}
+//     body: {machine_api_key, daemon_id, host?, port?, scheme?, capabilities?}
 //     200 :  {ok:true, daemon_id}
 //     401/403/4xx → throw Error('register_failed: <status>')
+//
+// `scheme` (T77, M1.2-FIX-B) is the public-URL scheme the daemon advertises
+// when it sits behind a TLS proxy (`http`/`https`/`ws`/`wss`). When omitted
+// the server keeps the legacy ws/http default for dev clusters.
 //
 //   GET  /api/daemon/{daemon_id}/devices
 //     header: Authorization: Bearer <machine_api_key>
@@ -31,6 +35,7 @@ export async function registerDaemon({
   daemonId,
   host = null,
   port = null,
+  scheme = null,
   capabilities = [],
   fetchImpl = globalThis.fetch,
 } = {}) {
@@ -47,6 +52,7 @@ export async function registerDaemon({
     capabilities: Array.isArray(capabilities) ? capabilities : [],
   };
   if (port != null) body.port = port;
+  if (scheme != null && scheme !== '') body.scheme = String(scheme);
 
   const res = await fetchImpl(joinUrl(serverUrl, '/api/daemon/register'), {
     method: 'POST',

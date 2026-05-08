@@ -54,6 +54,68 @@ test('registerDaemon POSTs to /api/daemon/register with expected body', async ()
   assert.deepEqual(body.capabilities, ['xhs-creator']);
 });
 
+test('registerDaemon includes port + scheme in body when provided (T77 M1.2-FIX-B)', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, daemon_id: 'd1' }),
+    };
+  };
+  await registerDaemon({
+    serverUrl: 'http://srv',
+    machineApiKey: 'mk',
+    daemonId: 'd1',
+    host: 'daemon.example.com',
+    port: 9501,
+    scheme: 'https',
+    capabilities: ['xhs-creator'],
+    fetchImpl,
+  });
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(body.port, 9501);
+  assert.equal(body.scheme, 'https');
+  assert.equal(body.host, 'daemon.example.com');
+});
+
+test('registerDaemon omits scheme when null/empty (T77 backward compat)', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, json: async () => ({ ok: true, daemon_id: 'd' }) };
+  };
+  await registerDaemon({
+    serverUrl: 'http://srv',
+    machineApiKey: 'mk',
+    daemonId: 'd',
+    host: 'h',
+    port: 9501,
+    fetchImpl,
+  });
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(Object.hasOwn(body, 'scheme'), false);
+  assert.equal(body.port, 9501);
+});
+
+test('registerDaemon omits port when null (T77 fallback when daemon HTTP is disabled)', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, json: async () => ({ ok: true, daemon_id: 'd' }) };
+  };
+  await registerDaemon({
+    serverUrl: 'http://srv',
+    machineApiKey: 'mk',
+    daemonId: 'd',
+    host: 'h',
+    fetchImpl,
+  });
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(Object.hasOwn(body, 'port'), false);
+});
+
 test('registerDaemon strips trailing slash from serverUrl', async () => {
   const calls = [];
   const fetchImpl = async (url, options) => {
