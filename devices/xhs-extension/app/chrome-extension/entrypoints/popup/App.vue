@@ -102,20 +102,6 @@
         </el-form>
       </section>
 
-      <!-- 相关链接 -->
-      <section class="links-section">
-        <h2 class="section-title">相关链接</h2>
-        <div class="links-grid">
-          <el-button class="link-btn" @click="openHomepage">
-            <el-icon :size="18"><HomeFilled /></el-icon>
-            <span>打开主页</span>
-          </el-button>
-          <el-button class="link-btn" @click="openGithub">
-            <el-icon :size="18"><Link /></el-icon>
-            <span>Github</span>
-          </el-button>
-        </div>
-      </section>
     </main>
   </div>
 </template>
@@ -128,10 +114,6 @@ import {
   getDefaultWebSocketUrl,
   getDefaultDaemonHttpBase,
 } from '@/entrypoints/background/connection-state';
-import {
-  HomeFilled,
-  Link,
-} from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
 
 const store = useAppStore();
@@ -241,15 +223,6 @@ const handleAutoReconnectChange = async () => {
   await saveConnectionSettings();
 };
 
-
-// 打开外部链接
-const openHomepage = () => {
-  chrome.tabs.create({ url: 'https://x.zouying.work/' });
-};
-
-const openGithub = () => {
-  chrome.tabs.create({ url: 'https://github.com/xpzouying/x-mcp' });
-};
 
 function syncConnectionStatus(status: any) {
   store.updateConnectionStatus({
@@ -532,50 +505,4 @@ onBeforeUnmount(() => {
   color: #000000;
 }
 
-.links-section {
-  margin-top: 20px;
-}
-
-.section-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: #000000;
-  margin: 0 0 14px 0;
-  letter-spacing: -0.01em;
-  text-transform: uppercase;
-  font-size: 11px;
-  color: #6B7280;
-}
-
-.links-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-}
-
-.link-btn {
-  height: 60px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  background: #FFFFFF;
-  border: 1px solid #E5E7EB;
-  border-radius: 6px;
-  transition: all 0.2s;
-  color: #1F2937;
-}
-
-.link-btn:hover {
-  background: #F8F9FA;
-  border-color: #000000;
-  color: #000000;
-  transform: translateY(-1px);
-}
-
-.link-btn span {
-  font-size: 12px;
-  font-weight: 500;
-}
 </style>
