@@ -138,6 +138,113 @@ test('registerDaemon throws when port is empty string (T81 M1.2-FIX-F)', async (
   );
 });
 
+test('registerDaemon throws when port is whitespace only (T83 M1.2-FIX-H)', async () => {
+  // Pre-T83 Number("   ") === 0 would have slipped past — call-site check
+  // now trims first so whitespace is rejected as "port is required",
+  // matching the server-side route.
+  const fetchImpl = async () => {
+    throw new Error('fetchImpl should not be invoked when port is whitespace');
+  };
+  await assert.rejects(
+    () => registerDaemon({
+      serverUrl: 'http://srv',
+      machineApiKey: 'mk',
+      daemonId: 'd',
+      host: 'h',
+      port: '   ',
+      fetchImpl,
+    }),
+    /port is required/,
+  );
+});
+
+test('registerDaemon throws when port is non-integer (T83 M1.2-FIX-H mirrors server)', async () => {
+  // Defense-in-depth: the daemon-side wrapper now matches the server
+  // contract — non-integer fails at the call site instead of round-tripping
+  // a 400 over the network.
+  const fetchImpl = async () => {
+    throw new Error('fetchImpl should not be invoked for non-integer port');
+  };
+  await assert.rejects(
+    () => registerDaemon({
+      serverUrl: 'http://srv',
+      machineApiKey: 'mk',
+      daemonId: 'd',
+      host: 'h',
+      port: 'not-a-number',
+      fetchImpl,
+    }),
+    /port must be an integer/,
+  );
+});
+
+test('registerDaemon throws on out-of-range port (T83 M1.2-FIX-H)', async () => {
+  // 0 / -1 / 65536 / 99999 each pass Number.isInteger — only the new
+  // 1..65535 range check rejects them. Without this the daemon would push
+  // garbage values into the server's persistence path (fail-fast lost) or
+  // burn a network round trip on the server's 400.
+  const fetchImpl = async () => {
+    throw new Error('fetchImpl should not be invoked for out-of-range port');
+  };
+  for (const port of [0, -1, 65536, 99999]) {
+    await assert.rejects(
+      () => registerDaemon({
+        serverUrl: 'http://srv',
+        machineApiKey: 'mk',
+        daemonId: 'd',
+        host: 'h',
+        port,
+        fetchImpl,
+      }),
+      /port must be a valid TCP port \(1-65535\)/,
+      `port=${port}`,
+    );
+  }
+});
+
+test('registerDaemon accepts boundary ports 1 and 65535 (T83 happy-path guard)', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, json: async () => ({ ok: true, daemon_id: 'd' }) };
+  };
+  for (const port of [1, 65535]) {
+    await registerDaemon({
+      serverUrl: 'http://srv',
+      machineApiKey: 'mk',
+      daemonId: 'd',
+      host: 'h',
+      port,
+      fetchImpl,
+    });
+  }
+  assert.equal(calls.length, 2);
+  assert.equal(JSON.parse(calls[0].options.body).port, 1);
+  assert.equal(JSON.parse(calls[1].options.body).port, 65535);
+});
+
+test('registerDaemon coerces string port to integer in body (T83 M1.2-FIX-H)', async () => {
+  // The wrapper now sends the canonical numeric form so the server doesn't
+  // have to re-parse "9501". This also guarantees the round-trip: caller
+  // passes "9501" → server stores 9501.
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, json: async () => ({ ok: true, daemon_id: 'd' }) };
+  };
+  await registerDaemon({
+    serverUrl: 'http://srv',
+    machineApiKey: 'mk',
+    daemonId: 'd',
+    host: 'h',
+    port: '9501',
+    fetchImpl,
+  });
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(body.port, 9501);
+  assert.equal(typeof body.port, 'number');
+});
+
 test('registerDaemon strips trailing slash from serverUrl', async () => {
   const calls = [];
   const fetchImpl = async (url, options) => {

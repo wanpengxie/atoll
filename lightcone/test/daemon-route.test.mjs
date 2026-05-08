@@ -245,6 +245,107 @@ test('POST /api/daemon/register rejects non-integer port with 400 (T77 regressio
   });
 });
 
+test('POST /api/daemon/register rejects out-of-range port with 400 (T83 M1.2-FIX-H)', async () => {
+  // T83 contract: t81 left port unranged so 0 / -1 / 65536 / 99999 silently
+  // passed Number.isInteger and persisted as garbage daemon_port, which
+  // /api/device/resolve then rendered into invalid URLs — re-creating the
+  // exact "register OK, /resolve later 503" pattern t81 set out to kill.
+  // Each row here pins one out-of-range value to a 400 with the canonical
+  // "port must be a valid TCP port (1-65535)" message.
+  const router = createDaemonRouter({
+    getDbImpl: () => ({}),
+    getMachineByApiKeyImpl: async () => ({ id: 'daemon-001', server_id: 'server-001' }),
+    updateMachineDaemonInfoImpl: async () => { throw new Error('should not call'); },
+    getDevicesByDaemonIdImpl: async () => [],
+  });
+
+  const cases = [
+    { label: 'zero',          port: 0 },
+    { label: 'negative',      port: -1 },
+    { label: 'just-over-max', port: 65536 },
+    { label: 'far-over-max',  port: 99999 },
+  ];
+
+  await withServer(createApp(router), async (baseUrl) => {
+    for (const { label, port } of cases) {
+      const res = await callJson(baseUrl, '/api/daemon/register', {
+        method: 'POST',
+        body: {
+          machine_api_key: 'k',
+          daemon_id: 'daemon-001',
+          host: 'h',
+          port,
+          capabilities: [],
+        },
+      });
+      assert.equal(res.status, 400, `case ${label} (port=${port})`);
+      assert.equal(res.json.error, 'port must be a valid TCP port (1-65535)', `case ${label}`);
+    }
+  });
+});
+
+test('POST /api/daemon/register rejects whitespace-only port with 400 (T83 M1.2-FIX-H)', async () => {
+  // Pre-T83: Number("   ") === 0 silently coerced past Number.isInteger,
+  // persisting daemon_port=0 and reproducing the t81 failure mode. Now the
+  // route trims first so whitespace is treated like missing port.
+  const router = createDaemonRouter({
+    getDbImpl: () => ({}),
+    getMachineByApiKeyImpl: async () => ({ id: 'daemon-001', server_id: 'server-001' }),
+    updateMachineDaemonInfoImpl: async () => { throw new Error('should not call'); },
+    getDevicesByDaemonIdImpl: async () => [],
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/daemon/register', {
+      method: 'POST',
+      body: {
+        machine_api_key: 'k',
+        daemon_id: 'daemon-001',
+        host: 'h',
+        port: '   ',
+        capabilities: [],
+      },
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.json.error, 'port is required');
+  });
+});
+
+test('POST /api/daemon/register accepts boundary ports 1 and 65535 (T83 M1.2-FIX-H happy-path guard)', async () => {
+  // Boundary regression: 1 and 65535 are inside the valid range; the new
+  // range check must not reject them. Pinning both ends keeps the helper
+  // honest if the comparison ever flips to strict inequality.
+  const updates = [];
+  const router = createDaemonRouter({
+    getDbImpl: () => ({}),
+    getMachineByApiKeyImpl: async () => ({ id: 'daemon-001', server_id: 'server-001' }),
+    updateMachineDaemonInfoImpl: async (_db, id, fields) => {
+      updates.push({ id, fields });
+      return { id, ...fields };
+    },
+    getDevicesByDaemonIdImpl: async () => [],
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    for (const port of [1, 65535]) {
+      const res = await callJson(baseUrl, '/api/daemon/register', {
+        method: 'POST',
+        body: {
+          machine_api_key: 'k',
+          daemon_id: 'daemon-001',
+          host: 'h',
+          port,
+          capabilities: [],
+        },
+      });
+      assert.equal(res.status, 200, `port=${port}`);
+    }
+    assert.equal(updates.length, 2);
+    assert.equal(updates[0].fields.daemon_port, 1);
+    assert.equal(updates[1].fields.daemon_port, 65535);
+  });
+});
+
 test('POST /api/daemon/register rejects daemon_id mismatch with 403', async () => {
   const router = createDaemonRouter({
     getDbImpl: () => ({}),

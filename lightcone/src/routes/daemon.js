@@ -43,12 +43,25 @@ export function createDaemonRouter({
     // making `/api/device/resolve` return 503 long after the daemon
     // believed register succeeded. Reject upfront so the daemon-side
     // bootstrap fails fast and surfaces the missing env var.
-    if (portRaw == null || portRaw === '') {
+    //
+    // T83 (M1.2-FIX-H): trim string-form input so whitespace ("   ") cannot
+    // sneak past the empty-check (Number("   ") silently coerces to 0). For
+    // numeric input `String(9501).trim() === '9501'` round-trips cleanly, so
+    // happy-path behavior is unchanged.
+    const portStr = portRaw == null ? '' : String(portRaw).trim();
+    if (portStr === '') {
       return res.status(400).json({ error: 'port is required' });
     }
-    const port = Number(portRaw);
+    const port = Number(portStr);
     if (!Number.isInteger(port)) {
       return res.status(400).json({ error: 'port must be an integer' });
+    }
+    // T83 (M1.2-FIX-H): require a valid TCP port. Without this, 0 / -1 /
+    // 65536 / 99999 all pass Number.isInteger and persist as garbage
+    // daemon_port, which `/api/device/resolve` then renders into invalid URLs
+    // — re-creating the t81 "register OK, /resolve later 503" failure mode.
+    if (port < 1 || port > 65535) {
+      return res.status(400).json({ error: 'port must be a valid TCP port (1-65535)' });
     }
     // T77 (M1.2-FIX-B): public scheme is optional. When daemon sits behind a
     // TLS proxy, prod clusters announce `https`/`wss` so `/api/device/resolve`
