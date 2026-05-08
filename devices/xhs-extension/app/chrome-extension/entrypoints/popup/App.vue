@@ -12,66 +12,47 @@
 
     <!-- 主体内容 -->
     <main class="popup-main">
-      <!-- Daemon 设备配置 -->
+      <!-- 主入口：1-key 流程（lightcone resolve API） -->
       <section class="connection-card">
         <div class="connection-card__header">
           <div>
-            <h2>🛰️ Coagent Daemon Device</h2>
+            <h2>🛰️ Coagent Device</h2>
             <p>
-              填写 daemon 地址、device api key、device id，点击 "连接" 与 daemon
-              建立 WebSocket 长连。
+              填 Coagent api-key + 点 "连接"，扩展自动从 lightcone server 反查
+              daemon 连接信息并建立 WebSocket 长连。
             </p>
           </div>
           <StatusIndicator :status="connectionStatus" :text="connectionStatusText" />
         </div>
 
         <el-form label-position="top" class="connection-form">
-          <el-form-item label="Daemon WebSocket URL" class="server-url-item">
+          <el-form-item label="Coagent api-key" class="api-key-item">
             <el-input
-              v-model="connectionForm.serverUrl"
-              placeholder="ws://127.0.0.1:9501/device/{deviceId}"
-            />
-          </el-form-item>
-
-          <el-form-item label="Daemon HTTP base" class="server-url-item">
-            <el-input
-              v-model="connectionForm.daemonHttpBase"
-              :placeholder="defaultDaemonHttpBase"
-            />
-          </el-form-item>
-
-          <el-form-item label="Device ID" class="server-url-item">
-            <el-input
-              v-model="connectionForm.deviceId"
-              placeholder="例 xhs-laptop-001"
-            />
-          </el-form-item>
-
-          <el-form-item label="Device API Key" class="api-key-item">
-            <el-input
-              v-model="connectionForm.apiKey"
+              v-model="primaryForm.apiKey"
               type="password"
               show-password
-              placeholder="device api key（与 daemon DEVICE_KEYS 一致）"
+              placeholder="sk_dev_xxx"
               class="api-key-input"
             />
           </el-form-item>
 
-          <el-form-item
-            label="主人 user_id（可选 - 留空使用 daemon 默认）"
-            class="server-url-item"
-          >
+          <el-form-item label="Server URL（lightcone server）" class="server-url-item">
             <el-input
-              v-model="connectionForm.userId"
-              placeholder="例 user-001（留空时由 daemon 解析当前主人）"
+              v-model="primaryForm.lightconeServerUrl"
+              :placeholder="defaultLightconeServerUrl"
             />
           </el-form-item>
+
+          <div v-if="primaryError" class="primary-error">
+            <span class="primary-error__icon">⚠️</span>
+            <span class="primary-error__text">{{ primaryError }}</span>
+          </div>
 
           <div class="connection-form__actions">
             <el-button
               type="primary"
-              :loading="connecting"
-              @click="connectDevice"
+              :loading="resolving"
+              @click="connectViaResolve"
               class="action-btn action-btn--primary"
             >
               连接
@@ -83,25 +64,89 @@
             >
               断开
             </el-button>
-            <el-button
-              :loading="savingConnection"
-              @click="saveConnectionSettings"
-              class="action-btn"
-            >
-              保存
-            </el-button>
           </div>
-
-          <el-checkbox
-            v-model="connectionForm.autoReconnect"
-            @change="handleAutoReconnectChange"
-            class="auto-reconnect-checkbox"
-          >
-            自动重连
-          </el-checkbox>
         </el-form>
       </section>
 
+      <!-- Advanced 折叠：旧 5 字段（dev/test 用） -->
+      <el-collapse v-model="advancedOpen" class="advanced-collapse">
+        <el-collapse-item name="advanced">
+          <template #title>
+            <span class="advanced-title">⚙️ Advanced（手动配置 5 字段）</span>
+          </template>
+          <section class="advanced-card">
+            <p class="advanced-desc">
+              dev / test 场景：跳过 lightcone resolve，直接手动填 daemon
+              连接信息。生产用 main 入口的 api-key 即可。
+            </p>
+
+            <el-form label-position="top" class="connection-form">
+              <el-form-item label="Daemon WebSocket URL" class="server-url-item">
+                <el-input
+                  v-model="advancedForm.serverUrl"
+                  placeholder="ws://127.0.0.1:9501/device/{deviceId}"
+                />
+              </el-form-item>
+
+              <el-form-item label="Daemon HTTP base" class="server-url-item">
+                <el-input
+                  v-model="advancedForm.daemonHttpBase"
+                  :placeholder="defaultDaemonHttpBase"
+                />
+              </el-form-item>
+
+              <el-form-item label="Device ID" class="server-url-item">
+                <el-input v-model="advancedForm.deviceId" placeholder="例 xhs-laptop-001" />
+              </el-form-item>
+
+              <el-form-item label="Device API Key" class="api-key-item">
+                <el-input
+                  v-model="advancedForm.apiKey"
+                  type="password"
+                  show-password
+                  placeholder="device api key（与 daemon DEVICE_KEYS 一致）"
+                  class="api-key-input"
+                />
+              </el-form-item>
+
+              <el-form-item
+                label="主人 user_id（可选 - 留空使用 daemon 默认）"
+                class="server-url-item"
+              >
+                <el-input
+                  v-model="advancedForm.userId"
+                  placeholder="例 user-001"
+                />
+              </el-form-item>
+
+              <div class="connection-form__actions">
+                <el-button
+                  :loading="advancedConnecting"
+                  @click="connectAdvanced"
+                  class="action-btn action-btn--primary"
+                >
+                  连接（advanced）
+                </el-button>
+                <el-button
+                  :loading="savingAdvanced"
+                  @click="saveAdvanced"
+                  class="action-btn"
+                >
+                  保存
+                </el-button>
+              </div>
+
+              <el-checkbox
+                v-model="advancedForm.autoReconnect"
+                @change="handleAutoReconnectChange"
+                class="auto-reconnect-checkbox"
+              >
+                自动重连
+              </el-checkbox>
+            </el-form>
+          </section>
+        </el-collapse-item>
+      </el-collapse>
     </main>
   </div>
 </template>
@@ -113,15 +158,26 @@ import StatusIndicator from '@/components/StatusIndicator.vue';
 import {
   getDefaultWebSocketUrl,
   getDefaultDaemonHttpBase,
+  getDefaultLightconeServerUrl,
 } from '@/entrypoints/background/connection-state';
 import { ElMessage } from 'element-plus';
 
 const store = useAppStore();
 
 const defaultDaemonHttpBase = getDefaultDaemonHttpBase();
+const defaultLightconeServerUrl = getDefaultLightconeServerUrl();
 
-// 状态：5 字段 device 配置（spec §6.2.5）
-const connectionForm = ref({
+// ── 主入口表单（1-key resolve 流程）────────────────────────────────────
+const primaryForm = ref({
+  apiKey: '',
+  lightconeServerUrl: defaultLightconeServerUrl,
+});
+const resolving = ref(false);
+/** Resolve 失败时的友好提示（中文）。connect 成功 / disconnect 时清空。 */
+const primaryError = ref<string>('');
+
+// ── Advanced 表单（旧 5 字段直连流程）──────────────────────────────────
+const advancedForm = ref({
   serverUrl: getDefaultWebSocketUrl(),
   autoReconnect: true,
   apiKey: '',
@@ -129,101 +185,155 @@ const connectionForm = ref({
   deviceId: '',
   userId: '',
 });
-const connecting = ref(false);
-const savingConnection = ref(false);
+const advancedConnecting = ref(false);
+const savingAdvanced = ref(false);
+const advancedOpen = ref<string[]>([]); // collapse 默认收起
 const configLoaded = ref(false);
 
-// 计算属性
-const connectionStatus = computed<'connected' | 'disconnected' | 'error' | 'loading'>(() => {
-  if (store.connectionStatus.reconnecting) {
-    return 'loading';
-  }
+// ── 连接状态徽章 ──────────────────────────────────────────────────────
+type StatusKind = 'connected' | 'disconnected' | 'error' | 'loading';
+const connectionStatus = computed<StatusKind>(() => {
+  if (resolving.value || store.connectionStatus.reconnecting) return 'loading';
   if (!store.connectionStatus.connected) {
-    return store.connectionStatus.lastError ? 'error' : 'disconnected';
+    if (primaryError.value || store.connectionStatus.lastError) return 'error';
+    return 'disconnected';
   }
   return 'connected';
 });
 const connectionStatusText = computed(() => {
-  if (store.connectionStatus.reconnecting) {
-    return '重新连接中...';
-  }
+  if (resolving.value) return '解析中...';
+  if (store.connectionStatus.reconnecting) return '重新连接中...';
   if (!store.connectionStatus.connected) {
-    return store.connectionStatus.lastError || '未连接';
+    if (primaryError.value) return '解析失败';
+    if (store.connectionStatus.lastError) return store.connectionStatus.lastError;
+    return '未连接';
   }
   return '已连接';
 });
 
+// ── storage 加载 / 回填 ───────────────────────────────────────────────
 const loadConnectionConfig = async () => {
   const response = await chrome.runtime.sendMessage({ type: 'GET_CONNECTION_CONFIG' });
   if (response?.success) {
-    connectionForm.value.serverUrl = response.config.serverUrl || getDefaultWebSocketUrl();
-    connectionForm.value.autoReconnect = response.config.autoReconnect;
-    connectionForm.value.apiKey = response.config.apiKey || '';
-    connectionForm.value.daemonHttpBase =
-      response.config.daemonHttpBase || defaultDaemonHttpBase;
-    connectionForm.value.deviceId = response.config.deviceId || '';
-    connectionForm.value.userId = response.config.userId || '';
+    const c = response.config ?? {};
+    // 主入口：lightconeServerUrl 优先；没填过用默认。apiKey 用 device key 同字段。
+    primaryForm.value.lightconeServerUrl =
+      c.lightconeServerUrl || defaultLightconeServerUrl;
+    primaryForm.value.apiKey = c.apiKey || '';
+
+    // Advanced 5 字段
+    advancedForm.value.serverUrl = c.serverUrl || getDefaultWebSocketUrl();
+    advancedForm.value.autoReconnect = c.autoReconnect ?? true;
+    advancedForm.value.apiKey = c.apiKey || '';
+    advancedForm.value.daemonHttpBase = c.daemonHttpBase || defaultDaemonHttpBase;
+    advancedForm.value.deviceId = c.deviceId || '';
+    advancedForm.value.userId = c.userId || '';
   }
   configLoaded.value = true;
 };
 
-const buildPayload = () => ({
-  serverUrl: connectionForm.value.serverUrl,
-  autoReconnect: connectionForm.value.autoReconnect,
-  apiKey: connectionForm.value.apiKey,
-  daemonHttpBase: connectionForm.value.daemonHttpBase || defaultDaemonHttpBase,
-  deviceId: connectionForm.value.deviceId,
-  userId: connectionForm.value.userId,
+// ── 主入口 connect（resolve + connect 一步走） ─────────────────────────
+const connectViaResolve = async () => {
+  primaryError.value = '';
+  resolving.value = true;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'RESOLVE_AND_CONNECT',
+      payload: {
+        lightconeServerUrl: primaryForm.value.lightconeServerUrl,
+        apiKey: primaryForm.value.apiKey,
+      },
+    });
+    if (response?.success) {
+      ElMessage.success('已发起 device 连接');
+      // resolve 后回填 advanced 表单方便切换查看。
+      if (response.config) {
+        const c = response.config;
+        advancedForm.value.serverUrl = c.serverUrl || advancedForm.value.serverUrl;
+        advancedForm.value.daemonHttpBase = c.daemonHttpBase || advancedForm.value.daemonHttpBase;
+        advancedForm.value.deviceId = c.deviceId || advancedForm.value.deviceId;
+        advancedForm.value.apiKey = c.apiKey || advancedForm.value.apiKey;
+        advancedForm.value.userId = c.userId || advancedForm.value.userId;
+      }
+    } else {
+      // 友好提示：网络类失败提示走 advanced fallback。
+      const kind: string = response?.errorKind || 'unknown';
+      const baseMsg = response?.error || '连接失败';
+      primaryError.value =
+        kind === 'network' || kind === 'unavailable'
+          ? `${baseMsg} — 若 server 不可达，可展开 Advanced 直接配 daemon 5 字段`
+          : baseMsg;
+      ElMessage.error(baseMsg);
+    }
+  } finally {
+    resolving.value = false;
+  }
+};
+
+// ── Advanced：旧 5 字段直连 / 保存 ─────────────────────────────────────
+const buildAdvancedPayload = () => ({
+  serverUrl: advancedForm.value.serverUrl,
+  autoReconnect: advancedForm.value.autoReconnect,
+  apiKey: advancedForm.value.apiKey,
+  daemonHttpBase: advancedForm.value.daemonHttpBase || defaultDaemonHttpBase,
+  deviceId: advancedForm.value.deviceId,
+  userId: advancedForm.value.userId,
 });
 
-const connectDevice = async () => {
-  connecting.value = true;
-  const response = await chrome.runtime.sendMessage({
-    type: 'CONNECT_DEVICE',
-    payload: buildPayload(),
-  });
-  connecting.value = false;
+const connectAdvanced = async () => {
+  primaryError.value = '';
+  advancedConnecting.value = true;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'CONNECT_DEVICE',
+      payload: buildAdvancedPayload(),
+    });
+    if (response?.success) {
+      ElMessage.success('已发起 device 连接（advanced）');
+    } else {
+      ElMessage.error(response?.error || 'device 连接失败');
+    }
+  } finally {
+    advancedConnecting.value = false;
+  }
+};
 
-  if (response?.success) {
-    ElMessage.success('已发起 device 连接');
-  } else {
-    ElMessage.error(response?.error || 'device 连接失败');
+const saveAdvanced = async () => {
+  savingAdvanced.value = true;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'SAVE_CONNECTION_CONFIG',
+      payload: buildAdvancedPayload(),
+    });
+    if (response?.success) {
+      const c = response.config ?? {};
+      advancedForm.value.serverUrl = c.serverUrl || getDefaultWebSocketUrl();
+      advancedForm.value.autoReconnect = c.autoReconnect ?? true;
+      advancedForm.value.apiKey = c.apiKey || '';
+      advancedForm.value.daemonHttpBase = c.daemonHttpBase || defaultDaemonHttpBase;
+      advancedForm.value.deviceId = c.deviceId || '';
+      advancedForm.value.userId = c.userId || '';
+      ElMessage.success('device 配置已保存');
+    } else {
+      ElMessage.error(response?.error || '保存失败');
+    }
+  } finally {
+    savingAdvanced.value = false;
   }
 };
 
 const disconnectDevice = async () => {
   await chrome.runtime.sendMessage({ type: 'DISCONNECT_DEVICE' });
+  primaryError.value = '';
   ElMessage.success('已断开 daemon');
-};
-
-const saveConnectionSettings = async () => {
-  savingConnection.value = true;
-  const response = await chrome.runtime.sendMessage({
-    type: 'SAVE_CONNECTION_CONFIG',
-    payload: buildPayload(),
-  });
-  savingConnection.value = false;
-
-  if (response?.success) {
-    connectionForm.value.serverUrl = response.config.serverUrl || getDefaultWebSocketUrl();
-    connectionForm.value.autoReconnect = response.config.autoReconnect;
-    connectionForm.value.apiKey = response.config.apiKey || '';
-    connectionForm.value.daemonHttpBase =
-      response.config.daemonHttpBase || defaultDaemonHttpBase;
-    connectionForm.value.deviceId = response.config.deviceId || '';
-    connectionForm.value.userId = response.config.userId || '';
-    ElMessage.success('device 配置已保存');
-  } else {
-    ElMessage.error(response?.error || '保存失败');
-  }
 };
 
 const handleAutoReconnectChange = async () => {
   if (!configLoaded.value) return;
-  await saveConnectionSettings();
+  await saveAdvanced();
 };
 
-
+// ── 状态广播 ──────────────────────────────────────────────────────────
 function syncConnectionStatus(status: any) {
   store.updateConnectionStatus({
     connected: Boolean(status.connected),
@@ -232,6 +342,8 @@ function syncConnectionStatus(status: any) {
     lastError: status.lastError,
     lastUpdated: status.lastUpdated,
   });
+  // 一旦真正连上，清空主入口的临时错误显示。
+  if (status.connected) primaryError.value = '';
 }
 
 const messageListener = (message: any) => {
@@ -240,7 +352,7 @@ const messageListener = (message: any) => {
   }
 };
 
-// 生命周期
+// ── 生命周期 ──────────────────────────────────────────────────────────
 onMounted(async () => {
   await store.loadSettings();
   await loadConnectionConfig();
@@ -305,7 +417,7 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   padding: 20px;
   border: 1px solid #E5E7EB;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -339,23 +451,31 @@ onBeforeUnmount(() => {
   line-height: 1.5;
 }
 
-.api-key-link {
-  color: #000000;
-  text-decoration: underline;
-  text-decoration-thickness: 1px;
-  text-underline-offset: 2px;
-  font-weight: 500;
-  transition: color 0.2s;
-}
-
-.api-key-link:hover {
-  color: #374151;
-}
-
 .connection-form {
   display: flex;
   flex-direction: column;
   gap: 18px;
+}
+
+/* 错误提示 */
+.primary-error {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #FEF2F2;
+  border: 1px solid #FECACA;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #B91C1C;
+  line-height: 1.4;
+}
+
+.primary-error__icon {
+  flex-shrink: 0;
+}
+
+.primary-error__text {
+  word-break: break-word;
 }
 
 /* 输入框通用样式 */
@@ -447,6 +567,44 @@ onBeforeUnmount(() => {
   background: #374151;
 }
 
+/* Advanced 折叠 */
+.advanced-collapse {
+  background: #FFFFFF;
+  border-radius: 8px;
+  border: 1px solid #E5E7EB;
+}
+
+.advanced-collapse :deep(.el-collapse-item__header) {
+  padding: 0 16px;
+  border-bottom: 1px solid #E5E7EB;
+  background: #F9FAFB;
+  font-weight: 500;
+}
+
+.advanced-collapse :deep(.el-collapse-item__wrap) {
+  border-bottom: none;
+}
+
+.advanced-title {
+  font-size: 14px;
+  color: #1F2937;
+  font-weight: 500;
+}
+
+.advanced-card {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.advanced-desc {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: #6B7280;
+  line-height: 1.5;
+}
+
 /* 复选框样式 */
 .auto-reconnect-checkbox {
   display: inline-flex;
@@ -504,5 +662,4 @@ onBeforeUnmount(() => {
 .auto-reconnect-checkbox :deep(.el-checkbox__input.is-checked) ~ .el-checkbox__label {
   color: #000000;
 }
-
 </style>
