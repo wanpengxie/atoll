@@ -2166,26 +2166,48 @@ export class ChannelManager {
    * `deviceCallback` independently; per-payload errors are swallowed (logged
    * via `device.callback.replay_error`) so one bad entry can't block the rest.
    *
+   * R3-T3 (FX5) — after dispatching, push a `callback_replay_ack` frame back
+   * to the originating device so the extension can decide which outbox
+   * entries to drop. dedupe is treated as accepted (daemon already has the
+   * row in its message store). per-payload errors → rejected with
+   * `{correlation_id, code, message}` so the extension can log + drop them.
+   *
    * @param {{ deviceId: string, payloads: Array<object> }} args
    * @returns {Promise<{
    *   accepted: number,
    *   deduped: number,
    *   failed: number,
    *   results: Array<{ correlation_id: string, ok: boolean, deduped?: boolean, error?: string }>,
+   *   ack: { accepted: string[], rejected: Array<{ correlation_id: string, code: string, message: string }> },
    * }>}
    */
   async handleCallbackReplay({ deviceId, payloads }) {
     if (!Array.isArray(payloads) || payloads.length === 0) {
-      return { accepted: 0, deduped: 0, failed: 0, results: [] };
+      return {
+        accepted: 0,
+        deduped: 0,
+        failed: 0,
+        results: [],
+        ack: { accepted: [], rejected: [] },
+      };
     }
     let accepted = 0;
     let deduped = 0;
     let failed = 0;
     const results = [];
+    // R3-T3: build ack lists in lock-step with results so the extension can
+    // surgically clear only the entries the daemon has confirmed.
+    const ackAccepted = [];
+    const ackRejected = [];
     for (const raw of payloads) {
       if (!raw || typeof raw !== 'object') {
         failed += 1;
         results.push({ correlation_id: '', ok: false, error: 'invalid_payload' });
+        ackRejected.push({
+          correlation_id: '',
+          code: 'invalid_payload',
+          message: 'payload must be an object',
+        });
         continue;
       }
       const correlationId = String(raw.correlation_id ?? raw.correlationId ?? '').trim();
@@ -2205,15 +2227,20 @@ export class ChannelManager {
           accepted += 1;
           results.push({ correlation_id: correlationId, ok: true });
         }
+        // dedupe → daemon already accepted the callback once; safe for
+        // extension to drop the outbox entry.
+        ackAccepted.push(correlationId);
       } catch (err) {
         failed += 1;
         const code = err?.code ?? 'replay_error';
+        const message = err?.message ?? String(err);
         results.push({ correlation_id: correlationId, ok: false, error: code });
+        ackRejected.push({ correlation_id: correlationId, code, message });
         emitJsonEvent('device.callback.replay_error', {
           device_id: deviceId ?? null,
           correlation_id: correlationId,
           error: code,
-          message: err?.message ?? String(err),
+          message,
         });
       }
     }
@@ -2224,7 +2251,29 @@ export class ChannelManager {
       deduped,
       failed,
     });
-    return { accepted, deduped, failed, results };
+
+    // R3-T3 — push callback_replay_ack so extension only drops accepted /
+    // rejected entries. Best-effort: pushCommand returns sync {ok|reason} and
+    // never throws; if device went offline mid-replay the next reconnect's
+    // drain will retry (daemon dedupe path will re-accept).
+    const ack = { accepted: ackAccepted, rejected: ackRejected };
+    if (deviceId && this.deviceWsServer && typeof this.deviceWsServer.pushCommand === 'function') {
+      const push = this.deviceWsServer.pushCommand(deviceId, {
+        type: 'callback_replay_ack',
+        accepted: ackAccepted,
+        rejected: ackRejected,
+      });
+      if (!push?.ok) {
+        emitJsonEvent('device.callback.replay_ack_push_failed', {
+          device_id: deviceId,
+          reason: push?.reason ?? 'unknown',
+          accepted_count: ackAccepted.length,
+          rejected_count: ackRejected.length,
+        });
+      }
+    }
+
+    return { accepted, deduped, failed, results, ack };
   }
 
   /**

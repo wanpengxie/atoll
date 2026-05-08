@@ -646,6 +646,9 @@ test('handleCallbackReplay: dispatches each payload through deviceCallback (mix 
     result: { note_id: 'b' },
   });
 
+  // Snapshot ws calls so the ack-push assertion below can find the new frame.
+  const wsCallsBefore = ctx.ws.calls.length;
+
   const summary = await ctx.cm.handleCallbackReplay({
     deviceId: 'device-A',
     payloads: [
@@ -660,6 +663,29 @@ test('handleCallbackReplay: dispatches each payload through deviceCallback (mix 
   assert.equal(summary.deduped, 1);
   assert.equal(summary.failed, 2);
   assert.equal(summary.results.length, 4);
+  // R3-T3: ack lists track results — accepted holds new + dedupe; rejected
+  // holds invalid_payload + correlation_unknown with daemon error code.
+  assert.deepEqual(summary.ack.accepted.sort(), [a.correlation_id, b.correlation_id].sort());
+  assert.equal(summary.ack.rejected.length, 2);
+  const rejectedCodes = summary.ack.rejected.map((r) => r.code).sort();
+  assert.deepEqual(rejectedCodes, ['correlation_unknown', 'invalid_payload']);
+  const rejectedById = new Map(summary.ack.rejected.map((r) => [r.correlation_id, r]));
+  assert.ok(rejectedById.has('never-existed'));
+  assert.equal(rejectedById.get('never-existed').code, 'correlation_unknown');
+  assert.ok(rejectedById.has(''));
+  assert.equal(rejectedById.get('').code, 'invalid_payload');
+
+  // R3-T3: the daemon must have pushed exactly one new callback_replay_ack
+  // frame back to device-A reflecting the same accepted / rejected lists.
+  const ackCalls = ctx.ws.calls.slice(wsCallsBefore).filter(
+    (c) => c.payload?.type === 'callback_replay_ack',
+  );
+  assert.equal(ackCalls.length, 1);
+  const ackFrame = ackCalls[0];
+  assert.equal(ackFrame.deviceId, 'device-A');
+  assert.deepEqual(ackFrame.payload.accepted.sort(), [a.correlation_id, b.correlation_id].sort());
+  assert.equal(ackFrame.payload.rejected.length, 2);
+
   // Original dispatch.completed for `a` exists exactly once.
   const dispatched = readDispatchMessages(ctx.node);
   const completedForA = dispatched.filter(
@@ -672,10 +698,34 @@ test('handleCallbackReplay: empty / non-array payloads short-circuit', async (t)
   const ctx = await createHarness(t);
   assert.deepEqual(
     await ctx.cm.handleCallbackReplay({ deviceId: 'device-A', payloads: [] }),
-    { accepted: 0, deduped: 0, failed: 0, results: [] },
+    { accepted: 0, deduped: 0, failed: 0, results: [], ack: { accepted: [], rejected: [] } },
   );
   assert.deepEqual(
     await ctx.cm.handleCallbackReplay({ deviceId: 'device-A', payloads: undefined }),
-    { accepted: 0, deduped: 0, failed: 0, results: [] },
+    { accepted: 0, deduped: 0, failed: 0, results: [], ack: { accepted: [], rejected: [] } },
   );
+});
+
+test('handleCallbackReplay: ack push failure is recorded but never throws', async (t) => {
+  const ctx = await createHarness(t);
+  ctx.ws.goOnline('device-A');
+  const a = await ctx.cm.deviceCommandSend({
+    channel_id: 'ch-xhs-1',
+    type: 'xhs.publish',
+    params: { title: 't', content: 'body' },
+  });
+  // Force the next pushCommand (the ack frame) to fail — extension dropped
+  // mid-replay; daemon must still complete handling without throwing.
+  ctx.ws.nextResult = { ok: false, reason: 'device_offline' };
+  const summary = await ctx.cm.handleCallbackReplay({
+    deviceId: 'device-A',
+    payloads: [
+      { correlation_id: a.correlation_id, status: 'ok', result: { note_id: 'a' } },
+    ],
+  });
+  assert.equal(summary.accepted, 1);
+  assert.deepEqual(summary.ack.accepted, [a.correlation_id]);
+  // ws-server got the ack push attempt even though it returned device_offline.
+  const ackCalls = ctx.ws.calls.filter((c) => c.payload?.type === 'callback_replay_ack');
+  assert.equal(ackCalls.length, 1);
 });
