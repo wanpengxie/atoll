@@ -87,18 +87,26 @@ function makeFakeDb() {
 }
 
 // ── ownership stubs ─────────────────────────────────────────────────────────
-// Default: a single channel `ch-001` in workspace `ws-001` and a single
-// machine `daemon-001` owned by `user-001` — happy path for tests that don't
-// care about ownership rejection. Override per-test as needed.
+// Default: a single channel `ch-001` in workspace `ws-001`, a single machine
+// `daemon-001` owned by `user-001`, and `user-001` is a member of both
+// `ws-001` and `ch-001:human` — happy path for tests that don't care about
+// ownership rejection. Override per-test as needed.
+//
+// T80 (M1.2-FIX-E): added `channelMembers` set + `isChannelMemberImpl` so the
+// new channel-membership gate in POST /api/devices is satisfied for default
+// happy paths and can be exercised by negative tests below.
 function makeOwnershipStubs({
   channels = { 'ch-001': { id: 'ch-001', workspace_id: 'ws-001', is_del: 0, deleted_at: null } },
   machines = { 'daemon-001': { id: 'daemon-001', owner_id: 'user-001', is_platform: 0 } },
   workspaceMembers = new Set(['ws-001:user-001']),
+  channelMembers = new Set(['ch-001:human:user-001']),
 } = {}) {
   return {
     getChannelByIdImpl: async (_db, id) => channels[id] ?? null,
     getMachineByIdImpl: async (_db, id) => machines[id] ?? null,
     isWorkspaceMemberImpl: async (_db, wsId, userId) => workspaceMembers.has(`${wsId}:${userId}`),
+    isChannelMemberImpl: async (_db, channelId, memberType, memberId) =>
+      channelMembers.has(`${channelId}:${memberType}:${memberId}`),
   };
 }
 
@@ -286,6 +294,99 @@ test('POST /api/devices rejects channel_id when caller is not a workspace member
     assert.equal(res.status, 403);
     assert.match(res.json.error, /workspace membership/i);
     assert.equal(fake.rows.length, 0);
+  });
+});
+
+// ── T80 (M1.2-FIX-E): channel membership gate ──────────────────────────────
+// spec agent-user.md "权限模型：workspace 全可读 + channel 成员才可写" and
+// original M1.2 codex review #1 require channel_members containment for any
+// channel-bound write. Workspace membership alone is no longer sufficient.
+test('T80: POST /api/devices rejects when caller is workspace member but not channel member (403)', async () => {
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    // user-001 is in ws-001 (workspace member) but NOT in ch-001 channel_members.
+    ...makeOwnershipStubs({
+      workspaceMembers: new Set(['ws-001:user-001']),
+      channelMembers: new Set(),
+    }),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: { channel_id: 'ch-001', daemon_id: 'daemon-001', device_type: 'xhs' },
+    });
+    assert.equal(res.status, 403);
+    assert.match(res.json.error, /channel membership/i);
+    assert.equal(fake.rows.length, 0);
+  });
+});
+
+test('T80: POST /api/devices accepts channel member (member_type=human) → 201', async () => {
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    // Explicit positive: user-001 is a workspace AND channel member of ch-001.
+    ...makeOwnershipStubs({
+      workspaceMembers: new Set(['ws-001:user-001']),
+      channelMembers: new Set(['ch-001:human:user-001']),
+    }),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+    uuidv4Impl: () => 'dev-channel-member',
+    generateApiKeyImpl: () => 'sk_dev_channel_member',
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: { channel_id: 'ch-001', daemon_id: 'daemon-001', device_type: 'xhs' },
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.json.id, 'dev-channel-member');
+    assert.equal(res.json.user_id, 'user-001');
+    assert.equal(res.json.channel_id, 'ch-001');
+    assert.equal(fake.rows.length, 1);
+  });
+});
+
+test('T80: POST /api/devices service caller bypasses channel membership gate', async () => {
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    // No channel members configured at all — service caller still proceeds.
+    ...makeOwnershipStubs({
+      channelMembers: new Set(),
+      workspaceMembers: new Set(),
+    }),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+    uuidv4Impl: () => 'dev-svc-bypass',
+    generateApiKeyImpl: () => 'sk_dev_svc_bypass',
+  });
+
+  await withServer(createApp(router, { user: { id: 'service', name: 'Service' }, isService: true }), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: { user_id: 'user-target', channel_id: 'ch-001', daemon_id: 'daemon-001', device_type: 'xhs' },
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.json.user_id, 'user-target');
   });
 });
 

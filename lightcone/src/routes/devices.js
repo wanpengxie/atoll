@@ -10,6 +10,7 @@ import {
   getChannelById,
   getMachineById,
   isWorkspaceMember,
+  isChannelMember,
   DeviceConflictError,
 } from '../db/index.js';
 import { sendToDaemon, isMachineOnline } from '../daemon/connections.js';
@@ -60,6 +61,7 @@ export function createDevicesRouter({
   getChannelByIdImpl = getChannelById,
   getMachineByIdImpl = getMachineById,
   isWorkspaceMemberImpl = isWorkspaceMember,
+  isChannelMemberImpl = isChannelMember,
   sendToDaemonImpl = sendToDaemon,
   isMachineOnlineImpl = isMachineOnline,
   uuidv4Impl = uuidv4,
@@ -125,14 +127,23 @@ export function createDevicesRouter({
     }
 
     // ── Ownership: channel_id must be a workspace the caller is a member of ──
+    // T80 (M1.2-FIX-E): spec (agent-user.md "权限模型：workspace 全可读 + channel
+    // 成员才可写") and original M1.2 codex review #1 require channel membership
+    // for writing channel-bound device keys. Workspace membership alone is the
+    // outer gate (rejects cross-workspace writes); channel_members is the
+    // inner gate that blocks workspace-but-not-channel members. Service callers
+    // (`req.isService`) bypass both gates so platform automation can still
+    // provision devices on a user's behalf.
     {
       const channel = await getChannelByIdImpl(getDbImpl(), channelId);
       if (!channel || channel.is_del || channel.deleted_at) {
         return res.status(404).json({ error: 'Channel not found' });
       }
       if (!req.isService) {
-        const ok = await isWorkspaceMemberImpl(getDbImpl(), channel.workspace_id, effectiveUserId);
-        if (!ok) return res.status(403).json({ error: 'Forbidden: workspace membership required for channel' });
+        const wsOk = await isWorkspaceMemberImpl(getDbImpl(), channel.workspace_id, effectiveUserId);
+        if (!wsOk) return res.status(403).json({ error: 'Forbidden: workspace membership required for channel' });
+        const chOk = await isChannelMemberImpl(getDbImpl(), channel.id, 'human', effectiveUserId);
+        if (!chOk) return res.status(403).json({ error: 'Forbidden: channel membership required to create device for this channel' });
       }
     }
 
