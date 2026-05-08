@@ -107,13 +107,13 @@ test('T78: reconnect → re-pull → DeviceStore reflects new server set, drops 
       fetchImpl,
     });
     resolvedDaemonId = reg.daemon_id;
-    const devices = await fetchDevices({
+    const { devices, revokedDeviceIds } = await fetchDevices({
       serverUrl: 'http://srv',
       machineApiKey: 'mk',
       daemonId: resolvedDaemonId,
       fetchImpl,
     });
-    store.replaceServer(devices);
+    store.replaceServer(devices, revokedDeviceIds);
   };
 
   const mocks = [];
@@ -190,13 +190,13 @@ test('T78: reconnect re-pull tombstones a device dropped from the new server set
       fetchImpl,
     });
     resolvedDaemonId = reg.daemon_id;
-    const devices = await fetchDevices({
+    const { devices, revokedDeviceIds } = await fetchDevices({
       serverUrl: 'http://srv',
       machineApiKey: 'mk',
       daemonId: resolvedDaemonId,
       fetchImpl,
     });
-    store.replaceServer(devices);
+    store.replaceServer(devices, revokedDeviceIds);
   };
 
   const mocks = [];
@@ -338,6 +338,136 @@ test('T81 M1.2-FIX-F: PUBLIC_PORT==null + DEVICE_SOURCE=env → existing env-onl
   assert.ok(logs.find((l) => l.includes('source=env')));
   assert.equal(logs.find((l) => l.includes('register skipped')), undefined,
     'env path uses its own log line, not the missing-port skip log');
+});
+
+test('T82 M1.2-FIX-G: fresh DeviceStore + envKey for revoked id + server pull with revoked_device_ids → verifyKey rejects env key', async () => {
+  // Fresh-boot scenario: daemon was restarted; in-memory DeviceStore comes
+  // up empty; env still carries a stale key for device-A; server has
+  // already revoked device-A. The boot pull's revoked_device_ids list lets
+  // the daemon seed the tombstone deterministically — without it, env
+  // fallback would silently re-authenticate device-A.
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/api/daemon/register')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, daemon_id: 'd-FRESH' }), text: async () => '' };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ devices: [], revoked_device_ids: ['device-A'] }),
+      text: async () => '',
+    };
+  };
+
+  // Stale env entry persists across the daemon restart (operator never
+  // rotated COAGENT_DEVICE_KEYS after the server-side revoke).
+  const store = new DeviceStore({
+    envEntries: new Map([['device-A', 'stale-env-key']]),
+  });
+  const bootstrap = createBootstrapDeviceSync({
+    deviceSource: 'both',
+    envDeviceKeysSize: 1,
+    serverUrl: 'http://srv',
+    machineApiKey: 'mk',
+    publicHost: 'h',
+    publicPort: 9501,
+    capabilities: [],
+    deviceStore: store,
+    registerDaemonImpl: (args) => registerDaemon({ ...args, fetchImpl }),
+    fetchDevicesImpl: (args) => fetchDevices({ ...args, fetchImpl }),
+    log: () => {},
+  });
+
+  // Pre-bootstrap: env-only fallback would still verify (no server context yet).
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'stale-env-key' }), true);
+
+  await bootstrap();
+
+  // Post-bootstrap: tombstone seeded from revoked_device_ids; env fallback
+  // is now blocked. This is the central T82 invariant.
+  assert.equal(store.serverManagedIds.has('device-A'), true);
+  assert.equal(store.revokedServerIds.has('device-A'), true);
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'stale-env-key' }), false,
+    'env fallback for server-revoked id must be rejected after fresh-boot pull');
+});
+
+test('T82 M1.2-FIX-G: bootstrap forwards revoked_device_ids to DeviceStore.replaceServer second arg', async () => {
+  // Wire-level check: the registrar parses revoked_device_ids and the
+  // bootstrap closure forwards it as the 2nd arg of replaceServer.
+  const replaceCalls = [];
+  const fakeStore = {
+    replaceServer: (entries, revokedIds) => replaceCalls.push({ entries, revokedIds }),
+    size: () => 0,
+  };
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/api/daemon/register')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, daemon_id: 'd-FWD' }), text: async () => '' };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        devices: [{ device_id: 'a', api_key: 'ka' }],
+        revoked_device_ids: ['device-X', 'device-Y'],
+      }),
+      text: async () => '',
+    };
+  };
+  const bootstrap = createBootstrapDeviceSync({
+    deviceSource: 'both',
+    envDeviceKeysSize: 0,
+    serverUrl: 'http://srv',
+    machineApiKey: 'mk',
+    publicHost: 'h',
+    publicPort: 9501,
+    capabilities: [],
+    deviceStore: fakeStore,
+    registerDaemonImpl: (args) => registerDaemon({ ...args, fetchImpl }),
+    fetchDevicesImpl: (args) => fetchDevices({ ...args, fetchImpl }),
+    log: () => {},
+  });
+  await bootstrap();
+  assert.equal(replaceCalls.length, 1);
+  assert.deepEqual(replaceCalls[0].revokedIds, ['device-X', 'device-Y']);
+  assert.equal(replaceCalls[0].entries.length, 1);
+  assert.equal(replaceCalls[0].entries[0].device_id, 'a');
+});
+
+test('T82 M1.2-FIX-G: bootstrap against old server (no revoked_device_ids) defaults to [] — no regression', async () => {
+  // Mixed-deploy guard: an older server returning only `{ devices }` must
+  // not break the daemon. revokedDeviceIds defaults to [].
+  const replaceCalls = [];
+  const fakeStore = {
+    replaceServer: (entries, revokedIds) => replaceCalls.push({ entries, revokedIds }),
+    size: () => 0,
+  };
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/api/daemon/register')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, daemon_id: 'd-OLD' }), text: async () => '' };
+    }
+    return {
+      ok: true,
+      status: 200,
+      // legacy payload — no revoked_device_ids
+      json: async () => ({ devices: [{ device_id: 'a', api_key: 'ka' }] }),
+      text: async () => '',
+    };
+  };
+  const bootstrap = createBootstrapDeviceSync({
+    deviceSource: 'both',
+    envDeviceKeysSize: 0,
+    serverUrl: 'http://srv',
+    machineApiKey: 'mk',
+    publicHost: 'h',
+    publicPort: 9501,
+    capabilities: [],
+    deviceStore: fakeStore,
+    registerDaemonImpl: (args) => registerDaemon({ ...args, fetchImpl }),
+    fetchDevicesImpl: (args) => fetchDevices({ ...args, fetchImpl }),
+    log: () => {},
+  });
+  await bootstrap();
+  assert.equal(replaceCalls.length, 1);
+  assert.deepEqual(replaceCalls[0].revokedIds, []);
 });
 
 test('T81 M1.2-FIX-F: bootstrap with PUBLIC_PORT set still registers + pulls (smoke regression)', async () => {

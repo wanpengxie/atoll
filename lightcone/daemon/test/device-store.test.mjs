@@ -208,6 +208,94 @@ test('T78: env-only ids (server never touched) keep working — fallback only bl
   assert.equal(store.verifyKey({ deviceId: 'shared', key: 'srv-shared' }), false);
 });
 
+// ── T82 (M1.2-FIX-G): fresh-boot tombstone seed via replaceServer 2nd arg ───
+// Without these guards, a daemon restart would reset `serverManagedIds` /
+// `revokedServerIds` to empty; the active-only server pull would not surface
+// any revoke transition; verifyKey() would silently fall back to env for any
+// id the server has revoked.
+
+test('T82: replaceServer(entries, revokedIds) tombstones server-revoked ids — env fallback rejected on fresh boot', () => {
+  // Fresh DeviceStore (post-restart) seeded with a stale env key for
+  // device-A. Server pull returns no active devices but lists device-A as
+  // recently revoked. After replaceServer() the env key MUST NOT verify.
+  const onRevoke = [];
+  const store = new DeviceStore({
+    envEntries: new Map([['device-A', 'stale-env-key']]),
+    onRevoke: (id) => onRevoke.push(id),
+  });
+
+  // Sanity: pre-pull, env-only fallback works (T78 by design — id has not
+  // been server-managed yet from this fresh store's POV).
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'stale-env-key' }), true);
+
+  store.replaceServer([], ['device-A']);
+
+  assert.equal(store.serverManagedIds.has('device-A'), true);
+  assert.equal(store.revokedServerIds.has('device-A'), true);
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'stale-env-key' }), false,
+    'env fallback for server-revoked id must be rejected on fresh boot');
+  // Tombstone-seed path must NOT fire _onRevoke (no connection to drop on
+  // fresh boot; revoke already happened upstream).
+  assert.deepEqual(onRevoke, []);
+});
+
+test('T82: replaceServer revokedIds default to [] — backward compat for old servers', () => {
+  // Old server payload omits revoked_device_ids; daemon defaults to []. The
+  // call must behave exactly like the single-arg path.
+  const store = new DeviceStore();
+  store.replaceServer([{ device_id: 'a', api_key: 'ka' }]);
+  assert.equal(store.verifyKey({ deviceId: 'a', key: 'ka' }), true);
+  assert.equal(store.revokedServerIds.size, 0);
+});
+
+test('T82: revokedIds collision with active entries — active set wins (revoke+re-create same id flow)', () => {
+  // Operator revokes device-A then immediately re-creates with key-NEW. The
+  // server returns device-A in BOTH `devices` (with the new key) AND
+  // `revoked_device_ids` (the historical revoked row still in window). The
+  // active entry must not be tombstoned.
+  const store = new DeviceStore();
+  store.replaceServer(
+    [{ device_id: 'device-A', api_key: 'key-NEW' }],
+    ['device-A'],
+  );
+  assert.equal(store.revokedServerIds.has('device-A'), false,
+    'active re-issue must lift tombstone even when id is also in revokedIds');
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'key-NEW' }), true);
+});
+
+test('T82: revokedIds dedupe + ignore empty/whitespace entries', () => {
+  const store = new DeviceStore();
+  store.replaceServer([], ['device-A', '', '  ', 'device-A', 'device-B']);
+  assert.equal(store.revokedServerIds.has('device-A'), true);
+  assert.equal(store.revokedServerIds.has('device-B'), true);
+  assert.equal(store.revokedServerIds.size, 2);
+});
+
+test('T82: revokedIds-only seed does NOT fire _onRevoke (no-op listener path)', () => {
+  // Distinct from drop-diff path: a tombstone seeded from the second arg
+  // represents a revoke that happened before this daemon process — no
+  // connection to drop, no listener to notify.
+  const onRevoke = [];
+  const store = new DeviceStore({ onRevoke: (id) => onRevoke.push(id) });
+  store.replaceServer([], ['device-X', 'device-Y']);
+  assert.deepEqual(onRevoke, []);
+});
+
+test('T82: combined drop-diff + revokedIds — drop fires _onRevoke, seeded ids do not', () => {
+  // First pull seeds device-A active. Second pull drops device-A AND lists
+  // device-Z as revoked-elsewhere. Drop-diff path fires _onRevoke for A
+  // (live transition observed by this process); seeded path stays silent
+  // for Z (we never had Z connected).
+  const onRevoke = [];
+  const store = new DeviceStore({ onRevoke: (id) => onRevoke.push(id) });
+  store.replaceServer([{ device_id: 'device-A', api_key: 'ka' }]);
+  assert.deepEqual(onRevoke, []);
+  store.replaceServer([], ['device-Z']);
+  assert.deepEqual(onRevoke, ['device-A']);
+  assert.equal(store.revokedServerIds.has('device-A'), true);
+  assert.equal(store.revokedServerIds.has('device-Z'), true);
+});
+
 test('T78: snapshot omits env entries shadowed by server authority (active or revoked)', () => {
   // Snapshot should reflect what verifyKey() would accept — env entries for
   // any id the server has managed are shadowed entirely.

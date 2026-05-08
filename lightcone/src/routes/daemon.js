@@ -4,6 +4,7 @@ import {
   getMachineByApiKey,
   updateMachineDaemonInfo,
   getDevicesByDaemonId,
+  getRevokedDeviceIdsByDaemonId,
 } from '../db/index.js';
 import { nowMysqlDatetime } from '../time.js';
 
@@ -17,6 +18,7 @@ export function createDaemonRouter({
   getMachineByApiKeyImpl = getMachineByApiKey,
   updateMachineDaemonInfoImpl = updateMachineDaemonInfo,
   getDevicesByDaemonIdImpl = getDevicesByDaemonId,
+  getRevokedDeviceIdsByDaemonIdImpl = getRevokedDeviceIdsByDaemonId,
   nowDatetimeImpl = nowMysqlDatetime,
 } = {}) {
   const router = Router();
@@ -77,6 +79,17 @@ export function createDaemonRouter({
   });
 
   // GET /api/daemon/:daemon_id/devices — daemon pulls active devices
+  //
+  // T82 (M1.2-FIX-G): also returns the recently-revoked device_id list so
+  // a freshly-booted daemon can seed tombstones deterministically. Without
+  // this the daemon's in-memory `serverManagedIds`/`revokedServerIds` would
+  // be empty across restart, the active-only pull would not surface any
+  // revoke transition, and a stale env key for a server-revoked device_id
+  // would silently re-authenticate.
+  //
+  // Backward compatibility: response gains a top-level `revoked_device_ids`
+  // string array. Old daemons ignore unknown keys, so the contract change
+  // is additive.
   router.get('/:daemon_id/devices', async (req, res) => {
     const token = bearerToken(req);
     if (!token) return res.status(401).json({ error: 'Missing Authorization header' });
@@ -89,8 +102,15 @@ export function createDaemonRouter({
       return res.status(403).json({ error: 'Machine is not authorized for this daemon' });
     }
 
-    const devices = await getDevicesByDaemonIdImpl(getDbImpl(), machine.id);
-    res.json({ devices });
+    const db = getDbImpl();
+    const [devices, revokedDeviceIds] = await Promise.all([
+      getDevicesByDaemonIdImpl(db, machine.id),
+      getRevokedDeviceIdsByDaemonIdImpl(db, machine.id),
+    ]);
+    res.json({
+      devices,
+      revoked_device_ids: Array.isArray(revokedDeviceIds) ? revokedDeviceIds : [],
+    });
   });
 
   return router;

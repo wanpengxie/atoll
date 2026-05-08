@@ -2216,6 +2216,50 @@ export async function getDevicesByDaemonId(db, daemonId) {
   return getDevices(db, { daemon_id: daemonId, status: 'active' });
 }
 
+/**
+ * Recently-revoked device_ids for a daemon, scoped to a retention window.
+ *
+ * T82 (M1.2-FIX-G) — fresh-boot tombstone seed source for the daemon-side
+ * DeviceStore. After a daemon restart its in-memory `serverManagedIds` /
+ * `revokedServerIds` sets are empty; if the operator's env still carries a
+ * stale key for a server-revoked device_id the verifyKey() path would fall
+ * back to env and re-authenticate the device. Returning the recent
+ * revoke-set on the boot pull lets the daemon seed tombstones deterministically
+ * without relying on push-event delivery across the restart.
+ *
+ * Default window: 30 days. Older revokes are assumed to have been operator-
+ * rotated already; the cap also bounds payload size for daemons that have
+ * been managing devices for years. Pass `{ sinceDays: null }` to disable.
+ *
+ * @param {*} db — mysql2 connection
+ * @param {string} daemonId
+ * @param {{ sinceDays?: number|null }} [opts]
+ * @returns {Promise<string[]>} unique device_id strings
+ */
+export async function getRevokedDeviceIdsByDaemonId(db, daemonId, { sinceDays = 30 } = {}) {
+  if (!daemonId) return [];
+  const params = [daemonId];
+  let where = `daemon_id = ? AND status = 'revoked'`;
+  if (sinceDays != null && Number(sinceDays) > 0) {
+    // INTERVAL ? DAY does not bind through `?` portably across mysql drivers,
+    // but the value is a Number we control above (clamped to integer below).
+    const days = Math.floor(Number(sinceDays));
+    where += ` AND revoked_at IS NOT NULL AND revoked_at >= (NOW() - INTERVAL ${days} DAY)`;
+  }
+  const sql = `SELECT DISTINCT device_id FROM devices WHERE ${where}`;
+  const [rows] = await db.execute(sql, params);
+  const out = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const id = row?.device_id;
+    if (typeof id === 'string' && id && !seen.has(id)) {
+      seen.add(id);
+      out.push(id);
+    }
+  }
+  return out;
+}
+
 export async function revokeDevice(db, id) {
   await db.execute(
     `UPDATE devices SET status = 'revoked', revoked_at = COALESCE(revoked_at, NOW()) WHERE id = ?`,

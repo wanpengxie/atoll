@@ -40,6 +40,23 @@
 //   Re-issuing the same deviceId via upsert() / replaceServer() lifts the
 //   tombstone (server authoritatively re-instated the id), so operators can
 //   revoke + re-create without restart.
+//
+// T82 (M1.2-FIX-G) — fresh-boot tombstone seed:
+//   The T78 tombstone state is purely in-process. After a daemon restart the
+//   two sets are empty; the active-only `replaceServer(entries)` pull cannot
+//   surface a revoke transition (drop diff is computed against the previous
+//   in-memory `serverEntries`, which is fresh). If env still carries a stale
+//   key for a server-revoked device_id, verifyKey() falls back to env and
+//   re-authenticates the device — silently bypassing server revoke across
+//   the restart.
+//
+//   `replaceServer(entries, revokedIds = [])` accepts a second arg listing
+//   recently-revoked device_ids the server vouches for. Each id is added to
+//   `serverManagedIds` + `revokedServerIds` (subject to the same "active set
+//   wins" rule — re-issued ids in `entries` lift the tombstone, see code).
+//   `_onRevoke` is NOT fired for these ids: by definition the server already
+//   tore down their connections at revoke time; on fresh boot there is no
+//   connection to drop either.
 
 export class DeviceStore {
   /**
@@ -78,8 +95,22 @@ export class DeviceStore {
     this._onRevoke = typeof onRevoke === 'function' ? onRevoke : () => {};
   }
 
-  /** Replace the entire server-managed entry set (used on boot pull + reconnect re-pull). */
-  replaceServer(entries) {
+  /**
+   * Replace the entire server-managed entry set (used on boot pull + reconnect
+   * re-pull).
+   *
+   * @param {Array<{device_id:string, api_key:string}>} entries
+   *   Active server-issued devices.
+   * @param {string[]} [revokedIds]
+   *   T82 (M1.2-FIX-G) — recently-revoked device_ids the server vouches for.
+   *   Used to seed tombstones on fresh boot (in-memory tombstone state was
+   *   wiped by the restart). These ids are NOT subject to drop-diff
+   *   semantics: `_onRevoke` is intentionally not fired (server already
+   *   disconnected those clients at revoke time; on fresh boot there is no
+   *   connection to drop either). If a revokedId also appears in `entries`
+   *   the active set wins (operator revoke+re-create same device_id flow).
+   */
+  replaceServer(entries, revokedIds = []) {
     const next = new Map();
     if (Array.isArray(entries)) {
       for (const entry of entries) {
@@ -110,6 +141,22 @@ export class DeviceStore {
       this.serverManagedIds.add(id); // belt-and-braces: should already be set
       this.revokedServerIds.add(id);
       try { this._onRevoke(id); } catch { /* listener errors must not break sync */ }
+    }
+    // T82: seed tombstones from the server-supplied revoked list. The active
+    // set is authoritative — if the same id is being re-issued in `entries`
+    // we already lifted the tombstone above; do not re-tombstone it here.
+    if (Array.isArray(revokedIds)) {
+      for (const raw of revokedIds) {
+        const id = String(raw ?? '').trim();
+        if (!id) continue;
+        if (next.has(id)) continue; // active re-issue wins
+        this.serverManagedIds.add(id);
+        this.revokedServerIds.add(id);
+        // Intentionally do NOT call `_onRevoke`: these ids were revoked on
+        // the server side prior to this pull (often before the daemon
+        // restart). Their connections are already gone; a stale revoke
+        // event would only confuse downstream listeners.
+      }
     }
   }
 

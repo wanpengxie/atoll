@@ -19,8 +19,16 @@
 //
 //   GET  /api/daemon/{daemon_id}/devices
 //     header: Authorization: Bearer <machine_api_key>
-//     200 :  {devices: Device[]}
+//     200 :  {devices: Device[], revoked_device_ids: string[]}  // T82 (M1.2-FIX-G)
 //     401/403/4xx → throw Error('fetch_devices_failed: <status>')
+//
+// T82 (M1.2-FIX-G) note: `revoked_device_ids` is the recently-revoked
+// device_id list the server vouches for. The daemon-side caller passes it
+// as `replaceServer`'s second arg so a fresh DeviceStore (post-restart)
+// seeds tombstones deterministically — without it, env fallback would
+// silently re-authenticate any device_id already revoked on the server.
+// Older servers that omit the field surface as `[]` here, preserving the
+// pre-T82 behavior on mixed deployments.
 //
 // Both helpers use globalThis.fetch by default (Node 22+) and accept fetchImpl
 // for unit tests. Errors include the response body (best effort) for triage —
@@ -79,6 +87,17 @@ export async function registerDaemon({
   return await res.json();
 }
 
+/**
+ * GET /api/daemon/{daemon_id}/devices.
+ *
+ * @returns {Promise<{ devices: Array, revokedDeviceIds: string[] }>}
+ *   `devices` is the active server-issued list; `revokedDeviceIds` is the
+ *   recently-revoked device_id list the daemon should pass to
+ *   DeviceStore.replaceServer as the 2nd arg. T82 (M1.2-FIX-G): the latter
+ *   is required to seed tombstones across daemon restart; against an older
+ *   server that omits the field it falls back to `[]` (no behavior change
+ *   beyond pre-T82 default).
+ */
 export async function fetchDevices({
   serverUrl,
   machineApiKey,
@@ -102,5 +121,18 @@ export async function fetchDevices({
     throw new Error(`fetch_devices_failed: ${res.status} ${text}`.trim());
   }
   const payload = await res.json();
-  return Array.isArray(payload?.devices) ? payload.devices : [];
+  const devices = Array.isArray(payload?.devices) ? payload.devices : [];
+  // T82: defensive normalization — old servers omit the field; corrupt /
+  // misshapen entries are filtered to non-empty strings only so downstream
+  // tombstone seeding never sees garbage.
+  const rawRevoked = Array.isArray(payload?.revoked_device_ids) ? payload.revoked_device_ids : [];
+  const revokedDeviceIds = [];
+  const seen = new Set();
+  for (const raw of rawRevoked) {
+    const id = typeof raw === 'string' ? raw.trim() : '';
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    revokedDeviceIds.push(id);
+  }
+  return { devices, revokedDeviceIds };
 }

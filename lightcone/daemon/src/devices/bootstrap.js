@@ -61,13 +61,21 @@ export function createBootstrapDeviceSync({
       const daemonId = String(reg?.daemon_id ?? '').trim();
       if (!daemonId) throw new Error('register response missing daemon_id');
       resolvedDaemonId = daemonId;
-      const devices = await fetchDevicesImpl({
+      // T82 (M1.2-FIX-G): fetchDevices now returns { devices, revokedDeviceIds }.
+      // The revoked list seeds tombstones in the DeviceStore on fresh boot;
+      // without it, env fallback would silently re-authenticate ids the
+      // server has already revoked. Old fetchDevices contract returned a
+      // bare array — supported via the defensive branch below so a
+      // partial-rollout daemon does not crash mid-deploy.
+      const result = await fetchDevicesImpl({
         serverUrl,
         machineApiKey,
         daemonId,
       });
-      deviceStore.replaceServer(devices);
-      log(`[Daemon] register+pull ok — daemon_id=${daemonId} devices=${devices.length} total=${deviceStore.size()}`);
+      const devices = Array.isArray(result) ? result : (result?.devices ?? []);
+      const revokedDeviceIds = Array.isArray(result?.revokedDeviceIds) ? result.revokedDeviceIds : [];
+      deviceStore.replaceServer(devices, revokedDeviceIds);
+      log(`[Daemon] register+pull ok — daemon_id=${daemonId} devices=${devices.length} revoked=${revokedDeviceIds.length} total=${deviceStore.size()}`);
     } catch (err) {
       if (deviceSource === 'server') {
         log(`[Daemon] register+pull failed (source=server, no env fallback): ${err?.message ?? err}`);

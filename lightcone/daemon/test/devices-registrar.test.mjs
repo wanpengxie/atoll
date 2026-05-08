@@ -166,35 +166,70 @@ test('registerDaemon throws on non-2xx with status code in error', async () => {
   );
 });
 
-test('fetchDevices GETs with Authorization Bearer header and returns devices array', async () => {
+test('fetchDevices GETs with Authorization Bearer header and returns { devices, revokedDeviceIds }', async () => {
+  // T82 (M1.2-FIX-G): fetchDevices now returns an object so the caller can
+  // pass revoked_device_ids to DeviceStore.replaceServer's 2nd arg.
   const calls = [];
   const sample = { devices: [{ device_id: 'a', api_key: 'ka' }, { device_id: 'b', api_key: 'kb' }] };
   const fetchImpl = async (url, options) => {
     calls.push({ url, options });
     return { ok: true, status: 200, json: async () => sample };
   };
-  const devices = await fetchDevices({
+  const result = await fetchDevices({
     serverUrl: 'http://srv',
     machineApiKey: 'mk',
     daemonId: 'd1',
     fetchImpl,
   });
-  assert.equal(devices.length, 2);
-  assert.equal(devices[0].device_id, 'a');
+  assert.equal(result.devices.length, 2);
+  assert.equal(result.devices[0].device_id, 'a');
+  assert.deepEqual(result.revokedDeviceIds, []);
   assert.equal(calls[0].url, 'http://srv/api/daemon/d1/devices');
   assert.equal(calls[0].options.method, 'GET');
   assert.equal(calls[0].options.headers.Authorization, 'Bearer mk');
 });
 
-test('fetchDevices returns [] when payload omits devices', async () => {
+test('fetchDevices returns { devices: [], revokedDeviceIds: [] } when payload omits both fields', async () => {
   const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({}) });
-  const devices = await fetchDevices({
+  const result = await fetchDevices({
     serverUrl: 'http://srv',
     machineApiKey: 'mk',
     daemonId: 'd1',
     fetchImpl,
   });
-  assert.deepEqual(devices, []);
+  assert.deepEqual(result, { devices: [], revokedDeviceIds: [] });
+});
+
+test('fetchDevices parses revoked_device_ids from payload (T82 M1.2-FIX-G)', async () => {
+  // Spec: server responds { devices, revoked_device_ids } so the daemon can
+  // seed tombstones on fresh boot. Daemon-side normalizes the snake_case
+  // wire field into camelCase + dedupes / strips whitespace.
+  const sample = {
+    devices: [{ device_id: 'a', api_key: 'ka' }],
+    revoked_device_ids: ['device-X', '', '  ', 'device-X', 'device-Y'],
+  };
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => sample });
+  const result = await fetchDevices({
+    serverUrl: 'http://srv',
+    machineApiKey: 'mk',
+    daemonId: 'd1',
+    fetchImpl,
+  });
+  assert.equal(result.devices.length, 1);
+  assert.deepEqual(result.revokedDeviceIds, ['device-X', 'device-Y']);
+});
+
+test('fetchDevices defaults revokedDeviceIds to [] for old servers omitting the field (T82 backward compat)', async () => {
+  const sample = { devices: [{ device_id: 'a', api_key: 'ka' }] };
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => sample });
+  const result = await fetchDevices({
+    serverUrl: 'http://srv',
+    machineApiKey: 'mk',
+    daemonId: 'd1',
+    fetchImpl,
+  });
+  assert.equal(result.devices.length, 1);
+  assert.deepEqual(result.revokedDeviceIds, []);
 });
 
 test('fetchDevices throws on non-2xx with status code in error', async () => {

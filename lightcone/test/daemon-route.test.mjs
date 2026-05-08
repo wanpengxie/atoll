@@ -281,6 +281,7 @@ test('GET /api/daemon/:id/devices returns active devices for the bearer machine'
         { id: 'd-2', device_id: 'xhs-002', api_key: 'sk_dev_bb', user_id: 'u2', channel_id: 'ch2', daemon_id: 'daemon-001', device_type: 'xhs', status: 'active', created_at: 't', revoked_at: null },
       ];
     },
+    getRevokedDeviceIdsByDaemonIdImpl: async () => [],
   });
 
   await withServer(createApp(router), async (baseUrl) => {
@@ -291,6 +292,65 @@ test('GET /api/daemon/:id/devices returns active devices for the bearer machine'
     assert.equal(res.json.devices.length, 2);
     assert.equal(res.json.devices[0].device_id, 'xhs-001');
     assert.equal(res.json.devices[0].api_key, 'sk_dev_aa');
+    // T82 (M1.2-FIX-G): response always carries revoked_device_ids — empty
+    // here because no rows in the revoked window.
+    assert.deepEqual(res.json.revoked_device_ids, []);
+  });
+});
+
+test('GET /api/daemon/:id/devices returns revoked_device_ids alongside active devices (T82 M1.2-FIX-G)', async () => {
+  // Spec: response { devices: [...active], revoked_device_ids: [...] } so a
+  // freshly-booted daemon can seed tombstones deterministically without
+  // relying on push-event delivery across the restart. Old daemons ignore
+  // the new field — this test pins the additive contract.
+  const calls = [];
+  const router = createDaemonRouter({
+    getDbImpl: () => ({}),
+    getMachineByApiKeyImpl: async () => ({ id: 'daemon-001', server_id: 'server-001' }),
+    updateMachineDaemonInfoImpl: async () => ({}),
+    getDevicesByDaemonIdImpl: async (_db, daemonId) => {
+      calls.push(['active', daemonId]);
+      return [
+        { id: 'd-1', device_id: 'xhs-001', api_key: 'sk_dev_aa', user_id: 'u1', channel_id: 'ch1', daemon_id: 'daemon-001', device_type: 'xhs', status: 'active', created_at: 't', revoked_at: null },
+      ];
+    },
+    getRevokedDeviceIdsByDaemonIdImpl: async (_db, daemonId) => {
+      calls.push(['revoked', daemonId]);
+      return ['xhs-002', 'xhs-003'];
+    },
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/daemon/daemon-001/devices', {
+      headers: { authorization: 'Bearer good' },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.json.devices.length, 1);
+    assert.equal(res.json.devices[0].device_id, 'xhs-001');
+    assert.deepEqual(res.json.revoked_device_ids, ['xhs-002', 'xhs-003']);
+    // Both queries scoped to the bearer machine's daemon id.
+    assert.deepEqual(calls.sort(), [['active', 'daemon-001'], ['revoked', 'daemon-001']].sort());
+  });
+});
+
+test('GET /api/daemon/:id/devices defaults revoked_device_ids to [] when impl returns non-array (T82)', async () => {
+  // Defense-in-depth: route normalizes a missing/garbage return into [] so
+  // daemons never see `undefined` in JSON.
+  const router = createDaemonRouter({
+    getDbImpl: () => ({}),
+    getMachineByApiKeyImpl: async () => ({ id: 'daemon-001', server_id: 'server-001' }),
+    updateMachineDaemonInfoImpl: async () => ({}),
+    getDevicesByDaemonIdImpl: async () => [],
+    getRevokedDeviceIdsByDaemonIdImpl: async () => undefined,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/daemon/daemon-001/devices', {
+      headers: { authorization: 'Bearer good' },
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json.devices, []);
+    assert.deepEqual(res.json.revoked_device_ids, []);
   });
 });
 
@@ -300,6 +360,7 @@ test('GET /api/daemon/:id/devices rejects when bearer machine != daemon_id (403)
     getMachineByApiKeyImpl: async () => ({ id: 'daemon-A', server_id: 'server-001' }),
     updateMachineDaemonInfoImpl: async () => ({}),
     getDevicesByDaemonIdImpl: async () => [],
+    getRevokedDeviceIdsByDaemonIdImpl: async () => [],
   });
 
   await withServer(createApp(router), async (baseUrl) => {
@@ -316,6 +377,7 @@ test('GET /api/daemon/:id/devices rejects missing bearer with 401', async () => 
     getMachineByApiKeyImpl: async () => null,
     updateMachineDaemonInfoImpl: async () => ({}),
     getDevicesByDaemonIdImpl: async () => [],
+    getRevokedDeviceIdsByDaemonIdImpl: async () => [],
   });
 
   await withServer(createApp(router), async (baseUrl) => {
