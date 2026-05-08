@@ -493,11 +493,14 @@ describe('PUBLISH_API_URL_PATTERN (R3-T4 FX6 → R4-T2 narrowed)', () => {
 describe('publish-wait persistence (R3-T4 FX9)', () => {
   it('writePublishWaitState writes under publish_wait:<correlationId>', async () => {
     const storage = makeFakeStorage();
+    // R4-T3 schema bump: deadlineAt now required on PublishWaitState. Round-trip
+    // 完整字段，确保 storage 写入字段集与 type 一致。
     const state: PublishWaitState = {
       correlationId: 'corr-A',
       tabId: 42,
       startedAt: 1700_000_000_000,
       timeoutMs: 600_000,
+      deadlineAt: 1700_000_000_000 + 600_000,
     };
     await writePublishWaitState(state, storage);
     expect(storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-A`]).toEqual(state);
@@ -544,6 +547,7 @@ describe('publish-wait persistence (R3-T4 FX9)', () => {
     const storage = makeFakeStorage();
     const correlationId = 'corr-entry-exit-1';
     const startedAt = 1_700_000_000_000;
+    const beforeNow = Date.now();
     const resultP = waitForPublishCompletion(200, {
       timeoutMs: 5_000,
       chromeApi: chromeApiOf(api),
@@ -551,16 +555,24 @@ describe('publish-wait persistence (R3-T4 FX9)', () => {
       startedAt,
       storageLocal: storage,
     });
+    const afterNow = Date.now();
 
     // After Promise body runs the persist write is enqueued; flush microtasks.
     await Promise.resolve();
     await Promise.resolve();
-    expect(storage._data[`${PUBLISH_WAIT_KEY_PREFIX}${correlationId}`]).toEqual({
+    const persisted = storage._data[
+      `${PUBLISH_WAIT_KEY_PREFIX}${correlationId}`
+    ] as PublishWaitState;
+    // R4-T3：entry 持久化字段集 = {correlationId, tabId, startedAt, timeoutMs, deadlineAt}。
+    // deadlineAt = Date.now() + timeoutMs；用 beforeNow / afterNow 框定真实窗口。
+    expect(persisted).toMatchObject({
       correlationId,
       tabId: 200,
       startedAt,
       timeoutMs: 5_000,
     });
+    expect(persisted.deadlineAt).toBeGreaterThanOrEqual(beforeNow + 5_000);
+    expect(persisted.deadlineAt).toBeLessThanOrEqual(afterNow + 5_000);
 
     // Drive a successful completion via NOTE_DETAIL navigation.
     const noteId = '0123456789abcdef01234567';

@@ -79,6 +79,12 @@ export interface PublishWaitOptions {
    * startedAt 以保留全局 deadline 不变；普通 dispatch 路径默认 Date.now()。
    */
   startedAt?: number;
+  /**
+   * R4-T3：绝对截止时刻（ms epoch）。recovery re-arm 路径必须传，避免
+   * `derived deadline = startedAt + timeoutMs` 在每次重 arm 时收缩。普通 dispatch
+   * 路径不传，由 entry 默认计算 `Date.now() + timeoutMs`。
+   */
+  deadlineAt?: number;
   /** R3-T4 FX9：测试可注入 fake storage；缺省走 chrome.storage.local。 */
   storageLocal?: StorageLocalLike;
 }
@@ -86,14 +92,28 @@ export interface PublishWaitOptions {
 /**
  * R3-T4 FX9：publish-wait 持久化 state。SW evict 后由 background startup hook
  * 扫 publish_wait:* 重建发布完成判定，避免 daemon 永远收不到 callback。
+ *
+ * R4-T3 schema bump (t64.C2)：
+ *   - 新字段 `deadlineAt`（ms epoch，绝对终点）取代 `startedAt + timeoutMs` 作
+ *     为 deadline 真相源；`startedAt` / `timeoutMs` 保留仅供 forensics + 旧条目
+ *     fallback。recovery 重 arm 时不再用 remaining 改写 timeoutMs，避免
+ *     `deadline = startedAt + 收缩 timeoutMs` 在二次 SW evict 后误触发提前
+ *     publish_timeout（worked example: startedAt=0/timeoutMs=600s → t=300 evict
+ *     后旧实现存为 timeoutMs=300，t=350 二次 evict 立即报 publish_timeout，比
+ *     真实 600s 终点早 250s）。
+ *   - 旧条目读到时无 `deadlineAt`：listPublishWaitStates 内 derive
+ *     `deadlineAt = startedAt + timeoutMs` 并写回 storage（一次性 migration），
+ *     之后 recovery 永远以绝对值为准。
  */
 export interface PublishWaitState {
   correlationId: string;
   tabId: number;
-  /** ms epoch */
+  /** ms epoch；entry 初次写入；recovery 不改。 */
   startedAt: number;
-  /** publish wait 的最长等待时间（ms）。recovery 据此判超时。 */
+  /** publish wait 的最长等待时间（ms）。仅 forensics + legacy fallback；deadline 真相源是 deadlineAt。 */
   timeoutMs: number;
+  /** R4-T3：ms epoch 绝对截止时刻。新条目必填；旧条目缺失时由 listPublishWaitStates 自动 derive 写回。 */
+  deadlineAt: number;
 }
 
 /** R3-T4 FX9：chrome.storage.local 抽象，单测可替换。 */
@@ -145,7 +165,13 @@ export async function removePublishWaitState(
   }
 }
 
-/** R3-T4 FX9：列出全部 publish-wait state。SW restart 时由 recovery 调用。 */
+/**
+ * R3-T4 FX9：列出全部 publish-wait state。SW restart 时由 recovery 调用。
+ *
+ * R4-T3：旧 schema 条目（无 deadlineAt）一次性 migration —— derive
+ * `deadlineAt = startedAt + timeoutMs` 后立即 set 写回 storage，确保下次
+ * recovery 走绝对终点路径，不再依赖相对 timeoutMs 重新计算。
+ */
 export async function listPublishWaitStates(
   storage?: StorageLocalLike,
 ): Promise<PublishWaitState[]> {
@@ -156,8 +182,21 @@ export async function listPublishWaitStates(
     const out: PublishWaitState[] = [];
     for (const [k, v] of Object.entries(all)) {
       if (!k.startsWith(PUBLISH_WAIT_KEY_PREFIX)) continue;
-      if (!isPublishWaitState(v)) continue;
-      out.push(v);
+      const normalized = normalizePublishWaitState(v);
+      if (!normalized) continue;
+      // 旧条目（无 deadlineAt）：写回补齐字段，避免后续 recovery 再 derive。
+      if (
+        v &&
+        typeof v === 'object' &&
+        typeof (v as Record<string, unknown>).deadlineAt !== 'number'
+      ) {
+        try {
+          await target.set({ [k]: normalized });
+        } catch (err) {
+          console.warn('[publish-content] listPublishWaitStates migration write-back failed', err);
+        }
+      }
+      out.push(normalized);
     }
     return out;
   } catch (err) {
@@ -166,15 +205,34 @@ export async function listPublishWaitStates(
   }
 }
 
-function isPublishWaitState(v: unknown): v is PublishWaitState {
-  if (!v || typeof v !== 'object') return false;
+/**
+ * R4-T3：把 storage 里的原始记录归一成新 schema。返回 null 表示形状不合法。
+ * 兼容旧 schema：缺 `deadlineAt` 时由 `startedAt + timeoutMs` 推导；缺
+ * `timeoutMs` 时尝试由 `deadlineAt - startedAt` 反推（极端 forensic-only 情况）。
+ */
+function normalizePublishWaitState(v: unknown): PublishWaitState | null {
+  if (!v || typeof v !== 'object') return null;
   const r = v as Record<string, unknown>;
-  return (
-    typeof r.correlationId === 'string' &&
-    typeof r.tabId === 'number' &&
-    typeof r.startedAt === 'number' &&
-    typeof r.timeoutMs === 'number'
-  );
+  if (typeof r.correlationId !== 'string') return null;
+  if (typeof r.tabId !== 'number') return null;
+  if (typeof r.startedAt !== 'number') return null;
+  const hasTimeoutMs = typeof r.timeoutMs === 'number';
+  const hasDeadlineAt = typeof r.deadlineAt === 'number';
+  if (!hasTimeoutMs && !hasDeadlineAt) return null;
+  const startedAt = r.startedAt;
+  const timeoutMs = hasTimeoutMs
+    ? (r.timeoutMs as number)
+    : (r.deadlineAt as number) - startedAt;
+  const deadlineAt = hasDeadlineAt
+    ? (r.deadlineAt as number)
+    : startedAt + (r.timeoutMs as number);
+  return {
+    correlationId: r.correlationId,
+    tabId: r.tabId,
+    startedAt,
+    timeoutMs,
+    deadlineAt,
+  };
 }
 
 /** 抛给上层 callback 的取消错误，code 透传到 daemon。 */
@@ -282,12 +340,15 @@ export function waitForPublishCompletion(
   // R3-T4 FX9: 持久化 publish-wait state 到 chrome.storage.local，SW evict 时
   // 由 recoverPublishWaitStates 兜底。仅当 correlationId 提供时启用（背景 init
   // 之外的纯单测路径不强制）。
+  // R4-T3：deadlineAt 是 deadline 真相源；recovery 重 arm 时透传原始 deadlineAt
+  // 才能保证 N 次 SW evict 后 derived deadline 不收缩。
   const correlationId = opts.correlationId ?? null;
   const startedAt = opts.startedAt ?? Date.now();
+  const deadlineAt = opts.deadlineAt ?? Date.now() + timeoutMs;
   const storage = opts.storageLocal ?? defaultStorageLocal();
   if (correlationId && storage) {
     void writePublishWaitState(
-      { correlationId, tabId, startedAt, timeoutMs },
+      { correlationId, tabId, startedAt, timeoutMs, deadlineAt },
       storage,
     );
   }
@@ -397,9 +458,12 @@ export function waitForPublishCompletion(
       settle(() => reject(new PublishCanceledError()));
     };
 
+    // R4-T3：定时器以绝对 deadlineAt 为准，1s 下限避免 0/负值导致立即 fire；
+    // 这样无论第几次 SW evict 重 arm，剩余时间都基于真实终点。
+    const remainingMs = Math.max(1_000, deadlineAt - Date.now());
     const timer = setTimeout(() => {
       settle(() => reject(new PublishTimeoutError(`publish wait timed out after ${timeoutMs}ms`)));
-    }, timeoutMs);
+    }, remainingMs);
 
     tabsOnUpdated.addListener(onUpdated);
     tabsOnRemoved.addListener(onRemoved);
@@ -502,7 +566,9 @@ export async function recoverPublishWaitStates(
   for (const state of states) {
     try {
       // 1) 已超时 → publish_timeout
-      const deadline = state.startedAt + state.timeoutMs;
+      // R4-T3：deadline 真相源是绝对 deadlineAt；listPublishWaitStates 已对旧
+      // 条目 fallback derive 过，这里直接用即可。
+      const deadline = state.deadlineAt;
       if (now > deadline) {
         await deps.postCallback(state.correlationId, {
           status: 'error',
@@ -544,11 +610,15 @@ export async function recoverPublishWaitStates(
         continue;
       }
       // 4) tab 仍在 publish 表单 → 重 register listener 续命
+      // R4-T3：透传绝对 deadlineAt + 原始 startedAt + 原始 timeoutMs。新 entry
+      // 内部 setTimeout 以 deadlineAt - Date.now() 为剩余时间，确保任意次 SW
+      // evict 后 derived deadline 不再收缩（旧实现用 timeoutMs=remaining 重写
+      // storage，二次 evict 立刻误触 publish_timeout）。
       if (PUBLISH_PAGE_PATTERN.test(tabUrl)) {
-        const remaining = Math.max(1_000, deadline - now);
         // fire-and-forget；listener settle 时会自行 remove storage 条目并 postCallback。
         void waitForPublishCompletion(state.tabId, {
-          timeoutMs: remaining,
+          timeoutMs: state.timeoutMs,
+          deadlineAt: state.deadlineAt,
           correlationId: state.correlationId,
           startedAt: state.startedAt,
           chromeApi: deps.chromeApi,
