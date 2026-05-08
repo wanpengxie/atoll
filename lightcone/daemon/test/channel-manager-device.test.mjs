@@ -192,15 +192,19 @@ test('deviceCommandSend errors when channel has no device member and no env defa
 
 test('deviceSessionUpdate persists patch and deviceSessionGet returns flat shape (spec §4.1)', async (t) => {
   const ctx = await createHarness(t);
+  // R3-T4 FX7: deviceSessionUpdate 返回脱敏 envelope（不含 cookies/session），
+  // 但持久化文件保留 cookie 真值，deviceSessionGet 仍可读出全量。
   const upd = await ctx.cm.deviceSessionUpdate({
     user_id: 'user-001',
     cookies: [{ name: 'sid', value: 'v9' }],
     login_state: 'logged_in',
     expires_at: 1234567890,
   });
-  assert.equal(upd.session.user_id, 'user-001');
-  assert.equal(upd.session.login_state, 'logged_in');
-  assert.equal(upd.session.cookies.length, 1);
+  assert.equal(upd.user_id, 'user-001');
+  assert.equal(upd.login_state, 'logged_in');
+  assert.equal(upd.cookie_count, 1);
+  assert.equal(upd.expires_at, 1234567890);
+  assert.equal(typeof upd.last_updated_at, 'number');
 
   const got = await ctx.cm.deviceSessionGet({ user_id: 'user-001' });
   // Fix-T2 §4: flat shape, no `{exists, session}` wrapper.
@@ -223,8 +227,36 @@ test('deviceSessionUpdate accepts the HTTP-forwarded {deviceId,userId,patch} sha
     userId: 'user-007',
     patch: { cookies: [{ name: 'a', value: 'b' }], login_state: 'logged_in' },
   });
-  assert.equal(upd.session.user_id, 'user-007');
-  assert.equal(upd.session.cookies.length, 1);
+  assert.equal(upd.user_id, 'user-007');
+  assert.equal(upd.login_state, 'logged_in');
+  assert.equal(upd.cookie_count, 1);
+});
+
+// R3-T4 FX7 / round-2 review codex#t59.2：返回 envelope 必须不泄漏完整 cookies / session 字段。
+// daemon 端 HTTP 透传（rpc-server.js writeJson 整段返回 result），任何 cookies / session 字段都
+// 会被 extension 端 console.log + UI message 打印出去。
+test('deviceSessionUpdate returns redacted envelope without raw cookies / session fields', async (t) => {
+  const ctx = await createHarness(t);
+  const upd = await ctx.cm.deviceSessionUpdate({
+    user_id: 'user-002',
+    cookies: [
+      { name: 'web_session', value: 'SECRET_SESSION_VALUE' },
+      { name: 'access-token', value: 'SECRET_TOKEN_VALUE' },
+    ],
+    login_state: 'logged_in',
+  });
+  // 正向：脱敏字段在
+  assert.equal(upd.cookie_count, 2);
+  assert.equal(upd.login_state, 'logged_in');
+  // 反向：禁止出现 cookies / session 完整结构
+  assert.ok(!('session' in upd), 'response must not include session wrapper');
+  assert.ok(!('cookies' in upd), 'response must not include raw cookies array');
+  // 整段序列化也不能出现 cookie 真值
+  const serialized = JSON.stringify(upd);
+  assert.ok(!serialized.includes('SECRET_SESSION_VALUE'), 'raw cookie value leaked into envelope');
+  assert.ok(!serialized.includes('SECRET_TOKEN_VALUE'), 'raw cookie value leaked into envelope');
+  assert.ok(!serialized.includes('web_session'), 'cookie name leaked into envelope');
+  assert.ok(!serialized.includes('access-token'), 'cookie name leaked into envelope');
 });
 
 test('deviceCallback emits dispatch.completed and clears router', async (t) => {
@@ -313,7 +345,11 @@ test('rpcCall switch dispatches device.* methods', async (t) => {
     cookies: [{ name: 'k', value: 'v' }],
     login_state: 'logged_in',
   });
-  assert.equal(upd.session.login_state, 'logged_in');
+  // R3-T4 FX7: rpcCall 透传脱敏 envelope；不含 session/cookies 字段。
+  assert.equal(upd.login_state, 'logged_in');
+  assert.equal(upd.cookie_count, 1);
+  assert.ok(!('session' in upd));
+  assert.ok(!('cookies' in upd));
 });
 
 // ── Fix-T2 §3 payload allowlist + per-type schema ────────────────────────────

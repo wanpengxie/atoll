@@ -2088,7 +2088,18 @@ export class ChannelManager {
       device_id: params.deviceId ?? null,
       login_state: merged.login_state ?? null,
     });
-    return { user_id: userId, session: merged };
+    // R3-T4 FX7 / round-2 review codex#t59.2：HTTP `/api/device/{id}/session`
+    // 透传整段 result 给 extension（再被拼进用户可见 message + console log），
+    // 旧实现里 result 含 `session.cookies` 真值 → 用户/日志泄漏。
+    // 修复：返回脱敏 envelope，仅保留诊断字段（数量、状态、时间戳）。
+    // 持久化文件 shape 不变，extension 端做对应适配。
+    return {
+      user_id: userId,
+      login_state: merged.login_state ?? null,
+      cookie_count: Array.isArray(merged.cookies) ? merged.cookies.length : 0,
+      last_updated_at: merged.last_updated_at ?? null,
+      expires_at: merged.expires_at ?? null,
+    };
   }
 
   async deviceCallback({ deviceId, correlationId, status, result, error }) {
