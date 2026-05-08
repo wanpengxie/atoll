@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Devices · lightcone</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:        #080c14;
+      --surface:   #0f1623;
+      --surface-2: #131c2c;
+      --border:    #1e2a3a;
+      --accent:    #f59e0b;
+      --accent-2:  #fb923c;
+      --text:      #e2e8f0;
+      --muted:     #64748b;
+      --green:     #34d399;
+      --red:       #f87171;
+      --yellow:    #fbbf24;
+    }
+    html { font-size: 16px; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Helvetica Neue', Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      min-height: 100vh;
+    }
+    .container { max-width: 1100px; margin: 0 auto; padding: 32px 24px 80px; }
+    .topbar {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 24px;
+    }
+    .topbar h1 { font-size: 20px; font-weight: 600; }
+    .topbar .crumb {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px; color: var(--muted);
+      letter-spacing: 0.05em; text-transform: uppercase;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 18px 20px;
+      margin-bottom: 20px;
+    }
+    .card h2 { font-size: 13px; color: var(--muted); margin-bottom: 12px; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; }
+
+    .form-row { display: flex; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+    .form-field { flex: 1; min-width: 180px; }
+    .form-field label {
+      display: block; font-size: 11px; color: var(--muted);
+      margin-bottom: 4px; letter-spacing: 0.04em;
+    }
+    .form-field input, .form-field select {
+      width: 100%; padding: 8px 10px;
+      background: var(--bg); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      font-family: inherit; font-size: 13px;
+    }
+    .form-field input:focus, .form-field select:focus {
+      outline: none; border-color: var(--accent);
+    }
+    .btn {
+      padding: 8px 16px; border: 1px solid var(--border);
+      background: var(--surface-2); color: var(--text);
+      border-radius: 4px; cursor: pointer; font-family: inherit;
+      font-size: 13px; transition: all 0.15s;
+    }
+    .btn:hover { border-color: var(--accent); color: var(--accent); }
+    .btn-primary {
+      background: var(--accent); color: #080c14; border-color: var(--accent);
+      font-weight: 600;
+    }
+    .btn-primary:hover { background: var(--accent-2); border-color: var(--accent-2); color: #080c14; }
+    .btn-danger { color: var(--red); border-color: var(--border); }
+    .btn-danger:hover { background: rgba(248,113,113,0.08); color: var(--red); border-color: var(--red); }
+
+    table {
+      width: 100%; border-collapse: collapse; font-size: 12.5px;
+    }
+    th, td {
+      text-align: left; padding: 10px 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      font-weight: 500; color: var(--muted);
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+    }
+    .mono { font-family: 'JetBrains Mono', 'Menlo', monospace; }
+    .badge {
+      display: inline-block; padding: 1px 8px; border-radius: 3px;
+      font-size: 10.5px; font-family: 'JetBrains Mono', monospace;
+    }
+    .badge-active { background: rgba(52,211,153,0.12); color: var(--green); }
+    .badge-revoked { background: rgba(248,113,113,0.12); color: var(--red); }
+
+    .empty {
+      text-align: center; color: var(--muted); padding: 40px 0;
+      font-size: 12px;
+    }
+    .err {
+      color: var(--red); font-size: 12px; margin-top: 8px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* api-key reveal modal */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.65);
+      display: none; align-items: center; justify-content: center; z-index: 100;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--surface); border: 1px solid var(--accent);
+      border-radius: 6px; padding: 24px; max-width: 540px; width: 92%;
+    }
+    .modal h3 { color: var(--yellow); font-size: 15px; margin-bottom: 8px; }
+    .modal p { color: var(--muted); font-size: 12px; line-height: 1.6; margin-bottom: 14px; }
+    .key-box {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+      padding: 12px; font-family: 'JetBrains Mono', monospace;
+      font-size: 12.5px; word-break: break-all; color: var(--accent);
+      margin-bottom: 14px;
+    }
+    .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+    .copy-feedback {
+      font-size: 11px; color: var(--green); margin-left: auto;
+      align-self: center; opacity: 0; transition: opacity 0.2s;
+    }
+    .copy-feedback.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="topbar">
+      <div>
+        <div class="crumb">// lightcone / devices</div>
+        <h1>Devices</h1>
+      </div>
+      <a href="/index.html">← back to app</a>
+    </div>
+
+    <div class="card">
+      <h2>Create device</h2>
+      <div class="form-row">
+        <div class="form-field">
+          <label>user_id <span style="color:var(--muted)">(default: 当前登录用户)</span></label>
+          <input id="form-user-id" placeholder="user-001">
+        </div>
+        <div class="form-field">
+          <label>channel_id</label>
+          <input id="form-channel-id" placeholder="ch-001">
+        </div>
+        <div class="form-field">
+          <label>daemon_id</label>
+          <input id="form-daemon-id" placeholder="daemon-001">
+        </div>
+        <div class="form-field">
+          <label>device_type</label>
+          <select id="form-device-type">
+            <option value="xhs">xhs</option>
+            <option value="douyin">douyin</option>
+            <option value="kuaishou">kuaishou</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>device_id <span style="color:var(--muted)">(optional)</span></label>
+          <input id="form-device-id" placeholder="xhs-001">
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
+        <button class="btn btn-primary" onclick="createDevice()">Create</button>
+        <span id="form-error" class="err"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <h2 style="margin:0">Devices</h2>
+        <button class="btn" onclick="loadDevices()">Refresh</button>
+      </div>
+      <div id="device-table-wrap">
+        <div class="empty">loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="key-modal">
+    <div class="modal">
+      <h3>⚠ device api-key (only shown once)</h3>
+      <p>请立即复制并安全保存。关闭此弹窗后将无法再次查看完整 api-key。</p>
+      <div class="key-box mono" id="key-box"></div>
+      <div class="modal-actions">
+        <span class="copy-feedback" id="copy-feedback">copied!</span>
+        <button class="btn" onclick="copyKey()">Copy</button>
+        <button class="btn btn-primary" onclick="closeKeyModal()">Done</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    credentials: 'include',
+    headers: { 'content-type': 'application/json', ...(opts.headers ?? {}) },
+    ...opts,
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  let json = null;
+  try { json = await res.json(); } catch { /* */ }
+  if (!res.ok) {
+    const err = new Error(json?.error ?? `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return json;
+}
+
+function escHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+function fmtDate(s) {
+  if (!s) return '—';
+  try {
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return s;
+    return d.toISOString().replace('T', ' ').slice(0, 19);
+  } catch { return s; }
+}
+
+let _devices = [];
+
+async function loadDevices() {
+  const wrap = document.getElementById('device-table-wrap');
+  wrap.innerHTML = '<div class="empty">loading…</div>';
+  try {
+    const { devices } = await api('/api/devices');
+    _devices = devices;
+    if (!devices.length) {
+      wrap.innerHTML = '<div class="empty">// no devices yet</div>';
+      return;
+    }
+    wrap.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>device_id</th>
+            <th>user</th>
+            <th>channel</th>
+            <th>type</th>
+            <th>daemon</th>
+            <th>status</th>
+            <th>api_key</th>
+            <th>created</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${devices.map(d => `
+            <tr>
+              <td class="mono">${escHtml(d.device_id)}</td>
+              <td class="mono">${escHtml(d.user_id)}</td>
+              <td class="mono">${escHtml(d.channel_id ?? '—')}</td>
+              <td class="mono">${escHtml(d.device_type)}</td>
+              <td class="mono">${escHtml(d.daemon_id ?? '—')}</td>
+              <td><span class="badge badge-${d.status === 'active' ? 'active' : 'revoked'}">${escHtml(d.status)}</span></td>
+              <td class="mono" style="color:var(--muted)">${escHtml(d.api_key)}</td>
+              <td class="mono" style="color:var(--muted)">${escHtml(fmtDate(d.created_at))}</td>
+              <td>${d.status === 'active'
+                ? `<button class="btn btn-danger" onclick="revokeDevice('${escHtml(d.id)}')">Revoke</button>`
+                : ''}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+  } catch (err) {
+    if (err.status === 401) {
+      wrap.innerHTML = '<div class="empty">未登录。请先到 <a href="/index.html">主页</a> 登录后再访问 devices 页面。</div>';
+      return;
+    }
+    wrap.innerHTML = `<div class="err">load failed: ${escHtml(err.message)}</div>`;
+  }
+}
+
+async function createDevice() {
+  const errEl = document.getElementById('form-error');
+  errEl.textContent = '';
+  const body = {
+    user_id:    document.getElementById('form-user-id').value.trim() || undefined,
+    channel_id: document.getElementById('form-channel-id').value.trim() || undefined,
+    daemon_id:  document.getElementById('form-daemon-id').value.trim() || undefined,
+    device_type:document.getElementById('form-device-type').value,
+    device_id:  document.getElementById('form-device-id').value.trim() || undefined,
+  };
+  try {
+    const created = await api('/api/devices', { method: 'POST', body });
+    showKeyModal(created.api_key, created.device_id);
+    document.getElementById('form-channel-id').value = '';
+    document.getElementById('form-device-id').value = '';
+    await loadDevices();
+  } catch (err) {
+    errEl.textContent = err.message;
+  }
+}
+
+async function revokeDevice(id) {
+  if (!confirm('Revoke this device? extension 将立即失去连接权限。')) return;
+  try {
+    await api('/api/devices/' + encodeURIComponent(id), { method: 'DELETE' });
+    await loadDevices();
+  } catch (err) {
+    alert('Revoke failed: ' + err.message);
+  }
+}
+
+function showKeyModal(apiKey, deviceId) {
+  document.getElementById('key-box').textContent = apiKey;
+  document.getElementById('key-modal').classList.add('open');
+  document.getElementById('key-modal').dataset.key = apiKey;
+}
+
+function closeKeyModal() {
+  document.getElementById('key-modal').classList.remove('open');
+}
+
+async function copyKey() {
+  const key = document.getElementById('key-modal').dataset.key;
+  if (!key) return;
+  try {
+    await navigator.clipboard.writeText(key);
+    const fb = document.getElementById('copy-feedback');
+    fb.classList.add('show');
+    setTimeout(() => fb.classList.remove('show'), 1500);
+  } catch {
+    // fallback
+    const ta = document.createElement('textarea');
+    ta.value = key;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch {}
+    document.body.removeChild(ta);
+  }
+}
+
+loadDevices();
+</script>
+</body>
+</html>
