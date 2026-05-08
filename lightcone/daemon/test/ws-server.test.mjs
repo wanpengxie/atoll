@@ -307,6 +307,47 @@ test('listOnline only includes OPEN sockets', async () => {
   }
 });
 
+// ── T74 §2: server revoke must force-disconnect already-connected device ──
+
+test('disconnect(deviceId) closes the existing ws and removes it from connections', async () => {
+  const verifier = makeKeyVerifier({ deviceKeys: new Map([['d1', 'good']]) });
+  const presenceLog = [];
+  const ctx = await startTestServer(verifier, {
+    onPresence: (info) => presenceLog.push(info),
+  });
+  try {
+    const ws = connectClient(ctx.port, 'd1', 'good');
+    await once(ws, 'open');
+    for (let i = 0; i < 50 && !ctx.wss.isOnline('d1'); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.equal(ctx.wss.isOnline('d1'), true);
+
+    const result = ctx.wss.disconnect('d1', 'revoked');
+    assert.equal(result, true);
+
+    // client side observes close
+    await once(ws, 'close');
+    for (let i = 0; i < 50 && ctx.wss.isOnline('d1'); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.equal(ctx.wss.isOnline('d1'), false);
+    assert.ok(presenceLog.some((p) => p.event === 'disconnect' && p.deviceId === 'd1'));
+  } finally {
+    await closeTestServer(ctx);
+  }
+});
+
+test('disconnect(deviceId) returns false when device not connected', async () => {
+  const verifier = makeKeyVerifier({ deviceKeys: new Map([['d1', 'good']]) });
+  const ctx = await startTestServer(verifier);
+  try {
+    assert.equal(ctx.wss.disconnect('ghost'), false);
+  } finally {
+    await closeTestServer(ctx);
+  }
+});
+
 test('non-json frames are dropped without affecting onMessage', async () => {
   const verifier = makeKeyVerifier({ deviceKeys: new Map([['d1', 'good']]) });
   const inboundFrames = [];
