@@ -328,7 +328,10 @@ test('disconnect(deviceId) closes the existing ws and removes it from connection
 
     // client side observes close
     await once(ws, 'close');
-    for (let i = 0; i < 50 && ctx.wss.isOnline('d1'); i++) {
+    // server-side close handler fires asynchronously after the close handshake;
+    // poll on presenceLog rather than isOnline (readyState flips to CLOSING
+    // before the 'close' listener — and presence/connections.delete — runs).
+    for (let i = 0; i < 80 && !presenceLog.some((p) => p.event === 'disconnect' && p.deviceId === 'd1'); i++) {
       await new Promise((r) => setTimeout(r, 5));
     }
     assert.equal(ctx.wss.isOnline('d1'), false);

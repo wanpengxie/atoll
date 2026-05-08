@@ -63,12 +63,39 @@ function probeModelsByRuntime(runtimes) {
 }
 
 export class DaemonConnection {
-  constructor({ serverUrl, machineApiKey, onMessage }) {
+  /**
+   * @param {object} opts
+   * @param {string} opts.serverUrl
+   * @param {string} opts.machineApiKey
+   * @param {(msg:any)=>void} opts.onMessage
+   * @param {()=>void|Promise<void>} [opts.onReady]
+   *   Called once per ws-open (initial connect + every reconnect). Used by
+   *   index.js to (re-)register + (re-)pull devices. Errors are caught and
+   *   logged so a failing onReady never tears down the WS.
+   * @param {(url:string)=>any} [opts.wsFactory]
+   *   Test seam for swapping the underlying ws instance. Defaults to
+   *   `(url) => new WebSocket(url)`.
+   * @param {number} [opts.reconnectInitialMs]
+   * @param {number} [opts.reconnectMaxMs]
+   */
+  constructor({
+    serverUrl,
+    machineApiKey,
+    onMessage,
+    onReady = null,
+    wsFactory = null,
+    reconnectInitialMs = RECONNECT_INITIAL,
+    reconnectMaxMs = RECONNECT_MAX,
+  }) {
     this.serverUrl = serverUrl.replace(/^http/, 'ws');
     this.machineApiKey = machineApiKey;
     this.onMessage = onMessage;
+    this.onReady = typeof onReady === 'function' ? onReady : null;
+    this._wsFactory = typeof wsFactory === 'function' ? wsFactory : (url) => new WebSocket(url);
+    this._reconnectInitialMs = reconnectInitialMs;
+    this._reconnectMaxMs = reconnectMaxMs;
     this.ws = null;
-    this.reconnectDelay = RECONNECT_INITIAL;
+    this.reconnectDelay = this._reconnectInitialMs;
     this.stopped = false;
     this.pendingRequests = new Map();
   }
@@ -76,12 +103,22 @@ export class DaemonConnection {
   connect() {
     const url = `${this.serverUrl}/daemon/connect?key=${this.machineApiKey}`;
     console.error(`[Connection] Connecting to ${url}`);
-    this.ws = new WebSocket(url);
+    this.ws = this._wsFactory(url);
 
     this.ws.on('open', () => {
       console.error(`[Connection] Connected (daemon v${DAEMON_VERSION})`);
-      this.reconnectDelay = RECONNECT_INITIAL;
+      this.reconnectDelay = this._reconnectInitialMs;
       this._sendReady();
+      if (this.onReady) {
+        try {
+          Promise.resolve(this.onReady({ daemonVersion: DAEMON_VERSION }))
+            .catch((err) => {
+              console.error(`[Connection] onReady handler failed: ${err?.message ?? err}`);
+            });
+        } catch (err) {
+          console.error(`[Connection] onReady handler threw synchronously: ${err?.message ?? err}`);
+        }
+      }
       // WS ping 心跳：远程代理 idle timeout 60-100 秒，30 秒发 ping 防止断
       this.pingTimer = setInterval(() => {
         if (this.ws?.readyState === WebSocket.OPEN) {
@@ -180,6 +217,6 @@ export class DaemonConnection {
   _scheduleReconnect() {
     console.error(`[Connection] Reconnecting in ${this.reconnectDelay}ms...`);
     setTimeout(() => this.connect(), this.reconnectDelay);
-    this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX);
+    this.reconnectDelay = Math.min(this.reconnectDelay * 2, this._reconnectMaxMs);
   }
 }

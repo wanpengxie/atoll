@@ -260,6 +260,25 @@ export class DeviceWsServer {
     return !!(ws && ws.readyState === WebSocket.OPEN);
   }
 
+  /**
+   * Force-disconnect a device's existing ws (T74 §2 — server `device.revoked`
+   * must drop already-connected extensions). Idempotent: returns `false` if no
+   * connection is tracked for `deviceId`. The actual map entry is removed by
+   * the `close` handler registered in `_registerConnection`.
+   */
+  disconnect(deviceId, reason = 'revoked') {
+    const id = String(deviceId ?? '').trim();
+    if (!id) return false;
+    const ws = this.connections.get(id);
+    if (!ws) return false;
+    try {
+      ws.close(1008, String(reason ?? 'revoked'));
+    } catch {
+      try { ws.terminate(); } catch { /* ignore */ }
+    }
+    return true;
+  }
+
   listOnline() {
     const out = [];
     for (const [deviceId, ws] of this.connections) {
