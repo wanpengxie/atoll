@@ -182,6 +182,46 @@ test('POST /api/daemon/register rejects unknown scheme with 400 (T77)', async ()
   });
 });
 
+test('POST /api/daemon/register rejects missing port with 400 (T81 M1.2-FIX-F)', async () => {
+  // T81 contract: port is now a hard precondition. Previously the route
+  // accepted null port and silently wrote daemon_port=null, which made
+  // /api/device/resolve return 503 long after the daemon believed register
+  // succeeded. Reject upfront with a precise error message.
+  const router = createDaemonRouter({
+    getDbImpl: () => ({}),
+    getMachineByApiKeyImpl: async () => ({ id: 'daemon-001', server_id: 'server-001' }),
+    updateMachineDaemonInfoImpl: async () => { throw new Error('should not call'); },
+    getDevicesByDaemonIdImpl: async () => [],
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const resMissing = await callJson(baseUrl, '/api/daemon/register', {
+      method: 'POST',
+      body: {
+        machine_api_key: 'k',
+        daemon_id: 'daemon-001',
+        host: 'h',
+        capabilities: [],
+      },
+    });
+    assert.equal(resMissing.status, 400);
+    assert.equal(resMissing.json.error, 'port is required');
+
+    const resEmpty = await callJson(baseUrl, '/api/daemon/register', {
+      method: 'POST',
+      body: {
+        machine_api_key: 'k',
+        daemon_id: 'daemon-001',
+        host: 'h',
+        port: '',
+        capabilities: [],
+      },
+    });
+    assert.equal(resEmpty.status, 400);
+    assert.equal(resEmpty.json.error, 'port is required');
+  });
+});
+
 test('POST /api/daemon/register rejects non-integer port with 400 (T77 regression guard)', async () => {
   const router = createDaemonRouter({
     getDbImpl: () => ({}),

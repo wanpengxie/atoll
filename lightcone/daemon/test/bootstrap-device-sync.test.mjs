@@ -24,6 +24,7 @@ import { EventEmitter } from 'node:events';
 import { DaemonConnection } from '../src/connection.js';
 import { DeviceStore } from '../src/devices/device-store.js';
 import { registerDaemon, fetchDevices } from '../src/devices/registrar.js';
+import { createBootstrapDeviceSync } from '../src/devices/bootstrap.js';
 
 class MockWebSocket extends EventEmitter {
   constructor(url) {
@@ -184,6 +185,7 @@ test('T78: reconnect re-pull tombstones a device dropped from the new server set
       serverUrl: 'http://srv',
       machineApiKey: 'mk',
       daemonId: resolvedDaemonId,
+      port: 1234, // T81: port now required by registrar contract
       capabilities: [],
       fetchImpl,
     });
@@ -227,4 +229,146 @@ test('T78: reconnect re-pull tombstones a device dropped from the new server set
   assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'key-X' }), false);
 
   conn.stop();
+});
+
+test('T81 M1.2-FIX-F: PUBLIC_PORT==null + DEVICE_SOURCE=both → register skipped, env fallback intact', async () => {
+  // T81 hard-rule: when the daemon has no PUBLIC_PORT it must NOT issue a
+  // register call. The server now returns 400 for null port, and firing the
+  // request just buries the real "missing PUBLIC_PORT" config issue under
+  // register_failed errors. With DEVICE_SOURCE='both' the env-seeded keys
+  // remain authoritative until the operator configures the port.
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls += 1;
+    throw new Error('fetchImpl should not be invoked when port is missing');
+  };
+  const logs = [];
+  const log = (...args) => logs.push(args.join(' '));
+
+  const store = new DeviceStore({
+    envEntries: new Map([['device-env', 'env-key']]),
+  });
+  const bootstrap = createBootstrapDeviceSync({
+    deviceSource: 'both',
+    envDeviceKeysSize: 1,
+    serverUrl: 'http://srv',
+    machineApiKey: 'mk',
+    publicHost: 'h',
+    publicPort: null, // operator forgot to set COAGENT_DAEMON_HTTP_PORT
+    publicScheme: null,
+    capabilities: [],
+    deviceStore: store,
+    registerDaemonImpl: (...args) => registerDaemon({ ...args[0], fetchImpl }),
+    fetchDevicesImpl: (...args) => fetchDevices({ ...args[0], fetchImpl }),
+    log,
+  });
+
+  await bootstrap();
+  // No fetch issued — register call short-circuited.
+  assert.equal(fetchCalls, 0, 'register must not fire when publicPort is null');
+  // Env fallback still authoritative.
+  assert.equal(store.verifyKey({ deviceId: 'device-env', key: 'env-key' }), true);
+  // Operator-facing log explains the skip + names the offending env vars.
+  const skipLog = logs.find((l) => l.includes('register skipped'));
+  assert.ok(skipLog, 'expected an explicit register-skipped log line');
+  assert.match(skipLog, /COAGENT_DAEMON_HTTP_PORT|COAGENT_DAEMON_PUBLIC_PORT/);
+});
+
+test('T81 M1.2-FIX-F: PUBLIC_PORT==null + DEVICE_SOURCE=server → register skipped, store stays empty', async () => {
+  // With source=server there is no env fallback; the device map simply
+  // stays empty (verifyKey rejects all) until config is fixed. The point
+  // is that we do NOT fire a doomed register request.
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls += 1;
+    throw new Error('fetchImpl should not be invoked when port is missing');
+  };
+  const logs = [];
+  const log = (...args) => logs.push(args.join(' '));
+
+  const store = new DeviceStore({ envEntries: new Map() });
+  const bootstrap = createBootstrapDeviceSync({
+    deviceSource: 'server',
+    envDeviceKeysSize: 0,
+    serverUrl: 'http://srv',
+    machineApiKey: 'mk',
+    publicHost: 'h',
+    publicPort: null,
+    publicScheme: null,
+    capabilities: [],
+    deviceStore: store,
+    registerDaemonImpl: (...args) => registerDaemon({ ...args[0], fetchImpl }),
+    fetchDevicesImpl: (...args) => fetchDevices({ ...args[0], fetchImpl }),
+    log,
+  });
+
+  await bootstrap();
+  assert.equal(fetchCalls, 0, 'register must not fire when publicPort is null');
+  assert.equal(store.verifyKey({ deviceId: 'whatever', key: 'whatever' }), false);
+  assert.ok(logs.find((l) => l.includes('register skipped')));
+});
+
+test('T81 M1.2-FIX-F: PUBLIC_PORT==null + DEVICE_SOURCE=env → existing env-only short-circuit (no skip log)', async () => {
+  // env source already short-circuits before the port check. This test
+  // pins that behavior so it stays orthogonal to the new skip-on-missing
+  // path.
+  let fetchCalls = 0;
+  const fetchImpl = async () => { fetchCalls += 1; return null; };
+  const logs = [];
+  const store = new DeviceStore({
+    envEntries: new Map([['device-env', 'env-key']]),
+  });
+  const bootstrap = createBootstrapDeviceSync({
+    deviceSource: 'env',
+    envDeviceKeysSize: 1,
+    serverUrl: 'http://srv',
+    machineApiKey: 'mk',
+    publicHost: 'h',
+    publicPort: null,
+    capabilities: [],
+    deviceStore: store,
+    registerDaemonImpl: (args) => registerDaemon({ ...args, fetchImpl }),
+    fetchDevicesImpl: (args) => fetchDevices({ ...args, fetchImpl }),
+    log: (...args) => logs.push(args.join(' ')),
+  });
+
+  await bootstrap();
+  assert.equal(fetchCalls, 0);
+  assert.equal(store.verifyKey({ deviceId: 'device-env', key: 'env-key' }), true);
+  assert.ok(logs.find((l) => l.includes('source=env')));
+  assert.equal(logs.find((l) => l.includes('register skipped')), undefined,
+    'env path uses its own log line, not the missing-port skip log');
+});
+
+test('T81 M1.2-FIX-F: bootstrap with PUBLIC_PORT set still registers + pulls (smoke regression)', async () => {
+  // Sanity-check that the new skip path does not regress the happy case.
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    if (url.endsWith('/api/daemon/register')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, daemon_id: 'd-OK' }), text: async () => '' };
+    }
+    return { ok: true, status: 200, json: async () => ({ devices: [{ device_id: 'srv-1', api_key: 'sk1' }] }), text: async () => '' };
+  };
+
+  const store = new DeviceStore({ envEntries: new Map() });
+  const bootstrap = createBootstrapDeviceSync({
+    deviceSource: 'both',
+    envDeviceKeysSize: 0,
+    serverUrl: 'http://srv',
+    machineApiKey: 'mk',
+    publicHost: 'h',
+    publicPort: 9501,
+    capabilities: [],
+    deviceStore: store,
+    registerDaemonImpl: (args) => registerDaemon({ ...args, fetchImpl }),
+    fetchDevicesImpl: (args) => fetchDevices({ ...args, fetchImpl }),
+    log: () => {},
+  });
+
+  await bootstrap();
+  assert.equal(calls.length, 2);
+  assert.match(calls[0], /\/api\/daemon\/register$/);
+  assert.match(calls[1], /\/api\/daemon\/d-OK\/devices$/);
+  assert.equal(store.verifyKey({ deviceId: 'srv-1', key: 'sk1' }), true);
 });

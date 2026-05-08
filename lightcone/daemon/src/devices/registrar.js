@@ -2,9 +2,16 @@
 // (lightcone/src/routes/daemon.js).
 //
 //   POST /api/daemon/register
-//     body: {machine_api_key, daemon_id, host?, port?, scheme?, capabilities?}
+//     body: {machine_api_key, daemon_id, host?, port (REQUIRED), scheme?, capabilities?}
 //     200 :  {ok:true, daemon_id}
+//     400 :  {error: "port is required"} when port missing/empty
+//     400 :  {error: "port must be an integer"} when port not integer
 //     401/403/4xx → throw Error('register_failed: <status>')
+//
+// `port` (T81, M1.2-FIX-F) is a hard precondition. Defense-in-depth check
+// here so daemon-side misconfig surfaces synchronously at the call site
+// rather than waiting on the network round trip; the server route enforces
+// the same contract.
 //
 // `scheme` (T77, M1.2-FIX-B) is the public-URL scheme the daemon advertises
 // when it sits behind a TLS proxy (`http`/`https`/`ws`/`wss`). When omitted
@@ -44,14 +51,20 @@ export async function registerDaemon({
   }
   if (!serverUrl) throw new Error('registerDaemon: serverUrl required');
   if (!machineApiKey) throw new Error('registerDaemon: machineApiKey required');
+  // T81 (M1.2-FIX-F): port is required. Throw before issuing the request
+  // so callers (daemon bootstrap, smoke tests) see the failure at the
+  // exact call site instead of decoding a 400 server response.
+  if (port == null || port === '') {
+    throw new Error('registerDaemon: port is required');
+  }
 
   const body = {
     machine_api_key: machineApiKey,
     daemon_id: daemonId ?? '',
     host,
+    port,
     capabilities: Array.isArray(capabilities) ? capabilities : [],
   };
-  if (port != null) body.port = port;
   if (scheme != null && scheme !== '') body.scheme = String(scheme);
 
   const res = await fetchImpl(joinUrl(serverUrl, '/api/daemon/register'), {

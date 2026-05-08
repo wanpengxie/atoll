@@ -36,8 +36,16 @@ export function createDaemonRouter({
 
     const host = req.body?.host == null ? null : String(req.body.host);
     const portRaw = req.body?.port;
-    const port = portRaw == null || portRaw === '' ? null : Number(portRaw);
-    if (port != null && !Number.isInteger(port)) {
+    // T81 (M1.2-FIX-F): port is now a hard precondition — t77 left it
+    // optional which silently produced a row with daemon_port=null,
+    // making `/api/device/resolve` return 503 long after the daemon
+    // believed register succeeded. Reject upfront so the daemon-side
+    // bootstrap fails fast and surfaces the missing env var.
+    if (portRaw == null || portRaw === '') {
+      return res.status(400).json({ error: 'port is required' });
+    }
+    const port = Number(portRaw);
+    if (!Number.isInteger(port)) {
       return res.status(400).json({ error: 'port must be an integer' });
     }
     // T77 (M1.2-FIX-B): public scheme is optional. When daemon sits behind a

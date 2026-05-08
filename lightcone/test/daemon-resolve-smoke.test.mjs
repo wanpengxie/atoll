@@ -134,7 +134,11 @@ test('register → resolve smoke: daemon publishes port+scheme, extension gets w
   });
 });
 
-test('register without port → resolve 503 "Daemon endpoint not registered" (T77 regression guard)', async () => {
+test('register without port → server rejects with 400 + DB row stays null (T81 M1.2-FIX-F)', async () => {
+  // T81 contract reversal: t77 left port optional and silently persisted
+  // null, which made `/api/device/resolve` return 503 long after the daemon
+  // believed register succeeded. The server route now fails fast with 400
+  // and the daemon-side registrar throws before the request fires.
   const machines = new Map([['daemon-001', {
     id: 'daemon-001',
     server_id: 'server-001',
@@ -155,19 +159,31 @@ test('register without port → resolve 503 "Daemon endpoint not registered" (T7
   const online = new Set(['daemon-001']);
 
   await withServer(buildApp({ machines, devices, online }), async (baseUrl) => {
-    // daemon registers with host but no port (legacy bug path)
-    await registerDaemon({
-      serverUrl: baseUrl,
-      machineApiKey: 'sk_machine_T77',
-      daemonId: 'daemon-001',
-      host: 'daemon.example.com',
-      capabilities: ['xhs-creator'],
+    // daemon-side registrar throws synchronously (defense-in-depth) before
+    // the request reaches the network — `port is required`.
+    await assert.rejects(
+      () => registerDaemon({
+        serverUrl: baseUrl,
+        machineApiKey: 'sk_machine_T77',
+        daemonId: 'daemon-001',
+        host: 'daemon.example.com',
+        capabilities: ['xhs-creator'],
+      }),
+      /port is required/,
+    );
+    // Server-side: explicit POST without port returns 400 from the route.
+    const reg = await callJson(baseUrl, '/api/daemon/register', {
+      body: {
+        machine_api_key: 'sk_machine_T77',
+        daemon_id: 'daemon-001',
+        host: 'daemon.example.com',
+        capabilities: ['xhs-creator'],
+      },
     });
+    assert.equal(reg.status, 400);
+    assert.equal(reg.json.error, 'port is required');
+    // DB row never mutated — daemon_port stays null (no silent regression).
     assert.equal(machines.get('daemon-001').daemon_port, null);
-
-    const res = await callJson(baseUrl, '/api/device/resolve', { body: { api_key: 'sk_dev_T77' } });
-    assert.equal(res.status, 503);
-    assert.equal(res.json.error, 'Daemon endpoint not registered');
   });
 });
 

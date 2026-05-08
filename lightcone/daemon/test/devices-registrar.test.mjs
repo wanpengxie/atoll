@@ -40,6 +40,7 @@ test('registerDaemon POSTs to /api/daemon/register with expected body', async ()
     machineApiKey: 'mk',
     daemonId: 'd1',
     host: 'host-x',
+    port: 9501,
     capabilities: ['xhs-creator'],
     fetchImpl,
   });
@@ -51,6 +52,7 @@ test('registerDaemon POSTs to /api/daemon/register with expected body', async ()
   assert.equal(body.machine_api_key, 'mk');
   assert.equal(body.daemon_id, 'd1');
   assert.equal(body.host, 'host-x');
+  assert.equal(body.port, 9501);
   assert.deepEqual(body.capabilities, ['xhs-creator']);
 });
 
@@ -99,21 +101,41 @@ test('registerDaemon omits scheme when null/empty (T77 backward compat)', async 
   assert.equal(body.port, 9501);
 });
 
-test('registerDaemon omits port when null (T77 fallback when daemon HTTP is disabled)', async () => {
-  const calls = [];
-  const fetchImpl = async (url, options) => {
-    calls.push({ url, options });
-    return { ok: true, status: 200, json: async () => ({ ok: true, daemon_id: 'd' }) };
+test('registerDaemon throws when port is missing (T81 M1.2-FIX-F port required)', async () => {
+  // T81 reversal: t77 silently omitted port from the body when null, which
+  // produced a server row with daemon_port=null and made /resolve return
+  // 503. The new contract is "port required"; registrar throws at the call
+  // site (defense-in-depth, before the network round trip).
+  const fetchImpl = async () => {
+    throw new Error('fetchImpl should not be invoked when port is missing');
   };
-  await registerDaemon({
-    serverUrl: 'http://srv',
-    machineApiKey: 'mk',
-    daemonId: 'd',
-    host: 'h',
-    fetchImpl,
-  });
-  const body = JSON.parse(calls[0].options.body);
-  assert.equal(Object.hasOwn(body, 'port'), false);
+  await assert.rejects(
+    () => registerDaemon({
+      serverUrl: 'http://srv',
+      machineApiKey: 'mk',
+      daemonId: 'd',
+      host: 'h',
+      fetchImpl,
+    }),
+    /port is required/,
+  );
+});
+
+test('registerDaemon throws when port is empty string (T81 M1.2-FIX-F)', async () => {
+  const fetchImpl = async () => {
+    throw new Error('fetchImpl should not be invoked when port is empty');
+  };
+  await assert.rejects(
+    () => registerDaemon({
+      serverUrl: 'http://srv',
+      machineApiKey: 'mk',
+      daemonId: 'd',
+      host: 'h',
+      port: '',
+      fetchImpl,
+    }),
+    /port is required/,
+  );
 });
 
 test('registerDaemon strips trailing slash from serverUrl', async () => {
@@ -126,6 +148,7 @@ test('registerDaemon strips trailing slash from serverUrl', async () => {
     serverUrl: 'http://srv/',
     machineApiKey: 'mk',
     daemonId: 'd',
+    port: 9501,
     fetchImpl,
   });
   assert.equal(calls[0], 'http://srv/api/daemon/register');
@@ -138,7 +161,7 @@ test('registerDaemon throws on non-2xx with status code in error', async () => {
     text: async () => 'unauthorized',
   });
   await assert.rejects(
-    () => registerDaemon({ serverUrl: 'http://x', machineApiKey: 'k', daemonId: 'd', fetchImpl }),
+    () => registerDaemon({ serverUrl: 'http://x', machineApiKey: 'k', daemonId: 'd', port: 9501, fetchImpl }),
     /401/,
   );
 });

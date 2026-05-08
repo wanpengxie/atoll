@@ -12,7 +12,7 @@ import { daemonSocketPath, machineKeyPath, normalizeProjectKey, readMachineKeyFi
 import { missingMachineApiKeyErrorLines, resolveMachineApiKey } from './machine-api-key.js';
 import { DeviceWsServer, parseDeviceKeysEnv } from './devices/ws-server.js';
 import { DeviceStore } from './devices/device-store.js';
-import { registerDaemon, fetchDevices } from './devices/registrar.js';
+import { createBootstrapDeviceSync } from './devices/bootstrap.js';
 
 const { version } = createRequire(import.meta.url)('../package.json');
 
@@ -188,53 +188,29 @@ function handleDeviceEvent(msg) {
   }
 }
 
-// Boot/reconnect register + pull (T74 §1, §3). Runs on every WS open. On
-// failure the daemon logs and continues — env fallback is already populated.
-// `resolvedDaemonId` is cached after the first successful register; the server
-// handler is idempotent so re-registering on every reconnect is intentional
-// (refreshes daemon_host / capabilities / last_heartbeat).
-let resolvedDaemonId = '';
-async function bootstrapDeviceSync() {
-  if (DEVICE_SOURCE === 'env') {
-    console.error(`[Daemon] device source=env — skipping register+pull (env-entries=${ENV_DEVICE_KEYS.size})`);
-    return;
-  }
-  // T77 (M1.2-FIX-B): announce the publicly routable endpoint so
-  // /api/device/resolve can hand the extension a usable ws_url/http_url.
-  // PUBLIC_PORT defaults to HTTP_PORT (already listening — main() awaits
-  // rpcServer.start() before connection.connect() fires onReady, so HTTP +
-  // device-WS are both up by the time we reach this register call).
-  if (PUBLIC_PORT == null) {
-    console.error('[Daemon] WARN register without public port — extension /resolve will return 503 until COAGENT_DAEMON_HTTP_PORT or COAGENT_DAEMON_PUBLIC_PORT is set');
-  }
-  try {
-    const reg = await registerDaemon({
-      serverUrl: SERVER_URL,
-      machineApiKey: MACHINE_API_KEY,
-      daemonId: resolvedDaemonId || '',
-      host: PUBLIC_HOST,
-      port: PUBLIC_PORT,
-      scheme: PUBLIC_SCHEME,
-      capabilities: ['xhs-creator'],
-    });
-    const daemonId = String(reg?.daemon_id ?? '').trim();
-    if (!daemonId) throw new Error('register response missing daemon_id');
-    resolvedDaemonId = daemonId;
-    const devices = await fetchDevices({
-      serverUrl: SERVER_URL,
-      machineApiKey: MACHINE_API_KEY,
-      daemonId,
-    });
-    deviceStore.replaceServer(devices);
-    console.error(`[Daemon] register+pull ok — daemon_id=${daemonId} devices=${devices.length} total=${deviceStore.size()}`);
-  } catch (err) {
-    if (DEVICE_SOURCE === 'server') {
-      console.error(`[Daemon] register+pull failed (source=server, no env fallback): ${err?.message ?? err}`);
-    } else {
-      console.error(`[Daemon] register+pull failed — falling back to env (${ENV_DEVICE_KEYS.size} entries): ${err?.message ?? err}`);
-    }
-  }
-}
+// Boot/reconnect register + pull (T74 §1, §3, T81 M1.2-FIX-F).
+// `bootstrapDeviceSync` is a stateful closure: it caches `resolvedDaemonId`
+// after the first successful register so reconnects can pass it back to the
+// idempotent server handler (refreshes daemon_host / capabilities /
+// last_heartbeat). T81 hard-rule: when PUBLIC_PORT is null we skip the
+// register call entirely — the server now rejects null port with 400, and
+// firing the request anyway just buries the real "missing PUBLIC_PORT"
+// configuration problem under register_failed errors.
+//
+// PUBLIC_PORT defaults to HTTP_PORT (already listening — main() awaits
+// rpcServer.start() before connection.connect() fires onReady, so HTTP +
+// device-WS are both up by the time we reach this register call).
+const bootstrapDeviceSync = createBootstrapDeviceSync({
+  deviceSource: DEVICE_SOURCE,
+  envDeviceKeysSize: ENV_DEVICE_KEYS.size,
+  serverUrl: SERVER_URL,
+  machineApiKey: MACHINE_API_KEY,
+  publicHost: PUBLIC_HOST,
+  publicPort: PUBLIC_PORT,
+  publicScheme: PUBLIC_SCHEME,
+  capabilities: ['xhs-creator'],
+  deviceStore,
+});
 
 const connection = new DaemonConnection({
   serverUrl: SERVER_URL,
