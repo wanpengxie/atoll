@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
 // In tests we don't go through the workspace package — easier to inline the
 // constants we need so vitest doesn't need a build step from the shared pkg.
-vi.mock('xiaohongshu-mcp-shared', () => ({
+vi.mock('coagent-xhs-shared', () => ({
   COAGENT_DEVICE_PROTOCOL: {
     COMMAND_FRAME_TYPE: 'command',
     ACK_FRAME_TYPE: 'ack',

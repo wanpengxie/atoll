@@ -1,5 +1,5 @@
 import { BaseTool, type TabSessionSnapshot } from '../base-tool';
-import type { ToolResult } from 'xiaohongshu-mcp-shared';
+import type { ToolResult } from 'coagent-xhs-shared';
 import { runInMainWorld } from '../inject-script';
 import { validateXhsNoteUrl } from './xhs-url';
 

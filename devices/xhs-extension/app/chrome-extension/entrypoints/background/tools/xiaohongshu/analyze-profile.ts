@@ -1,6 +1,6 @@
 import { BaseTool, type TabSessionSnapshot } from '../base-tool';
-import type { ToolResult } from 'xiaohongshu-mcp-shared';
-import { XIAOHONGSHU_URLS } from 'xiaohongshu-mcp-shared';
+import type { ToolResult } from 'coagent-xhs-shared';
+import { XIAOHONGSHU_URLS } from 'coagent-xhs-shared';
 import { runInMainWorld } from '../inject-script';
 import { validateXhsProfileUrl } from './xhs-url';
 // M1.1-T2: 1studio backend websocket-client 已切断；中间状态报告改为无操作。

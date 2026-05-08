@@ -1,5 +1,5 @@
 import { BaseTool } from '../base-tool';
-import { ToolResult } from 'xiaohongshu-mcp-shared';
+import { ToolResult } from 'coagent-xhs-shared';
 
 interface FillArgs {
   selector: string;     // CSS 选择器

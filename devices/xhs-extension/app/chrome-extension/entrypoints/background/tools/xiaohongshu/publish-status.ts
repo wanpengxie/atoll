@@ -13,7 +13,7 @@ import {
   XIAOHONGSHU_TOOL_NAMES,
   type ToolResult,
   ERROR_MESSAGES,
-} from 'xiaohongshu-mcp-shared';
+} from 'coagent-xhs-shared';
 import { XhsGetNoteAnalyticsTool } from './get-note-analytics';
 
 interface PublishStatusArgs {

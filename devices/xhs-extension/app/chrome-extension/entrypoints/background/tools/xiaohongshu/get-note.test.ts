@@ -7,7 +7,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 
-vi.mock('xiaohongshu-mcp-shared', () => ({
+vi.mock('coagent-xhs-shared', () => ({
   XIAOHONGSHU_TOOL_NAMES: {
     GET_NOTE: 'xhs_get_note',
   },

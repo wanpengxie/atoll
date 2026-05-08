@@ -1,9 +1,9 @@
 {
-  "name": "xiaohongshu-mcp-extension",
-  "displayName": "小红书MCP助手",
+  "name": "coagent-xhs-extension",
+  "displayName": "Coagent · 小红书 Device",
   "version": "1.1.0",
-  "description": "通过MCP协议控制小红书操作的Chrome插件",
-  "author": "XHS MCP Team",
+  "description": "Coagent daemon 的小红书 device 端 chrome 插件：长连 daemon WS，承载 publish/search/get-note 等命令",
+  "author": "Coagent",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -30,7 +30,7 @@
     "element-plus": "^2.4.4",
     "pinia": "^2.1.7",
     "vue": "^3.5.13",
-    "xiaohongshu-mcp-shared": "workspace:*"
+    "coagent-xhs-shared": "workspace:*"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.318",

@@ -1,5 +1,5 @@
 import { BaseTool } from '../base-tool';
-import type { ToolResult } from 'xiaohongshu-mcp-shared';
+import type { ToolResult } from 'coagent-xhs-shared';
 import { DOUYIN_CREATOR_URLS, DOUYIN_TIMEOUTS } from './selectors';
 
 interface DouyinCreatorInfoResult {

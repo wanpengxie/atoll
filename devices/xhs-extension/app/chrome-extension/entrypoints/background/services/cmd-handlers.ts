@@ -13,7 +13,7 @@
 import {
   COAGENT_DEVICE_COMMANDS,
   type CoagentDeviceCommand,
-} from 'xiaohongshu-mcp-shared';
+} from 'coagent-xhs-shared';
 
 export interface CommandFrame {
   type: 'command';

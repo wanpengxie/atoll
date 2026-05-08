@@ -1,4 +1,4 @@
-import { XIAOHONGSHU_URLS } from 'xiaohongshu-mcp-shared';
+import { XIAOHONGSHU_URLS } from 'coagent-xhs-shared';
 
 export type XhsContentKind = 'note' | 'profile';
 

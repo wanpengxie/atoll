@@ -9,7 +9,7 @@
     "types": ["chrome"],
     "paths": {
       "@/*": ["./*"],
-      "xiaohongshu-mcp-shared": ["../../packages/shared/src"]
+      "coagent-xhs-shared": ["../../packages/shared/src"]
     }
   },
   "include": ["**/*.ts", "**/*.tsx", "**/*.vue"],

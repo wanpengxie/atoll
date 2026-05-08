@@ -1,5 +1,5 @@
 import { BaseTool, type TabSessionSnapshot } from '../base-tool';
-import type { ToolResult } from 'xiaohongshu-mcp-shared';
+import type { ToolResult } from 'coagent-xhs-shared';
 import { CDPInterceptor } from '../cdp-interceptor';
 import { XHS_CREATOR_URLS, XHS_API_ENDPOINTS, XHS_TIMEOUTS } from './selectors';
 

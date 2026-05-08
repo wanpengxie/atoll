@@ -4,7 +4,7 @@ import {
   XIAOHONGSHU_TOOL_NAMES,
   ERROR_MESSAGES,
   TIMEOUTS,
-} from 'xiaohongshu-mcp-shared';
+} from 'coagent-xhs-shared';
 import { BaseTool } from './base-tool';
 
 type ExecutionCode = string | ((args: Record<string, any>) => any | Promise<any>);
@@ -31,7 +31,7 @@ async function cleanupInjectedScripts(tabId: number): Promise<void> {
   }
 
   try {
-    await chrome.tabs.sendMessage(tabId, { type: 'xiaohongshu-mcp:cleanup' });
+    await chrome.tabs.sendMessage(tabId, { type: 'coagent-xhs:cleanup' });
   } catch (error) {
     console.warn('Cleanup error:', error);
   } finally {

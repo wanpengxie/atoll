@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 // Inline shared constants — no build step needed.
-vi.mock('xiaohongshu-mcp-shared', () => ({
+vi.mock('coagent-xhs-shared', () => ({
   COAGENT_DEVICE_COMMANDS: {
     PUBLISH: 'publish',
     SEARCH: 'search',

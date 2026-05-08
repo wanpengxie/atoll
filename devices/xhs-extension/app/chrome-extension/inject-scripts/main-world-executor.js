@@ -10,14 +10,14 @@
 
 (() => {
   // Prevent duplicate injection
-  if (window.__XIAOHONGSHU_MAIN_EXECUTOR_LOADED__) return;
-  window.__XIAOHONGSHU_MAIN_EXECUTOR_LOADED__ = true;
+  if (window.__COAGENT_XHS_MAIN_EXECUTOR_LOADED__) return;
+  window.__COAGENT_XHS_MAIN_EXECUTOR_LOADED__ = true;
 
   // Event names
   const EVENT_NAME = {
-    EXECUTE: 'xiaohongshu-mcp:execute',
-    RESPONSE: 'xiaohongshu-mcp:response',
-    CLEANUP: 'xiaohongshu-mcp:cleanup',
+    EXECUTE: 'coagent-xhs:execute',
+    RESPONSE: 'coagent-xhs:response',
+    CLEANUP: 'coagent-xhs:cleanup',
   };
 
   /**
@@ -145,14 +145,14 @@
     window.removeEventListener(EVENT_NAME.CLEANUP, cleanupHandler);
 
     // Remove marker
-    delete window.__XIAOHONGSHU_MAIN_EXECUTOR_LOADED__;
+    delete window.__COAGENT_XHS_MAIN_EXECUTOR_LOADED__;
 
-    console.log('[XiaoHongShu MCP] Main world executor cleaned up');
+    console.log('[Coagent XHS] Main world executor cleaned up');
   };
 
   // Listen for cleanup event
   window.addEventListener(EVENT_NAME.CLEANUP, cleanupHandler);
 
   // Log successful initialization
-  console.log('[XiaoHongShu MCP] Main world executor loaded');
+  console.log('[Coagent XHS] Main world executor loaded');
 })();

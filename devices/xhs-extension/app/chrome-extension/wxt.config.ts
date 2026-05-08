@@ -169,7 +169,7 @@ export default defineConfig({
     resolve: {
       alias: {
         '@': resolve(__dirname, './'),
-        'xiaohongshu-mcp-shared': resolve(__dirname, '../../packages/shared/src'),
+        'coagent-xhs-shared': resolve(__dirname, '../../packages/shared/src'),
       },
     },
   }),

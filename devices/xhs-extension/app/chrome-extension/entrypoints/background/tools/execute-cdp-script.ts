@@ -1,4 +1,4 @@
-import { ToolResult, ERROR_MESSAGES } from 'xiaohongshu-mcp-shared';
+import { ToolResult, ERROR_MESSAGES } from 'coagent-xhs-shared';
 import { BaseTool } from './base-tool';
 
 /**

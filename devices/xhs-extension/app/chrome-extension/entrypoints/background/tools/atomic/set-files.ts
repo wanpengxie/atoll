@@ -1,5 +1,5 @@
 import { BaseTool } from '../base-tool';
-import { ToolResult } from 'xiaohongshu-mcp-shared';
+import { ToolResult } from 'coagent-xhs-shared';
 
 interface SetFilesArgs {
   selector: string; // 文件输入框选择器

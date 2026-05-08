@@ -1,5 +1,5 @@
 import { BaseTool } from '../base-tool';
-import { ToolResult } from 'xiaohongshu-mcp-shared';
+import { ToolResult } from 'coagent-xhs-shared';
 import { getXsecToken, isXhsHost, isXhsNotePath, isXhsProfilePath, safeParseUrl } from '../xiaohongshu/xhs-url';
 
 interface NavigateArgs {

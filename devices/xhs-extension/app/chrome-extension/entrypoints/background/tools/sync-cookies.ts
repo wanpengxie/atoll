@@ -2,7 +2,7 @@ import {
   XIAOHONGSHU_TOOL_NAMES,
   ToolResult,
   COAGENT_DEVICE_PROTOCOL,
-} from 'xiaohongshu-mcp-shared';
+} from 'coagent-xhs-shared';
 import { BaseTool } from './base-tool';
 import { getConnectionConfig } from '../connection-state';
 import { deriveHttpBaseFromWsUrl } from '../services/coagent-device';

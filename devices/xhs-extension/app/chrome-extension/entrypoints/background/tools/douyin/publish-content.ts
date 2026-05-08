@@ -1,6 +1,6 @@
 import { BaseTool } from '../base-tool';
 import { runInMainWorld } from '../inject-script';
-import type { ToolResult } from 'xiaohongshu-mcp-shared';
+import type { ToolResult } from 'coagent-xhs-shared';
 import { DOUYIN_CREATOR_URLS, DOUYIN_TIMEOUTS, DOUYIN_UPLOAD } from './selectors';
 
 interface PublishContentArgs {

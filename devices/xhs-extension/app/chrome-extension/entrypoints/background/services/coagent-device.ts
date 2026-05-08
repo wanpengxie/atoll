@@ -32,7 +32,7 @@
 import {
   COAGENT_DEVICE_PROTOCOL,
   ERROR_MESSAGES,
-} from 'xiaohongshu-mcp-shared';
+} from 'coagent-xhs-shared';
 import type { ConnectionConfig } from '../connection-state';
 import { saveConnectionStatus } from '../connection-state';
 import {

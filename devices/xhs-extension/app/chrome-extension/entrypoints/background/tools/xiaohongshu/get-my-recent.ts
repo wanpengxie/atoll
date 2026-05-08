@@ -9,7 +9,7 @@ import { BaseTool } from '../base-tool';
 import {
   XIAOHONGSHU_TOOL_NAMES,
   type ToolResult,
-} from 'xiaohongshu-mcp-shared';
+} from 'coagent-xhs-shared';
 import { XhsAnalyzeMyProfileTool } from './analyze-profile';
 
 interface GetMyRecentArgs {

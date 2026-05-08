@@ -1,4 +1,4 @@
-import { ToolResult, ERROR_MESSAGES, TIMEOUTS } from 'xiaohongshu-mcp-shared';
+import { ToolResult, ERROR_MESSAGES, TIMEOUTS } from 'coagent-xhs-shared';
 import {
   getXsecToken,
   isXhsHost,

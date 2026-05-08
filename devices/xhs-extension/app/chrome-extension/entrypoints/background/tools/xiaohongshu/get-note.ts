@@ -16,7 +16,7 @@ import {
   XIAOHONGSHU_TOOL_NAMES,
   type ToolResult,
   ERROR_MESSAGES,
-} from 'xiaohongshu-mcp-shared';
+} from 'coagent-xhs-shared';
 import { runInMainWorld } from '../inject-script';
 import {
   validateXhsNoteUrl,

@@ -1,5 +1,5 @@
 import { BaseTool } from '../base-tool';
-import { ToolResult } from 'xiaohongshu-mcp-shared';
+import { ToolResult } from 'coagent-xhs-shared';
 
 interface KeyboardArgs {
   keys: string;         // 按键序列，逗号分隔 (如 "#,美,食" 或 "Enter")

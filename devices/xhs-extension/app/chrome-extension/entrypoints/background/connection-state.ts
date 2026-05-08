@@ -13,7 +13,7 @@
 //
 // 默认 serverUrl 留空：未配置时 service 不自动连接。
 
-import { EXTENSION_CONSTANTS } from 'xiaohongshu-mcp-shared';
+import { EXTENSION_CONSTANTS } from 'coagent-xhs-shared';
 
 const DEFAULT_DAEMON_HTTP_BASE = 'http://127.0.0.1:9501';
 

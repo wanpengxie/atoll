@@ -1,4 +1,4 @@
-import { XIAOHONGSHU_TOOL_NAMES, ToolResult, XIAOHONGSHU_URLS } from 'xiaohongshu-mcp-shared';
+import { XIAOHONGSHU_TOOL_NAMES, ToolResult, XIAOHONGSHU_URLS } from 'coagent-xhs-shared';
 import { BaseTool, type TabSessionSnapshot } from './base-tool';
 import { runInMainWorld } from './inject-script';
 

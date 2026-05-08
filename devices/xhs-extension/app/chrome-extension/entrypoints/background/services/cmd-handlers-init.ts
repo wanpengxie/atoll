@@ -20,11 +20,11 @@
 //     daemon 端 deviceCommandSend 在 SessionManager.getSession 返回 null 时
 //     emit warn `device.session.missing` 不阻塞 dispatch，已在 Fix-T3 daemon 域跟进。
 
-import type { ToolResult } from 'xiaohongshu-mcp-shared';
+import type { ToolResult } from 'coagent-xhs-shared';
 import {
   COAGENT_DEVICE_COMMANDS,
   type CoagentDeviceCommand,
-} from 'xiaohongshu-mcp-shared';
+} from 'coagent-xhs-shared';
 import {
   registerCommandHandler,
   type CommandHandler,

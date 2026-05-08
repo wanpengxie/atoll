@@ -1,4 +1,4 @@
-Icon set for XiaoHongShu MCP Extension
+Icon set for the Coagent xhs device extension
 
 Files
 

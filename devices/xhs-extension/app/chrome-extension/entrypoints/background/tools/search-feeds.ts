@@ -4,7 +4,7 @@ import {
   XIAOHONGSHU_URLS,
   Feed,
   ERROR_MESSAGES,
-} from 'xiaohongshu-mcp-shared';
+} from 'coagent-xhs-shared';
 import { BaseTool, type TabSessionSnapshot } from './base-tool';
 import { runInMainWorld } from './inject-script';
 import { waitForLoadState } from './wait-utils';

@@ -1,8 +1,8 @@
 {
-  "name": "xiaohongshu-mcp-shared",
+  "name": "coagent-xhs-shared",
   "version": "1.0.0",
-  "description": "Shared types and utilities for XiaoHongShu MCP",
-  "author": "XHS MCP Team",
+  "description": "Shared types and utilities for the Coagent xhs device extension",
+  "author": "Coagent",
   "license": "MIT",
   "main": "dist/index.js",
   "module": "./dist/index.mjs",

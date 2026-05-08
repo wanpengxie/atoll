@@ -3,7 +3,7 @@ import {
   ToolResult,
   PublishContentArgs,
   XIAOHONGSHU_URLS,
-} from 'xiaohongshu-mcp-shared';
+} from 'coagent-xhs-shared';
 import { BaseTool } from './base-tool';
 import { runInMainWorld } from './inject-script';
 

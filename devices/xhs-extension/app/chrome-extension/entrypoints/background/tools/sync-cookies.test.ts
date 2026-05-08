@@ -7,7 +7,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-vi.mock('xiaohongshu-mcp-shared', () => ({
+vi.mock('coagent-xhs-shared', () => ({
   XIAOHONGSHU_TOOL_NAMES: {
     SYNC_COOKIES: 'xhs_sync_cookies',
   },
