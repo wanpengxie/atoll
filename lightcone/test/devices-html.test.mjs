@@ -44,3 +44,47 @@ test('public/devices.html: fmtDate uses local Date getters', async () => {
   assert.match(body, /getFullYear\(/);
   assert.match(body, /getHours\(/);
 });
+
+// ── T79 (M1.2-FIX-D, P3#11): inline onclick → data-id + delegated listener ──
+// codex review note: the dynamic row template used to inline the device id
+// into a JS string literal via `escHtml` (HTML-escape, not JS-string-escape).
+// Switch to `data-action="revoke" data-id="…"` plus a delegated click
+// listener on the table wrapper — `dataset` reads the value raw, no JS
+// parsing involved.
+test('public/devices.html: revoke button uses data-action + data-id (no inline onclick)', async () => {
+  const html = await readFile(HTML_PATH, 'utf8');
+  // The exact template line lives inside a backtick string in the script.
+  assert.match(
+    html,
+    /<button\s+class="btn btn-danger"\s+data-action="revoke"\s+data-id="\$\{escHtml\(d\.id\)\}">Revoke<\/button>/,
+    'revoke button must use data-action + data-id template',
+  );
+  // No remnants of the old onclick handler that smuggled d.id into a JS literal.
+  assert.equal(
+    html.includes("onclick=\"revokeDevice('"),
+    false,
+    'inline onclick="revokeDevice(\'…\')" must be gone — escHtml is HTML-escape, not JS-string-escape',
+  );
+});
+
+test('public/devices.html: delegated click listener handles data-action="revoke"', async () => {
+  const html = await readFile(HTML_PATH, 'utf8');
+  // Listener attached to the table wrapper.
+  assert.match(
+    html,
+    /getElementById\(['"]device-table-wrap['"]\)\.addEventListener\(['"]click['"]/,
+    'delegated click listener should be attached to #device-table-wrap',
+  );
+  // Listener dispatches on data-action="revoke".
+  assert.match(
+    html,
+    /data-action[^"']*['"]revoke['"]/,
+    'delegated listener should branch on data-action === "revoke"',
+  );
+  // Reads id from dataset / getAttribute, then calls revokeDevice(id).
+  assert.match(
+    html,
+    /revokeDevice\(\s*id\s*\)/,
+    'delegated listener should call revokeDevice with the id read from the button',
+  );
+});

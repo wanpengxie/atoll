@@ -283,7 +283,7 @@ async function loadDevices() {
               <td class="mono" style="color:var(--muted)">${escHtml(d.api_key)}</td>
               <td class="mono" style="color:var(--muted)">${escHtml(fmtDate(d.created_at))}</td>
               <td>${d.status === 'active'
-                ? `<button class="btn btn-danger" onclick="revokeDevice('${escHtml(d.id)}')">Revoke</button>`
+                ? `<button class="btn btn-danger" data-action="revoke" data-id="${escHtml(d.id)}">Revoke</button>`
                 : ''}</td>
             </tr>
           `).join('')}
@@ -367,6 +367,25 @@ async function copyKey() {
     document.body.removeChild(ta);
   }
 }
+
+// T79 (M1.2-FIX-D, P3#11): the revoke button used to be `onclick="revokeDevice
+// ('${escHtml(d.id)}')"` — `escHtml` is HTML-escape, not JS-string-escape, so a
+// device id that smuggled an apostrophe / paren past the row would break out
+// of the JS literal at parse time. Switch the row template to a `data-action`
+// + `data-id` pair and dispatch via a delegated click listener on the table
+// wrapper. The HTML escape on the attribute is safe because the value is
+// re-read raw from `dataset` rather than being inlined into JS source.
+document.getElementById('device-table-wrap').addEventListener('click', (ev) => {
+  const target = ev.target;
+  if (!(target instanceof Element)) return;
+  const btn = target.closest('button[data-action]');
+  if (!btn) return;
+  const action = btn.getAttribute('data-action');
+  if (action === 'revoke') {
+    const id = btn.getAttribute('data-id') ?? '';
+    if (id) revokeDevice(id);
+  }
+});
 
 loadDevices();
 </script>

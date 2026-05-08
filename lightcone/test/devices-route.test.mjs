@@ -248,7 +248,9 @@ test('POST /api/devices rejects cross-user user_id (non-service)', async () => {
   await withServer(createApp(router), async (baseUrl) => {
     const res = await callJson(baseUrl, '/api/devices', {
       method: 'POST',
-      body: { user_id: 'user-evil', device_type: 'xhs' },
+      // T79: channel_id + daemon_id are mandatory — provide both so the
+      // cross-user reject path (403) is reached instead of a 400.
+      body: { user_id: 'user-evil', channel_id: 'ch-001', daemon_id: 'daemon-001', device_type: 'xhs' },
     });
     assert.equal(res.status, 403);
     assert.match(res.json.error, /another user/i);
@@ -303,7 +305,9 @@ test('POST /api/devices returns 404 when channel_id does not exist', async () =>
   await withServer(createApp(router), async (baseUrl) => {
     const res = await callJson(baseUrl, '/api/devices', {
       method: 'POST',
-      body: { channel_id: 'ch-missing', device_type: 'xhs' },
+      // T79: daemon_id required — provide a valid one so we reach the channel
+      // lookup (which then 404s) instead of short-circuiting on missing daemon_id.
+      body: { channel_id: 'ch-missing', daemon_id: 'daemon-001', device_type: 'xhs' },
     });
     assert.equal(res.status, 404);
     assert.match(res.json.error, /Channel not found/);
@@ -332,7 +336,9 @@ test('POST /api/devices rejects daemon_id when caller does not own the machine',
   await withServer(createApp(router), async (baseUrl) => {
     const res = await callJson(baseUrl, '/api/devices', {
       method: 'POST',
-      body: { daemon_id: 'daemon-evil', device_type: 'xhs' },
+      // T79: channel_id required — provide a valid one so we reach the daemon
+      // ownership check (403) instead of short-circuiting on missing channel_id.
+      body: { channel_id: 'ch-001', daemon_id: 'daemon-evil', device_type: 'xhs' },
     });
     assert.equal(res.status, 403);
     assert.match(res.json.error, /daemon/i);
@@ -362,7 +368,9 @@ test('POST /api/devices accepts platform-owned daemon for any user', async () =>
   await withServer(createApp(router), async (baseUrl) => {
     const res = await callJson(baseUrl, '/api/devices', {
       method: 'POST',
-      body: { daemon_id: 'platform-1', device_type: 'xhs' },
+      // T79: channel_id is mandatory — supply a valid one alongside the
+      // platform daemon to reach the happy path 201.
+      body: { channel_id: 'ch-001', daemon_id: 'platform-1', device_type: 'xhs' },
     });
     assert.equal(res.status, 201);
     assert.equal(res.json.user_id, 'user-001');
@@ -388,7 +396,9 @@ test('POST /api/devices service caller may set arbitrary user_id', async () => {
   await withServer(createApp(router, { user: { id: 'service', name: 'Service' }, isService: true }), async (baseUrl) => {
     const res = await callJson(baseUrl, '/api/devices', {
       method: 'POST',
-      body: { user_id: 'user-target', device_type: 'xhs' },
+      // T79: channel_id + daemon_id are required for everyone, including the
+      // service caller who is authorising on behalf of `user-target`.
+      body: { user_id: 'user-target', channel_id: 'ch-001', daemon_id: 'daemon-001', device_type: 'xhs' },
     });
     assert.equal(res.status, 201);
     assert.equal(res.json.user_id, 'user-target');
@@ -743,4 +753,161 @@ test('T78: successful push does NOT bump failure counter', async () => {
     assert.equal(res.status, 201);
   });
   assert.equal(getDevicePushFailureCount(), before, 'happy path must not bump failure counter');
+});
+
+// ── T79 (M1.2-FIX-D): channel_id / daemon_id required + duplicate active 409 ──
+// codex review P2#8: extension `normalizeResolveSuccess` requires all 6
+// resolve fields to be non-empty strings, but server `POST /api/devices` used
+// to accept an empty channel_id and silently store NULL — the popup would
+// then see `channel_id:null` from `/api/device/resolve` and surface a
+// misleading parse error. The route must reject empty channel_id / daemon_id
+// at the entry point so the contract holds.
+test('T79: POST /api/devices rejects missing channel_id with 400', async () => {
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: { device_type: 'xhs', daemon_id: 'daemon-001' },
+    });
+    assert.equal(res.status, 400);
+    assert.match(res.json.error, /channel_id/);
+    assert.equal(fake.rows.length, 0);
+  });
+});
+
+test('T79: POST /api/devices rejects empty/whitespace channel_id with 400', async () => {
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    // Whitespace-only must not slip past trim()
+    const res = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: { device_type: 'xhs', channel_id: '   ', daemon_id: 'daemon-001' },
+    });
+    assert.equal(res.status, 400);
+    assert.match(res.json.error, /channel_id/);
+    assert.equal(fake.rows.length, 0);
+  });
+});
+
+test('T79: POST /api/devices rejects missing daemon_id with 400', async () => {
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: { device_type: 'xhs', channel_id: 'ch-001' },
+    });
+    assert.equal(res.status, 400);
+    assert.match(res.json.error, /daemon_id/);
+    assert.equal(fake.rows.length, 0);
+  });
+});
+
+// codex review P1#6: server allows duplicate (daemon_id, device_id) active
+// rows; daemon DeviceStore overwrites by device_id so the older extension
+// key 401s on next reconnect. Server must enforce active-only uniqueness and
+// reject the second create with a clear 409 instead of silently corrupting
+// the daemon's view.
+test('T79: POST /api/devices returns 409 when active (daemon_id, device_id) collision', async () => {
+  const fake = makeFakeDb();
+  // Inject a fake DB-level conflict: the second insert with the same
+  // (daemon_id, device_id) is rejected by the active-only UNIQUE — same shape
+  // as `insertDevice` produces in production (`DeviceConflictError`).
+  const realInsert = fake.insertDevice;
+  fake.insertDevice = async (db, device) => {
+    const dup = fake.rows.find(r =>
+      r.status === 'active'
+      && (r.daemon_id ?? null) === (device.daemon_id ?? null)
+      && r.device_id === device.device_id
+    );
+    if (dup) {
+      const err = new Error(
+        `Active device already exists for daemon_id=${device.daemon_id ?? '∅'} device_id=${device.device_id ?? '∅'}`
+      );
+      err.name = 'DeviceConflictError';
+      err.code = 'DEVICE_CONFLICT';
+      err.daemon_id = device.daemon_id ?? null;
+      err.device_id = device.device_id ?? null;
+      throw err;
+    }
+    return realInsert(db, device);
+  };
+
+  const ids = ['dev-1', 'dev-2'];
+  const apiKeys = ['sk_dev_first', 'sk_dev_second'];
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+    uuidv4Impl: () => ids.shift(),
+    generateApiKeyImpl: () => apiKeys.shift(),
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const first = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: {
+        device_type: 'xhs',
+        channel_id: 'ch-001',
+        daemon_id: 'daemon-001',
+        device_id: 'xhs-001',
+      },
+    });
+    assert.equal(first.status, 201, 'first insert succeeds');
+    assert.equal(first.json.api_key, 'sk_dev_first');
+
+    const second = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: {
+        device_type: 'xhs',
+        channel_id: 'ch-001',
+        daemon_id: 'daemon-001',
+        device_id: 'xhs-001',
+      },
+    });
+    assert.equal(second.status, 409, 'duplicate active (daemon_id, device_id) → 409');
+    assert.match(second.json.error, /already exists|conflict/i);
+    assert.equal(second.json.code, 'device_conflict');
+    assert.equal(second.json.daemon_id, 'daemon-001');
+    assert.equal(second.json.device_id, 'xhs-001');
+    // Only the first row should be persisted.
+    assert.equal(fake.rows.length, 1);
+  });
 });

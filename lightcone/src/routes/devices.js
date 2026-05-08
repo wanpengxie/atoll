@@ -10,6 +10,7 @@ import {
   getChannelById,
   getMachineById,
   isWorkspaceMember,
+  DeviceConflictError,
 } from '../db/index.js';
 import { sendToDaemon, isMachineOnline } from '../daemon/connections.js';
 
@@ -99,8 +100,16 @@ export function createDevicesRouter({
       return res.status(400).json({ error: `device_type must be one of: ${[...ALLOWED_DEVICE_TYPES].join(', ')}` });
     }
 
-    const channelId = req.body?.channel_id ?? null;
-    const daemonId  = req.body?.daemon_id ?? null;
+    // T79 (M1.2-FIX-D, P2#8): server contract for `POST /api/devices` must keep
+    // parity with extension `normalizeResolveSuccess`, which requires all 6
+    // resolve fields to be non-empty strings. Empty channel_id / daemon_id at
+    // create time would propagate to resolve and surface as a misleading
+    // "Server 响应缺字段" parse error in the popup. Force non-empty here so
+    // the contract is enforced at the entry point.
+    const channelId = String(req.body?.channel_id ?? '').trim();
+    const daemonId  = String(req.body?.daemon_id ?? '').trim();
+    if (!channelId) return res.status(400).json({ error: 'channel_id is required' });
+    if (!daemonId)  return res.status(400).json({ error: 'daemon_id is required' });
 
     // ── Ownership: enforce user_id = req.user.id for non-service callers ──
     const bodyUserId = req.body?.user_id == null ? '' : String(req.body.user_id).trim();
@@ -116,8 +125,8 @@ export function createDevicesRouter({
     }
 
     // ── Ownership: channel_id must be a workspace the caller is a member of ──
-    if (channelId != null && channelId !== '') {
-      const channel = await getChannelByIdImpl(getDbImpl(), String(channelId));
+    {
+      const channel = await getChannelByIdImpl(getDbImpl(), channelId);
       if (!channel || channel.is_del || channel.deleted_at) {
         return res.status(404).json({ error: 'Channel not found' });
       }
@@ -128,8 +137,8 @@ export function createDevicesRouter({
     }
 
     // ── Ownership: daemon_id must be owned by caller (or platform machine) ──
-    if (daemonId != null && daemonId !== '') {
-      const machine = await getMachineByIdImpl(getDbImpl(), String(daemonId));
+    {
+      const machine = await getMachineByIdImpl(getDbImpl(), daemonId);
       if (!machine) {
         return res.status(404).json({ error: 'Daemon machine not found' });
       }
@@ -146,16 +155,33 @@ export function createDevicesRouter({
 
     const id      = uuidv4Impl();
     const apiKey  = generateApiKeyImpl();
-    const created = await insertDeviceImpl(getDbImpl(), {
-      id,
-      device_id: deviceId,
-      api_key: apiKey,
-      user_id: effectiveUserId,
-      channel_id: channelId,
-      daemon_id: daemonId,
-      device_type: deviceType,
-      status: 'active',
-    });
+    let created;
+    try {
+      created = await insertDeviceImpl(getDbImpl(), {
+        id,
+        device_id: deviceId,
+        api_key: apiKey,
+        user_id: effectiveUserId,
+        channel_id: channelId,
+        daemon_id: daemonId,
+        device_type: deviceType,
+        status: 'active',
+      });
+    } catch (err) {
+      // T79 (M1.2-FIX-D, P1#6): the `(daemon_id, device_id)` active-only UNIQUE
+      // (`uq_devices_active`) rejected this insert — there is already an active
+      // device row for the same (daemon_id, device_id). Map to 409 so callers
+      // can show a clear "already exists" message instead of a generic 500.
+      if (err && (err.code === 'DEVICE_CONFLICT' || err instanceof DeviceConflictError)) {
+        return res.status(409).json({
+          error: 'Active device already exists for this daemon_id + device_id; revoke the existing device or pick a different device_id',
+          code: 'device_conflict',
+          daemon_id: err.daemon_id ?? daemonId,
+          device_id: err.device_id ?? deviceId,
+        });
+      }
+      throw err;
+    }
 
     pushDeviceEvent(created.daemon_id, 'device.created', created);
     res.status(201).json(created);

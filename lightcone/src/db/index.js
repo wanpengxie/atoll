@@ -388,22 +388,82 @@ export async function initDb() {
   `);
 
   // ── devices table (T73 / M1.2-T1) ────────────────────────────────────────────
+  // T79 (M1.2-FIX-D, P1#6): `(daemon_id, device_id)` is UNIQUE *only* across
+  // active rows. We can't write a partial unique index in MySQL directly, so we
+  // emulate one with a virtual generated column — `active_device_id` is NULL
+  // when the row is not active, and `(daemon_id, NULL)` does not collide with
+  // anything in MySQL UNIQUE indexes. Result: at most one active device row
+  // per (daemon_id, device_id), revoked rows can pile up freely.
   await db.execute(`
     CREATE TABLE IF NOT EXISTS devices (
-      id           VARCHAR(36)  PRIMARY KEY,
-      device_id    VARCHAR(64)  NOT NULL,
-      api_key      VARCHAR(80)  NOT NULL UNIQUE,
-      user_id      VARCHAR(36)  NOT NULL,
-      channel_id   VARCHAR(36)  DEFAULT NULL,
-      daemon_id    VARCHAR(36)  DEFAULT NULL,
-      device_type  VARCHAR(32)  NOT NULL,
-      status       VARCHAR(16)  NOT NULL DEFAULT 'active',
-      created_at   DATETIME     DEFAULT NOW(),
-      revoked_at   DATETIME     DEFAULT NULL,
+      id                VARCHAR(36)  PRIMARY KEY,
+      device_id         VARCHAR(64)  NOT NULL,
+      api_key           VARCHAR(80)  NOT NULL UNIQUE,
+      user_id           VARCHAR(36)  NOT NULL,
+      channel_id        VARCHAR(36)  DEFAULT NULL,
+      daemon_id         VARCHAR(36)  DEFAULT NULL,
+      device_type       VARCHAR(32)  NOT NULL,
+      status            VARCHAR(16)  NOT NULL DEFAULT 'active',
+      created_at        DATETIME     DEFAULT NOW(),
+      revoked_at        DATETIME     DEFAULT NULL,
+      active_device_id  VARCHAR(64)  GENERATED ALWAYS AS
+        (CASE WHEN status = 'active' THEN device_id ELSE NULL END) VIRTUAL,
       KEY idx_devices_daemon_status (daemon_id, status),
-      KEY idx_devices_user (user_id)
+      KEY idx_devices_user (user_id),
+      UNIQUE KEY uq_devices_active (daemon_id, active_device_id)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
+
+  // ── devices.active_device_id / uq_devices_active migration (T79 / M1.2-FIX-D)
+  // For DBs that already have the legacy schema (no generated column, no
+  // active-only unique index): add the column + index idempotently. When
+  // adding the unique index we first dedupe any pre-existing duplicate active
+  // rows by revoking all-but-the-newest within each (daemon_id, device_id)
+  // bucket, otherwise the ALTER would fail.
+  {
+    const [activeCols] = await db.execute(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND COLUMN_NAME = 'active_device_id'`
+    );
+    if (activeCols.length === 0) {
+      await db.execute(
+        `ALTER TABLE devices ADD COLUMN active_device_id VARCHAR(64)
+         GENERATED ALWAYS AS (CASE WHEN status = 'active' THEN device_id ELSE NULL END) VIRTUAL`
+      );
+      console.error('[DB] Added devices.active_device_id virtual column');
+    }
+    const [activeIdx] = await db.execute(
+      `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND INDEX_NAME = 'uq_devices_active'`
+    );
+    if (activeIdx.length === 0) {
+      // Dedupe legacy duplicates: for every (daemon_id, device_id) bucket with
+      // >1 active row, keep only the newest (by created_at desc, id desc as
+      // tiebreaker) and mark the rest revoked. Without this the ALTER below
+      // would fail with ER_DUP_ENTRY on existing data.
+      await db.execute(`
+        UPDATE devices d
+        JOIN (
+          SELECT id FROM (
+            SELECT id,
+                   ROW_NUMBER() OVER (
+                     PARTITION BY daemon_id, device_id
+                     ORDER BY created_at DESC, id DESC
+                   ) AS rn
+            FROM devices
+            WHERE status = 'active'
+          ) ranked
+          WHERE ranked.rn > 1
+        ) dups ON dups.id = d.id
+        SET d.status = 'revoked',
+            d.revoked_at = COALESCE(d.revoked_at, NOW())
+      `);
+      await db.execute(
+        `ALTER TABLE devices ADD UNIQUE KEY uq_devices_active (daemon_id, active_device_id)`
+      );
+      console.error('[DB] Added uq_devices_active UNIQUE on devices(daemon_id, active_device_id)');
+    }
+  }
 
   // ── machines.daemon_host / daemon_port / capabilities / daemon_scheme migration
   // T77 (M1.2-FIX-B): daemon_scheme is the explicit public-URL scheme reported
@@ -2070,22 +2130,61 @@ function rowToDevice(row) {
   };
 }
 
+/**
+ * Thrown by `insertDevice` when the (daemon_id, device_id) active-only unique
+ * index rejects the row — i.e. an active row with the same daemon_id + device_id
+ * already exists. The route layer catches this and turns it into a 409.
+ *
+ * T79 (M1.2-FIX-D, P1#6): without this the second POST would silently insert a
+ * second active row, daemon's in-memory DeviceStore would overwrite by
+ * device_id, and the older extension key would 401 on next reconnect.
+ */
+export class DeviceConflictError extends Error {
+  constructor(message, { daemon_id, device_id } = {}) {
+    super(message);
+    this.name = 'DeviceConflictError';
+    this.code = 'DEVICE_CONFLICT';
+    this.daemon_id = daemon_id ?? null;
+    this.device_id = device_id ?? null;
+  }
+}
+
+function isDuplicateEntryError(err) {
+  return err?.code === 'ER_DUP_ENTRY'
+    || err?.errno === 1062
+    || String(err?.message ?? '').includes('Duplicate entry');
+}
+
 export async function insertDevice(db, device) {
-  await db.execute(
-    `INSERT INTO devices
-       (id, device_id, api_key, user_id, channel_id, daemon_id, device_type, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      device.id,
-      device.device_id,
-      device.api_key,
-      device.user_id,
-      device.channel_id ?? null,
-      device.daemon_id ?? null,
-      device.device_type,
-      device.status ?? 'active',
-    ]
-  );
+  try {
+    await db.execute(
+      `INSERT INTO devices
+         (id, device_id, api_key, user_id, channel_id, daemon_id, device_type, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        device.id,
+        device.device_id,
+        device.api_key,
+        device.user_id,
+        device.channel_id ?? null,
+        device.daemon_id ?? null,
+        device.device_type,
+        device.status ?? 'active',
+      ]
+    );
+  } catch (err) {
+    // Distinguish active-only (daemon_id, device_id) collision from the
+    // separate api_key UNIQUE — both surface as ER_DUP_ENTRY but only the
+    // former is a caller-fixable 409 ("device already exists"). The api_key
+    // UNIQUE collision is an internal RNG miss and we let it bubble as 500.
+    if (isDuplicateEntryError(err) && /uq_devices_active|active_device_id/i.test(String(err?.message ?? ''))) {
+      throw new DeviceConflictError(
+        `Active device already exists for daemon_id=${device.daemon_id ?? '∅'} device_id=${device.device_id ?? '∅'}`,
+        { daemon_id: device.daemon_id ?? null, device_id: device.device_id ?? null }
+      );
+    }
+    throw err;
+  }
   const [rows] = await db.execute(`SELECT * FROM devices WHERE id = ?`, [device.id]);
   return rowToDevice(rows[0]);
 }
