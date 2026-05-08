@@ -1,6 +1,6 @@
-.PHONY: check-l0 install logrotate-config dev build deploy register doctor doctor-offline smoke test lint clean
+.PHONY: check-l0 install logrotate-config dev build deploy register doctor doctor-offline smoke test lint clean check-banned-mcp
 
-KNOWN_TARGETS := check-l0 install logrotate-config dev build deploy register doctor doctor-offline smoke test lint clean
+KNOWN_TARGETS := check-l0 install logrotate-config dev build deploy register doctor doctor-offline smoke test lint clean check-banned-mcp
 PASS_ARGS := $(strip $(ARGS) $(filter-out $(KNOWN_TARGETS),$(MAKECMDGOALS)))
 
 %:
@@ -31,9 +31,6 @@ build: check-l0
 	pnpm --filter lightcone build
 	pnpm --filter @lightcone-ai/daemon build
 	pnpm --filter feishu-bridge build
-	pnpm --filter mysql-mcp-server build
-	pnpm --filter platform-actions-mcp-server build
-	pnpm --filter publisher-mcp-server build
 
 deploy: install build
 
@@ -49,12 +46,15 @@ doctor-offline: check-l0
 smoke: check-l0
 	node lightcone/daemon/scripts/smoke-channel-runtime.mjs $(PASS_ARGS)
 
-test: check-l0
+test: check-l0 check-banned-mcp
 	node --test ops/*.test.mjs
 	pnpm -r test
 
 lint:
 	pnpm -r lint
+
+check-banned-mcp:
+	bash scripts/check-banned-mcp.sh
 
 clean:
 	pnpm -r clean

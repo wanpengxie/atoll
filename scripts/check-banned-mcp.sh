@@ -14,6 +14,8 @@
 #   - scripts/check-banned-mcp.sh             this guard's own source.
 #   - devices/xhs-extension/package.json line `"check:banned-mcp": ...`
 #                                              npm script entry that calls this guard.
+#   - Makefile lines naming the `check-banned-mcp` make target / its bash
+#     scripts/check-banned-mcp.sh invocation.
 #
 # spec: .dalek/agent-user.md <banned> + .dalek/pm/reviews/convergent-8/round-4/fix-spec.md §R5-T3
 set -euo pipefail
@@ -26,10 +28,11 @@ if ! command -v rg >/dev/null 2>&1; then
 fi
 
 # rg prints `path:line:content`. We strip the guard's own source by glob and
-# then strip the single self-referential `check:banned-mcp` npm-script line by
-# literal grep — both are intentional, not real residue. Any other `mcp` hit
-# (e.g. a new build filter sneaking back into the Makefile) survives the
-# filter and trips the guard.
+# then strip the self-referential `check[-:]banned-mcp` token (matches both
+# the npm-script colon form `check:banned-mcp` and the make-target hyphen
+# form `check-banned-mcp`, which also covers `scripts/check-banned-mcp.sh`
+# path references). Any other `mcp` hit (e.g. a new build filter sneaking
+# back into the Makefile) survives the filter and trips the guard.
 matches=$(rg -n -i 'mcp|@modelcontextprotocol' "${ROOT_DIR}" \
   --glob '!lightcone/**' \
   --glob '!.dalek/**' \
@@ -38,7 +41,7 @@ matches=$(rg -n -i 'mcp|@modelcontextprotocol' "${ROOT_DIR}" \
   --glob '!**/dist/**' \
   --glob '!pnpm-lock.yaml' \
   --glob '!scripts/check-banned-mcp.sh' \
-  | grep -v 'check:banned-mcp' \
+  | grep -Ev 'check[-:]banned-mcp' \
   || true)
 
 if [ -n "${matches}" ]; then
