@@ -783,6 +783,206 @@ describe('recoverPublishWaitStates (R3-T4 FX9 SW evict recovery)', () => {
     expect(storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-rearm`]).toBeUndefined();
   });
 
+  // R4-T3 / t64.C2 + t64.M1：double SW evict 回归。
+  //
+  // 旧实现把 entry 的 {startedAt, timeoutMs} 持久化，recovery 重 arm 时
+  // 传 timeoutMs=remaining，新 entry 又把缩水的 timeoutMs 写回 storage →
+  // 二次 evict 后 derived deadline (= startedAt + 已收缩 timeoutMs) 比真实
+  // 终点早数百秒，会触发 false-positive publish_timeout。
+  //
+  // 修复：持久化绝对 deadlineAt；recovery 永远以原始 deadlineAt 为准。
+  //
+  // 该测试以"两次 recoverPublishWaitStates 调用之间持久化的 deadline 不
+  // 收缩"为不变量；若实现回到相对 timeoutMs 持久化，本 case 会 fail。
+  it('double SW evict preserves absolute deadline across recovery cycles (R4-T3 t64.C2)', async () => {
+    const storage = makeFakeStorage();
+    const correlationId = 'corr-double-evict';
+    const tabId = 500;
+    const startedAt = 1_700_000_000_000;
+    const timeoutMs = 600_000; // 原始 10 分钟
+    const expectedDeadline = startedAt + timeoutMs;
+
+    // Seed：模拟 entry 持久化（绝对 deadlineAt）。
+    storage._data[`${PUBLISH_WAIT_KEY_PREFIX}${correlationId}`] = {
+      correlationId,
+      tabId,
+      startedAt,
+      deadlineAt: expectedDeadline,
+      timeoutMs, // 仅 forensics
+    };
+
+    // 第一次 SW evict at t = startedAt + 300_000（5 min in），tab 仍在 publish form
+    // → recovery 重 arm listener，必须保留绝对 deadlineAt。
+    let now = startedAt + 300_000;
+    const api1 = makeFakeTabsApi();
+    await recoverPublishWaitStates({
+      storageLocal: storage,
+      tabsGet: async () =>
+        ({ id: tabId, url: 'https://creator.xiaohongshu.com/publish/publish' } as any),
+      postCallback: async () => {
+        /* no settle in this leg */
+      },
+      now: () => now,
+      chromeApi: chromeApiOf(api1),
+    });
+
+    // 重 arm 路径会同步触发一次 entry 持久化；flush microtasks 让 fake storage 写入完成。
+    for (let i = 0; i < 5; i += 1) await Promise.resolve();
+    const persistedAfter1 = storage._data[
+      `${PUBLISH_WAIT_KEY_PREFIX}${correlationId}`
+    ] as { deadlineAt: number; startedAt: number };
+    expect(persistedAfter1).toBeDefined();
+    expect(persistedAfter1.deadlineAt).toBe(expectedDeadline);
+    expect(persistedAfter1.startedAt).toBe(startedAt);
+
+    // 第二次 SW evict at t = startedAt + 350_000（再 50s 后；distance to original
+    // deadline 还有 250_000ms）。重 evict 不显式拆 listener；模拟"上次 SW 整体被
+    // 杀掉、storage 仍在"。本次 recovery 必须 NOT publish_timeout。
+    now = startedAt + 350_000;
+    const api2 = makeFakeTabsApi();
+    const callbacks: any[] = [];
+    const summaries = await recoverPublishWaitStates({
+      storageLocal: storage,
+      tabsGet: async () =>
+        ({ id: tabId, url: 'https://creator.xiaohongshu.com/publish/publish' } as any),
+      postCallback: async (id, payload) => callbacks.push({ id, payload }),
+      now: () => now,
+      chromeApi: chromeApiOf(api2),
+    });
+
+    // 关键断言：未 settle 任何 callback；离原始 600s deadline 还有 250s。
+    expect(callbacks).toEqual([]);
+    expect(summaries).toEqual([
+      { correlationId, outcome: 'rearmed_listener' },
+    ]);
+
+    // 持久化 deadlineAt 仍等于原始 deadline，无收缩。
+    for (let i = 0; i < 5; i += 1) await Promise.resolve();
+    const persistedAfter2 = storage._data[
+      `${PUBLISH_WAIT_KEY_PREFIX}${correlationId}`
+    ] as { deadlineAt: number; startedAt: number };
+    expect(persistedAfter2).toBeDefined();
+    expect(persistedAfter2.deadlineAt).toBe(expectedDeadline);
+    expect(persistedAfter2.startedAt).toBe(startedAt);
+  });
+
+  // R4-T3 边界：第二次 recovery 的 setTimeout 计算的剩余 ms 与
+  // `原始 deadline - now` 一致（容差 100ms）。
+  // 旧实现下：第一次 recovery 把 timeoutMs 收缩并写回 storage；第二次 recovery
+  // 读到的 derived deadline 已早于真实 now → 短路 publish_timeout 分支，根本不
+  // 进入 rearm（无大 setTimeout）。修复后：第二次 recovery 读到原始 deadlineAt，
+  // setTimeout 延时仍 ≈ 真实剩余 ms。
+  it('second-recovery setTimeout delay tracks original absolute deadline (R4-T3 boundary)', async () => {
+    const storage = makeFakeStorage();
+    const correlationId = 'corr-boundary-timer';
+    const tabId = 510;
+    const startedAt = 1_700_000_000_000;
+    const timeoutMs = 600_000;
+    const expectedDeadline = startedAt + timeoutMs;
+
+    storage._data[`${PUBLISH_WAIT_KEY_PREFIX}${correlationId}`] = {
+      correlationId,
+      tabId,
+      startedAt,
+      deadlineAt: expectedDeadline,
+      timeoutMs,
+    };
+
+    // 用 fake timers + setSystemTime 把 globalThis.Date.now 钉死，
+    // 同时 spy setTimeout 抓 listener 重 arm 时传入的 delay。
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+
+    try {
+      // 第一次 recovery at t = startedAt + 300_000 (5min in)。
+      const now1 = startedAt + 300_000;
+      vi.setSystemTime(now1);
+      const api1 = makeFakeTabsApi();
+      await recoverPublishWaitStates({
+        storageLocal: storage,
+        tabsGet: async () =>
+          ({ id: tabId, url: 'https://creator.xiaohongshu.com/publish/publish' } as any),
+        postCallback: async () => {},
+        now: () => now1,
+        chromeApi: chromeApiOf(api1),
+      });
+
+      // Drain microtasks; clear spy 让第二次 recovery 的 setTimeout 单独可辨。
+      for (let i = 0; i < 5; i += 1) await Promise.resolve();
+      setTimeoutSpy.mockClear();
+
+      // 第二次 recovery at t = startedAt + 350_000；距 deadline 还 250_000ms。
+      const now2 = startedAt + 350_000;
+      vi.setSystemTime(now2);
+      const api2 = makeFakeTabsApi();
+      await recoverPublishWaitStates({
+        storageLocal: storage,
+        tabsGet: async () =>
+          ({ id: tabId, url: 'https://creator.xiaohongshu.com/publish/publish' } as any),
+        postCallback: async () => {},
+        now: () => now2,
+        chromeApi: chromeApiOf(api2),
+      });
+
+      // waitForPublishCompletion 在 entry 调用 `setTimeout(..., remaining)` 安排
+      // 主超时；其它 setTimeout 调用（如 fake storage / promise polyfill）通常
+      // 走更短延时。这里只取 >= 100s 的延时认作 publish wait timer。
+      const longDelays = setTimeoutSpy.mock.calls
+        .map((c) => Number(c[1] ?? 0))
+        .filter((d) => d >= 100_000);
+      expect(longDelays.length).toBeGreaterThan(0);
+      const armedDelay = longDelays[longDelays.length - 1];
+      const expectedRemaining = expectedDeadline - now2;
+      // 容差 100ms（spec 边界）。
+      expect(Math.abs(armedDelay - expectedRemaining)).toBeLessThanOrEqual(100);
+    } finally {
+      setTimeoutSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  // R4-T3 schema migration：旧条目（无 deadlineAt）应被自动补齐为
+  // startedAt + timeoutMs，避免给旧用户造成回归。
+  it('legacy entries without deadlineAt fall back to startedAt + timeoutMs (R4-T3 migration)', async () => {
+    const storage = makeFakeStorage();
+    const correlationId = 'corr-legacy';
+    const tabId = 520;
+    const startedAt = 1_700_000_000_000;
+    const timeoutMs = 600_000;
+
+    // 旧 schema：仅 startedAt + timeoutMs，无 deadlineAt。
+    storage._data[`${PUBLISH_WAIT_KEY_PREFIX}${correlationId}`] = {
+      correlationId,
+      tabId,
+      startedAt,
+      timeoutMs,
+    };
+
+    const now = startedAt + 100_000;
+    const api = makeFakeTabsApi();
+    const callbacks: any[] = [];
+    const summaries = await recoverPublishWaitStates({
+      storageLocal: storage,
+      tabsGet: async () =>
+        ({ id: tabId, url: 'https://creator.xiaohongshu.com/publish/publish' } as any),
+      postCallback: async (id, payload) => callbacks.push({ id, payload }),
+      now: () => now,
+      chromeApi: chromeApiOf(api),
+    });
+
+    // 没有 publish_timeout false-positive；按 deadline = startedAt + timeoutMs 解读，
+    // 仍在 publish form → rearmed_listener。
+    expect(summaries).toEqual([{ correlationId, outcome: 'rearmed_listener' }]);
+    expect(callbacks).toEqual([]);
+
+    // 持久化条目应被补上 deadlineAt（写回，避免下次 recovery 重新 derive）。
+    for (let i = 0; i < 5; i += 1) await Promise.resolve();
+    const persisted = storage._data[
+      `${PUBLISH_WAIT_KEY_PREFIX}${correlationId}`
+    ] as { deadlineAt?: number };
+    expect(persisted.deadlineAt).toBe(startedAt + timeoutMs);
+  });
+
   it('processes multiple states independently', async () => {
     const storage = makeFakeStorage();
     storage._data[`${PUBLISH_WAIT_KEY_PREFIX}corr-1`] = {
