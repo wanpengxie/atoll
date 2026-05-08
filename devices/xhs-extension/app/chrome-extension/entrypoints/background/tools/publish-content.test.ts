@@ -236,6 +236,84 @@ describe('waitForPublishCompletion', () => {
     await expect(resultP).rejects.toBeInstanceOf(PublishTimeoutError);
   });
 
+  // R4-T2 §3 negative regression: tabId 命中 + 200 + POST + URL 是同前缀
+  // 非 publish 端点（draft / list / template / counter）→ regex 二次校验拦下，
+  // 不 settle resolve；最终走 timeout。修 R3-T4 FX6 的 prefix 通配 false-success。
+  it('webRequest API watch ignores same-prefix non-publish endpoints at 200 (R4-T2)', async () => {
+    const api = makeFakeTabsApi();
+    const resultP = waitForPublishCompletion(112, {
+      timeoutMs: 80,
+      chromeApi: chromeApiOf(api),
+    });
+
+    // /api/galaxy/note/draft 200 POST — autosave 风格，禁 settle。
+    api.fireWebReqCompleted({
+      tabId: 112,
+      url: 'https://creator.xiaohongshu.com/api/galaxy/note/draft',
+      statusCode: 200,
+      method: 'POST',
+    } as any);
+    // /api/galaxy/note/list 200 POST — 创作者中心列表查询，禁 settle。
+    api.fireWebReqCompleted({
+      tabId: 112,
+      url: 'https://edith.xiaohongshu.com/api/galaxy/note/list?cursor=abc',
+      statusCode: 200,
+      method: 'POST',
+    } as any);
+    // /api/galaxy/note/template/123 200 POST — 模板拉取，禁 settle。
+    api.fireWebReqCompleted({
+      tabId: 112,
+      url: 'https://creator.xiaohongshu.com/api/galaxy/note/template/123',
+      statusCode: 200,
+      method: 'POST',
+    } as any);
+    // /api/galaxy/note/counter 200 POST — counter polling，禁 settle。
+    api.fireWebReqCompleted({
+      tabId: 112,
+      url: 'https://edith.xiaohongshu.com/api/galaxy/note/counter',
+      statusCode: 200,
+      method: 'POST',
+    } as any);
+
+    await expect(resultP).rejects.toBeInstanceOf(PublishTimeoutError);
+    expect(api.listenerCounts()).toEqual({ updated: 0, removed: 0, webreq: 0 });
+  });
+
+  // R4-T2 §2 negative regression: method !== 'POST' 一律忽略。XHS publish form
+  // 期间发起的 GET autosave / draft / template / list 即便 URL 和 publish-result
+  // 完全同前缀甚至同尾段，也必须不 settle（GET 永远不是 publish 提交动作）。
+  it('webRequest API watch ignores non-POST methods even on publish endpoint (R4-T2)', async () => {
+    const api = makeFakeTabsApi();
+    const resultP = waitForPublishCompletion(113, {
+      timeoutMs: 80,
+      chromeApi: chromeApiOf(api),
+    });
+
+    // GET on the actual publish endpoint — 仍禁 settle（method gate 拦下）。
+    api.fireWebReqCompleted({
+      tabId: 113,
+      url: 'https://creator.xiaohongshu.com/api/galaxy/note/publish',
+      statusCode: 200,
+      method: 'GET',
+    } as any);
+    // PUT 同上 —— 任何非 POST 都禁 settle。
+    api.fireWebReqCompleted({
+      tabId: 113,
+      url: 'https://creator.xiaohongshu.com/api/galaxy/note/submit',
+      statusCode: 200,
+      method: 'PUT',
+    } as any);
+    // method 字段缺失 —— 视为未知方法，安全侧禁 settle。
+    api.fireWebReqCompleted({
+      tabId: 113,
+      url: 'https://creator.xiaohongshu.com/api/galaxy/note/publish',
+      statusCode: 200,
+    } as any);
+
+    await expect(resultP).rejects.toBeInstanceOf(PublishTimeoutError);
+    expect(api.listenerCounts()).toEqual({ updated: 0, removed: 0, webreq: 0 });
+  });
+
   // R3-T4 FX6 (spec §1 + codex#t59.1): 离开 publish form 但跳到 `/post/list`
   // 类创作者中心列表页 = 用户取消发布，必须 reject canceled，不能算 success。
   it('rejects with PublishCanceledError when tab navigates to /post/list (FX6)', async () => {
@@ -363,17 +441,46 @@ describe('NOTE_ID_URL_PATTERN', () => {
   });
 });
 
-describe('PUBLISH_API_URL_PATTERN (R3-T4 FX6)', () => {
-  it('matches creator + edith publish API hosts', () => {
+describe('PUBLISH_API_URL_PATTERN (R3-T4 FX6 → R4-T2 narrowed)', () => {
+  it('matches creator + edith publish-result endpoints (publish | submit suffix)', () => {
+    // 精确尾段 publish
     expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/publish')).toBe(true);
-    expect(PUBLISH_API_URL_PATTERN.test('https://edith.xiaohongshu.com/api/galaxy/note/foo')).toBe(true);
+    expect(PUBLISH_API_URL_PATTERN.test('https://edith.xiaohongshu.com/api/galaxy/note/publish')).toBe(true);
+    // 精确尾段 submit
+    expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/submit')).toBe(true);
+    expect(PUBLISH_API_URL_PATTERN.test('https://edith.xiaohongshu.com/api/galaxy/note/submit')).toBe(true);
+    // 带 querystring / 子路径分隔符仍 match（边界守卫使用 [/?#]|$）
+    expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/publish?ts=1')).toBe(true);
+    expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/publish/done')).toBe(true);
+    expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/publish#frag')).toBe(true);
   });
-  it('does NOT match other xhs paths or hosts', () => {
+
+  it('does NOT match wrong hosts / wrong paths (R3-T4 FX6 baseline)', () => {
     expect(PUBLISH_API_URL_PATTERN.test('https://www.xiaohongshu.com/api/galaxy/note/publish')).toBe(false);
     expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/other/path')).toBe(false);
     expect(PUBLISH_API_URL_PATTERN.test('https://attacker.com/api/galaxy/note/publish')).toBe(false);
   });
+
+  // R4-T2 收紧的核心：同前缀 `/api/galaxy/note/<x>` 但 <x> 不是 publish/submit 必须 NOT match。
+  // XHS publish form 期间会发起 autosave / draft / template fetch / counter polling 等同前缀
+  // 200 GET，旧实现全部 settle resolve 引入 false-success；R4-T2 后这些必须被 regex 挡住。
+  it('does NOT match same-prefix non-publish endpoints (R4-T2 false-positive guard)', () => {
+    // 典型 publish form 期间 noise 端点
+    expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/draft')).toBe(false);
+    expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/draft/save')).toBe(false);
+    expect(PUBLISH_API_URL_PATTERN.test('https://edith.xiaohongshu.com/api/galaxy/note/list')).toBe(false);
+    expect(PUBLISH_API_URL_PATTERN.test('https://edith.xiaohongshu.com/api/galaxy/note/list?cursor=abc')).toBe(false);
+    expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/template/123')).toBe(false);
+    expect(PUBLISH_API_URL_PATTERN.test('https://edith.xiaohongshu.com/api/galaxy/note/counter')).toBe(false);
+    expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/foo')).toBe(false);
+    // 边界守卫：字母后缀延伸不可命中（防 `/publishabc` / `/submitter` 误匹配）
+    expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/publishabc')).toBe(false);
+    expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/submitter')).toBe(false);
+  });
+
   it('exposes filter URL list with creator + edith match-patterns', () => {
+    // chrome.webRequest manifest filter 不支持 regex；保持宽匹配做粗筛，
+    // 真正的尾段精确校验由 onApiCompleted 内的 PUBLISH_API_URL_PATTERN 二次执行。
     expect(PUBLISH_API_FILTER_URLS).toEqual([
       '*://creator.xiaohongshu.com/api/galaxy/note/*',
       '*://edith.xiaohongshu.com/api/galaxy/note/*',

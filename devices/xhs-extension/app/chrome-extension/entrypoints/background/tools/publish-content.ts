@@ -7,7 +7,7 @@ import {
 import { BaseTool } from './base-tool';
 import { runInMainWorld } from './inject-script';
 
-// ─── publish 等真发布完成（M1.1 Fix-T4 §1 → R3-T4 FX6 收紧） ──────────────────
+// ─── publish 等真发布完成（M1.1 Fix-T4 §1 → R3-T4 FX6 → R4-T2 收紧） ─────────
 //
 // 旧实现把表单填完即视为成功 → daemon 收到 ok callback 但用户根本没点
 // publish。M1.1 Fix-T4 在 background SW 挂 `chrome.tabs.onUpdated` +
@@ -28,6 +28,15 @@ import { runInMainWorld } from './inject-script';
 //      （如 `/post/list`、空白 `/`、其它 xhs 域）视为用户取消发布 →
 //      reject `PublishCanceledError`
 //   3) tab 关闭 / 10min 超时仍按原 canceled / timeout 路径
+//
+// R4-T2 进一步收紧（修 R3-T4 FX6 引入的 false-positive 回归）：
+//   - PUBLISH_API_URL_PATTERN 由 `/api/galaxy/note/` 前缀通配收紧为
+//     `/api/galaxy/note/(publish|submit)` 精确尾段（带 `[/?#]|$` 边界守卫，
+//     拒绝 `/publishabc` 字母后缀延伸误命中）。
+//   - onApiCompleted 内强制 `details.method === 'POST'`，把 publish form 期间
+//     XHS 发起的 GET autosave / draft / template fetch / counter polling
+//     200 一律挡在主信号之外。
+//   - 详见 PUBLISH_API_URL_PATTERN 注释里的"如何抓新端点"运维兜底。
 //
 // `waitForPublishCompletion` 抽成顶层 export 是为了 vitest 可注入 chromeApi
 // hook，单测里用 fake event 驱动完整生命周期（含 webRequest 注入位）。
@@ -204,13 +213,32 @@ export const NOTE_ID_URL_PATTERN = /\/(?:explore|discovery\/item)\/([0-9a-f]{20,
 export const NOTE_DETAIL_PATTERN = NOTE_ID_URL_PATTERN;
 
 /**
- * R3-T4 FX6：publish-result API URL 模式（webRequest filter 不支持原生
- * regex，但 onCompleted callback 内可二次校验）。XHS 创作者后台 publish 走
- * `creator.xiaohongshu.com/api/galaxy/note/*`，部分路径走业务后端
- * `edith.xiaohongshu.com/api/galaxy/note/*`，二者均覆盖。
+ * R3-T4 FX6 + R4-T2：publish-result API URL 模式（webRequest filter 不支持
+ * 原生 regex，所以 manifest match-pattern 仍宽匹配 `/api/galaxy/note/*`，
+ * 真正的精确尾段校验放在 onCompleted callback 内由本 regex 二次过滤）。
+ *
+ * R4-T2 收紧背景：旧实现末尾通配 `/api/galaxy/note/` 任何子路径都算 publish
+ * 完成。XHS publish form 编辑期间会发起 autosave / draft / template fetch /
+ * counter polling 等同前缀请求，任意 200 都会触发 settle resolve，重新引入
+ * R2 修复要消除的 false-success（用户没真正点 publish 也被记成 ok callback）。
+ *
+ * 收紧策略：
+ *   - 仅匹配 `(publish|submit)` 两条已知 publish-result 端点（尾段必须严格
+ *     收口，正则末尾的 `(?:[/?#]|$)` 防 `/publishabc` 字母后缀误命中）。
+ *   - 配合 onApiCompleted 内强制 `method === 'POST'`，把 GET autosave / draft
+ *     /template / list 一律挡在主信号之外。
+ *
+ * 兜底（如未来抓到额外 publish-result 端点）：
+ *   1. chrome.devtools 打开 publish 页 → Network 面板 → fetch/XHR 过滤 →
+ *      点 publish 按钮，找 status=200 / method=POST / 落在 `creator|edith
+ *      .xiaohongshu.com/api/galaxy/note/...` 下的端点。
+ *   2. 把新尾段加入下方 alternation（如 `(?:publish|submit|<new>)`），同步
+ *      在 publish-content.test.ts `PUBLISH_API_URL_PATTERN` 单测里加一条 positive。
+ *   3. 端点漏抓不致命：`onUpdated` NOTE_DETAIL_PATTERN URL fallback 仍能 settle，
+ *      10min timeout 兜底。漏匹配只是 fast-path 失效；放过假端点才是要避免的 bug。
  */
 export const PUBLISH_API_URL_PATTERN =
-  /^https?:\/\/(?:creator|edith)\.xiaohongshu\.com\/api\/galaxy\/note\//i;
+  /^https?:\/\/(?:creator|edith)\.xiaohongshu\.com\/api\/galaxy\/note\/(?:publish|submit)(?:[/?#]|$)/i;
 
 /**
  * R3-T4 FX6：chrome.webRequest.onCompleted filter 的 urls 字段，list pattern。
@@ -328,15 +356,27 @@ export function waitForPublishCompletion(
     };
 
     /**
-     * R3-T4 FX6：webRequest.onCompleted。XHS 后端 publish 接口在 200 时即代表
-     * 笔记已落库，UI 才会跳转。早期信号比 onUpdated 命中详情页快几百 ms，
-     * 用作主信号；后续 onUpdated 若再命中详情页，由 settled 守门只 resolve 一次。
+     * R3-T4 FX6 + R4-T2：webRequest.onCompleted。XHS 后端 publish 接口在 200
+     * 时即代表笔记已落库，UI 才会跳转。早期信号比 onUpdated 命中详情页快几百
+     * ms，用作主信号；后续 onUpdated 若再命中详情页，由 settled 守门只 resolve
+     * 一次。
+     *
+     * R4-T2 三层守门（按 short-circuit 顺序）：
+     *   1) tabId 命中
+     *   2) method === 'POST'（publish 永远是 POST；GET 都是 autosave/draft/list/template）
+     *   3) statusCode === 200
+     *   4) URL 命中收紧后的 PUBLISH_API_URL_PATTERN（`/api/galaxy/note/(publish|submit)$` 尾段守卫）
      */
     const onApiCompleted = (details: chrome.webRequest.WebResponseCacheDetails) => {
       if (typeof details?.tabId === 'number' && details.tabId !== tabId) return;
+      // R4-T2: method 校验。chrome.webRequest.WebResponseCacheDetails 在
+      // 实际 chrome SDK 里有 `method: string`，但旧 @types 可能漏标，统一用
+      // any cast 保守取。空/未知方法一律不 settle（安全侧）。
+      const method = String((details as { method?: string }).method ?? '').toUpperCase();
+      if (method !== 'POST') return;
       if (details.statusCode !== 200) return;
-      // 二次校验 URL 模式（manifest filter 已经粗筛，这里防 chrome 实现扩展 filter
-      // 范围带来的误命中）。
+      // 二次校验 URL 模式（manifest filter 已经粗筛，这里精确尾段过滤掉
+      // /api/galaxy/note/draft、/list、/template/* 等同前缀同 200 的 false-positive）。
       const apiUrl = String(details.url ?? '');
       if (!PUBLISH_API_URL_PATTERN.test(apiUrl)) return;
       // webRequest 不能直接拿 response body → note_id 暂留 null（除非 tab 已经
