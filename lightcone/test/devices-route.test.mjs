@@ -5,7 +5,11 @@ import test from 'node:test';
 
 import express from 'express';
 
-import { createDevicesRouter } from '../src/routes/devices.js';
+import {
+  createDevicesRouter,
+  getDevicePushFailureCount,
+  resetDevicePushFailureCount,
+} from '../src/routes/devices.js';
 
 function createApp(router, { user = { id: 'user-001', name: 'Owner' }, isService = false } = {}) {
   const app = express();
@@ -602,4 +606,141 @@ test('DELETE /api/devices/:id allows service caller to revoke any device', async
     assert.equal(res.status, 200);
     assert.equal(fake.rows[0].status, 'revoked');
   });
+});
+
+// ── T78 (M1.2-FIX-C, P2 #7): device.* push failure observability ────────────
+// Recovery for an offline-daemon push is the daemon-side reconnect re-pull
+// (bootstrapDeviceSync). These tests pin the metric/warn signal that ops
+// uses to detect lost pushes — the API call still succeeds (the DB write
+// already landed), but a counter increments and a structured warn is emitted.
+
+test('T78: device.created push records failure metric when daemon is offline', async () => {
+  const fake = makeFakeDb();
+  const sent = [];
+  const warns = [];
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
+    sendToDaemonImpl: (daemonId, frame) => { sent.push({ daemonId, frame }); return true; },
+    isMachineOnlineImpl: () => false, // daemon offline
+    uuidv4Impl: () => 'd-offline',
+    generateApiKeyImpl: () => 'sk_dev_offline',
+  });
+
+  resetDevicePushFailureCount();
+  const before = getDevicePushFailureCount();
+  const origWarn = console.warn;
+  console.warn = (...args) => { warns.push(args.join(' ')); };
+  try {
+    await withServer(createApp(router), async (baseUrl) => {
+      const res = await callJson(baseUrl, '/api/devices', {
+        method: 'POST',
+        body: { device_type: 'xhs', channel_id: 'ch-001', daemon_id: 'daemon-001' },
+      });
+      assert.equal(res.status, 201, 'create still succeeds — DB write already landed');
+    });
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.equal(sent.length, 0, 'no WS frame should be sent when daemon offline');
+  assert.equal(getDevicePushFailureCount() - before, 1, 'failure counter must increment by exactly 1');
+  assert.ok(warns.some(w => w.includes('[devicePush]') && w.includes('device.created')), `expected structured warn, got: ${warns.join(' | ')}`);
+});
+
+test('T78: device.revoked push records failure metric when daemon is offline', async () => {
+  const fake = makeFakeDb();
+  fake.rows.push({
+    id: 'd-revoke-offline', device_id: 'xhs-r', api_key: 'sk_dev_x', user_id: 'user-001',
+    channel_id: 'ch-001', daemon_id: 'daemon-001', device_type: 'xhs',
+    status: 'active', created_at: '2026-05-08', revoked_at: null,
+  });
+  const sent = [];
+  const warns = [];
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
+    sendToDaemonImpl: (daemonId, frame) => { sent.push({ daemonId, frame }); return true; },
+    isMachineOnlineImpl: () => false,
+  });
+
+  resetDevicePushFailureCount();
+  const before = getDevicePushFailureCount();
+  const origWarn = console.warn;
+  console.warn = (...args) => { warns.push(args.join(' ')); };
+  try {
+    await withServer(createApp(router), async (baseUrl) => {
+      const res = await callJson(baseUrl, '/api/devices/d-revoke-offline', { method: 'DELETE' });
+      assert.equal(res.status, 200);
+      assert.equal(fake.rows[0].status, 'revoked');
+    });
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.equal(sent.length, 0);
+  assert.equal(getDevicePushFailureCount() - before, 1);
+  assert.ok(warns.some(w => w.includes('[devicePush]') && w.includes('device.revoked')), `expected structured warn, got: ${warns.join(' | ')}`);
+});
+
+test('T78: sendToDaemon=false (race) also bumps failure counter', async () => {
+  // isMachineOnline returns true but sendToDaemon returns false (e.g. ws state
+  // changed between online check and send). We still want to bump the counter.
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
+    sendToDaemonImpl: () => false,
+    isMachineOnlineImpl: () => true,
+    uuidv4Impl: () => 'd-race',
+    generateApiKeyImpl: () => 'sk_dev_race',
+  });
+
+  resetDevicePushFailureCount();
+  const before = getDevicePushFailureCount();
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: { device_type: 'xhs', channel_id: 'ch-001', daemon_id: 'daemon-001' },
+    });
+    assert.equal(res.status, 201);
+  });
+  assert.equal(getDevicePushFailureCount() - before, 1);
+});
+
+test('T78: successful push does NOT bump failure counter', async () => {
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+    uuidv4Impl: () => 'd-ok',
+    generateApiKeyImpl: () => 'sk_dev_ok',
+  });
+
+  resetDevicePushFailureCount();
+  const before = getDevicePushFailureCount();
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: { device_type: 'xhs', channel_id: 'ch-001', daemon_id: 'daemon-001' },
+    });
+    assert.equal(res.status, 201);
+  });
+  assert.equal(getDevicePushFailureCount(), before, 'happy path must not bump failure counter');
 });

@@ -15,6 +15,25 @@ import { sendToDaemon, isMachineOnline } from '../daemon/connections.js';
 
 const ALLOWED_DEVICE_TYPES = new Set(['xhs', 'douyin', 'kuaishou']);
 
+// ── T78 (M1.2-FIX-C, P2 #7): WS push failure observability ──────────────────
+// `pushDeviceEvent` previously silently dropped device.* frames when the
+// daemon was offline or `sendToDaemon` returned false; the only recovery path
+// was a daemon-side reconnect re-pull (`bootstrapDeviceSync`). That is still
+// the recovery — outbox persistence is out of scope — but operators need a
+// signal when this happens. We log a structured warn line and bump an
+// in-process counter that tests can read back.
+let devicePushFailures = 0;
+
+/** Returns the number of device.* WS pushes that did not reach a daemon. */
+export function getDevicePushFailureCount() {
+  return devicePushFailures;
+}
+
+/** Test helper: reset the in-process counter. Not used in production. */
+export function resetDevicePushFailureCount() {
+  devicePushFailures = 0;
+}
+
 function defaultGenerateApiKey() {
   return 'sk_dev_' + randomBytes(32).toString('hex');
 }
@@ -49,8 +68,24 @@ export function createDevicesRouter({
 
   function pushDeviceEvent(daemonId, type, payload) {
     if (!daemonId) return;
-    if (typeof isMachineOnlineImpl === 'function' && !isMachineOnlineImpl(daemonId)) return;
-    sendToDaemonImpl(daemonId, { type, payload });
+    // daemon offline → record a failure metric and warn; recovery is the
+    // daemon-side reconnect re-pull (bootstrapDeviceSync) which will sync the
+    // up-to-date device set on next ws-open.
+    if (typeof isMachineOnlineImpl === 'function' && !isMachineOnlineImpl(daemonId)) {
+      devicePushFailures += 1;
+      const deviceId = payload?.device_id ?? payload?.id ?? '';
+      console.warn(`[devicePush] daemon=${daemonId} offline — dropped ${type} device_id=${deviceId} (will sync on reconnect)`);
+      return;
+    }
+    const sent = sendToDaemonImpl(daemonId, { type, payload });
+    // sendToDaemon returns false when ws.readyState != OPEN (and already logs
+    // its own warn). Count it so the metric is consistent with the offline
+    // branch above.
+    if (sent === false) {
+      devicePushFailures += 1;
+      const deviceId = payload?.device_id ?? payload?.id ?? '';
+      console.warn(`[devicePush] daemon=${daemonId} send failed — dropped ${type} device_id=${deviceId} (will sync on reconnect)`);
+    }
   }
 
   // POST /api/devices — create device, return sk_dev key once
