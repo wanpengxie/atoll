@@ -21,7 +21,7 @@
 //   }
 
 import path from 'node:path';
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { coagentProjectDir, normalizeProjectKey } from '../paths.js';
 
@@ -126,15 +126,25 @@ export class SessionManager {
 
     // Restrict baseDir + per-user dirs to owner only — these files contain
     // xhs cookies and login state. Fix-T2 §7 / round-1 review claude-M6.
+    // mkdirSync's `mode` option only takes effect when the directory is
+    // created; pre-existing dirs (e.g. left by an older release at 0o755)
+    // keep their original mode. Follow up with chmodSync so upgrade paths
+    // are pinned to 0o700. Round-2 review codex-#t57.2 / FX4 / R3-T2.
     const dir = this.userDir(safeUserId);
     mkdirSync(this.baseDir, { recursive: true, mode: 0o700 });
+    chmodSync(this.baseDir, 0o700);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
     const finalPath = this.sessionPath(safeUserId);
     const tmpPath = `${finalPath}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
     const json = JSON.stringify(merged, null, 2);
     try {
       writeFileSync(tmpPath, json, { encoding: 'utf8', mode: 0o600 });
       renameSync(tmpPath, finalPath);
+      // Defend against process umask interfering with the explicit 0o600
+      // mode passed to writeFileSync; rename preserves source mode but
+      // an explicit chmod keeps the contract auditable on every write.
+      chmodSync(finalPath, 0o600);
     } catch (err) {
       try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
       const error = new Error(`write session failed for ${safeUserId}: ${err.message}`);

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -131,6 +131,52 @@ test('updateSession creates baseDir + per-user dirs with mode 0o700', () => {
     // session file mode 0o600 is the existing contract — verify still holds.
     const fileStat = statSync(sm.sessionPath('user-mode'));
     assert.equal((fileStat.mode & 0o777), 0o600);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Round-2 review codex-#t57.2 / FX4 / R3-T2: pre-existing dirs at 0o755 (left
+// by an older release) must be tightened to 0o700 on the next updateSession
+// call. mkdirSync's `mode` only applies on creation, so a chmodSync follow-up
+// is required for the upgrade path.
+test('updateSession tightens pre-existing 0o755 baseDir + userDir to 0o700', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'coagent-session-upgrade-'));
+  const baseDir = path.join(root, 'users');
+  const userId = 'user-upgrade';
+  const userDir = path.join(baseDir, userId);
+  try {
+    // Simulate an older release's footprint: both dirs already exist at 0o755.
+    mkdirSync(baseDir, { recursive: true, mode: 0o755 });
+    mkdirSync(userDir, { recursive: true, mode: 0o755 });
+    // umask can mask the mkdir mode bits, so chmod explicitly to 0o755 to make
+    // the regression starting point deterministic.
+    chmodSync(baseDir, 0o755);
+    chmodSync(userDir, 0o755);
+    assert.equal((statSync(baseDir).mode & 0o777), 0o755, 'baseDir starts at 0o755');
+    assert.equal((statSync(userDir).mode & 0o777), 0o755, 'userDir starts at 0o755');
+
+    const sm = new SessionManager({ baseDir });
+    sm.updateSession(userId, { cookies: [] });
+
+    const baseStat = statSync(baseDir);
+    const userStat = statSync(userDir);
+    assert.equal(
+      (baseStat.mode & 0o777),
+      0o700,
+      `baseDir mode=${(baseStat.mode & 0o777).toString(8)}, want 0o700 after upgrade`,
+    );
+    assert.equal(
+      (userStat.mode & 0o777),
+      0o700,
+      `userDir mode=${(userStat.mode & 0o777).toString(8)}, want 0o700 after upgrade`,
+    );
+    const fileStat = statSync(sm.sessionPath(userId));
+    assert.equal(
+      (fileStat.mode & 0o777),
+      0o600,
+      `session file mode=${(fileStat.mode & 0o777).toString(8)}, want 0o600`,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
