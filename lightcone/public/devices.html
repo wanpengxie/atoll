@@ -230,7 +230,17 @@ function fmtDate(s) {
   try {
     const d = new Date(s);
     if (isNaN(d.getTime())) return s;
-    return d.toISOString().replace('T', ' ').slice(0, 19);
+    // Local-time formatter — keep parity with the project's +08:00 server-side
+    // formatter (src/time.js#formatLocalIso). UTC ISO strings drift the display
+    // for users in CN timezone, so we render via local Date getters instead.
+    const pad = (n) => String(n).padStart(2, '0');
+    const Y  = d.getFullYear();
+    const M  = pad(d.getMonth() + 1);
+    const D  = pad(d.getDate());
+    const h  = pad(d.getHours());
+    const m  = pad(d.getMinutes());
+    const sec = pad(d.getSeconds());
+    return `${Y}-${M}-${D} ${h}:${m}:${sec}`;
   } catch { return s; }
 }
 
@@ -327,7 +337,16 @@ function showKeyModal(apiKey, deviceId) {
 }
 
 function closeKeyModal() {
-  document.getElementById('key-modal').classList.remove('open');
+  // Clear the one-time api-key from DOM so XSS / extensions / devtools cannot
+  // recover it after the user closes the modal. Mirrors the spec line on the
+  // modal: "only shown once".
+  const modal = document.getElementById('key-modal');
+  const box   = document.getElementById('key-box');
+  if (box) box.textContent = '';
+  if (modal) {
+    modal.classList.remove('open');
+    delete modal.dataset.key;
+  }
 }
 
 async function copyKey() {

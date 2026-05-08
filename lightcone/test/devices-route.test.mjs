@@ -7,11 +7,14 @@ import express from 'express';
 
 import { createDevicesRouter } from '../src/routes/devices.js';
 
-function createApp(router, { user = { id: 'user-001', name: 'Owner' } } = {}) {
+function createApp(router, { user = { id: 'user-001', name: 'Owner' }, isService = false } = {}) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    if (user) req.user = user;
+    if (user) {
+      req.user = user;
+      if (isService) req.isService = true;
+    }
     next();
   });
   app.use('/api/devices', router);
@@ -79,6 +82,22 @@ function makeFakeDb() {
   };
 }
 
+// ── ownership stubs ─────────────────────────────────────────────────────────
+// Default: a single channel `ch-001` in workspace `ws-001` and a single
+// machine `daemon-001` owned by `user-001` — happy path for tests that don't
+// care about ownership rejection. Override per-test as needed.
+function makeOwnershipStubs({
+  channels = { 'ch-001': { id: 'ch-001', workspace_id: 'ws-001', is_del: 0, deleted_at: null } },
+  machines = { 'daemon-001': { id: 'daemon-001', owner_id: 'user-001', is_platform: 0 } },
+  workspaceMembers = new Set(['ws-001:user-001']),
+} = {}) {
+  return {
+    getChannelByIdImpl: async (_db, id) => channels[id] ?? null,
+    getMachineByIdImpl: async (_db, id) => machines[id] ?? null,
+    isWorkspaceMemberImpl: async (_db, wsId, userId) => workspaceMembers.has(`${wsId}:${userId}`),
+  };
+}
+
 test('POST /api/devices creates device with sk_dev key, persists row, and pushes device.created over WS', async () => {
   const fake = makeFakeDb();
   const sentToDaemons = [];
@@ -91,6 +110,7 @@ test('POST /api/devices creates device with sk_dev key, persists row, and pushes
     getDevicesImpl: fake.getDevices,
     getDeviceByIdImpl: fake.getDeviceById,
     revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
     sendToDaemonImpl: (daemonId, frame) => { sentToDaemons.push({ daemonId, frame }); return true; },
     isMachineOnlineImpl: () => true,
     uuidv4Impl: () => ids.shift(),
@@ -138,6 +158,7 @@ test('POST /api/devices generates default device_id when omitted', async () => {
     getDevicesImpl: fake.getDevices,
     getDeviceByIdImpl: fake.getDeviceById,
     revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
     sendToDaemonImpl: () => true,
     isMachineOnlineImpl: () => true,
     uuidv4Impl: () => 'dev-uuid-2',
@@ -148,7 +169,7 @@ test('POST /api/devices generates default device_id when omitted', async () => {
     const created = await callJson(baseUrl, '/api/devices', {
       method: 'POST',
       body: {
-        channel_id: 'ch-002',
+        channel_id: 'ch-001',
         daemon_id: 'daemon-001',
         device_type: 'xhs',
       },
@@ -169,6 +190,7 @@ test('POST /api/devices rejects without auth', async () => {
     getDevicesImpl: async () => [],
     getDeviceByIdImpl: async () => null,
     revokeDeviceImpl: async () => null,
+    ...makeOwnershipStubs(),
     sendToDaemonImpl: () => true,
     isMachineOnlineImpl: () => true,
   });
@@ -189,6 +211,7 @@ test('POST /api/devices validates required fields (device_type)', async () => {
     getDevicesImpl: async () => [],
     getDeviceByIdImpl: async () => null,
     revokeDeviceImpl: async () => null,
+    ...makeOwnershipStubs(),
     sendToDaemonImpl: () => true,
     isMachineOnlineImpl: () => true,
   });
@@ -203,12 +226,179 @@ test('POST /api/devices validates required fields (device_type)', async () => {
   });
 });
 
-test('GET /api/devices returns devices and accepts filters', async () => {
+// ── Negative ownership tests ────────────────────────────────────────────────
+
+test('POST /api/devices rejects cross-user user_id (non-service)', async () => {
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: { user_id: 'user-evil', device_type: 'xhs' },
+    });
+    assert.equal(res.status, 403);
+    assert.match(res.json.error, /another user/i);
+    assert.equal(fake.rows.length, 0);
+  });
+});
+
+test('POST /api/devices rejects channel_id when caller is not a workspace member', async () => {
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    // ch-other lives in ws-other; user-001 is NOT a member of ws-other.
+    ...makeOwnershipStubs({
+      channels: {
+        'ch-001': { id: 'ch-001', workspace_id: 'ws-001', is_del: 0, deleted_at: null },
+        'ch-other': { id: 'ch-other', workspace_id: 'ws-other', is_del: 0, deleted_at: null },
+      },
+      workspaceMembers: new Set(['ws-001:user-001']),
+    }),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: { channel_id: 'ch-other', daemon_id: 'daemon-001', device_type: 'xhs' },
+    });
+    assert.equal(res.status, 403);
+    assert.match(res.json.error, /workspace membership/i);
+    assert.equal(fake.rows.length, 0);
+  });
+});
+
+test('POST /api/devices returns 404 when channel_id does not exist', async () => {
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs({ channels: {} }),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: { channel_id: 'ch-missing', device_type: 'xhs' },
+    });
+    assert.equal(res.status, 404);
+    assert.match(res.json.error, /Channel not found/);
+    assert.equal(fake.rows.length, 0);
+  });
+});
+
+test('POST /api/devices rejects daemon_id when caller does not own the machine', async () => {
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs({
+      machines: {
+        'daemon-001': { id: 'daemon-001', owner_id: 'user-001', is_platform: 0 },
+        'daemon-evil': { id: 'daemon-evil', owner_id: 'user-evil', is_platform: 0 },
+      },
+    }),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: { daemon_id: 'daemon-evil', device_type: 'xhs' },
+    });
+    assert.equal(res.status, 403);
+    assert.match(res.json.error, /daemon/i);
+    assert.equal(fake.rows.length, 0);
+  });
+});
+
+test('POST /api/devices accepts platform-owned daemon for any user', async () => {
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs({
+      machines: {
+        'platform-1': { id: 'platform-1', owner_id: null, is_platform: 1 },
+      },
+    }),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+    uuidv4Impl: () => 'dev-platform',
+    generateApiKeyImpl: () => 'sk_dev_platform',
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: { daemon_id: 'platform-1', device_type: 'xhs' },
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.json.user_id, 'user-001');
+    assert.equal(res.json.daemon_id, 'platform-1');
+  });
+});
+
+test('POST /api/devices service caller may set arbitrary user_id', async () => {
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+    uuidv4Impl: () => 'dev-svc',
+    generateApiKeyImpl: () => 'sk_dev_svc',
+  });
+
+  await withServer(createApp(router, { user: { id: 'service', name: 'Service' }, isService: true }), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices', {
+      method: 'POST',
+      body: { user_id: 'user-target', device_type: 'xhs' },
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.json.user_id, 'user-target');
+  });
+});
+
+// ── GET tests ───────────────────────────────────────────────────────────────
+
+test('GET /api/devices defaults to caller-scoped listing and accepts filters', async () => {
   const fake = makeFakeDb();
   fake.rows.push(
     { id: 'd1', device_id: 'xhs-001', api_key: 'sk_dev_a', user_id: 'user-001', channel_id: 'ch-001', daemon_id: 'd-1', device_type: 'xhs', status: 'active', created_at: '2026-05-08', revoked_at: null },
     { id: 'd2', device_id: 'xhs-002', api_key: 'sk_dev_b', user_id: 'user-001', channel_id: 'ch-002', daemon_id: 'd-2', device_type: 'xhs', status: 'revoked', created_at: '2026-05-08', revoked_at: '2026-05-08' },
-    { id: 'd3', device_id: 'dy-001', api_key: 'sk_dev_c', user_id: 'user-002', channel_id: 'ch-003', daemon_id: 'd-1', device_type: 'douyin', status: 'active', created_at: '2026-05-08', revoked_at: null },
+    { id: 'd3', device_id: 'dy-001',  api_key: 'sk_dev_c', user_id: 'user-002', channel_id: 'ch-003', daemon_id: 'd-1', device_type: 'douyin', status: 'active', created_at: '2026-05-08', revoked_at: null },
   );
 
   const router = createDevicesRouter({
@@ -217,6 +407,7 @@ test('GET /api/devices returns devices and accepts filters', async () => {
     getDevicesImpl: fake.getDevices,
     getDeviceByIdImpl: fake.getDeviceById,
     revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
     sendToDaemonImpl: () => true,
     isMachineOnlineImpl: () => true,
   });
@@ -224,18 +415,88 @@ test('GET /api/devices returns devices and accepts filters', async () => {
   await withServer(createApp(router), async (baseUrl) => {
     const all = await callJson(baseUrl, '/api/devices');
     assert.equal(all.status, 200);
-    assert.equal(all.json.devices.length, 3);
+    // user-001 only (was previously 3 — IDOR)
+    assert.equal(all.json.devices.length, 2);
+    assert.ok(all.json.devices.every(d => d.user_id === 'user-001'));
 
     const onlyActive = await callJson(baseUrl, '/api/devices?status=active');
-    assert.equal(onlyActive.json.devices.length, 2);
+    assert.equal(onlyActive.json.devices.length, 1);
+    assert.equal(onlyActive.json.devices[0].id, 'd1');
 
     const byUser = await callJson(baseUrl, '/api/devices?user_id=user-001');
     assert.equal(byUser.json.devices.length, 2);
 
     const byDaemon = await callJson(baseUrl, '/api/devices?daemon_id=d-1');
-    assert.equal(byDaemon.json.devices.length, 2);
+    // d-1 has user-001's d1 + user-002's d3, but caller scope drops d3.
+    assert.equal(byDaemon.json.devices.length, 1);
+    assert.equal(byDaemon.json.devices[0].id, 'd1');
   });
 });
+
+test('GET /api/devices?user_id=other-user returns 403 for non-service caller', async () => {
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices?user_id=user-evil');
+    assert.equal(res.status, 403);
+    assert.match(res.json.error, /another user/i);
+  });
+});
+
+test('GET /api/devices?all=true returns 403 for non-service caller', async () => {
+  const fake = makeFakeDb();
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices?all=true');
+    assert.equal(res.status, 403);
+  });
+});
+
+test('GET /api/devices service caller sees all without scope', async () => {
+  const fake = makeFakeDb();
+  fake.rows.push(
+    { id: 'd1', device_id: 'xhs-001', api_key: 'sk_dev_a', user_id: 'user-001', channel_id: 'ch-001', daemon_id: 'd-1', device_type: 'xhs', status: 'active', created_at: '2026-05-08', revoked_at: null },
+    { id: 'd3', device_id: 'dy-001',  api_key: 'sk_dev_c', user_id: 'user-002', channel_id: 'ch-003', daemon_id: 'd-1', device_type: 'douyin', status: 'active', created_at: '2026-05-08', revoked_at: null },
+  );
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+  });
+
+  await withServer(createApp(router, { user: { id: 'service', name: 'Service' }, isService: true }), async (baseUrl) => {
+    const all = await callJson(baseUrl, '/api/devices');
+    assert.equal(all.status, 200);
+    assert.equal(all.json.devices.length, 2);
+  });
+});
+
+// ── DELETE tests ────────────────────────────────────────────────────────────
 
 test('DELETE /api/devices/:id revokes device and pushes device.revoked over WS', async () => {
   const fake = makeFakeDb();
@@ -251,6 +512,7 @@ test('DELETE /api/devices/:id revokes device and pushes device.revoked over WS',
     getDevicesImpl: fake.getDevices,
     getDeviceByIdImpl: fake.getDeviceById,
     revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
     sendToDaemonImpl: (daemonId, frame) => { sent.push({ daemonId, frame }); return true; },
     isMachineOnlineImpl: () => true,
   });
@@ -277,6 +539,7 @@ test('DELETE /api/devices/:id returns 404 when device does not exist', async () 
     getDevicesImpl: fake.getDevices,
     getDeviceByIdImpl: fake.getDeviceById,
     revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
     sendToDaemonImpl: () => true,
     isMachineOnlineImpl: () => true,
   });
@@ -284,5 +547,59 @@ test('DELETE /api/devices/:id returns 404 when device does not exist', async () 
   await withServer(createApp(router), async (baseUrl) => {
     const res = await callJson(baseUrl, '/api/devices/missing', { method: 'DELETE' });
     assert.equal(res.status, 404);
+  });
+});
+
+test('DELETE /api/devices/:id returns 403 when caller is not the device owner', async () => {
+  const fake = makeFakeDb();
+  fake.rows.push({
+    id: 'd-other', device_id: 'xhs-x', api_key: 'sk_dev_other', user_id: 'user-evil',
+    channel_id: 'ch-001', daemon_id: 'daemon-001', device_type: 'xhs',
+    status: 'active', created_at: '2026-05-08', revoked_at: null,
+  });
+  const sent = [];
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
+    sendToDaemonImpl: (daemonId, frame) => { sent.push({ daemonId, frame }); return true; },
+    isMachineOnlineImpl: () => true,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices/d-other', { method: 'DELETE' });
+    assert.equal(res.status, 403);
+    assert.match(res.json.error, /another user/i);
+    // device was not revoked
+    assert.equal(fake.rows[0].status, 'active');
+    assert.equal(sent.length, 0);
+  });
+});
+
+test('DELETE /api/devices/:id allows service caller to revoke any device', async () => {
+  const fake = makeFakeDb();
+  fake.rows.push({
+    id: 'd-svc', device_id: 'xhs-svc', api_key: 'sk_dev_svc', user_id: 'user-evil',
+    channel_id: 'ch-001', daemon_id: 'daemon-001', device_type: 'xhs',
+    status: 'active', created_at: '2026-05-08', revoked_at: null,
+  });
+  const router = createDevicesRouter({
+    getDbImpl: () => ({}),
+    insertDeviceImpl: fake.insertDevice,
+    getDevicesImpl: fake.getDevices,
+    getDeviceByIdImpl: fake.getDeviceById,
+    revokeDeviceImpl: fake.revokeDevice,
+    ...makeOwnershipStubs(),
+    sendToDaemonImpl: () => true,
+    isMachineOnlineImpl: () => true,
+  });
+
+  await withServer(createApp(router, { user: { id: 'service', name: 'Service' }, isService: true }), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/devices/d-svc', { method: 'DELETE' });
+    assert.equal(res.status, 200);
+    assert.equal(fake.rows[0].status, 'revoked');
   });
 });
