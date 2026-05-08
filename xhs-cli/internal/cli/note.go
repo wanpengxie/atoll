@@ -11,13 +11,15 @@ import (
 // newGetNoteCmd 注册 `coagent-xhs get-note`。
 //
 // flag：
-//   - `--note-id` mock 模式必填，用于 fixture lookup；real 模式可选。
-//   - `--url`        real 模式可选；与 --xsec-token 至少其一必须非空。
-//   - `--xsec-token` real 模式可选；与 --url 至少其一必须非空。
+//   - `--note-id`    mock 模式必填；real 模式 `--url` 缺失时与 `--xsec-token` 共同必填。
+//   - `--url`        real 模式：直接给完整 URL，或与 (`--note-id` + `--xsec-token`) 二选一。
+//   - `--xsec-token` real 模式 `--url` 缺失时与 `--note-id` 共同必填。
 //
 // 不同模式校验语义：
 //   - mock：require `--note-id`。
-//   - real：require `--url` 或 `--xsec-token` 至少其一非空（NoteID 仍可作为 fallback 一并下发）。
+//   - real：require `--url` OR (`--note-id` && `--xsec-token`)。
+//     R4-T1 收紧：xsec_token 单独无 note_id 在 XHS API 上是 dead-end（无法构造 explore URL），
+//     与 daemon validator + extension 端三层合约对齐。
 func newGetNoteCmd() *cobra.Command {
 	var (
 		noteID    string
@@ -37,8 +39,18 @@ func newGetNoteCmd() *cobra.Command {
 			// 也避免 real 用户用 mock 的 note-id fixture 假定。
 			isReal := xhs.IsRealBackendFromEnv()
 			if isReal {
-				if noteURL == "" && xsecToken == "" {
-					return NewCLIError("invalid_argument", "--url or --xsec-token is required in real mode")
+				hasURL := noteURL != ""
+				hasNoteID := noteID != ""
+				hasToken := xsecToken != ""
+				// R4-T1 (round-3 codex#t61.1 / claude#t61.C1) 收紧合约：
+				// real 模式 get-note 必须 --url，或 (--note-id && --xsec-token)。
+				// xsec_token 单独无 note_id 在 XHS API 上是 dead-end，CLI 提前拒绝
+				// 与 daemon validator + extension 端期望对齐。
+				if !hasURL && !(hasNoteID && hasToken) {
+					return NewCLIError(
+						"invalid_argument",
+						"real mode requires --url, or both --note-id and --xsec-token",
+					)
 				}
 			} else {
 				if noteID == "" {
@@ -58,8 +70,8 @@ func newGetNoteCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&noteID, "note-id", "n", "", "笔记 ID（mock 模式必填）")
-	cmd.Flags().StringVar(&noteURL, "url", "", "笔记 URL（real 模式与 --xsec-token 至少其一）")
-	cmd.Flags().StringVar(&xsecToken, "xsec-token", "", "xsec_token（real 模式与 --url 至少其一）")
+	cmd.Flags().StringVarP(&noteID, "note-id", "n", "", "笔记 ID（mock 模式必填；real 模式 --url 缺失时与 --xsec-token 共同必填）")
+	cmd.Flags().StringVar(&noteURL, "url", "", "笔记 URL（real 模式：直接给 URL，或与 --note-id+--xsec-token 二选一）")
+	cmd.Flags().StringVar(&xsecToken, "xsec-token", "", "xsec_token（real 模式 --url 缺失时与 --note-id 共同必填）")
 	return cmd
 }

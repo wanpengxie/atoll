@@ -336,9 +336,12 @@ func TestLoadRealConfigFromEnv_RequiresAbsoluteURL(t *testing.T) {
 	}
 }
 
-// TestRealProvider_GetNote_DispatchShape（fix-spec.md §R3-T1.FX2 round-2 codex#t56.2）:
-// real 模式 GetNote 应能透传 url-only / xsec-token-only / 三者皆给 三种 args 形态，
-// 由 daemon validator + extension 端 URL 解析 fallback 配合处理。
+// TestRealProvider_GetNote_DispatchShape（fix-spec.md §R3-T1.FX2 round-2 codex#t56.2 +
+// §R4-T1 round-3 codex#t61.1 / claude#t61.C1 收紧）:
+// real 模式 GetNote 应能透传以下三层合约允许的 args 形态：url-only / 三者皆给 / note-id+token。
+// xsec-token-only 形态在 CLI 层已被 NewGetNoteCmd 拦截（见 note_test.go::
+// TestGetNoteRealMode_XsecTokenAloneInsufficient），daemon validator 也会在收到时拒绝
+// （见 channel-manager-device.test.mjs），故此处不再覆盖 — 它是收紧后契约外的 dead-end。
 func TestRealProvider_GetNote_DispatchShape(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -355,13 +358,6 @@ func TestRealProvider_GetNote_DispatchShape(t *testing.T) {
 			wantXsecTok: nil,
 		},
 		{
-			name:        "xsec-token-only",
-			args:        GetNoteArgs{XsecToken: "tk2"},
-			wantNoteID:  nil,
-			wantURL:     nil,
-			wantXsecTok: "tk2",
-		},
-		{
 			name: "all-three-given",
 			args: GetNoteArgs{
 				NoteID:    "n1",
@@ -373,7 +369,7 @@ func TestRealProvider_GetNote_DispatchShape(t *testing.T) {
 			wantXsecTok: "tk3",
 		},
 		{
-			name:        "note-id-only-with-token",
+			name:        "note-id-and-token",
 			args:        GetNoteArgs{NoteID: "n2", XsecToken: "tk4"},
 			wantNoteID:  "n2",
 			wantURL:     nil,

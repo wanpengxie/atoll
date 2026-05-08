@@ -133,8 +133,9 @@ func (p *RealProvider) GetMyRecent(ctx context.Context, args GetMyRecentArgs) (a
 
 // GetNote dispatch xhs.get-note。
 //
-// real 模式 RPC 至少需要 url 或 xsec_token 之一（CLI 层校验）；
-// note_id 仍可作为 fallback 一并下发，由 daemon/extension 决定如何使用。
+// real 模式 RPC 必须 url，或 (note_id && xsec_token)（CLI 层校验，与 daemon validator
+// + extension 端期望对齐 — fix-spec §R4-T1 / round-3 codex#t61.1）。
+// xsec_token 单独无 note_id 在 XHS API 上是 dead-end，已在 CLI 层提前拒绝。
 func (p *RealProvider) GetNote(ctx context.Context, args GetNoteArgs) (any, error) {
 	params := map[string]any{}
 	if args.NoteID != "" {

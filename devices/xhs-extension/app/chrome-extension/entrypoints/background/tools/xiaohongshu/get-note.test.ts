@@ -126,7 +126,12 @@ describe('XhsGetNoteTool.execute (early-fail paths)', () => {
     expect(extractError(result)).toMatch(/note url|note_id|xsec_token/);
   });
 
-  it('rejects when only xsec_token given (no note_id, no url)', async () => {
+  // R4-T1（round-3 codex#t61.1 / claude#t61.C1）三层合约收紧：
+  // xsec_token 单独无 note_id 在 XHS API 上是 dead-end（无法构造 explore URL）。
+  // CLI 层 (xhs-cli/internal/cli/note.go) 与 daemon validator
+  // (lightcone/daemon/src/channel-manager.js) 都已在前置层拒绝该 shape；
+  // extension 端作为最后一道兜底再做防御 — 此断言锁定"按收紧后契约 noteId 必填"。
+  it('rejects xsec_token-alone：按收紧后契约 noteId（或 url）必填', async () => {
     const tool = new XhsGetNoteTool();
     const result = await tool.execute({ xsec_token: 'tk' });
     expect(result.isError).toBe(true);

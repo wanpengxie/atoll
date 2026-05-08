@@ -392,10 +392,27 @@ test('validateDeviceCommand: xhs.search / xhs.get-note / xhs.publish-status', ()
   validateDeviceCommand('xhs.get-my-recent', {});
   assert.throws(() => validateDeviceCommand('xhs.get-my-recent', { limit: 'lots' }), /limit/);
 
-  // get-note: url OR xsec_token required
-  assert.throws(() => validateDeviceCommand('xhs.get-note', {}), /url or xsec_token/);
+  // get-note: 必须 url，或 (note_id && xsec_token)。
+  // R4-T1 (round-3 codex#t61.1 / claude#t61.C1) 收紧合约：xsec_token 单独
+  // 无 note_id 在 XHS API 上是 dead-end，daemon validator 与 CLI + extension 三层对齐。
+  assert.throws(
+    () => validateDeviceCommand('xhs.get-note', {}),
+    /url, or both note_id and xsec_token/,
+  );
+  // xsec_token-only 必须被拒（旧合约接受，本次收紧）
+  assert.throws(
+    () => validateDeviceCommand('xhs.get-note', { xsec_token: 'abc' }),
+    /url, or both note_id and xsec_token/,
+  );
+  // note_id 单独也被拒（缺 xsec_token）
+  assert.throws(
+    () => validateDeviceCommand('xhs.get-note', { note_id: 'n1' }),
+    /url, or both note_id and xsec_token/,
+  );
+  // 正向：url 单独通过
   validateDeviceCommand('xhs.get-note', { url: 'https://xhs.com/note/x' });
-  validateDeviceCommand('xhs.get-note', { xsec_token: 'abc' });
+  // 正向：note_id + xsec_token 通过
+  validateDeviceCommand('xhs.get-note', { note_id: 'n1', xsec_token: 'abc' });
 
   // publish-status: note_id required (FX3 round-2 codex#t57.1).
   // correlation_id 是 dispatch envelope 字段（外层），不是 device-command params 字段。

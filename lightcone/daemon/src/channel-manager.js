@@ -156,10 +156,19 @@ export function validateDeviceCommand(type, params) {
       break;
     }
     case 'xhs.get-note': {
+      // R4-T1 (round-3 codex#t61.1 / claude#t61.C1) 收紧合约：
+      // get-note 必须 url，或 (note_id && xsec_token)。xsec_token 单独无 note_id
+      // 在 XHS API 上是 dead-end（无法构造 explore URL）。daemon validator 与
+      // CLI (xhs-cli/internal/cli/note.go) + extension (devices/xhs-extension/...
+      // get-note.ts) 三层合约对齐。
       const hasUrl = typeof params.url === 'string' && params.url.length > 0;
+      const hasNoteId = typeof params.note_id === 'string' && params.note_id.length > 0;
       const hasToken = typeof params.xsec_token === 'string' && params.xsec_token.length > 0;
-      if (!hasUrl && !hasToken) {
-        throw toRpcError('bad_request', `${type} requires url or xsec_token`);
+      if (!hasUrl && !(hasNoteId && hasToken)) {
+        throw toRpcError(
+          'bad_request',
+          `${type} requires url, or both note_id and xsec_token`,
+        );
       }
       break;
     }
