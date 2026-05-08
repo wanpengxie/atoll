@@ -79,7 +79,7 @@ describe('resolveDeviceConfig — input validation', () => {
 
 describe('resolveDeviceConfig — happy path', () => {
   it('returns ResolveSuccess on 200 with all fields', async () => {
-    const fetchMock = vi.fn(async () =>
+    const fetchMock: typeof fetch = vi.fn(async () =>
       fakeResponse(200, {
         ws_url: 'ws://10.0.0.1:9501',
         http_url: 'http://10.0.0.1:9501',
@@ -102,15 +102,16 @@ describe('resolveDeviceConfig — happy path', () => {
     }
 
     // POST body & path correct.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0];
+    const calls = (fetchMock as unknown as { mock: { calls: any[][] } }).mock.calls;
+    expect(calls.length).toBe(1);
+    const [url, init] = calls[0] as [string, RequestInit];
     expect(url).toBe('https://lightcone.example.com/api/device/resolve');
-    expect((init as RequestInit).method).toBe('POST');
-    expect(JSON.parse(String((init as RequestInit).body))).toEqual({ api_key: 'sk_dev_xxx' });
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(String(init.body))).toEqual({ api_key: 'sk_dev_xxx' });
   });
 
   it('strips trailing slash on serverUrl', async () => {
-    const fetchMock = vi.fn(async () =>
+    const fetchMock: typeof fetch = vi.fn(async () =>
       fakeResponse(200, {
         ws_url: 'ws://x',
         http_url: 'http://x',
@@ -125,7 +126,8 @@ describe('resolveDeviceConfig — happy path', () => {
       apiKey: 'k',
       fetchImpl: fetchMock,
     });
-    const [url] = fetchMock.mock.calls[0];
+    const calls = (fetchMock as unknown as { mock: { calls: any[][] } }).mock.calls;
+    const [url] = calls[0] as [string];
     expect(url).toBe('https://lightcone.example.com/api/device/resolve');
   });
 });

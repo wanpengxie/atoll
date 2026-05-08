@@ -45,7 +45,26 @@ pnpm build                 # 生产构建：app/chrome-extension/.output/chrome-
 
 ## Daemon 配置
 
-打开扩展 popup，填以下 5 字段并点 "连接"：
+### 主流程：1 个 api-key（推荐）
+
+打开扩展 popup，主入口只填 2 项：
+
+| 字段 | 说明 | 示例 |
+|---|---|---|
+| Coagent api-key | 在 lightcone server 创建 device 时分配的 key | `sk_dev_xxx` |
+| Server URL | lightcone server 部署地址；popup 默认 `https://lightcone-server`，必须改成真实部署域名 | `https://lightcone.example.com` |
+
+点 "连接" 后扩展走 `POST {Server URL}/api/device/resolve {api_key}`，
+反查到对应 daemon 的 `ws_url / http_url / device_id / user_id / channel_id /
+daemon_id`，落 `chrome.storage.local`，然后用 daemon WS URL 建立长连。
+
+resolve 失败（网络 / 401 / 404 / 429 / server 5xx）会在 popup 内显示中文友好
+错误，并提示「若 server 不可达，可展开 Advanced 直接配 daemon 5 字段」。
+
+### Advanced 折叠：旧 5 字段（dev / test）
+
+popup 下方 "⚙️ Advanced" 折叠区保留旧 5 字段，跳过 lightcone resolve 直接连
+daemon。多用于 lightcone server 暂不可用、本地起 daemon 调试等场景：
 
 | 字段 | 说明 | 示例 |
 |---|---|---|
@@ -55,8 +74,37 @@ pnpm build                 # 生产构建：app/chrome-extension/.output/chrome-
 | Device API Key | 与 daemon `DEVICE_KEYS` 中对应 device 的 key 一致 | `sk_dev_xxx` |
 | 主人 user_id（可选） | 写入 session sync 的 user_id | `user-001` |
 
-配置写入 `chrome.storage.local`（key=`coagent_device_config`）。Service Worker 启动时
-若 4 个核心字段（serverUrl/apiKey/deviceId 任一为空除外）齐全且自动重连开启，会自动连接。
+### Storage shape
+
+配置写入 `chrome.storage.local`（key = `coagent_device_config`）：
+
+```jsonc
+{
+  // 主入口字段
+  "lightconeServerUrl": "https://lightcone.example.com",
+
+  // Daemon 连接字段（resolve 自动填，或 advanced 手动填）
+  // serverUrl / wsUrl 为同一个值的 canonical+alias；daemonHttpBase / httpBase 同理
+  "serverUrl":      "ws://daemon-host:9501/device/xhs-laptop-001",
+  "wsUrl":          "ws://daemon-host:9501/device/xhs-laptop-001",
+  "daemonHttpBase": "http://daemon-host:9501",
+  "httpBase":       "http://daemon-host:9501",
+
+  "deviceId":  "xhs-laptop-001",
+  "apiKey":    "sk_dev_xxx",
+  "userId":    "user-001",
+
+  // Resolve 元数据（仅 main 入口流程会填，备用）
+  "channelId": "ch-1",
+  "daemonId":  "daemon-1",
+
+  "autoReconnect": true
+}
+```
+
+Service Worker 启动时若 `serverUrl/apiKey/deviceId` 三项齐全且 `autoReconnect`
+为 true，会自动连接。旧版本（仅含 `serverUrl/daemonHttpBase/apiKey/deviceId/
+userId/autoReconnect` 的 advanced shape）天然兼容，加载时新增字段为空不影响。
 
 ## 命令协议（spec §4）
 
@@ -111,7 +159,9 @@ Content-Type: application/json
 
 ## 常见问题
 
-**connect 报 "Device 配置不完整"** — 5 字段中 daemon WS URL / device api key / device id 任一为空。检查 popup。
+**connect 报 "Device 配置不完整"** — daemon WS URL / device api key / device id 任一为空。检查 popup（主入口走 resolve 自动填；advanced 需要全填）。
+
+**主入口 resolve 报 "Server 不可达 / 超时"** — 检查 Server URL 是否填的真实 lightcone 部署域名（默认 `https://lightcone-server` 是 placeholder）。临时绕过：展开 Advanced，手动填 daemon 5 字段。
 
 **callback 返回非 2xx** — daemon 校验 device_api_key 失败或 correlation_id 已过期；service worker console 会打印 `callback non-2xx` 含 status 与 body。
 
