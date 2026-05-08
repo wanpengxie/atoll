@@ -414,6 +414,22 @@ test('validateDeviceCommand: xhs.search / xhs.get-note / xhs.publish-status', ()
   // 正向：note_id + xsec_token 通过
   validateDeviceCommand('xhs.get-note', { note_id: 'n1', xsec_token: 'abc' });
 
+  // R5-T1 (round-4 codex#t66.1) 收紧：daemon validator 必须 trim 后判长度，
+  // 否则纯空白字符串通过 daemon RPC 直接打 device，破坏 t66 三层一致目标。
+  // 三层（CLI/extension/daemon）之前 CLI/extension 已 trim，daemon 是最后一层。
+  assert.throws(
+    () => validateDeviceCommand('xhs.get-note', { url: '   ' }),
+    /url, or both note_id and xsec_token/,
+  );
+  assert.throws(
+    () => validateDeviceCommand('xhs.get-note', { note_id: 'n1', xsec_token: '   ' }),
+    /url, or both note_id and xsec_token/,
+  );
+  assert.throws(
+    () => validateDeviceCommand('xhs.get-note', { note_id: '   ', xsec_token: 't1' }),
+    /url, or both note_id and xsec_token/,
+  );
+
   // publish-status: note_id required (FX3 round-2 codex#t57.1).
   // correlation_id 是 dispatch envelope 字段（外层），不是 device-command params 字段。
   assert.throws(() => validateDeviceCommand('xhs.publish-status', {}), /note_id/);

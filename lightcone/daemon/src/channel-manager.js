@@ -102,6 +102,11 @@ function _isPlainObject(v) {
   return v != null && typeof v === 'object' && !Array.isArray(v);
 }
 
+// R5-T1 (round-4 codex#t66.1): trim 后判长度的 boolean 谓词，配合 OR 分支使用。
+// 与 `_requireNonEmptyString` 同口径，但后者承担抛错语义，无法直接组合到
+// `xhs.get-note` 这类 (url) || (note_id && xsec_token) 的复合判定。
+const isNonEmptyString = (v) => typeof v === 'string' && v.trim().length > 0;
+
 function _requireNonEmptyString(params, field, type) {
   const value = params?.[field];
   if (typeof value !== 'string' || value.trim() === '') {
@@ -161,9 +166,12 @@ export function validateDeviceCommand(type, params) {
       // 在 XHS API 上是 dead-end（无法构造 explore URL）。daemon validator 与
       // CLI (xhs-cli/internal/cli/note.go) + extension (devices/xhs-extension/...
       // get-note.ts) 三层合约对齐。
-      const hasUrl = typeof params.url === 'string' && params.url.length > 0;
-      const hasNoteId = typeof params.note_id === 'string' && params.note_id.length > 0;
-      const hasToken = typeof params.xsec_token === 'string' && params.xsec_token.length > 0;
+      // R5-T1 (round-4 codex#t66.1) 三层合约最后一层：daemon validator 改用
+      // trim+length 判定，否则纯空白字符串 ({url:'   '}, {note_id:'n1', xsec_token:'   '})
+      // 直接打 daemon RPC 时仍能通过，破坏 CLI/extension 已收紧的端到端一致性。
+      const hasUrl = isNonEmptyString(params.url);
+      const hasNoteId = isNonEmptyString(params.note_id);
+      const hasToken = isNonEmptyString(params.xsec_token);
       if (!hasUrl && !(hasNoteId && hasToken)) {
         throw toRpcError(
           'bad_request',
