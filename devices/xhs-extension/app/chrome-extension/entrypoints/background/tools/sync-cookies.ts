@@ -195,23 +195,47 @@ export class SyncCookiesTool extends BaseTool {
       });
 
       if (!response.ok) {
-        const errorText = await response.text().catch(() => '');
+        // 错误路径：daemon 4xx/5xx body 通常是 {ok:false, error:{code,message}} 不含 cookie，
+        // 但 response 也不应被无差别拼回 message —— 仅取 status + 解析后的 error.message。
+        let errorMessage = '';
+        try {
+          const parsed = await response.json();
+          errorMessage = String(parsed?.error?.message ?? parsed?.message ?? '');
+        } catch {
+          // 解析失败时回退 status，绝不拼 raw text（防御 5xx 上游回写 cookie）。
+          errorMessage = '';
+        }
         return {
           success: false,
-          message: `device session 上报失败 (${response.status}): ${errorText}`,
+          message: errorMessage
+            ? `device session 上报失败 (${response.status}): ${errorMessage}`
+            : `device session 上报失败 (${response.status})`,
         };
       }
 
-      // daemon 端 200 即视为成功；body 可能含 {ok:true,...}
-      let bodyText = '';
+      // R3-T4 FX7 / round-2 review codex#t59.2：成功路径以前是
+      //   `device session 已上报: ${bodyText}` —— 把 daemon 回的整段 result（含
+      //   完整 cookies 数组、access-token / web_session 真值）拼进用户可见 message
+      //   + console log。
+      // 修复：daemon 改返回脱敏 envelope `{user_id, login_state, cookie_count,
+      //   last_updated_at, expires_at}`；这里只读 cookie_count 拼诊断 message，
+      //   不再透出 cookie 名 / 值。
+      let cookieCount: number | null = null;
       try {
-        bodyText = await response.text();
+        const parsed = await response.json();
+        const raw = parsed?.result?.cookie_count;
+        if (typeof raw === 'number' && Number.isFinite(raw)) {
+          cookieCount = raw;
+        }
       } catch {
-        // ignore
+        // 兼容空体 / 非 JSON：保持成功语义但不带计数。
       }
       return {
         success: true,
-        message: bodyText ? `device session 已上报: ${bodyText}` : 'device session 已上报',
+        message:
+          cookieCount != null
+            ? `device session 已上报 (${cookieCount} cookies)`
+            : 'device session 已上报',
       };
     } catch (error) {
       return {
