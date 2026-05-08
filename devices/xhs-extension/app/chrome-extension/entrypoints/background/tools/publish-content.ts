@@ -31,8 +31,8 @@ import { runInMainWorld } from './inject-script';
 //
 // R4-T2 进一步收紧（修 R3-T4 FX6 引入的 false-positive 回归）：
 //   - PUBLISH_API_URL_PATTERN 由 `/api/galaxy/note/` 前缀通配收紧为
-//     `/api/galaxy/note/(publish|submit)` 精确尾段（带 `[/?#]|$` 边界守卫，
-//     拒绝 `/publishabc` 字母后缀延伸误命中）。
+//     `/api/galaxy/note/(publish|submit)` 精确尾段（R5-T2 后边界守卫为 `[?#]|$`，
+//     既拒绝 `/publishabc` 字母后缀延伸，也拒绝 `/publish/draft` 等嵌套子路径）。
 //   - onApiCompleted 内强制 `details.method === 'POST'`，把 publish form 期间
 //     XHS 发起的 GET autosave / draft / template fetch / counter polling
 //     200 一律挡在主信号之外。
@@ -271,7 +271,7 @@ export const NOTE_ID_URL_PATTERN = /\/(?:explore|discovery\/item)\/([0-9a-f]{20,
 export const NOTE_DETAIL_PATTERN = NOTE_ID_URL_PATTERN;
 
 /**
- * R3-T4 FX6 + R4-T2：publish-result API URL 模式（webRequest filter 不支持
+ * R3-T4 FX6 + R4-T2 → R5-T2：publish-result API URL 模式（webRequest filter 不支持
  * 原生 regex，所以 manifest match-pattern 仍宽匹配 `/api/galaxy/note/*`，
  * 真正的精确尾段校验放在 onCompleted callback 内由本 regex 二次过滤）。
  *
@@ -280,9 +280,21 @@ export const NOTE_DETAIL_PATTERN = NOTE_ID_URL_PATTERN;
  * counter polling 等同前缀请求，任意 200 都会触发 settle resolve，重新引入
  * R2 修复要消除的 false-success（用户没真正点 publish 也被记成 ok callback）。
  *
+ * R5-T2 二次收紧背景：R4-T2 改完后尾段守卫还是 `(?:[/?#]|$)`，结果允许
+ * `/api/galaxy/note/(publish|submit)/<sub>` 任何嵌套子路径仍命中（codex t67.1 /
+ * claude t67.MAJOR-1）。`/publish/draft`、`/publish/autosave`、`/submit/check`
+ * 等同样 POST 200 的 publish-namespace 子端点会被误判 settle resolve，部分重引入
+ * R2/R3 修复要消除的 false-success。R5-T2 把守卫改为 `(?:[?#]|$)`，严禁任何
+ * `/publish/...` 或 `/submit/...` 嵌套子路径命中。
+ *
  * 收紧策略：
- *   - 仅匹配 `(publish|submit)` 两条已知 publish-result 端点（尾段必须严格
- *     收口，正则末尾的 `(?:[/?#]|$)` 防 `/publishabc` 字母后缀误命中）。
+ *   - 仅匹配 `(publish|submit)` 两条尾段（注：这是 R3/R4 推测的 seed allowlist，
+ *     **真实 XHS publish-result 端点未经 live trace 验证**——worker 环境无法跑
+ *     真实 publish；待 owner 在能跑真实 publish 的环境抓 webRequest trace 确认；
+ *     若实测尾段不同，按观测真实 path 重新 anchor regex，**不要回退到嵌套通配**）。
+ *   - 正则末尾的 `(?:[?#]|$)` 同时挡两类 false-positive：
+ *       a) `/publishabc` 字母后缀延伸（R4-T2 已挡）
+ *       b) `/publish/draft` 嵌套子路径（R5-T2 新挡）
  *   - 配合 onApiCompleted 内强制 `method === 'POST'`，把 GET autosave / draft
  *     /template / list 一律挡在主信号之外。
  *
@@ -290,13 +302,14 @@ export const NOTE_DETAIL_PATTERN = NOTE_ID_URL_PATTERN;
  *   1. chrome.devtools 打开 publish 页 → Network 面板 → fetch/XHR 过滤 →
  *      点 publish 按钮，找 status=200 / method=POST / 落在 `creator|edith
  *      .xiaohongshu.com/api/galaxy/note/...` 下的端点。
- *   2. 把新尾段加入下方 alternation（如 `(?:publish|submit|<new>)`），同步
- *      在 publish-content.test.ts `PUBLISH_API_URL_PATTERN` 单测里加一条 positive。
+ *   2. 把观测到的真实尾段加入下方 alternation（如 `(?:publish|submit|<new>)`），
+ *      同步在 publish-content.test.ts `PUBLISH_API_URL_PATTERN` 单测里加一条
+ *      positive。**严禁回退到嵌套通配**——发现新端点要 anchor 整段路径。
  *   3. 端点漏抓不致命：`onUpdated` NOTE_DETAIL_PATTERN URL fallback 仍能 settle，
  *      10min timeout 兜底。漏匹配只是 fast-path 失效；放过假端点才是要避免的 bug。
  */
 export const PUBLISH_API_URL_PATTERN =
-  /^https?:\/\/(?:creator|edith)\.xiaohongshu\.com\/api\/galaxy\/note\/(?:publish|submit)(?:[/?#]|$)/i;
+  /^https?:\/\/(?:creator|edith)\.xiaohongshu\.com\/api\/galaxy\/note\/(?:publish|submit)(?:[?#]|$)/i;
 
 /**
  * R3-T4 FX6：chrome.webRequest.onCompleted filter 的 urls 字段，list pattern。
