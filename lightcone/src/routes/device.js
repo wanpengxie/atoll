@@ -1,9 +1,35 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { PayloadType, SenderKind } from '@coagent/payload-types';
-import { getDb, getChannelById, getMachineByApiKey } from '../db/index.js';
+import {
+  getDb,
+  getChannelById,
+  getMachineByApiKey,
+  getDeviceByApiKey,
+  getMachineById,
+} from '../db/index.js';
 import { isMachineOnline } from '../daemon/connections.js';
 import { requestFromDaemon } from '../daemon/index.js';
+
+// Process-local token-bucket rate limiter for /resolve.
+// Multi-instance deploys can swap this out via dependency injection.
+const RESOLVE_DEFAULT_LIMIT = 30;       // requests
+const RESOLVE_DEFAULT_WINDOW_MS = 60_000; // per minute
+const resolveBuckets = new Map(); // key → { tokens, resetAt }
+
+function defaultResolveRateLimit(key, { limit = RESOLVE_DEFAULT_LIMIT, windowMs = RESOLVE_DEFAULT_WINDOW_MS } = {}) {
+  const now = Date.now();
+  const bucket = resolveBuckets.get(key);
+  if (!bucket || bucket.resetAt <= now) {
+    resolveBuckets.set(key, { tokens: limit - 1, resetAt: now + windowMs });
+    return true;
+  }
+  if (bucket.tokens > 0) {
+    bucket.tokens -= 1;
+    return true;
+  }
+  return false;
+}
 
 const STATUS_TO_PAYLOAD_TYPE = {
   accepted: PayloadType.DISPATCH_ACCEPTED,
@@ -29,12 +55,48 @@ export function createDeviceRouter({
   getDbImpl = getDb,
   getChannelByIdImpl = getChannelById,
   getMachineByApiKeyImpl = getMachineByApiKey,
+  getDeviceByApiKeyImpl = getDeviceByApiKey,
+  getMachineByIdImpl = getMachineById,
   isMachineOnlineImpl = isMachineOnline,
   requestFromDaemonImpl = requestFromDaemon,
+  resolveRateLimitImpl = defaultResolveRateLimit,
   uuidv4Impl = uuidv4,
   daemonRequestTimeoutMs = 10_000,
 } = {}) {
   const router = Router();
+
+  // POST /api/device/resolve — extension popup → server reverse-lookup
+  router.post('/resolve', async (req, res) => {
+    const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+    if (!resolveRateLimitImpl(ip)) {
+      return res.status(429).json({ error: 'Too many resolve requests' });
+    }
+
+    const apiKey = String(req.body?.api_key ?? '').trim();
+    if (!apiKey) return res.status(400).json({ error: 'api_key required' });
+
+    const device = await getDeviceByApiKeyImpl(getDbImpl(), apiKey);
+    if (!device || device.status !== 'active') {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+
+    const daemonId = device.daemon_id;
+    if (!daemonId) return res.status(503).json({ error: 'Device has no daemon assigned' });
+
+    const machine = await getMachineByIdImpl(getDbImpl(), daemonId);
+    if (!machine || !machine.daemon_host || !machine.daemon_port) {
+      return res.status(503).json({ error: 'Daemon endpoint not registered' });
+    }
+
+    return res.json({
+      ws_url:    `ws://${machine.daemon_host}:${machine.daemon_port}`,
+      http_url:  `http://${machine.daemon_host}:${machine.daemon_port}`,
+      device_id: device.device_id,
+      user_id:   device.user_id,
+      channel_id: device.channel_id,
+      daemon_id: device.daemon_id,
+    });
+  });
 
   router.post('/result', async (req, res) => {
     const token = bearerToken(req);

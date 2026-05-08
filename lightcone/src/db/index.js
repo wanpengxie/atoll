@@ -387,6 +387,41 @@ export async function initDb() {
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
 
+  // ── devices table (T73 / M1.2-T1) ────────────────────────────────────────────
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS devices (
+      id           VARCHAR(36)  PRIMARY KEY,
+      device_id    VARCHAR(64)  NOT NULL,
+      api_key      VARCHAR(80)  NOT NULL UNIQUE,
+      user_id      VARCHAR(36)  NOT NULL,
+      channel_id   VARCHAR(36)  DEFAULT NULL,
+      daemon_id    VARCHAR(36)  DEFAULT NULL,
+      device_type  VARCHAR(32)  NOT NULL,
+      status       VARCHAR(16)  NOT NULL DEFAULT 'active',
+      created_at   DATETIME     DEFAULT NOW(),
+      revoked_at   DATETIME     DEFAULT NULL,
+      KEY idx_devices_daemon_status (daemon_id, status),
+      KEY idx_devices_user (user_id)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+
+  // ── machines.daemon_host / daemon_port / capabilities migration ──────────────
+  for (const [col, ddl] of [
+    ['daemon_host',  'ALTER TABLE machines ADD COLUMN daemon_host VARCHAR(255) DEFAULT NULL'],
+    ['daemon_port',  'ALTER TABLE machines ADD COLUMN daemon_port INT          DEFAULT NULL'],
+    ['capabilities', 'ALTER TABLE machines ADD COLUMN capabilities TEXT        DEFAULT NULL'],
+  ]) {
+    const [cols] = await db.execute(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'machines' AND COLUMN_NAME = ?`,
+      [col]
+    );
+    if (cols.length === 0) {
+      await db.execute(ddl);
+      console.error(`[DB] Added ${col} column to machines`);
+    }
+  }
+
   // ── skills tables ─────────────────────────────────────────────────────────────
   await db.execute(`
     CREATE TABLE IF NOT EXISTS skills (
@@ -2011,6 +2046,95 @@ export async function insertActionLog(db, log) {
 }
 
 // ─── quota / plan ─────────────────────────────────────────────────────────────
+
+// ─── devices (T73 / M1.2-T1) ─────────────────────────────────────────────────
+
+function rowToDevice(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    device_id: row.device_id,
+    api_key: row.api_key,
+    user_id: row.user_id,
+    channel_id: row.channel_id ?? null,
+    daemon_id: row.daemon_id ?? null,
+    device_type: row.device_type,
+    status: row.status,
+    created_at: row.created_at,
+    revoked_at: row.revoked_at ?? null,
+  };
+}
+
+export async function insertDevice(db, device) {
+  await db.execute(
+    `INSERT INTO devices
+       (id, device_id, api_key, user_id, channel_id, daemon_id, device_type, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      device.id,
+      device.device_id,
+      device.api_key,
+      device.user_id,
+      device.channel_id ?? null,
+      device.daemon_id ?? null,
+      device.device_type,
+      device.status ?? 'active',
+    ]
+  );
+  const [rows] = await db.execute(`SELECT * FROM devices WHERE id = ?`, [device.id]);
+  return rowToDevice(rows[0]);
+}
+
+export async function getDeviceById(db, id) {
+  const [rows] = await db.execute(`SELECT * FROM devices WHERE id = ?`, [id]);
+  return rowToDevice(rows[0] ?? null);
+}
+
+export async function getDeviceByApiKey(db, apiKey) {
+  const [rows] = await db.execute(`SELECT * FROM devices WHERE api_key = ?`, [apiKey]);
+  return rowToDevice(rows[0] ?? null);
+}
+
+export async function getDevices(db, filters = {}) {
+  const where = [];
+  const args = [];
+  if (filters.user_id)    { where.push('user_id = ?');    args.push(filters.user_id); }
+  if (filters.channel_id) { where.push('channel_id = ?'); args.push(filters.channel_id); }
+  if (filters.daemon_id)  { where.push('daemon_id = ?');  args.push(filters.daemon_id); }
+  if (filters.status)     { where.push('status = ?');     args.push(filters.status); }
+  if (filters.device_type){ where.push('device_type = ?');args.push(filters.device_type); }
+  const sql = `SELECT * FROM devices${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at DESC`;
+  const [rows] = await db.execute(sql, args);
+  return rows.map(rowToDevice);
+}
+
+export async function getDevicesByDaemonId(db, daemonId) {
+  return getDevices(db, { daemon_id: daemonId, status: 'active' });
+}
+
+export async function revokeDevice(db, id) {
+  await db.execute(
+    `UPDATE devices SET status = 'revoked', revoked_at = COALESCE(revoked_at, NOW()) WHERE id = ?`,
+    [id]
+  );
+  return getDeviceById(db, id);
+}
+
+export async function updateMachineDaemonInfo(db, id, fields) {
+  const updates = {};
+  if ('daemon_host' in fields)  updates.daemon_host = fields.daemon_host ?? null;
+  if ('daemon_port' in fields)  updates.daemon_port = fields.daemon_port ?? null;
+  if ('capabilities' in fields) updates.capabilities = fields.capabilities == null
+    ? null
+    : (typeof fields.capabilities === 'string' ? fields.capabilities : JSON.stringify(fields.capabilities));
+  if ('status' in fields)         updates.status = fields.status;
+  if ('last_heartbeat' in fields) updates.last_heartbeat = fields.last_heartbeat;
+  if (Object.keys(updates).length === 0) return getMachineById(db, id);
+  const sets = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+  await db.execute(`UPDATE machines SET ${sets} WHERE id = ?`, [...Object.values(updates), id]);
+  const [rows] = await db.execute(`SELECT * FROM machines WHERE id = ?`, [id]);
+  return rows[0] ?? null;
+}
 
 export async function checkQuota(db, serverId, resource) {
   const [serverRows] = await db.execute(`SELECT plan FROM servers WHERE id = ?`, [serverId]);
