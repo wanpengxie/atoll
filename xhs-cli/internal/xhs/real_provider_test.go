@@ -336,6 +336,112 @@ func TestLoadRealConfigFromEnv_RequiresAbsoluteURL(t *testing.T) {
 	}
 }
 
+// TestRealProvider_GetNote_DispatchShape（fix-spec.md §R3-T1.FX2 round-2 codex#t56.2）:
+// real 模式 GetNote 应能透传 url-only / xsec-token-only / 三者皆给 三种 args 形态，
+// 由 daemon validator + extension 端 URL 解析 fallback 配合处理。
+func TestRealProvider_GetNote_DispatchShape(t *testing.T) {
+	cases := []struct {
+		name        string
+		args        GetNoteArgs
+		wantNoteID  any // nil 表示字段应不存在；string 表示精确匹配
+		wantURL     any
+		wantXsecTok any
+	}{
+		{
+			name:        "url-only",
+			args:        GetNoteArgs{URL: "https://www.xiaohongshu.com/explore/abc123?xsec_token=tk1"},
+			wantNoteID:  nil,
+			wantURL:     "https://www.xiaohongshu.com/explore/abc123?xsec_token=tk1",
+			wantXsecTok: nil,
+		},
+		{
+			name:        "xsec-token-only",
+			args:        GetNoteArgs{XsecToken: "tk2"},
+			wantNoteID:  nil,
+			wantURL:     nil,
+			wantXsecTok: "tk2",
+		},
+		{
+			name: "all-three-given",
+			args: GetNoteArgs{
+				NoteID:    "n1",
+				URL:       "https://www.xiaohongshu.com/discovery/item/n1?xsec_token=tk3",
+				XsecToken: "tk3",
+			},
+			wantNoteID:  "n1",
+			wantURL:     "https://www.xiaohongshu.com/discovery/item/n1?xsec_token=tk3",
+			wantXsecTok: "tk3",
+		},
+		{
+			name:        "note-id-only-with-token",
+			args:        GetNoteArgs{NoteID: "n2", XsecToken: "tk4"},
+			wantNoteID:  "n2",
+			wantURL:     nil,
+			wantXsecTok: "tk4",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newFakeDaemon()
+			defer d.server.Close()
+			p := newRealProviderForTest(d)
+
+			if _, err := p.GetNote(context.Background(), tc.args); err != nil {
+				t.Fatalf("get-note: %v", err)
+			}
+			if d.lastParams["type"] != "xhs.get-note" {
+				t.Fatalf("type mismatch: %v", d.lastParams["type"])
+			}
+			inner, ok := d.lastParams["params"].(map[string]any)
+			if !ok {
+				t.Fatalf("inner params not object: %T", d.lastParams["params"])
+			}
+			assertOptional := func(field string, want any) {
+				got, has := inner[field]
+				if want == nil {
+					if has {
+						t.Fatalf("%s should be absent, got %v", field, got)
+					}
+					return
+				}
+				if got != want {
+					t.Fatalf("%s mismatch: want %v, got %v", field, want, got)
+				}
+			}
+			assertOptional("note_id", tc.wantNoteID)
+			assertOptional("url", tc.wantURL)
+			assertOptional("xsec_token", tc.wantXsecTok)
+		})
+	}
+}
+
+// TestRealProvider_PublishStatus_DispatchShape（fix-spec.md §R3-T1.FX3 round-2 codex#t57.1）:
+// publish-status RPC params 必须含 note_id（与 daemon validator + extension 期望对齐），
+// 不应误带 correlation_id（后者是 dispatch envelope 字段，不是 device-command params 字段）。
+func TestRealProvider_PublishStatus_DispatchShape(t *testing.T) {
+	d := newFakeDaemon()
+	defer d.server.Close()
+	p := newRealProviderForTest(d)
+
+	if _, err := p.PublishStatus(context.Background(), PublishStatusArgs{NoteID: "note-99"}); err != nil {
+		t.Fatalf("publish-status: %v", err)
+	}
+	if d.lastParams["type"] != "xhs.publish-status" {
+		t.Fatalf("type mismatch: %v", d.lastParams["type"])
+	}
+	inner, ok := d.lastParams["params"].(map[string]any)
+	if !ok {
+		t.Fatalf("inner params not object: %T", d.lastParams["params"])
+	}
+	if inner["note_id"] != "note-99" {
+		t.Fatalf("note_id mismatch: %v", inner["note_id"])
+	}
+	// dispatch params 不应携带 correlation_id（该字段属于 envelope 外层）。
+	if _, has := inner["correlation_id"]; has {
+		t.Fatalf("publish-status RPC params must NOT contain 'correlation_id', got: %v", inner)
+	}
+}
+
 // TestPublishRealMode_NoContentInline（fix-spec.md §Fix-T1.1）：
 // real 模式 RPC 不应携带 inline content，只发 absolute content_path。
 func TestPublishRealMode_NoContentInline(t *testing.T) {
