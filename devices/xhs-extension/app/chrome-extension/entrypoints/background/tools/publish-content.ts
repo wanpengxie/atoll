@@ -7,17 +7,30 @@ import {
 import { BaseTool } from './base-tool';
 import { runInMainWorld } from './inject-script';
 
-// ─── M1.1 Fix-T4 §1: publish 等真发布完成 (P0 critical) ──────────────────────
+// ─── publish 等真发布完成（M1.1 Fix-T4 §1 → R3-T4 FX6 收紧） ──────────────────
 //
 // 旧实现把表单填完即视为成功 → daemon 收到 ok callback 但用户根本没点
-// publish。修复方式：runInMainWorld 仍然 fill-only，但在 background SW 这一层
-// 挂 `chrome.tabs.onUpdated` + `chrome.tabs.onRemoved` 监听 publish tab：
-//   - URL 离开 `/publish/publish` 页面 → resolve {url, note_id?}
-//   - tab 被关闭 → reject `publish_canceled`
-//   - 10 min 没有任何变化 → reject `publish_timeout`
+// publish。M1.1 Fix-T4 在 background SW 挂 `chrome.tabs.onUpdated` +
+// `chrome.tabs.onRemoved` 监听 publish tab —— 但**任意离开 publish 页**都
+// 当 success（包括 `/post/list` 创作者中心列表）。round-2 codex#t59.1 +
+// claude t59-M1/M2 共识 critical：
+//
+//   - 用户取消发布回到列表页也被记成 ok callback；daemon 端写错 dispatch.completed
+//   - spec §1 要求"监听 publish-result API 或 URL navigate"，API watch 完全缺失
+//
+// R3-T4 FX6 收紧：
+//   1) 增加 `chrome.webRequest.onCompleted` filter，监听 creator/edith
+//      `/api/galaxy/note/*` 任意 URL；status 200 即 settle resolve（webRequest
+//      不能直接读 body，URL 模式 + 状态码组合作信号；note_id 由后续
+//      onUpdated NOTE_DETAIL_PATTERN 命中时补，没补到留 null 也不阻塞 ok）
+//   2) `chrome.tabs.onUpdated` 改为辅助信号 —— 仅当 url 命中 NOTE_DETAIL_PATTERN
+//      （`/explore/<hex>` / `/discovery/item/<hex>`）才 resolve；其它非空 url
+//      （如 `/post/list`、空白 `/`、其它 xhs 域）视为用户取消发布 →
+//      reject `PublishCanceledError`
+//   3) tab 关闭 / 10min 超时仍按原 canceled / timeout 路径
 //
 // `waitForPublishCompletion` 抽成顶层 export 是为了 vitest 可注入 chromeApi
-// hook，单测里用 fake event 驱动完整生命周期。
+// hook，单测里用 fake event 驱动完整生命周期（含 webRequest 注入位）。
 
 /** 完成发布后回吐给 daemon 的最小载荷。 */
 export interface PublishCompletionResult {
@@ -27,6 +40,16 @@ export interface PublishCompletionResult {
   note_id: string | null;
 }
 
+/** webRequest.onCompleted 注入接口；测试用 fake 事件驱动。 */
+export interface WebRequestOnCompletedLike {
+  addListener(
+    callback: (details: chrome.webRequest.WebResponseCacheDetails) => void,
+    filter: chrome.webRequest.RequestFilter,
+    opt_extraInfoSpec?: string[]
+  ): void;
+  removeListener(callback: (details: chrome.webRequest.WebResponseCacheDetails) => void): void;
+}
+
 /** 等待选项；chromeApi 仅供单测注入。 */
 export interface PublishWaitOptions {
   /** 最长等待时间，默认 10 分钟（spec §Fix-T4-1）。 */
@@ -34,6 +57,8 @@ export interface PublishWaitOptions {
   chromeApi?: {
     tabsOnUpdated: Pick<chrome.tabs.TabUpdatedEvent, 'addListener' | 'removeListener'>;
     tabsOnRemoved: Pick<chrome.tabs.TabRemovedEvent, 'addListener' | 'removeListener'>;
+    /** R3-T4 FX6: publish-result API watch；测试可注入 fake。 */
+    webRequestOnCompleted?: WebRequestOnCompletedLike;
   };
 }
 
@@ -57,23 +82,55 @@ export class PublishTimeoutError extends Error {
 
 /**
  * publish 表单 URL 模式 —— 用户停留在该页面意味着尚未发布。
- * 离开此模式视为完成（成功或被用户主动跳走，UX 上等价）。
+ * 离开此页面**不再**直接视为成功，需要进一步辨别去向（NOTE_DETAIL = 成功，
+ * 其它 = 取消）。
  */
 export const PUBLISH_PAGE_PATTERN = /creator\.xiaohongshu\.com\/(?:publish|new)\/(?:publish|note)/i;
 
 /**
- * XHS 笔记详情 URL 模式，用于提取 note_id（hex 24 位）。
+ * XHS 笔记详情 URL 模式，用于提取 note_id（hex 20+ 位），同时作为
+ * "发布完成"权威跳转目标。R3-T4 FX6：onUpdated 仅在 url 命中本模式时 resolve。
  * 兼容 `/explore/<id>` 与 `/discovery/item/<id>` 两种形态。
  */
 export const NOTE_ID_URL_PATTERN = /\/(?:explore|discovery\/item)\/([0-9a-f]{20,})/i;
+
+/** R3-T4 FX6：NOTE_DETAIL 别名导出，语义更清晰，用作"发布成功"信号。 */
+export const NOTE_DETAIL_PATTERN = NOTE_ID_URL_PATTERN;
+
+/**
+ * R3-T4 FX6：publish-result API URL 模式（webRequest filter 不支持原生
+ * regex，但 onCompleted callback 内可二次校验）。XHS 创作者后台 publish 走
+ * `creator.xiaohongshu.com/api/galaxy/note/*`，部分路径走业务后端
+ * `edith.xiaohongshu.com/api/galaxy/note/*`，二者均覆盖。
+ */
+export const PUBLISH_API_URL_PATTERN =
+  /^https?:\/\/(?:creator|edith)\.xiaohongshu\.com\/api\/galaxy\/note\//i;
+
+/**
+ * R3-T4 FX6：chrome.webRequest.onCompleted filter 的 urls 字段，list pattern。
+ * 单独 export 让 background recovery hook 与单测使用一致的过滤集合。
+ */
+export const PUBLISH_API_FILTER_URLS = [
+  '*://creator.xiaohongshu.com/api/galaxy/note/*',
+  '*://edith.xiaohongshu.com/api/galaxy/note/*',
+];
 
 /** 默认 publish 等待超时：10 分钟。 */
 export const DEFAULT_PUBLISH_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
  * 等待 publish tab 真正发布完成。
- * 失败时抛 `PublishCanceledError` / `PublishTimeoutError`，code 字段会被
- * cmd-handlers-init.wrapTool 透传到 daemon callback envelope。
+ *
+ * R3-T4 FX6 后语义（spec §1）：
+ *   - publish-result API 200（`creator|edith.xiaohongshu.com/api/galaxy/note/*`）
+ *     → settle resolve（webRequest 不能读 body，URL+status 即信号；note_id 待
+ *     onUpdated NOTE_DETAIL 命中时补；url 当前 tab url 已可用则取，否则空串）
+ *   - tab 跳转到 NOTE_DETAIL_PATTERN（`/explore/<hex>` / `/discovery/item/<hex>`）
+ *     → settle resolve（拿得到 note_id）
+ *   - tab 跳转到任意非 PUBLISH_PAGE 且非 NOTE_DETAIL 的 url（典型 `/post/list`、
+ *     `/`、其它 xhs 页）→ reject `PublishCanceledError`（用户取消发布走人）
+ *   - tab 关闭 → reject `PublishCanceledError`
+ *   - 超时 → reject `PublishTimeoutError`
  */
 export function waitForPublishCompletion(
   tabId: number,
@@ -82,9 +139,18 @@ export function waitForPublishCompletion(
   const timeoutMs = opts.timeoutMs ?? DEFAULT_PUBLISH_WAIT_TIMEOUT_MS;
   const tabsOnUpdated = opts.chromeApi?.tabsOnUpdated ?? chrome.tabs.onUpdated;
   const tabsOnRemoved = opts.chromeApi?.tabsOnRemoved ?? chrome.tabs.onRemoved;
+  // webRequest 在 SW 环境下本身可用，但单测里没有；注入位允许测试驱动 fake。
+  const webRequestOnCompleted: WebRequestOnCompletedLike | undefined =
+    opts.chromeApi?.webRequestOnCompleted ??
+    (typeof chrome !== 'undefined' && chrome?.webRequest?.onCompleted
+      ? (chrome.webRequest.onCompleted as unknown as WebRequestOnCompletedLike)
+      : undefined);
 
   return new Promise<PublishCompletionResult>((resolve, reject) => {
     let settled = false;
+    /** 最近一次已知的 publish tab url（onUpdated 看到的就缓存），webRequest
+     *  resolve 时拿来作 fallback url。 */
+    let lastKnownUrl = '';
 
     const settle = (fn: () => void) => {
       if (settled) return;
@@ -99,6 +165,13 @@ export function waitForPublishCompletion(
       } catch {
         /* ignore */
       }
+      if (webRequestOnCompleted) {
+        try {
+          webRequestOnCompleted.removeListener(onApiCompleted);
+        } catch {
+          /* ignore */
+        }
+      }
       clearTimeout(timer);
       fn();
     };
@@ -111,12 +184,50 @@ export function waitForPublishCompletion(
       if (id !== tabId) return;
       const url = (changeInfo.url ?? tab?.url ?? '').trim();
       if (!url) return;
-      // 仍在 publish 表单页 → 还没点 publish。
+      lastKnownUrl = url;
+      // 仍在 publish 表单页 → 还没点 publish；继续等。
       if (PUBLISH_PAGE_PATTERN.test(url)) return;
-      // 离开 publish 表单 → 视为发布完成（XHS 通常跳到创作者中心或笔记详情）。
-      const match = url.match(NOTE_ID_URL_PATTERN);
-      const note_id = match ? match[1] : null;
-      settle(() => resolve({ url, note_id }));
+      // 命中笔记详情页 → 发布成功，提取 note_id。
+      const match = url.match(NOTE_DETAIL_PATTERN);
+      if (match) {
+        const note_id = match[1];
+        settle(() => resolve({ url, note_id }));
+        return;
+      }
+      // R3-T4 FX6：离开 publish 表单但**不是**笔记详情（例如跳到 `/post/list`
+      // 列表页、空白页、登录页）→ 用户取消发布，绝不能算 success。
+      settle(() =>
+        reject(
+          new PublishCanceledError(
+            `publish tab navigated away to non-detail page: ${url}`,
+          ),
+        ),
+      );
+    };
+
+    /**
+     * R3-T4 FX6：webRequest.onCompleted。XHS 后端 publish 接口在 200 时即代表
+     * 笔记已落库，UI 才会跳转。早期信号比 onUpdated 命中详情页快几百 ms，
+     * 用作主信号；后续 onUpdated 若再命中详情页，由 settled 守门只 resolve 一次。
+     */
+    const onApiCompleted = (details: chrome.webRequest.WebResponseCacheDetails) => {
+      if (typeof details?.tabId === 'number' && details.tabId !== tabId) return;
+      if (details.statusCode !== 200) return;
+      // 二次校验 URL 模式（manifest filter 已经粗筛，这里防 chrome 实现扩展 filter
+      // 范围带来的误命中）。
+      const apiUrl = String(details.url ?? '');
+      if (!PUBLISH_API_URL_PATTERN.test(apiUrl)) return;
+      // webRequest 不能直接拿 response body → note_id 暂留 null（除非 tab 已经
+      // 抢先跳到详情页）。url 选取顺序：
+      //   1) lastKnownUrl 若已是 NOTE_DETAIL（拿得到 note_id）→ 优先
+      //   2) 否则 API URL 自身（更真实地反映"发布完成"动作；publish 表单 url
+      //      不再算 completion url，避免回传给 daemon 显得没跳转）
+      const detailMatch = lastKnownUrl.match(NOTE_DETAIL_PATTERN);
+      if (detailMatch) {
+        settle(() => resolve({ url: lastKnownUrl, note_id: detailMatch[1] }));
+        return;
+      }
+      settle(() => resolve({ url: apiUrl, note_id: null }));
     };
 
     const onRemoved = (id: number) => {
@@ -130,6 +241,13 @@ export function waitForPublishCompletion(
 
     tabsOnUpdated.addListener(onUpdated);
     tabsOnRemoved.addListener(onRemoved);
+    if (webRequestOnCompleted) {
+      // webRequest filter 仅支持 manifest match-pattern；regex 二次校验在
+      // onApiCompleted 内做。extraInfoSpec 留空（不需要 responseHeaders）。
+      webRequestOnCompleted.addListener(onApiCompleted, {
+        urls: PUBLISH_API_FILTER_URLS,
+      });
+    }
   });
 }
 
