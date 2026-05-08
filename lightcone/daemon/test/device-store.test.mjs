@@ -108,3 +108,125 @@ test('DeviceStore.size reports total unique entries', () => {
   // distinct deviceIds = {a (server), } → 1
   assert.equal(store.size(), 1);
 });
+
+// ── T78 (M1.2-FIX-C): server-revoke authoritative tombstone ─────────────────
+// Without these guards, env fallback would silently re-authenticate a deviceId
+// the server has already revoked — see DeviceStore header note for full
+// rationale. Each test below pins one branch of the new verifyKey() logic.
+
+test('T78: remove() tombstones server-managed id; env fallback for same id is rejected', () => {
+  // Operator seeds env (dev fallback) with device-A:key-X; server pulls
+  // device-A:key-Y; then revokes device-A. The original env key MUST NOT
+  // re-authenticate after revoke.
+  const revoked = [];
+  const store = new DeviceStore({
+    envEntries: new Map([['device-A', 'key-X']]),
+    onRevoke: (id) => revoked.push(id),
+  });
+  store.upsert({ device_id: 'device-A', api_key: 'key-Y' });
+  // sanity: server key works, env key shadowed
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'key-Y' }), true);
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'key-X' }), false);
+
+  store.remove('device-A');
+  // After revoke: neither key works. Env fallback explicitly disabled.
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'key-Y' }), false);
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'key-X' }), false);
+  assert.deepEqual(revoked, ['device-A']);
+  assert.equal(store.revokedServerIds.has('device-A'), true);
+  assert.equal(store.serverManagedIds.has('device-A'), true);
+});
+
+test('T78: replaceServer() drop diff tombstones; server-managed id never falls back to env', () => {
+  // Same scenario via replaceServer (reconnect re-pull dropping a device).
+  const revoked = [];
+  const store = new DeviceStore({
+    envEntries: new Map([['device-A', 'key-X']]),
+    onRevoke: (id) => revoked.push(id),
+  });
+  store.replaceServer([{ device_id: 'device-A', api_key: 'key-Y' }]);
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'key-Y' }), true);
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'key-X' }), false);
+
+  // Re-pull no longer includes device-A (server-side revoke between syncs).
+  store.replaceServer([]);
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'key-Y' }), false);
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'key-X' }), false);
+  assert.deepEqual(revoked, ['device-A']);
+  assert.equal(store.revokedServerIds.has('device-A'), true);
+});
+
+test('T78: re-issuing a tombstoned id via upsert lifts the tombstone', () => {
+  // Operator revoke + re-create same device_id flow: the new server key must
+  // verify, env still must not.
+  const store = new DeviceStore({ envEntries: new Map([['device-A', 'key-X']]) });
+  store.upsert({ device_id: 'device-A', api_key: 'key-Y' });
+  store.remove('device-A');
+  assert.equal(store.revokedServerIds.has('device-A'), true);
+
+  store.upsert({ device_id: 'device-A', api_key: 'key-Z' });
+  assert.equal(store.revokedServerIds.has('device-A'), false, 'tombstone must clear on re-issue');
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'key-Z' }), true);
+  // Old server key + env key still rejected.
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'key-Y' }), false);
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'key-X' }), false);
+});
+
+test('T78: re-issuing a tombstoned id via replaceServer lifts the tombstone', () => {
+  // Same as above but via the bulk re-pull path (reconnect re-creates device).
+  const store = new DeviceStore({ envEntries: new Map([['device-A', 'key-X']]) });
+  store.replaceServer([{ device_id: 'device-A', api_key: 'key-Y' }]);
+  store.replaceServer([]); // drop → tombstoned
+  assert.equal(store.revokedServerIds.has('device-A'), true);
+
+  store.replaceServer([{ device_id: 'device-A', api_key: 'key-Z' }]);
+  assert.equal(store.revokedServerIds.has('device-A'), false);
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'key-Z' }), true);
+  assert.equal(store.verifyKey({ deviceId: 'device-A', key: 'key-X' }), false);
+});
+
+test('T78: env-only ids (server never touched) keep working — fallback only blocked for server-managed ids', () => {
+  // Regression guard: tombstone semantics only apply to ids the server has
+  // actually managed. Pure env entries must continue to verify.
+  const store = new DeviceStore({
+    envEntries: new Map([
+      ['env-only', 'env-key'],
+      ['shared', 'env-shared'],
+    ]),
+  });
+  // server only manages 'shared' (with a different key); 'env-only' remains
+  // pure env.
+  store.upsert({ device_id: 'shared', api_key: 'srv-shared' });
+  assert.equal(store.verifyKey({ deviceId: 'env-only', key: 'env-key' }), true);
+  assert.equal(store.verifyKey({ deviceId: 'shared', key: 'srv-shared' }), true);
+  assert.equal(store.verifyKey({ deviceId: 'shared', key: 'env-shared' }), false);
+
+  // Revoke 'shared': env-only still fine, shared fully tombstoned.
+  store.remove('shared');
+  assert.equal(store.verifyKey({ deviceId: 'env-only', key: 'env-key' }), true);
+  assert.equal(store.verifyKey({ deviceId: 'shared', key: 'env-shared' }), false);
+  assert.equal(store.verifyKey({ deviceId: 'shared', key: 'srv-shared' }), false);
+});
+
+test('T78: snapshot omits env entries shadowed by server authority (active or revoked)', () => {
+  // Snapshot should reflect what verifyKey() would accept — env entries for
+  // any id the server has managed are shadowed entirely.
+  const store = new DeviceStore({
+    envEntries: new Map([
+      ['env-only', 'ek'],
+      ['shared', 'env-shared'],
+    ]),
+  });
+  store.upsert({ device_id: 'shared', api_key: 'srv-shared' });
+  let snap = store.snapshot();
+  assert.equal(snap.size, 2);
+  assert.equal(snap.get('env-only').source, 'env');
+  assert.equal(snap.get('shared').source, 'server');
+
+  store.remove('shared');
+  snap = store.snapshot();
+  // 'shared' has no server entry and env is shadowed → omitted entirely.
+  assert.equal(snap.has('shared'), false);
+  assert.equal(snap.get('env-only').source, 'env');
+  assert.equal(snap.size, 1);
+});

@@ -18,6 +18,28 @@
 // or dropped from a replaceServer set). index.js wires it to
 // DeviceWsServer.disconnect so an already-connected extension is forcibly
 // dropped right after revoke (T74 §2 contract).
+//
+// T78 (M1.2-FIX-C) — server-revoke authoritative tombstone:
+//   Without a tombstone, `remove()` would simply delete the server entry and
+//   verifyKey() would silently fall back to the env map (default
+//   COAGENT_DEVICE_SOURCE=both seeds env). That violates the #74 "server
+//   revoke → forced disconnect" contract: an attacker with the original env
+//   key could re-authenticate after the operator revoked the device on the
+//   server.
+//
+//   Two sticky sets enforce server authority over any deviceId the server
+//   has ever managed:
+//     - `serverManagedIds`  — every deviceId the server has pulled/pushed
+//                              (active OR revoked). Once present, env can
+//                              never serve this id again, even if the
+//                              server map is later cleared.
+//     - `revokedServerIds`  — currently-tombstoned ids (revoked or dropped
+//                              by replaceServer). verifyKey rejects these
+//                              outright before consulting any other source.
+//
+//   Re-issuing the same deviceId via upsert() / replaceServer() lifts the
+//   tombstone (server authoritatively re-instated the id), so operators can
+//   revoke + re-create without restart.
 
 export class DeviceStore {
   /**
@@ -40,6 +62,19 @@ export class DeviceStore {
     }
     /** @type {Map<string, {device_id:string, api_key:string, [k:string]:any}>} */
     this.serverEntries = new Map();
+    /**
+     * Sticky set of deviceIds the server has ever managed (active or revoked).
+     * Used by verifyKey() to prevent env fallback for any id under server
+     * authority — see T78 (M1.2-FIX-C) header note.
+     * @type {Set<string>}
+     */
+    this.serverManagedIds = new Set();
+    /**
+     * Tombstoned server-managed deviceIds. verifyKey() rejects these
+     * outright. Re-issuing the same id via upsert/replaceServer clears it.
+     * @type {Set<string>}
+     */
+    this.revokedServerIds = new Set();
     this._onRevoke = typeof onRevoke === 'function' ? onRevoke : () => {};
   }
 
@@ -54,16 +89,26 @@ export class DeviceStore {
         next.set(id, { ...entry, device_id: id, api_key: key });
       }
     }
+    // Server authoritatively re-asserts every id present in `next`: mark as
+    // server-managed and lift any prior tombstone (operator may have revoked
+    // and re-created the same id between syncs).
+    for (const id of next.keys()) {
+      this.serverManagedIds.add(id);
+      this.revokedServerIds.delete(id);
+    }
     // Diff: any deviceId that left the server set fires onRevoke (best-effort
-    // disconnect). We do this BEFORE swapping the map so listeners that read
-    // back DeviceStore.size() inside the callback observe the post-swap state
-    // — but conventional revoke handlers only need the deviceId, not the entry.
+    // disconnect) and gets tombstoned. We compute the drop set BEFORE swapping
+    // the map so the diff is correct; we tombstone BEFORE firing onRevoke so
+    // listeners observing verifyKey() inside the callback see the post-revoke
+    // state (env fallback already disabled).
     const dropped = [];
     for (const id of this.serverEntries.keys()) {
       if (!next.has(id)) dropped.push(id);
     }
     this.serverEntries = next;
     for (const id of dropped) {
+      this.serverManagedIds.add(id); // belt-and-braces: should already be set
+      this.revokedServerIds.add(id);
       try { this._onRevoke(id); } catch { /* listener errors must not break sync */ }
     }
   }
@@ -74,6 +119,10 @@ export class DeviceStore {
     const key = String(entry?.api_key ?? '').trim();
     if (!id || !key) return false;
     this.serverEntries.set(id, { ...entry, device_id: id, api_key: key });
+    // Server authoritatively (re-)issued this id: mark managed and lift any
+    // prior tombstone (revoke + re-create same id flow).
+    this.serverManagedIds.add(id);
+    this.revokedServerIds.delete(id);
     return true;
   }
 
@@ -88,15 +137,31 @@ export class DeviceStore {
     if (!id) return false;
     if (!this.serverEntries.has(id)) return false;
     this.serverEntries.delete(id);
+    // Tombstone BEFORE firing onRevoke so listeners observing verifyKey()
+    // inside the callback see the rejected state (env fallback disabled).
+    this.serverManagedIds.add(id);
+    this.revokedServerIds.add(id);
     try { this._onRevoke(id); } catch { /* swallow */ }
     return true;
   }
 
-  /** verifyKey closure entry: server > env, never the other way around. */
+  /**
+   * verifyKey closure entry. Resolution order:
+   *   1. authoritative tombstone — `revokedServerIds` rejects outright
+   *   2. server entry — strict equal against current server-issued key
+   *   3. server-managed but missing — race-safe reject (see T78)
+   *   4. env fallback — only for ids the server has never managed
+   */
   verifyKey({ deviceId, key } = {}) {
     if (!deviceId || !key) return false;
+    if (this.revokedServerIds.has(deviceId)) return false;
     const fromServer = this.serverEntries.get(deviceId);
     if (fromServer) return fromServer.api_key === key;
+    // Server has managed this id but we don't have an entry right now: do NOT
+    // fall back to env. The id either left the server set (already in
+    // revokedServerIds via the branch above) or is being mutated concurrently
+    // — env fallback in either case would breach server authority.
+    if (this.serverManagedIds.has(deviceId)) return false;
     const fromEnv = this.envKeys.get(deviceId);
     if (fromEnv) return fromEnv === key;
     return false;
@@ -104,12 +169,16 @@ export class DeviceStore {
 
   /**
    * Stable read-only view of merged entries. Server entries shadow env entries
-   * with the same deviceId. Useful for tooling / status endpoints.
+   * with the same deviceId; env entries for any id under server authority
+   * (active OR revoked) are omitted entirely so the snapshot reflects what
+   * verifyKey() would actually accept (T78). Useful for tooling / status
+   * endpoints.
    */
   snapshot() {
     /** @type {Map<string, {device_id:string, api_key:string, source:'env'|'server', [k:string]:any}>} */
     const out = new Map();
     for (const [id, key] of this.envKeys) {
+      if (this.serverManagedIds.has(id)) continue; // server authority — env never serves
       out.set(id, { device_id: id, api_key: key, source: 'env' });
     }
     for (const [id, entry] of this.serverEntries) {
