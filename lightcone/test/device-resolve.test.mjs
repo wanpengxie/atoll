@@ -67,6 +67,7 @@ test('POST /api/device/resolve returns ws_url, http_url and device info for acti
     getMachineByIdImpl: async (_db, id) => (id === 'daemon-001'
       ? { id: 'daemon-001', daemon_host: '192.168.0.10', daemon_port: 9501 }
       : null),
+    isMachineOnlineImpl: () => true,
     resolveRateLimitImpl: () => true,
   });
 
@@ -91,6 +92,7 @@ test('POST /api/device/resolve returns 404 for revoked device', async () => {
     getDbImpl: () => ({}),
     getDeviceByApiKeyImpl: async () => REVOKED_DEVICE,
     getMachineByIdImpl: async () => ({ id: 'daemon-001', daemon_host: 'h', daemon_port: 9501 }),
+    isMachineOnlineImpl: () => true,
     resolveRateLimitImpl: () => true,
   });
 
@@ -107,6 +109,7 @@ test('POST /api/device/resolve returns 404 for unknown api_key', async () => {
     getDbImpl: () => ({}),
     getDeviceByApiKeyImpl: async () => null,
     getMachineByIdImpl: async () => null,
+    isMachineOnlineImpl: () => true,
     resolveRateLimitImpl: () => true,
   });
 
@@ -121,6 +124,7 @@ test('POST /api/device/resolve returns 503 when daemon has no host/port info yet
     getDbImpl: () => ({}),
     getDeviceByApiKeyImpl: async () => ACTIVE_DEVICE,
     getMachineByIdImpl: async () => ({ id: 'daemon-001', daemon_host: null, daemon_port: null }),
+    isMachineOnlineImpl: () => true,
     resolveRateLimitImpl: () => true,
   });
 
@@ -135,6 +139,7 @@ test('POST /api/device/resolve returns 400 when api_key is missing', async () =>
     getDbImpl: () => ({}),
     getDeviceByApiKeyImpl: async () => null,
     getMachineByIdImpl: async () => null,
+    isMachineOnlineImpl: () => true,
     resolveRateLimitImpl: () => true,
   });
 
@@ -144,12 +149,95 @@ test('POST /api/device/resolve returns 400 when api_key is missing', async () =>
   });
 });
 
+test('POST /api/device/resolve returns 503 with "Daemon offline" when WS link is down (T77 P1#5)', async () => {
+  const router = createDeviceRouter({
+    getDbImpl: () => ({}),
+    getDeviceByApiKeyImpl: async () => ACTIVE_DEVICE,
+    getMachineByIdImpl: async () => ({ id: 'daemon-001', daemon_host: '192.168.0.10', daemon_port: 9501 }),
+    isMachineOnlineImpl: () => false,
+    resolveRateLimitImpl: () => true,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/device/resolve', { body: { api_key: ACTIVE_DEVICE.api_key } });
+    assert.equal(res.status, 503);
+    assert.equal(res.json.error, 'Daemon offline');
+  });
+});
+
+test('POST /api/device/resolve renders wss/https when daemon registered with scheme=https (T77)', async () => {
+  const router = createDeviceRouter({
+    getDbImpl: () => ({}),
+    getDeviceByApiKeyImpl: async () => ACTIVE_DEVICE,
+    getMachineByIdImpl: async () => ({
+      id: 'daemon-001',
+      daemon_host: 'daemon.example.com',
+      daemon_port: 443,
+      daemon_scheme: 'https',
+    }),
+    isMachineOnlineImpl: () => true,
+    resolveRateLimitImpl: () => true,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/device/resolve', { body: { api_key: ACTIVE_DEVICE.api_key } });
+    assert.equal(res.status, 200);
+    assert.equal(res.json.ws_url, 'wss://daemon.example.com:443');
+    assert.equal(res.json.http_url, 'https://daemon.example.com:443');
+  });
+});
+
+test('POST /api/device/resolve renders wss/https when daemon registered with scheme=wss (T77)', async () => {
+  const router = createDeviceRouter({
+    getDbImpl: () => ({}),
+    getDeviceByApiKeyImpl: async () => ACTIVE_DEVICE,
+    getMachineByIdImpl: async () => ({
+      id: 'daemon-001',
+      daemon_host: 'daemon.example.com',
+      daemon_port: 443,
+      daemon_scheme: 'wss',
+    }),
+    isMachineOnlineImpl: () => true,
+    resolveRateLimitImpl: () => true,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/device/resolve', { body: { api_key: ACTIVE_DEVICE.api_key } });
+    assert.equal(res.status, 200);
+    assert.equal(res.json.ws_url, 'wss://daemon.example.com:443');
+    assert.equal(res.json.http_url, 'https://daemon.example.com:443');
+  });
+});
+
+test('POST /api/device/resolve falls back to ws/http when scheme is null (T77 dev default)', async () => {
+  const router = createDeviceRouter({
+    getDbImpl: () => ({}),
+    getDeviceByApiKeyImpl: async () => ACTIVE_DEVICE,
+    getMachineByIdImpl: async () => ({
+      id: 'daemon-001',
+      daemon_host: '192.168.0.10',
+      daemon_port: 9501,
+      daemon_scheme: null,
+    }),
+    isMachineOnlineImpl: () => true,
+    resolveRateLimitImpl: () => true,
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/device/resolve', { body: { api_key: ACTIVE_DEVICE.api_key } });
+    assert.equal(res.status, 200);
+    assert.equal(res.json.ws_url, 'ws://192.168.0.10:9501');
+    assert.equal(res.json.http_url, 'http://192.168.0.10:9501');
+  });
+});
+
 test('POST /api/device/resolve enforces rate limit (429)', async () => {
   let allowed = 2;
   const router = createDeviceRouter({
     getDbImpl: () => ({}),
     getDeviceByApiKeyImpl: async () => ACTIVE_DEVICE,
     getMachineByIdImpl: async () => ({ id: 'daemon-001', daemon_host: 'h', daemon_port: 9501 }),
+    isMachineOnlineImpl: () => true,
     resolveRateLimitImpl: () => {
       if (allowed > 0) { allowed -= 1; return true; }
       return false;

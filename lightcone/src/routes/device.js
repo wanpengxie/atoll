@@ -88,9 +88,28 @@ export function createDeviceRouter({
       return res.status(503).json({ error: 'Daemon endpoint not registered' });
     }
 
+    // T77 (M1.2-FIX-B P1#5): require an active daemon WS connection. A stale
+    // host/port row (e.g. daemon crashed without unregistering) would
+    // otherwise return a URL that the extension cannot reach — the popup then
+    // surfaces a generic network error instead of "daemon offline". Returning
+    // 503 here lets `resolve.ts → reasonForStatus()` map directly to the
+    // user-visible "daemon offline" state.
+    if (!isMachineOnlineImpl(daemonId)) {
+      return res.status(503).json({ error: 'Daemon offline' });
+    }
+
+    // T77 (M1.2-FIX-B): scheme is reported by the daemon at register time and
+    // mirrors public TLS termination. Map between the http/https/ws/wss
+    // families so we always emit a `ws_url` that uses ws or wss and a
+    // `http_url` that uses http or https. NULL keeps the legacy ws/http
+    // default (dev clusters with no proxy).
+    const dbScheme = String(machine.daemon_scheme ?? '').toLowerCase().trim();
+    const secure = dbScheme === 'https' || dbScheme === 'wss';
+    const wsScheme = secure ? 'wss' : 'ws';
+    const httpScheme = secure ? 'https' : 'http';
     return res.json({
-      ws_url:    `ws://${machine.daemon_host}:${machine.daemon_port}`,
-      http_url:  `http://${machine.daemon_host}:${machine.daemon_port}`,
+      ws_url:    `${wsScheme}://${machine.daemon_host}:${machine.daemon_port}`,
+      http_url:  `${httpScheme}://${machine.daemon_host}:${machine.daemon_port}`,
       device_id: device.device_id,
       user_id:   device.user_id,
       channel_id: device.channel_id,

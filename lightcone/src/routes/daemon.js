@@ -40,11 +40,26 @@ export function createDaemonRouter({
     if (port != null && !Number.isInteger(port)) {
       return res.status(400).json({ error: 'port must be an integer' });
     }
+    // T77 (M1.2-FIX-B): public scheme is optional. When daemon sits behind a
+    // TLS proxy, prod clusters announce `https`/`wss` so `/api/device/resolve`
+    // renders the correct extension URLs. Whitelist guards against arbitrary
+    // strings being persisted; missing/empty stays null (dev default ws/http).
+    const ALLOWED_DAEMON_SCHEMES = new Set(['http', 'https', 'ws', 'wss']);
+    const schemeRaw = req.body?.scheme;
+    let scheme = null;
+    if (schemeRaw != null && schemeRaw !== '') {
+      const norm = String(schemeRaw).toLowerCase().trim();
+      if (norm && !ALLOWED_DAEMON_SCHEMES.has(norm)) {
+        return res.status(400).json({ error: 'scheme must be one of http, https, ws, wss' });
+      }
+      scheme = norm || null;
+    }
     const capabilities = Array.isArray(req.body?.capabilities) ? req.body.capabilities : [];
 
     await updateMachineDaemonInfoImpl(getDbImpl(), machine.id, {
       daemon_host: host,
       daemon_port: port,
+      daemon_scheme: scheme,
       capabilities,
       status: 'online',
       last_heartbeat: nowDatetimeImpl(),

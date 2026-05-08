@@ -405,11 +405,16 @@ export async function initDb() {
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
 
-  // ── machines.daemon_host / daemon_port / capabilities migration ──────────────
+  // ── machines.daemon_host / daemon_port / capabilities / daemon_scheme migration
+  // T77 (M1.2-FIX-B): daemon_scheme is the explicit public-URL scheme reported
+  // by the daemon at register time (`http`/`https`/`ws`/`wss`). resolve uses
+  // it to render `ws_url`/`http_url`. NULL keeps the legacy ws/http default
+  // for dev clusters that don't sit behind a TLS proxy.
   for (const [col, ddl] of [
-    ['daemon_host',  'ALTER TABLE machines ADD COLUMN daemon_host VARCHAR(255) DEFAULT NULL'],
-    ['daemon_port',  'ALTER TABLE machines ADD COLUMN daemon_port INT          DEFAULT NULL'],
-    ['capabilities', 'ALTER TABLE machines ADD COLUMN capabilities TEXT        DEFAULT NULL'],
+    ['daemon_host',   'ALTER TABLE machines ADD COLUMN daemon_host VARCHAR(255) DEFAULT NULL'],
+    ['daemon_port',   'ALTER TABLE machines ADD COLUMN daemon_port INT          DEFAULT NULL'],
+    ['capabilities',  'ALTER TABLE machines ADD COLUMN capabilities TEXT        DEFAULT NULL'],
+    ['daemon_scheme', 'ALTER TABLE machines ADD COLUMN daemon_scheme VARCHAR(16) DEFAULT NULL'],
   ]) {
     const [cols] = await db.execute(
       `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
@@ -2122,8 +2127,9 @@ export async function revokeDevice(db, id) {
 
 export async function updateMachineDaemonInfo(db, id, fields) {
   const updates = {};
-  if ('daemon_host' in fields)  updates.daemon_host = fields.daemon_host ?? null;
-  if ('daemon_port' in fields)  updates.daemon_port = fields.daemon_port ?? null;
+  if ('daemon_host' in fields)   updates.daemon_host = fields.daemon_host ?? null;
+  if ('daemon_port' in fields)   updates.daemon_port = fields.daemon_port ?? null;
+  if ('daemon_scheme' in fields) updates.daemon_scheme = fields.daemon_scheme ?? null;
   if ('capabilities' in fields) updates.capabilities = fields.capabilities == null
     ? null
     : (typeof fields.capabilities === 'string' ? fields.capabilities : JSON.stringify(fields.capabilities));

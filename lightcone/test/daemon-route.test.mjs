@@ -100,6 +100,111 @@ test('POST /api/daemon/register rejects invalid machine_api_key with 401', async
   });
 });
 
+test('POST /api/daemon/register persists daemon_scheme when provided (T77)', async () => {
+  const updates = [];
+  const router = createDaemonRouter({
+    getDbImpl: () => ({}),
+    getMachineByApiKeyImpl: async () => ({ id: 'daemon-001', server_id: 'server-001' }),
+    updateMachineDaemonInfoImpl: async (_db, id, fields) => {
+      updates.push({ id, fields });
+      return { id, ...fields };
+    },
+    getDevicesByDaemonIdImpl: async () => [],
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/daemon/register', {
+      method: 'POST',
+      body: {
+        machine_api_key: 'k',
+        daemon_id: 'daemon-001',
+        host: 'daemon.example.com',
+        port: 443,
+        scheme: 'https',
+        capabilities: ['xhs-creator'],
+      },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(updates[0].fields.daemon_scheme, 'https');
+    assert.equal(updates[0].fields.daemon_port, 443);
+  });
+});
+
+test('POST /api/daemon/register defaults daemon_scheme to null when omitted (T77)', async () => {
+  const updates = [];
+  const router = createDaemonRouter({
+    getDbImpl: () => ({}),
+    getMachineByApiKeyImpl: async () => ({ id: 'daemon-001', server_id: 'server-001' }),
+    updateMachineDaemonInfoImpl: async (_db, id, fields) => {
+      updates.push({ id, fields });
+      return { id, ...fields };
+    },
+    getDevicesByDaemonIdImpl: async () => [],
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/daemon/register', {
+      method: 'POST',
+      body: {
+        machine_api_key: 'k',
+        daemon_id: 'daemon-001',
+        host: '127.0.0.1',
+        port: 9501,
+        capabilities: [],
+      },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(updates[0].fields.daemon_scheme, null);
+  });
+});
+
+test('POST /api/daemon/register rejects unknown scheme with 400 (T77)', async () => {
+  const router = createDaemonRouter({
+    getDbImpl: () => ({}),
+    getMachineByApiKeyImpl: async () => ({ id: 'daemon-001', server_id: 'server-001' }),
+    updateMachineDaemonInfoImpl: async () => { throw new Error('should not call'); },
+    getDevicesByDaemonIdImpl: async () => [],
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/daemon/register', {
+      method: 'POST',
+      body: {
+        machine_api_key: 'k',
+        daemon_id: 'daemon-001',
+        host: 'h',
+        port: 1,
+        scheme: 'gopher',
+        capabilities: [],
+      },
+    });
+    assert.equal(res.status, 400);
+  });
+});
+
+test('POST /api/daemon/register rejects non-integer port with 400 (T77 regression guard)', async () => {
+  const router = createDaemonRouter({
+    getDbImpl: () => ({}),
+    getMachineByApiKeyImpl: async () => ({ id: 'daemon-001', server_id: 'server-001' }),
+    updateMachineDaemonInfoImpl: async () => { throw new Error('should not call'); },
+    getDevicesByDaemonIdImpl: async () => [],
+  });
+
+  await withServer(createApp(router), async (baseUrl) => {
+    const res = await callJson(baseUrl, '/api/daemon/register', {
+      method: 'POST',
+      body: {
+        machine_api_key: 'k',
+        daemon_id: 'daemon-001',
+        host: 'h',
+        port: 'not-a-number',
+        capabilities: [],
+      },
+    });
+    assert.equal(res.status, 400);
+  });
+});
+
 test('POST /api/daemon/register rejects daemon_id mismatch with 403', async () => {
   const router = createDaemonRouter({
     getDbImpl: () => ({}),
