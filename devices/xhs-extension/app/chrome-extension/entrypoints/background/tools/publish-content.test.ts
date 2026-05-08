@@ -441,7 +441,7 @@ describe('NOTE_ID_URL_PATTERN', () => {
   });
 });
 
-describe('PUBLISH_API_URL_PATTERN (R3-T4 FX6 → R4-T2 narrowed)', () => {
+describe('PUBLISH_API_URL_PATTERN (R3-T4 FX6 → R4-T2 narrowed → R5-T2 nested-subpath sealed)', () => {
   it('matches creator + edith publish-result endpoints (publish | submit suffix)', () => {
     // 精确尾段 publish
     expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/publish')).toBe(true);
@@ -449,9 +449,8 @@ describe('PUBLISH_API_URL_PATTERN (R3-T4 FX6 → R4-T2 narrowed)', () => {
     // 精确尾段 submit
     expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/submit')).toBe(true);
     expect(PUBLISH_API_URL_PATTERN.test('https://edith.xiaohongshu.com/api/galaxy/note/submit')).toBe(true);
-    // 带 querystring / 子路径分隔符仍 match（边界守卫使用 [/?#]|$）
+    // 带 querystring / fragment 仍 match（边界守卫使用 [?#]|$；不再放过 `/`）
     expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/publish?ts=1')).toBe(true);
-    expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/publish/done')).toBe(true);
     expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/publish#frag')).toBe(true);
   });
 
@@ -476,6 +475,29 @@ describe('PUBLISH_API_URL_PATTERN (R3-T4 FX6 → R4-T2 narrowed)', () => {
     // 边界守卫：字母后缀延伸不可命中（防 `/publishabc` / `/submitter` 误匹配）
     expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/publishabc')).toBe(false);
     expect(PUBLISH_API_URL_PATTERN.test('https://creator.xiaohongshu.com/api/galaxy/note/submitter')).toBe(false);
+  });
+
+  // R5-T2：嵌套子路径必须不命中。R4-T2 的尾段守卫仍写作 `(?:[/?#]|$)`，结果允许任何
+  // `/publish/<sub>` / `/submit/<sub>` 通过（POST 200 → settle resolve），重新引入
+  // R2/R3 修复要消除的 false-success（任意 publish form 期间 publish-namespace 子端点
+  // 都会被当成 publish 完成信号）。R5-T2 把守卫改为 `(?:[?#]|$)` 严禁任何嵌套子路径。
+  //
+  // 注意 `/publish/done` 之前曾被 pin 为 positive，但**没有任何 live trace 验证它是
+  // 真实 publish-result 端点**；这里把它从 positive 转 negative，等 owner 在能跑真实
+  // publish 的环境抓 webRequest trace 后再按观测的真实 path 重新 anchor regex
+  // （不要回退到嵌套通配；详见 PUBLISH_API_URL_PATTERN 注释里的"如何抓新端点"运维兜底）。
+  //
+  // 拆 5 条独立 it 块是为了 TDD 红→绿审计可见性：在旧 regex `(?:[/?#]|$)` 下 5 条全部
+  // 单独 fail，spec 要求"至少 3 条必须 fail"——单 it 块加多 expect 在 vitest 里
+  // 第一条失败即 abort，看不到其余 4 条的红色信号。
+  it.each([
+    ['https://creator.xiaohongshu.com/api/galaxy/note/publish/draft'],
+    ['https://creator.xiaohongshu.com/api/galaxy/note/publish/done'],
+    ['https://creator.xiaohongshu.com/api/galaxy/note/publish/autosave'],
+    ['https://creator.xiaohongshu.com/api/galaxy/note/submit/check'],
+    ['https://creator.xiaohongshu.com/api/galaxy/note/submit/done'],
+  ])('does NOT match nested subpath %s (R5-T2 nested-subpath seal)', (url) => {
+    expect(PUBLISH_API_URL_PATTERN.test(url)).toBe(false);
   });
 
   it('exposes filter URL list with creator + edith match-patterns', () => {
