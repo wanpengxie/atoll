@@ -1,0 +1,9 @@
+# Go build artifacts produced by `go build ./cmd/daemon` / `./cmd/worker`
+# land in the package dir; keep them out of git.
+/cmd/daemon/daemon
+/cmd/worker/worker
+/bin/
+
+# Go test artifacts.
+*.test
+*.out
