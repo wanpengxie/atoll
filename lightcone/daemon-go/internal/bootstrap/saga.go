@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/coagent-ai/daemon-go/internal/registry"
 	"github.com/coagent-ai/daemon-go/internal/store"
 )
 
@@ -174,7 +175,12 @@ func (s *Saga) seedChannel(ctx context.Context, conn *sql.Conn, p CreateParams) 
 	if err := s.injected(fpStep3System); err != nil {
 		return fmt.Errorf("step3 system actor: %w", err)
 	}
-	if err := insertActor(ctx, conn, "system", "system", "", now); err != nil {
+	if err := registerActor(ctx, conn, p.ChannelID, registry.ActorMeta{
+		ActorID:   "system",
+		Kind:      registry.KindSystem,
+		Binding:   registry.BindingNone,
+		CreatedAt: now,
+	}); err != nil {
 		return fmt.Errorf("step3 system actor: %w", err)
 	}
 
@@ -183,7 +189,12 @@ func (s *Saga) seedChannel(ctx context.Context, conn *sql.Conn, p CreateParams) 
 		if err := s.injected(fpStep4Human); err != nil {
 			return fmt.Errorf("step4 human member[%d] %s: %w", i, m.ActorID, err)
 		}
-		if err := insertActor(ctx, conn, m.ActorID, "human", "", now); err != nil {
+		if err := registerActor(ctx, conn, p.ChannelID, registry.ActorMeta{
+			ActorID:   m.ActorID,
+			Kind:      registry.KindHuman,
+			Binding:   registry.BindingNone,
+			CreatedAt: now,
+		}); err != nil {
 			return fmt.Errorf("step4 human member[%d] %s: %w", i, m.ActorID, err)
 		}
 	}
@@ -196,7 +207,12 @@ func (s *Saga) seedChannel(ctx context.Context, conn *sql.Conn, p CreateParams) 
 	if err := s.injected(fpStep5Agent); err != nil {
 		return fmt.Errorf("step5 channel agent %s: %w", agentID, err)
 	}
-	if err := insertActor(ctx, conn, agentID, "agent", "daemon_rpc", now); err != nil {
+	if err := registerActor(ctx, conn, p.ChannelID, registry.ActorMeta{
+		ActorID:   agentID,
+		Kind:      registry.KindAgent,
+		Binding:   registry.BindingDaemonRPC,
+		CreatedAt: now,
+	}); err != nil {
 		return fmt.Errorf("step5 channel agent %s: %w", agentID, err)
 	}
 
@@ -205,7 +221,12 @@ func (s *Saga) seedChannel(ctx context.Context, conn *sql.Conn, p CreateParams) 
 		if err := s.injected(fpStep6Adapter); err != nil {
 			return fmt.Errorf("step6 adapter[%d] %s: %w", i, ad.ActorID, err)
 		}
-		if err := insertActor(ctx, conn, ad.ActorID, "tool", ad.Binding, now); err != nil {
+		if err := registerActor(ctx, conn, p.ChannelID, registry.ActorMeta{
+			ActorID:   ad.ActorID,
+			Kind:      registry.KindTool,
+			Binding:   registry.ActorBinding(ad.Binding),
+			CreatedAt: now,
+		}); err != nil {
 			return fmt.Errorf("step6 adapter[%d] %s actor: %w", i, ad.ActorID, err)
 		}
 		for j, row := range ad.TypeRows {
@@ -223,16 +244,15 @@ func (s *Saga) seedChannel(ctx context.Context, conn *sql.Conn, p CreateParams) 
 		}
 		// Minimal handler_actor_id integrity check — full validation
 		// is T5's job. Saga only ensures the FK-like invariant from
-		// L2 §1.4.2: handler_actor_id (if set) must resolve to a row
-		// already in actor_registry within the same tx.
+		// L2 §1.4.2: handler_actor_id (if set) must resolve to an
+		// active row in actor_registry within the same tx.
 		if row.HandlerActorID != "" {
-			ok, err := actorExists(ctx, conn, row.HandlerActorID)
-			if err != nil {
+			if _, err := registry.GetKind(ctx, conn, row.HandlerActorID); err != nil {
+				if errors.Is(err, registry.ErrActorNotFound) {
+					return fmt.Errorf("step7 business type[%d] %s: handler_actor_id %q not registered",
+						i, row.Type, row.HandlerActorID)
+				}
 				return fmt.Errorf("step7 business type[%d] %s lookup: %w", i, row.Type, err)
-			}
-			if !ok {
-				return fmt.Errorf("step7 business type[%d] %s: handler_actor_id %q not registered",
-					i, row.Type, row.HandlerActorID)
 			}
 		}
 		if err := insertType(ctx, conn, row, now); err != nil {
@@ -374,35 +394,15 @@ func validateTypeRow(row TypeRegistryRow) error {
 // SQL helpers (used by both saga and reconcile)
 // ---------------------------------------------------------------------------
 
-func insertActor(ctx context.Context, conn *sql.Conn, actorID, kind, binding string, now int64) error {
-	var bindingArg any
-	if binding == "" {
-		bindingArg = nil
-	} else {
-		bindingArg = binding
-	}
-	_, err := conn.ExecContext(ctx,
-		`INSERT INTO actor_registry
-		   (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
-		 VALUES (?, ?, ?, ?, NULL)`,
-		actorID, kind, bindingArg, now,
-	)
-	return err
-}
-
-func actorExists(ctx context.Context, conn *sql.Conn, actorID string) (bool, error) {
-	var got string
-	err := conn.QueryRowContext(ctx,
-		`SELECT actor_id FROM actor_registry WHERE actor_id = ? AND deregistered_at IS NULL`,
-		actorID,
-	).Scan(&got)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
+// registerActor is the saga's thin adapter over registry.Register. The
+// registry package owns the canonical write path (INSERT actor_registry
+// + INSERT OR IGNORE actor_cursors + emit system.event payload.kind=
+// actor_registered) per L1 §12.3 / L2 §1.4.6; the saga only forwards
+// channel_id + the per-step ActorMeta so the writes join its IMMEDIATE
+// tx. Surface error wrapping (step3 / step4 / ... prefixes) stays at
+// the call site.
+func registerActor(ctx context.Context, conn *sql.Conn, channelID string, meta registry.ActorMeta) error {
+	return registry.Register(ctx, conn, channelID, meta)
 }
 
 func insertType(ctx context.Context, conn *sql.Conn, row TypeRegistryRow, now int64) error {

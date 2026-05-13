@@ -175,6 +175,31 @@ func TestChannelCreate_HappyPath(t *testing.T) {
 		eventID); n != 1 {
 		t.Errorf("channel_created event missing (id=%s)", eventID)
 	}
+
+	// T4 invariant: every actor seeded via registry.Register also gets an
+	// actor_cursors row (last_consumed_seq=0) — otherwise supervisor
+	// backlog scan JOIN returns empty and the actor is never woken.
+	if n := countRows(t, ctx, channelDB, `SELECT COUNT(*) FROM actor_cursors`); n != 5 {
+		t.Errorf("actor_cursors rows = %d, want 5 (one per actor)", n)
+	}
+
+	// T4 invariant: each Register emits a system.event payload.kind=
+	// actor_registered with deterministic id actor_registered:<chan>:<aid>.
+	// 5 actors → 5 events; visibility=system, type=system.event.
+	if n := countRows(t, ctx, channelDB,
+		`SELECT COUNT(*) FROM messages WHERE type = 'system.event'
+		   AND visibility = 'system'
+		   AND id LIKE 'actor_registered:ch-1:%'`); n != 5 {
+		t.Errorf("actor_registered events = %d, want 5", n)
+	}
+	// And the channel_agent specifically — its actor_id is derived from
+	// DefaultChannelAgentName so this confirms the saga forwarded the
+	// resolved id (not the empty CreateParams field).
+	if n := countRows(t, ctx, channelDB,
+		`SELECT COUNT(*) FROM messages WHERE id = ?`,
+		"actor_registered:ch-1:"+wantAgent); n != 1 {
+		t.Errorf("actor_registered event for channel agent %q missing", wantAgent)
+	}
 }
 
 // ---------------------------------------------------------------------------
