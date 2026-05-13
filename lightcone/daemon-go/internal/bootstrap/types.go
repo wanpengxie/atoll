@@ -144,10 +144,10 @@ type ChannelInfo struct {
 // state changes (not just inspected rows) so callers can log a one-line
 // summary.
 type ReconcileReport struct {
-	Scanned     int      // rows seen with status='in_progress'
-	RolledBack  int      // pushed in_progress → rolled_back (integrity fail)
-	Completed   int      // pushed in_progress → completed (retry step 8-9)
-	Failures    []string // create_request_id list where reconcile itself errored
+	Scanned    int      // rows seen with status='in_progress'
+	RolledBack int      // pushed in_progress → rolled_back (integrity fail)
+	Completed  int      // pushed in_progress → completed (retry step 8-9)
+	Failures   []string // create_request_id list where reconcile itself errored
 }
 
 // openChannelFn matches store.OpenChannel. Injection point so tests can
