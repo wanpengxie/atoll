@@ -1,0 +1,38 @@
+# golangci-lint v2 config for the daemon-go (and future Go) modules.
+# Kept intentionally narrow at T0 — only the "must-fix" linters are on so
+# the CI gate is signal, not noise. Add more as the codebase grows.
+
+version: "2"
+
+run:
+  timeout: 5m
+  go: "1.25"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gocritic
+    - misspell
+  exclusions:
+    presets:
+      - common-false-positives
+    rules:
+      # T0 placeholder files (cmd/* + */doc.go) intentionally hold no logic.
+      - path: cmd/.*/main\.go
+        linters: [gocritic]
+      - path: .*/doc\.go
+        linters: [unused]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
