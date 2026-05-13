@@ -13,6 +13,7 @@ Tracking spec: [.dalek/pm/m1.3-tickets.md](../../.dalek/pm/m1.3-tickets.md).
 cmd/
   daemon/main.go      ; daemon entrypoint (placeholder until T1+)
   worker/main.go      ; worker entrypoint (placeholder; runs kimismoke)
+  migrate/main.go     ; T1  schema bootstrap + Node→v4 migration CLI
 internal/
   store/              ; T1  channel-local + daemon-level SQLite layer
   bootstrap/          ; T3  channel-create 9-step saga + reconcile
@@ -33,6 +34,29 @@ pkg/
 
 Most `internal/*` and `pkg/*` directories ship as `doc.go` skeletons in T0
 and grow real implementations through T1–T16.
+
+## migrate (T1)
+
+`cmd/migrate` is the schema bootstrap + Node-daemon-data import CLI. It
+owns three subcommands:
+
+```bash
+# Initialize an empty channel sqlite (6 v4 tables + 9 indexes).
+go run ./cmd/migrate init <channel.sqlite>
+
+# Initialize the daemon-level sqlite (bootstrap_registry + index).
+go run ./cmd/migrate init-daemon <daemon.sqlite>
+
+# Import a legacy Node daemon channel sqlite into v4 form. The source
+# is opened read-only; the destination is created if missing.
+go run ./cmd/migrate from-node --src <node.sqlite> --dst <channel.sqlite>
+```
+
+The transform rules follow `.dalek/pm/m1.3-v4-foundation-spec.md` §4.1
+verbatim — see `internal/store/migrate_typemap.go` for the
+type-mapping table and `migrate_from_node.go` for the per-column
+rewrite (audience, visibility, correlation_id, doc_refs, payload.body
+strip, attempts rename, sender_kind coercion, etc.).
 
 ## Build
 
