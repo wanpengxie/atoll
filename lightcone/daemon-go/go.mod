@@ -3,6 +3,7 @@ module github.com/coagent-ai/daemon-go
 go 1.25.0
 
 require (
+	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
 	github.com/wanpengxie/go-kimi v1.0.1-0.20260510163611-a48ad17ca09d
 	modernc.org/sqlite v1.50.1
 )
