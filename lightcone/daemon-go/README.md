@@ -35,6 +35,30 @@ pkg/
 Most `internal/*` and `pkg/*` directories ship as `doc.go` skeletons in T0
 and grow real implementations through T1–T16.
 
+## v4types + canonical (T2)
+
+`pkg/v4types` exposes the v4 protocol baseline as Go types: the
+`Envelope` struct (17 content + 4 delivery-metadata + `is_terminal` +
+`seq` columns), the three message ADT kinds (`KindEvent` /
+`KindRequest` / `KindResponse`), the 4-value `SenderKind` enum, the
+3-value `Visibility` enum, and the three closed reason sets from L1
+§10.3 (`HarnessRejectReason`, `InstallReason`, `TerminalFailureReason`)
+with `HTTPStatus()` mapping aligned to L2 §3.6.1.
+
+`pkg/canonical` provides the RFC 8785 + SHA-256 hash mandated by
+L2 §1.4.10.2:
+
+```go
+hash, err := canonical.CanonicalHash(envelope)          // 14-key content hash
+phash, err := canonical.CanonicalHashPayload(payload)    // adapter response id
+buf, err := canonical.CanonicalizeJSON(rawJSON)          // canonical bytes
+```
+
+The hash is hex lowercase (64 chars), deterministic across platforms,
+and excludes the store-derived columns (`ts_received`, delivery
+metadata, `is_terminal`, `seq`) per L1 §10.2.2. T6 / T7 build on this
+for action_ledger keys and harness step 0.5 / step 8 content compare.
+
 ## migrate (T1)
 
 `cmd/migrate` is the schema bootstrap + Node-daemon-data import CLI. It
