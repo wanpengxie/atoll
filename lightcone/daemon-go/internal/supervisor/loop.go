@@ -1,0 +1,423 @@
+package supervisor
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// DefaultPeriod is the protocol-baseline supervisor scan period per
+// L2 §1.4.10 ("Supervisor 周期：扫 worker_locks 默认每 10 秒一次").
+// Production callers may shrink this for tests (1ms is common) or
+// stretch it via channel config.
+const DefaultPeriod = 10 * time.Second
+
+// Spawner is the abstraction the supervisor calls to bring a fresh
+// worker process online. The production implementation (added in
+// T10) returns an exec.Cmd wrapper; tests inject a fake that
+// records the SpawnContext and signals "alive / killed" via channels.
+//
+// Spawn MUST return promptly — long blocking work (downloading
+// binaries, etc.) belongs upstream of the supervisor loop.
+type Spawner interface {
+	Spawn(ctx context.Context, sc SpawnContext) (Worker, error)
+}
+
+// Worker is the supervisor's handle on a live worker process. The
+// three methods cover the supervisor's full needs:
+//
+//   - PID returns the OS pid for log lines (test fakes return 0).
+//   - Wait blocks until the process exits and returns its terminal
+//     error (nil on clean exit). The supervisor launches one
+//     goroutine per Wait so the OS-level exit hook fires immediately
+//     without waiting for the next 10s tick.
+//   - Kill sends SIGKILL (or equivalent). Used on supervisor shutdown.
+type Worker interface {
+	PID() int
+	Wait() error
+	Kill() error
+}
+
+// SpawnContext is the turn-ctx the supervisor injects into every new
+// worker. The fields match L2 §3.4.2 ("Trigger Context 自动注入") +
+// §1.4.9 (fencing_token) + §1.4.10 (backlog scan result).
+//
+// The Spawner implementation chooses HOW to deliver these to the
+// worker process — env vars, CLI flags, stdin JSON, etc. The default
+// production wiring (T10) uses env vars per the ticket plan
+// ("exec.Command + env 注入 turn-ctx").
+type SpawnContext struct {
+	ChannelID    string
+	AgentID      string
+	WorkerID     string
+	FencingToken int64
+	Backlog      []BacklogMessage
+}
+
+// LoopConfig tunes the supervisor loop. Zero value gives the
+// protocol-baseline behaviour (10s period, 60s lease, real wall-clock,
+// UUID worker ids). Tests inject custom values via LoopConfig{...}.
+type LoopConfig struct {
+	// Period is the ticker interval; defaults to DefaultPeriod (10s).
+	Period time.Duration
+
+	// LeaseTTL is the worker_locks lease lifetime in seconds; defaults
+	// to DefaultLeaseTTL (60s).
+	LeaseTTL int64
+
+	// Now returns Unix seconds. Defaults to time.Now().Unix(). Tests
+	// inject a fixed-clock pointer so they can advance time
+	// deterministically.
+	Now func() int64
+
+	// NewWorkerID generates a fresh worker_id for each spawn attempt.
+	// Defaults to uuid.NewString(). Tests inject a counter to make
+	// log lines and assertions readable.
+	NewWorkerID func() string
+
+	// Logger receives the structured "supervisor.*" events emitted
+	// across one Loop iteration. Defaults to slog.Default().
+	Logger *slog.Logger
+}
+
+// Loop drives one (channel, agent) pair: it watches worker_locks,
+// spawns fresh workers when the lease is empty or stolen, kicks
+// graceful restarts on detected exits, and feeds backlog into every
+// fresh spawn.
+//
+// One Loop per agent — the daemon owns N loops, one per active
+// channel-agent pair. They share the channel sqlite *sql.DB but never
+// each other's state.
+type Loop struct {
+	db        *sql.DB
+	channelID string
+	agentID   string
+	spawner   Spawner
+	cfg       LoopConfig
+
+	// State guarded by mu — current worker (nil if no spawn yet),
+	// the lock token for that worker, and a one-shot exit channel
+	// closed by the wait goroutine when the worker terminates.
+	mu         sync.Mutex
+	current    Worker
+	currentID  string
+	currentTok int64
+	exitCh     chan struct{}
+}
+
+// New constructs a Loop. Returns an error on missing inputs (nil db,
+// empty channel/agent, nil spawner) so misuse surfaces at startup
+// rather than as a 10s-delayed panic.
+func New(
+	db *sql.DB,
+	channelID, agentID string,
+	spawner Spawner,
+	cfg LoopConfig,
+) (*Loop, error) {
+	if db == nil {
+		return nil, fmt.Errorf("%w: db is nil", ErrInvalidInput)
+	}
+	if strings.TrimSpace(channelID) == "" {
+		return nil, fmt.Errorf("%w: channel_id required", ErrInvalidInput)
+	}
+	if strings.TrimSpace(agentID) == "" {
+		return nil, fmt.Errorf("%w: agent_id required", ErrInvalidInput)
+	}
+	if spawner == nil {
+		return nil, fmt.Errorf("%w: spawner is nil", ErrInvalidInput)
+	}
+	if cfg.Period <= 0 {
+		cfg.Period = DefaultPeriod
+	}
+	if cfg.LeaseTTL <= 0 {
+		cfg.LeaseTTL = DefaultLeaseTTL
+	}
+	if cfg.Now == nil {
+		cfg.Now = func() int64 { return time.Now().Unix() }
+	}
+	if cfg.NewWorkerID == nil {
+		cfg.NewWorkerID = uuid.NewString
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	return &Loop{
+		db:        db,
+		channelID: channelID,
+		agentID:   agentID,
+		spawner:   spawner,
+		cfg:       cfg,
+	}, nil
+}
+
+// Run drives the supervisor loop until ctx is cancelled.
+//
+// Wake-up sources (per L2 §1.4.10 "OS-level 进程退出 hook 即时触发，
+// 不等周期"):
+//
+//   - ticker every cfg.Period (default 10s) — drives lease-expiry
+//     checks for the case where the worker hangs without crashing.
+//   - exitCh closed by the Wait goroutine — fires immediately when
+//     the OS reports the worker process died.
+//   - ctx.Done — graceful supervisor shutdown.
+//
+// Each wake-up runs exactly one Tick. Tick is idempotent — calling
+// it twice in a row when nothing changed is safe and cheap.
+func (l *Loop) Run(ctx context.Context) error {
+	ticker := time.NewTicker(l.cfg.Period)
+	defer ticker.Stop()
+
+	// First tick fires immediately so daemon startup doesn't wait
+	// `Period` seconds before noticing pending backlog.
+	if err := l.Tick(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		l.cfg.Logger.Error("supervisor.tick.error",
+			"channel_id", l.channelID, "agent_id", l.agentID, "err", err.Error())
+	}
+
+	for {
+		// Snapshot the exit channel under the lock so concurrent
+		// closes (Tick spawning a new worker) don't race with the
+		// select below.
+		l.mu.Lock()
+		exitCh := l.exitCh
+		l.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			l.shutdown()
+			return ctx.Err()
+		case <-ticker.C:
+		case <-orNever(exitCh):
+		}
+
+		if err := l.Tick(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			l.cfg.Logger.Error("supervisor.tick.error",
+				"channel_id", l.channelID, "agent_id", l.agentID, "err", err.Error())
+		}
+	}
+}
+
+// Tick executes one supervisor iteration. The decision tree mirrors
+// L2 §1.4.10 pseudocode:
+//
+//	current worker recorded and alive → no-op (heartbeat is the worker's job)
+//	lock missing OR expired           → CAS acquire/steal → spawn → backlog
+//	lock present and not expired      → another supervisor owns it; no-op
+//	lock owned by us but worker exited → release + spawn next tick
+//
+// Tick is exported primarily for tests — Run calls Tick on every
+// wake-up, but a unit test can drive the state machine manually
+// without spinning real timers.
+//
+// Tick reads l.current under mu; the wait goroutine clears l.current
+// atomically before closing exitCh, so a `current == nil` snapshot
+// always means "no live worker, even if the previous one was alive
+// on the previous tick".
+func (l *Loop) Tick(ctx context.Context) error {
+	l.mu.Lock()
+	cur := l.current
+	lastWorkerID := l.currentID
+	l.mu.Unlock()
+
+	if cur != nil {
+		// Worker still alive. Nothing to do — its heartbeat keeps
+		// the lease green; Run() will wake us again on the next tick
+		// or on OS exit.
+		return nil
+	}
+
+	now := l.cfg.Now()
+	lock, err := Get(ctx, l.db, l.agentID)
+	switch {
+	case errors.Is(err, ErrLockMissing):
+		// No row at all — first-ever spawn or post-release respawn.
+		return l.acquireAndSpawn(ctx, now)
+	case err != nil:
+		return fmt.Errorf("supervisor: get lock: %w", err)
+	}
+
+	if lock.Expired(now) {
+		// Lease expired (worker crashed or hung). Steal + spawn.
+		return l.acquireAndSpawn(ctx, now)
+	}
+
+	// Lock still valid. If WE used to own it (lastWorkerID matches
+	// the row owner) but the wait goroutine cleared l.current, the
+	// process died before the lease expired (e.g. SIGKILL'd before
+	// heartbeat tick). Release the orphan row so the next tick spawns
+	// a replacement immediately instead of waiting for lease expiry.
+	if lastWorkerID != "" && lastWorkerID == lock.WorkerID {
+		if err := Release(ctx, l.db, l.agentID, lock.WorkerID); err != nil && !errors.Is(err, ErrLockMissing) {
+			return fmt.Errorf("supervisor: release after exit: %w", err)
+		}
+		l.cfg.Logger.Info("supervisor.lock.released_after_exit",
+			"channel_id", l.channelID, "agent_id", l.agentID,
+			"worker_id", lock.WorkerID, "fencing_token", lock.FencingToken)
+		// Clear the stale lastWorkerID so subsequent Ticks don't
+		// re-release on stale memory.
+		l.mu.Lock()
+		if l.currentID == lastWorkerID {
+			l.currentID = ""
+			l.currentTok = 0
+		}
+		l.mu.Unlock()
+		// Don't re-spawn this tick — next wake-up runs through the
+		// "lock missing" branch and starts fresh.
+	}
+	return nil
+}
+
+// acquireAndSpawn runs the L2 §1.4.10 spawn branch:
+//
+//  1. CAS acquire/steal → returns Lock with fresh fencing_token
+//  2. spawn worker; on failure release lock (avoid orphan)
+//  3. backlog scan; non-empty → hand into SpawnContext.Backlog
+//  4. record (worker, fencing_token, exitCh); start Wait goroutine
+func (l *Loop) acquireAndSpawn(ctx context.Context, now int64) error {
+	workerID := l.cfg.NewWorkerID()
+	if strings.TrimSpace(workerID) == "" {
+		return fmt.Errorf("supervisor: NewWorkerID returned empty")
+	}
+
+	lock, err := Acquire(ctx, l.db, l.agentID, workerID, l.cfg.LeaseTTL, func() int64 { return now })
+	if err != nil {
+		if errors.Is(err, ErrLockHeld) {
+			// Another supervisor / daemon won the race; skip this tick.
+			l.cfg.Logger.Info("supervisor.acquire.lost",
+				"channel_id", l.channelID, "agent_id", l.agentID)
+			return nil
+		}
+		return fmt.Errorf("supervisor: acquire: %w", err)
+	}
+
+	// Backlog scan BEFORE spawn so we can hand it to the worker.
+	backlog, err := BacklogScan(ctx, l.db, l.agentID, now)
+	if err != nil {
+		// Release the lock we just took — otherwise it would expire
+		// naturally but block the next supervisor tick for `LeaseTTL`
+		// seconds.
+		_ = Release(ctx, l.db, l.agentID, workerID)
+		return fmt.Errorf("supervisor: backlog scan: %w", err)
+	}
+
+	sc := SpawnContext{
+		ChannelID:    l.channelID,
+		AgentID:      l.agentID,
+		WorkerID:     workerID,
+		FencingToken: lock.FencingToken,
+		Backlog:      backlog,
+	}
+	w, err := l.spawner.Spawn(ctx, sc)
+	if err != nil {
+		// Spawn failed — release the lock so we don't orphan it for
+		// LeaseTTL seconds (the §1.4.10 pseudocode's "SpawnFailed →
+		// release lock" branch).
+		if rerr := Release(ctx, l.db, l.agentID, workerID); rerr != nil && !errors.Is(rerr, ErrLockMissing) {
+			l.cfg.Logger.Warn("supervisor.release.after_spawn_fail.error",
+				"err", rerr.Error())
+		}
+		return fmt.Errorf("supervisor: spawn: %w", err)
+	}
+
+	// Hand the worker off — record its identity and start the Wait
+	// goroutine that signals exitCh on process death.
+	exitCh := make(chan struct{})
+	l.mu.Lock()
+	l.current = w
+	l.currentID = workerID
+	l.currentTok = lock.FencingToken
+	l.exitCh = exitCh
+	l.mu.Unlock()
+
+	go l.waitWorker(w, workerID, exitCh)
+
+	l.cfg.Logger.Info("supervisor.spawn.ok",
+		"channel_id", l.channelID, "agent_id", l.agentID,
+		"worker_id", workerID, "fencing_token", lock.FencingToken,
+		"pid", w.PID(), "backlog_size", len(backlog))
+	return nil
+}
+
+// waitWorker blocks on Worker.Wait() and, when the process exits,
+// performs the supervisor's "worker died" bookkeeping in a single
+// strict order:
+//
+//  1. clear l.current under mu (Tick will now see no live worker)
+//  2. close exitCh (Run wakes up early; the order matters — a Run
+//     iteration that wakes on exitCh MUST observe l.current == nil)
+//  3. emit the structured "worker.exit" log
+//
+// sync.Once defends against future callers that might invoke close
+// twice; today Wait returns once so the guard is purely defensive.
+func (l *Loop) waitWorker(w Worker, workerID string, exitCh chan struct{}) {
+	var once sync.Once
+	closer := func() { once.Do(func() { close(exitCh) }) }
+
+	err := w.Wait()
+
+	l.mu.Lock()
+	if l.currentID == workerID {
+		l.current = nil
+	}
+	l.mu.Unlock()
+
+	closer()
+
+	if err != nil {
+		l.cfg.Logger.Warn("supervisor.worker.exit",
+			"channel_id", l.channelID, "agent_id", l.agentID,
+			"worker_id", workerID, "err", err.Error())
+	} else {
+		l.cfg.Logger.Info("supervisor.worker.exit",
+			"channel_id", l.channelID, "agent_id", l.agentID,
+			"worker_id", workerID)
+	}
+}
+
+// currentWorker returns the live worker reference (nil when no spawn
+// has succeeded yet, or after Wait completed). Package-private — kept
+// as a test seam so loop_test.go can poll the post-Crash transition
+// without racing on the wait goroutine's bookkeeping.
+func (l *Loop) currentWorker() Worker {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.current
+}
+
+// shutdown kills the current worker (if any) and waits for the
+// exit channel so callers can rely on "Run returned ⇒ no goroutines
+// outstanding". The lock row stays — the next supervisor (this
+// daemon restart, or another instance) handles it via lease expiry.
+func (l *Loop) shutdown() {
+	l.mu.Lock()
+	w := l.current
+	exitCh := l.exitCh
+	l.mu.Unlock()
+
+	if w == nil {
+		return
+	}
+	if err := w.Kill(); err != nil {
+		l.cfg.Logger.Warn("supervisor.shutdown.kill.error", "err", err.Error())
+	}
+	if exitCh != nil {
+		<-exitCh
+	}
+}
+
+// orNever returns ch unchanged (non-nil) or a nil channel (which
+// blocks forever in select) when ch is nil. Lets Run() compose a
+// "select with optional exit channel" without branching on nil.
+func orNever(ch chan struct{}) <-chan struct{} {
+	if ch == nil {
+		return nil
+	}
+	return ch
+}

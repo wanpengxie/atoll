@@ -368,12 +368,12 @@ func TestReserve_ConcurrentSameKey(t *testing.T) {
 	// Each goroutine proposes its own envelope_id; only one INSERT
 	// wins, everyone else must surface the winner's id.
 	var (
-		wg     sync.WaitGroup
-		mu     sync.Mutex
-		seen   = make(map[string]struct{})
-		errs   int32
-		ids    = make([]string, racers)
-		ready  = make(chan struct{})
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		seen  = make(map[string]struct{})
+		errs  int32
+		ids   = make([]string, racers)
+		ready = make(chan struct{})
 	)
 
 	for i := 0; i < racers; i++ {

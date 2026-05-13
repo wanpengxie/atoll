@@ -4,14 +4,14 @@
 // Three primitives live in this file (worker_locks.go):
 //
 //   - Acquire:   CAS row INSERT or steal — increments fencing_token on
-//                steal so any old worker that survives is fenced out at
-//                harness write time (L2 §1.4.9 spawn protocol).
+//     steal so any old worker that survives is fenced out at
+//     harness write time (L2 §1.4.9 spawn protocol).
 //   - Heartbeat: CAS UPDATE that extends the lease as long as the caller
-//                holds the (worker_id, fencing_token) pair — a steal
-//                bumps the token, so the old worker's Heartbeat returns
-//                ErrFencingStale and self-destructs.
+//     holds the (worker_id, fencing_token) pair — a steal
+//     bumps the token, so the old worker's Heartbeat returns
+//     ErrFencingStale and self-destructs.
 //   - Release:   self-DELETE (caller proves ownership via worker_id),
-//                used both on graceful shutdown and after a failed spawn.
+//     used both on graceful shutdown and after a failed spawn.
 //
 // All three are designed to compose with internal/store.WithImmediate
 // — they accept either the *sql.DB pool (Acquire wraps WithImmediate

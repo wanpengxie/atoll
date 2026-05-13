@@ -16,19 +16,19 @@ import (
 // All time-typed fields are Unix seconds (matches the rest of the
 // daemon-go convention).
 type BacklogMessage struct {
-	Seq         int64
-	ID          string
-	TS          int64
-	ChannelID   string
-	SenderKind  string
-	SenderID    string
-	Kind        string
-	Type        string
-	Visibility  string
-	Audience    string // raw JSON value of the column — `["*"]` or `["agent:x", ...]`
-	NotBefore   *int64
-	ExpiresAt   *int64
-	ParentID    string
+	Seq        int64
+	ID         string
+	TS         int64
+	ChannelID  string
+	SenderKind string
+	SenderID   string
+	Kind       string
+	Type       string
+	Visibility string
+	Audience   string // raw JSON value of the column — `["*"]` or `["agent:x", ...]`
+	NotBefore  *int64
+	ExpiresAt  *int64
+	ParentID   string
 }
 
 // BacklogScan executes the L2 §1.4.10 normative SQL — every message

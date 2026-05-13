@@ -34,8 +34,8 @@ type msgFixture struct {
 	senderKind string
 	kind       string // "event" | "request" | "response"
 	typ        string
-	visibility string   // "public" | "private" | "system"
-	audience   string   // raw JSON
+	visibility string // "public" | "private" | "system"
+	audience   string // raw JSON
 	notBefore  *int64
 	expiresAt  *int64
 }
