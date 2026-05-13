@@ -59,6 +59,57 @@ and excludes the store-derived columns (`ts_received`, delivery
 metadata, `is_terminal`, `seq`) per L1 §10.2.2. T6 / T7 build on this
 for action_ledger keys and harness step 0.5 / step 8 content compare.
 
+## bootstrap saga (T3)
+
+`internal/bootstrap` runs the L2 §1.4.7 channel-create 9-step saga and
+its reconcile loop:
+
+```go
+saga := bootstrap.New(daemonDB)
+res, err := saga.ChannelCreate(ctx, bootstrap.CreateParams{
+    CreateRequestID: "<server-uuid>",
+    ChannelID:       "<server-assigned>",
+    WorkdirPath:     "/path/to/channel/workdir",
+    HumanMembers:    []bootstrap.HumanMember{{ActorID: "user-001"}},
+    ChannelAgent:    bootstrap.ChannelAgentSpec{ /* default channel-agent */ },
+    ToolAdapters:    []bootstrap.ToolAdapterSpec{ /* … */ },
+    BusinessTypes:   []bootstrap.TypeRegistryRow{ /* … */ },
+})
+```
+
+Idempotency is keyed on `create_request_id`: the same id replays
+return `(channel_id, completed)` after success;
+`ErrBootstrapInProgress` while a saga is still running;
+`ErrBootstrapRolledBack` when the previous attempt failed
+(caller must switch id).
+
+The 9 steps land in this order (each fail compensates):
+
+1. INSERT `bootstrap_registry` row (status=in_progress).
+2. mkdir workdir + `OpenChannel(messages.sqlite)`.
+3–7. Inside a single channel-local `BEGIN IMMEDIATE`:
+   seed `system` actor → human members → channel agent →
+   tool adapters (`actor_registry` + `type_registry` per L2 §3.5
+   install order) → business `type_registry` rows.
+8a. INSERT `messages` row for `system.event payload.kind=channel_created`
+   with deterministic id `bootstrap:<create_request_id>` (INSERT OR
+   IGNORE for reconcile-safe replay).
+8b. CAS `UPDATE bootstrap_registry SET status='completed'`.
+
+Crash between 8a and 8b → reconcile sees `in_progress`, retries 8a
+(no-op dedup via messages.id UNIQUE) + 8b → status=completed.
+
+HTTP surface (auto-mounted by `bootstrap.RegisterRoutes(mux, saga)`):
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/api/channel/create` | POST | drive ChannelCreate (200 / 409 / 400 / 500) |
+| `/api/channel/list`   | GET  | enumerate `status='completed'` rows for server-side cache reconcile |
+
+Tests use `internal/store.OpenDaemon` + `t.TempDir()` workdirs and a
+failpoint hook (`withFailpoints`) to assert the rollback compensation
+for every step. No real e2e: see `internal/bootstrap/*_test.go`.
+
 ## migrate (T1)
 
 `cmd/migrate` is the schema bootstrap + Node-daemon-data import CLI. It
