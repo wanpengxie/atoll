@@ -21,11 +21,11 @@ import (
 // (so retries against the same seq accumulate failures) and records the
 // state-changing methods.
 type fakeOutbox struct {
-	mu        sync.Mutex
-	chID      channel.ID
-	pending   []viewsync.PushFrame
-	pushed    map[viewsync.Seq]bool
-	pendingN  int // PendingCount stub — caller mutates directly
+	mu         sync.Mutex
+	chID       channel.ID
+	pending    []viewsync.PushFrame
+	pushed     map[viewsync.Seq]bool
+	pendingN   int // PendingCount stub — caller mutates directly
 	pendingErr error
 }
 
@@ -351,11 +351,11 @@ func TestPusher_FailHookStillFiresAlongsideEmitter(t *testing.T) {
 
 	var hookHits atomic.Int32
 	pusher, _ := transit.NewPusher(transit.PusherConfig{
-		Outbox:               outbox,
-		Client:               client,
-		Cursors:              transit.NewCursorTracker(),
-		FrameID:              atomicFrameID(),
-		FailHook:             func(channel.ID, viewsync.Seq, error) { hookHits.Add(1) },
+		Outbox:                outbox,
+		Client:                client,
+		Cursors:               transit.NewCursorTracker(),
+		FrameID:               atomicFrameID(),
+		FailHook:              func(channel.ID, viewsync.Seq, error) { hookHits.Add(1) },
 		MaxRetriesBeforeEvent: 10,
 		BacklogHighWatermark:  -1,
 	})

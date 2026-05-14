@@ -194,7 +194,7 @@ func TestWriteResultDedupeRoundTrip(t *testing.T) {
 // is an alias for kernel/message.HarnessRejectReason; callers must be
 // able to compare against either form without conversion.
 func TestRejectReasonAliasMatchesMessageReason(t *testing.T) {
-	var r harness.RejectReason = harness.RejectAuthFailed
+	r := harness.RejectAuthFailed
 	if r != message.HarnessAuthFailed {
 		t.Errorf("alias mismatch: %v != %v", r, message.HarnessAuthFailed)
 	}

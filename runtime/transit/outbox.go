@@ -88,12 +88,12 @@ type Pusher struct {
 	pollEvery time.Duration
 
 	// retry-counter + watermark state (L1 §8.1.5 observability).
-	maxRetries   int
-	watermark    int
-	emitter      EventEmitter
-	mu           sync.Mutex
-	failCount    map[viewsync.Seq]int
-	failedNotify map[viewsync.Seq]bool // seq → emitted view_sync_failed already
+	maxRetries    int
+	watermark     int
+	emitter       EventEmitter
+	mu            sync.Mutex
+	failCount     map[viewsync.Seq]int
+	failedNotify  map[viewsync.Seq]bool // seq → emitted view_sync_failed already
 	backlogActive bool                  // de-dupe consecutive backlog warns
 }
 
