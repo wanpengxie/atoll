@@ -25,6 +25,31 @@ func openTestChannel(t *testing.T) *sql.DB {
 	return db
 }
 
+// openTestChannelRWandRO mirrors the production runtime wiring after
+// R2-FIX-7 (t113): one writable + one `mode=ro` `*sql.DB` pointed at
+// the same file. Tests that exercise BuildTools / BuildConfig must
+// supply both because sqlite.query consumes the ro handle.
+func openTestChannelRWandRO(t *testing.T) (rw, ro *sql.DB) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "messages.sqlite")
+	ctx := context.Background()
+	var err error
+	rw, err = store.OpenChannel(ctx, path, store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("open channel rw: %v", err)
+	}
+	ro, err = store.OpenChannel(ctx, path, store.OpenOptions{ReadOnly: true, SkipDDL: true})
+	if err != nil {
+		_ = rw.Close()
+		t.Fatalf("open channel ro: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = ro.Close()
+		_ = rw.Close()
+	})
+	return rw, ro
+}
+
 // TestEnsureToolActors_HappyPath verifies every Catalog entry lands as
 // (a) an active actor_registry row with kind=tool/binding=in_worker_bus
 // and (b) a type_registry row with the prescribed max_pending_ms.
@@ -153,7 +178,7 @@ func TestEnsureToolActors_InputValidation(t *testing.T) {
 // catalog descriptor with the right v4 type name.
 func TestBuildTools_HappyPath(t *testing.T) {
 	t.Parallel()
-	db := openTestChannel(t)
+	db, roDB := openTestChannelRWandRO(t)
 	ctx := context.Background()
 	if err := EnsureToolActors(ctx, EnsureConfig{
 		DB: db, ChannelID: "ch-1", Now: 1700000000,
@@ -183,12 +208,13 @@ func TestBuildTools_HappyPath(t *testing.T) {
 	deps.Clock = func() int64 { return 1700000001_000 }
 
 	wrapped, err := BuildTools(BuildConfig{
-		DB:        db,
-		ChannelID: "ch-1",
-		AgentID:   "alice",
-		TurnID:    "turn:alice:t1",
-		WorkDir:   t.TempDir(),
-		Deps:      deps,
+		DB:         db,
+		ReadOnlyDB: roDB,
+		ChannelID:  "ch-1",
+		AgentID:    "alice",
+		TurnID:     "turn:alice:t1",
+		WorkDir:    t.TempDir(),
+		Deps:       deps,
 	})
 	if err != nil {
 		t.Fatalf("BuildTools: %v", err)
@@ -219,7 +245,7 @@ func TestBuildTools_HappyPath(t *testing.T) {
 // required fields before constructing tools.
 func TestBuildTools_ValidatesConfig(t *testing.T) {
 	t.Parallel()
-	db := openTestChannel(t)
+	db, roDB := openTestChannelRWandRO(t)
 	deps := pkgharness.Deps{
 		Store:     internalharness.NewSQLiteStore(db),
 		ChannelID: "ch-1",
@@ -228,11 +254,12 @@ func TestBuildTools_ValidatesConfig(t *testing.T) {
 		name string
 		cfg  BuildConfig
 	}{
-		{"nil db", BuildConfig{ChannelID: "ch-1", AgentID: "a", TurnID: "t", WorkDir: "/tmp", Deps: deps}},
-		{"empty channel", BuildConfig{DB: db, AgentID: "a", TurnID: "t", WorkDir: "/tmp", Deps: deps}},
-		{"empty agent", BuildConfig{DB: db, ChannelID: "ch-1", TurnID: "t", WorkDir: "/tmp", Deps: deps}},
-		{"empty turn", BuildConfig{DB: db, ChannelID: "ch-1", AgentID: "a", WorkDir: "/tmp", Deps: deps}},
-		{"empty workdir", BuildConfig{DB: db, ChannelID: "ch-1", AgentID: "a", TurnID: "t", Deps: deps}},
+		{"nil db", BuildConfig{ReadOnlyDB: roDB, ChannelID: "ch-1", AgentID: "a", TurnID: "t", WorkDir: "/tmp", Deps: deps}},
+		{"nil readonly db", BuildConfig{DB: db, ChannelID: "ch-1", AgentID: "a", TurnID: "t", WorkDir: "/tmp", Deps: deps}},
+		{"empty channel", BuildConfig{DB: db, ReadOnlyDB: roDB, AgentID: "a", TurnID: "t", WorkDir: "/tmp", Deps: deps}},
+		{"empty agent", BuildConfig{DB: db, ReadOnlyDB: roDB, ChannelID: "ch-1", TurnID: "t", WorkDir: "/tmp", Deps: deps}},
+		{"empty turn", BuildConfig{DB: db, ReadOnlyDB: roDB, ChannelID: "ch-1", AgentID: "a", WorkDir: "/tmp", Deps: deps}},
+		{"empty workdir", BuildConfig{DB: db, ReadOnlyDB: roDB, ChannelID: "ch-1", AgentID: "a", TurnID: "t", Deps: deps}},
 	}
 	for _, tc := range cases {
 		tc := tc

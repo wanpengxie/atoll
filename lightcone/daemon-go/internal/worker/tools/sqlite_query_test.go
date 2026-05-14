@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -11,27 +12,48 @@ import (
 	"github.com/coagent-ai/daemon-go/internal/store"
 )
 
+// openChannelRWandRO opens a fresh channel sqlite at a tmp path and
+// returns both a writable and a sibling read-only `*sql.DB` handle.
+// Tests use the writable handle to seed and the ro handle to drive
+// the tool — mirroring the production runtime.go wiring put in place
+// for R2-FIX-7 (t113).
+func openChannelRWandRO(t *testing.T) (rw, ro *sql.DB, path string) {
+	t.Helper()
+	path = filepath.Join(t.TempDir(), "messages.sqlite")
+	ctx := context.Background()
+	var err error
+	rw, err = store.OpenChannel(ctx, path, store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("open channel rw: %v", err)
+	}
+	ro, err = store.OpenChannel(ctx, path, store.OpenOptions{ReadOnly: true, SkipDDL: true})
+	if err != nil {
+		_ = rw.Close()
+		t.Fatalf("open channel ro: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = ro.Close()
+		_ = rw.Close()
+	})
+	return rw, ro, path
+}
+
 // TestSQLiteQueryTool_SelectHappyPath verifies a real SELECT lands rows
 // with the right shape.
 func TestSQLiteQueryTool_SelectHappyPath(t *testing.T) {
 	t.Parallel()
-	db, err := store.OpenChannel(context.Background(),
-		filepath.Join(t.TempDir(), "messages.sqlite"), store.OpenOptions{})
-	if err != nil {
-		t.Fatalf("open channel: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	rw, ro, _ := openChannelRWandRO(t)
 
 	// Seed two rows so the query has something interesting to scan.
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx,
+	if _, err := rw.ExecContext(ctx,
 		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
 		 VALUES ('alice', 'agent', 'in_worker_bus', 1700000000, NULL),
 		        ('bob',   'agent', 'in_worker_bus', 1700000001, NULL)`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	tool := NewSQLiteQueryTool(db)
+	tool := NewSQLiteQueryTool(ro)
 	res, err := tool.Execute(ctx, json.RawMessage(`{"sql":"SELECT actor_id, actor_kind FROM actor_registry ORDER BY actor_id"}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -60,14 +82,9 @@ func TestSQLiteQueryTool_SelectHappyPath(t *testing.T) {
 // land as IsError with the documented reason.
 func TestSQLiteQueryTool_RejectsNonSelect(t *testing.T) {
 	t.Parallel()
-	db, err := store.OpenChannel(context.Background(),
-		filepath.Join(t.TempDir(), "messages.sqlite"), store.OpenOptions{})
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	_, ro, _ := openChannelRWandRO(t)
 
-	tool := NewSQLiteQueryTool(db)
+	tool := NewSQLiteQueryTool(ro)
 	cases := []struct {
 		name  string
 		sqlIn string
@@ -98,18 +115,125 @@ func TestSQLiteQueryTool_RejectsNonSelect(t *testing.T) {
 	}
 }
 
+// TestSQLiteQueryTool_RejectsDMLCTE closes R2-FIX-7 (t113): the old
+// validator accepted any WITH-prefixed statement that mentioned SELECT
+// somewhere, which let SQLite ≥3.35 DML CTEs (`WITH x AS (DELETE ...
+// RETURNING) SELECT ...`) slip through. The new tokeniser must reject
+// at the validator layer (the ro `*sql.DB` is the second-line defence
+// in production — exercised separately by
+// TestSQLiteQueryTool_ReadOnlyHandleBlocksWrites below).
+func TestSQLiteQueryTool_RejectsDMLCTE(t *testing.T) {
+	t.Parallel()
+	_, ro, _ := openChannelRWandRO(t)
+
+	tool := NewSQLiteQueryTool(ro)
+	cases := []struct {
+		name  string
+		sqlIn string
+	}{
+		{"delete_cte", `WITH x AS (DELETE FROM actor_registry RETURNING *) SELECT * FROM x`},
+		{"update_cte", `WITH x AS (UPDATE actor_registry SET actor_kind='evil' RETURNING actor_id) SELECT * FROM x`},
+		{"insert_cte", `WITH x AS (INSERT INTO actor_registry (actor_id) VALUES ('z') RETURNING *) SELECT * FROM x`},
+		{"replace_cte", `WITH x AS (REPLACE INTO actor_registry (actor_id) VALUES ('z') RETURNING *) SELECT * FROM x`},
+		{"drop_cte", `WITH x AS (DROP TABLE actor_registry) SELECT 1`},
+		{"alter_cte", `WITH x AS (ALTER TABLE actor_registry RENAME TO evil) SELECT 1`},
+		{"create_cte", `WITH x AS (CREATE TABLE evil(a)) SELECT 1`},
+		{"truncate_nested", `WITH x AS (SELECT 1) SELECT * FROM (TRUNCATE actor_registry)`},
+		// block-comment / line-comment evasion attempts also fail.
+		{"line_comment_evasion", "SELECT * FROM x;\n-- harmless\nDELETE FROM actor_registry"},
+		{"block_comment_evasion", "SELECT 1 /* still */ DELETE FROM actor_registry"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]any{"sql": tc.sqlIn})
+			res, err := tool.Execute(context.Background(), body)
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if !res.IsError {
+				t.Fatalf("expected IsError=true for %s; got %+v", tc.name, res.Value.Value)
+			}
+			val := res.Value.Value.(map[string]any)
+			reason, _ := val["reason"].(string)
+			if !strings.HasPrefix(reason, "sqlite_query_not_select") {
+				t.Fatalf("reason = %v, want sqlite_query_not_select", reason)
+			}
+		})
+	}
+}
+
+// TestSQLiteQueryTool_AllowsKeywordsInsideStringLiterals confirms the
+// tokeniser does NOT mistake DML keywords that appear inside SQL
+// string literals or quoted identifiers for actual DML statements.
+// A regression here would break legitimate read-only queries that
+// happen to mention DML names as values or column aliases.
+func TestSQLiteQueryTool_AllowsKeywordsInsideStringLiterals(t *testing.T) {
+	t.Parallel()
+	_, ro, _ := openChannelRWandRO(t)
+
+	tool := NewSQLiteQueryTool(ro)
+	cases := []string{
+		`SELECT 'DELETE FROM x' AS s`,
+		`SELECT 'embedded ''DELETE''' AS s`,
+		`SELECT "DELETE" AS col`, // quoted identifier
+		`SELECT 1 AS n -- DELETE FROM actor_registry`,
+		`SELECT 1 AS n /* DELETE FROM actor_registry */`,
+	}
+	for _, sqlIn := range cases {
+		sqlIn := sqlIn
+		t.Run(sqlIn, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]any{"sql": sqlIn})
+			res, err := tool.Execute(context.Background(), body)
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if res.IsError {
+				t.Fatalf("expected pass-through for %q, got reject: %+v", sqlIn, res.Value.Value)
+			}
+		})
+	}
+}
+
+// TestSQLiteQueryTool_ReadOnlyHandleBlocksWrites is the driver-level
+// belt-and-braces guarantee. Even if the validator were defeated by a
+// novel evasion, the underlying `*sql.DB` handle is opened with
+// `mode=ro`, so SQLite itself refuses any write. We sidestep the
+// validator here by calling the ro handle directly with a DML
+// statement — production code never does this; the test exists to pin
+// the driver-level contract.
+func TestSQLiteQueryTool_ReadOnlyHandleBlocksWrites(t *testing.T) {
+	t.Parallel()
+	rw, ro, _ := openChannelRWandRO(t)
+
+	// Sanity: writable handle accepts a benign INSERT.
+	if _, err := rw.ExecContext(context.Background(),
+		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
+		 VALUES ('seed', 'agent', 'in_worker_bus', 1700000000, NULL)`); err != nil {
+		t.Fatalf("seed via rw failed: %v", err)
+	}
+	// Now drive the SAME statement through the ro handle. The
+	// modernc.org/sqlite driver must surface a readonly-database
+	// error (SQLite SQLITE_READONLY = 8).
+	_, err := ro.ExecContext(context.Background(),
+		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
+		 VALUES ('blocked', 'agent', 'in_worker_bus', 1700000001, NULL)`)
+	if err == nil {
+		t.Fatalf("expected DML on ro handle to fail at driver level")
+	}
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(lower, "read") && !strings.Contains(lower, "readonly") {
+		t.Fatalf("ro driver error %q does not mention read-only", err)
+	}
+}
+
 // TestSQLiteQueryTool_EmptySQL is a separate case because the reason
 // code differs from "not select".
 func TestSQLiteQueryTool_EmptySQL(t *testing.T) {
 	t.Parallel()
-	db, err := store.OpenChannel(context.Background(),
-		filepath.Join(t.TempDir(), "messages.sqlite"), store.OpenOptions{})
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	_, ro, _ := openChannelRWandRO(t)
 
-	tool := NewSQLiteQueryTool(db)
+	tool := NewSQLiteQueryTool(ro)
 	res, err := tool.Execute(context.Background(), json.RawMessage(`{"sql":""}`))
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -127,14 +251,9 @@ func TestSQLiteQueryTool_EmptySQL(t *testing.T) {
 // is accepted (common read-only construct).
 func TestSQLiteQueryTool_WithSelect(t *testing.T) {
 	t.Parallel()
-	db, err := store.OpenChannel(context.Background(),
-		filepath.Join(t.TempDir(), "messages.sqlite"), store.OpenOptions{})
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	_, ro, _ := openChannelRWandRO(t)
 
-	tool := NewSQLiteQueryTool(db)
+	tool := NewSQLiteQueryTool(ro)
 	res, err := tool.Execute(context.Background(), json.RawMessage(`{"sql":"WITH x AS (SELECT 1 AS n) SELECT n FROM x"}`))
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -147,20 +266,15 @@ func TestSQLiteQueryTool_WithSelect(t *testing.T) {
 // TestSQLiteQueryTool_Params verifies positional parameters work.
 func TestSQLiteQueryTool_Params(t *testing.T) {
 	t.Parallel()
-	db, err := store.OpenChannel(context.Background(),
-		filepath.Join(t.TempDir(), "messages.sqlite"), store.OpenOptions{})
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.ExecContext(context.Background(),
+	rw, ro, _ := openChannelRWandRO(t)
+	if _, err := rw.ExecContext(context.Background(),
 		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
 		 VALUES ('alice', 'agent', 'in_worker_bus', 1700000000, NULL),
 		        ('bob',   'agent', 'in_worker_bus', 1700000001, NULL)`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	tool := NewSQLiteQueryTool(db)
+	tool := NewSQLiteQueryTool(ro)
 	body, _ := json.Marshal(map[string]any{
 		"sql":    "SELECT actor_id FROM actor_registry WHERE actor_id = ?",
 		"params": []any{"alice"},
@@ -187,14 +301,9 @@ func TestSQLiteQueryTool_Params(t *testing.T) {
 // driver definitely observes the deadline mid-iteration.
 func TestSQLiteQueryTool_PerQueryTimeout(t *testing.T) {
 	t.Parallel()
-	db, err := store.OpenChannel(context.Background(),
-		filepath.Join(t.TempDir(), "messages.sqlite"), store.OpenOptions{})
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	_, ro, _ := openChannelRWandRO(t)
 
-	tool := &SQLiteQueryTool{db: db, timeout: 1 * time.Millisecond}
+	tool := &SQLiteQueryTool{db: ro, timeout: 1 * time.Millisecond}
 	// Recursive CTE that walks 5M rows — orders of magnitude over the
 	// 1ms budget so the driver/iterator must observe the deadline.
 	heavy := `WITH RECURSIVE r(n) AS (

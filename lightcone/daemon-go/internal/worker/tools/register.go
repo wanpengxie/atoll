@@ -102,7 +102,12 @@ func Catalog() []Descriptor {
 			return think.New()
 		}},
 		{Type: "sqlite.query", MaxPendingMs: 5_000, Build: func(cfg BuildConfig) kimitools.Tool {
-			return NewSQLiteQueryTool(cfg.DB)
+			// MUST consume the read-only handle, NOT cfg.DB. The
+			// writable handle is reserved for harness ledger / actor
+			// writes; the sqlite.query tool is LLM-driven and gets the
+			// `mode=ro` sibling so DML (incl. DML CTEs) hard-fails at
+			// the driver level. See R2-FIX-7 (t113).
+			return NewSQLiteQueryTool(cfg.ReadOnlyDB)
 		}},
 	}
 }
@@ -274,12 +279,19 @@ func buildTypeRow(d Descriptor) (registry.TypeRow, error) {
 // -----------------------------------------------------------------------------
 
 // BuildConfig wires BuildTools to the worker's harness + sqlite +
-// per-channel workdir. Required fields: DB, ChannelID, AgentID,
-// TurnID, WorkDir, Deps. The rest fall back to safe defaults.
+// per-channel workdir. Required fields: DB, ReadOnlyDB, ChannelID,
+// AgentID, TurnID, WorkDir, Deps. The rest fall back to safe defaults.
 type BuildConfig struct {
 	// DB is the channel sqlite — feeds the v4 wrapper's ledger
-	// executor and the inner sqlite.query tool.
+	// executor (writable).
 	DB *sql.DB
+
+	// ReadOnlyDB is a sibling handle to the same channel sqlite file
+	// opened with `mode=ro`. The sqlite.query tool consumes this so
+	// DML / DDL (including DML CTEs with RETURNING) fail at the
+	// driver level regardless of validator strength. See R2-FIX-7
+	// (t113). MUST be a different `*sql.DB` than `DB`.
+	ReadOnlyDB *sql.DB
 
 	// ChannelID is the channel scope (envelope.channel_id).
 	ChannelID string
@@ -334,6 +346,8 @@ func (c BuildConfig) Validate() error {
 	switch {
 	case c.DB == nil:
 		return errors.New("tools: BuildConfig.DB is nil")
+	case c.ReadOnlyDB == nil:
+		return errors.New("tools: BuildConfig.ReadOnlyDB is nil")
 	case strings.TrimSpace(c.ChannelID) == "":
 		return errors.New("tools: BuildConfig.ChannelID is empty")
 	case strings.TrimSpace(c.AgentID) == "":

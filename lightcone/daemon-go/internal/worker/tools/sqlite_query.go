@@ -28,14 +28,23 @@ const defaultSQLiteQueryTimeout = 5 * time.Second
 
 // NewSQLiteQueryTool builds a read-only sqlite.query tool. The tool
 // answers `{sql, params?}` requests by running QueryContext on the
-// channel-local sqlite handle and serialising the rows back as
+// caller-supplied sqlite handle and serialising the rows back as
 // `{columns, rows}`. Each Execute is wrapped in a per-call
 // `context.WithTimeout(defaultSQLiteQueryTimeout)` so a slow query
 // surfaces a deadline_exceeded error instead of hanging the worker.
 //
 // Hard contracts:
+//   - The supplied `db` MUST be a read-only `*sql.DB` (opened with
+//     `OpenOptions{ReadOnly: true}` / DSN `mode=ro`). This is the
+//     primary defence — SQLite rejects any DML at the driver level,
+//     so a DML CTE (`WITH x AS (DELETE ... RETURNING) SELECT ...`)
+//     fails regardless of validator quality. See R2-FIX-7 (t113).
 //   - SQL MUST start with SELECT or WITH (case-insensitive); everything
 //     else returns IsError=true `{reason: "sqlite_query_not_select"}`.
+//   - The validator also tokenises the SQL (skipping string literals
+//     and comments) and rejects any DML keyword at any nesting depth.
+//     Belt-and-suspenders against the ro driver — if the catalog wiring
+//     ever regresses to a writable handle, the validator still holds.
 //   - Empty SQL returns IsError=true `{reason: "sqlite_query_empty"}`.
 //   - Rows are scanned as `[]any` and JSON-marshalled — sqlite returns
 //     []byte for TEXT/BLOB; we promote []byte → string when the bytes
@@ -195,9 +204,32 @@ type rejectErr struct {
 
 func (e rejectErr) Error() string { return e.reason + ": " + e.detail }
 
-// validateSelect enforces the SELECT-only rule. We accept WITH ...
-// SELECT because CTEs are a common read-only construct; everything
-// else returns a structured rejection.
+// dmlKeywords is the closed set of statement-level keywords the
+// validator rejects at any nesting depth. SQLite ≥3.35 supports DML
+// CTEs (`WITH x AS (DELETE ... RETURNING) SELECT * FROM x`) — the old
+// `HasPrefix("WITH") && Contains("SELECT")` heuristic let those slip
+// through. Tokenising the statement and refusing any of these names
+// closes the LLM prompt-injection write path even if the underlying
+// `*sql.DB` were ever wired to a writable handle by mistake. See
+// R2-FIX-7 (t113).
+var dmlKeywords = map[string]struct{}{
+	"INSERT":   {},
+	"UPDATE":   {},
+	"DELETE":   {},
+	"DROP":     {},
+	"ALTER":    {},
+	"CREATE":   {},
+	"REPLACE":  {},
+	"TRUNCATE": {},
+}
+
+// validateSelect enforces the SELECT-only rule. It accepts statements
+// starting with SELECT or WITH (CTE) and rejects everything else.
+// Additionally it tokenises the SQL — skipping string literals,
+// quoted identifiers, and `--` / `/* */` comments — and rejects any
+// DML keyword (INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/REPLACE/TRUNCATE)
+// at any nesting depth. Belt-and-suspenders behind the ro `*sql.DB`
+// driver-level enforcement (R2-FIX-7).
 func validateSelect(sqlText string) *rejectErr {
 	trimmed := strings.TrimSpace(sqlText)
 	if trimmed == "" {
@@ -205,18 +237,185 @@ func validateSelect(sqlText string) *rejectErr {
 	}
 	upper := strings.ToUpper(trimmed)
 	switch {
-	case strings.HasPrefix(upper, "SELECT"):
-		return nil
-	case strings.HasPrefix(upper, "WITH"):
-		// Cheap heuristic: ensure the keyword SELECT appears somewhere
-		// in the statement so a `WITH ... INSERT` cannot sneak through.
-		if !strings.Contains(upper, "SELECT") {
-			return &rejectErr{"sqlite_query_not_select", "WITH clause without SELECT body is not allowed"}
-		}
-		return nil
+	case strings.HasPrefix(upper, "SELECT"), strings.HasPrefix(upper, "WITH"):
+		// fall through to tokeniser
 	default:
 		return &rejectErr{"sqlite_query_not_select", "only SELECT / WITH ... SELECT statements are allowed"}
 	}
+	if kw := scanForDMLKeyword(trimmed); kw != "" {
+		return &rejectErr{
+			"sqlite_query_not_select",
+			"DML keyword " + kw + " is not allowed (including inside CTE / subquery)",
+		}
+	}
+	if strings.HasPrefix(upper, "WITH") {
+		// Cheap heuristic: ensure the keyword SELECT appears somewhere
+		// in the statement so an empty `WITH` shell with no read body
+		// still falls back to a structured rejection.
+		if !strings.Contains(upper, "SELECT") {
+			return &rejectErr{"sqlite_query_not_select", "WITH clause without SELECT body is not allowed"}
+		}
+	}
+	return nil
+}
+
+// scanForDMLKeyword tokenises sqlText and returns the first DML
+// keyword it observes (uppercased), or "" if the statement is clean.
+//
+// Tokenisation rules (sqlite lexical conventions):
+//   - `--` starts a line comment that ends at the next newline.
+//   - `/* ... */` is a block comment (non-nesting per the SQL spec).
+//   - `'...'` is a string literal; `''` inside is an escaped quote.
+//   - `"..."` (and `[...]` / `` `...` `` per sqlite legacy) are quoted
+//     identifiers; we treat their contents as opaque, not keywords.
+//   - Outside the above, runs of `[A-Za-z_][A-Za-z0-9_]*` are tokens.
+//
+// We do NOT attempt to parse the AST — a single keyword match at any
+// depth is enough to reject. Conversely, keywords that appear inside
+// string literals (e.g. `SELECT 'DELETE FROM x' AS s`) are correctly
+// ignored.
+func scanForDMLKeyword(sqlText string) string {
+	const (
+		stateNormal = iota
+		stateLineComment
+		stateBlockComment
+		stateSingleQuote
+		stateDoubleQuote
+		stateBacktick
+		stateBracket
+	)
+	state := stateNormal
+	var token strings.Builder
+	flush := func() string {
+		if token.Len() == 0 {
+			return ""
+		}
+		kw := strings.ToUpper(token.String())
+		token.Reset()
+		if _, ok := dmlKeywords[kw]; ok {
+			return kw
+		}
+		return ""
+	}
+	r := []byte(sqlText)
+	for i := 0; i < len(r); i++ {
+		c := r[i]
+		switch state {
+		case stateNormal:
+			// Start of a comment?
+			if c == '-' && i+1 < len(r) && r[i+1] == '-' {
+				if kw := flush(); kw != "" {
+					return kw
+				}
+				state = stateLineComment
+				i++
+				continue
+			}
+			if c == '/' && i+1 < len(r) && r[i+1] == '*' {
+				if kw := flush(); kw != "" {
+					return kw
+				}
+				state = stateBlockComment
+				i++
+				continue
+			}
+			// Start of a quoted span?
+			switch c {
+			case '\'':
+				if kw := flush(); kw != "" {
+					return kw
+				}
+				state = stateSingleQuote
+				continue
+			case '"':
+				if kw := flush(); kw != "" {
+					return kw
+				}
+				state = stateDoubleQuote
+				continue
+			case '`':
+				if kw := flush(); kw != "" {
+					return kw
+				}
+				state = stateBacktick
+				continue
+			case '[':
+				if kw := flush(); kw != "" {
+					return kw
+				}
+				state = stateBracket
+				continue
+			}
+			// Identifier character?
+			if isIdentChar(c) {
+				token.WriteByte(c)
+				continue
+			}
+			if kw := flush(); kw != "" {
+				return kw
+			}
+		case stateLineComment:
+			if c == '\n' {
+				state = stateNormal
+			}
+		case stateBlockComment:
+			if c == '*' && i+1 < len(r) && r[i+1] == '/' {
+				state = stateNormal
+				i++
+			}
+		case stateSingleQuote:
+			if c == '\'' {
+				// Doubled '' is an embedded quote, not a terminator.
+				if i+1 < len(r) && r[i+1] == '\'' {
+					i++
+					continue
+				}
+				state = stateNormal
+			}
+		case stateDoubleQuote:
+			if c == '"' {
+				if i+1 < len(r) && r[i+1] == '"' {
+					i++
+					continue
+				}
+				state = stateNormal
+			}
+		case stateBacktick:
+			if c == '`' {
+				if i+1 < len(r) && r[i+1] == '`' {
+					i++
+					continue
+				}
+				state = stateNormal
+			}
+		case stateBracket:
+			// sqlite `[ident]` quotes have no escape; first `]` closes.
+			if c == ']' {
+				state = stateNormal
+			}
+		}
+	}
+	if kw := flush(); kw != "" {
+		return kw
+	}
+	return ""
+}
+
+// isIdentChar reports whether b can appear in a SQL identifier token
+// (ASCII-only — SQLite accepts unicode identifiers but DML keywords
+// are pure ASCII so the check is safe).
+func isIdentChar(b byte) bool {
+	switch {
+	case b >= 'A' && b <= 'Z':
+		return true
+	case b >= 'a' && b <= 'z':
+		return true
+	case b >= '0' && b <= '9':
+		return true
+	case b == '_':
+		return true
+	}
+	return false
 }
 
 // normaliseRow promotes []byte values to strings when possible. sqlite

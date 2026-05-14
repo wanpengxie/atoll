@@ -176,6 +176,20 @@ func Run(parentCtx context.Context, cfg RuntimeConfig) (RuntimeResult, error) {
 	}
 	defer func() { _ = db.Close() }()
 
+	// Step 3a: open a sibling read-only handle for the LLM-facing
+	// sqlite.query tool. `mode=ro` enforces SQLite-level read-only
+	// at the driver — any DML (including DML CTEs with RETURNING)
+	// fails regardless of validator strength. Keeps the harness
+	// ledger executor on the writable handle untouched. See
+	// R2-FIX-7 (t113). SkipDDL is required because the DDL has
+	// already been applied via the writable open above, and ro
+	// files cannot run CREATE TABLE.
+	roDB, err := store.OpenChannel(parentCtx, dbPath, store.OpenOptions{ReadOnly: true, SkipDDL: true})
+	if err != nil {
+		return RuntimeResult{}, fmt.Errorf("worker_runtime: open channel sqlite (ro) %s: %w", dbPath, err)
+	}
+	defer func() { _ = roDB.Close() }()
+
 	// Confirm the actor row exists. The bootstrap saga (T3) seeds it;
 	// a missing row means the channel was created out-of-band or the
 	// supervisor hands us a wrong agent_id. Surface early so the
@@ -241,6 +255,7 @@ func Run(parentCtx context.Context, cfg RuntimeConfig) (RuntimeResult, error) {
 	// rows for audience validation.
 	wrappedTools, terr := workertools.BuildTools(workertools.BuildConfig{
 		DB:                   db,
+		ReadOnlyDB:           roDB,
 		ChannelID:            tc.ChannelID,
 		AgentID:              tc.AgentID,
 		FencingToken:         tc.FencingToken,
