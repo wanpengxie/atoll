@@ -1,0 +1,75 @@
+// Package main is the coagent management CLI binary.
+//
+// Authoritative spec: .dalek/pm/m1.5-tickets.md §T7 (cmd/cli 子命令).
+//
+// Sub-commands:
+//
+//	coagent kernel events --channel <id> [--since <ts>] [--data-dir <p>] [--limit N]
+//	coagent channel ls    [--workspace <id>]
+//	coagent channel show  <chID>
+//	coagent channel create --workspace <ws> --name <name> [--type group]
+//	coagent device register --channel <ch> --type xhs --daemon <id> [--device-id <id>]
+//	coagent daemon status
+//
+// Auth: cookie-less. Pass `--token <session_token>` or set
+// COAGENT_SESSION_TOKEN — sent as `Authorization: Bearer …`. The
+// server identity middleware accepts both cookie and bearer forms.
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+// version is set via -ldflags at build time.
+var version = "dev"
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(2)
+	}
+	cmd := os.Args[1]
+	args := os.Args[2:]
+
+	switch cmd {
+	case "kernel":
+		runKernel(args)
+	case "channel":
+		runChannel(args)
+	case "device":
+		runDevice(args)
+	case "daemon":
+		runDaemon(args)
+	case "-h", "--help", "help":
+		usage()
+	case "-v", "--version", "version":
+		fmt.Println("coagent-cli", version)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
+		usage()
+		os.Exit(2)
+	}
+}
+
+func usage() {
+	fmt.Fprint(os.Stderr, `coagent-cli — management CLI
+
+USAGE
+  coagent <command> [subcommand] [flags]
+
+COMMANDS
+  kernel events    Stream messages from a channel's local sqlite log
+  channel ls       List workspaces + channels visible to the caller
+  channel show     Show a single channel
+  channel create   Create a channel inside a workspace
+  device register  Issue a device session token for a channel
+  daemon status    Report server health + active daemon placements
+
+GLOBAL FLAGS (forwarded by subcommands that call the HTTP API)
+  --server-url URL  Server base URL  (env COAGENT_SERVER_URL; default http://localhost:8080)
+  --token   TOKEN   Session token    (env COAGENT_SESSION_TOKEN; sent as Bearer)
+
+Run 'coagent <command> -h' for command-specific flags.
+`)
+}

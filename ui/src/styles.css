@@ -1,0 +1,194 @@
+/* coagent demo console — minimal CSS.
+ *
+ * The styling is intentionally austere: T7 only asks for a working
+ * login → channel list → messages → send → receive loop. Visual polish
+ * is deferred to the L3 milestone.
+ */
+
+:root {
+  --bg: #f6f4ef;
+  --fg: #1f1d18;
+  --muted: #7a7367;
+  --border: rgba(31, 29, 24, 0.14);
+  --accent: #1a8053;
+  --error: #c0392b;
+  --surface: #ffffff;
+  --me-bubble: #1a8053;
+  --other-bubble: #e9e6df;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; margin: 0; }
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+button {
+  font: inherit;
+  background: var(--accent);
+  color: white;
+  border: 0;
+  padding: 6px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+button[type="button"] { background: var(--muted); }
+button:hover { filter: brightness(1.08); }
+
+input {
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+
+.muted { color: var(--muted); font-size: 12px; }
+.hidden { display: none !important; }
+.error { color: var(--error); min-height: 1em; margin: 4px 0; }
+
+/* ── Auth view ─────────────────────────────────────────────────── */
+.auth {
+  max-width: 420px;
+  margin: 80px auto;
+  padding: 32px 24px;
+}
+.brand h1 { margin: 0; font-size: 32px; letter-spacing: -0.02em; }
+.brand p { margin: 4px 0 24px; }
+
+.tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+.tabs button {
+  background: transparent;
+  color: var(--fg);
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 4px 12px;
+}
+.tabs button.active { border-bottom-color: var(--accent); color: var(--accent); }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+.card button[type="submit"] { width: 100%; margin-top: 12px; }
+#btn-issue-code { margin-top: 8px; width: 100%; }
+
+/* ── Main app layout ───────────────────────────────────────────── */
+.app {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  height: 100%;
+}
+
+.sidebar {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+}
+.sidebar header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.sidebar h2 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 0 0 6px;
+}
+
+.ws-list, .channel-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 8px;
+}
+.ws-list li, .channel-list li {
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+}
+.ws-list li.active, .channel-list li.active {
+  background: var(--accent);
+  color: white;
+}
+.ws-list li:not(.active):hover, .channel-list li:not(.active):hover {
+  background: var(--bg);
+}
+
+.inline {
+  display: flex;
+  gap: 4px;
+}
+.inline input { flex: 1; min-width: 0; }
+.inline button { padding: 4px 8px; }
+
+/* ── Chat pane ─────────────────────────────────────────────────── */
+.chat {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.chat header {
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.chat header h2 { margin: 0; font-size: 18px; }
+
+.messages {
+  list-style: none;
+  padding: 16px 20px;
+  margin: 0;
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.messages li {
+  max-width: 70%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--other-bubble);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.messages li.me {
+  background: var(--me-bubble);
+  color: white;
+  align-self: flex-end;
+}
+.messages li small {
+  display: block;
+  font-size: 10px;
+  opacity: 0.7;
+  margin-bottom: 2px;
+}
+
+.composer {
+  display: flex;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+}
+.composer input { flex: 1; }
