@@ -70,7 +70,25 @@ type CreateRequestID string
 // String returns the wire form.
 func (c CreateRequestID) String() string { return string(c) }
 
-// Placement mirrors the channel_placements row from L2 §1.4.11.1.
+// TenantID is the multi-tenant scope identifier reserved per
+// .dalek/pm/m1.5-tickets.md §T10. M1.5 demo uses TenantID("") /
+// TenantID("default") and treats placements as a single shared pool;
+// M2+ SaaS deployments will scope placement selection / quota by
+// TenantID without changing the placement state machine.
+type TenantID string
+
+// String returns the wire form.
+func (t TenantID) String() string { return string(t) }
+
+// Placement mirrors the channel_placements row from L2 §1.4.11.1 plus
+// the three federation / tenancy columns reserved by
+// .dalek/pm/m1.5-tickets.md §T10 ("placements 表预留 federation 字段").
+//
+// HostActorID / FederatedOrigin / TenantID are zero-value ("") in
+// M1.5 demo deployments and stored as NULL in sqlite. Populating them
+// is M1.4 / federation / SaaS work and does NOT change the M1.5 state
+// machine — the columns are skipped by every M1.5 CAS / SELECT helper
+// that doesn't care about them.
 type Placement struct {
 	ChannelID             channel.ID
 	DaemonID              DaemonID
@@ -82,6 +100,12 @@ type Placement struct {
 	LastHeartbeatAt       int64           // 0 until first heartbeat
 	CreatedAt             int64
 	ActivatedAt           int64 // 0 until state advances to Active
+
+	// Federation / tenancy reservation columns per m1.5-tickets §T10.
+	// All three are "" / NULL in M1.5 demo deployments.
+	HostActorID     string   // M1.4 channel-as-actor: which channel-local actor exposes this channel externally
+	FederatedOrigin string   // M2+ federation: remote origin this channel mirrors (empty for native channels)
+	TenantID        TenantID // M2+ multi-tenant scope; "" / "default" in demo
 }
 
 // CreateChannelRequest is the payload of `control.create_channel` frame

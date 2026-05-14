@@ -32,6 +32,11 @@
 //     CorrelationTracker / ErrorPolicy / AdapterCtx /
 //     DeviceTransit interfaces — covers L1 §11.7 +
 //     L2 §8 framework contract.
+//   - kernel/addressing — ChannelRef / ActorRef / Route forward-compat
+//     types for M1.4 channel-as-actor + M2+ federation
+//     (m1.5-tickets §T10).
+//   - kernel/topology   — Node / Peer placeholder types for the v5
+//     federation topology (m1.5-tickets §T10).
 //
 // Layering rule (enforced by go-arch-lint in T2):
 //

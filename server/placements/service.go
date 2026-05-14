@@ -81,12 +81,35 @@ func (s *Service) Store() *SQLStore { return s.store }
 //
 // Returns the (Placement, CreateChannelRequest) pair so the gateway
 // can immediately ship the control.create_channel frame to daemon.
+//
+// This is the M1.5 demo-friendly entry point — the federation /
+// tenancy reservation columns introduced by m1.5-tickets §T10 are
+// left at their zero value (NULL in sqlite). Callers that need to
+// populate them MUST use ReserveWith.
 func (s *Service) Reserve(
 	ctx context.Context,
 	channelID channel.ID,
 	daemonID placement.DaemonID,
 	connectionEpoch placement.ConnectionEpoch,
 	initialMembers []placement.InitialMember,
+) (placement.Placement, placement.CreateChannelRequest, error) {
+	return s.ReserveWith(ctx, channelID, daemonID, connectionEpoch, initialMembers, ReserveOptions{})
+}
+
+// ReserveWith is the federation / tenancy-aware variant of Reserve.
+// It threads ReserveOptions (TenantID / HostActorID / FederatedOrigin)
+// through the placement record without changing the state machine.
+//
+// M1.5 demo flows can keep calling Reserve; this entry point is for
+// M1.4 channel-as-actor + M2+ federation / SaaS callers that need to
+// populate the reservation columns at insert time.
+func (s *Service) ReserveWith(
+	ctx context.Context,
+	channelID channel.ID,
+	daemonID placement.DaemonID,
+	connectionEpoch placement.ConnectionEpoch,
+	initialMembers []placement.InitialMember,
+	opts ReserveOptions,
 ) (placement.Placement, placement.CreateChannelRequest, error) {
 	now := s.now().UnixMilli()
 	epoch := placement.OwnerEpoch(now)
@@ -100,6 +123,11 @@ func (s *Service) Reserve(
 		CreateRequestID:       placement.CreateRequestID(uuid.NewString()),
 		DaemonConnectionEpoch: connectionEpoch,
 		CreatedAt:             now,
+		// Federation / tenancy reservation per m1.5-tickets §T10.
+		// Zero values land as NULL in sqlite via nullableString.
+		HostActorID:     opts.HostActorID,
+		FederatedOrigin: opts.FederatedOrigin,
+		TenantID:        tenantOrDefault(opts.TenantID),
 	}
 	out, err := s.store.Reserve(ctx, p)
 	if err != nil {

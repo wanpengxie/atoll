@@ -33,6 +33,12 @@ func NewSQLStore(db *sql.DB) *SQLStore { return &SQLStore{db: db} }
 
 // Reserve inserts the placement row in StateCreating (L2 §1.4.11.3
 // step 1). Returns ErrPlacementExists on PRIMARY KEY collision.
+//
+// The three federation / tenancy columns (host_actor_id /
+// federated_origin / tenant_id, reserved by m1.5-tickets §T10) are
+// written as NULL when the corresponding placement field is empty;
+// M1.5 demo callers therefore leave the columns NULL without any
+// extra parameter.
 func (s *SQLStore) Reserve(ctx context.Context, p placement.Placement) (placement.Placement, error) {
 	if p.ChannelID == "" {
 		return placement.Placement{}, errors.New("placements: channel_id required")
@@ -46,12 +52,16 @@ func (s *SQLStore) Reserve(ctx context.Context, p placement.Placement) (placemen
 		`INSERT INTO channel_placements (
 		   channel_id, daemon_id, state, owner_epoch, fencing_token,
 		   create_request_id, daemon_connection_epoch, last_heartbeat_at,
-		   created_at, activated_at
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		   created_at, activated_at,
+		   host_actor_id, federated_origin, tenant_id
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(p.ChannelID), string(p.DaemonID), string(p.State),
 		int64(p.OwnerEpoch), int64(p.FencingToken),
 		string(p.CreateRequestID), int64(p.DaemonConnectionEpoch),
 		p.LastHeartbeatAt, p.CreatedAt, p.ActivatedAt,
+		nullableString(p.HostActorID),
+		nullableString(p.FederatedOrigin),
+		nullableString(string(p.TenantID)),
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -66,11 +76,13 @@ func (s *SQLStore) Reserve(ctx context.Context, p placement.Placement) (placemen
 func (s *SQLStore) Get(ctx context.Context, channelID channel.ID) (placement.Placement, bool, error) {
 	var p placement.Placement
 	var state string
+	var hostActor, fedOrigin, tenant sql.NullString
 	err := s.db.QueryRowContext(
 		ctx,
 		`SELECT channel_id, daemon_id, state, owner_epoch, fencing_token,
 		        create_request_id, daemon_connection_epoch, last_heartbeat_at,
-		        created_at, activated_at
+		        created_at, activated_at,
+		        host_actor_id, federated_origin, tenant_id
 		   FROM channel_placements WHERE channel_id = ?`,
 		string(channelID),
 	).Scan(
@@ -78,6 +90,7 @@ func (s *SQLStore) Get(ctx context.Context, channelID channel.ID) (placement.Pla
 		(*int64)(&p.OwnerEpoch), (*int64)(&p.FencingToken),
 		(*string)(&p.CreateRequestID), (*int64)(&p.DaemonConnectionEpoch),
 		&p.LastHeartbeatAt, &p.CreatedAt, &p.ActivatedAt,
+		&hostActor, &fedOrigin, &tenant,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -86,6 +99,9 @@ func (s *SQLStore) Get(ctx context.Context, channelID channel.ID) (placement.Pla
 		return placement.Placement{}, false, fmt.Errorf("placements: get: %w", err)
 	}
 	p.State = placement.State(state)
+	p.HostActorID = hostActor.String
+	p.FederatedOrigin = fedOrigin.String
+	p.TenantID = placement.TenantID(tenant.String)
 	return p, true, nil
 }
 
@@ -222,7 +238,8 @@ func (s *SQLStore) ListByState(ctx context.Context, state placement.State) ([]pl
 		ctx,
 		`SELECT channel_id, daemon_id, state, owner_epoch, fencing_token,
 		        create_request_id, daemon_connection_epoch, last_heartbeat_at,
-		        created_at, activated_at
+		        created_at, activated_at,
+		        host_actor_id, federated_origin, tenant_id
 		   FROM channel_placements WHERE state = ?`,
 		string(state),
 	)
@@ -234,18 +251,23 @@ func (s *SQLStore) ListByState(ctx context.Context, state placement.State) ([]pl
 	var out []placement.Placement
 	for rows.Next() {
 		var (
-			p     placement.Placement
-			state string
+			p                            placement.Placement
+			state                        string
+			hostActor, fedOrigin, tenant sql.NullString
 		)
 		if err := rows.Scan(
 			(*string)(&p.ChannelID), (*string)(&p.DaemonID), &state,
 			(*int64)(&p.OwnerEpoch), (*int64)(&p.FencingToken),
 			(*string)(&p.CreateRequestID), (*int64)(&p.DaemonConnectionEpoch),
 			&p.LastHeartbeatAt, &p.CreatedAt, &p.ActivatedAt,
+			&hostActor, &fedOrigin, &tenant,
 		); err != nil {
 			return nil, err
 		}
 		p.State = placement.State(state)
+		p.HostActorID = hostActor.String
+		p.FederatedOrigin = fedOrigin.String
+		p.TenantID = placement.TenantID(tenant.String)
 		out = append(out, p)
 	}
 	return out, rows.Err()
@@ -258,7 +280,8 @@ func (s *SQLStore) ListByDaemon(ctx context.Context, daemonID placement.DaemonID
 		ctx,
 		`SELECT channel_id, daemon_id, state, owner_epoch, fencing_token,
 		        create_request_id, daemon_connection_epoch, last_heartbeat_at,
-		        created_at, activated_at
+		        created_at, activated_at,
+		        host_actor_id, federated_origin, tenant_id
 		   FROM channel_placements WHERE daemon_id = ?`,
 		string(daemonID),
 	)
@@ -269,21 +292,36 @@ func (s *SQLStore) ListByDaemon(ctx context.Context, daemonID placement.DaemonID
 	var out []placement.Placement
 	for rows.Next() {
 		var (
-			p     placement.Placement
-			state string
+			p                            placement.Placement
+			state                        string
+			hostActor, fedOrigin, tenant sql.NullString
 		)
 		if err := rows.Scan(
 			(*string)(&p.ChannelID), (*string)(&p.DaemonID), &state,
 			(*int64)(&p.OwnerEpoch), (*int64)(&p.FencingToken),
 			(*string)(&p.CreateRequestID), (*int64)(&p.DaemonConnectionEpoch),
 			&p.LastHeartbeatAt, &p.CreatedAt, &p.ActivatedAt,
+			&hostActor, &fedOrigin, &tenant,
 		); err != nil {
 			return nil, err
 		}
 		p.State = placement.State(state)
+		p.HostActorID = hostActor.String
+		p.FederatedOrigin = fedOrigin.String
+		p.TenantID = placement.TenantID(tenant.String)
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// nullableString converts a Go string to sql.NullString — empty
+// string maps to NULL so M1.5 demo callers leave the federation /
+// tenancy columns NULL without extra parameters.
+func nullableString(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: s, Valid: true}
 }
 
 // isUniqueViolation returns true for sqlite UNIQUE / PRIMARY KEY
