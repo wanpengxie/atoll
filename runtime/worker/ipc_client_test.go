@@ -1,0 +1,298 @@
+package worker_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"testing"
+	"time"
+
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/runtime/ipc"
+	"github.com/wanpengxie/ActOS/runtime/worker"
+)
+
+// fakeDaemon wires the daemon end of an io.Pipe pair into an ipc.Codec
+// + a small dispatcher loop that pattern-matches incoming Frame.Kind
+// and writes the corresponding reply. The test goroutine asserts what
+// the client stamped on outbound frames.
+type fakeDaemon struct {
+	codec *ipc.Codec
+	t     *testing.T
+
+	// Captured copies of the last write_message frame, so the test can
+	// verify reply stamping (channel id / worker id / fencing token /
+	// daemon epoch).
+	lastWriteFrame chan ipc.Frame
+}
+
+func newFakeDaemon(t *testing.T, r io.Reader, w io.Writer) *fakeDaemon {
+	return &fakeDaemon{
+		codec:          ipc.NewCodec(r, w),
+		t:              t,
+		lastWriteFrame: make(chan ipc.Frame, 4),
+	}
+}
+
+func (d *fakeDaemon) loop(ctx context.Context, ack ipc.HandshakeAckPayload) {
+	for {
+		frame, err := d.codec.Read()
+		if err != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		switch frame.Kind {
+		case ipc.KindHandshake:
+			payload, _ := json.Marshal(ack)
+			_ = d.codec.Write(ipc.Frame{
+				ID:      frame.ID,
+				Kind:    ipc.KindHandshakeAck,
+				Payload: payload,
+			})
+		case ipc.KindWriteMessage:
+			d.lastWriteFrame <- frame
+			res, _ := json.Marshal(ipc.WriteMessageResult{Seq: 42, Deduped: false})
+			rp, _ := json.Marshal(ipc.ReplyPayload{OK: true, Result: res})
+			_ = d.codec.Write(ipc.Frame{
+				ID:      frame.ID,
+				Kind:    ipc.KindReply,
+				Payload: rp,
+			})
+		case ipc.KindHeartbeat:
+			rp, _ := json.Marshal(ipc.ReplyPayload{OK: true})
+			_ = d.codec.Write(ipc.Frame{
+				ID:      frame.ID,
+				Kind:    ipc.KindReply,
+				Payload: rp,
+			})
+		case ipc.KindShutdown:
+			_ = d.codec.Write(ipc.Frame{ID: frame.ID, Kind: ipc.KindShutdownAck})
+			return
+		}
+	}
+}
+
+// TestIPCClient_HandshakeStampsOutboundFrames covers the L1 §11.6 contract:
+// after Handshake completes, every outbound non-handshake frame MUST be
+// stamped with channelID / workerID / fencingToken / daemonEpoch.
+func TestIPCClient_HandshakeStampsOutboundFrames(t *testing.T) {
+	t.Parallel()
+	workerR, daemonW := io.Pipe()
+	daemonR, workerW := io.Pipe()
+	t.Cleanup(func() {
+		_ = workerR.Close()
+		_ = workerW.Close()
+		_ = daemonR.Close()
+		_ = daemonW.Close()
+	})
+
+	daemon := newFakeDaemon(t, daemonR, daemonW)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	go daemon.loop(ctx, ipc.HandshakeAckPayload{
+		WorkerID:     "worker-XYZ",
+		ChannelID:    channel.ID("ch-1"),
+		FencingToken: placement.FencingToken(11),
+		DaemonEpoch:  placement.DaemonEpoch(7),
+	})
+
+	client := worker.NewIPCClient(workerR, workerW)
+	client.Start(ctx)
+	t.Cleanup(client.Stop)
+
+	ack, err := client.Handshake(ctx, "lease-A")
+	if err != nil {
+		t.Fatalf("Handshake: %v", err)
+	}
+	if ack.WorkerID != "worker-XYZ" {
+		t.Errorf("WorkerID=%q want worker-XYZ", ack.WorkerID)
+	}
+
+	// Send a write_message — daemon will record the frame.
+	if _, err := client.WriteMessage(ctx, messageEnvelopeStub()); err != nil {
+		t.Fatalf("WriteMessage: %v", err)
+	}
+
+	select {
+	case frame := <-daemon.lastWriteFrame:
+		if frame.ChannelID != "ch-1" {
+			t.Errorf("ChannelID=%q want ch-1", frame.ChannelID)
+		}
+		if frame.WorkerID != "worker-XYZ" {
+			t.Errorf("WorkerID=%q want worker-XYZ", frame.WorkerID)
+		}
+		if frame.FencingToken != 11 {
+			t.Errorf("FencingToken=%d want 11", frame.FencingToken)
+		}
+		if frame.DaemonEpoch != 7 {
+			t.Errorf("DaemonEpoch=%d want 7", frame.DaemonEpoch)
+		}
+		if frame.ID == "" {
+			t.Error("FrameID empty (stamp lost)")
+		}
+	case <-ctx.Done():
+		t.Fatal("write_message frame not observed by daemon")
+	}
+}
+
+// TestIPCClient_WriteMessageFenceInvalidReturnsTypedError covers the fence
+// path: when daemon replies with a fence_invalid frame, WriteMessage MUST
+// surface *FenceInvalidError so the worker main loop can errors.As.
+func TestIPCClient_WriteMessageFenceInvalidReturnsTypedError(t *testing.T) {
+	t.Parallel()
+	workerR, daemonW := io.Pipe()
+	daemonR, workerW := io.Pipe()
+	t.Cleanup(func() {
+		_ = workerR.Close()
+		_ = workerW.Close()
+		_ = daemonR.Close()
+		_ = daemonW.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	daemonCodec := ipc.NewCodec(daemonR, daemonW)
+	go func() {
+		for {
+			frame, err := daemonCodec.Read()
+			if err != nil {
+				return
+			}
+			switch frame.Kind {
+			case ipc.KindHandshake:
+				ack, _ := json.Marshal(ipc.HandshakeAckPayload{
+					WorkerID:     "worker-1",
+					ChannelID:    "ch-1",
+					FencingToken: 1,
+					DaemonEpoch:  1,
+				})
+				_ = daemonCodec.Write(ipc.Frame{ID: frame.ID, Kind: ipc.KindHandshakeAck, Payload: ack})
+			case ipc.KindWriteMessage:
+				payload, _ := json.Marshal(ipc.FenceInvalidPayload{
+					ExpectedToken: 2, GotToken: 1,
+					ExpectedEpoch: 2, GotEpoch: 1,
+					Reason: "stale",
+				})
+				_ = daemonCodec.Write(ipc.Frame{
+					ID:      frame.ID,
+					Kind:    ipc.KindFenceInvalid,
+					Payload: payload,
+				})
+				return
+			}
+		}
+	}()
+
+	client := worker.NewIPCClient(workerR, workerW)
+	client.Start(ctx)
+	t.Cleanup(client.Stop)
+
+	if _, err := client.Handshake(ctx, "lease-A"); err != nil {
+		t.Fatalf("Handshake: %v", err)
+	}
+
+	_, err := client.WriteMessage(ctx, messageEnvelopeStub())
+	if err == nil {
+		t.Fatal("WriteMessage should fail on fence_invalid reply")
+	}
+	var fenceErr *worker.FenceInvalidError
+	if !errors.As(err, &fenceErr) {
+		t.Fatalf("err=%T want *FenceInvalidError", err)
+	}
+	if fenceErr.Reason != "stale" {
+		t.Errorf("Reason=%q want stale", fenceErr.Reason)
+	}
+}
+
+// TestIPCClient_SendAfterStopFails — once Stop() is called, subsequent
+// sends MUST fail rather than block forever.
+func TestIPCClient_SendAfterStopFails(t *testing.T) {
+	t.Parallel()
+	r1, w1 := io.Pipe()
+	r2, w2 := io.Pipe()
+	t.Cleanup(func() {
+		_ = r1.Close()
+		_ = w1.Close()
+		_ = r2.Close()
+		_ = w2.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	client := worker.NewIPCClient(r1, w2)
+	client.Start(ctx)
+	client.Stop()
+
+	// Heartbeat after stop should not hang.
+	err := client.Heartbeat(ctx, 1)
+	if err == nil {
+		t.Error("Heartbeat after Stop() returned nil err")
+	}
+
+	// Suppress unused-variable warnings — pipe ends are cleaned by t.Cleanup.
+	_ = w1
+	_ = r2
+}
+
+// TestIPCClient_HandshakeMismatchSurfaceError — daemon returns a non-ack
+// kind; client should fail loudly rather than silently advance.
+func TestIPCClient_HandshakeMismatchSurfaceError(t *testing.T) {
+	t.Parallel()
+	workerR, daemonW := io.Pipe()
+	daemonR, workerW := io.Pipe()
+	t.Cleanup(func() {
+		_ = workerR.Close()
+		_ = workerW.Close()
+		_ = daemonR.Close()
+		_ = daemonW.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	daemonCodec := ipc.NewCodec(daemonR, daemonW)
+	go func() {
+		frame, err := daemonCodec.Read()
+		if err != nil {
+			return
+		}
+		// Reply with the wrong kind on purpose.
+		_ = daemonCodec.Write(ipc.Frame{ID: frame.ID, Kind: ipc.KindReply})
+	}()
+
+	client := worker.NewIPCClient(workerR, workerW)
+	client.Start(ctx)
+	t.Cleanup(client.Stop)
+
+	_, err := client.Handshake(ctx, "lease-A")
+	if err == nil {
+		t.Fatal("Handshake should fail on non-ack reply")
+	}
+}
+
+// messageEnvelopeStub returns a minimal valid envelope payload — every
+// WriteMessage test reuses this to keep focus on the IPC layer (the
+// fake daemon doesn't validate envelope contents).
+func messageEnvelopeStub() message.Envelope {
+	return message.Envelope{
+		ID:         "m-test",
+		ChannelID:  "ch-1",
+		Type:       "tick",
+		Visibility: message.VisibilityPublic,
+		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+		Kind:       message.KindEvent,
+		Payload:    json.RawMessage(`{}`),
+		Audience:   []string{"*"},
+	}
+}
