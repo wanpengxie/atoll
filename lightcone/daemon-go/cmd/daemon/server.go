@@ -38,6 +38,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -90,6 +91,15 @@ type Config struct {
 	// disabled (useful for smoke tests that exercise the HTTP write
 	// path without launching workers).
 	WorkerBinaryPath string
+
+	// WorkerStdout / WorkerStderr override the destination for spawned
+	// worker processes' stdout / stderr (FIX-4: ExecSpawner used to
+	// drop them on the floor). Default nil → ExecSpawner uses
+	// os.Stdout / os.Stderr so the daemon log aggregation pipe sees
+	// every "worker.*" JSON line. Smoke tests pipe to a captured
+	// buffer to assert real worker JSON logs surfaced.
+	WorkerStdout io.Writer
+	WorkerStderr io.Writer
 
 	// ServerURL is the view-sync server origin. When empty, the daemon
 	// runs without a Pusher (smoke / single-node mode). When non-empty,
@@ -505,6 +515,8 @@ func installChannel(
 			BinaryPath:     cfg.WorkerBinaryPath,
 			ChannelWorkdir: info.WorkdirPath,
 			LeaseTTL:       cfg.LeaseTTL,
+			Stdout:         cfg.WorkerStdout,
+			Stderr:         cfg.WorkerStderr,
 		})
 		if serr != nil {
 			_ = channelDB.Close()

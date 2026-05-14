@@ -31,6 +31,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -329,6 +331,178 @@ func TestSmoke_AskRoundTrip(t *testing.T) {
 		t.Fatalf("fallback reason = %q, want %s",
 			p.Reason, v4types.TerminalUnansweredTimeout)
 	}
+}
+
+// TestSmoke_WorkerJSONLogVisible builds the real worker binary, points
+// the daemon at it, seeds a channel + a backlog message, and asserts
+// the daemon captures the worker's slog JSON output via the
+// Config.WorkerStdout pipe (FIX-4 §"e2e scenario 看到真实 worker JSON
+// 日志").
+func TestSmoke_WorkerJSONLogVisible(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping worker-binary smoke in -short mode")
+	}
+
+	dir := t.TempDir()
+
+	// Build the worker binary into a temp path. Tests under
+	// `go test ./...` already have the toolchain on $PATH.
+	binPath := filepath.Join(dir, "worker")
+	{
+		cmd := osExecCmd("go", "build", "-o", binPath, "./cmd/worker")
+		cmd.Dir = repoRoot(t)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("go build worker: %v\n%s", err, out)
+		}
+	}
+
+	channelID := "smoke-ch-worker"
+	channelRoot := filepath.Join(dir, "channels")
+	workdir := filepath.Join(channelRoot, channelID)
+	daemonDBPath := filepath.Join(dir, "daemon.sqlite")
+
+	ctx := context.Background()
+
+	// Bootstrap a channel with alice as an in_worker_bus agent.
+	{
+		daemonDB, err := store.OpenDaemon(ctx, daemonDBPath, store.OpenOptions{})
+		if err != nil {
+			t.Fatalf("open daemon sqlite: %v", err)
+		}
+		saga := bootstrap.New(daemonDB, bootstrap.WithChannelRoot(channelRoot))
+		_, err = saga.ChannelCreate(ctx, bootstrap.CreateParams{
+			CreateRequestID: "smoke-create-worker",
+			ChannelID:       channelID,
+			ChannelAgent:    bootstrap.ChannelAgentSpec{ActorID: "alice"},
+		})
+		if err != nil {
+			_ = daemonDB.Close()
+			t.Fatalf("saga.ChannelCreate: %v", err)
+		}
+		// Insert a backlog-eligible message addressed to alice from a
+		// peer agent so the supervisor's BacklogScan + worker spawn
+		// produces a real turn.
+		channelDB, err := store.OpenChannel(ctx, filepath.Join(workdir, "messages.sqlite"), store.OpenOptions{})
+		if err != nil {
+			_ = daemonDB.Close()
+			t.Fatalf("open channel sqlite: %v", err)
+		}
+		// Register peer.
+		if _, err := channelDB.ExecContext(ctx,
+			`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
+			 VALUES (?, 'agent', 'in_worker_bus', ?, NULL)`,
+			"peer", time.Now().Unix(),
+		); err != nil {
+			_ = channelDB.Close()
+			_ = daemonDB.Close()
+			t.Fatalf("seed peer: %v", err)
+		}
+		if _, err := channelDB.ExecContext(ctx,
+			`INSERT OR IGNORE INTO actor_cursors (actor_id, last_consumed_seq) VALUES (?, 0)`, "peer",
+		); err != nil {
+			_ = channelDB.Close()
+			_ = daemonDB.Close()
+			t.Fatalf("seed peer cursor: %v", err)
+		}
+		ts := time.Now().Unix()
+		if _, err := channelDB.ExecContext(ctx,
+			`INSERT INTO messages
+			   (id, ts, ts_received, channel_id, sender_kind, sender_id,
+			    kind, type, payload, parent_id, correlation_id,
+			    visibility, audience, not_before, expires_at, is_terminal)
+			 VALUES ('smoke-trig-1', ?, ?, ?, 'agent', 'peer',
+			         'event', 'agent.text', '{"text":"hi alice"}', NULL, 'smoke-trig-1',
+			         'public', '["alice"]', NULL, NULL, 0)`,
+			ts, ts, channelID,
+		); err != nil {
+			_ = channelDB.Close()
+			_ = daemonDB.Close()
+			t.Fatalf("seed trigger msg: %v", err)
+		}
+		_ = channelDB.Close()
+		_ = daemonDB.Close()
+	}
+
+	// Capture worker stdout/stderr via a thread-safe buffer.
+	workerLog := &threadSafeBuffer{}
+
+	cfg := Config{
+		DaemonDBPath:     daemonDBPath,
+		ChannelRoot:      channelRoot,
+		HTTPListen:       "127.0.0.1:0",
+		AuthToken:        smokeAuthToken,
+		WorkerBinaryPath: binPath,
+		WorkerStdout:     workerLog,
+		WorkerStderr:     workerLog,
+		SupervisorPeriod: 100 * time.Millisecond,
+		LeaseTTL:         5,
+	}
+	_, _, wait := startDaemon(t, cfg)
+	defer wait()
+
+	// Poll the worker log for the canonical JSON line. The worker
+	// emits "worker.start" first thing in main, then
+	// "worker.runtime.ready" after registering, then "worker.exit"
+	// on clean shutdown.
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		got := workerLog.String()
+		if bytes.Contains([]byte(got), []byte(`"msg":"worker.start"`)) ||
+			bytes.Contains([]byte(got), []byte(`"worker.start"`)) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("worker JSON log did not surface within 15s; captured=%q", workerLog.String())
+}
+
+// threadSafeBuffer is a tiny mutex-guarded io.Writer we plug into
+// Config.WorkerStdout / WorkerStderr — the real worker process writes
+// from its own thread of control, so an unguarded bytes.Buffer would
+// race the test goroutine's String() reads.
+type threadSafeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *threadSafeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *threadSafeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// repoRoot walks up from the smoke test's working directory until it
+// finds the daemon-go go.mod — that's where `go build ./cmd/worker`
+// must run. Tests under `go test ./cmd/daemon/...` start with
+// $PWD = .../lightcone/daemon-go/cmd/daemon.
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	dir := wd
+	for i := 0; i < 5; i++ {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		dir = filepath.Dir(dir)
+	}
+	t.Fatalf("could not locate daemon-go go.mod from %s", wd)
+	return ""
+}
+
+// osExecCmd is a thin wrapper that lets the smoke import "os/exec"
+// without polluting the file's main import block.
+func osExecCmd(name string, args ...string) *exec.Cmd {
+	return exec.Command(name, args...)
 }
 
 // dumpMessagesTable prints the channel's messages rows + actor_registry
