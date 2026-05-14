@@ -160,13 +160,26 @@ type moduleEntry struct {
 
 // Manager is the framework's daemon-side runtime. One instance per
 // channel sqlite.
+//
+// Concurrency:
+//
+//   - `mu` (RWMutex) protects modules / actorToModule / typeToModule +
+//     installed / closed flags. Install acquires the write lock for
+//     exactly one atomic commit (after every module has Init'd into a
+//     staging map); Dispatch / OnExternalCallback / runGCOnce /
+//     Shutdown / ModuleNames acquire the read lock just long enough to
+//     snapshot the entry pointer they need, then release before calling
+//     out to user code.
+//   - The maps are never mutated outside Install / Shutdown, so once
+//     the write lock is released after Install commits, readers see
+//     fully-published state via mu's happens-before.
 type Manager struct {
 	cfg           ManagerConfig
 	modules       map[string]*moduleEntry
 	actorToModule map[string]string
 	typeToModule  map[string]string
 
-	mu        sync.Mutex
+	mu        sync.RWMutex
 	installed bool
 	closed    bool
 }
@@ -193,17 +206,28 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 // the channel's actor_registry + type_registry, then calls Module.Init
 // with a fully populated ModuleContext.
 //
+// Atomicity (FIX-6 §5 / codex t97 / claude 97-2):
+//
+// Install is all-or-nothing. Every module is staged into a local map
+// + Init'd outside the Manager's lock; only when every module passes
+// does Install acquire mu.Lock once to copy the staging maps into the
+// Manager and flip `installed=true`. If any module's validation or
+// Init fails, the already-Init'd modules are shut down (LIFO) and the
+// Manager remains uninstalled — caller can fix the offending module
+// and retry Install successfully.
+//
 // Idempotent at the DDL layer (CREATE TABLE IF NOT EXISTS); calling
-// Install twice on the same Manager value returns an error because
-// the in-memory state would double-up.
+// Install twice on an already-installed Manager returns an error
+// because the in-memory routing tables would double-up.
 func (m *Manager) Install(ctx context.Context) error {
-	m.mu.Lock()
+	// Reject re-install up front but do NOT set installed=true here;
+	// we only flip the flag after every module has Init'd successfully.
+	m.mu.RLock()
 	if m.installed {
-		m.mu.Unlock()
+		m.mu.RUnlock()
 		return errors.New("adapter: Manager.Install called twice")
 	}
-	m.installed = true
-	m.mu.Unlock()
+	m.mu.RUnlock()
 
 	if _, err := m.cfg.DB.ExecContext(ctx, CorrelationTrackerDDL); err != nil {
 		return fmt.Errorf("adapter: apply correlation DDL: %w", err)
@@ -217,9 +241,39 @@ func (m *Manager) Install(ctx context.Context) error {
 	}
 	sort.Strings(names)
 
+	// Staging maps — populated module-by-module. None of this state is
+	// visible to readers (Dispatch / RunGC / Shutdown) until the final
+	// atomic commit at the bottom of this function.
+	stagedEntries := make(map[string]*moduleEntry, len(names))
+	stagedActors := map[string]string{}
+	stagedTypes := map[string]string{}
+	// Init'd modules in install order — rollback walks this slice in
+	// reverse on any error so cleanup mirrors construction.
+	initialised := make([]*moduleEntry, 0, len(names))
+
+	// rollback tears down every Init'd module (LIFO) — used on any
+	// validation / Init error path. Safe to call multiple times.
+	rollback := func() {
+		for i := len(initialised) - 1; i >= 0; i-- {
+			e := initialised[i]
+			// Stop pending timers first so a Shutdown that blocks on
+			// timer flush doesn't accidentally re-trigger one.
+			e.policy.shutdown()
+			// Best-effort module.Shutdown — log + continue; an adapter
+			// that panics mid-shutdown should not strand others.
+			if err := e.module.Shutdown(ctx); err != nil {
+				m.cfg.Logger.Warn("adapter.install.rollback.shutdown_error",
+					"adapter", e.decl.Name,
+					"err", err.Error(),
+				)
+			}
+		}
+	}
+
 	for _, name := range names {
 		module := m.cfg.Modules[name]
 		if module == nil {
+			rollback()
 			return fmt.Errorf("adapter: module %q is nil", name)
 		}
 		decl := module.Declares()
@@ -227,24 +281,30 @@ func (m *Manager) Install(ctx context.Context) error {
 			decl.Name = name
 		}
 		if decl.Name != name {
+			rollback()
 			return fmt.Errorf("adapter: Modules key %q does not match Declaration.Name %q", name, decl.Name)
 		}
 		if err := decl.Validate(); err != nil {
+			rollback()
 			return err
 		}
 
 		// Verify the adapter actor exists + binding matches.
 		actor, aerr := m.cfg.Deps.Actors.Get(ctx, decl.ActorID)
 		if aerr != nil {
+			rollback()
 			return fmt.Errorf("adapter[%s]: actor lookup: %w", name, aerr)
 		}
 		if actor == nil || actor.DeregisteredAt != nil {
+			rollback()
 			return fmt.Errorf("adapter[%s]: actor %q is not registered (or deregistered)", name, decl.ActorID)
 		}
 		if actor.Kind != v4types.SenderTool {
+			rollback()
 			return fmt.Errorf("adapter[%s]: actor %q must have actor_kind='tool', got %q", name, decl.ActorID, actor.Kind)
 		}
 		if actor.Binding != decl.Binding {
+			rollback()
 			return fmt.Errorf("adapter[%s]: actor %q binding=%q != declaration binding=%q",
 				name, decl.ActorID, actor.Binding, decl.Binding)
 		}
@@ -253,21 +313,27 @@ func (m *Manager) Install(ctx context.Context) error {
 		for _, t := range decl.Types {
 			info, ok := m.cfg.Deps.Types.Get(t)
 			if !ok {
+				rollback()
 				return fmt.Errorf("adapter[%s]: type %q not in type_registry", name, t)
 			}
 			if info.HandlerActorID != "" && info.HandlerActorID != decl.ActorID {
+				rollback()
 				return fmt.Errorf("adapter[%s]: type %q handler_actor_id=%q != declaration actor=%q",
 					name, t, info.HandlerActorID, decl.ActorID)
 			}
 		}
 
-		// Reserve routing slots; conflicts mean two adapters claim the
-		// same actor / type which would be ambiguous at dispatch time.
-		if other, dup := m.actorToModule[decl.ActorID]; dup {
+		// Reserve routing slots in the staging maps; conflicts mean two
+		// adapters claim the same actor / type which would be ambiguous
+		// at dispatch time. Staging-local check — does not touch
+		// committed Manager state.
+		if other, dup := stagedActors[decl.ActorID]; dup {
+			rollback()
 			return fmt.Errorf("adapter[%s]: actor %q already claimed by %q", name, decl.ActorID, other)
 		}
 		for _, t := range decl.Types {
-			if other, dup := m.typeToModule[t]; dup {
+			if other, dup := stagedTypes[t]; dup {
+				rollback()
 				return fmt.Errorf("adapter[%s]: type %q already claimed by %q", name, t, other)
 			}
 		}
@@ -316,11 +382,6 @@ func (m *Manager) Install(ctx context.Context) error {
 			typeMaxPending[t] = v
 		}
 
-		// Call Module.Init last so adapters can store the context.
-		if err := module.Init(ctx, mctx); err != nil {
-			return fmt.Errorf("adapter[%s]: Init: %w", name, err)
-		}
-
 		entry := &moduleEntry{
 			module:         module,
 			decl:           decl,
@@ -329,12 +390,51 @@ func (m *Manager) Install(ctx context.Context) error {
 			policy:         policy,
 			typeMaxPending: typeMaxPending,
 		}
-		m.modules[decl.Name] = entry
-		m.actorToModule[decl.ActorID] = decl.Name
+
+		// Call Module.Init last so adapters can store the context.
+		// On any Init error we roll back ALL previously-Init'd modules
+		// (this one has not been added to `initialised` yet, so it
+		// cannot leak its own timer state).
+		if err := module.Init(ctx, mctx); err != nil {
+			// Stop the timerPolicy we just built but never installed —
+			// otherwise its goroutines would leak.
+			policy.shutdown()
+			rollback()
+			return fmt.Errorf("adapter[%s]: Init: %w", name, err)
+		}
+
+		// Stage everything; commit happens after every module passes.
+		initialised = append(initialised, entry)
+		stagedEntries[decl.Name] = entry
+		stagedActors[decl.ActorID] = decl.Name
 		for _, t := range decl.Types {
-			m.typeToModule[t] = decl.Name
+			stagedTypes[t] = decl.Name
 		}
 	}
+
+	// Atomic commit — race against Dispatch / Shutdown is bounded to
+	// this one Lock window. After Unlock, readers see fully-populated
+	// maps + installed=true via mu's happens-before edge.
+	m.mu.Lock()
+	if m.installed {
+		// Someone raced us between the upfront check and now (the
+		// upfront RLock window allows this when two callers Install
+		// concurrently). Roll back our work and surface the error.
+		m.mu.Unlock()
+		rollback()
+		return errors.New("adapter: Manager.Install called twice")
+	}
+	for k, v := range stagedEntries {
+		m.modules[k] = v
+	}
+	for k, v := range stagedActors {
+		m.actorToModule[k] = v
+	}
+	for k, v := range stagedTypes {
+		m.typeToModule[k] = v
+	}
+	m.installed = true
+	m.mu.Unlock()
 	return nil
 }
 
@@ -352,6 +452,20 @@ func (m *Manager) BootRecoverTimers(ctx context.Context) error {
 	if !m.isInstalled() {
 		return errors.New("adapter: BootRecoverTimers requires Install first")
 	}
+	// Snapshot routing tables under the read lock so the for-pending
+	// loop below can dereference entries without holding mu across
+	// timer-policy / sqlite work.
+	m.mu.RLock()
+	actorToModule := make(map[string]string, len(m.actorToModule))
+	for k, v := range m.actorToModule {
+		actorToModule[k] = v
+	}
+	modules := make(map[string]*moduleEntry, len(m.modules))
+	for k, v := range m.modules {
+		modules[k] = v
+	}
+	m.mu.RUnlock()
+
 	rows, err := m.cfg.DB.QueryContext(ctx,
 		`SELECT m.id, m.expires_at, m.type, json_extract(m.audience, '$[0]') AS receiver_id
 		   FROM messages m
@@ -393,7 +507,7 @@ func (m *Manager) BootRecoverTimers(ctx context.Context) error {
 	}
 
 	for _, p := range batch {
-		name, ok := m.actorToModule[p.receiverID]
+		name, ok := actorToModule[p.receiverID]
 		if !ok {
 			// Receiver is a tool actor but not bound to any module the
 			// Manager knows about. M1.3 baseline tolerates this — for
@@ -408,7 +522,7 @@ func (m *Manager) BootRecoverTimers(ctx context.Context) error {
 			)
 			continue
 		}
-		entry := m.modules[name]
+		entry := modules[name]
 
 		// Compute deadline relative to now.
 		deadlineMs := int64(0)
@@ -467,11 +581,19 @@ func (m *Manager) Dispatch(ctx context.Context, env *v4types.Envelope) error {
 		return fmt.Errorf("adapter: Dispatch envelope.audience must have one receiver (got %v)", env.Audience)
 	}
 	target := env.Audience[0]
+	// Snapshot the entry pointer under RLock and release before
+	// calling module.Handle — adapters MAY block (HTTP / sqlite) and
+	// must not stall Install / Shutdown by holding mu.
+	m.mu.RLock()
 	name, ok := m.actorToModule[target]
-	if !ok {
+	var entry *moduleEntry
+	if ok {
+		entry = m.modules[name]
+	}
+	m.mu.RUnlock()
+	if !ok || entry == nil {
 		return fmt.Errorf("adapter: Dispatch no adapter bound to actor %q", target)
 	}
-	entry := m.modules[name]
 	if ms, ok := entry.typeMaxPending[env.Type]; ok {
 		// Use envelope's expires_at when present so timer fires at the
 		// same wall clock the harness would. Fall back to "now + ms"
@@ -510,7 +632,9 @@ func (m *Manager) OnExternalCallback(ctx context.Context, adapterName string, pa
 	if !m.isInstalled() {
 		return errors.New("adapter: OnExternalCallback requires Install first")
 	}
+	m.mu.RLock()
 	entry, ok := m.modules[adapterName]
+	m.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("adapter: OnExternalCallback unknown adapter %q", adapterName)
 	}
@@ -546,7 +670,15 @@ func (m *Manager) RunGC(ctx context.Context) {
 // Exposed (lower-case) so tests can step the sweep deterministically.
 func (m *Manager) runGCOnce(ctx context.Context) {
 	now := m.cfg.Clock()
-	for name, entry := range m.modules {
+	// Snapshot entries under RLock so the gc + log calls below run
+	// without blocking Install / Dispatch readers.
+	m.mu.RLock()
+	entries := make(map[string]*moduleEntry, len(m.modules))
+	for k, v := range m.modules {
+		entries[k] = v
+	}
+	m.mu.RUnlock()
+	for name, entry := range entries {
 		stats, err := entry.tracker.gc(ctx, now, m.cfg.GCGraceMs)
 		if err != nil {
 			m.cfg.Logger.Warn("adapter.gc.error",
@@ -576,9 +708,15 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	m.closed = true
+	// Snapshot entries while holding the write lock so an in-flight
+	// Install cannot leak a new entry past us.
+	entries := make(map[string]*moduleEntry, len(m.modules))
+	for k, v := range m.modules {
+		entries[k] = v
+	}
 	m.mu.Unlock()
 
-	for name, entry := range m.modules {
+	for name, entry := range entries {
 		entry.policy.shutdown()
 		if err := entry.module.Shutdown(ctx); err != nil {
 			m.cfg.Logger.Warn("adapter.shutdown.error",
@@ -594,18 +732,20 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 // it via the public Manager surface (BootRecoverTimers etc.) so they
 // don't need to peek inside private state.
 func (m *Manager) isInstalled() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.installed
 }
 
 // ModuleNames returns the deterministic list of adapter names this
 // Manager supervises. Useful for tests + ops introspection.
 func (m *Manager) ModuleNames() []string {
+	m.mu.RLock()
 	out := make([]string, 0, len(m.modules))
 	for n := range m.modules {
 		out = append(out, n)
 	}
+	m.mu.RUnlock()
 	sort.Strings(out)
 	return out
 }

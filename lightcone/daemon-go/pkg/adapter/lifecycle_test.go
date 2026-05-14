@@ -660,3 +660,236 @@ func TestManager_ModuleNames(t *testing.T) {
 		t.Fatalf("ModuleNames = %v; want [%q]", names, mod.name)
 	}
 }
+
+// initFailModule is a Module whose Init returns an error — used to
+// drive the "partial-install rollback" tests.
+type initFailModule struct {
+	*mockModule
+	initFailWith error
+	initCalled   atomic.Int32
+	shutdownHits atomic.Int32
+}
+
+func (m *initFailModule) Init(ctx context.Context, mctx *ModuleContext) error {
+	m.initCalled.Add(1)
+	if m.initFailWith != nil {
+		return m.initFailWith
+	}
+	return m.mockModule.Init(ctx, mctx)
+}
+
+func (m *initFailModule) Shutdown(ctx context.Context) error {
+	m.shutdownHits.Add(1)
+	return m.mockModule.Shutdown(ctx)
+}
+
+// TestInstall_PartialFailure_NoSideEffects — FIX-6 §5 acceptance: when
+// module N's Init fails, modules 0..N-1 (already Init'd) get Shutdown
+// called, the Manager remains uninstalled, and the routing maps stay
+// empty so a subsequent Install retry can proceed.
+func TestInstall_PartialFailure_NoSideEffects(t *testing.T) {
+	db, _ := openAdapterChannel(t)
+	// Seed a second adapter actor + type so we can install two modules.
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
+		 VALUES ('tool:other', 'tool', 'daemon_rpc', ?, NULL)`,
+		testT0); err != nil {
+		t.Fatalf("seed second actor: %v", err)
+	}
+	schemas := json.RawMessage(`{
+	  "request": {"type": "object"},
+	  "response": {
+	    "type": "object",
+	    "required": ["status"],
+	    "properties": {
+	      "status": {"type": "string", "enum": ["completed", "failed"]},
+	      "reason": {"type": "string"}
+	    },
+	    "additionalProperties": true
+	  }
+	}`)
+	otherMax := int64(60_000)
+	rebuildDeps := installSecondType(t, db, schemas, otherMax)
+
+	clock := int64(testT0)
+	// First module installs cleanly; second module fails Init.
+	modA := newDefaultMockModule()
+	modB := &initFailModule{
+		mockModule: newMockModule(
+			"other",
+			"tool:other",
+			[]string{"other.echo"},
+			"daemon_rpc",
+			map[string]int64{"other.echo": 60_000},
+		),
+		initFailWith: errFakeInit,
+	}
+	mgr, err := NewManager(ManagerConfig{
+		DB:      db,
+		Deps:    rebuildDeps,
+		Modules: map[string]Module{modA.name: modA, modB.name: modB},
+		Clock:   fixedClock(&clock),
+		Logger:  silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	err = mgr.Install(ctx)
+	if err == nil {
+		t.Fatalf("expected Install to fail")
+	}
+	if !strings.Contains(err.Error(), "Init") {
+		t.Errorf("err = %v; want one mentioning Init", err)
+	}
+	// modA was successfully Init'd then rolled back via Shutdown.
+	if got := atomic.LoadInt32(&modA.declaredCalls); got < 1 {
+		t.Errorf("modA Declares should be invoked at least once, got %d", got)
+	}
+	if mgr.isInstalled() {
+		t.Errorf("Manager should remain uninstalled after partial-failure rollback")
+	}
+	// Routing maps must be empty so a retry has a clean slate.
+	if names := mgr.ModuleNames(); len(names) != 0 {
+		t.Errorf("Manager.ModuleNames after rollback = %v; want []", names)
+	}
+}
+
+// TestInstall_RetryAfterFailureSucceeds — after a partial rollback the
+// caller fixes the offending module and Install succeeds.
+func TestInstall_RetryAfterFailureSucceeds(t *testing.T) {
+	db, _ := openAdapterChannel(t)
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
+		 VALUES ('tool:other', 'tool', 'daemon_rpc', ?, NULL)`,
+		testT0); err != nil {
+		t.Fatalf("seed second actor: %v", err)
+	}
+	schemas := json.RawMessage(`{
+	  "request": {"type": "object"},
+	  "response": {
+	    "type": "object",
+	    "required": ["status"],
+	    "properties": {
+	      "status": {"type": "string", "enum": ["completed", "failed"]},
+	      "reason": {"type": "string"}
+	    },
+	    "additionalProperties": true
+	  }
+	}`)
+	otherMax := int64(60_000)
+	rebuildDeps := installSecondType(t, db, schemas, otherMax)
+
+	clock := int64(testT0)
+	modA := newDefaultMockModule()
+	modB := &initFailModule{
+		mockModule: newMockModule(
+			"other",
+			"tool:other",
+			[]string{"other.echo"},
+			"daemon_rpc",
+			map[string]int64{"other.echo": 60_000},
+		),
+		initFailWith: errFakeInit,
+	}
+	mgr, err := NewManager(ManagerConfig{
+		DB:      db,
+		Deps:    rebuildDeps,
+		Modules: map[string]Module{modA.name: modA, modB.name: modB},
+		Clock:   fixedClock(&clock),
+		Logger:  silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := mgr.Install(ctx); err == nil {
+		t.Fatalf("first Install should fail")
+	}
+	// Caller "fixes" modB and retries.
+	modB.initFailWith = nil
+	if err := mgr.Install(ctx); err != nil {
+		t.Fatalf("retry Install: %v", err)
+	}
+	if !mgr.isInstalled() {
+		t.Errorf("Manager should be installed after retry")
+	}
+	names := mgr.ModuleNames()
+	if len(names) != 2 || names[0] != "demo" || names[1] != "other" {
+		t.Errorf("ModuleNames = %v; want [demo other]", names)
+	}
+}
+
+// TestManager_ConcurrentInstallDispatchGC — race-mode stress: while
+// Install is committing, concurrent goroutines call Dispatch / RunGC /
+// Shutdown / ModuleNames. Run under `go test -race` to surface any
+// missing mu protection.
+func TestManager_ConcurrentInstallDispatchGC(t *testing.T) {
+	db, deps := openAdapterChannel(t)
+	clock := int64(testT0)
+	mod := newDefaultMockModule()
+	mgr, err := NewManager(ManagerConfig{
+		DB:        db,
+		Deps:      deps,
+		Modules:   map[string]Module{mod.name: mod},
+		Clock:     fixedClock(&clock),
+		Logger:    silentLogger(),
+		GCPeriod:  10 * time.Millisecond,
+		GCGraceMs: 0,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	var wg atomic.Int32
+	start := make(chan struct{})
+
+	// Background: many readers spinning on Dispatch / ModuleNames.
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Add(-1)
+			<-start
+			deadline := time.Now().Add(150 * time.Millisecond)
+			for time.Now().Before(deadline) {
+				_ = mgr.ModuleNames()
+				env := &v4types.Envelope{
+					ID:        "race-x",
+					Kind:      v4types.KindRequest,
+					Audience:  []string{testAdapterActor},
+					Type:      testAdapterType,
+					ChannelID: testChannelID,
+				}
+				_ = mgr.Dispatch(context.Background(), env)
+				_ = mgr.isInstalled()
+			}
+		}()
+	}
+	// Background: GC sweeper.
+	gcCtx, cancelGC := context.WithCancel(context.Background())
+	wg.Add(1)
+	go func() {
+		defer wg.Add(-1)
+		mgr.RunGC(gcCtx)
+	}()
+
+	close(start)
+	// Install in the foreground.
+	if err := mgr.Install(context.Background()); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	// Let readers continue briefly post-install.
+	time.Sleep(50 * time.Millisecond)
+	cancelGC()
+	_ = mgr.Shutdown(context.Background())
+
+	// Drain readers.
+	deadline := time.Now().Add(2 * time.Second)
+	for wg.Load() > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("workers did not drain")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

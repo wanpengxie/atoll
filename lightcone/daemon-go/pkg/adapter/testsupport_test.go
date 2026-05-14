@@ -343,3 +343,45 @@ func newDefaultMockModule() *mockModule {
 		map[string]int64{testAdapterType: 60_000},
 	)
 }
+
+// errFakeInit is the deterministic error returned by initFailModule —
+// kept as a package-level var so tests can assert errors.Is.
+var errFakeInit = errors.New("fake init failure")
+
+// installSecondType seeds an `other.echo` type bound to `tool:other`
+// adapter actor (which the caller must have inserted into
+// actor_registry beforehand). Returns a freshly-rebuilt Deps bundle
+// whose Types lookup includes the new row — pass to NewManager so the
+// framework install validator sees both types.
+//
+// Used by partial-failure / retry rollback tests that need two adapter
+// modules in the same channel.
+func installSecondType(t *testing.T, db *sql.DB, schemas json.RawMessage, maxPendingMs int64) pkgharness.Deps {
+	t.Helper()
+	ctx := context.Background()
+	rows := []registry.TypeRow{{
+		Type:               "other.echo",
+		AllowedKinds:       []string{"request", "response"},
+		SchemasByKind:      schemas,
+		HandlerBinding:     "daemon_rpc",
+		MaxPendingMs:       &maxPendingMs,
+		HandlerActorID:     "tool:other",
+		TerminalConvention: "single-response",
+	}}
+	if err := store.WithImmediate(ctx, db, func(c context.Context, conn *sql.Conn) error {
+		return registry.Install(c, conn, rows, testT0)
+	}); err != nil {
+		t.Fatalf("install other.echo type: %v", err)
+	}
+	types, err := internalharness.LoadTypeLookup(ctx, db)
+	if err != nil {
+		t.Fatalf("LoadTypeLookup: %v", err)
+	}
+	return pkgharness.New(
+		internalharness.NewSQLiteStore(db),
+		internalharness.NewSQLiteActors(db),
+		types,
+		nil,
+		testChannelID,
+	)
+}
