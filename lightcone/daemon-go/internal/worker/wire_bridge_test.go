@@ -18,8 +18,8 @@ import (
 // later inspection. Tests use it to assert envelope shape without
 // spinning up a real harness.
 type recordingWriter struct {
-	mu       sync.Mutex
-	calls    []writeCall
+	mu             sync.Mutex
+	calls          []writeCall
 	overrideResult *pkgharness.WriteResult
 	overrideErr    error
 }

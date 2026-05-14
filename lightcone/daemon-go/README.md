@@ -24,7 +24,9 @@ internal/
   supervisor/         ; T6  worker_locks CAS + supervisor loop
   ledger/             ; T6  action_ledger reserve/commit
   adapter/            ; T13+T14 adapter framework + xhs rewrite
-  worker/             ; T10+T11 worker runtime + tool actor wrappers
+  worker/             ; T10 worker runtime (turn-ctx / wire bridge /
+                      ;       agent factory / heartbeat / spawner) + T11
+                      ;       tool actor wrappers (separate ticket)
 pkg/
   canonical/          ; T2  RFC 8785 canonical JSON + SHA-256
   v4types/            ; T2  Envelope / kind / reason enums
@@ -154,11 +156,65 @@ make daemon-go-lint
 `pkg/kimismoke` adapts go-kimi's `examples/01_basic_turn` to use the
 in-process `echo` provider so the smoke runs in CI without an
 `OPENAI_API_KEY` or any network access. It exercises the four SDK calls
-the M1.3 worker runtime (T10) will depend on: `NewAgent`, `Run`,
+the M1.3 worker runtime (T10) depends on: `NewAgent`, `Run`,
 `LastResult`, `Close`.
 
-`cmd/worker/main.go` calls into it during T0; T10 replaces that with the
-real v4 ABI adapter loop.
+## worker runtime (T10)
+
+`internal/worker` hosts the v4 worker runtime — go-kimi `kimi.Agent` +
+the v4 ABI adapter (L2 §3.9). Each `cmd/worker` invocation runs one
+worker process driving one (channel, agent) pair.
+
+Spawn protocol (the supervisor builds this argv + env per L2 §3.9.3):
+
+```bash
+./worker \
+  --channel-id <id> \
+  --agent-id <actor> \
+  --worker-id <uuid> \
+  --fencing-token <int>  \
+  --channel-workdir <abs-path> \
+  --lease-ttl <seconds> \
+  [--trigger-msg-id <id> --trigger-correlation-id <id>] \
+  [--auth-token <token> --sender-kind agent]
+```
+
+The same fields propagate via env (`COAGENT_CHANNEL_ID`,
+`COAGENT_SELF_ID`, `COAGENT_WORKER_ID`, `COAGENT_FENCING_TOKEN`,
+`COAGENT_TRIGGER_*`, `COAGENT_AUTH_TOKEN`, `COAGENT_SENDER_KIND`,
+`COAGENT_CHANNEL_WORKDIR`, `COAGENT_LEASE_TTL`, `COAGENT_IN_WORKER`)
+and are snapshot to `~/.coagent/turn-ctx.json` so coagent CLI
+subprocesses can fall back when the env chain breaks.
+
+Lifecycle (`worker.Run`):
+
+1. `TurnCtx.Validate()` enforces required spawn fields.
+2. `WriteTurnCtxFile` snapshots the context to `~/.coagent/turn-ctx.json`.
+3. `store.OpenChannel` opens `<workdir>/messages.sqlite`.
+4. `registry.Get` confirms the actor row exists (the bootstrap saga
+   seeded it; missing row → exit 2 with `actor not registered`).
+5. Builds `pkgharness.Deps` (Store / Actors / Types / WorkerLocks).
+6. `NewWireBridge` wires a `wire.Emitter` that closes over
+   `pkgharness.InWorkerBus` (24 wire types → v4 channel emits per
+   L2 §3.9.5 mapping table).
+7. `NewAgent` constructs the `kimi.Agent` with the bridge as
+   `WireEmitter` and an echo LLM provider (M1.3 baseline forbids real
+   LLM calls during the PM-unattended phase).
+8. `RunHeartbeat` ticks at `LeaseTTL/2` calling
+   `supervisor.Heartbeat`. `ErrFencingStale` cancels the runtime ctx
+   so a stolen worker self-destructs cleanly.
+9. `agent.Run(ctx, prompt)` drives one turn; wire events stream to
+   the bridge in real time.
+10. On exit, `supervisor.Release` clears the worker_locks row so the
+    next supervisor tick spawns immediately.
+
+ExecSpawner (`internal/worker.NewExecSpawner`) provides the production
+`supervisor.Spawner` — daemon wiring (T16) constructs one per
+(channel, agent) and hands it to the supervisor `Loop`.
+
+Out of scope for T10:
+- T11 V4ize tool actor wrapping (`AdditionalTools` slot is empty until T11).
+- T13+ real LLM provider selection (echo only in M1.3 baseline).
 
 ## CI
 

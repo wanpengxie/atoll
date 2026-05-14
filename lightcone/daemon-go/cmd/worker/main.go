@@ -14,10 +14,10 @@
 //
 // Exit codes:
 //
-//   0 — clean exit (agent.Run ok + lock released), OR heartbeat stale
-//       (supervisor already stole us; nothing to retry).
-//   1 — agent.Run returned an error.
-//   2 — boot failure (flag parse, sqlite open, registry not found, etc.).
+//	0 — clean exit (agent.Run ok + lock released), OR heartbeat stale
+//	    (supervisor already stole us; nothing to retry).
+//	1 — agent.Run returned an error.
+//	2 — boot failure (flag parse, sqlite open, registry not found, etc.).
 //
 // The T11 V4ize-wrapped tools land in a later ticket; this worker
 // uses whatever AdditionalTools the runtime defaults to (currently

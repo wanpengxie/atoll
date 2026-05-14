@@ -108,9 +108,8 @@ type Logger interface {
 type WireBridge struct {
 	cfg BridgeConfig
 
-	mu          sync.Mutex
-	textBuffer  map[string]*deltaBuffer // turn_id → accumulated text
-	emitOrdinal uint64                  // monotonic per-bridge counter for hash uniqueness
+	mu         sync.Mutex
+	textBuffer map[string]*deltaBuffer // turn_id → accumulated text
 }
 
 // deltaBuffer holds the per-turn streaming text. seq increments per
