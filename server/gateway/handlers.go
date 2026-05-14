@@ -1,0 +1,321 @@
+package gateway
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+
+	"github.com/coagent-ai/coagent/kernel/channel"
+	kerneldaemonbus "github.com/coagent-ai/coagent/kernel/daemonbus"
+	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/coagent-ai/coagent/kernel/placement"
+	"github.com/coagent-ai/coagent/kernel/viewsync"
+	"github.com/coagent-ai/coagent/server/catalog"
+	"github.com/coagent-ai/coagent/server/daemonbus"
+	"github.com/coagent-ai/coagent/server/devicebus"
+	"github.com/coagent-ai/coagent/server/identity"
+)
+
+// DaemonbusHandlers wires the daemonbus dispatch hooks to gateway-
+// level subsystem services. Implements daemonbus.HandlersProvider.
+func (a *App) DaemonbusHandlers() daemonbus.Handlers {
+	return daemonbus.Handlers{
+		OnPush: func(ctx context.Context, conn *daemonbus.Connection, frame viewsync.PushFrame) (viewsync.LastReceivedSeq, error) {
+			res, err := a.viewcache.Apply(ctx, frame)
+			if err != nil {
+				return 0, err
+			}
+			// Fan-out to subscribed front-ends.
+			if res.Outcome == viewsync.ApplyOutcomeContiguous {
+				a.pushhub.PushMessage(frame.ChannelID, frame.Seq, frame.Envelope)
+			}
+			return res.LastReceivedSeq, nil
+		},
+		OnCreateChannelAck: func(ctx context.Context, conn *daemonbus.Connection, ack placement.CreateChannelAck) error {
+			_, err := a.placements.Activate(ctx, ack, placement.ConnectionEpoch(conn.ConnectionEpoch))
+			return err
+		},
+		OnHeartbeat: func(ctx context.Context, conn *daemonbus.Connection, payload daemonbus.HeartbeatPayload) error {
+			if err := a.daemonbus.RecordHeartbeat(ctx, conn.DaemonID); err != nil {
+				return err
+			}
+			for _, chID := range payload.Channels {
+				_ = a.placements.Heartbeat(ctx, chID, conn.DaemonID)
+			}
+			return nil
+		},
+		OnReclaim: func(ctx context.Context, conn *daemonbus.Connection, req placement.ReclaimRequest) error {
+			out := make([]placement.ReclaimDecision, 0, len(req.Channels))
+			for _, ch := range req.Channels {
+				ok, err := a.placements.AcceptReclaim(ctx, ch.ChannelID, ch, placement.ConnectionEpoch(conn.ConnectionEpoch))
+				if err != nil {
+					return err
+				}
+				if ok {
+					out = append(out, placement.ReclaimDecision{ChannelID: ch.ChannelID, Accepted: true})
+				} else {
+					out = append(out, placement.ReclaimDecision{ChannelID: ch.ChannelID, Accepted: false, Reason: "fencing mismatch"})
+				}
+			}
+			ft := kerneldaemonbus.FrameTypeControlReclaimAccepted
+			_, err := conn.SendFrame(ctx, ft, map[string]any{
+				"daemon_id": string(req.DaemonID),
+				"decisions": out,
+			})
+			return err
+		},
+		OnDeviceTransitRecv: func(ctx context.Context, conn *daemonbus.Connection, frame kerneldaemonbus.Frame) error {
+			// frame.Payload carries the devicebus.DeviceFrame the
+			// adapter wants forwarded to a device.
+			var df devicebus.DeviceFrame
+			if err := json.Unmarshal(frame.Payload, &df); err != nil {
+				return err
+			}
+			return a.devicebus.SendFrameToDevice(ctx, df.DeviceSessionID, df)
+		},
+	}
+}
+
+// ForwardDeviceFrame implements devicebus.TransitForwarder — converts
+// a frame from a device into a daemonbus device_transit.recv frame.
+func (a *App) ForwardDeviceFrame(ctx context.Context, frame devicebus.DeviceFrame) error {
+	conn, err := a.daemonbus.ConnectionForChannel(ctx, frame.ChannelID)
+	if err != nil {
+		return err
+	}
+	_, err = conn.SendFrame(ctx, kerneldaemonbus.FrameTypeDeviceTransitRecv, frame)
+	return err
+}
+
+// buildEngine wires the gin router. Routes are mounted by each
+// subsystem; this is the only place that knows the URL layout so
+// the surface stays auditable.
+func buildEngine(a *App) *gin.Engine {
+	r := gin.New()
+	r.Use(gin.Recovery())
+
+	r.GET("/healthz", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	api := r.Group("/api")
+
+	a.identity.RegisterPublicRoutes(api)
+
+	auth := api.Group("/")
+	auth.Use(a.identity.AuthMiddleware())
+	a.identity.RegisterAuthRoutes(auth)
+	a.catalog.RegisterRoutes(auth, a.identity)
+	a.placements.RegisterRoutes(auth)
+	a.viewcache.RegisterRoutes(auth)
+	a.devicebus.RegisterRoutes(auth)
+
+	// Channel-level orchestration: provisioning + message write.
+	auth.POST("/workspaces/:wsID/channels/:chID/bind", a.handleBindChannel)
+	auth.POST("/channels/:chID/messages", a.handleWriteMessage)
+
+	r.GET("/ws", a.pushhub.HandleWS(a.identity))
+	r.GET("/daemonbus", a.daemonbus.HandleWS(a))
+	r.GET("/devicebus", a.devicebus.HandleWS(a))
+	return r
+}
+
+// ----------------------------------------------------------------------
+// Channel bind: catalog channel + placements.Reserve + send
+// control.create_channel to daemon
+// ----------------------------------------------------------------------
+
+type bindChannelReq struct {
+	DaemonID string `json:"daemon_id" binding:"required"`
+}
+
+func (a *App) handleBindChannel(c *gin.Context) {
+	var req bindChannelReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	u := identity.UserFrom(c)
+
+	// Verify caller is a channel member.
+	ch, _, err := a.catalog.GetChannel(c.Request.Context(), c.Param("chID"), u.ID)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+
+	members, err := a.catalog.ListChannelMembers(c.Request.Context(), ch.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	displayFn := func(uid string) string {
+		usr, _ := a.identity.GetUser(c.Request.Context(), uid)
+		if usr.DisplayName != "" {
+			return usr.DisplayName
+		}
+		return usr.Email
+	}
+	initial := catalog.InitialMembersFor(members, displayFn)
+
+	daemonID := placement.DaemonID(req.DaemonID)
+	conn, ok := a.daemonbus.ConnectionFor(daemonID)
+	if !ok {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "daemon not connected"})
+		return
+	}
+
+	_, createReq, err := a.placements.Reserve(
+		c.Request.Context(),
+		channel.ID(ch.ID),
+		daemonID,
+		placement.ConnectionEpoch(conn.ConnectionEpoch),
+		initial,
+	)
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Fire-and-forget the create_channel frame — daemon's ACK arrives
+	// via the dispatch loop's OnCreateChannelAck hook which advances
+	// placement to active.
+	if _, err := conn.SendFrame(c.Request.Context(), kerneldaemonbus.FrameTypeControlCreateChannel, createReq); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{
+		"channel_id":        ch.ID,
+		"daemon_id":         string(daemonID),
+		"create_request_id": string(createReq.CreateRequestID),
+	})
+}
+
+// ----------------------------------------------------------------------
+// Write message: human-caller token → daemonbus control.write_message
+// ----------------------------------------------------------------------
+
+type writeMessageReq struct {
+	Type       string          `json:"type"        binding:"required"`
+	Payload    json.RawMessage `json:"payload"     binding:"required"`
+	ParentID   string          `json:"parent_id"`
+	Audience   []string        `json:"audience"`
+	Visibility string          `json:"visibility"`
+}
+
+// HumanCaller is the JSON object carried inside control.write_message.
+// Daemon recomputes the HMAC + verifies actor_id_in_channel against
+// its local actor_registry.
+type HumanCaller struct {
+	UserID           string `json:"user_id"`
+	ActorIDInChannel string `json:"actor_id_in_channel"`
+	TS               int64  `json:"ts"`
+	Nonce            string `json:"nonce"`
+	ServerToken      string `json:"server_token"`
+}
+
+// writeMessageBody is the daemonbus.control.write_message payload.
+type writeMessageBody struct {
+	FrameID         string           `json:"frame_id"`
+	ChannelID       string           `json:"channel_id"`
+	HumanCaller     HumanCaller      `json:"human_caller"`
+	EnvelopePartial message.Envelope `json:"envelope_partial"`
+}
+
+func (a *App) handleWriteMessage(c *gin.Context) {
+	var req writeMessageReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	u := identity.UserFrom(c)
+	channelID := c.Param("chID")
+
+	member, err := a.catalog.GetChannelMember(c.Request.Context(), channelID, u.ID)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+
+	conn, err := a.daemonbus.ConnectionForChannel(c.Request.Context(), channelID)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		return
+	}
+
+	ts := time.Now().UnixMilli()
+	nonce := newNonce()
+	caller := HumanCaller{
+		UserID: u.ID, ActorIDInChannel: member.ActorIDInChannel,
+		TS: ts, Nonce: nonce,
+		ServerToken: a.signHumanCaller(channelID, u.ID, member.ActorIDInChannel, ts, nonce),
+	}
+	vis := message.VisibilityPublic
+	if req.Visibility != "" {
+		vis = message.Visibility(req.Visibility)
+	}
+	envelope := message.Envelope{
+		Type:       req.Type,
+		ChannelID:  channelID,
+		Sender:     message.Sender{Kind: message.SenderHuman, ID: member.ActorIDInChannel},
+		Kind:       message.KindRequest,
+		Payload:    req.Payload,
+		ParentID:   req.ParentID,
+		Audience:   req.Audience,
+		Visibility: vis,
+		TS:         ts,
+	}
+	body := writeMessageBody{
+		FrameID:         uuid.NewString(),
+		ChannelID:       channelID,
+		HumanCaller:     caller,
+		EnvelopePartial: envelope,
+	}
+	ack, err := conn.SendAndAwait(c.Request.Context(), kerneldaemonbus.FrameTypeControlWriteMessage, body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"frame_id":      body.FrameID,
+		"daemon_ack_id": ack.FrameID,
+	})
+}
+
+// signHumanCaller produces the HMAC token consumed by daemon when it
+// receives control.write_message. The daemon-side recomputation uses
+// the same secret + same input concatenation order (covers codex #12).
+func (a *App) signHumanCaller(channelID, userID, actorID string, ts int64, nonce string) string {
+	mac := hmac.New(sha256.New, []byte(a.cfg.HumanCallerSecret))
+	mac.Write([]byte(channelID))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(userID))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(actorID))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(strconv.FormatInt(ts, 10)))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(nonce))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// ensure ts conversion compiles for non-test build.
+var _ = errors.New
+var _ = fmt.Println
+
+func newNonce() string {
+	buf := make([]byte, 16)
+	_, _ = rand.Read(buf)
+	return hex.EncodeToString(buf)
+}
