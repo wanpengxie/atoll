@@ -87,10 +87,11 @@ func TestEnd2End_PushFails_EmitsViewSyncFailed_ResyncReturnsIt(t *testing.T) {
 		SystemActorID: "system",
 	}
 	pusher, err := NewHTTPPusher(HTTPPusherOptions{
-		BaseURL:    upstream.URL,
-		HTTPClient: upstream.Client(),
-		Failure:    sink,
-		Clock:      func() int64 { return 1700000010000 },
+		BaseURL:       upstream.URL,
+		HTTPClient:    upstream.Client(),
+		Failure:       sink,
+		Clock:         func() int64 { return 1700000010000 },
+		RetryAttempts: 1, // single attempt — this test pins the failure-emit shape, not retry behavior
 	})
 	if err != nil {
 		t.Fatalf("new pusher: %v", err)
@@ -189,10 +190,11 @@ func TestEnd2End_DuplicatePushFailures_DedupeAtHarness(t *testing.T) {
 		SystemActorID: "system",
 	}
 	pusher, err := NewHTTPPusher(HTTPPusherOptions{
-		BaseURL:    upstream.URL,
-		HTTPClient: upstream.Client(),
-		Failure:    sink,
-		Clock:      func() int64 { return 1700000020000 },
+		BaseURL:       upstream.URL,
+		HTTPClient:    upstream.Client(),
+		Failure:       sink,
+		Clock:         func() int64 { return 1700000020000 },
+		RetryAttempts: 1, // single attempt per push — test pins dedupe across emits, not retry behavior
 	})
 	if err != nil {
 		t.Fatalf("new pusher: %v", err)

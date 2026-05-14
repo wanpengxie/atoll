@@ -7,10 +7,18 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/coagent-ai/daemon-go/pkg/v4types"
 )
+
+// instantBackoff disables the retry sleep so retry tests run in ms.
+func instantBackoff(int) time.Duration { return 0 }
+
+// noopSleep returns immediately — pair with instantBackoff in tests.
+func noopSleep(context.Context, time.Duration) {}
 
 // newTestEnvelope is a viewsync-local minimal envelope. We don't seed
 // the harness store from push tests; the envelope only needs to round-
@@ -152,10 +160,11 @@ func TestHTTPPusher_HTTP500_ReturnsPushErrorAndEmitsFailure(t *testing.T) {
 
 	sink := &recordingSink{}
 	pusher, err := NewHTTPPusher(HTTPPusherOptions{
-		BaseURL:    srv.URL,
-		HTTPClient: srv.Client(),
-		Failure:    sink,
-		Clock:      func() int64 { return 1700000001000 },
+		BaseURL:       srv.URL,
+		HTTPClient:    srv.Client(),
+		Failure:       sink,
+		Clock:         func() int64 { return 1700000001000 },
+		RetryAttempts: 1, // disable retry — this test pins the single-attempt failure shape
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -209,9 +218,10 @@ func TestHTTPPusher_TransportError_EmitsFailure(t *testing.T) {
 
 	sink := &recordingSink{}
 	pusher, err := NewHTTPPusher(HTTPPusherOptions{
-		BaseURL: srv.URL,
-		Failure: sink,
-		Clock:   func() int64 { return 1700000002000 },
+		BaseURL:       srv.URL,
+		Failure:       sink,
+		Clock:         func() int64 { return 1700000002000 },
+		RetryAttempts: 1, // disable retry — this test pins the single-attempt failure shape
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -343,5 +353,143 @@ func TestHarnessFailureSink_NilWriter_Errors(t *testing.T) {
 	err := sink.EmitViewSyncFailed(context.Background(), FailureParams{})
 	if err == nil {
 		t.Fatalf("expected error when Writer nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FIX-6 §6 — retry middleware (claude 99-3)
+// ---------------------------------------------------------------------------
+
+// TestHTTPPusher_TransientFailureRetriesAndSucceeds verifies the retry
+// loop hides a transient 503 from the caller (no PushError, no sink
+// emit) when a subsequent attempt succeeds.
+func TestHTTPPusher_TransientFailureRetriesAndSucceeds(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := calls.Add(1)
+		if n < 3 {
+			// First two attempts fail; third succeeds.
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"flaky"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"message_id":"ev-flaky"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	sink := &recordingSink{}
+	pusher, err := NewHTTPPusher(HTTPPusherOptions{
+		BaseURL:       srv.URL,
+		HTTPClient:    srv.Client(),
+		Failure:       sink,
+		RetryAttempts: 3,
+		RetryBackoff:  instantBackoff,
+		Sleep:         noopSleep,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	ack, err := pusher.PushToServer(context.Background(), newTestEnvelope("ev-flaky"))
+	if err != nil {
+		t.Fatalf("PushToServer: %v", err)
+	}
+	if ack == nil || ack.MessageID != "ev-flaky" {
+		t.Fatalf("ack = %+v, want MessageID=ev-flaky", ack)
+	}
+	if calls.Load() != 3 {
+		t.Errorf("attempts = %d, want 3 (2 retries + success)", calls.Load())
+	}
+	if got := len(sink.snapshot()); got != 0 {
+		t.Errorf("FailureSink got %d emits, want 0 (eventually-successful push hides transient failure)", got)
+	}
+}
+
+// TestHTTPPusher_AllRetriesFailEmitsFailure verifies the final emit +
+// PushError when every retry attempt fails.
+func TestHTTPPusher_AllRetriesFailEmitsFailure(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"down"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	sink := &recordingSink{}
+	pusher, err := NewHTTPPusher(HTTPPusherOptions{
+		BaseURL:       srv.URL,
+		HTTPClient:    srv.Client(),
+		Failure:       sink,
+		Clock:         func() int64 { return 17 },
+		RetryAttempts: 3,
+		RetryBackoff:  instantBackoff,
+		Sleep:         noopSleep,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	_, err = pusher.PushToServer(context.Background(), newTestEnvelope("ev-down"))
+	if err == nil {
+		t.Fatalf("expected error after all retries fail")
+	}
+	pe, ok := err.(*PushError)
+	if !ok {
+		t.Fatalf("err type = %T, want *PushError", err)
+	}
+	if pe.HTTPStatus != http.StatusServiceUnavailable {
+		t.Errorf("PushError.HTTPStatus = %d, want 503", pe.HTTPStatus)
+	}
+	if calls.Load() != 3 {
+		t.Errorf("attempts = %d, want 3", calls.Load())
+	}
+	emits := sink.snapshot()
+	if len(emits) != 1 {
+		t.Fatalf("FailureSink got %d emits after final failure, want 1", len(emits))
+	}
+	if emits[0].Kind != "http_status" || emits[0].HTTPStatus != 503 {
+		t.Errorf("emit kind/status = %s/%d", emits[0].Kind, emits[0].HTTPStatus)
+	}
+}
+
+// TestHTTPPusher_4xxNoRetry verifies that HTTP 4xx fails fast — the
+// retry loop must not waste attempts on a server-side semantic reject.
+func TestHTTPPusher_4xxNoRetry(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"malformed envelope"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	sink := &recordingSink{}
+	pusher, err := NewHTTPPusher(HTTPPusherOptions{
+		BaseURL:       srv.URL,
+		HTTPClient:    srv.Client(),
+		Failure:       sink,
+		RetryAttempts: 3,
+		RetryBackoff:  instantBackoff,
+		Sleep:         noopSleep,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	_, err = pusher.PushToServer(context.Background(), newTestEnvelope("ev-bad"))
+	if err == nil {
+		t.Fatalf("expected error on 400")
+	}
+	pe, ok := err.(*PushError)
+	if !ok || pe.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("err = %v, want PushError 400", err)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("attempts = %d, want 1 (4xx must fail-fast)", calls.Load())
+	}
+	if got := len(sink.snapshot()); got != 1 {
+		t.Errorf("FailureSink emits = %d, want 1", got)
 	}
 }

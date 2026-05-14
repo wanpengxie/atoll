@@ -162,26 +162,59 @@ type HTTPPusherOptions struct {
 	// Clock provides wall-clock ms; defaults to time.Now().UnixMilli.
 	// Tests inject a deterministic clock.
 	Clock func() int64
+
+	// RetryAttempts caps the total number of PushToServer attempts on
+	// retriable failures (transport error / HTTP 5xx). Defaults to
+	// defaultRetryAttempts (3). HTTP 4xx is treated as terminal (the
+	// server semantically rejected the envelope; retrying is wasted
+	// work) and skips all remaining attempts.
+	RetryAttempts int
+
+	// RetryBackoff returns the wait duration before retry attempt
+	// `attempt` (0-indexed; attempt 0 fires immediately after the
+	// first failure). Defaults to exponential 500ms / 1s / 2s. Tests
+	// inject a zero-duration backoff so retry loops run instantly.
+	RetryBackoff func(attempt int) time.Duration
+
+	// Sleep is the timer-style sleep used between retries. Defaults
+	// to a ctx-aware time.Sleep substitute. Tests inject a no-op so
+	// the loop runs synchronously.
+	Sleep func(ctx context.Context, d time.Duration)
 }
 
 // maxErrBody is the default response body read cap on error (1 KiB).
 const maxErrBody int64 = 1 << 10
 
-// defaultHTTPTimeout caps a single push attempt — view sync MUST not
-// block the daemon for arbitrarily long.
-const defaultHTTPTimeout = 10 * time.Second
+// defaultHTTPTimeout caps a SINGLE push attempt — view sync MUST not
+// block the daemon for arbitrarily long. With retry the worst-case
+// wall-time per PushToServer call is roughly
+//   defaultHTTPTimeout * RetryAttempts + sum(RetryBackoff)
+// ≈ 3 s * 3 + 0.5 s + 1 s + 2 s = 12.5 s, still within L1 §8.1 "异步
+// 不阻塞" tolerance for callers that wrap us in a goroutine.
+const defaultHTTPTimeout = 3 * time.Second
+
+// defaultRetryAttempts is how many total PushToServer attempts the
+// HTTPPusher makes on retriable failures (transport errors or 5xx).
+// Includes the first attempt — i.e. 3 means up to 2 retries after the
+// initial failure.
+const defaultRetryAttempts = 3
 
 // HTTPPusher is the default Pusher implementation — wraps an HTTP POST
-// to the server's view sync ingest endpoint. On failure it routes the
-// PushError through its FailureSink (if configured) before returning.
+// to the server's view sync ingest endpoint. On retriable failure it
+// retries with exponential backoff (RetryAttempts / RetryBackoff). Only
+// after every attempt has failed does it emit a FailureSink event +
+// return the last *PushError to the caller.
 type HTTPPusher struct {
-	baseURL    string
-	path       string
-	authToken  string
-	httpClient *http.Client
-	failure    FailureSink
-	maxBody    int64
-	clock      func() int64
+	baseURL       string
+	path          string
+	authToken     string
+	httpClient    *http.Client
+	failure       FailureSink
+	maxBody       int64
+	clock         func() int64
+	retryAttempts int
+	retryBackoff  func(attempt int) time.Duration
+	sleep         func(ctx context.Context, d time.Duration)
 }
 
 // NewHTTPPusher constructs a Pusher backed by an HTTP client.
@@ -209,23 +242,73 @@ func NewHTTPPusher(opts HTTPPusherOptions) (*HTTPPusher, error) {
 	if clock == nil {
 		clock = func() int64 { return time.Now().UnixMilli() }
 	}
+	attempts := opts.RetryAttempts
+	if attempts <= 0 {
+		attempts = defaultRetryAttempts
+	}
+	backoff := opts.RetryBackoff
+	if backoff == nil {
+		backoff = defaultRetryBackoff
+	}
+	sleep := opts.Sleep
+	if sleep == nil {
+		sleep = ctxAwareSleep
+	}
 	return &HTTPPusher{
-		baseURL:    strings.TrimRight(opts.BaseURL, "/"),
-		path:       path,
-		authToken:  opts.AuthToken,
-		httpClient: client,
-		failure:    opts.Failure,
-		maxBody:    maxBody,
-		clock:      clock,
+		baseURL:       strings.TrimRight(opts.BaseURL, "/"),
+		path:          path,
+		authToken:     opts.AuthToken,
+		httpClient:    client,
+		failure:       opts.Failure,
+		maxBody:       maxBody,
+		clock:         clock,
+		retryAttempts: attempts,
+		retryBackoff:  backoff,
+		sleep:         sleep,
 	}, nil
+}
+
+// defaultRetryBackoff returns 500ms / 1s / 2s for attempts 0 / 1 / 2.
+// Anything beyond gets capped at 2s — we don't want a single push call
+// to block indefinitely if attempts is reconfigured upward.
+func defaultRetryBackoff(attempt int) time.Duration {
+	switch attempt {
+	case 0:
+		return 500 * time.Millisecond
+	case 1:
+		return 1 * time.Second
+	default:
+		return 2 * time.Second
+	}
+}
+
+// ctxAwareSleep waits d but returns immediately when ctx is cancelled.
+// Keeps the retry loop responsive to caller cancellation.
+func ctxAwareSleep(ctx context.Context, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
 }
 
 // PushToServer ships env to the configured server endpoint. The body is
 // the raw envelope JSON; the response is decoded into PushAck on 2xx.
 //
-// On any failure the method routes a FailureParams through the FailureSink
-// (if configured), then returns a *PushError. The local message store is
-// never touched — daemon truth is preserved per L1 §8.1.2.
+// Retry semantics (FIX-6 §6 / claude 99-3):
+//   - Transport errors (network / encode / decode) and HTTP 5xx → retry
+//     with exponential backoff up to retryAttempts total attempts.
+//   - HTTP 4xx → terminal; server semantically rejected the envelope
+//     and a retry will not change the outcome, so we fail-fast.
+//   - Successful attempts return immediately.
+//
+// emitFailure is only invoked AFTER every attempt has failed so a
+// transient blip does not pollute the local system.event audit trail
+// with view_sync_failed rows that the next retry then succeeds past.
 func (p *HTTPPusher) PushToServer(ctx context.Context, env *v4types.Envelope) (*PushAck, error) {
 	if env == nil {
 		return nil, errors.New("viewsync: envelope is nil")
@@ -234,16 +317,49 @@ func (p *HTTPPusher) PushToServer(ctx context.Context, env *v4types.Envelope) (*
 
 	buf, err := json.Marshal(env)
 	if err != nil {
+		// Marshal failures are deterministic — no point retrying.
 		perr := &PushError{Kind: "transport_error", Cause: fmt.Errorf("marshal envelope: %w", err)}
 		p.emitFailure(ctx, env, target, perr)
 		return nil, perr
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(buf))
+	var lastErr *PushError
+	for attempt := 0; attempt < p.retryAttempts; attempt++ {
+		if attempt > 0 {
+			p.sleep(ctx, p.retryBackoff(attempt-1))
+			if ctx.Err() != nil {
+				// Caller cancelled mid-retry — surface the last error
+				// we observed but do NOT emit failure (the cancellation
+				// is the caller's signal, not a push outcome).
+				if lastErr != nil {
+					return nil, lastErr
+				}
+				return nil, &PushError{Kind: "transport_error", Cause: ctx.Err()}
+			}
+		}
+		ack, perr := p.doOnce(ctx, target, buf, env)
+		if perr == nil {
+			return ack, nil
+		}
+		lastErr = perr
+		if !isRetriablePushError(perr) {
+			// 4xx — fail-fast.
+			p.emitFailure(ctx, env, target, perr)
+			return nil, perr
+		}
+	}
+
+	// Every attempt failed; surface the last error after recording it.
+	p.emitFailure(ctx, env, target, lastErr)
+	return nil, lastErr
+}
+
+// doOnce performs a single HTTP attempt. Returns (ack, nil) on 2xx;
+// otherwise (nil, *PushError) describing the failure.
+func (p *HTTPPusher) doOnce(ctx context.Context, target string, body []byte, env *v4types.Envelope) (*PushAck, *PushError) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
-		perr := &PushError{Kind: "transport_error", Cause: fmt.Errorf("build request: %w", err)}
-		p.emitFailure(ctx, env, target, perr)
-		return nil, perr
+		return nil, &PushError{Kind: "transport_error", Cause: fmt.Errorf("build request: %w", err)}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if p.authToken != "" {
@@ -252,9 +368,7 @@ func (p *HTTPPusher) PushToServer(ctx context.Context, env *v4types.Envelope) (*
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		perr := &PushError{Kind: "transport_error", Cause: fmt.Errorf("http do: %w", err)}
-		p.emitFailure(ctx, env, target, perr)
-		return nil, perr
+		return nil, &PushError{Kind: "transport_error", Cause: fmt.Errorf("http do: %w", err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -262,9 +376,7 @@ func (p *HTTPPusher) PushToServer(ctx context.Context, env *v4types.Envelope) (*
 		var ack PushAck
 		raw, rerr := io.ReadAll(resp.Body)
 		if rerr != nil {
-			perr := &PushError{Kind: "transport_error", Cause: fmt.Errorf("read body: %w", rerr)}
-			p.emitFailure(ctx, env, target, perr)
-			return nil, perr
+			return nil, &PushError{Kind: "transport_error", Cause: fmt.Errorf("read body: %w", rerr)}
 		}
 		// An empty body is allowed — the server may ack with bare 200.
 		// In that case fill in message_id from the envelope so callers
@@ -273,9 +385,7 @@ func (p *HTTPPusher) PushToServer(ctx context.Context, env *v4types.Envelope) (*
 			return &PushAck{MessageID: env.ID}, nil
 		}
 		if uerr := json.Unmarshal(raw, &ack); uerr != nil {
-			perr := &PushError{Kind: "transport_error", Cause: fmt.Errorf("decode ack: %w", uerr)}
-			p.emitFailure(ctx, env, target, perr)
-			return nil, perr
+			return nil, &PushError{Kind: "transport_error", Cause: fmt.Errorf("decode ack: %w", uerr)}
 		}
 		if ack.MessageID == "" {
 			ack.MessageID = env.ID
@@ -285,13 +395,28 @@ func (p *HTTPPusher) PushToServer(ctx context.Context, env *v4types.Envelope) (*
 
 	// Non-2xx: capture a bounded slice of the body for diagnostics.
 	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, p.maxBody))
-	perr := &PushError{
+	return nil, &PushError{
 		Kind:       "http_status",
 		HTTPStatus: resp.StatusCode,
 		Body:       string(bodyBytes),
 	}
-	p.emitFailure(ctx, env, target, perr)
-	return nil, perr
+}
+
+// isRetriablePushError classifies a failure for the retry loop.
+// Transport errors (network / parse) and HTTP 5xx are retriable;
+// HTTP 4xx is NOT — the server's verdict is unlikely to change in a
+// few seconds, retries only burn budget.
+func isRetriablePushError(perr *PushError) bool {
+	if perr == nil {
+		return false
+	}
+	if perr.Kind == "transport_error" {
+		return true
+	}
+	if perr.Kind == "http_status" && perr.HTTPStatus >= 500 && perr.HTTPStatus < 600 {
+		return true
+	}
+	return false
 }
 
 // emitFailure routes a PushError through the FailureSink. Sink errors
