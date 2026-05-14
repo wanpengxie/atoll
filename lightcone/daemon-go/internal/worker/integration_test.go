@@ -245,46 +245,39 @@ func TestIntegration_TriggerSpawnCursorExit(t *testing.T) {
 	}
 
 	// Second Tick: backlog empty (cursor advanced past msg-1), no
-	// pending trigger → supervisor spawns one more worker that exits
-	// clean via the no-trigger path. The cursor stays at 1.
+	// pending trigger → T110 / R2-FIX-4 idle-respawn guard MUST
+	// short-circuit. Supervisor releases the lock it just took and
+	// returns without spawning another worker. The cursor stays at
+	// wantMaxSeq.
 	if err := loop.Tick(ctx); err != nil {
 		t.Fatalf("Tick #2: %v", err)
 	}
-	deadline2 := time.After(5 * time.Second)
-	for sp.spawnCount() < 2 {
-		select {
-		case <-deadline2:
-			t.Fatalf("second worker.Spawn did not happen: count=%d", sp.spawnCount())
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
-	for {
-		if sp.lastResult(t).SkippedNoTrigger {
-			break
-		}
-		select {
-		case <-deadline2:
-			t.Fatalf("second worker did not detect no-trigger: lastResult=%+v", sp.lastResult(t))
-		case <-time.After(20 * time.Millisecond):
-		}
+
+	// Give any erroneous in-flight Spawn a chance to land before we
+	// assert "count did not grow". 250ms is several times longer than
+	// the goroutine startup overhead the buggy path used to incur.
+	time.Sleep(250 * time.Millisecond)
+
+	if sp.spawnCount() != 1 {
+		t.Fatalf("idle-respawn guard violated: spawnCount=%d, want 1 (no second spawn on empty backlog)",
+			sp.spawnCount())
 	}
 
-	res2 := sp.lastResult(t)
-	if !res2.SkippedNoTrigger {
-		t.Errorf("expected SkippedNoTrigger on backlog-empty respawn, got %+v", res2)
-	}
-	if res2.CursorAdvancedTo != 0 {
-		t.Errorf("expected cursor untouched on no-trigger run, got CursorAdvancedTo=%d", res2.CursorAdvancedTo)
+	// Lock MUST remain released — the guard releases the freshly-acquired
+	// lock before returning so peer supervisors don't have to wait for
+	// the lease to expire.
+	if _, err := supervisor.Get(ctx, db, agentID); !errors.Is(err, supervisor.ErrLockMissing) {
+		t.Errorf("lock not released after idle Tick; err=%v", err)
 	}
 
-	// Cursor still at wantMaxSeq after the second (no-trigger) run.
+	// Cursor still at wantMaxSeq after the idle-Tick guard fires.
 	if err := db.QueryRowContext(ctx,
 		`SELECT last_consumed_seq FROM actor_cursors WHERE actor_id=?`, agentID,
 	).Scan(&got); err != nil {
 		t.Fatalf("read cursor #2: %v", err)
 	}
 	if got != wantMaxSeq {
-		t.Errorf("post-replay cursor = %d, want %d", got, wantMaxSeq)
+		t.Errorf("post-idle cursor = %d, want %d", got, wantMaxSeq)
 	}
 }
 

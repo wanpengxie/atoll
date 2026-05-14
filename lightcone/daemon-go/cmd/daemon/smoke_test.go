@@ -60,7 +60,9 @@ func startDaemon(t *testing.T, cfg Config) (addr string, cancel func(), wait fun
 	t.Helper()
 	ready := make(chan ReadyInfo, 1)
 	cfg.Ready = ready
-	cfg.Logger = silentLogger()
+	if cfg.Logger == nil {
+		cfg.Logger = silentLogger()
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -399,15 +401,20 @@ func TestSmoke_WorkerJSONLogVisible(t *testing.T) {
 			_ = daemonDB.Close()
 			t.Fatalf("saga.ChannelCreate: %v", err)
 		}
-		// Insert a backlog-eligible message addressed to alice from a
-		// peer agent so the supervisor's BacklogScan + worker spawn
-		// produces a real turn.
+		// Insert a backlog-eligible message addressed to peer from alice
+		// so the supervisor's BacklogScan + worker spawn produces a real
+		// turn. NB: post-T110 / R2-FIX-4 the supervisor MUST see a
+		// non-empty backlog for the agent it loops over (peer here), or
+		// the idle-respawn guard short-circuits the spawn. Routing the
+		// trigger to alice would leave peer's backlog empty and break
+		// the assertion.
 		channelDB, err := store.OpenChannel(ctx, filepath.Join(workdir, "messages.sqlite"), store.OpenOptions{})
 		if err != nil {
 			_ = daemonDB.Close()
 			t.Fatalf("open channel sqlite: %v", err)
 		}
-		// Register peer.
+		// Register peer (in_worker_bus → supervisor loop spawns a worker
+		// process for peer).
 		if _, err := channelDB.ExecContext(ctx,
 			`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
 			 VALUES (?, 'agent', 'in_worker_bus', ?, NULL)`,
@@ -417,8 +424,14 @@ func TestSmoke_WorkerJSONLogVisible(t *testing.T) {
 			_ = daemonDB.Close()
 			t.Fatalf("seed peer: %v", err)
 		}
+		// NB: actor_cursors.updated_at is NOT NULL; INSERT OR IGNORE
+		// would silently swallow a NOT NULL violation, leaving peer
+		// without a cursor row and BacklogScan returning empty even
+		// when matching messages exist.
 		if _, err := channelDB.ExecContext(ctx,
-			`INSERT OR IGNORE INTO actor_cursors (actor_id, last_consumed_seq) VALUES (?, 0)`, "peer",
+			`INSERT OR IGNORE INTO actor_cursors (actor_id, last_consumed_seq, last_consumed_id, updated_at)
+			 VALUES (?, 0, NULL, ?)`,
+			"peer", time.Now().Unix(),
 		); err != nil {
 			_ = channelDB.Close()
 			_ = daemonDB.Close()
@@ -430,9 +443,9 @@ func TestSmoke_WorkerJSONLogVisible(t *testing.T) {
 			   (id, ts, ts_received, channel_id, sender_kind, sender_id,
 			    kind, type, payload, parent_id, correlation_id,
 			    visibility, audience, not_before, expires_at, is_terminal)
-			 VALUES ('smoke-trig-1', ?, ?, ?, 'agent', 'peer',
-			         'event', 'agent.text', '{"text":"hi alice"}', NULL, 'smoke-trig-1',
-			         'public', '["alice"]', NULL, NULL, 0)`,
+			 VALUES ('smoke-trig-1', ?, ?, ?, 'agent', 'alice',
+			         'event', 'agent.text', '{"text":"hi peer"}', NULL, 'smoke-trig-1',
+			         'public', '["peer"]', NULL, NULL, 0)`,
 			ts, ts, channelID,
 		); err != nil {
 			_ = channelDB.Close()

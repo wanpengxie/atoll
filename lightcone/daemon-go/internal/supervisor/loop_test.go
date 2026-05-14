@@ -329,6 +329,13 @@ func TestTick_LeaseExpiredHang_StealsAndBumps(t *testing.T) {
 	ctx := context.Background()
 	db := openChannel(t)
 	seedCursor(t, ctx, db, "agent:writer", 0)
+	// One pending backlog row so the post-R2-FIX-4 idle-respawn guard
+	// does NOT short-circuit the steal+bump path under test here.
+	insertMessages(t, ctx, db, []msgFixture{
+		{id: "m-steal", senderID: "agent:peer", senderKind: "agent",
+			kind: "event", typ: "agent.text",
+			visibility: "public", audience: `["agent:writer"]`},
+	})
 
 	// Pre-write an expired lock row (owned by some long-dead worker
 	// from a prior daemon run; lease past, fencing_token=7).
@@ -381,6 +388,14 @@ func TestTick_LiveWorker_NoOpOnSecondTick(t *testing.T) {
 	ctx := context.Background()
 	db := openChannel(t)
 	seedCursor(t, ctx, db, "agent:writer", 0)
+	// Backlog row drives the first spawn past the R2-FIX-4 idle guard;
+	// the fake worker keeps Wait() blocking so the second Tick is a
+	// pure no-op against a live worker (not the empty-backlog skip).
+	insertMessages(t, ctx, db, []msgFixture{
+		{id: "m-live", senderID: "agent:peer", senderKind: "agent",
+			kind: "event", typ: "agent.text",
+			visibility: "public", audience: `["agent:writer"]`},
+	})
 
 	spawner := &fakeSpawner{}
 	idFn, _ := counterID()
@@ -460,6 +475,13 @@ func TestTick_SpawnFails_ReleasesLock(t *testing.T) {
 	ctx := context.Background()
 	db := openChannel(t)
 	seedCursor(t, ctx, db, "agent:writer", 0)
+	// Backlog row drives spawn past the R2-FIX-4 idle guard so we
+	// actually exercise the spawn-failure → release branch.
+	insertMessages(t, ctx, db, []msgFixture{
+		{id: "m-fail", senderID: "agent:peer", senderKind: "agent",
+			kind: "event", typ: "agent.text",
+			visibility: "public", audience: `["agent:writer"]`},
+	})
 
 	spawner := &fakeSpawner{failNext: errors.New("synthetic spawn fail")}
 	idFn, _ := counterID()
@@ -509,6 +531,12 @@ func TestTick_AliveButLeaseStolen_ReclaimAndRespawn(t *testing.T) {
 	ctx := context.Background()
 	db := openChannel(t)
 	seedCursor(t, ctx, db, "agent:writer", 0)
+	// Backlog row keeps the first Tick past the R2-FIX-4 idle guard.
+	insertMessages(t, ctx, db, []msgFixture{
+		{id: "m-stolen", senderID: "agent:peer", senderKind: "agent",
+			kind: "event", typ: "agent.text",
+			visibility: "public", audience: `["agent:writer"]`},
+	})
 
 	spawner := &fakeSpawner{}
 	idFn, _ := counterID()
@@ -568,6 +596,15 @@ func TestTick_AliveButLeaseExpired_StealAndRespawn(t *testing.T) {
 	ctx := context.Background()
 	db := openChannel(t)
 	seedCursor(t, ctx, db, "agent:writer", 0)
+	// Backlog row keeps both Ticks past the R2-FIX-4 idle guard. The
+	// fake worker never consumes the row (it just blocks on Wait), so
+	// the row stays eligible across the lease-expiry steal path under
+	// test here.
+	insertMessages(t, ctx, db, []msgFixture{
+		{id: "m-expired", senderID: "agent:peer", senderKind: "agent",
+			kind: "event", typ: "agent.text",
+			visibility: "public", audience: `["agent:writer"]`},
+	})
 
 	spawner := &fakeSpawner{}
 	idFn, _ := counterID()
@@ -615,6 +652,113 @@ func TestTick_AliveButLeaseExpired_StealAndRespawn(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 7c. T110 / R2-FIX-4 — idle-respawn guard. Empty backlog + no external
+//     trigger MUST NOT spawn a worker, and consecutive Ticks must stay
+//     idempotent (count remains 0, lock stays missing). Without the
+//     guard the worker would boot, detect no-trigger, Release the lock,
+//     and the next Tick (woken by exitCh) would spawn another noop —
+//     infinite loop, one worker startup overhead per cycle.
+// ---------------------------------------------------------------------------
+
+func TestTick_NoBacklogNoTrigger_DoesNotSpawn(t *testing.T) {
+	ctx := context.Background()
+	db := openChannel(t)
+	// Cursor row present so BacklogScan can join; but no messages → empty
+	// backlog → idle-respawn guard MUST short-circuit.
+	seedCursor(t, ctx, db, "agent:writer", 0)
+
+	spawner := &fakeSpawner{}
+	idFn, _ := counterID()
+	clk, _ := fixedClockPtr(1_700_000_000)
+	loop, err := New(db, "ch", "agent:writer", spawner, LoopConfig{
+		Period: 1 * time.Millisecond, LeaseTTL: testTTL,
+		Now: clk, NewWorkerID: idFn, Logger: silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Two consecutive Ticks — the guard MUST hold across both.
+	if err := loop.Tick(ctx); err != nil {
+		t.Fatalf("Tick #1: %v", err)
+	}
+	if err := loop.Tick(ctx); err != nil {
+		t.Fatalf("Tick #2: %v", err)
+	}
+
+	if spawner.Count() != 0 {
+		t.Errorf("spawn count = %d, want 0 (idle-respawn guard must skip empty-backlog tick)",
+			spawner.Count())
+	}
+	// Lock row MUST be released — leaving an orphan would block peer
+	// supervisors for LeaseTTL seconds. ErrLockMissing is the success
+	// signal here.
+	if _, err := Get(ctx, db, "agent:writer"); !errors.Is(err, ErrLockMissing) {
+		t.Errorf("worker_locks row not released after idle guard; err=%v", err)
+	}
+	if loop.currentWorker() != nil {
+		t.Errorf("loop.current should stay nil after idle tick")
+	}
+}
+
+// TestTick_BacklogArrivesAfterIdle_NextTickSpawns proves the guard is
+// purely conditional: once a backlog row lands, the very next Tick
+// MUST spawn (with the trigger populated from the backlog row).
+// Guards against an over-eager fix that, say, caches "idle" across
+// Ticks or forgets to bump the fencing_token correctly after a
+// release-and-return cycle.
+func TestTick_BacklogArrivesAfterIdle_NextTickSpawns(t *testing.T) {
+	ctx := context.Background()
+	db := openChannel(t)
+	seedCursor(t, ctx, db, "agent:writer", 0)
+
+	spawner := &fakeSpawner{}
+	idFn, _ := counterID()
+	clk, _ := fixedClockPtr(1_700_000_000)
+	loop, err := New(db, "ch", "agent:writer", spawner, LoopConfig{
+		Period: 1 * time.Millisecond, LeaseTTL: testTTL,
+		Now: clk, NewWorkerID: idFn, Logger: silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Tick 1 — idle, no spawn.
+	if err := loop.Tick(ctx); err != nil {
+		t.Fatalf("Tick #1: %v", err)
+	}
+	if spawner.Count() != 0 {
+		t.Fatalf("Tick #1 spawned despite empty backlog: count=%d", spawner.Count())
+	}
+
+	// A new message lands addressed to us — simulate the external
+	// trigger (future_scheduler dispatch / RPC ingest / peer message
+	// all land here through `messages`).
+	insertMessages(t, ctx, db, []msgFixture{
+		{id: "m-late", senderID: "agent:peer", senderKind: "agent",
+			kind: "event", typ: "agent.text",
+			visibility: "public", audience: `["agent:writer"]`},
+	})
+
+	// Tick 2 — backlog non-empty → spawn fires.
+	if err := loop.Tick(ctx); err != nil {
+		t.Fatalf("Tick #2: %v", err)
+	}
+	if spawner.Count() != 1 {
+		t.Fatalf("Tick #2 should have spawned: count=%d", spawner.Count())
+	}
+	sc := spawner.LastContext()
+	if sc.Trigger.MsgID != "m-late" {
+		t.Errorf("trigger msg id = %q, want m-late", sc.Trigger.MsgID)
+	}
+	if got := backlogIDs(sc.Backlog); !equalStrings(got, []string{"m-late"}) {
+		t.Errorf("backlog = %v, want [m-late]", got)
+	}
+
+	_ = spawner.Worker(0).Kill()
+}
+
+// ---------------------------------------------------------------------------
 // 8. Run drives Tick on Period intervals and shuts down cleanly on
 //    context cancellation. Uses a sub-millisecond period + a fake
 //    spawner that records each spawn.
@@ -626,6 +770,13 @@ func TestRun_HonoursContextCancel(t *testing.T) {
 
 	db := openChannel(t)
 	seedCursor(t, ctx, db, "agent:writer", 0)
+	// Backlog row drives the first Run-tick past the R2-FIX-4 idle
+	// guard so cancellation has a live worker to tear down.
+	insertMessages(t, ctx, db, []msgFixture{
+		{id: "m-cancel", senderID: "agent:peer", senderKind: "agent",
+			kind: "event", typ: "agent.text",
+			visibility: "public", audience: `["agent:writer"]`},
+	})
 
 	spawner := &fakeSpawner{}
 	idFn, _ := counterID()
@@ -677,6 +828,14 @@ func TestRun_CrashTriggersImmediateRespawn(t *testing.T) {
 
 	db := openChannel(t)
 	seedCursor(t, ctx, db, "agent:writer", 0)
+	// Backlog row keeps both spawns past the R2-FIX-4 idle guard. The
+	// fake worker never consumes the row, so it remains eligible for
+	// the second spawn after w1 crashes.
+	insertMessages(t, ctx, db, []msgFixture{
+		{id: "m-crash", senderID: "agent:peer", senderKind: "agent",
+			kind: "event", typ: "agent.text",
+			visibility: "public", audience: `["agent:writer"]`},
+	})
 
 	spawner := &fakeSpawner{}
 	idFn, _ := counterID()

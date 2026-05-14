@@ -378,9 +378,24 @@ func (l *Loop) Tick(ctx context.Context) error {
 // acquireAndSpawn runs the L2 §1.4.10 spawn branch:
 //
 //  1. CAS acquire/steal → returns Lock with fresh fencing_token
-//  2. spawn worker; on failure release lock (avoid orphan)
-//  3. backlog scan; non-empty → hand into SpawnContext.Backlog
+//  2. backlog scan; empty AND no external trigger → release + return
+//     (T110 / R2-FIX-4 idle-respawn guard — see below)
+//  3. spawn worker; on failure release lock (avoid orphan)
 //  4. record (worker, fencing_token, exitCh); start Wait goroutine
+//
+// Idle-respawn guard (R2-FIX-4): the worker runtime exits cleanly with
+// SkippedNoTrigger=true when both Trigger and Backlog are empty
+// (runtime.go:321-356). Without a supervisor-side guard the closed
+// exitCh wakes Run, Tick sees lock-missing (worker Released on exit),
+// re-enters acquireAndSpawn → spawns another noop worker → hot-loop.
+//
+// "External trigger signal" in M1.3 baseline reduces to
+// `len(backlog) > 0`: future_scheduler / long_pending / RPC paths all
+// land messages in the channel sqlite that BacklogScan picks up on the
+// next tick. There is no separate kick channel into the supervisor
+// today; the Period ticker covers idle-channel latency. When an
+// explicit kick channel lands, extend the guard to
+// `len(backlog) == 0 && !externalKick`.
 func (l *Loop) acquireAndSpawn(ctx context.Context, now int64) error {
 	workerID := l.cfg.NewWorkerID()
 	if strings.TrimSpace(workerID) == "" {
@@ -406,6 +421,29 @@ func (l *Loop) acquireAndSpawn(ctx context.Context, now int64) error {
 		// seconds.
 		_ = Release(ctx, l.db, l.agentID, workerID)
 		return fmt.Errorf("supervisor: backlog scan: %w", err)
+	}
+
+	// R2-FIX-4 idle-respawn guard: nothing to do this tick. Release the
+	// lock immediately so peer supervisors / the next ticker iteration
+	// don't have to wait for the lease to expire. Returning nil leaves
+	// l.current == nil; without a fresh exitCh Run.select falls back to
+	// the ticker (no busy-loop on the closed exit channel).
+	if len(backlog) == 0 {
+		if rerr := Release(ctx, l.db, l.agentID, workerID); rerr != nil && !errors.Is(rerr, ErrLockMissing) {
+			// Surface the release failure but do NOT return it: another
+			// supervisor that later sees this row will steal-on-expiry,
+			// so the lock can't strand indefinitely. Logging at Warn
+			// level is the right operator signal — turning this into a
+			// hard error would convert an empty-channel tick into a
+			// retry storm.
+			l.cfg.Logger.Warn("supervisor.acquire.idle.release.error",
+				"channel_id", l.channelID, "agent_id", l.agentID,
+				"worker_id", workerID, "err", rerr.Error())
+		}
+		l.cfg.Logger.Info("supervisor.acquire.idle",
+			"channel_id", l.channelID, "agent_id", l.agentID,
+			"worker_id", workerID, "fencing_token", lock.FencingToken)
+		return nil
 	}
 
 	sc := SpawnContext{
