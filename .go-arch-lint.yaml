@@ -44,16 +44,22 @@ components:
   kernel: { in: kernel/** }
 
   # ─────────────────────────────────────────────────────────────────────
+  # runtime_ipc — daemon ↔ worker IPC wire types (Frame, Codec, payloads).
+  # Pure: imports only kernel + stdlib.
+  # ─────────────────────────────────────────────────────────────────────
+  runtime_ipc: { in: runtime/ipc/** }
+
+  # ─────────────────────────────────────────────────────────────────────
   # runtime — daemon-side execution engine (M1.5-T3).
   # MUST NOT depend on server/**, adapters/**.
-  # MAY depend on kernel + self.
+  # MAY depend on kernel + self + runtime_ipc.
   # ─────────────────────────────────────────────────────────────────────
   runtime: { in: runtime/** }
 
   # ─────────────────────────────────────────────────────────────────────
   # runtime_worker — worker SUBPROCESS runtime (invariant #6).
   # Stricter than `runtime`: NO sqlite, NO runtime/store import.
-  # MAY depend on kernel + runtime/workerhost (IPC client side only).
+  # MAY depend on kernel + runtime/ipc (shared IPC wire types).
   # ─────────────────────────────────────────────────────────────────────
   runtime_worker: { in: runtime/worker/** }
 
@@ -95,16 +101,22 @@ deps:
       - uuid
       - jsonschema
 
+  runtime_ipc:
+    # Pure types: kernel only.
+    mayDependOn: [kernel]
+    canUse:
+      - uuid
+
   runtime:
     # runtime owns sqlite + WS client + worker pipes. runtime_worker is the
     # tighter subset. Vendor whitelist is broad (anyVendorDeps).
-    mayDependOn: [kernel, runtime, runtime_worker, pkg]
+    mayDependOn: [kernel, runtime, runtime_worker, runtime_ipc, pkg]
     anyVendorDeps: true
 
   runtime_worker:
     # STRICT: no sqlite, no runtime/store. canUse intentionally excludes
     # sqlite_driver.
-    mayDependOn: [kernel, pkg]
+    mayDependOn: [kernel, runtime_ipc, pkg]
     canUse:
       - go_kimi
       - uuid
