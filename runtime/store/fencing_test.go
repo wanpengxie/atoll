@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
+	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/store"

@@ -4,8 +4,8 @@ import (
 	"context"
 	"os"
 
-	"github.com/wanpengxie/ActOS/adapters/device/xhs/cli/internal/xhs"
 	"github.com/spf13/cobra"
+	"github.com/wanpengxie/ActOS/adapters/device/xhs/cli/internal/xhs"
 )
 
 // runWithProvider 是 5 子命令的共享 runner：

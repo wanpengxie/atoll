@@ -241,17 +241,17 @@ func TestErrorReasonFallback(t *testing.T) {
 // TestNormaliseStatus covers the legacy synonym fold-down.
 func TestNormaliseStatus(t *testing.T) {
 	cases := map[string]callbackOutcome{
-		"ok":         outcomeOK,
-		"completed":  outcomeOK,
-		"success":    outcomeOK,
-		"OK":         outcomeOK,
-		"error":      outcomeError,
-		"failed":     outcomeError,
-		"failure":    outcomeError,
-		"Failure":    outcomeError,
-		"":           outcomeUnknown,
-		"vibrating":  outcomeUnknown,
-		"  ok  ":     outcomeOK,
+		"ok":        outcomeOK,
+		"completed": outcomeOK,
+		"success":   outcomeOK,
+		"OK":        outcomeOK,
+		"error":     outcomeError,
+		"failed":    outcomeError,
+		"failure":   outcomeError,
+		"Failure":   outcomeError,
+		"":          outcomeUnknown,
+		"vibrating": outcomeUnknown,
+		"  ok  ":    outcomeOK,
 	}
 	for in, want := range cases {
 		if got := normaliseStatus(in); got != want {

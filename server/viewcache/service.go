@@ -101,13 +101,13 @@ func (s *Service) bufferFor(channelID channel.ID) *channelBuffer {
 //  3. classify the seq:
 //     - seq <= cursor: duplicate (ApplyOutcomeDuplicate)
 //     - seq == cursor+1: contiguous; advance cursor (+ drain buffer);
-//       buffered frames whose seq just crossed into "contiguous" are
-//       returned in ApplyResult.DrainedMessages alongside the current
-//       frame so the gateway can fan-out missed pushes (FIX-T5)
+//     buffered frames whose seq just crossed into "contiguous" are
+//     returned in ApplyResult.DrainedMessages alongside the current
+//     frame so the gateway can fan-out missed pushes (FIX-T5)
 //     - seq > cursor+1: gap; row persisted, cursor unchanged; a
-//       fire-and-forget TriggerResync goroutine is launched to ask the
-//       daemon for the missing closed interval [cursor+1, seq-1]
-//       (FIX-T5)
+//     fire-and-forget TriggerResync goroutine is launched to ask the
+//     daemon for the missing closed interval [cursor+1, seq-1]
+//     (FIX-T5)
 //  4. COMMIT
 //
 // Returns an ApplyResult carrying the post-commit cursor — the caller

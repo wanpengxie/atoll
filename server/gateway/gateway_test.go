@@ -344,9 +344,9 @@ func TestViewSyncGapDrainFanOut(t *testing.T) {
 	send := func(payload viewsync.PushFrame) {
 		raw, _ := json.Marshal(payload)
 		if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
-			FrameID: "f-" + itoa(int64(payload.Seq)),
+			FrameID:   "f-" + itoa(int64(payload.Seq)),
 			FrameType: kerneldaemonbus.FrameTypeViewsyncPush,
-			DaemonID: "d-fanout", DaemonConnectionEpoch: epoch, Payload: raw,
+			DaemonID:  "d-fanout", DaemonConnectionEpoch: epoch, Payload: raw,
 		}); err != nil {
 			t.Fatalf("write push %d: %v", payload.Seq, err)
 		}

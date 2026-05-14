@@ -99,10 +99,10 @@ func (m *mockServer) lastSend() (adapter.SendFrame, bool) {
 // ---- fake correlation / policy / respond / registry --------------------
 
 type fakeCorrelation struct {
-	mu       sync.Mutex
-	pending  map[string]adapter.CorrelationEntry
-	done     map[string]bool
-	expired  map[string]bool
+	mu         sync.Mutex
+	pending    map[string]adapter.CorrelationEntry
+	done       map[string]bool
+	expired    map[string]bool
 	reserveErr error
 }
 
@@ -224,8 +224,8 @@ func (f *fakePolicy) OnExternalError(_ context.Context, id adapter.CorrelationKe
 // the Respond closure to enforce the L4 §2.6 invariant: every emit
 // MUST have sender ∈ registry. Device ids never sit here.
 type fakeActorRegistry struct {
-	mu    sync.RWMutex
-	rows  map[actor.ActorID]bool
+	mu   sync.RWMutex
+	rows map[actor.ActorID]bool
 }
 
 func newFakeActorRegistry() *fakeActorRegistry {
@@ -252,9 +252,9 @@ type respondCall struct {
 }
 
 type fakeRespondHarness struct {
-	mu       sync.Mutex
-	calls    []respondCall
-	registry *fakeActorRegistry
+	mu           sync.Mutex
+	calls        []respondCall
+	registry     *fakeActorRegistry
 	adapterActor actor.ActorID
 }
 
@@ -771,7 +771,7 @@ func TestModuleInitRequiresDeviceTransit(t *testing.T) {
 	mctx := &adapter.ModuleContext{
 		Correlation: newFakeCorrelation(),
 		ErrorPolicy: newFakePolicy(),
-		Respond:     func(context.Context, adapter.CorrelationKey, json.RawMessage, adapter.RespondOptions) (adapter.RespondResult, error) {
+		Respond: func(context.Context, adapter.CorrelationKey, json.RawMessage, adapter.RespondOptions) (adapter.RespondResult, error) {
 			return adapter.RespondResult{}, nil
 		},
 		ChannelID: "c",

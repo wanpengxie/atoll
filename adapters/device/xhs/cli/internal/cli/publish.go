@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/wanpengxie/ActOS/adapters/device/xhs/cli/internal/xhs"
 	"github.com/spf13/cobra"
+	"github.com/wanpengxie/ActOS/adapters/device/xhs/cli/internal/xhs"
 )
 
 // newPublishCmd 注册 `coagent-xhs publish` 子命令。

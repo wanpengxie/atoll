@@ -8,19 +8,19 @@
 // File layout (each file holds one concern):
 //
 //   - proto.go      wire schema (Command, Callback, type constants,
-//                   per-type allow-list helpers).
+//     per-type allow-list helpers).
 //   - handlers.go   per-type request encoder + callback decoder built
-//                   on top of proto.go. The R4-FIX-A per-type
-//                   allow-list is preserved (T115 regression guard —
-//                   the schema lesson of the M1.3 baseline).
+//     on top of proto.go. The R4-FIX-A per-type
+//     allow-list is preserved (T115 regression guard —
+//     the schema lesson of the M1.3 baseline).
 //   - module.go     Module struct implementing kernel/adapter.Module
-//                   with BindingViaServerTransit; uses
-//                   adapters/device/framework.DeviceProxy for the
-//                   correlate + send + arm-timer trio.
+//     with BindingViaServerTransit; uses
+//     adapters/device/framework.DeviceProxy for the
+//     correlate + send + arm-timer trio.
 //   - install.go    InstallSpec helper consumed by cmd/daemon (T7) to
-//                   seed actor_registry (`tool:xhs-adapter`) +
-//                   type_registry (5 R/R + 1 event row,
-//                   handler_binding=via_server_transit).
+//     seed actor_registry (`tool:xhs-adapter`) +
+//     type_registry (5 R/R + 1 event row,
+//     handler_binding=via_server_transit).
 //
 // Boundary discipline (go-arch-lint T2):
 //
@@ -37,5 +37,5 @@
 //   - .dalek/pm/m1.5-tickets.md §T1.3    (device_transit frame field set)
 //   - .dalek/pm/v4-layer4-spec.md §2.6   (device-not-actor invariant)
 //   - .dalek/pm/v4-layer4-spec.md §2.2   (xhs response schemas — per-type
-//                                          allow-list source)
+//     allow-list source)
 package xhs

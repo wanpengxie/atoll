@@ -30,12 +30,12 @@ type DeviceState string
 
 // DeviceState closed set per T1.10.
 const (
-	StatePending  DeviceState = "pending"
-	StateReady    DeviceState = "ready"
-	StateActive   DeviceState = "active"
-	StateOffline  DeviceState = "offline"
-	StateExpired  DeviceState = "expired"
-	StateRevoked  DeviceState = "revoked"
+	StatePending DeviceState = "pending"
+	StateReady   DeviceState = "ready"
+	StateActive  DeviceState = "active"
+	StateOffline DeviceState = "offline"
+	StateExpired DeviceState = "expired"
+	StateRevoked DeviceState = "revoked"
 )
 
 // AllDeviceStates lists every DeviceState value in spec order — used by
@@ -70,10 +70,10 @@ func (s DeviceState) IsReachable() bool {
 // re-transition (X → X) is also legal — callers may call SetState with
 // the same value defensively without tripping the matrix.
 var allowedTransitions = map[DeviceState][]DeviceState{
-	StatePending:  {StatePending, StateReady, StateExpired, StateRevoked},
-	StateReady:    {StateReady, StateActive, StateOffline, StateExpired, StateRevoked},
-	StateActive:   {StateActive, StateOffline, StateExpired, StateRevoked},
-	StateOffline:  {StateOffline, StateActive, StateExpired, StateRevoked},
+	StatePending: {StatePending, StateReady, StateExpired, StateRevoked},
+	StateReady:   {StateReady, StateActive, StateOffline, StateExpired, StateRevoked},
+	StateActive:  {StateActive, StateOffline, StateExpired, StateRevoked},
+	StateOffline: {StateOffline, StateActive, StateExpired, StateRevoked},
 	// Sink states. Defensive idempotent self-loop; the row is meant to be
 	// deleted shortly after daemon ACKs unbind, but callers may re-stamp
 	// the sink state on duplicate control frames.

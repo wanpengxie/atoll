@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/wanpengxie/ActOS/adapters/device/xhs/cli/internal/xhs"
 	"github.com/spf13/cobra"
+	"github.com/wanpengxie/ActOS/adapters/device/xhs/cli/internal/xhs"
 )
 
 // newGetNoteCmd 注册 `coagent-xhs get-note`。

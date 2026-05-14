@@ -38,9 +38,9 @@ func TestDeviceStateClosedSet(t *testing.T) {
 // TestDeviceStateTerminalFlags covers IsTerminal + IsReachable.
 func TestDeviceStateTerminalFlags(t *testing.T) {
 	cases := []struct {
-		state      DeviceState
-		terminal   bool
-		reachable  bool
+		state     DeviceState
+		terminal  bool
+		reachable bool
 	}{
 		{StatePending, false, false},
 		{StateReady, false, false},

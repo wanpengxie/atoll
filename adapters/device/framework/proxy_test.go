@@ -15,11 +15,11 @@ import (
 // ---- test fakes ---------------------------------------------------------
 
 type fakeTransit struct {
-	mu     sync.Mutex
-	sent   []adapter.SendFrame
-	acks   []adapter.AckFrame
-	errs   []adapter.ErrorFrame
-	nextID string
+	mu      sync.Mutex
+	sent    []adapter.SendFrame
+	acks    []adapter.AckFrame
+	errs    []adapter.ErrorFrame
+	nextID  string
 	sendErr error
 }
 
@@ -53,11 +53,11 @@ func (f *fakeTransit) Error(_ context.Context, frame adapter.ErrorFrame) error {
 }
 
 type fakeCorrelation struct {
-	mu       sync.Mutex
-	pending  map[string]adapter.CorrelationEntry
-	done     map[string]bool
-	expired  map[string]bool
-	rejected map[string]string
+	mu         sync.Mutex
+	pending    map[string]adapter.CorrelationEntry
+	done       map[string]bool
+	expired    map[string]bool
+	rejected   map[string]string
 	reserveErr error
 }
 
@@ -122,11 +122,11 @@ func (f *fakeCorrelation) ListPending(_ context.Context) ([]adapter.CorrelationE
 }
 
 type fakePolicy struct {
-	mu              sync.Mutex
-	timers          map[string]time.Time
-	cancelled       map[string]bool
-	externalErrors  []externalErrorRecord
-	armErr          error
+	mu             sync.Mutex
+	timers         map[string]time.Time
+	cancelled      map[string]bool
+	externalErrors []externalErrorRecord
+	armErr         error
 }
 
 type externalErrorRecord struct {

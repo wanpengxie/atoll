@@ -5,22 +5,22 @@
 // Three concerns live here, each in its own file:
 //
 //   - session.go   DeviceSession state machine + local-replica SessionStore
-//                  interface (T1.10 lifecycle pending → ready → active →
-//                  offline → expired | revoked). server.devicebus owns the
-//                  authoritative row; daemon adapter holds the mirror copy
-//                  per L4 §2.6.2 (covers codex 必修 #5 — single ownership).
+//     interface (T1.10 lifecycle pending → ready → active →
+//     offline → expired | revoked). server.devicebus owns the
+//     authoritative row; daemon adapter holds the mirror copy
+//     per L4 §2.6.2 (covers codex 必修 #5 — single ownership).
 //
 //   - token.go     HMAC token issue + parse. server.devicebus signs the
-//                  token; daemon adapter never holds the plain text — only
-//                  a short fingerprint for log / audit. Per T1.10 ("server
-//                  在 user 登录后签发 …") + T1.3 control.bind_device_session
-//                  payload.token_fingerprint.
+//     token; daemon adapter never holds the plain text — only
+//     a short fingerprint for log / audit. Per T1.10 ("server
+//     在 user 登录后签发 …") + T1.3 control.bind_device_session
+//     payload.token_fingerprint.
 //
 //   - proxy.go     DeviceProxy bundles kernel/adapter.DeviceTransit +
-//                  CorrelationTracker + ErrorPolicy so a Module.Handle
-//                  body shrinks to "compose wire payload → proxy.Send".
-//                  Implements the daemon-side half of the T1.3 §2.6.4
-//                  device_transit.send / .recv / .ack / .error frame set.
+//     CorrelationTracker + ErrorPolicy so a Module.Handle
+//     body shrinks to "compose wire payload → proxy.Send".
+//     Implements the daemon-side half of the T1.3 §2.6.4
+//     device_transit.send / .recv / .ack / .error frame set.
 //
 // Boundary discipline (go-arch-lint T2):
 //

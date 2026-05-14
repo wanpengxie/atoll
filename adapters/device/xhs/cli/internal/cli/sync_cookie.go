@@ -3,8 +3,8 @@ package cli
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/adapters/device/xhs/cli/internal/xhs"
 	"github.com/spf13/cobra"
+	"github.com/wanpengxie/ActOS/adapters/device/xhs/cli/internal/xhs"
 )
 
 // newSyncCookieCmd 注册 `coagent-xhs sync-cookie`（v4 type:
