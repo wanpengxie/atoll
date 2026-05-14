@@ -139,6 +139,137 @@ func TestEndToEndRegisterLoginCreateChannel(t *testing.T) {
 	}
 }
 
+// TestHandleWriteMessage_RequestAudienceRejected covers FIX-T8 phase-1:
+// the handler must early-reject a kind=request envelope whose audience
+// is not exactly one concrete receiver. The check fires before
+// daemonbus / placements are consulted, so this test only needs a
+// signed-in user + a channel they're a member of.
+func TestHandleWriteMessage_RequestAudienceRejected(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	sess := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-aud@example.com")
+
+	cases := []struct {
+		name     string
+		audience []string
+	}{
+		{"wildcard", []string{"*"}},
+		{"empty", []string{}},
+		{"multi", []string{"agent:a", "agent:b"}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			payload := writeBody{
+				Type:     "human.text",
+				Kind:     "request",
+				Payload:  json.RawMessage(`{"text":"hi"}`),
+				Audience: tc.audience,
+			}
+			raw, _ := json.Marshal(payload)
+			req, _ := http.NewRequest(http.MethodPost,
+				srv.URL+"/api/channels/"+sess.channelID+"/messages",
+				strings.NewReader(string(raw)))
+			req.Header.Set("Content-Type", "application/json")
+			req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: sess.session})
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("POST: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status=%d want 400", resp.StatusCode)
+			}
+			var errBody struct {
+				Error string `json:"error"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&errBody)
+			if !strings.Contains(errBody.Error, "request_audience_invalid") {
+				t.Errorf("error=%q want request_audience_invalid", errBody.Error)
+			}
+		})
+	}
+}
+
+// writeBody mirrors writeMessageReq (unexported in gateway). Used by
+// TestHandleWriteMessage_* to build wire-shape JSON.
+type writeBody struct {
+	Type     string          `json:"type"`
+	Kind     string          `json:"kind,omitempty"`
+	Payload  json.RawMessage `json:"payload"`
+	Audience []string        `json:"audience"`
+}
+
+// registerLoginAndCreateChannel is a small fixture that returns a
+// session cookie + the channel id the freshly-registered user owns.
+// The user is auto-added as the channel's first member by the catalog
+// service, satisfying the gateway handler's membership check.
+type sessionAndChannel struct {
+	session   string
+	channelID string
+}
+
+func registerLoginAndCreateChannel(t *testing.T, c *http.Client, baseURL string, app *gateway.App, email string) sessionAndChannel {
+	t.Helper()
+	ctx := context.Background()
+
+	post(t, c, baseURL+"/api/identity/verification/issue",
+		`{"email":"`+email+`"}`, http.StatusAccepted)
+
+	var code string
+	if err := app.DB().QueryRowContext(ctx,
+		`SELECT code FROM verification_codes WHERE email = ? ORDER BY created_at DESC LIMIT 1`,
+		email,
+	).Scan(&code); err != nil {
+		t.Fatalf("read code: %v", err)
+	}
+
+	post(t, c, baseURL+"/api/identity/register",
+		`{"email":"`+email+`","password":"topsecret123","code":"`+code+`"}`,
+		http.StatusCreated)
+
+	loginResp := postRaw(t, c, baseURL+"/api/identity/login",
+		`{"email":"`+email+`","password":"topsecret123"}`, http.StatusOK)
+	defer func() { _ = loginResp.Body.Close() }()
+	cookie := extractSessionCookie(t, loginResp)
+	if cookie == "" {
+		t.Fatal("session cookie missing")
+	}
+
+	wsReq, _ := http.NewRequest(http.MethodPost, baseURL+"/api/workspaces",
+		strings.NewReader(`{"name":"Demo"}`))
+	wsReq.Header.Set("Content-Type", "application/json")
+	wsReq.AddCookie(&http.Cookie{Name: identity.CookieName, Value: cookie})
+	wsResp, err := c.Do(wsReq)
+	if err != nil || wsResp.StatusCode != http.StatusCreated {
+		t.Fatalf("workspace err=%v status=%d", err, wsResp.StatusCode)
+	}
+	var ws struct{ ID string }
+	_ = json.NewDecoder(wsResp.Body).Decode(&ws)
+	_ = wsResp.Body.Close()
+
+	chReq, _ := http.NewRequest(http.MethodPost,
+		baseURL+"/api/workspaces/"+ws.ID+"/channels",
+		strings.NewReader(`{"name":"general"}`))
+	chReq.Header.Set("Content-Type", "application/json")
+	chReq.AddCookie(&http.Cookie{Name: identity.CookieName, Value: cookie})
+	chResp, err := c.Do(chReq)
+	if err != nil || chResp.StatusCode != http.StatusCreated {
+		t.Fatalf("channel err=%v status=%d", err, chResp.StatusCode)
+	}
+	var chBody struct {
+		Channel struct{ ID string } `json:"channel"`
+	}
+	_ = json.NewDecoder(chResp.Body).Decode(&chBody)
+	_ = chResp.Body.Close()
+
+	return sessionAndChannel{session: cookie, channelID: chBody.Channel.ID}
+}
+
 // TestMockDaemonViewSyncRoundTrip drives a fake daemonbus connection
 // through the App's dispatch loop:
 //

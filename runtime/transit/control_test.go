@@ -416,3 +416,104 @@ func TestDispatcher_WriteMessageRoundTrip(t *testing.T) {
 		t.Error("ack.MessageID empty")
 	}
 }
+
+// TestDispatcher_StaleEpochRejected covers FIX-T8 phase-3 — when a
+// server-emitted frame stamps a connection_epoch that doesn't match
+// the daemon's current epoch (e.g. an old session frame races a
+// reconnect), Dispatch MUST return ErrStaleEpoch and MUST NOT invoke
+// the per-frame-type handler.
+func TestDispatcher_StaleEpochRejected(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	bus := transit.NewMockBus(8)
+	defer func() { _ = bus.Close() }()
+	client, err := transit.NewClient(transit.ClientConfig{
+		DaemonID: "daemon-stale", Transport: bus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	dispatcher, err := transit.NewDispatcher(transit.DispatcherConfig{
+		Client:  client,
+		FrameID: atomicFrameID(),
+		Handlers: transit.ControlHandlers{
+			OnWriteMessage: func(ctx context.Context, _ daemonbus.Frame, _ transit.WriteMessageBody) transit.WriteMessageAckBody {
+				called = true
+				return transit.WriteMessageAckBody{}
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a frame whose epoch is one less than the client's current
+	// epoch — simulates a frame from the previous WS session.
+	stale := client.Epoch() - 1
+	body := newWriteMessageBody(t, nil, 9_900)
+	frame, _ := transit.Encode("frame-stale", daemonbus.FrameTypeControlWriteMessage,
+		"server", stale, 0, body)
+
+	derr := dispatcher.Dispatch(ctx, frame)
+	if !errors.Is(derr, transit.ErrStaleEpoch) {
+		t.Fatalf("Dispatch err=%v want ErrStaleEpoch", derr)
+	}
+	if called {
+		t.Error("OnWriteMessage handler must NOT run for stale-epoch frames")
+	}
+}
+
+// TestWriteMessageHandler_NonceReplay covers FIX-T8 phase-5 — replaying
+// the same (channel_id, nonce) tuple within the configured window
+// MUST be rejected with replay_nonce_seen even though the HMAC, ts,
+// and registry checks all pass.
+func TestWriteMessageHandler_NonceReplay(t *testing.T) {
+	t.Parallel()
+	reg := newStubRegistry()
+	reg.put(actor.Record{ID: testWriteActor, Kind: message.SenderHuman, DisplayName: "Alice"})
+	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 1}}
+	h := mustNewWriteHandler(t, routerFor(chain, reg), 60*time.Second)
+
+	body := newWriteMessageBody(t, nil, 9_900)
+
+	// First write — accepted.
+	ack := h.Handle(context.Background(), body)
+	if !ack.Accepted {
+		t.Fatalf("first write should accept: %+v", ack)
+	}
+
+	// Re-send with the SAME nonce + ts → reject with replay_nonce_seen.
+	ack2 := h.Handle(context.Background(), body)
+	if ack2.Accepted {
+		t.Fatal("nonce reuse should reject")
+	}
+	if ack2.RejectReason != transit.RejectReasonReplayNonce {
+		t.Errorf("RejectReason=%q want %q", ack2.RejectReason, transit.RejectReasonReplayNonce)
+	}
+}
+
+// TestWriteMessageHandler_NonceCacheDisabledByDefault confirms that
+// when ReplayWindow=0 the nonce cache is NOT engaged — duplicate
+// frames pass through (the M1.5 default daemon configuration).
+func TestWriteMessageHandler_NonceCacheDisabledByDefault(t *testing.T) {
+	t.Parallel()
+	reg := newStubRegistry()
+	reg.put(actor.Record{ID: testWriteActor, Kind: message.SenderHuman})
+	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 1}}
+	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
+
+	body := newWriteMessageBody(t, nil, 9_900)
+	if ack := h.Handle(context.Background(), body); !ack.Accepted {
+		t.Fatalf("first: %+v", ack)
+	}
+	if ack := h.Handle(context.Background(), body); !ack.Accepted {
+		t.Fatalf("replay accepted when window=0: %+v", ack)
+	}
+}
