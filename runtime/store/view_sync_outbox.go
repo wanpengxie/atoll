@@ -103,6 +103,18 @@ func (o *ViewSyncOutbox) AckUpTo(ctx context.Context, lastAckedSeq viewsync.Seq)
 	return nil
 }
 
+// PendingCount returns the number of rows currently in status='pending'.
+// Used by the transit Pusher to surface the L1 §8.1.5 backlog-watermark
+// observability event.
+func (o *ViewSyncOutbox) PendingCount(ctx context.Context) (int, error) {
+	const q = `SELECT COUNT(*) FROM view_sync_outbox WHERE status='pending'`
+	var n int
+	if err := o.db.QueryRowContext(ctx, q).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: outbox pending count: %w", err)
+	}
+	return n, nil
+}
+
 // HighestSeq returns the largest seq currently in the outbox (pending
 // or pushed). Returns 0, false when the table is empty.
 func (o *ViewSyncOutbox) HighestSeq(ctx context.Context) (viewsync.Seq, bool, error) {
