@@ -24,7 +24,7 @@ set -euo pipefail
 # ----------------------------------------------------------------------------
 # 目标集合
 # ----------------------------------------------------------------------------
-CODE_DIRS=(kernel runtime adapters server cmd pkg ui)
+CODE_DIRS=(kernel runtime adapters server cmd pkg ui scripts)
 
 ACTIVE_SPEC=(
   .dalek/pm/v4-message-definition.md
