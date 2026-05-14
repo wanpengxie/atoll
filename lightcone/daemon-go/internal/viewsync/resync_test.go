@@ -177,7 +177,7 @@ func (m *inMemoryResyncStore) ListSince(_ context.Context, sinceSeq int64, limit
 	}
 	out := make([]v4types.Envelope, 0, limit)
 	hasMore := false
-	var lastSeq int64 = sinceSeq
+	lastSeq := sinceSeq
 	for _, env := range m.rows {
 		if env.Seq <= sinceSeq {
 			continue

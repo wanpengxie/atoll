@@ -63,10 +63,10 @@ type ResyncErrorPayload struct {
 
 // Resync error reasons (closed set, daemon-side).
 const (
-	ResyncReasonAuthFailed    = "auth_failed"
-	ResyncReasonBadRequest    = "bad_request"
+	ResyncReasonAuthFailed     = "auth_failed"
+	ResyncReasonBadRequest     = "bad_request"
 	ResyncReasonChannelMissing = "channel_missing"
-	ResyncReasonInternal      = "internal_error"
+	ResyncReasonInternal       = "internal_error"
 )
 
 // ResyncStore is the channel-local read interface the resync handler
