@@ -102,7 +102,6 @@ func TestHTTP_CreateChannel_InProgress_409(t *testing.T) {
 	status, body := postJSON(t, srv, CreateChannelPath, CreateParams{
 		CreateRequestID: "req-ip",
 		ChannelID:       "ch-ip",
-		WorkdirPath:     "/tmp/ip",
 	})
 	if status != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%v", status, body)
@@ -131,7 +130,6 @@ func TestHTTP_CreateChannel_RolledBack_409(t *testing.T) {
 	status, body := postJSON(t, srv, CreateChannelPath, CreateParams{
 		CreateRequestID: "req-rb",
 		ChannelID:       "ch-rb",
-		WorkdirPath:     "/tmp/rb",
 	})
 	if status != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%v", status, body)

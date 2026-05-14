@@ -161,7 +161,11 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	defer func() { _ = daemonDB.Close() }()
 
-	saga := bootstrap.New(daemonDB)
+	// channelRoot is required for the bootstrap saga's containment
+	// check (T102 FIX-2). Config validation already guarantees a
+	// non-empty value; main.go falls back to <home>/channels when the
+	// operator did not pass --channel-root.
+	saga := bootstrap.New(daemonDB, bootstrap.WithChannelRoot(cfg.ChannelRoot))
 
 	report, err := saga.Reconcile(ctx)
 	if err != nil {
@@ -235,10 +239,13 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// Adapter callback fanout (multi-channel: try each manager; the
 	// callback owner is whichever channel's correlation tracker has the
-	// id — others silently no-op per L1 §6.5).
+	// id — others silently no-op per L1 §6.5). Auth is enforced inside
+	// the handler against cfg.AuthToken (T102 FIX-2 hardening).
 	if len(managers) > 0 {
-		mux.Handle("/api/device/", xhs.NewCallbackHandler(authMiddleware(cfg.AuthToken,
-			&multiAdapterManager{managers: managers})))
+		mux.Handle("/api/device/", xhs.NewCallbackHandler(
+			&multiAdapterManager{managers: managers},
+			cfg.AuthToken,
+		))
 	}
 
 	// View-sync resync handler — uses the channel id from the request
@@ -358,6 +365,12 @@ func validateConfig(cfg Config) error {
 	}
 	if strings.TrimSpace(cfg.AuthToken) == "" {
 		return errors.New("daemon: Config.AuthToken is required")
+	}
+	if strings.TrimSpace(cfg.ChannelRoot) == "" {
+		return errors.New("daemon: Config.ChannelRoot is required (T102 FIX-2 containment)")
+	}
+	if !filepath.IsAbs(cfg.ChannelRoot) {
+		return fmt.Errorf("daemon: Config.ChannelRoot %q must be absolute", cfg.ChannelRoot)
 	}
 	return nil
 }
@@ -689,27 +702,10 @@ func sharedTokenResyncAuth(token string) viewsync.ResyncAuthFunc {
 	}
 }
 
-// authMiddleware wraps a CallbackManager with bearer-token verification
-// so the xhs callback path can not be reached without the daemon token.
-// L4 fix-spec FIX-2 (security hardening) is owned by a separate ticket;
-// here we land the minimum-viable check (token present + matches).
-func authMiddleware(token string, mgr xhs.CallbackManager) xhs.CallbackManager {
-	return &authedCallbackManager{token: token, inner: mgr}
-}
-
-type authedCallbackManager struct {
-	token string
-	inner xhs.CallbackManager
-}
-
-// OnExternalCallback forwards to the inner manager. Token verification
-// happens inside the wrapping http.Handler — but xhs.NewCallbackHandler
-// is the entrypoint and CallbackManager is its only seam, so for now
-// we leave token enforcement to a follow-up dedicated middleware patch
-// (FIX-2). The wrapper exists so that fix can be a single-line swap.
-func (a *authedCallbackManager) OnExternalCallback(ctx context.Context, name string, payload []byte) error {
-	return a.inner.OnExternalCallback(ctx, name, payload)
-}
+// (Auth enforcement for the xhs callback path now lives inside
+// xhs.NewCallbackHandler — see T102 FIX-2. The previous placeholder
+// `authMiddleware` / `authedCallbackManager` wrapper has been removed
+// to avoid the appearance of double-auth that confused reviewers.)
 
 // multiAdapterManager fans an OnExternalCallback across every channel's
 // adapter.Manager. The L1 §6.5 contract says a Manager whose correlation

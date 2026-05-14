@@ -14,7 +14,7 @@ import (
 // subcommand that REQUIRES --type (per L2 §3.3 "ask 必填") and
 // audience handling is special — see resolveAskAudience.
 var askFlags = map[string]bool{
-	"type": true, "payload": true, "parent": true,
+	"type": true, "payload": true, "payload-file": true, "parent": true,
 	"correlation-id": true, "audience": true,
 	"doc-refs": true, "expires-at": true,
 	"visibility": true, "sender-id": true, "channel-id": true,

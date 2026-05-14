@@ -39,6 +39,14 @@ var (
 // CreateParams carries every input the daemon needs to run the 9-step
 // saga. channel_id and create_request_id are supplied by the server
 // (L1 §3.1.2 — daemon never generates channel_id).
+//
+// NOTE (T102 FIX-2): the legacy `workdir_path` field has been removed
+// from the wire contract. The server no longer dictates a filesystem
+// path; the daemon derives `<channelRoot>/<channel_id>` internally and
+// validates that the derived path stays within the configured
+// channelRoot. This closes the codex t87 critical (an attacker who
+// could craft a CreateParams could cause `os.RemoveAll` on an arbitrary
+// daemon-readable directory during compensate).
 type CreateParams struct {
 	// CreateRequestID is the server-side UUID idempotency key. Same id
 	// re-sent to daemon returns the cached status (completed → existing
@@ -48,14 +56,12 @@ type CreateParams struct {
 
 	// ChannelID is the server-allocated id. The daemon stores it in
 	// bootstrap_registry.channel_id (UNIQUE) and uses it as
-	// messages.channel_id for the seed channel_created event.
+	// messages.channel_id for the seed channel_created event. It is
+	// also the only segment the daemon joins onto its configured
+	// channelRoot to derive the per-channel workdir path; therefore the
+	// saga validates that ChannelID contains no path separators and no
+	// "..".
 	ChannelID string `json:"channel_id"`
-
-	// WorkdirPath is the absolute path the daemon will mkdir + place
-	// messages.sqlite under. Caller (server) is responsible for picking
-	// a non-colliding path; the saga refuses to clobber a non-empty
-	// pre-existing directory.
-	WorkdirPath string `json:"workdir_path"`
 
 	// HumanMembers are the channel's human user ids (L0 §2.3 sender.id
 	// for sender.kind=human). May be empty (channel without humans —
@@ -160,11 +166,25 @@ type openChannelFn func(ctx context.Context, path string) (*sql.DB, error)
 type Saga struct {
 	daemonDB *sql.DB
 
+	// channelRoot is the absolute directory under which every channel's
+	// workdir lives. The saga derives each channel workdir as
+	// filepath.Join(channelRoot, channel_id) and validates the result
+	// stays within channelRoot (T102 FIX-2 containment). New() requires
+	// a non-empty channelRoot; ChannelCreate refuses params_invalid
+	// otherwise so production wiring cannot accidentally skip the check.
+	channelRoot string
+
 	now    func() int64
 	openCh openChannelFn
 	mkdir  func(path string, perm os.FileMode) error
 	rmAll  func(path string) error
 	stat   func(path string) (fs.FileInfo, error)
+
+	// fileWriter creates the per-workdir compensate marker. Tests can
+	// stub it; production uses os.WriteFile. The marker lets compensate
+	// distinguish "directory the saga created" from "directory that
+	// happened to already exist" — only the former is safe to rm.
+	fileWriter func(path string, data []byte, perm os.FileMode) error
 
 	// failpoints is an optional per-step error injection map used only
 	// by tests. Keys are the failPoint constants below. When the saga
@@ -229,6 +249,28 @@ func WithFilesystem(
 		}
 		if stat != nil {
 			s.stat = stat
+		}
+	}
+}
+
+// WithChannelRoot configures the directory under which channel workdirs
+// are derived. Required for ChannelCreate (T102 FIX-2): the saga refuses
+// to run with an empty channelRoot so production wiring cannot bypass
+// the containment check. Path must be absolute; the saga calls
+// filepath.Clean on it once at construction time.
+func WithChannelRoot(root string) Option {
+	return func(s *Saga) {
+		s.channelRoot = root
+	}
+}
+
+// WithFileWriter replaces the compensate marker writer. Default:
+// os.WriteFile. Tests inject a stub to assert the marker file is
+// written exactly once per workdir.
+func WithFileWriter(fn func(path string, data []byte, perm os.FileMode) error) Option {
+	return func(s *Saga) {
+		if fn != nil {
+			s.fileWriter = fn
 		}
 	}
 }

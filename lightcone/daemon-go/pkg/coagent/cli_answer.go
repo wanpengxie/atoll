@@ -14,7 +14,7 @@ import (
 // correlation-id / audience are NOT in the set — answer derives them
 // from the looked-up request per L2 §3.4.3.
 var answerFlags = map[string]bool{
-	"type": true, "payload": true,
+	"type": true, "payload": true, "payload-file": true,
 	"doc-refs": true, "expires-at": true,
 	"visibility": true, "sender-id": true, "channel-id": true,
 }

@@ -32,8 +32,14 @@ func fixtureClock(start int64) func() int64 {
 // happyParams builds a CreateParams that exercises every step of the
 // 9-step saga (system + 2 humans + agent + 1 tool adapter with 1 type +
 // 1 business type pointing at the adapter actor).
-func happyParams(t *testing.T, workdirRoot, requestID, channelID string) CreateParams {
+//
+// NOTE (T102 FIX-2): WorkdirPath has been removed from CreateParams.
+// The saga derives the workdir as filepath.Join(channelRoot, channelID)
+// from the Saga's configured channelRoot. Tests use derivedWorkdir to
+// recover the path for filesystem assertions.
+func happyParams(t *testing.T, _workdirRoot, requestID, channelID string) CreateParams {
 	t.Helper()
+	_ = _workdirRoot // retained for call-site readability; saga derives the path itself
 	schema, _ := json.Marshal(map[string]any{
 		"request": map[string]any{"type": "object"},
 	})
@@ -41,7 +47,6 @@ func happyParams(t *testing.T, workdirRoot, requestID, channelID string) CreateP
 	return CreateParams{
 		CreateRequestID: requestID,
 		ChannelID:       channelID,
-		WorkdirPath:     filepath.Join(workdirRoot, channelID),
 		HumanMembers: []HumanMember{
 			{ActorID: "user-001"},
 			{ActorID: "user-002"},
@@ -77,11 +82,17 @@ func happyParams(t *testing.T, workdirRoot, requestID, channelID string) CreateP
 }
 
 // newSaga opens a fresh daemon sqlite + returns a Saga wired to it.
-// Workdir root is t.TempDir() based so the test is hermetic.
+// Workdir root is t.TempDir()/channels so the test is hermetic AND the
+// containment check (T102 FIX-2) has a concrete channelRoot to validate
+// against.
 func newSaga(t *testing.T, opts ...Option) (*Saga, *sql.DB, string) {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
+	channelsRoot := filepath.Join(dir, "channels")
+	if err := os.MkdirAll(channelsRoot, 0o755); err != nil {
+		t.Fatalf("mkdir channels root: %v", err)
+	}
 	daemonPath := filepath.Join(dir, "daemon.sqlite")
 	daemonDB, err := store.OpenDaemon(ctx, daemonPath, store.OpenOptions{})
 	if err != nil {
@@ -89,8 +100,17 @@ func newSaga(t *testing.T, opts ...Option) (*Saga, *sql.DB, string) {
 	}
 	t.Cleanup(func() { _ = daemonDB.Close() })
 
-	allOpts := append([]Option{WithNow(fixtureClock(1_700_000_000))}, opts...)
-	return New(daemonDB, allOpts...), daemonDB, dir
+	allOpts := append([]Option{
+		WithNow(fixtureClock(1_700_000_000)),
+		WithChannelRoot(channelsRoot),
+	}, opts...)
+	return New(daemonDB, allOpts...), daemonDB, channelsRoot
+}
+
+// derivedWorkdir mirrors Saga.deriveWorkdir for test assertions. Tests
+// call it instead of CreateParams.WorkdirPath (which no longer exists).
+func derivedWorkdir(workRoot, channelID string) string {
+	return filepath.Join(workRoot, channelID)
 }
 
 // countRows is a tiny QueryRow + Scan(&n) helper used to assert row
@@ -139,7 +159,8 @@ func TestChannelCreate_HappyPath(t *testing.T) {
 	}
 
 	// Workdir + channel sqlite exist.
-	channelDBPath := filepath.Join(p.WorkdirPath, channelDBFilename)
+	workdirPath := derivedWorkdir(workRoot, p.ChannelID)
+	channelDBPath := filepath.Join(workdirPath, channelDBFilename)
 	if _, err := os.Stat(channelDBPath); err != nil {
 		t.Errorf("channel sqlite missing: %v", err)
 	}
@@ -245,7 +266,6 @@ func TestChannelCreate_Idempotent_InProgress(t *testing.T) {
 	res, err := saga.ChannelCreate(ctx, CreateParams{
 		CreateRequestID: "req-ip",
 		ChannelID:       "ch-ip",
-		WorkdirPath:     "/tmp/wd",
 	})
 	if !errors.Is(err, ErrBootstrapInProgress) {
 		t.Fatalf("err = %v, want ErrBootstrapInProgress", err)
@@ -267,7 +287,6 @@ func TestChannelCreate_Idempotent_RolledBack(t *testing.T) {
 	res, err := saga.ChannelCreate(ctx, CreateParams{
 		CreateRequestID: "req-rb",
 		ChannelID:       "ch-rb",
-		WorkdirPath:     "/tmp/wd",
 	})
 	if !errors.Is(err, ErrBootstrapRolledBack) {
 		t.Fatalf("err = %v, want ErrBootstrapRolledBack", err)
@@ -292,8 +311,13 @@ func TestChannelCreate_ParamsInvalid(t *testing.T) {
 	}{
 		{"empty create_request_id", func(p *CreateParams) { p.CreateRequestID = "" }, "create_request_id"},
 		{"empty channel_id", func(p *CreateParams) { p.ChannelID = "" }, "channel_id"},
-		{"empty workdir_path", func(p *CreateParams) { p.WorkdirPath = "" }, "workdir_path"},
-		{"relative workdir_path", func(p *CreateParams) { p.WorkdirPath = "relative/path" }, "absolute"},
+		// T102 FIX-2: channel_id is the only segment we join onto
+		// channelRoot, so the saga refuses any value that could escape
+		// the root via path syntax.
+		{"channel_id with traversal", func(p *CreateParams) { p.ChannelID = "../etc" }, "channel_id"},
+		{"channel_id with slash", func(p *CreateParams) { p.ChannelID = "ch/subdir" }, "channel_id"},
+		{"channel_id absolute", func(p *CreateParams) { p.ChannelID = "/abs/ch" }, "channel_id"},
+		{"channel_id parent dir", func(p *CreateParams) { p.ChannelID = ".." }, "channel_id"},
 		{"bad tool binding", func(p *CreateParams) {
 			p.ToolAdapters = []ToolAdapterSpec{{ActorID: "tool:x", Binding: "bogus"}}
 		}, "binding"},
@@ -427,15 +451,16 @@ func TestChannelCreate_StepFailures_TableDriven(t *testing.T) {
 			}
 
 			// workdir / channel sqlite presence.
-			workdirInfo, _ := os.Stat(p.WorkdirPath)
+			workdir := derivedWorkdir(workRoot, p.ChannelID)
+			workdirInfo, _ := os.Stat(workdir)
 			if c.expected.workdirExists && workdirInfo == nil {
-				t.Errorf("workdir %q expected to exist", p.WorkdirPath)
+				t.Errorf("workdir %q expected to exist", workdir)
 			}
 			if !c.expected.workdirExists && workdirInfo != nil {
-				t.Errorf("workdir %q expected to be removed", p.WorkdirPath)
+				t.Errorf("workdir %q expected to be removed", workdir)
 			}
 			if c.expected.channelDBExists {
-				if _, err := os.Stat(filepath.Join(p.WorkdirPath, channelDBFilename)); err != nil {
+				if _, err := os.Stat(filepath.Join(workdir, channelDBFilename)); err != nil {
 					t.Errorf("channel sqlite expected to exist: %v", err)
 				}
 			}
@@ -495,9 +520,12 @@ func TestChannelCreate_ChannelIDUnique(t *testing.T) {
 		t.Fatalf("first call: %v", err)
 	}
 
-	// Second attempt — different request_id, same channel_id.
+	// Second attempt — different request_id, same channel_id. The saga
+	// no longer accepts a custom WorkdirPath (it derives from
+	// channel_id), so the second attempt is intentionally identical in
+	// every way except create_request_id — the registry's UNIQUE
+	// constraint on channel_id still rejects it.
 	p2 := happyParams(t, workRoot, "req-b", "ch-shared")
-	p2.WorkdirPath = filepath.Join(workRoot, "ch-shared-alt")
 	_, err := saga.ChannelCreate(ctx, p2)
 	if err == nil {
 		t.Fatal("expected UNIQUE violation, got nil")
@@ -510,7 +538,9 @@ func TestChannelCreate_ChannelIDUnique(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // 7. Filesystem injection sanity — mkdir failure produces a rolled_back row
-//    even when stat doesn't see the workdir created.
+//    and compensate REFUSES to rm any directory because the marker file
+//    was never written (T102 FIX-2: the saga only removes workdirs it
+//    proved it created).
 // ---------------------------------------------------------------------------
 
 func TestChannelCreate_FilesystemInjection_Mkdir(t *testing.T) {
@@ -541,10 +571,104 @@ func TestChannelCreate_FilesystemInjection_Mkdir(t *testing.T) {
 	if mkdirCalls != 1 {
 		t.Errorf("mkdir calls = %d, want 1", mkdirCalls)
 	}
-	if rmCalls != 1 {
-		t.Errorf("rmAll calls = %d, want 1", rmCalls)
+	// With the FIX-2 marker gate, a mkdir that returned an error means
+	// the marker was never written → compensate must skip rmAll.
+	if rmCalls != 0 {
+		t.Errorf("rmAll calls = %d, want 0 (marker missing → compensate must not rm)", rmCalls)
 	}
 	if got := mustStatus(t, ctx, daemonDB, "req-fs"); got != StatusRolledBack {
 		t.Errorf("status = %q, want rolled_back", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 8. Compensate refuses to touch a workdir without the marker file.
+// ---------------------------------------------------------------------------
+
+// TestCompensate_RefusesUnmarkedDir simulates the codex t87 critical
+// scenario: a stale bootstrap_registry row points at a directory the
+// saga never created (e.g. /etc — a path that exists but does not carry
+// the .coagent-bootstrap marker). compensate() must leave the directory
+// alone.
+func TestCompensate_RefusesUnmarkedDir(t *testing.T) {
+	ctx := context.Background()
+
+	rmCalls := 0
+	rmAll := func(path string) error {
+		rmCalls++
+		return os.RemoveAll(path)
+	}
+	saga, daemonDB, workRoot := newSaga(t,
+		WithFilesystem(os.MkdirAll, rmAll, os.Stat))
+
+	// Hand-create a directory inside the channel root that LOOKS like a
+	// channel workdir but carries NO marker file. compensate must not
+	// remove it.
+	unmarked := filepath.Join(workRoot, "ch-unmarked")
+	if err := os.MkdirAll(unmarked, 0o755); err != nil {
+		t.Fatalf("mkdir unmarked: %v", err)
+	}
+	// Seed an in_progress row pointing at it.
+	if _, err := daemonDB.ExecContext(ctx,
+		`INSERT INTO bootstrap_registry (create_request_id, channel_id, status, workdir_path, started_at)
+		 VALUES ('req-unmarked', 'ch-unmarked', 'in_progress', ?, 1)`,
+		unmarked,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	saga.compensate(ctx, "req-unmarked", unmarked, fmt.Errorf("dummy"))
+
+	if rmCalls != 0 {
+		t.Errorf("rmAll called %d times on unmarked dir; want 0", rmCalls)
+	}
+	if _, err := os.Stat(unmarked); err != nil {
+		t.Errorf("unmarked dir wrongly removed: %v", err)
+	}
+	if got := mustStatus(t, ctx, daemonDB, "req-unmarked"); got != StatusRolledBack {
+		t.Errorf("status = %q, want rolled_back", got)
+	}
+}
+
+// TestCompensate_RefusesPathOutsideChannelRoot covers the defense-in-depth
+// containment check: compensate is asked to wipe a path that — while
+// existing and even marked — is NOT inside the saga's configured
+// channelRoot. Must skip the rm.
+func TestCompensate_RefusesPathOutsideChannelRoot(t *testing.T) {
+	ctx := context.Background()
+
+	rmCalls := 0
+	rmAll := func(path string) error {
+		rmCalls++
+		return os.RemoveAll(path)
+	}
+	saga, daemonDB, _ := newSaga(t,
+		WithFilesystem(os.MkdirAll, rmAll, os.Stat))
+
+	// Build a marked directory OUTSIDE the saga's channelRoot.
+	outside := t.TempDir()
+	marked := filepath.Join(outside, "rogue")
+	if err := os.MkdirAll(marked, 0o755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(marked, compensateMarkerFilename),
+		[]byte("rogue\n"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	if _, err := daemonDB.ExecContext(ctx,
+		`INSERT INTO bootstrap_registry (create_request_id, channel_id, status, workdir_path, started_at)
+		 VALUES ('req-out', 'ch-out', 'in_progress', ?, 1)`,
+		marked,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	saga.compensate(ctx, "req-out", marked, fmt.Errorf("dummy"))
+
+	if rmCalls != 0 {
+		t.Errorf("rmAll called %d times on out-of-root path; want 0", rmCalls)
+	}
+	if _, err := os.Stat(marked); err != nil {
+		t.Errorf("rogue marked dir wrongly removed: %v", err)
 	}
 }

@@ -43,10 +43,15 @@ func (r *recordingCallbackManager) snapshot() []recordedCallback {
 	return out
 }
 
+// testToken is the shared bearer token wired into every test server. It
+// is intentionally a non-empty deterministic string so the auth tests can
+// flip between "matching" and "mismatched" by changing the request header.
+const testToken = "test-machine-token"
+
 func newCallbackTestServer(t *testing.T, rec *recordingCallbackManager) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.Handle("/api/device/", NewCallbackHandler(rec))
+	mux.Handle("/api/device/", NewCallbackHandler(rec, testToken))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
@@ -54,7 +59,13 @@ func newCallbackTestServer(t *testing.T, rec *recordingCallbackManager) *httptes
 
 func postJSON(t *testing.T, url, body string) (*http.Response, string) {
 	t.Helper()
-	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request %s: %v", url, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}
@@ -194,5 +205,128 @@ func TestCallbackHandler_NilManagerPanics(t *testing.T) {
 			t.Fatal("expected panic on nil manager")
 		}
 	}()
-	_ = NewCallbackHandler(nil)
+	_ = NewCallbackHandler(nil, testToken)
+}
+
+// TestCallbackHandler_EmptyTokenPanics asserts the constructor refuses
+// to build a handler without an auth token — T102 FIX-2 mandates that
+// the daemon never silently accepts unauthenticated callbacks.
+func TestCallbackHandler_EmptyTokenPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic on empty token")
+		}
+	}()
+	_ = NewCallbackHandler(&recordingCallbackManager{}, "")
+}
+
+// TestCallbackHandler_AuthMissingHeader covers the "no Authorization
+// header at all" path: the handler must refuse with 401 token_required
+// and MUST NOT invoke the manager (otherwise an attacker could probe
+// adapter state without credentials).
+func TestCallbackHandler_AuthMissingHeader(t *testing.T) {
+	rec := &recordingCallbackManager{}
+	srv := newCallbackTestServer(t, rec)
+
+	req, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/device/dev-pri-001/callback",
+		strings.NewReader(`{"correlation_id":"req-x","status":"ok"}`))
+	req.Header.Set("Content-Type", "application/json")
+	// intentionally no Authorization header
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d (%s); want 401", resp.StatusCode, raw)
+	}
+	if !strings.Contains(string(raw), "token_required") {
+		t.Fatalf("body missing token_required marker: %s", raw)
+	}
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("manager invoked despite missing token (%d calls)", len(got))
+	}
+}
+
+// TestCallbackHandler_AuthMalformedHeader covers Authorization values
+// that are present but not a Bearer token (e.g. Basic, plain string).
+func TestCallbackHandler_AuthMalformedHeader(t *testing.T) {
+	rec := &recordingCallbackManager{}
+	srv := newCallbackTestServer(t, rec)
+
+	for _, bad := range []string{
+		"Basic Zm9vOmJhcg==",
+		"Bearer ", // empty token after prefix
+		"token-without-bearer-prefix",
+	} {
+		t.Run(bad, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodPost,
+				srv.URL+"/api/device/dev-pri-001/callback",
+				strings.NewReader(`{"correlation_id":"req-x","status":"ok"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", bad)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("POST: %v", err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d; want 401", resp.StatusCode)
+			}
+		})
+	}
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("manager invoked despite malformed token (%d calls)", len(got))
+	}
+}
+
+// TestCallbackHandler_AuthWrongToken covers the wrong-bearer-token
+// case: header is well-formed Bearer <X> but X != configured machine
+// token. Must surface 401 token_invalid (distinct from token_required
+// so ops can distinguish "client forgot the header" from "client used
+// the wrong creds").
+func TestCallbackHandler_AuthWrongToken(t *testing.T) {
+	rec := &recordingCallbackManager{}
+	srv := newCallbackTestServer(t, rec)
+
+	req, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/device/dev-pri-001/callback",
+		strings.NewReader(`{"correlation_id":"req-x","status":"ok"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer not-the-right-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d (%s); want 401", resp.StatusCode, raw)
+	}
+	if !strings.Contains(string(raw), "token_invalid") {
+		t.Fatalf("body missing token_invalid marker: %s", raw)
+	}
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("manager invoked despite wrong token (%d calls)", len(got))
+	}
+}
+
+// TestCallbackHandler_AuthHappyPath confirms the existing happy-path
+// flow keeps working once auth is enforced (the postJSON helper sets
+// the right header so we just need a positive assertion that the
+// manager IS invoked).
+func TestCallbackHandler_AuthHappyPath(t *testing.T) {
+	rec := &recordingCallbackManager{}
+	srv := newCallbackTestServer(t, rec)
+
+	resp, raw := postJSON(t, srv.URL+"/api/device/dev-pri-001/callback",
+		`{"correlation_id":"req-auth-ok","status":"ok"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d (%s); want 200", resp.StatusCode, raw)
+	}
+	if got := rec.snapshot(); len(got) != 1 {
+		t.Fatalf("manager call count = %d, want 1", len(got))
+	}
 }

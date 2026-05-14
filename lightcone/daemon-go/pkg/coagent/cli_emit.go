@@ -16,7 +16,7 @@ import (
 //	       --private --system --doc-refs --not-before --expires-at
 //	       (+ hidden: --visibility / --sender-id / --channel-id)
 var emitFlags = map[string]bool{
-	"type": true, "payload": true, "parent": true,
+	"type": true, "payload": true, "payload-file": true, "parent": true,
 	"correlation-id": true, "audience": true,
 	"private": true, "system": true,
 	"doc-refs": true, "not-before": true, "expires-at": true,

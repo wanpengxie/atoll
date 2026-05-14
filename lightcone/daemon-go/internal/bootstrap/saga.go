@@ -19,20 +19,39 @@ import (
 // sqlite file inside the workdir (L2 §1.2).
 const channelDBFilename = "messages.sqlite"
 
+// compensateMarkerFilename is the file the saga writes inside a workdir
+// immediately after creating it. compensate() refuses to RemoveAll a
+// workdir that does not carry this marker — closes the codex t87
+// critical (without the marker, a workdir reused from a previous channel
+// or a path leaked by a misconfigured server could be wiped by a failed
+// bootstrap retry).
+const compensateMarkerFilename = ".coagent-bootstrap"
+
 // New constructs a Saga bound to the daemon-level sqlite pool. The
 // daemon caller is expected to keep `daemonDB` open for the lifetime
 // of the process (it backs bootstrap_registry CAS + reconcile).
+//
+// channelRoot (configured via WithChannelRoot) is required for any
+// ChannelCreate invocation — the saga derives each channel workdir as
+// filepath.Join(channelRoot, channel_id) and validates the derived path
+// stays inside channelRoot. New itself does NOT panic on an empty
+// channelRoot so that test fixtures can construct a Saga before knowing
+// their TempDir; ChannelCreate raises ErrParamsInvalid instead.
 func New(daemonDB *sql.DB, opts ...Option) *Saga {
 	s := &Saga{
-		daemonDB: daemonDB,
-		now:      nowUnix,
-		openCh:   defaultOpenChannel,
-		mkdir:    os.MkdirAll,
-		rmAll:    os.RemoveAll,
-		stat:     os.Stat,
+		daemonDB:   daemonDB,
+		now:        nowUnix,
+		openCh:     defaultOpenChannel,
+		mkdir:      os.MkdirAll,
+		rmAll:      os.RemoveAll,
+		stat:       os.Stat,
+		fileWriter: os.WriteFile,
 	}
 	for _, o := range opts {
 		o(s)
+	}
+	if s.channelRoot != "" {
+		s.channelRoot = filepath.Clean(s.channelRoot)
 	}
 	return s
 }
@@ -63,9 +82,14 @@ func defaultOpenChannel(ctx context.Context, path string) (*sql.DB, error) {
 //     pass (the channel_created event is already durable so
 //     INSERT OR IGNORE on retry is a no-op).
 func (s *Saga) ChannelCreate(ctx context.Context, p CreateParams) (Result, error) {
-	if err := validateParams(p); err != nil {
+	if err := s.validateParams(p); err != nil {
 		return Result{}, err
 	}
+
+	// Derive the workdir from configured channelRoot + channel_id. The
+	// containment check inside validateParams has already verified the
+	// result stays under channelRoot, so this Join is purely a join.
+	workdirPath := s.deriveWorkdir(p.ChannelID)
 
 	// ---- Idempotency check ------------------------------------------------
 	existing, err := s.lookupExisting(ctx, p.CreateRequestID)
@@ -94,7 +118,7 @@ func (s *Saga) ChannelCreate(ctx context.Context, p CreateParams) (Result, error
 		`INSERT INTO bootstrap_registry
 		 (create_request_id, channel_id, status, workdir_path, started_at)
 		 VALUES (?, ?, ?, ?, ?)`,
-		p.CreateRequestID, p.ChannelID, StatusInProgress, p.WorkdirPath, startedAt,
+		p.CreateRequestID, p.ChannelID, StatusInProgress, workdirPath, startedAt,
 	); err != nil {
 		return Result{}, fmt.Errorf("bootstrap: step1 insert: %w", err)
 	}
@@ -102,9 +126,9 @@ func (s *Saga) ChannelCreate(ctx context.Context, p CreateParams) (Result, error
 	// From here on, any error must run the rollback compensation
 	// (delete workdir + UPDATE status='rolled_back'). Defer captures
 	// the named return so we can run the cleanup on the way out.
-	channelDBPath := filepath.Join(p.WorkdirPath, channelDBFilename)
+	channelDBPath := filepath.Join(workdirPath, channelDBFilename)
 	rollback := func(reason error) {
-		s.compensate(ctx, p.CreateRequestID, p.WorkdirPath, reason)
+		s.compensate(ctx, p.CreateRequestID, workdirPath, reason)
 	}
 
 	// ---- Step 2: mkdir + open channel sqlite ------------------------------
@@ -112,9 +136,18 @@ func (s *Saga) ChannelCreate(ctx context.Context, p CreateParams) (Result, error
 		rollback(err)
 		return Result{}, fmt.Errorf("bootstrap: step2 mkdir: %w", err)
 	}
-	if err := s.mkdir(p.WorkdirPath, 0o755); err != nil {
+	if err := s.mkdir(workdirPath, 0o755); err != nil {
 		rollback(err)
 		return Result{}, fmt.Errorf("bootstrap: step2 mkdir: %w", err)
+	}
+	// Write the compensate marker. Failure to write the marker is not
+	// fatal to the bootstrap (the channel sqlite is still useful), but
+	// compensate() will refuse to RemoveAll the workdir later. Log via
+	// the returned error so reconcile retries can re-attempt mkdir.
+	if err := s.fileWriter(filepath.Join(workdirPath, compensateMarkerFilename),
+		[]byte("coagent-bootstrap\n"), 0o644); err != nil {
+		rollback(err)
+		return Result{}, fmt.Errorf("bootstrap: step2 marker: %w", err)
 	}
 
 	if err := s.injected(fpStep2OpenCh); err != nil {
@@ -300,8 +333,11 @@ func (s *Saga) lookupExisting(ctx context.Context, createRequestID string) (*reg
 }
 
 // compensate runs the rollback path for a failed bootstrap attempt:
-//  1. os.RemoveAll(workdir) — best-effort; report (not retried) but
-//     never block the status update.
+//  1. os.RemoveAll(workdir) — only when the path carries the saga's
+//     compensate marker file (.coagent-bootstrap). Closes codex t87
+//     critical: without this guard, a CreateParams.WorkdirPath could
+//     coerce the daemon into removing any directory it has write access
+//     to (incl. caller-controlled paths on a reconcile pass).
 //  2. UPDATE bootstrap_registry SET status='rolled_back',
 //     rollback_reason=<err> WHERE create_request_id=? AND status='in_progress'.
 //
@@ -315,10 +351,19 @@ func (s *Saga) compensate(ctx context.Context, createRequestID, workdirPath stri
 		}
 	}
 
-	// Best-effort workdir cleanup. We DO NOT propagate errors — the
-	// status update is more important; the next Reconcile pass will
-	// retry the rm if it fails here.
-	_ = s.rmAll(workdirPath)
+	// Workdir cleanup is gated on the compensate marker. The marker is
+	// written by Step 2 immediately after mkdir, so any directory the
+	// saga itself created will carry it; a directory we did not create
+	// (mkdir failed, or compensate called with a stale registry row
+	// after the workdir was already removed) will not.
+	//
+	// We additionally double-check containment: the resolved workdir
+	// must still sit inside the configured channelRoot. Defense-in-depth
+	// for the case where a future bug feeds compensate() a path it
+	// shouldn't touch.
+	if s.shouldRemoveWorkdir(workdirPath) {
+		_ = s.rmAll(workdirPath)
+	}
 
 	_, _ = s.daemonDB.ExecContext(ctx,
 		`UPDATE bootstrap_registry
@@ -328,23 +373,86 @@ func (s *Saga) compensate(ctx context.Context, createRequestID, workdirPath stri
 	)
 }
 
+// shouldRemoveWorkdir is the compensate gate. Returns true iff:
+//   - channelRoot is configured and the path is contained inside it,
+//   - the path exists, and
+//   - the compensate marker file is present.
+//
+// Any failure (channelRoot empty, path not contained, marker missing)
+// yields false so compensate falls back to "leave it for ops" rather
+// than risking a destructive rm on a path the saga did not create.
+func (s *Saga) shouldRemoveWorkdir(workdirPath string) bool {
+	if workdirPath == "" {
+		return false
+	}
+	if s.channelRoot == "" {
+		return false
+	}
+	cleaned := filepath.Clean(workdirPath)
+	rel, err := filepath.Rel(s.channelRoot, cleaned)
+	if err != nil || rel == "." || rel == "" || strings.HasPrefix(rel, "..") ||
+		strings.HasPrefix(rel, string(filepath.Separator)) {
+		return false
+	}
+	// Path must exist and carry the marker. statExists() also returns
+	// false for permission errors, so a directory we cannot read is
+	// treated as "do not touch".
+	if !s.statExists(filepath.Join(cleaned, compensateMarkerFilename)) {
+		return false
+	}
+	return true
+}
+
+// deriveWorkdir builds the workdir path the saga uses for the given
+// channel. Always returns filepath.Clean'd so callers (INSERT,
+// compensate, reconcile) compare the same canonical string.
+func (s *Saga) deriveWorkdir(channelID string) string {
+	return filepath.Clean(filepath.Join(s.channelRoot, channelID))
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
 
-func validateParams(p CreateParams) error {
+// validateParams enforces the minimal pre-conditions before the saga
+// touches the daemon sqlite. Method receiver so we can read channelRoot.
+func (s *Saga) validateParams(p CreateParams) error {
 	if strings.TrimSpace(p.CreateRequestID) == "" {
 		return fmt.Errorf("%w: create_request_id is required", ErrParamsInvalid)
 	}
-	if strings.TrimSpace(p.ChannelID) == "" {
+	channelID := strings.TrimSpace(p.ChannelID)
+	if channelID == "" {
 		return fmt.Errorf("%w: channel_id is required", ErrParamsInvalid)
 	}
-	if strings.TrimSpace(p.WorkdirPath) == "" {
-		return fmt.Errorf("%w: workdir_path is required", ErrParamsInvalid)
+	// channel_id is the only segment we join onto channelRoot. Reject
+	// any value that could escape the root via path syntax: traversal
+	// (".."), absolute paths, or embedded separators. This is the
+	// pre-mkdir half of the T102 FIX-2 containment check; the
+	// shouldRemoveWorkdir guard catches anything that slips past.
+	if strings.ContainsAny(channelID, `/\`) ||
+		channelID == ".." || strings.Contains(channelID, "..") ||
+		filepath.IsAbs(channelID) {
+		return fmt.Errorf("%w: channel_id %q must not contain path separators or '..'",
+			ErrParamsInvalid, p.ChannelID)
 	}
-	if !filepath.IsAbs(p.WorkdirPath) {
-		return fmt.Errorf("%w: workdir_path must be absolute, got %q",
-			ErrParamsInvalid, p.WorkdirPath)
+	if s.channelRoot == "" {
+		return fmt.Errorf("%w: saga channel_root not configured (call WithChannelRoot)",
+			ErrParamsInvalid)
+	}
+	if !filepath.IsAbs(s.channelRoot) {
+		return fmt.Errorf("%w: saga channel_root %q must be absolute",
+			ErrParamsInvalid, s.channelRoot)
+	}
+	// Post-derive containment: filepath.Rel returns ".." when the
+	// derived path escapes the root (e.g. via symlink-resolved channelRoot
+	// disagreement). We compute this defensively even though the
+	// channel_id check above already covers the common cases.
+	derived := s.deriveWorkdir(channelID)
+	rel, err := filepath.Rel(s.channelRoot, derived)
+	if err != nil || rel == "." || rel == "" || strings.HasPrefix(rel, "..") ||
+		strings.HasPrefix(rel, string(filepath.Separator)) {
+		return fmt.Errorf("%w: derived workdir %q escapes channel_root %q",
+			ErrParamsInvalid, derived, s.channelRoot)
 	}
 	for i, ad := range p.ToolAdapters {
 		if strings.TrimSpace(ad.ActorID) == "" {

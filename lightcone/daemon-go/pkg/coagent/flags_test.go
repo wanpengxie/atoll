@@ -1,7 +1,9 @@
 package coagent
 
 import (
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,6 +66,85 @@ func TestParsePayload_AcceptsObject(t *testing.T) {
 		t.Fatalf("payload not preserved: %s", raw)
 	}
 }
+
+// TestResolvePayloadSource_InlineWins covers the "only --payload" path:
+// returns the inline string verbatim, no filesystem touch.
+func TestResolvePayloadSource_InlineOnly(t *testing.T) {
+	got, err := resolvePayloadSource(`{"a":1}`, "")
+	if err != nil || got != `{"a":1}` {
+		t.Fatalf("got (%q, %v); want (%q, nil)", got, err, `{"a":1}`)
+	}
+}
+
+// TestResolvePayloadSource_FileReadsContents writes a JSON file and
+// asserts resolvePayloadSource returns its body. Exercises the
+// T102 FIX-2 happy path (xhs-cli funnels large payloads through here).
+func TestResolvePayloadSource_FileReadsContents(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/payload.json"
+	body := `{"large":"` + strings.Repeat("x", 200_000) + `"}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write tmp: %v", err)
+	}
+	got, err := resolvePayloadSource("", path)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got != body {
+		t.Fatalf("body mismatch: len got=%d want=%d", len(got), len(body))
+	}
+}
+
+// TestResolvePayloadSource_MutuallyExclusive — passing both flags is
+// always an error so caller intent is unambiguous.
+func TestResolvePayloadSource_MutuallyExclusive(t *testing.T) {
+	_, err := resolvePayloadSource(`{"a":1}`, "/tmp/foo.json")
+	if err == nil {
+		t.Fatal("expected mutual-exclusion error")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("err = %q", err)
+	}
+}
+
+// TestResolvePayloadSource_MissingFile surfaces a useful error when
+// the path doesn't exist — caller logs the failure rather than
+// receiving an empty payload silently.
+func TestResolvePayloadSource_MissingFile(t *testing.T) {
+	_, err := resolvePayloadSource("", "/nope/no-such-file.json")
+	if err == nil {
+		t.Fatal("expected error for missing file")
+	}
+}
+
+// TestResolvePayloadSource_RejectsOversizeFile guards against the
+// caller staging a 100 MiB payload accidentally — the daemon-rpc layer
+// caps at 1 MiB anyway, so refuse early with a clear message.
+func TestResolvePayloadSource_RejectsOversizeFile(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/oversize.json"
+	if err := os.WriteFile(path, make([]byte, 10*1024*1024), 0o600); err != nil {
+		t.Fatalf("write tmp: %v", err)
+	}
+	// Stub osStat so the test does not depend on real filesystem
+	// allocator behaviour (10 MiB takes < 1s on tmpfs but slow disks).
+	origStat := osStat
+	osStat = func(name string) (osFileInfo, error) {
+		return fakeFileInfo{size: 9 * 1024 * 1024}, nil
+	}
+	defer func() { osStat = origStat }()
+	_, err := resolvePayloadSource("", path)
+	if err == nil {
+		t.Fatal("expected size-cap error")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err = %q", err)
+	}
+}
+
+type fakeFileInfo struct{ size int64 }
+
+func (f fakeFileInfo) Size() int64 { return f.size }
 
 func TestParseTime_AbsoluteMS(t *testing.T) {
 	got, err := parseTime("1700000000000", time.UnixMilli(0))

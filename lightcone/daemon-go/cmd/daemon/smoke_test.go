@@ -153,7 +153,8 @@ func TestSmoke_AskRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	daemonDBPath := filepath.Join(dir, "daemon.sqlite")
 	channelID := "smoke-ch-1"
-	workdir := filepath.Join(dir, "channels", channelID)
+	channelRoot := filepath.Join(dir, "channels")
+	workdir := filepath.Join(channelRoot, channelID)
 
 	ctx := context.Background()
 
@@ -163,7 +164,7 @@ func TestSmoke_AskRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open daemon sqlite: %v", err)
 		}
-		saga := bootstrap.New(daemonDB)
+		saga := bootstrap.New(daemonDB, bootstrap.WithChannelRoot(channelRoot))
 		maxPending := int64(60_000)
 		schema := mustRaw(map[string]any{
 			"request": map[string]any{"type": "object"},
@@ -180,7 +181,6 @@ func TestSmoke_AskRoundTrip(t *testing.T) {
 		_, err = saga.ChannelCreate(ctx, bootstrap.CreateParams{
 			CreateRequestID: "smoke-create-1",
 			ChannelID:       channelID,
-			WorkdirPath:     workdir,
 			ChannelAgent:    bootstrap.ChannelAgentSpec{ActorID: "alice"},
 			BusinessTypes: []bootstrap.TypeRegistryRow{
 				{

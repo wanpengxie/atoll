@@ -66,7 +66,8 @@ func TestReconcile_Step8bCrash_RetryCompletes(t *testing.T) {
 		t.Fatalf("post-crash status = %q, want in_progress", got)
 	}
 	// channel_created event already exists (single).
-	channelDB, err := store.OpenChannel(ctx, filepath.Join(p.WorkdirPath, channelDBFilename), store.OpenOptions{})
+	workdirPath := derivedWorkdir(workRoot, p.ChannelID)
+	channelDB, err := store.OpenChannel(ctx, filepath.Join(workdirPath, channelDBFilename), store.OpenOptions{})
 	if err != nil {
 		t.Fatalf("open channel: %v", err)
 	}

@@ -62,7 +62,14 @@ func buildBaseEnvelope(
 		return nil, SendOptions{}, verr
 	}
 
-	payload, perr := parsePayload(cf.Payload)
+	// T102 FIX-2: caller may stage the payload on disk via
+	// --payload-file. Resolve to a single string before parsing so the
+	// rest of the code path stays unchanged.
+	payloadRaw, payloadErr := resolvePayloadSource(cf.Payload, cf.PayloadFile)
+	if payloadErr != nil {
+		return nil, SendOptions{}, payloadErr
+	}
+	payload, perr := parsePayload(payloadRaw)
 	if perr != nil {
 		return nil, SendOptions{}, perr
 	}

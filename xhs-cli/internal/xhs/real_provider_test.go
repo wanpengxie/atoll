@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,11 @@ import (
 // fakeRunner is a stub CoagentRunner that captures every Run call and
 // returns a pre-configured result. Tests use it to verify the argv +
 // payload assembly without spawning real subprocesses.
+//
+// The runner also reads any `--payload-file <path>` value off argv at
+// call time and stashes the file bytes alongside the argv so test
+// assertions can examine the payload without race-ing against the
+// dispatch tempfile-cleanup defer (T102 FIX-2).
 type fakeRunner struct {
 	mu      sync.Mutex
 	calls   []fakeRunnerCall
@@ -21,8 +27,10 @@ type fakeRunner struct {
 }
 
 type fakeRunnerCall struct {
-	Argv []string
-	Env  []string
+	Argv        []string
+	Env         []string
+	PayloadFile string // path captured from --payload-file flag
+	PayloadBody []byte // body read from PayloadFile while still present
 }
 
 func newFakeRunner() *fakeRunner {
@@ -59,10 +67,22 @@ func (f *fakeRunner) Run(_ context.Context, cfg RealConfig, argv []string) (Coag
 	// Record the env the production runner would actually pass to the
 	// child process (cfg.Env + the three Daemon overrides). This keeps
 	// env-propagation assertions tied to the real shape callers see.
-	f.calls = append(f.calls, fakeRunnerCall{
+	call := fakeRunnerCall{
 		Argv: append([]string{}, argv...),
 		Env:  buildEnv(cfg),
-	})
+	}
+	// Capture payload-file contents BEFORE returning so the dispatch
+	// caller's defer cleanup() does not unlink the file mid-assertion.
+	for i := 0; i < len(argv); i++ {
+		if argv[i] == "--payload-file" && i+1 < len(argv) {
+			call.PayloadFile = argv[i+1]
+			if body, rerr := os.ReadFile(argv[i+1]); rerr == nil {
+				call.PayloadBody = body
+			}
+			break
+		}
+	}
+	f.calls = append(f.calls, call)
 	err := f.err
 	res := f.result
 	if f.customs != nil {
@@ -97,22 +117,29 @@ func (f *fakeRunner) lastCall(t *testing.T) fakeRunnerCall {
 	return f.calls[len(f.calls)-1]
 }
 
-// extractPayload decodes the JSON value passed via --payload.
+// extractPayload decodes the JSON value passed via --payload-file. The
+// T102 FIX-2 contract is that RealProvider.dispatch NEVER writes the
+// raw payload onto argv (cookie / image base64 must not appear in
+// /proc/<pid>/cmdline); the fakeRunner captures the file body before the
+// dispatch caller's deferred cleanup unlinks it.
 func extractPayload(t *testing.T, c fakeRunnerCall) map[string]any {
 	t.Helper()
-	var payload string
+	if c.PayloadFile == "" {
+		t.Fatal("--payload-file missing from argv (T102 FIX-2: payload must not be inline on argv)")
+	}
+	if len(c.PayloadBody) == 0 {
+		t.Fatal("payload file captured but body is empty")
+	}
+	// Defense-in-depth: make sure the legacy inline --payload flag
+	// is NOT present.
 	for i := 0; i < len(c.Argv); i++ {
-		if c.Argv[i] == "--payload" && i+1 < len(c.Argv) {
-			payload = c.Argv[i+1]
-			break
+		if c.Argv[i] == "--payload" {
+			t.Fatal("--payload should not appear on argv after T102 FIX-2")
 		}
 	}
-	if payload == "" {
-		t.Fatal("--payload missing from argv")
-	}
 	var got map[string]any
-	if err := json.Unmarshal([]byte(payload), &got); err != nil {
-		t.Fatalf("decode payload %q: %v", payload, err)
+	if err := json.Unmarshal(c.PayloadBody, &got); err != nil {
+		t.Fatalf("decode payload (%d bytes): %v", len(c.PayloadBody), err)
 	}
 	return got
 }
@@ -377,6 +404,96 @@ func TestRealProvider_Name(t *testing.T) {
 	p, _ := newTestProvider()
 	if p.Name() != "real" {
 		t.Fatalf("name = %q; want real", p.Name())
+	}
+}
+
+// TestRealProvider_LargePayload_NotInArgv exercises the T102 FIX-2
+// claude 98-3 major fix: a 200 KiB image payload — which would crash
+// the legacy `--payload <json>` path with E2BIG on most kernels (Linux
+// ARG_MAX is typically 128 KiB) — must succeed because the payload now
+// travels via --payload-file. The test asserts (1) the request reaches
+// the runner with --payload-file in argv, (2) the legacy --payload
+// flag is absent, (3) the file body decodes to the original params, and
+// (4) the file is unlinked after dispatch returns.
+func TestRealProvider_LargePayload_NotInArgv(t *testing.T) {
+	p, fr := newTestProvider()
+
+	// Build a ~200 KiB base64-ish blob. Larger than typical ARG_MAX so
+	// the legacy code path would have failed on real spawn.
+	const largeSize = 200 * 1024
+	bigBlob := strings.Repeat("A", largeSize)
+
+	_, err := p.Publish(context.Background(), PublishArgs{
+		Title:       "big-publish",
+		ContentPath: "/abs/path/to/note.md",
+		ImageData:   []map[string]any{{"type": "data", "value": bigBlob}},
+	})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	call := fr.lastCall(t)
+
+	// 1) argv contains --payload-file, NOT --payload.
+	var payloadFile string
+	for i := 0; i < len(call.Argv); i++ {
+		if call.Argv[i] == "--payload" {
+			t.Fatalf("argv must not contain --payload after T102 FIX-2 (got %v)", call.Argv)
+		}
+		if call.Argv[i] == "--payload-file" && i+1 < len(call.Argv) {
+			payloadFile = call.Argv[i+1]
+		}
+	}
+	if payloadFile == "" {
+		t.Fatalf("--payload-file missing from argv: %v", call.Argv)
+	}
+
+	// 2) Argv must not contain the giant blob verbatim (defense in
+	// depth — the previous attempt at writing a payload-file flag could
+	// regress by accidentally also appending --payload).
+	for _, arg := range call.Argv {
+		if strings.Contains(arg, bigBlob[:1024]) {
+			t.Fatal("argv element contains the giant blob — payload leaked back onto argv")
+		}
+	}
+
+	// 3) The captured file body decodes back to the original params.
+	if len(call.PayloadBody) < largeSize {
+		t.Fatalf("captured payload body length %d < blob %d", len(call.PayloadBody), largeSize)
+	}
+	var decoded map[string]any
+	if jerr := json.Unmarshal(call.PayloadBody, &decoded); jerr != nil {
+		t.Fatalf("decode payload body: %v", jerr)
+	}
+	imgs, ok := decoded["images"].([]any)
+	if !ok || len(imgs) != 1 {
+		t.Fatalf("images shape unexpected: %T %v", decoded["images"], decoded["images"])
+	}
+
+	// 4) The tempfile is removed before Publish returns.
+	if _, statErr := os.Stat(payloadFile); !os.IsNotExist(statErr) {
+		t.Fatalf("payload tempfile %q should be removed after dispatch; stat err = %v",
+			payloadFile, statErr)
+	}
+}
+
+// TestRealProvider_PayloadFile_Permissions ensures the staged payload
+// file is owner-read/write only — cookies must not be world-readable
+// even for the brief tempfile lifetime.
+func TestRealProvider_PayloadFile_Permissions(t *testing.T) {
+	// We hook into writePayloadTempFile directly because the dispatch
+	// path removes the file before Publish returns. The function is
+	// the same one dispatch uses; this is a focused permission check.
+	path, cleanup, err := writePayloadTempFile([]byte(`{"cookie":"secret"}`))
+	if err != nil {
+		t.Fatalf("writePayloadTempFile: %v", err)
+	}
+	defer cleanup()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("perm = %v, want 0600", perm)
 	}
 }
 

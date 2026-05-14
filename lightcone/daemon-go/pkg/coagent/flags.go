@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -23,19 +24,20 @@ import (
 // add cross-cutting validation (e.g. --private + --visibility public
 // mutual exclusion) in one place.
 type commonFlags struct {
-	Type           string
-	Payload        string
-	Parent         string
-	CorrelationID  string
-	Audience       string // raw comma-separated; parseAudience splits
-	Private        bool
-	System         bool
-	DocRefs        string // raw comma-separated; parseDocRefs splits
-	NotBefore      string
-	ExpiresAt      string
-	Visibility     string // hidden flag for tests / advanced users
-	SenderID       string // hidden override; production reads COAGENT_SELF_ID
-	ChannelID      string // hidden override; production reads COAGENT_CHANNEL_ID
+	Type          string
+	Payload       string
+	PayloadFile   string // T102 FIX-2 — file containing payload JSON (mutex with --payload)
+	Parent        string
+	CorrelationID string
+	Audience      string // raw comma-separated; parseAudience splits
+	Private       bool
+	System        bool
+	DocRefs       string // raw comma-separated; parseDocRefs splits
+	NotBefore     string
+	ExpiresAt     string
+	Visibility    string // hidden flag for tests / advanced users
+	SenderID      string // hidden override; production reads COAGENT_SELF_ID
+	ChannelID     string // hidden override; production reads COAGENT_CHANNEL_ID
 	MessageContent string // positional argument for the "free-form text" form
 
 	// Set tracks which flags the caller explicitly provided so we can
@@ -65,6 +67,13 @@ func bindCommonFlags(fs *flag.FlagSet, accept map[string]bool) *commonFlags {
 	}
 	register("type", &cf.Type, "", "business / core type (L2 §3.3 --type)")
 	register("payload", &cf.Payload, "", "JSON payload string (L2 §3.3 --payload)")
+	// --payload-file is the T102 FIX-2 escape hatch for large payloads
+	// (e.g. xhs.publish with a base64 image > Linux ARG_MAX). Caller
+	// MUST NOT pass both --payload and --payload-file. The file body
+	// MUST be a JSON object — parsePayload validates after read.
+	register("payload-file", &cf.PayloadFile, "",
+		"path to a file containing the JSON payload object (mutex with --payload; "+
+			"avoids passing large payloads via argv — T102 FIX-2)")
 	register("parent", &cf.Parent, "", "parent_id of a prior message (L2 §3.3 --parent)")
 	register("correlation-id", &cf.CorrelationID, "", "explicit correlation_id; 'new' generates a UUID (L2 §3.3.1)")
 	register("audience", &cf.Audience, "", "comma-separated audience actor ids (L2 §3.3 --audience)")
@@ -152,6 +161,57 @@ func parsePayload(raw string) (json.RawMessage, error) {
 		return nil, errors.New("--payload must be a JSON object")
 	}
 	return json.RawMessage(raw), nil
+}
+
+// resolvePayloadSource picks the payload string from either --payload
+// (inline) or --payload-file (path). They are mutually exclusive — both
+// set returns an error. Returns ("", nil) when neither is set so the
+// caller can fall back to positional-content / harness defaults.
+//
+// T102 FIX-2 (claude 98-3 major): large payloads (cookie / image data)
+// must NOT be carried on argv where they appear in /proc/<pid>/cmdline
+// and risk hitting Linux ARG_MAX. --payload-file lets the caller stage
+// the payload on disk and feed only the path through argv.
+func resolvePayloadSource(inline, filePath string) (string, error) {
+	inlineSet := strings.TrimSpace(inline) != ""
+	fileSet := strings.TrimSpace(filePath) != ""
+	if inlineSet && fileSet {
+		return "", errors.New("--payload and --payload-file are mutually exclusive")
+	}
+	if fileSet {
+		// Defensive size cap: 8 MiB. Bigger than the daemon-rpc 1 MiB
+		// limit but lets ops feed a 200KB image without a flake. Anything
+		// larger is almost certainly a programming error.
+		const maxPayloadFileBytes = 8 * 1024 * 1024
+		info, err := osStat(filePath)
+		if err != nil {
+			return "", fmt.Errorf("--payload-file stat %q: %w", filePath, err)
+		}
+		if info.Size() > maxPayloadFileBytes {
+			return "", fmt.Errorf("--payload-file %q size %d exceeds %d-byte cap",
+				filePath, info.Size(), maxPayloadFileBytes)
+		}
+		b, err := osReadFile(filePath)
+		if err != nil {
+			return "", fmt.Errorf("--payload-file read %q: %w", filePath, err)
+		}
+		return string(b), nil
+	}
+	return inline, nil
+}
+
+// osStat / osReadFile are package-private hooks so tests can swap them
+// without touching the real filesystem. Production aliases point at the
+// `os` package; the helpers stay tiny intentionally.
+var (
+	osStat     = func(name string) (osFileInfo, error) { return os.Stat(name) }
+	osReadFile = os.ReadFile
+)
+
+// osFileInfo is the subset of os.FileInfo flag-resolution uses (Size()
+// only). Modeled as an interface for test injection.
+type osFileInfo interface {
+	Size() int64
 }
 
 // parseTime resolves the dual-form time flag. The two accepted forms

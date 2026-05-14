@@ -219,18 +219,36 @@ func (p *RealProvider) SyncCookie(ctx context.Context, _ SyncCookieArgs) (any, e
 	return p.dispatch(ctx, cmdTypeCookieSync, map[string]any{})
 }
 
-// dispatch is the shared launcher: it serializes params → --payload,
-// invokes coagent, and packages the result as DispatchAck.
+// dispatch is the shared launcher: it serializes params, stages them in
+// a temp file, invokes coagent with --payload-file, and packages the
+// result as DispatchAck.
+//
+// T102 FIX-2 (claude 98-3 major): previously dispatch passed the JSON
+// payload inline via `--payload <string>`, which leaks cookie / image
+// base64 into /proc/<pid>/cmdline AND can hit Linux ARG_MAX (~128 KiB
+// per env+argv). Writing to a temp file (0600 perms) keeps the payload
+// off argv entirely. The temp file is removed before this function
+// returns, regardless of whether the coagent subprocess succeeded.
 func (p *RealProvider) dispatch(ctx context.Context, typeName string, params map[string]any) (DispatchAck, error) {
 	payloadBytes, err := json.Marshal(params)
 	if err != nil {
 		return DispatchAck{}, fmt.Errorf("marshal payload: %w", err)
 	}
+
+	payloadPath, cleanup, err := writePayloadTempFile(payloadBytes)
+	if err != nil {
+		return DispatchAck{}, &CodeError{
+			Code: "coagent_unavailable",
+			Msg:  fmt.Sprintf("stage payload tempfile: %s", err),
+		}
+	}
+	defer cleanup()
+
 	argv := []string{
 		"ask",
 		"--type", typeName,
 		"--audience", AdapterActor,
-		"--payload", string(payloadBytes),
+		"--payload-file", payloadPath,
 	}
 
 	ctxTimeout := ctx
@@ -256,6 +274,34 @@ func (p *RealProvider) dispatch(ctx context.Context, typeName string, params map
 		Status:        "dispatched",
 		Dedupe:        res.Dedupe,
 	}, nil
+}
+
+// writePayloadTempFile stages the JSON payload on disk for --payload-file
+// consumption. Returns the absolute file path and a cleanup closure the
+// caller MUST defer.
+func writePayloadTempFile(payload []byte) (string, func(), error) {
+	f, err := os.CreateTemp("", "xhs-coagent-payload-*.json")
+	if err != nil {
+		return "", func() {}, err
+	}
+	cleanup := func() { _ = os.Remove(f.Name()) }
+	// Restrict perms to owner-read/write. CreateTemp on Linux already
+	// uses 0600 but we set explicitly so the contract is portable.
+	if err := os.Chmod(f.Name(), 0o600); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", func() {}, fmt.Errorf("chmod tempfile: %w", err)
+	}
+	if _, err := f.Write(payload); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", func() {}, fmt.Errorf("write tempfile: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("close tempfile: %w", err)
+	}
+	return f.Name(), cleanup, nil
 }
 
 // execCoagentRunner is the production CoagentRunner: it locates the
