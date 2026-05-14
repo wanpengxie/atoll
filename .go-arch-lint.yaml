@@ -21,16 +21,13 @@ allow:
   ignoreNotFoundComponents: true
 
 exclude:
-  # `lightcone/` is the legacy Node+Go module being archived in T9; it
-  # has its own .go-arch-lint.yaml inside `lightcone/daemon-go/`.
-  - lightcone
-  # archive/ is reserved for legacy code preserved verbatim during the
-  # M1.5 rewrite — out of architectural scope.
+  # archive/ holds legacy code preserved verbatim during the M1.5 rewrite —
+  # out of architectural scope (includes the former agent-binary / cli-node
+  # / lightcone-* trees after T9 archiving).
   - archive
-  # xhs-cli + agent-binary live in separate go modules; the root
-  # go-arch-lint shouldn't reach into them.
+  # xhs-cli lives in a separate go module; the root go-arch-lint shouldn't
+  # reach into it.
   - xhs-cli
-  - agent-binary
 
 excludeFiles:
   # Test files don't carry architectural constraints (per spec §T2

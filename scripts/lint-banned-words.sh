@@ -8,7 +8,7 @@
 #   CODE_DIRS   (kernel runtime adapters server cmd pkg ui)      — 严格禁止
 #   ACTIVE_SPEC (.dalek/pm/v4-* + .dalek/pm/m1.5-*)               — 严格禁止
 #   历史/讨论文档 grandfather（不在 ACTIVE_SPEC 列表里，不扫）
-#   T9 完成前不扫 lightcone/
+#   archive/ 默认 grep 排除（lightcone/* 等已归档到 archive/）
 #
 # 禁词：
 #   1) MCP / @modelcontextprotocol / MCP server / capability_set.mcp
@@ -43,19 +43,15 @@ EXCLUDES=(
   --exclude-dir=node_modules
   --exclude-dir=dist
   --exclude-dir=.git
-  --exclude-dir=lightcone
   --exclude=lint-banned-words.sh
   # M1.5-T5: pnpm 锁文件的 integrity hash (base64) 会偶发包含 "mcp"
   # 子串，纯属字符级 false positive；锁文件本身由 pnpm 生成，无人写。
   --exclude=pnpm-lock.yaml
 )
 
-# T5: xhs Chrome extension 从 devices/ 重组到 adapters/，但其 TS 代码
-# 来自 M1.1-T2 一次性 rsync，沿用了 1studio / lightcone 历史引用。
-# 完整 banned-word 清理是单独的 follow-up（涉及 UI 字符串 + 用户可见
-# label，需配合产品 naming review）。在此之前，把整个 extension 子树
-# 从严格扫描里临时移出，单独走 grep -v 后过滤。
-EXT_PATH_FILTER='adapters/device/xhs/extension/'
+# T9 之前 xhs Chrome extension 的 TS 代码沿用了 lightcone 历史引用，曾用
+# EXT_PATH_FILTER 把整个 extension 子树临时移出严格扫描。T9 phase-refs-extension
+# 完成 lightcone → coagent 重写后，extension 已纳入正常扫描；过滤器移除。
 
 # ----------------------------------------------------------------------------
 # Allowlist —— 元引用放行
@@ -99,8 +95,7 @@ scan_dirs() {
   fi
   local hits
   hits=$(grep -rnEi "$bad" "${dirs[@]}" "${EXCLUDES[@]}" 2>/dev/null \
-           | grep -vE "$allow" \
-           | grep -vF "$EXT_PATH_FILTER" || true)
+           | grep -vE "$allow" || true)
   if [ -n "$hits" ]; then
     fail "$label found in CODE_DIRS:"
     printf '%s\n' "$hits" | sed 's/^/    /' >&2

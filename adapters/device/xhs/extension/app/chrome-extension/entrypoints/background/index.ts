@@ -5,7 +5,7 @@
 //   - 启动 coagent device WS 客户端（services/coagent-device.ts）
 //   - chrome.storage.local 保存 device 配置（serverUrl/apiKey/daemonHttpBase/deviceId/userId）
 //   - chrome.runtime.onMessage 仍提供 popup ↔ background 桥（连接 / 断开 / 状态查询 / 配置存取
-//     / 手动 cookie sync / 直接 EXECUTE_TOOL 调试）。旧 1studio backend 派发协议（HELLO/TOOL_CALL/
+//     / 手动 cookie sync / 直接 EXECUTE_TOOL 调试）。旧 upstream backend 派发协议（HELLO/TOOL_CALL/
 //     V2 EVENT/TASK_CONTROL/PENDING_ACK 等）已切断。
 
 import { initToolsRegistry, handleCallTool } from './tools';

@@ -1,7 +1,7 @@
 // Coagent device 连接配置 + 状态快照（chrome.storage.local 抽象层）。
 //
 // M1.1-T2 起 extension 直连 coagent daemon `/device/{deviceId}` WS，
-// 不再连 1studio backend；本模块持有 device 配置：
+// 不再连旧 upstream backend；本模块持有 device 配置：
 //   - serverUrl          (= daemon WS URL，例 ws://127.0.0.1:9501/device/{deviceId})
 //   - apiKey             (= device api key，header 与 WS 鉴权共用)
 //   - daemonHttpBase     (= daemon HTTP base，例 http://127.0.0.1:9501)
