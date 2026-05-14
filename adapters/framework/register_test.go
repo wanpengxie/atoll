@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/coagent-ai/coagent/kernel/adapter"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 func TestRegisterAndBuild(t *testing.T) {

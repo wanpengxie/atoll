@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	kerneldaemonbus "github.com/coagent-ai/coagent/kernel/daemonbus"
-	"github.com/coagent-ai/coagent/kernel/message"
-	"github.com/coagent-ai/coagent/kernel/placement"
-	"github.com/coagent-ai/coagent/kernel/viewsync"
-	"github.com/coagent-ai/coagent/server/daemonbus"
-	"github.com/coagent-ai/coagent/server/store"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/server/daemonbus"
+	"github.com/wanpengxie/ActOS/server/store"
 )
 
 func newSvc(t *testing.T) *daemonbus.Service {

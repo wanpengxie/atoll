@@ -9,7 +9,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/coagent-ai/coagent/adapters/framework"
+	"github.com/wanpengxie/ActOS/adapters/framework"
 )
 
 // DefaultBaseURL is the public Feishu OpenAPI host.

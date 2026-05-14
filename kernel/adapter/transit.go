@@ -3,7 +3,7 @@ package adapter
 import (
 	"context"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/channel"
 )
 
 // DeviceSessionID is the server-allocated identifier for one device

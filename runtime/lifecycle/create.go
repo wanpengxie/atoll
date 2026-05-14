@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/daemonbus"
-	"github.com/coagent-ai/coagent/kernel/placement"
-	"github.com/coagent-ai/coagent/runtime/store"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/runtime/store"
 )
 
 // ChannelBootstrapper opens a channel sqlite, runs the DDL, and seeds

@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/coagent-ai/coagent/kernel/daemonbus"
-	"github.com/coagent-ai/coagent/kernel/placement"
-	"github.com/coagent-ai/coagent/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
 )
 
 // Transport is the wire-level interface a daemonbus.Connection needs.

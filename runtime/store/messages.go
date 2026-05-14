@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	klog "github.com/coagent-ai/coagent/kernel/log"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	klog "github.com/wanpengxie/ActOS/kernel/log"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // Messages implements kernel/log.MessageLog over the messages table.

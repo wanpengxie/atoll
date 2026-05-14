@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
 // Lease is one acquired worker slot for one channel.

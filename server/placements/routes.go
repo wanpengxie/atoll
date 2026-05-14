@@ -5,7 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/channel"
 )
 
 // RegisterRoutes mounts read-only placement endpoints — useful for

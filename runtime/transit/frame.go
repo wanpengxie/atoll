@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/coagent-ai/coagent/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 )
 
 // Encode wraps a payload (PushFrame / AckFrame / CreateChannelRequest /

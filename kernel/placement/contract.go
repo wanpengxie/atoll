@@ -9,7 +9,7 @@ package placement
 import (
 	"context"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/channel"
 )
 
 // State is the channel placement state per L2 §1.4.11.2 state machine

@@ -21,7 +21,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/coagent-ai/coagent/runtime/worker"
+	"github.com/wanpengxie/ActOS/runtime/worker"
 )
 
 func main() {

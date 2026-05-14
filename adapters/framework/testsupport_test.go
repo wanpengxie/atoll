@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/actor"
-	"github.com/coagent-ai/coagent/kernel/harness"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/harness"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // memoryActorRegistry is the test-only actor.Registry implementation.

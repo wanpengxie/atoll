@@ -10,8 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
 // Config bundles reconcile knobs (T1.7).

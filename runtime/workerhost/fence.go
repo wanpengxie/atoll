@@ -1,8 +1,8 @@
 package workerhost
 
 import (
-	"github.com/coagent-ai/coagent/kernel/placement"
-	"github.com/coagent-ai/coagent/runtime/ipc"
+	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/runtime/ipc"
 )
 
 // Fence validates that an inbound IPC frame from a worker carries the

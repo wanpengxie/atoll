@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/actor"
-	"github.com/coagent-ai/coagent/kernel/adapter"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // TestInProcessBindingFullPath covers the in_process binding end-to-end:

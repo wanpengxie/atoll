@@ -1,8 +1,8 @@
 package viewsync
 
 import (
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // FrameType is the closed set of view-sync frame_type values that ride

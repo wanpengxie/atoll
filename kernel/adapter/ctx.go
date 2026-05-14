@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/coagent-ai/coagent/kernel/actor"
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/harness"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/harness"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // ModuleContext is the helper bundle injected into every adapter Module

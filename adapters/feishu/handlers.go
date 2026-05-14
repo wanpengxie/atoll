@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/coagent-ai/coagent/adapters/framework"
-	"github.com/coagent-ai/coagent/kernel/adapter"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/adapters/framework"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // Closed set of envelope.type values this adapter handles. Order is

@@ -4,8 +4,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/coagent-ai/coagent/kernel/actor"
-	"github.com/coagent-ai/coagent/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/channel"
 )
 
 // ActorState models the lifecycle of one channel-actor (L2 §1.4.6).

@@ -3,7 +3,7 @@ package harness
 import (
 	"context"
 
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // WriteResult is the outcome of a full Chain.Write invocation per L1

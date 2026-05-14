@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coagent-ai/coagent/adapters/feishu"
-	"github.com/coagent-ai/coagent/adapters/framework"
-	"github.com/coagent-ai/coagent/kernel/actor"
-	"github.com/coagent-ai/coagent/kernel/adapter"
-	"github.com/coagent-ai/coagent/kernel/harness"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/adapters/feishu"
+	"github.com/wanpengxie/ActOS/adapters/framework"
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/harness"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // ----------------------------------------------------------------------

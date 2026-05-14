@@ -3,7 +3,7 @@ package viewsync
 import (
 	"context"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/channel"
 )
 
 // ApplyOutcome is the result of one Receiver.Apply call. It mirrors the

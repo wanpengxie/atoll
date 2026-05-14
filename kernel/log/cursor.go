@@ -7,7 +7,7 @@ package log
 import (
 	"context"
 
-	"github.com/coagent-ai/coagent/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actor"
 )
 
 // Seq is the messages.seq column — store-allocated monotonic per-channel

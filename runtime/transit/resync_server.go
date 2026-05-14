@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
 )
 
 // MessageRangeReader is the subset of runtime/store.ViewSyncOutbox the

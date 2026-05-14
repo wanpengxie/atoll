@@ -3,8 +3,8 @@ package log
 import (
 	"context"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // AppendResult is what MessageLog.Append returns when the row write

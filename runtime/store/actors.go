@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/coagent-ai/coagent/kernel/actor"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // ActorRegistry implements kernel/actor.Registry over a channel-local

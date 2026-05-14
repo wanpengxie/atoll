@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/coagent-ai/coagent/kernel/actor"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // HandlerFn processes one envelope addressed to actorID.

@@ -1,8 +1,8 @@
 package feishu
 
 import (
-	"github.com/coagent-ai/coagent/adapters/framework"
-	"github.com/coagent-ai/coagent/kernel/adapter"
+	"github.com/wanpengxie/ActOS/adapters/framework"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
 // Name is the adapter identifier consumed by framework.Register /

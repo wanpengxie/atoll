@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/coagent-ai/coagent/kernel/adapter"
-	"github.com/coagent-ai/coagent/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/channel"
 )
 
 // InMemorySessionStore is the M1.5 reference implementation of

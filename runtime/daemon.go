@@ -9,11 +9,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/placement"
-	"github.com/coagent-ai/coagent/runtime/bootstrap"
-	"github.com/coagent-ai/coagent/runtime/lifecycle"
-	"github.com/coagent-ai/coagent/runtime/store"
-	"github.com/coagent-ai/coagent/runtime/transit"
+	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/runtime/bootstrap"
+	"github.com/wanpengxie/ActOS/runtime/lifecycle"
+	"github.com/wanpengxie/ActOS/runtime/store"
+	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
 // DaemonConfig is the cmd/daemon assembly knobs.

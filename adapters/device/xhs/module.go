@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coagent-ai/coagent/adapters/device/framework"
-	"github.com/coagent-ai/coagent/kernel/actor"
-	"github.com/coagent-ai/coagent/kernel/adapter"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/adapters/device/framework"
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // Config tunes a Module instance. Only SessionStore is mandatory at

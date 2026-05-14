@@ -7,10 +7,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	klog "github.com/coagent-ai/coagent/kernel/log"
-	"github.com/coagent-ai/coagent/kernel/message"
-	"github.com/coagent-ai/coagent/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	klog "github.com/wanpengxie/ActOS/kernel/log"
+	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
 )
 
 // ViewSyncOutbox provides CRUD over the view_sync_outbox table that

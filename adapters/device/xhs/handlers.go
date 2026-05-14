@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/coagent-ai/coagent/kernel/adapter"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // payloadMetadataKeys is the closed set of request-payload keys the

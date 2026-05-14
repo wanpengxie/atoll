@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/coagent-ai/coagent/kernel/adapter"
-	"github.com/coagent-ai/coagent/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/channel"
 )
 
 // DeviceState is the closed set of states a device session can occupy on

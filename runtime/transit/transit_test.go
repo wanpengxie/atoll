@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/daemonbus"
-	"github.com/coagent-ai/coagent/kernel/message"
-	"github.com/coagent-ai/coagent/kernel/viewsync"
-	"github.com/coagent-ai/coagent/runtime/store"
-	"github.com/coagent-ai/coagent/runtime/transit"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/runtime/store"
+	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
 const testChannelID = channel.ID("ch-1")

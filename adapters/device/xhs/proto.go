@@ -1,8 +1,8 @@
 package xhs
 
 import (
-	"github.com/coagent-ai/coagent/kernel/actor"
-	"github.com/coagent-ai/coagent/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
 // AdapterName is the framework module name; lookup key the daemon uses

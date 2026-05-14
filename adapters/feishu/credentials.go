@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coagent-ai/coagent/adapters/framework"
+	"github.com/wanpengxie/ActOS/adapters/framework"
 )
 
 // Credential store keys for the feishu adapter.

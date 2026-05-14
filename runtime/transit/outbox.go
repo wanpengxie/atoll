@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/daemonbus"
-	"github.com/coagent-ai/coagent/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
 )
 
 // OutboxReader is the subset of runtime/store.ViewSyncOutbox the pusher

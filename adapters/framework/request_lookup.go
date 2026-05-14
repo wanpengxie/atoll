@@ -3,7 +3,7 @@ package framework
 import (
 	"context"
 
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // RequestLookup is the framework-private seam Respond uses to recover

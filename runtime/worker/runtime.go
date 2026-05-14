@@ -7,8 +7,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/ledger"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/ledger"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // Config wires a Runtime.

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/adapter"
-	"github.com/coagent-ai/coagent/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/channel"
 )
 
 // TokenSpec is the signed payload server.devicebus embeds in a device

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/channel"
 )
 
 // Reconciler scans bootstrap_registry for rows left in 'in_progress'

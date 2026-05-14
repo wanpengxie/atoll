@@ -8,7 +8,7 @@
 // dependencies beyond kernel/* and the standard library.
 package adapter
 
-import "github.com/coagent-ai/coagent/kernel/actor"
+import "github.com/wanpengxie/ActOS/kernel/actor"
 
 // BindingKind is the M1.5 closed enum for adapter handler_binding (L1
 // §11.7). Three values: in_process / outbound_http / via_server_transit.

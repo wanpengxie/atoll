@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/coagent-ai/coagent/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
 // ChannelMember is the join row from channel_members. ActorID is

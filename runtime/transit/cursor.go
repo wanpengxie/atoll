@@ -3,8 +3,8 @@ package transit
 import (
 	"sync"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
 )
 
 // CursorTracker holds the in-memory daemon-side view-sync cursors per

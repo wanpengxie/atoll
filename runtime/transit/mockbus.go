@@ -6,7 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/coagent-ai/coagent/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 )
 
 // MockBus is an in-process Transport pair: the daemon side gets the

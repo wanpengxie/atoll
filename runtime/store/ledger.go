@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/coagent-ai/coagent/kernel/actor"
-	"github.com/coagent-ai/coagent/kernel/ledger"
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/ledger"
 )
 
 // Ledger implements kernel/ledger.Ledger over the action_ledger table.

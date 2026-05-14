@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // ErrorPolicy is the F3 interface (L2 §8.3) — the Ad-2 timeout +

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
 // Deps is the dependency bundle a Factory receives. It is a strict

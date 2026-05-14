@@ -6,11 +6,11 @@ import (
 	"errors"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	kerneldaemonbus "github.com/coagent-ai/coagent/kernel/daemonbus"
-	"github.com/coagent-ai/coagent/kernel/viewsync"
-	"github.com/coagent-ai/coagent/server/daemonbus"
-	"github.com/coagent-ai/coagent/server/viewcache"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/server/daemonbus"
+	"github.com/wanpengxie/ActOS/server/viewcache"
 )
 
 // busResyncer satisfies viewcache.Resyncer by sending a

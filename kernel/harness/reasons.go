@@ -5,7 +5,7 @@
 // re-exports the harness-reject closed reason set.
 package harness
 
-import "github.com/coagent-ai/coagent/kernel/message"
+import "github.com/wanpengxie/ActOS/kernel/message"
 
 // RejectReason is re-exported from kernel/message so callers can refer
 // to it as `harness.RejectReason` without crossing into kernel/message

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
 // HeartbeatEvery is the worker→daemon liveness cadence (codex review #10

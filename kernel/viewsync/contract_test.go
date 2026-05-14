@@ -7,8 +7,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // TestFrameTypeClosedSet asserts the L1 §8.3 frame_type closed set has

@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 )
 
 // Transport is the daemonbus transport abstraction (WS in production, or

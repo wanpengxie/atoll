@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coagent-ai/coagent/server/identity"
-	"github.com/coagent-ai/coagent/server/store"
+	"github.com/wanpengxie/ActOS/server/identity"
+	"github.com/wanpengxie/ActOS/server/store"
 )
 
 // testService opens a fresh in-tempdir sqlite DB, applies migrations,

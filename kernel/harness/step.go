@@ -3,7 +3,7 @@ package harness
 import (
 	"context"
 
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // StepID is the ordinal index inside the 9-step harness chain (L1

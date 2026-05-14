@@ -16,15 +16,15 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	kerneldaemonbus "github.com/coagent-ai/coagent/kernel/daemonbus"
-	"github.com/coagent-ai/coagent/kernel/message"
-	"github.com/coagent-ai/coagent/kernel/placement"
-	"github.com/coagent-ai/coagent/kernel/viewsync"
-	"github.com/coagent-ai/coagent/server/catalog"
-	"github.com/coagent-ai/coagent/server/daemonbus"
-	"github.com/coagent-ai/coagent/server/devicebus"
-	"github.com/coagent-ai/coagent/server/identity"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/server/catalog"
+	"github.com/wanpengxie/ActOS/server/daemonbus"
+	"github.com/wanpengxie/ActOS/server/devicebus"
+	"github.com/wanpengxie/ActOS/server/identity"
 )
 
 // DaemonbusHandlers wires the daemonbus dispatch hooks to gateway-

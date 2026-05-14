@@ -6,14 +6,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/coagent-ai/coagent/kernel/actor"
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/ledger"
-	klog "github.com/coagent-ai/coagent/kernel/log"
-	"github.com/coagent-ai/coagent/kernel/message"
-	"github.com/coagent-ai/coagent/kernel/placement"
-	"github.com/coagent-ai/coagent/kernel/viewsync"
-	"github.com/coagent-ai/coagent/runtime/store"
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/ledger"
+	klog "github.com/wanpengxie/ActOS/kernel/log"
+	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/runtime/store"
 )
 
 // TestSchema_TablesPresent verifies OpenChannel installs every table.

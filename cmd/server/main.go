@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/coagent-ai/coagent/server/gateway"
+	"github.com/wanpengxie/ActOS/server/gateway"
 )
 
 // version is set via -ldflags at build time.

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/actor"
-	"github.com/coagent-ai/coagent/kernel/message"
-	"github.com/coagent-ai/coagent/runtime/scheduler"
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/scheduler"
 )
 
 func TestDeliverer_Routes(t *testing.T) {

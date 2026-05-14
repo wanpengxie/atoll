@@ -15,14 +15,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/coagent-ai/coagent/server/catalog"
-	"github.com/coagent-ai/coagent/server/daemonbus"
-	"github.com/coagent-ai/coagent/server/devicebus"
-	"github.com/coagent-ai/coagent/server/identity"
-	"github.com/coagent-ai/coagent/server/placements"
-	"github.com/coagent-ai/coagent/server/pushhub"
-	"github.com/coagent-ai/coagent/server/store"
-	"github.com/coagent-ai/coagent/server/viewcache"
+	"github.com/wanpengxie/ActOS/server/catalog"
+	"github.com/wanpengxie/ActOS/server/daemonbus"
+	"github.com/wanpengxie/ActOS/server/devicebus"
+	"github.com/wanpengxie/ActOS/server/identity"
+	"github.com/wanpengxie/ActOS/server/placements"
+	"github.com/wanpengxie/ActOS/server/pushhub"
+	"github.com/wanpengxie/ActOS/server/store"
+	"github.com/wanpengxie/ActOS/server/viewcache"
 )
 
 // Config bundles the construction-time settings.

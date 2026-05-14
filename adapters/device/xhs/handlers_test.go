@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 func sampleRequest(t string, payload string) *message.Envelope {

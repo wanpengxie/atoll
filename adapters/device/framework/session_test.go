@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coagent-ai/coagent/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
 // TestDeviceStateClosedSet asserts AllDeviceStates is 1:1 with the

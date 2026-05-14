@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coagent-ai/coagent/adapters/device/xhs/cli/internal/xhs"
+	"github.com/wanpengxie/ActOS/adapters/device/xhs/cli/internal/xhs"
 )
 
 func TestWriteOK(t *testing.T) {

@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/placement"
-	"github.com/coagent-ai/coagent/server/placements"
-	"github.com/coagent-ai/coagent/server/store"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/server/placements"
+	"github.com/wanpengxie/ActOS/server/store"
 )
 
 type clock struct{ now time.Time }

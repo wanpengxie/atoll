@@ -25,7 +25,7 @@
 // types here directly.
 package v4types
 
-import "github.com/coagent-ai/coagent/kernel/message"
+import "github.com/wanpengxie/ActOS/kernel/message"
 
 // ===========================================================================
 // Envelope + Sender (L0 §2.1)

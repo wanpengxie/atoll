@@ -8,8 +8,8 @@
 package viewsync
 
 import (
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/log"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/log"
 )
 
 // Seq is the per-channel monotonic sequence carried in viewsync frames.

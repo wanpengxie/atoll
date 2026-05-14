@@ -10,7 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // Key is the action_ledger primary key — caller-derived idempotency key.

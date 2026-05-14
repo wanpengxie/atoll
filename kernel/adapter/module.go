@@ -3,8 +3,8 @@ package adapter
 import (
 	"context"
 
-	"github.com/coagent-ai/coagent/kernel/actor"
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // Declaration is the static metadata an adapter Module exposes at

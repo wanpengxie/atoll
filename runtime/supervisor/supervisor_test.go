@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/coagent-ai/coagent/runtime/supervisor"
+	"github.com/wanpengxie/ActOS/runtime/supervisor"
 )
 
 func TestLifecycle_StateMachine(t *testing.T) {

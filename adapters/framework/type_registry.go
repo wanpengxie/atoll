@@ -7,8 +7,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/coagent-ai/coagent/kernel/actor"
-	"github.com/coagent-ai/coagent/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
 // TypeRow is the framework-level view of one type_registry row (L2

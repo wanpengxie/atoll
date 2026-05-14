@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/placement"
-	"github.com/coagent-ai/coagent/server/devicebus"
-	"github.com/coagent-ai/coagent/server/store"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/server/devicebus"
+	"github.com/wanpengxie/ActOS/server/store"
 )
 
 func newSvc(t *testing.T, clock func() time.Time) *devicebus.Service {

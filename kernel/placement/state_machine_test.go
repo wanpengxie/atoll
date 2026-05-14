@@ -3,7 +3,7 @@ package placement
 import (
 	"testing"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/channel"
 )
 
 // TestStateClosedSet locks the L2 §1.4.11.2 closed enum: 4 values,

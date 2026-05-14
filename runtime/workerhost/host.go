@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/ledger"
-	klog "github.com/coagent-ai/coagent/kernel/log"
-	"github.com/coagent-ai/coagent/kernel/message"
-	"github.com/coagent-ai/coagent/kernel/placement"
-	"github.com/coagent-ai/coagent/runtime/ipc"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/ledger"
+	klog "github.com/wanpengxie/ActOS/kernel/log"
+	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/runtime/ipc"
 )
 
 // MessageWriter is the daemon-side append handler invoked by the host

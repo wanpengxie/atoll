@@ -3,7 +3,7 @@ package adapter
 import (
 	"context"
 
-	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // Manager is the per-channel adapter framework lifecycle contract (L2

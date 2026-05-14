@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/coagent-ai/coagent/server/catalog"
-	"github.com/coagent-ai/coagent/server/store"
+	"github.com/wanpengxie/ActOS/server/catalog"
+	"github.com/wanpengxie/ActOS/server/store"
 )
 
 func newTestService(t *testing.T) *catalog.Service {

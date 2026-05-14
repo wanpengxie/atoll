@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coagent-ai/coagent/kernel/channel"
-	"github.com/coagent-ai/coagent/kernel/daemonbus"
-	"github.com/coagent-ai/coagent/kernel/placement"
-	"github.com/coagent-ai/coagent/runtime/lifecycle"
-	"github.com/coagent-ai/coagent/runtime/store"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/runtime/lifecycle"
+	"github.com/wanpengxie/ActOS/runtime/store"
 )
 
 // stubBootstrapper: opens the channel sqlite via store.OpenChannel and

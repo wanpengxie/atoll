@@ -8,7 +8,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/coagent-ai/coagent/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
 // correlationKeyPrefix is the StateStore key prefix used by the

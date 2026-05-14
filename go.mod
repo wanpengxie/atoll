@@ -1,4 +1,4 @@
-module github.com/coagent-ai/coagent
+module github.com/wanpengxie/ActOS
 
 go 1.25.0
 

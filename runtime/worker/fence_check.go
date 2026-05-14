@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/coagent-ai/coagent/runtime/ipc"
+	"github.com/wanpengxie/ActOS/runtime/ipc"
 )
 
 // FenceInvalidError signals the worker MUST exit. A typed error so the

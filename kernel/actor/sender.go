@@ -1,6 +1,6 @@
 package actor
 
-import "github.com/coagent-ai/coagent/kernel/message"
+import "github.com/wanpengxie/ActOS/kernel/message"
 
 // Sender is re-exported from kernel/message for callers who want to
 // reach the type via kernel/actor without pulling kernel/message
