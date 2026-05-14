@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>coagent</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="root">
+      <main class="auth" id="view-auth">
+        <header class="brand">
+          <h1>coagent</h1>
+          <p class="muted">M1.5 demo console</p>
+        </header>
+
+        <section class="tabs">
+          <button data-tab="login" class="active">Log in</button>
+          <button data-tab="register">Register</button>
+        </section>
+
+        <form id="form-login" class="card">
+          <label>Email <input name="email" type="email" autocomplete="email" required /></label>
+          <label>Password <input name="password" type="password" autocomplete="current-password" required /></label>
+          <button type="submit">Log in</button>
+          <p class="error" id="login-error"></p>
+        </form>
+
+        <form id="form-register" class="card hidden">
+          <label>Email <input name="email" type="email" autocomplete="email" required /></label>
+          <label>Display name <input name="display_name" type="text" autocomplete="name" /></label>
+          <label>Password (≥ 8 chars) <input name="password" type="password" autocomplete="new-password" required minlength="8" /></label>
+          <label>Verification code <input name="code" type="text" inputmode="numeric" required /></label>
+          <button type="button" id="btn-issue-code">Send code</button>
+          <button type="submit">Create account</button>
+          <p class="error" id="register-error"></p>
+          <p class="muted" id="register-status"></p>
+        </form>
+      </main>
+
+      <main class="app hidden" id="view-app">
+        <aside class="sidebar">
+          <header>
+            <strong id="me-name">…</strong>
+            <button id="btn-logout">Log out</button>
+          </header>
+
+          <section>
+            <h2>Workspaces</h2>
+            <ul id="ws-list" class="ws-list"></ul>
+            <form id="form-create-ws" class="inline">
+              <input name="name" placeholder="New workspace name" required />
+              <button type="submit">＋</button>
+            </form>
+          </section>
+
+          <section>
+            <h2>Channels</h2>
+            <ul id="channel-list" class="channel-list"></ul>
+            <form id="form-create-channel" class="inline">
+              <input name="name" placeholder="New channel name" required />
+              <button type="submit">＋</button>
+            </form>
+          </section>
+        </aside>
+
+        <section class="chat">
+          <header>
+            <h2 id="chat-title">Select a channel</h2>
+            <span class="muted" id="chat-meta"></span>
+          </header>
+
+          <ol id="message-list" class="messages"></ol>
+
+          <form id="form-send" class="composer">
+            <input
+              name="text"
+              placeholder="Type a message and hit Enter to send"
+              autocomplete="off"
+              required
+            />
+            <button type="submit">Send</button>
+          </form>
+          <p class="error" id="send-error"></p>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
