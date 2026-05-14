@@ -408,7 +408,6 @@ func TestManagerDispatchRejectsChannelMismatch(t *testing.T) {
 }
 
 func TestManagerTimerFiresDefaultTimeout(t *testing.T) {
-	var responded atomic.Bool
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
@@ -440,7 +439,6 @@ func TestManagerTimerFiresDefaultTimeout(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	_ = responded
 
 	written := chain.Written()
 	if len(written) != 1 {
