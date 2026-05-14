@@ -39,11 +39,11 @@ func runAnswer(ctx context.Context, cfg Config, argv []string) int {
 	fs := flag.NewFlagSet("coagent answer", flag.ContinueOnError)
 	fs.SetOutput(cfg.Stderr)
 	cf := bindCommonFlags(fs, answerFlags)
-	if err := fs.Parse(argv); err != nil {
+	flagArgs, positional := splitFlagArgs(argv, boolFlagNames())
+	if err := fs.Parse(flagArgs); err != nil {
 		return exitUsage
 	}
 	cf.markSet(fs)
-	positional := fs.Args()
 	if len(positional) == 0 {
 		fmt.Fprintln(cfg.Stderr, "coagent: answer requires a <request_id> argument")
 		return exitUsage

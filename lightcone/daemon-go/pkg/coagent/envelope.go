@@ -113,10 +113,16 @@ func buildBaseEnvelope(
 	case "":
 		// no override → harness picks up TriggerCorrelationID first
 	case "new":
-		// CLI generates fresh UUID; store on SendOptions so harness
-		// normalize picks it up as 2nd-tier fallback (envelope.id-based
-		// 3rd-tier is the harness's own escape valve).
-		opts.ExplicitCorrelationID = cfg.NewID()
+		// CLI generates fresh UUID and writes it directly into
+		// envelope.correlation_id per L2 §3.3.1 ("CLI 实现：
+		// --correlation-id new 在 client 侧生成 UUID 写入 envelope,
+		// daemon 不分配"). Writing directly to the envelope makes
+		// the explicit value override trigger context (the spec's
+		// "开启新 chain" semantic — caller wants to escape the
+		// current trigger's correlation_id propagation).
+		newID := cfg.NewID()
+		env.CorrelationID = newID
+		opts.ExplicitCorrelationID = newID
 	default:
 		env.CorrelationID = cf.CorrelationID
 	}

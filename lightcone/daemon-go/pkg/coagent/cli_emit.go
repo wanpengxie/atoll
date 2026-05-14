@@ -38,11 +38,12 @@ func runEmit(ctx context.Context, cfg Config, argv []string) int {
 	fs := flag.NewFlagSet("coagent emit", flag.ContinueOnError)
 	fs.SetOutput(cfg.Stderr)
 	cf := bindCommonFlags(fs, emitFlags)
-	if err := fs.Parse(argv); err != nil {
+	flagArgs, positional := splitFlagArgs(argv, boolFlagNames())
+	if err := fs.Parse(flagArgs); err != nil {
 		return exitUsage
 	}
 	cf.markSet(fs)
-	cf.MessageContent = strings.Join(fs.Args(), " ")
+	cf.MessageContent = strings.Join(positional, " ")
 
 	turnCtx, terr := LoadTurnCtx(cfg.Env, cfg.HomeDir)
 	if terr != nil {
