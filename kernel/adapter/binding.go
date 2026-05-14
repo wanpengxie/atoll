@@ -24,9 +24,27 @@ const (
 	BindingInProcess        BindingKind = "in_process"
 	BindingOutboundHTTP     BindingKind = "outbound_http"
 	BindingViaServerTransit BindingKind = "via_server_transit"
+
+	// M2+ federation candidate (NOT implemented in M1.5; do not add to
+	// AllBindingKinds or NormalizeBinding until the federation
+	// control-plane spec lands). Reserved here per
+	// .dalek/pm/m1.5-tickets.md §T10 so future federation work can
+	// extend the closed enum without touching call sites that already
+	// switch on BindingKind exhaustively.
+	//
+	//   BindingFederatedActor BindingKind = "federated_actor"
+	//   // Actor lives on a remote daemon (M1.4 channel-as-actor) or
+	//   // a federation peer-server (M2+); resolved via
+	//   // kernel/addressing.ActorRef + kernel/topology.Peer.
 )
 
 // AllBindingKinds lists every M1.5 binding value in spec order.
+//
+// Federation / channel-as-actor candidates (e.g. federated_actor) are
+// intentionally OMITTED — they are commented-out placeholders in the
+// const block above per m1.5-tickets §T10 ("不实现，只占位"). Adding
+// them here would require new install / validator / scheduler paths
+// that M1.5 explicitly defers.
 var AllBindingKinds = []BindingKind{
 	BindingInProcess,
 	BindingOutboundHTTP,
