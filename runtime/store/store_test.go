@@ -139,6 +139,100 @@ func TestOutbox_MarkPushedAndAck(t *testing.T) {
 	}
 }
 
+// TestMessages_PendingDue_FutureMessagesGated covers FIX-T3 scheduler
+// scan: only rows with `not_before <= now AND delivered_at IS NULL` are
+// returned. MarkDelivered transitions a row out of the scan set.
+func TestMessages_PendingDue_FutureMessagesGated(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	msgs := store.NewMessages(db)
+	mkEnv := func(id string, notBefore *int64) *message.Envelope {
+		return &message.Envelope{
+			ID:         id,
+			TS:         1000,
+			TSReceived: 1000,
+			ChannelID:  "ch-1",
+			Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+			Kind:       message.KindEvent,
+			Type:       "tick",
+			Payload:    json.RawMessage(`{}`),
+			Visibility: message.VisibilityPublic,
+			Audience:   []string{"*"},
+			NotBefore:  notBefore,
+		}
+	}
+	nb500 := int64(500)
+	nb2000 := int64(2000)
+	if _, err := msgs.Append(ctx, mkEnv("m-immediate", nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := msgs.Append(ctx, mkEnv("m-past", &nb500)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := msgs.Append(ctx, mkEnv("m-future", &nb2000)); err != nil {
+		t.Fatal(err)
+	}
+
+	// At t=1000: m-immediate has no not_before → not in scan; m-past
+	// is due; m-future is not yet due.
+	due, err := msgs.PendingDue(ctx, 1000, 10)
+	if err != nil {
+		t.Fatalf("pending due: %v", err)
+	}
+	if len(due) != 1 || due[0].ID != "m-past" {
+		t.Fatalf("at t=1000 expected [m-past], got %+v", ids(due))
+	}
+
+	// MarkDelivered drops m-past out of the scan set.
+	if err := msgs.MarkDelivered(ctx, "m-past", 1100); err != nil {
+		t.Fatalf("mark delivered: %v", err)
+	}
+	due, _ = msgs.PendingDue(ctx, 1000, 10)
+	if len(due) != 0 {
+		t.Errorf("after MarkDelivered expected empty, got %+v", ids(due))
+	}
+
+	// Advance the clock past not_before — m-future becomes due.
+	due, _ = msgs.PendingDue(ctx, 2500, 10)
+	if len(due) != 1 || due[0].ID != "m-future" {
+		t.Errorf("at t=2500 expected [m-future], got %+v", ids(due))
+	}
+
+	// MarkDelivered is idempotent: re-calling on an already-delivered
+	// row is a no-op (rowsAffected=0) and must not error.
+	if err := msgs.MarkDelivered(ctx, "m-past", 9999); err != nil {
+		t.Errorf("re-MarkDelivered should be idempotent: %v", err)
+	}
+	if err := msgs.MarkDelivered(ctx, "missing", 9999); err != nil {
+		t.Errorf("MarkDelivered missing row should be no-op: %v", err)
+	}
+
+	// Limit clamp: passing 0 falls back to the default page size — sanity
+	// check it doesn't panic and still returns the row.
+	due, err = msgs.PendingDue(ctx, 2500, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 {
+		t.Errorf("limit=0 default expected 1 row, got %d", len(due))
+	}
+}
+
+// ids extracts envelope ids in slice order for diff-friendly assertions.
+func ids(rows []message.Envelope) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.ID
+	}
+	return out
+}
+
 func newSimpleEnvelope(seq int) *message.Envelope {
 	return &message.Envelope{
 		ID:         "m-" + itoa(seq),

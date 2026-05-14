@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -252,6 +253,25 @@ func TestDaemon_Phase3_DispatchesWriteMessage(t *testing.T) {
 		t.Errorf("ack.FrameID=%q want %q", ack.FrameID, body.FrameID)
 	}
 
+	// FIX-T3 acceptance #1: after harness accept the post-dispatch path
+	// MUST stamp delivered_at (immediate, non-deferred envelope). Poll
+	// briefly because the write/dispatch/MarkDelivered happens on the
+	// dispatcher goroutine, which races with the ack send.
+	{
+		deadline := time.Now().Add(2 * time.Second)
+		var got sql.NullInt64
+		for time.Now().Before(deadline) {
+			got, _ = queryDeliveredAt(ctx, dbPath, ack.MessageID)
+			if got.Valid {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !got.Valid {
+			t.Error("immediate envelope: delivered_at never stamped — gateway dispatch did not run")
+		}
+	}
+
 	// Graceful shutdown: Close must drain the dispatcher / pusher /
 	// scheduler goroutines without leaking. We assert this by
 	// requiring Close to return within a tight timeout.
@@ -265,6 +285,158 @@ func TestDaemon_Phase3_DispatchesWriteMessage(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Close blocked — phase 3 goroutine leak")
 	}
+}
+
+// TestDaemon_FutureMessage_SchedulerDrains covers FIX-T3 acceptance:
+// an envelope with `not_before > now` MUST NOT be delivered at write
+// time; once `not_before <= now` the scheduler periodic scan picks it
+// up, runs trigger.Gateway.Dispatch, and stamps `delivered_at` so
+// subsequent scans skip it.
+//
+// We seed the future-message row directly via store.Messages.Append
+// (the chain would refuse because the test rig doesn't model a full
+// human caller for a `human.text` write with a custom not_before — the
+// scheduler scan is upstream-agnostic so this path exercises the same
+// gateway.Dispatch + MarkDelivered seam the harness adapter uses).
+func TestDaemon_FutureMessage_SchedulerDrains(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dataDir := t.TempDir()
+	channelsDir := filepath.Join(dataDir, "channels")
+	chID := channel.ID("ch-fut")
+	chDir := filepath.Join(channelsDir, string(chID))
+	if err := os.MkdirAll(chDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(chDir, "channel.sqlite")
+	db, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed the channel_lock (so phase 2 reclaim accepts the channel) +
+	// two actors so audience=['*'] expands to a non-empty set + the
+	// future-message row that the scheduler must drain.
+	lock := store.NewChannelLock(db)
+	if err := lock.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    chID,
+		FencingToken: 1, OwnerEpoch: 1,
+		DaemonID: "daemon-fut", DaemonEpoch: 1,
+		AcquiredAt: now(), RefreshedAt: now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	areg := store.NewActorRegistry(db)
+	for _, rec := range []actor.Record{
+		{ID: "user:alice", Kind: message.SenderHuman, CreatedAt: now()},
+		{ID: "agent:beta", Kind: message.SenderAgent, CreatedAt: now()},
+	} {
+		if err := areg.Insert(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	notBefore := now() + 250 // ms in the future
+	msgs := store.NewMessages(db)
+	if _, err := msgs.Append(ctx, &message.Envelope{
+		ID:         "m-future",
+		TS:         now(),
+		ChannelID:  string(chID),
+		Sender:     message.Sender{Kind: message.SenderHuman, ID: "user:alice"},
+		Kind:       message.KindEvent,
+		Type:       "human.text",
+		Payload:    json.RawMessage(`{"text":"later"}`),
+		Visibility: message.VisibilityPublic,
+		Audience:   []string{"*"},
+		NotBefore:  &notBefore,
+	}); err != nil {
+		t.Fatalf("seed future message: %v", err)
+	}
+	_ = db.Close()
+
+	cfg := runtime.DaemonConfig{
+		DataDir:         dataDir,
+		ChannelsDir:     channelsDir,
+		DaemonID:        "daemon-fut",
+		DaemonEpoch:     42,
+		UseMockBus:      true,
+		NowFn:           now,
+		SchedulerPeriod: 30 * time.Millisecond,
+	}
+	d, err := runtime.AssembleDaemon(ctx, cfg)
+	if err != nil {
+		t.Fatalf("AssembleDaemon: %v", err)
+	}
+	if err := d.RunPhases(ctx); err != nil {
+		t.Fatalf("RunPhases: %v", err)
+	}
+	if !d.HasChannel(chID) {
+		t.Fatalf("daemon did not register channel %s", chID)
+	}
+
+	// 1) Before not_before passes (let the scheduler tick a few times),
+	// the row's delivered_at MUST still be NULL — that's the §5.3
+	// future-message guarantee. We poll the daemon's own messages handle
+	// via the exposed registry-friendly helper.
+	time.Sleep(80 * time.Millisecond) // ~3 ticks; not_before is +250ms
+	delivered, err := queryDeliveredAt(ctx, dbPath, "m-future")
+	if err != nil {
+		t.Fatalf("pre-not_before query: %v", err)
+	}
+	if delivered.Valid {
+		t.Fatalf("delivered_at populated before not_before passed: %d", delivered.Int64)
+	}
+
+	// 2) Wait until well past not_before + at least one scheduler tick
+	// so scanLongPending → gateway.Dispatch → MarkDelivered runs. We poll
+	// with a deadline rather than sleep-and-pray.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		delivered, err = queryDeliveredAt(ctx, dbPath, "m-future")
+		if err != nil {
+			t.Fatalf("post-not_before query: %v", err)
+		}
+		if delivered.Valid {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if !delivered.Valid {
+		t.Fatal("scheduler never marked future-message delivered after not_before passed")
+	}
+	if delivered.Int64 < notBefore {
+		t.Errorf("delivered_at=%d < not_before=%d — scheduler ticked too early", delivered.Int64, notBefore)
+	}
+
+	// Clean shutdown.
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- d.Close() }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close blocked — phase 3 goroutine leak")
+	}
+}
+
+// queryDeliveredAt opens the channel sqlite read-only and returns the
+// delivered_at column for the row id. We open a fresh handle each call
+// to avoid contention with the daemon's writer handle (WAL mode allows
+// concurrent readers).
+func queryDeliveredAt(ctx context.Context, dbPath, id string) (sql.NullInt64, error) {
+	db, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{SkipDDL: true})
+	if err != nil {
+		return sql.NullInt64{}, err
+	}
+	defer func() { _ = db.Close() }()
+	row := db.QueryRowContext(ctx, `SELECT delivered_at FROM messages WHERE id=?`, id)
+	var got sql.NullInt64
+	if err := row.Scan(&got); err != nil {
+		return sql.NullInt64{}, err
+	}
+	return got, nil
 }
 
 // TestDaemon_Phase3_ShutdownNoLeak verifies that even with no

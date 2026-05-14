@@ -146,6 +146,66 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope) (klog.Appe
 	return klog.AppendResult{Seq: klog.Seq(seq), IsTerminal: env.IsTerminal, Deduped: false}, nil
 }
 
+// PendingDue returns up to `limit` future-message rows that are due for
+// dispatch: `not_before IS NOT NULL AND not_before <= ? AND
+// delivered_at IS NULL`. Ordered by seq ASC so the scheduler ticks the
+// oldest backlog first (matches L1 §5.3 + §6.4 monotonic processing).
+//
+// `limit <= 0` is clamped to 64 — matches the outbox PendingPage
+// convention so the scheduler tick has a bounded per-channel cost.
+func (m *Messages) PendingDue(ctx context.Context, nowMs int64, limit int) ([]message.Envelope, error) {
+	if limit <= 0 {
+		limit = 64
+	}
+	const q = `SELECT id, ts, ts_received, channel_id,
+	                  sender_kind, sender_id, COALESCE(sender_name,''),
+	                  kind, type, payload,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs,
+	                  visibility, audience,
+	                  not_before, expires_at,
+	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
+	                  is_terminal, seq
+	             FROM messages
+	             WHERE not_before IS NOT NULL
+	               AND not_before <= ?
+	               AND delivered_at IS NULL
+	             ORDER BY seq ASC LIMIT ?`
+	rows, err := m.db.QueryContext(ctx, q, nowMs, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: pending due: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []message.Envelope
+	for rows.Next() {
+		env, err := scanEnvelopeRows(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: pending due scan: %w", err)
+		}
+		out = append(out, env)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: pending due rows: %w", err)
+	}
+	return out, nil
+}
+
+// MarkDelivered stamps messages.delivered_at when it is still NULL. The
+// UPDATE is idempotent (rowsAffected=0 when the row was already
+// delivered or missing — caller may treat as no-op). Used by the
+// scheduler dispatch path AND the harness post-write fan-out, so two
+// concurrent callers cannot double-stamp delivery time.
+func (m *Messages) MarkDelivered(ctx context.Context, id string, atMs int64) error {
+	if id == "" {
+		return errors.New("store: mark delivered empty id")
+	}
+	const q = `UPDATE messages SET delivered_at=? WHERE id=? AND delivered_at IS NULL`
+	if _, err := m.db.ExecContext(ctx, q, atMs, id); err != nil {
+		return fmt.Errorf("store: mark delivered %q: %w", id, err)
+	}
+	return nil
+}
+
 // FindByID implements log.MessageLog.
 func (m *Messages) FindByID(ctx context.Context, channelID channel.ID, id string) (message.Envelope, bool, error) {
 	_ = channelID // channel_id is enforced by the per-channel db file; query stays scoped.
@@ -169,15 +229,34 @@ func (m *Messages) FindByID(ctx context.Context, channelID channel.ID, id string
 	return env, true, nil
 }
 
+// rowScanner abstracts *sql.Row / *sql.Rows for the Scan call so
+// PendingDue (multi-row) can share the envelope materialization code
+// with FindByID (single-row).
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
 // scanEnvelope materializes a row into an Envelope.
 func scanEnvelope(row *sql.Row) (message.Envelope, error) {
+	return scanEnvelopeFrom(row)
+}
+
+// scanEnvelopeRows materializes the current *sql.Rows position into an
+// Envelope. Caller is responsible for rows.Next() / rows.Close().
+func scanEnvelopeRows(rows *sql.Rows) (message.Envelope, error) {
+	return scanEnvelopeFrom(rows)
+}
+
+// scanEnvelopeFrom is the shared implementation used by scanEnvelope
+// (FindByID) and scanEnvelopeRows (PendingDue).
+func scanEnvelopeFrom(s rowScanner) (message.Envelope, error) {
 	var env message.Envelope
 	var kind, sKind, vis string
 	var audJSON, payloadStr string
 	var docRefsStr sql.NullString
 	var notBefore, expiresAt, deliveredAt, deliveryFailedAt sql.NullInt64
 	var termInt int
-	if err := row.Scan(
+	if err := s.Scan(
 		&env.ID, &env.TS, &env.TSReceived, &env.ChannelID,
 		&sKind, &env.Sender.ID, &env.Sender.Name,
 		&kind, &env.Type, &payloadStr,

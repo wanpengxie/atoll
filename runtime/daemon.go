@@ -22,6 +22,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/scheduler"
 	"github.com/wanpengxie/ActOS/runtime/store"
 	"github.com/wanpengxie/ActOS/runtime/transit"
+	"github.com/wanpengxie/ActOS/runtime/trigger"
 )
 
 // DaemonConfig is the cmd/daemon assembly knobs.
@@ -62,7 +63,10 @@ type DaemonConfig struct {
 // channelRuntime is the per-owned-channel set of seams the daemon
 // operational loop drives during phase 3+: harness chain (for writes),
 // outbox pusher (for view-sync), actor registry (for write_message
-// caller-id resolution), message log (for long-pending scans).
+// caller-id resolution), message log (for long-pending scans),
+// trigger gateway (post-harness fan-out + future-message scheduler
+// scan), scheduler.Deliverer (per-actor handler registry — the actual
+// handler wiring lands with T4/T5 adapter framework).
 type channelRuntime struct {
 	channelID channel.ID
 	db        *sql.DB
@@ -71,6 +75,8 @@ type channelRuntime struct {
 	outbox    *store.ViewSyncOutbox
 	chain     *harness.Chain
 	pusher    *transit.Pusher
+	deliverer *scheduler.Deliverer
+	gateway   *trigger.Gateway
 }
 
 // Daemon is the assembled cmd/daemon process. Exposed so tests can
@@ -449,6 +455,19 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		return nil, fmt.Errorf("pusher for %s: %w", lc.ChannelID, err)
 	}
 
+	// Trigger gateway — post-harness fan-out seam (FIX-T3 / L1 §5.1).
+	// Deliverer starts empty; T4/T5 adapter framework will register per-
+	// actor handlers as agents/tools spawn.
+	deliverer := scheduler.NewDeliverer()
+	gw, err := trigger.New(trigger.Config{
+		Registry:  registry,
+		Deliverer: deliverer,
+		NowFn:     d.cfg.NowFn,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("trigger gateway for %s: %w", lc.ChannelID, err)
+	}
+
 	return &channelRuntime{
 		channelID: lc.ChannelID,
 		db:        db,
@@ -457,6 +476,8 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		outbox:    outbox,
 		chain:     chain,
 		pusher:    pusher,
+		deliverer: deliverer,
+		gateway:   gw,
 	}, nil
 }
 
@@ -478,12 +499,23 @@ func (d *Daemon) openChannelDB(ctx context.Context, sqlitePath string) (*sql.DB,
 // routeWrite returns the per-channel harness chain + registry +
 // caller-context stamper for the WriteMessage handler. ok=false means
 // the daemon does not currently own the channel.
+//
+// The returned HarnessChain is a `harnessChainAdapter` that, after a
+// successful chain.Write, invokes trigger.Gateway.Dispatch (L1 §5.1
+// post-harness fan-out) + messages.MarkDelivered. This is the FIX-T3
+// post-harness wiring seam — dedupe / deferred / reject paths skip
+// dispatch so we honor at-least-once-by-message.id (§6.2).
 func (d *Daemon) routeWrite(_ context.Context, ch channel.ID) (transit.HarnessChain, actor.Registry, transit.CallerStamper, bool) {
 	cr, ok := d.channels[ch]
 	if !ok {
 		return nil, nil, nil, false
 	}
-	chainAdapter := harnessChainAdapter{chain: cr.chain}
+	chainAdapter := harnessChainAdapter{
+		chain:    cr.chain,
+		gateway:  cr.gateway,
+		messages: cr.messages,
+		nowFn:    d.cfg.NowFn,
+	}
 	stamp := func(ctx context.Context, actorID actor.ActorID, chID channel.ID) context.Context {
 		return harness.CtxWithCaller(ctx, harness.CallerContext{
 			ActorID:                 actorID,
@@ -495,13 +527,40 @@ func (d *Daemon) routeWrite(_ context.Context, ch channel.ID) (transit.HarnessCh
 }
 
 // scanLongPending is the per-tick callback the long-pending scheduler
-// invokes. M1.5 has no concrete fallback emit path (the trigger
-// gateway / FIX-T3 wires that). We still iterate the channel set so
-// future work can plug in without touching daemon.go's goroutine
-// layout.
-func (d *Daemon) scanLongPending(_ context.Context, _ int64) error {
-	// no-op — kept so the scheduler goroutine has a real sink and tests
-	// can observe ticks via the channel set length.
+// invokes (registered as TimerConfig.Scan). It performs the FIX-T3
+// future-message drain (L1 §5.3): every row with `not_before <= now AND
+// delivered_at IS NULL` is fed through trigger.Gateway.Dispatch +
+// messages.MarkDelivered. Each per-channel error is logged and skipped
+// — the scheduler tick MUST NOT abort the daemon loop on a single bad
+// row (at-least-once contract, L1 §6.1).
+//
+// M1.5 long-pending fallback emit (§6.4) is still no-op: the trigger
+// Deliverer has no per-actor handlers registered, so Dispatch only
+// records the resolved audience. A later ticket replaces this no-op
+// with the system-side terminal_response emit path.
+func (d *Daemon) scanLongPending(ctx context.Context, nowMs int64) error {
+	for chID, cr := range d.channels {
+		if cr.gateway == nil || cr.messages == nil {
+			continue
+		}
+		due, err := cr.messages.PendingDue(ctx, nowMs, 64)
+		if err != nil {
+			fmt.Printf("runtime: scheduler scan %s: %v\n", chID, err)
+			continue
+		}
+		for i := range due {
+			env := due[i]
+			// scheduler is the dispatch-path upstream — bypass §5.1
+			// step 3 self-trigger ban (L1 §5.3 explicit semantics).
+			if _, err := cr.gateway.Dispatch(ctx, &env, trigger.Options{BypassSelfTriggerBan: true}); err != nil {
+				fmt.Printf("runtime: scheduler dispatch %s/%s: %v\n", chID, env.ID, err)
+				continue
+			}
+			if err := cr.messages.MarkDelivered(ctx, env.ID, nowMs); err != nil {
+				fmt.Printf("runtime: scheduler mark delivered %s/%s: %v\n", chID, env.ID, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -509,8 +568,18 @@ func (d *Daemon) scanLongPending(_ context.Context, _ int64) error {
 // WriteResult) to the transit.HarnessChain (transit WriteResult). It
 // avoids leaking kernel/harness into the transit package — the bridge
 // stays inside runtime where both packages are already imported.
+//
+// FIX-T3 post-harness wiring: after a successful, non-deduped chain
+// write the adapter calls trigger.Gateway.Dispatch + messages.MarkDelivered.
+// The dedupe path is skipped (the original write already dispatched —
+// at-least-once-by-message.id, §6.2). The deferred future-message path
+// is skipped too: scheduler.scanLongPending will pick it up after
+// not_before passes.
 type harnessChainAdapter struct {
-	chain *harness.Chain
+	chain    *harness.Chain
+	gateway  *trigger.Gateway
+	messages *store.Messages
+	nowFn    func() int64
 }
 
 // Write implements transit.HarnessChain.
@@ -518,6 +587,24 @@ func (a harnessChainAdapter) Write(ctx context.Context, env *message.Envelope) (
 	res, err := a.chain.Write(ctx, env)
 	if err != nil {
 		return transit.HarnessWriteResult{}, err
+	}
+	// Post-harness fan-out: only on a fresh accept. Reject / dedupe /
+	// internal-error paths skip dispatch — dedupe because the prior
+	// successful write already dispatched (§6.2); reject because no row
+	// landed; chain-error already returned to caller above.
+	if res.RejectReason == "" && !res.Deduped && a.gateway != nil {
+		dr, derr := a.gateway.Dispatch(ctx, env, trigger.Options{})
+		if derr != nil {
+			fmt.Printf("runtime: gateway dispatch %s: %v\n", env.ID, derr)
+		} else if !dr.Deferred && a.messages != nil {
+			// Immediate-delivery path: stamp delivered_at so the
+			// scheduler future-message scan ignores this row. Future-
+			// message path leaves delivered_at NULL — scheduler claims it
+			// later, then stamps after its own dispatch.
+			if err := a.messages.MarkDelivered(ctx, env.ID, a.nowFn()); err != nil {
+				fmt.Printf("runtime: mark delivered %s: %v\n", env.ID, err)
+			}
+		}
 	}
 	return transit.HarnessWriteResult{
 		MessageID:        res.MessageID,
