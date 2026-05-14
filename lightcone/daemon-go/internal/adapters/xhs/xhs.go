@@ -287,21 +287,20 @@ func (m *Module) OnExternalCallback(ctx context.Context, raw []byte) error {
 	reason := ""
 	switch strings.ToLower(cb.Status) {
 	case "ok", "completed", "success":
-		// Merge the extension's `result` object into the payload so
-		// the agent sees domain fields (note_id / url / notes / ...)
-		// at the top level — matches L4 §2.1.3.
-		for k, v := range cb.Result {
-			payload[k] = v
-		}
+		// T105 FIX-5 (claude 98-4 major): the extension's `result`
+		// object used to be spread verbatim into the response payload,
+		// so any drift / typo / over-share polluted the type_registry
+		// response schema's field set. Explicit allow-list keeps the
+		// adapter the single source of truth on what can land in the
+		// response (union of L4 §2.2 response schemas across the 5
+		// xhs R/R types).
+		copyAllowedKeys(payload, cb.Result, allowedResultKeys)
 	case "error", "failed", "failure":
 		status = adapter.StatusFailed
 		reason = errorReason(cb.Error)
-		for k, v := range cb.Error {
-			if k == "reason" {
-				continue
-			}
-			payload[k] = v
-		}
+		// T105 FIX-5: error path also uses a narrow allow-list; reason
+		// flows through RespondOptions.Reason, not the payload spread.
+		copyAllowedKeys(payload, cb.Error, allowedErrorKeys)
 	default:
 		status = adapter.StatusFailed
 		reason = "callback_status_unknown"
@@ -316,6 +315,52 @@ func (m *Module) OnExternalCallback(ctx context.Context, raw []byte) error {
 		Reason: reason,
 	})
 	return err
+}
+
+// allowedResultKeys is the union of L4 §2.2 response schema fields the
+// 5 xhs request/response types declare on top of the {status, reason}
+// pair. Used by OnExternalCallback to filter the extension's `result`
+// map so a misbehaving / over-sharing extension cannot inject keys the
+// type_registry schema does not declare (T105 FIX-5, claude 98-4
+// major).
+//
+// Per-type field origins:
+//   - xhs.publish        -> note_id, url, device_id, retry_after
+//   - xhs.search         -> results
+//   - xhs.note.fetch     -> note
+//   - xhs.recent.fetch   -> notes
+//   - xhs.cookie.sync    -> (none beyond status/reason)
+//
+// device_id is in the union because the callback handler folds the URL
+// path's deviceId into the payload regardless of source.
+var allowedResultKeys = map[string]struct{}{
+	"note_id":     {},
+	"url":         {},
+	"device_id":   {},
+	"retry_after": {},
+	"results":     {},
+	"note":        {},
+	"notes":       {},
+}
+
+// allowedErrorKeys is the failure-path allow-list. `reason` flows
+// through RespondOptions.Reason (not via spread), so the only field a
+// failed callback contributes to the response payload top-level is the
+// optional retry hint. device_id is allowed because the callback
+// handler unconditionally folds it into the payload.
+var allowedErrorKeys = map[string]struct{}{
+	"retry_after": {},
+	"device_id":   {},
+}
+
+// copyAllowedKeys copies entries from src to dst whose key is present
+// in allow. Nil src / nil allow are no-ops. dst is assumed non-nil.
+func copyAllowedKeys(dst, src map[string]any, allow map[string]struct{}) {
+	for k, v := range src {
+		if _, ok := allow[k]; ok {
+			dst[k] = v
+		}
+	}
 }
 
 // callbackBody mirrors the HTTP callback payload shape.

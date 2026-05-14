@@ -670,6 +670,119 @@ func TestRoundTrip_ExternalIDDifferentFromEnvelopeID(t *testing.T) {
 	}
 }
 
+// TestOnExternalCallback_WhitelistsResultKeys covers T105 FIX-5 / claude
+// 98-4 major: extension `result` fields that are not in the
+// allowedResultKeys union must NOT land in the response payload — even
+// when status=ok and the field name looks innocuous. Without the
+// whitelist a misbehaving / drifted extension could pollute the
+// type_registry-declared response schema.
+func TestOnExternalCallback_WhitelistsResultKeys(t *testing.T) {
+	db, deps := openXhsChannel(t)
+	requestID := "req-wl-result"
+	externalID := "ext-wl-result"
+	insertXhsRequest(t, db, requestID, TypePublish,
+		`{"title":"t","content":"c","device_id":"dev-pri-001"}`)
+	mock := NewMockDeviceClient()
+	mgr := newManagerWithMockExternalID(t, db, deps, mock, fixedExternalIDs(externalID))
+	dispatchEnvelope(t, mgr, requestID, TypePublish,
+		`{"title":"t","content":"c","device_id":"dev-pri-001"}`)
+
+	// Extension echoes the legit note_id/url alongside a couple of
+	// fields the type_registry schema never declared. Whitelist must
+	// drop the unknown ones.
+	cb := []byte(`{
+	  "correlation_id":"` + externalID + `",
+	  "device_id":"dev-pri-001",
+	  "status":"ok",
+	  "result":{
+	    "note_id":"n1",
+	    "url":"https://xhs/n1",
+	    "secret_field":"should_not_leak",
+	    "internal_state":"should_not_leak",
+	    "cookie":"super-secret-cookie"
+	  }
+	}`)
+	if err := mgr.OnExternalCallback(context.Background(), AdapterName, cb); err != nil {
+		t.Fatalf("OnExternalCallback: %v", err)
+	}
+	payload, _, ok := readResponse(t, db, requestID)
+	if !ok {
+		t.Fatalf("no terminal response written")
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(payload), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// allow-listed fields must land.
+	if got["note_id"] != "n1" {
+		t.Fatalf("note_id missing/wrong: %v", got["note_id"])
+	}
+	if got["url"] != "https://xhs/n1" {
+		t.Fatalf("url missing/wrong: %v", got["url"])
+	}
+	// Status must still flag completion.
+	if got["status"] != "completed" {
+		t.Fatalf("status = %v; want completed", got["status"])
+	}
+	// Stowaways must NOT.
+	for _, k := range []string{"secret_field", "internal_state", "cookie"} {
+		if v, has := got[k]; has {
+			t.Fatalf("disallowed key %q leaked into payload: %v", k, v)
+		}
+	}
+}
+
+// TestOnExternalCallback_WhitelistsErrorKeys mirrors the result-path
+// test for the failed branch: the only error-side payload top-level
+// field that may pass through is retry_after (publish failed schema
+// declares it). reason flows via RespondOptions.Reason, not via spread.
+func TestOnExternalCallback_WhitelistsErrorKeys(t *testing.T) {
+	db, deps := openXhsChannel(t)
+	requestID := "req-wl-err"
+	externalID := "ext-wl-err"
+	insertXhsRequest(t, db, requestID, TypePublish, `{}`)
+	mock := NewMockDeviceClient()
+	mgr := newManagerWithMockExternalID(t, db, deps, mock, fixedExternalIDs(externalID))
+	dispatchEnvelope(t, mgr, requestID, TypePublish, `{}`)
+
+	cb := []byte(`{
+	  "correlation_id":"` + externalID + `",
+	  "device_id":"dev-pri-001",
+	  "status":"error",
+	  "error":{
+	    "reason":"login_expired",
+	    "retry_after":30,
+	    "stack_trace":"should_not_leak",
+	    "extension_version":"should_not_leak"
+	  }
+	}`)
+	if err := mgr.OnExternalCallback(context.Background(), AdapterName, cb); err != nil {
+		t.Fatalf("OnExternalCallback: %v", err)
+	}
+	payload, _, ok := readResponse(t, db, requestID)
+	if !ok {
+		t.Fatalf("no terminal response written")
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(payload), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["status"] != "failed" {
+		t.Fatalf("status = %v; want failed", got["status"])
+	}
+	if got["reason"] != "login_expired" {
+		t.Fatalf("reason = %v; want login_expired", got["reason"])
+	}
+	if got["retry_after"] != float64(30) {
+		t.Fatalf("retry_after = %v; want 30", got["retry_after"])
+	}
+	for _, k := range []string{"stack_trace", "extension_version"} {
+		if v, has := got[k]; has {
+			t.Fatalf("disallowed error key %q leaked into payload: %v", k, v)
+		}
+	}
+}
+
 // TestRegister_ProvidesFactory documents the init-time Register hook
 // so future daemon main wiring can rely on it.
 func TestRegister_ProvidesFactory(t *testing.T) {
