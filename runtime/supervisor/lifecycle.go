@@ -12,10 +12,10 @@ import (
 type ActorState string
 
 const (
-	ActorPending  ActorState = "pending"
-	ActorRunning  ActorState = "running"
-	ActorStopped  ActorState = "stopped"
-	ActorFaulted  ActorState = "faulted"
+	ActorPending ActorState = "pending"
+	ActorRunning ActorState = "running"
+	ActorStopped ActorState = "stopped"
+	ActorFaulted ActorState = "faulted"
 )
 
 // ActorEntry tracks one actor's lifecycle.

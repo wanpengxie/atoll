@@ -43,10 +43,10 @@ func (p Phase) String() string {
 
 // LocalChannel summarizes what phase 1 found for one channel on disk.
 type LocalChannel struct {
-	ChannelID    channel.ID
-	SQLitePath   string
-	Lock         store.ChannelLockRow
-	OwnedByUs    bool // true iff Lock.DaemonID matches current daemon
+	ChannelID  channel.ID
+	SQLitePath string
+	Lock       store.ChannelLockRow
+	OwnedByUs  bool // true iff Lock.DaemonID matches current daemon
 }
 
 // BootResult is the outcome of a Boot run.
@@ -77,8 +77,8 @@ type BootConfig struct {
 
 // Bootstrapper runs the T1.6 phase 1/2/3/4 startup sequencer.
 type Bootstrapper struct {
-	cfg     BootConfig
-	phase   Phase
+	cfg      BootConfig
+	phase    Phase
 	channels []LocalChannel
 }
 

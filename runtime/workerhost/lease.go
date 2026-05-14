@@ -62,9 +62,9 @@ func (s *LeaseStore) Acquire(
 	const sel = `SELECT worker_id, fencing_token, daemon_epoch, lease_expires_at, acquired_at
 	             FROM worker_locks WHERE agent_id=?`
 	var (
-		curWorker             string
-		curFencing, curEpoch  int64
-		curExpires, curAcq    int64
+		curWorker            string
+		curFencing, curEpoch int64
+		curExpires, curAcq   int64
 	)
 	switch err := tx.QueryRowContext(ctx, sel, agentID).Scan(
 		&curWorker, &curFencing, &curEpoch, &curExpires, &curAcq,

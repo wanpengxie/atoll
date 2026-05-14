@@ -80,10 +80,9 @@ func (c *IPCClient) readLoop(ctx context.Context) {
 			c.Stop()
 			return
 		}
-		if frame.Kind == ipc.KindFenceInvalid {
-			// FenceCheck reads from the dedicated channel below; we still
-			// route by ID so it lands in the pending map for the caller.
-		}
+		// FenceInvalid frames are routed by ID into the pending map like
+		// any other reply; the caller (sendStamped) inspects Kind +
+		// translates to *FenceInvalidError via FenceFromFrame.
 		c.dispatch(frame)
 	}
 }

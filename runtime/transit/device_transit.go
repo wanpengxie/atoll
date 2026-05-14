@@ -31,11 +31,11 @@ type DeviceTransit struct {
 
 // DeviceTransitConfig wires a DeviceTransit.
 type DeviceTransitConfig struct {
-	Client    *Client
-	FrameID   FrameIDGen
-	OnRecv    func(ctx context.Context, frame adapter.SendFrame) error
-	OnAck     func(ctx context.Context, frame adapter.AckFrame) error
-	OnError   func(ctx context.Context, frame adapter.ErrorFrame) error
+	Client  *Client
+	FrameID FrameIDGen
+	OnRecv  func(ctx context.Context, frame adapter.SendFrame) error
+	OnAck   func(ctx context.Context, frame adapter.AckFrame) error
+	OnError func(ctx context.Context, frame adapter.ErrorFrame) error
 }
 
 // NewDeviceTransit builds a DeviceTransit.

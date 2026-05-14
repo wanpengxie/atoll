@@ -10,3 +10,5 @@ dist/
 .env
 .coagent-local/
 .dalek/
+bin/
+.go-arch-lint.yml

@@ -21,12 +21,12 @@ type ControlHandlers struct {
 	OnViewsyncAck           func(ctx context.Context, frame viewsync.AckFrame) error
 	OnViewsyncResyncRequest func(ctx context.Context, frame viewsync.ResyncRequest) (viewsync.ResyncResponse, error)
 
-	OnCreateChannel    func(ctx context.Context, frame daemonbus.Frame, req placement.CreateChannelRequest) error
-	OnUnbindChannel    func(ctx context.Context, frame daemonbus.Frame) error
-	OnReclaimAccepted  func(ctx context.Context, frame daemonbus.Frame) error
-	OnReclaimRejected  func(ctx context.Context, frame daemonbus.Frame) error
-	OnHeartbeatAck     func(ctx context.Context, frame daemonbus.Frame) error
-	OnDeviceTransit    func(ctx context.Context, frame daemonbus.Frame) error
+	OnCreateChannel   func(ctx context.Context, frame daemonbus.Frame, req placement.CreateChannelRequest) error
+	OnUnbindChannel   func(ctx context.Context, frame daemonbus.Frame) error
+	OnReclaimAccepted func(ctx context.Context, frame daemonbus.Frame) error
+	OnReclaimRejected func(ctx context.Context, frame daemonbus.Frame) error
+	OnHeartbeatAck    func(ctx context.Context, frame daemonbus.Frame) error
+	OnDeviceTransit   func(ctx context.Context, frame daemonbus.Frame) error
 
 	// Unknown is invoked for any frame_type not handled above. May be
 	// nil — default is to drop silently.

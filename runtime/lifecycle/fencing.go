@@ -52,10 +52,10 @@ func (c *FencingChecker) Validate(
 	}
 	if row.FencingToken != fencing || row.DaemonEpoch != daemonEpoch {
 		return &FenceMismatchError{
-			HaveToken:  row.FencingToken,
-			GotToken:   fencing,
-			HaveEpoch:  row.DaemonEpoch,
-			GotEpoch:   daemonEpoch,
+			HaveToken: row.FencingToken,
+			GotToken:  fencing,
+			HaveEpoch: row.DaemonEpoch,
+			GotEpoch:  daemonEpoch,
 		}
 	}
 	return nil

@@ -101,7 +101,9 @@ func applyPragmas(ctx context.Context, db *sql.DB, opts OpenOptions) error {
 			"PRAGMA busy_timeout=5000",
 		}
 	}
-	all := append(base, opts.ExtraPragmas...)
+	all := make([]string, 0, len(base)+len(opts.ExtraPragmas))
+	all = append(all, base...)
+	all = append(all, opts.ExtraPragmas...)
 	for _, p := range all {
 		if _, err := db.ExecContext(ctx, p); err != nil {
 			return fmt.Errorf("store: %s: %w", p, err)

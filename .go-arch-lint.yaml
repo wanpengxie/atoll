@@ -31,6 +31,16 @@ exclude:
   # daemon-go is the M1.3/M1.4 legacy module with its own .go-arch-lint.yaml.
   # T9 will archive it. The root config does not police it.
   - lightcone
+  # xhs-cli is an independent Go module (its own go.mod) — outside this
+  # module's architecture taxonomy. agent-binary / packages / scripts /
+  # ops / workspace-template are not Go.
+  - xhs-cli
+  - agent-binary
+  - packages
+  - scripts
+  - ops
+  - workspace-template
+  - bin
 
 excludeFiles:
   - "^.*_test\\.go$"
