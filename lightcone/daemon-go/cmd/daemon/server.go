@@ -205,7 +205,11 @@ func Run(ctx context.Context, cfg Config) error {
 	}()
 
 	resolverEntries := map[string]viewsync.ResyncStore{}
-	managers := []*adapter.Manager{}
+	// T112 R2-FIX-6: managers is typed as the interface
+	// adapterCallbackTarget (rather than *adapter.Manager) so
+	// multiAdapterManager.OnExternalCallback can be unit-tested with a
+	// stub. *adapter.Manager naturally satisfies the interface.
+	managers := []adapterCallbackTarget{}
 	channelIDs := make([]string, 0, len(infos))
 
 	for _, info := range infos {
@@ -746,20 +750,49 @@ func sharedTokenResyncAuth(token string) viewsync.ResyncAuthFunc {
 // `authMiddleware` / `authedCallbackManager` wrapper has been removed
 // to avoid the appearance of double-auth that confused reviewers.)
 
+// adapterCallbackTarget is the subset of *adapter.Manager that
+// multiAdapterManager consumes. Defined as an interface (rather than
+// using the concrete type directly) so tests can stub responses
+// without spinning up real Managers — T112 R2-FIX-6.
+type adapterCallbackTarget interface {
+	OnExternalCallback(ctx context.Context, name string, payload []byte) error
+}
+
 // multiAdapterManager fans an OnExternalCallback across every channel's
-// adapter.Manager. The L1 §6.5 contract says a Manager whose correlation
-// tracker has no entry for the correlation_id silently no-ops, so
-// fanout is safe across N channels: at most one Manager owns the
-// correlation, the rest return nil.
+// adapter.Manager.
+//
+// Two layers of "not me" filtering keep the fanout safe across
+// heterogeneous channels:
+//
+//  1. L1 §6.5: a Manager whose correlation tracker has no entry for the
+//     correlation_id silently no-ops — at most one Manager owns the
+//     callback, the rest hand it back as nil.
+//  2. T112 R2-FIX-6: a Manager that does NOT host the adapter at all
+//     (the channel has no actor for it, or Install hasn't committed
+//     yet) returns adapter.ErrAdapterNotInstalled. multiAdapterManager
+//     classifies these via errors.Is and skips them — otherwise the
+//     callback handler would surface a 500 to the external sender and
+//     extensions would interpret that as "retry", triggering the L2
+//     §8.2 duplicate-callback path needlessly. Only errors from the
+//     owning Manager propagate.
 type multiAdapterManager struct {
-	managers []*adapter.Manager
+	managers []adapterCallbackTarget
 }
 
 // OnExternalCallback satisfies xhs.CallbackManager.
 func (m *multiAdapterManager) OnExternalCallback(ctx context.Context, name string, payload []byte) error {
 	var firstErr error
 	for _, mgr := range m.managers {
-		if err := mgr.OnExternalCallback(ctx, name, payload); err != nil && firstErr == nil {
+		err := mgr.OnExternalCallback(ctx, name, payload)
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, adapter.ErrAdapterNotInstalled) {
+			// Expected: this Manager does not host the named adapter
+			// (heterogeneous channels, or pre-Install race). Skip.
+			continue
+		}
+		if firstErr == nil {
 			firstErr = err
 		}
 	}

@@ -52,6 +52,31 @@ import (
 	"github.com/coagent-ai/daemon-go/pkg/v4types"
 )
 
+// Sentinel errors exposed by the Manager so multi-Manager fanout and
+// race-detection callers can branch on them without string matching.
+var (
+	// ErrManagerClosed is returned by Install when Shutdown wins the
+	// commit-time race (Init has completed on every module but the
+	// final write-lock arrives after Shutdown flipped closed=true).
+	// The Install path rolls back every Init'd module before returning
+	// this error, so the Manager ends in (closed=true, installed=false,
+	// modules empty) — a terminal "Manager is dead" signal. Callers
+	// MUST treat the Manager as unusable and not retry on the same
+	// instance. T112 R2-FIX-6.
+	ErrManagerClosed = errors.New("adapter: Manager closed before Install committed")
+
+	// ErrAdapterNotInstalled is returned by OnExternalCallback when the
+	// adapter is not hosted on this Manager — either because Install
+	// has not yet committed, or because the named adapter is not in
+	// this Manager's Modules. Multi-Manager fanout callers
+	// (multiAdapterManager in cmd/daemon/server.go) use
+	// errors.Is(err, ErrAdapterNotInstalled) to treat this as a benign
+	// "not me" signal and avoid surfacing a 500 to the external caller,
+	// which would otherwise trigger a retry → duplicate-callback path.
+	// T112 R2-FIX-6.
+	ErrAdapterNotInstalled = errors.New("adapter: adapter not installed on this Manager")
+)
+
 // ManagerConfig is the boot-time wiring the daemon hands to NewManager.
 // Required fields: DB, Deps, Modules.
 type ManagerConfig struct {
@@ -431,6 +456,22 @@ func (m *Manager) Install(ctx context.Context) error {
 		rollback()
 		return errors.New("adapter: Manager.Install called twice")
 	}
+	if m.closed {
+		// T112 R2-FIX-6: Shutdown won the commit-time race. It already
+		// snapshotted an empty modules map (our staged entries were
+		// not yet visible) and flipped closed=true. If we commit now,
+		// the Manager would land in the corrupt
+		// (closed=true && installed=true) state with live timer
+		// goroutines that Shutdown never saw — Dispatch / RunGC would
+		// happily route to modules the caller believes are torn down.
+		// Release the lock, run rollback() to tear down every Init'd
+		// module (LIFO, mirrors the partial-failure path), and return
+		// the dedicated ErrManagerClosed sentinel so callers can stop
+		// using this Manager instance.
+		m.mu.Unlock()
+		rollback()
+		return ErrManagerClosed
+	}
 	for k, v := range stagedEntries {
 		m.modules[k] = v
 	}
@@ -637,13 +678,22 @@ func (m *Manager) Dispatch(ctx context.Context, env *v4types.Envelope) error {
 // hook (M1.x).
 func (m *Manager) OnExternalCallback(ctx context.Context, adapterName string, payload []byte) error {
 	if !m.isInstalled() {
-		return errors.New("adapter: OnExternalCallback requires Install first")
+		// T112 R2-FIX-6: wrap with ErrAdapterNotInstalled so
+		// multi-Manager fanout callers can errors.Is-classify the
+		// "this Manager doesn't host the adapter" case as a benign
+		// "not me" signal instead of bubbling a 500 to extensions.
+		return fmt.Errorf("%w: Install has not run", ErrAdapterNotInstalled)
 	}
 	m.mu.RLock()
 	entry, ok := m.modules[adapterName]
 	m.mu.RUnlock()
 	if !ok {
-		return fmt.Errorf("adapter: OnExternalCallback unknown adapter %q", adapterName)
+		// Same sentinel: "adapter not present on this Manager" — covers
+		// the case where a daemon hosts heterogeneous channels (some
+		// install xhs, some don't) and an xhs callback fans across all.
+		// Keep "unknown adapter" substring in the message for log
+		// readability + back-compat with existing test assertions.
+		return fmt.Errorf("%w: unknown adapter %q", ErrAdapterNotInstalled, adapterName)
 	}
 	return entry.module.OnExternalCallback(ctx, payload)
 }

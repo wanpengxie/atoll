@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -558,6 +559,39 @@ func TestManager_OnExternalCallbackUnknownAdapter(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "unknown adapter") {
 		t.Fatalf("err = %v; want substring 'unknown adapter'", err)
 	}
+	// T112 R2-FIX-6: must also satisfy errors.Is(ErrAdapterNotInstalled)
+	// so multiAdapterManager fanout can classify it as a benign miss.
+	if !errors.Is(err, ErrAdapterNotInstalled) {
+		t.Fatalf("err = %v; want errors.Is(ErrAdapterNotInstalled)", err)
+	}
+}
+
+// TestManager_OnExternalCallback_NotInstalledSentinel — T112 R2-FIX-6:
+// a Manager that never ran Install must return ErrAdapterNotInstalled
+// from OnExternalCallback so the multi-Manager fanout in
+// cmd/daemon/server.go can skip it without surfacing a 500.
+func TestManager_OnExternalCallback_NotInstalledSentinel(t *testing.T) {
+	db, deps := openAdapterChannel(t)
+	clock := int64(testT0)
+	mod := newDefaultMockModule()
+	mgr, err := NewManager(ManagerConfig{
+		DB:      db,
+		Deps:    deps,
+		Modules: map[string]Module{mod.name: mod},
+		Clock:   fixedClock(&clock),
+		Logger:  silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// Note: NOT calling Install.
+	err = mgr.OnExternalCallback(context.Background(), mod.name, []byte("{}"))
+	if err == nil {
+		t.Fatalf("expected error from uninstalled Manager")
+	}
+	if !errors.Is(err, ErrAdapterNotInstalled) {
+		t.Fatalf("err = %v; want errors.Is(ErrAdapterNotInstalled)", err)
+	}
 }
 
 // TestManager_BootRecoverTimers_SkipsNonAdapterToolActor ensures
@@ -891,5 +925,112 @@ func TestManager_ConcurrentInstallDispatchGC(t *testing.T) {
 			t.Fatalf("workers did not drain")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// slowInitModule wraps mockModule with an Init that blocks on a
+// release channel — used to deterministically race Shutdown against
+// Install's commit window. Tracks shutdownHits so the test can assert
+// rollback ran on the closed-race path.
+type slowInitModule struct {
+	*mockModule
+	initStarted  chan struct{}
+	initRelease  chan struct{}
+	shutdownHits atomic.Int32
+}
+
+func (m *slowInitModule) Init(ctx context.Context, mctx *ModuleContext) error {
+	// Signal Init has begun (the test uses this to know Shutdown can
+	// race the commit window) — guard against double-close on retry.
+	select {
+	case <-m.initStarted:
+		// Already signalled: this is a re-install attempt.
+	default:
+		close(m.initStarted)
+	}
+	select {
+	case <-m.initRelease:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return m.mockModule.Init(ctx, mctx)
+}
+
+func (m *slowInitModule) Shutdown(ctx context.Context) error {
+	m.shutdownHits.Add(1)
+	return m.mockModule.Shutdown(ctx)
+}
+
+// TestInstall_ShutdownDuringInit_NoCorruptState — T112 R2-FIX-6
+// acceptance: Shutdown invoked while Install's last module is mid-Init
+// must not leave the Manager in (closed=true && installed=true). The
+// closed-race re-check inside Install's commit block tears down every
+// Init'd module via rollback() and surfaces ErrManagerClosed.
+//
+// Run under `go test -race` to catch any unsynchronised access.
+func TestInstall_ShutdownDuringInit_NoCorruptState(t *testing.T) {
+	db, deps := openAdapterChannel(t)
+	clock := int64(testT0)
+	mod := &slowInitModule{
+		mockModule:  newDefaultMockModule(),
+		initStarted: make(chan struct{}),
+		initRelease: make(chan struct{}),
+	}
+	mgr, err := NewManager(ManagerConfig{
+		DB:      db,
+		Deps:    deps,
+		Modules: map[string]Module{mod.name: mod},
+		Clock:   fixedClock(&clock),
+		Logger:  silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	installErr := make(chan error, 1)
+	go func() {
+		installErr <- mgr.Install(context.Background())
+	}()
+
+	// Wait for Init to start so we know we're inside the staging
+	// window and the Manager has not yet committed installed=true.
+	select {
+	case <-mod.initStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Init never started")
+	}
+
+	// Shutdown the Manager while Init is in progress — this flips
+	// closed=true (snapshotting an empty modules map, because Install
+	// has not yet committed).
+	if err := mgr.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	// Release Init so Install can advance to the commit block, where
+	// the closed re-check fires.
+	close(mod.initRelease)
+
+	// Install must surface ErrManagerClosed.
+	select {
+	case err := <-installErr:
+		if !errors.Is(err, ErrManagerClosed) {
+			t.Fatalf("Install err = %v; want errors.Is(ErrManagerClosed)", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Install did not return after Init release")
+	}
+
+	// Post-condition: Manager is NOT installed, no modules are
+	// reachable through the routing tables, and rollback called
+	// Shutdown on the Init'd module exactly once.
+	if mgr.isInstalled() {
+		t.Errorf("Manager.isInstalled() = true; want false on lost race")
+	}
+	if names := mgr.ModuleNames(); len(names) != 0 {
+		t.Errorf("Manager.ModuleNames() = %v; want [] on lost race", names)
+	}
+	if got := mod.shutdownHits.Load(); got != 1 {
+		t.Errorf("slowInitModule.Shutdown calls = %d; want 1 (rollback path)", got)
 	}
 }
