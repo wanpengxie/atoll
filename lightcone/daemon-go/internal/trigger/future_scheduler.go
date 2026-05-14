@@ -268,6 +268,23 @@ SELECT seq, id, ts, channel_id,
 // processRow either marks the row expired or dispatches it through
 // the gateway. expires_at < now ALWAYS wins over dispatch — L1 §5.3
 // "scheduler 投递时若 expires_at < now，跳过 trigger".
+//
+// Concurrent-tick safety (FIX-6 §2 / codex t92):
+//
+//   - Pre-fix: Dispatch happened first, then markDelivered. Two
+//     schedulers ticking the same due row both Dispatched, then raced
+//     on the idempotent markDelivered — both side-effects fired.
+//   - Post-fix: a CAS UPDATE claims the row by stamping delivered_at
+//     BEFORE Dispatch runs. Only the CAS winner proceeds; the loser
+//     sees rows_affected == 0 and yields. On Dispatch failure the
+//     winner releases the claim (delivered_at → NULL, guarded by the
+//     same timestamp) so a later tick retries.
+//
+// `delivered_at` thus widens semantically from "dispatch finished" to
+// "claim acquired AND dispatch tentatively running"; downstream readers
+// (scanReadySQL `delivered_at IS NULL` filter, viewsync replay) tolerate
+// that window. SQLite serializes writers via WAL + busy_timeout so the
+// CAS is atomic against concurrent UPDATEs to the same row.
 func (s *FutureScheduler) processRow(ctx context.Context, r *readyRow, now int64) error {
 	if r.ExpiresAt.Valid && r.ExpiresAt.Int64 < now {
 		if err := s.markExpired(ctx, r.ID, now); err != nil {
@@ -278,24 +295,82 @@ func (s *FutureScheduler) processRow(ctx context.Context, r *readyRow, now int64
 		return nil
 	}
 
+	// Claim the row before Dispatch. CAS-fail (0 rows affected) → loser
+	// of the race; another scheduler already owns this row.
+	claimed, err := s.claim(ctx, r.ID, now)
+	if err != nil {
+		return fmt.Errorf("claim: %w", err)
+	}
+	if !claimed {
+		s.cfg.Logger.Debug("future_scheduler.claim.lost",
+			"channel_id", s.channelID, "id", r.ID, "now", now)
+		return nil
+	}
+
 	env, err := buildEnvelope(r)
 	if err != nil {
+		// Release the claim so a later tick can pick the row up again.
+		if relErr := s.releaseClaim(ctx, r.ID, now); relErr != nil {
+			s.cfg.Logger.Warn("future_scheduler.release_claim.error",
+				"channel_id", s.channelID, "id", r.ID, "err", relErr.Error())
+		}
 		return fmt.Errorf("build envelope: %w", err)
 	}
 
 	triggered, derr := s.dispatch.Dispatch(ctx, env, FutureSchedulerUpstream)
 	if derr != nil {
-		// Leave row pending; next Tick retries.
+		// Dispatch failed — release the claim so the next Tick retries.
+		if relErr := s.releaseClaim(ctx, r.ID, now); relErr != nil {
+			s.cfg.Logger.Warn("future_scheduler.release_claim.error",
+				"channel_id", s.channelID, "id", r.ID, "err", relErr.Error())
+		}
 		return fmt.Errorf("dispatch: %w", derr)
 	}
 
-	if err := s.markDelivered(ctx, r.ID, now); err != nil {
-		return fmt.Errorf("mark delivered: %w", err)
-	}
 	s.cfg.Logger.Info("future_scheduler.delivered",
 		"channel_id", s.channelID, "id", r.ID,
 		"type", r.Type, "triggered_count", len(triggered))
 	return nil
+}
+
+// claim runs the CAS-UPDATE that turns a pending row into a tentatively
+// delivered one. Returns (true, nil) when this scheduler instance wins
+// the race and SHOULD Dispatch; (false, nil) when another instance has
+// already claimed it.
+//
+// The CAS is guarded on BOTH delivered_at IS NULL AND delivery_failed_at
+// IS NULL so an already-expired row (markExpired path) does not get
+// double-counted.
+func (s *FutureScheduler) claim(ctx context.Context, id string, now int64) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE messages
+		    SET delivered_at = ?,
+		        attempts     = attempts + 1
+		  WHERE id = ?
+		    AND delivered_at IS NULL
+		    AND delivery_failed_at IS NULL`,
+		now, id,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, _ := res.RowsAffected()
+	return affected == 1, nil
+}
+
+// releaseClaim reverts a claim made by this scheduler so a later tick
+// can retry. The WHERE clause matches both `id` and the exact
+// `delivered_at` timestamp we wrote — that prevents us from clobbering
+// a claim that ANOTHER scheduler has since acquired (e.g. after a long
+// dispatch failure path).
+func (s *FutureScheduler) releaseClaim(ctx context.Context, id string, claimedAt int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE messages
+		    SET delivered_at = NULL
+		  WHERE id = ? AND delivered_at = ?`,
+		id, claimedAt,
+	)
+	return err
 }
 
 // buildEnvelope materialises a v4types.Envelope from a readyRow. The
@@ -338,32 +413,8 @@ func buildEnvelope(r *readyRow) (*v4types.Envelope, error) {
 	return env, nil
 }
 
-// markDelivered runs the L0 §2.5 delivered_at CAS — `WHERE
-// delivered_at IS NULL` makes the UPDATE idempotent against
-// concurrent scheduler instances (which protocol baseline forbids but
-// will arise during daemon restart races).
-func (s *FutureScheduler) markDelivered(ctx context.Context, id string, now int64) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE messages
-		    SET delivered_at = ?
-		  WHERE id = ? AND delivered_at IS NULL`,
-		now, id,
-	)
-	if err != nil {
-		return err
-	}
-	affected, _ := res.RowsAffected()
-	if affected == 0 {
-		// Another writer already stamped delivered_at — fine, this is
-		// the idempotent path. Log at debug level for observability.
-		s.cfg.Logger.Debug("future_scheduler.delivered.cas_miss",
-			"channel_id", s.channelID, "id", id)
-	}
-	return nil
-}
-
 // markExpired writes the L0 §2.5 delivery_failed_at + last_error
-// pair atomically. Same CAS protection as markDelivered.
+// pair atomically. Same CAS protection as claim/releaseClaim.
 func (s *FutureScheduler) markExpired(ctx context.Context, id string, now int64) error {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE messages

@@ -544,3 +544,129 @@ func TestFutureScheduler_Run_StopsOnCtxCancel(t *testing.T) {
 		t.Fatalf("Run did not stop within 2s after cancel")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 10. FIX-6 §2 acceptance — two schedulers ticking the same due row
+//     race; only one Dispatch fires (CAS-claim on delivered_at).
+// ---------------------------------------------------------------------------
+
+func TestProcessRow_ConcurrentClaim_OnlyOneDispatch(t *testing.T) {
+	ctx := context.Background()
+	db := openSchedulerDB(t)
+
+	// One due row: not_before just elapsed, no expires_at.
+	nb := int64(100)
+	insertFutureMsgs(t, ctx, db, "ch-future", 50, []futureMsg{{
+		id: "due-1", senderKind: "agent", senderID: "alice",
+		kind: "event", typ: "demo", visibility: "public",
+		audience: `["*"]`, notBefore: &nb,
+	}})
+
+	disp := &spyDispatcher{}
+	cur := int64(200)
+
+	// Two scheduler instances sharing the same DB + the same dispatcher.
+	s1 := newScheduler(t, db, disp, fixedNow(&cur))
+	s2 := newScheduler(t, db, disp, fixedNow(&cur))
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	errCh := make(chan error, 2)
+	go func() {
+		defer wg.Done()
+		errCh <- s1.Tick(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		errCh <- s2.Tick(ctx)
+	}()
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Errorf("Tick error: %v", err)
+		}
+	}
+
+	// Exactly one Dispatch call — the CAS-claim winner.
+	if got := disp.callCount(); got != 1 {
+		t.Errorf("Dispatch called %d times across two concurrent Ticks; want 1", got)
+	}
+
+	// The row is now marked delivered.
+	deliveredAt, failedAt, lastErr := readDeliveryColumns(t, ctx, db, "due-1")
+	if deliveredAt == nil {
+		t.Errorf("delivered_at should be set after winning claim")
+	}
+	if failedAt != nil {
+		t.Errorf("delivery_failed_at should remain NULL; got %d", *failedAt)
+	}
+	if lastErr != "" {
+		t.Errorf("last_error should be empty; got %q", lastErr)
+	}
+
+	// attempts column should be exactly 1 (only one CAS-claim succeeded).
+	var attempts int
+	if err := db.QueryRowContext(ctx,
+		`SELECT attempts FROM messages WHERE id = ?`, "due-1").Scan(&attempts); err != nil {
+		t.Fatalf("read attempts: %v", err)
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1 (CAS-claim is single-winner)", attempts)
+	}
+}
+
+// TestProcessRow_DispatchFailure_ReleasesClaim verifies that when
+// Dispatch errors after claim, the claim is rolled back so the next
+// Tick can retry.
+func TestProcessRow_DispatchFailure_ReleasesClaim(t *testing.T) {
+	ctx := context.Background()
+	db := openSchedulerDB(t)
+
+	nb := int64(100)
+	insertFutureMsgs(t, ctx, db, "ch-future", 50, []futureMsg{{
+		id: "due-fail", senderKind: "agent", senderID: "alice",
+		kind: "event", typ: "demo", visibility: "public",
+		audience: `["*"]`, notBefore: &nb,
+	}})
+
+	// Dispatcher always errors.
+	disp := &spyDispatcher{err: context.DeadlineExceeded}
+	cur := int64(200)
+	s := newScheduler(t, db, disp, fixedNow(&cur))
+
+	// First Tick — Dispatch fails; claim released.
+	if err := s.Tick(ctx); err == nil {
+		// Tick swallows per-row errors and logs them; check delivered_at
+		// instead.
+	}
+	deliveredAt, _, _ := readDeliveryColumns(t, ctx, db, "due-fail")
+	if deliveredAt != nil {
+		t.Fatalf("delivered_at should be NULL after dispatch failure (claim released); got %d", *deliveredAt)
+	}
+
+	// Second Tick at a later wall-clock — claim succeeds again (still
+	// errors though, because dispatcher still errors).
+	cur = 300
+	if err := s.Tick(ctx); err == nil {
+		// same as above
+	}
+	deliveredAt2, _, _ := readDeliveryColumns(t, ctx, db, "due-fail")
+	if deliveredAt2 != nil {
+		t.Fatalf("delivered_at should still be NULL after second failure; got %d", *deliveredAt2)
+	}
+
+	// Dispatch was called twice — once per Tick, neither succeeded.
+	if disp.callCount() != 2 {
+		t.Errorf("Dispatch called %d times after two failing Ticks, want 2", disp.callCount())
+	}
+	// attempts increments on every claim (even when later released).
+	var attempts int
+	if err := db.QueryRowContext(ctx,
+		`SELECT attempts FROM messages WHERE id = ?`, "due-fail").Scan(&attempts); err != nil {
+		t.Fatalf("read attempts: %v", err)
+	}
+	if attempts != 2 {
+		t.Errorf("attempts = %d, want 2 (one per Tick claim)", attempts)
+	}
+}
