@@ -1,6 +1,6 @@
-.PHONY: check-l0 install logrotate-config dev build deploy register doctor doctor-offline smoke test lint clean check-banned-mcp daemon-go-build daemon-go-test daemon-go-lint daemon-go-tidy
+.PHONY: check-l0 install logrotate-config dev build deploy register doctor doctor-offline smoke test lint clean check-banned-mcp daemon-go-build daemon-go-test daemon-go-lint daemon-go-tidy daemon-go-arch-lint daemon-go-kernel-deps-check
 
-KNOWN_TARGETS := check-l0 install logrotate-config dev build deploy register doctor doctor-offline smoke test lint clean check-banned-mcp daemon-go-build daemon-go-test daemon-go-lint daemon-go-tidy
+KNOWN_TARGETS := check-l0 install logrotate-config dev build deploy register doctor doctor-offline smoke test lint clean check-banned-mcp daemon-go-build daemon-go-test daemon-go-lint daemon-go-tidy daemon-go-arch-lint daemon-go-kernel-deps-check
 PASS_ARGS := $(strip $(ARGS) $(filter-out $(KNOWN_TARGETS),$(MAKECMDGOALS)))
 
 # daemon-go (M1.3-T0+): Go re-implementation of lightcone/daemon. Node
@@ -69,12 +69,30 @@ daemon-go-build:
 daemon-go-test:
 	cd $(DAEMON_GO_DIR) && go test ./...
 
-daemon-go-lint:
+daemon-go-lint: daemon-go-arch-lint daemon-go-kernel-deps-check
 	@if command -v golangci-lint >/dev/null; then \
 		cd $(DAEMON_GO_DIR) && golangci-lint run --config=../../.golangci.yml ./... ; \
 	else \
 		echo "[skip] golangci-lint not installed; run \"go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest\"" >&2 ; \
 	fi
+
+# daemon-go-arch-lint: enforce m1.5-tickets §T2 ownership invariants via
+# go-arch-lint. The 6 invariants (.dalek/pm/m1.5-tickets.md §T2 table)
+# are encoded in lightcone/daemon-go/.go-arch-lint.yaml. Violating an
+# invariant (e.g. server importing runtime/store) fails the build.
+daemon-go-arch-lint:
+	@if command -v go-arch-lint >/dev/null; then \
+		cd $(DAEMON_GO_DIR) && go-arch-lint check --arch-file=.go-arch-lint.yaml ; \
+	else \
+		echo "[skip] go-arch-lint not installed; run \"go install github.com/fe3dback/go-arch-lint@latest\"" >&2 ; \
+	fi
+
+# daemon-go-kernel-deps-check: defense-in-depth complement to
+# go-arch-lint. go-arch-lint auto-allows stdlib imports, so the spec
+# bans on `database/sql` and `net/http` are enforced here by walking
+# `go list -deps ./kernel/...` and failing on any forbidden import.
+daemon-go-kernel-deps-check:
+	cd $(DAEMON_GO_DIR) && bash scripts/kernel-deps-check.sh
 
 check-banned-mcp:
 	bash scripts/check-banned-mcp.sh
