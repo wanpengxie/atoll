@@ -10,7 +10,7 @@ import (
 
 // normalizeImagesForRPC 把 CLI 收到的 image 文件路径数组转成 daemon RPC 期望的对象数组。
 //
-// 输出 shape 对齐 devices/xhs-extension publish-content.ts 的 createFileFromResource：
+// 输出 shape 对齐 adapters/device/xhs/extension publish-content.ts 的 createFileFromResource：
 //
 //	{ "type": "data", "value": "data:<mime>;base64,<b64>", "fileName": "<basename>" }
 //
