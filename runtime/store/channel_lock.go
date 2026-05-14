@@ -1,0 +1,158 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+
+	"github.com/coagent-ai/coagent/kernel/channel"
+	"github.com/coagent-ai/coagent/kernel/placement"
+)
+
+// ChannelLockRow mirrors the channel_lock table row (M1.5-T3 — daemon
+// side fencing fields per T1.4).
+type ChannelLockRow struct {
+	ChannelID    channel.ID
+	FencingToken placement.FencingToken
+	OwnerEpoch   placement.OwnerEpoch
+	DaemonID     placement.DaemonID
+	DaemonEpoch  placement.DaemonEpoch
+	AcquiredAt   int64
+	RefreshedAt  int64
+}
+
+// ChannelLock owns the single-row channel_lock table.
+//
+// L1.4 + T3 semantics:
+//   - At-most-one row per channel sqlite (row keyed by channel_id, but
+//     since each channel has its own sqlite, the row is effectively
+//     singleton).
+//   - INSERT happens during create_channel ACK preparation (lifecycle/create).
+//   - UpgradeEpoch bumps fencing_token / owner_epoch when a reclaim wins.
+//   - RefreshDaemon bumps daemon_epoch on every daemon process start
+//     (regardless of whether ownership changes) so stale worker IPC
+//     after daemon restart fails fence_check.
+type ChannelLock struct {
+	db *sql.DB
+}
+
+// NewChannelLock returns a *ChannelLock bound to a channel sqlite.
+func NewChannelLock(db *sql.DB) *ChannelLock { return &ChannelLock{db: db} }
+
+// Get returns the single channel_lock row.
+// Returns ok=false when no row exists (channel never bootstrapped).
+func (l *ChannelLock) Get(ctx context.Context) (ChannelLockRow, bool, error) {
+	const q = `SELECT channel_id, fencing_token, owner_epoch, daemon_id, daemon_epoch,
+	                 acquired_at, refreshed_at
+	            FROM channel_lock LIMIT 1`
+	var row ChannelLockRow
+	var (
+		cid, did string
+		ft, oe   int64
+		de       int64
+	)
+	err := l.db.QueryRowContext(ctx, q).Scan(&cid, &ft, &oe, &did, &de,
+		&row.AcquiredAt, &row.RefreshedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ChannelLockRow{}, false, nil
+	}
+	if err != nil {
+		return ChannelLockRow{}, false, fmt.Errorf("store: lock get: %w", err)
+	}
+	row.ChannelID = channel.ID(cid)
+	row.FencingToken = placement.FencingToken(ft)
+	row.OwnerEpoch = placement.OwnerEpoch(oe)
+	row.DaemonID = placement.DaemonID(did)
+	row.DaemonEpoch = placement.DaemonEpoch(de)
+	return row, true, nil
+}
+
+// Insert creates the channel_lock row. Fails if a row already exists.
+// Caller (lifecycle/create.go) handles the "exists with matching
+// fencing_token" idempotent path BEFORE calling Insert.
+func (l *ChannelLock) Insert(ctx context.Context, row ChannelLockRow) error {
+	if row.ChannelID == "" {
+		return errors.New("store: channel_lock insert: empty channel_id")
+	}
+	const q = `INSERT INTO channel_lock
+	   (channel_id, fencing_token, owner_epoch, daemon_id, daemon_epoch, acquired_at, refreshed_at)
+	   VALUES (?, ?, ?, ?, ?, ?, ?)`
+	if _, err := l.db.ExecContext(ctx, q,
+		string(row.ChannelID), int64(row.FencingToken), int64(row.OwnerEpoch),
+		string(row.DaemonID), int64(row.DaemonEpoch),
+		row.AcquiredAt, row.RefreshedAt,
+	); err != nil {
+		return fmt.Errorf("store: channel_lock insert: %w", err)
+	}
+	return nil
+}
+
+// UpgradeEpoch bumps fencing_token / owner_epoch when a reclaim wins
+// (or when a stale daemon is being reclaimed by a newer create_channel).
+// Rejects (returns no rows affected → ok=false) when the existing
+// fencing_token is already >= newToken (CAS guard).
+func (l *ChannelLock) UpgradeEpoch(
+	ctx context.Context,
+	newToken placement.FencingToken,
+	newOwnerEpoch placement.OwnerEpoch,
+	newDaemonID placement.DaemonID,
+	newDaemonEpoch placement.DaemonEpoch,
+	refreshedAt int64,
+) (bool, error) {
+	const q = `UPDATE channel_lock
+	             SET fencing_token=?, owner_epoch=?, daemon_id=?, daemon_epoch=?,
+	                 refreshed_at=?
+	             WHERE fencing_token < ?`
+	res, err := l.db.ExecContext(ctx, q,
+		int64(newToken), int64(newOwnerEpoch), string(newDaemonID), int64(newDaemonEpoch),
+		refreshedAt, int64(newToken))
+	if err != nil {
+		return false, fmt.Errorf("store: channel_lock upgrade: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// RefreshDaemon updates daemon_epoch + refreshed_at without changing
+// fencing_token or owner_epoch. Called during boot phase 1 for every
+// channel the daemon claims to own, so stale worker IPC fails
+// fence_check immediately.
+func (l *ChannelLock) RefreshDaemon(
+	ctx context.Context,
+	daemonEpoch placement.DaemonEpoch,
+	refreshedAt int64,
+) error {
+	const q = `UPDATE channel_lock SET daemon_epoch=?, refreshed_at=?`
+	if _, err := l.db.ExecContext(ctx, q, int64(daemonEpoch), refreshedAt); err != nil {
+		return fmt.Errorf("store: channel_lock refresh daemon: %w", err)
+	}
+	return nil
+}
+
+// ValidateWrite is the fencing gate: every channel-sqlite mutation MUST
+// pass this check (or be executed inside a transaction that called this
+// first). Returns nil when the supplied fencing_token + daemon_epoch
+// match the stored row; non-nil error otherwise.
+func (l *ChannelLock) ValidateWrite(
+	ctx context.Context,
+	fencingToken placement.FencingToken,
+	daemonEpoch placement.DaemonEpoch,
+) error {
+	row, ok, err := l.Get(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("store: channel_lock missing — channel not bootstrapped")
+	}
+	if row.FencingToken != fencingToken {
+		return fmt.Errorf("store: fencing token mismatch (have=%d got=%d)",
+			row.FencingToken, fencingToken)
+	}
+	if row.DaemonEpoch != daemonEpoch {
+		return fmt.Errorf("store: daemon_epoch mismatch (have=%d got=%d)",
+			row.DaemonEpoch, daemonEpoch)
+	}
+	return nil
+}
