@@ -57,6 +57,7 @@ package v4tool
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -262,18 +263,39 @@ func (w *wrapper) Execute(ctx context.Context, params json.RawMessage) (types.To
 	respRes, respWErr := pkgharness.InWorkerBus(ctx, w.cfg.Deps, respEnv, w.callerCtxAsTool())
 	switch {
 	case respWErr != nil:
+		// Infrastructure failure persisting the response row (sql / ctx
+		// done). The inner side effect already happened, but the channel
+		// log has no record of the outcome. Do NOT Commit the ledger row
+		// so audit reflects the half-completed turn, and surface the
+		// error so the upper layer can react (codex t96 critical: prior
+		// implementation committed unconditionally, which silently broke
+		// the exactly-once side-effect promise on the next replay turn).
 		w.cfg.Logger.Error("v4tool.wrapper.response.infra",
 			"type", w.cfg.TypeName, "id", respEnv.ID, "err", respWErr.Error())
+		return w.makeErrorResult("harness_infra_error", respWErr.Error()), respWErr
 	case !respRes.OK:
 		reason, detail := unwrapReject(respRes.Error)
-		w.cfg.Logger.Warn("v4tool.wrapper.response.reject",
-			"type", w.cfg.TypeName, "id", respEnv.ID, "reason", reason, "detail", detail)
+		// terminal_duplicate is a *successful* idempotent path —
+		// another writer already persisted an equivalent terminal
+		// response. The wrapper still commits the ledger row because
+		// the canonical outcome is in the store. Every other reject is
+		// a real protocol failure (schema_violation / unknown_type /
+		// audience_invalid / ...) and MUST leave the ledger row in
+		// `reserved` state for replay / audit.
+		if respRes.Error == nil || respRes.Error.Reason != v4types.HarnessTerminalDuplicate {
+			w.cfg.Logger.Warn("v4tool.wrapper.response.reject",
+				"type", w.cfg.TypeName, "id", respEnv.ID, "reason", reason, "detail", detail)
+			return w.makeErrorResult(reason, detail), nil
+		}
+		w.cfg.Logger.Info("v4tool.wrapper.response.terminal_duplicate",
+			"type", w.cfg.TypeName, "id", respEnv.ID, "detail", detail)
 	}
 
 	// ---- Step 5: ledger.Commit --------------------------------------
+	// Only reached on OK or terminal_duplicate (both are canonical
+	// outcomes — the response row, or an equivalent prior row, is
+	// durable). Commit failures are observability-only.
 	if cerr := ledger.Commit(ctx, w.cfg.LedgerExec, ledgerKey, w.cfg.NowSec()); cerr != nil {
-		// Commit failure is observability-only — the message rows are
-		// already canonical. Log + continue.
 		w.cfg.Logger.Warn("v4tool.wrapper.ledger_commit",
 			"type", w.cfg.TypeName, "ledger_key", ledgerKey, "err", cerr.Error())
 	}
@@ -563,14 +585,13 @@ func (w *wrapper) replayFromPriorResponse(
 }
 
 // isNoRows reports whether err is the canonical "no row" error from
-// the database/sql layer. We string-match because action_ledger does
-// the same trick to avoid importing the sql.ErrNoRows sentinel into
-// every helper.
+// the database/sql layer. Uses errors.Is(err, sql.ErrNoRows) so wrapper
+// errors (`fmt.Errorf("...: %w", sql.ErrNoRows)`) and any future
+// driver-level wrappers still resolve correctly — string-matching the
+// stdlib's internal text is fragile across Go versions (claude 96-1
+// major: T103 / FIX C).
 func isNoRows(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "sql: no rows in result set")
+	return errors.Is(err, sql.ErrNoRows)
 }
 
 // unwrapReject extracts the reason / detail strings from a harness

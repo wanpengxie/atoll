@@ -65,6 +65,7 @@ func TestHarnessRejectHTTPStatus(t *testing.T) {
 		HarnessWorkerFencingStale:         410,
 		HarnessEngineACLDenied:            403,
 		HarnessMessageIDConflict:          409,
+		HarnessChannelMismatch:            400,
 	}
 	for r, want := range cases {
 		if got := r.HTTPStatus(); got != want {
@@ -124,7 +125,7 @@ func TestReasonInterface(t *testing.T) {
 // MUST update this test to acknowledge the closed-set change.
 func TestReasonCardinalities(t *testing.T) {
 	t.Parallel()
-	if got, want := len(AllHarnessRejectReasons), 19; got != want {
+	if got, want := len(AllHarnessRejectReasons), 20; got != want {
 		t.Errorf("len(AllHarnessRejectReasons) = %d, want %d", got, want)
 	}
 	if got, want := len(AllInstallReasons), 7; got != want {

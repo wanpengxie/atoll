@@ -262,6 +262,20 @@ func TestWrite_Step2_ResponseMissingParentID(t *testing.T) {
 	mustReject(t, err, v4types.HarnessResponseMissingParentID)
 }
 
+// TestWrite_Step2_ChannelMismatch covers the FIX-3 R1 requirement
+// (T103 / codex t91 critical): a binding bound to channel A MUST
+// reject an envelope addressed to channel B with `channel_mismatch`,
+// not silently accept it as registry/audience miss in subsequent
+// steps. Deps.ChannelID is the authoritative channel; envelope is
+// caller-supplied untrusted input.
+func TestWrite_Step2_ChannelMismatch(t *testing.T) {
+	f := newFixture(t)
+	env := validEvent()
+	env.ChannelID = "ch-other"
+	_, err := Write(context.Background(), f.deps, env, validCallerCtx())
+	mustReject(t, err, v4types.HarnessChannelMismatch)
+}
+
 // ---------------------------------------------------------------------------
 // Step 3 — sender × caller + actor_registry + fencing
 // ---------------------------------------------------------------------------

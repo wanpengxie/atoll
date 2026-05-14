@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coagent-ai/daemon-go/internal/store"
 )
@@ -174,6 +175,71 @@ func TestSQLiteQueryTool_Params(t *testing.T) {
 	rows := res.Value.Value.(map[string]any)["rows"].([][]any)
 	if len(rows) != 1 || rows[0][0] != "alice" {
 		t.Fatalf("unexpected rows: %v", rows)
+	}
+}
+
+// TestSQLiteQueryTool_PerQueryTimeout asserts FIX-3 R1 / FIX D
+// (T103 / claude 96-2 major): a runaway SELECT MUST surface as
+// a structured IsError result whose reason maps to the deadline
+// path, not block the worker until ctx cancellation. We pin the
+// tool's per-query timeout to 1ms and drive a deterministically
+// expensive WITH RECURSIVE that produces millions of rows so the
+// driver definitely observes the deadline mid-iteration.
+func TestSQLiteQueryTool_PerQueryTimeout(t *testing.T) {
+	t.Parallel()
+	db, err := store.OpenChannel(context.Background(),
+		filepath.Join(t.TempDir(), "messages.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	tool := &SQLiteQueryTool{db: db, timeout: 1 * time.Millisecond}
+	// Recursive CTE that walks 5M rows — orders of magnitude over the
+	// 1ms budget so the driver/iterator must observe the deadline.
+	heavy := `WITH RECURSIVE r(n) AS (
+	  SELECT 1
+	  UNION ALL
+	  SELECT n+1 FROM r WHERE n < 5000000
+	)
+	SELECT count(*) FROM r`
+	body, _ := json.Marshal(map[string]any{"sql": heavy})
+
+	start := time.Now()
+	res, err := tool.Execute(context.Background(), body)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Execute should NOT return infra error (it surfaces via IsError): %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected IsError=true on per-query timeout, got %+v", res.Value.Value)
+	}
+	val := res.Value.Value.(map[string]any)
+	reason, _ := val["reason"].(string)
+	if reason != "sqlite_query_failed" && reason != "sqlite_query_iter_failed" {
+		t.Fatalf("reason = %q, want sqlite_query_failed or sqlite_query_iter_failed", reason)
+	}
+	msg, _ := val["message"].(string)
+	if !strings.Contains(strings.ToLower(msg), "context") && !strings.Contains(strings.ToLower(msg), "deadline") && !strings.Contains(strings.ToLower(msg), "interrupt") {
+		t.Fatalf("message %q does not look like a deadline/cancel surface", msg)
+	}
+	// Must respect the 1ms budget — give a generous 2s upper bound for
+	// CI jitter. A regression that drops the per-query timeout would
+	// stall on the 5M-row recursion (seconds → minutes).
+	if elapsed > 2*time.Second {
+		t.Fatalf("Execute took %s, well beyond the 1ms budget — per-query timeout did not fire", elapsed)
+	}
+}
+
+// TestSQLiteQueryTool_DefaultTimeoutSet confirms NewSQLiteQueryTool
+// initialises the timeout field to the documented default (so
+// production callers do not accidentally get a zero-deadline tool
+// whose ctx.WithTimeout(0) fails immediately).
+func TestSQLiteQueryTool_DefaultTimeoutSet(t *testing.T) {
+	t.Parallel()
+	tool := NewSQLiteQueryTool(nil)
+	if tool.timeout != defaultSQLiteQueryTimeout {
+		t.Fatalf("default timeout = %s, want %s", tool.timeout, defaultSQLiteQueryTimeout)
 	}
 }
 

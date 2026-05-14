@@ -405,12 +405,13 @@ func (noopLogger) Warn(string, ...any)  {}
 func (noopLogger) Error(string, ...any) {}
 
 // isNoRows mirrors v4tool.isNoRows — we cannot import the wrapper's
-// private helper without exporting it, and string-matching is cheap.
+// private helper without exporting it. Uses errors.Is(err, sql.ErrNoRows)
+// so wrapper errors (`fmt.Errorf("...: %w", sql.ErrNoRows)`) and future
+// driver-level wrappers resolve correctly; string-matching the stdlib's
+// internal text is fragile across Go releases (claude 96-1 major:
+// T103 / FIX C).
 func isNoRows(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "sql: no rows in result set")
+	return errors.Is(err, sql.ErrNoRows)
 }
 
 // autoApproveFile + autoApproveShell are the go-kimi Approver callbacks

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
 )
@@ -18,10 +19,19 @@ import (
 // truncate anyway).
 const MaxSQLiteQueryRows = 1_000
 
+// defaultSQLiteQueryTimeout caps a single sqlite.query Execute. Aligned
+// with the M1.3 type_registry MaxPendingMs default (5s) per the harness
+// stalled-timeout convention — but applied here as a driver-level
+// deadline so a runaway SELECT cannot keep the worker conn busy past
+// the budget (claude 96-2 major: T103 / FIX D).
+const defaultSQLiteQueryTimeout = 5 * time.Second
+
 // NewSQLiteQueryTool builds a read-only sqlite.query tool. The tool
 // answers `{sql, params?}` requests by running QueryContext on the
 // channel-local sqlite handle and serialising the rows back as
-// `{columns, rows}`.
+// `{columns, rows}`. Each Execute is wrapped in a per-call
+// `context.WithTimeout(defaultSQLiteQueryTimeout)` so a slow query
+// surfaces a deadline_exceeded error instead of hanging the worker.
 //
 // Hard contracts:
 //   - SQL MUST start with SELECT or WITH (case-insensitive); everything
@@ -34,13 +44,17 @@ const MaxSQLiteQueryRows = 1_000
 // go-kimi does not ship an sqlite tool, so this is the M1.3 baseline
 // implementation per ticket T11 §交付物 "自实现 sqlite.query tool".
 func NewSQLiteQueryTool(db *sql.DB) *SQLiteQueryTool {
-	return &SQLiteQueryTool{db: db}
+	return &SQLiteQueryTool{db: db, timeout: defaultSQLiteQueryTimeout}
 }
 
 // SQLiteQueryTool implements the go-kimi tools.Tool interface for the
 // `sqlite.query` v4 type.
 type SQLiteQueryTool struct {
 	db *sql.DB
+	// timeout caps one Execute call. Constructor defaults to
+	// defaultSQLiteQueryTimeout; tests set a short value directly to
+	// exercise the deadline path.
+	timeout time.Duration
 }
 
 // Name reports the tool's go-kimi-facing identity. The v4 wrapper
@@ -84,10 +98,22 @@ func (t *SQLiteQueryTool) Execute(ctx context.Context, raw json.RawMessage) (typ
 		return failResult(perr.reason, perr.detail), nil
 	}
 
+	// Per-query deadline (FIX D / claude 96-2 major). We bound the
+	// driver call directly here — type_registry MaxPendingMs is the
+	// harness's stalled-pending observer, not a driver deadline. A
+	// nonpositive timeout (test forgetting to set the field) falls
+	// back to the documented default.
+	queryTimeout := t.timeout
+	if queryTimeout <= 0 {
+		queryTimeout = defaultSQLiteQueryTimeout
+	}
+	qctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
 	driverArgs := make([]any, len(args.Params))
 	copy(driverArgs, args.Params)
 
-	rows, err := t.db.QueryContext(ctx, args.SQL, driverArgs...)
+	rows, err := t.db.QueryContext(qctx, args.SQL, driverArgs...)
 	if err != nil {
 		return failResult("sqlite_query_failed", err.Error()), nil
 	}

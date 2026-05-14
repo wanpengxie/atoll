@@ -60,12 +60,23 @@ func WithImmediate(ctx context.Context, db *sql.DB, fn func(context.Context, *sq
 	}
 
 	defer func() {
-		// If the body errored (or panicked), roll back. Otherwise
-		// the COMMIT below already ran.
+		// Panic path: recover so we can run ROLLBACK against the
+		// dedicated conn before re-raising. Previously the panic
+		// bypassed the err != nil branch below, leaving the conn
+		// returning to the pool with an open IMMEDIATE transaction;
+		// the next acquirer would crash on "cannot start a
+		// transaction within a transaction" (claude 85-2 major:
+		// T103 / FIX E). We rebind ctx to context.Background() so
+		// shutdown / cancellation does not also skip the rollback.
+		if r := recover(); r != nil {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+			panic(r)
+		}
+		// If the body errored, roll back. Otherwise the COMMIT below
+		// already ran. Best-effort: if sqlite reports "no transaction
+		// active" because COMMIT half-succeeded, we still want the
+		// original err to bubble up.
 		if err != nil {
-			// Best-effort rollback. If sqlite reports "no transaction
-			// active" because COMMIT half-succeeded, we still want
-			// the original err to bubble up.
 			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()

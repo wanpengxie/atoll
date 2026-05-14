@@ -48,10 +48,12 @@ type Deps struct {
 	WorkerLocks WorkerLockLookup // may be nil when fencing not applicable
 	Dispatcher  Dispatcher       // defaults to NoopDispatcher
 	Clock       Clock            // defaults to UnixMilli now()
-	// ChannelID is the channel this Deps is bound to. Step 7 uses it to
-	// reject doc_refs crossing channel boundaries; Step 0 onward never
-	// rewrites envelope.channel_id (callers must supply the matching
-	// value or Step 2 rejects via missing_required_field).
+	// ChannelID is the channel this Deps is bound to. Step 2 enforces
+	// envelope.channel_id == Deps.ChannelID — any cross-channel write
+	// is rejected with `channel_mismatch` before reaching the store.
+	// Step 7 reuses the same value to reject doc_refs that point at a
+	// different channel root. Step 0 normalize never rewrites
+	// envelope.channel_id; callers MUST supply the matching value.
 	ChannelID string
 }
 
@@ -126,6 +128,15 @@ func Write(
 	// ----- Step 2: Required fields + ADT enum + One Law pairing ------
 	if err := checkRequiredFields(env); err != nil {
 		return nil, err
+	}
+	// channel_id binding check (L1 §10.2.1 Step 2 tail). Caught here so
+	// the cross-channel envelope never reaches Step 3+ identity/registry
+	// lookups (which run against this binding's channel-local stores
+	// and would silently treat a misrouted envelope as a registry miss).
+	if env.ChannelID != deps.ChannelID {
+		return nil, rejectf(v4types.HarnessChannelMismatch,
+			"envelope.channel_id %q does not match binding channel %q",
+			env.ChannelID, deps.ChannelID)
 	}
 
 	// ----- Step 3: Sender identity + actor_registry + fencing --------

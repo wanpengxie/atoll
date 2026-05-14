@@ -39,3 +39,24 @@ func TestInWorkerBus_RejectIsResultErrNotException(t *testing.T) {
 		t.Fatalf("IsReject should return true")
 	}
 }
+
+// TestInWorkerBus_ChannelMismatch_RejectedNotInfra mirrors the FIX-3 R1
+// requirement at the in_worker_bus binding edge: a binding bound to
+// `ch-1` MUST surface a cross-channel envelope as a structured reject
+// (channel_mismatch), not as an infrastructure error and not by
+// silently routing it through. Matches codex t91 critical acceptance.
+func TestInWorkerBus_ChannelMismatch_RejectedNotInfra(t *testing.T) {
+	f := newFixture(t)
+	env := validEvent()
+	env.ChannelID = "ch-other" // binding is bound to "ch-1"
+	res, err := InWorkerBus(context.Background(), f.deps, env, validCallerCtx())
+	if err != nil {
+		t.Fatalf("channel_mismatch must NOT surface as error (L2 §3.6.2): %v", err)
+	}
+	if res.OK {
+		t.Fatalf("expected OK=false for cross-channel envelope")
+	}
+	if res.Error == nil || res.Error.Reason != v4types.HarnessChannelMismatch {
+		t.Fatalf("expected channel_mismatch reject, got %+v", res.Error)
+	}
+}

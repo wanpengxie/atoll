@@ -478,6 +478,143 @@ func TestExecute_InnerError_LogsResponseFailure(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
+// Response-write infra failure: ledger MUST stay reserved + inner runs once
+// -----------------------------------------------------------------------------
+
+// failingResponseStore wraps a pkgharness.Store and surfaces a fixed
+// infrastructure error from InsertMessage when the envelope kind is
+// `response`. Request inserts and all read paths pass through to the
+// underlying store unchanged so the harness's earlier steps (Step 0.5
+// dedupe / Step 8 parent lookup) behave normally.
+//
+// The responses counter is shared via *atomic.Int32 so the tx-scoped
+// inner wrapper handed to WithTerminalTx increments the same counter
+// the outer fixture inspects.
+type failingResponseStore struct {
+	inner     pkgharness.Store
+	responses *atomic.Int32
+	injectErr error
+}
+
+func newFailingResponseStore(inner pkgharness.Store, injectErr error) *failingResponseStore {
+	return &failingResponseStore{
+		inner:     inner,
+		responses: &atomic.Int32{},
+		injectErr: injectErr,
+	}
+}
+
+func (s *failingResponseStore) FindByID(ctx context.Context, id string) (*v4types.Envelope, error) {
+	return s.inner.FindByID(ctx, id)
+}
+func (s *failingResponseStore) FindParent(ctx context.Context, id string) (*v4types.Envelope, error) {
+	return s.inner.FindParent(ctx, id)
+}
+func (s *failingResponseStore) FindTerminalResponse(ctx context.Context, parentID string) (*v4types.Envelope, error) {
+	return s.inner.FindTerminalResponse(ctx, parentID)
+}
+func (s *failingResponseStore) InsertMessage(ctx context.Context, env *v4types.Envelope, tsReceived int64) error {
+	if env.Kind == v4types.KindResponse {
+		s.responses.Add(1)
+		return s.injectErr
+	}
+	return s.inner.InsertMessage(ctx, env, tsReceived)
+}
+func (s *failingResponseStore) WithTerminalTx(ctx context.Context, body func(tx pkgharness.Store) error) error {
+	// Wrap the tx-bound store with the same response-fail policy so
+	// terminal responses (kind=response IsTerminal=true) also surface
+	// the infra error. The counter is shared so test assertions see
+	// the tx-scoped attempt.
+	return s.inner.WithTerminalTx(ctx, func(tx pkgharness.Store) error {
+		return body(&failingResponseStore{inner: tx, injectErr: s.injectErr, responses: s.responses})
+	})
+}
+
+// TestExecute_ResponseInfraError_LedgerNotCommitted is the FIX-3 R1
+// regression (T103 / codex t96 critical) asserting:
+//
+//   - inner.Execute runs exactly once even though the response write
+//     surfaces an infrastructure error;
+//   - the wrapper returns the infra error to the caller (not the
+//     possibly-successful inner result) so the upper layer reacts;
+//   - the action_ledger row stays in `reserved` state — Commit MUST
+//     NOT run, so audit + a future "did this finish?" observer can
+//     tell the turn never completed.
+//
+// Prior implementation logged-and-continued, then committed the ledger
+// unconditionally. The next replay turn would see status=committed,
+// look for the response row (missing), fall through, and re-run inner
+// — duplicating the external side effect.
+func TestExecute_ResponseInfraError_LedgerNotCommitted(t *testing.T) {
+	t.Parallel()
+	fix := newFixture(t)
+
+	injected := errors.New("synthetic response store infra failure")
+	wrappedStore := newFailingResponseStore(fix.deps.Store, injected)
+	deps := fix.deps
+	deps.Store = wrappedStore
+
+	tool := &fakeTool{
+		name: "read_file", description: "read", schema: json.RawMessage(`{}`),
+		nextResult: types.ToolResult{
+			Name:  "read_file",
+			Value: types.ToolReturnValue{Value: map[string]any{"content": "hi"}},
+		},
+	}
+	cfg := fix.baseConfig()
+	cfg.Deps = deps
+	w, err := V4ize(tool, cfg)
+	if err != nil {
+		t.Fatalf("V4ize: %v", err)
+	}
+
+	res, err := w.Execute(context.Background(), json.RawMessage(`{"path":"a.txt"}`))
+	if err == nil {
+		t.Fatalf("expected infra error to surface, got nil; result=%+v", res)
+	}
+	if !errors.Is(err, injected) && !strings.Contains(err.Error(), "synthetic response store infra failure") {
+		t.Fatalf("expected error to wrap injected store error, got %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected IsError=true on response infra failure")
+	}
+	val, ok := res.Value.Value.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map error value, got %T", res.Value.Value)
+	}
+	if val["reason"] != "harness_infra_error" {
+		t.Fatalf("reason = %v, want harness_infra_error", val["reason"])
+	}
+
+	if got := tool.calls.Load(); got != 1 {
+		t.Fatalf("inner.Execute call count = %d, want exactly 1", got)
+	}
+	if got := wrappedStore.responses.Load(); got != 1 {
+		t.Fatalf("response insert attempt count = %d, want exactly 1", got)
+	}
+
+	// Request row landed (so replay can find the existing envelope id
+	// via Reserve); response row did not (injected error).
+	if got := fix.countMessages(t, "request", "fs.read"); got != 1 {
+		t.Fatalf("expected 1 request row, got %d", got)
+	}
+	if got := fix.countMessages(t, "response", "fs.read"); got != 0 {
+		t.Fatalf("response row must not persist after infra failure, got %d", got)
+	}
+
+	// Ledger row stays reserved — FIX B's core invariant.
+	requestRow := fix.db.QueryRowContext(context.Background(),
+		`SELECT id FROM messages WHERE kind = 'request' AND type = 'fs.read'`)
+	var requestID string
+	if err := requestRow.Scan(&requestID); err != nil {
+		t.Fatalf("locate request: %v", err)
+	}
+	if status := fix.ledgerStatus(t, requestID); status != "reserved" {
+		t.Fatalf("ledger status = %q, want reserved (Commit must NOT run on response infra failure)", status)
+	}
+}
+
+// -----------------------------------------------------------------------------
 // Metadata pass-through
 // -----------------------------------------------------------------------------
 

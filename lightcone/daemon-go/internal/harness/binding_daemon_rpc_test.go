@@ -123,6 +123,26 @@ func TestHTTP_SenderMismatch_403(t *testing.T) {
 	}
 }
 
+// TestHTTP_ChannelMismatch_400 covers the FIX-3 R1 daemon_rpc surface
+// (T103 / codex t91 critical end-to-end check): a binding bound to
+// "ch-1" MUST reject an envelope addressed to a different channel with
+// HTTP 400 + `channel_mismatch`, NOT route it through.
+func TestHTTP_ChannelMismatch_400(t *testing.T) {
+	srv, client := httpFixture(t)
+	env := newSqliteEnv("http-cm-1")
+	env.ChannelID = "ch-other"
+	body := MessageSendRequest{Params: *env}
+	resp := postRPC(t, srv, client, "alice-token", body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+	var e MessageSendError
+	decode(t, resp, &e)
+	if e.Error.Reason != v4types.HarnessChannelMismatch {
+		t.Fatalf("expected channel_mismatch, got %q", e.Error.Reason)
+	}
+}
+
 func TestHTTP_MissingRequiredField_400(t *testing.T) {
 	srv, client := httpFixture(t)
 	env := newSqliteEnv("")
