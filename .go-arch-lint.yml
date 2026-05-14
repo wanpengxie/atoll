@@ -25,9 +25,6 @@ exclude:
   # out of architectural scope (includes the former agent-binary / cli-node
   # / lightcone-* trees after T9 archiving).
   - archive
-  # xhs-cli lives in a separate go module; the root go-arch-lint shouldn't
-  # reach into it.
-  - xhs-cli
 
 excludeFiles:
   # Test files don't carry architectural constraints (per spec §T2

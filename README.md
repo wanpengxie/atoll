@@ -92,7 +92,7 @@ Server 本地 sqlite：`./data/server.db`（demo 自用，无数据迁移；销�
 ## 协议合同
 
 - v4 envelope / kind / reason / actor 类型：`kernel/message/`（Go）
-- 6 大 ownership invariants：`.go-arch-lint.yaml` 顶层配置 + `make lint-arch`
+- 6 大 ownership invariants：`.go-arch-lint.yml` 顶层配置 + `make lint-arch`
 - 禁用词约束（mcp / dogfood / 1studio / lightcone）：`scripts/lint-banned-words.sh`
 - 文档交叉引用校验：`scripts/lint-docs.sh`
 

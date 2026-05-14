@@ -1,6 +1,6 @@
 // Package worker is the subprocess runtime for coagent workers.
 //
-// HARD BOUNDARY (codex review #9, enforced by .go-arch-lint.yaml):
+// HARD BOUNDARY (codex review #9, enforced by .go-arch-lint.yml):
 //
 //   - NO import of database/sql
 //   - NO import of github.com/mattn/go-sqlite3 / modernc.org/sqlite

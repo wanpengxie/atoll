@@ -25,7 +25,7 @@
 //     server (length-prefixed JSON over pipes) +
 //     fencing token + daemon_epoch enforcement.
 //   - runtime/worker       — worker subprocess main loop. STRICT IPC ONLY.
-//     No sqlite. Enforced by .go-arch-lint.yaml.
+//     No sqlite. Enforced by .go-arch-lint.yml.
 //   - runtime/supervisor   — lease lifecycle (vs heartbeat 30s) + spawner
 //     abstraction.
 //   - runtime/scheduler    — message deliver + long-pending Step 1/2/3 +
@@ -33,7 +33,7 @@
 //   - runtime/bootstrap    — 9-step channel bootstrap saga + crash
 //     reconcile.
 //
-// Boundary rules (enforced by .go-arch-lint.yaml at repo root):
+// Boundary rules (enforced by .go-arch-lint.yml at repo root):
 //
 //   - runtime/* MAY import kernel/* and runtime/* (self) and runtime_worker.
 //   - runtime/worker MUST NOT import database/sql, mattn/go-sqlite3,

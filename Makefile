@@ -11,7 +11,8 @@
 SHELL := /usr/bin/env bash
 
 .PHONY: install build build-go build-ui build-ext test lint migrate dev clean \
-        lint-go lint-arch lint-banned-words lint-kernel-protocol lint-docs
+        lint-go lint-arch lint-banned-words lint-kernel-protocol lint-docs \
+        fmt-check
 
 # v5 Go 二进制（cmd/<bin>/main.go 由 T6/T7 落地）。
 GO_BINARIES := server daemon worker cli
@@ -24,16 +25,16 @@ install:
 	@if [ -f go.mod ]; then go mod download; else echo "[skip] root go.mod absent (T2 pending)"; fi
 	@echo "[install] pnpm install"
 	pnpm install
-	@echo "[install] go install lint / migrate tools (best-effort)"
+	@echo "[install] go install lint / migrate tools"
+	@# fail-fast: if a required tool cannot install, exit non-zero so CI can
+	@# enforce the gate. M1.5-T8 acceptance: silent [warn] fallbacks were
+	@# letting the lint gate pass even when tools were missing.
 	@command -v golangci-lint >/dev/null 2>&1 || \
-	  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest || \
-	  echo "[warn] golangci-lint install failed; install manually"
+	  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 	@command -v go-arch-lint >/dev/null 2>&1 || \
-	  go install github.com/fe3dback/go-arch-lint@latest || \
-	  echo "[warn] go-arch-lint install failed; install manually"
+	  go install github.com/fe3dback/go-arch-lint@latest
 	@command -v migrate >/dev/null 2>&1 || \
-	  go install -tags 'sqlite3' github.com/golang-migrate/migrate/v4/cmd/migrate@latest || \
-	  echo "[warn] golang-migrate install failed; install manually"
+	  go install -tags 'sqlite3' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
 
 # ----------------------------------------------------------------------------
 # build — Go binaries + UI + chrome extension
@@ -83,36 +84,58 @@ test:
 	@pnpm -r --if-present test
 
 # ----------------------------------------------------------------------------
-# lint — 5 类 lint 全跑（spec §T8）
-#   1) golangci-lint        Go 代码风格 / 静态检查
-#   2) go-arch-lint         component-level import 边界（T2 提供 .go-arch-lint.yaml）
-#   3) banned-words         分层文本扫描（CODE_DIRS / ACTIVE_SPEC 严格 + 历史 grandfather）
-#   4) 协议合规             kernel/ Go test（T1 提供 envelope_test / kind_test / reason_test / contract_test）
-#   5) 文档 lint            .dalek/pm 文档交叉引用路径校验
+# lint — 6 类 lint 全跑（spec §T8）
+#   1) fmt-check            gofmt 格式一致性（CI 拒不规整代码）
+#   2) golangci-lint        Go 代码风格 / 静态检查
+#   3) go-arch-lint         component-level import 边界（T2 提供 .go-arch-lint.yml）
+#   4) banned-words         分层文本扫描（CODE_DIRS / ACTIVE_SPEC 严格 + 历史 grandfather）
+#   5) 协议合规             kernel/ Go test（T1 提供 envelope_test / kind_test / reason_test / contract_test）
+#   6) 文档 lint            .dalek/pm 文档交叉引用路径校验
 # ----------------------------------------------------------------------------
-lint: lint-go lint-arch lint-banned-words lint-kernel-protocol lint-docs
+lint: fmt-check lint-go lint-arch lint-banned-words lint-kernel-protocol lint-docs
+
+# fmt-check — gofmt diff guard. Refuse to ship unformatted Go.
+# Fails fast (exit 1) when gofmt -l reports any file.
+fmt-check:
+	@if [ ! -f go.mod ]; then \
+	  echo "[skip] fmt-check: root go.mod absent"; \
+	  exit 0; \
+	fi
+	@echo "[fmt-check] gofmt -l ."
+	@offenders=$$(gofmt -l . 2>/dev/null); \
+	if [ -n "$$offenders" ]; then \
+	  echo "[fmt-check] gofmt offenders (run 'gofmt -w' on these):" >&2; \
+	  printf '  %s\n' $$offenders >&2; \
+	  exit 1; \
+	fi
 
 lint-go:
 	@# 范围：lint-go 覆盖根模块（kernel/ runtime/ adapters/ server/ cmd/ pkg/）。
 	@# M1.5 单栈：只有一个 go module，不会有第二个 go module。
+	@# fail-fast: tool 缺失直接 exit 1，让 CI gate 能 enforce（不再 [skip]）。
 	@if [ ! -f go.mod ]; then \
-	  echo "[skip] lint-go: root go.mod absent (T2 pending)"; \
-	elif ! command -v golangci-lint >/dev/null 2>&1; then \
-	  echo "[skip] lint-go: golangci-lint not installed; run 'make install' or 'go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest'"; \
-	else \
-	  echo "[lint-go] golangci-lint run ./..."; \
-	  golangci-lint run ./... || exit 1; \
+	  echo "[lint-go] root go.mod absent" >&2; \
+	  exit 1; \
 	fi
+	@if ! command -v golangci-lint >/dev/null 2>&1; then \
+	  echo "[lint-go] golangci-lint not installed; run 'make install' or 'go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest'" >&2; \
+	  exit 1; \
+	fi
+	@echo "[lint-go] golangci-lint run ./..."
+	@golangci-lint run ./...
 
 lint-arch:
-	@if [ ! -f .go-arch-lint.yaml ]; then \
-	  echo "[skip] .go-arch-lint.yaml not present (T2 pending)"; \
-	elif ! command -v go-arch-lint >/dev/null 2>&1; then \
-	  echo "[skip] go-arch-lint not installed; run 'make install'"; \
-	else \
-	  echo "[lint-arch] go-arch-lint check"; \
-	  go-arch-lint check --arch-file .go-arch-lint.yaml; \
+	@# fail-fast: tool / config 缺失都 exit 1（不再 [skip]）。
+	@if [ ! -f .go-arch-lint.yml ]; then \
+	  echo "[lint-arch] .go-arch-lint.yml not present" >&2; \
+	  exit 1; \
 	fi
+	@if ! command -v go-arch-lint >/dev/null 2>&1; then \
+	  echo "[lint-arch] go-arch-lint not installed; run 'make install'" >&2; \
+	  exit 1; \
+	fi
+	@echo "[lint-arch] go-arch-lint check"
+	@go-arch-lint check --arch-file .go-arch-lint.yml
 
 lint-banned-words:
 	@echo "[lint-banned-words] scripts/lint-banned-words.sh"
