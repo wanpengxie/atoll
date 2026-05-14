@@ -320,12 +320,23 @@ func (s *Service) transition(ctx context.Context, sessionID string, from, to Sta
 	return nil
 }
 
-// deriveToken returns an opaque random 32-byte token. The HMAC of
-// (session_id + channel_id + expiry) is NOT used as the token
-// directly — the token is purely random + the HMAC hash of the
-// random token is what we store. This matches the spec wording:
-// "HMAC over device_id + channel_id + expiry" describes the
-// DERIVATION KEY, not the token value itself.
+// deriveToken returns a random 32-byte opaque bearer token (hex-
+// encoded, 64 chars). The raw token is handed back to the device
+// once; the server persists only HMAC-SHA-256(raw, TokenSecret) via
+// hashToken (see below), so a compromised store row cannot be
+// replayed against the device WS endpoint.
+//
+// FIX-T10 spec alignment: an earlier draft of m1.5-tickets.md
+// described `token.go` as "HMAC over device_id + channel_id +
+// expiry". That wording suggested a deterministic derivation, which
+// would (a) leak token recoverability to anyone with the secret and
+// (b) make rotation a global event. The spec was updated alongside
+// this implementation to describe the actual model: random opaque
+// token + server-side HMAC at rest. The sessionID / channelID /
+// expiresMs parameters are kept on the signature for call-site
+// readability and forward compatibility (future versions may bind
+// the random token to a session-scoped MAC), but they are NOT mixed
+// into the token value itself.
 func (s *Service) deriveToken(sessionID string, channelID channel.ID, expiresMs int64) (string, error) {
 	buf := make([]byte, 32)
 	if _, err := io.ReadFull(s.rng, buf); err != nil {

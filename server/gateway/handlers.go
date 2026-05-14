@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -358,9 +357,6 @@ func (a *App) signHumanCaller(channelID, userID, actorID string, ts int64, nonce
 	mac.Write([]byte(nonce))
 	return hex.EncodeToString(mac.Sum(nil))
 }
-
-// ensure ts conversion compiles for non-test build.
-var _ = errors.New
 
 // nonceReader is the entropy source for newNonce. Defaults to
 // crypto/rand.Reader; tests swap in a failing reader to assert the

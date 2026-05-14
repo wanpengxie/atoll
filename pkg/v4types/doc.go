@@ -2,6 +2,14 @@
 // types most callers need (envelope schema, kind / sender_kind /
 // visibility enums, the three closed reason sets).
 //
+// This package is **kept for future SDK / CLI authors** — it gives
+// external code a stable, dependency-light import path that re-exports
+// the kernel/message types without forcing every downstream module to
+// take a transitive dependency on the rest of `kernel/`. Today the
+// in-tree binaries (server / daemon / worker / cli) already import it
+// for the same reason; tomorrow a hypothetical out-of-tree SDK or
+// third-party CLI plugin can do the same with a single import.
+//
 // All declarations are Go type aliases / value re-exports — there is
 // **zero runtime cost** to importing v4types vs kernel/message, and
 // every method set / interface satisfaction is preserved.
