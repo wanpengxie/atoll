@@ -518,9 +518,14 @@ func installChannel(
 				continue
 			}
 			loop, lerr := supervisor.New(channelDB, info.ChannelID, a.ActorID, spawner, supervisor.LoopConfig{
-				Period:   cfg.SupervisorPeriod,
-				LeaseTTL: cfg.LeaseTTL,
-				Logger:   logger,
+				Period:    cfg.SupervisorPeriod,
+				LeaseTTL:  cfg.LeaseTTL,
+				Logger:    logger,
+				AuthToken: cfg.AuthToken,
+				// DaemonURL intentionally left empty in M1.3: the in-process
+				// in_worker_bus binding doesn't need it; coagent CLI
+				// fallback wiring lands in a follow-up ticket once the
+				// daemon's externally-reachable URL is part of Config.
 			})
 			if lerr != nil {
 				_ = channelDB.Close()

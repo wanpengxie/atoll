@@ -45,6 +45,33 @@ type Worker interface {
 	Kill() error
 }
 
+// SpawnTrigger captures the message that woke the supervisor up enough
+// to spawn a worker. Per L2 §3.4.2 the trigger context (msg_id +
+// correlation_id + sender_kind) MUST flow into the worker so the
+// harness Step 3 can stamp parent_id / correlation_id on every emitted
+// envelope.
+//
+// All three fields are optional from the type's perspective — empty
+// means "no trigger known yet". The supervisor populates them from the
+// first backlog row in `acquireAndSpawn`; future trigger sources
+// (long_pending, future_scheduler) can populate them out-of-band.
+type SpawnTrigger struct {
+	// MsgID is the canonical messages.id of the trigger envelope. The
+	// worker uses it as the default parent_id of any reply.
+	MsgID string
+
+	// CorrelationID is the trigger envelope's correlation_id (empty when
+	// the trigger itself was a root). Per L1 §2.2.1 the harness uses
+	// this as the default correlation_id when the worker omits the
+	// field on emit.
+	CorrelationID string
+
+	// SenderKind is the actor_kind of the trigger sender (typically
+	// "agent" or "human"). Informational — used for logging and for the
+	// worker's prompt context.
+	SenderKind string
+}
+
 // SpawnContext is the turn-ctx the supervisor injects into every new
 // worker. The fields match L2 §3.4.2 ("Trigger Context 自动注入") +
 // §1.4.9 (fencing_token) + §1.4.10 (backlog scan result).
@@ -58,7 +85,28 @@ type SpawnContext struct {
 	AgentID      string
 	WorkerID     string
 	FencingToken int64
-	Backlog      []BacklogMessage
+
+	// Trigger is the message that motivated this spawn. Populated by
+	// the supervisor from the first backlog row when present; empty
+	// when the spawn is a maintenance / no-trigger boot. Per FIX-4 the
+	// worker MUST exit cleanly without driving agent.Run when both
+	// Trigger.MsgID is empty AND Backlog is empty.
+	Trigger SpawnTrigger
+
+	// AuthToken is the bearer token the worker uses when calling back
+	// into the daemon over HTTP (daemon_rpc binding fallback). Empty
+	// for in_worker_bus actors that never leave the process boundary.
+	AuthToken string
+
+	// DaemonURL is the daemon HTTP RPC endpoint. Optional — the worker
+	// fallback path (pkg/coagent CLI subprocesses) needs it; in-process
+	// in_worker_bus binding ignores it.
+	DaemonURL string
+
+	// Backlog is the L2 §1.4.10 backlog scan result — every message the
+	// worker MUST replay (in seq ASC order) before the spawn closes.
+	// Empty slice means "nothing to replay".
+	Backlog []BacklogMessage
 }
 
 // LoopConfig tunes the supervisor loop. Zero value gives the
@@ -85,6 +133,17 @@ type LoopConfig struct {
 	// Logger receives the structured "supervisor.*" events emitted
 	// across one Loop iteration. Defaults to slog.Default().
 	Logger *slog.Logger
+
+	// AuthToken is forwarded to every spawned worker as
+	// SpawnContext.AuthToken — the bearer token the worker attaches to
+	// daemon_rpc HTTP calls. Optional (in_worker_bus actors leave it
+	// empty).
+	AuthToken string
+
+	// DaemonURL is forwarded to every spawned worker as
+	// SpawnContext.DaemonURL — the daemon HTTP RPC endpoint used by
+	// the coagent CLI fallback path. Optional.
+	DaemonURL string
 }
 
 // Loop drives one (channel, agent) pair: it watches worker_locks,
@@ -312,7 +371,29 @@ func (l *Loop) acquireAndSpawn(ctx context.Context, now int64) error {
 		AgentID:      l.agentID,
 		WorkerID:     workerID,
 		FencingToken: lock.FencingToken,
+		AuthToken:    l.cfg.AuthToken,
+		DaemonURL:    l.cfg.DaemonURL,
 		Backlog:      backlog,
+	}
+	// Per L2 §3.4.2: populate Trigger from the first backlog row so the
+	// worker's harness can stamp parent_id / correlation_id without
+	// re-reading the message. Empty backlog → Trigger stays zero, the
+	// worker treats this as a "no-trigger" boot and exits cleanly.
+	if len(backlog) > 0 {
+		first := backlog[0]
+		corr := first.CorrelationID
+		if corr == "" {
+			// Per L1 §2.2.1 fall back to the trigger's own message id
+			// when the row's correlation_id column is NULL — the worker
+			// then propagates that value as the correlation_id of every
+			// reply.
+			corr = first.ID
+		}
+		sc.Trigger = SpawnTrigger{
+			MsgID:         first.ID,
+			SenderKind:    first.SenderKind,
+			CorrelationID: corr,
+		}
 	}
 	w, err := l.spawner.Spawn(ctx, sc)
 	if err != nil {

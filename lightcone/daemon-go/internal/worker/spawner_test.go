@@ -44,11 +44,11 @@ func runHelper(cmd string) {
 	switch cmd {
 	case "dump":
 		fmt.Printf("ARGS:%s\n", strings.Join(os.Args[1:], "|"))
-		// Only emit COAGENT_* + IN_WORKER env keys so the test does
+		// Only emit COAGENT_* + DAEMON_URL env keys so the test does
 		// not have to filter parent inheritance noise.
 		var env []string
 		for _, e := range os.Environ() {
-			if strings.HasPrefix(e, "COAGENT_") {
+			if strings.HasPrefix(e, "COAGENT_") || strings.HasPrefix(e, "DAEMON_URL=") {
 				env = append(env, e)
 			}
 		}
@@ -153,6 +153,114 @@ func TestExecSpawner_Spawn_PropagatesContext(t *testing.T) {
 	} {
 		if !strings.Contains(got, kv) {
 			t.Errorf("env missing %q; got=%q", kv, got)
+		}
+	}
+}
+
+// FIX-4 trigger / auth / daemon-url propagation: when the supervisor
+// hands a fully-populated SpawnContext, every Trigger field plus
+// AuthToken + DaemonURL must surface as both an argv flag and a
+// COAGENT_*/DAEMON_URL env var.
+func TestExecSpawner_Spawn_PropagatesTriggerAuth(t *testing.T) {
+	sp, err := NewExecSpawner(ExecSpawnerConfig{
+		BinaryPath:     helperPath(t),
+		ChannelWorkdir: "/tmp/ch-trig",
+		LeaseTTL:       45,
+		ExtraEnv:       []string{helperEnvVar + "=dump"},
+		InheritEnv:     true,
+	})
+	if err != nil {
+		t.Fatalf("NewExecSpawner: %v", err)
+	}
+
+	sc := supervisor.SpawnContext{
+		ChannelID:    "ch-trig",
+		AgentID:      "alice",
+		WorkerID:     "w-trig",
+		FencingToken: 9,
+		AuthToken:    "secret-bearer",
+		DaemonURL:    "http://daemon.local:3101",
+		Trigger: supervisor.SpawnTrigger{
+			MsgID:         "msg-42",
+			CorrelationID: "corr-42",
+			SenderKind:    "human",
+		},
+	}
+
+	gotArgs, gotEnv, err := sp.buildArgsEnv(sc)
+	if err != nil {
+		t.Fatalf("buildArgsEnv: %v", err)
+	}
+	c := exec.Command(helperPath(t), gotArgs...)
+	c.Env = gotEnv
+	out, err := c.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper: %v; output=%q", err, out)
+	}
+	got := string(out)
+
+	for _, want := range []string{
+		"--trigger-msg-id=msg-42",
+		"--trigger-correlation-id=corr-42",
+		"--sender-kind=human",
+		"--auth-token=secret-bearer",
+		"--daemon-url=http://daemon.local:3101",
+		"COAGENT_TRIGGER_MSG_ID=msg-42",
+		"COAGENT_TRIGGER_CORRELATION_ID=corr-42",
+		"COAGENT_SENDER_KIND=human",
+		"COAGENT_AUTH_TOKEN=secret-bearer",
+		"DAEMON_URL=http://daemon.local:3101",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in helper output\n%s", want, got)
+		}
+	}
+}
+
+// When SpawnContext leaves Trigger / AuthToken / DaemonURL empty, the
+// argv MUST NOT carry stub flags with empty values — otherwise the
+// child's flag parser logs "--auth-token=" with empty content + the
+// receiving worker stamps "" as the trigger correlation_id.
+func TestExecSpawner_Spawn_OmitsEmptyOptionalFlags(t *testing.T) {
+	sp, err := NewExecSpawner(ExecSpawnerConfig{
+		BinaryPath:     helperPath(t),
+		ChannelWorkdir: "/tmp/ch-no-trig",
+		LeaseTTL:       30,
+	})
+	if err != nil {
+		t.Fatalf("NewExecSpawner: %v", err)
+	}
+	gotArgs, gotEnv, err := sp.buildArgsEnv(supervisor.SpawnContext{
+		ChannelID:    "ch-no-trig",
+		AgentID:      "bob",
+		WorkerID:     "w-bob",
+		FencingToken: 1,
+	})
+	if err != nil {
+		t.Fatalf("buildArgsEnv: %v", err)
+	}
+	joinedArgs := strings.Join(gotArgs, " ")
+	for _, banned := range []string{
+		"--trigger-msg-id",
+		"--trigger-correlation-id",
+		"--sender-kind",
+		"--auth-token",
+		"--daemon-url",
+	} {
+		if strings.Contains(joinedArgs, banned) {
+			t.Errorf("argv leaked stub flag %q: %s", banned, joinedArgs)
+		}
+	}
+	joinedEnv := strings.Join(gotEnv, " ")
+	for _, banned := range []string{
+		"COAGENT_TRIGGER_MSG_ID=",
+		"COAGENT_TRIGGER_CORRELATION_ID=",
+		"COAGENT_SENDER_KIND=",
+		"COAGENT_AUTH_TOKEN=",
+		"DAEMON_URL=",
+	} {
+		if strings.Contains(joinedEnv, banned) {
+			t.Errorf("env leaked stub key %q: %s", banned, joinedEnv)
 		}
 	}
 }

@@ -16,19 +16,20 @@ import (
 // All time-typed fields are Unix seconds (matches the rest of the
 // daemon-go convention).
 type BacklogMessage struct {
-	Seq        int64
-	ID         string
-	TS         int64
-	ChannelID  string
-	SenderKind string
-	SenderID   string
-	Kind       string
-	Type       string
-	Visibility string
-	Audience   string // raw JSON value of the column — `["*"]` or `["agent:x", ...]`
-	NotBefore  *int64
-	ExpiresAt  *int64
-	ParentID   string
+	Seq           int64
+	ID            string
+	TS            int64
+	ChannelID     string
+	SenderKind    string
+	SenderID      string
+	Kind          string
+	Type          string
+	Visibility    string
+	Audience      string // raw JSON value of the column — `["*"]` or `["agent:x", ...]`
+	NotBefore     *int64
+	ExpiresAt     *int64
+	ParentID      string
+	CorrelationID string // empty when the row's correlation_id column is NULL
 }
 
 // BacklogScan executes the L2 §1.4.10 normative SQL — every message
@@ -87,7 +88,7 @@ func BacklogScan(
 	var out []BacklogMessage
 	for rows.Next() {
 		var m BacklogMessage
-		var parent sql.NullString
+		var parent, correlation sql.NullString
 		var notBefore, expiresAt sql.NullInt64
 		if err := rows.Scan(
 			&m.Seq, &m.ID, &m.TS, &m.ChannelID,
@@ -95,12 +96,15 @@ func BacklogScan(
 			&m.Kind, &m.Type,
 			&m.Visibility, &m.Audience,
 			&notBefore, &expiresAt,
-			&parent,
+			&parent, &correlation,
 		); err != nil {
 			return nil, fmt.Errorf("backlog: scan row: %w", err)
 		}
 		if parent.Valid {
 			m.ParentID = parent.String
+		}
+		if correlation.Valid {
+			m.CorrelationID = correlation.String
 		}
 		if notBefore.Valid {
 			v := notBefore.Int64
@@ -135,7 +139,7 @@ SELECT m.seq, m.id, m.ts, m.channel_id,
        m.kind, m.type,
        m.visibility, m.audience,
        m.not_before, m.expires_at,
-       m.parent_id
+       m.parent_id, m.correlation_id
   FROM messages m
   JOIN actor_cursors c ON c.actor_id = ?
  WHERE m.seq > c.last_consumed_seq

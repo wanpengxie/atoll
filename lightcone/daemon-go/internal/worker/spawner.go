@@ -120,6 +120,7 @@ func (s *ExecSpawner) Spawn(ctx context.Context, sc supervisor.SpawnContext) (su
 		"agent_id", sc.AgentID,
 		"worker_id", sc.WorkerID,
 		"fencing_token", sc.FencingToken,
+		"trigger_msg_id", sc.Trigger.MsgID,
 		"backlog_size", len(sc.Backlog),
 	)
 
@@ -133,6 +134,11 @@ func (s *ExecSpawner) Spawn(ctx context.Context, sc supervisor.SpawnContext) (su
 // (the worker's TurnCtx.ParseFlags consumes them); env vars carry the
 // same info as a fallback so coagent CLI subprocesses can read them
 // without re-parsing argv.
+//
+// Per L2 §3.4.2 + FIX-4 the trigger context (msg_id + correlation_id +
+// sender_kind) and the auth/daemon-url pair are first-class fields:
+// they ship as both flags and env vars so the worker's TurnCtx and any
+// downstream coagent CLI subprocess see them without ambiguity.
 func (s *ExecSpawner) buildArgsEnv(sc supervisor.SpawnContext) ([]string, []string, error) {
 	if sc.ChannelID == "" || sc.AgentID == "" || sc.WorkerID == "" {
 		return nil, nil, fmt.Errorf("exec_spawner: incomplete SpawnContext: %+v", sc)
@@ -145,6 +151,24 @@ func (s *ExecSpawner) buildArgsEnv(sc supervisor.SpawnContext) ([]string, []stri
 		"--channel-workdir=" + s.cfg.ChannelWorkdir,
 		"--lease-ttl=" + strconv.FormatInt(s.cfg.LeaseTTL, 10),
 	}
+	// Trigger / auth / daemon-url are emitted only when populated so
+	// the child's flag parser does not see "--auth-token=" with an
+	// empty value (which would still parse but pollute the log lines).
+	if sc.Trigger.MsgID != "" {
+		args = append(args, "--trigger-msg-id="+sc.Trigger.MsgID)
+	}
+	if sc.Trigger.CorrelationID != "" {
+		args = append(args, "--trigger-correlation-id="+sc.Trigger.CorrelationID)
+	}
+	if sc.Trigger.SenderKind != "" {
+		args = append(args, "--sender-kind="+sc.Trigger.SenderKind)
+	}
+	if sc.AuthToken != "" {
+		args = append(args, "--auth-token="+sc.AuthToken)
+	}
+	if sc.DaemonURL != "" {
+		args = append(args, "--daemon-url="+sc.DaemonURL)
+	}
 	args = append(args, s.cfg.ExtraArgs...)
 
 	env := []string{
@@ -155,6 +179,21 @@ func (s *ExecSpawner) buildArgsEnv(sc supervisor.SpawnContext) ([]string, []stri
 		"COAGENT_FENCING_TOKEN=" + strconv.FormatInt(sc.FencingToken, 10),
 		"COAGENT_CHANNEL_WORKDIR=" + s.cfg.ChannelWorkdir,
 		"COAGENT_LEASE_TTL=" + strconv.FormatInt(s.cfg.LeaseTTL, 10),
+	}
+	if sc.Trigger.MsgID != "" {
+		env = append(env, "COAGENT_TRIGGER_MSG_ID="+sc.Trigger.MsgID)
+	}
+	if sc.Trigger.CorrelationID != "" {
+		env = append(env, "COAGENT_TRIGGER_CORRELATION_ID="+sc.Trigger.CorrelationID)
+	}
+	if sc.Trigger.SenderKind != "" {
+		env = append(env, "COAGENT_SENDER_KIND="+sc.Trigger.SenderKind)
+	}
+	if sc.AuthToken != "" {
+		env = append(env, "COAGENT_AUTH_TOKEN="+sc.AuthToken)
+	}
+	if sc.DaemonURL != "" {
+		env = append(env, "DAEMON_URL="+sc.DaemonURL)
 	}
 	if s.cfg.InheritEnv {
 		// Prepend parent env so the child sees $HOME / $PATH / etc.
