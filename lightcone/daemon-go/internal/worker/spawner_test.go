@@ -190,10 +190,12 @@ func TestExecSpawner_Spawn_PropagatesContext(t *testing.T) {
 	}
 }
 
-// FIX-4 trigger / auth / daemon-url propagation: when the supervisor
-// hands a fully-populated SpawnContext, every Trigger field plus
-// AuthToken + DaemonURL must surface as both an argv flag and a
-// COAGENT_*/DAEMON_URL env var.
+// FIX-4 trigger / daemon-url propagation + R2-FIX-2 auth-token off-argv
+// invariant: when the supervisor hands a fully-populated SpawnContext,
+// every Trigger field + DaemonURL surfaces as both an argv flag and an
+// env var, BUT AuthToken surfaces ONLY as COAGENT_AUTH_TOKEN env and
+// MUST NOT appear in argv (Linux /proc/<pid>/cmdline / ps / audit
+// pipelines would otherwise leak the daemon master bearer token).
 func TestExecSpawner_Spawn_PropagatesTriggerAuth(t *testing.T) {
 	sp, err := NewExecSpawner(ExecSpawnerConfig{
 		BinaryPath:     helperPath(t),
@@ -236,7 +238,6 @@ func TestExecSpawner_Spawn_PropagatesTriggerAuth(t *testing.T) {
 		"--trigger-msg-id=msg-42",
 		"--trigger-correlation-id=corr-42",
 		"--sender-kind=human",
-		"--auth-token=secret-bearer",
 		"--daemon-url=http://daemon.local:3101",
 		"COAGENT_TRIGGER_MSG_ID=msg-42",
 		"COAGENT_TRIGGER_CORRELATION_ID=corr-42",
@@ -247,6 +248,21 @@ func TestExecSpawner_Spawn_PropagatesTriggerAuth(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in helper output\n%s", want, got)
 		}
+	}
+
+	// R2-FIX-2 negative invariants: auth-token must never appear on
+	// argv even when AuthToken is non-empty. Check both the assembled
+	// argv directly (so this assertion is independent of helper output
+	// formatting) and the dump-helper's ARGS line.
+	joinedArgs := strings.Join(gotArgs, " ")
+	if strings.Contains(joinedArgs, "--auth-token") {
+		t.Errorf("argv leaked --auth-token: %s", joinedArgs)
+	}
+	if strings.Contains(joinedArgs, "secret-bearer") {
+		t.Errorf("argv leaked AuthToken value: %s", joinedArgs)
+	}
+	if strings.Contains(got, "--auth-token") {
+		t.Errorf("helper observed --auth-token on argv\n%s", got)
 	}
 }
 
@@ -284,16 +300,23 @@ func TestExecSpawner_Spawn_OmitsEmptyOptionalFlags(t *testing.T) {
 			t.Errorf("argv leaked stub flag %q: %s", banned, joinedArgs)
 		}
 	}
-	joinedEnv := strings.Join(gotEnv, " ")
-	for _, banned := range []string{
-		"COAGENT_TRIGGER_MSG_ID=",
-		"COAGENT_TRIGGER_CORRELATION_ID=",
-		"COAGENT_SENDER_KIND=",
-		"COAGENT_AUTH_TOKEN=",
-		"DAEMON_URL=",
-	} {
-		if strings.Contains(joinedEnv, banned) {
-			t.Errorf("env leaked stub key %q: %s", banned, joinedEnv)
+	// Per-entry exact match: the stub-key bug surfaces as an env entry
+	// that is EXACTLY "KEY=" (empty value). A substring scan over the
+	// joined env is fragile because the inherited parent env (forced on
+	// by NewExecSpawner) may contain unrelated values that happen to
+	// embed these prefixes — e.g. a log line or ticket description text
+	// that mentions "COAGENT_AUTH_TOKEN=token" as a literal.
+	for _, entry := range gotEnv {
+		for _, banned := range []string{
+			"COAGENT_TRIGGER_MSG_ID=",
+			"COAGENT_TRIGGER_CORRELATION_ID=",
+			"COAGENT_SENDER_KIND=",
+			"COAGENT_AUTH_TOKEN=",
+			"DAEMON_URL=",
+		} {
+			if entry == banned {
+				t.Errorf("env leaked stub key %q (empty value)", banned)
+			}
 		}
 	}
 }

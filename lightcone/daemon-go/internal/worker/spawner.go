@@ -195,9 +195,18 @@ func (s *ExecSpawner) buildArgsEnv(sc supervisor.SpawnContext) ([]string, []stri
 		"--channel-workdir=" + s.cfg.ChannelWorkdir,
 		"--lease-ttl=" + strconv.FormatInt(s.cfg.LeaseTTL, 10),
 	}
-	// Trigger / auth / daemon-url are emitted only when populated so
-	// the child's flag parser does not see "--auth-token=" with an
+	// Trigger / daemon-url are emitted only when populated so the
+	// child's flag parser does not see e.g. "--daemon-url=" with an
 	// empty value (which would still parse but pollute the log lines).
+	//
+	// AuthToken is INTENTIONALLY omitted from argv per R2-FIX-2: argv is
+	// world-readable on Linux (/proc/<pid>/cmdline, ps, audit pipelines,
+	// accidental log dumps), so the daemon master bearer token must not
+	// ride there. The worker reads it from COAGENT_AUTH_TOKEN env below,
+	// which env's per-process visibility (only owner uid via /proc/.../environ)
+	// keeps it within the worker's trust boundary. TurnCtx.ParseFlags still
+	// registers --auth-token so manual debugging / tests can pass it, but
+	// production spawn does not.
 	if sc.Trigger.MsgID != "" {
 		args = append(args, "--trigger-msg-id="+sc.Trigger.MsgID)
 	}
@@ -206,9 +215,6 @@ func (s *ExecSpawner) buildArgsEnv(sc supervisor.SpawnContext) ([]string, []stri
 	}
 	if sc.Trigger.SenderKind != "" {
 		args = append(args, "--sender-kind="+sc.Trigger.SenderKind)
-	}
-	if sc.AuthToken != "" {
-		args = append(args, "--auth-token="+sc.AuthToken)
 	}
 	if sc.DaemonURL != "" {
 		args = append(args, "--daemon-url="+sc.DaemonURL)
