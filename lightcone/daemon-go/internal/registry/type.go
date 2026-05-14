@@ -68,16 +68,20 @@ var validTerminalConventions = map[string]struct{}{
 	TerminalConventionSingleResponse: {},
 }
 
-// fallbackResponseSamples are the three platform fallback payloads L2
-// §1.4.2 mandates every request-allowed type's response schema accept.
-// Listed in the exact order the spec uses (unanswered_timeout /
-// adapter_default_timeout / receiver_unavailable). If a future spec rev
-// adds a fourth sample, append here — the loop in
-// validateFallbackBranch picks it up automatically.
+// fallbackResponseSamples are the platform fallback payloads L2 §1.4.2
+// mandates every request-allowed type's response schema accept. Listed
+// in spec order so install-time error messages stay stable.
+//
+// FIX-6 §3 / codex t89: long-pending scheduler Step 2 actually emits
+// `human_unanswered_timeout` (v4types.TerminalHumanUnansweredTimeout)
+// — a type whose response schema enumerates only the three older
+// reasons would install OK but reject the Step 2 fallback at harness
+// step 6 runtime. We include it here so install fails fast.
 var fallbackResponseSamples = []map[string]any{
 	{"status": "failed", "reason": string(v4types.TerminalUnansweredTimeout)},
 	{"status": "failed", "reason": string(v4types.TerminalAdapterDefaultTimeout)},
 	{"status": "failed", "reason": string(v4types.TerminalReceiverUnavailable)},
+	{"status": "failed", "reason": string(v4types.TerminalHumanUnansweredTimeout)},
 }
 
 // TypeRow is the canonical in-memory shape of one type_registry row

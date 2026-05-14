@@ -343,6 +343,10 @@ func TestInstall_FallbackResponseSchemaInvalid(t *testing.T) {
 		{"rejects unanswered_timeout", string(v4types.TerminalUnansweredTimeout)},
 		{"rejects adapter_default_timeout", string(v4types.TerminalAdapterDefaultTimeout)},
 		{"rejects receiver_unavailable", string(v4types.TerminalReceiverUnavailable)},
+		// FIX-6 §3 / codex t89: long-pending scheduler Step 2 emits
+		// `human_unanswered_timeout`; install MUST fail-fast when the
+		// type's response schema enum-narrows reason to exclude it.
+		{"rejects human_unanswered_timeout", string(v4types.TerminalHumanUnansweredTimeout)},
 	}
 
 	for _, c := range cases {
@@ -355,6 +359,7 @@ func TestInstall_FallbackResponseSchemaInvalid(t *testing.T) {
 				string(v4types.TerminalUnansweredTimeout),
 				string(v4types.TerminalAdapterDefaultTimeout),
 				string(v4types.TerminalReceiverUnavailable),
+				string(v4types.TerminalHumanUnansweredTimeout),
 			}
 			kept := make([]string, 0, len(allReasons)-1)
 			for _, r := range allReasons {
