@@ -9,6 +9,7 @@ import (
 
 	"github.com/coagent-ai/daemon-go/pkg/adapter"
 	"github.com/coagent-ai/daemon-go/pkg/v4types"
+	"github.com/google/uuid"
 )
 
 // AdapterName is the framework module name; matches the registry key
@@ -77,6 +78,19 @@ type Config struct {
 	// be entries from allTypes; missing entries default to
 	// defaultMaxPendingMs.
 	MaxPendingMs map[string]int64
+
+	// NewExternalID mints the id the adapter passes to the Chrome
+	// extension as the WS frame's CorrelationID (i.e. the value the
+	// extension echoes back on its callback). It is independent of
+	// envelope.ID so daemon-internal request ids do not leak through
+	// the wire protocol, and so a misbehaving extension that mints
+	// its own id cannot collide with our request id space (claude
+	// 98-5 major, T105 FIX-5).
+	//
+	// Defaults to uuid.NewString. Tests inject a deterministic
+	// generator to make assertions about the resulting external_id
+	// stable.
+	NewExternalID func() string
 }
 
 // Module is the xhs adapter implementing adapter.Module. One instance
@@ -96,6 +110,9 @@ func New(cfg Config) *Module {
 	}
 	if cfg.MaxPendingMs == nil {
 		cfg.MaxPendingMs = map[string]int64{}
+	}
+	if cfg.NewExternalID == nil {
+		cfg.NewExternalID = uuid.NewString
 	}
 	return &Module{cfg: cfg}
 }
@@ -184,9 +201,20 @@ func (m *Module) Handle(ctx context.Context, env *v4types.Envelope) error {
 		params[k] = v
 	}
 
+	// T105 FIX-5 (claude 98-5 major): mint a daemon-internal external_id
+	// distinct from envelope.ID. The Chrome extension echoes external_id
+	// back on its callback; we recover env.ID from the correlation
+	// tracker. This keeps daemon-internal envelope ids off the WS wire
+	// and gives the tracker a hard external/internal id separation so a
+	// future protocol drift cannot collide our id space.
+	externalID := m.cfg.NewExternalID()
+	if strings.TrimSpace(externalID) == "" {
+		return m.failNow(ctx, env.ID, "external_id_mint_failed", nil)
+	}
+
 	frame := Command{
 		Type:          "command",
-		CorrelationID: env.ID,
+		CorrelationID: externalID,
 		Cmd:           cmd,
 		Params:        params,
 	}
@@ -195,7 +223,7 @@ func (m *Module) Handle(ctx context.Context, env *v4types.Envelope) error {
 	// PushCommand returns (rare but possible under load / retransmit)
 	// must already see a Recover hit.
 	deadline := framePendingDeadline(env, m.mctx)
-	if err := m.mctx.Correlation.Track(ctx, env.ID, env.ID, deadline); err != nil {
+	if err := m.mctx.Correlation.Track(ctx, env.ID, externalID, deadline); err != nil {
 		return fmt.Errorf("xhs: track correlation: %w", err)
 	}
 

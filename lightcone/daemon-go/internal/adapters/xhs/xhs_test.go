@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -182,8 +183,21 @@ func fixedClock(cur *int64) func() int64 {
 
 func newManagerWithMock(t *testing.T, db *sql.DB, deps pkgharness.Deps, mock *MockDeviceClient) *adapter.Manager {
 	t.Helper()
+	return newManagerWithMockExternalID(t, db, deps, mock, nil)
+}
+
+// newManagerWithMockExternalID lets tests inject a deterministic
+// NewExternalID generator so assertions about frame.CorrelationID +
+// correlation_tracker Track stay stable. Pass nil for production
+// defaults (uuid.NewString).
+func newManagerWithMockExternalID(t *testing.T, db *sql.DB, deps pkgharness.Deps, mock *MockDeviceClient, newExternalID func() string) *adapter.Manager {
+	t.Helper()
 	clock := int64(testT0)
-	mod := New(Config{DeviceClient: mock, DefaultDeviceID: testDeviceID})
+	mod := New(Config{
+		DeviceClient:    mock,
+		DefaultDeviceID: testDeviceID,
+		NewExternalID:   newExternalID,
+	})
 	mgr, err := adapter.NewManager(adapter.ManagerConfig{
 		DB:      db,
 		Deps:    deps,
@@ -198,6 +212,23 @@ func newManagerWithMock(t *testing.T, db *sql.DB, deps pkgharness.Deps, mock *Mo
 		t.Fatalf("Install: %v", err)
 	}
 	return mgr
+}
+
+// fixedExternalIDs returns a NewExternalID closure that pops ids in
+// order. Empty / exhausted slice falls back to "ext-default-N" so the
+// test still produces stable values when over-called.
+func fixedExternalIDs(ids ...string) func() string {
+	idx := 0
+	return func() string {
+		if idx < len(ids) {
+			id := ids[idx]
+			idx++
+			return id
+		}
+		fallback := fmt.Sprintf("ext-default-%d", idx)
+		idx++
+		return fallback
+	}
 }
 
 // TestDeclares_AllTypes asserts the 6 closed-set types appear in
@@ -289,6 +320,11 @@ func dispatchEnvelope(t *testing.T, mgr *adapter.Manager, id, typeName, payload 
 // TestHandle_PushesPerTypeFrame iterates every request/response type
 // and asserts Handle pushes a WS frame with the matching `cmd` plus
 // strips the device_id field from the payload-derived params.
+//
+// T105 FIX-5 (claude 98-5 major): the frame's CorrelationID MUST be a
+// freshly-minted external_id distinct from envelope.ID — daemon internal
+// ids never leak onto the WS wire. The test injects a deterministic
+// generator so the assertion stays stable.
 func TestHandle_PushesPerTypeFrame(t *testing.T) {
 	cases := []struct {
 		typ     string
@@ -305,10 +341,12 @@ func TestHandle_PushesPerTypeFrame(t *testing.T) {
 		tc := tc
 		t.Run(tc.typ, func(t *testing.T) {
 			db, deps := openXhsChannel(t)
-			insertXhsRequest(t, db, "req-"+tc.cmd, tc.typ, tc.payload)
+			envID := "req-" + tc.cmd
+			extID := "ext-" + tc.cmd
+			insertXhsRequest(t, db, envID, tc.typ, tc.payload)
 			mock := NewMockDeviceClient()
-			mgr := newManagerWithMock(t, db, deps, mock)
-			dispatchEnvelope(t, mgr, "req-"+tc.cmd, tc.typ, tc.payload)
+			mgr := newManagerWithMockExternalID(t, db, deps, mock, fixedExternalIDs(extID))
+			dispatchEnvelope(t, mgr, envID, tc.typ, tc.payload)
 
 			sends := mock.Sends()
 			if len(sends) != 1 {
@@ -320,8 +358,11 @@ func TestHandle_PushesPerTypeFrame(t *testing.T) {
 			if sends[0].Command.Cmd != tc.cmd {
 				t.Fatalf("cmd = %q; want %q", sends[0].Command.Cmd, tc.cmd)
 			}
-			if sends[0].Command.CorrelationID != "req-"+tc.cmd {
-				t.Fatalf("correlation_id = %q; want %q", sends[0].Command.CorrelationID, "req-"+tc.cmd)
+			if sends[0].Command.CorrelationID != extID {
+				t.Fatalf("frame correlation_id = %q; want minted external_id %q", sends[0].Command.CorrelationID, extID)
+			}
+			if sends[0].Command.CorrelationID == envID {
+				t.Fatalf("frame correlation_id MUST NOT echo envelope.ID %q (T105 FIX-5)", envID)
 			}
 			if _, leak := sends[0].Command.Params["device_id"]; leak {
 				t.Fatalf("device_id should NOT appear in Command.Params")
@@ -337,18 +378,25 @@ func TestHandle_PushesPerTypeFrame(t *testing.T) {
 // request → Handle pushes → external callback (status=ok) → Respond
 // emits a terminal completed envelope with sender tool:xhs-adapter +
 // device_id in payload (not in sender.id).
+//
+// T105 FIX-5: the callback's correlation_id is the daemon-minted
+// external_id (NOT envelope.ID). Recover walks back to the request
+// envelope via the correlation tracker.
 func TestRoundTrip_CompletedCallback(t *testing.T) {
 	db, deps := openXhsChannel(t)
 	requestID := "req-publish-1"
+	externalID := "ext-publish-1"
 	insertXhsRequest(t, db, requestID, TypePublish,
 		`{"title":"hello","content":"world","device_id":"dev-pri-001"}`)
 	mock := NewMockDeviceClient()
-	mgr := newManagerWithMock(t, db, deps, mock)
+	mgr := newManagerWithMockExternalID(t, db, deps, mock, fixedExternalIDs(externalID))
 	dispatchEnvelope(t, mgr, requestID, TypePublish,
 		`{"title":"hello","content":"world","device_id":"dev-pri-001"}`)
 
-	// Simulate extension callback (status=ok with note_id + url).
-	cb := []byte(`{"correlation_id":"req-publish-1","device_id":"dev-pri-001","status":"ok","result":{"note_id":"n123","url":"https://xhs/n123"}}`)
+	// Simulate extension callback (status=ok with note_id + url). The
+	// extension echoes the external_id the daemon pushed on the WS
+	// frame, NOT the daemon's internal envelope.ID.
+	cb := []byte(`{"correlation_id":"` + externalID + `","device_id":"dev-pri-001","status":"ok","result":{"note_id":"n123","url":"https://xhs/n123"}}`)
 	if err := mgr.OnExternalCallback(context.Background(), AdapterName, cb); err != nil {
 		t.Fatalf("OnExternalCallback: %v", err)
 	}
@@ -383,12 +431,13 @@ func TestRoundTrip_CompletedCallback(t *testing.T) {
 func TestRoundTrip_FailedCallback(t *testing.T) {
 	db, deps := openXhsChannel(t)
 	requestID := "req-publish-fail"
+	externalID := "ext-publish-fail"
 	insertXhsRequest(t, db, requestID, TypePublish, `{}`)
 	mock := NewMockDeviceClient()
-	mgr := newManagerWithMock(t, db, deps, mock)
+	mgr := newManagerWithMockExternalID(t, db, deps, mock, fixedExternalIDs(externalID))
 	dispatchEnvelope(t, mgr, requestID, TypePublish, `{}`)
 
-	cb := []byte(`{"correlation_id":"req-publish-fail","device_id":"dev-pri-001","status":"error","error":{"reason":"login_expired","retry_after":60}}`)
+	cb := []byte(`{"correlation_id":"` + externalID + `","device_id":"dev-pri-001","status":"error","error":{"reason":"login_expired","retry_after":60}}`)
 	if err := mgr.OnExternalCallback(context.Background(), AdapterName, cb); err != nil {
 		t.Fatalf("OnExternalCallback: %v", err)
 	}
@@ -525,6 +574,99 @@ func TestOnExternalCallback_RejectsMissingCorrelation(t *testing.T) {
 	err := mgr.OnExternalCallback(context.Background(), AdapterName, cb)
 	if err == nil || !strings.Contains(err.Error(), "correlation_id") {
 		t.Fatalf("expected missing correlation_id error; got %v", err)
+	}
+}
+
+// TestHandle_MintsExternalIDDistinctFromEnvelopeID is the focused
+// version of the per-type assertion: one envelope, one frame, and we
+// verify the minted external_id reaches the WS wire while envelope.ID
+// stays daemon-internal (T105 FIX-5, claude 98-5 major).
+func TestHandle_MintsExternalIDDistinctFromEnvelopeID(t *testing.T) {
+	db, deps := openXhsChannel(t)
+	envID := "req-mint-1"
+	extID := "ext-deterministic-mint"
+	insertXhsRequest(t, db, envID, TypePublish, `{"title":"t","content":"c"}`)
+	mock := NewMockDeviceClient()
+	mgr := newManagerWithMockExternalID(t, db, deps, mock, fixedExternalIDs(extID))
+	dispatchEnvelope(t, mgr, envID, TypePublish, `{"title":"t","content":"c"}`)
+
+	sends := mock.Sends()
+	if len(sends) != 1 {
+		t.Fatalf("expected 1 push, got %d", len(sends))
+	}
+	if sends[0].Command.CorrelationID != extID {
+		t.Fatalf("frame correlation_id = %q; want %q", sends[0].Command.CorrelationID, extID)
+	}
+	if sends[0].Command.CorrelationID == envID {
+		t.Fatalf("frame correlation_id must not echo envelope.ID")
+	}
+}
+
+// TestRoundTrip_ExternalIDDifferentFromEnvelopeID exercises the full
+// callback recovery path with a deliberately different external_id —
+// before T105 FIX-5 this case was unreachable because Handle re-used
+// envelope.ID for the WS frame's CorrelationID. With the fix in place,
+// callbacks routed by external_id still resolve back to the original
+// envelope.ID and write the terminal response to the right parent.
+func TestRoundTrip_ExternalIDDifferentFromEnvelopeID(t *testing.T) {
+	db, deps := openXhsChannel(t)
+	requestID := "req-ext-decoupled"
+	externalID := "ext-completely-different-uuid-shape"
+	if requestID == externalID {
+		t.Fatal("test setup bug: requestID == externalID")
+	}
+	insertXhsRequest(t, db, requestID, TypePublish,
+		`{"title":"t","content":"c","device_id":"dev-pri-001"}`)
+	mock := NewMockDeviceClient()
+	mgr := newManagerWithMockExternalID(t, db, deps, mock, fixedExternalIDs(externalID))
+	dispatchEnvelope(t, mgr, requestID, TypePublish,
+		`{"title":"t","content":"c","device_id":"dev-pri-001"}`)
+
+	// Sanity: WS frame got the external_id, not envelope.ID.
+	sends := mock.Sends()
+	if len(sends) != 1 || sends[0].Command.CorrelationID != externalID {
+		t.Fatalf("frame correlation_id mismatch: %+v", sends)
+	}
+
+	// Extension callback echoes external_id (its only handle on the
+	// in-flight request). Recover must resolve back to requestID and
+	// the resulting response row's parent_id must equal requestID.
+	cb := []byte(`{"correlation_id":"` + externalID + `","device_id":"dev-pri-001","status":"ok","result":{"note_id":"n42","url":"https://xhs/n42"}}`)
+	if err := mgr.OnExternalCallback(context.Background(), AdapterName, cb); err != nil {
+		t.Fatalf("OnExternalCallback: %v", err)
+	}
+	payload, sender, ok := readResponse(t, db, requestID)
+	if !ok {
+		t.Fatalf("no terminal response written for requestID %q", requestID)
+	}
+	if sender != AdapterActorID {
+		t.Fatalf("sender = %q; want %q", sender, AdapterActorID)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(payload), &got); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if got["status"] != "completed" {
+		t.Fatalf("status = %v; want completed", got["status"])
+	}
+	if got["note_id"] != "n42" {
+		t.Fatalf("note_id = %v; want n42", got["note_id"])
+	}
+
+	// And: a callback echoing envelope.ID (the value an attacker /
+	// confused extension might try) MUST NOT resolve — orphan path
+	// drops it silently and writes no second response row.
+	cbWithEnvID := []byte(`{"correlation_id":"` + requestID + `","device_id":"dev-pri-001","status":"ok","result":{"note_id":"impostor"}}`)
+	if err := mgr.OnExternalCallback(context.Background(), AdapterName, cbWithEnvID); err != nil {
+		t.Fatalf("orphan callback should not error: %v", err)
+	}
+	// readResponse picks LIMIT 1 ORDER BY seq DESC; verify it still
+	// returns the original completion (no second response written).
+	payload2, _, _ := readResponse(t, db, requestID)
+	var got2 map[string]any
+	_ = json.Unmarshal([]byte(payload2), &got2)
+	if got2["note_id"] == "impostor" {
+		t.Fatalf("envelope.ID-echo callback should not have written a response; got %s", payload2)
 	}
 }
 
