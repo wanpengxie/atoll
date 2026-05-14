@@ -91,6 +91,12 @@ func TestApplyContiguous(t *testing.T) {
 		if int64(got.LastReceivedSeq) != int64(seq) {
 			t.Errorf("seq=%d cursor=%d", seq, got.LastReceivedSeq)
 		}
+		// FIX-T5: natural contiguous (no buffered drain) must NOT
+		// populate DrainedMessages — gateway falls back to fan-out
+		// of the current frame.
+		if len(got.DrainedMessages) != 0 {
+			t.Errorf("seq=%d drained=%v want empty (no buffered drain)", seq, got.DrainedMessages)
+		}
 	}
 }
 
@@ -160,6 +166,10 @@ func TestApplyGapAndDrain(t *testing.T) {
 	if int64(r.LastReceivedSeq) != 3 {
 		t.Errorf("cursor=%d want 3 (drain to 3)", r.LastReceivedSeq)
 	}
+	// FIX-T5: drained list is [current=2, buffered=3] in seq ASC.
+	if got := seqsOf(r.DrainedMessages); !equalSeqs(got, []viewsync.Seq{2, 3}) {
+		t.Errorf("seq=2 drained=%v want [2 3]", got)
+	}
 	r, _ = svc.Apply(ctx, frame(4))
 	if r.Outcome != viewsync.ApplyOutcomeContiguous {
 		t.Errorf("seq=4 outcome=%q want contiguous", r.Outcome)
@@ -167,6 +177,170 @@ func TestApplyGapAndDrain(t *testing.T) {
 	if int64(r.LastReceivedSeq) != 5 {
 		t.Errorf("cursor=%d want 5 (drain to 5)", r.LastReceivedSeq)
 	}
+	// FIX-T5: drained list is [current=4, buffered=5].
+	if got := seqsOf(r.DrainedMessages); !equalSeqs(got, []viewsync.Seq{4, 5}) {
+		t.Errorf("seq=4 drained=%v want [4 5]", got)
+	}
+}
+
+// TestApplyGapTriggersResync covers FIX-T5 part 3: when Apply detects
+// a gap (seq > cursor+1) it MUST fire a TriggerResync for the missing
+// closed interval [cursor+1, seq-1]. Test installs a fake fire-resync
+// hook + asserts the captured (since, until) window.
+func TestApplyGapTriggersResync(t *testing.T) {
+	t.Parallel()
+	svc := newSvc(t)
+	ctx := context.Background()
+
+	// Wire a resyncer that returns no messages — the auto-trigger
+	// path only needs the call signature; subsequent Applys are not
+	// exercised here.
+	fake := &fakeResyncer{messages: func(since, until viewsync.Seq) []viewsync.ResyncMessage {
+		return nil
+	}}
+	svc.SetResyncer(fake)
+
+	type call struct{ since, until viewsync.Seq }
+	calls := make(chan call, 4)
+	svc.SetFireResyncForTest(func(channelID channel.ID, since, until viewsync.Seq) {
+		calls <- call{since, until}
+	})
+
+	// Push seq=1 (contiguous) — no trigger expected.
+	if _, err := svc.Apply(ctx, frame(1)); err != nil {
+		t.Fatalf("Apply seq=1: %v", err)
+	}
+	// Push seq=3 — gap [2,2]; trigger expected.
+	r, err := svc.Apply(ctx, frame(3))
+	if err != nil {
+		t.Fatalf("Apply seq=3: %v", err)
+	}
+	if r.Outcome != viewsync.ApplyOutcomeGap {
+		t.Errorf("seq=3 outcome=%q want gap", r.Outcome)
+	}
+	if int64(r.LastReceivedSeq) != 1 {
+		t.Errorf("seq=3 cursor=%d want 1", r.LastReceivedSeq)
+	}
+	if len(r.DrainedMessages) != 0 {
+		t.Errorf("seq=3 drained=%v want empty (gap path)", r.DrainedMessages)
+	}
+	select {
+	case c := <-calls:
+		if int64(c.since) != 2 || int64(c.until) != 2 {
+			t.Errorf("gap trigger window=[%d,%d] want [2,2]", c.since, c.until)
+		}
+	default:
+		t.Fatal("gap did not trigger resync")
+	}
+
+	// Push seq=5 — gap [2,4]; trigger expected (different window).
+	r, err = svc.Apply(ctx, frame(5))
+	if err != nil {
+		t.Fatalf("Apply seq=5: %v", err)
+	}
+	if r.Outcome != viewsync.ApplyOutcomeGap {
+		t.Errorf("seq=5 outcome=%q want gap", r.Outcome)
+	}
+	select {
+	case c := <-calls:
+		if int64(c.since) != 2 || int64(c.until) != 4 {
+			t.Errorf("gap trigger window=[%d,%d] want [2,4]", c.since, c.until)
+		}
+	default:
+		t.Fatal("seq=5 gap did not trigger resync")
+	}
+}
+
+// TestApplyResyncRace covers FIX-T5 ordering: live push seq=5 lands
+// first (gap), then resync supplies seq=3,4. The fan-out order the
+// gateway will see — i.e. the catenation of DrainedMessages across
+// Applys — MUST be [3, 4, 5] (no skip, no duplicate).
+func TestApplyResyncRace(t *testing.T) {
+	t.Parallel()
+	svc := newSvc(t)
+	ctx := context.Background()
+
+	// Resyncer not needed — we manually call Apply for the resync
+	// messages. Just suppress the auto-trigger goroutine.
+	svc.SetFireResyncForTest(func(channel.ID, viewsync.Seq, viewsync.Seq) {})
+
+	// Establish cursor=2.
+	if _, err := svc.Apply(ctx, frame(1)); err != nil {
+		t.Fatalf("seed 1: %v", err)
+	}
+	if _, err := svc.Apply(ctx, frame(2)); err != nil {
+		t.Fatalf("seed 2: %v", err)
+	}
+
+	// Live push seq=5 arrives first → gap, buffered.
+	r5, _ := svc.Apply(ctx, frame(5))
+	if r5.Outcome != viewsync.ApplyOutcomeGap {
+		t.Fatalf("seq=5 outcome=%q want gap", r5.Outcome)
+	}
+	if len(r5.DrainedMessages) != 0 {
+		t.Errorf("seq=5 drained=%v want empty", r5.DrainedMessages)
+	}
+
+	// Resync brings 3 → contiguous, no buffer to drain yet.
+	r3, _ := svc.Apply(ctx, frame(3))
+	if r3.Outcome != viewsync.ApplyOutcomeContiguous {
+		t.Fatalf("seq=3 outcome=%q want contiguous", r3.Outcome)
+	}
+	if int64(r3.LastReceivedSeq) != 3 {
+		t.Errorf("seq=3 cursor=%d want 3", r3.LastReceivedSeq)
+	}
+	if len(r3.DrainedMessages) != 0 {
+		t.Errorf("seq=3 drained=%v want empty (no buffer)", r3.DrainedMessages)
+	}
+
+	// Resync brings 4 → contiguous, drains buffered 5.
+	r4, _ := svc.Apply(ctx, frame(4))
+	if r4.Outcome != viewsync.ApplyOutcomeContiguous {
+		t.Fatalf("seq=4 outcome=%q want contiguous", r4.Outcome)
+	}
+	if int64(r4.LastReceivedSeq) != 5 {
+		t.Errorf("seq=4 cursor=%d want 5 (drain 5)", r4.LastReceivedSeq)
+	}
+	if got := seqsOf(r4.DrainedMessages); !equalSeqs(got, []viewsync.Seq{4, 5}) {
+		t.Errorf("seq=4 drained=%v want [4 5]", got)
+	}
+
+	// Concatenate fan-out the gateway would emit, in Apply order:
+	// r5 (gap, no fan-out), r3 [3], r4 [4, 5] → 3, 4, 5.
+	var faned []viewsync.Seq
+	for _, df := range r3.DrainedMessages {
+		faned = append(faned, df.Seq)
+	}
+	if r3.Outcome == viewsync.ApplyOutcomeContiguous && len(r3.DrainedMessages) == 0 {
+		faned = append(faned, 3) // gateway fan-outs current frame
+	}
+	for _, df := range r4.DrainedMessages {
+		faned = append(faned, df.Seq)
+	}
+	if !equalSeqs(faned, []viewsync.Seq{3, 4, 5}) {
+		t.Errorf("fan-out order=%v want [3 4 5]", faned)
+	}
+}
+
+// seqsOf extracts the seq field from a slice of PushFrames.
+func seqsOf(frames []viewsync.PushFrame) []viewsync.Seq {
+	out := make([]viewsync.Seq, len(frames))
+	for i, f := range frames {
+		out[i] = f.Seq
+	}
+	return out
+}
+
+func equalSeqs(a, b []viewsync.Seq) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestResyncCallsBackProtocol verifies that TriggerResync hands the

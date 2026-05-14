@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/wanpengxie/ActOS/server/daemonbus"
 	"github.com/wanpengxie/ActOS/server/gateway"
 	"github.com/wanpengxie/ActOS/server/identity"
+	"github.com/wanpengxie/ActOS/server/pushhub"
 	"github.com/wanpengxie/ActOS/server/store"
 )
 
@@ -284,6 +286,110 @@ func TestMockDaemonCreateChannelACK(t *testing.T) {
 	t.Fatalf("placement never advanced to active")
 }
 
+// TestViewSyncGapDrainFanOut covers FIX-T5: when the daemon pushes a
+// gap-then-fill sequence (1, 3, 2), the gateway must:
+//
+//  1. fan-out seq 1 to subscribers (contiguous)
+//  2. NOT fan-out seq 3 alone (gap — client must not see it before 2)
+//  3. fan-out seq 2 AND seq 3, in that order, when 2 closes the gap
+//
+// Ack frames still carry only the contiguous cursor (1, 1, 3).
+func TestViewSyncGapDrainFanOut(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Suppress the auto-trigger goroutine — no daemon-side resync
+	// server is wired in this test; we feed the recovery frame
+	// manually via dmn.WriteFrame.
+	app.Viewcache().SetFireResyncForTest(func(channel.ID, viewsync.Seq, viewsync.Seq) {})
+
+	// Capture fan-out from pushhub.
+	var (
+		obsMu sync.Mutex
+		obs   []pushhub.PushedFrame
+	)
+	cancelObs := app.Pushhub().RegisterPushObserverForTest(channel.ID("ch-fanout"), func(f pushhub.PushedFrame) {
+		obsMu.Lock()
+		obs = append(obs, f)
+		obsMu.Unlock()
+	})
+	defer cancelObs()
+
+	if err := app.Daemonbus().RegisterDaemon(ctx, placement.DaemonID("d-fanout"), "h", "v", 0, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon: %v", err)
+	}
+	epoch, _ := app.Daemonbus().IssueConnectionEpoch(ctx, placement.DaemonID("d-fanout"))
+
+	svr, dmn := newPipePair()
+	conn := daemonbus.NewConnection(placement.DaemonID("d-fanout"), epoch, svr)
+	app.Daemonbus().Register(conn)
+	defer app.Daemonbus().Unregister(placement.DaemonID("d-fanout"))
+	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
+
+	mkPush := func(seq viewsync.Seq) viewsync.PushFrame {
+		id := "m-" + itoa(int64(seq))
+		return viewsync.PushFrame{
+			ChannelID: channel.ID("ch-fanout"), Seq: seq, MessageID: id,
+			Envelope: message.Envelope{
+				ID: id, TS: int64(seq) * 1000, ChannelID: "ch-fanout",
+				Sender: message.Sender{Kind: message.SenderAgent, ID: "a"},
+				Kind:   message.KindEvent, Type: "agent.text",
+				Payload:    json.RawMessage(`{}`),
+				Visibility: message.VisibilityPublic, Audience: []string{"*"},
+			},
+		}
+	}
+	send := func(payload viewsync.PushFrame) {
+		raw, _ := json.Marshal(payload)
+		if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+			FrameID: "f-" + itoa(int64(payload.Seq)),
+			FrameType: kerneldaemonbus.FrameTypeViewsyncPush,
+			DaemonID: "d-fanout", DaemonConnectionEpoch: epoch, Payload: raw,
+		}); err != nil {
+			t.Fatalf("write push %d: %v", payload.Seq, err)
+		}
+		// Drain matching ack so the gateway dispatch loop is unblocked
+		// before the next push goes in.
+		if _, err := dmn.ReadFrame(ctx); err != nil {
+			t.Fatalf("read ack %d: %v", payload.Seq, err)
+		}
+	}
+
+	// 1. push 1 — contiguous → fan-out [1]
+	send(mkPush(1))
+	// 2. push 3 — gap → fan-out unchanged
+	send(mkPush(3))
+	// 3. push 2 — drains buffer → fan-out [2, 3]
+	send(mkPush(2))
+
+	// Allow pushhub goroutines (synchronous in-process) to settle.
+	deadline := time.Now().Add(1 * time.Second)
+	for {
+		obsMu.Lock()
+		n := len(obs)
+		obsMu.Unlock()
+		if n >= 3 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	obsMu.Lock()
+	defer obsMu.Unlock()
+	if len(obs) != 3 {
+		t.Fatalf("fan-out len=%d want 3 (seqs=%v)", len(obs), seqList(obs))
+	}
+	want := []viewsync.Seq{1, 2, 3}
+	for i, w := range want {
+		if obs[i].Seq != w {
+			t.Errorf("fan-out[%d].seq=%d want %d (full=%v)", i, obs[i].Seq, w, seqList(obs))
+		}
+	}
+	conn.Close()
+}
+
 // TestReclaimDaemonIDMismatch is the FIX-T4 regression: a daemonbus
 // connection authenticated as "d1" must not be able to reclaim
 // placements by setting `ReclaimRequest.DaemonID` to some other
@@ -451,6 +557,16 @@ func (p *pipeTransport) WriteFrame(ctx context.Context, f kerneldaemonbus.Frame)
 	}
 }
 func (p *pipeTransport) Close() error { return nil }
+
+// seqList extracts the seq field of every captured PushedFrame; used
+// for readable failure messages in fan-out ordering tests.
+func seqList(fs []pushhub.PushedFrame) []viewsync.Seq {
+	out := make([]viewsync.Seq, len(fs))
+	for i, f := range fs {
+		out[i] = f.Seq
+	}
+	return out
+}
 
 // itoa is a tiny strconv-free int64 → string used in test message ids
 // (kept inline so the test file stays self-contained).

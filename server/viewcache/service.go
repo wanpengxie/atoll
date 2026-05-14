@@ -47,6 +47,12 @@ type Service struct {
 	buffers map[channel.ID]*channelBuffer
 
 	resyncer Resyncer
+
+	// fireResyncFn overrides the default fire-and-forget resync
+	// goroutine — set by tests via SetFireResyncForTest so they can
+	// observe trigger invocations synchronously without spawning real
+	// daemon RPC. nil → use the default goroutine path.
+	fireResyncFn func(channelID channel.ID, since, until viewsync.Seq)
 }
 
 type channelBuffer struct {
@@ -65,6 +71,14 @@ func NewService(db *sql.DB) *Service {
 
 // SetResyncer plugs in the gap-recovery RPC client.
 func (s *Service) SetResyncer(r Resyncer) { s.resyncer = r }
+
+// SetFireResyncForTest overrides the fire-and-forget gap-resync
+// goroutine launched by Apply when it sees a gap. Tests use this to
+// capture invocations synchronously without scheduling real goroutines
+// or RPC. Pass nil to restore the default. NOT for production callers.
+func (s *Service) SetFireResyncForTest(fn func(channelID channel.ID, since, until viewsync.Seq)) {
+	s.fireResyncFn = fn
+}
 
 // bufferFor returns the per-channel pending map (lazy-init).
 func (s *Service) bufferFor(channelID channel.ID) *channelBuffer {
@@ -86,8 +100,14 @@ func (s *Service) bufferFor(channelID channel.ID) *channelBuffer {
 //     UNIQUE)
 //  3. classify the seq:
 //     - seq <= cursor: duplicate (ApplyOutcomeDuplicate)
-//     - seq == cursor+1: contiguous; advance cursor (+ drain buffer)
-//     - seq > cursor+1: gap; row persisted, cursor unchanged
+//     - seq == cursor+1: contiguous; advance cursor (+ drain buffer);
+//       buffered frames whose seq just crossed into "contiguous" are
+//       returned in ApplyResult.DrainedMessages alongside the current
+//       frame so the gateway can fan-out missed pushes (FIX-T5)
+//     - seq > cursor+1: gap; row persisted, cursor unchanged; a
+//       fire-and-forget TriggerResync goroutine is launched to ask the
+//       daemon for the missing closed interval [cursor+1, seq-1]
+//       (FIX-T5)
 //  4. COMMIT
 //
 // Returns an ApplyResult carrying the post-commit cursor — the caller
@@ -125,6 +145,11 @@ func (s *Service) Apply(ctx context.Context, frame viewsync.PushFrame) (viewsync
 	var (
 		outcome viewsync.ApplyOutcome
 		newCur  viewsync.LastReceivedSeq
+		extras  []viewsync.PushFrame // buffered frames drained (excludes current)
+		// Gap window — captured before commit so the fire-and-forget
+		// resync goroutine sees a stable snapshot.
+		gapSince viewsync.Seq
+		gapUntil viewsync.Seq
 	)
 	switch {
 	case frame.Seq <= cursor:
@@ -134,16 +159,20 @@ func (s *Service) Apply(ctx context.Context, frame viewsync.PushFrame) (viewsync
 	case frame.Seq == cursor+1:
 		// Contiguous — advance cursor, then drain buffer for any
 		// already-stored seq cursor+1, +2, … in view_cache_messages.
-		next, err := advanceCursorTx(ctx, tx, frame.ChannelID, frame.Seq)
+		next, drainedRows, err := advanceCursorTx(ctx, tx, frame.ChannelID, frame.Seq)
 		if err != nil {
 			return viewsync.ApplyResult{}, err
 		}
 		outcome = viewsync.ApplyOutcomeContiguous
 		newCur = next
+		extras = drainedRows
 	default:
-		// Gap — row persisted but cursor stays put.
+		// Gap — row persisted but cursor stays put. Window of missing
+		// seqs is [cursor+1, frame.Seq-1] inclusive.
 		outcome = viewsync.ApplyOutcomeGap
 		newCur = cursor
+		gapSince = viewsync.Seq(cursor) + 1
+		gapUntil = frame.Seq - 1
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -167,7 +196,47 @@ func (s *Service) Apply(ctx context.Context, frame viewsync.PushFrame) (viewsync
 	}
 	buf.mu.Unlock()
 
-	return viewsync.ApplyResult{Outcome: outcome, LastReceivedSeq: newCur}, nil
+	// Build DrainedMessages payload. Convention (FIX-T5): nil unless at
+	// least one buffered row drained — then [current frame, ...extras]
+	// in seq ASC order. Plain contiguous → nil so the gateway falls
+	// back to fan-out of the current frame.
+	var drained []viewsync.PushFrame
+	if len(extras) > 0 {
+		drained = make([]viewsync.PushFrame, 0, 1+len(extras))
+		drained = append(drained, frame)
+		drained = append(drained, extras...)
+	}
+
+	// Gap → fire-and-forget resync request. We detach from caller ctx
+	// because the dispatch goroutine that invoked Apply may return
+	// before resync completes. Production path: spawn a goroutine and
+	// run TriggerResync against the wired daemonbus resyncer. Test
+	// path: synchronous invocation of the captured hook so assertions
+	// are deterministic (no flaky goroutine scheduling). We skip when
+	// neither a hook nor a resyncer is wired so service-level tests
+	// without a resyncer don't accumulate noisy goroutines.
+	if outcome == viewsync.ApplyOutcomeGap && gapSince <= gapUntil {
+		switch {
+		case s.fireResyncFn != nil:
+			s.fireResyncFn(frame.ChannelID, gapSince, gapUntil)
+		case s.resyncer != nil:
+			go s.fireResync(frame.ChannelID, gapSince, gapUntil)
+		}
+	}
+
+	return viewsync.ApplyResult{
+		Outcome:         outcome,
+		LastReceivedSeq: newCur,
+		DrainedMessages: drained,
+	}, nil
+}
+
+// fireResync wraps TriggerResync for the fire-and-forget gap path. It
+// uses a fresh background context so the recovery survives the request
+// scope and swallows errors — the next gap or a periodic reconcile
+// will retry. Production path only; tests intercept via fireResyncFn.
+func (s *Service) fireResync(channelID channel.ID, since, until viewsync.Seq) {
+	_, _ = s.TriggerResync(context.Background(), channelID, since, until)
 }
 
 // Cursor returns the current last_received_seq for channelID.
@@ -293,9 +362,18 @@ func readCursorTx(ctx context.Context, tx *sql.Tx, channelID channel.ID) (viewsy
 
 // advanceCursorTx bumps the cursor to seq, then drains any contiguous
 // stored rows beyond seq (i.e. messages that arrived during a gap and
-// are now connected). Returns the final cursor.
-func advanceCursorTx(ctx context.Context, tx *sql.Tx, channelID channel.ID, seq viewsync.Seq) (viewsync.LastReceivedSeq, error) {
+// are now connected). Returns the final cursor and the drained extra
+// frames (envelopes loaded from view_cache_messages, in seq ASC order).
+// The current frame's own row is NOT included in extras — the caller
+// has it in hand.
+func advanceCursorTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	channelID channel.ID,
+	seq viewsync.Seq,
+) (viewsync.LastReceivedSeq, []viewsync.PushFrame, error) {
 	cur := seq
+	var extras []viewsync.PushFrame
 
 	for {
 		// Set cursor = cur and look for cur+1 stored.
@@ -304,23 +382,37 @@ func advanceCursorTx(ctx context.Context, tx *sql.Tx, channelID channel.ID, seq 
 			`UPDATE view_cache_cursors SET last_received_seq = ? WHERE channel_id = ?`,
 			int64(cur), string(channelID),
 		); err != nil {
-			return 0, fmt.Errorf("viewcache: cursor update: %w", err)
+			return 0, nil, fmt.Errorf("viewcache: cursor update: %w", err)
 		}
-		var next int64
+		var (
+			nextSeq   int64
+			messageID string
+			envJSON   string
+		)
 		err := tx.QueryRowContext(
 			ctx,
-			`SELECT seq FROM view_cache_messages
+			`SELECT seq, message_id, envelope_json FROM view_cache_messages
 			  WHERE channel_id = ? AND seq = ?
 			  LIMIT 1`,
 			string(channelID), int64(cur)+1,
-		).Scan(&next)
+		).Scan(&nextSeq, &messageID, &envJSON)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return cur, nil
+				return cur, extras, nil
 			}
-			return 0, fmt.Errorf("viewcache: drain probe: %w", err)
+			return 0, nil, fmt.Errorf("viewcache: drain probe: %w", err)
 		}
-		cur = viewsync.Seq(next)
+		var env message.Envelope
+		if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
+			return 0, nil, fmt.Errorf("viewcache: drain unmarshal seq=%d: %w", nextSeq, err)
+		}
+		extras = append(extras, viewsync.PushFrame{
+			ChannelID: channelID,
+			Seq:       viewsync.Seq(nextSeq),
+			MessageID: messageID,
+			Envelope:  env,
+		})
+		cur = viewsync.Seq(nextSeq)
 	}
 }
 

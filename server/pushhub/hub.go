@@ -34,6 +34,24 @@ type Hub struct {
 	mu sync.RWMutex
 	// channel_id → user_id → set of subscribers
 	subs map[channel.ID]map[string]map[*subscriber]struct{}
+
+	// observersMu guards observers slice.
+	observersMu sync.RWMutex
+	observers   []*pushObserver
+}
+
+// PushedFrame is the in-memory shape delivered to test observers.
+// It mirrors what the WS subscriber receives without the JSON wrap.
+type PushedFrame struct {
+	ChannelID channel.ID
+	Seq       viewsync.Seq
+	Envelope  message.Envelope
+}
+
+// pushObserver is a registered test-only push capture function.
+type pushObserver struct {
+	channelID channel.ID // empty = all channels
+	fn        func(PushedFrame)
 }
 
 // NewHub builds a Hub.
@@ -178,6 +196,44 @@ func (h *Hub) PushMessage(channelID channel.ID, seq viewsync.Seq, env message.En
 		default:
 			// Slow subscriber — drop the frame. The client can
 			// recover via the REST resync endpoint.
+		}
+	}
+
+	// Notify in-process observers (test-only). Snapshot under RLock,
+	// invoke outside so a slow observer can't stall fan-out.
+	h.observersMu.RLock()
+	obs := append([]*pushObserver(nil), h.observers...)
+	h.observersMu.RUnlock()
+	if len(obs) == 0 {
+		return
+	}
+	pf := PushedFrame{ChannelID: channelID, Seq: seq, Envelope: env}
+	for _, o := range obs {
+		if o.channelID != "" && o.channelID != channelID {
+			continue
+		}
+		o.fn(pf)
+	}
+}
+
+// RegisterPushObserverForTest installs an in-process push capture
+// function. Pass channelID="" to observe every channel. Returns a
+// cancel func that unregisters the observer. NOT for production
+// callers — exists so handlers tests can assert fan-out ordering
+// without spinning up a WS subscriber.
+func (h *Hub) RegisterPushObserverForTest(channelID channel.ID, fn func(PushedFrame)) func() {
+	obs := &pushObserver{channelID: channelID, fn: fn}
+	h.observersMu.Lock()
+	h.observers = append(h.observers, obs)
+	h.observersMu.Unlock()
+	return func() {
+		h.observersMu.Lock()
+		defer h.observersMu.Unlock()
+		for i, o := range h.observers {
+			if o == obs {
+				h.observers = append(h.observers[:i], h.observers[i+1:]...)
+				return
+			}
 		}
 	}
 }

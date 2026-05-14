@@ -36,8 +36,22 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			if err != nil {
 				return 0, err
 			}
-			// Fan-out to subscribed front-ends.
-			if res.Outcome == viewsync.ApplyOutcomeContiguous {
+			// FIX-T5 fan-out: if a buffered gap just closed, Apply
+			// returns the just-newly-contiguous frames (current +
+			// previously buffered) in ApplyResult.DrainedMessages —
+			// fan-out every one in seq ASC order so the front-end
+			// doesn't miss messages that arrived out of order.
+			// Otherwise, plain contiguous → fan-out current frame.
+			// Duplicate / gap → no fan-out (gap path also fires a
+			// resync request inside viewcache.Apply so the missing
+			// closed interval is recovered without waiting for a
+			// client reconnect).
+			switch {
+			case len(res.DrainedMessages) > 0:
+				for _, df := range res.DrainedMessages {
+					a.pushhub.PushMessage(df.ChannelID, df.Seq, df.Envelope)
+				}
+			case res.Outcome == viewsync.ApplyOutcomeContiguous:
 				a.pushhub.PushMessage(frame.ChannelID, frame.Seq, frame.Envelope)
 			}
 			return res.LastReceivedSeq, nil

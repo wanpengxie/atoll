@@ -42,9 +42,30 @@ func (o ApplyOutcome) String() string {
 
 // ApplyResult is the full server-side apply outcome (kernel-typed so
 // runtime/server callers can switch on it).
+//
+// DrainedMessages carries the messages whose cursor-acked state flipped
+// during THIS Apply call when a gap closed (L1 §8.4 — "advance cursor
+// and drain buffered contiguous frames"). Semantics:
+//
+//   - Outcome != ApplyOutcomeContiguous   → DrainedMessages == nil
+//   - Plain contiguous (no buffered drain) → DrainedMessages == nil
+//   - Gap-fill (≥1 buffered seq drained)   → DrainedMessages = [current
+//     frame, ...newly drained buffered frames] in seq ASC order
+//
+// Callers fan-out as follows (gateway OnPush):
+//
+//	if len(res.DrainedMessages) > 0:        fan-out every drained
+//	elif Outcome == ApplyOutcomeContiguous: fan-out current frame
+//	else:                                   do nothing
+//
+// Ack still carries only the contiguous cursor (LastReceivedSeq).
 type ApplyResult struct {
 	Outcome         ApplyOutcome
 	LastReceivedSeq LastReceivedSeq // post-apply cursor; what the ack frame should carry
+
+	// DrainedMessages is populated only when a buffered gap closed in
+	// this Apply call. Empty for plain contiguous / duplicate / gap.
+	DrainedMessages []PushFrame
 }
 
 // Pusher is the daemon-side view-sync push contract. runtime/transit
