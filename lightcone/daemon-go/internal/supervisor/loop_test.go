@@ -497,6 +497,124 @@ func TestTick_SpawnFails_ReleasesLock(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 7b. FIX-4 codex t90 — worker process alive, but its heartbeat goroutine
+//     died so the worker_locks row drifted out from under us. The
+//     supervisor MUST detect the lease drift even when l.current is
+//     non-nil and reclaim the slot the same tick.
+// ---------------------------------------------------------------------------
+
+// 7b.1 Lease lost: a peer supervisor steals the row while we still
+//      hold the worker handle. Tick must Stop the orphan + spawn fresh.
+func TestTick_AliveButLeaseStolen_ReclaimAndRespawn(t *testing.T) {
+	ctx := context.Background()
+	db := openChannel(t)
+	seedCursor(t, ctx, db, "agent:writer", 0)
+
+	spawner := &fakeSpawner{}
+	idFn, _ := counterID()
+	clk, now := fixedClockPtr(1_700_000_000)
+	loop, err := New(db, "ch", "agent:writer", spawner, LoopConfig{
+		Period: 1 * time.Millisecond, LeaseTTL: testTTL,
+		Now: clk, NewWorkerID: idFn, Logger: silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Tick 1: spawn w1.
+	if err := loop.Tick(ctx); err != nil {
+		t.Fatalf("Tick #1: %v", err)
+	}
+	if spawner.Count() != 1 {
+		t.Fatalf("expected 1 spawn after first tick")
+	}
+	w1 := spawner.Worker(0)
+
+	// Simulate a peer supervisor stealing our lease — overwrite the
+	// worker_locks row directly with someone else as owner. The fake
+	// worker keeps Wait()'ing on done so loop.current stays non-nil
+	// until we Kill it.
+	if _, err := db.ExecContext(ctx,
+		`UPDATE worker_locks
+		    SET worker_id=?, fencing_token=?, lease_expires_at=?, acquired_at=?
+		  WHERE agent_id=?`,
+		"peer-thief", 99, atomic.LoadInt64(now)+testTTL, atomic.LoadInt64(now), "agent:writer",
+	); err != nil {
+		t.Fatalf("steal lease: %v", err)
+	}
+
+	// Tick 2: alive cur != nil, lock owner == "peer-thief" != "w1" →
+	// Stop + clear + lock-not-mine branch (peer holds live lease) →
+	// no spawn this tick.
+	if err := loop.Tick(ctx); err != nil {
+		t.Fatalf("Tick #2: %v", err)
+	}
+	if !w1.killed {
+		t.Errorf("expected w1 to be killed after lease drift detection")
+	}
+	if loop.currentWorker() != nil {
+		t.Errorf("expected loop.current to be cleared after lease drift")
+	}
+	if spawner.Count() != 1 {
+		// Peer still owns the row → no spawn. That's correct.
+		t.Errorf("unexpected respawn while peer holds the lease: %d", spawner.Count())
+	}
+}
+
+// 7b.2 Lease expired: our heartbeat goroutine died, the worker row
+//      passed its TTL. cur is still non-nil. Tick must reclaim and
+//      respawn the same iteration.
+func TestTick_AliveButLeaseExpired_StealAndRespawn(t *testing.T) {
+	ctx := context.Background()
+	db := openChannel(t)
+	seedCursor(t, ctx, db, "agent:writer", 0)
+
+	spawner := &fakeSpawner{}
+	idFn, _ := counterID()
+	clk, now := fixedClockPtr(1_700_000_000)
+	loop, err := New(db, "ch", "agent:writer", spawner, LoopConfig{
+		Period: 1 * time.Millisecond, LeaseTTL: testTTL,
+		Now: clk, NewWorkerID: idFn, Logger: silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Tick 1: spawn w1.
+	if err := loop.Tick(ctx); err != nil {
+		t.Fatalf("Tick #1: %v", err)
+	}
+	w1 := spawner.Worker(0)
+
+	// Heartbeat goroutine "dies": the worker_locks row is never
+	// extended, so when we advance the clock past testTTL the row is
+	// expired even though l.current is still non-nil (the OS-level
+	// process is still running its echo loop; only the heartbeat
+	// goroutine died).
+	atomic.AddInt64(now, testTTL+5)
+
+	if err := loop.Tick(ctx); err != nil {
+		t.Fatalf("Tick #2: %v", err)
+	}
+	if !w1.killed {
+		t.Errorf("expected w1 stopped after lease expiry detection")
+	}
+	if spawner.Count() != 2 {
+		t.Fatalf("expected immediate respawn within the same tick: count=%d", spawner.Count())
+	}
+	sc := spawner.LastContext()
+	if sc.WorkerID != "w2" {
+		t.Errorf("respawn WorkerID = %q, want w2", sc.WorkerID)
+	}
+	if sc.FencingToken != 2 {
+		t.Errorf("respawn FencingToken = %d, want 2 (steal bumps token)", sc.FencingToken)
+	}
+
+	// Cleanup the new spawn.
+	_ = spawner.Worker(1).Kill()
+}
+
+// ---------------------------------------------------------------------------
 // 8. Run drives Tick on Period intervals and shuts down cleanly on
 //    context cancellation. Uses a sub-millisecond period + a fake
 //    spawner that records each spawn.

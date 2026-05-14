@@ -264,12 +264,13 @@ func (l *Loop) Run(ctx context.Context) error {
 }
 
 // Tick executes one supervisor iteration. The decision tree mirrors
-// L2 §1.4.10 pseudocode:
+// L2 §1.4.10 pseudocode (with the FIX-4 lease-validation tightening):
 //
-//	current worker recorded and alive → no-op (heartbeat is the worker's job)
-//	lock missing OR expired           → CAS acquire/steal → spawn → backlog
-//	lock present and not expired      → another supervisor owns it; no-op
-//	lock owned by us but worker exited → release + spawn next tick
+//	current worker recorded and lease still ours → no-op
+//	current worker recorded but lease lost/expired → Stop + steal + spawn
+//	lock missing OR expired                       → CAS acquire/steal → spawn → backlog
+//	lock present and not expired                  → another supervisor owns it; no-op
+//	lock owned by us but worker exited            → release + spawn next tick
 //
 // Tick is exported primarily for tests — Run calls Tick on every
 // wake-up, but a unit test can drive the state machine manually
@@ -282,17 +283,58 @@ func (l *Loop) Run(ctx context.Context) error {
 func (l *Loop) Tick(ctx context.Context) error {
 	l.mu.Lock()
 	cur := l.current
+	curID := l.currentID
+	curTok := l.currentTok
 	lastWorkerID := l.currentID
 	l.mu.Unlock()
 
-	if cur != nil {
-		// Worker still alive. Nothing to do — its heartbeat keeps
-		// the lease green; Run() will wake us again on the next tick
-		// or on OS exit.
-		return nil
-	}
-
 	now := l.cfg.Now()
+
+	if cur != nil {
+		// FIX-4 codex t90: even when the supervisor still believes a
+		// worker is live, validate the worker_locks row before bailing
+		// out. The worker's heartbeat goroutine can die (panic, leaked
+		// stop, sqlite EAGAIN starvation) while the OS-level process
+		// keeps running — without this guard the supervisor would
+		// happily skip every Tick until Run noticed the OS exit, which
+		// may never come.
+		lock, err := Get(ctx, l.db, l.agentID)
+		if err != nil && !errors.Is(err, ErrLockMissing) {
+			return fmt.Errorf("supervisor: get lock (current alive): %w", err)
+		}
+		matches := err == nil && lock.WorkerID == curID && lock.FencingToken == curTok && !lock.Expired(now)
+		if matches {
+			// Healthy: heartbeat is keeping the lease green. Wait
+			// goroutine handles the OS-exit path.
+			return nil
+		}
+		// Lease lost (stolen by another supervisor) or expired
+		// (heartbeat goroutine dead). Stop the orphaned worker so it
+		// doesn't keep emitting under the now-stale fencing_token,
+		// clear our snapshot, then fall through to acquireAndSpawn
+		// this tick.
+		l.cfg.Logger.Warn("supervisor.tick.lease_invalid",
+			"channel_id", l.channelID, "agent_id", l.agentID,
+			"worker_id", curID, "fencing_token", curTok,
+			"lock_present", err == nil,
+		)
+		if serr := stopOrKill(cur); serr != nil {
+			l.cfg.Logger.Warn("supervisor.tick.stop.error",
+				"err", serr.Error(), "worker_id", curID)
+		}
+		l.mu.Lock()
+		// Only clear when the snapshot still matches — Run/wait
+		// may have raced and already replaced l.current.
+		if l.currentID == curID {
+			l.current = nil
+			l.currentID = ""
+			l.currentTok = 0
+		}
+		l.mu.Unlock()
+		// Continue into the lock-state branches below — we want this
+		// tick to immediately spawn a replacement rather than wait
+		// another full Period.
+	}
 	lock, err := Get(ctx, l.db, l.agentID)
 	switch {
 	case errors.Is(err, ErrLockMissing):
