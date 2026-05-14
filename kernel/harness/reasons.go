@@ -34,7 +34,6 @@ const (
 	RejectWorkerFencingStale         = message.HarnessWorkerFencingStale
 	RejectEngineACLDenied            = message.HarnessEngineACLDenied
 	RejectMessageIDConflict          = message.HarnessMessageIDConflict
-	RejectChannelMismatch            = message.HarnessChannelMismatch
 )
 
 // AllRejectReasons is re-exported from kernel/message.

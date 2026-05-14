@@ -2,10 +2,49 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
+
+// TypeSchema bundles the per-type schema metadata an adapter declares
+// for the Message-Write Harness (L1 §10.2 step 4/5/6/8 + L2 §1.4.2
+// install rules). All schema fields are JSON Schema fragments stored
+// as raw bytes — the framework validator dereferences them at write
+// time.
+//
+// TypeSchema is OPTIONAL: adapters that omit it for a Types entry get
+// permissive defaults (AllowedKinds={event,request,response}, no
+// payload schema, payload_status terminal convention). Adapters that
+// provide it MUST satisfy install-time validation per L2 §1.4.2.
+type TypeSchema struct {
+	// AllowedKinds is the closed set of envelope.kind the harness will
+	// accept for this type. Subset of {event, request, response}. When
+	// empty, install uses {event, request, response}.
+	AllowedKinds []message.Kind
+
+	// SchemasByKind maps kind → JSON Schema fragment validated against
+	// envelope.payload at harness step 6. Keys MUST be a subset of
+	// AllowedKinds. Optional — kinds without a schema accept any object
+	// payload.
+	SchemasByKind map[message.Kind]json.RawMessage
+
+	// FallbackResponseSchema is the response-schema projection that
+	// MUST accept the L2 §1.4.2 mandated system fallback payloads:
+	//   {status:'failed', reason:'unanswered_timeout'}
+	//   {status:'failed', reason:'adapter_default_timeout'}
+	//   {status:'failed', reason:'receiver_unavailable'}
+	// REQUIRED when AllowedKinds includes request and the schema map
+	// is supplied; install rejects with fallback_response_schema_invalid
+	// otherwise.
+	FallbackResponseSchema json.RawMessage
+
+	// TerminalConvention controls harness step 8 is_terminal computation
+	// (L1 §10.2). Either "payload_status" (default) or "single-response".
+	// Empty string is normalised to "payload_status" at install time.
+	TerminalConvention string
+}
 
 // Declaration is the static metadata an adapter Module exposes at
 // install time. Mirrors the L2 §8.1 framework Declaration with M1.5
@@ -31,6 +70,14 @@ type Declaration struct {
 	// == ActorID and handler_binding == Binding (Manager.Install
 	// verifies).
 	Types []string
+
+	// TypeSchemas optionally maps type → TypeSchema, supplying the
+	// allowed_kinds + per-kind payload schemas + fallback_response_schema
+	// + terminal_convention rows the harness loads at write time. A
+	// missing key falls back to permissive defaults; install logs a
+	// warning so the gap is observable. Adapters wishing strict harness
+	// validation MUST populate this map.
+	TypeSchemas map[string]TypeSchema
 
 	// Binding is the M1.5 tri-class transport for this adapter (L1
 	// §11.7). Determines which framework helpers run (in-process

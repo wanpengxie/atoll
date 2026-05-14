@@ -2,6 +2,7 @@ package framework
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -14,6 +15,17 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
+
+func cloneSchemaMap(in map[message.Kind]json.RawMessage) map[message.Kind]json.RawMessage {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[message.Kind]json.RawMessage, len(in))
+	for k, v := range in {
+		out[k] = append(json.RawMessage(nil), v...)
+	}
+	return out
+}
 
 // ManagerConfig parameterises NewManager. ChannelID, ActorRegistry,
 // TypeRegistry, HarnessChain, RequestLookup are required; the rest get
@@ -218,13 +230,46 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 			"note", "ManagerConfig.HTTPClient nil — adapter must provide its own")
 	}
 
-	// Upsert types into the type_registry.
+	// Upsert types into the type_registry. Per L2 §1.4.2 install rules,
+	// each row carries allowed_kinds + per-kind payload schemas +
+	// fallback_response_schema (when request) + terminal_convention.
+	// Adapters omitting decl.TypeSchemas[type] fall back to permissive
+	// defaults (allowed_kinds={event,request,response}, payload_status
+	// terminal); install logs a warning so the gap stays observable.
 	for _, t := range decl.Types {
+		schema, hasSchema := decl.TypeSchemas[t]
+		if !hasSchema {
+			schema = adapter.TypeSchema{
+				AllowedKinds: []message.Kind{
+					message.KindEvent,
+					message.KindRequest,
+					message.KindResponse,
+				},
+			}
+			m.cfg.Logger.Warn("framework.install.type_schema.permissive_default",
+				"adapter", decl.Name,
+				"type", t,
+				"note", "decl.TypeSchemas[type] missing — using permissive defaults; harness will not enforce per-payload schema")
+		} else {
+			if err := ValidateTypeSchema(t, schema); err != nil {
+				return fmt.Errorf("framework: validate type=%s: %w", t, err)
+			}
+		}
+
+		conv := schema.TerminalConvention
+		if conv == "" {
+			conv = string(TerminalPayloadStatus)
+		}
+
 		row := TypeRow{
-			Type:           t,
-			HandlerActorID: decl.ActorID,
-			HandlerBinding: decl.Binding,
-			MaxPendingMs:   decl.MaxPendingMs,
+			Type:                   t,
+			HandlerActorID:         decl.ActorID,
+			HandlerBinding:         decl.Binding,
+			MaxPendingMs:           decl.MaxPendingMs,
+			AllowedKinds:           append([]message.Kind(nil), schema.AllowedKinds...),
+			SchemasByKind:          cloneSchemaMap(schema.SchemasByKind),
+			FallbackResponseSchema: append(json.RawMessage(nil), schema.FallbackResponseSchema...),
+			TerminalConvention:     TerminalConvention(conv),
 		}
 		if row.MaxPendingMs <= 0 {
 			return fmt.Errorf("%w: adapter=%s type=%s",

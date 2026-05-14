@@ -2,6 +2,7 @@ package framework
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/wanpengxie/ActOS/kernel/adapter"
@@ -20,14 +21,14 @@ func TestInMemoryTypeRegistryUpsertAndLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	if got != row {
+	if !reflect.DeepEqual(got, row) {
 		t.Fatalf("Upsert returned %+v want %+v", got, row)
 	}
 	loaded, ok, err := r.Lookup(ctx, "feishu.chat.send")
 	if err != nil || !ok {
 		t.Fatalf("Lookup: ok=%v err=%v", ok, err)
 	}
-	if loaded != row {
+	if !reflect.DeepEqual(loaded, row) {
 		t.Fatalf("Lookup returned %+v want %+v", loaded, row)
 	}
 }

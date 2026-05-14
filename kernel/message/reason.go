@@ -45,11 +45,6 @@ const (
 	HarnessWorkerFencingStale         HarnessRejectReason = "worker_fencing_stale"
 	HarnessEngineACLDenied            HarnessRejectReason = "engine_acl_denied"
 	HarnessMessageIDConflict          HarnessRejectReason = "message_id_conflict"
-	// HarnessChannelMismatch is reported when envelope.channel_id does not
-	// equal the binding's bound channel (Deps.ChannelID). Routing error
-	// classed as bad-request (400) — distinct from sender_mismatch (403)
-	// which is an identity/permission failure.
-	HarnessChannelMismatch HarnessRejectReason = "channel_mismatch"
 )
 
 // AllHarnessRejectReasons enumerates every value of the HarnessRejectReason
@@ -74,7 +69,6 @@ var AllHarnessRejectReasons = []HarnessRejectReason{
 	HarnessWorkerFencingStale,
 	HarnessEngineACLDenied,
 	HarnessMessageIDConflict,
-	HarnessChannelMismatch,
 }
 
 // String returns the wire form of r.
@@ -108,8 +102,7 @@ func (r HarnessRejectReason) HTTPStatus() int {
 		HarnessAudienceActorNotRegistered,
 		HarnessAudienceHandlerMismatch,
 		HarnessPayloadSchemaViolation,
-		HarnessDocRefsInvalid,
-		HarnessChannelMismatch:
+		HarnessDocRefsInvalid:
 		return 400
 	}
 	return 0

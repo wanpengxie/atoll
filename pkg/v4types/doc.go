@@ -114,7 +114,6 @@ const (
 	HarnessWorkerFencingStale         = message.HarnessWorkerFencingStale
 	HarnessEngineACLDenied            = message.HarnessEngineACLDenied
 	HarnessMessageIDConflict          = message.HarnessMessageIDConflict
-	HarnessChannelMismatch            = message.HarnessChannelMismatch
 )
 
 // AllHarnessRejectReasons re-export.
