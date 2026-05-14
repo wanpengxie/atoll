@@ -1,0 +1,131 @@
+---
+# go-arch-lint v3 configuration — root module.
+#
+# Authoritative spec:
+#   - .dalek/pm/m1.5-tickets.md §T2 (6 Ownership Invariants → lint rules)
+#   - .dalek/pm/m1.5-tickets.md §T3 (runtime/worker boundary, codex #9)
+#
+# Module root: github.com/coagent-ai/coagent (see go.mod).
+#
+# Invariant coverage:
+#   #1 channel sqlite truth = daemon   → server ⊄ runtime/store
+#   #2 kernel runtime = daemon         → kernel ⊄ runtime/*
+#   #3 directory = server              → runtime ⊄ server/**
+#   #4 session = server                → runtime/adapters ⊄ server/identity
+#   #5 adapter = daemon                → server ⊄ adapters/*
+#   #6 worker = daemon spawn           → runtime/worker ⊄ runtime/store,
+#                                        ⊄ database/sql, ⊄ sqlite driver
+
+version: 3
+workdir: .
+
+allow:
+  # deepScan is OFF while runtime/* is being filled in. Re-enable in T6/T9.
+  deepScan: false
+  # Skip rules whose `in:` glob matches no files yet (e.g. server/ before T6).
+  ignoreNotFoundComponents: true
+
+exclude:
+  - test
+  - archive
+  # daemon-go is the M1.3/M1.4 legacy module with its own .go-arch-lint.yaml.
+  # T9 will archive it. The root config does not police it.
+  - lightcone
+
+excludeFiles:
+  - "^.*_test\\.go$"
+
+components:
+  # ─────────────────────────────────────────────────────────────────────
+  # kernel — protocol contract core (interfaces + pure types + pure logic).
+  # MUST NOT depend on runtime/adapters/server/cmd/pkg/ui.
+  # MUST NOT use sqlite, net/http, gorilla, gin, go-kimi.
+  # ─────────────────────────────────────────────────────────────────────
+  kernel: { in: kernel/** }
+
+  # ─────────────────────────────────────────────────────────────────────
+  # runtime — daemon-side execution engine (M1.5-T3).
+  # MUST NOT depend on server/**, adapters/**.
+  # MAY depend on kernel + self.
+  # ─────────────────────────────────────────────────────────────────────
+  runtime: { in: runtime/** }
+
+  # ─────────────────────────────────────────────────────────────────────
+  # runtime_worker — worker SUBPROCESS runtime (invariant #6).
+  # Stricter than `runtime`: NO sqlite, NO runtime/store import.
+  # MAY depend on kernel + runtime/workerhost (IPC client side only).
+  # ─────────────────────────────────────────────────────────────────────
+  runtime_worker: { in: runtime/worker/** }
+
+  # ─────────────────────────────────────────────────────────────────────
+  # adapters — adapter implementations (xhs, feishu, …). T4/T5.
+  # ─────────────────────────────────────────────────────────────────────
+  adapters: { in: adapters/** }
+
+  # ─────────────────────────────────────────────────────────────────────
+  # server — central server (placement, devicebus, identity, view cache). T6.
+  # ─────────────────────────────────────────────────────────────────────
+  server: { in: server/** }
+
+  # ─────────────────────────────────────────────────────────────────────
+  # cmd — process entry points (daemon / worker / server / cli). Composition
+  # root. T6/T7.
+  # ─────────────────────────────────────────────────────────────────────
+  cmd: { in: cmd/** }
+
+  # ─────────────────────────────────────────────────────────────────────
+  # pkg — public Go packages. After T9 may depend on kernel only.
+  # ─────────────────────────────────────────────────────────────────────
+  pkg: { in: pkg/** }
+
+  ui: { in: ui/** }
+
+vendors:
+  sqlite_driver: { in: ["github.com/mattn/go-sqlite3", "modernc.org/sqlite", "modernc.org/sqlite/**"] }
+  go_kimi:       { in: "github.com/wanpengxie/go-kimi/**" }
+  gorilla:       { in: "github.com/gorilla/**" }
+  gin:           { in: "github.com/gin-gonic/**" }
+  uuid:          { in: "github.com/google/uuid" }
+  jsonschema:    { in: "github.com/santhosh-tekuri/jsonschema/v5" }
+
+deps:
+  kernel:
+    mayDependOn: [kernel]
+    canUse:
+      - uuid
+      - jsonschema
+
+  runtime:
+    # runtime owns sqlite + WS client + worker pipes. runtime_worker is the
+    # tighter subset. Vendor whitelist is broad (anyVendorDeps).
+    mayDependOn: [kernel, runtime, runtime_worker, pkg]
+    anyVendorDeps: true
+
+  runtime_worker:
+    # STRICT: no sqlite, no runtime/store. canUse intentionally excludes
+    # sqlite_driver.
+    mayDependOn: [kernel, pkg]
+    canUse:
+      - go_kimi
+      - uuid
+      - jsonschema
+
+  adapters:
+    mayDependOn: [kernel, pkg]
+    anyVendorDeps: true
+
+  server:
+    mayDependOn: [kernel, pkg]
+    anyVendorDeps: true
+
+  cmd:
+    mayDependOn: [kernel, runtime, runtime_worker, adapters, server, pkg]
+    anyVendorDeps: true
+
+  pkg:
+    mayDependOn: [kernel, pkg]
+    anyVendorDeps: true
+
+  ui:
+    mayDependOn: [kernel]
+    anyVendorDeps: true
