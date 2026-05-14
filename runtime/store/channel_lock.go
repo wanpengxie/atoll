@@ -130,10 +130,15 @@ func (l *ChannelLock) RefreshDaemon(
 	return nil
 }
 
-// ValidateWrite is the fencing gate: every channel-sqlite mutation MUST
-// pass this check (or be executed inside a transaction that called this
-// first). Returns nil when the supplied fencing_token + daemon_epoch
-// match the stored row; non-nil error otherwise.
+// ValidateWrite is the fencing gate for non-tx callers (e.g.
+// lifecycle/FencingChecker pre-flight at IPC boundary). It performs a
+// standalone Get → compare. For sqlite-mutation paths the caller MUST
+// instead use ValidateWriteTx so the check runs in the SAME transaction
+// as the INSERT and a concurrent UpgradeEpoch cannot slip between read
+// and write (FIX-T6).
+//
+// Returns nil when the supplied fencing_token + daemon_epoch match the
+// stored row; ErrFencingStale wrapper otherwise.
 func (l *ChannelLock) ValidateWrite(
 	ctx context.Context,
 	fencingToken placement.FencingToken,
@@ -143,16 +148,104 @@ func (l *ChannelLock) ValidateWrite(
 	if err != nil {
 		return err
 	}
+	return validateRow(row, ok, fencingToken, daemonEpoch)
+}
+
+// ValidateWriteTx is the in-transaction fencing gate. Every
+// channel-local mutation (messages.Append, ledger.Reserve/Commit, etc.)
+// MUST call this BEFORE the actual write, inside the same *sql.Tx, so
+// the row-level lock semantics protect against a concurrent
+// UpgradeEpoch / RefreshDaemon racing with the write.
+//
+// Returns ErrFencingStale when the channel_lock row is missing OR the
+// fencing tuple does not match. The caller is expected to rollback the
+// transaction and surface HarnessWorkerFencingStale to the principal.
+func (l *ChannelLock) ValidateWriteTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	fencingToken placement.FencingToken,
+	daemonEpoch placement.DaemonEpoch,
+) error {
+	if tx == nil {
+		return errors.New("store: ValidateWriteTx nil tx")
+	}
+	const q = `SELECT fencing_token, daemon_epoch FROM channel_lock LIMIT 1`
+	var ft, de int64
+	err := tx.QueryRowContext(ctx, q).Scan(&ft, &de)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &FencingStaleError{Reason: "channel_lock row missing"}
+	}
+	if err != nil {
+		return fmt.Errorf("store: validate_write_tx: %w", err)
+	}
+	row := ChannelLockRow{
+		FencingToken: placement.FencingToken(ft),
+		DaemonEpoch:  placement.DaemonEpoch(de),
+	}
+	return validateRow(row, true, fencingToken, daemonEpoch)
+}
+
+// validateRow is the shared compare used by both ValidateWrite (non-tx)
+// and ValidateWriteTx (in-tx). Returns a typed FencingStaleError so
+// callers can map to message.HarnessWorkerFencingStale.
+func validateRow(
+	row ChannelLockRow,
+	ok bool,
+	fencingToken placement.FencingToken,
+	daemonEpoch placement.DaemonEpoch,
+) error {
 	if !ok {
-		return errors.New("store: channel_lock missing — channel not bootstrapped")
+		return &FencingStaleError{Reason: "channel_lock row missing"}
 	}
 	if row.FencingToken != fencingToken {
-		return fmt.Errorf("store: fencing token mismatch (have=%d got=%d)",
-			row.FencingToken, fencingToken)
+		return &FencingStaleError{
+			HaveToken: row.FencingToken,
+			GotToken:  fencingToken,
+			HaveEpoch: row.DaemonEpoch,
+			GotEpoch:  daemonEpoch,
+			Reason:    fmt.Sprintf("fencing_token mismatch (have=%d got=%d)", row.FencingToken, fencingToken),
+		}
 	}
 	if row.DaemonEpoch != daemonEpoch {
-		return fmt.Errorf("store: daemon_epoch mismatch (have=%d got=%d)",
-			row.DaemonEpoch, daemonEpoch)
+		return &FencingStaleError{
+			HaveToken: row.FencingToken,
+			GotToken:  fencingToken,
+			HaveEpoch: row.DaemonEpoch,
+			GotEpoch:  daemonEpoch,
+			Reason:    fmt.Sprintf("daemon_epoch mismatch (have=%d got=%d)", row.DaemonEpoch, daemonEpoch),
+		}
 	}
 	return nil
+}
+
+// FencingStaleError is the typed error returned by both ValidateWrite
+// flavors when the caller's (token, epoch) tuple does not match the
+// stored channel_lock row. Callers map this to
+// message.HarnessWorkerFencingStale per L1 §10.3.1.
+type FencingStaleError struct {
+	HaveToken placement.FencingToken
+	GotToken  placement.FencingToken
+	HaveEpoch placement.DaemonEpoch
+	GotEpoch  placement.DaemonEpoch
+	Reason    string
+}
+
+// Error implements error.
+func (e *FencingStaleError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Reason != "" {
+		return "store: fencing stale: " + e.Reason
+	}
+	return fmt.Sprintf(
+		"store: fencing stale (have token=%d epoch=%d, got token=%d epoch=%d)",
+		e.HaveToken, e.HaveEpoch, e.GotToken, e.GotEpoch,
+	)
+}
+
+// IsFencingStale reports whether err is (or wraps) a FencingStaleError.
+func IsFencingStale(err error) bool {
+	var fse *FencingStaleError
+	return errors.As(err, &fse)
 }

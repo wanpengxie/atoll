@@ -1,0 +1,381 @@
+package store_test
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"path/filepath"
+	"testing"
+
+	klog "github.com/wanpengxie/ActOS/kernel/log"
+	"github.com/wanpengxie/ActOS/kernel/ledger"
+	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/runtime/store"
+)
+
+// fencedFixture spins up a fresh channel sqlite with a seeded
+// channel_lock row and the WithLock variants of Messages + Ledger. The
+// shared (token, epoch) tuple is the one a non-stale daemon is supposed
+// to present.
+type fencedFixture struct {
+	db    *sql.DB
+	lock  *store.ChannelLock
+	msgs  *store.Messages
+	led   *store.Ledger
+	token placement.FencingToken
+	epoch placement.DaemonEpoch
+}
+
+func newFencedFixture(t *testing.T, token placement.FencingToken, epoch placement.DaemonEpoch) *fencedFixture {
+	t.Helper()
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	lock := store.NewChannelLock(db)
+	if err := lock.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    "ch-fence",
+		FencingToken: token,
+		OwnerEpoch:   placement.OwnerEpoch(1),
+		DaemonID:     "daemon-A",
+		DaemonEpoch:  epoch,
+		AcquiredAt:   1000,
+		RefreshedAt:  1000,
+	}); err != nil {
+		t.Fatalf("seed channel_lock: %v", err)
+	}
+
+	return &fencedFixture{
+		db:    db,
+		lock:  lock,
+		msgs:  store.NewMessagesWithLock(db, lock),
+		led:   store.NewLedgerWithLock(db, lock),
+		token: token,
+		epoch: epoch,
+	}
+}
+
+func newFencedEnvelope(id string) *message.Envelope {
+	return &message.Envelope{
+		ID:         id,
+		TS:         1000,
+		TSReceived: 1100,
+		ChannelID:  "ch-fence",
+		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:alpha"},
+		Kind:       message.KindEvent,
+		Type:       "channel.created",
+		Payload:    json.RawMessage(`{}`),
+		Visibility: message.VisibilityPublic,
+		Audience:   []string{"*"},
+	}
+}
+
+// outboxRowCount returns the number of view_sync_outbox rows — used to
+// prove the outbox is NOT polluted on a fencing-reject path (L1 §8.6).
+func outboxRowCount(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM view_sync_outbox`).Scan(&n); err != nil {
+		t.Fatalf("count outbox: %v", err)
+	}
+	return n
+}
+
+func messagesRowCount(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&n); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	return n
+}
+
+func ledgerRowCount(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM action_ledger`).Scan(&n); err != nil {
+		t.Fatalf("count action_ledger: %v", err)
+	}
+	return n
+}
+
+// TestMessages_FencingEnforced is the FIX-T6 reject table for Append.
+// Every row exercises one branch of the fencing gate.
+func TestMessages_FencingEnforced(t *testing.T) {
+	cases := []struct {
+		name       string
+		token      placement.FencingToken
+		epoch      placement.DaemonEpoch
+		stampCtx   bool
+		wantReject bool
+		wantReason message.HarnessRejectReason
+	}{
+		{
+			name:     "match — accept",
+			token:    placement.FencingToken(7),
+			epoch:    placement.DaemonEpoch(3),
+			stampCtx: true,
+		},
+		{
+			name:       "stale token — caller below lock",
+			token:      placement.FencingToken(6), // lock=7
+			epoch:      placement.DaemonEpoch(3),
+			stampCtx:   true,
+			wantReject: true,
+			wantReason: message.HarnessWorkerFencingStale,
+		},
+		{
+			name:       "stale token — caller above lock (newer worker view)",
+			token:      placement.FencingToken(8),
+			epoch:      placement.DaemonEpoch(3),
+			stampCtx:   true,
+			wantReject: true,
+			wantReason: message.HarnessWorkerFencingStale,
+		},
+		{
+			name:       "daemon_epoch mismatch — stale daemon",
+			token:      placement.FencingToken(7),
+			epoch:      placement.DaemonEpoch(99),
+			stampCtx:   true,
+			wantReject: true,
+			wantReason: message.HarnessWorkerFencingStale,
+		},
+		{
+			name:       "missing ctx — bare append rejected",
+			token:      placement.FencingToken(7),
+			epoch:      placement.DaemonEpoch(3),
+			stampCtx:   false,
+			wantReject: true,
+			wantReason: message.HarnessWorkerFencingStale,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newFencedFixture(t, placement.FencingToken(7), placement.DaemonEpoch(3))
+			ctx := context.Background()
+			if tc.stampCtx {
+				ctx = store.CtxWithFencing(ctx, tc.token, tc.epoch)
+			}
+
+			env := newFencedEnvelope("m-" + tc.name)
+			_, err := fx.msgs.Append(ctx, env)
+
+			if tc.wantReject {
+				var appErr *klog.AppendError
+				if !errors.As(err, &appErr) {
+					t.Fatalf("expected *AppendError, got %T: %v", err, err)
+				}
+				if appErr.Reason != tc.wantReason {
+					t.Fatalf("reason got=%q want=%q", appErr.Reason, tc.wantReason)
+				}
+				if n := messagesRowCount(t, fx.db); n != 0 {
+					t.Errorf("messages row written despite reject: %d", n)
+				}
+				if n := outboxRowCount(t, fx.db); n != 0 {
+					t.Errorf("view_sync_outbox row written despite reject: %d", n)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("expected accept, got err: %v", err)
+			}
+			if n := messagesRowCount(t, fx.db); n != 1 {
+				t.Errorf("messages rowcount = %d, want 1", n)
+			}
+			if n := outboxRowCount(t, fx.db); n != 1 {
+				t.Errorf("outbox rowcount = %d, want 1", n)
+			}
+		})
+	}
+}
+
+// TestLedger_FencingEnforced mirrors TestMessages_FencingEnforced for
+// Reserve + Commit. A stale daemon must not be able to reserve nor flip
+// status.
+func TestLedger_FencingEnforced(t *testing.T) {
+	ctx := context.Background()
+	fx := newFencedFixture(t, placement.FencingToken(7), placement.DaemonEpoch(3))
+
+	key, err := ledger.DeriveKey("turn-1", "act-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := ledger.Entry{
+		Key:        key,
+		TurnID:     "turn-1",
+		ActorID:    "agent:alpha",
+		EnvelopeID: "env-1",
+		Status:     ledger.StatusReserved,
+		ReservedAt: 1000,
+	}
+
+	// Reserve — stale fencing tuple → reject, no row.
+	staleCtx := store.CtxWithFencing(ctx, placement.FencingToken(6), placement.DaemonEpoch(3))
+	if _, err := fx.led.Reserve(staleCtx, entry); err == nil {
+		t.Fatal("Reserve with stale token: expected error, got nil")
+	} else if !store.IsFencingStale(err) {
+		t.Errorf("expected FencingStaleError, got %v", err)
+	}
+	if n := ledgerRowCount(t, fx.db); n != 0 {
+		t.Errorf("ledger rowcount after stale reserve = %d, want 0", n)
+	}
+
+	// Reserve — missing ctx → reject.
+	if _, err := fx.led.Reserve(ctx, entry); err == nil {
+		t.Fatal("Reserve without fencing ctx: expected error, got nil")
+	} else if !store.IsFencingStale(err) {
+		t.Errorf("expected FencingStaleError, got %v", err)
+	}
+
+	// Reserve — matching tuple → ok.
+	goodCtx := store.CtxWithFencing(ctx, fx.token, fx.epoch)
+	if _, err := fx.led.Reserve(goodCtx, entry); err != nil {
+		t.Fatalf("Reserve match: %v", err)
+	}
+	if n := ledgerRowCount(t, fx.db); n != 1 {
+		t.Errorf("ledger rowcount after good reserve = %d, want 1", n)
+	}
+
+	// Commit — stale daemon_epoch → reject.
+	staleEpochCtx := store.CtxWithFencing(ctx, fx.token, placement.DaemonEpoch(99))
+	if err := fx.led.Commit(staleEpochCtx, key, 2000); err == nil {
+		t.Fatal("Commit stale epoch: expected error")
+	} else if !store.IsFencingStale(err) {
+		t.Errorf("expected FencingStaleError, got %v", err)
+	}
+
+	// Commit — match → ok + status flipped to committed.
+	if err := fx.led.Commit(goodCtx, key, 2000); err != nil {
+		t.Fatalf("Commit match: %v", err)
+	}
+	got, ok, err := fx.led.Find(ctx, key)
+	if err != nil || !ok {
+		t.Fatalf("Find post-commit ok=%v err=%v", ok, err)
+	}
+	if got.Status != ledger.StatusCommitted {
+		t.Errorf("post-commit status=%q want=%q", got.Status, ledger.StatusCommitted)
+	}
+}
+
+// TestChannelLock_ValidateWriteTx covers the in-tx fencing gate in
+// isolation. Mirrors store_test.go TestChannelLock but exercises the
+// FIX-T6 tx-aware variant.
+func TestChannelLock_ValidateWriteTx(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	lock := store.NewChannelLock(db)
+	if err := lock.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    "ch-1",
+		FencingToken: placement.FencingToken(5),
+		OwnerEpoch:   placement.OwnerEpoch(1),
+		DaemonID:     "daemon-A",
+		DaemonEpoch:  placement.DaemonEpoch(2),
+		AcquiredAt:   1000,
+		RefreshedAt:  1000,
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	runInTx := func(token placement.FencingToken, epoch placement.DaemonEpoch) error {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		return lock.ValidateWriteTx(ctx, tx, token, epoch)
+	}
+
+	cases := []struct {
+		name    string
+		token   placement.FencingToken
+		epoch   placement.DaemonEpoch
+		wantErr bool
+	}{
+		{"match", 5, 2, false},
+		{"token lower", 4, 2, true},
+		{"token higher", 6, 2, true},
+		{"epoch lower", 5, 1, true},
+		{"epoch higher", 5, 3, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runInTx(tc.token, tc.epoch)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				if !store.IsFencingStale(err) {
+					t.Errorf("expected FencingStaleError, got %v", err)
+				}
+			} else if err != nil {
+				t.Errorf("expected ok, got %v", err)
+			}
+		})
+	}
+
+	// Lock row missing → also stale.
+	t.Run("lock row missing", func(t *testing.T) {
+		dir := t.TempDir()
+		db, err := store.OpenChannel(ctx, filepath.Join(dir, "empty.sqlite"), store.OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		emptyLock := store.NewChannelLock(db)
+		tx, _ := db.BeginTx(ctx, nil)
+		defer func() { _ = tx.Rollback() }()
+		err = emptyLock.ValidateWriteTx(ctx, tx, placement.FencingToken(5), placement.DaemonEpoch(2))
+		if !store.IsFencingStale(err) {
+			t.Errorf("missing row: want FencingStaleError, got %v", err)
+		}
+	})
+
+	// Nil tx → error path.
+	t.Run("nil tx", func(t *testing.T) {
+		if err := lock.ValidateWriteTx(ctx, nil, placement.FencingToken(5), placement.DaemonEpoch(2)); err == nil {
+			t.Fatal("nil tx: expected error")
+		}
+	})
+}
+
+// TestMessages_FencingDedupeUnchanged guards that the dedupe branch
+// still works once fencing is enforced — a retry with the same envelope
+// id should return Deduped=true (not a fencing reject).
+func TestMessages_FencingDedupeUnchanged(t *testing.T) {
+	fx := newFencedFixture(t, placement.FencingToken(7), placement.DaemonEpoch(3))
+	ctx := store.CtxWithFencing(context.Background(), fx.token, fx.epoch)
+
+	env := newFencedEnvelope("m-dedupe")
+	res1, err := fx.msgs.Append(ctx, env)
+	if err != nil {
+		t.Fatalf("append1: %v", err)
+	}
+	if res1.Deduped {
+		t.Error("first append should not be deduped")
+	}
+
+	res2, err := fx.msgs.Append(ctx, env)
+	if err != nil {
+		t.Fatalf("append2: %v", err)
+	}
+	if !res2.Deduped {
+		t.Error("second append should be deduped")
+	}
+	if n := outboxRowCount(t, fx.db); n != 1 {
+		t.Errorf("dedupe must not add outbox row, got %d", n)
+	}
+}

@@ -72,6 +72,8 @@ type channelRuntime struct {
 	db        *sql.DB
 	registry  *store.ActorRegistry
 	messages  *store.Messages
+	ledger    *store.Ledger
+	lock      *store.ChannelLock
 	outbox    *store.ViewSyncOutbox
 	chain     *harness.Chain
 	pusher    *transit.Pusher
@@ -431,7 +433,13 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		return nil, err
 	}
 	registry := store.NewActorRegistry(db)
-	messages := store.NewMessages(db)
+	// FIX-T6 — every channel-local mutation MUST validate (fencing_token,
+	// daemon_epoch) inside its sqlite tx. Wire one shared *ChannelLock
+	// per channel into both Messages and Ledger so harness.Append and
+	// workerhost.handleReserve/Commit go through the gate.
+	lock := store.NewChannelLock(db)
+	messages := store.NewMessagesWithLock(db, lock)
+	ledger := store.NewLedgerWithLock(db, lock)
 	outbox := store.NewViewSyncOutbox(db, lc.ChannelID)
 
 	chain, err := harness.New(harness.Deps{
@@ -473,6 +481,8 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		db:        db,
 		registry:  registry,
 		messages:  messages,
+		ledger:    ledger,
+		lock:      lock,
 		outbox:    outbox,
 		chain:     chain,
 		pusher:    pusher,
@@ -514,6 +524,7 @@ func (d *Daemon) routeWrite(_ context.Context, ch channel.ID) (transit.HarnessCh
 		chain:    cr.chain,
 		gateway:  cr.gateway,
 		messages: cr.messages,
+		lock:     cr.lock,
 		nowFn:    d.cfg.NowFn,
 	}
 	stamp := func(ctx context.Context, actorID actor.ActorID, chID channel.ID) context.Context {
@@ -579,11 +590,22 @@ type harnessChainAdapter struct {
 	chain    *harness.Chain
 	gateway  *trigger.Gateway
 	messages *store.Messages
+	lock     *store.ChannelLock
 	nowFn    func() int64
 }
 
 // Write implements transit.HarnessChain.
 func (a harnessChainAdapter) Write(ctx context.Context, env *message.Envelope) (transit.HarnessWriteResult, error) {
+	// FIX-T6 — stamp the daemon's current (fencing_token, daemon_epoch)
+	// tuple before running the harness. The store-level Append validates
+	// the tuple inside the messages-insert tx; if a placement reclaim
+	// silently bumped channel_lock under us, the write fails with
+	// HarnessWorkerFencingStale instead of silently corrupting outbox.
+	if a.lock != nil {
+		if row, ok, err := a.lock.Get(ctx); err == nil && ok {
+			ctx = store.CtxWithFencing(ctx, row.FencingToken, row.DaemonEpoch)
+		}
+	}
 	res, err := a.chain.Write(ctx, env)
 	if err != nil {
 		return transit.HarnessWriteResult{}, err

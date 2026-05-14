@@ -14,6 +14,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
+	"github.com/wanpengxie/ActOS/runtime/store"
 )
 
 // LedgerOps is the daemon-side ledger operations invoked by the host.
@@ -176,6 +177,13 @@ func (h *Host) handleWrite(ctx context.Context, frame ipc.Frame) error {
 		ChannelID:               h.cfg.ChannelID,
 		AllowProvidedSenderKind: false,
 	})
+	// FIX-T6 — stamp the host's (fencing_token, daemon_epoch) tuple so
+	// runtime/store.Messages.Append validates it inside the same tx as
+	// the row INSERT. The frame-level Fence() check above only proves
+	// the worker is talking to the right daemon process; the sqlite
+	// gate proves the daemon process itself still holds the channel
+	// fence (i.e. it isn't a reclaimed/stale daemon).
+	chainCtx = store.CtxWithFencing(chainCtx, h.cfg.FencingToken, h.cfg.DaemonEpoch)
 
 	res, err := h.cfg.Chain.Write(chainCtx, &payload.Envelope)
 	if err != nil {
@@ -209,6 +217,8 @@ func (h *Host) handleReserve(ctx context.Context, frame ipc.Frame) error {
 		reply, _ := ipc.EncodeResult(frame.ID, false, "decode: "+err.Error(), nil)
 		return h.codec.Write(reply)
 	}
+	// FIX-T6 fencing: same rationale as handleWrite.
+	ctx = store.CtxWithFencing(ctx, h.cfg.FencingToken, h.cfg.DaemonEpoch)
 	got, err := h.cfg.Ledger.Reserve(ctx, payload.Entry)
 	if err != nil {
 		reply, _ := ipc.EncodeResult(frame.ID, false, err.Error(), nil)
@@ -227,6 +237,8 @@ func (h *Host) handleCommit(ctx context.Context, frame ipc.Frame) error {
 		reply, _ := ipc.EncodeResult(frame.ID, false, "decode: "+err.Error(), nil)
 		return h.codec.Write(reply)
 	}
+	// FIX-T6 fencing: same rationale as handleWrite.
+	ctx = store.CtxWithFencing(ctx, h.cfg.FencingToken, h.cfg.DaemonEpoch)
 	if err := h.cfg.Ledger.Commit(ctx, payload.Key, payload.CommittedAt); err != nil {
 		reply, _ := ipc.EncodeResult(frame.ID, false, err.Error(), nil)
 		return h.codec.Write(reply)

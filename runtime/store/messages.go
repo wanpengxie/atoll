@@ -38,11 +38,28 @@ import (
 // (harness chain) to set env.IsTerminal correctly before Append. This
 // keeps store layer-independent of type_registry semantics.
 type Messages struct {
-	db *sql.DB
+	db   *sql.DB
+	lock *ChannelLock // optional — when non-nil, Append enforces fencing.
 }
 
-// NewMessages returns a *Messages bound to the channel sqlite.
+// NewMessages returns a *Messages bound to the channel sqlite WITHOUT
+// fencing enforcement. Use this constructor for store-level unit tests
+// (transit_test / store_test) and helper paths that seed rows before
+// the channel_lock row is even installed.
+//
+// Production daemon wiring MUST use NewMessagesWithLock so every
+// caller-driven mutation is guarded by the FIX-T6 fencing gate.
 func NewMessages(db *sql.DB) *Messages { return &Messages{db: db} }
+
+// NewMessagesWithLock returns a *Messages whose Append validates the
+// fencing tuple (carried via store.CtxWithFencing) against the channel's
+// channel_lock row INSIDE the same transaction as the row INSERT. A
+// stale daemon (or a forgotten CtxWithFencing stamp) is rejected with
+// klog.AppendError{Reason: HarnessWorkerFencingStale} and neither the
+// messages row nor the view_sync_outbox row is written.
+func NewMessagesWithLock(db *sql.DB, lock *ChannelLock) *Messages {
+	return &Messages{db: db, lock: lock}
+}
 
 // Append implements log.MessageLog.
 func (m *Messages) Append(ctx context.Context, env *message.Envelope) (klog.AppendResult, error) {
@@ -58,6 +75,17 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope) (klog.Appe
 		return klog.AppendResult{}, fmt.Errorf("store: append begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// 0) FIX-T6 fencing gate — when constructed with a *ChannelLock,
+	// every Append must present a matching (fencing_token, daemon_epoch)
+	// tuple via store.CtxWithFencing. The check runs INSIDE the tx so a
+	// concurrent UpgradeEpoch cannot slip between SELECT and INSERT.
+	// Failure path: typed *klog.AppendError so the harness chain maps
+	// it to message.HarnessWorkerFencingStale (closed-set reject). No
+	// outbox row is written.
+	if err := m.checkFencing(ctx, tx, env.ID); err != nil {
+		return klog.AppendResult{}, err
+	}
 
 	// 1) dedupe by envelope.id
 	const selExist = `SELECT seq, is_terminal FROM messages WHERE id=?`
@@ -328,6 +356,37 @@ func nullableInt(p *int64) any {
 		return nil
 	}
 	return *p
+}
+
+// checkFencing is the FIX-T6 gate. Returns nil when this Messages was
+// constructed without a *ChannelLock (test-mode wire). Otherwise pulls
+// the (token, epoch) tuple from ctx (CtxWithFencing) and validates
+// inside the supplied tx; on any mismatch returns a typed
+// *klog.AppendError{Reason: HarnessWorkerFencingStale} so the harness
+// chain can surface the canonical reject reason without parsing strings.
+func (m *Messages) checkFencing(ctx context.Context, tx *sql.Tx, envID string) error {
+	if m.lock == nil {
+		return nil
+	}
+	tuple, ok := FencingFromCtx(ctx)
+	if !ok {
+		return &klog.AppendError{
+			Reason:           message.HarnessWorkerFencingStale,
+			Detail:           "fencing tuple missing from context",
+			PartialMessageID: envID,
+		}
+	}
+	if err := m.lock.ValidateWriteTx(ctx, tx, tuple.Token, tuple.Epoch); err != nil {
+		if IsFencingStale(err) {
+			return &klog.AppendError{
+				Reason:           message.HarnessWorkerFencingStale,
+				Detail:           err.Error(),
+				PartialMessageID: envID,
+			}
+		}
+		return fmt.Errorf("store: append fencing check: %w", err)
+	}
+	return nil
 }
 
 // classifyAppendErr maps sqlite UNIQUE constraint failures to typed
