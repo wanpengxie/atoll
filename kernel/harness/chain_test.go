@@ -99,6 +99,139 @@ func TestWriteResultAccepted(t *testing.T) {
 	}
 }
 
+// TestStepIDIsTerminalAppend — StepEngineAppend must be the last numbered
+// step (index 9) so chain runners can pattern-match the terminal step.
+func TestStepIDIsTerminalAppend(t *testing.T) {
+	last := harness.AllStepIDs[len(harness.AllStepIDs)-1]
+	if last != harness.StepEngineAppend {
+		t.Errorf("AllStepIDs[last]=%d want StepEngineAppend(%d)",
+			last, harness.StepEngineAppend)
+	}
+}
+
+// TestStepDedupeOutsideOrdinalRange — StepDedupe sits between Normalize
+// and CallerAuth conceptually but is NOT part of AllStepIDs (it is
+// referenced by name).
+func TestStepDedupeOutsideOrdinalRange(t *testing.T) {
+	if harness.StepDedupe >= 0 {
+		t.Errorf("StepDedupe=%d should be sentinel < 0", harness.StepDedupe)
+	}
+	for _, id := range harness.AllStepIDs {
+		if id == harness.StepDedupe {
+			t.Errorf("AllStepIDs contains StepDedupe; should be sentinel only")
+		}
+	}
+}
+
+// TestOutcomeDetailTransparency — Detail is informative; it travels
+// through Outcome without being interpreted by Continue().
+func TestOutcomeDetailTransparency(t *testing.T) {
+	o := harness.Outcome{
+		RejectReason: message.HarnessDocRefsInvalid,
+		Detail:       "missing scheme",
+	}
+	if o.Continue() {
+		t.Error("rejected Outcome should not Continue regardless of Detail")
+	}
+	if o.Detail != "missing scheme" {
+		t.Errorf("Detail=%q corrupted by Outcome accessors", o.Detail)
+	}
+}
+
+// TestOutcomePartialMessageIDLateReject — late-stage rejects (step 8)
+// surface PartialMessageID so callers can correlate the failed id.
+func TestOutcomePartialMessageIDLateReject(t *testing.T) {
+	o := harness.Outcome{
+		RejectReason:     message.HarnessTerminalDuplicate,
+		PartialMessageID: "m-abc",
+	}
+	if o.Continue() {
+		t.Error("late-reject Outcome should not Continue")
+	}
+	if o.PartialMessageID != "m-abc" {
+		t.Errorf("PartialMessageID=%q want m-abc", o.PartialMessageID)
+	}
+}
+
+// TestWriteResultPartialMessageIDPreserved — late reject (step 8) must
+// expose PartialMessageID; MessageID stays empty since no durable row.
+func TestWriteResultPartialMessageIDPreserved(t *testing.T) {
+	r := harness.WriteResult{
+		RejectReason:     message.HarnessTerminalDuplicate,
+		PartialMessageID: "m-late",
+	}
+	if r.Accepted() {
+		t.Error("late-reject WriteResult should not be Accepted")
+	}
+	if r.PartialMessageID != "m-late" {
+		t.Errorf("PartialMessageID=%q want m-late", r.PartialMessageID)
+	}
+	if r.MessageID != "" {
+		t.Errorf("MessageID=%q want empty (no durable row on reject)", r.MessageID)
+	}
+}
+
+// TestWriteResultDedupeRoundTrip — dedupe path: Accepted + Deduped both
+// true; MessageID populated with the existing row's id.
+func TestWriteResultDedupeRoundTrip(t *testing.T) {
+	r := harness.WriteResult{
+		MessageID: "m-existing",
+		Seq:       42,
+		Deduped:   true,
+	}
+	if !r.Accepted() {
+		t.Error("dedupe WriteResult should be Accepted")
+	}
+	if !r.Deduped {
+		t.Error("Deduped flag corrupted")
+	}
+	if r.Seq != 42 {
+		t.Errorf("Seq=%d want 42 (dedupe surfaces seq of the original row)", r.Seq)
+	}
+}
+
+// TestRejectReasonAliasMatchesMessageReason — kernel/harness.RejectReason
+// is an alias for kernel/message.HarnessRejectReason; callers must be
+// able to compare against either form without conversion.
+func TestRejectReasonAliasMatchesMessageReason(t *testing.T) {
+	r := harness.RejectAuthFailed
+	if r != message.HarnessAuthFailed {
+		t.Errorf("alias mismatch: %v != %v", r, message.HarnessAuthFailed)
+	}
+}
+
+// TestRejectReasonReExports — every closed-set value MUST have a
+// `harness.Reject*` alias so call sites can stay inside the harness
+// package namespace.
+func TestRejectReasonReExports(t *testing.T) {
+	pairs := map[message.HarnessRejectReason]message.HarnessRejectReason{
+		harness.RejectAuthFailed:                 message.HarnessAuthFailed,
+		harness.RejectMissingRequiredField:       message.HarnessMissingRequiredField,
+		harness.RejectKindInvalid:                message.HarnessKindInvalid,
+		harness.RejectResponseMissingParentID:    message.HarnessResponseMissingParentID,
+		harness.RejectSenderMismatch:             message.HarnessSenderMismatch,
+		harness.RejectSenderKindMismatch:         message.HarnessSenderKindMismatch,
+		harness.RejectSenderDeregistered:         message.HarnessSenderDeregistered,
+		harness.RejectUnknownType:                message.HarnessUnknownType,
+		harness.RejectKindNotAllowed:             message.HarnessKindNotAllowed,
+		harness.RejectRequestAudienceInvalid:     message.HarnessRequestAudienceInvalid,
+		harness.RejectAudienceActorNotRegistered: message.HarnessAudienceActorNotRegistered,
+		harness.RejectAudienceHandlerMismatch:    message.HarnessAudienceHandlerMismatch,
+		harness.RejectPayloadSchemaViolation:     message.HarnessPayloadSchemaViolation,
+		harness.RejectDocRefsInvalid:             message.HarnessDocRefsInvalid,
+		harness.RejectResponseParentInvalid:      message.HarnessResponseParentInvalid,
+		harness.RejectTerminalDuplicate:          message.HarnessTerminalDuplicate,
+		harness.RejectWorkerFencingStale:         message.HarnessWorkerFencingStale,
+		harness.RejectEngineACLDenied:            message.HarnessEngineACLDenied,
+		harness.RejectMessageIDConflict:          message.HarnessMessageIDConflict,
+	}
+	for got, want := range pairs {
+		if got != want {
+			t.Errorf("re-export drift: %v != %v", got, want)
+		}
+	}
+}
+
 // TestRejectReasonHTTPStatus spot-checks the L2 §3.6.1 status map for
 // the closed set (covers the categories: auth=401, sender=403,
 // deregistered/fence=410, conflict=409, malformed=400).
