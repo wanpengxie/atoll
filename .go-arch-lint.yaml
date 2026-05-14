@@ -104,7 +104,14 @@ deps:
       - uuid
 
   adapters:
-    mayDependOn: [kernel, pkg]
+    # adapters/** is a tree with internal layering:
+    #   adapters/framework            (T4 outbound base)
+    #   adapters/device/framework     (T5 device-side base)
+    #   adapters/feishu, adapters/device/xhs, …
+    # Sub-packages within adapters/** MAY import each other (same pattern
+    # as server/**). The boundary that matters is adapters → server and
+    # adapters → runtime (both excluded by NOT listing them here).
+    mayDependOn: [kernel, adapters, pkg]
     anyVendorDeps: true
 
   server:

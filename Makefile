@@ -128,7 +128,7 @@ lint-arch:
 	  echo "[skip] go-arch-lint not installed; run 'make install'"; \
 	else \
 	  echo "[lint-arch] go-arch-lint check"; \
-	  go-arch-lint check; \
+	  go-arch-lint check --arch-file .go-arch-lint.yaml; \
 	fi
 
 lint-banned-words:
