@@ -56,9 +56,17 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			return nil
 		},
 		OnReclaim: func(ctx context.Context, conn *daemonbus.Connection, req placement.ReclaimRequest) error {
+			// FIX-T4: req.DaemonID must match the WS-authenticated
+			// Connection.DaemonID. A daemon must never speak for
+			// another daemon — without this guard a hostile / buggy
+			// daemon could reclaim placements it never owned by
+			// forging the payload-level daemon_id.
+			if req.DaemonID != conn.DaemonID {
+				return fmt.Errorf("daemonbus: reclaim daemon_id %q does not match authenticated conn %q", req.DaemonID, conn.DaemonID)
+			}
 			out := make([]placement.ReclaimDecision, 0, len(req.Channels))
 			for _, ch := range req.Channels {
-				ok, err := a.placements.AcceptReclaim(ctx, ch.ChannelID, ch, placement.ConnectionEpoch(conn.ConnectionEpoch))
+				ok, err := a.placements.AcceptReclaim(ctx, ch.ChannelID, conn.DaemonID, ch, placement.ConnectionEpoch(conn.ConnectionEpoch))
 				if err != nil {
 					return err
 				}
@@ -312,7 +320,6 @@ func (a *App) signHumanCaller(channelID, userID, actorID string, ts int64, nonce
 
 // ensure ts conversion compiles for non-test build.
 var _ = errors.New
-var _ = fmt.Println
 
 func newNonce() string {
 	buf := make([]byte, 16)

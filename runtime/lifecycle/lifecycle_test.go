@@ -325,6 +325,123 @@ func TestCreate_StaleRequestRejected(t *testing.T) {
 	}
 }
 
+// TestCreate_HigherTokenRejected is the FIX-T4 regression for branch
+// 2: when the daemon already has a local channel_lock row, a create
+// request bringing a HIGHER fencing_token MUST be rejected (not
+// silently UpgradeEpoch'd). The placement state machine is owned by
+// the server — daemon must let the server reconcile loop drive the
+// row through orphan → creating before producing the new ACK.
+func TestCreate_HigherTokenRejected(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	root := t.TempDir()
+	channelsDir := filepath.Join(root, "channels")
+	bootstrapper := &stubBootstrapper{root: channelsDir}
+	opener := newLockOpener()
+	defer opener.Close()
+
+	var acks []placement.CreateChannelAck
+	creator, _ := lifecycle.NewCreator(lifecycle.CreatorConfig{
+		DaemonID:     placement.DaemonID("daemon-A"),
+		DaemonEpoch:  placement.DaemonEpoch(1),
+		NowFn:        now,
+		ChannelsDir:  channelsDir,
+		Bootstrapper: bootstrapper,
+		LockOpener:   opener.Open,
+		FrameIDGen:   frameIDGen(),
+		EmitAck:      func(ctx context.Context, ack placement.CreateChannelAck) error { acks = append(acks, ack); return nil },
+	})
+
+	// Phase 1: fresh bootstrap at token=3.
+	frame := daemonbus.Frame{FrameID: "f-h1", FrameType: daemonbus.FrameTypeControlCreateChannel}
+	if err := creator.HandleCreate(ctx, frame, placement.CreateChannelRequest{
+		ChannelID: "ch-higher", CreateRequestID: "req-A", OwnerEpoch: 3, FencingToken: 3,
+	}); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	if acks[0].Status != placement.AckBound {
+		t.Fatalf("first create want bound, got %s", acks[0].Status)
+	}
+
+	// Phase 2: server reissues create with token=7 (would be a reclaim
+	// upgrade). Daemon MUST reject — server reconcile must drive the
+	// state machine, daemon never silently upgrades.
+	if err := creator.HandleCreate(ctx, frame, placement.CreateChannelRequest{
+		ChannelID: "ch-higher", CreateRequestID: "req-B", OwnerEpoch: 7, FencingToken: 7,
+	}); err != nil {
+		t.Fatalf("second create: %v", err)
+	}
+	if acks[1].Status != placement.AckRejected {
+		t.Fatalf("higher-token create should be rejected, got %s", acks[1].Status)
+	}
+	if acks[1].Reason != "local_lock_stale_higher_token_received" {
+		t.Errorf("reject reason=%q want local_lock_stale_higher_token_received", acks[1].Reason)
+	}
+
+	// Local lock row MUST remain at token=3 (no silent upgrade).
+	sqlitePath := filepath.Join(channelsDir, "ch-higher", "channel.sqlite")
+	lock, _ := opener.Open(ctx, sqlitePath)
+	row, ok, _ := lock.Get(ctx)
+	if !ok {
+		t.Fatal("lock missing")
+	}
+	if row.FencingToken != 3 {
+		t.Errorf("lock fencing_token=%d want 3 (no upgrade)", row.FencingToken)
+	}
+}
+
+// TestCreate_EqualTokenOwnerEpochMismatch covers branch 3 tightening:
+// fencing_token matches but owner_epoch differs → reject. (In practice
+// fencing_token == owner_epoch by spec invariant, but a malformed
+// server payload that violates the invariant must NOT silently bind.)
+func TestCreate_EqualTokenOwnerEpochMismatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	root := t.TempDir()
+	channelsDir := filepath.Join(root, "channels")
+	bootstrapper := &stubBootstrapper{root: channelsDir}
+	opener := newLockOpener()
+	defer opener.Close()
+
+	var acks []placement.CreateChannelAck
+	creator, _ := lifecycle.NewCreator(lifecycle.CreatorConfig{
+		DaemonID:     placement.DaemonID("daemon-A"),
+		DaemonEpoch:  placement.DaemonEpoch(1),
+		NowFn:        now,
+		ChannelsDir:  channelsDir,
+		Bootstrapper: bootstrapper,
+		LockOpener:   opener.Open,
+		FrameIDGen:   frameIDGen(),
+		EmitAck:      func(ctx context.Context, ack placement.CreateChannelAck) error { acks = append(acks, ack); return nil },
+	})
+
+	frame := daemonbus.Frame{FrameID: "f-eq", FrameType: daemonbus.FrameTypeControlCreateChannel}
+	// Bootstrap at (owner=5, token=5).
+	if err := creator.HandleCreate(ctx, frame, placement.CreateChannelRequest{
+		ChannelID: "ch-eq", CreateRequestID: "req", OwnerEpoch: 5, FencingToken: 5,
+	}); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if acks[0].Status != placement.AckBound {
+		t.Fatalf("first want bound got %s", acks[0].Status)
+	}
+
+	// Replay with same fencing_token but different owner_epoch → reject.
+	if err := creator.HandleCreate(ctx, frame, placement.CreateChannelRequest{
+		ChannelID: "ch-eq", CreateRequestID: "req", OwnerEpoch: 9, FencingToken: 5,
+	}); err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if acks[1].Status != placement.AckRejected {
+		t.Errorf("owner_epoch mismatch should reject, got %s", acks[1].Status)
+	}
+	if acks[1].Reason != "owner_epoch_mismatch" {
+		t.Errorf("reason=%q want owner_epoch_mismatch", acks[1].Reason)
+	}
+}
+
 // TestFencingChecker covers fencing.Validate happy + sad path.
 func TestFencingChecker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

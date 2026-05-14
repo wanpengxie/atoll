@@ -284,6 +284,98 @@ func TestMockDaemonCreateChannelACK(t *testing.T) {
 	t.Fatalf("placement never advanced to active")
 }
 
+// TestReclaimDaemonIDMismatch is the FIX-T4 regression: a daemonbus
+// connection authenticated as "d1" must not be able to reclaim
+// placements by setting `ReclaimRequest.DaemonID` to some other
+// daemon id. The dispatch hook must reject the frame (the Run loop
+// surfaces the error and terminates the connection).
+func TestReclaimDaemonIDMismatch(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Register two daemons; "owner" actually holds the placement,
+	// "attacker" is the misbehaving connection that tries to reclaim.
+	for _, did := range []placement.DaemonID{"owner", "attacker"} {
+		if err := app.Daemonbus().RegisterDaemon(ctx, did, "h", "v", 0, "test-daemon"); err != nil {
+			t.Fatalf("RegisterDaemon %s: %v", did, err)
+		}
+	}
+	ownerEpoch, _ := app.Daemonbus().IssueConnectionEpoch(ctx, placement.DaemonID("owner"))
+	attackerEpoch, _ := app.Daemonbus().IssueConnectionEpoch(ctx, placement.DaemonID("attacker"))
+
+	// Seed an active placement owned by "owner".
+	p, _, err := app.Placements().Reserve(ctx, channel.ID("ch-victim"),
+		placement.DaemonID("owner"), placement.ConnectionEpoch(ownerEpoch), nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	ack := placement.CreateChannelAck{
+		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
+		OwnerEpoch: p.OwnerEpoch, FencingToken: p.FencingToken,
+		DaemonID: placement.DaemonID("owner"), Status: placement.AckBound,
+	}
+	if ok, err := app.Placements().Activate(ctx, ack, placement.ConnectionEpoch(ownerEpoch)); err != nil || !ok {
+		t.Fatalf("Activate: ok=%v err=%v", ok, err)
+	}
+
+	// Wire a daemonbus connection authenticated as "attacker".
+	svr, dmn := newPipePair()
+	conn := daemonbus.NewConnection(placement.DaemonID("attacker"), attackerEpoch, svr)
+	app.Daemonbus().Register(conn)
+	defer app.Daemonbus().Unregister(placement.DaemonID("attacker"))
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- conn.Run(ctx, app.DaemonbusHandlers()) }()
+
+	// Attacker pushes a reclaim claiming to be "owner". OnReclaim
+	// MUST reject; conn.Run returns the validation error.
+	raw, _ := json.Marshal(placement.ReclaimRequest{
+		DaemonID:    placement.DaemonID("owner"),
+		DaemonEpoch: 1,
+		Channels: []placement.ReclaimChannel{{
+			ChannelID:    p.ChannelID,
+			FencingToken: p.FencingToken,
+			OwnerEpoch:   p.OwnerEpoch,
+		}},
+	})
+	if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+		FrameID:               "f-attack",
+		FrameType:             kerneldaemonbus.FrameTypeControlDaemonReclaim,
+		DaemonID:              "attacker",
+		DaemonConnectionEpoch: attackerEpoch,
+		Payload:               raw,
+	}); err != nil {
+		t.Fatalf("write reclaim: %v", err)
+	}
+
+	select {
+	case err := <-runDone:
+		if err == nil {
+			t.Fatal("conn.Run returned nil; expected daemon_id mismatch error")
+		}
+		if !strings.Contains(err.Error(), "does not match authenticated conn") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("conn.Run did not return within 1s — DaemonID mismatch was not enforced")
+	}
+
+	// Placement row must still belong to "owner" — the attacker
+	// cannot hijack ownership even though the (epoch, token) tuple
+	// they presented was valid.
+	got, _, err := app.Placements().Get(ctx, p.ChannelID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DaemonID != "owner" {
+		t.Errorf("post-attack daemon_id=%q want owner", got.DaemonID)
+	}
+
+	conn.Close()
+}
+
 // ----------------------------------------------------------------------
 // Test helpers
 // ----------------------------------------------------------------------

@@ -181,14 +181,18 @@ func (s *Service) Heartbeat(ctx context.Context, channelID channel.ID, daemonID 
 	return s.store.Heartbeat(ctx, channelID, daemonID, s.now().UnixMilli())
 }
 
-// AcceptReclaim runs the reclaim CAS (L2 §1.4.11.4 step 2).
+// AcceptReclaim runs the reclaim CAS (L2 §1.4.11.4 step 2). daemonID
+// MUST be the WS-authenticated owner identifier (Connection.DaemonID)
+// — the SQL CAS pins it into the WHERE so a different daemon presenting
+// the same epoch/token cannot hijack ownership (FIX-T4 invariant).
 func (s *Service) AcceptReclaim(
 	ctx context.Context,
 	channelID channel.ID,
+	daemonID placement.DaemonID,
 	req placement.ReclaimChannel,
 	newConnectionEpoch placement.ConnectionEpoch,
 ) (bool, error) {
-	return s.store.AcceptReclaim(ctx, channelID, req, newConnectionEpoch, s.now().UnixMilli())
+	return s.store.AcceptReclaim(ctx, channelID, daemonID, req, newConnectionEpoch, s.now().UnixMilli())
 }
 
 // Get is a thin pass-through.

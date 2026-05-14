@@ -221,7 +221,7 @@ func TestReserveCollision(t *testing.T) {
 
 // TestReclaim covers L2 §1.4.11.4 — daemon reconnects + reports the
 // (fencing_token, owner_epoch) it has on disk; server accepts when
-// the tuple matches the active placement.
+// the tuple matches the active placement (with daemon_id pinned).
 func TestReclaim(t *testing.T) {
 	t.Parallel()
 	c := &clock{now: time.Unix(1_700_000_000, 0)}
@@ -243,15 +243,15 @@ func TestReclaim(t *testing.T) {
 	}
 
 	// Matching reclaim accepted.
-	got, err := svc.AcceptReclaim(ctx, p.ChannelID, placement.ReclaimChannel{
+	got, err := svc.AcceptReclaim(ctx, p.ChannelID, p.DaemonID, placement.ReclaimChannel{
 		ChannelID: p.ChannelID, FencingToken: p.FencingToken, OwnerEpoch: p.OwnerEpoch,
 	}, 9)
 	if err != nil || !got {
 		t.Fatalf("AcceptReclaim ok=%v err=%v", got, err)
 	}
 
-	// Mismatched reclaim rejected.
-	got, err = svc.AcceptReclaim(ctx, p.ChannelID, placement.ReclaimChannel{
+	// Mismatched (epoch / token) reclaim rejected.
+	got, err = svc.AcceptReclaim(ctx, p.ChannelID, p.DaemonID, placement.ReclaimChannel{
 		ChannelID: p.ChannelID, FencingToken: 9999, OwnerEpoch: 9999,
 	}, 10)
 	if err != nil {
@@ -259,5 +259,61 @@ func TestReclaim(t *testing.T) {
 	}
 	if got {
 		t.Errorf("AcceptReclaim mismatch ok=true; expected false")
+	}
+}
+
+// TestReclaimHijackDifferentDaemonID is the FIX-T4 regression: a
+// different daemon presenting the SAME (channel_id, fencing_token,
+// owner_epoch) tuple MUST be rejected. Without the daemon_id pin in
+// the SQL WHERE clause the hostile daemon would silently inherit
+// ownership; with the fix the CAS finds zero rows and returns
+// ok=false (no error).
+func TestReclaimHijackDifferentDaemonID(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+	svc.MarkStartedAt()
+
+	p, _, err := svc.Reserve(ctx, channel.ID("ch-hijack"), placement.DaemonID("d-owner"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	ack := placement.CreateChannelAck{
+		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
+		OwnerEpoch: p.OwnerEpoch, FencingToken: p.FencingToken,
+		DaemonID: p.DaemonID, Status: placement.AckBound,
+	}
+	if ok, _ := svc.Activate(ctx, ack, 1); !ok {
+		t.Fatalf("Activate failed")
+	}
+
+	// The original owner reclaims with the correct tuple → accepted.
+	ok1, err := svc.AcceptReclaim(ctx, p.ChannelID, p.DaemonID, placement.ReclaimChannel{
+		ChannelID: p.ChannelID, FencingToken: p.FencingToken, OwnerEpoch: p.OwnerEpoch,
+	}, 7)
+	if err != nil || !ok1 {
+		t.Fatalf("owner reclaim ok=%v err=%v", ok1, err)
+	}
+
+	// A different daemon presents an identical (epoch, token) tuple →
+	// MUST be rejected (no row update).
+	ok2, err := svc.AcceptReclaim(ctx, p.ChannelID, placement.DaemonID("d-attacker"), placement.ReclaimChannel{
+		ChannelID: p.ChannelID, FencingToken: p.FencingToken, OwnerEpoch: p.OwnerEpoch,
+	}, 8)
+	if err != nil {
+		t.Fatalf("hijack reclaim err: %v", err)
+	}
+	if ok2 {
+		t.Fatalf("hijack reclaim accepted — daemon_id pin missing in SQL WHERE")
+	}
+
+	// Sanity: the row's daemon_id should still be the original owner.
+	got, _, err := svc.Get(ctx, p.ChannelID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DaemonID != p.DaemonID {
+		t.Errorf("post-hijack daemon_id=%q want %q (ownership leaked)", got.DaemonID, p.DaemonID)
 	}
 }

@@ -183,11 +183,19 @@ func (s *SQLStore) MarkOrphan(ctx context.Context, channelID channel.ID, nowMs i
 
 // AcceptReclaim runs the L2 §1.4.11.4 reclaim path — daemon reports
 // (channel_id, fencing_token, owner_epoch) on reconnect; server
-// validates state='active' + tuple matches, then refreshes the
+// validates state='active' + full tuple (channel_id, daemon_id,
+// owner_epoch, fencing_token) matches, then refreshes the
 // connection_epoch + heartbeat_at.
+//
+// daemonID is the WS-authenticated owner identifier from
+// Connection.DaemonID — pinned into the SQL WHERE alongside the
+// (owner_epoch, fencing_token) tuple so a different daemon presenting
+// the same epoch/token cannot hijack ownership (FIX-T4 / L2 §1.4.11.4
+// + spec T1.4 invariant).
 func (s *SQLStore) AcceptReclaim(
 	ctx context.Context,
 	channelID channel.ID,
+	daemonID placement.DaemonID,
 	req placement.ReclaimChannel,
 	newConnectionEpoch placement.ConnectionEpoch,
 	nowMs int64,
@@ -199,11 +207,13 @@ func (s *SQLStore) AcceptReclaim(
 		        daemon_connection_epoch  = ?,
 		        last_heartbeat_at        = ?
 		  WHERE channel_id    = ?
+		    AND daemon_id     = ?
 		    AND owner_epoch   = ?
 		    AND fencing_token = ?
 		    AND state IN ('active','stale')`,
 		int64(newConnectionEpoch), nowMs,
-		string(channelID), int64(req.OwnerEpoch), int64(req.FencingToken),
+		string(channelID), string(daemonID),
+		int64(req.OwnerEpoch), int64(req.FencingToken),
 	)
 	if err != nil {
 		return false, fmt.Errorf("placements: AcceptReclaim: %w", err)

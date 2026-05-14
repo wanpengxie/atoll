@@ -243,9 +243,18 @@ type Store interface {
 	// step 2 accepted branch). Returns ok=false when validation fails
 	// (caller should reject reclaim and let stale/orphan reconcile
 	// advance the row).
+	//
+	// daemonID is the WS-authenticated owner identifier from
+	// Connection.DaemonID — the SQL CAS pins it into the WHERE clause
+	// alongside (channel_id, owner_epoch, fencing_token) so a different
+	// daemon presenting the same (epoch, token) tuple cannot hijack
+	// ownership (FIX-T4 / L2 §1.4.11.4 invariant — covers spec
+	// requirement T1.4 "AcceptReclaim matches daemon_id,
+	// fencing_token, owner_epoch").
 	AcceptReclaim(
 		ctx context.Context,
 		channelID channel.ID,
+		daemonID DaemonID,
 		req ReclaimChannel,
 		newConnectionEpoch ConnectionEpoch,
 		nowMs int64,

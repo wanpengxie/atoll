@@ -84,12 +84,18 @@ func NewCreator(cfg CreatorConfig) (*Creator, error) {
 // the ACK. Caller passes the wrapper Frame (for frame_id pairing) and
 // the decoded request payload.
 //
-// State branches:
+// State branches (FIX-T4 — daemon never silently upgrades; only exact
+// tuple replay returns AckBound, every other mismatch is rejected and
+// the server placement reconcile loop is left to drive recovery):
 //
 //  1. local channel_lock missing → bootstrap; INSERT; ACK bound.
-//  2. local row, fencing < request.token → reject (stale local).
-//  3. local row, fencing == request.token, ids match → idempotent ACK.
-//  4. local row, fencing > request.token → reject (newer epoch active).
+//  2. local row, fencing < request.token → reject
+//     ("local_lock_stale_higher_token_received"); server reconcile
+//     re-issues create_channel with the up-to-date placement state.
+//  3. local row, fencing == request.token AND owner_epoch matches AND
+//     local daemon_id matches → idempotent ACK bound.
+//     Any of (owner_epoch, daemon_id) mismatch → reject.
+//  4. local row, fencing > request.token → reject ("stale_request").
 func (c *Creator) HandleCreate(
 	ctx context.Context,
 	frame daemonbus.Frame,
@@ -111,21 +117,25 @@ func (c *Creator) HandleCreate(
 		if ok {
 			switch {
 			case row.FencingToken < req.FencingToken:
-				// Stale local; request brings newer epoch. We honor by
-				// UpgradeEpoch + ACK bound.
-				okUp, err := lock.UpgradeEpoch(ctx,
-					req.FencingToken, req.OwnerEpoch, c.cfg.DaemonID, c.cfg.DaemonEpoch,
-					c.cfg.NowFn())
-				if err != nil {
-					return fmt.Errorf("lifecycle: lock upgrade: %w", err)
-				}
-				if !okUp {
-					// Another concurrent ACK already advanced.
-					return c.emit(ctx, frame, req, placement.AckRejected, "upgrade lost CAS")
-				}
-				return c.emit(ctx, frame, req, placement.AckBound, "")
+				// FIX-T4: do NOT silently UpgradeEpoch on a higher-token
+				// create. The placement state machine is single-writer
+				// (server placements) — if server thinks we should hold
+				// a newer epoch, our local view is stale and the right
+				// thing is to refuse the ACK so the server reconcile
+				// loop drives the row through orphan → creating with a
+				// fresh (epoch, token) tuple.
+				return c.emit(ctx, frame, req, placement.AckRejected, "local_lock_stale_higher_token_received")
 			case row.FencingToken == req.FencingToken:
-				// Idempotent — ACK bound with current ids.
+				// Idempotent — only safe when EVERY identity field on
+				// the existing lock row matches the request. Different
+				// owner_epoch or daemon_id at the same fencing_token is
+				// a placement-state bug and MUST NOT be papered over.
+				if row.OwnerEpoch != req.OwnerEpoch {
+					return c.emit(ctx, frame, req, placement.AckRejected, "owner_epoch_mismatch")
+				}
+				if row.DaemonID != c.cfg.DaemonID {
+					return c.emit(ctx, frame, req, placement.AckRejected, "daemon_id_mismatch")
+				}
 				return c.emit(ctx, frame, req, placement.AckBound, "")
 			case row.FencingToken > req.FencingToken:
 				// Newer local epoch already exists — server's request is stale.
