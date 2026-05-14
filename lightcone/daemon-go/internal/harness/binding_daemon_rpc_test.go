@@ -240,3 +240,98 @@ func mustJSON(t *testing.T, v any) []byte {
 	}
 	return b
 }
+
+// TestWriteReject_AllReasons_OneToOneMapping is the M1.3-T15 acceptance
+// gate for "所有 reason → HTTP status 一一对应（L2 §3.6 表 1:1）". It walks
+// every v4types.HarnessRejectReason in AllHarnessRejectReasons, feeds it
+// through writeReject (the binding's reject serializer), and asserts:
+//
+//   - the HTTP status equals v4types.HarnessRejectReason.HTTPStatus()
+//   - the body decodes as MessageSendError with the same reason
+//   - Detail / MessageIDIfPartial / DedupeResponseID round-trip
+//   - Content-Type is application/json
+//
+// A new harness reject reason added to the closed set MUST trip this
+// test (cardinalities asserted in v4types/reasons_test.go) — preventing
+// drift between the data layer (.HTTPStatus()) and the binding wiring.
+func TestWriteReject_AllReasons_OneToOneMapping(t *testing.T) {
+	t.Parallel()
+
+	for _, reason := range v4types.AllHarnessRejectReasons {
+		reason := reason
+		t.Run(string(reason), func(t *testing.T) {
+			t.Parallel()
+			rec := httptest.NewRecorder()
+			rerr := &pkgharness.RejectError{
+				Reason: reason,
+				Detail: "synthetic detail",
+			}
+			// terminal_duplicate carries dedupe_response_id; message_id_conflict
+			// historically rides with message_id_if_partial so exercise both
+			// optional fields via the per-reason matrix.
+			switch reason {
+			case v4types.HarnessTerminalDuplicate:
+				rerr.DedupeResponseID = "winner-id"
+			case v4types.HarnessMessageIDConflict:
+				rerr.MessageIDIfPartial = "conflicting-id"
+			}
+
+			writeReject(rec, rerr)
+
+			wantStatus := reason.HTTPStatus()
+			if wantStatus == 0 {
+				t.Fatalf("reason %q has no HTTPStatus mapping (data-layer drift)", reason)
+			}
+			if rec.Code != wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, wantStatus)
+			}
+			if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json", ct)
+			}
+			var body MessageSendError
+			if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if body.Error.Reason != reason {
+				t.Fatalf("body.error.reason = %q, want %q", body.Error.Reason, reason)
+			}
+			if body.Error.Detail != "synthetic detail" {
+				t.Fatalf("body.error.detail = %q, want synthetic detail", body.Error.Detail)
+			}
+			switch reason {
+			case v4types.HarnessTerminalDuplicate:
+				if body.Error.DedupeResponseID != "winner-id" {
+					t.Fatalf("dedupe_response_id = %q, want winner-id", body.Error.DedupeResponseID)
+				}
+			case v4types.HarnessMessageIDConflict:
+				if body.Error.MessageIDIfPartial != "conflicting-id" {
+					t.Fatalf("message_id_if_partial = %q, want conflicting-id", body.Error.MessageIDIfPartial)
+				}
+			}
+		})
+	}
+}
+
+// TestWriteReject_UnknownReason_FallsBackTo400 is the defensive branch
+// in writeReject — an out-of-set reason (data drift / future reason
+// added but not yet mapped) MUST still produce a 4xx body with the
+// reason string intact rather than swallowing it as 500.
+func TestWriteReject_UnknownReason_FallsBackTo400(t *testing.T) {
+	t.Parallel()
+	rec := httptest.NewRecorder()
+	rerr := &pkgharness.RejectError{
+		Reason: v4types.HarnessRejectReason("not_a_real_reason"),
+		Detail: "synthetic",
+	}
+	writeReject(rec, rerr)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 fallback", rec.Code)
+	}
+	var body MessageSendError
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if string(body.Error.Reason) != "not_a_real_reason" {
+		t.Fatalf("reason = %q, want preserved", body.Error.Reason)
+	}
+}
