@@ -879,6 +879,193 @@ func TestRun_CrashTriggersImmediateRespawn(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 10. R4-FIX-B regression — closed-exitCh hot-spin.
+//
+// Trace the fix addresses:
+//
+//	(a) some prior worker exited cleanly → waitWorker did close(l.exitCh)
+//	    but left l.exitCh pointing at the (now-closed) channel.
+//	(b) Run.select case `<-orNever(exitCh)` fires every iteration
+//	    because a closed channel is permanently readable; orNever only
+//	    short-circuits on nil.
+//	(c) Tick → cur==nil → ErrLockMissing → acquireAndSpawn → backlog
+//	    empty → R2-FIX-4 idle-guard releases lock + returns nil
+//	    WITHOUT resetting l.exitCh.
+//	(d) Run loops back, snapshots the same closed exitCh, fires again.
+//
+// Pre-fix: every wake-up performs 1 Acquire + 1 BacklogScan + 1 Release
+// against sqlite → CPU-pinned supervisor goroutine.
+//
+// Post-fix: idle-guard sets l.exitCh = nil. Run snapshots nil → orNever
+// returns a nil receive-only channel → select blocks until ticker.
+// ---------------------------------------------------------------------------
+
+// TestRun_PostWorkerExit_IdleNoTickSpin reproduces the hot-spin: seed
+// l.exitCh as a pre-closed channel before starting Run, keep the backlog
+// empty, and assert the Run goroutine performs at most a handful of
+// Ticks across two ticker periods.
+//
+// Counting Tick invocations: each Tick that reaches acquireAndSpawn
+// calls l.cfg.NewWorkerID() exactly once. counterID returns an int64
+// pointer we can sample atomically; pre-fix it ramps into the hundreds
+// in the test window, post-fix it stays at the immediate-first-Tick + a
+// couple of ticker-driven Ticks.
+func TestRun_PostWorkerExit_IdleNoTickSpin(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db := openChannel(t)
+	seedCursor(t, ctx, db, "agent:writer", 0)
+	// Backlog table stays empty for the entire test → idle-guard fires
+	// on every Tick.
+
+	spawner := &fakeSpawner{}
+	idFn, idCount := counterID()
+	clk, _ := fixedClockPtr(1_700_000_000)
+	period := 100 * time.Millisecond
+	loop, err := New(db, "ch", "agent:writer", spawner, LoopConfig{
+		Period: period, LeaseTTL: testTTL,
+		Now: clk, NewWorkerID: idFn, Logger: silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Pre-seed a pre-closed exitCh to simulate "a previous worker exited
+	// cleanly, waitWorker closed exitCh but left the field pointing at
+	// the closed channel". This is the exact state Run lands in after
+	// any clean worker exit (SkippedNoTrigger, SIGTERM honour, etc.).
+	preClosed := make(chan struct{})
+	close(preClosed)
+	loop.mu.Lock()
+	loop.exitCh = preClosed
+	loop.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() { done <- loop.Run(ctx) }()
+
+	// Wait 2 × Period wall-clock so the ticker has had two scheduled
+	// fires.
+	time.Sleep(2 * period)
+
+	got := atomic.LoadInt64(idCount)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("Run did not exit after cancel")
+	}
+
+	// Budget: 1 immediate-first Tick + 2 ticker fires within the
+	// 2×Period window = 3. Allow generous slack for scheduler jitter,
+	// but reject anything that looks like a hot-spin (pre-fix would
+	// emit dozens-to-hundreds of Ticks here).
+	const budget = 6
+	if got > budget {
+		t.Errorf("Run hot-spun on closed exitCh: NewWorkerID/Tick count = %d, want ≤ %d (regression: R4-FIX-B not effective)",
+			got, budget)
+	}
+
+	// loop.exitCh must have been cleared by the idle-guard so future
+	// snapshots fall back to the ticker.
+	loop.mu.Lock()
+	exitCh := loop.exitCh
+	loop.mu.Unlock()
+	if exitCh != nil {
+		t.Errorf("loop.exitCh = %v, want nil (idle-guard must reset it)", exitCh)
+	}
+}
+
+// TestRun_PostWorkerExit_BacklogArrives_StillResponsive guards the
+// other half of the contract: after the idle-guard clears exitCh, a
+// fresh backlog row MUST still trigger a spawn on the next ticker (or
+// any later wake-up source). Without this assertion an over-eager fix
+// that, say, also stopped the ticker would silently break the supervisor
+// once it had gone idle.
+func TestRun_PostWorkerExit_BacklogArrives_StillResponsive(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db := openChannel(t)
+	seedCursor(t, ctx, db, "agent:writer", 0)
+
+	spawner := &fakeSpawner{}
+	idFn, _ := counterID()
+	clk, _ := fixedClockPtr(1_700_000_000)
+	period := 50 * time.Millisecond
+	loop, err := New(db, "ch", "agent:writer", spawner, LoopConfig{
+		Period: period, LeaseTTL: testTTL,
+		Now: clk, NewWorkerID: idFn, Logger: silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Same pre-closed-exitCh setup as the previous case.
+	preClosed := make(chan struct{})
+	close(preClosed)
+	loop.mu.Lock()
+	loop.exitCh = preClosed
+	loop.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() { done <- loop.Run(ctx) }()
+
+	// Let the idle-guard fire at least once (immediate-first Tick).
+	// Poll for the exitCh reset rather than guessing a wall-clock delay.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		loop.mu.Lock()
+		cur := loop.exitCh
+		loop.mu.Unlock()
+		if cur == nil {
+			break
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+	loop.mu.Lock()
+	cur := loop.exitCh
+	loop.mu.Unlock()
+	if cur != nil {
+		cancel()
+		<-done
+		t.Fatalf("idle-guard never cleared loop.exitCh")
+	}
+
+	// Now drop a backlog row. The next ticker tick MUST observe it and
+	// spawn — proving the supervisor stays responsive after going idle.
+	insertMessages(t, ctx, db, []msgFixture{
+		{id: "m-wake", senderID: "agent:peer", senderKind: "agent",
+			kind: "event", typ: "agent.text",
+			visibility: "public", audience: `["agent:writer"]`},
+	})
+
+	if !waitForCount(spawner, 1, 10*period) {
+		cancel()
+		<-done
+		t.Fatalf("spawn never happened after backlog arrived post-idle (R4-FIX-B left supervisor unresponsive)")
+	}
+
+	sc := spawner.LastContext()
+	if sc.Trigger.MsgID != "m-wake" {
+		t.Errorf("trigger msg id = %q, want m-wake", sc.Trigger.MsgID)
+	}
+	if got := backlogIDs(sc.Backlog); !equalStrings(got, []string{"m-wake"}) {
+		t.Errorf("backlog = %v, want [m-wake]", got)
+	}
+
+	// Cleanup: cancel + drain Run, then kill the worker so its Wait
+	// goroutine exits.
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("Run did not exit after cancel")
+	}
+	_ = spawner.Worker(0).Kill()
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

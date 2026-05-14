@@ -426,8 +426,18 @@ func (l *Loop) acquireAndSpawn(ctx context.Context, now int64) error {
 	// R2-FIX-4 idle-respawn guard: nothing to do this tick. Release the
 	// lock immediately so peer supervisors / the next ticker iteration
 	// don't have to wait for the lease to expire. Returning nil leaves
-	// l.current == nil; without a fresh exitCh Run.select falls back to
-	// the ticker (no busy-loop on the closed exit channel).
+	// l.current == nil.
+	//
+	// R4-FIX-B: we ALSO reset l.exitCh to nil here. Background: when a
+	// previous worker exited cleanly, waitWorker closed the exitCh but
+	// left l.exitCh pointing at that (now-closed) channel. orNever only
+	// short-circuits on nil — a closed channel is permanently readable,
+	// so Run.select would wake every iteration on `<-orNever(exitCh)`,
+	// run Tick → idle-guard → return, and immediately loop again
+	// (hot-spin). Clearing l.exitCh = nil tells orNever to return a nil
+	// receive-only channel, which blocks forever in select; Run then
+	// falls back to the ticker until either a fresh spawn writes a new
+	// exitCh or a new backlog arrives.
 	if len(backlog) == 0 {
 		if rerr := Release(ctx, l.db, l.agentID, workerID); rerr != nil && !errors.Is(rerr, ErrLockMissing) {
 			// Surface the release failure but do NOT return it: another
@@ -440,6 +450,12 @@ func (l *Loop) acquireAndSpawn(ctx context.Context, now int64) error {
 				"channel_id", l.channelID, "agent_id", l.agentID,
 				"worker_id", workerID, "err", rerr.Error())
 		}
+		// R4-FIX-B: drop the stale exitCh reference so Run.select can
+		// idle on the ticker. Must be under l.mu — shutdown / Run /
+		// acquireAndSpawn all touch l.exitCh under the same lock.
+		l.mu.Lock()
+		l.exitCh = nil
+		l.mu.Unlock()
 		l.cfg.Logger.Info("supervisor.acquire.idle",
 			"channel_id", l.channelID, "agent_id", l.agentID,
 			"worker_id", workerID, "fencing_token", lock.FencingToken)
