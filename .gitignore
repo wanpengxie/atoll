@@ -7,12 +7,12 @@ dist/
 /bin/
 .dalek/*
 !.dalek/pm/
-!.dalek/pm/*.md
+!.dalek/pm/**
+.dalek/pm/**/*.local.*
 *.local.*
 .logs/
 .dalek/runtime/
 .env
 .coagent-local/
-.dalek/
 bin/
 .go-arch-lint.yml
