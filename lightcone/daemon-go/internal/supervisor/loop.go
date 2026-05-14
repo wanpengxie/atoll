@@ -472,10 +472,33 @@ func (l *Loop) currentWorker() Worker {
 	return l.current
 }
 
-// shutdown kills the current worker (if any) and waits for the
-// exit channel so callers can rely on "Run returned ⇒ no goroutines
-// outstanding". The lock row stays — the next supervisor (this
-// daemon restart, or another instance) handles it via lease expiry.
+// GracefulStopper is the optional interface a Worker may implement to
+// participate in the SIGTERM-then-SIGKILL graceful shutdown path. When
+// the supervisor wants the worker dead "soon, but with a chance to
+// release its lock first" it prefers Stop over Kill — the production
+// ExecSpawner provides Stop, while test fakes typically just satisfy
+// Worker.Kill.
+type GracefulStopper interface {
+	Stop() error
+}
+
+// stopOrKill prefers Worker.Stop (graceful) and falls back to Kill
+// (forceful) when the implementation doesn't expose Stop. Used by the
+// supervisor's shutdown + lease-mismatch reclaim paths so production
+// workers get a chance to defer-Release their worker_locks row.
+func stopOrKill(w Worker) error {
+	if s, ok := w.(GracefulStopper); ok {
+		return s.Stop()
+	}
+	return w.Kill()
+}
+
+// shutdown stops the current worker (if any) — graceful first, fallback
+// to Kill — and waits for the exit channel so callers can rely on
+// "Run returned ⇒ no goroutines outstanding". The lock row stays —
+// the next supervisor (this daemon restart, or another instance)
+// handles it via lease expiry. When the worker honoured SIGTERM it
+// will already have Released the row from its own defer.
 func (l *Loop) shutdown() {
 	l.mu.Lock()
 	w := l.current
@@ -485,8 +508,8 @@ func (l *Loop) shutdown() {
 	if w == nil {
 		return
 	}
-	if err := w.Kill(); err != nil {
-		l.cfg.Logger.Warn("supervisor.shutdown.kill.error", "err", err.Error())
+	if err := stopOrKill(w); err != nil {
+		l.cfg.Logger.Warn("supervisor.shutdown.stop.error", "err", err.Error())
 	}
 	if exitCh != nil {
 		<-exitCh

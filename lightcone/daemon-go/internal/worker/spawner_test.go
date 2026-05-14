@@ -1,12 +1,16 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -36,10 +40,19 @@ func TestMain(m *testing.M) {
 // runHelper is the test-binary's "worker" persona. Behaviour depends
 // on the helper command name:
 //
-//   - "dump": print "ARGS:<argv>" + "ENV:<filtered env>" then exit 0.
+//   - "dump":      print "ARGS:<argv>" + "ENV:<filtered env>" then exit 0.
 //     Used to assert the spawner wired flags + env correctly.
-//   - "sleep": block for 5 seconds (covers Kill / Wait paths).
-//   - "fail": exit 1 immediately (covers Wait error reporting).
+//   - "sleep":     block for 5 seconds (covers Kill / Wait paths).
+//   - "fail":      exit 1 immediately (covers Wait error reporting).
+//   - "graceful":  install a SIGTERM handler that prints
+//     "graceful_exit\n" to stdout then exits 0 — covers Stop()'s
+//     SIGTERM grace branch.
+//   - "ignore":    install a SIG_IGN-style handler so SIGTERM is
+//     swallowed; loops until SIGKILL terminates it. Covers Stop()'s
+//     SIGKILL fallback branch.
+//   - "logline":   print the JSON line `{"event":"worker.start"}` to
+//     stdout then exit 0 — covers the spawner's stdout passthrough
+//     contract.
 func runHelper(cmd string) {
 	switch cmd {
 	case "dump":
@@ -59,6 +72,26 @@ func runHelper(cmd string) {
 		os.Exit(0)
 	case "fail":
 		os.Exit(1)
+	case "graceful":
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGTERM)
+		<-ch
+		fmt.Println("graceful_exit")
+		os.Exit(0)
+	case "ignore":
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGTERM)
+		// Drain SIGTERMs forever; only SIGKILL stops us.
+		go func() {
+			for range ch {
+			}
+		}()
+		for {
+			time.Sleep(50 * time.Millisecond)
+		}
+	case "logline":
+		fmt.Println(`{"event":"worker.start"}`)
+		os.Exit(0)
 	default:
 		fmt.Fprintf(os.Stderr, "helper: unknown command %q\n", cmd)
 		os.Exit(2)
@@ -326,6 +359,146 @@ func TestExecSpawner_KillTerminatesWorker(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Wait did not return after Kill")
 	}
+}
+
+// FIX-4 §"spawner 增 Stop()": SIGTERM grace path. The "graceful"
+// helper installs a SIGTERM handler and exits 0, so the spawner's
+// Stop must NOT escalate to SIGKILL within the grace window.
+func TestExecSpawner_Stop_GracefulSIGTERM(t *testing.T) {
+	sp, err := NewExecSpawner(ExecSpawnerConfig{
+		BinaryPath:      helperPath(t),
+		ChannelWorkdir:  "/tmp/ch-stop-graceful",
+		ExtraEnv:        []string{helperEnvVar + "=graceful"},
+		StopGracePeriod: 1 * time.Second, // generous; helper exits immediately
+		InheritEnv:      true,
+	})
+	if err != nil {
+		t.Fatalf("NewExecSpawner: %v", err)
+	}
+	w, err := sp.Spawn(context.Background(), supervisor.SpawnContext{
+		ChannelID: "c", AgentID: "a", WorkerID: "w", FencingToken: 1,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	// Give the helper a moment to install its handler.
+	time.Sleep(100 * time.Millisecond)
+
+	stopper, ok := w.(interface{ Stop() error })
+	if !ok {
+		t.Fatalf("execWorker does not satisfy Stop()")
+	}
+
+	start := time.Now()
+	if serr := stopper.Stop(); serr != nil {
+		t.Fatalf("Stop: %v", serr)
+	}
+	elapsed := time.Since(start)
+	if elapsed > 800*time.Millisecond {
+		t.Errorf("Stop took %s — graceful path should finish well under grace window", elapsed)
+	}
+
+	// Wait surfaces nil because SIGTERM-handled exit returns 0.
+	werr := w.Wait()
+	if werr != nil {
+		t.Errorf("Wait after graceful Stop = %v, want nil", werr)
+	}
+}
+
+// FIX-4 §"等 gracePeriod 5s 后 SIGKILL": fallback path. The "ignore"
+// helper swallows SIGTERM and only dies on SIGKILL — Stop MUST escalate
+// once the grace period elapses.
+func TestExecSpawner_Stop_FallbackSIGKILL(t *testing.T) {
+	sp, err := NewExecSpawner(ExecSpawnerConfig{
+		BinaryPath:      helperPath(t),
+		ChannelWorkdir:  "/tmp/ch-stop-ignore",
+		ExtraEnv:        []string{helperEnvVar + "=ignore"},
+		StopGracePeriod: 200 * time.Millisecond, // tiny so the test is fast
+		InheritEnv:      true,
+	})
+	if err != nil {
+		t.Fatalf("NewExecSpawner: %v", err)
+	}
+	w, err := sp.Spawn(context.Background(), supervisor.SpawnContext{
+		ChannelID: "c", AgentID: "a", WorkerID: "w", FencingToken: 1,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	stopper, ok := w.(interface{ Stop() error })
+	if !ok {
+		t.Fatalf("execWorker does not satisfy Stop()")
+	}
+	start := time.Now()
+	if serr := stopper.Stop(); serr != nil {
+		t.Fatalf("Stop: %v", serr)
+	}
+	elapsed := time.Since(start)
+	if elapsed < 200*time.Millisecond {
+		t.Errorf("Stop returned in %s — should have waited at least one grace window before SIGKILL", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("Stop took %s — SIGKILL should fire promptly after grace expiry", elapsed)
+	}
+	// Wait surfaces a non-nil error because SIGKILL'd processes exit
+	// non-zero.
+	werr := w.Wait()
+	if werr == nil {
+		t.Errorf("Wait after SIGKILL fallback = nil, want non-nil exit error")
+	}
+}
+
+// FIX-4 §"ExecSpawner.cmd.Stdout = os.Stdout": the spawner MUST route
+// the worker's stdout to the configured writer. We capture into a
+// *bytes.Buffer guarded by a mutex (cmd.Stdout writes happen on the
+// child's exit goroutine).
+func TestExecSpawner_Stdout_Passthrough(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		buf bytes.Buffer
+	)
+	sp, err := NewExecSpawner(ExecSpawnerConfig{
+		BinaryPath:     helperPath(t),
+		ChannelWorkdir: "/tmp/ch-stdout",
+		ExtraEnv:       []string{helperEnvVar + "=logline"},
+		Stdout:         lockedWriter{mu: &mu, w: &buf},
+		Stderr:         lockedWriter{mu: &mu, w: &buf},
+		InheritEnv:     true,
+	})
+	if err != nil {
+		t.Fatalf("NewExecSpawner: %v", err)
+	}
+	w, err := sp.Spawn(context.Background(), supervisor.SpawnContext{
+		ChannelID: "c", AgentID: "a", WorkerID: "w", FencingToken: 1,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if werr := w.Wait(); werr != nil {
+		t.Fatalf("Wait: %v", werr)
+	}
+
+	mu.Lock()
+	got := buf.String()
+	mu.Unlock()
+	if !strings.Contains(got, `{"event":"worker.start"}`) {
+		t.Errorf("stdout did not capture worker JSON line; got=%q", got)
+	}
+}
+
+// lockedWriter serialises Write calls — exec.Cmd writes from the
+// child's reaper goroutine, so a raw bytes.Buffer would race.
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (l lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 // "fail" helper exits 1 immediately — Wait should surface the exit

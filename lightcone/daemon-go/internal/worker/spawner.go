@@ -19,14 +19,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/coagent-ai/daemon-go/internal/supervisor"
 )
+
+// DefaultStopGracePeriod is how long Stop() waits for a worker to
+// react to SIGTERM before escalating to SIGKILL. The 5-second value
+// is the FIX-4 spec baseline ("先对 pgid 发 SIGTERM, 等 gracePeriod
+// 5s 后 SIGKILL"); tests inject a sub-second value for speed.
+const DefaultStopGracePeriod = 5 * time.Second
 
 // ExecSpawnerConfig tunes the production spawner. BinaryPath is the
 // only required field; the rest tune logging + path-to-worker-binary
@@ -63,6 +72,21 @@ type ExecSpawnerConfig struct {
 	// child's env (defaults to true — production wants $PATH visible
 	// to the worker). Tests set false for hermetic isolation.
 	InheritEnv bool
+
+	// Stdout / Stderr override the destinations for the spawned
+	// worker's stdout / stderr. Defaults to os.Stdout / os.Stderr so
+	// the worker's slog JSON lines show up in the daemon log
+	// aggregation pipe by default. Tests pipe to a *bytes.Buffer
+	// to make assertions; production may pipe through a logger.Forward
+	// wrapper.
+	Stdout io.Writer
+	Stderr io.Writer
+
+	// StopGracePeriod is the wait between SIGTERM and the SIGKILL
+	// fallback in Stop(). Defaults to DefaultStopGracePeriod (5s).
+	// Tests set 50ms so the assertion finishes inside the standard
+	// `go test` timeout.
+	StopGracePeriod time.Duration
 }
 
 // NewExecSpawner builds the production spawner.
@@ -78,6 +102,15 @@ func NewExecSpawner(cfg ExecSpawnerConfig) (*ExecSpawner, error) {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = noopLogger{}
+	}
+	if cfg.StopGracePeriod <= 0 {
+		cfg.StopGracePeriod = DefaultStopGracePeriod
+	}
+	if cfg.Stdout == nil {
+		cfg.Stdout = os.Stdout
+	}
+	if cfg.Stderr == nil {
+		cfg.Stderr = os.Stderr
 	}
 	// InheritEnv defaults to true (zero value false → caller intent
 	// would be ambiguous; we force inherit so $PATH / TMPDIR are
@@ -103,6 +136,13 @@ func (s *ExecSpawner) Spawn(ctx context.Context, sc supervisor.SpawnContext) (su
 
 	cmd := exec.CommandContext(ctx, s.cfg.BinaryPath, args...)
 	cmd.Env = env
+	// Per FIX-4 §"ExecSpawner 不设 cmd.Stdout/Stderr": route the
+	// worker's slog JSON to the configured writers (default os.Stdout /
+	// os.Stderr) so the daemon log aggregation pipe sees them. Without
+	// these the worker's structured logs were silently dropped to
+	// /dev/null.
+	cmd.Stdout = s.cfg.Stdout
+	cmd.Stderr = s.cfg.Stderr
 
 	// Detach from the supervisor's process group so a SIGINT to the
 	// daemon doesn't propagate to every child — the supervisor sends
@@ -124,7 +164,11 @@ func (s *ExecSpawner) Spawn(ctx context.Context, sc supervisor.SpawnContext) (su
 		"backlog_size", len(sc.Backlog),
 	)
 
-	w := &execWorker{cmd: cmd, waitDone: make(chan struct{})}
+	w := &execWorker{
+		cmd:      cmd,
+		waitDone: make(chan struct{}),
+		grace:    s.cfg.StopGracePeriod,
+	}
 	go w.runWait()
 	return w, nil
 }
@@ -207,6 +251,11 @@ func (s *ExecSpawner) buildArgsEnv(sc supervisor.SpawnContext) ([]string, []stri
 type execWorker struct {
 	cmd *exec.Cmd
 
+	// grace is the SIGTERM → SIGKILL escalation window used by Stop().
+	// 0 means "skip the SIGTERM step and go straight to SIGKILL"; the
+	// spawner's NewExecSpawner always sets a non-zero default.
+	grace time.Duration
+
 	waitDone chan struct{}
 	mu       sync.Mutex
 	waitErr  error
@@ -230,7 +279,9 @@ func (w *execWorker) Wait() error {
 
 // Kill sends SIGKILL to the child's process group (so any forked
 // helper coagent CLI processes also exit). Returns nil if the child
-// is already gone.
+// is already gone. Use Stop() instead when graceful shutdown matters
+// — Kill bypasses the worker's defer-Release step so the supervisor
+// must wait LeaseTTL before reclaiming the lock.
 func (w *execWorker) Kill() error {
 	if w.cmd.Process == nil {
 		return nil
@@ -245,6 +296,47 @@ func (w *execWorker) Kill() error {
 	// Fallback to single-process kill when getpgid fails (rare —
 	// usually means the process already exited).
 	return w.cmd.Process.Kill()
+}
+
+// Stop is the graceful shutdown variant: SIGTERM the worker's process
+// group, wait up to `grace` for the worker's signal handler to release
+// its worker_locks row + close the agent, then escalate to SIGKILL on
+// the same group when the deadline elapses.
+//
+// Returns nil after the child has exited (either via SIGTERM-induced
+// graceful path or SIGKILL fallback). The worker's slog "worker.exit"
+// line still surfaces under both paths because the spawner's
+// cmd.Stdout / cmd.Stderr stay attached.
+func (w *execWorker) Stop() error {
+	if w.cmd.Process == nil {
+		return nil
+	}
+	pgid, err := syscall.Getpgid(w.cmd.Process.Pid)
+	if err != nil || pgid <= 0 {
+		// Process likely already exited. Fall back to single-pid Kill
+		// which will return nil for a dead process.
+		return w.cmd.Process.Kill()
+	}
+
+	// Phase 1: SIGTERM the whole pgroup. Errors are best-effort — a
+	// concurrently-exited child surfaces ESRCH which we ignore.
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+
+	grace := w.grace
+	if grace <= 0 {
+		grace = DefaultStopGracePeriod
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-w.waitDone:
+		return nil
+	case <-timer.C:
+		// Phase 2: escalate to SIGKILL — graceful window expired.
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		<-w.waitDone
+		return nil
+	}
 }
 
 // runWait drains cmd.Wait into waitDone + waitErr. The function is the
