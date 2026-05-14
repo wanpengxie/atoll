@@ -1,23 +1,18 @@
-# pnpm workspace — M1.5 target layout
+# pnpm workspace — M1.5 单栈 target layout
 #
-# spec: .dalek/pm/m1.5-tickets.md §T8 #5
+# spec: .dalek/pm/m1.5-tickets.md §T8
 #       .dalek/pm/m1.5-server-rewrite-and-restructure.md §15.1
 #
-# 已从此列表移除（T9 会归档到 archive/）：
-#   - cli                       (legacy Node CLI)
-#   - agent-binary              (legacy demo binary)
-#   - lightcone                 (M1.3 demo root)
-#   - lightcone/daemon          (legacy Node daemon)
-#   - lightcone/feishu-bridge   (legacy bridge)
-#
 # 加入：
-#   - ui                              (T7 落地：lightcone/public → ui/)
-#   - adapters/device/xhs/extension   (T5 已落地：xhs 浏览器扩展从
-#                                      devices/xhs-extension 重组到此)
+#   - ui                                (T7 落地：原生 Vite UI)
+#   - adapters/device/xhs/extension     (T5 已落地：xhs 浏览器扩展)
 #
-# 当前 T8 不强制这些目录存在，未匹配的 glob 不会让 pnpm install 失败。
+# 已归档（T9 完成；不再出现在 workspace 里）：
+#   - cli / agent-binary / lightcone/** / packages/payload-types / workspace-template
+#   - 各自的归档位置见 archive/<dir>/ARCHIVE.md
+#
+# 未匹配的 glob 不会让 pnpm install 失败。
 packages:
-  - 'packages/*'
   - 'ui'
   - 'adapters/device/xhs/extension'
   - 'adapters/device/xhs/extension/packages/*'

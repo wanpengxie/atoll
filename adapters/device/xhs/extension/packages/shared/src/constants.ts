@@ -11,7 +11,7 @@ export const XIAOHONGSHU_URLS = {
 
 /**
  * 工具名称常量（chrome.runtime.onMessage 内部 EXECUTE_TOOL 仍使用，
- * 仅作 background 内部 dispatch；不再对外暴露 1studio backend 派发协议）。
+ * 仅作 background 内部 dispatch；不再对外暴露旧 upstream backend 派发协议）。
  */
 export const XIAOHONGSHU_TOOL_NAMES = {
   CHECK_LOGIN_STATUS: 'xhs_check_login_status',
@@ -33,7 +33,7 @@ export const XIAOHONGSHU_TOOL_NAMES = {
 /**
  * Chrome 插件常量。
  *
- * M1.1-T2 起 extension 直接连 coagent daemon 的 device 通道，不再走旧 1studio backend 链路。
+ * M1.1-T2 起 extension 直接连 coagent daemon 的 device 通道，不再走旧 upstream backend 链路。
  * STORAGE_KEYS / 默认值同步为 device 形态。
  */
 export const EXTENSION_CONSTANTS = {

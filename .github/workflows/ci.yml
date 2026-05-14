@@ -3,9 +3,9 @@ name: CI
 # CI gate for the v5 工程纪律（M1.5 §T8）。
 # Runs the full discipline pipeline: install → lint (5 类) → test → build.
 #
-# Scope: top-level Makefile targets. daemon-go has its own dedicated lint
-# pipeline in `go-ci.yml`, pinned to v2.1.6 (pre-T9 dual-stack);
-# this workflow only invokes the root-level discipline.
+# Scope: top-level Makefile targets across the single root go module
+# (cmd/{server,daemon,worker,cli}) + pnpm workspaces (ui + xhs extension).
+# M1.5 单栈，无第二个 go module，无独立 workflow。
 #
 # spec: .dalek/pm/m1.5-tickets.md §T8 #4
 

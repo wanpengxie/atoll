@@ -3,7 +3,7 @@ import type { ToolResult } from 'coagent-xhs-shared';
 import { XIAOHONGSHU_URLS } from 'coagent-xhs-shared';
 import { runInMainWorld } from '../inject-script';
 import { validateXhsProfileUrl } from './xhs-url';
-// M1.1-T2: 1studio backend websocket-client 已切断；中间状态报告改为无操作。
+// M1.1-T2: 旧 upstream backend websocket-client 已切断；中间状态报告改为无操作。
 // 后续如需把进度推回 coagent daemon，由 services/coagent-device.ts 统一桥接。
 const websocketClient = {
   sendStatus(_requestId: string, _payload: unknown): void {

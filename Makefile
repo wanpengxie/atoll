@@ -4,9 +4,9 @@
 # 顶层 target 与 §15.1 对齐：install / build / build-go / build-ui / build-ext /
 # test / lint / migrate / dev / clean
 #
-# 容错策略：T8 在 T1/T2/T3/T6/T7/T9 之前或并行落地，对未到位的目录 / 配置
-# / 命令做 graceful skip（打印 `[skip] …` 并继续），等后续 ticket 把
-# kernel/ runtime/ adapters/ server/ cmd/ pkg/ ui/ 等填满后自动 ratchet。
+# 容错策略：对未到位的目录 / 配置 / 命令做 graceful skip（打印 `[skip] …`
+# 并继续）。M1.5 之后单栈：build-go / lint 只面向根 module
+# （cmd/{server,daemon,worker,cli}），不存在第二个 go module。
 
 SHELL := /usr/bin/env bash
 
@@ -16,18 +16,12 @@ SHELL := /usr/bin/env bash
 # v5 Go 二进制（cmd/<bin>/main.go 由 T6/T7 落地）。
 GO_BINARIES := server daemon worker cli
 
-# T9 之前 daemon-go 仍是 Go 主源；T9 归档后此目录消失，build-go / lint 自动跳过。
-DAEMON_GO_DIR := lightcone/daemon-go
-
 # ----------------------------------------------------------------------------
 # install — 拉依赖、安装 lint / migrate 工具
 # ----------------------------------------------------------------------------
 install:
 	@echo "[install] go mod download"
 	@if [ -f go.mod ]; then go mod download; else echo "[skip] root go.mod absent (T2 pending)"; fi
-	@if [ -d $(DAEMON_GO_DIR) ]; then \
-	  cd $(DAEMON_GO_DIR) && go mod download; \
-	fi
 	@echo "[install] pnpm install"
 	pnpm install
 	@echo "[install] go install lint / migrate tools (best-effort)"
@@ -48,23 +42,17 @@ build: build-go build-ui build-ext
 
 build-go:
 	@mkdir -p bin
-	@built=0; \
-	if [ -f go.mod ]; then \
+	@if [ -f go.mod ]; then \
 	  for b in $(GO_BINARIES); do \
 	    if [ -d "cmd/$$b" ]; then \
 	      echo "[build-go] cmd/$$b -> bin/coagent-$$b"; \
 	      go build -o bin/coagent-$$b ./cmd/$$b || exit 1; \
-	      built=$$((built+1)); \
 	    else \
 	      echo "[skip] cmd/$$b not present (T6/T7 pending)"; \
 	    fi; \
 	  done; \
 	else \
 	  echo "[skip] root go.mod absent (T2 pending)"; \
-	fi; \
-	if [ -d $(DAEMON_GO_DIR) ]; then \
-	  echo "[build-go] $(DAEMON_GO_DIR) (pre-T9 dual-stack)"; \
-	  (cd $(DAEMON_GO_DIR) && go build ./...) || exit 1; \
 	fi
 
 build-ui:
@@ -91,10 +79,6 @@ test:
 	  echo "[test] go test ./..."; \
 	  go test ./...; \
 	fi
-	@if [ -d $(DAEMON_GO_DIR) ]; then \
-	  echo "[test] $(DAEMON_GO_DIR) go test ./..."; \
-	  (cd $(DAEMON_GO_DIR) && go test ./... -race -count=1) || exit 1; \
-	fi
 	@echo "[test] pnpm -r --if-present test"
 	@pnpm -r --if-present test
 
@@ -109,9 +93,8 @@ test:
 lint: lint-go lint-arch lint-banned-words lint-kernel-protocol lint-docs
 
 lint-go:
-	@# 范围：T8 的 lint-go 只覆盖**根模块**（kernel/ runtime/ adapters/ server/ cmd/ pkg/，T2+）。
-	@# daemon-go 是 T9 前的过渡模块，独立由 .github/workflows/go-ci.yml 在 v2.1.6 pin 版本下 gate；
-	@# 不混进 T8 的 make lint，避免版本漂移和 grandfather 噪声。
+	@# 范围：lint-go 覆盖根模块（kernel/ runtime/ adapters/ server/ cmd/ pkg/）。
+	@# M1.5 单栈：只有一个 go module，不会有第二个 go module。
 	@if [ ! -f go.mod ]; then \
 	  echo "[skip] lint-go: root go.mod absent (T2 pending)"; \
 	elif ! command -v golangci-lint >/dev/null 2>&1; then \
@@ -188,7 +171,4 @@ dev:
 # ----------------------------------------------------------------------------
 clean:
 	rm -rf bin/ dist/ ui/dist
-	@if [ -d $(DAEMON_GO_DIR) ]; then \
-	  (cd $(DAEMON_GO_DIR) && go clean ./... 2>/dev/null) || true; \
-	fi
 	@pnpm -r --if-present clean 2>/dev/null || true

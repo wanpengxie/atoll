@@ -1,9 +1,10 @@
 // services/resolve.ts — M1.2-T3
 //
-// Popup 主入口 1-key 流程：用户填 `lightconeServerUrl + apiKey`，扩展走
-// `POST {lightconeServerUrl}/api/device/resolve` 反查 device 全套连接信息。
+// Popup 主入口 1-key 流程：用户填 `coagentServerUrl + apiKey`，扩展走
+// `POST {coagentServerUrl}/api/device/resolve` 反查 device 全套连接信息。
 //
-// 接口（lightcone/src/routes/device.js:69-99）：
+// 接口（M1.5 后由 server/devicebus 等 Go 实现承担同合同；早期 Node 实现
+// 已归档）：
 //   POST {SERVER_URL}/api/device/resolve
 //   body: { api_key: "<sk_dev_xxx>" }
 //   → 200 { ws_url, http_url, device_id, user_id, channel_id, daemon_id }
@@ -22,7 +23,7 @@ const RESOLVE_PATH = '/api/device/resolve';
 /** 单次 resolve 整体超时（含 DNS / TCP / TLS / HTTP）。 */
 const RESOLVE_TIMEOUT_MS = TIMEOUTS.NETWORK_REQUEST;
 
-/** Resolve API 成功返回体（与 lightcone server 合同对齐）。 */
+/** Resolve API 成功返回体（与 coagent server 合同对齐）。 */
 export interface ResolveSuccess {
   ws_url: string;
   http_url: string;
@@ -72,7 +73,7 @@ function stripTrailingSlash(s: string): string {
 }
 
 /**
- * 主 API：调 lightcone server `/api/device/resolve`，返回 normalize 过的
+ * 主 API：调 coagent server `/api/device/resolve`，返回 normalize 过的
  * `{ok, data?, error?}` 联合体。永不抛异常 — 调用方只看 `ok` 分支即可。
  */
 export async function resolveDeviceConfig(
@@ -84,7 +85,7 @@ export async function resolveDeviceConfig(
   if (!serverUrl) {
     return {
       ok: false,
-      error: { kind: 'invalid_input', message: '请填写 Server URL（lightcone server 地址）' },
+      error: { kind: 'invalid_input', message: '请填写 Server URL（coagent server 地址）' },
     };
   }
   if (!apiKey) {
@@ -103,7 +104,7 @@ export async function resolveDeviceConfig(
       ok: false,
       error: {
         kind: 'invalid_input',
-        message: 'Server URL 格式无效，请填类似 https://lightcone.example.com',
+        message: 'Server URL 格式无效，请填类似 https://coagent.example.com',
       },
     };
   }
@@ -275,7 +276,7 @@ function normalizeResolveSuccess(body: unknown): ResolveSuccess | null {
 }
 
 /**
- * 兜底读 server 的 error 字段（lightcone 返 `{error: '...'}`）。任何异常都返回
+ * 兜底读 server 的 error 字段（server 返 `{error: '...'}`）。任何异常都返回
  * 空字符串，让上层用默认 message。
  */
 async function safeReadErrorMessage(resp: Response): Promise<string> {
