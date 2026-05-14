@@ -35,10 +35,10 @@ type BackgroundRequest =
   | { type: 'GET_CONNECTION_CONFIG' }
   | { type: 'SAVE_CONNECTION_CONFIG'; payload: Partial<ConnectionConfig> }
   | {
-      // M1.2-T3: popup 主入口 1-key 流程。Background 调 lightcone resolve API
+      // M1.2-T3: popup 主入口 1-key 流程。Background 调 coagent resolve API
       // 拿全套连接信息，落 storage，再触发 coagent device WS connect。
       type: 'RESOLVE_AND_CONNECT';
-      payload: { lightconeServerUrl: string; apiKey: string };
+      payload: { coagentServerUrl: string; apiKey: string };
     }
   | { type: 'SYNC_COOKIES' };
 
@@ -143,9 +143,9 @@ export default defineBackground(() => {
           }
           case 'RESOLVE_AND_CONNECT': {
             // M1.2-T3 popup 主入口 1-key 流程。
-            const { lightconeServerUrl, apiKey } = request.payload ?? ({} as any);
+            const { coagentServerUrl, apiKey } = request.payload ?? ({} as any);
             const result = await resolveDeviceConfig({
-              serverUrl: String(lightconeServerUrl ?? ''),
+              serverUrl: String(coagentServerUrl ?? ''),
               apiKey: String(apiKey ?? ''),
             });
             if (!result.ok) {
@@ -160,7 +160,7 @@ export default defineBackground(() => {
             }
             // 写完整 device config（含 wsUrl/httpBase 别名）。
             const patch: Partial<ConnectionConfig> = {
-              lightconeServerUrl: String(lightconeServerUrl ?? '').trim(),
+              coagentServerUrl: String(coagentServerUrl ?? '').trim(),
               apiKey: String(apiKey ?? '').trim(),
               serverUrl: result.data.ws_url,        // canonical（被 coagent-device.ts 读）
               wsUrl: result.data.ws_url,            // 别名（与描述里 storage shape 对齐）

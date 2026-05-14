@@ -7,7 +7,7 @@
 //   - daemonHttpBase     (= daemon HTTP base，例 http://127.0.0.1:9501)
 //   - deviceId           (= 设备唯一 ID；与 WS path 中的 deviceId 一致)
 //   - userId             (= 当前主人 user_id；session sync / callback 上报使用)
-//   - lightconeServerUrl (M1.2-T3) lightcone server URL，popup 主入口调
+//   - coagentServerUrl   (M1.2-T3) coagent server URL，popup 主入口调
 //                        `/api/device/resolve` 反查 device 全套配置时使用。
 //   - channelId/daemonId (M1.2-T3) resolve 返回的元数据，备用。
 //   - wsUrl/httpBase     (M1.2-T3) 描述 storage 形态对齐用的别名字段；运行时
@@ -24,11 +24,10 @@ import { EXTENSION_CONSTANTS } from 'coagent-xhs-shared';
 
 const DEFAULT_DAEMON_HTTP_BASE = 'http://127.0.0.1:9501';
 /**
- * M1.2-T3 — popup 主入口默认 lightcone server URL。ticket 描述明确指定
- * `https://lightcone-server` 作为 placeholder；用户必须改成真实部署域名才能
- * 让 resolve 调用走通。
+ * M1.2-T3 — popup 主入口默认 coagent server URL。`https://coagent-server`
+ * 作为 placeholder；用户必须改成真实部署域名才能让 resolve 调用走通。
  */
-const DEFAULT_LIGHTCONE_SERVER_URL = 'https://lightcone-server';
+const DEFAULT_COAGENT_SERVER_URL = 'https://coagent-server';
 
 /** Device 连接状态快照（持久化到 chrome.storage.local；popup 也读它）。 */
 export interface ExtensionConnectionStatus {
@@ -56,15 +55,15 @@ export interface ConnectionConfig {
 
   // ── M1.2-T3 新增字段 ────────────────────────────────────────────────────
   /**
-   * Lightcone server URL（popup 主入口走 1-key 流程时使用）。
-   * 例 `https://lightcone.example.com`。POST `${lightconeServerUrl}/api/device/resolve`
+   * Coagent server URL（popup 主入口走 1-key 流程时使用）。
+   * 例 `https://coagent.example.com`。POST `${coagentServerUrl}/api/device/resolve`
    * 反查 device 全套配置（ws_url/http_url/device_id/user_id/channel_id/daemon_id）。
    *
    * 注意：与 `serverUrl`（= daemon WS URL）不是同一个东西。
-   *   - lightconeServerUrl: lightcone backend HTTP，每次 popup connect 时被请求。
-   *   - serverUrl:          daemon WS，service worker 长连保持。
+   *   - coagentServerUrl: coagent backend HTTP，每次 popup connect 时被请求。
+   *   - serverUrl:        daemon WS，service worker 长连保持。
    */
-  lightconeServerUrl?: string;
+  coagentServerUrl?: string;
   /**
    * `serverUrl` 的别名（与 ticket 描述里给的 storage shape 对齐）。
    * 写入时双写以便未来 reader 直接读 `wsUrl`；运行时 coagent-device.ts 仍然
@@ -96,8 +95,8 @@ const DEFAULT_CONFIG: ConnectionConfig = {
   daemonHttpBase: DEFAULT_DAEMON_HTTP_BASE,
   deviceId: '',
   userId: '',
-  // M1.2-T3：主入口 lightcone server URL 默认值（用户必须改成真实域名）。
-  lightconeServerUrl: DEFAULT_LIGHTCONE_SERVER_URL,
+  // M1.2-T3：主入口 coagent server URL 默认值（用户必须改成真实域名）。
+  coagentServerUrl: DEFAULT_COAGENT_SERVER_URL,
   wsUrl: '',
   httpBase: DEFAULT_DAEMON_HTTP_BASE,
   channelId: '',
@@ -220,12 +219,11 @@ export function getDefaultDaemonHttpBase(): string {
 }
 
 /**
- * M1.2-T3 — 默认 lightcone server URL（popup 主入口的 placeholder）。
+ * M1.2-T3 — 默认 coagent server URL（popup 主入口的 placeholder）。
  *
- * ticket 描述明确指定 `https://lightcone-server` 作为默认值；它是 placeholder，
- * 用户必须改成真实部署域名（例 `https://lightcone.example.com`）才能让
- * `/api/device/resolve` 调用走通。
+ * `https://coagent-server` 是 placeholder，用户必须改成真实部署域名
+ * （例 `https://coagent.example.com`）才能让 `/api/device/resolve` 调用走通。
  */
-export function getDefaultLightconeServerUrl(): string {
-  return DEFAULT_LIGHTCONE_SERVER_URL;
+export function getDefaultCoagentServerUrl(): string {
+  return DEFAULT_COAGENT_SERVER_URL;
 }

@@ -57,8 +57,8 @@ pnpm build                 # 生产构建：app/chrome-extension/.output/chrome-
 
 | 字段 | 说明 | 示例 |
 |---|---|---|
-| Coagent api-key | 在 lightcone server 创建 device 时分配的 key | `sk_dev_xxx` |
-| Server URL | lightcone server 部署地址；popup 默认 `https://lightcone-server`，必须改成真实部署域名 | `https://lightcone.example.com` |
+| Coagent api-key | 在 coagent server 创建 device 时分配的 key | `sk_dev_xxx` |
+| Server URL | coagent server 部署地址；popup 默认 `https://coagent-server`，必须改成真实部署域名 | `https://coagent.example.com` |
 
 点 "连接" 后扩展走 `POST {Server URL}/api/device/resolve {api_key}`，
 反查到对应 daemon 的 `ws_url / http_url / device_id / user_id / channel_id /
@@ -69,8 +69,8 @@ resolve 失败（网络 / 401 / 404 / 429 / server 5xx）会在 popup 内显示�
 
 ### Advanced 折叠：旧 5 字段（dev / test）
 
-popup 下方 "⚙️ Advanced" 折叠区保留旧 5 字段，跳过 lightcone resolve 直接连
-daemon。多用于 lightcone server 暂不可用、本地起 daemon 调试等场景：
+popup 下方 "⚙️ Advanced" 折叠区保留旧 5 字段，跳过 coagent resolve 直接连
+daemon。多用于 coagent server 暂不可用、本地起 daemon 调试等场景：
 
 | 字段 | 说明 | 示例 |
 |---|---|---|
@@ -87,7 +87,7 @@ daemon。多用于 lightcone server 暂不可用、本地起 daemon 调试等场
 ```jsonc
 {
   // 主入口字段
-  "lightconeServerUrl": "https://lightcone.example.com",
+  "coagentServerUrl": "https://coagent.example.com",
 
   // Daemon 连接字段（resolve 自动填，或 advanced 手动填）
   // serverUrl / wsUrl 为同一个值的 canonical+alias；daemonHttpBase / httpBase 同理
@@ -167,7 +167,7 @@ Content-Type: application/json
 
 **connect 报 "Device 配置不完整"** — daemon WS URL / device api key / device id 任一为空。检查 popup（主入口走 resolve 自动填；advanced 需要全填）。
 
-**主入口 resolve 报 "Server 不可达 / 超时"** — 检查 Server URL 是否填的真实 lightcone 部署域名（默认 `https://lightcone-server` 是 placeholder）。临时绕过：展开 Advanced，手动填 daemon 5 字段。
+**主入口 resolve 报 "Server 不可达 / 超时"** — 检查 Server URL 是否填的真实 coagent 部署域名（默认 `https://coagent-server` 是 placeholder）。临时绕过：展开 Advanced，手动填 daemon 5 字段。
 
 **callback 返回非 2xx** — daemon 校验 device_api_key 失败或 correlation_id 已过期；service worker console 会打印 `callback non-2xx` 含 status 与 body。
 

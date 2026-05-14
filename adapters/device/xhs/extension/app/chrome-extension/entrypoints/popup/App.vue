@@ -12,13 +12,13 @@
 
     <!-- 主体内容 -->
     <main class="popup-main">
-      <!-- 主入口：1-key 流程（lightcone resolve API） -->
+      <!-- 主入口：1-key 流程（coagent resolve API） -->
       <section class="connection-card">
         <div class="connection-card__header">
           <div>
             <h2>🛰️ Coagent Device</h2>
             <p>
-              填 Coagent api-key + 点 "连接"，扩展自动从 lightcone server 反查
+              填 Coagent api-key + 点 "连接"，扩展自动从 coagent server 反查
               daemon 连接信息并建立 WebSocket 长连。
             </p>
           </div>
@@ -36,10 +36,10 @@
             />
           </el-form-item>
 
-          <el-form-item label="Server URL（lightcone server）" class="server-url-item">
+          <el-form-item label="Server URL（coagent server）" class="server-url-item">
             <el-input
-              v-model="primaryForm.lightconeServerUrl"
-              :placeholder="defaultLightconeServerUrl"
+              v-model="primaryForm.coagentServerUrl"
+              :placeholder="defaultCoagentServerUrl"
             />
           </el-form-item>
 
@@ -76,7 +76,7 @@
           </template>
           <section class="advanced-card">
             <p class="advanced-desc">
-              dev / test 场景：跳过 lightcone resolve，直接手动填 daemon
+              dev / test 场景：跳过 coagent resolve，直接手动填 daemon
               连接信息。生产用 main 入口的 api-key 即可。
             </p>
 
@@ -158,19 +158,19 @@ import StatusIndicator from '@/components/StatusIndicator.vue';
 import {
   getDefaultWebSocketUrl,
   getDefaultDaemonHttpBase,
-  getDefaultLightconeServerUrl,
+  getDefaultCoagentServerUrl,
 } from '@/entrypoints/background/connection-state';
 import { ElMessage } from 'element-plus';
 
 const store = useAppStore();
 
 const defaultDaemonHttpBase = getDefaultDaemonHttpBase();
-const defaultLightconeServerUrl = getDefaultLightconeServerUrl();
+const defaultCoagentServerUrl = getDefaultCoagentServerUrl();
 
 // ── 主入口表单（1-key resolve 流程）────────────────────────────────────
 const primaryForm = ref({
   apiKey: '',
-  lightconeServerUrl: defaultLightconeServerUrl,
+  coagentServerUrl: defaultCoagentServerUrl,
 });
 const resolving = ref(false);
 /** Resolve 失败时的友好提示（中文）。connect 成功 / disconnect 时清空。 */
@@ -216,9 +216,9 @@ const loadConnectionConfig = async () => {
   const response = await chrome.runtime.sendMessage({ type: 'GET_CONNECTION_CONFIG' });
   if (response?.success) {
     const c = response.config ?? {};
-    // 主入口：lightconeServerUrl 优先；没填过用默认。apiKey 用 device key 同字段。
-    primaryForm.value.lightconeServerUrl =
-      c.lightconeServerUrl || defaultLightconeServerUrl;
+    // 主入口：coagentServerUrl 优先；没填过用默认。apiKey 用 device key 同字段。
+    primaryForm.value.coagentServerUrl =
+      c.coagentServerUrl || defaultCoagentServerUrl;
     primaryForm.value.apiKey = c.apiKey || '';
 
     // Advanced 5 字段
@@ -240,7 +240,7 @@ const connectViaResolve = async () => {
     const response = await chrome.runtime.sendMessage({
       type: 'RESOLVE_AND_CONNECT',
       payload: {
-        lightconeServerUrl: primaryForm.value.lightconeServerUrl,
+        coagentServerUrl: primaryForm.value.coagentServerUrl,
         apiKey: primaryForm.value.apiKey,
       },
     });

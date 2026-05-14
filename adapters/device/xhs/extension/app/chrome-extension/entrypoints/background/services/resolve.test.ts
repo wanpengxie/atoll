@@ -90,7 +90,7 @@ describe('resolveDeviceConfig — happy path', () => {
       }),
     );
     const r = await resolveDeviceConfig({
-      serverUrl: 'https://lightcone.example.com',
+      serverUrl: 'https://coagent.example.com',
       apiKey: 'sk_dev_xxx',
       fetchImpl: fetchMock,
     });
@@ -105,7 +105,7 @@ describe('resolveDeviceConfig — happy path', () => {
     const calls = (fetchMock as unknown as { mock: { calls: any[][] } }).mock.calls;
     expect(calls.length).toBe(1);
     const [url, init] = calls[0] as [string, RequestInit];
-    expect(url).toBe('https://lightcone.example.com/api/device/resolve');
+    expect(url).toBe('https://coagent.example.com/api/device/resolve');
     expect(init.method).toBe('POST');
     expect(JSON.parse(String(init.body))).toEqual({ api_key: 'sk_dev_xxx' });
   });
@@ -122,13 +122,13 @@ describe('resolveDeviceConfig — happy path', () => {
       }),
     );
     await resolveDeviceConfig({
-      serverUrl: 'https://lightcone.example.com/',
+      serverUrl: 'https://coagent.example.com/',
       apiKey: 'k',
       fetchImpl: fetchMock,
     });
     const calls = (fetchMock as unknown as { mock: { calls: any[][] } }).mock.calls;
     const [url] = calls[0] as [string];
-    expect(url).toBe('https://lightcone.example.com/api/device/resolve');
+    expect(url).toBe('https://coagent.example.com/api/device/resolve');
   });
 });
 
