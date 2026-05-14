@@ -61,21 +61,42 @@ func XHSCreatorTypes() []TypeRow {
 			HandlerActorID: XHSCreatorAdapterActorID,
 			Domain:         xhsCreatorDomain,
 			SchemasByKind: mustJSON(map[string]any{
+				// T105 FIX-5: schema 跟随 RealProvider 实际 payload —
+				// real 模式发 content_path 省略 content；图片是对象数组
+				// （L4 §5.1.5 + xhs-cli/internal/cli/images.go 归一化）。
+				// 旧 schema required=[title,content] 直接被 harness
+				// Step 6 拒。新 schema：
+				//   - title 必填；
+				//   - content 或 content_path 二选一（anyOf）；
+				//   - tags 仍为 string[]；
+				//   - images.items 接受 string（mock fallback / 历史
+				//     调用方）或 object（real mode 归一化后的
+				//     {type,value,fileName}）。
 				"request": map[string]any{
 					"type":                 "object",
-					"required":             []string{"title", "content"},
+					"required":             []string{"title"},
 					"additionalProperties": false,
 					"properties": map[string]any{
-						"title":   map[string]any{"type": "string"},
-						"content": map[string]any{"type": "string"},
+						"title":        map[string]any{"type": "string"},
+						"content":      map[string]any{"type": "string"},
+						"content_path": map[string]any{"type": "string"},
 						"tags": map[string]any{
 							"type":  "array",
 							"items": map[string]any{"type": "string"},
 						},
 						"images": map[string]any{
-							"type":  "array",
-							"items": map[string]any{"type": "string"},
+							"type": "array",
+							"items": map[string]any{
+								"oneOf": []map[string]any{
+									{"type": "string"},
+									{"type": "object"},
+								},
+							},
 						},
+					},
+					"anyOf": []map[string]any{
+						{"required": []string{"content"}},
+						{"required": []string{"content_path"}},
 					},
 				},
 				"response": xhsResponseSchema(map[string]any{
@@ -127,12 +148,24 @@ func XHSCreatorTypes() []TypeRow {
 			HandlerActorID: XHSCreatorAdapterActorID,
 			Domain:         xhsCreatorDomain,
 			SchemasByKind: mustJSON(map[string]any{
+				// T105 FIX-5: real 模式发 url / xsec_token (xhs-cli
+				// note.go: --url OR (--note-id && --xsec-token))。
+				// 旧 schema only-note_id + additionalProperties:false
+				// 被 harness Step 6 拒。新 schema：
+				//   - note_id / url / xsec_token 任选；
+				//   - 至少有 note_id 或 url（xsec_token 单独 dead-end，
+				//     CLI 已拦，schema 也补 anyOf 防御）。
 				"request": map[string]any{
 					"type":                 "object",
-					"required":             []string{"note_id"},
 					"additionalProperties": false,
 					"properties": map[string]any{
-						"note_id": map[string]any{"type": "string"},
+						"note_id":    map[string]any{"type": "string"},
+						"url":        map[string]any{"type": "string"},
+						"xsec_token": map[string]any{"type": "string"},
+					},
+					"anyOf": []map[string]any{
+						{"required": []string{"note_id"}},
+						{"required": []string{"url"}},
 					},
 				},
 				"response": xhsResponseSchema(map[string]any{
