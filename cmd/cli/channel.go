@@ -32,7 +32,7 @@ func runChannelLs(args []string) {
 	fs := flag.NewFlagSet("channel ls", flag.ExitOnError)
 	wsID := fs.String("workspace", "", "limit to a single workspace id")
 	serverURL, token := bindGlobalFlags(fs)
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError handles errors
 
 	c, err := newHTTPClient(*serverURL, *token)
 	if err != nil {
@@ -78,7 +78,7 @@ func runChannelLs(args []string) {
 func runChannelShow(args []string) {
 	fs := flag.NewFlagSet("channel show", flag.ExitOnError)
 	serverURL, token := bindGlobalFlags(fs)
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError handles errors
 
 	rest := fs.Args()
 	if len(rest) < 1 {
@@ -105,7 +105,7 @@ func runChannelCreate(args []string) {
 	name := fs.String("name", "", "channel name (required)")
 	ctype := fs.String("type", "group", "channel type (default 'group')")
 	serverURL, token := bindGlobalFlags(fs)
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError handles errors
 
 	if *wsID == "" || *name == "" {
 		fmt.Fprintln(os.Stderr, "--workspace and --name required")

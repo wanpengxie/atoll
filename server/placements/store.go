@@ -256,7 +256,7 @@ func (s *SQLStore) ListByState(ctx context.Context, state placement.State) ([]pl
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []placement.Placement
 	for rows.Next() {
@@ -298,7 +298,7 @@ func (s *SQLStore) ListByDaemon(ctx context.Context, daemonID placement.DaemonID
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []placement.Placement
 	for rows.Next() {
 		var (

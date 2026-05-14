@@ -46,16 +46,15 @@ func newGetNoteCmd() *cobra.Command {
 				// real 模式 get-note 必须 --url，或 (--note-id && --xsec-token)。
 				// xsec_token 单独无 note_id 在 XHS API 上是 dead-end，CLI 提前拒绝
 				// 与 daemon validator + extension 端期望对齐。
-				if !hasURL && !(hasNoteID && hasToken) {
+				ok := hasURL || (hasNoteID && hasToken)
+				if !ok {
 					return NewCLIError(
 						"invalid_argument",
 						"real mode requires --url, or both --note-id and --xsec-token",
 					)
 				}
-			} else {
-				if noteID == "" {
-					return NewCLIError("invalid_argument", "--note-id is required")
-				}
+			} else if noteID == "" {
+				return NewCLIError("invalid_argument", "--note-id is required")
 			}
 
 			argsIn := xhs.GetNoteArgs{

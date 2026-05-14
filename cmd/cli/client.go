@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -71,7 +70,7 @@ func (c *httpClient) do(method, path string, body, out any) error {
 	if err != nil {
 		return fmt.Errorf("%s %s: %w", method, path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -102,16 +101,6 @@ type httpError struct {
 
 func (e *httpError) Error() string {
 	return fmt.Sprintf("%s %s -> %d: %s", e.Method, e.Path, e.Status, truncate(e.Body, 500))
-}
-
-// isHTTPStatus reports whether `err` is an httpError with the given
-// status code.
-func isHTTPStatus(err error, status int) bool {
-	var he *httpError
-	if errors.As(err, &he) {
-		return he.Status == status
-	}
-	return false
 }
 
 func truncate(s string, n int) string {

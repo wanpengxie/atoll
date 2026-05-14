@@ -57,12 +57,7 @@ func (s *Service) handleRegister(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	user, err := s.Register(c.Request.Context(), RegisterInput{
-		Email:       req.Email,
-		Password:    req.Password,
-		Code:        req.Code,
-		DisplayName: req.DisplayName,
-	})
+	user, err := s.Register(c.Request.Context(), RegisterInput(req))
 	if err != nil {
 		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
 		return
@@ -86,10 +81,7 @@ func (s *Service) handleLogin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	res, err := s.Login(c.Request.Context(), LoginInput{
-		Email:    req.Email,
-		Password: req.Password,
-	})
+	res, err := s.Login(c.Request.Context(), LoginInput(req))
 	if err != nil {
 		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
 		return

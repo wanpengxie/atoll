@@ -15,7 +15,7 @@ func TestCobraParseError_WritesEnvelope(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"unknown_command", []string{"publsih", "--title", "T"}}, // typo
+		{"unknown_command", []string{"publsih", "--title", "T"}}, //nolint:misspell // intentional typo: tests cobra unknown-command path
 		{"unknown_flag", []string{"publish", "--no-such-flag"}},
 	}
 	for _, tc := range cases {

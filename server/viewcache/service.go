@@ -275,7 +275,7 @@ func (s *Service) Messages(ctx context.Context, channelID channel.ID, afterSeq v
 	if err != nil {
 		return nil, fmt.Errorf("viewcache: messages: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []StoredMessage
 	for rows.Next() {
 		var (
@@ -418,6 +418,6 @@ func advanceCursorTx(
 
 // nowMs returns the current wall-clock as unix ms. Indirected through
 // a package var so tests could swap it; default is time.Now.
-var nowMs = func() int64 { return realNow() }
+var nowMs = realNow
 
 func realNow() int64 { return timeNowFn().UnixMilli() }

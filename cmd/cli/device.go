@@ -32,7 +32,7 @@ func runDeviceRegister(args []string) {
 	daemonID := fs.String("daemon", "", "daemon id that will own this device (required)")
 	deviceID := fs.String("device-id", "", "stable device id (default: random uuid)")
 	serverURL, token := bindGlobalFlags(fs)
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError handles errors
 
 	if *channelID == "" || *daemonID == "" {
 		fmt.Fprintln(os.Stderr, "--channel and --daemon required")

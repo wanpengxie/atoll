@@ -172,11 +172,7 @@ func (s *Service) handleAddChannelMember(c *gin.Context) {
 		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
 		return
 	}
-	m, err := s.AddChannelMember(c.Request.Context(), c.Param("chID"), NewMember{
-		UserID:           req.UserID,
-		ActorIDInChannel: req.ActorIDInChannel,
-		Role:             req.Role,
-	})
+	m, err := s.AddChannelMember(c.Request.Context(), c.Param("chID"), NewMember(req))
 	if err != nil {
 		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
 		return

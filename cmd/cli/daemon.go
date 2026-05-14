@@ -27,7 +27,7 @@ func runDaemon(args []string) {
 func runDaemonStatus(args []string) {
 	fs := flag.NewFlagSet("daemon status", flag.ExitOnError)
 	serverURL, token := bindGlobalFlags(fs)
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError handles errors
 
 	c, err := newHTTPClient(*serverURL, *token)
 	if err != nil {

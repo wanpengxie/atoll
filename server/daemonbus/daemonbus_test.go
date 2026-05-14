@@ -169,7 +169,7 @@ func TestDispatchPushAndAck(t *testing.T) {
 		t.Errorf("ack seq=%d want 7", ackBody.LastReceivedSeq)
 	}
 
-	conn.Close()
+	_ = conn.Close()
 	<-runErr
 }
 
@@ -207,5 +207,5 @@ func TestStaleEpochDropped(t *testing.T) {
 	case <-time.After(150 * time.Millisecond):
 	}
 
-	conn.Close()
+	_ = conn.Close()
 }

@@ -21,7 +21,9 @@ func runKernel(args []string) {
 	}
 	switch args[0] {
 	case "events":
-		runKernelEvents(args[1:])
+		// runKernelEvents returns an exit code so its `defer db.Close()` /
+		// `defer rows.Close()` actually run before we exit.
+		os.Exit(runKernelEvents(args[1:]))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown kernel subcommand: %s\n", args[0])
 		os.Exit(2)
@@ -30,33 +32,34 @@ func runKernel(args []string) {
 
 // runKernelEvents reads messages from a channel's local sqlite log
 // (daemon-side) and prints them as NDJSON. ReadOnly mode so the cli
-// can safely target a live daemon.
-func runKernelEvents(args []string) {
+// can safely target a live daemon. Returns the process exit code so
+// callers can let `defer` cleanups run before `os.Exit`.
+func runKernelEvents(args []string) int {
 	fs := flag.NewFlagSet("kernel events", flag.ExitOnError)
 	channelID := fs.String("channel", "", "channel id (required)")
 	dataDir := fs.String("data-dir", defaultDataDir(), "daemon data dir (channels live at <data-dir>/channels/<id>/channel.sqlite)")
 	since := fs.Int64("since", 0, "only emit rows with ts_received >= this unix-ms (0 = no filter)")
 	limit := fs.Int("limit", 200, "max rows to emit (0 = no limit)")
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError handles errors
 
 	if *channelID == "" {
 		fmt.Fprintln(os.Stderr, "--channel required")
-		os.Exit(2)
+		return 2
 	}
 
 	dbPath := filepath.Join(*dataDir, "channels", *channelID, "channel.sqlite")
 	if _, err := os.Stat(dbPath); err != nil {
 		fmt.Fprintf(os.Stderr, "channel sqlite not found: %s (%v)\n", dbPath, err)
-		os.Exit(1)
+		return 1
 	}
 
 	ctx := context.Background()
 	db, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{ReadOnly: true})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open channel db: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	q := `SELECT seq, id, ts, ts_received, sender_kind, sender_id, sender_name,
 	             kind, type, payload, parent_id, correlation_id, audience, visibility
@@ -69,9 +72,9 @@ func runKernelEvents(args []string) {
 	rows, err := db.QueryContext(ctx, q, *since)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "query messages: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	enc := json.NewEncoder(os.Stdout)
 	count := 0
@@ -92,7 +95,7 @@ func runKernelEvents(args []string) {
 			&parentID, &corrID, &audience, &visib,
 		); err != nil {
 			fmt.Fprintf(os.Stderr, "scan row: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		row := map[string]any{
 			"seq":            seq,
@@ -112,17 +115,18 @@ func runKernelEvents(args []string) {
 		}
 		if err := enc.Encode(row); err != nil {
 			fmt.Fprintf(os.Stderr, "encode row: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		count++
 	}
 	if err := rows.Err(); err != nil {
 		fmt.Fprintf(os.Stderr, "iterate rows: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	if count == 0 {
 		fmt.Fprintln(os.Stderr, "[kernel events] no rows")
 	}
+	return 0
 }
 
 // nullStr unwraps sql.NullString into a plain string (empty when NULL).

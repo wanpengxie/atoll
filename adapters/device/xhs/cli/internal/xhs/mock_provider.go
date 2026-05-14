@@ -17,8 +17,6 @@ import (
 type MockProvider struct {
 	// now 是测试可注入的时钟；零值用 time.Now().UTC()。
 	now func() time.Time
-	// entropy 是测试可注入的 ULID 随机源；零值用 crypto/rand。
-	entropy func() ([]byte, error)
 }
 
 // NewMockProvider 构造默认 MockProvider。

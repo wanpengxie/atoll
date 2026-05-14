@@ -84,7 +84,7 @@ func TestEndToEndRegisterLoginCreateChannel(t *testing.T) {
 	loginResp := postRaw(t, client, srv.URL+"/api/identity/login",
 		`{"email":"alice@example.com","password":"topsecret123"}`,
 		http.StatusOK)
-	defer loginResp.Body.Close()
+	defer func() { _ = loginResp.Body.Close() }()
 	var loginBody struct {
 		User struct{ ID string } `json:"user"`
 	}
@@ -103,7 +103,7 @@ func TestEndToEndRegisterLoginCreateChannel(t *testing.T) {
 	if err != nil || meResp.StatusCode != 200 {
 		t.Fatalf("/me err=%v status=%d", err, meResp.StatusCode)
 	}
-	meResp.Body.Close()
+	_ = meResp.Body.Close()
 
 	// Create workspace.
 	wsReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/workspaces",
@@ -116,7 +116,7 @@ func TestEndToEndRegisterLoginCreateChannel(t *testing.T) {
 	}
 	var ws struct{ ID string }
 	_ = json.NewDecoder(wsResp.Body).Decode(&ws)
-	wsResp.Body.Close()
+	_ = wsResp.Body.Close()
 
 	// Create channel.
 	chReq, _ := http.NewRequest(http.MethodPost,
@@ -132,7 +132,7 @@ func TestEndToEndRegisterLoginCreateChannel(t *testing.T) {
 		Channel struct{ ID string } `json:"channel"`
 	}
 	_ = json.NewDecoder(chResp.Body).Decode(&chBody)
-	chResp.Body.Close()
+	_ = chResp.Body.Close()
 
 	if chBody.Channel.ID == "" {
 		t.Fatal("channel id empty")
@@ -229,7 +229,7 @@ func TestMockDaemonViewSyncRoundTrip(t *testing.T) {
 		t.Errorf("final cursor=%d want 3", cur)
 	}
 
-	conn.Close()
+	_ = conn.Close()
 }
 
 // TestMockDaemonCreateChannelACK exercises the placement path:
@@ -387,7 +387,7 @@ func TestViewSyncGapDrainFanOut(t *testing.T) {
 			t.Errorf("fan-out[%d].seq=%d want %d (full=%v)", i, obs[i].Seq, w, seqList(obs))
 		}
 	}
-	conn.Close()
+	_ = conn.Close()
 }
 
 // TestReclaimDaemonIDMismatch is the FIX-T4 regression: a daemonbus
@@ -479,7 +479,7 @@ func TestReclaimDaemonIDMismatch(t *testing.T) {
 		t.Errorf("post-attack daemon_id=%q want owner", got.DaemonID)
 	}
 
-	conn.Close()
+	_ = conn.Close()
 }
 
 // ----------------------------------------------------------------------
@@ -492,7 +492,7 @@ func post(t *testing.T, c *http.Client, url, body string, wantStatus int) {
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != wantStatus {
 		t.Fatalf("POST %s status=%d want %d", url, resp.StatusCode, wantStatus)
 	}
@@ -505,7 +505,7 @@ func postRaw(t *testing.T, c *http.Client, url, body string, wantStatus int) *ht
 		t.Fatalf("POST %s: %v", url, err)
 	}
 	if resp.StatusCode != wantStatus {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("POST %s status=%d want %d", url, resp.StatusCode, wantStatus)
 	}
 	return resp

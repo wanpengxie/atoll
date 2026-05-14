@@ -53,7 +53,7 @@ func (s *Service) ListChannelMembers(ctx context.Context, channelID string) ([]C
 	if err != nil {
 		return nil, fmt.Errorf("list members: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []ChannelMember
 	for rows.Next() {
 		var m ChannelMember

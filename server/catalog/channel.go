@@ -172,7 +172,7 @@ func (s *Service) ListChannels(ctx context.Context, workspaceID, userID string) 
 	if err != nil {
 		return nil, fmt.Errorf("list channels: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []Channel
 	for rows.Next() {
 		var c Channel

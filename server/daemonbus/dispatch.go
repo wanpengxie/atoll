@@ -62,7 +62,7 @@ type HeartbeatPayload struct {
 // that frame_type it runs after the ack-match (so the gateway can
 // observe ACK arrival even when nothing is waiting).
 func (c *Connection) Run(ctx context.Context, h Handlers) error {
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	for {
 		frame, err := c.transport.ReadFrame(ctx)
