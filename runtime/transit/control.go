@@ -74,9 +74,25 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	}, nil
 }
 
+// ErrStaleEpoch is returned by Dispatch when a frame's
+// DaemonConnectionEpoch does not match the daemon's current epoch.
+// FIX-T8: a frame from an older WS session must not be applied after
+// the daemon reconnects with a fresh epoch (L2 §9.4). The Loop swallows
+// this sentinel — it is observable, not fatal.
+var ErrStaleEpoch = errors.New("transit: stale connection epoch")
+
 // Dispatch one incoming frame to the right handler. Returns the handler
 // error (or nil) so the caller (Loop) can decide whether to disconnect.
 func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error {
+	// FIX-T8 — drop frames whose epoch does not match the current
+	// daemonbus connection epoch (L2 §9.4 stale-frame guard). Epoch 0
+	// means "client never connected" — Loop only fires after Connect,
+	// so a zero current-epoch is treated as "accept anything", keeping
+	// the test stub that ignores epoch alive without weakening prod.
+	if cur := d.client.Epoch(); cur != 0 && frame.DaemonConnectionEpoch != cur {
+		return ErrStaleEpoch
+	}
+
 	switch frame.FrameType {
 	case daemonbus.FrameTypeViewsyncAck:
 		if d.handlers.OnViewsyncAck == nil {
@@ -187,6 +203,11 @@ func (d *Dispatcher) Loop(ctx context.Context) error {
 			// unless the context is dead.
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return err
+			}
+			// FIX-T8: stale-epoch frames are an expected race during
+			// reconnect — drop without invoking Unknown.
+			if errors.Is(err, ErrStaleEpoch) {
+				continue
 			}
 			// Surface for observability but continue.
 			if d.handlers.Unknown != nil {

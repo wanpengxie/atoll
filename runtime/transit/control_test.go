@@ -371,12 +371,13 @@ func TestDispatcher_WriteMessageRoundTrip(t *testing.T) {
 		done <- dispatcher.Dispatch(ctx, frame)
 	}()
 
-	// Server sends control.write_message.
+	// Server sends control.write_message. Use the daemon's current
+	// connection epoch so the FIX-T8 stale-epoch guard accepts it.
 	body := newWriteMessageBody(t, nil, 9_900)
 	server := bus.ServerSide()
 	reqFrame, _ := transit.Encode("frame-srv-1",
 		daemonbus.FrameTypeControlWriteMessage,
-		"server", 0, 0, body)
+		"server", client.Epoch(), 0, body)
 	if err := server.SendToDaemon(ctx, reqFrame); err != nil {
 		t.Fatal(err)
 	}

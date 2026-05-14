@@ -211,9 +211,11 @@ func TestDaemon_Phase3_DispatchesWriteMessage(t *testing.T) {
 			TS:         ts,
 		},
 	}
+	// FIX-T8: stamp the daemon's current connection epoch so the
+	// dispatcher's stale-frame guard accepts the frame.
 	reqFrame, _ := transit.Encode("frame-srv-write",
 		daemonbus.FrameTypeControlWriteMessage,
-		"server", 0, ts, body)
+		"server", d.Transit().Epoch(), ts, body)
 	if err := server.SendToDaemon(ctx, reqFrame); err != nil {
 		t.Fatal(err)
 	}

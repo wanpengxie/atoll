@@ -289,7 +289,7 @@ func TestDispatcher_ResyncRoundTrip(t *testing.T) {
 	// Server sends resync_request.
 	server := bus.ServerSide()
 	req := viewsync.ResyncRequest{ChannelID: testChannelID, SinceSeq: 1, UntilSeq: 1}
-	reqFrame, _ := transit.Encode("frame-X", daemonbus.FrameTypeViewsyncResyncRequest, "server", 0, 0, req)
+	reqFrame, _ := transit.Encode("frame-X", daemonbus.FrameTypeViewsyncResyncRequest, "server", client.Epoch(), 0, req)
 	if err := server.SendToDaemon(ctx, reqFrame); err != nil {
 		t.Fatal(err)
 	}
