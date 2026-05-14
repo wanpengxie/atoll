@@ -141,7 +141,7 @@ func TestManager_FullRoundTrip(t *testing.T) {
 	const externalID = "EXT-RT-9001"
 	mod.onHandle = func(ctx context.Context, env *v4types.Envelope, mctx *ModuleContext) error {
 		// Track the request ↔ external mapping with a far-future deadline.
-		return mctx.Correlation.Track(ctx, env.ID, externalID, testT0+120_000)
+		return mctx.Correlation.Track(ctx, env.ID, externalID, env.Type, testT0+120_000)
 	}
 	mod.onExternalCallback = func(ctx context.Context, payload []byte, mctx *ModuleContext) error {
 		var cb struct {
@@ -151,7 +151,7 @@ func TestManager_FullRoundTrip(t *testing.T) {
 		if err := json.Unmarshal(payload, &cb); err != nil {
 			return err
 		}
-		req, ok, err := mctx.Correlation.Recover(ctx, cb.ExternalID)
+		req, _, ok, err := mctx.Correlation.Recover(ctx, cb.ExternalID)
 		if err != nil {
 			return err
 		}

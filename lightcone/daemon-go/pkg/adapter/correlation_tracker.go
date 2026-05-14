@@ -51,11 +51,19 @@ const DefaultGCPeriod = 30 * time.Second
 // Composite primary key (adapter_name, external_id) prevents two
 // adapters from clobbering each other's correlation entries when they
 // happen to mint identical external ids.
+//
+// `request_type` (T111 R2-FIX-5): the envelope.type of the inbound
+// request that minted the external_id. The xhs adapter uses it to pick
+// a per-type response-key allow-list in OnExternalCallback (otherwise a
+// cross-type stowaway field passes the union allow-list and the
+// resulting response gets rejected at harness Step 6 → silent timeout).
+// Adapters that don't care about per-type policy can pass "".
 const CorrelationTrackerDDL = `
 CREATE TABLE IF NOT EXISTS adapter_correlation (
   adapter_name  TEXT NOT NULL,
   external_id   TEXT NOT NULL,
   request_id    TEXT NOT NULL,
+  request_type  TEXT NOT NULL DEFAULT '',
   deadline_ms   INTEGER NOT NULL,
   created_at_ms INTEGER NOT NULL,
   PRIMARY KEY (adapter_name, external_id)
@@ -66,6 +74,44 @@ CREATE INDEX IF NOT EXISTS ix_adapter_correlation_deadline
   ON adapter_correlation(adapter_name, deadline_ms);
 `
 
+// ensureRequestTypeColumn brings a pre-existing adapter_correlation
+// table forward to the T111 schema (adds request_type column when
+// missing). sqlite does not support `ALTER TABLE ... ADD COLUMN IF NOT
+// EXISTS`, so we PRAGMA-probe before issuing the ALTER. The framework
+// runs this once on Install right after the CREATE-IF-NOT-EXISTS pass.
+func ensureRequestTypeColumn(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(adapter_correlation)`)
+	if err != nil {
+		return fmt.Errorf("adapter: pragma table_info: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("adapter: scan pragma row: %w", err)
+		}
+		if name == "request_type" {
+			return nil // already present
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("adapter: iter pragma rows: %w", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE adapter_correlation ADD COLUMN request_type TEXT NOT NULL DEFAULT ''`,
+	); err != nil {
+		return fmt.Errorf("adapter: alter add request_type: %w", err)
+	}
+	return nil
+}
+
 // CorrelationTracker is the F2 surface adapters call from Handle (to
 // register an external_id ↔ request_id pair) and OnExternalCallback
 // (Recover the request_id from the external_id).
@@ -74,16 +120,22 @@ CREATE INDEX IF NOT EXISTS ix_adapter_correlation_deadline
 // serialises access via an internal mutex + sqlite IMMEDIATE writes.
 type CorrelationTracker interface {
 	// Track records the mapping (request_id ↔ external_id) with a
-	// deadline (wall-clock ms). Repeated Track for the same
-	// (adapter, external_id) overwrites the row — adapters that
-	// re-issue an external call after a retry get a fresh deadline.
-	Track(ctx context.Context, requestID, externalID string, deadlineMs int64) error
+	// deadline (wall-clock ms) and the request's envelope.type.
+	// Repeated Track for the same (adapter, external_id) overwrites
+	// the row — adapters that re-issue an external call after a retry
+	// get a fresh deadline. requestType is the L4 §2.1 envelope.type
+	// (e.g. "xhs.publish"); adapters that don't care about per-type
+	// policy can pass "" (the response-side filter then falls back to
+	// the most-restrictive allow-list — T111 R2-FIX-5).
+	Track(ctx context.Context, requestID, externalID, requestType string, deadlineMs int64) error
 
-	// Recover maps an external_id back to its request_id. Returns
-	// ("", false, nil) when no entry exists (the caller treats the
-	// callback as orphan per L1 §6.5). Errors are infrastructure-level
-	// (sql / driver).
-	Recover(ctx context.Context, externalID string) (string, bool, error)
+	// Recover maps an external_id back to its (request_id, request_type).
+	// Returns ("", "", false, nil) when no entry exists (the caller
+	// treats the callback as orphan per L1 §6.5). Errors are
+	// infrastructure-level (sql / driver). request_type is "" when
+	// the original Track was called with "" (legacy adapters / rows
+	// written before T111).
+	Recover(ctx context.Context, externalID string) (requestID, requestType string, ok bool, err error)
 
 	// Forget drops any entries indexed by request_id. The framework
 	// calls it from Respond after a terminal write commits so subsequent
@@ -113,8 +165,9 @@ type correlationTracker struct {
 // correlationEntry is the in-memory mirror of one
 // adapter_correlation row.
 type correlationEntry struct {
-	requestID string
-	deadline  int64
+	requestID   string
+	requestType string
+	deadline    int64
 }
 
 // newCorrelationTracker constructs a tracker bound to db + adapter
@@ -143,8 +196,10 @@ func newCorrelationTracker(
 	}
 }
 
-// Track upserts the (request, external, deadline) row + cache entry.
-func (t *correlationTracker) Track(ctx context.Context, requestID, externalID string, deadlineMs int64) error {
+// Track upserts the (request, external, type, deadline) row + cache
+// entry. requestType is the request's envelope.type (see interface
+// docstring); pass "" when per-type policy is irrelevant.
+func (t *correlationTracker) Track(ctx context.Context, requestID, externalID, requestType string, deadlineMs int64) error {
 	if strings.TrimSpace(requestID) == "" {
 		return errors.New("adapter: Track requestID is required")
 	}
@@ -157,13 +212,14 @@ func (t *correlationTracker) Track(ctx context.Context, requestID, externalID st
 	now := t.clock()
 	_, err := t.db.ExecContext(ctx,
 		`INSERT INTO adapter_correlation
-		   (adapter_name, external_id, request_id, deadline_ms, created_at_ms)
-		 VALUES (?, ?, ?, ?, ?)
+		   (adapter_name, external_id, request_id, request_type, deadline_ms, created_at_ms)
+		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(adapter_name, external_id) DO UPDATE SET
 		   request_id = excluded.request_id,
+		   request_type = excluded.request_type,
 		   deadline_ms = excluded.deadline_ms,
 		   created_at_ms = excluded.created_at_ms`,
-		t.adapterName, externalID, requestID, deadlineMs, now,
+		t.adapterName, externalID, requestID, requestType, deadlineMs, now,
 	)
 	if err != nil {
 		return fmt.Errorf("adapter: track upsert: %w", err)
@@ -177,49 +233,52 @@ func (t *correlationTracker) Track(ctx context.Context, requestID, externalID st
 		delete(t.cache, prevExt)
 	}
 	t.cache[externalID] = &correlationEntry{
-		requestID: requestID,
-		deadline:  deadlineMs,
+		requestID:   requestID,
+		requestType: requestType,
+		deadline:    deadlineMs,
 	}
 	t.byRequest[requestID] = externalID
 	return nil
 }
 
-// Recover returns the request_id mapped to externalID, hitting the
-// in-memory cache first and falling back to sqlite on miss. Sets the
-// cache entry on a hit so future Recover calls stay in memory.
-func (t *correlationTracker) Recover(ctx context.Context, externalID string) (string, bool, error) {
+// Recover returns the (request_id, request_type) mapped to externalID,
+// hitting the in-memory cache first and falling back to sqlite on miss.
+// Sets the cache entry on a hit so future Recover calls stay in memory.
+func (t *correlationTracker) Recover(ctx context.Context, externalID string) (string, string, bool, error) {
 	if strings.TrimSpace(externalID) == "" {
-		return "", false, nil
+		return "", "", false, nil
 	}
 	t.mu.Lock()
 	if entry, ok := t.cache[externalID]; ok {
-		out := entry.requestID
+		req := entry.requestID
+		typ := entry.requestType
 		t.mu.Unlock()
-		return out, true, nil
+		return req, typ, true, nil
 	}
 	t.mu.Unlock()
 
 	row := t.db.QueryRowContext(ctx,
-		`SELECT request_id, deadline_ms FROM adapter_correlation
+		`SELECT request_id, request_type, deadline_ms FROM adapter_correlation
 		  WHERE adapter_name = ? AND external_id = ?`,
 		t.adapterName, externalID,
 	)
-	var requestID string
+	var requestID, requestType string
 	var deadline int64
-	if err := row.Scan(&requestID, &deadline); err != nil {
+	if err := row.Scan(&requestID, &requestType, &deadline); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", false, nil
+			return "", "", false, nil
 		}
-		return "", false, fmt.Errorf("adapter: recover scan: %w", err)
+		return "", "", false, fmt.Errorf("adapter: recover scan: %w", err)
 	}
 	t.mu.Lock()
 	t.cache[externalID] = &correlationEntry{
-		requestID: requestID,
-		deadline:  deadline,
+		requestID:   requestID,
+		requestType: requestType,
+		deadline:    deadline,
 	}
 	t.byRequest[requestID] = externalID
 	t.mu.Unlock()
-	return requestID, true, nil
+	return requestID, requestType, true, nil
 }
 
 // Forget deletes every adapter_correlation row pointing at requestID

@@ -19,31 +19,31 @@ func TestCorrelationTracker_TrackRecoverForget(t *testing.T) {
 		nil, fixedClock(&clock), silentLogger())
 
 	ctx := context.Background()
-	if err := tr.Track(ctx, "req-1", "ext-1", testT0+10_000); err != nil {
+	if err := tr.Track(ctx, "req-1", "ext-1", "demo.type.one", testT0+10_000); err != nil {
 		t.Fatalf("Track: %v", err)
 	}
-	got, ok, err := tr.Recover(ctx, "ext-1")
+	got, gotType, ok, err := tr.Recover(ctx, "ext-1")
 	if err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
-	if !ok || got != "req-1" {
-		t.Fatalf("Recover('ext-1') = (%q, %v); want ('req-1', true)", got, ok)
+	if !ok || got != "req-1" || gotType != "demo.type.one" {
+		t.Fatalf("Recover('ext-1') = (%q, %q, %v); want ('req-1', 'demo.type.one', true)", got, gotType, ok)
 	}
 
 	// Re-track same external_id with a different request — overwrite.
-	if err := tr.Track(ctx, "req-2", "ext-1", testT0+20_000); err != nil {
+	if err := tr.Track(ctx, "req-2", "ext-1", "demo.type.two", testT0+20_000); err != nil {
 		t.Fatalf("Track overwrite: %v", err)
 	}
-	got, _, _ = tr.Recover(ctx, "ext-1")
-	if got != "req-2" {
-		t.Fatalf("after overwrite Recover('ext-1') = %q; want 'req-2'", got)
+	got, gotType, _, _ = tr.Recover(ctx, "ext-1")
+	if got != "req-2" || gotType != "demo.type.two" {
+		t.Fatalf("after overwrite Recover('ext-1') = (%q, %q); want ('req-2', 'demo.type.two')", got, gotType)
 	}
 
 	// Forget by request_id clears cache + row.
 	if err := tr.Forget(ctx, "req-2"); err != nil {
 		t.Fatalf("Forget: %v", err)
 	}
-	_, ok, _ = tr.Recover(ctx, "ext-1")
+	_, _, ok, _ = tr.Recover(ctx, "ext-1")
 	if ok {
 		t.Fatalf("after Forget Recover('ext-1') should be missing")
 	}
@@ -57,19 +57,19 @@ func TestCorrelationTracker_RecoverFromSQLiteAfterRestart(t *testing.T) {
 	clock := int64(testT0)
 	tr1 := newCorrelationTracker(db, "demo", testChannelID, testSystemID,
 		nil, fixedClock(&clock), silentLogger())
-	if err := tr1.Track(context.Background(), "req-r", "ext-r", testT0+1_000); err != nil {
+	if err := tr1.Track(context.Background(), "req-r", "ext-r", "demo.type.restart", testT0+1_000); err != nil {
 		t.Fatalf("Track: %v", err)
 	}
 
 	// Fresh tracker = simulates daemon restart with empty cache.
 	tr2 := newCorrelationTracker(db, "demo", testChannelID, testSystemID,
 		nil, fixedClock(&clock), silentLogger())
-	got, ok, err := tr2.Recover(context.Background(), "ext-r")
+	got, gotType, ok, err := tr2.Recover(context.Background(), "ext-r")
 	if err != nil {
 		t.Fatalf("Recover after restart: %v", err)
 	}
-	if !ok || got != "req-r" {
-		t.Fatalf("Recover after restart = (%q, %v); want ('req-r', true)", got, ok)
+	if !ok || got != "req-r" || gotType != "demo.type.restart" {
+		t.Fatalf("Recover after restart = (%q, %q, %v); want ('req-r', 'demo.type.restart', true)", got, gotType, ok)
 	}
 }
 
@@ -92,7 +92,7 @@ func TestCorrelationTracker_GCExpiresPastGrace(t *testing.T) {
 		"ext-c": testT0 + 600_000, // still live
 	}
 	for ext, dl := range deadlines {
-		if err := tr.Track(ctx, "req-"+ext, ext, dl); err != nil {
+		if err := tr.Track(ctx, "req-"+ext, ext, "demo.gc", dl); err != nil {
 			t.Fatalf("Track %s: %v", ext, err)
 		}
 	}
@@ -108,13 +108,13 @@ func TestCorrelationTracker_GCExpiresPastGrace(t *testing.T) {
 	}
 
 	// In-flight entry still recoverable.
-	got, ok, _ := tr.Recover(ctx, "ext-c")
+	got, _, ok, _ := tr.Recover(ctx, "ext-c")
 	if !ok || got != "req-ext-c" {
 		t.Fatalf("Recover('ext-c') after gc = (%q, %v); want ('req-ext-c', true)", got, ok)
 	}
 	// Expired entries gone.
 	for _, ext := range []string{"ext-a", "ext-b"} {
-		_, ok, _ := tr.Recover(ctx, ext)
+		_, _, ok, _ := tr.Recover(ctx, ext)
 		if ok {
 			t.Fatalf("Recover(%q) after gc should be missing", ext)
 		}
@@ -160,7 +160,7 @@ func TestCorrelationTracker_TrackValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := tr.Track(context.Background(), tc.requestID, tc.externalID, tc.deadlineMs)
+			err := tr.Track(context.Background(), tc.requestID, tc.externalID, "demo.type.validate", tc.deadlineMs)
 			if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
 				t.Fatalf("err = %v, want substring %q", err, tc.wantSubstr)
 			}
@@ -185,7 +185,7 @@ func TestCorrelationTracker_GCEmitDeterministicID(t *testing.T) {
 		DefaultHarnessWriter(deps), fixedClock(&clock), silentLogger())
 
 	ctx := context.Background()
-	if err := tr.Track(ctx, "req-x", "ext-x", testT0+1_000); err != nil {
+	if err := tr.Track(ctx, "req-x", "ext-x", "demo.dedupe", testT0+1_000); err != nil {
 		t.Fatalf("Track: %v", err)
 	}
 	atomic.StoreInt64(&clock, testT0+DefaultGCGraceMs+10_000)
@@ -195,7 +195,7 @@ func TestCorrelationTracker_GCEmitDeterministicID(t *testing.T) {
 	// Re-track the same (adapter, external) to make the row eligible
 	// for a second sweep at the same clock — verifies dedupe rather
 	// than insert-then-fail.
-	if err := tr.Track(ctx, "req-x", "ext-x", testT0+1_000); err != nil {
+	if err := tr.Track(ctx, "req-x", "ext-x", "demo.dedupe", testT0+1_000); err != nil {
 		t.Fatalf("Track 2: %v", err)
 	}
 	stats, err := tr.gc(ctx, atomic.LoadInt64(&clock), DefaultGCGraceMs)
@@ -216,6 +216,79 @@ func TestCorrelationTracker_GCEmitDeterministicID(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected 1 correlation_gc row, got %d", count)
+	}
+}
+
+// TestEnsureRequestTypeColumn_AddsColumnToLegacyTable covers the T111
+// upgrade path: a sqlite channel created before R2-FIX-5 has the old
+// adapter_correlation table without `request_type`. The helper must
+// PRAGMA-probe, detect the missing column, and ALTER TABLE ADD it.
+// Idempotent — a second call (or running it on a fresh DDL'd table)
+// must be a no-op.
+func TestEnsureRequestTypeColumn_AddsColumnToLegacyTable(t *testing.T) {
+	db, _ := openAdapterChannel(t)
+	ctx := context.Background()
+	// Legacy DDL (pre-T111) — no request_type column.
+	if _, err := db.ExecContext(ctx, `
+CREATE TABLE adapter_correlation (
+  adapter_name  TEXT NOT NULL,
+  external_id   TEXT NOT NULL,
+  request_id    TEXT NOT NULL,
+  deadline_ms   INTEGER NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (adapter_name, external_id)
+)`); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	// Seed a legacy row so we can assert ALTER preserves data + the new
+	// column defaults to '' on existing rows.
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO adapter_correlation
+		   (adapter_name, external_id, request_id, deadline_ms, created_at_ms)
+		 VALUES ('demo', 'ext-legacy', 'req-legacy', ?, ?)`,
+		testT0+10_000, testT0,
+	); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	if err := ensureRequestTypeColumn(ctx, db); err != nil {
+		t.Fatalf("ensureRequestTypeColumn (legacy): %v", err)
+	}
+	// Verify the column is present + the legacy row has '' default.
+	var requestType string
+	if err := db.QueryRowContext(ctx,
+		`SELECT request_type FROM adapter_correlation WHERE external_id='ext-legacy'`,
+	).Scan(&requestType); err != nil {
+		t.Fatalf("scan request_type: %v", err)
+	}
+	if requestType != "" {
+		t.Fatalf("legacy row request_type = %q; want '' default", requestType)
+	}
+	// Idempotency: second call on a now-already-migrated table is a no-op.
+	if err := ensureRequestTypeColumn(ctx, db); err != nil {
+		t.Fatalf("ensureRequestTypeColumn (idempotent): %v", err)
+	}
+
+	// And: a freshly-DDL'd table (T111 baseline) already has the column;
+	// the helper must still no-op without erroring.
+	db2, _ := openAdapterChannel(t)
+	if _, err := db2.ExecContext(ctx, CorrelationTrackerDDL); err != nil {
+		t.Fatalf("apply DDL (fresh): %v", err)
+	}
+	if err := ensureRequestTypeColumn(ctx, db2); err != nil {
+		t.Fatalf("ensureRequestTypeColumn (fresh): %v", err)
+	}
+
+	// Tracker built on the migrated DB stores + retrieves request_type
+	// end-to-end.
+	clock := int64(testT0)
+	tr := newCorrelationTracker(db, "demo", testChannelID, testSystemID,
+		nil, fixedClock(&clock), silentLogger())
+	if err := tr.Track(ctx, "req-new", "ext-new", "xhs.publish", testT0+1_000); err != nil {
+		t.Fatalf("Track post-migration: %v", err)
+	}
+	got, gotType, ok, err := tr.Recover(ctx, "ext-new")
+	if err != nil || !ok || got != "req-new" || gotType != "xhs.publish" {
+		t.Fatalf("Recover post-migration = (%q, %q, %v, %v); want ('req-new', 'xhs.publish', true, nil)", got, gotType, ok, err)
 	}
 }
 

@@ -222,8 +222,14 @@ func (m *Module) Handle(ctx context.Context, env *v4types.Envelope) error {
 	// Track the correlation before push: a callback arriving before
 	// PushCommand returns (rare but possible under load / retransmit)
 	// must already see a Recover hit.
+	//
+	// T111 R2-FIX-5: pass env.Type so Recover can return the request
+	// type to OnExternalCallback, which picks a per-type response-key
+	// allow-list (the union allow-list let cross-type stowaways slip
+	// past the adapter and the harness Step 6 schema validator then
+	// rejected them silently → F3 timeout instead of completion).
 	deadline := framePendingDeadline(env, m.mctx)
-	if err := m.mctx.Correlation.Track(ctx, env.ID, externalID, deadline); err != nil {
+	if err := m.mctx.Correlation.Track(ctx, env.ID, externalID, env.Type, deadline); err != nil {
 		return fmt.Errorf("xhs: track correlation: %w", err)
 	}
 
@@ -265,7 +271,7 @@ func (m *Module) OnExternalCallback(ctx context.Context, raw []byte) error {
 		return errors.New("xhs: callback missing correlation_id")
 	}
 
-	requestID, ok, err := m.mctx.Correlation.Recover(ctx, correlation)
+	requestID, requestType, ok, err := m.mctx.Correlation.Recover(ctx, correlation)
 	if err != nil {
 		return fmt.Errorf("xhs: recover correlation: %w", err)
 	}
@@ -279,6 +285,14 @@ func (m *Module) OnExternalCallback(ctx context.Context, raw []byte) error {
 	// Build the Respond payload. device_id always flows back via the
 	// payload (v4-message-definition §1.2.5 — sender.id stays
 	// tool:xhs-adapter; device identity lives in payload.device_id).
+	//
+	// NOTE (T111 known carry-over): xhs.cookie.sync's L4 response schema is
+	// {status, reason} only — strictly speaking the unconditional device_id
+	// fold violates `additionalProperties:false` for that one type. The
+	// production templates Step 6 will reject it; tests use a permissive
+	// schema. Cleaning this up is intentionally out of R2-FIX-5 scope; the
+	// fix here closes the stowaway/timeout regression for the 4 R/R types
+	// that DO declare a non-trivial response.
 	payload := map[string]any{}
 	if cb.DeviceID != "" {
 		payload["device_id"] = cb.DeviceID
@@ -287,20 +301,23 @@ func (m *Module) OnExternalCallback(ctx context.Context, raw []byte) error {
 	reason := ""
 	switch strings.ToLower(cb.Status) {
 	case "ok", "completed", "success":
-		// T105 FIX-5 (claude 98-4 major): the extension's `result`
-		// object used to be spread verbatim into the response payload,
-		// so any drift / typo / over-share polluted the type_registry
-		// response schema's field set. Explicit allow-list keeps the
-		// adapter the single source of truth on what can land in the
-		// response (union of L4 §2.2 response schemas across the 5
-		// xhs R/R types).
-		copyAllowedKeys(payload, cb.Result, allowedResultKeys)
+		// T111 R2-FIX-5 (claude 98-4 major + R2 major 6): pick a
+		// per-type allow-list keyed on the recovered request type.
+		// Union allow-listing let cross-type stowaways (e.g. a search
+		// callback echoing `note_id`) survive the adapter and then
+		// fail harness Step 6 — the correlation row was already
+		// consumed by Recover, so the request silently waited out the
+		// F3 default-timeout. Per-type filter pre-empts the schema
+		// violation: stowaway keys never reach Respond.
+		copyAllowedKeys(payload, cb.Result, resultAllowListFor(requestType))
 	case "error", "failed", "failure":
 		status = adapter.StatusFailed
 		reason = errorReason(cb.Error)
-		// T105 FIX-5: error path also uses a narrow allow-list; reason
-		// flows through RespondOptions.Reason, not the payload spread.
-		copyAllowedKeys(payload, cb.Error, allowedErrorKeys)
+		// T111 R2-FIX-5: error path is also per-type. Only xhs.publish's
+		// failed response schema declares `retry_after`; the other types
+		// reject it. `reason` flows through RespondOptions.Reason, not
+		// the payload spread.
+		copyAllowedKeys(payload, cb.Error, errorAllowListFor(requestType))
 	default:
 		status = adapter.StatusFailed
 		reason = "callback_status_unknown"
@@ -317,40 +334,94 @@ func (m *Module) OnExternalCallback(ctx context.Context, raw []byte) error {
 	return err
 }
 
-// allowedResultKeys is the union of L4 §2.2 response schema fields the
-// 5 xhs request/response types declare on top of the {status, reason}
-// pair. Used by OnExternalCallback to filter the extension's `result`
-// map so a misbehaving / over-sharing extension cannot inject keys the
-// type_registry schema does not declare (T105 FIX-5, claude 98-4
-// major).
+// allowedResultKeysByType maps each xhs request type to the exact set
+// of `result` keys the L4 §2.2 response schema declares for that type
+// (excluding `status`/`reason`, which the adapter sets directly, and
+// `device_id`, which is folded unconditionally by the callback handler
+// — see the carry-over note in OnExternalCallback).
 //
-// Per-type field origins:
+// T111 R2-FIX-5 (R2 major 6): the predecessor `allowedResultKeys` was a
+// union of all 5 schemas, which let cross-type stowaway fields (e.g. a
+// search callback echoing `note_id`) reach Respond. The harness Step 6
+// validator would then reject the over-broad payload — but only AFTER
+// Recover had consumed the correlation row, leaving the request to time
+// out via F3 rather than completing. Per-type filtering closes the
+// regression by dropping out-of-schema keys at the adapter boundary.
+//
+// Per-type field origins (L4 §2.2):
 //   - xhs.publish        -> note_id, url, device_id, retry_after
 //   - xhs.search         -> results
 //   - xhs.note.fetch     -> note
 //   - xhs.recent.fetch   -> notes
 //   - xhs.cookie.sync    -> (none beyond status/reason)
 //
-// device_id is in the union because the callback handler folds the URL
-// path's deviceId into the payload regardless of source.
-var allowedResultKeys = map[string]struct{}{
-	"note_id":     {},
-	"url":         {},
-	"device_id":   {},
-	"retry_after": {},
-	"results":     {},
-	"note":        {},
-	"notes":       {},
+// Unknown / empty request types fall through to the most-restrictive
+// allow-list (empty set), so a recovered legacy row (request_type='')
+// or a future closed-set drift never lets stowaways slip past.
+var allowedResultKeysByType = map[string]map[string]struct{}{
+	TypePublish: {
+		"note_id":     {},
+		"url":         {},
+		"device_id":   {},
+		"retry_after": {},
+	},
+	TypeSearch: {
+		"results": {},
+	},
+	TypeNoteFetch: {
+		"note": {},
+	},
+	TypeRecentFetch: {
+		"notes": {},
+	},
+	TypeCookieSync: {},
 }
 
-// allowedErrorKeys is the failure-path allow-list. `reason` flows
-// through RespondOptions.Reason (not via spread), so the only field a
-// failed callback contributes to the response payload top-level is the
-// optional retry hint. device_id is allowed because the callback
-// handler unconditionally folds it into the payload.
-var allowedErrorKeys = map[string]struct{}{
-	"retry_after": {},
-	"device_id":   {},
+// allowedErrorKeysByType is the failure-path per-type allow-list.
+// `reason` flows through RespondOptions.Reason (not via spread).
+// `retry_after` is declared only on xhs.publish's failed response
+// schema; every other type's failed schema is {status, reason} only.
+// `device_id` is allowed across the board because the callback handler
+// unconditionally folds it into the payload (see the cookie.sync
+// carry-over note in OnExternalCallback).
+var allowedErrorKeysByType = map[string]map[string]struct{}{
+	TypePublish: {
+		"retry_after": {},
+		"device_id":   {},
+	},
+	TypeSearch: {
+		"device_id": {},
+	},
+	TypeNoteFetch: {
+		"device_id": {},
+	},
+	TypeRecentFetch: {
+		"device_id": {},
+	},
+	TypeCookieSync: {
+		"device_id": {},
+	},
+}
+
+// resultAllowListFor returns the per-type result allow-list, or the
+// empty set when the type is unknown / blank (most-restrictive default
+// — see allowedResultKeysByType docstring).
+func resultAllowListFor(requestType string) map[string]struct{} {
+	if v, ok := allowedResultKeysByType[requestType]; ok {
+		return v
+	}
+	return map[string]struct{}{}
+}
+
+// errorAllowListFor returns the per-type error allow-list, falling back
+// to a minimal {device_id} set when the type is unknown / blank — so a
+// failed terminal at least carries the device identity the framework
+// already folded into the payload.
+func errorAllowListFor(requestType string) map[string]struct{} {
+	if v, ok := allowedErrorKeysByType[requestType]; ok {
+		return v
+	}
+	return map[string]struct{}{"device_id": {}}
 }
 
 // copyAllowedKeys copies entries from src to dst whose key is present

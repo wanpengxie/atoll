@@ -783,6 +783,289 @@ func TestOnExternalCallback_WhitelistsErrorKeys(t *testing.T) {
 	}
 }
 
+// TestOnExternalCallback_PerTypeResultAllowList is the T111 R2-FIX-5
+// regression test for R2 major 6 (callback whitelist union → cross-type
+// stowaway → silent timeout).
+//
+// Setup: one request per request/response type, each gets a callback
+// carrying a STOWAWAY key that belongs to a DIFFERENT type's schema.
+// Pre-fix, the union allow-list let the stowaway through; the harness
+// Step 6 validator then rejected the response (the per-type
+// `additionalProperties:false` schemas in registry/templates.go don't
+// allow cross-type fields), the correlation row was already consumed
+// by Recover, and the request silently timed out via F3.
+//
+// Post-fix, the adapter selects the allow-list by the recovered
+// request_type, so the stowaway is dropped at the adapter boundary
+// and the response payload validates against its own schema.
+//
+// Note on test schemas: openXhsChannel installs `additionalProperties:
+// true` response schemas so the harness accepts our assertions about
+// what the adapter actually emits (we want to verify the adapter
+// filter, not re-test the harness validator). The production
+// `registry/templates.go` schemas remain `additionalProperties:false`
+// — the per-type filter is what keeps those schemas satisfied.
+func TestOnExternalCallback_PerTypeResultAllowList(t *testing.T) {
+	cases := []struct {
+		name        string
+		typ         string
+		payload     string
+		// result is the extension callback body's result object — must
+		// carry at least one allowed key + one stowaway from another
+		// type's schema, plus a couple of obviously-foreign fields.
+		result string
+		// expectPresent: keys that MUST survive the per-type filter.
+		expectPresent []string
+		// expectAbsent: keys that MUST NOT survive (cross-type stowaways
+		// + unknown fields).
+		expectAbsent []string
+	}{
+		{
+			name:    "publish-rejects-search-recent-note-stowaways",
+			typ:     TypePublish,
+			payload: `{"title":"t","content":"c","device_id":"dev-pri-001"}`,
+			result: `{
+			  "note_id":"n1",
+			  "url":"https://xhs/n1",
+			  "retry_after":30,
+			  "results":[{"id":"stowaway"}],
+			  "note":{"stowaway":true},
+			  "notes":[{"id":"stowaway"}],
+			  "secret":"leak"
+			}`,
+			expectPresent: []string{"note_id", "url", "retry_after"},
+			expectAbsent:  []string{"results", "note", "notes", "secret"},
+		},
+		{
+			name:    "search-rejects-publish-note-stowaways",
+			typ:     TypeSearch,
+			payload: `{"query":"q"}`,
+			result: `{
+			  "results":[{"id":"r1"}],
+			  "note_id":"stowaway",
+			  "url":"https://stowaway",
+			  "retry_after":99,
+			  "note":{"stowaway":true},
+			  "notes":[{"id":"stowaway"}],
+			  "cookie":"super-secret"
+			}`,
+			expectPresent: []string{"results"},
+			expectAbsent:  []string{"note_id", "url", "retry_after", "note", "notes", "cookie"},
+		},
+		{
+			name:    "note-fetch-rejects-publish-search-stowaways",
+			typ:     TypeNoteFetch,
+			payload: `{"note_id":"n42"}`,
+			result: `{
+			  "note":{"id":"n42","content":"hello"},
+			  "note_id":"stowaway",
+			  "url":"https://stowaway",
+			  "results":[{"id":"stowaway"}],
+			  "notes":[{"id":"stowaway"}],
+			  "leak":"yes"
+			}`,
+			expectPresent: []string{"note"},
+			expectAbsent:  []string{"note_id", "url", "results", "notes", "leak"},
+		},
+		{
+			name:    "recent-fetch-rejects-publish-search-note-stowaways",
+			typ:     TypeRecentFetch,
+			payload: `{"limit":5}`,
+			result: `{
+			  "notes":[{"id":"r1"},{"id":"r2"}],
+			  "note":{"stowaway":true},
+			  "note_id":"stowaway",
+			  "url":"https://stowaway",
+			  "results":[{"id":"stowaway"}],
+			  "retry_after":15
+			}`,
+			expectPresent: []string{"notes"},
+			expectAbsent:  []string{"note", "note_id", "url", "results", "retry_after"},
+		},
+		{
+			name:    "cookie-sync-rejects-every-result-key",
+			typ:     TypeCookieSync,
+			payload: `{}`,
+			result: `{
+			  "note_id":"stowaway",
+			  "url":"https://stowaway",
+			  "retry_after":99,
+			  "results":[{"id":"stowaway"}],
+			  "note":{"stowaway":true},
+			  "notes":[{"id":"stowaway"}],
+			  "anything":"else"
+			}`,
+			expectPresent: nil, // only status / reason / device_id (folded)
+			expectAbsent:  []string{"note_id", "url", "retry_after", "results", "note", "notes", "anything"},
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			db, deps := openXhsChannel(t)
+			requestID := "req-stowaway-" + tc.typ
+			externalID := "ext-stowaway-" + tc.typ
+			insertXhsRequest(t, db, requestID, tc.typ, tc.payload)
+			mock := NewMockDeviceClient()
+			mgr := newManagerWithMockExternalID(t, db, deps, mock, fixedExternalIDs(externalID))
+			dispatchEnvelope(t, mgr, requestID, tc.typ, tc.payload)
+
+			cb := []byte(`{"correlation_id":"` + externalID +
+				`","device_id":"dev-pri-001","status":"ok","result":` + tc.result + `}`)
+			if err := mgr.OnExternalCallback(context.Background(), AdapterName, cb); err != nil {
+				t.Fatalf("OnExternalCallback: %v", err)
+			}
+			payload, _, ok := readResponse(t, db, requestID)
+			if !ok {
+				t.Fatalf("no terminal response written for %s", tc.typ)
+			}
+			var got map[string]any
+			if err := json.Unmarshal([]byte(payload), &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got["status"] != "completed" {
+				t.Fatalf("status = %v; want completed", got["status"])
+			}
+			// device_id fold is unconditional — verify it landed so we
+			// catch a future regression that breaks the carry-over.
+			if got["device_id"] != "dev-pri-001" {
+				t.Fatalf("device_id fold missing; got %v", got["device_id"])
+			}
+			for _, k := range tc.expectPresent {
+				if _, has := got[k]; !has {
+					t.Fatalf("expected key %q present in payload, got %s", k, payload)
+				}
+			}
+			for _, k := range tc.expectAbsent {
+				if v, has := got[k]; has {
+					t.Fatalf("stowaway key %q leaked into payload: %v", k, v)
+				}
+			}
+		})
+	}
+}
+
+// TestOnExternalCallback_PerTypeErrorAllowList mirrors the result-side
+// stowaway defense on the failed path. Only xhs.publish's failed
+// response schema declares `retry_after`; the other 4 types' failed
+// schemas are {status, reason} only. The adapter must drop
+// retry_after on the non-publish types so the resulting response
+// validates against its per-type schema.
+//
+// `reason` flows through RespondOptions.Reason (not via spread), so we
+// assert it landed via that path. `device_id` fold is unconditional
+// (carry-over, see OnExternalCallback note).
+func TestOnExternalCallback_PerTypeErrorAllowList(t *testing.T) {
+	cases := []struct {
+		name             string
+		typ              string
+		payload          string
+		errorObj         string
+		expectRetryAfter bool
+	}{
+		{
+			name:             "publish-keeps-retry-after",
+			typ:              TypePublish,
+			payload:          `{}`,
+			errorObj:         `{"reason":"login_expired","retry_after":30,"stack":"leak"}`,
+			expectRetryAfter: true,
+		},
+		{
+			name:             "search-drops-retry-after",
+			typ:              TypeSearch,
+			payload:          `{"query":"q"}`,
+			errorObj:         `{"reason":"rate_limited","retry_after":30,"trace":"leak"}`,
+			expectRetryAfter: false,
+		},
+		{
+			name:             "note-fetch-drops-retry-after",
+			typ:              TypeNoteFetch,
+			payload:          `{"note_id":"n42"}`,
+			errorObj:         `{"reason":"not_found","retry_after":30,"trace":"leak"}`,
+			expectRetryAfter: false,
+		},
+		{
+			name:             "recent-fetch-drops-retry-after",
+			typ:              TypeRecentFetch,
+			payload:          `{"limit":5}`,
+			errorObj:         `{"reason":"throttled","retry_after":30,"trace":"leak"}`,
+			expectRetryAfter: false,
+		},
+		{
+			name:             "cookie-sync-drops-retry-after",
+			typ:              TypeCookieSync,
+			payload:          `{}`,
+			errorObj:         `{"reason":"cookie_expired","retry_after":30,"trace":"leak"}`,
+			expectRetryAfter: false,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			db, deps := openXhsChannel(t)
+			requestID := "req-err-stowaway-" + tc.typ
+			externalID := "ext-err-stowaway-" + tc.typ
+			insertXhsRequest(t, db, requestID, tc.typ, tc.payload)
+			mock := NewMockDeviceClient()
+			mgr := newManagerWithMockExternalID(t, db, deps, mock, fixedExternalIDs(externalID))
+			dispatchEnvelope(t, mgr, requestID, tc.typ, tc.payload)
+
+			cb := []byte(`{"correlation_id":"` + externalID +
+				`","device_id":"dev-pri-001","status":"error","error":` + tc.errorObj + `}`)
+			if err := mgr.OnExternalCallback(context.Background(), AdapterName, cb); err != nil {
+				t.Fatalf("OnExternalCallback: %v", err)
+			}
+			payload, _, ok := readResponse(t, db, requestID)
+			if !ok {
+				t.Fatalf("no terminal response written for %s", tc.typ)
+			}
+			var got map[string]any
+			if err := json.Unmarshal([]byte(payload), &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got["status"] != "failed" {
+				t.Fatalf("status = %v; want failed", got["status"])
+			}
+			if got["device_id"] != "dev-pri-001" {
+				t.Fatalf("device_id fold missing; got %v", got["device_id"])
+			}
+			if _, leak := got["stack"]; leak {
+				t.Fatalf("stack leaked: %v", got["stack"])
+			}
+			if _, leak := got["trace"]; leak {
+				t.Fatalf("trace leaked: %v", got["trace"])
+			}
+			_, hasRetry := got["retry_after"]
+			if tc.expectRetryAfter && !hasRetry {
+				t.Fatalf("expected retry_after to survive for %s; payload=%s", tc.typ, payload)
+			}
+			if !tc.expectRetryAfter && hasRetry {
+				t.Fatalf("retry_after should have been dropped for %s; payload=%s", tc.typ, payload)
+			}
+		})
+	}
+}
+
+// TestOnExternalCallback_UnknownRequestTypeFallsBackToEmptyAllowList
+// guards the fallback path: if the recovered request_type is empty
+// (e.g. an upgraded sqlite row from before T111) or doesn't match the
+// closed set, every result key must be dropped (most-restrictive
+// default) so a stowaway can't slip through during the upgrade window.
+func TestOnExternalCallback_UnknownRequestTypeFallsBackToEmptyAllowList(t *testing.T) {
+	if v := resultAllowListFor(""); len(v) != 0 {
+		t.Fatalf("empty request_type allow-list = %v; want empty", v)
+	}
+	if v := resultAllowListFor("xhs.future.type.not.yet.registered"); len(v) != 0 {
+		t.Fatalf("unknown request_type allow-list = %v; want empty", v)
+	}
+	// errorAllowListFor still passes device_id so the failed terminal
+	// keeps the framework-folded identity.
+	v := errorAllowListFor("")
+	if _, ok := v["device_id"]; !ok || len(v) != 1 {
+		t.Fatalf("empty request_type error allow-list = %v; want {device_id}", v)
+	}
+}
+
 // TestRegister_ProvidesFactory documents the init-time Register hook
 // so future daemon main wiring can rely on it.
 func TestRegister_ProvidesFactory(t *testing.T) {

@@ -232,6 +232,13 @@ func (m *Manager) Install(ctx context.Context) error {
 	if _, err := m.cfg.DB.ExecContext(ctx, CorrelationTrackerDDL); err != nil {
 		return fmt.Errorf("adapter: apply correlation DDL: %w", err)
 	}
+	// T111 R2-FIX-5: bring older adapter_correlation tables forward.
+	// sqlite has no `ADD COLUMN IF NOT EXISTS`, so the helper PRAGMA-probes
+	// then ADDs only when the column is missing — idempotent on fresh +
+	// upgraded channels alike.
+	if err := ensureRequestTypeColumn(ctx, m.cfg.DB); err != nil {
+		return fmt.Errorf("adapter: migrate correlation request_type: %w", err)
+	}
 
 	// Deterministic install order (name asc) so log + reject sequencing
 	// stays reproducible across runs.
