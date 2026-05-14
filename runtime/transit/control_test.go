@@ -224,8 +224,8 @@ func TestWriteMessageHandler_ReplayWindow(t *testing.T) {
 	if ack.Accepted {
 		t.Fatal("expected reject on stale ts")
 	}
-	if ack.RejectReason != transit.RejectReasonAuthFailed {
-		t.Errorf("RejectReason=%q want auth_failed", ack.RejectReason)
+	if ack.RejectReason != transit.RejectReasonReplayWindow {
+		t.Errorf("RejectReason=%q want replay_window_expired", ack.RejectReason)
 	}
 	if chain.lastEnv != nil {
 		t.Error("chain must not run when replay window fails")

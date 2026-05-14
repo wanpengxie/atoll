@@ -102,6 +102,18 @@ const (
 	// registry IO error, canonical-hash failure, store error escaping
 	// the harness chain, etc.
 	RejectReasonInternal = "internal"
+
+	// RejectReasonReplayWindow indicates |now - human_caller.ts| exceeded
+	// the configured replay window. FIX-T8: previously folded into
+	// `auth_failed`; split out so log triage can tell clock-skew /
+	// stale-credential apart from HMAC mismatch.
+	RejectReasonReplayWindow = "replay_window_expired"
+
+	// RejectReasonReplayNonce indicates the (channel, nonce) tuple was
+	// seen within the replay window. FIX-T8 — prevents an attacker who
+	// captured a valid HumanCaller token from re-submitting it inside
+	// the window.
+	RejectReasonReplayNonce = "replay_nonce_seen"
 )
 
 // HarnessChain is the minimal harness Chain shape the WriteMessage
@@ -174,6 +186,11 @@ type WriteMessageHandlerConfig struct {
 // `control.write_message_ack`.
 type WriteMessageHandler struct {
 	cfg WriteMessageHandlerConfig
+
+	// nonceCache is the FIX-T8 per-channel replay guard. It is non-nil
+	// only when ReplayWindow > 0; entries expire after one window
+	// (older nonces would already be cut by the ts check).
+	nonceCache *nonceCache
 }
 
 // NewWriteMessageHandler builds a WriteMessageHandler.
@@ -187,7 +204,11 @@ func NewWriteMessageHandler(cfg WriteMessageHandlerConfig) (*WriteMessageHandler
 	if cfg.NowMs == nil {
 		cfg.NowMs = func() int64 { return time.Now().UnixMilli() }
 	}
-	return &WriteMessageHandler{cfg: cfg}, nil
+	h := &WriteMessageHandler{cfg: cfg}
+	if cfg.ReplayWindow > 0 {
+		h.nonceCache = newNonceCache(cfg.ReplayWindow)
+	}
+	return h, nil
 }
 
 // Handle authenticates the HumanCaller token, fills in `sender` +
@@ -219,7 +240,10 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 		return ack
 	}
 
-	// 2. Optional replay-window check.
+	// 2. Optional replay-window check. FIX-T8: split clock-skew rejects
+	// (`replay_window_expired`) from the nonce-cache reject
+	// (`replay_nonce_seen`) so triage can tell stale-credentials apart
+	// from a deliberate replay attempt.
 	if h.cfg.ReplayWindow > 0 {
 		nowMs := h.cfg.NowMs()
 		delta := nowMs - body.HumanCaller.TS
@@ -227,8 +251,16 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 			delta = -delta
 		}
 		if time.Duration(delta)*time.Millisecond > h.cfg.ReplayWindow {
-			ack.RejectReason = RejectReasonAuthFailed
+			ack.RejectReason = RejectReasonReplayWindow
 			ack.RejectDetail = "human_caller ts outside replay window"
+			return ack
+		}
+		// Per-channel nonce LRU — reject re-use of the same nonce
+		// within one window. The cache is keyed by (channelID, nonce)
+		// and TTL-expires entries lazily.
+		if !h.nonceCache.observe(body.ChannelID, body.HumanCaller.Nonce, nowMs) {
+			ack.RejectReason = RejectReasonReplayNonce
+			ack.RejectDetail = "human_caller nonce already seen within replay window"
 			return ack
 		}
 	}
