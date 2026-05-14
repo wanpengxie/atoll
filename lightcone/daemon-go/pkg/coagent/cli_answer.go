@@ -10,11 +10,18 @@ import (
 	"github.com/coagent-ai/daemon-go/pkg/v4types"
 )
 
-// answerFlags lists the flags `coagent answer` accepts. parent /
-// correlation-id / audience are NOT in the set — answer derives them
-// from the looked-up request per L2 §3.4.3.
+// answerFlags lists the flags `coagent answer` accepts.
+//
+// FIX-6 §8 (codex t94a): --audience IS accepted. The §3.4.3
+// no-lookup binding path (daemon_rpc with no sqlite handle) requires
+// caller-supplied audience for the harness to anchor the response;
+// previously the flag was rejected by Parse so callers had no way to
+// satisfy that requirement. parent / correlation-id remain auto-filled
+// from the looked-up request per §3.4.3 — passing them via flags is
+// not part of the contract.
 var answerFlags = map[string]bool{
 	"type": true, "payload": true, "payload-file": true,
+	"audience": true,
 	"doc-refs": true, "expires-at": true,
 	"visibility": true, "sender-id": true, "channel-id": true,
 }

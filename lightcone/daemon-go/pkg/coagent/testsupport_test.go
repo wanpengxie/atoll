@@ -416,6 +416,9 @@ type stubBinding struct {
 	// send is invoked on each Send call. When nil, Send returns a
 	// canned success with empty fields.
 	send func(deps pkgharness.Deps) (*SendResult, error)
+	// captureEnv (optional) is invoked with the envelope passed to
+	// Send so tests can assert on the constructed envelope's fields.
+	captureEnv func(env *v4types.Envelope)
 	// lookupOK / lookupEnv control LookupRequest. Default returns
 	// (nil, false, nil).
 	lookupOK  bool
@@ -428,7 +431,10 @@ type stubBinding struct {
 	handlerErr   error
 }
 
-func (s *stubBinding) Send(_ context.Context, _ *v4types.Envelope, _ SendOptions) (*SendResult, error) {
+func (s *stubBinding) Send(_ context.Context, env *v4types.Envelope, _ SendOptions) (*SendResult, error) {
+	if s.captureEnv != nil {
+		s.captureEnv(env)
+	}
 	if s.send == nil {
 		return &SendResult{}, nil
 	}

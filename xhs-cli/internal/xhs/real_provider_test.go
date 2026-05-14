@@ -381,6 +381,78 @@ func TestRealProvider_CoagentReject(t *testing.T) {
 	}
 }
 
+// TestRejectFromStderr_FlatStructure — FIX-6 §9 (codex t94b): coagent
+// CLI writes a flat {"error":"reject","reason":"...","detail":"..."}
+// trailing JSON line; xhs RealProvider must extract the reason
+// verbatim instead of degrading to coagent_reject.
+func TestRejectFromStderr_FlatStructure(t *testing.T) {
+	stderr := "coagent: ask rejected: schema_violation: payload.title required\n" +
+		`{"error":"reject","reason":"schema_violation","detail":"payload.title required"}` + "\n"
+	err := rejectFromStderr(stderr)
+	var ce *CodeError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *CodeError, got %T %v", err, err)
+	}
+	if ce.Code != "schema_violation" {
+		t.Errorf("code = %q, want schema_violation", ce.Code)
+	}
+	if ce.Msg != "payload.title required" {
+		t.Errorf("msg = %q, want payload.title required", ce.Msg)
+	}
+}
+
+// TestRejectFromStderr_NestedFallback — legacy coagent versions emit
+// a nested {"error":{"reason":...}} body. Parser must still pull the
+// reason for backward compat.
+func TestRejectFromStderr_NestedFallback(t *testing.T) {
+	stderr := `{"error":{"reason":"actor_not_registered","detail":"unknown actor"}}`
+	err := rejectFromStderr(stderr)
+	var ce *CodeError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *CodeError, got %T", err)
+	}
+	if ce.Code != "actor_not_registered" {
+		t.Errorf("code = %q, want actor_not_registered (nested form)", ce.Code)
+	}
+}
+
+// TestRejectFromStderr_NoJSON_GenericFallback — when stderr has no
+// JSON at all the parser falls back to the generic code so callers
+// at least see *something*.
+func TestRejectFromStderr_NoJSON_GenericFallback(t *testing.T) {
+	err := rejectFromStderr("coagent: ask rejected: <opaque text without JSON>")
+	var ce *CodeError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *CodeError, got %T", err)
+	}
+	if ce.Code != "coagent_reject" {
+		t.Errorf("code = %q, want coagent_reject (generic fallback)", ce.Code)
+	}
+}
+
+// TestRealProvider_RejectReasonPassthrough — e2e: stub the runner so
+// it returns exit=3 + the canonical coagent stderr shape and verify
+// the RealProvider surfaces the harness reason as the CodeError code.
+// This anchors the entire xhs → coagent reject pipeline.
+func TestRealProvider_RejectReasonPassthrough(t *testing.T) {
+	p, fr := newTestProvider()
+	fr.SetError(rejectFromStderr(
+		"coagent: ask rejected: handler_actor_binding_mismatch: tool:xhs not bound to daemon_rpc\n" +
+			`{"error":"reject","reason":"handler_actor_binding_mismatch","detail":"tool:xhs not bound to daemon_rpc"}` + "\n",
+	))
+	_, err := p.Publish(context.Background(), PublishArgs{Title: "T", ContentPath: "/x.md"})
+	var ce *CodeError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *CodeError, got %T %v", err, err)
+	}
+	if ce.Code != "handler_actor_binding_mismatch" {
+		t.Errorf("code = %q, want handler_actor_binding_mismatch (passthrough)", ce.Code)
+	}
+	if !strings.Contains(ce.Msg, "tool:xhs not bound to daemon_rpc") {
+		t.Errorf("msg = %q, want detail to flow through", ce.Msg)
+	}
+}
+
 // TestRealProvider_MissingCorrelationID — runner returns success but
 // without correlation_id → invalid_daemon_response.
 func TestRealProvider_MissingCorrelationID(t *testing.T) {

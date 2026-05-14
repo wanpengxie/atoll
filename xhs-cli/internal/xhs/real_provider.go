@@ -375,23 +375,75 @@ func classifyExit(code int, _, stderr string) error {
 // stderr on exit 3 and turns it into a CodeError whose Code is the
 // harness reason. Best-effort: when the stderr is not parseable we
 // fall back to a generic code.
+//
+// FIX-6 §9 (codex t94b): coagent v4.6+ writes a flat JSON object
+//
+//	{"error":"reject","reason":"<r>","detail":"<d>",...}
+//
+// after the human-readable prefix line. Older versions used a nested
+// {"error":{"reason":...,"detail":...}} shape. We try the flat form
+// first (current coagent), then fall back to the nested form (older
+// envs we may still be invoked against), then degrade to
+// coagent_reject so the harness reason at least flows through some of
+// the time.
 func rejectFromStderr(stderr string) error {
-	// coagent writes a header line like "coagent: ask: reject reason=..."
-	// followed by a JSON body. Pull out the JSON portion if present.
 	trimmed := strings.TrimSpace(stderr)
-	if i := strings.Index(trimmed, "{"); i >= 0 {
-		trimmed = trimmed[i:]
+	// coagent emits "coagent: <sub> rejected: ..." then a JSON line.
+	// Walk forward to the FIRST '{' so we can attempt to parse the
+	// remainder; if there are multiple JSON-looking fragments (rare),
+	// take the last full object on the trailing line.
+	jsonBlob := extractTrailingJSON(trimmed)
+	if jsonBlob == "" {
+		return &CodeError{Code: "coagent_reject", Msg: truncate(stderr, 200)}
 	}
-	var body struct {
+
+	// 1) Flat form (current coagent CLI).
+	var flat struct {
+		Error  string `json:"error"`
+		Reason string `json:"reason"`
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal([]byte(jsonBlob), &flat); err == nil && flat.Reason != "" {
+		return &CodeError{Code: flat.Reason, Msg: flat.Detail}
+	}
+
+	// 2) Nested form (legacy fallback).
+	var nested struct {
 		Error struct {
 			Reason string `json:"reason"`
 			Detail string `json:"detail"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal([]byte(trimmed), &body); err == nil && body.Error.Reason != "" {
-		return &CodeError{Code: body.Error.Reason, Msg: body.Error.Detail}
+	if err := json.Unmarshal([]byte(jsonBlob), &nested); err == nil && nested.Error.Reason != "" {
+		return &CodeError{Code: nested.Error.Reason, Msg: nested.Error.Detail}
 	}
+
 	return &CodeError{Code: "coagent_reject", Msg: truncate(stderr, 200)}
+}
+
+// extractTrailingJSON returns the last non-empty line of `s` if it
+// parses as a JSON object opener, else the substring from the first
+// '{' onward (covers single-line outputs and older trailing-JSON
+// formats). Returns "" when no '{' is present.
+func extractTrailingJSON(s string) string {
+	lines := strings.Split(s, "\n")
+	// Walk from the end skipping blank lines.
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "{") {
+			return line
+		}
+		// Last non-empty line is not JSON — fall through to the
+		// "first '{' anywhere" heuristic below.
+		break
+	}
+	if i := strings.Index(s, "{"); i >= 0 {
+		return strings.TrimSpace(s[i:])
+	}
+	return ""
 }
 
 // buildEnv produces the env slice for the child process. Starts from

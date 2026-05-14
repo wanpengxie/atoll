@@ -142,3 +142,33 @@ func TestAnswer_NoLookupBinding_RequiresType(t *testing.T) {
 		t.Fatalf("expected stderr to require --type, got %q", stderr)
 	}
 }
+
+// TestAnswer_NoLookupBinding_AcceptsAudience — FIX-6 §8 (codex t94a)
+// acceptance: --audience IS now registered on the answer subcommand,
+// so a no-lookup binding can satisfy the §3.4.3 contract with --type
+// + --audience flags. Pre-fix the flag was rejected by Parse and
+// callers had no way through.
+func TestAnswer_NoLookupBinding_AcceptsAudience(t *testing.T) {
+	var captured *v4types.Envelope
+	stubB := &stubBinding{
+		send: func(_ pkgharness.Deps) (*SendResult, error) {
+			return &SendResult{ID: "out-aud", CorrelationID: "out-aud", Kind: v4types.KindResponse}, nil
+		},
+	}
+	stubB.captureEnv = func(env *v4types.Envelope) { captured = env }
+	exit, _, stderr := runWithBinding([]string{
+		"answer", "req-z",
+		"--type", "agent.text",
+		"--audience", "bob",
+		"hello",
+	}, stubB)
+	if exit != 0 {
+		t.Fatalf("expected exit 0 with --audience present, got %d (stderr=%s)", exit, stderr)
+	}
+	if captured == nil {
+		t.Fatalf("captureEnv hook did not fire — binding may not have been called")
+	}
+	if len(captured.Audience) != 1 || captured.Audience[0] != "bob" {
+		t.Errorf("Audience = %v, want [bob]", captured.Audience)
+	}
+}

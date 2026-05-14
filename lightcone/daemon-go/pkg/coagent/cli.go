@@ -2,6 +2,7 @@ package coagent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -163,10 +164,22 @@ func resolveBinding(cfg Config, tc TurnCtx) (Binding, int, string) {
 	}), 0, ""
 }
 
-// writeReject is the common stderr writer for *RejectError. The
-// shape mirrors L2 §3.6.1's reason/detail pair so shell callers can
-// grep on the reason.
+// writeReject is the common stderr writer for *RejectError. Emits two
+// lines:
+//
+//  1. A human-readable header line of the form
+//     "coagent: <sub> rejected: <reason>: <detail>" — preserved from
+//     the pre-FIX-6 contract so existing shell scripts that grep on
+//     the prefix keep working.
+//  2. A structured JSON object on its own line:
+//     {"error":"reject","reason":"...","detail":"...",
+//      "dedupe_response_id":"...","message_id_if_partial":"..."}
+//     Empty optional fields are omitted. Downstream consumers
+//     (xhs-cli RealProvider, future automation) can parse this line
+//     to propagate the harness reason verbatim instead of degrading to
+//     a generic "coagent_reject" code (codex t94b).
 func writeReject(w io.Writer, sub string, re *RejectError) {
+	// Human-readable prefix line (legacy contract).
 	fmt.Fprintf(w, "coagent: %s rejected: %s", sub, re.Reason)
 	if re.Detail != "" {
 		fmt.Fprintf(w, ": %s", re.Detail)
@@ -178,6 +191,30 @@ func writeReject(w io.Writer, sub string, re *RejectError) {
 		fmt.Fprintf(w, " (message_id_if_partial=%s)", re.MessageIDIfPartial)
 	}
 	fmt.Fprintln(w)
+
+	// Structured JSON line. We build the map manually rather than tag
+	// RejectError so the wire shape stays under our control even if
+	// RejectError grows new fields.
+	body := map[string]string{
+		"error":  "reject",
+		"reason": string(re.Reason),
+	}
+	if re.Detail != "" {
+		body["detail"] = re.Detail
+	}
+	if re.DedupeResponseID != "" {
+		body["dedupe_response_id"] = re.DedupeResponseID
+	}
+	if re.MessageIDIfPartial != "" {
+		body["message_id_if_partial"] = re.MessageIDIfPartial
+	}
+	enc, err := json.Marshal(body)
+	if err != nil {
+		// json.Marshal on a string-keyed map should not fail; defensive
+		// fallback to an empty object keeps the contract intact.
+		enc = []byte(`{"error":"reject"}`)
+	}
+	fmt.Fprintln(w, string(enc))
 }
 
 // writeSuccess prints the success body JSON on stdout. Format matches
