@@ -18,6 +18,9 @@ Prereqs (confirm BEFORE starting):
       and `golangci-lint run`).
 - [ ] T16 e2e suite green on the cutover host
       (`go test -v ./test/e2e/...`).
+- [ ] cmd/daemon smoke green
+      (`go test -v ./cmd/daemon/...`) — boot + ask round-trip on the
+      production composition root.
 - [ ] Backup snapshot of every channel's `messages.sqlite`
       under `${COAGENT_HOME}/channels/*/messages.sqlite`.
 - [ ] `coagent` (legacy `lightcone/daemon/`) PM2 process recorded so the
@@ -122,15 +125,45 @@ Atomic per-machine. Recommended sequence:
 
 3. **Start the Go daemon** with the same `COAGENT_HOME`:
    ```bash
+   # Build the daemon + worker binaries side-by-side. The supervisor
+   # finds the worker via the --worker-binary flag (default
+   # `${dirname(daemon)}/worker`), so a shared bin dir keeps the
+   # path implicit.
+   ( cd lightcone/daemon-go && \
+     go build -o bin/daemon  ./cmd/daemon && \
+     go build -o bin/worker  ./cmd/worker )
+
    pm2 start lightcone/daemon-go/bin/daemon \
      --name lightcone-daemon-go \
      --update-env -- \
-     --home "${COAGENT_HOME}" \
-     --server-url "${SERVER_URL}" \
-     --machine-api-key "${MACHINE_API_KEY}"
+     --home          "${COAGENT_HOME}" \
+     --http-listen   "${DAEMON_HTTP_LISTEN:-:3101}" \
+     --auth-token    "${MACHINE_API_KEY}" \
+     --worker-binary "${COAGENT_HOME}/bin/worker" \
+     --server-url    "${SERVER_URL}"
    ```
 
+   Flag table (matches `cmd/daemon/main.go::parseFlags`):
+
+   | Flag | Default | Purpose |
+   |---|---|---|
+   | `--home` | `$COAGENT_HOME` / `~/.coagent` | Anchors `--daemon-db` + `--channel-root` defaults |
+   | `--daemon-db` | `<home>/daemon.sqlite` | bootstrap_registry sqlite |
+   | `--channel-root` | `<home>/channels` | Informational — per-channel workdir lives here |
+   | `--http-listen` | `:3101` | TCP bind address |
+   | `--auth-token` | env `COAGENT_AUTH_TOKEN` | Bearer token for `daemon_rpc message.send`, `view.resync_channel`, `xhs callback` |
+   | `--worker-binary` | `<dirname(daemon-bin)>/worker` | Supervisor target binary; empty = supervisor loops disabled |
+   | `--server-url` | empty | View-sync server origin (M1.x — push hook follow-up) |
+   | `--xhs-device-id` | empty | Default device_id for the xhs adapter |
+   | `--scheduler-period` | `1s` | Long-pending + future scheduler tick cadence |
+   | `--supervisor-period` | `10s` | Supervisor scan cadence |
+   | `--lease-ttl` | `60` | Worker lease seconds |
+
 4. **Smoke**:
+   - `curl http://localhost:${DAEMON_HTTP_PORT:-3101}/api/healthz` —
+     daemon HTTP listener up.
+   - `curl http://localhost:${DAEMON_HTTP_PORT:-3101}/api/channel/list`
+     — every migrated channel id shows up in the JSON array.
    - `curl ${SERVER_URL}/api/healthz` — server still up.
    - Post a benign `agent.text` event through the UI. Confirm the daemon
      log shows `worker.runtime.ready` and the message appears in the UI.
