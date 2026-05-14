@@ -16,7 +16,8 @@ import (
 //
 // runtime/lifecycle wires CreateChannel + UnbindChannel + Heartbeat /
 // Reclaim handlers; runtime/transit ack_handler wires Ack; runtime/
-// scheduler may wire WriteMessage (server->daemon write-through).
+// daemon wires WriteMessage via a per-channel router (FIX-T2 /
+// server→daemon write-through path).
 type ControlHandlers struct {
 	OnViewsyncAck           func(ctx context.Context, frame viewsync.AckFrame) error
 	OnViewsyncResyncRequest func(ctx context.Context, frame viewsync.ResyncRequest) (viewsync.ResyncResponse, error)
@@ -27,6 +28,14 @@ type ControlHandlers struct {
 	OnReclaimRejected func(ctx context.Context, frame daemonbus.Frame) error
 	OnHeartbeatAck    func(ctx context.Context, frame daemonbus.Frame) error
 	OnDeviceTransit   func(ctx context.Context, frame daemonbus.Frame) error
+
+	// OnWriteMessage handles the daemon-side `control.write_message`
+	// dispatch path (FIX-T2). The Dispatcher decodes the frame body
+	// into WriteMessageBody, invokes this callback, and SENDS the
+	// returned ack as `control.write_message_ack`. The callback is
+	// nil-safe — when unset, the frame is dropped silently (M1.5
+	// development bootstrap path).
+	OnWriteMessage func(ctx context.Context, frame daemonbus.Frame, body WriteMessageBody) WriteMessageAckBody
 
 	// Unknown is invoked for any frame_type not handled above. May be
 	// nil — default is to drop silently.
@@ -127,6 +136,26 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 			return d.handlers.OnHeartbeatAck(ctx, frame)
 		}
 		return nil
+
+	case daemonbus.FrameTypeControlWriteMessage:
+		if d.handlers.OnWriteMessage == nil {
+			return nil
+		}
+		var body WriteMessageBody
+		if err := DecodePayload(frame, &body); err != nil {
+			return fmt.Errorf("transit: decode control.write_message: %w", err)
+		}
+		if body.FrameID == "" {
+			// Fall back to the wrapper frame_id so the gateway can still
+			// pair the ack with the HTTP request.
+			body.FrameID = frame.FrameID
+		}
+		ack := d.handlers.OnWriteMessage(ctx, frame, body)
+		if ack.FrameID == "" {
+			ack.FrameID = body.FrameID
+		}
+		return d.client.Send(ctx, d.frameID(),
+			daemonbus.FrameTypeControlWriteMessageAck, ack)
 	}
 
 	if daemonbus.CategoryOf(frame.FrameType) == daemonbus.CategoryDeviceTransit {

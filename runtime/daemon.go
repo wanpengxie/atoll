@@ -6,12 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	khar "github.com/wanpengxie/ActOS/kernel/harness"
+	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/bootstrap"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/lifecycle"
+	"github.com/wanpengxie/ActOS/runtime/scheduler"
 	"github.com/wanpengxie/ActOS/runtime/store"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
@@ -24,13 +32,45 @@ type DaemonConfig struct {
 	DaemonEpoch int64
 	UseMockBus  bool
 
+	// WSConfig is the production daemonbus WS connection knobs. Required
+	// when UseMockBus is false. Ignored when UseMockBus is true.
+	WSConfig *transit.WSClientConfig
+
+	// HumanCallerSecret is the shared HMAC key matching server.gateway.
+	// App.cfg.HumanCallerSecret. Required when the daemon should accept
+	// control.write_message frames (production wiring); may be empty in
+	// tests that don't drive the write path.
+	HumanCallerSecret []byte
+
+	// ReplayWindow caps |now - human_caller.ts|. Zero disables the
+	// check (M1.5 default).
+	ReplayWindow time.Duration
+
 	// NowFn / FrameIDGen optional — production injects time.Now and uuid.
 	NowFn      func() int64
 	FrameIDGen func() string
 
+	// SchedulerPeriod overrides the long-pending scheduler tick period.
+	// Defaults to 1s (L2 §3.7).
+	SchedulerPeriod time.Duration
+
 	// PostBoot is invoked once phase 4 starts. May be nil. Used by
 	// tests to inspect state without racing with shutdown.
 	PostBoot func(ctx context.Context, d *Daemon) error
+}
+
+// channelRuntime is the per-owned-channel set of seams the daemon
+// operational loop drives during phase 3+: harness chain (for writes),
+// outbox pusher (for view-sync), actor registry (for write_message
+// caller-id resolution), message log (for long-pending scans).
+type channelRuntime struct {
+	channelID channel.ID
+	db        *sql.DB
+	registry  *store.ActorRegistry
+	messages  *store.Messages
+	outbox    *store.ViewSyncOutbox
+	chain     *harness.Chain
+	pusher    *transit.Pusher
 }
 
 // Daemon is the assembled cmd/daemon process. Exposed so tests can
@@ -42,9 +82,24 @@ type Daemon struct {
 	bootRes    lifecycle.BootResult
 	transit    *transit.Client
 	bus        *transit.MockBus
+	wsClient   *transit.WSClient
 	booter     *lifecycle.Bootstrapper
 	reconciler *bootstrap.Reconciler
 	saga       *bootstrap.Saga
+
+	channels   map[channel.ID]*channelRuntime
+	cursors    *transit.CursorTracker
+	dispatcher *transit.Dispatcher
+	schedTimer *scheduler.Timer
+
+	runCtx    context.Context
+	runCancel context.CancelFunc
+	wg        sync.WaitGroup
+
+	// owned-channels barrier — phase 3 closes this once per-channel
+	// seams are wired so OnWriteMessage can return channel_unbound for
+	// any frame that arrives before bootstrap completes.
+	ready atomic.Bool
 }
 
 // RunDaemon is the cmd/daemon entry point body. Blocks until ctx is
@@ -94,6 +149,12 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 			return fmt.Sprintf("f-%d", n.Add(1))
 		}
 	}
+	if cfg.SchedulerPeriod <= 0 {
+		cfg.SchedulerPeriod = time.Second
+	}
+	if !cfg.UseMockBus && cfg.WSConfig == nil {
+		return nil, errors.New("runtime: DaemonConfig.WSConfig required when UseMockBus=false")
+	}
 
 	daemonDB, err := store.OpenDaemon(ctx, filepath.Join(cfg.DataDir, "daemon.sqlite"), store.OpenOptions{})
 	if err != nil {
@@ -132,7 +193,7 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 		NowFn:       cfg.NowFn,
 		ChannelsDir: cfg.ChannelsDir,
 		LockOpener:  openLock,
-		// EmitReclaim left nil — T6 wires the WS client; until then the
+		// EmitReclaim left nil — T4 wires the WS client; until then the
 		// offline path treats all locally-owned channels as still ours.
 	})
 	if err != nil {
@@ -147,6 +208,8 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 		booter:     booter,
 		reconciler: reconciler,
 		saga:       saga,
+		channels:   make(map[channel.ID]*channelRuntime),
+		cursors:    transit.NewCursorTracker(),
 	}
 
 	if cfg.UseMockBus {
@@ -162,6 +225,27 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 			_ = daemonDB.Close()
 			return nil, err
 		}
+		d.transit = client
+	} else {
+		ws, err := transit.NewWSClient(*cfg.WSConfig)
+		if err != nil {
+			_ = daemonDB.Close()
+			return nil, err
+		}
+		client, err := transit.NewClient(transit.ClientConfig{
+			DaemonID: cfg.DaemonID, Transport: ws, NowFn: cfg.NowFn,
+		})
+		if err != nil {
+			_ = ws.Close()
+			_ = daemonDB.Close()
+			return nil, err
+		}
+		if _, err := client.Connect(ctx); err != nil {
+			_ = ws.Close()
+			_ = daemonDB.Close()
+			return nil, err
+		}
+		d.wsClient = ws
 		d.transit = client
 	}
 	return d, nil
@@ -186,15 +270,267 @@ func (d *Daemon) RunPhases(ctx context.Context) error {
 	}
 	d.bootRes = res
 
-	// Phase 3: would normally start outbox pump + scheduler + supervisor
-	// loop. M1.5-T3 wiring point — keep this method synchronous so
-	// tests can inspect post-boot state.
+	// Phase 3: operational loop — boot per-channel seams, then start
+	// the transit dispatcher / pushers / scheduler goroutines.
+	if err := d.startPhase3(ctx); err != nil {
+		return fmt.Errorf("runtime: phase3 start: %w", err)
+	}
 	d.booter.MarkRecovering()
 
 	// Phase 4: accept new control.create_channel frames.
 	d.booter.MarkAcceptingNew()
 	return nil
 }
+
+// startPhase3 wires the daemon's operational goroutines: per-channel
+// outbox pushers, the transit dispatcher, and the long-pending
+// scheduler. All goroutines share a child context cancelled by Close
+// so shutdown is deterministic.
+func (d *Daemon) startPhase3(ctx context.Context) error {
+	if d.runCtx != nil {
+		return errors.New("runtime: phase 3 already started")
+	}
+	d.runCtx, d.runCancel = context.WithCancel(context.Background())
+
+	// 3.1 — per-channel runtime + outbox push.
+	acceptedSet := make(map[channel.ID]struct{}, len(d.bootRes.ReclaimAccepted))
+	for _, id := range d.bootRes.ReclaimAccepted {
+		acceptedSet[id] = struct{}{}
+	}
+	for _, lc := range d.bootRes.Local {
+		if _, ok := acceptedSet[lc.ChannelID]; !ok {
+			continue
+		}
+		cr, err := d.buildChannelRuntime(ctx, lc)
+		if err != nil {
+			return fmt.Errorf("runtime: channel %s: %w", lc.ChannelID, err)
+		}
+		d.channels[lc.ChannelID] = cr
+		d.wg.Add(1)
+		go func(p *transit.Pusher, id channel.ID) {
+			defer d.wg.Done()
+			if err := p.Pump(d.runCtx); err != nil {
+				if !errors.Is(err, context.Canceled) {
+					// Log via stderr — tests assert on graceful exit so we
+					// keep this best-effort. cmd/daemon swaps in structured
+					// logging via DaemonConfig in a later ticket.
+					fmt.Printf("runtime: pusher %s exited: %v\n", id, err)
+				}
+			}
+		}(cr.pusher, lc.ChannelID)
+	}
+
+	// 3.2 — transit dispatcher (one goroutine drains the recv side).
+	handler, err := transit.NewWriteMessageHandler(transit.WriteMessageHandlerConfig{
+		Secret:       d.cfg.HumanCallerSecret,
+		Router:       d.routeWrite,
+		NowMs:        d.cfg.NowFn,
+		ReplayWindow: d.cfg.ReplayWindow,
+	})
+	switch {
+	case err == nil:
+		// proceed
+	case len(d.cfg.HumanCallerSecret) == 0:
+		// Allow the daemon to boot without the secret — write_message
+		// frames will surface as OnWriteMessage=nil (silent drop).
+		handler = nil
+	default:
+		return err
+	}
+
+	ackHandler, err := transit.NewAckHandlerForChannels(d.cursors, func(id channel.ID) (transit.OutboxAcker, bool) {
+		cr, ok := d.channels[id]
+		if !ok {
+			return nil, false
+		}
+		return cr.outbox, true
+	})
+	if err != nil {
+		return fmt.Errorf("runtime: build ack handler: %w", err)
+	}
+
+	resyncRouter := func(id channel.ID) (transit.ResyncSource, bool) {
+		cr, ok := d.channels[id]
+		if !ok {
+			return nil, false
+		}
+		return cr.outbox, true
+	}
+	resyncServer, err := transit.NewMultiResyncServer(resyncRouter)
+	if err != nil {
+		return fmt.Errorf("runtime: build resync server: %w", err)
+	}
+
+	handlers := transit.ControlHandlers{
+		OnViewsyncAck:           ackHandler.Handle,
+		OnViewsyncResyncRequest: resyncServer.ServeResync,
+	}
+	if handler != nil {
+		handlers.OnWriteMessage = func(ctx context.Context, _ daemonbus.Frame, body transit.WriteMessageBody) transit.WriteMessageAckBody {
+			return handler.Handle(ctx, body)
+		}
+	}
+
+	dispatcher, err := transit.NewDispatcher(transit.DispatcherConfig{
+		Client:   d.transit,
+		FrameID:  d.cfg.FrameIDGen,
+		Handlers: handlers,
+	})
+	if err != nil {
+		return fmt.Errorf("runtime: build dispatcher: %w", err)
+	}
+	d.dispatcher = dispatcher
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		if err := dispatcher.Loop(d.runCtx); err != nil {
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, transit.ErrBusClosed) {
+				fmt.Printf("runtime: dispatcher exited: %v\n", err)
+			}
+		}
+	}()
+
+	// 3.3 — long-pending scheduler. M1.5 has no concrete fallback path;
+	// the scan callback iterates per-channel hooks (currently a no-op
+	// until trigger gateway / T3 fills in the fallback emit). The
+	// goroutine still ticks so cmd/daemon proves graceful shutdown.
+	timer, err := scheduler.NewTimer(scheduler.TimerConfig{
+		Period: d.cfg.SchedulerPeriod,
+		NowFn:  d.cfg.NowFn,
+		Scan:   d.scanLongPending,
+	})
+	if err != nil {
+		return fmt.Errorf("runtime: build scheduler timer: %w", err)
+	}
+	d.schedTimer = timer
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		if err := timer.Run(d.runCtx); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				fmt.Printf("runtime: scheduler exited: %v\n", err)
+			}
+		}
+	}()
+
+	d.ready.Store(true)
+	return nil
+}
+
+// buildChannelRuntime opens the per-channel sqlite, constructs every
+// seam phase 3 needs (registry / messages / outbox / chain / pusher).
+func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChannel) (*channelRuntime, error) {
+	db, err := d.openChannelDB(ctx, lc.SQLitePath)
+	if err != nil {
+		return nil, err
+	}
+	registry := store.NewActorRegistry(db)
+	messages := store.NewMessages(db)
+	outbox := store.NewViewSyncOutbox(db, lc.ChannelID)
+
+	chain, err := harness.New(harness.Deps{
+		ChannelID:     lc.ChannelID,
+		ActorRegistry: registry,
+		Log:           messages,
+		NowMs:         d.cfg.NowFn,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("harness for %s: %w", lc.ChannelID, err)
+	}
+
+	pusher, err := transit.NewPusher(transit.PusherConfig{
+		Outbox:  outbox,
+		Client:  d.transit,
+		Cursors: d.cursors,
+		FrameID: d.cfg.FrameIDGen,
+		NowFn:   d.cfg.NowFn,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("pusher for %s: %w", lc.ChannelID, err)
+	}
+
+	return &channelRuntime{
+		channelID: lc.ChannelID,
+		db:        db,
+		registry:  registry,
+		messages:  messages,
+		outbox:    outbox,
+		chain:     chain,
+		pusher:    pusher,
+	}, nil
+}
+
+// openChannelDB reuses the cache populated by lifecycle.LockOpener.
+// Subsequent calls return the same *sql.DB so the channel sqlite
+// stays single-handle (sqlite WAL works best that way).
+func (d *Daemon) openChannelDB(ctx context.Context, sqlitePath string) (*sql.DB, error) {
+	if db, ok := d.channelDBs[sqlitePath]; ok {
+		return db, nil
+	}
+	db, err := store.OpenChannel(ctx, sqlitePath, store.OpenOptions{SkipDDL: true})
+	if err != nil {
+		return nil, err
+	}
+	d.channelDBs[sqlitePath] = db
+	return db, nil
+}
+
+// routeWrite returns the per-channel harness chain + registry +
+// caller-context stamper for the WriteMessage handler. ok=false means
+// the daemon does not currently own the channel.
+func (d *Daemon) routeWrite(_ context.Context, ch channel.ID) (transit.HarnessChain, actor.Registry, transit.CallerStamper, bool) {
+	cr, ok := d.channels[ch]
+	if !ok {
+		return nil, nil, nil, false
+	}
+	chainAdapter := harnessChainAdapter{chain: cr.chain}
+	stamp := func(ctx context.Context, actorID actor.ActorID, chID channel.ID) context.Context {
+		return harness.CtxWithCaller(ctx, harness.CallerContext{
+			ActorID:                 actorID,
+			ChannelID:               chID,
+			AllowProvidedSenderKind: false,
+		})
+	}
+	return chainAdapter, cr.registry, stamp, true
+}
+
+// scanLongPending is the per-tick callback the long-pending scheduler
+// invokes. M1.5 has no concrete fallback emit path (the trigger
+// gateway / FIX-T3 wires that). We still iterate the channel set so
+// future work can plug in without touching daemon.go's goroutine
+// layout.
+func (d *Daemon) scanLongPending(_ context.Context, _ int64) error {
+	// no-op — kept so the scheduler goroutine has a real sink and tests
+	// can observe ticks via the channel set length.
+	return nil
+}
+
+// harnessChainAdapter bridges runtime/harness.Chain (kernel
+// WriteResult) to the transit.HarnessChain (transit WriteResult). It
+// avoids leaking kernel/harness into the transit package — the bridge
+// stays inside runtime where both packages are already imported.
+type harnessChainAdapter struct {
+	chain *harness.Chain
+}
+
+// Write implements transit.HarnessChain.
+func (a harnessChainAdapter) Write(ctx context.Context, env *message.Envelope) (transit.HarnessWriteResult, error) {
+	res, err := a.chain.Write(ctx, env)
+	if err != nil {
+		return transit.HarnessWriteResult{}, err
+	}
+	return transit.HarnessWriteResult{
+		MessageID:        res.MessageID,
+		Seq:              res.Seq,
+		Deduped:          res.Deduped,
+		RejectReason:     string(res.RejectReason),
+		RejectDetail:     res.RejectDetail,
+		PartialMessageID: res.PartialMessageID,
+	}, nil
+}
+
+// compile-time interface check.
+var _ khar.Chain = (*harness.Chain)(nil)
 
 // Phase returns the current boot phase (for tests / observability).
 func (d *Daemon) Phase() lifecycle.Phase { return d.booter.Phase() }
@@ -208,15 +544,25 @@ func (d *Daemon) Saga() *bootstrap.Saga { return d.saga }
 // DaemonDB exposes the daemon-level sqlite (tests / future server.go).
 func (d *Daemon) DaemonDB() *sql.DB { return d.daemonDB }
 
-// Transit returns the daemonbus client (nil when --mock-bus=false and
-// T6 wiring is incomplete).
+// Transit returns the daemonbus client. Non-nil after AssembleDaemon
+// regardless of UseMockBus.
 func (d *Daemon) Transit() *transit.Client { return d.transit }
 
 // Bus returns the underlying MockBus (nil unless UseMockBus).
 func (d *Daemon) Bus() *transit.MockBus { return d.bus }
 
+// Dispatcher returns the transit dispatcher started in phase 3.
+func (d *Daemon) Dispatcher() *transit.Dispatcher { return d.dispatcher }
+
 // FrameIDGen returns the configured frame id generator.
 func (d *Daemon) FrameIDGen() func() string { return d.cfg.FrameIDGen }
+
+// HasChannel reports whether channelID is currently owned by this
+// daemon (phase 3 booted it).
+func (d *Daemon) HasChannel(id channel.ID) bool {
+	_, ok := d.channels[id]
+	return ok
+}
 
 // OpenChannelLock returns the channel_lock store for a channel sqlite
 // path (cached). Useful for lifecycle.Creator / FencingChecker wiring
@@ -233,11 +579,22 @@ func (d *Daemon) OpenChannelLock(ctx context.Context, sqlitePath string) (*store
 	return store.NewChannelLock(db), nil
 }
 
-// Close releases all open sqlite handles + the mock bus.
+// Close cancels phase-3 goroutines and releases all open sqlite
+// handles + the transit bus.
 func (d *Daemon) Close() error {
+	if d.runCancel != nil {
+		d.runCancel()
+	}
 	if d.bus != nil {
 		_ = d.bus.Close()
 	}
+	if d.wsClient != nil {
+		_ = d.wsClient.Close()
+	}
+	// Wait for phase 3 goroutines to finish BEFORE closing the
+	// per-channel sqlite handles — sqlite "database is locked" can
+	// otherwise leak.
+	d.wg.Wait()
 	for _, db := range d.channelDBs {
 		_ = db.Close()
 	}

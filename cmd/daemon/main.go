@@ -2,21 +2,21 @@
 //
 // Authoritative spec: .dalek/pm/m1.5-tickets.md §T3 (acceptance gate #1
 // — cmd/daemon can start; scans channels/ directory in T1.6 phase 1/2/3/4
-// order).
+// order) and FIX-T2 (operational loop assembly + WS client + write_message
+// handler).
 //
-// In M1.5-T3 this binary is a thin assembly:
+// Wiring (FIX-T2 spec):
 //
 //  1. Open daemon.sqlite (bootstrap_registry).
 //  2. Reconciler.Run — roll back any in-progress crashed sagas.
 //  3. lifecycle.Bootstrapper.LoadLocal — scan channels/ dir, refresh
 //     daemon_epoch.
-//  4. (placeholder) Connect to server via daemonbus transit — replaced
-//     in T6 with real WS client. For now uses the in-process MockBus
-//     when the --mock-bus flag is set.
-//  5. ReportReclaim → MarkRecovering → MarkAcceptingNew.
+//  4. Connect to server via daemonbus transit:
+//     - production: gorilla/websocket dialer (transit.WSClient).
+//     - dev/test : in-process MockBus when --mock-bus is set.
+//  5. ReportReclaim → MarkRecovering → MarkAcceptingNew (Phase 3 starts
+//     the dispatcher + per-channel pusher + scheduler goroutines).
 //  6. Block until shutdown signal.
-//
-// Real adapter / scheduler / supervisor wiring lands in T4 / T5 / T6.
 package main
 
 import (
@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/runtime"
+	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
 func main() {
@@ -38,7 +39,16 @@ func main() {
 		dataDir     = flag.String("data-dir", defaultDataDir(), "daemon data directory")
 		daemonID    = flag.String("daemon-id", "daemon-local", "stable daemon identifier")
 		daemonEpoch = flag.Int64("daemon-epoch", 0, "daemon process epoch (0 = use unix-second)")
-		mockBus     = flag.Bool("mock-bus", true, "use in-process mock bus (M1.5-T3 default; T6 replaces with WS)")
+		mockBus     = flag.Bool("mock-bus", false, "use in-process mock bus (dev only; production uses --server-url WS)")
+		serverURL   = flag.String("server-url", "", "daemonbus WS URL, e.g. ws://localhost:8080/api/daemonbus")
+		daemonKey   = flag.String("key", "", "shared key for daemonbus auth (must match server.daemonbus.SharedSecret)")
+		humanSecret = flag.String("human-caller-secret", "",
+			"HMAC secret matching server.gateway.HumanCallerSecret; "+
+				"required when the daemon should accept control.write_message frames")
+		replayWindowMs = flag.Int64("replay-window-ms", 0,
+			"reject control.write_message frames whose ts differs from now() by more than this many milliseconds (0 = disabled)")
+		host    = flag.String("host", "", "optional host metadata reported to the daemonbus registry")
+		version = flag.String("version", "", "optional version metadata reported to the daemonbus registry")
 	)
 	flag.Parse()
 
@@ -46,16 +56,35 @@ func main() {
 		*daemonEpoch = time.Now().Unix()
 	}
 
+	cfg := runtime.DaemonConfig{
+		DataDir:      *dataDir,
+		ChannelsDir:  filepath.Join(*dataDir, "channels"),
+		DaemonID:     *daemonID,
+		DaemonEpoch:  *daemonEpoch,
+		UseMockBus:   *mockBus,
+		ReplayWindow: time.Duration(*replayWindowMs) * time.Millisecond,
+	}
+
+	if !*mockBus {
+		if *serverURL == "" || *daemonKey == "" {
+			log.Fatal("daemon: --server-url and --key are required when --mock-bus=false")
+		}
+		cfg.WSConfig = &transit.WSClientConfig{
+			URL:      *serverURL,
+			DaemonID: *daemonID,
+			Key:      *daemonKey,
+			Host:     *host,
+			Version:  *version,
+		}
+	}
+
+	if *humanSecret != "" {
+		cfg.HumanCallerSecret = []byte(*humanSecret)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cfg := runtime.DaemonConfig{
-		DataDir:     *dataDir,
-		ChannelsDir: filepath.Join(*dataDir, "channels"),
-		DaemonID:    *daemonID,
-		DaemonEpoch: *daemonEpoch,
-		UseMockBus:  *mockBus,
-	}
 	if err := runtime.RunDaemon(ctx, cfg); err != nil {
 		log.Fatalf("daemon exit: %v", err)
 	}
