@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -234,6 +235,11 @@ type writeMessageReq struct {
 	ParentID   string          `json:"parent_id"`
 	Audience   []string        `json:"audience"`
 	Visibility string          `json:"visibility"`
+	// FIX-T8: caller may supply kind explicitly. When omitted the
+	// gateway fills the L1 §1.1 default for core types (and leaves
+	// it empty for business types — daemon harness will reject on
+	// step 5 with `kind_not_allowed`).
+	Kind string `json:"kind"`
 }
 
 // HumanCaller is the JSON object carried inside control.write_message.
@@ -270,6 +276,23 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		return
 	}
 
+	// FIX-T8: server-side early kind normalize + request audience
+	// validation. Caller may supply `kind` explicitly; otherwise we
+	// apply the L1 §1.1 default. kind-locked core types (e.g.
+	// system.event) reject caller overrides. kind=request frames
+	// must carry exactly one concrete audience (L1 §10.2 step 5).
+	kind, ok := resolveKind(req.Type, message.Kind(req.Kind))
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "kind_not_allowed"})
+		return
+	}
+	if kind == message.KindRequest {
+		if len(req.Audience) != 1 || req.Audience[0] == "" || req.Audience[0] == "*" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "request_audience_invalid"})
+			return
+		}
+	}
+
 	conn, err := a.daemonbus.ConnectionForChannel(c.Request.Context(), channelID)
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
@@ -277,7 +300,11 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 	}
 
 	ts := time.Now().UnixMilli()
-	nonce := newNonce()
+	nonce, err := newNonce()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "nonce: " + err.Error()})
+		return
+	}
 	caller := HumanCaller{
 		UserID: u.ID, ActorIDInChannel: member.ActorIDInChannel,
 		TS: ts, Nonce: nonce,
@@ -291,7 +318,7 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		Type:       req.Type,
 		ChannelID:  channelID,
 		Sender:     message.Sender{Kind: message.SenderHuman, ID: member.ActorIDInChannel},
-		Kind:       message.KindRequest,
+		Kind:       kind,
 		Payload:    req.Payload,
 		ParentID:   req.ParentID,
 		Audience:   req.Audience,
@@ -335,8 +362,19 @@ func (a *App) signHumanCaller(channelID, userID, actorID string, ts int64, nonce
 // ensure ts conversion compiles for non-test build.
 var _ = errors.New
 
-func newNonce() string {
+// nonceReader is the entropy source for newNonce. Defaults to
+// crypto/rand.Reader; tests swap in a failing reader to assert the
+// 500 path of FIX-T8 phase-4.
+var nonceReader io.Reader = rand.Reader
+
+// newNonce returns a fresh 16-byte hex nonce, propagating any error
+// from the entropy source. The caller MUST surface the error to the
+// HTTP client (500) — FIX-T8: silently signing with all-zero bytes
+// would defeat the HumanCaller replay-protection token.
+func newNonce() (string, error) {
 	buf := make([]byte, 16)
-	_, _ = rand.Read(buf)
-	return hex.EncodeToString(buf)
+	if _, err := io.ReadFull(nonceReader, buf); err != nil {
+		return "", fmt.Errorf("gateway: read nonce entropy: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
 }
