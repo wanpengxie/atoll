@@ -89,6 +89,15 @@ Server 本地 sqlite：`./data/server.db`（demo 自用，无数据迁移；销�
 工程规划文档：`.dalek/pm/` 顶层 spec 入仓；`.dalek/runtime/` + worker-local
 状态由 dalek 管理且 ignore。
 
+## 项目名 vs module path
+
+- **项目名 / 产品名：coagent**（小写）。所有外部文档、内部讨论、binary 前缀
+  （`coagent-server` / `coagent-daemon` / ...）都用 `coagent`。
+- **Go module path：`github.com/wanpengxie/ActOS`** —— `ActOS` 是 module 别名
+  (= coagent kernel)，仅作为 import path 出现；它不是产品改名，也不是
+  目录别名。新代码请继续使用 `import "github.com/wanpengxie/ActOS/<pkg>"`，
+  但用户/PM/spec 文档里仍称项目为 coagent。
+
 ## 协议合同
 
 - v4 envelope / kind / reason / actor 类型：`kernel/message/`（Go）

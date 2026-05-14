@@ -92,9 +92,10 @@ deps:
   # ─────────────────────────────────────────────────────────────────────
   kernel:
     mayDependOn: [kernel]
-    canUse:
-      - uuid
-    # No anyVendorDeps — kernel is closed.
+    # No canUse, no anyVendorDeps — kernel is fully closed at the vendor
+    # boundary. FIX-T10: removed `uuid` allowance; kernel deals in opaque
+    # string IDs only. If/when kernel needs an ID generator, it must be
+    # injected from the runtime layer rather than imported here.
 
   runtime_ipc:
     # Pure wire-types package. Closed at project boundary: kernel + stdlib only.

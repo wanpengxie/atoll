@@ -34,9 +34,15 @@ import (
 // with non-empty parent_id are treated terminal by default (L2 §1.4.1
 // `payload_status` convention) unless the row's type_registry entry
 // declares `single-response` — which the harness step 8 has already
-// resolved by the time Append is called. For T3 we trust the caller
-// (harness chain) to set env.IsTerminal correctly before Append. This
-// keeps store layer-independent of type_registry semantics.
+// resolved by the time Append is called.
+//
+// **Protocol contract (FIX-T10):** `env.IsTerminal` is NOT a caller-
+// settable knob. It must be resolved by the harness chain (step 8 +
+// type_registry semantics) BEFORE Append is reached. Store treats the
+// field as a pre-computed harness output and persists it verbatim; it
+// neither validates nor recomputes the value. This keeps store layer-
+// independent of type_registry semantics and keeps the harness as the
+// single source of truth for terminal classification.
 type Messages struct {
 	db   *sql.DB
 	lock *ChannelLock // optional — when non-nil, Append enforces fencing.
@@ -68,6 +74,16 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope) (klog.Appe
 	}
 	if env.ID == "" {
 		return klog.AppendResult{}, errors.New("store: append empty envelope.id")
+	}
+	// FIX-T10 protocol defense: Payload is a REQUIRED field per L0 §2.1
+	// (every envelope carries a payload object, even if the body is the
+	// empty JSON object `{}`). Silently coercing nil to `{}` masks
+	// caller bugs that bypass harness step 4 (payload schema validation)
+	// and lets unvalidated rows enter the store. Reject loudly so the
+	// caller (harness chain) is forced to materialize the payload before
+	// reaching the persistence sink.
+	if env.Payload == nil {
+		return klog.AppendResult{}, errors.New("store: append nil payload (harness step 4 must materialize payload before reaching store)")
 	}
 
 	tx, err := m.db.BeginTx(ctx, nil)
@@ -117,9 +133,6 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope) (klog.Appe
 	audJSON, err := json.Marshal(env.Audience)
 	if err != nil {
 		return klog.AppendResult{}, fmt.Errorf("store: append audience encode: %w", err)
-	}
-	if env.Payload == nil {
-		env.Payload = json.RawMessage("{}")
 	}
 
 	const ins = `INSERT INTO messages (
