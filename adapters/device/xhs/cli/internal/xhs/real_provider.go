@@ -11,8 +11,9 @@ import (
 	"time"
 )
 
-// Env names — aligned with coagent CLI (lightcone/daemon-go/cmd/coagent
-// + L4 §2.3.2).
+// Env names — aligned with the coagent CLI (M1.5 cmd/cli main entry
+// will be supplied by T7; pre-T7 builds reuse the archived daemon-go
+// cmd/coagent binary) + L4 §2.3.2.
 //
 // CLI no longer talks HTTP directly; it spawns `coagent ask`, which
 // internally reads these envs to build the daemon_rpc binding.
@@ -310,7 +311,8 @@ type execCoagentRunner struct{}
 
 // Run implements CoagentRunner by spawning `coagent ask ...`.
 //
-// Exit code mapping mirrors lightcone/daemon-go/cmd/coagent/main.go:
+// Exit code mapping mirrors the archived daemon-go cmd/coagent entry
+// (M1.5-T7 cmd/cli will publish the same contract):
 //
 //	0 success                 → unmarshal stdout
 //	2 usage / bad args        → CodeError{coagent_usage_error}
