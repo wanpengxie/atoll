@@ -34,6 +34,15 @@ import (
 // fallback envelope id = "fallback:" + request.id + ":" + reason，是
 // deterministic 派生——重复扫描时 harness Step 0.5 会按 envelope.id +
 // canonical_hash 比较直接 dedupe，不会重复落库。
+//
+// canonical_hash 输入域里包含 envelope.ts (pkg/canonical §14-key map)，
+// 所以 fallback ts 必须是稳定派生，否则同 id 不同 ts 会让 Step 0.5 走
+// `message_id_conflict` 而不是 dedupe。当前实现：
+//   - Step 1 / Step 2：使用 row.expires_at（scan SQL 已经 `expires_at IS NOT NULL`
+//     强约束），同一 request 两次 tick 输入相同 → hash 相同 → 第二次 dedupe。
+//   - Step 3：缺少 expires_at 时回退到 row.ts（原 request envelope.ts，永远存在）。
+// scheduler 自己的 wall-clock now 不再进入 envelope.ts，只用于日志与
+// scanStep1/Step2 的过期判定。
 
 // ---------------------------------------------------------------------------
 // Defaults
@@ -240,6 +249,12 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 
 // pendingRow captures the columns the emit path needs from one pending
 // request row. Loaded by every scanStep helper.
+//
+// ExpiresAt drives Step 1/2's deterministic fallback ts (so two ticks
+// at different wall-clocks still produce identical canonical_hash).
+// scanStep1 / scanStep2 SQL guarantees `expires_at IS NOT NULL` for
+// those rows; Step 3 may have NULL — buildFallbackEnvelope then falls
+// back to row.TS.
 type pendingRow struct {
 	ID            string
 	TS            int64
@@ -247,6 +262,7 @@ type pendingRow struct {
 	SenderID      string // original request's sender — becomes audience[0] of fallback
 	CorrelationID sql.NullString
 	AudienceFirst string // json_extract(audience, '$[0]') — Step 3 'missing_actor_id'
+	ExpiresAt     sql.NullInt64
 }
 
 // scanStep1 finds pending request rows whose receiver is an active
@@ -299,7 +315,7 @@ func scanPendingRows(rows *sql.Rows) ([]pendingRow, error) {
 		var r pendingRow
 		if err := rows.Scan(
 			&r.ID, &r.TS, &r.Type, &r.SenderID,
-			&r.CorrelationID, &r.AudienceFirst,
+			&r.CorrelationID, &r.AudienceFirst, &r.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -318,7 +334,8 @@ func scanPendingRows(rows *sql.Rows) ([]pendingRow, error) {
 const scanExpiredByReceiverKindSQL = `
 SELECT m.id, m.ts, m.type, m.sender_id,
        m.correlation_id,
-       json_extract(m.audience, '$[0]') AS receiver_id
+       json_extract(m.audience, '$[0]') AS receiver_id,
+       m.expires_at
   FROM messages m
   JOIN actor_registry a
     ON a.actor_id = json_extract(m.audience, '$[0]')
@@ -342,7 +359,8 @@ SELECT m.id, m.ts, m.type, m.sender_id,
 const scanReceiverUnavailableSQL = `
 SELECT m.id, m.ts, m.type, m.sender_id,
        m.correlation_id,
-       json_extract(m.audience, '$[0]') AS missing_actor_id
+       json_extract(m.audience, '$[0]') AS missing_actor_id,
+       m.expires_at
   FROM messages m
   LEFT JOIN actor_registry a
     ON a.actor_id = json_extract(m.audience, '$[0]')
@@ -378,7 +396,12 @@ func (s *Scheduler) emit(
 	missingActorID string,
 	now int64,
 ) {
-	env, err := buildFallbackEnvelope(row, reason, missingActorID, s.channelID, now)
+	// `now` is intentionally NOT threaded into env.ts: canonical_hash
+	// includes ts, so non-deterministic ts breaks harness Step 0.5
+	// dedupe across ticks. buildFallbackEnvelope derives ts from the
+	// pending row instead (see header). We keep `now` for log context.
+	_ = now
+	env, err := buildFallbackEnvelope(row, reason, missingActorID, s.channelID)
 	if err != nil {
 		s.cfg.Logger.Error("long_pending.build_envelope.error",
 			"channel_id", s.channelID, "request_id", row.ID,
@@ -435,14 +458,16 @@ type fallbackPayload struct {
 //
 // `visibility=system` keeps the fallback off the user-facing UI by default
 // (L0 §2.4 — system-emitted audit messages); the original request's response
-// chain is closed regardless. `ts` uses the scheduler clock so canonical_hash
-// stays stable for the deterministic-id dedupe path.
+// chain is closed regardless.
+//
+// `ts` is derived from the pending row, NOT from wall-clock now, so two
+// ticks at different times produce identical canonical_hash and harness
+// Step 0.5 dedupes. See pickStableTS for the per-reason rule.
 func buildFallbackEnvelope(
 	row *pendingRow,
 	reason v4types.TerminalFailureReason,
 	missingActorID string,
 	channelID string,
-	now int64,
 ) (*v4types.Envelope, error) {
 	payloadBytes, err := json.Marshal(fallbackPayload{
 		Status:         "failed",
@@ -454,7 +479,7 @@ func buildFallbackEnvelope(
 	}
 	env := &v4types.Envelope{
 		ID:         FallbackID(row.ID, reason),
-		TS:         now,
+		TS:         pickStableTS(row),
 		ChannelID:  channelID,
 		Sender:     v4types.Sender{Kind: v4types.SenderSystem, ID: SystemActorID},
 		Kind:       v4types.KindResponse,
@@ -468,6 +493,24 @@ func buildFallbackEnvelope(
 		env.CorrelationID = row.CorrelationID.String
 	}
 	return env, nil
+}
+
+// pickStableTS returns the envelope.ts a fallback emit should use. The
+// choice MUST be a pure function of the pending row so two ticks at
+// different wall-clocks produce the same canonical_hash.
+//
+//   - Step 1 / Step 2 rows: row.ExpiresAt is guaranteed non-NULL by the
+//     scan SQL (`m.expires_at IS NOT NULL`). Using it makes the fallback
+//     ts equal to the original deadline — semantically "this is when we
+//     concluded the request failed", reproducible across replays.
+//   - Step 3 rows: expires_at MAY be NULL (receiver_unavailable doesn't
+//     wait for expires_at). Fall back to row.TS (original request ts,
+//     always populated by harness normalize). Still deterministic.
+func pickStableTS(row *pendingRow) int64 {
+	if row.ExpiresAt.Valid {
+		return row.ExpiresAt.Int64
+	}
+	return row.TS
 }
 
 // FallbackID renders the deterministic envelope id used by every fallback

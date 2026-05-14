@@ -573,11 +573,16 @@ func TestLongPending_RepeatTick_DedupesViaHarnessStep0_5(t *testing.T) {
 		ID: "req-dup", TS: testT0, Type: testBizType, SenderID: testRequester,
 		CorrelationID: sql.NullString{String: "req-dup", Valid: true},
 		AudienceFirst: testReceiver,
+		// pickStableTS now derives env.ts from ExpiresAt (Step 1/2) or row.TS
+		// (Step 3); supply the same ExpiresAt that scanStep1 would have read
+		// so this synthetic envelope hashes identically to the scheduler's emit.
+		ExpiresAt: sql.NullInt64{Int64: testT0 + 1000, Valid: true},
 	}
-	dupEnv, err := buildFallbackEnvelope(row, v4types.TerminalUnansweredTimeout, "", testChannelID, cur)
+	dupEnv, err := buildFallbackEnvelope(row, v4types.TerminalUnansweredTimeout, "", testChannelID)
 	if err != nil {
 		t.Fatalf("buildFallbackEnvelope: %v", err)
 	}
+	_ = cur // pickStableTS does not use wall-clock now anymore
 	r2, err := writer.Write(ctx, dupEnv, harness.CallerCtx{Authenticated: true, ActorID: SystemActorID})
 	if err != nil {
 		t.Fatalf("direct re-emit: %v", err)
@@ -734,5 +739,117 @@ func TestFallbackID_Deterministic(t *testing.T) {
 	id3 := FallbackID("req-1", v4types.TerminalReceiverUnavailable)
 	if id3 == id1 {
 		t.Errorf("different reasons should yield different ids, got %q twice", id3)
+	}
+}
+
+// TestTick_FallbackDedupeAcrossDifferentNow is the FIX-6 §1 acceptance
+// test (codex t93). Two ticks at different wall-clocks scanning the
+// same expired pending request must both produce identical
+// canonical_hash so harness Step 0.5 returns Dedupe=true on the second
+// emit instead of message_id_conflict.
+//
+// Pre-fix: env.ts = scheduler.now() — two ticks at different times
+// produced different canonical_hash on the same envelope.id, harness
+// Step 0.5 raised `message_id_conflict`.
+// Post-fix: env.ts = pickStableTS(row) — purely derived from the pending
+// row, so identical hash across ticks regardless of `now`.
+func TestTick_FallbackDedupeAcrossDifferentNow(t *testing.T) {
+	ctx := context.Background()
+	db := openSchedulerDB(t)
+
+	// Step 1 case: agent receiver, expires_at < now.
+	exp := testT0 + 1_000
+	insertPendingRequest(t, ctx, db, pendingFixture{
+		id: "req-stable", senderID: testRequester, receiver: testReceiver,
+		expiresAt: &exp,
+	})
+
+	// First Tick at now=T+2s.
+	cur1 := testT0 + 2_000
+	writer := &spyWriter{inner: newSqliteHarnessWriter(t, db)}
+	s := newScheduler(t, db, writer, fixedNow(&cur1))
+	if err := s.Tick(ctx); err != nil {
+		t.Fatalf("Tick #1: %v", err)
+	}
+
+	// The fallback row exists at the deterministic id.
+	wantID := FallbackID("req-stable", v4types.TerminalUnansweredTimeout)
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM messages WHERE id = ?`, wantID).Scan(&n); err != nil {
+		t.Fatalf("count fallback row: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("after Tick #1: fallback row count = %d, want 1", n)
+	}
+
+	// Sanity: env.ts on the persisted fallback equals the request's
+	// expires_at, not cur1. This is the heart of the fix.
+	var persistedTS int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT ts FROM messages WHERE id = ?`, wantID).Scan(&persistedTS); err != nil {
+		t.Fatalf("read fallback ts: %v", err)
+	}
+	if persistedTS != exp {
+		t.Errorf("fallback env.ts = %d, want %d (request.expires_at); now=%d",
+			persistedTS, exp, cur1)
+	}
+
+	// Drop the terminal we just inserted so the second Tick re-scans the
+	// pending request as still-pending. This simulates a missed-write
+	// race where harness Step 8 has not yet committed the terminal but a
+	// second scheduler is already mid-tick.
+	if _, err := db.ExecContext(ctx, `DELETE FROM messages WHERE id = ?`, wantID); err != nil {
+		t.Fatalf("delete fallback row: %v", err)
+	}
+
+	// First Tick already inserted; now simulate a second Tick at a
+	// MUCH later now. Pre-fix this would have given a different env.ts
+	// → different canonical_hash → message_id_conflict reject.
+	// Post-fix: env.ts is the same stable value, so the Write goes
+	// through (and produces a fresh insert since we deleted the row).
+	cur2 := testT0 + 30_000 // 28s later
+	s2 := newScheduler(t, db, writer, fixedNow(&cur2))
+	if err := s2.Tick(ctx); err != nil {
+		t.Fatalf("Tick #2 at later now: %v", err)
+	}
+	// The second emit produces the same canonical_hash → same ts on the row.
+	var persistedTS2 int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT ts FROM messages WHERE id = ?`, wantID).Scan(&persistedTS2); err != nil {
+		t.Fatalf("read fallback ts after Tick #2: %v", err)
+	}
+	if persistedTS2 != exp {
+		t.Errorf("Tick #2 env.ts = %d, want %d (stable across now); now=%d",
+			persistedTS2, exp, cur2)
+	}
+
+	// And the writer was invoked exactly twice — no reject path.
+	calls := writer.callsList()
+	if len(calls) != 2 {
+		t.Fatalf("writer invoked %d times, want 2 (one per Tick)", len(calls))
+	}
+	for i, c := range calls {
+		if c.err != nil {
+			t.Errorf("call #%d returned err %v (should be nil; canonical_hash stable)", i, c.err)
+		}
+		if c.envelope.TS != exp {
+			t.Errorf("call #%d env.ts = %d, want %d (stable)", i, c.envelope.TS, exp)
+		}
+	}
+}
+
+// TestPickStableTS_PerStepRule covers the small helper directly so
+// regressions show up without seeding sqlite.
+func TestPickStableTS_PerStepRule(t *testing.T) {
+	// Step 1/2: ExpiresAt valid → use it.
+	row := &pendingRow{TS: 1_000, ExpiresAt: sql.NullInt64{Int64: 9_000, Valid: true}}
+	if got := pickStableTS(row); got != 9_000 {
+		t.Errorf("Step1/2: pickStableTS = %d, want 9000 (ExpiresAt)", got)
+	}
+	// Step 3: ExpiresAt NULL → fall back to row.TS.
+	row3 := &pendingRow{TS: 2_500}
+	if got := pickStableTS(row3); got != 2_500 {
+		t.Errorf("Step3: pickStableTS = %d, want 2500 (row.TS)", got)
 	}
 }
