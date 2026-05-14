@@ -43,6 +43,7 @@ func run() error {
 		DaemonSharedSecret:        cfg.DaemonSharedSecret,
 		DeviceTokenSecret:         cfg.DeviceTokenSecret,
 		HumanCallerSecret:         cfg.HumanCallerSecret,
+		AllowDevSecrets:           cfg.AllowDevSecrets,
 		ReconcileGracePeriod:      cfg.ReconcileGracePeriod,
 		ReconcileCreateTimeout:    cfg.ReconcileCreateTimeout,
 		ReconcileHeartbeatTimeout: cfg.ReconcileHeartbeatTimeout,
@@ -90,6 +91,7 @@ type config struct {
 	DaemonSharedSecret        string
 	DeviceTokenSecret         string
 	HumanCallerSecret         string
+	AllowDevSecrets           bool
 	ReconcileGracePeriod      time.Duration
 	ReconcileCreateTimeout    time.Duration
 	ReconcileHeartbeatTimeout time.Duration
@@ -97,12 +99,17 @@ type config struct {
 
 func loadConfig() config {
 	cfg := config{
-		HTTPAddr:                  envOr("COAGENT_SERVER_ADDR", ":8080"),
-		DBPath:                    envOr("COAGENT_SERVER_DB", "data/server.db"),
-		SessionSecret:             envOr("COAGENT_SESSION_SECRET", "dev-session-secret-change-me"),
-		DaemonSharedSecret:        envOr("COAGENT_DAEMON_SECRET", "dev-daemon-secret-change-me"),
-		DeviceTokenSecret:         envOr("COAGENT_DEVICE_SECRET", "dev-device-secret-change-me"),
-		HumanCallerSecret:         envOr("COAGENT_HUMAN_SECRET", "dev-human-caller-secret-change-me"),
+		HTTPAddr: envOr("COAGENT_SERVER_ADDR", ":8080"),
+		DBPath:   envOr("COAGENT_SERVER_DB", "data/server.db"),
+		// FIX-T8: env defaults are empty so gateway.New fails fast when
+		// the operator forgets to set the secrets. Pass --allow-dev-secrets
+		// (or COAGENT_ALLOW_DEV_SECRETS=1) to fall back to the dev sentinels
+		// with a startup warning.
+		SessionSecret:             os.Getenv("COAGENT_SESSION_SECRET"),
+		DaemonSharedSecret:        os.Getenv("COAGENT_DAEMON_SECRET"),
+		DeviceTokenSecret:         os.Getenv("COAGENT_DEVICE_SECRET"),
+		HumanCallerSecret:         os.Getenv("COAGENT_HUMAN_SECRET"),
+		AllowDevSecrets:           os.Getenv("COAGENT_ALLOW_DEV_SECRETS") == "1",
 		ReconcileGracePeriod:      60 * time.Second,
 		ReconcileCreateTimeout:    30 * time.Second,
 		ReconcileHeartbeatTimeout: 90 * time.Second,
@@ -110,6 +117,8 @@ func loadConfig() config {
 
 	flag.StringVar(&cfg.HTTPAddr, "addr", cfg.HTTPAddr, "HTTP listen address")
 	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "Path to server sqlite database")
+	flag.BoolVar(&cfg.AllowDevSecrets, "allow-dev-secrets", cfg.AllowDevSecrets,
+		"Allow empty / dev-sentinel secrets (dev-only; required for the legacy --change-me defaults)")
 	flag.DurationVar(&cfg.ReconcileGracePeriod, "reconcile-grace", cfg.ReconcileGracePeriod, "Cold start grace before stale reconcile begins")
 	flag.DurationVar(&cfg.ReconcileCreateTimeout, "create-timeout", cfg.ReconcileCreateTimeout, "Placement creating→orphan timeout")
 	flag.DurationVar(&cfg.ReconcileHeartbeatTimeout, "heartbeat-timeout", cfg.ReconcileHeartbeatTimeout, "Placement active→stale heartbeat timeout")

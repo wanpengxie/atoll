@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -36,8 +37,42 @@ type Config struct {
 	ReconcileCreateTimeout    time.Duration
 	ReconcileHeartbeatTimeout time.Duration
 
+	// AllowDevSecrets controls FIX-T8 secret fail-fast. When false (the
+	// production default), any empty secret or any value equal to a
+	// well-known dev sentinel causes gateway.New to return an error.
+	// Set true in dev / CI to keep the legacy "fall back to dev-*-change-
+	// me" behavior with a startup warning.
+	AllowDevSecrets bool
+
 	// DB overrides DBPath when non-nil (tests).
 	DB *sql.DB
+}
+
+// Dev sentinel values withDefaults rejects under
+// AllowDevSecrets=false. Listed as package-level constants so test
+// fixtures and cmd/server share the exact strings.
+const (
+	devSessionSecret     = "dev-session-secret-change-me"
+	devDaemonSecret      = "dev-daemon-secret-change-me"
+	devDeviceSecret      = "dev-device-secret-change-me"
+	devHumanCallerSecret = "dev-human-caller-secret-change-me"
+)
+
+// ErrInsecureSecret is returned by withDefaults when a required secret
+// is empty or equals one of the dev sentinels and AllowDevSecrets is
+// false. Wraps the offending config field name so cmd/server can print
+// an actionable error.
+type ErrInsecureSecret struct {
+	Field string
+	Value string
+}
+
+// Error implements error.
+func (e *ErrInsecureSecret) Error() string {
+	if e.Value == "" {
+		return fmt.Sprintf("gateway: %s empty (set the env var or pass --allow-dev-secrets)", e.Field)
+	}
+	return fmt.Sprintf("gateway: %s equals dev sentinel %q (set the env var or pass --allow-dev-secrets)", e.Field, e.Value)
 }
 
 // App is the server façade. cmd/server holds one.
@@ -58,12 +93,15 @@ type App struct {
 
 // New builds a composed App.
 func New(ctx context.Context, cfg Config) (*App, error) {
-	cfg = withDefaults(cfg)
+	var err error
+	cfg, err = withDefaults(cfg)
+	if err != nil {
+		return nil, err
+	}
 
 	var (
 		db     *sql.DB
 		closer func() error
-		err    error
 	)
 	if cfg.DB != nil {
 		db = cfg.DB
@@ -134,7 +172,12 @@ func (a *App) RunReconcile(ctx context.Context) {
 	a.placements.RunReconcile(ctx)
 }
 
-func withDefaults(cfg Config) Config {
+// withDefaults applies reconcile-loop default durations and runs the
+// FIX-T8 secret fail-fast gate. Empty secrets and dev sentinel values
+// are rejected unless AllowDevSecrets=true, in which case withDefaults
+// installs the dev sentinel and emits a warning so operators can spot
+// the misconfiguration in logs.
+func withDefaults(cfg Config) (Config, error) {
 	if cfg.ReconcileGracePeriod <= 0 {
 		cfg.ReconcileGracePeriod = 60 * time.Second
 	}
@@ -144,17 +187,29 @@ func withDefaults(cfg Config) Config {
 	if cfg.ReconcileHeartbeatTimeout <= 0 {
 		cfg.ReconcileHeartbeatTimeout = 90 * time.Second
 	}
-	if cfg.SessionSecret == "" {
-		cfg.SessionSecret = "dev-session-secret-change-me"
+
+	type secretSlot struct {
+		field    string
+		ptr      *string
+		devValue string
 	}
-	if cfg.DaemonSharedSecret == "" {
-		cfg.DaemonSharedSecret = "dev-daemon-secret-change-me"
+	slots := []secretSlot{
+		{"SessionSecret", &cfg.SessionSecret, devSessionSecret},
+		{"DaemonSharedSecret", &cfg.DaemonSharedSecret, devDaemonSecret},
+		{"DeviceTokenSecret", &cfg.DeviceTokenSecret, devDeviceSecret},
+		{"HumanCallerSecret", &cfg.HumanCallerSecret, devHumanCallerSecret},
 	}
-	if cfg.DeviceTokenSecret == "" {
-		cfg.DeviceTokenSecret = "dev-device-secret-change-me"
+	for _, s := range slots {
+		current := *s.ptr
+		insecure := current == "" || current == s.devValue
+		if !insecure {
+			continue
+		}
+		if !cfg.AllowDevSecrets {
+			return cfg, &ErrInsecureSecret{Field: s.field, Value: current}
+		}
+		log.Printf("[gateway] WARN: %s using dev sentinel %q — DO NOT USE IN PRODUCTION", s.field, s.devValue)
+		*s.ptr = s.devValue
 	}
-	if cfg.HumanCallerSecret == "" {
-		cfg.HumanCallerSecret = "dev-human-caller-secret-change-me"
-	}
-	return cfg
+	return cfg, nil
 }
