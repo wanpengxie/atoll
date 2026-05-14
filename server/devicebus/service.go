@@ -41,12 +41,12 @@ const defaultTokenTTL = 24 * time.Hour
 type State string
 
 const (
-	StatePending  State = "pending"
-	StateReady    State = "ready"
-	StateActive   State = "active"
-	StateOffline  State = "offline"
-	StateExpired  State = "expired"
-	StateRevoked  State = "revoked"
+	StatePending State = "pending"
+	StateReady   State = "ready"
+	StateActive  State = "active"
+	StateOffline State = "offline"
+	StateExpired State = "expired"
+	StateRevoked State = "revoked"
 )
 
 // AllStates is the closed set for tests / state-machine assertions.
@@ -341,4 +341,3 @@ func (s *Service) hashToken(raw string) string {
 	mac.Write([]byte(raw))
 	return hex.EncodeToString(mac.Sum(nil))
 }
-

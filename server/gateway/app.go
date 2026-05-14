@@ -119,14 +119,14 @@ func (a *App) Handler() http.Handler { return a.engine }
 
 // Identity / Catalog / Placements / Viewcache / Daemonbus / Devicebus
 // / Pushhub: test helpers.
-func (a *App) Identity() *identity.Service   { return a.identity }
-func (a *App) Catalog() *catalog.Service     { return a.catalog }
+func (a *App) Identity() *identity.Service     { return a.identity }
+func (a *App) Catalog() *catalog.Service       { return a.catalog }
 func (a *App) Placements() *placements.Service { return a.placements }
-func (a *App) Viewcache() *viewcache.Service { return a.viewcache }
-func (a *App) Daemonbus() *daemonbus.Service { return a.daemonbus }
-func (a *App) Devicebus() *devicebus.Service { return a.devicebus }
-func (a *App) Pushhub() *pushhub.Hub         { return a.pushhub }
-func (a *App) DB() *sql.DB                   { return a.db }
+func (a *App) Viewcache() *viewcache.Service   { return a.viewcache }
+func (a *App) Daemonbus() *daemonbus.Service   { return a.daemonbus }
+func (a *App) Devicebus() *devicebus.Service   { return a.devicebus }
+func (a *App) Pushhub() *pushhub.Hub           { return a.pushhub }
+func (a *App) DB() *sql.DB                     { return a.db }
 
 // RunReconcile blocks until ctx is cancelled, running the placements
 // reconcile loop.

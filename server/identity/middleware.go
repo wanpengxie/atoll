@@ -13,9 +13,14 @@ import (
 // CookieName is the cookie key carrying the raw session token.
 const CookieName = "coagent_session"
 
-// gin context key for the resolved user (set by AuthMiddleware,
-// read by handlers + nested middleware).
+// ginUserKey is the gin.Context key for the resolved user (set by
+// AuthMiddleware, read by handlers).
 const ginUserKey = "coagent.user"
+
+// contextUserKey is a private type used as the context.Context key
+// so it can't collide with other packages' values (staticcheck
+// SA1029). Used by WithUserContext / UserFromContext.
+type contextUserKey struct{}
 
 // ExtractTokenFromRequest returns the raw session token from the
 // request — preferring the cookie, falling back to the
@@ -110,14 +115,14 @@ func UserFrom(c *gin.Context) User {
 // zero User + false). Used by WS upgrades where the gin context may
 // not be available downstream.
 func UserFromContext(ctx context.Context) (User, bool) {
-	v, ok := ctx.Value(ginUserKey).(User)
+	v, ok := ctx.Value(contextUserKey{}).(User)
 	return v, ok
 }
 
 // WithUserContext attaches a user to a context — used by WS upgrades
 // to thread the auth result through to background goroutines.
 func WithUserContext(parent context.Context, u User) context.Context {
-	return context.WithValue(parent, ginUserKey, u)
+	return context.WithValue(parent, contextUserKey{}, u)
 }
 
 // nowMillis is the package-level clock used by SetCookie /

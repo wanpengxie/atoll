@@ -19,7 +19,7 @@ var upgrader = websocket.Upgrader{
 // frames to the daemon (via daemonbus) + receiver of frames pushed
 // back from the daemon.
 type Connection struct {
-	Session  Session
+	Session   Session
 	transport DeviceTransport
 
 	closeOnce sync.Once
@@ -38,7 +38,7 @@ type DeviceTransport interface {
 // device. It's deliberately distinct from the daemonbus mux frame:
 // the device sees a simpler shape and the server transforms.
 type DeviceFrame struct {
-	Direction       string          `json:"direction"`        // "from_device" | "to_device"
+	Direction       string          `json:"direction"` // "from_device" | "to_device"
 	DeviceSessionID string          `json:"device_session_id"`
 	ChannelID       string          `json:"channel_id"`
 	RequestID       string          `json:"request_id,omitempty"`

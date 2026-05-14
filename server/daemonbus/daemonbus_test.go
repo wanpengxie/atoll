@@ -129,8 +129,8 @@ func TestDispatchPushAndAck(t *testing.T) {
 		ChannelID: channel.ID("ch-A"), Seq: 7, MessageID: "m-7",
 		Envelope: message.Envelope{
 			ID: "m-7", TS: 1, ChannelID: "ch-A",
-			Sender:     message.Sender{Kind: message.SenderAgent, ID: "a"},
-			Kind:       message.KindEvent, Type: "agent.text",
+			Sender: message.Sender{Kind: message.SenderAgent, ID: "a"},
+			Kind:   message.KindEvent, Type: "agent.text",
 			Payload:    json.RawMessage(`{}`),
 			Visibility: message.VisibilityPublic, Audience: []string{"*"},
 		},

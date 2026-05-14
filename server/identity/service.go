@@ -61,15 +61,15 @@ const (
 // Errors returned by Service. Caller-facing endpoints translate
 // these to HTTP 400 / 401 / 409.
 var (
-	ErrEmailRequired        = errors.New("identity: email required")
-	ErrPasswordRequired     = errors.New("identity: password required")
-	ErrPasswordTooShort     = errors.New("identity: password must be ≥ 8 chars")
-	ErrEmailAlreadyExists   = errors.New("identity: email already registered")
-	ErrInvalidCredentials   = errors.New("identity: invalid email or password")
-	ErrCodeRequired         = errors.New("identity: verification code required")
-	ErrCodeInvalid          = errors.New("identity: invalid or expired verification code")
-	ErrSessionInvalid       = errors.New("identity: invalid or expired session")
-	ErrUserNotFound         = errors.New("identity: user not found")
+	ErrEmailRequired      = errors.New("identity: email required")
+	ErrPasswordRequired   = errors.New("identity: password required")
+	ErrPasswordTooShort   = errors.New("identity: password must be ≥ 8 chars")
+	ErrEmailAlreadyExists = errors.New("identity: email already registered")
+	ErrInvalidCredentials = errors.New("identity: invalid email or password")
+	ErrCodeRequired       = errors.New("identity: verification code required")
+	ErrCodeInvalid        = errors.New("identity: invalid or expired verification code")
+	ErrSessionInvalid     = errors.New("identity: invalid or expired session")
+	ErrUserNotFound       = errors.New("identity: user not found")
 )
 
 // Config carries construction-time options.

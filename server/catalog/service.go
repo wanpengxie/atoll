@@ -25,9 +25,9 @@ import (
 
 // Errors returned by Service.
 var (
-	ErrInvalidName    = errors.New("catalog: invalid name")
-	ErrWorkspaceNotFound = errors.New("catalog: workspace not found")
-	ErrChannelNotFound   = errors.New("catalog: channel not found")
+	ErrInvalidName        = errors.New("catalog: invalid name")
+	ErrWorkspaceNotFound  = errors.New("catalog: workspace not found")
+	ErrChannelNotFound    = errors.New("catalog: channel not found")
 	ErrNotWorkspaceMember = errors.New("catalog: not a workspace member")
 	ErrNotChannelMember   = errors.New("catalog: not a channel member")
 	ErrMemberExists       = errors.New("catalog: member already exists")

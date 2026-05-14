@@ -1,0 +1,132 @@
+---
+# go-arch-lint v3 — root module architecture enforcement (T2 spec §T2,
+# applied here because §T6 acceptance criterion #6 explicitly requires
+# `server -> runtime/*` and `server -> adapters/*` to be lint-rejected.
+#
+# Authoritative spec: .dalek/pm/m1.5-tickets.md §T2 + §T6.
+#
+# Maps the 6 ownership invariants from §T2 onto enforceable component
+# boundaries. When T3 / T4 land they fill the runtime/ and adapters/
+# trees; today both trees may be empty and `ignoreNotFoundComponents`
+# keeps the build green until they exist.
+
+version: 3
+workdir: .
+
+allow:
+  # deepScan checks method-level boundary crossings. ON because the
+  # M1.5 layout is clean.
+  deepScan: true
+  # runtime/ + adapters/ trees may not exist yet (T3 / T4 land later).
+  ignoreNotFoundComponents: true
+
+exclude:
+  # `lightcone/` is the legacy Node+Go module being archived in T9; it
+  # has its own .go-arch-lint.yaml inside `lightcone/daemon-go/`.
+  - lightcone
+  # archive/ is reserved for legacy code preserved verbatim during the
+  # M1.5 rewrite — out of architectural scope.
+  - archive
+  # xhs-cli + agent-binary live in separate go modules; the root
+  # go-arch-lint shouldn't reach into them.
+  - xhs-cli
+  - agent-binary
+
+excludeFiles:
+  # Test files don't carry architectural constraints (per spec §T2
+  # `excludeFiles: ["**/*_test.go"]`).
+  - "^.*_test\\.go$"
+
+components:
+  # ─────────────────────────────────────────────────────────────────────
+  # kernel — protocol contract core (interfaces + pure types + pure logic)
+  # Invariants #1 + #2.
+  # ─────────────────────────────────────────────────────────────────────
+  kernel: { in: kernel/** }
+
+  # ─────────────────────────────────────────────────────────────────────
+  # runtime — daemon-side execution engine. Landed by T3.
+  # Invariants #3 + #4.
+  # ─────────────────────────────────────────────────────────────────────
+  runtime: { in: runtime/** }
+  runtime_worker: { in: runtime/worker/** }
+
+  # ─────────────────────────────────────────────────────────────────────
+  # adapters — adapter implementations. Landed by T4 / T5.
+  # Invariants #4 + #5.
+  # ─────────────────────────────────────────────────────────────────────
+  adapters: { in: adapters/** }
+
+  # ─────────────────────────────────────────────────────────────────────
+  # server — central server (THIS ticket). MUST NOT depend on runtime/**
+  # or adapters/**. MAY depend on kernel/** and pkg/**.
+  # Invariants #1 + #2 + #5.
+  # ─────────────────────────────────────────────────────────────────────
+  server: { in: server/** }
+
+  # ─────────────────────────────────────────────────────────────────────
+  # cmd — process entry points. Composition root — may wire anything.
+  # ─────────────────────────────────────────────────────────────────────
+  cmd: { in: cmd/** }
+
+  # ─────────────────────────────────────────────────────────────────────
+  # pkg — public Go packages exported to 3rd-party callers.
+  # ─────────────────────────────────────────────────────────────────────
+  pkg: { in: pkg/** }
+
+vendors:
+  # Vendor sets used by canUse whitelists.
+  sqlite_driver: { in: ["modernc.org/sqlite", "modernc.org/sqlite/**"] }
+  gorilla:       { in: "github.com/gorilla/**" }
+  gin:           { in: "github.com/gin-gonic/**" }
+  uuid:          { in: "github.com/google/uuid" }
+  crypto:        { in: "golang.org/x/crypto/**" }
+  migrate:       { in: "github.com/golang-migrate/migrate/**" }
+
+deps:
+  # ─────────────────────────────────────────────────────────────────────
+  # kernel — closed at the project boundary AND the vendor boundary.
+  # ─────────────────────────────────────────────────────────────────────
+  kernel:
+    mayDependOn: [kernel]
+    canUse:
+      - uuid
+    # No anyVendorDeps — kernel is closed.
+
+  runtime:
+    mayDependOn: [kernel, runtime, runtime_worker, pkg]
+    anyVendorDeps: true
+
+  runtime_worker:
+    # Strict subset of runtime: NO sqlite, NO server.
+    mayDependOn: [kernel, pkg]
+    canUse:
+      - uuid
+
+  adapters:
+    mayDependOn: [kernel, pkg]
+    anyVendorDeps: true
+
+  server:
+    # server uses sqlite for its OWN view-cache / placements / identity
+    # tables (server-side cache is NOT the channel truth). May use
+    # gin / gorilla / migrate / crypto. Sub-packages of server (server/
+    # identity, server/catalog, server/gateway, …) freely import each
+    # other — that is the intra-component composition root pattern.
+    # The boundary that matters is server → runtime/** + server →
+    # adapters/**, both excluded by NOT listing them here.
+    mayDependOn: [kernel, server, pkg]
+    canUse:
+      - sqlite_driver
+      - gin
+      - gorilla
+      - uuid
+      - crypto
+      - migrate
+
+  cmd:
+    mayDependOn: [kernel, runtime, runtime_worker, adapters, server, pkg]
+    anyVendorDeps: true
+
+  pkg:
+    mayDependOn: [kernel, pkg]

@@ -26,7 +26,7 @@ import (
 
 // Errors returned by Service.
 var (
-	ErrDaemonAuthFailed   = errors.New("daemonbus: auth failed")
+	ErrDaemonAuthFailed    = errors.New("daemonbus: auth failed")
 	ErrDaemonNotRegistered = errors.New("daemonbus: daemon not registered")
 	ErrNoDaemonForChannel  = errors.New("daemonbus: no daemon for channel")
 )

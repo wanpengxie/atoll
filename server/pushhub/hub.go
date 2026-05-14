@@ -45,12 +45,12 @@ func NewHub() *Hub {
 
 // subscriber is one open WS connection.
 type subscriber struct {
-	ws     *websocket.Conn
-	userID string
-	chans  map[channel.ID]struct{}
-	send   chan []byte
-	once   sync.Once
-	done   chan struct{}
+	ws      *websocket.Conn
+	userID  string
+	chans   map[channel.ID]struct{}
+	send    chan []byte
+	once    sync.Once
+	done    chan struct{}
 	writeMu sync.Mutex
 }
 

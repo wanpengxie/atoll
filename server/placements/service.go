@@ -259,7 +259,3 @@ func (s *Service) RunReconcile(ctx context.Context) {
 		}
 	}
 }
-
-// nowMs is the unix-ms shorthand the gateway uses when it needs a
-// timestamp without reaching into the Service clock.
-func (s *Service) nowMs() int64 { return s.now().UnixMilli() }

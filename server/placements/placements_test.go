@@ -103,7 +103,10 @@ func TestACKMismatchRejected(t *testing.T) {
 		{"wrong owner_epoch", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.OwnerEpoch++; return a }},
 		{"wrong fencing_token", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.FencingToken++; return a }},
 		{"wrong daemon_id", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.DaemonID = "other"; return a }},
-		{"rejected status", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.Status = placement.AckRejected; return a }},
+		{"rejected status", func(a placement.CreateChannelAck) placement.CreateChannelAck {
+			a.Status = placement.AckRejected
+			return a
+		}},
 	}
 	for _, m := range mutations {
 		m := m
