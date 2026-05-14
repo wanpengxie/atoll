@@ -1,0 +1,55 @@
+package scheduler
+
+import (
+	"context"
+	"errors"
+
+	"github.com/coagent-ai/coagent/kernel/actor"
+	"github.com/coagent-ai/coagent/kernel/message"
+)
+
+// HandlerFn processes one envelope addressed to actorID.
+type HandlerFn func(ctx context.Context, actorID actor.ActorID, env *message.Envelope) error
+
+// Deliverer dispatches an envelope to one or more actor handlers.
+//
+// The supervisor / adapter manager registers a handler per active actor.
+// scheduler.Deliver iterates the envelope.Audience (resolved by trigger
+// gateway in L1 §5.1) and invokes each handler.
+//
+// This package keeps no per-actor state — that lives in supervisor
+// (lifecycle) + adapter manager. Deliverer is the routing seam.
+type Deliverer struct {
+	handlers map[actor.ActorID]HandlerFn
+}
+
+// NewDeliverer returns an empty Deliverer.
+func NewDeliverer() *Deliverer { return &Deliverer{handlers: make(map[actor.ActorID]HandlerFn)} }
+
+// Register adds a handler. Replaces an existing handler for the same id.
+func (d *Deliverer) Register(actorID actor.ActorID, fn HandlerFn) {
+	if fn == nil {
+		delete(d.handlers, actorID)
+		return
+	}
+	d.handlers[actorID] = fn
+}
+
+// Deliver routes the envelope to every registered audience actor. Errors
+// from individual handlers are collected and returned joined.
+func (d *Deliverer) Deliver(ctx context.Context, audience []actor.ActorID, env *message.Envelope) error {
+	if env == nil {
+		return errors.New("scheduler: deliver nil envelope")
+	}
+	var errs []error
+	for _, id := range audience {
+		fn, ok := d.handlers[id]
+		if !ok {
+			continue
+		}
+		if err := fn(ctx, id, env); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
