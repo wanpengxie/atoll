@@ -35,6 +35,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +43,7 @@ import (
 	"github.com/coagent-ai/daemon-go/internal/registry"
 	"github.com/coagent-ai/daemon-go/internal/store"
 	"github.com/coagent-ai/daemon-go/internal/supervisor"
+	workertools "github.com/coagent-ai/daemon-go/internal/worker/tools"
 	pkgharness "github.com/coagent-ai/daemon-go/pkg/harness"
 	"github.com/coagent-ai/daemon-go/pkg/v4types"
 
@@ -155,6 +157,19 @@ func Run(parentCtx context.Context, cfg RuntimeConfig) (RuntimeResult, error) {
 		return RuntimeResult{}, fmt.Errorf("worker_runtime: registry.Get %q: %w", tc.AgentID, err)
 	}
 
+	// Step 3a: ensure the built-in tool actors + their type_registry
+	// rows exist in this channel (idempotent — re-running registers no
+	// new rows). MUST run before buildHarnessDeps so LoadTypeLookup
+	// sees the new types in the cache.
+	if err := workertools.EnsureToolActors(parentCtx, workertools.EnsureConfig{
+		DB:        db,
+		ChannelID: tc.ChannelID,
+		Now:       time.Now().Unix(),
+		Logger:    cfg.Logger,
+	}); err != nil {
+		return RuntimeResult{}, fmt.Errorf("worker_runtime: ensure tool actors: %w", err)
+	}
+
 	// Step 4: build harness deps backed by the channel sqlite.
 	deps, derr := buildHarnessDeps(parentCtx, db, tc)
 	if derr != nil {
@@ -188,15 +203,42 @@ func Run(parentCtx context.Context, cfg RuntimeConfig) (RuntimeResult, error) {
 		provider = llm.NewEchoChatProvider(cfg.Model)
 	}
 
+	// Step 5a: build the V4ize-wrapped tool slice (T11). Each tool's
+	// Execute emits a request + response pair via in_worker_bus harness.
+	// MUST run after EnsureToolActors + buildHarnessDeps so the
+	// wrapper has the populated TypeLookup + the seeded tool actor
+	// rows for audience validation.
+	wrappedTools, terr := workertools.BuildTools(workertools.BuildConfig{
+		DB:                   db,
+		ChannelID:            tc.ChannelID,
+		AgentID:              tc.AgentID,
+		FencingToken:         tc.FencingToken,
+		TurnID:               deriveTurnID(tc),
+		TriggerCorrelationID: tc.TriggerCorrelationID,
+		WorkDir:              tc.ChannelWorkdir,
+		Deps:                 deps,
+		Logger:               cfg.Logger,
+	})
+	if terr != nil {
+		return RuntimeResult{}, fmt.Errorf("worker_runtime: BuildTools: %w", terr)
+	}
+
 	// Step 6: build the go-kimi agent. SessionID is intentionally left
 	// empty — go-kimi auto-creates a fresh session under the workdir
 	// per spawn. Persistent session resumption belongs to T11 / T13
 	// once turn replay semantics get hardened.
+	//
+	// AdditionalTools = the v4-wrapped catalogue. We set
+	// DisableStandardSandboxTools so go-kimi does not also expose its
+	// un-wrapped default tool set — every tool call must land on the
+	// channel log (L2 §3.9.4 invariant).
 	agent, aerr := NewAgent(AgentConfig{
-		WorkDir:  tc.ChannelWorkdir,
-		Provider: provider,
-		Model:    cfg.Model,
-		Emitter:  bridge,
+		WorkDir:                     tc.ChannelWorkdir,
+		Provider:                    provider,
+		Model:                       cfg.Model,
+		Emitter:                     bridge,
+		AdditionalTools:             wrappedTools,
+		DisableStandardSandboxTools: true,
 	})
 	if aerr != nil {
 		return RuntimeResult{}, fmt.Errorf("worker_runtime: NewAgent: %w", aerr)
@@ -289,6 +331,19 @@ func buildHarnessDeps(ctx context.Context, db *sql.DB, tc TurnCtx) (pkgharness.D
 		harness.NewSQLiteWorkerLocks(db),
 		tc.ChannelID,
 	), nil
+}
+
+// deriveTurnID synthesises the action_ledger turn key from the spawn
+// context. Spec §3.9.3 mandates `hash(actor_id, min_seq_in_batch)` but
+// the supervisor does not yet hand the worker `min_seq` — M1.3 baseline
+// substitutes `turn:<agent_id>:<trigger_msg_id|noop>`. The value is
+// stable across worker respawns for the same trigger, which is the
+// property action_ledger Reserve cares about.
+func deriveTurnID(tc TurnCtx) string {
+	if strings.TrimSpace(tc.TriggerMsgID) == "" {
+		return "turn:" + tc.AgentID + ":noop"
+	}
+	return "turn:" + tc.AgentID + ":" + tc.TriggerMsgID
 }
 
 // derivePrompt builds a minimal prompt for the echo-provider path. M1.3

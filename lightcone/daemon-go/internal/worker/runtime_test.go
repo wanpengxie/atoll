@@ -100,6 +100,40 @@ func TestRuntimeRun_HappyPath(t *testing.T) {
 		t.Errorf("channel sqlite gone: %v", statErr)
 	}
 	verifyTurnCtxFile(t, home, tc)
+
+	// T11 acceptance: every built-in tool actor lands in actor_registry
+	// + type_registry rows (idempotent — Run does the EnsureToolActors
+	// step before harness deps are built).
+	verifyToolActorsInstalled(t, workdir)
+}
+
+// verifyToolActorsInstalled checks that the canonical L2 §3.9.4 tool
+// actors are present in the channel sqlite after a worker boot.
+func verifyToolActorsInstalled(t *testing.T, workdir string) {
+	t.Helper()
+	db, err := openChannelAt(t, workdir)
+	if err != nil {
+		t.Fatalf("reopen channel: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	// Pick one canonical entry — fs.read + tool:fs.read. The tools
+	// package owns the full list; runtime test only proves the
+	// integration happened.
+	row := db.QueryRowContext(context.Background(),
+		`SELECT 1 FROM actor_registry WHERE actor_id = 'tool:fs.read' AND deregistered_at IS NULL`)
+	var present int
+	if err := row.Scan(&present); err != nil {
+		t.Fatalf("tool:fs.read actor not registered: %v", err)
+	}
+	row = db.QueryRowContext(context.Background(),
+		`SELECT max_pending_ms FROM type_registry WHERE type = 'fs.read'`)
+	var maxPending sql.NullInt64
+	if err := row.Scan(&maxPending); err != nil {
+		t.Fatalf("fs.read type not installed: %v", err)
+	}
+	if !maxPending.Valid || maxPending.Int64 <= 0 {
+		t.Fatalf("fs.read max_pending_ms invalid: %v", maxPending)
+	}
 }
 
 // SkipAgentRun path proves the boot lifecycle (turn-ctx write +
