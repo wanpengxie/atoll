@@ -282,19 +282,27 @@ func (m *Module) OnExternalCallback(ctx context.Context, raw []byte) error {
 		return nil
 	}
 
-	// Build the Respond payload. device_id always flows back via the
-	// payload (v4-message-definition §1.2.5 — sender.id stays
-	// tool:xhs-adapter; device identity lives in payload.device_id).
+	// Build the Respond payload. device_id flows back via the payload
+	// (v4-message-definition §1.2.5 — sender.id stays tool:xhs-adapter;
+	// device identity lives in payload.device_id) — but ONLY on
+	// xhs.publish responses.
 	//
-	// NOTE (T111 known carry-over): xhs.cookie.sync's L4 response schema is
-	// {status, reason} only — strictly speaking the unconditional device_id
-	// fold violates `additionalProperties:false` for that one type. The
-	// production templates Step 6 will reject it; tests use a permissive
-	// schema. Cleaning this up is intentionally out of R2-FIX-5 scope; the
-	// fix here closes the stowaway/timeout regression for the 4 R/R types
-	// that DO declare a non-trivial response.
+	// R4-FIX-A (T115, closes R3 critical / R2 major #6 regression class):
+	// Only xhs.publish's L4 §2.2 response schema declares `device_id`;
+	// the other 4 R/R types (xhs.search, xhs.note.fetch,
+	// xhs.recent.fetch, xhs.cookie.sync) are strict
+	// `additionalProperties:false` over {status, reason, <type-specific>}.
+	// Folding device_id unconditionally let harness Write Step 6 reject
+	// the 4 non-publish responses; correlation_id was already consumed
+	// by Recover above, so the request silently waited out the F3
+	// default-timeout (soft data-loss).
+	//
+	// Per-type guard pre-empts the schema violation: device_id only
+	// joins the payload when the recovered request type is publish.
+	// Unknown / blank request_type falls through to the most-restrictive
+	// default (no device_id), matching the per-type allow-list policy.
 	payload := map[string]any{}
-	if cb.DeviceID != "" {
+	if cb.DeviceID != "" && requestType == TypePublish {
 		payload["device_id"] = cb.DeviceID
 	}
 	status := adapter.StatusCompleted
@@ -336,9 +344,15 @@ func (m *Module) OnExternalCallback(ctx context.Context, raw []byte) error {
 
 // allowedResultKeysByType maps each xhs request type to the exact set
 // of `result` keys the L4 §2.2 response schema declares for that type
-// (excluding `status`/`reason`, which the adapter sets directly, and
-// `device_id`, which is folded unconditionally by the callback handler
-// — see the carry-over note in OnExternalCallback).
+// (excluding `status`/`reason`, which the adapter sets directly).
+//
+// `device_id` appears in this set ONLY for xhs.publish — its response
+// schema is the lone L4 §2.2 row that declares device_id. The 4
+// non-publish response schemas are strict
+// `additionalProperties:false` over {status, reason, <type-specific>}.
+// The OnExternalCallback payload builder folds cb.DeviceID only when
+// requestType == TypePublish, matching this allow-list (R4-FIX-A,
+// T115).
 //
 // T111 R2-FIX-5 (R2 major 6): the predecessor `allowedResultKeys` was a
 // union of all 5 schemas, which let cross-type stowaway fields (e.g. a
@@ -381,26 +395,23 @@ var allowedResultKeysByType = map[string]map[string]struct{}{
 // `reason` flows through RespondOptions.Reason (not via spread).
 // `retry_after` is declared only on xhs.publish's failed response
 // schema; every other type's failed schema is {status, reason} only.
-// `device_id` is allowed across the board because the callback handler
-// unconditionally folds it into the payload (see the cookie.sync
-// carry-over note in OnExternalCallback).
+// `device_id` is only declared on xhs.publish's response schema; the
+// 4 non-publish types' response schemas are strict
+// `additionalProperties:false` over {status, reason, <type-specific>}.
+// R4-FIX-A (T115): the prior allow-list let device_id through on all 5
+// types, which violated the 4 non-publish schemas and reproduced the
+// R2 major #6 silent F3 timeout. Keeping the entries empty makes the
+// adapter boundary drop device_id on non-publish failed terminals
+// even if a future callback handler still folds it.
 var allowedErrorKeysByType = map[string]map[string]struct{}{
 	TypePublish: {
 		"retry_after": {},
 		"device_id":   {},
 	},
-	TypeSearch: {
-		"device_id": {},
-	},
-	TypeNoteFetch: {
-		"device_id": {},
-	},
-	TypeRecentFetch: {
-		"device_id": {},
-	},
-	TypeCookieSync: {
-		"device_id": {},
-	},
+	TypeSearch:      {},
+	TypeNoteFetch:   {},
+	TypeRecentFetch: {},
+	TypeCookieSync:  {},
 }
 
 // resultAllowListFor returns the per-type result allow-list, or the
@@ -413,15 +424,20 @@ func resultAllowListFor(requestType string) map[string]struct{} {
 	return map[string]struct{}{}
 }
 
-// errorAllowListFor returns the per-type error allow-list, falling back
-// to a minimal {device_id} set when the type is unknown / blank — so a
-// failed terminal at least carries the device identity the framework
-// already folded into the payload.
+// errorAllowListFor returns the per-type error allow-list, or the
+// empty set when the type is unknown / blank (most-restrictive default,
+// mirroring resultAllowListFor).
+//
+// R4-FIX-A (T115): the predecessor fell back to {device_id}, but
+// device_id is only declared on xhs.publish's response schema. A
+// recovered legacy row (request_type='') with that fallback would
+// silently fail harness Step 6 on every non-publish type and surface
+// as an F3 timeout (R2 major #6 regression class).
 func errorAllowListFor(requestType string) map[string]struct{} {
 	if v, ok := allowedErrorKeysByType[requestType]; ok {
 		return v
 	}
-	return map[string]struct{}{"device_id": {}}
+	return map[string]struct{}{}
 }
 
 // copyAllowedKeys copies entries from src to dst whose key is present

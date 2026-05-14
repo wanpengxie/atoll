@@ -65,10 +65,16 @@ func openXhsChannel(t *testing.T) (*sql.DB, pkgharness.Deps) {
 	seedActor(AdapterActorID, "tool", adapterBinding)
 
 	maxPending := int64(60_000)
-	// L4 §2.2 schemas — keep them permissive (`type:object`) so the
-	// harness Step 6 doesn't reject our test payloads; the real
-	// install-time schemas come from the bootstrap saga (T3) which we
-	// don't exercise here.
+	// L4 §2.2 schemas — kept permissive (`additionalProperties:true`)
+	// so harness Write Step 6 accepts the deliberately-malformed
+	// callback payloads our adapter-boundary tests need (cross-type
+	// stowaways, etc.) without re-implementing the harness validator
+	// here. The production install-time schemas come from
+	// registry.XHSCreatorTypes() and are exercised in
+	// TestOnExternalCallback_ProductionSchemaValidates_AllTypes /
+	// openXhsChannelProduction — R4-FIX-A (T115) closed the gap where
+	// the permissive fixture used to hide the device_id-in-non-publish
+	// schema violation.
 	objectSchema := json.RawMessage(`{
 	  "request":  {"type": "object"},
 	  "response": {
@@ -801,10 +807,18 @@ func TestOnExternalCallback_WhitelistsErrorKeys(t *testing.T) {
 //
 // Note on test schemas: openXhsChannel installs `additionalProperties:
 // true` response schemas so the harness accepts our assertions about
-// what the adapter actually emits (we want to verify the adapter
-// filter, not re-test the harness validator). The production
+// what the adapter actually emits when we drive intentionally
+// schema-violating callbacks (cross-type stowaways). The production
 // `registry/templates.go` schemas remain `additionalProperties:false`
-// — the per-type filter is what keeps those schemas satisfied.
+// — the per-type filter is what keeps those schemas satisfied; the
+// `TestOnExternalCallback_ProductionSchemaValidates_AllTypes` suite
+// below exercises the per-type filter against the real production
+// schemas (R4-FIX-A, T115).
+//
+// device_id assertions are per-type (R4-FIX-A, T115): only xhs.publish
+// declares device_id in its L4 §2.2 response schema, so the adapter
+// only folds it for publish. Non-publish types assert device_id is
+// ABSENT from the payload.
 func TestOnExternalCallback_PerTypeResultAllowList(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -926,10 +940,19 @@ func TestOnExternalCallback_PerTypeResultAllowList(t *testing.T) {
 			if got["status"] != "completed" {
 				t.Fatalf("status = %v; want completed", got["status"])
 			}
-			// device_id fold is unconditional — verify it landed so we
-			// catch a future regression that breaks the carry-over.
-			if got["device_id"] != "dev-pri-001" {
-				t.Fatalf("device_id fold missing; got %v", got["device_id"])
+			// R4-FIX-A (T115): device_id fold is per-type. Only
+			// xhs.publish's L4 §2.2 response schema declares device_id;
+			// the 4 non-publish types must drop it at the adapter
+			// boundary to satisfy their `additionalProperties:false`
+			// production schemas.
+			if tc.typ == TypePublish {
+				if got["device_id"] != "dev-pri-001" {
+					t.Fatalf("device_id fold missing for publish; got %v", got["device_id"])
+				}
+			} else {
+				if v, has := got["device_id"]; has {
+					t.Fatalf("device_id leaked into non-publish payload for %s: %v", tc.typ, v)
+				}
 			}
 			for _, k := range tc.expectPresent {
 				if _, has := got[k]; !has {
@@ -953,8 +976,11 @@ func TestOnExternalCallback_PerTypeResultAllowList(t *testing.T) {
 // validates against its per-type schema.
 //
 // `reason` flows through RespondOptions.Reason (not via spread), so we
-// assert it landed via that path. `device_id` fold is unconditional
-// (carry-over, see OnExternalCallback note).
+// assert it landed via that path.
+//
+// device_id fold is per-type (R4-FIX-A, T115): only xhs.publish
+// declares device_id in its L4 §2.2 response schema. Non-publish types
+// assert device_id is ABSENT.
 func TestOnExternalCallback_PerTypeErrorAllowList(t *testing.T) {
 	cases := []struct {
 		name             string
@@ -1026,8 +1052,16 @@ func TestOnExternalCallback_PerTypeErrorAllowList(t *testing.T) {
 			if got["status"] != "failed" {
 				t.Fatalf("status = %v; want failed", got["status"])
 			}
-			if got["device_id"] != "dev-pri-001" {
-				t.Fatalf("device_id fold missing; got %v", got["device_id"])
+			// R4-FIX-A (T115): device_id fold is per-type; publish has
+			// device_id in its response schema, the other 4 types do not.
+			if tc.typ == TypePublish {
+				if got["device_id"] != "dev-pri-001" {
+					t.Fatalf("device_id fold missing for publish; got %v", got["device_id"])
+				}
+			} else {
+				if v, has := got["device_id"]; has {
+					t.Fatalf("device_id leaked into non-publish failed payload for %s: %v", tc.typ, v)
+				}
 			}
 			if _, leak := got["stack"]; leak {
 				t.Fatalf("stack leaked: %v", got["stack"])
@@ -1051,18 +1085,25 @@ func TestOnExternalCallback_PerTypeErrorAllowList(t *testing.T) {
 // (e.g. an upgraded sqlite row from before T111) or doesn't match the
 // closed set, every result key must be dropped (most-restrictive
 // default) so a stowaway can't slip through during the upgrade window.
+//
+// R4-FIX-A (T115): the error-path fallback used to return {device_id}
+// to keep the framework-folded identity on legacy rows, but device_id
+// is only declared on xhs.publish's response schema. A legacy row that
+// resolved to a non-publish type at runtime would then violate
+// `additionalProperties:false` and silently F3-timeout. The fallback is
+// now the empty set for both result and error paths.
 func TestOnExternalCallback_UnknownRequestTypeFallsBackToEmptyAllowList(t *testing.T) {
 	if v := resultAllowListFor(""); len(v) != 0 {
-		t.Fatalf("empty request_type allow-list = %v; want empty", v)
+		t.Fatalf("empty request_type result allow-list = %v; want empty", v)
 	}
 	if v := resultAllowListFor("xhs.future.type.not.yet.registered"); len(v) != 0 {
-		t.Fatalf("unknown request_type allow-list = %v; want empty", v)
+		t.Fatalf("unknown request_type result allow-list = %v; want empty", v)
 	}
-	// errorAllowListFor still passes device_id so the failed terminal
-	// keeps the framework-folded identity.
-	v := errorAllowListFor("")
-	if _, ok := v["device_id"]; !ok || len(v) != 1 {
-		t.Fatalf("empty request_type error allow-list = %v; want {device_id}", v)
+	if v := errorAllowListFor(""); len(v) != 0 {
+		t.Fatalf("empty request_type error allow-list = %v; want empty", v)
+	}
+	if v := errorAllowListFor("xhs.future.type.not.yet.registered"); len(v) != 0 {
+		t.Fatalf("unknown request_type error allow-list = %v; want empty", v)
 	}
 }
 
@@ -1072,5 +1113,302 @@ func TestRegister_ProvidesFactory(t *testing.T) {
 	factories := adapter.RegisteredModules()
 	if _, ok := factories[AdapterName]; !ok {
 		t.Fatalf("expected adapter.Register to publish %q", AdapterName)
+	}
+}
+
+// openXhsChannelProduction is the production-schema sibling of
+// openXhsChannel: it installs the EXACT type_registry rows
+// `registry.XHSCreatorTypes()` ships to channel bootstrap, including
+// each response schema's `additionalProperties:false` constraint. Used
+// by the R4-FIX-A (T115) regression suite so the harness Write Step 6
+// validator runs against the production schemas — pre-fix the 4
+// non-publish callback paths would have silently failed schema
+// validation here (correlation row already consumed → F3 timeout).
+func openXhsChannelProduction(t *testing.T) (*sql.DB, pkgharness.Deps) {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := store.OpenChannel(context.Background(),
+		filepath.Join(dir, "messages.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+	seedActor := func(id, kind, binding string) {
+		var bindArg any
+		if binding != "" {
+			bindArg = binding
+		}
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
+			 VALUES (?, ?, ?, ?, NULL)`,
+			id, kind, bindArg, testT0,
+		); err != nil {
+			t.Fatalf("seed actor %s: %v", id, err)
+		}
+	}
+	seedActor(testSystemID, "system", "")
+	seedActor(testAgentID, "agent", "in_worker_bus")
+	// XHSCreatorTypes() declares HandlerActorID = XHSCreatorAdapterActorID
+	// = "tool:xhs-adapter" with daemon_rpc binding — same actor the
+	// adapter publishes via AdapterActorID. Seed it under the daemon_rpc
+	// binding so registry.Install's actor-binding-consistency check
+	// accepts the rows.
+	seedActor(AdapterActorID, "tool", adapterBinding)
+
+	rows := registry.XHSCreatorTypes()
+	if err := store.WithImmediate(ctx, db, func(c context.Context, conn *sql.Conn) error {
+		return registry.Install(c, conn, rows, testT0)
+	}); err != nil {
+		t.Fatalf("install xhs production types: %v", err)
+	}
+
+	types, err := internalharness.LoadTypeLookup(ctx, db)
+	if err != nil {
+		t.Fatalf("LoadTypeLookup: %v", err)
+	}
+	deps := pkgharness.New(
+		internalharness.NewSQLiteStore(db),
+		internalharness.NewSQLiteActors(db),
+		types,
+		nil,
+		testChannelID,
+	)
+	return db, deps
+}
+
+// TestOnExternalCallback_ProductionSchemaValidates_AllTypes is the
+// R4-FIX-A (T115) regression for R3 critical / R2 major #6 residual:
+// non-publish callbacks were folding `device_id` into the response
+// payload, but only xhs.publish's L4 §2.2 response schema declares
+// device_id. The 4 non-publish schemas are strict
+// `additionalProperties:false` over {status, reason, <type-specific>}.
+//
+// Pre-fix, every non-publish callback (success OR failure) would have
+// failed harness Write Step 6 on the production schemas — but only
+// AFTER Recover consumed the correlation row, leaving the request to
+// wait out the F3 default-timeout (soft data-loss).
+//
+// This suite drives all 5 R/R types through the production schemas via
+// openXhsChannelProduction(). For each type:
+//   - success callback carries device_id + the type's declared result
+//     fields (no stowaways — those are covered by the
+//     PerTypeResultAllowList suite using permissive fixtures).
+//   - failure callback carries device_id + retry_after (only publish
+//     declares the latter on its failed schema).
+//
+// Assertions:
+//   - Respond returns no error → harness Step 6 accepted the payload
+//     under the production schema.
+//   - publish payload includes device_id; the other 4 do NOT.
+//   - publish failed payload includes retry_after; the other 4 do NOT.
+func TestOnExternalCallback_ProductionSchemaValidates_AllTypes(t *testing.T) {
+	cases := []struct {
+		name        string
+		typ         string
+		requestBody string
+		result      string
+		errorObj    string
+		// expectResult: keys that MUST appear in the success payload
+		// (beyond status / reason / device_id, which are checked
+		// separately).
+		expectResult []string
+		// expectRetryAfterOnFailure: only true for publish.
+		expectRetryAfterOnFailure bool
+	}{
+		{
+			name:         "publish",
+			typ:          TypePublish,
+			requestBody:  `{"title":"t","content":"c","device_id":"dev-pri-001"}`,
+			result:       `{"note_id":"n1","url":"https://xhs/n1"}`,
+			errorObj:     `{"reason":"login_expired","retry_after":30}`,
+			expectResult: []string{"note_id", "url"},
+			expectRetryAfterOnFailure: true,
+		},
+		{
+			name:         "search",
+			typ:          TypeSearch,
+			requestBody:  `{"query":"q"}`,
+			result:       `{"results":[{"id":"r1"}]}`,
+			errorObj:     `{"reason":"rate_limited"}`,
+			expectResult: []string{"results"},
+		},
+		{
+			name:         "note_fetch",
+			typ:          TypeNoteFetch,
+			requestBody:  `{"note_id":"n42"}`,
+			result:       `{"note":{"id":"n42"}}`,
+			errorObj:     `{"reason":"not_found"}`,
+			expectResult: []string{"note"},
+		},
+		{
+			name:         "recent_fetch",
+			typ:          TypeRecentFetch,
+			requestBody:  `{"limit":5}`,
+			result:       `{"notes":[{"id":"r1"}]}`,
+			errorObj:     `{"reason":"throttled"}`,
+			expectResult: []string{"notes"},
+		},
+		{
+			name:         "cookie_sync",
+			typ:          TypeCookieSync,
+			requestBody:  `{}`,
+			result:       `{}`,
+			errorObj:     `{"reason":"cookie_expired"}`,
+			expectResult: nil, // only status / reason
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name+"/success", func(t *testing.T) {
+			db, deps := openXhsChannelProduction(t)
+			requestID := "req-prod-ok-" + tc.name
+			externalID := "ext-prod-ok-" + tc.name
+			insertXhsRequest(t, db, requestID, tc.typ, tc.requestBody)
+			mock := NewMockDeviceClient()
+			mgr := newManagerWithMockExternalID(t, db, deps, mock, fixedExternalIDs(externalID))
+			dispatchEnvelope(t, mgr, requestID, tc.typ, tc.requestBody)
+
+			cb := []byte(`{"correlation_id":"` + externalID +
+				`","device_id":"dev-pri-001","status":"ok","result":` + tc.result + `}`)
+			if err := mgr.OnExternalCallback(context.Background(), AdapterName, cb); err != nil {
+				t.Fatalf("OnExternalCallback (production schema, success): %v", err)
+			}
+			payload, _, ok := readResponse(t, db, requestID)
+			if !ok {
+				t.Fatalf("no terminal response written for %s", tc.typ)
+			}
+			var got map[string]any
+			if err := json.Unmarshal([]byte(payload), &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got["status"] != "completed" {
+				t.Fatalf("status = %v; want completed", got["status"])
+			}
+			// device_id: only xhs.publish carries it under the production
+			// schema; non-publish types must drop it.
+			if tc.typ == TypePublish {
+				if got["device_id"] != "dev-pri-001" {
+					t.Fatalf("publish payload should carry device_id; got %v", got["device_id"])
+				}
+			} else {
+				if v, has := got["device_id"]; has {
+					t.Fatalf("non-publish %s payload should NOT carry device_id; got %v", tc.typ, v)
+				}
+			}
+			for _, k := range tc.expectResult {
+				if _, has := got[k]; !has {
+					t.Fatalf("expected %s payload to carry %q; got %s", tc.typ, k, payload)
+				}
+			}
+		})
+		t.Run(tc.name+"/failure", func(t *testing.T) {
+			db, deps := openXhsChannelProduction(t)
+			requestID := "req-prod-err-" + tc.name
+			externalID := "ext-prod-err-" + tc.name
+			insertXhsRequest(t, db, requestID, tc.typ, tc.requestBody)
+			mock := NewMockDeviceClient()
+			mgr := newManagerWithMockExternalID(t, db, deps, mock, fixedExternalIDs(externalID))
+			dispatchEnvelope(t, mgr, requestID, tc.typ, tc.requestBody)
+
+			cb := []byte(`{"correlation_id":"` + externalID +
+				`","device_id":"dev-pri-001","status":"error","error":` + tc.errorObj + `}`)
+			if err := mgr.OnExternalCallback(context.Background(), AdapterName, cb); err != nil {
+				t.Fatalf("OnExternalCallback (production schema, failure): %v", err)
+			}
+			payload, _, ok := readResponse(t, db, requestID)
+			if !ok {
+				t.Fatalf("no terminal response written for %s failure path", tc.typ)
+			}
+			var got map[string]any
+			if err := json.Unmarshal([]byte(payload), &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got["status"] != "failed" {
+				t.Fatalf("status = %v; want failed", got["status"])
+			}
+			if r, _ := got["reason"].(string); r == "" {
+				t.Fatalf("reason missing in failed payload: %s", payload)
+			}
+			if tc.typ == TypePublish {
+				if got["device_id"] != "dev-pri-001" {
+					t.Fatalf("publish failed payload should carry device_id; got %v", got["device_id"])
+				}
+			} else {
+				if v, has := got["device_id"]; has {
+					t.Fatalf("non-publish %s failed payload should NOT carry device_id; got %v", tc.typ, v)
+				}
+			}
+			_, hasRetry := got["retry_after"]
+			if tc.expectRetryAfterOnFailure && !hasRetry {
+				t.Fatalf("publish failed payload should carry retry_after; got %s", payload)
+			}
+			if !tc.expectRetryAfterOnFailure && hasRetry {
+				t.Fatalf("non-publish %s failed payload should NOT carry retry_after; got %s", tc.typ, payload)
+			}
+		})
+	}
+}
+
+// TestOnExternalCallback_FailurePath_NonPublish_NoDeviceID is the
+// focused sanity check per R4 fix-spec: each non-publish failure
+// callback must produce a {status, reason} response under the
+// production schema. Failing this guarantees R3 critical does not
+// re-emerge if someone reintroduces device_id into
+// allowedErrorKeysByType.
+func TestOnExternalCallback_FailurePath_NonPublish_NoDeviceID(t *testing.T) {
+	cases := []struct {
+		typ         string
+		requestBody string
+	}{
+		{TypeSearch, `{"query":"q"}`},
+		{TypeNoteFetch, `{"note_id":"n42"}`},
+		{TypeRecentFetch, `{"limit":5}`},
+		{TypeCookieSync, `{}`},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.typ, func(t *testing.T) {
+			db, deps := openXhsChannelProduction(t)
+			requestID := "req-nopub-err-" + tc.typ
+			externalID := "ext-nopub-err-" + tc.typ
+			insertXhsRequest(t, db, requestID, tc.typ, tc.requestBody)
+			mock := NewMockDeviceClient()
+			mgr := newManagerWithMockExternalID(t, db, deps, mock, fixedExternalIDs(externalID))
+			dispatchEnvelope(t, mgr, requestID, tc.typ, tc.requestBody)
+
+			cb := []byte(`{"correlation_id":"` + externalID +
+				`","device_id":"dev-pri-001","status":"error","error":{"reason":"boom","retry_after":99}}`)
+			if err := mgr.OnExternalCallback(context.Background(), AdapterName, cb); err != nil {
+				t.Fatalf("OnExternalCallback: %v", err)
+			}
+			payload, _, ok := readResponse(t, db, requestID)
+			if !ok {
+				t.Fatalf("no terminal response written for %s", tc.typ)
+			}
+			var got map[string]any
+			if err := json.Unmarshal([]byte(payload), &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got["status"] != "failed" {
+				t.Fatalf("%s status = %v; want failed", tc.typ, got["status"])
+			}
+			if got["reason"] != "boom" {
+				t.Fatalf("%s reason = %v; want boom", tc.typ, got["reason"])
+			}
+			if v, has := got["device_id"]; has {
+				t.Fatalf("%s failed payload leaked device_id: %v", tc.typ, v)
+			}
+			if v, has := got["retry_after"]; has {
+				t.Fatalf("%s failed payload leaked retry_after: %v", tc.typ, v)
+			}
+			// The only top-level keys should be status + reason.
+			for k := range got {
+				if k != "status" && k != "reason" {
+					t.Fatalf("%s failed payload has unexpected key %q: %s", tc.typ, k, payload)
+				}
+			}
+		})
 	}
 }
