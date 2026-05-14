@@ -65,9 +65,16 @@ func TestScenario4_DuplicateCallback_ChannelLogHasOneTerminal(t *testing.T) {
 	}
 
 	// One WS frame pushed; the adapter has registered a correlation
-	// entry for requestID.
-	if got := len(stack.Device.Sends()); got != 1 {
+	// entry for requestID. T105 FIX-5: pull the minted external_id off
+	// the frame so the callback can echo it (extension never sees
+	// envelope.ID).
+	sends := stack.Device.Sends()
+	if got := len(sends); got != 1 {
 		t.Fatalf("WS push count = %d, want 1", got)
+	}
+	externalID := sends[0].Command.CorrelationID
+	if externalID == "" || externalID == requestID {
+		t.Fatalf("expected minted external_id distinct from envelope.ID; got %q", externalID)
 	}
 
 	// -----------------------------------------------------------------
@@ -75,7 +82,7 @@ func TestScenario4_DuplicateCallback_ChannelLogHasOneTerminal(t *testing.T) {
 	// the terminal response and calls Forget on the correlation entry.
 	// -----------------------------------------------------------------
 	callbackBody := []byte(`{
-		"correlation_id":"` + requestID + `",
+		"correlation_id":"` + externalID + `",
 		"device_id":"` + DeviceID + `",
 		"status":"ok",
 		"result":{"note_id":"n-retry-1","url":"https://xhs.example/n-retry-1"}
@@ -165,9 +172,19 @@ func TestScenario4_DuplicateCallback_ConflictingBodyStillDedupes(t *testing.T) {
 		t.Fatalf("Manager.Dispatch: %v", err)
 	}
 
+	// T105 FIX-5: callbacks echo the minted external_id, not envelope.ID.
+	sends := stack.Device.Sends()
+	if len(sends) != 1 {
+		t.Fatalf("WS push count = %d, want 1", len(sends))
+	}
+	externalID := sends[0].Command.CorrelationID
+	if externalID == "" || externalID == requestID {
+		t.Fatalf("expected minted external_id distinct from envelope.ID; got %q", externalID)
+	}
+
 	// First callback wins.
 	first := []byte(`{
-		"correlation_id":"` + requestID + `",
+		"correlation_id":"` + externalID + `",
 		"device_id":"` + DeviceID + `",
 		"status":"ok",
 		"result":{"note_id":"winner-note","url":"https://xhs.example/winner"}
@@ -178,7 +195,7 @@ func TestScenario4_DuplicateCallback_ConflictingBodyStillDedupes(t *testing.T) {
 
 	// Second callback — same correlation_id, fabricated `error` shape.
 	second := []byte(`{
-		"correlation_id":"` + requestID + `",
+		"correlation_id":"` + externalID + `",
 		"device_id":"` + DeviceID + `",
 		"status":"error",
 		"error":{"reason":"unexpected_retry","code":"E_PHANTOM"}

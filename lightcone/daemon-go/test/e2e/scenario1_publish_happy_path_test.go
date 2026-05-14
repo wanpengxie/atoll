@@ -101,8 +101,15 @@ func TestScenario1_PublishXHSHappyPath(t *testing.T) {
 	if frame.Command.Cmd != "publish" {
 		t.Errorf("WS frame cmd = %q, want %q", frame.Command.Cmd, "publish")
 	}
-	if frame.Command.CorrelationID != publishReq.ID {
-		t.Errorf("WS frame correlation_id = %q, want %q", frame.Command.CorrelationID, publishReq.ID)
+	// T105 FIX-5: WS frame's correlation_id is the daemon-minted
+	// external_id, NOT envelope.ID. We assert the decoupling holds, then
+	// reuse the minted id for the extension's callback below.
+	externalID := frame.Command.CorrelationID
+	if externalID == "" {
+		t.Fatalf("WS frame correlation_id is empty")
+	}
+	if externalID == publishReq.ID {
+		t.Errorf("WS frame correlation_id MUST NOT echo envelope.ID %q (T105 FIX-5)", publishReq.ID)
 	}
 	// The adapter strips device_id out of params (it lives in the
 	// outer frame). Belt-and-braces — the unit test already proves this
@@ -115,8 +122,10 @@ func TestScenario1_PublishXHSHappyPath(t *testing.T) {
 	// -----------------------------------------------------------------
 	// Step 4: simulate Chrome extension callback (status=ok).
 	// -----------------------------------------------------------------
+	// The extension echoes the external_id the daemon pushed on the WS
+	// frame, NOT the daemon's internal envelope.ID.
 	callbackBody := `{
-		"correlation_id":"` + publishReq.ID + `",
+		"correlation_id":"` + externalID + `",
 		"device_id":"` + DeviceID + `",
 		"status":"ok",
 		"result":{
