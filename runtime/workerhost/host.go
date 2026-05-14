@@ -1,0 +1,214 @@
+package workerhost
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+
+	"github.com/coagent-ai/coagent/kernel/channel"
+	"github.com/coagent-ai/coagent/kernel/ledger"
+	klog "github.com/coagent-ai/coagent/kernel/log"
+	"github.com/coagent-ai/coagent/kernel/message"
+	"github.com/coagent-ai/coagent/kernel/placement"
+	"github.com/coagent-ai/coagent/runtime/ipc"
+)
+
+// MessageWriter is the daemon-side append handler invoked by the host
+// when a worker IPC requests write_message. Implementations wrap
+// runtime/store.Messages.Append.
+type MessageWriter interface {
+	Append(ctx context.Context, env *message.Envelope) (klog.AppendResult, error)
+}
+
+// LedgerOps is the daemon-side ledger operations invoked by the host.
+type LedgerOps interface {
+	Reserve(ctx context.Context, e ledger.Entry) (ledger.Entry, error)
+	Commit(ctx context.Context, key ledger.Key, committedAt int64) error
+}
+
+// HostConfig wires a Host.
+type HostConfig struct {
+	ChannelID    channel.ID
+	WorkerID     string
+	LeaseID      string
+	FencingToken placement.FencingToken
+	DaemonEpoch  placement.DaemonEpoch
+	Writer       MessageWriter
+	Ledger       LedgerOps
+
+	// NowFn returns unix-ms; required.
+	NowFn func() int64
+
+	// OnHeartbeat is called after a successful heartbeat. May be nil.
+	OnHeartbeat func(int64)
+
+	// OnShutdown is called after IPCShutdown is received. May be nil.
+	OnShutdown func()
+}
+
+// Host is the daemon-side IPC server for one worker.
+type Host struct {
+	cfg   HostConfig
+	codec *ipc.Codec
+}
+
+// NewHost wires a Host around an IPC stream (typically WorkerProc.Stdout
+// for input + WorkerProc.Stdin for output).
+func NewHost(in io.Reader, out io.Writer, cfg HostConfig) (*Host, error) {
+	if cfg.Writer == nil {
+		return nil, errors.New("workerhost: HostConfig.Writer nil")
+	}
+	if cfg.Ledger == nil {
+		return nil, errors.New("workerhost: HostConfig.Ledger nil")
+	}
+	if cfg.NowFn == nil {
+		return nil, errors.New("workerhost: HostConfig.NowFn nil")
+	}
+	return &Host{
+		cfg:   cfg,
+		codec: ipc.NewCodec(in, out),
+	}, nil
+}
+
+// Serve runs the daemon-side read loop. Blocks until the worker
+// disconnects (io.EOF) or ctx is cancelled.
+func (h *Host) Serve(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		frame, err := h.codec.Read()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if err := h.handle(ctx, frame); err != nil {
+			return err
+		}
+		if frame.Kind == ipc.KindShutdown {
+			if err := h.codec.Write(ipc.Frame{ID: frame.ID, Kind: ipc.KindShutdownAck}); err != nil {
+				return err
+			}
+			if h.cfg.OnShutdown != nil {
+				h.cfg.OnShutdown()
+			}
+			return nil
+		}
+	}
+}
+
+func (h *Host) handle(ctx context.Context, frame ipc.Frame) error {
+	// Handshake is the only kind that bypasses fence — it establishes
+	// the fencing context.
+	if frame.Kind == ipc.KindHandshake {
+		return h.handleHandshake(frame)
+	}
+	if frame.Kind == ipc.KindShutdown {
+		return nil // ack handled in Serve after handle returns
+	}
+
+	if ok, fi := Fence(frame, h.cfg.FencingToken, h.cfg.DaemonEpoch); !ok {
+		fiPayload, _ := json.Marshal(fi)
+		return h.codec.Write(ipc.Frame{
+			ID:      frame.ID,
+			Kind:    ipc.KindFenceInvalid,
+			Payload: fiPayload,
+		})
+	}
+
+	switch frame.Kind {
+	case ipc.KindWriteMessage:
+		return h.handleWrite(ctx, frame)
+	case ipc.KindReserveLedger:
+		return h.handleReserve(ctx, frame)
+	case ipc.KindCommitLedger:
+		return h.handleCommit(ctx, frame)
+	case ipc.KindHeartbeat:
+		return h.handleHeartbeat(frame)
+	default:
+		reply, _ := ipc.EncodeResult(frame.ID, false, fmt.Sprintf("unknown kind: %s", frame.Kind), nil)
+		return h.codec.Write(reply)
+	}
+}
+
+func (h *Host) handleHandshake(frame ipc.Frame) error {
+	ack := ipc.HandshakeAckPayload{
+		WorkerID:     h.cfg.WorkerID,
+		ChannelID:    h.cfg.ChannelID,
+		FencingToken: h.cfg.FencingToken,
+		DaemonEpoch:  h.cfg.DaemonEpoch,
+	}
+	payload, err := json.Marshal(ack)
+	if err != nil {
+		return err
+	}
+	return h.codec.Write(ipc.Frame{ID: frame.ID, Kind: ipc.KindHandshakeAck, Payload: payload})
+}
+
+func (h *Host) handleWrite(ctx context.Context, frame ipc.Frame) error {
+	var payload ipc.WriteMessagePayload
+	if err := json.Unmarshal(frame.Payload, &payload); err != nil {
+		reply, _ := ipc.EncodeResult(frame.ID, false, "decode: "+err.Error(), nil)
+		return h.codec.Write(reply)
+	}
+	res, err := h.cfg.Writer.Append(ctx, &payload.Envelope)
+	if err != nil {
+		reply, _ := ipc.EncodeResult(frame.ID, false, err.Error(), ipc.WriteMessageResult{
+			Reason: err.Error(),
+		})
+		return h.codec.Write(reply)
+	}
+	reply, _ := ipc.EncodeResult(frame.ID, true, "", ipc.WriteMessageResult{
+		Seq:     int64(res.Seq),
+		Deduped: res.Deduped,
+	})
+	return h.codec.Write(reply)
+}
+
+func (h *Host) handleReserve(ctx context.Context, frame ipc.Frame) error {
+	var payload ipc.ReserveLedgerPayload
+	if err := json.Unmarshal(frame.Payload, &payload); err != nil {
+		reply, _ := ipc.EncodeResult(frame.ID, false, "decode: "+err.Error(), nil)
+		return h.codec.Write(reply)
+	}
+	got, err := h.cfg.Ledger.Reserve(ctx, payload.Entry)
+	if err != nil {
+		reply, _ := ipc.EncodeResult(frame.ID, false, err.Error(), nil)
+		return h.codec.Write(reply)
+	}
+	replayed := got.EnvelopeID != payload.Entry.EnvelopeID
+	reply, _ := ipc.EncodeResult(frame.ID, true, "", ipc.ReserveLedgerResult{
+		Entry: got, Replayed: replayed,
+	})
+	return h.codec.Write(reply)
+}
+
+func (h *Host) handleCommit(ctx context.Context, frame ipc.Frame) error {
+	var payload ipc.CommitLedgerPayload
+	if err := json.Unmarshal(frame.Payload, &payload); err != nil {
+		reply, _ := ipc.EncodeResult(frame.ID, false, "decode: "+err.Error(), nil)
+		return h.codec.Write(reply)
+	}
+	if err := h.cfg.Ledger.Commit(ctx, payload.Key, payload.CommittedAt); err != nil {
+		reply, _ := ipc.EncodeResult(frame.ID, false, err.Error(), nil)
+		return h.codec.Write(reply)
+	}
+	reply, _ := ipc.EncodeResult(frame.ID, true, "", nil)
+	return h.codec.Write(reply)
+}
+
+func (h *Host) handleHeartbeat(frame ipc.Frame) error {
+	var payload ipc.HeartbeatPayload
+	_ = json.Unmarshal(frame.Payload, &payload)
+	if h.cfg.OnHeartbeat != nil {
+		h.cfg.OnHeartbeat(payload.NowMs)
+	}
+	reply, _ := ipc.EncodeResult(frame.ID, true, "", map[string]int64{
+		"server_now_ms": h.cfg.NowFn(),
+	})
+	return h.codec.Write(reply)
+}

@@ -45,6 +45,15 @@ components:
   kernel: { in: kernel/** }
 
   # ─────────────────────────────────────────────────────────────────────
+  # runtime_ipc — daemon ↔ worker IPC wire types (Frame, Codec, payloads).
+  # Pure: imports only kernel + stdlib. Shared by runtime (daemon-side
+  # workerhost) and runtime_worker (worker subprocess). Splitting it out
+  # is what lets runtime_worker stay sqlite-free while still talking
+  # the IPC protocol (T3 spec §T3, invariant #6).
+  # ─────────────────────────────────────────────────────────────────────
+  runtime_ipc: { in: runtime/ipc/** }
+
+  # ─────────────────────────────────────────────────────────────────────
   # runtime — daemon-side execution engine. Landed by T3.
   # Invariants #3 + #4.
   # ─────────────────────────────────────────────────────────────────────
@@ -93,13 +102,19 @@ deps:
       - uuid
     # No anyVendorDeps — kernel is closed.
 
+  runtime_ipc:
+    # Pure wire-types package. Closed at project boundary: kernel + stdlib only.
+    mayDependOn: [kernel]
+    # No anyVendorDeps — runtime_ipc is closed (no sqlite, no gin, no kimi).
+
   runtime:
-    mayDependOn: [kernel, runtime, runtime_worker, pkg]
+    mayDependOn: [kernel, runtime, runtime_ipc, runtime_worker, pkg]
     anyVendorDeps: true
 
   runtime_worker:
-    # Strict subset of runtime: NO sqlite, NO server.
-    mayDependOn: [kernel, pkg]
+    # Strict subset of runtime: NO sqlite, NO server. MAY import runtime_ipc
+    # (shared IPC wire types — T3 spec §T3 invariant #6).
+    mayDependOn: [kernel, runtime_ipc, pkg]
     canUse:
       - uuid
 
