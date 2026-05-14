@@ -612,22 +612,22 @@ func validateConfig(cfg Config) error {
 // every Execute.
 func validateDeps(d pkgharness.Deps) error {
 	if d.Store == nil {
-		return errors.New("Store is nil")
+		return errors.New("store is nil")
 	}
 	if d.Actors == nil {
-		return errors.New("Actors is nil")
+		return errors.New("actors lookup is nil")
 	}
 	if d.Types == nil {
-		return errors.New("Types is nil")
+		return errors.New("types lookup is nil")
 	}
 	if d.Dispatcher == nil {
-		return errors.New("Dispatcher is nil")
+		return errors.New("dispatcher is nil")
 	}
 	if d.Clock == nil {
-		return errors.New("Clock is nil")
+		return errors.New("clock is nil")
 	}
 	if strings.TrimSpace(d.ChannelID) == "" {
-		return errors.New("ChannelID is empty")
+		return errors.New("channel_id is empty")
 	}
 	return nil
 }

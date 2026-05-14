@@ -420,5 +420,5 @@ func isNoRows(err error) bool {
 // can wire an HITL approver if needed.
 //
 // Both signatures are `func(ctx, action, desc) (bool, reason)`.
-func autoApproveFile(_ context.Context, _, _ string) (bool, string) { return true, "" }
+func autoApproveFile(_ context.Context, _, _ string) (bool, string)  { return true, "" }
 func autoApproveShell(_ context.Context, _, _ string) (bool, string) { return true, "" }

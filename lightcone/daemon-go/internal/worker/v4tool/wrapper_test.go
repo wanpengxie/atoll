@@ -35,8 +35,8 @@ type fakeTool struct {
 	nextErr    error
 }
 
-func (f *fakeTool) Name() string                  { return f.name }
-func (f *fakeTool) Description() string           { return f.description }
+func (f *fakeTool) Name() string                     { return f.name }
+func (f *fakeTool) Description() string              { return f.description }
 func (f *fakeTool) ParameterSchema() json.RawMessage { return f.schema }
 func (f *fakeTool) Execute(_ context.Context, _ json.RawMessage) (types.ToolResult, error) {
 	f.calls.Add(1)
@@ -89,7 +89,7 @@ func newFixture(t *testing.T) *fixture {
 	// fallback-branch install check passes.
 	requestSchema := map[string]any{"type": "object"}
 	responseSchema := map[string]any{
-		"type": "object",
+		"type":     "object",
 		"required": []string{"status"},
 		"properties": map[string]any{
 			"status": map[string]any{"type": "string", "enum": []string{"completed", "failed"}},

@@ -85,9 +85,7 @@ func (t *SQLiteQueryTool) Execute(ctx context.Context, raw json.RawMessage) (typ
 	}
 
 	driverArgs := make([]any, len(args.Params))
-	for i, p := range args.Params {
-		driverArgs[i] = p
-	}
+	copy(driverArgs, args.Params)
 
 	rows, err := t.db.QueryContext(ctx, args.SQL, driverArgs...)
 	if err != nil {
