@@ -2,7 +2,9 @@ package trigger
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +40,27 @@ const FutureSchedulerUpstream = ""
 // constant exported lets callers grep for it in audit queries.
 const FutureSchedulerExpiredError = "expired"
 
+// FutureSchedulerMaxAttemptsError is the sentinel `last_error` value the
+// scheduler stamps on rows that have been claimed more times than the
+// configured MaxAttempts. The row is moved to the terminal failed state
+// so a poison message stops chewing CPU.
+const FutureSchedulerMaxAttemptsError = "max_attempts_exceeded"
+
+// DefaultFutureSchedulerClaimTTL is the staleness threshold after which
+// scanReady reclaims a row whose claim_owner never released the row —
+// the typical case is a daemon SIGKILL between claim() and Dispatch
+// completion. 60s is long enough that an honest in-flight Dispatch
+// (e.g. waiting on a downstream HTTP timeout) will not be ripped out
+// from under the holder.
+const DefaultFutureSchedulerClaimTTL = 60 * time.Second
+
+// DefaultFutureSchedulerMaxAttempts caps how many times the scheduler
+// will re-Dispatch a single row before marking it permanently failed.
+// 10 matches the spec example in fix-spec.md R2-FIX-3 and gives a
+// flapping downstream ~10 retries (≈10 ticks ≈ 10 s with the 1 s
+// baseline period) before the row drops out of the scheduler hot loop.
+const DefaultFutureSchedulerMaxAttempts = 10
+
 // GatewayDispatcher is the subset of Gateway the scheduler calls. It's
 // a 1-method interface so tests can inject a spy without spinning up
 // an ActorLookup. The production wiring passes *Gateway directly —
@@ -47,27 +70,47 @@ type GatewayDispatcher interface {
 }
 
 // FutureScheduler scans `messages` for future-message rows
-// (`not_before <= now AND delivered_at IS NULL`) and injects each
-// into the trigger gateway per L1 §5.3.
+// (`not_before <= now AND delivered_at IS NULL AND
+// delivery_failed_at IS NULL`) and injects each into the trigger
+// gateway per L1 §5.3.
 //
 // One scheduler per channel sqlite. The daemon owns N schedulers
 // when it hosts N channels. They share the protocol baseline cadence
 // (DefaultFutureSchedulerPeriod) unless channel-specific override is
 // wired via SchedulerConfig.
 //
-// Crash recovery is built-in: scheduler state lives entirely in the
-// channel sqlite (messages.delivered_at / delivery_failed_at flags).
-// A restarted daemon simply re-runs Tick and picks up where it left
-// off — there is no in-memory queue to lose.
+// In-flight claim vs. terminal state (R2-FIX-3):
+//
+//   - claim_owner / claimed_at — the scheduler instance that is
+//     currently dispatching this row and when it took the claim. These
+//     are NULL whenever the row is dispatchable. A claim is the
+//     scheduler's "I am working on this" flag; it does NOT advance the
+//     row to a terminal state.
+//   - delivered_at — written exactly once, when Dispatch returns
+//     successfully. This is the L0 §2.5 terminal "delivered" marker.
+//   - delivery_failed_at + last_error — written exactly once, when the
+//     row reaches a terminal failure (expires_at < now at scan time
+//     OR attempts > MaxAttempts).
+//
+// Crash-recovery contract: state lives entirely in the channel sqlite,
+// so a restarted daemon simply re-runs Tick. The scan SQL admits a row
+// when `claim_owner IS NULL` OR `claimed_at < now - claim_ttl_ms`, so
+// a ghost claim left behind by a SIGKILL between claim() and Dispatch
+// completion is reclaimed once the TTL elapses. delivered_at remains
+// strictly terminal — at-least-once delivery, no silent-loss window.
 type FutureScheduler struct {
-	db        *sql.DB
-	dispatch  GatewayDispatcher
-	channelID string
-	cfg       SchedulerConfig
+	db           *sql.DB
+	dispatch     GatewayDispatcher
+	channelID    string
+	cfg          SchedulerConfig
+	ownerID      string
+	claimTTLMs   int64
+	maxAttempts  int
 }
 
 // SchedulerConfig tunes the scheduler. Zero value yields baseline
-// behaviour (1s period, 256 batch, wall-clock now, slog.Default).
+// behaviour (1s period, 256 batch, wall-clock now, slog.Default,
+// random 16-hex OwnerID, 60s ClaimTTL, 10 MaxAttempts).
 type SchedulerConfig struct {
 	// Period is the ticker interval for Run; defaults to
 	// DefaultFutureSchedulerPeriod (1 second).
@@ -87,6 +130,28 @@ type SchedulerConfig struct {
 	// Logger receives structured scheduler events. Defaults to
 	// slog.Default(); test callers can pass a discard logger.
 	Logger *slog.Logger
+
+	// OwnerID identifies this scheduler instance in the messages
+	// `claim_owner` column. Multiple schedulers sharing a sqlite (e.g.
+	// during a daemon hot-restart or HA failover) MUST have distinct
+	// owner ids so claim/release CAS clauses do not clobber each
+	// other. Defaults to a random 16-hex string generated at
+	// construction; production callers may pass the daemon instance
+	// id for easier debugging.
+	OwnerID string
+
+	// ClaimTTL is the staleness threshold after which scanReady
+	// reclaims a row whose claim_owner is set but claimed_at is older
+	// than now - ClaimTTL. Defaults to DefaultFutureSchedulerClaimTTL
+	// (60s). Tests use sub-second TTLs to exercise stale-claim paths.
+	ClaimTTL time.Duration
+
+	// MaxAttempts caps how many claim+Dispatch cycles one row receives
+	// before scheduler stamps delivery_failed_at +
+	// FutureSchedulerMaxAttemptsError and stops re-claiming. Defaults
+	// to DefaultFutureSchedulerMaxAttempts (10). Tests use 1-3 to
+	// exercise the cap quickly.
+	MaxAttempts int
 }
 
 // NewFutureScheduler constructs a scheduler. Returns an error on
@@ -119,12 +184,41 @@ func NewFutureScheduler(
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	if cfg.ClaimTTL <= 0 {
+		cfg.ClaimTTL = DefaultFutureSchedulerClaimTTL
+	}
+	if cfg.MaxAttempts <= 0 {
+		cfg.MaxAttempts = DefaultFutureSchedulerMaxAttempts
+	}
+	ownerID := cfg.OwnerID
+	if ownerID == "" {
+		var err error
+		ownerID, err = generateOwnerID()
+		if err != nil {
+			return nil, fmt.Errorf("future_scheduler: generate owner id: %w", err)
+		}
+	}
 	return &FutureScheduler{
-		db:        db,
-		dispatch:  dispatch,
-		channelID: channelID,
-		cfg:       cfg,
+		db:          db,
+		dispatch:    dispatch,
+		channelID:   channelID,
+		cfg:         cfg,
+		ownerID:     ownerID,
+		claimTTLMs:  cfg.ClaimTTL.Milliseconds(),
+		maxAttempts: cfg.MaxAttempts,
 	}, nil
+}
+
+// generateOwnerID returns a random 16-hex (8-byte) string used as the
+// default claim_owner value when SchedulerConfig.OwnerID is empty.
+// crypto/rand is overkill collision-wise but guarantees uniqueness
+// across two schedulers in the same process without any coordination.
+func generateOwnerID() (string, error) {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf[:]), nil
 }
 
 // Run drives the scheduler loop until ctx is cancelled. Each
@@ -161,18 +255,20 @@ func (s *FutureScheduler) Run(ctx context.Context) error {
 // produce duplicate Dispatcher invocations only for rows that were
 // **newly** eligible since the previous call. Rows already marked
 // `delivered_at` / `delivery_failed_at` are silently skipped by the
-// scan SQL.
+// scan SQL, and rows still under a fresh claim are skipped via the
+// claim_owner / claimed_at columns.
 //
 // Per-row processing:
 //
 //  1. expires_at < now → CAS UPDATE delivery_failed_at + last_error;
 //     do not dispatch.
-//  2. else → Dispatch(env, upstream="" per L1 §5.3); on success CAS
-//     UPDATE delivered_at.
-//
-// Dispatch failure leaves the row pending — next Tick retries. The
-// CAS guards (WHERE delivered_at IS NULL / WHERE delivery_failed_at
-// IS NULL) make duplicate scheduler invocations safe.
+//  2. else → claim() CAS sets claim_owner + claimed_at + bumps
+//     attempts. CAS-loser yields. Post-claim, if attempts >
+//     MaxAttempts the row is moved to terminal failure and skipped.
+//  3. Dispatch(env, upstream="" per L1 §5.3). On success, markDelivered
+//     CAS stamps delivered_at and clears the claim. On failure,
+//     releaseClaim CAS clears the claim (so the next Tick retries) —
+//     attempts stays at the bumped value so the cap is enforced.
 func (s *FutureScheduler) Tick(ctx context.Context) error {
 	now := s.cfg.Now()
 	rows, err := s.scanReady(ctx, now)
@@ -212,14 +308,17 @@ type readyRow struct {
 }
 
 // scanReady executes the L1 §5.3 / L2 §1.4.1 scan: every future
-// message whose not_before has elapsed and which has not yet been
-// delivered or marked expired.
+// message whose not_before has elapsed, has not yet been delivered or
+// marked expired, AND is either unclaimed or whose claim has gone
+// stale past ClaimTTL.
 //
 // The SQL uses the partial index `ix_messages_not_before` (created in
 // L2 §1.4.1 with `WHERE not_before IS NOT NULL`), so the scan is
-// cheap even with a large messages table.
+// cheap even with a large messages table. The trailing claim_owner
+// clause is evaluated per-row after the partial index narrows the set.
 func (s *FutureScheduler) scanReady(ctx context.Context, now int64) ([]readyRow, error) {
-	rows, err := s.db.QueryContext(ctx, scanReadySQL, now, s.cfg.Batch)
+	staleBefore := now - s.claimTTLMs
+	rows, err := s.db.QueryContext(ctx, scanReadySQL, now, staleBefore, s.cfg.Batch)
 	if err != nil {
 		return nil, err
 	}
@@ -249,6 +348,11 @@ func (s *FutureScheduler) scanReady(ctx context.Context, now int64) ([]readyRow,
 // scanReadySQL projects exactly the columns readyRow needs and orders
 // by seq ASC so the trigger order is deterministic (matches store
 // arrival order; same convention as supervisor.BacklogScan).
+//
+// The `claim_owner IS NULL OR claimed_at < ?` predicate makes scan
+// recover ghost claims left behind by a crashed daemon — without it
+// any row that won a CAS-claim before SIGKILL would silently vanish
+// from the scheduler's view forever.
 const scanReadySQL = `
 SELECT seq, id, ts, channel_id,
        sender_kind, sender_id,
@@ -261,6 +365,7 @@ SELECT seq, id, ts, channel_id,
    AND not_before <= ?
    AND delivered_at IS NULL
    AND delivery_failed_at IS NULL
+   AND (claim_owner IS NULL OR claimed_at < ?)
  ORDER BY seq ASC
  LIMIT ?
 `
@@ -269,22 +374,27 @@ SELECT seq, id, ts, channel_id,
 // the gateway. expires_at < now ALWAYS wins over dispatch — L1 §5.3
 // "scheduler 投递时若 expires_at < now，跳过 trigger".
 //
-// Concurrent-tick safety (FIX-6 §2 / codex t92):
+// Crash-safety contract (R2-FIX-3):
 //
-//   - Pre-fix: Dispatch happened first, then markDelivered. Two
-//     schedulers ticking the same due row both Dispatched, then raced
-//     on the idempotent markDelivered — both side-effects fired.
-//   - Post-fix: a CAS UPDATE claims the row by stamping delivered_at
-//     BEFORE Dispatch runs. Only the CAS winner proceeds; the loser
-//     sees rows_affected == 0 and yields. On Dispatch failure the
-//     winner releases the claim (delivered_at → NULL, guarded by the
-//     same timestamp) so a later tick retries.
+//   - claim() CAS sets claim_owner + claimed_at + bumps attempts. The
+//     CAS predicate (delivered_at IS NULL AND delivery_failed_at IS
+//     NULL AND (claim_owner IS NULL OR claimed_at < stale_before))
+//     means a ghost claim left behind by SIGKILL is reclaimed once
+//     ClaimTTL elapses. delivered_at is NEVER touched here, so it
+//     stays a true terminal marker.
+//   - On Dispatch success, markDelivered CAS sets delivered_at and
+//     clears the claim atomically — the row reaches its real terminal
+//     state in one statement.
+//   - On Dispatch failure, releaseClaim clears the claim (so the next
+//     Tick can retry). The release WHERE clause is owner-scoped
+//     (claim_owner = s.ownerID) so a concurrent winner's claim cannot
+//     be clobbered.
+//   - If attempts > MaxAttempts after a claim, markPermanentlyFailed
+//     stamps delivery_failed_at + FutureSchedulerMaxAttemptsError so
+//     the row drops out of the scan set.
 //
-// `delivered_at` thus widens semantically from "dispatch finished" to
-// "claim acquired AND dispatch tentatively running"; downstream readers
-// (scanReadySQL `delivered_at IS NULL` filter, viewsync replay) tolerate
-// that window. SQLite serializes writers via WAL + busy_timeout so the
-// CAS is atomic against concurrent UPDATEs to the same row.
+// SQLite serializes writers via WAL + busy_timeout so each CAS is
+// atomic against concurrent UPDATEs to the same row.
 func (s *FutureScheduler) processRow(ctx context.Context, r *readyRow, now int64) error {
 	if r.ExpiresAt.Valid && r.ExpiresAt.Int64 < now {
 		if err := s.markExpired(ctx, r.ID, now); err != nil {
@@ -296,8 +406,9 @@ func (s *FutureScheduler) processRow(ctx context.Context, r *readyRow, now int64
 	}
 
 	// Claim the row before Dispatch. CAS-fail (0 rows affected) → loser
-	// of the race; another scheduler already owns this row.
-	claimed, err := s.claim(ctx, r.ID, now)
+	// of the race; another scheduler already owns this row (or it has
+	// since reached a terminal state).
+	attempts, claimed, err := s.claim(ctx, r.ID, now)
 	if err != nil {
 		return fmt.Errorf("claim: %w", err)
 	}
@@ -307,10 +418,25 @@ func (s *FutureScheduler) processRow(ctx context.Context, r *readyRow, now int64
 		return nil
 	}
 
+	// Cap re-claims at MaxAttempts so a poison row drops out of the
+	// scheduler hot loop. The check runs AFTER claim so a concurrent
+	// winner does not get falsely "failed" by a loser racing here.
+	if attempts > int64(s.maxAttempts) {
+		if err := s.markPermanentlyFailed(ctx, r.ID, now, FutureSchedulerMaxAttemptsError); err != nil {
+			s.cfg.Logger.Warn("future_scheduler.mark_failed.error",
+				"channel_id", s.channelID, "id", r.ID, "err", err.Error())
+			return fmt.Errorf("mark permanently failed: %w", err)
+		}
+		s.cfg.Logger.Warn("future_scheduler.max_attempts_exceeded",
+			"channel_id", s.channelID, "id", r.ID,
+			"attempts", attempts, "max_attempts", s.maxAttempts)
+		return nil
+	}
+
 	env, err := buildEnvelope(r)
 	if err != nil {
 		// Release the claim so a later tick can pick the row up again.
-		if relErr := s.releaseClaim(ctx, r.ID, now); relErr != nil {
+		if relErr := s.releaseClaim(ctx, r.ID); relErr != nil {
 			s.cfg.Logger.Warn("future_scheduler.release_claim.error",
 				"channel_id", s.channelID, "id", r.ID, "err", relErr.Error())
 		}
@@ -320,11 +446,17 @@ func (s *FutureScheduler) processRow(ctx context.Context, r *readyRow, now int64
 	triggered, derr := s.dispatch.Dispatch(ctx, env, FutureSchedulerUpstream)
 	if derr != nil {
 		// Dispatch failed — release the claim so the next Tick retries.
-		if relErr := s.releaseClaim(ctx, r.ID, now); relErr != nil {
+		if relErr := s.releaseClaim(ctx, r.ID); relErr != nil {
 			s.cfg.Logger.Warn("future_scheduler.release_claim.error",
 				"channel_id", s.channelID, "id", r.ID, "err", relErr.Error())
 		}
 		return fmt.Errorf("dispatch: %w", derr)
+	}
+
+	if err := s.markDelivered(ctx, r.ID, now); err != nil {
+		s.cfg.Logger.Warn("future_scheduler.mark_delivered.error",
+			"channel_id", s.channelID, "id", r.ID, "err", err.Error())
+		return fmt.Errorf("mark delivered: %w", err)
 	}
 
 	s.cfg.Logger.Info("future_scheduler.delivered",
@@ -333,42 +465,114 @@ func (s *FutureScheduler) processRow(ctx context.Context, r *readyRow, now int64
 	return nil
 }
 
-// claim runs the CAS-UPDATE that turns a pending row into a tentatively
-// delivered one. Returns (true, nil) when this scheduler instance wins
-// the race and SHOULD Dispatch; (false, nil) when another instance has
-// already claimed it.
+// claim runs the CAS-UPDATE that takes the in-flight slot for one row.
+// It sets claim_owner + claimed_at and atomically increments attempts.
+// Returns (newAttempts, true, nil) when this scheduler instance wins
+// the race; (0, false, nil) when another instance already holds a
+// fresh claim or the row has reached a terminal state.
 //
-// The CAS is guarded on BOTH delivered_at IS NULL AND delivery_failed_at
-// IS NULL so an already-expired row (markExpired path) does not get
-// double-counted.
-func (s *FutureScheduler) claim(ctx context.Context, id string, now int64) (bool, error) {
+// The CAS predicate covers four cases at once:
+//
+//   - delivered_at IS NULL              — row not yet delivered
+//   - delivery_failed_at IS NULL        — row not permanently failed
+//   - claim_owner IS NULL               — no current holder
+//   - OR claimed_at < now - ClaimTTL    — current claim has gone stale
+//     (crashed daemon never released)
+//
+// delivered_at is NEVER mutated here — that's the whole point of the
+// R2-FIX-3 split: the claim is just a "working on it" flag, and only
+// markDelivered turns the row terminal.
+func (s *FutureScheduler) claim(ctx context.Context, id string, now int64) (int64, bool, error) {
+	staleBefore := now - s.claimTTLMs
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE messages
+		    SET claim_owner = ?,
+		        claimed_at  = ?,
+		        attempts    = attempts + 1
+		  WHERE id = ?
+		    AND delivered_at IS NULL
+		    AND delivery_failed_at IS NULL
+		    AND (claim_owner IS NULL OR claimed_at < ?)`,
+		s.ownerID, now, id, staleBefore,
+	)
+	if err != nil {
+		return 0, false, err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return 0, false, nil
+	}
+	// Read back the new attempts value so processRow can enforce
+	// MaxAttempts. The single-conn pool + WAL guarantees the SELECT
+	// observes this transaction's UPDATE.
+	var attempts int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT attempts FROM messages WHERE id = ?`, id,
+	).Scan(&attempts); err != nil {
+		return 0, false, fmt.Errorf("read attempts: %w", err)
+	}
+	return attempts, true, nil
+}
+
+// releaseClaim drops the in-flight claim held by this scheduler so a
+// later tick (or a different scheduler) can retry. The WHERE clause is
+// **owner-scoped** — it only matches rows whose claim_owner equals
+// this instance's ownerID. That guarantees a loser whose CAS clock
+// happened to fall on the same wall-clock ms as the winner cannot
+// accidentally release the winner's claim.
+func (s *FutureScheduler) releaseClaim(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE messages
+		    SET claim_owner = NULL,
+		        claimed_at  = NULL
+		  WHERE id = ? AND claim_owner = ?`,
+		id, s.ownerID,
+	)
+	return err
+}
+
+// markDelivered stamps the row's terminal "delivered" state and clears
+// the claim columns in one atomic CAS. The owner-scoped WHERE clause
+// is defensive: only the holder of the in-flight claim may move the
+// row to terminal-delivered.
+func (s *FutureScheduler) markDelivered(ctx context.Context, id string, now int64) error {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE messages
 		    SET delivered_at = ?,
-		        attempts     = attempts + 1
-		  WHERE id = ?
-		    AND delivered_at IS NULL
-		    AND delivery_failed_at IS NULL`,
-		now, id,
+		        claim_owner  = NULL,
+		        claimed_at   = NULL
+		  WHERE id = ? AND claim_owner = ? AND delivered_at IS NULL`,
+		now, id, s.ownerID,
 	)
 	if err != nil {
-		return false, err
+		return err
 	}
 	affected, _ := res.RowsAffected()
-	return affected == 1, nil
+	if affected == 0 {
+		// Either the claim was stolen via stale-TTL, or the row was
+		// flipped terminal by another path. Log so audit can correlate
+		// with the corresponding releaseClaim/markPermanentlyFailed.
+		s.cfg.Logger.Debug("future_scheduler.mark_delivered.cas_miss",
+			"channel_id", s.channelID, "id", id, "owner", s.ownerID)
+	}
+	return nil
 }
 
-// releaseClaim reverts a claim made by this scheduler so a later tick
-// can retry. The WHERE clause matches both `id` and the exact
-// `delivered_at` timestamp we wrote — that prevents us from clobbering
-// a claim that ANOTHER scheduler has since acquired (e.g. after a long
-// dispatch failure path).
-func (s *FutureScheduler) releaseClaim(ctx context.Context, id string, claimedAt int64) error {
+// markPermanentlyFailed moves a row to terminal failure (max attempts
+// exceeded). It clears the claim slot in the same UPDATE so a future
+// scan does not bother with the row again. Owner-scoped to mirror
+// markDelivered's safety guarantee.
+func (s *FutureScheduler) markPermanentlyFailed(ctx context.Context, id string, now int64, reason string) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE messages
-		    SET delivered_at = NULL
-		  WHERE id = ? AND delivered_at = ?`,
-		id, claimedAt,
+		    SET delivery_failed_at = ?,
+		        last_error         = ?,
+		        claim_owner        = NULL,
+		        claimed_at         = NULL
+		  WHERE id = ?
+		    AND claim_owner = ?
+		    AND delivery_failed_at IS NULL`,
+		now, reason, id, s.ownerID,
 	)
 	return err
 }

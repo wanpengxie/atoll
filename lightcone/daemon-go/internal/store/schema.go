@@ -52,6 +52,15 @@ CREATE TABLE IF NOT EXISTS messages (
   last_error           TEXT,
   attempts             INTEGER NOT NULL DEFAULT 0,
 
+  -- Future-scheduler in-flight claim (R2-FIX-3). claim_owner holds the
+  -- daemon instance id that is currently dispatching; claimed_at is the
+  -- unix-ms timestamp when the claim was taken. Both are NULL while the
+  -- row is dispatchable. They are decoupled from delivered_at so a
+  -- crash between claim and dispatch never silently drops the row —
+  -- scan picks the row up again once claimed_at < now - claim_ttl_ms.
+  claim_owner          TEXT,
+  claimed_at           INTEGER,
+
   is_terminal          INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0,1))
 );
 

@@ -69,6 +69,14 @@ func OpenChannel(ctx context.Context, path string, opts OpenOptions) (*sql.DB, e
 		_ = db.Close()
 		return nil, fmt.Errorf("store: apply channel DDL: %w", err)
 	}
+	// Idempotent column-level migrations for channels created before a
+	// schema bump shipped. CREATE TABLE IF NOT EXISTS is a no-op on an
+	// existing table, so columns added in later tickets must be patched
+	// in by ALTER TABLE.
+	if err := applyChannelMigrations(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: apply channel migrations: %w", err)
+	}
 	return db, nil
 }
 
@@ -170,4 +178,84 @@ func applyDDL(ctx context.Context, db *sql.DB, ddl string) error {
 		return err
 	}
 	return nil
+}
+
+// channelMigration describes one idempotent `ALTER TABLE ADD COLUMN`
+// (or similar) step. A migration is run only if columnExists(table,
+// column) returns false, so re-opening an already-migrated database
+// (or a fresh database created by the new DDL) is a no-op.
+type channelMigration struct {
+	table  string
+	column string
+	stmt   string
+}
+
+// channelMigrations lists every column-level patch that must be applied
+// to channel-local sqlite files created before the column landed in
+// ChannelLocalDDL. Keep entries append-only — never rename or remove.
+//
+// R2-FIX-3 (t109): claim_owner / claimed_at decouple the future
+// scheduler in-flight claim from the terminal delivered_at column.
+var channelMigrations = []channelMigration{
+	{
+		table:  "messages",
+		column: "claim_owner",
+		stmt:   `ALTER TABLE messages ADD COLUMN claim_owner TEXT`,
+	},
+	{
+		table:  "messages",
+		column: "claimed_at",
+		stmt:   `ALTER TABLE messages ADD COLUMN claimed_at INTEGER`,
+	},
+}
+
+// applyChannelMigrations runs each channelMigration whose target column
+// is still missing. The check via PRAGMA table_info is portable across
+// sqlite versions (older modernc builds did not support
+// `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`).
+func applyChannelMigrations(ctx context.Context, db *sql.DB) error {
+	for _, m := range channelMigrations {
+		exists, err := columnExists(ctx, db, m.table, m.column)
+		if err != nil {
+			return fmt.Errorf("inspect %s.%s: %w", m.table, m.column, err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, m.stmt); err != nil {
+			return fmt.Errorf("apply %s.%s migration: %w", m.table, m.column, err)
+		}
+	}
+	return nil
+}
+
+// columnExists reports whether the named column is present on the named
+// table. Uses PRAGMA table_info because SQLite does not expose
+// information_schema.
+func columnExists(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
 }

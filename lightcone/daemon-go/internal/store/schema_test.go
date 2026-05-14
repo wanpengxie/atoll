@@ -223,6 +223,120 @@ func TestOpenDaemon_BuildsBootstrapRegistry(t *testing.T) {
 	}
 }
 
+// TestOpenChannel_AppliesColumnMigrations verifies that a channel sqlite
+// created before the R2-FIX-3 claim_owner / claimed_at columns shipped
+// gets the columns added by applyChannelMigrations the next time
+// OpenChannel is called. Without this safety net, daemons upgrading
+// from R2 round-1 would crash on first claim() with "no such column".
+func TestOpenChannel_AppliesColumnMigrations(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "messages.sqlite")
+
+	// 1. Build a "legacy" channel sqlite with the old DDL — no
+	// claim_owner / claimed_at columns. Mirror the rest of ChannelLocalDDL
+	// shape so the rest of the schema invariants hold.
+	legacy, err := OpenChannel(ctx, path, OpenOptions{SkipDDL: true})
+	if err != nil {
+		t.Fatalf("OpenChannel SkipDDL: %v", err)
+	}
+	if _, err := legacy.ExecContext(ctx, `
+CREATE TABLE messages (
+  seq                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  id                   TEXT NOT NULL UNIQUE,
+  ts                   INTEGER NOT NULL,
+  ts_received          INTEGER NOT NULL,
+  channel_id           TEXT NOT NULL,
+  sender_kind          TEXT NOT NULL CHECK (sender_kind IN ('human','agent','system','tool')),
+  sender_id            TEXT NOT NULL,
+  sender_name          TEXT,
+  kind                 TEXT NOT NULL CHECK (kind IN ('event','request','response')),
+  type                 TEXT NOT NULL,
+  payload              TEXT NOT NULL,
+  parent_id            TEXT,
+  correlation_id       TEXT,
+  doc_refs             TEXT,
+  visibility           TEXT NOT NULL CHECK (visibility IN ('public','private','system')),
+  audience             TEXT NOT NULL,
+  not_before           INTEGER,
+  expires_at           INTEGER,
+  delivered_at         INTEGER,
+  delivery_failed_at   INTEGER,
+  last_error           TEXT,
+  attempts             INTEGER NOT NULL DEFAULT 0,
+  is_terminal          INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0,1))
+);`); err != nil {
+		t.Fatalf("seed legacy schema: %v", err)
+	}
+	// Seed a row using the legacy column set, then close so the next
+	// OpenChannel sees the file as the upgrade target.
+	if _, err := legacy.ExecContext(ctx,
+		`INSERT INTO messages (id, ts, ts_received, channel_id, sender_kind, sender_id,
+		                       kind, type, payload, visibility, audience)
+		 VALUES ('m-legacy', 1, 1, 'c', 'human', 'u', 'event', 't', '{}', 'public', '["*"]')`,
+	); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy: %v", err)
+	}
+
+	// Pre-check: legacy table really lacks the new columns.
+	verify, err := OpenChannel(ctx, path, OpenOptions{SkipDDL: true})
+	if err != nil {
+		t.Fatalf("OpenChannel verify SkipDDL: %v", err)
+	}
+	for _, col := range []string{"claim_owner", "claimed_at"} {
+		exists, err := columnExists(ctx, verify, "messages", col)
+		if err != nil {
+			t.Fatalf("columnExists pre-migration %s: %v", col, err)
+		}
+		if exists {
+			t.Fatalf("column %s should be absent BEFORE migration", col)
+		}
+	}
+	_ = verify.Close()
+
+	// 2. Re-open with the production OpenChannel — DDL is idempotent,
+	// and applyChannelMigrations should patch the missing columns in.
+	upgraded, err := OpenChannel(ctx, path, OpenOptions{})
+	if err != nil {
+		t.Fatalf("OpenChannel upgrade: %v", err)
+	}
+	t.Cleanup(func() { _ = upgraded.Close() })
+
+	for _, col := range []string{"claim_owner", "claimed_at"} {
+		exists, err := columnExists(ctx, upgraded, "messages", col)
+		if err != nil {
+			t.Fatalf("columnExists post-migration %s: %v", col, err)
+		}
+		if !exists {
+			t.Errorf("column %s should be present after migration", col)
+		}
+	}
+
+	// Sanity: the seeded legacy row survived; the new columns default to NULL.
+	var owner sql.NullString
+	var claimedAt sql.NullInt64
+	if err := upgraded.QueryRowContext(ctx,
+		`SELECT claim_owner, claimed_at FROM messages WHERE id = ?`, "m-legacy",
+	).Scan(&owner, &claimedAt); err != nil {
+		t.Fatalf("read legacy row: %v", err)
+	}
+	if owner.Valid {
+		t.Errorf("legacy row claim_owner = %q, want NULL", owner.String)
+	}
+	if claimedAt.Valid {
+		t.Errorf("legacy row claimed_at = %d, want NULL", claimedAt.Int64)
+	}
+
+	// Re-running OpenChannel must be a no-op (idempotent — no error).
+	again, err := OpenChannel(ctx, path, OpenOptions{})
+	if err != nil {
+		t.Fatalf("OpenChannel re-run: %v", err)
+	}
+	_ = again.Close()
+}
+
 // TestOpenChannel_SkipDDL verifies SkipDDL leaves the file empty so the
 // migrate tool can use it for foreign Node sqlite files.
 func TestOpenChannel_SkipDDL(t *testing.T) {
