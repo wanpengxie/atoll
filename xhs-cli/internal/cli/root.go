@@ -17,14 +17,21 @@ func NewRootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "coagent-xhs",
 		Short: "coagent xhs CLI",
-		Long: fmt.Sprintf(`coagent-xhs：xhs 业务命令行入口。
+		Long: fmt.Sprintf(`coagent-xhs：xhs 业务命令行入口（M1.3-T14 v4 重写）。
 
-5 个子命令：publish / search / get-my-recent / get-note / publish-status
+5 个子命令：publish / search / recent / get-note / sync-cookie
+
+real 模式内部 spawn %s 子进程，按 L4 §2.3.2 把命令翻译成
+"%s ask --type xhs.<op> --audience tool:xhs-adapter --payload ..."。
+legacy 命令 publish-status 已废弃；改为新增 sync-cookie（对应 v4
+xhs.cookie.sync type）。
 
 provider 切换 env：%s（mock|real，默认 mock）
-real 模式必填 env：%s / %s / %s`,
+real 模式必填 env：%s / %s / %s（兼容 legacy %s / %s）`,
+			"coagent", "coagent",
 			"COAGENT_XHS_BACKEND",
-			"COAGENT_DAEMON_HTTP", "COAGENT_DAEMON_TOKEN", "COAGENT_CHANNEL_ID"),
+			"DAEMON_URL", "COAGENT_AUTH_TOKEN", "COAGENT_CHANNEL_ID",
+			"COAGENT_DAEMON_HTTP", "COAGENT_DAEMON_TOKEN"),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -32,9 +39,9 @@ real 模式必填 env：%s / %s / %s`,
 	root.AddCommand(
 		newPublishCmd(),
 		newSearchCmd(),
-		newGetMyRecentCmd(),
+		newRecentCmd(),
 		newGetNoteCmd(),
-		newPublishStatusCmd(),
+		newSyncCookieCmd(),
 	)
 
 	return root

@@ -7,12 +7,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newGetMyRecentCmd 注册 `coagent-xhs get-my-recent [--limit N]`。
-func newGetMyRecentCmd() *cobra.Command {
+// newRecentCmd 注册 `coagent-xhs recent [--limit N]`（v4 type:
+// xhs.recent.fetch；L4 §2.3）。
+//
+// 历史命名 `get-my-recent` 已废弃；现命令名与 L4 §2.3.1 CLI 表对齐。
+func newRecentCmd() *cobra.Command {
 	var limit int
 
 	cmd := &cobra.Command{
-		Use:   "get-my-recent",
+		Use:   "recent",
 		Short: "获取当前账号最近发布列表",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

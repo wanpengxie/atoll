@@ -96,18 +96,21 @@ func TestMockProvider_GetNote(t *testing.T) {
 	}
 }
 
-func TestMockProvider_PublishStatus(t *testing.T) {
+func TestMockProvider_SyncCookie(t *testing.T) {
 	p := NewMockProvider()
-	out, err := p.PublishStatus(context.Background(), PublishStatusArgs{NoteID: "01HXYZ"})
+	out, err := p.SyncCookie(context.Background(), SyncCookieArgs{})
 	if err != nil {
-		t.Fatalf("publish-status error: %v", err)
+		t.Fatalf("sync-cookie error: %v", err)
 	}
-	res := out.(PublishStatusResult)
-	if res.Status != "published" {
-		t.Fatalf("expected status=published, got %q", res.Status)
+	res := out.(SyncCookieResult)
+	if res.Status != "ok" {
+		t.Fatalf("expected status=ok, got %q", res.Status)
 	}
-	if !strings.Contains(res.URL, "01HXYZ") {
-		t.Fatalf("expected url to contain note id, got %q", res.URL)
+	if res.CookieCount <= 0 {
+		t.Fatalf("expected positive cookie count; got %d", res.CookieCount)
+	}
+	if res.LastSyncAt == "" {
+		t.Fatalf("expected last_sync_at to be populated")
 	}
 }
 

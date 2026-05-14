@@ -11,13 +11,14 @@ import (
 )
 
 // Exit code 约定：
-//   0 = ok
-//   1 = runtime/IO/daemon 错误（也包含 provider 业务错误）
-//   3 = usage 错误（参数缺失 / env 无效）
+//
+//	0 = ok
+//	1 = runtime/IO/daemon 错误（也包含 provider 业务错误）
+//	3 = usage 错误（参数缺失 / env 无效）
 const (
-	ExitOK          = 0
-	ExitRuntime     = 1
-	ExitUsageError  = 3
+	ExitOK         = 0
+	ExitRuntime    = 1
+	ExitUsageError = 3
 )
 
 // Envelope 是 stdout 输出的统一外壳。

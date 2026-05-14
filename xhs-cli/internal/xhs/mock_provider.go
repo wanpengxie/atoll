@@ -107,14 +107,13 @@ func (m *MockProvider) GetNote(_ context.Context, args GetNoteArgs) (any, error)
 	}, nil
 }
 
-// PublishStatus 把 note_id 映射成 published 状态 + url。
-func (m *MockProvider) PublishStatus(_ context.Context, args PublishStatusArgs) (any, error) {
-	if strings.TrimSpace(args.NoteID) == "" {
-		return nil, &CodeError{Code: "invalid_argument", Msg: "note_id is required"}
-	}
-	return PublishStatusResult{
-		Status: "published",
-		URL:    fmt.Sprintf("https://xhs.com/explore/%s", args.NoteID),
+// SyncCookie 返回固定 mock 数据。L4 §2.1 `xhs.cookie.sync` 不带请求字段；
+// mock 端口模拟"刚刚完成同步"的状态。
+func (m *MockProvider) SyncCookie(_ context.Context, _ SyncCookieArgs) (any, error) {
+	return SyncCookieResult{
+		Status:      "ok",
+		LastSyncAt:  m.clock().Format(time.RFC3339),
+		CookieCount: 12,
 	}, nil
 }
 

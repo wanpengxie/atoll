@@ -10,9 +10,9 @@ import (
 
 // runWithProvider 是 5 子命令的共享 runner：
 //
-//   1. 按 env 构造 Provider；构造失败按 envelope 输出 + ExitRuntime 退出。
-//   2. 调 fn(ctx, provider)；失败按 envelope 输出 + ExitRuntime 退出。
-//   3. 成功把返回 data 写成成功 envelope。
+//  1. 按 env 构造 Provider；构造失败按 envelope 输出 + ExitRuntime 退出。
+//  2. 调 fn(ctx, provider)；失败按 envelope 输出 + ExitRuntime 退出。
+//  3. 成功把返回 data 写成成功 envelope。
 //
 // 命令实现只关心如何拼参数 + 选哪个 Provider 方法。
 //
