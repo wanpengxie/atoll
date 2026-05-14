@@ -233,18 +233,40 @@ func Run(ctx context.Context, cfg Config) error {
 	}))
 
 	// Bootstrap routes — server uses these to provision new channels.
-	bootstrap.RegisterRoutes(mux, saga)
+	// Wrapped in requireBearer so anonymous callers cannot provision
+	// channels (DDL + channel_created events) or enumerate channel ids
+	// + workdir paths via /api/channel/list (T107 R2-FIX-1 critical #1).
+	bootstrapAuth := requireBearer(cfg.AuthToken)
+	{
+		bootstrapMux := http.NewServeMux()
+		bootstrap.RegisterRoutes(bootstrapMux, saga)
+		// Mount the guarded sub-mux at both bootstrap paths. We register
+		// each path explicitly (rather than via a single "/api/channel/"
+		// prefix) so unrelated paths don't accidentally fall through.
+		guarded := bootstrapAuth(bootstrapMux)
+		mux.Handle(bootstrap.CreateChannelPath, guarded)
+		mux.Handle(bootstrap.ListChannelsPath, guarded)
+	}
 
 	// Daemon_rpc message.send. The auth function trusts the shared
 	// daemon token and pulls sender identity from the envelope (the
 	// M1.3 baseline trust model — single-machine token, sender stamped
 	// by the caller).
+	//
+	// The outer requireBearer guard runs BEFORE newMessageSendRouter
+	// reads any body or peeks params.channel_id, so an attacker without
+	// a valid token cannot distinguish "existing channel (401)" from
+	// "missing channel (404)" — closes the channel-id fingerprinting
+	// leak (T107 R2-FIX-1 major #5). The per-channel handler's internal
+	// AuthFunc re-checks the same token; that double-check is redundant
+	// but harmless and preserves the existing per-channel contract.
 	if len(channels) > 0 {
 		// Pick the first channel's Deps for the handler — but in a
 		// multi-channel daemon, the harness write path needs the right
 		// Deps per envelope.channel_id. We mount a per-channel handler
 		// router so each channel id dispatches to its own Deps.
-		mux.Handle(internalharness.RPCPath, newMessageSendRouter(cfg.AuthToken, channels))
+		mux.Handle(internalharness.RPCPath,
+			requireBearer(cfg.AuthToken)(newMessageSendRouter(cfg.AuthToken, channels)))
 	}
 
 	// Adapter callback fanout (multi-channel: try each manager; the

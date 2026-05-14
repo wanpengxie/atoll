@@ -117,7 +117,14 @@ func TestSmoke_DaemonBoot(t *testing.T) {
 		t.Fatalf("/api/healthz status = %d, want 200", resp.StatusCode)
 	}
 
-	resp2, err := http.Get("http://" + addr + bootstrap.ListChannelsPath)
+	// /api/channel/list is bearer-gated (T107 R2-FIX-1) — present the
+	// shared smoke token in the Authorization header.
+	listReq, err := http.NewRequest(http.MethodGet, "http://"+addr+bootstrap.ListChannelsPath, nil)
+	if err != nil {
+		t.Fatalf("build /api/channel/list request: %v", err)
+	}
+	listReq.Header.Set("Authorization", "Bearer "+smokeAuthToken)
+	resp2, err := http.DefaultClient.Do(listReq)
 	if err != nil {
 		t.Fatalf("/api/channel/list GET: %v", err)
 	}
@@ -128,6 +135,18 @@ func TestSmoke_DaemonBoot(t *testing.T) {
 	body, _ := io.ReadAll(resp2.Body)
 	if string(bytes.TrimSpace(body)) != "[]" {
 		t.Fatalf("/api/channel/list body = %q, want []", string(body))
+	}
+
+	// Negative coverage: same endpoint without the bearer must return
+	// 401 — the boot path is the integration point that wires the
+	// requireBearer guard around the bootstrap mux.
+	anonResp, err := http.Get("http://" + addr + bootstrap.ListChannelsPath)
+	if err != nil {
+		t.Fatalf("/api/channel/list anonymous GET: %v", err)
+	}
+	defer func() { _ = anonResp.Body.Close() }()
+	if anonResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("/api/channel/list anonymous status = %d, want 401", anonResp.StatusCode)
 	}
 }
 
