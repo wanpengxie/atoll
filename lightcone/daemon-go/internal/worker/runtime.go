@@ -94,6 +94,20 @@ type RuntimeConfig struct {
 	// so the next supervisor tick spawns immediately rather than
 	// waiting LeaseTTL seconds.
 	SkipReleaseOnExit bool
+
+	// Backlog optionally seeds the runtime with the supervisor's
+	// pre-scanned backlog (mostly for in-process integration tests so
+	// they can verify "supervisor passed N rows" end-to-end without
+	// double-scanning). When nil the runtime scans the channel sqlite
+	// itself via supervisor.BacklogScan — production behaviour, since
+	// the spawn argv/env doesn't carry the slice across exec.
+	Backlog []supervisor.BacklogMessage
+
+	// Now returns Unix seconds for the BacklogScan call + cursor
+	// advance write. Defaults to time.Now().Unix(). Tests inject a
+	// fixed clock so the predicate `m.not_before <= now` behaves
+	// deterministically.
+	Now func() int64
 }
 
 // RuntimeResult is the structured outcome of Run. cmd/worker/main.go
@@ -113,6 +127,23 @@ type RuntimeResult struct {
 	// LockReleased reports whether the worker_locks row was
 	// successfully released at shutdown.
 	LockReleased bool
+
+	// BacklogConsumed is the slice of backlog rows the runtime saw at
+	// boot (after pre-scanning the channel sqlite). Empty when the
+	// spawn was a "no trigger" no-op.
+	BacklogConsumed []supervisor.BacklogMessage
+
+	// CursorAdvancedTo is the actor_cursors.last_consumed_seq value
+	// the runtime CAS-bumped to at end-of-turn. Zero when no turn
+	// ran (no backlog) or when the CAS missed (cursor already past
+	// our max — possible after a crash + replay).
+	CursorAdvancedTo int64
+
+	// SkippedNoTrigger is true when the runtime exited cleanly without
+	// driving agent.Run because both Trigger.MsgID and the live
+	// backlog were empty. Maps to exit 0; the supervisor sees the
+	// lock released and stops respawning until a fresh trigger arrives.
+	SkippedNoTrigger bool
 }
 
 // Run executes one full worker lifecycle. Returns a structured result
@@ -261,17 +292,54 @@ func Run(parentCtx context.Context, cfg RuntimeConfig) (RuntimeResult, error) {
 		}, cancel)
 	}()
 
+	// Step 7a: load backlog. The supervisor passes its pre-scan result
+	// in cfg.Backlog when wired in-process (integration tests); the
+	// production exec-spawned worker re-scans the channel sqlite here
+	// because the spawn argv/env can't carry the slice across exec.
+	now := cfg.Now
+	if now == nil {
+		now = func() int64 { return time.Now().Unix() }
+	}
+	backlog := cfg.Backlog
+	if backlog == nil {
+		scanned, scanErr := supervisor.BacklogScan(ctx, db, tc.AgentID, now())
+		if scanErr != nil {
+			return RuntimeResult{}, fmt.Errorf("worker_runtime: backlog scan: %w", scanErr)
+		}
+		backlog = scanned
+	}
+
 	cfg.Logger.Info("worker.runtime.ready",
 		"channel_id", tc.ChannelID,
 		"agent_id", tc.AgentID,
 		"worker_id", tc.WorkerID,
 		"fencing_token", tc.FencingToken,
 		"trigger_msg_id", tc.TriggerMsgID,
+		"backlog_size", len(backlog),
 	)
 
 	// Step 8: drive the turn.
+	//
+	// Per FIX-4 §"backlog 为空且 trigger 为空时进等待态"（exit 让
+	// supervisor 不重 spawn）the runtime MUST NOT call agent.Run when
+	// neither a trigger nor backlog is available — otherwise the
+	// supervisor wakes on exit, finds no work, spawns another noop,
+	// and loops forever.
 	var result RuntimeResult
-	if !cfg.SkipAgentRun {
+	result.BacklogConsumed = backlog
+	hasTrigger := strings.TrimSpace(tc.TriggerMsgID) != "" || len(backlog) > 0
+	switch {
+	case cfg.SkipAgentRun:
+		cfg.Logger.Info("worker.runtime.skip_agent_run",
+			"channel_id", tc.ChannelID, "agent_id", tc.AgentID)
+	case !hasTrigger:
+		result.SkippedNoTrigger = true
+		cfg.Logger.Info("worker.runtime.no_trigger_exit",
+			"channel_id", tc.ChannelID,
+			"agent_id", tc.AgentID,
+			"worker_id", tc.WorkerID,
+		)
+	default:
 		prompt := cfg.Prompt
 		if prompt == "" {
 			prompt = derivePrompt(tc)
@@ -285,9 +353,30 @@ func Run(parentCtx context.Context, cfg RuntimeConfig) (RuntimeResult, error) {
 			cfg.Logger.Info("worker.agent.run.ok",
 				"agent_id", tc.AgentID, "reply_chars", len(result.AgentReply))
 		}
-	} else {
-		cfg.Logger.Info("worker.runtime.skip_agent_run",
-			"channel_id", tc.ChannelID, "agent_id", tc.AgentID)
+	}
+
+	// Step 8a: advance actor_cursors only when the turn completed
+	// without an agent error. The CAS predicate
+	// `last_consumed_seq < ?new` mirrors L1 §6.3.4.3 + the channel
+	// invariant test (TestActorCursors_MonotonicCAS): a replay after
+	// a crash sees the same backlog, but the WHERE clause makes the
+	// second UPDATE a no-op so side effects (cursor wise) stay
+	// idempotent.
+	if !cfg.SkipAgentRun && result.AgentErr == nil && len(backlog) > 0 {
+		maxSeq := backlog[len(backlog)-1].Seq
+		advanced, advErr := advanceCursor(ctx, db, tc.AgentID, maxSeq, now())
+		if advErr != nil {
+			cfg.Logger.Warn("worker.cursor.advance.error",
+				"agent_id", tc.AgentID, "max_seq", maxSeq, "err", advErr.Error())
+		} else if advanced {
+			result.CursorAdvancedTo = maxSeq
+			cfg.Logger.Info("worker.cursor.advance.ok",
+				"agent_id", tc.AgentID, "max_seq", maxSeq)
+		} else {
+			cfg.Logger.Info("worker.cursor.advance.noop",
+				"agent_id", tc.AgentID, "max_seq", maxSeq,
+				"reason", "cursor already past max_seq (replay)")
+		}
 	}
 
 	// Step 9: shutdown. Cancel siblings (so heartbeat exits), wait, then
@@ -355,6 +444,38 @@ func derivePrompt(tc TurnCtx) string {
 		return fmt.Sprintf("channel=%s agent=%s trigger=%s", tc.ChannelID, tc.AgentID, tc.TriggerMsgID)
 	}
 	return fmt.Sprintf("channel=%s agent=%s no-trigger", tc.ChannelID, tc.AgentID)
+}
+
+// advanceCursor CAS-bumps actor_cursors.last_consumed_seq to maxSeq
+// for the given actor. Returns (true, nil) when the row updated, (false,
+// nil) when the predicate `last_consumed_seq < maxSeq` ruled the
+// update out (cursor already at or past maxSeq — typical replay path),
+// (false, err) on driver failures.
+//
+// Single-statement so no enclosing tx is needed; mirrors the
+// invariants_test.TestActorCursors_MonotonicCAS contract.
+func advanceCursor(ctx context.Context, db *sql.DB, actorID string, maxSeq, now int64) (bool, error) {
+	if actorID == "" {
+		return false, fmt.Errorf("advance_cursor: empty actor_id")
+	}
+	if maxSeq <= 0 {
+		return false, fmt.Errorf("advance_cursor: max_seq must be positive, got %d", maxSeq)
+	}
+	res, err := db.ExecContext(ctx,
+		`UPDATE actor_cursors
+		    SET last_consumed_seq = ?, updated_at = ?
+		  WHERE actor_id = ?
+		    AND last_consumed_seq < ?`,
+		maxSeq, now, actorID, maxSeq,
+	)
+	if err != nil {
+		return false, fmt.Errorf("advance_cursor: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("advance_cursor rowsAffected: %w", err)
+	}
+	return affected == 1, nil
 }
 
 // lastReplyText pulls the assistant reply text out of agent.LastResult.

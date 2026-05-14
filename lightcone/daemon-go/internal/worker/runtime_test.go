@@ -225,6 +225,167 @@ func TestRuntimeRun_RejectsBadTurnCtx(t *testing.T) {
 	}
 }
 
+// TestRuntimeRun_NoTriggerExitsClean verifies the FIX-4 §"backlog 为空且
+// trigger 为空时进等待态" branch: when neither a trigger nor any pending
+// backlog exists, Run MUST NOT call agent.Run; it logs a no_trigger
+// event and exits cleanly so the supervisor stops respawning until a
+// fresh trigger arrives.
+func TestRuntimeRun_NoTriggerExitsClean(t *testing.T) {
+	workdir := t.TempDir()
+	db, err := openChannelAt(t, workdir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	channelID, agentID, workerID := "ch-no-trig", "alice-nt", "w-nt"
+	seedActor(t, db, channelID, agentID)
+	lock, err := supervisor.Acquire(context.Background(), db, agentID, workerID, 60,
+		func() int64 { return 1700000040 })
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("HOME", t.TempDir())
+	res, err := Run(context.Background(), RuntimeConfig{
+		TurnCtx: TurnCtx{
+			ChannelID:      channelID,
+			AgentID:        agentID,
+			WorkerID:       workerID,
+			FencingToken:   lock.FencingToken,
+			ChannelWorkdir: workdir,
+			LeaseTTL:       60,
+			// TriggerMsgID intentionally empty.
+		},
+		// Backlog explicitly empty so the runtime takes the "scan ourselves"
+		// path and finds nothing.
+		Backlog:  []supervisor.BacklogMessage{},
+		Provider: llm.NewEchoChatProvider("echo-nt"),
+		Model:    "echo-nt",
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.SkippedNoTrigger {
+		t.Errorf("expected SkippedNoTrigger=true, got %+v", res)
+	}
+	if res.AgentReply != "" {
+		t.Errorf("expected empty reply on no-trigger, got %q", res.AgentReply)
+	}
+	if !res.LockReleased {
+		t.Errorf("expected lock released on clean no-trigger exit")
+	}
+	if res.CursorAdvancedTo != 0 {
+		t.Errorf("expected cursor untouched, got %d", res.CursorAdvancedTo)
+	}
+}
+
+// TestRuntimeRun_AdvancesCursorAfterTurn drives a full turn and
+// verifies actor_cursors.last_consumed_seq lands on max(backlog.Seq).
+// Re-running Run with the same backlog (a crash + replay scenario)
+// MUST be a no-op on the cursor (CAS predicate `< maxSeq`).
+func TestRuntimeRun_AdvancesCursorAfterTurn(t *testing.T) {
+	workdir := t.TempDir()
+	db, err := openChannelAt(t, workdir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	channelID, agentID, workerID := "ch-cur", "alice-cur", "w-cur"
+	seedActor(t, db, channelID, agentID)
+	lock, err := supervisor.Acquire(context.Background(), db, agentID, workerID, 60,
+		func() int64 { return 1700000050 })
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	_ = db.Close()
+
+	// Synthesise an injected backlog. The runtime trusts the slice
+	// when cfg.Backlog != nil, so the cursor will advance to the
+	// highest Seq we hand in.
+	backlog := []supervisor.BacklogMessage{
+		{Seq: 7, ID: "msg-7", SenderKind: "agent", SenderID: "peer"},
+		{Seq: 9, ID: "msg-9", SenderKind: "agent", SenderID: "peer"},
+		{Seq: 12, ID: "msg-12", SenderKind: "agent", SenderID: "peer"},
+	}
+	tc := TurnCtx{
+		ChannelID:      channelID,
+		AgentID:        agentID,
+		WorkerID:       workerID,
+		FencingToken:   lock.FencingToken,
+		ChannelWorkdir: workdir,
+		LeaseTTL:       60,
+		TriggerMsgID:   "msg-7",
+	}
+	t.Setenv("HOME", t.TempDir())
+	res, err := Run(context.Background(), RuntimeConfig{
+		TurnCtx:  tc,
+		Backlog:  backlog,
+		Provider: llm.NewEchoChatProvider("echo-cur"),
+		Model:    "echo-cur",
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.CursorAdvancedTo != 12 {
+		t.Errorf("CursorAdvancedTo = %d, want 12", res.CursorAdvancedTo)
+	}
+	if res.SkippedNoTrigger {
+		t.Errorf("did not expect SkippedNoTrigger when trigger present")
+	}
+
+	// Direct read confirms the row landed.
+	dbCheck, err := openChannelAt(t, workdir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	var got int64
+	if err := dbCheck.QueryRowContext(context.Background(),
+		`SELECT last_consumed_seq FROM actor_cursors WHERE actor_id=?`, agentID,
+	).Scan(&got); err != nil {
+		t.Fatalf("read cursor: %v", err)
+	}
+	if got != 12 {
+		t.Errorf("actor_cursors.last_consumed_seq = %d, want 12", got)
+	}
+
+	// Replay path: re-acquire the lock under a fresh worker_id +
+	// re-Run with the same backlog. The CAS predicate must reject the
+	// second update (cursor not < 12) so the side effect is idempotent.
+	lock2, err := supervisor.Acquire(context.Background(), dbCheck, agentID, "w-cur-replay", 60,
+		func() int64 { return 1700000200 })
+	if err != nil {
+		t.Fatalf("acquire replay: %v", err)
+	}
+	_ = dbCheck.Close()
+	tc.WorkerID = "w-cur-replay"
+	tc.FencingToken = lock2.FencingToken
+	res2, err := Run(context.Background(), RuntimeConfig{
+		TurnCtx:  tc,
+		Backlog:  backlog,
+		Provider: llm.NewEchoChatProvider("echo-cur"),
+		Model:    "echo-cur",
+	})
+	if err != nil {
+		t.Fatalf("replay Run: %v", err)
+	}
+	if res2.CursorAdvancedTo != 0 {
+		t.Errorf("replay CursorAdvancedTo = %d, want 0 (CAS no-op)", res2.CursorAdvancedTo)
+	}
+
+	dbCheck2, err := openChannelAt(t, workdir)
+	if err != nil {
+		t.Fatalf("reopen2: %v", err)
+	}
+	var stillGot int64
+	if err := dbCheck2.QueryRowContext(context.Background(),
+		`SELECT last_consumed_seq FROM actor_cursors WHERE actor_id=?`, agentID,
+	).Scan(&stillGot); err != nil {
+		t.Fatalf("read cursor 2: %v", err)
+	}
+	if stillGot != 12 {
+		t.Errorf("post-replay cursor = %d, want 12", stillGot)
+	}
+}
+
 // openChannelAt opens (or creates) the channel sqlite at
 // workdir/messages.sqlite with the full DDL applied. Mirrors
 // supervisor's openChannel helper but accepts a caller-supplied
