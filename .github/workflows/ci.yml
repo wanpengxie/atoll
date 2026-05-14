@@ -1,0 +1,73 @@
+name: CI
+
+# CI gate for the v5 工程纪律（M1.5 §T8）。
+# Runs the full discipline pipeline: install → lint (5 类) → test → build.
+#
+# Scope: top-level Makefile targets. daemon-go has its own dedicated lint
+# pipeline in `go-ci.yml`, pinned to v2.1.6 (pre-T9 dual-stack);
+# this workflow only invokes the root-level discipline.
+#
+# spec: .dalek/pm/m1.5-tickets.md §T8 #4
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discipline:
+    name: install + lint + test + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: '9'
+
+      - name: cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: install golangci-lint v2 (pin)
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: make install
+        run: make install
+
+      - name: make lint
+        run: make lint
+
+      - name: make test
+        run: make test
+
+      - name: make build
+        run: make build
