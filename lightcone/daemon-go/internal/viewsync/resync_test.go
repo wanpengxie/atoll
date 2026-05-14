@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/coagent-ai/daemon-go/internal/store"
@@ -402,6 +404,89 @@ func TestResyncClient_ResyncAll(t *testing.T) {
 		if env.Seq != int64(i+1) {
 			t.Fatalf("[%d] seq = %d", i, env.Seq)
 		}
+	}
+}
+
+// TestResyncAllStream_PerPageCallback — FIX-6 §7: streaming API
+// hands envelopes to the caller page by page, never accumulating.
+func TestResyncAllStream_PerPageCallback(t *testing.T) {
+	t.Parallel()
+	store := &inMemoryResyncStore{rows: []v4types.Envelope{
+		mkEnv("ev-1", 1), mkEnv("ev-2", 2), mkEnv("ev-3", 3),
+		mkEnv("ev-4", 4), mkEnv("ev-5", 5),
+	}}
+	_, client := resyncFixture(t, store)
+	var pages [][]string
+	var totalSeen int
+	err := client.ResyncAllStream(context.Background(), "ch-1", 2, func(page []v4types.Envelope) error {
+		var ids []string
+		for _, env := range page {
+			ids = append(ids, env.ID)
+		}
+		pages = append(pages, ids)
+		totalSeen += len(page)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ResyncAllStream: %v", err)
+	}
+	if totalSeen != 5 {
+		t.Errorf("total envelopes via stream = %d, want 5", totalSeen)
+	}
+	if len(pages) != 3 {
+		// perCall=2 with 5 rows → pages of 2, 2, 1
+		t.Errorf("len(pages) = %d, want 3", len(pages))
+	}
+	if len(pages) >= 1 && (len(pages[0]) != 2 || pages[0][0] != "ev-1") {
+		t.Errorf("page[0] = %v, want [ev-1 ev-2]", pages[0])
+	}
+}
+
+// TestResyncAllStream_CallbackErrorAborts — caller error short-circuits
+// the stream.
+func TestResyncAllStream_CallbackErrorAborts(t *testing.T) {
+	t.Parallel()
+	store := &inMemoryResyncStore{rows: []v4types.Envelope{
+		mkEnv("ev-1", 1), mkEnv("ev-2", 2), mkEnv("ev-3", 3),
+	}}
+	_, client := resyncFixture(t, store)
+	callbackErr := errors.New("caller-side abort")
+	called := 0
+	err := client.ResyncAllStream(context.Background(), "ch-1", 1, func(_ []v4types.Envelope) error {
+		called++
+		if called == 2 {
+			return callbackErr
+		}
+		return nil
+	})
+	if !errors.Is(err, callbackErr) {
+		t.Errorf("err = %v, want callbackErr", err)
+	}
+	if called != 2 {
+		t.Errorf("callback called %d times, want 2 (abort on second)", called)
+	}
+}
+
+// TestResyncAll_RespectsMaxTotalCap — the legacy slice-returning
+// ResyncAll refuses to buffer beyond DefaultResyncAllMaxTotal so a
+// large channel cannot OOM the caller. Stash the cap, push it down
+// to a small number, then verify the error surfaces.
+func TestResyncAll_RespectsMaxTotalCap(t *testing.T) {
+	t.Parallel()
+	rows := make([]v4types.Envelope, 0, DefaultResyncAllMaxTotal+5)
+	for i := 1; i <= DefaultResyncAllMaxTotal+5; i++ {
+		rows = append(rows, mkEnv(fmt.Sprintf("ev-%d", i), int64(i)))
+	}
+	store := &inMemoryResyncStore{rows: rows}
+	_, client := resyncFixture(t, store)
+	// perCall larger than the overflow so the cap kicks in on the
+	// last page; ResyncAll must return an error rather than allocate.
+	_, err := client.ResyncAll(context.Background(), "ch-1", 1000)
+	if err == nil {
+		t.Fatalf("expected ResyncAll to error when channel exceeds DefaultResyncAllMaxTotal")
+	}
+	if !strings.Contains(err.Error(), "ResyncAllStream") {
+		t.Errorf("err = %v, want hint to switch to ResyncAllStream", err)
 	}
 }
 

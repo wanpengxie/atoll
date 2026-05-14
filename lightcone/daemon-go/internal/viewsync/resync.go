@@ -508,19 +508,40 @@ func (c *ResyncClient) Resync(ctx context.Context, req ResyncRequest) (*ResyncRe
 	return nil, fmt.Errorf("viewsync: unexpected status %d: %s", resp.StatusCode, string(raw))
 }
 
-// ResyncAll is a convenience wrapper that drains the channel by
-// calling Resync in a loop until HasMore=false. Returns the
-// concatenated envelopes. Used by server cold-start path where the
-// caller wants the full backfill in one go.
+// DefaultResyncAllMaxTotal caps the in-memory accumulation of
+// ResyncAll's legacy slice-returning signature. 10000 envelopes ×
+// roughly 1 KiB each ≈ 10 MiB — a per-call ceiling well below the
+// 100 MiB blow-up the unbounded version risked.
 //
-// IMPORTANT: server callers handling large channels SHOULD prefer
-// Resync + their own checkpointing — ResyncAll loads everything into
-// memory.
-func (c *ResyncClient) ResyncAll(ctx context.Context, channelID string, perCall int) ([]v4types.Envelope, error) {
+// Callers that legitimately need more should switch to ResyncAllStream
+// (per-page callback, no buffering).
+const DefaultResyncAllMaxTotal = 10000
+
+// ResyncAllStream drives the channel-drain loop without buffering the
+// full backfill in RAM. For every page the daemon returns, onPage is
+// invoked with that page's envelopes; ResyncAllStream loops until
+// HasMore=false or onPage returns an error.
+//
+// This is the FIX-6 §7 (claude 99-1) replacement for the legacy
+// slice-returning ResyncAll. Server callers handling large channels
+// (≥ 10k envelopes) MUST use this form so memory stays bounded — the
+// page slice can be drained / persisted to the caller's store and
+// then dropped before the next page arrives.
+//
+// onPage must NOT retain the slice beyond its call — ResyncClient may
+// reuse the underlying buffer between pages.
+func (c *ResyncClient) ResyncAllStream(
+	ctx context.Context,
+	channelID string,
+	perCall int,
+	onPage func([]v4types.Envelope) error,
+) error {
 	if strings.TrimSpace(channelID) == "" {
-		return nil, errors.New("viewsync: channelID is required")
+		return errors.New("viewsync: channelID is required")
 	}
-	var all []v4types.Envelope
+	if onPage == nil {
+		return errors.New("viewsync: onPage callback is required")
+	}
 	since := int64(0)
 	for {
 		out, err := c.Resync(ctx, ResyncRequest{
@@ -529,19 +550,48 @@ func (c *ResyncClient) ResyncAll(ctx context.Context, channelID string, perCall 
 			Limit:     perCall,
 		})
 		if err != nil {
-			return all, err
+			return err
 		}
-		all = append(all, out.Envelopes...)
+		if len(out.Envelopes) > 0 {
+			if cberr := onPage(out.Envelopes); cberr != nil {
+				return cberr
+			}
+		}
 		if !out.HasMore {
-			return all, nil
+			return nil
 		}
 		// Defensive: if NextSeq did not advance the loop would spin.
-		// Treat that as an upstream bug and break with what we have.
+		// Treat that as an upstream bug and break with an error.
 		if out.NextSeq <= since {
-			return all, fmt.Errorf("viewsync: NextSeq did not advance (since=%d next=%d)", since, out.NextSeq)
+			return fmt.Errorf("viewsync: NextSeq did not advance (since=%d next=%d)", since, out.NextSeq)
 		}
 		since = out.NextSeq
 	}
+}
+
+// ResyncAll is a convenience wrapper that drains the channel by
+// calling Resync in a loop until HasMore=false. Returns the
+// concatenated envelopes.
+//
+// CAUTION: this signature loads the entire channel into memory. The
+// implementation enforces an in-memory cap of DefaultResyncAllMaxTotal
+// (10000 envelopes) and returns an error when the channel has more
+// rows than that — large-channel callers MUST switch to ResyncAllStream
+// which streams pages through a callback.
+//
+// Pre-fix this method was unbounded; a 100k-row channel produced a
+// ~100 MiB single buffer (claude 99-1).
+func (c *ResyncClient) ResyncAll(ctx context.Context, channelID string, perCall int) ([]v4types.Envelope, error) {
+	all := make([]v4types.Envelope, 0)
+	err := c.ResyncAllStream(ctx, channelID, perCall, func(page []v4types.Envelope) error {
+		if len(all)+len(page) > DefaultResyncAllMaxTotal {
+			return fmt.Errorf("viewsync: ResyncAll buffered %d envelopes; channel has more than %d — use ResyncAllStream",
+				len(all)+len(page), DefaultResyncAllMaxTotal)
+		}
+		all = append(all, page...)
+		return nil
+	})
+	return all, err
 }
 
 // ResyncError is the structured error returned by ResyncClient when the
