@@ -15,6 +15,15 @@ import (
 
 // Messages implements kernel/log.MessageLog over the messages table.
 //
+// Per L2 §1.4.5 engine-append ACL, Messages is a PURE PERSISTENCE SINK:
+// every caller MUST run the L1 §10.2 9-step Message-Write Harness chain
+// FIRST (runtime/harness.Chain). The chain is the only legitimate
+// principal that may call Append; agent / worker / adapter / control
+// paths all flow through harness → store. Direct Append calls are a
+// debug-only escape hatch that bypasses normalize, sender_kind
+// overwrite, type_registry / schema validation, and The One Law
+// uniqueness contract.
+//
 // Append performs three things in one transaction:
 //  1. dedupe check by envelope.id (returns Deduped=true if existing row).
 //  2. INSERT the messages row (raises *AppendError on terminal-duplicate

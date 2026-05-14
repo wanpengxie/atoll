@@ -7,20 +7,14 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
-	klog "github.com/wanpengxie/ActOS/kernel/log"
-	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 )
-
-// MessageWriter is the daemon-side append handler invoked by the host
-// when a worker IPC requests write_message. Implementations wrap
-// runtime/store.Messages.Append.
-type MessageWriter interface {
-	Append(ctx context.Context, env *message.Envelope) (klog.AppendResult, error)
-}
 
 // LedgerOps is the daemon-side ledger operations invoked by the host.
 type LedgerOps interface {
@@ -35,8 +29,22 @@ type HostConfig struct {
 	LeaseID      string
 	FencingToken placement.FencingToken
 	DaemonEpoch  placement.DaemonEpoch
-	Writer       MessageWriter
-	Ledger       LedgerOps
+
+	// Chain is the daemon-side Message-Write Harness entry point. Every
+	// worker IPC write_message frame is routed through Chain.Write so
+	// the 9-step validation chain (L1 §10.2) runs before the row
+	// reaches the messages-table sink. REQUIRED — host construction
+	// refuses nil to prevent the FIX-T1 regression where worker IPC
+	// bypassed harness.
+	Chain khar.Chain
+
+	// WorkerActorID identifies which actor the worker speaks as. Every
+	// inbound write_message frame is stamped with this actor as the
+	// caller principal (harness step 3 sender_mismatch enforces the
+	// envelope.sender.id match). REQUIRED.
+	WorkerActorID actor.ActorID
+
+	Ledger LedgerOps
 
 	// NowFn returns unix-ms; required.
 	NowFn func() int64
@@ -57,8 +65,11 @@ type Host struct {
 // NewHost wires a Host around an IPC stream (typically WorkerProc.Stdout
 // for input + WorkerProc.Stdin for output).
 func NewHost(in io.Reader, out io.Writer, cfg HostConfig) (*Host, error) {
-	if cfg.Writer == nil {
-		return nil, errors.New("workerhost: HostConfig.Writer nil")
+	if cfg.Chain == nil {
+		return nil, errors.New("workerhost: HostConfig.Chain nil")
+	}
+	if cfg.WorkerActorID == "" {
+		return nil, errors.New("workerhost: HostConfig.WorkerActorID nil")
 	}
 	if cfg.Ledger == nil {
 		return nil, errors.New("workerhost: HostConfig.Ledger nil")
@@ -155,15 +166,38 @@ func (h *Host) handleWrite(ctx context.Context, frame ipc.Frame) error {
 		reply, _ := ipc.EncodeResult(frame.ID, false, "decode: "+err.Error(), nil)
 		return h.codec.Write(reply)
 	}
-	res, err := h.cfg.Writer.Append(ctx, &payload.Envelope)
+
+	// Stamp the caller principal onto ctx so harness step 1 / step 3
+	// can verify envelope.sender.id == WorkerActorID. Worker IPC is
+	// the daemon's authenticated edge; the caller cannot self-declare
+	// kind (AllowProvidedSenderKind=false enforces strict overwrite).
+	chainCtx := harness.CtxWithCaller(ctx, harness.CallerContext{
+		ActorID:                 h.cfg.WorkerActorID,
+		ChannelID:               h.cfg.ChannelID,
+		AllowProvidedSenderKind: false,
+	})
+
+	res, err := h.cfg.Chain.Write(chainCtx, &payload.Envelope)
 	if err != nil {
 		reply, _ := ipc.EncodeResult(frame.ID, false, err.Error(), ipc.WriteMessageResult{
 			Reason: err.Error(),
 		})
 		return h.codec.Write(reply)
 	}
+	if res.RejectReason != "" {
+		// Harness reject — surface the closed-set reason to the worker;
+		// caller maps to *RejectError on the worker side. OK=false so
+		// callers know the envelope did NOT persist.
+		reply, _ := ipc.EncodeResult(frame.ID, false,
+			fmt.Sprintf("%s: %s", res.RejectReason, res.RejectDetail),
+			ipc.WriteMessageResult{
+				Reason:  string(res.RejectReason),
+				Deduped: res.Deduped,
+			})
+		return h.codec.Write(reply)
+	}
 	reply, _ := ipc.EncodeResult(frame.ID, true, "", ipc.WriteMessageResult{
-		Seq:     int64(res.Seq),
+		Seq:     res.Seq,
 		Deduped: res.Deduped,
 	})
 	return h.codec.Write(reply)

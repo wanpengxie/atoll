@@ -2,6 +2,7 @@ package workerhost_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,16 +11,42 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
-	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 	"github.com/wanpengxie/ActOS/runtime/store"
 	"github.com/wanpengxie/ActOS/runtime/worker"
 	"github.com/wanpengxie/ActOS/runtime/workerhost"
 )
+
+// newE2EChain wires a harness.Chain on top of a channel sqlite + actor
+// registry seeded with the worker's actor. Returns the chain so the
+// caller wires it into HostConfig.
+func newE2EChain(t *testing.T, db *sql.DB, channelID channel.ID, workerActor actor.ActorID) *harness.Chain {
+	t.Helper()
+	areg := store.NewActorRegistry(db)
+	if err := areg.Insert(context.Background(), actor.Record{
+		ID:        workerActor,
+		Kind:      actor.SenderAgent,
+		CreatedAt: now(),
+	}); err != nil {
+		t.Fatalf("seed actor: %v", err)
+	}
+	chain, err := harness.New(harness.Deps{
+		ChannelID:     channelID,
+		ActorRegistry: areg,
+		Log:           store.NewMessages(db),
+		NowMs:         now,
+	})
+	if err != nil {
+		t.Fatalf("harness.New: %v", err)
+	}
+	return chain
+}
 
 func now() int64 { return time.Now().UnixMilli() }
 
@@ -93,13 +120,6 @@ func TestPool_Quota(t *testing.T) {
 	}
 }
 
-// messagesWriter adapts runtime/store.Messages to workerhost.MessageWriter.
-type messagesWriter struct{ msgs *store.Messages }
-
-func (a *messagesWriter) Append(ctx context.Context, env *message.Envelope) (klog.AppendResult, error) {
-	return a.msgs.Append(ctx, env)
-}
-
 // TestWorker_LeaseE2E covers acceptance gate #5 (T3):
 //
 //	spawn worker → handshake → write message via IPC → reserve+commit
@@ -128,8 +148,8 @@ func TestWorker_LeaseE2E(t *testing.T) {
 						ID: "m-1", TS: now(), TSReceived: now(),
 						ChannelID: "ch-1",
 						Sender:    message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
-						Kind:      message.KindEvent, Type: "turn.start",
-						Payload: json.RawMessage(`{}`), Visibility: message.VisibilityPublic,
+						Kind:      message.KindEvent, Type: "agent.text",
+						Payload: json.RawMessage(`{"text":"turn.start"}`), Visibility: message.VisibilityPublic,
 						Audience: []string{"*"},
 					}
 					if _, err := client.WriteMessage(ctx, env); err != nil {
@@ -164,15 +184,17 @@ func TestWorker_LeaseE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	chain := newE2EChain(t, db, "ch-1", actor.ActorID("agent:a"))
 	host, err := workerhost.NewHost(proc.Stdout, proc.Stdin, workerhost.HostConfig{
-		ChannelID:    "ch-1",
-		WorkerID:     "w-1",
-		LeaseID:      "lease-1",
-		FencingToken: placement.FencingToken(1),
-		DaemonEpoch:  placement.DaemonEpoch(7),
-		Writer:       &messagesWriter{msgs: msgs},
-		Ledger:       led,
-		NowFn:        now,
+		ChannelID:     "ch-1",
+		WorkerID:      "w-1",
+		LeaseID:       "lease-1",
+		FencingToken:  placement.FencingToken(1),
+		DaemonEpoch:   placement.DaemonEpoch(7),
+		Chain:         chain,
+		WorkerActorID: "agent:a",
+		Ledger:        led,
+		NowFn:         now,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -214,8 +236,9 @@ func TestFence_DaemonEpochMismatch(t *testing.T) {
 	dir := t.TempDir()
 	db, _ := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
 	defer func() { _ = db.Close() }()
-	msgs := store.NewMessages(db)
+	_ = store.NewMessages(db)
 	led := store.NewLedger(db)
+	chain := newE2EChain(t, db, "ch-1", actor.ActorID("agent:a"))
 
 	in1, in2 := io.Pipe()
 	out1, out2 := io.Pipe()
@@ -223,7 +246,8 @@ func TestFence_DaemonEpochMismatch(t *testing.T) {
 	host, _ := workerhost.NewHost(in1, out2, workerhost.HostConfig{
 		ChannelID: "ch-1", WorkerID: "w-1", LeaseID: "lease-1",
 		FencingToken: 1, DaemonEpoch: 99,
-		Writer: &messagesWriter{msgs: msgs}, Ledger: led, NowFn: now,
+		Chain: chain, WorkerActorID: "agent:a",
+		Ledger: led, NowFn: now,
 	})
 	var wg sync.WaitGroup
 	wg.Add(1)
