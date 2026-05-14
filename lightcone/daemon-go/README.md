@@ -216,6 +216,37 @@ Out of scope for T10:
 - T11 V4ize tool actor wrapping (`AdditionalTools` slot is empty until T11).
 - T13+ real LLM provider selection (echo only in M1.3 baseline).
 
+## End-to-end smoke (T16)
+
+`test/e2e/` hosts the five cross-subsystem scenario tests M1.3-T16
+mandates as the cutover gate. Each `scenarioN_*.go` test composes the
+real harness / supervisor / ledger / adapter / scheduler primitives
+against a single channel-local sqlite (no daemon binary, no real
+Chrome extension — see the package doc comment for why).
+
+```bash
+cd lightcone/daemon-go
+go test -v ./test/e2e/...
+```
+
+Coverage matrix (v4 audit view A):
+
+| File | Audit case | Subsystems exercised |
+|---|---|---|
+| `scenario1_publish_happy_path_test.go` | publish xhs happy path | harness + adapter.Manager + xhs.Module + MockDeviceClient |
+| `scenario2_kill_replay_test.go` | worker kill-9 → ledger replay | supervisor + ledger + harness Step 0.5 dedupe |
+| `scenario3_unanswered_timeout_test.go` | 24h unanswered_timeout | scheduler Step 1 + mock clock |
+| `scenario4_callback_dedupe_test.go` | duplicate callback dedupe | adapter.Manager.OnExternalCallback + correlation tracker Forget |
+| `scenario5_receiver_unavailable_test.go` | admin deregister → receiver_unavailable | scheduler Step 3 + actor_registry deregister |
+
+## Deployment + Node retirement
+
+- [docs/deployment-cutover.md](docs/deployment-cutover.md) — operator
+  playbook for moving cvmax from the Node daemon to `daemon-go`.
+- [docs/node-daemon-retirement.md](docs/node-daemon-retirement.md) —
+  companion checklist + file list for the follow-up "delete Node
+  daemon" PR (separate from T16 per ticket plan).
+
 ## CI
 
 The GitHub Actions workflow [.github/workflows/go-ci.yml](../../.github/workflows/go-ci.yml)

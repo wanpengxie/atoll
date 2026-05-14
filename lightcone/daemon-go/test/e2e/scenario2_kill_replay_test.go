@@ -281,8 +281,9 @@ func TestScenario2_LedgerReplay_RaceLoser_ReturnsSameEnvelopeID(t *testing.T) {
 		t.Errorf("Reserve #2 EnvelopeID = %q, want env-race-A (the WINNER's id)", res2.EnvelopeID)
 	}
 
-	// The pkgharness import is held live by the e2e common fixture;
-	// kept as a typed assertion guard so refactors that drop the
-	// shared dep are caught at compile time.
-	var _ pkgharness.Deps = fix.Deps
+	// Touch the fixture's pkgharness.Deps to keep the cross-package
+	// dependency live at compile time — a refactor that drops the
+	// shared dep should fail here, not silently.
+	_ = fix.Deps
+	_ = pkgharness.New
 }

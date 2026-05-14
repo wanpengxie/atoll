@@ -13,37 +13,23 @@
 //
 // Scenarios (mapped to v4 audit view A):
 //
-//  1. scenario1_publish_happy_path_test.go   — user emits "publish xhs"
-//                                                event → channel agent
-//                                                emits xhs.publish
-//                                                request → adapter pushes
-//                                                WS frame → mock callback
-//                                                → terminal response.
-//  2. scenario2_kill_replay_test.go          — worker crash → supervisor
-//                                                respawns → action_ledger
-//                                                Reserve replays same
-//                                                envelope_id → harness
-//                                                Step 0.5 dedupes → no
-//                                                duplicate xhs.publish.
-//  3. scenario3_unanswered_timeout_test.go   — alice ask bob (kind=request)
-//                                                → bob silent → mock clock
-//                                                jumps past expires_at →
-//                                                scheduler emits
-//                                                unanswered_timeout terminal.
-//  4. scenario4_callback_dedupe_test.go      — adapter receives the same
-//                                                callback twice (network
-//                                                retry) → ctx.Respond
-//                                                dedupes → channel log
-//                                                holds exactly one
-//                                                terminal response.
-//  5. scenario5_receiver_unavailable_test.go — admin deregisters
-//                                                tool:xhs-adapter → alice
-//                                                ask xhs.publish (raw
-//                                                row, bypass harness Step
-//                                                5 so we reach the
-//                                                receiver-missing window)
-//                                                → scheduler Step 3 emits
-//                                                receiver_unavailable.
+//   - scenario1_publish_happy_path_test.go — user emits "publish xhs";
+//     the (folded) channel-agent emits xhs.publish; the adapter pushes
+//     a WS frame; the mock callback completes; the terminal response
+//     lands in the channel log.
+//   - scenario2_kill_replay_test.go — worker crashes mid-turn; the
+//     supervisor respawns; action_ledger.Reserve replays the same
+//     envelope_id; the harness Step 0.5 dedupe collapses the second
+//     write so the channel log holds exactly one xhs.publish row.
+//   - scenario3_unanswered_timeout_test.go — alice asks bob; bob never
+//     replies; the mock clock advances past expires_at; the long-pending
+//     scheduler emits the unanswered_timeout terminal.
+//   - scenario4_callback_dedupe_test.go — the device transport retries
+//     the same callback; the adapter's Forget hook collapses the
+//     repeats to a single terminal response.
+//   - scenario5_receiver_unavailable_test.go — admin deregisters
+//     tool:xhs-adapter; the scheduler's Step 3 emits a
+//     receiver_unavailable terminal without waiting for expires_at.
 //
 // Shared fixtures live in this common_test.go so each scenario file
 // reads as a self-contained spec.
@@ -410,41 +396,12 @@ func agentCallerCtx(actorID string) pkgharness.CallerCtx {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Raw-row helpers
-// ---------------------------------------------------------------------------
-//
-// Scheduler scenarios sometimes need to stage a pending request that
-// would NOT pass current-state harness validation (e.g. an audience
-// pointing at a now-deregistered actor). The helper insertRawRequest
-// writes the row directly so the test can drive scheduler.Tick against
-// it. Matches the pattern in internal/scheduler/long_pending_test.go's
-// insertPendingRequest helper.
-
-// insertRawRequest writes a single kind=request row bypassing the
-// harness. expiresAt is optional — passing nil leaves the column NULL
-// (scheduler Step 2 / Step 3 both tolerate NULL; Step 1 ignores).
-func insertRawRequest(t *testing.T, ctx context.Context, db *sql.DB, id, senderID, receiverID, typeName string, expiresAt *int64) {
-	t.Helper()
-	aud, _ := json.Marshal([]string{receiverID})
-	var expArg any
-	if expiresAt != nil {
-		expArg = *expiresAt
-	}
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO messages
-		   (id, ts, ts_received, channel_id, sender_kind, sender_id,
-		    kind, type, payload, parent_id, correlation_id,
-		    visibility, audience, not_before, expires_at, is_terminal)
-		 VALUES (?, ?, ?, ?, 'agent', ?,
-		         'request', ?, '{}', NULL, ?,
-		         'public', ?, NULL, ?, 0)`,
-		id, T0, T0, ChannelID, senderID,
-		typeName, id, string(aud), expArg,
-	); err != nil {
-		t.Fatalf("insertRawRequest %s: %v", id, err)
-	}
-}
+// (Note: an earlier scaffold draft exposed an `insertRawRequest` raw-SQL
+// helper. The shipping scenarios all use the harness path so the helper
+// has been removed; if a future scenario needs to stage a row that
+// would NOT pass current-state harness validation, copy the pattern
+// from `internal/scheduler/long_pending_test.go::insertPendingRequest`
+// rather than re-introducing a partially-redundant helper here.)
 
 // ---------------------------------------------------------------------------
 // Channel-log assertions

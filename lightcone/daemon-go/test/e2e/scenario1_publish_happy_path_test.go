@@ -27,21 +27,18 @@ package e2e
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/coagent-ai/daemon-go/internal/adapters/xhs"
-	pkgharness "github.com/coagent-ai/daemon-go/pkg/harness"
-	"github.com/coagent-ai/daemon-go/pkg/v4types"
 )
 
 // TestScenario1_PublishXHSHappyPath drives the publish chain through
 // every subsystem and verifies the channel log carries the expected
 // three rows in seq order:
 //
-//	1. agent.text-style event (user → broadcast)
-//	2. xhs.publish request    (channel-agent → tool:xhs-adapter)
-//	3. xhs.publish response   (tool:xhs-adapter → channel-agent, terminal)
+//  1. agent.text-style event (user → broadcast)
+//  2. xhs.publish request    (channel-agent → tool:xhs-adapter)
+//  3. xhs.publish response   (tool:xhs-adapter → channel-agent, terminal)
 //
 // The assertion shape mirrors the L1 §10.2 invariant: every request
 // in a single-response type ends with exactly one terminal response.
@@ -183,12 +180,3 @@ func countAllMessages(t *testing.T, ctx context.Context, fix *E2EFixture) int {
 	}
 	return n
 }
-
-// -----------------------------------------------------------------------------
-// Type-check helpers used only by scenario-1 — keeps wiring compact and
-// makes the package import list explicit.
-// -----------------------------------------------------------------------------
-
-var _ pkgharness.Deps     // import guard — symbol used via fix.Deps construction in common_test.go
-var _ v4types.Visibility  // ditto for the env builders
-var _ = strings.HasPrefix // future scenarios may add assertions on substrings; keep the import live for now
