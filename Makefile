@@ -1,102 +1,197 @@
-.PHONY: check-l0 install logrotate-config dev build deploy register doctor doctor-offline smoke test lint clean check-banned-mcp daemon-go-build daemon-go-test daemon-go-lint daemon-go-tidy daemon-go-arch-lint daemon-go-kernel-deps-check
+# Top-level Makefile — M1.5 工程纪律入口
+#
+# Spec: .dalek/pm/m1.5-tickets.md §T8
+# 顶层 target 与 §15.1 对齐：install / build / build-go / build-ui / build-ext /
+# test / lint / migrate / dev / clean
+#
+# 容错策略：T8 在 T1/T2/T3/T6/T7/T9 之前或并行落地，对未到位的目录 / 配置
+# / 命令做 graceful skip（打印 `[skip] …` 并继续），等后续 ticket 把
+# kernel/ runtime/ adapters/ server/ cmd/ pkg/ ui/ 等填满后自动 ratchet。
 
-KNOWN_TARGETS := check-l0 install logrotate-config dev build deploy register doctor doctor-offline smoke test lint clean check-banned-mcp daemon-go-build daemon-go-test daemon-go-lint daemon-go-tidy daemon-go-arch-lint daemon-go-kernel-deps-check
-PASS_ARGS := $(strip $(ARGS) $(filter-out $(KNOWN_TARGETS),$(MAKECMDGOALS)))
+SHELL := /usr/bin/env bash
 
-# daemon-go (M1.3-T0+): Go re-implementation of lightcone/daemon. Node
-# daemon stays online during the dual-stack window — both stacks build
-# off the root Makefile.
+.PHONY: install build build-go build-ui build-ext test lint migrate dev clean \
+        lint-go lint-arch lint-banned-words lint-kernel-protocol lint-docs
+
+# v5 Go 二进制（cmd/<bin>/main.go 由 T6/T7 落地）。
+GO_BINARIES := server daemon worker cli
+
+# T9 之前 daemon-go 仍是 Go 主源；T9 归档后此目录消失，build-go / lint 自动跳过。
 DAEMON_GO_DIR := lightcone/daemon-go
 
-%:
-	@:
-
-check-l0:
-	@if command -v node >/dev/null; then node -e "const major=Number(process.versions.node.split('.')[0]); if (major < 20) { console.error('[missing] node '+process.versions.node+' (need 20+)'); process.exit(1); } console.log('[ok] node '+process.versions.node);"; else echo "[missing] node - install Node.js 20+." >&2; exit 1; fi
-	@if command -v pnpm >/dev/null; then version=$$(pnpm -v); major=$${version%%.*}; if [ "$$major" -ge 9 ]; then echo "[ok] pnpm $$version"; else echo "[missing] pnpm $$version (need 9+)" >&2; exit 1; fi; else echo "[missing] pnpm - install pnpm 9+." >&2; exit 1; fi
-	@if command -v pm2 >/dev/null; then echo "[ok] pm2 $$(pm2 --version | head -n 1)"; else echo "[missing] pm2 - install with: npm i -g pm2"; fi
-	@if command -v claude >/dev/null; then echo "[ok] claude $$(claude --version | head -n 1)"; else echo "[missing] claude - install and authenticate Claude Code"; fi
-	@if command -v mysql >/dev/null; then echo "[ok] mysql $$(mysql --version | head -n 1)"; else echo "[missing] mysql - install mysql-client/mysql-client-core"; fi
-
-install: check-l0
+# ----------------------------------------------------------------------------
+# install — 拉依赖、安装 lint / migrate 工具
+# ----------------------------------------------------------------------------
+install:
+	@echo "[install] go mod download"
+	@if [ -f go.mod ]; then go mod download; else echo "[skip] root go.mod absent (T2 pending)"; fi
+	@if [ -d $(DAEMON_GO_DIR) ]; then \
+	  cd $(DAEMON_GO_DIR) && go mod download; \
+	fi
+	@echo "[install] pnpm install"
 	pnpm install
-	pm2 install pm2-logrotate >/dev/null 2>&1 || true
+	@echo "[install] go install lint / migrate tools (best-effort)"
+	@command -v golangci-lint >/dev/null 2>&1 || \
+	  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest || \
+	  echo "[warn] golangci-lint install failed; install manually"
+	@command -v go-arch-lint >/dev/null 2>&1 || \
+	  go install github.com/fe3dback/go-arch-lint@latest || \
+	  echo "[warn] go-arch-lint install failed; install manually"
+	@command -v migrate >/dev/null 2>&1 || \
+	  go install -tags 'sqlite3' github.com/golang-migrate/migrate/v4/cmd/migrate@latest || \
+	  echo "[warn] golang-migrate install failed; install manually"
 
-logrotate-config: check-l0
-	pm2 set pm2-logrotate:max_size 100M
-	pm2 set pm2-logrotate:retain 10
-	pm2 set pm2-logrotate:compress true
+# ----------------------------------------------------------------------------
+# build — Go binaries + UI + chrome extension
+# ----------------------------------------------------------------------------
+build: build-go build-ui build-ext
 
+build-go:
+	@mkdir -p bin
+	@built=0; \
+	if [ -f go.mod ]; then \
+	  for b in $(GO_BINARIES); do \
+	    if [ -d "cmd/$$b" ]; then \
+	      echo "[build-go] cmd/$$b -> bin/coagent-$$b"; \
+	      go build -o bin/coagent-$$b ./cmd/$$b || exit 1; \
+	      built=$$((built+1)); \
+	    else \
+	      echo "[skip] cmd/$$b not present (T6/T7 pending)"; \
+	    fi; \
+	  done; \
+	else \
+	  echo "[skip] root go.mod absent (T2 pending)"; \
+	fi; \
+	if [ -d $(DAEMON_GO_DIR) ]; then \
+	  echo "[build-go] $(DAEMON_GO_DIR) (pre-T9 dual-stack)"; \
+	  (cd $(DAEMON_GO_DIR) && go build ./...) || exit 1; \
+	fi
+
+build-ui:
+	@if [ -f ui/package.json ]; then \
+	  echo "[build-ui] pnpm --filter ui build"; \
+	  pnpm --filter ui build; \
+	else \
+	  echo "[skip] ui/ not present (T7 pending)"; \
+	fi
+
+build-ext:
+	@if [ -f devices/xhs-extension/app/chrome-extension/package.json ]; then \
+	  echo "[build-ext] pnpm --filter coagent-xhs-extension build"; \
+	  pnpm --filter coagent-xhs-extension build; \
+	elif [ -f adapters/device/xhs/extension/package.json ]; then \
+	  echo "[build-ext] pnpm --filter coagent-xhs-extension build (adapters/ path)"; \
+	  pnpm --filter coagent-xhs-extension build; \
+	else \
+	  echo "[skip] xhs extension package not present"; \
+	fi
+
+# ----------------------------------------------------------------------------
+# test — Go + JS
+# ----------------------------------------------------------------------------
+test:
+	@if [ -f go.mod ]; then \
+	  echo "[test] go test ./..."; \
+	  go test ./...; \
+	fi
+	@if [ -d $(DAEMON_GO_DIR) ]; then \
+	  echo "[test] $(DAEMON_GO_DIR) go test ./..."; \
+	  (cd $(DAEMON_GO_DIR) && go test ./... -race -count=1) || exit 1; \
+	fi
+	@echo "[test] pnpm -r --if-present test"
+	@pnpm -r --if-present test
+
+# ----------------------------------------------------------------------------
+# lint — 5 类 lint 全跑（spec §T8）
+#   1) golangci-lint        Go 代码风格 / 静态检查
+#   2) go-arch-lint         component-level import 边界（T2 提供 .go-arch-lint.yaml）
+#   3) banned-words         分层文本扫描（CODE_DIRS / ACTIVE_SPEC 严格 + 历史 grandfather）
+#   4) 协议合规             kernel/ Go test（T1 提供 envelope_test / kind_test / reason_test / contract_test）
+#   5) 文档 lint            .dalek/pm 文档交叉引用路径校验
+# ----------------------------------------------------------------------------
+lint: lint-go lint-arch lint-banned-words lint-kernel-protocol lint-docs
+
+lint-go:
+	@# 范围：T8 的 lint-go 只覆盖**根模块**（kernel/ runtime/ adapters/ server/ cmd/ pkg/，T2+）。
+	@# daemon-go 是 T9 前的过渡模块，独立由 .github/workflows/go-ci.yml 在 v2.1.6 pin 版本下 gate；
+	@# 不混进 T8 的 make lint，避免版本漂移和 grandfather 噪声。
+	@if [ ! -f go.mod ]; then \
+	  echo "[skip] lint-go: root go.mod absent (T2 pending)"; \
+	elif ! command -v golangci-lint >/dev/null 2>&1; then \
+	  echo "[skip] lint-go: golangci-lint not installed; run 'make install' or 'go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest'"; \
+	else \
+	  echo "[lint-go] golangci-lint run ./..."; \
+	  golangci-lint run ./... || exit 1; \
+	fi
+
+lint-arch:
+	@if [ ! -f .go-arch-lint.yaml ]; then \
+	  echo "[skip] .go-arch-lint.yaml not present (T2 pending)"; \
+	elif ! command -v go-arch-lint >/dev/null 2>&1; then \
+	  echo "[skip] go-arch-lint not installed; run 'make install'"; \
+	else \
+	  echo "[lint-arch] go-arch-lint check"; \
+	  go-arch-lint check; \
+	fi
+
+lint-banned-words:
+	@echo "[lint-banned-words] scripts/lint-banned-words.sh"
+	@bash scripts/lint-banned-words.sh
+
+lint-kernel-protocol:
+	@if [ -d kernel ] && [ -f go.mod ]; then \
+	  echo "[lint-kernel-protocol] go test ./kernel/..."; \
+	  go test ./kernel/... || exit 1; \
+	else \
+	  echo "[skip] kernel/ Go module not present (T1 pending)"; \
+	fi
+
+lint-docs:
+	@echo "[lint-docs] scripts/lint-docs.sh"
+	@bash scripts/lint-docs.sh
+
+# ----------------------------------------------------------------------------
+# migrate — server-side sqlite schema（T6 落地 server/store/migrations/）
+# ----------------------------------------------------------------------------
+migrate:
+	@if [ ! -d server/store/migrations ]; then \
+	  echo "[skip] server/store/migrations/ not present (T6 pending)"; \
+	elif ! command -v migrate >/dev/null 2>&1; then \
+	  echo "[skip] migrate CLI not installed; run 'make install'"; \
+	else \
+	  mkdir -p data; \
+	  migrate -path server/store/migrations -database "sqlite3://./data/server.db" up; \
+	fi
+
+# ----------------------------------------------------------------------------
+# dev — 本地起 server + daemon + ui dev server（v5 二进制；缺位则提示）
+# ----------------------------------------------------------------------------
 dev:
-	pnpm -r --parallel dev
-
-build: check-l0 daemon-go-build
-	pnpm --filter @coagent/agent-binary build
-	pnpm --filter @coagent/cli build
-	pnpm --filter lightcone build
-	pnpm --filter @lightcone-ai/daemon build
-	pnpm --filter feishu-bridge build
-
-deploy: install build
-
-register: check-l0
-	node ops/register-machine.mjs $(PASS_ARGS)
-
-doctor: check-l0
-	node ops/doctor.mjs $(PASS_ARGS)
-
-doctor-offline: check-l0
-	node ops/doctor.mjs --offline
-
-smoke: check-l0
-	node lightcone/daemon/scripts/smoke-channel-runtime.mjs $(PASS_ARGS)
-
-test: check-l0 check-banned-mcp daemon-go-test
-	node --test ops/*.test.mjs
-	pnpm -r test
-
-lint: daemon-go-lint
-	pnpm -r lint
-
-# --- daemon-go (Go) targets --------------------------------------------------
-
-daemon-go-tidy:
-	cd $(DAEMON_GO_DIR) && go mod tidy
-
-daemon-go-build:
-	cd $(DAEMON_GO_DIR) && go build ./...
-
-daemon-go-test:
-	cd $(DAEMON_GO_DIR) && go test ./...
-
-daemon-go-lint: daemon-go-arch-lint daemon-go-kernel-deps-check
-	@if command -v golangci-lint >/dev/null; then \
-		cd $(DAEMON_GO_DIR) && golangci-lint run --config=../../.golangci.yml ./... ; \
+	@echo "[dev] v5 dev stack (best-effort)"
+	@if [ -x bin/coagent-server ]; then \
+	  echo "[dev] starting bin/coagent-server &"; \
+	  ./bin/coagent-server & \
 	else \
-		echo "[skip] golangci-lint not installed; run \"go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest\"" >&2 ; \
+	  echo "[skip] bin/coagent-server not built (run make build first)"; \
+	fi
+	@if [ -x bin/coagent-daemon ]; then \
+	  echo "[dev] starting bin/coagent-daemon &"; \
+	  ./bin/coagent-daemon --server-url ws://localhost:8080 --key dev & \
+	else \
+	  echo "[skip] bin/coagent-daemon not built (run make build first)"; \
+	fi
+	@if [ -f ui/package.json ]; then \
+	  pnpm --filter ui dev; \
+	else \
+	  echo "[skip] ui/ not present (T7 pending); foreground process exits."; \
 	fi
 
-# daemon-go-arch-lint: enforce m1.5-tickets §T2 ownership invariants via
-# go-arch-lint. The 6 invariants (.dalek/pm/m1.5-tickets.md §T2 table)
-# are encoded in lightcone/daemon-go/.go-arch-lint.yaml. Violating an
-# invariant (e.g. server importing runtime/store) fails the build.
-daemon-go-arch-lint:
-	@if command -v go-arch-lint >/dev/null; then \
-		cd $(DAEMON_GO_DIR) && go-arch-lint check --arch-file=.go-arch-lint.yaml ; \
-	else \
-		echo "[skip] go-arch-lint not installed; run \"go install github.com/fe3dback/go-arch-lint@latest\"" >&2 ; \
-	fi
-
-# daemon-go-kernel-deps-check: defense-in-depth complement to
-# go-arch-lint. go-arch-lint auto-allows stdlib imports, so the spec
-# bans on `database/sql` and `net/http` are enforced here by walking
-# `go list -deps ./kernel/...` and failing on any forbidden import.
-daemon-go-kernel-deps-check:
-	cd $(DAEMON_GO_DIR) && bash scripts/kernel-deps-check.sh
-
-check-banned-mcp:
-	bash scripts/check-banned-mcp.sh
-
+# ----------------------------------------------------------------------------
+# clean — 删 build 产物（不动 .dalek / 用户数据）
+# ----------------------------------------------------------------------------
 clean:
-	pnpm -r clean
-	rm -rf node_modules
+	rm -rf bin/ dist/ ui/dist
+	@if [ -d $(DAEMON_GO_DIR) ]; then \
+	  (cd $(DAEMON_GO_DIR) && go clean ./... 2>/dev/null) || true; \
+	fi
+	@pnpm -r --if-present clean 2>/dev/null || true
