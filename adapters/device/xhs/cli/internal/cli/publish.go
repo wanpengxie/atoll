@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/coagent-ai/xhs-cli/internal/xhs"
+	"github.com/coagent-ai/coagent/adapters/device/xhs/cli/internal/xhs"
 	"github.com/spf13/cobra"
 )
 

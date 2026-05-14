@@ -1,34 +1,40 @@
 # Coagent · 小红书 Device
 
-Coagent 的 chrome 端 device 实现：长连 coagent daemon 的 `/device/{deviceId}` WebSocket，
-承载 daemon 派发的 5 个小红书业务命令（publish / search / get-my-recent / get-note /
-publish-status），并把 chrome.cookies 主动同步给 daemon 用作 session。
+Coagent 的 chrome 端 device 实现。承载 5 个小红书业务命令
+（publish / search / recent.fetch / note.fetch / cookie.sync）。
 
-> 来源：本目录 M1.1-T2 一次性 rsync 自 1studio extension（蓝本：`~/tardis/1studio/extension/`），
-> 之后在 coagent 仓库独立维护，**不再 sync 1studio 母本**。详见
-> `.dalek/pm/m1.1-xhs-real-onboarding-spec.md` §六。
+> M1.5-T5：本目录从 `devices/xhs-extension` 重组到
+> `adapters/device/xhs/extension`（go-arch-lint adapters/ 顶层化的一部分）。
+> 协议从 daemon WS 直连（M1.3 baseline）切到 via_server_transit binding
+> （连 server WS，承载 daemon ↔ adapter 的 device_transit 帧）—— 协议层
+> 切换的完整落地等 T6 server.devicebus + T7 cmd/* 接入；T5 阶段保留旧
+> WS 客户端代码，server WS / token 接入分阶段添加，参见 `services/`。
+>
+> 来源历史：M1.1-T2 一次性 rsync 自外部模板，之后在 coagent 仓库独立
+> 维护。
 
-## 架构
+## 架构（M1.5 via_server_transit 目标态）
 
 ```
 agent (channel-agent)
-  ↓ SDK Bash
-cli/bin/xhs (shim) → coagent-xhs (Go binary, T1)
-  ↓ daemon HTTP /rpc device.command.send
-coagent daemon (T3)
-  ↓ DeviceWsServer.pushCommand
-  WS /device/{deviceId}?key=...
-本插件 (T2)
+  ↓ SDK Bash / 直接 envelope
+adapters/device/xhs (Go, M1.5-T5)
+  ↓ kernel/adapter.DeviceTransit.Send(device_transit.send frame)
+runtime/transit (M1.5-T3) → daemonbus mux → server.devicebus (M1.5-T6)
+  ↓ device WS endpoint
+本插件 (M1.5-T5)
   ↓ services/coagent-device.ts dispatch → tools/*.ts handler
-xhs.com / creator.xiaohongshu.com（用户实操或 DOM/CDP 抓取）
-  ↓ POST {daemonHttpBase}/api/device/{deviceId}/callback
-coagent daemon → emit dispatch.completed → trigger gateway → REACT → wake agent
+xhs.com / creator.xiaohongshu.com
+  ↓ device_transit.recv frame
+server.devicebus → daemonbus → runtime/transit → adapter.OnExternalCallback
+  ↓ ctx.Respond (sender=tool:xhs-adapter)
+channel log（device 不出现在 actor_registry — L4 §2.6）
 ```
 
 ## 开发 / 构建
 
 ```bash
-cd devices/xhs-extension
+cd adapters/device/xhs/extension
 pnpm install               # 第一次运行需要拉依赖
 pnpm dev                   # WXT dev 模式（实时重载）
 pnpm build                 # 生产构建：app/chrome-extension/.output/chrome-mv3/

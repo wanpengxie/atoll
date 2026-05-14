@@ -76,11 +76,8 @@ build-ui:
 	fi
 
 build-ext:
-	@if [ -f devices/xhs-extension/app/chrome-extension/package.json ]; then \
+	@if [ -f adapters/device/xhs/extension/app/chrome-extension/package.json ]; then \
 	  echo "[build-ext] pnpm --filter coagent-xhs-extension build"; \
-	  pnpm --filter coagent-xhs-extension build; \
-	elif [ -f adapters/device/xhs/extension/package.json ]; then \
-	  echo "[build-ext] pnpm --filter coagent-xhs-extension build (adapters/ path)"; \
 	  pnpm --filter coagent-xhs-extension build; \
 	else \
 	  echo "[skip] xhs extension package not present"; \

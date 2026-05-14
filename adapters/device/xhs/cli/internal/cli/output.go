@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/coagent-ai/xhs-cli/internal/xhs"
+	"github.com/coagent-ai/coagent/adapters/device/xhs/cli/internal/xhs"
 )
 
 // Exit code 约定：

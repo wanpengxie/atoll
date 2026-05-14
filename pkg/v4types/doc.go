@@ -8,9 +8,10 @@
 //
 // Why this package exists:
 //
-//   - Historical: lightcone/daemon-go/pkg/v4types was the original home
-//     of these types. The M1.5 reorg moved the source of truth into
-//     kernel/message (.dalek/pm/m1.5-tickets.md §T1).
+//   - Historical: the legacy daemon-go Go module (archived under the
+//     M1.3 demo root, slated for removal in M1.5-T9) was the original
+//     home of these types. The M1.5 reorg moved the source of truth
+//     into kernel/message (.dalek/pm/m1.5-tickets.md §T1).
 //   - Current: external callers (cmd/, server/, runtime/, adapters/, ui)
 //     import pkg/v4types so they don't need to thread through
 //     kernel/message paths. T2 go-arch-lint allows pkg/ → kernel/.

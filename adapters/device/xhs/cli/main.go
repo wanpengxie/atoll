@@ -10,7 +10,7 @@ package main
 import (
 	"os"
 
-	"github.com/coagent-ai/xhs-cli/internal/cli"
+	"github.com/coagent-ai/coagent/adapters/device/xhs/cli/internal/cli"
 )
 
 func main() {
