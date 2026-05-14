@@ -151,7 +151,7 @@ var ErrBreakerOpen = errors.New("framework: http breaker open")
 // Use DoJSON for JSON bodies (they're encoded fresh on every attempt).
 func (c *HTTPClient) Do(ctx context.Context, method, path string, body io.Reader, headers http.Header) (*HTTPResponse, error) {
 	if !c.allowRequest() {
-		c.cfg.Metrics.IncCounter(c.cfg.MetricName+".breaker_rejected")
+		c.cfg.Metrics.IncCounter(c.cfg.MetricName + ".breaker_rejected")
 		return nil, ErrBreakerOpen
 	}
 
@@ -181,7 +181,7 @@ func (c *HTTPClient) Do(ctx context.Context, method, path string, body io.Reader
 		c.recordFailure()
 		return nil, fmt.Errorf("framework: http %s %s: %w", method, path, doErr)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {

@@ -25,9 +25,9 @@ import (
 // ----------------------------------------------------------------------
 
 type fakeFeishu struct {
-	mu       sync.Mutex
-	tokenHit int
-	sendHit  int
+	mu        sync.Mutex
+	tokenHit  int
+	sendHit   int
 	createHit int
 
 	// raw payloads captured for assertion
@@ -35,7 +35,7 @@ type fakeFeishu struct {
 	lastCreateBody []byte
 
 	// configurable failure modes
-	sendCode   int    // override envelope code
+	sendCode   int // override envelope code
 	sendMsg    string
 	tokenCode  int
 	failOnSend bool   // simulate transport failure
@@ -163,7 +163,9 @@ func (c *fakeChain) snapshot() []*message.Envelope {
 	return out
 }
 
-type memoryActorRegistry struct{ rows map[actor.ActorID]actor.Record }
+type memoryActorRegistry struct {
+	rows map[actor.ActorID]actor.Record
+}
 
 func newMemoryActorRegistry() *memoryActorRegistry {
 	return &memoryActorRegistry{rows: map[actor.ActorID]actor.Record{}}
@@ -216,8 +218,7 @@ func (l *recordingLogger) dump() string {
 	defer l.mu.Unlock()
 	out := strings.Join(l.lines, "\n")
 	for _, a := range l.args {
-		switch v := a.(type) {
-		case string:
+		if v, ok := a.(string); ok {
 			out += " " + v
 		}
 	}
@@ -229,13 +230,13 @@ func (l *recordingLogger) dump() string {
 // ----------------------------------------------------------------------
 
 type setupResult struct {
-	mgr     *framework.Manager
-	chain   *fakeChain
-	lookup  *framework.MemoryRequestLookup
-	fake    *fakeFeishu
-	logger  *recordingLogger
-	creds   framework.CredentialStore
-	tregs   *framework.InMemoryTypeRegistry
+	mgr    *framework.Manager
+	chain  *fakeChain
+	lookup *framework.MemoryRequestLookup
+	fake   *fakeFeishu
+	logger *recordingLogger
+	creds  framework.CredentialStore
+	tregs  *framework.InMemoryTypeRegistry
 }
 
 func setup(t *testing.T, mods ...func(*feishu.Module)) *setupResult {
@@ -274,12 +275,12 @@ func setup(t *testing.T, mods ...func(*feishu.Module)) *setupResult {
 	tregs := framework.NewInMemoryTypeRegistry()
 
 	mgr, err := framework.NewManager(framework.ManagerConfig{
-		ChannelID:     "channel:test",
-		ActorRegistry: registry,
-		TypeRegistry:  tregs,
-		HarnessChain:  chain,
-		RequestLookup: lookup,
-		Logger:        logger,
+		ChannelID:       "channel:test",
+		ActorRegistry:   registry,
+		TypeRegistry:    tregs,
+		HarnessChain:    chain,
+		RequestLookup:   lookup,
+		Logger:          logger,
 		CredentialStore: credStore,
 	})
 	if err != nil {

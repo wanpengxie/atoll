@@ -109,15 +109,6 @@ func (c *fakeChain) Written() []*message.Envelope {
 	return out
 }
 
-func (c *fakeChain) lastEnvelope() *message.Envelope {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.written) == 0 {
-		return nil
-	}
-	return c.written[len(c.written)-1]
-}
-
 // fixedClock returns a clock that advances deterministically.
 type fixedClock struct {
 	mu  sync.Mutex
@@ -130,12 +121,6 @@ func (c *fixedClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.now
-}
-
-func (c *fixedClock) advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
 }
 
 // recordingLogger captures every log line for assertion.

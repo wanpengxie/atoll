@@ -422,7 +422,7 @@ func TestManagerTimerFiresDefaultTimeout(t *testing.T) {
 		},
 	}
 	mgr, chain, lookup, _, _ := newTestManager(t, mod)
-	defer mgr.Shutdown(context.Background())
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
 
 	req := newTestRequest("channel:test", "agent:author", "feishu.chat.send", "req-timer")
 	lookup.Put(req)
@@ -474,7 +474,7 @@ func TestManagerRespondCancelsTimer(t *testing.T) {
 		},
 	}
 	mgr, chain, lookup, _, _ := newTestManager(t, mod)
-	defer mgr.Shutdown(context.Background())
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
 
 	req := newTestRequest("channel:test", "agent:a", "feishu.chat.send", "req-cancel")
 	lookup.Put(req)
@@ -580,7 +580,7 @@ func TestManagerDeduplicatesResponseFromTerminalDuplicate(t *testing.T) {
 		return err
 	}
 	mgr, chain, lookup, _, _ := newTestManager(t, mod)
-	defer mgr.Shutdown(context.Background())
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
 
 	// Configure fake chain to return terminal_duplicate.
 	chain.results = []harness.WriteResult{

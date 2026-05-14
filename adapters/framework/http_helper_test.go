@@ -80,13 +80,10 @@ func TestHTTPClientBreakerOpens(t *testing.T) {
 		Metrics:          metrics,
 	})
 
-	// Three failures trip the breaker.
+	// Three failures trip the breaker (5xx isn't an error from Do's
+	// perspective but recordFailure is still called inside Do).
 	for i := 0; i < 3; i++ {
-		_, err := c.Do(context.Background(), http.MethodGet, "/x", nil, nil)
-		if err == nil && i == 2 {
-			// 5xx is not an error from Do's perspective but recordFailure was called.
-		}
-		_ = err
+		_, _ = c.Do(context.Background(), http.MethodGet, "/x", nil, nil)
 	}
 	// Fourth call should be rejected by breaker.
 	_, err := c.Do(context.Background(), http.MethodGet, "/x", nil, nil)

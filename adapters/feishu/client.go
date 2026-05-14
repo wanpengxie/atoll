@@ -17,8 +17,8 @@ const DefaultBaseURL = "https://open.feishu.cn/open-apis"
 
 // tokenResponse is the body returned by /auth/v3/tenant_access_token/internal.
 type tokenResponse struct {
-	Code             int    `json:"code"`
-	Msg              string `json:"msg"`
+	Code              int    `json:"code"`
+	Msg               string `json:"msg"`
 	TenantAccessToken string `json:"tenant_access_token"`
 	Expire            int    `json:"expire"`
 }
@@ -68,11 +68,11 @@ type CreateChatResponse struct {
 // (Handle goroutines) share one cached token even under concurrent
 // dispatch.
 type client struct {
-	http     *framework.HTTPClient
-	creds    credentialBundle
-	tokens   *tokenCache
-	logger   framework.Logger
-	metrics  framework.Metrics
+	http    *framework.HTTPClient
+	creds   credentialBundle
+	tokens  *tokenCache
+	logger  framework.Logger
+	metrics framework.Metrics
 }
 
 func newClient(http *framework.HTTPClient, creds credentialBundle, tokens *tokenCache, logger framework.Logger, metrics framework.Metrics) *client {
