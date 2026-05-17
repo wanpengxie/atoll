@@ -68,13 +68,30 @@ type DaemonConfig struct {
 	PostBoot func(ctx context.Context, d *Daemon) error
 }
 
+// ChannelAgentID is the well-known actor id every per-channel runtime
+// registers on boot. It is the single L2 worker target for trigger
+// fan-out: scheduler.Deliverer routes every audience-resolved envelope
+// addressed to this id into the per-channel WorkerManager (M1.6-T1 P4).
+//
+// We use the flat form rather than the spec'd `<channel_id>:<agent>`
+// shape because the per-channel sqlite already scopes the id; the L2
+// runtime today is single-worker-per-channel so a stable constant is
+// sufficient. Multi-agent / sub-agent ids land with M1.4 Part 2.
+const ChannelAgentID actor.ActorID = "agent:channel-agent"
+
+// channelAgentDisplayName is the human-readable label seeded alongside
+// ChannelAgentID. Surfaces in view-sync rows that join actor_registry
+// (display_name nullable, callers fall back to id when empty).
+const channelAgentDisplayName = "channel agent"
+
 // channelRuntime is the per-owned-channel set of seams the daemon
 // operational loop drives during phase 3+: harness chain (for writes),
 // outbox pusher (for view-sync), actor registry (for write_message
 // caller-id resolution), message log (for long-pending scans),
 // trigger gateway (post-harness fan-out + future-message scheduler
-// scan), scheduler.Deliverer (per-actor handler registry — the actual
-// handler wiring lands with T4/T5 adapter framework).
+// scan), scheduler.Deliverer (per-actor handler registry — M1.6-T1 P2
+// registers a stub handler for ChannelAgentID; P4 replaces it with the
+// per-channel WorkerManager.OnTrigger entry point).
 type channelRuntime struct {
 	channelID channel.ID
 	db        *sql.DB
@@ -87,6 +104,19 @@ type channelRuntime struct {
 	pusher    *transit.Pusher
 	deliverer *scheduler.Deliverer
 	gateway   *trigger.Gateway
+
+	// channelAgentID is always the constant ChannelAgentID; cached here
+	// so the deliverer handler closure does not need to import the
+	// package-level symbol.
+	channelAgentID actor.ActorID
+
+	// channelAgentTriggers counts every envelope dispatched to the
+	// channel-agent handler. Today the handler is a P2 stub used by
+	// runtime/daemon_test to assert the deliverer wiring; P4 replaces
+	// the handler with WorkerManager.OnTrigger and the counter becomes
+	// a probe for the test suite (kept across the swap so existing
+	// observability stays intact).
+	channelAgentTriggers atomic.Int64
 }
 
 // Daemon is the assembled cmd/daemon process. Exposed so tests can
@@ -523,18 +553,68 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 	}
 
 	return &channelRuntime{
-		channelID: lc.ChannelID,
-		db:        db,
-		registry:  registry,
-		messages:  messages,
-		ledger:    ledger,
-		lock:      lock,
-		outbox:    outbox,
-		chain:     chain,
-		pusher:    pusher,
-		deliverer: deliverer,
-		gateway:   gw,
+		channelID:      lc.ChannelID,
+		db:             db,
+		registry:       registry,
+		messages:       messages,
+		ledger:         ledger,
+		lock:           lock,
+		outbox:         outbox,
+		chain:          chain,
+		pusher:         pusher,
+		deliverer:      deliverer,
+		gateway:        gw,
+		channelAgentID: ChannelAgentID,
 	}, nil
+}
+
+// ensureChannelAgent guarantees the per-channel actor_registry contains
+// the L2 worker target (ChannelAgentID) and registers a deliverer
+// handler that the trigger gateway can route post-harness envelopes to.
+//
+// Idempotency: bootChannel runs on every cold-start (RunPhases) AND every
+// hot OnCreateChannel; a daemon restart re-loads existing channel
+// sqlite, so we Lookup first and only Insert when missing. Re-running
+// Insert would fail the actor_registry PRIMARY KEY.
+//
+// Handler wiring (P2 stub): records a count on cr so daemon_test can
+// observe that trigger.Gateway.Dispatch reached the agent target. P4
+// (WorkerManager) replaces the handler in-place via the same
+// Deliverer.Register seam — no API change here.
+func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) error {
+	_, ok, err := cr.registry.Lookup(ctx, cr.channelAgentID)
+	if err != nil {
+		return fmt.Errorf("runtime: ensure channel-agent lookup %s: %w", cr.channelID, err)
+	}
+	if !ok {
+		if err := cr.registry.Insert(ctx, actor.Record{
+			ID:          cr.channelAgentID,
+			Kind:        message.SenderAgent,
+			DisplayName: channelAgentDisplayName,
+			CreatedAt:   d.cfg.NowFn(),
+		}); err != nil {
+			return fmt.Errorf("runtime: ensure channel-agent insert %s: %w", cr.channelID, err)
+		}
+	}
+
+	// P2 stub handler — counts arrivals. P4 swaps in WorkerManager.OnTrigger.
+	cr.deliverer.Register(cr.channelAgentID, func(_ context.Context, _ actor.ActorID, _ *message.Envelope) error {
+		cr.channelAgentTriggers.Add(1)
+		return nil
+	})
+	return nil
+}
+
+// ChannelAgentTriggerCount returns the number of times the per-channel
+// agent handler has been invoked since boot. Exposed for daemon_test to
+// assert M1.6-T1 P2 wiring. Returns -1 when the channel is not owned by
+// this daemon (caller can distinguish "no channel" from "no triggers").
+func (d *Daemon) ChannelAgentTriggerCount(chID channel.ID) int64 {
+	cr, ok := d.channels[chID]
+	if !ok {
+		return -1
+	}
+	return cr.channelAgentTriggers.Load()
 }
 
 // bootChannel wires a per-channel runtime + outbox pusher goroutine
@@ -548,6 +628,15 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 		return err
 	}
 	d.channels[lc.ChannelID] = cr
+
+	// M1.6-T1 P2 — register the per-channel agent target so trigger
+	// gateway fan-out has somewhere to route audience=['*']. Done
+	// before the pusher goroutine starts so a write that immediately
+	// follows boot still observes the handler.
+	if err := d.ensureChannelAgent(ctx, cr); err != nil {
+		delete(d.channels, lc.ChannelID)
+		return err
+	}
 
 	// Per-channel context so Unload can stop the pusher independently
 	// of the global d.runCtx.

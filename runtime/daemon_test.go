@@ -569,3 +569,173 @@ func TestDaemon_Phase3_HeartbeatSender(t *testing.T) {
 		t.Errorf("heartbeat body.Channels=%v missing seeded channel %s", firstBody.Channels, chID)
 	}
 }
+
+// TestDaemon_Phase3_ChannelAgent_Registered covers M1.6-T1 P2:
+//   - bootChannel inserts the well-known agent:channel-agent actor row
+//     into the per-channel registry (so trigger.Gateway audience expand
+//     resolves wildcard envelopes to the agent target).
+//   - bootChannel registers a deliverer handler for that id, so a
+//     post-harness Dispatch reaches the agent layer. The P2 stub just
+//     counts arrivals; P4 swaps in WorkerManager.OnTrigger via the same
+//     Deliverer.Register seam.
+func TestDaemon_Phase3_ChannelAgent_Registered(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	dataDir := t.TempDir()
+	channelsDir := filepath.Join(dataDir, "channels")
+	chID := channel.ID("ch-agent")
+	chDir := filepath.Join(channelsDir, string(chID))
+	if err := os.MkdirAll(chDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(chDir, "channel.sqlite")
+	db, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := store.NewChannelLock(db)
+	if err := lock.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    chID,
+		FencingToken: 1, OwnerEpoch: 1,
+		DaemonID: "daemon-agent", DaemonEpoch: 1,
+		AcquiredAt: now(), RefreshedAt: now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	areg := store.NewActorRegistry(db)
+	if err := areg.Insert(ctx, actor.Record{
+		ID: "user:alice", Kind: message.SenderHuman,
+		DisplayName: "Alice", CreatedAt: now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	const secret = "agent-secret"
+	cfg := runtime.DaemonConfig{
+		DataDir:           dataDir,
+		ChannelsDir:       channelsDir,
+		DaemonID:          "daemon-agent",
+		DaemonEpoch:       1,
+		UseMockBus:        true,
+		NowFn:             now,
+		HumanCallerSecret: []byte(secret),
+		SchedulerPeriod:   50 * time.Millisecond,
+		HeartbeatPeriod:   time.Second,
+	}
+	d, err := runtime.AssembleDaemon(ctx, cfg)
+	if err != nil {
+		t.Fatalf("AssembleDaemon: %v", err)
+	}
+	if err := d.RunPhases(ctx); err != nil {
+		t.Fatalf("RunPhases: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+
+	// (a) actor row exists post-boot — open the sqlite read-only and
+	// query the registry directly to prove the Insert happened (the
+	// daemon's own Lookup would conflate "ensureChannelAgent insert"
+	// with "Lookup hit a residual row from a previous test run", since
+	// t.TempDir guarantees a fresh tree it is in fact unambiguous, but
+	// reading via Lookup also exercises the in-process registry).
+	{
+		db2, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{})
+		if err != nil {
+			t.Fatalf("reopen channel sqlite: %v", err)
+		}
+		areg2 := store.NewActorRegistry(db2)
+		rec, ok, err := areg2.Lookup(ctx, runtime.ChannelAgentID)
+		_ = db2.Close()
+		if err != nil {
+			t.Fatalf("lookup channel-agent: %v", err)
+		}
+		if !ok {
+			t.Fatalf("channel-agent actor row missing after bootChannel")
+		}
+		if rec.Kind != message.SenderAgent {
+			t.Errorf("channel-agent kind=%q want %q", rec.Kind, message.SenderAgent)
+		}
+	}
+
+	// (b) drive a write_message frame and assert the trigger counter
+	// climbs — proves the deliverer handler is wired and reachable via
+	// the post-harness gateway.Dispatch path.
+	if got := d.ChannelAgentTriggerCount(chID); got != 0 {
+		t.Fatalf("pre-drive counter = %d, want 0", got)
+	}
+
+	bus := d.Bus()
+	server := bus.ServerSide()
+	ts := now()
+	hc := transit.HumanCaller{
+		UserID:           "u1",
+		ActorIDInChannel: "user:alice",
+		TS:               ts,
+		Nonce:            "nonce-agent",
+	}
+	hc.ServerToken = transit.SignHumanCaller(
+		[]byte(secret), string(chID), hc.UserID, hc.ActorIDInChannel, hc.TS, hc.Nonce,
+	)
+	body := transit.WriteMessageBody{
+		FrameID:     "frame-agent-1",
+		ChannelID:   string(chID),
+		HumanCaller: hc,
+		EnvelopePartial: message.Envelope{
+			Type:       "human.text",
+			Kind:       message.KindEvent,
+			Payload:    json.RawMessage(`{"text":"hi agent"}`),
+			Audience:   []string{"*"},
+			Visibility: message.VisibilityPublic,
+			TS:         ts,
+		},
+	}
+	reqFrame, _ := transit.Encode("frame-srv-agent",
+		daemonbus.FrameTypeControlWriteMessage,
+		"server", d.Transit().Epoch(), ts, body)
+	if err := server.SendToDaemon(ctx, reqFrame); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for the ack — same drain shape as
+	// TestDaemon_Phase3_DispatchesWriteMessage.
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("daemon never emitted write_message_ack")
+		default:
+		}
+		recvCtx, recvCancel := context.WithTimeout(ctx, 2*time.Second)
+		f, err := server.RecvFromDaemon(recvCtx)
+		recvCancel()
+		if err != nil {
+			t.Fatalf("recv ack: %v", err)
+		}
+		if f.FrameType != daemonbus.FrameTypeControlWriteMessageAck {
+			continue
+		}
+		var ack transit.WriteMessageAckBody
+		if err := transit.DecodePayload(f, &ack); err != nil {
+			t.Fatal(err)
+		}
+		if !ack.Accepted {
+			t.Fatalf("ack reject: reason=%s detail=%s", ack.RejectReason, ack.RejectDetail)
+		}
+		break
+	}
+
+	// Dispatch races with the ack reply — poll briefly.
+	pollDeadline := time.Now().Add(2 * time.Second)
+	var got int64
+	for time.Now().Before(pollDeadline) {
+		got = d.ChannelAgentTriggerCount(chID)
+		if got >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got < 1 {
+		t.Fatalf("channel-agent trigger counter = %d, want >= 1 (gateway.Dispatch did not reach handler)", got)
+	}
+}
