@@ -25,6 +25,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/store"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 	"github.com/wanpengxie/ActOS/runtime/trigger"
+	"github.com/wanpengxie/ActOS/runtime/workerhost"
 )
 
 // DaemonConfig is the cmd/daemon assembly knobs.
@@ -62,6 +63,14 @@ type DaemonConfig struct {
 	// the sender, server placements drift to `stale` 90s after boot even
 	// when the daemon process is alive (M1.6-T1 acceptance #1).
 	HeartbeatPeriod time.Duration
+
+	// WorkerSpawner, when non-nil, swaps the bootChannel deliverer
+	// handler from the P2 counter stub to a full WorkerManager that
+	// spawns + reuses worker subprocesses (M1.6-T1 P4). Tests that
+	// don't care about workers leave this nil and keep the stub —
+	// runtime/daemon_test relies on the counter probe to assert
+	// trigger fan-out without paying the spawn cost.
+	WorkerSpawner workerhost.Spawner
 
 	// PostBoot is invoked once phase 4 starts. May be nil. Used by
 	// tests to inspect state without racing with shutdown.
@@ -111,12 +120,16 @@ type channelRuntime struct {
 	channelAgentID actor.ActorID
 
 	// channelAgentTriggers counts every envelope dispatched to the
-	// channel-agent handler. Today the handler is a P2 stub used by
-	// runtime/daemon_test to assert the deliverer wiring; P4 replaces
-	// the handler with WorkerManager.OnTrigger and the counter becomes
-	// a probe for the test suite (kept across the swap so existing
-	// observability stays intact).
+	// channel-agent handler. The P2 stub increments it directly; when
+	// the P4 WorkerManager is wired the daemon wraps the manager's
+	// OnTrigger so the counter still ticks (observability bridge).
 	channelAgentTriggers atomic.Int64
+
+	// workerManager is non-nil when DaemonConfig.WorkerSpawner is set
+	// and bootChannel successfully built the per-channel manager. The
+	// channel teardown calls manager.Close so worker subprocesses do
+	// not leak past placement reclaim.
+	workerManager *workerhost.Manager
 }
 
 // Daemon is the assembled cmd/daemon process. Exposed so tests can
@@ -577,10 +590,12 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 // sqlite, so we Lookup first and only Insert when missing. Re-running
 // Insert would fail the actor_registry PRIMARY KEY.
 //
-// Handler wiring (P2 stub): records a count on cr so daemon_test can
-// observe that trigger.Gateway.Dispatch reached the agent target. P4
-// (WorkerManager) replaces the handler in-place via the same
-// Deliverer.Register seam — no API change here.
+// Handler wiring depends on whether DaemonConfig.WorkerSpawner is set:
+//   - nil (P2 default, runtime/daemon_test) → stub handler increments
+//     channelAgentTriggers and returns. No worker subprocess.
+//   - non-nil (P4 wiring, cmd/daemon) → builds a workerhost.Manager and
+//     registers a handler that ticks the counter AND calls
+//     manager.OnTrigger so the trigger envelope reaches a real worker.
 func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) error {
 	_, ok, err := cr.registry.Lookup(ctx, cr.channelAgentID)
 	if err != nil {
@@ -597,7 +612,47 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 		}
 	}
 
-	// P2 stub handler — counts arrivals. P4 swaps in WorkerManager.OnTrigger.
+	// Lock snapshot for fencing. Use the in-process channel lock row;
+	// bootChannel guarantees this row is current (cold-start phase 2
+	// already refreshed daemon_epoch; hot OnCreateChannel inserts the
+	// row in the same tx as the saga).
+	lockRow, lockOK, err := cr.lock.Get(ctx)
+	if err != nil {
+		return fmt.Errorf("runtime: ensure channel-agent lock get %s: %w", cr.channelID, err)
+	}
+	if !lockOK {
+		return fmt.Errorf("runtime: ensure channel-agent missing lock %s", cr.channelID)
+	}
+
+	// P4 wire: build manager when a spawner is configured. Otherwise
+	// fall back to the P2 counter stub so tests don't pay the spawn cost.
+	if d.cfg.WorkerSpawner != nil {
+		leaseStore := workerhost.NewLeaseStore(cr.db)
+		mgr, err := workerhost.NewManager(workerhost.ManagerConfig{
+			ChannelID:     cr.channelID,
+			AgentID:       cr.channelAgentID,
+			WorkerActorID: cr.channelAgentID,
+			Spawner:       d.cfg.WorkerSpawner,
+			LeaseStore:    leaseStore,
+			Chain:         cr.chain,
+			Ledger:        cr.ledger,
+			NowFn:         d.cfg.NowFn,
+			FencingToken:  lockRow.FencingToken,
+			DaemonEpoch:   lockRow.DaemonEpoch,
+			ServeCtx:      d.runCtx,
+		})
+		if err != nil {
+			return fmt.Errorf("runtime: ensure channel-agent manager %s: %w", cr.channelID, err)
+		}
+		cr.workerManager = mgr
+		cr.deliverer.Register(cr.channelAgentID, func(ctx context.Context, id actor.ActorID, env *message.Envelope) error {
+			cr.channelAgentTriggers.Add(1)
+			return mgr.OnTrigger(ctx, id, env)
+		})
+		return nil
+	}
+
+	// P2 fallback — counter-only handler.
 	cr.deliverer.Register(cr.channelAgentID, func(_ context.Context, _ actor.ActorID, _ *message.Envelope) error {
 		cr.channelAgentTriggers.Add(1)
 		return nil
@@ -654,11 +709,17 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 		}
 	}(cr.pusher, lc.ChannelID)
 
-	// Register the teardown: cancel pusher ctx + drop the runtime
-	// entry. Sqlite handle stays open — Close() reaps it at shutdown
-	// (unbind is not wipe; channels/<id>/ stays on disk).
+	// Register the teardown: tear down the worker manager (if any),
+	// cancel pusher ctx, and drop the runtime entry. Sqlite handle
+	// stays open — Close() reaps it at shutdown (unbind is not wipe;
+	// channels/<id>/ stays on disk).
 	chID := lc.ChannelID
 	d.unloader.Register(chID, func() error {
+		if cr.workerManager != nil {
+			closeCtx, cc := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = cr.workerManager.Close(closeCtx)
+			cc()
+		}
 		pusherCancel()
 		delete(d.channels, chID)
 		d.booter.Unload(chID)

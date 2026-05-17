@@ -1,0 +1,327 @@
+package workerhost
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	khar "github.com/wanpengxie/ActOS/kernel/harness"
+	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/runtime/ipc"
+)
+
+// Manager is the per-channel worker bridge: it lazily spawns a single
+// worker subprocess on the first trigger envelope, reuses it across
+// subsequent triggers, and re-spawns on crash. Built around the
+// existing Spawner / LeaseStore / Host primitives so the only new
+// behavioural surface is "when does a worker exist".
+//
+// Wiring:
+//
+//	scheduler.Deliverer.Register(ChannelAgentID, manager.OnTrigger)
+//	bootChannel constructs Manager, stores it on channelRuntime, and
+//	defers manager.Close in the unloader teardown.
+//
+// Concurrency: OnTrigger is called from the daemon dispatcher (write
+// path) and from the long-pending scheduler scan. Both paths can race;
+// a single mutex serialises spawn / push. The mutex is held during
+// PushTrigger so a slow worker stdin write blocks subsequent triggers
+// rather than corrupting frame ordering — acceptable because triggers
+// are low-rate (per acceptance #3 same channel reuses one worker).
+type Manager struct {
+	cfg ManagerConfig
+
+	mu      sync.Mutex
+	cur     *workerSession
+	closed  bool
+	spawnSeq atomic.Int64
+	leaseSeq atomic.Int64
+}
+
+// ManagerConfig wires a Manager.
+type ManagerConfig struct {
+	ChannelID     channel.ID
+	AgentID       actor.ActorID // lease + actor target — e.g. ChannelAgentID
+	WorkerActorID actor.ActorID // principal the worker speaks as on IPC writes
+
+	Spawner    Spawner
+	LeaseStore *LeaseStore
+	Chain      khar.Chain
+	Ledger     LedgerOps
+
+	NowFn func() int64
+
+	// Fencing snapshot at construction. Manager assumes the channel
+	// lock doesn't change during its lifetime; daemon unloads + re-
+	// builds the manager on placement reclaim, so this is safe.
+	FencingToken placement.FencingToken
+	DaemonEpoch  placement.DaemonEpoch
+
+	// HandshakeTimeout caps how long OnTrigger waits for the freshly
+	// spawned worker's handshake before giving up. Default 5s.
+	HandshakeTimeout time.Duration
+
+	// WorkerIDPrefix prepends a stable label to generated worker ids.
+	// Defaults to "w" — production wiring sets to the daemon id so
+	// log lines correlate.
+	WorkerIDPrefix string
+
+	// ServeCtx is the long-lived context the Host.Serve goroutine
+	// inherits. Defaults to context.Background() if unset, but
+	// production should pass the daemon runCtx so shutdown cascades
+	// reach the worker subprocesses.
+	ServeCtx context.Context
+}
+
+// workerSession is the daemon-side state for one live worker subprocess.
+type workerSession struct {
+	leaseID  string
+	workerID string
+	proc     WorkerProc
+	host     *Host
+
+	// done closes when Host.Serve returns (worker exit or fatal IPC
+	// error). Set under Manager.mu via serve goroutine close-on-exit.
+	done chan struct{}
+}
+
+// dead reports whether the session's serve goroutine has returned.
+func (s *workerSession) dead() bool {
+	if s == nil {
+		return true
+	}
+	select {
+	case <-s.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// NewManager builds a Manager. Defaults to a 5s handshake timeout and
+// a background ServeCtx when callers don't pass either.
+func NewManager(cfg ManagerConfig) (*Manager, error) {
+	if cfg.ChannelID == "" {
+		return nil, errors.New("workerhost: ManagerConfig.ChannelID empty")
+	}
+	if cfg.AgentID == "" {
+		return nil, errors.New("workerhost: ManagerConfig.AgentID empty")
+	}
+	if cfg.WorkerActorID == "" {
+		return nil, errors.New("workerhost: ManagerConfig.WorkerActorID empty")
+	}
+	if cfg.Spawner == nil {
+		return nil, errors.New("workerhost: ManagerConfig.Spawner nil")
+	}
+	if cfg.LeaseStore == nil {
+		return nil, errors.New("workerhost: ManagerConfig.LeaseStore nil")
+	}
+	if cfg.Chain == nil {
+		return nil, errors.New("workerhost: ManagerConfig.Chain nil")
+	}
+	if cfg.Ledger == nil {
+		return nil, errors.New("workerhost: ManagerConfig.Ledger nil")
+	}
+	if cfg.NowFn == nil {
+		return nil, errors.New("workerhost: ManagerConfig.NowFn nil")
+	}
+	if cfg.HandshakeTimeout <= 0 {
+		cfg.HandshakeTimeout = 5 * time.Second
+	}
+	if cfg.WorkerIDPrefix == "" {
+		cfg.WorkerIDPrefix = "w"
+	}
+	if cfg.ServeCtx == nil {
+		cfg.ServeCtx = context.Background()
+	}
+	return &Manager{cfg: cfg}, nil
+}
+
+// OnTrigger is the scheduler.Deliverer.HandlerFn entry point. Per the
+// L2 worker-bridge contract: spawn a worker if there isn't one alive,
+// then push the envelope as a KindTrigger IPC frame.
+//
+// Errors here are surfaced back to gateway.Dispatch which logs them
+// and continues — fan-out is at-least-once (L1 §6.1) so a single push
+// failure does not stall the harness write or reject the originating
+// human envelope. The next trigger retries the spawn.
+func (m *Manager) OnTrigger(ctx context.Context, _ actor.ActorID, env *message.Envelope) error {
+	if env == nil {
+		return errors.New("workerhost: OnTrigger nil envelope")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return errors.New("workerhost: manager closed")
+	}
+
+	if m.cur == nil || m.cur.dead() {
+		// Best-effort cleanup of any tombstoned previous session so
+		// the lease row reflects the new worker.
+		if m.cur != nil {
+			_ = m.cfg.LeaseStore.Release(ctx, string(m.cfg.AgentID))
+			m.cur = nil
+		}
+		if err := m.spawnLocked(ctx); err != nil {
+			return fmt.Errorf("workerhost: spawn: %w", err)
+		}
+	}
+
+	payload := ipc.TriggerPayload{
+		Envelope:      *env,
+		CorrelationID: env.CorrelationID,
+		Cursor:        env.Seq,
+	}
+	if err := m.cur.host.PushTrigger(payload); err != nil {
+		// Push failure likely means the worker pipe is broken — drop
+		// the session so the next trigger re-spawns. Don't release the
+		// lease synchronously here; the serve goroutine will run that
+		// when Host.Serve returns.
+		return fmt.Errorf("workerhost: push trigger: %w", err)
+	}
+	return nil
+}
+
+// spawnLocked must be called with m.mu held. Acquires the lease, starts
+// the worker subprocess, builds a Host, fires off Host.Serve, and waits
+// for the handshake (so the first PushTrigger lands after the worker's
+// IPC client is reading).
+func (m *Manager) spawnLocked(ctx context.Context) error {
+	leaseID := fmt.Sprintf("lease-%s-%d", m.cfg.ChannelID, m.leaseSeq.Add(1))
+	workerID := fmt.Sprintf("%s-%s-%d", m.cfg.WorkerIDPrefix, m.cfg.ChannelID, m.spawnSeq.Add(1))
+
+	if _, ok, err := m.cfg.LeaseStore.Acquire(
+		ctx,
+		string(m.cfg.AgentID),
+		workerID,
+		m.cfg.FencingToken,
+		m.cfg.DaemonEpoch,
+		m.cfg.NowFn(),
+	); err != nil {
+		return fmt.Errorf("lease acquire: %w", err)
+	} else if !ok {
+		return errors.New("workerhost: lease acquire conflict")
+	}
+
+	proc, err := m.cfg.Spawner.Spawn(m.cfg.ServeCtx, leaseID)
+	if err != nil {
+		_ = m.cfg.LeaseStore.Release(ctx, string(m.cfg.AgentID))
+		return fmt.Errorf("spawn: %w", err)
+	}
+
+	host, err := NewHost(proc.Stdout, proc.Stdin, HostConfig{
+		ChannelID:     m.cfg.ChannelID,
+		WorkerID:      workerID,
+		LeaseID:       leaseID,
+		FencingToken:  m.cfg.FencingToken,
+		DaemonEpoch:   m.cfg.DaemonEpoch,
+		Chain:         m.cfg.Chain,
+		WorkerActorID: m.cfg.WorkerActorID,
+		Ledger:        m.cfg.Ledger,
+		NowFn:         m.cfg.NowFn,
+	})
+	if err != nil {
+		_ = proc.Kill()
+		_ = m.cfg.LeaseStore.Release(ctx, string(m.cfg.AgentID))
+		return fmt.Errorf("host: %w", err)
+	}
+
+	sess := &workerSession{
+		leaseID:  leaseID,
+		workerID: workerID,
+		proc:     proc,
+		host:     host,
+		done:     make(chan struct{}),
+	}
+	m.cur = sess
+
+	// Start the serve goroutine. When Serve returns (worker EOF or
+	// fatal IPC error), tombstone the session so the next OnTrigger
+	// re-spawns; release the lease so a future spawn can grab a new
+	// fencing-token-stamped row.
+	go func() {
+		_ = host.Serve(m.cfg.ServeCtx)
+		// Close stdin so any half-spoken worker write side terminates;
+		// then wait for the subprocess so we don't leak zombies.
+		_ = proc.Stdin.Close()
+		_ = proc.Wait()
+		// Release lease; ignore err — best-effort cleanup.
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = m.cfg.LeaseStore.Release(releaseCtx, string(m.cfg.AgentID))
+		cancel()
+		close(sess.done)
+	}()
+
+	// Wait until the worker handshakes (Host writes the ack and
+	// signals Ready). PushTrigger only goes onto the wire after this.
+	select {
+	case <-host.Ready():
+		return nil
+	case <-sess.done:
+		// Spawned process died before completing handshake. Drop the
+		// session pointer so the next OnTrigger retries.
+		m.cur = nil
+		return errors.New("workerhost: worker exited before handshake")
+	case <-time.After(m.cfg.HandshakeTimeout):
+		_ = proc.Kill()
+		<-sess.done
+		m.cur = nil
+		return errors.New("workerhost: handshake timeout")
+	case <-ctx.Done():
+		_ = proc.Kill()
+		<-sess.done
+		m.cur = nil
+		return ctx.Err()
+	}
+}
+
+// Close terminates the active worker session (if any) and marks the
+// manager as no longer accepting triggers. Idempotent.
+func (m *Manager) Close(ctx context.Context) error {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil
+	}
+	m.closed = true
+	cur := m.cur
+	m.cur = nil
+	m.mu.Unlock()
+
+	if cur == nil {
+		return nil
+	}
+	// Force exit — worker subprocess sees stdin EOF + ctx cancel via
+	// ServeCtx upstream cancellation. The serve goroutine releases
+	// the lease on its way out.
+	_ = cur.proc.Stdin.Close()
+	_ = cur.proc.Kill()
+	select {
+	case <-cur.done:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(3 * time.Second):
+		return errors.New("workerhost: manager close timeout")
+	}
+	return nil
+}
+
+// CurrentWorkerID exposes the running worker's id for tests; "" when
+// no worker is alive OR when the current session's serve goroutine has
+// already exited (worker crash / Close-in-progress). The next
+// OnTrigger will clear the dead session pointer and re-spawn.
+func (m *Manager) CurrentWorkerID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cur == nil || m.cur.dead() {
+		return ""
+	}
+	return m.cur.workerID
+}
