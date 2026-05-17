@@ -32,6 +32,15 @@ type IPCClient struct {
 	stopCh   chan struct{}
 	stopOnce sync.Once
 
+	// triggerCh fan-outs daemon-pushed KindTrigger frames to whoever is
+	// driving the worker's reaction loop (typically the Bridge). It is
+	// buffered so a slow consumer does not stall the read loop's reply
+	// dispatch path; overflow drops the oldest waiting frame and emits
+	// a stderr warning (gateway redelivery makes this safe under L1
+	// §6.1 at-least-once-by-message.id).
+	triggerCh   chan ipc.TriggerPayload
+	triggerDrop atomic.Int64
+
 	// Snapshot established at handshake — every outbound non-handshake
 	// frame gets these fields stamped.
 	channelID    channel.ID
@@ -40,12 +49,18 @@ type IPCClient struct {
 	daemonEpoch  placement.DaemonEpoch
 }
 
+// triggerBufferSize bounds the IPCClient.triggerCh backlog. Sized big
+// enough that the bridge processing one trigger does not lose subsequent
+// pushes during a typical channel burst.
+const triggerBufferSize = 32
+
 // NewIPCClient builds an IPCClient over the supplied bidirectional pipe.
 func NewIPCClient(in io.Reader, out io.Writer) *IPCClient {
 	return &IPCClient{
-		codec:   ipc.NewCodec(in, out),
-		pending: make(map[string]chan ipc.Frame),
-		stopCh:  make(chan struct{}),
+		codec:     ipc.NewCodec(in, out),
+		pending:   make(map[string]chan ipc.Frame),
+		stopCh:    make(chan struct{}),
+		triggerCh: make(chan ipc.TriggerPayload, triggerBufferSize),
 	}
 }
 
@@ -55,7 +70,11 @@ func (c *IPCClient) Start(ctx context.Context) {
 	go c.readLoop(ctx)
 }
 
-// Stop shuts the read loop.
+// Stop shuts the read loop. triggerCh is NOT closed here — only the
+// readLoop closes it (deferred), so dispatch can never send to a closed
+// channel. Bridge.Run loops observing the channel will see it close
+// once readLoop returns (which Stop ultimately triggers via the pipe
+// closures owned by the caller).
 func (c *IPCClient) Stop() {
 	c.stopOnce.Do(func() {
 		close(c.stopCh)
@@ -69,7 +88,27 @@ func (c *IPCClient) Stop() {
 	})
 }
 
+// Triggers returns the channel of daemon-pushed KindTrigger payloads.
+// The Bridge ranges over it; the channel closes when the IPC client
+// stops (handshake EOF, daemon-side shutdown, or Stop()). Drops are
+// surfaced via TriggerDropCount.
+func (c *IPCClient) Triggers() <-chan ipc.TriggerPayload {
+	return c.triggerCh
+}
+
+// TriggerDropCount returns the total number of KindTrigger frames the
+// IPC client had to drop because triggerCh was full. Non-zero in
+// production usually means the bridge processing loop is slower than
+// the daemon push rate; surface as an observability counter.
+func (c *IPCClient) TriggerDropCount() int64 {
+	return c.triggerDrop.Load()
+}
+
 func (c *IPCClient) readLoop(ctx context.Context) {
+	// Close the trigger channel exactly once, after the read loop
+	// stops reading + dispatching. This makes Bridge.Run loops observe
+	// EOF deterministically when the IPC link tears down.
+	defer close(c.triggerCh)
 	for {
 		if err := ctx.Err(); err != nil {
 			c.Stop()
@@ -97,10 +136,25 @@ func (c *IPCClient) dispatch(frame ipc.Frame) {
 	if ok {
 		ch <- frame
 		close(ch)
+		return
 	}
-	// Frames without a matching pending request are silently dropped —
-	// they're either stale duplicates or unsolicited shutdown commands
-	// which Stop() will surface via the read error.
+	// Unsolicited frame. KindTrigger is the only documented daemon-push
+	// kind today (M1.6-T1); route it to the trigger channel. Anything
+	// else stays dropped per the original semantics.
+	if frame.Kind == ipc.KindTrigger {
+		var payload ipc.TriggerPayload
+		if err := json.Unmarshal(frame.Payload, &payload); err != nil {
+			fmt.Fprintf(io.Discard, "worker ipc: trigger decode failed: %v\n", err)
+			return
+		}
+		select {
+		case c.triggerCh <- payload:
+		default:
+			c.triggerDrop.Add(1)
+			// Drop quietly into io.Discard so unit tests don't spam
+			// stderr. The TriggerDropCount probe is the contract.
+		}
+	}
 }
 
 // Handshake performs the initial handshake. On success the client
