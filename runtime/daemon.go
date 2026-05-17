@@ -1244,26 +1244,57 @@ func (b transitChainBridge) Write(ctx context.Context, env *message.Envelope) (t
 }
 
 // scanLongPending is the per-tick callback the long-pending scheduler
-// invokes (registered as TimerConfig.Scan). It performs the FIX-T3
-// future-message drain (L1 §5.3): every row with `not_before <= now AND
-// delivered_at IS NULL` is fed through trigger.Gateway.Dispatch +
-// messages.MarkDelivered. Each per-channel error is logged and skipped
-// — the scheduler tick MUST NOT abort the daemon loop on a single bad
-// row (at-least-once contract, L1 §6.1).
+// invokes (registered as TimerConfig.Scan). It runs TWO passes per
+// owned channel — each pass is independent and per-channel errors are
+// logged-and-skipped so a single bad row cannot abort the daemon loop
+// (at-least-once contract, L1 §6.1):
 //
-// M1.5 long-pending fallback emit (§6.4) is still no-op: the trigger
-// Deliverer has no per-actor handlers registered, so Dispatch only
-// records the resolved audience. A later ticket replaces this no-op
-// with the system-side terminal_response emit path.
+//  1. FIX-T3 future-message drain (L1 §5.3) — every row with
+//     `not_before <= now AND delivered_at IS NULL` is fed through
+//     trigger.Gateway.Dispatch + messages.MarkDelivered. This makes
+//     `emit not_before=future` honour its delayed-delivery contract
+//     across daemon restarts (the persisted row remains scannable
+//     until MarkDelivered stamps it).
+//
+//  2. L1 §6.4 long-pending fallback (T147) — every request that has
+//     blown past its expires_at deadline without earning a terminal
+//     response gets a synthesised failed terminal whose reason depends
+//     on the receiver:
+//
+//     - audience[0] resolves to an active `agent` / `system` actor →
+//     reason='unanswered_timeout' (the agent silently dropped it).
+//     - audience[0] resolves to a `tool` actor → SKIP: the adapter
+//     framework F3 timer is the authoritative source for tool-
+//     receiver timeouts. Emitting from both paths would race the
+//     `ux_terminal_response_per_request` UNIQUE constraint and
+//     bombard the loser with a harness `terminal_duplicate` reject
+//     even though business semantics are identical. This is the
+//     ticket's MUTUAL-EXCLUSION rule.
+//     - audience[0] resolves to a `human` actor → SKIP: humans do not
+//     have an SLA in the baseline spec (channel-config-driven human
+//     timeouts are M1.7 scope).
+//     - audience[0] is missing from actor_registry, OR is soft-
+//     deregistered → reason='receiver_unavailable' (the request
+//     can never be answered because nobody is listening). NOTE: per
+//     L1 §6.4 this should fire IMMEDIATELY rather than waiting for
+//     expires_at. M1.6 simplifies by piggybacking on the expires_at
+//     scan; the standalone "deregister-time immediate emit" scan is
+//     deferred to a later ticket to keep T147 surface tight.
+//
+// The synthesised response uses the system actor as sender (the canonical
+// "harness wrote this on the channel's behalf" identity per L1 §3.2) and
+// a deterministic id derived from the request id + reason so re-firing
+// the scan idempotently dedupes via harness step 0.5.
 func (d *Daemon) scanLongPending(ctx context.Context, nowMs int64) error {
 	for chID, cr := range d.channels {
 		if cr.gateway == nil || cr.messages == nil {
 			continue
 		}
+
+		// Pass 1 — §5.3 future-message drain.
 		due, err := cr.messages.PendingDue(ctx, nowMs, 64)
 		if err != nil {
 			fmt.Printf("runtime: scheduler scan %s: %v\n", chID, err)
-			continue
 		}
 		for i := range due {
 			env := due[i]
@@ -1277,8 +1308,151 @@ func (d *Daemon) scanLongPending(ctx context.Context, nowMs int64) error {
 				fmt.Printf("runtime: scheduler mark delivered %s/%s: %v\n", chID, env.ID, err)
 			}
 		}
+
+		// Pass 2 — §6.4 long-pending fallback emit.
+		overdue, err := cr.messages.LongPendingRequests(ctx, nowMs, 64)
+		if err != nil {
+			fmt.Printf("runtime: scheduler long-pending %s: %v\n", chID, err)
+			continue
+		}
+		for i := range overdue {
+			req := overdue[i]
+			if err := d.emitLongPendingFallback(ctx, cr, &req, nowMs); err != nil {
+				fmt.Printf("runtime: scheduler long-pending emit %s/%s: %v\n", chID, req.ID, err)
+				continue
+			}
+		}
 	}
 	return nil
+}
+
+// longPendingPayload is the synthesised response payload the scheduler
+// writes for L1 §6.4 fallback. The shape MUST match adapter framework's
+// terminalPayload (status/reason/detail) so consumers reading either
+// path see one schema.
+type longPendingPayload struct {
+	Status string `json:"status"`
+	Reason string `json:"reason"`
+}
+
+// emitLongPendingFallback synthesises one failed terminal response for
+// an overdue request. Classification (skip vs. emit + which reason) is
+// driven by the receiver actor record. The write goes through the
+// channel's wrappedChain so the post-harness fan-out + MarkDelivered +
+// fencing-stamp invariants are honoured identically to the WriteMessage
+// entrypoint AND the adapter framework's Respond path.
+func (d *Daemon) emitLongPendingFallback(
+	ctx context.Context,
+	cr *channelRuntime,
+	req *message.Envelope,
+	nowMs int64,
+) error {
+	if len(req.Audience) == 0 {
+		// L1 §5.1 invariant: every request lands on at least one resolved
+		// audience entry by the time it's persisted. A zero-length slice
+		// here would be a harness bug — log and skip rather than fabricate
+		// a recipient.
+		return fmt.Errorf("request %s has empty audience", req.ID)
+	}
+	// M1.6 baseline: 1 channel ↔ 1 device, 1 receiver per request. The
+	// audience[0] entry is the canonical receiver for the SLA decision.
+	// Multi-receiver fan-out (audience=['*'] expansions) is M1.7 scope.
+	receiverID := actor.ActorID(req.Audience[0])
+
+	reason, emit, err := d.classifyLongPendingReason(ctx, cr, receiverID)
+	if err != nil {
+		return fmt.Errorf("classify %s: %w", req.ID, err)
+	}
+	if !emit {
+		return nil
+	}
+
+	payload, err := json.Marshal(longPendingPayload{Status: "failed", Reason: string(reason)})
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+	// Deterministic id keeps the scan idempotent across ticks: every
+	// re-fire builds the same id, hits harness step 0.5 dedupe, and
+	// short-circuits (canonical-hash-equal → Deduped=true).
+	envID := "response:" + req.ID + ":sys-" + string(reason)
+
+	correlationID := req.CorrelationID
+	if correlationID == "" {
+		correlationID = req.ID
+	}
+
+	env := &message.Envelope{
+		ID:            envID,
+		TS:            nowMs,
+		ChannelID:     req.ChannelID,
+		Sender:        message.Sender{Kind: message.SenderSystem, ID: string(actor.SystemActorID)},
+		Kind:          message.KindResponse,
+		Type:          req.Type,
+		Payload:       payload,
+		ParentID:      req.ID,
+		CorrelationID: correlationID,
+		Visibility:    req.Visibility,
+		Audience:      []string{req.Sender.ID},
+	}
+
+	// The scheduler is a system caller; stamp the harness context with
+	// the system actor + permit kind pre-fill (we set Kind=SenderSystem
+	// above so the registry-truth overwrite path remains exact-match).
+	chainCtx := harness.CtxWithCaller(ctx, harness.CallerContext{
+		ActorID:                 actor.SystemActorID,
+		ChannelID:               channel.ID(req.ChannelID),
+		AllowProvidedSenderKind: true,
+	})
+
+	res, err := cr.wrappedChain.Write(chainCtx, env)
+	if err != nil {
+		return fmt.Errorf("chain write: %w", err)
+	}
+	// terminal_duplicate is benign — another path (adapter framework
+	// timer racing the scheduler) won the One-Law-uniqueness; the
+	// scheduler's job is done either way.
+	if res.RejectReason != "" && res.RejectReason != message.HarnessTerminalDuplicate {
+		return fmt.Errorf("rejected: %s (%s)", res.RejectReason, res.RejectDetail)
+	}
+	return nil
+}
+
+// classifyLongPendingReason inspects the receiver's actor_registry row
+// and returns (reason, emit?, err) per the L1 §6.4 dispatch matrix.
+// See scanLongPending's pass-2 docstring for the rule set.
+func (d *Daemon) classifyLongPendingReason(
+	ctx context.Context,
+	cr *channelRuntime,
+	receiverID actor.ActorID,
+) (message.TerminalFailureReason, bool, error) {
+	rec, ok, err := cr.registry.Lookup(ctx, receiverID)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok {
+		// Receiver never registered → request will never be answered.
+		return message.TerminalReceiverUnavailable, true, nil
+	}
+	if rec.DeregisteredAt != 0 {
+		// Receiver soft-deregistered → request will never be answered.
+		return message.TerminalReceiverUnavailable, true, nil
+	}
+	switch rec.Kind {
+	case message.SenderTool:
+		// Adapter framework F3 timer owns this case — MUTUAL EXCLUSION.
+		return "", false, nil
+	case message.SenderHuman:
+		// Baseline: humans do not have an SLA in M1.6.
+		return "", false, nil
+	case message.SenderAgent, message.SenderSystem:
+		return message.TerminalUnansweredTimeout, true, nil
+	default:
+		// Unknown kind — defensive log + skip. The CHECK constraint on
+		// actor_registry.actor_kind makes this branch unreachable in
+		// production but we don't want a future kind expansion to
+		// accidentally emit the wrong reason.
+		return "", false, nil
+	}
 }
 
 // postHarnessChain wraps the bare runtime/harness.Chain with the per-

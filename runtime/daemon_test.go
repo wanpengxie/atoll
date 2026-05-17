@@ -427,6 +427,239 @@ func TestDaemon_FutureMessage_SchedulerDrains(t *testing.T) {
 	}
 }
 
+// TestDaemon_LongPending_Scheduler_EmitsFailedTerminal covers the L1
+// §6.4 long-pending fallback (T147 §B). For each request whose
+// expires_at has elapsed without a terminal response the scheduler
+// either synthesises a system-side failed terminal or skips, per the
+// receiver-kind dispatch matrix:
+//
+//   - audience=[agent] / [system]      → emit reason=unanswered_timeout
+//   - audience=[tool]                  → skip (adapter framework F3 timer)
+//   - audience=[human]                 → skip (no baseline human SLA)
+//   - audience=[deregistered actor]    → emit reason=receiver_unavailable
+//   - audience=[never-registered actor]→ emit reason=receiver_unavailable
+//
+// The synthesised response is also asserted to be idempotent (re-running
+// the scan does not double-emit thanks to the deterministic envelope id
+// + harness step 0.5 dedupe).
+func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dataDir := t.TempDir()
+	channelsDir := filepath.Join(dataDir, "channels")
+	chID := channel.ID("ch-overdue")
+	chDir := filepath.Join(channelsDir, string(chID))
+	if err := os.MkdirAll(chDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(chDir, "channel.sqlite")
+	db, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lock := store.NewChannelLock(db)
+	if err := lock.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    chID,
+		FencingToken: 1, OwnerEpoch: 1,
+		DaemonID: "daemon-overdue", DaemonEpoch: 1,
+		AcquiredAt: now(), RefreshedAt: now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed the registry. We need:
+	//   - system actor: signs the synthesised response.
+	//   - agent:caller: the request originator (envelope.sender.id).
+	//   - agent:beta:   agent receiver → unanswered_timeout.
+	//   - tool:xhs:     tool receiver → skip.
+	//   - user:alice:   human receiver → skip.
+	//   - agent:gone:   inserted then deregistered → receiver_unavailable.
+	// (audience=[system] is exercised via the system actor itself.)
+	// (audience=[agent:ghost] is exercised by *not* registering it — the
+	// store.NewMessages.Append path bypasses harness step 5 so the row
+	// lands even when audience[0] is unknown.)
+	areg := store.NewActorRegistry(db)
+	for _, rec := range []actor.Record{
+		{ID: actor.SystemActorID, Kind: message.SenderSystem, CreatedAt: now()},
+		{ID: "agent:caller", Kind: message.SenderAgent, CreatedAt: now()},
+		{ID: "agent:beta", Kind: message.SenderAgent, CreatedAt: now()},
+		{ID: "tool:xhs", Kind: message.SenderTool, CreatedAt: now()},
+		{ID: "user:alice", Kind: message.SenderHuman, CreatedAt: now()},
+		{ID: "agent:gone", Kind: message.SenderAgent, CreatedAt: now()},
+	} {
+		if err := areg.Insert(ctx, rec); err != nil {
+			t.Fatalf("seed actor %s: %v", rec.ID, err)
+		}
+	}
+	// Deregister agent:gone so the scheduler sees a soft-deleted receiver.
+	if err := areg.Deregister(ctx, "agent:gone", now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed 6 requests, all already past expires_at (deadline = now - 1s).
+	// We use "human.text" core type with kind=request — core types pass
+	// step 4 without a type_registry hit. The raw store.Append path
+	// bypasses harness (the harness would refuse kind=request with an
+	// inactive / unknown receiver), which models a request emitted while
+	// the receiver was active that later went silent.
+	msgs := store.NewMessages(db)
+	deadline := now() - 1000
+	type seedCase struct {
+		id          string
+		audience    string
+		expectEmit  bool
+		expectReason message.TerminalFailureReason
+	}
+	cases := []seedCase{
+		{id: "req-agent", audience: "agent:beta", expectEmit: true, expectReason: message.TerminalUnansweredTimeout},
+		{id: "req-system", audience: string(actor.SystemActorID), expectEmit: true, expectReason: message.TerminalUnansweredTimeout},
+		{id: "req-tool", audience: "tool:xhs", expectEmit: false},
+		{id: "req-human", audience: "user:alice", expectEmit: false},
+		{id: "req-deregistered", audience: "agent:gone", expectEmit: true, expectReason: message.TerminalReceiverUnavailable},
+		{id: "req-unknown", audience: "agent:ghost", expectEmit: true, expectReason: message.TerminalReceiverUnavailable},
+	}
+	for _, c := range cases {
+		env := &message.Envelope{
+			ID:         c.id,
+			TS:         now(),
+			TSReceived: now(),
+			ChannelID:  string(chID),
+			Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:caller"},
+			Kind:       message.KindRequest,
+			Type:       "human.text",
+			Payload:    json.RawMessage(`{"text":"please"}`),
+			Visibility: message.VisibilityPublic,
+			Audience:   []string{c.audience},
+			ExpiresAt:  &deadline,
+		}
+		if _, err := msgs.Append(ctx, env); err != nil {
+			t.Fatalf("seed %s: %v", c.id, err)
+		}
+	}
+	_ = db.Close()
+
+	cfg := runtime.DaemonConfig{
+		DataDir:         dataDir,
+		ChannelsDir:     channelsDir,
+		DaemonID:        "daemon-overdue",
+		DaemonEpoch:     42,
+		UseMockBus:      true,
+		NowFn:           now,
+		SchedulerPeriod: 30 * time.Millisecond,
+	}
+	d, err := runtime.AssembleDaemon(ctx, cfg)
+	if err != nil {
+		t.Fatalf("AssembleDaemon: %v", err)
+	}
+	if err := d.RunPhases(ctx); err != nil {
+		t.Fatalf("RunPhases: %v", err)
+	}
+	if !d.HasChannel(chID) {
+		t.Fatalf("daemon did not register channel %s", chID)
+	}
+
+	// Poll until every expected emit has materialised. We assert the
+	// FULL set in one shot to also catch "scheduler emitted for a
+	// receiver it should have skipped" — every emit case must show up
+	// AND every skip case must remain absent.
+	expectedTerminalCount := 0
+	for _, c := range cases {
+		if c.expectEmit {
+			expectedTerminalCount++
+		}
+	}
+	deadline2 := time.Now().Add(3 * time.Second)
+	var responses map[string]string
+	for time.Now().Before(deadline2) {
+		responses, err = queryTerminalResponses(ctx, dbPath)
+		if err != nil {
+			t.Fatalf("query responses: %v", err)
+		}
+		if len(responses) >= expectedTerminalCount {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if len(responses) != expectedTerminalCount {
+		t.Fatalf("expected %d synthesised terminal responses, got %d: %+v",
+			expectedTerminalCount, len(responses), responses)
+	}
+
+	for _, c := range cases {
+		reason, has := responses[c.id]
+		if c.expectEmit {
+			if !has {
+				t.Errorf("%s: expected emit reason=%s, got no terminal response", c.id, c.expectReason)
+				continue
+			}
+			if reason != string(c.expectReason) {
+				t.Errorf("%s: reason=%s want %s", c.id, reason, c.expectReason)
+			}
+		} else {
+			if has {
+				t.Errorf("%s: scheduler should have SKIPPED but emitted reason=%s", c.id, reason)
+			}
+		}
+	}
+
+	// Idempotency — let the scheduler tick again and assert no new
+	// terminals show up.
+	time.Sleep(120 * time.Millisecond)
+	again, err := queryTerminalResponses(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("query responses (re-tick): %v", err)
+	}
+	if len(again) != expectedTerminalCount {
+		t.Errorf("idempotency: re-tick changed terminal count from %d to %d",
+			expectedTerminalCount, len(again))
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- d.Close() }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close blocked — phase 3 goroutine leak")
+	}
+}
+
+// queryTerminalResponses opens the channel sqlite read-only and returns
+// a map of request_id → response payload.reason for every terminal
+// failed response present. Helper for the long-pending scheduler test.
+func queryTerminalResponses(ctx context.Context, dbPath string) (map[string]string, error) {
+	db, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{SkipDDL: true})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = db.Close() }()
+	rows, err := db.QueryContext(ctx,
+		`SELECT COALESCE(parent_id,''), payload
+		   FROM messages
+		   WHERE kind='response' AND is_terminal=1 AND parent_id IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]string{}
+	for rows.Next() {
+		var parentID, payload string
+		if err := rows.Scan(&parentID, &payload); err != nil {
+			return nil, err
+		}
+		var doc struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.Unmarshal([]byte(payload), &doc)
+		out[parentID] = doc.Reason
+	}
+	return out, rows.Err()
+}
+
 // queryDeliveredAt opens the channel sqlite read-only and returns the
 // delivered_at column for the row id. We open a fresh handle each call
 // to avoid contention with the daemon's writer handle (WAL mode allows
