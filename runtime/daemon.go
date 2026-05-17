@@ -89,6 +89,17 @@ type DaemonConfig struct {
 	// the channel is not added to the active map.
 	OnChannelBoot func(ctx context.Context, h ChannelHooks) (teardown func(context.Context) error, err error)
 
+	// OnBindDeviceSession / OnUnbindDeviceSession (T147 §A-S2) handle
+	// the server → daemon device-session lifecycle frames. The composition
+	// root (cmd/daemon) wires these to the per-process SessionStore so
+	// adapter modules with binding=via_server_transit can mirror the
+	// server's authoritative device_sessions row. Both are nil-safe — when
+	// unset, the transit dispatcher synthesises an Accepted=false ack with
+	// Reason=BindRejectReasonHandlerMissing so the server can distinguish
+	// "daemon does not implement bind" from "daemon rejected bind".
+	OnBindDeviceSession   func(ctx context.Context, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody
+	OnUnbindDeviceSession func(ctx context.Context, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody
+
 	// ChannelTemplate is the static channel template hosted by this
 	// daemon. Currently consumed by bootstrap.Saga to seed extra
 	// actor_registry rows (e.g. tool:xhs-adapter for the xhs-creator
@@ -556,6 +567,16 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 	if handler != nil {
 		handlers.OnWriteMessage = func(ctx context.Context, _ daemonbus.Frame, body transit.WriteMessageBody) transit.WriteMessageAckBody {
 			return handler.Handle(ctx, body)
+		}
+	}
+	if d.cfg.OnBindDeviceSession != nil {
+		handlers.OnBindDeviceSession = func(ctx context.Context, _ daemonbus.Frame, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody {
+			return d.cfg.OnBindDeviceSession(ctx, body)
+		}
+	}
+	if d.cfg.OnUnbindDeviceSession != nil {
+		handlers.OnUnbindDeviceSession = func(ctx context.Context, _ daemonbus.Frame, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody {
+			return d.cfg.OnUnbindDeviceSession(ctx, body)
 		}
 	}
 

@@ -16,6 +16,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/scheduler"
+	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
 // AdapterModuleFactory builds one adapter.Module per channel. The
@@ -243,4 +244,91 @@ func DeviceXHSActorSeed() actor.Record {
 		Kind:    message.SenderTool,
 		Binding: actor.BindingViaServerTransit,
 	}
+}
+
+// DeviceSessionBinder couples a shared framework.SessionStore with the
+// daemon-level control.bind_device_session / control.unbind_device_session
+// handlers (T147 §A-S2 phase-4b). cmd/daemon constructs one binder per
+// process: the store is shared across every channel (per-channel routing
+// happens by DeviceSession.ChannelID), and the handlers map bind / unbind
+// frames into Upsert / Delete calls.
+//
+// Wire the binder via:
+//
+//	binder := NewDeviceSessionBinder(deviceframework.NewInMemorySessionStore())
+//	cfg.OnBindDeviceSession   = binder.OnBind
+//	cfg.OnUnbindDeviceSession = binder.OnUnbind
+//	cfg.OnChannelBoot         = wireAdapterFramework(
+//	    DeviceXHSFactory(binder.SessionStore(), devicexhs.Config{...}),
+//	)
+type DeviceSessionBinder struct {
+	store deviceframework.SessionStore
+}
+
+// NewDeviceSessionBinder wires a binder over the supplied store. When
+// store is nil a fresh InMemorySessionStore is allocated — sufficient
+// for development / e2e harnesses without sqlite mirroring.
+func NewDeviceSessionBinder(store deviceframework.SessionStore) *DeviceSessionBinder {
+	if store == nil {
+		store = deviceframework.NewInMemorySessionStore()
+	}
+	return &DeviceSessionBinder{store: store}
+}
+
+// SessionStore exposes the shared store so the composition root can
+// pass it into DeviceXHSFactory.
+func (b *DeviceSessionBinder) SessionStore() deviceframework.SessionStore {
+	return b.store
+}
+
+// OnBind handles control.bind_device_session. Maps the wire payload into
+// a framework.DeviceSession in state=ready (server-side state machine has
+// already INSERTed the row in pending and will MarkBound on ack), then
+// Upserts into the per-daemon SessionStore. Idempotent: re-running with
+// the same SessionID overwrites the row (T1.10 — replay safe).
+func (b *DeviceSessionBinder) OnBind(ctx context.Context, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody {
+	ack := transit.BindDeviceSessionAckBody{
+		FrameID:   body.FrameID,
+		SessionID: body.SessionID,
+	}
+	sess := deviceframework.DeviceSession{
+		SessionID:  body.SessionID,
+		ChannelID:  body.ChannelID,
+		DeviceID:   body.DeviceID,
+		DeviceType: body.DeviceType,
+		// Authoritative server row transitions pending → ready on this
+		// ack; the daemon mirror jumps straight to ready so adapter
+		// modules see the eventual state immediately. T1.10 allows the
+		// daemon to skip the pending intermediate because the daemon
+		// never observes "pending → ready" as two distinct events.
+		State:            deviceframework.StateReady,
+		BoundAt:          body.BoundAt,
+		TokenFingerprint: body.TokenFingerprint,
+		ExpiresAt:        body.ExpiresAt,
+	}
+	if err := b.store.Upsert(ctx, sess); err != nil {
+		ack.Reason = "session_store_upsert"
+		ack.Detail = err.Error()
+		return ack
+	}
+	ack.Accepted = true
+	return ack
+}
+
+// OnUnbind handles control.unbind_device_session. Deletes the mirror
+// row idempotently (missing row is not an error). The server's
+// authoritative row stays revoked / expired regardless of the daemon
+// response, so this is best-effort tear-down only.
+func (b *DeviceSessionBinder) OnUnbind(ctx context.Context, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody {
+	ack := transit.UnbindDeviceSessionAckBody{
+		FrameID:   body.FrameID,
+		SessionID: body.SessionID,
+	}
+	if err := b.store.Delete(ctx, body.SessionID); err != nil {
+		ack.Reason = "session_store_delete"
+		ack.Detail = err.Error()
+		return ack
+	}
+	ack.Accepted = true
+	return ack
 }

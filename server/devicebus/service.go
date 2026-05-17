@@ -79,6 +79,69 @@ type Service struct {
 
 	mu       sync.Mutex
 	sessions map[string]*Connection // session_id → live WS connection
+
+	// notifierMu guards notifier. The notifier itself is composed late
+	// by the gateway (after Service construction) because daemonbus is
+	// not visible to this package — see SetBindNotifier.
+	notifierMu sync.RWMutex
+	notifier   BindNotifier
+}
+
+// BindNotifier is the lifecycle hook the gateway implements so the
+// devicebus HTTP handlers can pump bind / unbind frames into daemonbus
+// without taking a direct dependency on the daemonbus package (which
+// lives at a higher composition layer and would create an import cycle).
+//
+// Wire one instance via Service.SetBindNotifier during gateway.New.
+// Bind is invoked after IssueSession succeeds and before MarkBound is
+// called; Unbind is invoked before Revoke. Both methods MUST be
+// idempotent on the daemon side because handleIssue / handleRevoke can
+// retry the call after a transient network failure.
+type BindNotifier interface {
+	// Bind sends control.bind_device_session to the daemon owning the
+	// session's channel and waits for the ack. Returns nil on Accepted=true
+	// ack; a wrapped error on any failure (daemon not connected, ack
+	// timeout, daemon rejection). The caller (handleIssue) maps the
+	// error to HTTP 5xx and does NOT advance the session state.
+	Bind(ctx context.Context, in BindInput) error
+
+	// Unbind sends control.unbind_device_session to the daemon. Returns
+	// nil when the ack reports Accepted=true OR when the daemon is no
+	// longer connected (best-effort tear-down: a fresh daemon reboot
+	// would not carry the mirror row anyway). Returns a wrapped error
+	// only on protocol / decode failures so the caller can surface a
+	// 5xx.
+	Unbind(ctx context.Context, in UnbindInput) error
+}
+
+// BindInput is the payload the gateway needs to construct the
+// daemonbus control.bind_device_session frame.
+type BindInput struct {
+	Session          Session
+	TokenFingerprint string
+}
+
+// UnbindInput is the payload for control.unbind_device_session.
+type UnbindInput struct {
+	Session Session
+	Reason  string
+}
+
+// SetBindNotifier wires the lifecycle notifier. Safe to call multiple
+// times; a subsequent call replaces the previous binding (gateway
+// reload). Pass nil to clear the binding — handleIssue will then refuse
+// to issue sessions (HTTP 503).
+func (s *Service) SetBindNotifier(n BindNotifier) {
+	s.notifierMu.Lock()
+	s.notifier = n
+	s.notifierMu.Unlock()
+}
+
+// bindNotifier returns the currently wired notifier (or nil).
+func (s *Service) bindNotifier() BindNotifier {
+	s.notifierMu.RLock()
+	defer s.notifierMu.RUnlock()
+	return s.notifier
 }
 
 // NewService builds a Service.
@@ -128,11 +191,22 @@ type IssueInput struct {
 }
 
 // IssueResult carries the new session + raw token. The raw token is
-// never re-derivable from the row (only its HMAC hash is stored).
+// never re-derivable from the row (only its HMAC hash is stored). The
+// TokenFingerprint is a short hex prefix of the HMAC suitable for audit
+// logs and for the daemon-side mirror row (per T1.10 — daemon stores
+// the fingerprint, never the raw token).
 type IssueResult struct {
-	Session Session
-	Token   string
+	Session          Session
+	Token            string
+	TokenFingerprint string
 }
+
+// TokenFingerprintLength is the number of hex characters retained from
+// the HMAC tail when populating IssueResult.TokenFingerprint and the
+// daemon-mirror DeviceSession.TokenFingerprint. 16 hex chars = 64 bits
+// — long enough to identify a token in audit logs without leaking the
+// signing material. Matches adapters/device/framework.FingerprintLength.
+const TokenFingerprintLength = 16
 
 // IssueSession allocates a fresh session_id + token, INSERTs the
 // device_sessions row in state=pending. Caller (gateway) should then
@@ -156,6 +230,7 @@ func (s *Service) IssueSession(ctx context.Context, in IssueInput) (IssueResult,
 		State: StatePending, ExpiresAt: exp, CreatedAt: now,
 	}
 
+	hashed := s.hashToken(token)
 	if _, err := s.db.ExecContext(
 		ctx,
 		`INSERT INTO device_sessions (
@@ -164,12 +239,27 @@ func (s *Service) IssueSession(ctx context.Context, in IssueInput) (IssueResult,
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.ID, row.DeviceID, row.DeviceType,
 		string(row.ChannelID), row.UserID, string(row.DaemonID),
-		s.hashToken(token), string(row.State),
+		hashed, string(row.State),
 		row.ExpiresAt, row.CreatedAt, row.CreatedAt,
 	); err != nil {
 		return IssueResult{}, fmt.Errorf("devicebus: insert session: %w", err)
 	}
-	return IssueResult{Session: row, Token: token}, nil
+	return IssueResult{
+		Session:          row,
+		Token:            token,
+		TokenFingerprint: fingerprintFromHash(hashed),
+	}, nil
+}
+
+// fingerprintFromHash takes a hex-encoded HMAC and returns the leading
+// TokenFingerprintLength characters as the audit fingerprint. The full
+// hash is kept in the device_sessions row for verification; only the
+// truncated form leaves the server (daemon mirror + audit log).
+func fingerprintFromHash(hashed string) string {
+	if len(hashed) <= TokenFingerprintLength {
+		return hashed
+	}
+	return hashed[:TokenFingerprintLength]
 }
 
 // MarkBound advances pending → ready when daemon ACKs

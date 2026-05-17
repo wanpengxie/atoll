@@ -42,15 +42,56 @@ func (s *Service) handleIssue(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	// T147 §A-S2 — push the bind frame to the owning daemon. The session
+	// row was already INSERTed in state=pending; advance pending → ready
+	// only when the daemon ACKs. A failure here leaves the row pending
+	// so a follow-up reconciler / retry can pick it up without confusing
+	// the client (no half-ready sessions advertised over HTTP).
+	if notifier := s.bindNotifier(); notifier != nil {
+		bindErr := notifier.Bind(c.Request.Context(), BindInput{
+			Session:          res.Session,
+			TokenFingerprint: res.TokenFingerprint,
+		})
+		if bindErr != nil {
+			c.JSON(http.StatusBadGateway, gin.H{
+				"error":             "bind_device_session: " + bindErr.Error(),
+				"device_session_id": res.Session.ID,
+			})
+			return
+		}
+		if err := s.MarkBound(c.Request.Context(), res.Session.ID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":             "mark_bound: " + err.Error(),
+				"device_session_id": res.Session.ID,
+			})
+			return
+		}
+	}
 	c.JSON(http.StatusCreated, gin.H{
 		"device_session_id": res.Session.ID,
 		"token":             res.Token,
 		"expires_at":        res.Session.ExpiresAt,
+		"token_fingerprint": res.TokenFingerprint,
 	})
 }
 
 func (s *Service) handleRevoke(c *gin.Context) {
-	if err := s.Revoke(c.Request.Context(), c.Param("sid")); err != nil {
+	sid := c.Param("sid")
+	// T147 §A-S2 — best-effort daemon notification BEFORE flipping the
+	// authoritative row to revoked. If the daemon ack fails we still
+	// proceed with the local Revoke (idempotent): a stale mirror row
+	// inside a daemon process is acceptable because every subsequent
+	// device WS handshake re-validates against the server's row state.
+	if notifier := s.bindNotifier(); notifier != nil {
+		row, getErr := s.Get(c.Request.Context(), sid)
+		if getErr == nil {
+			_ = notifier.Unbind(c.Request.Context(), UnbindInput{
+				Session: row,
+				Reason:  "revoked",
+			})
+		}
+	}
+	if err := s.Revoke(c.Request.Context(), sid); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

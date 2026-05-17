@@ -62,8 +62,13 @@ func main() {
 	// channel. ChannelTemplate seeds the actor_registry row up-front so
 	// framework.Manager.Install can find it; OnChannelBoot constructs
 	// the Manager + installs the module + registers the Deliverer
-	// handler. T3 swaps this for the adapters/device/xhs factory when
-	// DeviceTransit is wired.
+	// handler. T3 phase-3+4b additionally wires the daemon-level
+	// device-session bind / unbind handlers so a future swap to
+	// DeviceXHSFactory works end-to-end without re-touching cmd/daemon.
+	// The binder is kept process-wide so a single SessionStore is
+	// shared across every channel (per-channel routing happens by
+	// DeviceSession.ChannelID inside the framework).
+	deviceBinder := NewDeviceSessionBinder(nil)
 	cfg := runtime.DaemonConfig{
 		DataDir:      *dataDir,
 		ChannelsDir:  filepath.Join(*dataDir, "channels"),
@@ -74,7 +79,9 @@ func main() {
 		ChannelTemplate: runtime.ChannelTemplate{
 			AdapterActorSeeds: []actor.Record{xhs.DefaultActorSeed()},
 		},
-		OnChannelBoot: wireAdapterFramework(XHSScaffoldFactory(xhs.Config{})),
+		OnChannelBoot:         wireAdapterFramework(XHSScaffoldFactory(xhs.Config{})),
+		OnBindDeviceSession:   deviceBinder.OnBind,
+		OnUnbindDeviceSession: deviceBinder.OnUnbind,
 	}
 
 	if !*mockBus {

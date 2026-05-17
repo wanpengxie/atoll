@@ -141,6 +141,39 @@ func TestAllStatesClosedSet(t *testing.T) {
 	}
 }
 
+// TestIssueResultCarriesFingerprint covers T147 phase-4b — the issue
+// path returns a non-empty TokenFingerprint sized to TokenFingerprintLength
+// so the gateway can ship it into the daemon-side mirror without
+// re-hashing the raw token.
+func TestIssueResultCarriesFingerprint(t *testing.T) {
+	t.Parallel()
+	svc := newSvc(t, nil)
+	ctx := context.Background()
+
+	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
+		DeviceID: "dev-A", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if got := len(res.TokenFingerprint); got != devicebus.TokenFingerprintLength {
+		t.Errorf("len(fingerprint)=%d want %d", got, devicebus.TokenFingerprintLength)
+	}
+	// Fingerprint is stable across re-derivation (HMAC of raw token →
+	// prefix). Re-issue with the same token should yield the same prefix.
+	// Issue a second session — different sessions MUST have different
+	// fingerprints because the raw tokens differ.
+	res2, err := svc.IssueSession(ctx, devicebus.IssueInput{
+		DeviceID: "dev-B", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+	})
+	if err != nil {
+		t.Fatalf("Issue 2: %v", err)
+	}
+	if res.TokenFingerprint == res2.TokenFingerprint {
+		t.Error("two distinct sessions produced identical fingerprints")
+	}
+}
+
 type fakeClock struct{ now time.Time }
 
 func (f *fakeClock) Now() time.Time { return f.now }
