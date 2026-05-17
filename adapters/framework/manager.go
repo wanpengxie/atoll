@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"time"
@@ -424,7 +425,7 @@ func (m *Manager) Dispatch(ctx context.Context, env *message.Envelope) error {
 	m.cfg.Metrics.IncCounter("adapter.dispatch",
 		"adapter", bm.declaration.Name, "type", env.Type)
 
-	if err := bm.module.Handle(ctx, env); err != nil {
+	if err := m.runHandle(ctx, bm, env); err != nil {
 		m.cfg.Logger.Warn("framework.dispatch.handle.error",
 			"adapter", bm.declaration.Name,
 			"type", env.Type,
@@ -435,6 +436,45 @@ func (m *Manager) Dispatch(ctx context.Context, env *message.Envelope) error {
 		return err
 	}
 	return nil
+}
+
+// runHandle wraps Module.Handle with a panic recover that emits a
+// failed terminal via ErrorPolicy.OnExternalError per L2 §8 F3 panic
+// safety. The terminal carries reason=receiver_unavailable + detail
+// containing the panic message and stack trace (closed-set reason from
+// L1 §10.3.3; "handler crashed" maps semantically to "receiver
+// unavailable" — no separate handler_panic reason exists in the spec).
+func (m *Manager) runHandle(ctx context.Context, bm *boundModule, env *message.Envelope) (err error) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		stack := string(debug.Stack())
+		detail := fmt.Sprintf("adapter %s panic: %v\n%s", bm.declaration.Name, r, stack)
+		m.cfg.Logger.Error("framework.dispatch.handle.panic",
+			"adapter", bm.declaration.Name,
+			"type", env.Type,
+			"request_id", env.ID,
+			"panic", fmt.Sprint(r))
+		m.cfg.Metrics.IncCounter("adapter.dispatch.handle_panic",
+			"adapter", bm.declaration.Name, "type", env.Type)
+		if perr := bm.policy.OnExternalError(ctx,
+			adapter.CorrelationKey(env.ID),
+			message.TerminalReceiverUnavailable,
+			detail,
+		); perr != nil {
+			m.cfg.Logger.Error("framework.dispatch.handle.panic.emit_failed",
+				"adapter", bm.declaration.Name,
+				"request_id", env.ID,
+				"err", perr.Error())
+			err = fmt.Errorf("adapter %s panicked and failed-terminal emit failed: %v / %w",
+				bm.declaration.Name, r, perr)
+			return
+		}
+		err = fmt.Errorf("adapter %s panicked (failed terminal emitted): %v", bm.declaration.Name, r)
+	}()
+	return bm.module.Handle(ctx, env)
 }
 
 // OnExternalCallback routes an inbound external callback to the named

@@ -8,8 +8,11 @@ import (
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/scheduler"
 )
 
@@ -53,11 +56,24 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 			return func(context.Context) error { return nil }, nil
 		}
 
+		// Wrap the channel chain so any envelope authored with
+		// sender.kind=tool (i.e. an adapter response or terminal_failure
+		// emitted by framework Respond / ErrorPolicy) carries a fresh
+		// CallerContext stamping that adapter actor as the caller —
+		// otherwise harness step 1 rejects the response because the
+		// inherited inbound stamp is the request author. Covers both the
+		// synchronous Handle→Respond path and the F3 timer-fire path
+		// (which uses context.Background() inside policy.fire).
+		adapterChain := &adapterCallerChain{
+			inner:     h.HarnessChain,
+			channelID: h.ChannelID,
+		}
+
 		mgr, err := framework.NewManager(framework.ManagerConfig{
 			ChannelID:     h.ChannelID,
 			ActorRegistry: h.ActorRegistry,
 			TypeRegistry:  h.TypeRegistry,
-			HarnessChain:  h.HarnessChain,
+			HarnessChain:  adapterChain,
 			RequestLookup: h.RequestLookup,
 		})
 		if err != nil {
@@ -72,10 +88,16 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 
 		// Register one scheduler.Deliverer handler per installed module so
 		// trigger.Gateway.Dispatch routes inbound request envelopes through
-		// the framework.Manager.
+		// the framework.Manager. Each handler re-stamps the ctx with the
+		// adapter actor as caller so framework.Respond's inner chain.Write
+		// (which produces an envelope with sender=adapter actor) passes the
+		// step-1/3 caller-vs-sender check — the inbound stamp was the
+		// request author (e.g. user:alice), which doesn't match the
+		// response sender.
 		for _, mod := range modules {
 			decl := mod.Declares()
-			h.Deliverer.Register(decl.ActorID, deliverThroughManager(mgr))
+			h.Deliverer.Register(decl.ActorID,
+				deliverThroughManager(mgr, decl.ActorID, h.ChannelID))
 		}
 
 		return func(shutdownCtx context.Context) error {
@@ -88,13 +110,56 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 // scheduler.HandlerFn shape. The framework Manager only handles
 // kind=request envelopes — anything else returned by trigger.Gateway is
 // ignored (no error, so the gateway's at-least-once contract holds).
-func deliverThroughManager(mgr adapter.Manager) scheduler.HandlerFn {
+//
+// The wrapper re-stamps the harness CallerContext with adapterID so the
+// framework.Respond chain.Write — which emits a response with
+// sender=adapter actor — passes the harness step-1/step-3 caller-vs-
+// sender check. AllowProvidedSenderKind=true lets the framework keep its
+// `Sender.Kind = SenderTool` value (the registry record agrees).
+func deliverThroughManager(mgr adapter.Manager, adapterID actor.ActorID, channelID channel.ID) scheduler.HandlerFn {
 	return func(ctx context.Context, _ actor.ActorID, env *message.Envelope) error {
 		if env == nil || env.Kind != message.KindRequest {
 			return nil
 		}
-		return mgr.Dispatch(ctx, env)
+		stamped := harness.CtxWithCaller(ctx, harness.CallerContext{
+			ActorID:                 adapterID,
+			ChannelID:               channelID,
+			AllowProvidedSenderKind: true,
+		})
+		if err := mgr.Dispatch(stamped, env); err != nil {
+			// Log + swallow so the gateway's at-least-once contract holds
+			// (a single failed Dispatch must NOT abort the harness write
+			// path). The framework already emitted any required failed
+			// terminal via ErrorPolicy.
+			fmt.Printf("runtime: adapter dispatch %s/%s: %v\n", channelID, env.ID, err)
+			return nil
+		}
+		return nil
 	}
+}
+
+// adapterCallerChain wraps a kernel/harness.Chain and stamps the
+// CallerContext to env.Sender.ID when the envelope's sender is a tool
+// actor. Used by the adapter framework so its inner chain.Write calls
+// pass the harness step-1/step-3 caller-vs-sender check regardless of
+// whether the call was made on the synchronous Handle→Respond path
+// (inbound stamp is the request author) or the F3 timer-fire path
+// (no inbound stamp at all).
+type adapterCallerChain struct {
+	inner     khar.Chain
+	channelID channel.ID
+}
+
+// Write satisfies kernel/harness.Chain.
+func (c *adapterCallerChain) Write(ctx context.Context, env *message.Envelope) (khar.WriteResult, error) {
+	if env != nil && env.Sender.Kind == message.SenderTool && env.Sender.ID != "" {
+		ctx = harness.CtxWithCaller(ctx, harness.CallerContext{
+			ActorID:                 actor.ActorID(env.Sender.ID),
+			ChannelID:               c.channelID,
+			AllowProvidedSenderKind: true,
+		})
+	}
+	return c.inner.Write(ctx, env)
 }
 
 // XHSScaffoldFactory returns an AdapterModuleFactory that installs the

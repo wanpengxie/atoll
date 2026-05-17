@@ -112,6 +112,7 @@ type channelRuntime struct {
 	lock          *store.ChannelLock
 	outbox        *store.ViewSyncOutbox
 	chain         *harness.Chain
+	wrappedChain  *postHarnessChain
 	pusher        *transit.Pusher
 	deliverer     *scheduler.Deliverer
 	gateway       *trigger.Gateway
@@ -154,10 +155,12 @@ type ChannelHooks struct {
 	// satisfying kernel/adapter.RequestLookup.
 	RequestLookup *store.RequestLookup
 
-	// HarnessChain is the runtime/harness.Chain used by the daemon's
-	// trigger gateway + WriteMessage handler. Also the chain
-	// framework.Manager flows responses through.
-	HarnessChain *harness.Chain
+	// HarnessChain is the per-channel wrapped chain (kernel/harness.Chain)
+	// that stamps fencing + runs the post-harness trigger.Gateway fan-out
+	// + messages.MarkDelivered. Adapter framework uses this so its
+	// response writes share the same invariants the WriteMessage entry
+	// point enforces.
+	HarnessChain khar.Chain
 
 	// Deliverer is the per-channel scheduler.Deliverer — the
 	// composition root registers a HandlerFn per adapter actor id that
@@ -512,7 +515,7 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 
 // buildChannelRuntime opens the per-channel sqlite, constructs every
 // seam phase 3 needs (registry / messages / outbox / chain / pusher /
-// type_registry / request_lookup).
+// type_registry / request_lookup / wrapped post-harness chain).
 func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChannel) (*channelRuntime, error) {
 	db, err := d.openChannelDB(ctx, lc.SQLitePath)
 	if err != nil {
@@ -570,6 +573,19 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		return nil, fmt.Errorf("trigger gateway for %s: %w", lc.ChannelID, err)
 	}
 
+	// Wrapped chain — same fencing-stamping + post-harness gateway dispatch
+	// + MarkDelivered behavior the daemon's WriteMessage handler uses
+	// (FIX-T3 / FIX-T6). Shared across the WriteMessage entrypoint AND the
+	// adapter framework so adapter responses (and timer-fired failed
+	// terminals) flow through the same invariants.
+	wrappedChain := &postHarnessChain{
+		chain:    chain,
+		gateway:  gw,
+		messages: messages,
+		lock:     lock,
+		nowFn:    d.cfg.NowFn,
+	}
+
 	return &channelRuntime{
 		channelID:     lc.ChannelID,
 		db:            db,
@@ -579,6 +595,7 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		lock:          lock,
 		outbox:        outbox,
 		chain:         chain,
+		wrappedChain:  wrappedChain,
 		pusher:        pusher,
 		deliverer:     deliverer,
 		gateway:       gw,
@@ -611,9 +628,13 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 			Messages:      cr.messages,
 			TypeRegistry:  cr.typeRegistry,
 			RequestLookup: cr.requestLookup,
-			HarnessChain:  cr.chain,
-			Deliverer:     cr.deliverer,
-			NowFn:         d.cfg.NowFn,
+			// HarnessChain is the post-harness wrapper (fencing + gateway
+			// dispatch + MarkDelivered) so adapter responses + framework
+			// timer-fired terminals flow through the same invariants the
+			// WriteMessage handler enforces.
+			HarnessChain: cr.wrappedChain,
+			Deliverer:    cr.deliverer,
+			NowFn:        d.cfg.NowFn,
 		})
 		if hookErr != nil {
 			delete(d.channels, lc.ChannelID)
@@ -969,22 +990,16 @@ func (d *Daemon) openChannelDB(ctx context.Context, sqlitePath string) (*sql.DB,
 // caller-context stamper for the WriteMessage handler. ok=false means
 // the daemon does not currently own the channel.
 //
-// The returned HarnessChain is a `harnessChainAdapter` that, after a
-// successful chain.Write, invokes trigger.Gateway.Dispatch (L1 §5.1
-// post-harness fan-out) + messages.MarkDelivered. This is the FIX-T3
-// post-harness wiring seam — dedupe / deferred / reject paths skip
-// dispatch so we honor at-least-once-by-message.id (§6.2).
+// The returned HarnessChain is `transitChainBridge` wrapping the
+// channel's postHarnessChain — after a successful chain.Write it
+// invokes trigger.Gateway.Dispatch (L1 §5.1 post-harness fan-out) +
+// messages.MarkDelivered. This is the FIX-T3 post-harness wiring seam
+// — dedupe / deferred / reject paths skip dispatch so we honor
+// at-least-once-by-message.id (§6.2).
 func (d *Daemon) routeWrite(_ context.Context, ch channel.ID) (transit.HarnessChain, actor.Registry, transit.CallerStamper, bool) {
 	cr, ok := d.channels[ch]
 	if !ok {
 		return nil, nil, nil, false
-	}
-	chainAdapter := harnessChainAdapter{
-		chain:    cr.chain,
-		gateway:  cr.gateway,
-		messages: cr.messages,
-		lock:     cr.lock,
-		nowFn:    d.cfg.NowFn,
 	}
 	stamp := func(ctx context.Context, actorID actor.ActorID, chID channel.ID) context.Context {
 		return harness.CtxWithCaller(ctx, harness.CallerContext{
@@ -993,7 +1008,31 @@ func (d *Daemon) routeWrite(_ context.Context, ch channel.ID) (transit.HarnessCh
 			AllowProvidedSenderKind: false,
 		})
 	}
-	return chainAdapter, cr.registry, stamp, true
+	return transitChainBridge{inner: cr.wrappedChain}, cr.registry, stamp, true
+}
+
+// transitChainBridge adapts a kernel/harness.Chain to the transit
+// package's HarnessChain shape (transit.HarnessWriteResult). Keeps the
+// transit package decoupled from kernel/harness while letting the
+// daemon share one wrapped chain instance across the WriteMessage
+// handler AND the adapter framework hook.
+type transitChainBridge struct {
+	inner khar.Chain
+}
+
+func (b transitChainBridge) Write(ctx context.Context, env *message.Envelope) (transit.HarnessWriteResult, error) {
+	res, err := b.inner.Write(ctx, env)
+	if err != nil {
+		return transit.HarnessWriteResult{}, err
+	}
+	return transit.HarnessWriteResult{
+		MessageID:        res.MessageID,
+		Seq:              res.Seq,
+		Deduped:          res.Deduped,
+		RejectReason:     string(res.RejectReason),
+		RejectDetail:     res.RejectDetail,
+		PartialMessageID: res.PartialMessageID,
+	}, nil
 }
 
 // scanLongPending is the per-tick callback the long-pending scheduler
@@ -1034,18 +1073,22 @@ func (d *Daemon) scanLongPending(ctx context.Context, nowMs int64) error {
 	return nil
 }
 
-// harnessChainAdapter bridges runtime/harness.Chain (kernel
-// WriteResult) to the transit.HarnessChain (transit WriteResult). It
-// avoids leaking kernel/harness into the transit package — the bridge
-// stays inside runtime where both packages are already imported.
+// postHarnessChain wraps the bare runtime/harness.Chain with the per-
+// channel post-harness fan-out invariants every daemon-side caller
+// must obey (WriteMessage handler + adapter framework + future write-
+// path callers):
 //
-// FIX-T3 post-harness wiring: after a successful, non-deduped chain
-// write the adapter calls trigger.Gateway.Dispatch + messages.MarkDelivered.
-// The dedupe path is skipped (the original write already dispatched —
-// at-least-once-by-message.id, §6.2). The deferred future-message path
-// is skipped too: scheduler.scanLongPending will pick it up after
-// not_before passes.
-type harnessChainAdapter struct {
+//   - FIX-T6: stamp the channel's current (fencing_token, daemon_epoch)
+//     tuple before delegating so the messages-insert tx validates the
+//     fencing pair (a silent placement reclaim under us surfaces as
+//     HarnessWorkerFencingStale instead of corrupting outbox).
+//   - FIX-T3: after a successful, non-deduped, non-rejected write call
+//     trigger.Gateway.Dispatch (L1 §5.1 fan-out) + messages.MarkDelivered.
+//     Dedupe / deferred / reject paths skip dispatch.
+//
+// Implements kernel/harness.Chain so the framework Manager can consume
+// the same wrapper without taking a dependency on the daemon package.
+type postHarnessChain struct {
 	chain    *harness.Chain
 	gateway  *trigger.Gateway
 	messages *store.Messages
@@ -1053,13 +1096,8 @@ type harnessChainAdapter struct {
 	nowFn    func() int64
 }
 
-// Write implements transit.HarnessChain.
-func (a harnessChainAdapter) Write(ctx context.Context, env *message.Envelope) (transit.HarnessWriteResult, error) {
-	// FIX-T6 — stamp the daemon's current (fencing_token, daemon_epoch)
-	// tuple before running the harness. The store-level Append validates
-	// the tuple inside the messages-insert tx; if a placement reclaim
-	// silently bumped channel_lock under us, the write fails with
-	// HarnessWorkerFencingStale instead of silently corrupting outbox.
+// Write implements kernel/harness.Chain.
+func (a *postHarnessChain) Write(ctx context.Context, env *message.Envelope) (khar.WriteResult, error) {
 	if a.lock != nil {
 		if row, ok, err := a.lock.Get(ctx); err == nil && ok {
 			ctx = store.CtxWithFencing(ctx, row.FencingToken, row.DaemonEpoch)
@@ -1067,38 +1105,26 @@ func (a harnessChainAdapter) Write(ctx context.Context, env *message.Envelope) (
 	}
 	res, err := a.chain.Write(ctx, env)
 	if err != nil {
-		return transit.HarnessWriteResult{}, err
+		return khar.WriteResult{}, err
 	}
-	// Post-harness fan-out: only on a fresh accept. Reject / dedupe /
-	// internal-error paths skip dispatch — dedupe because the prior
-	// successful write already dispatched (§6.2); reject because no row
-	// landed; chain-error already returned to caller above.
 	if res.RejectReason == "" && !res.Deduped && a.gateway != nil {
 		dr, derr := a.gateway.Dispatch(ctx, env, trigger.Options{})
 		if derr != nil {
 			fmt.Printf("runtime: gateway dispatch %s: %v\n", env.ID, derr)
 		} else if !dr.Deferred && a.messages != nil {
-			// Immediate-delivery path: stamp delivered_at so the
-			// scheduler future-message scan ignores this row. Future-
-			// message path leaves delivered_at NULL — scheduler claims it
-			// later, then stamps after its own dispatch.
 			if err := a.messages.MarkDelivered(ctx, env.ID, a.nowFn()); err != nil {
 				fmt.Printf("runtime: mark delivered %s: %v\n", env.ID, err)
 			}
 		}
 	}
-	return transit.HarnessWriteResult{
-		MessageID:        res.MessageID,
-		Seq:              res.Seq,
-		Deduped:          res.Deduped,
-		RejectReason:     string(res.RejectReason),
-		RejectDetail:     res.RejectDetail,
-		PartialMessageID: res.PartialMessageID,
-	}, nil
+	return res, nil
 }
 
-// compile-time interface check.
-var _ khar.Chain = (*harness.Chain)(nil)
+// compile-time interface checks.
+var (
+	_ khar.Chain = (*harness.Chain)(nil)
+	_ khar.Chain = (*postHarnessChain)(nil)
+)
 
 // Phase returns the current boot phase (for tests / observability).
 func (d *Daemon) Phase() lifecycle.Phase { return d.booter.Phase() }
