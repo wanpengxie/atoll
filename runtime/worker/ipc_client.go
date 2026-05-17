@@ -43,10 +43,11 @@ type IPCClient struct {
 
 	// Snapshot established at handshake — every outbound non-handshake
 	// frame gets these fields stamped.
-	channelID    channel.ID
-	workerID     string
-	fencingToken placement.FencingToken
-	daemonEpoch  placement.DaemonEpoch
+	channelID     channel.ID
+	workerID      string
+	workerActorID string
+	fencingToken  placement.FencingToken
+	daemonEpoch   placement.DaemonEpoch
 }
 
 // triggerBufferSize bounds the IPCClient.triggerCh backlog. Sized big
@@ -183,10 +184,35 @@ func (c *IPCClient) Handshake(ctx context.Context, leaseID string) (ipc.Handshak
 	c.mu.Lock()
 	c.channelID = ack.ChannelID
 	c.workerID = ack.WorkerID
+	c.workerActorID = ack.WorkerActorID
 	c.fencingToken = ack.FencingToken
 	c.daemonEpoch = ack.DaemonEpoch
 	c.mu.Unlock()
 	return ack, nil
+}
+
+// ChannelID returns the post-handshake channel id snapshot.
+func (c *IPCClient) ChannelID() channel.ID {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.channelID
+}
+
+// WorkerActorID returns the post-handshake principal id that the
+// worker MUST stamp onto envelope.sender.id for every WriteMessage
+// (otherwise harness step 3 sender_mismatch rejects). Empty until
+// Handshake succeeds.
+func (c *IPCClient) WorkerActorID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.workerActorID
+}
+
+// WorkerID returns the post-handshake worker process id snapshot.
+func (c *IPCClient) WorkerID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.workerID
 }
 
 // WriteMessage sends a write_message IPC.

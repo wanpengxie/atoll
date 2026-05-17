@@ -189,10 +189,11 @@ func (h *Host) handle(ctx context.Context, frame ipc.Frame) error {
 
 func (h *Host) handleHandshake(frame ipc.Frame) error {
 	ack := ipc.HandshakeAckPayload{
-		WorkerID:     h.cfg.WorkerID,
-		ChannelID:    h.cfg.ChannelID,
-		FencingToken: h.cfg.FencingToken,
-		DaemonEpoch:  h.cfg.DaemonEpoch,
+		WorkerID:      h.cfg.WorkerID,
+		ChannelID:     h.cfg.ChannelID,
+		WorkerActorID: string(h.cfg.WorkerActorID),
+		FencingToken:  h.cfg.FencingToken,
+		DaemonEpoch:   h.cfg.DaemonEpoch,
 	}
 	payload, err := json.Marshal(ack)
 	if err != nil {

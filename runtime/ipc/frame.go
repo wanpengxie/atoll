@@ -82,11 +82,17 @@ type HandshakePayload struct {
 
 // HandshakeAckPayload is daemon's reply.
 type HandshakeAckPayload struct {
-	WorkerID     string                 `json:"worker_id"`
-	ChannelID    channel.ID             `json:"channel_id"`
-	FencingToken placement.FencingToken `json:"fencing_token"`
-	DaemonEpoch  placement.DaemonEpoch  `json:"daemon_epoch"`
-	TurnDeadline int64                  `json:"turn_deadline_ms"`
+	WorkerID  string     `json:"worker_id"`
+	ChannelID channel.ID `json:"channel_id"`
+	// WorkerActorID is the principal the worker MUST stamp into
+	// envelope.sender.id on every WriteMessage frame (otherwise
+	// harness step 3 sender_mismatch will reject). Added in M1.6-T1
+	// so the MockBridge knows its own actor identity without
+	// out-of-band configuration.
+	WorkerActorID string                 `json:"worker_actor_id,omitempty"`
+	FencingToken  placement.FencingToken `json:"fencing_token"`
+	DaemonEpoch   placement.DaemonEpoch  `json:"daemon_epoch"`
+	TurnDeadline  int64                  `json:"turn_deadline_ms"`
 }
 
 // WriteMessagePayload asks daemon to append an envelope.

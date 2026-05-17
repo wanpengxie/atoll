@@ -9,7 +9,9 @@
 // worker.Bridge implementation here so that runtime/worker stays
 // vendor-light (no go-kimi import inside runtime/worker).
 //
-// M1.5-T3 ships a no-op bridge — concrete agent loops come in T4/T5.
+// M1.6-T1 wires the deterministic MockBridge so the daemon ↔ worker
+// trigger loop can be exercised end-to-end without a real LLM. The
+// real-LLM bridge lands with M1.7.
 package main
 
 import (
@@ -27,6 +29,8 @@ import (
 func main() {
 	leaseID := flag.String("lease-id", os.Getenv("COAGENT_WORKER_LEASE_ID"),
 		"lease id assigned by daemon (also via COAGENT_WORKER_LEASE_ID)")
+	maxTurns := flag.Int("max-turns", 8,
+		"mock bridge: cap on trigger reactions before next_action=done exit")
 	flag.Parse()
 
 	if *leaseID == "" {
@@ -37,11 +41,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	bridge := worker.NewMockBridge()
+	bridge.MaxTurns = *maxTurns
+
 	rt, err := worker.New(worker.Config{
 		LeaseID: *leaseID,
 		In:      os.Stdin,
 		Out:     os.Stdout,
-		// Bridge nil — M1.5-T3 placeholder. T4/T5 plug the go-kimi loop.
+		Bridge:  bridge,
 	})
 	if err != nil {
 		log.Fatalf("worker: assemble: %v", err)
