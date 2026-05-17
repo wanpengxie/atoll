@@ -28,7 +28,7 @@ import (
 //  3. Open / create channels/<id>/channel.sqlite with DDL.
 //  4. Insert actor_registry row for 'system' actor.
 //  5. Insert actor_registry + member rows from req.InitialMembers.
-//  5b. Insert AdapterActorSeeds from the daemon-level ChannelTemplate
+//     5b. Insert AdapterActorSeeds from the daemon-level ChannelTemplate
 //     (M1.6-T2 — pre-creates tool adapter rows so framework.Manager.Install
 //     can locate them).
 //  6. (caller — runtime/lifecycle.Creator) writes channel_lock row.

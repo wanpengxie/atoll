@@ -204,8 +204,8 @@ type typeRowScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanTypeRow(rows *sql.Rows) (adapter.TypeRow, error)       { return scanTypeRowFrom(rows) }
-func scanTypeRowSingle(row *sql.Row) (adapter.TypeRow, error)   { return scanTypeRowFrom(row) }
+func scanTypeRow(rows *sql.Rows) (adapter.TypeRow, error)     { return scanTypeRowFrom(rows) }
+func scanTypeRowSingle(row *sql.Row) (adapter.TypeRow, error) { return scanTypeRowFrom(row) }
 
 func scanTypeRowFrom(s typeRowScanner) (adapter.TypeRow, error) {
 	var (
