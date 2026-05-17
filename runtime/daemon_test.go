@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	kadapter "github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -614,6 +615,151 @@ func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
 	if len(again) != expectedTerminalCount {
 		t.Errorf("idempotency: re-tick changed terminal count from %d to %d",
 			expectedTerminalCount, len(again))
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- d.Close() }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close blocked — phase 3 goroutine leak")
+	}
+}
+
+// TestDaemon_DeviceTransit_InboundRoutesToPerChannelCallback covers
+// T147 §A daemon-side wiring: when a device_transit.recv frame arrives
+// at the daemonbus dispatcher, it must (1) decode the SendFrame to
+// recover the routing key (channel_id), (2) look up the per-channel
+// runtime, (3) hand the frame to that channel's *transit.DeviceTransit,
+// and (4) the DeviceTransit invokes the closure set via
+// ChannelHooks.SetDeviceCallback during OnChannelBoot.
+//
+// Verified end-to-end: frame on MockBus → daemon dispatcher → our
+// recording callback observes the original payload bytes.
+//
+// Multi-channel routing is also asserted — a frame addressed to a
+// channel the daemon doesn't own gets dropped without touching the
+// callback (the production semantic is at-least-once; the server will
+// retry once placement settles).
+func TestDaemon_DeviceTransit_InboundRoutesToPerChannelCallback(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dataDir := t.TempDir()
+	channelsDir := filepath.Join(dataDir, "channels")
+	chID := channel.ID("ch-dev")
+	chDir := filepath.Join(channelsDir, string(chID))
+	if err := os.MkdirAll(chDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(chDir, "channel.sqlite")
+	db, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := store.NewChannelLock(db)
+	if err := lock.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    chID,
+		FencingToken: 1, OwnerEpoch: 1,
+		DaemonID: "daemon-dev", DaemonEpoch: 1,
+		AcquiredAt: now(), RefreshedAt: now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	type observation struct {
+		channelID string
+		payload   string
+	}
+	observed := make(chan observation, 4)
+
+	cfg := runtime.DaemonConfig{
+		DataDir:         dataDir,
+		ChannelsDir:     channelsDir,
+		DaemonID:        "daemon-dev",
+		DaemonEpoch:     1,
+		UseMockBus:      true,
+		NowFn:           now,
+		SchedulerPeriod: 50 * time.Millisecond,
+		OnChannelBoot: func(_ context.Context, h runtime.ChannelHooks) (func(context.Context) error, error) {
+			// Defensive: DeviceTransit / SetDeviceCallback are populated by
+			// the daemon when the channel has a transit client, which is
+			// always true under UseMockBus.
+			if h.DeviceTransit == nil {
+				t.Errorf("OnChannelBoot: expected non-nil DeviceTransit on hooks for channel %s", h.ChannelID)
+			}
+			if h.SetDeviceCallback == nil {
+				t.Errorf("OnChannelBoot: expected non-nil SetDeviceCallback on hooks for channel %s", h.ChannelID)
+				return func(context.Context) error { return nil }, nil
+			}
+			h.SetDeviceCallback(func(_ context.Context, frame kadapter.SendFrame) error {
+				observed <- observation{
+					channelID: string(frame.ChannelID),
+					payload:   string(frame.Payload),
+				}
+				return nil
+			})
+			return func(context.Context) error { return nil }, nil
+		},
+	}
+	d, err := runtime.AssembleDaemon(ctx, cfg)
+	if err != nil {
+		t.Fatalf("AssembleDaemon: %v", err)
+	}
+	if err := d.RunPhases(ctx); err != nil {
+		t.Fatalf("RunPhases: %v", err)
+	}
+	if !d.HasChannel(chID) {
+		t.Fatalf("daemon did not register channel %s", chID)
+	}
+
+	srv := d.Bus().ServerSide()
+	pushFrame := func(targetCh channel.ID, payload string) {
+		t.Helper()
+		body := kadapter.SendFrame{
+			ChannelID:       targetCh,
+			DeviceSessionID: "sess-1",
+			Direction:       kadapter.DirectionFromDevice,
+			RequestID:       "req-1",
+			Payload:         []byte(payload),
+		}
+		frame, err := transit.Encode("frame-recv-"+string(targetCh),
+			daemonbus.FrameTypeDeviceTransitRecv,
+			"server", d.Transit().Epoch(), now(), body)
+		if err != nil {
+			t.Fatalf("encode device_transit.recv: %v", err)
+		}
+		if err := srv.SendToDaemon(ctx, frame); err != nil {
+			t.Fatalf("SendToDaemon: %v", err)
+		}
+	}
+
+	// 1) Frame targeting the owned channel — callback must fire with the
+	// original payload bytes.
+	pushFrame(chID, `{"correlation_id":"req-1","ok":true}`)
+	select {
+	case obs := <-observed:
+		if obs.channelID != string(chID) {
+			t.Errorf("callback observed channel_id=%s want %s", obs.channelID, chID)
+		}
+		if obs.payload != `{"correlation_id":"req-1","ok":true}` {
+			t.Errorf("callback observed payload=%q", obs.payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("callback never fired for owned channel frame")
+	}
+
+	// 2) Frame targeting an unknown channel — dropped silently.
+	pushFrame(channel.ID("ch-other"), `{"correlation_id":"req-x"}`)
+	select {
+	case obs := <-observed:
+		t.Errorf("callback fired for unowned channel: %+v", obs)
+	case <-time.After(200 * time.Millisecond):
+		// Expected: no callback.
 	}
 
 	closeDone := make(chan error, 1)

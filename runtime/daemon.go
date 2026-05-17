@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	kadapter "github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
@@ -166,6 +167,22 @@ type channelRuntime struct {
 	// channel teardown calls manager.Close so worker subprocesses do
 	// not leak past placement reclaim. (M1.6-T1)
 	workerManager *workerhost.Manager
+
+	// deviceTransit is the per-channel adapter.DeviceTransit (T147 §A).
+	// One instance per channel sharing the daemon's *transit.Client so
+	// daemon→server device_transit.send frames carry the SendFrame's
+	// channel_id verbatim; inbound device_transit.recv frames are
+	// routed back here by handleDeviceTransitFrame (see daemon.go).
+	// Nil only when the daemon is constructed without a transit client
+	// (defensive — every production wiring sets one up).
+	deviceTransit *transit.DeviceTransit
+
+	// deviceCallback receives the decoded SendFrame the framework
+	// Manager turns into Module.OnExternalCallback. OnChannelBoot sets
+	// it (atomic.Value enables late binding after buildChannelRuntime
+	// has already wired the *transit.DeviceTransit). Reads are atomic;
+	// "" / nil means "no adapter wired yet — drop silently".
+	deviceCallback atomic.Value // func(ctx context.Context, frame kadapter.SendFrame) error
 }
 
 // ChannelHooks bundles the per-channel seams exposed to a daemon
@@ -216,6 +233,28 @@ type ChannelHooks struct {
 
 	// NowFn returns unix-ms; same clock the daemon stamps writes with.
 	NowFn func() int64
+
+	// DeviceTransit is the per-channel adapter.DeviceTransit handed to
+	// `via_server_transit` adapter modules (T147 §A). When the channel
+	// boots without a daemonbus transit client (e.g. tests that only
+	// exercise the harness write path), this is nil — the composition
+	// root MUST skip via_server_transit factories or use a fake. When
+	// non-nil, pass it verbatim into framework.ManagerConfig.DeviceTransit
+	// so the framework can satisfy adapter modules that declare
+	// Binding=via_server_transit at Install time.
+	DeviceTransit kadapter.DeviceTransit
+
+	// SetDeviceCallback wires the inbound device→daemon callback for
+	// this channel. The composition root calls it after constructing the
+	// framework.Manager so device_transit.recv frames routed back from
+	// the server land on Manager.OnExternalCallback(adapter, payload).
+	// The closure shape mirrors transit.DeviceTransitConfig.OnRecv
+	// (frame body, not raw bytes) so callers don't need to parse the
+	// adapter.SendFrame envelope themselves. Calling SetDeviceCallback
+	// more than once REPLACES the previous binding — that's the M1.6
+	// hot-swap escape hatch when a channel's adapter set changes.
+	// Passing nil clears the binding (frames are dropped silently).
+	SetDeviceCallback func(func(ctx context.Context, frame kadapter.SendFrame) error)
 }
 
 // Daemon is the assembled cmd/daemon process. Exposed so tests can
@@ -508,6 +547,11 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 		OnHeartbeatAck:          d.heartbeat.Handle(d.cfg.NowFn),
 		OnReclaimAccepted:       d.handleReclaimAccepted,
 		OnReclaimRejected:       d.handleReclaimRejected,
+		// T147 §A — central router for device_transit.* frames. Decodes
+		// the SendFrame, looks up the per-channel DeviceTransit by
+		// frame.ChannelID, and forwards via DispatchIncoming so the
+		// channel's framework.Manager fans out to Module.OnExternalCallback.
+		OnDeviceTransit: d.handleDeviceTransitFrame,
 	}
 	if handler != nil {
 		handlers.OnWriteMessage = func(ctx context.Context, _ daemonbus.Frame, body transit.WriteMessageBody) transit.WriteMessageAckBody {
@@ -676,7 +720,7 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		nowFn:    d.cfg.NowFn,
 	}
 
-	return &channelRuntime{
+	cr := &channelRuntime{
 		channelID:      lc.ChannelID,
 		db:             db,
 		registry:       registry,
@@ -692,7 +736,37 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		typeRegistry:   typeRegistry,
 		requestLookup:  requestLookup,
 		channelAgentID: ChannelAgentID,
-	}, nil
+	}
+
+	// T147 §A — per-channel adapter.DeviceTransit. The instance shares
+	// the daemon's *transit.Client (single WS connection to the server
+	// daemonbus mux) and owns the inbound SendFrame fan-out. We MUST
+	// have a transit client at this point — phase 3 cold-start runs
+	// AFTER AssembleDaemon connected it. The OnRecv closure reads
+	// cr.deviceCallback at frame-receive time so OnChannelBoot can
+	// late-bind the callback after constructing its framework.Manager.
+	if d.transit != nil {
+		dt, err := transit.NewDeviceTransit(transit.DeviceTransitConfig{
+			Client:  d.transit,
+			FrameID: d.cfg.FrameIDGen,
+			OnRecv: func(ctx context.Context, frame kadapter.SendFrame) error {
+				cb, _ := cr.deviceCallback.Load().(func(context.Context, kadapter.SendFrame) error)
+				if cb == nil {
+					// No adapter wired yet — drop. Production wiring is
+					// expected to call SetDeviceCallback during
+					// OnChannelBoot, well before the first inbound recv.
+					return nil
+				}
+				return cb(ctx, frame)
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("device transit for %s: %w", lc.ChannelID, err)
+		}
+		cr.deviceTransit = dt
+	}
+
+	return cr, nil
 }
 
 // ensureChannelAgent guarantees the per-channel actor_registry contains
@@ -824,7 +898,7 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 	// Run BEFORE starting the pusher goroutine so a failing hook unwinds
 	// cleanly (no orphan goroutine).
 	if d.cfg.OnChannelBoot != nil {
-		teardown, hookErr := d.cfg.OnChannelBoot(ctx, ChannelHooks{
+		hooks := ChannelHooks{
 			ChannelID:     lc.ChannelID,
 			DB:            cr.db,
 			ActorRegistry: cr.registry,
@@ -838,7 +912,27 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 			HarnessChain: cr.wrappedChain,
 			Deliverer:    cr.deliverer,
 			NowFn:        d.cfg.NowFn,
-		})
+		}
+		// T147 §A — expose the per-channel DeviceTransit + an inbound
+		// callback hook so the composition root can build a
+		// via_server_transit-capable framework.Manager.
+		if cr.deviceTransit != nil {
+			hooks.DeviceTransit = cr.deviceTransit
+			// Capture cr in the closure (atomic.Value publishes the new
+			// callback to the OnRecv reader without taking a lock).
+			capturedCR := cr
+			hooks.SetDeviceCallback = func(cb func(context.Context, kadapter.SendFrame) error) {
+				if cb == nil {
+					// atomic.Value cannot store a typed nil — publish a
+					// non-nil sentinel that resolves to "drop" on the
+					// reader side.
+					capturedCR.deviceCallback.Store(func(context.Context, kadapter.SendFrame) error { return nil })
+					return
+				}
+				capturedCR.deviceCallback.Store(cb)
+			}
+		}
+		teardown, hookErr := d.cfg.OnChannelBoot(ctx, hooks)
 		if hookErr != nil {
 			delete(d.channels, lc.ChannelID)
 			return fmt.Errorf("runtime: channel %s on_boot hook: %w", lc.ChannelID, hookErr)
@@ -1217,6 +1311,52 @@ func (d *Daemon) routeWrite(_ context.Context, ch channel.ID) (transit.HarnessCh
 		})
 	}
 	return transitChainBridge{inner: cr.wrappedChain}, cr.registry, stamp, true
+}
+
+// handleDeviceTransitFrame is the central daemonbus dispatcher hook for
+// device_transit.* frames (T147 §A). The transit.Dispatcher routes any
+// CategoryDeviceTransit frame here; we decode the SendFrame envelope,
+// look up the per-channel runtime by frame.ChannelID, and hand the
+// frame to the channel's *transit.DeviceTransit for the recv-side
+// fan-out. Ack / Error frames don't carry channel_id at the kernel
+// level — for the M1.6 baseline (1 channel ↔ 1 device), we fan them
+// out to EVERY channel's DeviceTransit; each channel's correlation
+// tracker decides whether the frame matches an outstanding request.
+//
+// Unknown channels / disabled hooks are dropped silently — at-least-
+// once delivery means callers will retry if the daemon is not ready.
+func (d *Daemon) handleDeviceTransitFrame(ctx context.Context, frame daemonbus.Frame) error {
+	switch frame.FrameType {
+	case daemonbus.FrameTypeDeviceTransitSend, daemonbus.FrameTypeDeviceTransitRecv:
+		// SendFrame / recv share the same payload — decode once to
+		// extract the routing key (channel_id).
+		var payload kadapter.SendFrame
+		if err := transit.DecodePayload(frame, &payload); err != nil {
+			return fmt.Errorf("runtime: decode device_transit %s: %w", frame.FrameType, err)
+		}
+		cr, ok := d.channels[payload.ChannelID]
+		if !ok || cr.deviceTransit == nil {
+			// Unknown channel or no device transit wired — drop.
+			return nil
+		}
+		return cr.deviceTransit.DispatchIncoming(ctx, frame)
+	case daemonbus.FrameTypeDeviceTransitAck, daemonbus.FrameTypeDeviceTransitError:
+		// No channel_id on ack/error — fan out to every channel; each
+		// channel's DeviceTransit checks frame_id correlation locally.
+		// Returns the first non-nil error so observability still surfaces
+		// the failure; downstream channels are best-effort.
+		var firstErr error
+		for _, cr := range d.channels {
+			if cr.deviceTransit == nil {
+				continue
+			}
+			if err := cr.deviceTransit.DispatchIncoming(ctx, frame); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+	return nil
 }
 
 // transitChainBridge adapts a kernel/harness.Chain to the transit
