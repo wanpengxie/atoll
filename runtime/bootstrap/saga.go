@@ -28,15 +28,19 @@ import (
 //  3. Open / create channels/<id>/channel.sqlite with DDL.
 //  4. Insert actor_registry row for 'system' actor.
 //  5. Insert actor_registry + member rows from req.InitialMembers.
+//     5b. Insert AdapterActorSeeds from the daemon-level ChannelTemplate
+//     (M1.6-T2 — pre-creates tool adapter rows so framework.Manager.Install
+//     can locate them).
 //  6. (caller — runtime/lifecycle.Creator) writes channel_lock row.
 //  7. Mark bootstrap_registry status='completed'.
 //
 // On failure between steps 2 and 7 the row is left status='in_progress'
 // so reconcile.go can roll it back on next start.
 type Saga struct {
-	daemonDB    *sql.DB
-	channelsDir string
-	nowFn       func() int64
+	daemonDB          *sql.DB
+	channelsDir       string
+	nowFn             func() int64
+	adapterActorSeeds []actor.Record
 }
 
 // SagaConfig wires Saga.
@@ -44,6 +48,11 @@ type SagaConfig struct {
 	DaemonDB    *sql.DB
 	ChannelsDir string
 	NowFn       func() int64
+
+	// AdapterActorSeeds is the static set of tool actor_registry rows
+	// the saga MUST insert in addition to the system + initial member
+	// rows (M1.6-T2 ChannelTemplate). Empty list = no extra actors.
+	AdapterActorSeeds []actor.Record
 }
 
 // NewSaga builds a Saga.
@@ -57,10 +66,13 @@ func NewSaga(cfg SagaConfig) (*Saga, error) {
 	if cfg.NowFn == nil {
 		return nil, errors.New("bootstrap: SagaConfig.NowFn nil")
 	}
+	seeds := make([]actor.Record, len(cfg.AdapterActorSeeds))
+	copy(seeds, cfg.AdapterActorSeeds)
 	return &Saga{
-		daemonDB:    cfg.DaemonDB,
-		channelsDir: cfg.ChannelsDir,
-		nowFn:       cfg.NowFn,
+		daemonDB:          cfg.DaemonDB,
+		channelsDir:       cfg.ChannelsDir,
+		nowFn:             cfg.NowFn,
+		adapterActorSeeds: seeds,
 	}, nil
 }
 
@@ -121,6 +133,24 @@ func (s *Saga) Bootstrap(
 			CreatedAt:   s.nowFn(),
 		}); err != nil {
 			return "", fmt.Errorf("bootstrap: insert member %s: %w", m.ActorIDInChannel, err)
+		}
+	}
+
+	// Step 5b — adapter actor seeds (M1.6-T2 ChannelTemplate). The
+	// framework.Manager Install path will fail later if a declared
+	// adapter actor is missing from actor_registry; seeding here keeps
+	// channel bootstrap + adapter install atomic from the operator's
+	// point of view.
+	for _, seed := range s.adapterActorSeeds {
+		if seed.ID == "" {
+			continue
+		}
+		rec := seed
+		if rec.CreatedAt == 0 {
+			rec.CreatedAt = s.nowFn()
+		}
+		if err := reg.Insert(ctx, rec); err != nil {
+			return "", fmt.Errorf("bootstrap: insert adapter seed %s: %w", seed.ID, err)
 		}
 	}
 

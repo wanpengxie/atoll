@@ -3,21 +3,14 @@ package framework
 import (
 	"context"
 
+	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// RequestLookup is the framework-private seam Respond uses to recover
-// the original request envelope by id. The daemon composition root (T3)
-// wires this to its channel-local store; tests use MemoryRequestLookup.
-//
-// The lookup MUST be channel-scoped — callers pass an id and trust the
-// implementation to refuse cross-channel reads. The Manager validates
-// the returned envelope.channel_id matches its bound channel ID.
-type RequestLookup interface {
-	// FindByID returns the envelope at id. Returns ok=false when the
-	// row does not exist or has been deleted.
-	FindByID(ctx context.Context, id string) (*message.Envelope, bool, error)
-}
+// RequestLookup re-exports kernel/adapter.RequestLookup. The canonical
+// interface lives in kernel/adapter so runtime/store can implement it
+// without taking a dependency on adapters/**.
+type RequestLookup = adapter.RequestLookup
 
 // MemoryRequestLookup is the test/default in-memory RequestLookup.
 type MemoryRequestLookup struct {
@@ -53,3 +46,6 @@ func (m *MemoryRequestLookup) FindByID(_ context.Context, id string) (*message.E
 	v, ok := m.rows[id]
 	return v, ok, nil
 }
+
+// Compile-time interface check.
+var _ RequestLookup = (*MemoryRequestLookup)(nil)

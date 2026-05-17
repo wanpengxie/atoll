@@ -30,6 +30,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wanpengxie/ActOS/adapters/xhs"
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
@@ -56,6 +58,12 @@ func main() {
 		*daemonEpoch = time.Now().Unix()
 	}
 
+	// M1.6-T2 — wire the in_process xhs scaffold into every booted
+	// channel. ChannelTemplate seeds the actor_registry row up-front so
+	// framework.Manager.Install can find it; OnChannelBoot constructs
+	// the Manager + installs the module + registers the Deliverer
+	// handler. T3 swaps this for the adapters/device/xhs factory when
+	// DeviceTransit is wired.
 	cfg := runtime.DaemonConfig{
 		DataDir:      *dataDir,
 		ChannelsDir:  filepath.Join(*dataDir, "channels"),
@@ -63,6 +71,10 @@ func main() {
 		DaemonEpoch:  *daemonEpoch,
 		UseMockBus:   *mockBus,
 		ReplayWindow: time.Duration(*replayWindowMs) * time.Millisecond,
+		ChannelTemplate: runtime.ChannelTemplate{
+			AdapterActorSeeds: []actor.Record{xhs.DefaultActorSeed()},
+		},
+		OnChannelBoot: wireAdapterFramework(XHSScaffoldFactory(xhs.Config{})),
 	}
 
 	if !*mockBus {
