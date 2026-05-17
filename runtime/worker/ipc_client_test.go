@@ -296,3 +296,103 @@ func messageEnvelopeStub() message.Envelope {
 		Audience:   []string{"*"},
 	}
 }
+
+// TestIPCClient_TriggersDeliversDaemonPush covers M1.6-T1 P3: an
+// unsolicited KindTrigger frame pushed by the daemon MUST be decoded
+// and surfaced through IPCClient.Triggers() so the worker's Bridge can
+// react. Triggers are fire-and-forget — no reply expected — and the
+// daemon-supplied envelope / correlation_id / cursor must round-trip
+// intact.
+func TestIPCClient_TriggersDeliversDaemonPush(t *testing.T) {
+	t.Parallel()
+	workerR, daemonW := io.Pipe()
+	daemonR, workerW := io.Pipe()
+	t.Cleanup(func() {
+		_ = workerR.Close()
+		_ = workerW.Close()
+		_ = daemonR.Close()
+		_ = daemonW.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	daemonCodec := ipc.NewCodec(daemonR, daemonW)
+	// Daemon side: respond to handshake, then push a KindTrigger frame.
+	go func() {
+		for {
+			frame, err := daemonCodec.Read()
+			if err != nil {
+				return
+			}
+			if frame.Kind != ipc.KindHandshake {
+				continue
+			}
+			ack, _ := json.Marshal(ipc.HandshakeAckPayload{
+				WorkerID:     "worker-T",
+				ChannelID:    "ch-T",
+				FencingToken: 5,
+				DaemonEpoch:  3,
+			})
+			_ = daemonCodec.Write(ipc.Frame{
+				ID: frame.ID, Kind: ipc.KindHandshakeAck, Payload: ack,
+			})
+
+			// Now push two triggers — second one to prove the buffer
+			// can hold a backlog while the bridge processes the first.
+			for i := 0; i < 2; i++ {
+				env := messageEnvelopeStub()
+				env.ID = "m-trigger"
+				if i == 1 {
+					env.ID = "m-trigger-2"
+				}
+				payload, _ := json.Marshal(ipc.TriggerPayload{
+					Envelope:      env,
+					CorrelationID: "corr-1",
+					Cursor:        int64(100 + i),
+				})
+				_ = daemonCodec.Write(ipc.Frame{
+					ID:      "push-trigger",
+					Kind:    ipc.KindTrigger,
+					Payload: payload,
+				})
+			}
+			return
+		}
+	}()
+
+	client := worker.NewIPCClient(workerR, workerW)
+	client.Start(ctx)
+	t.Cleanup(client.Stop)
+
+	if _, err := client.Handshake(ctx, "lease-T"); err != nil {
+		t.Fatalf("Handshake: %v", err)
+	}
+
+	triggers := client.Triggers()
+	got := 0
+	deadline := time.After(2 * time.Second)
+	for got < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("only %d triggers seen", got)
+		case payload, ok := <-triggers:
+			if !ok {
+				t.Fatalf("trigger channel closed early at %d", got)
+			}
+			if payload.CorrelationID != "corr-1" {
+				t.Errorf("CorrelationID=%q want corr-1", payload.CorrelationID)
+			}
+			if payload.Envelope.ID == "" {
+				t.Error("envelope id empty")
+			}
+			if payload.Cursor < 100 {
+				t.Errorf("Cursor=%d want >=100", payload.Cursor)
+			}
+			got++
+		}
+	}
+	if dropped := client.TriggerDropCount(); dropped != 0 {
+		t.Errorf("unexpected drops=%d", dropped)
+	}
+}

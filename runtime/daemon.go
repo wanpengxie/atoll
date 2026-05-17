@@ -25,6 +25,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/store"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 	"github.com/wanpengxie/ActOS/runtime/trigger"
+	"github.com/wanpengxie/ActOS/runtime/workerhost"
 )
 
 // DaemonConfig is the cmd/daemon assembly knobs.
@@ -57,18 +58,49 @@ type DaemonConfig struct {
 	// Defaults to 1s (L2 §3.7).
 	SchedulerPeriod time.Duration
 
+	// HeartbeatPeriod overrides the daemon → server control.heartbeat
+	// cadence. Defaults to transit.DefaultHeartbeatPeriod (15s). Without
+	// the sender, server placements drift to `stale` 90s after boot even
+	// when the daemon process is alive (M1.6-T1 acceptance #1).
+	HeartbeatPeriod time.Duration
+
+	// WorkerSpawner, when non-nil, swaps the bootChannel deliverer
+	// handler from the P2 counter stub to a full WorkerManager that
+	// spawns + reuses worker subprocesses (M1.6-T1 P4). Tests that
+	// don't care about workers leave this nil and keep the stub —
+	// runtime/daemon_test relies on the counter probe to assert
+	// trigger fan-out without paying the spawn cost.
+	WorkerSpawner workerhost.Spawner
+
 	// PostBoot is invoked once phase 4 starts. May be nil. Used by
 	// tests to inspect state without racing with shutdown.
 	PostBoot func(ctx context.Context, d *Daemon) error
 }
+
+// ChannelAgentID is the well-known actor id every per-channel runtime
+// registers on boot. It is the single L2 worker target for trigger
+// fan-out: scheduler.Deliverer routes every audience-resolved envelope
+// addressed to this id into the per-channel WorkerManager (M1.6-T1 P4).
+//
+// We use the flat form rather than the spec'd `<channel_id>:<agent>`
+// shape because the per-channel sqlite already scopes the id; the L2
+// runtime today is single-worker-per-channel so a stable constant is
+// sufficient. Multi-agent / sub-agent ids land with M1.4 Part 2.
+const ChannelAgentID actor.ActorID = "agent:channel-agent"
+
+// channelAgentDisplayName is the human-readable label seeded alongside
+// ChannelAgentID. Surfaces in view-sync rows that join actor_registry
+// (display_name nullable, callers fall back to id when empty).
+const channelAgentDisplayName = "channel agent"
 
 // channelRuntime is the per-owned-channel set of seams the daemon
 // operational loop drives during phase 3+: harness chain (for writes),
 // outbox pusher (for view-sync), actor registry (for write_message
 // caller-id resolution), message log (for long-pending scans),
 // trigger gateway (post-harness fan-out + future-message scheduler
-// scan), scheduler.Deliverer (per-actor handler registry — the actual
-// handler wiring lands with T4/T5 adapter framework).
+// scan), scheduler.Deliverer (per-actor handler registry — M1.6-T1 P2
+// registers a stub handler for ChannelAgentID; P4 replaces it with the
+// per-channel WorkerManager.OnTrigger entry point).
 type channelRuntime struct {
 	channelID channel.ID
 	db        *sql.DB
@@ -81,6 +113,23 @@ type channelRuntime struct {
 	pusher    *transit.Pusher
 	deliverer *scheduler.Deliverer
 	gateway   *trigger.Gateway
+
+	// channelAgentID is always the constant ChannelAgentID; cached here
+	// so the deliverer handler closure does not need to import the
+	// package-level symbol.
+	channelAgentID actor.ActorID
+
+	// channelAgentTriggers counts every envelope dispatched to the
+	// channel-agent handler. The P2 stub increments it directly; when
+	// the P4 WorkerManager is wired the daemon wraps the manager's
+	// OnTrigger so the counter still ticks (observability bridge).
+	channelAgentTriggers atomic.Int64
+
+	// workerManager is non-nil when DaemonConfig.WorkerSpawner is set
+	// and bootChannel successfully built the per-channel manager. The
+	// channel teardown calls manager.Close so worker subprocesses do
+	// not leak past placement reclaim.
+	workerManager *workerhost.Manager
 }
 
 // Daemon is the assembled cmd/daemon process. Exposed so tests can
@@ -103,6 +152,7 @@ type Daemon struct {
 	cursors    *transit.CursorTracker
 	dispatcher *transit.Dispatcher
 	schedTimer *scheduler.Timer
+	hbSender   *transit.HeartbeatSender
 
 	runCtx    context.Context
 	runCancel context.CancelFunc
@@ -418,8 +468,50 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 		}
 	}()
 
+	// 3.4 — control.heartbeat sender (M1.6-T1 part A). Without this
+	// ticker the daemon's OnHeartbeatAck receipt watermark works fine,
+	// but the server never sees a heartbeat → after 90s server.placements
+	// flips active → stale even though the daemon process is alive. The
+	// sender snapshot-reads d.channels each tick; that's the same
+	// lock-free pattern routeWrite uses, see daemon.go:848.
+	hb, err := transit.NewHeartbeatSender(transit.HeartbeatSenderConfig{
+		Client:   d.transit,
+		Period:   d.cfg.HeartbeatPeriod,
+		FrameID:  d.cfg.FrameIDGen,
+		Channels: d.snapshotOwnedChannels,
+	})
+	if err != nil {
+		return fmt.Errorf("runtime: build heartbeat sender: %w", err)
+	}
+	d.hbSender = hb
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		if err := hb.Run(d.runCtx); err != nil {
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, transit.ErrBusClosed) {
+				fmt.Printf("runtime: heartbeat sender exited: %v\n", err)
+			}
+		}
+	}()
+
 	d.ready.Store(true)
 	return nil
+}
+
+// snapshotOwnedChannels returns the current owned-channel ids. Used by
+// the heartbeat sender to populate HeartbeatBody.Channels each tick.
+// Same lock-free read pattern as routeWrite — the map is mutated only
+// by the dispatcher / phase-3 boot goroutines, never concurrently with
+// itself.
+func (d *Daemon) snapshotOwnedChannels() []channel.ID {
+	if len(d.channels) == 0 {
+		return nil
+	}
+	out := make([]channel.ID, 0, len(d.channels))
+	for id := range d.channels {
+		out = append(out, id)
+	}
+	return out
 }
 
 // buildChannelRuntime opens the per-channel sqlite, constructs every
@@ -474,18 +566,122 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 	}
 
 	return &channelRuntime{
-		channelID: lc.ChannelID,
-		db:        db,
-		registry:  registry,
-		messages:  messages,
-		ledger:    ledger,
-		lock:      lock,
-		outbox:    outbox,
-		chain:     chain,
-		pusher:    pusher,
-		deliverer: deliverer,
-		gateway:   gw,
+		channelID:      lc.ChannelID,
+		db:             db,
+		registry:       registry,
+		messages:       messages,
+		ledger:         ledger,
+		lock:           lock,
+		outbox:         outbox,
+		chain:          chain,
+		pusher:         pusher,
+		deliverer:      deliverer,
+		gateway:        gw,
+		channelAgentID: ChannelAgentID,
 	}, nil
+}
+
+// ensureChannelAgent guarantees the per-channel actor_registry contains
+// the L2 worker target (ChannelAgentID) and registers a deliverer
+// handler that the trigger gateway can route post-harness envelopes to.
+//
+// Idempotency: bootChannel runs on every cold-start (RunPhases) AND every
+// hot OnCreateChannel; a daemon restart re-loads existing channel
+// sqlite, so we Lookup first and only Insert when missing. Re-running
+// Insert would fail the actor_registry PRIMARY KEY.
+//
+// Handler wiring depends on whether DaemonConfig.WorkerSpawner is set:
+//   - nil (P2 default, runtime/daemon_test) → stub handler increments
+//     channelAgentTriggers and returns. No worker subprocess.
+//   - non-nil (P4 wiring, cmd/daemon) → builds a workerhost.Manager and
+//     registers a handler that ticks the counter AND calls
+//     manager.OnTrigger so the trigger envelope reaches a real worker.
+func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) error {
+	_, ok, err := cr.registry.Lookup(ctx, cr.channelAgentID)
+	if err != nil {
+		return fmt.Errorf("runtime: ensure channel-agent lookup %s: %w", cr.channelID, err)
+	}
+	if !ok {
+		if err := cr.registry.Insert(ctx, actor.Record{
+			ID:          cr.channelAgentID,
+			Kind:        message.SenderAgent,
+			DisplayName: channelAgentDisplayName,
+			CreatedAt:   d.cfg.NowFn(),
+		}); err != nil {
+			return fmt.Errorf("runtime: ensure channel-agent insert %s: %w", cr.channelID, err)
+		}
+	}
+
+	// Lock snapshot for fencing. Use the in-process channel lock row;
+	// bootChannel guarantees this row is current (cold-start phase 2
+	// already refreshed daemon_epoch; hot OnCreateChannel inserts the
+	// row in the same tx as the saga).
+	lockRow, lockOK, err := cr.lock.Get(ctx)
+	if err != nil {
+		return fmt.Errorf("runtime: ensure channel-agent lock get %s: %w", cr.channelID, err)
+	}
+	if !lockOK {
+		return fmt.Errorf("runtime: ensure channel-agent missing lock %s", cr.channelID)
+	}
+
+	// P4 wire: build manager when a spawner is configured. Otherwise
+	// fall back to the P2 counter stub so tests don't pay the spawn cost.
+	if d.cfg.WorkerSpawner != nil {
+		leaseStore := workerhost.NewLeaseStore(cr.db)
+		mgr, err := workerhost.NewManager(workerhost.ManagerConfig{
+			ChannelID:     cr.channelID,
+			AgentID:       cr.channelAgentID,
+			WorkerActorID: cr.channelAgentID,
+			Spawner:       d.cfg.WorkerSpawner,
+			LeaseStore:    leaseStore,
+			Chain:         cr.chain,
+			Ledger:        cr.ledger,
+			NowFn:         d.cfg.NowFn,
+			FencingToken:  lockRow.FencingToken,
+			DaemonEpoch:   lockRow.DaemonEpoch,
+			ServeCtx:      d.runCtx,
+		})
+		if err != nil {
+			return fmt.Errorf("runtime: ensure channel-agent manager %s: %w", cr.channelID, err)
+		}
+		cr.workerManager = mgr
+		cr.deliverer.Register(cr.channelAgentID, func(ctx context.Context, id actor.ActorID, env *message.Envelope) error {
+			cr.channelAgentTriggers.Add(1)
+			return mgr.OnTrigger(ctx, id, env)
+		})
+		return nil
+	}
+
+	// P2 fallback — counter-only handler.
+	cr.deliverer.Register(cr.channelAgentID, func(_ context.Context, _ actor.ActorID, _ *message.Envelope) error {
+		cr.channelAgentTriggers.Add(1)
+		return nil
+	})
+	return nil
+}
+
+// ChannelAgentTriggerCount returns the number of times the per-channel
+// agent handler has been invoked since boot. Exposed for daemon_test to
+// assert M1.6-T1 P2 wiring. Returns -1 when the channel is not owned by
+// this daemon (caller can distinguish "no channel" from "no triggers").
+func (d *Daemon) ChannelAgentTriggerCount(chID channel.ID) int64 {
+	cr, ok := d.channels[chID]
+	if !ok {
+		return -1
+	}
+	return cr.channelAgentTriggers.Load()
+}
+
+// CurrentWorkerIDFor returns the id of the worker subprocess currently
+// alive for the channel, or "" when no worker is alive (manager not
+// configured, channel not owned, worker crashed). Test accessor for
+// the M1.6-T1 e2e reuse check.
+func (d *Daemon) CurrentWorkerIDFor(chID channel.ID) string {
+	cr, ok := d.channels[chID]
+	if !ok || cr.workerManager == nil {
+		return ""
+	}
+	return cr.workerManager.CurrentWorkerID()
 }
 
 // bootChannel wires a per-channel runtime + outbox pusher goroutine
@@ -499,6 +695,15 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 		return err
 	}
 	d.channels[lc.ChannelID] = cr
+
+	// M1.6-T1 P2 — register the per-channel agent target so trigger
+	// gateway fan-out has somewhere to route audience=['*']. Done
+	// before the pusher goroutine starts so a write that immediately
+	// follows boot still observes the handler.
+	if err := d.ensureChannelAgent(ctx, cr); err != nil {
+		delete(d.channels, lc.ChannelID)
+		return err
+	}
 
 	// Per-channel context so Unload can stop the pusher independently
 	// of the global d.runCtx.
@@ -516,11 +721,17 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 		}
 	}(cr.pusher, lc.ChannelID)
 
-	// Register the teardown: cancel pusher ctx + drop the runtime
-	// entry. Sqlite handle stays open — Close() reaps it at shutdown
-	// (unbind is not wipe; channels/<id>/ stays on disk).
+	// Register the teardown: tear down the worker manager (if any),
+	// cancel pusher ctx, and drop the runtime entry. Sqlite handle
+	// stays open — Close() reaps it at shutdown (unbind is not wipe;
+	// channels/<id>/ stays on disk).
 	chID := lc.ChannelID
 	d.unloader.Register(chID, func() error {
+		if cr.workerManager != nil {
+			closeCtx, cc := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = cr.workerManager.Close(closeCtx)
+			cc()
+		}
 		pusherCancel()
 		delete(d.channels, chID)
 		d.booter.Unload(chID)

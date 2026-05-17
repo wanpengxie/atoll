@@ -33,6 +33,12 @@ import (
 //	heartbeat / shutdown                     — worker → daemon (request)
 //	handshake_ack / reply / fence_invalid /
 //	shutdown_ack                              — daemon → worker (response)
+//	trigger                                   — daemon → worker (push,
+//	                                            fire-and-forget; no reply
+//	                                            because the worker emits
+//	                                            its reaction via a
+//	                                            subsequent write_message
+//	                                            round-trip).
 type Kind string
 
 // Kind closed set.
@@ -47,6 +53,14 @@ const (
 	KindFenceInvalid  Kind = "fence_invalid"
 	KindShutdown      Kind = "shutdown"
 	KindShutdownAck   Kind = "shutdown_ack"
+	// KindTrigger is the M1.6-T1 daemon → worker push of a post-harness
+	// envelope addressed to the channel-agent target. The worker's
+	// Bridge consumes these via IPCClient.Triggers(); it MAY call
+	// WriteMessage to emit a reaction envelope, but the trigger frame
+	// itself has no reply. Backpressure is bounded by IPCClient's
+	// trigger buffer (overflow logs + drops; gateway redelivery makes
+	// this safe under L1 §6.1 at-least-once-by-message.id).
+	KindTrigger Kind = "trigger"
 )
 
 // Frame is the IPC wire envelope. Length-prefixed JSON: a uint32 BE
@@ -68,11 +82,17 @@ type HandshakePayload struct {
 
 // HandshakeAckPayload is daemon's reply.
 type HandshakeAckPayload struct {
-	WorkerID     string                 `json:"worker_id"`
-	ChannelID    channel.ID             `json:"channel_id"`
-	FencingToken placement.FencingToken `json:"fencing_token"`
-	DaemonEpoch  placement.DaemonEpoch  `json:"daemon_epoch"`
-	TurnDeadline int64                  `json:"turn_deadline_ms"`
+	WorkerID  string     `json:"worker_id"`
+	ChannelID channel.ID `json:"channel_id"`
+	// WorkerActorID is the principal the worker MUST stamp into
+	// envelope.sender.id on every WriteMessage frame (otherwise
+	// harness step 3 sender_mismatch will reject). Added in M1.6-T1
+	// so the MockBridge knows its own actor identity without
+	// out-of-band configuration.
+	WorkerActorID string                 `json:"worker_actor_id,omitempty"`
+	FencingToken  placement.FencingToken `json:"fencing_token"`
+	DaemonEpoch   placement.DaemonEpoch  `json:"daemon_epoch"`
+	TurnDeadline  int64                  `json:"turn_deadline_ms"`
 }
 
 // WriteMessagePayload asks daemon to append an envelope.
@@ -124,6 +144,19 @@ type ReplyPayload struct {
 	OK     bool            `json:"ok"`
 	Error  string          `json:"error,omitempty"`
 	Result json.RawMessage `json:"result,omitempty"`
+}
+
+// TriggerPayload is the daemon → worker push body for KindTrigger
+// frames. Carries one fully-resolved envelope (already through harness
+// chain) plus the correlation_id the worker MUST propagate when
+// emitting downstream envelopes (per v4-layer1-spec correlation
+// propagation rules) and the channel cursor at the time the envelope
+// was dispatched (the worker bridge uses this to align its read view
+// against the channel log).
+type TriggerPayload struct {
+	Envelope      message.Envelope `json:"envelope"`
+	CorrelationID string           `json:"correlation_id,omitempty"`
+	Cursor        int64            `json:"cursor,omitempty"`
 }
 
 // Codec encodes / decodes IPC frames on length-prefixed buffered IO.

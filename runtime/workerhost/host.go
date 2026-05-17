@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -61,6 +62,14 @@ type HostConfig struct {
 type Host struct {
 	cfg   HostConfig
 	codec *ipc.Codec
+
+	// ready closes after the worker completes its handshake. The
+	// WorkerManager waits on this before pushing the first KindTrigger
+	// frame so that the worker's IPCClient is already running its read
+	// loop (otherwise the trigger arrives before the worker is ready
+	// to dispatch into Bridge.Triggers()).
+	ready     chan struct{}
+	readyOnce sync.Once
 }
 
 // NewHost wires a Host around an IPC stream (typically WorkerProc.Stdout
@@ -81,7 +90,38 @@ func NewHost(in io.Reader, out io.Writer, cfg HostConfig) (*Host, error) {
 	return &Host{
 		cfg:   cfg,
 		codec: ipc.NewCodec(in, out),
+		ready: make(chan struct{}),
 	}, nil
+}
+
+// Ready returns a channel that closes once the worker handshake ack is
+// flushed. Used by WorkerManager to gate the first KindTrigger push.
+func (h *Host) Ready() <-chan struct{} { return h.ready }
+
+// PushTrigger emits a daemon → worker KindTrigger frame carrying the
+// post-harness envelope + propagation context. Fire-and-forget: the
+// worker reacts via a subsequent KindWriteMessage round-trip; the
+// trigger itself has no reply. Safe to call from any goroutine — the
+// underlying ipc.Codec serialises writes with an internal mutex.
+//
+// The frame is stamped with the host's (channel, fencing_token,
+// daemon_epoch) tuple so the worker's IPCClient observes the same
+// fence context it expects to stamp on its own outbound frames. The
+// frame ID is informational (worker drops unsolicited replies).
+func (h *Host) PushTrigger(payload ipc.TriggerPayload) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("workerhost: encode trigger: %w", err)
+	}
+	return h.codec.Write(ipc.Frame{
+		ID:           fmt.Sprintf("trig-%s", payload.Envelope.ID),
+		Kind:         ipc.KindTrigger,
+		ChannelID:    h.cfg.ChannelID,
+		WorkerID:     h.cfg.WorkerID,
+		FencingToken: h.cfg.FencingToken,
+		DaemonEpoch:  h.cfg.DaemonEpoch,
+		Payload:      raw,
+	})
 }
 
 // Serve runs the daemon-side read loop. Blocks until the worker
@@ -149,16 +189,24 @@ func (h *Host) handle(ctx context.Context, frame ipc.Frame) error {
 
 func (h *Host) handleHandshake(frame ipc.Frame) error {
 	ack := ipc.HandshakeAckPayload{
-		WorkerID:     h.cfg.WorkerID,
-		ChannelID:    h.cfg.ChannelID,
-		FencingToken: h.cfg.FencingToken,
-		DaemonEpoch:  h.cfg.DaemonEpoch,
+		WorkerID:      h.cfg.WorkerID,
+		ChannelID:     h.cfg.ChannelID,
+		WorkerActorID: string(h.cfg.WorkerActorID),
+		FencingToken:  h.cfg.FencingToken,
+		DaemonEpoch:   h.cfg.DaemonEpoch,
 	}
 	payload, err := json.Marshal(ack)
 	if err != nil {
 		return err
 	}
-	return h.codec.Write(ipc.Frame{ID: frame.ID, Kind: ipc.KindHandshakeAck, Payload: payload})
+	if err := h.codec.Write(ipc.Frame{ID: frame.ID, Kind: ipc.KindHandshakeAck, Payload: payload}); err != nil {
+		return err
+	}
+	// Signal Ready exactly once — gate for PushTrigger from the
+	// WorkerManager. Must happen after the ack flush so the worker
+	// has had the chance to populate its IPC client snapshot.
+	h.readyOnce.Do(func() { close(h.ready) })
+	return nil
 }
 
 func (h *Host) handleWrite(ctx context.Context, frame ipc.Frame) error {
