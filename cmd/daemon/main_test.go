@@ -25,6 +25,43 @@ func buildDaemon(t *testing.T) string {
 	return bin
 }
 
+// TestDaemon_FailFast_MissingHumanCallerSecret covers M1.6-T0.5: in
+// production mode (no --mock-bus) the daemon MUST exit non-zero if
+// --human-caller-secret is empty. Otherwise the control.write_message
+// handler is silently nil and POST /api/channels/:id/messages returns
+// "no daemon for channel".
+func TestDaemon_FailFast_MissingHumanCallerSecret(t *testing.T) {
+	t.Parallel()
+	bin := buildDaemon(t)
+	dataDir := t.TempDir()
+
+	cmd := exec.Command(bin,
+		"--data-dir", dataDir,
+		"--daemon-id", "daemon-failfast",
+		"--daemon-epoch", "1",
+		"--server-url", "ws://127.0.0.1:1",
+		"--key", "dummy",
+		// --human-caller-secret intentionally omitted.
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("daemon exited 0 with no --human-caller-secret; want non-zero")
+	} else {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("unexpected error type: %v", err)
+		}
+		if ee.ExitCode() == 0 {
+			t.Errorf("exit code = 0, want non-zero")
+		}
+	}
+	if got := stderr.String(); got == "" {
+		t.Error("expected fatal message on stderr, got empty")
+	}
+}
+
 // TestDaemon_BootAndShutdown — assert cmd/daemon with --mock-bus boots
 // past phase 4 (PhaseAcceptingNew), then reacts to SIGTERM by exiting
 // cleanly within a short window. This is a binary-level smoke that

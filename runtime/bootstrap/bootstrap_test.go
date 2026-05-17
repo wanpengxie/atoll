@@ -80,6 +80,47 @@ func TestSaga_Bootstrap(t *testing.T) {
 	}
 }
 
+// TestReconciler_ReclaimWatermarks covers the M1.6-T0.4 watermark
+// helpers added on Reconciler — Accept/Reject mutually exclusive,
+// idempotent overwrites, missing channel returns zero values.
+func TestReconciler_ReclaimWatermarks(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	daemonDB, _ := store.OpenDaemon(ctx, filepath.Join(root, "daemon.sqlite"), store.OpenOptions{})
+	defer func() { _ = daemonDB.Close() }()
+
+	rec, err := bootstrap.NewReconciler(daemonDB, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rec.ReclaimAcceptedAt("ch-x") != 0 {
+		t.Error("initial AcceptedAt should be 0")
+	}
+	if _, ok := rec.ReclaimRejectedReason("ch-x"); ok {
+		t.Error("initial RejectedReason should be unset")
+	}
+
+	rec.AcceptReclaim("ch-x")
+	if rec.ReclaimAcceptedAt("ch-x") == 0 {
+		t.Error("AcceptedAt not stamped")
+	}
+	// Reject supersedes accept.
+	rec.RejectReclaim("ch-x", "stale")
+	if rec.ReclaimAcceptedAt("ch-x") != 0 {
+		t.Error("AcceptedAt should be cleared by Reject")
+	}
+	reason, ok := rec.ReclaimRejectedReason("ch-x")
+	if !ok || reason != "stale" {
+		t.Errorf("RejectedReason=%q ok=%v", reason, ok)
+	}
+	// Accept clears reject.
+	rec.AcceptReclaim("ch-x")
+	if _, ok := rec.ReclaimRejectedReason("ch-x"); ok {
+		t.Error("Reject should be cleared by Accept")
+	}
+}
+
 func TestReconciler_RollsBackInProgress(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

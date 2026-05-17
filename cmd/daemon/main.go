@@ -69,6 +69,14 @@ func main() {
 		if *serverURL == "" || *daemonKey == "" {
 			log.Fatal("daemon: --server-url and --key are required when --mock-bus=false")
 		}
+		// T0.5 — production wiring MUST carry the shared HMAC secret used
+		// to authenticate human-caller tokens; without it the
+		// control.write_message handler is silently skipped and POST
+		// /api/channels/:id/messages returns 'no daemon for channel'.
+		// Fail-fast so misconfiguration is loud instead of stealthy.
+		if *humanSecret == "" {
+			log.Fatal("daemon: --human-caller-secret required when --mock-bus=false")
+		}
 		cfg.WSConfig = &transit.WSClientConfig{
 			URL:      *serverURL,
 			DaemonID: *daemonID,
