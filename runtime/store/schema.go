@@ -63,17 +63,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_terminal_response_per_request
 -- 2) type_registry  (L2 §1.4.2)
 -- =============================================================
 CREATE TABLE IF NOT EXISTS type_registry (
-  type                 TEXT PRIMARY KEY,
-  allowed_kinds        TEXT NOT NULL,
-  schemas_by_kind      TEXT NOT NULL,
-  handler_binding      TEXT NOT NULL
-                       CHECK (handler_binding IN ('in_process','outbound_http','via_server_transit')),
-  terminal_convention  TEXT NOT NULL DEFAULT 'payload_status'
-                       CHECK (terminal_convention IN ('payload_status','single-response')),
-  max_pending_ms       INTEGER,
-  handler_actor_id     TEXT,
-  domain               TEXT,
-  created_at           INTEGER NOT NULL
+  type                     TEXT PRIMARY KEY,
+  allowed_kinds            TEXT NOT NULL,
+  schemas_by_kind          TEXT NOT NULL,
+  handler_binding          TEXT NOT NULL
+                           CHECK (handler_binding IN ('in_process','outbound_http','via_server_transit')),
+  terminal_convention      TEXT NOT NULL DEFAULT 'payload_status'
+                           CHECK (terminal_convention IN ('payload_status','single-response')),
+  max_pending_ms           INTEGER,
+  handler_actor_id         TEXT,
+  fallback_response_schema TEXT,
+  domain                   TEXT,
+  created_at               INTEGER NOT NULL
 );
 
 -- =============================================================
