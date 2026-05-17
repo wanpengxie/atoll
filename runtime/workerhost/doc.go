@@ -1,19 +1,29 @@
 // Package workerhost is the daemon-side host for worker subprocesses.
 //
 // Authoritative spec: .dalek/pm/m1.5-tickets.md §T3 (worker lease model)
-// + codex review #10 (lease vs heartbeat + daemon_epoch fencing).
+// + codex review #10 (lease vs heartbeat + daemon_epoch fencing)
+// + .dalek/pm/m1.6-tickets.md §T1 (per-channel WorkerManager).
 //
 // Files:
 //
-//   - pool.go   — worker process pool + quota (e.g. 32 concurrent leases).
-//   - lease.go  — Acquire / Release / Renew (lease TTL = 5min); idle
+//   - pool.go    — worker process pool + quota (e.g. 32 concurrent leases).
+//   - lease.go   — Acquire / Release / Renew (lease TTL = 5min); idle
 //     timeout sweep.
-//   - spawn.go  — exec.Cmd worker binary + bidirectional stdin/stdout
+//   - spawn.go   — exec.Cmd worker binary + bidirectional stdin/stdout
 //     pipe.
-//   - ipc.go    — IPC protocol: length-prefixed JSON frames over the
-//     spawn pipes. Methods: write_message / reserve_ledger
-//     / commit_ledger / heartbeat / shutdown.
-//   - fence.go  — fencing_token + daemon_epoch enforcement on every IPC
-//     mutation. Mismatch → daemon rejects + sends fence_invalid
+//   - host.go    — daemon-side IPC server for one worker: handshake +
+//     ack, fence enforcement, write_message / reserve_ledger /
+//     commit_ledger handlers. Exposes Ready() + PushTrigger() so
+//     the Manager can gate the first KindTrigger frame on the
+//     worker handshake completing.
+//   - fence.go   — fencing_token + daemon_epoch enforcement on every
+//     IPC mutation. Mismatch → daemon rejects + sends fence_invalid
 //     reply (worker exits per fence_check).
+//   - manager.go — per-channel lazy-spawn / reuse Manager. Wired into
+//     runtime/daemon.bootChannel via DaemonConfig.WorkerSpawner.
+//     The Manager owns one workerSession at a time; OnTrigger
+//     spawns when there is no live worker, otherwise pushes the
+//     envelope onto the existing IPC channel as a KindTrigger
+//     frame. Crash recovery: Host.Serve exit → tombstone session,
+//     release lease, next OnTrigger re-spawns.
 package workerhost
