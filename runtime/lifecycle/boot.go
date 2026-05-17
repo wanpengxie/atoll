@@ -216,3 +216,79 @@ func (b *Bootstrapper) MarkRecovering() { b.phase = PhaseRecovering }
 
 // MarkAcceptingNew is phase 4 — daemon now processes new create_channel.
 func (b *Bootstrapper) MarkAcceptingNew() { b.phase = PhaseAcceptingNew }
+
+// LoadOne is the hot-path companion to LoadLocal. The daemon calls it
+// after bootstrap.Saga.Bootstrap + channel_lock insert finish for a
+// freshly-created channel: it opens the channel_lock row, validates
+// daemon ownership, refreshes daemon_epoch, appends the LocalChannel
+// into the bootstrapper's in-memory view, and returns the LocalChannel
+// so the caller can immediately build the per-channel runtime via
+// daemon.buildChannelRuntime — bypassing the cold-start directory scan.
+//
+// LoadOne is invoked from the daemonbus dispatcher loop, which is a
+// single goroutine, so the append to b.channels is race-free against
+// LoadLocal (LoadLocal runs once in phase 1 before the dispatcher loop
+// is started).
+//
+// Returns ErrChannelUnbound when the channel_lock row is missing
+// (saga left no lock — caller wired wrong) and a typed error when the
+// lock row exists but belongs to a different daemon (DaemonID
+// mismatch — caller is hot-loading a channel we don't own, refuse).
+func (b *Bootstrapper) LoadOne(ctx context.Context, id channel.ID, sqlitePath string) (LocalChannel, error) {
+	if id == "" {
+		return LocalChannel{}, errors.New("lifecycle: LoadOne empty channel id")
+	}
+	if sqlitePath == "" {
+		return LocalChannel{}, errors.New("lifecycle: LoadOne empty sqlite path")
+	}
+	lock, err := b.cfg.LockOpener(ctx, sqlitePath)
+	if err != nil {
+		return LocalChannel{}, fmt.Errorf("lifecycle: LoadOne open lock %s: %w", id, err)
+	}
+	row, ok, err := lock.Get(ctx)
+	if err != nil {
+		return LocalChannel{}, fmt.Errorf("lifecycle: LoadOne read lock %s: %w", id, err)
+	}
+	if !ok {
+		return LocalChannel{}, ErrChannelUnbound
+	}
+	if row.DaemonID != b.cfg.DaemonID {
+		return LocalChannel{}, fmt.Errorf(
+			"lifecycle: LoadOne %s daemon_id mismatch (have %q, want %q)",
+			id, row.DaemonID, b.cfg.DaemonID,
+		)
+	}
+	// Refresh daemon_epoch so any stale worker IPC fails fence_check —
+	// mirrors LoadLocal behaviour for cold-scanned channels.
+	if err := lock.RefreshDaemon(ctx, b.cfg.DaemonEpoch, b.cfg.NowFn()); err != nil {
+		return LocalChannel{}, fmt.Errorf("lifecycle: LoadOne refresh daemon_epoch %s: %w", id, err)
+	}
+	row.DaemonEpoch = b.cfg.DaemonEpoch
+	lc := LocalChannel{
+		ChannelID:  id,
+		SQLitePath: sqlitePath,
+		Lock:       row,
+		OwnedByUs:  true,
+	}
+	// Append (no dedupe) — dispatcher loop is the only writer so a
+	// duplicate is a caller bug we want to surface in tests; the worst
+	// case is two entries for the same channel id, both still owned by
+	// us, which makes downstream loops idempotent.
+	b.channels = append(b.channels, lc)
+	return lc, nil
+}
+
+// Unload removes the LocalChannel entry for id from the in-memory
+// view. Called by the daemon's OnUnbindChannel handler after the
+// per-channel runtime has been torn down. Idempotent — missing entry
+// is a no-op.
+func (b *Bootstrapper) Unload(id channel.ID) {
+	out := b.channels[:0]
+	for _, lc := range b.channels {
+		if lc.ChannelID == id {
+			continue
+		}
+		out = append(out, lc)
+	}
+	b.channels = out
+}

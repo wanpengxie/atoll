@@ -3,8 +3,10 @@ package runtime
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -94,6 +96,8 @@ type Daemon struct {
 	booter     *lifecycle.Bootstrapper
 	reconciler *bootstrap.Reconciler
 	saga       *bootstrap.Saga
+	unloader   *lifecycle.Unloader
+	heartbeat  *transit.HeartbeatTracker
 
 	channels   map[channel.ID]*channelRuntime
 	cursors    *transit.CursorTracker
@@ -216,6 +220,8 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 		booter:     booter,
 		reconciler: reconciler,
 		saga:       saga,
+		unloader:   lifecycle.NewUnloader(),
+		heartbeat:  transit.NewHeartbeatTracker(),
 		channels:   make(map[channel.ID]*channelRuntime),
 		cursors:    transit.NewCursorTracker(),
 	}
@@ -309,23 +315,9 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 		if _, ok := acceptedSet[lc.ChannelID]; !ok {
 			continue
 		}
-		cr, err := d.buildChannelRuntime(ctx, lc)
-		if err != nil {
+		if err := d.bootChannel(ctx, lc); err != nil {
 			return fmt.Errorf("runtime: channel %s: %w", lc.ChannelID, err)
 		}
-		d.channels[lc.ChannelID] = cr
-		d.wg.Add(1)
-		go func(p *transit.Pusher, id channel.ID) {
-			defer d.wg.Done()
-			if err := p.Pump(d.runCtx); err != nil {
-				if !errors.Is(err, context.Canceled) {
-					// Log via stderr — tests assert on graceful exit so we
-					// keep this best-effort. cmd/daemon swaps in structured
-					// logging via DaemonConfig in a later ticket.
-					fmt.Printf("runtime: pusher %s exited: %v\n", id, err)
-				}
-			}
-		}(cr.pusher, lc.ChannelID)
 	}
 
 	// 3.2 — transit dispatcher (one goroutine drains the recv side).
@@ -372,6 +364,11 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 	handlers := transit.ControlHandlers{
 		OnViewsyncAck:           ackHandler.Handle,
 		OnViewsyncResyncRequest: resyncServer.ServeResync,
+		OnCreateChannel:         d.handleCreateChannel,
+		OnUnbindChannel:         d.handleUnbindChannel,
+		OnHeartbeatAck:          d.heartbeat.Handle(d.cfg.NowFn),
+		OnReclaimAccepted:       d.handleReclaimAccepted,
+		OnReclaimRejected:       d.handleReclaimRejected,
 	}
 	if handler != nil {
 		handlers.OnWriteMessage = func(ctx context.Context, _ daemonbus.Frame, body transit.WriteMessageBody) transit.WriteMessageAckBody {
@@ -489,6 +486,338 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		deliverer: deliverer,
 		gateway:   gw,
 	}, nil
+}
+
+// bootChannel wires a per-channel runtime + outbox pusher goroutine
+// and registers a teardown function with lifecycle.Unloader. Used by
+// both phase-3 cold-start AND the hot OnCreateChannel handler so the
+// two paths stay symmetric (single source of "what does it take to
+// bring a channel up").
+func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) error {
+	cr, err := d.buildChannelRuntime(ctx, lc)
+	if err != nil {
+		return err
+	}
+	d.channels[lc.ChannelID] = cr
+
+	// Per-channel context so Unload can stop the pusher independently
+	// of the global d.runCtx.
+	pusherCtx, pusherCancel := context.WithCancel(d.runCtx)
+	d.wg.Add(1)
+	go func(p *transit.Pusher, id channel.ID) {
+		defer d.wg.Done()
+		if err := p.Pump(pusherCtx); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				// Log via stderr — tests assert on graceful exit so we
+				// keep this best-effort. cmd/daemon swaps in structured
+				// logging via DaemonConfig in a later ticket.
+				fmt.Printf("runtime: pusher %s exited: %v\n", id, err)
+			}
+		}
+	}(cr.pusher, lc.ChannelID)
+
+	// Register the teardown: cancel pusher ctx + drop the runtime
+	// entry. Sqlite handle stays open — Close() reaps it at shutdown
+	// (unbind is not wipe; channels/<id>/ stays on disk).
+	chID := lc.ChannelID
+	d.unloader.Register(chID, func() error {
+		pusherCancel()
+		delete(d.channels, chID)
+		d.booter.Unload(chID)
+		return nil
+	})
+	return nil
+}
+
+// handleCreateChannel is the OnCreateChannel handler — T0.1. It runs
+// the bootstrap saga, writes the channel_lock row (saga step 6
+// historically lived in lifecycle.Creator), wires the new channel into
+// the daemon's runtime map via lifecycle.Bootstrapper.LoadOne +
+// buildChannelRuntime, and emits a control.create_channel_ack with
+// every match-field populated so the server's step-5 CAS succeeds
+// (kernel/placement.CreateChannelAck.Match).
+//
+// Failure semantics:
+//   - saga.Bootstrap fails → AckRejected (reason=saga error). bootstrap_registry
+//     row stays 'in_progress'; reconcile loop rolls it back on next restart.
+//   - channel_lock.Insert race (idempotent replay with matching tuple) →
+//     branch on existing row: matching tuple ⇒ AckBound idempotent; any
+//     mismatch ⇒ AckRejected per lifecycle.Creator branch 2/3/4.
+//   - LoadOne / buildChannelRuntime fail → AckRejected; channel_lock row
+//     remains so reconciler can drive recovery.
+func (d *Daemon) handleCreateChannel(
+	ctx context.Context,
+	frame daemonbus.Frame,
+	req placement.CreateChannelRequest,
+) error {
+	ack := placement.CreateChannelAck{
+		FrameID:         frame.FrameID,
+		ChannelID:       req.ChannelID,
+		CreateRequestID: req.CreateRequestID,
+		OwnerEpoch:      req.OwnerEpoch,
+		FencingToken:    req.FencingToken,
+		DaemonID:        placement.DaemonID(d.cfg.DaemonID),
+		DaemonEpoch:     placement.DaemonEpoch(d.cfg.DaemonEpoch),
+	}
+
+	if req.ChannelID == "" {
+		ack.Status = placement.AckRejected
+		ack.Reason = "empty_channel_id"
+		return d.sendCreateAck(ctx, ack)
+	}
+	if req.CreateRequestID == "" {
+		ack.Status = placement.AckRejected
+		ack.Reason = "empty_create_request_id"
+		return d.sendCreateAck(ctx, ack)
+	}
+
+	sqlitePath := filepath.Join(d.cfg.ChannelsDir, string(req.ChannelID), "channel.sqlite")
+
+	// Idempotency / conflict pre-check: if a channel.sqlite already
+	// exists on disk and carries a channel_lock row, branch the same
+	// way lifecycle.Creator does (FIX-T4 ladder). When the sqlite is
+	// absent, fall through to fresh-bootstrap below — OpenChannelLock
+	// would otherwise CREATE an empty sqlite file with no DDL, leaving
+	// a half-baked channel dir behind.
+	sqliteExists := false
+	if _, err := os.Stat(sqlitePath); err == nil {
+		sqliteExists = true
+	}
+	if sqliteExists {
+		existingLock, err := d.OpenChannelLock(ctx, sqlitePath)
+		if err != nil {
+			ack.Status = placement.AckRejected
+			ack.Reason = fmt.Sprintf("lock open: %v", err)
+			return d.sendCreateAck(ctx, ack)
+		}
+		row, ok, getErr := existingLock.Get(ctx)
+		if getErr != nil {
+			ack.Status = placement.AckRejected
+			ack.Reason = fmt.Sprintf("lock get: %v", getErr)
+			return d.sendCreateAck(ctx, ack)
+		}
+		if ok {
+			switch {
+			case row.FencingToken < req.FencingToken:
+				ack.Status = placement.AckRejected
+				ack.Reason = "local_lock_stale_higher_token_received"
+				return d.sendCreateAck(ctx, ack)
+			case row.FencingToken == req.FencingToken:
+				if row.OwnerEpoch != req.OwnerEpoch {
+					ack.Status = placement.AckRejected
+					ack.Reason = "owner_epoch_mismatch"
+					return d.sendCreateAck(ctx, ack)
+				}
+				if row.DaemonID != placement.DaemonID(d.cfg.DaemonID) {
+					ack.Status = placement.AckRejected
+					ack.Reason = "daemon_id_mismatch"
+					return d.sendCreateAck(ctx, ack)
+				}
+				// Idempotent replay — make sure the runtime is mounted
+				// (re-issued create after a restart with the same tuple).
+				if !d.HasChannel(req.ChannelID) {
+					if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath); err != nil {
+						ack.Status = placement.AckRejected
+						ack.Reason = fmt.Sprintf("mount existing: %v", err)
+						return d.sendCreateAck(ctx, ack)
+					}
+				}
+				ack.Status = placement.AckBound
+				return d.sendCreateAck(ctx, ack)
+			case row.FencingToken > req.FencingToken:
+				ack.Status = placement.AckRejected
+				ack.Reason = "stale_request"
+				return d.sendCreateAck(ctx, ack)
+			}
+		}
+	}
+
+	// Fresh bootstrap path: run the saga (steps 1-5,7) then insert
+	// channel_lock (step 6 — daemon-side equivalent of lifecycle.Creator).
+	if _, err := d.saga.Bootstrap(ctx, req.ChannelID, req); err != nil {
+		ack.Status = placement.AckRejected
+		ack.Reason = fmt.Sprintf("saga: %v", err)
+		return d.sendCreateAck(ctx, ack)
+	}
+	lockStore, err := d.OpenChannelLock(ctx, sqlitePath)
+	if err != nil {
+		ack.Status = placement.AckRejected
+		ack.Reason = fmt.Sprintf("lock open: %v", err)
+		return d.sendCreateAck(ctx, ack)
+	}
+	now := d.cfg.NowFn()
+	if err := lockStore.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    req.ChannelID,
+		FencingToken: req.FencingToken,
+		OwnerEpoch:   req.OwnerEpoch,
+		DaemonID:     placement.DaemonID(d.cfg.DaemonID),
+		DaemonEpoch:  placement.DaemonEpoch(d.cfg.DaemonEpoch),
+		AcquiredAt:   now,
+		RefreshedAt:  now,
+	}); err != nil {
+		ack.Status = placement.AckRejected
+		ack.Reason = fmt.Sprintf("lock insert: %v", err)
+		return d.sendCreateAck(ctx, ack)
+	}
+
+	if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath); err != nil {
+		ack.Status = placement.AckRejected
+		ack.Reason = fmt.Sprintf("mount: %v", err)
+		return d.sendCreateAck(ctx, ack)
+	}
+	ack.Status = placement.AckBound
+	return d.sendCreateAck(ctx, ack)
+}
+
+// mountExistingChannel hot-loads a channel that has its bootstrap saga
+// + channel_lock already on disk: it runs lifecycle.Bootstrapper.LoadOne
+// + bootChannel so the new channel id becomes routable for
+// OnWriteMessage / viewsync without restarting the daemon.
+func (d *Daemon) mountExistingChannel(ctx context.Context, id channel.ID, sqlitePath string) error {
+	lc, err := d.booter.LoadOne(ctx, id, sqlitePath)
+	if err != nil {
+		return err
+	}
+	return d.bootChannel(ctx, lc)
+}
+
+// sendCreateAck wraps the transit Send for a CreateChannelAck. Pulled
+// out so handleCreateChannel doesn't repeat the boilerplate.
+func (d *Daemon) sendCreateAck(ctx context.Context, ack placement.CreateChannelAck) error {
+	return d.transit.Send(ctx, d.cfg.FrameIDGen(),
+		daemonbus.FrameTypeControlCreateChannelAck, ack)
+}
+
+// unbindChannelBody is the minimal payload shape this daemon
+// understands for a control.unbind_channel frame. The kernel package
+// does not yet define a typed payload for this frame (M1.6 scope), so
+// we decode an inline JSON struct. The server only needs frame_id +
+// channel_id round-tripped on the ack.
+type unbindChannelBody struct {
+	FrameID   string     `json:"frame_id"`
+	ChannelID channel.ID `json:"channel_id"`
+}
+
+// unbindChannelAckBody is the response payload sent back as
+// control.unbind_channel_ack.
+type unbindChannelAckBody struct {
+	FrameID   string     `json:"frame_id"`
+	ChannelID channel.ID `json:"channel_id"`
+	Status    string     `json:"status"` // "unbound" | "not_found"
+	Reason    string     `json:"reason,omitempty"`
+}
+
+// handleUnbindChannel — T0.2. Closes the per-channel pusher
+// goroutine (via lifecycle.Unloader teardown), drops the runtime
+// entry from d.channels, and emits control.unbind_channel_ack. Does
+// NOT delete channels/<id>/ on disk — that's the GC schedule, not the
+// unbind path.
+func (d *Daemon) handleUnbindChannel(ctx context.Context, frame daemonbus.Frame) error {
+	var body unbindChannelBody
+	if len(frame.Payload) > 0 {
+		if err := json.Unmarshal(frame.Payload, &body); err != nil {
+			return fmt.Errorf("runtime: decode unbind_channel: %w", err)
+		}
+	}
+	if body.FrameID == "" {
+		body.FrameID = frame.FrameID
+	}
+	ack := unbindChannelAckBody{FrameID: body.FrameID, ChannelID: body.ChannelID}
+	if body.ChannelID == "" {
+		ack.Status = "not_found"
+		ack.Reason = "empty_channel_id"
+		return d.transit.Send(ctx, d.cfg.FrameIDGen(),
+			daemonbus.FrameTypeControlUnbindChannelAck, ack)
+	}
+	if !d.HasChannel(body.ChannelID) {
+		ack.Status = "not_found"
+		return d.transit.Send(ctx, d.cfg.FrameIDGen(),
+			daemonbus.FrameTypeControlUnbindChannelAck, ack)
+	}
+	if err := d.unloader.Unload(ctx, body.ChannelID, lifecycle.UnloadOrphan); err != nil {
+		ack.Status = "not_found"
+		ack.Reason = err.Error()
+		return d.transit.Send(ctx, d.cfg.FrameIDGen(),
+			daemonbus.FrameTypeControlUnbindChannelAck, ack)
+	}
+	ack.Status = "unbound"
+	return d.transit.Send(ctx, d.cfg.FrameIDGen(),
+		daemonbus.FrameTypeControlUnbindChannelAck, ack)
+}
+
+// reclaimAcceptedBody mirrors the wire payload server/gateway emits:
+// {"daemon_id":..., "decisions":[ReclaimDecision...]}
+type reclaimAcceptedBody struct {
+	DaemonID  string                      `json:"daemon_id"`
+	Decisions []placement.ReclaimDecision `json:"decisions"`
+}
+
+// handleReclaimAccepted — T0.4. The server bundles per-channel
+// reclaim decisions inside a single control.reclaim_accepted frame
+// (server/gateway/handlers.go), so this handler iterates each decision
+// and updates the bootstrap.Reconciler watermark; rejected entries
+// trigger the per-channel unload path to prevent zombie writes.
+func (d *Daemon) handleReclaimAccepted(ctx context.Context, frame daemonbus.Frame) error {
+	var body reclaimAcceptedBody
+	if len(frame.Payload) > 0 {
+		if err := json.Unmarshal(frame.Payload, &body); err != nil {
+			return fmt.Errorf("runtime: decode reclaim_accepted: %w", err)
+		}
+	}
+	for _, dec := range body.Decisions {
+		if dec.Accepted {
+			d.reconciler.AcceptReclaim(dec.ChannelID)
+			continue
+		}
+		d.reconciler.RejectReclaim(dec.ChannelID, dec.Reason)
+		// Trigger per-channel unload — zombie writes are forbidden once
+		// the server has revoked our ownership claim.
+		if d.HasChannel(dec.ChannelID) {
+			if err := d.unloader.Unload(ctx, dec.ChannelID, lifecycle.UnloadStale); err != nil {
+				fmt.Printf("runtime: reclaim reject unload %s: %v\n", dec.ChannelID, err)
+			}
+		}
+	}
+	return nil
+}
+
+// reclaimRejectedBody mirrors the alternative wire payload some servers
+// may emit as a dedicated frame_type. Currently the M1.5 server bundles
+// rejections inside control.reclaim_accepted, so this handler is a
+// future-proof companion that drives the same Reject path per channel.
+type reclaimRejectedBody struct {
+	DaemonID  string                      `json:"daemon_id"`
+	Decisions []placement.ReclaimDecision `json:"decisions"`
+	ChannelID channel.ID                  `json:"channel_id,omitempty"`
+	Reason    string                      `json:"reason,omitempty"`
+}
+
+// handleReclaimRejected — T0.4 companion. Accepts both the
+// per-channel single-shot shape ({channel_id, reason}) and the
+// bundled decisions shape so the handler is tolerant to either server
+// revision.
+func (d *Daemon) handleReclaimRejected(ctx context.Context, frame daemonbus.Frame) error {
+	var body reclaimRejectedBody
+	if len(frame.Payload) > 0 {
+		if err := json.Unmarshal(frame.Payload, &body); err != nil {
+			return fmt.Errorf("runtime: decode reclaim_rejected: %w", err)
+		}
+	}
+	rejected := body.Decisions
+	if len(rejected) == 0 && body.ChannelID != "" {
+		rejected = []placement.ReclaimDecision{
+			{ChannelID: body.ChannelID, Accepted: false, Reason: body.Reason},
+		}
+	}
+	for _, dec := range rejected {
+		d.reconciler.RejectReclaim(dec.ChannelID, dec.Reason)
+		if d.HasChannel(dec.ChannelID) {
+			if err := d.unloader.Unload(ctx, dec.ChannelID, lifecycle.UnloadStale); err != nil {
+				fmt.Printf("runtime: reclaim_rejected unload %s: %v\n", dec.ChannelID, err)
+			}
+		}
+	}
+	return nil
 }
 
 // openChannelDB reuses the cache populated by lifecycle.LockOpener.
@@ -649,6 +978,17 @@ func (d *Daemon) BootResult() lifecycle.BootResult { return d.bootRes }
 
 // Saga exposes the channel bootstrap saga (used by lifecycle.Creator).
 func (d *Daemon) Saga() *bootstrap.Saga { return d.saga }
+
+// Reconciler exposes the bootstrap reconciler — used by tests + the
+// future M1-FIX-T4 reclaim wiring.
+func (d *Daemon) Reconciler() *bootstrap.Reconciler { return d.reconciler }
+
+// Heartbeat exposes the heartbeat-ack tracker.
+func (d *Daemon) Heartbeat() *transit.HeartbeatTracker { return d.heartbeat }
+
+// Unloader exposes the lifecycle unloader (used by tests + future
+// adapter manager teardown paths).
+func (d *Daemon) Unloader() *lifecycle.Unloader { return d.unloader }
 
 // DaemonDB exposes the daemon-level sqlite (tests / future server.go).
 func (d *Daemon) DaemonDB() *sql.DB { return d.daemonDB }

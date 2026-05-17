@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
 )
@@ -13,9 +14,20 @@ import (
 // Reconciler scans bootstrap_registry for rows left in 'in_progress'
 // state (a daemon crash mid-saga). Each such row is rolled back: the
 // workdir is removed and the row is marked 'rolled_back'.
+//
+// The Reconciler also tracks per-channel reclaim outcomes for the
+// daemon — when a `control.reclaim_accepted` / `control.reclaim_rejected`
+// frame arrives, the OnReclaimAccepted/Rejected handlers call
+// AcceptReclaim / RejectReclaim to record the decision. Confirmed
+// channels gate downstream zombie-write protection; rejected channels
+// trigger the daemon's per-channel unload path.
 type Reconciler struct {
 	daemonDB *sql.DB
 	nowFn    func() int64
+
+	mu              sync.Mutex
+	reclaimAccepted map[channel.ID]int64  // channel_id → confirmed_at
+	reclaimRejected map[channel.ID]string // channel_id → reject reason
 }
 
 // NewReconciler builds a Reconciler.
@@ -26,7 +38,67 @@ func NewReconciler(daemonDB *sql.DB, nowFn func() int64) (*Reconciler, error) {
 	if nowFn == nil {
 		return nil, errors.New("bootstrap: NewReconciler nowFn nil")
 	}
-	return &Reconciler{daemonDB: daemonDB, nowFn: nowFn}, nil
+	return &Reconciler{
+		daemonDB:        daemonDB,
+		nowFn:           nowFn,
+		reclaimAccepted: make(map[channel.ID]int64),
+		reclaimRejected: make(map[channel.ID]string),
+	}, nil
+}
+
+// AcceptReclaim records that the server accepted ownership of channelID
+// at the current wall-clock. Idempotent — repeated calls overwrite the
+// timestamp with the most recent. Used by the daemon's
+// OnReclaimAccepted handler to confirm per-channel ownership after a
+// daemonbus reconnect.
+func (r *Reconciler) AcceptReclaim(channelID channel.ID) {
+	if r == nil || channelID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reclaimAccepted[channelID] = r.nowFn()
+	// Clear any prior reject; accept supersedes.
+	delete(r.reclaimRejected, channelID)
+}
+
+// RejectReclaim records that the server rejected our reclaim of
+// channelID. The daemon's OnReclaimRejected handler reads this map to
+// drive the per-channel unload path (zombie writes must not survive a
+// reclaim loss).
+func (r *Reconciler) RejectReclaim(channelID channel.ID, reason string) {
+	if r == nil || channelID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reclaimRejected[channelID] = reason
+	// Clear any prior accept; reject supersedes — daemon will unload.
+	delete(r.reclaimAccepted, channelID)
+}
+
+// ReclaimAcceptedAt returns the wall-clock at which channelID's reclaim
+// was last accepted, or 0 if it has not been accepted (or has since
+// been rejected).
+func (r *Reconciler) ReclaimAcceptedAt(channelID channel.ID) int64 {
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reclaimAccepted[channelID]
+}
+
+// ReclaimRejectedReason returns the last recorded rejection reason for
+// channelID, or "" if no rejection is currently active.
+func (r *Reconciler) ReclaimRejectedReason(channelID channel.ID) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	reason, ok := r.reclaimRejected[channelID]
+	return reason, ok
 }
 
 // RolledBack records one rollback outcome.

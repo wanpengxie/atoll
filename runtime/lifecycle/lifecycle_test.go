@@ -564,6 +564,97 @@ func TestBoot_LoadLocal(t *testing.T) {
 	}
 }
 
+// TestBoot_LoadOne covers the M1.6-T0.1.1 hot-path entry point —
+// after saga.Bootstrap + channel_lock insert, LoadOne mounts the
+// channel into the bootstrapper's in-memory view, refreshes
+// daemon_epoch, and returns a LocalChannel. Unload removes it again.
+func TestBoot_LoadOne(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	root := t.TempDir()
+	channelsDir := filepath.Join(root, "channels")
+	opener := newLockOpener()
+	defer opener.Close()
+
+	boot, err := lifecycle.NewBootstrapper(lifecycle.BootConfig{
+		DaemonID:    "daemon-X",
+		DaemonEpoch: placement.DaemonEpoch(11),
+		NowFn:       now,
+		ChannelsDir: channelsDir,
+		LockOpener:  opener.Open,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed a channel with an existing channel_lock owned by daemon-X.
+	chID := channel.ID("ch-hot")
+	dir := filepath.Join(channelsDir, string(chID))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dir, "channel.sqlite")
+	db, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.NewChannelLock(db).Insert(ctx, store.ChannelLockRow{
+		ChannelID:    chID,
+		FencingToken: 5, OwnerEpoch: 5,
+		DaemonID: "daemon-X", DaemonEpoch: 1,
+		AcquiredAt: now(), RefreshedAt: now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	lc, err := boot.LoadOne(ctx, chID, dbPath)
+	if err != nil {
+		t.Fatalf("LoadOne: %v", err)
+	}
+	if lc.ChannelID != chID || lc.SQLitePath != dbPath || !lc.OwnedByUs {
+		t.Errorf("LocalChannel = %+v", lc)
+	}
+	if lc.Lock.DaemonEpoch != 11 {
+		t.Errorf("daemon_epoch not refreshed: %d", lc.Lock.DaemonEpoch)
+	}
+
+	// LoadOne should reject a channel whose lock row belongs to a
+	// different daemon.
+	otherDB := filepath.Join(channelsDir, "ch-other", "channel.sqlite")
+	if err := os.MkdirAll(filepath.Dir(otherDB), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	odb, _ := store.OpenChannel(ctx, otherDB, store.OpenOptions{})
+	if err := store.NewChannelLock(odb).Insert(ctx, store.ChannelLockRow{
+		ChannelID:    "ch-other",
+		FencingToken: 1, OwnerEpoch: 1,
+		DaemonID: "daemon-Y", DaemonEpoch: 1,
+		AcquiredAt: now(), RefreshedAt: now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = odb.Close()
+	if _, err := boot.LoadOne(ctx, "ch-other", otherDB); err == nil {
+		t.Error("LoadOne should reject channel owned by another daemon")
+	}
+
+	// Missing channel_lock row → ErrChannelUnbound.
+	missingDB := filepath.Join(channelsDir, "ch-empty", "channel.sqlite")
+	if err := os.MkdirAll(filepath.Dir(missingDB), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mdb, _ := store.OpenChannel(ctx, missingDB, store.OpenOptions{})
+	_ = mdb.Close()
+	if _, err := boot.LoadOne(ctx, "ch-empty", missingDB); !errors.Is(err, lifecycle.ErrChannelUnbound) {
+		t.Errorf("missing lock want ErrChannelUnbound, got %v", err)
+	}
+
+	// Unload drops the entry.
+	boot.Unload(chID)
+}
+
 // TestUnloader exercises Register + Unload ordering.
 func TestUnloader(t *testing.T) {
 	u := lifecycle.NewUnloader()
