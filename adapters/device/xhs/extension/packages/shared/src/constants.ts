@@ -51,7 +51,51 @@ export const EXTENSION_CONSTANTS = {
 } as const;
 
 /**
- * Coagent device 协议常量（与 spec §四 align）。
+ * T147 §A-E — Server devicebus 协议常量（v4，L4 §2.6.4 DeviceFrame 形态）。
+ *
+ * 与 legacy COAGENT_DEVICE_PROTOCOL 的本质差异：
+ *   - WS 端点：wss://{server-host}/devicebus?session_id=...&token=...
+ *   - 帧形态：DeviceFrame{direction, device_session_id, channel_id,
+ *     request_id, correlation_id, payload, expires_at}，payload 内嵌
+ *     Command/Callback JSON。
+ *   - 回调通道：全 WS（不再 HTTP POST /api/device/{id}/callback）。
+ *   - 鉴权：session token 通过 WS query 一次性鉴权，不再附带 api_key。
+ *
+ * mock / real provider 切换仍由 background tools registry 决定（与协议
+ * 层无关），cmd-handlers.ts 路由保持原样。
+ */
+export const COAGENT_SERVER_DEVICEBUS_PROTOCOL = {
+  /** WS URL path mounted on the coagent server gin engine. */
+  DEVICEBUS_PATH: '/devicebus',
+  /** DeviceFrame.direction enum (closed set). */
+  DIRECTION_TO_DEVICE: 'to_device',
+  DIRECTION_FROM_DEVICE: 'from_device',
+  /** Inner payload `type` for daemon→extension command frames. Same wire
+   *  value as legacy COAGENT_DEVICE_PROTOCOL.COMMAND_FRAME_TYPE so the
+   *  cmd-handlers registry stays unchanged. */
+  COMMAND_TYPE: 'command',
+  /** Callback `status` enum returned by cmd handlers. */
+  STATUS_OK: 'ok',
+  STATUS_ERROR: 'error',
+  /** Reconnect backoff (1s, 2s, 4s, ... capped at MAX_MS). */
+  RECONNECT_BASE_MS: 1_000,
+  RECONNECT_MAX_MS: 30_000,
+  /**
+   * chrome.storage.local key holding callback DeviceFrames that arrived
+   * while the WS was down. Drained on next open. Bounded by
+   * OUTBOX_MAX_SIZE; entries older than OUTBOX_MAX_AGE_MS are GC'd at
+   * drain time.
+   */
+  OUTBOX_STORAGE_KEY: 'coagent_server_device_outbox',
+  OUTBOX_MAX_SIZE: 200,
+  OUTBOX_MAX_AGE_MS: 7 * 24 * 60 * 60 * 1000,
+} as const;
+
+/**
+ * Coagent device 协议常量（legacy daemon-direct WS；M1.1/M1.2/M1.3）。
+ * T147 §A-E 起新路径走 COAGENT_SERVER_DEVICEBUS_PROTOCOL；这套常量保留
+ * 给 sync-cookies / publish-content 等模块过渡期复用（deriveHttpBaseFromWsUrl
+ * 等工具函数尚未抽离）。
  */
 export const COAGENT_DEVICE_PROTOCOL = {
   /** WS frame from daemon → extension. */

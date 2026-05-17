@@ -80,6 +80,19 @@ export interface ConnectionConfig {
   channelId?: string;
   /** Resolve 返回的 daemon_id 元数据（暂时不被运行时消费，方便 debug）。 */
   daemonId?: string;
+
+  // ── T147 §A-E v4 server-devicebus 协议字段 ─────────────────────────────
+  /**
+   * Coagent server `wss://{server}/devicebus` 基础 URL（不带 query；
+   * `session_id` / `token` 由客户端追加）。当此字段存在时，background
+   * 启用 v4 client（coagentServerDeviceClient）；缺失时仍走 legacy
+   * daemon-direct client 兼容旧部署。
+   */
+  serverWsEndpoint?: string;
+  /** server.devicebus 分配的 device_session_id。 */
+  deviceSessionId?: string;
+  /** server.devicebus 签发的 bearer token（24h TTL）。 */
+  deviceSessionToken?: string;
 }
 
 const DEFAULT_STATUS: ExtensionConnectionStatus = {
@@ -101,6 +114,10 @@ const DEFAULT_CONFIG: ConnectionConfig = {
   httpBase: DEFAULT_DAEMON_HTTP_BASE,
   channelId: '',
   daemonId: '',
+  // T147 §A-E：v4 字段默认空；popup / resolve API 在 issueSession 后写入。
+  serverWsEndpoint: '',
+  deviceSessionId: '',
+  deviceSessionToken: '',
 };
 
 export async function getStoredConnectionStatus(): Promise<ExtensionConnectionStatus> {

@@ -1,12 +1,18 @@
-// Background entrypoint — coagent xhs-extension service worker。
+// Background entrypoint — coagent xhs-extension service worker.
 //
 // M1.1-T2 起：
 //   - 启动 tools registry（沿用 fork 母本的 5 大类工具实现，复用）
-//   - 启动 coagent device WS 客户端（services/coagent-device.ts）
-//   - chrome.storage.local 保存 device 配置（serverUrl/apiKey/daemonHttpBase/deviceId/userId）
-//   - chrome.runtime.onMessage 仍提供 popup ↔ background 桥（连接 / 断开 / 状态查询 / 配置存取
-//     / 手动 cookie sync / 直接 EXECUTE_TOOL 调试）。旧 upstream backend 派发协议（HELLO/TOOL_CALL/
-//     V2 EVENT/TASK_CONTROL/PENDING_ACK 等）已切断。
+//   - 启动 device WS 客户端（services/coagent-device.ts 或 server-devicebus.ts）
+//   - chrome.storage.local 保存 device 配置
+//   - chrome.runtime.onMessage 仍提供 popup ↔ background 桥（连接 / 断开 / 状态查询
+//     / 配置存取 / 手动 cookie sync / 直接 EXECUTE_TOOL 调试）。
+//
+// T147 §A-E：根据 ConnectionConfig 选择 v4 server-devicebus client 或 legacy
+// daemon-direct client：当 `serverWsEndpoint + deviceSessionId +
+// deviceSessionToken` 三件套齐时走 v4；否则保留 legacy 路径兼容老配置。
+// 两条客户端都实现 `connect / disconnect / updateConfig / postCallback`
+// — `activeDeviceClient()` 在每次 dispatch 时按当前 config 选择，确保 popup
+// 切换配置后立刻生效，无需 SW 重启。
 
 import { initToolsRegistry, handleCallTool } from './tools';
 import {
@@ -17,6 +23,10 @@ import {
 } from './connection-state';
 import { cookieSyncService } from './tools/sync-cookies';
 import { coagentDeviceClient } from './services/coagent-device';
+import {
+  coagentServerDeviceClient,
+  type ServerDeviceConfig,
+} from './services/server-devicebus';
 import { resolveDeviceConfig } from './services/resolve';
 import { recoverPublishWaitStates } from './tools/publish-content';
 
@@ -44,6 +54,88 @@ type BackgroundRequest =
 
 let connectionConfig: ConnectionConfig;
 
+/**
+ * Tag identifying which device transport binding is in use for the
+ * currently-loaded ConnectionConfig:
+ *   - 'server' → T147 §A-E v4 path via `coagentServerDeviceClient` to
+ *     `wss://{server}/devicebus?session_id=...&token=...`
+ *   - 'daemon' → legacy M1.1/M1.2 daemon-direct path via
+ *     `coagentDeviceClient` to `ws://{daemon}/device/{id}?key=...`
+ *   - 'none'   → config incomplete; no client should connect.
+ */
+type DeviceTransport = 'server' | 'daemon' | 'none';
+
+function selectTransport(cfg: ConnectionConfig): DeviceTransport {
+  if (hasServerDeviceConfig(cfg)) return 'server';
+  if (hasLegacyDeviceConfig(cfg)) return 'daemon';
+  return 'none';
+}
+
+/** Translate the persistent ConnectionConfig into the v4 client's input. */
+function toServerDeviceConfig(cfg: ConnectionConfig): ServerDeviceConfig {
+  return {
+    wsEndpoint: (cfg.serverWsEndpoint ?? '').trim(),
+    sessionId: (cfg.deviceSessionId ?? '').trim(),
+    token: (cfg.deviceSessionToken ?? '').trim(),
+    channelId: (cfg.channelId ?? '').trim(),
+    autoReconnect: cfg.autoReconnect !== false,
+    userId: cfg.userId,
+    deviceId: cfg.deviceId,
+  };
+}
+
+/**
+ * applyClients pushes the latest ConnectionConfig into both transport
+ * clients (only one will actually be used by `activeDeviceClient()` —
+ * the inactive one stays idle). Calling this is idempotent.
+ */
+function applyClients(cfg: ConnectionConfig): void {
+  coagentDeviceClient.updateConfig(cfg);
+  coagentServerDeviceClient.updateConfig(toServerDeviceConfig(cfg));
+}
+
+/**
+ * activeDeviceClient returns the client paired with the currently
+ * configured transport. Both share the `connect / disconnect / postCallback`
+ * surface used by the rest of background. Callers MUST NOT cache the
+ * returned reference across config saves — `applyClients()` may flip
+ * the active transport on the next dispatch.
+ */
+function activeDeviceClient(): {
+  transport: DeviceTransport;
+  connect: () => Promise<{ success: boolean; error?: string }>;
+  disconnect: () => void;
+  postCallback: (
+    correlationId: string,
+    payload: {
+      status: 'ok' | 'error';
+      result: Record<string, unknown> | null;
+      error: { code: string; message: string } | null;
+    },
+  ) => Promise<void>;
+} {
+  const transport = selectTransport(connectionConfig);
+  if (transport === 'server') {
+    return {
+      transport,
+      connect: () => coagentServerDeviceClient.connect(),
+      disconnect: () => coagentServerDeviceClient.disconnect(),
+      postCallback: (id, p) => coagentServerDeviceClient.postCallback(id, p),
+    };
+  }
+  return {
+    transport,
+    connect: () => coagentDeviceClient.connect(),
+    disconnect: () => coagentDeviceClient.disconnect(),
+    postCallback: (id, p) => coagentDeviceClient.postCallback(id, p),
+  };
+}
+
+function disconnectAll(): void {
+  coagentDeviceClient.disconnect();
+  coagentServerDeviceClient.disconnect();
+}
+
 export default defineBackground(() => {
   console.log('🚀 Coagent xhs-extension Background script initialized');
 
@@ -52,22 +144,30 @@ export default defineBackground(() => {
   // 异步初始化，不阻塞 Service Worker 启动。
   (async () => {
     connectionConfig = await getConnectionConfig();
-    coagentDeviceClient.updateConfig(connectionConfig);
-    if (connectionConfig.autoReconnect && hasMinimalDeviceConfig(connectionConfig)) {
-      void coagentDeviceClient.connect();
+    applyClients(connectionConfig);
+    const transport = selectTransport(connectionConfig);
+    if (connectionConfig.autoReconnect && transport !== 'none') {
+      console.info('[Background] auto-connecting device transport', { transport });
+      void activeDeviceClient().connect();
     } else {
       console.log('[Background] device config incomplete, skip auto-connect', {
-        hasUrl: Boolean(connectionConfig.serverUrl),
-        hasKey: Boolean(connectionConfig.apiKey),
+        transport,
+        hasServerWs: Boolean(connectionConfig.serverWsEndpoint),
+        hasSessionId: Boolean(connectionConfig.deviceSessionId),
+        hasSessionToken: Boolean(connectionConfig.deviceSessionToken),
+        hasLegacyUrl: Boolean(connectionConfig.serverUrl),
+        hasLegacyKey: Boolean(connectionConfig.apiKey),
         hasDeviceId: Boolean(connectionConfig.deviceId),
       });
     }
     // R3-T4 FX9：MV3 SW evict 后，由 publish_wait:* storage 条目恢复
-    // publish-wait 收尾。recovery 走的 callback 复用 coagentDeviceClient
-    // 已有的 retry / outbox 兜底（无网时入队，下次连上自动 replay）。
+    // publish-wait 收尾。recovery 走 activeDeviceClient().postCallback —
+    // 当 v4 transport 启用时由 server-devicebus 直接走 WS 回 callback；
+    // legacy transport 走 HTTP 兜底 + outbox。两者底层都有 outbox，断网
+    // 期间入队，下次连上自动 replay。
     void recoverPublishWaitStates({
       postCallback: (correlationId, payload) =>
-        coagentDeviceClient.postCallback(correlationId, payload),
+        activeDeviceClient().postCallback(correlationId, payload),
     })
       .then((summaries) => {
         if (summaries.length > 0) {
@@ -104,21 +204,22 @@ export default defineBackground(() => {
           case 'CONNECT_DEVICE': {
             const patch = request.payload ?? {};
             connectionConfig = await saveConnectionConfig(patch);
-            coagentDeviceClient.updateConfig(connectionConfig);
-            if (!hasMinimalDeviceConfig(connectionConfig)) {
+            applyClients(connectionConfig);
+            const transport = selectTransport(connectionConfig);
+            if (transport === 'none') {
               sendResponse({
                 success: false,
                 error:
-                  'Device 配置不完整：需要 daemon WS URL、device api key、device id。',
+                  'Device 配置不完整：需要 server WS + session_id + token（v4），或 daemon WS + api key + device id（legacy）。',
               });
               break;
             }
-            const result = await coagentDeviceClient.connect();
+            const result = await activeDeviceClient().connect();
             sendResponse(result);
             break;
           }
           case 'DISCONNECT_DEVICE': {
-            coagentDeviceClient.disconnect();
+            disconnectAll();
             sendResponse({ success: true });
             break;
           }
@@ -129,12 +230,16 @@ export default defineBackground(() => {
           }
           case 'SAVE_CONNECTION_CONFIG': {
             connectionConfig = await saveConnectionConfig(request.payload);
-            // 配置变更：先断开旧连接，再用新配置（不自动重连，由 popup 触发）。
-            coagentDeviceClient.disconnect();
-            coagentDeviceClient.updateConfig(connectionConfig);
+            // 配置变更：先断开两条 transport，再统一 update（不自动重连，由 popup 触发）。
+            disconnectAll();
+            applyClients(connectionConfig);
+            const transport = selectTransport(connectionConfig);
             console.log('[Background] device config saved', {
-              serverUrl: connectionConfig.serverUrl,
-              hasKey: Boolean(connectionConfig.apiKey),
+              transport,
+              hasServerWs: Boolean(connectionConfig.serverWsEndpoint),
+              hasSessionId: Boolean(connectionConfig.deviceSessionId),
+              hasLegacyUrl: Boolean(connectionConfig.serverUrl),
+              hasLegacyKey: Boolean(connectionConfig.apiKey),
               deviceId: connectionConfig.deviceId,
               userId: connectionConfig.userId,
             });
@@ -162,8 +267,8 @@ export default defineBackground(() => {
             const patch: Partial<ConnectionConfig> = {
               coagentServerUrl: String(coagentServerUrl ?? '').trim(),
               apiKey: String(apiKey ?? '').trim(),
-              serverUrl: result.data.ws_url,        // canonical（被 coagent-device.ts 读）
-              wsUrl: result.data.ws_url,            // 别名（与描述里 storage shape 对齐）
+              serverUrl: result.data.ws_url,        // canonical（legacy daemon WS）
+              wsUrl: result.data.ws_url,            // 别名
               daemonHttpBase: result.data.http_url, // canonical（callback / sync-cookies）
               httpBase: result.data.http_url,       // 别名
               deviceId: result.data.device_id,
@@ -172,15 +277,16 @@ export default defineBackground(() => {
               daemonId: result.data.daemon_id,
             };
             connectionConfig = await saveConnectionConfig(patch);
-            // 切换连接：先断旧再用新配置 connect。
-            coagentDeviceClient.disconnect();
-            coagentDeviceClient.updateConfig(connectionConfig);
+            // 切换连接：先断旧再 update，再 connect。
+            disconnectAll();
+            applyClients(connectionConfig);
             console.info('[Background] device.resolve ok', {
+              transport: selectTransport(connectionConfig),
               deviceId: connectionConfig.deviceId,
               channelId: connectionConfig.channelId,
               daemonId: connectionConfig.daemonId,
             });
-            const connectResult = await coagentDeviceClient.connect();
+            const connectResult = await activeDeviceClient().connect();
             sendResponse({
               success: connectResult.success,
               error: connectResult.error,
@@ -225,10 +331,20 @@ function handleToolResult(payload: any) {
   });
 }
 
-function hasMinimalDeviceConfig(cfg: ConnectionConfig): boolean {
+/** v4 server-devicebus transport readiness: server endpoint + session_id + token. */
+function hasServerDeviceConfig(cfg: ConnectionConfig): boolean {
+  return Boolean(
+    (cfg.serverWsEndpoint ?? '').trim() &&
+      (cfg.deviceSessionId ?? '').trim() &&
+      (cfg.deviceSessionToken ?? '').trim(),
+  );
+}
+
+/** Legacy daemon-direct transport readiness: daemon WS + api key + device id. */
+function hasLegacyDeviceConfig(cfg: ConnectionConfig): boolean {
   return Boolean(
     (cfg.serverUrl ?? '').trim() &&
       (cfg.apiKey ?? '').trim() &&
-      (cfg.deviceId ?? '').trim()
+      (cfg.deviceId ?? '').trim(),
   );
 }
