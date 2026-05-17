@@ -672,6 +672,18 @@ func (d *Daemon) ChannelAgentTriggerCount(chID channel.ID) int64 {
 	return cr.channelAgentTriggers.Load()
 }
 
+// CurrentWorkerIDFor returns the id of the worker subprocess currently
+// alive for the channel, or "" when no worker is alive (manager not
+// configured, channel not owned, worker crashed). Test accessor for
+// the M1.6-T1 e2e reuse check.
+func (d *Daemon) CurrentWorkerIDFor(chID channel.ID) string {
+	cr, ok := d.channels[chID]
+	if !ok || cr.workerManager == nil {
+		return ""
+	}
+	return cr.workerManager.CurrentWorkerID()
+}
+
 // bootChannel wires a per-channel runtime + outbox pusher goroutine
 // and registers a teardown function with lifecycle.Unloader. Used by
 // both phase-3 cold-start AND the hot OnCreateChannel handler so the

@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +20,8 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/lifecycle"
 	"github.com/wanpengxie/ActOS/runtime/store"
 	"github.com/wanpengxie/ActOS/runtime/transit"
+	"github.com/wanpengxie/ActOS/runtime/worker"
+	"github.com/wanpengxie/ActOS/runtime/workerhost"
 )
 
 func now() int64 { return time.Now().UnixMilli() }
@@ -738,4 +742,249 @@ func TestDaemon_Phase3_ChannelAgent_Registered(t *testing.T) {
 	if got < 1 {
 		t.Fatalf("channel-agent trigger counter = %d, want >= 1 (gateway.Dispatch did not reach handler)", got)
 	}
+}
+
+// TestDaemon_Phase3_WorkerReply covers M1.6-T1 acceptance #2 + #3:
+//
+// (a) e2e — POST human.text → daemon harness chain → trigger gateway
+//     dispatch → worker spawn → worker emits agent.text reply → query
+//     channel.sqlite returns the reply row.
+//
+// (b) reuse — the second human.text in the same channel must hit the
+//     SAME spawned worker (PipeSpawner spawn counter stays at 1).
+//
+// PipeSpawner runs an in-process worker.Runtime wired to MockBridge so
+// the test stays hermetic (no need for ./bin/coagent-worker).
+func TestDaemon_Phase3_WorkerReply(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	dataDir := t.TempDir()
+	channelsDir := filepath.Join(dataDir, "channels")
+	chID := channel.ID("ch-worker")
+	chDir := filepath.Join(channelsDir, string(chID))
+	if err := os.MkdirAll(chDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(chDir, "channel.sqlite")
+	db, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := store.NewChannelLock(db)
+	if err := lock.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    chID,
+		FencingToken: 1, OwnerEpoch: 1,
+		DaemonID: "daemon-worker", DaemonEpoch: 1,
+		AcquiredAt: now(), RefreshedAt: now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	areg := store.NewActorRegistry(db)
+	if err := areg.Insert(ctx, actor.Record{
+		ID: "user:alice", Kind: message.SenderHuman,
+		DisplayName: "Alice", CreatedAt: now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	// PipeSpawner injects a fresh worker.Runtime + MockBridge per
+	// spawn. spawnCount is the reuse witness — it must stay 1 across
+	// two consecutive human.text frames.
+	spawnCount := new(atomic.Int64)
+	spawner := &workerhost.PipeSpawner{
+		WorkerFunc: func(ctx context.Context, leaseID string, in io.Reader, out io.Writer) error {
+			spawnCount.Add(1)
+			bridge := worker.NewMockBridge()
+			bridge.MaxTurns = 99 // big — manager re-use covers exit
+			bridge.EnvelopeIDFn = func(workerID string, turn int) string {
+				return "agent-reply-" + leaseID + "-" + itoa(turn)
+			}
+			rt, err := worker.New(worker.Config{
+				LeaseID:        leaseID,
+				In:             in,
+				Out:            out,
+				NowFn:          now,
+				HeartbeatEvery: time.Hour, // suppress; test is short
+				Bridge:         bridge,
+			})
+			if err != nil {
+				return err
+			}
+			return rt.Run(ctx)
+		},
+	}
+
+	const secret = "worker-secret"
+	cfg := runtime.DaemonConfig{
+		DataDir:           dataDir,
+		ChannelsDir:       channelsDir,
+		DaemonID:          "daemon-worker",
+		DaemonEpoch:       1,
+		UseMockBus:        true,
+		NowFn:             now,
+		HumanCallerSecret: []byte(secret),
+		SchedulerPeriod:   50 * time.Millisecond,
+		HeartbeatPeriod:   time.Second,
+		WorkerSpawner:     spawner,
+	}
+	d, err := runtime.AssembleDaemon(ctx, cfg)
+	if err != nil {
+		t.Fatalf("AssembleDaemon: %v", err)
+	}
+	if err := d.RunPhases(ctx); err != nil {
+		t.Fatalf("RunPhases: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+
+	bus := d.Bus()
+	server := bus.ServerSide()
+	// sendHuman returns the daemon-allocated envelope id (canonical hash)
+	// so the e2e check can look up the agent reply by parent_id.
+	sendHuman := func(t *testing.T, nonce string) string {
+		t.Helper()
+		ts := now()
+		hc := transit.HumanCaller{
+			UserID:           "u1",
+			ActorIDInChannel: "user:alice",
+			TS:               ts,
+			Nonce:            nonce,
+		}
+		hc.ServerToken = transit.SignHumanCaller(
+			[]byte(secret), string(chID), hc.UserID, hc.ActorIDInChannel, hc.TS, hc.Nonce,
+		)
+		body := transit.WriteMessageBody{
+			FrameID:     "frame-" + nonce,
+			ChannelID:   string(chID),
+			HumanCaller: hc,
+			EnvelopePartial: message.Envelope{
+				Type:       "human.text",
+				Kind:       message.KindEvent,
+				Payload:    json.RawMessage(`{"text":"hi-` + nonce + `"}`),
+				Audience:   []string{"*"},
+				Visibility: message.VisibilityPublic,
+				TS:         ts,
+			},
+		}
+		reqFrame, _ := transit.Encode("frame-srv-"+nonce,
+			daemonbus.FrameTypeControlWriteMessage,
+			"server", d.Transit().Epoch(), ts, body)
+		if err := server.SendToDaemon(ctx, reqFrame); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case <-deadline:
+				t.Fatal("write_message_ack timeout")
+			default:
+			}
+			recvCtx, recvCancel := context.WithTimeout(ctx, 2*time.Second)
+			f, err := server.RecvFromDaemon(recvCtx)
+			recvCancel()
+			if err != nil {
+				t.Fatalf("recv ack: %v", err)
+			}
+			if f.FrameType != daemonbus.FrameTypeControlWriteMessageAck {
+				continue
+			}
+			var ack transit.WriteMessageAckBody
+			if err := transit.DecodePayload(f, &ack); err != nil {
+				t.Fatal(err)
+			}
+			if !ack.Accepted {
+				t.Fatalf("ack reject: %s/%s", ack.RejectReason, ack.RejectDetail)
+			}
+			return ack.MessageID
+		}
+	}
+
+	// === First human envelope — should spawn worker + collect reply.
+	humanID1 := sendHuman(t, "n1")
+	waitAgentReply(t, ctx, dbPath, humanID1)
+	if got := spawnCount.Load(); got != 1 {
+		t.Fatalf("after first trigger spawn count = %d want 1", got)
+	}
+	w1 := d.CurrentWorkerIDFor(chID)
+	if w1 == "" {
+		t.Fatal("worker id empty after first reply")
+	}
+
+	// === Second human envelope — same worker reused.
+	humanID2 := sendHuman(t, "n2")
+	waitAgentReply(t, ctx, dbPath, humanID2)
+	if got := spawnCount.Load(); got != 1 {
+		t.Fatalf("after second trigger spawn count = %d want 1 (worker should be reused)", got)
+	}
+	if w2 := d.CurrentWorkerIDFor(chID); w2 != w1 {
+		t.Errorf("worker id changed across triggers: %q → %q", w1, w2)
+	}
+}
+
+// waitAgentReply polls the channel sqlite for any agent.text envelope
+// whose parent_id matches the supplied human envelope id. Times out at
+// 5s — the spawn + IPC round-trip is ~50ms in CI; 5s buys headroom.
+func waitAgentReply(t *testing.T, ctx context.Context, dbPath string, parentID string) {
+	t.Helper()
+	db, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("reopen sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	deadline := time.Now().Add(5 * time.Second)
+	const q = `SELECT id, sender_id, COALESCE(parent_id,'')
+	             FROM messages
+	            WHERE type='agent.text' AND parent_id=?`
+	for time.Now().Before(deadline) {
+		row := db.QueryRowContext(ctx, q, parentID)
+		var id, sender, parent string
+		switch err := row.Scan(&id, &sender, &parent); {
+		case err == nil:
+			if sender != "agent:channel-agent" {
+				t.Fatalf("agent reply sender=%q want agent:channel-agent (id=%s)", sender, id)
+			}
+			return
+		case err == sql.ErrNoRows:
+			time.Sleep(30 * time.Millisecond)
+		default:
+			t.Fatalf("query agent reply: %v", err)
+		}
+	}
+	// Dump all messages for diagnosis before failing.
+	rows, derr := db.QueryContext(ctx, `SELECT id, type, sender_id, COALESCE(parent_id,'') FROM messages ORDER BY seq`)
+	if derr == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var id, typ, sender, parent string
+			_ = rows.Scan(&id, &typ, &sender, &parent)
+			t.Logf("  row: id=%s type=%s sender=%s parent=%s", id, typ, sender, parent)
+		}
+	}
+	t.Fatalf("agent.text reply for parent %q never appeared", parentID)
+}
+
+// itoa is a tiny helper to avoid pulling strconv just for the test's
+// envelope id generator (test files already import a fair stack).
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	buf := [20]byte{}
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
 }
