@@ -60,6 +60,39 @@ type DaemonConfig struct {
 	// PostBoot is invoked once phase 4 starts. May be nil. Used by
 	// tests to inspect state without racing with shutdown.
 	PostBoot func(ctx context.Context, d *Daemon) error
+
+	// OnChannelBoot is invoked at the tail of every per-channel boot
+	// (both phase-3 cold start and the hot OnCreateChannel path). cmd/
+	// daemon wires this to a framework.Manager constructor so adapters
+	// install per channel without the runtime package taking a
+	// dependency on adapters/**.
+	//
+	// May be nil — channels boot without adapter framework hosting.
+	// The returned teardown closure (when non-nil) runs on channel
+	// unload / daemon shutdown. Returning an error fails the boot and
+	// the channel is not added to the active map.
+	OnChannelBoot func(ctx context.Context, h ChannelHooks) (teardown func(context.Context) error, err error)
+
+	// ChannelTemplate is the static channel template hosted by this
+	// daemon. Currently consumed by bootstrap.Saga to seed extra
+	// actor_registry rows (e.g. tool:xhs-adapter for the xhs-creator
+	// template). T2 wires a fixed template; L4 will swap this for a
+	// template snapshot lookup.
+	ChannelTemplate ChannelTemplate
+}
+
+// ChannelTemplate is the daemon-side projection of an L4 channel
+// template snapshot. For M1.6 it carries only the actor_registry seeds
+// the bootstrap saga MUST insert before adapter framework Install runs.
+//
+// Empty template = no extra actors (channel still gets system +
+// initial members seeded by the saga base path).
+type ChannelTemplate struct {
+	// AdapterActorSeeds lists the tool actor rows the saga inserts in
+	// addition to system + initial members. Each row supplies enough
+	// fields for kernel/adapter.Manager.Install to find the actor with
+	// the right binding.
+	AdapterActorSeeds []actor.Record
 }
 
 // channelRuntime is the per-owned-channel set of seams the daemon
@@ -67,20 +100,72 @@ type DaemonConfig struct {
 // outbox pusher (for view-sync), actor registry (for write_message
 // caller-id resolution), message log (for long-pending scans),
 // trigger gateway (post-harness fan-out + future-message scheduler
-// scan), scheduler.Deliverer (per-actor handler registry — the actual
-// handler wiring lands with T4/T5 adapter framework).
+// scan), scheduler.Deliverer (per-actor handler registry — adapter
+// framework Manager registers Dispatch handlers here at boot via the
+// OnChannelBoot hook).
 type channelRuntime struct {
-	channelID channel.ID
-	db        *sql.DB
-	registry  *store.ActorRegistry
-	messages  *store.Messages
-	ledger    *store.Ledger
-	lock      *store.ChannelLock
-	outbox    *store.ViewSyncOutbox
-	chain     *harness.Chain
-	pusher    *transit.Pusher
-	deliverer *scheduler.Deliverer
-	gateway   *trigger.Gateway
+	channelID     channel.ID
+	db            *sql.DB
+	registry      *store.ActorRegistry
+	messages      *store.Messages
+	ledger        *store.Ledger
+	lock          *store.ChannelLock
+	outbox        *store.ViewSyncOutbox
+	chain         *harness.Chain
+	pusher        *transit.Pusher
+	deliverer     *scheduler.Deliverer
+	gateway       *trigger.Gateway
+	typeRegistry  *store.TypeRegistry
+	requestLookup *store.RequestLookup
+	teardown      func(context.Context) error
+}
+
+// ChannelHooks bundles the per-channel seams exposed to a daemon
+// composition root (cmd/daemon) via DaemonConfig.OnChannelBoot. Lets the
+// caller construct an adapter framework Manager + module set per
+// channel WITHOUT runtime/** taking a dependency on adapters/** (go-
+// arch-lint enforces runtime ↛ adapters).
+//
+// The composition root MAY return a teardown closure that the daemon
+// invokes on channel unload / shutdown — typically to call
+// framework.Manager.Shutdown.
+type ChannelHooks struct {
+	// ChannelID is the channel this hook is wiring.
+	ChannelID channel.ID
+
+	// DB is the channel-local sqlite handle. Same handle backing every
+	// store in this struct — exposed for callers that need to construct
+	// new per-channel stores not already in this struct.
+	DB *sql.DB
+
+	// ActorRegistry is the channel-local actor.Registry (sqlite-backed).
+	ActorRegistry *store.ActorRegistry
+
+	// Messages is the channel-local message log.
+	Messages *store.Messages
+
+	// TypeRegistry is the channel-local sqlite type_registry. Implements
+	// both kernel/adapter.TypeRegistry (for framework.Manager.Install)
+	// AND runtime/harness.TypeRegistry (for chain step 4-8) — daemon
+	// already wired the HarnessView projection into HarnessChain.
+	TypeRegistry *store.TypeRegistry
+
+	// RequestLookup is the channel-local request lookup over Messages,
+	// satisfying kernel/adapter.RequestLookup.
+	RequestLookup *store.RequestLookup
+
+	// HarnessChain is the runtime/harness.Chain used by the daemon's
+	// trigger gateway + WriteMessage handler. Also the chain
+	// framework.Manager flows responses through.
+	HarnessChain *harness.Chain
+
+	// Deliverer is the per-channel scheduler.Deliverer — the
+	// composition root registers a HandlerFn per adapter actor id that
+	// calls framework.Manager.Dispatch.
+	Deliverer *scheduler.Deliverer
+
+	// NowFn returns unix-ms; same clock the daemon stamps writes with.
+	NowFn func() int64
 }
 
 // Daemon is the assembled cmd/daemon process. Exposed so tests can
@@ -179,7 +264,10 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 		return nil, err
 	}
 	saga, err := bootstrap.NewSaga(bootstrap.SagaConfig{
-		DaemonDB: daemonDB, ChannelsDir: cfg.ChannelsDir, NowFn: cfg.NowFn,
+		DaemonDB:          daemonDB,
+		ChannelsDir:       cfg.ChannelsDir,
+		NowFn:             cfg.NowFn,
+		AdapterActorSeeds: cfg.ChannelTemplate.AdapterActorSeeds,
 	})
 	if err != nil {
 		_ = daemonDB.Close()
@@ -423,7 +511,8 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 }
 
 // buildChannelRuntime opens the per-channel sqlite, constructs every
-// seam phase 3 needs (registry / messages / outbox / chain / pusher).
+// seam phase 3 needs (registry / messages / outbox / chain / pusher /
+// type_registry / request_lookup).
 func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChannel) (*channelRuntime, error) {
 	db, err := d.openChannelDB(ctx, lc.SQLitePath)
 	if err != nil {
@@ -439,9 +528,17 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 	ledger := store.NewLedgerWithLock(db, lock)
 	outbox := store.NewViewSyncOutbox(db, lc.ChannelID)
 
+	// T2 — sqlite type_registry doubles as the framework.TypeRegistry
+	// (adapter install path) and harness.TypeRegistry (harness step 4-8
+	// read path). Building both off the same row keeps Install + Write
+	// consistent.
+	typeRegistry := store.NewTypeRegistry(db, d.cfg.NowFn)
+	requestLookup := store.NewRequestLookup(messages, lc.ChannelID)
+
 	chain, err := harness.New(harness.Deps{
 		ChannelID:     lc.ChannelID,
 		ActorRegistry: registry,
+		TypeRegistry:  typeRegistry.HarnessView(),
 		Log:           messages,
 		NowMs:         d.cfg.NowFn,
 	})
@@ -461,8 +558,8 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 	}
 
 	// Trigger gateway — post-harness fan-out seam (FIX-T3 / L1 §5.1).
-	// Deliverer starts empty; T4/T5 adapter framework will register per-
-	// actor handlers as agents/tools spawn.
+	// Deliverer starts empty; OnChannelBoot wires per-adapter Dispatch
+	// handlers below.
 	deliverer := scheduler.NewDeliverer()
 	gw, err := trigger.New(trigger.Config{
 		Registry:  registry,
@@ -474,17 +571,19 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 	}
 
 	return &channelRuntime{
-		channelID: lc.ChannelID,
-		db:        db,
-		registry:  registry,
-		messages:  messages,
-		ledger:    ledger,
-		lock:      lock,
-		outbox:    outbox,
-		chain:     chain,
-		pusher:    pusher,
-		deliverer: deliverer,
-		gateway:   gw,
+		channelID:     lc.ChannelID,
+		db:            db,
+		registry:      registry,
+		messages:      messages,
+		ledger:        ledger,
+		lock:          lock,
+		outbox:        outbox,
+		chain:         chain,
+		pusher:        pusher,
+		deliverer:     deliverer,
+		gateway:       gw,
+		typeRegistry:  typeRegistry,
+		requestLookup: requestLookup,
 	}, nil
 }
 
@@ -499,6 +598,29 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 		return err
 	}
 	d.channels[lc.ChannelID] = cr
+
+	// T2 — OnChannelBoot hook lets cmd/daemon wire the adapter framework
+	// Manager + register Dispatch handlers on the Deliverer. Run BEFORE
+	// starting the pusher goroutine so a failing hook unwinds cleanly
+	// (no orphan goroutine).
+	if d.cfg.OnChannelBoot != nil {
+		teardown, hookErr := d.cfg.OnChannelBoot(ctx, ChannelHooks{
+			ChannelID:     lc.ChannelID,
+			DB:            cr.db,
+			ActorRegistry: cr.registry,
+			Messages:      cr.messages,
+			TypeRegistry:  cr.typeRegistry,
+			RequestLookup: cr.requestLookup,
+			HarnessChain:  cr.chain,
+			Deliverer:     cr.deliverer,
+			NowFn:         d.cfg.NowFn,
+		})
+		if hookErr != nil {
+			delete(d.channels, lc.ChannelID)
+			return fmt.Errorf("runtime: channel %s on_boot hook: %w", lc.ChannelID, hookErr)
+		}
+		cr.teardown = teardown
+	}
 
 	// Per-channel context so Unload can stop the pusher independently
 	// of the global d.runCtx.
@@ -516,11 +638,19 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 		}
 	}(cr.pusher, lc.ChannelID)
 
-	// Register the teardown: cancel pusher ctx + drop the runtime
-	// entry. Sqlite handle stays open — Close() reaps it at shutdown
-	// (unbind is not wipe; channels/<id>/ stays on disk).
+	// Register the teardown: run OnChannelBoot teardown, cancel pusher
+	// ctx + drop the runtime entry. Sqlite handle stays open — Close()
+	// reaps it at shutdown (unbind is not wipe; channels/<id>/ stays on
+	// disk).
 	chID := lc.ChannelID
 	d.unloader.Register(chID, func() error {
+		if cr.teardown != nil {
+			tctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := cr.teardown(tctx); err != nil {
+				fmt.Printf("runtime: channel %s teardown: %v\n", chID, err)
+			}
+			cancel()
+		}
 		pusherCancel()
 		delete(d.channels, chID)
 		d.booter.Unload(chID)
