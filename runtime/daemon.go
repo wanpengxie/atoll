@@ -57,6 +57,12 @@ type DaemonConfig struct {
 	// Defaults to 1s (L2 §3.7).
 	SchedulerPeriod time.Duration
 
+	// HeartbeatPeriod overrides the daemon → server control.heartbeat
+	// cadence. Defaults to transit.DefaultHeartbeatPeriod (15s). Without
+	// the sender, server placements drift to `stale` 90s after boot even
+	// when the daemon process is alive (M1.6-T1 acceptance #1).
+	HeartbeatPeriod time.Duration
+
 	// PostBoot is invoked once phase 4 starts. May be nil. Used by
 	// tests to inspect state without racing with shutdown.
 	PostBoot func(ctx context.Context, d *Daemon) error
@@ -103,6 +109,7 @@ type Daemon struct {
 	cursors    *transit.CursorTracker
 	dispatcher *transit.Dispatcher
 	schedTimer *scheduler.Timer
+	hbSender   *transit.HeartbeatSender
 
 	runCtx    context.Context
 	runCancel context.CancelFunc
@@ -418,8 +425,50 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 		}
 	}()
 
+	// 3.4 — control.heartbeat sender (M1.6-T1 part A). Without this
+	// ticker the daemon's OnHeartbeatAck receipt watermark works fine,
+	// but the server never sees a heartbeat → after 90s server.placements
+	// flips active → stale even though the daemon process is alive. The
+	// sender snapshot-reads d.channels each tick; that's the same
+	// lock-free pattern routeWrite uses, see daemon.go:848.
+	hb, err := transit.NewHeartbeatSender(transit.HeartbeatSenderConfig{
+		Client:   d.transit,
+		Period:   d.cfg.HeartbeatPeriod,
+		FrameID:  d.cfg.FrameIDGen,
+		Channels: d.snapshotOwnedChannels,
+	})
+	if err != nil {
+		return fmt.Errorf("runtime: build heartbeat sender: %w", err)
+	}
+	d.hbSender = hb
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		if err := hb.Run(d.runCtx); err != nil {
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, transit.ErrBusClosed) {
+				fmt.Printf("runtime: heartbeat sender exited: %v\n", err)
+			}
+		}
+	}()
+
 	d.ready.Store(true)
 	return nil
+}
+
+// snapshotOwnedChannels returns the current owned-channel ids. Used by
+// the heartbeat sender to populate HeartbeatBody.Channels each tick.
+// Same lock-free read pattern as routeWrite — the map is mutated only
+// by the dispatcher / phase-3 boot goroutines, never concurrently with
+// itself.
+func (d *Daemon) snapshotOwnedChannels() []channel.ID {
+	if len(d.channels) == 0 {
+		return nil
+	}
+	out := make([]channel.ID, 0, len(d.channels))
+	for id := range d.channels {
+		out = append(out, id)
+	}
+	return out
 }
 
 // buildChannelRuntime opens the per-channel sqlite, constructs every

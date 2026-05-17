@@ -478,3 +478,94 @@ func TestDaemon_Phase3_ShutdownNoLeak(t *testing.T) {
 		t.Fatal("Close blocked — goroutine leak")
 	}
 }
+
+// TestDaemon_Phase3_HeartbeatSender covers M1.6-T1 part A: after
+// startPhase3 runs, the daemon must periodically emit
+// control.heartbeat frames carrying the owned-channel snapshot. Without
+// this, server placements drift to `stale` 90s after boot (the bug T0
+// closing verification surfaced).
+func TestDaemon_Phase3_HeartbeatSender(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dataDir := t.TempDir()
+	channelsDir := filepath.Join(dataDir, "channels")
+	chID := channel.ID("ch-hb")
+	chDir := filepath.Join(channelsDir, string(chID))
+	if err := os.MkdirAll(chDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(chDir, "channel.sqlite")
+	db, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := store.NewChannelLock(db)
+	if err := lock.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    chID,
+		FencingToken: 1, OwnerEpoch: 1,
+		DaemonID: "daemon-hb", DaemonEpoch: 1,
+		AcquiredAt: now(), RefreshedAt: now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	cfg := runtime.DaemonConfig{
+		DataDir:         dataDir,
+		ChannelsDir:     channelsDir,
+		DaemonID:        "daemon-hb",
+		DaemonEpoch:     1,
+		UseMockBus:      true,
+		NowFn:           now,
+		SchedulerPeriod: time.Second,
+		HeartbeatPeriod: 25 * time.Millisecond,
+	}
+	d, err := runtime.AssembleDaemon(ctx, cfg)
+	if err != nil {
+		t.Fatalf("AssembleDaemon: %v", err)
+	}
+	if err := d.RunPhases(ctx); err != nil {
+		t.Fatalf("RunPhases: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+
+	server := d.Bus().ServerSide()
+
+	// Collect at least 2 heartbeat frames within the timeout. Other
+	// frame types may interleave (e.g. viewsync.push); we filter for
+	// the heartbeat ones.
+	recvCtx, recvCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer recvCancel()
+	got := 0
+	var firstBody transit.HeartbeatBody
+	for got < 2 {
+		f, err := server.RecvFromDaemon(recvCtx)
+		if err != nil {
+			t.Fatalf("only saw %d heartbeats before timeout: %v", got, err)
+		}
+		if f.FrameType != daemonbus.FrameTypeControlHeartbeat {
+			continue
+		}
+		var body transit.HeartbeatBody
+		if err := json.Unmarshal(f.Payload, &body); err != nil {
+			t.Fatalf("decode heartbeat payload: %v", err)
+		}
+		if got == 0 {
+			firstBody = body
+		}
+		got++
+	}
+
+	// The owned-channel snapshot must include the channel we seeded.
+	found := false
+	for _, id := range firstBody.Channels {
+		if id == chID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("heartbeat body.Channels=%v missing seeded channel %s", firstBody.Channels, chID)
+	}
+}
