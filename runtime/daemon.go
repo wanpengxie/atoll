@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	kadapter "github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
@@ -87,6 +88,17 @@ type DaemonConfig struct {
 	// unload / daemon shutdown. Returning an error fails the boot and
 	// the channel is not added to the active map.
 	OnChannelBoot func(ctx context.Context, h ChannelHooks) (teardown func(context.Context) error, err error)
+
+	// OnBindDeviceSession / OnUnbindDeviceSession (T147 §A-S2) handle
+	// the server → daemon device-session lifecycle frames. The composition
+	// root (cmd/daemon) wires these to the per-process SessionStore so
+	// adapter modules with binding=via_server_transit can mirror the
+	// server's authoritative device_sessions row. Both are nil-safe — when
+	// unset, the transit dispatcher synthesises an Accepted=false ack with
+	// Reason=BindRejectReasonHandlerMissing so the server can distinguish
+	// "daemon does not implement bind" from "daemon rejected bind".
+	OnBindDeviceSession   func(ctx context.Context, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody
+	OnUnbindDeviceSession func(ctx context.Context, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody
 
 	// ChannelTemplate is the static channel template hosted by this
 	// daemon. Currently consumed by bootstrap.Saga to seed extra
@@ -166,6 +178,22 @@ type channelRuntime struct {
 	// channel teardown calls manager.Close so worker subprocesses do
 	// not leak past placement reclaim. (M1.6-T1)
 	workerManager *workerhost.Manager
+
+	// deviceTransit is the per-channel adapter.DeviceTransit (T147 §A).
+	// One instance per channel sharing the daemon's *transit.Client so
+	// daemon→server device_transit.send frames carry the SendFrame's
+	// channel_id verbatim; inbound device_transit.recv frames are
+	// routed back here by handleDeviceTransitFrame (see daemon.go).
+	// Nil only when the daemon is constructed without a transit client
+	// (defensive — every production wiring sets one up).
+	deviceTransit *transit.DeviceTransit
+
+	// deviceCallback receives the decoded SendFrame the framework
+	// Manager turns into Module.OnExternalCallback. OnChannelBoot sets
+	// it (atomic.Value enables late binding after buildChannelRuntime
+	// has already wired the *transit.DeviceTransit). Reads are atomic;
+	// "" / nil means "no adapter wired yet — drop silently".
+	deviceCallback atomic.Value // func(ctx context.Context, frame kadapter.SendFrame) error
 }
 
 // ChannelHooks bundles the per-channel seams exposed to a daemon
@@ -216,6 +244,28 @@ type ChannelHooks struct {
 
 	// NowFn returns unix-ms; same clock the daemon stamps writes with.
 	NowFn func() int64
+
+	// DeviceTransit is the per-channel adapter.DeviceTransit handed to
+	// `via_server_transit` adapter modules (T147 §A). When the channel
+	// boots without a daemonbus transit client (e.g. tests that only
+	// exercise the harness write path), this is nil — the composition
+	// root MUST skip via_server_transit factories or use a fake. When
+	// non-nil, pass it verbatim into framework.ManagerConfig.DeviceTransit
+	// so the framework can satisfy adapter modules that declare
+	// Binding=via_server_transit at Install time.
+	DeviceTransit kadapter.DeviceTransit
+
+	// SetDeviceCallback wires the inbound device→daemon callback for
+	// this channel. The composition root calls it after constructing the
+	// framework.Manager so device_transit.recv frames routed back from
+	// the server land on Manager.OnExternalCallback(adapter, payload).
+	// The closure shape mirrors transit.DeviceTransitConfig.OnRecv
+	// (frame body, not raw bytes) so callers don't need to parse the
+	// adapter.SendFrame envelope themselves. Calling SetDeviceCallback
+	// more than once REPLACES the previous binding — that's the M1.6
+	// hot-swap escape hatch when a channel's adapter set changes.
+	// Passing nil clears the binding (frames are dropped silently).
+	SetDeviceCallback func(func(ctx context.Context, frame kadapter.SendFrame) error)
 }
 
 // Daemon is the assembled cmd/daemon process. Exposed so tests can
@@ -508,10 +558,25 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 		OnHeartbeatAck:          d.heartbeat.Handle(d.cfg.NowFn),
 		OnReclaimAccepted:       d.handleReclaimAccepted,
 		OnReclaimRejected:       d.handleReclaimRejected,
+		// T147 §A — central router for device_transit.* frames. Decodes
+		// the SendFrame, looks up the per-channel DeviceTransit by
+		// frame.ChannelID, and forwards via DispatchIncoming so the
+		// channel's framework.Manager fans out to Module.OnExternalCallback.
+		OnDeviceTransit: d.handleDeviceTransitFrame,
 	}
 	if handler != nil {
 		handlers.OnWriteMessage = func(ctx context.Context, _ daemonbus.Frame, body transit.WriteMessageBody) transit.WriteMessageAckBody {
 			return handler.Handle(ctx, body)
+		}
+	}
+	if d.cfg.OnBindDeviceSession != nil {
+		handlers.OnBindDeviceSession = func(ctx context.Context, _ daemonbus.Frame, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody {
+			return d.cfg.OnBindDeviceSession(ctx, body)
+		}
+	}
+	if d.cfg.OnUnbindDeviceSession != nil {
+		handlers.OnUnbindDeviceSession = func(ctx context.Context, _ daemonbus.Frame, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody {
+			return d.cfg.OnUnbindDeviceSession(ctx, body)
 		}
 	}
 
@@ -676,7 +741,7 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		nowFn:    d.cfg.NowFn,
 	}
 
-	return &channelRuntime{
+	cr := &channelRuntime{
 		channelID:      lc.ChannelID,
 		db:             db,
 		registry:       registry,
@@ -692,7 +757,37 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		typeRegistry:   typeRegistry,
 		requestLookup:  requestLookup,
 		channelAgentID: ChannelAgentID,
-	}, nil
+	}
+
+	// T147 §A — per-channel adapter.DeviceTransit. The instance shares
+	// the daemon's *transit.Client (single WS connection to the server
+	// daemonbus mux) and owns the inbound SendFrame fan-out. We MUST
+	// have a transit client at this point — phase 3 cold-start runs
+	// AFTER AssembleDaemon connected it. The OnRecv closure reads
+	// cr.deviceCallback at frame-receive time so OnChannelBoot can
+	// late-bind the callback after constructing its framework.Manager.
+	if d.transit != nil {
+		dt, err := transit.NewDeviceTransit(transit.DeviceTransitConfig{
+			Client:  d.transit,
+			FrameID: d.cfg.FrameIDGen,
+			OnRecv: func(ctx context.Context, frame kadapter.SendFrame) error {
+				cb, _ := cr.deviceCallback.Load().(func(context.Context, kadapter.SendFrame) error)
+				if cb == nil {
+					// No adapter wired yet — drop. Production wiring is
+					// expected to call SetDeviceCallback during
+					// OnChannelBoot, well before the first inbound recv.
+					return nil
+				}
+				return cb(ctx, frame)
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("device transit for %s: %w", lc.ChannelID, err)
+		}
+		cr.deviceTransit = dt
+	}
+
+	return cr, nil
 }
 
 // ensureChannelAgent guarantees the per-channel actor_registry contains
@@ -824,7 +919,7 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 	// Run BEFORE starting the pusher goroutine so a failing hook unwinds
 	// cleanly (no orphan goroutine).
 	if d.cfg.OnChannelBoot != nil {
-		teardown, hookErr := d.cfg.OnChannelBoot(ctx, ChannelHooks{
+		hooks := ChannelHooks{
 			ChannelID:     lc.ChannelID,
 			DB:            cr.db,
 			ActorRegistry: cr.registry,
@@ -838,7 +933,27 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 			HarnessChain: cr.wrappedChain,
 			Deliverer:    cr.deliverer,
 			NowFn:        d.cfg.NowFn,
-		})
+		}
+		// T147 §A — expose the per-channel DeviceTransit + an inbound
+		// callback hook so the composition root can build a
+		// via_server_transit-capable framework.Manager.
+		if cr.deviceTransit != nil {
+			hooks.DeviceTransit = cr.deviceTransit
+			// Capture cr in the closure (atomic.Value publishes the new
+			// callback to the OnRecv reader without taking a lock).
+			capturedCR := cr
+			hooks.SetDeviceCallback = func(cb func(context.Context, kadapter.SendFrame) error) {
+				if cb == nil {
+					// atomic.Value cannot store a typed nil — publish a
+					// non-nil sentinel that resolves to "drop" on the
+					// reader side.
+					capturedCR.deviceCallback.Store(func(context.Context, kadapter.SendFrame) error { return nil })
+					return
+				}
+				capturedCR.deviceCallback.Store(cb)
+			}
+		}
+		teardown, hookErr := d.cfg.OnChannelBoot(ctx, hooks)
 		if hookErr != nil {
 			delete(d.channels, lc.ChannelID)
 			return fmt.Errorf("runtime: channel %s on_boot hook: %w", lc.ChannelID, hookErr)
@@ -1219,6 +1334,52 @@ func (d *Daemon) routeWrite(_ context.Context, ch channel.ID) (transit.HarnessCh
 	return transitChainBridge{inner: cr.wrappedChain}, cr.registry, stamp, true
 }
 
+// handleDeviceTransitFrame is the central daemonbus dispatcher hook for
+// device_transit.* frames (T147 §A). The transit.Dispatcher routes any
+// CategoryDeviceTransit frame here; we decode the SendFrame envelope,
+// look up the per-channel runtime by frame.ChannelID, and hand the
+// frame to the channel's *transit.DeviceTransit for the recv-side
+// fan-out. Ack / Error frames don't carry channel_id at the kernel
+// level — for the M1.6 baseline (1 channel ↔ 1 device), we fan them
+// out to EVERY channel's DeviceTransit; each channel's correlation
+// tracker decides whether the frame matches an outstanding request.
+//
+// Unknown channels / disabled hooks are dropped silently — at-least-
+// once delivery means callers will retry if the daemon is not ready.
+func (d *Daemon) handleDeviceTransitFrame(ctx context.Context, frame daemonbus.Frame) error {
+	switch frame.FrameType {
+	case daemonbus.FrameTypeDeviceTransitSend, daemonbus.FrameTypeDeviceTransitRecv:
+		// SendFrame / recv share the same payload — decode once to
+		// extract the routing key (channel_id).
+		var payload kadapter.SendFrame
+		if err := transit.DecodePayload(frame, &payload); err != nil {
+			return fmt.Errorf("runtime: decode device_transit %s: %w", frame.FrameType, err)
+		}
+		cr, ok := d.channels[payload.ChannelID]
+		if !ok || cr.deviceTransit == nil {
+			// Unknown channel or no device transit wired — drop.
+			return nil
+		}
+		return cr.deviceTransit.DispatchIncoming(ctx, frame)
+	case daemonbus.FrameTypeDeviceTransitAck, daemonbus.FrameTypeDeviceTransitError:
+		// No channel_id on ack/error — fan out to every channel; each
+		// channel's DeviceTransit checks frame_id correlation locally.
+		// Returns the first non-nil error so observability still surfaces
+		// the failure; downstream channels are best-effort.
+		var firstErr error
+		for _, cr := range d.channels {
+			if cr.deviceTransit == nil {
+				continue
+			}
+			if err := cr.deviceTransit.DispatchIncoming(ctx, frame); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+	return nil
+}
+
 // transitChainBridge adapts a kernel/harness.Chain to the transit
 // package's HarnessChain shape (transit.HarnessWriteResult). Keeps the
 // transit package decoupled from kernel/harness while letting the
@@ -1244,26 +1405,57 @@ func (b transitChainBridge) Write(ctx context.Context, env *message.Envelope) (t
 }
 
 // scanLongPending is the per-tick callback the long-pending scheduler
-// invokes (registered as TimerConfig.Scan). It performs the FIX-T3
-// future-message drain (L1 §5.3): every row with `not_before <= now AND
-// delivered_at IS NULL` is fed through trigger.Gateway.Dispatch +
-// messages.MarkDelivered. Each per-channel error is logged and skipped
-// — the scheduler tick MUST NOT abort the daemon loop on a single bad
-// row (at-least-once contract, L1 §6.1).
+// invokes (registered as TimerConfig.Scan). It runs TWO passes per
+// owned channel — each pass is independent and per-channel errors are
+// logged-and-skipped so a single bad row cannot abort the daemon loop
+// (at-least-once contract, L1 §6.1):
 //
-// M1.5 long-pending fallback emit (§6.4) is still no-op: the trigger
-// Deliverer has no per-actor handlers registered, so Dispatch only
-// records the resolved audience. A later ticket replaces this no-op
-// with the system-side terminal_response emit path.
+//  1. FIX-T3 future-message drain (L1 §5.3) — every row with
+//     `not_before <= now AND delivered_at IS NULL` is fed through
+//     trigger.Gateway.Dispatch + messages.MarkDelivered. This makes
+//     `emit not_before=future` honour its delayed-delivery contract
+//     across daemon restarts (the persisted row remains scannable
+//     until MarkDelivered stamps it).
+//
+//  2. L1 §6.4 long-pending fallback (T147) — every request that has
+//     blown past its expires_at deadline without earning a terminal
+//     response gets a synthesised failed terminal whose reason depends
+//     on the receiver:
+//
+//     - audience[0] resolves to an active `agent` / `system` actor →
+//     reason='unanswered_timeout' (the agent silently dropped it).
+//     - audience[0] resolves to a `tool` actor → SKIP: the adapter
+//     framework F3 timer is the authoritative source for tool-
+//     receiver timeouts. Emitting from both paths would race the
+//     `ux_terminal_response_per_request` UNIQUE constraint and
+//     bombard the loser with a harness `terminal_duplicate` reject
+//     even though business semantics are identical. This is the
+//     ticket's MUTUAL-EXCLUSION rule.
+//     - audience[0] resolves to a `human` actor → SKIP: humans do not
+//     have an SLA in the baseline spec (channel-config-driven human
+//     timeouts are M1.7 scope).
+//     - audience[0] is missing from actor_registry, OR is soft-
+//     deregistered → reason='receiver_unavailable' (the request
+//     can never be answered because nobody is listening). NOTE: per
+//     L1 §6.4 this should fire IMMEDIATELY rather than waiting for
+//     expires_at. M1.6 simplifies by piggybacking on the expires_at
+//     scan; the standalone "deregister-time immediate emit" scan is
+//     deferred to a later ticket to keep T147 surface tight.
+//
+// The synthesised response uses the system actor as sender (the canonical
+// "harness wrote this on the channel's behalf" identity per L1 §3.2) and
+// a deterministic id derived from the request id + reason so re-firing
+// the scan idempotently dedupes via harness step 0.5.
 func (d *Daemon) scanLongPending(ctx context.Context, nowMs int64) error {
 	for chID, cr := range d.channels {
 		if cr.gateway == nil || cr.messages == nil {
 			continue
 		}
+
+		// Pass 1 — §5.3 future-message drain.
 		due, err := cr.messages.PendingDue(ctx, nowMs, 64)
 		if err != nil {
 			fmt.Printf("runtime: scheduler scan %s: %v\n", chID, err)
-			continue
 		}
 		for i := range due {
 			env := due[i]
@@ -1277,8 +1469,151 @@ func (d *Daemon) scanLongPending(ctx context.Context, nowMs int64) error {
 				fmt.Printf("runtime: scheduler mark delivered %s/%s: %v\n", chID, env.ID, err)
 			}
 		}
+
+		// Pass 2 — §6.4 long-pending fallback emit.
+		overdue, err := cr.messages.LongPendingRequests(ctx, nowMs, 64)
+		if err != nil {
+			fmt.Printf("runtime: scheduler long-pending %s: %v\n", chID, err)
+			continue
+		}
+		for i := range overdue {
+			req := overdue[i]
+			if err := d.emitLongPendingFallback(ctx, cr, &req, nowMs); err != nil {
+				fmt.Printf("runtime: scheduler long-pending emit %s/%s: %v\n", chID, req.ID, err)
+				continue
+			}
+		}
 	}
 	return nil
+}
+
+// longPendingPayload is the synthesised response payload the scheduler
+// writes for L1 §6.4 fallback. The shape MUST match adapter framework's
+// terminalPayload (status/reason/detail) so consumers reading either
+// path see one schema.
+type longPendingPayload struct {
+	Status string `json:"status"`
+	Reason string `json:"reason"`
+}
+
+// emitLongPendingFallback synthesises one failed terminal response for
+// an overdue request. Classification (skip vs. emit + which reason) is
+// driven by the receiver actor record. The write goes through the
+// channel's wrappedChain so the post-harness fan-out + MarkDelivered +
+// fencing-stamp invariants are honoured identically to the WriteMessage
+// entrypoint AND the adapter framework's Respond path.
+func (d *Daemon) emitLongPendingFallback(
+	ctx context.Context,
+	cr *channelRuntime,
+	req *message.Envelope,
+	nowMs int64,
+) error {
+	if len(req.Audience) == 0 {
+		// L1 §5.1 invariant: every request lands on at least one resolved
+		// audience entry by the time it's persisted. A zero-length slice
+		// here would be a harness bug — log and skip rather than fabricate
+		// a recipient.
+		return fmt.Errorf("request %s has empty audience", req.ID)
+	}
+	// M1.6 baseline: 1 channel ↔ 1 device, 1 receiver per request. The
+	// audience[0] entry is the canonical receiver for the SLA decision.
+	// Multi-receiver fan-out (audience=['*'] expansions) is M1.7 scope.
+	receiverID := actor.ActorID(req.Audience[0])
+
+	reason, emit, err := d.classifyLongPendingReason(ctx, cr, receiverID)
+	if err != nil {
+		return fmt.Errorf("classify %s: %w", req.ID, err)
+	}
+	if !emit {
+		return nil
+	}
+
+	payload, err := json.Marshal(longPendingPayload{Status: "failed", Reason: string(reason)})
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+	// Deterministic id keeps the scan idempotent across ticks: every
+	// re-fire builds the same id, hits harness step 0.5 dedupe, and
+	// short-circuits (canonical-hash-equal → Deduped=true).
+	envID := "response:" + req.ID + ":sys-" + string(reason)
+
+	correlationID := req.CorrelationID
+	if correlationID == "" {
+		correlationID = req.ID
+	}
+
+	env := &message.Envelope{
+		ID:            envID,
+		TS:            nowMs,
+		ChannelID:     req.ChannelID,
+		Sender:        message.Sender{Kind: message.SenderSystem, ID: string(actor.SystemActorID)},
+		Kind:          message.KindResponse,
+		Type:          req.Type,
+		Payload:       payload,
+		ParentID:      req.ID,
+		CorrelationID: correlationID,
+		Visibility:    req.Visibility,
+		Audience:      []string{req.Sender.ID},
+	}
+
+	// The scheduler is a system caller; stamp the harness context with
+	// the system actor + permit kind pre-fill (we set Kind=SenderSystem
+	// above so the registry-truth overwrite path remains exact-match).
+	chainCtx := harness.CtxWithCaller(ctx, harness.CallerContext{
+		ActorID:                 actor.SystemActorID,
+		ChannelID:               channel.ID(req.ChannelID),
+		AllowProvidedSenderKind: true,
+	})
+
+	res, err := cr.wrappedChain.Write(chainCtx, env)
+	if err != nil {
+		return fmt.Errorf("chain write: %w", err)
+	}
+	// terminal_duplicate is benign — another path (adapter framework
+	// timer racing the scheduler) won the One-Law-uniqueness; the
+	// scheduler's job is done either way.
+	if res.RejectReason != "" && res.RejectReason != message.HarnessTerminalDuplicate {
+		return fmt.Errorf("rejected: %s (%s)", res.RejectReason, res.RejectDetail)
+	}
+	return nil
+}
+
+// classifyLongPendingReason inspects the receiver's actor_registry row
+// and returns (reason, emit?, err) per the L1 §6.4 dispatch matrix.
+// See scanLongPending's pass-2 docstring for the rule set.
+func (d *Daemon) classifyLongPendingReason(
+	ctx context.Context,
+	cr *channelRuntime,
+	receiverID actor.ActorID,
+) (message.TerminalFailureReason, bool, error) {
+	rec, ok, err := cr.registry.Lookup(ctx, receiverID)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok {
+		// Receiver never registered → request will never be answered.
+		return message.TerminalReceiverUnavailable, true, nil
+	}
+	if rec.DeregisteredAt != 0 {
+		// Receiver soft-deregistered → request will never be answered.
+		return message.TerminalReceiverUnavailable, true, nil
+	}
+	switch rec.Kind {
+	case message.SenderTool:
+		// Adapter framework F3 timer owns this case — MUTUAL EXCLUSION.
+		return "", false, nil
+	case message.SenderHuman:
+		// Baseline: humans do not have an SLA in M1.6.
+		return "", false, nil
+	case message.SenderAgent, message.SenderSystem:
+		return message.TerminalUnansweredTimeout, true, nil
+	default:
+		// Unknown kind — defensive log + skip. The CHECK constraint on
+		// actor_registry.actor_kind makes this branch unreachable in
+		// production but we don't want a future kind expansion to
+		// accidentally emit the wrong reason.
+		return "", false, nil
+	}
 }
 
 // postHarnessChain wraps the bare runtime/harness.Chain with the per-

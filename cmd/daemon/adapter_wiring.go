@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
+	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/framework"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
@@ -14,6 +16,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/scheduler"
+	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
 // AdapterModuleFactory builds one adapter.Module per channel. The
@@ -75,6 +78,13 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 			TypeRegistry:  h.TypeRegistry,
 			HarnessChain:  adapterChain,
 			RequestLookup: h.RequestLookup,
+			// T147 §A — daemon supplies the per-channel DeviceTransit so
+			// the framework can satisfy `via_server_transit` modules at
+			// Install time (manager.installOne refuses such a module
+			// when DeviceTransit is nil). Safe to pass nil here when the
+			// channel hooks don't provide one (in_process-only channels);
+			// the manager only consults this field for matching modules.
+			DeviceTransit: h.DeviceTransit,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("framework.NewManager(%s): %w", h.ChannelID, err)
@@ -84,6 +94,29 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 		}
 		if err := mgr.BootRecoverTimers(ctx); err != nil {
 			return nil, fmt.Errorf("framework.Manager.BootRecoverTimers(%s): %w", h.ChannelID, err)
+		}
+
+		// T147 §A — wire the inbound device→daemon callback. Every
+		// via_server_transit adapter installed above gets its
+		// OnExternalCallback invoked when a device_transit.recv frame
+		// arrives for this channel. M1.6 baseline assumption: 1 channel
+		// ↔ 1 device adapter, so we hand the first match. Multi-adapter
+		// routing (by SessionStore.session_id → adapter map) is M1.7
+		// scope; the loop also covers it best-effort by trying each
+		// adapter and returning the first non-nil error.
+		if h.SetDeviceCallback != nil {
+			deviceAdapters := mgr.AdaptersByBinding(adapter.BindingViaServerTransit)
+			if len(deviceAdapters) > 0 {
+				h.SetDeviceCallback(func(ctx context.Context, frame adapter.SendFrame) error {
+					var firstErr error
+					for _, name := range deviceAdapters {
+						if err := mgr.OnExternalCallback(ctx, name, frame.Payload); err != nil && firstErr == nil {
+							firstErr = err
+						}
+					}
+					return firstErr
+				})
+			}
 		}
 
 		// Register one scheduler.Deliverer handler per installed module so
@@ -170,4 +203,132 @@ func XHSScaffoldFactory(cfg xhs.Config) AdapterModuleFactory {
 	return func(_ context.Context, _ runtime.ChannelHooks) (adapter.Module, error) {
 		return xhs.New(cfg), nil
 	}
+}
+
+// DeviceXHSFactory returns an AdapterModuleFactory that installs the
+// production xhs device adapter (adapters/device/xhs) configured to run
+// over the via_server_transit binding — daemon → server → device WS,
+// per M1.6-T3 §A. The supplied sessionStore is reused across every
+// channel (per-daemon mirror of server.device_sessions). When nil, a
+// fresh framework.InMemorySessionStore is created — sufficient for
+// development / e2e harnesses that don't yet wire sqlite mirroring (the
+// store lives only in daemon memory and is rebuilt from server-issued
+// control.bind_device_session frames after every restart).
+//
+// Composition root contract: the caller MUST swap XHSScaffoldFactory
+// for this one in the OnChannelBoot wiring AND ensure the channel's
+// actor_registry seeds the xhs adapter actor with binding=via_server_transit
+// (not in_process — the framework Install path otherwise rejects the
+// module per L2 §1.4.6 binding consistency).
+func DeviceXHSFactory(sessionStore deviceframework.SessionStore, cfg devicexhs.Config) AdapterModuleFactory {
+	return func(_ context.Context, _ runtime.ChannelHooks) (adapter.Module, error) {
+		effective := cfg
+		if effective.SessionStore == nil {
+			if sessionStore == nil {
+				sessionStore = deviceframework.NewInMemorySessionStore()
+			}
+			effective.SessionStore = sessionStore
+		}
+		return devicexhs.New(effective)
+	}
+}
+
+// DeviceXHSActorSeed returns the actor_registry seed row for the xhs
+// device adapter using the via_server_transit binding. Counterpart to
+// adapters/xhs.DefaultActorSeed (which seeds the in_process scaffold).
+// cmd/daemon plugs the result into ChannelTemplate.AdapterActorSeeds
+// when swapping the in-process scaffold for the real device adapter.
+func DeviceXHSActorSeed() actor.Record {
+	return actor.Record{
+		ID:      devicexhs.DefaultAdapterActorID,
+		Kind:    message.SenderTool,
+		Binding: actor.BindingViaServerTransit,
+	}
+}
+
+// DeviceSessionBinder couples a shared framework.SessionStore with the
+// daemon-level control.bind_device_session / control.unbind_device_session
+// handlers (T147 §A-S2 phase-4b). cmd/daemon constructs one binder per
+// process: the store is shared across every channel (per-channel routing
+// happens by DeviceSession.ChannelID), and the handlers map bind / unbind
+// frames into Upsert / Delete calls.
+//
+// Wire the binder via:
+//
+//	binder := NewDeviceSessionBinder(deviceframework.NewInMemorySessionStore())
+//	cfg.OnBindDeviceSession   = binder.OnBind
+//	cfg.OnUnbindDeviceSession = binder.OnUnbind
+//	cfg.OnChannelBoot         = wireAdapterFramework(
+//	    DeviceXHSFactory(binder.SessionStore(), devicexhs.Config{...}),
+//	)
+type DeviceSessionBinder struct {
+	store deviceframework.SessionStore
+}
+
+// NewDeviceSessionBinder wires a binder over the supplied store. When
+// store is nil a fresh InMemorySessionStore is allocated — sufficient
+// for development / e2e harnesses without sqlite mirroring.
+func NewDeviceSessionBinder(store deviceframework.SessionStore) *DeviceSessionBinder {
+	if store == nil {
+		store = deviceframework.NewInMemorySessionStore()
+	}
+	return &DeviceSessionBinder{store: store}
+}
+
+// SessionStore exposes the shared store so the composition root can
+// pass it into DeviceXHSFactory.
+func (b *DeviceSessionBinder) SessionStore() deviceframework.SessionStore {
+	return b.store
+}
+
+// OnBind handles control.bind_device_session. Maps the wire payload into
+// a framework.DeviceSession in state=ready (server-side state machine has
+// already INSERTed the row in pending and will MarkBound on ack), then
+// Upserts into the per-daemon SessionStore. Idempotent: re-running with
+// the same SessionID overwrites the row (T1.10 — replay safe).
+func (b *DeviceSessionBinder) OnBind(ctx context.Context, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody {
+	ack := transit.BindDeviceSessionAckBody{
+		FrameID:   body.FrameID,
+		SessionID: body.SessionID,
+	}
+	sess := deviceframework.DeviceSession{
+		SessionID:  body.SessionID,
+		ChannelID:  body.ChannelID,
+		DeviceID:   body.DeviceID,
+		DeviceType: body.DeviceType,
+		// Authoritative server row transitions pending → ready on this
+		// ack; the daemon mirror jumps straight to ready so adapter
+		// modules see the eventual state immediately. T1.10 allows the
+		// daemon to skip the pending intermediate because the daemon
+		// never observes "pending → ready" as two distinct events.
+		State:            deviceframework.StateReady,
+		BoundAt:          body.BoundAt,
+		TokenFingerprint: body.TokenFingerprint,
+		ExpiresAt:        body.ExpiresAt,
+	}
+	if err := b.store.Upsert(ctx, sess); err != nil {
+		ack.Reason = "session_store_upsert"
+		ack.Detail = err.Error()
+		return ack
+	}
+	ack.Accepted = true
+	return ack
+}
+
+// OnUnbind handles control.unbind_device_session. Deletes the mirror
+// row idempotently (missing row is not an error). The server's
+// authoritative row stays revoked / expired regardless of the daemon
+// response, so this is best-effort tear-down only.
+func (b *DeviceSessionBinder) OnUnbind(ctx context.Context, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody {
+	ack := transit.UnbindDeviceSessionAckBody{
+		FrameID:   body.FrameID,
+		SessionID: body.SessionID,
+	}
+	if err := b.store.Delete(ctx, body.SessionID); err != nil {
+		ack.Reason = "session_store_delete"
+		ack.Detail = err.Error()
+		return ack
+	}
+	ack.Accepted = true
+	return ack
 }

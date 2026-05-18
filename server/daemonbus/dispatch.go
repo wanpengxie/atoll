@@ -38,9 +38,19 @@ type Handlers struct {
 	// control.reclaim_rejected.
 	OnReclaim func(ctx context.Context, conn *Connection, req placement.ReclaimRequest) error
 
-	// OnDeviceTransitRecv handles device_transit.recv frames (device
-	// → server → daemon) — the gateway forwards to devicebus.
-	OnDeviceTransitRecv func(ctx context.Context, conn *Connection, frame daemonbus.Frame) error
+	// OnDeviceTransitSend handles device_transit.send frames pushed BY
+	// the daemon (daemon → server → device). The gateway decodes the
+	// adapter.SendFrame body and asks the devicebus.Service to relay
+	// it to the device WS keyed by SendFrame.DeviceSessionID.
+	//
+	// Naming note (T147 §A-S1): pre-T147 this slot was misnamed
+	// OnDeviceTransitRecv and registered against FrameTypeDeviceTransitRecv
+	// — but recv is the device → server direction (the gateway's
+	// ForwardDeviceFrame produces those after a device WS read), so the
+	// daemon-sent frame never reached this hook. Phase-4 renames + flips
+	// the case to FrameTypeDeviceTransitSend so the wire shape matches
+	// the daemon's transit.DeviceTransit.Send call.
+	OnDeviceTransitSend func(ctx context.Context, conn *Connection, frame daemonbus.Frame) error
 
 	// OnWriteMessageAck handles control.write_message_ack — gateway
 	// uses this to fulfil the human-caller-token write path.
@@ -137,9 +147,9 @@ func (c *Connection) Run(ctx context.Context, h Handlers) error {
 					return err
 				}
 			}
-		case daemonbus.FrameTypeDeviceTransitRecv:
-			if h.OnDeviceTransitRecv != nil {
-				if err := h.OnDeviceTransitRecv(ctx, c, frame); err != nil {
+		case daemonbus.FrameTypeDeviceTransitSend:
+			if h.OnDeviceTransitSend != nil {
+				if err := h.OnDeviceTransitSend(ctx, c, frame); err != nil {
 					return err
 				}
 			}

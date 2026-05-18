@@ -118,6 +118,17 @@ func createChannel(t *testing.T, ctx context.Context, d *runtime.Daemon, srv *tr
 func writeRequest(t *testing.T, ctx context.Context, d *runtime.Daemon, srv *transit.MockServer,
 	channelID, requestID, callerActor, envType string, payload []byte,
 ) transit.WriteMessageAckBody {
+	return writeRequestWithExpiry(t, ctx, d, srv, channelID, requestID, callerActor, envType, payload, nil)
+}
+
+// writeRequestWithExpiry is the same as writeRequest but lets the caller
+// set EnvelopePartial.ExpiresAt. Used by T147 acceptance C
+// (TestIntegration_LongPending_ToolReceiverSkippedByScheduler_F3Wins) to
+// seed a request whose expires_at lapses long before the adapter F3 timer
+// fires — proving the scheduler skip + F3-wins contract.
+func writeRequestWithExpiry(t *testing.T, ctx context.Context, d *runtime.Daemon, srv *transit.MockServer,
+	channelID, requestID, callerActor, envType string, payload []byte, expiresAt *int64,
+) transit.WriteMessageAckBody {
 	t.Helper()
 	ts := nowMs()
 	hc := transit.HumanCaller{
@@ -143,8 +154,9 @@ func writeRequest(t *testing.T, ctx context.Context, d *runtime.Daemon, srv *tra
 			// trigger.Gateway audience-expand sees the explicit list (Private
 			// would short-circuit Resolve to nil per L1 §5.1 visibility
 			// filter and the adapter would never be dispatched).
-			TS:     ts,
-			Sender: message.Sender{ID: callerActor},
+			TS:        ts,
+			Sender:    message.Sender{ID: callerActor},
+			ExpiresAt: expiresAt,
 		},
 	}
 	reqFrame, err := transit.Encode("frame-srv-write-"+requestID,
@@ -431,5 +443,93 @@ func TestIntegration_XhsPublish_TimerEmitsAdapterDefaultTimeout(t *testing.T) {
 	}
 	if payload["reason"] != string(message.TerminalAdapterDefaultTimeout) {
 		t.Errorf("payload.reason=%v want %s", payload["reason"], message.TerminalAdapterDefaultTimeout)
+	}
+}
+
+// countResponses returns the number of `kind='response' AND parent_id=requestID`
+// rows in the channel sqlite. Used by the acceptance C test below to assert
+// the long-pending scheduler did NOT double-emit alongside the adapter F3
+// timer.
+func countResponses(t *testing.T, db *sql.DB, requestID string) int {
+	t.Helper()
+	var n int
+	err := db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM messages WHERE parent_id=? AND kind='response'`, requestID).Scan(&n)
+	if err != nil {
+		t.Fatalf("count responses: %v", err)
+	}
+	return n
+}
+
+// TestIntegration_LongPending_ToolReceiverSkippedByScheduler_F3Wins covers
+// T147 acceptance C — the合并 ticket 价值: 当 xhs.publish 请求 envelope
+// expires_at 早于 adapter framework F3 deadline 时，scheduler 扫到
+// audience=tool:xhs-adapter MUST skip（receiver-kind=tool 分支），由
+// framework F3 timer 兜底 emit reason=adapter_default_timeout，确保 The
+// One Law 单一终态 + 没有 terminal_duplicate.
+//
+// Wall-clock budget:
+//
+//	t=0      seed request with expires_at = now+200ms; adapter MaxPendingMs=1500ms
+//	t=600ms  poll: must be ZERO response rows (scheduler 已扫多次，tool skip)
+//	t≈1.5s   framework F3 emits failed reason=adapter_default_timeout
+//	t<4s     final poll asserts exactly ONE terminal response with the
+//	         adapter timeout reason.
+func TestIntegration_LongPending_ToolReceiverSkippedByScheduler_F3Wins(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	d, srv, channelsDir := startIntegrationDaemon(t, ctx, integDaemonOpts{
+		XHSConfig: xhs.Config{
+			SkipRespond:  true,
+			MaxPendingMs: 1500, // F3 deadline ~1.5s after Handle
+		},
+		SchedulerPeriod: 30 * time.Millisecond, // aggressive scan loop
+	})
+	defer func() { _ = d.Close() }()
+
+	const channelID = "ch-integ-join"
+	createChannel(t, ctx, d, srv, channelID, []placement.InitialMember{
+		{ActorIDInChannel: "user:alice", Kind: "human"},
+	})
+
+	const requestID = "req-join-1"
+	expiresAt := nowMs() + 200 // expires well before MaxPendingMs deadline
+	ack := writeRequestWithExpiry(t, ctx, d, srv, channelID, requestID,
+		"user:alice", xhs.TypePublish, []byte(`{"title":"slow"}`), &expiresAt)
+	if !ack.Accepted {
+		t.Fatalf("write_message rejected: %s", ack.RejectReason)
+	}
+
+	_, db := openChannelMessages(t, channelsDir, channelID)
+	defer func() { _ = db.Close() }()
+
+	// 1) Mid-flight check at 600ms: expires_at lapsed long ago, scheduler
+	//    has scanned ~20 times (period=30ms), MaxPendingMs not yet hit.
+	//    There MUST be no response row — tool-skip branch holds.
+	time.Sleep(600 * time.Millisecond)
+	if c := countResponses(t, db, ack.MessageID); c != 0 {
+		t.Fatalf("scheduler emitted %d terminal(s) before F3 fired — tool-skip branch broken", c)
+	}
+
+	// 2) Adapter F3 timer eventually fires. Poll up to 5s.
+	resp := pollResponse(t, db, ack.MessageID, 5*time.Second)
+	var payload map[string]any
+	_ = json.Unmarshal(resp.Payload, &payload)
+	if payload["status"] != "failed" {
+		t.Errorf("payload.status=%v want failed", payload["status"])
+	}
+	if payload["reason"] != string(message.TerminalAdapterDefaultTimeout) {
+		t.Errorf("payload.reason=%v want %s", payload["reason"], message.TerminalAdapterDefaultTimeout)
+	}
+
+	// 3) After F3 fires, give the scheduler a few more ticks to confirm it
+	//    does NOT race in a second emit on top of the framework's terminal.
+	//    The One Law unique index guards this at the SQL layer, but a stray
+	//    emit would surface as a count > 1 OR a noisy terminal_duplicate
+	//    error in the daemon log — either way the test fails.
+	time.Sleep(200 * time.Millisecond)
+	if c := countResponses(t, db, ack.MessageID); c != 1 {
+		t.Errorf("terminal response count=%d want 1 — possible double-emit", c)
 	}
 }

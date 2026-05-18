@@ -16,11 +16,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	kadapter "github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/runtime/transit"
 	"github.com/wanpengxie/ActOS/server/catalog"
 	"github.com/wanpengxie/ActOS/server/daemonbus"
 	"github.com/wanpengxie/ActOS/server/devicebus"
@@ -97,26 +99,143 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			})
 			return err
 		},
-		OnDeviceTransitRecv: func(ctx context.Context, conn *daemonbus.Connection, frame kerneldaemonbus.Frame) error {
-			// frame.Payload carries the devicebus.DeviceFrame the
-			// adapter wants forwarded to a device.
-			var df devicebus.DeviceFrame
-			if err := json.Unmarshal(frame.Payload, &df); err != nil {
-				return err
+		OnDeviceTransitSend: func(ctx context.Context, conn *daemonbus.Connection, frame kerneldaemonbus.Frame) error {
+			// T147 §A-S1 — daemon serialises the adapter.SendFrame
+			// (kernel/adapter/transit.go) as the daemonbus payload, so
+			// we MUST decode the same shape. The earlier wiring decoded
+			// devicebus.DeviceFrame which silently drops fields the
+			// daemon includes (Direction enum, ExpiresAt) and yields an
+			// empty DeviceSessionID when the JSON keys differ — every
+			// adapter push got routed to "" and dropped.
+			var sf kadapter.SendFrame
+			if err := json.Unmarshal(frame.Payload, &sf); err != nil {
+				return fmt.Errorf("gateway: decode device_transit.send: %w", err)
+			}
+			// Translate to the device-WS wire shape (devicebus.DeviceFrame
+			// carries the simpler json used between server and the Chrome
+			// extension — see server/devicebus/connection.go).
+			df := devicebus.DeviceFrame{
+				Direction:       string(kadapter.DirectionToDevice),
+				DeviceSessionID: string(sf.DeviceSessionID),
+				ChannelID:       string(sf.ChannelID),
+				RequestID:       sf.RequestID,
+				CorrelationID:   sf.CorrelationID,
+				Payload:         sf.Payload,
+				ExpiresAt:       sf.ExpiresAt,
 			}
 			return a.devicebus.SendFrameToDevice(ctx, df.DeviceSessionID, df)
 		},
 	}
 }
 
+// Bind implements devicebus.BindNotifier (T147 §A-S2). After
+// devicebus.IssueSession allocates the row in state=pending, the HTTP
+// handler calls Bind so the daemon mirrors the row and acks; on a
+// successful Accepted=true ack the caller advances pending → ready.
+// Bind blocks until the ack arrives or the context is cancelled
+// (gin's request context).
+//
+// Errors:
+//   - daemon connection is missing → daemonbus.ErrDaemonNotRegistered
+//     wrapped with the daemon_id (HTTP 502 to client).
+//   - daemon ack reports Accepted=false → error string carries the
+//     daemon-supplied Reason / Detail so triage points at the rejecting
+//     edge.
+//   - send / decode failure → wrapped error.
+func (a *App) Bind(ctx context.Context, in devicebus.BindInput) error {
+	conn, ok := a.daemonbus.ConnectionFor(in.Session.DaemonID)
+	if !ok {
+		return fmt.Errorf("gateway: bind_device_session: daemon %s not connected", in.Session.DaemonID)
+	}
+	body := transit.BindDeviceSessionBody{
+		FrameID:          uuid.NewString(),
+		SessionID:        kadapter.DeviceSessionID(in.Session.ID),
+		ChannelID:        in.Session.ChannelID,
+		DeviceID:         in.Session.DeviceID,
+		DeviceType:       in.Session.DeviceType,
+		DaemonID:         in.Session.DaemonID,
+		TokenFingerprint: in.TokenFingerprint,
+		ExpiresAt:        in.Session.ExpiresAt,
+		BoundAt:          in.Session.CreatedAt,
+	}
+	ackFrame, err := conn.SendAndAwait(ctx, kerneldaemonbus.FrameTypeControlBindDeviceSession, body)
+	if err != nil {
+		return fmt.Errorf("gateway: bind_device_session send: %w", err)
+	}
+	var ack transit.BindDeviceSessionAckBody
+	if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
+		return fmt.Errorf("gateway: bind_device_session ack decode: %w", err)
+	}
+	if !ack.Accepted {
+		if ack.Reason == "" {
+			ack.Reason = "rejected"
+		}
+		if ack.Detail == "" {
+			return fmt.Errorf("gateway: bind_device_session rejected: %s", ack.Reason)
+		}
+		return fmt.Errorf("gateway: bind_device_session rejected: %s — %s", ack.Reason, ack.Detail)
+	}
+	return nil
+}
+
+// Unbind implements devicebus.BindNotifier — sends
+// control.unbind_device_session and waits for the ack. Daemon
+// disconnection is NOT an error (best-effort tear-down: a daemon that
+// reboots reloads its mirror from server-emitted bind frames anyway).
+// Any other failure is wrapped so the HTTP caller can surface a 502.
+func (a *App) Unbind(ctx context.Context, in devicebus.UnbindInput) error {
+	conn, ok := a.daemonbus.ConnectionFor(in.Session.DaemonID)
+	if !ok {
+		// Daemon offline — server row revoke proceeds; the daemon
+		// reloads from server on the next bind cycle.
+		return nil
+	}
+	body := transit.UnbindDeviceSessionBody{
+		FrameID:   uuid.NewString(),
+		SessionID: kadapter.DeviceSessionID(in.Session.ID),
+		ChannelID: in.Session.ChannelID,
+		Reason:    in.Reason,
+	}
+	ackFrame, err := conn.SendAndAwait(ctx, kerneldaemonbus.FrameTypeControlUnbindDeviceSession, body)
+	if err != nil {
+		return fmt.Errorf("gateway: unbind_device_session send: %w", err)
+	}
+	var ack transit.UnbindDeviceSessionAckBody
+	if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
+		return fmt.Errorf("gateway: unbind_device_session ack decode: %w", err)
+	}
+	if !ack.Accepted {
+		if ack.Reason == "" {
+			ack.Reason = "rejected"
+		}
+		return fmt.Errorf("gateway: unbind_device_session rejected: %s", ack.Reason)
+	}
+	return nil
+}
+
 // ForwardDeviceFrame implements devicebus.TransitForwarder — converts
-// a frame from a device into a daemonbus device_transit.recv frame.
+// a DeviceFrame received from the Chrome extension into a daemonbus
+// device_transit.recv frame whose body is the canonical
+// kernel/adapter.SendFrame shape. The daemon decodes the same struct on
+// the receiving side (runtime/transit.DeviceTransit.DispatchIncoming),
+// so the gateway translates the device-WS-flavoured DeviceFrame into
+// the SendFrame here rather than shipping two different schemas across
+// the daemonbus mux (T147 §A-S4).
 func (a *App) ForwardDeviceFrame(ctx context.Context, frame devicebus.DeviceFrame) error {
 	conn, err := a.daemonbus.ConnectionForChannel(ctx, frame.ChannelID)
 	if err != nil {
 		return err
 	}
-	_, err = conn.SendFrame(ctx, kerneldaemonbus.FrameTypeDeviceTransitRecv, frame)
+	sf := kadapter.SendFrame{
+		ChannelID:       channel.ID(frame.ChannelID),
+		DeviceSessionID: kadapter.DeviceSessionID(frame.DeviceSessionID),
+		Direction:       kadapter.DirectionFromDevice,
+		RequestID:       frame.RequestID,
+		CorrelationID:   frame.CorrelationID,
+		Payload:         frame.Payload,
+		ExpiresAt:       frame.ExpiresAt,
+	}
+	_, err = conn.SendFrame(ctx, kerneldaemonbus.FrameTypeDeviceTransitRecv, sf)
 	return err
 }
 

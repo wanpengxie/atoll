@@ -581,6 +581,28 @@ func (m *Manager) InstalledAdapters() []string {
 	return out
 }
 
+// AdaptersByBinding returns the sorted list of installed adapter names
+// whose Declaration.Binding equals the supplied binding. Composition
+// roots use this to discover which adapters need binding-specific wiring
+// — notably the via_server_transit binding's inbound callback hook (the
+// daemon's per-channel SetDeviceCallback dispatches device_transit.recv
+// frames to the Manager.OnExternalCallback of these adapters).
+//
+// Returns an empty slice (not nil) when no adapter matches so callers
+// can range over it without a nil check.
+func (m *Manager) AdaptersByBinding(b adapter.BindingKind) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]string, 0, len(m.modules))
+	for _, bm := range m.modules {
+		if bm.declaration.Binding == b {
+			out = append(out, bm.declaration.Name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func validateDeclaration(d adapter.Declaration) error {
 	if d.Name == "" {
 		return errors.New("framework: Declaration.Name required")

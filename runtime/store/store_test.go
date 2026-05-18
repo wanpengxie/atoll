@@ -224,6 +224,168 @@ func TestMessages_PendingDue_FutureMessagesGated(t *testing.T) {
 	}
 }
 
+// TestMessages_LongPendingRequests covers the L1 §6.4 scan filter that
+// powers the long-pending scheduler fallback. Each sub-case seeds a row
+// the daemon would synthesise a failed terminal for (or skip) and
+// asserts the SQL filter behaviour:
+//
+//   - request with expires_at IN THE FUTURE       → not yet due, skip.
+//   - request without expires_at                  → no SLA, skip.
+//   - request with expires_at=0 sentinel          → no SLA, skip.
+//   - request past expires_at, no response        → return (timeout).
+//   - request past expires_at, non-terminal resp  → return (partial does
+//     not satisfy The One Law, scheduler still emits the failed terminal).
+//   - request past expires_at, terminal resp on disk → already settled,
+//     skip (NOT EXISTS guard).
+//   - event past expires_at                       → skip (kind!=request).
+//
+// The limit clamp + monotonic ordering also asserted so the daemon
+// integration test can trust the slice order.
+func TestMessages_LongPendingRequests(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	msgs := store.NewMessages(db)
+	mkReq := func(id string, expiresAt *int64) *message.Envelope {
+		return &message.Envelope{
+			ID:         id,
+			TS:         1000,
+			TSReceived: 1000,
+			ChannelID:  "ch-1",
+			Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+			Kind:       message.KindRequest,
+			Type:       "xhs.publish",
+			Payload:    json.RawMessage(`{}`),
+			Visibility: message.VisibilityPublic,
+			Audience:   []string{"tool:xhs-adapter"},
+			ExpiresAt:  expiresAt,
+		}
+	}
+
+	pastDeadline := int64(900)
+	futureDeadline := int64(2000)
+	zeroDeadline := int64(0)
+
+	// Rows the scheduler must return at t=1500.
+	if _, err := msgs.Append(ctx, mkReq("req-overdue-orphan", &pastDeadline)); err != nil {
+		t.Fatalf("append req-overdue-orphan: %v", err)
+	}
+
+	// Row with a non-terminal interim response — still counts as
+	// overdue because The One Law cares about *terminal* responses.
+	partialReq := mkReq("req-overdue-partial", &pastDeadline)
+	if _, err := msgs.Append(ctx, partialReq); err != nil {
+		t.Fatalf("append req-overdue-partial: %v", err)
+	}
+	interim := &message.Envelope{
+		ID:         "resp-partial",
+		TS:         950,
+		TSReceived: 950,
+		ChannelID:  "ch-1",
+		Sender:     message.Sender{Kind: message.SenderTool, ID: "tool:xhs-adapter"},
+		Kind:       message.KindResponse,
+		Type:       "xhs.publish",
+		Payload:    json.RawMessage(`{"status":"in_progress"}`),
+		ParentID:   "req-overdue-partial",
+		Visibility: message.VisibilityPublic,
+		Audience:   []string{"agent:a"},
+	}
+	if _, err := msgs.Append(ctx, interim); err != nil {
+		t.Fatalf("append interim response: %v", err)
+	}
+
+	// Rows the scheduler must skip.
+	if _, err := msgs.Append(ctx, mkReq("req-future-deadline", &futureDeadline)); err != nil {
+		t.Fatalf("append req-future-deadline: %v", err)
+	}
+	if _, err := msgs.Append(ctx, mkReq("req-no-deadline", nil)); err != nil {
+		t.Fatalf("append req-no-deadline: %v", err)
+	}
+	if _, err := msgs.Append(ctx, mkReq("req-zero-deadline", &zeroDeadline)); err != nil {
+		t.Fatalf("append req-zero-deadline: %v", err)
+	}
+
+	// Settled-already row: terminal response sitting on disk → scheduler
+	// must skip the parent request even though its expires_at has passed.
+	if _, err := msgs.Append(ctx, mkReq("req-settled", &pastDeadline)); err != nil {
+		t.Fatalf("append req-settled: %v", err)
+	}
+	terminal := &message.Envelope{
+		ID:         "resp-settled-terminal",
+		TS:         960,
+		TSReceived: 960,
+		ChannelID:  "ch-1",
+		Sender:     message.Sender{Kind: message.SenderTool, ID: "tool:xhs-adapter"},
+		Kind:       message.KindResponse,
+		Type:       "xhs.publish",
+		Payload:    json.RawMessage(`{"status":"completed"}`),
+		ParentID:   "req-settled",
+		Visibility: message.VisibilityPublic,
+		Audience:   []string{"agent:a"},
+		IsTerminal: true,
+	}
+	if _, err := msgs.Append(ctx, terminal); err != nil {
+		t.Fatalf("append terminal response: %v", err)
+	}
+
+	// Event past expires_at must NOT be returned — only requests can
+	// be settled by a terminal response.
+	if _, err := msgs.Append(ctx, &message.Envelope{
+		ID:         "evt-overdue",
+		TS:         1000,
+		TSReceived: 1000,
+		ChannelID:  "ch-1",
+		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+		Kind:       message.KindEvent,
+		Type:       "noise.tick",
+		Payload:    json.RawMessage(`{}`),
+		Visibility: message.VisibilityPublic,
+		Audience:   []string{"*"},
+		ExpiresAt:  &pastDeadline,
+	}); err != nil {
+		t.Fatalf("append evt-overdue: %v", err)
+	}
+
+	due, err := msgs.LongPendingRequests(ctx, 1500, 64)
+	if err != nil {
+		t.Fatalf("LongPendingRequests: %v", err)
+	}
+	gotIDs := ids(due)
+	want := []string{"req-overdue-orphan", "req-overdue-partial"}
+	if len(gotIDs) != len(want) {
+		t.Fatalf("LongPendingRequests at t=1500: got %v want %v", gotIDs, want)
+	}
+	for i, id := range want {
+		if gotIDs[i] != id {
+			t.Errorf("[%d] got %s want %s (order matters — seq ASC contract)", i, gotIDs[i], id)
+		}
+	}
+
+	// Sanity: clamping limit=0 → default 64; passing limit=1 caps to 1.
+	if got, err := msgs.LongPendingRequests(ctx, 1500, 0); err != nil {
+		t.Fatalf("LongPendingRequests limit=0: %v", err)
+	} else if len(got) != 2 {
+		t.Errorf("LongPendingRequests limit=0 default expected 2, got %d", len(got))
+	}
+	if got, err := msgs.LongPendingRequests(ctx, 1500, 1); err != nil {
+		t.Fatalf("LongPendingRequests limit=1: %v", err)
+	} else if len(got) != 1 {
+		t.Errorf("LongPendingRequests limit=1 expected 1 row, got %d", len(got))
+	}
+
+	// Before any deadline passes — empty result.
+	if got, err := msgs.LongPendingRequests(ctx, 500, 64); err != nil {
+		t.Fatalf("LongPendingRequests early: %v", err)
+	} else if len(got) != 0 {
+		t.Errorf("LongPendingRequests at t=500 expected empty, got %v", ids(got))
+	}
+}
+
 // ids extracts envelope ids in slice order for diff-friendly assertions.
 func ids(rows []message.Envelope) []string {
 	out := make([]string, len(rows))

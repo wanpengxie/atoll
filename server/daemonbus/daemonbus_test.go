@@ -173,6 +173,59 @@ func TestDispatchPushAndAck(t *testing.T) {
 	<-runErr
 }
 
+// TestDispatch_DeviceTransitSend_RoutesToHandler covers the T147 §A-S1
+// routing fix: a daemon-sent device_transit.send frame must reach the
+// OnDeviceTransitSend hook (previously the dispatch case matched
+// FrameTypeDeviceTransitRecv — the wrong direction — so daemon pushes
+// were silently dropped on the server side).
+func TestDispatch_DeviceTransitSend_RoutesToHandler(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	svr, dmn := newPipePair()
+	conn := daemonbus.NewConnection(placement.DaemonID("d1"), 5, svr)
+
+	got := make(chan kerneldaemonbus.Frame, 1)
+	handlers := daemonbus.Handlers{
+		OnDeviceTransitSend: func(_ context.Context, _ *daemonbus.Connection, f kerneldaemonbus.Frame) error {
+			got <- f
+			return nil
+		},
+	}
+	go func() { _ = conn.Run(ctx, handlers) }()
+
+	body := map[string]any{
+		"channel_id":        "ch-A",
+		"device_session_id": "sess-1",
+		"direction":         "to_device",
+		"request_id":        "req-1",
+		"payload":           []byte(`{"cmd":"publish"}`),
+	}
+	raw, _ := json.Marshal(body)
+	if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+		FrameID:               "frame-send-1",
+		FrameType:             kerneldaemonbus.FrameTypeDeviceTransitSend,
+		DaemonID:              "d1",
+		DaemonConnectionEpoch: 5,
+		Payload:               raw,
+	}); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	select {
+	case f := <-got:
+		if f.FrameType != kerneldaemonbus.FrameTypeDeviceTransitSend {
+			t.Errorf("frame_type=%q want %q", f.FrameType, kerneldaemonbus.FrameTypeDeviceTransitSend)
+		}
+		if f.FrameID != "frame-send-1" {
+			t.Errorf("frame_id=%q", f.FrameID)
+		}
+	case <-ctx.Done():
+		t.Fatal("OnDeviceTransitSend never invoked — dispatch routing still broken")
+	}
+	_ = conn.Close()
+}
+
 // TestStaleEpochDropped ensures frames with an older epoch are
 // silently dropped (L2 §9.4).
 func TestStaleEpochDropped(t *testing.T) {

@@ -231,6 +231,83 @@ func (m *Messages) PendingDue(ctx context.Context, nowMs int64, limit int) ([]me
 	return out, nil
 }
 
+// LongPendingRequests returns up to `limit` request rows that have
+// blown past their expires_at deadline without earning a terminal
+// response. Used by the long-pending scheduler (L1 §6.4) to synthesise
+// the system-side failed terminal for receivers the trigger gateway
+// can no longer honour (deregistered actor, silent agent / system).
+//
+// Filter clause (uses ix_messages_expires + ix_messages_parent):
+//
+//   - kind='request'           — only requests can earn a terminal.
+//   - expires_at IS NOT NULL   — rows without an SLA never time out.
+//   - expires_at > 0           — 0 = "no deadline" sentinel (defensive).
+//   - expires_at <= nowMs      — deadline has actually passed.
+//   - is_terminal = 0          — defensive; requests should never carry
+//                                the terminal bit, but the schema allows
+//                                it and we don't want to re-emit on a
+//                                row that already settled.
+//   - NOT EXISTS (terminal response with parent_id=m.id) — The One Law
+//                                says exactly one terminal response per
+//                                request. If one is already on disk we
+//                                skip this row.
+//
+// `limit <= 0` clamps to 64 — matches PendingDue + the outbox PendingPage
+// convention so a single scheduler tick has bounded per-channel cost.
+// Ordered by seq ASC so the oldest backlog is drained first (matches L1
+// §6.4 monotonic processing semantics).
+//
+// NOTE: this query intentionally does NOT join actor_registry. The
+// caller (daemon scanLongPending) performs the receiver-kind classification
+// because the L1 §6.4 dispatch matrix (tool/human skip vs. agent/system
+// emit unanswered_timeout vs. deregistered emit receiver_unavailable)
+// requires the audience JSON parse and a registry lookup — pushing that
+// into SQL would couple the store to the receiver-policy table.
+func (m *Messages) LongPendingRequests(ctx context.Context, nowMs int64, limit int) ([]message.Envelope, error) {
+	if limit <= 0 {
+		limit = 64
+	}
+	const q = `SELECT id, ts, ts_received, channel_id,
+	                  sender_kind, sender_id, COALESCE(sender_name,''),
+	                  kind, type, payload,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs,
+	                  visibility, audience,
+	                  not_before, expires_at,
+	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
+	                  is_terminal, seq
+	             FROM messages m
+	             WHERE m.kind = 'request'
+	               AND m.expires_at IS NOT NULL
+	               AND m.expires_at > 0
+	               AND m.expires_at <= ?
+	               AND m.is_terminal = 0
+	               AND NOT EXISTS (
+	                 SELECT 1 FROM messages r
+	                  WHERE r.parent_id = m.id
+	                    AND r.kind = 'response'
+	                    AND r.is_terminal = 1
+	               )
+	             ORDER BY m.seq ASC LIMIT ?`
+	rows, err := m.db.QueryContext(ctx, q, nowMs, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: long pending requests: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []message.Envelope
+	for rows.Next() {
+		env, err := scanEnvelopeRows(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: long pending requests scan: %w", err)
+		}
+		out = append(out, env)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: long pending requests rows: %w", err)
+	}
+	return out, nil
+}
+
 // MarkDelivered stamps messages.delivered_at when it is still NULL. The
 // UPDATE is idempotent (rowsAffected=0 when the row was already
 // delivered or missing — caller may treat as no-op). Used by the

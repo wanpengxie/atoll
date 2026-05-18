@@ -140,6 +140,11 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	// Wire viewcache → daemon resync via daemonbus.
 	app.viewcache.SetResyncer(&busResyncer{bus: app.daemonbus, viewcache: app.viewcache})
 
+	// T147 §A-S2 — bind / unbind device session frames flow through the
+	// gateway's daemonbus client. devicebus's HTTP issue / revoke routes
+	// invoke the notifier so the daemon mirror stays in sync.
+	app.devicebus.SetBindNotifier(app)
+
 	app.engine = buildEngine(app)
 	return app, nil
 }
