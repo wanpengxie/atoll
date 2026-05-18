@@ -51,7 +51,38 @@ pnpm build                 # 生产构建：app/chrome-extension/.output/chrome-
 
 ## Daemon 配置
 
-### 主流程：1 个 api-key（推荐）
+### M1.6-T6 主流程：web UI 一键绑定（推荐）
+
+从 M1.6 开始，**正式 onboarding 路径是 web UI 端按钮**，不再要求用户手动填
+popup（popup 的 1-key 流程仍可用但标 deprecated）。流程：
+
+1. 用户在 coagent web UI 登录 → 进入 channel
+2. 点击 chat header 的 "绑定 Chrome extension"
+3. UI 通过 `chrome.runtime.sendMessage(EXTENSION_ID, ...)` 把 server 颁发的
+   `device_session_id + token` 注入 extension
+4. extension 写 `chrome.storage.local` + 接 server `/devicebus` WS
+
+构建侧配置（**生产环境必填**）：
+
+| Env (extension build) | 作用 | 示例 |
+|---|---|---|
+| `COAGENT_WEB_ORIGINS` | 写入 `manifest.externally_connectable.matches`，决定哪些 origin 可以调 `chrome.runtime.sendMessage` 到本扩展 | `https://app.coagent.dev/*,http://localhost:*/*` |
+
+| Env (UI build) | 作用 | 示例 |
+|---|---|---|
+| `VITE_COAGENT_EXTENSION_ID` | UI 调 `sendMessage` 时用的目标 extension id | `ngghjmpccpgmfgblbifmlmjnnpfknhka` |
+
+不设 `COAGENT_WEB_ORIGINS` 时，dev 默认只允许 `http://localhost:*/*` +
+`http://127.0.0.1:*/*`；prod 部署到真实域名时必须重新构建 extension 并把
+domain 加入此 env，否则 Chrome 直接拒绝 message 不会触发 background。
+
+安全双层：
+1. Chrome 在 manifest 层强制 origin 匹配；
+2. background 的 `external-bind.ts::isAllowedSenderOrigin` 二次校验
+   `sender.origin`，匹配名单与 manifest 同源（运行时从 `chrome.runtime
+   .getManifest().externally_connectable.matches` 读取）。
+
+### 旧流程：popup 1-key（已 deprecated；保留为 debug 路径）
 
 打开扩展 popup，主入口只填 2 项：
 
