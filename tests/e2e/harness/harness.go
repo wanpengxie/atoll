@@ -66,6 +66,8 @@ type Stack struct {
 	t   *testing.T
 	ctx context.Context
 
+	opts Options
+
 	RepoRoot    string
 	WorkDir     string
 	ServerDB    string
@@ -94,6 +96,20 @@ type Stack struct {
 	currentUser registeredUser
 	workspaces  map[string]string // name → id
 	channels    map[string]string // name → id
+
+	// extraDaemons covers tests that spawn additional daemons beyond the
+	// primary one (multi-daemon reclaim case). Map key is the daemon id.
+	extraDaemons map[string]*daemonProc
+}
+
+// daemonProc bundles the per-daemon process + log buffers so multi-
+// daemon tests can read either side's stderr on assertion failure.
+type daemonProc struct {
+	id      string
+	dataDir string
+	cmd     *exec.Cmd
+	stdout  *teeBuf
+	stderr  *teeBuf
 }
 
 // registeredUser is the result of a Register + Login pair.
@@ -109,6 +125,34 @@ type Options struct {
 	// log on stop. Default false (only logged on failure via t.Logf in
 	// Stop's defer). Set via E2E_VERBOSE=1.
 	Verbose bool
+
+	// DeviceAllowedOrigins forwards `--devicebus-allowed-origins` to the
+	// server. Tests that need /devicebus WS handshakes (mock extension)
+	// must pre-declare the chrome-extension://test-ext-id origin here.
+	// Empty (the default) keeps the deny-all production posture.
+	DeviceAllowedOrigins []string
+
+	// FastReconcile shrinks the server-side placement reconcile knobs so
+	// stale-eviction tests don't have to wait the 90s production
+	// timeout. Wires --heartbeat-timeout=2s --reconcile-grace=1s
+	// --create-timeout=5s when true. Default false (production timings).
+	FastReconcile bool
+
+	// SkipPrimaryDaemon=true starts the server alone — used by tests that
+	// drive multiple daemons themselves via StartDaemon. The default
+	// stack always includes a single primary daemon.
+	SkipPrimaryDaemon bool
+
+	// SharedDataDir overrides the per-stack tmpdir for daemon data. Used
+	// by tests that want a deliberate ordering (kill daemon A → boot
+	// daemon B against same data dir) so the boot reclaim path reads
+	// the existing channel locks. Empty (default) = isolated tmpdir.
+	SharedDataDir string
+
+	// ExtraDaemonEnv is appended to the daemon subprocess env. Lets a
+	// test enable e.g. COAGENT_MOCK_SCRIPT=xhs-publish without forking
+	// the harness — entries replace any default in lower precedence.
+	ExtraDaemonEnv []string
 }
 
 // Start launches a fresh stack with random ports + tmp data dir. The
@@ -134,7 +178,10 @@ func Start(t *testing.T, opts Options) *Stack {
 
 	work := t.TempDir()
 	serverDB := filepath.Join(work, "server.db")
-	dataDir := filepath.Join(work, "daemon-data")
+	dataDir := opts.SharedDataDir
+	if dataDir == "" {
+		dataDir = filepath.Join(work, "daemon-data")
+	}
 	channelsDir := filepath.Join(dataDir, "channels")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatalf("harness: mkdir data: %v", err)
@@ -146,26 +193,30 @@ func Start(t *testing.T, opts Options) *Stack {
 	t.Cleanup(cancel)
 
 	s := &Stack{
-		t:           t,
-		ctx:         ctx,
-		RepoRoot:    repoRoot,
-		WorkDir:     work,
-		ServerDB:    serverDB,
-		DataDir:     dataDir,
-		ChannelsDir: channelsDir,
-		ServerPort:  serverPort,
-		ServerURL:   fmt.Sprintf("http://127.0.0.1:%d", serverPort),
-		WSURL:       fmt.Sprintf("ws://127.0.0.1:%d/ws", serverPort),
-		workspaces:  make(map[string]string),
-		channels:    make(map[string]string),
-		stoppedCh:   make(chan struct{}),
+		t:            t,
+		ctx:          ctx,
+		opts:         opts,
+		RepoRoot:     repoRoot,
+		WorkDir:      work,
+		ServerDB:     serverDB,
+		DataDir:      dataDir,
+		ChannelsDir:  channelsDir,
+		ServerPort:   serverPort,
+		ServerURL:    fmt.Sprintf("http://127.0.0.1:%d", serverPort),
+		WSURL:        fmt.Sprintf("ws://127.0.0.1:%d/ws", serverPort),
+		workspaces:   make(map[string]string),
+		channels:     make(map[string]string),
+		stoppedCh:    make(chan struct{}),
+		extraDaemons: map[string]*daemonProc{},
 	}
 	s.client = buildClient(t)
 
 	s.startServer(serverBin)
 	s.waitHealthy()
-	s.startDaemon(daemonBin, workerBin)
-	s.waitDaemonRegistered()
+	if !opts.SkipPrimaryDaemon {
+		s.startDaemon(daemonBin, workerBin)
+		s.waitDaemonRegistered(daemonID)
+	}
 
 	t.Cleanup(func() { s.Stop() })
 	return s
@@ -177,10 +228,29 @@ func Start(t *testing.T, opts Options) *Stack {
 // calls are no-ops.
 func (s *Stack) Stop() {
 	s.once.Do(func() {
-		// Send SIGINT to both. Server has 10s shutdown budget, daemon
+		// Collect every daemon process (primary + extras) and the server
+		// into a single shutdown order: daemons first (so they get their
+		// disconnect frames out before the server tears down WS readers),
+		// then the server.
+		var all []*exec.Cmd
+		if s.daemon != nil {
+			all = append(all, s.daemon)
+		}
+		s.mu.Lock()
+		for _, dp := range s.extraDaemons {
+			if dp != nil && dp.cmd != nil {
+				all = append(all, dp.cmd)
+			}
+		}
+		s.mu.Unlock()
+		if s.server != nil {
+			all = append(all, s.server)
+		}
+
+		// Send SIGINT to all. Server has 10s shutdown budget, daemon
 		// drains its dispatcher in supervisor.Shutdown — give each
 		// 15s before SIGKILL.
-		for _, c := range []*exec.Cmd{s.daemon, s.server} {
+		for _, c := range all {
 			if c == nil || c.Process == nil {
 				continue
 			}
@@ -188,7 +258,7 @@ func (s *Stack) Stop() {
 		}
 
 		shutdownDeadline := time.Now().Add(15 * time.Second)
-		for _, c := range []*exec.Cmd{s.daemon, s.server} {
+		for _, c := range all {
 			if c == nil {
 				continue
 			}
@@ -206,10 +276,16 @@ func (s *Stack) Stop() {
 		// Surface logs on test failure so triage doesn't require
 		// re-running with E2E_VERBOSE=1.
 		if s.t.Failed() {
-			s.t.Logf("=== server stdout ===\n%s", s.serverStdout.String())
-			s.t.Logf("=== server stderr ===\n%s", s.serverStderr.String())
-			s.t.Logf("=== daemon stdout ===\n%s", s.daemonStdout.String())
-			s.t.Logf("=== daemon stderr ===\n%s", s.daemonStderr.String())
+			s.t.Logf("=== server stdout ===\n%s", safeBuf(s.serverStdout))
+			s.t.Logf("=== server stderr ===\n%s", safeBuf(s.serverStderr))
+			s.t.Logf("=== daemon stdout ===\n%s", safeBuf(s.daemonStdout))
+			s.t.Logf("=== daemon stderr ===\n%s", safeBuf(s.daemonStderr))
+			s.mu.Lock()
+			for id, dp := range s.extraDaemons {
+				s.t.Logf("=== daemon(%s) stdout ===\n%s", id, safeBuf(dp.stdout))
+				s.t.Logf("=== daemon(%s) stderr ===\n%s", id, safeBuf(dp.stderr))
+			}
+			s.mu.Unlock()
 		}
 	})
 }
@@ -239,6 +315,17 @@ func (s *Stack) startServer(bin string) {
 		"--db", s.ServerDB,
 		"--allow-dev-secrets",
 	}
+	if len(s.opts.DeviceAllowedOrigins) > 0 {
+		args = append(args, "--devicebus-allowed-origins",
+			strings.Join(s.opts.DeviceAllowedOrigins, ","))
+	}
+	if s.opts.FastReconcile {
+		args = append(args,
+			"--heartbeat-timeout=2s",
+			"--reconcile-grace=1s",
+			"--create-timeout=5s",
+		)
+	}
 	cmd := exec.CommandContext(s.ctx, bin, args...)
 	cmd.Env = append(os.Environ(),
 		"COAGENT_SESSION_SECRET="+sessionSecret,
@@ -259,10 +346,22 @@ func (s *Stack) startServer(bin string) {
 }
 
 func (s *Stack) startDaemon(daemonBin, workerBin string) {
+	s.daemonStdout, s.daemonStderr, s.daemon = s.spawnDaemon(daemonBin, workerBin, daemonID, s.DataDir, s.opts.ExtraDaemonEnv)
+}
+
+// spawnDaemon launches a coagent-daemon subprocess against the harness
+// server. id is the --daemon-id; dataDir is the per-daemon data root
+// (may be shared across daemons for the multi-daemon reclaim case);
+// extraEnv is appended after the base env so callers may override the
+// mock-bridge mode per-daemon.
+func (s *Stack) spawnDaemon(daemonBin, workerBin, id, dataDir string, extraEnv []string) (*teeBuf, *teeBuf, *exec.Cmd) {
 	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/daemonbus", s.ServerPort)
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		s.t.Fatalf("harness: mkdir daemon data %s: %v", dataDir, err)
+	}
 	args := []string{
-		"--data-dir", s.DataDir,
-		"--daemon-id", daemonID,
+		"--data-dir", dataDir,
+		"--daemon-id", id,
 		"--server-url", wsURL,
 		"--key", daemonSecret,
 		"--human-caller-secret", humanSecret,
@@ -271,8 +370,8 @@ func (s *Stack) startDaemon(daemonBin, workerBin string) {
 		"--replay-window-ms", "300000",
 	}
 	cmd := exec.CommandContext(s.ctx, daemonBin, args...)
-	cmd.Env = append(os.Environ(),
-		"COAGENT_DATA_DIR="+s.DataDir,
+	env := append(os.Environ(),
+		"COAGENT_DATA_DIR="+dataDir,
 		"COAGENT_LOG_LEVEL=info",
 		// Force every spawned mock worker into single-shot mode so the
 		// "exactly 1 agent.text per trigger with next_action=done"
@@ -280,14 +379,90 @@ func (s *Stack) startDaemon(daemonBin, workerBin string) {
 		"COAGENT_MOCK_SINGLE_SHOT=1",
 		"COAGENT_MOCK_REPLY_TEXT=pong",
 	)
-	s.daemonStdout = &teeBuf{}
-	s.daemonStderr = &teeBuf{}
-	cmd.Stdout = s.daemonStdout
-	cmd.Stderr = s.daemonStderr
+	env = append(env, extraEnv...)
+	cmd.Env = env
+	stdout := &teeBuf{}
+	stderr := &teeBuf{}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
-		s.t.Fatalf("harness: daemon start: %v", err)
+		s.t.Fatalf("harness: daemon %s start: %v", id, err)
 	}
-	s.daemon = cmd
+	return stdout, stderr, cmd
+}
+
+// StartExtraDaemon launches a second (or N-th) coagent-daemon against
+// the same server with the supplied id. The data dir is dataDir or, when
+// empty, a fresh per-daemon tmpdir under WorkDir. Returns the daemon id
+// so callers can pass it to RestartExtraDaemon / StopExtraDaemon. Wait
+// for it to register via WaitDaemonRegistered(id).
+//
+// When dataDir == s.DataDir the second daemon shares the channels/
+// volume with the primary daemon — which is exactly what multi-daemon
+// reclaim requires (the protocol assumes the channel sqlite files are
+// available to the reclaiming daemon).
+func (s *Stack) StartExtraDaemon(id, dataDir string) {
+	s.t.Helper()
+	daemonBin := filepath.Join(s.RepoRoot, "bin", "coagent-daemon")
+	workerBin := filepath.Join(s.RepoRoot, "bin", "coagent-worker")
+	if dataDir == "" {
+		dataDir = filepath.Join(s.WorkDir, "daemon-"+id)
+	}
+	stdout, stderr, cmd := s.spawnDaemon(daemonBin, workerBin, id, dataDir, nil)
+	s.mu.Lock()
+	s.extraDaemons[id] = &daemonProc{id: id, dataDir: dataDir, cmd: cmd, stdout: stdout, stderr: stderr}
+	s.mu.Unlock()
+	s.waitDaemonRegistered(id)
+}
+
+// StopExtraDaemon SIGINTs a previously-spawned extra daemon and removes
+// it from bookkeeping. Test cleanup calls Stop anyway, so this is only
+// needed when the case wants a deliberate kill ordering (e.g. crash
+// daemon-A before daemon-B picks up).
+func (s *Stack) StopExtraDaemon(id string, force bool) {
+	s.t.Helper()
+	s.mu.Lock()
+	dp, ok := s.extraDaemons[id]
+	if ok {
+		delete(s.extraDaemons, id)
+	}
+	s.mu.Unlock()
+	if !ok || dp.cmd == nil || dp.cmd.Process == nil {
+		return
+	}
+	sig := syscall.SIGINT
+	if force {
+		sig = syscall.SIGKILL
+	}
+	_ = dp.cmd.Process.Signal(sig)
+	done := make(chan error, 1)
+	go func() { done <- dp.cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		_ = dp.cmd.Process.Kill()
+		<-done
+	}
+}
+
+// CrashPrimaryDaemon force-kills the primary daemon (SIGKILL) so the
+// server-side placement reconciler must transition its placements to
+// stale via the heartbeat timeout instead of receiving a graceful
+// disconnect. Used by multi-daemon reclaim tests where we want the
+// stale-eviction path, not the clean-shutdown path.
+func (s *Stack) CrashPrimaryDaemon() {
+	s.t.Helper()
+	if s.daemon == nil || s.daemon.Process == nil {
+		return
+	}
+	_ = s.daemon.Process.Kill()
+	done := make(chan error, 1)
+	go func() { done <- s.daemon.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+	}
+	s.daemon = nil
 }
 
 func (s *Stack) waitHealthy() {
@@ -312,7 +487,7 @@ func (s *Stack) waitHealthy() {
 // expected daemonID row exists with key_hash filled in. That row is
 // only created when the daemon's WS handshake succeeds, so it is the
 // cheapest "daemon is up and connected" proxy.
-func (s *Stack) waitDaemonRegistered() {
+func (s *Stack) waitDaemonRegistered(id string) {
 	deadline := time.Now().Add(20 * time.Second)
 	db, err := sql.Open("sqlite", s.ServerDB)
 	if err != nil {
@@ -320,20 +495,42 @@ func (s *Stack) waitDaemonRegistered() {
 	}
 	defer func() { _ = db.Close() }()
 	for time.Now().Before(deadline) {
-		if s.daemon.ProcessState != nil && s.daemon.ProcessState.Exited() {
-			s.t.Fatalf("harness: daemon exited early\nstdout:\n%s\nstderr:\n%s",
-				s.daemonStdout.String(), s.daemonStderr.String())
+		// Identify which daemon process to watch: primary uses the well-
+		// known `daemonID`, extras live in extraDaemons.
+		var proc *exec.Cmd
+		var stdout, stderr *teeBuf
+		if id == daemonID {
+			proc = s.daemon
+			stdout, stderr = s.daemonStdout, s.daemonStderr
+		} else {
+			s.mu.Lock()
+			dp := s.extraDaemons[id]
+			s.mu.Unlock()
+			if dp != nil {
+				proc = dp.cmd
+				stdout, stderr = dp.stdout, dp.stderr
+			}
+		}
+		if proc != nil && proc.ProcessState != nil && proc.ProcessState.Exited() {
+			s.t.Fatalf("harness: daemon %s exited early\nstdout:\n%s\nstderr:\n%s",
+				id, safeBuf(stdout), safeBuf(stderr))
 		}
 		var got string
 		err := db.QueryRowContext(s.ctx,
-			`SELECT id FROM daemons WHERE id=? AND key_hash != ''`, daemonID).Scan(&got)
-		if err == nil && got == daemonID {
+			`SELECT id FROM daemons WHERE id=? AND key_hash != ''`, id).Scan(&got)
+		if err == nil && got == id {
 			return
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	s.t.Fatalf("harness: daemon never registered within 20s\nstdout:\n%s\nstderr:\n%s",
-		s.daemonStdout.String(), s.daemonStderr.String())
+	s.t.Fatalf("harness: daemon %s never registered within 20s", id)
+}
+
+func safeBuf(t *teeBuf) string {
+	if t == nil {
+		return ""
+	}
+	return t.String()
 }
 
 // ----------------------------------------------------------------------
@@ -486,27 +683,197 @@ func (s *Stack) DialPushWS() *websocket.Conn {
 	return ws
 }
 
+// IssueDeviceSessionResponse mirrors POST /api/channels/:chID/devices.
+type IssueDeviceSessionResponse struct {
+	DeviceSessionID string `json:"device_session_id"`
+	Token           string `json:"token"`
+	ExpiresAt       int64  `json:"expires_at"`
+}
+
+// IssueDeviceSession calls the gateway's device session issue endpoint
+// and returns the freshly minted session_id + raw token.  Wraps the four
+// step bind: (1) caller already knows the channel + daemon, (2) caller
+// uses the returned token to open a /devicebus WS handshake.
+func (s *Stack) IssueDeviceSession(channelID, deviceID, daemonIDArg string) IssueDeviceSessionResponse {
+	s.t.Helper()
+	if daemonIDArg == "" {
+		daemonIDArg = daemonID
+	}
+	var resp IssueDeviceSessionResponse
+	s.do("POST", "/api/channels/"+channelID+"/devices", map[string]any{
+		"device_id":   deviceID,
+		"device_type": "xhs",
+		"daemon_id":   daemonIDArg,
+	}, http.StatusCreated, &resp)
+	return resp
+}
+
+// PlacementRow captures the columns multi-daemon reclaim tests assert on.
+type PlacementRow struct {
+	ChannelID       string
+	DaemonID        string
+	State           string
+	OwnerEpoch      int64
+	ConnectionEpoch int64
+	LastHeartbeatAt int64
+}
+
+// GetPlacement reads the current channel_placements row directly from
+// server.db. Returns false when no row exists for that channel. Tests
+// poll this to watch the active → stale → active(daemon-B) transitions
+// during multi-daemon reclaim.
+func (s *Stack) GetPlacement(channelID string) (PlacementRow, bool) {
+	s.t.Helper()
+	db, err := sql.Open("sqlite", "file:"+s.ServerDB+"?mode=ro")
+	if err != nil {
+		s.t.Fatalf("harness: open server.db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var row PlacementRow
+	err = db.QueryRowContext(s.ctx, `
+		SELECT channel_id, daemon_id, state,
+		       owner_epoch,
+		       COALESCE(daemon_connection_epoch, 0),
+		       COALESCE(last_heartbeat_at, 0)
+		FROM channel_placements WHERE channel_id=?`, channelID).Scan(
+		&row.ChannelID, &row.DaemonID, &row.State,
+		&row.OwnerEpoch, &row.ConnectionEpoch, &row.LastHeartbeatAt,
+	)
+	if err == sql.ErrNoRows {
+		return PlacementRow{}, false
+	}
+	if err != nil {
+		s.t.Fatalf("harness: placement lookup: %v", err)
+	}
+	return row, true
+}
+
+// DeviceSessionRow captures the columns device session bind tests
+// assert on. token_hash is included so tests can verify it equals the
+// HMAC over the raw token they received from IssueDeviceSession.
+type DeviceSessionRow struct {
+	ID        string
+	DeviceID  string
+	ChannelID string
+	DaemonID  string
+	State     string
+	TokenHash string
+	ExpiresAt int64
+	CreatedAt int64
+}
+
+// GetDeviceSession reads the device_sessions row directly. Returns false
+// when no row exists. Used by case 2 to assert state=ready / active and
+// that the row carries the right channel + daemon ids.
+func (s *Stack) GetDeviceSession(sessionID string) (DeviceSessionRow, bool) {
+	s.t.Helper()
+	db, err := sql.Open("sqlite", "file:"+s.ServerDB+"?mode=ro")
+	if err != nil {
+		s.t.Fatalf("harness: open server.db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var row DeviceSessionRow
+	err = db.QueryRowContext(s.ctx, `
+		SELECT device_session_id, device_id, channel_id, daemon_id,
+		       state, token_hash, expires_at, created_at
+		FROM device_sessions WHERE device_session_id=?`, sessionID).Scan(
+		&row.ID, &row.DeviceID, &row.ChannelID, &row.DaemonID,
+		&row.State, &row.TokenHash, &row.ExpiresAt, &row.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return DeviceSessionRow{}, false
+	}
+	if err != nil {
+		s.t.Fatalf("harness: device session lookup: %v", err)
+	}
+	return row, true
+}
+
+// RestartServer SIGINTs the server process and starts a fresh one on the
+// same port + db path. Used by the view-sync gap drain test — daemon
+// must reconnect cleanly and replay any unacked view-sync outbox rows.
+func (s *Stack) RestartServer() {
+	s.t.Helper()
+	if s.server == nil || s.server.Process == nil {
+		s.t.Fatalf("harness: RestartServer called with no running server")
+	}
+	_ = s.server.Process.Signal(syscall.SIGINT)
+	done := make(chan error, 1)
+	go func() { done <- s.server.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		_ = s.server.Process.Kill()
+		<-done
+	}
+	serverBin := filepath.Join(s.RepoRoot, "bin", "coagent-server")
+	s.startServer(serverBin)
+	s.waitHealthy()
+	// daemonbus reconnect supervisor handles redial; wait for the
+	// daemon row to repopulate as a proxy for "WS handshake complete".
+	if s.daemon != nil {
+		s.waitDaemonRegistered(daemonID)
+	}
+}
+
+// DataDirFor returns the on-disk path for an arbitrary daemon's data
+// root. Used by tests that need to assert files exist under either the
+// primary or an extra daemon's tree.
+func (s *Stack) DataDirFor(id string) string {
+	s.t.Helper()
+	if id == daemonID {
+		return s.DataDir
+	}
+	s.mu.Lock()
+	dp, ok := s.extraDaemons[id]
+	s.mu.Unlock()
+	if !ok {
+		s.t.Fatalf("harness: unknown daemon %q", id)
+	}
+	return dp.dataDir
+}
+
+// ChannelSqlitePathFor returns the channel sqlite path under the named
+// daemon's data root. Useful for the multi-daemon reclaim case where
+// each daemon owns its own channels dir.
+func (s *Stack) ChannelSqlitePathFor(daemonName, channelID string) string {
+	return filepath.Join(s.DataDirFor(daemonName), "channels", channelID, "channel.sqlite")
+}
+
+// ServerURLBase returns the http base url (no trailing slash).
+func (s *Stack) ServerURLBase() string { return s.ServerURL }
+
+// DevicebusWSURL composes the wss/ws URL for the /devicebus endpoint
+// with the session_id + token query params.
+func (s *Stack) DevicebusWSURL(sessionID, token string) string {
+	return fmt.Sprintf("ws://127.0.0.1:%d/devicebus?session_id=%s&token=%s",
+		s.ServerPort, url.QueryEscape(sessionID), url.QueryEscape(token))
+}
+
 // RestartDaemon kills the daemon process and starts a fresh one with
 // the same data dir + daemon-id. Tests rely on this to assert the
 // reconnect path keeps placements healthy.
+//
+// When the primary daemon was already torn down (e.g. via
+// CrashPrimaryDaemon) the SIGINT step is skipped — the cold-start path
+// is what we want to exercise next.
 func (s *Stack) RestartDaemon() {
 	s.t.Helper()
-	if s.daemon == nil || s.daemon.Process == nil {
-		s.t.Fatalf("harness: RestartDaemon called with no running daemon")
-	}
-	_ = s.daemon.Process.Signal(syscall.SIGINT)
-	done := make(chan error, 1)
-	go func() { done <- s.daemon.Wait() }()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		_ = s.daemon.Process.Kill()
-		<-done
+	if s.daemon != nil && s.daemon.Process != nil {
+		_ = s.daemon.Process.Signal(syscall.SIGINT)
+		done := make(chan error, 1)
+		go func() { done <- s.daemon.Wait() }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			_ = s.daemon.Process.Kill()
+			<-done
+		}
 	}
 	daemonBin := filepath.Join(s.RepoRoot, "bin", "coagent-daemon")
 	workerBin := filepath.Join(s.RepoRoot, "bin", "coagent-worker")
 	s.startDaemon(daemonBin, workerBin)
-	s.waitDaemonRegistered()
+	s.waitDaemonRegistered(daemonID)
 }
 
 // ----------------------------------------------------------------------

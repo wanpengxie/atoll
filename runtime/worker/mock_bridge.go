@@ -41,6 +41,30 @@ const (
 	// known sentinel so test assertions don't depend on the default
 	// string.
 	EnvKeyMockReplyText = "COAGENT_MOCK_REPLY_TEXT"
+
+	// EnvKeyMockScript — when set to a known script name, the mock
+	// bridge switches its react path to that script's emission
+	// sequence. Today the only known value is "xhs-publish": when the
+	// trigger payload.text contains the substring "publish", the bridge
+	// emits a `tool:xhs-adapter`-addressed kind=request envelope of
+	// type=xhs.publish, lets the adapter framework respond, then emits
+	// the agent.text summary terminal. Any other trigger falls through
+	// to the default single-shot reply.
+	//
+	// Used by tests/e2e/ to exercise the full agent → adapter request /
+	// response chain without standing up a real LLM.
+	EnvKeyMockScript = "COAGENT_MOCK_SCRIPT"
+
+	// ScriptXHSPublish is the recognised value for EnvKeyMockScript that
+	// triggers the xhs.publish emission path.
+	ScriptXHSPublish = "xhs-publish"
+
+	// EnvKeyMockDeviceSessionID — when set, the xhs-publish script
+	// stamps this value into the request payload.device_session_id so
+	// the adapter can route the device_transit.send frame to the right
+	// extension session. The harness sets this after issuing a device
+	// session.
+	EnvKeyMockDeviceSessionID = "COAGENT_MOCK_DEVICE_SESSION_ID"
 )
 
 // MockBridge is the deterministic Bridge implementation cmd/worker
@@ -98,6 +122,10 @@ type MockBridge struct {
 	// SingleShotReplyText — payload.text value used in single-shot
 	// mode. Defaults to "pong" (env COAGENT_MOCK_REPLY_TEXT overrides).
 	SingleShotReplyText string
+
+	// Script names the active emission script. Empty = no script (use
+	// the default ReplyFn). Backed by env var COAGENT_MOCK_SCRIPT.
+	Script string
 
 	turns int
 }
@@ -160,6 +188,11 @@ func (m *MockBridge) applyDefaults() {
 				"next_action": "done",
 			})
 			return "agent.text", payload
+		}
+	}
+	if m.Script == "" {
+		if v := m.EnvLookup(EnvKeyMockScript); v != "" {
+			m.Script = v
 		}
 	}
 }
@@ -234,8 +267,14 @@ func (m *MockBridge) Run(ctx context.Context, client *IPCClient) error {
 	}
 }
 
-// react builds and writes the per-trigger reply envelope.
+// react builds and writes the per-trigger reply envelope. When a
+// script is active and the trigger matches the script's emission
+// trigger, the scripted emission path runs instead of the default
+// ReplyFn.
 func (m *MockBridge) react(ctx context.Context, client *IPCClient, in ipc.TriggerPayload) error {
+	if m.Script == ScriptXHSPublish && triggerMentionsPublish(in) {
+		return m.reactXHSPublish(ctx, client, in)
+	}
 	envType, payload := m.ReplyFn(in, m.turns+1)
 	env := message.Envelope{
 		ID:            m.EnvelopeIDFn(client.WorkerID(), m.turns+1),
@@ -247,6 +286,90 @@ func (m *MockBridge) react(ctx context.Context, client *IPCClient, in ipc.Trigge
 		Audience:      []string{"*"},
 		Payload:       payload,
 		CorrelationID: in.CorrelationID, // L1 propagation
+		ParentID:      in.Envelope.ID,
+		TS:            m.NowFn(),
+		TSReceived:    m.NowFn(),
+	}
+	if _, err := client.WriteMessage(ctx, env); err != nil {
+		return err
+	}
+	return nil
+}
+
+// triggerMentionsPublish returns true when the inbound envelope's
+// payload.text contains the substring "publish" (case-insensitive). The
+// xhs-publish script keys off this so a human POST like "请发一条小红书
+// publish foo bar" reproduces the production flow without needing the
+// LLM to do real NLP.
+func triggerMentionsPublish(in ipc.TriggerPayload) bool {
+	var body struct {
+		Text string `json:"text"`
+	}
+	_ = json.Unmarshal(in.Envelope.Payload, &body)
+	return containsFold(body.Text, "publish")
+}
+
+// containsFold is a tiny ASCII-case-insensitive substring check — kept
+// inline so the bridge doesn't pull in strings.ToLower allocations on
+// the hot trigger path.
+func containsFold(haystack, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		match := true
+		for j := 0; j < len(needle); j++ {
+			c1 := haystack[i+j]
+			c2 := needle[j]
+			if c1 >= 'A' && c1 <= 'Z' {
+				c1 += 'a' - 'A'
+			}
+			if c2 >= 'A' && c2 <= 'Z' {
+				c2 += 'a' - 'A'
+			}
+			if c1 != c2 {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+// reactXHSPublish emits a kind=request envelope addressed to
+// tool:xhs-adapter (type=xhs.publish). The framework F1-F8 chain on
+// the daemon side picks it up, dispatches via device transit, and the
+// adapter response surfaces as a separate envelope on the channel log.
+// Tests assert the request envelope alone — the response is
+// observable as a side-effect via the channel.sqlite messages table.
+//
+// No terminal agent.text is emitted from here: a separate post-
+// response summary would require the bridge to observe the response,
+// which the mock cannot today (no IPC for received envelopes). Tests
+// asserting on the agent.text terminal must POST a second human.text
+// trigger so the single-shot fallback runs.
+func (m *MockBridge) reactXHSPublish(ctx context.Context, client *IPCClient, in ipc.TriggerPayload) error {
+	body := map[string]any{
+		"title":   "hello",
+		"content": "world",
+	}
+	if sid := m.EnvLookup(EnvKeyMockDeviceSessionID); sid != "" {
+		body["device_session_id"] = sid
+	}
+	payload, _ := json.Marshal(body)
+	env := message.Envelope{
+		ID:            m.EnvelopeIDFn(client.WorkerID(), m.turns+1) + "-xhsreq",
+		ChannelID:     string(client.ChannelID()),
+		Type:          "xhs.publish",
+		Kind:          message.KindRequest,
+		Sender:        message.Sender{Kind: message.SenderAgent, ID: client.WorkerActorID()},
+		Visibility:    message.VisibilityPublic,
+		Audience:      []string{"tool:xhs-adapter"},
+		Payload:       payload,
+		CorrelationID: in.CorrelationID,
 		ParentID:      in.Envelope.ID,
 		TS:            m.NowFn(),
 		TSReceived:    m.NowFn(),
