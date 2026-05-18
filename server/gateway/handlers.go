@@ -461,10 +461,52 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
+
+	// M1.6-T5 phase-4: deserialize the daemon-side ack body so callers
+	// (coagent ask/emit/answer + downstream agents) receive the actual
+	// envelope.id / seq / dedupe / reject_reason rather than just the
+	// frame transport metadata. Best-effort: if the ack payload is the
+	// legacy "no body" shape, fall through with the historical
+	// {frame_id, daemon_ack_id} response so existing browser-side flows
+	// keep working unchanged.
+	resp := gin.H{
 		"frame_id":      body.FrameID,
 		"daemon_ack_id": ack.FrameID,
-	})
+	}
+	if len(ack.Payload) > 0 {
+		var ackBody transit.WriteMessageAckBody
+		if err := json.Unmarshal(ack.Payload, &ackBody); err == nil {
+			if ackBody.MessageID != "" {
+				resp["message_id"] = ackBody.MessageID
+				// L1 §1.5 contract:
+				//   kind=request  → correlation_id = envelope.id
+				//   kind=event    → correlation_id = envelope.id
+				//   kind=response → correlation_id = parent's id (not
+				//                   accessible here without a store
+				//                   lookup; omit and let downstream
+				//                   resolve via parent_id).
+				if kind == message.KindRequest || kind == message.KindEvent {
+					resp["correlation_id"] = ackBody.MessageID
+				}
+			}
+			if ackBody.Seq > 0 {
+				resp["seq"] = ackBody.Seq
+			}
+			if ackBody.Deduped {
+				resp["deduped"] = true
+			}
+			if ackBody.RejectReason != "" {
+				resp["reject_reason"] = ackBody.RejectReason
+				resp["reject_detail"] = ackBody.RejectDetail
+				// Surface harness rejects as 409 so `coagent ask` can
+				// map exit=3 onto stable harness reasons (L1 §10.3.1).
+				c.JSON(http.StatusConflict, resp)
+				return
+			}
+			resp["accepted"] = ackBody.Accepted
+		}
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // signHumanCaller produces the HMAC token consumed by daemon when it

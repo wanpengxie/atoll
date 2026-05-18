@@ -935,17 +935,26 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 	// fall back to the P2 counter stub so tests don't pay the spawn cost.
 	if d.cfg.WorkerSpawner != nil {
 		leaseStore := workerhost.NewLeaseStore(cr.db)
-		// M1.6-T5 phase-3 — pack the per-channel domain prompt + channel
-		// type into the worker spawn env. Empty values are still passed
-		// so the worker can distinguish "no template" from "missing wire"
-		// (an unset COAGENT_CHANNEL_ID is the latter). Order is:
-		//   COAGENT_CHANNEL_ID=<id>
+		// M1.6-T5 phase-3 + phase-4 — pack the per-channel domain
+		// prompt, channel type, channel id, and channel-sqlite path
+		// into the worker spawn env. Empty values are still passed so
+		// the worker can distinguish "no template" from "missing wire".
+		// Order is:
 		//   COAGENT_CHANNEL_TYPE=<type>     (may be "")
-		//   COAGENT_DOMAIN_PROMPT=<prompt>  (may be "")
+		//   COAGENT_DOMAIN_PROMPT=<prompt>  (may be ""; omitted entirely if empty)
+		//   COAGENT_CHANNEL_ID=<id>         (always set for owned channels)
+		//   COAGENT_CHANNEL_DB=<abs-path>   (always set; xhs-cli dedupe reads it ro)
 		// mock_bridge / kimi_bridge read these directly via os.Getenv;
 		// no extra IPC frame is introduced (the prompt is base-prompt
-		// scaffolding, not a per-turn signal).
+		// scaffolding, not a per-turn signal). coagent ask resolves
+		// COAGENT_CHANNEL_ID for the gateway URL path, and
+		// adapters/device/xhs/cli reads COAGENT_CHANNEL_DB to perform
+		// the duplicate-publish business-invariant check.
 		workerEnv := d.buildWorkerEnvForChannel(lockRow.ChannelType)
+		workerEnv = append(workerEnv,
+			"COAGENT_CHANNEL_ID="+string(cr.channelID),
+			"COAGENT_CHANNEL_DB="+filepath.Join(d.cfg.ChannelsDir, string(cr.channelID), "channel.sqlite"),
+		)
 		mgr, err := workerhost.NewManager(workerhost.ManagerConfig{
 			ChannelID:     cr.channelID,
 			AgentID:       cr.channelAgentID,
