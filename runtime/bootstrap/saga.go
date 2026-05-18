@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -14,6 +15,33 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/store"
 )
+
+// TemplateView is the bootstrap-side projection of one L4 channel
+// template (M1.6-T5 phase-2). The Saga consumes it inside Bootstrap to
+// (a) seed adapter tool actor rows so framework.Manager.Install can
+// locate them in step 5b and (b) materialise template-declared workdir
+// subdirectories in new step 5c.
+//
+// TemplateView is intentionally a value type defined here (NOT in
+// runtime/) so the bootstrap package does NOT take a dependency on the
+// runtime package — `runtime` constructs a resolver closure during
+// AssembleDaemon that converts its richer ChannelTemplate into this
+// minimal view.
+type TemplateView struct {
+	// AdapterActorSeeds lists the actor_registry rows the saga inserts
+	// in addition to system + initial members. Each row supplies enough
+	// fields for kernel/adapter.Manager.Install to find the actor with
+	// the right binding.
+	AdapterActorSeeds []actor.Record
+
+	// WorkdirSubdirs lists relative directory paths the saga MUST
+	// mkdir under <ChannelsDir>/<channelID>/ during step 5c (after the
+	// channel sqlite is open / actor seeds are inserted). Each entry is
+	// a path component (e.g. "published-notes", "drafts", "assets")
+	// joined with channelDir before MkdirAll. Empty list = no extra
+	// subdirs (legacy / generic channels).
+	WorkdirSubdirs []string
+}
 
 // Saga is the daemon-side channel bootstrap orchestrator (L2 §3.6
 // bootstrap_registry 9-step). For M1.5-T3 we ship a lean variant
@@ -28,9 +56,13 @@ import (
 //  3. Open / create channels/<id>/channel.sqlite with DDL.
 //  4. Insert actor_registry row for 'system' actor.
 //  5. Insert actor_registry + member rows from req.InitialMembers.
-//     5b. Insert AdapterActorSeeds from the daemon-level ChannelTemplate
-//     (M1.6-T2 — pre-creates tool adapter rows so framework.Manager.Install
-//     can locate them).
+//     5b. Insert template AdapterActorSeeds (M1.6-T2 — pre-creates tool
+//     adapter rows so framework.Manager.Install can locate them). Seeds
+//     come from the resolved TemplateView for req.ChannelType when a
+//     ResolveTemplate callback is wired; otherwise the saga falls back
+//     to the AdapterActorSeeds field for backward compatibility.
+//     5c. Mkdir template WorkdirSubdirs (M1.6-T5 phase-2 — e.g.
+//     published-notes/, drafts/, assets/ for the xhs-creator template).
 //  6. (caller — runtime/lifecycle.Creator) writes channel_lock row.
 //  7. Mark bootstrap_registry status='completed'.
 //
@@ -41,6 +73,7 @@ type Saga struct {
 	channelsDir       string
 	nowFn             func() int64
 	adapterActorSeeds []actor.Record
+	resolveTemplate   func(channelType string) TemplateView
 }
 
 // SagaConfig wires Saga.
@@ -52,7 +85,23 @@ type SagaConfig struct {
 	// AdapterActorSeeds is the static set of tool actor_registry rows
 	// the saga MUST insert in addition to the system + initial member
 	// rows (M1.6-T2 ChannelTemplate). Empty list = no extra actors.
+	//
+	// Deprecated: callers wiring multiple templates (M1.6-T5 phase-2)
+	// MUST instead provide ResolveTemplate so the per-channel template
+	// is selected by req.ChannelType. The static field stays as a
+	// fallback for legacy single-template wiring and the existing tests.
 	AdapterActorSeeds []actor.Record
+
+	// ResolveTemplate, when non-nil, is consulted in Bootstrap to obtain
+	// the per-channel TemplateView keyed by CreateChannelRequest.ChannelType
+	// (M1.6-T5 phase-2). When nil the saga uses the legacy
+	// AdapterActorSeeds field for every channel and skips the workdir-
+	// subdir step.
+	//
+	// The callback MUST return a usable TemplateView even for unknown
+	// types (return the zero value to mean "no template" — saga seeds
+	// only system + initial members).
+	ResolveTemplate func(channelType string) TemplateView
 }
 
 // NewSaga builds a Saga.
@@ -73,6 +122,7 @@ func NewSaga(cfg SagaConfig) (*Saga, error) {
 		channelsDir:       cfg.ChannelsDir,
 		nowFn:             cfg.NowFn,
 		adapterActorSeeds: seeds,
+		resolveTemplate:   cfg.ResolveTemplate,
 	}, nil
 }
 
@@ -136,12 +186,21 @@ func (s *Saga) Bootstrap(
 		}
 	}
 
+	// M1.6-T5 phase-2 — resolve the per-channel template ONCE: prefer
+	// the ResolveTemplate callback when wired, otherwise fall back to
+	// the static AdapterActorSeeds field for legacy single-template
+	// configurations and the existing test fixtures.
+	tpl := TemplateView{AdapterActorSeeds: s.adapterActorSeeds}
+	if s.resolveTemplate != nil {
+		tpl = s.resolveTemplate(req.ChannelType)
+	}
+
 	// Step 5b — adapter actor seeds (M1.6-T2 ChannelTemplate). The
 	// framework.Manager Install path will fail later if a declared
 	// adapter actor is missing from actor_registry; seeding here keeps
 	// channel bootstrap + adapter install atomic from the operator's
 	// point of view.
-	for _, seed := range s.adapterActorSeeds {
+	for _, seed := range tpl.AdapterActorSeeds {
 		if seed.ID == "" {
 			continue
 		}
@@ -151,6 +210,31 @@ func (s *Saga) Bootstrap(
 		}
 		if err := reg.Insert(ctx, rec); err != nil {
 			return "", fmt.Errorf("bootstrap: insert adapter seed %s: %w", seed.ID, err)
+		}
+	}
+
+	// Step 5c — template-declared workdir subdirectories (M1.6-T5
+	// phase-2 — e.g. the xhs-creator template ships published-notes/,
+	// drafts/, assets/). Each entry is resolved against channelDir so
+	// the saga does NOT leak above the channel root. MkdirAll is
+	// idempotent so re-running the saga on a partially-created channel
+	// is safe.
+	for _, sub := range tpl.WorkdirSubdirs {
+		if sub == "" {
+			continue
+		}
+		// Defensive: reject anything that would escape channelDir or
+		// land at an unexpected absolute root. We accept "a", "a/b",
+		// reject "..", "../x", "/abs", and any clean form that
+		// collapses to "." or starts with "..".
+		cleaned := filepath.Clean(sub)
+		if filepath.IsAbs(cleaned) || cleaned == "." || cleaned == ".." ||
+			strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("bootstrap: workdir subdir %q escapes channel root", sub)
+		}
+		target := filepath.Join(channelDir, cleaned)
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return "", fmt.Errorf("bootstrap: mkdir workdir subdir %s: %w", target, err)
 		}
 	}
 

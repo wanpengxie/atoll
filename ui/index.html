@@ -58,8 +58,9 @@
           <section>
             <h2>Channels</h2>
             <ul id="channel-list" class="channel-list"></ul>
-            <form id="form-create-channel" class="inline">
+            <form id="form-create-channel" class="inline channel-create">
               <input name="name" placeholder="New channel name" required />
+              <input name="type" placeholder="type (group / xhs-creator)" />
               <button type="submit">＋</button>
             </form>
           </section>
@@ -84,6 +85,13 @@
           </header>
 
           <ol id="message-list" class="messages"></ol>
+
+          <section id="system-drawer" class="system-drawer hidden">
+            <button type="button" id="system-drawer-toggle" class="system-drawer-toggle">
+              显示系统事件
+            </button>
+            <div id="system-drawer-body" class="system-drawer-body hidden"></div>
+          </section>
 
           <form id="form-send" class="composer">
             <input

@@ -214,3 +214,272 @@ label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
   border-top: 1px solid var(--border);
 }
 .composer input { flex: 1; }
+
+/* ── L3 chat renderer additions ─────────────────────────────────────── */
+
+/* Channel sidebar: unread badge + per-channel layout */
+.channel-list li.channel-item {
+  align-items: center;
+}
+.channel-badge {
+  display: inline-block;
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: transparent;
+  color: white;
+  font-size: 11px;
+  text-align: center;
+  line-height: 18px;
+}
+.channel-badge.has-unread {
+  background: var(--error);
+}
+.channel-list li.active .channel-badge.has-unread {
+  background: white;
+  color: var(--accent);
+}
+.channel-create input[name="type"] {
+  flex: 1;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* Reset previous bubble styling: the new renderer emits structured
+ * .entry > .bubble nodes; the legacy `.messages li` rule still applies
+ * for backwards-compat (e.g. system-notice).  */
+.messages li.entry {
+  background: transparent;
+  max-width: none;
+  padding: 0;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.messages li.entry.system-event { opacity: 0.7; }
+.messages li.system-notice {
+  background: rgba(192, 57, 43, 0.08);
+  color: var(--error);
+  padding: 6px 10px;
+  border-radius: 6px;
+  max-width: 100%;
+}
+
+/* Bubble — replaces direct <li> styling. */
+.bubble {
+  max-width: 70%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--other-bubble);
+  white-space: pre-wrap;
+  word-break: break-word;
+  align-self: flex-start;
+  border: 1px solid transparent;
+}
+.bubble.bubble-self {
+  align-self: flex-end;
+  background: var(--me-bubble);
+  color: white;
+}
+.bubble.bubble-system {
+  align-self: center;
+  background: rgba(31, 29, 24, 0.04);
+  border-color: var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  max-width: 86%;
+}
+.bubble.bubble-system .bubble-system-header {
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+}
+.bubble.bubble-system .bubble-system-body {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.bubble.bubble-request {
+  border-color: rgba(31, 29, 24, 0.18);
+  border-style: dashed;
+}
+.bubble.bubble-response {
+  border-left: 3px solid var(--accent);
+}
+.bubble.bubble-mention {
+  border-left: 3px solid var(--error);
+  background: rgba(192, 57, 43, 0.06);
+}
+.bubble-body { margin: 2px 0; }
+.bubble-meta {
+  display: block;
+  font-size: 10px;
+  opacity: 0.7;
+  margin-top: 4px;
+}
+
+/* Sender header — avatar + name + inactive tag */
+.sender-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: white;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.avatar.avatar-human { border-radius: 4px; }
+.avatar.avatar-agent { border-radius: 50%; }
+.avatar.avatar-tool {
+  border-radius: 4px;
+  outline: 2px dashed currentColor;
+  outline-offset: -3px;
+}
+.avatar.avatar-system { border-radius: 50%; background: var(--muted); }
+.sender-name { font-weight: 600; color: var(--fg); }
+.inactive-tag {
+  font-size: 10px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* Folds — thinking + threads (Claude Code TUI 模式) */
+.fold {
+  margin-top: 4px;
+  margin-left: 16px;
+  padding: 4px 8px;
+  border-left: 2px solid var(--border);
+  font-size: 12px;
+}
+.fold summary {
+  cursor: pointer;
+  color: var(--muted);
+  user-select: none;
+}
+.fold[open] summary { color: var(--fg); }
+.fold .bubble {
+  max-width: 100%;
+  margin: 4px 0;
+  background: var(--bg);
+}
+
+/* Thread rows */
+.thread-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0;
+  border-top: 1px dashed var(--border);
+}
+.thread-row:first-child { border-top: 0; }
+.thread-line {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+.thread-tag {
+  font-size: 10px;
+  color: var(--muted);
+  min-width: 60px;
+}
+.thread-payload {
+  flex: 1;
+  font-size: 11px;
+  color: var(--fg);
+  word-break: break-all;
+}
+.thread-status {
+  font-size: 11px;
+  color: var(--muted);
+}
+.thread-status.thread-status-pending { color: #b58900; }
+.thread-status.thread-status-completed { color: var(--accent); }
+.thread-status.thread-status-failed { color: var(--error); }
+.thread-status.thread-status-responded { color: var(--accent); }
+
+/* Event cards (kind=event business types like xhs.note.archived) */
+.event-card {
+  margin-top: 4px;
+  margin-left: 16px;
+  padding: 6px 10px;
+  background: rgba(26, 128, 83, 0.08);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  font-size: 12px;
+}
+.event-header { font-weight: 600; color: var(--accent); }
+.event-body {
+  margin-top: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--fg);
+  word-break: break-all;
+}
+
+/* Inline media — §4 */
+.media { margin-top: 6px; }
+.media-image img,
+.media-video video {
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: 6px;
+  cursor: zoom-in;
+  display: block;
+}
+.media-md .media-md-body {
+  background: var(--bg);
+  border-radius: 4px;
+  padding: 6px;
+  font-size: 11px;
+  max-height: 240px;
+  overflow: auto;
+  margin: 4px 0 0;
+}
+.media-file-card {
+  display: inline-block;
+  padding: 4px 8px;
+  background: var(--bg);
+  color: var(--fg);
+  text-decoration: none;
+  border-radius: 4px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+}
+
+/* System events drawer (§9 噪音过滤) */
+.system-drawer {
+  border-top: 1px solid var(--border);
+  padding: 6px 20px;
+  font-size: 12px;
+}
+.system-drawer.hidden { display: none; }
+.system-drawer-toggle {
+  background: transparent;
+  color: var(--muted);
+  padding: 2px 6px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+}
+.system-drawer-toggle:hover { background: var(--bg); }
+.system-drawer-body {
+  max-height: 240px;
+  overflow-y: auto;
+  margin-top: 6px;
+  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.system-drawer-body.hidden { display: none; }

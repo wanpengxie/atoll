@@ -35,7 +35,7 @@ type triggerCountingWorker struct {
 	crashAfter   int // > 0 → simulate worker crash after N triggers
 }
 
-func (w *triggerCountingWorker) workerFn(ctx context.Context, leaseID string, in io.Reader, out io.Writer) error {
+func (w *triggerCountingWorker) workerFn(ctx context.Context, leaseID string, _ []string, in io.Reader, out io.Writer) error {
 	w.spawnCount.Add(1)
 	rt, err := worker.New(worker.Config{
 		LeaseID:        leaseID,
@@ -266,6 +266,98 @@ func TestManager_RespawnAfterCrash(t *testing.T) {
 	}
 	if got := f.spawnCount.Load(); got != 2 {
 		t.Errorf("spawn count = %d, want 2", got)
+	}
+}
+
+// TestManager_WorkerEnvPropagates covers M1.6-T5 phase-3: the
+// ManagerConfig.WorkerEnv slice flows verbatim into every Spawner.Spawn
+// invocation so per-channel COAGENT_* keys (channel id, channel type,
+// domain prompt) reach the worker subprocess without an extra IPC frame.
+func TestManager_WorkerEnvPropagates(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dir := t.TempDir()
+	db, err := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	led := store.NewLedger(db)
+
+	chID := channel.ID("ch-env")
+	agentID := actor.ActorID("agent:channel-agent")
+	chain := newE2EChain(t, db, chID, agentID)
+
+	wantEnv := []string{
+		"COAGENT_CHANNEL_TYPE=xhs-creator",
+		"COAGENT_DOMAIN_PROMPT=你是 xhs 内容创作 agent",
+	}
+
+	gotEnvCh := make(chan []string, 1)
+	spawned := new(atomic.Int64)
+	tcw := &triggerCountingWorker{
+		t:           t,
+		spawnCount:  spawned,
+		receivedAll: make(chan ipc.TriggerPayload, 4),
+	}
+	spawner := &workerhost.PipeSpawner{
+		WorkerFunc: func(ctx context.Context, leaseID string, extraEnv []string, in io.Reader, out io.Writer) error {
+			// Snapshot the env Manager handed us. A nil-equivalent slice
+			// also lands here (empty list) so a missing wire is visible
+			// as `len(extraEnv)==0`.
+			snap := append([]string(nil), extraEnv...)
+			select {
+			case gotEnvCh <- snap:
+			default:
+			}
+			return tcw.workerFn(ctx, leaseID, extraEnv, in, out)
+		},
+	}
+
+	leaseStore := workerhost.NewLeaseStore(db)
+	mgr, err := workerhost.NewManager(workerhost.ManagerConfig{
+		ChannelID:        chID,
+		AgentID:          agentID,
+		WorkerActorID:    agentID,
+		Spawner:          spawner,
+		LeaseStore:       leaseStore,
+		Chain:            chain,
+		Ledger:           led,
+		NowFn:            now,
+		FencingToken:     placement.FencingToken(1),
+		DaemonEpoch:      placement.DaemonEpoch(7),
+		HandshakeTimeout: 2 * time.Second,
+		ServeCtx:         ctx,
+		WorkerEnv:        wantEnv,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() {
+		closeCtx, cc := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cc()
+		_ = mgr.Close(closeCtx)
+	})
+
+	if err := mgr.OnTrigger(ctx, agentID, triggerEnvelope("env-env-1", 1)); err != nil {
+		t.Fatalf("OnTrigger: %v", err)
+	}
+
+	select {
+	case got := <-gotEnvCh:
+		if len(got) != len(wantEnv) {
+			t.Fatalf("env len mismatch: got=%v want=%v", got, wantEnv)
+		}
+		for i := range wantEnv {
+			if got[i] != wantEnv[i] {
+				t.Errorf("env[%d]=%q want %q", i, got[i], wantEnv[i])
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("spawner never invoked")
 	}
 }
 

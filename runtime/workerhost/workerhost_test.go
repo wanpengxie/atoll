@@ -136,7 +136,7 @@ func TestWorker_LeaseE2E(t *testing.T) {
 
 	bridgeDone := make(chan error, 1)
 	spawner := &workerhost.PipeSpawner{
-		WorkerFunc: func(ctx context.Context, leaseID string, in io.Reader, out io.Writer) error {
+		WorkerFunc: func(ctx context.Context, leaseID string, _ []string, in io.Reader, out io.Writer) error {
 			rt, err := worker.New(worker.Config{
 				LeaseID:        leaseID,
 				In:             in,
@@ -179,7 +179,7 @@ func TestWorker_LeaseE2E(t *testing.T) {
 		},
 	}
 
-	proc, err := spawner.Spawn(ctx, "lease-1")
+	proc, err := spawner.Spawn(ctx, "lease-1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

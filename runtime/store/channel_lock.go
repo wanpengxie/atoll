@@ -20,6 +20,11 @@ type ChannelLockRow struct {
 	DaemonEpoch  placement.DaemonEpoch
 	AcquiredAt   int64
 	RefreshedAt  int64
+	// ChannelType is the L4 channel-template key (M1.6-T5 phase-2). Empty
+	// means "no template" — legacy group channels. Set by the daemon's
+	// handleCreateChannel from the server-supplied CreateChannelRequest;
+	// surfaced back into ChannelHooks on every (cold or hot) channel boot.
+	ChannelType string
 }
 
 // ChannelLock owns the single-row channel_lock table.
@@ -44,16 +49,17 @@ func NewChannelLock(db *sql.DB) *ChannelLock { return &ChannelLock{db: db} }
 // Returns ok=false when no row exists (channel never bootstrapped).
 func (l *ChannelLock) Get(ctx context.Context) (ChannelLockRow, bool, error) {
 	const q = `SELECT channel_id, fencing_token, owner_epoch, daemon_id, daemon_epoch,
-	                 acquired_at, refreshed_at
+	                 acquired_at, refreshed_at, channel_type
 	            FROM channel_lock LIMIT 1`
 	var row ChannelLockRow
 	var (
 		cid, did string
 		ft, oe   int64
 		de       int64
+		chType   string
 	)
 	err := l.db.QueryRowContext(ctx, q).Scan(&cid, &ft, &oe, &did, &de,
-		&row.AcquiredAt, &row.RefreshedAt)
+		&row.AcquiredAt, &row.RefreshedAt, &chType)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ChannelLockRow{}, false, nil
 	}
@@ -65,6 +71,7 @@ func (l *ChannelLock) Get(ctx context.Context) (ChannelLockRow, bool, error) {
 	row.OwnerEpoch = placement.OwnerEpoch(oe)
 	row.DaemonID = placement.DaemonID(did)
 	row.DaemonEpoch = placement.DaemonEpoch(de)
+	row.ChannelType = chType
 	return row, true, nil
 }
 
@@ -76,12 +83,12 @@ func (l *ChannelLock) Insert(ctx context.Context, row ChannelLockRow) error {
 		return errors.New("store: channel_lock insert: empty channel_id")
 	}
 	const q = `INSERT INTO channel_lock
-	   (channel_id, fencing_token, owner_epoch, daemon_id, daemon_epoch, acquired_at, refreshed_at)
-	   VALUES (?, ?, ?, ?, ?, ?, ?)`
+	   (channel_id, fencing_token, owner_epoch, daemon_id, daemon_epoch, acquired_at, refreshed_at, channel_type)
+	   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 	if _, err := l.db.ExecContext(ctx, q,
 		string(row.ChannelID), int64(row.FencingToken), int64(row.OwnerEpoch),
 		string(row.DaemonID), int64(row.DaemonEpoch),
-		row.AcquiredAt, row.RefreshedAt,
+		row.AcquiredAt, row.RefreshedAt, row.ChannelType,
 	); err != nil {
 		return fmt.Errorf("store: channel_lock insert: %w", err)
 	}

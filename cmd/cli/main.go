@@ -10,6 +10,9 @@
 //	coagent channel create --workspace <ws> --name <name> [--type group]
 //	coagent device register --channel <ch> --type xhs --daemon <id> [--device-id <id>]
 //	coagent daemon status
+//	coagent ask     --type <T> --audience <A> [--channel <id>] (--payload <json> | --payload-file <p>)
+//	coagent emit    --type <T>                [--channel <id>] (--payload <json> | --payload-file <p>)
+//	coagent answer  --type <T> --parent-id <P> [--channel <id>] (--payload <json> | --payload-file <p>)
 //
 // Auth: cookie-less. Pass `--token <session_token>` or set
 // COAGENT_SESSION_TOKEN — sent as `Authorization: Bearer …`. The
@@ -41,6 +44,12 @@ func main() {
 		runDevice(args)
 	case "daemon":
 		runDaemon(args)
+	case "ask":
+		runAsk(args)
+	case "emit":
+		runEmit(args)
+	case "answer":
+		runAnswer(args)
 	case "-h", "--help", "help":
 		usage()
 	case "-v", "--version", "version":
@@ -65,6 +74,9 @@ COMMANDS
   channel create   Create a channel inside a workspace
   device register  Issue a device session token for a channel
   daemon status    Report server health + active daemon placements
+  ask              Write a kind=request envelope (audience required)
+  emit             Write a kind=event envelope (audience optional)
+  answer           Write a kind=response envelope (--parent-id required)
 
 GLOBAL FLAGS (forwarded by subcommands that call the HTTP API)
   --server-url URL  Server base URL  (env COAGENT_SERVER_URL; default http://localhost:8080)

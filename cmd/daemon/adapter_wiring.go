@@ -199,11 +199,26 @@ func (c *adapterCallerChain) Write(ctx context.Context, env *message.Envelope) (
 // adapters/xhs in_process scaffold (M1.6-T2). cmd/daemon supplies it
 // during DaemonConfig assembly. T3 will replace this with the
 // adapters/device/xhs factory once DeviceTransit is wired.
+//
+// M1.6-T5 phase-2 — the factory is gated by ChannelHooks.ChannelType:
+// it installs only for channels created with type=="xhs-creator" (the
+// L4 template that declares xhs.* business types). Channels created
+// with any other type (e.g. "group" / "") get a no-op factory so the
+// xhs adapter does not pollute generic channels.
 func XHSScaffoldFactory(cfg xhs.Config) AdapterModuleFactory {
-	return func(_ context.Context, _ runtime.ChannelHooks) (adapter.Module, error) {
+	return func(_ context.Context, h runtime.ChannelHooks) (adapter.Module, error) {
+		if h.ChannelType != XHSCreatorChannelType {
+			return nil, nil
+		}
 		return xhs.New(cfg), nil
 	}
 }
+
+// XHSCreatorChannelType is the catalog.Channel.Type value the L4
+// xhs-creator template binds (per v4-layer4-spec). cmd/daemon registers
+// a ChannelTemplate under this key and the AdapterModuleFactory closures
+// install the xhs adapter only for channels carrying it.
+const XHSCreatorChannelType = "xhs-creator"
 
 // DeviceXHSFactory returns an AdapterModuleFactory that installs the
 // production xhs device adapter (adapters/device/xhs) configured to run

@@ -1,11 +1,18 @@
-// main.js — coagent demo SPA entry.
+// main.js — coagent SPA entry. Auth + workspace/channel navigation +
+// message render pipeline + composer + WS push.
 //
-// Implements the four-step T7 acceptance flow against the Go server:
-//   login → list channels → select channel → see messages →
-//   send message → receive responses (live via native WebSocket).
+// Authoritative spec: .dalek/pm/v4-layer3-spec.md §1-§9. The render
+// pipeline delegates to:
+//   - protocol.js  closed enums + visibility/kind/audience helpers
+//   - threading.js correlation_id + parent_id grouping
+//   - renderer.js  envelope → DOM
+//   - media.js     doc_refs inline rendering
+//   - notify.js    browser Notification API
+//   - unread.js    cursor + sidebar badge
+//   - errors.js    L1 §10.3 reason → composer / system event mapping
 //
-// Intentionally small (no framework) — this is the M1.5 demo console,
-// not the production UI. L3 polish is a separate milestone.
+// main.js stays the only file that touches the DOM tree wholesale; the
+// modules emit nodes and main.js mounts them.
 
 import { api, APIError } from './api.js';
 import { ChannelSocket } from './ws.js';
@@ -18,17 +25,34 @@ import {
   defaultServerWsUrl,
   describeReason,
 } from './extension.js';
+import { VISIBILITY } from './protocol.js';
+import { groupTimeline } from './threading.js';
+import { buildEntryNode } from './renderer.js';
+import { readCursor, writeCursor, unreadCount, mentionedIds } from './unread.js';
+import { ensurePermission, classifyNotification, fire as fireNotification } from './notify.js';
+import { composerMessage } from './errors.js';
 
-/** App-wide state. Kept on `window` to ease console debugging. */
+// ── App-wide state ──────────────────────────────────────────────────────
 const state = {
   me: null,
   workspaces: [],
   activeWorkspaceID: null,
   channels: [],
   activeChannelID: null,
-  messages: [],
-  cursor: 0,
-  members: [],
+  /** activeChannelID → normalised messages (envelope-shaped + seq) */
+  messagesByChannel: new Map(),
+  /** activeChannelID → max known seq */
+  cursorByChannel: new Map(),
+  /** channelID → Map(actorID → actor record) — display name, kind, deregistered_at */
+  actorsByChannel: new Map(),
+  /** channelID → Set(envelope.id) for envelopes whose request.sender = self */
+  selfRequestIDsByChannel: new Map(),
+  /** channelID → Set(envelope.id) the renderer should mark as @-mention */
+  mentionedByChannel: new Map(),
+  /** channelID → current actor_id_in_channel of viewer */
+  viewerActorByChannel: new Map(),
+  /** channelID → boolean — show system events drawer expanded */
+  showSystemByChannel: new Map(),
   socket: null,
   // T148 (M1.6-T6) — last successful bind result for the currently
   // selected channel. Cleared on channel switch / unbind / logout.
@@ -39,7 +63,7 @@ const state = {
 };
 window.__coagent = state;
 
-// ── DOM lookup helpers ────────────────────────────────────────────────
+// ── DOM lookup helpers ──────────────────────────────────────────────────
 const $ = (sel) => document.querySelector(sel);
 
 const els = {
@@ -65,6 +89,9 @@ const els = {
   chatTitle: $('#chat-title'),
   chatMeta: $('#chat-meta'),
   messageList: $('#message-list'),
+  systemDrawer: $('#system-drawer'),
+  systemDrawerToggle: $('#system-drawer-toggle'),
+  systemDrawerBody: $('#system-drawer-body'),
   formSend: $('#form-send'),
   sendError: $('#send-error'),
 
@@ -74,7 +101,7 @@ const els = {
   deviceBindStatus: $('#device-bind-status'),
 };
 
-// ── Auth view ────────────────────────────────────────────────────────
+// ── Auth view ───────────────────────────────────────────────────────────
 els.tabs.forEach((btn) => {
   btn.addEventListener('click', () => {
     els.tabs.forEach((b) => b.classList.toggle('active', b === btn));
@@ -121,7 +148,6 @@ els.formRegister.addEventListener('submit', async (e) => {
       code: fd.get('code'),
       display_name: fd.get('display_name') || undefined,
     });
-    // Then auto-login so the cookie is set.
     const res = await api.login(fd.get('email'), fd.get('password'));
     state.me = res.user;
     await enterApp();
@@ -130,7 +156,7 @@ els.formRegister.addEventListener('submit', async (e) => {
   }
 });
 
-// ── App view ─────────────────────────────────────────────────────────
+// ── App view ────────────────────────────────────────────────────────────
 async function enterApp() {
   els.viewAuth.classList.add('hidden');
   els.viewApp.classList.remove('hidden');
@@ -141,18 +167,26 @@ async function enterApp() {
 
   refreshExtensionAvailabilityHint();
   renderBindButton();
+  // Best-effort notification permission prompt — async, non-blocking.
+  ensurePermission().catch(() => {});
+
   await refreshWorkspaces();
 }
 
 els.btnLogout.addEventListener('click', async () => {
-  try { await api.logout(); } catch { /* ignore — clear UI either way */ }
+  try { await api.logout(); } catch { /* clear UI either way */ }
   if (state.socket) state.socket.stop();
   state.me = null;
   state.workspaces = [];
   state.channels = [];
   state.activeWorkspaceID = null;
   state.activeChannelID = null;
-  state.messages = [];
+  state.messagesByChannel.clear();
+  state.cursorByChannel.clear();
+  state.actorsByChannel.clear();
+  state.selfRequestIDsByChannel.clear();
+  state.mentionedByChannel.clear();
+  state.viewerActorByChannel.clear();
   state.deviceBind = null;
   renderBindButton();
   setBindStatus('', 'idle');
@@ -193,8 +227,7 @@ async function selectWorkspace(wsID) {
     await selectChannel(state.channels[0].id);
   } else {
     state.activeChannelID = null;
-    state.messages = [];
-    renderMessages();
+    clearChatPane();
     els.chatTitle.textContent = 'No channels yet — create one ↘';
     els.chatMeta.textContent = '';
   }
@@ -204,11 +237,20 @@ function renderChannels() {
   els.channelList.innerHTML = '';
   for (const ch of state.channels) {
     const li = document.createElement('li');
-    li.textContent = ch.name;
+    li.classList.add('channel-item');
+    const name = document.createElement('span');
+    name.className = 'channel-name';
+    name.textContent = ch.name;
+    li.appendChild(name);
+    const badge = document.createElement('span');
+    badge.className = 'channel-badge';
+    badge.dataset.channelId = ch.id;
+    li.appendChild(badge);
     if (ch.id === state.activeChannelID) li.classList.add('active');
     li.addEventListener('click', () => selectChannel(ch.id));
     els.channelList.appendChild(li);
   }
+  refreshAllBadges();
 }
 
 async function selectChannel(chID) {
@@ -221,8 +263,7 @@ async function selectChannel(chID) {
   els.chatTitle.textContent = ch?.name || chID;
   els.chatMeta.textContent = chID;
 
-  state.messages = [];
-  state.cursor = 0;
+  clearChatPane();
   // T148 (M1.6-T6): a bind is per-channel; switching channels invalidates
   // the previous bind state in the UI. The extension's WS lives across
   // channel switches until the user explicitly re-binds — we don't auto-
@@ -230,26 +271,36 @@ async function selectChannel(chID) {
   state.deviceBind = null;
   refreshExtensionAvailabilityHint();
   renderBindButton();
-  renderMessages();
 
-  // Subscribe over WS first so any messages emitted while we fetch
-  // the backlog also land — viewcache dedupes by (channel, seq).
   if (state.socket) state.socket.subscribe(chID);
 
   try {
-    const res = await api.listMessages(chID, 0, 200);
-    state.messages = (res.messages || []).map(normalizeStoredMessage);
-    state.cursor = state.messages.reduce((m, msg) => Math.max(m, msg.seq), 0);
-    renderMessages();
+    const [msgRes, memberRes] = await Promise.all([
+      api.listMessages(chID, 0, 200),
+      api.listMembers(chID).catch(() => ({ members: [] })),
+    ]);
+    indexActors(chID, memberRes.members || []);
+    const me = (memberRes.members || []).find((m) => m.user_id === state.me?.id);
+    if (me) state.viewerActorByChannel.set(chID, me.actor_id_in_channel);
+    const messages = (msgRes.messages || []).map(normalizeStoredMessage);
+    indexMessages(chID, messages);
+    rerenderChat(chID);
+    markChannelSeenAtBottom(chID);
   } catch (err) {
     appendSystemNotice(`load history failed: ${formatError(err)}`);
   }
 }
 
+function clearChatPane() {
+  els.messageList.innerHTML = '';
+  els.systemDrawerBody.innerHTML = '';
+  els.sendError.textContent = '';
+  if (els.systemDrawer) els.systemDrawer.classList.add('hidden');
+}
+
+// ── Message ingestion + indexing ────────────────────────────────────────
+
 function normalizeStoredMessage(row) {
-  // /api/channels/:id/messages returns viewcache.MessageRow which
-  // already embeds the envelope; surface a normalized shape so the
-  // renderer doesn't care whether the row came from REST or WS push.
   const env = row.envelope || row;
   return {
     seq: Number(row.seq ?? env.seq ?? 0),
@@ -257,51 +308,200 @@ function normalizeStoredMessage(row) {
     ts: env.ts || row.ts || 0,
     sender: env.sender || { kind: 'system', id: 'unknown' },
     type: env.type || 'text',
-    payload: env.payload,
     kind: env.kind || 'event',
+    payload: env.payload,
+    visibility: env.visibility || VISIBILITY.PUBLIC,
+    audience: Array.isArray(env.audience) ? env.audience : [],
+    correlation_id: env.correlation_id || '',
+    parent_id: env.parent_id || '',
+    doc_refs: Array.isArray(env.doc_refs) ? env.doc_refs : null,
+    not_before: env.not_before,
+    delivery_failed_at: env.delivery_failed_at,
+    last_error: env.last_error,
   };
 }
 
-function renderMessages() {
+function indexActors(channelID, members) {
+  const map = new Map();
+  for (const m of members) {
+    map.set(m.actor_id_in_channel, {
+      id: m.actor_id_in_channel,
+      display_name: m.display_name || m.user_id,
+      kind: m.kind || 'human',
+      deregistered_at: m.deregistered_at || null,
+    });
+  }
+  state.actorsByChannel.set(channelID, map);
+}
+
+function indexMessages(channelID, messages) {
+  state.messagesByChannel.set(channelID, messages);
+  state.cursorByChannel.set(channelID, messages.reduce((m, msg) => Math.max(m, msg.seq), 0));
+  const viewerActor = state.viewerActorByChannel.get(channelID);
+  const selfRequests = new Set();
+  for (const m of messages) {
+    if (m.kind === 'request' && m.sender && m.sender.id === viewerActor) {
+      selfRequests.add(m.id);
+    }
+  }
+  state.selfRequestIDsByChannel.set(channelID, selfRequests);
+  recomputeMentions(channelID);
+}
+
+function recomputeMentions(channelID) {
+  const messages = state.messagesByChannel.get(channelID) || [];
+  const viewerActor = state.viewerActorByChannel.get(channelID) || '';
+  const ids = mentionedIds(messages, viewerActor, 0);
+  state.mentionedByChannel.set(channelID, new Set(ids));
+}
+
+function appendMessage(channelID, message) {
+  let list = state.messagesByChannel.get(channelID);
+  if (!list) {
+    list = [];
+    state.messagesByChannel.set(channelID, list);
+  }
+  // Dedup vs REST backlog.
+  if (list.some((m) => m.seq === message.seq)) return false;
+  list.push(message);
+  state.cursorByChannel.set(channelID, Math.max(state.cursorByChannel.get(channelID) || 0, message.seq));
+
+  const viewerActor = state.viewerActorByChannel.get(channelID) || '';
+  if (message.kind === 'request' && message.sender?.id === viewerActor) {
+    const selfReqs = state.selfRequestIDsByChannel.get(channelID) || new Set();
+    selfReqs.add(message.id);
+    state.selfRequestIDsByChannel.set(channelID, selfReqs);
+  }
+  return true;
+}
+
+// ── Chat re-render pipeline ─────────────────────────────────────────────
+
+function rerenderChat(channelID) {
+  if (channelID !== state.activeChannelID) return;
+  const messages = state.messagesByChannel.get(channelID) || [];
+  const viewerActor = state.viewerActorByChannel.get(channelID) || '';
+  const actors = state.actorsByChannel.get(channelID) || new Map();
+  const mentioned = state.mentionedByChannel.get(channelID) || new Set();
+  const includeSystem = Boolean(state.showSystemByChannel.get(channelID));
+
+  const entries = groupTimeline(messages, {
+    viewerActorID: viewerActor,
+    nowMs: Date.now(),
+    includeSystem,
+  });
   els.messageList.innerHTML = '';
-  const meActorIDs = new Set();
-  if (state.me?.id) meActorIDs.add(state.me.id);
-  for (const msg of state.messages) {
-    const li = document.createElement('li');
-    const isMe = msg.sender?.kind === 'human' && meActorIDs.has(msg.sender.id);
-    if (isMe) li.classList.add('me');
-    const meta = document.createElement('small');
-    meta.textContent = `${msg.sender?.kind || '?'} · ${msg.type} · seq ${msg.seq}`;
-    li.appendChild(meta);
-    li.appendChild(document.createTextNode(renderPayload(msg)));
-    els.messageList.appendChild(li);
+  const ctx = { viewerActorID: viewerActor, channelID, actors, mentionedIds: mentioned };
+  let hasSystem = false;
+  for (const entry of entries) {
+    const node = buildEntryNode(entry, ctx);
+    if (entry.kind === 'system-event' && !includeSystem) {
+      hasSystem = true;
+      // Always render into the system drawer too so the toggle reveals it.
+      els.systemDrawerBody.appendChild(buildEntryNode(entry, ctx));
+      continue;
+    }
+    if (entry.systemEvents && entry.systemEvents.length > 0) hasSystem = true;
+    els.messageList.appendChild(node);
+  }
+  if (els.systemDrawer) {
+    els.systemDrawer.classList.toggle('hidden', !hasSystem);
   }
   els.messageList.scrollTop = els.messageList.scrollHeight;
 }
 
-function renderPayload(msg) {
-  const p = msg.payload;
-  if (p && typeof p === 'object' && typeof p.text === 'string') return p.text;
-  if (typeof p === 'string') return p;
-  try { return JSON.stringify(p); } catch { return String(p); }
-}
-
 function appendSystemNotice(text) {
   const li = document.createElement('li');
-  li.appendChild(document.createTextNode(`⚠ ${text}`));
+  li.className = 'entry system-notice';
+  li.textContent = `⚠ ${text}`;
   els.messageList.appendChild(li);
 }
 
-// ── WebSocket push handler ───────────────────────────────────────────
-function handleIncomingMessage(channelID, seq, envelope) {
-  if (channelID !== state.activeChannelID) return;
-  if (seq <= state.cursor) return; // dedupe vs the REST backlog
-  state.cursor = seq;
-  state.messages.push(normalizeStoredMessage({ seq, envelope }));
-  renderMessages();
+// ── System events drawer ────────────────────────────────────────────────
+
+if (els.systemDrawerToggle) {
+  els.systemDrawerToggle.addEventListener('click', () => {
+    const ch = state.activeChannelID;
+    if (!ch) return;
+    const cur = state.showSystemByChannel.get(ch) || false;
+    state.showSystemByChannel.set(ch, !cur);
+    els.systemDrawerToggle.textContent = !cur ? '隐藏系统事件' : '显示系统事件';
+    els.systemDrawerBody.classList.toggle('hidden', cur);
+    rerenderChat(ch);
+  });
 }
 
-// ── Sidebar forms ────────────────────────────────────────────────────
+// ── WebSocket push handler ──────────────────────────────────────────────
+
+function handleIncomingMessage(channelID, seq, envelope) {
+  const normalised = normalizeStoredMessage({ seq, envelope });
+  const fresh = appendMessage(channelID, normalised);
+  if (!fresh) return;
+  recomputeMentions(channelID);
+  if (channelID === state.activeChannelID) {
+    rerenderChat(channelID);
+    if (document.visibilityState === 'visible') {
+      markChannelSeenAtBottom(channelID);
+    }
+  }
+  refreshAllBadges();
+  maybeNotify(channelID, normalised);
+}
+
+function maybeNotify(channelID, envelope) {
+  const viewerActor = state.viewerActorByChannel.get(channelID) || '';
+  if (!viewerActor) return;
+  const selfReqs = state.selfRequestIDsByChannel.get(channelID) || new Set();
+  const descriptor = classifyNotification(envelope, {
+    viewerActorID: viewerActor,
+    requestSentBySelf: (id) => selfReqs.has(id),
+  });
+  if (!descriptor) return;
+  fireNotification(descriptor, () => {
+    if (channelID !== state.activeChannelID) selectChannel(channelID);
+  });
+}
+
+// ── Unread badges ───────────────────────────────────────────────────────
+
+function refreshAllBadges() {
+  for (const ch of state.channels) {
+    const badge = els.channelList.querySelector(`.channel-badge[data-channel-id="${ch.id}"]`);
+    if (!badge) continue;
+    const messages = state.messagesByChannel.get(ch.id) || [];
+    const viewer = state.viewerActorByChannel.get(ch.id) || '';
+    const cursor = readCursor(ch.id);
+    const n = unreadCount(messages, viewer, cursor);
+    if (n > 0) {
+      badge.textContent = String(n);
+      badge.classList.add('has-unread');
+    } else {
+      badge.textContent = '';
+      badge.classList.remove('has-unread');
+    }
+  }
+}
+
+function markChannelSeenAtBottom(channelID) {
+  const top = state.cursorByChannel.get(channelID) || 0;
+  writeCursor(channelID, top);
+  refreshAllBadges();
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && state.activeChannelID) {
+    markChannelSeenAtBottom(state.activeChannelID);
+  }
+});
+
+els.messageList.addEventListener('scroll', () => {
+  const list = els.messageList;
+  if (list.scrollTop + list.clientHeight >= list.scrollHeight - 24) {
+    if (state.activeChannelID) markChannelSeenAtBottom(state.activeChannelID);
+  }
+});
+
+// ── Sidebar forms ───────────────────────────────────────────────────────
 els.formCreateWs.addEventListener('submit', async (e) => {
   e.preventDefault();
   const fd = new FormData(els.formCreateWs);
@@ -322,7 +522,9 @@ els.formCreateChannel.addEventListener('submit', async (e) => {
   }
   const fd = new FormData(els.formCreateChannel);
   try {
-    await api.createChannel(state.activeWorkspaceID, fd.get('name'));
+    const name = fd.get('name');
+    const type = (fd.get('type') || 'group').trim() || 'group';
+    await api.createChannel(state.activeWorkspaceID, name, type);
     els.formCreateChannel.reset();
     await selectWorkspace(state.activeWorkspaceID);
   } catch (err) {
@@ -337,10 +539,11 @@ els.formSend.addEventListener('submit', async (e) => {
   const text = String(fd.get('text') || '').trim();
   if (!text || !state.activeChannelID) return;
   try {
-    await api.sendMessage(state.activeChannelID, { text }, 'chat.text');
+    await api.sendMessage(state.activeChannelID, { text }, 'human.text');
     els.formSend.reset();
   } catch (err) {
-    els.sendError.textContent = formatError(err);
+    const apiErr = err instanceof APIError ? err.body?.error : '';
+    els.sendError.textContent = composerMessage(apiErr) || formatError(err);
   }
 });
 
@@ -518,10 +721,7 @@ async function boot() {
     state.me = me;
     await enterApp();
   } catch (err) {
-    if (err instanceof APIError && err.status === 401) {
-      // Not logged in — show auth view (default).
-      return;
-    }
+    if (err instanceof APIError && err.status === 401) return;
     console.error('boot failed', err);
   }
 }

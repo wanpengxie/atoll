@@ -141,6 +141,10 @@ func (s *Service) ReserveWith(
 		FencingToken:                  out.FencingToken,
 		DaemonConnectionEpochExpected: out.DaemonConnectionEpoch,
 		InitialMembers:                initialMembers,
+		// L4 channel-template key (catalog.Channel.Type) — daemon side
+		// resolves the template from this value during bootstrap saga
+		// (M1.6-T5 phase-2).
+		ChannelType: opts.ChannelType,
 	}
 	return out, req, nil
 }

@@ -163,6 +163,10 @@ func (c *Creator) HandleCreate(
 		DaemonEpoch:  c.cfg.DaemonEpoch,
 		AcquiredAt:   now,
 		RefreshedAt:  now,
+		// M1.6-T5 phase-2 — persist the L4 channel-template key so
+		// cold-start picks the matching template without re-asking the
+		// server.
+		ChannelType: req.ChannelType,
 	}); err != nil {
 		return c.emit(ctx, frame, req, placement.AckRejected, fmt.Sprintf("lock insert: %v", err))
 	}
