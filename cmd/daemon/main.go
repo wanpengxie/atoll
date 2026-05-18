@@ -29,7 +29,9 @@ import (
 	"syscall"
 	"time"
 
+	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/pkg/logger"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/transit"
@@ -57,6 +59,8 @@ func main() {
 		versionFlag  = flag.String("version", "", "optional version metadata reported to the daemonbus registry")
 		allowDevMode = flag.Bool("allow-dev-secrets", false,
 			"dev mode: pretty-printed console logs + relax --key / --human-caller-secret requirement when paired with --mock-bus")
+		useScaffoldXHS = flag.Bool("use-scaffold-xhs", false,
+			"dev/test fallback: install the in-process xhs scaffold instead of the production device transit adapter")
 	)
 	flag.Parse()
 
@@ -110,12 +114,11 @@ func main() {
 	// because the conversion is a composition-root concern (keeps
 	// `runtime` independent of `adapters/**` per arch-lint).
 	//
-	// OnChannelBoot stays wired to a single XHSScaffoldFactory: the
-	// factory itself inspects ChannelHooks.ChannelType and returns a
-	// no-op for channels that aren't xhs-creator, so the boundary lives
-	// in the factory closure rather than in the runtime ChannelTemplates
-	// keys.
 	deviceBinder := NewDeviceSessionBinder(nil)
+	xhsFactory := DeviceXHSFactory(deviceBinder.SessionStore(), devicexhs.Config{})
+	if *useScaffoldXHS {
+		xhsFactory = XHSScaffoldFactory(xhs.Config{})
+	}
 	cfg := runtime.DaemonConfig{
 		DataDir:               *dataDir,
 		ChannelsDir:           filepath.Join(*dataDir, "channels"),
@@ -123,8 +126,8 @@ func main() {
 		DaemonEpoch:           *daemonEpoch,
 		UseMockBus:            *mockBus,
 		ReplayWindow:          time.Duration(*replayWindowMs) * time.Millisecond,
-		ChannelTemplates:      buildChannelTemplates(),
-		OnChannelBoot:         wireAdapterFramework(XHSScaffoldFactory(xhs.Config{})),
+		ChannelTemplates:      buildChannelTemplates(*useScaffoldXHS),
+		OnChannelBoot:         wireAdapterFramework(xhsFactory),
 		OnBindDeviceSession:   deviceBinder.OnBind,
 		OnUnbindDeviceSession: deviceBinder.OnUnbind,
 	}
@@ -149,6 +152,7 @@ func main() {
 		Int64("daemon_epoch", *daemonEpoch).
 		Str("data_dir", *dataDir).
 		Bool("mock_bus", *mockBus).
+		Bool("use_scaffold_xhs", *useScaffoldXHS).
 		Msg("coagent-daemon starting")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -185,7 +189,7 @@ func defaultDataDir() string {
 // The conversion from the adapter-owned xhs.Template to the runtime
 // projection lives here because the composition root is the only layer
 // that may import both `adapters/**` and `runtime/**` per arch-lint.
-func buildChannelTemplates() map[string]runtime.ChannelTemplate {
+func buildChannelTemplates(useScaffoldXHS bool) map[string]runtime.ChannelTemplate {
 	out := make(map[string]runtime.ChannelTemplate, 3)
 	// Empty + "group" share the generic no-template projection. We
 	// register both so the daemon resolver returns a stable zero-value
@@ -195,8 +199,12 @@ func buildChannelTemplates() map[string]runtime.ChannelTemplate {
 	out["group"] = generic
 
 	tpl := xhs.XHSCreatorTemplate()
+	adapterSeeds := []actor.Record{DeviceXHSActorSeed()}
+	if useScaffoldXHS {
+		adapterSeeds = tpl.AdapterActorSeeds
+	}
 	out[tpl.ChannelType] = runtime.ChannelTemplate{
-		AdapterActorSeeds: tpl.AdapterActorSeeds,
+		AdapterActorSeeds: adapterSeeds,
 		WorkdirSubdirs:    tpl.WorkdirSubdirs,
 		DomainPrompt:      tpl.DomainPrompt,
 	}

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -29,7 +31,9 @@ type terminalPayload struct {
 // adapter's RespondFunc with reason=adapter_default_timeout.
 type timerPolicy struct {
 	adapterName string
+	channelID   channel.ID
 	respond     adapter.RespondFunc
+	chain       harness.Chain
 	correlation *memoryCorrelationTracker
 	logger      Logger
 	metrics     Metrics
@@ -45,6 +49,8 @@ func newTimerPolicy(
 	logger Logger,
 	metrics Metrics,
 	clock func() time.Time,
+	channelID channel.ID,
+	chain harness.Chain,
 ) *timerPolicy {
 	if logger == nil {
 		logger = NoopLogger{}
@@ -57,7 +63,9 @@ func newTimerPolicy(
 	}
 	return &timerPolicy{
 		adapterName: adapterName,
+		channelID:   channelID,
 		correlation: correlation,
+		chain:       chain,
 		logger:      logger,
 		metrics:     metrics,
 		clock:       clock,
@@ -172,22 +180,48 @@ func (p *timerPolicy) fire(requestID string) {
 			"adapter", p.adapterName, "request_id", requestID, "err", err.Error())
 		return
 	}
-	res, err := p.respond(ctx, requestID, payload, adapter.RespondOptions{
-		Status: "failed",
-		Reason: string(message.TerminalAdapterDefaultTimeout),
-	})
-	if err != nil {
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if attempt > 1 {
+			time.Sleep(time.Duration(attempt-1) * 25 * time.Millisecond)
+		}
+		res, err := p.respond(ctx, requestID, payload, adapter.RespondOptions{
+			Status: "failed",
+			Reason: string(message.TerminalAdapterDefaultTimeout),
+		})
+		if err == nil {
+			p.logger.Info("framework.policy.timer_fired",
+				"adapter", p.adapterName,
+				"request_id", requestID,
+				"message_id", res.MessageID,
+				"deduped", res.Deduped,
+				"attempt", attempt)
+			p.metrics.IncCounter("adapter.policy.timer_fired",
+				"adapter", p.adapterName)
+			return
+		}
+		lastErr = err
 		p.logger.Error("framework.policy.timer_fire.respond",
-			"adapter", p.adapterName, "request_id", requestID, "err", err.Error())
-		return
+			"adapter", p.adapterName, "request_id", requestID, "attempt", attempt, "err", err.Error())
 	}
-	p.logger.Info("framework.policy.timer_fired",
-		"adapter", p.adapterName,
-		"request_id", requestID,
-		"message_id", res.MessageID,
-		"deduped", res.Deduped)
-	p.metrics.IncCounter("adapter.policy.timer_fired",
-		"adapter", p.adapterName)
+	p.metrics.IncCounter("adapter.policy.timer_terminal_failed", "adapter", p.adapterName)
+	if p.correlation != nil {
+		if err := p.correlation.MarkExpired(ctx, requestID); err != nil {
+			p.logger.Error("framework.policy.timer_fire.mark_expired",
+				"adapter", p.adapterName, "request_id", requestID, "err", err.Error())
+		}
+	}
+	if err := emitTimerTerminalFailedEvent(ctx, timerTerminalFailedEvent{
+		AdapterName: p.adapterName,
+		ChannelID:   p.channelID,
+		Chain:       p.chain,
+		Clock:       p.clock,
+		RequestID:   requestID,
+		Err:         lastErr,
+	}); err != nil {
+		p.logger.Error("framework.policy.timer_fire.event_failed",
+			"adapter", p.adapterName, "request_id", requestID, "err", err.Error())
+	}
 }
 
 // shutdown stops every armed timer. Called from Manager.Shutdown.

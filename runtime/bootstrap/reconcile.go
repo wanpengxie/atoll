@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/runtime/store"
 )
 
 // Reconciler scans bootstrap_registry for rows left in 'in_progress'
@@ -134,6 +136,12 @@ func (r *Reconciler) Run(ctx context.Context) ([]RolledBack, error) {
 		return nil, err
 	}
 
+	completedOrphans, err := r.completedWithoutLock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	staging = append(staging, completedOrphans...)
+
 	for _, rb := range staging {
 		if rb.WorkdirPath != "" {
 			if err := os.RemoveAll(rb.WorkdirPath); err != nil {
@@ -148,4 +156,59 @@ func (r *Reconciler) Run(ctx context.Context) ([]RolledBack, error) {
 		}
 	}
 	return staging, nil
+}
+
+func (r *Reconciler) completedWithoutLock(ctx context.Context) ([]RolledBack, error) {
+	const sel = `SELECT create_request_id, channel_id, workdir_path
+	             FROM bootstrap_registry WHERE status='completed'`
+	rows, err := r.daemonDB.QueryContext(ctx, sel)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap: reconcile completed select: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []RolledBack
+	for rows.Next() {
+		var rb RolledBack
+		var cid string
+		if err := rows.Scan(&rb.CreateRequestID, &cid, &rb.WorkdirPath); err != nil {
+			return nil, fmt.Errorf("bootstrap: reconcile completed scan: %w", err)
+		}
+		rb.ChannelID = channel.ID(cid)
+		hasLock, err := channelLockExists(ctx, rb.WorkdirPath)
+		if err != nil {
+			return nil, err
+		}
+		if !hasLock {
+			out = append(out, rb)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func channelLockExists(ctx context.Context, workdir string) (bool, error) {
+	if workdir == "" {
+		return false, nil
+	}
+	sqlitePath := filepath.Join(workdir, "channel.sqlite")
+	if _, err := os.Stat(sqlitePath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("bootstrap: reconcile stat channel sqlite %s: %w", sqlitePath, err)
+	}
+	db, err := store.OpenChannel(ctx, sqlitePath, store.OpenOptions{SkipDDL: true})
+	if err != nil {
+		return false, fmt.Errorf("bootstrap: reconcile open channel sqlite %s: %w", sqlitePath, err)
+	}
+	defer func() { _ = db.Close() }()
+	lock := store.NewChannelLock(db)
+	_, ok, err := lock.Get(ctx)
+	if err != nil {
+		return false, fmt.Errorf("bootstrap: reconcile read channel_lock %s: %w", sqlitePath, err)
+	}
+	return ok, nil
 }

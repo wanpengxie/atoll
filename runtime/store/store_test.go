@@ -3,7 +3,9 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
@@ -383,6 +385,66 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 		t.Fatalf("LongPendingRequests early: %v", err)
 	} else if len(got) != 0 {
 		t.Errorf("LongPendingRequests at t=500 expected empty, got %v", ids(got))
+	}
+}
+
+func TestMessages_ConcurrentTerminalDuplicateClassified(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	msgs := store.NewMessages(db)
+	parentID := "req-terminal-race"
+	results := make(chan error, 2)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i, id := range []string{"resp-race-a", "resp-race-b"} {
+		wg.Add(1)
+		go func(i int, id string) {
+			defer wg.Done()
+			<-start
+			_, err := msgs.Append(ctx, &message.Envelope{
+				ID:         id,
+				TS:         int64(1000 + i),
+				TSReceived: int64(1000 + i),
+				ChannelID:  "ch-1",
+				Sender:     message.Sender{Kind: message.SenderTool, ID: "tool:xhs-adapter"},
+				Kind:       message.KindResponse,
+				Type:       "xhs.publish",
+				Payload:    json.RawMessage(`{"status":"completed"}`),
+				ParentID:   parentID,
+				Visibility: message.VisibilityPublic,
+				Audience:   []string{"agent:a"},
+				IsTerminal: true,
+			})
+			results <- err
+		}(i, id)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var accepted, duplicates int
+	for err := range results {
+		if err == nil {
+			accepted++
+			continue
+		}
+		var appendErr *klog.AppendError
+		if !errors.As(err, &appendErr) {
+			t.Fatalf("loser error type=%T value=%v, want *AppendError", err, err)
+		}
+		if appendErr.Reason != message.HarnessTerminalDuplicate {
+			t.Fatalf("append reason=%s want %s detail=%s", appendErr.Reason, message.HarnessTerminalDuplicate, appendErr.Detail)
+		}
+		duplicates++
+	}
+	if accepted != 1 || duplicates != 1 {
+		t.Fatalf("accepted=%d duplicates=%d want 1/1", accepted, duplicates)
 	}
 }
 

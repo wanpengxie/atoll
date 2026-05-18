@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/server/identity"
 )
 
@@ -189,6 +190,9 @@ func (s *Service) handleRemoveChannelMember(c *gin.Context) {
 	if err := s.RemoveChannelMember(c.Request.Context(), c.Param("chID"), c.Param("uid")); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if s.subscriptionRevoker != nil {
+		s.subscriptionRevoker.RevokeChannelUser(channel.ID(c.Param("chID")), c.Param("uid"))
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "removed"})
 }

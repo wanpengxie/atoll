@@ -308,6 +308,29 @@ func (h *Hub) unsubscribe(sub *subscriber, channelID channel.ID) {
 	delete(sub.chans, channelID)
 }
 
+// RevokeChannelUser removes every live subscription held by userID for
+// channelID. The websocket connection stays open so the client may remain
+// subscribed to other channels.
+func (h *Hub) RevokeChannelUser(channelID channel.ID, userID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	perUser, ok := h.subs[channelID]
+	if !ok {
+		return
+	}
+	set, ok := perUser[userID]
+	if !ok {
+		return
+	}
+	for sub := range set {
+		delete(sub.chans, channelID)
+	}
+	delete(perUser, userID)
+	if len(perUser) == 0 {
+		delete(h.subs, channelID)
+	}
+}
+
 func (h *Hub) unregister(sub *subscriber) {
 	for ch := range sub.chans {
 		h.unsubscribe(sub, ch)

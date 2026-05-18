@@ -281,11 +281,33 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 				asInstallError(message.InstallTypeRegistryInvalid), decl.Name, t, err)
 		}
 	}
+	if _, err := m.cfg.TypeRegistry.Upsert(ctx, TypeRow{
+		Type:           OrphanCallbackType(decl.Name),
+		HandlerActorID: decl.ActorID,
+		HandlerBinding: decl.Binding,
+		MaxPendingMs:   decl.MaxPendingMs,
+		AllowedKinds:   []message.Kind{message.KindEvent},
+		SchemasByKind: map[message.Kind]json.RawMessage{
+			message.KindEvent: json.RawMessage(eventPayloadSchemaObject),
+		},
+		TerminalConvention: TerminalPayloadStatus,
+	}); err != nil {
+		return fmt.Errorf("%w: adapter=%s type=%s: %v",
+			asInstallError(message.InstallTypeRegistryInvalid), decl.Name, OrphanCallbackType(decl.Name), err)
+	}
 
 	// Build framework helpers.
 	state := NewNamespacedStateStore(m.cfg.StateStore, "adapter:"+decl.Name)
 	corr := newCorrelationTracker(decl.Name, state)
-	policy := newTimerPolicy(decl.Name, corr, m.cfg.Logger, m.cfg.Metrics, m.cfg.Clock)
+	policy := newTimerPolicy(
+		decl.Name,
+		corr,
+		m.cfg.Logger,
+		m.cfg.Metrics,
+		m.cfg.Clock,
+		m.cfg.ChannelID,
+		m.cfg.HarnessChain,
+	)
 	respond, err := buildRespond(respondConfig{
 		adapterName:    decl.Name,
 		adapterActorID: decl.ActorID,
@@ -490,7 +512,38 @@ func (m *Manager) OnExternalCallback(ctx context.Context, adapterName string, pa
 	span := m.cfg.Tracer.StartSpan("adapter.callback", "adapter", adapterName)
 	defer span.End()
 	m.cfg.Metrics.IncCounter("adapter.callback", "adapter", adapterName)
+	if correlationID := callbackCorrelationID(payload); correlationID != "" {
+		if _, ok, err := bm.correlation.Get(ctx, correlationID); err != nil {
+			return fmt.Errorf("framework: callback correlation lookup %s: %w", correlationID, err)
+		} else if !ok {
+			m.cfg.Metrics.IncCounter("adapter.callback.orphan", "adapter", adapterName)
+			return EmitOrphanCallbackEvents(ctx, OrphanCallbackEvent{
+				AdapterName:    adapterName,
+				AdapterActorID: bm.declaration.ActorID,
+				ChannelID:      m.cfg.ChannelID,
+				Chain:          m.cfg.HarnessChain,
+				Clock:          m.cfg.Clock,
+				CorrelationID:  correlationID,
+				Detail:         "correlation lookup miss",
+				Payload:        payload,
+			})
+		}
+	}
 	return bm.module.OnExternalCallback(ctx, payload)
+}
+
+func callbackCorrelationID(payload []byte) string {
+	var body struct {
+		CorrelationID string `json:"correlation_id"`
+		RequestID     string `json:"request_id"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return ""
+	}
+	if body.CorrelationID != "" {
+		return body.CorrelationID
+	}
+	return body.RequestID
 }
 
 // RunGC starts the periodic GC ticker. Stops on ctx cancellation.

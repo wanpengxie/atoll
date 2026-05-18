@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wanpengxie/ActOS/kernel/channel"
 )
 
 // Errors returned by Service.
@@ -35,8 +36,9 @@ var (
 
 // Service is the catalog facade.
 type Service struct {
-	db  *sql.DB
-	now func() time.Time
+	db                  *sql.DB
+	now                 func() time.Time
+	subscriptionRevoker SubscriptionRevoker
 }
 
 // NewService constructs a Service.
@@ -48,6 +50,18 @@ func NewService(db *sql.DB) *Service {
 func (s *Service) WithClock(now func() time.Time) *Service {
 	s.now = now
 	return s
+}
+
+// SubscriptionRevoker is implemented by pushhub.Hub. Catalog calls it after
+// a member row is durably removed so long-lived websocket subscriptions stop
+// receiving that channel's messages.
+type SubscriptionRevoker interface {
+	RevokeChannelUser(channelID channel.ID, userID string)
+}
+
+// SetSubscriptionRevoker wires the optional live-subscription revocation hook.
+func (s *Service) SetSubscriptionRevoker(r SubscriptionRevoker) {
+	s.subscriptionRevoker = r
 }
 
 func (s *Service) nowMs() int64 { return s.now().UnixMilli() }
