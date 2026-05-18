@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
 	"github.com/wanpengxie/ActOS/server/identity"
@@ -43,7 +44,23 @@ func (s *Service) handleMessages(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"messages": msgs})
+	// Return a flat envelope array — UI consumes the same envelope shape
+	// here as it does on the pushhub WS frame. The outer store-derived
+	// metadata (StoredMessage{Seq, MessageID, ReceivedAt}) is intentionally
+	// not leaked: seq is already inside envelope.seq, the message id is
+	// envelope.id, and received_at corresponds to envelope.ts_received.
+	envs := make([]message.Envelope, 0, len(msgs))
+	for _, m := range msgs {
+		env := m.Envelope
+		if env.Seq == 0 {
+			env.Seq = int64(m.Seq)
+		}
+		if env.TSReceived == 0 {
+			env.TSReceived = m.ReceivedAt
+		}
+		envs = append(envs, env)
+	}
+	c.JSON(http.StatusOK, gin.H{"messages": envs})
 }
 
 func (s *Service) handleCursor(c *gin.Context) {
