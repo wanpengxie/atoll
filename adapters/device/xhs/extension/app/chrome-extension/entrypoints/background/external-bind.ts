@@ -175,11 +175,23 @@ export function isAllowedSenderOrigin(
 }
 
 function matchPattern(pattern: OriginMatcher, scheme: string, host: string): boolean {
-  // Chrome match pattern: scheme://host/path. We only validate scheme + host.
+  // Chrome match pattern: scheme://host[:port]/path. We only validate
+  // scheme + host. Chrome docs explicitly say "the port part of the URL
+  // is ignored" for match patterns (see
+  // https://developer.chrome.com/docs/extensions/develop/concepts/match-patterns),
+  // so we strip everything from the first ':' in the pattern host before
+  // comparing. The browser URL parser already drops the port from
+  // sender.hostname, so the right-hand side never carries a port.
   const m = pattern.match(/^([a-z]+):\/\/([^/]+)(\/.*)?$/i);
   if (!m) return false;
   const patternScheme = m[1].toLowerCase();
-  const patternHost = m[2];
+  const patternHostRaw = m[2];
+  // Strip port from pattern host: 'localhost:*' → 'localhost',
+  // '*.coagent.dev:8080' → '*.coagent.dev'. Bare ':' / empty host
+  // segments are rejected.
+  const colonIdx = patternHostRaw.indexOf(':');
+  const patternHost = colonIdx >= 0 ? patternHostRaw.slice(0, colonIdx) : patternHostRaw;
+  if (!patternHost) return false;
   if (patternScheme !== '*' && patternScheme !== scheme.toLowerCase()) return false;
   if (patternHost === '*') return true;
   if (patternHost.startsWith('*.')) {
