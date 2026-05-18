@@ -23,6 +23,10 @@ type ChannelBootstrapper interface {
 	Bootstrap(ctx context.Context, channelID channel.ID, req placement.CreateChannelRequest) (string, error)
 }
 
+type channelBootstrapCompleter interface {
+	Complete(ctx context.Context, createRequestID string) error
+}
+
 // CreatorConfig wires a Creator.
 type CreatorConfig struct {
 	DaemonID    placement.DaemonID
@@ -169,6 +173,11 @@ func (c *Creator) HandleCreate(
 		ChannelType: req.ChannelType,
 	}); err != nil {
 		return c.emit(ctx, frame, req, placement.AckRejected, fmt.Sprintf("lock insert: %v", err))
+	}
+	if completer, ok := c.cfg.Bootstrapper.(channelBootstrapCompleter); ok {
+		if err := completer.Complete(ctx, string(req.CreateRequestID)); err != nil {
+			return c.emit(ctx, frame, req, placement.AckRejected, fmt.Sprintf("bootstrap complete: %v", err))
+		}
 	}
 	return c.emit(ctx, frame, req, placement.AckBound, "")
 }

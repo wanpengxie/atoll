@@ -402,6 +402,87 @@ func TestPushhubSubscribeRejectsNonMemberAndBlocksFanout(t *testing.T) {
 	}
 }
 
+func TestPushhubRevokesSubscriptionAfterMemberRemoval(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	alice := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-pushhub-revoke@example.com")
+	bob := registerLoginAndCreateChannel(t, client, srv.URL, app, "bob-pushhub-revoke@example.com")
+	bobID := userIDByEmail(t, app, "bob-pushhub-revoke@example.com")
+
+	addReq, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/channels/"+alice.channelID+"/members",
+		strings.NewReader(`{"user_id":"`+bobID+`"}`))
+	addReq.Header.Set("Content-Type", "application/json")
+	addReq.AddCookie(&http.Cookie{Name: identity.CookieName, Value: alice.session})
+	addResp, err := client.Do(addReq)
+	if err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+	_ = addResp.Body.Close()
+	if addResp.StatusCode != http.StatusCreated {
+		t.Fatalf("add member status=%d want 201", addResp.StatusCode)
+	}
+
+	header := http.Header{}
+	header.Set("Cookie", (&http.Cookie{Name: identity.CookieName, Value: bob.session}).String())
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+	ws, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		t.Fatalf("dial pushhub: status=%d err=%v", status, err)
+	}
+	defer func() { _ = ws.Close() }()
+
+	if err := ws.WriteJSON(map[string]string{
+		"type":       "subscribe",
+		"channel_id": alice.channelID,
+	}); err != nil {
+		t.Fatalf("subscribe write: %v", err)
+	}
+	pollUntil(t, time.Second, func() bool {
+		return app.Pushhub().SubscriberCount(channel.ID(alice.channelID)) == 1
+	})
+
+	delReq, _ := http.NewRequest(http.MethodDelete,
+		srv.URL+"/api/channels/"+alice.channelID+"/members/"+bobID, nil)
+	delReq.AddCookie(&http.Cookie{Name: identity.CookieName, Value: alice.session})
+	delResp, err := client.Do(delReq)
+	if err != nil {
+		t.Fatalf("delete member: %v", err)
+	}
+	_ = delResp.Body.Close()
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("delete member status=%d want 200", delResp.StatusCode)
+	}
+	pollUntil(t, time.Second, func() bool {
+		return app.Pushhub().SubscriberCount(channel.ID(alice.channelID)) == 0
+	})
+
+	app.Pushhub().PushMessage(channel.ID(alice.channelID), 1, message.Envelope{
+		ID:         "m-after-revoke",
+		ChannelID:  alice.channelID,
+		Type:       "agent.text",
+		Kind:       message.KindEvent,
+		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+		Payload:    json.RawMessage(`{"text":"secret"}`),
+		Visibility: message.VisibilityPublic,
+		Audience:   []string{"*"},
+	})
+	if err := ws.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if _, raw, err := ws.ReadMessage(); err == nil {
+		t.Fatalf("unexpected push after membership removal: %s", string(raw))
+	}
+}
+
 func TestHandleWriteMessageResponseInheritsParentCorrelation(t *testing.T) {
 	t.Parallel()
 	app := newTestApp(t)
@@ -608,6 +689,20 @@ func registerLoginAndCreateChannel(t *testing.T, c *http.Client, baseURL string,
 	_ = chResp.Body.Close()
 
 	return sessionAndChannel{session: cookie, channelID: chBody.Channel.ID}
+}
+
+func pollUntil(t *testing.T, timeout time.Duration, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !fn() {
+		t.Fatalf("condition not met within %s", timeout)
+	}
 }
 
 // TestMockDaemonViewSyncRoundTrip drives a fake daemonbus connection

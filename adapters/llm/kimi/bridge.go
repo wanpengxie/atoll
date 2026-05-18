@@ -215,7 +215,7 @@ func (b *Bridge) Run(ctx context.Context, ipc IPCFacade) error {
 
 	provider, err := b.buildProvider()
 	if err != nil {
-		return b.emitTerminalLLMError(ctx, ipc, err, "")
+		return b.emitTerminalLLMError(ctx, ipc, err, "", "")
 	}
 
 	wireCh := make(chan wire.WireMessage, 128)
@@ -235,7 +235,7 @@ func (b *Bridge) Run(ctx context.Context, ipc IPCFacade) error {
 		},
 	})
 	if err != nil {
-		return b.emitTerminalLLMError(ctx, ipc, err, "")
+		return b.emitTerminalLLMError(ctx, ipc, err, "", "")
 	}
 	defer func() { _ = agent.Close() }()
 
@@ -281,7 +281,7 @@ func (b *Bridge) runTurn(
 ) error {
 	input, err := composeUserInput(trigger)
 	if err != nil {
-		return b.emitTerminalLLMError(ctx, ipc, err, trigger.Envelope.ID)
+		return b.emitTerminalLLMError(ctx, ipc, err, trigger.Envelope.ID, terminalErrorCorrelationID(trigger))
 	}
 
 	turnCtx, cancel := context.WithCancel(ctx)
@@ -313,7 +313,7 @@ func (b *Bridge) runTurn(
 	}
 	runErr := <-runErrCh
 	if runErr != nil {
-		return b.emitTerminalLLMError(ctx, ipc, runErr, trigger.Envelope.ID)
+		return b.emitTerminalLLMError(ctx, ipc, runErr, trigger.Envelope.ID, terminalErrorCorrelationID(trigger))
 	}
 	return nil
 }
@@ -511,6 +511,7 @@ func (b *Bridge) emitTerminalLLMError(
 	ipc IPCFacade,
 	err error,
 	parentEnvID string,
+	correlationID string,
 ) error {
 	if err == nil {
 		return nil
@@ -524,22 +525,30 @@ func (b *Bridge) emitTerminalLLMError(
 	body, _ := json.Marshal(payload)
 	now := b.cfg.NowFn()
 	env := message.Envelope{
-		ID:         b.envelopeID(ipc, now),
-		ChannelID:  string(ipc.ChannelID()),
-		Type:       "agent.text",
-		Kind:       message.KindEvent,
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: ipc.WorkerActorID()},
-		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
-		Payload:    body,
-		ParentID:   parentEnvID,
-		TS:         now,
-		TSReceived: now,
+		ID:            b.envelopeID(ipc, now),
+		ChannelID:     string(ipc.ChannelID()),
+		Type:          "agent.text",
+		Kind:          message.KindEvent,
+		Sender:        message.Sender{Kind: message.SenderAgent, ID: ipc.WorkerActorID()},
+		Visibility:    message.VisibilityPublic,
+		Audience:      []string{"*"},
+		Payload:       body,
+		ParentID:      parentEnvID,
+		CorrelationID: correlationID,
+		TS:            now,
+		TSReceived:    now,
 	}
 	if writeErr := ipc.WriteEnvelope(ctx, env); writeErr != nil {
 		return errors.Join(err, writeErr)
 	}
 	return err
+}
+
+func terminalErrorCorrelationID(trigger TriggerPayload) string {
+	if trigger.CorrelationID != "" {
+		return trigger.CorrelationID
+	}
+	return trigger.Envelope.CorrelationID
 }
 
 // envelopeID generates a deterministic-shape id for emitted envelopes.

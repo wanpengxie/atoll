@@ -288,6 +288,9 @@ func TestBridge_RunEmitsFailedTerminalOnLLMError(t *testing.T) {
 	if last.Visibility != message.VisibilityPublic {
 		t.Errorf("visibility=%q want public", last.Visibility)
 	}
+	if last.CorrelationID != "corr-1" {
+		t.Errorf("correlation_id=%q want corr-1", last.CorrelationID)
+	}
 }
 
 func TestBridge_EnvelopeIDUniqueWithinSameMillisecond(t *testing.T) {

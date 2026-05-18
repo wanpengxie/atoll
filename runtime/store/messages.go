@@ -493,7 +493,9 @@ func classifyAppendErr(err error, envID string) error {
 			Detail:           msg,
 			PartialMessageID: envID,
 		}
-	case strings.Contains(msg, "ux_terminal_response_per_request"):
+	case strings.Contains(msg, "ux_terminal_response_per_request") ||
+		strings.Contains(msg, "UNIQUE constraint failed: messages.parent_id") ||
+		strings.Contains(msg, "parent_id, kind, is_terminal"):
 		return &klog.AppendError{
 			Reason:           message.HarnessTerminalDuplicate,
 			Detail:           msg,

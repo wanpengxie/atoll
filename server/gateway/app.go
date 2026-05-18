@@ -164,6 +164,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	app.viewcache.SetResyncer(&busResyncer{bus: app.daemonbus, viewcache: app.viewcache})
 	app.viewcache.SetAccessAuthorizer(app)
 	app.pushhub.SetAccessAuthorizer(app)
+	app.catalog.SetSubscriptionRevoker(app.pushhub)
 
 	// T147 §A-S2 — bind / unbind device session frames flow through the
 	// gateway's daemonbus client. devicebus's HTTP issue / revoke routes

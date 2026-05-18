@@ -53,7 +53,8 @@ func TestSaga_Bootstrap(t *testing.T) {
 		t.Errorf("channel sqlite missing: %v", err)
 	}
 
-	// bootstrap_registry row marked completed.
+	// bootstrap_registry row stays in_progress until the caller has inserted
+	// channel_lock and invoked Complete.
 	var status string
 	if err := daemonDB.QueryRowContext(ctx,
 		`SELECT status FROM bootstrap_registry WHERE create_request_id=?`,
@@ -61,8 +62,20 @@ func TestSaga_Bootstrap(t *testing.T) {
 	).Scan(&status); err != nil {
 		t.Fatal(err)
 	}
-	if status != "completed" {
+	if status != "in_progress" {
 		t.Errorf("bootstrap_registry status = %q", status)
+	}
+	if err := saga.Complete(ctx, "req-001"); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if err := daemonDB.QueryRowContext(ctx,
+		`SELECT status FROM bootstrap_registry WHERE create_request_id=?`,
+		"req-001",
+	).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "completed" {
+		t.Errorf("bootstrap_registry status after Complete = %q", status)
 	}
 
 	// Channel sqlite has system + alice in actor_registry.
@@ -158,6 +171,49 @@ func TestReconciler_RollsBackInProgress(t *testing.T) {
 	// Status flipped.
 	var status string
 	_ = daemonDB.QueryRowContext(ctx, `SELECT status FROM bootstrap_registry WHERE create_request_id=?`, "req-crash").Scan(&status)
+	if status != "rolled_back" {
+		t.Errorf("status = %q", status)
+	}
+}
+
+func TestReconciler_RollsBackCompletedWithoutChannelLock(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	daemonDB, _ := store.OpenDaemon(ctx, filepath.Join(root, "daemon.sqlite"), store.OpenOptions{})
+	defer func() { _ = daemonDB.Close() }()
+
+	channelDir := filepath.Join(root, "channels", "completed-no-lock")
+	if err := os.MkdirAll(channelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	chDB, err := store.OpenChannel(ctx, filepath.Join(channelDir, "channel.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = chDB.Close()
+	if _, err := daemonDB.ExecContext(ctx, `INSERT INTO bootstrap_registry
+		(create_request_id, channel_id, status, workdir_path, started_at, completed_at)
+		VALUES (?, ?, 'completed', ?, ?, ?)`,
+		"req-completed-no-lock", "completed-no-lock", channelDir, now(), now()); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := bootstrap.NewReconciler(daemonDB, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolled, err := rec.Run(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rolled) != 1 || rolled[0].ChannelID != "completed-no-lock" {
+		t.Fatalf("rolled = %+v", rolled)
+	}
+	if _, err := os.Stat(channelDir); !os.IsNotExist(err) {
+		t.Errorf("completed/no-lock workdir should be removed: %v", err)
+	}
+	var status string
+	_ = daemonDB.QueryRowContext(ctx, `SELECT status FROM bootstrap_registry WHERE create_request_id=?`, "req-completed-no-lock").Scan(&status)
 	if status != "rolled_back" {
 		t.Errorf("status = %q", status)
 	}

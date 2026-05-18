@@ -31,6 +31,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	kharness "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -280,6 +281,27 @@ func (h *fakeRespondHarness) RespondFunc() adapter.RespondFunc {
 		})
 		return adapter.RespondResult{MessageID: "msg-" + requestID, Deduped: false}, nil
 	}
+}
+
+type eventChain struct {
+	mu      sync.Mutex
+	written []*message.Envelope
+}
+
+func (c *eventChain) Write(_ context.Context, env *message.Envelope) (kharness.WriteResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cp := *env
+	c.written = append(c.written, &cp)
+	return kharness.WriteResult{MessageID: env.ID, Seq: int64(len(c.written))}, nil
+}
+
+func (c *eventChain) Written() []*message.Envelope {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]*message.Envelope, len(c.written))
+	copy(out, c.written)
+	return out
 }
 
 // ---- helpers ------------------------------------------------------------
@@ -733,6 +755,45 @@ func TestOrphanCallbackIsDropped(t *testing.T) {
 	}
 	if len(h.respond.calls) != 0 {
 		t.Errorf("orphan callback must not produce a Respond; got %d", len(h.respond.calls))
+	}
+}
+
+func TestParseFailureEmitsOrphanCallbackEvents(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	chain := &eventChain{}
+	h.mctx.HarnessChain = chain
+
+	err := h.module.OnExternalCallback(ctx, []byte(`{"status":"ok"}`))
+	if err == nil || !strings.Contains(err.Error(), "missing correlation_id") {
+		t.Fatalf("expected parse error for missing correlation_id, got %v", err)
+	}
+	if len(h.respond.calls) != 0 {
+		t.Fatalf("parse failure must not produce a Respond; got %d", len(h.respond.calls))
+	}
+	written := chain.Written()
+	if len(written) != 2 {
+		t.Fatalf("expected orphan callback + system event writes, got %d", len(written))
+	}
+	if written[0].Type != "adapter.xhs.orphan_callback" || written[0].Kind != message.KindEvent {
+		t.Fatalf("first event type/kind=%s/%s", written[0].Type, written[0].Kind)
+	}
+	if written[1].Type != "system.event" || written[1].Kind != message.KindEvent {
+		t.Fatalf("second event type/kind=%s/%s", written[1].Type, written[1].Kind)
+	}
+	var adapterPayload map[string]any
+	if err := json.Unmarshal(written[0].Payload, &adapterPayload); err != nil {
+		t.Fatalf("decode orphan payload: %v", err)
+	}
+	if adapterPayload["kind"] != "orphan_callback" || adapterPayload["detail"] == "" {
+		t.Fatalf("orphan payload=%v", adapterPayload)
+	}
+	var systemPayload map[string]any
+	if err := json.Unmarshal(written[1].Payload, &systemPayload); err != nil {
+		t.Fatalf("decode system payload: %v", err)
+	}
+	if systemPayload["kind"] != "correlation_lost" || systemPayload["severity"] != "warn" {
+		t.Fatalf("system payload=%v", systemPayload)
 	}
 }
 

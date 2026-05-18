@@ -128,6 +128,16 @@ func TestManagerInstallSeedsTypeRegistry(t *testing.T) {
 	if _, ok, _ := registry.Lookup(context.Background(), "feishu.chat.create"); !ok {
 		t.Fatalf("type_registry missing feishu.chat.create")
 	}
+	orphan, ok, err := registry.Lookup(context.Background(), OrphanCallbackType("feishu"))
+	if err != nil {
+		t.Fatalf("lookup orphan callback type: %v", err)
+	}
+	if !ok {
+		t.Fatalf("type_registry missing %s", OrphanCallbackType("feishu"))
+	}
+	if len(orphan.AllowedKinds) != 1 || orphan.AllowedKinds[0] != message.KindEvent {
+		t.Fatalf("orphan callback allowed kinds=%v want [event]", orphan.AllowedKinds)
+	}
 }
 
 func TestManagerInstallRejectsMissingActor(t *testing.T) {
@@ -454,6 +464,124 @@ func TestManagerTimerFiresDefaultTimeout(t *testing.T) {
 	}
 }
 
+func TestManagerTimerRetriesTransientRespondWriteErrors(t *testing.T) {
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu",
+			Types:        []string{"feishu.chat.send"},
+			Binding:      adapter.BindingOutboundHTTP,
+			MaxPendingMs: 20,
+		},
+		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {
+			return nil
+		},
+	}
+	mgr, chain, lookup, _, _ := newTestManager(t, mod)
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
+	chain.errs = []error{
+		errors.New("transient write 1"),
+		errors.New("transient write 2"),
+	}
+
+	req := newTestRequest("channel:test", "agent:a", "feishu.chat.send", "req-timer-retry")
+	lookup.Put(req)
+	if err := mgr.Dispatch(context.Background(), req); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(chain.Written()) >= 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	written := chain.Written()
+	if len(written) != 3 {
+		t.Fatalf("expected 3 response write attempts, got %d", len(written))
+	}
+	for i, env := range written {
+		if env.Kind != message.KindResponse {
+			t.Fatalf("write %d kind=%s want response", i+1, env.Kind)
+		}
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(written[2].Payload, &payload); err != nil {
+		t.Fatalf("decode final payload: %v", err)
+	}
+	if payload["reason"] != string(message.TerminalAdapterDefaultTimeout) {
+		t.Fatalf("payload.reason=%v want adapter_default_timeout", payload["reason"])
+	}
+}
+
+func TestManagerTimerEmitsSystemEventAfterPermanentRespondWriteFailure(t *testing.T) {
+	metrics := NewMemoryMetrics()
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu",
+			Types:        []string{"feishu.chat.send"},
+			Binding:      adapter.BindingOutboundHTTP,
+			MaxPendingMs: 20,
+		},
+		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {
+			return nil
+		},
+	}
+	mgr, chain, lookup, _, _ := newTestManager(t, mod, func(cfg *ManagerConfig) {
+		cfg.Metrics = metrics
+	})
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
+	chain.errs = []error{
+		errors.New("permanent write 1"),
+		errors.New("permanent write 2"),
+		errors.New("permanent write 3"),
+	}
+
+	req := newTestRequest("channel:test", "agent:a", "feishu.chat.send", "req-timer-terminal-failed")
+	lookup.Put(req)
+	if err := mgr.Dispatch(context.Background(), req); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(chain.Written()) >= 4 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	written := chain.Written()
+	if len(written) != 4 {
+		t.Fatalf("expected 3 failed responses plus system event, got %d", len(written))
+	}
+	event := written[3]
+	if event.Kind != message.KindEvent || event.Type != "system.event" {
+		t.Fatalf("last write kind/type=%s/%s want event/system.event", event.Kind, event.Type)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		t.Fatalf("decode system event: %v", err)
+	}
+	if payload["kind"] != systemEventTimerTerminalFailed {
+		t.Fatalf("system event kind=%v want %s", payload["kind"], systemEventTimerTerminalFailed)
+	}
+	if payload["request_id"] != "req-timer-terminal-failed" {
+		t.Fatalf("system event request_id=%v", payload["request_id"])
+	}
+	if got := metrics.Counter("adapter.policy.timer_terminal_failed", "adapter", "feishu"); got != 1 {
+		t.Fatalf("timer_terminal_failed metric=%d want 1", got)
+	}
+	entry, ok, err := mod.mctx.Correlation.Get(context.Background(), "req-timer-terminal-failed")
+	if err != nil {
+		t.Fatalf("correlation get: %v", err)
+	}
+	if !ok || entry.State != adapter.CorrelationExpired {
+		t.Fatalf("correlation state=%v ok=%v want expired", entry.State, ok)
+	}
+}
+
 func TestManagerRespondCancelsTimer(t *testing.T) {
 	var responded atomic.Bool
 	mod := &stubModule{
@@ -516,6 +644,54 @@ func TestManagerOnExternalCallbackRoutes(t *testing.T) {
 	err := mgr.OnExternalCallback(context.Background(), "unknown", nil)
 	if err == nil {
 		t.Fatalf("expected error for unknown adapter")
+	}
+}
+
+func TestManagerOnExternalCallbackEmitsOrphanEvents(t *testing.T) {
+	var routed atomic.Bool
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu",
+			Types:        []string{"feishu.chat.send"},
+			Binding:      adapter.BindingOutboundHTTP,
+			MaxPendingMs: 30_000,
+		},
+		onCallback: func(context.Context, []byte, *adapter.ModuleContext) error {
+			routed.Store(true)
+			return nil
+		},
+	}
+	mgr, chain, _, _, _ := newTestManager(t, mod)
+	if err := mgr.OnExternalCallback(context.Background(), "feishu", []byte(`{"correlation_id":"ghost","status":"ok"}`)); err != nil {
+		t.Fatalf("OnExternalCallback: %v", err)
+	}
+	if routed.Load() {
+		t.Fatalf("orphan callback should not route into module")
+	}
+	written := chain.Written()
+	if len(written) != 2 {
+		t.Fatalf("expected orphan callback + system event writes, got %d", len(written))
+	}
+	if written[0].Type != OrphanCallbackType("feishu") || written[0].Kind != message.KindEvent {
+		t.Fatalf("first event type/kind=%s/%s", written[0].Type, written[0].Kind)
+	}
+	if written[1].Type != "system.event" || written[1].Kind != message.KindEvent {
+		t.Fatalf("second event type/kind=%s/%s", written[1].Type, written[1].Kind)
+	}
+	var adapterPayload map[string]any
+	if err := json.Unmarshal(written[0].Payload, &adapterPayload); err != nil {
+		t.Fatalf("decode orphan payload: %v", err)
+	}
+	if adapterPayload["kind"] != orphanCallbackPayloadKind || adapterPayload["correlation_id"] != "ghost" {
+		t.Fatalf("orphan payload=%v", adapterPayload)
+	}
+	var systemPayload map[string]any
+	if err := json.Unmarshal(written[1].Payload, &systemPayload); err != nil {
+		t.Fatalf("decode system payload: %v", err)
+	}
+	if systemPayload["kind"] != systemEventCorrelationLost || systemPayload["correlation_id"] != "ghost" {
+		t.Fatalf("system payload=%v", systemPayload)
 	}
 }
 

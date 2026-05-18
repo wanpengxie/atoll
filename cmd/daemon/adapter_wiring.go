@@ -172,12 +172,14 @@ func deliverThroughManager(mgr adapter.Manager, adapterID actor.ActorID, channel
 }
 
 // adapterCallerChain wraps a kernel/harness.Chain and stamps the
-// CallerContext to env.Sender.ID when the envelope's sender is a tool
-// actor. Used by the adapter framework so its inner chain.Write calls
+// CallerContext to env.Sender.ID when the envelope carries an explicit
+// actor sender. Used by the adapter framework so its inner chain.Write calls
 // pass the harness step-1/step-3 caller-vs-sender check regardless of
 // whether the call was made on the synchronous Handle→Respond path
 // (inbound stamp is the request author) or the F3 timer-fire path
-// (no inbound stamp at all).
+// (no inbound stamp at all). Adapter observability events may be emitted
+// by system as well as tool actors, so the stamp follows the envelope
+// sender rather than only SenderTool.
 type adapterCallerChain struct {
 	inner     khar.Chain
 	channelID channel.ID
@@ -185,7 +187,7 @@ type adapterCallerChain struct {
 
 // Write satisfies kernel/harness.Chain.
 func (c *adapterCallerChain) Write(ctx context.Context, env *message.Envelope) (khar.WriteResult, error) {
-	if env != nil && env.Sender.Kind == message.SenderTool && env.Sender.ID != "" {
+	if env != nil && env.Sender.ID != "" {
 		ctx = harness.CtxWithCaller(ctx, harness.CallerContext{
 			ActorID:                 actor.ActorID(env.Sender.ID),
 			ChannelID:               c.channelID,
@@ -236,7 +238,10 @@ const XHSCreatorChannelType = "xhs-creator"
 // (not in_process — the framework Install path otherwise rejects the
 // module per L2 §1.4.6 binding consistency).
 func DeviceXHSFactory(sessionStore deviceframework.SessionStore, cfg devicexhs.Config) AdapterModuleFactory {
-	return func(_ context.Context, _ runtime.ChannelHooks) (adapter.Module, error) {
+	return func(_ context.Context, h runtime.ChannelHooks) (adapter.Module, error) {
+		if h.ChannelType != XHSCreatorChannelType {
+			return nil, nil
+		}
 		effective := cfg
 		if effective.SessionStore == nil {
 			if sessionStore == nil {

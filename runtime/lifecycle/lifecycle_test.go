@@ -43,6 +43,16 @@ func (s *stubBootstrapper) Bootstrap(ctx context.Context, id channel.ID, _ place
 	return dbPath, nil
 }
 
+type completingBootstrapper struct {
+	stubBootstrapper
+	completed []string
+}
+
+func (s *completingBootstrapper) Complete(_ context.Context, createRequestID string) error {
+	s.completed = append(s.completed, createRequestID)
+	return nil
+}
+
 type lockOpener struct {
 	dbs map[string]*sql.DB
 }
@@ -186,6 +196,58 @@ func TestCreate_FreshBootstrap(t *testing.T) {
 	}
 	if row.FencingToken != 1 || row.DaemonEpoch != 7 {
 		t.Errorf("local lock row = %+v", row)
+	}
+}
+
+func TestCreate_CompletesBootstrapAfterLockInsert(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	root := t.TempDir()
+	channelsDir := filepath.Join(root, "channels")
+	bootstrapper := &completingBootstrapper{
+		stubBootstrapper: stubBootstrapper{root: channelsDir},
+	}
+	opener := newLockOpener()
+	defer opener.Close()
+
+	var acks []placement.CreateChannelAck
+	creator, err := lifecycle.NewCreator(lifecycle.CreatorConfig{
+		DaemonID:     placement.DaemonID("daemon-A"),
+		DaemonEpoch:  placement.DaemonEpoch(7),
+		NowFn:        now,
+		ChannelsDir:  channelsDir,
+		Bootstrapper: bootstrapper,
+		LockOpener:   opener.Open,
+		FrameIDGen:   frameIDGen(),
+		EmitAck: func(ctx context.Context, ack placement.CreateChannelAck) error {
+			acks = append(acks, ack)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := placement.CreateChannelRequest{
+		ChannelID:       channel.ID("ch-complete"),
+		CreateRequestID: placement.CreateRequestID("req-complete"),
+		OwnerEpoch:      placement.OwnerEpoch(1),
+		FencingToken:    placement.FencingToken(1),
+	}
+	if err := creator.HandleCreate(ctx, daemonbus.Frame{FrameID: "f-complete"}, req); err != nil {
+		t.Fatalf("HandleCreate: %v", err)
+	}
+	if len(acks) != 1 || acks[0].Status != placement.AckBound {
+		t.Fatalf("acks=%+v want one bound ack", acks)
+	}
+	if len(bootstrapper.completed) != 1 || bootstrapper.completed[0] != "req-complete" {
+		t.Fatalf("completed=%v want [req-complete]", bootstrapper.completed)
+	}
+	sqlitePath := filepath.Join(channelsDir, "ch-complete", "channel.sqlite")
+	lock, _ := opener.Open(ctx, sqlitePath)
+	if _, ok, _ := lock.Get(ctx); !ok {
+		t.Fatal("channel_lock row missing")
 	}
 }
 

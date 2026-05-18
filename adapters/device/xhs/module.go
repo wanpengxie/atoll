@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/adapters/device/framework"
+	adapterframework "github.com/wanpengxie/ActOS/adapters/framework"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -232,6 +233,17 @@ func (m *Module) OnExternalCallback(ctx context.Context, raw []byte) error {
 	}
 	cb, err := parseCallback(raw)
 	if err != nil {
+		if emitErr := adapterframework.EmitOrphanCallbackEvents(ctx, adapterframework.OrphanCallbackEvent{
+			AdapterName:    AdapterName,
+			AdapterActorID: m.mctx.AdapterActorID,
+			ChannelID:      m.mctx.ChannelID,
+			Chain:          m.mctx.HarnessChain,
+			Clock:          m.now,
+			Detail:         err.Error(),
+			Payload:        raw,
+		}); emitErr != nil {
+			return fmt.Errorf("xhs.OnExternalCallback: emit parse failure event: %w", emitErr)
+		}
 		return err
 	}
 

@@ -63,8 +63,10 @@ type TemplateView struct {
 //     to the AdapterActorSeeds field for backward compatibility.
 //     5c. Mkdir template WorkdirSubdirs (M1.6-T5 phase-2 — e.g.
 //     published-notes/, drafts/, assets/ for the xhs-creator template).
-//  6. (caller — runtime/lifecycle.Creator) writes channel_lock row.
-//  7. Mark bootstrap_registry status='completed'.
+//  6. (caller — runtime/lifecycle.Creator / runtime.Daemon) writes
+//     channel_lock row.
+//  7. Caller invokes Complete to mark bootstrap_registry status='completed'
+//     only after channel_lock is durable.
 //
 // On failure between steps 2 and 7 the row is left status='in_progress'
 // so reconcile.go can roll it back on next start.
@@ -158,7 +160,7 @@ func (s *Saga) Bootstrap(
 
 	// Step 4 — register system actor.
 	reg := store.NewActorRegistry(channelDB)
-	if err := reg.Insert(ctx, actor.Record{
+	if err := s.insertActorIfMissing(ctx, reg, actor.Record{
 		ID:        actor.SystemActorID,
 		Kind:      message.SenderSystem,
 		Binding:   "",
@@ -176,7 +178,7 @@ func (s *Saga) Bootstrap(
 		if m.Kind != "" {
 			kind = message.SenderKind(m.Kind)
 		}
-		if err := reg.Insert(ctx, actor.Record{
+		if err := s.insertActorIfMissing(ctx, reg, actor.Record{
 			ID:          actor.ActorID(m.ActorIDInChannel),
 			Kind:        kind,
 			DisplayName: m.DisplayName,
@@ -208,7 +210,7 @@ func (s *Saga) Bootstrap(
 		if rec.CreatedAt == 0 {
 			rec.CreatedAt = s.nowFn()
 		}
-		if err := reg.Insert(ctx, rec); err != nil {
+		if err := s.insertActorIfMissing(ctx, reg, rec); err != nil {
 			return "", fmt.Errorf("bootstrap: insert adapter seed %s: %w", seed.ID, err)
 		}
 	}
@@ -238,11 +240,36 @@ func (s *Saga) Bootstrap(
 		}
 	}
 
-	// Step 7 — mark completed (step 6 happens in lifecycle.Creator).
-	if err := s.markCompleted(ctx, createReq); err != nil {
-		return "", err
-	}
 	return sqlitePath, nil
+}
+
+// Complete marks a create request completed after the caller has durably
+// inserted channel_lock. Keeping completion after lock insertion eliminates
+// the completed-without-lock crash window while preserving Saga's ownership
+// of bootstrap_registry.
+func (s *Saga) Complete(ctx context.Context, createReq string) error {
+	if createReq == "" {
+		return errors.New("bootstrap: complete empty create_request_id")
+	}
+	return s.markCompleted(ctx, createReq)
+}
+
+func (s *Saga) insertActorIfMissing(ctx context.Context, reg *store.ActorRegistry, rec actor.Record) error {
+	if rec.ID == "" {
+		return nil
+	}
+	existing, ok, err := reg.Lookup(ctx, rec.ID)
+	if err != nil {
+		return err
+	}
+	if ok {
+		if existing.Kind != rec.Kind || existing.Binding != rec.Binding {
+			return fmt.Errorf("actor %s exists with kind=%s binding=%s, want kind=%s binding=%s",
+				rec.ID, existing.Kind, existing.Binding, rec.Kind, rec.Binding)
+		}
+		return nil
+	}
+	return reg.Insert(ctx, rec)
 }
 
 func (s *Saga) insertRegistry(ctx context.Context, createReq string, channelID channel.ID, workdir string) error {
@@ -259,7 +286,7 @@ func (s *Saga) insertRegistry(ctx context.Context, createReq string, channelID c
 func (s *Saga) markCompleted(ctx context.Context, createReq string) error {
 	const upd = `UPDATE bootstrap_registry
 	             SET status='completed', completed_at=?
-	             WHERE create_request_id=? AND status='in_progress'`
+	             WHERE create_request_id=? AND status IN ('in_progress', 'completed')`
 	if _, err := s.daemonDB.ExecContext(ctx, upd, s.nowFn(), createReq); err != nil {
 		return fmt.Errorf("bootstrap: registry complete: %w", err)
 	}

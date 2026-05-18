@@ -1307,8 +1307,8 @@ func (d *Daemon) handleCreateChannel(
 		}
 	}
 
-	// Fresh bootstrap path: run the saga (steps 1-5,7) then insert
-	// channel_lock (step 6 — daemon-side equivalent of lifecycle.Creator).
+	// Fresh bootstrap path: run the saga (steps 1-5), insert
+	// channel_lock (step 6), then mark bootstrap complete (step 7).
 	if _, err := d.saga.Bootstrap(ctx, req.ChannelID, req); err != nil {
 		ack.Status = placement.AckRejected
 		ack.Reason = fmt.Sprintf("saga: %v", err)
@@ -1336,6 +1336,11 @@ func (d *Daemon) handleCreateChannel(
 	}); err != nil {
 		ack.Status = placement.AckRejected
 		ack.Reason = fmt.Sprintf("lock insert: %v", err)
+		return d.sendCreateAck(ctx, ack)
+	}
+	if err := d.saga.Complete(ctx, string(req.CreateRequestID)); err != nil {
+		ack.Status = placement.AckRejected
+		ack.Reason = fmt.Sprintf("bootstrap complete: %v", err)
 		return d.sendCreateAck(ctx, ack)
 	}
 
