@@ -19,6 +19,22 @@ import (
 // write goroutine while holding wsDeviceTransport.mu.
 const DefaultDeviceWSWriteTimeout = 10 * time.Second
 
+// DefaultDevicePingCadence is how often the server pings the device.
+// 30s gives ~3× margin against the cloudflare tunnel ~100s idle
+// reaper. Pings use gorilla WriteControl (bypasses application-frame
+// mutex) so a stuck app write cannot starve them.
+const DefaultDevicePingCadence = 30 * time.Second
+
+// DefaultDeviceIdleReadTimeout is the maximum time the server will
+// block reading from a device WS before declaring it dead. ~2.3× the
+// ping cadence absorbs one missed pong without false-positive
+// teardown.
+const DefaultDeviceIdleReadTimeout = 70 * time.Second
+
+// DefaultDevicePingWriteTimeout caps a single ping write; on failure
+// the conn is closed and the read loop unwedges.
+const DefaultDevicePingWriteTimeout = 5 * time.Second
+
 // Connection wraps one open device WS — sender of device_transit
 // frames to the daemon (via daemonbus) + receiver of frames pushed
 // back from the daemon.
@@ -89,15 +105,70 @@ func (c *Connection) Close() error {
 }
 
 // wsDeviceTransport adapts gorilla to DeviceTransport.
+//
+// Keepalive: ping/pong identical to server/daemonbus/wsTransport.
+// Server pings the device every cadence via WriteControl; PongHandler
+// + per-read refresh keeps the read deadline alive; an idle peer
+// trips the deadline after idleReadTimeout and the conn closes.
 type wsDeviceTransport struct {
 	mu sync.Mutex
 	ws *websocket.Conn
+
+	idleReadTimeout time.Duration
+	stopPing        chan struct{}
+	stopOnce        sync.Once
+}
+
+func newWSDeviceTransport(ws *websocket.Conn) *wsDeviceTransport {
+	return &wsDeviceTransport{
+		ws:       ws,
+		stopPing: make(chan struct{}),
+	}
+}
+
+func (t *wsDeviceTransport) startPinger(cadence, pingWriteTimeout, idleReadTimeout time.Duration) {
+	t.idleReadTimeout = idleReadTimeout
+	ws := t.ws
+	defaultPingHandler := ws.PingHandler()
+	ws.SetPingHandler(func(appData string) error {
+		_ = ws.SetReadDeadline(time.Now().Add(idleReadTimeout))
+		return defaultPingHandler(appData)
+	})
+	ws.SetPongHandler(func(string) error {
+		_ = ws.SetReadDeadline(time.Now().Add(idleReadTimeout))
+		return nil
+	})
+	_ = ws.SetReadDeadline(time.Now().Add(idleReadTimeout))
+
+	go func() {
+		ticker := time.NewTicker(cadence)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-t.stopPing:
+				return
+			case <-ticker.C:
+				err := ws.WriteControl(
+					websocket.PingMessage,
+					nil,
+					time.Now().Add(pingWriteTimeout),
+				)
+				if err != nil {
+					_ = ws.Close()
+					return
+				}
+			}
+		}
+	}()
 }
 
 func (t *wsDeviceTransport) ReadFrame(ctx context.Context) (DeviceFrame, error) {
 	_, data, err := t.ws.ReadMessage()
 	if err != nil {
 		return DeviceFrame{}, err
+	}
+	if t.idleReadTimeout > 0 {
+		_ = t.ws.SetReadDeadline(time.Now().Add(t.idleReadTimeout))
 	}
 	var f DeviceFrame
 	if err := json.Unmarshal(data, &f); err != nil {
@@ -125,7 +196,14 @@ func (t *wsDeviceTransport) WriteFrame(ctx context.Context, f DeviceFrame) error
 	}
 	return nil
 }
-func (t *wsDeviceTransport) Close() error { return t.ws.Close() }
+func (t *wsDeviceTransport) Close() error {
+	t.stopOnce.Do(func() {
+		if t.stopPing != nil {
+			close(t.stopPing)
+		}
+	})
+	return t.ws.Close()
+}
 
 // TransitForwarder is implemented by the gateway — it knows how to
 // reach the daemonbus connection for the channel + how to wrap a
@@ -158,7 +236,21 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 		if err != nil {
 			return
 		}
-		conn := NewConnection(row, &wsDeviceTransport{ws: ws})
+		tx := newWSDeviceTransport(ws)
+		cadence := s.cfg.PingCadence
+		if cadence <= 0 {
+			cadence = DefaultDevicePingCadence
+		}
+		idle := s.cfg.IdleReadTimeout
+		if idle <= 0 {
+			idle = DefaultDeviceIdleReadTimeout
+		}
+		pingWrite := s.cfg.PingWriteTimeout
+		if pingWrite <= 0 {
+			pingWrite = DefaultDevicePingWriteTimeout
+		}
+		tx.startPinger(cadence, pingWrite, idle)
+		conn := NewConnection(row, tx)
 		if err := s.MarkActive(c.Request.Context(), sessionID); err != nil {
 			_ = conn.Close()
 			return

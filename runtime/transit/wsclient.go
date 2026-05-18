@@ -27,6 +27,19 @@ import (
 // deadline so this lower bound dominates.
 const DefaultWSWriteTimeout = 10 * time.Second
 
+// DefaultWSIdleReadTimeout bounds how long Recv may block without
+// hearing ANY frame (including ping/pong control frames). The server
+// side actively pings every 30s (see server/daemonbus.DefaultPingCadence)
+// so 70s gives ~2.3× margin to absorb one missed ping before the read
+// side surfaces EOF and the supervisor reconnects. Without this floor
+// a half-open TCP partition (cloudflare tunnel drops outgoing frames
+// silently — no FIN, no RST) wedges the reader forever on
+// conn.ReadMessage, and the only liveness signal becomes the next
+// heartbeat write attempt 15s later. ping/pong + idle read deadline
+// covers the case where there is NO heartbeat write to fail (e.g. the
+// daemon is quiescent between ticks).
+const DefaultWSIdleReadTimeout = 70 * time.Second
+
 // WSClientConfig wires a WSClient — the production daemon-side transit
 // Transport that speaks gorilla/websocket against
 // `server/daemonbus.HandleWS`.
@@ -73,6 +86,16 @@ type WSClientConfig struct {
 	// write_message ack reply, ...). A timed-out write returns an error
 	// and marks the underlying conn dead so the caller can reconnect.
 	WriteTimeout time.Duration
+
+	// IdleReadTimeout is the maximum time Recv may block without
+	// receiving ANY frame (including server-initiated ping control
+	// frames). Defaults to DefaultWSIdleReadTimeout. MUST be larger
+	// than the server-side ping cadence so a single missed ping does
+	// not trip a false-positive disconnect. On expiry Recv returns an
+	// i/o timeout error, the conn is marked dead, and the supervisor
+	// dials a fresh connection. Tests override to a smaller value to
+	// keep the assertion window tight.
+	IdleReadTimeout time.Duration
 
 	// Logger receives connection lifecycle + transport error events. May
 	// be nil — when nil a no-op zerolog.Nop() is used.
@@ -123,6 +146,9 @@ func NewWSClient(cfg WSClientConfig) (*WSClient, error) {
 	}
 	if cfg.WriteTimeout <= 0 {
 		cfg.WriteTimeout = DefaultWSWriteTimeout
+	}
+	if cfg.IdleReadTimeout <= 0 {
+		cfg.IdleReadTimeout = DefaultWSIdleReadTimeout
 	}
 	log := zerolog.Nop()
 	if cfg.Logger != nil {
@@ -194,10 +220,41 @@ func (c *WSClient) Connect(ctx context.Context) (daemonbus.ConnectionEpoch, erro
 		_ = conn.Close()
 		return 0, err
 	}
+
+	// Install Ping/Pong handlers that refresh the idle read deadline.
+	// gorilla calls these from inside ReadMessage when the
+	// corresponding control frame arrives — and crucially,
+	// ReadMessage does NOT return on a control frame, so without
+	// these the deadline would not refresh until a business text
+	// frame happened to arrive.
+	//
+	// In our production wiring the server actively pings the client
+	// (see server/daemonbus.DefaultPingCadence). The PingHandler is
+	// therefore the primary refresh path; PongHandler is included for
+	// symmetry in case the client ever starts pinging the server.
+	idleTimeout := c.cfg.IdleReadTimeout
+	defaultPingHandler := conn.PingHandler()
+	conn.SetPingHandler(func(appData string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(idleTimeout))
+		// Preserve gorilla's default behaviour: auto-reply with a
+		// pong carrying the same appData. defaultPingHandler returns
+		// non-nil on write error (other than transient
+		// timeouts) — propagate that.
+		return defaultPingHandler(appData)
+	})
+	conn.SetPongHandler(func(string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(idleTimeout))
+		return nil
+	})
+	// Seed the initial read deadline so Recv before any traffic
+	// arrives can still trip the idle floor.
+	_ = conn.SetReadDeadline(time.Now().Add(idleTimeout))
+
 	c.conn = conn
 	c.log.Info().Str("event", "transit.ws.connected").
 		Int64("connection_epoch", int64(epoch)).
 		Str("daemon_id", c.cfg.DaemonID).
+		Dur("idle_read_timeout", idleTimeout).
 		Msg("daemonbus websocket connected")
 	return epoch, nil
 }
@@ -274,6 +331,14 @@ func (c *WSClient) Send(ctx context.Context, frame daemonbus.Frame) error {
 
 // Recv blocks for the next text frame and parses it into daemonbus.Frame.
 // Returns an error when the websocket is closed or the JSON parse fails.
+//
+// Read deadline policy:
+//   - If ctx has a deadline AND it is sooner than now+IdleReadTimeout
+//     we use the ctx deadline (caller wants a tighter bound).
+//   - Otherwise we apply now+IdleReadTimeout. This is the half-open-
+//     detection floor: ANY ping/pong/data frame from the peer refreshes
+//     the deadline (pong via SetPongHandler installed in Connect; data
+//     via the explicit refresh after a successful read below).
 func (c *WSClient) Recv(ctx context.Context) (daemonbus.Frame, error) {
 	c.connMu.Lock()
 	conn := c.conn
@@ -281,14 +346,15 @@ func (c *WSClient) Recv(ctx context.Context) (daemonbus.Frame, error) {
 	if conn == nil {
 		return daemonbus.Frame{}, errors.New("transit: ws not connected")
 	}
-	// gorilla/websocket has no ctx-aware ReadMessage; we approximate
-	// cancellation by closing the conn on ctx.Done. Spawn a watchdog
-	// only when the ctx has a deadline.
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetReadDeadline(deadline)
-	} else {
-		_ = conn.SetReadDeadline(time.Time{})
+	idleTimeout := c.cfg.IdleReadTimeout
+	deadline := time.Now().Add(idleTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
 	}
+	_ = conn.SetReadDeadline(deadline)
+
+	// gorilla/websocket has no ctx-aware ReadMessage; we approximate
+	// cancellation by closing the read deadline to "now" on ctx.Done.
 	stop := make(chan struct{})
 	defer close(stop)
 	go func() {
@@ -306,11 +372,16 @@ func (c *WSClient) Recv(ctx context.Context) (daemonbus.Frame, error) {
 			return daemonbus.Frame{}, ctxErr
 		}
 		// A read error means the conn is gone (peer closed, framing
-		// error, deadline). Close it and clear the pointer so the
+		// error, idle deadline). Close it and clear the pointer so the
 		// dispatcher Loop's caller can reconnect cleanly.
 		c.markDead("read_error", err)
 		return daemonbus.Frame{}, fmt.Errorf("transit: ws read: %w", err)
 	}
+	// Successful read = liveness signal. Refresh the idle deadline.
+	// Belt-and-suspenders with the pong handler: business frames also
+	// count as proof the peer is alive (a busy daemonbus may receive
+	// many push/ack frames between pings).
+	_ = conn.SetReadDeadline(time.Now().Add(idleTimeout))
 	var frame daemonbus.Frame
 	if err := json.Unmarshal(data, &frame); err != nil {
 		return daemonbus.Frame{}, fmt.Errorf("transit: parse frame: %w", err)

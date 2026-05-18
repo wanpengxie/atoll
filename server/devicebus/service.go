@@ -75,6 +75,18 @@ type Config struct {
 	// AllowMissingOrigin explicitly permits requests with no Origin header
 	// (for non-browser clients). The zero value is fail-closed.
 	AllowMissingOrigin bool
+
+	// PingCadence overrides DefaultDevicePingCadence (tests). Zero =
+	// production default.
+	PingCadence time.Duration
+
+	// IdleReadTimeout overrides DefaultDeviceIdleReadTimeout (tests).
+	// Zero = production default.
+	IdleReadTimeout time.Duration
+
+	// PingWriteTimeout overrides DefaultDevicePingWriteTimeout (tests).
+	// Zero = production default.
+	PingWriteTimeout time.Duration
 }
 
 // Service is the devicebus facade.

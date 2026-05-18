@@ -437,3 +437,129 @@ func TestWSClient_SendFailureMarksConnDead(t *testing.T) {
 		t.Errorf("err=%v want 'not connected'", err)
 	}
 }
+
+// TestWSClient_IdleReadTimeoutTripsWhenServerSilent is the regression
+// test for the half-open detection fix (audit section A,
+// daemonbus-bugs-audit-20260518.md): when the server never sends
+// anything (no pings, no business frames, no pongs), a Recv with no
+// ctx deadline previously blocked forever. With ping/pong + idle
+// read deadline a Recv MUST return an i/o timeout error inside
+// IdleReadTimeout, and the conn MUST be marked dead so the
+// supervisor reconnects.
+//
+// We use IdleReadTimeout=300ms to keep the assertion window tight.
+// Production uses 70s; the policy under test is the same.
+func TestWSClient_IdleReadTimeoutTripsWhenServerSilent(t *testing.T) {
+	h := newWSHarness(t)
+	// Hold the conn open but NEVER write to the client after the
+	// connection_accepted frame. No business frames, no pings, no
+	// pongs — pure silence.
+	h.onConn = func(_ int64, conn *websocket.Conn) {
+		go func() {
+			<-time.After(10 * time.Second)
+			_ = conn.Close()
+		}()
+	}
+
+	client, err := transit.NewWSClient(transit.WSClientConfig{
+		URL: h.WSURL(), DaemonID: "daemon-A", Key: "sek-1",
+		IdleReadTimeout: 300 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := client.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Recv with a ctx that has NO deadline — the production
+	// dispatcher Loop path. IdleReadTimeout MUST still trip.
+	start := time.Now()
+	bgCtx := context.Background()
+	_, err = client.Recv(bgCtx)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected Recv to fail when server is silent")
+	}
+	// Must surface within ~5x IdleReadTimeout (slack for race detector +
+	// scheduling). The point: it returns at ALL within a bounded time.
+	if elapsed > 2*time.Second {
+		t.Fatalf("Recv took %v to fail — idle deadline not enforced (err=%v)", elapsed, err)
+	}
+	if !strings.Contains(err.Error(), "ws read") {
+		t.Errorf("expected ws read error, got %v", err)
+	}
+	// Conn must be marked dead so the supervisor can reconnect.
+	if client.IsConnected() {
+		t.Error("expected IsConnected=false after idle deadline tripped")
+	}
+}
+
+// TestWSClient_PongRefreshesReadDeadline asserts that a server-side
+// ping (which gorilla auto-replies to with a pong) keeps the conn
+// alive across multiple IdleReadTimeout intervals. Without the
+// PongHandler refresh the first idle deadline would still trip even
+// though pong control frames were arriving.
+func TestWSClient_PongRefreshesReadDeadline(t *testing.T) {
+	h := newWSHarness(t)
+	// Server pings every 100ms — well under the 300ms idle timeout.
+	h.onConn = func(_ int64, conn *websocket.Conn) {
+		go func() {
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+			deadline := time.After(2 * time.Second)
+			for {
+				select {
+				case <-ticker.C:
+					err := conn.WriteControl(
+						websocket.PingMessage,
+						nil,
+						time.Now().Add(time.Second),
+					)
+					if err != nil {
+						return
+					}
+				case <-deadline:
+					_ = conn.Close()
+					return
+				}
+			}
+		}()
+	}
+
+	client, err := transit.NewWSClient(transit.WSClientConfig{
+		URL: h.WSURL(), DaemonID: "daemon-A", Key: "sek-1",
+		IdleReadTimeout: 300 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := client.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Block on Recv for ~1.5s. Without pong refresh the 300ms idle
+	// deadline would fire after the first interval and Recv would
+	// return an error. With pong refresh Recv stays blocked until the
+	// server closes at the 2s mark.
+	recvCtx, recvCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer recvCancel()
+	_, err = client.Recv(recvCtx)
+	if err == nil {
+		t.Fatal("expected Recv to eventually fail")
+	}
+	// We expect ctx.DeadlineExceeded (the recvCtx 1500ms cap), NOT a
+	// ws read timeout from the 300ms idle deadline. If the idle
+	// deadline tripped despite incoming pongs, the test fails.
+	if !strings.Contains(err.Error(), "context deadline") {
+		t.Errorf("expected context deadline (pong refresh kept conn alive), got: %v", err)
+	}
+}

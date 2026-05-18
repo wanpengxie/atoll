@@ -36,6 +36,18 @@ type Config struct {
 	// SharedSecret is the HMAC key daemons present at connect time.
 	// Demo period uses one secret for every daemon.
 	SharedSecret string
+
+	// PingCadence overrides DefaultPingCadence (tests). Zero =
+	// production default.
+	PingCadence time.Duration
+
+	// IdleReadTimeout overrides DefaultServerIdleReadTimeout (tests).
+	// Zero = production default.
+	IdleReadTimeout time.Duration
+
+	// PingWriteTimeout overrides DefaultPingWriteTimeout (tests).
+	// Zero = production default.
+	PingWriteTimeout time.Duration
 }
 
 // Service is the daemonbus facade.

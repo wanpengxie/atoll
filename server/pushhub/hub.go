@@ -34,6 +34,23 @@ import (
 // the send chan).
 const pushhubWSWriteTimeout = 10 * time.Second
 
+// pushhubPingCadence is how often the server sends a WS PingMessage
+// to each UI subscriber. 30s gives ~3× margin against the cloudflare
+// tunnel ~100s idle reaper. Idle channels (no pushes for minutes) are
+// the exact failure mode this catches: without ping/pong the conn
+// silently dies but lingers in h.subs, and the user sees stale data
+// until they refresh.
+const pushhubPingCadence = 30 * time.Second
+
+// pushhubIdleReadTimeout is the maximum gap between any frame from
+// the UI (pong, subscribe, unsubscribe) before the server tears down
+// the subscriber. ~2.3× pushhubPingCadence absorbs one missed pong.
+const pushhubIdleReadTimeout = 70 * time.Second
+
+// pushhubPingWriteTimeout caps a single ping write; on failure the
+// subscriber is closed and pumpRead exits.
+const pushhubPingWriteTimeout = 5 * time.Second
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
@@ -50,6 +67,12 @@ type Hub struct {
 
 	accessMu sync.RWMutex
 	access   channelaccess.Authorizer
+
+	// keepalive parameters. Mutated only by SetKeepaliveForTest; read
+	// without lock at subscribe-time (zero = production default).
+	pingCadence      time.Duration
+	idleReadTimeout  time.Duration
+	pingWriteTimeout time.Duration
 }
 
 // PushedFrame is the in-memory shape delivered to test observers.
@@ -80,6 +103,32 @@ func (h *Hub) SetAccessAuthorizer(a channelaccess.Authorizer) {
 	h.accessMu.Unlock()
 }
 
+// SetKeepaliveForTest overrides the ping cadence + idle read timeout
+// for the next-accepted subscriber. NOT for production callers — used
+// by hub_test.go to keep assertion windows tight without sleeping for
+// the full 70s default.
+func (h *Hub) SetKeepaliveForTest(pingCadence, idleReadTimeout, pingWriteTimeout time.Duration) {
+	h.pingCadence = pingCadence
+	h.idleReadTimeout = idleReadTimeout
+	h.pingWriteTimeout = pingWriteTimeout
+}
+
+func (h *Hub) keepaliveCfg() (time.Duration, time.Duration, time.Duration) {
+	cadence := h.pingCadence
+	if cadence <= 0 {
+		cadence = pushhubPingCadence
+	}
+	idle := h.idleReadTimeout
+	if idle <= 0 {
+		idle = pushhubIdleReadTimeout
+	}
+	pingWrite := h.pingWriteTimeout
+	if pingWrite <= 0 {
+		pingWrite = pushhubPingWriteTimeout
+	}
+	return cadence, idle, pingWrite
+}
+
 func (h *Hub) accessAuthorizer() channelaccess.Authorizer {
 	h.accessMu.RLock()
 	defer h.accessMu.RUnlock()
@@ -95,15 +144,24 @@ type subscriber struct {
 	once    sync.Once
 	done    chan struct{}
 	writeMu sync.Mutex
+
+	// keepalive parameters captured at construction (so test overrides
+	// don't race with production defaults).
+	pingCadence      time.Duration
+	idleReadTimeout  time.Duration
+	pingWriteTimeout time.Duration
 }
 
-func newSubscriber(ws *websocket.Conn, userID string) *subscriber {
+func newSubscriber(ws *websocket.Conn, userID string, pingCadence, idleReadTimeout, pingWriteTimeout time.Duration) *subscriber {
 	return &subscriber{
-		ws:     ws,
-		userID: userID,
-		chans:  map[channel.ID]struct{}{},
-		send:   make(chan []byte, 64),
-		done:   make(chan struct{}),
+		ws:               ws,
+		userID:           userID,
+		chans:            map[channel.ID]struct{}{},
+		send:             make(chan []byte, 64),
+		done:             make(chan struct{}),
+		pingCadence:      pingCadence,
+		idleReadTimeout:  idleReadTimeout,
+		pingWriteTimeout: pingWriteTimeout,
 	}
 }
 
@@ -115,12 +173,30 @@ func (s *subscriber) Close() {
 	})
 }
 
-// pumpWrite drains the send channel onto the WS.
+// pumpWrite drains the send channel onto the WS and emits periodic
+// PingMessage control frames. Pings travel via gorilla WriteControl,
+// which uses an internal control-frame lock — it does NOT contend
+// against writeMu (the application-frame lock), so a slow business
+// fan-out cannot starve pings.
 func (s *subscriber) pumpWrite() {
+	pingTicker := time.NewTicker(s.pingCadence)
+	defer pingTicker.Stop()
 	for {
 		select {
 		case <-s.done:
 			return
+		case <-pingTicker.C:
+			err := s.ws.WriteControl(
+				websocket.PingMessage,
+				nil,
+				time.Now().Add(s.pingWriteTimeout),
+			)
+			if err != nil {
+				// Conn is dead — close so pumpRead unwedges and the
+				// hub.unregister cleanup fires.
+				s.Close()
+				return
+			}
 		case msg, ok := <-s.send:
 			if !ok {
 				return
@@ -138,13 +214,38 @@ func (s *subscriber) pumpWrite() {
 }
 
 // pumpRead reads control + subscribe frames from the client.
+//
+// Read deadline policy: every successful read refreshes the deadline
+// to now+pushhubIdleReadTimeout. gorilla's installed PongHandler
+// (registered before this loop starts) does the same on every pong
+// control frame. If the UI tab is closed without an explicit close
+// frame the conn would otherwise linger in h.subs until the OS TCP
+// stack notices — ping/pong + idle deadline forces a bounded reap.
 func (s *subscriber) pumpRead(ctx context.Context, hub *Hub) {
 	defer hub.unregister(s)
+	// Initial deadline + ping/pong handlers. We install here (not in
+	// HandleWS) because pumpRead is the goroutine that owns reads;
+	// gorilla calls the handlers from inside ReadMessage. The
+	// PongHandler is the dominant refresh path on idle channels
+	// (server pumpWrite pings every cadence → UI auto-pongs → server
+	// PongHandler fires here).
+	_ = s.ws.SetReadDeadline(time.Now().Add(s.idleReadTimeout))
+	defaultPingHandler := s.ws.PingHandler()
+	s.ws.SetPingHandler(func(appData string) error {
+		_ = s.ws.SetReadDeadline(time.Now().Add(s.idleReadTimeout))
+		return defaultPingHandler(appData)
+	})
+	s.ws.SetPongHandler(func(string) error {
+		_ = s.ws.SetReadDeadline(time.Now().Add(s.idleReadTimeout))
+		return nil
+	})
 	for {
 		_, raw, err := s.ws.ReadMessage()
 		if err != nil {
 			return
 		}
+		// Successful business frame = liveness signal.
+		_ = s.ws.SetReadDeadline(time.Now().Add(s.idleReadTimeout))
 		var ctrl struct {
 			Type      string     `json:"type"`
 			ChannelID channel.ID `json:"channel_id"`
@@ -205,7 +306,8 @@ func (h *Hub) HandleWS(ident *identity.Service) gin.HandlerFunc {
 		if err != nil {
 			return
 		}
-		sub := newSubscriber(ws, user.ID)
+		cadence, idle, pingWrite := h.keepaliveCfg()
+		sub := newSubscriber(ws, user.ID, cadence, idle, pingWrite)
 		go sub.pumpWrite()
 		sub.pumpRead(c.Request.Context(), h)
 	}

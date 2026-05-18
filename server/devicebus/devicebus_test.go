@@ -280,3 +280,69 @@ func (f *fakeClock) Now() time.Time { return f.now }
 type noopForwarder struct{}
 
 func (noopForwarder) ForwardDeviceFrame(context.Context, devicebus.DeviceFrame) error { return nil }
+
+// TestHandleWS_IdleDeviceTrippedByReadDeadline mirrors the daemonbus
+// keepalive regression test: a device WS that connects then ignores
+// server pings (no pong replies, no business reads) must be reaped
+// within ~IdleReadTimeout. Otherwise the gateway holds a dead
+// devicebus.Connection in s.sessions forever and any daemon→device
+// push will silently no-op.
+func TestHandleWS_IdleDeviceTrippedByReadDeadline(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "d.db"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	svc := devicebus.NewService(db, devicebus.Config{
+		TokenSecret:        "secret",
+		TokenTTL:           time.Hour,
+		AllowMissingOrigin: true,
+		PingCadence:        100 * time.Millisecond,
+		IdleReadTimeout:    500 * time.Millisecond,
+		PingWriteTimeout:   250 * time.Millisecond,
+	})
+	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
+		DeviceID: "dev-idle", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if err := svc.MarkBound(ctx, res.Session.ID); err != nil {
+		t.Fatalf("MarkBound: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/devicebus", svc.HandleWS(noopForwarder{}))
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/devicebus?session_id=" + res.Session.ID + "&token=" + res.Token
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = ws.Close() }()
+
+	// Silence the client: no pong replies, no reads after dial.
+	ws.SetPingHandler(func(string) error { return nil })
+
+	// Poll for the session to flip away from active. MarkOffline runs
+	// in the HandleWS defer; once the server-side read loop unwedges
+	// it will run.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		got, err := svc.Get(ctx, res.Session.ID)
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
+		if got.State != devicebus.StateActive {
+			return // success — server marked it offline (or similar)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("server did not reap silent device WS within 3s — idle read deadline not enforced")
+}
