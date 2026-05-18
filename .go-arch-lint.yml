@@ -77,6 +77,14 @@ components:
   # ─────────────────────────────────────────────────────────────────────
   pkg: { in: pkg/** }
 
+  # ─────────────────────────────────────────────────────────────────────
+  # tests — end-to-end smoke test framework. Composition-root posture
+  # like cmd/**: spins up real server/daemon/worker binaries and pokes
+  # them via HTTP/WS. Build tag `e2e` keeps the suite out of the default
+  # `go test ./...` run; `make e2e-smoke` is the dedicated entry point.
+  # ─────────────────────────────────────────────────────────────────────
+  tests: { in: tests/** }
+
 vendors:
   # Vendor sets used by canUse whitelists.
   sqlite_driver: { in: ["modernc.org/sqlite", "modernc.org/sqlite/**"] }
@@ -155,3 +163,10 @@ deps:
     mayDependOn: [kernel, pkg]
     canUse:
       - zerolog
+
+  tests:
+    # tests/** is end-to-end smoke infrastructure — composition-root
+    # posture mirroring cmd/**. Freely imports every internal component
+    # plus any vendor it needs (sqlite, gorilla websocket, etc.).
+    mayDependOn: [kernel, runtime, runtime_worker, runtime_ipc, adapters, server, pkg, tests]
+    anyVendorDeps: true

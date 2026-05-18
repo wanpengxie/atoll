@@ -27,6 +27,20 @@ const (
 	// EnvKeyDomainPrompt holds the L4 §2.4 prompt segment associated
 	// with the channel type. Empty / unset for legacy / group channels.
 	EnvKeyDomainPrompt = "COAGENT_DOMAIN_PROMPT"
+
+	// EnvKeyMockSingleShot — when set to "1" the MockBridge switches
+	// to single-shot mode: every trigger emits exactly ONE agent.text
+	// envelope whose payload carries `next_action=done` directly (no
+	// separate emitTerminal frame). Used by tests/e2e/ to assert the
+	// "single terminal envelope per turn" contract without having the
+	// bridge spam a second envelope.
+	EnvKeyMockSingleShot = "COAGENT_MOCK_SINGLE_SHOT"
+
+	// EnvKeyMockReplyText — overrides the default reply text in
+	// single-shot mode. Defaults to "pong". Lets e2e harness inject a
+	// known sentinel so test assertions don't depend on the default
+	// string.
+	EnvKeyMockReplyText = "COAGENT_MOCK_REPLY_TEXT"
 )
 
 // MockBridge is the deterministic Bridge implementation cmd/worker
@@ -75,6 +89,16 @@ type MockBridge struct {
 	// a synthetic env without actually mutating the test process state.
 	EnvLookup func(key string) string
 
+	// SingleShot — when true, every trigger emits ONE agent.text
+	// envelope whose payload already carries next_action=done. No
+	// separate terminal envelope is written. Backed by env var
+	// COAGENT_MOCK_SINGLE_SHOT=1 (resolved in applyDefaults).
+	SingleShot bool
+
+	// SingleShotReplyText — payload.text value used in single-shot
+	// mode. Defaults to "pong" (env COAGENT_MOCK_REPLY_TEXT overrides).
+	SingleShotReplyText string
+
 	turns int
 }
 
@@ -111,6 +135,32 @@ func (m *MockBridge) applyDefaults() {
 	}
 	if m.EnvLookup == nil {
 		m.EnvLookup = os.Getenv
+	}
+	// Resolve single-shot mode from env once per Run. Field already
+	// set by caller (tests) wins; env only flips a default-false field.
+	if !m.SingleShot && m.EnvLookup(EnvKeyMockSingleShot) == "1" {
+		m.SingleShot = true
+	}
+	if m.SingleShotReplyText == "" {
+		if v := m.EnvLookup(EnvKeyMockReplyText); v != "" {
+			m.SingleShotReplyText = v
+		} else {
+			m.SingleShotReplyText = "pong"
+		}
+	}
+	if m.SingleShot {
+		// Override ReplyFn so the very first per-trigger react frame
+		// already carries next_action=done. The Run loop's MaxTurns
+		// guard then skips emitTerminal (we set MaxTurns high so the
+		// guard never fires; loop exits on IPC EOF / ctx cancel).
+		text := m.SingleShotReplyText
+		m.ReplyFn = func(in ipc.TriggerPayload, turn int) (string, json.RawMessage) {
+			payload, _ := json.Marshal(map[string]any{
+				"text":        text,
+				"next_action": "done",
+			})
+			return "agent.text", payload
+		}
 	}
 }
 
@@ -167,10 +217,16 @@ func (m *MockBridge) Run(ctx context.Context, client *IPCClient) error {
 			}
 			m.turns++
 			if m.turns >= m.MaxTurns {
-				// Emit a terminal envelope marking next_action=done so
-				// the channel log carries an observable exit point.
-				if err := m.emitTerminal(ctx, client); err != nil {
-					return err
+				// Single-shot mode: the per-trigger react frame already
+				// carried next_action=done — emitting a second envelope
+				// would violate the "exactly 1 agent.text per trigger"
+				// contract that tests/e2e/ asserts.
+				if !m.SingleShot {
+					// Emit a terminal envelope marking next_action=done so
+					// the channel log carries an observable exit point.
+					if err := m.emitTerminal(ctx, client); err != nil {
+						return err
+					}
 				}
 				return nil
 			}

@@ -12,7 +12,7 @@ SHELL := /usr/bin/env bash
 
 .PHONY: install build build-go build-ui build-ext extension-zip test lint migrate dev clean \
         lint-go lint-arch lint-banned-words lint-kernel-protocol lint-docs \
-        fmt-check
+        fmt-check e2e-smoke
 
 # v5 Go 二进制（cmd/<bin>/main.go 由 T6/T7 落地）。
 GO_BINARIES := server daemon worker cli
@@ -72,7 +72,9 @@ extension-zip:
 	  echo "[skip] extension-zip: xhs extension package not present"; \
 	else \
 	  echo "[extension-zip] pnpm --filter coagent-xhs-extension zip"; \
-	  pnpm --filter coagent-xhs-extension zip; \
+	  COAGENT_EXTENSION_KEY_FILE=$$(pwd)/.dev-secrets/extension-key.pub.b64 \
+	  COAGENT_WEB_DOMAIN=$${COAGENT_WEB_DOMAIN:-lightcone.onestudio.cc} \
+	    pnpm --filter coagent-xhs-extension zip; \
 	  mkdir -p ui/public/downloads; \
 	  zip=$$(ls -t adapters/device/xhs/extension/app/chrome-extension/dist/*-chrome.zip adapters/device/xhs/extension/app/chrome-extension/dist/coagent-xhs-extension-*.zip 2>/dev/null | head -1); \
 	  if [ -z "$$zip" ]; then \
@@ -207,6 +209,28 @@ dev:
 	else \
 	  echo "[skip] ui/ not present (T7 pending); foreground process exits."; \
 	fi
+
+# ----------------------------------------------------------------------------
+# e2e-smoke — end-to-end smoke suite (build tag `e2e`)
+#
+# Spawns server + daemon + worker subprocesses against random ports +
+# a tmp data dir, then exercises the API/WS contract. Catches wiring
+# bugs that single-binary unit tests cannot see (daemonbus ack pairing,
+# WS keepalive, channel sqlite write path, push fan-out shape, etc.).
+#
+# Requires: `make build-go` first so bin/coagent-{server,daemon,worker}
+# exist on disk. The harness fail-fasts with a clear message if any
+# binary is missing.
+#
+# Expected runtime: ~60-90s (7 tests × ~5-10s per stack spin-up).
+# ----------------------------------------------------------------------------
+e2e-smoke:
+	@if [ ! -x bin/coagent-server ] || [ ! -x bin/coagent-daemon ] || [ ! -x bin/coagent-worker ]; then \
+	  echo "[e2e-smoke] missing binaries — run 'make build-go' first" >&2; \
+	  exit 1; \
+	fi
+	@echo "[e2e-smoke] go test -tags=e2e ./tests/e2e/..."
+	@go test -tags=e2e -count=1 -timeout=5m ./tests/e2e/...
 
 # ----------------------------------------------------------------------------
 # clean — 删 build 产物（不动 .dalek / 用户数据）
