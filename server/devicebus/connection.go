@@ -5,15 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
-
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
 
 // Connection wraps one open device WS — sender of device_transit
 // frames to the daemon (via daemonbus) + receiver of frames pushed
@@ -134,6 +131,7 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
 		}
+		upgrader := websocket.Upgrader{CheckOrigin: s.checkOrigin}
 		ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
 			return
@@ -163,6 +161,15 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 			}
 		}
 	}
+}
+
+func (s *Service) checkOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return s.cfg.AllowMissingOrigin
+	}
+	_, ok := s.allowedOrigins[origin]
+	return ok
 }
 
 // SendFrameToDevice is invoked by the gateway when a daemon-pushed

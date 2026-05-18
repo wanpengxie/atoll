@@ -17,6 +17,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
 	"github.com/wanpengxie/ActOS/server/daemonbus"
+	"github.com/wanpengxie/ActOS/server/devicebus"
 	"github.com/wanpengxie/ActOS/server/gateway"
 	"github.com/wanpengxie/ActOS/server/identity"
 	"github.com/wanpengxie/ActOS/server/pushhub"
@@ -195,13 +196,203 @@ func TestHandleWriteMessage_RequestAudienceRejected(t *testing.T) {
 	}
 }
 
+func TestDevicebusIssueRequiresChannelMembership(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	alice := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-devbus@example.com")
+	bob := registerLoginAndCreateChannel(t, client, srv.URL, app, "bob-devbus@example.com")
+
+	req, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/channels/"+alice.channelID+"/devices",
+		strings.NewReader(`{"device_id":"dev-bob","device_type":"xhs","daemon_id":"d1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: bob.session})
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST devices: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status=%d want 403", resp.StatusCode)
+	}
+}
+
+func TestDevicebusSessionAccessRequiresOwnerOrChannelMembership(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	alice := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-device-owner@example.com")
+	bob := registerLoginAndCreateChannel(t, client, srv.URL, app, "bob-device-attacker@example.com")
+	aliceID := userIDByEmail(t, app, "alice-device-owner@example.com")
+
+	res, err := app.Devicebus().IssueSession(context.Background(), devicebus.IssueInput{
+		DeviceID: "dev-alice", ChannelID: channel.ID(alice.channelID), UserID: aliceID, DaemonID: "d1",
+	})
+	if err != nil {
+		t.Fatalf("IssueSession: %v", err)
+	}
+
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		req, _ := http.NewRequest(method, srv.URL+"/api/devices/"+res.Session.ID, nil)
+		req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: bob.session})
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("%s devices: %v", method, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s status=%d want 403", method, resp.StatusCode)
+		}
+	}
+}
+
+func TestHandleWriteMessageResponseInheritsParentCorrelation(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	sess := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-response-corr@example.com")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	parent := message.Envelope{
+		ID:            "parent-req",
+		ChannelID:     sess.channelID,
+		Type:          "human.text",
+		Kind:          message.KindRequest,
+		CorrelationID: "corr-parent",
+		Sender:        message.Sender{Kind: message.SenderAgent, ID: "agent:requester"},
+		Visibility:    message.VisibilityPublic,
+		Audience:      []string{"user:alice"},
+		Payload:       json.RawMessage(`{"text":"question"}`),
+	}
+	if _, err := app.Viewcache().Apply(ctx, viewsync.PushFrame{
+		ChannelID: channel.ID(sess.channelID),
+		Seq:       1,
+		MessageID: parent.ID,
+		Envelope:  parent,
+	}); err != nil {
+		t.Fatalf("seed parent viewcache: %v", err)
+	}
+
+	if err := app.Daemonbus().RegisterDaemon(ctx, placement.DaemonID("d-corr"), "h", "v", 0, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon: %v", err)
+	}
+	epoch, err := app.Daemonbus().IssueConnectionEpoch(ctx, placement.DaemonID("d-corr"))
+	if err != nil {
+		t.Fatalf("IssueConnectionEpoch: %v", err)
+	}
+	svrTx, dmnTx := newPipePair()
+	conn := daemonbus.NewConnection(placement.DaemonID("d-corr"), epoch, svrTx)
+	app.Daemonbus().Register(conn)
+	defer app.Daemonbus().Unregister(placement.DaemonID("d-corr"))
+	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
+
+	p, createReq, err := app.Placements().Reserve(ctx, channel.ID(sess.channelID), placement.DaemonID("d-corr"), placement.ConnectionEpoch(epoch), nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	ack := placement.CreateChannelAck{
+		ChannelID:       p.ChannelID,
+		CreateRequestID: createReq.CreateRequestID,
+		OwnerEpoch:      p.OwnerEpoch,
+		FencingToken:    p.FencingToken,
+		DaemonID:        placement.DaemonID("d-corr"),
+		Status:          placement.AckBound,
+	}
+	if ok, err := app.Placements().Activate(ctx, ack, placement.ConnectionEpoch(epoch)); err != nil || !ok {
+		t.Fatalf("Activate: ok=%v err=%v", ok, err)
+	}
+
+	respCh := make(chan *http.Response, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		body, _ := json.Marshal(writeBody{
+			Type:     "human.text",
+			Kind:     string(message.KindResponse),
+			ParentID: parent.ID,
+			Payload:  json.RawMessage(`{"text":"answer"}`),
+			Audience: []string{"agent:requester"},
+		})
+		req, _ := http.NewRequest(http.MethodPost,
+			srv.URL+"/api/channels/"+sess.channelID+"/messages",
+			strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: sess.session})
+		resp, err := client.Do(req)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		respCh <- resp
+	}()
+
+	frame, err := dmnTx.ReadFrame(ctx)
+	if err != nil {
+		t.Fatalf("read write_message: %v", err)
+	}
+	var body kerneldaemonbus.WriteMessageBody
+	if err := json.Unmarshal(frame.Payload, &body); err != nil {
+		t.Fatalf("decode write body: %v", err)
+	}
+	if got := body.EnvelopePartial.CorrelationID; got != "corr-parent" {
+		t.Fatalf("envelope_partial.correlation_id=%q want corr-parent", got)
+	}
+	ackBody := kerneldaemonbus.WriteMessageAckBody{
+		FrameID:   body.FrameID,
+		Accepted:  true,
+		MessageID: "response-1",
+		Seq:       2,
+	}
+	raw, _ := json.Marshal(ackBody)
+	if err := dmnTx.WriteFrame(ctx, kerneldaemonbus.Frame{
+		FrameID:               frame.FrameID,
+		FrameType:             kerneldaemonbus.FrameTypeControlWriteMessageAck,
+		DaemonID:              "d-corr",
+		DaemonConnectionEpoch: epoch,
+		Payload:               raw,
+	}); err != nil {
+		t.Fatalf("write ack: %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("POST response: %v", err)
+	case resp := <-respCh:
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d want 200", resp.StatusCode)
+		}
+		var out map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if out["correlation_id"] != "corr-parent" {
+			t.Fatalf("response correlation_id=%v want corr-parent", out["correlation_id"])
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+}
+
 // writeBody mirrors writeMessageReq (unexported in gateway). Used by
 // TestHandleWriteMessage_* to build wire-shape JSON.
 type writeBody struct {
-	Type     string          `json:"type"`
-	Kind     string          `json:"kind,omitempty"`
-	Payload  json.RawMessage `json:"payload"`
-	Audience []string        `json:"audience"`
+	Type          string          `json:"type"`
+	Kind          string          `json:"kind,omitempty"`
+	Payload       json.RawMessage `json:"payload"`
+	ParentID      string          `json:"parent_id,omitempty"`
+	CorrelationID string          `json:"correlation_id,omitempty"`
+	Audience      []string        `json:"audience"`
 }
 
 // registerLoginAndCreateChannel is a small fixture that returns a
@@ -650,6 +841,18 @@ func extractSessionCookie(t *testing.T, resp *http.Response) string {
 		}
 	}
 	return ""
+}
+
+func userIDByEmail(t *testing.T, app *gateway.App, email string) string {
+	t.Helper()
+	var id string
+	if err := app.DB().QueryRowContext(context.Background(),
+		`SELECT id FROM users WHERE email = ?`,
+		email,
+	).Scan(&id); err != nil {
+		t.Fatalf("userIDByEmail(%s): %v", email, err)
+	}
+	return id
 }
 
 // pipeTransport satisfies daemonbus.Transport in-memory.

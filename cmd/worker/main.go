@@ -10,14 +10,15 @@
 // vendor-light (no go-kimi import inside runtime/worker).
 //
 // Two bridges ship:
-//   --provider=mock   M1.6-T1 MockBridge — deterministic, no network.
-//                     Default for dev / CI so tests run without external
-//                     side effects.
-//   --provider=kimi   M1.6-T7 phase-4 LLM bridge — wraps go-kimi via
-//                     DeepSeek anthropic-compat endpoint (KIMI_API_KEY
-//                     / KIMI_BASE_URL / KIMI_MODEL env). Reads
-//                     COAGENT_DOMAIN_PROMPT to assemble the prompt-
-//                     cache friendly system prompt.
+//
+//	--provider=mock   M1.6-T1 MockBridge — deterministic, no network.
+//	                  Default for dev / CI so tests run without external
+//	                  side effects.
+//	--provider=kimi   M1.6-T7 phase-4 LLM bridge — wraps go-kimi via
+//	                  DeepSeek anthropic-compat endpoint (KIMI_API_KEY
+//	                  / KIMI_BASE_URL / KIMI_MODEL env). Reads
+//	                  COAGENT_DOMAIN_PROMPT to assemble the prompt-
+//	                  cache friendly system prompt.
 //
 // Logging note: stdout is the IPC frame stream (read by the parent
 // daemon as length-prefixed binary frames). Logs MUST go to stderr

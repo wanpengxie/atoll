@@ -145,7 +145,6 @@ func (c *IPCClient) dispatch(frame ipc.Frame) {
 	if frame.Kind == ipc.KindTrigger {
 		var payload ipc.TriggerPayload
 		if err := json.Unmarshal(frame.Payload, &payload); err != nil {
-			fmt.Fprintf(io.Discard, "worker ipc: trigger decode failed: %v\n", err)
 			return
 		}
 		select {

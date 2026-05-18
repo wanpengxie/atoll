@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +67,12 @@ type Config struct {
 	TokenSecret string
 	// TokenTTL overrides defaultTokenTTL. 0 → default.
 	TokenTTL time.Duration
+	// AllowedOrigins is the exact Origin allowlist for browser WebSocket
+	// handshakes. Empty means deny browser-origin WS handshakes.
+	AllowedOrigins []string
+	// AllowMissingOrigin explicitly permits requests with no Origin header
+	// (for non-browser clients). The zero value is fail-closed.
+	AllowMissingOrigin bool
 }
 
 // Service is the devicebus facade.
@@ -85,6 +92,11 @@ type Service struct {
 	// not visible to this package — see SetBindNotifier.
 	notifierMu sync.RWMutex
 	notifier   BindNotifier
+
+	accessMu sync.RWMutex
+	access   AccessAuthorizer
+
+	allowedOrigins map[string]struct{}
 }
 
 // BindNotifier is the lifecycle hook the gateway implements so the
@@ -127,6 +139,12 @@ type UnbindInput struct {
 	Reason  string
 }
 
+// AccessAuthorizer validates that an authenticated user may access a
+// channel. Gateway implements this with catalog channel membership.
+type AccessAuthorizer interface {
+	AuthorizeChannelAccess(ctx context.Context, channelID, userID string) error
+}
+
 // SetBindNotifier wires the lifecycle notifier. Safe to call multiple
 // times; a subsequent call replaces the previous binding (gateway
 // reload). Pass nil to clear the binding — handleIssue will then refuse
@@ -135,6 +153,20 @@ func (s *Service) SetBindNotifier(n BindNotifier) {
 	s.notifierMu.Lock()
 	s.notifier = n
 	s.notifierMu.Unlock()
+}
+
+// SetAccessAuthorizer wires the route-level channel access check. Safe to
+// replace at runtime for tests.
+func (s *Service) SetAccessAuthorizer(a AccessAuthorizer) {
+	s.accessMu.Lock()
+	s.access = a
+	s.accessMu.Unlock()
+}
+
+func (s *Service) accessAuthorizer() AccessAuthorizer {
+	s.accessMu.RLock()
+	defer s.accessMu.RUnlock()
+	return s.access
 }
 
 // bindNotifier returns the currently wired notifier (or nil).
@@ -150,13 +182,22 @@ func NewService(db *sql.DB, cfg Config) *Service {
 	if ttl <= 0 {
 		ttl = defaultTokenTTL
 	}
+	allowed := make(map[string]struct{}, len(cfg.AllowedOrigins))
+	for _, origin := range cfg.AllowedOrigins {
+		origin = strings.TrimSpace(origin)
+		if origin == "" {
+			continue
+		}
+		allowed[origin] = struct{}{}
+	}
 	return &Service{
-		db:       db,
-		cfg:      cfg,
-		now:      time.Now,
-		rng:      rand.Reader,
-		tokenTTL: ttl,
-		sessions: map[string]*Connection{},
+		db:             db,
+		cfg:            cfg,
+		now:            time.Now,
+		rng:            rand.Reader,
+		tokenTTL:       ttl,
+		sessions:       map[string]*Connection{},
+		allowedOrigins: allowed,
 	}
 }
 

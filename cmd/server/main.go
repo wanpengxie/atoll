@@ -83,6 +83,8 @@ func run() error {
 		SessionSecret:             cfg.SessionSecret,
 		DaemonSharedSecret:        cfg.DaemonSharedSecret,
 		DeviceTokenSecret:         cfg.DeviceTokenSecret,
+		DeviceAllowedOrigins:      cfg.DeviceAllowedOrigins,
+		DeviceAllowMissingOrigin:  cfg.DeviceAllowMissingOrigin,
 		HumanCallerSecret:         cfg.HumanCallerSecret,
 		AllowDevSecrets:           cfg.AllowDevSecrets,
 		ReconcileGracePeriod:      cfg.ReconcileGracePeriod,
@@ -135,6 +137,8 @@ type config struct {
 	SessionSecret             string
 	DaemonSharedSecret        string
 	DeviceTokenSecret         string
+	DeviceAllowedOrigins      []string
+	DeviceAllowMissingOrigin  bool
 	HumanCallerSecret         string
 	AllowDevSecrets           bool
 	ReconcileGracePeriod      time.Duration
@@ -143,6 +147,7 @@ type config struct {
 }
 
 func loadConfig() config {
+	deviceOrigins := os.Getenv("COAGENT_DEVICEBUS_ALLOWED_ORIGINS")
 	cfg := config{
 		HTTPAddr: envOr("COAGENT_SERVER_ADDR", ":8080"),
 		DBPath:   envOr("COAGENT_SERVER_DB", "data/server.db"),
@@ -155,6 +160,7 @@ func loadConfig() config {
 		DeviceTokenSecret:         os.Getenv("COAGENT_DEVICE_SECRET"),
 		HumanCallerSecret:         os.Getenv("COAGENT_HUMAN_SECRET"),
 		AllowDevSecrets:           os.Getenv("COAGENT_ALLOW_DEV_SECRETS") == "1",
+		DeviceAllowMissingOrigin:  envBool("COAGENT_DEVICEBUS_ALLOW_MISSING_ORIGIN"),
 		ReconcileGracePeriod:      60 * time.Second,
 		ReconcileCreateTimeout:    30 * time.Second,
 		ReconcileHeartbeatTimeout: 90 * time.Second,
@@ -164,11 +170,16 @@ func loadConfig() config {
 	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "Path to server sqlite database")
 	flag.BoolVar(&cfg.AllowDevSecrets, "allow-dev-secrets", cfg.AllowDevSecrets,
 		"Allow empty / dev-sentinel secrets (dev-only; required for the legacy --change-me defaults)")
+	flag.StringVar(&deviceOrigins, "devicebus-allowed-origins", deviceOrigins,
+		"Comma-separated exact Origin allowlist for /devicebus WebSocket handshakes")
+	flag.BoolVar(&cfg.DeviceAllowMissingOrigin, "devicebus-allow-missing-origin", cfg.DeviceAllowMissingOrigin,
+		"Allow /devicebus WebSocket handshakes with no Origin header (non-browser clients only)")
 	flag.DurationVar(&cfg.ReconcileGracePeriod, "reconcile-grace", cfg.ReconcileGracePeriod, "Cold start grace before stale reconcile begins")
 	flag.DurationVar(&cfg.ReconcileCreateTimeout, "create-timeout", cfg.ReconcileCreateTimeout, "Placement creating→orphan timeout")
 	flag.DurationVar(&cfg.ReconcileHeartbeatTimeout, "heartbeat-timeout", cfg.ReconcileHeartbeatTimeout, "Placement active→stale heartbeat timeout")
 	flag.Parse()
 
+	cfg.DeviceAllowedOrigins = splitCSV(deviceOrigins)
 	return cfg
 }
 
@@ -177,6 +188,23 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envBool(key string) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func splitCSV(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // applyGinMode sets gin.Mode() according to the production / dev gate.

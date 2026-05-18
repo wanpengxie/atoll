@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gokimi "github.com/wanpengxie/go-kimi/pkg/kimi"
@@ -38,8 +39,8 @@ const (
 	// EnvKeyChannelType / EnvKeyDomainPrompt are inherited from the
 	// worker spawn env (M1.6-T5 phase-3). They feed the prompt-cache
 	// friendly base prompt (L4 §2.4 + L0-L2 platform teaching).
-	EnvKeyChannelType   = "COAGENT_CHANNEL_TYPE"
-	EnvKeyDomainPrompt  = "COAGENT_DOMAIN_PROMPT"
+	EnvKeyChannelType  = "COAGENT_CHANNEL_TYPE"
+	EnvKeyDomainPrompt = "COAGENT_DOMAIN_PROMPT"
 )
 
 // Config drives a Bridge. All fields optional unless documented; sane
@@ -149,6 +150,7 @@ type Bridge struct {
 	mu              sync.Mutex
 	agentNew        func(gokimi.AgentConfig) (kimiAgent, error) // test hook
 	testWireEmitter wire.Emitter                                // populated by Run; tests reach in via export_test.go
+	envelopeSeq     atomic.Uint64
 }
 
 // kimiAgent is the subset of go-kimi.Agent the bridge consumes. Carved
@@ -297,13 +299,21 @@ func (b *Bridge) runTurn(
 	}()
 
 	consumeErr := b.consumeWire(turnCtx, ipc, wireCh, agentDone, trigger)
+	if consumeErr != nil {
+		cancel()
+		select {
+		case runErr := <-runErrCh:
+			if runErr != nil && !errors.Is(runErr, context.Canceled) {
+				return errors.Join(consumeErr, runErr)
+			}
+			return consumeErr
+		case <-ctx.Done():
+			return errors.Join(consumeErr, ctx.Err())
+		}
+	}
 	runErr := <-runErrCh
-
-	switch {
-	case runErr != nil:
+	if runErr != nil {
 		return b.emitTerminalLLMError(ctx, ipc, runErr, trigger.Envelope.ID)
-	case consumeErr != nil:
-		return consumeErr
 	}
 	return nil
 }
@@ -533,14 +543,14 @@ func (b *Bridge) emitTerminalLLMError(
 }
 
 // envelopeID generates a deterministic-shape id for emitted envelopes.
-// Format: `kimi-<workerID>-<nowMs>` — mirrors the MockBridge format
-// so debugger pipelines can grep `agent_id_prefix` consistently.
+// The per-bridge sequence keeps multiple emits in the same millisecond
+// unique while preserving the worker/time prefix for debugging.
 func (b *Bridge) envelopeID(ipc IPCFacade, nowMs int64) string {
 	workerID := ipc.WorkerID()
 	if workerID == "" {
 		workerID = "anon"
 	}
-	return fmt.Sprintf("kimi-%s-%d", workerID, nowMs)
+	return fmt.Sprintf("kimi-%s-%d-%d", workerID, nowMs, b.envelopeSeq.Add(1))
 }
 
 // buildProvider hands a fully-configured llm.ChatProvider to
@@ -663,8 +673,8 @@ func contentPartsToText(parts any) string {
 // BuildBasePrompt assembles the prompt-cache friendly stable prefix
 // for the kimi system prompt. Layout:
 //
-//   [L0-L2 platform teaching]
-//   [L4 domain prompt — from COAGENT_DOMAIN_PROMPT]
+//	[L0-L2 platform teaching]
+//	[L4 domain prompt — from COAGENT_DOMAIN_PROMPT]
 //
 // channelType is purely informational (helps a debug operator grep
 // session logs). Empty COAGENT_DOMAIN_PROMPT (legacy channels) yields
@@ -676,7 +686,9 @@ func BuildBasePrompt(channelType, domainPrompt string) string {
 	if domain != "" {
 		b.WriteString("\n\n")
 		if channelType != "" {
-			b.WriteString(fmt.Sprintf("# Channel template: %s\n\n", channelType))
+			b.WriteString("# Channel template: ")
+			b.WriteString(channelType)
+			b.WriteString("\n\n")
 		}
 		b.WriteString(domain)
 	}

@@ -441,4 +441,3 @@ func TestDaemon_OnHeartbeatAck_TracksWatermark(t *testing.T) {
 		t.Errorf("HeartbeatTracker.LastFrameID=%q want frame-hb", d.Heartbeat().LastFrameID())
 	}
 }
-

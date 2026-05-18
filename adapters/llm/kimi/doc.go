@@ -19,18 +19,18 @@
 // ticket description maps to ~23 const lines in go-kimi/pkg/kimi/wire/
 // types.go). M1.6 scope is intentionally narrow:
 //
-//   wire.TextDelta    → agent.text envelope, visibility=system,
-//                       batched so we don't fan out one envelope per
-//                       LLM streaming chunk (typical chunk is <10 B).
-//   wire.TurnEnd      → agent.text envelope, visibility=public,
-//                       next_action stamped from go-kimi's stop reason
-//                       (TurnEnd.StopReason).
-//   wire.ToolCallReq  → not emitted as envelope in M1.6; we capture
-//                       the call for trace logging but UI does not yet
-//                       render tool traces.
-//   everything else   → logged at debug level + dropped. Future
-//                       expansion (M1.7+) can promote more wire types
-//                       into envelope traffic.
+//	wire.TextDelta    → agent.text envelope, visibility=system,
+//	                    batched so we don't fan out one envelope per
+//	                    LLM streaming chunk (typical chunk is <10 B).
+//	wire.TurnEnd      → agent.text envelope, visibility=public,
+//	                    next_action stamped from go-kimi's stop reason
+//	                    (TurnEnd.StopReason).
+//	wire.ToolCallReq  → not emitted as envelope in M1.6; we capture
+//	                    the call for trace logging but UI does not yet
+//	                    render tool traces.
+//	everything else   → logged at debug level + dropped. Future
+//	                    expansion (M1.7+) can promote more wire types
+//	                    into envelope traffic.
 //
 // Errors from go-kimi (wraps *kimierrors.LLMError when the provider
 // is non-2xx) are classified into 5 reason buckets — rate_limit, auth,

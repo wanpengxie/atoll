@@ -347,23 +347,25 @@ func buildTemplateResolver(
 // Daemon is the assembled cmd/daemon process. Exposed so tests can
 // drive the phases manually.
 type Daemon struct {
-	cfg        DaemonConfig
-	daemonDB   *sql.DB
-	channelDBs map[string]*sql.DB
-	bootRes    lifecycle.BootResult
-	transit    *transit.Client
-	bus        *transit.MockBus
-	wsClient   *transit.WSClient
-	booter     *lifecycle.Bootstrapper
-	reconciler *bootstrap.Reconciler
-	saga       *bootstrap.Saga
-	unloader   *lifecycle.Unloader
-	heartbeat  *transit.HeartbeatTracker
+	cfg          DaemonConfig
+	daemonDB     *sql.DB
+	channelDBs   map[string]*sql.DB
+	channelDBsMu *sync.Mutex
+	bootRes      lifecycle.BootResult
+	transit      *transit.Client
+	bus          *transit.MockBus
+	wsClient     *transit.WSClient
+	booter       *lifecycle.Bootstrapper
+	reconciler   *bootstrap.Reconciler
+	saga         *bootstrap.Saga
+	unloader     *lifecycle.Unloader
+	heartbeat    *transit.HeartbeatTracker
 	// resolveTemplate returns the daemon-side ChannelTemplate for a
 	// given channel type. Used by bootChannel to surface WorkdirSubdirs
 	// / DomainPrompt into ChannelHooks (M1.6-T5 phase-2/3).
 	resolveTemplate func(channelType string) ChannelTemplate
 
+	channelsMu sync.RWMutex
 	channels   map[channel.ID]*channelRuntime
 	cursors    *transit.CursorTracker
 	dispatcher *transit.Dispatcher
@@ -473,7 +475,10 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 	}
 
 	channelDBs := make(map[string]*sql.DB)
+	channelDBsMu := &sync.Mutex{}
 	openLock := func(ctx context.Context, sqlitePath string) (*store.ChannelLock, error) {
+		channelDBsMu.Lock()
+		defer channelDBsMu.Unlock()
 		if db, ok := channelDBs[sqlitePath]; ok {
 			return store.NewChannelLock(db), nil
 		}
@@ -503,6 +508,7 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 		cfg:             cfg,
 		daemonDB:        daemonDB,
 		channelDBs:      channelDBs,
+		channelDBsMu:    channelDBsMu,
 		booter:          booter,
 		reconciler:      reconciler,
 		saga:            saga,
@@ -626,7 +632,7 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 	}
 
 	ackHandler, err := transit.NewAckHandlerForChannels(d.cursors, func(id channel.ID) (transit.OutboxAcker, bool) {
-		cr, ok := d.channels[id]
+		cr, ok := d.getChannel(id)
 		if !ok {
 			return nil, false
 		}
@@ -637,7 +643,7 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 	}
 
 	resyncRouter := func(id channel.ID) (transit.ResyncSource, bool) {
-		cr, ok := d.channels[id]
+		cr, ok := d.getChannel(id)
 		if !ok {
 			return nil, false
 		}
@@ -724,8 +730,8 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 	// ticker the daemon's OnHeartbeatAck receipt watermark works fine,
 	// but the server never sees a heartbeat → after 90s server.placements
 	// flips active → stale even though the daemon process is alive. The
-	// sender snapshot-reads d.channels each tick; that's the same
-	// lock-free pattern routeWrite uses, see daemon.go:848.
+	// sender snapshot-reads d.channels each tick through the runtime
+	// map lock shared with routeWrite / hot bind-unbind.
 	hb, err := transit.NewHeartbeatSender(transit.HeartbeatSenderConfig{
 		Client:   d.transit,
 		Period:   d.cfg.HeartbeatPeriod,
@@ -756,12 +762,43 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 // by the dispatcher / phase-3 boot goroutines, never concurrently with
 // itself.
 func (d *Daemon) snapshotOwnedChannels() []channel.ID {
+	d.channelsMu.RLock()
+	defer d.channelsMu.RUnlock()
 	if len(d.channels) == 0 {
 		return nil
 	}
 	out := make([]channel.ID, 0, len(d.channels))
 	for id := range d.channels {
 		out = append(out, id)
+	}
+	return out
+}
+
+func (d *Daemon) getChannel(id channel.ID) (*channelRuntime, bool) {
+	d.channelsMu.RLock()
+	defer d.channelsMu.RUnlock()
+	cr, ok := d.channels[id]
+	return cr, ok
+}
+
+func (d *Daemon) setChannel(id channel.ID, cr *channelRuntime) {
+	d.channelsMu.Lock()
+	d.channels[id] = cr
+	d.channelsMu.Unlock()
+}
+
+func (d *Daemon) deleteChannel(id channel.ID) {
+	d.channelsMu.Lock()
+	delete(d.channels, id)
+	d.channelsMu.Unlock()
+}
+
+func (d *Daemon) snapshotChannelRuntimes() []*channelRuntime {
+	d.channelsMu.RLock()
+	defer d.channelsMu.RUnlock()
+	out := make([]*channelRuntime, 0, len(d.channels))
+	for _, cr := range d.channels {
+		out = append(out, cr)
 	}
 	return out
 }
@@ -993,7 +1030,7 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 // assert M1.6-T1 P2 wiring. Returns -1 when the channel is not owned by
 // this daemon (caller can distinguish "no channel" from "no triggers").
 func (d *Daemon) ChannelAgentTriggerCount(chID channel.ID) int64 {
-	cr, ok := d.channels[chID]
+	cr, ok := d.getChannel(chID)
 	if !ok {
 		return -1
 	}
@@ -1037,7 +1074,7 @@ func (d *Daemon) WorkerEnvForChannel(channelType string) []string {
 // configured, channel not owned, worker crashed). Test accessor for
 // the M1.6-T1 e2e reuse check.
 func (d *Daemon) CurrentWorkerIDFor(chID channel.ID) string {
-	cr, ok := d.channels[chID]
+	cr, ok := d.getChannel(chID)
 	if !ok || cr.workerManager == nil {
 		return ""
 	}
@@ -1054,14 +1091,14 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 	if err != nil {
 		return err
 	}
-	d.channels[lc.ChannelID] = cr
+	d.setChannel(lc.ChannelID, cr)
 
 	// M1.6-T1 — register the per-channel agent target so trigger gateway
 	// fan-out has somewhere to route audience=['*']. Done before the
 	// pusher goroutine starts so a write that immediately follows boot
 	// still observes the handler.
 	if err := d.ensureChannelAgent(ctx, cr); err != nil {
-		delete(d.channels, lc.ChannelID)
+		d.deleteChannel(lc.ChannelID)
 		return err
 	}
 
@@ -1119,7 +1156,7 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 		}
 		teardown, hookErr := d.cfg.OnChannelBoot(ctx, hooks)
 		if hookErr != nil {
-			delete(d.channels, lc.ChannelID)
+			d.deleteChannel(lc.ChannelID)
 			return fmt.Errorf("runtime: channel %s on_boot hook: %w", lc.ChannelID, hookErr)
 		}
 		cr.teardown = teardown
@@ -1160,7 +1197,7 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 			cancel()
 		}
 		pusherCancel()
-		delete(d.channels, chID)
+		d.deleteChannel(chID)
 		d.booter.Unload(chID)
 		return nil
 	})
@@ -1466,6 +1503,8 @@ func (d *Daemon) handleReclaimRejected(ctx context.Context, frame daemonbus.Fram
 // Subsequent calls return the same *sql.DB so the channel sqlite
 // stays single-handle (sqlite WAL works best that way).
 func (d *Daemon) openChannelDB(ctx context.Context, sqlitePath string) (*sql.DB, error) {
+	d.channelDBsMu.Lock()
+	defer d.channelDBsMu.Unlock()
 	if db, ok := d.channelDBs[sqlitePath]; ok {
 		return db, nil
 	}
@@ -1488,7 +1527,7 @@ func (d *Daemon) openChannelDB(ctx context.Context, sqlitePath string) (*sql.DB,
 // — dedupe / deferred / reject paths skip dispatch so we honor
 // at-least-once-by-message.id (§6.2).
 func (d *Daemon) routeWrite(_ context.Context, ch channel.ID) (transit.HarnessChain, actor.Registry, transit.CallerStamper, bool) {
-	cr, ok := d.channels[ch]
+	cr, ok := d.getChannel(ch)
 	if !ok {
 		return nil, nil, nil, false
 	}
@@ -1523,7 +1562,7 @@ func (d *Daemon) handleDeviceTransitFrame(ctx context.Context, frame daemonbus.F
 		if err := transit.DecodePayload(frame, &payload); err != nil {
 			return fmt.Errorf("runtime: decode device_transit %s: %w", frame.FrameType, err)
 		}
-		cr, ok := d.channels[payload.ChannelID]
+		cr, ok := d.getChannel(payload.ChannelID)
 		if !ok || cr.deviceTransit == nil {
 			// Unknown channel or no device transit wired — drop.
 			return nil
@@ -1535,7 +1574,7 @@ func (d *Daemon) handleDeviceTransitFrame(ctx context.Context, frame daemonbus.F
 		// Returns the first non-nil error so observability still surfaces
 		// the failure; downstream channels are best-effort.
 		var firstErr error
-		for _, cr := range d.channels {
+		for _, cr := range d.snapshotChannelRuntimes() {
 			if cr.deviceTransit == nil {
 				continue
 			}
@@ -1615,7 +1654,8 @@ func (b transitChainBridge) Write(ctx context.Context, env *message.Envelope) (t
 // a deterministic id derived from the request id + reason so re-firing
 // the scan idempotently dedupes via harness step 0.5.
 func (d *Daemon) scanLongPending(ctx context.Context, nowMs int64) error {
-	for chID, cr := range d.channels {
+	for _, cr := range d.snapshotChannelRuntimes() {
+		chID := cr.channelID
 		if cr.gateway == nil || cr.messages == nil {
 			continue
 		}
@@ -1876,7 +1916,7 @@ func (d *Daemon) FrameIDGen() func() string { return d.cfg.FrameIDGen }
 // HasChannel reports whether channelID is currently owned by this
 // daemon (phase 3 booted it).
 func (d *Daemon) HasChannel(id channel.ID) bool {
-	_, ok := d.channels[id]
+	_, ok := d.getChannel(id)
 	return ok
 }
 
@@ -1884,6 +1924,8 @@ func (d *Daemon) HasChannel(id channel.ID) bool {
 // path (cached). Useful for lifecycle.Creator / FencingChecker wiring
 // in tests.
 func (d *Daemon) OpenChannelLock(ctx context.Context, sqlitePath string) (*store.ChannelLock, error) {
+	d.channelDBsMu.Lock()
+	defer d.channelDBsMu.Unlock()
 	if db, ok := d.channelDBs[sqlitePath]; ok {
 		return store.NewChannelLock(db), nil
 	}
@@ -1911,7 +1953,13 @@ func (d *Daemon) Close() error {
 	// per-channel sqlite handles — sqlite "database is locked" can
 	// otherwise leak.
 	d.wg.Wait()
+	d.channelDBsMu.Lock()
+	dbs := make([]*sql.DB, 0, len(d.channelDBs))
 	for _, db := range d.channelDBs {
+		dbs = append(dbs, db)
+	}
+	d.channelDBsMu.Unlock()
+	for _, db := range dbs {
 		_ = db.Close()
 	}
 	if d.daemonDB != nil {

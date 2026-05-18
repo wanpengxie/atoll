@@ -42,9 +42,9 @@ func newFakeIPC() *fakeIPC {
 	}
 }
 
-func (f *fakeIPC) ChannelID() channel.ID         { return f.channelID }
-func (f *fakeIPC) WorkerID() string              { return f.workerID }
-func (f *fakeIPC) WorkerActorID() string         { return f.actorID }
+func (f *fakeIPC) ChannelID() channel.ID                { return f.channelID }
+func (f *fakeIPC) WorkerID() string                     { return f.workerID }
+func (f *fakeIPC) WorkerActorID() string                { return f.actorID }
 func (f *fakeIPC) Triggers() <-chan kimi.TriggerPayload { return f.triggers }
 
 func (f *fakeIPC) WriteEnvelope(_ context.Context, env message.Envelope) error {
@@ -287,6 +287,57 @@ func TestBridge_RunEmitsFailedTerminalOnLLMError(t *testing.T) {
 	}
 	if last.Visibility != message.VisibilityPublic {
 		t.Errorf("visibility=%q want public", last.Visibility)
+	}
+}
+
+func TestBridge_EnvelopeIDUniqueWithinSameMillisecond(t *testing.T) {
+	b := mustBridge(t)
+	ipc := newFakeIPC()
+	seen := map[string]bool{}
+	for i := 0; i < 10; i++ {
+		id := kimi.EnvelopeIDForTest(b, ipc, 123_456)
+		if seen[id] {
+			t.Fatalf("duplicate envelope id generated: %s", id)
+		}
+		seen[id] = true
+	}
+}
+
+func TestBridge_ConsumeWireErrorCancelsAgentRun(t *testing.T) {
+	b := mustBridge(t)
+	ipc := newFakeIPC()
+	ipc.wErr = errors.New("ipc write failed")
+	agentExited := make(chan struct{})
+
+	kimi.SetAgentFactory(b, func(_ kimi.AgentConfig) (kimi.Agent, error) {
+		return &scriptedAgent{
+			emitFn: func(ctx context.Context, _ string) error {
+				emitter := kimi.BridgeWireEmitter(b)
+				if err := emitter.Emit(wire.TurnEnd{StopReason: "end_turn"}); err != nil {
+					return err
+				}
+				<-ctx.Done()
+				close(agentExited)
+				return ctx.Err()
+			},
+		}, nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go func() {
+		ipc.triggers <- triggerEnv("t-cancel")
+		close(ipc.triggers)
+	}()
+
+	err := b.Run(ctx, ipc)
+	if err == nil || !strings.Contains(err.Error(), "ipc write failed") {
+		t.Fatalf("Run error=%v want ipc write failed", err)
+	}
+	select {
+	case <-agentExited:
+	case <-time.After(1 * time.Second):
+		t.Fatal("agent.Run did not exit within 1s after consumeWire error")
 	}
 }
 
