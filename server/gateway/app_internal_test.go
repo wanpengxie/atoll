@@ -7,10 +7,13 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/rs/zerolog"
 )
 
 func TestWithDefaults_RejectsEmptySecret(t *testing.T) {
@@ -76,6 +79,52 @@ func TestWithDefaults_AllowDevSecrets(t *testing.T) {
 	}
 	if out.HumanCallerSecret != devHumanCallerSecret {
 		t.Errorf("HumanCallerSecret=%q", out.HumanCallerSecret)
+	}
+}
+
+// TestWithDefaults_AllowDevSecrets_EmitsJSONWarning verifies the
+// M1.6-T7 phase-2 contract: dev-sentinel substitution emits a
+// structured JSON warn line carrying both the offending field name
+// and the dev sentinel value, so operators grepping for
+// `dev_sentinel_used` can spot misconfiguration immediately.
+func TestWithDefaults_AllowDevSecrets_EmitsJSONWarning(t *testing.T) {
+	// Not t.Parallel — pkgLogger is package-level.
+	orig := pkgLogger
+	t.Cleanup(func() { pkgLogger = orig })
+
+	var buf bytes.Buffer
+	pkgLogger = zerolog.New(&buf).With().Timestamp().Logger()
+
+	cfg := Config{AllowDevSecrets: true} // all 4 secrets empty → 4 warnings
+	if _, err := withDefaults(cfg); err != nil {
+		t.Fatalf("AllowDevSecrets=true should not error: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("expected 4 warn lines, got %d:\n%s", len(lines), buf.String())
+	}
+	fields := map[string]bool{}
+	for _, line := range lines {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Errorf("non-JSON warn line: %v\n%s", err, line)
+			continue
+		}
+		if rec["level"] != "warn" {
+			t.Errorf("level=%v want warn: %s", rec["level"], line)
+		}
+		if rec["event"] != "gateway.dev_sentinel_used" {
+			t.Errorf("event=%v want gateway.dev_sentinel_used: %s", rec["event"], line)
+		}
+		if f, ok := rec["field"].(string); ok {
+			fields[f] = true
+		}
+	}
+	for _, want := range []string{"SessionSecret", "DaemonSharedSecret", "DeviceTokenSecret", "HumanCallerSecret"} {
+		if !fields[want] {
+			t.Errorf("missing dev_sentinel_used warning for field %q\nlines=%s", want, buf.String())
+		}
 	}
 }
 

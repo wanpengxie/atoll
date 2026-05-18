@@ -1,41 +1,39 @@
 import { defineConfig } from 'wxt';
 import { viteStaticCopy } from 'vite-plugin-static-copy';
 import { resolve } from 'path';
+import { resolveExternallyConnectableMatches, resolveManifestKey } from './wxt-helpers';
 
 //
-// T148 (M1.6-T6): externally_connectable.matches allowlist.
+// T148 (M1.6-T6) + M1.6-T7 phase-3: externally_connectable.matches
+// allowlist + optional unpacked-mode `key` field.
 //
-// Build-time env var COAGENT_WEB_ORIGINS is a comma-separated list of
-// Chrome match patterns (for example
-//   "https://*.coagent.dev/*,http://localhost:*/*")
-// naming origins permitted to call
-//   chrome.runtime.sendMessage(EXTENSION_ID, ...)
-// from a page context. Used by the web UI's "Bind Chrome extension"
-// flow.
+// The resolver functions live in ./wxt-helpers.ts so vitest can test
+// them in isolation; full behaviour + security rationale documented
+// in that file's JSDoc.
 //
-// When unset, the dev defaults are used (localhost + 127.0.0.1).
-// Production builds MUST set COAGENT_WEB_ORIGINS explicitly so the
-// Chrome Web Store-distributed artefact does not silently allow
-// arbitrary HTTPS origins.
+// Quick reference for the four env knobs:
 //
-// Two layers of defense:
-//   1. This manifest field. Chrome only routes messages from these
+//   COAGENT_WEB_ORIGINS        — comma-separated full chrome match
+//                                patterns (M1.6-T6 legacy form).
+//   COAGENT_WEB_DOMAIN         — single canonical https host expanded
+//                                to https://${domain}/* + dev defaults
+//                                (M1.6-T7 acceptance C1).
+//   COAGENT_EXTENSION_KEY      — base64 RSA pubkey for manifest.key,
+//                                pins unpacked extension ID across reloads.
+//   COAGENT_EXTENSION_KEY_FILE — path to a file containing the base64
+//                                key string (local dev convenience).
+//
+// Two layers of defense for the allowlist:
+//   1. Manifest field below. Chrome only routes messages from these
 //      origins to our chrome.runtime.onMessageExternal listener.
 //   2. entrypoints/background/external-bind.ts::isAllowedSenderOrigin
-//      re-validates sender.origin against the same list, so a future
-//      wildcard mistake here does not immediately leak a token write.
+//      re-validates sender.origin against the same list (manifest is
+//      the runtime source of truth — see background/index.ts).
 //
-const DEFAULT_EXTERNAL_ORIGINS = ['http://localhost:*/*', 'http://127.0.0.1:*/*'];
-
-function resolveExternallyConnectableMatches(): string[] {
-  const raw = (process.env.COAGENT_WEB_ORIGINS ?? '').trim();
-  if (!raw) return DEFAULT_EXTERNAL_ORIGINS;
-  const patterns = raw
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  return patterns.length > 0 ? patterns : DEFAULT_EXTERNAL_ORIGINS;
-}
+const manifestKey = resolveManifestKey(process.env as NodeJS.ProcessEnv);
+const externallyConnectableMatches = resolveExternallyConnectableMatches(
+  process.env as NodeJS.ProcessEnv,
+);
 
 export default defineConfig({
   modules: ['@wxt-dev/module-vue'],
@@ -56,11 +54,18 @@ export default defineConfig({
     description: 'Coagent daemon 的小红书 device 端：长连 daemon WS，承载 publish / search / get-note 等命令',
     version: '1.1.0',
 
+    // M1.6-T7 phase-3: optional stable extension ID for unpacked installs.
+    // Resolved from COAGENT_EXTENSION_KEY / COAGENT_EXTENSION_KEY_FILE.
+    // Omitted entirely (the `as any` cast accommodates wxt's manifest
+    // typing) when no key is configured, preserving Chrome Web Store
+    // behaviour for the distributed build.
+    ...(manifestKey ? ({ key: manifestKey } as any) : {}),
+
     // T148 (M1.6-T6): allow the coagent web UI to inject device session
     // tokens via chrome.runtime.sendMessage. See the comment block above
-    // resolveExternallyConnectableMatches for the security model.
+    // for the security model.
     externally_connectable: {
-      matches: resolveExternallyConnectableMatches(),
+      matches: externallyConnectableMatches,
     },
 
     icons: {

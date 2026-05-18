@@ -1,0 +1,42 @@
+// Package kimi is the M1.6-T7 phase-4 LLM bridge — it wraps go-kimi's
+// Agent so the coagent worker can drive a real LLM (DeepSeek's
+// anthropic-compat endpoint per the cvmax deploy plan) instead of the
+// deterministic MockBridge used during M1.6 e2e bring-up.
+//
+// Why this lives under adapters/**:
+//   - .go-arch-lint.yml forbids adapters/** from importing runtime/**,
+//     which means we cannot implement runtime/worker.Bridge directly
+//     here. Instead we expose a local Bridge interface that operates
+//     on a lightweight IPCFacade abstraction (channel id / actor id /
+//     trigger channel / WriteEnvelope func). cmd/worker (composition
+//     root, allowed to import both adapters and runtime) writes a
+//     ~30-line adapter that turns runtime/worker.IPCClient into our
+//     IPCFacade and wraps the kimi.Bridge into a worker.Bridge.
+//   - adapters/** is allowed anyVendorDeps:true so the go-kimi import
+//     stays here without polluting the worker runtime package surface.
+//
+// Wire types → v4 envelope mapping (the "24 wire types" callout in the
+// ticket description maps to ~23 const lines in go-kimi/pkg/kimi/wire/
+// types.go). M1.6 scope is intentionally narrow:
+//
+//   wire.TextDelta    → agent.text envelope, visibility=system,
+//                       batched so we don't fan out one envelope per
+//                       LLM streaming chunk (typical chunk is <10 B).
+//   wire.TurnEnd      → agent.text envelope, visibility=public,
+//                       next_action stamped from go-kimi's stop reason
+//                       (TurnEnd.StopReason).
+//   wire.ToolCallReq  → not emitted as envelope in M1.6; we capture
+//                       the call for trace logging but UI does not yet
+//                       render tool traces.
+//   everything else   → logged at debug level + dropped. Future
+//                       expansion (M1.7+) can promote more wire types
+//                       into envelope traffic.
+//
+// Errors from go-kimi (wraps *kimierrors.LLMError when the provider
+// is non-2xx) are classified into 5 reason buckets — rate_limit, auth,
+// server, network, unknown — and emitted as a terminal agent.text
+// envelope with payload.next_action="failed" and payload.reason
+// carrying the bucket name. The worker process exits 0 after this so
+// the daemon's worker supervisor sees a clean shutdown rather than a
+// crash loop.
+package kimi

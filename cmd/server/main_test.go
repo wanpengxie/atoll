@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -51,9 +52,16 @@ func TestServer_BootAndShutdown(t *testing.T) {
 	addr := pickFreePort(t)
 	dbPath := filepath.Join(t.TempDir(), "server.db")
 
+	// `--allow-dev-secrets` mirrors the dev / CI gate so the boot path
+	// can run without injecting the 4 COAGENT_* env values (M1.5 FIX-T8
+	// fail-fast). M1.6-T7 phase-1 keeps the gate honest in prod by
+	// flipping gin into release mode when this flag is absent — the
+	// smoke test stays on the dev branch to avoid leaking secrets into
+	// CI logs.
 	cmd := exec.Command(bin,
 		"-addr", addr,
 		"-db", dbPath,
+		"-allow-dev-secrets",
 	)
 
 	stderrPipe, err := cmd.StderrPipe()
@@ -149,4 +157,62 @@ func TestServer_BootAndShutdown(t *testing.T) {
 		t.Fatalf("server did not exit within 8s after SIGTERM\nstderr=%s", stderrStr)
 	}
 	<-stderrCh
+}
+
+// TestServer_FailFastOnEmptySecrets is the M1.6-T7 phase-1 acceptance
+// for the production fail-fast path. The server MUST exit 1 within a
+// few hundred ms when the 4 COAGENT_* secrets are empty and the
+// `--allow-dev-secrets` escape hatch is not set. The stderr message
+// MUST surface the offending field name so an operator misconfiguring
+// e.g. COAGENT_SESSION_SECRET can grep the cause without reading the
+// gateway source.
+func TestServer_FailFastOnEmptySecrets(t *testing.T) {
+	t.Parallel()
+	bin := buildServer(t)
+	addr := pickFreePort(t)
+	dbPath := filepath.Join(t.TempDir(), "server.db")
+
+	cmd := exec.Command(bin,
+		"-addr", addr,
+		"-db", dbPath,
+	)
+	// Clear inherited env so the test process doesn't accidentally
+	// supply the secrets through its own shell environment. Keep PATH
+	// + HOME so the go runtime / sqlite extension loaders keep working.
+	cmd.Env = []string{
+		"PATH=" + envOrTest("PATH"),
+		"HOME=" + envOrTest("HOME"),
+		"COAGENT_GIN_MODE=test", // suppress gin debug banner in CI logs
+	}
+
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("server exited 0 with empty secrets; want fail-fast\nstdout/err=%s", string(out))
+	}
+	ee, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("server Wait error not *ExitError: %v\nstdout/err=%s", err, string(out))
+	}
+	if code := ee.ExitCode(); code != 1 {
+		t.Errorf("exit code = %d want 1\nstdout/err=%s", code, string(out))
+	}
+	combined := string(out)
+	if !strings.Contains(combined, "SessionSecret") &&
+		!strings.Contains(combined, "DaemonSharedSecret") &&
+		!strings.Contains(combined, "DeviceTokenSecret") &&
+		!strings.Contains(combined, "HumanCallerSecret") {
+		t.Errorf("stderr did not surface offending secret field name\nstdout/err=%s", combined)
+	}
+}
+
+// envOrTest is a tiny helper so the fail-fast test can build a clean
+// child env without losing PATH/HOME. Standalone (not the cmd/server
+// runtime's envOr) so the test stays independent of main.go internals.
+func envOrTest(key string) string {
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, key+"=") {
+			return strings.TrimPrefix(kv, key+"=")
+		}
+	}
+	return ""
 }

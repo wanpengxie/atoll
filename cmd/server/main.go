@@ -10,13 +10,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
+	"github.com/wanpengxie/ActOS/pkg/logger"
 	"github.com/wanpengxie/ActOS/server/gateway"
 )
 
@@ -25,14 +28,52 @@ var version = "dev"
 
 func main() {
 	if err := run(); err != nil {
-		log.Fatalf("[server] fatal: %v", err)
+		// `run` already logged the detailed structured error; exit 1
+		// with a final plain stderr line so non-JSON parsers in CI also
+		// see what happened.
+		fmt.Fprintf(os.Stderr, "[server] fatal: %v\n", err)
+		os.Exit(1)
 	}
 }
 
 func run() error {
 	cfg := loadConfig()
 
-	log.Printf("[server] coagent-server %s starting on %s (db=%s)", version, cfg.HTTPAddr, cfg.DBPath)
+	// M1.6-T7 phase-1 — production default: GIN_MODE=release.
+	// `--allow-dev-secrets` is the established dev / CI gate; reuse it to
+	// flip gin back to debug (which prints the route table + per-request
+	// logger). Production binaries default to release so:
+	//   1. /api/* responses don't carry the gin debug banner;
+	//   2. gin's per-request `Logger` middleware is suppressed (we have
+	//      our own structured handler logging downstream);
+	//   3. there's no risk of leaking handler internals via the verbose
+	//      console output.
+	// COAGENT_GIN_MODE overrides (escape hatch for ops, e.g. forcing
+	// debug in a staging deploy without touching CLI flags).
+	applyGinMode(cfg.AllowDevSecrets)
+
+	// M1.6-T7 phase-2 — structured JSON logger. `--allow-dev-secrets`
+	// (matching the existing dev/prod gate) flips zerolog into pretty
+	// ConsoleWriter for hand-readable dev output; prod stays on JSON
+	// so logs can be shipped to loki / docker logs / etc. without
+	// post-processing.
+	lg := logger.New(logger.Config{
+		Component: "server",
+		Version:   version,
+		Writer:    os.Stdout,
+		Pretty:    cfg.AllowDevSecrets,
+		Level:     os.Getenv("COAGENT_LOG_LEVEL"),
+	})
+	restore := lg.RedirectStdlib()
+	defer restore()
+
+	lg.Z().Info().
+		Str("event", "server.starting").
+		Str("addr", cfg.HTTPAddr).
+		Str("db", cfg.DBPath).
+		Str("gin_mode", gin.Mode()).
+		Bool("allow_dev_secrets", cfg.AllowDevSecrets).
+		Msg("coagent-server starting")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -49,6 +90,7 @@ func run() error {
 		ReconcileHeartbeatTimeout: cfg.ReconcileHeartbeatTimeout,
 	})
 	if err != nil {
+		lg.Z().Error().Err(err).Str("event", "server.gateway_init_failed").Msg("gateway init failed")
 		return fmt.Errorf("gateway init: %w", err)
 	}
 	defer func() { _ = app.Close() }()
@@ -61,7 +103,7 @@ func run() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("[server] http listen %s", cfg.HTTPAddr)
+		lg.Z().Info().Str("event", "server.http_listen").Str("addr", cfg.HTTPAddr).Msg("http listen")
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -71,16 +113,19 @@ func run() error {
 
 	select {
 	case <-ctx.Done():
-		log.Printf("[server] signal received, shutting down")
+		lg.Z().Info().Str("event", "server.shutdown_signal").Msg("signal received, shutting down")
 	case err := <-errCh:
+		lg.Z().Error().Err(err).Str("event", "server.http_error").Msg("http server error")
 		return fmt.Errorf("http server: %w", err)
 	}
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
+		lg.Z().Error().Err(err).Str("event", "server.shutdown_error").Msg("http shutdown error")
 		return fmt.Errorf("http shutdown: %w", err)
 	}
+	lg.Z().Info().Str("event", "server.stopped").Msg("server stopped cleanly")
 	return nil
 }
 
@@ -132,4 +177,33 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// applyGinMode sets gin.Mode() according to the production / dev gate.
+//
+// Precedence (highest first):
+//  1. COAGENT_GIN_MODE env override (`release` / `debug` / `test`) — escape
+//     hatch for ops; mostly unused.
+//  2. GIN_MODE env (gin's built-in convention) — respected verbatim so
+//     operators can still flip the toggle from the standard knob.
+//  3. allowDevSecrets=true → debug (matches the dev-friendly default the
+//     `--allow-dev-secrets` gate already enables for secrets).
+//  4. otherwise → release (production default).
+//
+// Returns the resolved mode so callers can log it.
+func applyGinMode(allowDevSecrets bool) string {
+	if v := strings.TrimSpace(os.Getenv("COAGENT_GIN_MODE")); v != "" {
+		gin.SetMode(v)
+		return gin.Mode()
+	}
+	if v := strings.TrimSpace(os.Getenv("GIN_MODE")); v != "" {
+		gin.SetMode(v)
+		return gin.Mode()
+	}
+	if allowDevSecrets {
+		gin.SetMode(gin.DebugMode)
+	} else {
+		gin.SetMode(gin.ReleaseMode)
+	}
+	return gin.Mode()
 }
