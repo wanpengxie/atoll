@@ -9,10 +9,15 @@
 // worker.Bridge implementation here so that runtime/worker stays
 // vendor-light (no go-kimi import inside runtime/worker).
 //
-// M1.6-T1 wires the deterministic MockBridge so the daemon ↔ worker
-// trigger loop can be exercised end-to-end without a real LLM. The
-// real-LLM bridge lands in M1.6-T7 phase-4 (kimi via DeepSeek
-// anthropic-compat endpoint).
+// Two bridges ship:
+//   --provider=mock   M1.6-T1 MockBridge — deterministic, no network.
+//                     Default for dev / CI so tests run without external
+//                     side effects.
+//   --provider=kimi   M1.6-T7 phase-4 LLM bridge — wraps go-kimi via
+//                     DeepSeek anthropic-compat endpoint (KIMI_API_KEY
+//                     / KIMI_BASE_URL / KIMI_MODEL env). Reads
+//                     COAGENT_DOMAIN_PROMPT to assemble the prompt-
+//                     cache friendly system prompt.
 //
 // Logging note: stdout is the IPC frame stream (read by the parent
 // daemon as length-prefixed binary frames). Logs MUST go to stderr
@@ -26,20 +31,33 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
+	"github.com/wanpengxie/ActOS/adapters/llm/kimi"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/pkg/logger"
+	"github.com/wanpengxie/ActOS/runtime/ipc"
 	"github.com/wanpengxie/ActOS/runtime/worker"
 )
 
 // version is set via -ldflags at build time.
 var version = "dev"
 
+const (
+	providerMock = "mock"
+	providerKimi = "kimi"
+)
+
 func main() {
 	leaseID := flag.String("lease-id", os.Getenv("COAGENT_WORKER_LEASE_ID"),
 		"lease id assigned by daemon (also via COAGENT_WORKER_LEASE_ID)")
 	maxTurns := flag.Int("max-turns", 8,
 		"mock bridge: cap on trigger reactions before next_action=done exit")
+	provider := flag.String("provider", envOr("COAGENT_WORKER_PROVIDER", providerMock),
+		"agent provider — mock (deterministic) or kimi (go-kimi via DeepSeek anthropic-compat). "+
+			"Also via COAGENT_WORKER_PROVIDER env.")
 	pretty := flag.Bool("pretty-logs", false,
 		"emit human-readable console logs on stderr (dev only; production stays on JSON)")
 	flag.Parse()
@@ -68,13 +86,18 @@ func main() {
 		Str("event", "worker.starting").
 		Str("lease_id", *leaseID).
 		Int("max_turns", *maxTurns).
+		Str("provider", *provider).
 		Msg("coagent-worker starting")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	bridge := worker.NewMockBridge()
-	bridge.MaxTurns = *maxTurns
+	bridge, err := buildBridge(*provider, *maxTurns)
+	if err != nil {
+		lg.Z().Error().Err(err).Str("event", "worker.bridge_init_failed").
+			Str("provider", *provider).Msg("bridge init failed")
+		os.Exit(1)
+	}
 
 	rt, err := worker.New(worker.Config{
 		LeaseID: *leaseID,
@@ -92,3 +115,92 @@ func main() {
 	}
 	lg.Z().Info().Str("event", "worker.stopped").Msg("worker stopped cleanly")
 }
+
+// buildBridge picks the Bridge implementation. The kimi path reads its
+// env contract at construction time so fail-fast is loud + immediate.
+func buildBridge(provider string, maxTurns int) (worker.Bridge, error) {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case providerMock, "":
+		mock := worker.NewMockBridge()
+		mock.MaxTurns = maxTurns
+		return mock, nil
+
+	case providerKimi:
+		// Build the prompt-cache friendly base prompt from the spawn
+		// env. The daemon set COAGENT_DOMAIN_PROMPT during worker
+		// fork (M1.6-T5 phase-3) so the L4 template segment is
+		// available without an IPC round-trip.
+		basePrompt := kimi.BuildBasePrompt(
+			os.Getenv(kimi.EnvKeyChannelType),
+			os.Getenv(kimi.EnvKeyDomainPrompt),
+		)
+		cfg, err := kimi.NewConfigFromEnv(basePrompt)
+		if err != nil {
+			return nil, err
+		}
+		kb, err := kimi.NewBridge(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("kimi bridge: %w", err)
+		}
+		return worker.BridgeFunc(func(ctx context.Context, client *worker.IPCClient) error {
+			return kb.Run(ctx, &kimiIPCAdapter{client: client})
+		}), nil
+
+	default:
+		return nil, fmt.Errorf("worker: unknown --provider %q (want mock|kimi)", provider)
+	}
+}
+
+// kimiIPCAdapter bridges runtime/worker.IPCClient → adapters/llm/kimi.
+// IPCFacade. The arch-lint boundary forbids adapters/** from importing
+// runtime/worker directly, so this thin adapter lives here in
+// cmd/worker (the composition root, allowed to touch both).
+type kimiIPCAdapter struct {
+	client *worker.IPCClient
+}
+
+func (a *kimiIPCAdapter) ChannelID() channel.ID { return a.client.ChannelID() }
+func (a *kimiIPCAdapter) WorkerID() string      { return a.client.WorkerID() }
+func (a *kimiIPCAdapter) WorkerActorID() string { return a.client.WorkerActorID() }
+
+// Triggers wraps the worker.IPCClient trigger channel by spinning a
+// goroutine that translates each ipc.TriggerPayload into the
+// kimi.TriggerPayload shape (only field names + package origin differ).
+//
+// Cheap: triggers fire at human-message cadence (single-digit/min).
+func (a *kimiIPCAdapter) Triggers() <-chan kimi.TriggerPayload {
+	out := make(chan kimi.TriggerPayload, 4)
+	go func() {
+		defer close(out)
+		for p := range a.client.Triggers() {
+			out <- kimi.TriggerPayload{
+				Envelope:      p.Envelope,
+				CorrelationID: p.CorrelationID,
+				Cursor:        p.Cursor,
+			}
+		}
+	}()
+	return out
+}
+
+// WriteEnvelope forwards to IPCClient.WriteMessage and discards the
+// returned WriteMessageResult. The kimi bridge does not consult
+// dedup / sequence info today (parity with MockBridge).
+func (a *kimiIPCAdapter) WriteEnvelope(ctx context.Context, env message.Envelope) error {
+	_, err := a.client.WriteMessage(ctx, env)
+	return err
+}
+
+// envOr returns the env value or fallback. Inlined so the cmd binary
+// stays free of helper imports.
+func envOr(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// Compile-time anchor so the runtime/ipc package stays in the dep
+// graph — keeps `go vet` happy when only the type-erased branch above
+// references it.
+var _ = ipc.KindTrigger
