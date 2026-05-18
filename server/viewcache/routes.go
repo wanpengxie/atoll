@@ -8,6 +8,8 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/server/channelaccess"
+	"github.com/wanpengxie/ActOS/server/identity"
 )
 
 // RegisterRoutes mounts the read-only viewcache endpoints + the
@@ -20,6 +22,10 @@ func (s *Service) RegisterRoutes(g *gin.RouterGroup) {
 
 func (s *Service) handleMessages(c *gin.Context) {
 	chID := channel.ID(c.Param("chID"))
+	if err := s.authorizeChannel(c, chID); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
 	afterStr := c.DefaultQuery("after", "0")
 	limitStr := c.DefaultQuery("limit", "200")
 	after, err := strconv.ParseInt(afterStr, 10, 64)
@@ -41,7 +47,12 @@ func (s *Service) handleMessages(c *gin.Context) {
 }
 
 func (s *Service) handleCursor(c *gin.Context) {
-	cur, err := s.Cursor(c.Request.Context(), channel.ID(c.Param("chID")))
+	chID := channel.ID(c.Param("chID"))
+	if err := s.authorizeChannel(c, chID); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+	cur, err := s.Cursor(c.Request.Context(), chID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -55,6 +66,11 @@ type resyncReq struct {
 }
 
 func (s *Service) handleResync(c *gin.Context) {
+	chID := channel.ID(c.Param("chID"))
+	if err := s.authorizeChannel(c, chID); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
 	var req resyncReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -62,7 +78,7 @@ func (s *Service) handleResync(c *gin.Context) {
 	}
 	cur, err := s.TriggerResync(
 		c.Request.Context(),
-		channel.ID(c.Param("chID")),
+		chID,
 		viewsync.Seq(req.SinceSeq), viewsync.Seq(req.UntilSeq),
 	)
 	if err != nil {
@@ -70,4 +86,9 @@ func (s *Service) handleResync(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"last_received_seq": int64(cur)})
+}
+
+func (s *Service) authorizeChannel(c *gin.Context, channelID channel.ID) error {
+	u := identity.UserFrom(c)
+	return channelaccess.Require(c.Request.Context(), s.accessAuthorizer(), string(channelID), u.ID)
 }

@@ -29,6 +29,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/server/channelaccess"
 )
 
 // Resyncer is what viewcache calls when it detects a gap.
@@ -47,6 +48,9 @@ type Service struct {
 	buffers map[channel.ID]*channelBuffer
 
 	resyncer Resyncer
+
+	accessMu sync.RWMutex
+	access   channelaccess.Authorizer
 
 	// fireResyncFn overrides the default fire-and-forget resync
 	// goroutine — set by tests via SetFireResyncForTest so they can
@@ -71,6 +75,19 @@ func NewService(db *sql.DB) *Service {
 
 // SetResyncer plugs in the gap-recovery RPC client.
 func (s *Service) SetResyncer(r Resyncer) { s.resyncer = r }
+
+// SetAccessAuthorizer wires the route-level channel access check.
+func (s *Service) SetAccessAuthorizer(a channelaccess.Authorizer) {
+	s.accessMu.Lock()
+	s.access = a
+	s.accessMu.Unlock()
+}
+
+func (s *Service) accessAuthorizer() channelaccess.Authorizer {
+	s.accessMu.RLock()
+	defer s.accessMu.RUnlock()
+	return s.access
+}
 
 // SetFireResyncForTest overrides the fire-and-forget gap-resync
 // goroutine launched by Apply when it sees a gap. Tests use this to

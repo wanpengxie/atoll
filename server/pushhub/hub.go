@@ -22,6 +22,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/server/channelaccess"
 	"github.com/wanpengxie/ActOS/server/identity"
 )
 
@@ -38,6 +39,9 @@ type Hub struct {
 	// observersMu guards observers slice.
 	observersMu sync.RWMutex
 	observers   []*pushObserver
+
+	accessMu sync.RWMutex
+	access   channelaccess.Authorizer
 }
 
 // PushedFrame is the in-memory shape delivered to test observers.
@@ -59,6 +63,19 @@ func NewHub() *Hub {
 	return &Hub{
 		subs: map[channel.ID]map[string]map[*subscriber]struct{}{},
 	}
+}
+
+// SetAccessAuthorizer wires the subscribe-time channel access check.
+func (h *Hub) SetAccessAuthorizer(a channelaccess.Authorizer) {
+	h.accessMu.Lock()
+	h.access = a
+	h.accessMu.Unlock()
+}
+
+func (h *Hub) accessAuthorizer() channelaccess.Authorizer {
+	h.accessMu.RLock()
+	defer h.accessMu.RUnlock()
+	return h.access
 }
 
 // subscriber is one open WS connection.
@@ -112,7 +129,7 @@ func (s *subscriber) pumpWrite() {
 }
 
 // pumpRead reads control + subscribe frames from the client.
-func (s *subscriber) pumpRead(hub *Hub) {
+func (s *subscriber) pumpRead(ctx context.Context, hub *Hub) {
 	defer hub.unregister(s)
 	for {
 		_, raw, err := s.ws.ReadMessage()
@@ -128,10 +145,29 @@ func (s *subscriber) pumpRead(hub *Hub) {
 		}
 		switch ctrl.Type {
 		case "subscribe":
-			hub.subscribe(s, ctrl.ChannelID)
+			if err := hub.subscribe(ctx, s, ctrl.ChannelID); err != nil {
+				s.sendSubscribeRejected(ctrl.ChannelID)
+			}
 		case "unsubscribe":
 			hub.unsubscribe(s, ctrl.ChannelID)
 		}
+	}
+}
+
+func (s *subscriber) sendSubscribeRejected(channelID channel.ID) {
+	payload := map[string]any{
+		"type":       "subscribe_rejected",
+		"channel_id": string(channelID),
+		"error":      channelaccess.ErrDenied.Error(),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	select {
+	case s.send <- raw:
+	case <-s.done:
+	default:
 	}
 }
 
@@ -162,7 +198,7 @@ func (h *Hub) HandleWS(ident *identity.Service) gin.HandlerFunc {
 		}
 		sub := newSubscriber(ws, user.ID)
 		go sub.pumpWrite()
-		sub.pumpRead(h)
+		sub.pumpRead(c.Request.Context(), h)
 	}
 }
 
@@ -238,7 +274,10 @@ func (h *Hub) RegisterPushObserverForTest(channelID channel.ID, fn func(PushedFr
 	}
 }
 
-func (h *Hub) subscribe(sub *subscriber, channelID channel.ID) {
+func (h *Hub) subscribe(ctx context.Context, sub *subscriber, channelID channel.ID) error {
+	if err := channelaccess.Require(ctx, h.accessAuthorizer(), string(channelID), sub.userID); err != nil {
+		return err
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if _, ok := h.subs[channelID]; !ok {
@@ -249,6 +288,7 @@ func (h *Hub) subscribe(sub *subscriber, channelID channel.ID) {
 	}
 	h.subs[channelID][sub.userID][sub] = struct{}{}
 	sub.chans[channelID] = struct{}{}
+	return nil
 }
 
 func (h *Hub) unsubscribe(sub *subscriber, channelID channel.ID) {
@@ -287,9 +327,3 @@ func (h *Hub) SubscriberCount(channelID channel.ID) int {
 	}
 	return total
 }
-
-// Ensure context.Context import isn't dropped by go fmt — Hub doesn't
-// directly use it but the public API hooks (PushMessage) accept
-// context-bound callers indirectly. The unused-import linter is
-// satisfied by the blank import below.
-var _ = context.Background

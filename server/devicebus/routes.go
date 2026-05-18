@@ -2,17 +2,15 @@ package devicebus
 
 import (
 	"context"
-	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/server/channelaccess"
 	"github.com/wanpengxie/ActOS/server/identity"
 )
-
-var errAccessDenied = errors.New("devicebus: access denied")
 
 // RegisterRoutes mounts the issuance + revoke endpoints. Callers
 // must be authenticated upstream (gateway's identity middleware).
@@ -39,6 +37,11 @@ func (s *Service) handleIssue(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
+	notifier := s.bindNotifier()
+	if notifier == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "devicebus: bind notifier unavailable"})
+		return
+	}
 	res, err := s.IssueSession(c.Request.Context(), IssueInput{
 		DeviceID:   req.DeviceID,
 		DeviceType: req.DeviceType,
@@ -55,25 +58,23 @@ func (s *Service) handleIssue(c *gin.Context) {
 	// only when the daemon ACKs. A failure here leaves the row pending
 	// so a follow-up reconciler / retry can pick it up without confusing
 	// the client (no half-ready sessions advertised over HTTP).
-	if notifier := s.bindNotifier(); notifier != nil {
-		bindErr := notifier.Bind(c.Request.Context(), BindInput{
-			Session:          res.Session,
-			TokenFingerprint: res.TokenFingerprint,
+	bindErr := notifier.Bind(c.Request.Context(), BindInput{
+		Session:          res.Session,
+		TokenFingerprint: res.TokenFingerprint,
+	})
+	if bindErr != nil {
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":             "bind_device_session: " + bindErr.Error(),
+			"device_session_id": res.Session.ID,
 		})
-		if bindErr != nil {
-			c.JSON(http.StatusBadGateway, gin.H{
-				"error":             "bind_device_session: " + bindErr.Error(),
-				"device_session_id": res.Session.ID,
-			})
-			return
-		}
-		if err := s.MarkBound(c.Request.Context(), res.Session.ID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":             "mark_bound: " + err.Error(),
-				"device_session_id": res.Session.ID,
-			})
-			return
-		}
+		return
+	}
+	if err := s.MarkBound(c.Request.Context(), res.Session.ID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":             "mark_bound: " + err.Error(),
+			"device_session_id": res.Session.ID,
+		})
+		return
 	}
 	c.JSON(http.StatusCreated, gin.H{
 		"device_session_id": res.Session.ID,
@@ -144,14 +145,7 @@ func (s *Service) handleGet(c *gin.Context) {
 }
 
 func (s *Service) authorizeChannel(ctx context.Context, channelID, userID string) error {
-	auth := s.accessAuthorizer()
-	if auth == nil {
-		return errAccessDenied
-	}
-	if err := auth.AuthorizeChannelAccess(ctx, channelID, userID); err != nil {
-		return errAccessDenied
-	}
-	return nil
+	return channelaccess.Require(ctx, s.accessAuthorizer(), channelID, userID)
 }
 
 func (s *Service) authorizeSession(ctx context.Context, row Session, userID string) error {
