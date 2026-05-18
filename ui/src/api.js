@@ -57,15 +57,20 @@ export const api = {
   listChannels:     (wsID)                      => request('GET',  `/api/workspaces/${wsID}/channels`),
   createChannel:    (wsID, name, type = 'group') => request('POST', `/api/workspaces/${wsID}/channels`, { name, type }),
   getChannel:       (chID)                      => request('GET',  `/api/channels/${chID}`),
-  listMembers:      (chID)                      => request('GET',  `/api/channels/${chID}/members`),
+  listMembers:      (chID)                      => request('GET',  `/api/channels/${chID}/members`).then((r) => ({ members: r.members || [] })),
 
-  // Messages
+  // Messages — send accepts an envelope shape so callers can drive
+  // kind / audience / visibility explicitly; defaults keep current
+  // behaviour ("public event of the given type") for the demo composer.
   listMessages:     (chID, after = 0, limit = 200) =>
                       request('GET', `/api/channels/${chID}/messages?after=${after}&limit=${limit}`),
-  sendMessage:      (chID, payload, type = 'text') =>
+  sendMessage:      (chID, payload, type = 'human.text', opts = {}) =>
                       request('POST', `/api/channels/${chID}/messages`, {
                         type,
                         payload,
-                        visibility: 'public',
+                        visibility: opts.visibility || 'public',
+                        kind: opts.kind,
+                        audience: opts.audience,
+                        parent_id: opts.parent_id,
                       }),
 };
