@@ -29,6 +29,12 @@ import {
 } from './services/server-devicebus';
 import { resolveDeviceConfig } from './services/resolve';
 import { recoverPublishWaitStates } from './tools/publish-content';
+import {
+  handleExternalMessage,
+  type ExternalBindMessage,
+  type ExternalSender,
+  type ExternalBindDeps,
+} from './external-bind';
 
 interface ExecuteToolPayload {
   name: string;
@@ -314,6 +320,89 @@ export default defineBackground(() => {
 
     return true;
   });
+
+  // T148 (M1.6-T6): externally-connectable handshake. Web UI hosted on
+  // an allowed origin (see wxt.config.ts externally_connectable.matches)
+  // calls `chrome.runtime.sendMessage(EXTENSION_ID, {action, ...})` to
+  // hand off a fresh device_session_token, bypassing the popup
+  // RESOLVE_AND_CONNECT manual flow. Three actions:
+  //   - getDeviceInfo  → returns persistent device_id (auto-generated)
+  //   - setDeviceToken → writes v4 session bundle + opens WS
+  //   - unbindDevice   → clears v4 fields + disconnects
+  //
+  // All policy / origin validation lives in external-bind.ts so the
+  // surface is unit-testable; here we only wire chrome APIs to the
+  // pure handler.
+  //
+  // SECURITY: the runtime allowlist is derived from
+  // `chrome.runtime.getManifest().externally_connectable.matches` —
+  // single source of truth with the manifest. This means a future maintainer
+  // who tightens / loosens the manifest does NOT need to remember to also
+  // edit a second list here; the handler's defense-in-depth check will
+  // simply mirror whatever Chrome already enforced upstream.
+  const manifestMatches =
+    (chrome.runtime.getManifest() as chrome.runtime.Manifest & {
+      externally_connectable?: { matches?: string[] };
+    }).externally_connectable?.matches ?? [];
+  const runtimeAllowedOrigins =
+    manifestMatches.length > 0
+      ? manifestMatches
+      : // Defensive: if the manifest somehow lost its allowlist, default
+        // to localhost-only so we never fail-open onto arbitrary origins.
+        ['http://localhost:*/*', 'http://127.0.0.1:*/*'];
+
+  const externalDeps: ExternalBindDeps = {
+    getConfig: () => getConnectionConfig(),
+    saveConfig: (patch) => {
+      // saveConnectionConfig is the canonical write path — mirrors
+      // serverUrl ↔ wsUrl aliases and persists to chrome.storage.local.
+      return saveConnectionConfig(patch).then(async (cfg) => {
+        connectionConfig = cfg;
+        return cfg;
+      });
+    },
+    disconnectAll: () => disconnectAll(),
+    applyClients: (cfg) => applyClients(cfg),
+    connect: () => activeDeviceClient().connect(),
+    extensionVersion: chrome.runtime.getManifest().version ?? '0.0.0',
+    allowedOrigins: runtimeAllowedOrigins,
+    generateDeviceID: () => {
+      // crypto.randomUUID is available in MV3 service workers (Chrome 92+).
+      const c: any = (globalThis as any).crypto;
+      if (c && typeof c.randomUUID === 'function') return `xhs-${c.randomUUID()}`;
+      // Defensive fallback for unexpected runtimes; not security-sensitive
+      // because device_id is a logical identifier, not a secret.
+      return `xhs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    },
+  };
+
+  chrome.runtime.onMessageExternal.addListener(
+    (message: ExternalBindMessage, sender, sendResponse) => {
+      // The sender shape we care about is `{origin, url, id}` — narrow
+      // to ExternalSender so the handler doesn't depend on chrome types.
+      const narrowSender: ExternalSender = {
+        origin: (sender as any)?.origin,
+        url: sender?.url,
+        id: sender?.id,
+        tab: sender?.tab ? { id: sender.tab.id } : undefined,
+      };
+      console.log('[Background] Received external message', { action: message?.action, sender: narrowSender });
+      void handleExternalMessage(message, narrowSender, externalDeps)
+        .then((response) => {
+          console.log('[Background] External message response', { action: message?.action, status: response.status });
+          sendResponse(response);
+        })
+        .catch((err) => {
+          console.error('[Background] External message handler crashed', err);
+          sendResponse({
+            status: 'failed',
+            reason: 'internal_error',
+            detail: err instanceof Error ? err.message : String(err),
+          });
+        });
+      return true; // async sendResponse — Chrome keeps the channel open.
+    },
+  );
 
   chrome.runtime.onInstalled.addListener((details) => {
     if (details.reason === 'install') {
