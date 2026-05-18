@@ -179,28 +179,26 @@ func TestBridge_NewBridgeRequiresModel(t *testing.T) {
 	}
 }
 
-// TestBridge_RunEmitsAgentTextOnTextDelta — feed a TextDelta + TurnEnd
-// wire stream and assert the bridge emits at least one system-visibility
-// agent.text intermediate (M1.6-T7 phase-4 streaming contract) plus a
-// final public-visibility agent.text with next_action stamped.
-func TestBridge_RunEmitsAgentTextOnTextDelta(t *testing.T) {
+// TestBridge_RunEmitsSingleTerminalOnTextDelta — feed many TextDelta
+// chunks + a TurnEnd and assert the bridge emits EXACTLY ONE envelope
+// (the terminal one), carrying the full concatenated text. Streaming
+// chunks must never leak into the v4 envelope layer.
+func TestBridge_RunEmitsSingleTerminalOnTextDelta(t *testing.T) {
 	b := mustBridge(t)
 	ipc := newFakeIPC()
+
+	chunks := []string{"Hello", " ", "stream", " ", "world", "!"}
 
 	// Inject the scripted agent via the exported test hook below.
 	kimi.SetAgentFactory(b, func(_ kimi.AgentConfig) (kimi.Agent, error) {
 		return &scriptedAgent{
 			emitFn: func(_ context.Context, _ string) error {
 				emitter := kimi.BridgeWireEmitter(b)
-				if err := emitter.Emit(wire.TextDelta{Delta: "Hello "}); err != nil {
-					return err
+				for _, c := range chunks {
+					if err := emitter.Emit(wire.TextDelta{Delta: c}); err != nil {
+						return err
+					}
 				}
-				if err := emitter.Emit(wire.TextDelta{Delta: "world!"}); err != nil {
-					return err
-				}
-				// Allow the flush ticker one tick worth of buffering;
-				// the final emitBuffered before TurnEnd will flush the
-				// remainder.
 				return emitter.Emit(wire.TurnEnd{StopReason: "end_turn"})
 			},
 		}, nil
@@ -219,13 +217,12 @@ func TestBridge_RunEmitsAgentTextOnTextDelta(t *testing.T) {
 	}
 
 	written := ipc.Written()
-	if len(written) < 1 {
-		t.Fatalf("expected at least one envelope, got %d", len(written))
+	if len(written) != 1 {
+		t.Fatalf("expected exactly 1 envelope (zero streaming, one terminal); got %d", len(written))
 	}
-	// Final envelope must be public + carry next_action.
-	last := written[len(written)-1]
+	last := written[0]
 	if last.Visibility != message.VisibilityPublic {
-		t.Errorf("final envelope visibility=%q want public", last.Visibility)
+		t.Errorf("terminal envelope visibility=%q want public", last.Visibility)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(last.Payload, &payload); err != nil {
@@ -233,6 +230,13 @@ func TestBridge_RunEmitsAgentTextOnTextDelta(t *testing.T) {
 	}
 	if payload["next_action"] != "done" {
 		t.Errorf("next_action=%v want done", payload["next_action"])
+	}
+	if payload["stop_reason"] != "end_turn" {
+		t.Errorf("stop_reason=%v want end_turn", payload["stop_reason"])
+	}
+	wantText := strings.Join(chunks, "")
+	if got, _ := payload["text"].(string); got != wantText {
+		t.Errorf("text=%q want %q", got, wantText)
 	}
 	if last.CorrelationID != "corr-1" {
 		t.Errorf("correlation_id=%q want corr-1", last.CorrelationID)
@@ -379,7 +383,6 @@ func TestBridge_ClassifyLLMError_NetworkBuckets(t *testing.T) {
 func TestBridge_RunMaxTurnsExit(t *testing.T) {
 	cfg := mustConfig(t)
 	cfg.MaxTurns = 2
-	cfg.TextDeltaFlushInterval = 5 * time.Millisecond
 	b, err := kimi.NewBridge(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -428,13 +431,12 @@ func TestBridge_RunMaxTurnsExit(t *testing.T) {
 func mustConfig(t *testing.T) kimi.Config {
 	t.Helper()
 	return kimi.Config{
-		APIKey:                 "fake-key",
-		Model:                  "fake-model",
-		ProviderType:           "anthropic",
-		SystemPrompt:           "test prompt",
-		MaxTurns:               4,
-		WorkDir:                t.TempDir(),
-		TextDeltaFlushInterval: 10 * time.Millisecond,
+		APIKey:       "fake-key",
+		Model:        "fake-model",
+		ProviderType: "anthropic",
+		SystemPrompt: "test prompt",
+		MaxTurns:     4,
+		WorkDir:      t.TempDir(),
 	}
 }
 

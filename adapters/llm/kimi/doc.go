@@ -17,20 +17,26 @@
 //
 // Wire types → v4 envelope mapping (the "24 wire types" callout in the
 // ticket description maps to ~23 const lines in go-kimi/pkg/kimi/wire/
-// types.go). M1.6 scope is intentionally narrow:
+// types.go). M1.6 scope is intentionally narrow + strictly single-response
+// per v4-message-definition.md (each request gets at most ONE response
+// envelope; streaming chunks are a transport-layer artifact and never
+// leak into the v4 envelope layer):
 //
-//	wire.TextDelta    → agent.text envelope, visibility=system,
-//	                    batched so we don't fan out one envelope per
-//	                    LLM streaming chunk (typical chunk is <10 B).
-//	wire.TurnEnd      → agent.text envelope, visibility=public,
-//	                    next_action stamped from go-kimi's stop reason
-//	                    (TurnEnd.StopReason).
-//	wire.ToolCallReq  → not emitted as envelope in M1.6; we capture
-//	                    the call for trace logging but UI does not yet
-//	                    render tool traces.
-//	everything else   → logged at debug level + dropped. Future
-//	                    expansion (M1.7+) can promote more wire types
-//	                    into envelope traffic.
+//	wire.TextDelta    → pure buffer (NO envelope emitted). Deltas are
+//	                    accumulated locally; the final text is folded
+//	                    into the single TurnEnd terminal envelope.
+//	wire.TurnEnd      → exactly ONE agent.text envelope, visibility=public,
+//	                    payload.text carries the full accumulated content,
+//	                    payload.next_action stamped from TurnEnd.StopReason,
+//	                    payload.stop_reason echoes the provider raw reason.
+//	wire.ToolCallReq  → not emitted as envelope in M1.6; future ticket
+//	                    can promote into a dedicated tool.invocation type.
+//	everything else   → dropped. Future expansion (M1.7+) can promote
+//	                    more wire types into envelope traffic.
+//
+// Failure path: a single failed-terminal envelope is emitted from the
+// LLM error classifier (see emitTerminalLLMError) carrying the full
+// error description in payload.text + payload.reason bucket.
 //
 // Errors from go-kimi (wraps *kimierrors.LLMError when the provider
 // is non-2xx) are classified into 5 reason buckets — rate_limit, auth,

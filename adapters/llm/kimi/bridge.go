@@ -79,12 +79,6 @@ type Config struct {
 
 	// NowFn returns unix-ms. Defaults to time.Now.UnixMilli.
 	NowFn func() int64
-
-	// TextDeltaFlushInterval batches TextDelta wire events into a
-	// single agent.text envelope. Defaults to 250ms — short enough
-	// that the UI sees progress in near-realtime, long enough that
-	// envelope traffic stays sane on noisy streams.
-	TextDeltaFlushInterval time.Duration
 }
 
 // NewConfigFromEnv populates a Config from the documented env vars.
@@ -176,9 +170,6 @@ func NewBridge(cfg Config) (*Bridge, error) {
 	}
 	if cfg.NowFn == nil {
 		cfg.NowFn = func() int64 { return time.Now().UnixMilli() }
-	}
-	if cfg.TextDeltaFlushInterval <= 0 {
-		cfg.TextDeltaFlushInterval = 250 * time.Millisecond
 	}
 	if cfg.WorkDir == "" {
 		tmp, err := os.MkdirTemp("", "coagent-kimi-")
@@ -318,12 +309,17 @@ func (b *Bridge) runTurn(
 	return nil
 }
 
-// consumeWire flushes wire events into envelopes until a TurnEnd
-// arrives, agentDone closes (agent.Run returned with or without an
-// error before emitting TurnEnd — typical of an LLM connection error),
-// or the context expires. The flush cadence (cfg.TextDeltaFlushInterval)
-// batches TextDelta increments so a streaming LLM response doesn't
-// produce one envelope per chunk.
+// consumeWire pure-buffers the wire stream and emits exactly ONE
+// terminal envelope at TurnEnd (or zero envelopes if agentDone closes
+// without a TurnEnd — in that case the caller emits the failed terminal
+// envelope from the run-error path).
+//
+// LLM streaming chunks are a transport-layer artifact and MUST NOT leak
+// into the v4 envelope layer. Per v4-message-definition.md §single-response,
+// each request gets at most one response envelope; progress (if ever
+// needed) would go through a dedicated <type>.progress event, never as
+// envelope spam keyed off TextDelta cadence. Owner decision (M1.6):
+// zero intermediate envelopes, one terminal envelope per turn.
 func (b *Bridge) consumeWire(
 	ctx context.Context,
 	ipc IPCFacade,
@@ -332,35 +328,16 @@ func (b *Bridge) consumeWire(
 	trigger TriggerPayload,
 ) error {
 	var buffered strings.Builder
-	flush := time.NewTicker(b.cfg.TextDeltaFlushInterval)
-	defer flush.Stop()
-
-	emitBuffered := func(final bool) error {
-		text := buffered.String()
-		if text == "" {
-			return nil
-		}
-		buffered.Reset()
-		visibility := message.VisibilitySystem
-		payload := map[string]any{"text": text}
-		if final {
-			visibility = message.VisibilityPublic
-			payload["next_action"] = "continue"
-		}
-		return b.emitEnvelope(ctx, ipc, trigger, "agent.text", visibility, payload)
-	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			_ = emitBuffered(false)
 			return ctx.Err()
 		case <-agentDone:
-			// Agent returned (success or error). Drain any wire events
-			// still buffered in the channel before exiting so the test
-			// double's scripted TurnEnd is not lost when it fires just
-			// before agent.Run returns. Non-blocking drain — anything
-			// the agent emitted is already in the channel buffer.
+			// Agent returned. Drain any wire events still buffered in
+			// the channel so a scripted TurnEnd that fires just before
+			// agent.Run returns is not lost. Non-blocking drain —
+			// anything the agent emitted is already in the buffer.
 			for drained := true; drained; {
 				select {
 				case msg, ok := <-wireCh:
@@ -368,75 +345,69 @@ func (b *Bridge) consumeWire(
 						drained = false
 						break
 					}
-					if err := b.handleWireMsg(ctx, ipc, msg, &buffered, trigger); err != nil {
+					done, err := b.handleWireMsg(ctx, ipc, msg, &buffered, trigger)
+					if err != nil {
 						return err
 					}
-					if _, isEnd := msg.(wire.TurnEnd); isEnd {
+					if done {
 						return nil
 					}
 				default:
 					drained = false
 				}
 			}
-			// No TurnEnd seen — flush any remaining text so the UI
-			// doesn't lose the trailing fragment. The caller emits the
-			// terminal failed envelope when runErr != nil.
-			_ = emitBuffered(false)
+			// No TurnEnd seen. Do NOT emit a partial envelope here —
+			// the caller's failed-terminal path will surface the error
+			// with the full accumulated text once we return nil.
 			return nil
-		case <-flush.C:
-			if err := emitBuffered(false); err != nil {
-				return err
-			}
 		case msg, ok := <-wireCh:
 			if !ok {
 				return nil
 			}
-			if err := b.handleWireMsg(ctx, ipc, msg, &buffered, trigger); err != nil {
+			done, err := b.handleWireMsg(ctx, ipc, msg, &buffered, trigger)
+			if err != nil {
 				return err
 			}
-			if _, isEnd := msg.(wire.TurnEnd); isEnd {
+			if done {
 				return nil
 			}
 		}
 	}
 }
 
-// handleWireMsg routes one wire message to the appropriate envelope
-// emission path (or drops it). Returns the first envelope-write error.
+// handleWireMsg routes one wire message. TextDelta is pure buffer (no
+// emit). TurnEnd emits the single terminal envelope for the turn. The
+// boolean return signals "turn complete, stop consuming".
 func (b *Bridge) handleWireMsg(
 	ctx context.Context,
 	ipc IPCFacade,
 	msg wire.WireMessage,
 	buffered *strings.Builder,
 	trigger TriggerPayload,
-) error {
+) (bool, error) {
 	switch m := msg.(type) {
 	case wire.TextDelta:
 		buffered.WriteString(m.Delta)
-		return nil
+		return false, nil
 	case wire.TurnEnd:
-		// Flush buffered text as a system envelope first, then emit
-		// the public terminal envelope stamping next_action.
-		if buffered.Len() > 0 {
-			payload := map[string]any{"text": buffered.String()}
-			buffered.Reset()
-			if err := b.emitEnvelope(ctx, ipc, trigger, "agent.text", message.VisibilitySystem, payload); err != nil {
-				return err
-			}
-		}
-		return b.emitTurnEnd(ctx, ipc, trigger, m)
+		return true, b.emitTurnEnd(ctx, ipc, trigger, m, buffered.String())
 	default:
-		// Other wire events dropped in M1.6 scope. Future promotion:
-		// tool_call_request → tool.invocation envelope, etc.
-		return nil
+		// Other wire events (ToolCallReq, etc.) are out of M1.6 scope —
+		// dropped without envelope emission.
+		return false, nil
 	}
 }
 
+// emitTurnEnd emits the single terminal envelope for the completed turn.
+// `accumulated` is the full TextDelta-buffered string; the TurnEnd's own
+// Output (when populated) is preferred, falling back to the buffered
+// stream — providers vary on which one carries the final text.
 func (b *Bridge) emitTurnEnd(
 	ctx context.Context,
 	ipc IPCFacade,
 	trigger TriggerPayload,
 	end wire.TurnEnd,
+	accumulated string,
 ) error {
 	nextAction := "continue"
 	switch strings.ToLower(strings.TrimSpace(end.StopReason)) {
@@ -450,8 +421,12 @@ func (b *Bridge) emitTurnEnd(
 		// turn perspective).
 		nextAction = "tool_use"
 	}
+	text := contentPartsToText(end.Output)
+	if text == "" {
+		text = accumulated
+	}
 	payload := map[string]any{
-		"text":        contentPartsToText(end.Output),
+		"text":        text,
 		"next_action": nextAction,
 		"stop_reason": end.StopReason,
 	}
