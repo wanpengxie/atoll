@@ -2,6 +2,41 @@ import { defineConfig } from 'wxt';
 import { viteStaticCopy } from 'vite-plugin-static-copy';
 import { resolve } from 'path';
 
+//
+// T148 (M1.6-T6): externally_connectable.matches allowlist.
+//
+// Build-time env var COAGENT_WEB_ORIGINS is a comma-separated list of
+// Chrome match patterns (for example
+//   "https://*.coagent.dev/*,http://localhost:*/*")
+// naming origins permitted to call
+//   chrome.runtime.sendMessage(EXTENSION_ID, ...)
+// from a page context. Used by the web UI's "Bind Chrome extension"
+// flow.
+//
+// When unset, the dev defaults are used (localhost + 127.0.0.1).
+// Production builds MUST set COAGENT_WEB_ORIGINS explicitly so the
+// Chrome Web Store-distributed artefact does not silently allow
+// arbitrary HTTPS origins.
+//
+// Two layers of defense:
+//   1. This manifest field. Chrome only routes messages from these
+//      origins to our chrome.runtime.onMessageExternal listener.
+//   2. entrypoints/background/external-bind.ts::isAllowedSenderOrigin
+//      re-validates sender.origin against the same list, so a future
+//      wildcard mistake here does not immediately leak a token write.
+//
+const DEFAULT_EXTERNAL_ORIGINS = ['http://localhost:*/*', 'http://127.0.0.1:*/*'];
+
+function resolveExternallyConnectableMatches(): string[] {
+  const raw = (process.env.COAGENT_WEB_ORIGINS ?? '').trim();
+  if (!raw) return DEFAULT_EXTERNAL_ORIGINS;
+  const patterns = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  return patterns.length > 0 ? patterns : DEFAULT_EXTERNAL_ORIGINS;
+}
+
 export default defineConfig({
   modules: ['@wxt-dev/module-vue'],
 
@@ -20,6 +55,13 @@ export default defineConfig({
     name: 'Coagent · 小红书 Device',
     description: 'Coagent daemon 的小红书 device 端：长连 daemon WS，承载 publish / search / get-note 等命令',
     version: '1.1.0',
+
+    // T148 (M1.6-T6): allow the coagent web UI to inject device session
+    // tokens via chrome.runtime.sendMessage. See the comment block above
+    // resolveExternallyConnectableMatches for the security model.
+    externally_connectable: {
+      matches: resolveExternallyConnectableMatches(),
+    },
 
     icons: {
       16: 'icon-16.png',

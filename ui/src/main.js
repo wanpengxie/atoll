@@ -9,6 +9,15 @@
 
 import { api, APIError } from './api.js';
 import { ChannelSocket } from './ws.js';
+import {
+  isExtensionAvailable,
+  extensionUnavailableReason,
+  getDeviceInfo,
+  setDeviceToken,
+  unbindDevice,
+  defaultServerWsUrl,
+  describeReason,
+} from './extension.js';
 
 /** App-wide state. Kept on `window` to ease console debugging. */
 const state = {
@@ -21,6 +30,12 @@ const state = {
   cursor: 0,
   members: [],
   socket: null,
+  // T148 (M1.6-T6) — last successful bind result for the currently
+  // selected channel. Cleared on channel switch / unbind / logout.
+  // Shape: {device_session_id, channel_id, user_id} | null
+  deviceBind: null,
+  // Pending state so the bind button reflects in-flight work.
+  deviceBindBusy: false,
 };
 window.__coagent = state;
 
@@ -52,6 +67,11 @@ const els = {
   messageList: $('#message-list'),
   formSend: $('#form-send'),
   sendError: $('#send-error'),
+
+  // T148 (M1.6-T6) device-binding controls.
+  btnBindDevice: $('#btn-bind-device'),
+  btnUnbindDevice: $('#btn-unbind-device'),
+  deviceBindStatus: $('#device-bind-status'),
 };
 
 // ── Auth view ────────────────────────────────────────────────────────
@@ -119,6 +139,8 @@ async function enterApp() {
   state.socket = new ChannelSocket(handleIncomingMessage);
   state.socket.start();
 
+  refreshExtensionAvailabilityHint();
+  renderBindButton();
   await refreshWorkspaces();
 }
 
@@ -131,6 +153,9 @@ els.btnLogout.addEventListener('click', async () => {
   state.activeWorkspaceID = null;
   state.activeChannelID = null;
   state.messages = [];
+  state.deviceBind = null;
+  renderBindButton();
+  setBindStatus('', 'idle');
   els.viewApp.classList.add('hidden');
   els.viewAuth.classList.remove('hidden');
 });
@@ -198,6 +223,13 @@ async function selectChannel(chID) {
 
   state.messages = [];
   state.cursor = 0;
+  // T148 (M1.6-T6): a bind is per-channel; switching channels invalidates
+  // the previous bind state in the UI. The extension's WS lives across
+  // channel switches until the user explicitly re-binds — we don't auto-
+  // unbind because the existing token is still good for its lifetime.
+  state.deviceBind = null;
+  refreshExtensionAvailabilityHint();
+  renderBindButton();
   renderMessages();
 
   // Subscribe over WS first so any messages emitted while we fetch
@@ -311,6 +343,173 @@ els.formSend.addEventListener('submit', async (e) => {
     els.sendError.textContent = formatError(err);
   }
 });
+
+// ── Device binding (T148 / M1.6-T6) ──────────────────────────────────
+//
+// 4-step flow:
+//   1. sendMessage(extId, getDeviceInfo)        → extension returns persistent device_id
+//   2. GET  /api/placements/:chID               → server returns daemon_id
+//   3. POST /api/channels/:chID/devices         → server returns {device_session_id, token, expires_at}
+//   4. sendMessage(extId, setDeviceToken)       → extension persists + opens WS
+
+async function bindCurrentChannel() {
+  if (!state.activeChannelID) return;
+  if (state.deviceBindBusy) return;
+  state.deviceBindBusy = true;
+  setBindStatus('正在绑定 …', 'pending');
+  renderBindButton();
+  try {
+    // Step 1: device_id from extension.
+    const info = await getDeviceInfo();
+    if (info.status !== 'ok') {
+      throw new Error(describeReason(info.reason, info.detail));
+    }
+    // Step 2: which daemon owns this channel?
+    let placement;
+    try {
+      placement = await api.getPlacement(state.activeChannelID);
+    } catch (err) {
+      if (err instanceof APIError && err.status === 404) {
+        throw new Error('channel 尚未绑定 daemon — 请先在 server 端 bind channel');
+      }
+      throw err;
+    }
+    const daemonID = placement?.daemon_id;
+    if (!daemonID) throw new Error('placement 缺少 daemon_id');
+    // Step 3: issue a device session row + token.
+    const session = await api.issueDeviceSession(state.activeChannelID, {
+      device_id: info.device_id,
+      daemon_id: daemonID,
+      device_type: 'xhs-extension',
+    });
+    if (!session?.device_session_id || !session?.token) {
+      throw new Error('server issue 响应缺字段');
+    }
+    // Step 4: hand the bundle to the extension. It persists + opens WS.
+    const ack = await setDeviceToken({
+      server_ws_url: defaultServerWsUrl(),
+      device_session_id: session.device_session_id,
+      token: session.token,
+      channel_id: state.activeChannelID,
+      user_id: state.me?.id,
+      device_id: info.device_id,
+      expires_at: session.expires_at,
+    });
+    if (ack.status !== 'connected') {
+      // If the server already issued the row but the extension failed
+      // to connect, revoke it so we don't leak orphan sessions.
+      try {
+        await api.revokeDeviceSession(session.device_session_id);
+      } catch (revokeErr) {
+        console.warn('revoke after failed bind', revokeErr);
+      }
+      throw new Error(describeReason(ack.reason, ack.detail));
+    }
+    state.deviceBind = {
+      device_session_id: ack.device_session_id,
+      channel_id: ack.channel_id,
+      user_id: ack.user_id,
+    };
+    setBindStatus(
+      `✅ 已绑定 (channel=${ack.channel_id}, user=${ack.user_id || '?'})`,
+      'ok',
+    );
+  } catch (err) {
+    state.deviceBind = null;
+    setBindStatus(`❌ 绑定失败：${formatError(err)}`, 'error');
+  } finally {
+    state.deviceBindBusy = false;
+    renderBindButton();
+  }
+}
+
+async function unbindCurrentChannel() {
+  if (state.deviceBindBusy) return;
+  const sid = state.deviceBind?.device_session_id;
+  if (!sid) return;
+  state.deviceBindBusy = true;
+  setBindStatus('正在解绑 …', 'pending');
+  renderBindButton();
+  try {
+    // Best-effort dual-revoke: server flips row to 'revoked' AND
+    // extension drops its local v4 fields. Order: server first so the
+    // extension's WS close is initiated server-side, then sendMessage
+    // as a safety net in case the close didn't arrive.
+    try {
+      await api.revokeDeviceSession(sid);
+    } catch (err) {
+      console.warn('server revoke failed', err);
+    }
+    const ack = await unbindDevice();
+    if (ack.status !== 'unbound' && ack.available !== false) {
+      console.warn('extension unbind failed', ack);
+    }
+    state.deviceBind = null;
+    setBindStatus('已解绑', 'idle');
+  } catch (err) {
+    setBindStatus(`解绑出错：${formatError(err)}`, 'error');
+  } finally {
+    state.deviceBindBusy = false;
+    renderBindButton();
+  }
+}
+
+function renderBindButton() {
+  const btn = els.btnBindDevice;
+  const unbindBtn = els.btnUnbindDevice;
+  if (!btn || !unbindBtn) return;
+  const bound = Boolean(state.deviceBind);
+  unbindBtn.hidden = !bound;
+  if (state.deviceBindBusy) {
+    btn.disabled = true;
+    unbindBtn.disabled = true;
+    return;
+  }
+  unbindBtn.disabled = false;
+  if (!state.activeChannelID) {
+    btn.disabled = true;
+    btn.textContent = '绑定 Chrome extension';
+    return;
+  }
+  if (!isExtensionAvailable()) {
+    btn.disabled = true;
+    btn.textContent = 'Extension 不可用';
+    return;
+  }
+  btn.disabled = false;
+  btn.textContent = bound ? '重新绑定 Chrome extension' : '绑定 Chrome extension';
+}
+
+function setBindStatus(text, kind) {
+  const el = els.deviceBindStatus;
+  if (!el) return;
+  el.textContent = text;
+  el.dataset.kind = kind || '';
+}
+
+function refreshExtensionAvailabilityHint() {
+  // On boot / channel switch / when no bind has happened yet, surface
+  // why the button might be disabled.
+  if (state.deviceBind) return;
+  if (!isExtensionAvailable()) {
+    setBindStatus(describeReason(extensionUnavailableReason()), 'warn');
+  } else if (!state.activeChannelID) {
+    setBindStatus('先选择一个 channel', 'idle');
+  } else {
+    setBindStatus('', 'idle');
+  }
+}
+
+if (els.btnBindDevice) {
+  els.btnBindDevice.addEventListener('click', () => {
+    void bindCurrentChannel();
+  });
+}
+if (els.btnUnbindDevice) {
+  els.btnUnbindDevice.addEventListener('click', () => {
+    void unbindCurrentChannel();
+  });
+}
 
 // ── Boot: restore session if cookie is still valid ───────────────────
 async function boot() {

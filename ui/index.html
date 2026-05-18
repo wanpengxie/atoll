@@ -69,6 +69,18 @@
           <header>
             <h2 id="chat-title">Select a channel</h2>
             <span class="muted" id="chat-meta"></span>
+            <!-- T148 (M1.6-T6): one-click extension binding. The button
+                 is disabled until a channel is selected; its label +
+                 status reflect the current bind state. -->
+            <div class="device-bind" id="device-bind">
+              <button type="button" id="btn-bind-device" disabled>
+                绑定 Chrome extension
+              </button>
+              <button type="button" id="btn-unbind-device" class="ghost" hidden>
+                解绑
+              </button>
+              <span class="muted device-bind-status" id="device-bind-status"></span>
+            </div>
           </header>
 
           <ol id="message-list" class="messages"></ol>

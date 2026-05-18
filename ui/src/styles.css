@@ -155,6 +155,28 @@ label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
 }
 .chat header h2 { margin: 0; font-size: 18px; }
 
+/* T148 (M1.6-T6) — device bind controls in the chat header. */
+.device-bind {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+.device-bind button {
+  padding: 4px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.device-bind button:disabled { cursor: not-allowed; opacity: 0.55; }
+.device-bind .ghost { background: transparent; color: var(--muted, #888); }
+.device-bind-status { font-size: 12px; }
+.device-bind-status[data-kind='ok']    { color: #2e7d32; }
+.device-bind-status[data-kind='error'] { color: #c62828; }
+.device-bind-status[data-kind='warn']  { color: #b26a00; }
+.device-bind-status[data-kind='pending'] { color: #1565c0; }
+
 .messages {
   list-style: none;
   padding: 16px 20px;

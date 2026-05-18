@@ -59,9 +59,35 @@ The SPA targets the Go gateway routes documented in
 | List messages     | `GET  /api/channels/:chID/messages?after=&limit=` |
 | Write message     | `POST /api/channels/:chID/messages`            |
 | Live updates      | `GET  /ws` (native WebSocket; subscribe frames) |
+| Get placement     | `GET  /api/placements/:chID`                   |
+| Issue device sess | `POST /api/channels/:chID/devices`             |
+| Revoke device     | `DELETE /api/devices/:sid`                     |
 
 Auth is by cookie (`coagent_session`, `HttpOnly`, `SameSite=Lax`) —
 all fetches set `credentials: 'include'`.
+
+## Bind Chrome extension (T148 / M1.6-T6)
+
+The chat header has a "Bind Chrome extension" button that hands a
+fresh device session token to the coagent xhs-extension via
+`chrome.runtime.sendMessage`. Pre-reqs:
+
+1. Install the unpacked extension from
+   `adapters/device/xhs/extension/app/chrome-extension` (or the Chrome
+   Web Store build for prod).
+2. Copy its id from `chrome://extensions` into `ui/.env.local`:
+
+   ```
+   VITE_COAGENT_EXTENSION_ID=ngghjmpccpgmfgblbifmlmjnnpfknhka
+   ```
+
+3. The extension's manifest `externally_connectable.matches` must include
+   the origin you serve the UI from. Set `COAGENT_WEB_ORIGINS` at
+   extension build time (comma-separated Chrome match patterns) — e.g.
+   `COAGENT_WEB_ORIGINS=https://*.coagent.dev/*,http://localhost:*/*`.
+
+If the button is disabled the status line below it explains why
+(`no_extension_id`, `extension_not_installed`, etc.).
 
 ## Wire protocol — WS `/ws`
 

@@ -68,4 +68,25 @@ export const api = {
                         payload,
                         visibility: 'public',
                       }),
+
+  // T148 (M1.6-T6) — device session lifecycle (issued by server/devicebus).
+  //
+  // getPlacement → which daemon currently owns this channel. Web UI
+  // needs the daemon_id to POST a device session row; placement is
+  // populated by the M1.6-T0 control plane after channel bind.
+  // Returns 404 if the channel has no active placement yet (user must
+  // bind the channel first).
+  getPlacement:       (chID) =>
+                        request('GET',  `/api/placements/${chID}`),
+  // POST a fresh device_session_token. Server (devicebus) returns
+  // {device_session_id, token, expires_at, token_fingerprint}; the
+  // call also kicks the daemon control.bind_device_session handshake
+  // synchronously so the session is in `ready` state on return.
+  issueDeviceSession: (chID, body) =>
+                        request('POST', `/api/channels/${chID}/devices`, body),
+  // Revoke an issued session. Server flips the row to `revoked` and
+  // best-effort sends control.unbind_device_session to the daemon;
+  // the extension's WS will be closed server-side as well.
+  revokeDeviceSession:(sid) =>
+                        request('DELETE', `/api/devices/${sid}`),
 };
