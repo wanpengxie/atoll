@@ -17,3 +17,7 @@ dist/
 bin/
 .go-arch-lint.yml
 .dalek/
+.dev-secrets/
+
+# UI build artifacts: chrome extension zip is staged here by `make extension-zip`
+ui/public/downloads/

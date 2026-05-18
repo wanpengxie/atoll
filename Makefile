@@ -10,7 +10,7 @@
 
 SHELL := /usr/bin/env bash
 
-.PHONY: install build build-go build-ui build-ext test lint migrate dev clean \
+.PHONY: install build build-go build-ui build-ext extension-zip test lint migrate dev clean \
         lint-go lint-arch lint-banned-words lint-kernel-protocol lint-docs \
         fmt-check
 
@@ -56,12 +56,31 @@ build-go:
 	  echo "[skip] root go.mod absent (T2 pending)"; \
 	fi
 
-build-ui:
+build-ui: extension-zip
 	@if [ -f ui/package.json ]; then \
 	  echo "[build-ui] pnpm --filter ui build"; \
 	  pnpm --filter ui build; \
 	else \
 	  echo "[skip] ui/ not present (T7 pending)"; \
+	fi
+
+# extension-zip — build chrome extension zip and stage it as a UI public asset
+# so vite build copies it into ui/dist/downloads/ for the web UI to serve.
+# Source zip lands in dist/ (wxt outDir); we normalize to a stable filename.
+extension-zip:
+	@if [ ! -f adapters/device/xhs/extension/app/chrome-extension/package.json ]; then \
+	  echo "[skip] extension-zip: xhs extension package not present"; \
+	else \
+	  echo "[extension-zip] pnpm --filter coagent-xhs-extension zip"; \
+	  pnpm --filter coagent-xhs-extension zip; \
+	  mkdir -p ui/public/downloads; \
+	  zip=$$(ls -t adapters/device/xhs/extension/app/chrome-extension/dist/*-chrome.zip adapters/device/xhs/extension/app/chrome-extension/dist/coagent-xhs-extension-*.zip 2>/dev/null | head -1); \
+	  if [ -z "$$zip" ]; then \
+	    echo "[extension-zip] no zip artifact found under app/chrome-extension/dist/" >&2; \
+	    exit 1; \
+	  fi; \
+	  cp "$$zip" ui/public/downloads/coagent-extension.zip; \
+	  echo "[extension-zip] $$zip -> ui/public/downloads/coagent-extension.zip"; \
 	fi
 
 build-ext:

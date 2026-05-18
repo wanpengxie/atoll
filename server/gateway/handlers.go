@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -280,6 +282,37 @@ func buildEngine(a *App) *gin.Engine {
 	r.GET("/ws", a.pushhub.HandleWS(a.identity))
 	r.GET("/daemonbus", a.daemonbus.HandleWS(a))
 	r.GET("/devicebus", a.devicebus.HandleWS(a))
+
+	// SPA static serving: when UIDistDir is configured, serve the
+	// pnpm-build artifact at "/" plus a NoRoute fallback to index.html
+	// so client-side routes (e.g. /channel/123) still hand off to the
+	// SPA. API/WS prefixes are excluded so missing endpoints continue
+	// to return a JSON 404 (audit-friendly).
+	if dir := a.cfg.UIDistDir; dir != "" {
+		r.Static("/assets", filepath.Join(dir, "assets"))
+		r.Static("/downloads", filepath.Join(dir, "downloads"))
+		r.StaticFile("/favicon.svg", filepath.Join(dir, "favicon.svg"))
+		indexPath := filepath.Join(dir, "index.html")
+		r.NoRoute(func(c *gin.Context) {
+			p := c.Request.URL.Path
+			if strings.HasPrefix(p, "/api/") || p == "/ws" || p == "/daemonbus" || p == "/devicebus" {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not_found"})
+				return
+			}
+			// Missing static download must not fall back to index.html;
+			// returning the SPA shell would mask 404s and break clients
+			// that expect a real binary at /downloads/<file>.
+			if strings.HasPrefix(p, "/downloads/") {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not_found"})
+				return
+			}
+			if c.Request.Method != http.MethodGet {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not_found"})
+				return
+			}
+			c.File(indexPath)
+		})
+	}
 	return r
 }
 
