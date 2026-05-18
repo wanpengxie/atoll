@@ -14,8 +14,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/ActOS/server/gateway"
 )
@@ -32,7 +35,21 @@ func main() {
 func run() error {
 	cfg := loadConfig()
 
-	log.Printf("[server] coagent-server %s starting on %s (db=%s)", version, cfg.HTTPAddr, cfg.DBPath)
+	// M1.6-T7 phase-1 — production default: GIN_MODE=release.
+	// `--allow-dev-secrets` is the established dev / CI gate; reuse it to
+	// flip gin back to debug (which prints the route table + per-request
+	// logger). Production binaries default to release so:
+	//   1. /api/* responses don't carry the gin debug banner;
+	//   2. gin's per-request `Logger` middleware is suppressed (we have
+	//      our own structured handler logging downstream);
+	//   3. there's no risk of leaking handler internals via the verbose
+	//      console output.
+	// COAGENT_GIN_MODE overrides (escape hatch for ops, e.g. forcing
+	// debug in a staging deploy without touching CLI flags).
+	applyGinMode(cfg.AllowDevSecrets)
+
+	log.Printf("[server] coagent-server %s starting on %s (db=%s gin_mode=%s)",
+		version, cfg.HTTPAddr, cfg.DBPath, gin.Mode())
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -132,4 +149,33 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// applyGinMode sets gin.Mode() according to the production / dev gate.
+//
+// Precedence (highest first):
+//  1. COAGENT_GIN_MODE env override (`release` / `debug` / `test`) — escape
+//     hatch for ops; mostly unused.
+//  2. GIN_MODE env (gin's built-in convention) — respected verbatim so
+//     operators can still flip the toggle from the standard knob.
+//  3. allowDevSecrets=true → debug (matches the dev-friendly default the
+//     `--allow-dev-secrets` gate already enables for secrets).
+//  4. otherwise → release (production default).
+//
+// Returns the resolved mode so callers can log it.
+func applyGinMode(allowDevSecrets bool) string {
+	if v := strings.TrimSpace(os.Getenv("COAGENT_GIN_MODE")); v != "" {
+		gin.SetMode(v)
+		return gin.Mode()
+	}
+	if v := strings.TrimSpace(os.Getenv("GIN_MODE")); v != "" {
+		gin.SetMode(v)
+		return gin.Mode()
+	}
+	if allowDevSecrets {
+		gin.SetMode(gin.DebugMode)
+	} else {
+		gin.SetMode(gin.ReleaseMode)
+	}
+	return gin.Mode()
 }
