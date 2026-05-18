@@ -129,13 +129,13 @@ func (m *MockBridge) logDomainPromptOnce(workerID string) {
 		// "domain_prompt_loaded" sees a deterministic counterpart line
 		// for legacy / group channels. Keeps `acceptance B3` honest:
 		// the grep target is positive only on type=xhs-creator boots.
-		fmt.Fprintf(m.PromptLogWriter,
+		_, _ = fmt.Fprintf(m.PromptLogWriter,
 			"mock_bridge: no_domain_prompt worker=%s channel_type=%q\n",
 			workerID, channelType)
 		return
 	}
 	sum := sha256.Sum256([]byte(prompt))
-	fmt.Fprintf(m.PromptLogWriter,
+	_, _ = fmt.Fprintf(m.PromptLogWriter,
 		"mock_bridge: domain_prompt_loaded worker=%s channel_type=%q len=%d sha256=%s\n",
 		workerID, channelType, len(prompt), hex.EncodeToString(sum[:8]))
 }
