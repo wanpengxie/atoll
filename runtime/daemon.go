@@ -101,25 +101,53 @@ type DaemonConfig struct {
 	OnUnbindDeviceSession func(ctx context.Context, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody
 
 	// ChannelTemplate is the static channel template hosted by this
-	// daemon. Currently consumed by bootstrap.Saga to seed extra
-	// actor_registry rows (e.g. tool:xhs-adapter for the xhs-creator
-	// template). T2 wires a fixed template; L4 will swap this for a
-	// template snapshot lookup.
+	// daemon. Used as the legacy single-template fallback when
+	// ChannelTemplates is empty — every channel boot resolves to this
+	// value regardless of CreateChannelRequest.ChannelType. M1.6-T2
+	// wired this for a fixed xhs scaffold; M1.6-T5 phase-2 introduced
+	// ChannelTemplates for per-type lookup.
 	ChannelTemplate ChannelTemplate
+
+	// ChannelTemplates is the M1.6-T5 phase-2 per-type template
+	// registry keyed by CreateChannelRequest.ChannelType (catalog
+	// channel.type — e.g. "group" / "xhs-creator"). When non-empty it
+	// takes precedence over the legacy ChannelTemplate field: the
+	// daemon resolves the matching template per channel boot. Unknown
+	// types fall through to the entry keyed by "" if one exists,
+	// otherwise to a zero ChannelTemplate (no actor seeds / subdirs).
+	//
+	// The empty-string key is reserved for the "no template" legacy
+	// path (generic group channels) so cmd/daemon can register both
+	// `""` and `"xhs-creator"` in one map without losing the fallback.
+	ChannelTemplates map[string]ChannelTemplate
 }
 
 // ChannelTemplate is the daemon-side projection of an L4 channel
-// template snapshot. For M1.6 it carries only the actor_registry seeds
-// the bootstrap saga MUST insert before adapter framework Install runs.
+// template snapshot. M1.6-T2 covered actor_registry seeds; M1.6-T5
+// phase-2 adds workdir subdirs (e.g. xhs-creator published-notes/) and
+// the domain prompt segment (consumed by phase-3 worker spawn).
 //
-// Empty template = no extra actors (channel still gets system +
-// initial members seeded by the saga base path).
+// Zero value = no extra actors / no extra subdirs / no domain prompt
+// (channel still gets system + initial members seeded by the saga base
+// path).
 type ChannelTemplate struct {
 	// AdapterActorSeeds lists the tool actor rows the saga inserts in
 	// addition to system + initial members. Each row supplies enough
 	// fields for kernel/adapter.Manager.Install to find the actor with
 	// the right binding.
 	AdapterActorSeeds []actor.Record
+
+	// WorkdirSubdirs lists relative directory paths the bootstrap saga
+	// mkdirs inside <ChannelsDir>/<channelID>/ during step 5c. The
+	// xhs-creator template ships ["published-notes", "drafts", "assets"]
+	// per v4-layer4-spec §2.5. Entries are treated as path components
+	// joined with channelDir; "../" or absolute escapes are rejected.
+	WorkdirSubdirs []string
+
+	// DomainPrompt is the L4 §2.4 prompt segment cmd/daemon injects into
+	// the worker base prompt at spawn time (M1.6-T5 phase-3 will plumb
+	// this via env). Empty = no domain prompt (legacy channels).
+	DomainPrompt string
 }
 
 // ChannelAgentID is the well-known actor id every per-channel runtime
@@ -209,6 +237,21 @@ type ChannelHooks struct {
 	// ChannelID is the channel this hook is wiring.
 	ChannelID channel.ID
 
+	// ChannelType is the L4 channel-template key (catalog.Channel.Type;
+	// e.g. "" / "group" / "xhs-creator") that this channel was created
+	// with. Sourced from CreateChannelRequest on the hot path and the
+	// channel_lock row on cold-start (M1.6-T5 phase-2). cmd/daemon
+	// inspects this in its AdapterModuleFactory closures to decide
+	// whether the factory applies for this channel (e.g. install xhs
+	// adapter only when ChannelType=="xhs-creator").
+	ChannelType string
+
+	// DomainPrompt is the L4 §2.4 prompt segment associated with
+	// ChannelType (M1.6-T5 phase-3 will plumb this into worker spawn
+	// env so the agent's base prompt picks it up). Empty when the
+	// channel has no template or the template declared no prompt.
+	DomainPrompt string
+
 	// DB is the channel-local sqlite handle. Same handle backing every
 	// store in this struct — exposed for callers that need to construct
 	// new per-channel stores not already in this struct.
@@ -268,21 +311,58 @@ type ChannelHooks struct {
 	SetDeviceCallback func(func(ctx context.Context, frame kadapter.SendFrame) error)
 }
 
+// buildTemplateResolver returns a closure that picks the ChannelTemplate
+// for a given CreateChannelRequest.ChannelType. M1.6-T5 phase-2 wiring:
+//
+//   - When templates is non-empty: prefer an exact-match entry; fall
+//     back to the entry keyed by "" if present; otherwise return the
+//     zero value (no template).
+//   - When templates is nil/empty: return the legacy single template
+//     for every channel type so pre-M1.6-T5 wirings (single
+//     DaemonConfig.ChannelTemplate) keep working unchanged.
+func buildTemplateResolver(
+	templates map[string]ChannelTemplate,
+	legacy ChannelTemplate,
+) func(channelType string) ChannelTemplate {
+	if len(templates) == 0 {
+		return func(string) ChannelTemplate { return legacy }
+	}
+	// Copy the map so callers can't mutate the resolver state
+	// post-construction.
+	snapshot := make(map[string]ChannelTemplate, len(templates))
+	for k, v := range templates {
+		snapshot[k] = v
+	}
+	return func(channelType string) ChannelTemplate {
+		if tpl, ok := snapshot[channelType]; ok {
+			return tpl
+		}
+		if tpl, ok := snapshot[""]; ok {
+			return tpl
+		}
+		return ChannelTemplate{}
+	}
+}
+
 // Daemon is the assembled cmd/daemon process. Exposed so tests can
 // drive the phases manually.
 type Daemon struct {
-	cfg        DaemonConfig
-	daemonDB   *sql.DB
-	channelDBs map[string]*sql.DB
-	bootRes    lifecycle.BootResult
-	transit    *transit.Client
-	bus        *transit.MockBus
-	wsClient   *transit.WSClient
-	booter     *lifecycle.Bootstrapper
-	reconciler *bootstrap.Reconciler
-	saga       *bootstrap.Saga
-	unloader   *lifecycle.Unloader
-	heartbeat  *transit.HeartbeatTracker
+	cfg             DaemonConfig
+	daemonDB        *sql.DB
+	channelDBs      map[string]*sql.DB
+	bootRes         lifecycle.BootResult
+	transit         *transit.Client
+	bus             *transit.MockBus
+	wsClient        *transit.WSClient
+	booter          *lifecycle.Bootstrapper
+	reconciler      *bootstrap.Reconciler
+	saga            *bootstrap.Saga
+	unloader        *lifecycle.Unloader
+	heartbeat       *transit.HeartbeatTracker
+	// resolveTemplate returns the daemon-side ChannelTemplate for a
+	// given channel type. Used by bootChannel to surface WorkdirSubdirs
+	// / DomainPrompt into ChannelHooks (M1.6-T5 phase-2/3).
+	resolveTemplate func(channelType string) ChannelTemplate
 
 	channels   map[channel.ID]*channelRuntime
 	cursors    *transit.CursorTracker
@@ -364,11 +444,28 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 		_ = daemonDB.Close()
 		return nil, err
 	}
+	// M1.6-T5 phase-2 — build a per-type template resolver. When
+	// ChannelTemplates is wired, look up by req.ChannelType (falling
+	// back to the "" entry for unknown / legacy types). When the map
+	// is nil, return a closure based on the legacy single
+	// ChannelTemplate field so back-compat callers (tests, M1.6-T2
+	// integration) keep working unchanged.
+	resolveTemplate := buildTemplateResolver(cfg.ChannelTemplates, cfg.ChannelTemplate)
+
 	saga, err := bootstrap.NewSaga(bootstrap.SagaConfig{
-		DaemonDB:          daemonDB,
-		ChannelsDir:       cfg.ChannelsDir,
-		NowFn:             cfg.NowFn,
+		DaemonDB:    daemonDB,
+		ChannelsDir: cfg.ChannelsDir,
+		NowFn:       cfg.NowFn,
+		// Legacy single-template fallback retained for back-compat —
+		// the resolver below supersedes when wired.
 		AdapterActorSeeds: cfg.ChannelTemplate.AdapterActorSeeds,
+		ResolveTemplate: func(channelType string) bootstrap.TemplateView {
+			tpl := resolveTemplate(channelType)
+			return bootstrap.TemplateView{
+				AdapterActorSeeds: tpl.AdapterActorSeeds,
+				WorkdirSubdirs:    tpl.WorkdirSubdirs,
+			}
+		},
 	})
 	if err != nil {
 		_ = daemonDB.Close()
@@ -403,16 +500,17 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 	}
 
 	d := &Daemon{
-		cfg:        cfg,
-		daemonDB:   daemonDB,
-		channelDBs: channelDBs,
-		booter:     booter,
-		reconciler: reconciler,
-		saga:       saga,
-		unloader:   lifecycle.NewUnloader(),
-		heartbeat:  transit.NewHeartbeatTracker(),
-		channels:   make(map[channel.ID]*channelRuntime),
-		cursors:    transit.NewCursorTracker(),
+		cfg:             cfg,
+		daemonDB:        daemonDB,
+		channelDBs:      channelDBs,
+		booter:          booter,
+		reconciler:      reconciler,
+		saga:            saga,
+		unloader:        lifecycle.NewUnloader(),
+		heartbeat:       transit.NewHeartbeatTracker(),
+		channels:        make(map[channel.ID]*channelRuntime),
+		cursors:         transit.NewCursorTracker(),
+		resolveTemplate: resolveTemplate,
 	}
 
 	if cfg.UseMockBus {
@@ -919,8 +1017,21 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 	// Run BEFORE starting the pusher goroutine so a failing hook unwinds
 	// cleanly (no orphan goroutine).
 	if d.cfg.OnChannelBoot != nil {
+		// M1.6-T5 phase-2 — surface the L4 channel-template key into
+		// hooks so cmd/daemon factories can gate themselves (e.g.
+		// XHSScaffoldFactory installs ONLY for type=="xhs-creator").
+		// The lock row is the single source of truth across both the
+		// hot OnCreateChannel path (lock just written from req) and
+		// the cold-start path (lock pre-existed on disk).
+		channelType := lc.Lock.ChannelType
+		var domainPrompt string
+		if d.resolveTemplate != nil {
+			domainPrompt = d.resolveTemplate(channelType).DomainPrompt
+		}
 		hooks := ChannelHooks{
 			ChannelID:     lc.ChannelID,
+			ChannelType:   channelType,
+			DomainPrompt:  domainPrompt,
 			DB:            cr.db,
 			ActorRegistry: cr.registry,
 			Messages:      cr.messages,
@@ -1128,6 +1239,10 @@ func (d *Daemon) handleCreateChannel(
 		DaemonEpoch:  placement.DaemonEpoch(d.cfg.DaemonEpoch),
 		AcquiredAt:   now,
 		RefreshedAt:  now,
+		// M1.6-T5 phase-2 — persist the L4 channel-template key so a
+		// cold-start daemon can re-resolve the template without
+		// round-tripping the server.
+		ChannelType: req.ChannelType,
 	}); err != nil {
 		ack.Status = placement.AckRejected
 		ack.Reason = fmt.Sprintf("lock insert: %v", err)

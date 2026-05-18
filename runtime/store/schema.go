@@ -174,7 +174,12 @@ CREATE TABLE IF NOT EXISTS channel_lock (
   daemon_id          TEXT NOT NULL,
   daemon_epoch       INTEGER NOT NULL,
   acquired_at        INTEGER NOT NULL,
-  refreshed_at       INTEGER NOT NULL
+  refreshed_at       INTEGER NOT NULL,
+  -- M1.6-T5 phase-2: L4 channel-template key (e.g. "xhs-creator") so a
+  -- cold-start daemon can look the template up when re-mounting the
+  -- channel without round-tripping the server. NULL / empty == legacy
+  -- "no template" (generic group channel).
+  channel_type       TEXT NOT NULL DEFAULT ''
 );
 `
 

@@ -31,7 +31,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/adapters/xhs"
-	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
@@ -58,27 +57,28 @@ func main() {
 		*daemonEpoch = time.Now().Unix()
 	}
 
-	// M1.6-T2 — wire the in_process xhs scaffold into every booted
-	// channel. ChannelTemplate seeds the actor_registry row up-front so
-	// framework.Manager.Install can find it; OnChannelBoot constructs
-	// the Manager + installs the module + registers the Deliverer
-	// handler. T3 phase-3+4b additionally wires the daemon-level
-	// device-session bind / unbind handlers so a future swap to
-	// DeviceXHSFactory works end-to-end without re-touching cmd/daemon.
-	// The binder is kept process-wide so a single SessionStore is
-	// shared across every channel (per-channel routing happens by
-	// DeviceSession.ChannelID inside the framework).
+	// M1.6-T5 phase-2 — register both the legacy / generic "group"
+	// template (empty seeds, no domain prompt) and the xhs-creator
+	// template (tool:xhs-adapter actor seed + published-notes/drafts/
+	// assets/ workdir + L4 §2.4 domain prompt). cmd/daemon converts
+	// the adapter-owned xhs.Template into the runtime projection here
+	// because the conversion is a composition-root concern (keeps
+	// `runtime` independent of `adapters/**` per arch-lint).
+	//
+	// OnChannelBoot stays wired to a single XHSScaffoldFactory: the
+	// factory itself inspects ChannelHooks.ChannelType and returns a
+	// no-op for channels that aren't xhs-creator, so the boundary lives
+	// in the factory closure rather than in the runtime ChannelTemplates
+	// keys.
 	deviceBinder := NewDeviceSessionBinder(nil)
 	cfg := runtime.DaemonConfig{
-		DataDir:      *dataDir,
-		ChannelsDir:  filepath.Join(*dataDir, "channels"),
-		DaemonID:     *daemonID,
-		DaemonEpoch:  *daemonEpoch,
-		UseMockBus:   *mockBus,
-		ReplayWindow: time.Duration(*replayWindowMs) * time.Millisecond,
-		ChannelTemplate: runtime.ChannelTemplate{
-			AdapterActorSeeds: []actor.Record{xhs.DefaultActorSeed()},
-		},
+		DataDir:               *dataDir,
+		ChannelsDir:           filepath.Join(*dataDir, "channels"),
+		DaemonID:              *daemonID,
+		DaemonEpoch:           *daemonEpoch,
+		UseMockBus:            *mockBus,
+		ReplayWindow:          time.Duration(*replayWindowMs) * time.Millisecond,
+		ChannelTemplates:      buildChannelTemplates(),
 		OnChannelBoot:         wireAdapterFramework(XHSScaffoldFactory(xhs.Config{})),
 		OnBindDeviceSession:   deviceBinder.OnBind,
 		OnUnbindDeviceSession: deviceBinder.OnUnbind,
@@ -126,4 +126,35 @@ func defaultDataDir() string {
 		return ".coagent"
 	}
 	return fmt.Sprintf("%s/.coagent", home)
+}
+
+// buildChannelTemplates assembles the DaemonConfig.ChannelTemplates map
+// (M1.6-T5 phase-2). The map keys are catalog.Channel.Type values:
+//
+//   - ""          legacy / unspecified channels — no template seeds.
+//   - "group"     generic group chat — no template seeds.
+//   - "xhs-creator" L4 xhs-creator template (v4-layer4-spec §2): seeds
+//     tool:xhs-adapter into actor_registry, mkdirs published-notes/ /
+//     drafts/ / assets/ inside the channel workdir, and ships the
+//     §2.4 domain prompt segment for the worker spawn env (phase-3).
+//
+// The conversion from the adapter-owned xhs.Template to the runtime
+// projection lives here because the composition root is the only layer
+// that may import both `adapters/**` and `runtime/**` per arch-lint.
+func buildChannelTemplates() map[string]runtime.ChannelTemplate {
+	out := make(map[string]runtime.ChannelTemplate, 3)
+	// Empty + "group" share the generic no-template projection. We
+	// register both so the daemon resolver returns a stable zero-value
+	// for either key without falling through to the "" default twice.
+	generic := runtime.ChannelTemplate{}
+	out[""] = generic
+	out["group"] = generic
+
+	tpl := xhs.XHSCreatorTemplate()
+	out[tpl.ChannelType] = runtime.ChannelTemplate{
+		AdapterActorSeeds: tpl.AdapterActorSeeds,
+		WorkdirSubdirs:    tpl.WorkdirSubdirs,
+		DomainPrompt:      tpl.DomainPrompt,
+	}
+	return out
 }

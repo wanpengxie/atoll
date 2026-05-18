@@ -46,6 +46,15 @@ type ReserveOptions struct {
 	// this channel mirrors for M2+ federation. Empty means the channel
 	// is native, non-mirror (M1.5 default).
 	FederatedOrigin string
+
+	// ChannelType is the L4 channel-template key (e.g. "xhs-creator")
+	// that the catalog stored on the channels row. The placement layer
+	// itself does not interpret it — it threads the value verbatim into
+	// CreateChannelRequest.ChannelType so the daemon-side bootstrap saga
+	// can resolve the matching template (actor seeds, workdir subdirs,
+	// domain prompt). Empty means "no template" — legacy or generic
+	// group channels (M1.6-T5).
+	ChannelType string
 }
 
 // tenantOrDefault returns the tenant id to persist. Demo callers

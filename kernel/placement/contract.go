@@ -122,6 +122,18 @@ type CreateChannelRequest struct {
 	// §12.1). Each entry is an opaque JSON object the daemon decodes
 	// against its own schema.
 	InitialMembers []InitialMember `json:"initial_members,omitempty"`
+	// ChannelType carries the L4 channel-template key (catalog.Channel.Type)
+	// the server resolved at reserve time — typically `"group"` (no
+	// template) or `"xhs-creator"` (M1.6-T5 first template). The daemon
+	// uses it to look up the per-type ChannelTemplate (actor seeds /
+	// workdir subdirs / domain prompt) so the bootstrap saga can specialise
+	// the new channel without touching the envelope schema.
+	//
+	// Empty string is treated as the legacy "no template" path — the
+	// saga only seeds system + initial members and OnChannelBoot does
+	// not install any domain adapters. This preserves backward
+	// compatibility for pre-M1.6-T5 daemons.
+	ChannelType string `json:"channel_type,omitempty"`
 }
 
 // InitialMember mirrors one `initial_members[*]` entry per L2 §12.1.

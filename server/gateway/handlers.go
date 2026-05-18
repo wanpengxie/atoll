@@ -27,6 +27,7 @@ import (
 	"github.com/wanpengxie/ActOS/server/daemonbus"
 	"github.com/wanpengxie/ActOS/server/devicebus"
 	"github.com/wanpengxie/ActOS/server/identity"
+	"github.com/wanpengxie/ActOS/server/placements"
 )
 
 // DaemonbusHandlers wires the daemonbus dispatch hooks to gateway-
@@ -317,12 +318,18 @@ func (a *App) handleBindChannel(c *gin.Context) {
 		return
 	}
 
-	_, createReq, err := a.placements.Reserve(
+	// M1.6-T5 phase-2 — thread the channel-template key (catalog.Channel.Type)
+	// into the placement reserve so daemon's bootstrap saga can resolve
+	// the matching ChannelTemplate (actor seeds / workdir subdirs / domain
+	// prompt). Legacy group channels carry Type="group", which the daemon
+	// treats as the no-template default.
+	_, createReq, err := a.placements.ReserveWith(
 		c.Request.Context(),
 		channel.ID(ch.ID),
 		daemonID,
 		placement.ConnectionEpoch(conn.ConnectionEpoch),
 		initial,
+		placements.ReserveOptions{ChannelType: ch.Type},
 	)
 	if err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})

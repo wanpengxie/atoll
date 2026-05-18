@@ -50,8 +50,17 @@ func startIntegrationDaemon(t *testing.T, ctx context.Context, opts integDaemonO
 		NowFn:             nowMs,
 		HumanCallerSecret: []byte(integSecret),
 		SchedulerPeriod:   period,
-		ChannelTemplate: runtime.ChannelTemplate{
-			AdapterActorSeeds: []actor.Record{xhs.DefaultActorSeed()},
+		// M1.6-T5 phase-2 — wire the xhs-creator template so the
+		// bootstrap saga seeds tool:xhs-adapter into actor_registry
+		// and the per-channel adapter framework Install path can find
+		// it. createChannel below tags each fresh channel with
+		// ChannelType="xhs-creator" so XHSScaffoldFactory installs.
+		ChannelTemplates: map[string]runtime.ChannelTemplate{
+			XHSCreatorChannelType: {
+				AdapterActorSeeds: []actor.Record{xhs.DefaultActorSeed()},
+				WorkdirSubdirs:    xhs.WorkdirSubdirs(),
+				DomainPrompt:      xhs.DomainPrompt(),
+			},
 		},
 		OnChannelBoot: wireAdapterFramework(XHSScaffoldFactory(opts.XHSConfig)),
 	}
@@ -76,6 +85,11 @@ func createChannel(t *testing.T, ctx context.Context, d *runtime.Daemon, srv *tr
 		OwnerEpoch:      placement.OwnerEpoch(1),
 		FencingToken:    placement.FencingToken(1),
 		InitialMembers:  members,
+		// M1.6-T5 phase-2 — tag the channel with the xhs-creator
+		// template so the daemon resolves the matching seeds /
+		// workdir subdirs / domain prompt and XHSScaffoldFactory
+		// installs the xhs adapter.
+		ChannelType: XHSCreatorChannelType,
 	}
 	frame, err := transit.Encode("frame-create-"+channelID,
 		daemonbus.FrameTypeControlCreateChannel,
