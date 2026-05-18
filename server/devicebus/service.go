@@ -31,6 +31,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/server/channelaccess"
 )
 
 // Default token TTL (24h). Configurable via Config.
@@ -58,6 +59,7 @@ var (
 	ErrSessionNotFound = errors.New("devicebus: session not found")
 	ErrTokenInvalid    = errors.New("devicebus: invalid token")
 	ErrSessionExpired  = errors.New("devicebus: session expired")
+	ErrSessionNotReady = errors.New("devicebus: session not ready")
 )
 
 // Config tunes Service.
@@ -94,7 +96,7 @@ type Service struct {
 	notifier   BindNotifier
 
 	accessMu sync.RWMutex
-	access   AccessAuthorizer
+	access   channelaccess.Authorizer
 
 	allowedOrigins map[string]struct{}
 }
@@ -139,11 +141,8 @@ type UnbindInput struct {
 	Reason  string
 }
 
-// AccessAuthorizer validates that an authenticated user may access a
-// channel. Gateway implements this with catalog channel membership.
-type AccessAuthorizer interface {
-	AuthorizeChannelAccess(ctx context.Context, channelID, userID string) error
-}
+// AccessAuthorizer validates that an authenticated user may access a channel.
+type AccessAuthorizer = channelaccess.Authorizer
 
 // SetBindNotifier wires the lifecycle notifier. Safe to call multiple
 // times; a subsequent call replaces the previous binding (gateway
@@ -157,13 +156,13 @@ func (s *Service) SetBindNotifier(n BindNotifier) {
 
 // SetAccessAuthorizer wires the route-level channel access check. Safe to
 // replace at runtime for tests.
-func (s *Service) SetAccessAuthorizer(a AccessAuthorizer) {
+func (s *Service) SetAccessAuthorizer(a channelaccess.Authorizer) {
 	s.accessMu.Lock()
 	s.access = a
 	s.accessMu.Unlock()
 }
 
-func (s *Service) accessAuthorizer() AccessAuthorizer {
+func (s *Service) accessAuthorizer() channelaccess.Authorizer {
 	s.accessMu.RLock()
 	defer s.accessMu.RUnlock()
 	return s.access
@@ -425,10 +424,13 @@ func (s *Service) ValidateToken(ctx context.Context, sessionID, rawToken string)
 		return Session{}, ErrSessionExpired
 	}
 	switch row.State {
+	case StateReady, StateActive, StateOffline:
+		return row, nil
 	case StateExpired, StateRevoked:
 		return Session{}, ErrSessionExpired
+	default:
+		return Session{}, ErrSessionNotReady
 	}
-	return row, nil
 }
 
 // transition is the generic state-machine helper.

@@ -2,6 +2,7 @@ package devicebus_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -113,6 +114,22 @@ func TestIssueAndLifecycle(t *testing.T) {
 	}
 }
 
+func TestValidateTokenRejectsPendingSession(t *testing.T) {
+	t.Parallel()
+	svc := newSvc(t, nil)
+	ctx := context.Background()
+
+	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
+		DeviceID: "dev-A", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, err := svc.ValidateToken(ctx, res.Session.ID, res.Token); !errors.Is(err, devicebus.ErrSessionNotReady) {
+		t.Fatalf("ValidateToken pending err=%v want ErrSessionNotReady", err)
+	}
+}
+
 func TestExpireDueSessions(t *testing.T) {
 	t.Parallel()
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
@@ -144,6 +161,37 @@ func TestAllStatesClosedSet(t *testing.T) {
 	t.Parallel()
 	if got := len(devicebus.AllStates); got != 6 {
 		t.Errorf("len=%d want 6", got)
+	}
+}
+
+func TestHandleWSRejectsPendingBeforeUpgrade(t *testing.T) {
+	t.Parallel()
+	svc := newSvc(t, nil)
+	ctx := context.Background()
+	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
+		DeviceID: "dev-A", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/devicebus", svc.HandleWS(noopForwarder{}))
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/devicebus?session_id=" + res.Session.ID + "&token=" + res.Token
+	ws, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err == nil {
+		_ = ws.Close()
+		t.Fatal("pending session upgraded successfully")
+	}
+	if resp == nil {
+		t.Fatalf("dial response nil: %v", err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status=%d want 409", resp.StatusCode)
 	}
 }
 

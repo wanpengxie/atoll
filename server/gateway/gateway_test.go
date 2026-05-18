@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -221,6 +223,31 @@ func TestDevicebusIssueRequiresChannelMembership(t *testing.T) {
 	}
 }
 
+func TestDevicebusIssueFailsClosedWithoutBindNotifier(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	app.Devicebus().SetBindNotifier(nil)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	alice := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-devbus-nil-notifier@example.com")
+
+	req, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/channels/"+alice.channelID+"/devices",
+		strings.NewReader(`{"device_id":"dev-alice","device_type":"xhs","daemon_id":"d1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: alice.session})
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST devices: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503", resp.StatusCode)
+	}
+}
+
 func TestDevicebusSessionAccessRequiresOwnerOrChannelMembership(t *testing.T) {
 	t.Parallel()
 	app := newTestApp(t)
@@ -250,6 +277,128 @@ func TestDevicebusSessionAccessRequiresOwnerOrChannelMembership(t *testing.T) {
 		if resp.StatusCode != http.StatusForbidden {
 			t.Fatalf("%s status=%d want 403", method, resp.StatusCode)
 		}
+	}
+}
+
+func TestViewcacheRoutesRequireChannelMembership(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	alice := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-viewcache@example.com")
+	bob := registerLoginAndCreateChannel(t, client, srv.URL, app, "bob-viewcache@example.com")
+	ctx := context.Background()
+
+	env := message.Envelope{
+		ID:         "m-private",
+		ChannelID:  alice.channelID,
+		Type:       "agent.text",
+		Kind:       message.KindEvent,
+		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+		Payload:    json.RawMessage(`{"text":"secret"}`),
+		Visibility: message.VisibilityPublic,
+		Audience:   []string{"*"},
+	}
+	if _, err := app.Viewcache().Apply(ctx, viewsync.PushFrame{
+		ChannelID: channel.ID(alice.channelID),
+		Seq:       1,
+		MessageID: env.ID,
+		Envelope:  env,
+	}); err != nil {
+		t.Fatalf("seed viewcache: %v", err)
+	}
+
+	cases := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/api/channels/" + alice.channelID + "/messages", ""},
+		{http.MethodGet, "/api/channels/" + alice.channelID + "/cursor", ""},
+		{http.MethodPost, "/api/channels/" + alice.channelID + "/resync", `{"since_seq":1,"until_seq":1}`},
+	}
+	for _, tc := range cases {
+		req, _ := http.NewRequest(tc.method, srv.URL+tc.path, strings.NewReader(tc.body))
+		if tc.body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: bob.session})
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", tc.method, tc.path, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s %s status=%d want 403", tc.method, tc.path, resp.StatusCode)
+		}
+	}
+}
+
+func TestPushhubSubscribeRejectsNonMemberAndBlocksFanout(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	alice := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-pushhub@example.com")
+	bob := registerLoginAndCreateChannel(t, client, srv.URL, app, "bob-pushhub@example.com")
+
+	header := http.Header{}
+	header.Set("Cookie", (&http.Cookie{Name: identity.CookieName, Value: bob.session}).String())
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+	ws, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		t.Fatalf("dial pushhub: status=%d err=%v", status, err)
+	}
+	defer func() { _ = ws.Close() }()
+
+	if err := ws.WriteJSON(map[string]string{
+		"type":       "subscribe",
+		"channel_id": alice.channelID,
+	}); err != nil {
+		t.Fatalf("subscribe write: %v", err)
+	}
+
+	if err := ws.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	var reject struct {
+		Type      string `json:"type"`
+		ChannelID string `json:"channel_id"`
+		Error     string `json:"error"`
+	}
+	if err := ws.ReadJSON(&reject); err != nil {
+		t.Fatalf("read subscribe reject: %v", err)
+	}
+	if reject.Type != "subscribe_rejected" || reject.ChannelID != alice.channelID {
+		t.Fatalf("reject frame=%+v want subscribe_rejected for %s", reject, alice.channelID)
+	}
+	if got := app.Pushhub().SubscriberCount(channel.ID(alice.channelID)); got != 0 {
+		t.Fatalf("subscriber count=%d want 0", got)
+	}
+
+	app.Pushhub().PushMessage(channel.ID(alice.channelID), 1, message.Envelope{
+		ID:         "m-private-push",
+		ChannelID:  alice.channelID,
+		Type:       "agent.text",
+		Kind:       message.KindEvent,
+		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+		Payload:    json.RawMessage(`{"text":"secret"}`),
+		Visibility: message.VisibilityPublic,
+		Audience:   []string{"*"},
+	})
+	if err := ws.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if _, raw, err := ws.ReadMessage(); err == nil {
+		t.Fatalf("unexpected push for non-member: %s", string(raw))
 	}
 }
 

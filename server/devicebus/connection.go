@@ -128,7 +128,11 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 		}
 		row, err := s.ValidateToken(c.Request.Context(), sessionID, token)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			status := http.StatusUnauthorized
+			if errors.Is(err, ErrSessionNotReady) {
+				status = http.StatusConflict
+			}
+			c.JSON(status, gin.H{"error": err.Error()})
 			return
 		}
 		upgrader := websocket.Upgrader{CheckOrigin: s.checkOrigin}
