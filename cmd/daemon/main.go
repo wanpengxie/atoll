@@ -35,6 +35,7 @@ import (
 	"github.com/wanpengxie/ActOS/pkg/logger"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/transit"
+	"github.com/wanpengxie/ActOS/runtime/workerhost"
 )
 
 // version is set via -ldflags at build time.
@@ -61,6 +62,10 @@ func main() {
 			"dev mode: pretty-printed console logs + relax --key / --human-caller-secret requirement when paired with --mock-bus")
 		useScaffoldXHS = flag.Bool("use-scaffold-xhs", false,
 			"dev/test fallback: install the in-process xhs scaffold instead of the production device transit adapter")
+		workerBin = flag.String("worker-bin", defaultWorkerBin(),
+			"path to the coagent-worker subprocess binary; empty disables worker spawning (channel-agent triggers become no-op)")
+		workerProvider = flag.String("worker-provider", envOrDefault("COAGENT_WORKER_PROVIDER", "kimi"),
+			"value passed as --provider to spawned workers (mock|kimi). Also via COAGENT_WORKER_PROVIDER env.")
 	)
 	flag.Parse()
 
@@ -148,6 +153,32 @@ func main() {
 		cfg.HumanCallerSecret = []byte(*humanSecret)
 	}
 
+	// M1.6-T1 P4 — wire the worker subprocess spawner so channel-agent
+	// trigger envelopes reach a real worker (mock or kimi). When
+	// --worker-bin is empty (or the binary is missing on disk at boot)
+	// we fall back to the P2 counter-stub handler by leaving
+	// cfg.WorkerSpawner nil; that path is silent (handler is no-op) but
+	// at least the daemon boots — useful for smoke tests where the
+	// worker binary is not built yet.
+	if *workerBin != "" {
+		args := []string{"--provider=" + *workerProvider}
+		cfg.WorkerSpawner = &workerhost.ExecSpawner{
+			BinaryPath: *workerBin,
+			Args:       args,
+			// Env left nil — ExecSpawner already inherits os.Environ()
+			// at Spawn time (KIMI_*, COAGENT_* propagate naturally).
+		}
+		lg.Z().Info().
+			Str("event", "daemon.worker_spawner_wired").
+			Str("worker_bin", *workerBin).
+			Str("worker_provider", *workerProvider).
+			Msg("workerhost.ExecSpawner installed")
+	} else {
+		lg.Z().Warn().
+			Str("event", "daemon.worker_spawner_disabled").
+			Msg("--worker-bin empty; channel-agent triggers will be no-op")
+	}
+
 	lg.Z().Info().
 		Str("event", "daemon.starting").
 		Str("daemon_id", *daemonID).
@@ -165,6 +196,27 @@ func main() {
 		os.Exit(1)
 	}
 	lg.Z().Info().Str("event", "daemon.stopped").Msg("daemon stopped cleanly")
+}
+
+// defaultWorkerBin returns the worker subprocess path. Honours
+// COAGENT_WORKER_BIN env so ops can override the location without
+// shipping a flag — falls back to the make-build output (./bin/
+// coagent-worker) which lives alongside the daemon binary in
+// production deployments.
+func defaultWorkerBin() string {
+	if v := os.Getenv("COAGENT_WORKER_BIN"); v != "" {
+		return v
+	}
+	return "./bin/coagent-worker"
+}
+
+// envOrDefault returns the env value (trimmed) when non-empty, else
+// fallback. Inlined helper so cmd/daemon stays free of utility imports.
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func defaultDataDir() string {

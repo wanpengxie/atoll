@@ -49,16 +49,25 @@ type ExecSpawner struct {
 // The per-Spawn extraEnv list (M1.6-T5 phase-3) is appended after the
 // static s.Env so per-channel keys (COAGENT_CHANNEL_TYPE,
 // COAGENT_DOMAIN_PROMPT, ...) override any global default. Order:
-// os.Environ() → s.Env → extraEnv.
+// os.Environ() → s.Env → extraEnv → COAGENT_WORKER_LEASE_ID.
+//
+// The leaseID assigned by the Manager is injected as
+// COAGENT_WORKER_LEASE_ID so cmd/worker can fail-fast when the daemon
+// forgets to wire it — matching the worker's flag/env fallback (see
+// cmd/worker/main.go:55).
 func (s *ExecSpawner) Spawn(ctx context.Context, leaseID string, extraEnv []string) (WorkerProc, error) {
 	if s.BinaryPath == "" {
 		return WorkerProc{}, errors.New("workerhost: ExecSpawner.BinaryPath empty")
+	}
+	if leaseID == "" {
+		return WorkerProc{}, errors.New("workerhost: ExecSpawner.Spawn empty leaseID")
 	}
 	cmd := exec.CommandContext(ctx, s.BinaryPath, s.Args...) //nolint:gosec
 	cmd.Env = append(os.Environ(), s.Env...)
 	if len(extraEnv) > 0 {
 		cmd.Env = append(cmd.Env, extraEnv...)
 	}
+	cmd.Env = append(cmd.Env, "COAGENT_WORKER_LEASE_ID="+leaseID)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return WorkerProc{}, fmt.Errorf("workerhost: stdin pipe: %w", err)
