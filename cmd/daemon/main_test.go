@@ -30,6 +30,9 @@ func buildDaemon(t *testing.T) string {
 // --human-caller-secret is empty. Otherwise the control.write_message
 // handler is silently nil and POST /api/channels/:id/messages returns
 // "no daemon for channel".
+//
+// M1.6-T7 phase-2: error logs are now JSON on stdout (structured
+// logging), so we assert against the combined output instead of stderr.
 func TestDaemon_FailFast_MissingHumanCallerSecret(t *testing.T) {
 	t.Parallel()
 	bin := buildDaemon(t)
@@ -43,22 +46,20 @@ func TestDaemon_FailFast_MissingHumanCallerSecret(t *testing.T) {
 		"--key", "dummy",
 		// --human-caller-secret intentionally omitted.
 	)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err == nil {
-		t.Fatalf("daemon exited 0 with no --human-caller-secret; want non-zero")
-	} else {
-		ee, ok := err.(*exec.ExitError)
-		if !ok {
-			t.Fatalf("unexpected error type: %v", err)
-		}
-		if ee.ExitCode() == 0 {
-			t.Errorf("exit code = 0, want non-zero")
-		}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("daemon exited 0 with no --human-caller-secret; want non-zero\noutput=%s", string(out))
 	}
-	if got := stderr.String(); got == "" {
-		t.Error("expected fatal message on stderr, got empty")
+	ee, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("unexpected error type: %v\noutput=%s", err, string(out))
+	}
+	if ee.ExitCode() == 0 {
+		t.Errorf("exit code = 0, want non-zero\noutput=%s", string(out))
+	}
+	if got := string(out); got == "" {
+		t.Error("expected fail-fast message on stdout/stderr, got empty")
 	}
 }
 

@@ -10,7 +10,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/wanpengxie/ActOS/pkg/logger"
 	"github.com/wanpengxie/ActOS/server/gateway"
 )
 
@@ -28,7 +28,11 @@ var version = "dev"
 
 func main() {
 	if err := run(); err != nil {
-		log.Fatalf("[server] fatal: %v", err)
+		// `run` already logged the detailed structured error; exit 1
+		// with a final plain stderr line so non-JSON parsers in CI also
+		// see what happened.
+		fmt.Fprintf(os.Stderr, "[server] fatal: %v\n", err)
+		os.Exit(1)
 	}
 }
 
@@ -48,8 +52,28 @@ func run() error {
 	// debug in a staging deploy without touching CLI flags).
 	applyGinMode(cfg.AllowDevSecrets)
 
-	log.Printf("[server] coagent-server %s starting on %s (db=%s gin_mode=%s)",
-		version, cfg.HTTPAddr, cfg.DBPath, gin.Mode())
+	// M1.6-T7 phase-2 — structured JSON logger. `--allow-dev-secrets`
+	// (matching the existing dev/prod gate) flips zerolog into pretty
+	// ConsoleWriter for hand-readable dev output; prod stays on JSON
+	// so logs can be shipped to loki / docker logs / etc. without
+	// post-processing.
+	lg := logger.New(logger.Config{
+		Component: "server",
+		Version:   version,
+		Writer:    os.Stdout,
+		Pretty:    cfg.AllowDevSecrets,
+		Level:     os.Getenv("COAGENT_LOG_LEVEL"),
+	})
+	restore := lg.RedirectStdlib()
+	defer restore()
+
+	lg.Z().Info().
+		Str("event", "server.starting").
+		Str("addr", cfg.HTTPAddr).
+		Str("db", cfg.DBPath).
+		Str("gin_mode", gin.Mode()).
+		Bool("allow_dev_secrets", cfg.AllowDevSecrets).
+		Msg("coagent-server starting")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -66,6 +90,7 @@ func run() error {
 		ReconcileHeartbeatTimeout: cfg.ReconcileHeartbeatTimeout,
 	})
 	if err != nil {
+		lg.Z().Error().Err(err).Str("event", "server.gateway_init_failed").Msg("gateway init failed")
 		return fmt.Errorf("gateway init: %w", err)
 	}
 	defer func() { _ = app.Close() }()
@@ -78,7 +103,7 @@ func run() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("[server] http listen %s", cfg.HTTPAddr)
+		lg.Z().Info().Str("event", "server.http_listen").Str("addr", cfg.HTTPAddr).Msg("http listen")
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -88,16 +113,19 @@ func run() error {
 
 	select {
 	case <-ctx.Done():
-		log.Printf("[server] signal received, shutting down")
+		lg.Z().Info().Str("event", "server.shutdown_signal").Msg("signal received, shutting down")
 	case err := <-errCh:
+		lg.Z().Error().Err(err).Str("event", "server.http_error").Msg("http server error")
 		return fmt.Errorf("http server: %w", err)
 	}
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
+		lg.Z().Error().Err(err).Str("event", "server.shutdown_error").Msg("http shutdown error")
 		return fmt.Errorf("http shutdown: %w", err)
 	}
+	lg.Z().Info().Str("event", "server.stopped").Msg("server stopped cleanly")
 	return nil
 }
 

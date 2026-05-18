@@ -85,6 +85,7 @@ vendors:
   uuid:          { in: "github.com/google/uuid" }
   crypto:        { in: "golang.org/x/crypto/**" }
   migrate:       { in: "github.com/golang-migrate/migrate/**" }
+  zerolog:       { in: ["github.com/rs/zerolog", "github.com/rs/zerolog/**"] }
 
 deps:
   # ─────────────────────────────────────────────────────────────────────
@@ -140,10 +141,17 @@ deps:
       - uuid
       - crypto
       - migrate
+      - zerolog
 
   cmd:
     mayDependOn: [kernel, runtime, runtime_worker, adapters, server, pkg]
     anyVendorDeps: true
 
   pkg:
+    # M1.6-T7 phase-2: pkg/logger ships a tiny zerolog facade reused by
+    # cmd/* (server / daemon / worker) to emit structured JSON to stdout.
+    # zerolog stays the only vendor pkg/** depends on so this stays a
+    # leaf utility, not a kitchen-sink.
     mayDependOn: [kernel, pkg]
+    canUse:
+      - zerolog

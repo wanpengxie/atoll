@@ -23,7 +23,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -31,30 +30,69 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/adapters/xhs"
+	"github.com/wanpengxie/ActOS/pkg/logger"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
+// version is set via -ldflags at build time.
+var version = "dev"
+
 func main() {
 	var (
-		dataDir     = flag.String("data-dir", defaultDataDir(), "daemon data directory")
-		daemonID    = flag.String("daemon-id", "daemon-local", "stable daemon identifier")
-		daemonEpoch = flag.Int64("daemon-epoch", 0, "daemon process epoch (0 = use unix-second)")
-		mockBus     = flag.Bool("mock-bus", false, "use in-process mock bus (dev only; production uses --server-url WS)")
-		serverURL   = flag.String("server-url", "", "daemonbus WS URL, e.g. ws://localhost:8080/api/daemonbus")
-		daemonKey   = flag.String("key", "", "shared key for daemonbus auth (must match server.daemonbus.SharedSecret)")
-		humanSecret = flag.String("human-caller-secret", "",
+		dataDir         = flag.String("data-dir", defaultDataDir(), "daemon data directory")
+		daemonID        = flag.String("daemon-id", "daemon-local", "stable daemon identifier")
+		daemonEpoch     = flag.Int64("daemon-epoch", 0, "daemon process epoch (0 = use unix-second)")
+		mockBus         = flag.Bool("mock-bus", false, "use in-process mock bus (dev only; production uses --server-url WS)")
+		serverURL       = flag.String("server-url", "", "daemonbus WS URL, e.g. ws://localhost:8080/api/daemonbus")
+		daemonKey       = flag.String("key", "", "shared key for daemonbus auth (must match server.daemonbus.SharedSecret)")
+		humanSecret     = flag.String("human-caller-secret", "",
 			"HMAC secret matching server.gateway.HumanCallerSecret; "+
 				"required when the daemon should accept control.write_message frames")
 		replayWindowMs = flag.Int64("replay-window-ms", 0,
 			"reject control.write_message frames whose ts differs from now() by more than this many milliseconds (0 = disabled)")
-		host    = flag.String("host", "", "optional host metadata reported to the daemonbus registry")
-		version = flag.String("version", "", "optional version metadata reported to the daemonbus registry")
+		host          = flag.String("host", "", "optional host metadata reported to the daemonbus registry")
+		versionFlag   = flag.String("version", "", "optional version metadata reported to the daemonbus registry")
+		allowDevMode  = flag.Bool("allow-dev-secrets", false,
+			"dev mode: pretty-printed console logs + relax --key / --human-caller-secret requirement when paired with --mock-bus")
 	)
 	flag.Parse()
 
 	if *daemonEpoch == 0 {
 		*daemonEpoch = time.Now().Unix()
+	}
+
+	// M1.6-T7 phase-2 — structured logger first so every subsequent
+	// failure path emits JSON instead of a bare stdlib log line.
+	lg := logger.New(logger.Config{
+		Component: "daemon",
+		Version:   version,
+		Writer:    os.Stdout,
+		Pretty:    *allowDevMode,
+		Level:     os.Getenv("COAGENT_LOG_LEVEL"),
+	})
+	restore := lg.RedirectStdlib()
+	defer restore()
+
+	// M1.6-T7 phase-2 — production fail-fast on missing secrets, matching
+	// cmd/server's gateway.withDefaults gate. `--mock-bus` keeps the
+	// dev-only loopback path open without requiring real keys.
+	if !*mockBus {
+		if *serverURL == "" || *daemonKey == "" {
+			lg.Z().Error().Str("event", "daemon.fail_fast").
+				Msg("--server-url and --key are required when --mock-bus=false")
+			os.Exit(1)
+		}
+		// T0.5 — production wiring MUST carry the shared HMAC secret used
+		// to authenticate human-caller tokens; without it the
+		// control.write_message handler is silently skipped and POST
+		// /api/channels/:id/messages returns 'no daemon for channel'.
+		// Fail-fast so misconfiguration is loud instead of stealthy.
+		if *humanSecret == "" {
+			lg.Z().Error().Str("event", "daemon.fail_fast").
+				Msg("--human-caller-secret required when --mock-bus=false")
+			os.Exit(1)
+		}
 	}
 
 	// M1.6-T5 phase-2 — register both the legacy / generic "group"
@@ -85,23 +123,12 @@ func main() {
 	}
 
 	if !*mockBus {
-		if *serverURL == "" || *daemonKey == "" {
-			log.Fatal("daemon: --server-url and --key are required when --mock-bus=false")
-		}
-		// T0.5 — production wiring MUST carry the shared HMAC secret used
-		// to authenticate human-caller tokens; without it the
-		// control.write_message handler is silently skipped and POST
-		// /api/channels/:id/messages returns 'no daemon for channel'.
-		// Fail-fast so misconfiguration is loud instead of stealthy.
-		if *humanSecret == "" {
-			log.Fatal("daemon: --human-caller-secret required when --mock-bus=false")
-		}
 		cfg.WSConfig = &transit.WSClientConfig{
 			URL:      *serverURL,
 			DaemonID: *daemonID,
 			Key:      *daemonKey,
 			Host:     *host,
-			Version:  *version,
+			Version:  *versionFlag,
 		}
 	}
 
@@ -109,12 +136,22 @@ func main() {
 		cfg.HumanCallerSecret = []byte(*humanSecret)
 	}
 
+	lg.Z().Info().
+		Str("event", "daemon.starting").
+		Str("daemon_id", *daemonID).
+		Int64("daemon_epoch", *daemonEpoch).
+		Str("data_dir", *dataDir).
+		Bool("mock_bus", *mockBus).
+		Msg("coagent-daemon starting")
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if err := runtime.RunDaemon(ctx, cfg); err != nil {
-		log.Fatalf("daemon exit: %v", err)
+		lg.Z().Error().Err(err).Str("event", "daemon.exit_error").Msg("daemon exited with error")
+		os.Exit(1)
 	}
+	lg.Z().Info().Str("event", "daemon.stopped").Msg("daemon stopped cleanly")
 }
 
 func defaultDataDir() string {

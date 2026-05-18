@@ -10,11 +10,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/rs/zerolog"
 
 	"github.com/wanpengxie/ActOS/server/catalog"
 	"github.com/wanpengxie/ActOS/server/daemonbus"
@@ -25,6 +26,24 @@ import (
 	"github.com/wanpengxie/ActOS/server/store"
 	"github.com/wanpengxie/ActOS/server/viewcache"
 )
+
+// pkgLogger is the package-level zerolog handle used for boot-time
+// warnings (dev-sentinel use). Tests can swap it via SetLogger.
+//
+// We don't import pkg/logger here — that would create a circular dep
+// once the server package starts exposing helpers consumed by cmd/*.
+// zerolog is already on the canUse list (M1.6-T7 phase-2 arch-lint
+// update), so this is the canonical way to emit JSON warnings from
+// inside the server tree.
+var pkgLogger = zerolog.New(os.Stdout).With().
+	Timestamp().
+	Str("component", "server").
+	Str("source", "gateway").
+	Logger()
+
+// SetLogger overrides the package-level logger. Used by tests to
+// capture the dev-sentinel warning output without scraping stdlib log.
+func SetLogger(l zerolog.Logger) { pkgLogger = l }
 
 // Config bundles the construction-time settings.
 type Config struct {
@@ -213,7 +232,11 @@ func withDefaults(cfg Config) (Config, error) {
 		if !cfg.AllowDevSecrets {
 			return cfg, &ErrInsecureSecret{Field: s.field, Value: current}
 		}
-		log.Printf("[gateway] WARN: %s using dev sentinel %q — DO NOT USE IN PRODUCTION", s.field, s.devValue)
+		pkgLogger.Warn().
+			Str("event", "gateway.dev_sentinel_used").
+			Str("field", s.field).
+			Str("dev_value", s.devValue).
+			Msg("dev sentinel installed for missing/insecure secret — DO NOT USE IN PRODUCTION")
 		*s.ptr = s.devValue
 	}
 	return cfg, nil
