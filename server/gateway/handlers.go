@@ -290,7 +290,19 @@ func buildEngine(a *App) *gin.Engine {
 	// to return a JSON 404 (audit-friendly).
 	if dir := a.cfg.UIDistDir; dir != "" {
 		r.Static("/assets", filepath.Join(dir, "assets"))
-		r.Static("/downloads", filepath.Join(dir, "downloads"))
+		// /downloads/* must revalidate every fetch so cloudflare / browser
+		// caches can't pin a stale extension zip — see commit message for
+		// the cloudflare-cached-zip-broke-manifest.key incident.
+		downloadsDir := filepath.Join(dir, "downloads")
+		r.GET("/downloads/*filepath", func(c *gin.Context) {
+			name := c.Param("filepath")
+			if strings.Contains(name, "..") {
+				c.AbortWithStatus(http.StatusNotFound)
+				return
+			}
+			c.Header("Cache-Control", "no-cache, must-revalidate")
+			c.File(filepath.Join(downloadsDir, name))
+		})
 		r.StaticFile("/favicon.svg", filepath.Join(dir, "favicon.svg"))
 		indexPath := filepath.Join(dir, "index.html")
 		r.NoRoute(func(c *gin.Context) {
