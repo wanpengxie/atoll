@@ -38,22 +38,24 @@ import (
 // version is set via -ldflags at build time.
 var version = "dev"
 
+const defaultReplayWindowMs int64 = 300_000
+
 func main() {
 	var (
-		dataDir         = flag.String("data-dir", defaultDataDir(), "daemon data directory")
-		daemonID        = flag.String("daemon-id", "daemon-local", "stable daemon identifier")
-		daemonEpoch     = flag.Int64("daemon-epoch", 0, "daemon process epoch (0 = use unix-second)")
-		mockBus         = flag.Bool("mock-bus", false, "use in-process mock bus (dev only; production uses --server-url WS)")
-		serverURL       = flag.String("server-url", "", "daemonbus WS URL, e.g. ws://localhost:8080/api/daemonbus")
-		daemonKey       = flag.String("key", "", "shared key for daemonbus auth (must match server.daemonbus.SharedSecret)")
-		humanSecret     = flag.String("human-caller-secret", "",
+		dataDir     = flag.String("data-dir", defaultDataDir(), "daemon data directory")
+		daemonID    = flag.String("daemon-id", "daemon-local", "stable daemon identifier")
+		daemonEpoch = flag.Int64("daemon-epoch", 0, "daemon process epoch (0 = use unix-second)")
+		mockBus     = flag.Bool("mock-bus", false, "use in-process mock bus (dev only; production uses --server-url WS)")
+		serverURL   = flag.String("server-url", "", "daemonbus WS URL, e.g. ws://localhost:8080/api/daemonbus")
+		daemonKey   = flag.String("key", "", "shared key for daemonbus auth (must match server.daemonbus.SharedSecret)")
+		humanSecret = flag.String("human-caller-secret", "",
 			"HMAC secret matching server.gateway.HumanCallerSecret; "+
 				"required when the daemon should accept control.write_message frames")
-		replayWindowMs = flag.Int64("replay-window-ms", 0,
-			"reject control.write_message frames whose ts differs from now() by more than this many milliseconds (0 = disabled)")
-		host          = flag.String("host", "", "optional host metadata reported to the daemonbus registry")
-		versionFlag   = flag.String("version", "", "optional version metadata reported to the daemonbus registry")
-		allowDevMode  = flag.Bool("allow-dev-secrets", false,
+		replayWindowMs = flag.Int64("replay-window-ms", defaultReplayWindowMs,
+			"reject control.write_message frames whose ts differs from now() by more than this many milliseconds (0 = disabled; mock-bus/dev only)")
+		host         = flag.String("host", "", "optional host metadata reported to the daemonbus registry")
+		versionFlag  = flag.String("version", "", "optional version metadata reported to the daemonbus registry")
+		allowDevMode = flag.Bool("allow-dev-secrets", false,
 			"dev mode: pretty-printed console logs + relax --key / --human-caller-secret requirement when paired with --mock-bus")
 	)
 	flag.Parse()
@@ -91,6 +93,11 @@ func main() {
 		if *humanSecret == "" {
 			lg.Z().Error().Str("event", "daemon.fail_fast").
 				Msg("--human-caller-secret required when --mock-bus=false")
+			os.Exit(1)
+		}
+		if *replayWindowMs <= 0 {
+			lg.Z().Error().Str("event", "daemon.fail_fast").
+				Msg("--replay-window-ms must be > 0 when --mock-bus=false")
 			os.Exit(1)
 		}
 	}

@@ -598,10 +598,8 @@ func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
 			if reason != string(c.expectReason) {
 				t.Errorf("%s: reason=%s want %s", c.id, reason, c.expectReason)
 			}
-		} else {
-			if has {
-				t.Errorf("%s: scheduler should have SKIPPED but emitted reason=%s", c.id, reason)
-			}
+		} else if has {
+			t.Errorf("%s: scheduler should have SKIPPED but emitted reason=%s", c.id, reason)
 		}
 	}
 
@@ -1321,13 +1319,13 @@ func waitAgentReply(t *testing.T, ctx context.Context, dbPath string, parentID s
 	for time.Now().Before(deadline) {
 		row := db.QueryRowContext(ctx, q, parentID)
 		var id, sender, parent string
-		switch err := row.Scan(&id, &sender, &parent); {
-		case err == nil:
+		switch err := row.Scan(&id, &sender, &parent); err {
+		case nil:
 			if sender != "agent:channel-agent" {
 				t.Fatalf("agent reply sender=%q want agent:channel-agent (id=%s)", sender, id)
 			}
 			return
-		case err == sql.ErrNoRows:
+		case sql.ErrNoRows:
 			time.Sleep(30 * time.Millisecond)
 		default:
 			t.Fatalf("query agent reply: %v", err)
@@ -1336,7 +1334,7 @@ func waitAgentReply(t *testing.T, ctx context.Context, dbPath string, parentID s
 	// Dump all messages for diagnosis before failing.
 	rows, derr := db.QueryContext(ctx, `SELECT id, type, sender_id, COALESCE(parent_id,'') FROM messages ORDER BY seq`)
 	if derr == nil {
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var id, typ, sender, parent string
 			_ = rows.Scan(&id, &typ, &sender, &parent)

@@ -2,9 +2,15 @@ package devicebus_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/placement"
@@ -141,6 +147,51 @@ func TestAllStatesClosedSet(t *testing.T) {
 	}
 }
 
+func TestHandleWSRejectsNonAllowlistedOrigin(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "d.db"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	svc := devicebus.NewService(db, devicebus.Config{
+		TokenSecret:    "secret",
+		TokenTTL:       time.Hour,
+		AllowedOrigins: []string{"https://allowed.example"},
+	})
+	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
+		DeviceID: "dev-A", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if err := svc.MarkBound(ctx, res.Session.ID); err != nil {
+		t.Fatalf("MarkBound: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/devicebus", svc.HandleWS(noopForwarder{}))
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/devicebus?session_id=" + res.Session.ID + "&token=" + res.Token
+	header := http.Header{}
+	header.Set("Origin", "https://evil.example")
+	ws, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err == nil {
+		_ = ws.Close()
+		t.Fatal("dial with non-allowlisted Origin succeeded")
+	}
+	if resp == nil {
+		t.Fatalf("dial response nil: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status=%d want 403", resp.StatusCode)
+	}
+}
+
 // TestIssueResultCarriesFingerprint covers T147 phase-4b — the issue
 // path returns a non-empty TokenFingerprint sized to TokenFingerprintLength
 // so the gateway can ship it into the daemon-side mirror without
@@ -177,3 +228,7 @@ func TestIssueResultCarriesFingerprint(t *testing.T) {
 type fakeClock struct{ now time.Time }
 
 func (f *fakeClock) Now() time.Time { return f.now }
+
+type noopForwarder struct{}
+
+func (noopForwarder) ForwardDeviceFrame(context.Context, devicebus.DeviceFrame) error { return nil }

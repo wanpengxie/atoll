@@ -51,6 +51,8 @@ type Config struct {
 	SessionSecret             string
 	DaemonSharedSecret        string
 	DeviceTokenSecret         string
+	DeviceAllowedOrigins      []string
+	DeviceAllowMissingOrigin  bool
 	HumanCallerSecret         string
 	ReconcileGracePeriod      time.Duration
 	ReconcileCreateTimeout    time.Duration
@@ -153,7 +155,9 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		SharedSecret: cfg.DaemonSharedSecret,
 	})
 	app.devicebus = devicebus.NewService(db, devicebus.Config{
-		TokenSecret: cfg.DeviceTokenSecret,
+		TokenSecret:        cfg.DeviceTokenSecret,
+		AllowedOrigins:     cfg.DeviceAllowedOrigins,
+		AllowMissingOrigin: cfg.DeviceAllowMissingOrigin,
 	})
 
 	// Wire viewcache → daemon resync via daemonbus.
@@ -163,6 +167,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	// gateway's daemonbus client. devicebus's HTTP issue / revoke routes
 	// invoke the notifier so the daemon mirror stays in sync.
 	app.devicebus.SetBindNotifier(app)
+	app.devicebus.SetAccessAuthorizer(app)
 
 	app.engine = buildEngine(app)
 	return app, nil
@@ -189,6 +194,13 @@ func (a *App) Daemonbus() *daemonbus.Service   { return a.daemonbus }
 func (a *App) Devicebus() *devicebus.Service   { return a.devicebus }
 func (a *App) Pushhub() *pushhub.Hub           { return a.pushhub }
 func (a *App) DB() *sql.DB                     { return a.db }
+
+// AuthorizeChannelAccess implements devicebus.AccessAuthorizer using the
+// catalog membership table.
+func (a *App) AuthorizeChannelAccess(ctx context.Context, channelID, userID string) error {
+	_, err := a.catalog.GetChannelMember(ctx, channelID, userID)
+	return err
+}
 
 // RunReconcile blocks until ctx is cancelled, running the placements
 // reconcile loop.

@@ -77,7 +77,7 @@ func New(cfg Config) Logger {
 	// align log events to envelope timestamps without unit conversion.
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnixMs
 
-	var out io.Writer = cfg.Writer
+	out := cfg.Writer
 	if cfg.Pretty {
 		out = zerolog.ConsoleWriter{Out: cfg.Writer, TimeFormat: time.RFC3339}
 	}

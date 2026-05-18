@@ -22,7 +22,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
-	"github.com/wanpengxie/ActOS/runtime/transit"
 	"github.com/wanpengxie/ActOS/server/catalog"
 	"github.com/wanpengxie/ActOS/server/daemonbus"
 	"github.com/wanpengxie/ActOS/server/devicebus"
@@ -148,7 +147,7 @@ func (a *App) Bind(ctx context.Context, in devicebus.BindInput) error {
 	if !ok {
 		return fmt.Errorf("gateway: bind_device_session: daemon %s not connected", in.Session.DaemonID)
 	}
-	body := transit.BindDeviceSessionBody{
+	body := kerneldaemonbus.BindDeviceSessionBody{
 		FrameID:          uuid.NewString(),
 		SessionID:        kadapter.DeviceSessionID(in.Session.ID),
 		ChannelID:        in.Session.ChannelID,
@@ -163,7 +162,7 @@ func (a *App) Bind(ctx context.Context, in devicebus.BindInput) error {
 	if err != nil {
 		return fmt.Errorf("gateway: bind_device_session send: %w", err)
 	}
-	var ack transit.BindDeviceSessionAckBody
+	var ack kerneldaemonbus.BindDeviceSessionAckBody
 	if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
 		return fmt.Errorf("gateway: bind_device_session ack decode: %w", err)
 	}
@@ -191,7 +190,7 @@ func (a *App) Unbind(ctx context.Context, in devicebus.UnbindInput) error {
 		// reloads from server on the next bind cycle.
 		return nil
 	}
-	body := transit.UnbindDeviceSessionBody{
+	body := kerneldaemonbus.UnbindDeviceSessionBody{
 		FrameID:   uuid.NewString(),
 		SessionID: kadapter.DeviceSessionID(in.Session.ID),
 		ChannelID: in.Session.ChannelID,
@@ -201,7 +200,7 @@ func (a *App) Unbind(ctx context.Context, in devicebus.UnbindInput) error {
 	if err != nil {
 		return fmt.Errorf("gateway: unbind_device_session send: %w", err)
 	}
-	var ack transit.UnbindDeviceSessionAckBody
+	var ack kerneldaemonbus.UnbindDeviceSessionAckBody
 	if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
 		return fmt.Errorf("gateway: unbind_device_session ack decode: %w", err)
 	}
@@ -238,6 +237,17 @@ func (a *App) ForwardDeviceFrame(ctx context.Context, frame devicebus.DeviceFram
 	}
 	_, err = conn.SendFrame(ctx, kerneldaemonbus.FrameTypeDeviceTransitRecv, sf)
 	return err
+}
+
+func (a *App) correlationForParent(ctx context.Context, channelID, parentID string) string {
+	parent, ok, err := a.viewcache.MessageByID(ctx, channel.ID(channelID), parentID)
+	if err != nil || !ok {
+		return parentID
+	}
+	if parent.Envelope.CorrelationID != "" {
+		return parent.Envelope.CorrelationID
+	}
+	return parent.Envelope.ID
 }
 
 // buildEngine wires the gin router. Routes are mounted by each
@@ -355,11 +365,12 @@ func (a *App) handleBindChannel(c *gin.Context) {
 // ----------------------------------------------------------------------
 
 type writeMessageReq struct {
-	Type       string          `json:"type"        binding:"required"`
-	Payload    json.RawMessage `json:"payload"     binding:"required"`
-	ParentID   string          `json:"parent_id"`
-	Audience   []string        `json:"audience"`
-	Visibility string          `json:"visibility"`
+	Type          string          `json:"type"        binding:"required"`
+	Payload       json.RawMessage `json:"payload"     binding:"required"`
+	ParentID      string          `json:"parent_id"`
+	CorrelationID string          `json:"correlation_id"`
+	Audience      []string        `json:"audience"`
+	Visibility    string          `json:"visibility"`
 	// FIX-T8: caller may supply kind explicitly. When omitted the
 	// gateway fills the L1 §1.1 default for core types (and leaves
 	// it empty for business types — daemon harness will reject on
@@ -440,15 +451,19 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		vis = message.Visibility(req.Visibility)
 	}
 	envelope := message.Envelope{
-		Type:       req.Type,
-		ChannelID:  channelID,
-		Sender:     message.Sender{Kind: message.SenderHuman, ID: member.ActorIDInChannel},
-		Kind:       kind,
-		Payload:    req.Payload,
-		ParentID:   req.ParentID,
-		Audience:   req.Audience,
-		Visibility: vis,
-		TS:         ts,
+		Type:          req.Type,
+		ChannelID:     channelID,
+		Sender:        message.Sender{Kind: message.SenderHuman, ID: member.ActorIDInChannel},
+		Kind:          kind,
+		Payload:       req.Payload,
+		ParentID:      req.ParentID,
+		CorrelationID: req.CorrelationID,
+		Audience:      req.Audience,
+		Visibility:    vis,
+		TS:            ts,
+	}
+	if kind == message.KindResponse && envelope.ParentID != "" && envelope.CorrelationID == "" {
+		envelope.CorrelationID = a.correlationForParent(c.Request.Context(), channelID, envelope.ParentID)
 	}
 	body := writeMessageBody{
 		FrameID:         uuid.NewString(),
@@ -474,7 +489,7 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		"daemon_ack_id": ack.FrameID,
 	}
 	if len(ack.Payload) > 0 {
-		var ackBody transit.WriteMessageAckBody
+		var ackBody kerneldaemonbus.WriteMessageAckBody
 		if err := json.Unmarshal(ack.Payload, &ackBody); err == nil {
 			if ackBody.MessageID != "" {
 				resp["message_id"] = ackBody.MessageID
@@ -487,6 +502,8 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 				//                   resolve via parent_id).
 				if kind == message.KindRequest || kind == message.KindEvent {
 					resp["correlation_id"] = ackBody.MessageID
+				} else if envelope.CorrelationID != "" {
+					resp["correlation_id"] = envelope.CorrelationID
 				}
 			}
 			if ackBody.Seq > 0 {

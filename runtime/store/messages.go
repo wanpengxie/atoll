@@ -244,13 +244,13 @@ func (m *Messages) PendingDue(ctx context.Context, nowMs int64, limit int) ([]me
 //   - expires_at > 0           — 0 = "no deadline" sentinel (defensive).
 //   - expires_at <= nowMs      — deadline has actually passed.
 //   - is_terminal = 0          — defensive; requests should never carry
-//                                the terminal bit, but the schema allows
-//                                it and we don't want to re-emit on a
-//                                row that already settled.
+//     the terminal bit, but the schema allows
+//     it and we don't want to re-emit on a
+//     row that already settled.
 //   - NOT EXISTS (terminal response with parent_id=m.id) — The One Law
-//                                says exactly one terminal response per
-//                                request. If one is already on disk we
-//                                skip this row.
+//     says exactly one terminal response per
+//     request. If one is already on disk we
+//     skip this row.
 //
 // `limit <= 0` clamps to 64 — matches PendingDue + the outbox PendingPage
 // convention so a single scheduler tick has bounded per-channel cost.

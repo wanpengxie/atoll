@@ -12,6 +12,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -22,13 +23,7 @@ import (
 // The field layout MUST match server/gateway/handlers.go HumanCaller
 // byte-for-byte — the daemon recomputes the HMAC over the same input
 // concatenation order (`channelID|userID|actorID|ts|nonce`).
-type HumanCaller struct {
-	UserID           string `json:"user_id"`
-	ActorIDInChannel string `json:"actor_id_in_channel"`
-	TS               int64  `json:"ts"`
-	Nonce            string `json:"nonce"`
-	ServerToken      string `json:"server_token"`
-}
+type HumanCaller = daemonbus.HumanCaller
 
 // WriteMessageBody is the daemonbus `control.write_message` payload.
 // The daemon receives one per HTTP write the gateway accepts.
@@ -38,48 +33,11 @@ type HumanCaller struct {
 // + the actor_registry record, then derives `id = CanonicalHash(env)`
 // before invoking the harness chain (matches T1.9 §"daemon 收到 control.
 // write_message" flow).
-type WriteMessageBody struct {
-	FrameID         string           `json:"frame_id"`
-	ChannelID       string           `json:"channel_id"`
-	HumanCaller     HumanCaller      `json:"human_caller"`
-	EnvelopePartial message.Envelope `json:"envelope_partial"`
-}
+type WriteMessageBody = daemonbus.WriteMessageBody
 
 // WriteMessageAckBody is the daemon → server reply. One ack per
 // inbound `control.write_message` frame.
-type WriteMessageAckBody struct {
-	// FrameID echoes the request frame_id so the gateway can pair it
-	// with the HTTP request waiting on SendAndAwait.
-	FrameID string `json:"frame_id"`
-
-	// Accepted is true when the harness wrote (or dedupe-matched) the
-	// envelope. false on every reject path (HMAC failure, unknown
-	// channel, harness reject, internal error).
-	Accepted bool `json:"accepted"`
-
-	// MessageID is the envelope.id the daemon allocated (CanonicalHash
-	// result). Present on accept AND on the harness-reject path so the
-	// caller can correlate; empty on auth_failed / channel_unbound.
-	MessageID string `json:"message_id,omitempty"`
-
-	// Seq is the assigned monotonic sequence on the accept path. Zero
-	// for dedupe / any reject.
-	Seq int64 `json:"seq,omitempty"`
-
-	// Deduped reports the L2 §1.4.10.1 idempotent-retry path. Implies
-	// Accepted=true.
-	Deduped bool `json:"deduped,omitempty"`
-
-	// RejectReason is the closed-set L1 §10.3.1 reason on a harness
-	// reject. Daemon-edge rejects (HMAC failure / unknown channel /
-	// internal error) populate this with edge-only sentinels documented
-	// in the const block below.
-	RejectReason string `json:"reject_reason,omitempty"`
-
-	// RejectDetail is the human-readable detail mirrored from the
-	// rejecting step (or daemon edge).
-	RejectDetail string `json:"reject_detail,omitempty"`
-}
+type WriteMessageAckBody = daemonbus.WriteMessageAckBody
 
 // Daemon-edge reject reasons. These are NOT part of L1 §10.3.1; they
 // surface failures that happen BEFORE the harness chain runs.

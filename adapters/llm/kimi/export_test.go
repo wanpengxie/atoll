@@ -49,6 +49,11 @@ func BridgeWireEmitter(b *Bridge) wire.Emitter {
 	return emitter
 }
 
+// EnvelopeIDForTest exposes the private id generator for collision tests.
+func EnvelopeIDForTest(b *Bridge, ipc IPCFacade, nowMs int64) string {
+	return b.envelopeID(ipc, nowMs)
+}
+
 // ClassifyLLMError is the exported alias for the internal classifier so
 // the table test in bridge_test.go can pin the reason buckets.
 func ClassifyLLMError(err error) string { return classifyLLMError(err) }

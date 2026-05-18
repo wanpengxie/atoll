@@ -63,6 +63,30 @@ func TestDaemon_FailFast_MissingHumanCallerSecret(t *testing.T) {
 	}
 }
 
+func TestDaemon_FailFast_ProductionReplayWindowDisabled(t *testing.T) {
+	t.Parallel()
+	bin := buildDaemon(t)
+	dataDir := t.TempDir()
+
+	cmd := exec.Command(bin,
+		"--data-dir", dataDir,
+		"--daemon-id", "daemon-replay-failfast",
+		"--daemon-epoch", "1",
+		"--server-url", "ws://127.0.0.1:1",
+		"--key", "dummy",
+		"--human-caller-secret", "human-secret",
+		"--replay-window-ms", "0",
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("daemon exited 0 with --replay-window-ms=0 in production; want non-zero\noutput=%s", string(out))
+	}
+	if !bytes.Contains(out, []byte("--replay-window-ms must be > 0")) {
+		t.Fatalf("output missing replay-window fail-fast message\noutput=%s", string(out))
+	}
+}
+
 // TestDaemon_BootAndShutdown — assert cmd/daemon with --mock-bus boots
 // past phase 4 (PhaseAcceptingNew), then reacts to SIGTERM by exiting
 // cleanly within a short window. This is a binary-level smoke that

@@ -297,6 +297,36 @@ func (s *Service) Messages(ctx context.Context, channelID channel.ID, afterSeq v
 	return out, rows.Err()
 }
 
+// MessageByID returns one cached message by (channel_id, message_id).
+func (s *Service) MessageByID(ctx context.Context, channelID channel.ID, messageID string) (StoredMessage, bool, error) {
+	var (
+		m       StoredMessage
+		seq     int64
+		recvAt  int64
+		envJSON string
+	)
+	err := s.db.QueryRowContext(
+		ctx,
+		`SELECT seq, message_id, envelope_json, received_at
+		   FROM view_cache_messages
+		  WHERE channel_id = ? AND message_id = ?
+		  LIMIT 1`,
+		string(channelID), messageID,
+	).Scan(&seq, &m.MessageID, &envJSON, &recvAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return StoredMessage{}, false, nil
+		}
+		return StoredMessage{}, false, fmt.Errorf("viewcache: message_by_id: %w", err)
+	}
+	m.Seq = viewsync.Seq(seq)
+	m.ReceivedAt = recvAt
+	if err := json.Unmarshal([]byte(envJSON), &m.Envelope); err != nil {
+		return StoredMessage{}, false, fmt.Errorf("viewcache: unmarshal message_id=%s: %w", messageID, err)
+	}
+	return m, true, nil
+}
+
 // StoredMessage is the read shape returned by Messages.
 type StoredMessage struct {
 	Seq        viewsync.Seq

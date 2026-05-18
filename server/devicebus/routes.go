@@ -1,6 +1,8 @@
 package devicebus
 
 import (
+	"context"
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -9,6 +11,8 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/server/identity"
 )
+
+var errAccessDenied = errors.New("devicebus: access denied")
 
 // RegisterRoutes mounts the issuance + revoke endpoints. Callers
 // must be authenticated upstream (gateway's identity middleware).
@@ -31,6 +35,10 @@ func (s *Service) handleIssue(c *gin.Context) {
 		return
 	}
 	u := identity.UserFrom(c)
+	if err := s.authorizeChannel(c.Request.Context(), c.Param("chID"), u.ID); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
 	res, err := s.IssueSession(c.Request.Context(), IssueInput{
 		DeviceID:   req.DeviceID,
 		DeviceType: req.DeviceType,
@@ -77,19 +85,30 @@ func (s *Service) handleIssue(c *gin.Context) {
 
 func (s *Service) handleRevoke(c *gin.Context) {
 	sid := c.Param("sid")
+	u := identity.UserFrom(c)
+	row, getErr := s.Get(c.Request.Context(), sid)
+	if getErr != nil {
+		status := http.StatusInternalServerError
+		if getErr == ErrSessionNotFound {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": getErr.Error()})
+		return
+	}
+	if err := s.authorizeSession(c.Request.Context(), row, u.ID); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
 	// T147 §A-S2 — best-effort daemon notification BEFORE flipping the
 	// authoritative row to revoked. If the daemon ack fails we still
 	// proceed with the local Revoke (idempotent): a stale mirror row
 	// inside a daemon process is acceptable because every subsequent
 	// device WS handshake re-validates against the server's row state.
 	if notifier := s.bindNotifier(); notifier != nil {
-		row, getErr := s.Get(c.Request.Context(), sid)
-		if getErr == nil {
-			_ = notifier.Unbind(c.Request.Context(), UnbindInput{
-				Session: row,
-				Reason:  "revoked",
-			})
-		}
+		_ = notifier.Unbind(c.Request.Context(), UnbindInput{
+			Session: row,
+			Reason:  "revoked",
+		})
 	}
 	if err := s.Revoke(c.Request.Context(), sid); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -108,6 +127,11 @@ func (s *Service) handleGet(c *gin.Context) {
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
+	u := identity.UserFrom(c)
+	if err := s.authorizeSession(c.Request.Context(), row, u.ID); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"device_session_id": row.ID,
 		"device_id":         row.DeviceID,
@@ -117,4 +141,22 @@ func (s *Service) handleGet(c *gin.Context) {
 		"expires_at":        row.ExpiresAt,
 		"created_at":        row.CreatedAt,
 	})
+}
+
+func (s *Service) authorizeChannel(ctx context.Context, channelID, userID string) error {
+	auth := s.accessAuthorizer()
+	if auth == nil {
+		return errAccessDenied
+	}
+	if err := auth.AuthorizeChannelAccess(ctx, channelID, userID); err != nil {
+		return errAccessDenied
+	}
+	return nil
+}
+
+func (s *Service) authorizeSession(ctx context.Context, row Session, userID string) error {
+	if row.UserID == userID {
+		return nil
+	}
+	return s.authorizeChannel(ctx, string(row.ChannelID), userID)
 }
