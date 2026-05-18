@@ -37,9 +37,9 @@ import (
 type Manager struct {
 	cfg ManagerConfig
 
-	mu      sync.Mutex
-	cur     *workerSession
-	closed  bool
+	mu       sync.Mutex
+	cur      *workerSession
+	closed   bool
 	spawnSeq atomic.Int64
 	leaseSeq atomic.Int64
 }
@@ -77,6 +77,17 @@ type ManagerConfig struct {
 	// production should pass the daemon runCtx so shutdown cascades
 	// reach the worker subprocesses.
 	ServeCtx context.Context
+
+	// WorkerEnv is the per-channel "KEY=VALUE" list the daemon
+	// composition root wires in so every Spawn invocation carries the
+	// channel-scoped env (e.g. COAGENT_CHANNEL_TYPE,
+	// COAGENT_DOMAIN_PROMPT, COAGENT_CHANNEL_ID). M1.6-T5 phase-3
+	// runtime/daemon.ensureChannelAgent populates this from
+	// ChannelLock.ChannelType + resolveTemplate(...).DomainPrompt so
+	// the worker bridge can hash / grep the L4 §2.4 prompt without
+	// re-resolving the template. Empty/nil ⇒ Manager spawns the
+	// worker with only os.Environ + the Spawner's static env list.
+	WorkerEnv []string
 }
 
 // workerSession is the daemon-side state for one live worker subprocess.
@@ -210,7 +221,7 @@ func (m *Manager) spawnLocked(ctx context.Context) error {
 		return errors.New("workerhost: lease acquire conflict")
 	}
 
-	proc, err := m.cfg.Spawner.Spawn(m.cfg.ServeCtx, leaseID)
+	proc, err := m.cfg.Spawner.Spawn(m.cfg.ServeCtx, leaseID, m.cfg.WorkerEnv)
 	if err != nil {
 		_ = m.cfg.LeaseStore.Release(ctx, string(m.cfg.AgentID))
 		return fmt.Errorf("spawn: %w", err)

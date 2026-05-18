@@ -13,11 +13,19 @@ import (
 // Spawner abstracts how a worker subprocess is started. cmd/daemon uses
 // ExecSpawner which spawns ./bin/coagent-worker via os/exec; tests can
 // inject InProcessSpawner which runs a goroutine.
+//
+// extraEnv is the per-channel "KEY=VALUE" list the Manager passes in on
+// every Spawn call (M1.6-T5 phase-3). cmd/daemon uses this to inject
+// COAGENT_CHANNEL_ID / COAGENT_CHANNEL_TYPE / COAGENT_DOMAIN_PROMPT so
+// the worker bridge can grep / hash the L4 §2.4 domain prompt without
+// re-resolving the channel template. Empty/nil means "no per-channel
+// env" (matches the M1.6-T1/T2 behaviour where Spawner only saw daemon
+// global env).
 type Spawner interface {
 	// Spawn starts a worker subprocess and returns the bidirectional
 	// IPC stream + a Wait func to await exit + a Kill func to force
 	// termination.
-	Spawn(ctx context.Context, leaseID string) (WorkerProc, error)
+	Spawn(ctx context.Context, leaseID string, extraEnv []string) (WorkerProc, error)
 }
 
 // WorkerProc is the daemon-side handle on a running worker.
@@ -37,12 +45,20 @@ type ExecSpawner struct {
 }
 
 // Spawn starts the worker binary.
-func (s *ExecSpawner) Spawn(ctx context.Context, leaseID string) (WorkerProc, error) {
+//
+// The per-Spawn extraEnv list (M1.6-T5 phase-3) is appended after the
+// static s.Env so per-channel keys (COAGENT_CHANNEL_TYPE,
+// COAGENT_DOMAIN_PROMPT, ...) override any global default. Order:
+// os.Environ() → s.Env → extraEnv.
+func (s *ExecSpawner) Spawn(ctx context.Context, leaseID string, extraEnv []string) (WorkerProc, error) {
 	if s.BinaryPath == "" {
 		return WorkerProc{}, errors.New("workerhost: ExecSpawner.BinaryPath empty")
 	}
 	cmd := exec.CommandContext(ctx, s.BinaryPath, s.Args...) //nolint:gosec
 	cmd.Env = append(os.Environ(), s.Env...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(cmd.Env, extraEnv...)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return WorkerProc{}, fmt.Errorf("workerhost: stdin pipe: %w", err)
@@ -72,11 +88,17 @@ type PipeSpawner struct {
 	// reads from in (daemon→worker) and writes to out (worker→daemon).
 	// When the function returns the goroutine ends; out is closed to
 	// signal Wait().
-	WorkerFunc func(ctx context.Context, leaseID string, in io.Reader, out io.Writer) error
+	//
+	// extraEnv mirrors the per-Spawn env list the daemon-side Manager
+	// passes through (M1.6-T5 phase-3) — tests may inspect / forward
+	// it to construct a worker.Runtime whose embedded MockBridge sees
+	// the same COAGENT_* keys an ExecSpawner-spawned subprocess would
+	// receive via os.Environ. Empty/nil means no per-channel env.
+	WorkerFunc func(ctx context.Context, leaseID string, extraEnv []string, in io.Reader, out io.Writer) error
 }
 
 // Spawn starts a goroutine pair simulating a worker subprocess.
-func (s *PipeSpawner) Spawn(ctx context.Context, leaseID string) (WorkerProc, error) {
+func (s *PipeSpawner) Spawn(ctx context.Context, leaseID string, extraEnv []string) (WorkerProc, error) {
 	if s.WorkerFunc == nil {
 		return WorkerProc{}, errors.New("workerhost: PipeSpawner.WorkerFunc nil")
 	}
@@ -86,7 +108,7 @@ func (s *PipeSpawner) Spawn(ctx context.Context, leaseID string) (WorkerProc, er
 	var killOnce sync.Once
 
 	go func() {
-		err := s.WorkerFunc(ctx, leaseID, d2wR, w2dW)
+		err := s.WorkerFunc(ctx, leaseID, extraEnv, d2wR, w2dW)
 		// Close write-side so daemon reader sees EOF.
 		_ = w2dW.Close()
 		// Close read-side too so subsequent writes by daemon fail loudly.

@@ -2,13 +2,31 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
+)
+
+// Env keys M1.6-T5 phase-3 plumbs from daemon → worker spawn so the
+// bridge can hash / grep / forward the L4 §2.4 domain prompt without
+// any new IPC frame. Kept exported so cmd/cli + tests can reuse the
+// constants (one source of truth for the spawn-time contract).
+const (
+	// EnvKeyChannelType holds the L4 channel-template key (catalog
+	// Channel.Type — e.g. "xhs-creator" / "group" / "").
+	EnvKeyChannelType = "COAGENT_CHANNEL_TYPE"
+
+	// EnvKeyDomainPrompt holds the L4 §2.4 prompt segment associated
+	// with the channel type. Empty / unset for legacy / group channels.
+	EnvKeyDomainPrompt = "COAGENT_DOMAIN_PROMPT"
 )
 
 // MockBridge is the deterministic Bridge implementation cmd/worker
@@ -44,6 +62,19 @@ type MockBridge struct {
 	// default emits `{"text": "mock reply to <env.id> (turn N)"}`.
 	ReplyFn func(in ipc.TriggerPayload, turn int) (envelopeType string, payload json.RawMessage)
 
+	// PromptLogWriter receives the one-line domain_prompt_loaded summary
+	// the bridge emits when Run starts and finds a non-empty
+	// COAGENT_DOMAIN_PROMPT in the environment (M1.6-T5 phase-3
+	// acceptance B3). Defaults to os.Stderr so cmd/worker spawned by
+	// the daemon writes the line through to the daemon's stderr pipe.
+	// Tests set this to a bytes.Buffer to assert the format.
+	PromptLogWriter io.Writer
+
+	// EnvLookup returns the value associated with key in the spawn env.
+	// Defaults to os.Getenv. Tests override it to drive the bridge with
+	// a synthetic env without actually mutating the test process state.
+	EnvLookup func(key string) string
+
 	turns int
 }
 
@@ -75,6 +106,38 @@ func (m *MockBridge) applyDefaults() {
 			return "agent.text", payload
 		}
 	}
+	if m.PromptLogWriter == nil {
+		m.PromptLogWriter = os.Stderr
+	}
+	if m.EnvLookup == nil {
+		m.EnvLookup = os.Getenv
+	}
+}
+
+// logDomainPromptOnce writes the M1.6-T5 acceptance-B3 grep target
+// (`mock_bridge: domain_prompt_loaded ...`) to PromptLogWriter when the
+// spawn env supplies a non-empty COAGENT_DOMAIN_PROMPT. The line is
+// stable + idempotent: caller is Run, which fires exactly once per
+// worker.Runtime invocation. Empty prompts emit a "no_domain_prompt"
+// line keyed by channel_type so log scans can still distinguish
+// "phase-3 not wired" from "phase-3 wired but template is generic".
+func (m *MockBridge) logDomainPromptOnce(workerID string) {
+	channelType := m.EnvLookup(EnvKeyChannelType)
+	prompt := m.EnvLookup(EnvKeyDomainPrompt)
+	if prompt == "" {
+		// Surface the absence so an operator grepping for
+		// "domain_prompt_loaded" sees a deterministic counterpart line
+		// for legacy / group channels. Keeps `acceptance B3` honest:
+		// the grep target is positive only on type=xhs-creator boots.
+		fmt.Fprintf(m.PromptLogWriter,
+			"mock_bridge: no_domain_prompt worker=%s channel_type=%q\n",
+			workerID, channelType)
+		return
+	}
+	sum := sha256.Sum256([]byte(prompt))
+	fmt.Fprintf(m.PromptLogWriter,
+		"mock_bridge: domain_prompt_loaded worker=%s channel_type=%q len=%d sha256=%s\n",
+		workerID, channelType, len(prompt), hex.EncodeToString(sum[:8]))
 }
 
 // Run implements Bridge. Blocks until ctx is cancelled, the trigger
@@ -87,6 +150,9 @@ func (m *MockBridge) Run(ctx context.Context, client *IPCClient) error {
 	if client.WorkerActorID() == "" {
 		return errors.New("worker: MockBridge handshake did not populate actor id")
 	}
+	// M1.6-T5 phase-3 — emit the domain_prompt_loaded breadcrumb once
+	// per Run. Stable target for acceptance B3 (`grep prompt log`).
+	m.logDomainPromptOnce(client.WorkerID())
 	triggers := client.Triggers()
 	for {
 		select {

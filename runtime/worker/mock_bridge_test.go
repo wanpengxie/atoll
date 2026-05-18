@@ -1,9 +1,13 @@
 package worker_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -206,5 +210,159 @@ func TestMockBridge_ReactAndExitOnMaxTurns(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Runtime.Run never returned")
+	}
+}
+
+// TestMockBridge_DomainPromptLog covers M1.6-T5 phase-3 acceptance B3:
+// when the daemon spawn env carries COAGENT_DOMAIN_PROMPT (the L4 §2.4
+// xhs-creator segment), the bridge emits exactly one
+// `mock_bridge: domain_prompt_loaded ...` line to PromptLogWriter on
+// Run start. The line carries the worker id, channel_type, prompt
+// length, and a short sha256 prefix so log scans can correlate the
+// prompt-cache key without echoing the full prompt body.
+func TestMockBridge_DomainPromptLog(t *testing.T) {
+	t.Parallel()
+
+	const prompt = "你是 xhs 内容创作 agent。\n业务约束：禁止重复 publish。"
+	const channelType = "xhs-creator"
+	sum := sha256.Sum256([]byte(prompt))
+	wantSHA := hex.EncodeToString(sum[:8])
+
+	workerR, daemonW := io.Pipe()
+	daemonR, workerW := io.Pipe()
+	t.Cleanup(func() {
+		_ = workerR.Close()
+		_ = workerW.Close()
+		_ = daemonR.Close()
+		_ = daemonW.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	daemon := newFakeBridgeDaemon(daemonR, daemonW)
+	ack := ipc.HandshakeAckPayload{
+		WorkerID:      "worker-PROMPT",
+		ChannelID:     channel.ID("ch-PROMPT"),
+		WorkerActorID: "agent:channel-agent",
+		FencingToken:  placement.FencingToken(1),
+		DaemonEpoch:   placement.DaemonEpoch(1),
+	}
+	// One trigger → bridge reacts, MaxTurns=1 fires terminal, Run exits.
+	go daemon.loop(ctx, ack, 1)
+
+	logBuf := &bytes.Buffer{}
+	envLookup := func(key string) string {
+		switch key {
+		case worker.EnvKeyChannelType:
+			return channelType
+		case worker.EnvKeyDomainPrompt:
+			return prompt
+		}
+		return ""
+	}
+	bridge := worker.NewMockBridge()
+	bridge.MaxTurns = 1 // exit after the single trigger
+	bridge.PromptLogWriter = logBuf
+	bridge.EnvLookup = envLookup
+
+	rt, err := worker.New(worker.Config{
+		LeaseID:        "lease-prompt",
+		In:             workerR,
+		Out:            workerW,
+		HeartbeatEvery: time.Hour,
+		Bridge:         bridge,
+	})
+	if err != nil {
+		t.Fatalf("worker.New: %v", err)
+	}
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- rt.Run(ctx) }()
+
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Runtime.Run never returned")
+	}
+
+	got := logBuf.String()
+	if !strings.Contains(got, "mock_bridge: domain_prompt_loaded ") {
+		t.Errorf("log missing prompt-loaded breadcrumb; got=%q", got)
+	}
+	if !strings.Contains(got, "worker=worker-PROMPT") {
+		t.Errorf("log missing worker id; got=%q", got)
+	}
+	if !strings.Contains(got, "channel_type=\"xhs-creator\"") {
+		t.Errorf("log missing channel_type; got=%q", got)
+	}
+	if !strings.Contains(got, "sha256="+wantSHA) {
+		t.Errorf("log missing sha256=%s; got=%q", wantSHA, got)
+	}
+}
+
+// TestMockBridge_NoDomainPromptLog asserts the legacy / group-channel
+// path: when COAGENT_DOMAIN_PROMPT is unset the bridge emits a
+// `no_domain_prompt` counterpart so the absence is still observable.
+// Keeps acceptance B3 grep deterministic (positive for xhs-creator,
+// negative for generic channels — no silent omission).
+func TestMockBridge_NoDomainPromptLog(t *testing.T) {
+	t.Parallel()
+
+	workerR, daemonW := io.Pipe()
+	daemonR, workerW := io.Pipe()
+	t.Cleanup(func() {
+		_ = workerR.Close()
+		_ = workerW.Close()
+		_ = daemonR.Close()
+		_ = daemonW.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	daemon := newFakeBridgeDaemon(daemonR, daemonW)
+	ack := ipc.HandshakeAckPayload{
+		WorkerID:      "worker-GROUP",
+		ChannelID:     channel.ID("ch-GROUP"),
+		WorkerActorID: "agent:channel-agent",
+		FencingToken:  placement.FencingToken(1),
+		DaemonEpoch:   placement.DaemonEpoch(1),
+	}
+	go daemon.loop(ctx, ack, 1)
+
+	logBuf := &bytes.Buffer{}
+	bridge := worker.NewMockBridge()
+	bridge.MaxTurns = 1
+	bridge.PromptLogWriter = logBuf
+	// Force empty env so the test doesn't leak host COAGENT_* state.
+	bridge.EnvLookup = func(string) string { return "" }
+
+	rt, err := worker.New(worker.Config{
+		LeaseID:        "lease-nogrp",
+		In:             workerR,
+		Out:            workerW,
+		HeartbeatEvery: time.Hour,
+		Bridge:         bridge,
+	})
+	if err != nil {
+		t.Fatalf("worker.New: %v", err)
+	}
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- rt.Run(ctx) }()
+
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Runtime.Run never returned")
+	}
+
+	got := logBuf.String()
+	if !strings.Contains(got, "mock_bridge: no_domain_prompt ") {
+		t.Errorf("log missing no_domain_prompt breadcrumb; got=%q", got)
+	}
+	if strings.Contains(got, "domain_prompt_loaded") {
+		t.Errorf("legacy path must not emit domain_prompt_loaded; got=%q", got)
 	}
 }

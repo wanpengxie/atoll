@@ -347,18 +347,18 @@ func buildTemplateResolver(
 // Daemon is the assembled cmd/daemon process. Exposed so tests can
 // drive the phases manually.
 type Daemon struct {
-	cfg             DaemonConfig
-	daemonDB        *sql.DB
-	channelDBs      map[string]*sql.DB
-	bootRes         lifecycle.BootResult
-	transit         *transit.Client
-	bus             *transit.MockBus
-	wsClient        *transit.WSClient
-	booter          *lifecycle.Bootstrapper
-	reconciler      *bootstrap.Reconciler
-	saga            *bootstrap.Saga
-	unloader        *lifecycle.Unloader
-	heartbeat       *transit.HeartbeatTracker
+	cfg        DaemonConfig
+	daemonDB   *sql.DB
+	channelDBs map[string]*sql.DB
+	bootRes    lifecycle.BootResult
+	transit    *transit.Client
+	bus        *transit.MockBus
+	wsClient   *transit.WSClient
+	booter     *lifecycle.Bootstrapper
+	reconciler *bootstrap.Reconciler
+	saga       *bootstrap.Saga
+	unloader   *lifecycle.Unloader
+	heartbeat  *transit.HeartbeatTracker
 	// resolveTemplate returns the daemon-side ChannelTemplate for a
 	// given channel type. Used by bootChannel to surface WorkdirSubdirs
 	// / DomainPrompt into ChannelHooks (M1.6-T5 phase-2/3).
@@ -935,6 +935,17 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 	// fall back to the P2 counter stub so tests don't pay the spawn cost.
 	if d.cfg.WorkerSpawner != nil {
 		leaseStore := workerhost.NewLeaseStore(cr.db)
+		// M1.6-T5 phase-3 — pack the per-channel domain prompt + channel
+		// type into the worker spawn env. Empty values are still passed
+		// so the worker can distinguish "no template" from "missing wire"
+		// (an unset COAGENT_CHANNEL_ID is the latter). Order is:
+		//   COAGENT_CHANNEL_ID=<id>
+		//   COAGENT_CHANNEL_TYPE=<type>     (may be "")
+		//   COAGENT_DOMAIN_PROMPT=<prompt>  (may be "")
+		// mock_bridge / kimi_bridge read these directly via os.Getenv;
+		// no extra IPC frame is introduced (the prompt is base-prompt
+		// scaffolding, not a per-turn signal).
+		workerEnv := d.buildWorkerEnvForChannel(lockRow.ChannelType)
 		mgr, err := workerhost.NewManager(workerhost.ManagerConfig{
 			ChannelID:     cr.channelID,
 			AgentID:       cr.channelAgentID,
@@ -947,6 +958,7 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 			FencingToken:  lockRow.FencingToken,
 			DaemonEpoch:   lockRow.DaemonEpoch,
 			ServeCtx:      d.runCtx,
+			WorkerEnv:     workerEnv,
 		})
 		if err != nil {
 			return fmt.Errorf("runtime: ensure channel-agent manager %s: %w", cr.channelID, err)
@@ -977,6 +989,38 @@ func (d *Daemon) ChannelAgentTriggerCount(chID channel.ID) int64 {
 		return -1
 	}
 	return cr.channelAgentTriggers.Load()
+}
+
+// buildWorkerEnvForChannel assembles the per-channel "KEY=VALUE" env
+// list ManagerConfig.WorkerEnv carries (M1.6-T5 phase-3). cmd/daemon
+// sets DaemonConfig.ChannelTemplates so resolveTemplate returns the L4
+// snapshot keyed by the lock row's ChannelType; the DomainPrompt is
+// either the §2.4 segment (e.g. xhs-creator) or "" (generic group).
+//
+// The env always contains COAGENT_CHANNEL_TYPE so the worker bridge can
+// distinguish "no template" (empty) from "template missing" (key
+// absent). COAGENT_DOMAIN_PROMPT is only emitted when non-empty to
+// avoid wasting the cmd.Env slot for legacy channels.
+//
+// Exported via tests through WorkerEnvForChannel below.
+func (d *Daemon) buildWorkerEnvForChannel(channelType string) []string {
+	env := make([]string, 0, 3)
+	env = append(env, "COAGENT_CHANNEL_TYPE="+channelType)
+	if d.resolveTemplate != nil {
+		if prompt := d.resolveTemplate(channelType).DomainPrompt; prompt != "" {
+			env = append(env, "COAGENT_DOMAIN_PROMPT="+prompt)
+		}
+	}
+	return env
+}
+
+// WorkerEnvForChannel is the test-facing accessor that mirrors the env
+// the Daemon would hand to workerhost.ManagerConfig.WorkerEnv for the
+// supplied channel type. Returns the COAGENT_* "KEY=VALUE" slice in
+// resolution order. Used by daemon_test / template_integration_test to
+// assert the prompt env shape without spawning a real worker.
+func (d *Daemon) WorkerEnvForChannel(channelType string) []string {
+	return d.buildWorkerEnvForChannel(channelType)
 }
 
 // CurrentWorkerIDFor returns the id of the worker subprocess currently

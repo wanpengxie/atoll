@@ -508,9 +508,9 @@ func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
 	msgs := store.NewMessages(db)
 	deadline := now() - 1000
 	type seedCase struct {
-		id          string
-		audience    string
-		expectEmit  bool
+		id           string
+		audience     string
+		expectEmit   bool
 		expectReason message.TerminalFailureReason
 	}
 	cases := []seedCase{
@@ -1126,11 +1126,13 @@ func TestDaemon_Phase3_ChannelAgent_Registered(t *testing.T) {
 // TestDaemon_Phase3_WorkerReply covers M1.6-T1 acceptance #2 + #3:
 //
 // (a) e2e — POST human.text → daemon harness chain → trigger gateway
-//     dispatch → worker spawn → worker emits agent.text reply → query
-//     channel.sqlite returns the reply row.
+//
+//	dispatch → worker spawn → worker emits agent.text reply → query
+//	channel.sqlite returns the reply row.
 //
 // (b) reuse — the second human.text in the same channel must hit the
-//     SAME spawned worker (PipeSpawner spawn counter stays at 1).
+//
+//	SAME spawned worker (PipeSpawner spawn counter stays at 1).
 //
 // PipeSpawner runs an in-process worker.Runtime wired to MockBridge so
 // the test stays hermetic (no need for ./bin/coagent-worker).
@@ -1173,7 +1175,7 @@ func TestDaemon_Phase3_WorkerReply(t *testing.T) {
 	// two consecutive human.text frames.
 	spawnCount := new(atomic.Int64)
 	spawner := &workerhost.PipeSpawner{
-		WorkerFunc: func(ctx context.Context, leaseID string, in io.Reader, out io.Writer) error {
+		WorkerFunc: func(ctx context.Context, leaseID string, _ []string, in io.Reader, out io.Writer) error {
 			spawnCount.Add(1)
 			bridge := worker.NewMockBridge()
 			bridge.MaxTurns = 99 // big — manager re-use covers exit
@@ -1346,6 +1348,75 @@ func waitAgentReply(t *testing.T, ctx context.Context, dbPath string, parentID s
 
 // itoa is a tiny helper to avoid pulling strconv just for the test's
 // envelope id generator (test files already import a fair stack).
+// TestDaemon_WorkerEnvForChannel_DomainPromptPlumbed covers M1.6-T5
+// phase-3: when DaemonConfig.ChannelTemplates has an xhs-creator entry
+// with a non-empty DomainPrompt, the daemon's per-channel WorkerEnv
+// resolution carries both COAGENT_CHANNEL_TYPE and COAGENT_DOMAIN_PROMPT
+// in slot order. Legacy / group channels produce only COAGENT_CHANNEL_TYPE
+// (prompt omitted) so cmd.Env stays lean.
+func TestDaemon_WorkerEnvForChannel_DomainPromptPlumbed(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	dataDir := filepath.Join(tmp, "data")
+	channelsDir := filepath.Join(tmp, "channels")
+	if err := os.MkdirAll(channelsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	const xhsPrompt = "你是 xhs 内容创作 agent.\n禁止重复 publish。"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cfg := runtime.DaemonConfig{
+		DataDir:     dataDir,
+		ChannelsDir: channelsDir,
+		DaemonID:    "daemon-prompt",
+		DaemonEpoch: 1,
+		UseMockBus:  true,
+		NowFn:       now,
+		ChannelTemplates: map[string]runtime.ChannelTemplate{
+			"":            {},
+			"group":       {},
+			"xhs-creator": {DomainPrompt: xhsPrompt},
+		},
+	}
+	d, err := runtime.AssembleDaemon(ctx, cfg)
+	if err != nil {
+		t.Fatalf("AssembleDaemon: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+
+	t.Run("xhs-creator carries domain prompt", func(t *testing.T) {
+		got := d.WorkerEnvForChannel("xhs-creator")
+		if len(got) != 2 {
+			t.Fatalf("len=%d want 2; got=%v", len(got), got)
+		}
+		if got[0] != "COAGENT_CHANNEL_TYPE=xhs-creator" {
+			t.Errorf("env[0]=%q", got[0])
+		}
+		if got[1] != "COAGENT_DOMAIN_PROMPT="+xhsPrompt {
+			t.Errorf("env[1]=%q want COAGENT_DOMAIN_PROMPT=<prompt>", got[1])
+		}
+	})
+
+	t.Run("group channel omits prompt", func(t *testing.T) {
+		got := d.WorkerEnvForChannel("group")
+		if len(got) != 1 {
+			t.Fatalf("len=%d want 1; got=%v", len(got), got)
+		}
+		if got[0] != "COAGENT_CHANNEL_TYPE=group" {
+			t.Errorf("env[0]=%q want COAGENT_CHANNEL_TYPE=group", got[0])
+		}
+	})
+
+	t.Run("legacy unset type still emits empty channel_type", func(t *testing.T) {
+		got := d.WorkerEnvForChannel("")
+		if len(got) != 1 || got[0] != "COAGENT_CHANNEL_TYPE=" {
+			t.Errorf("legacy env=%v want [COAGENT_CHANNEL_TYPE=]", got)
+		}
+	})
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
