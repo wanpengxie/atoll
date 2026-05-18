@@ -86,6 +86,21 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	}, nil
 }
 
+// replyFrameID returns the envelope frame_id the daemon should use when
+// emitting an ack for the given inbound frame. We echo the inbound
+// frame_id so the server-side daemonbus.Connection.matchAck pending
+// map (keyed under the originating SendAndAwait envelope frame_id) can
+// pair the ack with the waiting caller (FIX-2026-05-18). A generated
+// fallback is used only when the inbound frame_id is empty — that
+// branch is unreachable in production but keeps the helper safe under
+// fuzz/test inputs.
+func (d *Dispatcher) replyFrameID(frame daemonbus.Frame) string {
+	if frame.FrameID != "" {
+		return frame.FrameID
+	}
+	return d.frameID()
+}
+
 // ErrStaleEpoch is returned by Dispatch when a frame's
 // DaemonConnectionEpoch does not match the daemon's current epoch.
 // FIX-T8: a frame from an older WS session must not be applied after
@@ -128,7 +143,18 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 		if err != nil {
 			return err
 		}
-		return d.client.Send(ctx, d.frameID(),
+		// FIX-2026-05-18: when replying to a frame the server is
+		// awaiting via SendAndAwait, the ack envelope frame_id MUST
+		// match the inbound frame_id — that is the key the server's
+		// pending-map is registered under (server/daemonbus/
+		// connection.go:96). Generating a fresh frame_id here makes
+		// the server's matchAck miss forever and SendAndAwait times
+		// out (the production 524 incident root cause). The protocol
+		// underdefines envelope vs. body frame_id semantics; until
+		// L2 §9 explicitly specifies "envelope frame_id = in-reply-to
+		// frame_id for ack frames", every ack-reply path on the
+		// daemon side echoes the inbound envelope frame_id.
+		return d.client.Send(ctx, d.replyFrameID(frame),
 			daemonbus.FrameTypeViewsyncResyncResponse, resp)
 
 	case daemonbus.FrameTypeControlCreateChannel:
@@ -182,7 +208,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 		if ack.FrameID == "" {
 			ack.FrameID = body.FrameID
 		}
-		return d.client.Send(ctx, d.frameID(),
+		// FIX-2026-05-18: echo inbound envelope frame_id. See viewsync
+		// resync_response branch for the full root-cause comment.
+		return d.client.Send(ctx, d.replyFrameID(frame),
 			daemonbus.FrameTypeControlWriteMessageAck, ack)
 
 	case daemonbus.FrameTypeControlBindDeviceSession:
@@ -214,7 +242,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 				ack.SessionID = body.SessionID
 			}
 		}
-		return d.client.Send(ctx, d.frameID(),
+		// FIX-2026-05-18: echo inbound envelope frame_id. See viewsync
+		// resync_response branch for the full root-cause comment.
+		return d.client.Send(ctx, d.replyFrameID(frame),
 			daemonbus.FrameTypeControlBindDeviceSessionAck, ack)
 
 	case daemonbus.FrameTypeControlUnbindDeviceSession:
@@ -243,7 +273,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 				ack.SessionID = body.SessionID
 			}
 		}
-		return d.client.Send(ctx, d.frameID(),
+		// FIX-2026-05-18: echo inbound envelope frame_id. See viewsync
+		// resync_response branch for the full root-cause comment.
+		return d.client.Send(ctx, d.replyFrameID(frame),
 			daemonbus.FrameTypeControlUnbindDeviceSessionAck, ack)
 	}
 

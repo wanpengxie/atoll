@@ -12,6 +12,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
@@ -414,6 +415,218 @@ func TestDispatcher_WriteMessageRoundTrip(t *testing.T) {
 	}
 	if ack.MessageID == "" {
 		t.Error("ack.MessageID empty")
+	}
+	// FIX-2026-05-18 regression: ack envelope frame_id MUST echo the
+	// inbound envelope frame_id. Server-side daemonbus.Connection
+	// matchAck registers pending callers under the SendAndAwait
+	// envelope frame_id; if the daemon emits a fresh id here, the
+	// match misses forever and SendAndAwait times out (the production
+	// 524 incident root cause).
+	if ackFrame.FrameID != reqFrame.FrameID {
+		t.Errorf("ack envelope frame_id=%q want %q (must echo inbound for SendAndAwait pairing)",
+			ackFrame.FrameID, reqFrame.FrameID)
+	}
+}
+
+// TestDispatcher_AckEnvelopeFrameIDEchoesInbound is the explicit
+// regression for the 2026-05-18 daemonbus ack-pairing bug: every ack
+// path on the daemon side (write_message_ack / bind_device_session_ack
+// / unbind_device_session_ack / viewsync.resync_response /
+// create_channel_ack / unbind_channel_ack) MUST emit an envelope
+// frame_id that equals the inbound envelope frame_id, otherwise
+// server/daemonbus.Connection.SendAndAwait can never pair the ack
+// against its pending entry and the gateway HTTP request times out
+// (cloudflare 524 in production).
+//
+// Covers the four SendAndAwait-bound paths through Dispatcher; the
+// daemon.go-owned create_channel_ack / unbind_channel_ack paths are
+// not routed through Dispatcher and are exercised by their own tests.
+func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	reg := newStubRegistry()
+	reg.put(actor.Record{ID: testWriteActor, Kind: message.SenderHuman})
+	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 1}}
+	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
+
+	bus := transit.NewMockBus(64)
+	defer func() { _ = bus.Close() }()
+	client, err := transit.NewClient(transit.ClientConfig{
+		DaemonID: "daemon-A", Transport: bus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	bindCalled := false
+	unbindCalled := false
+	resyncCalled := false
+	dispatcher, err := transit.NewDispatcher(transit.DispatcherConfig{
+		Client:  client,
+		FrameID: atomicFrameID(),
+		Handlers: transit.ControlHandlers{
+			OnWriteMessage: func(ctx context.Context, _ daemonbus.Frame, body transit.WriteMessageBody) transit.WriteMessageAckBody {
+				return h.Handle(ctx, body)
+			},
+			OnBindDeviceSession: func(_ context.Context, _ daemonbus.Frame, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody {
+				bindCalled = true
+				return transit.BindDeviceSessionAckBody{
+					FrameID:   body.FrameID,
+					SessionID: body.SessionID,
+					Accepted:  true,
+				}
+			},
+			OnUnbindDeviceSession: func(_ context.Context, _ daemonbus.Frame, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody {
+				unbindCalled = true
+				return transit.UnbindDeviceSessionAckBody{
+					FrameID:   body.FrameID,
+					SessionID: body.SessionID,
+					Accepted:  true,
+				}
+			},
+			OnViewsyncResyncRequest: func(_ context.Context, _ viewsync.ResyncRequest) (viewsync.ResyncResponse, error) {
+				resyncCalled = true
+				return viewsync.ResyncResponse{ChannelID: "ch-1"}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := bus.ServerSide()
+
+	// Run Recv→Dispatch loop in background.
+	loopDone := make(chan error, 1)
+	go func() {
+		for {
+			frame, recvErr := client.Recv(ctx)
+			if recvErr != nil {
+				loopDone <- recvErr
+				return
+			}
+			if derr := dispatcher.Dispatch(ctx, frame); derr != nil {
+				loopDone <- derr
+				return
+			}
+		}
+	}()
+
+	// --- Case A: control.write_message ---
+	caseAFrameID := "envelope-from-server-A"
+	{
+		body := newWriteMessageBody(t, nil, 9_900)
+		reqFrame, _ := transit.Encode(caseAFrameID,
+			daemonbus.FrameTypeControlWriteMessage,
+			"server", client.Epoch(), 0, body)
+		if err := server.SendToDaemon(ctx, reqFrame); err != nil {
+			t.Fatal(err)
+		}
+		ackFrame, err := server.RecvFromDaemon(ctx)
+		if err != nil {
+			t.Fatalf("write_message ack recv: %v", err)
+		}
+		if ackFrame.FrameType != daemonbus.FrameTypeControlWriteMessageAck {
+			t.Fatalf("write_message ack type=%s", ackFrame.FrameType)
+		}
+		if ackFrame.FrameID != caseAFrameID {
+			t.Errorf("write_message_ack envelope frame_id=%q want %q — SendAndAwait pairing would BREAK",
+				ackFrame.FrameID, caseAFrameID)
+		}
+	}
+
+	// --- Case B: control.bind_device_session ---
+	caseBFrameID := "envelope-from-server-B"
+	{
+		bindBody := transit.BindDeviceSessionBody{
+			FrameID:   "body-frame-B",
+			SessionID: "sess-B",
+		}
+		reqFrame, _ := transit.Encode(caseBFrameID,
+			daemonbus.FrameTypeControlBindDeviceSession,
+			"server", client.Epoch(), 0, bindBody)
+		if err := server.SendToDaemon(ctx, reqFrame); err != nil {
+			t.Fatal(err)
+		}
+		ackFrame, err := server.RecvFromDaemon(ctx)
+		if err != nil {
+			t.Fatalf("bind ack recv: %v", err)
+		}
+		if ackFrame.FrameType != daemonbus.FrameTypeControlBindDeviceSessionAck {
+			t.Fatalf("bind ack type=%s", ackFrame.FrameType)
+		}
+		if ackFrame.FrameID != caseBFrameID {
+			t.Errorf("bind_device_session_ack envelope frame_id=%q want %q",
+				ackFrame.FrameID, caseBFrameID)
+		}
+		if !bindCalled {
+			t.Error("OnBindDeviceSession not invoked")
+		}
+	}
+
+	// --- Case C: control.unbind_device_session ---
+	caseCFrameID := "envelope-from-server-C"
+	{
+		ubBody := transit.UnbindDeviceSessionBody{
+			FrameID:   "body-frame-C",
+			SessionID: "sess-C",
+		}
+		reqFrame, _ := transit.Encode(caseCFrameID,
+			daemonbus.FrameTypeControlUnbindDeviceSession,
+			"server", client.Epoch(), 0, ubBody)
+		if err := server.SendToDaemon(ctx, reqFrame); err != nil {
+			t.Fatal(err)
+		}
+		ackFrame, err := server.RecvFromDaemon(ctx)
+		if err != nil {
+			t.Fatalf("unbind ack recv: %v", err)
+		}
+		if ackFrame.FrameType != daemonbus.FrameTypeControlUnbindDeviceSessionAck {
+			t.Fatalf("unbind ack type=%s", ackFrame.FrameType)
+		}
+		if ackFrame.FrameID != caseCFrameID {
+			t.Errorf("unbind_device_session_ack envelope frame_id=%q want %q",
+				ackFrame.FrameID, caseCFrameID)
+		}
+		if !unbindCalled {
+			t.Error("OnUnbindDeviceSession not invoked")
+		}
+	}
+
+	// --- Case D: viewsync.resync_request ---
+	caseDFrameID := "envelope-from-server-D"
+	{
+		req := viewsync.ResyncRequest{ChannelID: "ch-1", SinceSeq: 1, UntilSeq: 5}
+		reqFrame, _ := transit.Encode(caseDFrameID,
+			daemonbus.FrameTypeViewsyncResyncRequest,
+			"server", client.Epoch(), 0, req)
+		if err := server.SendToDaemon(ctx, reqFrame); err != nil {
+			t.Fatal(err)
+		}
+		ackFrame, err := server.RecvFromDaemon(ctx)
+		if err != nil {
+			t.Fatalf("resync resp recv: %v", err)
+		}
+		if ackFrame.FrameType != daemonbus.FrameTypeViewsyncResyncResponse {
+			t.Fatalf("resync resp type=%s", ackFrame.FrameType)
+		}
+		if ackFrame.FrameID != caseDFrameID {
+			t.Errorf("viewsync.resync_response envelope frame_id=%q want %q",
+				ackFrame.FrameID, caseDFrameID)
+		}
+		if !resyncCalled {
+			t.Error("OnViewsyncResyncRequest not invoked")
+		}
+	}
+
+	cancel()
+	select {
+	case <-loopDone:
+	case <-time.After(1 * time.Second):
 	}
 }
 
