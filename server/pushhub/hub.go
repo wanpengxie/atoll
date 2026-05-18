@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -25,6 +26,13 @@ import (
 	"github.com/wanpengxie/ActOS/server/channelaccess"
 	"github.com/wanpengxie/ActOS/server/identity"
 )
+
+// pushhubWSWriteTimeout caps a single fan-out WS write. Without this
+// cap, a slow / stuck front-end TCP send buffer would block pumpWrite
+// indefinitely while holding writeMu, preventing the subscriber's
+// other broadcasts from making progress (broadcast goroutine fills up
+// the send chan).
+const pushhubWSWriteTimeout = 10 * time.Second
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
@@ -118,6 +126,7 @@ func (s *subscriber) pumpWrite() {
 				return
 			}
 			s.writeMu.Lock()
+			_ = s.ws.SetWriteDeadline(time.Now().Add(pushhubWSWriteTimeout))
 			err := s.ws.WriteMessage(websocket.TextMessage, msg)
 			s.writeMu.Unlock()
 			if err != nil {

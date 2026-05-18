@@ -11,9 +11,21 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/rs/zerolog"
 
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 )
+
+// DefaultWSWriteTimeout caps an individual WriteMessage call. Without
+// this floor a stuck TCP send buffer (cloudflare tunnel half-open, lost
+// FIN, etc.) deadlocks the write goroutine on the underlying syscall
+// while still holding `sendMu` — and every subsequent Send (heartbeat,
+// write_message ack reply, ...) blocks behind it, silently bricking the
+// daemon. 10s is the deliberate ceiling: heartbeat cadence is 15s so a
+// failing write surfaces inside one heartbeat interval; SendAndAwait
+// callers (server gateway) typically run with their own 30s+ ctx
+// deadline so this lower bound dominates.
+const DefaultWSWriteTimeout = 10 * time.Second
 
 // WSClientConfig wires a WSClient — the production daemon-side transit
 // Transport that speaks gorilla/websocket against
@@ -27,7 +39,7 @@ import (
 // does not validate (kept for ops triage).
 type WSClientConfig struct {
 	// URL is the daemonbus WS endpoint, e.g.
-	// "ws://localhost:8080/api/daemonbus". The trailing query string
+	// "ws://localhost:8832/api/daemonbus". The trailing query string
 	// is appended by Connect — callers MUST NOT include it.
 	URL string
 
@@ -52,6 +64,19 @@ type WSClientConfig struct {
 	// HandshakeTimeout caps the first-frame read waiting for the
 	// `control.connection_accepted` echo. Defaults to 5s.
 	HandshakeTimeout time.Duration
+
+	// WriteTimeout is the maximum time a single WriteMessage call may
+	// block before being abandoned. Defaults to DefaultWSWriteTimeout.
+	// MUST be > 0 in production: without an effective deadline a TCP
+	// half-open stall blocks the write goroutine indefinitely while
+	// holding sendMu, freezing every subsequent Send (heartbeat,
+	// write_message ack reply, ...). A timed-out write returns an error
+	// and marks the underlying conn dead so the caller can reconnect.
+	WriteTimeout time.Duration
+
+	// Logger receives connection lifecycle + transport error events. May
+	// be nil — when nil a no-op zerolog.Nop() is used.
+	Logger *zerolog.Logger
 }
 
 // WSClient is a gorilla/websocket Transport implementation suitable
@@ -70,6 +95,7 @@ type WSClientConfig struct {
 //     existing connection before dialing a fresh one (reconnect path).
 type WSClient struct {
 	cfg WSClientConfig
+	log zerolog.Logger
 
 	connMu sync.Mutex
 	conn   *websocket.Conn
@@ -95,7 +121,14 @@ func NewWSClient(cfg WSClientConfig) (*WSClient, error) {
 	if cfg.HandshakeTimeout <= 0 {
 		cfg.HandshakeTimeout = 5 * time.Second
 	}
-	return &WSClient{cfg: cfg}, nil
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = DefaultWSWriteTimeout
+	}
+	log := zerolog.Nop()
+	if cfg.Logger != nil {
+		log = *cfg.Logger
+	}
+	return &WSClient{cfg: cfg, log: log}, nil
 }
 
 // Connect (re-)establishes the underlying websocket and reads the
@@ -134,6 +167,10 @@ func (c *WSClient) Connect(ctx context.Context) (daemonbus.ConnectionEpoch, erro
 	}
 	conn, _, err := c.cfg.Dialer.DialContext(dialCtx, u.String(), http.Header{})
 	if err != nil {
+		c.log.Warn().Str("event", "transit.ws.dial_failed").
+			Str("url", u.String()).
+			Err(err).
+			Msg("daemonbus dial failed")
 		return 0, fmt.Errorf("transit: dial %s: %w", u.String(), err)
 	}
 
@@ -158,12 +195,45 @@ func (c *WSClient) Connect(ctx context.Context) (daemonbus.ConnectionEpoch, erro
 		return 0, err
 	}
 	c.conn = conn
+	c.log.Info().Str("event", "transit.ws.connected").
+		Int64("connection_epoch", int64(epoch)).
+		Str("daemon_id", c.cfg.DaemonID).
+		Msg("daemonbus websocket connected")
 	return epoch, nil
+}
+
+// markDead closes the current conn (if any) and clears the pointer so
+// the next Send/Recv returns "not connected" — letting the supervisor /
+// caller drive a reconnect. Safe to call from any goroutine; idempotent.
+func (c *WSClient) markDead(reason string, err error) {
+	c.connMu.Lock()
+	conn := c.conn
+	c.conn = nil
+	c.connMu.Unlock()
+	if conn == nil {
+		return
+	}
+	_ = conn.Close()
+	c.log.Warn().Str("event", "transit.ws.conn_dead").
+		Str("reason", reason).
+		Err(err).
+		Str("daemon_id", c.cfg.DaemonID).
+		Msg("daemonbus websocket marked dead")
 }
 
 // Send marshals the frame as JSON text and writes it to the websocket.
 // Returns an error when no connection is established or the websocket
 // errors — caller can recover by calling Connect again.
+//
+// A bounded write deadline is ALWAYS applied (min of ctx.Deadline and
+// cfg.WriteTimeout). Without this floor a stuck TCP write
+// (cloudflare-tunnel half-open, network partition with no RST) blocks
+// the call indefinitely while still holding sendMu, starving every
+// other Send (heartbeat, server→daemon ack reply). On any write error
+// (including i/o timeout) the underlying conn is closed and the pointer
+// cleared so the next Send returns "not connected" — making the
+// failure observable to the dispatcher / supervisor that drives
+// reconnect.
 func (c *WSClient) Send(ctx context.Context, frame daemonbus.Frame) error {
 	c.connMu.Lock()
 	conn := c.conn
@@ -177,13 +247,26 @@ func (c *WSClient) Send(ctx context.Context, frame daemonbus.Frame) error {
 	}
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
-	// Best-effort ctx-deadline → write deadline.
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetWriteDeadline(deadline)
-	} else {
-		_ = conn.SetWriteDeadline(time.Time{})
+
+	// Always cap the write with a deadline. Use the earlier of
+	// ctx.Deadline (if any) and now+WriteTimeout so a ctx that has its
+	// own tighter deadline still wins, but a ctx with no deadline (the
+	// HeartbeatSender / dispatcher runCtx case — the exact path that
+	// deadlocked in the production incident) gets WriteTimeout as a
+	// hard floor instead of `time.Time{}` (= no deadline at all).
+	deadline := time.Now().Add(c.cfg.WriteTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
 	}
+	_ = conn.SetWriteDeadline(deadline)
+
 	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		// Treat ANY write error as fatal for this connection. gorilla
+		// websocket does not surface "transient" write errors that are
+		// safe to retry on the same conn — a write deadline / closed
+		// pipe / framing error all leave the conn in an undefined
+		// state. Close + nil so Send sees "not connected" next time.
+		c.markDead("write_error", err)
 		return fmt.Errorf("transit: ws write: %w", err)
 	}
 	return nil
@@ -218,8 +301,14 @@ func (c *WSClient) Recv(ctx context.Context) (daemonbus.Frame, error) {
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
+			// Caller is shutting down; do NOT mark dead — close is
+			// the supervisor's job.
 			return daemonbus.Frame{}, ctxErr
 		}
+		// A read error means the conn is gone (peer closed, framing
+		// error, deadline). Close it and clear the pointer so the
+		// dispatcher Loop's caller can reconnect cleanly.
+		c.markDead("read_error", err)
 		return daemonbus.Frame{}, fmt.Errorf("transit: ws read: %w", err)
 	}
 	var frame daemonbus.Frame
@@ -239,7 +328,18 @@ func (c *WSClient) Close() error {
 	}
 	err := c.conn.Close()
 	c.conn = nil
+	c.log.Info().Str("event", "transit.ws.closed").
+		Str("daemon_id", c.cfg.DaemonID).
+		Msg("daemonbus websocket closed")
 	return err
+}
+
+// IsConnected reports whether the WS conn pointer is currently non-nil.
+// Used by reconnect supervisors to decide whether to dial.
+func (c *WSClient) IsConnected() bool {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return c.conn != nil
 }
 
 // extractEpoch parses the `connection_accepted` payload — the demo-

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -15,6 +16,15 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 )
+
+// DefaultServerWSWriteTimeout is the upper bound on a single WS write
+// from the server's wsTransport. Without it, a stuck send buffer (peer
+// gone half-open) would block forever while holding wsTransport.mu —
+// any subsequent SendAndAwait / SendFrame on the same Connection would
+// queue behind it and the gateway HTTP handler would wait up to its
+// own ctx timeout (often tens of seconds) before failing. 10s matches
+// the daemon-side floor (runtime/transit.DefaultWSWriteTimeout).
+const DefaultServerWSWriteTimeout = 10 * time.Second
 
 // upgrader is shared between daemonbus WS upgrades. Demo-period
 // allows any origin (gateway is single-host) — production should
@@ -164,7 +174,23 @@ func (t *wsTransport) WriteFrame(ctx context.Context, frame daemonbus.Frame) err
 	if err != nil {
 		return err
 	}
-	return t.ws.WriteMessage(websocket.TextMessage, data)
+	// Always cap the write with a deadline. Use the earlier of
+	// ctx.Deadline (if any) and now+DefaultServerWSWriteTimeout. This
+	// is the mirror image of the daemon-side fix (wsclient.go) — a
+	// stuck TCP send buffer here would otherwise hang every gateway
+	// handler waiting on SendAndAwait behind wsTransport.mu.
+	deadline := time.Now().Add(DefaultServerWSWriteTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	_ = t.ws.SetWriteDeadline(deadline)
+	if err := t.ws.WriteMessage(websocket.TextMessage, data); err != nil {
+		// Close the WS so subsequent writes fail fast and the
+		// Connection.Run reader-side surfaces the disconnect.
+		_ = t.ws.Close()
+		return err
+	}
+	return nil
 }
 
 func (t *wsTransport) Close() error { return t.ws.Close() }

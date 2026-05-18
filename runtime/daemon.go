@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	kadapter "github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -99,6 +101,24 @@ type DaemonConfig struct {
 	// "daemon does not implement bind" from "daemon rejected bind".
 	OnBindDeviceSession   func(ctx context.Context, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody
 	OnUnbindDeviceSession func(ctx context.Context, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody
+
+	// Logger receives daemon lifecycle + transport supervisor events.
+	// When nil a no-op zerolog.Nop() is used so legacy callers and tests
+	// keep compiling unchanged. Production wiring (cmd/daemon) supplies
+	// the project-stamped logger so transit events join the same JSON
+	// stream as the rest of the daemon.
+	Logger *zerolog.Logger
+
+	// ReconnectInitialBackoff is the initial wait the WS reconnect
+	// supervisor sleeps after a disconnect before redialing. Doubles
+	// every failure up to ReconnectMaxBackoff. Defaults to 1s.
+	ReconnectInitialBackoff time.Duration
+
+	// ReconnectMaxBackoff caps exponential backoff between reconnect
+	// attempts. Defaults to 30s — fast enough that a multi-minute
+	// outage still gets a fresh dial attempt regularly, slow enough not
+	// to hammer a struggling server.
+	ReconnectMaxBackoff time.Duration
 
 	// ChannelTemplate is the static channel template hosted by this
 	// daemon. Used as the legacy single-template fallback when
@@ -348,6 +368,7 @@ func buildTemplateResolver(
 // drive the phases manually.
 type Daemon struct {
 	cfg          DaemonConfig
+	log          zerolog.Logger
 	daemonDB     *sql.DB
 	channelDBs   map[string]*sql.DB
 	channelDBsMu *sync.Mutex
@@ -432,8 +453,18 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 	if cfg.SchedulerPeriod <= 0 {
 		cfg.SchedulerPeriod = time.Second
 	}
+	if cfg.ReconnectInitialBackoff <= 0 {
+		cfg.ReconnectInitialBackoff = time.Second
+	}
+	if cfg.ReconnectMaxBackoff <= 0 {
+		cfg.ReconnectMaxBackoff = 30 * time.Second
+	}
 	if !cfg.UseMockBus && cfg.WSConfig == nil {
 		return nil, errors.New("runtime: DaemonConfig.WSConfig required when UseMockBus=false")
+	}
+	log := zerolog.Nop()
+	if cfg.Logger != nil {
+		log = *cfg.Logger
 	}
 
 	daemonDB, err := store.OpenDaemon(ctx, filepath.Join(cfg.DataDir, "daemon.sqlite"), store.OpenOptions{})
@@ -506,6 +537,7 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 
 	d := &Daemon{
 		cfg:             cfg,
+		log:             log,
 		daemonDB:        daemonDB,
 		channelDBs:      channelDBs,
 		channelDBsMu:    channelDBsMu,
@@ -534,7 +566,11 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 		}
 		d.transit = client
 	} else {
-		ws, err := transit.NewWSClient(*cfg.WSConfig)
+		wsCfg := *cfg.WSConfig
+		if wsCfg.Logger == nil {
+			wsCfg.Logger = &log
+		}
+		ws, err := transit.NewWSClient(wsCfg)
 		if err != nil {
 			_ = daemonDB.Close()
 			return nil, err
@@ -696,11 +732,7 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
-		if err := dispatcher.Loop(d.runCtx); err != nil {
-			if !errors.Is(err, context.Canceled) && !errors.Is(err, transit.ErrBusClosed) {
-				fmt.Printf("runtime: dispatcher exited: %v\n", err)
-			}
-		}
+		d.runDispatcherSupervised(d.runCtx, dispatcher)
 	}()
 
 	// 3.3 — long-pending scheduler. M1.5 has no concrete fallback path;
@@ -721,7 +753,8 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 		defer d.wg.Done()
 		if err := timer.Run(d.runCtx); err != nil {
 			if !errors.Is(err, context.Canceled) {
-				fmt.Printf("runtime: scheduler exited: %v\n", err)
+				d.log.Error().Err(err).Str("event", "runtime.scheduler_exited").
+					Msg("scheduler exited with error")
 			}
 		}
 	}()
@@ -747,13 +780,97 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 		defer d.wg.Done()
 		if err := hb.Run(d.runCtx); err != nil {
 			if !errors.Is(err, context.Canceled) && !errors.Is(err, transit.ErrBusClosed) {
-				fmt.Printf("runtime: heartbeat sender exited: %v\n", err)
+				d.log.Error().Err(err).Str("event", "runtime.heartbeat_sender_exited").
+					Msg("heartbeat sender exited with error")
 			}
 		}
 	}()
 
 	d.ready.Store(true)
 	return nil
+}
+
+// runDispatcherSupervised drives transit.Dispatcher.Loop and, on
+// non-context errors, attempts to reconnect the underlying transport
+// with exponential backoff before restarting the loop. This is the
+// recovery path for the production incident (2026-05-18) where a stuck
+// TCP write left the WS conn dead but the daemon had no way to retry
+// the dial — every Send returned "not connected" forever.
+//
+// Reconnect is only attempted when a wsClient is wired (production
+// path). Mock-bus deployments fall through and exit on the first error
+// preserving the existing test semantics.
+func (d *Daemon) runDispatcherSupervised(ctx context.Context, dispatcher *transit.Dispatcher) {
+	backoff := d.cfg.ReconnectInitialBackoff
+	for {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		err := dispatcher.Loop(ctx)
+		if err == nil {
+			// Loop returned nil — defensive; treat as shutdown.
+			return
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
+		if errors.Is(err, transit.ErrBusClosed) {
+			// MockBus closed (test path) — terminate. Production
+			// uses WSClient which surfaces transport errors instead.
+			return
+		}
+		d.log.Warn().Err(err).
+			Str("event", "runtime.dispatcher_disconnected").
+			Dur("retry_in", backoff).
+			Msg("dispatcher loop disconnected; attempting reconnect")
+
+		if d.wsClient == nil {
+			// No reconnect transport (mock bus). Exit so callers see
+			// the original behavior.
+			d.log.Error().Err(err).
+				Str("event", "runtime.dispatcher_exited").
+				Msg("dispatcher exited (no reconnect transport wired)")
+			return
+		}
+
+		// Sleep with cancellation awareness.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+
+		if _, connectErr := d.transit.Connect(ctx); connectErr != nil {
+			if errors.Is(connectErr, context.Canceled) {
+				return
+			}
+			d.log.Warn().Err(connectErr).
+				Str("event", "runtime.reconnect_failed").
+				Dur("next_retry_in", nextBackoff(backoff, d.cfg.ReconnectMaxBackoff)).
+				Msg("daemonbus reconnect failed; will retry")
+			backoff = nextBackoff(backoff, d.cfg.ReconnectMaxBackoff)
+			continue
+		}
+		d.log.Info().
+			Str("event", "runtime.reconnected").
+			Int64("connection_epoch", int64(d.transit.Epoch())).
+			Msg("daemonbus reconnected; resuming dispatcher loop")
+		// Reset backoff on a successful reconnect so a flaky link
+		// doesn't permanently inflate.
+		backoff = d.cfg.ReconnectInitialBackoff
+	}
+}
+
+// nextBackoff doubles the current backoff, capped at maxBackoff.
+func nextBackoff(cur, maxB time.Duration) time.Duration {
+	next := cur * 2
+	if next > maxB {
+		next = maxB
+	}
+	if next <= 0 {
+		next = time.Second
+	}
+	return next
 }
 
 // snapshotOwnedChannels returns the current owned-channel ids. Used by
@@ -1170,10 +1287,12 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 		defer d.wg.Done()
 		if err := p.Pump(pusherCtx); err != nil {
 			if !errors.Is(err, context.Canceled) {
-				// Log via stderr — tests assert on graceful exit so we
-				// keep this best-effort. cmd/daemon swaps in structured
-				// logging via DaemonConfig in a later ticket.
-				fmt.Printf("runtime: pusher %s exited: %v\n", id, err)
+				// Structured log so cmd/daemon JSON stream captures it
+				// alongside dispatcher/heartbeat events.
+				d.log.Warn().Err(err).
+					Str("event", "runtime.pusher_exited").
+					Str("channel_id", string(id)).
+					Msg("per-channel pusher exited with error")
 			}
 		}
 	}(cr.pusher, lc.ChannelID)
@@ -1192,7 +1311,10 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 		if cr.teardown != nil {
 			tctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := cr.teardown(tctx); err != nil {
-				fmt.Printf("runtime: channel %s teardown: %v\n", chID, err)
+				d.log.Warn().Err(err).
+					Str("event", "runtime.channel_teardown_failed").
+					Str("channel_id", string(chID)).
+					Msg("channel teardown returned error")
 			}
 			cancel()
 		}
@@ -1238,12 +1360,12 @@ func (d *Daemon) handleCreateChannel(
 	if req.ChannelID == "" {
 		ack.Status = placement.AckRejected
 		ack.Reason = "empty_channel_id"
-		return d.sendCreateAck(ctx, ack)
+		return d.sendCreateAck(ctx, frame.FrameID, ack)
 	}
 	if req.CreateRequestID == "" {
 		ack.Status = placement.AckRejected
 		ack.Reason = "empty_create_request_id"
-		return d.sendCreateAck(ctx, ack)
+		return d.sendCreateAck(ctx, frame.FrameID, ack)
 	}
 
 	sqlitePath := filepath.Join(d.cfg.ChannelsDir, string(req.ChannelID), "channel.sqlite")
@@ -1263,30 +1385,30 @@ func (d *Daemon) handleCreateChannel(
 		if err != nil {
 			ack.Status = placement.AckRejected
 			ack.Reason = fmt.Sprintf("lock open: %v", err)
-			return d.sendCreateAck(ctx, ack)
+			return d.sendCreateAck(ctx, frame.FrameID, ack)
 		}
 		row, ok, getErr := existingLock.Get(ctx)
 		if getErr != nil {
 			ack.Status = placement.AckRejected
 			ack.Reason = fmt.Sprintf("lock get: %v", getErr)
-			return d.sendCreateAck(ctx, ack)
+			return d.sendCreateAck(ctx, frame.FrameID, ack)
 		}
 		if ok {
 			switch {
 			case row.FencingToken < req.FencingToken:
 				ack.Status = placement.AckRejected
 				ack.Reason = "local_lock_stale_higher_token_received"
-				return d.sendCreateAck(ctx, ack)
+				return d.sendCreateAck(ctx, frame.FrameID, ack)
 			case row.FencingToken == req.FencingToken:
 				if row.OwnerEpoch != req.OwnerEpoch {
 					ack.Status = placement.AckRejected
 					ack.Reason = "owner_epoch_mismatch"
-					return d.sendCreateAck(ctx, ack)
+					return d.sendCreateAck(ctx, frame.FrameID, ack)
 				}
 				if row.DaemonID != placement.DaemonID(d.cfg.DaemonID) {
 					ack.Status = placement.AckRejected
 					ack.Reason = "daemon_id_mismatch"
-					return d.sendCreateAck(ctx, ack)
+					return d.sendCreateAck(ctx, frame.FrameID, ack)
 				}
 				// Idempotent replay — make sure the runtime is mounted
 				// (re-issued create after a restart with the same tuple).
@@ -1294,15 +1416,15 @@ func (d *Daemon) handleCreateChannel(
 					if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath); err != nil {
 						ack.Status = placement.AckRejected
 						ack.Reason = fmt.Sprintf("mount existing: %v", err)
-						return d.sendCreateAck(ctx, ack)
+						return d.sendCreateAck(ctx, frame.FrameID, ack)
 					}
 				}
 				ack.Status = placement.AckBound
-				return d.sendCreateAck(ctx, ack)
+				return d.sendCreateAck(ctx, frame.FrameID, ack)
 			case row.FencingToken > req.FencingToken:
 				ack.Status = placement.AckRejected
 				ack.Reason = "stale_request"
-				return d.sendCreateAck(ctx, ack)
+				return d.sendCreateAck(ctx, frame.FrameID, ack)
 			}
 		}
 	}
@@ -1312,13 +1434,13 @@ func (d *Daemon) handleCreateChannel(
 	if _, err := d.saga.Bootstrap(ctx, req.ChannelID, req); err != nil {
 		ack.Status = placement.AckRejected
 		ack.Reason = fmt.Sprintf("saga: %v", err)
-		return d.sendCreateAck(ctx, ack)
+		return d.sendCreateAck(ctx, frame.FrameID, ack)
 	}
 	lockStore, err := d.OpenChannelLock(ctx, sqlitePath)
 	if err != nil {
 		ack.Status = placement.AckRejected
 		ack.Reason = fmt.Sprintf("lock open: %v", err)
-		return d.sendCreateAck(ctx, ack)
+		return d.sendCreateAck(ctx, frame.FrameID, ack)
 	}
 	now := d.cfg.NowFn()
 	if err := lockStore.Insert(ctx, store.ChannelLockRow{
@@ -1336,21 +1458,21 @@ func (d *Daemon) handleCreateChannel(
 	}); err != nil {
 		ack.Status = placement.AckRejected
 		ack.Reason = fmt.Sprintf("lock insert: %v", err)
-		return d.sendCreateAck(ctx, ack)
+		return d.sendCreateAck(ctx, frame.FrameID, ack)
 	}
 	if err := d.saga.Complete(ctx, string(req.CreateRequestID)); err != nil {
 		ack.Status = placement.AckRejected
 		ack.Reason = fmt.Sprintf("bootstrap complete: %v", err)
-		return d.sendCreateAck(ctx, ack)
+		return d.sendCreateAck(ctx, frame.FrameID, ack)
 	}
 
 	if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath); err != nil {
 		ack.Status = placement.AckRejected
 		ack.Reason = fmt.Sprintf("mount: %v", err)
-		return d.sendCreateAck(ctx, ack)
+		return d.sendCreateAck(ctx, frame.FrameID, ack)
 	}
 	ack.Status = placement.AckBound
-	return d.sendCreateAck(ctx, ack)
+	return d.sendCreateAck(ctx, frame.FrameID, ack)
 }
 
 // mountExistingChannel hot-loads a channel that has its bootstrap saga
@@ -1367,8 +1489,22 @@ func (d *Daemon) mountExistingChannel(ctx context.Context, id channel.ID, sqlite
 
 // sendCreateAck wraps the transit Send for a CreateChannelAck. Pulled
 // out so handleCreateChannel doesn't repeat the boilerplate.
-func (d *Daemon) sendCreateAck(ctx context.Context, ack placement.CreateChannelAck) error {
-	return d.transit.Send(ctx, d.cfg.FrameIDGen(),
+//
+// FIX-2026-05-18: the envelope frame_id we emit MUST echo the inbound
+// create_channel envelope frame_id so the server-side
+// daemonbus.Connection.matchAck (keyed on the SendAndAwait envelope
+// frame_id) can pair the ack with the originating caller. The legacy
+// create-channel HTTP path consumes the ack via the OnCreateChannelAck
+// hook (no SendAndAwait), but we keep the policy uniform across all
+// ack frames so future SendAndAwait callers don't re-trip the bug.
+// Empty inboundFrameID falls back to a fresh generator id (test-only
+// path; production always carries a frame_id).
+func (d *Daemon) sendCreateAck(ctx context.Context, inboundFrameID string, ack placement.CreateChannelAck) error {
+	frameID := inboundFrameID
+	if frameID == "" {
+		frameID = d.cfg.FrameIDGen()
+	}
+	return d.transit.Send(ctx, frameID,
 		daemonbus.FrameTypeControlCreateChannelAck, ack)
 }
 
@@ -1407,25 +1543,32 @@ func (d *Daemon) handleUnbindChannel(ctx context.Context, frame daemonbus.Frame)
 		body.FrameID = frame.FrameID
 	}
 	ack := unbindChannelAckBody{FrameID: body.FrameID, ChannelID: body.ChannelID}
+	// FIX-2026-05-18: echo inbound envelope frame_id (see sendCreateAck
+	// for the full root-cause comment). Empty inbound id falls back to
+	// the generator — only reachable under test stubs.
+	replyFrameID := frame.FrameID
+	if replyFrameID == "" {
+		replyFrameID = d.cfg.FrameIDGen()
+	}
 	if body.ChannelID == "" {
 		ack.Status = "not_found"
 		ack.Reason = "empty_channel_id"
-		return d.transit.Send(ctx, d.cfg.FrameIDGen(),
+		return d.transit.Send(ctx, replyFrameID,
 			daemonbus.FrameTypeControlUnbindChannelAck, ack)
 	}
 	if !d.HasChannel(body.ChannelID) {
 		ack.Status = "not_found"
-		return d.transit.Send(ctx, d.cfg.FrameIDGen(),
+		return d.transit.Send(ctx, replyFrameID,
 			daemonbus.FrameTypeControlUnbindChannelAck, ack)
 	}
 	if err := d.unloader.Unload(ctx, body.ChannelID, lifecycle.UnloadOrphan); err != nil {
 		ack.Status = "not_found"
 		ack.Reason = err.Error()
-		return d.transit.Send(ctx, d.cfg.FrameIDGen(),
+		return d.transit.Send(ctx, replyFrameID,
 			daemonbus.FrameTypeControlUnbindChannelAck, ack)
 	}
 	ack.Status = "unbound"
-	return d.transit.Send(ctx, d.cfg.FrameIDGen(),
+	return d.transit.Send(ctx, replyFrameID,
 		daemonbus.FrameTypeControlUnbindChannelAck, ack)
 }
 

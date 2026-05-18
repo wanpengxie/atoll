@@ -7,10 +7,17 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
+
+// DefaultDeviceWSWriteTimeout caps a single device-side WS write.
+// Mirror of the daemonbus floor — see runtime/transit/wsclient.go for
+// the rationale: a stuck send buffer would otherwise deadlock the
+// write goroutine while holding wsDeviceTransport.mu.
+const DefaultDeviceWSWriteTimeout = 10 * time.Second
 
 // Connection wraps one open device WS — sender of device_transit
 // frames to the daemon (via daemonbus) + receiver of frames pushed
@@ -105,7 +112,18 @@ func (t *wsDeviceTransport) WriteFrame(ctx context.Context, f DeviceFrame) error
 	if err != nil {
 		return err
 	}
-	return t.ws.WriteMessage(websocket.TextMessage, data)
+	// Always cap with a write deadline — same fix as daemonbus
+	// wsTransport (avoids stuck send buffer blocking the mu).
+	deadline := time.Now().Add(DefaultDeviceWSWriteTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	_ = t.ws.SetWriteDeadline(deadline)
+	if err := t.ws.WriteMessage(websocket.TextMessage, data); err != nil {
+		_ = t.ws.Close()
+		return err
+	}
+	return nil
 }
 func (t *wsDeviceTransport) Close() error { return t.ws.Close() }
 

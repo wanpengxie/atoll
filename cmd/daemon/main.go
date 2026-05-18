@@ -48,7 +48,7 @@ func main() {
 		daemonID    = flag.String("daemon-id", "daemon-local", "stable daemon identifier")
 		daemonEpoch = flag.Int64("daemon-epoch", 0, "daemon process epoch (0 = use unix-second)")
 		mockBus     = flag.Bool("mock-bus", false, "use in-process mock bus (dev only; production uses --server-url WS)")
-		serverURL   = flag.String("server-url", "", "daemonbus WS URL, e.g. ws://localhost:8080/api/daemonbus")
+		serverURL   = flag.String("server-url", "", "daemonbus WS URL, e.g. ws://localhost:8832/api/daemonbus")
 		daemonKey   = flag.String("key", "", "shared key for daemonbus auth (must match server.daemonbus.SharedSecret)")
 		humanSecret = flag.String("human-caller-secret", "",
 			"HMAC secret matching server.gateway.HumanCallerSecret; "+
@@ -119,6 +119,7 @@ func main() {
 	if *useScaffoldXHS {
 		xhsFactory = XHSScaffoldFactory(xhs.Config{})
 	}
+	daemonLogger := lg.Z()
 	cfg := runtime.DaemonConfig{
 		DataDir:               *dataDir,
 		ChannelsDir:           filepath.Join(*dataDir, "channels"),
@@ -130,6 +131,7 @@ func main() {
 		OnChannelBoot:         wireAdapterFramework(xhsFactory),
 		OnBindDeviceSession:   deviceBinder.OnBind,
 		OnUnbindDeviceSession: deviceBinder.OnUnbind,
+		Logger:                daemonLogger,
 	}
 
 	if !*mockBus {
