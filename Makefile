@@ -238,3 +238,8 @@ e2e-smoke:
 clean:
 	rm -rf bin/ dist/ ui/dist
 	@pnpm -r --if-present clean 2>/dev/null || true
+
+# dev-deploy — single-command rebuild + rolling restart for local stack
+.PHONY: dev-deploy
+dev-deploy:
+	@bash scripts/dev-deploy.sh
