@@ -228,7 +228,7 @@ func scanTypeRowFrom(s typeRowScanner) (adapter.TypeRow, error) {
 	}
 	row := adapter.TypeRow{
 		Type:               typ,
-		HandlerBinding:     adapter.BindingKind(binding),
+		HandlerBinding:     actor.Binding(binding),
 		TerminalConvention: adapter.TerminalConvention(terminal),
 		AllowedKinds:       allowed,
 		SchemasByKind:      schemas,

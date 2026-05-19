@@ -13,6 +13,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -66,7 +67,7 @@ func newTestManager(t *testing.T, mod *stubModule, opts ...func(*ManagerConfig))
 	if err := registry.Insert(context.Background(), actorreg.Record{
 		ID:      mod.decl.ActorID,
 		Kind:    actor.KindTool,
-		Binding: actorreg.Binding(mod.decl.Binding),
+		Binding: actor.Binding(mod.decl.Binding),
 	}); err != nil {
 		t.Fatalf("seed actor: %v", err)
 	}
@@ -114,7 +115,7 @@ func TestManagerInstallSeedsTypeRegistry(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send", "feishu.chat.create"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -147,7 +148,7 @@ func TestManagerInstallRejectsMissingActor(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:does-not-exist",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -180,14 +181,14 @@ func TestManagerInstallRejectsBindingMismatch(t *testing.T) {
 	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID:      "tool:feishu",
 		Kind:    actor.KindTool,
-		Binding: actorreg.BindingInProcess,
+		Binding: actor.BindingInProcess,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -210,14 +211,14 @@ func TestManagerInstallRejectsTransitMissing(t *testing.T) {
 	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID:      "tool:xhs",
 		Kind:    actor.KindTool,
-		Binding: actorreg.BindingViaServerTransit,
+		Binding: actor.BindingViaServerTransit,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "xhs",
 			ActorID:      "tool:xhs",
 			Types:        []string{"xhs.publish"},
-			Binding:      adapter.BindingViaServerTransit,
+			Binding:      actor.BindingViaServerTransit,
 			MaxPendingMs: 1_000,
 		},
 	}
@@ -237,13 +238,13 @@ func TestManagerInstallRejectsTransitMissing(t *testing.T) {
 // recordingTransit captures Send / Ack / Error calls.
 type recordingTransit struct {
 	mu    sync.Mutex
-	sent  []adapter.SendFrame
-	acks  []adapter.AckFrame
-	errs  []adapter.ErrorFrame
+	sent  []devicetransit.SendFrame
+	acks  []devicetransit.AckFrame
+	errs  []devicetransit.ErrorFrame
 	frame string
 }
 
-func (r *recordingTransit) Send(_ context.Context, frame adapter.SendFrame) (string, error) {
+func (r *recordingTransit) Send(_ context.Context, frame devicetransit.SendFrame) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sent = append(r.sent, frame)
@@ -251,14 +252,14 @@ func (r *recordingTransit) Send(_ context.Context, frame adapter.SendFrame) (str
 	return r.frame, nil
 }
 
-func (r *recordingTransit) Ack(_ context.Context, frame adapter.AckFrame) error {
+func (r *recordingTransit) Ack(_ context.Context, frame devicetransit.AckFrame) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.acks = append(r.acks, frame)
 	return nil
 }
 
-func (r *recordingTransit) Error(_ context.Context, frame adapter.ErrorFrame) error {
+func (r *recordingTransit) Error(_ context.Context, frame devicetransit.ErrorFrame) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.errs = append(r.errs, frame)
@@ -270,14 +271,14 @@ func TestManagerInstallAcceptsTransitWhenWired(t *testing.T) {
 	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID:      "tool:xhs",
 		Kind:    actor.KindTool,
-		Binding: actorreg.BindingViaServerTransit,
+		Binding: actor.BindingViaServerTransit,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "xhs",
 			ActorID:      "tool:xhs",
 			Types:        []string{"xhs.publish"},
-			Binding:      adapter.BindingViaServerTransit,
+			Binding:      actor.BindingViaServerTransit,
 			MaxPendingMs: 1_000,
 		},
 	}
@@ -305,7 +306,7 @@ func TestManagerDispatchHandlesRequestAndRespond(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -369,7 +370,7 @@ func TestManagerDispatchRejectsUnknownAudience(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -388,7 +389,7 @@ func TestManagerDispatchRejectsUnknownType(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -406,7 +407,7 @@ func TestManagerDispatchRejectsChannelMismatch(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -424,7 +425,7 @@ func TestManagerTimerFiresDefaultTimeout(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 50, // 50ms timeout
 		},
 		handle: func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
@@ -471,7 +472,7 @@ func TestManagerTimerRetriesTransientRespondWriteErrors(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 20,
 		},
 		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {
@@ -523,7 +524,7 @@ func TestManagerTimerEmitsSystemEventAfterPermanentRespondWriteFailure(t *testin
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 20,
 		},
 		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {
@@ -590,7 +591,7 @@ func TestManagerRespondCancelsTimer(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 80,
 		},
 		handle: func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
@@ -627,7 +628,7 @@ func TestManagerOnExternalCallbackRoutes(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 30_000,
 		},
 		onCallback: func(_ context.Context, payload []byte, _ *adapter.ModuleContext) error {
@@ -655,7 +656,7 @@ func TestManagerOnExternalCallbackEmitsOrphanEvents(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 30_000,
 		},
 		onCallback: func(context.Context, []byte, *adapter.ModuleContext) error {
@@ -703,7 +704,7 @@ func TestManagerShutdownCallsModule(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 30_000,
 		},
 		shutdown: func() error {
@@ -726,7 +727,7 @@ func TestManagerInstalledAdapters(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -743,7 +744,7 @@ func TestManagerDeduplicatesResponseFromTerminalDuplicate(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -763,7 +764,7 @@ func TestManagerDeduplicatesResponseFromTerminalDuplicate(t *testing.T) {
 	chain.results = []harness.WriteResult{
 		{
 			MessageID:        "",
-			RejectReason:     harness.RejectTerminalDuplicate,
+			RejectReason:     message.HarnessTerminalDuplicate,
 			PartialMessageID: "response:existing",
 		},
 	}

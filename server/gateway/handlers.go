@@ -19,9 +19,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	kadapter "github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
@@ -103,14 +103,14 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			return err
 		},
 		OnDeviceTransitSend: func(ctx context.Context, conn *daemonbus.Connection, frame kerneldaemonbus.Frame) error {
-			// T147 §A-S1 — daemon serialises the adapter.SendFrame
-			// (kernel/adapter/transit.go) as the daemonbus payload, so
+			// T147 §A-S1 — daemon serialises the devicetransit.SendFrame
+			// as the daemonbus payload, so
 			// we MUST decode the same shape. The earlier wiring decoded
 			// devicebus.DeviceFrame which silently drops fields the
 			// daemon includes (Direction enum, ExpiresAt) and yields an
 			// empty DeviceSessionID when the JSON keys differ — every
 			// adapter push got routed to "" and dropped.
-			var sf kadapter.SendFrame
+			var sf devicetransit.SendFrame
 			if err := json.Unmarshal(frame.Payload, &sf); err != nil {
 				return fmt.Errorf("gateway: decode device_transit.send: %w", err)
 			}
@@ -118,7 +118,7 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			// carries the simpler json used between server and the Chrome
 			// extension — see server/devicebus/connection.go).
 			df := devicebus.DeviceFrame{
-				Direction:       string(kadapter.DirectionToDevice),
+				Direction:       string(devicetransit.DirectionToDevice),
 				DeviceSessionID: string(sf.DeviceSessionID),
 				ChannelID:       string(sf.ChannelID),
 				RequestID:       sf.RequestID,
@@ -152,11 +152,11 @@ func (a *App) Bind(ctx context.Context, in devicebus.BindInput) error {
 	}
 	body := kerneldaemonbus.BindDeviceSessionBody{
 		FrameID:          uuid.NewString(),
-		SessionID:        kadapter.DeviceSessionID(in.Session.ID),
+		SessionID:        devicetransit.DeviceSessionID(in.Session.ID),
 		ChannelID:        in.Session.ChannelID,
 		DeviceID:         in.Session.DeviceID,
 		DeviceType:       in.Session.DeviceType,
-		DaemonID:         in.Session.DaemonID,
+		DaemonID:         string(in.Session.DaemonID),
 		TokenFingerprint: in.TokenFingerprint,
 		ExpiresAt:        in.Session.ExpiresAt,
 		BoundAt:          in.Session.CreatedAt,
@@ -195,7 +195,7 @@ func (a *App) Unbind(ctx context.Context, in devicebus.UnbindInput) error {
 	}
 	body := kerneldaemonbus.UnbindDeviceSessionBody{
 		FrameID:   uuid.NewString(),
-		SessionID: kadapter.DeviceSessionID(in.Session.ID),
+		SessionID: devicetransit.DeviceSessionID(in.Session.ID),
 		ChannelID: in.Session.ChannelID,
 		Reason:    in.Reason,
 	}
@@ -219,7 +219,7 @@ func (a *App) Unbind(ctx context.Context, in devicebus.UnbindInput) error {
 // ForwardDeviceFrame implements devicebus.TransitForwarder — converts
 // a DeviceFrame received from the Chrome extension into a daemonbus
 // device_transit.recv frame whose body is the canonical
-// kernel/adapter.SendFrame shape. The daemon decodes the same struct on
+// kernel/devicetransit.SendFrame shape. The daemon decodes the same struct on
 // the receiving side (runtime/transit.DeviceTransit.DispatchIncoming),
 // so the gateway translates the device-WS-flavoured DeviceFrame into
 // the SendFrame here rather than shipping two different schemas across
@@ -229,10 +229,10 @@ func (a *App) ForwardDeviceFrame(ctx context.Context, frame devicebus.DeviceFram
 	if err != nil {
 		return err
 	}
-	sf := kadapter.SendFrame{
+	sf := devicetransit.SendFrame{
 		ChannelID:       channel.ID(frame.ChannelID),
-		DeviceSessionID: kadapter.DeviceSessionID(frame.DeviceSessionID),
-		Direction:       kadapter.DirectionFromDevice,
+		DeviceSessionID: devicetransit.DeviceSessionID(frame.DeviceSessionID),
+		Direction:       devicetransit.DirectionFromDevice,
 		RequestID:       frame.RequestID,
 		CorrelationID:   frame.CorrelationID,
 		Payload:         frame.Payload,

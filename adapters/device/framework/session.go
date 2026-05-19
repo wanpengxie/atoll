@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 )
 
 // DeviceState is the closed set of states a device session can occupy on
@@ -124,15 +124,15 @@ func (s DeviceState) CanTransitionTo(next DeviceState) bool {
 //     server-side row carries it for catalog, but the daemon adapter
 //     never needs it (envelope sender stays tool:xhs-adapter — L4 §2.6).
 type DeviceSession struct {
-	SessionID        adapter.DeviceSessionID `json:"session_id"`
-	ChannelID        channel.ID              `json:"channel_id"`
-	DeviceID         string                  `json:"device_id"`
-	DeviceType       string                  `json:"device_type"`
-	State            DeviceState             `json:"state"`
-	BoundAt          int64                   `json:"bound_at"`
-	LastActiveAt     int64                   `json:"last_active_at,omitempty"`
-	TokenFingerprint string                  `json:"token_fingerprint"`
-	ExpiresAt        int64                   `json:"expires_at,omitempty"`
+	SessionID        devicetransit.DeviceSessionID `json:"session_id"`
+	ChannelID        channel.ID                    `json:"channel_id"`
+	DeviceID         string                        `json:"device_id"`
+	DeviceType       string                        `json:"device_type"`
+	State            DeviceState                   `json:"state"`
+	BoundAt          int64                         `json:"bound_at"`
+	LastActiveAt     int64                         `json:"last_active_at,omitempty"`
+	TokenFingerprint string                        `json:"token_fingerprint"`
+	ExpiresAt        int64                         `json:"expires_at,omitempty"`
 }
 
 // SessionFields lists every DeviceSession field in spec order. Tests
@@ -190,12 +190,12 @@ type SessionStore interface {
 	// Get returns the mirror row by SessionID. ok=false when absent
 	// (caller decides: pending bind frame? orphan callback? — handler
 	// chooses the diagnostic).
-	Get(ctx context.Context, sid adapter.DeviceSessionID) (DeviceSession, bool, error)
+	Get(ctx context.Context, sid devicetransit.DeviceSessionID) (DeviceSession, bool, error)
 
 	// SetState advances the row's State, stamping LastActiveAt with
 	// `at` (ms epoch). Returns an error if the transition violates
 	// CanTransitionTo. Idempotent (state == next is legal).
-	SetState(ctx context.Context, sid adapter.DeviceSessionID, next DeviceState, at int64) error
+	SetState(ctx context.Context, sid devicetransit.DeviceSessionID, next DeviceState, at int64) error
 
 	// ListByChannel returns every mirror row attached to channelID. Used
 	// by adapter boot recovery (T1.6 phase 1.4) so on daemon restart the
@@ -205,5 +205,5 @@ type SessionStore interface {
 	// Delete drops the row by SessionID. Called when daemon ACKs an
 	// unbind_device_session control frame after the session reached a
 	// sink state. Idempotent (delete missing row is OK).
-	Delete(ctx context.Context, sid adapter.DeviceSessionID) error
+	Delete(ctx context.Context, sid devicetransit.DeviceSessionID) error
 }

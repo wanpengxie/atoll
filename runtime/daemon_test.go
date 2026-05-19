@@ -13,9 +13,9 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
-	kadapter "github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime"
@@ -695,7 +695,7 @@ func TestDaemon_DeviceTransit_InboundRoutesToPerChannelCallback(t *testing.T) {
 				t.Errorf("OnChannelBoot: expected non-nil SetDeviceCallback on hooks for channel %s", h.ChannelID)
 				return func(context.Context) error { return nil }, nil
 			}
-			h.SetDeviceCallback(func(_ context.Context, frame kadapter.SendFrame) error {
+			h.SetDeviceCallback(func(_ context.Context, frame devicetransit.SendFrame) error {
 				observed <- observation{
 					channelID: string(frame.ChannelID),
 					payload:   string(frame.Payload),
@@ -719,10 +719,10 @@ func TestDaemon_DeviceTransit_InboundRoutesToPerChannelCallback(t *testing.T) {
 	srv := d.Bus().ServerSide()
 	pushFrame := func(targetCh channel.ID, payload string) {
 		t.Helper()
-		body := kadapter.SendFrame{
+		body := devicetransit.SendFrame{
 			ChannelID:       targetCh,
 			DeviceSessionID: "sess-1",
-			Direction:       kadapter.DirectionFromDevice,
+			Direction:       devicetransit.DirectionFromDevice,
 			RequestID:       "req-1",
 			Payload:         []byte(payload),
 		}

@@ -10,6 +10,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -17,14 +18,14 @@ import (
 
 type fakeTransit struct {
 	mu      sync.Mutex
-	sent    []adapter.SendFrame
-	acks    []adapter.AckFrame
-	errs    []adapter.ErrorFrame
+	sent    []devicetransit.SendFrame
+	acks    []devicetransit.AckFrame
+	errs    []devicetransit.ErrorFrame
 	nextID  string
 	sendErr error
 }
 
-func (f *fakeTransit) Send(_ context.Context, frame adapter.SendFrame) (string, error) {
+func (f *fakeTransit) Send(_ context.Context, frame devicetransit.SendFrame) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.sendErr != nil {
@@ -39,14 +40,14 @@ func (f *fakeTransit) Send(_ context.Context, frame adapter.SendFrame) (string, 
 	return "frame-default", nil
 }
 
-func (f *fakeTransit) Ack(_ context.Context, frame adapter.AckFrame) error {
+func (f *fakeTransit) Ack(_ context.Context, frame devicetransit.AckFrame) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.acks = append(f.acks, frame)
 	return nil
 }
 
-func (f *fakeTransit) Error(_ context.Context, frame adapter.ErrorFrame) error {
+func (f *fakeTransit) Error(_ context.Context, frame devicetransit.ErrorFrame) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.errs = append(f.errs, frame)
@@ -257,7 +258,7 @@ func TestSendRequestHappyPath(t *testing.T) {
 	if got.DeviceSessionID != "sess-1" {
 		t.Errorf("session mismatch: %q", got.DeviceSessionID)
 	}
-	if got.Direction != adapter.DirectionToDevice {
+	if got.Direction != devicetransit.DirectionToDevice {
 		t.Errorf("direction mismatch: %q", got.Direction)
 	}
 	if got.RequestID != env.ID {

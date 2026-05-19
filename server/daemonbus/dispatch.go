@@ -40,7 +40,7 @@ type Handlers struct {
 
 	// OnDeviceTransitSend handles device_transit.send frames pushed BY
 	// the daemon (daemon → server → device). The gateway decodes the
-	// adapter.SendFrame body and asks the devicebus.Service to relay
+	// devicetransit.SendFrame body and asks the devicebus.Service to relay
 	// it to the device WS keyed by SendFrame.DeviceSessionID.
 	//
 	// Naming note (T147 §A-S1): pre-T147 this slot was misnamed

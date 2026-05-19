@@ -3,7 +3,7 @@
 // device-transit frame between daemon and server (L2 §9 daemonbus mux
 // frame spec). The frame_type closed set + shared header fields belong
 // here; per-frame-type payloads live in kernel/viewsync, kernel/placement,
-// kernel/adapter (for device_transit).
+// and kernel/devicetransit.
 package daemonbus
 
 import "encoding/json"

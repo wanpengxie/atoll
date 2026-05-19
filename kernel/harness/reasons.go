@@ -7,34 +7,5 @@ package harness
 
 import "github.com/wanpengxie/ActOS/kernel/message"
 
-// RejectReason is re-exported from kernel/message so callers can refer
-// to it as `harness.RejectReason` without crossing into kernel/message
-// for the closed-set type.
+// RejectReason is the harness-facing name for kernel/message.HarnessRejectReason.
 type RejectReason = message.HarnessRejectReason
-
-// Re-exports for the closed set values — keep symbol-for-symbol with
-// kernel/message/reason.go for ergonomic lookup.
-const (
-	RejectAuthFailed                 = message.HarnessAuthFailed
-	RejectMissingRequiredField       = message.HarnessMissingRequiredField
-	RejectKindInvalid                = message.HarnessKindInvalid
-	RejectResponseMissingParentID    = message.HarnessResponseMissingParentID
-	RejectSenderMismatch             = message.HarnessSenderMismatch
-	RejectSenderKindMismatch         = message.HarnessSenderKindMismatch
-	RejectSenderDeregistered         = message.HarnessSenderDeregistered
-	RejectUnknownType                = message.HarnessUnknownType
-	RejectKindNotAllowed             = message.HarnessKindNotAllowed
-	RejectRequestAudienceInvalid     = message.HarnessRequestAudienceInvalid
-	RejectAudienceActorNotRegistered = message.HarnessAudienceActorNotRegistered
-	RejectAudienceHandlerMismatch    = message.HarnessAudienceHandlerMismatch
-	RejectPayloadSchemaViolation     = message.HarnessPayloadSchemaViolation
-	RejectDocRefsInvalid             = message.HarnessDocRefsInvalid
-	RejectResponseParentInvalid      = message.HarnessResponseParentInvalid
-	RejectTerminalDuplicate          = message.HarnessTerminalDuplicate
-	RejectWorkerFencingStale         = message.HarnessWorkerFencingStale
-	RejectEngineACLDenied            = message.HarnessEngineACLDenied
-	RejectMessageIDConflict          = message.HarnessMessageIDConflict
-)
-
-// AllRejectReasons is re-exported from kernel/message.
-var AllRejectReasons = message.AllHarnessRejectReasons

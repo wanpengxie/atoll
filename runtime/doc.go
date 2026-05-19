@@ -8,7 +8,7 @@
 //   - channel placement state machine — daemon side (lifecycle)
 //   - WS/IPC fan-out to server (transit) and worker subprocess (workerhost)
 //   - worker subprocess runtime — strict IPC, no sqlite (worker)
-//   - long-pending scheduler, bootstrap saga, lease supervisor
+//   - long-pending scheduler, bootstrap saga, workerhost leases
 //
 // Subpackages:
 //
@@ -26,8 +26,6 @@
 //     fencing token + daemon_epoch enforcement.
 //   - runtime/worker       — worker subprocess main loop. STRICT IPC ONLY.
 //     No sqlite. Enforced by .go-arch-lint.yml.
-//   - runtime/supervisor   — lease lifecycle (vs heartbeat 30s) + spawner
-//     abstraction.
 //   - runtime/scheduler    — message deliver + long-pending Step 1/2/3 +
 //     daemon-restart timer recover.
 //   - runtime/bootstrap    — 9-step channel bootstrap saga + crash

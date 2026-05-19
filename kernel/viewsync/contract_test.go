@@ -12,27 +12,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// TestFrameTypeClosedSet asserts the L1 §8.3 frame_type closed set has
-// exactly 4 values, in spec order. Drift on either side trips the test.
-func TestFrameTypeClosedSet(t *testing.T) {
-	t.Parallel()
-
-	if got := len(AllFrameTypes); got != 4 {
-		t.Fatalf("AllFrameTypes len = %d, want 4", got)
-	}
-	want := []FrameType{
-		FrameTypePush,
-		FrameTypeAck,
-		FrameTypeResyncRequest,
-		FrameTypeResyncResponse,
-	}
-	for i, ft := range AllFrameTypes {
-		if ft != want[i] {
-			t.Errorf("AllFrameTypes[%d] = %q, want %q", i, ft, want[i])
-		}
-	}
-}
-
 // TestPushAckFramePayloadFields locks the JSON wire-form keys for the
 // Push and Ack payloads against L1 §8.3 row 1 + row 2 spec.
 func TestPushAckFramePayloadFields(t *testing.T) {

@@ -1,6 +1,5 @@
 // Package actor defines the L0 channel-actor identity model: ActorID and
 // actor Kind primitives.
-//
 package actor
 
 // ActorID is the channel-local sender identifier. It is identical to

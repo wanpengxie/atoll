@@ -18,7 +18,7 @@ func TestRegisterAndBuild(t *testing.T) {
 			Name:         "test",
 			ActorID:      "tool:test",
 			Types:        []string{"x.y"},
-			Binding:      adapter.BindingInProcess,
+			Binding:      actor.BindingInProcess,
 			MaxPendingMs: 1,
 		}}
 	})

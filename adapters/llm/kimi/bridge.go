@@ -1133,7 +1133,7 @@ func renderChannelContext(c ChannelContext) string {
 			b.WriteString(strings.Join(t.AllowedKinds, ", "))
 			b.WriteString(" | ")
 			if t.MaxPendingMs > 0 {
-				b.WriteString(fmt.Sprintf("%d", t.MaxPendingMs))
+				fmt.Fprintf(&b, "%d", t.MaxPendingMs)
 			}
 			b.WriteString(" |\n")
 		}

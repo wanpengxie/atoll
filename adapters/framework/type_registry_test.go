@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/actor"
 )
 
 func TestInMemoryTypeRegistryUpsertAndLookup(t *testing.T) {
@@ -14,7 +14,7 @@ func TestInMemoryTypeRegistryUpsertAndLookup(t *testing.T) {
 	row := TypeRow{
 		Type:           "feishu.chat.send",
 		HandlerActorID: "tool:feishu",
-		HandlerBinding: adapter.BindingOutboundHTTP,
+		HandlerBinding: actor.BindingOutboundHTTP,
 		MaxPendingMs:   30_000,
 	}
 	got, err := r.Upsert(ctx, row)
@@ -40,10 +40,10 @@ func TestTypeRegistryRejectsBadRows(t *testing.T) {
 		name string
 		row  TypeRow
 	}{
-		{"missing-type", TypeRow{HandlerActorID: "a", HandlerBinding: adapter.BindingInProcess, MaxPendingMs: 1}},
-		{"missing-actor", TypeRow{Type: "x", HandlerBinding: adapter.BindingInProcess, MaxPendingMs: 1}},
+		{"missing-type", TypeRow{HandlerActorID: "a", HandlerBinding: actor.BindingInProcess, MaxPendingMs: 1}},
+		{"missing-actor", TypeRow{Type: "x", HandlerBinding: actor.BindingInProcess, MaxPendingMs: 1}},
 		{"bad-binding", TypeRow{Type: "x", HandlerActorID: "a", HandlerBinding: "wat", MaxPendingMs: 1}},
-		{"zero-timeout", TypeRow{Type: "x", HandlerActorID: "a", HandlerBinding: adapter.BindingInProcess}},
+		{"zero-timeout", TypeRow{Type: "x", HandlerActorID: "a", HandlerBinding: actor.BindingInProcess}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -61,7 +61,7 @@ func TestInMemoryTypeRegistryListSorted(t *testing.T) {
 		_, _ = r.Upsert(ctx, TypeRow{
 			Type:           t,
 			HandlerActorID: "tool:a",
-			HandlerBinding: adapter.BindingInProcess,
+			HandlerBinding: actor.BindingInProcess,
 			MaxPendingMs:   1,
 		})
 	}
@@ -74,17 +74,16 @@ func TestInMemoryTypeRegistryListSorted(t *testing.T) {
 	}
 }
 
-func TestRegistryLegacyBindingNormalized(t *testing.T) {
+func TestRegistryRejectsLegacyBinding(t *testing.T) {
 	r := NewInMemoryTypeRegistry()
 	ctx := context.Background()
-	// Legacy daemon_rpc must normalise to in_process via validate.
 	row := TypeRow{
 		Type:           "old.type",
 		HandlerActorID: "tool:a",
-		HandlerBinding: adapter.BindingKind("daemon_rpc"),
+		HandlerBinding: actor.Binding("daemon_rpc"),
 		MaxPendingMs:   1,
 	}
-	if _, err := r.Upsert(ctx, row); err != nil {
-		t.Fatalf("Upsert legacy: %v", err)
+	if _, err := r.Upsert(ctx, row); err == nil {
+		t.Fatal("Upsert legacy binding: expected error")
 	}
 }

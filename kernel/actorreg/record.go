@@ -11,8 +11,8 @@ import "github.com/wanpengxie/ActOS/kernel/actor"
 type Record struct {
 	ID             actor.ActorID
 	Kind           actor.Kind
-	Binding        Binding // empty for human / system
-	DisplayName    string  // optional; informative only (L1 §12.2 fields optional)
+	Binding        actor.Binding // empty for human / system
+	DisplayName    string        // optional; informative only (L1 §12.2 fields optional)
 	CreatedAt      int64
 	DeregisteredAt int64 // 0 = active; non-zero = soft-deregister timestamp
 }

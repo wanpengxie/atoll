@@ -12,6 +12,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime"
@@ -106,9 +107,9 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 		// scope; the loop also covers it best-effort by trying each
 		// adapter and returning the first non-nil error.
 		if h.SetDeviceCallback != nil {
-			deviceAdapters := mgr.AdaptersByBinding(adapter.BindingViaServerTransit)
+			deviceAdapters := mgr.AdaptersByBinding(actor.BindingViaServerTransit)
 			if len(deviceAdapters) > 0 {
-				h.SetDeviceCallback(func(ctx context.Context, frame adapter.SendFrame) error {
+				h.SetDeviceCallback(func(ctx context.Context, frame devicetransit.SendFrame) error {
 					var firstErr error
 					for _, name := range deviceAdapters {
 						if err := mgr.OnExternalCallback(ctx, name, frame.Payload); err != nil && firstErr == nil {
@@ -263,7 +264,7 @@ func DeviceXHSActorSeed() actorreg.Record {
 	return actorreg.Record{
 		ID:      devicexhs.DefaultAdapterActorID,
 		Kind:    actor.KindTool,
-		Binding: actorreg.BindingViaServerTransit,
+		Binding: actor.BindingViaServerTransit,
 	}
 }
 

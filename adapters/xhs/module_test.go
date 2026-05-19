@@ -55,7 +55,7 @@ func TestDeclares(t *testing.T) {
 	if d.ActorID != xhs.DefaultAdapterActorID {
 		t.Errorf("ActorID=%s want %s", d.ActorID, xhs.DefaultAdapterActorID)
 	}
-	if d.Binding != adapter.BindingInProcess {
+	if d.Binding != actor.BindingInProcess {
 		t.Errorf("Binding=%s want in_process", d.Binding)
 	}
 	if d.MaxPendingMs != xhs.DefaultMaxPendingMs {

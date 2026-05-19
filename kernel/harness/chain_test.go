@@ -55,12 +55,12 @@ func TestAllRejectReasons(t *testing.T) {
 		message.HarnessEngineACLDenied,
 		message.HarnessMessageIDConflict,
 	}
-	if len(harness.AllRejectReasons) != len(want) {
+	if len(message.AllHarnessRejectReasons) != len(want) {
 		t.Fatalf("AllRejectReasons len=%d want=%d (L1 §10.3.1 closed set)",
-			len(harness.AllRejectReasons), len(want))
+			len(message.AllHarnessRejectReasons), len(want))
 	}
 	seen := map[message.HarnessRejectReason]bool{}
-	for _, r := range harness.AllRejectReasons {
+	for _, r := range message.AllHarnessRejectReasons {
 		if seen[r] {
 			t.Errorf("duplicate reason %s", r)
 		}
@@ -194,42 +194,12 @@ func TestWriteResultDedupeRoundTrip(t *testing.T) {
 // is an alias for kernel/message.HarnessRejectReason; callers must be
 // able to compare against either form without conversion.
 func TestRejectReasonAliasMatchesMessageReason(t *testing.T) {
-	r := harness.RejectAuthFailed
-	if r != message.HarnessAuthFailed {
-		t.Errorf("alias mismatch: %v != %v", r, message.HarnessAuthFailed)
-	}
-}
-
-// TestRejectReasonReExports — every closed-set value MUST have a
-// `harness.Reject*` alias so call sites can stay inside the harness
-// package namespace.
-func TestRejectReasonReExports(t *testing.T) {
-	pairs := map[message.HarnessRejectReason]message.HarnessRejectReason{
-		harness.RejectAuthFailed:                 message.HarnessAuthFailed,
-		harness.RejectMissingRequiredField:       message.HarnessMissingRequiredField,
-		harness.RejectKindInvalid:                message.HarnessKindInvalid,
-		harness.RejectResponseMissingParentID:    message.HarnessResponseMissingParentID,
-		harness.RejectSenderMismatch:             message.HarnessSenderMismatch,
-		harness.RejectSenderKindMismatch:         message.HarnessSenderKindMismatch,
-		harness.RejectSenderDeregistered:         message.HarnessSenderDeregistered,
-		harness.RejectUnknownType:                message.HarnessUnknownType,
-		harness.RejectKindNotAllowed:             message.HarnessKindNotAllowed,
-		harness.RejectRequestAudienceInvalid:     message.HarnessRequestAudienceInvalid,
-		harness.RejectAudienceActorNotRegistered: message.HarnessAudienceActorNotRegistered,
-		harness.RejectAudienceHandlerMismatch:    message.HarnessAudienceHandlerMismatch,
-		harness.RejectPayloadSchemaViolation:     message.HarnessPayloadSchemaViolation,
-		harness.RejectDocRefsInvalid:             message.HarnessDocRefsInvalid,
-		harness.RejectResponseParentInvalid:      message.HarnessResponseParentInvalid,
-		harness.RejectTerminalDuplicate:          message.HarnessTerminalDuplicate,
-		harness.RejectWorkerFencingStale:         message.HarnessWorkerFencingStale,
-		harness.RejectEngineACLDenied:            message.HarnessEngineACLDenied,
-		harness.RejectMessageIDConflict:          message.HarnessMessageIDConflict,
-	}
-	for got, want := range pairs {
-		if got != want {
-			t.Errorf("re-export drift: %v != %v", got, want)
+	assertReason := func(r harness.RejectReason) {
+		if r != message.HarnessAuthFailed {
+			t.Errorf("alias mismatch: %v != %v", r, message.HarnessAuthFailed)
 		}
 	}
+	assertReason(message.HarnessAuthFailed)
 }
 
 // TestRejectReasonHTTPStatus spot-checks the L2 §3.6.1 status map for

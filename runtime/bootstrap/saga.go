@@ -17,7 +17,7 @@ import (
 )
 
 // TemplateView is the bootstrap-side projection of one L4 channel
-// template (M1.6-T5 phase-2). The Saga consumes it inside Bootstrap to
+// template. The Saga consumes it inside Bootstrap to
 // (a) seed adapter tool actor rows so framework.Manager.Install can
 // locate them in step 5b and (b) materialise template-declared workdir
 // subdirectories in new step 5c.
@@ -58,24 +58,20 @@ type TemplateView struct {
 //  5. Insert actor_registry + member rows from req.InitialMembers.
 //     5b. Insert template AdapterActorSeeds (M1.6-T2 — pre-creates tool
 //     adapter rows so framework.Manager.Install can locate them). Seeds
-//     come from the resolved TemplateView for req.ChannelType when a
-//     ResolveTemplate callback is wired; otherwise the saga falls back
-//     to the AdapterActorSeeds field for backward compatibility.
+//     come from the resolved TemplateView for req.ChannelType.
 //     5c. Mkdir template WorkdirSubdirs (M1.6-T5 phase-2 — e.g.
 //     published-notes/, drafts/, assets/ for the xhs-creator template).
-//  6. (caller — runtime/lifecycle.Creator / runtime.Daemon) writes
-//     channel_lock row.
+//  6. Caller writes channel_lock row.
 //  7. Caller invokes Complete to mark bootstrap_registry status='completed'
 //     only after channel_lock is durable.
 //
 // On failure between steps 2 and 7 the row is left status='in_progress'
 // so reconcile.go can roll it back on next start.
 type Saga struct {
-	daemonDB          *sql.DB
-	channelsDir       string
-	nowFn             func() int64
-	adapterActorSeeds []actorreg.Record
-	resolveTemplate   func(channelType string) TemplateView
+	daemonDB        *sql.DB
+	channelsDir     string
+	nowFn           func() int64
+	resolveTemplate func(channelType string) TemplateView
 }
 
 // SagaConfig wires Saga.
@@ -84,21 +80,9 @@ type SagaConfig struct {
 	ChannelsDir string
 	NowFn       func() int64
 
-	// AdapterActorSeeds is the static set of tool actor_registry rows
-	// the saga MUST insert in addition to the system + initial member
-	// rows (M1.6-T2 ChannelTemplate). Empty list = no extra actors.
-	//
-	// Deprecated: callers wiring multiple templates (M1.6-T5 phase-2)
-	// MUST instead provide ResolveTemplate so the per-channel template
-	// is selected by req.ChannelType. The static field stays as a
-	// fallback for legacy single-template wiring and the existing tests.
-	AdapterActorSeeds []actorreg.Record
-
 	// ResolveTemplate, when non-nil, is consulted in Bootstrap to obtain
-	// the per-channel TemplateView keyed by CreateChannelRequest.ChannelType
-	// (M1.6-T5 phase-2). When nil the saga uses the legacy
-	// AdapterActorSeeds field for every channel and skips the workdir-
-	// subdir step.
+	// the per-channel TemplateView keyed by CreateChannelRequest.ChannelType.
+	// When nil the saga seeds only system + initial members.
 	//
 	// The callback MUST return a usable TemplateView even for unknown
 	// types (return the zero value to mean "no template" — saga seeds
@@ -117,14 +101,11 @@ func NewSaga(cfg SagaConfig) (*Saga, error) {
 	if cfg.NowFn == nil {
 		return nil, errors.New("bootstrap: SagaConfig.NowFn nil")
 	}
-	seeds := make([]actorreg.Record, len(cfg.AdapterActorSeeds))
-	copy(seeds, cfg.AdapterActorSeeds)
 	return &Saga{
-		daemonDB:          cfg.DaemonDB,
-		channelsDir:       cfg.ChannelsDir,
-		nowFn:             cfg.NowFn,
-		adapterActorSeeds: seeds,
-		resolveTemplate:   cfg.ResolveTemplate,
+		daemonDB:        cfg.DaemonDB,
+		channelsDir:     cfg.ChannelsDir,
+		nowFn:           cfg.NowFn,
+		resolveTemplate: cfg.ResolveTemplate,
 	}, nil
 }
 
@@ -188,11 +169,9 @@ func (s *Saga) Bootstrap(
 		}
 	}
 
-	// M1.6-T5 phase-2 — resolve the per-channel template ONCE: prefer
-	// the ResolveTemplate callback when wired, otherwise fall back to
-	// the static AdapterActorSeeds field for legacy single-template
-	// configurations and the existing test fixtures.
-	tpl := TemplateView{AdapterActorSeeds: s.adapterActorSeeds}
+	// Resolve the per-channel template once. A nil resolver means generic
+	// channels with no extra actors or workdir subdirectories.
+	tpl := TemplateView{}
 	if s.resolveTemplate != nil {
 		tpl = s.resolveTemplate(req.ChannelType)
 	}

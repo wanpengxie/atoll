@@ -13,9 +13,9 @@ import (
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime"
@@ -30,16 +30,16 @@ func TestBuildChannelTemplates_DefaultsToDeviceXHSBinding(t *testing.T) {
 	if len(prod.AdapterActorSeeds) != 1 {
 		t.Fatalf("prod seeds len=%d want 1", len(prod.AdapterActorSeeds))
 	}
-	if prod.AdapterActorSeeds[0].Binding != actorreg.BindingViaServerTransit {
-		t.Fatalf("prod actor binding=%q want %q", prod.AdapterActorSeeds[0].Binding, actorreg.BindingViaServerTransit)
+	if prod.AdapterActorSeeds[0].Binding != actor.BindingViaServerTransit {
+		t.Fatalf("prod actor binding=%q want %q", prod.AdapterActorSeeds[0].Binding, actor.BindingViaServerTransit)
 	}
 
 	scaffold := buildChannelTemplates(true)[XHSCreatorChannelType]
 	if len(scaffold.AdapterActorSeeds) != 1 {
 		t.Fatalf("scaffold seeds len=%d want 1", len(scaffold.AdapterActorSeeds))
 	}
-	if scaffold.AdapterActorSeeds[0].Binding != actorreg.BindingInProcess {
-		t.Fatalf("scaffold actor binding=%q want %q", scaffold.AdapterActorSeeds[0].Binding, actorreg.BindingInProcess)
+	if scaffold.AdapterActorSeeds[0].Binding != actor.BindingInProcess {
+		t.Fatalf("scaffold actor binding=%q want %q", scaffold.AdapterActorSeeds[0].Binding, actor.BindingInProcess)
 	}
 }
 
@@ -90,7 +90,7 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	assertProductionXHSBindings(t, ctx, db)
 
-	const sessionID adapter.DeviceSessionID = "sess-prod-xhs"
+	const sessionID devicetransit.DeviceSessionID = "sess-prod-xhs"
 	bindDeviceSession(t, ctx, d, srv, sessionID, channel.ID(channelID))
 	if err := sessionStore.SetState(ctx, sessionID, deviceframework.StateActive, nowMs()); err != nil {
 		t.Fatalf("activate session: %v", err)
@@ -141,15 +141,15 @@ func assertProductionXHSBindings(t *testing.T, ctx context.Context, db *sql.DB) 
 	if !ok {
 		t.Fatalf("actor_registry missing %s", devicexhs.DefaultAdapterActorID)
 	}
-	if rec.Binding != actorreg.BindingViaServerTransit {
-		t.Fatalf("actor binding=%q want %q", rec.Binding, actorreg.BindingViaServerTransit)
+	if rec.Binding != actor.BindingViaServerTransit {
+		t.Fatalf("actor binding=%q want %q", rec.Binding, actor.BindingViaServerTransit)
 	}
 	var binding string
 	if err := db.QueryRowContext(ctx, `SELECT handler_binding FROM type_registry WHERE type=?`, devicexhs.TypePublish).Scan(&binding); err != nil {
 		t.Fatalf("type_registry xhs.publish binding: %v", err)
 	}
-	if binding != string(adapter.BindingViaServerTransit) {
-		t.Fatalf("type_registry xhs.publish binding=%q want %q", binding, adapter.BindingViaServerTransit)
+	if binding != string(actor.BindingViaServerTransit) {
+		t.Fatalf("type_registry xhs.publish binding=%q want %q", binding, actor.BindingViaServerTransit)
 	}
 }
 
@@ -158,7 +158,7 @@ func bindDeviceSession(
 	ctx context.Context,
 	d *runtime.Daemon,
 	srv *transit.MockServer,
-	sessionID adapter.DeviceSessionID,
+	sessionID devicetransit.DeviceSessionID,
 	channelID channel.ID,
 ) {
 	t.Helper()
@@ -168,7 +168,7 @@ func bindDeviceSession(
 		ChannelID:        channelID,
 		DeviceID:         "device-" + string(sessionID),
 		DeviceType:       "xhs",
-		DaemonID:         placement.DaemonID("daemon-prod-xhs"),
+		DaemonID:         "daemon-prod-xhs",
 		TokenFingerprint: "prod123456789abc",
 		BoundAt:          nowMs(),
 		ExpiresAt:        nowMs() + 60_000,
@@ -199,7 +199,7 @@ func writeRequestAndWaitForDeviceSend(
 	srv *transit.MockServer,
 	channelID, requestID, callerActor, envType string,
 	payload []byte,
-) (transit.WriteMessageAckBody, adapter.SendFrame) {
+) (transit.WriteMessageAckBody, devicetransit.SendFrame) {
 	t.Helper()
 	ts := nowMs()
 	hc := transit.HumanCaller{
@@ -238,7 +238,7 @@ func writeRequestAndWaitForDeviceSend(
 
 	var (
 		ack     transit.WriteMessageAckBody
-		send    adapter.SendFrame
+		send    devicetransit.SendFrame
 		gotAck  bool
 		gotSend bool
 	)

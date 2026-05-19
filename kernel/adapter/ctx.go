@@ -6,6 +6,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -50,7 +51,7 @@ type ModuleContext struct {
 	// BindingViaServerTransit. Other binding types receive nil; the
 	// framework refuses to call Handle when DeviceTransit is required
 	// but absent (T3 composition root wires it).
-	DeviceTransit DeviceTransit
+	DeviceTransit devicetransit.DeviceTransit
 }
 
 // RespondOptions adjusts the Respond call (L2 §8.5 + L1 §11.1 Ad-2).

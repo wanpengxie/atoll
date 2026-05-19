@@ -9,10 +9,9 @@ import (
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
-	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
@@ -47,8 +46,10 @@ func TestIntegration_BindDeviceSession_RoundTrip(t *testing.T) {
 		NowFn:             nowMs,
 		HumanCallerSecret: []byte(integSecret),
 		SchedulerPeriod:   50 * time.Millisecond,
-		ChannelTemplate: runtime.ChannelTemplate{
-			AdapterActorSeeds: []actorreg.Record{xhs.DefaultActorSeed()},
+		ChannelTemplates: map[string]runtime.ChannelTemplate{
+			"": {
+				AdapterActorSeeds: []actorreg.Record{xhs.DefaultActorSeed()},
+			},
 		},
 		OnChannelBoot:         wireAdapterFramework(XHSScaffoldFactory(xhs.Config{})),
 		OnBindDeviceSession:   binder.OnBind,
@@ -64,14 +65,14 @@ func TestIntegration_BindDeviceSession_RoundTrip(t *testing.T) {
 	defer func() { _ = d.Close() }()
 	srv := d.Bus().ServerSide()
 
-	const sessionID adapter.DeviceSessionID = "sess-integ-1"
+	const sessionID devicetransit.DeviceSessionID = "sess-integ-1"
 	bindBody := transit.BindDeviceSessionBody{
 		FrameID:          "frame-bind-integ",
 		SessionID:        sessionID,
 		ChannelID:        channel.ID("ch-X"),
 		DeviceID:         "dev-1",
 		DeviceType:       "xhs",
-		DaemonID:         placement.DaemonID("daemon-bind-integ"),
+		DaemonID:         "daemon-bind-integ",
 		TokenFingerprint: "1234567890abcdef",
 		ExpiresAt:        90_000,
 		BoundAt:          80_000,

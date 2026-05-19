@@ -2,8 +2,6 @@ package xhs
 
 import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/actorreg"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
 // ActorSeed is the actor_registry row composition root MUST insert
@@ -12,7 +10,7 @@ import (
 type ActorSeed struct {
 	ID          actor.ActorID
 	Kind        actor.Kind
-	Binding     actorreg.Binding
+	Binding     actor.Binding
 	DisplayName string
 }
 
@@ -28,7 +26,7 @@ type ActorSeed struct {
 type TypeSeed struct {
 	Type           string
 	HandlerActorID actor.ActorID
-	HandlerBinding adapter.BindingKind
+	HandlerBinding actor.Binding
 	MaxPendingMs   int64
 	AllowEvent     bool
 }
@@ -61,7 +59,7 @@ func DefaultInstallSpec(maxPendingMs int64) InstallSpec {
 	actorSeed := ActorSeed{
 		ID:          DefaultAdapterActorID,
 		Kind:        actor.KindTool,
-		Binding:     actorreg.BindingViaServerTransit,
+		Binding:     actor.BindingViaServerTransit,
 		DisplayName: "xhs",
 	}
 	types := make([]TypeSeed, 0, len(AllTypes))

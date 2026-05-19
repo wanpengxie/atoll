@@ -9,6 +9,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -22,7 +23,7 @@ func TestInProcessBindingFullPath(t *testing.T) {
 			Name:         "calc",
 			ActorID:      "tool:calc",
 			Types:        []string{"calc.add"},
-			Binding:      adapter.BindingInProcess,
+			Binding:      actor.BindingInProcess,
 			MaxPendingMs: 5_000,
 		},
 		handle: func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
@@ -73,26 +74,26 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 	lookup := NewMemoryRequestLookup(nil)
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actorreg.Record{
-		ID: "tool:xhs", Kind: actor.KindTool, Binding: actorreg.BindingViaServerTransit,
+		ID: "tool:xhs", Kind: actor.KindTool, Binding: actor.BindingViaServerTransit,
 	})
 
-	var seenFrame *adapter.SendFrame
+	var seenFrame *devicetransit.SendFrame
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "xhs",
 			ActorID:      "tool:xhs",
 			Types:        []string{"xhs.publish"},
-			Binding:      adapter.BindingViaServerTransit,
+			Binding:      actor.BindingViaServerTransit,
 			MaxPendingMs: 5_000,
 		},
 		handle: func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
 			if mctx.DeviceTransit == nil {
 				t.Fatalf("via_server_transit mctx.DeviceTransit nil")
 			}
-			frame := adapter.SendFrame{
+			frame := devicetransit.SendFrame{
 				ChannelID:       mctx.ChannelID,
 				DeviceSessionID: "device-1",
-				Direction:       adapter.DirectionToDevice,
+				Direction:       devicetransit.DirectionToDevice,
 				RequestID:       env.ID,
 				Payload:         env.Payload,
 			}
@@ -135,7 +136,7 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 	if seenFrame.RequestID != "req-vst-1" {
 		t.Fatalf("frame.RequestID=%s want req-vst-1", seenFrame.RequestID)
 	}
-	if seenFrame.Direction != adapter.DirectionToDevice {
+	if seenFrame.Direction != devicetransit.DirectionToDevice {
 		t.Fatalf("frame.Direction=%s want to_device", seenFrame.Direction)
 	}
 	if len(transit.sent) != 1 {
@@ -181,7 +182,7 @@ func TestOutboundHTTPBindingMCtxShape(t *testing.T) {
 			Name:         "outbound",
 			ActorID:      "tool:outbound",
 			Types:        []string{"outbound.x"},
-			Binding:      adapter.BindingOutboundHTTP,
+			Binding:      actor.BindingOutboundHTTP,
 			MaxPendingMs: 1_000,
 		},
 	}
@@ -213,14 +214,14 @@ func TestOutboundHTTPBindingMCtxShape(t *testing.T) {
 func TestViaServerTransitRequiresDeviceTransit(t *testing.T) {
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actorreg.Record{
-		ID: "tool:vst", Kind: actor.KindTool, Binding: actorreg.BindingViaServerTransit,
+		ID: "tool:vst", Kind: actor.KindTool, Binding: actor.BindingViaServerTransit,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "vst",
 			ActorID:      "tool:vst",
 			Types:        []string{"vst.send"},
-			Binding:      adapter.BindingViaServerTransit,
+			Binding:      actor.BindingViaServerTransit,
 			MaxPendingMs: 1_000,
 		},
 	}

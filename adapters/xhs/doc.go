@@ -14,7 +14,7 @@
 //
 // The scaffold owns the same canonical actor id (tool:xhs-adapter) and
 // declares the same six envelope types as the device adapter — the only
-// difference is the BindingKind, which T2 keeps as in_process so the
+// difference is the actor.Binding, which T2 keeps as in_process so the
 // daemon composition root can install it without DeviceTransit. T3
 // replaces this scaffold by registering adapters/device/xhs as the bound
 // module for tool:xhs-adapter instead.

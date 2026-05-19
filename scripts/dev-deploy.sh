@@ -26,6 +26,7 @@ DB_PATH="$DATA_DIR/server.db"
 DAEMON_DATA="$DATA_DIR/daemon"
 SERVER_LOG="$LOG_DIR/server.log"
 DAEMON_LOG="$LOG_DIR/daemon.log"
+DAEMONBUS_URL="${COAGENT_DAEMONBUS_URL:-ws://127.0.0.1:8832/daemonbus}"
 
 red()   { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -137,9 +138,9 @@ done
 # -----------------------------------------------------------------------------
 # Step 6: start daemon, wait daemonbus.ws.connected
 # -----------------------------------------------------------------------------
-blue "[deploy] step 6: start daemon → wss://lightcone.onestudio.cc/daemonbus"
+blue "[deploy] step 6: start daemon → $DAEMONBUS_URL"
 nohup ./bin/coagent-daemon \
-  -server-url wss://lightcone.onestudio.cc/daemonbus \
+  -server-url "$DAEMONBUS_URL" \
   -key "$COAGENT_DAEMON_SECRET" \
   -human-caller-secret "$COAGENT_HUMAN_SECRET" \
   -data-dir "$DAEMON_DATA" \

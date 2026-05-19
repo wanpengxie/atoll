@@ -16,7 +16,7 @@
 //     在 user 登录后签发 …") + T1.3 control.bind_device_session
 //     payload.token_fingerprint.
 //
-//   - proxy.go     DeviceProxy bundles kernel/adapter.DeviceTransit +
+//   - proxy.go     DeviceProxy bundles kernel/devicetransit.DeviceTransit +
 //     CorrelationTracker + ErrorPolicy so a Module.Handle
 //     body shrinks to "compose wire payload → proxy.Send".
 //     Implements the daemon-side half of the T1.3 §2.6.4

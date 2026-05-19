@@ -2,7 +2,6 @@ package xhs
 
 import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
 // AdapterName is the framework module name; lookup key the daemon uses
@@ -19,8 +18,8 @@ const AdapterName = "xhs"
 const DefaultAdapterActorID actor.ActorID = "tool:xhs-adapter"
 
 // Binding is the M1.5 closed-enum value this adapter declares. See
-// kernel/adapter.BindingViaServerTransit + L1 §11.7.
-const Binding = adapter.BindingViaServerTransit
+// kernel/actor.BindingViaServerTransit + L1 §11.7.
+const Binding = actor.BindingViaServerTransit
 
 // DefaultMaxPendingMs mirrors the M1.3 xhs baseline (5 min). Large
 // enough to absorb Chrome extension throttling; short enough that a

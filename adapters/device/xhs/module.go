@@ -12,6 +12,7 @@ import (
 	adapterframework "github.com/wanpengxie/ActOS/adapters/framework"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -31,7 +32,7 @@ type Config struct {
 	// also omits device_session_id, Module.Handle emits a synchronous
 	// failed terminal with reason="device_session_missing" rather than
 	// guessing.
-	DefaultSession adapter.DeviceSessionID
+	DefaultSession devicetransit.DeviceSessionID
 
 	// SessionStore is the daemon-side mirror table for device sessions.
 	// Required: Module.Handle consults it to confirm the target session

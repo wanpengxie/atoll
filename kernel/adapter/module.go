@@ -47,8 +47,8 @@ type TypeSchema struct {
 }
 
 // Declaration is the static metadata an adapter Module exposes at
-// install time. Mirrors the L2 §8.1 framework Declaration with M1.5
-// updates (Binding → BindingKind tri-class per L1 §11.7).
+// install time. Mirrors the L2 §8.1 framework Declaration with the
+// actor.Binding tri-class transport per L1 §11.7.
 //
 // Every field is read once during Manager.Install — Modules MUST keep
 // the value side-effect-free and identical across calls.
@@ -79,10 +79,10 @@ type Declaration struct {
 	// validation MUST populate this map.
 	TypeSchemas map[string]TypeSchema
 
-	// Binding is the M1.5 tri-class transport for this adapter (L1
-	// §11.7). Determines which framework helpers run (in-process
-	// dispatch / outbound HTTP / via_server_transit + DeviceTransit).
-	Binding BindingKind
+	// Binding is the M1.5 tri-class transport for this adapter (L1 §11.7).
+	// Determines which framework helpers run (in-process dispatch /
+	// outbound HTTP / via_server_transit + DeviceTransit).
+	Binding actor.Binding
 
 	// MaxPendingMs is the per-type request timeout (milliseconds). Used
 	// by Ad-2 framework timeout timer (L1 §11.1 + L2 §8.3). Each Types

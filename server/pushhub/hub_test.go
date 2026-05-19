@@ -168,4 +168,3 @@ func TestPushhub_HealthyClientStaysSubscribed(t *testing.T) {
 		t.Fatalf("healthy subscriber reaped: count=%d", hub.SubscriberCount("ch-2"))
 	}
 }
-

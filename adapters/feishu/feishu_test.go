@@ -268,7 +268,7 @@ func setup(t *testing.T, mods ...func(*feishu.Module)) *setupResult {
 	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID:      "tool:feishu",
 		Kind:    actor.KindTool,
-		Binding: actorreg.BindingOutboundHTTP,
+		Binding: actor.BindingOutboundHTTP,
 	})
 
 	chain := &fakeChain{}
@@ -326,7 +326,7 @@ func TestInstallRegistersTypesInTypeRegistry(t *testing.T) {
 		if row.HandlerActorID != "tool:feishu" {
 			t.Fatalf("type=%s handler=%s want tool:feishu", want, row.HandlerActorID)
 		}
-		if row.HandlerBinding != adapter.BindingOutboundHTTP {
+		if row.HandlerBinding != actor.BindingOutboundHTTP {
 			t.Fatalf("type=%s binding=%s want outbound_http", want, row.HandlerBinding)
 		}
 	}
@@ -346,7 +346,7 @@ func TestInstallRejectsMissingCredentials(t *testing.T) {
 	)
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actorreg.Record{
-		ID: "tool:feishu", Kind: actor.KindTool, Binding: actorreg.BindingOutboundHTTP,
+		ID: "tool:feishu", Kind: actor.KindTool, Binding: actor.BindingOutboundHTTP,
 	})
 	mgr, _ := framework.NewManager(framework.ManagerConfig{
 		ChannelID:       "channel:test",

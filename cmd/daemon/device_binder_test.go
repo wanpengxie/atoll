@@ -5,9 +5,8 @@ import (
 	"testing"
 
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
@@ -23,11 +22,11 @@ func TestDeviceSessionBinder_BindUpsertsRow(t *testing.T) {
 
 	body := transit.BindDeviceSessionBody{
 		FrameID:          "f-1",
-		SessionID:        adapter.DeviceSessionID("sess-A"),
+		SessionID:        devicetransit.DeviceSessionID("sess-A"),
 		ChannelID:        channel.ID("ch-X"),
 		DeviceID:         "dev-1",
 		DeviceType:       "xhs",
-		DaemonID:         placement.DaemonID("daemon-A"),
+		DaemonID:         "daemon-A",
 		TokenFingerprint: "abc123def4567890",
 		ExpiresAt:        50_000,
 		BoundAt:          10_000,
@@ -75,7 +74,7 @@ func TestDeviceSessionBinder_BindIdempotent(t *testing.T) {
 
 	body := transit.BindDeviceSessionBody{
 		FrameID:    "f-1",
-		SessionID:  adapter.DeviceSessionID("sess-A"),
+		SessionID:  devicetransit.DeviceSessionID("sess-A"),
 		ChannelID:  channel.ID("ch-X"),
 		DeviceID:   "dev-1",
 		DeviceType: "xhs",
@@ -106,7 +105,7 @@ func TestDeviceSessionBinder_UnbindDeletesRow(t *testing.T) {
 
 	bind := transit.BindDeviceSessionBody{
 		FrameID:    "f-1",
-		SessionID:  adapter.DeviceSessionID("sess-A"),
+		SessionID:  devicetransit.DeviceSessionID("sess-A"),
 		ChannelID:  channel.ID("ch-X"),
 		DeviceID:   "dev-1",
 		DeviceType: "xhs",
@@ -143,7 +142,7 @@ func TestDeviceSessionBinder_UnbindMissingIsAccepted(t *testing.T) {
 
 	ack := binder.OnUnbind(context.Background(), transit.UnbindDeviceSessionBody{
 		FrameID:   "f-1",
-		SessionID: adapter.DeviceSessionID("never-existed"),
+		SessionID: devicetransit.DeviceSessionID("never-existed"),
 	})
 	if !ack.Accepted {
 		t.Errorf("OnUnbind missing row: ack=%+v want Accepted=true", ack)
