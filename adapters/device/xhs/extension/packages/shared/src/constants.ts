@@ -81,6 +81,31 @@ export const COAGENT_SERVER_DEVICEBUS_PROTOCOL = {
   RECONNECT_BASE_MS: 1_000,
   RECONNECT_MAX_MS: 30_000,
   /**
+   * Hard cap on consecutive reconnect attempts that close with code !=
+   * 1000/1001 (clean) before we give up. Server-side 401/403 handshake
+   * rejection surfaces to the JS WS API as a code-1006 close (the auth
+   * status frame never reaches user-space). Without a cap, the
+   * background SW will retry a revoked session_id indefinitely — bug
+   * report `[ServerDeviceBus] WS closed code:1006` in tight loop.
+   *
+   * After this many attempts we stop the loop, clear the stored token
+   * so a stale value can't trigger SW-restart auto-reconnect, and
+   * surface lastError to the popup so the user re-runs bindFlow.
+   */
+  RECONNECT_MAX_ATTEMPTS_AFTER_DIRTY_CLOSE: 5,
+  /**
+   * WS close codes considered "clean intentional close" — never trigger
+   * reconnect. 1000 = normal closure, 1001 = going-away (SW unload).
+   * 4401/4403 are coagent server-side custom codes for auth failure
+   * (token expired / session revoked); when the server CAN send a close
+   * frame (handshake succeeded then session got revoked mid-stream),
+   * these codes tell us the token is dead and reconnect is futile.
+   */
+  WS_CLOSE_CODE_NORMAL: 1000,
+  WS_CLOSE_CODE_GOING_AWAY: 1001,
+  WS_CLOSE_CODE_AUTH_FAILED: 4401,
+  WS_CLOSE_CODE_SESSION_REVOKED: 4403,
+  /**
    * chrome.storage.local key holding callback DeviceFrames that arrived
    * while the WS was down. Drained on next open. Bounded by
    * OUTBOX_MAX_SIZE; entries older than OUTBOX_MAX_AGE_MS are GC'd at

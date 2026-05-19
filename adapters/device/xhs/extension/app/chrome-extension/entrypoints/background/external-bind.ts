@@ -356,16 +356,29 @@ async function handleSetDeviceToken(
 
 async function handleUnbindDevice(deps: ExternalBindDeps): Promise<ExternalBindResponse> {
   try {
+    // Tear down WS / reconnect loop FIRST so a parallel reconnect timer
+    // can't fire mid-clear and respawn the loop with the still-cached
+    // stale token.
     deps.disconnectAll();
     // Clear v4 fields but keep deviceId persistent — same physical browser
     // can re-bind to a different channel later without re-generating its id.
-    await deps.saveConfig({
+    const cleared = await deps.saveConfig({
       serverWsEndpoint: '',
       deviceSessionId: '',
       deviceSessionToken: '',
       channelId: '',
       autoReconnect: false,
     });
+    // Push the cleared config into both transport clients. Previously
+    // we only called disconnectAll(), which left the v4 client's
+    // internal `this.config` holding the stale token+session_id. If
+    // anything later triggered connect() (SW restart auto-connect,
+    // background race), the client would happily rebuild a WS URL
+    // from the dead credentials and spin a reconnect loop. After this
+    // step the client's identity differs from the previous one, so
+    // updateConfig()'s identity-swap path bumps the generation and
+    // settles any hung pending promise.
+    deps.applyClients(cleared);
     return { status: 'unbound' };
   } catch (err) {
     return errorResponse(err);

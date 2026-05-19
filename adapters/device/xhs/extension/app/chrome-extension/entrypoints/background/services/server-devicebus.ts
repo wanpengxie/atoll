@@ -289,6 +289,26 @@ class CoagentServerDeviceClient {
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private connectInFlight: Promise<ConnectResult> | null = null;
+  /**
+   * Generation counter that increments on every reset (disconnect /
+   * updateConfig with a different token / unbind). All async paths
+   * (pending connect promise resolvers, scheduled reconnect callbacks,
+   * close-event handlers of stale sockets) capture the generation they
+   * were spawned under and self-abort when `this.generation` has moved
+   * on. Fixes the stale-session reconnect-loop race documented in
+   * https://github.com/wanpengxie/ActOS issue: extension reconnects to a
+   * revoked session_id even after the UI hands over a fresh token.
+   */
+  private generation = 0;
+  /**
+   * Pending connect-promise resolver. Held in a field (not just inside
+   * the connectOnce promise closure) so a hard reset can settle it
+   * synchronously as canceled — previously close-event short-circuit
+   * via `if (this.socket !== socket) return` left this promise pending
+   * forever, and the next `connect()` call's `if (this.connectInFlight)
+   * return await it;` would hang.
+   */
+  private pendingSettle: ((result: ConnectResult) => void) | null = null;
   /** Test seam — overridden via `setWebSocketImpl`. */
   private wsCtor: typeof WebSocket = WebSocket;
 
@@ -296,8 +316,29 @@ class CoagentServerDeviceClient {
     this.wsCtor = impl;
   }
 
+  /**
+   * Replace the device config. When the WS-handshake-affecting fields
+   * (`sessionId` / `token` / `wsEndpoint`) change vs the previous
+   * config, this is an atomic identity swap — we bump the generation
+   * counter so any in-flight connect/reconnect attached to the previous
+   * identity self-cancels, close the active socket, clear the reconnect
+   * timer, reset the backoff attempt counter, and settle any hung
+   * pending promise. Same-config updates (e.g. flipping
+   * `autoReconnect`) keep the generation stable so an open WS isn't
+   * needlessly cycled.
+   */
   updateConfig(config: ServerDeviceConfig): void {
-    this.config = { ...config };
+    const prev = this.config;
+    const next: ServerDeviceConfig = { ...config };
+    const identityChanged =
+      !prev ||
+      (prev.sessionId ?? '') !== (next.sessionId ?? '') ||
+      (prev.token ?? '') !== (next.token ?? '') ||
+      (prev.wsEndpoint ?? '') !== (next.wsEndpoint ?? '');
+    this.config = next;
+    if (identityChanged) {
+      this.hardResetForIdentitySwap('updateConfig identity changed');
+    }
   }
 
   isConnected(): boolean {
@@ -321,13 +362,19 @@ class CoagentServerDeviceClient {
       return await this.connectInFlight;
     }
     this.shouldReconnect = this.config.autoReconnect !== false;
-    this.connectInFlight = this.connectOnce(wsUrl).finally(() => {
-      this.connectInFlight = null;
+    const gen = this.generation;
+    this.connectInFlight = this.connectOnce(wsUrl, gen).finally(() => {
+      // Only clear the in-flight slot if it still belongs to our gen.
+      // hardResetForIdentitySwap already nulls it for prior gens.
+      if (this.generation === gen) this.connectInFlight = null;
     });
     return await this.connectInFlight;
   }
 
-  private async connectOnce(url: string): Promise<ConnectResult> {
+  private async connectOnce(url: string, gen: number): Promise<ConnectResult> {
+    if (this.generation !== gen) {
+      return { success: false, error: 'canceled: generation changed' };
+    }
     this.currentUrl = url;
     this.clearReconnectTimer();
 
@@ -345,13 +392,19 @@ class CoagentServerDeviceClient {
       lastError: undefined,
     });
 
+    if (this.generation !== gen) {
+      return { success: false, error: 'canceled: generation changed' };
+    }
+
     return await new Promise<ConnectResult>((resolve) => {
       let resolved = false;
       const settle = (result: ConnectResult) => {
         if (resolved) return;
         resolved = true;
+        if (this.pendingSettle === settle) this.pendingSettle = null;
         resolve(result);
       };
+      this.pendingSettle = settle;
 
       let socket: WebSocket;
       try {
@@ -372,6 +425,7 @@ class CoagentServerDeviceClient {
       console.info('[ServerDeviceBus] connecting', { url: safeUrl });
 
       socket.addEventListener('open', () => {
+        if (this.generation !== gen) return;
         if (this.socket !== socket) return;
         console.info('[ServerDeviceBus] WS opened', { url: safeUrl });
         this.reconnectAttempt = 0;
@@ -387,11 +441,20 @@ class CoagentServerDeviceClient {
       });
 
       socket.addEventListener('message', (event) => {
+        if (this.generation !== gen) return;
         if (this.socket !== socket) return;
         void this.onMessage(event.data);
       });
 
       socket.addEventListener('close', (event) => {
+        // Same-generation close on the currently-active socket: normal
+        // close path → settle + maybe schedule reconnect.
+        // Different-generation OR replaced-socket close: stale socket
+        // from a previous identity that's being shut down — drop it
+        // quietly. Critically we DO NOT settle()/scheduleReconnect()
+        // here, otherwise a revoked-session close lingering after
+        // updateConfig() would respawn a stale-token reconnect.
+        if (this.generation !== gen) return;
         if (this.socket !== socket) return;
         const reason = event.reason || 'WebSocket closed';
         console.warn('[ServerDeviceBus] WS closed', {
@@ -401,6 +464,43 @@ class CoagentServerDeviceClient {
           reason,
         });
         this.socket = null;
+        // Auth-failure close codes from server (token revoked / expired):
+        // stop the reconnect loop, clear the dead URL, and surface
+        // lastError. The next bindFlow's updateConfig() will reset
+        // shouldReconnect anyway. Without this guard a 4401/4403 from
+        // server would spam reconnects with the same dead token.
+        const isAuthFail =
+          event.code === COAGENT_SERVER_DEVICEBUS_PROTOCOL.WS_CLOSE_CODE_AUTH_FAILED ||
+          event.code === COAGENT_SERVER_DEVICEBUS_PROTOCOL.WS_CLOSE_CODE_SESSION_REVOKED;
+        if (isAuthFail) {
+          console.warn('[ServerDeviceBus] auth-failure close — abandoning reconnect', {
+            code: event.code,
+            reason,
+          });
+          this.shouldReconnect = false;
+          this.currentUrl = null;
+          this.reconnectAttempt = 0;
+        }
+        // Bound the dirty-close (1006-style) reconnect loop. After N
+        // consecutive non-clean closes without a successful handshake,
+        // we give up rather than spam the server with a revoked token.
+        // `reconnectAttempt` is reset on a successful `open`, so a
+        // legitimately bouncing network does not exhaust the budget.
+        const isCleanClose =
+          event.code === COAGENT_SERVER_DEVICEBUS_PROTOCOL.WS_CLOSE_CODE_NORMAL ||
+          event.code === COAGENT_SERVER_DEVICEBUS_PROTOCOL.WS_CLOSE_CODE_GOING_AWAY;
+        const exhausted =
+          !isCleanClose &&
+          this.reconnectAttempt >=
+            COAGENT_SERVER_DEVICEBUS_PROTOCOL.RECONNECT_MAX_ATTEMPTS_AFTER_DIRTY_CLOSE;
+        if (exhausted) {
+          console.warn(
+            '[ServerDeviceBus] reconnect budget exhausted — abandoning loop',
+            { attempts: this.reconnectAttempt, code: event.code },
+          );
+          this.shouldReconnect = false;
+          this.currentUrl = null;
+        }
         void saveConnectionStatus({
           connected: false,
           reconnecting: this.shouldReconnect,
@@ -408,10 +508,11 @@ class CoagentServerDeviceClient {
           lastError: event.wasClean ? undefined : reason,
         });
         if (!resolved) settle({ success: false, error: reason });
-        if (this.shouldReconnect) this.scheduleReconnect();
+        if (this.shouldReconnect) this.scheduleReconnect(gen);
       });
 
       socket.addEventListener('error', (event) => {
+        if (this.generation !== gen) return;
         if (this.socket !== socket) return;
         const message =
           typeof ErrorEvent !== 'undefined' && event instanceof ErrorEvent
@@ -429,17 +530,59 @@ class CoagentServerDeviceClient {
     });
   }
 
-  disconnect(): void {
-    this.shouldReconnect = false;
+  /**
+   * Hard reset triggered when the device identity changes (different
+   * sessionId / token / endpoint) or when the user explicitly unbinds.
+   *
+   * Atomically:
+   *   - bumps the generation so all in-flight callbacks self-cancel
+   *   - settles the pending connect-promise (if any) as canceled
+   *   - closes the active socket
+   *   - clears the reconnect timer + resets backoff
+   *   - clears `currentUrl` and `connectInFlight` so subsequent
+   *     `connect()` starts from a clean slate
+   *   - leaves `this.config` untouched (caller is responsible for
+   *     setting the new config either before or after this reset)
+   */
+  private hardResetForIdentitySwap(reason: string): void {
+    this.generation += 1;
+    console.info('[ServerDeviceBus] hard reset', {
+      reason,
+      generation: this.generation,
+    });
+    if (this.pendingSettle) {
+      const s = this.pendingSettle;
+      this.pendingSettle = null;
+      try {
+        s({ success: false, error: `canceled: ${reason}` });
+      } catch { /* ignore */ }
+    }
+    this.connectInFlight = null;
     this.clearReconnectTimer();
+    this.reconnectAttempt = 0;
+    this.currentUrl = null;
+    this.shouldReconnect = false;
     if (this.socket) {
-      try { this.socket.close(1000, 'disconnect'); } catch { /* ignore */ }
+      try { this.socket.close(1000, 'reset'); } catch { /* ignore */ }
       this.socket = null;
     }
+  }
+
+  disconnect(): void {
+    // disconnect is the explicit "stop and forget" — full hard reset
+    // so a stray reconnect timer / pending promise from a prior
+    // session_id can't fire after the user unbinds. Previously this
+    // only cleared shouldReconnect+timer+socket, leaving currentUrl
+    // populated and connectInFlight hung; if the WS close handler ran
+    // BEFORE disconnect (e.g. server revoked mid-flight), the close
+    // path scheduled a reconnect that would respawn under the old
+    // token.
+    this.hardResetForIdentitySwap('disconnect');
     void saveConnectionStatus({ connected: false, reconnecting: false });
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(gen: number): void {
+    if (this.generation !== gen) return;
     if (!this.shouldReconnect || !this.currentUrl) return;
     this.clearReconnectTimer();
     const base = COAGENT_SERVER_DEVICEBUS_PROTOCOL.RECONNECT_BASE_MS;
@@ -449,8 +592,12 @@ class CoagentServerDeviceClient {
     console.info('[ServerDeviceBus] schedule reconnect', {
       attempt: this.reconnectAttempt,
       delay,
+      generation: gen,
     });
     this.reconnectTimer = setTimeout(() => {
+      // Re-check generation at fire time — a hardReset between
+      // schedule and fire must abort the reconnect.
+      if (this.generation !== gen) return;
       void this.connect();
     }, delay);
   }
