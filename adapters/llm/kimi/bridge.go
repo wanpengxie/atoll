@@ -17,6 +17,7 @@ import (
 	"github.com/wanpengxie/go-kimi/pkg/kimi/config"
 	kimierrors "github.com/wanpengxie/go-kimi/pkg/kimi/errors"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/llm"
+	kimisession "github.com/wanpengxie/go-kimi/pkg/kimi/session"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
 
 	// Force-register the anthropic provider factory. go-kimi's factory
@@ -193,9 +194,14 @@ func (b *Bridge) defaultAgentFactory(ac gokimi.AgentConfig) (kimiAgent, error) {
 // (max turns reached, trigger channel closed, terminal failed envelope
 // emitted) and propagates ctx.Err on cancellation.
 //
-// Run is single-shot: spinning up a new go-kimi Agent inside Run keeps
-// the session ID stable across turns within one Run (kimi's session
-// stores the conversation history); a new Run call gets a fresh session.
+// Run is single-shot per worker process. A single go-kimi Agent is built
+// once and reused across all turns; go-kimi's SoulContext.Append already
+// preserves history correctly now that adjacent TextPart runs are
+// collapsed upstream (go-kimi commit 5336deb removed the chunked-content
+// self-perpetuation bug at every layer that touches ContentParts —
+// streaming accumulation, wire merger, anthropic encoder, and the
+// normalizeHistory read defense). The bridge no longer needs to rebuild
+// the agent or sanitize context.jsonl between turns.
 func (b *Bridge) Run(ctx context.Context, ipc IPCFacade) error {
 	if ipc == nil {
 		return errors.New("kimi: Run nil ipc facade")
@@ -215,20 +221,15 @@ func (b *Bridge) Run(ctx context.Context, ipc IPCFacade) error {
 	b.testWireEmitter = emitter
 	b.mu.Unlock()
 
-	agent, err := b.agentNew(gokimi.AgentConfig{
-		WorkDir:     b.cfg.WorkDir,
-		Config:      config.NewDefaultConfig(),
-		Provider:    provider,
-		WireEmitter: emitter,
-		Overrides: gokimi.AgentOverrides{
-			SystemPrompt: b.cfg.SystemPrompt,
-			Model:        b.cfg.Model,
-		},
-	})
+	agent, err := b.buildAgent(provider, emitter)
 	if err != nil {
 		return b.emitTerminalLLMError(ctx, ipc, err, "", "")
 	}
-	defer func() { _ = agent.Close() }()
+	defer func() {
+		if agent != nil {
+			_ = agent.Close()
+		}
+	}()
 
 	turns := 0
 	triggers := ipc.Triggers()
@@ -258,6 +259,29 @@ func (b *Bridge) Run(ctx context.Context, ipc IPCFacade) error {
 			}
 		}
 	}
+}
+
+// buildAgent builds a fresh kimiAgent bound to (workDir, emitter,
+// provider). When a prior session exists under <workDir>/.kimi/sessions
+// (i.e. last_session_id resolves), the build pins that session id so
+// history Restore lands on the right session; otherwise go-kimi creates
+// one.
+func (b *Bridge) buildAgent(provider llm.ChatProvider, emitter wire.Emitter) (kimiAgent, error) {
+	sessionID := ""
+	if sess, err := kimisession.Continue(b.cfg.WorkDir); err == nil && sess != nil {
+		sessionID = sess.ID
+	}
+	return b.agentNew(gokimi.AgentConfig{
+		WorkDir:     b.cfg.WorkDir,
+		SessionID:   sessionID,
+		Config:      config.NewDefaultConfig(),
+		Provider:    provider,
+		WireEmitter: emitter,
+		Overrides: gokimi.AgentOverrides{
+			SystemPrompt: b.cfg.SystemPrompt,
+			Model:        b.cfg.Model,
+		},
+	})
 }
 
 // runTurn drives one Agent.Run call: it composes the user input from
