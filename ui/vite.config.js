@@ -24,9 +24,10 @@
 // into VITE_COAGENT_EXTENSION_ID via the `define` plugin below.
 
 import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
 
 const serverURL =
-  process.env.COAGENT_SERVER_URL || process.env.VITE_SERVER_URL || 'http://localhost:8080';
+  process.env.COAGENT_SERVER_URL || process.env.VITE_SERVER_URL || 'http://localhost:8832';
 const wsURL = serverURL.replace(/^http/, 'ws');
 
 // COAGENT_EXTENSION_ID is the project-wide canonical name; VITE_COAGENT_
@@ -43,6 +44,7 @@ if (extensionID) {
 }
 
 export default defineConfig({
+  plugins: [react()],
   root: '.',
   publicDir: 'public',
   build: {

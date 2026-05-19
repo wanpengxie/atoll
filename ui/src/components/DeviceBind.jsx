@@ -17,15 +17,50 @@ export default function DeviceBind({ channelID, me }) {
   const [available, setAvailable] = useState(false);
 
   useEffect(() => {
-    setAvailable(isExtensionAvailable());
+    const avail = isExtensionAvailable();
+    setAvailable(avail);
     setBind(null);
     setStatus('');
+    if (!channelID || !avail) return;
+    let alive = true;
+    (async () => {
+      try {
+        const info = await getDeviceInfo();
+        if (!alive) return;
+        if (info.status === 'ok' && info.bound && info.bound.channel_id === channelID && info.bound.device_session_id) {
+          // Extension self-reports a bind, but cross-check server: the
+          // session might have been revoked / wiped server-side while
+          // the extension was offline. Only restore "bound" UI when
+          // server confirms it's still ours.
+          try {
+            const server = await api.getDeviceSession?.(info.bound.device_session_id);
+            if (!alive) return;
+            if (server && (server.state === 'active' || server.state === 'ready')) {
+              setBind({
+                device_session_id: info.bound.device_session_id,
+                channel_id: info.bound.channel_id,
+                user_id: info.bound.user_id,
+              });
+              return;
+            }
+          } catch (_) {}
+          // Server says no — silently tell extension to forget its
+          // stale bind so the next bindFlow starts clean.
+          try { await unbindDevice(); } catch (_) {}
+        }
+      } catch (_) {}
+    })();
+    return () => { alive = false; };
   }, [channelID]);
 
   async function bindFlow() {
     setBusy(true);
     setStatus('');
     try {
+      // Force-clear any stale token / WS state inside the extension
+      // background before issuing a fresh session — fixes the case where
+      // a previously revoked session_id is being retried in a loop.
+      try { await unbindDevice(); } catch (_) {}
       const info = await getDeviceInfo();
       if (info.status !== 'ok') {
         setStatus(describeReason(info.reason) || '获取 device_id 失败');
@@ -72,7 +107,11 @@ export default function DeviceBind({ channelID, me }) {
     if (!bind) return;
     setBusy(true);
     try {
-      await api.revokeDeviceSession(bind.device_session_id);
+      // Server-side revoke is best-effort — session row may already be
+      // gone (manual cleanup, daemon restart, etc). Either way, we MUST
+      // clear the extension-side state so the UI / WS reconnect loop
+      // doesn't keep retrying a dead session_id.
+      try { await api.revokeDeviceSession(bind.device_session_id); } catch (_) {}
       await unbindDevice();
       setBind(null);
       setStatus('已解绑');
@@ -109,6 +148,14 @@ export default function DeviceBind({ channelID, me }) {
         </button>
       )}
       {status && <span className="muted device-bind-status">{status}</span>}
+      <a
+        href="/downloads/coagent-extension.zip"
+        download
+        className="muted"
+        style={{ marginLeft: 8, fontSize: 12 }}
+      >
+        下载插件
+      </a>
     </div>
   );
 }

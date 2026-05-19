@@ -56,6 +56,11 @@ export const api = {
   createWorkspace:  (name)                      => request('POST', '/api/workspaces', { name }),
   listChannels:     (wsID)                      => request('GET',  `/api/workspaces/${wsID}/channels`),
   createChannel:    (wsID, name, type = 'group') => request('POST', `/api/workspaces/${wsID}/channels`, { name, type }),
+  // Bind a channel to a daemon — reserves placement and sends the
+  // control.create_channel frame; daemon ACKs and placement flips to
+  // active. Must be called after createChannel before any message can
+  // be written into the channel.
+  bindChannel:      (wsID, chID, daemonID) => request('POST', `/api/workspaces/${wsID}/channels/${chID}/bind`, { daemon_id: daemonID }),
   getChannel:       (chID)                      => request('GET',  `/api/channels/${chID}`),
   listMembers:      (chID)                      => request('GET',  `/api/channels/${chID}/members`).then((r) => ({ members: r.members || [] })),
 
@@ -94,4 +99,8 @@ export const api = {
   // the extension's WS will be closed server-side as well.
   revokeDeviceSession:(sid) =>
                         request('DELETE', `/api/devices/${sid}`),
+  // Cross-check a session_id server-side. 404 → no longer valid; UI uses
+  // this to reconcile extension-cached bind against server truth.
+  getDeviceSession:   (sid) =>
+                        request('GET',    `/api/devices/${sid}`),
 };

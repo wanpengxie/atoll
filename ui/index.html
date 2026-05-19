@@ -4,109 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Outfit:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
     <title>coagent</title>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <div id="root">
-      <main class="auth" id="view-auth">
-        <header class="brand">
-          <h1>coagent</h1>
-          <p class="muted">M1.5 demo console</p>
-        </header>
-
-        <section class="tabs">
-          <button data-tab="login" class="active">Log in</button>
-          <button data-tab="register">Register</button>
-        </section>
-
-        <form id="form-login" class="card">
-          <label>Email <input name="email" type="email" autocomplete="email" required /></label>
-          <label>Password <input name="password" type="password" autocomplete="current-password" required /></label>
-          <button type="submit">Log in</button>
-          <p class="error" id="login-error"></p>
-        </form>
-
-        <form id="form-register" class="card hidden">
-          <label>Email <input name="email" type="email" autocomplete="email" required /></label>
-          <label>Display name <input name="display_name" type="text" autocomplete="name" /></label>
-          <label>Password (≥ 8 chars) <input name="password" type="password" autocomplete="new-password" required minlength="8" /></label>
-          <label>Verification code <input name="code" type="text" inputmode="numeric" required /></label>
-          <button type="button" id="btn-issue-code">Send code</button>
-          <button type="submit">Create account</button>
-          <p class="error" id="register-error"></p>
-          <p class="muted" id="register-status"></p>
-        </form>
-      </main>
-
-      <main class="app hidden" id="view-app">
-        <aside class="sidebar">
-          <header>
-            <strong id="me-name">…</strong>
-            <button id="btn-logout">Log out</button>
-          </header>
-
-          <section>
-            <h2>Workspaces</h2>
-            <ul id="ws-list" class="ws-list"></ul>
-            <form id="form-create-ws" class="inline">
-              <input name="name" placeholder="New workspace name" required />
-              <button type="submit">＋</button>
-            </form>
-          </section>
-
-          <section>
-            <h2>Channels</h2>
-            <ul id="channel-list" class="channel-list"></ul>
-            <form id="form-create-channel" class="inline channel-create">
-              <input name="name" placeholder="New channel name" required />
-              <input name="type" placeholder="type (group / xhs-creator)" />
-              <button type="submit">＋</button>
-            </form>
-          </section>
-        </aside>
-
-        <section class="chat">
-          <header>
-            <h2 id="chat-title">Select a channel</h2>
-            <span class="muted" id="chat-meta"></span>
-            <!-- T148 (M1.6-T6): one-click extension binding. The button
-                 is disabled until a channel is selected; its label +
-                 status reflect the current bind state. -->
-            <div class="device-bind" id="device-bind">
-              <button type="button" id="btn-bind-device" disabled>
-                绑定 Chrome extension
-              </button>
-              <button type="button" id="btn-unbind-device" class="ghost" hidden>
-                解绑
-              </button>
-              <span class="muted device-bind-status" id="device-bind-status"></span>
-            </div>
-          </header>
-
-          <ol id="message-list" class="messages"></ol>
-
-          <section id="system-drawer" class="system-drawer hidden">
-            <button type="button" id="system-drawer-toggle" class="system-drawer-toggle">
-              显示系统事件
-            </button>
-            <div id="system-drawer-body" class="system-drawer-body hidden"></div>
-          </section>
-
-          <form id="form-send" class="composer">
-            <input
-              name="text"
-              placeholder="Type a message and hit Enter to send"
-              autocomplete="off"
-              required
-            />
-            <button type="submit">Send</button>
-          </form>
-          <p class="error" id="send-error"></p>
-        </section>
-      </main>
-    </div>
-
-    <script type="module" src="/src/main.js"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

@@ -21,3 +21,10 @@ packages:
 allowBuilds:
   bcrypt: true
   better-sqlite3: true
+
+# Force a single vite version across the workspace.
+# Without this, pnpm hoists two vites (one for ui/, one transitively for
+# wxt/module-vue) and wxt's download plugin filter API (vite 6.3+) breaks
+# under the older vite assigned to wxt's build pipeline.
+overrides:
+  vite: '^8.0.13'

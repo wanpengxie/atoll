@@ -37,7 +37,7 @@ pnpm --filter ui dev
 ```
 
 Vite dev proxies `/api/*`, `/healthz`, and `/ws` to
-`http://localhost:8080` by default. Override with
+`http://localhost:8832` by default. Override with
 `VITE_SERVER_URL=https://stage.example pnpm --filter ui dev`.
 
 ## Production build

@@ -91,9 +91,13 @@ export default function Chat({ channelID, channel, me }) {
       </header>
 
       <ol className="messages" ref={listRef}>
-        {messages.map((m, idx) => (
-          <MessageRow key={m.id || idx} envelope={m} me={me} />
-        ))}
+        {groupProgressRuns(messages).map((entry, idx) =>
+          entry.kind === 'progress-group' ? (
+            <ProgressGroup key={entry.key} envelopes={entry.envelopes} />
+          ) : (
+            <MessageRow key={entry.envelope.id || idx} envelope={entry.envelope} me={me} />
+          ),
+        )}
         {messages.length === 0 && <li className="messages-empty">还没有消息</li>}
       </ol>
 
@@ -126,10 +130,6 @@ function MessageRow({ envelope, me }) {
   // (tool calls in flight). Visually distinct from agent.text so the
   // user can tell the difference between intermediate steps and the
   // final reply.
-  if (type === 'agent.progress') {
-    return <ProgressRow envelope={envelope} />;
-  }
-
   const text = envelope.payload?.text || envelope.payload?.content || '';
   return (
     <li className={`message-row sender-${senderKind} ${isSelf ? 'self' : 'other'} vis-${visibility}`}>
@@ -142,32 +142,65 @@ function MessageRow({ envelope, me }) {
   );
 }
 
-// ProgressRow renders an `agent.progress` envelope as a compact,
-// muted bubble showing what tools the agent is calling + a short
-// reasoning preview (when present). Stands apart from the main
-// reply bubble so users see "agent is working" instead of silence.
-function ProgressRow({ envelope }) {
-  const payload = envelope.payload || {};
-  const tools = Array.isArray(payload.tool_calls) ? payload.tool_calls : [];
-  const reasoning = typeof payload.reasoning === 'string' ? payload.reasoning : '';
-  const turnIndex = payload.turn_index;
-  const stepIndex = payload.step_index;
+// Group consecutive agent.progress envelopes into a single render
+// entry so the UI shows ONE process bubble per "thinking session"
+// regardless of how many turns / steps the agent goes through. A non-
+// progress envelope (e.g. agent.text final reply) closes the group.
+function groupProgressRuns(messages) {
+  const out = [];
+  let group = null;
+  for (const m of messages) {
+    const t = m.type || m.Type || '';
+    if (t === 'agent.progress') {
+      if (!group) {
+        group = { kind: 'progress-group', key: `pg-${m.id || out.length}`, envelopes: [] };
+        out.push(group);
+      }
+      group.envelopes.push(m);
+    } else {
+      group = null;
+      out.push({ kind: 'envelope', envelope: m });
+    }
+  }
+  return out;
+}
+
+// ProgressGroup renders a contiguous run of agent.progress envelopes
+// as ONE compact "agent working" bubble showing all tool calls in
+// chronological order. Replaces the previous per-envelope ProgressRow
+// which spammed the chat with one bubble per turn/step.
+function ProgressGroup({ envelopes }) {
+  const last = envelopes[envelopes.length - 1] || {};
+  const lastPayload = last.payload || {};
+  const totalTurns = lastPayload.turn_index != null ? lastPayload.turn_index : envelopes.length;
+
+  // Flatten all tool_calls from all envelopes in order.
+  const allTools = [];
+  for (const e of envelopes) {
+    const p = e.payload || {};
+    const tcs = Array.isArray(p.tool_calls) ? p.tool_calls : [];
+    for (const tc of tcs) allTools.push(tc);
+  }
+  // Final reasoning (if any envelope carried it).
+  const reasoning = envelopes
+    .map((e) => (typeof (e.payload || {}).reasoning === 'string' ? e.payload.reasoning : ''))
+    .filter(Boolean)
+    .pop() || '';
+
   return (
     <li className="message-row progress">
       <div className="progress-meta">
         <span className="progress-tag">process</span>
-        {turnIndex != null && (
-          <span className="progress-step">
-            turn {turnIndex}
-            {stepIndex != null ? ` · step ${stepIndex}` : ''}
-          </span>
-        )}
+        <span className="progress-step">
+          {envelopes.length} step{envelopes.length === 1 ? '' : 's'} · {totalTurns} turn
+          {totalTurns === 1 ? '' : 's'}
+        </span>
       </div>
       <div className="progress-body">
-        {tools.length === 0 && !reasoning && (
+        {allTools.length === 0 && !reasoning && (
           <span className="muted">agent thinking…</span>
         )}
-        {tools.map((tc, i) => (
+        {allTools.map((tc, i) => (
           <div key={i} className="progress-tool">
             <span className="progress-tool-icon">⚙</span>
             <span className="progress-tool-name">{tc.name || 'tool'}</span>
