@@ -156,9 +156,9 @@ func (s *Service) handleListChannelMembers(c *gin.Context) {
 }
 
 type addMemberReq struct {
-	UserID           string `json:"user_id"             binding:"required"`
+	UserID        string `json:"user_id"             binding:"required"`
 	MemberActorID string `json:"member_actor_id"`
-	Role             string `json:"role"`
+	Role          string `json:"role"`
 }
 
 func (s *Service) handleAddChannelMember(c *gin.Context) {
