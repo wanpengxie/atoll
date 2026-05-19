@@ -147,34 +147,35 @@ func (c *IPCClient) dispatch(frame ipc.Frame) {
 	if frame.Kind == ipc.KindTrigger {
 		var payload ipc.TriggerPayload
 		if err := json.Unmarshal(frame.Payload, &payload); err != nil {
-			if err := c.writeTriggerAck(frame, ipc.TriggerAckPayload{
+			c.writeTriggerAckAsync(frame, ipc.TriggerAckPayload{
 				Accepted: false,
 				Reason:   "decode: " + err.Error(),
-			}); err != nil {
-				c.Stop()
-			}
+			})
 			return
 		}
-		if len(c.triggerCh) >= cap(c.triggerCh) {
+		select {
+		case c.triggerCh <- payload:
+			c.writeTriggerAckAsync(frame, ipc.TriggerAckPayload{
+				Accepted: true,
+				Cursor:   payload.Cursor,
+			})
+		default:
 			c.triggerDrop.Add(1)
-			if err := c.writeTriggerAck(frame, ipc.TriggerAckPayload{
+			c.writeTriggerAckAsync(frame, ipc.TriggerAckPayload{
 				Accepted: false,
 				Cursor:   payload.Cursor,
 				Reason:   "trigger_buffer_full",
-			}); err != nil {
-				c.Stop()
-			}
-			return
+			})
 		}
-		if err := c.writeTriggerAck(frame, ipc.TriggerAckPayload{
-			Accepted: true,
-			Cursor:   payload.Cursor,
-		}); err != nil {
-			c.Stop()
-			return
-		}
-		c.triggerCh <- payload
 	}
+}
+
+func (c *IPCClient) writeTriggerAckAsync(trigger ipc.Frame, ackPayload ipc.TriggerAckPayload) {
+	go func() {
+		if err := c.writeTriggerAck(trigger, ackPayload); err != nil {
+			c.Stop()
+		}
+	}()
 }
 
 func (c *IPCClient) writeTriggerAck(trigger ipc.Frame, ackPayload ipc.TriggerAckPayload) error {
