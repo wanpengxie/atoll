@@ -38,6 +38,7 @@ func (s *Service) handleGetPlacement(c *gin.Context) {
 		"last_heartbeat_at":       p.LastHeartbeatAt,
 		"created_at":              p.CreatedAt,
 		"activated_at":            p.ActivatedAt,
+		"entered_state_at":        p.EnteredStateAt,
 	})
 }
 
@@ -55,11 +56,12 @@ func (s *Service) handleListPlacements(c *gin.Context) {
 	out := make([]gin.H, 0, len(plist))
 	for _, p := range plist {
 		out = append(out, gin.H{
-			"channel_id":   string(p.ChannelID),
-			"daemon_id":    string(p.DaemonID),
-			"state":        string(p.State),
-			"created_at":   p.CreatedAt,
-			"activated_at": p.ActivatedAt,
+			"channel_id":       string(p.ChannelID),
+			"daemon_id":        string(p.DaemonID),
+			"state":            string(p.State),
+			"created_at":       p.CreatedAt,
+			"activated_at":     p.ActivatedAt,
+			"entered_state_at": p.EnteredStateAt,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"placements": out})

@@ -59,7 +59,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 	}
 
 	// Compute is_terminal.
-	if _, isCore := CoreTypeTable[env.Type]; isCore {
+	if _, isCore := message.CoreTypeTable[env.Type]; isCore {
 		env.IsTerminal = true
 		return khar.Outcome{}, nil
 	}

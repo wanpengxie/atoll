@@ -109,25 +109,24 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 		gcCtx, gcCancel := context.WithCancel(context.Background())
 		go mgr.RunGC(gcCtx)
 
-		// T147 §A — wire the inbound device→daemon callback. Every
-		// via_server_transit adapter installed above gets its
-		// OnExternalCallback invoked when a device_transit.recv frame
-		// arrives for this channel. M1.6 baseline assumption: 1 channel
-		// ↔ 1 device adapter, so we hand the first match. Multi-adapter
-		// routing (by SessionStore.session_id → adapter map) is M1.7
-		// scope; the loop also covers it best-effort by trying each
-		// adapter and returning the first non-nil error.
+		// T147 §A — wire the inbound device→daemon callback. M1.6
+		// baseline supports one via_server_transit adapter per channel.
+		// M1.7 owns session_id → adapter routing; until that lands, more
+		// than one transit adapter is a composition bug and must fail
+		// loudly instead of broadcasting callbacks to every adapter.
 		if h.SetDeviceCallback != nil {
 			deviceAdapters := mgr.AdaptersByBinding(actor.BindingViaServerTransit)
-			if len(deviceAdapters) > 0 {
+			if len(deviceAdapters) > 1 {
+				panic(fmt.Sprintf(
+					"cmd/daemon: multiple via_server_transit adapters for channel %s; M1.7 routing required before enabling more than one: %v",
+					h.ChannelID,
+					deviceAdapters,
+				))
+			}
+			if len(deviceAdapters) == 1 {
+				adapterName := deviceAdapters[0]
 				h.SetDeviceCallback(func(ctx context.Context, frame devicetransit.SendFrame) error {
-					var firstErr error
-					for _, name := range deviceAdapters {
-						if err := mgr.OnExternalCallback(ctx, name, frame.Payload); err != nil && firstErr == nil {
-							firstErr = err
-						}
-					}
-					return firstErr
+					return mgr.OnExternalCallback(ctx, adapterName, frame.Payload)
 				})
 			}
 		}

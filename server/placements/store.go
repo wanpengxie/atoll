@@ -52,13 +52,13 @@ func (s *SQLStore) Reserve(ctx context.Context, p placement.Placement) (placemen
 		`INSERT INTO channel_placements (
 		   channel_id, daemon_id, state, owner_epoch, fencing_token,
 		   create_request_id, daemon_connection_epoch, last_heartbeat_at,
-		   created_at, activated_at,
+		   created_at, activated_at, entered_state_at,
 		   host_actor_id, federated_origin, tenant_id
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(p.ChannelID), string(p.DaemonID), string(p.State),
 		int64(p.OwnerEpoch), int64(p.FencingToken),
 		string(p.CreateRequestID), int64(p.DaemonConnectionEpoch),
-		p.LastHeartbeatAt, p.CreatedAt, p.ActivatedAt,
+		p.LastHeartbeatAt, p.CreatedAt, p.ActivatedAt, p.EnteredStateAt,
 		nullableString(p.HostActorID),
 		nullableString(p.FederatedOrigin),
 		nullableString(string(p.TenantID)),
@@ -81,7 +81,7 @@ func (s *SQLStore) Get(ctx context.Context, channelID channel.ID) (placement.Pla
 		ctx,
 		`SELECT channel_id, daemon_id, state, owner_epoch, fencing_token,
 		        create_request_id, daemon_connection_epoch, last_heartbeat_at,
-		        created_at, activated_at,
+		        created_at, activated_at, entered_state_at,
 		        host_actor_id, federated_origin, tenant_id
 		   FROM channel_placements WHERE channel_id = ?`,
 		string(channelID),
@@ -89,7 +89,7 @@ func (s *SQLStore) Get(ctx context.Context, channelID channel.ID) (placement.Pla
 		(*string)(&p.ChannelID), (*string)(&p.DaemonID), &state,
 		(*int64)(&p.OwnerEpoch), (*int64)(&p.FencingToken),
 		(*string)(&p.CreateRequestID), (*int64)(&p.DaemonConnectionEpoch),
-		&p.LastHeartbeatAt, &p.CreatedAt, &p.ActivatedAt,
+		&p.LastHeartbeatAt, &p.CreatedAt, &p.ActivatedAt, &p.EnteredStateAt,
 		&hostActor, &fedOrigin, &tenant,
 	)
 	if err != nil {
@@ -103,6 +103,25 @@ func (s *SQLStore) Get(ctx context.Context, channelID channel.ID) (placement.Pla
 	p.FederatedOrigin = fedOrigin.String
 	p.TenantID = placement.TenantID(tenant.String)
 	return p, true, nil
+}
+
+// ResolveDaemonForChannel returns the daemon owning channelID when
+// the placement is active. ok=false means no active owner exists.
+func (s *SQLStore) ResolveDaemonForChannel(ctx context.Context, channelID channel.ID) (placement.DaemonID, bool, error) {
+	var daemonID string
+	err := s.db.QueryRowContext(
+		ctx,
+		`SELECT daemon_id FROM channel_placements
+		  WHERE channel_id = ? AND state = 'active'`,
+		string(channelID),
+	).Scan(&daemonID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("placements: resolve daemon: %w", err)
+	}
+	return placement.DaemonID(daemonID), true, nil
 }
 
 // CASActivate runs the L2 §1.4.11.3 step 5 CAS — UPDATE state to
@@ -127,6 +146,7 @@ func (s *SQLStore) CASActivate(
 		`UPDATE channel_placements
 		    SET state                    = 'active',
 		        activated_at             = ?,
+		        entered_state_at         = ?,
 		        daemon_connection_epoch  = ?,
 		        last_heartbeat_at        = ?
 		  WHERE channel_id        = ?
@@ -135,7 +155,7 @@ func (s *SQLStore) CASActivate(
 		    AND fencing_token     = ?
 		    AND daemon_id         = ?
 		    AND state             = 'creating'`,
-		nowMs, int64(newConnectionEpoch), nowMs,
+		nowMs, nowMs, int64(newConnectionEpoch), nowMs,
 		string(ack.ChannelID), string(ack.CreateRequestID),
 		int64(ack.OwnerEpoch), int64(ack.FencingToken),
 		string(ack.DaemonID),
@@ -156,8 +176,10 @@ func (s *SQLStore) MarkStale(ctx context.Context, channelID channel.ID, nowMs in
 	_, err := s.db.ExecContext(
 		ctx,
 		`UPDATE channel_placements
-		    SET state = 'stale'
+		    SET state = 'stale',
+		        entered_state_at = ?
 		  WHERE channel_id = ? AND state = 'active'`,
+		nowMs,
 		string(channelID),
 	)
 	if err != nil {
@@ -171,8 +193,10 @@ func (s *SQLStore) MarkOrphan(ctx context.Context, channelID channel.ID, nowMs i
 	_, err := s.db.ExecContext(
 		ctx,
 		`UPDATE channel_placements
-		    SET state = 'orphan'
+		    SET state = 'orphan',
+		        entered_state_at = ?
 		  WHERE channel_id = ? AND state = 'creating'`,
+		nowMs,
 		string(channelID),
 	)
 	if err != nil {
@@ -204,6 +228,7 @@ func (s *SQLStore) AcceptReclaim(
 		ctx,
 		`UPDATE channel_placements
 		    SET state                    = 'active',
+		        entered_state_at         = ?,
 		        daemon_connection_epoch  = ?,
 		        last_heartbeat_at        = ?
 		  WHERE channel_id    = ?
@@ -211,7 +236,7 @@ func (s *SQLStore) AcceptReclaim(
 		    AND owner_epoch   = ?
 		    AND fencing_token = ?
 		    AND state IN ('active','stale')`,
-		int64(newConnectionEpoch), nowMs,
+		nowMs, int64(newConnectionEpoch), nowMs,
 		string(channelID), string(daemonID),
 		int64(req.OwnerEpoch), int64(req.FencingToken),
 	)
@@ -248,7 +273,7 @@ func (s *SQLStore) ListByState(ctx context.Context, state placement.State) ([]pl
 		ctx,
 		`SELECT channel_id, daemon_id, state, owner_epoch, fencing_token,
 		        create_request_id, daemon_connection_epoch, last_heartbeat_at,
-		        created_at, activated_at,
+		        created_at, activated_at, entered_state_at,
 		        host_actor_id, federated_origin, tenant_id
 		   FROM channel_placements WHERE state = ?`,
 		string(state),
@@ -269,7 +294,7 @@ func (s *SQLStore) ListByState(ctx context.Context, state placement.State) ([]pl
 			(*string)(&p.ChannelID), (*string)(&p.DaemonID), &state,
 			(*int64)(&p.OwnerEpoch), (*int64)(&p.FencingToken),
 			(*string)(&p.CreateRequestID), (*int64)(&p.DaemonConnectionEpoch),
-			&p.LastHeartbeatAt, &p.CreatedAt, &p.ActivatedAt,
+			&p.LastHeartbeatAt, &p.CreatedAt, &p.ActivatedAt, &p.EnteredStateAt,
 			&hostActor, &fedOrigin, &tenant,
 		); err != nil {
 			return nil, err
@@ -290,7 +315,7 @@ func (s *SQLStore) ListByDaemon(ctx context.Context, daemonID placement.DaemonID
 		ctx,
 		`SELECT channel_id, daemon_id, state, owner_epoch, fencing_token,
 		        create_request_id, daemon_connection_epoch, last_heartbeat_at,
-		        created_at, activated_at,
+		        created_at, activated_at, entered_state_at,
 		        host_actor_id, federated_origin, tenant_id
 		   FROM channel_placements WHERE daemon_id = ?`,
 		string(daemonID),
@@ -310,7 +335,7 @@ func (s *SQLStore) ListByDaemon(ctx context.Context, daemonID placement.DaemonID
 			(*string)(&p.ChannelID), (*string)(&p.DaemonID), &state,
 			(*int64)(&p.OwnerEpoch), (*int64)(&p.FencingToken),
 			(*string)(&p.CreateRequestID), (*int64)(&p.DaemonConnectionEpoch),
-			&p.LastHeartbeatAt, &p.CreatedAt, &p.ActivatedAt,
+			&p.LastHeartbeatAt, &p.CreatedAt, &p.ActivatedAt, &p.EnteredStateAt,
 			&hostActor, &fedOrigin, &tenant,
 		); err != nil {
 			return nil, err

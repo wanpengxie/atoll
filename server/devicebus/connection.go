@@ -11,6 +11,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 )
 
 // DefaultDeviceWSWriteTimeout caps a single device-side WS write.
@@ -55,18 +57,10 @@ type DeviceTransport interface {
 	Close() error
 }
 
-// DeviceFrame is the JSON wire shape exchanged between server and
-// device. It's deliberately distinct from the daemonbus mux frame:
-// the device sees a simpler shape and the server transforms.
-type DeviceFrame struct {
-	Direction       string          `json:"direction"` // "from_device" | "to_device"
-	DeviceSessionID string          `json:"device_session_id"`
-	ChannelID       string          `json:"channel_id"`
-	RequestID       string          `json:"request_id,omitempty"`
-	CorrelationID   string          `json:"correlation_id,omitempty"`
-	Payload         json.RawMessage `json:"payload"`
-	ExpiresAt       int64           `json:"expires_at,omitempty"`
-}
+// DeviceFrame is the shared device_transit payload contract. The
+// device WS and daemonbus mux carry the same JSON body; only the outer
+// transport envelope differs.
+type DeviceFrame = devicetransit.SendFrame
 
 // NewConnection wires a transport.
 func NewConnection(s Session, tx DeviceTransport) *Connection {
@@ -270,9 +264,9 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 			if err != nil {
 				return
 			}
-			frame.DeviceSessionID = sessionID
-			frame.ChannelID = string(row.ChannelID)
-			frame.Direction = "from_device"
+			frame.DeviceSessionID = devicetransit.DeviceSessionID(sessionID)
+			frame.ChannelID = row.ChannelID
+			frame.Direction = devicetransit.DirectionFromDevice
 			if err := forwarder.ForwardDeviceFrame(c.Request.Context(), frame); err != nil {
 				return
 			}

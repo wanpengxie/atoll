@@ -19,7 +19,7 @@ func newStepTypeRegistered(d Deps) khar.Step { return &stepTypeRegistered{deps: 
 func (s *stepTypeRegistered) ID() khar.StepID { return khar.StepTypeRegistered }
 
 func (s *stepTypeRegistered) Run(ctx context.Context, env *message.Envelope) (khar.Outcome, error) {
-	if _, isCore := CoreTypeTable[env.Type]; isCore {
+	if _, isCore := message.CoreTypeTable[env.Type]; isCore {
 		return khar.Outcome{}, nil
 	}
 	if s.deps.TypeRegistry == nil {

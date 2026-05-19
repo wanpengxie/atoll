@@ -103,30 +103,11 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			return err
 		},
 		OnDeviceTransitSend: func(ctx context.Context, conn *daemonbus.Connection, frame kerneldaemonbus.Frame) error {
-			// T147 §A-S1 — daemon serialises the devicetransit.SendFrame
-			// as the daemonbus payload, so
-			// we MUST decode the same shape. The earlier wiring decoded
-			// devicebus.DeviceFrame which silently drops fields the
-			// daemon includes (Direction enum, ExpiresAt) and yields an
-			// empty DeviceSessionID when the JSON keys differ — every
-			// adapter push got routed to "" and dropped.
 			var sf devicetransit.SendFrame
 			if err := json.Unmarshal(frame.Payload, &sf); err != nil {
 				return fmt.Errorf("gateway: decode device_transit.send: %w", err)
 			}
-			// Translate to the device-WS wire shape (devicebus.DeviceFrame
-			// carries the simpler json used between server and the Chrome
-			// extension — see server/devicebus/connection.go).
-			df := devicebus.DeviceFrame{
-				Direction:       string(devicetransit.DirectionToDevice),
-				DeviceSessionID: string(sf.DeviceSessionID),
-				ChannelID:       string(sf.ChannelID),
-				RequestID:       sf.RequestID.String(),
-				CorrelationID:   sf.CorrelationID.String(),
-				Payload:         sf.Payload,
-				ExpiresAt:       sf.ExpiresAt,
-			}
-			return a.devicebus.SendFrameToDevice(ctx, df.DeviceSessionID, df)
+			return a.devicebus.SendFrameToDevice(ctx, sf.DeviceSessionID.String(), sf)
 		},
 	}
 }
@@ -216,29 +197,15 @@ func (a *App) Unbind(ctx context.Context, in devicebus.UnbindInput) error {
 	return nil
 }
 
-// ForwardDeviceFrame implements devicebus.TransitForwarder — converts
-// a DeviceFrame received from the Chrome extension into a daemonbus
-// device_transit.recv frame whose body is the canonical
-// kernel/devicetransit.SendFrame shape. The daemon decodes the same struct on
-// the receiving side (runtime/transit.DeviceTransit.DispatchIncoming),
-// so the gateway translates the device-WS-flavoured DeviceFrame into
-// the SendFrame here rather than shipping two different schemas across
-// the daemonbus mux (T147 §A-S4).
+// ForwardDeviceFrame implements devicebus.TransitForwarder by wrapping
+// the shared device_transit payload in the daemonbus mux envelope.
 func (a *App) ForwardDeviceFrame(ctx context.Context, frame devicebus.DeviceFrame) error {
-	conn, err := a.daemonbus.ConnectionForChannel(ctx, frame.ChannelID)
+	conn, err := a.daemonbus.ConnectionForChannel(ctx, frame.ChannelID.String())
 	if err != nil {
 		return err
 	}
-	sf := devicetransit.SendFrame{
-		ChannelID:       channel.ID(frame.ChannelID),
-		DeviceSessionID: devicetransit.DeviceSessionID(frame.DeviceSessionID),
-		Direction:       devicetransit.DirectionFromDevice,
-		RequestID:       message.ID(frame.RequestID),
-		CorrelationID:   message.ID(frame.CorrelationID),
-		Payload:         frame.Payload,
-		ExpiresAt:       frame.ExpiresAt,
-	}
-	_, err = conn.SendFrame(ctx, kerneldaemonbus.FrameTypeDeviceTransitRecv, sf)
+	frame.Direction = devicetransit.DirectionFromDevice
+	_, err = conn.SendFrame(ctx, kerneldaemonbus.FrameTypeDeviceTransitRecv, frame)
 	return err
 }
 
@@ -424,25 +391,6 @@ type writeMessageReq struct {
 	Kind string `json:"kind"`
 }
 
-// HumanCaller is the JSON object carried inside control.write_message.
-// Daemon recomputes the HMAC + verifies member_actor_id against
-// its local actor_registry.
-type HumanCaller struct {
-	UserID        kerneldaemonbus.UserID `json:"user_id"`
-	MemberActorID actor.ActorID          `json:"member_actor_id"`
-	TS            int64                  `json:"ts"`
-	Nonce         string                 `json:"nonce"`
-	ServerToken   string                 `json:"server_token"`
-}
-
-// writeMessageBody is the daemonbus.control.write_message payload.
-type writeMessageBody struct {
-	FrameID         kerneldaemonbus.FrameID `json:"frame_id"`
-	ChannelID       channel.ID              `json:"channel_id"`
-	HumanCaller     HumanCaller             `json:"human_caller"`
-	EnvelopePartial message.Envelope        `json:"envelope_partial"`
-}
-
 func (a *App) handleWriteMessage(c *gin.Context) {
 	var req writeMessageReq
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -487,7 +435,7 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "nonce: " + err.Error()})
 		return
 	}
-	caller := HumanCaller{
+	caller := kerneldaemonbus.HumanCaller{
 		UserID:        kerneldaemonbus.UserID(u.ID),
 		MemberActorID: actor.ActorID(member.MemberActorID),
 		TS:            ts,
@@ -517,7 +465,7 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 	if kind == message.KindResponse && envelope.ParentID != "" && envelope.CorrelationID == "" {
 		envelope.CorrelationID = a.correlationForParent(c.Request.Context(), channelID, envelope.ParentID)
 	}
-	body := writeMessageBody{
+	body := kerneldaemonbus.WriteMessageBody{
 		FrameID:         kerneldaemonbus.FrameID(uuid.NewString()),
 		ChannelID:       channel.ID(channelID),
 		HumanCaller:     caller,

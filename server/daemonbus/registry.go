@@ -23,6 +23,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/server/placements"
 )
 
 // Errors returned by Service.
@@ -60,6 +61,8 @@ type Service struct {
 	mu          sync.RWMutex
 	connections map[placement.DaemonID]*Connection
 	connGen     atomic.Uint64
+
+	channelDaemonResolver placements.ChannelDaemonResolver
 }
 
 // NewService builds a Service.
@@ -79,6 +82,14 @@ func (s *Service) WithClock(now func() time.Time) *Service {
 }
 
 func (s *Service) nowMs() int64 { return s.now().UnixMilli() }
+
+// SetChannelDaemonResolver wires the placement-owned active-channel
+// lookup used by ConnectionForChannel. Passing nil disables lookup.
+func (s *Service) SetChannelDaemonResolver(r placements.ChannelDaemonResolver) {
+	s.mu.Lock()
+	s.channelDaemonResolver = r
+	s.mu.Unlock()
+}
 
 // RegisterDaemon ensures a row exists in the daemons table for the
 // given (daemonID, host, version, capacity). Idempotent — re-runs
@@ -176,20 +187,20 @@ func (s *Service) RecordHeartbeat(ctx context.Context, daemonID placement.Daemon
 // channel (active placement). Returns ErrNoDaemonForChannel when
 // the channel has no active placement.
 func (s *Service) LookupDaemonForChannel(ctx context.Context, channelID channel.ID) (placement.DaemonID, error) {
-	var daemonID string
-	err := s.db.QueryRowContext(
-		ctx,
-		`SELECT daemon_id FROM channel_placements
-		  WHERE channel_id = ? AND state = 'active'`,
-		string(channelID),
-	).Scan(&daemonID)
+	s.mu.RLock()
+	resolver := s.channelDaemonResolver
+	s.mu.RUnlock()
+	if resolver == nil {
+		return "", ErrNoDaemonForChannel
+	}
+	daemonID, ok, err := resolver.ResolveDaemonForChannel(ctx, channelID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", ErrNoDaemonForChannel
-		}
 		return "", fmt.Errorf("daemonbus: lookup: %w", err)
 	}
-	return placement.DaemonID(daemonID), nil
+	if !ok {
+		return "", ErrNoDaemonForChannel
+	}
+	return daemonID, nil
 }
 
 // hashKey is a thin string hash for the daemons.key_hash column.

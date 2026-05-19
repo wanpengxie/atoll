@@ -35,6 +35,16 @@ func newSvc(t *testing.T) *daemonbus.Service {
 	return daemonbus.NewService(db, daemonbus.Config{SharedSecret: "test-secret"})
 }
 
+type fakeChannelDaemonResolver struct {
+	daemonID placement.DaemonID
+	ok       bool
+	err      error
+}
+
+func (f fakeChannelDaemonResolver) ResolveDaemonForChannel(context.Context, channel.ID) (placement.DaemonID, bool, error) {
+	return f.daemonID, f.ok, f.err
+}
+
 func TestUnregisterConnectionCompareAndDelete(t *testing.T) {
 	t.Parallel()
 	svc := newSvc(t)
@@ -56,6 +66,27 @@ func TestUnregisterConnectionCompareAndDelete(t *testing.T) {
 	}
 	if _, ok := svc.ConnectionFor("daemon-1"); ok {
 		t.Fatal("connection still registered after current unregister")
+	}
+}
+
+func TestLookupDaemonForChannelUsesResolver(t *testing.T) {
+	t.Parallel()
+	svc := newSvc(t)
+	ctx := context.Background()
+
+	if _, err := svc.LookupDaemonForChannel(ctx, channel.ID("ch-A")); !errors.Is(err, daemonbus.ErrNoDaemonForChannel) {
+		t.Fatalf("nil resolver err=%v want ErrNoDaemonForChannel", err)
+	}
+
+	svc.SetChannelDaemonResolver(fakeChannelDaemonResolver{daemonID: placement.DaemonID("d1"), ok: true})
+	got, err := svc.LookupDaemonForChannel(ctx, channel.ID("ch-A"))
+	if err != nil || got != "d1" {
+		t.Fatalf("resolved daemon=%q err=%v", got, err)
+	}
+
+	svc.SetChannelDaemonResolver(fakeChannelDaemonResolver{ok: false})
+	if _, err := svc.LookupDaemonForChannel(ctx, channel.ID("ch-A")); !errors.Is(err, daemonbus.ErrNoDaemonForChannel) {
+		t.Fatalf("resolver miss err=%v want ErrNoDaemonForChannel", err)
 	}
 }
 
