@@ -26,8 +26,8 @@ type coreKindRule struct {
 // is only consulted by handleWriteMessage to fill the default kind when
 // the caller omits it.
 var coreKindTable = map[string]coreKindRule{
-	"human.text":       {defaultKind: message.KindEvent, allowOverride: true},
-	"agent.text":       {defaultKind: message.KindEvent, allowOverride: true},
+	"human.text": {defaultKind: message.KindEvent, allowOverride: true},
+	"agent.text": {defaultKind: message.KindEvent, allowOverride: true},
 	// agent.progress — intermediate process bubble (one envelope per
 	// tool-call step inside a turn). See runtime/harness/deps.go for the
 	// authoritative entry; this table mirrors it so the gateway edge
