@@ -61,13 +61,12 @@ make clean       # 删 bin/ dist/ ui/dist
 ## 目录结构（v5 单栈）
 
 ```
-kernel/             # 协议合同 + 纯类型（v4 envelope / actor / channel / placement / topology / addressing）
+kernel/             # 协议合同 + 纯类型（actor identity L0 / message envelope / channel / actorreg L1 registry / placement / topology / addressing）
 runtime/            # daemon 侧：bootstrap / scheduler / supervisor / transit / ipc / workerhost / store
 adapters/           # device + messaging adapter（device/xhs/extension/、messaging/feishu/ 等）
 server/             # server 进程内部模块（gateway / daemonbus / devicebus / placements / catalog / identity / pushhub）
 cmd/{server,daemon,worker,cli}/  # 4 binary 入口（main.go）
-pkg/v4types/        # 跨 binary 共享的 v4 互操作类型（v0~v3 grandfather 兼容）
-ui/                 # 原生 Vite UI（替换 lightcone/public/ demo）
+ui/                 # React (Vite) UI
 archive/            # 旧 Node 双栈归档（agent-binary / cli-node / lightcone-* / ops-node-scripts / 等）
 .dalek/pm/          # 工程权威 spec（v4-* / m1.5-* / m1.4-* / m1.3-*）
 ```
