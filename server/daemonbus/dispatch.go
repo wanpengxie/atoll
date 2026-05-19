@@ -51,10 +51,6 @@ type Handlers struct {
 	// the case to FrameTypeDeviceTransitSend so the wire shape matches
 	// the daemon's transit.DeviceTransit.Send call.
 	OnDeviceTransitSend func(ctx context.Context, conn *Connection, frame daemonbus.Frame) error
-
-	// OnWriteMessageAck handles control.write_message_ack — gateway
-	// uses this to fulfil the human-caller-token write path.
-	OnWriteMessageAck func(ctx context.Context, conn *Connection, frame daemonbus.Frame) error
 }
 
 // HeartbeatPayload is the wire shape of `control.heartbeat`. Demo
@@ -150,12 +146,6 @@ func (c *Connection) Run(ctx context.Context, h Handlers) error {
 		case daemonbus.FrameTypeDeviceTransitSend:
 			if h.OnDeviceTransitSend != nil {
 				if err := h.OnDeviceTransitSend(ctx, c, frame); err != nil {
-					return err
-				}
-			}
-		case daemonbus.FrameTypeControlWriteMessageAck:
-			if h.OnWriteMessageAck != nil {
-				if err := h.OnWriteMessageAck(ctx, c, frame); err != nil {
 					return err
 				}
 			}

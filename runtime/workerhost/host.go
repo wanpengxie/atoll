@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -70,6 +71,11 @@ type Host struct {
 	// to dispatch into Bridge.Triggers()).
 	ready     chan struct{}
 	readyOnce sync.Once
+
+	mu              sync.Mutex
+	closed          bool
+	triggerSeq      atomic.Int64
+	pendingTriggers map[string]chan ipc.TriggerAckPayload
 }
 
 // NewHost wires a Host around an IPC stream (typically WorkerProc.Stdout
@@ -88,9 +94,10 @@ func NewHost(in io.Reader, out io.Writer, cfg HostConfig) (*Host, error) {
 		return nil, errors.New("workerhost: HostConfig.NowFn nil")
 	}
 	return &Host{
-		cfg:   cfg,
-		codec: ipc.NewCodec(in, out),
-		ready: make(chan struct{}),
+		cfg:             cfg,
+		codec:           ipc.NewCodec(in, out),
+		ready:           make(chan struct{}),
+		pendingTriggers: make(map[string]chan ipc.TriggerAckPayload),
 	}, nil
 }
 
@@ -99,22 +106,24 @@ func NewHost(in io.Reader, out io.Writer, cfg HostConfig) (*Host, error) {
 func (h *Host) Ready() <-chan struct{} { return h.ready }
 
 // PushTrigger emits a daemon → worker KindTrigger frame carrying the
-// post-harness envelope + propagation context. Fire-and-forget: the
-// worker reacts via a subsequent KindWriteMessage round-trip; the
-// trigger itself has no reply. Safe to call from any goroutine — the
-// underlying ipc.Codec serialises writes with an internal mutex.
+// post-harness envelope + propagation context. The worker must answer
+// with KindTriggerAck after it accepts or rejects the trigger; a nack
+// turns into a PushTrigger error so the caller can keep the delivery
+// retryable. Safe to call from any goroutine — the underlying ipc.Codec
+// serialises writes with an internal mutex.
 //
 // The frame is stamped with the host's (channel, fencing_token,
 // daemon_epoch) tuple so the worker's IPCClient observes the same
 // fence context it expects to stamp on its own outbound frames. The
-// frame ID is informational (worker drops unsolicited replies).
+// frame ID correlates the trigger ack.
 func (h *Host) PushTrigger(ctx context.Context, payload ipc.TriggerPayload) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("workerhost: encode trigger: %w", err)
 	}
+	frameID := fmt.Sprintf("trig-%s-%d", payload.Envelope.ID, h.triggerSeq.Add(1))
 	frame := ipc.Frame{
-		ID:           fmt.Sprintf("trig-%s", payload.Envelope.ID),
+		ID:           frameID,
 		Kind:         ipc.KindTrigger,
 		ChannelID:    h.cfg.ChannelID,
 		WorkerID:     ipc.WorkerID(h.cfg.WorkerID),
@@ -122,14 +131,43 @@ func (h *Host) PushTrigger(ctx context.Context, payload ipc.TriggerPayload) erro
 		DaemonEpoch:  h.cfg.DaemonEpoch,
 		Payload:      raw,
 	}
+	ackCh := make(chan ipc.TriggerAckPayload, 1)
+	if err := h.registerPendingTrigger(frame.ID, ackCh); err != nil {
+		return err
+	}
 
 	done := make(chan error, 1)
 	go func() { done <- h.codec.Write(frame) }()
 
 	select {
 	case err := <-done:
-		return err
+		if err != nil {
+			h.unregisterPendingTrigger(frame.ID, ackCh)
+			return err
+		}
 	case <-ctx.Done():
+		h.unregisterPendingTrigger(frame.ID, ackCh)
+		return ctx.Err()
+	}
+
+	select {
+	case ack, ok := <-ackCh:
+		if !ok {
+			return errors.New("workerhost: trigger ack closed")
+		}
+		if ack.Cursor != payload.Cursor {
+			return fmt.Errorf("workerhost: trigger ack cursor mismatch: got %d want %d", ack.Cursor, payload.Cursor)
+		}
+		if !ack.Accepted {
+			reason := ack.Reason
+			if reason == "" {
+				reason = "rejected"
+			}
+			return fmt.Errorf("workerhost: trigger rejected: %s", reason)
+		}
+		return nil
+	case <-ctx.Done():
+		h.unregisterPendingTrigger(frame.ID, ackCh)
 		return ctx.Err()
 	}
 }
@@ -137,6 +175,7 @@ func (h *Host) PushTrigger(ctx context.Context, payload ipc.TriggerPayload) erro
 // Serve runs the daemon-side read loop. Blocks until the worker
 // disconnects (io.EOF) or ctx is cancelled.
 func (h *Host) Serve(ctx context.Context) error {
+	defer h.closePendingTriggers()
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -191,6 +230,8 @@ func (h *Host) handle(ctx context.Context, frame ipc.Frame) error {
 		return h.handleCommit(ctx, frame)
 	case ipc.KindHeartbeat:
 		return h.handleHeartbeat(frame)
+	case ipc.KindTriggerAck:
+		return h.handleTriggerAck(frame)
 	default:
 		reply, _ := ipc.EncodeResult(frame.ID, false, fmt.Sprintf("unknown kind: %s", frame.Kind), nil)
 		return h.codec.Write(reply)
@@ -315,4 +356,60 @@ func (h *Host) handleHeartbeat(frame ipc.Frame) error {
 		"server_now_ms": h.cfg.NowFn(),
 	})
 	return h.codec.Write(reply)
+}
+
+func (h *Host) handleTriggerAck(frame ipc.Frame) error {
+	var payload ipc.TriggerAckPayload
+	if err := json.Unmarshal(frame.Payload, &payload); err != nil {
+		return fmt.Errorf("workerhost: decode trigger ack: %w", err)
+	}
+	h.completePendingTrigger(frame.ID, payload)
+	return nil
+}
+
+func (h *Host) registerPendingTrigger(id string, ch chan ipc.TriggerAckPayload) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return errors.New("workerhost: host closed")
+	}
+	h.pendingTriggers[id] = ch
+	return nil
+}
+
+func (h *Host) unregisterPendingTrigger(id string, ch chan ipc.TriggerAckPayload) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if cur, ok := h.pendingTriggers[id]; ok && cur == ch {
+		delete(h.pendingTriggers, id)
+	}
+}
+
+func (h *Host) completePendingTrigger(id string, payload ipc.TriggerAckPayload) {
+	h.mu.Lock()
+	ch, ok := h.pendingTriggers[id]
+	if ok {
+		delete(h.pendingTriggers, id)
+	}
+	h.mu.Unlock()
+	if !ok {
+		return
+	}
+	ch <- payload
+	close(ch)
+}
+
+func (h *Host) closePendingTriggers() {
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return
+	}
+	h.closed = true
+	pending := h.pendingTriggers
+	h.pendingTriggers = make(map[string]chan ipc.TriggerAckPayload)
+	h.mu.Unlock()
+	for _, ch := range pending {
+		close(ch)
+	}
 }

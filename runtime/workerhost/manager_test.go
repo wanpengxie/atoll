@@ -156,6 +156,7 @@ type blockingAfterFirstWrite struct {
 	writes    atomic.Int64
 	closeOnce sync.Once
 	closed    chan struct{}
+	onFrame   func(ipc.Frame)
 }
 
 func newBlockingAfterFirstWrite(allow int64) *blockingAfterFirstWrite {
@@ -164,6 +165,12 @@ func newBlockingAfterFirstWrite(allow int64) *blockingAfterFirstWrite {
 
 func (w *blockingAfterFirstWrite) Write(p []byte) (int, error) {
 	if w.writes.Add(1) <= w.allow {
+		if w.onFrame != nil {
+			var frame ipc.Frame
+			if err := json.Unmarshal(p, &frame); err == nil && frame.Kind != "" {
+				w.onFrame(frame)
+			}
+		}
 		return len(p), nil
 	}
 	<-w.closed
@@ -183,11 +190,33 @@ func (s *blockingPushSpawner) Spawn(ctx context.Context, leaseID string, _ []str
 	stdoutR, stdoutW := io.Pipe()
 	stdin := newBlockingAfterFirstWrite(s.allowWrites)
 	done := make(chan error, 1)
+	workerCodec := ipc.NewCodec(bytes.NewReader(nil), stdoutW)
+	var acked atomic.Bool
+	stdin.onFrame = func(frame ipc.Frame) {
+		if frame.Kind != ipc.KindTrigger || acked.Swap(true) {
+			return
+		}
+		var trigger ipc.TriggerPayload
+		_ = json.Unmarshal(frame.Payload, &trigger)
+		payload, _ := json.Marshal(ipc.TriggerAckPayload{
+			Accepted: true,
+			Cursor:   trigger.Cursor,
+		})
+		_ = workerCodec.Write(ipc.Frame{
+			ID:           frame.ID,
+			Kind:         ipc.KindTriggerAck,
+			ChannelID:    frame.ChannelID,
+			WorkerID:     frame.WorkerID,
+			FencingToken: frame.FencingToken,
+			DaemonEpoch:  frame.DaemonEpoch,
+			Payload:      payload,
+		})
+	}
 
 	go func() {
 		payload, err := json.Marshal(ipc.HandshakePayload{LeaseID: leaseID})
 		if err == nil {
-			err = ipc.NewCodec(bytes.NewReader(nil), stdoutW).Write(ipc.Frame{
+			err = workerCodec.Write(ipc.Frame{
 				ID:      "handshake-" + leaseID,
 				Kind:    ipc.KindHandshake,
 				Payload: payload,

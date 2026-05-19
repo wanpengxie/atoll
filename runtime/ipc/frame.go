@@ -34,12 +34,9 @@ import (
 //	heartbeat / shutdown                     — worker → daemon (request)
 //	handshake_ack / reply / fence_invalid /
 //	shutdown_ack                              — daemon → worker (response)
-//	trigger                                   — daemon → worker (push,
-//	                                            fire-and-forget; no reply
-//	                                            because the worker emits
-//	                                            its reaction via a
-//	                                            subsequent write_message
-//	                                            round-trip).
+//	trigger                                   — daemon → worker (push)
+//	trigger_ack                               — worker → daemon (trigger
+//	                                            accept/reject response).
 type Kind string
 
 // Kind closed set.
@@ -57,11 +54,16 @@ const (
 	// KindTrigger is the M1.6-T1 daemon → worker push of a post-harness
 	// envelope addressed to the channel-agent target. The worker's
 	// Bridge consumes these via IPCClient.Triggers(); it MAY call
-	// WriteMessage to emit a reaction envelope, but the trigger frame
-	// itself has no reply. Backpressure is bounded by IPCClient's
-	// trigger buffer (overflow logs + drops; gateway redelivery makes
-	// this safe under L1 §6.1 at-least-once-by-message.id).
+	// WriteMessage to emit a reaction envelope. The worker MUST answer
+	// each trigger with KindTriggerAck on the same frame ID once it has
+	// either accepted the payload into its local trigger budget or
+	// rejected it.
 	KindTrigger Kind = "trigger"
+	// KindTriggerAck is the worker → daemon acknowledgement for one
+	// KindTrigger frame. Accepted=false is a negative acknowledgement:
+	// the daemon treats PushTrigger as failed and leaves the originating
+	// delivery eligible for retry by the caller's at-least-once policy.
+	KindTriggerAck Kind = "trigger_ack"
 )
 
 // MaxFrameBytes caps one length-prefixed JSON frame at 16 MiB.
@@ -167,6 +169,15 @@ type TriggerPayload struct {
 	Envelope      message.Envelope `json:"envelope"`
 	CorrelationID message.ID       `json:"correlation_id,omitempty"`
 	Cursor        int64            `json:"cursor,omitempty"`
+}
+
+// TriggerAckPayload is the worker → daemon response body for
+// KindTriggerAck frames. Cursor mirrors the trigger cursor so the host
+// can detect protocol mismatches while correlating by frame ID.
+type TriggerAckPayload struct {
+	Accepted bool   `json:"accepted"`
+	Cursor   int64  `json:"cursor,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // Codec encodes / decodes IPC frames on length-prefixed buffered IO.

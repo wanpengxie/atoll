@@ -66,32 +66,12 @@ func (d *fakeBridgeDaemon) loop(ctx context.Context, ack ipc.HandshakeAckPayload
 			// in-order; daemon side captures each WriteMessage frame.
 			if !pushed {
 				pushed = true
-				for i := 0; i < triggers; i++ {
-					env := message.Envelope{
-						ID:         message.ID("trig-" + string(rune('a'+i))),
-						ChannelID:  ack.ChannelID,
-						Type:       "human.text",
-						Sender:     message.Sender{Kind: actor.KindHuman, ID: "user:alice"},
-						Visibility: message.VisibilityPublic,
-						Kind:       message.KindEvent,
-						Audience:   message.Audience{ack.WorkerActorID},
-						Payload:    json.RawMessage(`{"text":"hi"}`),
-					}
-					payload, _ := json.Marshal(ipc.TriggerPayload{
-						Envelope:      env,
-						CorrelationID: "corr-X",
-						Cursor:        int64(i + 1),
-					})
-					_ = d.codec.Write(ipc.Frame{
-						ID:      "push-" + string(env.ID),
-						Kind:    ipc.KindTrigger,
-						Payload: payload,
-					})
-				}
+				go d.pushTriggers(ctx, ack, triggers)
 			}
 		case ipc.KindWriteMessage:
 			d.writeFrames <- frame
 			d.writeFakeAck(frame)
+		case ipc.KindTriggerAck:
 		case ipc.KindHeartbeat:
 			rp, _ := json.Marshal(ipc.ReplyPayload{OK: true})
 			_ = d.codec.Write(ipc.Frame{ID: frame.ID, Kind: ipc.KindReply, Payload: rp})
@@ -101,6 +81,38 @@ func (d *fakeBridgeDaemon) loop(ctx context.Context, ack ipc.HandshakeAckPayload
 			case d.doneAcks <- struct{}{}:
 			default:
 			}
+			return
+		}
+	}
+}
+
+func (d *fakeBridgeDaemon) pushTriggers(ctx context.Context, ack ipc.HandshakeAckPayload, triggers int) {
+	for i := 0; i < triggers; i++ {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		env := message.Envelope{
+			ID:         message.ID("trig-" + string(rune('a'+i))),
+			ChannelID:  ack.ChannelID,
+			Type:       "human.text",
+			Sender:     message.Sender{Kind: actor.KindHuman, ID: "user:alice"},
+			Visibility: message.VisibilityPublic,
+			Kind:       message.KindEvent,
+			Audience:   message.Audience{ack.WorkerActorID},
+			Payload:    json.RawMessage(`{"text":"hi"}`),
+		}
+		payload, _ := json.Marshal(ipc.TriggerPayload{
+			Envelope:      env,
+			CorrelationID: "corr-X",
+			Cursor:        int64(i + 1),
+		})
+		if err := d.codec.Write(ipc.Frame{
+			ID:      "push-" + string(env.ID),
+			Kind:    ipc.KindTrigger,
+			Payload: payload,
+		}); err != nil {
 			return
 		}
 	}

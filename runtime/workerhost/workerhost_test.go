@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -224,6 +225,190 @@ func TestWorker_LeaseE2E(t *testing.T) {
 	if !ok || entry.Status != ledger.StatusCommitted {
 		t.Errorf("ledger entry not committed: %+v", entry)
 	}
+}
+
+func TestHost_PushTriggerWaitsForAck(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	db, err := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	hostInR, workerOutW := io.Pipe()
+	workerInR, hostOutW := io.Pipe()
+	defer func() {
+		_ = hostInR.Close()
+		_ = workerOutW.Close()
+		_ = workerInR.Close()
+		_ = hostOutW.Close()
+	}()
+
+	host, err := workerhost.NewHost(hostInR, hostOutW, workerhost.HostConfig{
+		ChannelID:     "ch-ack",
+		WorkerID:      "w-ack",
+		LeaseID:       "lease-ack",
+		FencingToken:  11,
+		DaemonEpoch:   12,
+		Chain:         newE2EChain(t, db, "ch-ack", actor.ActorID("agent:a")),
+		WorkerActorID: "agent:a",
+		Ledger:        store.NewLedger(db),
+		NowFn:         now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- host.Serve(ctx) }()
+
+	workerCodec := ipc.NewCodec(workerInR, workerOutW)
+	handshake, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "lease-ack"})
+	if err := workerCodec.Write(ipc.Frame{ID: "h-1", Kind: ipc.KindHandshake, Payload: handshake}); err != nil {
+		t.Fatal(err)
+	}
+	if frame, err := workerCodec.Read(); err != nil {
+		t.Fatal(err)
+	} else if frame.Kind != ipc.KindHandshakeAck {
+		t.Fatalf("handshake ack kind=%s", frame.Kind)
+	}
+
+	pushDone := make(chan error, 1)
+	go func() {
+		pushDone <- host.PushTrigger(ctx, ipc.TriggerPayload{
+			Envelope: *triggerEnvelope("env-ack", 42),
+			Cursor:   42,
+		})
+	}()
+
+	triggerFrame, err := workerCodec.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if triggerFrame.Kind != ipc.KindTrigger {
+		t.Fatalf("trigger kind=%s want %s", triggerFrame.Kind, ipc.KindTrigger)
+	}
+	ackPayload, _ := json.Marshal(ipc.TriggerAckPayload{Accepted: true, Cursor: 42})
+	if err := workerCodec.Write(ipc.Frame{
+		ID:           triggerFrame.ID,
+		Kind:         ipc.KindTriggerAck,
+		ChannelID:    "ch-ack",
+		WorkerID:     "w-ack",
+		FencingToken: 11,
+		DaemonEpoch:  12,
+		Payload:      ackPayload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-pushDone:
+		if err != nil {
+			t.Fatalf("PushTrigger: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("PushTrigger did not return after ack")
+	}
+
+	cancel()
+	_ = hostInR.Close()
+	_ = hostOutW.Close()
+	<-serveDone
+}
+
+func TestHost_PushTriggerReturnsNackError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	db, err := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	hostInR, workerOutW := io.Pipe()
+	workerInR, hostOutW := io.Pipe()
+	defer func() {
+		_ = hostInR.Close()
+		_ = workerOutW.Close()
+		_ = workerInR.Close()
+		_ = hostOutW.Close()
+	}()
+
+	host, err := workerhost.NewHost(hostInR, hostOutW, workerhost.HostConfig{
+		ChannelID:     "ch-nack",
+		WorkerID:      "w-nack",
+		LeaseID:       "lease-nack",
+		FencingToken:  21,
+		DaemonEpoch:   22,
+		Chain:         newE2EChain(t, db, "ch-nack", actor.ActorID("agent:a")),
+		WorkerActorID: "agent:a",
+		Ledger:        store.NewLedger(db),
+		NowFn:         now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- host.Serve(ctx) }()
+
+	workerCodec := ipc.NewCodec(workerInR, workerOutW)
+	handshake, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "lease-nack"})
+	if err := workerCodec.Write(ipc.Frame{ID: "h-1", Kind: ipc.KindHandshake, Payload: handshake}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workerCodec.Read(); err != nil {
+		t.Fatal(err)
+	}
+
+	pushDone := make(chan error, 1)
+	go func() {
+		pushDone <- host.PushTrigger(ctx, ipc.TriggerPayload{
+			Envelope: *triggerEnvelope("env-nack", 7),
+			Cursor:   7,
+		})
+	}()
+
+	triggerFrame, err := workerCodec.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ackPayload, _ := json.Marshal(ipc.TriggerAckPayload{
+		Accepted: false,
+		Cursor:   7,
+		Reason:   "trigger_buffer_full",
+	})
+	if err := workerCodec.Write(ipc.Frame{
+		ID:           triggerFrame.ID,
+		Kind:         ipc.KindTriggerAck,
+		ChannelID:    "ch-nack",
+		WorkerID:     "w-nack",
+		FencingToken: 21,
+		DaemonEpoch:  22,
+		Payload:      ackPayload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-pushDone:
+		if err == nil {
+			t.Fatal("PushTrigger returned nil for nack")
+		}
+		if !strings.Contains(err.Error(), "trigger_buffer_full") {
+			t.Fatalf("PushTrigger error=%q", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("PushTrigger did not return after nack")
+	}
+
+	cancel()
+	_ = hostInR.Close()
+	_ = hostOutW.Close()
+	<-serveDone
 }
 
 // TestFence_DaemonEpochMismatch covers codex review #10 directly:
