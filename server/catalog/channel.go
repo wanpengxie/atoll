@@ -33,9 +33,9 @@ type CreateChannelInput struct {
 
 // NewMember is one entry of CreateChannelInput.Members.
 type NewMember struct {
-	UserID           string
+	UserID        string
 	MemberActorID string // optional — auto-assigned if empty
-	Role             string // "owner" | "member"; defaults to "member"
+	Role          string // "owner" | "member"; defaults to "member"
 }
 
 // CreateChannel inserts a channel row + every member row in a single
@@ -83,11 +83,11 @@ func (s *Service) CreateChannel(ctx context.Context, in CreateChannelInput) (Cha
 	out := make([]ChannelMember, 0, len(members))
 	for _, m := range members {
 		row := ChannelMember{
-			ChannelID:        ch.ID,
-			UserID:           m.UserID,
+			ChannelID:     ch.ID,
+			UserID:        m.UserID,
 			MemberActorID: m.MemberActorID,
-			Role:             m.Role,
-			JoinedAt:         ch.CreatedAt,
+			Role:          m.Role,
+			JoinedAt:      ch.CreatedAt,
 		}
 		if row.MemberActorID == "" {
 			row.MemberActorID = "user:" + row.UserID

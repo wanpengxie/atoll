@@ -52,7 +52,7 @@ func (s *Service) WithClock(now func() time.Time) *Service {
 	return s
 }
 
-// SubscriptionRevoker is implemented by pushhub.Hub. Catalog calls it after
+// SubscriptionRevoker is implemented by pushhub.Service. Catalog calls it after
 // a member row is durably removed so long-lived websocket subscriptions stop
 // receiving that channel's messages.
 type SubscriptionRevoker interface {

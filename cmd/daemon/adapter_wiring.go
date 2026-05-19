@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/framework"
@@ -100,7 +102,7 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 			channelID: h.ChannelID,
 		}
 
-		clock := func() time.Time { return time.Now() }
+		clock := time.Now
 		if h.NowFn != nil {
 			clock = func() time.Time { return time.UnixMilli(h.NowFn()) }
 		}
@@ -169,7 +171,7 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 		for _, mod := range modules {
 			decl := mod.Declares()
 			h.Deliverer.Register(decl.ActorID,
-				deliverThroughManager(mgr, decl.ActorID, h.ChannelID))
+				deliverThroughManager(mgr, decl.ActorID, h.ChannelID, h.Logger))
 		}
 
 		return func(shutdownCtx context.Context) error {
@@ -189,7 +191,7 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 // sender=adapter actor — passes the harness step-1/step-3 caller-vs-
 // sender check. AllowProvidedSenderKind=true lets the framework keep its
 // `Sender.Kind = actor.KindTool` value (the registry record agrees).
-func deliverThroughManager(mgr adapter.Manager, adapterID actor.ActorID, channelID channel.ID) scheduler.HandlerFn {
+func deliverThroughManager(mgr adapter.Manager, adapterID actor.ActorID, channelID channel.ID, logger *zerolog.Logger) scheduler.HandlerFn {
 	return func(ctx context.Context, _ actor.ActorID, env *message.Envelope) error {
 		if env == nil || env.Kind != message.KindRequest {
 			return nil
@@ -204,7 +206,14 @@ func deliverThroughManager(mgr adapter.Manager, adapterID actor.ActorID, channel
 			// (a single failed Dispatch must NOT abort the harness write
 			// path). The framework already emitted any required failed
 			// terminal via ErrorPolicy.
-			fmt.Printf("runtime: adapter dispatch %s/%s: %v\n", channelID, env.ID, err)
+			if logger != nil {
+				logger.Warn().Err(err).
+					Str("event", "daemon.adapter_dispatch_failed").
+					Str("channel_id", string(channelID)).
+					Str("message_id", string(env.ID)).
+					Str("adapter_id", string(adapterID)).
+					Msg("adapter manager dispatch failed")
+			}
 			return nil
 		}
 		return nil
@@ -367,7 +376,7 @@ func (b *DeviceSessionBinder) OnBind(ctx context.Context, body transit.BindDevic
 		ExpiresAt:        body.ExpiresAt,
 	}
 	if err := b.store.Upsert(ctx, sess); err != nil {
-		ack.Reason = "session_store_upsert"
+		ack.Reason = transit.BindRejectReasonSessionStoreUpsert
 		ack.Detail = err.Error()
 		return ack
 	}
@@ -385,7 +394,7 @@ func (b *DeviceSessionBinder) OnUnbind(ctx context.Context, body transit.UnbindD
 		SessionID: body.SessionID,
 	}
 	if err := b.store.Delete(ctx, body.SessionID); err != nil {
-		ack.Reason = "session_store_delete"
+		ack.Reason = transit.BindRejectReasonSessionStoreDelete
 		ack.Detail = err.Error()
 		return ack
 	}

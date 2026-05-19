@@ -28,12 +28,12 @@ func (allowAllAuth) AuthorizeChannelAccess(context.Context, string, string) erro
 // We do this because pushhub.HandleWS depends on *identity.Service
 // which requires DB + bcrypt + verification code plumbing — heavy
 // for a keepalive test. Instead we exercise subscriber + pumpWrite +
-// pumpRead directly via a constructed Hub + raw upgrader, which is
+// pumpRead directly via a constructed Service + raw upgrader, which is
 // what HandleWS does after auth anyway.
 
 // upgradeAndRun mirrors HandleWS minus identity auth. Returns the
 // route path the caller can dial.
-func upgradeAndRun(t *testing.T, hub *Hub, userID string) (*httptest.Server, string) {
+func upgradeAndRun(t *testing.T, hub *Service, userID string) (*httptest.Server, string) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -62,7 +62,7 @@ func upgradeAndRun(t *testing.T, hub *Hub, userID string) (*httptest.Server, str
 func TestPushhub_IdleSubscriberReaped(t *testing.T) {
 	t.Parallel()
 
-	hub := NewHub()
+	hub := NewService()
 	hub.SetAccessAuthorizer(allowAllAuth{})
 	hub.SetKeepaliveForTest(
 		80*time.Millisecond,  // ping cadence
@@ -115,7 +115,7 @@ func TestPushhub_IdleSubscriberReaped(t *testing.T) {
 func TestPushhub_HealthyClientStaysSubscribed(t *testing.T) {
 	t.Parallel()
 
-	hub := NewHub()
+	hub := NewService()
 	hub.SetAccessAuthorizer(allowAllAuth{})
 	hub.SetKeepaliveForTest(
 		80*time.Millisecond,

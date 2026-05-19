@@ -16,6 +16,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
+	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime"
@@ -357,7 +358,7 @@ func TestDaemon_FutureMessage_SchedulerDrains(t *testing.T) {
 		Visibility: message.VisibilityPublic,
 		Audience:   message.Audience{"*"},
 		NotBefore:  &notBefore,
-	}); err != nil {
+	}, klog.FencingTuple{}); err != nil {
 		t.Fatalf("seed future message: %v", err)
 	}
 	_ = db.Close()
@@ -541,7 +542,7 @@ func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
 			Audience:   message.Audience{actor.ActorID(c.audience)},
 			ExpiresAt:  c.expiresAt,
 		}
-		if _, err := msgs.Append(ctx, env); err != nil {
+		if _, err := msgs.Append(ctx, env, klog.FencingTuple{}); err != nil {
 			t.Fatalf("seed %s: %v", c.id, err)
 		}
 	}
@@ -963,7 +964,7 @@ func TestDaemon_Phase3_HeartbeatSender(t *testing.T) {
 //     resolves wildcard envelopes to the agent target).
 //   - bootChannel registers a deliverer handler for that id, so a
 //     post-harness Dispatch reaches the agent layer. The P2 stub just
-//     counts arrivals; P4 swaps in WorkerManager.OnTrigger via the same
+//     counts arrivals; P4 swaps in WorkerBridge.OnTrigger via the same
 //     Deliverer.Register seam.
 func TestDaemon_Phase3_ChannelAgent_Registered(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -73,7 +73,7 @@ func TestAdapterFrameworkBootRecoverTimersUsesSQLiteStateStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenChannel: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	reg := store.NewActorRegistry(db)
 	if err := reg.Insert(ctx, actorreg.Record{

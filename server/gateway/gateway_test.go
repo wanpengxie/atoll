@@ -710,7 +710,7 @@ func pollUntil(t *testing.T, timeout time.Duration, fn func() bool) {
 // through the App's dispatch loop:
 //
 //  1. fake daemon pushes viewsync.push seq=1 → server.viewcache.Apply
-//     → fan-out (no subscriber yet, but Hub call must succeed)
+//     → fan-out (no subscriber yet, but pushhub Service call must succeed)
 //  2. ack frame must arrive with last_received_seq=1
 //  3. push seq=3 — gap — ack still 1
 //  4. push seq=2 — drains; ack 3

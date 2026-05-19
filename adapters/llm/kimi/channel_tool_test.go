@@ -100,6 +100,23 @@ func TestDispatchToolResponseAfterUnregisterIsQuarantined(t *testing.T) {
 	}
 }
 
+func TestDispatchToolResponseDuplicateRedeliveryIsQuarantined(t *testing.T) {
+	b := &Bridge{}
+	ch := b.registerPendingTool("tool-req-redelivered")
+
+	if !b.dispatchToolResponse(toolTrigger(message.KindResponse, "response-1", "tool-req-redelivered")) {
+		t.Fatal("first response was not dispatched")
+	}
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("pending tool did not receive first response")
+	}
+	if !b.dispatchToolResponse(toolTrigger(message.KindResponse, "response-1-redelivery", "tool-req-redelivered")) {
+		t.Fatal("duplicate terminal response should be quarantined")
+	}
+}
+
 func toolTrigger(kind message.Kind, id, parentID string) TriggerPayload {
 	return TriggerPayload{
 		Envelope: message.Envelope{

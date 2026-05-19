@@ -65,7 +65,7 @@ type Host struct {
 	codec *ipc.Codec
 
 	// ready closes after the worker completes its handshake. The
-	// WorkerManager waits on this before pushing the first KindTrigger
+	// WorkerBridge waits on this before pushing the first KindTrigger
 	// frame so that the worker's IPCClient is already running its read
 	// loop (otherwise the trigger arrives before the worker is ready
 	// to dispatch into Bridge.Triggers()).
@@ -102,7 +102,7 @@ func NewHost(in io.Reader, out io.Writer, cfg HostConfig) (*Host, error) {
 }
 
 // Ready returns a channel that closes once the worker handshake ack is
-// flushed. Used by WorkerManager to gate the first KindTrigger push.
+// flushed. Used by WorkerBridge to gate the first KindTrigger push.
 func (h *Host) Ready() <-chan struct{} { return h.ready }
 
 // PushTrigger emits a daemon → worker KindTrigger frame carrying the
@@ -254,7 +254,7 @@ func (h *Host) handleHandshake(frame ipc.Frame) error {
 		return err
 	}
 	// Signal Ready exactly once — gate for PushTrigger from the
-	// WorkerManager. Must happen after the ack flush so the worker
+	// WorkerBridge. Must happen after the ack flush so the worker
 	// has had the chance to populate its IPC client snapshot.
 	h.readyOnce.Do(func() { close(h.ready) })
 	return nil
@@ -276,14 +276,6 @@ func (h *Host) handleWrite(ctx context.Context, frame ipc.Frame) error {
 		ChannelID:               h.cfg.ChannelID,
 		AllowProvidedSenderKind: false,
 	})
-	// FIX-T6 — stamp the host's (fencing_token, daemon_epoch) tuple so
-	// runtime/store.Messages.Append validates it inside the same tx as
-	// the row INSERT. The frame-level Fence() check above only proves
-	// the worker is talking to the right daemon process; the sqlite
-	// gate proves the daemon process itself still holds the channel
-	// fence (i.e. it isn't a reclaimed/stale daemon).
-	chainCtx = store.CtxWithFencing(chainCtx, h.cfg.FencingToken, h.cfg.DaemonEpoch)
-
 	res, err := h.cfg.Chain.Write(chainCtx, &payload.Envelope)
 	if err != nil {
 		reply, _ := ipc.EncodeResult(frame.ID, false, err.Error(), ipc.WriteMessageResult{

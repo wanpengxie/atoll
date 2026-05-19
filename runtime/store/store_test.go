@@ -66,7 +66,7 @@ func TestMessageAppend_OutboxRoundTrip(t *testing.T) {
 		Visibility: message.VisibilityPublic,
 		Audience:   message.Audience{"*"},
 	}
-	res, err := msgs.Append(ctx, env)
+	res, err := msgs.Append(ctx, env, klog.FencingTuple{})
 	if err != nil {
 		t.Fatalf("append: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestMessageAppend_OutboxRoundTrip(t *testing.T) {
 	}
 
 	// Append same envelope again → dedupe path, no new outbox row.
-	res2, err := msgs.Append(ctx, env)
+	res2, err := msgs.Append(ctx, env, klog.FencingTuple{})
 	if err != nil {
 		t.Fatalf("append dedupe: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestOutbox_MarkPushedAndAck(t *testing.T) {
 	// Insert 3 messages.
 	for i := 0; i < 3; i++ {
 		env := newSimpleEnvelope(i + 1)
-		if _, err := msgs.Append(ctx, env); err != nil {
+		if _, err := msgs.Append(ctx, env, klog.FencingTuple{}); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
@@ -182,13 +182,13 @@ func TestMessages_PendingDue_FutureMessagesGated(t *testing.T) {
 	}
 	nb500 := int64(500)
 	nb2000 := int64(2000)
-	if _, err := msgs.Append(ctx, mkEnv("m-immediate", nil)); err != nil {
+	if _, err := msgs.Append(ctx, mkEnv("m-immediate", nil), klog.FencingTuple{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := msgs.Append(ctx, mkEnv("m-past", &nb500)); err != nil {
+	if _, err := msgs.Append(ctx, mkEnv("m-past", &nb500), klog.FencingTuple{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := msgs.Append(ctx, mkEnv("m-future", &nb2000)); err != nil {
+	if _, err := msgs.Append(ctx, mkEnv("m-future", &nb2000), klog.FencingTuple{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -248,7 +248,7 @@ func TestMessages_MarkDeliveryErrorKeepsRowRetryable(t *testing.T) {
 
 	msgs := store.NewMessages(db)
 	env := newSimpleEnvelope(1)
-	if _, err := msgs.Append(ctx, env); err != nil {
+	if _, err := msgs.Append(ctx, env, klog.FencingTuple{}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 
@@ -338,14 +338,14 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 	zeroDeadline := int64(0)
 
 	// Rows the scheduler must return at t=1500.
-	if _, err := msgs.Append(ctx, mkReq("req-overdue-orphan", &pastDeadline)); err != nil {
+	if _, err := msgs.Append(ctx, mkReq("req-overdue-orphan", &pastDeadline), klog.FencingTuple{}); err != nil {
 		t.Fatalf("append req-overdue-orphan: %v", err)
 	}
 
 	// Row with a non-terminal interim response — still counts as
 	// overdue because The One Law cares about *terminal* responses.
 	partialReq := mkReq("req-overdue-partial", &pastDeadline)
-	if _, err := msgs.Append(ctx, partialReq); err != nil {
+	if _, err := msgs.Append(ctx, partialReq, klog.FencingTuple{}); err != nil {
 		t.Fatalf("append req-overdue-partial: %v", err)
 	}
 	interim := &message.Envelope{
@@ -361,24 +361,24 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 		Visibility: message.VisibilityPublic,
 		Audience:   message.Audience{"agent:a"},
 	}
-	if _, err := msgs.Append(ctx, interim); err != nil {
+	if _, err := msgs.Append(ctx, interim, klog.FencingTuple{}); err != nil {
 		t.Fatalf("append interim response: %v", err)
 	}
 
 	// Rows the scheduler must skip.
-	if _, err := msgs.Append(ctx, mkReq("req-future-deadline", &futureDeadline)); err != nil {
+	if _, err := msgs.Append(ctx, mkReq("req-future-deadline", &futureDeadline), klog.FencingTuple{}); err != nil {
 		t.Fatalf("append req-future-deadline: %v", err)
 	}
-	if _, err := msgs.Append(ctx, mkReq("req-no-deadline", nil)); err != nil {
+	if _, err := msgs.Append(ctx, mkReq("req-no-deadline", nil), klog.FencingTuple{}); err != nil {
 		t.Fatalf("append req-no-deadline: %v", err)
 	}
-	if _, err := msgs.Append(ctx, mkReq("req-zero-deadline", &zeroDeadline)); err != nil {
+	if _, err := msgs.Append(ctx, mkReq("req-zero-deadline", &zeroDeadline), klog.FencingTuple{}); err != nil {
 		t.Fatalf("append req-zero-deadline: %v", err)
 	}
 
 	// Settled-already row: terminal response sitting on disk → scheduler
 	// must skip the parent request even though its expires_at has passed.
-	if _, err := msgs.Append(ctx, mkReq("req-settled", &pastDeadline)); err != nil {
+	if _, err := msgs.Append(ctx, mkReq("req-settled", &pastDeadline), klog.FencingTuple{}); err != nil {
 		t.Fatalf("append req-settled: %v", err)
 	}
 	terminal := &message.Envelope{
@@ -395,7 +395,7 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 		Audience:   message.Audience{"agent:a"},
 		IsTerminal: true,
 	}
-	if _, err := msgs.Append(ctx, terminal); err != nil {
+	if _, err := msgs.Append(ctx, terminal, klog.FencingTuple{}); err != nil {
 		t.Fatalf("append terminal response: %v", err)
 	}
 
@@ -413,7 +413,7 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 		Visibility: message.VisibilityPublic,
 		Audience:   message.Audience{"*"},
 		ExpiresAt:  &pastDeadline,
-	}); err != nil {
+	}, klog.FencingTuple{}); err != nil {
 		t.Fatalf("append evt-overdue: %v", err)
 	}
 
@@ -495,7 +495,7 @@ func TestMessages_ReceiverUnavailableRequests(t *testing.T) {
 		mkReq("req-missing", "agent:missing"),
 		mkReq("req-settled-missing", "agent:missing"),
 	} {
-		if _, err := msgs.Append(ctx, env); err != nil {
+		if _, err := msgs.Append(ctx, env, klog.FencingTuple{}); err != nil {
 			t.Fatalf("append %s: %v", env.ID, err)
 		}
 	}
@@ -513,7 +513,7 @@ func TestMessages_ReceiverUnavailableRequests(t *testing.T) {
 		Audience:   message.Audience{"agent:a"},
 		IsTerminal: true,
 	}
-	if _, err := msgs.Append(ctx, terminal); err != nil {
+	if _, err := msgs.Append(ctx, terminal, klog.FencingTuple{}); err != nil {
 		t.Fatalf("append terminal: %v", err)
 	}
 	if _, err := msgs.Append(ctx, &message.Envelope{
@@ -527,7 +527,7 @@ func TestMessages_ReceiverUnavailableRequests(t *testing.T) {
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
 		Audience:   message.Audience{"agent:missing"},
-	}); err != nil {
+	}, klog.FencingTuple{}); err != nil {
 		t.Fatalf("append event: %v", err)
 	}
 
@@ -573,7 +573,7 @@ func TestMessages_ConcurrentTerminalDuplicateClassified(t *testing.T) {
 				Visibility: message.VisibilityPublic,
 				Audience:   message.Audience{"agent:a"},
 				IsTerminal: true,
-			})
+			}, klog.FencingTuple{})
 			results <- err
 		}(i, id)
 	}

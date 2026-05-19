@@ -20,6 +20,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
+	khlog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/bootstrap"
@@ -69,7 +70,7 @@ type DaemonConfig struct {
 	HeartbeatPeriod time.Duration
 
 	// WorkerSpawner, when non-nil, swaps the bootChannel deliverer
-	// handler from the P2 counter stub to a full WorkerManager that
+	// handler from the P2 counter stub to a full WorkerBridge that
 	// spawns + reuses worker subprocesses (M1.6-T1 P4). Tests that
 	// don't care about workers leave this nil and keep the stub —
 	// runtime/daemon_test relies on the counter probe to assert
@@ -192,7 +193,7 @@ type ChannelTemplate struct {
 // ChannelAgentID is the well-known actor id every per-channel runtime
 // registers on boot. It is the single L2 worker target for trigger
 // fan-out: scheduler.Deliverer routes every audience-resolved envelope
-// addressed to this id into the per-channel WorkerManager (M1.6-T1 P4).
+// addressed to this id into the per-channel WorkerBridge (M1.6-T1 P4).
 //
 // We use the flat form rather than the spec'd `<channel_id>:<agent>`
 // shape because the per-channel sqlite already scopes the id; the L2
@@ -240,11 +241,11 @@ type channelRuntime struct {
 	// channel-agent handler. (M1.6-T1)
 	channelAgentTriggers atomic.Int64
 
-	// workerManager is non-nil when DaemonConfig.WorkerSpawner is set
-	// and bootChannel successfully built the per-channel manager. The
-	// channel teardown calls manager.Close so worker subprocesses do
+	// workerBridge is non-nil when DaemonConfig.WorkerSpawner is set
+	// and bootChannel successfully built the per-channel bridge. The
+	// channel teardown calls bridge.Close so worker subprocesses do
 	// not leak past placement reclaim. (M1.6-T1)
-	workerManager *workerhost.Manager
+	workerBridge *workerhost.Bridge
 
 	// deviceTransit is the per-channel devicetransit.DeviceTransit (T147 §A).
 	// One instance per channel sharing the daemon's *transit.Client so
@@ -326,6 +327,10 @@ type ChannelHooks struct {
 
 	// NowFn returns unix-ms; same clock the daemon stamps writes with.
 	NowFn func() int64
+
+	// Logger is the daemon's structured log sink, scoped to the same JSON
+	// stream as runtime lifecycle and transit events.
+	Logger *zerolog.Logger
 
 	// DeviceTransit is the per-channel devicetransit.DeviceTransit handed to
 	// `via_server_transit` adapter modules (T147 §A). When the channel
@@ -957,7 +962,11 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		ActorRegistry: registry,
 		TypeRegistry:  typeRegistry.HarnessView(),
 		Log:           messages,
-		NowMs:         d.cfg.NowFn,
+		Fencing: khlog.FencingTuple{
+			Token: lc.Lock.FencingToken,
+			Epoch: lc.Lock.DaemonEpoch,
+		},
+		NowMs: d.cfg.NowFn,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("harness for %s: %w", lc.ChannelID, err)
@@ -987,7 +996,7 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		return nil, fmt.Errorf("trigger gateway for %s: %w", lc.ChannelID, err)
 	}
 
-	// Wrapped chain — same fencing-stamping + post-harness gateway dispatch
+	// Wrapped chain — same fencing + post-harness gateway dispatch
 	// + MarkDelivered behavior the daemon's WriteMessage handler uses
 	// (FIX-T3 / FIX-T6). Shared across the WriteMessage entrypoint AND the
 	// adapter framework so adapter responses (and timer-fired failed
@@ -996,7 +1005,7 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		chain:    chain,
 		gateway:  gw,
 		messages: messages,
-		lock:     lock,
+		log:      &d.log,
 		nowFn:    d.cfg.NowFn,
 	}
 
@@ -1061,9 +1070,9 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 // Handler wiring depends on whether DaemonConfig.WorkerSpawner is set:
 //   - nil (P2 default, runtime/daemon_test) → stub handler increments
 //     channelAgentTriggers and returns. No worker subprocess.
-//   - non-nil (P4 wiring, cmd/daemon) → builds a workerhost.Manager and
+//   - non-nil (P4 wiring, cmd/daemon) → builds a workerhost.Bridge and
 //     registers a handler that ticks the counter AND calls
-//     manager.OnTrigger so the trigger envelope reaches a real worker.
+//     bridge.OnTrigger so the trigger envelope reaches a real worker.
 func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) error {
 	_, ok, err := cr.registry.Lookup(ctx, cr.channelAgentID)
 	if err != nil {
@@ -1092,7 +1101,7 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 		return fmt.Errorf("runtime: ensure channel-agent missing lock %s", cr.channelID)
 	}
 
-	// P4 wire: build manager when a spawner is configured. Otherwise
+	// P4 wire: build bridge when a spawner is configured. Otherwise
 	// fall back to the P2 counter stub so tests don't pay the spawn cost.
 	if d.cfg.WorkerSpawner != nil {
 		leaseStore := workerhost.NewLeaseStore(cr.db)
@@ -1145,7 +1154,7 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 			}
 			return []string{"COAGENT_CHANNEL_CONTEXT_FILE=" + channelCtxPath}, nil
 		}
-		mgr, err := workerhost.NewManager(workerhost.ManagerConfig{
+		bridge, err := workerhost.NewBridge(workerhost.BridgeConfig{
 			ChannelID:     cr.channelID,
 			AgentID:       cr.channelAgentID,
 			WorkerActorID: cr.channelAgentID,
@@ -1161,12 +1170,12 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 			PreSpawn:      preSpawn,
 		})
 		if err != nil {
-			return fmt.Errorf("runtime: ensure channel-agent manager %s: %w", cr.channelID, err)
+			return fmt.Errorf("runtime: ensure channel-agent bridge %s: %w", cr.channelID, err)
 		}
-		cr.workerManager = mgr
+		cr.workerBridge = bridge
 		cr.deliverer.Register(cr.channelAgentID, func(ctx context.Context, id actor.ActorID, env *message.Envelope) error {
 			cr.channelAgentTriggers.Add(1)
-			return mgr.OnTrigger(ctx, id, env)
+			return bridge.OnTrigger(ctx, id, env)
 		})
 		return nil
 	}
@@ -1192,7 +1201,7 @@ func (d *Daemon) ChannelAgentTriggerCount(chID channel.ID) int64 {
 }
 
 // buildWorkerEnvForChannel assembles the per-channel "KEY=VALUE" env
-// list ManagerConfig.WorkerEnv carries (M1.6-T5 phase-3). cmd/daemon
+// list BridgeConfig.WorkerEnv carries (M1.6-T5 phase-3). cmd/daemon
 // sets DaemonConfig.ChannelTemplates so resolveTemplate returns the L4
 // snapshot keyed by the lock row's ChannelType; the DomainPrompt is
 // either the §2.4 segment (e.g. xhs-creator) or "" (generic group).
@@ -1215,7 +1224,7 @@ func (d *Daemon) buildWorkerEnvForChannel(channelType string) []string {
 }
 
 // WorkerEnvForChannel is the test-facing accessor that mirrors the env
-// the Daemon would hand to workerhost.ManagerConfig.WorkerEnv for the
+// the Daemon would hand to workerhost.BridgeConfig.WorkerEnv for the
 // supplied channel type. Returns the COAGENT_* "KEY=VALUE" slice in
 // resolution order. Used by daemon_test / template_integration_test to
 // assert the prompt env shape without spawning a real worker.
@@ -1354,15 +1363,15 @@ func writeChannelContextSnapshot(
 }
 
 // CurrentWorkerIDFor returns the id of the worker subprocess currently
-// alive for the channel, or "" when no worker is alive (manager not
+// alive for the channel, or "" when no worker is alive (bridge not
 // configured, channel not owned, worker crashed). Test accessor for
 // the M1.6-T1 e2e reuse check.
 func (d *Daemon) CurrentWorkerIDFor(chID channel.ID) string {
 	cr, ok := d.getChannel(chID)
-	if !ok || cr.workerManager == nil {
+	if !ok || cr.workerBridge == nil {
 		return ""
 	}
-	return cr.workerManager.CurrentWorkerID()
+	return cr.workerBridge.CurrentWorkerID()
 }
 
 // bootChannel wires a per-channel runtime + outbox pusher goroutine
@@ -1418,6 +1427,7 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 			HarnessChain: cr.wrappedChain,
 			Deliverer:    cr.deliverer,
 			NowFn:        d.cfg.NowFn,
+			Logger:       &d.log,
 		}
 		// T147 §A — expose the per-channel DeviceTransit + an inbound
 		// callback hook so the composition root can build a
@@ -1464,15 +1474,15 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 		}
 	}(cr.pusher, lc.ChannelID)
 
-	// Register the teardown: shut down worker manager (T1) and adapter
+	// Register the teardown: shut down worker bridge (T1) and adapter
 	// framework (T2 via cr.teardown), cancel pusher ctx, drop the
 	// runtime entry. Sqlite handle stays open — Close() reaps it at
 	// shutdown (unbind is not wipe; channels/<id>/ stays on disk).
 	chID := lc.ChannelID
 	d.unloader.Register(chID, func() error {
-		if cr.workerManager != nil {
+		if cr.workerBridge != nil {
 			closeCtx, cc := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = cr.workerManager.Close(closeCtx)
+			_ = cr.workerBridge.Close(closeCtx)
 			cc()
 		}
 		if cr.teardown != nil {
@@ -1766,7 +1776,10 @@ func (d *Daemon) handleReclaimAccepted(ctx context.Context, frame daemonbus.Fram
 		// the server has revoked our ownership claim.
 		if d.HasChannel(dec.ChannelID) {
 			if err := d.unloader.Unload(ctx, dec.ChannelID, lifecycle.UnloadStale); err != nil {
-				fmt.Printf("runtime: reclaim reject unload %s: %v\n", dec.ChannelID, err)
+				d.log.Warn().Err(err).
+					Str("event", "runtime.reclaim_reject_unload_failed").
+					Str("channel_id", string(dec.ChannelID)).
+					Msg("failed to unload channel after reclaim rejection")
 			}
 		}
 	}
@@ -1805,7 +1818,10 @@ func (d *Daemon) handleReclaimRejected(ctx context.Context, frame daemonbus.Fram
 		d.reconciler.RejectReclaim(dec.ChannelID, dec.Reason)
 		if d.HasChannel(dec.ChannelID) {
 			if err := d.unloader.Unload(ctx, dec.ChannelID, lifecycle.UnloadStale); err != nil {
-				fmt.Printf("runtime: reclaim_rejected unload %s: %v\n", dec.ChannelID, err)
+				d.log.Warn().Err(err).
+					Str("event", "runtime.reclaim_rejected_unload_failed").
+					Str("channel_id", string(dec.ChannelID)).
+					Msg("failed to unload channel after reclaim_rejected")
 			}
 		}
 	}
@@ -1975,33 +1991,55 @@ func (d *Daemon) scanLongPending(ctx context.Context, nowMs int64) error {
 		// Pass 1 — §5.3 future-message drain.
 		due, err := cr.messages.PendingDue(ctx, nowMs, 64)
 		if err != nil {
-			fmt.Printf("runtime: scheduler scan %s: %v\n", chID, err)
+			d.log.Warn().Err(err).
+				Str("event", "runtime.scheduler_scan_failed").
+				Str("channel_id", string(chID)).
+				Msg("scheduler failed to scan due messages")
 		}
 		for i := range due {
 			env := due[i]
 			// scheduler is the dispatch-path upstream — bypass §5.1
 			// step 3 self-trigger ban (L1 §5.3 explicit semantics).
 			if _, derr := cr.gateway.Dispatch(ctx, &env, trigger.Options{BypassSelfTriggerBan: true}); derr != nil {
-				fmt.Printf("runtime: scheduler dispatch %s/%s: %v\n", chID, env.ID, derr)
+				d.log.Warn().Err(derr).
+					Str("event", "runtime.scheduler_dispatch_failed").
+					Str("channel_id", string(chID)).
+					Str("message_id", string(env.ID)).
+					Msg("scheduler failed to dispatch due message")
 				if err := cr.messages.MarkDeliveryError(ctx, env.ID, nowMs, derr.Error()); err != nil {
-					fmt.Printf("runtime: scheduler mark delivery error %s/%s: %v\n", chID, env.ID, err)
+					d.log.Warn().Err(err).
+						Str("event", "runtime.scheduler_mark_delivery_error_failed").
+						Str("channel_id", string(chID)).
+						Str("message_id", string(env.ID)).
+						Msg("scheduler failed to mark delivery error")
 				}
 				continue
 			}
 			if err := cr.messages.MarkDelivered(ctx, env.ID, nowMs); err != nil {
-				fmt.Printf("runtime: scheduler mark delivered %s/%s: %v\n", chID, env.ID, err)
+				d.log.Warn().Err(err).
+					Str("event", "runtime.scheduler_mark_delivered_failed").
+					Str("channel_id", string(chID)).
+					Str("message_id", string(env.ID)).
+					Msg("scheduler failed to mark message delivered")
 			}
 		}
 
 		// Pass 2 — §6.4 receiver_unavailable immediate fallback emit.
 		unavailable, err := cr.messages.ReceiverUnavailableRequests(ctx, 64)
 		if err != nil {
-			fmt.Printf("runtime: scheduler receiver-unavailable %s: %v\n", chID, err)
+			d.log.Warn().Err(err).
+				Str("event", "runtime.scheduler_receiver_unavailable_scan_failed").
+				Str("channel_id", string(chID)).
+				Msg("scheduler failed to scan receiver-unavailable requests")
 		}
 		for i := range unavailable {
 			req := unavailable[i]
 			if err := d.emitLongPendingFallback(ctx, cr, &req, nowMs); err != nil {
-				fmt.Printf("runtime: scheduler receiver-unavailable emit %s/%s: %v\n", chID, req.ID, err)
+				d.log.Warn().Err(err).
+					Str("event", "runtime.scheduler_receiver_unavailable_emit_failed").
+					Str("channel_id", string(chID)).
+					Str("message_id", string(req.ID)).
+					Msg("scheduler failed to emit receiver-unavailable fallback")
 				continue
 			}
 		}
@@ -2009,13 +2047,20 @@ func (d *Daemon) scanLongPending(ctx context.Context, nowMs int64) error {
 		// Pass 3 — §6.4 expires_at-gated long-pending fallback emit.
 		overdue, err := cr.messages.LongPendingRequests(ctx, nowMs, 64)
 		if err != nil {
-			fmt.Printf("runtime: scheduler long-pending %s: %v\n", chID, err)
+			d.log.Warn().Err(err).
+				Str("event", "runtime.scheduler_long_pending_scan_failed").
+				Str("channel_id", string(chID)).
+				Msg("scheduler failed to scan long-pending requests")
 			continue
 		}
 		for i := range overdue {
 			req := overdue[i]
 			if err := d.emitLongPendingFallback(ctx, cr, &req, nowMs); err != nil {
-				fmt.Printf("runtime: scheduler long-pending emit %s/%s: %v\n", chID, req.ID, err)
+				d.log.Warn().Err(err).
+					Str("event", "runtime.scheduler_long_pending_emit_failed").
+					Str("channel_id", string(chID)).
+					Str("message_id", string(req.ID)).
+					Msg("scheduler failed to emit long-pending fallback")
 				continue
 			}
 		}
@@ -2162,10 +2207,10 @@ func (d *Daemon) classifyLongPendingReason(
 // must obey (WriteMessage handler + adapter framework + future write-
 // path callers):
 //
-//   - FIX-T6: stamp the channel's current (fencing_token, daemon_epoch)
-//     tuple before delegating so the messages-insert tx validates the
-//     fencing pair (a silent placement reclaim under us surfaces as
-//     HarnessWorkerFencingStale instead of corrupting outbox).
+//   - FIX-T6: the wrapped harness chain carries the channel's explicit
+//     (fencing_token, daemon_epoch) tuple so the messages-insert tx
+//     validates the fencing pair (a silent placement reclaim under us
+//     surfaces as HarnessWorkerFencingStale instead of corrupting outbox).
 //   - FIX-T3/T155-B5: after a successful, non-deduped, non-rejected write
 //     call trigger.Gateway.Dispatch (L1 §5.1 fan-out) + messages.MarkDelivered.
 //     Dispatch failures record messages.MarkDeliveryError and leave the row
@@ -2177,17 +2222,12 @@ type postHarnessChain struct {
 	chain    *harness.Chain
 	gateway  *trigger.Gateway
 	messages *store.Messages
-	lock     *store.ChannelLock
+	log      *zerolog.Logger
 	nowFn    func() int64
 }
 
 // Write implements kernel/harness.Chain.
 func (a *postHarnessChain) Write(ctx context.Context, env *message.Envelope) (khar.WriteResult, error) {
-	if a.lock != nil {
-		if row, ok, err := a.lock.Get(ctx); err == nil && ok {
-			ctx = store.CtxWithFencing(ctx, row.FencingToken, row.DaemonEpoch)
-		}
-	}
 	res, err := a.chain.Write(ctx, env)
 	if err != nil {
 		return khar.WriteResult{}, err
@@ -2195,15 +2235,30 @@ func (a *postHarnessChain) Write(ctx context.Context, env *message.Envelope) (kh
 	if res.RejectReason == "" && !res.Deduped && a.gateway != nil {
 		dr, derr := a.gateway.Dispatch(ctx, env, trigger.Options{})
 		if derr != nil {
-			fmt.Printf("runtime: gateway dispatch %s: %v\n", env.ID, derr)
+			if a.log != nil {
+				a.log.Warn().Err(derr).
+					Str("event", "runtime.gateway_dispatch_failed").
+					Str("message_id", string(env.ID)).
+					Msg("post-harness gateway dispatch failed")
+			}
 			if a.messages != nil {
 				if err := a.messages.MarkDeliveryError(ctx, env.ID, a.nowFn(), derr.Error()); err != nil {
-					fmt.Printf("runtime: mark delivery error %s: %v\n", env.ID, err)
+					if a.log != nil {
+						a.log.Warn().Err(err).
+							Str("event", "runtime.mark_delivery_error_failed").
+							Str("message_id", string(env.ID)).
+							Msg("failed to mark post-harness delivery error")
+					}
 				}
 			}
 		} else if !dr.Deferred && a.messages != nil {
 			if err := a.messages.MarkDelivered(ctx, env.ID, a.nowFn()); err != nil {
-				fmt.Printf("runtime: mark delivered %s: %v\n", env.ID, err)
+				if a.log != nil {
+					a.log.Warn().Err(err).
+						Str("event", "runtime.mark_delivered_failed").
+						Str("message_id", string(env.ID)).
+						Msg("failed to mark post-harness message delivered")
+				}
 			}
 		}
 	}

@@ -25,6 +25,9 @@ exclude:
   # out of architectural scope (includes the former agent-binary / cli-node
   # / lightcone-* trees after T9 archiving).
   - archive
+  # pnpm dependencies may contain vendored Go fixtures; they are not part of
+  # this module's architecture graph.
+  - node_modules
 
 excludeFiles:
   # Test files don't carry architectural constraints (per spec §T2

@@ -302,8 +302,8 @@ func messageEnvelopeStub() message.Envelope {
 // unsolicited KindTrigger frame pushed by the daemon MUST be decoded
 // and surfaced through IPCClient.Triggers() so the worker's Bridge can
 // react. The daemon-supplied envelope / correlation_id / cursor must
-// round-trip intact, and the worker must ack before exposing the
-// trigger to bridge processing.
+// round-trip intact, and the worker must reserve local trigger-buffer
+// capacity before acking the daemon.
 func TestIPCClient_TriggersDeliversDaemonPush(t *testing.T) {
 	t.Parallel()
 	workerR, daemonW := io.Pipe()

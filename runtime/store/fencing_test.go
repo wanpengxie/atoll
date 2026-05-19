@@ -113,21 +113,21 @@ func TestMessages_FencingEnforced(t *testing.T) {
 		name       string
 		token      placement.FencingToken
 		epoch      placement.DaemonEpoch
-		stampCtx   bool
+		supply     bool
 		wantReject bool
 		wantReason message.HarnessRejectReason
 	}{
 		{
-			name:     "match — accept",
-			token:    placement.FencingToken(7),
-			epoch:    placement.DaemonEpoch(3),
-			stampCtx: true,
+			name:   "match — accept",
+			token:  placement.FencingToken(7),
+			epoch:  placement.DaemonEpoch(3),
+			supply: true,
 		},
 		{
 			name:       "stale token — caller below lock",
 			token:      placement.FencingToken(6), // lock=7
 			epoch:      placement.DaemonEpoch(3),
-			stampCtx:   true,
+			supply:     true,
 			wantReject: true,
 			wantReason: message.HarnessWorkerFencingStale,
 		},
@@ -135,7 +135,7 @@ func TestMessages_FencingEnforced(t *testing.T) {
 			name:       "stale token — caller above lock (newer worker view)",
 			token:      placement.FencingToken(8),
 			epoch:      placement.DaemonEpoch(3),
-			stampCtx:   true,
+			supply:     true,
 			wantReject: true,
 			wantReason: message.HarnessWorkerFencingStale,
 		},
@@ -143,15 +143,15 @@ func TestMessages_FencingEnforced(t *testing.T) {
 			name:       "daemon_epoch mismatch — stale daemon",
 			token:      placement.FencingToken(7),
 			epoch:      placement.DaemonEpoch(99),
-			stampCtx:   true,
+			supply:     true,
 			wantReject: true,
 			wantReason: message.HarnessWorkerFencingStale,
 		},
 		{
-			name:       "missing ctx — bare append rejected",
+			name:       "missing fencing — bare append rejected",
 			token:      placement.FencingToken(7),
 			epoch:      placement.DaemonEpoch(3),
-			stampCtx:   false,
+			supply:     false,
 			wantReject: true,
 			wantReason: message.HarnessWorkerFencingStale,
 		},
@@ -161,12 +161,13 @@ func TestMessages_FencingEnforced(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fx := newFencedFixture(t, placement.FencingToken(7), placement.DaemonEpoch(3))
 			ctx := context.Background()
-			if tc.stampCtx {
-				ctx = store.CtxWithFencing(ctx, tc.token, tc.epoch)
+			var fencing klog.FencingTuple
+			if tc.supply {
+				fencing = klog.FencingTuple{Token: tc.token, Epoch: tc.epoch}
 			}
 
 			env := newFencedEnvelope("m-" + tc.name)
-			_, err := fx.msgs.Append(ctx, env)
+			_, err := fx.msgs.Append(ctx, env, fencing)
 
 			if tc.wantReject {
 				var appErr *klog.AppendError
@@ -358,10 +359,11 @@ func TestChannelLock_ValidateWriteTx(t *testing.T) {
 // id should return Deduped=true (not a fencing reject).
 func TestMessages_FencingDedupeUnchanged(t *testing.T) {
 	fx := newFencedFixture(t, placement.FencingToken(7), placement.DaemonEpoch(3))
-	ctx := store.CtxWithFencing(context.Background(), fx.token, fx.epoch)
+	ctx := context.Background()
+	fencing := klog.FencingTuple{Token: fx.token, Epoch: fx.epoch}
 
 	env := newFencedEnvelope("m-dedupe")
-	res1, err := fx.msgs.Append(ctx, env)
+	res1, err := fx.msgs.Append(ctx, env, fencing)
 	if err != nil {
 		t.Fatalf("append1: %v", err)
 	}
@@ -369,7 +371,7 @@ func TestMessages_FencingDedupeUnchanged(t *testing.T) {
 		t.Error("first append should not be deduped")
 	}
 
-	res2, err := fx.msgs.Append(ctx, env)
+	res2, err := fx.msgs.Append(ctx, env, fencing)
 	if err != nil {
 		t.Fatalf("append2: %v", err)
 	}

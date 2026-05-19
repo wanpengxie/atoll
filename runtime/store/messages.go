@@ -59,9 +59,9 @@ type Messages struct {
 func NewMessages(db *sql.DB) *Messages { return &Messages{db: db} }
 
 // NewMessagesWithLock returns a *Messages whose Append validates the
-// fencing tuple (carried via store.CtxWithFencing) against the channel's
-// channel_lock row INSIDE the same transaction as the row INSERT. A
-// stale daemon (or a forgotten CtxWithFencing stamp) is rejected with
+// explicit fencing tuple against the channel's channel_lock row INSIDE
+// the same transaction as the row INSERT. A stale daemon (or a forgotten
+// Append fencing argument) is rejected with
 // klog.AppendError{Reason: HarnessWorkerFencingStale} and neither the
 // messages row nor the view_sync_outbox row is written.
 func NewMessagesWithLock(db *sql.DB, lock *ChannelLock) *Messages {
@@ -69,7 +69,7 @@ func NewMessagesWithLock(db *sql.DB, lock *ChannelLock) *Messages {
 }
 
 // Append implements log.MessageLog.
-func (m *Messages) Append(ctx context.Context, env *message.Envelope) (klog.AppendResult, error) {
+func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing klog.FencingTuple) (klog.AppendResult, error) {
 	if env == nil {
 		return klog.AppendResult{}, errors.New("store: append nil envelope")
 	}
@@ -95,12 +95,12 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope) (klog.Appe
 
 	// 0) FIX-T6 fencing gate — when constructed with a *ChannelLock,
 	// every Append must present a matching (fencing_token, daemon_epoch)
-	// tuple via store.CtxWithFencing. The check runs INSIDE the tx so a
-	// concurrent UpgradeEpoch cannot slip between SELECT and INSERT.
-	// Failure path: typed *klog.AppendError so the harness chain maps
-	// it to message.HarnessWorkerFencingStale (closed-set reject). No
-	// outbox row is written.
-	if err := m.checkFencing(ctx, tx, string(env.ID)); err != nil {
+	// tuple via an explicit Append parameter. The check runs INSIDE
+	// the tx so a concurrent UpgradeEpoch cannot slip between SELECT
+	// and INSERT. Failure path: typed *klog.AppendError so the harness
+	// chain maps it to message.HarnessWorkerFencingStale (closed-set
+	// reject). No outbox row is written.
+	if err := m.checkFencing(ctx, tx, string(env.ID), fencing); err != nil {
 		return klog.AppendResult{}, err
 	}
 
@@ -522,24 +522,23 @@ func nullableInt(p *int64) any {
 }
 
 // checkFencing is the FIX-T6 gate. Returns nil when this Messages was
-// constructed without a *ChannelLock (test-mode wire). Otherwise pulls
-// the (token, epoch) tuple from ctx (CtxWithFencing) and validates
-// inside the supplied tx; on any mismatch returns a typed
+// constructed without a *ChannelLock (test-mode wire). Otherwise validates
+// the explicit (token, epoch) tuple inside the supplied tx; on any
+// mismatch returns a typed
 // *klog.AppendError{Reason: HarnessWorkerFencingStale} so the harness
 // chain can surface the canonical reject reason without parsing strings.
-func (m *Messages) checkFencing(ctx context.Context, tx *sql.Tx, envID string) error {
+func (m *Messages) checkFencing(ctx context.Context, tx *sql.Tx, envID string, fencing klog.FencingTuple) error {
 	if m.lock == nil {
 		return nil
 	}
-	tuple, ok := FencingFromCtx(ctx)
-	if !ok {
+	if fencing == (klog.FencingTuple{}) {
 		return &klog.AppendError{
 			Reason:           message.HarnessWorkerFencingStale,
-			Detail:           "fencing tuple missing from context",
+			Detail:           "fencing tuple missing from Append parameter",
 			PartialMessageID: message.ID(envID),
 		}
 	}
-	if err := m.lock.ValidateWriteTx(ctx, tx, tuple.Token, tuple.Epoch); err != nil {
+	if err := m.lock.ValidateWriteTx(ctx, tx, fencing.Token, fencing.Epoch); err != nil {
 		if IsFencingStale(err) {
 			return &klog.AppendError{
 				Reason:           message.HarnessWorkerFencingStale,

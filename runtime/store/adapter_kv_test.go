@@ -16,7 +16,7 @@ func TestAdapterStateStoreRoundTripListAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenChannel: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	s := store.NewAdapterStateStore(db, func() int64 { return 123 })
 
 	if err := s.Put(ctx, "adapter:x:a", []byte("one")); err != nil {
@@ -59,7 +59,7 @@ func TestAdapterCredentialStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenChannel: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	s := store.NewAdapterCredentialStore(db, func() int64 { return 456 })
 
 	if err := s.Put(ctx, "feishu.app_secret", "secret-v1"); err != nil {

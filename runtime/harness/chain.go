@@ -111,7 +111,7 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (khar.WriteRes
 	// other field; the store implementation is responsible for outbox /
 	// sequence allocation per L1 §8.6 / L2 §1.4.1.
 	env.TSReceived = c.deps.NowMs()
-	res, err := c.deps.Log.Append(ctx, env)
+	res, err := c.deps.Log.Append(ctx, env, c.deps.Fencing)
 	if err != nil {
 		// Map the typed AppendError to a closed-set reject when possible.
 		var appErr *khlog.AppendError

@@ -16,7 +16,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 )
 
-// Manager is the per-channel worker bridge: it lazily spawns a single
+// Bridge is the per-channel worker bridge: it lazily spawns a single
 // worker subprocess on the first trigger envelope, reuses it across
 // subsequent triggers, and re-spawns on crash. Built around the
 // existing Spawner / LeaseStore / Host primitives so the only new
@@ -24,17 +24,17 @@ import (
 //
 // Wiring:
 //
-//	scheduler.Deliverer.Register(ChannelAgentID, manager.OnTrigger)
-//	bootChannel constructs Manager, stores it on channelRuntime, and
-//	defers manager.Close in the unloader teardown.
+//	scheduler.Deliverer.Register(ChannelAgentID, bridge.OnTrigger)
+//	bootChannel constructs Bridge, stores it on channelRuntime, and
+//	defers bridge.Close in the unloader teardown.
 //
 // Concurrency: OnTrigger is called from the daemon dispatcher (write
 // path) and from the long-pending scheduler scan. Both paths can race;
 // a single mutex serialises spawn / session replacement, but the worker
 // stdin write happens outside the mutex with a timeout so a slow worker
-// cannot block unrelated trigger dispatchers behind Manager.mu.
-type Manager struct {
-	cfg ManagerConfig
+// cannot block unrelated trigger dispatchers behind Bridge.mu.
+type Bridge struct {
+	cfg BridgeConfig
 
 	mu       sync.Mutex
 	cur      *workerSession
@@ -44,8 +44,8 @@ type Manager struct {
 	pushDrop atomic.Int64
 }
 
-// ManagerConfig wires a Manager.
-type ManagerConfig struct {
+// BridgeConfig wires a Bridge.
+type BridgeConfig struct {
 	ChannelID     channel.ID
 	AgentID       actor.ActorID // lease + actor target — e.g. ChannelAgentID
 	WorkerActorID actor.ActorID // principal the worker speaks as on IPC writes
@@ -57,9 +57,9 @@ type ManagerConfig struct {
 
 	NowFn func() int64
 
-	// Fencing snapshot at construction. Manager assumes the channel
+	// Fencing snapshot at construction. Bridge assumes the channel
 	// lock doesn't change during its lifetime; daemon unloads + re-
-	// builds the manager on placement reclaim, so this is safe.
+	// builds the bridge on placement reclaim, so this is safe.
 	FencingToken placement.FencingToken
 	DaemonEpoch  placement.DaemonEpoch
 
@@ -85,13 +85,13 @@ type ManagerConfig struct {
 	// runtime/daemon.ensureChannelAgent populates this from
 	// ChannelLock.ChannelType + resolveTemplate(...).DomainPrompt so
 	// the worker bridge can hash / grep the L4 §2.4 prompt without
-	// re-resolving the template. Empty/nil ⇒ Manager spawns the
+	// re-resolving the template. Empty/nil ⇒ Bridge spawns the
 	// worker with only os.Environ + the Spawner's static env list.
 	WorkerEnv []string
 
 	// PreSpawn is an optional hook invoked at the top of every
 	// Spawner.Spawn call (i.e. once per worker subprocess, NOT once
-	// per trigger — the manager reuses a live worker across triggers
+	// per trigger — the bridge reuses a live worker across triggers
 	// and only re-spawns on crash / first trigger after boot). The
 	// hook returns an extra "KEY=VALUE" env slice that is appended
 	// AFTER WorkerEnv so PreSpawn-supplied values override defaults.
@@ -106,7 +106,7 @@ type ManagerConfig struct {
 	// host-filesystem exploration ("Chrome 145 / type_registry空"
 	// hallucinated reply class).
 	//
-	// Hook errors do NOT abort the spawn — the manager logs (via the
+	// Hook errors do NOT abort the spawn — the bridge logs (via the
 	// returned error path is currently best-effort) and proceeds with
 	// only WorkerEnv. Worker boots cleanly without the appendix, same
 	// as a legacy channel. Nil hook → behaviour identical to before
@@ -117,7 +117,7 @@ type ManagerConfig struct {
 	PushTimeout time.Duration
 
 	// OnPushDrop observes trigger pushes that failed or timed out. It is
-	// invoked after the manager increments PushDropCount.
+	// invoked after the bridge increments PushDropCount.
 	OnPushDrop func(PushDrop)
 }
 
@@ -132,13 +132,14 @@ type PushDrop struct {
 
 // workerSession is the daemon-side state for one live worker subprocess.
 type workerSession struct {
-	leaseID  string
-	workerID string
-	proc     WorkerProc
-	host     *Host
+	leaseID   string
+	lockLease Lease
+	workerID  string
+	proc      WorkerProc
+	host      *Host
 
 	// done closes when Host.Serve returns (worker exit or fatal IPC
-	// error). Set under Manager.mu via serve goroutine close-on-exit.
+	// error). Set under Bridge.mu via serve goroutine close-on-exit.
 	done chan struct{}
 }
 
@@ -155,32 +156,32 @@ func (s *workerSession) dead() bool {
 	}
 }
 
-// NewManager builds a Manager. Defaults to a 5s handshake timeout and
+// NewBridge builds a Bridge. Defaults to a 5s handshake timeout and
 // a background ServeCtx when callers don't pass either.
-func NewManager(cfg ManagerConfig) (*Manager, error) {
+func NewBridge(cfg BridgeConfig) (*Bridge, error) {
 	if cfg.ChannelID == "" {
-		return nil, errors.New("workerhost: ManagerConfig.ChannelID empty")
+		return nil, errors.New("workerhost: BridgeConfig.ChannelID empty")
 	}
 	if cfg.AgentID == "" {
-		return nil, errors.New("workerhost: ManagerConfig.AgentID empty")
+		return nil, errors.New("workerhost: BridgeConfig.AgentID empty")
 	}
 	if cfg.WorkerActorID == "" {
-		return nil, errors.New("workerhost: ManagerConfig.WorkerActorID empty")
+		return nil, errors.New("workerhost: BridgeConfig.WorkerActorID empty")
 	}
 	if cfg.Spawner == nil {
-		return nil, errors.New("workerhost: ManagerConfig.Spawner nil")
+		return nil, errors.New("workerhost: BridgeConfig.Spawner nil")
 	}
 	if cfg.LeaseStore == nil {
-		return nil, errors.New("workerhost: ManagerConfig.LeaseStore nil")
+		return nil, errors.New("workerhost: BridgeConfig.LeaseStore nil")
 	}
 	if cfg.Chain == nil {
-		return nil, errors.New("workerhost: ManagerConfig.Chain nil")
+		return nil, errors.New("workerhost: BridgeConfig.Chain nil")
 	}
 	if cfg.Ledger == nil {
-		return nil, errors.New("workerhost: ManagerConfig.Ledger nil")
+		return nil, errors.New("workerhost: BridgeConfig.Ledger nil")
 	}
 	if cfg.NowFn == nil {
-		return nil, errors.New("workerhost: ManagerConfig.NowFn nil")
+		return nil, errors.New("workerhost: BridgeConfig.NowFn nil")
 	}
 	if cfg.HandshakeTimeout <= 0 {
 		cfg.HandshakeTimeout = 5 * time.Second
@@ -194,7 +195,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if cfg.ServeCtx == nil {
 		cfg.ServeCtx = context.Background()
 	}
-	return &Manager{cfg: cfg}, nil
+	return &Bridge{cfg: cfg}, nil
 }
 
 // OnTrigger is the scheduler.Deliverer.HandlerFn entry point. Per the
@@ -205,7 +206,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 // and continues — fan-out is at-least-once (L1 §6.1) so a single push
 // failure does not stall the harness write or reject the originating
 // human envelope. The next trigger retries the spawn.
-func (m *Manager) OnTrigger(ctx context.Context, _ actor.ActorID, env *message.Envelope) error {
+func (m *Bridge) OnTrigger(ctx context.Context, _ actor.ActorID, env *message.Envelope) error {
 	if env == nil {
 		return errors.New("workerhost: OnTrigger nil envelope")
 	}
@@ -213,14 +214,14 @@ func (m *Manager) OnTrigger(ctx context.Context, _ actor.ActorID, env *message.E
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		return errors.New("workerhost: manager closed")
+		return errors.New("workerhost: bridge closed")
 	}
 
 	if m.cur == nil || m.cur.dead() {
 		// Best-effort cleanup of any tombstoned previous session so
 		// the lease row reflects the new worker.
 		if m.cur != nil {
-			_ = m.cfg.LeaseStore.Release(ctx, string(m.cfg.AgentID))
+			_ = m.cfg.LeaseStore.Release(ctx, m.cur.lockLease.ID)
 			m.cur = nil
 		}
 		if err := m.spawnLocked(ctx); err != nil {
@@ -251,7 +252,7 @@ func (m *Manager) OnTrigger(ctx context.Context, _ actor.ActorID, env *message.E
 	return nil
 }
 
-func (m *Manager) onPushFailure(sess *workerSession, envelopeID string, err error) {
+func (m *Bridge) onPushFailure(sess *workerSession, envelopeID string, err error) {
 	m.pushDrop.Add(1)
 	if m.cfg.OnPushDrop != nil {
 		m.cfg.OnPushDrop(PushDrop{
@@ -281,27 +282,30 @@ func (m *Manager) onPushFailure(sess *workerSession, envelopeID string, err erro
 // the worker subprocess, builds a Host, fires off Host.Serve, and waits
 // for the handshake (so the first PushTrigger lands after the worker's
 // IPC client is reading).
-func (m *Manager) spawnLocked(ctx context.Context) error {
+func (m *Bridge) spawnLocked(ctx context.Context) error {
 	leaseID := fmt.Sprintf("lease-%s-%d", m.cfg.ChannelID, m.leaseSeq.Add(1))
 	workerID := fmt.Sprintf("%s-%s-%d", m.cfg.WorkerIDPrefix, m.cfg.ChannelID, m.spawnSeq.Add(1))
 
-	if _, ok, err := m.cfg.LeaseStore.Acquire(
+	lease, ok, err := m.cfg.LeaseStore.Acquire(
 		ctx,
 		string(m.cfg.AgentID),
 		workerID,
 		m.cfg.FencingToken,
 		m.cfg.DaemonEpoch,
 		m.cfg.NowFn(),
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("lease acquire: %w", err)
-	} else if !ok {
+	}
+	if !ok {
 		return errors.New("workerhost: lease acquire conflict")
 	}
+	lease.ChannelID = m.cfg.ChannelID
 
 	// PreSpawn: composition root may inject extra env (e.g.
 	// COAGENT_CHANNEL_CONTEXT_FILE pointing at a freshly-written
 	// channel context snapshot for the LLM system prompt). Errors are
-	// non-fatal — the manager logs nothing today (no logger plumbed)
+	// non-fatal — the bridge logs nothing today (no logger plumbed)
 	// and proceeds with only the static WorkerEnv. Worker boots
 	// cleanly without the appendix, matching the legacy behaviour.
 	spawnEnv := m.cfg.WorkerEnv
@@ -317,7 +321,7 @@ func (m *Manager) spawnLocked(ctx context.Context) error {
 
 	proc, err := m.cfg.Spawner.Spawn(m.cfg.ServeCtx, leaseID, spawnEnv)
 	if err != nil {
-		_ = m.cfg.LeaseStore.Release(ctx, string(m.cfg.AgentID))
+		_ = m.cfg.LeaseStore.Release(ctx, lease.ID)
 		return fmt.Errorf("spawn: %w", err)
 	}
 
@@ -334,16 +338,17 @@ func (m *Manager) spawnLocked(ctx context.Context) error {
 	})
 	if err != nil {
 		_ = proc.Kill()
-		_ = m.cfg.LeaseStore.Release(ctx, string(m.cfg.AgentID))
+		_ = m.cfg.LeaseStore.Release(ctx, lease.ID)
 		return fmt.Errorf("host: %w", err)
 	}
 
 	sess := &workerSession{
-		leaseID:  leaseID,
-		workerID: workerID,
-		proc:     proc,
-		host:     host,
-		done:     make(chan struct{}),
+		leaseID:   leaseID,
+		lockLease: lease,
+		workerID:  workerID,
+		proc:      proc,
+		host:      host,
+		done:      make(chan struct{}),
 	}
 	m.cur = sess
 
@@ -359,7 +364,7 @@ func (m *Manager) spawnLocked(ctx context.Context) error {
 		_ = proc.Wait()
 		// Release lease; ignore err — best-effort cleanup.
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = m.cfg.LeaseStore.Release(releaseCtx, string(m.cfg.AgentID))
+		_ = m.cfg.LeaseStore.Release(releaseCtx, sess.lockLease.ID)
 		cancel()
 		close(sess.done)
 	}()
@@ -388,8 +393,8 @@ func (m *Manager) spawnLocked(ctx context.Context) error {
 }
 
 // Close terminates the active worker session (if any) and marks the
-// manager as no longer accepting triggers. Idempotent.
-func (m *Manager) Close(ctx context.Context) error {
+// bridge as no longer accepting triggers. Idempotent.
+func (m *Bridge) Close(ctx context.Context) error {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -413,7 +418,7 @@ func (m *Manager) Close(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(3 * time.Second):
-		return errors.New("workerhost: manager close timeout")
+		return errors.New("workerhost: bridge close timeout")
 	}
 	return nil
 }
@@ -422,7 +427,7 @@ func (m *Manager) Close(ctx context.Context) error {
 // no worker is alive OR when the current session's serve goroutine has
 // already exited (worker crash / Close-in-progress). The next
 // OnTrigger will clear the dead session pointer and re-spawn.
-func (m *Manager) CurrentWorkerID() string {
+func (m *Bridge) CurrentWorkerID() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.cur == nil || m.cur.dead() {
@@ -432,6 +437,6 @@ func (m *Manager) CurrentWorkerID() string {
 }
 
 // PushDropCount returns the number of trigger pushes that failed or timed out.
-func (m *Manager) PushDropCount() int64 {
+func (m *Bridge) PushDropCount() int64 {
 	return m.pushDrop.Load()
 }
