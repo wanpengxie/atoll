@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -20,6 +21,7 @@ type HandlerFn func(ctx context.Context, actorID actor.ActorID, env *message.Env
 // This package keeps no per-actor state — that lives in supervisor
 // (lifecycle) + adapter manager. Deliverer is the routing seam.
 type Deliverer struct {
+	mu       sync.RWMutex
 	handlers map[actor.ActorID]HandlerFn
 }
 
@@ -28,6 +30,8 @@ func NewDeliverer() *Deliverer { return &Deliverer{handlers: make(map[actor.Acto
 
 // Register adds a handler. Replaces an existing handler for the same id.
 func (d *Deliverer) Register(actorID actor.ActorID, fn HandlerFn) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if fn == nil {
 		delete(d.handlers, actorID)
 		return
@@ -41,6 +45,9 @@ func (d *Deliverer) Deliver(ctx context.Context, audience []actor.ActorID, env *
 	if env == nil {
 		return errors.New("scheduler: deliver nil envelope")
 	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
 	var errs []error
 	for _, id := range audience {
 		fn, ok := d.handlers[id]
