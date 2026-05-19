@@ -42,7 +42,113 @@ const (
 	// friendly base prompt (L4 §2.4 + L0-L2 platform teaching).
 	EnvKeyChannelType  = "COAGENT_CHANNEL_TYPE"
 	EnvKeyDomainPrompt = "COAGENT_DOMAIN_PROMPT"
+
+	// EnvKeyChannelContextFile points at a per-spawn JSON snapshot of
+	// the channel's actor_registry / type_registry / device_sessions
+	// rows. The daemon writes it at worker spawn time (see
+	// runtime/daemon.ensureChannelAgent) and cmd/worker loads it before
+	// constructing the kimi Bridge so the worker's system prompt knows
+	// which tool actors / business types / active devices exist in its
+	// channel — without that injection the agent is blind and falls
+	// back to host-filesystem exploration on "what tools do I have"
+	// style questions.
+	//
+	// Empty / missing file is allowed (legacy channels) — the bridge
+	// emits the L0-L2 + L4 prompt without the channel-context appendix.
+	EnvKeyChannelContextFile = "COAGENT_CHANNEL_CONTEXT_FILE"
 )
+
+// ChannelContext is the static per-spawn snapshot of the channel's
+// registries that the daemon hands to the worker so the LLM system
+// prompt can carry an authoritative list of "who lives in this channel
+// and what types they handle". The struct is intentionally narrow —
+// only fields the LLM needs to answer "what tools do I have / who can
+// I talk to" without re-resolving anything at runtime.
+//
+// Loaded once at worker spawn (JSON file pointed at by
+// EnvKeyChannelContextFile) and folded into BuildBasePrompt. The
+// prompt-cache stays warm because the snapshot is byte-stable across
+// turns within a single worker subprocess; channel-registry mutations
+// inside the same worker session are NOT reflected — that's a
+// deliberate trade so prompt caching survives. If a registry change
+// must reach the LLM mid-session, push it as a regular conversation
+// message (the dynamic channel), not as a prompt mutation.
+type ChannelContext struct {
+	// ChannelID is the channel this snapshot describes. Surfaces in the
+	// rendered prompt header so a debug operator can grep session logs.
+	ChannelID string `json:"channel_id,omitempty"`
+
+	// ChannelType is the L4 channel-template key (e.g. "xhs-creator").
+	// Empty for legacy / generic channels.
+	ChannelType string `json:"channel_type,omitempty"`
+
+	// Actors is the active set from actor_registry (deregistered rows
+	// filtered out). Includes system / human members / agent self /
+	// tool adapters. Order: actor_id ascending (matches store.ActorRegistry.ListActive).
+	Actors []ActorInfo `json:"actors,omitempty"`
+
+	// Types is the channel-local type_registry list — every business
+	// type the harness will accept, plus its handler actor binding and
+	// allowed kinds. The LLM uses this to pick which envelope.type to
+	// emit for a given user request.
+	Types []TypeInfo `json:"types,omitempty"`
+
+	// Devices is the active device_sessions list (per-daemon mirror of
+	// server.device_sessions). Surfaces session_id / device_id /
+	// state — enough for the LLM to confirm that e.g. the xhs Chrome
+	// extension is online before promising a publish flow.
+	Devices []DeviceInfo `json:"devices,omitempty"`
+}
+
+// ActorInfo is one actor_registry row projected into the LLM prompt.
+type ActorInfo struct {
+	ActorID     string `json:"actor_id"`
+	Kind        string `json:"kind"`                   // human | agent | tool | system
+	Binding     string `json:"binding,omitempty"`      // empty for human/system; in_process / via_server_transit / outbound_http for tools
+	DisplayName string `json:"display_name,omitempty"` // optional human-readable label
+}
+
+// TypeInfo is one type_registry row projected into the LLM prompt.
+type TypeInfo struct {
+	Type           string   `json:"type"`             // e.g. "xhs.publish"
+	HandlerActorID string   `json:"handler_actor_id"` // e.g. "tool:xhs-adapter"
+	HandlerBinding string   `json:"handler_binding,omitempty"`
+	AllowedKinds   []string `json:"allowed_kinds,omitempty"` // subset of {event, request, response}
+}
+
+// DeviceInfo is one device_sessions row projected into the LLM prompt.
+type DeviceInfo struct {
+	SessionID  string `json:"session_id"`
+	DeviceID   string `json:"device_id,omitempty"`
+	DeviceType string `json:"device_type,omitempty"`
+	State      string `json:"state,omitempty"` // pending | ready | active | offline | expired | revoked
+}
+
+// LoadChannelContextFile reads a JSON ChannelContext from disk. Returns
+// a zero ChannelContext + ok=false when the path is empty, the file is
+// missing, or the JSON is malformed — these are non-fatal so the
+// worker falls back to "no channel context appendix" rather than
+// crashing on a stale daemon spawn env. The error (when non-nil) is
+// returned alongside so cmd/worker can log it on stderr without
+// killing the boot.
+func LoadChannelContextFile(path string) (ChannelContext, bool, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ChannelContext{}, false, nil
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // path comes from the daemon spawn env, not user input
+	if err != nil {
+		return ChannelContext{}, false, fmt.Errorf("kimi: channel context read %q: %w", path, err)
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return ChannelContext{}, false, nil
+	}
+	var ctx ChannelContext
+	if err := json.Unmarshal(data, &ctx); err != nil {
+		return ChannelContext{}, false, fmt.Errorf("kimi: channel context json decode %q: %w", path, err)
+	}
+	return ctx, true, nil
+}
 
 // Config drives a Bridge. All fields optional unless documented; sane
 // defaults come from NewConfigFromEnv.
@@ -70,8 +176,11 @@ type Config struct {
 	// long as it stays byte-stable across turns.
 	SystemPrompt string
 
-	// MaxTurns caps the bridge — same semantics as MockBridge. Defaults
-	// to 32 (more than 8 because LLM turns are larger units of work).
+	// MaxTurns caps the bridge — same semantics as MockBridge. A
+	// non-positive value means UNLIMITED: the LLM itself decides when
+	// to stop via stop_reason=end_turn / stop, and external cancellation
+	// (ctx done, IPC EOF) is the only hard-stop signal. Tests can set
+	// a positive cap to bound runs deterministically.
 	MaxTurns int
 
 	// WorkDir is the directory go-kimi uses for sessions / wire log /
@@ -166,9 +275,9 @@ func NewBridge(cfg Config) (*Bridge, error) {
 	if cfg.ProviderType == "" {
 		cfg.ProviderType = "anthropic"
 	}
-	if cfg.MaxTurns <= 0 {
-		cfg.MaxTurns = 32
-	}
+	// MaxTurns <= 0 means UNLIMITED. The Run loop checks `> 0` before
+	// enforcing the cap so daemon-spawned bridges never get prematurely
+	// truncated.
 	if cfg.NowFn == nil {
 		cfg.NowFn = func() int64 { return time.Now().UnixMilli() }
 	}
@@ -242,13 +351,17 @@ func (b *Bridge) Run(ctx context.Context, ipc IPCFacade) error {
 				return nil
 			}
 			turns++
-			if err := b.runTurn(ctx, ipc, agent, wireCh, payload); err != nil {
+			if err := b.runTurn(ctx, ipc, agent, wireCh, payload, turns); err != nil {
 				// runTurn already emitted a terminal envelope; surface
 				// the error to Runtime so the caller can decide whether
 				// to exit non-zero.
 				return err
 			}
-			if turns >= b.cfg.MaxTurns {
+			// MaxTurns > 0 enforces a cap (deterministic exit for tests).
+			// MaxTurns <= 0 (the production default) lets the LLM drive
+			// turn cadence — stop_reason=end_turn / stop on the wire is
+			// the natural exit. ctx.Done() / triggers close still terminate.
+			if b.cfg.MaxTurns > 0 && turns >= b.cfg.MaxTurns {
 				if err := b.emitTerminal(ctx, ipc, payload, "agent.text", map[string]any{
 					"text":        "kimi bridge reached max_turns",
 					"next_action": "done",
@@ -287,12 +400,16 @@ func (b *Bridge) buildAgent(provider llm.ChatProvider, emitter wire.Emitter) (ki
 // runTurn drives one Agent.Run call: it composes the user input from
 // the trigger envelope, kicks the agent in a goroutine, and consumes
 // wire events until the turn completes or the agent errors out.
+//
+// turnIndex is 1-based; it is stamped on every envelope this turn emits
+// so the UI / observability layer can order progress vs. text events.
 func (b *Bridge) runTurn(
 	ctx context.Context,
 	ipc IPCFacade,
 	agent kimiAgent,
 	wireCh chan wire.WireMessage,
 	trigger TriggerPayload,
+	turnIndex int,
 ) error {
 	input, err := composeUserInput(trigger)
 	if err != nil {
@@ -313,7 +430,7 @@ func (b *Bridge) runTurn(
 		close(agentDone)
 	}()
 
-	consumeErr := b.consumeWire(turnCtx, ipc, wireCh, agentDone, trigger)
+	consumeErr := b.consumeWire(turnCtx, ipc, wireCh, agentDone, trigger, turnIndex)
 	if consumeErr != nil {
 		cancel()
 		select {
@@ -333,25 +450,48 @@ func (b *Bridge) runTurn(
 	return nil
 }
 
-// consumeWire pure-buffers the wire stream and emits exactly ONE
-// terminal envelope at TurnEnd (or zero envelopes if agentDone closes
-// without a TurnEnd — in that case the caller emits the failed terminal
-// envelope from the run-error path).
+// turnState tracks the in-flight signals the bridge observes inside a
+// single Agent.Run wire stream. Each go-kimi soul "step" inside that run
+// emits a batch of ToolCallRequest events, followed by ToolCallResult
+// events as the tools complete. We use the first ToolCallResult of a
+// batch as the boundary to flush one `agent.progress` envelope: the LLM
+// finished one reasoning step (typed by `step_index`), is about to feed
+// tool results back to the next inference, and the UI gets a process
+// bubble so the user is not staring at silence for 30-60s.
+//
+// On TurnEnd the bridge emits the single `agent.text` terminal envelope.
+// Stream-level TextDelta keeps buffering into the final text — never as
+// envelope spam (chunk-spam was explicitly excluded by owner).
+type turnState struct {
+	textBuf       strings.Builder
+	pendingTools  []wireToolCall
+	stepIndex     int
+	progressEmits int
+}
+
+// consumeWire reads the wire stream and:
+//   - buffers TextDelta into the final text accumulator,
+//   - collects ToolCallRequest events into per-step batches,
+//   - emits one `agent.progress` envelope at each step boundary
+//     (first ToolCallResult after a ToolCallRequest batch),
+//   - emits one terminal `agent.text` envelope on TurnEnd.
 //
 // LLM streaming chunks are a transport-layer artifact and MUST NOT leak
-// into the v4 envelope layer. Per v4-message-definition.md §single-response,
-// each request gets at most one response envelope; progress (if ever
-// needed) would go through a dedicated <type>.progress event, never as
-// envelope spam keyed off TextDelta cadence. Owner decision (M1.6):
-// zero intermediate envelopes, one terminal envelope per turn.
+// into the v4 envelope layer (the One Law: business change = new
+// message; a chunk is not a business change). Per
+// v4-message-definition.md §single-response a request gets one final
+// response envelope; intermediate progress goes through the
+// <type>.progress event channel, here `agent.progress`. Owner decision
+// (M1.6): per-step progress + one terminal `agent.text` per turn.
 func (b *Bridge) consumeWire(
 	ctx context.Context,
 	ipc IPCFacade,
 	wireCh chan wire.WireMessage,
 	agentDone <-chan struct{},
 	trigger TriggerPayload,
+	turnIndex int,
 ) error {
-	var buffered strings.Builder
+	state := &turnState{}
 
 	for {
 		select {
@@ -369,7 +509,7 @@ func (b *Bridge) consumeWire(
 						drained = false
 						break
 					}
-					done, err := b.handleWireMsg(ctx, ipc, msg, &buffered, trigger)
+					done, err := b.handleWireMsg(ctx, ipc, msg, state, trigger, turnIndex)
 					if err != nil {
 						return err
 					}
@@ -388,7 +528,7 @@ func (b *Bridge) consumeWire(
 			if !ok {
 				return nil
 			}
-			done, err := b.handleWireMsg(ctx, ipc, msg, &buffered, trigger)
+			done, err := b.handleWireMsg(ctx, ipc, msg, state, trigger, turnIndex)
 			if err != nil {
 				return err
 			}
@@ -399,53 +539,146 @@ func (b *Bridge) consumeWire(
 	}
 }
 
-// handleWireMsg routes one wire message. TextDelta is pure buffer (no
-// emit). TurnEnd emits the single terminal envelope for the turn. The
-// boolean return signals "turn complete, stop consuming".
+// handleWireMsg routes one wire message. Returns done=true only when
+// TurnEnd fires (i.e. the turn is finished and the consumer should
+// stop reading the wire stream). Tool call request/result events are
+// folded into the per-step progress envelope as described in the
+// consumeWire godoc.
 func (b *Bridge) handleWireMsg(
 	ctx context.Context,
 	ipc IPCFacade,
 	msg wire.WireMessage,
-	buffered *strings.Builder,
+	state *turnState,
 	trigger TriggerPayload,
+	turnIndex int,
 ) (bool, error) {
 	switch m := msg.(type) {
 	case wire.TextDelta:
-		buffered.WriteString(m.Delta)
+		state.textBuf.WriteString(m.Delta)
+		return false, nil
+	case wire.ToolCallRequest:
+		state.pendingTools = append(state.pendingTools, wireToolCall{
+			ID:        m.ToolCall.ID,
+			Name:      m.ToolCall.Name,
+			Arguments: toolCallArgumentsJSON(m.ToolCall.Arguments),
+		})
+		return false, nil
+	case wire.ToolCallResult:
+		// First result after a batch of requests marks the step boundary.
+		// Flush one progress envelope summarising the step's tool calls,
+		// then clear the pending list so the next step starts fresh.
+		if len(state.pendingTools) == 0 {
+			return false, nil
+		}
+		state.stepIndex++
+		if err := b.emitTurnProgress(ctx, ipc, trigger, turnIndex, state.stepIndex, state.pendingTools); err != nil {
+			return false, err
+		}
+		state.pendingTools = state.pendingTools[:0]
+		state.progressEmits++
 		return false, nil
 	case wire.TurnEnd:
-		return true, b.emitTurnEnd(ctx, ipc, trigger, m, buffered.String())
+		// If the LLM yielded with tool_use but the tools never resolved
+		// (e.g. provider error mid-step) we still flush any pending
+		// requests as a progress envelope so the UI shows what the agent
+		// attempted before the final text.
+		if len(state.pendingTools) > 0 {
+			state.stepIndex++
+			if err := b.emitTurnProgress(ctx, ipc, trigger, turnIndex, state.stepIndex, state.pendingTools); err != nil {
+				return false, err
+			}
+			state.pendingTools = state.pendingTools[:0]
+			state.progressEmits++
+		}
+		return true, b.emitTurnEnd(ctx, ipc, trigger, m, state.textBuf.String(), turnIndex)
 	default:
-		// Other wire events (ToolCallReq, etc.) are out of M1.6 scope —
-		// dropped without envelope emission.
 		return false, nil
 	}
 }
 
-// emitTurnEnd emits the single terminal envelope for the completed turn.
-// `accumulated` is the full TextDelta-buffered string; the TurnEnd's own
-// Output (when populated) is preferred, falling back to the buffered
-// stream — providers vary on which one carries the final text.
+// toolCallArgumentsJSON normalises go-kimi's `types.JsonType` (= any)
+// argument blob into the json.RawMessage the bridge stores per pending
+// tool call. Empty / nil arguments yield an empty RawMessage — the
+// preview builder treats that as "no preview available".
+func toolCallArgumentsJSON(args any) json.RawMessage {
+	if args == nil {
+		return nil
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// emitTurnProgress writes one agent.progress envelope summarising a
+// completed step. Payload shape:
+//
+//	{
+//	  "turn_index":  <1-based bridge turn>,
+//	  "step_index":  <1-based within-turn step>,
+//	  "tool_calls":  [{"name": "...", "preview": "..."}, ...],
+//	}
+//
+// Visibility=public so the UI surfaces it. The progress envelope sits
+// next to the eventual agent.text terminal envelope under the same
+// parent_id / correlation_id, so harness ordering keeps them grouped.
+func (b *Bridge) emitTurnProgress(
+	ctx context.Context,
+	ipc IPCFacade,
+	trigger TriggerPayload,
+	turnIndex int,
+	stepIndex int,
+	tools []wireToolCall,
+) error {
+	payload := map[string]any{
+		"turn_index": turnIndex,
+		"step_index": stepIndex,
+	}
+	if summary := summariseToolCalls(tools, 240); len(summary) > 0 {
+		payload["tool_calls"] = summary
+	}
+	return b.emitEnvelope(ctx, ipc, trigger, "agent.progress", message.VisibilityPublic, payload)
+}
+
+// emitTurnEnd writes the single terminal agent.text envelope for one
+// completed Agent.Run. Per-step progress envelopes have already been
+// emitted by handleWireMsg at each ToolCallResult boundary — this
+// function only produces the final reply.
+//
+// `accumulated` is the full TextDelta-buffered string; the TurnEnd's
+// own Output ContentParts (text + think) are preferred, falling back to
+// the buffered stream when Output is empty (providers vary).
+//
+// turnIndex is 1-based and stamps `payload.turn_index` so the UI can
+// thread the envelope to the user's trigger.
 func (b *Bridge) emitTurnEnd(
 	ctx context.Context,
 	ipc IPCFacade,
 	trigger TriggerPayload,
 	end wire.TurnEnd,
 	accumulated string,
+	turnIndex int,
 ) error {
+	stop := strings.ToLower(strings.TrimSpace(end.StopReason))
+	parts := parseOutputParts(end.Output)
+
 	nextAction := "continue"
-	switch strings.ToLower(strings.TrimSpace(end.StopReason)) {
-	case "end_turn", "stop", "completed", "finish":
+	switch stop {
+	case "end_turn", "stop", "completed", "finish", "":
 		nextAction = "done"
 	case "max_tokens":
 		nextAction = "max_tokens"
 	case "tool_use":
-		// LLM yielded back to wait for an external tool call. In M1.6
-		// we treat this as a logical pause (still done from the agent's
-		// turn perspective).
-		nextAction = "tool_use"
+		// go-kimi's soul aggregates tool steps internally and only
+		// emits TurnEnd at Agent.Run completion. Seeing stop_reason=
+		// tool_use at the bridge boundary means the run ended while
+		// the LLM was still yielding — surface as `done` so the trigger
+		// turn closes cleanly; per-step progress bubbles already gave
+		// the UI visibility into what was attempted.
+		nextAction = "done"
 	}
-	text := contentPartsToText(end.Output)
+	text := parts.text
 	if text == "" {
 		text = accumulated
 	}
@@ -453,6 +686,7 @@ func (b *Bridge) emitTurnEnd(
 		"text":        text,
 		"next_action": nextAction,
 		"stop_reason": end.StopReason,
+		"turn_index":  turnIndex,
 	}
 	return b.emitEnvelope(ctx, ipc, trigger, "agent.text", message.VisibilityPublic, payload)
 }
@@ -644,52 +878,156 @@ func classifyLLMError(err error) string {
 	return "llm_unknown"
 }
 
-// contentPartsToText flattens kimi ContentParts (text + tool_use parts)
-// into the plain-text representation we emit on the public envelope.
-// Tool use parts are dropped in M1.6 (no UI consumer yet).
-func contentPartsToText(parts any) string {
+// outputParts is the bridge-side breakdown of one TurnEnd.Output slice
+// into the three flavours we care about: plain text (the public reply),
+// tool calls (intermediate progress signal), and thinking (internal
+// reasoning preview for progress envelopes).
+type outputParts struct {
+	text     string
+	tools    []wireToolCall
+	thinking string // accumulated raw think text (pre-trim)
+}
+
+// wireToolCall is the JSON-shape of one ToolCallPart we decode from the
+// TurnEnd output stream. Field names align with go-kimi's wire format
+// so json.Unmarshal round-trips without a translator.
+type wireToolCall struct {
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+}
+
+// parseOutputParts flattens kimi ContentParts (text / think / tool_call)
+// into outputParts. Reflection-free JSON round-trip — we don't want to
+// pull go-kimi's types surface into the adapter's import set.
+func parseOutputParts(parts any) outputParts {
+	var out outputParts
 	if parts == nil {
-		return ""
+		return out
 	}
-	// The go-kimi types.ContentParts is a []types.ContentPart slice with
-	// a per-part TextPart variant. We use reflection-free JSON
-	// marshaling because we don't want to import the entire types
-	// package surface here (keeps the adapter dependency footprint
-	// minimal). The shape is well-known.
 	raw, err := json.Marshal(parts)
 	if err != nil {
-		return ""
+		return out
 	}
 	var slice []struct {
-		Type string `json:"type"`
-		Text string `json:"text,omitempty"`
+		Type     string        `json:"type"`
+		Text     string        `json:"text,omitempty"`
+		Think    string        `json:"think,omitempty"`
+		ToolCall *wireToolCall `json:"tool_call,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &slice); err != nil {
-		// Fall back to the raw JSON so we don't black-hole content
-		// when the format changes upstream.
-		return string(raw)
+		return out
 	}
-	var b strings.Builder
+	var (
+		textBuf  strings.Builder
+		thinkBuf strings.Builder
+	)
 	for i := range slice {
-		if slice[i].Type == "text" || slice[i].Text != "" {
-			b.WriteString(slice[i].Text)
+		switch slice[i].Type {
+		case "text":
+			textBuf.WriteString(slice[i].Text)
+		case "think":
+			thinkBuf.WriteString(slice[i].Think)
+		case "tool_call":
+			if slice[i].ToolCall != nil {
+				out.tools = append(out.tools, *slice[i].ToolCall)
+			}
+		default:
+			// Unknown discriminator. If there's a text field anyway,
+			// take it (defensive — providers sometimes drop the `type`
+			// for plain text turns).
+			if slice[i].Text != "" {
+				textBuf.WriteString(slice[i].Text)
+			}
 		}
 	}
-	return b.String()
+	out.text = textBuf.String()
+	out.thinking = thinkBuf.String()
+	return out
+}
+
+// summariseToolCalls builds the `tool_calls` array carried on
+// agent.progress envelopes. Each entry is `{name, preview}` where
+// preview is a short truncated string built from the arguments JSON
+// — enough for an operator skimming the channel log to recognise what
+// the agent is doing without exposing the full payload.
+func summariseToolCalls(tools []wireToolCall, maxPreview int) []map[string]string {
+	if len(tools) == 0 {
+		return nil
+	}
+	if maxPreview <= 0 {
+		maxPreview = 200
+	}
+	out := make([]map[string]string, 0, len(tools))
+	for i := range tools {
+		entry := map[string]string{"name": tools[i].Name}
+		preview := buildToolPreview(tools[i].Arguments)
+		if preview != "" {
+			if len(preview) > maxPreview {
+				preview = preview[:maxPreview] + "…"
+			}
+			entry["preview"] = preview
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// buildToolPreview turns a tool_call.arguments JSON blob into a one-line
+// preview. Heuristic: when the payload is an object, prefer the first
+// string-valued field (covers shell.cmd / read_file.path / write_file.path
+// shapes). Fall back to the raw JSON when no such field exists.
+func buildToolPreview(args json.RawMessage) string {
+	if len(args) == 0 {
+		return ""
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(args, &obj); err != nil {
+		return strings.TrimSpace(string(args))
+	}
+	for _, key := range []string{"cmd", "command", "path", "file", "query", "input", "url"} {
+		if v, ok := obj[key].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	// No conventional key — encode back as a single compact JSON line.
+	compact, err := json.Marshal(obj)
+	if err != nil {
+		return strings.TrimSpace(string(args))
+	}
+	return string(compact)
 }
 
 // BuildBasePrompt assembles the prompt-cache friendly stable prefix
 // for the kimi system prompt. Layout:
 //
 //	[L0-L2 platform teaching]
+//	[Channel context appendix — actors + types + devices]
 //	[L4 domain prompt — from COAGENT_DOMAIN_PROMPT]
 //
 // channelType is purely informational (helps a debug operator grep
 // session logs). Empty COAGENT_DOMAIN_PROMPT (legacy channels) yields
-// the platform prompt alone.
-func BuildBasePrompt(channelType, domainPrompt string) string {
+// the platform prompt alone. A zero ChannelContext is also accepted —
+// the appendix is omitted and the prompt is byte-identical to the
+// pre-channel-context behaviour, so legacy tests pass unchanged.
+//
+// The channel context section sits BETWEEN platform teaching and the
+// domain prompt so the LLM reads the L0-L2 envelope contract first
+// ("what is a coagent worker"), then sees the concrete actors / types
+// it can address inside this channel, then finally the L4 domain
+// playbook ("for an xhs publish do …"). That ordering makes the
+// domain prompt's tool references (xhs.publish, xhs.search …)
+// directly resolvable against the type list rendered immediately
+// above it.
+func BuildBasePrompt(channelType, domainPrompt string, channelCtx ChannelContext) string {
 	var b strings.Builder
 	b.WriteString(platformTeachingPrompt)
+
+	if appendix := renderChannelContext(channelCtx); appendix != "" {
+		b.WriteString("\n\n")
+		b.WriteString(appendix)
+	}
+
 	domain := strings.TrimSpace(domainPrompt)
 	if domain != "" {
 		b.WriteString("\n\n")
@@ -700,6 +1038,106 @@ func BuildBasePrompt(channelType, domainPrompt string) string {
 		}
 		b.WriteString(domain)
 	}
+	return b.String()
+}
+
+// renderChannelContext folds the registry snapshot into a markdown
+// section the LLM can parse. Returns "" when the snapshot is empty so
+// BuildBasePrompt skips the appendix entirely (legacy channels stay
+// byte-identical to pre-injection behaviour).
+//
+// Format choice — markdown, not yaml, because:
+//   - the rest of the system prompt is markdown
+//   - LLMs index tables ("| col | col |") + bullet lists particularly well
+//   - one read pass at spawn is cheap, and the result is cached
+//
+// Field order matches the struct definition above so the rendering
+// stays deterministic across builds (prompt cache hits depend on
+// byte-stable output).
+func renderChannelContext(c ChannelContext) string {
+	if len(c.Actors) == 0 && len(c.Types) == 0 && len(c.Devices) == 0 && c.ChannelID == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("# Channel context")
+	if c.ChannelType != "" {
+		b.WriteString(" (")
+		b.WriteString(c.ChannelType)
+		b.WriteString(")")
+	}
+	b.WriteString("\n")
+	if c.ChannelID != "" {
+		b.WriteString("channel_id: ")
+		b.WriteString(c.ChannelID)
+		b.WriteString("\n")
+	}
+
+	if len(c.Actors) > 0 {
+		b.WriteString("\n## Actors in this channel\n")
+		for _, a := range c.Actors {
+			b.WriteString("- ")
+			b.WriteString(a.ActorID)
+			b.WriteString(" (kind=")
+			if a.Kind == "" {
+				b.WriteString("?")
+			} else {
+				b.WriteString(a.Kind)
+			}
+			if a.Binding != "" {
+				b.WriteString(", binding=")
+				b.WriteString(a.Binding)
+			}
+			b.WriteString(")")
+			if a.DisplayName != "" {
+				b.WriteString(" — ")
+				b.WriteString(a.DisplayName)
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	if len(c.Types) > 0 {
+		b.WriteString("\n## Tool / business types available\n")
+		b.WriteString("| type | handler_actor_id | binding | allowed_kinds |\n")
+		b.WriteString("|---|---|---|---|\n")
+		for _, t := range c.Types {
+			b.WriteString("| ")
+			b.WriteString(t.Type)
+			b.WriteString(" | ")
+			b.WriteString(t.HandlerActorID)
+			b.WriteString(" | ")
+			if t.HandlerBinding != "" {
+				b.WriteString(t.HandlerBinding)
+			}
+			b.WriteString(" | ")
+			b.WriteString(strings.Join(t.AllowedKinds, ", "))
+			b.WriteString(" |\n")
+		}
+		b.WriteString("\nTo call a tool, emit an envelope with the matching type, kind=request, and audience=[handler_actor_id]. The harness routes the request; the tool replies with kind=response carrying the same correlation_id.\n")
+	}
+
+	if len(c.Devices) > 0 {
+		b.WriteString("\n## Active device sessions\n")
+		for _, d := range c.Devices {
+			b.WriteString("- ")
+			b.WriteString(d.SessionID)
+			if d.DeviceType != "" {
+				b.WriteString(" (")
+				b.WriteString(d.DeviceType)
+				if d.DeviceID != "" {
+					b.WriteString("/")
+					b.WriteString(d.DeviceID)
+				}
+				b.WriteString(")")
+			}
+			if d.State != "" {
+				b.WriteString(" state=")
+				b.WriteString(d.State)
+			}
+			b.WriteString("\n")
+		}
+	}
+
 	return b.String()
 }
 

@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	kimierrors "github.com/wanpengxie/go-kimi/pkg/kimi/errors"
+	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
 
 	"github.com/wanpengxie/ActOS/adapters/llm/kimi"
@@ -143,17 +146,20 @@ func TestNewConfigFromEnv_ReadsAllFields(t *testing.T) {
 }
 
 func TestBuildBasePrompt_EmptyDomain(t *testing.T) {
-	got := kimi.BuildBasePrompt("group", "")
+	got := kimi.BuildBasePrompt("group", "", kimi.ChannelContext{})
 	if !strings.Contains(got, "coagent worker") {
 		t.Errorf("base prompt missing platform teaching: %q", got)
 	}
 	if strings.Contains(got, "Channel template") {
 		t.Errorf("base prompt should omit Channel template heading when domain empty")
 	}
+	if strings.Contains(got, "Channel context") {
+		t.Errorf("base prompt should omit Channel context when ChannelContext zero")
+	}
 }
 
 func TestBuildBasePrompt_WithDomain(t *testing.T) {
-	got := kimi.BuildBasePrompt("xhs-creator", "You handle xhs-creator workflow.")
+	got := kimi.BuildBasePrompt("xhs-creator", "You handle xhs-creator workflow.", kimi.ChannelContext{})
 	if !strings.Contains(got, "coagent worker") {
 		t.Error("missing platform teaching")
 	}
@@ -162,6 +168,95 @@ func TestBuildBasePrompt_WithDomain(t *testing.T) {
 	}
 	if !strings.Contains(got, "xhs-creator workflow") {
 		t.Error("missing domain prompt body")
+	}
+}
+
+// TestBuildBasePrompt_WithChannelContext exercises the channel-context
+// appendix (M1.6 follow-up — agent self-awareness fix). Asserts that
+// actor_registry rows, type_registry rows, and device_sessions rows
+// render into the prompt as markdown so the LLM can answer "what
+// tools do I have / who else is in this channel" without exploring
+// host filesystem.
+func TestBuildBasePrompt_WithChannelContext(t *testing.T) {
+	ctx := kimi.ChannelContext{
+		ChannelID:   "f9831154-ch",
+		ChannelType: "xhs-creator",
+		Actors: []kimi.ActorInfo{
+			{ActorID: "system", Kind: "system"},
+			{ActorID: "agent:channel-agent", Kind: "agent", DisplayName: "channel agent"},
+			{ActorID: "tool:xhs-adapter", Kind: "tool", Binding: "via_server_transit"},
+			{ActorID: "user:2cc317ee", Kind: "human", DisplayName: "Wanpeng Xie"},
+		},
+		Types: []kimi.TypeInfo{
+			{Type: "xhs.publish", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "via_server_transit", AllowedKinds: []string{"request", "response", "event"}},
+			{Type: "xhs.search", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "via_server_transit", AllowedKinds: []string{"request", "response"}},
+			{Type: "xhs.note.fetch", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "via_server_transit", AllowedKinds: []string{"request", "response"}},
+		},
+		Devices: []kimi.DeviceInfo{
+			{SessionID: "de67872c", DeviceID: "chrome-default", DeviceType: "xhs-chrome", State: "active"},
+		},
+	}
+	got := kimi.BuildBasePrompt("xhs-creator", "domain body", ctx)
+	for _, want := range []string{
+		"# Channel context (xhs-creator)",
+		"channel_id: f9831154-ch",
+		"## Actors in this channel",
+		"tool:xhs-adapter",
+		"binding=via_server_transit",
+		"## Tool / business types available",
+		"xhs.publish",
+		"xhs.search",
+		"xhs.note.fetch",
+		"## Active device sessions",
+		"de67872c",
+		"state=active",
+		"domain body",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("base prompt missing %q\nfull prompt:\n%s", want, got)
+		}
+	}
+}
+
+// TestLoadChannelContextFile_RoundTrip ensures the JSON shape the
+// daemon writes matches what cmd/worker reads. Guards the env-file
+// hand-off contract.
+func TestLoadChannelContextFile_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ctx.json")
+	original := kimi.ChannelContext{
+		ChannelID:   "abc",
+		ChannelType: "xhs-creator",
+		Actors:      []kimi.ActorInfo{{ActorID: "system", Kind: "system"}},
+		Types:       []kimi.TypeInfo{{Type: "xhs.publish", HandlerActorID: "tool:xhs-adapter", AllowedKinds: []string{"request"}}},
+		Devices:     []kimi.DeviceInfo{{SessionID: "s1", State: "active"}},
+	}
+	buf, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buf, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := kimi.LoadChannelContextFile(path)
+	if err != nil {
+		t.Fatalf("LoadChannelContextFile: %v", err)
+	}
+	if !ok {
+		t.Fatal("LoadChannelContextFile ok=false")
+	}
+	if got.ChannelID != "abc" || len(got.Actors) != 1 || len(got.Types) != 1 || len(got.Devices) != 1 {
+		t.Errorf("round-trip mismatch: %#v", got)
+	}
+
+	// Empty path → ok=false, no error.
+	if _, ok, err := kimi.LoadChannelContextFile(""); err != nil || ok {
+		t.Errorf("empty path: want ok=false err=nil, got ok=%v err=%v", ok, err)
+	}
+
+	// Missing file → error.
+	if _, _, err := kimi.LoadChannelContextFile(filepath.Join(dir, "missing.json")); err == nil {
+		t.Error("missing file: want error, got nil")
 	}
 }
 
@@ -246,6 +341,157 @@ func TestBridge_RunEmitsSingleTerminalOnTextDelta(t *testing.T) {
 	}
 	if last.Sender.ID != ipc.WorkerActorID() {
 		t.Errorf("sender.id=%q want %q", last.Sender.ID, ipc.WorkerActorID())
+	}
+}
+
+// TestBridge_RunEmitsProgressPerToolStep — when the wire stream carries
+// ToolCallRequest → ToolCallResult pairs inside one Agent.Run (the
+// go-kimi soul "step" boundary), the bridge MUST emit one
+// `agent.progress` envelope per step, BEFORE the terminal `agent.text`
+// envelope. With 2 step boundaries we expect 2 progress + 1 text.
+func TestBridge_RunEmitsProgressPerToolStep(t *testing.T) {
+	b := mustBridge(t)
+	ipc := newFakeIPC()
+
+	kimi.SetAgentFactory(b, func(_ kimi.AgentConfig) (kimi.Agent, error) {
+		return &scriptedAgent{
+			emitFn: func(_ context.Context, _ string) error {
+				emitter := kimi.BridgeWireEmitter(b)
+				// Step 1: one shell tool call → result.
+				if err := emitter.Emit(wire.ToolCallRequest{
+					ID: "tc-1",
+					ToolCall: types.ToolCall{
+						ID:        "tc-1",
+						Name:      "shell",
+						Arguments: map[string]any{"cmd": "ls -laR .kimi/"},
+					},
+				}); err != nil {
+					return err
+				}
+				if err := emitter.Emit(wire.ToolCallResult{
+					ID:     "tc-1",
+					Result: types.ToolResult{ToolCallID: "tc-1"},
+				}); err != nil {
+					return err
+				}
+				// Step 2: a read_file call → result.
+				if err := emitter.Emit(wire.ToolCallRequest{
+					ID: "tc-2",
+					ToolCall: types.ToolCall{
+						ID:        "tc-2",
+						Name:      "read_file",
+						Arguments: map[string]any{"path": "state.json"},
+					},
+				}); err != nil {
+					return err
+				}
+				if err := emitter.Emit(wire.ToolCallResult{
+					ID:     "tc-2",
+					Result: types.ToolResult{ToolCallID: "tc-2"},
+				}); err != nil {
+					return err
+				}
+				// Final text reply.
+				if err := emitter.Emit(wire.TextDelta{Delta: "Done — found 3 files."}); err != nil {
+					return err
+				}
+				return emitter.Emit(wire.TurnEnd{StopReason: "stop"})
+			},
+		}, nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	go func() {
+		ipc.triggers <- triggerEnv("t-prog-1")
+		close(ipc.triggers)
+	}()
+
+	if err := b.Run(ctx, ipc); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	written := ipc.Written()
+	if len(written) != 3 {
+		t.Fatalf("expected 3 envelopes (2 progress + 1 text); got %d", len(written))
+	}
+
+	// Envelope 1 — progress for step 1 (shell).
+	p1 := written[0]
+	if p1.Type != "agent.progress" {
+		t.Fatalf("written[0].type=%q want agent.progress", p1.Type)
+	}
+	if p1.Visibility != message.VisibilityPublic {
+		t.Errorf("p1 visibility=%q want public", p1.Visibility)
+	}
+	var pp1 map[string]any
+	if err := json.Unmarshal(p1.Payload, &pp1); err != nil {
+		t.Fatalf("p1 payload decode: %v", err)
+	}
+	if ti, _ := pp1["turn_index"].(float64); int(ti) != 1 {
+		t.Errorf("p1 turn_index=%v want 1", pp1["turn_index"])
+	}
+	if si, _ := pp1["step_index"].(float64); int(si) != 1 {
+		t.Errorf("p1 step_index=%v want 1", pp1["step_index"])
+	}
+	tools1, ok := pp1["tool_calls"].([]any)
+	if !ok || len(tools1) != 1 {
+		t.Fatalf("p1 tool_calls shape unexpected: %v", pp1["tool_calls"])
+	}
+	tc1, _ := tools1[0].(map[string]any)
+	if tc1["name"] != "shell" {
+		t.Errorf("p1 tool name=%v want shell", tc1["name"])
+	}
+	if got, _ := tc1["preview"].(string); !strings.Contains(got, "ls -laR") {
+		t.Errorf("p1 tool preview=%q want contains 'ls -laR'", got)
+	}
+
+	// Envelope 2 — progress for step 2 (read_file).
+	p2 := written[1]
+	if p2.Type != "agent.progress" {
+		t.Fatalf("written[1].type=%q want agent.progress", p2.Type)
+	}
+	var pp2 map[string]any
+	if err := json.Unmarshal(p2.Payload, &pp2); err != nil {
+		t.Fatalf("p2 payload decode: %v", err)
+	}
+	if si, _ := pp2["step_index"].(float64); int(si) != 2 {
+		t.Errorf("p2 step_index=%v want 2", pp2["step_index"])
+	}
+	tools2, _ := pp2["tool_calls"].([]any)
+	if len(tools2) != 1 {
+		t.Fatalf("p2 tool_calls len=%d want 1", len(tools2))
+	}
+	tc2, _ := tools2[0].(map[string]any)
+	if tc2["name"] != "read_file" {
+		t.Errorf("p2 tool name=%v want read_file", tc2["name"])
+	}
+
+	// Envelope 3 — terminal agent.text.
+	final := written[2]
+	if final.Type != "agent.text" {
+		t.Fatalf("written[2].type=%q want agent.text", final.Type)
+	}
+	var fp map[string]any
+	if err := json.Unmarshal(final.Payload, &fp); err != nil {
+		t.Fatalf("final payload decode: %v", err)
+	}
+	if fp["next_action"] != "done" {
+		t.Errorf("final next_action=%v want done", fp["next_action"])
+	}
+	if fp["text"] != "Done — found 3 files." {
+		t.Errorf("final text=%v", fp["text"])
+	}
+
+	// All three envelopes share the same correlation + parent_id.
+	for i, env := range written {
+		if env.CorrelationID != "corr-1" {
+			t.Errorf("written[%d] correlation_id=%q want corr-1", i, env.CorrelationID)
+		}
+		if env.ParentID != "t-prog-1" {
+			t.Errorf("written[%d] parent_id=%q want t-prog-1", i, env.ParentID)
+		}
 	}
 }
 

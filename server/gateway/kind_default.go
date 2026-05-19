@@ -28,6 +28,11 @@ type coreKindRule struct {
 var coreKindTable = map[string]coreKindRule{
 	"human.text":       {defaultKind: message.KindEvent, allowOverride: true},
 	"agent.text":       {defaultKind: message.KindEvent, allowOverride: true},
+	// agent.progress — intermediate process bubble (one envelope per
+	// tool-call step inside a turn). See runtime/harness/deps.go for the
+	// authoritative entry; this table mirrors it so the gateway edge
+	// fills the default kind when callers post via the public API.
+	"agent.progress":   {defaultKind: message.KindEvent, allowOverride: false},
 	"system.event":     {defaultKind: message.KindEvent, allowOverride: false},
 	"system.heartbeat": {defaultKind: message.KindEvent, allowOverride: false},
 	"file.created":     {defaultKind: message.KindEvent, allowOverride: false},

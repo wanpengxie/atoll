@@ -64,6 +64,12 @@ type CoreTypeRule struct {
 var CoreTypeTable = map[string]CoreTypeRule{
 	"human.text":       {DefaultKind: message.KindEvent, AllowOverride: true},
 	"agent.text":       {DefaultKind: message.KindEvent, AllowOverride: true},
+	// agent.progress is the intermediate "process bubble" event emitted
+	// per LLM-step (tool-call boundary) inside one trigger turn. Carries
+	// payload.turn_index + tool_calls preview so the UI can render a
+	// muted progress row while the agent is still mid-work. See
+	// v4-message-definition.md §`<type>.progress` for the protocol slot.
+	"agent.progress":   {DefaultKind: message.KindEvent, AllowOverride: false},
 	"system.event":     {DefaultKind: message.KindEvent, AllowOverride: false},
 	"system.heartbeat": {DefaultKind: message.KindEvent, AllowOverride: false},
 	"file.created":     {DefaultKind: message.KindEvent, AllowOverride: false},

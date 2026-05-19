@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -58,6 +60,23 @@ const (
 	// ScriptXHSPublish is the recognised value for EnvKeyMockScript that
 	// triggers the xhs.publish emission path.
 	ScriptXHSPublish = "xhs-publish"
+
+	// ScriptProgressMultiTurn drives the mock bridge through a
+	// deterministic "progress + final text" sequence for one trigger:
+	//   - emit N agent.progress envelopes (each carrying a turn_index +
+	//     tool_calls preview) so the UI / e2e harness can observe
+	//     intermediate per-turn updates.
+	//   - emit one terminal agent.text envelope with next_action=done.
+	//
+	// N defaults to 2 (env EnvKeyMockProgressCount overrides). Used by
+	// tests/e2e/ to assert the agent.progress contract end-to-end
+	// without standing up a real LLM.
+	ScriptProgressMultiTurn = "multi-turn-with-progress"
+
+	// EnvKeyMockProgressCount overrides the number of progress envelopes
+	// the multi-turn-with-progress script emits before the terminal
+	// agent.text. Defaults to 2.
+	EnvKeyMockProgressCount = "COAGENT_MOCK_PROGRESS_COUNT"
 
 	// EnvKeyMockDeviceSessionID — when set, the xhs-publish script
 	// stamps this value into the request payload.device_session_id so
@@ -136,10 +155,13 @@ func NewMockBridge() *MockBridge {
 }
 
 // applyDefaults backfills nil fields. Called once per Run.
+//
+// MaxTurns <= 0 means UNLIMITED — the bridge does not enforce a
+// reaction cap and relies on IPC EOF (`triggers` channel close) or
+// ctx cancellation for shutdown. cmd/worker passes 0 by default so
+// daemon-spawned workers do not get truncated mid-conversation; unit
+// tests set MaxTurns explicitly to bound the run deterministically.
 func (m *MockBridge) applyDefaults() {
-	if m.MaxTurns <= 0 {
-		m.MaxTurns = 8
-	}
 	if m.NowFn == nil {
 		m.NowFn = func() int64 { return time.Now().UnixMilli() }
 	}
@@ -249,7 +271,9 @@ func (m *MockBridge) Run(ctx context.Context, client *IPCClient) error {
 				return err
 			}
 			m.turns++
-			if m.turns >= m.MaxTurns {
+			// MaxTurns > 0 enforces a cap (used by unit tests). 0 / negative
+			// = unlimited; the loop exits on IPC EOF or ctx.Done.
+			if m.MaxTurns > 0 && m.turns >= m.MaxTurns {
 				// Single-shot mode: the per-trigger react frame already
 				// carried next_action=done — emitting a second envelope
 				// would violate the "exactly 1 agent.text per trigger"
@@ -274,6 +298,9 @@ func (m *MockBridge) Run(ctx context.Context, client *IPCClient) error {
 func (m *MockBridge) react(ctx context.Context, client *IPCClient, in ipc.TriggerPayload) error {
 	if m.Script == ScriptXHSPublish && triggerMentionsPublish(in) {
 		return m.reactXHSPublish(ctx, client, in)
+	}
+	if m.Script == ScriptProgressMultiTurn {
+		return m.reactProgressMultiTurn(ctx, client, in)
 	}
 	envType, payload := m.ReplyFn(in, m.turns+1)
 	env := message.Envelope{
@@ -369,6 +396,107 @@ func (m *MockBridge) reactXHSPublish(ctx context.Context, client *IPCClient, in 
 		Visibility:    message.VisibilityPublic,
 		Audience:      []string{"tool:xhs-adapter"},
 		Payload:       payload,
+		CorrelationID: in.CorrelationID,
+		ParentID:      in.Envelope.ID,
+		TS:            m.NowFn(),
+		TSReceived:    m.NowFn(),
+	}
+	if _, err := client.WriteMessage(ctx, env); err != nil {
+		return err
+	}
+	return nil
+}
+
+// reactProgressMultiTurn emits N agent.progress envelopes followed by
+// one terminal agent.text envelope for a single trigger. N defaults to
+// 2 (env COAGENT_MOCK_PROGRESS_COUNT overrides, max 10 to avoid log
+// floods). Progress payloads mirror the kimi bridge contract:
+//
+//	{
+//	  "turn_index": <1-based>,
+//	  "stop_reason": "tool_use",
+//	  "tool_calls":  [{"name": "...", "preview": "..."}],
+//	  "reasoning":   "<short summary>"
+//	}
+//
+// Terminal payload:
+//
+//	{
+//	  "text":        "<final reply>",
+//	  "next_action": "done",
+//	  "stop_reason": "end_turn",
+//	  "turn_index":  <N+1>
+//	}
+//
+// All envelopes carry the same correlation_id + parent_id (the trigger
+// envelope id) so the v4 harness routes them together.
+func (m *MockBridge) reactProgressMultiTurn(ctx context.Context, client *IPCClient, in ipc.TriggerPayload) error {
+	count := 2
+	if v := strings.TrimSpace(m.EnvLookup(EnvKeyMockProgressCount)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			if n > 10 {
+				n = 10
+			}
+			count = n
+		}
+	}
+
+	// Reply text — reuse the single-shot override if set, else default.
+	replyText := m.SingleShotReplyText
+	if replyText == "" {
+		replyText = "pong"
+	}
+
+	for i := 1; i <= count; i++ {
+		progressPayload := map[string]any{
+			"turn_index":  i,
+			"stop_reason": "tool_use",
+			"tool_calls": []map[string]string{
+				{
+					"name":    fmt.Sprintf("mock_tool_%d", i),
+					"preview": fmt.Sprintf("scripted progress step %d/%d", i, count),
+				},
+			},
+			"reasoning": fmt.Sprintf("step %d: probing channel state", i),
+		}
+		body, _ := json.Marshal(progressPayload)
+		env := message.Envelope{
+			ID:            fmt.Sprintf("%s-progress-%d", m.EnvelopeIDFn(client.WorkerID(), m.turns+1), i),
+			ChannelID:     string(client.ChannelID()),
+			Type:          "agent.progress",
+			Kind:          message.KindEvent,
+			Sender:        message.Sender{Kind: message.SenderAgent, ID: client.WorkerActorID()},
+			Visibility:    message.VisibilityPublic,
+			Audience:      []string{"*"},
+			Payload:       body,
+			CorrelationID: in.CorrelationID,
+			ParentID:      in.Envelope.ID,
+			TS:            m.NowFn(),
+			TSReceived:    m.NowFn(),
+		}
+		if _, err := client.WriteMessage(ctx, env); err != nil {
+			return err
+		}
+	}
+
+	// Terminal agent.text — payload carries next_action=done so the
+	// trigger turn is considered complete.
+	finalPayload := map[string]any{
+		"text":        replyText,
+		"next_action": "done",
+		"stop_reason": "end_turn",
+		"turn_index":  count + 1,
+	}
+	body, _ := json.Marshal(finalPayload)
+	env := message.Envelope{
+		ID:            fmt.Sprintf("%s-final", m.EnvelopeIDFn(client.WorkerID(), m.turns+1)),
+		ChannelID:     string(client.ChannelID()),
+		Type:          "agent.text",
+		Kind:          message.KindEvent,
+		Sender:        message.Sender{Kind: message.SenderAgent, ID: client.WorkerActorID()},
+		Visibility:    message.VisibilityPublic,
+		Audience:      []string{"*"},
+		Payload:       body,
 		CorrelationID: in.CorrelationID,
 		ParentID:      in.Envelope.ID,
 		TS:            m.NowFn(),

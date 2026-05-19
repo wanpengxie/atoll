@@ -54,8 +54,14 @@ const (
 func main() {
 	leaseID := flag.String("lease-id", os.Getenv("COAGENT_WORKER_LEASE_ID"),
 		"lease id assigned by daemon (also via COAGENT_WORKER_LEASE_ID)")
-	maxTurns := flag.Int("max-turns", 8,
-		"mock bridge: cap on trigger reactions before next_action=done exit")
+	// max-turns defaults to 0 = unlimited. The LLM itself decides when a
+	// reaction is finished (stop_reason=end_turn / stop). External
+	// cancellation paths (lease expire, SIGINT, IPC EOF) are the only
+	// hard-stop signals. A positive value still caps reactions — useful
+	// for unit tests that want deterministic exit, but never set from
+	// the daemon spawn path.
+	maxTurns := flag.Int("max-turns", 0,
+		"cap on trigger reactions before next_action=done exit (0 = unlimited; LLM-driven stop)")
 	provider := flag.String("provider", envOr("COAGENT_WORKER_PROVIDER", providerMock),
 		"agent provider — mock (deterministic) or kimi (go-kimi via DeepSeek anthropic-compat). "+
 			"Also via COAGENT_WORKER_PROVIDER env.")
@@ -131,9 +137,24 @@ func buildBridge(provider string, maxTurns int) (worker.Bridge, error) {
 		// env. The daemon set COAGENT_DOMAIN_PROMPT during worker
 		// fork (M1.6-T5 phase-3) so the L4 template segment is
 		// available without an IPC round-trip.
+		//
+		// COAGENT_CHANNEL_CONTEXT_FILE (when set) points at a JSON
+		// snapshot the daemon wrote at spawn time containing the
+		// channel's actor_registry / type_registry / device_sessions
+		// rows — folded into the system prompt so the LLM knows what
+		// tools and devices exist in its channel. Missing / malformed
+		// files are non-fatal (log + continue) so a partially-staged
+		// rollout still boots; the agent just falls back to the
+		// pre-injection behaviour (no appendix) until the next spawn.
+		channelCtx, ok, ctxErr := kimi.LoadChannelContextFile(os.Getenv(kimi.EnvKeyChannelContextFile))
+		if ctxErr != nil {
+			fmt.Fprintf(os.Stderr, "worker: channel context load failed (continuing without appendix): %v\n", ctxErr)
+		}
+		_ = ok // ok=false simply means "no appendix" — same path as the legacy channels
 		basePrompt := kimi.BuildBasePrompt(
 			os.Getenv(kimi.EnvKeyChannelType),
 			os.Getenv(kimi.EnvKeyDomainPrompt),
+			channelCtx,
 		)
 		cfg, err := kimi.NewConfigFromEnv(basePrompt)
 		if err != nil {
