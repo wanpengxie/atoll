@@ -9,6 +9,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -76,7 +77,7 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 		ID: "tool:xhs", Kind: actor.KindTool, Binding: actor.BindingViaServerTransit,
 	})
 
-	var seenFrame *adapter.SendFrame
+	var seenFrame *devicetransit.SendFrame
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "xhs",
@@ -89,10 +90,10 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 			if mctx.DeviceTransit == nil {
 				t.Fatalf("via_server_transit mctx.DeviceTransit nil")
 			}
-			frame := adapter.SendFrame{
+			frame := devicetransit.SendFrame{
 				ChannelID:       mctx.ChannelID,
 				DeviceSessionID: "device-1",
-				Direction:       adapter.DirectionToDevice,
+				Direction:       devicetransit.DirectionToDevice,
 				RequestID:       env.ID,
 				Payload:         env.Payload,
 			}
@@ -135,7 +136,7 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 	if seenFrame.RequestID != "req-vst-1" {
 		t.Fatalf("frame.RequestID=%s want req-vst-1", seenFrame.RequestID)
 	}
-	if seenFrame.Direction != adapter.DirectionToDevice {
+	if seenFrame.Direction != devicetransit.DirectionToDevice {
 		t.Fatalf("frame.Direction=%s want to_device", seenFrame.Direction)
 	}
 	if len(transit.sent) != 1 {

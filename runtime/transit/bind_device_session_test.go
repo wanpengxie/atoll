@@ -5,10 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
-	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
@@ -63,11 +62,11 @@ func TestDispatcher_BindDeviceSessionRoundTrip(t *testing.T) {
 
 	body := transit.BindDeviceSessionBody{
 		FrameID:          "frame-bind-1",
-		SessionID:        adapter.DeviceSessionID("sess-1"),
+		SessionID:        devicetransit.DeviceSessionID("sess-1"),
 		ChannelID:        channel.ID("ch-X"),
 		DeviceID:         "dev-A",
 		DeviceType:       "xhs",
-		DaemonID:         placement.DaemonID("daemon-A"),
+		DaemonID:         "daemon-A",
 		TokenFingerprint: "deadbeefcafebabe",
 		ExpiresAt:        12_345,
 		BoundAt:          11_000,
@@ -163,7 +162,7 @@ func TestDispatcher_BindDeviceSessionHandlerMissing(t *testing.T) {
 
 	body := transit.BindDeviceSessionBody{
 		FrameID:   "frame-bind-2",
-		SessionID: adapter.DeviceSessionID("sess-2"),
+		SessionID: devicetransit.DeviceSessionID("sess-2"),
 		ChannelID: channel.ID("ch-Y"),
 		DeviceID:  "dev-B",
 	}
@@ -257,7 +256,7 @@ func TestDispatcher_UnbindDeviceSessionRoundTrip(t *testing.T) {
 
 	body := transit.UnbindDeviceSessionBody{
 		FrameID:   "frame-unbind-1",
-		SessionID: adapter.DeviceSessionID("sess-1"),
+		SessionID: devicetransit.DeviceSessionID("sess-1"),
 		ChannelID: channel.ID("ch-X"),
 		Reason:    "revoked",
 	}

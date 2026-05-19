@@ -13,9 +13,9 @@ import (
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime"
@@ -90,7 +90,7 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	assertProductionXHSBindings(t, ctx, db)
 
-	const sessionID adapter.DeviceSessionID = "sess-prod-xhs"
+	const sessionID devicetransit.DeviceSessionID = "sess-prod-xhs"
 	bindDeviceSession(t, ctx, d, srv, sessionID, channel.ID(channelID))
 	if err := sessionStore.SetState(ctx, sessionID, deviceframework.StateActive, nowMs()); err != nil {
 		t.Fatalf("activate session: %v", err)
@@ -158,7 +158,7 @@ func bindDeviceSession(
 	ctx context.Context,
 	d *runtime.Daemon,
 	srv *transit.MockServer,
-	sessionID adapter.DeviceSessionID,
+	sessionID devicetransit.DeviceSessionID,
 	channelID channel.ID,
 ) {
 	t.Helper()
@@ -199,7 +199,7 @@ func writeRequestAndWaitForDeviceSend(
 	srv *transit.MockServer,
 	channelID, requestID, callerActor, envType string,
 	payload []byte,
-) (transit.WriteMessageAckBody, adapter.SendFrame) {
+) (transit.WriteMessageAckBody, devicetransit.SendFrame) {
 	t.Helper()
 	ts := nowMs()
 	hc := transit.HumanCaller{
@@ -238,7 +238,7 @@ func writeRequestAndWaitForDeviceSend(
 
 	var (
 		ack     transit.WriteMessageAckBody
-		send    adapter.SendFrame
+		send    devicetransit.SendFrame
 		gotAck  bool
 		gotSend bool
 	)

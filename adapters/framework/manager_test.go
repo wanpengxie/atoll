@@ -13,6 +13,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -237,13 +238,13 @@ func TestManagerInstallRejectsTransitMissing(t *testing.T) {
 // recordingTransit captures Send / Ack / Error calls.
 type recordingTransit struct {
 	mu    sync.Mutex
-	sent  []adapter.SendFrame
-	acks  []adapter.AckFrame
-	errs  []adapter.ErrorFrame
+	sent  []devicetransit.SendFrame
+	acks  []devicetransit.AckFrame
+	errs  []devicetransit.ErrorFrame
 	frame string
 }
 
-func (r *recordingTransit) Send(_ context.Context, frame adapter.SendFrame) (string, error) {
+func (r *recordingTransit) Send(_ context.Context, frame devicetransit.SendFrame) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sent = append(r.sent, frame)
@@ -251,14 +252,14 @@ func (r *recordingTransit) Send(_ context.Context, frame adapter.SendFrame) (str
 	return r.frame, nil
 }
 
-func (r *recordingTransit) Ack(_ context.Context, frame adapter.AckFrame) error {
+func (r *recordingTransit) Ack(_ context.Context, frame devicetransit.AckFrame) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.acks = append(r.acks, frame)
 	return nil
 }
 
-func (r *recordingTransit) Error(_ context.Context, frame adapter.ErrorFrame) error {
+func (r *recordingTransit) Error(_ context.Context, frame devicetransit.ErrorFrame) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.errs = append(r.errs, frame)

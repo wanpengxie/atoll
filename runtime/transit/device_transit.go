@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 )
 
-// DeviceTransit is the daemon-side implementation of kernel/adapter.
-// DeviceTransit — the via_server_transit binding's transport.
+// DeviceTransit is the daemon-side implementation of
+// kernel/devicetransit.DeviceTransit — the via_server_transit binding's
+// transport.
 //
 // Per T1.3:
 //
@@ -24,18 +25,18 @@ import (
 type DeviceTransit struct {
 	client    *Client
 	frameID   FrameIDGen
-	onRecvFn  func(ctx context.Context, frame adapter.SendFrame) error
-	onAckFn   func(ctx context.Context, frame adapter.AckFrame) error
-	onErrorFn func(ctx context.Context, frame adapter.ErrorFrame) error
+	onRecvFn  func(ctx context.Context, frame devicetransit.SendFrame) error
+	onAckFn   func(ctx context.Context, frame devicetransit.AckFrame) error
+	onErrorFn func(ctx context.Context, frame devicetransit.ErrorFrame) error
 }
 
 // DeviceTransitConfig wires a DeviceTransit.
 type DeviceTransitConfig struct {
 	Client  *Client
 	FrameID FrameIDGen
-	OnRecv  func(ctx context.Context, frame adapter.SendFrame) error
-	OnAck   func(ctx context.Context, frame adapter.AckFrame) error
-	OnError func(ctx context.Context, frame adapter.ErrorFrame) error
+	OnRecv  func(ctx context.Context, frame devicetransit.SendFrame) error
+	OnAck   func(ctx context.Context, frame devicetransit.AckFrame) error
+	OnError func(ctx context.Context, frame devicetransit.ErrorFrame) error
 }
 
 // NewDeviceTransit builds a DeviceTransit.
@@ -55,11 +56,11 @@ func NewDeviceTransit(cfg DeviceTransitConfig) (*DeviceTransit, error) {
 	}, nil
 }
 
-// Send implements adapter.DeviceTransit — packages a SendFrame into a
+// Send implements devicetransit.DeviceTransit — packages a SendFrame into a
 // device_transit.send daemonbus frame. The returned frame_id is the one
 // the underlying daemonbus frame carries (also what ack/error frames
 // reference).
-func (d *DeviceTransit) Send(ctx context.Context, frame adapter.SendFrame) (string, error) {
+func (d *DeviceTransit) Send(ctx context.Context, frame devicetransit.SendFrame) (string, error) {
 	fid := d.frameID()
 	if err := d.client.Send(ctx, fid, daemonbus.FrameTypeDeviceTransitSend, frame); err != nil {
 		return "", err
@@ -67,14 +68,14 @@ func (d *DeviceTransit) Send(ctx context.Context, frame adapter.SendFrame) (stri
 	return fid, nil
 }
 
-// Ack implements adapter.DeviceTransit (daemon-side outgoing ack, e.g.
+// Ack implements devicetransit.DeviceTransit (daemon-side outgoing ack, e.g.
 // daemon ACKs a device_transit.recv it processed successfully).
-func (d *DeviceTransit) Ack(ctx context.Context, frame adapter.AckFrame) error {
+func (d *DeviceTransit) Ack(ctx context.Context, frame devicetransit.AckFrame) error {
 	return d.client.Send(ctx, d.frameID(), daemonbus.FrameTypeDeviceTransitAck, frame)
 }
 
-// Error implements adapter.DeviceTransit.
-func (d *DeviceTransit) Error(ctx context.Context, frame adapter.ErrorFrame) error {
+// Error implements devicetransit.DeviceTransit.
+func (d *DeviceTransit) Error(ctx context.Context, frame devicetransit.ErrorFrame) error {
 	return d.client.Send(ctx, d.frameID(), daemonbus.FrameTypeDeviceTransitError, frame)
 }
 
@@ -86,7 +87,7 @@ func (d *DeviceTransit) DispatchIncoming(ctx context.Context, frame daemonbus.Fr
 		if d.onRecvFn == nil {
 			return nil
 		}
-		var payload adapter.SendFrame
+		var payload devicetransit.SendFrame
 		if err := DecodePayload(frame, &payload); err != nil {
 			return fmt.Errorf("transit: decode device_transit.recv: %w", err)
 		}
@@ -95,7 +96,7 @@ func (d *DeviceTransit) DispatchIncoming(ctx context.Context, frame daemonbus.Fr
 		if d.onAckFn == nil {
 			return nil
 		}
-		var payload adapter.AckFrame
+		var payload devicetransit.AckFrame
 		if err := DecodePayload(frame, &payload); err != nil {
 			return fmt.Errorf("transit: decode device_transit.ack: %w", err)
 		}
@@ -104,7 +105,7 @@ func (d *DeviceTransit) DispatchIncoming(ctx context.Context, frame daemonbus.Fr
 		if d.onErrorFn == nil {
 			return nil
 		}
-		var payload adapter.ErrorFrame
+		var payload devicetransit.ErrorFrame
 		if err := DecodePayload(frame, &payload); err != nil {
 			return fmt.Errorf("transit: decode device_transit.error: %w", err)
 		}

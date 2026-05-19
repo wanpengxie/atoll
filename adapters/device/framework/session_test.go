@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 )
 
 // TestDeviceStateClosedSet asserts AllDeviceStates is 1:1 with the
@@ -227,7 +227,7 @@ func TestInMemoryStoreUpsertValidates(t *testing.T) {
 func TestInMemoryStoreSetState(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
-	id := adapter.DeviceSessionID("sess-1")
+	id := devicetransit.DeviceSessionID("sess-1")
 	mustUpsert(t, store, DeviceSession{
 		SessionID: id, ChannelID: "c", DeviceID: "d", DeviceType: "xhs",
 		State: StatePending,
@@ -239,7 +239,7 @@ func TestInMemoryStoreSetState(t *testing.T) {
 
 	// pending → active is illegal (must go through ready first).
 	store2 := NewInMemorySessionStore()
-	idleID := adapter.DeviceSessionID("sess-2")
+	idleID := devicetransit.DeviceSessionID("sess-2")
 	mustUpsert(t, store2, DeviceSession{
 		SessionID: idleID, ChannelID: "c", DeviceID: "d", DeviceType: "xhs",
 		State: StatePending,
@@ -307,7 +307,7 @@ func mustUpsert(t *testing.T, store *InMemorySessionStore, sess DeviceSession) {
 	}
 }
 
-func mustState(t *testing.T, store *InMemorySessionStore, id adapter.DeviceSessionID, next DeviceState, at int64) {
+func mustState(t *testing.T, store *InMemorySessionStore, id devicetransit.DeviceSessionID, next DeviceState, at int64) {
 	t.Helper()
 	if err := store.SetState(context.Background(), id, next, at); err != nil {
 		t.Fatalf("setstate %s → %s: %v", id, next, err)

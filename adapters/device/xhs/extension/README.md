@@ -19,7 +19,7 @@ Coagent 的 chrome 端 device 实现。承载 5 个小红书业务命令
 agent (channel-agent)
   ↓ SDK Bash / 直接 envelope
 adapters/device/xhs (Go, M1.5-T5)
-  ↓ kernel/adapter.DeviceTransit.Send(device_transit.send frame)
+  ↓ kernel/devicetransit.DeviceTransit.Send(device_transit.send frame)
 runtime/transit (M1.5-T3) → daemonbus mux → server.devicebus (M1.5-T6)
   ↓ device WS endpoint
 本插件 (M1.5-T5)

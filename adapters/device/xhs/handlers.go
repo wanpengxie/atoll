@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -32,7 +32,7 @@ var payloadMetadataKeys = map[string]struct{}{
 //
 // Errors are surfaced as plain Go errors; the caller (Module.Handle)
 // decides whether they map to a synchronous Respond / failed terminal.
-func buildCommand(env *message.Envelope) (cmd Command, sessionID adapter.DeviceSessionID, deviceID string, err error) {
+func buildCommand(env *message.Envelope) (cmd Command, sessionID devicetransit.DeviceSessionID, deviceID string, err error) {
 	if env == nil {
 		return Command{}, "", "", errors.New("xhs.buildCommand: envelope is nil")
 	}
@@ -58,7 +58,7 @@ func buildCommand(env *message.Envelope) (cmd Command, sessionID adapter.DeviceS
 	}
 
 	if v, ok := payload["device_session_id"].(string); ok {
-		sessionID = adapter.DeviceSessionID(strings.TrimSpace(v))
+		sessionID = devicetransit.DeviceSessionID(strings.TrimSpace(v))
 	}
 	if v, ok := payload["device_id"].(string); ok {
 		deviceID = strings.TrimSpace(v)

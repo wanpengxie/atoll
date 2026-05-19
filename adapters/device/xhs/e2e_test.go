@@ -4,7 +4,7 @@ package xhs_test
 // via_server_transit binding (T5 acceptance).
 //
 // Scope:
-//   - mock server.devicebus (mockServer) implements kernel/adapter.DeviceTransit:
+//   - mock server.devicebus (mockServer) implements kernel/devicetransit.DeviceTransit:
 //     it captures SendFrame instances, lets the test simulate the device side
 //     by routing payload bytes back into the adapter via OnExternalCallback.
 //   - in-memory fakes for CorrelationTracker / ErrorPolicy / Respond / ActorRegistry
@@ -31,6 +31,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	kharness "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -38,18 +39,18 @@ import (
 // ---- mock server.devicebus ---------------------------------------------
 
 type mockServerSend struct {
-	frame adapter.SendFrame
+	frame devicetransit.SendFrame
 	at    time.Time
 }
 
 // mockServer is the test stand-in for server.devicebus. It implements
-// kernel/adapter.DeviceTransit; the adapter never knows it isn't talking
+// kernel/devicetransit.DeviceTransit; the adapter never knows it isn't talking
 // to a real runtime/transit client.
 type mockServer struct {
 	mu        sync.Mutex
 	sends     []mockServerSend
-	acks      []adapter.AckFrame
-	errFrames []adapter.ErrorFrame
+	acks      []devicetransit.AckFrame
+	errFrames []devicetransit.ErrorFrame
 	failSend  error
 	nextFrame string
 	now       func() time.Time
@@ -59,7 +60,7 @@ func newMockServer() *mockServer {
 	return &mockServer{now: time.Now}
 }
 
-func (m *mockServer) Send(_ context.Context, frame adapter.SendFrame) (string, error) {
+func (m *mockServer) Send(_ context.Context, frame devicetransit.SendFrame) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failSend != nil {
@@ -74,25 +75,25 @@ func (m *mockServer) Send(_ context.Context, frame adapter.SendFrame) (string, e
 	return "frame-test", nil
 }
 
-func (m *mockServer) Ack(_ context.Context, frame adapter.AckFrame) error {
+func (m *mockServer) Ack(_ context.Context, frame devicetransit.AckFrame) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.acks = append(m.acks, frame)
 	return nil
 }
 
-func (m *mockServer) Error(_ context.Context, frame adapter.ErrorFrame) error {
+func (m *mockServer) Error(_ context.Context, frame devicetransit.ErrorFrame) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.errFrames = append(m.errFrames, frame)
 	return nil
 }
 
-func (m *mockServer) lastSend() (adapter.SendFrame, bool) {
+func (m *mockServer) lastSend() (devicetransit.SendFrame, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.sends) == 0 {
-		return adapter.SendFrame{}, false
+		return devicetransit.SendFrame{}, false
 	}
 	return m.sends[len(m.sends)-1].frame, true
 }
@@ -368,9 +369,9 @@ func newHarness(t *testing.T) *harness {
 	}
 }
 
-func (h *harness) seedActiveSession(t *testing.T, sid string) adapter.DeviceSessionID {
+func (h *harness) seedActiveSession(t *testing.T, sid string) devicetransit.DeviceSessionID {
 	t.Helper()
-	id := adapter.DeviceSessionID(sid)
+	id := devicetransit.DeviceSessionID(sid)
 	if err := h.sessions.Upsert(context.Background(), framework.DeviceSession{
 		SessionID:  id,
 		ChannelID:  h.channelID,
@@ -442,7 +443,7 @@ func TestPublishHappyPath(t *testing.T) {
 	if !ok {
 		t.Fatal("server captured no frame")
 	}
-	if frame.Direction != adapter.DirectionToDevice {
+	if frame.Direction != devicetransit.DirectionToDevice {
 		t.Errorf("direction=%q", frame.Direction)
 	}
 	if frame.DeviceSessionID != sid {

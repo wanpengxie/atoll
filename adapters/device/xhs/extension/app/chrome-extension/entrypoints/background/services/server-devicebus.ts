@@ -57,7 +57,7 @@ import { saveConnectionStatus } from '../connection-state';
  * DeviceFrame is the JSON wire envelope exchanged with server/devicebus.
  * Field shape MUST stay aligned with `server/devicebus/connection.go`'s
  * `DeviceFrame` struct — the gateway translates DeviceFrame ↔ kernel/
- * adapter.SendFrame across the daemonbus boundary and any drift breaks
+ * devicetransit.SendFrame across the daemonbus boundary and any drift breaks
  * the `via_server_transit` binding silently.
  */
 export interface DeviceFrame {

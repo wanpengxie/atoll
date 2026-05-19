@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 )
 
 // TokenSpec is the signed payload server.devicebus embeds in a device
@@ -25,11 +25,11 @@ import (
 // not actor). User-side authentication happens upstream at the
 // human_caller_token layer (T1.9).
 type TokenSpec struct {
-	SessionID adapter.DeviceSessionID `json:"sid"`
-	ChannelID channel.ID              `json:"cid"`
-	DeviceID  string                  `json:"did"`
-	IssuedAt  int64                   `json:"iat"`
-	ExpiresAt int64                   `json:"exp"`
+	SessionID devicetransit.DeviceSessionID `json:"sid"`
+	ChannelID channel.ID                    `json:"cid"`
+	DeviceID  string                        `json:"did"`
+	IssuedAt  int64                         `json:"iat"`
+	ExpiresAt int64                         `json:"exp"`
 }
 
 // Validate enforces the structural rules every TokenSpec must satisfy

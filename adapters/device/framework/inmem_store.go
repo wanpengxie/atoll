@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 )
 
 // InMemorySessionStore is the M1.5 reference implementation of
@@ -18,12 +18,12 @@ import (
 // the go-arch-lint boundary (no sqlite, no runtime imports).
 type InMemorySessionStore struct {
 	mu   sync.RWMutex
-	rows map[adapter.DeviceSessionID]DeviceSession
+	rows map[devicetransit.DeviceSessionID]DeviceSession
 }
 
 // NewInMemorySessionStore constructs an empty store.
 func NewInMemorySessionStore() *InMemorySessionStore {
-	return &InMemorySessionStore{rows: map[adapter.DeviceSessionID]DeviceSession{}}
+	return &InMemorySessionStore{rows: map[devicetransit.DeviceSessionID]DeviceSession{}}
 }
 
 // Upsert implements SessionStore. Returns the row's Validate() error
@@ -40,7 +40,7 @@ func (s *InMemorySessionStore) Upsert(_ context.Context, sess DeviceSession) err
 }
 
 // Get implements SessionStore.
-func (s *InMemorySessionStore) Get(_ context.Context, sid adapter.DeviceSessionID) (DeviceSession, bool, error) {
+func (s *InMemorySessionStore) Get(_ context.Context, sid devicetransit.DeviceSessionID) (DeviceSession, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	row, ok := s.rows[sid]
@@ -49,7 +49,7 @@ func (s *InMemorySessionStore) Get(_ context.Context, sid adapter.DeviceSessionI
 
 // SetState implements SessionStore — enforces CanTransitionTo +
 // timestamps LastActiveAt with `at`.
-func (s *InMemorySessionStore) SetState(_ context.Context, sid adapter.DeviceSessionID, next DeviceState, at int64) error {
+func (s *InMemorySessionStore) SetState(_ context.Context, sid devicetransit.DeviceSessionID, next DeviceState, at int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	row, ok := s.rows[sid]
@@ -83,7 +83,7 @@ func (s *InMemorySessionStore) ListByChannel(_ context.Context, channelID channe
 }
 
 // Delete implements SessionStore. Idempotent.
-func (s *InMemorySessionStore) Delete(_ context.Context, sid adapter.DeviceSessionID) error {
+func (s *InMemorySessionStore) Delete(_ context.Context, sid devicetransit.DeviceSessionID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.rows, sid)

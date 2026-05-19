@@ -14,6 +14,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -57,7 +58,7 @@ type ManagerConfig struct {
 	// DeviceTransit is optional; required only when a module declares
 	// Binding == BindingViaServerTransit. The framework refuses
 	// Install for such modules when DeviceTransit is nil.
-	DeviceTransit adapter.DeviceTransit
+	DeviceTransit devicetransit.DeviceTransit
 
 	// HTTPClient is optional; modules with Binding == BindingOutboundHTTP
 	// receive it via ModuleContext (extension surface — kernel/adapter

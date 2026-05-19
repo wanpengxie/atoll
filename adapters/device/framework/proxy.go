@@ -11,6 +11,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -25,9 +26,9 @@ var ErrDeviceSessionUnreachable = errors.New("framework.DeviceProxy: device sess
 // by NewDeviceProxy to keep the constructor signature flat + by tests
 // to swap fakes wholesale.
 type DeviceProxyDeps struct {
-	// Transit is the DeviceTransit kernel seam (kernel/adapter.DeviceTransit).
+	// Transit is the DeviceTransit kernel seam (kernel/devicetransit.DeviceTransit).
 	// Required.
-	Transit adapter.DeviceTransit
+	Transit devicetransit.DeviceTransit
 
 	// Correlation is the F2 tracker scoped to this adapter. Required.
 	Correlation adapter.CorrelationTracker
@@ -38,7 +39,7 @@ type DeviceProxyDeps struct {
 }
 
 // DeviceProxy translates one adapter-level request into the
-// kernel/adapter device_transit.send frame + the per-request bookkeeping
+// kernel/devicetransit device_transit.send frame + the per-request bookkeeping
 // (correlation reserve, F3 timer arm). One instance per Module per
 // channel; constructed inside Module.Init after the framework hands
 // over a ModuleContext.
@@ -144,7 +145,7 @@ func (p *DeviceProxy) SetFrameIDFactory(factory func() string) {
 func (p *DeviceProxy) SendRequest(
 	ctx context.Context,
 	env *message.Envelope,
-	sessionID adapter.DeviceSessionID,
+	sessionID devicetransit.DeviceSessionID,
 	wirePayload []byte,
 ) (frameID string, err error) {
 	if env == nil {
@@ -186,10 +187,10 @@ func (p *DeviceProxy) SendRequest(
 		return "", fmt.Errorf("framework.DeviceProxy.SendRequest: arm F3 timer: %w", err)
 	}
 
-	frame := adapter.SendFrame{
+	frame := devicetransit.SendFrame{
 		ChannelID:       p.ChannelID,
 		DeviceSessionID: sessionID,
-		Direction:       adapter.DirectionToDevice,
+		Direction:       devicetransit.DirectionToDevice,
 		RequestID:       env.ID,
 		ParentID:        env.ParentID,
 		CorrelationID:   env.CorrelationID,
