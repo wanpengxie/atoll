@@ -102,7 +102,7 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 			channelID: h.ChannelID,
 		}
 
-		clock := func() time.Time { return time.Now() }
+		clock := time.Now
 		if h.NowFn != nil {
 			clock = func() time.Time { return time.UnixMilli(h.NowFn()) }
 		}

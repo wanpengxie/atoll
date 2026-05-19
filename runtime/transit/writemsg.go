@@ -101,6 +101,8 @@ type HarnessWriteResult struct {
 // Accepted reports whether the result is a durable / dedupe write.
 func (r HarnessWriteResult) Accepted() bool { return r.RejectReason == "" }
 
+var _ = assertHarnessWriteResultSubset(khar.WriteResult{})
+
 // assertHarnessWriteResultSubset is a compile-time field subset check
 // against kernel/harness.WriteResult. transit intentionally keeps its local
 // result type to avoid importing runtime/harness, but field drift in the

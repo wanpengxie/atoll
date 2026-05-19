@@ -84,7 +84,7 @@ func (s *AdapterStateStore) List(ctx context.Context, prefix string) ([]string, 
 	if err != nil {
 		return nil, fmt.Errorf("store: adapter_state list: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []string
 	for rows.Next() {
 		var key string
