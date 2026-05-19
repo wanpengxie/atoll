@@ -70,21 +70,22 @@ func (r *Runtime) Client() *IPCClient { return r.client }
 //   - the IPC pipe closes (daemon went away)
 //   - a *FenceInvalidError is received (worker MUST exit)
 func (r *Runtime) Run(ctx context.Context) error {
-	r.client.Start(ctx)
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
+	r.client.Start(runCtx)
 	defer r.client.Stop()
 
-	if _, err := r.client.Handshake(ctx, r.cfg.LeaseID); err != nil {
+	if _, err := r.client.Handshake(runCtx, r.cfg.LeaseID); err != nil {
 		return fmt.Errorf("worker: handshake: %w", err)
 	}
 
 	// Heartbeat goroutine.
-	hbCtx, hbCancel := context.WithCancel(ctx)
-	defer hbCancel()
-	go r.heartbeatLoop(hbCtx)
+	go r.heartbeatLoop(runCtx, cancelRun)
 
 	var runErr error
 	if r.cfg.Bridge != nil {
-		runErr = r.cfg.Bridge.Run(ctx, r.client)
+		runErr = r.cfg.Bridge.Run(runCtx, r.client)
 	}
 
 	// Graceful shutdown — even on error we politely close the IPC.
@@ -95,7 +96,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 	return runErr
 }
 
-func (r *Runtime) heartbeatLoop(ctx context.Context) {
+func (r *Runtime) heartbeatLoop(ctx context.Context, cancelRun context.CancelFunc) {
 	t := time.NewTicker(r.cfg.HeartbeatEvery)
 	defer t.Stop()
 	for {
@@ -108,6 +109,7 @@ func (r *Runtime) heartbeatLoop(ctx context.Context) {
 				if errors.As(err, &fence) {
 					// Fence invalid — worker MUST exit. Cancel ctx so Run
 					// unwinds and main does os.Exit.
+					cancelRun()
 					return
 				}
 				// transient — let the next tick retry.
