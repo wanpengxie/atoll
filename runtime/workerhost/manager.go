@@ -30,10 +30,9 @@ import (
 //
 // Concurrency: OnTrigger is called from the daemon dispatcher (write
 // path) and from the long-pending scheduler scan. Both paths can race;
-// a single mutex serialises spawn / push. The mutex is held during
-// PushTrigger so a slow worker stdin write blocks subsequent triggers
-// rather than corrupting frame ordering — acceptable because triggers
-// are low-rate (per acceptance #3 same channel reuses one worker).
+// a single mutex serialises spawn / session replacement, but the worker
+// stdin write happens outside the mutex with a timeout so a slow worker
+// cannot block unrelated trigger dispatchers behind Manager.mu.
 type Manager struct {
 	cfg ManagerConfig
 
@@ -42,6 +41,7 @@ type Manager struct {
 	closed   bool
 	spawnSeq atomic.Int64
 	leaseSeq atomic.Int64
+	pushDrop atomic.Int64
 }
 
 // ManagerConfig wires a Manager.
@@ -112,6 +112,22 @@ type ManagerConfig struct {
 	// as a legacy channel. Nil hook → behaviour identical to before
 	// this field was added.
 	PreSpawn func(ctx context.Context) (extraEnv []string, err error)
+
+	// PushTimeout caps one daemon → worker trigger write. Default 5s.
+	PushTimeout time.Duration
+
+	// OnPushDrop observes trigger pushes that failed or timed out. It is
+	// invoked after the manager increments PushDropCount.
+	OnPushDrop func(PushDrop)
+}
+
+// PushDrop describes one failed daemon → worker trigger push.
+type PushDrop struct {
+	ChannelID  channel.ID
+	AgentID    actor.ActorID
+	WorkerID   string
+	EnvelopeID string
+	Err        error
 }
 
 // workerSession is the daemon-side state for one live worker subprocess.
@@ -169,6 +185,9 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if cfg.HandshakeTimeout <= 0 {
 		cfg.HandshakeTimeout = 5 * time.Second
 	}
+	if cfg.PushTimeout <= 0 {
+		cfg.PushTimeout = 5 * time.Second
+	}
 	if cfg.WorkerIDPrefix == "" {
 		cfg.WorkerIDPrefix = "w"
 	}
@@ -192,8 +211,8 @@ func (m *Manager) OnTrigger(ctx context.Context, _ actor.ActorID, env *message.E
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
+		m.mu.Unlock()
 		return errors.New("workerhost: manager closed")
 	}
 
@@ -205,23 +224,57 @@ func (m *Manager) OnTrigger(ctx context.Context, _ actor.ActorID, env *message.E
 			m.cur = nil
 		}
 		if err := m.spawnLocked(ctx); err != nil {
+			m.mu.Unlock()
 			return fmt.Errorf("workerhost: spawn: %w", err)
 		}
 	}
 
+	sess := m.cur
 	payload := ipc.TriggerPayload{
 		Envelope:      *env,
 		CorrelationID: env.CorrelationID,
 		Cursor:        env.Seq,
 	}
-	if err := m.cur.host.PushTrigger(payload); err != nil {
+	m.mu.Unlock()
+
+	pushCtx, cancel := context.WithTimeout(ctx, m.cfg.PushTimeout)
+	err := sess.host.PushTrigger(pushCtx, payload)
+	cancel()
+	if err != nil {
 		// Push failure likely means the worker pipe is broken — drop
 		// the session so the next trigger re-spawns. Don't release the
 		// lease synchronously here; the serve goroutine will run that
 		// when Host.Serve returns.
+		m.onPushFailure(sess, env.ID, err)
 		return fmt.Errorf("workerhost: push trigger: %w", err)
 	}
 	return nil
+}
+
+func (m *Manager) onPushFailure(sess *workerSession, envelopeID string, err error) {
+	m.pushDrop.Add(1)
+	if m.cfg.OnPushDrop != nil {
+		m.cfg.OnPushDrop(PushDrop{
+			ChannelID:  m.cfg.ChannelID,
+			AgentID:    m.cfg.AgentID,
+			WorkerID:   sess.workerID,
+			EnvelopeID: envelopeID,
+			Err:        err,
+		})
+	}
+
+	var stale *workerSession
+	m.mu.Lock()
+	if m.cur == sess {
+		stale = sess
+		m.cur = nil
+	}
+	m.mu.Unlock()
+
+	if stale != nil {
+		_ = stale.proc.Stdin.Close()
+		_ = stale.proc.Kill()
+	}
 }
 
 // spawnLocked must be called with m.mu held. Acquires the lease, starts
@@ -376,4 +429,9 @@ func (m *Manager) CurrentWorkerID() string {
 		return ""
 	}
 	return m.cur.workerID
+}
+
+// PushDropCount returns the number of trigger pushes that failed or timed out.
+func (m *Manager) PushDropCount() int64 {
+	return m.pushDrop.Load()
 }

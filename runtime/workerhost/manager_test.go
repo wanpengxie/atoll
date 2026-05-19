@@ -1,6 +1,7 @@
 package workerhost_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -150,6 +151,79 @@ func newManagerFixture(t *testing.T, triggerLimit, crashAfter int) *managerFixtu
 	}
 }
 
+type blockingAfterFirstWrite struct {
+	allow     int64
+	writes    atomic.Int64
+	closeOnce sync.Once
+	closed    chan struct{}
+}
+
+func newBlockingAfterFirstWrite(allow int64) *blockingAfterFirstWrite {
+	return &blockingAfterFirstWrite{allow: allow, closed: make(chan struct{})}
+}
+
+func (w *blockingAfterFirstWrite) Write(p []byte) (int, error) {
+	if w.writes.Add(1) <= w.allow {
+		return len(p), nil
+	}
+	<-w.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (w *blockingAfterFirstWrite) Close() error {
+	w.closeOnce.Do(func() { close(w.closed) })
+	return nil
+}
+
+type blockingPushSpawner struct {
+	allowWrites int64
+}
+
+func (s *blockingPushSpawner) Spawn(ctx context.Context, leaseID string, _ []string) (workerhost.WorkerProc, error) {
+	stdoutR, stdoutW := io.Pipe()
+	stdin := newBlockingAfterFirstWrite(s.allowWrites)
+	done := make(chan error, 1)
+
+	go func() {
+		payload, err := json.Marshal(ipc.HandshakePayload{LeaseID: leaseID})
+		if err == nil {
+			err = ipc.NewCodec(bytes.NewReader(nil), stdoutW).Write(ipc.Frame{
+				ID:      "handshake-" + leaseID,
+				Kind:    ipc.KindHandshake,
+				Payload: payload,
+			})
+		}
+		if err != nil {
+			_ = stdoutW.CloseWithError(err)
+			done <- err
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+		case <-stdin.closed:
+		}
+		_ = stdoutW.Close()
+		done <- err
+	}()
+
+	return workerhost.WorkerProc{
+		LeaseID: leaseID,
+		Stdin:   stdin,
+		Stdout:  stdoutR,
+		Wait: func() error {
+			return <-done
+		},
+		Kill: func() error {
+			_ = stdin.Close()
+			_ = stdoutR.Close()
+			_ = stdoutW.Close()
+			return nil
+		},
+	}, nil
+}
+
 func triggerEnvelope(id string, seq int64) *message.Envelope {
 	return &message.Envelope{
 		ID:            id,
@@ -266,6 +340,107 @@ func TestManager_RespawnAfterCrash(t *testing.T) {
 	}
 	if got := f.spawnCount.Load(); got != 2 {
 		t.Errorf("spawn count = %d, want 2", got)
+	}
+}
+
+func TestManager_OnTriggerPushTimeoutDoesNotHoldLock(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dir := t.TempDir()
+	db, err := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	chID := channel.ID("ch-blocking-push")
+	agentID := actor.ActorID("agent:channel-agent")
+	chain := newE2EChain(t, db, chID, agentID)
+	leaseStore := workerhost.NewLeaseStore(db)
+	led := store.NewLedger(db)
+	var hookDrops atomic.Int64
+
+	mgr, err := workerhost.NewManager(workerhost.ManagerConfig{
+		ChannelID:        chID,
+		AgentID:          agentID,
+		WorkerActorID:    agentID,
+		Spawner:          &blockingPushSpawner{allowWrites: 4},
+		LeaseStore:       leaseStore,
+		Chain:            chain,
+		Ledger:           led,
+		NowFn:            now,
+		FencingToken:     placement.FencingToken(1),
+		DaemonEpoch:      placement.DaemonEpoch(7),
+		HandshakeTimeout: 2 * time.Second,
+		PushTimeout:      80 * time.Millisecond,
+		ServeCtx:         ctx,
+		OnPushDrop: func(drop workerhost.PushDrop) {
+			if drop.EnvelopeID == "" || drop.Err == nil {
+				t.Errorf("invalid push drop: %+v", drop)
+			}
+			hookDrops.Add(1)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() {
+		closeCtx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer ccancel()
+		_ = mgr.Close(closeCtx)
+	})
+
+	if err := mgr.OnTrigger(ctx, agentID, triggerEnvelope("env-warm", 1)); err != nil {
+		t.Fatalf("warm OnTrigger: %v", err)
+	}
+
+	const n = 6
+	start := make(chan struct{})
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			callCtx, ccancel := context.WithTimeout(ctx, 2*time.Second)
+			defer ccancel()
+			errs <- mgr.OnTrigger(callCtx, agentID, triggerEnvelope("env-block-"+string(rune('a'+i)), int64(i+2)))
+		}()
+	}
+
+	t0 := time.Now()
+	close(start)
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("concurrent OnTrigger calls waited behind earlier blocked pushes")
+	}
+	elapsed := time.Since(t0)
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("concurrent OnTrigger calls took %s; want under 300ms", elapsed)
+	}
+
+	for i := 0; i < n; i++ {
+		if err := <-errs; err == nil {
+			t.Fatal("OnTrigger returned nil for blocking worker stdin")
+		}
+	}
+	if got := mgr.PushDropCount(); got != n {
+		t.Fatalf("PushDropCount=%d want %d", got, n)
+	}
+	if got := hookDrops.Load(); got != n {
+		t.Fatalf("OnPushDrop calls=%d want %d", got, n)
 	}
 }
 

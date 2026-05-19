@@ -3,6 +3,7 @@ package scheduler_test
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -36,6 +37,55 @@ func TestDeliverer_Routes(t *testing.T) {
 	if _, ok := hits.Load(actor.ActorID("agent:b")); !ok {
 		t.Error("agent:b not hit")
 	}
+}
+
+func TestDeliverer_ConcurrentRegisterDeliver(t *testing.T) {
+	d := scheduler.NewDeliverer()
+	env := &message.Envelope{ID: "m-race", Payload: json.RawMessage(`{}`)}
+
+	audience := make([]actor.ActorID, 100)
+	for i := range audience {
+		audience[i] = actor.ActorID("agent:" + strconv.Itoa(i))
+	}
+
+	var hits atomic.Int64
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for _, id := range audience {
+		id := id
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < 50; j++ {
+				d.Register(id, func(context.Context, actor.ActorID, *message.Envelope) error {
+					hits.Add(1)
+					return nil
+				})
+				if j%5 == 0 {
+					d.Register(id, nil)
+				}
+			}
+		}()
+	}
+
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < 50; j++ {
+				if err := d.Deliver(context.Background(), audience, env); err != nil {
+					t.Errorf("Deliver: %v", err)
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	_ = hits.Load()
 }
 
 func TestTimer_Tick(t *testing.T) {

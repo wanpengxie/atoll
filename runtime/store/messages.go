@@ -309,18 +309,39 @@ func (m *Messages) LongPendingRequests(ctx context.Context, nowMs int64, limit i
 	return out, nil
 }
 
-// MarkDelivered stamps messages.delivered_at when it is still NULL. The
-// UPDATE is idempotent (rowsAffected=0 when the row was already
-// delivered or missing — caller may treat as no-op). Used by the
-// scheduler dispatch path AND the harness post-write fan-out, so two
-// concurrent callers cannot double-stamp delivery time.
+// MarkDelivered stamps messages.delivered_at when it is still NULL and
+// clears any previous delivery error. The UPDATE is idempotent
+// (rowsAffected=0 when the row was already delivered or missing — caller
+// may treat as no-op). Used by the scheduler dispatch path AND the
+// harness post-write fan-out, so two concurrent callers cannot
+// double-stamp delivery time.
 func (m *Messages) MarkDelivered(ctx context.Context, id string, atMs int64) error {
 	if id == "" {
 		return errors.New("store: mark delivered empty id")
 	}
-	const q = `UPDATE messages SET delivered_at=? WHERE id=? AND delivered_at IS NULL`
+	const q = `UPDATE messages
+	             SET delivered_at=?, delivery_failed_at=NULL, last_error=NULL
+	           WHERE id=? AND delivered_at IS NULL`
 	if _, err := m.db.ExecContext(ctx, q, atMs, id); err != nil {
 		return fmt.Errorf("store: mark delivered %q: %w", id, err)
+	}
+	return nil
+}
+
+// MarkDeliveryError records a failed delivery attempt while leaving
+// delivered_at NULL so the row remains retryable.
+func (m *Messages) MarkDeliveryError(ctx context.Context, id string, atMs int64, errText string) error {
+	if id == "" {
+		return errors.New("store: mark delivery error empty id")
+	}
+	if errText == "" {
+		errText = "delivery failed"
+	}
+	const q = `UPDATE messages
+	             SET delivery_failed_at=?, last_error=?, attempts=attempts+1
+	           WHERE id=? AND delivered_at IS NULL`
+	if _, err := m.db.ExecContext(ctx, q, atMs, errText, id); err != nil {
+		return fmt.Errorf("store: mark delivery error %q: %w", id, err)
 	}
 	return nil
 }

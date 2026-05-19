@@ -63,6 +63,9 @@ const (
 	KindTrigger Kind = "trigger"
 )
 
+// MaxFrameBytes caps one length-prefixed JSON frame at 16 MiB.
+const MaxFrameBytes = 1 << 24
+
 // Frame is the IPC wire envelope. Length-prefixed JSON: a uint32 BE
 // length header followed by the JSON-marshalled Frame.
 type Frame struct {
@@ -179,7 +182,7 @@ func (c *Codec) Write(f Frame) error {
 	if err != nil {
 		return fmt.Errorf("ipc: marshal: %w", err)
 	}
-	if len(raw) > (1 << 24) {
+	if len(raw) > MaxFrameBytes {
 		return errors.New("ipc: frame too large")
 	}
 	c.wmu.Lock()
@@ -201,6 +204,9 @@ func (c *Codec) Read() (Frame, error) {
 		return Frame{}, err
 	}
 	n := binary.BigEndian.Uint32(hdr[:])
+	if n > MaxFrameBytes {
+		return Frame{}, fmt.Errorf("ipc: frame too large: %d > %d", n, MaxFrameBytes)
+	}
 	if int(n) > cap(c.rbuf) {
 		c.rbuf = make([]byte, n)
 	} else {

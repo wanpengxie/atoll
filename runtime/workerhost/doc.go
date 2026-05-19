@@ -13,7 +13,7 @@
 //     pipe.
 //   - host.go    — daemon-side IPC server for one worker: handshake +
 //     ack, fence enforcement, write_message / reserve_ledger /
-//     commit_ledger handlers. Exposes Ready() + PushTrigger() so
+//     commit_ledger handlers. Exposes Ready() + PushTrigger(ctx) so
 //     the Manager can gate the first KindTrigger frame on the
 //     worker handshake completing.
 //   - fence.go   — fencing_token + daemon_epoch enforcement on every

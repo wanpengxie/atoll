@@ -86,9 +86,8 @@ type DispatchResult struct {
 //     caller MUST NOT mark messages.delivered_at — scheduler will pick
 //     this row up via PendingDue once not_before passes.
 //   - else                 → run Resolve; invoke deliverer.Deliver; return
-//     the resolved audience. Deliver errors are swallowed (logged) per L1
-//     §6.1 at-least-once contract: a single failed fan-out hop must NOT
-//     reject the harness write.
+//     the resolved audience. Deliver errors are returned so callers keep
+//     messages.delivered_at NULL and preserve retryability per L1 §6.1.
 func (g *Gateway) Dispatch(ctx context.Context, env *message.Envelope, opts Options) (DispatchResult, error) {
 	if env == nil {
 		return DispatchResult{}, errors.New("trigger: dispatch nil envelope")
@@ -103,10 +102,8 @@ func (g *Gateway) Dispatch(ctx context.Context, env *message.Envelope, opts Opti
 	if len(audience) == 0 {
 		return DispatchResult{Audience: nil}, nil
 	}
-	// Per §6.1 at-least-once: Deliver errors are routing-layer noise
-	// (handler crashed / not yet registered). Surface as nil so the
-	// caller can continue marking delivered_at; observability is the
-	// daemon's responsibility (cmd/daemon swaps in structured logging).
-	_ = g.deliver.Deliver(ctx, audience, env)
+	if err := g.deliver.Deliver(ctx, audience, env); err != nil {
+		return DispatchResult{Audience: audience}, err
+	}
 	return DispatchResult{Audience: audience}, nil
 }

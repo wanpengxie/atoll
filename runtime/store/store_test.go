@@ -237,6 +237,59 @@ func TestMessages_PendingDue_FutureMessagesGated(t *testing.T) {
 	}
 }
 
+func TestMessages_MarkDeliveryErrorKeepsRowRetryable(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	msgs := store.NewMessages(db)
+	env := newSimpleEnvelope(1)
+	if _, err := msgs.Append(ctx, env); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	if err := msgs.MarkDeliveryError(ctx, env.ID, 1200, "worker push failed"); err != nil {
+		t.Fatalf("MarkDeliveryError: %v", err)
+	}
+	got, ok, err := msgs.FindByID(ctx, channel.ID("ch-1"), env.ID)
+	if err != nil || !ok {
+		t.Fatalf("FindByID ok=%v err=%v", ok, err)
+	}
+	if got.DeliveredAt != nil {
+		t.Fatalf("DeliveredAt=%v want nil after delivery error", *got.DeliveredAt)
+	}
+	if got.DeliveryFailedAt == nil || *got.DeliveryFailedAt != 1200 {
+		t.Fatalf("DeliveryFailedAt=%v want 1200", got.DeliveryFailedAt)
+	}
+	if got.LastError != "worker push failed" {
+		t.Fatalf("LastError=%q want worker push failed", got.LastError)
+	}
+	if got.Attempts != 1 {
+		t.Fatalf("Attempts=%d want 1", got.Attempts)
+	}
+
+	if err := msgs.MarkDelivered(ctx, env.ID, 1300); err != nil {
+		t.Fatalf("MarkDelivered: %v", err)
+	}
+	got, ok, err = msgs.FindByID(ctx, channel.ID("ch-1"), env.ID)
+	if err != nil || !ok {
+		t.Fatalf("FindByID after delivered ok=%v err=%v", ok, err)
+	}
+	if got.DeliveredAt == nil || *got.DeliveredAt != 1300 {
+		t.Fatalf("DeliveredAt=%v want 1300", got.DeliveredAt)
+	}
+	if got.DeliveryFailedAt != nil {
+		t.Fatalf("DeliveryFailedAt=%v want nil after MarkDelivered", *got.DeliveryFailedAt)
+	}
+	if got.LastError != "" {
+		t.Fatalf("LastError=%q want cleared", got.LastError)
+	}
+}
+
 // TestMessages_LongPendingRequests covers the L1 §6.4 scan filter that
 // powers the long-pending scheduler fallback. Each sub-case seeds a row
 // the daemon would synthesise a failed terminal for (or skip) and
