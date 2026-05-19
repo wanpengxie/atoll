@@ -1956,9 +1956,10 @@ func (b transitChainBridge) Write(ctx context.Context, env *message.Envelope) (t
 //
 //  1. FIX-T3 future-message drain (L1 §5.3) — every row with
 //     `not_before <= now AND delivered_at IS NULL` is fed through
-//     trigger.Gateway.Dispatch + messages.MarkDelivered. This makes
-//     `emit not_before=future` honour its delayed-delivery contract
-//     across daemon restarts (the persisted row remains scannable
+//     trigger.Gateway.Dispatch + messages.MarkDelivered. Dispatch
+//     failures record messages.MarkDeliveryError and leave delivered_at
+//     NULL. This makes `emit not_before=future` honour its delayed-delivery
+//     contract across daemon restarts (the persisted row remains scannable
 //     until MarkDelivered stamps it).
 //
 //  2. L1 §6.4 long-pending fallback (T147) — every request that has
@@ -2006,8 +2007,11 @@ func (d *Daemon) scanLongPending(ctx context.Context, nowMs int64) error {
 			env := due[i]
 			// scheduler is the dispatch-path upstream — bypass §5.1
 			// step 3 self-trigger ban (L1 §5.3 explicit semantics).
-			if _, err := cr.gateway.Dispatch(ctx, &env, trigger.Options{BypassSelfTriggerBan: true}); err != nil {
-				fmt.Printf("runtime: scheduler dispatch %s/%s: %v\n", chID, env.ID, err)
+			if _, derr := cr.gateway.Dispatch(ctx, &env, trigger.Options{BypassSelfTriggerBan: true}); derr != nil {
+				fmt.Printf("runtime: scheduler dispatch %s/%s: %v\n", chID, env.ID, derr)
+				if err := cr.messages.MarkDeliveryError(ctx, env.ID, nowMs, derr.Error()); err != nil {
+					fmt.Printf("runtime: scheduler mark delivery error %s/%s: %v\n", chID, env.ID, err)
+				}
 				continue
 			}
 			if err := cr.messages.MarkDelivered(ctx, env.ID, nowMs); err != nil {
@@ -2170,9 +2174,10 @@ func (d *Daemon) classifyLongPendingReason(
 //     tuple before delegating so the messages-insert tx validates the
 //     fencing pair (a silent placement reclaim under us surfaces as
 //     HarnessWorkerFencingStale instead of corrupting outbox).
-//   - FIX-T3: after a successful, non-deduped, non-rejected write call
-//     trigger.Gateway.Dispatch (L1 §5.1 fan-out) + messages.MarkDelivered.
-//     Dedupe / deferred / reject paths skip dispatch.
+//   - FIX-T3/T155-B5: after a successful, non-deduped, non-rejected write
+//     call trigger.Gateway.Dispatch (L1 §5.1 fan-out) + messages.MarkDelivered.
+//     Dispatch failures record messages.MarkDeliveryError and leave the row
+//     retryable. Dedupe / deferred / reject paths skip dispatch.
 //
 // Implements kernel/harness.Chain so the framework Manager can consume
 // the same wrapper without taking a dependency on the daemon package.
@@ -2199,6 +2204,11 @@ func (a *postHarnessChain) Write(ctx context.Context, env *message.Envelope) (kh
 		dr, derr := a.gateway.Dispatch(ctx, env, trigger.Options{})
 		if derr != nil {
 			fmt.Printf("runtime: gateway dispatch %s: %v\n", env.ID, derr)
+			if a.messages != nil {
+				if err := a.messages.MarkDeliveryError(ctx, env.ID, a.nowFn(), derr.Error()); err != nil {
+					fmt.Printf("runtime: mark delivery error %s: %v\n", env.ID, err)
+				}
+			}
 		} else if !dr.Deferred && a.messages != nil {
 			if err := a.messages.MarkDelivered(ctx, env.ID, a.nowFn()); err != nil {
 				fmt.Printf("runtime: mark delivered %s: %v\n", env.ID, err)

@@ -3,6 +3,7 @@ package trigger_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -353,6 +354,39 @@ func TestGateway_Dispatch_ImmediateInvokesDeliverer(t *testing.T) {
 	}
 	if res.Deferred {
 		t.Error("immediate envelope should not be Deferred")
+	}
+	if d.Calls() != 1 {
+		t.Errorf("deliverer calls = %d, want 1", d.Calls())
+	}
+}
+
+func TestGateway_Dispatch_ReturnsDeliverError(t *testing.T) {
+	reg := makeReg()
+	wantErr := errors.New("deliver failed")
+	d := &fakeDeliverer{err: wantErr}
+	gw, err := trigger.New(trigger.Config{
+		Registry:  reg,
+		Deliverer: d,
+		NowFn:     func() int64 { return 1000 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := &message.Envelope{
+		ID:         "m-deliver-error",
+		Sender:     message.Sender{Kind: actor.KindHuman, ID: "user:demo"},
+		Kind:       message.KindEvent,
+		Type:       "human.text",
+		Payload:    json.RawMessage(`{}`),
+		Visibility: message.VisibilityPublic,
+		Audience:   []string{"*"},
+	}
+	res, err := gw.Dispatch(context.Background(), env, trigger.Options{})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Dispatch err=%v want %v", err, wantErr)
+	}
+	if len(res.Audience) == 0 {
+		t.Fatal("Dispatch should return resolved audience with deliver error")
 	}
 	if d.Calls() != 1 {
 		t.Errorf("deliverer calls = %d, want 1", d.Calls())
