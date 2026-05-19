@@ -89,6 +89,9 @@ func TestTypeRegistry_UpsertLookupRoundTrip(t *testing.T) {
 	if view.TerminalConvention != string(adapter.TerminalPayloadStatus) {
 		t.Errorf("harness view terminal=%q", view.TerminalConvention)
 	}
+	if view.MaxPendingMs != 60_000 {
+		t.Errorf("harness view max_pending_ms=%d want 60000", view.MaxPendingMs)
+	}
 	if !reflect.DeepEqual(view.AllowedKinds, in.AllowedKinds) {
 		t.Errorf("harness view allowed_kinds=%v", view.AllowedKinds)
 	}

@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -11,7 +12,7 @@ import (
 // envelope.payload against a registered JSON Schema fragment. The
 // default implementation (adapters/framework.ValidatePayload) handles
 // a JSON-Schema subset; production deployments may swap in a full
-// JSON Schema Draft 2020-12 implementation by injecting Deps.Validator.
+// JSON Schema Draft 2020-12 implementation via SetPayloadValidator.
 type PayloadValidator func(schema, payload []byte) error
 
 // stepPayloadSchema implements L1 §10.2 step 6 — payload schema check.
@@ -50,8 +51,16 @@ func (s *stepPayloadSchema) Run(ctx context.Context, env *message.Envelope) (kha
 		return khar.Outcome{}, nil
 	}
 	// Resolve the validator at run time so tests can rebind
-	// DefaultPayloadValidator independently of Chain construction.
-	if err := currentPayloadValidator()(schema, env.Payload); err != nil {
+	// DefaultPayloadValidator independently of Chain construction. Schema
+	// presence + missing validator is a protocol violation: fail closed.
+	validator, ok := currentPayloadValidator()
+	if !ok {
+		return khar.Outcome{
+			RejectReason: message.HarnessPayloadSchemaViolation,
+			Detail:       ErrPayloadValidatorMissing.Error(),
+		}, nil
+	}
+	if err := validator(schema, env.Payload); err != nil {
 		return khar.Outcome{
 			RejectReason: message.HarnessPayloadSchemaViolation,
 			Detail:       err.Error(),
@@ -60,27 +69,28 @@ func (s *stepPayloadSchema) Run(ctx context.Context, env *message.Envelope) (kha
 	return khar.Outcome{}, nil
 }
 
+// ErrPayloadValidatorMissing is reported as the step-6 reject detail when a
+// type has a schema but the runtime did not wire a validator.
+var ErrPayloadValidatorMissing = errors.New("payload schema validator not configured")
+
 // DefaultPayloadValidator is the package-level PayloadValidator. It is
 // overridable at runtime (tests inject a stricter validator; production
-// daemon wiring rebinds it via SetPayloadValidator). Resolve via
-// currentPayloadValidator to pick up reassignment after construction.
-var DefaultPayloadValidator PayloadValidator = noopValidator
+// daemon wiring rebinds it via SetPayloadValidator). The zero value is
+// intentionally nil: schemas without a validator fail closed.
+var DefaultPayloadValidator PayloadValidator
 
-func currentPayloadValidator() PayloadValidator {
+func currentPayloadValidator() (PayloadValidator, bool) {
 	if DefaultPayloadValidator == nil {
-		return noopValidator
+		return nil, false
 	}
-	return DefaultPayloadValidator
+	return DefaultPayloadValidator, true
 }
 
-func noopValidator(_, _ []byte) error { return nil }
+// PayloadValidatorConfigured reports whether step 6 can evaluate registered
+// schemas. Composition roots use it as a boot-time fail-fast check.
+func PayloadValidatorConfigured() bool { return DefaultPayloadValidator != nil }
 
 // SetPayloadValidator overrides the validator used by every step 6
-// instance going forward. Calling with nil reverts to the no-op.
-func SetPayloadValidator(v PayloadValidator) {
-	if v == nil {
-		DefaultPayloadValidator = noopValidator
-		return
-	}
-	DefaultPayloadValidator = v
-}
+// instance going forward. Calling with nil clears the validator, restoring
+// the fail-closed default.
+func SetPayloadValidator(v PayloadValidator) { DefaultPayloadValidator = v }

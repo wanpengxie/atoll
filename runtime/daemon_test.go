@@ -500,7 +500,9 @@ func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Seed 6 requests, all already past expires_at (deadline = now - 1s).
+	// Seed requests. Most are already past expires_at (deadline = now -
+	// 1s); two receiver_unavailable cases intentionally omit expires_at
+	// to pin the independent immediate scan.
 	// We use "human.text" core type with kind=request — core types pass
 	// step 4 without a type_registry hit. The raw store.Append path
 	// bypasses harness (the harness would refuse kind=request with an
@@ -511,16 +513,19 @@ func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
 	type seedCase struct {
 		id           string
 		audience     string
+		expiresAt    *int64
 		expectEmit   bool
 		expectReason message.TerminalFailureReason
 	}
 	cases := []seedCase{
-		{id: "req-agent", audience: "agent:beta", expectEmit: true, expectReason: message.TerminalUnansweredTimeout},
-		{id: "req-system", audience: string(actor.SystemActorID), expectEmit: true, expectReason: message.TerminalUnansweredTimeout},
-		{id: "req-tool", audience: "tool:xhs", expectEmit: false},
-		{id: "req-human", audience: "user:alice", expectEmit: false},
-		{id: "req-deregistered", audience: "agent:gone", expectEmit: true, expectReason: message.TerminalReceiverUnavailable},
-		{id: "req-unknown", audience: "agent:ghost", expectEmit: true, expectReason: message.TerminalReceiverUnavailable},
+		{id: "req-agent", audience: "agent:beta", expiresAt: &deadline, expectEmit: true, expectReason: message.TerminalUnansweredTimeout},
+		{id: "req-system", audience: string(actor.SystemActorID), expiresAt: &deadline, expectEmit: true, expectReason: message.TerminalUnansweredTimeout},
+		{id: "req-tool", audience: "tool:xhs", expiresAt: &deadline, expectEmit: false},
+		{id: "req-human", audience: "user:alice", expiresAt: &deadline, expectEmit: false},
+		{id: "req-deregistered", audience: "agent:gone", expiresAt: &deadline, expectEmit: true, expectReason: message.TerminalReceiverUnavailable},
+		{id: "req-unknown", audience: "agent:ghost", expiresAt: &deadline, expectEmit: true, expectReason: message.TerminalReceiverUnavailable},
+		{id: "req-null-deregistered", audience: "agent:gone", expectEmit: true, expectReason: message.TerminalReceiverUnavailable},
+		{id: "req-null-unknown", audience: "agent:ghost", expectEmit: true, expectReason: message.TerminalReceiverUnavailable},
 	}
 	for _, c := range cases {
 		env := &message.Envelope{
@@ -534,7 +539,7 @@ func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
 			Payload:    json.RawMessage(`{"text":"please"}`),
 			Visibility: message.VisibilityPublic,
 			Audience:   message.Audience{actor.ActorID(c.audience)},
-			ExpiresAt:  &deadline,
+			ExpiresAt:  c.expiresAt,
 		}
 		if _, err := msgs.Append(ctx, env); err != nil {
 			t.Fatalf("seed %s: %v", c.id, err)

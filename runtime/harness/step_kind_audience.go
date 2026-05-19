@@ -9,6 +9,11 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
+const (
+	defaultAgentMaxPendingMs  int64 = 24 * 60 * 60 * 1000
+	defaultSystemMaxPendingMs int64 = 60 * 60 * 1000
+)
+
 // stepKindAndAudience implements L1 §10.2 step 5:
 //
 //   - core types: kind must equal default_kind unless AllowOverride
@@ -25,7 +30,12 @@ func newStepKindAndAudience(d Deps) khar.Step { return &stepKindAndAudience{deps
 func (s *stepKindAndAudience) ID() khar.StepID { return khar.StepKindAndAudience }
 
 func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (khar.Outcome, error) {
-	if rule, isCore := CoreTypeTable[env.Type]; isCore {
+	var (
+		view   TypeView
+		isCore bool
+	)
+	if rule, ok := CoreTypeTable[env.Type]; ok {
+		isCore = true
 		if !rule.AllowOverride && env.Kind != rule.DefaultKind {
 			return khar.Outcome{
 				RejectReason: message.HarnessKindNotAllowed,
@@ -36,7 +46,9 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (k
 	} else {
 		// business type — look up allowed_kinds. unknown_type was already
 		// caught at step 4, so we expect a hit here.
-		view, ok, err := s.deps.TypeRegistry.Lookup(ctx, env.Type)
+		var ok bool
+		var err error
+		view, ok, err = s.deps.TypeRegistry.Lookup(ctx, env.Type)
 		if err != nil {
 			return khar.Outcome{}, err
 		}
@@ -79,17 +91,49 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (k
 	}
 
 	// business type handler_actor_id check (core types have no handler).
-	if _, isCore := CoreTypeTable[env.Type]; !isCore {
-		view, _, _ := s.deps.TypeRegistry.Lookup(ctx, env.Type)
-		if view.HandlerActorID != "" && view.HandlerActorID != target {
-			return khar.Outcome{
-				RejectReason: message.HarnessAudienceHandlerMismatch,
-				Detail: fmt.Sprintf("audience=%q must equal handler_actor_id=%q",
-					target, view.HandlerActorID),
-			}, nil
+	if !isCore && view.HandlerActorID != "" && view.HandlerActorID != target {
+		return khar.Outcome{
+			RejectReason: message.HarnessAudienceHandlerMismatch,
+			Detail: fmt.Sprintf("audience=%q must equal handler_actor_id=%q",
+				target, view.HandlerActorID),
+		}, nil
+	}
+	if env.ExpiresAt == nil {
+		if out := s.defaultExpiresAt(env, rec.Kind, view, !isCore); !out.Continue() {
+			return out, nil
 		}
 	}
 	return khar.Outcome{}, nil
+}
+
+func (s *stepKindAndAudience) defaultExpiresAt(
+	env *message.Envelope,
+	receiverKind actor.Kind,
+	view TypeView,
+	hasTypeView bool,
+) khar.Outcome {
+	var maxPendingMs int64
+	switch receiverKind {
+	case actor.KindTool:
+		if !hasTypeView || view.MaxPendingMs <= 0 {
+			return khar.Outcome{
+				RejectReason: message.HarnessPayloadSchemaViolation,
+				Detail:       "tool receiver requires type_registry.max_pending_ms to default expires_at",
+			}
+		}
+		maxPendingMs = view.MaxPendingMs
+	case actor.KindAgent:
+		maxPendingMs = defaultAgentMaxPendingMs
+	case actor.KindSystem:
+		maxPendingMs = defaultSystemMaxPendingMs
+	case actor.KindHuman:
+		return khar.Outcome{}
+	default:
+		return khar.Outcome{}
+	}
+	deadline := s.deps.NowMs() + maxPendingMs
+	env.ExpiresAt = &deadline
+	return khar.Outcome{}
 }
 
 func kindAllowed(allowed []message.Kind, want message.Kind) bool {

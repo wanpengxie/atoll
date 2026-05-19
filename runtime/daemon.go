@@ -1957,11 +1957,9 @@ func (b transitChainBridge) Write(ctx context.Context, env *message.Envelope) (t
 //     timeouts are M1.7 scope).
 //     - audience[0] is missing from actor_registry, OR is soft-
 //     deregistered → reason='receiver_unavailable' (the request
-//     can never be answered because nobody is listening). NOTE: per
-//     L1 §6.4 this should fire IMMEDIATELY rather than waiting for
-//     expires_at. M1.6 simplifies by piggybacking on the expires_at
-//     scan; the standalone "deregister-time immediate emit" scan is
-//     deferred to a later ticket to keep T147 surface tight.
+//     can never be answered because nobody is listening). This path
+//     is scanned independently from expires_at so NULL/future-deadline
+//     rows close immediately per L1 §6.4 / L2 §3.7.1 Step 3.
 //
 // The synthesised response uses the system actor as sender (the canonical
 // "harness wrote this on the channel's behalf" identity per L1 §3.2) and
@@ -1995,7 +1993,20 @@ func (d *Daemon) scanLongPending(ctx context.Context, nowMs int64) error {
 			}
 		}
 
-		// Pass 2 — §6.4 long-pending fallback emit.
+		// Pass 2 — §6.4 receiver_unavailable immediate fallback emit.
+		unavailable, err := cr.messages.ReceiverUnavailableRequests(ctx, 64)
+		if err != nil {
+			fmt.Printf("runtime: scheduler receiver-unavailable %s: %v\n", chID, err)
+		}
+		for i := range unavailable {
+			req := unavailable[i]
+			if err := d.emitLongPendingFallback(ctx, cr, &req, nowMs); err != nil {
+				fmt.Printf("runtime: scheduler receiver-unavailable emit %s/%s: %v\n", chID, req.ID, err)
+				continue
+			}
+		}
+
+		// Pass 3 — §6.4 expires_at-gated long-pending fallback emit.
 		overdue, err := cr.messages.LongPendingRequests(ctx, nowMs, 64)
 		if err != nil {
 			fmt.Printf("runtime: scheduler long-pending %s: %v\n", chID, err)
@@ -2017,8 +2028,9 @@ func (d *Daemon) scanLongPending(ctx context.Context, nowMs int64) error {
 // terminalPayload (status/reason/detail) so consumers reading either
 // path see one schema.
 type longPendingPayload struct {
-	Status string `json:"status"`
-	Reason string `json:"reason"`
+	Status         string `json:"status"`
+	Reason         string `json:"reason"`
+	MissingActorID string `json:"missing_actor_id,omitempty"`
 }
 
 // emitLongPendingFallback synthesises one failed terminal response for
@@ -2053,7 +2065,11 @@ func (d *Daemon) emitLongPendingFallback(
 		return nil
 	}
 
-	payload, err := json.Marshal(longPendingPayload{Status: "failed", Reason: string(reason)})
+	body := longPendingPayload{Status: "failed", Reason: string(reason)}
+	if reason == message.TerminalReceiverUnavailable {
+		body.MissingActorID = receiverID.String()
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
 	}

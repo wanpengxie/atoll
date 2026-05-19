@@ -309,6 +309,56 @@ func (m *Messages) LongPendingRequests(ctx context.Context, nowMs int64, limit i
 	return out, nil
 }
 
+// ReceiverUnavailableRequests returns pending request rows whose first
+// audience actor is missing from actor_registry or has been deregistered.
+// Unlike LongPendingRequests this scan has no expires_at gate: a receiver
+// that no longer exists cannot answer, so the scheduler must close the
+// request immediately with receiver_unavailable.
+func (m *Messages) ReceiverUnavailableRequests(ctx context.Context, limit int) ([]message.Envelope, error) {
+	if limit <= 0 {
+		limit = 64
+	}
+	const q = `SELECT id, ts, ts_received, channel_id,
+	                  sender_kind, sender_id, COALESCE(sender_name,''),
+	                  kind, type, payload,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs,
+	                  visibility, audience,
+	                  not_before, expires_at,
+	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
+	                  is_terminal, seq
+	             FROM messages m
+	             LEFT JOIN actor_registry a
+	               ON a.actor_id = json_extract(m.audience, '$[0]')
+	             WHERE m.kind = 'request'
+	               AND m.is_terminal = 0
+	               AND NOT EXISTS (
+	                 SELECT 1 FROM messages r
+	                  WHERE r.parent_id = m.id
+	                    AND r.kind = 'response'
+	                    AND r.is_terminal = 1
+	               )
+	               AND (a.actor_id IS NULL OR a.deregistered_at IS NOT NULL)
+	             ORDER BY m.seq ASC LIMIT ?`
+	rows, err := m.db.QueryContext(ctx, q, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: receiver unavailable requests: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []message.Envelope
+	for rows.Next() {
+		env, err := scanEnvelopeRows(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: receiver unavailable requests scan: %w", err)
+		}
+		out = append(out, env)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: receiver unavailable requests rows: %w", err)
+	}
+	return out, nil
+}
+
 // MarkDelivered stamps messages.delivered_at when it is still NULL and
 // clears any previous delivery error. The UPDATE is idempotent
 // (rowsAffected=0 when the row was already delivered or missing — caller

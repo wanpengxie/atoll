@@ -30,6 +30,10 @@ type TypeView struct {
 	// envelope.payload at step 6. Empty map = no schema enforcement.
 	SchemasByKind map[message.Kind]json.RawMessage
 
+	// MaxPendingMs is the per-type request timeout used when a request's
+	// receiver is a tool and the envelope omitted expires_at.
+	MaxPendingMs int64
+
 	// HandlerActorID is the type's default concrete receiver (L2
 	// §1.4.2). When non-empty AND envelope.kind==request, step 5
 	// asserts the explicit audience equals this id

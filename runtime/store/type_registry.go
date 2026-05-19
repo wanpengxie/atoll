@@ -165,6 +165,7 @@ func (r *TypeRegistry) LookupView(ctx context.Context, typeName string) (harness
 		Type:               row.Type,
 		AllowedKinds:       append([]message.Kind(nil), row.AllowedKinds...),
 		SchemasByKind:      cloneSchemaMap(row.SchemasByKind),
+		MaxPendingMs:       row.MaxPendingMs,
 		HandlerActorID:     row.HandlerActorID,
 		TerminalConvention: string(row.TerminalConvention),
 	}, true, nil
