@@ -20,7 +20,7 @@ package main
 //
 // Auth / scope env (precedence — explicit flag → env → default):
 //
-//	--server-url  COAGENT_SERVER_URL  http://localhost:8080
+//	--server-url  COAGENT_SERVER_URL  http://localhost:8832
 //	--token       COAGENT_SESSION_TOKEN | COAGENT_AUTH_TOKEN | DAEMON_URL-paired token
 //	--channel     COAGENT_CHANNEL_ID
 //

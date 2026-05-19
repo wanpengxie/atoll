@@ -28,7 +28,7 @@ func newHTTPClient(serverURL, token string) (*httpClient, error) {
 		serverURL = os.Getenv("COAGENT_SERVER_URL")
 	}
 	if serverURL == "" {
-		serverURL = "http://localhost:8080"
+		serverURL = "http://localhost:8832"
 	}
 	if token == "" {
 		token = os.Getenv("COAGENT_SESSION_TOKEN")

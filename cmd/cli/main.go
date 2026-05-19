@@ -79,7 +79,7 @@ COMMANDS
   answer           Write a kind=response envelope (--parent-id required)
 
 GLOBAL FLAGS (forwarded by subcommands that call the HTTP API)
-  --server-url URL  Server base URL  (env COAGENT_SERVER_URL; default http://localhost:8080)
+  --server-url URL  Server base URL  (env COAGENT_SERVER_URL; default http://localhost:8832)
   --token   TOKEN   Session token    (env COAGENT_SESSION_TOKEN; sent as Bearer)
 
 Run 'coagent <command> -h' for command-specific flags.

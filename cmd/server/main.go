@@ -87,6 +87,7 @@ func run() error {
 		DeviceAllowMissingOrigin:  cfg.DeviceAllowMissingOrigin,
 		HumanCallerSecret:         cfg.HumanCallerSecret,
 		AllowDevSecrets:           cfg.AllowDevSecrets,
+		UIDistDir:                 cfg.UIDistDir,
 		ReconcileGracePeriod:      cfg.ReconcileGracePeriod,
 		ReconcileCreateTimeout:    cfg.ReconcileCreateTimeout,
 		ReconcileHeartbeatTimeout: cfg.ReconcileHeartbeatTimeout,
@@ -141,6 +142,7 @@ type config struct {
 	DeviceAllowMissingOrigin  bool
 	HumanCallerSecret         string
 	AllowDevSecrets           bool
+	UIDistDir                 string
 	ReconcileGracePeriod      time.Duration
 	ReconcileCreateTimeout    time.Duration
 	ReconcileHeartbeatTimeout time.Duration
@@ -149,7 +151,7 @@ type config struct {
 func loadConfig() config {
 	deviceOrigins := os.Getenv("COAGENT_DEVICEBUS_ALLOWED_ORIGINS")
 	cfg := config{
-		HTTPAddr: envOr("COAGENT_SERVER_ADDR", ":8080"),
+		HTTPAddr: envOr("COAGENT_SERVER_ADDR", ":8832"),
 		DBPath:   envOr("COAGENT_SERVER_DB", "data/server.db"),
 		// FIX-T8: env defaults are empty so gateway.New fails fast when
 		// the operator forgets to set the secrets. Pass --allow-dev-secrets
@@ -161,6 +163,7 @@ func loadConfig() config {
 		HumanCallerSecret:         os.Getenv("COAGENT_HUMAN_SECRET"),
 		AllowDevSecrets:           os.Getenv("COAGENT_ALLOW_DEV_SECRETS") == "1",
 		DeviceAllowMissingOrigin:  envBool("COAGENT_DEVICEBUS_ALLOW_MISSING_ORIGIN"),
+		UIDistDir:                 os.Getenv("COAGENT_UI_DIST"),
 		ReconcileGracePeriod:      60 * time.Second,
 		ReconcileCreateTimeout:    30 * time.Second,
 		ReconcileHeartbeatTimeout: 90 * time.Second,
@@ -168,6 +171,8 @@ func loadConfig() config {
 
 	flag.StringVar(&cfg.HTTPAddr, "addr", cfg.HTTPAddr, "HTTP listen address")
 	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "Path to server sqlite database")
+	flag.StringVar(&cfg.UIDistDir, "ui-dist", cfg.UIDistDir,
+		"Path to ui/dist directory; when set, served as SPA at /. Empty (default) = API only.")
 	flag.BoolVar(&cfg.AllowDevSecrets, "allow-dev-secrets", cfg.AllowDevSecrets,
 		"Allow empty / dev-sentinel secrets (dev-only; required for the legacy --change-me defaults)")
 	flag.StringVar(&deviceOrigins, "devicebus-allowed-origins", deviceOrigins,

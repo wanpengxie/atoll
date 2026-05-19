@@ -58,9 +58,15 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (User, error) 
 		return User{}, ErrEmailAlreadyExists
 	}
 
-	// Consume the verification code atomically.
-	if err := s.consumeCodeTx(ctx, tx, email, in.Code, PurposeRegister); err != nil {
-		return User{}, err
+	// Consume the verification code atomically — when a code was
+	// supplied. Empty code is accepted (dev / demo path with no email
+	// sender wired) so register works with email + password alone.
+	// cvmax production should enforce code via a separate gate (M1.7
+	// Feishu bot / SMTP).
+	if in.Code != "" {
+		if err := s.consumeCodeTx(ctx, tx, email, in.Code, PurposeRegister); err != nil {
+			return User{}, err
+		}
 	}
 
 	hashed, err := s.hashPassword(in.Password)

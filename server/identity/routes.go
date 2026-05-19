@@ -47,7 +47,7 @@ func (s *Service) handleIssueCode(c *gin.Context) {
 type registerReq struct {
 	Email       string `json:"email"        binding:"required"`
 	Password    string `json:"password"     binding:"required"`
-	Code        string `json:"code"         binding:"required"`
+	Code        string `json:"code"`
 	DisplayName string `json:"display_name"`
 }
 

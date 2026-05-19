@@ -58,6 +58,14 @@ type Config struct {
 	ReconcileCreateTimeout    time.Duration
 	ReconcileHeartbeatTimeout time.Duration
 
+	// UIDistDir is the absolute path to the ui/dist/ directory produced
+	// by `pnpm --filter ui build`. When non-empty, buildEngine wires a
+	// SPA static handler at "/" that serves the directory and falls back
+	// to index.html for any non-API path. Empty (the default) preserves
+	// the historical API-only behaviour — useful when ui/ is served by
+	// a separate vite dev server during local development.
+	UIDistDir string
+
 	// AllowDevSecrets controls FIX-T8 secret fail-fast. When false (the
 	// production default), any empty secret or any value equal to a
 	// well-known dev sentinel causes gateway.New to return an error.
