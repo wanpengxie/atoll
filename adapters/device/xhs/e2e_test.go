@@ -586,7 +586,7 @@ func TestSearchPerTypeAllowList(t *testing.T) {
 }
 
 // TestDeviceOfflineSession seeds an offline session and verifies the
-// adapter short-circuits to a failed terminal with reason=device_offline.
+// adapter short-circuits to a failed terminal with a closed-set reason.
 func TestDeviceOfflineSession(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
@@ -611,9 +611,7 @@ func TestDeviceOfflineSession(t *testing.T) {
 	if call.opts.Status != "failed" {
 		t.Errorf("status=%q want failed", call.opts.Status)
 	}
-	if call.opts.Reason != "device_offline" {
-		t.Errorf("reason=%q want device_offline", call.opts.Reason)
-	}
+	assertAdapterExecutionFailure(t, call, "device_offline")
 	if call.sender != testAdapterActor {
 		t.Errorf("sender=%q want %q", call.sender, testAdapterActor)
 	}
@@ -629,9 +627,7 @@ func TestDeviceSessionMissing(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	call := h.respond.calls[0]
-	if call.opts.Reason != "device_session_missing" {
-		t.Errorf("reason=%q want device_session_missing", call.opts.Reason)
-	}
+	assertAdapterExecutionFailure(t, call, "device_session_missing")
 }
 
 // TestDeviceSessionUnknown covers the case where a session id is
@@ -644,9 +640,7 @@ func TestDeviceSessionUnknown(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	call := h.respond.calls[0]
-	if call.opts.Reason != "device_session_unknown" {
-		t.Errorf("reason=%q want device_session_unknown", call.opts.Reason)
-	}
+	assertAdapterExecutionFailure(t, call, "device_session_unknown")
 }
 
 // TestTransitSendFailureRollsBack covers the path where DeviceTransit.Send
@@ -663,14 +657,26 @@ func TestTransitSendFailureRollsBack(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	call := h.respond.calls[0]
-	if call.opts.Reason != "device_push_failed" {
-		t.Errorf("reason=%q want device_push_failed", call.opts.Reason)
-	}
+	assertAdapterExecutionFailure(t, call, "device_push_failed")
 	if !h.policy.cancelled[adapter.CorrelationKey(env.ID)] {
 		t.Error("timer should be cancelled on push failure")
 	}
 	if !h.cor.expired[adapter.CorrelationKey(env.ID)] {
 		t.Error("correlation should be expired on push failure")
+	}
+}
+
+func assertAdapterExecutionFailure(t *testing.T, call respondCall, wantErrorCode string) {
+	t.Helper()
+	if call.opts.Reason != string(message.TerminalAdapterExecutionFailed) {
+		t.Fatalf("reason=%q want %s", call.opts.Reason, message.TerminalAdapterExecutionFailed)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(call.payload, &payload); err != nil {
+		t.Fatalf("unmarshal response payload: %v", err)
+	}
+	if payload["error_code"] != wantErrorCode {
+		t.Fatalf("payload.error_code=%v want %s", payload["error_code"], wantErrorCode)
 	}
 }
 

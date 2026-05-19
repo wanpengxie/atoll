@@ -102,6 +102,9 @@ func runRespond(
 	if status == "" {
 		status = "completed"
 	}
+	if err := validateRespondReason(status, opts.Reason); err != nil {
+		return adapter.RespondResult{}, err
+	}
 
 	mergedPayload, err := mergeResponsePayload(payload, status, opts.Reason, opts.Dedupe)
 	if err != nil {
@@ -219,6 +222,29 @@ func mergeResponsePayload(userPayload json.RawMessage, status, reason string, de
 		return nil, fmt.Errorf("framework: marshal merged payload: %w", err)
 	}
 	return out, nil
+}
+
+var frameworkInternalTerminalReasons = map[string]struct{}{
+	string(message.TerminalAdapterExecutionFailed): {},
+	string(message.TerminalAdapterPanic):           {},
+}
+
+func validateRespondReason(status, reason string) error {
+	if reason == "" {
+		return nil
+	}
+	if status != "failed" {
+		return fmt.Errorf("framework: RespondOptions.Reason requires status=failed (status=%q)", status)
+	}
+	for _, allowed := range message.AllTerminalFailureReasons {
+		if reason == string(allowed) {
+			return nil
+		}
+	}
+	if _, ok := frameworkInternalTerminalReasons[reason]; ok {
+		return nil
+	}
+	return fmt.Errorf("framework: RespondOptions.Reason %q not in terminal_failure_reason closed set", reason)
 }
 
 func boolStr(b bool) string {

@@ -30,6 +30,7 @@ const (
 
 	// Control plane frames (placement / member sync / device session /
 	// human caller) per L2 §9.1.
+	FrameTypeControlConnectionAccepted     FrameType = "control.connection_accepted"
 	FrameTypeControlCreateChannel          FrameType = "control.create_channel"
 	FrameTypeControlCreateChannelAck       FrameType = "control.create_channel_ack"
 	FrameTypeControlUnbindChannel          FrameType = "control.unbind_channel"
@@ -65,6 +66,7 @@ var AllFrameTypes = []FrameType{
 	FrameTypeViewsyncResyncRequest,
 	FrameTypeViewsyncResyncResponse,
 	// control plane
+	FrameTypeControlConnectionAccepted,
 	FrameTypeControlCreateChannel,
 	FrameTypeControlCreateChannelAck,
 	FrameTypeControlUnbindChannel,

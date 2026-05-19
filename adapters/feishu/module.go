@@ -162,7 +162,9 @@ func (m *Module) Shutdown(_ context.Context) error {
 
 // Handle dispatches by env.Type. Unknown types are rejected with a
 // failed terminal so the caller observes a definite outcome instead of
-// waiting for the framework timer.
+// waiting for the framework timer. The domain code is carried in
+// payload.error_code; payload.reason stays in the terminal_failure_reason
+// closed set.
 func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 	switch env.Type {
 	case TypeChatSend:

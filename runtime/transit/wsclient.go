@@ -413,12 +413,10 @@ func (c *WSClient) IsConnected() bool {
 	return c.conn != nil
 }
 
-// extractEpoch parses the `connection_accepted` payload — the demo-
-// period informational frame the server sends right after upgrading.
+// extractEpoch parses the `connection_accepted` payload the server
+// sends right after upgrading.
 // We accept both the typed payload and a generic map shape so the
-// client survives the spec-vs-impl gap noted in
-// server/daemonbus/ws_handler.go:93 (connection_accepted is NOT in the
-// L2 §9.1 closed set).
+// client survives old demo-period server builds.
 func extractEpoch(frame daemonbus.Frame) (daemonbus.ConnectionEpoch, error) {
 	if frame.DaemonConnectionEpoch != 0 {
 		return frame.DaemonConnectionEpoch, nil

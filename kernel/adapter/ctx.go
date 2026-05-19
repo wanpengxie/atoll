@@ -61,8 +61,8 @@ type RespondOptions struct {
 	// explicitly for failure terminals.
 	Status string
 
-	// Reason populates payload.reason on failure. Optional for
-	// "completed".
+	// Reason populates payload.reason on failure. When non-empty it MUST
+	// be a message.TerminalFailureReason wire value.
 	Reason string
 
 	// Visibility overrides the default response visibility (which

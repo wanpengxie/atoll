@@ -48,7 +48,7 @@ func TestValidatePayload(t *testing.T) {
 }
 
 func TestValidateFallbackResponseSchema(t *testing.T) {
-	// Schema that accepts {status,reason} object — passes all 3 samples.
+	// Schema that accepts {status,reason} object — passes all terminal samples.
 	ok := json.RawMessage(`{
 		"type":"object",
 		"required":["status","reason"],
@@ -58,14 +58,14 @@ func TestValidateFallbackResponseSchema(t *testing.T) {
 		t.Errorf("ok schema should pass: %v", err)
 	}
 
-	// Schema with enum that EXCLUDES one of the system fallback reasons.
+	// Schema with enum that EXCLUDES several terminal failure reasons.
 	bad := json.RawMessage(`{
 		"type":"object",
 		"required":["status","reason"],
 		"properties":{"reason":{"enum":["unanswered_timeout","adapter_default_timeout"]}}
 	}`)
 	if err := ValidateFallbackResponseSchema(bad); err == nil {
-		t.Error("schema excluding receiver_unavailable should fail")
+		t.Error("schema excluding terminal_failure_reason values should fail")
 	}
 
 	if err := ValidateFallbackResponseSchema(nil); err == nil {

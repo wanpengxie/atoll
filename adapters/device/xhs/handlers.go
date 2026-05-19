@@ -116,7 +116,8 @@ const (
 
 // normaliseStatus maps the wire status string to the closed outcome
 // set. Unknown / blank values resolve to outcomeUnknown so the adapter
-// emits a failed terminal with reason="callback_status_unknown".
+// emits a failed terminal with adapter_execution_failed and preserves
+// callback_status_unknown in payload.error_code.
 func normaliseStatus(raw string) callbackOutcome {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "ok", "completed", "success":
@@ -133,8 +134,8 @@ func normaliseStatus(raw string) callbackOutcome {
 // (resultAllowListFor / errorAllowListFor) so stowaway keys never reach
 // the harness Step 6 schema validator (R4-FIX-A).
 //
-// Returns (payload, status, reason). The caller wraps them into
-// adapter.RespondOptions.
+// Returns (payload, status, terminal reason). The caller wraps them
+// into adapter.RespondOptions.
 func buildRespondPayload(cb Callback, requestType string) (json.RawMessage, string, string, error) {
 	payload := map[string]any{}
 
@@ -152,11 +153,13 @@ func buildRespondPayload(cb Callback, requestType string) (json.RawMessage, stri
 		copyAllowedKeys(payload, cb.Result, resultAllowListFor(requestType))
 	case outcomeError:
 		status = "failed"
-		reason = errorReason(cb.ErrorObj)
+		reason = string(message.TerminalAdapterExecutionFailed)
+		payload["error_code"] = errorReason(cb.ErrorObj)
 		copyAllowedKeys(payload, cb.ErrorObj, errorAllowListFor(requestType))
 	default:
 		status = "failed"
-		reason = "callback_status_unknown"
+		reason = string(message.TerminalAdapterExecutionFailed)
+		payload["error_code"] = "callback_status_unknown"
 	}
 
 	body, err := json.Marshal(payload)

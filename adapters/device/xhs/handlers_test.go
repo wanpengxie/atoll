@@ -188,11 +188,14 @@ func TestBuildRespondPayloadFailureSchema(t *testing.T) {
 
 	// publish: retry_after allowed.
 	body, status, reason, _ := buildRespondPayload(cb, TypePublish)
-	if status != "failed" || reason != "boom" {
+	if status != "failed" || reason != string(message.TerminalAdapterExecutionFailed) {
 		t.Errorf("status/reason mismatch: %s / %s", status, reason)
 	}
 	publish := map[string]any{}
 	_ = json.Unmarshal(body, &publish)
+	if publish["error_code"] != "boom" {
+		t.Errorf("publish should preserve callback reason as error_code; got %v", publish["error_code"])
+	}
 	if publish["retry_after"] != float64(30) {
 		t.Errorf("publish should preserve retry_after; got %v", publish)
 	}
@@ -213,12 +216,17 @@ func TestBuildRespondPayloadFailureSchema(t *testing.T) {
 // TestBuildRespondPayloadUnknownStatus
 func TestBuildRespondPayloadUnknownStatus(t *testing.T) {
 	cb := Callback{CorrelationID: "env-1", Status: "vibrating"}
-	_, status, reason, _ := buildRespondPayload(cb, TypePublish)
+	body, status, reason, _ := buildRespondPayload(cb, TypePublish)
 	if status != "failed" {
 		t.Errorf("unknown status should resolve to failed; got %q", status)
 	}
-	if reason != "callback_status_unknown" {
-		t.Errorf("reason=%q want callback_status_unknown", reason)
+	if reason != string(message.TerminalAdapterExecutionFailed) {
+		t.Errorf("reason=%q want adapter_execution_failed", reason)
+	}
+	var payload map[string]any
+	_ = json.Unmarshal(body, &payload)
+	if payload["error_code"] != "callback_status_unknown" {
+		t.Errorf("payload.error_code=%v want callback_status_unknown", payload["error_code"])
 	}
 }
 

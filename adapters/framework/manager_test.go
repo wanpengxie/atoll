@@ -827,3 +827,38 @@ func TestManagerDeduplicatesResponseFromTerminalDuplicate(t *testing.T) {
 		t.Fatalf("expected PartialMessageID surfaced, got %q", dedupedResult.MessageID)
 	}
 }
+
+func TestManagerHandlePanicEmitsAdapterPanic(t *testing.T) {
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu",
+			Types:        []string{"feishu.chat.send"},
+			Binding:      actor.BindingOutboundHTTP,
+			MaxPendingMs: 30_000,
+		},
+		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {
+			panic("boom")
+		},
+	}
+	mgr, chain, lookup, _, _ := newTestManager(t, mod)
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
+
+	req := newTestRequest("channel:test", "agent:a", "feishu.chat.send", "req-panic")
+	lookup.Put(req)
+	if err := mgr.Dispatch(context.Background(), req); err == nil {
+		t.Fatal("Dispatch should surface adapter panic")
+	}
+
+	written := chain.Written()
+	if len(written) != 1 {
+		t.Fatalf("written=%d want 1 failed terminal", len(written))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(written[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload["reason"] != string(message.TerminalAdapterPanic) {
+		t.Fatalf("payload.reason=%v want %s", payload["reason"], message.TerminalAdapterPanic)
+	}
+}

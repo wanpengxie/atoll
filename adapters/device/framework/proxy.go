@@ -16,9 +16,9 @@ import (
 )
 
 // ErrDeviceSessionUnreachable is the proxy-level error every adapter
-// translates to a `device_offline` / `receiver_unavailable` terminal
-// when DeviceTransit.Send reports the session cannot carry the frame
-// right now. Adapters MAY override the surfaced reason; the proxy
+// translates to a closed-set terminal failure when DeviceTransit.Send
+// reports the session cannot carry the frame right now. Adapters may
+// preserve device-specific detail in payload.error_code; the proxy
 // itself stays neutral.
 var ErrDeviceSessionUnreachable = errors.New("framework.DeviceProxy: device session unreachable")
 
