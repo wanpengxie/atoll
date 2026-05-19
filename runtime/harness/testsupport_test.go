@@ -7,22 +7,23 @@ import (
 	"sync"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	khlog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// memActorRegistry is an actor.Registry implementation for harness tests.
+// memActorRegistry is an actorreg.Registry implementation for harness tests.
 type memActorRegistry struct {
 	mu   sync.Mutex
-	rows map[actor.ActorID]actor.Record
+	rows map[actor.ActorID]actorreg.Record
 }
 
 func newMemActorRegistry() *memActorRegistry {
-	return &memActorRegistry{rows: map[actor.ActorID]actor.Record{}}
+	return &memActorRegistry{rows: map[actor.ActorID]actorreg.Record{}}
 }
 
-func (r *memActorRegistry) Lookup(_ context.Context, id actor.ActorID) (actor.Record, bool, error) {
+func (r *memActorRegistry) Lookup(_ context.Context, id actor.ActorID) (actorreg.Record, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec, ok := r.rows[id]
@@ -36,10 +37,10 @@ func (r *memActorRegistry) Exists(_ context.Context, id actor.ActorID) (bool, er
 	return ok, nil
 }
 
-func (r *memActorRegistry) ListActive(_ context.Context) ([]actor.Record, error) {
+func (r *memActorRegistry) ListActive(_ context.Context) ([]actorreg.Record, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]actor.Record, 0, len(r.rows))
+	out := make([]actorreg.Record, 0, len(r.rows))
 	for _, rec := range r.rows {
 		if rec.IsActive() {
 			out = append(out, rec)
@@ -48,7 +49,7 @@ func (r *memActorRegistry) ListActive(_ context.Context) ([]actor.Record, error)
 	return out, nil
 }
 
-func (r *memActorRegistry) Insert(_ context.Context, rec actor.Record) error {
+func (r *memActorRegistry) Insert(_ context.Context, rec actorreg.Record) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, dup := r.rows[rec.ID]; dup {
@@ -129,10 +130,10 @@ func newTestChain(t interface {
 }, opts ...func(*Deps)) (*Chain, *memActorRegistry, *memLog, *InMemoryTypeRegistry) {
 	t.Helper()
 	areg := newMemActorRegistry()
-	_ = areg.Insert(context.Background(), actor.Record{ID: "agent:alpha", Kind: actor.SenderAgent, CreatedAt: 1})
-	_ = areg.Insert(context.Background(), actor.Record{ID: "user:demo", Kind: actor.SenderHuman, CreatedAt: 1})
-	_ = areg.Insert(context.Background(), actor.Record{ID: actor.SystemActorID, Kind: actor.SenderSystem, CreatedAt: 1})
-	_ = areg.Insert(context.Background(), actor.Record{ID: "tool:feishu", Kind: actor.SenderTool, CreatedAt: 1})
+	_ = areg.Insert(context.Background(), actorreg.Record{ID: "agent:alpha", Kind: actor.KindAgent, CreatedAt: 1})
+	_ = areg.Insert(context.Background(), actorreg.Record{ID: "user:demo", Kind: actor.KindHuman, CreatedAt: 1})
+	_ = areg.Insert(context.Background(), actorreg.Record{ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: 1})
+	_ = areg.Insert(context.Background(), actorreg.Record{ID: "tool:feishu", Kind: actor.KindTool, CreatedAt: 1})
 
 	log := newMemLog()
 	treg := NewInMemoryTypeRegistry()
@@ -157,7 +158,7 @@ func newEvent(senderID actor.ActorID, t string, payload json.RawMessage) *messag
 	return &message.Envelope{
 		ID:        "evt-" + string(senderID),
 		ChannelID: "ch-1",
-		Sender:    message.Sender{ID: string(senderID)},
+		Sender:    message.Sender{ID: senderID},
 		Type:      t,
 		Kind:      message.KindEvent,
 		Payload:   payload,
@@ -169,7 +170,7 @@ func newRequest(id string, senderID actor.ActorID, t string, audience string, pa
 	return &message.Envelope{
 		ID:        id,
 		ChannelID: "ch-1",
-		Sender:    message.Sender{ID: string(senderID)},
+		Sender:    message.Sender{ID: senderID},
 		Type:      t,
 		Kind:      message.KindRequest,
 		Payload:   payload,
@@ -181,7 +182,7 @@ func newResponse(id string, senderID actor.ActorID, parentID, t string, payload 
 	return &message.Envelope{
 		ID:        id,
 		ChannelID: "ch-1",
-		Sender:    message.Sender{ID: string(senderID)},
+		Sender:    message.Sender{ID: senderID},
 		Type:      t,
 		Kind:      message.KindResponse,
 		Payload:   payload,

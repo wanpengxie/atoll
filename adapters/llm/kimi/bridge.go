@@ -26,6 +26,7 @@ import (
 	// surfaces as "provider not found" at NewAgent time.
 	_ "github.com/wanpengxie/go-kimi/pkg/kimi/llm/anthropic"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -712,7 +713,7 @@ func (b *Bridge) emitEnvelope(
 		ChannelID:     string(ipc.ChannelID()),
 		Type:          envType,
 		Kind:          message.KindEvent,
-		Sender:        message.Sender{Kind: message.SenderAgent, ID: ipc.WorkerActorID()},
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(ipc.WorkerActorID())},
 		Visibility:    visibility,
 		Audience:      []string{"*"},
 		Payload:       body,
@@ -762,7 +763,7 @@ func (b *Bridge) emitTerminalLLMError(
 		ChannelID:     string(ipc.ChannelID()),
 		Type:          "agent.text",
 		Kind:          message.KindEvent,
-		Sender:        message.Sender{Kind: message.SenderAgent, ID: ipc.WorkerActorID()},
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(ipc.WorkerActorID())},
 		Visibility:    message.VisibilityPublic,
 		Audience:      []string{"*"},
 		Payload:       body,

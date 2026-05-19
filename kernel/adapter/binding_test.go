@@ -3,7 +3,7 @@ package adapter_test
 import (
 	"testing"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
@@ -92,17 +92,17 @@ func TestNormalizeBindingUnknown(t *testing.T) {
 func TestMatchesActorBinding(t *testing.T) {
 	cases := []struct {
 		handler adapter.BindingKind
-		actor   actor.Binding
+		actor   actorreg.Binding
 		want    bool
 	}{
-		{adapter.BindingInProcess, actor.BindingInProcess, true},
-		{adapter.BindingOutboundHTTP, actor.BindingOutboundHTTP, true},
-		{adapter.BindingViaServerTransit, actor.BindingViaServerTransit, true},
-		{adapter.BindingInProcess, actor.BindingOutboundHTTP, false},
+		{adapter.BindingInProcess, actorreg.BindingInProcess, true},
+		{adapter.BindingOutboundHTTP, actorreg.BindingOutboundHTTP, true},
+		{adapter.BindingViaServerTransit, actorreg.BindingViaServerTransit, true},
+		{adapter.BindingInProcess, actorreg.BindingOutboundHTTP, false},
 		{adapter.BindingOutboundHTTP, "", false},
 		// Cross-domain canonical strings happen to match — verifies the
 		// kernel/actor + kernel/adapter Binding values stay in sync.
-		{adapter.BindingViaServerTransit, actor.Binding("via_server_transit"), true},
+		{adapter.BindingViaServerTransit, actorreg.Binding("via_server_transit"), true},
 	}
 	for _, c := range cases {
 		if got := c.handler.MatchesActorBinding(c.actor); got != c.want {

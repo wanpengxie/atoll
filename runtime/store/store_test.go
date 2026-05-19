@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
 	klog "github.com/wanpengxie/ActOS/kernel/log"
@@ -58,7 +59,7 @@ func TestMessageAppend_OutboxRoundTrip(t *testing.T) {
 		TS:         1000,
 		TSReceived: 1100,
 		ChannelID:  "ch-1",
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:alpha"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:alpha"},
 		Kind:       message.KindEvent,
 		Type:       "channel.created",
 		Payload:    json.RawMessage(`{"ok":true}`),
@@ -82,6 +83,16 @@ func TestMessageAppend_OutboxRoundTrip(t *testing.T) {
 	}
 	if len(pending) != 1 || pending[0].Seq != viewsync.Seq(1) || pending[0].MessageID != "m-1" {
 		t.Fatalf("unexpected outbox: %+v", pending)
+	}
+	got, ok, err := msgs.FindByID(ctx, channel.ID("ch-1"), "m-1")
+	if err != nil || !ok {
+		t.Fatalf("FindByID ok=%v err=%v", ok, err)
+	}
+	if got.Sender.ID != actor.ActorID("agent:alpha") {
+		t.Errorf("sender.id=%q want agent:alpha", got.Sender.ID)
+	}
+	if got.Sender.Kind != actor.KindAgent {
+		t.Errorf("sender.kind=%q want %q", got.Sender.Kind, actor.KindAgent)
 	}
 
 	// Append same envelope again → dedupe path, no new outbox row.
@@ -160,7 +171,7 @@ func TestMessages_PendingDue_FutureMessagesGated(t *testing.T) {
 			TS:         1000,
 			TSReceived: 1000,
 			ChannelID:  "ch-1",
-			Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+			Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 			Kind:       message.KindEvent,
 			Type:       "tick",
 			Payload:    json.RawMessage(`{}`),
@@ -259,7 +270,7 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 			TS:         1000,
 			TSReceived: 1000,
 			ChannelID:  "ch-1",
-			Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+			Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 			Kind:       message.KindRequest,
 			Type:       "xhs.publish",
 			Payload:    json.RawMessage(`{}`),
@@ -289,7 +300,7 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 		TS:         950,
 		TSReceived: 950,
 		ChannelID:  "ch-1",
-		Sender:     message.Sender{Kind: message.SenderTool, ID: "tool:xhs-adapter"},
+		Sender:     message.Sender{Kind: actor.KindTool, ID: "tool:xhs-adapter"},
 		Kind:       message.KindResponse,
 		Type:       "xhs.publish",
 		Payload:    json.RawMessage(`{"status":"in_progress"}`),
@@ -322,7 +333,7 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 		TS:         960,
 		TSReceived: 960,
 		ChannelID:  "ch-1",
-		Sender:     message.Sender{Kind: message.SenderTool, ID: "tool:xhs-adapter"},
+		Sender:     message.Sender{Kind: actor.KindTool, ID: "tool:xhs-adapter"},
 		Kind:       message.KindResponse,
 		Type:       "xhs.publish",
 		Payload:    json.RawMessage(`{"status":"completed"}`),
@@ -342,7 +353,7 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 		TS:         1000,
 		TSReceived: 1000,
 		ChannelID:  "ch-1",
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Kind:       message.KindEvent,
 		Type:       "noise.tick",
 		Payload:    json.RawMessage(`{}`),
@@ -412,7 +423,7 @@ func TestMessages_ConcurrentTerminalDuplicateClassified(t *testing.T) {
 				TS:         int64(1000 + i),
 				TSReceived: int64(1000 + i),
 				ChannelID:  "ch-1",
-				Sender:     message.Sender{Kind: message.SenderTool, ID: "tool:xhs-adapter"},
+				Sender:     message.Sender{Kind: actor.KindTool, ID: "tool:xhs-adapter"},
 				Kind:       message.KindResponse,
 				Type:       "xhs.publish",
 				Payload:    json.RawMessage(`{"status":"completed"}`),
@@ -463,7 +474,7 @@ func newSimpleEnvelope(seq int) *message.Envelope {
 		TS:         int64(1000 + seq),
 		TSReceived: int64(1000 + seq),
 		ChannelID:  "ch-1",
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Kind:       message.KindEvent,
 		Type:       "tick",
 		Payload:    json.RawMessage(`{}`),
@@ -499,10 +510,10 @@ func TestActorRegistry(t *testing.T) {
 	reg := store.NewActorRegistry(db)
 	cur := store.NewCursors(db)
 
-	rec := actor.Record{
+	rec := actorreg.Record{
 		ID:        "agent:alpha",
-		Kind:      message.SenderAgent,
-		Binding:   actor.BindingInProcess,
+		Kind:      actor.KindAgent,
+		Binding:   actorreg.BindingInProcess,
 		CreatedAt: 1000,
 	}
 	if err := reg.Insert(ctx, rec); err != nil {
@@ -512,7 +523,13 @@ func TestActorRegistry(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("lookup ok=%v err=%v", ok, err)
 	}
-	if got.Binding != actor.BindingInProcess || !got.IsActive() {
+	if got.ID != actor.ActorID("agent:alpha") {
+		t.Errorf("actor id=%q want agent:alpha", got.ID)
+	}
+	if got.Kind != actor.KindAgent {
+		t.Errorf("actor kind=%q want %q", got.Kind, actor.KindAgent)
+	}
+	if got.Binding != actorreg.BindingInProcess || !got.IsActive() {
 		t.Errorf("got=%+v", got)
 	}
 

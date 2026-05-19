@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -151,7 +152,7 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope) (klog.Appe
 	}
 	res, err := tx.ExecContext(ctx, ins,
 		env.ID, env.TS, env.TSReceived, env.ChannelID,
-		string(env.Sender.Kind), env.Sender.ID, nullableString(env.Sender.Name),
+		string(env.Sender.Kind), string(env.Sender.ID), nullableString(env.Sender.Name),
 		string(env.Kind), env.Type, string(env.Payload),
 		nullableString(env.ParentID), nullableString(env.CorrelationID), nullableString(docRefsJSON),
 		string(env.Visibility), string(audJSON),
@@ -369,14 +370,14 @@ func scanEnvelopeRows(rows *sql.Rows) (message.Envelope, error) {
 // (FindByID) and scanEnvelopeRows (PendingDue).
 func scanEnvelopeFrom(s rowScanner) (message.Envelope, error) {
 	var env message.Envelope
-	var kind, sKind, vis string
+	var kind, sKind, senderID, vis string
 	var audJSON, payloadStr string
 	var docRefsStr sql.NullString
 	var notBefore, expiresAt, deliveredAt, deliveryFailedAt sql.NullInt64
 	var termInt int
 	if err := s.Scan(
 		&env.ID, &env.TS, &env.TSReceived, &env.ChannelID,
-		&sKind, &env.Sender.ID, &env.Sender.Name,
+		&sKind, &senderID, &env.Sender.Name,
 		&kind, &env.Type, &payloadStr,
 		&env.ParentID, &env.CorrelationID, &docRefsStr,
 		&vis, &audJSON,
@@ -386,7 +387,8 @@ func scanEnvelopeFrom(s rowScanner) (message.Envelope, error) {
 	); err != nil {
 		return message.Envelope{}, err
 	}
-	env.Sender.Kind = message.SenderKind(sKind)
+	env.Sender.Kind = actor.Kind(sKind)
+	env.Sender.ID = actor.ActorID(senderID)
 	env.Kind = message.Kind(kind)
 	env.Visibility = message.Visibility(vis)
 	env.Payload = json.RawMessage(payloadStr)

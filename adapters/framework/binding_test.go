@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -71,8 +72,8 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 	chain := newFakeChain()
 	lookup := NewMemoryRequestLookup(nil)
 	registry := newMemoryActorRegistry()
-	_ = registry.Insert(context.Background(), actor.Record{
-		ID: "tool:xhs", Kind: actor.SenderTool, Binding: actor.BindingViaServerTransit,
+	_ = registry.Insert(context.Background(), actorreg.Record{
+		ID: "tool:xhs", Kind: actor.KindTool, Binding: actorreg.BindingViaServerTransit,
 	})
 
 	var seenFrame *adapter.SendFrame
@@ -211,8 +212,8 @@ func TestOutboundHTTPBindingMCtxShape(t *testing.T) {
 // this is the seam guard from manager.go.
 func TestViaServerTransitRequiresDeviceTransit(t *testing.T) {
 	registry := newMemoryActorRegistry()
-	_ = registry.Insert(context.Background(), actor.Record{
-		ID: "tool:vst", Kind: actor.SenderTool, Binding: actor.BindingViaServerTransit,
+	_ = registry.Insert(context.Background(), actorreg.Record{
+		ID: "tool:vst", Kind: actor.KindTool, Binding: actorreg.BindingViaServerTransit,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{

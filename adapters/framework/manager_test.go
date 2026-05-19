@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/harness"
@@ -62,10 +63,10 @@ func newTestManager(t *testing.T, mod *stubModule, opts ...func(*ManagerConfig))
 	registry := newMemoryActorRegistry()
 
 	// Pre-seed actor row matching the module's declaration.
-	if err := registry.Insert(context.Background(), actor.Record{
+	if err := registry.Insert(context.Background(), actorreg.Record{
 		ID:      mod.decl.ActorID,
-		Kind:    actor.SenderTool,
-		Binding: actor.Binding(mod.decl.Binding),
+		Kind:    actor.KindTool,
+		Binding: actorreg.Binding(mod.decl.Binding),
 	}); err != nil {
 		t.Fatalf("seed actor: %v", err)
 	}
@@ -98,7 +99,7 @@ func newTestRequest(channelID channel.ID, sender, typ, requestID string) *messag
 		ID:         requestID,
 		TS:         1_700_000_000_000,
 		ChannelID:  string(channelID),
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: sender},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(sender)},
 		Kind:       message.KindRequest,
 		Type:       typ,
 		Payload:    json.RawMessage(`{"msg":"hi"}`),
@@ -176,10 +177,10 @@ func TestManagerInstallRejectsMissingActor(t *testing.T) {
 
 func TestManagerInstallRejectsBindingMismatch(t *testing.T) {
 	registry := newMemoryActorRegistry()
-	_ = registry.Insert(context.Background(), actor.Record{
+	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID:      "tool:feishu",
-		Kind:    actor.SenderTool,
-		Binding: actor.BindingInProcess,
+		Kind:    actor.KindTool,
+		Binding: actorreg.BindingInProcess,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
@@ -206,10 +207,10 @@ func TestManagerInstallRejectsBindingMismatch(t *testing.T) {
 
 func TestManagerInstallRejectsTransitMissing(t *testing.T) {
 	registry := newMemoryActorRegistry()
-	_ = registry.Insert(context.Background(), actor.Record{
+	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID:      "tool:xhs",
-		Kind:    actor.SenderTool,
-		Binding: actor.BindingViaServerTransit,
+		Kind:    actor.KindTool,
+		Binding: actorreg.BindingViaServerTransit,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
@@ -266,10 +267,10 @@ func (r *recordingTransit) Error(_ context.Context, frame adapter.ErrorFrame) er
 
 func TestManagerInstallAcceptsTransitWhenWired(t *testing.T) {
 	registry := newMemoryActorRegistry()
-	_ = registry.Insert(context.Background(), actor.Record{
+	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID:      "tool:xhs",
-		Kind:    actor.SenderTool,
-		Binding: actor.BindingViaServerTransit,
+		Kind:    actor.KindTool,
+		Binding: actorreg.BindingViaServerTransit,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
@@ -337,7 +338,7 @@ func TestManagerDispatchHandlesRequestAndRespond(t *testing.T) {
 	if resp.Sender.ID != "tool:feishu" {
 		t.Fatalf("response sender.id=%s want tool:feishu", resp.Sender.ID)
 	}
-	if resp.Sender.Kind != message.SenderTool {
+	if resp.Sender.Kind != actor.KindTool {
 		t.Fatalf("response sender.kind=%s want tool", resp.Sender.Kind)
 	}
 	if resp.ParentID != req.ID {

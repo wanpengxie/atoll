@@ -395,7 +395,7 @@ func (h *harness) request(envID, ty, payload, sessionID string) *message.Envelop
 		return &message.Envelope{
 			ID:        envID,
 			ChannelID: string(h.channelID),
-			Sender:    message.Sender{Kind: message.SenderAgent, ID: "agent:test"},
+			Sender:    message.Sender{Kind: actor.KindAgent, ID: "agent:test"},
 			Kind:      message.KindRequest,
 			Type:      ty,
 			Payload:   []byte(payload),
@@ -412,7 +412,7 @@ func (h *harness) request(envID, ty, payload, sessionID string) *message.Envelop
 	return &message.Envelope{
 		ID:        envID,
 		ChannelID: string(h.channelID),
-		Sender:    message.Sender{Kind: message.SenderAgent, ID: "agent:test"},
+		Sender:    message.Sender{Kind: actor.KindAgent, ID: "agent:test"},
 		Kind:      message.KindRequest,
 		Type:      ty,
 		Payload:   body,

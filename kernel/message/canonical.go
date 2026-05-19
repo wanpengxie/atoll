@@ -133,7 +133,7 @@ func envelopeHashInput(e Envelope) (map[string]any, error) {
 
 	sender := map[string]any{
 		"kind": string(e.Sender.Kind),
-		"id":   e.Sender.ID,
+		"id":   string(e.Sender.ID),
 		"name": e.Sender.Name,
 	}
 

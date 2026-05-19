@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -296,7 +297,7 @@ func TestViewcacheRoutesRequireChannelMembership(t *testing.T) {
 		ChannelID:  alice.channelID,
 		Type:       "agent.text",
 		Kind:       message.KindEvent,
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Payload:    json.RawMessage(`{"text":"secret"}`),
 		Visibility: message.VisibilityPublic,
 		Audience:   []string{"*"},
@@ -389,7 +390,7 @@ func TestPushhubSubscribeRejectsNonMemberAndBlocksFanout(t *testing.T) {
 		ChannelID:  alice.channelID,
 		Type:       "agent.text",
 		Kind:       message.KindEvent,
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Payload:    json.RawMessage(`{"text":"secret"}`),
 		Visibility: message.VisibilityPublic,
 		Audience:   []string{"*"},
@@ -470,7 +471,7 @@ func TestPushhubRevokesSubscriptionAfterMemberRemoval(t *testing.T) {
 		ChannelID:  alice.channelID,
 		Type:       "agent.text",
 		Kind:       message.KindEvent,
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Payload:    json.RawMessage(`{"text":"secret"}`),
 		Visibility: message.VisibilityPublic,
 		Audience:   []string{"*"},
@@ -500,7 +501,7 @@ func TestHandleWriteMessageResponseInheritsParentCorrelation(t *testing.T) {
 		Type:          "human.text",
 		Kind:          message.KindRequest,
 		CorrelationID: "corr-parent",
-		Sender:        message.Sender{Kind: message.SenderAgent, ID: "agent:requester"},
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: "agent:requester"},
 		Visibility:    message.VisibilityPublic,
 		Audience:      []string{"user:alice"},
 		Payload:       json.RawMessage(`{"text":"question"}`),
@@ -755,7 +756,7 @@ func TestMockDaemonViewSyncRoundTrip(t *testing.T) {
 			MessageID: id,
 			Envelope: message.Envelope{
 				ID: id, TS: int64(seq) * 1000, ChannelID: "ch-A",
-				Sender: message.Sender{Kind: message.SenderAgent, ID: "a"},
+				Sender: message.Sender{Kind: actor.KindAgent, ID: "a"},
 				Kind:   message.KindEvent, Type: "agent.text",
 				Payload:    json.RawMessage(`{}`),
 				Visibility: message.VisibilityPublic, Audience: []string{"*"},
@@ -900,7 +901,7 @@ func TestViewSyncGapDrainFanOut(t *testing.T) {
 			ChannelID: channel.ID("ch-fanout"), Seq: seq, MessageID: id,
 			Envelope: message.Envelope{
 				ID: id, TS: int64(seq) * 1000, ChannelID: "ch-fanout",
-				Sender: message.Sender{Kind: message.SenderAgent, ID: "a"},
+				Sender: message.Sender{Kind: actor.KindAgent, ID: "a"},
 				Kind:   message.KindEvent, Type: "agent.text",
 				Payload:    json.RawMessage(`{}`),
 				Visibility: message.VisibilityPublic, Audience: []string{"*"},

@@ -1,8 +1,6 @@
 package xhs
 
-import (
-	"github.com/wanpengxie/ActOS/kernel/actor"
-)
+import "github.com/wanpengxie/ActOS/kernel/actorreg"
 
 // ChannelType is the catalog.Channel.Type key the L4 xhs-creator
 // template binds (v4-layer4-spec §2). Re-exported here so cmd/daemon /
@@ -28,7 +26,7 @@ type Template struct {
 	// AdapterActorSeeds lists the actor_registry rows the bootstrap
 	// saga inserts during step 5b so framework.Manager.Install can
 	// locate the adapter actor with the right binding.
-	AdapterActorSeeds []actor.Record
+	AdapterActorSeeds []actorreg.Record
 
 	// WorkdirSubdirs lists relative directory paths the bootstrap
 	// saga mkdirs inside <ChannelsDir>/<channelID>/ during step 5c.
@@ -100,7 +98,7 @@ func WorkdirSubdirs() []string {
 func XHSCreatorTemplate() Template {
 	return Template{
 		ChannelType:       ChannelType,
-		AdapterActorSeeds: []actor.Record{DefaultActorSeed()},
+		AdapterActorSeeds: []actorreg.Record{DefaultActorSeed()},
 		WorkdirSubdirs:    WorkdirSubdirs(),
 		DomainPrompt:      xhsCreatorDomainPrompt,
 	}

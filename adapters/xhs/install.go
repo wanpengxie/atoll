@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -51,15 +52,15 @@ func declarationTypeSchemas() map[string]adapter.TypeSchema {
 	return out
 }
 
-// DefaultActorSeed returns the kernel/actor.Record the saga inserts so
+// DefaultActorSeed returns the kernel/actorreg.Record the saga inserts so
 // framework.Manager.Install can locate tool:xhs-adapter at boot. T3
 // will need to flip the Binding to ViaServerTransit when the device
 // adapter replaces this scaffold.
-func DefaultActorSeed() actor.Record {
-	return actor.Record{
+func DefaultActorSeed() actorreg.Record {
+	return actorreg.Record{
 		ID:          DefaultAdapterActorID,
-		Kind:        message.SenderTool,
-		Binding:     actor.BindingInProcess,
+		Kind:        actor.KindTool,
+		Binding:     actorreg.BindingInProcess,
 		DisplayName: "xhs",
 	}
 }

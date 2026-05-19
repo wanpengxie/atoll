@@ -9,27 +9,28 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime/trigger"
 )
 
-// memRegistry is an in-memory actor.Registry for trigger tests. Mirrors
+// memRegistry is an in-memory actorreg.Registry for trigger tests. Mirrors
 // the harness package's testsupport_test.go layout so the two stay easy
 // to compare side-by-side.
 type memRegistry struct {
 	mu   sync.Mutex
-	rows map[actor.ActorID]actor.Record
+	rows map[actor.ActorID]actorreg.Record
 }
 
-func newMemRegistry(recs ...actor.Record) *memRegistry {
-	r := &memRegistry{rows: map[actor.ActorID]actor.Record{}}
+func newMemRegistry(recs ...actorreg.Record) *memRegistry {
+	r := &memRegistry{rows: map[actor.ActorID]actorreg.Record{}}
 	for _, rec := range recs {
 		r.rows[rec.ID] = rec
 	}
 	return r
 }
 
-func (r *memRegistry) Lookup(_ context.Context, id actor.ActorID) (actor.Record, bool, error) {
+func (r *memRegistry) Lookup(_ context.Context, id actor.ActorID) (actorreg.Record, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec, ok := r.rows[id]
@@ -43,10 +44,10 @@ func (r *memRegistry) Exists(_ context.Context, id actor.ActorID) (bool, error) 
 	return ok, nil
 }
 
-func (r *memRegistry) ListActive(_ context.Context) ([]actor.Record, error) {
+func (r *memRegistry) ListActive(_ context.Context) ([]actorreg.Record, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]actor.Record, 0, len(r.rows))
+	out := make([]actorreg.Record, 0, len(r.rows))
 	for _, rec := range r.rows {
 		if rec.IsActive() {
 			out = append(out, rec)
@@ -56,7 +57,7 @@ func (r *memRegistry) ListActive(_ context.Context) ([]actor.Record, error) {
 	return out, nil
 }
 
-func (r *memRegistry) Insert(_ context.Context, rec actor.Record) error {
+func (r *memRegistry) Insert(_ context.Context, rec actorreg.Record) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.rows[rec.ID] = rec
@@ -112,10 +113,10 @@ func (f *fakeDeliverer) LastAudience() []actor.ActorID {
 
 func makeReg() *memRegistry {
 	return newMemRegistry(
-		actor.Record{ID: "agent:alpha", Kind: actor.SenderAgent, CreatedAt: 1},
-		actor.Record{ID: "agent:beta", Kind: actor.SenderAgent, CreatedAt: 1},
-		actor.Record{ID: "user:demo", Kind: actor.SenderHuman, CreatedAt: 1},
-		actor.Record{ID: actor.SystemActorID, Kind: actor.SenderSystem, CreatedAt: 1},
+		actorreg.Record{ID: "agent:alpha", Kind: actor.KindAgent, CreatedAt: 1},
+		actorreg.Record{ID: "agent:beta", Kind: actor.KindAgent, CreatedAt: 1},
+		actorreg.Record{ID: "user:demo", Kind: actor.KindHuman, CreatedAt: 1},
+		actorreg.Record{ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: 1},
 	)
 }
 
@@ -123,7 +124,7 @@ func TestResolve_WildcardExpand_StripsSender(t *testing.T) {
 	reg := makeReg()
 	env := &message.Envelope{
 		ID:         "m-1",
-		Sender:     message.Sender{Kind: actor.SenderHuman, ID: "user:demo"},
+		Sender:     message.Sender{Kind: actor.KindHuman, ID: "user:demo"},
 		Kind:       message.KindEvent,
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{}`),
@@ -144,7 +145,7 @@ func TestResolve_ExplicitAudience_OnlyListed(t *testing.T) {
 	reg := makeReg()
 	env := &message.Envelope{
 		ID:         "m-2",
-		Sender:     message.Sender{Kind: actor.SenderHuman, ID: "user:demo"},
+		Sender:     message.Sender{Kind: actor.KindHuman, ID: "user:demo"},
 		Kind:       message.KindEvent,
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{}`),
@@ -166,7 +167,7 @@ func TestResolve_DeregisteredActor_DroppedFromExplicitList(t *testing.T) {
 	_ = reg.Deregister(context.Background(), "agent:beta", 1234)
 	env := &message.Envelope{
 		ID:         "m-3",
-		Sender:     message.Sender{Kind: actor.SenderHuman, ID: "user:demo"},
+		Sender:     message.Sender{Kind: actor.KindHuman, ID: "user:demo"},
 		Kind:       message.KindEvent,
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{}`),
@@ -187,7 +188,7 @@ func TestResolve_VisibilitySystem_Suppressed(t *testing.T) {
 	reg := makeReg()
 	env := &message.Envelope{
 		ID:         "m-sys",
-		Sender:     message.Sender{Kind: actor.SenderSystem, ID: actor.SystemActorID.String()},
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
 		Kind:       message.KindEvent,
 		Type:       "system.event",
 		Payload:    json.RawMessage(`{}`),
@@ -207,7 +208,7 @@ func TestResolve_VisibilityPrivate_Suppressed(t *testing.T) {
 	reg := makeReg()
 	env := &message.Envelope{
 		ID:         "m-priv",
-		Sender:     message.Sender{Kind: actor.SenderAgent, ID: "agent:alpha"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:alpha"},
 		Kind:       message.KindEvent,
 		Type:       "agent.text",
 		Payload:    json.RawMessage(`{}`),
@@ -227,7 +228,7 @@ func TestResolve_SystemHeartbeat_Suppressed(t *testing.T) {
 	reg := makeReg()
 	env := &message.Envelope{
 		ID:         "m-hb",
-		Sender:     message.Sender{Kind: actor.SenderSystem, ID: actor.SystemActorID.String()},
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
 		Kind:       message.KindEvent,
 		Type:       "system.heartbeat",
 		Payload:    json.RawMessage(`{}`),
@@ -247,7 +248,7 @@ func TestResolve_SelfTriggerBan_DropsSender(t *testing.T) {
 	reg := makeReg()
 	env := &message.Envelope{
 		ID:         "m-agent-broadcast",
-		Sender:     message.Sender{Kind: actor.SenderAgent, ID: "agent:alpha"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:alpha"},
 		Kind:       message.KindEvent,
 		Type:       "agent.text",
 		Payload:    json.RawMessage(`{}`),
@@ -274,7 +275,7 @@ func TestResolve_BypassSelfTriggerBan_KeepsSender(t *testing.T) {
 	reg := makeReg()
 	env := &message.Envelope{
 		ID:         "m-future",
-		Sender:     message.Sender{Kind: actor.SenderAgent, ID: "agent:alpha"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:alpha"},
 		Kind:       message.KindEvent,
 		Type:       "agent.text",
 		Payload:    json.RawMessage(`{}`),
@@ -296,7 +297,7 @@ func TestResolve_EmptyAudience_TreatedAsWildcard(t *testing.T) {
 	reg := makeReg()
 	env := &message.Envelope{
 		ID:         "m-empty-aud",
-		Sender:     message.Sender{Kind: actor.SenderHuman, ID: "user:demo"},
+		Sender:     message.Sender{Kind: actor.KindHuman, ID: "user:demo"},
 		Kind:       message.KindEvent,
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{}`),
@@ -339,7 +340,7 @@ func TestGateway_Dispatch_ImmediateInvokesDeliverer(t *testing.T) {
 	}
 	env := &message.Envelope{
 		ID:         "m-imm",
-		Sender:     message.Sender{Kind: actor.SenderHuman, ID: "user:demo"},
+		Sender:     message.Sender{Kind: actor.KindHuman, ID: "user:demo"},
 		Kind:       message.KindEvent,
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{}`),
@@ -374,7 +375,7 @@ func TestGateway_Dispatch_FutureMessageDeferred(t *testing.T) {
 	notBefore := int64(2000)
 	env := &message.Envelope{
 		ID:         "m-future",
-		Sender:     message.Sender{Kind: actor.SenderHuman, ID: "user:demo"},
+		Sender:     message.Sender{Kind: actor.KindHuman, ID: "user:demo"},
 		Kind:       message.KindEvent,
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{}`),
@@ -419,7 +420,7 @@ func TestGateway_Dispatch_SystemHeartbeatNoDeliverer(t *testing.T) {
 	}
 	env := &message.Envelope{
 		ID:         "m-hb",
-		Sender:     message.Sender{Kind: actor.SenderSystem, ID: actor.SystemActorID.String()},
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
 		Kind:       message.KindEvent,
 		Type:       "system.heartbeat",
 		Payload:    json.RawMessage(`{}`),

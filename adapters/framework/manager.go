@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/harness"
@@ -38,7 +38,7 @@ type ManagerConfig struct {
 	// ActorRegistry is the channel-local actor registry. Install
 	// queries it to verify each Declaration.ActorID exists with the
 	// right binding.
-	ActorRegistry actor.Registry
+	ActorRegistry actorreg.Registry
 
 	// TypeRegistry receives one Upsert per Declaration.Type at Install
 	// time. Framework ships InMemoryTypeRegistry for tests.

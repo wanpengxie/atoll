@@ -15,6 +15,7 @@ import (
 	"github.com/wanpengxie/ActOS/adapters/feishu"
 	"github.com/wanpengxie/ActOS/adapters/framework"
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -164,17 +165,17 @@ func (c *fakeChain) snapshot() []*message.Envelope {
 }
 
 type memoryActorRegistry struct {
-	rows map[actor.ActorID]actor.Record
+	rows map[actor.ActorID]actorreg.Record
 }
 
 func newMemoryActorRegistry() *memoryActorRegistry {
-	return &memoryActorRegistry{rows: map[actor.ActorID]actor.Record{}}
+	return &memoryActorRegistry{rows: map[actor.ActorID]actorreg.Record{}}
 }
-func (r *memoryActorRegistry) Insert(_ context.Context, rec actor.Record) error {
+func (r *memoryActorRegistry) Insert(_ context.Context, rec actorreg.Record) error {
 	r.rows[rec.ID] = rec
 	return nil
 }
-func (r *memoryActorRegistry) Lookup(_ context.Context, id actor.ActorID) (actor.Record, bool, error) {
+func (r *memoryActorRegistry) Lookup(_ context.Context, id actor.ActorID) (actorreg.Record, bool, error) {
 	rec, ok := r.rows[id]
 	return rec, ok, nil
 }
@@ -182,8 +183,8 @@ func (r *memoryActorRegistry) Exists(_ context.Context, id actor.ActorID) (bool,
 	_, ok := r.rows[id]
 	return ok, nil
 }
-func (r *memoryActorRegistry) ListActive(_ context.Context) ([]actor.Record, error) {
-	out := make([]actor.Record, 0, len(r.rows))
+func (r *memoryActorRegistry) ListActive(_ context.Context) ([]actorreg.Record, error) {
+	out := make([]actorreg.Record, 0, len(r.rows))
 	for _, rec := range r.rows {
 		out = append(out, rec)
 	}
@@ -264,10 +265,10 @@ func setup(t *testing.T, mods ...func(*feishu.Module)) *setupResult {
 	}
 
 	registry := newMemoryActorRegistry()
-	_ = registry.Insert(context.Background(), actor.Record{
+	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID:      "tool:feishu",
-		Kind:    actor.SenderTool,
-		Binding: actor.BindingOutboundHTTP,
+		Kind:    actor.KindTool,
+		Binding: actorreg.BindingOutboundHTTP,
 	})
 
 	chain := &fakeChain{}
@@ -301,7 +302,7 @@ func newRequest(typ, id, payload string) *message.Envelope {
 		ID:         id,
 		TS:         time.Now().UnixMilli(),
 		ChannelID:  "channel:test",
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:author"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:author"},
 		Kind:       message.KindRequest,
 		Type:       typ,
 		Payload:    json.RawMessage(payload),
@@ -344,8 +345,8 @@ func TestInstallRejectsMissingCredentials(t *testing.T) {
 		}),
 	)
 	registry := newMemoryActorRegistry()
-	_ = registry.Insert(context.Background(), actor.Record{
-		ID: "tool:feishu", Kind: actor.SenderTool, Binding: actor.BindingOutboundHTTP,
+	_ = registry.Insert(context.Background(), actorreg.Record{
+		ID: "tool:feishu", Kind: actor.KindTool, Binding: actorreg.BindingOutboundHTTP,
 	})
 	mgr, _ := framework.NewManager(framework.ManagerConfig{
 		ChannelID:       "channel:test",

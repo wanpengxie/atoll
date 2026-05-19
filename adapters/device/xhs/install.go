@@ -2,8 +2,8 @@ package xhs
 
 import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
-	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // ActorSeed is the actor_registry row composition root MUST insert
@@ -11,8 +11,8 @@ import (
 // minimum field set + L2 §1.4.6 / L2 §1.4.2 install rules.
 type ActorSeed struct {
 	ID          actor.ActorID
-	Kind        message.SenderKind
-	Binding     actor.Binding
+	Kind        actor.Kind
+	Binding     actorreg.Binding
 	DisplayName string
 }
 
@@ -60,8 +60,8 @@ func DefaultInstallSpec(maxPendingMs int64) InstallSpec {
 	}
 	actorSeed := ActorSeed{
 		ID:          DefaultAdapterActorID,
-		Kind:        message.SenderTool,
-		Binding:     actor.BindingViaServerTransit,
+		Kind:        actor.KindTool,
+		Binding:     actorreg.BindingViaServerTransit,
 		DisplayName: "xhs",
 	}
 	types := make([]TypeSeed, 0, len(AllTypes))

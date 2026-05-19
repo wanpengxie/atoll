@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -51,7 +52,7 @@ type Options struct {
 func Resolve(
 	ctx context.Context,
 	env *message.Envelope,
-	reg actor.Registry,
+	reg actorreg.Registry,
 	opts Options,
 ) ([]actor.ActorID, error) {
 	if env == nil {
@@ -95,8 +96,7 @@ func Resolve(
 
 	// (4) Self-trigger ban — L1 §5.1 step 3.
 	if !opts.BypassSelfTriggerBan {
-		senderID := actor.ActorID(env.Sender.ID)
-		candidates = filterOut(candidates, senderID)
+		candidates = filterOut(candidates, env.Sender.ID)
 	}
 
 	// (5) Dedupe + stable sort. The audience slice may carry the same
@@ -115,7 +115,7 @@ func Resolve(
 func expandAudience(
 	ctx context.Context,
 	env *message.Envelope,
-	reg actor.Registry,
+	reg actorreg.Registry,
 ) ([]actor.ActorID, error) {
 	if isWildcard(env.Audience) {
 		rows, err := reg.ListActive(ctx)

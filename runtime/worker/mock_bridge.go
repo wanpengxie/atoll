@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 )
@@ -308,7 +309,7 @@ func (m *MockBridge) react(ctx context.Context, client *IPCClient, in ipc.Trigge
 		ChannelID:     string(client.ChannelID()),
 		Type:          envType,
 		Kind:          message.KindEvent,
-		Sender:        message.Sender{Kind: message.SenderAgent, ID: client.WorkerActorID()},
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(client.WorkerActorID())},
 		Visibility:    message.VisibilityPublic,
 		Audience:      []string{"*"},
 		Payload:       payload,
@@ -392,7 +393,7 @@ func (m *MockBridge) reactXHSPublish(ctx context.Context, client *IPCClient, in 
 		ChannelID:     string(client.ChannelID()),
 		Type:          "xhs.publish",
 		Kind:          message.KindRequest,
-		Sender:        message.Sender{Kind: message.SenderAgent, ID: client.WorkerActorID()},
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(client.WorkerActorID())},
 		Visibility:    message.VisibilityPublic,
 		Audience:      []string{"tool:xhs-adapter"},
 		Payload:       payload,
@@ -465,7 +466,7 @@ func (m *MockBridge) reactProgressMultiTurn(ctx context.Context, client *IPCClie
 			ChannelID:     string(client.ChannelID()),
 			Type:          "agent.progress",
 			Kind:          message.KindEvent,
-			Sender:        message.Sender{Kind: message.SenderAgent, ID: client.WorkerActorID()},
+			Sender:        message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(client.WorkerActorID())},
 			Visibility:    message.VisibilityPublic,
 			Audience:      []string{"*"},
 			Payload:       body,
@@ -493,7 +494,7 @@ func (m *MockBridge) reactProgressMultiTurn(ctx context.Context, client *IPCClie
 		ChannelID:     string(client.ChannelID()),
 		Type:          "agent.text",
 		Kind:          message.KindEvent,
-		Sender:        message.Sender{Kind: message.SenderAgent, ID: client.WorkerActorID()},
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(client.WorkerActorID())},
 		Visibility:    message.VisibilityPublic,
 		Audience:      []string{"*"},
 		Payload:       body,
@@ -523,7 +524,7 @@ func (m *MockBridge) emitTerminal(ctx context.Context, client *IPCClient) error 
 		ChannelID:  string(client.ChannelID()),
 		Type:       "agent.text",
 		Kind:       message.KindEvent,
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: client.WorkerActorID()},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(client.WorkerActorID())},
 		Visibility: message.VisibilityPublic,
 		Audience:   []string{"*"},
 		Payload:    payload,

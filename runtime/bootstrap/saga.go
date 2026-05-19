@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/store"
 )
@@ -32,7 +32,7 @@ type TemplateView struct {
 	// in addition to system + initial members. Each row supplies enough
 	// fields for kernel/adapter.Manager.Install to find the actor with
 	// the right binding.
-	AdapterActorSeeds []actor.Record
+	AdapterActorSeeds []actorreg.Record
 
 	// WorkdirSubdirs lists relative directory paths the saga MUST
 	// mkdir under <ChannelsDir>/<channelID>/ during step 5c (after the
@@ -74,7 +74,7 @@ type Saga struct {
 	daemonDB          *sql.DB
 	channelsDir       string
 	nowFn             func() int64
-	adapterActorSeeds []actor.Record
+	adapterActorSeeds []actorreg.Record
 	resolveTemplate   func(channelType string) TemplateView
 }
 
@@ -92,7 +92,7 @@ type SagaConfig struct {
 	// MUST instead provide ResolveTemplate so the per-channel template
 	// is selected by req.ChannelType. The static field stays as a
 	// fallback for legacy single-template wiring and the existing tests.
-	AdapterActorSeeds []actor.Record
+	AdapterActorSeeds []actorreg.Record
 
 	// ResolveTemplate, when non-nil, is consulted in Bootstrap to obtain
 	// the per-channel TemplateView keyed by CreateChannelRequest.ChannelType
@@ -117,7 +117,7 @@ func NewSaga(cfg SagaConfig) (*Saga, error) {
 	if cfg.NowFn == nil {
 		return nil, errors.New("bootstrap: SagaConfig.NowFn nil")
 	}
-	seeds := make([]actor.Record, len(cfg.AdapterActorSeeds))
+	seeds := make([]actorreg.Record, len(cfg.AdapterActorSeeds))
 	copy(seeds, cfg.AdapterActorSeeds)
 	return &Saga{
 		daemonDB:          cfg.DaemonDB,
@@ -160,9 +160,9 @@ func (s *Saga) Bootstrap(
 
 	// Step 4 — register system actor.
 	reg := store.NewActorRegistry(channelDB)
-	if err := s.insertActorIfMissing(ctx, reg, actor.Record{
+	if err := s.insertActorIfMissing(ctx, reg, actorreg.Record{
 		ID:        actor.SystemActorID,
-		Kind:      message.SenderSystem,
+		Kind:      actor.KindSystem,
 		Binding:   "",
 		CreatedAt: s.nowFn(),
 	}); err != nil {
@@ -174,11 +174,11 @@ func (s *Saga) Bootstrap(
 		if m.ActorIDInChannel == "" {
 			continue
 		}
-		kind := message.SenderHuman
+		kind := actor.KindHuman
 		if m.Kind != "" {
-			kind = message.SenderKind(m.Kind)
+			kind = actor.Kind(m.Kind)
 		}
-		if err := s.insertActorIfMissing(ctx, reg, actor.Record{
+		if err := s.insertActorIfMissing(ctx, reg, actorreg.Record{
 			ID:          actor.ActorID(m.ActorIDInChannel),
 			Kind:        kind,
 			DisplayName: m.DisplayName,
@@ -254,7 +254,7 @@ func (s *Saga) Complete(ctx context.Context, createReq string) error {
 	return s.markCompleted(ctx, createReq)
 }
 
-func (s *Saga) insertActorIfMissing(ctx context.Context, reg *store.ActorRegistry, rec actor.Record) error {
+func (s *Saga) insertActorIfMissing(ctx context.Context, reg *store.ActorRegistry, rec actorreg.Record) error {
 	if rec.ID == "" {
 		return nil
 	}

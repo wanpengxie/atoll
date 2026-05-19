@@ -7,10 +7,10 @@ import (
 	"fmt"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 )
 
-// ActorRegistry implements kernel/actor.Registry over a channel-local
+// ActorRegistry implements kernel/actorreg.Registry over a channel-local
 // sqlite. Each *ActorRegistry is bound to one channel database.
 type ActorRegistry struct {
 	db *sql.DB
@@ -19,29 +19,29 @@ type ActorRegistry struct {
 // NewActorRegistry returns a registry over the given channel sqlite.
 func NewActorRegistry(db *sql.DB) *ActorRegistry { return &ActorRegistry{db: db} }
 
-// Lookup implements actor.Registry.
-func (r *ActorRegistry) Lookup(ctx context.Context, id actor.ActorID) (actor.Record, bool, error) {
+// Lookup implements actorreg.Registry.
+func (r *ActorRegistry) Lookup(ctx context.Context, id actor.ActorID) (actorreg.Record, bool, error) {
 	const q = `SELECT actor_id, actor_kind, COALESCE(actor_binding,''),
 	                 COALESCE(display_name,''), created_at,
 	                 COALESCE(deregistered_at,0)
 	            FROM actor_registry WHERE actor_id=?`
-	var rec actor.Record
+	var rec actorreg.Record
 	var kind, binding string
 	err := r.db.QueryRowContext(ctx, q, string(id)).Scan(
 		&rec.ID, &kind, &binding, &rec.DisplayName, &rec.CreatedAt, &rec.DeregisteredAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return actor.Record{}, false, nil
+		return actorreg.Record{}, false, nil
 	}
 	if err != nil {
-		return actor.Record{}, false, fmt.Errorf("store: actor lookup %q: %w", id, err)
+		return actorreg.Record{}, false, fmt.Errorf("store: actor lookup %q: %w", id, err)
 	}
-	rec.Kind = message.SenderKind(kind)
-	rec.Binding = actor.Binding(binding)
+	rec.Kind = actor.Kind(kind)
+	rec.Binding = actorreg.Binding(binding)
 	return rec, true, nil
 }
 
-// Exists implements actor.Registry — returns true even for soft-deregistered.
+// Exists implements actorreg.Registry — returns true even for soft-deregistered.
 func (r *ActorRegistry) Exists(ctx context.Context, id actor.ActorID) (bool, error) {
 	const q = `SELECT 1 FROM actor_registry WHERE actor_id=? LIMIT 1`
 	var one int
@@ -55,8 +55,8 @@ func (r *ActorRegistry) Exists(ctx context.Context, id actor.ActorID) (bool, err
 	return true, nil
 }
 
-// ListActive implements actor.Registry.
-func (r *ActorRegistry) ListActive(ctx context.Context) ([]actor.Record, error) {
+// ListActive implements actorreg.Registry.
+func (r *ActorRegistry) ListActive(ctx context.Context) ([]actorreg.Record, error) {
 	const q = `SELECT actor_id, actor_kind, COALESCE(actor_binding,''),
 	                 COALESCE(display_name,''), created_at
 	            FROM actor_registry
@@ -68,15 +68,15 @@ func (r *ActorRegistry) ListActive(ctx context.Context) ([]actor.Record, error) 
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []actor.Record
+	var out []actorreg.Record
 	for rows.Next() {
-		var rec actor.Record
+		var rec actorreg.Record
 		var kind, binding string
 		if err := rows.Scan(&rec.ID, &kind, &binding, &rec.DisplayName, &rec.CreatedAt); err != nil {
 			return nil, fmt.Errorf("store: list active actors scan: %w", err)
 		}
-		rec.Kind = message.SenderKind(kind)
-		rec.Binding = actor.Binding(binding)
+		rec.Kind = actor.Kind(kind)
+		rec.Binding = actorreg.Binding(binding)
 		out = append(out, rec)
 	}
 	if err := rows.Err(); err != nil {
@@ -85,9 +85,9 @@ func (r *ActorRegistry) ListActive(ctx context.Context) ([]actor.Record, error) 
 	return out, nil
 }
 
-// Insert implements actor.Registry. Per L2 §1.4.6 invariant, the
+// Insert implements actorreg.Registry. Per L2 §1.4.6 invariant, the
 // actor_cursors row is seeded in the same transaction.
-func (r *ActorRegistry) Insert(ctx context.Context, rec actor.Record) error {
+func (r *ActorRegistry) Insert(ctx context.Context, rec actorreg.Record) error {
 	if rec.ID == "" {
 		return errors.New("store: actor insert: empty ID")
 	}
@@ -131,7 +131,7 @@ func (r *ActorRegistry) Insert(ctx context.Context, rec actor.Record) error {
 	return nil
 }
 
-// Deregister implements actor.Registry.
+// Deregister implements actorreg.Registry.
 func (r *ActorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int64) error {
 	const q = `UPDATE actor_registry SET deregistered_at=? WHERE actor_id=? AND deregistered_at IS NULL`
 	res, err := r.db.ExecContext(ctx, q, at, string(id))

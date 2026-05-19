@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
@@ -34,7 +35,7 @@ func frame(seq viewsync.Seq) viewsync.PushFrame {
 			ID:         msgID(seq),
 			TS:         int64(seq) * 1000,
 			ChannelID:  "ch-X",
-			Sender:     message.Sender{Kind: message.SenderAgent, ID: "a"},
+			Sender:     message.Sender{Kind: actor.KindAgent, ID: "a"},
 			Kind:       message.KindEvent,
 			Type:       "agent.text",
 			Payload:    json.RawMessage(`{}`),

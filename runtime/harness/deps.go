@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	khlog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -62,8 +63,8 @@ type CoreTypeRule struct {
 // engine-built-in: they live OUTSIDE type_registry and pass through
 // step 4 without a Lookup.
 var CoreTypeTable = map[string]CoreTypeRule{
-	"human.text":       {DefaultKind: message.KindEvent, AllowOverride: true},
-	"agent.text":       {DefaultKind: message.KindEvent, AllowOverride: true},
+	"human.text": {DefaultKind: message.KindEvent, AllowOverride: true},
+	"agent.text": {DefaultKind: message.KindEvent, AllowOverride: true},
 	// agent.progress is the intermediate "process bubble" event emitted
 	// per LLM-step (tool-call boundary) inside one trigger turn. Carries
 	// payload.turn_index + tool_calls preview so the UI can render a
@@ -111,9 +112,9 @@ type Deps struct {
 	ChannelID channel.ID
 
 	// ActorRegistry resolves sender.id / audience[*] / handler_actor_id
-	// to actor.Record (kind / binding / deregistration timestamp).
+	// to actorreg.Record (kind / binding / deregistration timestamp).
 	// Required.
-	ActorRegistry actor.Registry
+	ActorRegistry actorreg.Registry
 
 	// TypeRegistry resolves business types declared by adapters /
 	// channel template. Optional; when nil the chain assumes only core

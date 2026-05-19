@@ -12,6 +12,7 @@ import (
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
@@ -29,16 +30,16 @@ func TestBuildChannelTemplates_DefaultsToDeviceXHSBinding(t *testing.T) {
 	if len(prod.AdapterActorSeeds) != 1 {
 		t.Fatalf("prod seeds len=%d want 1", len(prod.AdapterActorSeeds))
 	}
-	if prod.AdapterActorSeeds[0].Binding != actor.BindingViaServerTransit {
-		t.Fatalf("prod actor binding=%q want %q", prod.AdapterActorSeeds[0].Binding, actor.BindingViaServerTransit)
+	if prod.AdapterActorSeeds[0].Binding != actorreg.BindingViaServerTransit {
+		t.Fatalf("prod actor binding=%q want %q", prod.AdapterActorSeeds[0].Binding, actorreg.BindingViaServerTransit)
 	}
 
 	scaffold := buildChannelTemplates(true)[XHSCreatorChannelType]
 	if len(scaffold.AdapterActorSeeds) != 1 {
 		t.Fatalf("scaffold seeds len=%d want 1", len(scaffold.AdapterActorSeeds))
 	}
-	if scaffold.AdapterActorSeeds[0].Binding != actor.BindingInProcess {
-		t.Fatalf("scaffold actor binding=%q want %q", scaffold.AdapterActorSeeds[0].Binding, actor.BindingInProcess)
+	if scaffold.AdapterActorSeeds[0].Binding != actorreg.BindingInProcess {
+		t.Fatalf("scaffold actor binding=%q want %q", scaffold.AdapterActorSeeds[0].Binding, actorreg.BindingInProcess)
 	}
 }
 
@@ -61,7 +62,7 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 		SchedulerPeriod:   50 * time.Millisecond,
 		ChannelTemplates: map[string]runtime.ChannelTemplate{
 			XHSCreatorChannelType: {
-				AdapterActorSeeds: []actor.Record{DeviceXHSActorSeed()},
+				AdapterActorSeeds: []actorreg.Record{DeviceXHSActorSeed()},
 				WorkdirSubdirs:    xhs.WorkdirSubdirs(),
 				DomainPrompt:      xhs.DomainPrompt(),
 			},
@@ -140,8 +141,8 @@ func assertProductionXHSBindings(t *testing.T, ctx context.Context, db *sql.DB) 
 	if !ok {
 		t.Fatalf("actor_registry missing %s", devicexhs.DefaultAdapterActorID)
 	}
-	if rec.Binding != actor.BindingViaServerTransit {
-		t.Fatalf("actor binding=%q want %q", rec.Binding, actor.BindingViaServerTransit)
+	if rec.Binding != actorreg.BindingViaServerTransit {
+		t.Fatalf("actor binding=%q want %q", rec.Binding, actorreg.BindingViaServerTransit)
 	}
 	var binding string
 	if err := db.QueryRowContext(ctx, `SELECT handler_binding FROM type_registry WHERE type=?`, devicexhs.TypePublish).Scan(&binding); err != nil {
@@ -221,7 +222,7 @@ func writeRequestAndWaitForDeviceSend(
 			Payload:    json.RawMessage(payload),
 			Audience:   []string{string(devicexhs.DefaultAdapterActorID)},
 			TS:         ts,
-			Sender:     message.Sender{ID: callerActor},
+			Sender:     message.Sender{ID: actor.ActorID(callerActor)},
 			Visibility: message.VisibilityPublic,
 		},
 	}

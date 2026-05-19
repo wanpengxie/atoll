@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -335,7 +336,7 @@ func newEnvelope(seq int) *message.Envelope {
 		TS:         int64(1000 + seq),
 		TSReceived: int64(1000 + seq),
 		ChannelID:  string(testChannelID),
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Kind:       message.KindEvent,
 		Type:       "tick",
 		Payload:    json.RawMessage(`{}`),

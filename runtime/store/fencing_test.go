@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
 	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -67,7 +68,7 @@ func newFencedEnvelope(id string) *message.Envelope {
 		TS:         1000,
 		TSReceived: 1100,
 		ChannelID:  "ch-fence",
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:alpha"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:alpha"},
 		Kind:       message.KindEvent,
 		Type:       "channel.created",
 		Payload:    json.RawMessage(`{}`),

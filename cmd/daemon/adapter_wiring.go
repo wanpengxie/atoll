@@ -9,6 +9,7 @@ import (
 	"github.com/wanpengxie/ActOS/adapters/framework"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
@@ -148,7 +149,7 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 // framework.Respond chain.Write — which emits a response with
 // sender=adapter actor — passes the harness step-1/step-3 caller-vs-
 // sender check. AllowProvidedSenderKind=true lets the framework keep its
-// `Sender.Kind = SenderTool` value (the registry record agrees).
+// `Sender.Kind = actor.KindTool` value (the registry record agrees).
 func deliverThroughManager(mgr adapter.Manager, adapterID actor.ActorID, channelID channel.ID) scheduler.HandlerFn {
 	return func(ctx context.Context, _ actor.ActorID, env *message.Envelope) error {
 		if env == nil || env.Kind != message.KindRequest {
@@ -179,7 +180,7 @@ func deliverThroughManager(mgr adapter.Manager, adapterID actor.ActorID, channel
 // (inbound stamp is the request author) or the F3 timer-fire path
 // (no inbound stamp at all). Adapter observability events may be emitted
 // by system as well as tool actors, so the stamp follows the envelope
-// sender rather than only SenderTool.
+// sender rather than only actor.KindTool.
 type adapterCallerChain struct {
 	inner     khar.Chain
 	channelID channel.ID
@@ -189,7 +190,7 @@ type adapterCallerChain struct {
 func (c *adapterCallerChain) Write(ctx context.Context, env *message.Envelope) (khar.WriteResult, error) {
 	if env != nil && env.Sender.ID != "" {
 		ctx = harness.CtxWithCaller(ctx, harness.CallerContext{
-			ActorID:                 actor.ActorID(env.Sender.ID),
+			ActorID:                 env.Sender.ID,
 			ChannelID:               c.channelID,
 			AllowProvidedSenderKind: true,
 		})
@@ -258,11 +259,11 @@ func DeviceXHSFactory(sessionStore deviceframework.SessionStore, cfg devicexhs.C
 // adapters/xhs.DefaultActorSeed (which seeds the in_process scaffold).
 // cmd/daemon plugs the result into ChannelTemplate.AdapterActorSeeds
 // when swapping the in-process scaffold for the real device adapter.
-func DeviceXHSActorSeed() actor.Record {
-	return actor.Record{
+func DeviceXHSActorSeed() actorreg.Record {
+	return actorreg.Record{
 		ID:      devicexhs.DefaultAdapterActorID,
-		Kind:    message.SenderTool,
-		Binding: actor.BindingViaServerTransit,
+		Kind:    actor.KindTool,
+		Binding: actorreg.BindingViaServerTransit,
 	}
 }
 

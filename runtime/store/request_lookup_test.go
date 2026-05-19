@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime/store"
@@ -30,7 +31,7 @@ func TestRequestLookup_FindByID(t *testing.T) {
 		TS:         1000,
 		TSReceived: 1000,
 		ChannelID:  "ch-1",
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:author"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:author"},
 		Kind:       message.KindRequest,
 		Type:       "xhs.publish",
 		Payload:    json.RawMessage(`{"title":"hello"}`),

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
@@ -70,7 +71,7 @@ func (d *fakeBridgeDaemon) loop(ctx context.Context, ack ipc.HandshakeAckPayload
 						ID:         "trig-" + string(rune('a'+i)),
 						ChannelID:  string(ack.ChannelID),
 						Type:       "human.text",
-						Sender:     message.Sender{Kind: message.SenderHuman, ID: "user:alice"},
+						Sender:     message.Sender{Kind: actor.KindHuman, ID: "user:alice"},
 						Visibility: message.VisibilityPublic,
 						Kind:       message.KindEvent,
 						Audience:   []string{string(ack.WorkerActorID)},
@@ -176,7 +177,7 @@ func TestMockBridge_ReactAndExitOnMaxTurns(t *testing.T) {
 		if wp.Envelope.Sender.ID != "agent:channel-agent" {
 			t.Errorf("frame %d sender.id=%q want agent:channel-agent", i, wp.Envelope.Sender.ID)
 		}
-		if wp.Envelope.Sender.Kind != message.SenderAgent {
+		if wp.Envelope.Sender.Kind != actor.KindAgent {
 			t.Errorf("frame %d sender.kind=%q", i, wp.Envelope.Sender.Kind)
 		}
 		if i < 2 {

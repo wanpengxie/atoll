@@ -18,6 +18,7 @@ import (
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
 
 	"github.com/wanpengxie/ActOS/adapters/llm/kimi"
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -97,7 +98,7 @@ func triggerEnv(id string) kimi.TriggerPayload {
 			ChannelID:  "ch-test",
 			Type:       "human.text",
 			Visibility: message.VisibilityPublic,
-			Sender:     message.Sender{Kind: message.SenderHuman, ID: "user-A"},
+			Sender:     message.Sender{Kind: actor.KindHuman, ID: "user-A"},
 			Kind:       message.KindEvent,
 			Payload:    body,
 			Audience:   []string{"*"},
@@ -339,7 +340,7 @@ func TestBridge_RunEmitsSingleTerminalOnTextDelta(t *testing.T) {
 	if last.ParentID != "t-1" {
 		t.Errorf("parent_id=%q want t-1", last.ParentID)
 	}
-	if last.Sender.ID != ipc.WorkerActorID() {
+	if string(last.Sender.ID) != ipc.WorkerActorID() {
 		t.Errorf("sender.id=%q want %q", last.Sender.ID, ipc.WorkerActorID())
 	}
 }

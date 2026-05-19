@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -164,14 +165,14 @@ func (o *ViewSyncOutbox) MessagesByRange(
 	var out []viewsync.ResyncMessage
 	for rows.Next() {
 		var env message.Envelope
-		var kind, sKind, vis string
+		var kind, sKind, senderID, vis string
 		var audJSON, payloadStr string
 		var docRefsStr sql.NullString
 		var notBefore, expiresAt, deliveredAt, deliveryFailedAt sql.NullInt64
 		var termInt int
 		if err := rows.Scan(
 			&env.Seq, &env.ID, &env.TS, &env.TSReceived, &env.ChannelID,
-			&sKind, &env.Sender.ID, &env.Sender.Name,
+			&sKind, &senderID, &env.Sender.Name,
 			&kind, &env.Type, &payloadStr,
 			&env.ParentID, &env.CorrelationID, &docRefsStr,
 			&vis, &audJSON,
@@ -181,7 +182,8 @@ func (o *ViewSyncOutbox) MessagesByRange(
 		); err != nil {
 			return nil, fmt.Errorf("store: resync range scan: %w", err)
 		}
-		env.Sender.Kind = message.SenderKind(sKind)
+		env.Sender.Kind = actor.Kind(sKind)
+		env.Sender.ID = actor.ActorID(senderID)
 		env.Kind = message.Kind(kind)
 		env.Visibility = message.Visibility(vis)
 		env.Payload = json.RawMessage(payloadStr)

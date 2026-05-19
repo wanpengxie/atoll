@@ -12,7 +12,7 @@
 //     channel_lock).
 //   - messages.go          — kernel/log.MessageLog impl.
 //   - cursors.go           — kernel/log.Cursors impl.
-//   - actors.go            — kernel/actor.Registry impl.
+//   - actors.go            — kernel/actorreg.Registry impl.
 //   - ledger.go            — kernel/ledger.Ledger impl.
 //   - view_sync_outbox.go  — outbox CRUD + GC (drives runtime/transit).
 //   - channel_lock.go      — channel_lock CRUD (fencing_token /

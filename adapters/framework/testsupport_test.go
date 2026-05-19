@@ -7,21 +7,22 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// memoryActorRegistry is the test-only actor.Registry implementation.
+// memoryActorRegistry is the test-only actorreg.Registry implementation.
 type memoryActorRegistry struct {
 	mu   sync.Mutex
-	rows map[actor.ActorID]actor.Record
+	rows map[actor.ActorID]actorreg.Record
 }
 
 func newMemoryActorRegistry() *memoryActorRegistry {
-	return &memoryActorRegistry{rows: map[actor.ActorID]actor.Record{}}
+	return &memoryActorRegistry{rows: map[actor.ActorID]actorreg.Record{}}
 }
 
-func (r *memoryActorRegistry) Insert(_ context.Context, rec actor.Record) error {
+func (r *memoryActorRegistry) Insert(_ context.Context, rec actorreg.Record) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, dup := r.rows[rec.ID]; dup {
@@ -31,7 +32,7 @@ func (r *memoryActorRegistry) Insert(_ context.Context, rec actor.Record) error 
 	return nil
 }
 
-func (r *memoryActorRegistry) Lookup(_ context.Context, id actor.ActorID) (actor.Record, bool, error) {
+func (r *memoryActorRegistry) Lookup(_ context.Context, id actor.ActorID) (actorreg.Record, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec, ok := r.rows[id]
@@ -45,10 +46,10 @@ func (r *memoryActorRegistry) Exists(_ context.Context, id actor.ActorID) (bool,
 	return ok, nil
 }
 
-func (r *memoryActorRegistry) ListActive(_ context.Context) ([]actor.Record, error) {
+func (r *memoryActorRegistry) ListActive(_ context.Context) ([]actorreg.Record, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]actor.Record, 0, len(r.rows))
+	out := make([]actorreg.Record, 0, len(r.rows))
 	for _, rec := range r.rows {
 		if rec.IsActive() {
 			out = append(out, rec)

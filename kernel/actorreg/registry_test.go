@@ -1,4 +1,4 @@
-package actor_test
+package actorreg_test
 
 import (
 	"context"
@@ -8,22 +8,23 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 )
 
-// memRegistry is a minimal in-package implementation of actor.Registry
+// memRegistry is a minimal in-package implementation of actorreg.Registry
 // (kept here so the kernel test doesn't pull adapters/framework). It
 // mirrors the runtime/store contract closely enough to exercise the
 // register → deregister → still-resolvable lifecycle from L1 §12.4.
 type memRegistry struct {
 	mu   sync.Mutex
-	rows map[actor.ActorID]actor.Record
+	rows map[actor.ActorID]actorreg.Record
 }
 
 func newMemRegistry() *memRegistry {
-	return &memRegistry{rows: map[actor.ActorID]actor.Record{}}
+	return &memRegistry{rows: map[actor.ActorID]actorreg.Record{}}
 }
 
-func (r *memRegistry) Lookup(_ context.Context, id actor.ActorID) (actor.Record, bool, error) {
+func (r *memRegistry) Lookup(_ context.Context, id actor.ActorID) (actorreg.Record, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec, ok := r.rows[id]
@@ -37,10 +38,10 @@ func (r *memRegistry) Exists(_ context.Context, id actor.ActorID) (bool, error) 
 	return ok, nil
 }
 
-func (r *memRegistry) ListActive(_ context.Context) ([]actor.Record, error) {
+func (r *memRegistry) ListActive(_ context.Context) ([]actorreg.Record, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]actor.Record, 0)
+	out := make([]actorreg.Record, 0)
 	for _, rec := range r.rows {
 		if rec.IsActive() {
 			out = append(out, rec)
@@ -49,7 +50,7 @@ func (r *memRegistry) ListActive(_ context.Context) ([]actor.Record, error) {
 	return out, nil
 }
 
-func (r *memRegistry) Insert(_ context.Context, rec actor.Record) error {
+func (r *memRegistry) Insert(_ context.Context, rec actorreg.Record) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, dup := r.rows[rec.ID]; dup {
@@ -73,7 +74,7 @@ func (r *memRegistry) Deregister(_ context.Context, id actor.ActorID, at int64) 
 
 // TestRecordIsActive covers the L1 §12.2 active-bit semantic.
 func TestRecordIsActive(t *testing.T) {
-	r := actor.Record{ID: "agent:a"}
+	r := actorreg.Record{ID: "agent:a"}
 	if !r.IsActive() {
 		t.Error("DeregisteredAt=0 should be active")
 	}
@@ -92,10 +93,10 @@ func TestRegisterDeregisterStillResolvable(t *testing.T) {
 	ctx := context.Background()
 	reg := newMemRegistry()
 
-	rec := actor.Record{
+	rec := actorreg.Record{
 		ID:        "agent:alpha",
-		Kind:      actor.SenderAgent,
-		Binding:   actor.BindingInProcess,
+		Kind:      actor.KindAgent,
+		Binding:   actorreg.BindingInProcess,
 		CreatedAt: 1000,
 	}
 	if err := reg.Insert(ctx, rec); err != nil {
@@ -162,9 +163,9 @@ func TestConcurrentInsertSameID(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
-			err := reg.Insert(ctx, actor.Record{
+			err := reg.Insert(ctx, actorreg.Record{
 				ID:        "agent:concurrent",
-				Kind:      actor.SenderAgent,
+				Kind:      actor.KindAgent,
 				CreatedAt: int64(i),
 			})
 			if err == nil {
@@ -198,7 +199,7 @@ func TestDeregisterMissingActor(t *testing.T) {
 func TestExistsAfterFullLifecycle(t *testing.T) {
 	ctx := context.Background()
 	reg := newMemRegistry()
-	_ = reg.Insert(ctx, actor.Record{ID: "tool:x", Kind: actor.SenderTool})
+	_ = reg.Insert(ctx, actorreg.Record{ID: "tool:x", Kind: actor.KindTool})
 	_ = reg.Deregister(ctx, "tool:x", 1)
 	ex, err := reg.Exists(ctx, "tool:x")
 	if err != nil {
@@ -212,7 +213,7 @@ func TestExistsAfterFullLifecycle(t *testing.T) {
 // TestRecordBindingZeroValueForHuman — Binding is empty string for
 // human / system actors per L1 §12.2.
 func TestRecordBindingZeroValueForHuman(t *testing.T) {
-	r := actor.Record{ID: "user:alice", Kind: actor.SenderHuman}
+	r := actorreg.Record{ID: "user:alice", Kind: actor.KindHuman}
 	if r.Binding != "" {
 		t.Errorf("human Record.Binding=%q want empty", r.Binding)
 	}

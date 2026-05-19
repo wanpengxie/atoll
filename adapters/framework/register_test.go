@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
-	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 func TestRegisterAndBuild(t *testing.T) {
@@ -87,5 +87,5 @@ func TestDepsFromManagerConfig(t *testing.T) {
 	if deps.StateStore == nil {
 		t.Fatalf("StateStore nil after applyDefaults")
 	}
-	_ = message.SenderTool // keep import live
+	_ = actor.KindTool // keep import live
 }

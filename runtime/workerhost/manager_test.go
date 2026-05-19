@@ -155,7 +155,7 @@ func triggerEnvelope(id string, seq int64) *message.Envelope {
 		ID:            id,
 		ChannelID:     "ch-mgr",
 		Type:          "human.text",
-		Sender:        message.Sender{Kind: message.SenderHuman, ID: "user:alice"},
+		Sender:        message.Sender{Kind: actor.KindHuman, ID: "user:alice"},
 		Kind:          message.KindEvent,
 		Visibility:    message.VisibilityPublic,
 		Audience:      []string{"*"},
