@@ -46,8 +46,10 @@ func TestIntegration_BindDeviceSession_RoundTrip(t *testing.T) {
 		NowFn:             nowMs,
 		HumanCallerSecret: []byte(integSecret),
 		SchedulerPeriod:   50 * time.Millisecond,
-		ChannelTemplate: runtime.ChannelTemplate{
-			AdapterActorSeeds: []actorreg.Record{xhs.DefaultActorSeed()},
+		ChannelTemplates: map[string]runtime.ChannelTemplate{
+			"": {
+				AdapterActorSeeds: []actorreg.Record{xhs.DefaultActorSeed()},
+			},
 		},
 		OnChannelBoot:         wireAdapterFramework(XHSScaffoldFactory(xhs.Config{})),
 		OnBindDeviceSession:   binder.OnBind,

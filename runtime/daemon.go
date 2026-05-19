@@ -134,21 +134,11 @@ type DaemonConfig struct {
 	// to hammer a struggling server.
 	ReconnectMaxBackoff time.Duration
 
-	// ChannelTemplate is the static channel template hosted by this
-	// daemon. Used as the legacy single-template fallback when
-	// ChannelTemplates is empty — every channel boot resolves to this
-	// value regardless of CreateChannelRequest.ChannelType. M1.6-T2
-	// wired this for a fixed xhs scaffold; M1.6-T5 phase-2 introduced
-	// ChannelTemplates for per-type lookup.
-	ChannelTemplate ChannelTemplate
-
-	// ChannelTemplates is the M1.6-T5 phase-2 per-type template
-	// registry keyed by CreateChannelRequest.ChannelType (catalog
-	// channel.type — e.g. "group" / "xhs-creator"). When non-empty it
-	// takes precedence over the legacy ChannelTemplate field: the
-	// daemon resolves the matching template per channel boot. Unknown
-	// types fall through to the entry keyed by "" if one exists,
-	// otherwise to a zero ChannelTemplate (no actor seeds / subdirs).
+	// ChannelTemplates is the per-type template registry keyed by
+	// CreateChannelRequest.ChannelType (catalog channel.type — e.g.
+	// "group" / "xhs-creator"). Unknown types fall through to the entry
+	// keyed by "" if one exists, otherwise to a zero ChannelTemplate (no
+	// actor seeds / subdirs).
 	//
 	// The empty-string key is reserved for the "no template" legacy
 	// path (generic group channels) so cmd/daemon can register both
@@ -366,15 +356,9 @@ type ChannelHooks struct {
 //   - When templates is non-empty: prefer an exact-match entry; fall
 //     back to the entry keyed by "" if present; otherwise return the
 //     zero value (no template).
-//   - When templates is nil/empty: return the legacy single template
-//     for every channel type so pre-M1.6-T5 wirings (single
-//     DaemonConfig.ChannelTemplate) keep working unchanged.
-func buildTemplateResolver(
-	templates map[string]ChannelTemplate,
-	legacy ChannelTemplate,
-) func(channelType string) ChannelTemplate {
+func buildTemplateResolver(templates map[string]ChannelTemplate) func(channelType string) ChannelTemplate {
 	if len(templates) == 0 {
-		return func(string) ChannelTemplate { return legacy }
+		return func(string) ChannelTemplate { return ChannelTemplate{} }
 	}
 	// Copy the map so callers can't mutate the resolver state
 	// post-construction.
@@ -506,21 +490,15 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 		_ = daemonDB.Close()
 		return nil, err
 	}
-	// M1.6-T5 phase-2 — build a per-type template resolver. When
-	// ChannelTemplates is wired, look up by req.ChannelType (falling
-	// back to the "" entry for unknown / legacy types). When the map
-	// is nil, return a closure based on the legacy single
-	// ChannelTemplate field so back-compat callers (tests, M1.6-T2
-	// integration) keep working unchanged.
-	resolveTemplate := buildTemplateResolver(cfg.ChannelTemplates, cfg.ChannelTemplate)
+	// Build a per-type template resolver. When ChannelTemplates is wired,
+	// look up by req.ChannelType, falling back to the "" entry for unknown
+	// / generic types.
+	resolveTemplate := buildTemplateResolver(cfg.ChannelTemplates)
 
 	saga, err := bootstrap.NewSaga(bootstrap.SagaConfig{
 		DaemonDB:    daemonDB,
 		ChannelsDir: cfg.ChannelsDir,
 		NowFn:       cfg.NowFn,
-		// Legacy single-template fallback retained for back-compat —
-		// the resolver below supersedes when wired.
-		AdapterActorSeeds: cfg.ChannelTemplate.AdapterActorSeeds,
 		ResolveTemplate: func(channelType string) bootstrap.TemplateView {
 			tpl := resolveTemplate(channelType)
 			return bootstrap.TemplateView{
@@ -1516,11 +1494,10 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 }
 
 // handleCreateChannel is the OnCreateChannel handler — T0.1. It runs
-// the bootstrap saga, writes the channel_lock row (saga step 6
-// historically lived in lifecycle.Creator), wires the new channel into
-// the daemon's runtime map via lifecycle.Bootstrapper.LoadOne +
-// buildChannelRuntime, and emits a control.create_channel_ack with
-// every match-field populated so the server's step-5 CAS succeeds
+// the bootstrap saga, writes the channel_lock row, wires the new channel
+// into the daemon's runtime map via lifecycle.Bootstrapper.LoadOne +
+// buildChannelRuntime, and emits a control.create_channel_ack with every
+// match-field populated so the server's step-5 CAS succeeds
 // (kernel/placement.CreateChannelAck.Match).
 //
 // Failure semantics:
@@ -1528,7 +1505,7 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 //     row stays 'in_progress'; reconcile loop rolls it back on next restart.
 //   - channel_lock.Insert race (idempotent replay with matching tuple) →
 //     branch on existing row: matching tuple ⇒ AckBound idempotent; any
-//     mismatch ⇒ AckRejected per lifecycle.Creator branch 2/3/4.
+//     mismatch ⇒ AckRejected.
 //   - LoadOne / buildChannelRuntime fail → AckRejected; channel_lock row
 //     remains so reconciler can drive recovery.
 func (d *Daemon) handleCreateChannel(
@@ -1559,12 +1536,11 @@ func (d *Daemon) handleCreateChannel(
 
 	sqlitePath := filepath.Join(d.cfg.ChannelsDir, string(req.ChannelID), "channel.sqlite")
 
-	// Idempotency / conflict pre-check: if a channel.sqlite already
-	// exists on disk and carries a channel_lock row, branch the same
-	// way lifecycle.Creator does (FIX-T4 ladder). When the sqlite is
-	// absent, fall through to fresh-bootstrap below — OpenChannelLock
-	// would otherwise CREATE an empty sqlite file with no DDL, leaving
-	// a half-baked channel dir behind.
+	// Idempotency / conflict pre-check: if a channel.sqlite already exists
+	// on disk and carries a channel_lock row, run the FIX-T4 ladder. When
+	// the sqlite is absent, fall through to fresh-bootstrap below —
+	// OpenChannelLock would otherwise CREATE an empty sqlite file with no
+	// DDL, leaving a half-baked channel dir behind.
 	sqliteExists := false
 	if _, err := os.Stat(sqlitePath); err == nil {
 		sqliteExists = true
@@ -2220,7 +2196,7 @@ func (d *Daemon) Phase() lifecycle.Phase { return d.booter.Phase() }
 // BootResult returns the phase-2 reclaim outcome.
 func (d *Daemon) BootResult() lifecycle.BootResult { return d.bootRes }
 
-// Saga exposes the channel bootstrap saga (used by lifecycle.Creator).
+// Saga exposes the channel bootstrap saga for tests.
 func (d *Daemon) Saga() *bootstrap.Saga { return d.saga }
 
 // Reconciler exposes the bootstrap reconciler — used by tests + the
@@ -2258,8 +2234,7 @@ func (d *Daemon) HasChannel(id channel.ID) bool {
 }
 
 // OpenChannelLock returns the channel_lock store for a channel sqlite
-// path (cached). Useful for lifecycle.Creator / FencingChecker wiring
-// in tests.
+// path (cached). Useful for FencingChecker wiring in tests.
 func (d *Daemon) OpenChannelLock(ctx context.Context, sqlitePath string) (*store.ChannelLock, error) {
 	d.channelDBsMu.Lock()
 	defer d.channelDBsMu.Unlock()

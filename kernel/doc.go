@@ -14,8 +14,7 @@
 //     sqlite).
 //   - kernel/channel    — ChannelID type, ChannelRef (org_id?, channel_id)
 //     for federation forward-compat.
-//   - kernel/harness    — 9-step Harness chain interface, Step contract,
-//     re-export of HarnessRejectReason.
+//   - kernel/harness    — 9-step Harness chain interface and Step contract.
 //   - kernel/ledger     — ActionLedger reserve/commit interface, ledger key
 //     derivation.
 //   - kernel/log        — append-only MessageLog interface, Seq/Cursor.
@@ -31,11 +30,8 @@
 //   - kernel/adapter    — Module / Manager / CorrelationTracker /
 //     ErrorPolicy / AdapterCtx / DeviceTransit interfaces — covers
 //     L2 §8 framework contract. Binding lives in kernel/actor.
-//   - kernel/addressing — ChannelRef / ActorRef / Route forward-compat
-//     types for M1.4 channel-as-actor + M2+ federation
-//     (m1.5-tickets §T10).
-//   - kernel/topology   — Node / Peer placeholder types for the v5
-//     federation topology (m1.5-tickets §T10).
+//   - kernel/devicetransit — device_transit payloads and DeviceTransit
+//     interface shared by adapter, daemonbus and runtime transit.
 //
 // Layering rule (enforced by go-arch-lint in T2):
 //

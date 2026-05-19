@@ -764,7 +764,7 @@ func TestManagerDeduplicatesResponseFromTerminalDuplicate(t *testing.T) {
 	chain.results = []harness.WriteResult{
 		{
 			MessageID:        "",
-			RejectReason:     harness.RejectTerminalDuplicate,
+			RejectReason:     message.HarnessTerminalDuplicate,
 			PartialMessageID: "response:existing",
 		},
 	}

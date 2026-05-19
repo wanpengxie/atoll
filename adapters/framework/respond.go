@@ -155,7 +155,7 @@ func runRespond(
 	switch {
 	case res.Accepted() && res.Deduped:
 		result.Deduped = true
-	case res.RejectReason == harness.RejectTerminalDuplicate:
+	case res.RejectReason == message.HarnessTerminalDuplicate:
 		// Spec §8.5: another path already wrote a different response —
 		// adapter treats it as business success and surfaces the
 		// existing id.
