@@ -10,6 +10,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -57,7 +58,7 @@ func startIntegrationDaemon(t *testing.T, ctx context.Context, opts integDaemonO
 		// ChannelType="xhs-creator" so XHSScaffoldFactory installs.
 		ChannelTemplates: map[string]runtime.ChannelTemplate{
 			XHSCreatorChannelType: {
-				AdapterActorSeeds: []actor.Record{xhs.DefaultActorSeed()},
+				AdapterActorSeeds: []actorreg.Record{xhs.DefaultActorSeed()},
 				WorkdirSubdirs:    xhs.WorkdirSubdirs(),
 				DomainPrompt:      xhs.DomainPrompt(),
 			},

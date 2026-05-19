@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	kadapter "github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
@@ -155,7 +156,7 @@ func TestDaemon_Phase3_DispatchesWriteMessage(t *testing.T) {
 	}
 	// Seed an actor row so the write_message handler accepts the caller.
 	areg := store.NewActorRegistry(db)
-	if err := areg.Insert(ctx, actor.Record{
+	if err := areg.Insert(ctx, actorreg.Record{
 		ID: "user:alice", Kind: actor.KindHuman,
 		DisplayName: "Alice", CreatedAt: now(),
 	}); err != nil {
@@ -334,7 +335,7 @@ func TestDaemon_FutureMessage_SchedulerDrains(t *testing.T) {
 		t.Fatal(err)
 	}
 	areg := store.NewActorRegistry(db)
-	for _, rec := range []actor.Record{
+	for _, rec := range []actorreg.Record{
 		{ID: "user:alice", Kind: actor.KindHuman, CreatedAt: now()},
 		{ID: "agent:beta", Kind: actor.KindAgent, CreatedAt: now()},
 	} {
@@ -482,7 +483,7 @@ func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
 	// store.NewMessages.Append path bypasses harness step 5 so the row
 	// lands even when audience[0] is unknown.)
 	areg := store.NewActorRegistry(db)
-	for _, rec := range []actor.Record{
+	for _, rec := range []actorreg.Record{
 		{ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: now()},
 		{ID: "agent:caller", Kind: actor.KindAgent, CreatedAt: now()},
 		{ID: "agent:beta", Kind: actor.KindAgent, CreatedAt: now()},
@@ -985,7 +986,7 @@ func TestDaemon_Phase3_ChannelAgent_Registered(t *testing.T) {
 		t.Fatal(err)
 	}
 	areg := store.NewActorRegistry(db)
-	if err := areg.Insert(ctx, actor.Record{
+	if err := areg.Insert(ctx, actorreg.Record{
 		ID: "user:alice", Kind: actor.KindHuman,
 		DisplayName: "Alice", CreatedAt: now(),
 	}); err != nil {
@@ -1160,7 +1161,7 @@ func TestDaemon_Phase3_WorkerReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	areg := store.NewActorRegistry(db)
-	if err := areg.Insert(ctx, actor.Record{
+	if err := areg.Insert(ctx, actorreg.Record{
 		ID: "user:alice", Kind: actor.KindHuman,
 		DisplayName: "Alice", CreatedAt: now(),
 	}); err != nil {

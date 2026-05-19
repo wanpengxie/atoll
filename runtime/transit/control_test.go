@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -20,25 +21,25 @@ import (
 
 type stubRegistry struct {
 	mu        sync.Mutex
-	records   map[actor.ActorID]actor.Record
+	records   map[actor.ActorID]actorreg.Record
 	lookupErr error
 }
 
 func newStubRegistry() *stubRegistry {
-	return &stubRegistry{records: map[actor.ActorID]actor.Record{}}
+	return &stubRegistry{records: map[actor.ActorID]actorreg.Record{}}
 }
 
-func (r *stubRegistry) put(rec actor.Record) {
+func (r *stubRegistry) put(rec actorreg.Record) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.records[rec.ID] = rec
 }
 
-func (r *stubRegistry) Lookup(_ context.Context, id actor.ActorID) (actor.Record, bool, error) {
+func (r *stubRegistry) Lookup(_ context.Context, id actor.ActorID) (actorreg.Record, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.lookupErr != nil {
-		return actor.Record{}, false, r.lookupErr
+		return actorreg.Record{}, false, r.lookupErr
 	}
 	rec, ok := r.records[id]
 	return rec, ok, nil
@@ -51,11 +52,11 @@ func (r *stubRegistry) Exists(_ context.Context, id actor.ActorID) (bool, error)
 	return ok, nil
 }
 
-func (r *stubRegistry) ListActive(_ context.Context) ([]actor.Record, error) {
+func (r *stubRegistry) ListActive(_ context.Context) ([]actorreg.Record, error) {
 	return nil, nil
 }
 
-func (r *stubRegistry) Insert(_ context.Context, rec actor.Record) error {
+func (r *stubRegistry) Insert(_ context.Context, rec actorreg.Record) error {
 	r.put(rec)
 	return nil
 }
@@ -151,8 +152,8 @@ func newWriteMessageBody(t *testing.T, payload json.RawMessage, ts int64) transi
 	}
 }
 
-func routerFor(chain transit.HarnessChain, registry actor.Registry) transit.WriteMessageRouter {
-	return func(_ context.Context, ch channel.ID) (transit.HarnessChain, actor.Registry, transit.CallerStamper, bool) {
+func routerFor(chain transit.HarnessChain, registry actorreg.Registry) transit.WriteMessageRouter {
+	return func(_ context.Context, ch channel.ID) (transit.HarnessChain, actorreg.Registry, transit.CallerStamper, bool) {
 		if string(ch) != testWriteChannel {
 			return nil, nil, nil, false
 		}
@@ -164,7 +165,7 @@ func routerFor(chain transit.HarnessChain, registry actor.Registry) transit.Writ
 
 func TestWriteMessageHandler_Accept(t *testing.T) {
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman, DisplayName: "Alice"})
+	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman, DisplayName: "Alice"})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 42}}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
 
@@ -195,7 +196,7 @@ func TestWriteMessageHandler_Accept(t *testing.T) {
 
 func TestWriteMessageHandler_BadHMAC(t *testing.T) {
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman})
+	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
 
@@ -215,7 +216,7 @@ func TestWriteMessageHandler_BadHMAC(t *testing.T) {
 
 func TestWriteMessageHandler_ReplayWindow(t *testing.T) {
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman})
+	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 60*time.Second)
 
@@ -235,7 +236,7 @@ func TestWriteMessageHandler_ReplayWindow(t *testing.T) {
 
 func TestWriteMessageHandler_UnknownChannel(t *testing.T) {
 	chain := &stubChain{}
-	router := func(_ context.Context, _ channel.ID) (transit.HarnessChain, actor.Registry, transit.CallerStamper, bool) {
+	router := func(_ context.Context, _ channel.ID) (transit.HarnessChain, actorreg.Registry, transit.CallerStamper, bool) {
 		return nil, nil, nil, false
 	}
 	h := mustNewWriteHandler(t, router, 0)
@@ -270,7 +271,7 @@ func TestWriteMessageHandler_UnknownActor(t *testing.T) {
 
 func TestWriteMessageHandler_DeregisteredActor(t *testing.T) {
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman, DeregisteredAt: 1})
+	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman, DeregisteredAt: 1})
 	chain := &stubChain{}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
 
@@ -286,7 +287,7 @@ func TestWriteMessageHandler_DeregisteredActor(t *testing.T) {
 
 func TestWriteMessageHandler_HarnessReject(t *testing.T) {
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman})
+	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{result: transit.HarnessWriteResult{
 		RejectReason: "kind_not_allowed",
 		RejectDetail: "demo reject",
@@ -308,7 +309,7 @@ func TestWriteMessageHandler_HarnessReject(t *testing.T) {
 
 func TestWriteMessageHandler_HarnessError(t *testing.T) {
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman})
+	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{err: errors.New("store down")}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
 
@@ -332,7 +333,7 @@ func TestDispatcher_WriteMessageRoundTrip(t *testing.T) {
 	defer cancel()
 
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman})
+	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 7}}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
 
@@ -446,7 +447,7 @@ func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
 	defer cancel()
 
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman})
+	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 1}}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
 
@@ -690,7 +691,7 @@ func TestDispatcher_StaleEpochRejected(t *testing.T) {
 func TestWriteMessageHandler_NonceReplay(t *testing.T) {
 	t.Parallel()
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman, DisplayName: "Alice"})
+	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman, DisplayName: "Alice"})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 1}}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 60*time.Second)
 
@@ -718,7 +719,7 @@ func TestWriteMessageHandler_NonceReplay(t *testing.T) {
 func TestWriteMessageHandler_NonceCacheDisabledByDefault(t *testing.T) {
 	t.Parallel()
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman})
+	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 1}}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
 

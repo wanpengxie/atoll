@@ -1,12 +1,6 @@
 // Package actor defines the L0 channel-actor identity model: ActorID and
 // actor Kind primitives.
 //
-// `actor_registry` is a channel-local control-plane store table; this
-// package only declares the **interface** kernel-level callers (harness,
-// scheduler, type_registry install) depend on. The sqlite implementation
-// lives in runtime/store/actors.go (T3) and the federation/postgres
-// alternative will live in runtime/store/<other>.go — neither imported
-// here.
 package actor
 
 // ActorID is the channel-local sender identifier. It is identical to

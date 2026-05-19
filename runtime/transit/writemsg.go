@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -111,7 +112,7 @@ type CallerStamper func(ctx context.Context, actorID actor.ActorID, channelID ch
 // out of date / channel still in phase 2).
 type WriteMessageRouter func(ctx context.Context, ch channel.ID) (
 	chain HarnessChain,
-	registry actor.Registry,
+	registry actorreg.Registry,
 	stamp CallerStamper,
 	ok bool,
 )

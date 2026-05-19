@@ -31,7 +31,7 @@ import (
 
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
-	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/pkg/logger"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/transit"
@@ -259,7 +259,7 @@ func buildChannelTemplates(useScaffoldXHS bool) map[string]runtime.ChannelTempla
 	out["group"] = generic
 
 	tpl := xhs.XHSCreatorTemplate()
-	adapterSeeds := []actor.Record{DeviceXHSActorSeed()}
+	adapterSeeds := []actorreg.Record{DeviceXHSActorSeed()}
 	if useScaffoldXHS {
 		adapterSeeds = tpl.AdapterActorSeeds
 	}

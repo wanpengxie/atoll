@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
 	klog "github.com/wanpengxie/ActOS/kernel/log"
@@ -509,10 +510,10 @@ func TestActorRegistry(t *testing.T) {
 	reg := store.NewActorRegistry(db)
 	cur := store.NewCursors(db)
 
-	rec := actor.Record{
+	rec := actorreg.Record{
 		ID:        "agent:alpha",
 		Kind:      actor.KindAgent,
-		Binding:   actor.BindingInProcess,
+		Binding:   actorreg.BindingInProcess,
 		CreatedAt: 1000,
 	}
 	if err := reg.Insert(ctx, rec); err != nil {
@@ -528,7 +529,7 @@ func TestActorRegistry(t *testing.T) {
 	if got.Kind != actor.KindAgent {
 		t.Errorf("actor kind=%q want %q", got.Kind, actor.KindAgent)
 	}
-	if got.Binding != actor.BindingInProcess || !got.IsActive() {
+	if got.Binding != actorreg.BindingInProcess || !got.IsActive() {
 		t.Errorf("got=%+v", got)
 	}
 

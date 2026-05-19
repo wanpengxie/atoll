@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/harness"
@@ -62,10 +63,10 @@ func newTestManager(t *testing.T, mod *stubModule, opts ...func(*ManagerConfig))
 	registry := newMemoryActorRegistry()
 
 	// Pre-seed actor row matching the module's declaration.
-	if err := registry.Insert(context.Background(), actor.Record{
+	if err := registry.Insert(context.Background(), actorreg.Record{
 		ID:      mod.decl.ActorID,
 		Kind:    actor.KindTool,
-		Binding: actor.Binding(mod.decl.Binding),
+		Binding: actorreg.Binding(mod.decl.Binding),
 	}); err != nil {
 		t.Fatalf("seed actor: %v", err)
 	}
@@ -176,10 +177,10 @@ func TestManagerInstallRejectsMissingActor(t *testing.T) {
 
 func TestManagerInstallRejectsBindingMismatch(t *testing.T) {
 	registry := newMemoryActorRegistry()
-	_ = registry.Insert(context.Background(), actor.Record{
+	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID:      "tool:feishu",
 		Kind:    actor.KindTool,
-		Binding: actor.BindingInProcess,
+		Binding: actorreg.BindingInProcess,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
@@ -206,10 +207,10 @@ func TestManagerInstallRejectsBindingMismatch(t *testing.T) {
 
 func TestManagerInstallRejectsTransitMissing(t *testing.T) {
 	registry := newMemoryActorRegistry()
-	_ = registry.Insert(context.Background(), actor.Record{
+	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID:      "tool:xhs",
 		Kind:    actor.KindTool,
-		Binding: actor.BindingViaServerTransit,
+		Binding: actorreg.BindingViaServerTransit,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
@@ -266,10 +267,10 @@ func (r *recordingTransit) Error(_ context.Context, frame adapter.ErrorFrame) er
 
 func TestManagerInstallAcceptsTransitWhenWired(t *testing.T) {
 	registry := newMemoryActorRegistry()
-	_ = registry.Insert(context.Background(), actor.Record{
+	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID:      "tool:xhs",
 		Kind:    actor.KindTool,
-		Binding: actor.BindingViaServerTransit,
+		Binding: actorreg.BindingViaServerTransit,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{

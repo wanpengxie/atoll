@@ -8,7 +8,7 @@ import (
 
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
-	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
@@ -48,7 +48,7 @@ func TestIntegration_BindDeviceSession_RoundTrip(t *testing.T) {
 		HumanCallerSecret: []byte(integSecret),
 		SchedulerPeriod:   50 * time.Millisecond,
 		ChannelTemplate: runtime.ChannelTemplate{
-			AdapterActorSeeds: []actor.Record{xhs.DefaultActorSeed()},
+			AdapterActorSeeds: []actorreg.Record{xhs.DefaultActorSeed()},
 		},
 		OnChannelBoot:         wireAdapterFramework(XHSScaffoldFactory(xhs.Config{})),
 		OnBindDeviceSession:   binder.OnBind,

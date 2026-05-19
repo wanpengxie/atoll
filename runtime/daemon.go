@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	kadapter "github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
@@ -183,7 +184,7 @@ type ChannelTemplate struct {
 	// addition to system + initial members. Each row supplies enough
 	// fields for kernel/adapter.Manager.Install to find the actor with
 	// the right binding.
-	AdapterActorSeeds []actor.Record
+	AdapterActorSeeds []actorreg.Record
 
 	// WorkdirSubdirs lists relative directory paths the bootstrap saga
 	// mkdirs inside <ChannelsDir>/<channelID>/ during step 5c. The
@@ -305,7 +306,7 @@ type ChannelHooks struct {
 	// new per-channel stores not already in this struct.
 	DB *sql.DB
 
-	// ActorRegistry is the channel-local actor.Registry (sqlite-backed).
+	// ActorRegistry is the channel-local actorreg.Registry (sqlite-backed).
 	ActorRegistry *store.ActorRegistry
 
 	// Messages is the channel-local message log.
@@ -1091,7 +1092,7 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 		return fmt.Errorf("runtime: ensure channel-agent lookup %s: %w", cr.channelID, err)
 	}
 	if !ok {
-		if err := cr.registry.Insert(ctx, actor.Record{
+		if err := cr.registry.Insert(ctx, actorreg.Record{
 			ID:          cr.channelAgentID,
 			Kind:        actor.KindAgent,
 			DisplayName: channelAgentDisplayName,
@@ -1851,7 +1852,7 @@ func (d *Daemon) openChannelDB(ctx context.Context, sqlitePath string) (*sql.DB,
 // messages.MarkDelivered. This is the FIX-T3 post-harness wiring seam
 // — dedupe / deferred / reject paths skip dispatch so we honor
 // at-least-once-by-message.id (§6.2).
-func (d *Daemon) routeWrite(_ context.Context, ch channel.ID) (transit.HarnessChain, actor.Registry, transit.CallerStamper, bool) {
+func (d *Daemon) routeWrite(_ context.Context, ch channel.ID) (transit.HarnessChain, actorreg.Registry, transit.CallerStamper, bool) {
 	cr, ok := d.getChannel(ch)
 	if !ok {
 		return nil, nil, nil, false

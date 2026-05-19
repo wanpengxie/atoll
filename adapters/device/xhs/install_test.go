@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
@@ -17,8 +18,8 @@ func TestDefaultInstallSpec(t *testing.T) {
 	if spec.Actor.Kind != actor.KindTool {
 		t.Errorf("actor kind=%q want %q", spec.Actor.Kind, actor.KindTool)
 	}
-	if spec.Actor.Binding != actor.BindingViaServerTransit {
-		t.Errorf("actor binding=%q want %q", spec.Actor.Binding, actor.BindingViaServerTransit)
+	if spec.Actor.Binding != actorreg.BindingViaServerTransit {
+		t.Errorf("actor binding=%q want %q", spec.Actor.Binding, actorreg.BindingViaServerTransit)
 	}
 	if len(spec.Types) != len(AllTypes) {
 		t.Fatalf("types len=%d want %d", len(spec.Types), len(AllTypes))

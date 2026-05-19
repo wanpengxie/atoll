@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -185,7 +186,7 @@ func TestChain_Step5_AudienceActorNotRegistered(t *testing.T) {
 // TestChain_Step5_AudienceHandlerMismatch.
 func TestChain_Step5_AudienceHandlerMismatch(t *testing.T) {
 	c, areg, _, treg := newTestChain(t)
-	_ = areg.Insert(context.Background(), actor.Record{ID: "tool:other", Kind: actor.KindTool, CreatedAt: 1})
+	_ = areg.Insert(context.Background(), actorreg.Record{ID: "tool:other", Kind: actor.KindTool, CreatedAt: 1})
 	treg.Add(TypeView{
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},

@@ -2,6 +2,7 @@ package xhs
 
 import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
@@ -11,7 +12,7 @@ import (
 type ActorSeed struct {
 	ID          actor.ActorID
 	Kind        actor.Kind
-	Binding     actor.Binding
+	Binding     actorreg.Binding
 	DisplayName string
 }
 
@@ -60,7 +61,7 @@ func DefaultInstallSpec(maxPendingMs int64) InstallSpec {
 	actorSeed := ActorSeed{
 		ID:          DefaultAdapterActorID,
 		Kind:        actor.KindTool,
-		Binding:     actor.BindingViaServerTransit,
+		Binding:     actorreg.BindingViaServerTransit,
 		DisplayName: "xhs",
 	}
 	types := make([]TypeSeed, 0, len(AllTypes))

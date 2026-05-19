@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -51,7 +52,7 @@ type Options struct {
 func Resolve(
 	ctx context.Context,
 	env *message.Envelope,
-	reg actor.Registry,
+	reg actorreg.Registry,
 	opts Options,
 ) ([]actor.ActorID, error) {
 	if env == nil {
@@ -114,7 +115,7 @@ func Resolve(
 func expandAudience(
 	ctx context.Context,
 	env *message.Envelope,
-	reg actor.Registry,
+	reg actorreg.Registry,
 ) ([]actor.ActorID, error) {
 	if isWildcard(env.Audience) {
 		rows, err := reg.ListActive(ctx)

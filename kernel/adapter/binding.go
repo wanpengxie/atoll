@@ -8,14 +8,14 @@
 // dependencies beyond kernel/* and the standard library.
 package adapter
 
-import "github.com/wanpengxie/ActOS/kernel/actor"
+import "github.com/wanpengxie/ActOS/kernel/actorreg"
 
 // BindingKind is the M1.5 closed enum for adapter handler_binding (L1
 // §11.7). Three values: in_process / outbound_http / via_server_transit.
 //
 // Wire-form values match the actor_registry.actor_binding +
 // type_registry.handler_binding columns (L2 §1.4.2 / §1.4.6) and
-// kernel/actor.Binding (kept duplicated to avoid kernel/actor ↔
+// kernel/actorreg.Binding (kept duplicated to avoid kernel/actorreg ↔
 // kernel/adapter cycles).
 type BindingKind string
 
@@ -89,6 +89,6 @@ func NormalizeBinding(raw string) (BindingKind, bool) {
 // Currently identical-value match — but kept as a function so M1.x
 // extensions (e.g. broaden to capability sets) can refine the rule
 // without touching every call site.
-func (b BindingKind) MatchesActorBinding(actorBinding actor.Binding) bool {
+func (b BindingKind) MatchesActorBinding(actorBinding actorreg.Binding) bool {
 	return string(b) == string(actorBinding)
 }

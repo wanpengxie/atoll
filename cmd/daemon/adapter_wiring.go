@@ -9,6 +9,7 @@ import (
 	"github.com/wanpengxie/ActOS/adapters/framework"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
@@ -258,11 +259,11 @@ func DeviceXHSFactory(sessionStore deviceframework.SessionStore, cfg devicexhs.C
 // adapters/xhs.DefaultActorSeed (which seeds the in_process scaffold).
 // cmd/daemon plugs the result into ChannelTemplate.AdapterActorSeeds
 // when swapping the in-process scaffold for the real device adapter.
-func DeviceXHSActorSeed() actor.Record {
-	return actor.Record{
+func DeviceXHSActorSeed() actorreg.Record {
+	return actorreg.Record{
 		ID:      devicexhs.DefaultAdapterActorID,
 		Kind:    actor.KindTool,
-		Binding: actor.BindingViaServerTransit,
+		Binding: actorreg.BindingViaServerTransit,
 	}
 }
 

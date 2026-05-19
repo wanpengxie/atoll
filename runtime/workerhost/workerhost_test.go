@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -29,7 +30,7 @@ import (
 func newE2EChain(t *testing.T, db *sql.DB, channelID channel.ID, workerActor actor.ActorID) *harness.Chain {
 	t.Helper()
 	areg := store.NewActorRegistry(db)
-	if err := areg.Insert(context.Background(), actor.Record{
+	if err := areg.Insert(context.Background(), actorreg.Record{
 		ID:        workerActor,
 		Kind:      actor.KindAgent,
 		CreatedAt: now(),
