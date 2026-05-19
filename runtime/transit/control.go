@@ -96,7 +96,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 // fuzz/test inputs.
 func (d *Dispatcher) replyFrameID(frame daemonbus.Frame) string {
 	if frame.FrameID != "" {
-		return frame.FrameID
+		return string(frame.FrameID)
 	}
 	return d.frameID()
 }

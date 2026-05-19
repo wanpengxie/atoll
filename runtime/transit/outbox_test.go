@@ -36,16 +36,16 @@ func newFakeOutbox(chID channel.ID, n int) *fakeOutbox {
 		pending = append(pending, viewsync.PushFrame{
 			ChannelID: chID,
 			Seq:       viewsync.Seq(i),
-			MessageID: "m-" + itoa(i),
+			MessageID: message.ID("m-" + itoa(i)),
 			Envelope: message.Envelope{
-				ID:         "m-" + itoa(i),
-				ChannelID:  string(chID),
+				ID:         message.ID("m-" + itoa(i)),
+				ChannelID:  chID,
 				Type:       "tick",
 				Visibility: message.VisibilityPublic,
 				Kind:       message.KindEvent,
 				Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 				Payload:    json.RawMessage(`{}`),
-				Audience:   []string{"*"},
+				Audience:   message.Audience{"*"},
 			},
 		})
 	}

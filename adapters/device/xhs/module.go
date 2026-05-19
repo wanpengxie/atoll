@@ -174,10 +174,10 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 
 	cmd, sid, _, err := buildCommand(env)
 	if err != nil {
-		return m.failNow(ctx, env.ID, "", "payload_decode_failed", err.Error())
+		return m.failNow(ctx, env.ID.String(), "", "payload_decode_failed", err.Error())
 	}
 
-	if newID := m.externalID(env.ID); newID != "" {
+	if newID := m.externalID(env.ID.String()); newID != "" {
 		cmd.CorrelationID = newID
 	}
 
@@ -185,7 +185,7 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 		sid = m.cfg.DefaultSession
 	}
 	if sid == "" {
-		return m.failNow(ctx, env.ID, "", "device_session_missing", "")
+		return m.failNow(ctx, env.ID.String(), "", "device_session_missing", "")
 	}
 
 	// Confirm the session is registered + reachable. The framework
@@ -193,30 +193,30 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 	// other states surface as device_offline / receiver_unavailable.
 	sess, ok, err := m.sessions.Get(ctx, sid)
 	if err != nil {
-		return m.failNow(ctx, env.ID, "", "session_store_unavailable", err.Error())
+		return m.failNow(ctx, env.ID.String(), "", "session_store_unavailable", err.Error())
 	}
 	if !ok {
-		return m.failNow(ctx, env.ID, "", "device_session_unknown", string(sid))
+		return m.failNow(ctx, env.ID.String(), "", "device_session_unknown", string(sid))
 	}
 	if !sess.State.IsReachable() {
-		return m.failNow(ctx, env.ID, "", "device_offline", fmt.Sprintf("session state=%s", sess.State))
+		return m.failNow(ctx, env.ID.String(), "", "device_offline", fmt.Sprintf("session state=%s", sess.State))
 	}
 
 	wirePayload, err := json.Marshal(cmd)
 	if err != nil {
-		return m.failNow(ctx, env.ID, "", "command_marshal_failed", err.Error())
+		return m.failNow(ctx, env.ID.String(), "", "command_marshal_failed", err.Error())
 	}
 
 	// Stash the requestType BEFORE Send so a callback that races the
 	// proxy's bookkeeping still finds it. The stash is dropped on
 	// terminal (success or cancel) inside completePending.
-	m.setPendingType(env.ID, env.Type)
+	m.setPendingType(env.ID.String(), env.Type)
 
 	if _, err := m.proxy.SendRequest(ctx, env, sid, wirePayload); err != nil {
 		// SendRequest already rolled back correlation + timer; clear our
 		// local stash too.
-		m.clearPendingType(env.ID)
-		return m.failNow(ctx, env.ID, "", "device_push_failed", err.Error())
+		m.clearPendingType(env.ID.String())
+		return m.failNow(ctx, env.ID.String(), "", "device_push_failed", err.Error())
 	}
 	return nil
 }
@@ -278,7 +278,7 @@ func (m *Module) OnExternalCallback(ctx context.Context, raw []byte) error {
 	}
 	m.clearPendingType(cb.CorrelationID)
 
-	_, err = m.mctx.Respond(ctx, cb.CorrelationID, body, adapter.RespondOptions{
+	_, err = m.mctx.Respond(ctx, adapter.CorrelationKey(message.ID(cb.CorrelationID)), body, adapter.RespondOptions{
 		Status: status,
 		Reason: reason,
 	})
@@ -306,7 +306,7 @@ func (m *Module) failNow(ctx context.Context, requestID string, terminalReason m
 	opts := adapter.RespondOptions{Status: "failed", Reason: reason}
 
 	if terminalReason != "" {
-		_ = m.mctx.ErrorPolicy.OnExternalError(ctx, requestID, terminalReason, detail)
+		_ = m.mctx.ErrorPolicy.OnExternalError(ctx, adapter.CorrelationKey(message.ID(requestID)), terminalReason, detail)
 	}
 
 	// Walk back the framework bookkeeping so the F3 default-timeout
@@ -314,7 +314,7 @@ func (m *Module) failNow(ctx context.Context, requestID string, terminalReason m
 	m.proxy.CancelInFlight(ctx, requestID)
 	m.clearPendingType(requestID)
 
-	_, err := m.mctx.Respond(ctx, requestID, payload, opts)
+	_, err := m.mctx.Respond(ctx, adapter.CorrelationKey(message.ID(requestID)), payload, opts)
 	return err
 }
 

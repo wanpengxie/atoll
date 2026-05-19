@@ -64,7 +64,7 @@ func TestMessageAppend_OutboxRoundTrip(t *testing.T) {
 		Type:       "channel.created",
 		Payload:    json.RawMessage(`{"ok":true}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 	}
 	res, err := msgs.Append(ctx, env)
 	if err != nil {
@@ -167,7 +167,7 @@ func TestMessages_PendingDue_FutureMessagesGated(t *testing.T) {
 	msgs := store.NewMessages(db)
 	mkEnv := func(id string, notBefore *int64) *message.Envelope {
 		return &message.Envelope{
-			ID:         id,
+			ID:         message.ID(id),
 			TS:         1000,
 			TSReceived: 1000,
 			ChannelID:  "ch-1",
@@ -176,7 +176,7 @@ func TestMessages_PendingDue_FutureMessagesGated(t *testing.T) {
 			Type:       "tick",
 			Payload:    json.RawMessage(`{}`),
 			Visibility: message.VisibilityPublic,
-			Audience:   []string{"*"},
+			Audience:   message.Audience{"*"},
 			NotBefore:  notBefore,
 		}
 	}
@@ -319,7 +319,7 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 	msgs := store.NewMessages(db)
 	mkReq := func(id string, expiresAt *int64) *message.Envelope {
 		return &message.Envelope{
-			ID:         id,
+			ID:         message.ID(id),
 			TS:         1000,
 			TSReceived: 1000,
 			ChannelID:  "ch-1",
@@ -328,7 +328,7 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 			Type:       "xhs.publish",
 			Payload:    json.RawMessage(`{}`),
 			Visibility: message.VisibilityPublic,
-			Audience:   []string{"tool:xhs-adapter"},
+			Audience:   message.Audience{"tool:xhs-adapter"},
 			ExpiresAt:  expiresAt,
 		}
 	}
@@ -359,7 +359,7 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 		Payload:    json.RawMessage(`{"status":"in_progress"}`),
 		ParentID:   "req-overdue-partial",
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"agent:a"},
+		Audience:   message.Audience{"agent:a"},
 	}
 	if _, err := msgs.Append(ctx, interim); err != nil {
 		t.Fatalf("append interim response: %v", err)
@@ -392,7 +392,7 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 		Payload:    json.RawMessage(`{"status":"completed"}`),
 		ParentID:   "req-settled",
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"agent:a"},
+		Audience:   message.Audience{"agent:a"},
 		IsTerminal: true,
 	}
 	if _, err := msgs.Append(ctx, terminal); err != nil {
@@ -411,7 +411,7 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 		Type:       "noise.tick",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 		ExpiresAt:  &pastDeadline,
 	}); err != nil {
 		t.Fatalf("append evt-overdue: %v", err)
@@ -472,7 +472,7 @@ func TestMessages_ConcurrentTerminalDuplicateClassified(t *testing.T) {
 			defer wg.Done()
 			<-start
 			_, err := msgs.Append(ctx, &message.Envelope{
-				ID:         id,
+				ID:         message.ID(id),
 				TS:         int64(1000 + i),
 				TSReceived: int64(1000 + i),
 				ChannelID:  "ch-1",
@@ -480,9 +480,9 @@ func TestMessages_ConcurrentTerminalDuplicateClassified(t *testing.T) {
 				Kind:       message.KindResponse,
 				Type:       "xhs.publish",
 				Payload:    json.RawMessage(`{"status":"completed"}`),
-				ParentID:   parentID,
+				ParentID:   message.ID(parentID),
 				Visibility: message.VisibilityPublic,
-				Audience:   []string{"agent:a"},
+				Audience:   message.Audience{"agent:a"},
 				IsTerminal: true,
 			})
 			results <- err
@@ -516,14 +516,14 @@ func TestMessages_ConcurrentTerminalDuplicateClassified(t *testing.T) {
 func ids(rows []message.Envelope) []string {
 	out := make([]string, len(rows))
 	for i, r := range rows {
-		out[i] = r.ID
+		out[i] = string(r.ID)
 	}
 	return out
 }
 
 func newSimpleEnvelope(seq int) *message.Envelope {
 	return &message.Envelope{
-		ID:         "m-" + itoa(seq),
+		ID:         message.ID("m-" + itoa(seq)),
 		TS:         int64(1000 + seq),
 		TSReceived: int64(1000 + seq),
 		ChannelID:  "ch-1",
@@ -532,7 +532,7 @@ func newSimpleEnvelope(seq int) *message.Envelope {
 		Type:       "tick",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 	}
 }
 

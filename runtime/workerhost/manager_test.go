@@ -226,13 +226,13 @@ func (s *blockingPushSpawner) Spawn(ctx context.Context, leaseID string, _ []str
 
 func triggerEnvelope(id string, seq int64) *message.Envelope {
 	return &message.Envelope{
-		ID:            id,
+		ID:            message.ID(id),
 		ChannelID:     "ch-mgr",
 		Type:          "human.text",
 		Sender:        message.Sender{Kind: actor.KindHuman, ID: "user:alice"},
 		Kind:          message.KindEvent,
 		Visibility:    message.VisibilityPublic,
-		Audience:      []string{"*"},
+		Audience:      message.Audience{"*"},
 		Payload:       json.RawMessage(`{"text":"hi"}`),
 		Seq:           seq,
 		CorrelationID: "corr-1",
@@ -248,7 +248,7 @@ func waitForTrigger(t *testing.T, ch <-chan ipc.TriggerPayload, want string, dea
 	for {
 		select {
 		case payload := <-ch:
-			if payload.Envelope.ID == want {
+			if payload.Envelope.ID == message.ID(want) {
 				return payload
 			}
 			// allow draining other envelopes (none expected in current tests)

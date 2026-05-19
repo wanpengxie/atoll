@@ -68,13 +68,13 @@ func (d *fakeBridgeDaemon) loop(ctx context.Context, ack ipc.HandshakeAckPayload
 				pushed = true
 				for i := 0; i < triggers; i++ {
 					env := message.Envelope{
-						ID:         "trig-" + string(rune('a'+i)),
-						ChannelID:  string(ack.ChannelID),
+						ID:         message.ID("trig-" + string(rune('a'+i))),
+						ChannelID:  ack.ChannelID,
 						Type:       "human.text",
 						Sender:     message.Sender{Kind: actor.KindHuman, ID: "user:alice"},
 						Visibility: message.VisibilityPublic,
 						Kind:       message.KindEvent,
-						Audience:   []string{string(ack.WorkerActorID)},
+						Audience:   message.Audience{ack.WorkerActorID},
 						Payload:    json.RawMessage(`{"text":"hi"}`),
 					}
 					payload, _ := json.Marshal(ipc.TriggerPayload{
@@ -83,7 +83,7 @@ func (d *fakeBridgeDaemon) loop(ctx context.Context, ack ipc.HandshakeAckPayload
 						Cursor:        int64(i + 1),
 					})
 					_ = d.codec.Write(ipc.Frame{
-						ID:      "push-" + env.ID,
+						ID:      "push-" + string(env.ID),
 						Kind:    ipc.KindTrigger,
 						Payload: payload,
 					})

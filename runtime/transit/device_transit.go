@@ -60,12 +60,12 @@ func NewDeviceTransit(cfg DeviceTransitConfig) (*DeviceTransit, error) {
 // device_transit.send daemonbus frame. The returned frame_id is the one
 // the underlying daemonbus frame carries (also what ack/error frames
 // reference).
-func (d *DeviceTransit) Send(ctx context.Context, frame devicetransit.SendFrame) (string, error) {
+func (d *DeviceTransit) Send(ctx context.Context, frame devicetransit.SendFrame) (devicetransit.FrameID, error) {
 	fid := d.frameID()
 	if err := d.client.Send(ctx, fid, daemonbus.FrameTypeDeviceTransitSend, frame); err != nil {
 		return "", err
 	}
-	return fid, nil
+	return devicetransit.FrameID(fid), nil
 }
 
 // Ack implements devicetransit.DeviceTransit (daemon-side outgoing ack, e.g.

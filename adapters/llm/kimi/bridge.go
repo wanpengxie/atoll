@@ -233,7 +233,7 @@ type IPCFacade interface {
 	WorkerID() string
 	// WorkerActorID returns the agent sender id stamped on every emitted
 	// envelope.
-	WorkerActorID() string
+	WorkerActorID() actor.ActorID
 	// Triggers returns the daemon → worker push channel. Bridge ranges
 	// over it; the channel closes when the IPC link tears down.
 	Triggers() <-chan TriggerPayload
@@ -249,7 +249,7 @@ type IPCFacade interface {
 // trigger stream into this shape.
 type TriggerPayload struct {
 	Envelope      message.Envelope
-	CorrelationID string
+	CorrelationID message.ID
 	Cursor        int64
 }
 
@@ -266,7 +266,7 @@ type Bridge struct {
 	envelopeSeq     atomic.Uint64
 
 	pendingMu    sync.Mutex
-	pendingTools map[string]chan toolResponse
+	pendingTools map[message.ID]chan toolResponse
 }
 
 // kimiAgent is the subset of go-kimi.Agent the bridge consumes. Carved
@@ -729,12 +729,12 @@ func (b *Bridge) emitEnvelope(
 	now := b.cfg.NowFn()
 	env := message.Envelope{
 		ID:            b.envelopeID(ipc, now),
-		ChannelID:     string(ipc.ChannelID()),
+		ChannelID:     ipc.ChannelID(),
 		Type:          envType,
 		Kind:          message.KindEvent,
-		Sender:        message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(ipc.WorkerActorID())},
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: ipc.WorkerActorID()},
 		Visibility:    visibility,
-		Audience:      []string{"*"},
+		Audience:      message.Audience{message.AudienceWildcard},
 		Payload:       body,
 		CorrelationID: trigger.CorrelationID,
 		ParentID:      trigger.Envelope.ID,
@@ -763,8 +763,8 @@ func (b *Bridge) emitTerminalLLMError(
 	ctx context.Context,
 	ipc IPCFacade,
 	err error,
-	parentEnvID string,
-	correlationID string,
+	parentEnvID message.ID,
+	correlationID message.ID,
 ) error {
 	if err == nil {
 		return nil
@@ -779,12 +779,12 @@ func (b *Bridge) emitTerminalLLMError(
 	now := b.cfg.NowFn()
 	env := message.Envelope{
 		ID:            b.envelopeID(ipc, now),
-		ChannelID:     string(ipc.ChannelID()),
+		ChannelID:     ipc.ChannelID(),
 		Type:          "agent.text",
 		Kind:          message.KindEvent,
-		Sender:        message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(ipc.WorkerActorID())},
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: ipc.WorkerActorID()},
 		Visibility:    message.VisibilityPublic,
-		Audience:      []string{"*"},
+		Audience:      message.Audience{message.AudienceWildcard},
 		Payload:       body,
 		ParentID:      parentEnvID,
 		CorrelationID: correlationID,
@@ -797,7 +797,7 @@ func (b *Bridge) emitTerminalLLMError(
 	return err
 }
 
-func terminalErrorCorrelationID(trigger TriggerPayload) string {
+func terminalErrorCorrelationID(trigger TriggerPayload) message.ID {
 	if trigger.CorrelationID != "" {
 		return trigger.CorrelationID
 	}
@@ -807,12 +807,12 @@ func terminalErrorCorrelationID(trigger TriggerPayload) string {
 // envelopeID generates a deterministic-shape id for emitted envelopes.
 // The per-bridge sequence keeps multiple emits in the same millisecond
 // unique while preserving the worker/time prefix for debugging.
-func (b *Bridge) envelopeID(ipc IPCFacade, nowMs int64) string {
+func (b *Bridge) envelopeID(ipc IPCFacade, nowMs int64) message.ID {
 	workerID := ipc.WorkerID()
 	if workerID == "" {
 		workerID = "anon"
 	}
-	return fmt.Sprintf("kimi-%s-%d-%d", workerID, nowMs, b.envelopeSeq.Add(1))
+	return message.ID(fmt.Sprintf("kimi-%s-%d-%d", workerID, nowMs, b.envelopeSeq.Add(1)))
 }
 
 // buildProvider hands a fully-configured llm.ChatProvider to

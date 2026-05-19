@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
@@ -13,11 +14,11 @@ import (
 // stable for the (channel, user) tuple — daemon harness uses it as
 // envelope.sender.id when the human caller token path runs.
 type ChannelMember struct {
-	ChannelID        string
-	UserID           string
-	ActorIDInChannel string
-	Role             string
-	JoinedAt         int64
+	ChannelID     string
+	UserID        string
+	MemberActorID string
+	Role          string
+	JoinedAt      int64
 }
 
 // GetChannelMember returns the row for (channelID, userID).
@@ -26,11 +27,11 @@ func (s *Service) GetChannelMember(ctx context.Context, channelID, userID string
 	var m ChannelMember
 	err := s.db.QueryRowContext(
 		ctx,
-		`SELECT channel_id, user_id, actor_id_in_channel, role, joined_at
+		`SELECT channel_id, user_id, member_actor_id, role, joined_at
 		   FROM channel_members
 		  WHERE channel_id = ? AND user_id = ?`,
 		channelID, userID,
-	).Scan(&m.ChannelID, &m.UserID, &m.ActorIDInChannel, &m.Role, &m.JoinedAt)
+	).Scan(&m.ChannelID, &m.UserID, &m.MemberActorID, &m.Role, &m.JoinedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ChannelMember{}, ErrNotChannelMember
@@ -44,7 +45,7 @@ func (s *Service) GetChannelMember(ctx context.Context, channelID, userID string
 func (s *Service) ListChannelMembers(ctx context.Context, channelID string) ([]ChannelMember, error) {
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT channel_id, user_id, actor_id_in_channel, role, joined_at
+		`SELECT channel_id, user_id, member_actor_id, role, joined_at
 		   FROM channel_members
 		  WHERE channel_id = ?
 		  ORDER BY joined_at ASC`,
@@ -57,7 +58,7 @@ func (s *Service) ListChannelMembers(ctx context.Context, channelID string) ([]C
 	var out []ChannelMember
 	for rows.Next() {
 		var m ChannelMember
-		if err := rows.Scan(&m.ChannelID, &m.UserID, &m.ActorIDInChannel, &m.Role, &m.JoinedAt); err != nil {
+		if err := rows.Scan(&m.ChannelID, &m.UserID, &m.MemberActorID, &m.Role, &m.JoinedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -72,23 +73,23 @@ func (s *Service) AddChannelMember(ctx context.Context, channelID string, m NewM
 		return ChannelMember{}, fmt.Errorf("catalog: user_id required")
 	}
 	row := ChannelMember{
-		ChannelID:        channelID,
-		UserID:           m.UserID,
-		ActorIDInChannel: m.ActorIDInChannel,
-		Role:             m.Role,
-		JoinedAt:         s.nowMs(),
+		ChannelID:     channelID,
+		UserID:        m.UserID,
+		MemberActorID: m.MemberActorID,
+		Role:          m.Role,
+		JoinedAt:      s.nowMs(),
 	}
-	if row.ActorIDInChannel == "" {
-		row.ActorIDInChannel = "user:" + row.UserID
+	if row.MemberActorID == "" {
+		row.MemberActorID = "user:" + row.UserID
 	}
 	if row.Role == "" {
 		row.Role = "member"
 	}
 	if _, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO channel_members (channel_id, user_id, actor_id_in_channel, role, joined_at)
+		`INSERT INTO channel_members (channel_id, user_id, member_actor_id, role, joined_at)
 		 VALUES (?, ?, ?, ?, ?)`,
-		row.ChannelID, row.UserID, row.ActorIDInChannel, row.Role, row.JoinedAt,
+		row.ChannelID, row.UserID, row.MemberActorID, row.Role, row.JoinedAt,
 	); err != nil {
 		// modernc.org/sqlite returns CONSTRAINT errors via the SQL
 		// driver; cheapest portable check is on the message.
@@ -121,10 +122,10 @@ func InitialMembersFor(members []ChannelMember, displayName func(userID string) 
 	out := make([]placement.InitialMember, 0, len(members))
 	for _, m := range members {
 		entry := placement.InitialMember{
-			UserID:           m.UserID,
-			ActorIDInChannel: m.ActorIDInChannel,
-			Kind:             "human",
-			Role:             m.Role,
+			UserID:        placement.UserID(m.UserID),
+			MemberActorID: actor.ActorID(m.MemberActorID),
+			Kind:          actor.KindHuman,
+			Role:          m.Role,
 		}
 		if displayName != nil {
 			entry.DisplayName = displayName(m.UserID)

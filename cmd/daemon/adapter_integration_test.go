@@ -147,24 +147,24 @@ func writeRequestWithExpiry(t *testing.T, ctx context.Context, d *runtime.Daemon
 	t.Helper()
 	ts := nowMs()
 	hc := transit.HumanCaller{
-		UserID:           "u1",
-		ActorIDInChannel: callerActor,
-		TS:               ts,
-		Nonce:            "nonce-" + requestID,
+		UserID:        "u1",
+		MemberActorID: actor.ActorID(callerActor),
+		TS:            ts,
+		Nonce:         "nonce-" + requestID,
 	}
 	hc.ServerToken = transit.SignHumanCaller(
-		[]byte(integSecret), channelID, hc.UserID, hc.ActorIDInChannel, hc.TS, hc.Nonce,
+		[]byte(integSecret), channelID, hc.UserID, hc.MemberActorID, hc.TS, hc.Nonce,
 	)
 	body := transit.WriteMessageBody{
-		FrameID:     "frame-write-" + requestID,
-		ChannelID:   channelID,
+		FrameID:     daemonbus.FrameID("frame-write-" + requestID),
+		ChannelID:   channel.ID(channelID),
 		HumanCaller: hc,
 		EnvelopePartial: message.Envelope{
-			ID:       requestID,
+			ID:       message.ID(requestID),
 			Type:     envType,
 			Kind:     message.KindRequest,
 			Payload:  json.RawMessage(payload),
-			Audience: []string{string(xhs.DefaultAdapterActorID)},
+			Audience: message.Audience{xhs.DefaultAdapterActorID},
 			// Visibility omitted — writemsg.go defaults to Public so the
 			// trigger.Gateway audience-expand sees the explicit list (Private
 			// would short-circuit Resolve to nil per L1 §5.1 visibility
@@ -222,7 +222,7 @@ func openChannelMessages(t *testing.T, channelsDir, channelID string) (*store.Me
 
 // pollResponse polls messages until a response row with parent_id ==
 // requestID appears (or deadline). Returns the response envelope.
-func pollResponse(t *testing.T, db *sql.DB, requestID string, timeout time.Duration) message.Envelope {
+func pollResponse(t *testing.T, db *sql.DB, requestID message.ID, timeout time.Duration) message.Envelope {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -232,7 +232,7 @@ func pollResponse(t *testing.T, db *sql.DB, requestID string, timeout time.Durat
 			id, payload, parent, kind string
 			term                      int
 		)
-		err := db.QueryRowContext(context.Background(), q, requestID).Scan(&id, &payload, &parent, &kind, &term)
+		err := db.QueryRowContext(context.Background(), q, requestID.String()).Scan(&id, &payload, &parent, &kind, &term)
 		if err == sql.ErrNoRows {
 			time.Sleep(20 * time.Millisecond)
 			continue
@@ -241,10 +241,10 @@ func pollResponse(t *testing.T, db *sql.DB, requestID string, timeout time.Durat
 			t.Fatalf("query response: %v", err)
 		}
 		var env message.Envelope
-		env.ID = id
+		env.ID = message.ID(id)
 		env.Payload = json.RawMessage(payload)
 		env.Kind = message.Kind(kind)
-		env.ParentID = parent
+		env.ParentID = message.ID(parent)
 		if term == 1 {
 			env.IsTerminal = true
 		}
@@ -285,7 +285,7 @@ func TestIntegration_XhsPublish_HappyPath(t *testing.T) {
 
 	const channelID = "ch-integ-happy"
 	createChannel(t, ctx, d, srv, channelID, []placement.InitialMember{
-		{ActorIDInChannel: "user:alice", Kind: "human", DisplayName: "Alice"},
+		{MemberActorID: "user:alice", Kind: "human", DisplayName: "Alice"},
 	})
 
 	if !d.HasChannel(channel.ID(channelID)) {
@@ -333,11 +333,11 @@ func TestIntegration_XhsPublish_Concurrent(t *testing.T) {
 
 	const channelID = "ch-integ-conc"
 	createChannel(t, ctx, d, srv, channelID, []placement.InitialMember{
-		{ActorIDInChannel: "user:alice", Kind: "human"},
+		{MemberActorID: "user:alice", Kind: "human"},
 	})
 
 	requestIDs := []string{"req-conc-A", "req-conc-B"}
-	canonical := make([]string, 0, len(requestIDs))
+	canonical := make([]message.ID, 0, len(requestIDs))
 	for i, rid := range requestIDs {
 		ack := writeRequest(t, ctx, d, srv, channelID, rid, "user:alice",
 			xhs.TypePublish, []byte(`{"title":"t-`+rid+`"}`))
@@ -386,7 +386,7 @@ func TestIntegration_XhsPublish_PanicEmitsFailedTerminal(t *testing.T) {
 
 	const channelID = "ch-integ-panic"
 	createChannel(t, ctx, d, srv, channelID, []placement.InitialMember{
-		{ActorIDInChannel: "user:alice", Kind: "human"},
+		{MemberActorID: "user:alice", Kind: "human"},
 	})
 
 	const requestID = "req-panic-1"
@@ -437,7 +437,7 @@ func TestIntegration_XhsPublish_TimerEmitsAdapterDefaultTimeout(t *testing.T) {
 
 	const channelID = "ch-integ-timer"
 	createChannel(t, ctx, d, srv, channelID, []placement.InitialMember{
-		{ActorIDInChannel: "user:alice", Kind: "human"},
+		{MemberActorID: "user:alice", Kind: "human"},
 	})
 
 	const requestID = "req-timer-1"
@@ -465,11 +465,11 @@ func TestIntegration_XhsPublish_TimerEmitsAdapterDefaultTimeout(t *testing.T) {
 // rows in the channel sqlite. Used by the acceptance C test below to assert
 // the long-pending scheduler did NOT double-emit alongside the adapter F3
 // timer.
-func countResponses(t *testing.T, db *sql.DB, requestID string) int {
+func countResponses(t *testing.T, db *sql.DB, requestID message.ID) int {
 	t.Helper()
 	var n int
 	err := db.QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM messages WHERE parent_id=? AND kind='response'`, requestID).Scan(&n)
+		`SELECT COUNT(*) FROM messages WHERE parent_id=? AND kind='response'`, requestID.String()).Scan(&n)
 	if err != nil {
 		t.Fatalf("count responses: %v", err)
 	}
@@ -505,7 +505,7 @@ func TestIntegration_LongPending_ToolReceiverSkippedByScheduler_F3Wins(t *testin
 
 	const channelID = "ch-integ-join"
 	createChannel(t, ctx, d, srv, channelID, []placement.InitialMember{
-		{ActorIDInChannel: "user:alice", Kind: "human"},
+		{MemberActorID: "user:alice", Kind: "human"},
 	})
 
 	const requestID = "req-join-1"

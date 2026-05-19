@@ -86,14 +86,14 @@ func runRespond(
 		return adapter.RespondResult{}, errors.New("framework: Respond requestID required")
 	}
 
-	request, ok, err := cfg.lookup.FindByID(ctx, requestID)
+	request, ok, err := cfg.lookup.FindByID(ctx, message.ID(requestID))
 	if err != nil {
 		return adapter.RespondResult{}, fmt.Errorf("framework: respond lookup %s: %w", requestID, err)
 	}
 	if !ok || request == nil {
 		return adapter.RespondResult{}, fmt.Errorf("framework: respond request %s not found", requestID)
 	}
-	if request.ChannelID != string(cfg.channelID) {
+	if request.ChannelID != cfg.channelID {
 		return adapter.RespondResult{}, fmt.Errorf("framework: respond channel mismatch: request=%s manager=%s",
 			request.ChannelID, cfg.channelID)
 	}
@@ -112,7 +112,7 @@ func runRespond(
 	if err != nil {
 		return adapter.RespondResult{}, fmt.Errorf("framework: respond hash: %w", err)
 	}
-	envID := "response:" + requestID + ":" + hash
+	envID := message.ID("response:" + requestID.String() + ":" + hash)
 
 	visibility := opts.Visibility
 	if visibility == "" {
@@ -121,9 +121,9 @@ func runRespond(
 
 	audience := opts.Audience
 	if len(audience) == 0 {
-		audience = []string{string(request.Sender.ID)}
+		audience = message.Audience{request.Sender.ID}
 	} else {
-		audience = append([]string(nil), audience...)
+		audience = append(message.Audience(nil), audience...)
 	}
 
 	correlationID := request.CorrelationID
@@ -140,7 +140,7 @@ func runRespond(
 		Kind:          message.KindResponse,
 		Type:          request.Type,
 		Payload:       mergedPayload,
-		ParentID:      requestID,
+		ParentID:      message.ID(requestID),
 		CorrelationID: correlationID,
 		Visibility:    visibility,
 		Audience:      audience,

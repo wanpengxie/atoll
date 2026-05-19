@@ -78,7 +78,7 @@ func (h *HeartbeatTracker) Handle(nowFn func() int64) func(context.Context, daem
 		}
 	}
 	return func(_ context.Context, frame daemonbus.Frame) error {
-		h.AckReceived(nowFn(), frame.FrameID)
+		h.AckReceived(nowFn(), string(frame.FrameID))
 		return nil
 	}
 }

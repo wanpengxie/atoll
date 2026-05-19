@@ -133,7 +133,7 @@ func (c *Connection) Run(ctx context.Context, h Handlers) error {
 			// Always reply heartbeat_ack so daemon RTT stays calibrated.
 			ackPayload := struct {
 				FrameID string `json:"frame_id"`
-			}{FrameID: frame.FrameID}
+			}{FrameID: frame.FrameID.String()}
 			if _, err := c.SendFrame(ctx, daemonbus.FrameTypeControlHeartbeatAck, ackPayload); err != nil {
 				return err
 			}

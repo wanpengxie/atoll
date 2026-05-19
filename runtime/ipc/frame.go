@@ -19,6 +19,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -66,6 +67,12 @@ const (
 // MaxFrameBytes caps one length-prefixed JSON frame at 16 MiB.
 const MaxFrameBytes = 1 << 24
 
+// WorkerID is the daemon-assigned worker subprocess identifier.
+type WorkerID string
+
+// String returns the wire form.
+func (w WorkerID) String() string { return string(w) }
+
 // Frame is the IPC wire envelope. Length-prefixed JSON: a uint32 BE
 // length header followed by the JSON-marshalled Frame.
 type Frame struct {
@@ -74,7 +81,7 @@ type Frame struct {
 	ChannelID    channel.ID             `json:"channel_id,omitempty"`
 	FencingToken placement.FencingToken `json:"fencing_token,omitempty"`
 	DaemonEpoch  placement.DaemonEpoch  `json:"daemon_epoch,omitempty"`
-	WorkerID     string                 `json:"worker_id,omitempty"`
+	WorkerID     WorkerID               `json:"worker_id,omitempty"`
 	Payload      json.RawMessage        `json:"payload,omitempty"`
 }
 
@@ -85,14 +92,14 @@ type HandshakePayload struct {
 
 // HandshakeAckPayload is daemon's reply.
 type HandshakeAckPayload struct {
-	WorkerID  string     `json:"worker_id"`
+	WorkerID  WorkerID   `json:"worker_id"`
 	ChannelID channel.ID `json:"channel_id"`
 	// WorkerActorID is the principal the worker MUST stamp into
 	// envelope.sender.id on every WriteMessage frame (otherwise
 	// harness step 3 sender_mismatch will reject). Added in M1.6-T1
 	// so the MockBridge knows its own actor identity without
 	// out-of-band configuration.
-	WorkerActorID string                 `json:"worker_actor_id,omitempty"`
+	WorkerActorID actor.ActorID          `json:"worker_actor_id,omitempty"`
 	FencingToken  placement.FencingToken `json:"fencing_token"`
 	DaemonEpoch   placement.DaemonEpoch  `json:"daemon_epoch"`
 	TurnDeadline  int64                  `json:"turn_deadline_ms"`
@@ -158,7 +165,7 @@ type ReplyPayload struct {
 // against the channel log).
 type TriggerPayload struct {
 	Envelope      message.Envelope `json:"envelope"`
-	CorrelationID string           `json:"correlation_id,omitempty"`
+	CorrelationID message.ID       `json:"correlation_id,omitempty"`
 	Cursor        int64            `json:"cursor,omitempty"`
 }
 

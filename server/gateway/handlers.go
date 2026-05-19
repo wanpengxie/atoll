@@ -121,8 +121,8 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 				Direction:       string(devicetransit.DirectionToDevice),
 				DeviceSessionID: string(sf.DeviceSessionID),
 				ChannelID:       string(sf.ChannelID),
-				RequestID:       sf.RequestID,
-				CorrelationID:   sf.CorrelationID,
+				RequestID:       sf.RequestID.String(),
+				CorrelationID:   sf.CorrelationID.String(),
 				Payload:         sf.Payload,
 				ExpiresAt:       sf.ExpiresAt,
 			}
@@ -151,12 +151,12 @@ func (a *App) Bind(ctx context.Context, in devicebus.BindInput) error {
 		return fmt.Errorf("gateway: bind_device_session: daemon %s not connected", in.Session.DaemonID)
 	}
 	body := kerneldaemonbus.BindDeviceSessionBody{
-		FrameID:          uuid.NewString(),
+		FrameID:          kerneldaemonbus.FrameID(uuid.NewString()),
 		SessionID:        devicetransit.DeviceSessionID(in.Session.ID),
 		ChannelID:        in.Session.ChannelID,
 		DeviceID:         in.Session.DeviceID,
 		DeviceType:       in.Session.DeviceType,
-		DaemonID:         string(in.Session.DaemonID),
+		DaemonID:         in.Session.DaemonID,
 		TokenFingerprint: in.TokenFingerprint,
 		ExpiresAt:        in.Session.ExpiresAt,
 		BoundAt:          in.Session.CreatedAt,
@@ -194,7 +194,7 @@ func (a *App) Unbind(ctx context.Context, in devicebus.UnbindInput) error {
 		return nil
 	}
 	body := kerneldaemonbus.UnbindDeviceSessionBody{
-		FrameID:   uuid.NewString(),
+		FrameID:   kerneldaemonbus.FrameID(uuid.NewString()),
 		SessionID: devicetransit.DeviceSessionID(in.Session.ID),
 		ChannelID: in.Session.ChannelID,
 		Reason:    in.Reason,
@@ -233,8 +233,8 @@ func (a *App) ForwardDeviceFrame(ctx context.Context, frame devicebus.DeviceFram
 		ChannelID:       channel.ID(frame.ChannelID),
 		DeviceSessionID: devicetransit.DeviceSessionID(frame.DeviceSessionID),
 		Direction:       devicetransit.DirectionFromDevice,
-		RequestID:       frame.RequestID,
-		CorrelationID:   frame.CorrelationID,
+		RequestID:       message.ID(frame.RequestID),
+		CorrelationID:   message.ID(frame.CorrelationID),
 		Payload:         frame.Payload,
 		ExpiresAt:       frame.ExpiresAt,
 	}
@@ -242,8 +242,8 @@ func (a *App) ForwardDeviceFrame(ctx context.Context, frame devicebus.DeviceFram
 	return err
 }
 
-func (a *App) correlationForParent(ctx context.Context, channelID, parentID string) string {
-	parent, ok, err := a.viewcache.MessageByID(ctx, channel.ID(channelID), parentID)
+func (a *App) correlationForParent(ctx context.Context, channelID string, parentID message.ID) message.ID {
+	parent, ok, err := a.viewcache.MessageByID(ctx, channel.ID(channelID), parentID.String())
 	if err != nil || !ok {
 		return parentID
 	}
@@ -425,22 +425,22 @@ type writeMessageReq struct {
 }
 
 // HumanCaller is the JSON object carried inside control.write_message.
-// Daemon recomputes the HMAC + verifies actor_id_in_channel against
+// Daemon recomputes the HMAC + verifies member_actor_id against
 // its local actor_registry.
 type HumanCaller struct {
-	UserID           string `json:"user_id"`
-	ActorIDInChannel string `json:"actor_id_in_channel"`
-	TS               int64  `json:"ts"`
-	Nonce            string `json:"nonce"`
-	ServerToken      string `json:"server_token"`
+	UserID        kerneldaemonbus.UserID `json:"user_id"`
+	MemberActorID actor.ActorID          `json:"member_actor_id"`
+	TS            int64                  `json:"ts"`
+	Nonce         string                 `json:"nonce"`
+	ServerToken   string                 `json:"server_token"`
 }
 
 // writeMessageBody is the daemonbus.control.write_message payload.
 type writeMessageBody struct {
-	FrameID         string           `json:"frame_id"`
-	ChannelID       string           `json:"channel_id"`
-	HumanCaller     HumanCaller      `json:"human_caller"`
-	EnvelopePartial message.Envelope `json:"envelope_partial"`
+	FrameID         kerneldaemonbus.FrameID `json:"frame_id"`
+	ChannelID       channel.ID              `json:"channel_id"`
+	HumanCaller     HumanCaller             `json:"human_caller"`
+	EnvelopePartial message.Envelope        `json:"envelope_partial"`
 }
 
 func (a *App) handleWriteMessage(c *gin.Context) {
@@ -488,23 +488,29 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		return
 	}
 	caller := HumanCaller{
-		UserID: u.ID, ActorIDInChannel: member.ActorIDInChannel,
-		TS: ts, Nonce: nonce,
-		ServerToken: a.signHumanCaller(channelID, u.ID, member.ActorIDInChannel, ts, nonce),
+		UserID:        kerneldaemonbus.UserID(u.ID),
+		MemberActorID: actor.ActorID(member.MemberActorID),
+		TS:            ts,
+		Nonce:         nonce,
+		ServerToken:   a.signHumanCaller(channelID, u.ID, member.MemberActorID, ts, nonce),
 	}
 	vis := message.VisibilityPublic
 	if req.Visibility != "" {
 		vis = message.Visibility(req.Visibility)
 	}
+	audience := make(message.Audience, 0, len(req.Audience))
+	for _, id := range req.Audience {
+		audience = append(audience, actor.ActorID(id))
+	}
 	envelope := message.Envelope{
 		Type:          req.Type,
-		ChannelID:     channelID,
-		Sender:        message.Sender{Kind: actor.KindHuman, ID: actor.ActorID(member.ActorIDInChannel)},
+		ChannelID:     channel.ID(channelID),
+		Sender:        message.Sender{Kind: actor.KindHuman, ID: actor.ActorID(member.MemberActorID)},
 		Kind:          kind,
 		Payload:       req.Payload,
-		ParentID:      req.ParentID,
-		CorrelationID: req.CorrelationID,
-		Audience:      req.Audience,
+		ParentID:      message.ID(req.ParentID),
+		CorrelationID: message.ID(req.CorrelationID),
+		Audience:      audience,
 		Visibility:    vis,
 		TS:            ts,
 	}
@@ -512,8 +518,8 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		envelope.CorrelationID = a.correlationForParent(c.Request.Context(), channelID, envelope.ParentID)
 	}
 	body := writeMessageBody{
-		FrameID:         uuid.NewString(),
-		ChannelID:       channelID,
+		FrameID:         kerneldaemonbus.FrameID(uuid.NewString()),
+		ChannelID:       channel.ID(channelID),
 		HumanCaller:     caller,
 		EnvelopePartial: envelope,
 	}

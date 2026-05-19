@@ -146,7 +146,7 @@ type Manager struct {
 
 	mu      sync.RWMutex
 	modules []*boundModule
-	byActor map[string]*boundModule
+	byActor map[actor.ActorID]*boundModule
 	byName  map[string]*boundModule
 
 	gcCancel context.CancelFunc
@@ -171,7 +171,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	cfg.applyDefaults()
 	return &Manager{
 		cfg:     cfg,
-		byActor: map[string]*boundModule{},
+		byActor: map[actor.ActorID]*boundModule{},
 		byName:  map[string]*boundModule{},
 	}, nil
 }
@@ -202,7 +202,7 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		m.mu.Unlock()
 		return fmt.Errorf("framework: adapter %q already installed", decl.Name)
 	}
-	if _, dup := m.byActor[string(decl.ActorID)]; dup {
+	if _, dup := m.byActor[decl.ActorID]; dup {
 		m.mu.Unlock()
 		return fmt.Errorf("framework: actor %q already bound by another adapter", decl.ActorID)
 	}
@@ -354,7 +354,7 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 	}
 	m.mu.Lock()
 	m.modules = append(m.modules, bm)
-	m.byActor[string(decl.ActorID)] = bm
+	m.byActor[decl.ActorID] = bm
 	m.byName[decl.Name] = bm
 	m.mu.Unlock()
 
@@ -402,7 +402,7 @@ func (m *Manager) Dispatch(ctx context.Context, env *message.Envelope) error {
 	if env.Kind != message.KindRequest {
 		return fmt.Errorf("framework: Dispatch envelope kind=%s (must be request)", env.Kind)
 	}
-	if env.ChannelID != string(m.cfg.ChannelID) {
+	if env.ChannelID != m.cfg.ChannelID {
 		return fmt.Errorf("framework: Dispatch channel mismatch envelope=%s manager=%s",
 			env.ChannelID, m.cfg.ChannelID)
 	}
@@ -431,10 +431,10 @@ func (m *Manager) Dispatch(ctx context.Context, env *message.Envelope) error {
 	now := m.cfg.Clock()
 	deadline := now.Add(time.Duration(bm.declaration.MaxPendingMs) * time.Millisecond)
 	entry := adapter.CorrelationEntry{
-		RequestID:     env.ID,
+		RequestID:     adapter.CorrelationKey(env.ID),
 		CorrelationID: env.CorrelationID,
 		ChannelID:     env.ChannelID,
-		AudienceActor: string(bm.declaration.ActorID),
+		AudienceActor: bm.declaration.ActorID,
 		ParentID:      env.ID,
 		EnqueuedAt:    now.UnixMilli(),
 		ExpiresAt:     deadline.UnixMilli(),
@@ -443,7 +443,7 @@ func (m *Manager) Dispatch(ctx context.Context, env *message.Envelope) error {
 	if _, err := bm.correlation.Reserve(ctx, entry); err != nil {
 		return fmt.Errorf("framework: dispatch reserve: %w", err)
 	}
-	if err := bm.policy.RegisterTimer(ctx, env.ID, deadline); err != nil {
+	if err := bm.policy.RegisterTimer(ctx, adapter.CorrelationKey(env.ID), deadline); err != nil {
 		return fmt.Errorf("framework: dispatch register timer: %w", err)
 	}
 	m.cfg.Metrics.IncCounter("adapter.dispatch",
@@ -515,7 +515,7 @@ func (m *Manager) OnExternalCallback(ctx context.Context, adapterName string, pa
 	defer span.End()
 	m.cfg.Metrics.IncCounter("adapter.callback", "adapter", adapterName)
 	if correlationID := callbackCorrelationID(payload); correlationID != "" {
-		if _, ok, err := bm.correlation.Get(ctx, correlationID); err != nil {
+		if _, ok, err := bm.correlation.Get(ctx, adapter.CorrelationKey(message.ID(correlationID))); err != nil {
 			return fmt.Errorf("framework: callback correlation lookup %s: %w", correlationID, err)
 		} else if !ok {
 			m.cfg.Metrics.IncCounter("adapter.callback.orphan", "adapter", adapterName)

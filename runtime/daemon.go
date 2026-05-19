@@ -1514,7 +1514,7 @@ func (d *Daemon) handleCreateChannel(
 	req placement.CreateChannelRequest,
 ) error {
 	ack := placement.CreateChannelAck{
-		FrameID:         frame.FrameID,
+		FrameID:         string(frame.FrameID),
 		ChannelID:       req.ChannelID,
 		CreateRequestID: req.CreateRequestID,
 		OwnerEpoch:      req.OwnerEpoch,
@@ -1664,8 +1664,8 @@ func (d *Daemon) mountExistingChannel(ctx context.Context, id channel.ID, sqlite
 // ack frames so future SendAndAwait callers don't re-trip the bug.
 // Empty inboundFrameID falls back to a fresh generator id (test-only
 // path; production always carries a frame_id).
-func (d *Daemon) sendCreateAck(ctx context.Context, inboundFrameID string, ack placement.CreateChannelAck) error {
-	frameID := inboundFrameID
+func (d *Daemon) sendCreateAck(ctx context.Context, inboundFrameID daemonbus.FrameID, ack placement.CreateChannelAck) error {
+	frameID := string(inboundFrameID)
 	if frameID == "" {
 		frameID = d.cfg.FrameIDGen()
 	}
@@ -1705,13 +1705,13 @@ func (d *Daemon) handleUnbindChannel(ctx context.Context, frame daemonbus.Frame)
 		}
 	}
 	if body.FrameID == "" {
-		body.FrameID = frame.FrameID
+		body.FrameID = string(frame.FrameID)
 	}
 	ack := unbindChannelAckBody{FrameID: body.FrameID, ChannelID: body.ChannelID}
 	// FIX-2026-05-18: echo inbound envelope frame_id (see sendCreateAck
 	// for the full root-cause comment). Empty inbound id falls back to
 	// the generator — only reachable under test stubs.
-	replyFrameID := frame.FrameID
+	replyFrameID := string(frame.FrameID)
 	if replyFrameID == "" {
 		replyFrameID = d.cfg.FrameIDGen()
 	}
@@ -2043,7 +2043,7 @@ func (d *Daemon) emitLongPendingFallback(
 	// M1.6 baseline: 1 channel ↔ 1 device, 1 receiver per request. The
 	// audience[0] entry is the canonical receiver for the SLA decision.
 	// Multi-receiver fan-out (audience=['*'] expansions) is M1.7 scope.
-	receiverID := actor.ActorID(req.Audience[0])
+	receiverID := req.Audience[0]
 
 	reason, emit, err := d.classifyLongPendingReason(ctx, cr, receiverID)
 	if err != nil {
@@ -2060,7 +2060,7 @@ func (d *Daemon) emitLongPendingFallback(
 	// Deterministic id keeps the scan idempotent across ticks: every
 	// re-fire builds the same id, hits harness step 0.5 dedupe, and
 	// short-circuits (canonical-hash-equal → Deduped=true).
-	envID := "response:" + req.ID + ":sys-" + string(reason)
+	envID := message.ID("response:" + string(req.ID) + ":sys-" + string(reason))
 
 	correlationID := req.CorrelationID
 	if correlationID == "" {
@@ -2078,7 +2078,7 @@ func (d *Daemon) emitLongPendingFallback(
 		ParentID:      req.ID,
 		CorrelationID: correlationID,
 		Visibility:    req.Visibility,
-		Audience:      []string{string(req.Sender.ID)},
+		Audience:      message.Audience{req.Sender.ID},
 	}
 
 	// The scheduler is a system caller; stamp the harness context with
@@ -2086,7 +2086,7 @@ func (d *Daemon) emitLongPendingFallback(
 	// above so the registry-truth overwrite path remains exact-match).
 	chainCtx := harness.CtxWithCaller(ctx, harness.CallerContext{
 		ActorID:                 actor.SystemActorID,
-		ChannelID:               channel.ID(req.ChannelID),
+		ChannelID:               req.ChannelID,
 		AllowProvidedSenderKind: true,
 	})
 

@@ -294,7 +294,7 @@ func messageEnvelopeStub() message.Envelope {
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Kind:       message.KindEvent,
 		Payload:    json.RawMessage(`{}`),
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 	}
 }
 

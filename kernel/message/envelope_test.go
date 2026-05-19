@@ -23,7 +23,7 @@ func TestEnvelopeRoundTripMinimal(t *testing.T) {
 		Type:       "agent.text",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   Audience{"*"},
 	}
 	got := roundTrip(t, src)
 	if !reflect.DeepEqual(got.Audience, src.Audience) {
@@ -60,7 +60,7 @@ func TestEnvelopeRoundTripFullyPopulated(t *testing.T) {
 		CorrelationID:    "corr-1",
 		DocRefs:          &docs,
 		Visibility:       VisibilityPublic,
-		Audience:         []string{"tool:xhs-adapter"},
+		Audience:         Audience{"tool:xhs-adapter"},
 		NotBefore:        &notBefore,
 		ExpiresAt:        &expiresAt,
 		DeliveredAt:      &delivered,
@@ -90,7 +90,7 @@ func TestDocRefsTriState(t *testing.T) {
 			Type:       "file.updated",
 			Payload:    json.RawMessage(`{}`),
 			Visibility: VisibilityPublic,
-			Audience:   []string{"*"},
+			Audience:   Audience{"*"},
 			DocRefs:    refs,
 		}
 	}
@@ -170,7 +170,7 @@ func TestEnvelopeFieldSet1To1WithSpec(t *testing.T) {
 		CorrelationID:    "corr-1",
 		DocRefs:          &docs,
 		Visibility:       VisibilityPublic,
-		Audience:         []string{"tool:xhs-adapter"},
+		Audience:         Audience{"tool:xhs-adapter"},
 		NotBefore:        &notBefore,
 		ExpiresAt:        &expiresAt,
 		DeliveredAt:      &delivered,
@@ -244,7 +244,7 @@ func TestCanonicalHashStableAcrossSenderIdentityTyping(t *testing.T) {
 		CorrelationID:    "corr-77",
 		DocRefs:          &refs,
 		Visibility:       VisibilityPublic,
-		Audience:         []string{"*", "agent:bob"},
+		Audience:         Audience{"*", "agent:bob"},
 		NotBefore:        &nb,
 		ExpiresAt:        &ex,
 		DeliveredAt:      &delivered,

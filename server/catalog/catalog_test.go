@@ -105,8 +105,8 @@ func TestCreateWorkspaceAndChannel(t *testing.T) {
 func TestInitialMembersFor(t *testing.T) {
 	t.Parallel()
 	members := []catalog.ChannelMember{
-		{ChannelID: "c1", UserID: "u1", ActorIDInChannel: "user:u1", Role: "owner"},
-		{ChannelID: "c1", UserID: "u2", ActorIDInChannel: "user:u2", Role: "member"},
+		{ChannelID: "c1", UserID: "u1", MemberActorID: "user:u1", Role: "owner"},
+		{ChannelID: "c1", UserID: "u2", MemberActorID: "user:u2", Role: "member"},
 	}
 	out := catalog.InitialMembersFor(members, func(uid string) string { return "Display:" + uid })
 	if len(out) != 2 {

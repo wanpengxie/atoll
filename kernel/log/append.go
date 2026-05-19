@@ -35,7 +35,7 @@ type AppendError struct {
 	Detail string
 	// PartialMessageID is the envelope.id that was attempted (so the
 	// caller can report which id "lost" the race).
-	PartialMessageID string
+	PartialMessageID message.ID
 }
 
 // Error implements the error interface.
@@ -75,5 +75,5 @@ type MessageLog interface {
 	// FindByID returns the row identified by envelope.id, or ok=false
 	// when no such row exists. Used by harness step 0.5 (dedupe path)
 	// to compare canonical-hash before short-circuiting.
-	FindByID(ctx context.Context, channelID channel.ID, id string) (message.Envelope, bool, error)
+	FindByID(ctx context.Context, channelID channel.ID, id message.ID) (message.Envelope, bool, error)
 }

@@ -30,7 +30,7 @@ func TestPushAckFramePayloadFields(t *testing.T) {
 			Type:       "agent.text",
 			Payload:    json.RawMessage(`{}`),
 			Visibility: message.VisibilityPublic,
-			Audience:   []string{"*"},
+			Audience:   message.Audience{"*"},
 		},
 	}
 	if got := jsonKeys(t, push); !equalSlices(got, []string{"channel_id", "envelope", "message_id", "seq"}) {
@@ -222,13 +222,13 @@ func mkPush(channelID channel.ID, seq Seq) PushFrame {
 		Envelope: message.Envelope{
 			ID:         "env",
 			TS:         1,
-			ChannelID:  string(channelID),
+			ChannelID:  channelID,
 			Sender:     message.Sender{Kind: actor.KindAgent, ID: "a"},
 			Kind:       message.KindEvent,
 			Type:       "agent.text",
 			Payload:    json.RawMessage(`{}`),
 			Visibility: message.VisibilityPublic,
-			Audience:   []string{"*"},
+			Audience:   message.Audience{"*"},
 		},
 	}
 }

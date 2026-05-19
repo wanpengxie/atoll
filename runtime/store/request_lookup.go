@@ -32,7 +32,7 @@ func NewRequestLookup(messages *Messages, channelID channel.ID) *RequestLookup {
 
 // FindByID satisfies kernel/adapter.RequestLookup. Returns nil envelope
 // + ok=false when the row is missing.
-func (r *RequestLookup) FindByID(ctx context.Context, id string) (*message.Envelope, bool, error) {
+func (r *RequestLookup) FindByID(ctx context.Context, id message.ID) (*message.Envelope, bool, error) {
 	env, ok, err := r.messages.FindByID(ctx, r.channelID, id)
 	if err != nil {
 		return nil, false, err

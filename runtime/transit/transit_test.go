@@ -332,16 +332,16 @@ func atomicFrameID() transit.FrameIDGen {
 
 func newEnvelope(seq int) *message.Envelope {
 	return &message.Envelope{
-		ID:         "m-" + itoa(seq),
+		ID:         message.ID("m-" + itoa(seq)),
 		TS:         int64(1000 + seq),
 		TSReceived: int64(1000 + seq),
-		ChannelID:  string(testChannelID),
+		ChannelID:  testChannelID,
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Kind:       message.KindEvent,
 		Type:       "tick",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 	}
 }
 

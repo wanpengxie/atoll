@@ -102,7 +102,7 @@ func TestDaemon_OnCreateChannel_FreshBootstrap(t *testing.T) {
 		OwnerEpoch:      1,
 		FencingToken:    1,
 		InitialMembers: []placement.InitialMember{
-			{ActorIDInChannel: "user:alice", Kind: "human", DisplayName: "Alice"},
+			{MemberActorID: "user:alice", Kind: "human", DisplayName: "Alice"},
 		},
 	}
 	ack := sendCreateChannel(t, ctx, d, srv, req)

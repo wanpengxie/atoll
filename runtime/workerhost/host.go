@@ -117,7 +117,7 @@ func (h *Host) PushTrigger(ctx context.Context, payload ipc.TriggerPayload) erro
 		ID:           fmt.Sprintf("trig-%s", payload.Envelope.ID),
 		Kind:         ipc.KindTrigger,
 		ChannelID:    h.cfg.ChannelID,
-		WorkerID:     h.cfg.WorkerID,
+		WorkerID:     ipc.WorkerID(h.cfg.WorkerID),
 		FencingToken: h.cfg.FencingToken,
 		DaemonEpoch:  h.cfg.DaemonEpoch,
 		Payload:      raw,
@@ -199,9 +199,9 @@ func (h *Host) handle(ctx context.Context, frame ipc.Frame) error {
 
 func (h *Host) handleHandshake(frame ipc.Frame) error {
 	ack := ipc.HandshakeAckPayload{
-		WorkerID:      h.cfg.WorkerID,
+		WorkerID:      ipc.WorkerID(h.cfg.WorkerID),
 		ChannelID:     h.cfg.ChannelID,
-		WorkerActorID: string(h.cfg.WorkerActorID),
+		WorkerActorID: h.cfg.WorkerActorID,
 		FencingToken:  h.cfg.FencingToken,
 		DaemonEpoch:   h.cfg.DaemonEpoch,
 	}

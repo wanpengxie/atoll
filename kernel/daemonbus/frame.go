@@ -6,7 +6,11 @@
 // and kernel/devicetransit.
 package daemonbus
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/wanpengxie/ActOS/kernel/placement"
+)
 
 // FrameType is the M1.5 closed set of daemonbus frame_type values. Per
 // L2 §9.1 there are three categories (viewsync.* / control.* /
@@ -129,6 +133,12 @@ func (c Category) String() string { return string(c) }
 // frames from a stale connection.
 type ConnectionEpoch int64
 
+// FrameID is the daemonbus mux frame identifier.
+type FrameID string
+
+// String returns the wire form.
+func (f FrameID) String() string { return string(f) }
+
 // Frame is the daemonbus mux wrapper carried over the WS connection
 // (L2 §9.2). Every frame — viewsync.*, control.*, device_transit.* —
 // rides inside this envelope.
@@ -138,12 +148,12 @@ type ConnectionEpoch int64
 // CreateChannelRequest, etc.) without forcing kernel/daemonbus to
 // import every payload package.
 type Frame struct {
-	FrameID               string          `json:"frame_id"`
-	FrameType             FrameType       `json:"frame_type"`
-	DaemonID              string          `json:"daemon_id"`
-	DaemonConnectionEpoch ConnectionEpoch `json:"daemon_connection_epoch"`
-	SentAt                int64           `json:"sent_at"`
-	Payload               json.RawMessage `json:"payload"`
+	FrameID               FrameID            `json:"frame_id"`
+	FrameType             FrameType          `json:"frame_type"`
+	DaemonID              placement.DaemonID `json:"daemon_id"`
+	DaemonConnectionEpoch ConnectionEpoch    `json:"daemon_connection_epoch"`
+	SentAt                int64              `json:"sent_at"`
+	Payload               json.RawMessage    `json:"payload"`
 }
 
 // HeaderFields lists the 5 daemonbus mux header field names (excluding

@@ -130,7 +130,7 @@ func TestResolve_WildcardExpand_StripsSender(t *testing.T) {
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 	}
 	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{})
 	if err != nil {
@@ -151,7 +151,7 @@ func TestResolve_ExplicitAudience_OnlyListed(t *testing.T) {
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"agent:alpha", "agent:missing"},
+		Audience:   message.Audience{"agent:alpha", "agent:missing"},
 	}
 	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{})
 	if err != nil {
@@ -173,7 +173,7 @@ func TestResolve_DeregisteredActor_DroppedFromExplicitList(t *testing.T) {
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"agent:alpha", "agent:beta"},
+		Audience:   message.Audience{"agent:alpha", "agent:beta"},
 	}
 	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{})
 	if err != nil {
@@ -194,7 +194,7 @@ func TestResolve_VisibilitySystem_Suppressed(t *testing.T) {
 		Type:       "system.event",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilitySystem,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 	}
 	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{})
 	if err != nil {
@@ -214,7 +214,7 @@ func TestResolve_VisibilityPrivate_Suppressed(t *testing.T) {
 		Type:       "agent.text",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPrivate,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 	}
 	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{})
 	if err != nil {
@@ -234,7 +234,7 @@ func TestResolve_SystemHeartbeat_Suppressed(t *testing.T) {
 		Type:       "system.heartbeat",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilitySystem,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 	}
 	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{})
 	if err != nil {
@@ -254,7 +254,7 @@ func TestResolve_SelfTriggerBan_DropsSender(t *testing.T) {
 		Type:       "agent.text",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 	}
 	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{})
 	if err != nil {
@@ -281,7 +281,7 @@ func TestResolve_BypassSelfTriggerBan_KeepsSender(t *testing.T) {
 		Type:       "agent.text",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"agent:alpha"},
+		Audience:   message.Audience{"agent:alpha"},
 	}
 	// scheduler / system upstream dispatch: bypass the §5.1 step 3 filter.
 	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{BypassSelfTriggerBan: true})
@@ -346,7 +346,7 @@ func TestGateway_Dispatch_ImmediateInvokesDeliverer(t *testing.T) {
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 	}
 	res, err := gw.Dispatch(context.Background(), env, trigger.Options{})
 	if err != nil {
@@ -379,7 +379,7 @@ func TestGateway_Dispatch_ReturnsDeliverError(t *testing.T) {
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 	}
 	res, err := gw.Dispatch(context.Background(), env, trigger.Options{})
 	if !errors.Is(err, wantErr) {
@@ -414,7 +414,7 @@ func TestGateway_Dispatch_FutureMessageDeferred(t *testing.T) {
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 		NotBefore:  &notBefore,
 	}
 	res, err := gw.Dispatch(context.Background(), env, trigger.Options{})
@@ -459,7 +459,7 @@ func TestGateway_Dispatch_SystemHeartbeatNoDeliverer(t *testing.T) {
 		Type:       "system.heartbeat",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilitySystem,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 	}
 	res, err := gw.Dispatch(context.Background(), env, trigger.Options{})
 	if err != nil {

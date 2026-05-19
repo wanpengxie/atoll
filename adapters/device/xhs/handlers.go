@@ -76,7 +76,7 @@ func buildCommand(env *message.Envelope) (cmd Command, sessionID devicetransit.D
 
 	cmd = Command{
 		Type:          CommandWireType,
-		CorrelationID: env.ID,
+		CorrelationID: env.ID.String(),
 		Cmd:           strings.TrimPrefix(env.Type, "xhs."),
 		Params:        params,
 	}

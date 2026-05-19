@@ -182,7 +182,7 @@ func rejectFromOutcome(out khar.Outcome, env *message.Envelope) khar.WriteResult
 	r := khar.WriteResult{
 		RejectReason:     out.RejectReason,
 		RejectDetail:     out.Detail,
-		PartialMessageID: out.PartialMessageID,
+		PartialMessageID: message.ID(out.PartialMessageID),
 	}
 	if env != nil && env.ID != "" {
 		r.MessageID = env.ID

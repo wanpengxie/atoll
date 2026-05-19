@@ -145,12 +145,12 @@ func (b *Bridge) executeChannelTool(
 	expiresAt := now + int64(timeout/time.Millisecond)
 	env := message.Envelope{
 		ID:            b.envelopeID(ipc, now),
-		ChannelID:     string(ipc.ChannelID()),
+		ChannelID:     ipc.ChannelID(),
 		Type:          tool.Name(),
 		Kind:          message.KindRequest,
-		Sender:        message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(ipc.WorkerActorID())},
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: ipc.WorkerActorID()},
 		Visibility:    message.VisibilityPublic,
-		Audience:      []string{tool.handlerActorID},
+		Audience:      message.Audience{actor.ActorID(tool.handlerActorID)},
 		Payload:       payload,
 		ParentID:      trigger.Envelope.ID,
 		CorrelationID: channelToolCorrelationID(trigger),
@@ -180,18 +180,18 @@ func (b *Bridge) executeChannelTool(
 	}
 }
 
-func (b *Bridge) registerPendingTool(id string) chan toolResponse {
+func (b *Bridge) registerPendingTool(id message.ID) chan toolResponse {
 	ch := make(chan toolResponse, 1)
 	b.pendingMu.Lock()
 	if b.pendingTools == nil {
-		b.pendingTools = map[string]chan toolResponse{}
+		b.pendingTools = map[message.ID]chan toolResponse{}
 	}
 	b.pendingTools[id] = ch
 	b.pendingMu.Unlock()
 	return ch
 }
 
-func (b *Bridge) unregisterPendingTool(id string) {
+func (b *Bridge) unregisterPendingTool(id message.ID) {
 	b.pendingMu.Lock()
 	if b.pendingTools != nil {
 		delete(b.pendingTools, id)
@@ -200,7 +200,7 @@ func (b *Bridge) unregisterPendingTool(id string) {
 }
 
 func (b *Bridge) dispatchToolResponse(trigger TriggerPayload) bool {
-	parentID := strings.TrimSpace(trigger.Envelope.ParentID)
+	parentID := message.ID(strings.TrimSpace(trigger.Envelope.ParentID.String()))
 	if parentID == "" {
 		return false
 	}
@@ -243,7 +243,7 @@ func channelToolTimeout(maxPendingMs int64) time.Duration {
 	return time.Duration(maxPendingMs) * time.Millisecond
 }
 
-func channelToolCorrelationID(trigger TriggerPayload) string {
+func channelToolCorrelationID(trigger TriggerPayload) message.ID {
 	if trigger.CorrelationID != "" {
 		return trigger.CorrelationID
 	}

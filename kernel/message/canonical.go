@@ -40,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -116,7 +117,7 @@ func envelopeHashInput(e Envelope) (map[string]any, error) {
 	// audience: copy slice to []any (canonicalizeArray accepts []any only).
 	audience := make([]any, len(e.Audience))
 	for i, a := range e.Audience {
-		audience[i] = a
+		audience[i] = string(a)
 	}
 
 	// doc_refs: tri-state per L0 §2.1.
@@ -138,15 +139,15 @@ func envelopeHashInput(e Envelope) (map[string]any, error) {
 	}
 
 	return map[string]any{
-		"id":             e.ID,
+		"id":             string(e.ID),
 		"ts":             jsonNumberFromInt64(e.TS),
-		"channel_id":     e.ChannelID,
+		"channel_id":     string(e.ChannelID),
 		"sender":         sender,
 		"kind":           string(e.Kind),
 		"type":           e.Type,
 		"payload":        payload,
-		"parent_id":      nullableString(e.ParentID),
-		"correlation_id": nullableString(e.CorrelationID),
+		"parent_id":      nullableString(string(e.ParentID)),
+		"correlation_id": nullableString(string(e.CorrelationID)),
 		"doc_refs":       docRefs,
 		"visibility":     string(e.Visibility),
 		"audience":       audience,
@@ -223,6 +224,61 @@ func canonicalizeValue(buf []byte, v any) ([]byte, error) {
 		return canonicalizeArray(buf, x)
 	case map[string]any:
 		return canonicalizeObject(buf, x)
+	}
+	return canonicalizeReflectValue(buf, v)
+}
+
+func canonicalizeReflectValue(buf []byte, v any) ([]byte, error) {
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() {
+		return append(buf, 'n', 'u', 'l', 'l'), nil
+	}
+	switch rv.Kind() {
+	case reflect.String:
+		return appendCanonicalString(buf, rv.String()), nil
+	case reflect.Bool:
+		if rv.Bool() {
+			return append(buf, 't', 'r', 'u', 'e'), nil
+		}
+		return append(buf, 'f', 'a', 'l', 's', 'e'), nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return strconv.AppendInt(buf, rv.Int(), 10), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return strconv.AppendUint(buf, rv.Uint(), 10), nil
+	case reflect.Float32, reflect.Float64:
+		s, err := formatFloatES(rv.Float())
+		if err != nil {
+			return nil, err
+		}
+		return append(buf, s...), nil
+	case reflect.Slice, reflect.Array:
+		buf = append(buf, '[')
+		for i := 0; i < rv.Len(); i++ {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			var err error
+			buf, err = canonicalizeValue(buf, rv.Index(i).Interface())
+			if err != nil {
+				return nil, err
+			}
+		}
+		return append(buf, ']'), nil
+	case reflect.Map:
+		if rv.Type().Key().Kind() != reflect.String {
+			break
+		}
+		m := make(map[string]any, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			m[iter.Key().String()] = iter.Value().Interface()
+		}
+		return canonicalizeObject(buf, m)
+	case reflect.Pointer, reflect.Interface:
+		if rv.IsNil() {
+			return append(buf, 'n', 'u', 'l', 'l'), nil
+		}
+		return canonicalizeValue(buf, rv.Elem().Interface())
 	}
 	return nil, fmt.Errorf("canonical: unsupported value type %T", v)
 }

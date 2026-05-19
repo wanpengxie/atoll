@@ -2,6 +2,11 @@
 // actor Kind primitives.
 package actor
 
+import (
+	"database/sql/driver"
+	"fmt"
+)
+
 // ActorID is the channel-local sender identifier. It is identical to
 // envelope `sender.id` (L0 §2.1 — same namespace, see L1 §3.2).
 //
@@ -28,3 +33,23 @@ const (
 
 // String returns the wire form of the actor id.
 func (a ActorID) String() string { return string(a) }
+
+// Value implements driver.Valuer for SQL TEXT boundaries.
+func (a ActorID) Value() (driver.Value, error) { return string(a), nil }
+
+// Scan implements sql.Scanner for SQL TEXT boundaries.
+func (a *ActorID) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		*a = ""
+		return nil
+	case string:
+		*a = ActorID(v)
+		return nil
+	case []byte:
+		*a = ActorID(string(v))
+		return nil
+	default:
+		return fmt.Errorf("actor.ActorID: scan unsupported %T", src)
+	}
+}

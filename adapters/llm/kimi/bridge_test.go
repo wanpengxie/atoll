@@ -29,7 +29,7 @@ import (
 type fakeIPC struct {
 	channelID channel.ID
 	workerID  string
-	actorID   string
+	actorID   actor.ActorID
 	triggers  chan kimi.TriggerPayload
 
 	mu      sync.Mutex
@@ -48,7 +48,7 @@ func newFakeIPC() *fakeIPC {
 
 func (f *fakeIPC) ChannelID() channel.ID                { return f.channelID }
 func (f *fakeIPC) WorkerID() string                     { return f.workerID }
-func (f *fakeIPC) WorkerActorID() string                { return f.actorID }
+func (f *fakeIPC) WorkerActorID() actor.ActorID         { return f.actorID }
 func (f *fakeIPC) Triggers() <-chan kimi.TriggerPayload { return f.triggers }
 
 func (f *fakeIPC) WriteEnvelope(_ context.Context, env message.Envelope) error {
@@ -94,14 +94,14 @@ func triggerEnv(id string) kimi.TriggerPayload {
 	body, _ := json.Marshal(map[string]string{"text": "hi"})
 	return kimi.TriggerPayload{
 		Envelope: message.Envelope{
-			ID:         id,
+			ID:         message.ID(id),
 			ChannelID:  "ch-test",
 			Type:       "human.text",
 			Visibility: message.VisibilityPublic,
 			Sender:     message.Sender{Kind: actor.KindHuman, ID: "user-A"},
 			Kind:       message.KindEvent,
 			Payload:    body,
-			Audience:   []string{"*"},
+			Audience:   message.Audience{message.AudienceWildcard},
 		},
 		CorrelationID: "corr-1",
 		Cursor:        42,
@@ -355,7 +355,7 @@ func TestBridge_RunEmitsSingleTerminalOnTextDelta(t *testing.T) {
 	if last.ParentID != "t-1" {
 		t.Errorf("parent_id=%q want t-1", last.ParentID)
 	}
-	if string(last.Sender.ID) != ipc.WorkerActorID() {
+	if last.Sender.ID != ipc.WorkerActorID() {
 		t.Errorf("sender.id=%q want %q", last.Sender.ID, ipc.WorkerActorID())
 	}
 }
@@ -955,14 +955,14 @@ func waitForWritten(ctx context.Context, ipc *fakeIPC, match func(message.Envelo
 }
 
 func responseForRequest(req message.Envelope, payload json.RawMessage) kimi.TriggerPayload {
-	audience := []string{string(req.Sender.ID)}
+	audience := message.Audience{req.Sender.ID}
 	senderID := actor.ActorID("tool:test")
 	if len(req.Audience) > 0 {
-		senderID = actor.ActorID(req.Audience[0])
+		senderID = req.Audience[0]
 	}
 	return kimi.TriggerPayload{
 		Envelope: message.Envelope{
-			ID:            "response-" + req.ID,
+			ID:            message.ID("response-" + req.ID.String()),
 			ChannelID:     req.ChannelID,
 			Type:          req.Type,
 			Kind:          message.KindResponse,

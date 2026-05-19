@@ -1,23 +1,32 @@
 package adapter
 
-import "context"
+import (
+	"context"
+
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/message"
+)
 
 // CorrelationKey is the lookup key adapter framework uses to find an
 // in-flight request — by L2 §8.2 it is the request envelope.id (the
-// "request_id" wire form). Aliased so call sites read intent-clear.
-type CorrelationKey = string
+// "request_id" wire form).
+type CorrelationKey message.ID
+
+// String returns the wire form.
+func (k CorrelationKey) String() string { return string(k) }
 
 // CorrelationEntry is a snapshot of one in-flight request inside the
 // CorrelationTracker. Pure data — no methods so backends (sqlite /
 // in-memory) stay free to choose row representation.
 type CorrelationEntry struct {
 	RequestID     CorrelationKey
-	CorrelationID string // envelope.correlation_id (informational)
-	ChannelID     string
-	AudienceActor string // sender actor of the response (the adapter actor id)
-	ParentID      string // == RequestID (response.parent_id should equal RequestID)
-	EnqueuedAt    int64  // ms epoch
-	ExpiresAt     int64  // ms epoch (derived from MaxPendingMs)
+	CorrelationID message.ID // envelope.correlation_id (informational)
+	ChannelID     channel.ID
+	AudienceActor actor.ActorID // sender actor of the response (the adapter actor id)
+	ParentID      message.ID    // == RequestID (response.parent_id should equal RequestID)
+	EnqueuedAt    int64         // ms epoch
+	ExpiresAt     int64         // ms epoch (derived from MaxPendingMs)
 	State         CorrelationState
 }
 

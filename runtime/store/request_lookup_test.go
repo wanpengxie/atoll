@@ -36,7 +36,7 @@ func TestRequestLookup_FindByID(t *testing.T) {
 		Type:       "xhs.publish",
 		Payload:    json.RawMessage(`{"title":"hello"}`),
 		Visibility: message.VisibilityPrivate,
-		Audience:   []string{"tool:xhs-adapter"},
+		Audience:   message.Audience{"tool:xhs-adapter"},
 	}
 	if _, err := msgs.Append(ctx, env); err != nil {
 		t.Fatalf("Append: %v", err)

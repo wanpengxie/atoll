@@ -10,11 +10,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// AudienceWildcard is the `audience=['*']` channel-wide marker per L1 §5.1
-// (audience expand step). It is the only meaningful non-actor entry in
-// the audience slice.
-const AudienceWildcard = "*"
-
 // TypeSystemHeartbeat is the noise-filter type explicitly excluded from
 // trigger fan-out per L1 §5.2 (system.heartbeat).
 const TypeSystemHeartbeat = "system.heartbeat"
@@ -131,7 +126,7 @@ func expandAudience(
 
 	out := make([]actor.ActorID, 0, len(env.Audience))
 	for _, raw := range env.Audience {
-		if raw == "" || raw == AudienceWildcard {
+		if raw == "" || raw == message.AudienceWildcard {
 			// Mixed-wildcard payloads are caller error; ignore the marker
 			// rather than blowing up. The validated harness path never
 			// produces this — defense in depth for adapter framework
@@ -156,16 +151,11 @@ func expandAudience(
 // callers that forget to default `audience=['*']` still get correct
 // fan-out (harness step 0 normalize fills it, but in-process callers
 // that bypass the chain may not).
-func isWildcard(aud []string) bool {
+func isWildcard(aud message.Audience) bool {
 	if len(aud) == 0 {
 		return true
 	}
-	for _, a := range aud {
-		if a == AudienceWildcard {
-			return true
-		}
-	}
-	return false
+	return aud.IsWildcard()
 }
 
 // filterOut drops the given id from the slice. Preserves order; callers

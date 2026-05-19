@@ -35,7 +35,7 @@ func TestBuildCommandStripsXhsPrefix(t *testing.T) {
 	if cmd.Type != CommandWireType {
 		t.Errorf("Type=%q want %q", cmd.Type, CommandWireType)
 	}
-	if cmd.CorrelationID != env.ID {
+	if cmd.CorrelationID != env.ID.String() {
 		t.Errorf("CorrelationID=%q want %q", cmd.CorrelationID, env.ID)
 	}
 	if cmd.Params["title"] != "hi" {
