@@ -90,7 +90,7 @@ func (m *Module) handleChatSend(ctx context.Context, env *message.Envelope) erro
 		ChatID:    data.ChatID,
 	}
 	raw, _ := json.Marshal(result)
-	_, err = m.mctx.Respond(ctx, env.ID, raw, adapter.RespondOptions{Status: "completed"})
+	_, err = m.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), raw, adapter.RespondOptions{Status: "completed"})
 	if err != nil {
 		m.logger.Warn("feishu.chat.send.respond.error",
 			"request_id", env.ID,
@@ -145,7 +145,7 @@ func (m *Module) handleChatCreate(ctx context.Context, env *message.Envelope) er
 	}
 	result := ChatCreateResult{ChatID: data.ChatID}
 	raw, _ := json.Marshal(result)
-	_, err = m.mctx.Respond(ctx, env.ID, raw, adapter.RespondOptions{Status: "completed"})
+	_, err = m.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), raw, adapter.RespondOptions{Status: "completed"})
 	if err != nil {
 		m.logger.Warn("feishu.chat.create.respond.error",
 			"request_id", env.ID,
@@ -184,7 +184,7 @@ func (m *Module) fail(ctx context.Context, env *message.Envelope, reason, detail
 	if err != nil {
 		return fmt.Errorf("feishu: marshal fail payload: %w", err)
 	}
-	_, err = m.mctx.Respond(ctx, env.ID, payload, adapter.RespondOptions{
+	_, err = m.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), payload, adapter.RespondOptions{
 		Status: "failed",
 		Reason: reason,
 	})

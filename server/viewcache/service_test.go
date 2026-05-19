@@ -40,14 +40,14 @@ func frame(seq viewsync.Seq) viewsync.PushFrame {
 			Type:       "agent.text",
 			Payload:    json.RawMessage(`{}`),
 			Visibility: message.VisibilityPublic,
-			Audience:   []string{"*"},
+			Audience:   message.Audience{message.AudienceWildcard},
 			Seq:        int64(seq),
 		},
 	}
 }
 
-func msgID(seq viewsync.Seq) string {
-	return "m-" + itoa(int64(seq))
+func msgID(seq viewsync.Seq) message.ID {
+	return message.ID("m-" + itoa(int64(seq)))
 }
 
 func itoa(n int64) string {

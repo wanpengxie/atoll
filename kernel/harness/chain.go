@@ -13,7 +13,7 @@ type WriteResult struct {
 	// MessageID is the canonical envelope.id that was written (or
 	// dedupe-matched). Empty on hard failures that occurred before id
 	// finalization.
-	MessageID string
+	MessageID message.ID
 
 	// Seq is the store-derived monotonic sequence (L2 §1.4.1) — only
 	// populated on successful append. Zero on dedupe / reject.
@@ -34,7 +34,7 @@ type WriteResult struct {
 	// PartialMessageID is set when reject happened after id finalization
 	// (e.g. step 8 terminal_duplicate). Lets the caller observe which
 	// id was actually allocated even though the row write failed.
-	PartialMessageID string
+	PartialMessageID message.ID
 }
 
 // Accepted reports whether the write produced a durable row (or matched

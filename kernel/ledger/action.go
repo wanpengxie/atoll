@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // Status mirrors the action_ledger.status column from L2 §1.4.10.1. Two
@@ -16,12 +17,18 @@ const (
 	StatusCommitted Status = "committed"
 )
 
+// TurnID is the idempotency turn identifier persisted in action_ledger.
+type TurnID string
+
+// String returns the wire form.
+func (t TurnID) String() string { return string(t) }
+
 // Entry mirrors the action_ledger row schema from L2 §1.4.10.1.
 type Entry struct {
 	Key         Key
-	TurnID      string
+	TurnID      TurnID
 	ActorID     actor.ActorID
-	EnvelopeID  string
+	EnvelopeID  message.ID
 	Status      Status
 	ReservedAt  int64
 	CommittedAt int64 // 0 until Commit; non-zero after harness append succeeds

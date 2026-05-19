@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -89,7 +90,7 @@ type timerTerminalFailedEvent struct {
 	ChannelID   channel.ID
 	Chain       harness.Chain
 	Clock       func() time.Time
-	RequestID   string
+	RequestID   adapter.CorrelationKey
 	Err         error
 }
 
@@ -132,16 +133,16 @@ func writeEvent(ctx context.Context, chain harness.Chain, ev eventEnvelope) erro
 	hash := sha256.Sum256(body)
 	seq := eventSeq.Add(1)
 	env := &message.Envelope{
-		ID:         fmt.Sprintf("event:%s:%d:%d:%s", ev.Type, ev.Now, seq, hex.EncodeToString(hash[:])[:16]),
+		ID:         message.ID(fmt.Sprintf("event:%s:%d:%d:%s", ev.Type, ev.Now, seq, hex.EncodeToString(hash[:])[:16])),
 		TS:         ev.Now,
 		TSReceived: ev.Now,
-		ChannelID:  string(ev.ChannelID),
+		ChannelID:  ev.ChannelID,
 		Sender:     ev.Sender,
 		Kind:       message.KindEvent,
 		Type:       ev.Type,
 		Payload:    body,
 		Visibility: message.VisibilitySystem,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{message.AudienceWildcard},
 	}
 	res, err := chain.Write(ctx, env)
 	if err != nil {

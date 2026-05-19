@@ -152,20 +152,20 @@ func (s *Saga) Bootstrap(
 
 	// Step 5 — initial members.
 	for _, m := range req.InitialMembers {
-		if m.ActorIDInChannel == "" {
+		if m.MemberActorID == "" {
 			continue
 		}
 		kind := actor.KindHuman
 		if m.Kind != "" {
-			kind = actor.Kind(m.Kind)
+			kind = m.Kind
 		}
 		if err := s.insertActorIfMissing(ctx, reg, actorreg.Record{
-			ID:          actor.ActorID(m.ActorIDInChannel),
+			ID:          m.MemberActorID,
 			Kind:        kind,
 			DisplayName: m.DisplayName,
 			CreatedAt:   s.nowFn(),
 		}); err != nil {
-			return "", fmt.Errorf("bootstrap: insert member %s: %w", m.ActorIDInChannel, err)
+			return "", fmt.Errorf("bootstrap: insert member %s: %w", m.MemberActorID, err)
 		}
 	}
 

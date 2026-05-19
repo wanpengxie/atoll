@@ -67,7 +67,7 @@ type Outcome struct {
 	// PartialMessageID is set on rejects that occurred AFTER the
 	// envelope.id was finalized (e.g. step 8 terminal_duplicate happens
 	// in the engine append transaction). Empty otherwise.
-	PartialMessageID string
+	PartialMessageID message.ID
 }
 
 // Continue is true when the step accepts the envelope and the next

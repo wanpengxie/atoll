@@ -456,7 +456,7 @@ func advanceCursorTx(
 		extras = append(extras, viewsync.PushFrame{
 			ChannelID: channelID,
 			Seq:       viewsync.Seq(nextSeq),
-			MessageID: messageID,
+			MessageID: message.ID(messageID),
 			Envelope:  env,
 		})
 		cur = viewsync.Seq(nextSeq)

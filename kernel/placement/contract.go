@@ -9,8 +9,8 @@ package placement
 import (
 	"context"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 )
 
 // State is the channel placement state per L2 §1.4.11.2 state machine
@@ -48,7 +48,7 @@ type FencingToken int64
 
 // ConnectionEpoch is the daemonbus connection epoch. Placement rows store
 // the same value carried by daemonbus frame headers.
-type ConnectionEpoch = daemonbus.ConnectionEpoch
+type ConnectionEpoch int64
 
 // DaemonID is the stable daemon identifier (assigned at registration,
 // survives restarts).
@@ -68,6 +68,13 @@ type CreateRequestID string
 
 // String returns the wire form.
 func (c CreateRequestID) String() string { return string(c) }
+
+// UserID is the server identity user identifier carried in placement
+// bootstrap member payloads.
+type UserID string
+
+// String returns the wire form.
+func (u UserID) String() string { return string(u) }
 
 // TenantID is the multi-tenant scope identifier reserved per
 // .dalek/pm/m1.5-tickets.md §T10. M1.5 demo uses TenantID("") /
@@ -137,11 +144,11 @@ type CreateChannelRequest struct {
 
 // InitialMember mirrors one `initial_members[*]` entry per L2 §12.1.
 type InitialMember struct {
-	UserID           string `json:"user_id"`
-	ActorIDInChannel string `json:"actor_id_in_channel"`
-	Kind             string `json:"kind"` // 'human' for L2 §12.1 channel.create flow
-	DisplayName      string `json:"display_name"`
-	Role             string `json:"role"` // 'owner' | 'member'
+	UserID        UserID        `json:"user_id"`
+	MemberActorID actor.ActorID `json:"member_actor_id"`
+	Kind          actor.Kind    `json:"kind"` // 'human' for L2 §12.1 channel.create flow
+	DisplayName   string        `json:"display_name"`
+	Role          string        `json:"role"` // 'owner' | 'member'
 }
 
 // AckStatus is the closed status set inside CreateChannelAck (L2

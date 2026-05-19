@@ -40,7 +40,7 @@ type timerPolicy struct {
 	clock       func() time.Time
 
 	mu     sync.Mutex
-	timers map[string]*time.Timer
+	timers map[adapter.CorrelationKey]*time.Timer
 }
 
 func newTimerPolicy(
@@ -69,7 +69,7 @@ func newTimerPolicy(
 		logger:      logger,
 		metrics:     metrics,
 		clock:       clock,
-		timers:      map[string]*time.Timer{},
+		timers:      map[adapter.CorrelationKey]*time.Timer{},
 	}
 }
 
@@ -83,7 +83,7 @@ func (p *timerPolicy) bindRespond(respond adapter.RespondFunc) {
 // RegisterTimer arms a timer that fires at deadline. Repeated calls for
 // the same requestID reset the timer (the new deadline wins). Returns
 // an error when the policy has been Shutdown.
-func (p *timerPolicy) RegisterTimer(_ context.Context, requestID string, deadline time.Time) error {
+func (p *timerPolicy) RegisterTimer(_ context.Context, requestID adapter.CorrelationKey, deadline time.Time) error {
 	if requestID == "" {
 		return errors.New("framework: RegisterTimer requestID required")
 	}
@@ -107,7 +107,7 @@ func (p *timerPolicy) RegisterTimer(_ context.Context, requestID string, deadlin
 }
 
 // CancelTimer stops the timer for requestID. Idempotent.
-func (p *timerPolicy) CancelTimer(_ context.Context, requestID string) error {
+func (p *timerPolicy) CancelTimer(_ context.Context, requestID adapter.CorrelationKey) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if t, ok := p.timers[requestID]; ok {
@@ -147,9 +147,9 @@ func (p *timerPolicy) OnExternalError(
 	}
 	p.logger.Warn("framework.policy.external_error",
 		"adapter", p.adapterName,
-		"request_id", requestID,
+		"request_id", requestID.String(),
 		"reason", string(reason),
-		"message_id", res.MessageID,
+		"message_id", res.MessageID.String(),
 	)
 	p.metrics.IncCounter("adapter.policy.external_error",
 		"adapter", p.adapterName, "reason", string(reason))
@@ -161,13 +161,13 @@ func (p *timerPolicy) OnExternalError(
 // fire is the AfterFunc callback. It emits the adapter_default_timeout
 // terminal via Respond. We swallow most errors so a timer panic cannot
 // poison the rest of the daemon — anything non-trivial is logged.
-func (p *timerPolicy) fire(requestID string) {
+func (p *timerPolicy) fire(requestID adapter.CorrelationKey) {
 	p.mu.Lock()
 	delete(p.timers, requestID)
 	p.mu.Unlock()
 	if p.respond == nil {
 		p.logger.Error("framework.policy.timer_fire.no_respond",
-			"adapter", p.adapterName, "request_id", requestID)
+			"adapter", p.adapterName, "request_id", requestID.String())
 		return
 	}
 	// Use background ctx — the per-request ctx is gone by the time the
@@ -192,8 +192,8 @@ func (p *timerPolicy) fire(requestID string) {
 		if err == nil {
 			p.logger.Info("framework.policy.timer_fired",
 				"adapter", p.adapterName,
-				"request_id", requestID,
-				"message_id", res.MessageID,
+				"request_id", requestID.String(),
+				"message_id", res.MessageID.String(),
 				"deduped", res.Deduped,
 				"attempt", attempt)
 			p.metrics.IncCounter("adapter.policy.timer_fired",
@@ -202,13 +202,13 @@ func (p *timerPolicy) fire(requestID string) {
 		}
 		lastErr = err
 		p.logger.Error("framework.policy.timer_fire.respond",
-			"adapter", p.adapterName, "request_id", requestID, "attempt", attempt, "err", err.Error())
+			"adapter", p.adapterName, "request_id", requestID.String(), "attempt", attempt, "err", err.Error())
 	}
 	p.metrics.IncCounter("adapter.policy.timer_terminal_failed", "adapter", p.adapterName)
 	if p.correlation != nil {
 		if err := p.correlation.MarkExpired(ctx, requestID); err != nil {
 			p.logger.Error("framework.policy.timer_fire.mark_expired",
-				"adapter", p.adapterName, "request_id", requestID, "err", err.Error())
+				"adapter", p.adapterName, "request_id", requestID.String(), "err", err.Error())
 		}
 	}
 	if err := emitTimerTerminalFailedEvent(ctx, timerTerminalFailedEvent{
@@ -220,7 +220,7 @@ func (p *timerPolicy) fire(requestID string) {
 		Err:         lastErr,
 	}); err != nil {
 		p.logger.Error("framework.policy.timer_fire.event_failed",
-			"adapter", p.adapterName, "request_id", requestID, "err", err.Error())
+			"adapter", p.adapterName, "request_id", requestID.String(), "err", err.Error())
 	}
 }
 

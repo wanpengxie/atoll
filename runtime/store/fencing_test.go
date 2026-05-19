@@ -64,7 +64,7 @@ func newFencedFixture(t *testing.T, token placement.FencingToken, epoch placemen
 
 func newFencedEnvelope(id string) *message.Envelope {
 	return &message.Envelope{
-		ID:         id,
+		ID:         message.ID(id),
 		TS:         1000,
 		TSReceived: 1100,
 		ChannelID:  "ch-fence",
@@ -73,7 +73,7 @@ func newFencedEnvelope(id string) *message.Envelope {
 		Type:       "channel.created",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 	}
 }
 

@@ -31,7 +31,7 @@ type memoryCorrelationTracker struct {
 	store       StateStore // optional; nil → memory only
 
 	mu      sync.Mutex
-	entries map[string]adapter.CorrelationEntry // request_id → entry
+	entries map[adapter.CorrelationKey]adapter.CorrelationEntry // request_id → entry
 }
 
 // newCorrelationTracker constructs a tracker bound to an adapter name.
@@ -40,7 +40,7 @@ func newCorrelationTracker(adapterName string, store StateStore) *memoryCorrelat
 	return &memoryCorrelationTracker{
 		adapterName: adapterName,
 		store:       store,
-		entries:     map[string]adapter.CorrelationEntry{},
+		entries:     map[adapter.CorrelationKey]adapter.CorrelationEntry{},
 	}
 }
 
@@ -68,7 +68,7 @@ func (t *memoryCorrelationTracker) Reserve(ctx context.Context, e adapter.Correl
 }
 
 // Get returns the entry by request_id.
-func (t *memoryCorrelationTracker) Get(_ context.Context, requestID string) (adapter.CorrelationEntry, bool, error) {
+func (t *memoryCorrelationTracker) Get(_ context.Context, requestID adapter.CorrelationKey) (adapter.CorrelationEntry, bool, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	e, ok := t.entries[requestID]
@@ -76,12 +76,12 @@ func (t *memoryCorrelationTracker) Get(_ context.Context, requestID string) (ada
 }
 
 // MarkDone advances pending → done. Idempotent.
-func (t *memoryCorrelationTracker) MarkDone(ctx context.Context, requestID string) error {
+func (t *memoryCorrelationTracker) MarkDone(ctx context.Context, requestID adapter.CorrelationKey) error {
 	return t.advance(ctx, requestID, adapter.CorrelationDone)
 }
 
 // MarkExpired advances pending → expired. Idempotent.
-func (t *memoryCorrelationTracker) MarkExpired(ctx context.Context, requestID string) error {
+func (t *memoryCorrelationTracker) MarkExpired(ctx context.Context, requestID adapter.CorrelationKey) error {
 	return t.advance(ctx, requestID, adapter.CorrelationExpired)
 }
 
@@ -89,11 +89,11 @@ func (t *memoryCorrelationTracker) MarkExpired(ctx context.Context, requestID st
 // existing entry via the AudienceActor field's documentation contract
 // (we don't have a Reason slot in CorrelationEntry — log via state).
 // Idempotent.
-func (t *memoryCorrelationTracker) MarkRejected(ctx context.Context, requestID string, _ string) error {
+func (t *memoryCorrelationTracker) MarkRejected(ctx context.Context, requestID adapter.CorrelationKey, _ string) error {
 	return t.advance(ctx, requestID, adapter.CorrelationRejected)
 }
 
-func (t *memoryCorrelationTracker) advance(ctx context.Context, requestID string, to adapter.CorrelationState) error {
+func (t *memoryCorrelationTracker) advance(ctx context.Context, requestID adapter.CorrelationKey, to adapter.CorrelationState) error {
 	if requestID == "" {
 		return errors.New("framework: advance requestID required")
 	}
@@ -129,7 +129,7 @@ func (t *memoryCorrelationTracker) ListPending(_ context.Context) ([]adapter.Cor
 			out = append(out, e)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].RequestID < out[j].RequestID })
+	sort.Slice(out, func(i, j int) bool { return out[i].RequestID.String() < out[j].RequestID.String() })
 	return out, nil
 }
 
@@ -141,7 +141,7 @@ func (t *memoryCorrelationTracker) persist(ctx context.Context, e adapter.Correl
 	if err != nil {
 		return fmt.Errorf("framework: marshal correlation entry: %w", err)
 	}
-	key := fmt.Sprintf("%s:%s:%s", correlationKeyPrefix, t.adapterName, e.RequestID)
+	key := fmt.Sprintf("%s:%s:%s", correlationKeyPrefix, t.adapterName, e.RequestID.String())
 	if err := t.store.Put(ctx, key, b); err != nil {
 		return fmt.Errorf("framework: persist correlation: %w", err)
 	}

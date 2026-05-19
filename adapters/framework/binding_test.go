@@ -27,7 +27,7 @@ func TestInProcessBindingFullPath(t *testing.T) {
 			MaxPendingMs: 5_000,
 		},
 		handle: func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
-			_, err := mctx.Respond(ctx, env.ID,
+			_, err := mctx.Respond(ctx, adapter.CorrelationKey(env.ID),
 				json.RawMessage(`{"sum":42}`),
 				adapter.RespondOptions{Status: "completed"})
 			return err
@@ -45,7 +45,7 @@ func TestInProcessBindingFullPath(t *testing.T) {
 	}
 
 	req := newTestRequest("channel:test", "agent:a", "calc.add", "req-ip-1")
-	req.Audience = []string{"tool:calc"}
+	req.Audience = message.Audience{"tool:calc"}
 	lookup.Put(req)
 	if err := mgr.Dispatch(context.Background(), req); err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -125,7 +125,7 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 	}
 
 	req := newTestRequest("channel:test", "agent:a", "xhs.publish", "req-vst-1")
-	req.Audience = []string{"tool:xhs"}
+	req.Audience = message.Audience{"tool:xhs"}
 	lookup.Put(req)
 	if err := mgr.Dispatch(context.Background(), req); err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -152,7 +152,7 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 	mod.onCallback = func(ctx context.Context, payload []byte, mctx *adapter.ModuleContext) error {
 		// The adapter looks up request_id from its own payload format
 		// then calls Respond.
-		_, err := mctx.Respond(ctx, "req-vst-1",
+		_, err := mctx.Respond(ctx, adapter.CorrelationKey(message.ID("req-vst-1")),
 			json.RawMessage(`{"note_id":"note_42"}`),
 			adapter.RespondOptions{Status: "completed"},
 		)

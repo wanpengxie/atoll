@@ -48,13 +48,13 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 	if !ok {
 		return khar.Outcome{
 			RejectReason: message.HarnessResponseParentInvalid,
-			Detail:       "parent_id not found: " + env.ParentID,
+			Detail:       "parent_id not found: " + string(env.ParentID),
 		}, nil
 	}
 	if parent.Kind != message.KindRequest {
 		return khar.Outcome{
 			RejectReason: message.HarnessResponseParentInvalid,
-			Detail:       "parent_id is not kind=request: " + env.ParentID,
+			Detail:       "parent_id is not kind=request: " + string(env.ParentID),
 		}, nil
 	}
 

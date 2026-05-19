@@ -16,6 +16,12 @@ type DeviceSessionID string
 // String returns the wire form.
 func (d DeviceSessionID) String() string { return string(d) }
 
+// FrameID is the device-transit frame identifier returned by daemonbus.
+type FrameID string
+
+// String returns the wire form.
+func (f FrameID) String() string { return string(f) }
+
 // TransitDirection is the closed set of `direction` field values on SendFrame.
 type TransitDirection string
 
@@ -29,9 +35,9 @@ type SendFrame struct {
 	ChannelID       channel.ID        `json:"channel_id"`
 	DeviceSessionID DeviceSessionID   `json:"device_session_id"`
 	Direction       TransitDirection  `json:"direction"`
-	RequestID       string            `json:"request_id"`
-	ParentID        string            `json:"parent_id,omitempty"`
-	CorrelationID   string            `json:"correlation_id,omitempty"`
+	RequestID       message.ID        `json:"request_id"`
+	ParentID        message.ID        `json:"parent_id,omitempty"`
+	CorrelationID   message.ID        `json:"correlation_id,omitempty"`
 	Payload         json.RawMessage   `json:"payload"`
 	EnvelopePartial *message.Envelope `json:"envelope_partial,omitempty"`
 	ExpiresAt       int64             `json:"expires_at,omitempty"`
@@ -39,7 +45,7 @@ type SendFrame struct {
 
 // AckFrame is the `device_transit.ack` payload.
 type AckFrame struct {
-	FrameID         string          `json:"frame_id"`
+	FrameID         FrameID         `json:"frame_id"`
 	DeviceSessionID DeviceSessionID `json:"device_session_id"`
 	ChannelID       channel.ID      `json:"channel_id"`
 	OK              bool            `json:"ok"`
@@ -47,7 +53,7 @@ type AckFrame struct {
 
 // ErrorFrame is the `device_transit.error` payload.
 type ErrorFrame struct {
-	RequestID       string          `json:"request_id"`
+	RequestID       message.ID      `json:"request_id"`
 	DeviceSessionID DeviceSessionID `json:"device_session_id"`
 	ChannelID       channel.ID      `json:"channel_id"`
 	Code            string          `json:"code"`
@@ -57,7 +63,7 @@ type ErrorFrame struct {
 // DeviceTransit is the kernel-level seam the via_server_transit binding uses
 // to hand adapter-generated frames to the daemonbus/devicebus bridge.
 type DeviceTransit interface {
-	Send(ctx context.Context, frame SendFrame) (frameID string, err error)
+	Send(ctx context.Context, frame SendFrame) (frameID FrameID, err error)
 	Ack(ctx context.Context, frame AckFrame) error
 	Error(ctx context.Context, frame ErrorFrame) error
 }

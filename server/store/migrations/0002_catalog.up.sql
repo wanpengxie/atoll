@@ -31,17 +31,17 @@ CREATE TABLE IF NOT EXISTS channels (
 
 CREATE INDEX IF NOT EXISTS idx_channels_workspace ON channels(workspace_id);
 
--- channel_members maps (channel_id, user_id) → actor_id_in_channel (T1.9 spec).
--- actor_id_in_channel is unique within a channel and travels with every
+-- channel_members maps (channel_id, user_id) → member_actor_id (T1.9 spec).
+-- member_actor_id is unique within a channel and travels with every
 -- envelope written via the human caller token path.
 CREATE TABLE IF NOT EXISTS channel_members (
     channel_id           TEXT NOT NULL,
     user_id              TEXT NOT NULL,
-    actor_id_in_channel  TEXT NOT NULL,
+    member_actor_id      TEXT NOT NULL,
     role                 TEXT NOT NULL,       -- 'owner' | 'member'
     joined_at            INTEGER NOT NULL,
     PRIMARY KEY (channel_id, user_id),
-    UNIQUE      (channel_id, actor_id_in_channel),
+    UNIQUE      (channel_id, member_actor_id),
     FOREIGN KEY (channel_id) REFERENCES channels(id),
     FOREIGN KEY (user_id)    REFERENCES users(id)
 );

@@ -13,7 +13,7 @@ import (
 type PushFrame struct {
 	ChannelID channel.ID       `json:"channel_id"`
 	Seq       Seq              `json:"seq"`
-	MessageID string           `json:"message_id"`
+	MessageID message.ID       `json:"message_id"`
 	Envelope  message.Envelope `json:"envelope"`
 }
 
@@ -39,7 +39,7 @@ type ResyncRequest struct {
 // (L1 §8.5).
 type ResyncMessage struct {
 	Seq       Seq              `json:"seq"`
-	MessageID string           `json:"message_id"`
+	MessageID message.ID       `json:"message_id"`
 	Envelope  message.Envelope `json:"envelope"`
 }
 

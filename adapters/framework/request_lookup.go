@@ -14,15 +14,15 @@ type RequestLookup = adapter.RequestLookup
 
 // MemoryRequestLookup is the test/default in-memory RequestLookup.
 type MemoryRequestLookup struct {
-	rows map[string]*message.Envelope
+	rows map[message.ID]*message.Envelope
 }
 
 // NewMemoryRequestLookup returns a populated MemoryRequestLookup. The
 // caller hands in a snapshot of rows keyed by envelope.id.
 func NewMemoryRequestLookup(rows map[string]*message.Envelope) *MemoryRequestLookup {
-	cp := make(map[string]*message.Envelope, len(rows))
+	cp := make(map[message.ID]*message.Envelope, len(rows))
 	for k, v := range rows {
-		cp[k] = v
+		cp[message.ID(k)] = v
 	}
 	return &MemoryRequestLookup{rows: cp}
 }
@@ -33,13 +33,13 @@ func (m *MemoryRequestLookup) Put(env *message.Envelope) {
 		return
 	}
 	if m.rows == nil {
-		m.rows = map[string]*message.Envelope{}
+		m.rows = map[message.ID]*message.Envelope{}
 	}
 	m.rows[env.ID] = env
 }
 
 // FindByID satisfies RequestLookup.
-func (m *MemoryRequestLookup) FindByID(_ context.Context, id string) (*message.Envelope, bool, error) {
+func (m *MemoryRequestLookup) FindByID(_ context.Context, id message.ID) (*message.Envelope, bool, error) {
 	if m.rows == nil {
 		return nil, false, nil
 	}

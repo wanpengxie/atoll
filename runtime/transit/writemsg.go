@@ -21,7 +21,7 @@ import (
 // `control.write_message` so the daemon can authenticate the human
 // origin of a write (L2 §9.1, T1.9 / FIX-T2 spec).
 //
-// The field layout MUST match server/gateway/handlers.go HumanCaller
+// The field layout MUST match daemonbus.HumanCaller
 // byte-for-byte — the daemon recomputes the HMAC over the same input
 // concatenation order (`channelID|userID|actorID|ts|nonce`).
 type HumanCaller = daemonbus.HumanCaller
@@ -30,7 +30,7 @@ type HumanCaller = daemonbus.HumanCaller
 // The daemon receives one per HTTP write the gateway accepts.
 //
 // `EnvelopePartial` carries the caller-shaped envelope (no id / no
-// sender). The daemon fills `sender` from `HumanCaller.ActorIDInChannel`
+// sender). The daemon fills `sender` from `HumanCaller.MemberActorID`
 // + the actor_registry record, then derives `id = CanonicalHash(env)`
 // before invoking the harness chain (matches T1.9 §"daemon 收到 control.
 // write_message" flow).
@@ -48,7 +48,7 @@ type WriteMessageAckBody = daemonbus.WriteMessageAckBody
 // reject.
 const (
 	// RejectReasonAuthFailed indicates an HMAC mismatch on the
-	// HumanCaller token, an unknown actor_id_in_channel, a deregistered
+	// HumanCaller token, an unknown member_actor_id, a deregistered
 	// actor, or a replay-window violation.
 	RejectReasonAuthFailed = "auth_failed"
 
@@ -89,12 +89,12 @@ type HarnessChain interface {
 // daemon adapts the kernel/harness.Chain into a transit.HarnessChain
 // adapter at assembly time.
 type HarnessWriteResult struct {
-	MessageID        string
+	MessageID        message.ID
 	Seq              int64
 	Deduped          bool
 	RejectReason     string
 	RejectDetail     string
-	PartialMessageID string
+	PartialMessageID message.ID
 }
 
 // Accepted reports whether the result is a durable / dedupe write.
@@ -187,9 +187,9 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 
 	// 1. HMAC verify — constant-time.
 	expect := SignHumanCaller(h.cfg.Secret,
-		body.ChannelID,
+		string(body.ChannelID),
 		body.HumanCaller.UserID,
-		body.HumanCaller.ActorIDInChannel,
+		body.HumanCaller.MemberActorID,
 		body.HumanCaller.TS,
 		body.HumanCaller.Nonce,
 	)
@@ -217,7 +217,7 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 		// Per-channel nonce LRU — reject re-use of the same nonce
 		// within one window. The cache is keyed by (channelID, nonce)
 		// and TTL-expires entries lazily.
-		if !h.nonceCache.observe(body.ChannelID, body.HumanCaller.Nonce, nowMs) {
+		if !h.nonceCache.observe(string(body.ChannelID), body.HumanCaller.Nonce, nowMs) {
 			ack.RejectReason = RejectReasonReplayNonce
 			ack.RejectDetail = "human_caller nonce already seen within replay window"
 			return ack
@@ -225,7 +225,7 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 	}
 
 	// 3. Resolve per-channel chain + registry.
-	chID := channel.ID(body.ChannelID)
+	chID := body.ChannelID
 	chain, registry, stamp, ok := h.cfg.Router(ctx, chID)
 	if !ok {
 		ack.RejectReason = RejectReasonChannelUnbound
@@ -234,10 +234,10 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 	}
 
 	// 4. Verify the claimed actor exists + is active.
-	actorID := actor.ActorID(body.HumanCaller.ActorIDInChannel)
+	actorID := body.HumanCaller.MemberActorID
 	if actorID == "" {
 		ack.RejectReason = RejectReasonAuthFailed
-		ack.RejectDetail = "human_caller actor_id_in_channel empty"
+		ack.RejectDetail = "human_caller member_actor_id empty"
 		return ack
 	}
 	rec, exists, err := registry.Lookup(ctx, actorID)
@@ -248,7 +248,7 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 	}
 	if !exists || !rec.IsActive() {
 		ack.RejectReason = RejectReasonAuthFailed
-		ack.RejectDetail = "actor_id_in_channel unknown or deregistered"
+		ack.RejectDetail = "member_actor_id unknown or deregistered"
 		return ack
 	}
 
@@ -268,7 +268,7 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 		env.Visibility = message.VisibilityPublic
 	}
 	if len(env.Audience) == 0 {
-		env.Audience = []string{"*"}
+		env.Audience = message.Audience{message.AudienceWildcard}
 	}
 	// Ensure non-null payload (canonical hash refuses empty).
 	if len(env.Payload) == 0 {
@@ -283,7 +283,7 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 		ack.RejectDetail = "canonical_hash: " + err.Error()
 		return ack
 	}
-	env.ID = id
+	env.ID = message.ID(id)
 
 	// 7. Invoke the harness chain — caller_context provides the
 	// authenticated principal for step 1 / step 3.
@@ -320,13 +320,13 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 // `channelID|userID|actorID|ts|nonce` using SHA-256, hex-lowercase
 // output. Mirrors server/gateway/handlers.go signHumanCaller exactly so
 // the daemon-side verify recomputes the same bytes.
-func SignHumanCaller(secret []byte, channelID, userID, actorID string, ts int64, nonce string) string {
+func SignHumanCaller(secret []byte, channelID string, userID daemonbus.UserID, actorID actor.ActorID, ts int64, nonce string) string {
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(channelID))
 	mac.Write([]byte("|"))
-	mac.Write([]byte(userID))
+	mac.Write([]byte(string(userID)))
 	mac.Write([]byte("|"))
-	mac.Write([]byte(actorID))
+	mac.Write([]byte(string(actorID)))
 	mac.Write([]byte("|"))
 	mac.Write([]byte(strconv.FormatInt(ts, 10)))
 	mac.Write([]byte("|"))

@@ -76,14 +76,14 @@ func (r *memActorRegistry) Deregister(_ context.Context, id actor.ActorID, at in
 // can run end-to-end (dedupe / parent lookup / terminal duplicate).
 type memLog struct {
 	mu       sync.Mutex
-	rows     map[string]message.Envelope
+	rows     map[message.ID]message.Envelope
 	seq      int64
-	terminal map[string]string // parent_id → response_id (only when is_terminal=true + kind=response)
-	failOn   string            // injected failure marker
+	terminal map[message.ID]message.ID // parent_id → response_id (only when is_terminal=true + kind=response)
+	failOn   message.ID                // injected failure marker
 }
 
 func newMemLog() *memLog {
-	return &memLog{rows: map[string]message.Envelope{}, terminal: map[string]string{}}
+	return &memLog{rows: map[message.ID]message.Envelope{}, terminal: map[message.ID]message.ID{}}
 }
 
 func (l *memLog) Append(_ context.Context, env *message.Envelope) (khlog.AppendResult, error) {
@@ -102,7 +102,7 @@ func (l *memLog) Append(_ context.Context, env *message.Envelope) (khlog.AppendR
 		if existingID, dup := l.terminal[env.ParentID]; dup {
 			return khlog.AppendResult{}, &khlog.AppendError{
 				Reason:           message.HarnessTerminalDuplicate,
-				Detail:           "terminal already exists for parent=" + env.ParentID,
+				Detail:           "terminal already exists for parent=" + string(env.ParentID),
 				PartialMessageID: existingID,
 			}
 		}
@@ -114,7 +114,7 @@ func (l *memLog) Append(_ context.Context, env *message.Envelope) (khlog.AppendR
 	return khlog.AppendResult{Seq: khlog.Seq(l.seq), IsTerminal: env.IsTerminal, Deduped: false}, nil
 }
 
-func (l *memLog) FindByID(_ context.Context, _ channel.ID, id string) (message.Envelope, bool, error) {
+func (l *memLog) FindByID(_ context.Context, _ channel.ID, id message.ID) (message.Envelope, bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	row, ok := l.rows[id]
@@ -156,37 +156,37 @@ func newTestChain(t interface {
 
 func newEvent(senderID actor.ActorID, t string, payload json.RawMessage) *message.Envelope {
 	return &message.Envelope{
-		ID:        "evt-" + string(senderID),
+		ID:        message.ID("evt-" + string(senderID)),
 		ChannelID: "ch-1",
 		Sender:    message.Sender{ID: senderID},
 		Type:      t,
 		Kind:      message.KindEvent,
 		Payload:   payload,
-		Audience:  []string{"*"},
+		Audience:  message.Audience{"*"},
 	}
 }
 
 func newRequest(id string, senderID actor.ActorID, t string, audience string, payload json.RawMessage) *message.Envelope {
 	return &message.Envelope{
-		ID:        id,
+		ID:        message.ID(id),
 		ChannelID: "ch-1",
 		Sender:    message.Sender{ID: senderID},
 		Type:      t,
 		Kind:      message.KindRequest,
 		Payload:   payload,
-		Audience:  []string{audience},
+		Audience:  message.Audience{actor.ActorID(audience)},
 	}
 }
 
 func newResponse(id string, senderID actor.ActorID, parentID, t string, payload json.RawMessage) *message.Envelope {
 	return &message.Envelope{
-		ID:        id,
+		ID:        message.ID(id),
 		ChannelID: "ch-1",
 		Sender:    message.Sender{ID: senderID},
 		Type:      t,
 		Kind:      message.KindResponse,
 		Payload:   payload,
-		Audience:  []string{"*"},
-		ParentID:  parentID,
+		Audience:  message.Audience{"*"},
+		ParentID:  message.ID(parentID),
 	}
 }

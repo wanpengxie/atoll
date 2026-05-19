@@ -294,13 +294,13 @@ func TestViewcacheRoutesRequireChannelMembership(t *testing.T) {
 
 	env := message.Envelope{
 		ID:         "m-private",
-		ChannelID:  alice.channelID,
+		ChannelID:  channel.ID(alice.channelID),
 		Type:       "agent.text",
 		Kind:       message.KindEvent,
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Payload:    json.RawMessage(`{"text":"secret"}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{message.AudienceWildcard},
 	}
 	if _, err := app.Viewcache().Apply(ctx, viewsync.PushFrame{
 		ChannelID: channel.ID(alice.channelID),
@@ -387,13 +387,13 @@ func TestPushhubSubscribeRejectsNonMemberAndBlocksFanout(t *testing.T) {
 
 	app.Pushhub().PushMessage(channel.ID(alice.channelID), 1, message.Envelope{
 		ID:         "m-private-push",
-		ChannelID:  alice.channelID,
+		ChannelID:  channel.ID(alice.channelID),
 		Type:       "agent.text",
 		Kind:       message.KindEvent,
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Payload:    json.RawMessage(`{"text":"secret"}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{message.AudienceWildcard},
 	})
 	if err := ws.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
 		t.Fatalf("set read deadline: %v", err)
@@ -468,13 +468,13 @@ func TestPushhubRevokesSubscriptionAfterMemberRemoval(t *testing.T) {
 
 	app.Pushhub().PushMessage(channel.ID(alice.channelID), 1, message.Envelope{
 		ID:         "m-after-revoke",
-		ChannelID:  alice.channelID,
+		ChannelID:  channel.ID(alice.channelID),
 		Type:       "agent.text",
 		Kind:       message.KindEvent,
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Payload:    json.RawMessage(`{"text":"secret"}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{message.AudienceWildcard},
 	})
 	if err := ws.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
 		t.Fatalf("set read deadline: %v", err)
@@ -497,13 +497,13 @@ func TestHandleWriteMessageResponseInheritsParentCorrelation(t *testing.T) {
 
 	parent := message.Envelope{
 		ID:            "parent-req",
-		ChannelID:     sess.channelID,
+		ChannelID:     channel.ID(sess.channelID),
 		Type:          "human.text",
 		Kind:          message.KindRequest,
 		CorrelationID: "corr-parent",
 		Sender:        message.Sender{Kind: actor.KindAgent, ID: "agent:requester"},
 		Visibility:    message.VisibilityPublic,
-		Audience:      []string{"user:alice"},
+		Audience:      message.Audience{"user:alice"},
 		Payload:       json.RawMessage(`{"text":"question"}`),
 	}
 	if _, err := app.Viewcache().Apply(ctx, viewsync.PushFrame{
@@ -550,7 +550,7 @@ func TestHandleWriteMessageResponseInheritsParentCorrelation(t *testing.T) {
 		body, _ := json.Marshal(writeBody{
 			Type:     "human.text",
 			Kind:     string(message.KindResponse),
-			ParentID: parent.ID,
+			ParentID: parent.ID.String(),
 			Payload:  json.RawMessage(`{"text":"answer"}`),
 			Audience: []string{"agent:requester"},
 		})
@@ -742,7 +742,7 @@ func TestMockDaemonViewSyncRoundTrip(t *testing.T) {
 	send := func(ft kerneldaemonbus.FrameType, payload any) {
 		raw, _ := json.Marshal(payload)
 		if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
-			FrameID: "f-" + ft.String(), FrameType: ft,
+			FrameID: kerneldaemonbus.FrameID("f-" + ft.String()), FrameType: ft,
 			DaemonID: "mock-d1", DaemonConnectionEpoch: epoch, Payload: raw,
 		}); err != nil {
 			t.Fatalf("write %s: %v", ft, err)
@@ -750,7 +750,7 @@ func TestMockDaemonViewSyncRoundTrip(t *testing.T) {
 	}
 
 	mkPush := func(seq viewsync.Seq) viewsync.PushFrame {
-		id := "m-" + itoa(int64(seq))
+		id := message.ID("m-" + itoa(int64(seq)))
 		return viewsync.PushFrame{
 			ChannelID: channel.ID("ch-A"), Seq: seq,
 			MessageID: id,
@@ -759,7 +759,7 @@ func TestMockDaemonViewSyncRoundTrip(t *testing.T) {
 				Sender: message.Sender{Kind: actor.KindAgent, ID: "a"},
 				Kind:   message.KindEvent, Type: "agent.text",
 				Payload:    json.RawMessage(`{}`),
-				Visibility: message.VisibilityPublic, Audience: []string{"*"},
+				Visibility: message.VisibilityPublic, Audience: message.Audience{message.AudienceWildcard},
 			},
 		}
 	}
@@ -896,7 +896,7 @@ func TestViewSyncGapDrainFanOut(t *testing.T) {
 	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
 
 	mkPush := func(seq viewsync.Seq) viewsync.PushFrame {
-		id := "m-" + itoa(int64(seq))
+		id := message.ID("m-" + itoa(int64(seq)))
 		return viewsync.PushFrame{
 			ChannelID: channel.ID("ch-fanout"), Seq: seq, MessageID: id,
 			Envelope: message.Envelope{
@@ -904,14 +904,14 @@ func TestViewSyncGapDrainFanOut(t *testing.T) {
 				Sender: message.Sender{Kind: actor.KindAgent, ID: "a"},
 				Kind:   message.KindEvent, Type: "agent.text",
 				Payload:    json.RawMessage(`{}`),
-				Visibility: message.VisibilityPublic, Audience: []string{"*"},
+				Visibility: message.VisibilityPublic, Audience: message.Audience{message.AudienceWildcard},
 			},
 		}
 	}
 	send := func(payload viewsync.PushFrame) {
 		raw, _ := json.Marshal(payload)
 		if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
-			FrameID:   "f-" + itoa(int64(payload.Seq)),
+			FrameID:   kerneldaemonbus.FrameID("f-" + itoa(int64(payload.Seq))),
 			FrameType: kerneldaemonbus.FrameTypeViewsyncPush,
 			DaemonID:  "d-fanout", DaemonConnectionEpoch: epoch, Payload: raw,
 		}); err != nil {

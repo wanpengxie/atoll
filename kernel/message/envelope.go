@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/channel"
 )
 
 // Sender is the nested `sender` object inside an envelope. `Name` is
@@ -44,19 +45,19 @@ type Sender struct {
 type Envelope struct {
 	// --- 17 content fields (L0 §2.1) ----------------------------------
 
-	ID            string          `json:"id"`
+	ID            ID              `json:"id"`
 	TS            int64           `json:"ts"`
 	TSReceived    int64           `json:"ts_received,omitempty"`
-	ChannelID     string          `json:"channel_id"`
+	ChannelID     channel.ID      `json:"channel_id"`
 	Sender        Sender          `json:"sender"`
 	Kind          Kind            `json:"kind"`
 	Type          string          `json:"type"`
 	Payload       json.RawMessage `json:"payload"`
-	ParentID      string          `json:"parent_id,omitempty"`
-	CorrelationID string          `json:"correlation_id,omitempty"`
+	ParentID      ID              `json:"parent_id,omitempty"`
+	CorrelationID ID              `json:"correlation_id,omitempty"`
 	DocRefs       *[]string       `json:"doc_refs,omitempty"`
 	Visibility    Visibility      `json:"visibility"`
-	Audience      []string        `json:"audience"`
+	Audience      Audience        `json:"audience"`
 	NotBefore     *int64          `json:"not_before,omitempty"`
 	ExpiresAt     *int64          `json:"expires_at,omitempty"`
 

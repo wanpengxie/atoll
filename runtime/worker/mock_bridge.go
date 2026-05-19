@@ -305,13 +305,13 @@ func (m *MockBridge) react(ctx context.Context, client *IPCClient, in ipc.Trigge
 	}
 	envType, payload := m.ReplyFn(in, m.turns+1)
 	env := message.Envelope{
-		ID:            m.EnvelopeIDFn(client.WorkerID(), m.turns+1),
-		ChannelID:     string(client.ChannelID()),
+		ID:            message.ID(m.EnvelopeIDFn(client.WorkerID(), m.turns+1)),
+		ChannelID:     client.ChannelID(),
 		Type:          envType,
 		Kind:          message.KindEvent,
-		Sender:        message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(client.WorkerActorID())},
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: client.WorkerActorID()},
 		Visibility:    message.VisibilityPublic,
-		Audience:      []string{"*"},
+		Audience:      message.Audience{message.AudienceWildcard},
 		Payload:       payload,
 		CorrelationID: in.CorrelationID, // L1 propagation
 		ParentID:      in.Envelope.ID,
@@ -389,13 +389,13 @@ func (m *MockBridge) reactXHSPublish(ctx context.Context, client *IPCClient, in 
 	}
 	payload, _ := json.Marshal(body)
 	env := message.Envelope{
-		ID:            m.EnvelopeIDFn(client.WorkerID(), m.turns+1) + "-xhsreq",
-		ChannelID:     string(client.ChannelID()),
+		ID:            message.ID(m.EnvelopeIDFn(client.WorkerID(), m.turns+1) + "-xhsreq"),
+		ChannelID:     client.ChannelID(),
 		Type:          "xhs.publish",
 		Kind:          message.KindRequest,
-		Sender:        message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(client.WorkerActorID())},
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: client.WorkerActorID()},
 		Visibility:    message.VisibilityPublic,
-		Audience:      []string{"tool:xhs-adapter"},
+		Audience:      message.Audience{"tool:xhs-adapter"},
 		Payload:       payload,
 		CorrelationID: in.CorrelationID,
 		ParentID:      in.Envelope.ID,
@@ -462,13 +462,13 @@ func (m *MockBridge) reactProgressMultiTurn(ctx context.Context, client *IPCClie
 		}
 		body, _ := json.Marshal(progressPayload)
 		env := message.Envelope{
-			ID:            fmt.Sprintf("%s-progress-%d", m.EnvelopeIDFn(client.WorkerID(), m.turns+1), i),
-			ChannelID:     string(client.ChannelID()),
+			ID:            message.ID(fmt.Sprintf("%s-progress-%d", m.EnvelopeIDFn(client.WorkerID(), m.turns+1), i)),
+			ChannelID:     client.ChannelID(),
 			Type:          "agent.progress",
 			Kind:          message.KindEvent,
-			Sender:        message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(client.WorkerActorID())},
+			Sender:        message.Sender{Kind: actor.KindAgent, ID: client.WorkerActorID()},
 			Visibility:    message.VisibilityPublic,
-			Audience:      []string{"*"},
+			Audience:      message.Audience{message.AudienceWildcard},
 			Payload:       body,
 			CorrelationID: in.CorrelationID,
 			ParentID:      in.Envelope.ID,
@@ -490,13 +490,13 @@ func (m *MockBridge) reactProgressMultiTurn(ctx context.Context, client *IPCClie
 	}
 	body, _ := json.Marshal(finalPayload)
 	env := message.Envelope{
-		ID:            fmt.Sprintf("%s-final", m.EnvelopeIDFn(client.WorkerID(), m.turns+1)),
-		ChannelID:     string(client.ChannelID()),
+		ID:            message.ID(fmt.Sprintf("%s-final", m.EnvelopeIDFn(client.WorkerID(), m.turns+1))),
+		ChannelID:     client.ChannelID(),
 		Type:          "agent.text",
 		Kind:          message.KindEvent,
-		Sender:        message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(client.WorkerActorID())},
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: client.WorkerActorID()},
 		Visibility:    message.VisibilityPublic,
-		Audience:      []string{"*"},
+		Audience:      message.Audience{message.AudienceWildcard},
 		Payload:       body,
 		CorrelationID: in.CorrelationID,
 		ParentID:      in.Envelope.ID,
@@ -520,13 +520,13 @@ func (m *MockBridge) emitTerminal(ctx context.Context, client *IPCClient) error 
 	}
 	payload, _ := json.Marshal(body)
 	env := message.Envelope{
-		ID:         m.EnvelopeIDFn(client.WorkerID(), m.turns+1) + "-done",
-		ChannelID:  string(client.ChannelID()),
+		ID:         message.ID(m.EnvelopeIDFn(client.WorkerID(), m.turns+1) + "-done"),
+		ChannelID:  client.ChannelID(),
 		Type:       "agent.text",
 		Kind:       message.KindEvent,
-		Sender:     message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(client.WorkerActorID())},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: client.WorkerActorID()},
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{message.AudienceWildcard},
 		Payload:    payload,
 		TS:         m.NowFn(),
 		TSReceived: m.NowFn(),

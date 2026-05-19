@@ -83,7 +83,7 @@ export function classifyDocRef(path) {
 // --- Visibility ACL (L3 §7.1 visibility guard) ---------------------------
 //
 // Returns true when the message is visible to the given viewer actor id.
-// Precondition: viewerActorID is the current user's actor_id_in_channel
+// Precondition: viewerActorID is the current user's member_actor_id
 // (never the user UUID — channel.sqlite only knows the channel-local id).
 export function isVisibleTo(envelope, viewerActorID) {
   if (!envelope) return false;

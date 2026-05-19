@@ -97,15 +97,15 @@ func newTestManager(t *testing.T, mod *stubModule, opts ...func(*ManagerConfig))
 
 func newTestRequest(channelID channel.ID, sender, typ, requestID string) *message.Envelope {
 	return &message.Envelope{
-		ID:         requestID,
+		ID:         message.ID(requestID),
 		TS:         1_700_000_000_000,
-		ChannelID:  string(channelID),
+		ChannelID:  channelID,
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(sender)},
 		Kind:       message.KindRequest,
 		Type:       typ,
 		Payload:    json.RawMessage(`{"msg":"hi"}`),
 		Visibility: message.VisibilityPrivate,
-		Audience:   []string{"tool:feishu"},
+		Audience:   message.Audience{"tool:feishu"},
 	}
 }
 
@@ -244,12 +244,12 @@ type recordingTransit struct {
 	frame string
 }
 
-func (r *recordingTransit) Send(_ context.Context, frame devicetransit.SendFrame) (string, error) {
+func (r *recordingTransit) Send(_ context.Context, frame devicetransit.SendFrame) (devicetransit.FrameID, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sent = append(r.sent, frame)
 	r.frame = "frame-1"
-	return r.frame, nil
+	return devicetransit.FrameID(r.frame), nil
 }
 
 func (r *recordingTransit) Ack(_ context.Context, frame devicetransit.AckFrame) error {
@@ -312,7 +312,7 @@ func TestManagerDispatchHandlesRequestAndRespond(t *testing.T) {
 	}
 	mod.handle = func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
 		// Immediately respond with completed status.
-		_, err := mctx.Respond(ctx, env.ID,
+		_, err := mctx.Respond(ctx, adapter.CorrelationKey(env.ID),
 			json.RawMessage(`{"message_id":"feishu-12345"}`),
 			adapter.RespondOptions{Status: "completed"},
 		)
@@ -376,7 +376,7 @@ func TestManagerDispatchRejectsUnknownAudience(t *testing.T) {
 	}
 	mgr, _, _, _, _ := newTestManager(t, mod)
 	req := newTestRequest("channel:test", "agent:a", "feishu.chat.send", "r1")
-	req.Audience = []string{"tool:nope"}
+	req.Audience = message.Audience{"tool:nope"}
 	err := mgr.Dispatch(context.Background(), req)
 	if err == nil {
 		t.Fatalf("expected error for unknown audience")
@@ -595,7 +595,7 @@ func TestManagerRespondCancelsTimer(t *testing.T) {
 			MaxPendingMs: 80,
 		},
 		handle: func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
-			_, err := mctx.Respond(ctx, env.ID,
+			_, err := mctx.Respond(ctx, adapter.CorrelationKey(env.ID),
 				json.RawMessage(`{}`),
 				adapter.RespondOptions{Status: "completed"},
 			)
@@ -750,7 +750,7 @@ func TestManagerDeduplicatesResponseFromTerminalDuplicate(t *testing.T) {
 	}
 	var dedupedResult adapter.RespondResult
 	mod.handle = func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
-		res, err := mctx.Respond(ctx, env.ID,
+		res, err := mctx.Respond(ctx, adapter.CorrelationKey(env.ID),
 			json.RawMessage(`{}`),
 			adapter.RespondOptions{Status: "completed"},
 		)

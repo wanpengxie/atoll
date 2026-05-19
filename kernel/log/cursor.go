@@ -8,6 +8,7 @@ import (
 	"context"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // Seq is the messages.seq column — store-allocated monotonic per-channel
@@ -21,7 +22,7 @@ type Seq int64
 type Cursor struct {
 	ActorID         actor.ActorID
 	LastConsumedSeq Seq
-	LastConsumedID  string // informational; ordering uses Seq
+	LastConsumedID  message.ID // informational; ordering uses Seq
 	UpdatedAt       int64
 }
 
@@ -44,7 +45,7 @@ type Cursors interface {
 		ctx context.Context,
 		actorID actor.ActorID,
 		newSeq Seq,
-		newID string,
+		newID message.ID,
 		nowMs int64,
 	) (ok bool, err error)
 }

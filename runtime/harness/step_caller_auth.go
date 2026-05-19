@@ -40,7 +40,7 @@ func (s *stepCallerAuth) Run(ctx context.Context, env *message.Envelope) (khar.O
 			Detail:       "harness: caller bound to a different channel",
 		}, nil
 	}
-	if env.ChannelID != "" && env.ChannelID != string(s.deps.ChannelID) {
+	if env.ChannelID != "" && env.ChannelID != s.deps.ChannelID {
 		return khar.Outcome{
 			RejectReason: message.HarnessAuthFailed,
 			Detail:       "harness: envelope.channel_id does not match bound channel",
@@ -49,7 +49,7 @@ func (s *stepCallerAuth) Run(ctx context.Context, env *message.Envelope) (khar.O
 	// engine ts_received normalize — caller may leave channel_id blank
 	// in tests; populate from the bound channel here.
 	if env.ChannelID == "" {
-		env.ChannelID = string(s.deps.ChannelID)
+		env.ChannelID = s.deps.ChannelID
 	}
 	return khar.Outcome{}, nil
 }

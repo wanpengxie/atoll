@@ -60,7 +60,7 @@ func newMockServer() *mockServer {
 	return &mockServer{now: time.Now}
 }
 
-func (m *mockServer) Send(_ context.Context, frame devicetransit.SendFrame) (string, error) {
+func (m *mockServer) Send(_ context.Context, frame devicetransit.SendFrame) (devicetransit.FrameID, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failSend != nil {
@@ -70,7 +70,7 @@ func (m *mockServer) Send(_ context.Context, frame devicetransit.SendFrame) (str
 	if m.nextFrame != "" {
 		id := m.nextFrame
 		m.nextFrame = ""
-		return id, nil
+		return devicetransit.FrameID(id), nil
 	}
 	return "frame-test", nil
 }
@@ -102,17 +102,17 @@ func (m *mockServer) lastSend() (devicetransit.SendFrame, bool) {
 
 type fakeCorrelation struct {
 	mu         sync.Mutex
-	pending    map[string]adapter.CorrelationEntry
-	done       map[string]bool
-	expired    map[string]bool
+	pending    map[adapter.CorrelationKey]adapter.CorrelationEntry
+	done       map[adapter.CorrelationKey]bool
+	expired    map[adapter.CorrelationKey]bool
 	reserveErr error
 }
 
 func newFakeCorrelation() *fakeCorrelation {
 	return &fakeCorrelation{
-		pending: map[string]adapter.CorrelationEntry{},
-		done:    map[string]bool{},
-		expired: map[string]bool{},
+		pending: map[adapter.CorrelationKey]adapter.CorrelationEntry{},
+		done:    map[adapter.CorrelationKey]bool{},
+		expired: map[adapter.CorrelationKey]bool{},
 	}
 }
 
@@ -181,21 +181,21 @@ func (f *fakeCorrelation) ListPending(_ context.Context) ([]adapter.CorrelationE
 }
 
 type policyEvent struct {
-	requestID string
+	requestID adapter.CorrelationKey
 	reason    message.TerminalFailureReason
 	detail    string
 }
 
 type fakePolicy struct {
 	mu             sync.Mutex
-	timers         map[string]time.Time
-	cancelled      map[string]bool
+	timers         map[adapter.CorrelationKey]time.Time
+	cancelled      map[adapter.CorrelationKey]bool
 	externalErrors []policyEvent
 	armErr         error
 }
 
 func newFakePolicy() *fakePolicy {
-	return &fakePolicy{timers: map[string]time.Time{}, cancelled: map[string]bool{}}
+	return &fakePolicy{timers: map[adapter.CorrelationKey]time.Time{}, cancelled: map[adapter.CorrelationKey]bool{}}
 }
 
 func (f *fakePolicy) RegisterTimer(_ context.Context, id adapter.CorrelationKey, t time.Time) error {
@@ -247,7 +247,7 @@ func (r *fakeActorRegistry) exists(id actor.ActorID) bool {
 }
 
 type respondCall struct {
-	requestID string
+	requestID adapter.CorrelationKey
 	payload   json.RawMessage
 	opts      adapter.RespondOptions
 	sender    actor.ActorID
@@ -280,7 +280,7 @@ func (h *fakeRespondHarness) RespondFunc() adapter.RespondFunc {
 			opts:      opts,
 			sender:    h.adapterActor,
 		})
-		return adapter.RespondResult{MessageID: "msg-" + requestID, Deduped: false}, nil
+		return adapter.RespondResult{MessageID: message.ID("msg-" + requestID.String()), Deduped: false}, nil
 	}
 }
 
@@ -394,8 +394,8 @@ func (h *harness) seedActiveSession(t *testing.T, sid string) devicetransit.Devi
 func (h *harness) request(envID, ty, payload, sessionID string) *message.Envelope {
 	if sessionID == "" {
 		return &message.Envelope{
-			ID:        envID,
-			ChannelID: string(h.channelID),
+			ID:        message.ID(envID),
+			ChannelID: h.channelID,
 			Sender:    message.Sender{Kind: actor.KindAgent, ID: "agent:test"},
 			Kind:      message.KindRequest,
 			Type:      ty,
@@ -411,8 +411,8 @@ func (h *harness) request(envID, ty, payload, sessionID string) *message.Envelop
 	orig["device_session_id"] = sessionID
 	body, _ := json.Marshal(orig)
 	return &message.Envelope{
-		ID:        envID,
-		ChannelID: string(h.channelID),
+		ID:        message.ID(envID),
+		ChannelID: h.channelID,
 		Sender:    message.Sender{Kind: actor.KindAgent, ID: "agent:test"},
 		Kind:      message.KindRequest,
 		Type:      ty,
@@ -472,16 +472,16 @@ func TestPublishHappyPath(t *testing.T) {
 	}
 
 	// 3. F3 timer armed; correlation reserved.
-	if _, ok := h.policy.timers[env.ID]; !ok {
+	if _, ok := h.policy.timers[adapter.CorrelationKey(env.ID)]; !ok {
 		t.Error("F3 timer not armed")
 	}
-	if _, ok, _ := h.cor.Get(ctx, env.ID); !ok {
+	if _, ok, _ := h.cor.Get(ctx, adapter.CorrelationKey(env.ID)); !ok {
 		t.Error("correlation not reserved")
 	}
 
 	// 4. Simulate the device side replying with a successful callback.
 	callback := xhs.Callback{
-		CorrelationID: env.ID,
+		CorrelationID: env.ID.String(),
 		DeviceID:      "device-sess-publish",
 		Status:        "ok",
 		Result: map[string]any{
@@ -503,7 +503,7 @@ func TestPublishHappyPath(t *testing.T) {
 		t.Fatalf("respond calls = %d want 1", got)
 	}
 	call := h.respond.calls[0]
-	if call.requestID != env.ID {
+	if call.requestID != adapter.CorrelationKey(env.ID) {
 		t.Errorf("respond requestID=%q", call.requestID)
 	}
 	if call.opts.Status != "completed" {
@@ -528,10 +528,10 @@ func TestPublishHappyPath(t *testing.T) {
 	}
 
 	// 6. Correlation transitioned pending → done; timer cancelled.
-	if !h.cor.done[env.ID] {
+	if !h.cor.done[adapter.CorrelationKey(env.ID)] {
 		t.Error("correlation should be done")
 	}
-	if !h.policy.cancelled[env.ID] {
+	if !h.policy.cancelled[adapter.CorrelationKey(env.ID)] {
 		t.Error("F3 timer should be cancelled")
 	}
 
@@ -559,7 +559,7 @@ func TestSearchPerTypeAllowList(t *testing.T) {
 	}
 
 	callback := xhs.Callback{
-		CorrelationID: env.ID,
+		CorrelationID: env.ID.String(),
 		DeviceID:      "device-sess-search",
 		Status:        "ok",
 		Result: map[string]any{
@@ -666,10 +666,10 @@ func TestTransitSendFailureRollsBack(t *testing.T) {
 	if call.opts.Reason != "device_push_failed" {
 		t.Errorf("reason=%q want device_push_failed", call.opts.Reason)
 	}
-	if !h.policy.cancelled[env.ID] {
+	if !h.policy.cancelled[adapter.CorrelationKey(env.ID)] {
 		t.Error("timer should be cancelled on push failure")
 	}
-	if !h.cor.expired[env.ID] {
+	if !h.cor.expired[adapter.CorrelationKey(env.ID)] {
 		t.Error("correlation should be expired on push failure")
 	}
 }
@@ -696,7 +696,7 @@ func TestF3TimeoutTerminal(t *testing.T) {
 	// Simulate the F3 timer firing: in production the framework would
 	// call OnExternalError → ErrorPolicy emits a terminal Respond. Here
 	// we exercise the seam directly.
-	if err := h.policy.OnExternalError(ctx, env.ID, message.TerminalReceiverUnavailable, "no device ack"); err != nil {
+	if err := h.policy.OnExternalError(ctx, adapter.CorrelationKey(env.ID), message.TerminalReceiverUnavailable, "no device ack"); err != nil {
 		t.Fatalf("OnExternalError: %v", err)
 	}
 	if len(h.policy.externalErrors) != 1 {
@@ -731,7 +731,7 @@ func TestSenderHarnessGuard(t *testing.T) {
 	delete(h.registry.rows, testAdapterActor)
 	h.registry.mu.Unlock()
 
-	callback := xhs.Callback{CorrelationID: env.ID, Status: "ok", Result: map[string]any{"note_id": "n"}}
+	callback := xhs.Callback{CorrelationID: env.ID.String(), Status: "ok", Result: map[string]any{"note_id": "n"}}
 	raw, _ := json.Marshal(callback)
 	err := h.module.OnExternalCallback(ctx, raw)
 	if err == nil || !strings.Contains(err.Error(), "harness reject") {
@@ -810,10 +810,10 @@ func TestDuplicateCallbackIsDropped(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	// Pretend F3 expired before the device callback arrived.
-	if err := h.cor.MarkExpired(ctx, env.ID); err != nil {
+	if err := h.cor.MarkExpired(ctx, adapter.CorrelationKey(env.ID)); err != nil {
 		t.Fatalf("mark expired: %v", err)
 	}
-	callback := xhs.Callback{CorrelationID: env.ID, Status: "ok", Result: map[string]any{"note_id": "n"}}
+	callback := xhs.Callback{CorrelationID: env.ID.String(), Status: "ok", Result: map[string]any{"note_id": "n"}}
 	raw, _ := json.Marshal(callback)
 	if err := h.module.OnExternalCallback(ctx, raw); err != nil {
 		t.Fatalf("duplicate callback should not error: %v", err)

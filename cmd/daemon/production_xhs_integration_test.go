@@ -83,7 +83,7 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 
 	const channelID = "ch-prod-xhs"
 	createChannel(t, ctx, d, srv, channelID, []placement.InitialMember{
-		{ActorIDInChannel: "user:alice", Kind: "human"},
+		{MemberActorID: "user:alice", Kind: "human"},
 	})
 
 	db := openChannelDBForTest(t, channelsDir, channelID)
@@ -163,7 +163,7 @@ func bindDeviceSession(
 ) {
 	t.Helper()
 	body := transit.BindDeviceSessionBody{
-		FrameID:          "frame-bind-" + string(sessionID),
+		FrameID:          daemonbus.FrameID("frame-bind-" + string(sessionID)),
 		SessionID:        sessionID,
 		ChannelID:        channelID,
 		DeviceID:         "device-" + string(sessionID),
@@ -203,24 +203,24 @@ func writeRequestAndWaitForDeviceSend(
 	t.Helper()
 	ts := nowMs()
 	hc := transit.HumanCaller{
-		UserID:           "u1",
-		ActorIDInChannel: callerActor,
-		TS:               ts,
-		Nonce:            "nonce-" + requestID,
+		UserID:        "u1",
+		MemberActorID: actor.ActorID(callerActor),
+		TS:            ts,
+		Nonce:         "nonce-" + requestID,
 	}
 	hc.ServerToken = transit.SignHumanCaller(
-		[]byte(integSecret), channelID, hc.UserID, hc.ActorIDInChannel, hc.TS, hc.Nonce,
+		[]byte(integSecret), channelID, hc.UserID, hc.MemberActorID, hc.TS, hc.Nonce,
 	)
 	body := transit.WriteMessageBody{
-		FrameID:     "frame-write-" + requestID,
-		ChannelID:   channelID,
+		FrameID:     daemonbus.FrameID("frame-write-" + requestID),
+		ChannelID:   channel.ID(channelID),
 		HumanCaller: hc,
 		EnvelopePartial: message.Envelope{
-			ID:         requestID,
+			ID:         message.ID(requestID),
 			Type:       envType,
 			Kind:       message.KindRequest,
 			Payload:    json.RawMessage(payload),
-			Audience:   []string{string(devicexhs.DefaultAdapterActorID)},
+			Audience:   message.Audience{devicexhs.DefaultAdapterActorID},
 			TS:         ts,
 			Sender:     message.Sender{ID: actor.ActorID(callerActor)},
 			Visibility: message.VisibilityPublic,

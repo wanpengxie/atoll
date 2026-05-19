@@ -5,7 +5,7 @@
 // Authoritative spec: .dalek/pm/m1.5-tickets.md §T6 (catalog 子目录) +
 // L1 §3 channel namespace + T1.9 channel-member sync.
 //
-// Key invariant: actor_id_in_channel is unique per channel (DB-level
+// Key invariant: member_actor_id is unique per channel (DB-level
 // UNIQUE constraint) so daemon harness can rely on it for sender
 // identification. The mapping (channel_id, user_id) → actor_id is the
 // single source of truth — daemonbus update_members frame derives

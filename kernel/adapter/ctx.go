@@ -72,7 +72,7 @@ type RespondOptions struct {
 	// Audience overrides the response audience. Empty = use the
 	// request's sender as the single audience entry (the canonical
 	// "respond to caller" path).
-	Audience []string
+	Audience message.Audience
 
 	// Dedupe signals to the framework that a duplicate inbound
 	// callback should be tagged with payload.dedupe=true (used by
@@ -83,7 +83,7 @@ type RespondOptions struct {
 // RespondResult is what RespondFunc returns when the harness write
 // succeeds (or dedupes against an existing terminal).
 type RespondResult struct {
-	MessageID string
+	MessageID message.ID
 	Deduped   bool // true when harness step 8 detected terminal_duplicate
 }
 

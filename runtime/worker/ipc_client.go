@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -44,8 +45,8 @@ type IPCClient struct {
 	// Snapshot established at handshake — every outbound non-handshake
 	// frame gets these fields stamped.
 	channelID     channel.ID
-	workerID      string
-	workerActorID string
+	workerID      ipc.WorkerID
+	workerActorID actor.ActorID
 	fencingToken  placement.FencingToken
 	daemonEpoch   placement.DaemonEpoch
 }
@@ -201,7 +202,7 @@ func (c *IPCClient) ChannelID() channel.ID {
 // worker MUST stamp onto envelope.sender.id for every WriteMessage
 // (otherwise harness step 3 sender_mismatch rejects). Empty until
 // Handshake succeeds.
-func (c *IPCClient) WorkerActorID() string {
+func (c *IPCClient) WorkerActorID() actor.ActorID {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.workerActorID
@@ -211,7 +212,7 @@ func (c *IPCClient) WorkerActorID() string {
 func (c *IPCClient) WorkerID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.workerID
+	return string(c.workerID)
 }
 
 // WriteMessage sends a write_message IPC.

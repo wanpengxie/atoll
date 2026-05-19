@@ -34,7 +34,7 @@ type CreateChannelInput struct {
 // NewMember is one entry of CreateChannelInput.Members.
 type NewMember struct {
 	UserID           string
-	ActorIDInChannel string // optional — auto-assigned if empty
+	MemberActorID string // optional — auto-assigned if empty
 	Role             string // "owner" | "member"; defaults to "member"
 }
 
@@ -85,21 +85,21 @@ func (s *Service) CreateChannel(ctx context.Context, in CreateChannelInput) (Cha
 		row := ChannelMember{
 			ChannelID:        ch.ID,
 			UserID:           m.UserID,
-			ActorIDInChannel: m.ActorIDInChannel,
+			MemberActorID: m.MemberActorID,
 			Role:             m.Role,
 			JoinedAt:         ch.CreatedAt,
 		}
-		if row.ActorIDInChannel == "" {
-			row.ActorIDInChannel = "user:" + row.UserID
+		if row.MemberActorID == "" {
+			row.MemberActorID = "user:" + row.UserID
 		}
 		if row.Role == "" {
 			row.Role = "member"
 		}
 		if _, err := tx.ExecContext(
 			ctx,
-			`INSERT INTO channel_members (channel_id, user_id, actor_id_in_channel, role, joined_at)
+			`INSERT INTO channel_members (channel_id, user_id, member_actor_id, role, joined_at)
 			 VALUES (?, ?, ?, ?, ?)`,
-			row.ChannelID, row.UserID, row.ActorIDInChannel, row.Role, row.JoinedAt,
+			row.ChannelID, row.UserID, row.MemberActorID, row.Role, row.JoinedAt,
 		); err != nil {
 			return Channel{}, nil, fmt.Errorf("insert member %s: %w", row.UserID, err)
 		}

@@ -48,7 +48,7 @@ func TestIntegration_XHSCreatorTemplate_BootSeedsChannel(t *testing.T) {
 
 	// --- xhs-creator channel (createChannel helper sets ChannelType) ---
 	createChannel(t, ctx, d, srv, "ch-xhs", []placement.InitialMember{
-		{ActorIDInChannel: "user:alice", Kind: "human", DisplayName: "Alice"},
+		{MemberActorID: "user:alice", Kind: "human", DisplayName: "Alice"},
 	})
 
 	xhsSqlitePath := filepath.Join(channelsDir, "ch-xhs", "channel.sqlite")
@@ -128,7 +128,7 @@ func TestIntegration_XHSCreatorTemplate_BootSeedsChannel(t *testing.T) {
 	// --- B4 — a generic group channel must NOT seed xhs.* ---
 	createChannelOfType(t, ctx, d, srv, "ch-group", "group",
 		[]placement.InitialMember{
-			{ActorIDInChannel: "user:bob", Kind: "human", DisplayName: "Bob"},
+			{MemberActorID: "user:bob", Kind: "human", DisplayName: "Bob"},
 		})
 
 	groupSqlitePath := filepath.Join(channelsDir, "ch-group", "channel.sqlite")

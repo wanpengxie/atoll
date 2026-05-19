@@ -100,7 +100,7 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope) (klog.Appe
 	// Failure path: typed *klog.AppendError so the harness chain maps
 	// it to message.HarnessWorkerFencingStale (closed-set reject). No
 	// outbox row is written.
-	if err := m.checkFencing(ctx, tx, env.ID); err != nil {
+	if err := m.checkFencing(ctx, tx, string(env.ID)); err != nil {
 		return klog.AppendResult{}, err
 	}
 
@@ -154,15 +154,15 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope) (klog.Appe
 		env.ID, env.TS, env.TSReceived, env.ChannelID,
 		string(env.Sender.Kind), string(env.Sender.ID), nullableString(env.Sender.Name),
 		string(env.Kind), env.Type, string(env.Payload),
-		nullableString(env.ParentID), nullableString(env.CorrelationID), nullableString(docRefsJSON),
-		string(env.Visibility), string(audJSON),
+		nullableString(string(env.ParentID)), nullableString(string(env.CorrelationID)), nullableString(docRefsJSON),
+		env.Visibility, string(audJSON),
 		nullableInt(env.NotBefore), nullableInt(env.ExpiresAt),
 		nullableInt(env.DeliveredAt), nullableInt(env.DeliveryFailedAt),
 		nullableString(env.LastError), env.Attempts,
 		terminalInt,
 	)
 	if err != nil {
-		return klog.AppendResult{}, classifyAppendErr(err, env.ID)
+		return klog.AppendResult{}, classifyAppendErr(err, string(env.ID))
 	}
 	seq, err := res.LastInsertId()
 	if err != nil {
@@ -315,7 +315,7 @@ func (m *Messages) LongPendingRequests(ctx context.Context, nowMs int64, limit i
 // may treat as no-op). Used by the scheduler dispatch path AND the
 // harness post-write fan-out, so two concurrent callers cannot
 // double-stamp delivery time.
-func (m *Messages) MarkDelivered(ctx context.Context, id string, atMs int64) error {
+func (m *Messages) MarkDelivered(ctx context.Context, id message.ID, atMs int64) error {
 	if id == "" {
 		return errors.New("store: mark delivered empty id")
 	}
@@ -330,7 +330,7 @@ func (m *Messages) MarkDelivered(ctx context.Context, id string, atMs int64) err
 
 // MarkDeliveryError records a failed delivery attempt while leaving
 // delivered_at NULL so the row remains retryable.
-func (m *Messages) MarkDeliveryError(ctx context.Context, id string, atMs int64, errText string) error {
+func (m *Messages) MarkDeliveryError(ctx context.Context, id message.ID, atMs int64, errText string) error {
 	if id == "" {
 		return errors.New("store: mark delivery error empty id")
 	}
@@ -347,7 +347,7 @@ func (m *Messages) MarkDeliveryError(ctx context.Context, id string, atMs int64,
 }
 
 // FindByID implements log.MessageLog.
-func (m *Messages) FindByID(ctx context.Context, channelID channel.ID, id string) (message.Envelope, bool, error) {
+func (m *Messages) FindByID(ctx context.Context, channelID channel.ID, id message.ID) (message.Envelope, bool, error) {
 	_ = channelID // channel_id is enforced by the per-channel db file; query stays scoped.
 	const q = `SELECT id, ts, ts_received, channel_id,
 	                  sender_kind, sender_id, COALESCE(sender_name,''),
@@ -486,7 +486,7 @@ func (m *Messages) checkFencing(ctx context.Context, tx *sql.Tx, envID string) e
 		return &klog.AppendError{
 			Reason:           message.HarnessWorkerFencingStale,
 			Detail:           "fencing tuple missing from context",
-			PartialMessageID: envID,
+			PartialMessageID: message.ID(envID),
 		}
 	}
 	if err := m.lock.ValidateWriteTx(ctx, tx, tuple.Token, tuple.Epoch); err != nil {
@@ -494,7 +494,7 @@ func (m *Messages) checkFencing(ctx context.Context, tx *sql.Tx, envID string) e
 			return &klog.AppendError{
 				Reason:           message.HarnessWorkerFencingStale,
 				Detail:           err.Error(),
-				PartialMessageID: envID,
+				PartialMessageID: message.ID(envID),
 			}
 		}
 		return fmt.Errorf("store: append fencing check: %w", err)
@@ -514,7 +514,7 @@ func classifyAppendErr(err error, envID string) error {
 		return &klog.AppendError{
 			Reason:           message.HarnessMessageIDConflict,
 			Detail:           msg,
-			PartialMessageID: envID,
+			PartialMessageID: message.ID(envID),
 		}
 	case strings.Contains(msg, "ux_terminal_response_per_request") ||
 		strings.Contains(msg, "UNIQUE constraint failed: messages.parent_id") ||
@@ -522,7 +522,7 @@ func classifyAppendErr(err error, envID string) error {
 		return &klog.AppendError{
 			Reason:           message.HarnessTerminalDuplicate,
 			Detail:           msg,
-			PartialMessageID: envID,
+			PartialMessageID: message.ID(envID),
 		}
 	default:
 		return fmt.Errorf("store: append insert: %w", err)

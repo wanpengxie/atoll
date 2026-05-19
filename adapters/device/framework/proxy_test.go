@@ -25,7 +25,7 @@ type fakeTransit struct {
 	sendErr error
 }
 
-func (f *fakeTransit) Send(_ context.Context, frame devicetransit.SendFrame) (string, error) {
+func (f *fakeTransit) Send(_ context.Context, frame devicetransit.SendFrame) (devicetransit.FrameID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.sendErr != nil {
@@ -35,7 +35,7 @@ func (f *fakeTransit) Send(_ context.Context, frame devicetransit.SendFrame) (st
 	if f.nextID != "" {
 		id := f.nextID
 		f.nextID = ""
-		return id, nil
+		return devicetransit.FrameID(id), nil
 	}
 	return "frame-default", nil
 }
@@ -56,19 +56,19 @@ func (f *fakeTransit) Error(_ context.Context, frame devicetransit.ErrorFrame) e
 
 type fakeCorrelation struct {
 	mu         sync.Mutex
-	pending    map[string]adapter.CorrelationEntry
-	done       map[string]bool
-	expired    map[string]bool
-	rejected   map[string]string
+	pending    map[adapter.CorrelationKey]adapter.CorrelationEntry
+	done       map[adapter.CorrelationKey]bool
+	expired    map[adapter.CorrelationKey]bool
+	rejected   map[adapter.CorrelationKey]string
 	reserveErr error
 }
 
 func newFakeCorrelation() *fakeCorrelation {
 	return &fakeCorrelation{
-		pending:  map[string]adapter.CorrelationEntry{},
-		done:     map[string]bool{},
-		expired:  map[string]bool{},
-		rejected: map[string]string{},
+		pending:  map[adapter.CorrelationKey]adapter.CorrelationEntry{},
+		done:     map[adapter.CorrelationKey]bool{},
+		expired:  map[adapter.CorrelationKey]bool{},
+		rejected: map[adapter.CorrelationKey]string{},
 	}
 }
 
@@ -125,20 +125,20 @@ func (f *fakeCorrelation) ListPending(_ context.Context) ([]adapter.CorrelationE
 
 type fakePolicy struct {
 	mu             sync.Mutex
-	timers         map[string]time.Time
-	cancelled      map[string]bool
+	timers         map[adapter.CorrelationKey]time.Time
+	cancelled      map[adapter.CorrelationKey]bool
 	externalErrors []externalErrorRecord
 	armErr         error
 }
 
 type externalErrorRecord struct {
-	requestID string
+	requestID adapter.CorrelationKey
 	reason    message.TerminalFailureReason
 	detail    string
 }
 
 func newFakePolicy() *fakePolicy {
-	return &fakePolicy{timers: map[string]time.Time{}, cancelled: map[string]bool{}}
+	return &fakePolicy{timers: map[adapter.CorrelationKey]time.Time{}, cancelled: map[adapter.CorrelationKey]bool{}}
 }
 
 func (f *fakePolicy) RegisterTimer(_ context.Context, id adapter.CorrelationKey, t time.Time) error {
@@ -272,10 +272,10 @@ func TestSendRequestHappyPath(t *testing.T) {
 	}
 
 	// Correlation reserved + F3 timer armed.
-	if _, ok, _ := cor.Get(ctx, env.ID); !ok {
+	if _, ok, _ := cor.Get(ctx, adapter.CorrelationKey(env.ID)); !ok {
 		t.Error("correlation reserve missing")
 	}
-	if _, ok := pol.timers[env.ID]; !ok {
+	if _, ok := pol.timers[adapter.CorrelationKey(env.ID)]; !ok {
 		t.Error("F3 timer not armed")
 	}
 }
@@ -319,10 +319,10 @@ func TestSendRequestTransitFailureRollsBack(t *testing.T) {
 		t.Errorf("error chain should wrap sentinel: %v", err)
 	}
 	// Timer cancelled + correlation expired so caller can emit terminal.
-	if !pol.cancelled[env.ID] {
+	if !pol.cancelled[adapter.CorrelationKey(env.ID)] {
 		t.Error("F3 timer should be cancelled on transit failure")
 	}
-	if !cor.expired[env.ID] {
+	if !cor.expired[adapter.CorrelationKey(env.ID)] {
 		t.Error("correlation should be marked expired on transit failure")
 	}
 }
@@ -336,7 +336,7 @@ func TestSendRequestPolicyArmFailureRollsBack(t *testing.T) {
 	if _, err := p.SendRequest(ctx, env, "sess-1", []byte(`{}`)); err == nil {
 		t.Fatal("expected timer arm error")
 	}
-	if !cor.expired[env.ID] {
+	if !cor.expired[adapter.CorrelationKey(env.ID)] {
 		t.Error("correlation must be expired when timer arm fails")
 	}
 }

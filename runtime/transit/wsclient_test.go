@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
@@ -65,7 +66,7 @@ func (h *wsHarness) handle(w http.ResponseWriter, r *http.Request) {
 	frame := daemonbus.Frame{
 		FrameID:               "boot-1",
 		FrameType:             daemonbus.FrameType("control.connection_accepted"),
-		DaemonID:              h.expectedID,
+		DaemonID:              placement.DaemonID(h.expectedID),
 		DaemonConnectionEpoch: daemonbus.ConnectionEpoch(epoch),
 		SentAt:                time.Now().UnixMilli(),
 		Payload:               []byte(`{"connection_epoch":` + itoaInt64(epoch) + `}`),
@@ -185,7 +186,7 @@ func TestWSClient_SendRecvRoundTrip(t *testing.T) {
 	frame := daemonbus.Frame{
 		FrameID:               "hb-1",
 		FrameType:             daemonbus.FrameTypeControlHeartbeat,
-		DaemonID:              "daemon-A",
+		DaemonID:              placement.DaemonID("daemon-A"),
 		DaemonConnectionEpoch: epoch,
 		SentAt:                time.Now().UnixMilli(),
 		Payload:               []byte(`{"channels":[]}`),
@@ -320,7 +321,7 @@ func TestWSClient_WriteDeadlineUnblocksSendMu(t *testing.T) {
 	frame := daemonbus.Frame{
 		FrameID:               "stuck-1",
 		FrameType:             daemonbus.FrameTypeControlHeartbeat,
-		DaemonID:              "daemon-A",
+		DaemonID:              placement.DaemonID("daemon-A"),
 		DaemonConnectionEpoch: epoch,
 		SentAt:                time.Now().UnixMilli(),
 		Payload:               []byte(`{"blob":"` + string(big) + `"}`),
@@ -413,7 +414,7 @@ func TestWSClient_SendFailureMarksConnDead(t *testing.T) {
 	frame := daemonbus.Frame{
 		FrameID:               "f-1",
 		FrameType:             daemonbus.FrameTypeControlHeartbeat,
-		DaemonID:              "daemon-A",
+		DaemonID:              placement.DaemonID("daemon-A"),
 		DaemonConnectionEpoch: epoch,
 		SentAt:                time.Now().UnixMilli(),
 		Payload:               []byte(`{}`),

@@ -299,7 +299,7 @@ func setup(t *testing.T, mods ...func(*feishu.Module)) *setupResult {
 
 func newRequest(typ, id, payload string) *message.Envelope {
 	return &message.Envelope{
-		ID:         id,
+		ID:         message.ID(id),
 		TS:         time.Now().UnixMilli(),
 		ChannelID:  "channel:test",
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:author"},
@@ -307,7 +307,7 @@ func newRequest(typ, id, payload string) *message.Envelope {
 		Type:       typ,
 		Payload:    json.RawMessage(payload),
 		Visibility: message.VisibilityPrivate,
-		Audience:   []string{"tool:feishu"},
+		Audience:   message.Audience{"tool:feishu"},
 	}
 }
 

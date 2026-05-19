@@ -196,23 +196,23 @@ func TestDaemon_Phase3_DispatchesWriteMessage(t *testing.T) {
 
 	ts := now()
 	hc := transit.HumanCaller{
-		UserID:           "u1",
-		ActorIDInChannel: "user:alice",
-		TS:               ts,
-		Nonce:            "nonce-A",
+		UserID:        "u1",
+		MemberActorID: "user:alice",
+		TS:            ts,
+		Nonce:         "nonce-A",
 	}
 	hc.ServerToken = transit.SignHumanCaller(
-		[]byte(secret), string(chID), hc.UserID, hc.ActorIDInChannel, hc.TS, hc.Nonce,
+		[]byte(secret), string(chID), hc.UserID, hc.MemberActorID, hc.TS, hc.Nonce,
 	)
 	body := transit.WriteMessageBody{
 		FrameID:     "frame-write-1",
-		ChannelID:   string(chID),
+		ChannelID:   chID,
 		HumanCaller: hc,
 		EnvelopePartial: message.Envelope{
 			Type:       "human.text",
 			Kind:       message.KindEvent,
 			Payload:    json.RawMessage(`{"text":"hi"}`),
-			Audience:   []string{"*"},
+			Audience:   message.Audience{"*"},
 			Visibility: message.VisibilityPublic,
 			TS:         ts,
 		},
@@ -269,7 +269,7 @@ func TestDaemon_Phase3_DispatchesWriteMessage(t *testing.T) {
 		deadline := time.Now().Add(2 * time.Second)
 		var got sql.NullInt64
 		for time.Now().Before(deadline) {
-			got, _ = queryDeliveredAt(ctx, dbPath, ack.MessageID)
+			got, _ = queryDeliveredAt(ctx, dbPath, string(ack.MessageID))
 			if got.Valid {
 				break
 			}
@@ -349,13 +349,13 @@ func TestDaemon_FutureMessage_SchedulerDrains(t *testing.T) {
 	if _, err := msgs.Append(ctx, &message.Envelope{
 		ID:         "m-future",
 		TS:         now(),
-		ChannelID:  string(chID),
+		ChannelID:  chID,
 		Sender:     message.Sender{Kind: actor.KindHuman, ID: "user:alice"},
 		Kind:       message.KindEvent,
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{"text":"later"}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"*"},
+		Audience:   message.Audience{"*"},
 		NotBefore:  &notBefore,
 	}); err != nil {
 		t.Fatalf("seed future message: %v", err)
@@ -524,16 +524,16 @@ func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
 	}
 	for _, c := range cases {
 		env := &message.Envelope{
-			ID:         c.id,
+			ID:         message.ID(c.id),
 			TS:         now(),
 			TSReceived: now(),
-			ChannelID:  string(chID),
+			ChannelID:  chID,
 			Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:caller"},
 			Kind:       message.KindRequest,
 			Type:       "human.text",
 			Payload:    json.RawMessage(`{"text":"please"}`),
 			Visibility: message.VisibilityPublic,
-			Audience:   []string{c.audience},
+			Audience:   message.Audience{actor.ActorID(c.audience)},
 			ExpiresAt:  &deadline,
 		}
 		if _, err := msgs.Append(ctx, env); err != nil {
@@ -1051,23 +1051,23 @@ func TestDaemon_Phase3_ChannelAgent_Registered(t *testing.T) {
 	server := bus.ServerSide()
 	ts := now()
 	hc := transit.HumanCaller{
-		UserID:           "u1",
-		ActorIDInChannel: "user:alice",
-		TS:               ts,
-		Nonce:            "nonce-agent",
+		UserID:        "u1",
+		MemberActorID: "user:alice",
+		TS:            ts,
+		Nonce:         "nonce-agent",
 	}
 	hc.ServerToken = transit.SignHumanCaller(
-		[]byte(secret), string(chID), hc.UserID, hc.ActorIDInChannel, hc.TS, hc.Nonce,
+		[]byte(secret), string(chID), hc.UserID, hc.MemberActorID, hc.TS, hc.Nonce,
 	)
 	body := transit.WriteMessageBody{
 		FrameID:     "frame-agent-1",
-		ChannelID:   string(chID),
+		ChannelID:   chID,
 		HumanCaller: hc,
 		EnvelopePartial: message.Envelope{
 			Type:       "human.text",
 			Kind:       message.KindEvent,
 			Payload:    json.RawMessage(`{"text":"hi agent"}`),
-			Audience:   []string{"*"},
+			Audience:   message.Audience{"*"},
 			Visibility: message.VisibilityPublic,
 			TS:         ts,
 		},
@@ -1226,23 +1226,23 @@ func TestDaemon_Phase3_WorkerReply(t *testing.T) {
 		t.Helper()
 		ts := now()
 		hc := transit.HumanCaller{
-			UserID:           "u1",
-			ActorIDInChannel: "user:alice",
-			TS:               ts,
-			Nonce:            nonce,
+			UserID:        "u1",
+			MemberActorID: "user:alice",
+			TS:            ts,
+			Nonce:         nonce,
 		}
 		hc.ServerToken = transit.SignHumanCaller(
-			[]byte(secret), string(chID), hc.UserID, hc.ActorIDInChannel, hc.TS, hc.Nonce,
+			[]byte(secret), string(chID), hc.UserID, hc.MemberActorID, hc.TS, hc.Nonce,
 		)
 		body := transit.WriteMessageBody{
-			FrameID:     "frame-" + nonce,
-			ChannelID:   string(chID),
+			FrameID:     daemonbus.FrameID("frame-" + nonce),
+			ChannelID:   chID,
 			HumanCaller: hc,
 			EnvelopePartial: message.Envelope{
 				Type:       "human.text",
 				Kind:       message.KindEvent,
 				Payload:    json.RawMessage(`{"text":"hi-` + nonce + `"}`),
-				Audience:   []string{"*"},
+				Audience:   message.Audience{"*"},
 				Visibility: message.VisibilityPublic,
 				TS:         ts,
 			},
@@ -1276,7 +1276,7 @@ func TestDaemon_Phase3_WorkerReply(t *testing.T) {
 			if !ack.Accepted {
 				t.Fatalf("ack reject: %s/%s", ack.RejectReason, ack.RejectDetail)
 			}
-			return ack.MessageID
+			return string(ack.MessageID)
 		}
 	}
 

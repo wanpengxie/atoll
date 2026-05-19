@@ -167,10 +167,10 @@ func (p *DeviceProxy) SendRequest(
 	deadline := time.UnixMilli(deadlineMs)
 
 	entry := adapter.CorrelationEntry{
-		RequestID:     env.ID,
+		RequestID:     adapter.CorrelationKey(env.ID),
 		CorrelationID: env.CorrelationID,
-		ChannelID:     string(p.ChannelID),
-		AudienceActor: string(p.AdapterActorID),
+		ChannelID:     p.ChannelID,
+		AudienceActor: p.AdapterActorID,
 		ParentID:      env.ID,
 		EnqueuedAt:    enqueuedAt,
 		ExpiresAt:     deadlineMs,
@@ -180,10 +180,11 @@ func (p *DeviceProxy) SendRequest(
 		return "", fmt.Errorf("framework.DeviceProxy.SendRequest: reserve correlation: %w", err)
 	}
 
-	if err := p.deps.Policy.RegisterTimer(ctx, env.ID, deadline); err != nil {
+	requestKey := adapter.CorrelationKey(env.ID)
+	if err := p.deps.Policy.RegisterTimer(ctx, requestKey, deadline); err != nil {
 		// Best-effort cleanup: expire the correlation so the framework
 		// observes the abandoned reserve.
-		_ = p.deps.Correlation.MarkExpired(ctx, env.ID)
+		_ = p.deps.Correlation.MarkExpired(ctx, requestKey)
 		return "", fmt.Errorf("framework.DeviceProxy.SendRequest: arm F3 timer: %w", err)
 	}
 
@@ -198,14 +199,14 @@ func (p *DeviceProxy) SendRequest(
 		ExpiresAt:       deadlineMs,
 	}
 
-	frameID, err = p.deps.Transit.Send(ctx, frame)
+	sentFrameID, err := p.deps.Transit.Send(ctx, frame)
 	if err != nil {
 		// Walk back the reserves so caller can emit synchronous terminal.
-		_ = p.deps.Policy.CancelTimer(ctx, env.ID)
-		_ = p.deps.Correlation.MarkExpired(ctx, env.ID)
+		_ = p.deps.Policy.CancelTimer(ctx, requestKey)
+		_ = p.deps.Correlation.MarkExpired(ctx, requestKey)
 		return "", fmt.Errorf("framework.DeviceProxy.SendRequest: transit send: %w", err)
 	}
-	return frameID, nil
+	return sentFrameID.String(), nil
 }
 
 // CancelInFlight is the adapter-driven escape hatch. Called when the
@@ -213,18 +214,20 @@ func (p *DeviceProxy) SendRequest(
 // failure → emit synchronous terminal). Cancels the F3 timer + marks
 // the correlation expired. Idempotent.
 func (p *DeviceProxy) CancelInFlight(ctx context.Context, requestID string) {
-	_ = p.deps.Policy.CancelTimer(ctx, requestID)
-	_ = p.deps.Correlation.MarkExpired(ctx, requestID)
+	key := adapter.CorrelationKey(message.ID(requestID))
+	_ = p.deps.Policy.CancelTimer(ctx, key)
+	_ = p.deps.Correlation.MarkExpired(ctx, key)
 }
 
 // CompleteInFlight is the success-path counterpart. Called by the
 // Module right before emitting ctx.Respond on a recv frame. Cancels the
 // F3 timer + marks correlation done. Idempotent.
 func (p *DeviceProxy) CompleteInFlight(ctx context.Context, requestID string) error {
-	if err := p.deps.Policy.CancelTimer(ctx, requestID); err != nil {
+	key := adapter.CorrelationKey(message.ID(requestID))
+	if err := p.deps.Policy.CancelTimer(ctx, key); err != nil {
 		return fmt.Errorf("framework.DeviceProxy.CompleteInFlight: cancel timer: %w", err)
 	}
-	if err := p.deps.Correlation.MarkDone(ctx, requestID); err != nil {
+	if err := p.deps.Correlation.MarkDone(ctx, key); err != nil {
 		return fmt.Errorf("framework.DeviceProxy.CompleteInFlight: mark done: %w", err)
 	}
 	return nil
@@ -234,7 +237,7 @@ func (p *DeviceProxy) CompleteInFlight(ctx context.Context, requestID string) er
 // when the adapter has nothing but a request_id on the wire and needs
 // the original envelope.type / audience to build the response payload.
 func (p *DeviceProxy) LookupInFlight(ctx context.Context, requestID string) (adapter.CorrelationEntry, bool, error) {
-	return p.deps.Correlation.Get(ctx, requestID)
+	return p.deps.Correlation.Get(ctx, adapter.CorrelationKey(message.ID(requestID)))
 }
 
 // envelopeDeadline picks the deadline (wall-ms) for the F3 timer.

@@ -82,13 +82,13 @@ func TestPostHarnessChainDispatchFailureDoesNotMarkDelivered(t *testing.T) {
 	})
 	env := &message.Envelope{
 		ID:         "m-delivery-error",
-		ChannelID:  string(chID),
+		ChannelID:  chID,
 		Sender:     message.Sender{ID: "user:demo"},
 		Kind:       message.KindEvent,
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{"text":"hello"}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   []string{"agent:beta"},
+		Audience:   message.Audience{"agent:beta"},
 	}
 
 	res, err := wrapped.Write(writeCtx, env)

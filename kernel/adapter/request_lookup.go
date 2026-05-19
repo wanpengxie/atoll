@@ -19,5 +19,5 @@ import (
 type RequestLookup interface {
 	// FindByID returns the envelope at id. Returns ok=false when the
 	// row does not exist or has been deleted.
-	FindByID(ctx context.Context, id string) (*message.Envelope, bool, error)
+	FindByID(ctx context.Context, id message.ID) (*message.Envelope, bool, error)
 }

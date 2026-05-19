@@ -124,15 +124,15 @@ func mustNewWriteHandler(t *testing.T, router transit.WriteMessageRouter, window
 func newWriteMessageBody(t *testing.T, payload json.RawMessage, ts int64) transit.WriteMessageBody {
 	t.Helper()
 	hc := transit.HumanCaller{
-		UserID:           "user-1",
-		ActorIDInChannel: testWriteActor,
-		TS:               ts,
-		Nonce:            "nonce-1",
+		UserID:        "user-1",
+		MemberActorID: testWriteActor,
+		TS:            ts,
+		Nonce:         "nonce-1",
 	}
 	hc.ServerToken = transit.SignHumanCaller(
 		[]byte(testWriteSecret),
 		testWriteChannel,
-		hc.UserID, hc.ActorIDInChannel, hc.TS, hc.Nonce,
+		hc.UserID, hc.MemberActorID, hc.TS, hc.Nonce,
 	)
 	if payload == nil {
 		payload = json.RawMessage(`{"text":"hello"}`)
@@ -145,7 +145,7 @@ func newWriteMessageBody(t *testing.T, payload json.RawMessage, ts int64) transi
 			Type:       "human.text",
 			Kind:       message.KindEvent,
 			Payload:    payload,
-			Audience:   []string{"*"},
+			Audience:   message.Audience{"*"},
 			Visibility: message.VisibilityPublic,
 			TS:         ts,
 		},
@@ -534,7 +534,7 @@ func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
 		if ackFrame.FrameType != daemonbus.FrameTypeControlWriteMessageAck {
 			t.Fatalf("write_message ack type=%s", ackFrame.FrameType)
 		}
-		if ackFrame.FrameID != caseAFrameID {
+		if ackFrame.FrameID != daemonbus.FrameID(caseAFrameID) {
 			t.Errorf("write_message_ack envelope frame_id=%q want %q — SendAndAwait pairing would BREAK",
 				ackFrame.FrameID, caseAFrameID)
 		}
@@ -560,7 +560,7 @@ func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
 		if ackFrame.FrameType != daemonbus.FrameTypeControlBindDeviceSessionAck {
 			t.Fatalf("bind ack type=%s", ackFrame.FrameType)
 		}
-		if ackFrame.FrameID != caseBFrameID {
+		if ackFrame.FrameID != daemonbus.FrameID(caseBFrameID) {
 			t.Errorf("bind_device_session_ack envelope frame_id=%q want %q",
 				ackFrame.FrameID, caseBFrameID)
 		}
@@ -589,7 +589,7 @@ func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
 		if ackFrame.FrameType != daemonbus.FrameTypeControlUnbindDeviceSessionAck {
 			t.Fatalf("unbind ack type=%s", ackFrame.FrameType)
 		}
-		if ackFrame.FrameID != caseCFrameID {
+		if ackFrame.FrameID != daemonbus.FrameID(caseCFrameID) {
 			t.Errorf("unbind_device_session_ack envelope frame_id=%q want %q",
 				ackFrame.FrameID, caseCFrameID)
 		}
@@ -615,7 +615,7 @@ func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
 		if ackFrame.FrameType != daemonbus.FrameTypeViewsyncResyncResponse {
 			t.Fatalf("resync resp type=%s", ackFrame.FrameType)
 		}
-		if ackFrame.FrameID != caseDFrameID {
+		if ackFrame.FrameID != daemonbus.FrameID(caseDFrameID) {
 			t.Errorf("viewsync.resync_response envelope frame_id=%q want %q",
 				ackFrame.FrameID, caseDFrameID)
 		}

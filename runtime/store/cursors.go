@@ -8,6 +8,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/log"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // Cursors implements kernel/log.Cursors over the actor_cursors table.
@@ -41,7 +42,7 @@ func (c *Cursors) Advance(
 	ctx context.Context,
 	actorID actor.ActorID,
 	newSeq log.Seq,
-	newID string,
+	newID message.ID,
 	nowMs int64,
 ) (bool, error) {
 	const q = `UPDATE actor_cursors

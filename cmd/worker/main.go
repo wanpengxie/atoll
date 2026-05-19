@@ -36,6 +36,7 @@ import (
 	"syscall"
 
 	"github.com/wanpengxie/ActOS/adapters/llm/kimi"
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/pkg/logger"
@@ -184,7 +185,9 @@ type kimiIPCAdapter struct {
 
 func (a *kimiIPCAdapter) ChannelID() channel.ID { return a.client.ChannelID() }
 func (a *kimiIPCAdapter) WorkerID() string      { return a.client.WorkerID() }
-func (a *kimiIPCAdapter) WorkerActorID() string { return a.client.WorkerActorID() }
+func (a *kimiIPCAdapter) WorkerActorID() actor.ActorID {
+	return a.client.WorkerActorID()
+}
 
 // Triggers wraps the worker.IPCClient trigger channel by spinning a
 // goroutine that translates each ipc.TriggerPayload into the

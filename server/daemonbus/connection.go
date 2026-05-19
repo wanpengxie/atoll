@@ -31,7 +31,7 @@ type Connection struct {
 	transport Transport
 
 	mu      sync.Mutex
-	pending map[string]chan daemonbus.Frame // frame_id → ack waiter
+	pending map[daemonbus.FrameID]chan daemonbus.Frame // frame_id → ack waiter
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -43,7 +43,7 @@ func NewConnection(daemonID placement.DaemonID, epoch daemonbus.ConnectionEpoch,
 		DaemonID:        daemonID,
 		ConnectionEpoch: epoch,
 		transport:       tx,
-		pending:         map[string]chan daemonbus.Frame{},
+		pending:         map[daemonbus.FrameID]chan daemonbus.Frame{},
 		closed:          make(chan struct{}),
 	}
 }
@@ -83,7 +83,7 @@ func (c *Connection) SendFrame(ctx context.Context, ft daemonbus.FrameType, payl
 	if err := c.transport.WriteFrame(ctx, frame); err != nil {
 		return "", fmt.Errorf("daemonbus: write %s: %w", ft, err)
 	}
-	return frame.FrameID, nil
+	return frame.FrameID.String(), nil
 }
 
 // SendAndAwait writes a frame and blocks until an ACK with matching
@@ -146,9 +146,9 @@ func buildFrame(ft daemonbus.FrameType, daemonID placement.DaemonID, epoch daemo
 		return daemonbus.Frame{}, fmt.Errorf("daemonbus: marshal %s: %w", ft, err)
 	}
 	return daemonbus.Frame{
-		FrameID:               newFrameID(),
+		FrameID:               daemonbus.FrameID(newFrameID()),
 		FrameType:             ft,
-		DaemonID:              string(daemonID),
+		DaemonID:              daemonID,
 		DaemonConnectionEpoch: epoch,
 		SentAt:                nowMs(),
 		Payload:               raw,
@@ -177,7 +177,7 @@ func DecodeCreateAck(frame daemonbus.Frame) (placement.CreateChannelAck, error) 
 		return out, fmt.Errorf("daemonbus: unmarshal ack: %w", err)
 	}
 	if out.FrameID == "" {
-		out.FrameID = frame.FrameID
+		out.FrameID = frame.FrameID.String()
 	}
 	return out, nil
 }

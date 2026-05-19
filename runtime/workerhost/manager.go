@@ -245,7 +245,7 @@ func (m *Manager) OnTrigger(ctx context.Context, _ actor.ActorID, env *message.E
 		// the session so the next trigger re-spawns. Don't release the
 		// lease synchronously here; the serve goroutine will run that
 		// when Host.Serve returns.
-		m.onPushFailure(sess, env.ID, err)
+		m.onPushFailure(sess, string(env.ID), err)
 		return fmt.Errorf("workerhost: push trigger: %w", err)
 	}
 	return nil

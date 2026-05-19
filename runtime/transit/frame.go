@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
 // Encode wraps a payload (PushFrame / AckFrame / CreateChannelRequest /
@@ -24,9 +25,9 @@ func Encode(
 		return daemonbus.Frame{}, fmt.Errorf("transit: encode payload (%s): %w", frameType, err)
 	}
 	return daemonbus.Frame{
-		FrameID:               frameID,
+		FrameID:               daemonbus.FrameID(frameID),
 		FrameType:             frameType,
-		DaemonID:              daemonID,
+		DaemonID:              placement.DaemonID(daemonID),
 		DaemonConnectionEpoch: epoch,
 		SentAt:                sentAt,
 		Payload:               raw,

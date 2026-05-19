@@ -27,7 +27,7 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (khar.Ou
 
 	// audience default → ['*'].
 	if env.Audience == nil {
-		env.Audience = []string{"*"}
+		env.Audience = message.Audience{message.AudienceWildcard}
 	}
 
 	// visibility default → public.

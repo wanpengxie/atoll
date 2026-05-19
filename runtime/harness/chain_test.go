@@ -144,7 +144,7 @@ func TestChain_Step4_UnknownType(t *testing.T) {
 		Kind:      message.KindEvent,
 		Sender:    message.Sender{ID: "agent:alpha"},
 		Payload:   json.RawMessage(`{}`),
-		Audience:  []string{"*"},
+		Audience:  message.Audience{"*"},
 	}
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessUnknownType {
@@ -378,7 +378,7 @@ func TestChain_CoreTypeKindLocked(t *testing.T) {
 		Kind:      message.KindRequest, // not allowed for system.event
 		Sender:    message.Sender{ID: actor.SystemActorID},
 		Payload:   json.RawMessage(`{}`),
-		Audience:  []string{"*"},
+		Audience:  message.Audience{"*"},
 	}
 	res, _ := c.Write(chainCallerCtx(actor.SystemActorID), env)
 	if res.RejectReason != message.HarnessKindNotAllowed {

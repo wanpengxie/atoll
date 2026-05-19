@@ -51,7 +51,8 @@ func (o *ViewSyncOutbox) PendingPage(ctx context.Context, limit int) ([]viewsync
 	var out []viewsync.PushFrame
 	for rows.Next() {
 		var seq int64
-		var msgID, envJSON string
+		var msgID message.ID
+		var envJSON string
 		if err := rows.Scan(&seq, &msgID, &envJSON); err != nil {
 			return nil, fmt.Errorf("store: outbox pending scan: %w", err)
 		}
@@ -165,7 +166,10 @@ func (o *ViewSyncOutbox) MessagesByRange(
 	var out []viewsync.ResyncMessage
 	for rows.Next() {
 		var env message.Envelope
-		var kind, sKind, senderID, vis string
+		var kind message.Kind
+		var sKind actor.Kind
+		var senderID actor.ActorID
+		var vis message.Visibility
 		var audJSON, payloadStr string
 		var docRefsStr sql.NullString
 		var notBefore, expiresAt, deliveredAt, deliveryFailedAt sql.NullInt64
@@ -182,10 +186,10 @@ func (o *ViewSyncOutbox) MessagesByRange(
 		); err != nil {
 			return nil, fmt.Errorf("store: resync range scan: %w", err)
 		}
-		env.Sender.Kind = actor.Kind(sKind)
-		env.Sender.ID = actor.ActorID(senderID)
-		env.Kind = message.Kind(kind)
-		env.Visibility = message.Visibility(vis)
+		env.Sender.Kind = sKind
+		env.Sender.ID = senderID
+		env.Kind = kind
+		env.Visibility = vis
 		env.Payload = json.RawMessage(payloadStr)
 		if err := json.Unmarshal([]byte(audJSON), &env.Audience); err != nil {
 			return nil, fmt.Errorf("store: resync audience: %w", err)

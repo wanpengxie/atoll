@@ -38,7 +38,7 @@ func TestSaga_Bootstrap(t *testing.T) {
 		CreateRequestID: "req-001",
 		OwnerEpoch:      1, FencingToken: 1,
 		InitialMembers: []placement.InitialMember{
-			{ActorIDInChannel: "user:alice", Kind: "human", DisplayName: "Alice"},
+			{MemberActorID: "user:alice", Kind: "human", DisplayName: "Alice"},
 		},
 	})
 	if err != nil {

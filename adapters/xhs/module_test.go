@@ -26,13 +26,13 @@ type respondCall struct {
 
 func (f *fakeRespond) fn(_ context.Context, id adapter.CorrelationKey, payload json.RawMessage, opts adapter.RespondOptions) (adapter.RespondResult, error) {
 	f.calls = append(f.calls, respondCall{requestID: id, payload: payload, opts: opts})
-	return adapter.RespondResult{MessageID: "response:" + string(id)}, f.err
+	return adapter.RespondResult{MessageID: message.ID("response:" + id.String())}, f.err
 }
 
 func newRequest(t *testing.T, id, typ string) *message.Envelope {
 	t.Helper()
 	return &message.Envelope{
-		ID:         id,
+		ID:         message.ID(id),
 		TS:         1000,
 		ChannelID:  "ch-1",
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:author"},
@@ -40,7 +40,7 @@ func newRequest(t *testing.T, id, typ string) *message.Envelope {
 		Type:       typ,
 		Payload:    json.RawMessage(`{"title":"hello"}`),
 		Visibility: message.VisibilityPrivate,
-		Audience:   []string{string(xhs.DefaultAdapterActorID)},
+		Audience:   message.Audience{xhs.DefaultAdapterActorID},
 	}
 }
 

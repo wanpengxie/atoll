@@ -151,7 +151,7 @@ func TestWorker_LeaseE2E(t *testing.T) {
 						Sender:    message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 						Kind:      message.KindEvent, Type: "agent.text",
 						Payload: json.RawMessage(`{"text":"turn.start"}`), Visibility: message.VisibilityPublic,
-						Audience: []string{"*"},
+						Audience: message.Audience{"*"},
 					}
 					if _, err := client.WriteMessage(ctx, env); err != nil {
 						bridgeDone <- err
@@ -263,7 +263,7 @@ func TestFence_DaemonEpochMismatch(t *testing.T) {
 		Sender: message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Kind:   message.KindEvent, Type: "stale",
 		Payload: json.RawMessage(`{}`), Visibility: message.VisibilityPublic,
-		Audience: []string{"*"},
+		Audience: message.Audience{"*"},
 	}})
 	if err := codec.Write(ipc.Frame{
 		ID: "f-1", Kind: ipc.KindWriteMessage, ChannelID: "ch-1",
