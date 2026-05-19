@@ -180,20 +180,20 @@ func enumContains(enum []any, v any) bool {
 	return false
 }
 
-// fallbackResponseSamples returns the 3 system fallback payloads the
+// fallbackResponseSamples returns the failed terminal payloads the
 // L2 §1.4.2 install rule mandates a response schema accept.
 func fallbackResponseSamples() [][]byte {
-	return [][]byte{
-		[]byte(`{"status":"failed","reason":"unanswered_timeout"}`),
-		[]byte(`{"status":"failed","reason":"adapter_default_timeout"}`),
-		[]byte(`{"status":"failed","reason":"receiver_unavailable"}`),
+	out := make([][]byte, 0, len(message.AllTerminalFailureReasons))
+	for _, reason := range message.AllTerminalFailureReasons {
+		out = append(out, []byte(fmt.Sprintf(`{"status":"failed","reason":%q}`, reason)))
 	}
+	return out
 }
 
-// ValidateFallbackResponseSchema runs the 3-sample check L2 §1.4.2
-// install requires for any type whose AllowedKinds includes request:
-// the schema MUST accept each fallback payload. Returns the offending
-// sample's error on the first failure.
+// ValidateFallbackResponseSchema runs the closed-set sample check L2
+// §1.4.2 install requires for any type whose AllowedKinds includes
+// request: the schema MUST accept each fallback payload. Returns the
+// offending sample's error on the first failure.
 func ValidateFallbackResponseSchema(schema json.RawMessage) error {
 	if len(schema) == 0 {
 		return errors.New("fallback response schema empty")

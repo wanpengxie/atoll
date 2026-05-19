@@ -65,7 +65,7 @@ func (h *wsHarness) handle(w http.ResponseWriter, r *http.Request) {
 	// Send connection_accepted frame the client expects.
 	frame := daemonbus.Frame{
 		FrameID:               "boot-1",
-		FrameType:             daemonbus.FrameType("control.connection_accepted"),
+		FrameType:             daemonbus.FrameTypeControlConnectionAccepted,
 		DaemonID:              placement.DaemonID(h.expectedID),
 		DaemonConnectionEpoch: daemonbus.ConnectionEpoch(epoch),
 		SentAt:                time.Now().UnixMilli(),

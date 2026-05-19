@@ -163,42 +163,44 @@ func (m *Module) handleChatCreate(ctx context.Context, env *message.Envelope) er
 // adapter's local redact for double safety.
 func (m *Module) handleAPIError(ctx context.Context, env *message.Envelope, op string, err error) error {
 	var apiErr *APIError
-	reason := op + "_failed"
+	errorCode := op + "_failed"
 	detail := err.Error()
 	if errors.As(err, &apiErr) {
-		reason = fmt.Sprintf("feishu_code_%d", apiErr.Code)
+		errorCode = fmt.Sprintf("feishu_code_%d", apiErr.Code)
 		detail = fmt.Sprintf("%s: %s", op, apiErr.Msg)
 	}
-	m.metrics.IncCounter("adapter.feishu."+op+".error", "reason", reason)
-	return m.fail(ctx, env, reason, detail)
+	m.metrics.IncCounter("adapter.feishu."+op+".error", "error_code", errorCode)
+	return m.fail(ctx, env, errorCode, detail)
 }
 
-// fail emits a status=failed Respond terminal with the supplied
-// reason+detail. detail is passed through the adapter's redact wrapper
-// to ensure any leaked secret substring is scrubbed.
-func (m *Module) fail(ctx context.Context, env *message.Envelope, reason, detail string) error {
+// fail emits a status=failed Respond terminal with a closed-set terminal
+// reason. The adapter-specific code is preserved in payload.error_code;
+// detail is passed through the adapter's redact wrapper.
+func (m *Module) fail(ctx context.Context, env *message.Envelope, errorCode, detail string) error {
 	redacted := m.redactString(detail)
 	payload, err := json.Marshal(map[string]any{
-		"detail": redacted,
+		"detail":     redacted,
+		"error_code": errorCode,
 	})
 	if err != nil {
 		return fmt.Errorf("feishu: marshal fail payload: %w", err)
 	}
 	_, err = m.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), payload, adapter.RespondOptions{
 		Status: "failed",
-		Reason: reason,
+		Reason: string(message.TerminalAdapterExecutionFailed),
 	})
 	if err != nil {
 		m.logger.Error("feishu.fail.respond.error",
 			"request_id", env.ID,
-			"reason", reason,
+			"error_code", errorCode,
 			"err", err.Error())
 		return err
 	}
 	m.logger.Warn("feishu.handler.failed",
 		"type", env.Type,
 		"request_id", env.ID,
-		"reason", reason,
+		"reason", string(message.TerminalAdapterExecutionFailed),
+		"error_code", errorCode,
 		"detail", redacted,
 	)
 	return nil

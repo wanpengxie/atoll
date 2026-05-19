@@ -30,8 +30,8 @@ type Config struct {
 	// DefaultSession is the device_session_id used when an inbound
 	// request payload omits one. Optional — if empty AND the payload
 	// also omits device_session_id, Module.Handle emits a synchronous
-	// failed terminal with reason="device_session_missing" rather than
-	// guessing.
+	// failed terminal with terminal_failure_reason=adapter_execution_failed
+	// and payload.error_code="device_session_missing" rather than guessing.
 	DefaultSession devicetransit.DeviceSessionID
 
 	// SessionStore is the daemon-side mirror table for device sessions.
@@ -159,8 +159,8 @@ func (m *Module) Shutdown(_ context.Context) error { return nil }
 
 // Handle translates one inbound kind=request envelope into a
 // device_transit.send frame. Synchronous failure paths emit a failed
-// terminal immediately so the agent observes a clean reason without
-// waiting on the F3 fallback timer.
+// terminal immediately so the agent observes a closed-set terminal reason
+// without waiting on the F3 fallback timer.
 func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 	if m.mctx == nil || m.proxy == nil {
 		return errors.New("xhs.Handle: Init was not called")
@@ -190,7 +190,8 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 
 	// Confirm the session is registered + reachable. The framework
 	// state-machine guarantees `active` is the only routable state;
-	// other states surface as device_offline / receiver_unavailable.
+	// other states surface as adapter_execution_failed with a
+	// device-specific payload.error_code.
 	sess, ok, err := m.sessions.Get(ctx, sid)
 	if err != nil {
 		return m.failNow(ctx, env.ID.String(), "", "session_store_unavailable", err.Error())
@@ -295,15 +296,23 @@ func (m *Module) OnExternalCallback(ctx context.Context, raw []byte) error {
 // value to feed ErrorPolicy.OnExternalError when the failure path
 // wants the policy hook (some failures — payload decode — are pre-
 // transit and don't need it; pass empty string to skip).
-func (m *Module) failNow(ctx context.Context, requestID string, terminalReason message.TerminalFailureReason, reason, detail string) error {
+func (m *Module) failNow(ctx context.Context, requestID string, terminalReason message.TerminalFailureReason, errorCode, detail string) error {
 	if m.mctx == nil {
-		return fmt.Errorf("xhs.failNow: Init was not called (reason=%s)", reason)
+		return fmt.Errorf("xhs.failNow: Init was not called (error_code=%s)", errorCode)
 	}
-	payload, marshalErr := json.Marshal(map[string]any{"reason": reason})
+	fields := map[string]any{"error_code": errorCode}
+	if detail != "" {
+		fields["detail"] = detail
+	}
+	payload, marshalErr := json.Marshal(fields)
 	if marshalErr != nil {
 		payload = []byte(`{}`)
 	}
-	opts := adapter.RespondOptions{Status: "failed", Reason: reason}
+	respondReason := message.TerminalAdapterExecutionFailed
+	if terminalReason != "" {
+		respondReason = terminalReason
+	}
+	opts := adapter.RespondOptions{Status: "failed", Reason: string(respondReason)}
 
 	if terminalReason != "" {
 		_ = m.mctx.ErrorPolicy.OnExternalError(ctx, adapter.CorrelationKey(message.ID(requestID)), terminalReason, detail)

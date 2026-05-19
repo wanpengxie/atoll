@@ -130,7 +130,7 @@ func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 
 		// Send the connection_accepted frame so daemon learns its
 		// epoch (mirrors the L2 §9.4 contract).
-		_, _ = conn.SendFrame(c.Request.Context(), daemonbus.FrameType("control.connection_accepted"), connectionAcceptedPayload{
+		_, _ = conn.SendFrame(c.Request.Context(), daemonbus.FrameTypeControlConnectionAccepted, connectionAcceptedPayload{
 			DaemonID:        string(daemonID),
 			ConnectionEpoch: int64(epoch),
 		})
@@ -143,12 +143,10 @@ func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 	}
 }
 
-// connectionAcceptedPayload mirrors a tiny custom frame the gateway
-// sends right after upgrading. Strictly speaking control.connection_
-// accepted is not in the L2 §9.1 closed set (which is 18 control
-// types) — this is a demo-period nicety that the daemon side may
-// ignore. Treat it as informational metadata, NOT a protocol
-// requirement.
+// connectionAcceptedPayload mirrors the control.connection_accepted
+// frame the gateway sends right after upgrading so the daemon learns
+// its assigned connection epoch. It is handshake metadata rather than
+// a routed business frame.
 type connectionAcceptedPayload struct {
 	DaemonID        string `json:"daemon_id"`
 	ConnectionEpoch int64  `json:"connection_epoch"`

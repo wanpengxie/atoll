@@ -410,8 +410,8 @@ func TestIntegration_XhsPublish_PanicEmitsFailedTerminal(t *testing.T) {
 	if payload["status"] != "failed" {
 		t.Errorf("payload.status=%v want failed", payload["status"])
 	}
-	if payload["reason"] != string(message.TerminalReceiverUnavailable) {
-		t.Errorf("payload.reason=%v want %s", payload["reason"], message.TerminalReceiverUnavailable)
+	if payload["reason"] != string(message.TerminalAdapterPanic) {
+		t.Errorf("payload.reason=%v want %s", payload["reason"], message.TerminalAdapterPanic)
 	}
 	detail, _ := payload["detail"].(string)
 	if detail == "" {

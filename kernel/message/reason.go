@@ -182,6 +182,8 @@ const (
 	TerminalAdapterDefaultTimeout  TerminalFailureReason = "adapter_default_timeout"
 	TerminalReceiverUnavailable    TerminalFailureReason = "receiver_unavailable"
 	TerminalHumanUnansweredTimeout TerminalFailureReason = "human_unanswered_timeout"
+	TerminalAdapterExecutionFailed TerminalFailureReason = "adapter_execution_failed"
+	TerminalAdapterPanic           TerminalFailureReason = "adapter_panic"
 )
 
 // AllTerminalFailureReasons enumerates every value of the
@@ -191,6 +193,8 @@ var AllTerminalFailureReasons = []TerminalFailureReason{
 	TerminalAdapterDefaultTimeout,
 	TerminalReceiverUnavailable,
 	TerminalHumanUnansweredTimeout,
+	TerminalAdapterExecutionFailed,
+	TerminalAdapterPanic,
 }
 
 // String returns the wire form of r.

@@ -8,14 +8,14 @@ import (
 )
 
 // TestFrameTypeClosedSetCardinality asserts the L2 §9.1 closed-set
-// cardinality. M1.5 = 4 viewsync + 18 control + 4 device_transit = 26.
+// cardinality. M1.5 = 4 viewsync + 19 control + 4 device_transit = 27.
 //
 // Exact values (in spec order) checked by TestAllFrameTypesSpecOrder.
 func TestFrameTypeClosedSetCardinality(t *testing.T) {
 	t.Parallel()
 
-	if got := len(AllFrameTypes); got != 26 {
-		t.Errorf("AllFrameTypes len = %d, want 26 (4 viewsync + 18 control + 4 device_transit)", got)
+	if got := len(AllFrameTypes); got != 27 {
+		t.Errorf("AllFrameTypes len = %d, want 27 (4 viewsync + 19 control + 4 device_transit)", got)
 	}
 
 	// Per-category breakdown — keeps the failure message specific when
@@ -27,8 +27,8 @@ func TestFrameTypeClosedSetCardinality(t *testing.T) {
 	if counts[CategoryViewsync] != 4 {
 		t.Errorf("viewsync frame count = %d, want 4", counts[CategoryViewsync])
 	}
-	if counts[CategoryControl] != 18 {
-		t.Errorf("control frame count = %d, want 18", counts[CategoryControl])
+	if counts[CategoryControl] != 19 {
+		t.Errorf("control frame count = %d, want 19", counts[CategoryControl])
 	}
 	if counts[CategoryDeviceTransit] != 4 {
 		t.Errorf("device_transit frame count = %d, want 4", counts[CategoryDeviceTransit])
@@ -47,6 +47,7 @@ func TestAllFrameTypesSpecOrder(t *testing.T) {
 		FrameTypeViewsyncResyncRequest,
 		FrameTypeViewsyncResyncResponse,
 		// control plane
+		FrameTypeControlConnectionAccepted,
 		FrameTypeControlCreateChannel,
 		FrameTypeControlCreateChannelAck,
 		FrameTypeControlUnbindChannel,

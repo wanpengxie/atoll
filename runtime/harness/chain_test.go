@@ -159,6 +159,7 @@ func TestChain_Step5_RequestAudienceInvalid(t *testing.T) {
 	treg.Add(TypeView{
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		MaxPendingMs:   10_000,
 		HandlerActorID: "tool:feishu",
 	})
 	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "*", json.RawMessage(`{"title":"x"}`))
@@ -174,6 +175,7 @@ func TestChain_Step5_AudienceActorNotRegistered(t *testing.T) {
 	treg.Add(TypeView{
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		MaxPendingMs:   10_000,
 		HandlerActorID: "tool:feishu",
 	})
 	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:does-not-exist", json.RawMessage(`{"title":"x"}`))
@@ -190,6 +192,7 @@ func TestChain_Step5_AudienceHandlerMismatch(t *testing.T) {
 	treg.Add(TypeView{
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		MaxPendingMs:   10_000,
 		HandlerActorID: "tool:feishu",
 	})
 	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:other", json.RawMessage(`{"title":"x"}`))
@@ -226,6 +229,7 @@ func TestChain_Step6_PayloadSchema(t *testing.T) {
 		SchemasByKind: map[message.Kind]json.RawMessage{
 			message.KindRequest: json.RawMessage(`{"type":"object","required":["title"]}`),
 		},
+		MaxPendingMs:   10_000,
 		HandlerActorID: "tool:feishu",
 	})
 	prev := DefaultPayloadValidator
@@ -237,6 +241,97 @@ func TestChain_Step6_PayloadSchema(t *testing.T) {
 		t.Fatalf("expected payload_schema_violation, got %s", res.RejectReason)
 	}
 }
+
+func TestChain_Step6_PayloadSchemaFailsClosedWithoutValidator(t *testing.T) {
+	c, _, _, treg := newTestChain(t)
+	treg.Add(TypeView{
+		Type:         "feishu.chat.send",
+		AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
+		SchemasByKind: map[message.Kind]json.RawMessage{
+			message.KindRequest: json.RawMessage(`{"type":"object"}`),
+		},
+		MaxPendingMs:   10_000,
+		HandlerActorID: "tool:feishu",
+	})
+	prev := DefaultPayloadValidator
+	SetPayloadValidator(nil)
+	t.Cleanup(func() { SetPayloadValidator(prev) })
+
+	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu", json.RawMessage(`{}`))
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
+	if res.RejectReason != message.HarnessPayloadSchemaViolation {
+		t.Fatalf("expected payload_schema_violation, got %s", res.RejectReason)
+	}
+	if res.RejectDetail != ErrPayloadValidatorMissing.Error() {
+		t.Fatalf("detail=%q want %q", res.RejectDetail, ErrPayloadValidatorMissing.Error())
+	}
+}
+
+func TestChain_Step5_DefaultExpiresAtByReceiverKind(t *testing.T) {
+	c, areg, _, treg := newTestChain(t)
+	_ = areg.Insert(context.Background(), actorreg.Record{ID: "agent:beta", Kind: actor.KindAgent, CreatedAt: 1})
+	treg.Add(TypeView{
+		Type:           "tool.exec",
+		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		MaxPendingMs:   2500,
+		HandlerActorID: "tool:feishu",
+	})
+
+	cases := []struct {
+		name     string
+		env      *message.Envelope
+		want     *int64
+		wantNil  bool
+		callerID actor.ActorID
+	}{
+		{
+			name:     "tool max_pending_ms",
+			env:      newRequest("req-tool", "agent:alpha", "tool.exec", "tool:feishu", json.RawMessage(`{}`)),
+			want:     int64Ptr(1700000002500),
+			callerID: "agent:alpha",
+		},
+		{
+			name:     "agent default",
+			env:      newRequest("req-agent", "agent:alpha", "human.text", "agent:beta", json.RawMessage(`{"text":"hi"}`)),
+			want:     int64Ptr(1700000000000 + defaultAgentMaxPendingMs),
+			callerID: "agent:alpha",
+		},
+		{
+			name:     "system default",
+			env:      newRequest("req-system", "agent:alpha", "human.text", string(actor.SystemActorID), json.RawMessage(`{"text":"hi"}`)),
+			want:     int64Ptr(1700000000000 + defaultSystemMaxPendingMs),
+			callerID: "agent:alpha",
+		},
+		{
+			name:     "human null baseline",
+			env:      newRequest("req-human", "agent:alpha", "human.text", "user:demo", json.RawMessage(`{"text":"hi"}`)),
+			wantNil:  true,
+			callerID: "agent:alpha",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := c.Write(chainCallerCtx(tc.callerID), tc.env)
+			if err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			if !res.Accepted() {
+				t.Fatalf("Write rejected: %s %s", res.RejectReason, res.RejectDetail)
+			}
+			if tc.wantNil {
+				if tc.env.ExpiresAt != nil {
+					t.Fatalf("ExpiresAt=%d want nil", *tc.env.ExpiresAt)
+				}
+				return
+			}
+			if tc.env.ExpiresAt == nil || *tc.env.ExpiresAt != *tc.want {
+				t.Fatalf("ExpiresAt=%v want %d", tc.env.ExpiresAt, *tc.want)
+			}
+		})
+	}
+}
+
+func int64Ptr(v int64) *int64 { return &v }
 
 var errFakeSchema = &schemaError{msg: "missing field"}
 
@@ -279,6 +374,7 @@ func TestChain_Step8_TerminalDuplicate(t *testing.T) {
 	treg.Add(TypeView{
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		MaxPendingMs:   10_000,
 		HandlerActorID: "tool:feishu",
 	})
 	// Seed a parent request and a terminal response.

@@ -452,6 +452,95 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 	}
 }
 
+func TestMessages_ReceiverUnavailableRequests(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	areg := store.NewActorRegistry(db)
+	for _, rec := range []actorreg.Record{
+		{ID: "agent:active", Kind: actor.KindAgent, CreatedAt: 1},
+		{ID: "agent:gone", Kind: actor.KindAgent, CreatedAt: 1},
+	} {
+		if err := areg.Insert(ctx, rec); err != nil {
+			t.Fatalf("insert actor %s: %v", rec.ID, err)
+		}
+	}
+	if err := areg.Deregister(ctx, "agent:gone", 2); err != nil {
+		t.Fatalf("deregister: %v", err)
+	}
+
+	msgs := store.NewMessages(db)
+	mkReq := func(id, audience string) *message.Envelope {
+		return &message.Envelope{
+			ID:         message.ID(id),
+			TS:         1000,
+			TSReceived: 1000,
+			ChannelID:  "ch-1",
+			Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
+			Kind:       message.KindRequest,
+			Type:       "agent.text",
+			Payload:    json.RawMessage(`{}`),
+			Visibility: message.VisibilityPublic,
+			Audience:   message.Audience{actor.ActorID(audience)},
+		}
+	}
+	for _, env := range []*message.Envelope{
+		mkReq("req-active", "agent:active"),
+		mkReq("req-gone", "agent:gone"),
+		mkReq("req-missing", "agent:missing"),
+		mkReq("req-settled-missing", "agent:missing"),
+	} {
+		if _, err := msgs.Append(ctx, env); err != nil {
+			t.Fatalf("append %s: %v", env.ID, err)
+		}
+	}
+	terminal := &message.Envelope{
+		ID:         "resp-settled-missing",
+		TS:         1001,
+		TSReceived: 1001,
+		ChannelID:  "ch-1",
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind:       message.KindResponse,
+		Type:       "agent.text",
+		Payload:    json.RawMessage(`{"status":"failed","reason":"receiver_unavailable"}`),
+		ParentID:   "req-settled-missing",
+		Visibility: message.VisibilityPublic,
+		Audience:   message.Audience{"agent:a"},
+		IsTerminal: true,
+	}
+	if _, err := msgs.Append(ctx, terminal); err != nil {
+		t.Fatalf("append terminal: %v", err)
+	}
+	if _, err := msgs.Append(ctx, &message.Envelope{
+		ID:         "evt-missing",
+		TS:         1000,
+		TSReceived: 1000,
+		ChannelID:  "ch-1",
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
+		Kind:       message.KindEvent,
+		Type:       "noise.tick",
+		Payload:    json.RawMessage(`{}`),
+		Visibility: message.VisibilityPublic,
+		Audience:   message.Audience{"agent:missing"},
+	}); err != nil {
+		t.Fatalf("append event: %v", err)
+	}
+
+	got, err := msgs.ReceiverUnavailableRequests(ctx, 64)
+	if err != nil {
+		t.Fatalf("ReceiverUnavailableRequests: %v", err)
+	}
+	want := []string{"req-gone", "req-missing"}
+	if gotIDs := ids(got); !equalStrings(gotIDs, want) {
+		t.Fatalf("ReceiverUnavailableRequests got %v want %v", gotIDs, want)
+	}
+}
+
 func TestMessages_ConcurrentTerminalDuplicateClassified(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -519,6 +608,18 @@ func ids(rows []message.Envelope) []string {
 		out[i] = string(r.ID)
 	}
 	return out
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func newSimpleEnvelope(seq int) *message.Envelope {

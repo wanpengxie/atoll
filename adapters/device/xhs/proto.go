@@ -122,11 +122,12 @@ var allowedResultKeysByType = map[string]map[string]struct{}{
 	TypeCookieSync: {},
 }
 
-// allowedErrorKeysByType is the failure-path per-type allow-list.
-// `reason` flows through RespondOptions.Reason, not the payload spread.
-// `retry_after` is declared only on xhs.publish's failed schema; the
-// other types' failed schemas are {status, reason} only. device_id is
-// also only on xhs.publish's response schema.
+// allowedErrorKeysByType is the failure-path per-type allow-list for
+// callback error objects. `reason` flows through RespondOptions.Reason
+// as a closed terminal_failure_reason, while the callback's original
+// reason/code is preserved as payload.error_code. `retry_after` is
+// declared only on xhs.publish's failed schema; device_id is also only
+// on xhs.publish's response schema.
 var allowedErrorKeysByType = map[string]map[string]struct{}{
 	TypePublish: {
 		"retry_after": {},

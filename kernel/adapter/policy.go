@@ -31,8 +31,7 @@ type ErrorPolicy interface {
 	// OnExternalError is invoked by the adapter when the external
 	// system returns a non-recoverable error before the request
 	// completes. The implementation MUST emit a terminal_failure
-	// response (reason chosen from message.TerminalFailureReason or a
-	// domain-specific payload.reason — adapter decides).
+	// response with reason chosen from message.TerminalFailureReason.
 	OnExternalError(
 		ctx context.Context,
 		requestID CorrelationKey,
