@@ -189,7 +189,7 @@ func TestBuildBasePrompt_WithChannelContext(t *testing.T) {
 			{ActorID: "user:2cc317ee", Kind: "human", DisplayName: "Wanpeng Xie"},
 		},
 		Types: []kimi.TypeInfo{
-			{Type: "xhs.publish", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "via_server_transit", AllowedKinds: []string{"request", "response", "event"}},
+			{Type: "xhs.publish", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "via_server_transit", AllowedKinds: []string{"request", "response", "event"}, MaxPendingMs: 300_000},
 			{Type: "xhs.search", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "via_server_transit", AllowedKinds: []string{"request", "response"}},
 			{Type: "xhs.note.fetch", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "via_server_transit", AllowedKinds: []string{"request", "response"}},
 		},
@@ -206,6 +206,7 @@ func TestBuildBasePrompt_WithChannelContext(t *testing.T) {
 		"binding=via_server_transit",
 		"## Tool / business types available",
 		"xhs.publish",
+		"300000",
 		"xhs.search",
 		"xhs.note.fetch",
 		"## Active device sessions",
@@ -229,8 +230,16 @@ func TestLoadChannelContextFile_RoundTrip(t *testing.T) {
 		ChannelID:   "abc",
 		ChannelType: "xhs-creator",
 		Actors:      []kimi.ActorInfo{{ActorID: "system", Kind: "system"}},
-		Types:       []kimi.TypeInfo{{Type: "xhs.publish", HandlerActorID: "tool:xhs-adapter", AllowedKinds: []string{"request"}}},
-		Devices:     []kimi.DeviceInfo{{SessionID: "s1", State: "active"}},
+		Types: []kimi.TypeInfo{{
+			Type:           "xhs.publish",
+			HandlerActorID: "tool:xhs-adapter",
+			AllowedKinds:   []string{"request"},
+			SchemasByKind: map[string]json.RawMessage{
+				"request": json.RawMessage(`{"type":"object","required":["title"]}`),
+			},
+			MaxPendingMs: 1234,
+		}},
+		Devices: []kimi.DeviceInfo{{SessionID: "s1", State: "active"}},
 	}
 	buf, err := json.Marshal(original)
 	if err != nil {
@@ -248,6 +257,12 @@ func TestLoadChannelContextFile_RoundTrip(t *testing.T) {
 	}
 	if got.ChannelID != "abc" || len(got.Actors) != 1 || len(got.Types) != 1 || len(got.Devices) != 1 {
 		t.Errorf("round-trip mismatch: %#v", got)
+	}
+	if got.Types[0].MaxPendingMs != 1234 {
+		t.Errorf("type max_pending_ms=%d want 1234", got.Types[0].MaxPendingMs)
+	}
+	if string(got.Types[0].SchemasByKind["request"]) != `{"type":"object","required":["title"]}` {
+		t.Errorf("request schema=%s", got.Types[0].SchemasByKind["request"])
 	}
 
 	// Empty path → ok=false, no error.
@@ -496,6 +511,231 @@ func TestBridge_RunEmitsProgressPerToolStep(t *testing.T) {
 	}
 }
 
+func TestBridge_ChannelTypeToolEmitsRequestAndReturnsResponse(t *testing.T) {
+	cfg := mustConfig(t)
+	cfg.ChannelContext = kimi.ChannelContext{
+		Types: []kimi.TypeInfo{
+			{
+				Type:           "xhs.publish",
+				HandlerActorID: "tool:xhs-adapter",
+				AllowedKinds:   []string{"request", "response"},
+				SchemasByKind: map[string]json.RawMessage{
+					"request": json.RawMessage(`{"type":"object","required":["title","content"]}`),
+				},
+				MaxPendingMs: 1000,
+			},
+			{
+				Type:           "xhs.note.archived",
+				HandlerActorID: "tool:xhs-adapter",
+				AllowedKinds:   []string{"event"},
+			},
+		},
+	}
+	b, err := kimi.NewBridge(cfg)
+	if err != nil {
+		t.Fatalf("NewBridge: %v", err)
+	}
+	ipc := newFakeIPC()
+	resultCh := make(chan types.ToolResult, 1)
+
+	kimi.SetAgentFactory(b, func(ac kimi.AgentConfig) (kimi.Agent, error) {
+		if len(ac.AdditionalTools) != 1 {
+			return nil, fmt.Errorf("AdditionalTools len=%d want 1", len(ac.AdditionalTools))
+		}
+		tool := ac.AdditionalTools[0]
+		if tool.Name() != "xhs.publish" {
+			return nil, fmt.Errorf("tool name=%q want xhs.publish", tool.Name())
+		}
+		if schema := string(tool.ParameterSchema()); !strings.Contains(schema, `"title"`) {
+			return nil, fmt.Errorf("tool schema=%s want title requirement", schema)
+		}
+		return &scriptedAgent{
+			emitFn: func(ctx context.Context, _ string) error {
+				emitter := kimi.BridgeWireEmitter(b)
+				call := types.ToolCall{
+					ID:        "call-xhs-publish",
+					Name:      "xhs.publish",
+					Arguments: map[string]any{"title": "hello", "content": "world"},
+				}
+				if err := emitter.Emit(wire.ToolCallRequest{ID: call.ID, ToolCall: call}); err != nil {
+					return err
+				}
+				result, err := tool.Execute(ctx, json.RawMessage(`{"title":"hello","content":"world"}`))
+				if err != nil {
+					return err
+				}
+				resultCh <- result
+				if err := emitter.Emit(wire.ToolCallResult{ID: call.ID, Result: result}); err != nil {
+					return err
+				}
+				if err := emitter.Emit(wire.TextDelta{Delta: "publish complete"}); err != nil {
+					return err
+				}
+				return emitter.Emit(wire.TurnEnd{StopReason: "end_turn"})
+			},
+		}, nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	injectErr := make(chan error, 1)
+	go func() {
+		ipc.triggers <- triggerEnv("t-tool")
+		req, err := waitForWritten(ctx, ipc, func(env message.Envelope) bool {
+			return env.Type == "xhs.publish" && env.Kind == message.KindRequest
+		})
+		if err != nil {
+			injectErr <- err
+			return
+		}
+		if req.Audience[0] != "tool:xhs-adapter" {
+			injectErr <- fmt.Errorf("request audience=%v want [tool:xhs-adapter]", req.Audience)
+			return
+		}
+		if req.ParentID != "t-tool" || req.CorrelationID != "corr-1" {
+			injectErr <- fmt.Errorf("request parent/correlation=%q/%q", req.ParentID, req.CorrelationID)
+			return
+		}
+		var payload map[string]string
+		if err := json.Unmarshal(req.Payload, &payload); err != nil {
+			injectErr <- fmt.Errorf("request payload decode: %w", err)
+			return
+		}
+		if payload["title"] != "hello" || payload["content"] != "world" {
+			injectErr <- fmt.Errorf("request payload=%v", payload)
+			return
+		}
+		ipc.triggers <- responseForRequest(req, json.RawMessage(`{"status":"completed","note_id":"n-1","url":"https://xhs.test/n-1"}`))
+		close(ipc.triggers)
+		injectErr <- nil
+	}()
+
+	if err := b.Run(ctx, ipc); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := <-injectErr; err != nil {
+		t.Fatal(err)
+	}
+	result := <-resultCh
+	if result.IsError {
+		t.Fatalf("ToolResult.IsError=true; value=%#v", result.Value.Value)
+	}
+	value, ok := result.Value.Value.(map[string]any)
+	if !ok {
+		t.Fatalf("ToolResult value=%T want map", result.Value.Value)
+	}
+	if value["note_id"] != "n-1" {
+		t.Errorf("ToolResult note_id=%v want n-1", value["note_id"])
+	}
+}
+
+func TestBridge_ChannelTypeToolTimeoutReturnsErrorResult(t *testing.T) {
+	cfg := mustConfig(t)
+	cfg.ChannelContext = kimi.ChannelContext{Types: []kimi.TypeInfo{{
+		Type:           "xhs.publish",
+		HandlerActorID: "tool:xhs-adapter",
+		AllowedKinds:   []string{"request"},
+		SchemasByKind:  map[string]json.RawMessage{"request": json.RawMessage(`{"type":"object"}`)},
+		MaxPendingMs:   20,
+	}}}
+	b, err := kimi.NewBridge(cfg)
+	if err != nil {
+		t.Fatalf("NewBridge: %v", err)
+	}
+	ipc := newFakeIPC()
+	resultCh := make(chan types.ToolResult, 1)
+	kimi.SetAgentFactory(b, func(ac kimi.AgentConfig) (kimi.Agent, error) {
+		tool := ac.AdditionalTools[0]
+		return &scriptedAgent{
+			emitFn: func(ctx context.Context, _ string) error {
+				result, err := tool.Execute(ctx, json.RawMessage(`{"title":"slow"}`))
+				if err != nil {
+					return err
+				}
+				resultCh <- result
+				emitter := kimi.BridgeWireEmitter(b)
+				if err := emitter.Emit(wire.ToolCallResult{ID: "call-timeout", Result: result}); err != nil {
+					return err
+				}
+				return emitter.Emit(wire.TurnEnd{StopReason: "end_turn"})
+			},
+		}, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go func() {
+		ipc.triggers <- triggerEnv("t-timeout")
+		close(ipc.triggers)
+	}()
+	if err := b.Run(ctx, ipc); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	result := <-resultCh
+	if !result.IsError {
+		t.Fatalf("ToolResult.IsError=false; value=%#v", result.Value.Value)
+	}
+	if !strings.Contains(fmt.Sprint(result.Value.Value), "timed out") {
+		t.Errorf("ToolResult value=%#v want timeout text", result.Value.Value)
+	}
+}
+
+func TestBridge_ChannelTypeToolTerminalFailureReturnsErrorResult(t *testing.T) {
+	cfg := mustConfig(t)
+	cfg.ChannelContext = kimi.ChannelContext{Types: []kimi.TypeInfo{{
+		Type:           "xhs.publish",
+		HandlerActorID: "tool:xhs-adapter",
+		AllowedKinds:   []string{"request"},
+		SchemasByKind:  map[string]json.RawMessage{"request": json.RawMessage(`{"type":"object"}`)},
+		MaxPendingMs:   1000,
+	}}}
+	b, err := kimi.NewBridge(cfg)
+	if err != nil {
+		t.Fatalf("NewBridge: %v", err)
+	}
+	ipc := newFakeIPC()
+	resultCh := make(chan types.ToolResult, 1)
+	kimi.SetAgentFactory(b, func(ac kimi.AgentConfig) (kimi.Agent, error) {
+		tool := ac.AdditionalTools[0]
+		return &scriptedAgent{
+			emitFn: func(ctx context.Context, _ string) error {
+				result, err := tool.Execute(ctx, json.RawMessage(`{"title":"boom"}`))
+				if err != nil {
+					return err
+				}
+				resultCh <- result
+				emitter := kimi.BridgeWireEmitter(b)
+				if err := emitter.Emit(wire.ToolCallResult{ID: "call-failed", Result: result}); err != nil {
+					return err
+				}
+				return emitter.Emit(wire.TurnEnd{StopReason: "end_turn"})
+			},
+		}, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go func() {
+		ipc.triggers <- triggerEnv("t-failed")
+		req, err := waitForWritten(ctx, ipc, func(env message.Envelope) bool {
+			return env.Type == "xhs.publish" && env.Kind == message.KindRequest
+		})
+		if err == nil {
+			ipc.triggers <- responseForRequest(req, json.RawMessage(`{"status":"failed","reason":"adapter_default_timeout"}`))
+		}
+		close(ipc.triggers)
+	}()
+	if err := b.Run(ctx, ipc); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	result := <-resultCh
+	if !result.IsError {
+		t.Fatalf("ToolResult.IsError=false; value=%#v", result.Value.Value)
+	}
+	value, ok := result.Value.Value.(map[string]any)
+	if !ok || value["error"] != "adapter_default_timeout" {
+		t.Fatalf("ToolResult value=%#v want error=adapter_default_timeout", result.Value.Value)
+	}
+}
+
 // TestBridge_RunEmitsFailedTerminalOnLLMError — when go-kimi returns
 // an *LLMError with StatusCode 429, the bridge MUST emit a public
 // terminal envelope with payload.next_action=failed + reason=llm_rate_limit.
@@ -695,4 +935,44 @@ func mustBridge(t *testing.T) *kimi.Bridge {
 		t.Fatalf("NewBridge: %v", err)
 	}
 	return b
+}
+
+func waitForWritten(ctx context.Context, ipc *fakeIPC, match func(message.Envelope) bool) (message.Envelope, error) {
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		for _, env := range ipc.Written() {
+			if match(env) {
+				return env, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return message.Envelope{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func responseForRequest(req message.Envelope, payload json.RawMessage) kimi.TriggerPayload {
+	audience := []string{string(req.Sender.ID)}
+	senderID := actor.ActorID("tool:test")
+	if len(req.Audience) > 0 {
+		senderID = actor.ActorID(req.Audience[0])
+	}
+	return kimi.TriggerPayload{
+		Envelope: message.Envelope{
+			ID:            "response-" + req.ID,
+			ChannelID:     req.ChannelID,
+			Type:          req.Type,
+			Kind:          message.KindResponse,
+			Visibility:    req.Visibility,
+			Sender:        message.Sender{Kind: actor.KindTool, ID: senderID},
+			Audience:      audience,
+			Payload:       payload,
+			ParentID:      req.ID,
+			CorrelationID: req.CorrelationID,
+		},
+		CorrelationID: req.CorrelationID,
+	}
 }

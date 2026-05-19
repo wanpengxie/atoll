@@ -111,10 +111,13 @@ type ActorInfo struct {
 
 // TypeInfo is one type_registry row projected into the LLM prompt.
 type TypeInfo struct {
-	Type           string   `json:"type"`             // e.g. "xhs.publish"
-	HandlerActorID string   `json:"handler_actor_id"` // e.g. "tool:xhs-adapter"
-	HandlerBinding string   `json:"handler_binding,omitempty"`
-	AllowedKinds   []string `json:"allowed_kinds,omitempty"` // subset of {event, request, response}
+	Type           string                     `json:"type"`             // e.g. "xhs.publish"
+	HandlerActorID string                     `json:"handler_actor_id"` // e.g. "tool:xhs-adapter"
+	HandlerBinding string                     `json:"handler_binding,omitempty"`
+	AllowedKinds   []string                   `json:"allowed_kinds,omitempty"` // subset of {event, request, response}
+	SchemasByKind  map[string]json.RawMessage `json:"schemas_by_kind,omitempty"`
+	MaxPendingMs   int64                      `json:"max_pending_ms,omitempty"`
+	Description    string                     `json:"description,omitempty"`
 }
 
 // DeviceInfo is one device_sessions row projected into the LLM prompt.
@@ -176,6 +179,11 @@ type Config struct {
 	// injects via COAGENT_DOMAIN_PROMPT. Cached by the provider so
 	// long as it stays byte-stable across turns.
 	SystemPrompt string
+
+	// ChannelContext is the same per-spawn registry snapshot folded into
+	// SystemPrompt. The bridge also consumes it structurally to derive
+	// go-kimi AdditionalTools for channel-local request types.
+	ChannelContext ChannelContext
 
 	// MaxTurns caps the bridge — same semantics as MockBridge. A
 	// non-positive value means UNLIMITED: the LLM itself decides when
@@ -256,6 +264,9 @@ type Bridge struct {
 	agentNew        func(gokimi.AgentConfig) (kimiAgent, error) // test hook
 	testWireEmitter wire.Emitter                                // populated by Run; tests reach in via export_test.go
 	envelopeSeq     atomic.Uint64
+
+	pendingMu    sync.Mutex
+	pendingTools map[string]chan toolResponse
 }
 
 // kimiAgent is the subset of go-kimi.Agent the bridge consumes. Carved
@@ -341,8 +352,11 @@ func (b *Bridge) Run(ctx context.Context, ipc IPCFacade) error {
 		}
 	}()
 
+	runCtx, stopRouter := context.WithCancel(ctx)
+	defer stopRouter()
+
 	turns := 0
-	triggers := ipc.Triggers()
+	triggers := b.routeTriggers(runCtx, ipc.Triggers())
 	for {
 		select {
 		case <-ctx.Done():
@@ -386,11 +400,12 @@ func (b *Bridge) buildAgent(provider llm.ChatProvider, emitter wire.Emitter) (ki
 		sessionID = sess.ID
 	}
 	return b.agentNew(gokimi.AgentConfig{
-		WorkDir:     b.cfg.WorkDir,
-		SessionID:   sessionID,
-		Config:      config.NewDefaultConfig(),
-		Provider:    provider,
-		WireEmitter: emitter,
+		WorkDir:         b.cfg.WorkDir,
+		SessionID:       sessionID,
+		Config:          config.NewDefaultConfig(),
+		Provider:        provider,
+		WireEmitter:     emitter,
+		AdditionalTools: b.channelTools(),
 		Overrides: gokimi.AgentOverrides{
 			SystemPrompt: b.cfg.SystemPrompt,
 			Model:        b.cfg.Model,
@@ -419,6 +434,10 @@ func (b *Bridge) runTurn(
 
 	turnCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	turnCtx = context.WithValue(turnCtx, channelToolRuntimeKey{}, channelToolRuntime{
+		ipc:     ipc,
+		trigger: trigger,
+	})
 
 	// agent.Run drives wire events into wireCh; consumeWire collates
 	// them into envelopes. We signal turn completion via an explicit
@@ -1099,8 +1118,8 @@ func renderChannelContext(c ChannelContext) string {
 
 	if len(c.Types) > 0 {
 		b.WriteString("\n## Tool / business types available\n")
-		b.WriteString("| type | handler_actor_id | binding | allowed_kinds |\n")
-		b.WriteString("|---|---|---|---|\n")
+		b.WriteString("| type | handler_actor_id | binding | allowed_kinds | max_pending_ms |\n")
+		b.WriteString("|---|---|---|---|---|\n")
 		for _, t := range c.Types {
 			b.WriteString("| ")
 			b.WriteString(t.Type)
@@ -1112,6 +1131,10 @@ func renderChannelContext(c ChannelContext) string {
 			}
 			b.WriteString(" | ")
 			b.WriteString(strings.Join(t.AllowedKinds, ", "))
+			b.WriteString(" | ")
+			if t.MaxPendingMs > 0 {
+				b.WriteString(fmt.Sprintf("%d", t.MaxPendingMs))
+			}
 			b.WriteString(" |\n")
 		}
 		b.WriteString("\nTo call a tool, emit an envelope with the matching type, kind=request, and audience=[handler_actor_id]. The harness routes the request; the tool replies with kind=response carrying the same correlation_id.\n")

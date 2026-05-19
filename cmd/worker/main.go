@@ -160,6 +160,7 @@ func buildBridge(provider string, maxTurns int) (worker.Bridge, error) {
 		if err != nil {
 			return nil, err
 		}
+		cfg.ChannelContext = channelCtx
 		kb, err := kimi.NewBridge(cfg)
 		if err != nil {
 			return nil, fmt.Errorf("kimi bridge: %w", err)
