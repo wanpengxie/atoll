@@ -27,17 +27,23 @@ import (
 // client.Shutdown after reaching the limit, simulating bridge exit.
 //
 // reuseSignal counts spawn events so the test can assert how many
-// worker subprocesses the Manager started.
+// worker subprocesses the Bridge started.
 type triggerCountingWorker struct {
 	t            *testing.T
 	spawnCount   *atomic.Int64
 	receivedAll  chan ipc.TriggerPayload
 	triggerLimit int
 	crashAfter   int // > 0 → simulate worker crash after N triggers
+	crashGate    <-chan struct{}
+	crashBudget  atomic.Int64
 }
 
 func (w *triggerCountingWorker) workerFn(ctx context.Context, leaseID string, _ []string, in io.Reader, out io.Writer) error {
 	w.spawnCount.Add(1)
+	crashAfter := 0
+	if w.crashAfter > 0 && w.crashBudget.Add(-1) >= 0 {
+		crashAfter = w.crashAfter
+	}
 	rt, err := worker.New(worker.Config{
 		LeaseID:        leaseID,
 		In:             in,
@@ -60,7 +66,14 @@ func (w *triggerCountingWorker) workerFn(ctx context.Context, leaseID string, _ 
 					case <-bctx.Done():
 						return nil
 					}
-					if w.crashAfter > 0 && received >= w.crashAfter {
+					if crashAfter > 0 && received >= crashAfter {
+						if w.crashGate != nil {
+							select {
+							case <-w.crashGate:
+							case <-bctx.Done():
+								return nil
+							}
+						}
 						// Return without graceful shutdown — simulates
 						// worker crash. Runtime.Run will return because
 						// Bridge returned; PipeSpawner closes pipes.
@@ -80,18 +93,19 @@ func (w *triggerCountingWorker) workerFn(ctx context.Context, leaseID string, _ 
 	return rt.Run(ctx)
 }
 
-// newManagerTestFixture sets up the daemon-side seam (chain + ledger +
-// lease store) over a fresh channel sqlite and returns a Manager wired
+// newBridgeTestFixture sets up the daemon-side seam (chain + ledger +
+// lease store) over a fresh channel sqlite and returns a Bridge wired
 // to the supplied worker fn. The caller drives OnTrigger and inspects
 // the recorded trigger envelopes via receivedAll.
-type managerFixture struct {
-	mgr        *workerhost.Manager
+type bridgeFixture struct {
+	mgr        *workerhost.Bridge
 	spawnCount *atomic.Int64
 	receivedCh chan ipc.TriggerPayload
+	crashGate  chan struct{}
 	cleanup    func()
 }
 
-func newManagerFixture(t *testing.T, triggerLimit, crashAfter int) *managerFixture {
+func newBridgeFixture(t *testing.T, triggerLimit, crashAfter int) *bridgeFixture {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -108,17 +122,25 @@ func newManagerFixture(t *testing.T, triggerLimit, crashAfter int) *managerFixtu
 
 	spawnCount := new(atomic.Int64)
 	received := make(chan ipc.TriggerPayload, 32)
+	var crashGate chan struct{}
+	if crashAfter > 0 {
+		crashGate = make(chan struct{})
+	}
 	tcw := &triggerCountingWorker{
 		t:            t,
 		spawnCount:   spawnCount,
 		receivedAll:  received,
 		triggerLimit: triggerLimit,
 		crashAfter:   crashAfter,
+		crashGate:    crashGate,
+	}
+	if crashAfter > 0 {
+		tcw.crashBudget.Store(1)
 	}
 
 	spawner := &workerhost.PipeSpawner{WorkerFunc: tcw.workerFn}
 	leaseStore := workerhost.NewLeaseStore(db)
-	mgr, err := workerhost.NewManager(workerhost.ManagerConfig{
+	mgr, err := workerhost.NewBridge(workerhost.BridgeConfig{
 		ChannelID:        chID,
 		AgentID:          agentID,
 		WorkerActorID:    agentID,
@@ -133,7 +155,7 @@ func newManagerFixture(t *testing.T, triggerLimit, crashAfter int) *managerFixtu
 		ServeCtx:         ctx,
 	})
 	if err != nil {
-		t.Fatalf("NewManager: %v", err)
+		t.Fatalf("NewBridge: %v", err)
 	}
 
 	cleanup := func() {
@@ -143,10 +165,11 @@ func newManagerFixture(t *testing.T, triggerLimit, crashAfter int) *managerFixtu
 		cancel()
 		_ = db.Close()
 	}
-	return &managerFixture{
+	return &bridgeFixture{
 		mgr:        mgr,
 		spawnCount: spawnCount,
 		receivedCh: received,
+		crashGate:  crashGate,
 		cleanup:    cleanup,
 	}
 }
@@ -287,13 +310,13 @@ func waitForTrigger(t *testing.T, ch <-chan ipc.TriggerPayload, want string, dea
 	}
 }
 
-// TestManager_SpawnAndReuse covers M1.6-T1 acceptance #3:
+// TestBridge_SpawnAndReuse covers M1.6-T1 acceptance #3:
 //
 //	OnTrigger #1 → spawn a worker subprocess
 //	OnTrigger #2 → reuse the SAME worker (no second spawn)
-func TestManager_SpawnAndReuse(t *testing.T) {
+func TestBridge_SpawnAndReuse(t *testing.T) {
 	t.Parallel()
-	f := newManagerFixture(t, 0, 0)
+	f := newBridgeFixture(t, 0, 0)
 	t.Cleanup(f.cleanup)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -329,15 +352,15 @@ func TestManager_SpawnAndReuse(t *testing.T) {
 	}
 }
 
-// TestManager_RespawnAfterCrash covers M1.6-T1 acceptance #4 (worker
+// TestBridge_RespawnAfterCrash covers M1.6-T1 acceptance #4 (worker
 // crash path): when the active worker exits unexpectedly, the next
 // OnTrigger spawns a fresh subprocess (with a new worker id) and the
 // lease row is re-acquired with the prevailing fencing tuple.
-func TestManager_RespawnAfterCrash(t *testing.T) {
+func TestBridge_RespawnAfterCrash(t *testing.T) {
 	t.Parallel()
 	// Worker crashes after the first trigger; second OnTrigger must
 	// spawn a new one.
-	f := newManagerFixture(t, 0, 1)
+	f := newBridgeFixture(t, 0, 1)
 	t.Cleanup(f.cleanup)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -348,15 +371,16 @@ func TestManager_RespawnAfterCrash(t *testing.T) {
 	}
 	_ = waitForTrigger(t, f.receivedCh, "env-1", 2*time.Second)
 	w1 := f.mgr.CurrentWorkerID()
+	close(f.crashGate)
 
 	// Wait for the crash to propagate — the serve goroutine sees pipe
-	// closure and the manager tombstones the session.
+	// closure and the bridge tombstones the session.
 	deadline := time.Now().Add(2 * time.Second)
 	for f.mgr.CurrentWorkerID() != "" && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	if f.mgr.CurrentWorkerID() != "" {
-		t.Fatal("manager did not tombstone crashed worker")
+		t.Fatal("bridge did not tombstone crashed worker")
 	}
 
 	if err := f.mgr.OnTrigger(ctx, "agent:channel-agent", triggerEnvelope("env-2", 2)); err != nil {
@@ -372,7 +396,7 @@ func TestManager_RespawnAfterCrash(t *testing.T) {
 	}
 }
 
-func TestManager_OnTriggerPushTimeoutDoesNotHoldLock(t *testing.T) {
+func TestBridge_OnTriggerPushTimeoutDoesNotHoldLock(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -392,7 +416,7 @@ func TestManager_OnTriggerPushTimeoutDoesNotHoldLock(t *testing.T) {
 	led := store.NewLedger(db)
 	var hookDrops atomic.Int64
 
-	mgr, err := workerhost.NewManager(workerhost.ManagerConfig{
+	mgr, err := workerhost.NewBridge(workerhost.BridgeConfig{
 		ChannelID:        chID,
 		AgentID:          agentID,
 		WorkerActorID:    agentID,
@@ -414,7 +438,7 @@ func TestManager_OnTriggerPushTimeoutDoesNotHoldLock(t *testing.T) {
 		},
 	})
 	if err != nil {
-		t.Fatalf("NewManager: %v", err)
+		t.Fatalf("NewBridge: %v", err)
 	}
 	t.Cleanup(func() {
 		closeCtx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -473,11 +497,11 @@ func TestManager_OnTriggerPushTimeoutDoesNotHoldLock(t *testing.T) {
 	}
 }
 
-// TestManager_WorkerEnvPropagates covers M1.6-T5 phase-3: the
-// ManagerConfig.WorkerEnv slice flows verbatim into every Spawner.Spawn
+// TestBridge_WorkerEnvPropagates covers M1.6-T5 phase-3: the
+// BridgeConfig.WorkerEnv slice flows verbatim into every Spawner.Spawn
 // invocation so per-channel COAGENT_* keys (channel id, channel type,
 // domain prompt) reach the worker subprocess without an extra IPC frame.
-func TestManager_WorkerEnvPropagates(t *testing.T) {
+func TestBridge_WorkerEnvPropagates(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -509,7 +533,7 @@ func TestManager_WorkerEnvPropagates(t *testing.T) {
 	}
 	spawner := &workerhost.PipeSpawner{
 		WorkerFunc: func(ctx context.Context, leaseID string, extraEnv []string, in io.Reader, out io.Writer) error {
-			// Snapshot the env Manager handed us. A nil-equivalent slice
+			// Snapshot the env Bridge handed us. A nil-equivalent slice
 			// also lands here (empty list) so a missing wire is visible
 			// as `len(extraEnv)==0`.
 			snap := append([]string(nil), extraEnv...)
@@ -522,7 +546,7 @@ func TestManager_WorkerEnvPropagates(t *testing.T) {
 	}
 
 	leaseStore := workerhost.NewLeaseStore(db)
-	mgr, err := workerhost.NewManager(workerhost.ManagerConfig{
+	mgr, err := workerhost.NewBridge(workerhost.BridgeConfig{
 		ChannelID:        chID,
 		AgentID:          agentID,
 		WorkerActorID:    agentID,
@@ -538,7 +562,7 @@ func TestManager_WorkerEnvPropagates(t *testing.T) {
 		WorkerEnv:        wantEnv,
 	})
 	if err != nil {
-		t.Fatalf("NewManager: %v", err)
+		t.Fatalf("NewBridge: %v", err)
 	}
 	t.Cleanup(func() {
 		closeCtx, cc := context.WithTimeout(context.Background(), 3*time.Second)
@@ -565,12 +589,12 @@ func TestManager_WorkerEnvPropagates(t *testing.T) {
 	}
 }
 
-// TestManager_CloseShutsWorker verifies Close() reliably tears down the
+// TestBridge_CloseShutsWorker verifies Close() reliably tears down the
 // live worker subprocess so no goroutine / pipe leaks survive the
-// fixture cleanup. Regression guard for the manager's serve goroutine.
-func TestManager_CloseShutsWorker(t *testing.T) {
+// fixture cleanup. Regression guard for the bridge's serve goroutine.
+func TestBridge_CloseShutsWorker(t *testing.T) {
 	t.Parallel()
-	f := newManagerFixture(t, 0, 0)
+	f := newBridgeFixture(t, 0, 0)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

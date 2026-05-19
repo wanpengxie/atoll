@@ -65,7 +65,7 @@ type Host struct {
 	codec *ipc.Codec
 
 	// ready closes after the worker completes its handshake. The
-	// WorkerManager waits on this before pushing the first KindTrigger
+	// WorkerBridge waits on this before pushing the first KindTrigger
 	// frame so that the worker's IPCClient is already running its read
 	// loop (otherwise the trigger arrives before the worker is ready
 	// to dispatch into Bridge.Triggers()).
@@ -102,7 +102,7 @@ func NewHost(in io.Reader, out io.Writer, cfg HostConfig) (*Host, error) {
 }
 
 // Ready returns a channel that closes once the worker handshake ack is
-// flushed. Used by WorkerManager to gate the first KindTrigger push.
+// flushed. Used by WorkerBridge to gate the first KindTrigger push.
 func (h *Host) Ready() <-chan struct{} { return h.ready }
 
 // PushTrigger emits a daemon → worker KindTrigger frame carrying the
@@ -254,7 +254,7 @@ func (h *Host) handleHandshake(frame ipc.Frame) error {
 		return err
 	}
 	// Signal Ready exactly once — gate for PushTrigger from the
-	// WorkerManager. Must happen after the ack flush so the worker
+	// WorkerBridge. Must happen after the ack flush so the worker
 	// has had the chance to populate its IPC client snapshot.
 	h.readyOnce.Do(func() { close(h.ready) })
 	return nil

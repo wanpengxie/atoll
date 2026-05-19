@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/placement"
@@ -20,6 +21,7 @@ type Config struct {
 	CreateTimeout    time.Duration // creating → orphan when this elapses
 	HeartbeatTimeout time.Duration // active → stale when last_heartbeat_at exceeds this
 	ReconcileTick    time.Duration // how often to run a sweep (default 5s in prod, faster in tests)
+	Logger           *zerolog.Logger
 }
 
 // Service bundles SQLStore + reconcile loop + the helper that
@@ -28,6 +30,7 @@ type Service struct {
 	store *SQLStore
 	cfg   Config
 	now   func() time.Time
+	log   zerolog.Logger
 	mu    sync.Mutex
 	// startedAt is set on first Reconcile call (or RunReconcile) to
 	// implement the T1.7 cold-start grace.
@@ -56,10 +59,15 @@ func NewService(db *sql.DB, cfg Config) *Service {
 	if cfg.ReconcileTick <= 0 {
 		cfg.ReconcileTick = 5 * time.Second
 	}
+	log := zerolog.Nop()
+	if cfg.Logger != nil {
+		log = *cfg.Logger
+	}
 	return &Service{
 		store: NewSQLStore(db),
 		cfg:   cfg,
 		now:   time.Now,
+		log:   log,
 	}
 }
 
@@ -305,7 +313,9 @@ func (s *Service) RunReconcile(ctx context.Context) {
 		case <-ticker.C:
 			if err := s.ReconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				// Reconcile errors are non-fatal — log but keep going.
-				fmt.Printf("[placements] reconcile error: %v\n", err)
+				s.log.Warn().Err(err).
+					Str("event", "placements.reconcile_failed").
+					Msg("placements reconcile failed")
 			}
 		}
 	}

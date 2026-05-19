@@ -6,7 +6,7 @@
 // Authoritative spec: .dalek/pm/m1.5-tickets.md §T6 (pushhub 子目录).
 //
 // Demo-period: single-instance; no Redis pub/sub. Production would
-// replace Hub.broadcast with a pub/sub backend so multiple server
+// replace Service.broadcast with a pub/sub backend so multiple server
 // processes can fan out.
 package pushhub
 
@@ -55,8 +55,8 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-// Hub holds the live subscriber registry.
-type Hub struct {
+// Service holds the live subscriber registry.
+type Service struct {
 	mu sync.RWMutex
 	// channel_id → user_id → set of subscribers
 	subs map[channel.ID]map[string]map[*subscriber]struct{}
@@ -89,15 +89,15 @@ type pushObserver struct {
 	fn        func(PushedFrame)
 }
 
-// NewHub builds a Hub.
-func NewHub() *Hub {
-	return &Hub{
+// NewService builds a Service.
+func NewService() *Service {
+	return &Service{
 		subs: map[channel.ID]map[string]map[*subscriber]struct{}{},
 	}
 }
 
 // SetAccessAuthorizer wires the subscribe-time channel access check.
-func (h *Hub) SetAccessAuthorizer(a channelaccess.Authorizer) {
+func (h *Service) SetAccessAuthorizer(a channelaccess.Authorizer) {
 	h.accessMu.Lock()
 	h.access = a
 	h.accessMu.Unlock()
@@ -105,15 +105,15 @@ func (h *Hub) SetAccessAuthorizer(a channelaccess.Authorizer) {
 
 // SetKeepaliveForTest overrides the ping cadence + idle read timeout
 // for the next-accepted subscriber. NOT for production callers — used
-// by hub_test.go to keep assertion windows tight without sleeping for
+// by service_test.go to keep assertion windows tight without sleeping for
 // the full 70s default.
-func (h *Hub) SetKeepaliveForTest(pingCadence, idleReadTimeout, pingWriteTimeout time.Duration) {
+func (h *Service) SetKeepaliveForTest(pingCadence, idleReadTimeout, pingWriteTimeout time.Duration) {
 	h.pingCadence = pingCadence
 	h.idleReadTimeout = idleReadTimeout
 	h.pingWriteTimeout = pingWriteTimeout
 }
 
-func (h *Hub) keepaliveCfg() (time.Duration, time.Duration, time.Duration) {
+func (h *Service) keepaliveCfg() (time.Duration, time.Duration, time.Duration) {
 	cadence := h.pingCadence
 	if cadence <= 0 {
 		cadence = pushhubPingCadence
@@ -129,7 +129,7 @@ func (h *Hub) keepaliveCfg() (time.Duration, time.Duration, time.Duration) {
 	return cadence, idle, pingWrite
 }
 
-func (h *Hub) accessAuthorizer() channelaccess.Authorizer {
+func (h *Service) accessAuthorizer() channelaccess.Authorizer {
 	h.accessMu.RLock()
 	defer h.accessMu.RUnlock()
 	return h.access
@@ -221,7 +221,7 @@ func (s *subscriber) pumpWrite() {
 // control frame. If the UI tab is closed without an explicit close
 // frame the conn would otherwise linger in h.subs until the OS TCP
 // stack notices — ping/pong + idle deadline forces a bounded reap.
-func (s *subscriber) pumpRead(ctx context.Context, hub *Hub) {
+func (s *subscriber) pumpRead(ctx context.Context, hub *Service) {
 	defer hub.unregister(s)
 	// Initial deadline + ping/pong handlers. We install here (not in
 	// HandleWS) because pumpRead is the goroutine that owns reads;
@@ -291,7 +291,7 @@ func (s *subscriber) sendSubscribeRejected(channelID channel.ID) {
 //
 // Server-pushed frames carry the kernel/message.Envelope shape
 // inside `{"type":"message","channel_id":"…","seq":N,"envelope":…}`.
-func (h *Hub) HandleWS(ident *identity.Service) gin.HandlerFunc {
+func (h *Service) HandleWS(ident *identity.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// HTTP→WS upgrade can't use middleware-set context (the
 		// request lifecycle is hijacked); re-authenticate by reading
@@ -315,7 +315,7 @@ func (h *Hub) HandleWS(ident *identity.Service) gin.HandlerFunc {
 
 // PushMessage fan-outs a stored message to every subscriber of the
 // channel. Called by gateway after viewcache.Apply commits.
-func (h *Hub) PushMessage(channelID channel.ID, seq viewsync.Seq, env message.Envelope) {
+func (h *Service) PushMessage(channelID channel.ID, seq viewsync.Seq, env message.Envelope) {
 	payload := map[string]any{
 		"type":       "message",
 		"channel_id": string(channelID),
@@ -368,7 +368,7 @@ func (h *Hub) PushMessage(channelID channel.ID, seq viewsync.Seq, env message.En
 // cancel func that unregisters the observer. NOT for production
 // callers — exists so handlers tests can assert fan-out ordering
 // without spinning up a WS subscriber.
-func (h *Hub) RegisterPushObserverForTest(channelID channel.ID, fn func(PushedFrame)) func() {
+func (h *Service) RegisterPushObserverForTest(channelID channel.ID, fn func(PushedFrame)) func() {
 	obs := &pushObserver{channelID: channelID, fn: fn}
 	h.observersMu.Lock()
 	h.observers = append(h.observers, obs)
@@ -385,7 +385,7 @@ func (h *Hub) RegisterPushObserverForTest(channelID channel.ID, fn func(PushedFr
 	}
 }
 
-func (h *Hub) subscribe(ctx context.Context, sub *subscriber, channelID channel.ID) error {
+func (h *Service) subscribe(ctx context.Context, sub *subscriber, channelID channel.ID) error {
 	if err := channelaccess.Require(ctx, h.accessAuthorizer(), string(channelID), sub.userID); err != nil {
 		return err
 	}
@@ -402,7 +402,7 @@ func (h *Hub) subscribe(ctx context.Context, sub *subscriber, channelID channel.
 	return nil
 }
 
-func (h *Hub) unsubscribe(sub *subscriber, channelID channel.ID) {
+func (h *Service) unsubscribe(sub *subscriber, channelID channel.ID) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if perUser, ok := h.subs[channelID]; ok {
@@ -422,7 +422,7 @@ func (h *Hub) unsubscribe(sub *subscriber, channelID channel.ID) {
 // RevokeChannelUser removes every live subscription held by userID for
 // channelID. The websocket connection stays open so the client may remain
 // subscribed to other channels.
-func (h *Hub) RevokeChannelUser(channelID channel.ID, userID string) {
+func (h *Service) RevokeChannelUser(channelID channel.ID, userID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	perUser, ok := h.subs[channelID]
@@ -442,7 +442,7 @@ func (h *Hub) RevokeChannelUser(channelID channel.ID, userID string) {
 	}
 }
 
-func (h *Hub) unregister(sub *subscriber) {
+func (h *Service) unregister(sub *subscriber) {
 	for ch := range sub.chans {
 		h.unsubscribe(sub, ch)
 	}
@@ -451,7 +451,7 @@ func (h *Hub) unregister(sub *subscriber) {
 
 // SubscriberCount returns the number of active subscribers for a
 // channel (test helper).
-func (h *Hub) SubscriberCount(channelID channel.ID) int {
+func (h *Service) SubscriberCount(channelID channel.ID) int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	bucket := h.subs[channelID]

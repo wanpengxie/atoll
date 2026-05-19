@@ -115,7 +115,7 @@ type App struct {
 	catalog    *catalog.Service
 	placements *placements.Service
 	viewcache  *viewcache.Service
-	pushhub    *pushhub.Hub
+	pushhub    *pushhub.Service
 	daemonbus  *daemonbus.Service
 	devicebus  *devicebus.Service
 }
@@ -156,9 +156,10 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		GracePeriod:      cfg.ReconcileGracePeriod,
 		CreateTimeout:    cfg.ReconcileCreateTimeout,
 		HeartbeatTimeout: cfg.ReconcileHeartbeatTimeout,
+		Logger:           &pkgLogger,
 	})
 	app.viewcache = viewcache.NewService(db)
-	app.pushhub = pushhub.NewHub()
+	app.pushhub = pushhub.NewService()
 	app.daemonbus = daemonbus.NewService(db, daemonbus.Config{
 		SharedSecret: cfg.DaemonSharedSecret,
 	})
@@ -204,7 +205,7 @@ func (a *App) Placements() *placements.Service { return a.placements }
 func (a *App) Viewcache() *viewcache.Service   { return a.viewcache }
 func (a *App) Daemonbus() *daemonbus.Service   { return a.daemonbus }
 func (a *App) Devicebus() *devicebus.Service   { return a.devicebus }
-func (a *App) Pushhub() *pushhub.Hub           { return a.pushhub }
+func (a *App) Pushhub() *pushhub.Service       { return a.pushhub }
 func (a *App) DB() *sql.DB                     { return a.db }
 
 // AuthorizeChannelAccess implements devicebus.AccessAuthorizer using the

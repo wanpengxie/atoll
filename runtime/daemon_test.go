@@ -964,7 +964,7 @@ func TestDaemon_Phase3_HeartbeatSender(t *testing.T) {
 //     resolves wildcard envelopes to the agent target).
 //   - bootChannel registers a deliverer handler for that id, so a
 //     post-harness Dispatch reaches the agent layer. The P2 stub just
-//     counts arrivals; P4 swaps in WorkerManager.OnTrigger via the same
+//     counts arrivals; P4 swaps in WorkerBridge.OnTrigger via the same
 //     Deliverer.Register seam.
 func TestDaemon_Phase3_ChannelAgent_Registered(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -14,7 +14,7 @@ import (
 // ExecSpawner which spawns ./bin/coagent-worker via os/exec; tests can
 // inject InProcessSpawner which runs a goroutine.
 //
-// extraEnv is the per-channel "KEY=VALUE" list the Manager passes in on
+// extraEnv is the per-channel "KEY=VALUE" list the Bridge passes in on
 // every Spawn call (M1.6-T5 phase-3). cmd/daemon uses this to inject
 // COAGENT_CHANNEL_ID / COAGENT_CHANNEL_TYPE / COAGENT_DOMAIN_PROMPT so
 // the worker bridge can grep / hash the L4 §2.4 domain prompt without
@@ -51,7 +51,7 @@ type ExecSpawner struct {
 // COAGENT_DOMAIN_PROMPT, ...) override any global default. Order:
 // os.Environ() → s.Env → extraEnv → COAGENT_WORKER_LEASE_ID.
 //
-// The leaseID assigned by the Manager is injected as
+// The leaseID assigned by the Bridge is injected as
 // COAGENT_WORKER_LEASE_ID so cmd/worker can fail-fast when the daemon
 // forgets to wire it — matching the worker's flag/env fallback (see
 // cmd/worker/main.go:55).
@@ -98,7 +98,7 @@ type PipeSpawner struct {
 	// When the function returns the goroutine ends; out is closed to
 	// signal Wait().
 	//
-	// extraEnv mirrors the per-Spawn env list the daemon-side Manager
+	// extraEnv mirrors the per-Spawn env list the daemon-side Bridge
 	// passes through (M1.6-T5 phase-3) — tests may inspect / forward
 	// it to construct a worker.Runtime whose embedded MockBridge sees
 	// the same COAGENT_* keys an ExecSpawner-spawned subprocess would
