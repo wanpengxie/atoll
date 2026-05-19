@@ -51,32 +51,6 @@ type TypeRegistry interface {
 	Lookup(ctx context.Context, typeName string) (TypeView, bool, error)
 }
 
-// CoreTypeRule expresses the L1 §1.1 core-type table for one entry. It
-// captures default_kind + whether the caller may override + the payload
-// validator shape.
-type CoreTypeRule struct {
-	DefaultKind   message.Kind
-	AllowOverride bool
-}
-
-// CoreTypeTable is the L1 §1.1 closed set of core types. core types are
-// engine-built-in: they live OUTSIDE type_registry and pass through
-// step 4 without a Lookup.
-var CoreTypeTable = map[string]CoreTypeRule{
-	"human.text": {DefaultKind: message.KindEvent, AllowOverride: true},
-	"agent.text": {DefaultKind: message.KindEvent, AllowOverride: true},
-	// agent.progress is the intermediate "process bubble" event emitted
-	// per LLM-step (tool-call boundary) inside one trigger turn. Carries
-	// payload.turn_index + tool_calls preview so the UI can render a
-	// muted progress row while the agent is still mid-work. See
-	// v4-message-definition.md §`<type>.progress` for the protocol slot.
-	"agent.progress":   {DefaultKind: message.KindEvent, AllowOverride: false},
-	"system.event":     {DefaultKind: message.KindEvent, AllowOverride: false},
-	"system.heartbeat": {DefaultKind: message.KindEvent, AllowOverride: false},
-	"file.created":     {DefaultKind: message.KindEvent, AllowOverride: false},
-	"file.updated":     {DefaultKind: message.KindEvent, AllowOverride: false},
-}
-
 // CallerContext carries the principal + transport metadata the harness
 // needs to verify a write. It is plumbed through context.Context (see
 // CtxWithCaller / CallerFromCtx) so step implementations do not need a

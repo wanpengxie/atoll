@@ -49,6 +49,9 @@ func TestCreatingToActiveHappyPath(t *testing.T) {
 	if p.State != placement.StateCreating {
 		t.Errorf("state=%q want creating", p.State)
 	}
+	if p.EnteredStateAt != p.CreatedAt || p.EnteredStateAt == 0 {
+		t.Errorf("creating entered_state_at=%d created_at=%d", p.EnteredStateAt, p.CreatedAt)
+	}
 	if req.ChannelID != p.ChannelID || req.OwnerEpoch != p.OwnerEpoch || req.FencingToken != p.FencingToken {
 		t.Errorf("create request mismatch: %+v vs %+v", req, p)
 	}
@@ -72,6 +75,9 @@ func TestCreatingToActiveHappyPath(t *testing.T) {
 	}
 	if got.ActivatedAt == 0 {
 		t.Errorf("activated_at not set")
+	}
+	if got.EnteredStateAt != got.ActivatedAt {
+		t.Errorf("entered_state_at=%d want activated_at=%d", got.EnteredStateAt, got.ActivatedAt)
 	}
 }
 
@@ -153,18 +159,22 @@ func TestCreateTimeoutOrphan(t *testing.T) {
 	if got.State != placement.StateOrphan {
 		t.Errorf("state=%q want orphan", got.State)
 	}
+	if got.EnteredStateAt != c.now.UnixMilli() {
+		t.Errorf("entered_state_at=%d want %d", got.EnteredStateAt, c.now.UnixMilli())
+	}
 }
 
-// TestColdStartGrace asserts the L2 §11 + T1.7 cold-start grace:
+// TestColdStartGrace asserts the L2 §11 + T1.7 row-local grace:
 // active rows whose last_heartbeat_at is stale MUST NOT transition
-// to stale inside the GracePeriod window. After the grace expires
-// the same row DOES transition.
+// to stale inside their entered_state_at GracePeriod window even when
+// the process-level start time is already older than the grace. After
+// the row-local grace expires the same row DOES transition.
 func TestColdStartGrace(t *testing.T) {
 	t.Parallel()
 	c := &clock{now: time.Unix(1_700_000_000, 0)}
 	svc := newSvc(t, c)
 	ctx := context.Background()
-	svc.MarkStartedAt()
+	svc.WithStartedAt(c.now.Add(-time.Hour))
 
 	// Reserve + activate at t=0.
 	p, _, err := svc.Reserve(ctx, channel.ID("ch-4"), placement.DaemonID("d-1"), 1, nil)
@@ -198,6 +208,42 @@ func TestColdStartGrace(t *testing.T) {
 	got, _, _ = svc.Get(ctx, p.ChannelID)
 	if got.State != placement.StateStale {
 		t.Errorf("post-grace state=%q want stale", got.State)
+	}
+}
+
+func TestResolveDaemonForChannelActiveOnly(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+
+	p, _, err := svc.Reserve(ctx, channel.ID("ch-resolve"), placement.DaemonID("d-owner"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if daemonID, ok, err := svc.ResolveDaemonForChannel(ctx, p.ChannelID); err != nil || ok || daemonID != "" {
+		t.Fatalf("creating ResolveDaemonForChannel daemon=%q ok=%v err=%v", daemonID, ok, err)
+	}
+
+	ack := placement.CreateChannelAck{
+		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
+		OwnerEpoch: p.OwnerEpoch, FencingToken: p.FencingToken,
+		DaemonID: p.DaemonID, Status: placement.AckBound,
+	}
+	if ok, err := svc.Activate(ctx, ack, 1); err != nil || !ok {
+		t.Fatalf("Activate ok=%v err=%v", ok, err)
+	}
+	daemonID, ok, err := svc.ResolveDaemonForChannel(ctx, p.ChannelID)
+	if err != nil || !ok || daemonID != p.DaemonID {
+		t.Fatalf("active ResolveDaemonForChannel daemon=%q ok=%v err=%v", daemonID, ok, err)
+	}
+
+	c.now = c.now.Add(40 * time.Second)
+	if err := svc.Store().MarkStale(ctx, p.ChannelID, c.now.UnixMilli()); err != nil {
+		t.Fatalf("MarkStale: %v", err)
+	}
+	if daemonID, ok, err := svc.ResolveDaemonForChannel(ctx, p.ChannelID); err != nil || ok || daemonID != "" {
+		t.Fatalf("stale ResolveDaemonForChannel daemon=%q ok=%v err=%v", daemonID, ok, err)
 	}
 }
 
@@ -243,11 +289,20 @@ func TestReclaim(t *testing.T) {
 	}
 
 	// Matching reclaim accepted.
+	c.now = c.now.Add(5 * time.Second)
+	reclaimAt := c.now.UnixMilli()
 	got, err := svc.AcceptReclaim(ctx, p.ChannelID, p.DaemonID, placement.ReclaimChannel{
 		ChannelID: p.ChannelID, FencingToken: p.FencingToken, OwnerEpoch: p.OwnerEpoch,
 	}, 9)
 	if err != nil || !got {
 		t.Fatalf("AcceptReclaim ok=%v err=%v", got, err)
+	}
+	reclaimed, _, err := svc.Get(ctx, p.ChannelID)
+	if err != nil {
+		t.Fatalf("Get reclaimed: %v", err)
+	}
+	if reclaimed.EnteredStateAt != reclaimAt || reclaimed.LastHeartbeatAt != reclaimAt {
+		t.Errorf("reclaim timestamps entered=%d heartbeat=%d want %d", reclaimed.EnteredStateAt, reclaimed.LastHeartbeatAt, reclaimAt)
 	}
 
 	// Mismatched (epoch / token) reclaim rejected.

@@ -35,6 +35,13 @@ type Service struct {
 	hasStart  bool
 }
 
+// ChannelDaemonResolver is the narrow daemonbus dependency for
+// resolving a channel's current active owner. The placement package
+// remains the sole server owner of channel_placements SQL.
+type ChannelDaemonResolver interface {
+	ResolveDaemonForChannel(ctx context.Context, channelID channel.ID) (placement.DaemonID, bool, error)
+}
+
 // NewService builds a Service.
 func NewService(db *sql.DB, cfg Config) *Service {
 	if cfg.GracePeriod <= 0 {
@@ -123,6 +130,7 @@ func (s *Service) ReserveWith(
 		CreateRequestID:       placement.CreateRequestID(uuid.NewString()),
 		DaemonConnectionEpoch: connectionEpoch,
 		CreatedAt:             now,
+		EnteredStateAt:        now,
 		// Federation / tenancy reservation per m1.5-tickets §T10.
 		// Zero values land as NULL in sqlite via nullableString.
 		HostActorID:     opts.HostActorID,
@@ -209,6 +217,12 @@ func (s *Service) ListByDaemon(ctx context.Context, daemonID placement.DaemonID)
 	return s.store.ListByDaemon(ctx, daemonID)
 }
 
+// ResolveDaemonForChannel returns the active daemon currently owning
+// channelID. ok=false means the channel has no active placement.
+func (s *Service) ResolveDaemonForChannel(ctx context.Context, channelID channel.ID) (placement.DaemonID, bool, error) {
+	return s.store.ResolveDaemonForChannel(ctx, channelID)
+}
+
 // ListByState is a thin pass-through.
 func (s *Service) ListByState(ctx context.Context, state placement.State) ([]placement.Placement, error) {
 	return s.store.ListByState(ctx, state)
@@ -226,12 +240,13 @@ func (s *Service) MarkStartedAt() {
 }
 
 // ReconcileOnce runs a single reconcile sweep — creating→orphan
-// (always) + active→stale (only after grace).
+// (always) + active→stale (only after row-local grace).
 func (s *Service) ReconcileOnce(ctx context.Context) error {
 	s.MarkStartedAt()
 	now := s.now()
 	cutoffCreate := now.Add(-s.cfg.CreateTimeout).UnixMilli()
 	cutoffHeart := now.Add(-s.cfg.HeartbeatTimeout).UnixMilli()
+	cutoffGrace := now.Add(-s.cfg.GracePeriod).UnixMilli()
 
 	// 1) creating + created_at < cutoffCreate → orphan (no grace).
 	creating, err := s.store.ListByState(ctx, placement.StateCreating)
@@ -247,20 +262,20 @@ func (s *Service) ReconcileOnce(ctx context.Context) error {
 		}
 	}
 
-	// 2) active + last_heartbeat_at < cutoffHeart → stale, only
-	//    AFTER cold-start grace has elapsed.
-	s.mu.Lock()
-	start := s.startedAt
-	s.mu.Unlock()
-	if now.Sub(start) < s.cfg.GracePeriod {
-		return nil
-	}
-
+	// 2) active + last_heartbeat_at < cutoffHeart → stale only after
+	//    this placement has spent GracePeriod in its current state.
 	active, err := s.store.ListByState(ctx, placement.StateActive)
 	if err != nil {
 		return err
 	}
 	for _, p := range active {
+		enteredStateAt := p.EnteredStateAt
+		if enteredStateAt == 0 {
+			enteredStateAt = p.ActivatedAt
+		}
+		if enteredStateAt > cutoffGrace {
+			continue
+		}
 		// last_heartbeat_at == 0 means we never saw one — that
 		// shouldn't happen because CASActivate sets it, but be
 		// defensive.

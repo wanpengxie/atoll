@@ -157,6 +157,8 @@ lint-arch:
 	fi
 	@echo "[lint-arch] go-arch-lint check"
 	@go-arch-lint check --arch-file .go-arch-lint.yml
+	@echo "[lint-arch] placements SQL boundary"
+	@bash scripts/lint-placements-sql-boundary.sh
 
 lint-banned-words:
 	@echo "[lint-banned-words] scripts/lint-banned-words.sh"

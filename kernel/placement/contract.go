@@ -106,6 +106,7 @@ type Placement struct {
 	LastHeartbeatAt       int64           // 0 until first heartbeat
 	CreatedAt             int64
 	ActivatedAt           int64 // 0 until state advances to Active
+	EnteredStateAt        int64 // timestamp when State was last entered
 
 	// Federation / tenancy reservation columns per m1.5-tickets §T10.
 	// All three are "" / NULL in M1.5 demo deployments.

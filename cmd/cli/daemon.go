@@ -45,6 +45,7 @@ func runDaemonStatus(args []string) {
 		DaemonID    string `json:"daemon_id"`
 		State       string `json:"state"`
 		ActivatedAt int64  `json:"activated_at"`
+		EnteredAt   int64  `json:"entered_state_at"`
 	}
 	type placementsResp struct {
 		Placements []placementRow `json:"placements"`

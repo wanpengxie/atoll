@@ -25,7 +25,7 @@ func newStepKindAndAudience(d Deps) khar.Step { return &stepKindAndAudience{deps
 func (s *stepKindAndAudience) ID() khar.StepID { return khar.StepKindAndAudience }
 
 func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (khar.Outcome, error) {
-	if rule, isCore := CoreTypeTable[env.Type]; isCore {
+	if rule, isCore := message.CoreTypeTable[env.Type]; isCore {
 		if !rule.AllowOverride && env.Kind != rule.DefaultKind {
 			return khar.Outcome{
 				RejectReason: message.HarnessKindNotAllowed,
@@ -79,7 +79,7 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (k
 	}
 
 	// business type handler_actor_id check (core types have no handler).
-	if _, isCore := CoreTypeTable[env.Type]; !isCore {
+	if _, isCore := message.CoreTypeTable[env.Type]; !isCore {
 		view, _, _ := s.deps.TypeRegistry.Lookup(ctx, env.Type)
 		if view.HandlerActorID != "" && view.HandlerActorID != target {
 			return khar.Outcome{

@@ -32,7 +32,7 @@ func newStepPayloadSchema(d Deps) khar.Step {
 func (s *stepPayloadSchema) ID() khar.StepID { return khar.StepPayloadSchema }
 
 func (s *stepPayloadSchema) Run(ctx context.Context, env *message.Envelope) (khar.Outcome, error) {
-	if _, isCore := CoreTypeTable[env.Type]; isCore {
+	if _, isCore := message.CoreTypeTable[env.Type]; isCore {
 		return khar.Outcome{}, nil
 	}
 	if s.deps.TypeRegistry == nil {
