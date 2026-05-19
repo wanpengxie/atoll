@@ -5,7 +5,6 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
-	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // TestDefaultInstallSpec asserts the canonical seed bundle: one tool
@@ -15,8 +14,8 @@ func TestDefaultInstallSpec(t *testing.T) {
 	if spec.Actor.ID != DefaultAdapterActorID {
 		t.Errorf("actor id=%q want %q", spec.Actor.ID, DefaultAdapterActorID)
 	}
-	if spec.Actor.Kind != message.SenderTool {
-		t.Errorf("actor kind=%q want %q", spec.Actor.Kind, message.SenderTool)
+	if spec.Actor.Kind != actor.KindTool {
+		t.Errorf("actor kind=%q want %q", spec.Actor.Kind, actor.KindTool)
 	}
 	if spec.Actor.Binding != actor.BindingViaServerTransit {
 		t.Errorf("actor binding=%q want %q", spec.Actor.Binding, actor.BindingViaServerTransit)

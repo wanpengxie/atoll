@@ -18,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	kadapter "github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
@@ -498,7 +499,7 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 	envelope := message.Envelope{
 		Type:          req.Type,
 		ChannelID:     channelID,
-		Sender:        message.Sender{Kind: message.SenderHuman, ID: member.ActorIDInChannel},
+		Sender:        message.Sender{Kind: actor.KindHuman, ID: member.ActorIDInChannel},
 		Kind:          kind,
 		Payload:       req.Payload,
 		ParentID:      req.ParentID,

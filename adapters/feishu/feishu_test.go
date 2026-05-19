@@ -266,7 +266,7 @@ func setup(t *testing.T, mods ...func(*feishu.Module)) *setupResult {
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actor.Record{
 		ID:      "tool:feishu",
-		Kind:    actor.SenderTool,
+		Kind:    actor.KindTool,
 		Binding: actor.BindingOutboundHTTP,
 	})
 
@@ -301,7 +301,7 @@ func newRequest(typ, id, payload string) *message.Envelope {
 		ID:         id,
 		TS:         time.Now().UnixMilli(),
 		ChannelID:  "channel:test",
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:author"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:author"},
 		Kind:       message.KindRequest,
 		Type:       typ,
 		Payload:    json.RawMessage(payload),
@@ -345,7 +345,7 @@ func TestInstallRejectsMissingCredentials(t *testing.T) {
 	)
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actor.Record{
-		ID: "tool:feishu", Kind: actor.SenderTool, Binding: actor.BindingOutboundHTTP,
+		ID: "tool:feishu", Kind: actor.KindTool, Binding: actor.BindingOutboundHTTP,
 	})
 	mgr, _ := framework.NewManager(framework.ManagerConfig{
 		ChannelID:       "channel:test",

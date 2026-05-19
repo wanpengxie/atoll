@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -386,7 +387,7 @@ func scanEnvelopeFrom(s rowScanner) (message.Envelope, error) {
 	); err != nil {
 		return message.Envelope{}, err
 	}
-	env.Sender.Kind = message.SenderKind(sKind)
+	env.Sender.Kind = actor.Kind(sKind)
 	env.Kind = message.Kind(kind)
 	env.Visibility = message.Visibility(vis)
 	env.Payload = json.RawMessage(payloadStr)

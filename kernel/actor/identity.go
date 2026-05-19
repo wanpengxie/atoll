@@ -1,6 +1,5 @@
-// Package actor defines the channel-actor identity model: ActorID type,
-// Sender re-export, ActorRegistry interface (channel-local query
-// contract per L1 §12).
+// Package actor defines the L0 channel-actor identity model: ActorID and
+// actor Kind primitives.
 //
 // `actor_registry` is a channel-local control-plane store table; this
 // package only declares the **interface** kernel-level callers (harness,

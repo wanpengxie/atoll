@@ -7,7 +7,6 @@ import (
 	"fmt"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // ActorRegistry implements kernel/actor.Registry over a channel-local
@@ -36,7 +35,7 @@ func (r *ActorRegistry) Lookup(ctx context.Context, id actor.ActorID) (actor.Rec
 	if err != nil {
 		return actor.Record{}, false, fmt.Errorf("store: actor lookup %q: %w", id, err)
 	}
-	rec.Kind = message.SenderKind(kind)
+	rec.Kind = actor.Kind(kind)
 	rec.Binding = actor.Binding(binding)
 	return rec, true, nil
 }
@@ -75,7 +74,7 @@ func (r *ActorRegistry) ListActive(ctx context.Context) ([]actor.Record, error) 
 		if err := rows.Scan(&rec.ID, &kind, &binding, &rec.DisplayName, &rec.CreatedAt); err != nil {
 			return nil, fmt.Errorf("store: list active actors scan: %w", err)
 		}
-		rec.Kind = message.SenderKind(kind)
+		rec.Kind = actor.Kind(kind)
 		rec.Binding = actor.Binding(binding)
 		out = append(out, rec)
 	}

@@ -64,7 +64,7 @@ func newTestManager(t *testing.T, mod *stubModule, opts ...func(*ManagerConfig))
 	// Pre-seed actor row matching the module's declaration.
 	if err := registry.Insert(context.Background(), actor.Record{
 		ID:      mod.decl.ActorID,
-		Kind:    actor.SenderTool,
+		Kind:    actor.KindTool,
 		Binding: actor.Binding(mod.decl.Binding),
 	}); err != nil {
 		t.Fatalf("seed actor: %v", err)
@@ -98,7 +98,7 @@ func newTestRequest(channelID channel.ID, sender, typ, requestID string) *messag
 		ID:         requestID,
 		TS:         1_700_000_000_000,
 		ChannelID:  string(channelID),
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: sender},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: sender},
 		Kind:       message.KindRequest,
 		Type:       typ,
 		Payload:    json.RawMessage(`{"msg":"hi"}`),
@@ -178,7 +178,7 @@ func TestManagerInstallRejectsBindingMismatch(t *testing.T) {
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actor.Record{
 		ID:      "tool:feishu",
-		Kind:    actor.SenderTool,
+		Kind:    actor.KindTool,
 		Binding: actor.BindingInProcess,
 	})
 	mod := &stubModule{
@@ -208,7 +208,7 @@ func TestManagerInstallRejectsTransitMissing(t *testing.T) {
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actor.Record{
 		ID:      "tool:xhs",
-		Kind:    actor.SenderTool,
+		Kind:    actor.KindTool,
 		Binding: actor.BindingViaServerTransit,
 	})
 	mod := &stubModule{
@@ -268,7 +268,7 @@ func TestManagerInstallAcceptsTransitWhenWired(t *testing.T) {
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actor.Record{
 		ID:      "tool:xhs",
-		Kind:    actor.SenderTool,
+		Kind:    actor.KindTool,
 		Binding: actor.BindingViaServerTransit,
 	})
 	mod := &stubModule{
@@ -337,7 +337,7 @@ func TestManagerDispatchHandlesRequestAndRespond(t *testing.T) {
 	if resp.Sender.ID != "tool:feishu" {
 		t.Fatalf("response sender.id=%s want tool:feishu", resp.Sender.ID)
 	}
-	if resp.Sender.Kind != message.SenderTool {
+	if resp.Sender.Kind != actor.KindTool {
 		t.Fatalf("response sender.kind=%s want tool", resp.Sender.Kind)
 	}
 	if resp.ParentID != req.ID {

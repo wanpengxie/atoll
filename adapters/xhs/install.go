@@ -58,7 +58,7 @@ func declarationTypeSchemas() map[string]adapter.TypeSchema {
 func DefaultActorSeed() actor.Record {
 	return actor.Record{
 		ID:          DefaultAdapterActorID,
-		Kind:        message.SenderTool,
+		Kind:        actor.KindTool,
 		Binding:     actor.BindingInProcess,
 		DisplayName: "xhs",
 	}

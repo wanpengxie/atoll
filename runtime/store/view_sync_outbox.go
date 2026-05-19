@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -181,7 +182,7 @@ func (o *ViewSyncOutbox) MessagesByRange(
 		); err != nil {
 			return nil, fmt.Errorf("store: resync range scan: %w", err)
 		}
-		env.Sender.Kind = message.SenderKind(sKind)
+		env.Sender.Kind = actor.Kind(sKind)
 		env.Kind = message.Kind(kind)
 		env.Visibility = message.Visibility(vis)
 		env.Payload = json.RawMessage(payloadStr)

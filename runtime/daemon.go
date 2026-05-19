@@ -1093,7 +1093,7 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 	if !ok {
 		if err := cr.registry.Insert(ctx, actor.Record{
 			ID:          cr.channelAgentID,
-			Kind:        message.SenderAgent,
+			Kind:        actor.KindAgent,
 			DisplayName: channelAgentDisplayName,
 			CreatedAt:   d.cfg.NowFn(),
 		}); err != nil {
@@ -2079,7 +2079,7 @@ func (d *Daemon) emitLongPendingFallback(
 		ID:            envID,
 		TS:            nowMs,
 		ChannelID:     req.ChannelID,
-		Sender:        message.Sender{Kind: message.SenderSystem, ID: string(actor.SystemActorID)},
+		Sender:        message.Sender{Kind: actor.KindSystem, ID: string(actor.SystemActorID)},
 		Kind:          message.KindResponse,
 		Type:          req.Type,
 		Payload:       payload,
@@ -2090,7 +2090,7 @@ func (d *Daemon) emitLongPendingFallback(
 	}
 
 	// The scheduler is a system caller; stamp the harness context with
-	// the system actor + permit kind pre-fill (we set Kind=SenderSystem
+	// the system actor + permit kind pre-fill (we set Kind=actor.KindSystem
 	// above so the registry-truth overwrite path remains exact-match).
 	chainCtx := harness.CtxWithCaller(ctx, harness.CallerContext{
 		ActorID:                 actor.SystemActorID,
@@ -2132,13 +2132,13 @@ func (d *Daemon) classifyLongPendingReason(
 		return message.TerminalReceiverUnavailable, true, nil
 	}
 	switch rec.Kind {
-	case message.SenderTool:
+	case actor.KindTool:
 		// Adapter framework F3 timer owns this case — MUTUAL EXCLUSION.
 		return "", false, nil
-	case message.SenderHuman:
+	case actor.KindHuman:
 		// Baseline: humans do not have an SLA in M1.6.
 		return "", false, nil
-	case message.SenderAgent, message.SenderSystem:
+	case actor.KindAgent, actor.KindSystem:
 		return message.TerminalUnansweredTimeout, true, nil
 	default:
 		// Unknown kind — defensive log + skip. The CHECK constraint on

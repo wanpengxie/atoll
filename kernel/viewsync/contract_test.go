@@ -7,6 +7,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -45,7 +46,7 @@ func TestPushAckFramePayloadFields(t *testing.T) {
 			ID:         "m-42",
 			TS:         1,
 			ChannelID:  "chan-A",
-			Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent-1"},
+			Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent-1"},
 			Kind:       message.KindEvent,
 			Type:       "agent.text",
 			Payload:    json.RawMessage(`{}`),
@@ -243,7 +244,7 @@ func mkPush(channelID channel.ID, seq Seq) PushFrame {
 			ID:         "env",
 			TS:         1,
 			ChannelID:  string(channelID),
-			Sender:     message.Sender{Kind: message.SenderAgent, ID: "a"},
+			Sender:     message.Sender{Kind: actor.KindAgent, ID: "a"},
 			Kind:       message.KindEvent,
 			Type:       "agent.text",
 			Payload:    json.RawMessage(`{}`),

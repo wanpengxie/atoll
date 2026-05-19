@@ -156,7 +156,7 @@ func TestDaemon_Phase3_DispatchesWriteMessage(t *testing.T) {
 	// Seed an actor row so the write_message handler accepts the caller.
 	areg := store.NewActorRegistry(db)
 	if err := areg.Insert(ctx, actor.Record{
-		ID: "user:alice", Kind: message.SenderHuman,
+		ID: "user:alice", Kind: actor.KindHuman,
 		DisplayName: "Alice", CreatedAt: now(),
 	}); err != nil {
 		t.Fatal(err)
@@ -335,8 +335,8 @@ func TestDaemon_FutureMessage_SchedulerDrains(t *testing.T) {
 	}
 	areg := store.NewActorRegistry(db)
 	for _, rec := range []actor.Record{
-		{ID: "user:alice", Kind: message.SenderHuman, CreatedAt: now()},
-		{ID: "agent:beta", Kind: message.SenderAgent, CreatedAt: now()},
+		{ID: "user:alice", Kind: actor.KindHuman, CreatedAt: now()},
+		{ID: "agent:beta", Kind: actor.KindAgent, CreatedAt: now()},
 	} {
 		if err := areg.Insert(ctx, rec); err != nil {
 			t.Fatal(err)
@@ -349,7 +349,7 @@ func TestDaemon_FutureMessage_SchedulerDrains(t *testing.T) {
 		ID:         "m-future",
 		TS:         now(),
 		ChannelID:  string(chID),
-		Sender:     message.Sender{Kind: message.SenderHuman, ID: "user:alice"},
+		Sender:     message.Sender{Kind: actor.KindHuman, ID: "user:alice"},
 		Kind:       message.KindEvent,
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{"text":"later"}`),
@@ -483,12 +483,12 @@ func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
 	// lands even when audience[0] is unknown.)
 	areg := store.NewActorRegistry(db)
 	for _, rec := range []actor.Record{
-		{ID: actor.SystemActorID, Kind: message.SenderSystem, CreatedAt: now()},
-		{ID: "agent:caller", Kind: message.SenderAgent, CreatedAt: now()},
-		{ID: "agent:beta", Kind: message.SenderAgent, CreatedAt: now()},
-		{ID: "tool:xhs", Kind: message.SenderTool, CreatedAt: now()},
-		{ID: "user:alice", Kind: message.SenderHuman, CreatedAt: now()},
-		{ID: "agent:gone", Kind: message.SenderAgent, CreatedAt: now()},
+		{ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: now()},
+		{ID: "agent:caller", Kind: actor.KindAgent, CreatedAt: now()},
+		{ID: "agent:beta", Kind: actor.KindAgent, CreatedAt: now()},
+		{ID: "tool:xhs", Kind: actor.KindTool, CreatedAt: now()},
+		{ID: "user:alice", Kind: actor.KindHuman, CreatedAt: now()},
+		{ID: "agent:gone", Kind: actor.KindAgent, CreatedAt: now()},
 	} {
 		if err := areg.Insert(ctx, rec); err != nil {
 			t.Fatalf("seed actor %s: %v", rec.ID, err)
@@ -527,7 +527,7 @@ func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
 			TS:         now(),
 			TSReceived: now(),
 			ChannelID:  string(chID),
-			Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:caller"},
+			Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:caller"},
 			Kind:       message.KindRequest,
 			Type:       "human.text",
 			Payload:    json.RawMessage(`{"text":"please"}`),
@@ -986,7 +986,7 @@ func TestDaemon_Phase3_ChannelAgent_Registered(t *testing.T) {
 	}
 	areg := store.NewActorRegistry(db)
 	if err := areg.Insert(ctx, actor.Record{
-		ID: "user:alice", Kind: message.SenderHuman,
+		ID: "user:alice", Kind: actor.KindHuman,
 		DisplayName: "Alice", CreatedAt: now(),
 	}); err != nil {
 		t.Fatal(err)
@@ -1034,8 +1034,8 @@ func TestDaemon_Phase3_ChannelAgent_Registered(t *testing.T) {
 		if !ok {
 			t.Fatalf("channel-agent actor row missing after bootChannel")
 		}
-		if rec.Kind != message.SenderAgent {
-			t.Errorf("channel-agent kind=%q want %q", rec.Kind, message.SenderAgent)
+		if rec.Kind != actor.KindAgent {
+			t.Errorf("channel-agent kind=%q want %q", rec.Kind, actor.KindAgent)
 		}
 	}
 
@@ -1161,7 +1161,7 @@ func TestDaemon_Phase3_WorkerReply(t *testing.T) {
 	}
 	areg := store.NewActorRegistry(db)
 	if err := areg.Insert(ctx, actor.Record{
-		ID: "user:alice", Kind: message.SenderHuman,
+		ID: "user:alice", Kind: actor.KindHuman,
 		DisplayName: "Alice", CreatedAt: now(),
 	}); err != nil {
 		t.Fatal(err)

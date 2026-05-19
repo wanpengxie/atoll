@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -189,7 +190,7 @@ func sampleRequestEnv() *message.Envelope {
 	return &message.Envelope{
 		ID:            "env-1",
 		ChannelID:     "channel-1",
-		Sender:        message.Sender{Kind: message.SenderAgent, ID: "agent:writer"},
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: "agent:writer"},
 		Kind:          message.KindRequest,
 		Type:          "xhs.publish",
 		Payload:       []byte(`{"title":"x"}`),

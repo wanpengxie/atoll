@@ -11,7 +11,6 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/store"
 )
@@ -162,7 +161,7 @@ func (s *Saga) Bootstrap(
 	reg := store.NewActorRegistry(channelDB)
 	if err := s.insertActorIfMissing(ctx, reg, actor.Record{
 		ID:        actor.SystemActorID,
-		Kind:      message.SenderSystem,
+		Kind:      actor.KindSystem,
 		Binding:   "",
 		CreatedAt: s.nowFn(),
 	}); err != nil {
@@ -174,9 +173,9 @@ func (s *Saga) Bootstrap(
 		if m.ActorIDInChannel == "" {
 			continue
 		}
-		kind := message.SenderHuman
+		kind := actor.KindHuman
 		if m.Kind != "" {
-			kind = message.SenderKind(m.Kind)
+			kind = actor.Kind(m.Kind)
 		}
 		if err := s.insertActorIfMissing(ctx, reg, actor.Record{
 			ID:          actor.ActorID(m.ActorIDInChannel),

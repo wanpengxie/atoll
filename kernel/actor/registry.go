@@ -26,7 +26,7 @@ const (
 // same.
 type Record struct {
 	ID             ActorID
-	Kind           SenderKind
+	Kind           Kind
 	Binding        Binding // empty for human / system
 	DisplayName    string  // optional; informative only (L1 §12.2 fields ⬜)
 	CreatedAt      int64

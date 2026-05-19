@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -42,7 +43,7 @@ func newFakeOutbox(chID channel.ID, n int) *fakeOutbox {
 				Type:       "tick",
 				Visibility: message.VisibilityPublic,
 				Kind:       message.KindEvent,
-				Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+				Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 				Payload:    json.RawMessage(`{}`),
 				Audience:   []string{"*"},
 			},

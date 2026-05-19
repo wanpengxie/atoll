@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/ActOS/adapters/xhs"
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -34,7 +35,7 @@ func newRequest(t *testing.T, id, typ string) *message.Envelope {
 		ID:         id,
 		TS:         1000,
 		ChannelID:  "ch-1",
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:author"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:author"},
 		Kind:       message.KindRequest,
 		Type:       typ,
 		Payload:    json.RawMessage(`{"title":"hello"}`),

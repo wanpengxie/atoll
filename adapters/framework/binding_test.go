@@ -72,7 +72,7 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 	lookup := NewMemoryRequestLookup(nil)
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actor.Record{
-		ID: "tool:xhs", Kind: actor.SenderTool, Binding: actor.BindingViaServerTransit,
+		ID: "tool:xhs", Kind: actor.KindTool, Binding: actor.BindingViaServerTransit,
 	})
 
 	var seenFrame *adapter.SendFrame
@@ -212,7 +212,7 @@ func TestOutboundHTTPBindingMCtxShape(t *testing.T) {
 func TestViaServerTransitRequiresDeviceTransit(t *testing.T) {
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actor.Record{
-		ID: "tool:vst", Kind: actor.SenderTool, Binding: actor.BindingViaServerTransit,
+		ID: "tool:vst", Kind: actor.KindTool, Binding: actor.BindingViaServerTransit,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{

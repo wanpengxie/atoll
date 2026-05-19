@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
@@ -290,7 +291,7 @@ func messageEnvelopeStub() message.Envelope {
 		ChannelID:  "ch-1",
 		Type:       "tick",
 		Visibility: message.VisibilityPublic,
-		Sender:     message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Kind:       message.KindEvent,
 		Payload:    json.RawMessage(`{}`),
 		Audience:   []string{"*"},

@@ -63,7 +63,7 @@ func EmitOrphanCallbackEvents(ctx context.Context, ev OrphanCallbackEvent) error
 	if err := writeEvent(ctx, ev.Chain, eventEnvelope{
 		Type:      OrphanCallbackType(ev.AdapterName),
 		ChannelID: ev.ChannelID,
-		Sender:    message.Sender{Kind: message.SenderTool, ID: string(ev.AdapterActorID)},
+		Sender:    message.Sender{Kind: actor.KindTool, ID: string(ev.AdapterActorID)},
 		Now:       now,
 		Payload:   adapterPayload,
 	}); err != nil {
@@ -72,7 +72,7 @@ func EmitOrphanCallbackEvents(ctx context.Context, ev OrphanCallbackEvent) error
 	return writeEvent(ctx, ev.Chain, eventEnvelope{
 		Type:      "system.event",
 		ChannelID: ev.ChannelID,
-		Sender:    message.Sender{Kind: message.SenderSystem, ID: string(actor.SystemActorID)},
+		Sender:    message.Sender{Kind: actor.KindSystem, ID: string(actor.SystemActorID)},
 		Now:       now,
 		Payload: map[string]any{
 			"severity":       "warn",
@@ -104,7 +104,7 @@ func emitTimerTerminalFailedEvent(ctx context.Context, ev timerTerminalFailedEve
 	return writeEvent(ctx, ev.Chain, eventEnvelope{
 		Type:      "system.event",
 		ChannelID: ev.ChannelID,
-		Sender:    message.Sender{Kind: message.SenderSystem, ID: string(actor.SystemActorID)},
+		Sender:    message.Sender{Kind: actor.KindSystem, ID: string(actor.SystemActorID)},
 		Now:       eventNow(ev.Clock),
 		Payload: map[string]any{
 			"severity":   "error",

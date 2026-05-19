@@ -96,7 +96,7 @@ func TestChain_Step3_SenderMismatch(t *testing.T) {
 func TestChain_Step3_SenderKindTamper(t *testing.T) {
 	c, _, _, _ := newTestChain(t)
 	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
-	env.Sender.Kind = message.SenderSystem // alpha is an agent.
+	env.Sender.Kind = actor.KindSystem // alpha is an agent.
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessSenderKindMismatch {
 		t.Fatalf("expected sender_kind_mismatch, got %s", res.RejectReason)
@@ -116,7 +116,7 @@ func TestChain_Step3_SenderKindOverwrite(t *testing.T) {
 	if !res.Accepted() {
 		t.Fatalf("expected accept, got reject=%s detail=%s", res.RejectReason, res.RejectDetail)
 	}
-	if env.Sender.Kind != message.SenderAgent {
+	if env.Sender.Kind != actor.KindAgent {
 		t.Fatalf("expected sender.kind=agent (forced), got %s", env.Sender.Kind)
 	}
 }
@@ -185,7 +185,7 @@ func TestChain_Step5_AudienceActorNotRegistered(t *testing.T) {
 // TestChain_Step5_AudienceHandlerMismatch.
 func TestChain_Step5_AudienceHandlerMismatch(t *testing.T) {
 	c, areg, _, treg := newTestChain(t)
-	_ = areg.Insert(context.Background(), actor.Record{ID: "tool:other", Kind: actor.SenderTool, CreatedAt: 1})
+	_ = areg.Insert(context.Background(), actor.Record{ID: "tool:other", Kind: actor.KindTool, CreatedAt: 1})
 	treg.Add(TypeView{
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},

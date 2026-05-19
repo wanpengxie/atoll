@@ -129,10 +129,10 @@ func newTestChain(t interface {
 }, opts ...func(*Deps)) (*Chain, *memActorRegistry, *memLog, *InMemoryTypeRegistry) {
 	t.Helper()
 	areg := newMemActorRegistry()
-	_ = areg.Insert(context.Background(), actor.Record{ID: "agent:alpha", Kind: actor.SenderAgent, CreatedAt: 1})
-	_ = areg.Insert(context.Background(), actor.Record{ID: "user:demo", Kind: actor.SenderHuman, CreatedAt: 1})
-	_ = areg.Insert(context.Background(), actor.Record{ID: actor.SystemActorID, Kind: actor.SenderSystem, CreatedAt: 1})
-	_ = areg.Insert(context.Background(), actor.Record{ID: "tool:feishu", Kind: actor.SenderTool, CreatedAt: 1})
+	_ = areg.Insert(context.Background(), actor.Record{ID: "agent:alpha", Kind: actor.KindAgent, CreatedAt: 1})
+	_ = areg.Insert(context.Background(), actor.Record{ID: "user:demo", Kind: actor.KindHuman, CreatedAt: 1})
+	_ = areg.Insert(context.Background(), actor.Record{ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: 1})
+	_ = areg.Insert(context.Background(), actor.Record{ID: "tool:feishu", Kind: actor.KindTool, CreatedAt: 1})
 
 	log := newMemLog()
 	treg := NewInMemoryTypeRegistry()

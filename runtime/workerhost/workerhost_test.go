@@ -31,7 +31,7 @@ func newE2EChain(t *testing.T, db *sql.DB, channelID channel.ID, workerActor act
 	areg := store.NewActorRegistry(db)
 	if err := areg.Insert(context.Background(), actor.Record{
 		ID:        workerActor,
-		Kind:      actor.SenderAgent,
+		Kind:      actor.KindAgent,
 		CreatedAt: now(),
 	}); err != nil {
 		t.Fatalf("seed actor: %v", err)
@@ -147,7 +147,7 @@ func TestWorker_LeaseE2E(t *testing.T) {
 					env := message.Envelope{
 						ID: "m-1", TS: now(), TSReceived: now(),
 						ChannelID: "ch-1",
-						Sender:    message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+						Sender:    message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 						Kind:      message.KindEvent, Type: "agent.text",
 						Payload: json.RawMessage(`{"text":"turn.start"}`), Visibility: message.VisibilityPublic,
 						Audience: []string{"*"},
@@ -259,7 +259,7 @@ func TestFence_DaemonEpochMismatch(t *testing.T) {
 	codec := ipc.NewCodec(out1, in2)
 	envBytes, _ := json.Marshal(ipc.WriteMessagePayload{Envelope: message.Envelope{
 		ID: "stale", TS: now(), TSReceived: now(), ChannelID: "ch-1",
-		Sender: message.Sender{Kind: message.SenderAgent, ID: "agent:a"},
+		Sender: message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Kind:   message.KindEvent, Type: "stale",
 		Payload: json.RawMessage(`{}`), Visibility: message.VisibilityPublic,
 		Audience: []string{"*"},

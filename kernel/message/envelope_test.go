@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/wanpengxie/ActOS/kernel/actor"
 )
 
 // TestEnvelopeRoundTripMinimal exercises the minimal valid envelope —
@@ -16,7 +18,7 @@ func TestEnvelopeRoundTripMinimal(t *testing.T) {
 		ID:         "msg-1",
 		TS:         1700000000000,
 		ChannelID:  "chan-A",
-		Sender:     Sender{Kind: SenderAgent, ID: "agent-1", Name: ""},
+		Sender:     Sender{Kind: actor.KindAgent, ID: "agent-1", Name: ""},
 		Kind:       KindEvent,
 		Type:       "agent.text",
 		Payload:    json.RawMessage(`{}`),
@@ -50,7 +52,7 @@ func TestEnvelopeRoundTripFullyPopulated(t *testing.T) {
 		TS:               1700000000000,
 		TSReceived:       1700000000123,
 		ChannelID:        "chan-A",
-		Sender:           Sender{Kind: SenderAgent, ID: "agent-1", Name: "Alice"},
+		Sender:           Sender{Kind: actor.KindAgent, ID: "agent-1", Name: "Alice"},
 		Kind:             KindRequest,
 		Type:             "xhs.publish",
 		Payload:          json.RawMessage(`{"body":{"title":"hi"}}`),
@@ -83,7 +85,7 @@ func TestDocRefsTriState(t *testing.T) {
 			ID:         "id",
 			TS:         1,
 			ChannelID:  "c",
-			Sender:     Sender{Kind: SenderAgent, ID: "a"},
+			Sender:     Sender{Kind: actor.KindAgent, ID: "a"},
 			Kind:       KindEvent,
 			Type:       "file.updated",
 			Payload:    json.RawMessage(`{}`),
@@ -119,8 +121,8 @@ func TestAllEnumSets(t *testing.T) {
 	if got := len(AllKinds); got != 3 {
 		t.Errorf("AllKinds len = %d, want 3", got)
 	}
-	if got := len(AllSenderKinds); got != 4 {
-		t.Errorf("AllSenderKinds len = %d, want 4", got)
+	if got := len(actor.AllKinds); got != 4 {
+		t.Errorf("actor.AllKinds len = %d, want 4", got)
 	}
 	if got := len(AllVisibilities); got != 3 {
 		t.Errorf("AllVisibilities len = %d, want 3", got)
@@ -160,7 +162,7 @@ func TestEnvelopeFieldSet1To1WithSpec(t *testing.T) {
 		TS:               1700000000000,
 		TSReceived:       1700000000123,
 		ChannelID:        "chan-A",
-		Sender:           Sender{Kind: SenderAgent, ID: "agent-1", Name: "Alice"},
+		Sender:           Sender{Kind: actor.KindAgent, ID: "agent-1", Name: "Alice"},
 		Kind:             KindRequest,
 		Type:             "xhs.publish",
 		Payload:          json.RawMessage(`{"x":1}`),
@@ -217,6 +219,48 @@ func TestEnvelopeFieldSet1To1WithSpec(t *testing.T) {
 		missing := diff(wantKeys, gotKeys)
 		t.Errorf("envelope JSON field set drifted from spec:\n  extra in struct (not in spec): %v\n  missing from struct (in spec): %v\n  full got:  %v\n  full want: %v",
 			extra, missing, gotKeys, wantKeys)
+	}
+}
+
+func TestCanonicalHashStableAcrossSenderIdentityTyping(t *testing.T) {
+	t.Parallel()
+
+	ts := int64(1700000000000)
+	nb := int64(1700000060000)
+	ex := int64(1700000999999)
+	delivered := int64(1700000010000)
+	failed := int64(1700000020000)
+	refs := []string{"work/draft.md", "notes/raw.txt"}
+	env := Envelope{
+		ID:               "fixed-id",
+		TS:               ts,
+		TSReceived:       1700000000123,
+		ChannelID:        "ch-1",
+		Sender:           Sender{Kind: actor.KindAgent, ID: "agent:alice", Name: ""},
+		Kind:             KindEvent,
+		Type:             "agent.text",
+		Payload:          json.RawMessage(`{"z":1,"a":{"y":2,"b":[3,1,2]},"m":"hi"}`),
+		ParentID:         "parent-99",
+		CorrelationID:    "corr-77",
+		DocRefs:          &refs,
+		Visibility:       VisibilityPublic,
+		Audience:         []string{"*", "agent:bob"},
+		NotBefore:        &nb,
+		ExpiresAt:        &ex,
+		DeliveredAt:      &delivered,
+		DeliveryFailedAt: &failed,
+		LastError:        "ignored by hash",
+		Attempts:         3,
+		IsTerminal:       true,
+		Seq:              42,
+	}
+	got, err := CanonicalHash(env)
+	if err != nil {
+		t.Fatalf("CanonicalHash: %v", err)
+	}
+	const wantHex = "3eced5f03d2bc78d9dc585bd07b1c4ddaff230111d10fbb26e5ec688f1fc5c8b"
+	if got != wantHex {
+		t.Errorf("CanonicalHash mismatch:\n got  = %q\n want = %q", got, wantHex)
 	}
 }
 

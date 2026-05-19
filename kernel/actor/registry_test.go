@@ -94,7 +94,7 @@ func TestRegisterDeregisterStillResolvable(t *testing.T) {
 
 	rec := actor.Record{
 		ID:        "agent:alpha",
-		Kind:      actor.SenderAgent,
+		Kind:      actor.KindAgent,
 		Binding:   actor.BindingInProcess,
 		CreatedAt: 1000,
 	}
@@ -164,7 +164,7 @@ func TestConcurrentInsertSameID(t *testing.T) {
 			defer wg.Done()
 			err := reg.Insert(ctx, actor.Record{
 				ID:        "agent:concurrent",
-				Kind:      actor.SenderAgent,
+				Kind:      actor.KindAgent,
 				CreatedAt: int64(i),
 			})
 			if err == nil {
@@ -198,7 +198,7 @@ func TestDeregisterMissingActor(t *testing.T) {
 func TestExistsAfterFullLifecycle(t *testing.T) {
 	ctx := context.Background()
 	reg := newMemRegistry()
-	_ = reg.Insert(ctx, actor.Record{ID: "tool:x", Kind: actor.SenderTool})
+	_ = reg.Insert(ctx, actor.Record{ID: "tool:x", Kind: actor.KindTool})
 	_ = reg.Deregister(ctx, "tool:x", 1)
 	ex, err := reg.Exists(ctx, "tool:x")
 	if err != nil {
@@ -212,7 +212,7 @@ func TestExistsAfterFullLifecycle(t *testing.T) {
 // TestRecordBindingZeroValueForHuman — Binding is empty string for
 // human / system actors per L1 §12.2.
 func TestRecordBindingZeroValueForHuman(t *testing.T) {
-	r := actor.Record{ID: "user:alice", Kind: actor.SenderHuman}
+	r := actor.Record{ID: "user:alice", Kind: actor.KindHuman}
 	if r.Binding != "" {
 		t.Errorf("human Record.Binding=%q want empty", r.Binding)
 	}

@@ -164,7 +164,7 @@ func routerFor(chain transit.HarnessChain, registry actor.Registry) transit.Writ
 
 func TestWriteMessageHandler_Accept(t *testing.T) {
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: message.SenderHuman, DisplayName: "Alice"})
+	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman, DisplayName: "Alice"})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 42}}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
 
@@ -182,7 +182,7 @@ func TestWriteMessageHandler_Accept(t *testing.T) {
 	if chain.lastEnv == nil {
 		t.Fatal("chain.Write never invoked")
 	}
-	if chain.lastEnv.Sender.Kind != message.SenderHuman || chain.lastEnv.Sender.ID != testWriteActor {
+	if chain.lastEnv.Sender.Kind != actor.KindHuman || chain.lastEnv.Sender.ID != testWriteActor {
 		t.Errorf("sender stamp wrong: %+v", chain.lastEnv.Sender)
 	}
 	if chain.lastEnv.ID != ack.MessageID {
@@ -195,7 +195,7 @@ func TestWriteMessageHandler_Accept(t *testing.T) {
 
 func TestWriteMessageHandler_BadHMAC(t *testing.T) {
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: message.SenderHuman})
+	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
 
@@ -215,7 +215,7 @@ func TestWriteMessageHandler_BadHMAC(t *testing.T) {
 
 func TestWriteMessageHandler_ReplayWindow(t *testing.T) {
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: message.SenderHuman})
+	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 60*time.Second)
 
@@ -270,7 +270,7 @@ func TestWriteMessageHandler_UnknownActor(t *testing.T) {
 
 func TestWriteMessageHandler_DeregisteredActor(t *testing.T) {
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: message.SenderHuman, DeregisteredAt: 1})
+	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman, DeregisteredAt: 1})
 	chain := &stubChain{}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
 
@@ -286,7 +286,7 @@ func TestWriteMessageHandler_DeregisteredActor(t *testing.T) {
 
 func TestWriteMessageHandler_HarnessReject(t *testing.T) {
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: message.SenderHuman})
+	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{result: transit.HarnessWriteResult{
 		RejectReason: "kind_not_allowed",
 		RejectDetail: "demo reject",
@@ -308,7 +308,7 @@ func TestWriteMessageHandler_HarnessReject(t *testing.T) {
 
 func TestWriteMessageHandler_HarnessError(t *testing.T) {
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: message.SenderHuman})
+	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{err: errors.New("store down")}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
 
@@ -332,7 +332,7 @@ func TestDispatcher_WriteMessageRoundTrip(t *testing.T) {
 	defer cancel()
 
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: message.SenderHuman})
+	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 7}}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
 
@@ -446,7 +446,7 @@ func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
 	defer cancel()
 
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: message.SenderHuman})
+	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 1}}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
 
@@ -690,7 +690,7 @@ func TestDispatcher_StaleEpochRejected(t *testing.T) {
 func TestWriteMessageHandler_NonceReplay(t *testing.T) {
 	t.Parallel()
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: message.SenderHuman, DisplayName: "Alice"})
+	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman, DisplayName: "Alice"})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 1}}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 60*time.Second)
 
@@ -718,7 +718,7 @@ func TestWriteMessageHandler_NonceReplay(t *testing.T) {
 func TestWriteMessageHandler_NonceCacheDisabledByDefault(t *testing.T) {
 	t.Parallel()
 	reg := newStubRegistry()
-	reg.put(actor.Record{ID: testWriteActor, Kind: message.SenderHuman})
+	reg.put(actor.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 1}}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
 

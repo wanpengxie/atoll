@@ -136,7 +136,7 @@ func runRespond(
 		ID:            envID,
 		TS:            now,
 		ChannelID:     request.ChannelID,
-		Sender:        message.Sender{Kind: message.SenderTool, ID: string(cfg.adapterActorID)},
+		Sender:        message.Sender{Kind: actor.KindTool, ID: string(cfg.adapterActorID)},
 		Kind:          message.KindResponse,
 		Type:          request.Type,
 		Payload:       mergedPayload,
