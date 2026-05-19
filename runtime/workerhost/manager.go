@@ -88,6 +88,30 @@ type ManagerConfig struct {
 	// re-resolving the template. Empty/nil ⇒ Manager spawns the
 	// worker with only os.Environ + the Spawner's static env list.
 	WorkerEnv []string
+
+	// PreSpawn is an optional hook invoked at the top of every
+	// Spawner.Spawn call (i.e. once per worker subprocess, NOT once
+	// per trigger — the manager reuses a live worker across triggers
+	// and only re-spawns on crash / first trigger after boot). The
+	// hook returns an extra "KEY=VALUE" env slice that is appended
+	// AFTER WorkerEnv so PreSpawn-supplied values override defaults.
+	//
+	// Production wiring (M1.6 agent self-awareness fix): cmd/daemon
+	// implements PreSpawn to (1) snapshot the channel's actor_registry
+	// + type_registry + device_sessions, (2) write a JSON file into
+	// the channel workdir, (3) return ["COAGENT_CHANNEL_CONTEXT_FILE=
+	// <abs-path>"]. The worker bridge folds the file into its system
+	// prompt so the LLM knows what tools / actors / devices live in
+	// the channel — without it the agent is blind and falls back to
+	// host-filesystem exploration ("Chrome 145 / type_registry空"
+	// hallucinated reply class).
+	//
+	// Hook errors do NOT abort the spawn — the manager logs (via the
+	// returned error path is currently best-effort) and proceeds with
+	// only WorkerEnv. Worker boots cleanly without the appendix, same
+	// as a legacy channel. Nil hook → behaviour identical to before
+	// this field was added.
+	PreSpawn func(ctx context.Context) (extraEnv []string, err error)
 }
 
 // workerSession is the daemon-side state for one live worker subprocess.
@@ -221,7 +245,24 @@ func (m *Manager) spawnLocked(ctx context.Context) error {
 		return errors.New("workerhost: lease acquire conflict")
 	}
 
-	proc, err := m.cfg.Spawner.Spawn(m.cfg.ServeCtx, leaseID, m.cfg.WorkerEnv)
+	// PreSpawn: composition root may inject extra env (e.g.
+	// COAGENT_CHANNEL_CONTEXT_FILE pointing at a freshly-written
+	// channel context snapshot for the LLM system prompt). Errors are
+	// non-fatal — the manager logs nothing today (no logger plumbed)
+	// and proceeds with only the static WorkerEnv. Worker boots
+	// cleanly without the appendix, matching the legacy behaviour.
+	spawnEnv := m.cfg.WorkerEnv
+	if m.cfg.PreSpawn != nil {
+		extra, _ := m.cfg.PreSpawn(ctx)
+		if len(extra) > 0 {
+			combined := make([]string, 0, len(spawnEnv)+len(extra))
+			combined = append(combined, spawnEnv...)
+			combined = append(combined, extra...)
+			spawnEnv = combined
+		}
+	}
+
+	proc, err := m.cfg.Spawner.Spawn(m.cfg.ServeCtx, leaseID, spawnEnv)
 	if err != nil {
 		_ = m.cfg.LeaseStore.Release(ctx, string(m.cfg.AgentID))
 		return fmt.Errorf("spawn: %w", err)

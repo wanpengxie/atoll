@@ -352,3 +352,43 @@ func (b *DeviceSessionBinder) OnUnbind(ctx context.Context, body transit.UnbindD
 	ack.Accepted = true
 	return ack
 }
+
+// listDeviceSessionsForChannel returns the DaemonConfig.ListDeviceSessionsForChannel
+// closure backed by the supplied DeviceSessionBinder's SessionStore (M1.6
+// follow-up — agent self-awareness fix). The runtime daemon calls this
+// inside the worker spawn PreSpawn hook so the kimi system prompt
+// surfaces the channel's active device sessions to the LLM. Errors from
+// the store are swallowed and treated as "no sessions" — the worker
+// boots with an empty devices section, same as a channel that never
+// bound any device.
+//
+// Composition-root only: the runtime package cannot import
+// adapters/device/framework directly (arch-lint forbids
+// runtime ↛ adapters), so this adapter lives in cmd/daemon and
+// translates framework.DeviceSession → runtime.DeviceSessionInfo on
+// the way out.
+func listDeviceSessionsForChannel(binder *DeviceSessionBinder) func(ctx context.Context, ch channel.ID) []runtime.DeviceSessionInfo {
+	if binder == nil {
+		return nil
+	}
+	store := binder.SessionStore()
+	if store == nil {
+		return nil
+	}
+	return func(ctx context.Context, ch channel.ID) []runtime.DeviceSessionInfo {
+		rows, err := store.ListByChannel(ctx, ch)
+		if err != nil || len(rows) == 0 {
+			return nil
+		}
+		out := make([]runtime.DeviceSessionInfo, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, runtime.DeviceSessionInfo{
+				SessionID:  string(r.SessionID),
+				DeviceID:   r.DeviceID,
+				DeviceType: r.DeviceType,
+				State:      string(r.State),
+			})
+		}
+		return out
+	}
+}

@@ -136,7 +136,13 @@ func main() {
 		OnChannelBoot:         wireAdapterFramework(xhsFactory),
 		OnBindDeviceSession:   deviceBinder.OnBind,
 		OnUnbindDeviceSession: deviceBinder.OnUnbind,
-		Logger:                daemonLogger,
+		// M1.6 follow-up — agent self-awareness fix. The runtime daemon
+		// snapshots device sessions into the worker spawn context file
+		// so the kimi system prompt can surface "active device sessions"
+		// to the LLM. Composition-root callback so runtime/** does not
+		// need to import adapters/device/framework (arch-lint forbids it).
+		ListDeviceSessionsForChannel: listDeviceSessionsForChannel(deviceBinder),
+		Logger:                       daemonLogger,
 	}
 
 	if !*mockBus {
