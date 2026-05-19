@@ -98,7 +98,7 @@ func newTestRequest(channelID channel.ID, sender, typ, requestID string) *messag
 		ID:         requestID,
 		TS:         1_700_000_000_000,
 		ChannelID:  string(channelID),
-		Sender:     message.Sender{Kind: actor.KindAgent, ID: sender},
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: actor.ActorID(sender)},
 		Kind:       message.KindRequest,
 		Type:       typ,
 		Payload:    json.RawMessage(`{"msg":"hi"}`),

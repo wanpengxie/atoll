@@ -257,7 +257,7 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 	env.ChannelID = body.ChannelID
 	env.Sender = message.Sender{
 		Kind: rec.Kind,
-		ID:   string(rec.ID),
+		ID:   rec.ID,
 		Name: rec.DisplayName,
 	}
 	if env.TS == 0 {

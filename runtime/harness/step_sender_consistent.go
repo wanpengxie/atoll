@@ -39,7 +39,7 @@ func (s *stepSenderConsistent) Run(ctx context.Context, env *message.Envelope) (
 			Detail:       "harness: caller missing at step 3",
 		}, nil
 	}
-	if actor.ActorID(env.Sender.ID) != caller.ActorID {
+	if env.Sender.ID != caller.ActorID {
 		return khar.Outcome{
 			RejectReason: message.HarnessSenderMismatch,
 			Detail: fmt.Sprintf("envelope.sender.id=%q does not match caller=%q",
@@ -47,7 +47,7 @@ func (s *stepSenderConsistent) Run(ctx context.Context, env *message.Envelope) (
 		}, nil
 	}
 
-	rec, ok, err := s.deps.ActorRegistry.Lookup(ctx, actor.ActorID(env.Sender.ID))
+	rec, ok, err := s.deps.ActorRegistry.Lookup(ctx, env.Sender.ID)
 	if err != nil {
 		return khar.Outcome{}, fmt.Errorf("harness: actor lookup: %w", err)
 	}
@@ -57,7 +57,7 @@ func (s *stepSenderConsistent) Run(ctx context.Context, env *message.Envelope) (
 			Detail:       fmt.Sprintf("sender %q not in actor_registry", env.Sender.ID),
 		}, nil
 	}
-	if rec.DeregisteredAt != 0 && actor.ActorID(env.Sender.ID) != actor.SystemActorID {
+	if rec.DeregisteredAt != 0 && env.Sender.ID != actor.SystemActorID {
 		return khar.Outcome{
 			RejectReason: message.HarnessSenderDeregistered,
 			Detail:       fmt.Sprintf("sender %q deregistered_at=%d", env.Sender.ID, rec.DeregisteredAt),

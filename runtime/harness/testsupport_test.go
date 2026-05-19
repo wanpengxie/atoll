@@ -157,7 +157,7 @@ func newEvent(senderID actor.ActorID, t string, payload json.RawMessage) *messag
 	return &message.Envelope{
 		ID:        "evt-" + string(senderID),
 		ChannelID: "ch-1",
-		Sender:    message.Sender{ID: string(senderID)},
+		Sender:    message.Sender{ID: senderID},
 		Type:      t,
 		Kind:      message.KindEvent,
 		Payload:   payload,
@@ -169,7 +169,7 @@ func newRequest(id string, senderID actor.ActorID, t string, audience string, pa
 	return &message.Envelope{
 		ID:        id,
 		ChannelID: "ch-1",
-		Sender:    message.Sender{ID: string(senderID)},
+		Sender:    message.Sender{ID: senderID},
 		Type:      t,
 		Kind:      message.KindRequest,
 		Payload:   payload,
@@ -181,7 +181,7 @@ func newResponse(id string, senderID actor.ActorID, parentID, t string, payload 
 	return &message.Envelope{
 		ID:        id,
 		ChannelID: "ch-1",
-		Sender:    message.Sender{ID: string(senderID)},
+		Sender:    message.Sender{ID: senderID},
 		Type:      t,
 		Kind:      message.KindResponse,
 		Payload:   payload,

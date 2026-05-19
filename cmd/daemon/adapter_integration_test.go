@@ -169,7 +169,7 @@ func writeRequestWithExpiry(t *testing.T, ctx context.Context, d *runtime.Daemon
 			// would short-circuit Resolve to nil per L1 §5.1 visibility
 			// filter and the adapter would never be dispatched).
 			TS:        ts,
-			Sender:    message.Sender{ID: callerActor},
+			Sender:    message.Sender{ID: actor.ActorID(callerActor)},
 			ExpiresAt: expiresAt,
 		},
 	}

@@ -13,9 +13,9 @@ import (
 // `Name` is kept always-present in JSON (no `omitempty`) so the canonical
 // 14-key hash input (L2 §1.4.10.2) sees a stable shape.
 type Sender struct {
-	Kind actor.Kind `json:"kind"`
-	ID   string     `json:"id"`
-	Name string     `json:"name"`
+	Kind actor.Kind    `json:"kind"`
+	ID   actor.ActorID `json:"id"`
+	Name string        `json:"name"`
 }
 
 // Envelope is the v4 message envelope.

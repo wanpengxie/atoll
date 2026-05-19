@@ -95,8 +95,7 @@ func Resolve(
 
 	// (4) Self-trigger ban — L1 §5.1 step 3.
 	if !opts.BypassSelfTriggerBan {
-		senderID := actor.ActorID(env.Sender.ID)
-		candidates = filterOut(candidates, senderID)
+		candidates = filterOut(candidates, env.Sender.ID)
 	}
 
 	// (5) Dedupe + stable sort. The audience slice may carry the same

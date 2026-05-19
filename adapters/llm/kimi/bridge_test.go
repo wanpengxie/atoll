@@ -340,7 +340,7 @@ func TestBridge_RunEmitsSingleTerminalOnTextDelta(t *testing.T) {
 	if last.ParentID != "t-1" {
 		t.Errorf("parent_id=%q want t-1", last.ParentID)
 	}
-	if last.Sender.ID != ipc.WorkerActorID() {
+	if string(last.Sender.ID) != ipc.WorkerActorID() {
 		t.Errorf("sender.id=%q want %q", last.Sender.ID, ipc.WorkerActorID())
 	}
 }

@@ -221,7 +221,7 @@ func writeRequestAndWaitForDeviceSend(
 			Payload:    json.RawMessage(payload),
 			Audience:   []string{string(devicexhs.DefaultAdapterActorID)},
 			TS:         ts,
-			Sender:     message.Sender{ID: callerActor},
+			Sender:     message.Sender{ID: actor.ActorID(callerActor)},
 			Visibility: message.VisibilityPublic,
 		},
 	}

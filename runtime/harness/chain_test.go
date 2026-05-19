@@ -375,7 +375,7 @@ func TestChain_CoreTypeKindLocked(t *testing.T) {
 		ChannelID: "ch-1",
 		Type:      "system.event",
 		Kind:      message.KindRequest, // not allowed for system.event
-		Sender:    message.Sender{ID: actor.SystemActorID.String()},
+		Sender:    message.Sender{ID: actor.SystemActorID},
 		Payload:   json.RawMessage(`{}`),
 		Audience:  []string{"*"},
 	}

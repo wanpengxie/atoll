@@ -189,7 +189,7 @@ type adapterCallerChain struct {
 func (c *adapterCallerChain) Write(ctx context.Context, env *message.Envelope) (khar.WriteResult, error) {
 	if env != nil && env.Sender.ID != "" {
 		ctx = harness.CtxWithCaller(ctx, harness.CallerContext{
-			ActorID:                 actor.ActorID(env.Sender.ID),
+			ActorID:                 env.Sender.ID,
 			ChannelID:               c.channelID,
 			AllowProvidedSenderKind: true,
 		})

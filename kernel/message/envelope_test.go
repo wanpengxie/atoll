@@ -236,7 +236,7 @@ func TestCanonicalHashStableAcrossSenderIdentityTyping(t *testing.T) {
 		TS:               ts,
 		TSReceived:       1700000000123,
 		ChannelID:        "ch-1",
-		Sender:           Sender{Kind: actor.KindAgent, ID: "agent:alice", Name: ""},
+		Sender:           Sender{Kind: actor.KindAgent, ID: actor.ActorID("agent:alice"), Name: ""},
 		Kind:             KindEvent,
 		Type:             "agent.text",
 		Payload:          json.RawMessage(`{"z":1,"a":{"y":2,"b":[3,1,2]},"m":"hi"}`),

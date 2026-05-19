@@ -2079,14 +2079,14 @@ func (d *Daemon) emitLongPendingFallback(
 		ID:            envID,
 		TS:            nowMs,
 		ChannelID:     req.ChannelID,
-		Sender:        message.Sender{Kind: actor.KindSystem, ID: string(actor.SystemActorID)},
+		Sender:        message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
 		Kind:          message.KindResponse,
 		Type:          req.Type,
 		Payload:       payload,
 		ParentID:      req.ID,
 		CorrelationID: correlationID,
 		Visibility:    req.Visibility,
-		Audience:      []string{req.Sender.ID},
+		Audience:      []string{string(req.Sender.ID)},
 	}
 
 	// The scheduler is a system caller; stamp the harness context with

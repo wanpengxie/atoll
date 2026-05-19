@@ -499,7 +499,7 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 	envelope := message.Envelope{
 		Type:          req.Type,
 		ChannelID:     channelID,
-		Sender:        message.Sender{Kind: actor.KindHuman, ID: member.ActorIDInChannel},
+		Sender:        message.Sender{Kind: actor.KindHuman, ID: actor.ActorID(member.ActorIDInChannel)},
 		Kind:          kind,
 		Payload:       req.Payload,
 		ParentID:      req.ParentID,

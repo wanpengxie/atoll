@@ -187,7 +187,7 @@ func TestResolve_VisibilitySystem_Suppressed(t *testing.T) {
 	reg := makeReg()
 	env := &message.Envelope{
 		ID:         "m-sys",
-		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID.String()},
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
 		Kind:       message.KindEvent,
 		Type:       "system.event",
 		Payload:    json.RawMessage(`{}`),
@@ -227,7 +227,7 @@ func TestResolve_SystemHeartbeat_Suppressed(t *testing.T) {
 	reg := makeReg()
 	env := &message.Envelope{
 		ID:         "m-hb",
-		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID.String()},
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
 		Kind:       message.KindEvent,
 		Type:       "system.heartbeat",
 		Payload:    json.RawMessage(`{}`),
@@ -419,7 +419,7 @@ func TestGateway_Dispatch_SystemHeartbeatNoDeliverer(t *testing.T) {
 	}
 	env := &message.Envelope{
 		ID:         "m-hb",
-		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID.String()},
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
 		Kind:       message.KindEvent,
 		Type:       "system.heartbeat",
 		Payload:    json.RawMessage(`{}`),

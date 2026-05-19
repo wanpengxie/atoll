@@ -121,7 +121,7 @@ func runRespond(
 
 	audience := opts.Audience
 	if len(audience) == 0 {
-		audience = []string{request.Sender.ID}
+		audience = []string{string(request.Sender.ID)}
 	} else {
 		audience = append([]string(nil), audience...)
 	}
@@ -136,7 +136,7 @@ func runRespond(
 		ID:            envID,
 		TS:            now,
 		ChannelID:     request.ChannelID,
-		Sender:        message.Sender{Kind: actor.KindTool, ID: string(cfg.adapterActorID)},
+		Sender:        message.Sender{Kind: actor.KindTool, ID: cfg.adapterActorID},
 		Kind:          message.KindResponse,
 		Type:          request.Type,
 		Payload:       mergedPayload,

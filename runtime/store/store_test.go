@@ -83,6 +83,16 @@ func TestMessageAppend_OutboxRoundTrip(t *testing.T) {
 	if len(pending) != 1 || pending[0].Seq != viewsync.Seq(1) || pending[0].MessageID != "m-1" {
 		t.Fatalf("unexpected outbox: %+v", pending)
 	}
+	got, ok, err := msgs.FindByID(ctx, channel.ID("ch-1"), "m-1")
+	if err != nil || !ok {
+		t.Fatalf("FindByID ok=%v err=%v", ok, err)
+	}
+	if got.Sender.ID != actor.ActorID("agent:alpha") {
+		t.Errorf("sender.id=%q want agent:alpha", got.Sender.ID)
+	}
+	if got.Sender.Kind != actor.KindAgent {
+		t.Errorf("sender.kind=%q want %q", got.Sender.Kind, actor.KindAgent)
+	}
 
 	// Append same envelope again → dedupe path, no new outbox row.
 	res2, err := msgs.Append(ctx, env)
@@ -511,6 +521,12 @@ func TestActorRegistry(t *testing.T) {
 	got, ok, err := reg.Lookup(ctx, "agent:alpha")
 	if err != nil || !ok {
 		t.Fatalf("lookup ok=%v err=%v", ok, err)
+	}
+	if got.ID != actor.ActorID("agent:alpha") {
+		t.Errorf("actor id=%q want agent:alpha", got.ID)
+	}
+	if got.Kind != actor.KindAgent {
+		t.Errorf("actor kind=%q want %q", got.Kind, actor.KindAgent)
 	}
 	if got.Binding != actor.BindingInProcess || !got.IsActive() {
 		t.Errorf("got=%+v", got)

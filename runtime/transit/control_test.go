@@ -182,7 +182,7 @@ func TestWriteMessageHandler_Accept(t *testing.T) {
 	if chain.lastEnv == nil {
 		t.Fatal("chain.Write never invoked")
 	}
-	if chain.lastEnv.Sender.Kind != actor.KindHuman || chain.lastEnv.Sender.ID != testWriteActor {
+	if chain.lastEnv.Sender.Kind != actor.KindHuman || chain.lastEnv.Sender.ID != actor.ActorID(testWriteActor) {
 		t.Errorf("sender stamp wrong: %+v", chain.lastEnv.Sender)
 	}
 	if chain.lastEnv.ID != ack.MessageID {
