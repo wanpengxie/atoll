@@ -12,7 +12,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
@@ -71,7 +70,7 @@ func TestIntegration_BindDeviceSession_RoundTrip(t *testing.T) {
 		ChannelID:        channel.ID("ch-X"),
 		DeviceID:         "dev-1",
 		DeviceType:       "xhs",
-		DaemonID:         placement.DaemonID("daemon-bind-integ"),
+		DaemonID:         "daemon-bind-integ",
 		TokenFingerprint: "1234567890abcdef",
 		ExpiresAt:        90_000,
 		BoundAt:          80_000,

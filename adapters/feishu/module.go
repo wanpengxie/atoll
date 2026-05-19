@@ -110,7 +110,7 @@ func (m *Module) Declares() adapter.Declaration {
 		Name:         "feishu",
 		ActorID:      m.actorID,
 		Types:        append([]string(nil), AllTypes...),
-		Binding:      adapter.BindingOutboundHTTP,
+		Binding:      actor.BindingOutboundHTTP,
 		MaxPendingMs: m.maxPendingMs,
 		Needs:        []string{"http_helper", "credentials"},
 	}

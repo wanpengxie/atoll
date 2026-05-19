@@ -51,9 +51,9 @@ type TypeRow struct {
 	// a tool actor in actor_registry per L2 §1.4.2.
 	HandlerActorID actor.ActorID
 
-	// HandlerBinding mirrors the actor's binding kind (in_process /
+	// HandlerBinding mirrors the actor's binding (in_process /
 	// outbound_http / via_server_transit).
-	HandlerBinding BindingKind
+	HandlerBinding actor.Binding
 
 	// MaxPendingMs is the per-type request timeout in milliseconds. MUST
 	// be > 0 for tool receivers — install rejects with
@@ -97,7 +97,7 @@ func (t TypeRow) Validate() error {
 	if t.HandlerActorID == "" {
 		return fmt.Errorf("adapter: TypeRow[%s].HandlerActorID required", t.Type)
 	}
-	if _, ok := NormalizeBinding(string(t.HandlerBinding)); !ok {
+	if _, ok := actor.ParseBinding(string(t.HandlerBinding)); !ok {
 		return fmt.Errorf("adapter: TypeRow[%s].HandlerBinding %q invalid",
 			t.Type, t.HandlerBinding)
 	}

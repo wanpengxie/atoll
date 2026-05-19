@@ -10,6 +10,7 @@ import (
 	"context"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 )
 
 // State is the channel placement state per L2 §1.4.11.2 state machine
@@ -45,11 +46,9 @@ type OwnerEpoch int64
 // the channel sqlite (L2 §1.4.11.6). MUST equal OwnerEpoch.
 type FencingToken int64
 
-// ConnectionEpoch is the daemonbus connection epoch — incremented every
-// time the daemon ↔ server WS reconnects (L2 §9.4). Stored on placement
-// rows + every daemonbus frame header so frames from a stale connection
-// can be detected and dropped.
-type ConnectionEpoch int64
+// ConnectionEpoch is the daemonbus connection epoch. Placement rows store
+// the same value carried by daemonbus frame headers.
+type ConnectionEpoch = daemonbus.ConnectionEpoch
 
 // DaemonID is the stable daemon identifier (assigned at registration,
 // survives restarts).

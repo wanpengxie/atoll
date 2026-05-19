@@ -2,7 +2,6 @@ package xhs
 
 import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
 // AdapterName is the framework Module identifier (Manager.OnExternalCallback
@@ -18,7 +17,7 @@ const DefaultAdapterActorID actor.ActorID = "tool:xhs-adapter"
 // Binding is the T2 closed-enum value — in_process so the daemon
 // composition root can install it without DeviceTransit. T3 will swap
 // this to BindingViaServerTransit when the device adapter goes live.
-const Binding = adapter.BindingInProcess
+const Binding = actor.BindingInProcess
 
 // DefaultMaxPendingMs mirrors the device adapter baseline (5 min). The
 // framework arms an F3 timer of this duration on every request; T2's

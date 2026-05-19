@@ -37,7 +37,7 @@ func (r *ActorRegistry) Lookup(ctx context.Context, id actor.ActorID) (actorreg.
 		return actorreg.Record{}, false, fmt.Errorf("store: actor lookup %q: %w", id, err)
 	}
 	rec.Kind = actor.Kind(kind)
-	rec.Binding = actorreg.Binding(binding)
+	rec.Binding = actor.Binding(binding)
 	return rec, true, nil
 }
 
@@ -76,7 +76,7 @@ func (r *ActorRegistry) ListActive(ctx context.Context) ([]actorreg.Record, erro
 			return nil, fmt.Errorf("store: list active actors scan: %w", err)
 		}
 		rec.Kind = actor.Kind(kind)
-		rec.Binding = actorreg.Binding(binding)
+		rec.Binding = actor.Binding(binding)
 		out = append(out, rec)
 	}
 	if err := rows.Err(); err != nil {

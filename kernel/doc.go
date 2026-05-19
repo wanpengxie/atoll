@@ -28,10 +28,9 @@
 //   - kernel/daemonbus  — daemonbus mux frame schema (control / viewsync
 //     / device_transit) + epoch-bearing header —
 //     covers L2 §9.
-//   - kernel/adapter    — BindingKind tri-class enum, Module / Manager /
-//     CorrelationTracker / ErrorPolicy / AdapterCtx /
-//     DeviceTransit interfaces — covers L1 §11.7 +
-//     L2 §8 framework contract.
+//   - kernel/adapter    — Module / Manager / CorrelationTracker /
+//     ErrorPolicy / AdapterCtx / DeviceTransit interfaces — covers
+//     L2 §8 framework contract. Binding lives in kernel/actor.
 //   - kernel/addressing — ChannelRef / ActorRef / Route forward-compat
 //     types for M1.4 channel-as-actor + M2+ federation
 //     (m1.5-tickets §T10).

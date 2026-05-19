@@ -106,7 +106,7 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 		// scope; the loop also covers it best-effort by trying each
 		// adapter and returning the first non-nil error.
 		if h.SetDeviceCallback != nil {
-			deviceAdapters := mgr.AdaptersByBinding(adapter.BindingViaServerTransit)
+			deviceAdapters := mgr.AdaptersByBinding(actor.BindingViaServerTransit)
 			if len(deviceAdapters) > 0 {
 				h.SetDeviceCallback(func(ctx context.Context, frame adapter.SendFrame) error {
 					var firstErr error
@@ -263,7 +263,7 @@ func DeviceXHSActorSeed() actorreg.Record {
 	return actorreg.Record{
 		ID:      devicexhs.DefaultAdapterActorID,
 		Kind:    actor.KindTool,
-		Binding: actorreg.BindingViaServerTransit,
+		Binding: actor.BindingViaServerTransit,
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime/store"
@@ -34,7 +35,7 @@ func TestTypeRegistry_UpsertLookupRoundTrip(t *testing.T) {
 	in := adapter.TypeRow{
 		Type:           "xhs.publish",
 		HandlerActorID: "tool:xhs-adapter",
-		HandlerBinding: adapter.BindingInProcess,
+		HandlerBinding: actor.BindingInProcess,
 		MaxPendingMs:   60_000,
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 		SchemasByKind: map[message.Kind]json.RawMessage{
@@ -102,7 +103,7 @@ func TestTypeRegistry_UpsertReplaces(t *testing.T) {
 	if _, err := reg.Upsert(ctx, adapter.TypeRow{
 		Type:           "xhs.publish",
 		HandlerActorID: "tool:xhs-adapter",
-		HandlerBinding: adapter.BindingInProcess,
+		HandlerBinding: actor.BindingInProcess,
 		MaxPendingMs:   60_000,
 		AllowedKinds:   []message.Kind{message.KindRequest},
 	}); err != nil {
@@ -112,7 +113,7 @@ func TestTypeRegistry_UpsertReplaces(t *testing.T) {
 	if _, err := reg.Upsert(ctx, adapter.TypeRow{
 		Type:           "xhs.publish",
 		HandlerActorID: "tool:xhs-adapter",
-		HandlerBinding: adapter.BindingOutboundHTTP,
+		HandlerBinding: actor.BindingOutboundHTTP,
 		MaxPendingMs:   90_000,
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 	}); err != nil {
@@ -122,7 +123,7 @@ func TestTypeRegistry_UpsertReplaces(t *testing.T) {
 	if !ok {
 		t.Fatal("Lookup missing after replace")
 	}
-	if got.HandlerBinding != adapter.BindingOutboundHTTP || got.MaxPendingMs != 90_000 {
+	if got.HandlerBinding != actor.BindingOutboundHTTP || got.MaxPendingMs != 90_000 {
 		t.Errorf("after replace: binding=%q max_pending=%d", got.HandlerBinding, got.MaxPendingMs)
 	}
 	if len(got.AllowedKinds) != 2 {
@@ -140,7 +141,7 @@ func TestTypeRegistry_List(t *testing.T) {
 		if _, err := reg.Upsert(ctx, adapter.TypeRow{
 			Type:           typ,
 			HandlerActorID: "tool:xhs-adapter",
-			HandlerBinding: adapter.BindingInProcess,
+			HandlerBinding: actor.BindingInProcess,
 			MaxPendingMs:   60_000,
 			AllowedKinds:   []message.Kind{message.KindRequest},
 		}); err != nil {
@@ -188,10 +189,10 @@ func TestTypeRegistry_UpsertRejectsInvalid(t *testing.T) {
 		name string
 		row  adapter.TypeRow
 	}{
-		{"missing type", adapter.TypeRow{HandlerActorID: "tool:x", HandlerBinding: adapter.BindingInProcess, MaxPendingMs: 100}},
-		{"missing handler actor", adapter.TypeRow{Type: "t", HandlerBinding: adapter.BindingInProcess, MaxPendingMs: 100}},
+		{"missing type", adapter.TypeRow{HandlerActorID: "tool:x", HandlerBinding: actor.BindingInProcess, MaxPendingMs: 100}},
+		{"missing handler actor", adapter.TypeRow{Type: "t", HandlerBinding: actor.BindingInProcess, MaxPendingMs: 100}},
 		{"invalid binding", adapter.TypeRow{Type: "t", HandlerActorID: "tool:x", HandlerBinding: "bogus", MaxPendingMs: 100}},
-		{"missing max_pending_ms", adapter.TypeRow{Type: "t", HandlerActorID: "tool:x", HandlerBinding: adapter.BindingInProcess}},
+		{"missing max_pending_ms", adapter.TypeRow{Type: "t", HandlerActorID: "tool:x", HandlerBinding: actor.BindingInProcess}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -210,7 +211,7 @@ func TestTypeRegistry_DefaultTerminalConvention(t *testing.T) {
 	if _, err := reg.Upsert(ctx, adapter.TypeRow{
 		Type:           "xhs.publish",
 		HandlerActorID: "tool:xhs-adapter",
-		HandlerBinding: adapter.BindingInProcess,
+		HandlerBinding: actor.BindingInProcess,
 		MaxPendingMs:   60_000,
 		AllowedKinds:   []message.Kind{message.KindRequest},
 		// TerminalConvention deliberately left empty.

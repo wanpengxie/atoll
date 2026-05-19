@@ -4,7 +4,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
 // HumanCaller is the wire object the server attaches to
@@ -45,7 +44,7 @@ type BindDeviceSessionBody struct {
 	ChannelID        channel.ID              `json:"channel_id"`
 	DeviceID         string                  `json:"device_id"`
 	DeviceType       string                  `json:"device_type"`
-	DaemonID         placement.DaemonID      `json:"daemon_id"`
+	DaemonID         string                  `json:"daemon_id"`
 	TokenFingerprint string                  `json:"token_fingerprint"`
 	ExpiresAt        int64                   `json:"expires_at,omitempty"`
 	BoundAt          int64                   `json:"bound_at,omitempty"`

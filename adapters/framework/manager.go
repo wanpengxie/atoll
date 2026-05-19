@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -214,18 +215,18 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 	if !ok {
 		return fmt.Errorf("%w: actor %s", asInstallError(message.InstallHandlerActorNotRegistered), decl.ActorID)
 	}
-	if !decl.Binding.MatchesActorBinding(rec.Binding) {
+	if decl.Binding != rec.Binding {
 		return fmt.Errorf("%w: actor=%s actor_binding=%s declared=%s",
 			asInstallError(message.InstallHandlerActorBindingMismatch),
 			decl.ActorID, rec.Binding, decl.Binding)
 	}
 
 	// Binding-specific dependency check.
-	if decl.Binding == adapter.BindingViaServerTransit && m.cfg.DeviceTransit == nil {
+	if decl.Binding == actor.BindingViaServerTransit && m.cfg.DeviceTransit == nil {
 		return fmt.Errorf("framework: adapter %q requires DeviceTransit (binding=via_server_transit) but ManagerConfig.DeviceTransit is nil",
 			decl.Name)
 	}
-	if decl.Binding == adapter.BindingOutboundHTTP && m.cfg.HTTPClient == nil {
+	if decl.Binding == actor.BindingOutboundHTTP && m.cfg.HTTPClient == nil {
 		m.cfg.Logger.Warn("framework.install.outbound_http.no_client",
 			"adapter", decl.Name,
 			"note", "ManagerConfig.HTTPClient nil — adapter must provide its own")
@@ -334,7 +335,7 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		Respond:        respond,
 		HarnessChain:   m.cfg.HarnessChain,
 	}
-	if decl.Binding == adapter.BindingViaServerTransit {
+	if decl.Binding == actor.BindingViaServerTransit {
 		mctx.DeviceTransit = m.cfg.DeviceTransit
 	}
 
@@ -643,7 +644,7 @@ func (m *Manager) InstalledAdapters() []string {
 //
 // Returns an empty slice (not nil) when no adapter matches so callers
 // can range over it without a nil check.
-func (m *Manager) AdaptersByBinding(b adapter.BindingKind) []string {
+func (m *Manager) AdaptersByBinding(b actor.Binding) []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]string, 0, len(m.modules))
@@ -666,7 +667,7 @@ func validateDeclaration(d adapter.Declaration) error {
 	if len(d.Types) == 0 {
 		return fmt.Errorf("framework: Declaration[%s].Types must be non-empty", d.Name)
 	}
-	if _, ok := adapter.NormalizeBinding(string(d.Binding)); !ok {
+	if _, ok := actor.ParseBinding(string(d.Binding)); !ok {
 		return fmt.Errorf("framework: Declaration[%s].Binding %q invalid", d.Name, d.Binding)
 	}
 	if d.MaxPendingMs <= 0 {

@@ -5,30 +5,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// FrameType is the closed set of view-sync frame_type values that ride
-// inside the daemonbus mux (L1 §8.3 + L2 §9.1). Each value matches the
-// JSON wire form 1:1.
-type FrameType string
-
-// FrameType closed set per L1 §8.3.
-const (
-	FrameTypePush           FrameType = "viewsync.push"
-	FrameTypeAck            FrameType = "viewsync.ack"
-	FrameTypeResyncRequest  FrameType = "viewsync.resync_request"
-	FrameTypeResyncResponse FrameType = "viewsync.resync_response"
-)
-
-// AllFrameTypes lists every viewsync frame_type in spec order.
-var AllFrameTypes = []FrameType{
-	FrameTypePush,
-	FrameTypeAck,
-	FrameTypeResyncRequest,
-	FrameTypeResyncResponse,
-}
-
-// String returns the wire form.
-func (f FrameType) String() string { return string(f) }
-
 // PushFrame is the payload of `viewsync.push` (L1 §8.3 row 1).
 //
 // Carried inside daemonbus mux frame (L2 §9.2 wraps with daemon_id /

@@ -513,7 +513,7 @@ func TestActorRegistry(t *testing.T) {
 	rec := actorreg.Record{
 		ID:        "agent:alpha",
 		Kind:      actor.KindAgent,
-		Binding:   actorreg.BindingInProcess,
+		Binding:   actor.BindingInProcess,
 		CreatedAt: 1000,
 	}
 	if err := reg.Insert(ctx, rec); err != nil {
@@ -529,7 +529,7 @@ func TestActorRegistry(t *testing.T) {
 	if got.Kind != actor.KindAgent {
 		t.Errorf("actor kind=%q want %q", got.Kind, actor.KindAgent)
 	}
-	if got.Binding != actorreg.BindingInProcess || !got.IsActive() {
+	if got.Binding != actor.BindingInProcess || !got.IsActive() {
 		t.Errorf("got=%+v", got)
 	}
 

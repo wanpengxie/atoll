@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/adapters/xhs"
-	"github.com/wanpengxie/ActOS/kernel/actorreg"
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
@@ -79,8 +79,8 @@ func TestIntegration_XHSCreatorTemplate_BootSeedsChannel(t *testing.T) {
 	if !ok {
 		t.Fatalf("actor_registry missing %s — saga step 5b did not seed", xhs.DefaultAdapterActorID)
 	}
-	if rec.Binding != actorreg.BindingInProcess {
-		t.Errorf("adapter actor binding=%q want %q", rec.Binding, actorreg.BindingInProcess)
+	if rec.Binding != actor.BindingInProcess {
+		t.Errorf("adapter actor binding=%q want %q", rec.Binding, actor.BindingInProcess)
 	}
 
 	// B1.3 — channel_lock.channel_type persisted so cold-start resolves

@@ -7,7 +7,6 @@ import (
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
@@ -27,7 +26,7 @@ func TestDeviceSessionBinder_BindUpsertsRow(t *testing.T) {
 		ChannelID:        channel.ID("ch-X"),
 		DeviceID:         "dev-1",
 		DeviceType:       "xhs",
-		DaemonID:         placement.DaemonID("daemon-A"),
+		DaemonID:         "daemon-A",
 		TokenFingerprint: "abc123def4567890",
 		ExpiresAt:        50_000,
 		BoundAt:          10_000,

@@ -156,7 +156,7 @@ func (a *App) Bind(ctx context.Context, in devicebus.BindInput) error {
 		ChannelID:        in.Session.ChannelID,
 		DeviceID:         in.Session.DeviceID,
 		DeviceType:       in.Session.DeviceType,
-		DaemonID:         in.Session.DaemonID,
+		DaemonID:         string(in.Session.DaemonID),
 		TokenFingerprint: in.TokenFingerprint,
 		ExpiresAt:        in.Session.ExpiresAt,
 		BoundAt:          in.Session.CreatedAt,
