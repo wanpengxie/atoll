@@ -8,6 +8,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime/store"
 )
@@ -38,7 +39,7 @@ func TestRequestLookup_FindByID(t *testing.T) {
 		Visibility: message.VisibilityPrivate,
 		Audience:   message.Audience{"tool:xhs-adapter"},
 	}
-	if _, err := msgs.Append(ctx, env); err != nil {
+	if _, err := msgs.Append(ctx, env, klog.FencingTuple{}); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 

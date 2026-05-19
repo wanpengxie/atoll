@@ -14,6 +14,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -99,6 +100,22 @@ type HarnessWriteResult struct {
 
 // Accepted reports whether the result is a durable / dedupe write.
 func (r HarnessWriteResult) Accepted() bool { return r.RejectReason == "" }
+
+// assertHarnessWriteResultSubset is a compile-time field subset check
+// against kernel/harness.WriteResult. transit intentionally keeps its local
+// result type to avoid importing runtime/harness, but field drift in the
+// kernel contract should break this package instead of silently changing the
+// daemonbus write_message mapping.
+func assertHarnessWriteResultSubset(r khar.WriteResult) HarnessWriteResult {
+	return HarnessWriteResult{
+		MessageID:        r.MessageID,
+		Seq:              r.Seq,
+		Deduped:          r.Deduped,
+		RejectReason:     string(r.RejectReason),
+		RejectDetail:     r.RejectDetail,
+		PartialMessageID: r.PartialMessageID,
+	}
+}
 
 // CallerStamper plumbs the CallerContext into the chain ctx. The
 // runtime/daemon wiring supplies this so we keep harness.CtxWithCaller

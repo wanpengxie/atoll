@@ -45,6 +45,13 @@ type WriteMessageAckBody struct {
 	RejectDetail string     `json:"reject_detail,omitempty"`
 }
 
+// BindRejectReason is the closed daemon-edge reason set for bind/unbind
+// session acks. Details stay free-form in the sibling Detail field.
+type BindRejectReason string
+
+// String returns the wire form.
+func (r BindRejectReason) String() string { return string(r) }
+
 // BindDeviceSessionBody is the daemonbus control.bind_device_session
 // payload. The server emits it after allocating a device session row.
 type BindDeviceSessionBody struct {
@@ -65,7 +72,7 @@ type BindDeviceSessionAckBody struct {
 	FrameID   FrameID                       `json:"frame_id"`
 	SessionID devicetransit.DeviceSessionID `json:"session_id,omitempty"`
 	Accepted  bool                          `json:"accepted"`
-	Reason    string                        `json:"reason,omitempty"`
+	Reason    BindRejectReason              `json:"reason,omitempty"`
 	Detail    string                        `json:"detail,omitempty"`
 }
 
@@ -84,16 +91,24 @@ type UnbindDeviceSessionAckBody struct {
 	FrameID   FrameID                       `json:"frame_id"`
 	SessionID devicetransit.DeviceSessionID `json:"session_id,omitempty"`
 	Accepted  bool                          `json:"accepted"`
-	Reason    string                        `json:"reason,omitempty"`
+	Reason    BindRejectReason              `json:"reason,omitempty"`
 	Detail    string                        `json:"detail,omitempty"`
 }
 
 const (
 	// BindRejectReasonDecodeFailed indicates a bind/unbind payload could
 	// not be decoded. Dispatchers surface this as a protocol error.
-	BindRejectReasonDecodeFailed = "decode_failed"
+	BindRejectReasonDecodeFailed BindRejectReason = "decode_failed"
 
 	// BindRejectReasonHandlerMissing is emitted when the daemon dispatcher
 	// has no bind/unbind lifecycle handler wired.
-	BindRejectReasonHandlerMissing = "handler_missing"
+	BindRejectReasonHandlerMissing BindRejectReason = "handler_missing"
+
+	// BindRejectReasonSessionStoreUpsert indicates the daemon failed to
+	// mirror a bind into its local device session store.
+	BindRejectReasonSessionStoreUpsert BindRejectReason = "session_store_upsert"
+
+	// BindRejectReasonSessionStoreDelete indicates the daemon failed to
+	// remove a local device session mirror during unbind.
+	BindRejectReasonSessionStoreDelete BindRejectReason = "session_store_delete"
 )

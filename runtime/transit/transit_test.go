@@ -11,6 +11,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
 	"github.com/wanpengxie/ActOS/runtime/store"
@@ -39,7 +40,7 @@ func TestViewSync_E2E(t *testing.T) {
 	// Insert 3 messages.
 	for i := 0; i < 3; i++ {
 		env := newEnvelope(i + 1)
-		if _, err := msgs.Append(ctx, env); err != nil {
+		if _, err := msgs.Append(ctx, env, klog.FencingTuple{}); err != nil {
 			t.Fatalf("append #%d: %v", i+1, err)
 		}
 	}
@@ -157,7 +158,7 @@ func TestGap_ResyncFillsHole(t *testing.T) {
 	// Insert 5 messages.
 	for i := 0; i < 5; i++ {
 		env := newEnvelope(i + 1)
-		if _, err := msgs.Append(ctx, env); err != nil {
+		if _, err := msgs.Append(ctx, env, klog.FencingTuple{}); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -254,7 +255,7 @@ func TestDispatcher_ResyncRoundTrip(t *testing.T) {
 
 	msgs := store.NewMessages(db)
 	outbox := store.NewViewSyncOutbox(db, testChannelID)
-	if _, err := msgs.Append(ctx, newEnvelope(1)); err != nil {
+	if _, err := msgs.Append(ctx, newEnvelope(1), klog.FencingTuple{}); err != nil {
 		t.Fatal(err)
 	}
 

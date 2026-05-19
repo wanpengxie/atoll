@@ -8,15 +8,13 @@ import (
 
 // FencingTuple bundles the (fencing_token, daemon_epoch) pair that
 // every channel-local mutation must present to the channel_lock fencing
-// gate. The tuple is plumbed through context.Context so the
-// kernel/log.MessageLog interface (and kernel/ledger.Ledger) signatures
-// stay independent of the daemon-side fencing concern.
+// gate. Ledger operations still receive this tuple through context.Context;
+// kernel/log.MessageLog.Append receives its tuple explicitly.
 //
 // Production wiring (runtime/workerhost) stamps the tuple onto the
-// per-request context before calling Chain.Write / Ledger.Reserve /
-// Ledger.Commit. Pure-store unit tests that do not exercise fencing
-// pass an unstamped context and use NewMessages / NewLedger (the lock
-// pointer stays nil so the validate step is skipped).
+// per-request context before calling Ledger.Reserve / Ledger.Commit.
+// Pure-store unit tests that do not exercise fencing pass an unstamped
+// context and use NewLedger without a lock so the validate step is skipped.
 type FencingTuple struct {
 	Token placement.FencingToken
 	Epoch placement.DaemonEpoch

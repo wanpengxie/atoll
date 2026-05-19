@@ -276,14 +276,6 @@ func (h *Host) handleWrite(ctx context.Context, frame ipc.Frame) error {
 		ChannelID:               h.cfg.ChannelID,
 		AllowProvidedSenderKind: false,
 	})
-	// FIX-T6 — stamp the host's (fencing_token, daemon_epoch) tuple so
-	// runtime/store.Messages.Append validates it inside the same tx as
-	// the row INSERT. The frame-level Fence() check above only proves
-	// the worker is talking to the right daemon process; the sqlite
-	// gate proves the daemon process itself still holds the channel
-	// fence (i.e. it isn't a reclaimed/stale daemon).
-	chainCtx = store.CtxWithFencing(chainCtx, h.cfg.FencingToken, h.cfg.DaemonEpoch)
-
 	res, err := h.cfg.Chain.Write(chainCtx, &payload.Envelope)
 	if err != nil {
 		reply, _ := ipc.EncodeResult(frame.ID, false, err.Error(), ipc.WriteMessageResult{

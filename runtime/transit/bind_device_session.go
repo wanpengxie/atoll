@@ -53,6 +53,10 @@ type UnbindDeviceSessionBody = daemonbus.UnbindDeviceSessionBody
 // purged the mirror row (or the row was already absent).
 type UnbindDeviceSessionAckBody = daemonbus.UnbindDeviceSessionAckBody
 
+// BindRejectReason is the closed daemon-edge reason set for bind/unbind
+// session acks.
+type BindRejectReason = daemonbus.BindRejectReason
+
 // Reject reasons emitted by the dispatcher / handler edge before the
 // adapter-specific session store is consulted. Closed set so server
 // log triage can branch on these without parsing free-form strings.
@@ -70,4 +74,12 @@ const (
 	// can distinguish "daemon does not implement bind" from "daemon
 	// rejected bind".
 	BindRejectReasonHandlerMissing = daemonbus.BindRejectReasonHandlerMissing
+
+	// BindRejectReasonSessionStoreUpsert indicates the daemon failed to
+	// mirror a bind into its local device session store.
+	BindRejectReasonSessionStoreUpsert = daemonbus.BindRejectReasonSessionStoreUpsert
+
+	// BindRejectReasonSessionStoreDelete indicates the daemon failed to
+	// remove a local device session mirror during unbind.
+	BindRejectReasonSessionStoreDelete = daemonbus.BindRejectReasonSessionStoreDelete
 )

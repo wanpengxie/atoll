@@ -104,6 +104,11 @@ type Deps struct {
 	// Log.FindByID for dedupe / parent existence checks.
 	Log khlog.MessageLog
 
+	// Fencing is the explicit ownership tuple passed to Log.Append at
+	// step 9. Unfenced test logs ignore the zero value; production daemon
+	// wiring must populate it from the channel_lock row.
+	Fencing khlog.FencingTuple
+
 	// NowMs returns unix-ms (engine ts_received write source). Defaults
 	// to time.Now when nil.
 	NowMs func() int64

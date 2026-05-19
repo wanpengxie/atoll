@@ -86,7 +86,7 @@ func newMemLog() *memLog {
 	return &memLog{rows: map[message.ID]message.Envelope{}, terminal: map[message.ID]message.ID{}}
 }
 
-func (l *memLog) Append(_ context.Context, env *message.Envelope) (khlog.AppendResult, error) {
+func (l *memLog) Append(_ context.Context, env *message.Envelope, _ khlog.FencingTuple) (khlog.AppendResult, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.failOn != "" && env.ID == l.failOn {

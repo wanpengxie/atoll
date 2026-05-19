@@ -367,7 +367,7 @@ func (b *DeviceSessionBinder) OnBind(ctx context.Context, body transit.BindDevic
 		ExpiresAt:        body.ExpiresAt,
 	}
 	if err := b.store.Upsert(ctx, sess); err != nil {
-		ack.Reason = "session_store_upsert"
+		ack.Reason = transit.BindRejectReasonSessionStoreUpsert
 		ack.Detail = err.Error()
 		return ack
 	}
@@ -385,7 +385,7 @@ func (b *DeviceSessionBinder) OnUnbind(ctx context.Context, body transit.UnbindD
 		SessionID: body.SessionID,
 	}
 	if err := b.store.Delete(ctx, body.SessionID); err != nil {
-		ack.Reason = "session_store_delete"
+		ack.Reason = transit.BindRejectReasonSessionStoreDelete
 		ack.Detail = err.Error()
 		return ack
 	}

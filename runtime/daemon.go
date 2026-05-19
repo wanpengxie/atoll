@@ -20,6 +20,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
+	khlog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/bootstrap"
@@ -957,7 +958,11 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		ActorRegistry: registry,
 		TypeRegistry:  typeRegistry.HarnessView(),
 		Log:           messages,
-		NowMs:         d.cfg.NowFn,
+		Fencing: khlog.FencingTuple{
+			Token: lc.Lock.FencingToken,
+			Epoch: lc.Lock.DaemonEpoch,
+		},
+		NowMs: d.cfg.NowFn,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("harness for %s: %w", lc.ChannelID, err)
@@ -987,7 +992,7 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		return nil, fmt.Errorf("trigger gateway for %s: %w", lc.ChannelID, err)
 	}
 
-	// Wrapped chain — same fencing-stamping + post-harness gateway dispatch
+	// Wrapped chain — same fencing + post-harness gateway dispatch
 	// + MarkDelivered behavior the daemon's WriteMessage handler uses
 	// (FIX-T3 / FIX-T6). Shared across the WriteMessage entrypoint AND the
 	// adapter framework so adapter responses (and timer-fired failed
@@ -996,7 +1001,6 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		chain:    chain,
 		gateway:  gw,
 		messages: messages,
-		lock:     lock,
 		nowFn:    d.cfg.NowFn,
 	}
 
@@ -2162,10 +2166,10 @@ func (d *Daemon) classifyLongPendingReason(
 // must obey (WriteMessage handler + adapter framework + future write-
 // path callers):
 //
-//   - FIX-T6: stamp the channel's current (fencing_token, daemon_epoch)
-//     tuple before delegating so the messages-insert tx validates the
-//     fencing pair (a silent placement reclaim under us surfaces as
-//     HarnessWorkerFencingStale instead of corrupting outbox).
+//   - FIX-T6: the wrapped harness chain carries the channel's explicit
+//     (fencing_token, daemon_epoch) tuple so the messages-insert tx
+//     validates the fencing pair (a silent placement reclaim under us
+//     surfaces as HarnessWorkerFencingStale instead of corrupting outbox).
 //   - FIX-T3/T155-B5: after a successful, non-deduped, non-rejected write
 //     call trigger.Gateway.Dispatch (L1 §5.1 fan-out) + messages.MarkDelivered.
 //     Dispatch failures record messages.MarkDeliveryError and leave the row
@@ -2177,17 +2181,11 @@ type postHarnessChain struct {
 	chain    *harness.Chain
 	gateway  *trigger.Gateway
 	messages *store.Messages
-	lock     *store.ChannelLock
 	nowFn    func() int64
 }
 
 // Write implements kernel/harness.Chain.
 func (a *postHarnessChain) Write(ctx context.Context, env *message.Envelope) (khar.WriteResult, error) {
-	if a.lock != nil {
-		if row, ok, err := a.lock.Get(ctx); err == nil && ok {
-			ctx = store.CtxWithFencing(ctx, row.FencingToken, row.DaemonEpoch)
-		}
-	}
 	res, err := a.chain.Write(ctx, env)
 	if err != nil {
 		return khar.WriteResult{}, err

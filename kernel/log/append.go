@@ -5,6 +5,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
 // AppendResult is what MessageLog.Append returns when the row write
@@ -23,6 +24,16 @@ type AppendResult struct {
 	// Deduped reports whether the append matched an existing row by
 	// envelope.id (L2 §1.4.10.1 / harness step 0.5 dedupe path).
 	Deduped bool
+}
+
+// FencingTuple is the explicit daemon ownership token a channel-local
+// MessageLog append must present when the concrete store enforces fencing.
+// A zero tuple means "no fencing supplied"; unfenced test stores may ignore
+// it, but fenced stores reject it as stale rather than reading hidden state
+// from context.Context.
+type FencingTuple struct {
+	Token placement.FencingToken
+	Epoch placement.DaemonEpoch
 }
 
 // AppendError is the typed error returned for protocol-level rejects
@@ -70,7 +81,7 @@ type MessageLog interface {
 	// env.TSReceived in-place so the harness chain can return the
 	// final envelope to the caller (L0 §3.2 — engine writes
 	// ts_received).
-	Append(ctx context.Context, env *message.Envelope) (AppendResult, error)
+	Append(ctx context.Context, env *message.Envelope, fencing FencingTuple) (AppendResult, error)
 
 	// FindByID returns the row identified by envelope.id, or ok=false
 	// when no such row exists. Used by harness step 0.5 (dedupe path)
