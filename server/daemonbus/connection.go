@@ -27,6 +27,7 @@ type Transport interface {
 type Connection struct {
 	DaemonID        placement.DaemonID
 	ConnectionEpoch daemonbus.ConnectionEpoch
+	Generation      uint64
 
 	transport Transport
 

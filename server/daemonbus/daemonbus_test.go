@@ -35,6 +35,30 @@ func newSvc(t *testing.T) *daemonbus.Service {
 	return daemonbus.NewService(db, daemonbus.Config{SharedSecret: "test-secret"})
 }
 
+func TestUnregisterConnectionCompareAndDelete(t *testing.T) {
+	t.Parallel()
+	svc := newSvc(t)
+	oldServer, _ := newPipePair()
+	newServer, _ := newPipePair()
+	oldConn := daemonbus.NewConnection("daemon-1", 1, oldServer)
+	newConn := daemonbus.NewConnection("daemon-1", 2, newServer)
+
+	svc.Register(oldConn)
+	svc.Register(newConn)
+	if svc.UnregisterConnection(oldConn) {
+		t.Fatal("old connection unregister removed current connection")
+	}
+	if got, ok := svc.ConnectionFor("daemon-1"); !ok || got != newConn {
+		t.Fatalf("current connection = %p ok=%v want %p", got, ok, newConn)
+	}
+	if !svc.UnregisterConnection(newConn) {
+		t.Fatal("current connection unregister did not remove entry")
+	}
+	if _, ok := svc.ConnectionFor("daemon-1"); ok {
+		t.Fatal("connection still registered after current unregister")
+	}
+}
+
 // pipeTransport is an in-memory bidirectional transport: send via one
 // channel, receive via the other. Used by both "daemon side" and
 // "server side" of the test (each side wires opposite read/write

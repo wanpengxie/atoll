@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
@@ -18,6 +19,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/scheduler"
+	runtimestore "github.com/wanpengxie/ActOS/runtime/store"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
@@ -74,12 +76,19 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 			channelID: h.ChannelID,
 		}
 
+		clock := func() time.Time { return time.Now() }
+		if h.NowFn != nil {
+			clock = func() time.Time { return time.UnixMilli(h.NowFn()) }
+		}
 		mgr, err := framework.NewManager(framework.ManagerConfig{
-			ChannelID:     h.ChannelID,
-			ActorRegistry: h.ActorRegistry,
-			TypeRegistry:  h.TypeRegistry,
-			HarnessChain:  adapterChain,
-			RequestLookup: h.RequestLookup,
+			ChannelID:       h.ChannelID,
+			ActorRegistry:   h.ActorRegistry,
+			TypeRegistry:    h.TypeRegistry,
+			HarnessChain:    adapterChain,
+			RequestLookup:   h.RequestLookup,
+			StateStore:      runtimestore.NewAdapterStateStore(h.DB, h.NowFn),
+			CredentialStore: runtimestore.NewAdapterCredentialStore(h.DB, h.NowFn),
+			Clock:           clock,
 			// T147 §A — daemon supplies the per-channel DeviceTransit so
 			// the framework can satisfy `via_server_transit` modules at
 			// Install time (manager.installOne refuses such a module
@@ -97,6 +106,8 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 		if err := mgr.BootRecoverTimers(ctx); err != nil {
 			return nil, fmt.Errorf("framework.Manager.BootRecoverTimers(%s): %w", h.ChannelID, err)
 		}
+		gcCtx, gcCancel := context.WithCancel(context.Background())
+		go mgr.RunGC(gcCtx)
 
 		// T147 §A — wire the inbound device→daemon callback. Every
 		// via_server_transit adapter installed above gets its
@@ -136,6 +147,7 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 		}
 
 		return func(shutdownCtx context.Context) error {
+			gcCancel()
 			return mgr.Shutdown(shutdownCtx)
 		}, nil
 	}

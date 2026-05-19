@@ -167,10 +167,10 @@ CREATE INDEX IF NOT EXISTS ix_view_sync_outbox_status_seq
 -- daemon process must satisfy to write into this channel sqlite.
 -- daemon_epoch is the daemon process counter — bumped on every
 -- daemon restart so stale worker IPC after restart fails fence_check.
-CREATE TABLE IF NOT EXISTS channel_lock (
-  channel_id         TEXT PRIMARY KEY,
-  fencing_token      INTEGER NOT NULL,
-  owner_epoch        INTEGER NOT NULL,
+	CREATE TABLE IF NOT EXISTS channel_lock (
+	  channel_id         TEXT PRIMARY KEY,
+	  fencing_token      INTEGER NOT NULL,
+	  owner_epoch        INTEGER NOT NULL,
   daemon_id          TEXT NOT NULL,
   daemon_epoch       INTEGER NOT NULL,
   acquired_at        INTEGER NOT NULL,
@@ -179,9 +179,27 @@ CREATE TABLE IF NOT EXISTS channel_lock (
   -- cold-start daemon can look the template up when re-mounting the
   -- channel without round-tripping the server. NULL / empty == legacy
   -- "no template" (generic group channel).
-  channel_type       TEXT NOT NULL DEFAULT ''
-);
-`
+	  channel_type       TEXT NOT NULL DEFAULT ''
+	);
+
+	-- =============================================================
+	-- 9) adapter_state  (L2 §8 F4 — framework StateStore)
+	-- =============================================================
+	CREATE TABLE IF NOT EXISTS adapter_state (
+	  key                TEXT PRIMARY KEY,
+	  value              BLOB NOT NULL,
+	  updated_at         INTEGER NOT NULL
+	);
+
+	-- =============================================================
+	-- 10) adapter_credentials  (L2 §8 F8 — framework CredentialStore)
+	-- =============================================================
+	CREATE TABLE IF NOT EXISTS adapter_credentials (
+	  key                TEXT PRIMARY KEY,
+	  value              TEXT NOT NULL,
+	  updated_at         INTEGER NOT NULL
+	);
+	`
 
 // DaemonLocalDDL builds the daemon-level sqlite tables. There is exactly
 // one bootstrap_registry row per channel-create attempt.
@@ -215,6 +233,8 @@ var ChannelLocalTables = []string{
 	"action_ledger",
 	"view_sync_outbox",
 	"channel_lock",
+	"adapter_state",
+	"adapter_credentials",
 }
 
 // DaemonLocalTables enumerates daemon-level table names.

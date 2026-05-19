@@ -25,6 +25,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -100,6 +101,7 @@ type Service struct {
 
 	mu       sync.Mutex
 	sessions map[string]*Connection // session_id → live WS connection
+	connGen  atomic.Uint64
 
 	// notifierMu guards notifier. The notifier itself is composed late
 	// by the gateway (after Service construction) because daemonbus is
@@ -328,8 +330,8 @@ func (s *Service) MarkActive(ctx context.Context, sessionID string) error {
 		ctx,
 		`UPDATE device_sessions
 		    SET state = 'active', last_state_at = ?
-		  WHERE device_session_id = ?
-		    AND state IN ('ready','offline')`,
+			  WHERE device_session_id = ?
+			    AND state IN ('ready','offline','active')`,
 		now, sessionID,
 	)
 	if err != nil {

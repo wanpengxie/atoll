@@ -200,6 +200,9 @@ func (b *Bridge) unregisterPendingTool(id message.ID) {
 }
 
 func (b *Bridge) dispatchToolResponse(trigger TriggerPayload) bool {
+	if trigger.Envelope.Kind != message.KindResponse {
+		return false
+	}
 	parentID := message.ID(strings.TrimSpace(trigger.Envelope.ParentID.String()))
 	if parentID == "" {
 		return false
@@ -211,9 +214,12 @@ func (b *Bridge) dispatchToolResponse(trigger TriggerPayload) bool {
 	}
 	b.pendingMu.Unlock()
 	if !ok {
-		return false
+		return true
 	}
-	ch <- toolResponse{trigger: trigger}
+	select {
+	case ch <- toolResponse{trigger: trigger}:
+	default:
+	}
 	close(ch)
 	return true
 }

@@ -23,6 +23,7 @@ import (
 type stubModule struct {
 	decl       adapter.Declaration
 	mctx       *adapter.ModuleContext
+	initErr    error
 	handle     func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error
 	onCallback func(ctx context.Context, payload []byte, mctx *adapter.ModuleContext) error
 	shutdown   func() error
@@ -31,6 +32,9 @@ type stubModule struct {
 func (m *stubModule) Declares() adapter.Declaration { return m.decl }
 
 func (m *stubModule) Init(_ context.Context, mctx *adapter.ModuleContext) error {
+	if m.initErr != nil {
+		return m.initErr
+	}
 	m.mctx = mctx
 	return nil
 }
@@ -139,6 +143,48 @@ func TestManagerInstallSeedsTypeRegistry(t *testing.T) {
 	}
 	if len(orphan.AllowedKinds) != 1 || orphan.AllowedKinds[0] != message.KindEvent {
 		t.Fatalf("orphan callback allowed kinds=%v want [event]", orphan.AllowedKinds)
+	}
+}
+
+func TestManagerInstallDoesNotPublishTypeRowsWhenInitFails(t *testing.T) {
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu",
+			Types:        []string{"feishu.chat.send"},
+			Binding:      actor.BindingOutboundHTTP,
+			MaxPendingMs: 30_000,
+		},
+		initErr: errors.New("init failed"),
+	}
+	registry := newMemoryActorRegistry()
+	if err := registry.Insert(context.Background(), actorreg.Record{
+		ID:      mod.decl.ActorID,
+		Kind:    actor.KindTool,
+		Binding: actor.BindingOutboundHTTP,
+	}); err != nil {
+		t.Fatalf("seed actor: %v", err)
+	}
+	types := NewInMemoryTypeRegistry()
+	mgr, err := NewManager(ManagerConfig{
+		ChannelID:     "channel:test",
+		ActorRegistry: registry,
+		TypeRegistry:  types,
+		HarnessChain:  newFakeChain(),
+		RequestLookup: NewMemoryRequestLookup(nil),
+		Clock:         time.Now,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := mgr.Install(context.Background(), []adapter.Module{mod}); err == nil {
+		t.Fatalf("Install succeeded; want init failure")
+	}
+	if _, ok, err := types.Lookup(context.Background(), "feishu.chat.send"); err != nil || ok {
+		t.Fatalf("type row after failed init ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := types.Lookup(context.Background(), OrphanCallbackType("feishu")); err != nil || ok {
+		t.Fatalf("orphan type row after failed init ok=%v err=%v", ok, err)
 	}
 }
 

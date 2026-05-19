@@ -39,8 +39,9 @@ const DefaultDevicePingWriteTimeout = 5 * time.Second
 // frames to the daemon (via daemonbus) + receiver of frames pushed
 // back from the daemon.
 type Connection struct {
-	Session   Session
-	transport DeviceTransport
+	Session    Session
+	transport  DeviceTransport
+	Generation uint64
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -251,14 +252,16 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 		}
 		tx.startPinger(cadence, pingWrite, idle)
 		conn := NewConnection(row, tx)
+		s.registerConnection(sessionID, conn)
 		if err := s.MarkActive(c.Request.Context(), sessionID); err != nil {
+			s.unregisterConnection(sessionID, conn)
 			_ = conn.Close()
 			return
 		}
-		s.registerConnection(sessionID, conn)
 		defer func() {
-			s.unregisterConnection(sessionID)
-			_ = s.MarkOffline(c.Request.Context(), sessionID)
+			if s.unregisterConnection(sessionID, conn) {
+				_ = s.MarkOffline(c.Request.Context(), sessionID)
+			}
 			_ = conn.Close()
 		}()
 
@@ -300,13 +303,24 @@ func (s *Service) SendFrameToDevice(ctx context.Context, sessionID string, frame
 }
 
 func (s *Service) registerConnection(sessionID string, conn *Connection) {
+	var previous *Connection
 	s.mu.Lock()
+	conn.Generation = s.connGen.Add(1)
+	previous = s.sessions[sessionID]
 	s.sessions[sessionID] = conn
 	s.mu.Unlock()
+	if previous != nil && previous != conn {
+		_ = previous.Close()
+	}
 }
 
-func (s *Service) unregisterConnection(sessionID string) {
+func (s *Service) unregisterConnection(sessionID string, conn *Connection) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.sessions[sessionID]
+	if current != conn || current.Generation != conn.Generation {
+		return false
+	}
 	delete(s.sessions, sessionID)
-	s.mu.Unlock()
+	return true
 }

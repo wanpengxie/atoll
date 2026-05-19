@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -58,6 +59,7 @@ type Service struct {
 
 	mu          sync.RWMutex
 	connections map[placement.DaemonID]*Connection
+	connGen     atomic.Uint64
 }
 
 // NewService builds a Service.

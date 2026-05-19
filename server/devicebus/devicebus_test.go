@@ -84,6 +84,9 @@ func TestIssueAndLifecycle(t *testing.T) {
 	if row.State != devicebus.StateActive {
 		t.Errorf("post-active state=%q", row.State)
 	}
+	if err := svc.MarkActive(ctx, res.Session.ID); err != nil {
+		t.Fatalf("idempotent active: %v", err)
+	}
 
 	// Offline → Active round trip.
 	if err := svc.MarkOffline(ctx, res.Session.ID); err != nil {

@@ -43,7 +43,7 @@ func TestDeviceStateTerminalFlags(t *testing.T) {
 		reachable bool
 	}{
 		{StatePending, false, false},
-		{StateReady, false, false},
+		{StateReady, false, true},
 		{StateActive, false, true},
 		{StateOffline, false, false},
 		{StateExpired, true, false},

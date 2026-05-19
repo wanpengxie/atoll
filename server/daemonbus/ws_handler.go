@@ -126,7 +126,7 @@ func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 		}
 		tx.startPinger(cadence, pingWrite, idle)
 		s.Register(conn)
-		defer s.Unregister(daemonID)
+		defer s.UnregisterConnection(conn)
 
 		// Send the connection_accepted frame so daemon learns its
 		// epoch (mirrors the L2 §9.4 contract).
@@ -156,9 +156,18 @@ type connectionAcceptedPayload struct {
 
 // Register tracks an open connection.
 func (s *Service) Register(conn *Connection) {
+	if conn == nil {
+		return
+	}
+	var previous *Connection
 	s.mu.Lock()
+	conn.Generation = s.connGen.Add(1)
+	previous = s.connections[conn.DaemonID]
 	s.connections[conn.DaemonID] = conn
 	s.mu.Unlock()
+	if previous != nil && previous != conn {
+		_ = previous.Close()
+	}
 }
 
 // Unregister drops a connection from the registry.
@@ -166,6 +175,23 @@ func (s *Service) Unregister(daemonID placement.DaemonID) {
 	s.mu.Lock()
 	delete(s.connections, daemonID)
 	s.mu.Unlock()
+}
+
+// UnregisterConnection drops conn only if it is still the current registry
+// entry. This prevents an older WS read-loop defer from deleting a newer
+// reconnect that registered under the same daemon id.
+func (s *Service) UnregisterConnection(conn *Connection) bool {
+	if conn == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.connections[conn.DaemonID]
+	if current != conn || current.Generation != conn.Generation {
+		return false
+	}
+	delete(s.connections, conn.DaemonID)
+	return true
 }
 
 // ConnectionFor returns the open Connection for daemonID, if any.

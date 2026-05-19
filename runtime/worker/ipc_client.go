@@ -36,9 +36,9 @@ type IPCClient struct {
 	// triggerCh fan-outs daemon-pushed KindTrigger frames to whoever is
 	// driving the worker's reaction loop (typically the Bridge). It is
 	// buffered so a slow consumer does not stall the read loop's reply
-	// dispatch path; overflow drops the oldest waiting frame and emits
-	// a stderr warning (gateway redelivery makes this safe under L1
-	// §6.1 at-least-once-by-message.id).
+	// dispatch path. Overflow is reported to the daemon with an explicit
+	// trigger nack so the delivery remains retryable instead of being
+	// silently marked delivered.
 	triggerCh   chan ipc.TriggerPayload
 	triggerDrop atomic.Int64
 
@@ -92,14 +92,14 @@ func (c *IPCClient) Stop() {
 
 // Triggers returns the channel of daemon-pushed KindTrigger payloads.
 // The Bridge ranges over it; the channel closes when the IPC client
-// stops (handshake EOF, daemon-side shutdown, or Stop()). Drops are
-// surfaced via TriggerDropCount.
+// stops (handshake EOF, daemon-side shutdown, or Stop()). Buffer
+// overflow is surfaced via TriggerDropCount and a trigger nack.
 func (c *IPCClient) Triggers() <-chan ipc.TriggerPayload {
 	return c.triggerCh
 }
 
 // TriggerDropCount returns the total number of KindTrigger frames the
-// IPC client had to drop because triggerCh was full. Non-zero in
+// IPC client had to reject because triggerCh was full. Non-zero in
 // production usually means the bridge processing loop is slower than
 // the daemon push rate; surface as an observability counter.
 func (c *IPCClient) TriggerDropCount() int64 {
@@ -141,21 +141,79 @@ func (c *IPCClient) dispatch(frame ipc.Frame) {
 		return
 	}
 	// Unsolicited frame. KindTrigger is the only documented daemon-push
-	// kind today (M1.6-T1); route it to the trigger channel. Anything
-	// else stays dropped per the original semantics.
+	// kind today (M1.6-T1); route it to the trigger channel and answer
+	// with an explicit ack/nack. Anything else stays dropped per the
+	// original semantics.
 	if frame.Kind == ipc.KindTrigger {
 		var payload ipc.TriggerPayload
 		if err := json.Unmarshal(frame.Payload, &payload); err != nil {
+			if err := c.writeTriggerAck(frame, ipc.TriggerAckPayload{
+				Accepted: false,
+				Reason:   "decode: " + err.Error(),
+			}); err != nil {
+				c.Stop()
+			}
 			return
 		}
-		select {
-		case c.triggerCh <- payload:
-		default:
+		if len(c.triggerCh) >= cap(c.triggerCh) {
 			c.triggerDrop.Add(1)
-			// Drop quietly into io.Discard so unit tests don't spam
-			// stderr. The TriggerDropCount probe is the contract.
+			if err := c.writeTriggerAck(frame, ipc.TriggerAckPayload{
+				Accepted: false,
+				Cursor:   payload.Cursor,
+				Reason:   "trigger_buffer_full",
+			}); err != nil {
+				c.Stop()
+			}
+			return
 		}
+		if err := c.writeTriggerAck(frame, ipc.TriggerAckPayload{
+			Accepted: true,
+			Cursor:   payload.Cursor,
+		}); err != nil {
+			c.Stop()
+			return
+		}
+		c.triggerCh <- payload
 	}
+}
+
+func (c *IPCClient) writeTriggerAck(trigger ipc.Frame, ackPayload ipc.TriggerAckPayload) error {
+	payload, err := json.Marshal(ackPayload)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return errors.New("worker: ipc client closed")
+	}
+	channelID := c.channelID
+	if channelID == "" {
+		channelID = trigger.ChannelID
+	}
+	workerID := c.workerID
+	if workerID == "" {
+		workerID = trigger.WorkerID
+	}
+	fencingToken := c.fencingToken
+	if fencingToken == 0 {
+		fencingToken = trigger.FencingToken
+	}
+	daemonEpoch := c.daemonEpoch
+	if daemonEpoch == 0 {
+		daemonEpoch = trigger.DaemonEpoch
+	}
+	frame := ipc.Frame{
+		ID:           trigger.ID,
+		Kind:         ipc.KindTriggerAck,
+		ChannelID:    channelID,
+		WorkerID:     workerID,
+		FencingToken: fencingToken,
+		DaemonEpoch:  daemonEpoch,
+		Payload:      payload,
+	}
+	c.mu.Unlock()
+	return c.codec.Write(frame)
 }
 
 // Handshake performs the initial handshake. On success the client

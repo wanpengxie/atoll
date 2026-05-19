@@ -301,9 +301,9 @@ func messageEnvelopeStub() message.Envelope {
 // TestIPCClient_TriggersDeliversDaemonPush covers M1.6-T1 P3: an
 // unsolicited KindTrigger frame pushed by the daemon MUST be decoded
 // and surfaced through IPCClient.Triggers() so the worker's Bridge can
-// react. Triggers are fire-and-forget — no reply expected — and the
-// daemon-supplied envelope / correlation_id / cursor must round-trip
-// intact.
+// react. The daemon-supplied envelope / correlation_id / cursor must
+// round-trip intact, and the worker must ack before exposing the
+// trigger to bridge processing.
 func TestIPCClient_TriggersDeliversDaemonPush(t *testing.T) {
 	t.Parallel()
 	workerR, daemonW := io.Pipe()
@@ -320,10 +320,13 @@ func TestIPCClient_TriggersDeliversDaemonPush(t *testing.T) {
 
 	daemonCodec := ipc.NewCodec(daemonR, daemonW)
 	// Daemon side: respond to handshake, then push a KindTrigger frame.
+	daemonDone := make(chan error, 1)
 	go func() {
+		defer close(daemonDone)
 		for {
 			frame, err := daemonCodec.Read()
 			if err != nil {
+				daemonDone <- err
 				return
 			}
 			if frame.Kind != ipc.KindHandshake {
@@ -357,6 +360,33 @@ func TestIPCClient_TriggersDeliversDaemonPush(t *testing.T) {
 					Kind:    ipc.KindTrigger,
 					Payload: payload,
 				})
+				ackFrame, err := daemonCodec.Read()
+				if err != nil {
+					daemonDone <- err
+					return
+				}
+				if ackFrame.Kind != ipc.KindTriggerAck {
+					daemonDone <- errors.New("unexpected trigger ack kind")
+					return
+				}
+				if ackFrame.ChannelID != "ch-T" || ackFrame.WorkerID != "worker-T" ||
+					ackFrame.FencingToken != 5 || ackFrame.DaemonEpoch != 3 {
+					daemonDone <- errors.New("trigger ack stamp mismatch")
+					return
+				}
+				var ack ipc.TriggerAckPayload
+				if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
+					daemonDone <- err
+					return
+				}
+				if !ack.Accepted {
+					daemonDone <- errors.New("trigger ack rejected")
+					return
+				}
+				if ack.Cursor != int64(100+i) {
+					daemonDone <- errors.New("trigger ack cursor mismatch")
+					return
+				}
 			}
 			return
 		}
@@ -395,5 +425,106 @@ func TestIPCClient_TriggersDeliversDaemonPush(t *testing.T) {
 	}
 	if dropped := client.TriggerDropCount(); dropped != 0 {
 		t.Errorf("unexpected drops=%d", dropped)
+	}
+	select {
+	case err := <-daemonDone:
+		if err != nil {
+			t.Fatalf("daemon side: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("daemon side did not finish")
+	}
+}
+
+func TestIPCClient_TriggersNackWhenBufferFull(t *testing.T) {
+	t.Parallel()
+	workerR, daemonW := io.Pipe()
+	daemonR, workerW := io.Pipe()
+	t.Cleanup(func() {
+		_ = workerR.Close()
+		_ = workerW.Close()
+		_ = daemonR.Close()
+		_ = daemonW.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	daemonCodec := ipc.NewCodec(daemonR, daemonW)
+	client := worker.NewIPCClient(workerR, workerW)
+	client.Start(ctx)
+	t.Cleanup(client.Stop)
+
+	handshakeDone := make(chan struct{})
+	go func() {
+		frame, err := daemonCodec.Read()
+		if err != nil {
+			t.Errorf("read handshake: %v", err)
+			close(handshakeDone)
+			return
+		}
+		ack, _ := json.Marshal(ipc.HandshakeAckPayload{
+			WorkerID:     "worker-T",
+			ChannelID:    "ch-T",
+			FencingToken: 5,
+			DaemonEpoch:  3,
+		})
+		_ = daemonCodec.Write(ipc.Frame{ID: frame.ID, Kind: ipc.KindHandshakeAck, Payload: ack})
+		close(handshakeDone)
+	}()
+	if _, err := client.Handshake(ctx, "lease-T"); err != nil {
+		t.Fatalf("Handshake: %v", err)
+	}
+	<-handshakeDone
+
+	const triggerBufferSize = 32
+	for i := 0; i < triggerBufferSize+1; i++ {
+		env := messageEnvelopeStub()
+		env.ID = message.ID("m-buffer")
+		payload, _ := json.Marshal(ipc.TriggerPayload{
+			Envelope: env,
+			Cursor:   int64(i + 1),
+		})
+		if err := daemonCodec.Write(ipc.Frame{
+			ID:      "push-buffer",
+			Kind:    ipc.KindTrigger,
+			Payload: payload,
+		}); err != nil {
+			t.Fatalf("write trigger %d: %v", i, err)
+		}
+		ackFrame, err := daemonCodec.Read()
+		if err != nil {
+			t.Fatalf("read ack %d: %v", i, err)
+		}
+		if ackFrame.Kind != ipc.KindTriggerAck {
+			t.Fatalf("ack kind=%s want %s", ackFrame.Kind, ipc.KindTriggerAck)
+		}
+		var ack ipc.TriggerAckPayload
+		if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
+			t.Fatalf("decode ack %d: %v", i, err)
+		}
+		if i < triggerBufferSize {
+			if !ack.Accepted {
+				t.Fatalf("ack %d accepted=false: %+v", i, ack)
+			}
+			continue
+		}
+		if ack.Accepted {
+			t.Fatalf("overflow ack accepted=true: %+v", ack)
+		}
+		if ack.Reason != "trigger_buffer_full" {
+			t.Fatalf("overflow reason=%q want trigger_buffer_full", ack.Reason)
+		}
+	}
+
+	if dropped := client.TriggerDropCount(); dropped != 1 {
+		t.Fatalf("TriggerDropCount=%d want 1", dropped)
+	}
+	for i := 0; i < triggerBufferSize; i++ {
+		select {
+		case <-client.Triggers():
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("drain trigger %d timed out", i)
+		}
 	}
 }

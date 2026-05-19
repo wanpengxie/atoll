@@ -233,12 +233,10 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 			"note", "ManagerConfig.HTTPClient nil — adapter must provide its own")
 	}
 
-	// Upsert types into the type_registry. Per L2 §1.4.2 install rules,
-	// each row carries allowed_kinds + per-kind payload schemas +
-	// fallback_response_schema (when request) + terminal_convention.
-	// Adapters omitting decl.TypeSchemas[type] fall back to permissive
-	// defaults (allowed_kinds={event,request,response}, payload_status
-	// terminal); install logs a warning so the gap stays observable.
+	// Build type rows, but do not publish them until mod.Init succeeds.
+	// Otherwise an Init failure leaves a callable type_registry row with
+	// no live module behind it.
+	typeRows := make([]TypeRow, 0, len(decl.Types)+1)
 	for _, t := range decl.Types {
 		schema, hasSchema := decl.TypeSchemas[t]
 		if !hasSchema {
@@ -278,12 +276,9 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 			return fmt.Errorf("%w: adapter=%s type=%s",
 				asInstallError(message.InstallAdapterTimeoutMissing), decl.Name, t)
 		}
-		if _, err := m.cfg.TypeRegistry.Upsert(ctx, row); err != nil {
-			return fmt.Errorf("%w: adapter=%s type=%s: %v",
-				asInstallError(message.InstallTypeRegistryInvalid), decl.Name, t, err)
-		}
+		typeRows = append(typeRows, row)
 	}
-	if _, err := m.cfg.TypeRegistry.Upsert(ctx, TypeRow{
+	typeRows = append(typeRows, TypeRow{
 		Type:           OrphanCallbackType(decl.Name),
 		HandlerActorID: decl.ActorID,
 		HandlerBinding: decl.Binding,
@@ -293,10 +288,7 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 			message.KindEvent: json.RawMessage(eventPayloadSchemaObject),
 		},
 		TerminalConvention: TerminalPayloadStatus,
-	}); err != nil {
-		return fmt.Errorf("%w: adapter=%s type=%s: %v",
-			asInstallError(message.InstallTypeRegistryInvalid), decl.Name, OrphanCallbackType(decl.Name), err)
-	}
+	})
 
 	// Build framework helpers.
 	state := NewNamespacedStateStore(m.cfg.StateStore, "adapter:"+decl.Name)
@@ -342,6 +334,14 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 
 	if err := mod.Init(ctx, mctx); err != nil {
 		return fmt.Errorf("framework: module %s init: %w", decl.Name, err)
+	}
+
+	for _, row := range typeRows {
+		if _, err := m.cfg.TypeRegistry.Upsert(ctx, row); err != nil {
+			_ = mod.Shutdown(ctx)
+			return fmt.Errorf("%w: adapter=%s type=%s: %v",
+				asInstallError(message.InstallTypeRegistryInvalid), decl.Name, row.Type, err)
+		}
 	}
 
 	bm := &boundModule{

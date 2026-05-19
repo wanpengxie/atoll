@@ -58,11 +58,14 @@ func (s DeviceState) IsTerminal() bool {
 	return s == StateExpired || s == StateRevoked
 }
 
-// IsReachable reports whether the device WS can carry traffic in this
-// state. Only `active` is delivery-eligible; offline holds the session
-// open for reconnection but cannot route requests.
+// IsReachable reports whether the daemon may attempt to route traffic
+// for this mirror row. The server/devicebus owns the authoritative
+// active-connection check; the daemon mirror observes bind/unbind
+// control frames but does not receive every ready→active WS transition.
+// `ready` therefore remains an attemptable state, while offline and
+// terminal states fail before sending.
 func (s DeviceState) IsReachable() bool {
-	return s == StateActive
+	return s == StateReady || s == StateActive
 }
 
 // allowedTransitions encodes the T1.10 state machine. Reading: from
