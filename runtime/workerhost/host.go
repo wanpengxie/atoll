@@ -108,12 +108,12 @@ func (h *Host) Ready() <-chan struct{} { return h.ready }
 // daemon_epoch) tuple so the worker's IPCClient observes the same
 // fence context it expects to stamp on its own outbound frames. The
 // frame ID is informational (worker drops unsolicited replies).
-func (h *Host) PushTrigger(payload ipc.TriggerPayload) error {
+func (h *Host) PushTrigger(ctx context.Context, payload ipc.TriggerPayload) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("workerhost: encode trigger: %w", err)
 	}
-	return h.codec.Write(ipc.Frame{
+	frame := ipc.Frame{
 		ID:           fmt.Sprintf("trig-%s", payload.Envelope.ID),
 		Kind:         ipc.KindTrigger,
 		ChannelID:    h.cfg.ChannelID,
@@ -121,7 +121,17 @@ func (h *Host) PushTrigger(payload ipc.TriggerPayload) error {
 		FencingToken: h.cfg.FencingToken,
 		DaemonEpoch:  h.cfg.DaemonEpoch,
 		Payload:      raw,
-	})
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- h.codec.Write(frame) }()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Serve runs the daemon-side read loop. Blocks until the worker
