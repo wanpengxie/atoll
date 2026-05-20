@@ -107,7 +107,7 @@ func TestACKMismatchRejected(t *testing.T) {
 	}{
 		{"wrong create_request_id", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.CreateRequestID = "bogus"; return a }},
 		{"wrong owner_epoch", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.OwnerEpoch++; return a }},
-		{"wrong fencing_token", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.FencingToken++; return a }},
+		{"wrong fencing_token", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.FencingToken = "tok-mutated"; return a }},
 		{"wrong daemon_id", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.DaemonID = "other"; return a }},
 		{"rejected status", func(a placement.CreateChannelAck) placement.CreateChannelAck {
 			a.Status = placement.AckRejected
@@ -307,7 +307,7 @@ func TestReclaim(t *testing.T) {
 
 	// Mismatched (epoch / token) reclaim rejected.
 	got, err = svc.AcceptReclaim(ctx, p.ChannelID, p.DaemonID, placement.ReclaimChannel{
-		ChannelID: p.ChannelID, FencingToken: 9999, OwnerEpoch: 9999,
+		ChannelID: p.ChannelID, FencingToken: "tok-9999", OwnerEpoch: 9999,
 	}, 10)
 	if err != nil {
 		t.Fatalf("AcceptReclaim mismatch err: %v", err)
@@ -370,5 +370,47 @@ func TestReclaimHijackDifferentDaemonID(t *testing.T) {
 	}
 	if got.DaemonID != p.DaemonID {
 		t.Errorf("post-hijack daemon_id=%q want %q (ownership leaked)", got.DaemonID, p.DaemonID)
+	}
+}
+
+// TestReserve_GeneratesOpaqueFencingToken asserts the server-side
+// Reserve path generates a fresh unguessable fencing_token (32-char hex)
+// per proto-foundation §3.6.1, and that it is decoupled from OwnerEpoch
+// — two Reserve calls produce different tokens even when OwnerEpoch
+// would collide.
+func TestReserve_GeneratesOpaqueFencingToken(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+
+	p1, req1, err := svc.Reserve(ctx, channel.ID("ch-A"), placement.DaemonID("d-1"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve A: %v", err)
+	}
+	// Bump clock so OwnerEpoch differs; we mainly care about token
+	// independence from epoch.
+	c.now = c.now.Add(1 * time.Second)
+	p2, _, err := svc.Reserve(ctx, channel.ID("ch-B"), placement.DaemonID("d-1"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve B: %v", err)
+	}
+
+	// Token shape: 32-char hex.
+	if len(p1.FencingToken) != 32 {
+		t.Errorf("FencingToken len=%d want 32 (token=%q)", len(p1.FencingToken), p1.FencingToken)
+	}
+	// Token is independent of OwnerEpoch — not a stringified int64.
+	if string(p1.FencingToken) == "1700000000000" || p1.FencingToken == placement.FencingToken(p1.CreateRequestID) {
+		t.Errorf("FencingToken leaks epoch / request id: %q (epoch=%d)", p1.FencingToken, p1.OwnerEpoch)
+	}
+	// Two reserves → two different tokens.
+	if p1.FencingToken == p2.FencingToken {
+		t.Errorf("two Reserve calls returned identical token %q", p1.FencingToken)
+	}
+	// Request carries the same token as the placement record.
+	if req1.FencingToken != p1.FencingToken {
+		t.Errorf("CreateChannelRequest.FencingToken=%q want placement.FencingToken=%q",
+			req1.FencingToken, p1.FencingToken)
 	}
 }

@@ -141,7 +141,7 @@ func TestMockBridge_ReactAndExitOnMaxTurns(t *testing.T) {
 		WorkerID:      "worker-MB",
 		ChannelID:     channel.ID("ch-MB"),
 		WorkerActorID: "agent:channel-agent",
-		FencingToken:  placement.FencingToken(1),
+		FencingToken:  placement.FencingToken("tok-1"),
 		DaemonEpoch:   placement.DaemonEpoch(1),
 	}
 	go daemon.loop(ctx, ack, 2)
@@ -258,7 +258,7 @@ func TestMockBridge_DomainPromptLog(t *testing.T) {
 		WorkerID:      "worker-PROMPT",
 		ChannelID:     channel.ID("ch-PROMPT"),
 		WorkerActorID: "agent:channel-agent",
-		FencingToken:  placement.FencingToken(1),
+		FencingToken:  placement.FencingToken("tok-1"),
 		DaemonEpoch:   placement.DaemonEpoch(1),
 	}
 	// One trigger → bridge reacts, MaxTurns=1 fires terminal, Run exits.
@@ -339,7 +339,7 @@ func TestMockBridge_NoDomainPromptLog(t *testing.T) {
 		WorkerID:      "worker-GROUP",
 		ChannelID:     channel.ID("ch-GROUP"),
 		WorkerActorID: "agent:channel-agent",
-		FencingToken:  placement.FencingToken(1),
+		FencingToken:  placement.FencingToken("tok-1"),
 		DaemonEpoch:   placement.DaemonEpoch(1),
 	}
 	go daemon.loop(ctx, ack, 1)

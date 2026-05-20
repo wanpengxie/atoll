@@ -119,13 +119,13 @@ func TestMessages_FencingEnforced(t *testing.T) {
 	}{
 		{
 			name:   "match — accept",
-			token:  placement.FencingToken(7),
+			token:  placement.FencingToken("tok-7"),
 			epoch:  placement.DaemonEpoch(3),
 			supply: true,
 		},
 		{
 			name:       "stale token — caller below lock",
-			token:      placement.FencingToken(6), // lock=7
+			token:      placement.FencingToken("tok-6"), // lock=7
 			epoch:      placement.DaemonEpoch(3),
 			supply:     true,
 			wantReject: true,
@@ -133,7 +133,7 @@ func TestMessages_FencingEnforced(t *testing.T) {
 		},
 		{
 			name:       "stale token — caller above lock (newer worker view)",
-			token:      placement.FencingToken(8),
+			token:      placement.FencingToken("tok-8"),
 			epoch:      placement.DaemonEpoch(3),
 			supply:     true,
 			wantReject: true,
@@ -141,7 +141,7 @@ func TestMessages_FencingEnforced(t *testing.T) {
 		},
 		{
 			name:       "daemon_epoch mismatch — stale daemon",
-			token:      placement.FencingToken(7),
+			token:      placement.FencingToken("tok-7"),
 			epoch:      placement.DaemonEpoch(99),
 			supply:     true,
 			wantReject: true,
@@ -149,7 +149,7 @@ func TestMessages_FencingEnforced(t *testing.T) {
 		},
 		{
 			name:       "missing fencing — bare append rejected",
-			token:      placement.FencingToken(7),
+			token:      placement.FencingToken("tok-7"),
 			epoch:      placement.DaemonEpoch(3),
 			supply:     false,
 			wantReject: true,
@@ -159,7 +159,7 @@ func TestMessages_FencingEnforced(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fx := newFencedFixture(t, placement.FencingToken(7), placement.DaemonEpoch(3))
+			fx := newFencedFixture(t, placement.FencingToken("tok-7"), placement.DaemonEpoch(3))
 			ctx := context.Background()
 			var fencing klog.FencingTuple
 			if tc.supply {
@@ -204,7 +204,7 @@ func TestMessages_FencingEnforced(t *testing.T) {
 // status.
 func TestLedger_FencingEnforced(t *testing.T) {
 	ctx := context.Background()
-	fx := newFencedFixture(t, placement.FencingToken(7), placement.DaemonEpoch(3))
+	fx := newFencedFixture(t, placement.FencingToken("tok-7"), placement.DaemonEpoch(3))
 
 	key, err := ledger.DeriveKey("turn-1", "act-1")
 	if err != nil {
@@ -220,7 +220,7 @@ func TestLedger_FencingEnforced(t *testing.T) {
 	}
 
 	// Reserve — stale fencing tuple → reject, no row.
-	staleCtx := store.CtxWithFencing(ctx, placement.FencingToken(6), placement.DaemonEpoch(3))
+	staleCtx := store.CtxWithFencing(ctx, placement.FencingToken("tok-6"), placement.DaemonEpoch(3))
 	if _, err := fx.led.Reserve(staleCtx, entry); err == nil {
 		t.Fatal("Reserve with stale token: expected error, got nil")
 	} else if !store.IsFencingStale(err) {
@@ -282,7 +282,7 @@ func TestChannelLock_ValidateWriteTx(t *testing.T) {
 	lock := store.NewChannelLock(db)
 	if err := lock.Insert(ctx, store.ChannelLockRow{
 		ChannelID:    "ch-1",
-		FencingToken: placement.FencingToken(5),
+		FencingToken: placement.FencingToken("tok-5"),
 		OwnerEpoch:   placement.OwnerEpoch(1),
 		DaemonID:     "daemon-A",
 		DaemonEpoch:  placement.DaemonEpoch(2),
@@ -307,11 +307,11 @@ func TestChannelLock_ValidateWriteTx(t *testing.T) {
 		epoch   placement.DaemonEpoch
 		wantErr bool
 	}{
-		{"match", 5, 2, false},
-		{"token lower", 4, 2, true},
-		{"token higher", 6, 2, true},
-		{"epoch lower", 5, 1, true},
-		{"epoch higher", 5, 3, true},
+		{"match", "tok-5", 2, false},
+		{"token mismatch (different value 'lower')", "tok-4", 2, true},
+		{"token mismatch (different value 'higher')", "tok-6", 2, true},
+		{"epoch lower", "tok-5", 1, true},
+		{"epoch higher", "tok-5", 3, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -340,7 +340,7 @@ func TestChannelLock_ValidateWriteTx(t *testing.T) {
 		emptyLock := store.NewChannelLock(db)
 		tx, _ := db.BeginTx(ctx, nil)
 		defer func() { _ = tx.Rollback() }()
-		err = emptyLock.ValidateWriteTx(ctx, tx, placement.FencingToken(5), placement.DaemonEpoch(2))
+		err = emptyLock.ValidateWriteTx(ctx, tx, placement.FencingToken("tok-5"), placement.DaemonEpoch(2))
 		if !store.IsFencingStale(err) {
 			t.Errorf("missing row: want FencingStaleError, got %v", err)
 		}
@@ -348,17 +348,120 @@ func TestChannelLock_ValidateWriteTx(t *testing.T) {
 
 	// Nil tx → error path.
 	t.Run("nil tx", func(t *testing.T) {
-		if err := lock.ValidateWriteTx(ctx, nil, placement.FencingToken(5), placement.DaemonEpoch(2)); err == nil {
+		if err := lock.ValidateWriteTx(ctx, nil, placement.FencingToken("tok-5"), placement.DaemonEpoch(2)); err == nil {
 			t.Fatal("nil tx: expected error")
 		}
 	})
+}
+
+// TestChannelLock_ReclaimRotatesFencingToken asserts the spec invariant
+// from proto-foundation §3.6.1 + proto-layer1 §6.2: a successful reclaim
+// MUST rotate the fencing_token to a fresh unguessable value, and the
+// old token MUST be rejected by the in-tx fencing gate afterward. This
+// is the F.fencing invariant — reusing a token across reclaims breaks it.
+func TestChannelLock_ReclaimRotatesFencingToken(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	lock := store.NewChannelLock(db)
+	oldToken, err := placement.NewFencingToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    "ch-1",
+		FencingToken: oldToken,
+		OwnerEpoch:   placement.OwnerEpoch(1),
+		DaemonID:     "daemon-A",
+		DaemonEpoch:  placement.DaemonEpoch(1),
+		AcquiredAt:   1000,
+		RefreshedAt:  1000,
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// Simulate reclaim — generate a fresh token + bump owner_epoch.
+	newToken, err := placement.NewFencingToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newToken == oldToken {
+		t.Fatalf("reclaim must rotate fencing_token (got same %q for both)", oldToken)
+	}
+	ok, err := lock.UpgradeEpoch(ctx, newToken, placement.OwnerEpoch(2),
+		placement.DaemonID("daemon-A"), placement.DaemonEpoch(1), 2000)
+	if err != nil || !ok {
+		t.Fatalf("UpgradeEpoch ok=%v err=%v", ok, err)
+	}
+
+	// Old token MUST now be rejected by ValidateWriteTx.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := lock.ValidateWriteTx(ctx, tx, oldToken, placement.DaemonEpoch(1)); !store.IsFencingStale(err) {
+		t.Errorf("old token after reclaim must be rejected, got %v", err)
+	}
+	// New token still passes.
+	if err := lock.ValidateWriteTx(ctx, tx, newToken, placement.DaemonEpoch(1)); err != nil {
+		t.Errorf("new token must pass post-reclaim, got %v", err)
+	}
+}
+
+// TestChannelLock_OwnerEpochIsTheOrderingInvariant asserts UpgradeEpoch
+// rejects writes that do NOT strictly advance owner_epoch, even when the
+// fresh fencing_token differs lexicographically from the stored one.
+// Ordering is owner_epoch's job — fencing_token only supports equality.
+func TestChannelLock_OwnerEpochIsTheOrderingInvariant(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	lock := store.NewChannelLock(db)
+	if err := lock.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    "ch-1",
+		FencingToken: placement.FencingToken("aaaa"),
+		OwnerEpoch:   placement.OwnerEpoch(5),
+		DaemonID:     "daemon-A",
+		DaemonEpoch:  placement.DaemonEpoch(1),
+		AcquiredAt:   1000,
+		RefreshedAt:  1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Lexicographically "smaller" token but same epoch — reject.
+	ok, _ := lock.UpgradeEpoch(ctx,
+		placement.FencingToken("zzzz"), placement.OwnerEpoch(5),
+		placement.DaemonID("daemon-B"), placement.DaemonEpoch(1), 2000)
+	if ok {
+		t.Error("same-epoch upgrade must reject regardless of token value")
+	}
+
+	// Strictly higher epoch — accept.
+	ok, _ = lock.UpgradeEpoch(ctx,
+		placement.FencingToken("zzzz"), placement.OwnerEpoch(6),
+		placement.DaemonID("daemon-B"), placement.DaemonEpoch(1), 2000)
+	if !ok {
+		t.Error("higher-epoch upgrade must accept")
+	}
 }
 
 // TestMessages_FencingDedupeUnchanged guards that the dedupe branch
 // still works once fencing is enforced — a retry with the same envelope
 // id should return Deduped=true (not a fencing reject).
 func TestMessages_FencingDedupeUnchanged(t *testing.T) {
-	fx := newFencedFixture(t, placement.FencingToken(7), placement.DaemonEpoch(3))
+	fx := newFencedFixture(t, placement.FencingToken("tok-7"), placement.DaemonEpoch(3))
 	ctx := context.Background()
 	fencing := klog.FencingTuple{Token: fx.token, Epoch: fx.epoch}
 

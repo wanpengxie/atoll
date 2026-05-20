@@ -17,15 +17,15 @@ import (
 func TestFenceInvalidErrorFormat(t *testing.T) {
 	err := &worker.FenceInvalidError{
 		FenceInvalidPayload: ipc.FenceInvalidPayload{
-			ExpectedToken: placement.FencingToken(7),
-			GotToken:      placement.FencingToken(5),
+			ExpectedToken: placement.FencingToken("tok-7"),
+			GotToken:      placement.FencingToken("tok-5"),
 			ExpectedEpoch: placement.DaemonEpoch(12),
 			GotEpoch:      placement.DaemonEpoch(10),
 			Reason:        "stale-daemon",
 		},
 	}
 	got := err.Error()
-	for _, frag := range []string{"token=7", "token=5", "epoch=12", "epoch=10", "stale-daemon"} {
+	for _, frag := range []string{"tok-7", "tok-5", "epoch=12", "epoch=10", "stale-daemon"} {
 		if !strings.Contains(got, frag) {
 			t.Errorf("Error()=%q missing fragment %q", got, frag)
 		}
@@ -36,8 +36,8 @@ func TestFenceInvalidErrorFormat(t *testing.T) {
 // with the decoded payload, accessible via errors.As.
 func TestFenceFromFrameDecodes(t *testing.T) {
 	payload := ipc.FenceInvalidPayload{
-		ExpectedToken: 9,
-		GotToken:      8,
+		ExpectedToken: "tok-9",
+		GotToken:      "tok-8",
 		ExpectedEpoch: 3,
 		GotEpoch:      2,
 		Reason:        "fence-stale",
@@ -57,8 +57,8 @@ func TestFenceFromFrameDecodes(t *testing.T) {
 	if !errors.As(wrapped, &fenceErr) {
 		t.Fatalf("errors.As(*FenceInvalidError) failed for %T", wrapped)
 	}
-	if fenceErr.ExpectedToken != 9 || fenceErr.GotToken != 8 {
-		t.Errorf("tokens=%d/%d want 9/8", fenceErr.ExpectedToken, fenceErr.GotToken)
+	if fenceErr.ExpectedToken != "tok-9" || fenceErr.GotToken != "tok-8" {
+		t.Errorf("tokens=%q/%q want tok-9/tok-8", fenceErr.ExpectedToken, fenceErr.GotToken)
 	}
 	if fenceErr.ExpectedEpoch != 3 || fenceErr.GotEpoch != 2 {
 		t.Errorf("epochs=%d/%d want 3/2", fenceErr.ExpectedEpoch, fenceErr.GotEpoch)

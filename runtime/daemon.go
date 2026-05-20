@@ -1569,15 +1569,20 @@ func (d *Daemon) handleCreateChannel(
 			return d.sendCreateAck(ctx, frame.FrameID, ack)
 		}
 		if ok {
+			// Ordering uses owner_epoch — fencing_token is opaque random
+			// (proto-foundation §3.6.1) and cannot be compared by
+			// magnitude. owner_epoch carries the monotonic ordering
+			// invariant; fencing_token only supports equality match for
+			// idempotent-replay detection.
 			switch {
-			case row.FencingToken < req.FencingToken:
+			case row.OwnerEpoch < req.OwnerEpoch:
 				ack.Status = placement.AckRejected
-				ack.Reason = "local_lock_stale_higher_token_received"
+				ack.Reason = "local_lock_stale_higher_epoch_received"
 				return d.sendCreateAck(ctx, frame.FrameID, ack)
-			case row.FencingToken == req.FencingToken:
-				if row.OwnerEpoch != req.OwnerEpoch {
+			case row.OwnerEpoch == req.OwnerEpoch:
+				if row.FencingToken != req.FencingToken {
 					ack.Status = placement.AckRejected
-					ack.Reason = "owner_epoch_mismatch"
+					ack.Reason = "fencing_token_mismatch"
 					return d.sendCreateAck(ctx, frame.FrameID, ack)
 				}
 				if row.DaemonID != placement.DaemonID(d.cfg.DaemonID) {
@@ -1596,7 +1601,7 @@ func (d *Daemon) handleCreateChannel(
 				}
 				ack.Status = placement.AckBound
 				return d.sendCreateAck(ctx, frame.FrameID, ack)
-			case row.FencingToken > req.FencingToken:
+			case row.OwnerEpoch > req.OwnerEpoch:
 				ack.Status = placement.AckRejected
 				ack.Reason = "stale_request"
 				return d.sendCreateAck(ctx, frame.FrameID, ack)

@@ -128,13 +128,17 @@ func (s *Service) ReserveWith(
 ) (placement.Placement, placement.CreateChannelRequest, error) {
 	now := s.now().UnixMilli()
 	epoch := placement.OwnerEpoch(now)
+	token, err := placement.NewFencingToken()
+	if err != nil {
+		return placement.Placement{}, placement.CreateChannelRequest{}, fmt.Errorf("placements: fencing token: %w", err)
+	}
 
 	p := placement.Placement{
 		ChannelID:             channelID,
 		DaemonID:              daemonID,
 		State:                 placement.StateCreating,
 		OwnerEpoch:            epoch,
-		FencingToken:          placement.FencingToken(epoch),
+		FencingToken:          token,
 		CreateRequestID:       placement.CreateRequestID(uuid.NewString()),
 		DaemonConnectionEpoch: connectionEpoch,
 		CreatedAt:             now,

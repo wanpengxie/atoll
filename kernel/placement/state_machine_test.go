@@ -79,7 +79,7 @@ func TestACKMatchExactFieldSet(t *testing.T) {
 		DaemonID:        "daemon-1",
 		State:           StateCreating,
 		OwnerEpoch:      7,
-		FencingToken:    7,
+		FencingToken:    "tok-7",
 		CreateRequestID: "req-uuid-x",
 	}
 	ackOK := CreateChannelAck{
@@ -87,7 +87,7 @@ func TestACKMatchExactFieldSet(t *testing.T) {
 		ChannelID:       channel.ID("chan-A"),
 		CreateRequestID: "req-uuid-x",
 		OwnerEpoch:      7,
-		FencingToken:    7,
+		FencingToken:    "tok-7",
 		DaemonID:        "daemon-1",
 		DaemonEpoch:     1,
 		Status:          AckBound,
@@ -114,7 +114,7 @@ func TestACKMatchExactFieldSet(t *testing.T) {
 		},
 		{
 			name: "fencing_token mismatch",
-			mod:  func(a *CreateChannelAck) { a.FencingToken = 8 },
+			mod:  func(a *CreateChannelAck) { a.FencingToken = "tok-8" },
 		},
 		{
 			name: "daemon_id mismatch",

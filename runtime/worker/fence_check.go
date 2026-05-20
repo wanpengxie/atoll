@@ -16,7 +16,7 @@ type FenceInvalidError struct {
 // Error implements error.
 func (e *FenceInvalidError) Error() string {
 	return fmt.Sprintf(
-		"worker: fence invalid (expected token=%d epoch=%d, got token=%d epoch=%d): %s",
+		"worker: fence invalid (expected token=%q epoch=%d, got token=%q epoch=%d): %s",
 		e.ExpectedToken, e.ExpectedEpoch, e.GotToken, e.GotEpoch, e.Reason,
 	)
 }

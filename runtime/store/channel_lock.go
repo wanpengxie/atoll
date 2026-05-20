@@ -54,7 +54,8 @@ func (l *ChannelLock) Get(ctx context.Context) (ChannelLockRow, bool, error) {
 	var row ChannelLockRow
 	var (
 		cid, did string
-		ft, oe   int64
+		ft       string
+		oe       int64
 		de       int64
 		chType   string
 	)
@@ -86,7 +87,7 @@ func (l *ChannelLock) Insert(ctx context.Context, row ChannelLockRow) error {
 	   (channel_id, fencing_token, owner_epoch, daemon_id, daemon_epoch, acquired_at, refreshed_at, channel_type)
 	   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 	if _, err := l.db.ExecContext(ctx, q,
-		string(row.ChannelID), int64(row.FencingToken), int64(row.OwnerEpoch),
+		string(row.ChannelID), string(row.FencingToken), int64(row.OwnerEpoch),
 		string(row.DaemonID), int64(row.DaemonEpoch),
 		row.AcquiredAt, row.RefreshedAt, row.ChannelType,
 	); err != nil {
@@ -98,7 +99,10 @@ func (l *ChannelLock) Insert(ctx context.Context, row ChannelLockRow) error {
 // UpgradeEpoch bumps fencing_token / owner_epoch when a reclaim wins
 // (or when a stale daemon is being reclaimed by a newer create_channel).
 // Rejects (returns no rows affected → ok=false) when the existing
-// fencing_token is already >= newToken (CAS guard).
+// owner_epoch is already >= newOwnerEpoch (CAS guard).
+//
+// Ordering uses owner_epoch — fencing_token is opaque random per
+// proto-foundation §3.6.1 and cannot be compared by magnitude.
 func (l *ChannelLock) UpgradeEpoch(
 	ctx context.Context,
 	newToken placement.FencingToken,
@@ -110,10 +114,10 @@ func (l *ChannelLock) UpgradeEpoch(
 	const q = `UPDATE channel_lock
 	             SET fencing_token=?, owner_epoch=?, daemon_id=?, daemon_epoch=?,
 	                 refreshed_at=?
-	             WHERE fencing_token < ?`
+	             WHERE owner_epoch < ?`
 	res, err := l.db.ExecContext(ctx, q,
-		int64(newToken), int64(newOwnerEpoch), string(newDaemonID), int64(newDaemonEpoch),
-		refreshedAt, int64(newToken))
+		string(newToken), int64(newOwnerEpoch), string(newDaemonID), int64(newDaemonEpoch),
+		refreshedAt, int64(newOwnerEpoch))
 	if err != nil {
 		return false, fmt.Errorf("store: channel_lock upgrade: %w", err)
 	}
@@ -177,7 +181,8 @@ func (l *ChannelLock) ValidateWriteTx(
 		return errors.New("store: ValidateWriteTx nil tx")
 	}
 	const q = `SELECT fencing_token, daemon_epoch FROM channel_lock LIMIT 1`
-	var ft, de int64
+	var ft string
+	var de int64
 	err := tx.QueryRowContext(ctx, q).Scan(&ft, &de)
 	if errors.Is(err, sql.ErrNoRows) {
 		return &FencingStaleError{Reason: "channel_lock row missing"}
@@ -210,7 +215,7 @@ func validateRow(
 			GotToken:  fencingToken,
 			HaveEpoch: row.DaemonEpoch,
 			GotEpoch:  daemonEpoch,
-			Reason:    fmt.Sprintf("fencing_token mismatch (have=%d got=%d)", row.FencingToken, fencingToken),
+			Reason:    fmt.Sprintf("fencing_token mismatch (have=%q got=%q)", row.FencingToken, fencingToken),
 		}
 	}
 	if row.DaemonEpoch != daemonEpoch {
@@ -246,7 +251,7 @@ func (e *FencingStaleError) Error() string {
 		return "store: fencing stale: " + e.Reason
 	}
 	return fmt.Sprintf(
-		"store: fencing stale (have token=%d epoch=%d, got token=%d epoch=%d)",
+		"store: fencing stale (have token=%q epoch=%d, got token=%q epoch=%d)",
 		e.HaveToken, e.HaveEpoch, e.GotToken, e.GotEpoch,
 	)
 }

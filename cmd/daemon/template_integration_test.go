@@ -176,7 +176,7 @@ func createChannelOfType(
 		ChannelID:       channel.ID(channelID),
 		CreateRequestID: placement.CreateRequestID("req-" + channelID),
 		OwnerEpoch:      placement.OwnerEpoch(1),
-		FencingToken:    placement.FencingToken(1),
+		FencingToken:    placement.FencingToken("tok-1"),
 		InitialMembers:  members,
 		ChannelType:     channelType,
 	}

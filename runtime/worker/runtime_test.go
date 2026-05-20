@@ -39,14 +39,14 @@ func TestRuntime_FenceInvalidHeartbeatCancelsBridge(t *testing.T) {
 					WorkerID:      "worker-fenced",
 					ChannelID:     channel.ID("ch-fenced"),
 					WorkerActorID: "agent:fenced",
-					FencingToken:  1,
+					FencingToken:  "tok-1",
 					DaemonEpoch:   1,
 				})
 				_ = daemonCodec.Write(ipc.Frame{ID: frame.ID, Kind: ipc.KindHandshakeAck, Payload: ack})
 			case ipc.KindHeartbeat:
 				payload, _ := json.Marshal(ipc.FenceInvalidPayload{
-					ExpectedToken: 2,
-					GotToken:      1,
+					ExpectedToken: "tok-2",
+					GotToken:      "tok-1",
 					ExpectedEpoch: 2,
 					GotEpoch:      1,
 					Reason:        "stale worker",

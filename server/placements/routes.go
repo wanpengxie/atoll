@@ -27,12 +27,15 @@ func (s *Service) handleGetPlacement(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "placement not found"})
 		return
 	}
+	// fencing_token is intentionally omitted from external responses per
+	// proto-foundation §3.6.1 + L3 §5.5.3: it is an opaque unguessable
+	// secret used only by daemon-side write authorization, never by
+	// external callers. Exposing it would defeat the L1 F.fencing invariant.
 	c.JSON(http.StatusOK, gin.H{
 		"channel_id":              string(p.ChannelID),
 		"daemon_id":               string(p.DaemonID),
 		"state":                   string(p.State),
 		"owner_epoch":             int64(p.OwnerEpoch),
-		"fencing_token":           int64(p.FencingToken),
 		"create_request_id":       string(p.CreateRequestID),
 		"daemon_connection_epoch": int64(p.DaemonConnectionEpoch),
 		"last_heartbeat_at":       p.LastHeartbeatAt,

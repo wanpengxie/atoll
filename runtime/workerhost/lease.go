@@ -62,18 +62,22 @@ func (s *LeaseStore) Acquire(
 	const sel = `SELECT worker_id, fencing_token, daemon_epoch, lease_expires_at, acquired_at
 	             FROM worker_locks WHERE agent_id=?`
 	var (
-		curWorker            string
-		curFencing, curEpoch int64
-		curExpires, curAcq   int64
+		curWorker          string
+		curFencing         string
+		curEpoch           int64
+		curExpires, curAcq int64
 	)
 	switch err := tx.QueryRowContext(ctx, sel, agentID).Scan(
 		&curWorker, &curFencing, &curEpoch, &curExpires, &curAcq,
 	); {
 	case err == nil:
 		// Existing row — overwrite only if the existing lease is stale
-		// OR the new fencing token strictly dominates (recover from a
-		// daemon restart where the old worker already exited).
-		if curExpires > now && curFencing >= int64(fencing) {
+		// OR the caller's daemon_epoch strictly dominates (recover from
+		// a daemon restart where the old worker already exited).
+		//
+		// Ordering uses daemon_epoch — fencing_token is opaque random
+		// (proto-foundation §3.6.1) and cannot be compared by magnitude.
+		if curExpires > now && curEpoch >= int64(daemonEpoch) {
 			return Lease{}, false, tx.Commit()
 		}
 	case errors.Is(err, sql.ErrNoRows):
@@ -93,7 +97,7 @@ func (s *LeaseStore) Acquire(
 	     acquired_at=excluded.acquired_at`
 	expires := now + LeaseTTL.Milliseconds()
 	if _, err := tx.ExecContext(ctx, upsert,
-		agentID, workerID, int64(fencing), int64(daemonEpoch), expires, now,
+		agentID, workerID, string(fencing), int64(daemonEpoch), expires, now,
 	); err != nil {
 		return Lease{}, false, fmt.Errorf("workerhost: lease upsert: %w", err)
 	}

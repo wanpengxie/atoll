@@ -62,7 +62,7 @@ func TestDaemon_StartupPhases(t *testing.T) {
 		lock := store.NewChannelLock(db)
 		if err := lock.Insert(ctx, store.ChannelLockRow{
 			ChannelID:    channel.ID(id),
-			FencingToken: 1, OwnerEpoch: 1,
+			FencingToken: "tok-1", OwnerEpoch: 1,
 			DaemonID: "daemon-A", DaemonEpoch: 1,
 			AcquiredAt: now(), RefreshedAt: now(),
 		}); err != nil {
@@ -124,7 +124,7 @@ func TestDaemon_StartupPhases(t *testing.T) {
 	// Saga is usable post-boot.
 	sagaCh := placement.CreateChannelRequest{
 		ChannelID: "ch-new", CreateRequestID: "req-new",
-		OwnerEpoch: 1, FencingToken: 1,
+		OwnerEpoch: 1, FencingToken: "tok-1",
 	}
 	if _, err := d.Saga().Bootstrap(ctx, "ch-new", sagaCh); err != nil {
 		t.Errorf("post-boot saga: %v", err)
@@ -157,7 +157,7 @@ func TestDaemon_Phase3_DispatchesWriteMessage(t *testing.T) {
 	lock := store.NewChannelLock(db)
 	if err := lock.Insert(ctx, store.ChannelLockRow{
 		ChannelID:    chID,
-		FencingToken: 1, OwnerEpoch: 1,
+		FencingToken: "tok-1", OwnerEpoch: 1,
 		DaemonID: "daemon-A", DaemonEpoch: 1,
 		AcquiredAt: now(), RefreshedAt: now(),
 	}); err != nil {
@@ -337,7 +337,7 @@ func TestDaemon_FutureMessage_SchedulerDrains(t *testing.T) {
 	lock := store.NewChannelLock(db)
 	if err := lock.Insert(ctx, store.ChannelLockRow{
 		ChannelID:    chID,
-		FencingToken: 1, OwnerEpoch: 1,
+		FencingToken: "tok-1", OwnerEpoch: 1,
 		DaemonID: "daemon-fut", DaemonEpoch: 1,
 		AcquiredAt: now(), RefreshedAt: now(),
 	}); err != nil {
@@ -473,7 +473,7 @@ func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
 	lock := store.NewChannelLock(db)
 	if err := lock.Insert(ctx, store.ChannelLockRow{
 		ChannelID:    chID,
-		FencingToken: 1, OwnerEpoch: 1,
+		FencingToken: "tok-1", OwnerEpoch: 1,
 		DaemonID: "daemon-overdue", DaemonEpoch: 1,
 		AcquiredAt: now(), RefreshedAt: now(),
 	}); err != nil {
@@ -684,7 +684,7 @@ func TestDaemon_DeviceTransit_InboundRoutesToPerChannelCallback(t *testing.T) {
 	lock := store.NewChannelLock(db)
 	if err := lock.Insert(ctx, store.ChannelLockRow{
 		ChannelID:    chID,
-		FencingToken: 1, OwnerEpoch: 1,
+		FencingToken: "tok-1", OwnerEpoch: 1,
 		DaemonID: "daemon-dev", DaemonEpoch: 1,
 		AcquiredAt: now(), RefreshedAt: now(),
 	}); err != nil {
@@ -907,7 +907,7 @@ func TestDaemon_Phase3_HeartbeatSender(t *testing.T) {
 	lock := store.NewChannelLock(db)
 	if err := lock.Insert(ctx, store.ChannelLockRow{
 		ChannelID:    chID,
-		FencingToken: 1, OwnerEpoch: 1,
+		FencingToken: "tok-1", OwnerEpoch: 1,
 		DaemonID: "daemon-hb", DaemonEpoch: 1,
 		AcquiredAt: now(), RefreshedAt: now(),
 	}); err != nil {
@@ -1001,7 +1001,7 @@ func TestDaemon_Phase3_ChannelAgent_Registered(t *testing.T) {
 	lock := store.NewChannelLock(db)
 	if err := lock.Insert(ctx, store.ChannelLockRow{
 		ChannelID:    chID,
-		FencingToken: 1, OwnerEpoch: 1,
+		FencingToken: "tok-1", OwnerEpoch: 1,
 		DaemonID: "daemon-agent", DaemonEpoch: 1,
 		AcquiredAt: now(), RefreshedAt: now(),
 	}); err != nil {
@@ -1176,7 +1176,7 @@ func TestDaemon_Phase3_WorkerReply(t *testing.T) {
 	lock := store.NewChannelLock(db)
 	if err := lock.Insert(ctx, store.ChannelLockRow{
 		ChannelID:    chID,
-		FencingToken: 1, OwnerEpoch: 1,
+		FencingToken: "tok-1", OwnerEpoch: 1,
 		DaemonID: "daemon-worker", DaemonEpoch: 1,
 		AcquiredAt: now(), RefreshedAt: now(),
 	}); err != nil {

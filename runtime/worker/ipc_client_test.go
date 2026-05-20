@@ -102,7 +102,7 @@ func TestIPCClient_HandshakeStampsOutboundFrames(t *testing.T) {
 	go daemon.loop(ctx, ipc.HandshakeAckPayload{
 		WorkerID:     "worker-XYZ",
 		ChannelID:    channel.ID("ch-1"),
-		FencingToken: placement.FencingToken(11),
+		FencingToken: placement.FencingToken("tok-11"),
 		DaemonEpoch:  placement.DaemonEpoch(7),
 	})
 
@@ -131,8 +131,8 @@ func TestIPCClient_HandshakeStampsOutboundFrames(t *testing.T) {
 		if frame.WorkerID != "worker-XYZ" {
 			t.Errorf("WorkerID=%q want worker-XYZ", frame.WorkerID)
 		}
-		if frame.FencingToken != 11 {
-			t.Errorf("FencingToken=%d want 11", frame.FencingToken)
+		if frame.FencingToken != "tok-11" {
+			t.Errorf("FencingToken=%q want tok-11", frame.FencingToken)
 		}
 		if frame.DaemonEpoch != 7 {
 			t.Errorf("DaemonEpoch=%d want 7", frame.DaemonEpoch)
@@ -174,13 +174,13 @@ func TestIPCClient_WriteMessageFenceInvalidReturnsTypedError(t *testing.T) {
 				ack, _ := json.Marshal(ipc.HandshakeAckPayload{
 					WorkerID:     "worker-1",
 					ChannelID:    "ch-1",
-					FencingToken: 1,
+					FencingToken: "tok-1",
 					DaemonEpoch:  1,
 				})
 				_ = daemonCodec.Write(ipc.Frame{ID: frame.ID, Kind: ipc.KindHandshakeAck, Payload: ack})
 			case ipc.KindWriteMessage:
 				payload, _ := json.Marshal(ipc.FenceInvalidPayload{
-					ExpectedToken: 2, GotToken: 1,
+					ExpectedToken: "tok-2", GotToken: "tok-1",
 					ExpectedEpoch: 2, GotEpoch: 1,
 					Reason: "stale",
 				})
@@ -335,7 +335,7 @@ func TestIPCClient_TriggersDeliversDaemonPush(t *testing.T) {
 			ack, _ := json.Marshal(ipc.HandshakeAckPayload{
 				WorkerID:     "worker-T",
 				ChannelID:    "ch-T",
-				FencingToken: 5,
+				FencingToken: "tok-5",
 				DaemonEpoch:  3,
 			})
 			_ = daemonCodec.Write(ipc.Frame{
@@ -370,7 +370,7 @@ func TestIPCClient_TriggersDeliversDaemonPush(t *testing.T) {
 					return
 				}
 				if ackFrame.ChannelID != "ch-T" || ackFrame.WorkerID != "worker-T" ||
-					ackFrame.FencingToken != 5 || ackFrame.DaemonEpoch != 3 {
+					ackFrame.FencingToken != "tok-5" || ackFrame.DaemonEpoch != 3 {
 					daemonDone <- errors.New("trigger ack stamp mismatch")
 					return
 				}
@@ -466,7 +466,7 @@ func TestIPCClient_TriggersNackWhenBufferFull(t *testing.T) {
 		ack, _ := json.Marshal(ipc.HandshakeAckPayload{
 			WorkerID:     "worker-T",
 			ChannelID:    "ch-T",
-			FencingToken: 5,
+			FencingToken: "tok-5",
 			DaemonEpoch:  3,
 		})
 		_ = daemonCodec.Write(ipc.Frame{ID: frame.ID, Kind: ipc.KindHandshakeAck, Payload: ack})

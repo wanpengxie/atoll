@@ -113,7 +113,9 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
 CREATE TABLE IF NOT EXISTS worker_locks (
   agent_id           TEXT PRIMARY KEY,
   worker_id          TEXT NOT NULL,
-  fencing_token      INTEGER NOT NULL,
+  -- fencing_token is an opaque unguessable string (proto-foundation
+  -- §3.6.1). Decoupled from owner_epoch / daemon_epoch.
+  fencing_token      TEXT NOT NULL,
   daemon_epoch       INTEGER NOT NULL,
   lease_expires_at   INTEGER NOT NULL,
   acquired_at        INTEGER NOT NULL
@@ -170,7 +172,9 @@ CREATE INDEX IF NOT EXISTS ix_view_sync_outbox_status_seq
 -- daemon restart so stale worker IPC after restart fails fence_check.
 	CREATE TABLE IF NOT EXISTS channel_lock (
 	  channel_id         TEXT PRIMARY KEY,
-	  fencing_token      INTEGER NOT NULL,
+	  -- fencing_token is an opaque unguessable string (proto-foundation
+	  -- §3.6.1). owner_epoch carries the monotonic ordering invariant.
+	  fencing_token      TEXT NOT NULL,
 	  owner_epoch        INTEGER NOT NULL,
   daemon_id          TEXT NOT NULL,
   daemon_epoch       INTEGER NOT NULL,

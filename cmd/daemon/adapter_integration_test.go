@@ -84,7 +84,7 @@ func createChannel(t *testing.T, ctx context.Context, d *runtime.Daemon, srv *tr
 		ChannelID:       channel.ID(channelID),
 		CreateRequestID: placement.CreateRequestID("req-" + channelID),
 		OwnerEpoch:      placement.OwnerEpoch(1),
-		FencingToken:    placement.FencingToken(1),
+		FencingToken:    placement.FencingToken("tok-1"),
 		InitialMembers:  members,
 		// M1.6-T5 phase-2 — tag the channel with the xhs-creator
 		// template so the daemon resolves the matching seeds /

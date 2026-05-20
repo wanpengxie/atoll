@@ -36,7 +36,7 @@ func TestSaga_Bootstrap(t *testing.T) {
 	path, err := saga.Bootstrap(ctx, channel.ID("ch-1"), placement.CreateChannelRequest{
 		ChannelID:       "ch-1",
 		CreateRequestID: "req-001",
-		OwnerEpoch:      1, FencingToken: 1,
+		OwnerEpoch:      1, FencingToken: "tok-1",
 		InitialMembers: []placement.InitialMember{
 			{MemberActorID: "user:alice", Kind: "human", DisplayName: "Alice"},
 		},

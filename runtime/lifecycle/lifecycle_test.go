@@ -56,7 +56,7 @@ func TestFencingChecker(t *testing.T) {
 	lock := store.NewChannelLock(db)
 	_ = lock.Insert(ctx, store.ChannelLockRow{
 		ChannelID:    "ch-1",
-		FencingToken: 1, OwnerEpoch: 1,
+		FencingToken: "tok-1", OwnerEpoch: 1,
 		DaemonID: "daemon-A", DaemonEpoch: 1,
 		AcquiredAt: now(), RefreshedAt: now(),
 	})
@@ -65,20 +65,20 @@ func TestFencingChecker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := chk.Validate(ctx, 1, 1); err != nil {
+	if err := chk.Validate(ctx, "tok-1", 1); err != nil {
 		t.Errorf("should pass: %v", err)
 	}
 	var mismatch *lifecycle.FenceMismatchError
-	if err := chk.Validate(ctx, 1, 2); !errors.As(err, &mismatch) {
+	if err := chk.Validate(ctx, "tok-1", 2); !errors.As(err, &mismatch) {
 		t.Errorf("expected FenceMismatchError, got %v", err)
 	}
 
 	// After RefreshDaemon, the new daemon_epoch is required.
 	_ = lock.RefreshDaemon(ctx, 99, now())
-	if err := chk.Validate(ctx, 1, 1); !errors.As(err, &mismatch) {
+	if err := chk.Validate(ctx, "tok-1", 1); !errors.As(err, &mismatch) {
 		t.Errorf("after refresh old epoch should fail, got %v", err)
 	}
-	if err := chk.Validate(ctx, 1, 99); err != nil {
+	if err := chk.Validate(ctx, "tok-1", 99); err != nil {
 		t.Errorf("post-refresh validate should pass: %v", err)
 	}
 }
@@ -104,7 +104,7 @@ func TestBoot_LoadLocal(t *testing.T) {
 		lock := store.NewChannelLock(db)
 		_ = lock.Insert(ctx, store.ChannelLockRow{
 			ChannelID:    channel.ID(id),
-			FencingToken: 1, OwnerEpoch: 1,
+			FencingToken: "tok-1", OwnerEpoch: 1,
 			DaemonID: "daemon-A", DaemonEpoch: 1,
 			AcquiredAt: now(), RefreshedAt: now(),
 		})
@@ -203,7 +203,7 @@ func TestBoot_LoadOne(t *testing.T) {
 	}
 	if err := store.NewChannelLock(db).Insert(ctx, store.ChannelLockRow{
 		ChannelID:    chID,
-		FencingToken: 5, OwnerEpoch: 5,
+		FencingToken: "tok-5", OwnerEpoch: 5,
 		DaemonID: "daemon-X", DaemonEpoch: 1,
 		AcquiredAt: now(), RefreshedAt: now(),
 	}); err != nil {
@@ -231,7 +231,7 @@ func TestBoot_LoadOne(t *testing.T) {
 	odb, _ := store.OpenChannel(ctx, otherDB, store.OpenOptions{})
 	if err := store.NewChannelLock(odb).Insert(ctx, store.ChannelLockRow{
 		ChannelID:    "ch-other",
-		FencingToken: 1, OwnerEpoch: 1,
+		FencingToken: "tok-1", OwnerEpoch: 1,
 		DaemonID: "daemon-Y", DaemonEpoch: 1,
 		AcquiredAt: now(), RefreshedAt: now(),
 	}); err != nil {

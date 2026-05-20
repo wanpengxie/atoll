@@ -66,7 +66,7 @@ func TestLeaseAcquireRelease(t *testing.T) {
 
 	leases := workerhost.NewLeaseStore(db)
 	l, ok, err := leases.Acquire(ctx, "agent:a", "w-1",
-		placement.FencingToken(1), placement.DaemonEpoch(1), now())
+		placement.FencingToken("tok-1"), placement.DaemonEpoch(1), now())
 	if err != nil || !ok {
 		t.Fatalf("Acquire: ok=%v err=%v", ok, err)
 	}
@@ -77,14 +77,16 @@ func TestLeaseAcquireRelease(t *testing.T) {
 	// Re-Acquire by another worker with same fencing token — rejected
 	// while existing lease is fresh.
 	_, ok2, err := leases.Acquire(ctx, "agent:a", "w-2",
-		placement.FencingToken(1), placement.DaemonEpoch(1), now())
+		placement.FencingToken("tok-1"), placement.DaemonEpoch(1), now())
 	if err != nil || ok2 {
 		t.Errorf("conflicting Acquire should fail: ok=%v err=%v", ok2, err)
 	}
 
-	// Stronger token wins.
+	// Higher daemon_epoch wins (daemon restart scenario). fencing_token
+	// is opaque random per proto-foundation §3.6.1; ordering uses
+	// daemon_epoch instead.
 	_, ok3, err := leases.Acquire(ctx, "agent:a", "w-3",
-		placement.FencingToken(2), placement.DaemonEpoch(1), now())
+		placement.FencingToken("tok-2"), placement.DaemonEpoch(2), now())
 	if err != nil || !ok3 {
 		t.Errorf("stronger Acquire should win: ok=%v err=%v", ok3, err)
 	}
@@ -93,7 +95,7 @@ func TestLeaseAcquireRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, ok4, _ := leases.Acquire(ctx, "agent:a", "w-4",
-		placement.FencingToken(1), placement.DaemonEpoch(1), now())
+		placement.FencingToken("tok-1"), placement.DaemonEpoch(1), now())
 	if !ok4 {
 		t.Errorf("Acquire after Release should succeed")
 	}
@@ -191,7 +193,7 @@ func TestWorker_LeaseE2E(t *testing.T) {
 		ChannelID:     "ch-1",
 		WorkerID:      "w-1",
 		LeaseID:       "lease-1",
-		FencingToken:  placement.FencingToken(1),
+		FencingToken:  placement.FencingToken("tok-1"),
 		DaemonEpoch:   placement.DaemonEpoch(7),
 		Chain:         chain,
 		WorkerActorID: "agent:a",
@@ -251,7 +253,7 @@ func TestHost_PushTriggerWaitsForAck(t *testing.T) {
 		ChannelID:     "ch-ack",
 		WorkerID:      "w-ack",
 		LeaseID:       "lease-ack",
-		FencingToken:  11,
+		FencingToken:  "tok-11",
 		DaemonEpoch:   12,
 		Chain:         newE2EChain(t, db, "ch-ack", actor.ActorID("agent:a")),
 		WorkerActorID: "agent:a",
@@ -296,7 +298,7 @@ func TestHost_PushTriggerWaitsForAck(t *testing.T) {
 		Kind:         ipc.KindTriggerAck,
 		ChannelID:    "ch-ack",
 		WorkerID:     "w-ack",
-		FencingToken: 11,
+		FencingToken: "tok-11",
 		DaemonEpoch:  12,
 		Payload:      ackPayload,
 	}); err != nil {
@@ -342,7 +344,7 @@ func TestHost_PushTriggerReturnsNackError(t *testing.T) {
 		ChannelID:     "ch-nack",
 		WorkerID:      "w-nack",
 		LeaseID:       "lease-nack",
-		FencingToken:  21,
+		FencingToken:  "tok-21",
 		DaemonEpoch:   22,
 		Chain:         newE2EChain(t, db, "ch-nack", actor.ActorID("agent:a")),
 		WorkerActorID: "agent:a",
@@ -386,7 +388,7 @@ func TestHost_PushTriggerReturnsNackError(t *testing.T) {
 		Kind:         ipc.KindTriggerAck,
 		ChannelID:    "ch-nack",
 		WorkerID:     "w-nack",
-		FencingToken: 21,
+		FencingToken: "tok-21",
 		DaemonEpoch:  22,
 		Payload:      ackPayload,
 	}); err != nil {
@@ -431,7 +433,7 @@ func TestFence_DaemonEpochMismatch(t *testing.T) {
 
 	host, _ := workerhost.NewHost(in1, out2, workerhost.HostConfig{
 		ChannelID: "ch-1", WorkerID: "w-1", LeaseID: "lease-1",
-		FencingToken: 1, DaemonEpoch: 99,
+		FencingToken: "tok-1", DaemonEpoch: 99,
 		Chain: chain, WorkerActorID: "agent:a",
 		Ledger: led, NowFn: now,
 	})
@@ -452,7 +454,7 @@ func TestFence_DaemonEpochMismatch(t *testing.T) {
 	}})
 	if err := codec.Write(ipc.Frame{
 		ID: "f-1", Kind: ipc.KindWriteMessage, ChannelID: "ch-1",
-		FencingToken: 1, DaemonEpoch: 1, // stale
+		FencingToken: "tok-1", DaemonEpoch: 1, // stale
 		Payload: envBytes,
 	}); err != nil {
 		t.Fatal(err)
@@ -488,7 +490,7 @@ func TestFence_DaemonEpochMismatch(t *testing.T) {
 // TestInMemoryLeaseTable round-trip.
 func TestInMemoryLeaseTable(t *testing.T) {
 	tab := workerhost.NewInMemoryLeaseTable()
-	tab.Put(workerhost.Lease{ID: "a", WorkerID: "w-1", FencingToken: 1, DaemonEpoch: 1})
+	tab.Put(workerhost.Lease{ID: "a", WorkerID: "w-1", FencingToken: "tok-1", DaemonEpoch: 1})
 	if _, ok := tab.Get("a"); !ok {
 		t.Error("Get after Put failed")
 	}

@@ -197,7 +197,7 @@ func (c *IPCClient) writeTriggerAck(trigger ipc.Frame, ackPayload ipc.TriggerAck
 		workerID = trigger.WorkerID
 	}
 	fencingToken := c.fencingToken
-	if fencingToken == 0 {
+	if fencingToken == "" {
 		fencingToken = trigger.FencingToken
 	}
 	daemonEpoch := c.daemonEpoch

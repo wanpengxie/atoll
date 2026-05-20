@@ -8,6 +8,8 @@ package placement
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -37,14 +39,37 @@ var AllStates = []State{
 func (s State) String() string { return string(s) }
 
 // OwnerEpoch is the monotonic ownership counter per channel — incremented
-// whenever placement is re-claimed (orphan → creating). Equal to
-// FencingToken by spec invariant ("一一对应"), but kept as separate
-// types for type-safety + readability at call sites.
+// whenever placement is re-claimed (orphan → creating). Decoupled from
+// FencingToken: epoch is the monotonic ordering invariant used to detect
+// stale create/reclaim attempts; fencing token is the unguessable opaque
+// secret used to gate writes (proto-foundation §3.6.1 + proto-layer1
+// §6.2). The two values are generated together but carry independent
+// semantics.
 type OwnerEpoch int64
 
 // FencingToken is the SQL-layer guard value that gates daemon writes to
-// the channel sqlite (L2 §1.4.11.6). MUST equal OwnerEpoch.
-type FencingToken int64
+// the channel sqlite (L2 §1.4.11.6). Per proto-foundation §3.6.1 +
+// proto-layer1 §6.2: an opaque, cryptographically unguessable random
+// token generated fresh on every channel creation / reclaim. Decoupled
+// from OwnerEpoch (two independent values; equality match is the only
+// legal comparison — ordering uses OwnerEpoch).
+type FencingToken string
+
+// String returns the wire form.
+func (f FencingToken) String() string { return string(f) }
+
+// NewFencingToken generates a fresh opaque fencing token per
+// proto-foundation §3.6.1 + proto-layer1 §6.2. Uses crypto/rand to
+// produce 16 bytes of randomness, encoded as lowercase hex (32 chars).
+// MUST be called on every channel creation + reclaim; reusing a value
+// across reclaims violates F.fencing (the L1 fencing invariant).
+func NewFencingToken() (FencingToken, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return FencingToken(hex.EncodeToString(buf[:])), nil
+}
 
 // ConnectionEpoch is the daemonbus connection epoch. Placement rows store
 // the same value carried by daemonbus frame headers.
@@ -100,7 +125,7 @@ type Placement struct {
 	DaemonID              DaemonID
 	State                 State
 	OwnerEpoch            OwnerEpoch
-	FencingToken          FencingToken // == OwnerEpoch
+	FencingToken          FencingToken // opaque random; independent of OwnerEpoch
 	CreateRequestID       CreateRequestID
 	DaemonConnectionEpoch ConnectionEpoch // 0 until first connection
 	LastHeartbeatAt       int64           // 0 until first heartbeat

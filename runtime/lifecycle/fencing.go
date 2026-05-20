@@ -66,10 +66,10 @@ func (c *FencingChecker) Validate(
 func (c *FencingChecker) Snapshot(ctx context.Context) (placement.FencingToken, placement.DaemonEpoch, error) {
 	row, ok, err := c.lock.Get(ctx)
 	if err != nil {
-		return 0, 0, err
+		return "", 0, err
 	}
 	if !ok {
-		return 0, 0, ErrChannelUnbound
+		return "", 0, ErrChannelUnbound
 	}
 	return row.FencingToken, row.DaemonEpoch, nil
 }
@@ -88,7 +88,7 @@ type FenceMismatchError struct {
 // Error implements error.
 func (e *FenceMismatchError) Error() string {
 	return fmt.Sprintf(
-		"lifecycle: fence mismatch (have token=%d epoch=%d, got token=%d epoch=%d)",
+		"lifecycle: fence mismatch (have token=%q epoch=%d, got token=%q epoch=%d)",
 		e.HaveToken, e.HaveEpoch, e.GotToken, e.GotEpoch,
 	)
 }

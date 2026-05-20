@@ -100,7 +100,7 @@ func TestDaemon_OnCreateChannel_FreshBootstrap(t *testing.T) {
 		ChannelID:       "ch-new",
 		CreateRequestID: "req-fresh-1",
 		OwnerEpoch:      1,
-		FencingToken:    1,
+		FencingToken:    "tok-1",
 		InitialMembers: []placement.InitialMember{
 			{MemberActorID: "user:alice", Kind: "human", DisplayName: "Alice"},
 		},
@@ -117,7 +117,7 @@ func TestDaemon_OnCreateChannel_FreshBootstrap(t *testing.T) {
 		t.Errorf("ack.CreateRequestID=%s want %s", ack.CreateRequestID, req.CreateRequestID)
 	}
 	if ack.OwnerEpoch != req.OwnerEpoch || ack.FencingToken != req.FencingToken {
-		t.Errorf("ack epoch/token=%d/%d want %d/%d",
+		t.Errorf("ack epoch/token=%d/%q want %d/%q",
 			ack.OwnerEpoch, ack.FencingToken, req.OwnerEpoch, req.FencingToken)
 	}
 	if ack.DaemonID != "daemon-A" {
@@ -163,7 +163,7 @@ func TestDaemon_OnCreateChannel_FreshBootstrap(t *testing.T) {
 	if !ok {
 		t.Fatal("channel_lock row missing after OnCreateChannel")
 	}
-	if row.DaemonID != "daemon-A" || row.FencingToken != 1 {
+	if row.DaemonID != "daemon-A" || row.FencingToken != "tok-1" {
 		t.Errorf("channel_lock row=%+v", row)
 	}
 
@@ -198,7 +198,7 @@ func TestDaemon_OnCreateChannel_IdempotentReplay(t *testing.T) {
 
 	req := placement.CreateChannelRequest{
 		ChannelID: "ch-idem", CreateRequestID: "req-idem",
-		OwnerEpoch: 5, FencingToken: 5,
+		OwnerEpoch: 5, FencingToken: "tok-5",
 	}
 	a1 := sendCreateChannel(t, ctx, d, srv, req)
 	if a1.Status != placement.AckBound {
@@ -221,7 +221,7 @@ func TestDaemon_OnCreateChannel_HigherTokenRejected(t *testing.T) {
 	defer func() { _ = d.Close() }()
 
 	bind := placement.CreateChannelRequest{
-		ChannelID: "ch-high", CreateRequestID: "req-A", OwnerEpoch: 3, FencingToken: 3,
+		ChannelID: "ch-high", CreateRequestID: "req-A", OwnerEpoch: 3, FencingToken: "tok-3",
 	}
 	if ack := sendCreateChannel(t, ctx, d, srv, bind); ack.Status != placement.AckBound {
 		t.Fatalf("first bind=%s reason=%s", ack.Status, ack.Reason)
@@ -230,13 +230,13 @@ func TestDaemon_OnCreateChannel_HigherTokenRejected(t *testing.T) {
 	higher := bind
 	higher.CreateRequestID = "req-B"
 	higher.OwnerEpoch = 7
-	higher.FencingToken = 7
+	higher.FencingToken = "tok-7"
 	ack := sendCreateChannel(t, ctx, d, srv, higher)
 	if ack.Status != placement.AckRejected {
 		t.Fatalf("higher token expected reject, got %s", ack.Status)
 	}
-	if ack.Reason != "local_lock_stale_higher_token_received" {
-		t.Errorf("ack.Reason=%q want local_lock_stale_higher_token_received", ack.Reason)
+	if ack.Reason != "local_lock_stale_higher_epoch_received" {
+		t.Errorf("ack.Reason=%q want local_lock_stale_higher_epoch_received", ack.Reason)
 	}
 }
 
@@ -252,7 +252,7 @@ func TestDaemon_OnUnbindChannel(t *testing.T) {
 
 	chID := channel.ID("ch-unbind")
 	req := placement.CreateChannelRequest{
-		ChannelID: chID, CreateRequestID: "req-unb", OwnerEpoch: 1, FencingToken: 1,
+		ChannelID: chID, CreateRequestID: "req-unb", OwnerEpoch: 1, FencingToken: "tok-1",
 	}
 	if ack := sendCreateChannel(t, ctx, d, srv, req); ack.Status != placement.AckBound {
 		t.Fatalf("create=%s", ack.Status)
@@ -335,7 +335,7 @@ func TestDaemon_OnReclaimRejected_UnloadsChannel(t *testing.T) {
 
 	chID := channel.ID("ch-recl-rej")
 	req := placement.CreateChannelRequest{
-		ChannelID: chID, CreateRequestID: "req-recl", OwnerEpoch: 1, FencingToken: 1,
+		ChannelID: chID, CreateRequestID: "req-recl", OwnerEpoch: 1, FencingToken: "tok-1",
 	}
 	if ack := sendCreateChannel(t, ctx, d, srv, req); ack.Status != placement.AckBound {
 		t.Fatalf("create=%s", ack.Status)
@@ -378,7 +378,7 @@ func TestDaemon_OnReclaimAccepted_RecordsWatermark(t *testing.T) {
 
 	chID := channel.ID("ch-recl-ok")
 	req := placement.CreateChannelRequest{
-		ChannelID: chID, CreateRequestID: "req-recl-ok", OwnerEpoch: 1, FencingToken: 1,
+		ChannelID: chID, CreateRequestID: "req-recl-ok", OwnerEpoch: 1, FencingToken: "tok-1",
 	}
 	if ack := sendCreateChannel(t, ctx, d, srv, req); ack.Status != placement.AckBound {
 		t.Fatalf("create=%s", ack.Status)

@@ -56,7 +56,7 @@ func (s *SQLStore) Reserve(ctx context.Context, p placement.Placement) (placemen
 		   host_actor_id, federated_origin, tenant_id
 		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(p.ChannelID), string(p.DaemonID), string(p.State),
-		int64(p.OwnerEpoch), int64(p.FencingToken),
+		int64(p.OwnerEpoch), string(p.FencingToken),
 		string(p.CreateRequestID), int64(p.DaemonConnectionEpoch),
 		p.LastHeartbeatAt, p.CreatedAt, p.ActivatedAt, p.EnteredStateAt,
 		nullableString(p.HostActorID),
@@ -87,7 +87,7 @@ func (s *SQLStore) Get(ctx context.Context, channelID channel.ID) (placement.Pla
 		string(channelID),
 	).Scan(
 		(*string)(&p.ChannelID), (*string)(&p.DaemonID), &state,
-		(*int64)(&p.OwnerEpoch), (*int64)(&p.FencingToken),
+		(*int64)(&p.OwnerEpoch), (*string)(&p.FencingToken),
 		(*string)(&p.CreateRequestID), (*int64)(&p.DaemonConnectionEpoch),
 		&p.LastHeartbeatAt, &p.CreatedAt, &p.ActivatedAt, &p.EnteredStateAt,
 		&hostActor, &fedOrigin, &tenant,
@@ -157,7 +157,7 @@ func (s *SQLStore) CASActivate(
 		    AND state             = 'creating'`,
 		nowMs, nowMs, int64(newConnectionEpoch), nowMs,
 		string(ack.ChannelID), string(ack.CreateRequestID),
-		int64(ack.OwnerEpoch), int64(ack.FencingToken),
+		int64(ack.OwnerEpoch), string(ack.FencingToken),
 		string(ack.DaemonID),
 	)
 	if err != nil {
@@ -238,7 +238,7 @@ func (s *SQLStore) AcceptReclaim(
 		    AND state IN ('active','stale')`,
 		nowMs, int64(newConnectionEpoch), nowMs,
 		string(channelID), string(daemonID),
-		int64(req.OwnerEpoch), int64(req.FencingToken),
+		int64(req.OwnerEpoch), string(req.FencingToken),
 	)
 	if err != nil {
 		return false, fmt.Errorf("placements: AcceptReclaim: %w", err)
@@ -292,7 +292,7 @@ func (s *SQLStore) ListByState(ctx context.Context, state placement.State) ([]pl
 		)
 		if err := rows.Scan(
 			(*string)(&p.ChannelID), (*string)(&p.DaemonID), &state,
-			(*int64)(&p.OwnerEpoch), (*int64)(&p.FencingToken),
+			(*int64)(&p.OwnerEpoch), (*string)(&p.FencingToken),
 			(*string)(&p.CreateRequestID), (*int64)(&p.DaemonConnectionEpoch),
 			&p.LastHeartbeatAt, &p.CreatedAt, &p.ActivatedAt, &p.EnteredStateAt,
 			&hostActor, &fedOrigin, &tenant,
@@ -333,7 +333,7 @@ func (s *SQLStore) ListByDaemon(ctx context.Context, daemonID placement.DaemonID
 		)
 		if err := rows.Scan(
 			(*string)(&p.ChannelID), (*string)(&p.DaemonID), &state,
-			(*int64)(&p.OwnerEpoch), (*int64)(&p.FencingToken),
+			(*int64)(&p.OwnerEpoch), (*string)(&p.FencingToken),
 			(*string)(&p.CreateRequestID), (*int64)(&p.DaemonConnectionEpoch),
 			&p.LastHeartbeatAt, &p.CreatedAt, &p.ActivatedAt, &p.EnteredStateAt,
 			&hostActor, &fedOrigin, &tenant,
