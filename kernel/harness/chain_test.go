@@ -32,7 +32,7 @@ func TestAllStepIDs(t *testing.T) {
 }
 
 // TestAllRejectReasons enforces the L1 §10.3.1 closed-set contract.
-// channel_mismatch was removed in FIX-T1 — count must be 19.
+// channel_mismatch was removed in FIX-T1 — count must be 21.
 func TestAllRejectReasons(t *testing.T) {
 	want := []message.HarnessRejectReason{
 		message.HarnessAuthFailed,
@@ -50,6 +50,8 @@ func TestAllRejectReasons(t *testing.T) {
 		message.HarnessPayloadSchemaViolation,
 		message.HarnessDocRefsInvalid,
 		message.HarnessResponseParentInvalid,
+		message.HarnessResponseUnauthorizedSender,
+		message.HarnessResponseAudienceMismatch,
 		message.HarnessTerminalDuplicate,
 		message.HarnessWorkerFencingStale,
 		message.HarnessEngineACLDenied,
@@ -214,6 +216,7 @@ func TestRejectReasonHTTPStatus(t *testing.T) {
 		{message.HarnessSenderMismatch, 403},
 		{message.HarnessSenderKindMismatch, 403},
 		{message.HarnessEngineACLDenied, 403},
+		{message.HarnessResponseUnauthorizedSender, 403},
 		{message.HarnessSenderDeregistered, 410},
 		{message.HarnessWorkerFencingStale, 410},
 		{message.HarnessTerminalDuplicate, 409},
@@ -221,6 +224,7 @@ func TestRejectReasonHTTPStatus(t *testing.T) {
 		{message.HarnessMissingRequiredField, 400},
 		{message.HarnessKindInvalid, 400},
 		{message.HarnessDocRefsInvalid, 400},
+		{message.HarnessResponseAudienceMismatch, 400},
 	}
 	for _, tc := range cases {
 		if got := tc.r.HTTPStatus(); got != tc.want {

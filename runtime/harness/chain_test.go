@@ -368,6 +368,90 @@ func TestChain_Step8_ResponseParentInvalid(t *testing.T) {
 	}
 }
 
+func TestChain_Step8_ResponsePairingAcceptsAuthorizedResponder(t *testing.T) {
+	c, _, _, treg := newTestChain(t)
+	treg.Add(TypeView{
+		Type:           "feishu.chat.send",
+		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		MaxPendingMs:   10_000,
+		HandlerActorID: "tool:feishu",
+	})
+
+	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu",
+		json.RawMessage(`{"title":"x"}`))
+	if r, err := c.Write(chainCallerCtx("agent:alpha"), req); err != nil || !r.Accepted() {
+		t.Fatalf("seed request: r=%+v err=%v", r, err)
+	}
+
+	resp := newResponse("resp-1", "tool:feishu", "req-1", "feishu.chat.send",
+		json.RawMessage(`{"status":"completed"}`))
+	resp.Audience = message.Audience{"agent:alpha"}
+	res, err := c.Write(chainCallerCtx("tool:feishu"), resp)
+	if err != nil {
+		t.Fatalf("Write response: %v", err)
+	}
+	if !res.Accepted() {
+		t.Fatalf("expected response accepted, got reject=%s detail=%s", res.RejectReason, res.RejectDetail)
+	}
+}
+
+func TestChain_Step8_ResponseUnauthorizedSender(t *testing.T) {
+	c, areg, _, treg := newTestChain(t)
+	_ = areg.Insert(context.Background(), actorreg.Record{ID: "agent:mallory", Kind: actor.KindAgent, CreatedAt: 1})
+	treg.Add(TypeView{
+		Type:           "feishu.chat.send",
+		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		MaxPendingMs:   10_000,
+		HandlerActorID: "tool:feishu",
+	})
+
+	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu",
+		json.RawMessage(`{"title":"x"}`))
+	if r, err := c.Write(chainCallerCtx("agent:alpha"), req); err != nil || !r.Accepted() {
+		t.Fatalf("seed request: r=%+v err=%v", r, err)
+	}
+
+	resp := newResponse("resp-mallory", "agent:mallory", "req-1", "feishu.chat.send",
+		json.RawMessage(`{"status":"failed","reason":"permission_denied"}`))
+	resp.Audience = message.Audience{"agent:alpha"}
+	res, err := c.Write(chainCallerCtx("agent:mallory"), resp)
+	if err != nil {
+		t.Fatalf("Write mallory response: %v", err)
+	}
+	if res.RejectReason != message.HarnessResponseUnauthorizedSender {
+		t.Fatalf("expected harness_response_unauthorized_sender, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
+func TestChain_Step8_ResponseAudienceMismatch(t *testing.T) {
+	c, _, _, treg := newTestChain(t)
+	treg.Add(TypeView{
+		Type:           "feishu.chat.send",
+		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		MaxPendingMs:   10_000,
+		HandlerActorID: "tool:feishu",
+	})
+
+	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu",
+		json.RawMessage(`{"title":"x"}`))
+	if r, err := c.Write(chainCallerCtx("agent:alpha"), req); err != nil || !r.Accepted() {
+		t.Fatalf("seed request: r=%+v err=%v", r, err)
+	}
+
+	resp := newResponse("resp-bad-audience", "tool:feishu", "req-1", "feishu.chat.send",
+		json.RawMessage(`{"status":"failed"}`))
+	resp.Audience = message.Audience{"user:demo"}
+	res, err := c.Write(chainCallerCtx("tool:feishu"), resp)
+	if err != nil {
+		t.Fatalf("Write mismatched response: %v", err)
+	}
+	if res.RejectReason != message.HarnessResponseAudienceMismatch {
+		t.Fatalf("expected harness_response_audience_mismatch, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
 // TestChain_Step8_TerminalDuplicate.
 func TestChain_Step8_TerminalDuplicate(t *testing.T) {
 	c, _, log, treg := newTestChain(t)
@@ -385,12 +469,14 @@ func TestChain_Step8_TerminalDuplicate(t *testing.T) {
 	}
 	resp := newResponse("resp-1", "tool:feishu", "req-1", "feishu.chat.send",
 		json.RawMessage(`{"status":"completed"}`))
+	resp.Audience = message.Audience{"agent:alpha"}
 	if r, err := c.Write(chainCallerCtx("tool:feishu"), resp); err != nil || !r.Accepted() {
 		t.Fatalf("seed response: r=%+v err=%v", r, err)
 	}
 	// Second different response for the same parent → terminal_duplicate.
 	resp2 := newResponse("resp-2", "tool:feishu", "req-1", "feishu.chat.send",
 		json.RawMessage(`{"status":"failed"}`))
+	resp2.Audience = message.Audience{"agent:alpha"}
 	res, err := c.Write(chainCallerCtx("tool:feishu"), resp2)
 	if err != nil {
 		t.Fatalf("Write second response: %v", err)

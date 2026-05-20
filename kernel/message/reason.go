@@ -41,6 +41,8 @@ const (
 	HarnessPayloadSchemaViolation     HarnessRejectReason = "payload_schema_violation"
 	HarnessDocRefsInvalid             HarnessRejectReason = "doc_refs_invalid"
 	HarnessResponseParentInvalid      HarnessRejectReason = "response_parent_invalid"
+	HarnessResponseUnauthorizedSender HarnessRejectReason = "harness_response_unauthorized_sender"
+	HarnessResponseAudienceMismatch   HarnessRejectReason = "harness_response_audience_mismatch"
 	HarnessTerminalDuplicate          HarnessRejectReason = "terminal_duplicate"
 	HarnessWorkerFencingStale         HarnessRejectReason = "worker_fencing_stale"
 	HarnessEngineACLDenied            HarnessRejectReason = "engine_acl_denied"
@@ -65,6 +67,8 @@ var AllHarnessRejectReasons = []HarnessRejectReason{
 	HarnessPayloadSchemaViolation,
 	HarnessDocRefsInvalid,
 	HarnessResponseParentInvalid,
+	HarnessResponseUnauthorizedSender,
+	HarnessResponseAudienceMismatch,
 	HarnessTerminalDuplicate,
 	HarnessWorkerFencingStale,
 	HarnessEngineACLDenied,
@@ -86,7 +90,8 @@ func (r HarnessRejectReason) HTTPStatus() int {
 	switch r {
 	case HarnessAuthFailed:
 		return 401
-	case HarnessSenderMismatch, HarnessSenderKindMismatch, HarnessEngineACLDenied:
+	case HarnessSenderMismatch, HarnessSenderKindMismatch, HarnessEngineACLDenied,
+		HarnessResponseUnauthorizedSender:
 		return 403
 	case HarnessSenderDeregistered, HarnessWorkerFencingStale:
 		return 410
@@ -101,6 +106,7 @@ func (r HarnessRejectReason) HTTPStatus() int {
 		HarnessRequestAudienceInvalid,
 		HarnessAudienceActorNotRegistered,
 		HarnessAudienceHandlerMismatch,
+		HarnessResponseAudienceMismatch,
 		HarnessPayloadSchemaViolation,
 		HarnessDocRefsInvalid:
 		return 400

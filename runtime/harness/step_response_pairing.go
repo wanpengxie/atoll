@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -15,6 +16,10 @@ import (
 //
 //   - response.parent_id must point to an existing kind=request message
 //     (response_parent_invalid otherwise).
+//   - response.sender must be one of the parent request's audience actors,
+//     and response.audience must target the parent request sender exactly.
+//     Trusted system terminal-failure fallbacks are the only sender
+//     exception; they still must target the parent request sender.
 //   - is_terminal is computed per type_registry.terminal_convention:
 //     core types collapse to single-response semantics; business types
 //     read payload.status (or single-response, when set).
@@ -57,6 +62,18 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 			Detail:       "parent_id is not kind=request: " + string(env.ParentID),
 		}, nil
 	}
+	if !audienceContains(parent.Audience, env.Sender.ID) && !isSystemTerminalFallback(env) {
+		return khar.Outcome{
+			RejectReason: message.HarnessResponseUnauthorizedSender,
+			Detail:       "response sender is not in parent request audience: " + string(env.Sender.ID),
+		}, nil
+	}
+	if !audienceExactlySender(env.Audience, parent.Sender.ID) {
+		return khar.Outcome{
+			RejectReason: message.HarnessResponseAudienceMismatch,
+			Detail:       "response audience must equal parent request sender: " + string(parent.Sender.ID),
+		}, nil
+	}
 
 	// Compute is_terminal.
 	if _, isCore := message.CoreTypeTable[env.Type]; isCore {
@@ -80,6 +97,54 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 		env.IsTerminal = true
 	}
 	return khar.Outcome{}, nil
+}
+
+func audienceContains(audience message.Audience, want actor.ActorID) bool {
+	for _, id := range audience {
+		if id == want {
+			return true
+		}
+	}
+	return false
+}
+
+func audienceExactlySender(audience message.Audience, sender actor.ActorID) bool {
+	return len(audience) == 1 && audience[0] == sender
+}
+
+func isSystemTerminalFallback(env *message.Envelope) bool {
+	if env.Sender.ID != actor.SystemActorID {
+		return false
+	}
+	if len(env.Payload) == 0 {
+		return false
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(env.Payload, &doc); err != nil {
+		return false
+	}
+	rawStatus, ok := doc["status"]
+	if !ok {
+		return false
+	}
+	var status string
+	if err := json.Unmarshal(rawStatus, &status); err != nil || status != "failed" {
+		return false
+	}
+	rawReason, ok := doc["reason"]
+	if !ok {
+		return false
+	}
+	var reason string
+	if err := json.Unmarshal(rawReason, &reason); err != nil {
+		return false
+	}
+	for _, r := range message.AllTerminalFailureReasons {
+		if reason == string(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // payloadStatusTerminal returns true when payload.status is one of
