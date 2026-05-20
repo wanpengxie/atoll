@@ -17,7 +17,7 @@
 //   - runtime.go      — worker main loop (subprocess entry helper).
 //     Wired by cmd/worker/main.go.
 //   - kimi_bridge.go  — go-kimi wire event → v4 envelope mapper.
-//   - tool_wrappers.go — in_process tool actor wrappers.
+//   - tool_wrappers.go — embedded tool actor wrappers.
 //   - ipc_client.go   — IPC client (write_message / reserve_ledger /
 //     commit_ledger / heartbeat / shutdown_ack).
 //   - fence_check.go  — verify daemon_epoch on every daemon ACK; on

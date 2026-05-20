@@ -143,8 +143,8 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kl
 	   parent_id, correlation_id, doc_refs,
 	   visibility, audience, not_before, expires_at,
 	   delivered_at, delivery_failed_at, last_error, attempts,
-	   is_terminal
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	   is_terminal, canonical_hash
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	terminalInt := 0
 	if env.IsTerminal {
@@ -159,7 +159,7 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kl
 		nullableInt(env.NotBefore), nullableInt(env.ExpiresAt),
 		nullableInt(env.DeliveredAt), nullableInt(env.DeliveryFailedAt),
 		nullableString(env.LastError), env.Attempts,
-		terminalInt,
+		terminalInt, env.CanonicalHash,
 	)
 	if err != nil {
 		return klog.AppendResult{}, classifyAppendErr(err, string(env.ID))
@@ -394,6 +394,23 @@ func (m *Messages) MarkDeliveryError(ctx context.Context, id message.ID, atMs in
 		return fmt.Errorf("store: mark delivery error %q: %w", id, err)
 	}
 	return nil
+}
+
+// LookupCanonicalHash implements log.MessageLog — returns the row's
+// stored canonical_hash for StepDedupe's pre-normalize comparison
+// (proto-layer1 §2.3).
+func (m *Messages) LookupCanonicalHash(ctx context.Context, channelID channel.ID, id message.ID) (string, bool, error) {
+	_ = channelID
+	const q = `SELECT canonical_hash FROM messages WHERE id=?`
+	var hash string
+	err := m.db.QueryRowContext(ctx, q, id).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("store: lookup canonical hash: %w", err)
+	}
+	return hash, true, nil
 }
 
 // FindByID implements log.MessageLog.

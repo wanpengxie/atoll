@@ -48,7 +48,7 @@ type ModuleContext struct {
 	HarnessChain harness.Chain
 
 	// DeviceTransit is non-nil iff Declaration.Binding ==
-	// BindingViaServerTransit. Other binding types receive nil; the
+	// BindingRuntimeInboundViaRelay. Other binding types receive nil; the
 	// framework refuses to call Handle when DeviceTransit is required
 	// but absent (T3 composition root wires it).
 	DeviceTransit devicetransit.DeviceTransit

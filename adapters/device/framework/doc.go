@@ -1,5 +1,5 @@
 // Package framework declares the device-adapter shared utilities that
-// every via_server_transit binding adapter (the M1.5 "device" adapter
+// every runtime_inbound_via_relay binding adapter (the M1.5 "device" adapter
 // family — first concrete one is adapters/device/xhs) builds on top of.
 //
 // Three concerns live here, each in its own file:
@@ -37,5 +37,5 @@
 //   - .dalek/pm/m1.5-tickets.md §T1.3    (device callback + frame field set)
 //   - .dalek/pm/m1.5-tickets.md §T1.10   (device session lifecycle state machine)
 //   - .dalek/pm/v4-layer4-spec.md §2.6   (device-not-actor invariant)
-//   - .dalek/pm/v4-layer1-spec.md §11.7  (binding tri-class — via_server_transit)
+//   - .dalek/pm/v4-layer1-spec.md §11.7  (binding tri-class — runtime_inbound_via_relay)
 package framework

@@ -13,8 +13,8 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// TestInProcessBindingFullPath covers the in_process binding end-to-end:
-//   - Install verifies actor binding == in_process.
+// TestInProcessBindingFullPath covers the embedded binding end-to-end:
+//   - Install verifies actor binding == embedded.
 //   - Module Init receives a mctx with DeviceTransit == nil.
 //   - Handle responds synchronously; framework writes the response.
 func TestInProcessBindingFullPath(t *testing.T) {
@@ -23,7 +23,7 @@ func TestInProcessBindingFullPath(t *testing.T) {
 			Name:         "calc",
 			ActorID:      "tool:calc",
 			Types:        []string{"calc.add"},
-			Binding:      actor.BindingInProcess,
+			Binding:      actor.BindingEmbedded,
 			MaxPendingMs: 5_000,
 		},
 		handle: func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
@@ -41,7 +41,7 @@ func TestInProcessBindingFullPath(t *testing.T) {
 		t.Fatalf("mctx nil")
 	}
 	if mod.mctx.DeviceTransit != nil {
-		t.Fatalf("in_process mctx.DeviceTransit should be nil, got %T", mod.mctx.DeviceTransit)
+		t.Fatalf("embedded mctx.DeviceTransit should be nil, got %T", mod.mctx.DeviceTransit)
 	}
 
 	req := newTestRequest("channel:test", "agent:a", "calc.add", "req-ip-1")
@@ -61,8 +61,8 @@ func TestInProcessBindingFullPath(t *testing.T) {
 	}
 }
 
-// TestViaServerTransitBindingFullPath covers via_server_transit:
-//   - Install verifies actor binding == via_server_transit + DeviceTransit injected.
+// TestViaServerTransitBindingFullPath covers runtime_inbound_via_relay:
+//   - Install verifies actor binding == runtime_inbound_via_relay + DeviceTransit injected.
 //   - Module Init receives a mctx with DeviceTransit != nil.
 //   - Handle calls DeviceTransit.Send (the daemon-transit seam) — not the
 //     external HTTP API.
@@ -74,7 +74,7 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 	lookup := NewMemoryRequestLookup(nil)
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actorreg.Record{
-		ID: "tool:xhs", Kind: actor.KindTool, Binding: actor.BindingViaServerTransit,
+		ID: "tool:xhs", Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay,
 	})
 
 	var seenFrame *devicetransit.SendFrame
@@ -83,12 +83,12 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 			Name:         "xhs",
 			ActorID:      "tool:xhs",
 			Types:        []string{"xhs.publish"},
-			Binding:      actor.BindingViaServerTransit,
+			Binding:      actor.BindingRuntimeInboundViaRelay,
 			MaxPendingMs: 5_000,
 		},
 		handle: func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
 			if mctx.DeviceTransit == nil {
-				t.Fatalf("via_server_transit mctx.DeviceTransit nil")
+				t.Fatalf("runtime_inbound_via_relay mctx.DeviceTransit nil")
 			}
 			frame := devicetransit.SendFrame{
 				ChannelID:       mctx.ChannelID,
@@ -121,7 +121,7 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 
 	// Verify mctx wiring.
 	if mod.mctx.DeviceTransit == nil {
-		t.Fatalf("DeviceTransit not wired into mctx for via_server_transit")
+		t.Fatalf("DeviceTransit not wired into mctx for runtime_inbound_via_relay")
 	}
 
 	req := newTestRequest("channel:test", "agent:a", "xhs.publish", "req-vst-1")
@@ -142,10 +142,10 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 	if len(transit.sent) != 1 {
 		t.Fatalf("expected 1 transit.Send call, got %d", len(transit.sent))
 	}
-	// IMPORTANT: via_server_transit Handle must NOT write to harness
+	// IMPORTANT: runtime_inbound_via_relay Handle must NOT write to harness
 	// directly — the response comes back via OnExternalCallback later.
 	if len(chain.Written()) != 0 {
-		t.Fatalf("via_server_transit Handle wrote to chain (should be 0): %d", len(chain.Written()))
+		t.Fatalf("runtime_inbound_via_relay Handle wrote to chain (should be 0): %d", len(chain.Written()))
 	}
 
 	// Now simulate the device callback arriving via Manager.OnExternalCallback.
@@ -175,14 +175,14 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 }
 
 // TestOutboundHTTPBindingMCtxShape sanity-checks the contract for
-// outbound_http (already covered end-to-end by feishu_test.go).
+// runtime_outbound (already covered end-to-end by feishu_test.go).
 func TestOutboundHTTPBindingMCtxShape(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "outbound",
 			ActorID:      "tool:outbound",
 			Types:        []string{"outbound.x"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 1_000,
 		},
 	}
@@ -192,7 +192,7 @@ func TestOutboundHTTPBindingMCtxShape(t *testing.T) {
 		t.Fatalf("mctx nil")
 	}
 	if mod.mctx.DeviceTransit != nil {
-		t.Fatalf("outbound_http should not receive DeviceTransit")
+		t.Fatalf("runtime_outbound should not receive DeviceTransit")
 	}
 	if mod.mctx.HarnessChain == nil {
 		t.Fatalf("HarnessChain not wired")
@@ -209,19 +209,19 @@ func TestOutboundHTTPBindingMCtxShape(t *testing.T) {
 }
 
 // TestViaServerTransitRequiresDeviceTransit asserts that installing a
-// via_server_transit module without a DeviceTransit explicitly fails —
+// runtime_inbound_via_relay module without a DeviceTransit explicitly fails —
 // this is the seam guard from manager.go.
 func TestViaServerTransitRequiresDeviceTransit(t *testing.T) {
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actorreg.Record{
-		ID: "tool:vst", Kind: actor.KindTool, Binding: actor.BindingViaServerTransit,
+		ID: "tool:vst", Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "vst",
 			ActorID:      "tool:vst",
 			Types:        []string{"vst.send"},
-			Binding:      actor.BindingViaServerTransit,
+			Binding:      actor.BindingRuntimeInboundViaRelay,
 			MaxPendingMs: 1_000,
 		},
 	}

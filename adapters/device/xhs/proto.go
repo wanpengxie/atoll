@@ -18,8 +18,8 @@ const AdapterName = "xhs"
 const DefaultAdapterActorID actor.ActorID = "tool:xhs-adapter"
 
 // Binding is the M1.5 closed-enum value this adapter declares. See
-// kernel/actor.BindingViaServerTransit + L1 §11.7.
-const Binding = actor.BindingViaServerTransit
+// kernel/actor.BindingRuntimeInboundViaRelay + L1 §11.7.
+const Binding = actor.BindingRuntimeInboundViaRelay
 
 // DefaultMaxPendingMs mirrors the M1.3 xhs baseline (5 min). Large
 // enough to absorb Chrome extension throttling; short enough that a

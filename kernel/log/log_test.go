@@ -70,7 +70,7 @@ func TestCursorZero(t *testing.T) {
 // TestAppendErrorIsError — *AppendError satisfies the error interface
 // (defensive: callers use errors.As).
 func TestAppendErrorIsError(t *testing.T) {
-	var err error = &klog.AppendError{Reason: message.HarnessAuthFailed}
+	var err error = &klog.AppendError{Reason: message.HarnessEngineACLDenied}
 	if err.Error() == "" {
 		t.Error("AppendError as error returns empty string")
 	}

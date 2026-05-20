@@ -35,7 +35,7 @@ func (s *stepSenderConsistent) Run(ctx context.Context, env *message.Envelope) (
 	if caller.ActorID == "" {
 		// stepCallerAuth should already have rejected; defensive.
 		return khar.Outcome{
-			RejectReason: message.HarnessAuthFailed,
+			RejectReason: message.HarnessEngineACLDenied,
 			Detail:       "harness: caller missing at step 3",
 		}, nil
 	}

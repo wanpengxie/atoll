@@ -56,16 +56,16 @@ type ManagerConfig struct {
 	RequestLookup RequestLookup
 
 	// DeviceTransit is optional; required only when a module declares
-	// Binding == BindingViaServerTransit. The framework refuses
+	// Binding == BindingRuntimeInboundViaRelay. The framework refuses
 	// Install for such modules when DeviceTransit is nil.
 	DeviceTransit devicetransit.DeviceTransit
 
-	// HTTPClient is optional; modules with Binding == BindingOutboundHTTP
+	// HTTPClient is optional; modules with Binding == BindingRuntimeOutbound
 	// receive it via ModuleContext (extension surface — kernel/adapter
 	// does not currently expose the field; the framework attaches it
 	// behind a typed assertion through ModuleContext.HarnessChain not
 	// applicable here, so adapters call a per-module accessor —
-	// see ModuleContext below). When nil for an outbound_http module,
+	// see ModuleContext below). When nil for an runtime_outbound module,
 	// Install logs a warning but still proceeds (tests may provide
 	// their own client via the Init phase).
 	HTTPClient *HTTPClient
@@ -223,12 +223,12 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 	}
 
 	// Binding-specific dependency check.
-	if decl.Binding == actor.BindingViaServerTransit && m.cfg.DeviceTransit == nil {
-		return fmt.Errorf("framework: adapter %q requires DeviceTransit (binding=via_server_transit) but ManagerConfig.DeviceTransit is nil",
+	if decl.Binding == actor.BindingRuntimeInboundViaRelay && m.cfg.DeviceTransit == nil {
+		return fmt.Errorf("framework: adapter %q requires DeviceTransit (binding=runtime_inbound_via_relay) but ManagerConfig.DeviceTransit is nil",
 			decl.Name)
 	}
-	if decl.Binding == actor.BindingOutboundHTTP && m.cfg.HTTPClient == nil {
-		m.cfg.Logger.Warn("framework.install.outbound_http.no_client",
+	if decl.Binding == actor.BindingRuntimeOutbound && m.cfg.HTTPClient == nil {
+		m.cfg.Logger.Warn("framework.install.runtime_outbound.no_client",
 			"adapter", decl.Name,
 			"note", "ManagerConfig.HTTPClient nil — adapter must provide its own")
 	}
@@ -328,7 +328,7 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		Respond:        respond,
 		HarnessChain:   m.cfg.HarnessChain,
 	}
-	if decl.Binding == actor.BindingViaServerTransit {
+	if decl.Binding == actor.BindingRuntimeInboundViaRelay {
 		mctx.DeviceTransit = m.cfg.DeviceTransit
 	}
 
@@ -637,7 +637,7 @@ func (m *Manager) InstalledAdapters() []string {
 // AdaptersByBinding returns the sorted list of installed adapter names
 // whose Declaration.Binding equals the supplied binding. Composition
 // roots use this to discover which adapters need binding-specific wiring
-// — notably the via_server_transit binding's inbound callback hook (the
+// — notably the runtime_inbound_via_relay binding's inbound callback hook (the
 // daemon's per-channel SetDeviceCallback dispatches device_transit.recv
 // frames to the Manager.OnExternalCallback of these adapters).
 //

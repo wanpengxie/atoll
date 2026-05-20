@@ -258,7 +258,10 @@ func TestCanonicalHashStableAcrossSenderIdentityTyping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CanonicalHash: %v", err)
 	}
-	const wantHex = "3eced5f03d2bc78d9dc585bd07b1c4ddaff230111d10fbb26e5ec688f1fc5c8b"
+	// Hash is computed over sender-provided fields only (proto-layer1
+	// §2.3): sender.kind is excluded because it is runtime-derived
+	// (forced overwrite from actor_registry at StepSenderConsistent).
+	const wantHex = "616b69cbad986d12eebadc836ea8898e171010105361a9fef28336fe66a73917"
 	if got != wantHex {
 		t.Errorf("CanonicalHash mismatch:\n got  = %q\n want = %q", got, wantHex)
 	}

@@ -38,7 +38,7 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (k
 		isCore = true
 		if !rule.AllowOverride && env.Kind != rule.DefaultKind {
 			return khar.Outcome{
-				RejectReason: message.HarnessKindNotAllowed,
+				RejectReason: message.HarnessKindNotAllowedForType,
 				Detail: fmt.Sprintf("core type %s allows only kind=%s",
 					env.Type, rule.DefaultKind),
 			}, nil
@@ -54,13 +54,13 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (k
 		}
 		if !ok {
 			return khar.Outcome{
-				RejectReason: message.HarnessUnknownType,
+				RejectReason: message.HarnessTypeUnknown,
 				Detail:       "type lookup vanished between step 4 and 5: " + env.Type,
 			}, nil
 		}
 		if !kindAllowed(view.AllowedKinds, env.Kind) {
 			return khar.Outcome{
-				RejectReason: message.HarnessKindNotAllowed,
+				RejectReason: message.HarnessKindNotAllowedForType,
 				Detail:       fmt.Sprintf("kind=%s not allowed for type=%s", env.Kind, env.Type),
 			}, nil
 		}
@@ -85,7 +85,7 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (k
 	}
 	if !ok || !rec.IsActive() {
 		return khar.Outcome{
-			RejectReason: message.HarnessAudienceActorNotRegistered,
+			RejectReason: message.HarnessAudienceMemberNotActive,
 			Detail:       fmt.Sprintf("audience actor %q not active in registry", target),
 		}, nil
 	}
@@ -116,8 +116,13 @@ func (s *stepKindAndAudience) defaultExpiresAt(
 	switch receiverKind {
 	case actor.KindTool:
 		if !hasTypeView || view.MaxPendingMs <= 0 {
+			// Type registry installed the tool handler but omitted
+			// max_pending_ms — install validator should have caught this,
+			// but harness fails closed using harness_schema_missing (the
+			// closest match in proto-layer1 §2.11.1 for "registry config
+			// the harness needs is absent").
 			return khar.Outcome{
-				RejectReason: message.HarnessPayloadSchemaViolation,
+				RejectReason: message.HarnessSchemaMissing,
 				Detail:       "tool receiver requires type_registry.max_pending_ms to default expires_at",
 			}
 		}

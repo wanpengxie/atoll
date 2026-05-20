@@ -121,6 +121,16 @@ func (l *memLog) FindByID(_ context.Context, _ channel.ID, id message.ID) (messa
 	return row, ok, nil
 }
 
+func (l *memLog) LookupCanonicalHash(_ context.Context, _ channel.ID, id message.ID) (string, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	row, ok := l.rows[id]
+	if !ok {
+		return "", false, nil
+	}
+	return row.CanonicalHash, true, nil
+}
+
 // newTestChain wires a Chain over an in-memory log + actor registry.
 // The actor list is pre-populated with a handful of senders that
 // cover human / agent / system / tool kinds.

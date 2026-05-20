@@ -22,10 +22,10 @@
 //
 // Three binding kinds (L1 §11.7) flow through the same Manager:
 //
-//   - in_process        — Handle runs on the daemon goroutine; no transport.
-//   - outbound_http     — Handle uses HTTPClient to reach an external API;
+//   - embedded        — Handle runs on the daemon goroutine; no transport.
+//   - runtime_outbound     — Handle uses HTTPClient to reach an external API;
 //     callbacks flow through Manager.OnExternalCallback.
-//   - via_server_transit — Handle calls DeviceTransit.Send to push a
+//   - runtime_inbound_via_relay — Handle calls DeviceTransit.Send to push a
 //     device_transit.send frame through the daemonbus; callbacks flow
 //     through Manager.OnExternalCallback after server.devicebus delivers a
 //     device_transit.recv frame.

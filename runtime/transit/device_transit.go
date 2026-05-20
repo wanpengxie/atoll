@@ -10,7 +10,7 @@ import (
 )
 
 // DeviceTransit is the daemon-side implementation of
-// kernel/devicetransit.DeviceTransit — the via_server_transit binding's
+// kernel/devicetransit.DeviceTransit — the runtime_inbound_via_relay binding's
 // transport.
 //
 // Per T1.3:

@@ -112,14 +112,14 @@ func (m *Module) Declares() adapter.Declaration {
 // Init captures the framework-provided ModuleContext + constructs the
 // DeviceProxy that wraps DeviceTransit + Correlation + ErrorPolicy.
 // Returns an error if DeviceTransit is absent (the framework MUST
-// inject it for via_server_transit bindings — covers codex warning
+// inject it for runtime_inbound_via_relay bindings — covers codex warning
 // #15).
 func (m *Module) Init(_ context.Context, mctx *adapter.ModuleContext) error {
 	if mctx == nil {
 		return errors.New("xhs.Init: ModuleContext is nil")
 	}
 	if mctx.DeviceTransit == nil {
-		return errors.New("xhs.Init: ModuleContext.DeviceTransit is nil; via_server_transit binding requires runtime/transit to wire it (T3)")
+		return errors.New("xhs.Init: ModuleContext.DeviceTransit is nil; runtime_inbound_via_relay binding requires runtime/transit to wire it (T3)")
 	}
 	if mctx.Correlation == nil {
 		return errors.New("xhs.Init: ModuleContext.Correlation is nil")

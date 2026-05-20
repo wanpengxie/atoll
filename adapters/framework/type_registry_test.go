@@ -14,7 +14,7 @@ func TestInMemoryTypeRegistryUpsertAndLookup(t *testing.T) {
 	row := TypeRow{
 		Type:           "feishu.chat.send",
 		HandlerActorID: "tool:feishu",
-		HandlerBinding: actor.BindingOutboundHTTP,
+		HandlerBinding: actor.BindingRuntimeOutbound,
 		MaxPendingMs:   30_000,
 	}
 	got, err := r.Upsert(ctx, row)
@@ -40,10 +40,10 @@ func TestTypeRegistryRejectsBadRows(t *testing.T) {
 		name string
 		row  TypeRow
 	}{
-		{"missing-type", TypeRow{HandlerActorID: "a", HandlerBinding: actor.BindingInProcess, MaxPendingMs: 1}},
-		{"missing-actor", TypeRow{Type: "x", HandlerBinding: actor.BindingInProcess, MaxPendingMs: 1}},
+		{"missing-type", TypeRow{HandlerActorID: "a", HandlerBinding: actor.BindingEmbedded, MaxPendingMs: 1}},
+		{"missing-actor", TypeRow{Type: "x", HandlerBinding: actor.BindingEmbedded, MaxPendingMs: 1}},
 		{"bad-binding", TypeRow{Type: "x", HandlerActorID: "a", HandlerBinding: "wat", MaxPendingMs: 1}},
-		{"zero-timeout", TypeRow{Type: "x", HandlerActorID: "a", HandlerBinding: actor.BindingInProcess}},
+		{"zero-timeout", TypeRow{Type: "x", HandlerActorID: "a", HandlerBinding: actor.BindingEmbedded}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -61,7 +61,7 @@ func TestInMemoryTypeRegistryListSorted(t *testing.T) {
 		_, _ = r.Upsert(ctx, TypeRow{
 			Type:           t,
 			HandlerActorID: "tool:a",
-			HandlerBinding: actor.BindingInProcess,
+			HandlerBinding: actor.BindingEmbedded,
 			MaxPendingMs:   1,
 		})
 	}

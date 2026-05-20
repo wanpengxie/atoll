@@ -52,17 +52,20 @@ func (s *stepPayloadSchema) Run(ctx context.Context, env *message.Envelope) (kha
 	}
 	// Resolve the validator at run time so tests can rebind
 	// DefaultPayloadValidator independently of Chain construction. Schema
-	// presence + missing validator is a protocol violation: fail closed.
+	// presence + missing validator is a protocol violation: fail closed
+	// with the distinct harness_schema_missing reason (proto-layer1
+	// §2.11.1) so callers can tell "schema absent" apart from "payload
+	// didn't match schema".
 	validator, ok := currentPayloadValidator()
 	if !ok {
 		return khar.Outcome{
-			RejectReason: message.HarnessPayloadSchemaViolation,
+			RejectReason: message.HarnessSchemaMissing,
 			Detail:       ErrPayloadValidatorMissing.Error(),
 		}, nil
 	}
 	if err := validator(schema, env.Payload); err != nil {
 		return khar.Outcome{
-			RejectReason: message.HarnessPayloadSchemaViolation,
+			RejectReason: message.HarnessPayloadSchemaInvalid,
 			Detail:       err.Error(),
 		}, nil
 	}

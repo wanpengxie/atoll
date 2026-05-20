@@ -15,8 +15,8 @@ import (
 //	user:<short-id>      - human members
 //	system               - the channel-local system actor (fixed id)
 //	agent:<role-name>    - channel agents / sub-agents
-//	tool:<adapter-name>  - tool/adapter actors (in_process /
-//	                       outbound_http / via_server_transit per
+//	tool:<adapter-name>  - tool/adapter actors (embedded /
+//	                       runtime_outbound / runtime_inbound_via_relay per
 //	                       L1 §11.7)
 //
 // Cross-channel uniqueness is NOT guaranteed; mapping a real-world user

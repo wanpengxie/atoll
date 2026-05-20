@@ -667,7 +667,7 @@ func TestActorRegistry(t *testing.T) {
 	rec := actorreg.Record{
 		ID:        "agent:alpha",
 		Kind:      actor.KindAgent,
-		Binding:   actor.BindingInProcess,
+		Binding:   actor.BindingEmbedded,
 		CreatedAt: 1000,
 	}
 	if err := reg.Insert(ctx, rec); err != nil {
@@ -683,7 +683,7 @@ func TestActorRegistry(t *testing.T) {
 	if got.Kind != actor.KindAgent {
 		t.Errorf("actor kind=%q want %q", got.Kind, actor.KindAgent)
 	}
-	if got.Binding != actor.BindingInProcess || !got.IsActive() {
+	if got.Binding != actor.BindingEmbedded || !got.IsActive() {
 		t.Errorf("got=%+v", got)
 	}
 
@@ -723,6 +723,46 @@ func TestActorRegistry(t *testing.T) {
 	}
 	if len(active) != 0 {
 		t.Errorf("expected 0 active, got %d", len(active))
+	}
+}
+
+// TestActorRegistry_AllBindings_RoundTrip writes each binding wire
+// value (proto-foundation §2.5.1 closed set) and verifies the schema
+// CHECK constraint accepts it + Lookup returns the same canonical form.
+func TestActorRegistry_AllBindings_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	reg := store.NewActorRegistry(db)
+	cases := []struct {
+		id      actor.ActorID
+		binding actor.Binding
+	}{
+		{"tool:emb", actor.BindingEmbedded},
+		{"tool:out", actor.BindingRuntimeOutbound},
+		{"tool:relay", actor.BindingRuntimeInboundViaRelay},
+	}
+	for _, tc := range cases {
+		if err := reg.Insert(ctx, actorreg.Record{
+			ID:        tc.id,
+			Kind:      actor.KindTool,
+			Binding:   tc.binding,
+			CreatedAt: 1000,
+		}); err != nil {
+			t.Fatalf("Insert(%s, %s): %v", tc.id, tc.binding, err)
+		}
+		got, ok, err := reg.Lookup(ctx, tc.id)
+		if err != nil || !ok {
+			t.Fatalf("Lookup(%s): ok=%v err=%v", tc.id, ok, err)
+		}
+		if got.Binding != tc.binding {
+			t.Errorf("Binding round-trip for %s: got=%q want=%q", tc.id, got.Binding, tc.binding)
+		}
 	}
 }
 

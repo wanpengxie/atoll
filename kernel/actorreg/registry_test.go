@@ -96,7 +96,7 @@ func TestRegisterDeregisterStillResolvable(t *testing.T) {
 	rec := actorreg.Record{
 		ID:        "agent:alpha",
 		Kind:      actor.KindAgent,
-		Binding:   actor.BindingInProcess,
+		Binding:   actor.BindingEmbedded,
 		CreatedAt: 1000,
 	}
 	if err := reg.Insert(ctx, rec); err != nil {

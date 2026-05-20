@@ -51,8 +51,8 @@ type TypeRow struct {
 	// a tool actor in actor_registry per L2 §1.4.2.
 	HandlerActorID actor.ActorID
 
-	// HandlerBinding mirrors the actor's binding (in_process /
-	// outbound_http / via_server_transit).
+	// HandlerBinding mirrors the actor's binding (embedded /
+	// runtime_outbound / runtime_inbound_via_relay).
 	HandlerBinding actor.Binding
 
 	// MaxPendingMs is the per-type request timeout in milliseconds. MUST

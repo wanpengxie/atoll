@@ -34,13 +34,13 @@ func (s *stepCallerAuth) Run(ctx context.Context, env *message.Envelope) (khar.O
 	caller := CallerFromCtx(ctx)
 	if caller.ActorID == "" {
 		return khar.Outcome{
-			RejectReason: message.HarnessAuthFailed,
+			RejectReason: message.HarnessEngineACLDenied,
 			Detail:       "harness: missing caller context",
 		}, nil
 	}
 	if caller.ChannelID != "" && caller.ChannelID != s.deps.ChannelID {
 		return khar.Outcome{
-			RejectReason: message.HarnessAuthFailed,
+			RejectReason: message.HarnessEngineACLDenied,
 			Detail:       "harness: caller bound to a different channel",
 		}, nil
 	}

@@ -60,7 +60,7 @@ type ErrorFrame struct {
 	Message         string          `json:"message"`
 }
 
-// DeviceTransit is the kernel-level seam the via_server_transit binding uses
+// DeviceTransit is the kernel-level seam the runtime_inbound_via_relay binding uses
 // to hand adapter-generated frames to the daemonbus/devicebus bridge.
 type DeviceTransit interface {
 	Send(ctx context.Context, frame SendFrame) (frameID FrameID, err error)

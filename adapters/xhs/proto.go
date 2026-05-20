@@ -9,15 +9,15 @@ import (
 const AdapterName = "xhs-scaffold"
 
 // DefaultAdapterActorID is the canonical tool actor row this scaffold
-// binds — same id the T3 device adapter will own once the via_server_transit
+// binds — same id the T3 device adapter will own once the runtime_inbound_via_relay
 // path lands. v4-message-definition §1.2.5 mandates sender.id =
 // tool:xhs-adapter on every adapter-emitted response.
 const DefaultAdapterActorID actor.ActorID = "tool:xhs-adapter"
 
-// Binding is the T2 closed-enum value — in_process so the daemon
+// Binding is the T2 closed-enum value — embedded so the daemon
 // composition root can install it without DeviceTransit. T3 will swap
-// this to BindingViaServerTransit when the device adapter goes live.
-const Binding = actor.BindingInProcess
+// this to BindingRuntimeInboundViaRelay when the device adapter goes live.
+const Binding = actor.BindingEmbedded
 
 // DefaultMaxPendingMs mirrors the device adapter baseline (5 min). The
 // framework arms an F3 timer of this duration on every request; T2's

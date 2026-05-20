@@ -134,7 +134,7 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (kha
 	// (7) response.parent_id non-null — One Law extra-strong constraint.
 	if env.Kind == message.KindResponse && env.ParentID == "" {
 		return khar.Outcome{
-			RejectReason: message.HarnessResponseMissingParentID,
+			RejectReason: message.HarnessResponseMissingParent,
 			Detail:       "kind=response requires non-empty parent_id",
 		}, nil
 	}

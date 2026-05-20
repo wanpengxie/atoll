@@ -119,7 +119,7 @@ func TestManagerInstallSeedsTypeRegistry(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send", "feishu.chat.create"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -152,7 +152,7 @@ func TestManagerInstallDoesNotPublishTypeRowsWhenInitFails(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
 		},
 		initErr: errors.New("init failed"),
@@ -161,7 +161,7 @@ func TestManagerInstallDoesNotPublishTypeRowsWhenInitFails(t *testing.T) {
 	if err := registry.Insert(context.Background(), actorreg.Record{
 		ID:      mod.decl.ActorID,
 		Kind:    actor.KindTool,
-		Binding: actor.BindingOutboundHTTP,
+		Binding: actor.BindingRuntimeOutbound,
 	}); err != nil {
 		t.Fatalf("seed actor: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestManagerInstallRejectsMissingActor(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:does-not-exist",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -227,14 +227,14 @@ func TestManagerInstallRejectsBindingMismatch(t *testing.T) {
 	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID:      "tool:feishu",
 		Kind:    actor.KindTool,
-		Binding: actor.BindingInProcess,
+		Binding: actor.BindingEmbedded,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -257,14 +257,14 @@ func TestManagerInstallRejectsTransitMissing(t *testing.T) {
 	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID:      "tool:xhs",
 		Kind:    actor.KindTool,
-		Binding: actor.BindingViaServerTransit,
+		Binding: actor.BindingRuntimeInboundViaRelay,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "xhs",
 			ActorID:      "tool:xhs",
 			Types:        []string{"xhs.publish"},
-			Binding:      actor.BindingViaServerTransit,
+			Binding:      actor.BindingRuntimeInboundViaRelay,
 			MaxPendingMs: 1_000,
 		},
 	}
@@ -317,14 +317,14 @@ func TestManagerInstallAcceptsTransitWhenWired(t *testing.T) {
 	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID:      "tool:xhs",
 		Kind:    actor.KindTool,
-		Binding: actor.BindingViaServerTransit,
+		Binding: actor.BindingRuntimeInboundViaRelay,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "xhs",
 			ActorID:      "tool:xhs",
 			Types:        []string{"xhs.publish"},
-			Binding:      actor.BindingViaServerTransit,
+			Binding:      actor.BindingRuntimeInboundViaRelay,
 			MaxPendingMs: 1_000,
 		},
 	}
@@ -352,7 +352,7 @@ func TestManagerDispatchHandlesRequestAndRespond(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -416,7 +416,7 @@ func TestManagerDispatchRejectsUnknownAudience(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -435,7 +435,7 @@ func TestManagerDispatchRejectsUnknownType(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -453,7 +453,7 @@ func TestManagerDispatchRejectsChannelMismatch(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -471,7 +471,7 @@ func TestManagerTimerFiresUnansweredTimeout(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 50, // 50ms timeout
 		},
 		handle: func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
@@ -518,7 +518,7 @@ func TestManagerTimerRetriesTransientRespondWriteErrors(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 20,
 		},
 		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {
@@ -570,7 +570,7 @@ func TestManagerTimerEmitsSystemEventAfterPermanentRespondWriteFailure(t *testin
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 20,
 		},
 		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {
@@ -637,7 +637,7 @@ func TestManagerRespondCancelsTimer(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 80,
 		},
 		handle: func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
@@ -674,7 +674,7 @@ func TestManagerOnExternalCallbackRoutes(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
 		},
 		onCallback: func(_ context.Context, payload []byte, _ *adapter.ModuleContext) error {
@@ -702,7 +702,7 @@ func TestManagerOnExternalCallbackEmitsOrphanEvents(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
 		},
 		onCallback: func(context.Context, []byte, *adapter.ModuleContext) error {
@@ -750,7 +750,7 @@ func TestManagerShutdownCallsModule(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
 		},
 		shutdown: func() error {
@@ -773,7 +773,7 @@ func TestManagerInstalledAdapters(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -790,7 +790,7 @@ func TestManagerDeduplicatesResponseFromTerminalDuplicate(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
 		},
 	}
@@ -834,7 +834,7 @@ func TestManagerHandlePanicEmitsReceiverInternalError(t *testing.T) {
 			Name:         "feishu",
 			ActorID:      "tool:feishu",
 			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingOutboundHTTP,
+			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
 		},
 		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {

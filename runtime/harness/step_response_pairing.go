@@ -9,13 +9,17 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// stepResponsePairing implements L1 §10.2 step 8 — The One Law /
-// terminal-uniqueness contract. Applies only to kind=response.
+// stepResponsePairing implements proto-layer1 §2.9 step 9 — The One Law
+// / terminal-uniqueness contract. Applies only to kind=response.
 //
 // Concretely:
 //
-//   - response.parent_id must point to an existing kind=request message
-//     (response_parent_invalid otherwise).
+//   - response.parent_id must point to an existing message; missing →
+//     harness_response_parent_not_found.
+//   - parent.kind must equal "request"; otherwise →
+//     harness_response_parent_not_request.
+//   - payload.status MUST be one of {"completed","failed"}; otherwise →
+//     harness_response_status_invalid.
 //   - response.sender must be one of the parent request's audience actors,
 //     and response.audience must target the parent request sender exactly.
 //     Trusted system terminal-failure fallbacks are the only sender
@@ -30,7 +34,7 @@ import (
 //     correctly per L2 §1.4.1 invariant.
 //
 // We DO perform a non-authoritative early check (FindByID parent) so
-// the harness can return response_parent_invalid before any sqlite
+// the harness can return the appropriate reject before any sqlite
 // transaction starts — saves a roundtrip on obviously wrong responses.
 type stepResponsePairing struct {
 	deps Deps
@@ -52,16 +56,26 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 	}
 	if !ok {
 		return khar.Outcome{
-			RejectReason: message.HarnessResponseParentInvalid,
+			RejectReason: message.HarnessResponseParentNotFound,
 			Detail:       "parent_id not found: " + string(env.ParentID),
 		}, nil
 	}
 	if parent.Kind != message.KindRequest {
 		return khar.Outcome{
-			RejectReason: message.HarnessResponseParentInvalid,
+			RejectReason: message.HarnessResponseParentNotRequest,
 			Detail:       "parent_id is not kind=request: " + string(env.ParentID),
 		}, nil
 	}
+
+	// payload.status strict closed set — proto-layer1 §2.9 #4. Missing
+	// status (or non-string / out-of-set) → harness_response_status_invalid.
+	if !payloadStatusValid(env.Payload) {
+		return khar.Outcome{
+			RejectReason: message.HarnessResponseStatusInvalid,
+			Detail:       "payload.status must be one of {completed, failed}",
+		}, nil
+	}
+
 	systemFallback, reasonCheck := allowsSystemTerminalFallback(env)
 	if reasonCheck.invalid {
 		return khar.Outcome{
@@ -186,6 +200,29 @@ func terminalFailureReasonAllowed(reason string) bool {
 		}
 	}
 	return false
+}
+
+// payloadStatusValid returns true when payload.status is present and
+// equals one of the proto-layer1 §2.9 closed set {"completed","failed"}.
+// Empty payload or missing/non-string status → false (caller rejects
+// with harness_response_status_invalid).
+func payloadStatusValid(payload []byte) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &doc); err != nil {
+		return false
+	}
+	raw, ok := doc["status"]
+	if !ok {
+		return false
+	}
+	var status string
+	if err := json.Unmarshal(raw, &status); err != nil {
+		return false
+	}
+	return status == "completed" || status == "failed"
 }
 
 // payloadStatusTerminal returns true when payload.status is one of

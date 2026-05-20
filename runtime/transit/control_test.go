@@ -289,7 +289,7 @@ func TestWriteMessageHandler_HarnessReject(t *testing.T) {
 	reg := newStubRegistry()
 	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{result: transit.HarnessWriteResult{
-		RejectReason: "harness_kind_not_allowed",
+		RejectReason: "harness_kind_not_allowed_for_type",
 		RejectDetail: "demo reject",
 	}}
 	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
@@ -299,7 +299,7 @@ func TestWriteMessageHandler_HarnessReject(t *testing.T) {
 	if ack.Accepted {
 		t.Fatal("expected ack.Accepted=false on harness reject")
 	}
-	if ack.RejectReason != "harness_kind_not_allowed" {
+	if ack.RejectReason != "harness_kind_not_allowed_for_type" {
 		t.Errorf("RejectReason=%q", ack.RejectReason)
 	}
 	if ack.MessageID == "" {

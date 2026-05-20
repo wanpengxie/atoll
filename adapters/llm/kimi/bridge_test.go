@@ -185,13 +185,13 @@ func TestBuildBasePrompt_WithChannelContext(t *testing.T) {
 		Actors: []kimi.ActorInfo{
 			{ActorID: "system", Kind: "system"},
 			{ActorID: "agent:channel-agent", Kind: "agent", DisplayName: "channel agent"},
-			{ActorID: "tool:xhs-adapter", Kind: "tool", Binding: "via_server_transit"},
+			{ActorID: "tool:xhs-adapter", Kind: "tool", Binding: "runtime_inbound_via_relay"},
 			{ActorID: "user:2cc317ee", Kind: "human", DisplayName: "Wanpeng Xie"},
 		},
 		Types: []kimi.TypeInfo{
-			{Type: "xhs.publish", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "via_server_transit", AllowedKinds: []string{"request", "response", "event"}, MaxPendingMs: 300_000},
-			{Type: "xhs.search", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "via_server_transit", AllowedKinds: []string{"request", "response"}},
-			{Type: "xhs.note.fetch", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "via_server_transit", AllowedKinds: []string{"request", "response"}},
+			{Type: "xhs.publish", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "runtime_inbound_via_relay", AllowedKinds: []string{"request", "response", "event"}, MaxPendingMs: 300_000},
+			{Type: "xhs.search", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "runtime_inbound_via_relay", AllowedKinds: []string{"request", "response"}},
+			{Type: "xhs.note.fetch", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "runtime_inbound_via_relay", AllowedKinds: []string{"request", "response"}},
 		},
 		Devices: []kimi.DeviceInfo{
 			{SessionID: "de67872c", DeviceID: "chrome-default", DeviceType: "xhs-chrome", State: "active"},
@@ -203,7 +203,7 @@ func TestBuildBasePrompt_WithChannelContext(t *testing.T) {
 		"channel_id: f9831154-ch",
 		"## Actors in this channel",
 		"tool:xhs-adapter",
-		"binding=via_server_transit",
+		"binding=runtime_inbound_via_relay",
 		"## Tool / business types available",
 		"xhs.publish",
 		"300000",

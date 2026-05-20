@@ -27,7 +27,7 @@ func (m *durabilityModule) Declares() adapter.Declaration {
 		Name:         "durable",
 		ActorID:      actor.ActorID("tool:durable"),
 		Types:        []string{"durable.request"},
-		Binding:      actor.BindingInProcess,
+		Binding:      actor.BindingEmbedded,
 		MaxPendingMs: 10_000,
 	}
 }
@@ -79,7 +79,7 @@ func TestAdapterFrameworkBootRecoverTimersUsesSQLiteStateStore(t *testing.T) {
 	if err := reg.Insert(ctx, actorreg.Record{
 		ID:      "tool:durable",
 		Kind:    actor.KindTool,
-		Binding: actor.BindingInProcess,
+		Binding: actor.BindingEmbedded,
 	}); err != nil {
 		t.Fatalf("seed actor: %v", err)
 	}

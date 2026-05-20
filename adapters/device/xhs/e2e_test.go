@@ -1,7 +1,7 @@
 package xhs_test
 
 // End-to-end harness for the xhs adapter on top of the M1.5
-// via_server_transit binding (T5 acceptance).
+// runtime_inbound_via_relay binding (T5 acceptance).
 //
 // Scope:
 //   - mock server.devicebus (mockServer) implements kernel/devicetransit.DeviceTransit:

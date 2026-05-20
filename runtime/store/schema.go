@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS messages (
   attempts             INTEGER NOT NULL DEFAULT 0,
   claim_owner          TEXT,
   claimed_at           INTEGER,
-  is_terminal          INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0,1))
+  is_terminal          INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0,1)),
+  canonical_hash       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS ix_messages_correlation_ts ON messages(correlation_id, ts_received);
@@ -67,7 +68,7 @@ CREATE TABLE IF NOT EXISTS type_registry (
   allowed_kinds            TEXT NOT NULL,
   schemas_by_kind          TEXT NOT NULL,
   handler_binding          TEXT NOT NULL
-                           CHECK (handler_binding IN ('in_process','outbound_http','via_server_transit')),
+                           CHECK (handler_binding IN ('embedded','runtime_outbound','runtime_inbound_via_relay')),
   terminal_convention      TEXT NOT NULL DEFAULT 'payload_status'
                            CHECK (terminal_convention IN ('payload_status','single-response')),
   max_pending_ms           INTEGER,
@@ -96,7 +97,7 @@ CREATE TABLE IF NOT EXISTS actor_registry (
                      CHECK (actor_kind IN ('human','agent','system','tool')),
   actor_binding      TEXT
                      CHECK (actor_binding IS NULL
-                            OR actor_binding IN ('in_process','outbound_http','via_server_transit')),
+                            OR actor_binding IN ('embedded','runtime_outbound','runtime_inbound_via_relay')),
   display_name       TEXT,
   created_at         INTEGER NOT NULL,
   deregistered_at    INTEGER

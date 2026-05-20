@@ -7,7 +7,9 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// TestAllStepIDs covers the StepID closed set + ordering.
+// TestAllStepIDs covers the StepID closed set + ordering. The chain
+// now runs in single-loop ascending order with StepDedupe sitting
+// between StepEnvelopeShape and StepNormalize per proto-layer1 §2.3.
 func TestAllStepIDs(t *testing.T) {
 	if len(harness.AllStepIDs) != 10 {
 		t.Fatalf("AllStepIDs len=%d, want 10 (proto-layer1 §2.0)", len(harness.AllStepIDs))
@@ -15,12 +17,12 @@ func TestAllStepIDs(t *testing.T) {
 	want := []harness.StepID{
 		harness.StepCallerAuth,
 		harness.StepEnvelopeShape,
+		harness.StepDedupe,
 		harness.StepNormalize,
 		harness.StepSenderConsistent,
 		harness.StepTypeRegistered,
 		harness.StepKindAndAudience,
 		harness.StepPayloadSchema,
-		harness.StepDocRefs,
 		harness.StepResponsePairing,
 		harness.StepEngineAppend,
 	}
@@ -31,45 +33,70 @@ func TestAllStepIDs(t *testing.T) {
 	}
 }
 
+// TestStepIDsAreStrictlyAscending — chain.go relies on ascending IDs
+// for the single-loop runner.
+func TestStepIDsAreStrictlyAscending(t *testing.T) {
+	for i := 1; i < len(harness.AllStepIDs); i++ {
+		if harness.AllStepIDs[i] <= harness.AllStepIDs[i-1] {
+			t.Errorf("AllStepIDs not strictly ascending at index %d: %d <= %d",
+				i, harness.AllStepIDs[i], harness.AllStepIDs[i-1])
+		}
+	}
+}
+
+// TestStepDedupeOrdering — StepDedupe MUST sit between StepEnvelopeShape
+// and StepNormalize so canonical_hash sees sender-provided fields
+// (proto-layer1 §2.3).
+func TestStepDedupeOrdering(t *testing.T) {
+	if harness.StepDedupe <= harness.StepEnvelopeShape {
+		t.Errorf("StepDedupe (%d) must run AFTER StepEnvelopeShape (%d)",
+			harness.StepDedupe, harness.StepEnvelopeShape)
+	}
+	if harness.StepDedupe >= harness.StepNormalize {
+		t.Errorf("StepDedupe (%d) must run BEFORE StepNormalize (%d) so canonical_hash sees sender-provided fields",
+			harness.StepDedupe, harness.StepNormalize)
+	}
+}
+
 // TestAllRejectReasons enforces the proto-layer1 §2.11.1 closed-set
-// contract. Round-3 Cluster F adds the 7 envelope-shape / time-relation
-// reasons and renames message_id_conflict → harness_id_duplicate_conflict.
+// contract.
 func TestAllRejectReasons(t *testing.T) {
 	want := []message.HarnessRejectReason{
-		message.HarnessAuthFailed,
-		message.HarnessMissingRequiredField,
+		message.HarnessWorkerFencingStale,
 		message.HarnessEnvelopeFieldMissing,
 		message.HarnessChannelMismatch,
 		message.HarnessKindInvalid,
 		message.HarnessVisibilityInvalid,
 		message.HarnessVisibilityAudienceInvalid,
 		message.HarnessEnvelopeUnknownField,
+		message.HarnessIDDuplicateConflict,
+		message.HarnessTimeInvalid,
+		message.HarnessTypeUnknown,
+		message.HarnessKindNotAllowedForType,
+		message.HarnessReservedTypeUnauthorizedSender,
+		message.HarnessSenderDeregistered,
+		message.HarnessSenderKindMismatch,
+		message.HarnessSenderMismatch,
 		message.HarnessAudienceEmpty,
 		message.HarnessAudienceMixedWildcard,
-		message.HarnessResponseAudienceInvalid,
-		message.HarnessResponseMissingParentID,
-		message.HarnessSenderMismatch,
-		message.HarnessSenderKindMismatch,
-		message.HarnessSenderDeregistered,
-		message.HarnessUnknownType,
-		message.HarnessKindNotAllowed,
+		message.HarnessAudienceMemberNotActive,
 		message.HarnessRequestAudienceInvalid,
-		message.HarnessAudienceActorNotRegistered,
+		message.HarnessResponseAudienceInvalid,
 		message.HarnessAudienceHandlerMismatch,
-		message.HarnessPayloadSchemaViolation,
-		message.HarnessDocRefsInvalid,
-		message.HarnessResponseParentInvalid,
+		message.HarnessSchemaMissing,
+		message.HarnessPayloadSchemaInvalid,
+		message.HarnessResponseMissingParent,
+		message.HarnessResponseParentNotFound,
+		message.HarnessResponseParentNotRequest,
+		message.HarnessResponseStatusInvalid,
+		message.HarnessResponseReasonInvalid,
 		message.HarnessResponseUnauthorizedSender,
 		message.HarnessResponseAudienceMismatch,
-		message.HarnessResponseReasonInvalid,
-		message.HarnessTimeInvalid,
 		message.HarnessTerminalDuplicate,
-		message.HarnessWorkerFencingStale,
 		message.HarnessEngineACLDenied,
-		message.HarnessIDDuplicateConflict,
 	}
 	if len(message.AllHarnessRejectReasons) != len(want) {
-		t.Fatalf("AllRejectReasons len=%d want=%d (L1 §10.3.1 closed set)",
+		t.Fatalf("AllRejectReasons len=%d want=%d (proto-layer1 §2.11.1 closed set)",
 			len(message.AllHarnessRejectReasons), len(want))
 	}
 	seen := map[message.HarnessRejectReason]bool{}
@@ -91,9 +118,13 @@ func TestOutcomeContinue(t *testing.T) {
 	if !(harness.Outcome{}).Continue() {
 		t.Error("zero outcome should Continue")
 	}
-	o := harness.Outcome{RejectReason: message.HarnessAuthFailed}
+	o := harness.Outcome{RejectReason: message.HarnessEngineACLDenied}
 	if o.Continue() {
 		t.Error("rejected outcome should not Continue")
+	}
+	d := harness.Outcome{Deduped: true}
+	if d.Continue() {
+		t.Error("dedupe outcome should not Continue (short-circuit)")
 	}
 }
 
@@ -112,8 +143,8 @@ func TestWriteResultAccepted(t *testing.T) {
 	}
 }
 
-// TestStepIDIsTerminalAppend — StepEngineAppend must be the last numbered
-// step (index 9) so chain runners can pattern-match the terminal step.
+// TestStepIDIsTerminalAppend — StepEngineAppend must be the last
+// numbered step so chain runners can pattern-match the terminal step.
 func TestStepIDIsTerminalAppend(t *testing.T) {
 	last := harness.AllStepIDs[len(harness.AllStepIDs)-1]
 	if last != harness.StepEngineAppend {
@@ -122,36 +153,22 @@ func TestStepIDIsTerminalAppend(t *testing.T) {
 	}
 }
 
-// TestStepDedupeOutsideOrdinalRange — StepDedupe sits between Normalize
-// and CallerAuth conceptually but is NOT part of AllStepIDs (it is
-// referenced by name).
-func TestStepDedupeOutsideOrdinalRange(t *testing.T) {
-	if harness.StepDedupe >= 0 {
-		t.Errorf("StepDedupe=%d should be sentinel < 0", harness.StepDedupe)
-	}
-	for _, id := range harness.AllStepIDs {
-		if id == harness.StepDedupe {
-			t.Errorf("AllStepIDs contains StepDedupe; should be sentinel only")
-		}
-	}
-}
-
 // TestOutcomeDetailTransparency — Detail is informative; it travels
 // through Outcome without being interpreted by Continue().
 func TestOutcomeDetailTransparency(t *testing.T) {
 	o := harness.Outcome{
-		RejectReason: message.HarnessDocRefsInvalid,
-		Detail:       "missing scheme",
+		RejectReason: message.HarnessEnvelopeFieldMissing,
+		Detail:       "missing channel_id",
 	}
 	if o.Continue() {
 		t.Error("rejected Outcome should not Continue regardless of Detail")
 	}
-	if o.Detail != "missing scheme" {
+	if o.Detail != "missing channel_id" {
 		t.Errorf("Detail=%q corrupted by Outcome accessors", o.Detail)
 	}
 }
 
-// TestOutcomePartialMessageIDLateReject — late-stage rejects (step 8)
+// TestOutcomePartialMessageIDLateReject — late-stage rejects (step 9)
 // surface PartialMessageID so callers can correlate the failed id.
 func TestOutcomePartialMessageIDLateReject(t *testing.T) {
 	o := harness.Outcome{
@@ -166,7 +183,7 @@ func TestOutcomePartialMessageIDLateReject(t *testing.T) {
 	}
 }
 
-// TestWriteResultPartialMessageIDPreserved — late reject (step 8) must
+// TestWriteResultPartialMessageIDPreserved — late reject (step 9) must
 // expose PartialMessageID; MessageID stays empty since no durable row.
 func TestWriteResultPartialMessageIDPreserved(t *testing.T) {
 	r := harness.WriteResult{
@@ -208,34 +225,39 @@ func TestWriteResultDedupeRoundTrip(t *testing.T) {
 // able to compare against either form without conversion.
 func TestRejectReasonAliasMatchesMessageReason(t *testing.T) {
 	assertReason := func(r harness.RejectReason) {
-		if r != message.HarnessAuthFailed {
-			t.Errorf("alias mismatch: %v != %v", r, message.HarnessAuthFailed)
+		if r != message.HarnessEngineACLDenied {
+			t.Errorf("alias mismatch: %v != %v", r, message.HarnessEngineACLDenied)
 		}
 	}
-	assertReason(message.HarnessAuthFailed)
+	assertReason(message.HarnessEngineACLDenied)
 }
 
 // TestRejectReasonHTTPStatus spot-checks the L2 §3.6.1 status map for
-// the closed set (covers the categories: auth=401, sender=403,
+// the closed set (covers the categories: sender/auth=403,
 // deregistered/fence=410, conflict=409, malformed=400).
 func TestRejectReasonHTTPStatus(t *testing.T) {
 	cases := []struct {
 		r    message.HarnessRejectReason
 		want int
 	}{
-		{message.HarnessAuthFailed, 401},
 		{message.HarnessSenderMismatch, 403},
 		{message.HarnessSenderKindMismatch, 403},
 		{message.HarnessEngineACLDenied, 403},
 		{message.HarnessResponseUnauthorizedSender, 403},
+		{message.HarnessReservedTypeUnauthorizedSender, 403},
 		{message.HarnessSenderDeregistered, 410},
 		{message.HarnessWorkerFencingStale, 410},
 		{message.HarnessTerminalDuplicate, 409},
 		{message.HarnessIDDuplicateConflict, 409},
-		{message.HarnessMissingRequiredField, 400},
+		{message.HarnessEnvelopeFieldMissing, 400},
 		{message.HarnessKindInvalid, 400},
-		{message.HarnessDocRefsInvalid, 400},
+		{message.HarnessResponseStatusInvalid, 400},
+		{message.HarnessResponseParentNotFound, 400},
+		{message.HarnessResponseParentNotRequest, 400},
 		{message.HarnessResponseAudienceMismatch, 400},
+		{message.HarnessSchemaMissing, 400},
+		{message.HarnessPayloadSchemaInvalid, 400},
+		{message.HarnessReservedTypeUnauthorizedSender, 403},
 	}
 	for _, tc := range cases {
 		if got := tc.r.HTTPStatus(); got != tc.want {

@@ -16,7 +16,7 @@ type ActorSeed struct {
 
 // TypeSeed is one type_registry row entry. handler_actor_id always
 // equals the xhs adapter actor id (it owns every xhs.* type); the
-// handler_binding equals BindingViaServerTransit per L1 §11.7.
+// handler_binding equals BindingRuntimeInboundViaRelay per L1 §11.7.
 //
 // MaxPendingMs is the per-type request budget — the framework arms a
 // timer of that duration on every kind=request envelope.
@@ -59,7 +59,7 @@ func DefaultInstallSpec(maxPendingMs int64) InstallSpec {
 	actorSeed := ActorSeed{
 		ID:          DefaultAdapterActorID,
 		Kind:        actor.KindTool,
-		Binding:     actor.BindingViaServerTransit,
+		Binding:     actor.BindingRuntimeInboundViaRelay,
 		DisplayName: "xhs",
 	}
 	types := make([]TypeSeed, 0, len(AllTypes))

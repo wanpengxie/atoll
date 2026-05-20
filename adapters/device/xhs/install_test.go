@@ -16,8 +16,8 @@ func TestDefaultInstallSpec(t *testing.T) {
 	if spec.Actor.Kind != actor.KindTool {
 		t.Errorf("actor kind=%q want %q", spec.Actor.Kind, actor.KindTool)
 	}
-	if spec.Actor.Binding != actor.BindingViaServerTransit {
-		t.Errorf("actor binding=%q want %q", spec.Actor.Binding, actor.BindingViaServerTransit)
+	if spec.Actor.Binding != actor.BindingRuntimeInboundViaRelay {
+		t.Errorf("actor binding=%q want %q", spec.Actor.Binding, actor.BindingRuntimeInboundViaRelay)
 	}
 	if len(spec.Types) != len(AllTypes) {
 		t.Fatalf("types len=%d want %d", len(spec.Types), len(AllTypes))
@@ -27,7 +27,7 @@ func TestDefaultInstallSpec(t *testing.T) {
 		if s.HandlerActorID != DefaultAdapterActorID {
 			t.Errorf("type %s handler actor=%q want %q", s.Type, s.HandlerActorID, DefaultAdapterActorID)
 		}
-		if s.HandlerBinding != actor.BindingViaServerTransit {
+		if s.HandlerBinding != actor.BindingRuntimeInboundViaRelay {
 			t.Errorf("type %s binding=%q", s.Type, s.HandlerBinding)
 		}
 		if s.MaxPendingMs != DefaultMaxPendingMs {

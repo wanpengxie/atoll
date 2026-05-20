@@ -81,7 +81,7 @@ type Declaration struct {
 
 	// Binding is the M1.5 tri-class transport for this adapter (L1 §11.7).
 	// Determines which framework helpers run (in-process dispatch /
-	// outbound HTTP / via_server_transit + DeviceTransit).
+	// outbound HTTP / runtime_inbound_via_relay + DeviceTransit).
 	Binding actor.Binding
 
 	// MaxPendingMs is the per-type request timeout (milliseconds). Used

@@ -52,13 +52,17 @@ import (
 // canonicalization of the 14 hash-input fields of `e` (L2 §1.4.10.2).
 //
 // Excluded by L1 §10.2.2: ts_received, is_terminal, the four delivery
-// metadata fields, and seq. Hash inputs use the post-normalize value
-// domain — callers MUST call the harness normalize pass before hashing
-// (T7); CanonicalHash itself does not fill defaults.
+// metadata fields, and seq. Hash inputs are sender-provided content
+// fields per proto-layer1 §2.3 (pre-normalize) — the dedupe step uses
+// this hash BEFORE the normalize pass so a sender retry that omits
+// runtime-derived defaults still matches.
 //
 // For each optional field, the key is always present in the canonical
 // output (value `null` when absent) to avoid the "omit key" vs "null
-// key" canonicalization ambiguity.
+// key" canonicalization ambiguity. Empty/missing payload is canonicalized
+// as `null` — proto-layer0 §1.1 admits a missing payload for kind=event,
+// and the dedupe step must compare sender-provided payload as-is without
+// substituting normalize defaults.
 func CanonicalHash(e Envelope) (string, error) {
 	m, err := envelopeHashInput(e)
 	if err != nil {
@@ -104,14 +108,17 @@ func CanonicalizeJSON(raw []byte) ([]byte, error) {
 // the hash input domain.
 func envelopeHashInput(e Envelope) (map[string]any, error) {
 	// payload: parse raw JSON via UseNumber so integers retain precision.
-	if len(e.Payload) == 0 {
-		// L0 §2.2: payload non-null but {} legal. Caller's normalize
-		// pass should have substituted `{}` already; refuse otherwise.
-		return nil, errors.New("canonical: envelope.payload is empty; normalize must run first")
-	}
-	payload, err := decodeJSON(e.Payload)
-	if err != nil {
-		return nil, fmt.Errorf("canonical: parse envelope payload: %w", err)
+	// proto-layer1 §2.3 / proto-layer0 §1.1 — payload may be absent for
+	// kind=event sender-provided envelopes; the dedupe step compares
+	// sender-provided fields verbatim and substitutes `null` for an
+	// empty payload (no normalize default fill at hash time).
+	var payload any
+	if len(e.Payload) > 0 {
+		decoded, err := decodeJSON(e.Payload)
+		if err != nil {
+			return nil, fmt.Errorf("canonical: parse envelope payload: %w", err)
+		}
+		payload = decoded
 	}
 
 	// audience: copy slice to []any (canonicalizeArray accepts []any only).
@@ -132,8 +139,12 @@ func envelopeHashInput(e Envelope) (map[string]any, error) {
 		docRefs = refs
 	}
 
+	// sender.kind is excluded from the dedupe hash input per
+	// proto-layer1 §2.3: kind is runtime-derived (forced overwrite from
+	// actor_registry at Step 6 SenderConsistent) and not "sender-provided".
+	// Including it would make a sender retry that left kind empty hash
+	// differently from the stored row whose kind got force-filled.
 	sender := map[string]any{
-		"kind": string(e.Sender.Kind),
 		"id":   string(e.Sender.ID),
 		"name": e.Sender.Name,
 	}

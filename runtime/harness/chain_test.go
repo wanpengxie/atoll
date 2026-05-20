@@ -27,8 +27,8 @@ func TestChain_Step1_MissingCaller(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	if res.RejectReason != message.HarnessAuthFailed {
-		t.Fatalf("expected harness_auth_failed, got %s", res.RejectReason)
+	if res.RejectReason != message.HarnessEngineACLDenied {
+		t.Fatalf("expected harness_engine_acl_denied, got %s", res.RejectReason)
 	}
 }
 
@@ -40,13 +40,13 @@ func TestChain_Step1_ChannelMismatch(t *testing.T) {
 	})
 	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
 	res, _ := c.Write(ctx, env)
-	if res.RejectReason != message.HarnessAuthFailed {
-		t.Fatalf("expected harness_auth_failed, got %s", res.RejectReason)
+	if res.RejectReason != message.HarnessEngineACLDenied {
+		t.Fatalf("expected harness_engine_acl_denied, got %s", res.RejectReason)
 	}
 }
 
 // TestChain_Step2_MissingFields covers nil payload + missing kind etc.
-// (Round-3 cluster F: HarnessMissingRequiredField was the pre-round-3
+// (Round-3 cluster F: HarnessEnvelopeFieldMissing was the pre-round-3
 // reason; the new envelope-shape stage emits HarnessEnvelopeFieldMissing.)
 func TestChain_Step2_MissingFields(t *testing.T) {
 	c, _, _, _ := newTestChain(t)
@@ -78,8 +78,8 @@ func TestChain_Step2_ResponseMissingParent(t *testing.T) {
 	c, _, _, _ := newTestChain(t)
 	env := newResponse("r-1", "agent:alpha", "", "agent.text", json.RawMessage(`{"status":"completed"}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
-	if res.RejectReason != message.HarnessResponseMissingParentID {
-		t.Fatalf("expected harness_response_missing_parent_id, got %s", res.RejectReason)
+	if res.RejectReason != message.HarnessResponseMissingParent {
+		t.Fatalf("expected harness_response_missing_parent, got %s", res.RejectReason)
 	}
 }
 
@@ -150,8 +150,8 @@ func TestChain_Step4_UnknownType(t *testing.T) {
 		Audience:  message.Audience{"*"},
 	}
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
-	if res.RejectReason != message.HarnessUnknownType {
-		t.Fatalf("expected harness_unknown_type, got %s", res.RejectReason)
+	if res.RejectReason != message.HarnessTypeUnknown {
+		t.Fatalf("expected harness_type_unknown, got %s", res.RejectReason)
 	}
 }
 
@@ -183,8 +183,8 @@ func TestChain_Step5_AudienceActorNotRegistered(t *testing.T) {
 	})
 	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:does-not-exist", json.RawMessage(`{"title":"x"}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
-	if res.RejectReason != message.HarnessAudienceActorNotRegistered {
-		t.Fatalf("expected harness_audience_actor_not_registered, got %s", res.RejectReason)
+	if res.RejectReason != message.HarnessAudienceMemberNotActive {
+		t.Fatalf("expected harness_audience_member_not_active, got %s", res.RejectReason)
 	}
 }
 
@@ -217,7 +217,7 @@ func TestChain_Step5_KindNotAllowed(t *testing.T) {
 	})
 	env := newEvent("agent:alpha", "feishu.chat.send", json.RawMessage(`{}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
-	if res.RejectReason != message.HarnessKindNotAllowed {
+	if res.RejectReason != message.HarnessKindNotAllowedForType {
 		t.Fatalf("expected harness_kind_not_allowed, got %s", res.RejectReason)
 	}
 }
@@ -240,8 +240,8 @@ func TestChain_Step6_PayloadSchema(t *testing.T) {
 	defer SetPayloadValidator(prev)
 	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu", json.RawMessage(`{}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
-	if res.RejectReason != message.HarnessPayloadSchemaViolation {
-		t.Fatalf("expected harness_payload_schema_violation, got %s", res.RejectReason)
+	if res.RejectReason != message.HarnessPayloadSchemaInvalid {
+		t.Fatalf("expected harness_payload_schema_invalid, got %s", res.RejectReason)
 	}
 }
 
@@ -262,8 +262,10 @@ func TestChain_Step6_PayloadSchemaFailsClosedWithoutValidator(t *testing.T) {
 
 	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu", json.RawMessage(`{}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
-	if res.RejectReason != message.HarnessPayloadSchemaViolation {
-		t.Fatalf("expected harness_payload_schema_violation, got %s", res.RejectReason)
+	// proto-layer1 §2.11.1: schema present but validator not wired →
+	// harness_schema_missing (distinct from harness_payload_schema_invalid).
+	if res.RejectReason != message.HarnessSchemaMissing {
+		t.Fatalf("expected harness_schema_missing, got %s", res.RejectReason)
 	}
 	if res.RejectDetail != ErrPayloadValidatorMissing.Error() {
 		t.Fatalf("detail=%q want %q", res.RejectDetail, ErrPayloadValidatorMissing.Error())
@@ -342,32 +344,62 @@ type schemaError struct{ msg string }
 
 func (e *schemaError) Error() string { return e.msg }
 
-// TestChain_Step7_DocRefsInvalid covers absolute / parent-escape paths.
-func TestChain_Step7_DocRefsInvalid(t *testing.T) {
-	c, _, _, _ := newTestChain(t)
-	bad := []string{"/abs/path"}
-	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
-	env.DocRefs = &bad
-	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
-	if res.RejectReason != message.HarnessDocRefsInvalid {
-		t.Fatalf("expected harness_doc_refs_invalid, got %s", res.RejectReason)
-	}
-	traversal := []string{"foo/../etc/passwd"}
-	env.DocRefs = &traversal
-	res, _ = c.Write(chainCallerCtx("agent:alpha"), env)
-	if res.RejectReason != message.HarnessDocRefsInvalid {
-		t.Fatalf("expected harness_doc_refs_invalid traversal, got %s", res.RejectReason)
-	}
-}
-
-// TestChain_Step8_ResponseParentInvalid.
-func TestChain_Step8_ResponseParentInvalid(t *testing.T) {
+// TestChain_Step8_ResponseParentNotFound — parent_id doesn't exist in
+// message_log → harness_response_parent_not_found per proto-layer1 §2.9.
+func TestChain_Step8_ResponseParentNotFound(t *testing.T) {
 	c, _, _, _ := newTestChain(t)
 	env := newResponse("r-1", "agent:alpha", "missing-parent-id", "agent.text",
 		json.RawMessage(`{"status":"completed"}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
-	if res.RejectReason != message.HarnessResponseParentInvalid {
-		t.Fatalf("expected harness_response_parent_invalid, got %s", res.RejectReason)
+	if res.RejectReason != message.HarnessResponseParentNotFound {
+		t.Fatalf("expected harness_response_parent_not_found, got %s", res.RejectReason)
+	}
+}
+
+// TestChain_Step8_ResponseParentNotRequest — parent_id resolves but
+// points at a kind=event → harness_response_parent_not_request.
+func TestChain_Step8_ResponseParentNotRequest(t *testing.T) {
+	c, _, _, _ := newTestChain(t)
+	// Seed an event message that the test response will erroneously
+	// reference as parent.
+	parent := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
+	parent.ID = "evt-not-request"
+	if r, err := c.Write(chainCallerCtx("agent:alpha"), parent); err != nil || !r.Accepted() {
+		t.Fatalf("seed event: r=%+v err=%v", r, err)
+	}
+	resp := newResponse("resp-bad-parent", "agent:alpha", "evt-not-request", "agent.text",
+		json.RawMessage(`{"status":"completed"}`))
+	resp.Audience = message.Audience{"agent:alpha"}
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), resp)
+	if res.RejectReason != message.HarnessResponseParentNotRequest {
+		t.Fatalf("expected harness_response_parent_not_request, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
+// TestChain_Step8_ResponseStatusInvalid — payload.status not in the
+// strict {completed, failed} closed set → harness_response_status_invalid
+// per proto-layer1 §2.9 #4.
+func TestChain_Step8_ResponseStatusInvalid(t *testing.T) {
+	c, _, _, treg := newTestChain(t)
+	treg.Add(TypeView{
+		Type:           "feishu.chat.send",
+		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		MaxPendingMs:   10_000,
+		HandlerActorID: "tool:feishu",
+	})
+	req := newRequest("req-status", "agent:alpha", "feishu.chat.send", "tool:feishu",
+		json.RawMessage(`{"title":"x"}`))
+	if r, err := c.Write(chainCallerCtx("agent:alpha"), req); err != nil || !r.Accepted() {
+		t.Fatalf("seed request: r=%+v err=%v", r, err)
+	}
+	resp := newResponse("resp-bogus-status", "tool:feishu", "req-status", "feishu.chat.send",
+		json.RawMessage(`{"status":"in_progress"}`))
+	resp.Audience = message.Audience{"agent:alpha"}
+	res, _ := c.Write(chainCallerCtx("tool:feishu"), resp)
+	if res.RejectReason != message.HarnessResponseStatusInvalid {
+		t.Fatalf("expected harness_response_status_invalid, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
 	}
 }
 
@@ -598,7 +630,7 @@ func TestChain_CoreTypeKindLocked(t *testing.T) {
 		Audience:  message.Audience{"*"},
 	}
 	res, _ := c.Write(chainCallerCtx(actor.SystemActorID), env)
-	if res.RejectReason != message.HarnessKindNotAllowed {
+	if res.RejectReason != message.HarnessKindNotAllowedForType {
 		t.Fatalf("expected harness_kind_not_allowed, got %s", res.RejectReason)
 	}
 }
@@ -800,6 +832,140 @@ func TestChain_Step4_TimeRelation_AcceptsValidFuture(t *testing.T) {
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if !res.Accepted() {
 		t.Fatalf("expected accept with valid future timing, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Dedupe ordering — proto-layer1 §2.3.
+// ---------------------------------------------------------------------------
+
+// TestChain_DedupeRunsBeforeNormalize asserts the dedupe hash is computed
+// from the pre-normalize sender-provided envelope. A retry that omits
+// runtime-derived defaults (visibility / not_before) MUST still match.
+func TestChain_DedupeRunsBeforeNormalize(t *testing.T) {
+	c, _, log, _ := newTestChain(t)
+	payload := json.RawMessage(`{"text":"hi"}`)
+
+	// First write: sender provides the minimum. Normalize will fill
+	// visibility=public + not_before=ts.
+	env1 := newEvent("agent:alpha", "agent.text", payload)
+	env1.ID = "evt-prenormalize-dedupe"
+	env1.Visibility = "" // explicit zero — normalize fills
+	env1.NotBefore = nil
+	r1, err := c.Write(chainCallerCtx("agent:alpha"), env1)
+	if err != nil || !r1.Accepted() {
+		t.Fatalf("first append: r=%+v err=%v", r1, err)
+	}
+
+	// Confirm the stored row's CanonicalHash matches what dedupe step
+	// would compute on a raw retry.
+	storedHash, ok, err := log.LookupCanonicalHash(context.Background(), "ch-1", "evt-prenormalize-dedupe")
+	if err != nil || !ok {
+		t.Fatalf("LookupCanonicalHash: ok=%v err=%v", ok, err)
+	}
+	if storedHash == "" {
+		t.Fatalf("stored canonical_hash empty; StepEngineAppend must persist it")
+	}
+
+	// Retry — same sender-provided shape (no normalize defaults).
+	env2 := newEvent("agent:alpha", "agent.text", payload)
+	env2.ID = "evt-prenormalize-dedupe"
+	env2.Visibility = ""
+	env2.NotBefore = nil
+	r2, err := c.Write(chainCallerCtx("agent:alpha"), env2)
+	if err != nil {
+		t.Fatalf("retry write: %v", err)
+	}
+	if !r2.Deduped {
+		t.Fatalf("expected Deduped=true on raw retry, got %+v", r2)
+	}
+}
+
+// TestChain_DedupeIgnoresSenderKindOverwrite — sender retries without
+// providing sender.kind; StepSenderConsistent forces kind=agent on first
+// write but the stored row's canonical_hash (sender-provided) MUST match
+// the retry's hash.
+func TestChain_DedupeIgnoresSenderKindOverwrite(t *testing.T) {
+	c, _, _, _ := newTestChain(t)
+	payload := json.RawMessage(`{"text":"hi"}`)
+
+	env1 := newEvent("agent:alpha", "agent.text", payload)
+	env1.ID = "evt-kind-retry"
+	env1.Sender.Kind = "" // sender omits — registry forces agent
+	r1, err := c.Write(chainCallerCtx("agent:alpha"), env1)
+	if err != nil || !r1.Accepted() {
+		t.Fatalf("first append: %+v %v", r1, err)
+	}
+	if env1.Sender.Kind != actor.KindAgent {
+		t.Fatalf("expected forced kind=agent after first write, got %s", env1.Sender.Kind)
+	}
+
+	env2 := newEvent("agent:alpha", "agent.text", payload)
+	env2.ID = "evt-kind-retry"
+	env2.Sender.Kind = "" // retry also omits
+	r2, err := c.Write(chainCallerCtx("agent:alpha"), env2)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if !r2.Deduped {
+		t.Fatalf("expected Deduped on sender.kind-omitted retry, got %+v", r2)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Reserved namespace authority — proto-layer1 §2.5 + §6.2.0.
+// ---------------------------------------------------------------------------
+
+// TestChain_Step5_ReservedTypeUnauthorizedSender — non-system actor
+// emits a reserved system type → harness_reserved_type_unauthorized_sender.
+func TestChain_Step5_ReservedTypeUnauthorizedSender(t *testing.T) {
+	c, _, _, treg := newTestChain(t)
+	// Add system.actor.registered to the type registry so type lookup
+	// would succeed if the reserved gate let it through (we want to be
+	// sure the reserved check runs *first*).
+	treg.Add(TypeView{
+		Type:         "system.actor.registered",
+		AllowedKinds: []message.Kind{message.KindEvent},
+	})
+	env := &message.Envelope{
+		ID:        "evt-fake-system",
+		ChannelID: "ch-1",
+		TS:        testTS,
+		Type:      "system.actor.registered",
+		Kind:      message.KindEvent,
+		Sender:    message.Sender{ID: "agent:alpha"},
+		Payload:   json.RawMessage(`{}`),
+		Audience:  message.Audience{"*"},
+	}
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
+	if res.RejectReason != message.HarnessReservedTypeUnauthorizedSender {
+		t.Fatalf("expected harness_reserved_type_unauthorized_sender, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
+// TestChain_Step5_ReservedTypeSystemSenderAccepted — system actor
+// emitting a reserved type passes the authority gate.
+func TestChain_Step5_ReservedTypeSystemSenderAccepted(t *testing.T) {
+	c, _, _, treg := newTestChain(t)
+	treg.Add(TypeView{
+		Type:         "system.actor.registered",
+		AllowedKinds: []message.Kind{message.KindEvent},
+	})
+	env := &message.Envelope{
+		ID:        "evt-real-system",
+		ChannelID: "ch-1",
+		TS:        testTS,
+		Type:      "system.actor.registered",
+		Kind:      message.KindEvent,
+		Sender:    message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Payload:   json.RawMessage(`{}`),
+		Audience:  message.Audience{"*"},
+	}
+	res, _ := c.Write(chainCallerCtx(actor.SystemActorID), env)
+	if !res.Accepted() {
+		t.Fatalf("expected accept for system-sender reserved type, got %s detail=%s",
 			res.RejectReason, res.RejectDetail)
 	}
 }

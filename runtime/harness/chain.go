@@ -13,9 +13,9 @@ import (
 )
 
 // Chain is the concrete runtime implementation of kernel/harness.Chain.
-// It assembles the 10 numbered steps (plus the out-of-band StepDedupe)
-// declared in proto-layer1 §2.0 / kernel/harness.StepID and runs them in
-// stable order, short-circuiting on the first reject.
+// It assembles the 10 numbered steps declared in proto-layer1 §2.0 and
+// runs them in stable ascending-ID order, short-circuiting on the first
+// reject (or on the first idempotent dedupe hit).
 //
 // Construct with New; Write is safe for concurrent use as long as Deps
 // implementations are concurrent-safe (the standard sqlite-backed store
@@ -38,12 +38,12 @@ func New(deps Deps) (*Chain, error) {
 	steps := []khar.Step{
 		newStepCallerAuth(deps),
 		newStepEnvelopeShape(deps),
-		newStepSenderConsistent(deps),
+		newStepDedupe(deps),
 		newStepNormalize(deps),
+		newStepSenderConsistent(deps),
 		newStepTypeRegistered(deps),
 		newStepKindAndAudience(deps),
 		newStepPayloadSchema(deps),
-		newStepDocRefs(deps),
 		newStepResponsePairing(deps),
 		// StepEngineAppend (step 10) is fused into Chain.Write so the Step
 		// interface can stay pure (no side-effects beyond envelope
@@ -63,46 +63,23 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (khar.WriteRes
 		return khar.WriteResult{}, errors.New("harness: nil envelope")
 	}
 
-	// Run StepCallerAuth(0), StepEnvelopeShape(1), StepSenderConsistent(2)
-	// BEFORE the StepDedupe pre-check.
-	//
-	// Rationale: StepSenderConsistent forces envelope.sender.kind to the
-	// registry truth, so the canonical hash of the stored row (which
-	// reflects post-sender-consistent state) only matches a retry hash
-	// after the same overwrite has been applied. The proto-layer1 §2.3
-	// dedupe spec calls for sender-provided fields, but engineering
-	// correctness requires sender-kind normalization first; the practical
-	// behaviour is equivalent because StepSenderConsistent only forces
-	// kind/name, never the wire id.
+	// Single linear loop: steps run in strict ascending-ID order.
+	// StepDedupe is a normal step that short-circuits via Outcome.Deduped
+	// when the incoming envelope is an idempotent retry.
 	for _, s := range c.steps {
-		if s.ID() > khar.StepSenderConsistent {
-			break
-		}
 		out, err := s.Run(ctx, env)
 		if err != nil {
 			return khar.WriteResult{}, err
 		}
-		if !out.Continue() {
-			return rejectFromOutcome(out, env), nil
-		}
-	}
-
-	// StepDedupe — id-conflict pre-check (post-sender-consistent,
-	// pre-normalize).
-	if dedupeRes, err := c.runDedupe(ctx, env); err != nil {
-		return khar.WriteResult{}, err
-	} else if dedupeRes != nil {
-		return *dedupeRes, nil
-	}
-
-	// Remaining steps: StepNormalize → StepResponsePairing.
-	for _, s := range c.steps {
-		if s.ID() <= khar.StepSenderConsistent {
-			continue
-		}
-		out, err := s.Run(ctx, env)
-		if err != nil {
-			return khar.WriteResult{}, err
+		if out.Deduped {
+			env.Seq = out.ExistingSeq
+			env.IsTerminal = out.ExistingIsTerminal
+			env.TSReceived = out.ExistingTSReceived
+			return khar.WriteResult{
+				MessageID: env.ID,
+				Seq:       out.ExistingSeq,
+				Deduped:   true,
+			}, nil
 		}
 		if !out.Continue() {
 			return rejectFromOutcome(out, env), nil
@@ -133,52 +110,6 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (khar.WriteRes
 		MessageID: env.ID,
 		Seq:       int64(res.Seq),
 		Deduped:   res.Deduped,
-	}, nil
-}
-
-// runDedupe is StepDedupe — universal id-conflict pre-check per
-// proto-layer1 §2.3.
-//
-// Returns (nil, nil) when no existing row matches (caller proceeds to
-// the rest of the chain). Returns a non-nil WriteResult when the chain
-// should short-circuit (dedupe hit / id conflict).
-func (c *Chain) runDedupe(ctx context.Context, env *message.Envelope) (*khar.WriteResult, error) {
-	if env.ID == "" {
-		// StepEnvelopeShape rejects empty id — leave StepDedupe a no-op
-		// when the chain entered with no id (defensive).
-		return nil, nil
-	}
-	existing, ok, err := c.deps.Log.FindByID(ctx, c.deps.ChannelID, env.ID)
-	if err != nil {
-		return nil, fmt.Errorf("harness: dedupe find: %w", err)
-	}
-	if !ok {
-		return nil, nil
-	}
-	existingHash, err := message.CanonicalHash(existing)
-	if err != nil {
-		return nil, fmt.Errorf("harness: dedupe hash existing: %w", err)
-	}
-	incomingHash, err := message.CanonicalHash(*env)
-	if err != nil {
-		return nil, fmt.Errorf("harness: dedupe hash incoming: %w", err)
-	}
-	if existingHash == incomingHash {
-		// Idempotent retry — surface the stored seq + Deduped flag.
-		env.Seq = existing.Seq
-		env.IsTerminal = existing.IsTerminal
-		env.TSReceived = existing.TSReceived
-		return &khar.WriteResult{
-			MessageID: existing.ID,
-			Seq:       existing.Seq,
-			Deduped:   true,
-		}, nil
-	}
-	return &khar.WriteResult{
-		MessageID:        env.ID,
-		RejectReason:     message.HarnessIDDuplicateConflict,
-		RejectDetail:     "envelope.id reused with different content",
-		PartialMessageID: env.ID,
 	}, nil
 }
 

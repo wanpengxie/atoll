@@ -14,7 +14,7 @@ type Reason interface {
 }
 
 // ===========================================================================
-// HarnessRejectReason — L1 §10.3.1
+// HarnessRejectReason — proto-layer1 §2.11.1
 // ===========================================================================
 
 // HarnessRejectReason is the closed set of reasons the Message-Write
@@ -24,81 +24,102 @@ type Reason interface {
 // adapters → L2 §3.6.2).
 type HarnessRejectReason string
 
-// HarnessRejectReason closed set (per proto-layer1 §2.11.1 + L2 §3.6.1).
+// HarnessRejectReason closed set (per proto-layer1 §2.11.1).
 const (
-	HarnessAuthFailed                 HarnessRejectReason = "harness_auth_failed"
-	HarnessMissingRequiredField       HarnessRejectReason = "harness_missing_required_field"
-	HarnessEnvelopeFieldMissing       HarnessRejectReason = "harness_envelope_field_missing"
-	HarnessChannelMismatch            HarnessRejectReason = "harness_channel_mismatch"
-	HarnessKindInvalid                HarnessRejectReason = "harness_kind_invalid"
-	HarnessVisibilityInvalid          HarnessRejectReason = "harness_visibility_invalid"
-	HarnessVisibilityAudienceInvalid  HarnessRejectReason = "harness_visibility_audience_invalid"
-	HarnessEnvelopeUnknownField       HarnessRejectReason = "harness_envelope_unknown_field"
-	HarnessAudienceEmpty              HarnessRejectReason = "harness_audience_empty"
-	HarnessAudienceMixedWildcard      HarnessRejectReason = "harness_audience_mixed_wildcard"
-	HarnessResponseAudienceInvalid    HarnessRejectReason = "harness_response_audience_invalid"
-	HarnessResponseMissingParentID    HarnessRejectReason = "harness_response_missing_parent_id"
-	HarnessSenderMismatch             HarnessRejectReason = "harness_sender_mismatch"
-	HarnessSenderKindMismatch         HarnessRejectReason = "harness_sender_kind_mismatch"
-	HarnessSenderDeregistered         HarnessRejectReason = "harness_sender_deregistered"
-	HarnessUnknownType                HarnessRejectReason = "harness_unknown_type"
-	HarnessKindNotAllowed             HarnessRejectReason = "harness_kind_not_allowed"
-	HarnessRequestAudienceInvalid     HarnessRejectReason = "harness_request_audience_invalid"
-	HarnessAudienceActorNotRegistered HarnessRejectReason = "harness_audience_actor_not_registered"
-	HarnessAudienceHandlerMismatch    HarnessRejectReason = "harness_audience_handler_mismatch"
-	HarnessPayloadSchemaViolation     HarnessRejectReason = "harness_payload_schema_violation"
-	HarnessDocRefsInvalid             HarnessRejectReason = "harness_doc_refs_invalid"
-	HarnessResponseParentInvalid      HarnessRejectReason = "harness_response_parent_invalid"
+	// Step 1 — Fence Check
+	HarnessWorkerFencingStale HarnessRejectReason = "harness_worker_fencing_stale"
+
+	// Step 2 — Envelope Shape Validate
+	HarnessEnvelopeFieldMissing      HarnessRejectReason = "harness_envelope_field_missing"
+	HarnessChannelMismatch           HarnessRejectReason = "harness_channel_mismatch"
+	HarnessKindInvalid               HarnessRejectReason = "harness_kind_invalid"
+	HarnessVisibilityInvalid         HarnessRejectReason = "harness_visibility_invalid"
+	HarnessVisibilityAudienceInvalid HarnessRejectReason = "harness_visibility_audience_invalid"
+	HarnessEnvelopeUnknownField      HarnessRejectReason = "harness_envelope_unknown_field"
+
+	// Step 3 — Id Dedupe
+	HarnessIDDuplicateConflict HarnessRejectReason = "harness_id_duplicate_conflict"
+
+	// Step 4 — Normalize (time-relation guard)
+	HarnessTimeInvalid HarnessRejectReason = "harness_time_invalid"
+
+	// Step 5 — Type / Kind Validate
+	HarnessTypeUnknown                    HarnessRejectReason = "harness_type_unknown"
+	HarnessKindNotAllowedForType          HarnessRejectReason = "harness_kind_not_allowed_for_type"
+	HarnessReservedTypeUnauthorizedSender HarnessRejectReason = "harness_reserved_type_unauthorized_sender"
+
+	// Step 6 — Sender Validate
+	HarnessSenderMismatch     HarnessRejectReason = "harness_sender_mismatch"
+	HarnessSenderKindMismatch HarnessRejectReason = "harness_sender_kind_mismatch"
+	HarnessSenderDeregistered HarnessRejectReason = "harness_sender_deregistered"
+
+	// Step 7 — Audience Validate
+	HarnessAudienceEmpty           HarnessRejectReason = "harness_audience_empty"
+	HarnessAudienceMixedWildcard   HarnessRejectReason = "harness_audience_mixed_wildcard"
+	HarnessAudienceMemberNotActive HarnessRejectReason = "harness_audience_member_not_active"
+	HarnessRequestAudienceInvalid  HarnessRejectReason = "harness_request_audience_invalid"
+	HarnessResponseAudienceInvalid HarnessRejectReason = "harness_response_audience_invalid"
+	HarnessAudienceHandlerMismatch HarnessRejectReason = "harness_audience_handler_mismatch"
+
+	// Step 8 — Payload Schema
+	HarnessSchemaMissing        HarnessRejectReason = "harness_schema_missing"
+	HarnessPayloadSchemaInvalid HarnessRejectReason = "harness_payload_schema_invalid"
+
+	// Step 9 — Terminal Uniqueness + Response Parent Validation
+	HarnessResponseMissingParent      HarnessRejectReason = "harness_response_missing_parent"
+	HarnessResponseParentNotFound     HarnessRejectReason = "harness_response_parent_not_found"
+	HarnessResponseParentNotRequest   HarnessRejectReason = "harness_response_parent_not_request"
+	HarnessResponseStatusInvalid      HarnessRejectReason = "harness_response_status_invalid"
+	HarnessResponseReasonInvalid      HarnessRejectReason = "harness_response_reason_invalid"
 	HarnessResponseUnauthorizedSender HarnessRejectReason = "harness_response_unauthorized_sender"
 	HarnessResponseAudienceMismatch   HarnessRejectReason = "harness_response_audience_mismatch"
-	HarnessResponseReasonInvalid      HarnessRejectReason = "harness_response_reason_invalid"
-	HarnessTimeInvalid                HarnessRejectReason = "harness_time_invalid"
 	HarnessTerminalDuplicate          HarnessRejectReason = "harness_terminal_duplicate"
-	HarnessWorkerFencingStale         HarnessRejectReason = "harness_worker_fencing_stale"
-	HarnessEngineACLDenied            HarnessRejectReason = "harness_engine_acl_denied"
-	HarnessIDDuplicateConflict        HarnessRejectReason = "harness_id_duplicate_conflict"
+
+	// Step 0 — Caller Principal Validation (pre-harness)
+	HarnessEngineACLDenied HarnessRejectReason = "harness_engine_acl_denied"
 )
 
 // AllHarnessRejectReasons enumerates every value of the HarnessRejectReason
 // closed set, in their proto-layer1 §2.11.1 listed order.
 var AllHarnessRejectReasons = []HarnessRejectReason{
-	HarnessAuthFailed,
-	HarnessMissingRequiredField,
+	HarnessWorkerFencingStale,
 	HarnessEnvelopeFieldMissing,
 	HarnessChannelMismatch,
 	HarnessKindInvalid,
 	HarnessVisibilityInvalid,
 	HarnessVisibilityAudienceInvalid,
 	HarnessEnvelopeUnknownField,
+	HarnessIDDuplicateConflict,
+	HarnessTimeInvalid,
+	HarnessTypeUnknown,
+	HarnessKindNotAllowedForType,
+	HarnessReservedTypeUnauthorizedSender,
+	HarnessSenderDeregistered,
+	HarnessSenderKindMismatch,
+	HarnessSenderMismatch,
 	HarnessAudienceEmpty,
 	HarnessAudienceMixedWildcard,
-	HarnessResponseAudienceInvalid,
-	HarnessResponseMissingParentID,
-	HarnessSenderMismatch,
-	HarnessSenderKindMismatch,
-	HarnessSenderDeregistered,
-	HarnessUnknownType,
-	HarnessKindNotAllowed,
+	HarnessAudienceMemberNotActive,
 	HarnessRequestAudienceInvalid,
-	HarnessAudienceActorNotRegistered,
+	HarnessResponseAudienceInvalid,
 	HarnessAudienceHandlerMismatch,
-	HarnessPayloadSchemaViolation,
-	HarnessDocRefsInvalid,
-	HarnessResponseParentInvalid,
+	HarnessSchemaMissing,
+	HarnessPayloadSchemaInvalid,
+	HarnessResponseMissingParent,
+	HarnessResponseParentNotFound,
+	HarnessResponseParentNotRequest,
+	HarnessResponseStatusInvalid,
+	HarnessResponseReasonInvalid,
 	HarnessResponseUnauthorizedSender,
 	HarnessResponseAudienceMismatch,
-	HarnessResponseReasonInvalid,
-	HarnessTimeInvalid,
 	HarnessTerminalDuplicate,
-	HarnessWorkerFencingStale,
 	HarnessEngineACLDenied,
-	HarnessIDDuplicateConflict,
 }
 
 // String returns the wire form of r.
 func (r HarnessRejectReason) String() string { return string(r) }
 
-// Class returns "harness_reject" — the L1 §10.3 class tag.
+// Class returns "harness_reject" — the proto-layer1 §2.11.1 class tag.
 func (r HarnessRejectReason) Class() string { return "harness_reject" }
 
 // HTTPStatus returns the HTTP status code the daemon-RPC binding MUST
@@ -108,17 +129,14 @@ func (r HarnessRejectReason) Class() string { return "harness_reject" }
 // caller restricts itself to the named constants).
 func (r HarnessRejectReason) HTTPStatus() int {
 	switch r {
-	case HarnessAuthFailed:
-		return 401
 	case HarnessSenderMismatch, HarnessSenderKindMismatch, HarnessEngineACLDenied,
-		HarnessResponseUnauthorizedSender:
+		HarnessResponseUnauthorizedSender, HarnessReservedTypeUnauthorizedSender:
 		return 403
 	case HarnessSenderDeregistered, HarnessWorkerFencingStale:
 		return 410
 	case HarnessIDDuplicateConflict, HarnessTerminalDuplicate:
 		return 409
-	case HarnessMissingRequiredField,
-		HarnessEnvelopeFieldMissing,
+	case HarnessEnvelopeFieldMissing,
 		HarnessChannelMismatch,
 		HarnessKindInvalid,
 		HarnessVisibilityInvalid,
@@ -126,19 +144,21 @@ func (r HarnessRejectReason) HTTPStatus() int {
 		HarnessEnvelopeUnknownField,
 		HarnessAudienceEmpty,
 		HarnessAudienceMixedWildcard,
+		HarnessAudienceMemberNotActive,
 		HarnessResponseAudienceInvalid,
-		HarnessResponseMissingParentID,
-		HarnessResponseParentInvalid,
-		HarnessUnknownType,
-		HarnessKindNotAllowed,
+		HarnessResponseMissingParent,
+		HarnessResponseParentNotFound,
+		HarnessResponseParentNotRequest,
+		HarnessResponseStatusInvalid,
+		HarnessTypeUnknown,
+		HarnessKindNotAllowedForType,
 		HarnessRequestAudienceInvalid,
-		HarnessAudienceActorNotRegistered,
 		HarnessAudienceHandlerMismatch,
 		HarnessResponseAudienceMismatch,
 		HarnessResponseReasonInvalid,
 		HarnessTimeInvalid,
-		HarnessPayloadSchemaViolation,
-		HarnessDocRefsInvalid:
+		HarnessSchemaMissing,
+		HarnessPayloadSchemaInvalid:
 		return 400
 	}
 	return 0

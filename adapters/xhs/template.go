@@ -91,8 +91,8 @@ func WorkdirSubdirs() []string {
 // cmd/daemon/adapter_wiring.go.
 //
 // The adapter actor seed list ships exactly one row — tool:xhs-adapter
-// with kind=tool, binding=in_process — matching the M1.6-T2 in_process
-// scaffold. A later phase swaps the seed binding to via_server_transit
+// with kind=tool, binding=embedded — matching the M1.6-T2 embedded
+// scaffold. A later phase swaps the seed binding to runtime_inbound_via_relay
 // (DeviceXHSActorSeed) by editing this single function; no other
 // caller needs to change.
 func XHSCreatorTemplate() Template {

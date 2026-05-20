@@ -105,7 +105,7 @@ type ChannelContext struct {
 type ActorInfo struct {
 	ActorID     string `json:"actor_id"`
 	Kind        string `json:"kind"`                   // human | agent | tool | system
-	Binding     string `json:"binding,omitempty"`      // empty for human/system; in_process / via_server_transit / outbound_http for tools
+	Binding     string `json:"binding,omitempty"`      // empty for human/system; embedded / runtime_inbound_via_relay / runtime_outbound for tools
 	DisplayName string `json:"display_name,omitempty"` // optional human-readable label
 }
 

@@ -14,12 +14,12 @@ import (
 //
 // Wiring under test: cmd/daemon.buildChannelTemplates(false) returns a
 // production-flavoured xhs-creator ChannelTemplate (DeviceXHSActorSeed
-// with binding=via_server_transit + WorkdirSubdirs = published-notes/
+// with binding=runtime_inbound_via_relay + WorkdirSubdirs = published-notes/
 // drafts/ assets/). When a channel is created with type="xhs-creator"
 // the bootstrap saga MUST:
 //
 //  1. Insert tool:xhs-adapter into actor_registry with kind=tool +
-//     binding=via_server_transit.
+//     binding=runtime_inbound_via_relay.
 //  2. Mkdir each declared workdir subdir under the channel root.
 //
 // Regression target: the owner observed type=group channels lacking the
@@ -62,8 +62,8 @@ func TestE2E_XHSCreatorChannel_BootstrapSeedsTool(t *testing.T) {
 	if row.Kind != "tool" {
 		t.Errorf("tool:xhs-adapter kind=%q want tool", row.Kind)
 	}
-	if row.Binding != "via_server_transit" {
-		t.Errorf("tool:xhs-adapter binding=%q want via_server_transit", row.Binding)
+	if row.Binding != "runtime_inbound_via_relay" {
+		t.Errorf("tool:xhs-adapter binding=%q want runtime_inbound_via_relay", row.Binding)
 	}
 
 	// Workdir subdirs — exact set declared by adapters/xhs.WorkdirSubdirs().

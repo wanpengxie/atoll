@@ -84,7 +84,14 @@ type MessageLog interface {
 	Append(ctx context.Context, env *message.Envelope, fencing FencingTuple) (AppendResult, error)
 
 	// FindByID returns the row identified by envelope.id, or ok=false
-	// when no such row exists. Used by harness step 0.5 (dedupe path)
-	// to compare canonical-hash before short-circuiting.
+	// when no such row exists. Used by callers that need the full
+	// envelope (parent lookup, view fanout, recovery).
 	FindByID(ctx context.Context, channelID channel.ID, id message.ID) (message.Envelope, bool, error)
+
+	// LookupCanonicalHash returns the stored canonical_hash of the row
+	// identified by envelope.id, or ok=false when no such row exists.
+	// Used by harness StepDedupe (proto-layer1 §2.3) to compare a retry
+	// against the stored sender-provided hash without recomputing from
+	// the post-normalize row.
+	LookupCanonicalHash(ctx context.Context, channelID channel.ID, id message.ID) (hash string, ok bool, err error)
 }

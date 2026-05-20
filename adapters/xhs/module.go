@@ -43,7 +43,7 @@ type Config struct {
 	SkipRespond bool
 }
 
-// Module is the T2 in_process xhs scaffold. One instance per channel
+// Module is the T2 embedded xhs scaffold. One instance per channel
 // per daemon process. Safe for concurrent invocation by the framework.
 type Module struct {
 	cfg     Config
@@ -139,7 +139,7 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 	return nil
 }
 
-// OnExternalCallback is a no-op for the in_process scaffold — there is
+// OnExternalCallback is a no-op for the embedded scaffold — there is
 // no external transport to call back from. T3 device adapter replaces
 // this with the device_transit.recv decode path.
 func (m *Module) OnExternalCallback(_ context.Context, _ []byte) error {

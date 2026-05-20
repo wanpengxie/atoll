@@ -413,7 +413,7 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 	// must carry exactly one concrete audience (L1 §10.2 step 5).
 	kind, ok := resolveKind(req.Type, message.Kind(req.Kind))
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": string(message.HarnessKindNotAllowed)})
+		c.JSON(http.StatusBadRequest, gin.H{"error": string(message.HarnessKindNotAllowedForType)})
 		return
 	}
 	if kind == message.KindRequest {

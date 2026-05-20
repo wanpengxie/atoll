@@ -122,7 +122,7 @@ func (p *DeviceProxy) SetFrameIDFactory(factory func() string) {
 }
 
 // SendRequest is the per-request entry point Modules call from Handle.
-// It bundles every via_server_transit invariant the daemon side owes
+// It bundles every runtime_inbound_via_relay invariant the daemon side owes
 // the harness:
 //
 //  1. Pre-flight envelope sanity — non-nil + kind=request.

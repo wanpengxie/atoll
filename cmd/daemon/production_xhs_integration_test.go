@@ -30,16 +30,16 @@ func TestBuildChannelTemplates_DefaultsToDeviceXHSBinding(t *testing.T) {
 	if len(prod.AdapterActorSeeds) != 1 {
 		t.Fatalf("prod seeds len=%d want 1", len(prod.AdapterActorSeeds))
 	}
-	if prod.AdapterActorSeeds[0].Binding != actor.BindingViaServerTransit {
-		t.Fatalf("prod actor binding=%q want %q", prod.AdapterActorSeeds[0].Binding, actor.BindingViaServerTransit)
+	if prod.AdapterActorSeeds[0].Binding != actor.BindingRuntimeInboundViaRelay {
+		t.Fatalf("prod actor binding=%q want %q", prod.AdapterActorSeeds[0].Binding, actor.BindingRuntimeInboundViaRelay)
 	}
 
 	scaffold := buildChannelTemplates(true)[XHSCreatorChannelType]
 	if len(scaffold.AdapterActorSeeds) != 1 {
 		t.Fatalf("scaffold seeds len=%d want 1", len(scaffold.AdapterActorSeeds))
 	}
-	if scaffold.AdapterActorSeeds[0].Binding != actor.BindingInProcess {
-		t.Fatalf("scaffold actor binding=%q want %q", scaffold.AdapterActorSeeds[0].Binding, actor.BindingInProcess)
+	if scaffold.AdapterActorSeeds[0].Binding != actor.BindingEmbedded {
+		t.Fatalf("scaffold actor binding=%q want %q", scaffold.AdapterActorSeeds[0].Binding, actor.BindingEmbedded)
 	}
 }
 
@@ -141,15 +141,15 @@ func assertProductionXHSBindings(t *testing.T, ctx context.Context, db *sql.DB) 
 	if !ok {
 		t.Fatalf("actor_registry missing %s", devicexhs.DefaultAdapterActorID)
 	}
-	if rec.Binding != actor.BindingViaServerTransit {
-		t.Fatalf("actor binding=%q want %q", rec.Binding, actor.BindingViaServerTransit)
+	if rec.Binding != actor.BindingRuntimeInboundViaRelay {
+		t.Fatalf("actor binding=%q want %q", rec.Binding, actor.BindingRuntimeInboundViaRelay)
 	}
 	var binding string
 	if err := db.QueryRowContext(ctx, `SELECT handler_binding FROM type_registry WHERE type=?`, devicexhs.TypePublish).Scan(&binding); err != nil {
 		t.Fatalf("type_registry xhs.publish binding: %v", err)
 	}
-	if binding != string(actor.BindingViaServerTransit) {
-		t.Fatalf("type_registry xhs.publish binding=%q want %q", binding, actor.BindingViaServerTransit)
+	if binding != string(actor.BindingRuntimeInboundViaRelay) {
+		t.Fatalf("type_registry xhs.publish binding=%q want %q", binding, actor.BindingRuntimeInboundViaRelay)
 	}
 }
 

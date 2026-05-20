@@ -8,9 +8,9 @@ import (
 
 func TestAllBindings(t *testing.T) {
 	want := []actor.Binding{
-		actor.BindingInProcess,
-		actor.BindingOutboundHTTP,
-		actor.BindingViaServerTransit,
+		actor.BindingEmbedded,
+		actor.BindingRuntimeOutbound,
+		actor.BindingRuntimeInboundViaRelay,
 	}
 	if len(actor.AllBindings) != len(want) {
 		t.Fatalf("AllBindings len=%d want=%d", len(actor.AllBindings), len(want))
@@ -31,9 +31,9 @@ func TestAllBindings(t *testing.T) {
 
 func TestBindingStringRoundTrip(t *testing.T) {
 	cases := map[actor.Binding]string{
-		actor.BindingInProcess:        "in_process",
-		actor.BindingOutboundHTTP:     "outbound_http",
-		actor.BindingViaServerTransit: "via_server_transit",
+		actor.BindingEmbedded:               "embedded",
+		actor.BindingRuntimeOutbound:        "runtime_outbound",
+		actor.BindingRuntimeInboundViaRelay: "runtime_inbound_via_relay",
 	}
 	for b, want := range cases {
 		if got := b.String(); got != want {

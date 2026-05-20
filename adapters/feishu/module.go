@@ -13,7 +13,7 @@ import (
 )
 
 // DefaultActorID is the actor_registry row this adapter binds to. The
-// daemon bootstrap is expected to seed this actor with binding=outbound_http.
+// daemon bootstrap is expected to seed this actor with binding=runtime_outbound.
 const DefaultActorID actor.ActorID = "tool:feishu"
 
 // DefaultMaxPendingMs is the per-request timeout (10s) used when the
@@ -104,13 +104,13 @@ func New(opts ...Option) *Module {
 }
 
 // Declares returns the static metadata that satisfies §T4 install
-// rules: outbound_http binding, AllTypes, per-type timeout.
+// rules: runtime_outbound binding, AllTypes, per-type timeout.
 func (m *Module) Declares() adapter.Declaration {
 	return adapter.Declaration{
 		Name:         "feishu",
 		ActorID:      m.actorID,
 		Types:        append([]string(nil), AllTypes...),
-		Binding:      actor.BindingOutboundHTTP,
+		Binding:      actor.BindingRuntimeOutbound,
 		MaxPendingMs: m.maxPendingMs,
 		Needs:        []string{"http_helper", "credentials"},
 	}

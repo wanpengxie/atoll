@@ -116,10 +116,10 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 			CredentialStore: runtimestore.NewAdapterCredentialStore(h.DB, h.NowFn),
 			Clock:           clock,
 			// T147 §A — daemon supplies the per-channel DeviceTransit so
-			// the framework can satisfy `via_server_transit` modules at
+			// the framework can satisfy `runtime_inbound_via_relay` modules at
 			// Install time (manager.installOne refuses such a module
 			// when DeviceTransit is nil). Safe to pass nil here when the
-			// channel hooks don't provide one (in_process-only channels);
+			// channel hooks don't provide one (embedded-only channels);
 			// the manager only consults this field for matching modules.
 			DeviceTransit: h.DeviceTransit,
 		})
@@ -139,15 +139,15 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 		go mgr.RunGC(gcCtx)
 
 		// T147 §A — wire the inbound device→daemon callback. M1.6
-		// baseline supports one via_server_transit adapter per channel.
+		// baseline supports one runtime_inbound_via_relay adapter per channel.
 		// M1.7 owns session_id → adapter routing; until that lands, more
 		// than one transit adapter is a composition bug and must fail
 		// loudly instead of broadcasting callbacks to every adapter.
 		if h.SetDeviceCallback != nil {
-			deviceAdapters := mgr.AdaptersByBinding(actor.BindingViaServerTransit)
+			deviceAdapters := mgr.AdaptersByBinding(actor.BindingRuntimeInboundViaRelay)
 			if len(deviceAdapters) > 1 {
 				panic(fmt.Sprintf(
-					"cmd/daemon: multiple via_server_transit adapters for channel %s; M1.7 routing required before enabling more than one: %v",
+					"cmd/daemon: multiple runtime_inbound_via_relay adapters for channel %s; M1.7 routing required before enabling more than one: %v",
 					h.ChannelID,
 					deviceAdapters,
 				))
@@ -247,7 +247,7 @@ func (c *adapterCallerChain) Write(ctx context.Context, env *message.Envelope) (
 }
 
 // XHSScaffoldFactory returns an AdapterModuleFactory that installs the
-// adapters/xhs in_process scaffold (M1.6-T2). cmd/daemon supplies it
+// adapters/xhs embedded scaffold (M1.6-T2). cmd/daemon supplies it
 // during DaemonConfig assembly. T3 will replace this with the
 // adapters/device/xhs factory once DeviceTransit is wired.
 //
@@ -273,7 +273,7 @@ const XHSCreatorChannelType = "xhs-creator"
 
 // DeviceXHSFactory returns an AdapterModuleFactory that installs the
 // production xhs device adapter (adapters/device/xhs) configured to run
-// over the via_server_transit binding — daemon → server → device WS,
+// over the runtime_inbound_via_relay binding — daemon → server → device WS,
 // per M1.6-T3 §A. The supplied sessionStore is reused across every
 // channel (per-daemon mirror of server.device_sessions). When nil, a
 // fresh framework.InMemorySessionStore is created — sufficient for
@@ -283,8 +283,8 @@ const XHSCreatorChannelType = "xhs-creator"
 //
 // Composition root contract: the caller MUST swap XHSScaffoldFactory
 // for this one in the OnChannelBoot wiring AND ensure the channel's
-// actor_registry seeds the xhs adapter actor with binding=via_server_transit
-// (not in_process — the framework Install path otherwise rejects the
+// actor_registry seeds the xhs adapter actor with binding=runtime_inbound_via_relay
+// (not embedded — the framework Install path otherwise rejects the
 // module per L2 §1.4.6 binding consistency).
 func DeviceXHSFactory(sessionStore deviceframework.SessionStore, cfg devicexhs.Config) AdapterModuleFactory {
 	return func(_ context.Context, h runtime.ChannelHooks) (adapter.Module, error) {
@@ -303,15 +303,15 @@ func DeviceXHSFactory(sessionStore deviceframework.SessionStore, cfg devicexhs.C
 }
 
 // DeviceXHSActorSeed returns the actor_registry seed row for the xhs
-// device adapter using the via_server_transit binding. Counterpart to
-// adapters/xhs.DefaultActorSeed (which seeds the in_process scaffold).
+// device adapter using the runtime_inbound_via_relay binding. Counterpart to
+// adapters/xhs.DefaultActorSeed (which seeds the embedded scaffold).
 // cmd/daemon plugs the result into ChannelTemplate.AdapterActorSeeds
 // when swapping the in-process scaffold for the real device adapter.
 func DeviceXHSActorSeed() actorreg.Record {
 	return actorreg.Record{
 		ID:      devicexhs.DefaultAdapterActorID,
 		Kind:    actor.KindTool,
-		Binding: actor.BindingViaServerTransit,
+		Binding: actor.BindingRuntimeInboundViaRelay,
 	}
 }
 

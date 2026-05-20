@@ -96,7 +96,7 @@ type DaemonConfig struct {
 	// OnBindDeviceSession / OnUnbindDeviceSession (T147 §A-S2) handle
 	// the server → daemon device-session lifecycle frames. The composition
 	// root (cmd/daemon) wires these to the per-process SessionStore so
-	// adapter modules with binding=via_server_transit can mirror the
+	// adapter modules with binding=runtime_inbound_via_relay can mirror the
 	// server's authoritative device_sessions row. Both are nil-safe — when
 	// unset, the transit dispatcher synthesises an Accepted=false ack with
 	// Reason=BindRejectReasonHandlerMissing so the server can distinguish
@@ -333,13 +333,13 @@ type ChannelHooks struct {
 	Logger *zerolog.Logger
 
 	// DeviceTransit is the per-channel devicetransit.DeviceTransit handed to
-	// `via_server_transit` adapter modules (T147 §A). When the channel
+	// `runtime_inbound_via_relay` adapter modules (T147 §A). When the channel
 	// boots without a daemonbus transit client (e.g. tests that only
 	// exercise the harness write path), this is nil — the composition
-	// root MUST skip via_server_transit factories or use a fake. When
+	// root MUST skip runtime_inbound_via_relay factories or use a fake. When
 	// non-nil, pass it verbatim into framework.ManagerConfig.DeviceTransit
 	// so the framework can satisfy adapter modules that declare
-	// Binding=via_server_transit at Install time.
+	// Binding=runtime_inbound_via_relay at Install time.
 	DeviceTransit devicetransit.DeviceTransit
 
 	// SetDeviceCallback wires the inbound device→daemon callback for
@@ -1431,7 +1431,7 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 		}
 		// T147 §A — expose the per-channel DeviceTransit + an inbound
 		// callback hook so the composition root can build a
-		// via_server_transit-capable framework.Manager.
+		// runtime_inbound_via_relay-capable framework.Manager.
 		if cr.deviceTransit != nil {
 			hooks.DeviceTransit = cr.deviceTransit
 			// Capture cr in the closure (atomic.Value publishes the new

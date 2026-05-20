@@ -72,6 +72,15 @@ type Envelope struct {
 
 	IsTerminal bool  `json:"is_terminal,omitempty"`
 	Seq        int64 `json:"seq,omitempty"`
+
+	// CanonicalHash is the hash computed at StepDedupe over the
+	// sender-provided envelope (pre-normalize) per proto-layer1 §2.3.
+	// Stored alongside the row by the engine append step; subsequent
+	// retries read it back via MessageLog.LookupCanonicalHash for an O(1)
+	// dedupe comparison without recomputing from a post-normalize row.
+	// Transient on the wire: omitted from JSON and excluded from
+	// CanonicalHash itself.
+	CanonicalHash string `json:"-"`
 }
 
 // HashInputFields lists the 14 top-level keys (in alphabetical order)

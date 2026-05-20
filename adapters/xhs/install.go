@@ -60,7 +60,7 @@ func DefaultActorSeed() actorreg.Record {
 	return actorreg.Record{
 		ID:          DefaultAdapterActorID,
 		Kind:        actor.KindTool,
-		Binding:     actor.BindingInProcess,
+		Binding:     actor.BindingEmbedded,
 		DisplayName: "xhs",
 	}
 }
