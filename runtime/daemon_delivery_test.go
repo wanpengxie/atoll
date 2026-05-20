@@ -83,6 +83,7 @@ func TestPostHarnessChainDispatchFailureDoesNotMarkDelivered(t *testing.T) {
 	env := &message.Envelope{
 		ID:         "m-delivery-error",
 		ChannelID:  chID,
+		TS:         1000,
 		Sender:     message.Sender{ID: "user:demo"},
 		Kind:       message.KindEvent,
 		Type:       "human.text",

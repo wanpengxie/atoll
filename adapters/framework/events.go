@@ -132,6 +132,11 @@ func writeEvent(ctx context.Context, chain harness.Chain, ev eventEnvelope) erro
 	}
 	hash := sha256.Sum256(body)
 	seq := eventSeq.Add(1)
+	// Round-3 cluster F: visibility=system was removed from the
+	// proto-layer0 §2.4 closed set. Ops events (correlation_lost /
+	// adapter_timer_terminal_failed) now follow §4.1.3 informative
+	// guidance for ops events: visibility=private + audience=[channel
+	// system actor] so they stay out of user view caches.
 	env := &message.Envelope{
 		ID:         message.ID(fmt.Sprintf("event:%s:%d:%d:%s", ev.Type, ev.Now, seq, hex.EncodeToString(hash[:])[:16])),
 		TS:         ev.Now,
@@ -141,8 +146,8 @@ func writeEvent(ctx context.Context, chain harness.Chain, ev eventEnvelope) erro
 		Kind:       message.KindEvent,
 		Type:       ev.Type,
 		Payload:    body,
-		Visibility: message.VisibilitySystem,
-		Audience:   message.Audience{message.AudienceWildcard},
+		Visibility: message.VisibilityPrivate,
+		Audience:   message.Audience{actor.SystemActorID},
 	}
 	res, err := chain.Write(ctx, env)
 	if err != nil {

@@ -154,10 +154,16 @@ func newTestChain(t interface {
 	return c, areg, log, treg
 }
 
+// testTS is the canonical ts value newTestChain plumbs as NowMs(); we
+// pre-fill envelope.ts to the same value so StepEnvelopeShape's ts-non-zero
+// guard passes for the struct-based test envelopes.
+const testTS int64 = 1700000000000
+
 func newEvent(senderID actor.ActorID, t string, payload json.RawMessage) *message.Envelope {
 	return &message.Envelope{
 		ID:        message.ID("evt-" + string(senderID)),
 		ChannelID: "ch-1",
+		TS:        testTS,
 		Sender:    message.Sender{ID: senderID},
 		Type:      t,
 		Kind:      message.KindEvent,
@@ -170,6 +176,7 @@ func newRequest(id string, senderID actor.ActorID, t string, audience string, pa
 	return &message.Envelope{
 		ID:        message.ID(id),
 		ChannelID: "ch-1",
+		TS:        testTS,
 		Sender:    message.Sender{ID: senderID},
 		Type:      t,
 		Kind:      message.KindRequest,
@@ -182,11 +189,12 @@ func newResponse(id string, senderID actor.ActorID, parentID, t string, payload 
 	return &message.Envelope{
 		ID:        message.ID(id),
 		ChannelID: "ch-1",
+		TS:        testTS,
 		Sender:    message.Sender{ID: senderID},
 		Type:      t,
 		Kind:      message.KindResponse,
 		Payload:   payload,
-		Audience:  message.Audience{"*"},
+		Audience:  message.Audience{"agent:alpha"},
 		ParentID:  message.ID(parentID),
 	}
 }

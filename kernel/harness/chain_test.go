@@ -10,12 +10,12 @@ import (
 // TestAllStepIDs covers the StepID closed set + ordering.
 func TestAllStepIDs(t *testing.T) {
 	if len(harness.AllStepIDs) != 10 {
-		t.Fatalf("AllStepIDs len=%d, want 10 (Step 0..9)", len(harness.AllStepIDs))
+		t.Fatalf("AllStepIDs len=%d, want 10 (proto-layer1 §2.0)", len(harness.AllStepIDs))
 	}
 	want := []harness.StepID{
-		harness.StepNormalize,
 		harness.StepCallerAuth,
-		harness.StepRequiredFields,
+		harness.StepEnvelopeShape,
+		harness.StepNormalize,
 		harness.StepSenderConsistent,
 		harness.StepTypeRegistered,
 		harness.StepKindAndAudience,
@@ -31,14 +31,22 @@ func TestAllStepIDs(t *testing.T) {
 	}
 }
 
-// TestAllRejectReasons enforces the L1 §10.3.1 closed-set contract.
-// channel_mismatch was removed in FIX-T1; reason validation adds the
-// Step 8 response reason invalid reject.
+// TestAllRejectReasons enforces the proto-layer1 §2.11.1 closed-set
+// contract. Round-3 Cluster F adds the 7 envelope-shape / time-relation
+// reasons and renames message_id_conflict → harness_id_duplicate_conflict.
 func TestAllRejectReasons(t *testing.T) {
 	want := []message.HarnessRejectReason{
 		message.HarnessAuthFailed,
 		message.HarnessMissingRequiredField,
+		message.HarnessEnvelopeFieldMissing,
+		message.HarnessChannelMismatch,
 		message.HarnessKindInvalid,
+		message.HarnessVisibilityInvalid,
+		message.HarnessVisibilityAudienceInvalid,
+		message.HarnessEnvelopeUnknownField,
+		message.HarnessAudienceEmpty,
+		message.HarnessAudienceMixedWildcard,
+		message.HarnessResponseAudienceInvalid,
 		message.HarnessResponseMissingParentID,
 		message.HarnessSenderMismatch,
 		message.HarnessSenderKindMismatch,
@@ -54,10 +62,11 @@ func TestAllRejectReasons(t *testing.T) {
 		message.HarnessResponseUnauthorizedSender,
 		message.HarnessResponseAudienceMismatch,
 		message.HarnessResponseReasonInvalid,
+		message.HarnessTimeInvalid,
 		message.HarnessTerminalDuplicate,
 		message.HarnessWorkerFencingStale,
 		message.HarnessEngineACLDenied,
-		message.HarnessMessageIDConflict,
+		message.HarnessIDDuplicateConflict,
 	}
 	if len(message.AllHarnessRejectReasons) != len(want) {
 		t.Fatalf("AllRejectReasons len=%d want=%d (L1 §10.3.1 closed set)",
@@ -222,7 +231,7 @@ func TestRejectReasonHTTPStatus(t *testing.T) {
 		{message.HarnessSenderDeregistered, 410},
 		{message.HarnessWorkerFencingStale, 410},
 		{message.HarnessTerminalDuplicate, 409},
-		{message.HarnessMessageIDConflict, 409},
+		{message.HarnessIDDuplicateConflict, 409},
 		{message.HarnessMissingRequiredField, 400},
 		{message.HarnessKindInvalid, 400},
 		{message.HarnessDocRefsInvalid, 400},

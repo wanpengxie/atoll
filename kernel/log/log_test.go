@@ -40,9 +40,9 @@ func TestAppendErrorFormat(t *testing.T) {
 // TestAppendErrorBareReason — Error returns just the reason when Detail
 // is empty.
 func TestAppendErrorBareReason(t *testing.T) {
-	e := &klog.AppendError{Reason: message.HarnessMessageIDConflict}
-	if got := e.Error(); got != string(message.HarnessMessageIDConflict) {
-		t.Errorf("Error()=%q want %q", got, message.HarnessMessageIDConflict)
+	e := &klog.AppendError{Reason: message.HarnessIDDuplicateConflict}
+	if got := e.Error(); got != string(message.HarnessIDDuplicateConflict) {
+		t.Errorf("Error()=%q want %q", got, message.HarnessIDDuplicateConflict)
 	}
 }
 

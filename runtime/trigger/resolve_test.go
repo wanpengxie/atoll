@@ -185,43 +185,40 @@ func TestResolve_DeregisteredActor_DroppedFromExplicitList(t *testing.T) {
 	}
 }
 
-func TestResolve_VisibilitySystem_Suppressed(t *testing.T) {
+// TestResolve_VisibilityIgnoredByTrigger documents the round-3 cluster F
+// split between trigger fanout (audience-driven, proto-layer1 §4.1.2)
+// and view fanout (visibility-driven, §4.1.3). Trigger fanout no longer
+// filters by visibility — visibility only narrows view-cache delivery
+// via ViewFanout. The two paths are independent.
+func TestResolve_VisibilityIgnoredByTrigger(t *testing.T) {
 	reg := makeReg()
-	env := &message.Envelope{
-		ID:         "m-sys",
-		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
-		Kind:       message.KindEvent,
-		Type:       "system.event",
-		Payload:    json.RawMessage(`{}`),
-		Visibility: message.VisibilitySystem,
-		Audience:   message.Audience{"*"},
+	cases := []struct {
+		name string
+		vis  message.Visibility
+		aud  message.Audience
+	}{
+		{"public+wildcard", message.VisibilityPublic, message.Audience{"*"}},
+		{"private+concrete", message.VisibilityPrivate, message.Audience{"agent:beta"}},
 	}
-	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 0 {
-		t.Errorf("visibility=system should suppress fan-out, got %v", got)
-	}
-}
-
-func TestResolve_VisibilityPrivate_Suppressed(t *testing.T) {
-	reg := makeReg()
-	env := &message.Envelope{
-		ID:         "m-priv",
-		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:alpha"},
-		Kind:       message.KindEvent,
-		Type:       "agent.text",
-		Payload:    json.RawMessage(`{}`),
-		Visibility: message.VisibilityPrivate,
-		Audience:   message.Audience{"*"},
-	}
-	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 0 {
-		t.Errorf("visibility=private should suppress fan-out, got %v", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := &message.Envelope{
+				ID:         message.ID("m-" + tc.name),
+				Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:alpha"},
+				Kind:       message.KindEvent,
+				Type:       "agent.text",
+				Payload:    json.RawMessage(`{}`),
+				Visibility: tc.vis,
+				Audience:   tc.aud,
+			}
+			got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) == 0 {
+				t.Fatalf("trigger fanout must not be suppressed by visibility; got empty audience for %s", tc.name)
+			}
+		})
 	}
 }
 
@@ -233,7 +230,7 @@ func TestResolve_SystemHeartbeat_Suppressed(t *testing.T) {
 		Kind:       message.KindEvent,
 		Type:       "system.heartbeat",
 		Payload:    json.RawMessage(`{}`),
-		Visibility: message.VisibilitySystem,
+		Visibility: message.VisibilityPrivate,
 		Audience:   message.Audience{"*"},
 	}
 	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{})
@@ -458,7 +455,7 @@ func TestGateway_Dispatch_SystemHeartbeatNoDeliverer(t *testing.T) {
 		Kind:       message.KindEvent,
 		Type:       "system.heartbeat",
 		Payload:    json.RawMessage(`{}`),
-		Visibility: message.VisibilitySystem,
+		Visibility: message.VisibilityPrivate,
 		Audience:   message.Audience{"*"},
 	}
 	res, err := gw.Dispatch(context.Background(), env, trigger.Options{})

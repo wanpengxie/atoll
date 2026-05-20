@@ -24,11 +24,19 @@ type Reason interface {
 // adapters → L2 §3.6.2).
 type HarnessRejectReason string
 
-// HarnessRejectReason closed set (per L1 §10.3.1 + L2 §3.6.1).
+// HarnessRejectReason closed set (per proto-layer1 §2.11.1 + L2 §3.6.1).
 const (
 	HarnessAuthFailed                 HarnessRejectReason = "auth_failed"
 	HarnessMissingRequiredField       HarnessRejectReason = "missing_required_field"
-	HarnessKindInvalid                HarnessRejectReason = "kind_invalid"
+	HarnessEnvelopeFieldMissing       HarnessRejectReason = "harness_envelope_field_missing"
+	HarnessChannelMismatch            HarnessRejectReason = "harness_channel_mismatch"
+	HarnessKindInvalid                HarnessRejectReason = "harness_kind_invalid"
+	HarnessVisibilityInvalid          HarnessRejectReason = "harness_visibility_invalid"
+	HarnessVisibilityAudienceInvalid  HarnessRejectReason = "harness_visibility_audience_invalid"
+	HarnessEnvelopeUnknownField       HarnessRejectReason = "harness_envelope_unknown_field"
+	HarnessAudienceEmpty              HarnessRejectReason = "harness_audience_empty"
+	HarnessAudienceMixedWildcard      HarnessRejectReason = "harness_audience_mixed_wildcard"
+	HarnessResponseAudienceInvalid    HarnessRejectReason = "harness_response_audience_invalid"
 	HarnessResponseMissingParentID    HarnessRejectReason = "response_missing_parent_id"
 	HarnessSenderMismatch             HarnessRejectReason = "sender_mismatch"
 	HarnessSenderKindMismatch         HarnessRejectReason = "sender_kind_mismatch"
@@ -44,18 +52,27 @@ const (
 	HarnessResponseUnauthorizedSender HarnessRejectReason = "harness_response_unauthorized_sender"
 	HarnessResponseAudienceMismatch   HarnessRejectReason = "harness_response_audience_mismatch"
 	HarnessResponseReasonInvalid      HarnessRejectReason = "harness_response_reason_invalid"
+	HarnessTimeInvalid                HarnessRejectReason = "harness_time_invalid"
 	HarnessTerminalDuplicate          HarnessRejectReason = "terminal_duplicate"
 	HarnessWorkerFencingStale         HarnessRejectReason = "worker_fencing_stale"
 	HarnessEngineACLDenied            HarnessRejectReason = "engine_acl_denied"
-	HarnessMessageIDConflict          HarnessRejectReason = "message_id_conflict"
+	HarnessIDDuplicateConflict        HarnessRejectReason = "harness_id_duplicate_conflict"
 )
 
 // AllHarnessRejectReasons enumerates every value of the HarnessRejectReason
-// closed set, in their L1 §10.3.1 listed order.
+// closed set, in their proto-layer1 §2.11.1 listed order.
 var AllHarnessRejectReasons = []HarnessRejectReason{
 	HarnessAuthFailed,
 	HarnessMissingRequiredField,
+	HarnessEnvelopeFieldMissing,
+	HarnessChannelMismatch,
 	HarnessKindInvalid,
+	HarnessVisibilityInvalid,
+	HarnessVisibilityAudienceInvalid,
+	HarnessEnvelopeUnknownField,
+	HarnessAudienceEmpty,
+	HarnessAudienceMixedWildcard,
+	HarnessResponseAudienceInvalid,
 	HarnessResponseMissingParentID,
 	HarnessSenderMismatch,
 	HarnessSenderKindMismatch,
@@ -71,10 +88,11 @@ var AllHarnessRejectReasons = []HarnessRejectReason{
 	HarnessResponseUnauthorizedSender,
 	HarnessResponseAudienceMismatch,
 	HarnessResponseReasonInvalid,
+	HarnessTimeInvalid,
 	HarnessTerminalDuplicate,
 	HarnessWorkerFencingStale,
 	HarnessEngineACLDenied,
-	HarnessMessageIDConflict,
+	HarnessIDDuplicateConflict,
 }
 
 // String returns the wire form of r.
@@ -97,10 +115,18 @@ func (r HarnessRejectReason) HTTPStatus() int {
 		return 403
 	case HarnessSenderDeregistered, HarnessWorkerFencingStale:
 		return 410
-	case HarnessMessageIDConflict, HarnessTerminalDuplicate:
+	case HarnessIDDuplicateConflict, HarnessTerminalDuplicate:
 		return 409
 	case HarnessMissingRequiredField,
+		HarnessEnvelopeFieldMissing,
+		HarnessChannelMismatch,
 		HarnessKindInvalid,
+		HarnessVisibilityInvalid,
+		HarnessVisibilityAudienceInvalid,
+		HarnessEnvelopeUnknownField,
+		HarnessAudienceEmpty,
+		HarnessAudienceMixedWildcard,
+		HarnessResponseAudienceInvalid,
 		HarnessResponseMissingParentID,
 		HarnessResponseParentInvalid,
 		HarnessUnknownType,
@@ -110,6 +136,7 @@ func (r HarnessRejectReason) HTTPStatus() int {
 		HarnessAudienceHandlerMismatch,
 		HarnessResponseAudienceMismatch,
 		HarnessResponseReasonInvalid,
+		HarnessTimeInvalid,
 		HarnessPayloadSchemaViolation,
 		HarnessDocRefsInvalid:
 		return 400

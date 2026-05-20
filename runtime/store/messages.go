@@ -561,7 +561,7 @@ func classifyAppendErr(err error, envID string) error {
 	switch {
 	case strings.Contains(msg, "UNIQUE constraint failed: messages.id"):
 		return &klog.AppendError{
-			Reason:           message.HarnessMessageIDConflict,
+			Reason:           message.HarnessIDDuplicateConflict,
 			Detail:           msg,
 			PartialMessageID: message.ID(envID),
 		}

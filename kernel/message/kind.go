@@ -57,21 +57,21 @@ func (k *Kind) Scan(src any) error {
 	}
 }
 
-// Visibility is the envelope `visibility` field — 3-value closed set
+// Visibility is the envelope `visibility` field — 2-value closed set
 // covering who in the channel can query-see this message.
 //
-// Authoritative spec: L0 §2.4. Once written, visibility is immutable.
+// Authoritative spec: proto-layer0 §2.4 (round-3 cluster F). Once
+// written, visibility is immutable.
 type Visibility string
 
-// Visibility enum — closed set per L0 §2.4.
+// Visibility enum — closed set per proto-layer0 §2.4.
 const (
 	VisibilityPublic  Visibility = "public"
 	VisibilityPrivate Visibility = "private"
-	VisibilitySystem  Visibility = "system"
 )
 
 // AllVisibilities enumerates every valid Visibility value, in spec order.
-var AllVisibilities = []Visibility{VisibilityPublic, VisibilityPrivate, VisibilitySystem}
+var AllVisibilities = []Visibility{VisibilityPublic, VisibilityPrivate}
 
 // String returns the wire form.
 func (v Visibility) String() string { return string(v) }

@@ -6,39 +6,46 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// StepID is the ordinal index inside the 9-step harness chain (L1
-// §10.2). Step 0 is normalize (default-fill); steps 1..9 are validation
-// stages.
+// StepID is the ordinal index inside the 10-step harness chain
+// (proto-layer1 §2.0). Lower numeric ids run first.
+//
+// The constant *names* mirror the spec vocabulary but the numeric
+// values reflect the *physical* execution order chain.go enforces — the
+// two diverge by one notable detail: StepSenderConsistent runs before
+// StepDedupe and StepNormalize so the canonical hash used for dedupe is
+// computed against the post-sender-consistent envelope (matches the
+// store row that proto-layer1 §2.3 / §2.10 persist).
 type StepID int
 
-// Step ids per L1 §10.2 (and L2 §3.4 — Authoritative Pseudocode
-// reference). Keep this list 1:1 with the spec so renaming stays cheap.
+// Step ids per proto-layer1 §2.0 (Round 3 Cluster F). The new
+// StepEnvelopeShape stage subsumes the pre-Round 3 RequiredFields step
+// and adds visibility / audience cardinality / unknown-field guards.
 const (
-	StepNormalize        StepID = 0 // 0   — Normalize (audience/visibility/kind/correlation_id default-fill)
-	StepCallerAuth       StepID = 1 // 1   — caller token / channel membership
-	StepRequiredFields   StepID = 2 // 2   — L0 I1+I7 required fields + response.parent_id non-NULL
-	StepSenderConsistent StepID = 3 // 3   — sender × caller match; sender.kind from registry; deregistered guard
-	StepTypeRegistered   StepID = 4 // 4   — type ∈ (core ∪ registry)
-	StepKindAndAudience  StepID = 5 // 5   — kind × type allowed_kinds + request audience narrow + handler match
-	StepPayloadSchema    StepID = 6 // 6   — payload schema validation (per kind)
-	StepDocRefs          StepID = 7 // 7   — doc_refs path validation
-	StepResponsePairing  StepID = 8 // 8   — response parent valid + The One Law uniqueness
-	StepEngineAppend     StepID = 9 // 9   — engine append + dispatch (terminal step; emits row)
+	StepCallerAuth       StepID = 0 // proto-layer1 §2.0 step 0+1 — caller principal + fence + channel binding
+	StepEnvelopeShape    StepID = 1 // proto-layer1 §2.2 step 2  — required fields / closed sets / cardinality / unknown field fail-closed
+	StepNormalize        StepID = 2 // proto-layer1 §2.4 step 4  — default-fill (audience/visibility/kind/correlation_id/payload/ts) + time-relation guard
+	StepSenderConsistent StepID = 3 // proto-layer1 §2.6 step 6  — sender × caller match; sender.kind from registry
+	StepTypeRegistered   StepID = 4 // proto-layer1 §2.5 step 5a — type ∈ (core ∪ registry)
+	StepKindAndAudience  StepID = 5 // proto-layer1 §2.5/§2.7    — kind ∈ allowed_kinds + audience members active + handler match
+	StepPayloadSchema    StepID = 6 // proto-layer1 §2.8 step 8  — payload schema validation
+	StepDocRefs          StepID = 7 //                            — doc_refs path validation (envelope-level)
+	StepResponsePairing  StepID = 8 // proto-layer1 §2.9 step 9  — response parent valid + The One Law uniqueness
+	StepEngineAppend     StepID = 9 // proto-layer1 §2.10 step 10 — engine append + dispatch (terminal step; emits row)
 
-	// StepDedupe (a.k.a. step 0.5 / step 0a) sits between Normalize and
-	// CallerAuth — short-circuit when a row with envelope.id already
-	// exists (hash-equal payload returns 200 dedupe). Kept named to mirror
-	// L1 §10.2 / L2 §1.4.10.1 vocabulary even though it is not a numbered
-	// validation stage.
+	// StepDedupe (proto-layer1 §2.3) is the universal id-conflict pre-check.
+	// chain.go inserts it between StepSenderConsistent and StepNormalize so
+	// the canonical hash sees post-sender-consistent state (the same shape
+	// the store row holds). It is NOT part of AllStepIDs because the spec
+	// numbers it differently from the validation stages.
 	StepDedupe StepID = -1
 )
 
-// AllStepIDs lists every numbered step (0..9) in chain order. StepDedupe
-// is excluded — callers that care about it reference it by name.
+// AllStepIDs lists every numbered step in chain order. StepDedupe is
+// excluded — callers that care about it reference it by name.
 var AllStepIDs = []StepID{
-	StepNormalize,
 	StepCallerAuth,
-	StepRequiredFields,
+	StepEnvelopeShape,
+	StepNormalize,
 	StepSenderConsistent,
 	StepTypeRegistered,
 	StepKindAndAudience,
@@ -56,8 +63,8 @@ var AllStepIDs = []StepID{
 // (e.g. store IO failure) are returned via the error return value of
 // Step.Run, not by stuffing them into Outcome.
 type Outcome struct {
-	// RejectReason is set when the step rejects the write per L1 §10.3.
-	// Empty string == continue.
+	// RejectReason is set when the step rejects the write per
+	// proto-layer1 §2.11. Empty string == continue.
 	RejectReason RejectReason
 
 	// Detail is an informative error string. Caller MAY surface it in
@@ -65,7 +72,7 @@ type Outcome struct {
 	Detail string
 
 	// PartialMessageID is set on rejects that occurred AFTER the
-	// envelope.id was finalized (e.g. step 8 terminal_duplicate happens
+	// envelope.id was finalized (e.g. step 9 terminal_duplicate happens
 	// in the engine append transaction). Empty otherwise.
 	PartialMessageID message.ID
 }
@@ -74,8 +81,8 @@ type Outcome struct {
 // step should run.
 func (o Outcome) Continue() bool { return o.RejectReason == "" }
 
-// Step is one stage in the 9-step harness chain. Implementations live
-// in runtime/harness — kernel only declares the interface so concrete
+// Step is one stage in the harness chain. Implementations live in
+// runtime/harness — kernel only declares the interface so concrete
 // step rules can be swapped out (e.g. M1.x adds new steps without
 // touching the kernel layer).
 type Step interface {

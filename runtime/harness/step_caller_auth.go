@@ -7,17 +7,21 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// stepCallerAuth implements L1 §10.2 step 1 — caller token / channel
-// membership. The harness consumes the CallerContext attached via
-// CtxWithCaller (set by the binding edge: workerhost, control handler,
-// adapter framework). When no caller is attached we reject auth_failed
-// (defensive — every legitimate edge wires it).
+// stepCallerAuth implements proto-layer1 §2.0 step 0+1 — caller principal
+// validation and fence check. The harness consumes the CallerContext
+// attached via CtxWithCaller (set by the binding edge: workerhost,
+// control handler, adapter framework). When no caller is attached we
+// reject auth_failed (defensive — every legitimate edge wires it).
 //
-// The step also enforces envelope.channel_id == caller.ChannelID:
-// envelope.channel_id NOT matching the bound channel is a routing /
-// permission error. The L1 §10.3.1 closed set has no `channel_mismatch`
-// reason; we collapse the case to auth_failed (the spec-defined value
-// covering "caller has no permission on this channel").
+// Channel mismatch detection is split:
+//
+//   - caller.ChannelID vs the harness-bound channel is a *caller* identity
+//     mismatch (caller bound to the wrong channel) → auth_failed.
+//   - envelope.channel_id vs the harness-bound channel is an *envelope*
+//     shape error per proto-layer1 §2.2 #2 → harness_channel_mismatch,
+//     emitted by step_envelope_shape (Step 2). step 0+1 leaves the
+//     envelope.channel_id alone so Step 2 can surface the dedicated
+//     reason.
 type stepCallerAuth struct {
 	deps Deps
 }
@@ -39,17 +43,6 @@ func (s *stepCallerAuth) Run(ctx context.Context, env *message.Envelope) (khar.O
 			RejectReason: message.HarnessAuthFailed,
 			Detail:       "harness: caller bound to a different channel",
 		}, nil
-	}
-	if env.ChannelID != "" && env.ChannelID != s.deps.ChannelID {
-		return khar.Outcome{
-			RejectReason: message.HarnessAuthFailed,
-			Detail:       "harness: envelope.channel_id does not match bound channel",
-		}, nil
-	}
-	// engine ts_received normalize — caller may leave channel_id blank
-	// in tests; populate from the bound channel here.
-	if env.ChannelID == "" {
-		env.ChannelID = s.deps.ChannelID
 	}
 	return khar.Outcome{}, nil
 }

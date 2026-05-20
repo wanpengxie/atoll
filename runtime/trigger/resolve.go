@@ -58,32 +58,22 @@ func Resolve(
 	}
 
 	// (1) Noise filter — system.heartbeat never fan-outs (L1 §5.2 explicit
-	// row). Evaluated before visibility so that an unusual visibility=public
-	// heartbeat (e.g. test fixture) still gets suppressed.
+	// row). Evaluated independently of visibility so that an unusual
+	// visibility=public heartbeat (e.g. test fixture) still gets suppressed.
 	if env.Type == TypeSystemHeartbeat {
 		return nil, nil
 	}
 
-	// (2) Visibility filter — L1 §5.1 step 1.
-	switch env.Visibility {
-	case message.VisibilitySystem:
-		// System-internal: no fan-out unless an actor explicitly
-		// subscribed (§5.4 — subscription mechanism deferred to L1.1).
-		return nil, nil
-	case message.VisibilityPrivate:
-		// Private = sender-only readable. Combined with the §5.1 step 3
-		// self-trigger ban this always reduces to nil (the only candidate
-		// would be the sender, who is then filtered out). When
-		// BypassSelfTriggerBan is true the upstream is NOT the sender, so
-		// even a private envelope can dispatch back to its author (the
-		// L1 §5.3 future-message bypass case).
-		if !opts.BypassSelfTriggerBan {
-			return nil, nil
-		}
-		// fall through — sender is the only legitimate target.
-	}
+	// (2) Trigger fan-out is audience-driven, NOT visibility-driven
+	// (proto-layer1 §4.1.2). The view fanout layer (§4.1.3) is the
+	// component that filters by visibility for view-cache delivery; trigger
+	// fan-out treats every visibility uniformly and only consults audience.
+	//
+	// Round 3 cluster F removes the older visibility-suppress branch here
+	// — its job moved to ViewFanout (visibility=private hides the message
+	// from non-audience view caches, but the audience handler still fires).
 
-	// (3) Audience expand — L1 §5.1 step 2.
+	// (3) Audience expand — proto-layer1 §4.1.2.
 	candidates, err := expandAudience(ctx, env, reg)
 	if err != nil {
 		return nil, err

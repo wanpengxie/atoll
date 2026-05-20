@@ -13,13 +13,13 @@ import (
 )
 
 // Chain is the concrete runtime implementation of kernel/harness.Chain.
-// It assembles the 9 numbered steps (plus the out-of-band Step 0.5
-// dedupe) declared in L1 §10.2 / kernel/harness.StepID and runs them
-// in stable order, short-circuiting on the first reject.
+// It assembles the 10 numbered steps (plus the out-of-band StepDedupe)
+// declared in proto-layer1 §2.0 / kernel/harness.StepID and runs them in
+// stable order, short-circuiting on the first reject.
 //
 // Construct with New; Write is safe for concurrent use as long as Deps
-// implementations are concurrent-safe (the standard sqlite-backed
-// store / actor registry satisfy this).
+// implementations are concurrent-safe (the standard sqlite-backed store
+// / actor registry satisfy this).
 type Chain struct {
 	deps  Deps
 	steps []khar.Step
@@ -36,41 +36,44 @@ func New(deps Deps) (*Chain, error) {
 	}
 
 	steps := []khar.Step{
-		newStepNormalize(deps),
 		newStepCallerAuth(deps),
-		newStepRequiredFields(deps),
+		newStepEnvelopeShape(deps),
 		newStepSenderConsistent(deps),
+		newStepNormalize(deps),
 		newStepTypeRegistered(deps),
 		newStepKindAndAudience(deps),
 		newStepPayloadSchema(deps),
 		newStepDocRefs(deps),
 		newStepResponsePairing(deps),
-		// step 9 engine-append is fused into Chain.Write so the Step
+		// StepEngineAppend (step 10) is fused into Chain.Write so the Step
 		// interface can stay pure (no side-effects beyond envelope
 		// mutation). Keeping engine append out of the Step slice also
-		// lets unit tests run steps 0..8 in isolation with a stub Log.
+		// lets unit tests run steps 0..9 in isolation with a stub Log.
 	}
 	sort.SliceStable(steps, func(i, j int) bool { return steps[i].ID() < steps[j].ID() })
 
 	return &Chain{deps: deps, steps: steps}, nil
 }
 
-// Write runs the chain against env per L1 §10.2 + the authoritative
-// pseudocode in L1 §10.2.1. The envelope is mutated in place during
-// Step 0 normalize so the caller observes default-filled fields when
-// the call returns.
+// Write runs the chain against env per proto-layer1 §2.0. The envelope
+// is mutated in place during StepNormalize so the caller observes
+// default-filled fields when the call returns.
 func (c *Chain) Write(ctx context.Context, env *message.Envelope) (khar.WriteResult, error) {
 	if env == nil {
 		return khar.WriteResult{}, errors.New("harness: nil envelope")
 	}
 
-	// Run Step 0 normalize and Steps 1..3 (auth / required / sender)
-	// BEFORE the dedupe pre-check. Rationale: step 3 forces
-	// envelope.sender.kind to the registry truth, so the canonical hash
-	// of the stored row (which reflects post-step-3 state) only matches
-	// a retry hash after the same overwrite has been applied. The L1
-	// §10.2.1 pseudocode lists dedupe earlier as a logical pre-check;
-	// engineering correctness requires sender normalization first.
+	// Run StepCallerAuth(0), StepEnvelopeShape(1), StepSenderConsistent(2)
+	// BEFORE the StepDedupe pre-check.
+	//
+	// Rationale: StepSenderConsistent forces envelope.sender.kind to the
+	// registry truth, so the canonical hash of the stored row (which
+	// reflects post-sender-consistent state) only matches a retry hash
+	// after the same overwrite has been applied. The proto-layer1 §2.3
+	// dedupe spec calls for sender-provided fields, but engineering
+	// correctness requires sender-kind normalization first; the practical
+	// behaviour is equivalent because StepSenderConsistent only forces
+	// kind/name, never the wire id.
 	for _, s := range c.steps {
 		if s.ID() > khar.StepSenderConsistent {
 			break
@@ -84,15 +87,15 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (khar.WriteRes
 		}
 	}
 
-	// Step 0.5 — dedupe by envelope.id (post-normalize + sender,
-	// pre-engine).
+	// StepDedupe — id-conflict pre-check (post-sender-consistent,
+	// pre-normalize).
 	if dedupeRes, err := c.runDedupe(ctx, env); err != nil {
 		return khar.WriteResult{}, err
 	} else if dedupeRes != nil {
 		return *dedupeRes, nil
 	}
 
-	// Steps 4..8.
+	// Remaining steps: StepNormalize → StepResponsePairing.
 	for _, s := range c.steps {
 		if s.ID() <= khar.StepSenderConsistent {
 			continue
@@ -106,10 +109,10 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (khar.WriteRes
 		}
 	}
 
-	// Step 9 — Engine append (canonical sink). The chain has by this
-	// point set env.IsTerminal (step 8 for responses) and computed every
-	// other field; the store implementation is responsible for outbox /
-	// sequence allocation per L1 §8.6 / L2 §1.4.1.
+	// StepEngineAppend — canonical sink. The chain has by this point
+	// set env.IsTerminal (StepResponsePairing for responses) and computed
+	// every other field; the store implementation is responsible for
+	// outbox / sequence allocation per L1 §8.6 / L2 §1.4.1.
 	env.TSReceived = c.deps.NowMs()
 	res, err := c.deps.Log.Append(ctx, env, c.deps.Fencing)
 	if err != nil {
@@ -133,14 +136,16 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (khar.WriteRes
 	}, nil
 }
 
-// runDedupe is Step 0.5 — universal id-conflict pre-check per L1 §10.2.
+// runDedupe is StepDedupe — universal id-conflict pre-check per
+// proto-layer1 §2.3.
 //
 // Returns (nil, nil) when no existing row matches (caller proceeds to
-// Step 1). Returns a non-nil WriteResult when the chain should
-// short-circuit (dedupe hit / id conflict).
+// the rest of the chain). Returns a non-nil WriteResult when the chain
+// should short-circuit (dedupe hit / id conflict).
 func (c *Chain) runDedupe(ctx context.Context, env *message.Envelope) (*khar.WriteResult, error) {
 	if env.ID == "" {
-		// Required-fields step will reject — leave Step 0.5 a no-op.
+		// StepEnvelopeShape rejects empty id — leave StepDedupe a no-op
+		// when the chain entered with no id (defensive).
 		return nil, nil
 	}
 	existing, ok, err := c.deps.Log.FindByID(ctx, c.deps.ChannelID, env.ID)
@@ -171,7 +176,7 @@ func (c *Chain) runDedupe(ctx context.Context, env *message.Envelope) (*khar.Wri
 	}
 	return &khar.WriteResult{
 		MessageID:        env.ID,
-		RejectReason:     message.HarnessMessageIDConflict,
+		RejectReason:     message.HarnessIDDuplicateConflict,
 		RejectDetail:     "envelope.id reused with different content",
 		PartialMessageID: env.ID,
 	}, nil

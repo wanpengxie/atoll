@@ -46,6 +46,8 @@ func TestChain_Step1_ChannelMismatch(t *testing.T) {
 }
 
 // TestChain_Step2_MissingFields covers nil payload + missing kind etc.
+// (Round-3 cluster F: HarnessMissingRequiredField was the pre-round-3
+// reason; the new envelope-shape stage emits HarnessEnvelopeFieldMissing.)
 func TestChain_Step2_MissingFields(t *testing.T) {
 	c, _, _, _ := newTestChain(t)
 	env := &message.Envelope{
@@ -53,8 +55,8 @@ func TestChain_Step2_MissingFields(t *testing.T) {
 		// no ID, no Type — required-field reject expected.
 	}
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
-	if res.RejectReason != message.HarnessMissingRequiredField {
-		t.Fatalf("expected missing_required_field, got %s detail=%s",
+	if res.RejectReason != message.HarnessEnvelopeFieldMissing {
+		t.Fatalf("expected harness_envelope_field_missing, got %s detail=%s",
 			res.RejectReason, res.RejectDetail)
 	}
 }
@@ -66,7 +68,7 @@ func TestChain_Step2_KindInvalid(t *testing.T) {
 	env.Kind = "bogus"
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessKindInvalid {
-		t.Fatalf("expected kind_invalid, got %s", res.RejectReason)
+		t.Fatalf("expected harness_kind_invalid, got %s", res.RejectReason)
 	}
 }
 
@@ -140,6 +142,7 @@ func TestChain_Step4_UnknownType(t *testing.T) {
 	env := &message.Envelope{
 		ID:        "m-1",
 		ChannelID: "ch-1",
+		TS:        testTS,
 		Type:      "biz.nonexistent",
 		Kind:      message.KindEvent,
 		Sender:    message.Sender{ID: "agent:alpha"},
@@ -537,8 +540,10 @@ func TestChain_Step0_5_Dedupe(t *testing.T) {
 	}
 }
 
-// TestChain_Step0_5_MessageIDConflict — same id different content.
-func TestChain_Step0_5_MessageIDConflict(t *testing.T) {
+// TestChain_Step0_5_IDDuplicateConflict — same id different content.
+// (Round-3 cluster G3: renamed from MessageIDConflict; wire value
+// harness_id_duplicate_conflict per proto-layer1 §2.3 / §2.11.1.)
+func TestChain_Step0_5_IDDuplicateConflict(t *testing.T) {
 	c, _, _, _ := newTestChain(t)
 	env1 := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
 	env1.ID = "evt-conflict"
@@ -551,8 +556,8 @@ func TestChain_Step0_5_MessageIDConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("conflict append: %v", err)
 	}
-	if r.RejectReason != message.HarnessMessageIDConflict {
-		t.Fatalf("expected message_id_conflict, got %+v", r)
+	if r.RejectReason != message.HarnessIDDuplicateConflict {
+		t.Fatalf("expected harness_id_duplicate_conflict, got %+v", r)
 	}
 }
 
@@ -585,6 +590,7 @@ func TestChain_CoreTypeKindLocked(t *testing.T) {
 	env := &message.Envelope{
 		ID:        "evt-sys-1",
 		ChannelID: "ch-1",
+		TS:        testTS,
 		Type:      "system.event",
 		Kind:      message.KindRequest, // not allowed for system.event
 		Sender:    message.Sender{ID: actor.SystemActorID},
@@ -594,5 +600,206 @@ func TestChain_CoreTypeKindLocked(t *testing.T) {
 	res, _ := c.Write(chainCallerCtx(actor.SystemActorID), env)
 	if res.RejectReason != message.HarnessKindNotAllowed {
 		t.Fatalf("expected kind_not_allowed, got %s", res.RejectReason)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Round-3 Cluster F — Step 2 Envelope Shape Validate coverage.
+//
+// Each new reject reason from proto-layer1 §2.11.1 added by cluster F gets
+// at least one explicit case. The cases are exhaustive in the sense that
+// every numbered branch in §2.2 of the spec maps to a test below.
+// ---------------------------------------------------------------------------
+
+// TestChain_Step2_ChannelMismatch — envelope.channel_id != bound channel.
+// Caller is bound to the same ch-1 as the harness (so step 0+1 accepts);
+// the envelope itself carries a stray channel_id.
+func TestChain_Step2_ChannelMismatch(t *testing.T) {
+	c, _, _, _ := newTestChain(t)
+	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
+	env.ChannelID = "ch-other"
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
+	if res.RejectReason != message.HarnessChannelMismatch {
+		t.Fatalf("expected harness_channel_mismatch, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
+// TestChain_Step2_VisibilityInvalid — caller-provided visibility outside
+// the closed {public, private} set.
+func TestChain_Step2_VisibilityInvalid(t *testing.T) {
+	c, _, _, _ := newTestChain(t)
+	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
+	env.Visibility = "internal"
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
+	if res.RejectReason != message.HarnessVisibilityInvalid {
+		t.Fatalf("expected harness_visibility_invalid, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
+// TestChain_Step2_VisibilityAudienceInvalid — visibility=private +
+// audience=['*'] is a semantic contradiction (private with broadcast).
+func TestChain_Step2_VisibilityAudienceInvalid(t *testing.T) {
+	c, _, _, _ := newTestChain(t)
+	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
+	env.Visibility = message.VisibilityPrivate
+	env.Audience = message.Audience{"*"}
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
+	if res.RejectReason != message.HarnessVisibilityAudienceInvalid {
+		t.Fatalf("expected harness_visibility_audience_invalid, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
+// TestChain_Step2_AudienceEmpty — explicit empty audience after the
+// shape stage (caller can construct one even though newEvent fills ['*']).
+func TestChain_Step2_AudienceEmpty(t *testing.T) {
+	c, _, _, _ := newTestChain(t)
+	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
+	env.Audience = message.Audience{}
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
+	if res.RejectReason != message.HarnessAudienceEmpty {
+		t.Fatalf("expected harness_audience_empty, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
+// TestChain_Step2_AudienceMixedWildcard — '*' mixed with concrete actors.
+func TestChain_Step2_AudienceMixedWildcard(t *testing.T) {
+	c, _, _, _ := newTestChain(t)
+	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
+	env.Audience = message.Audience{"*", "agent:alpha"}
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
+	if res.RejectReason != message.HarnessAudienceMixedWildcard {
+		t.Fatalf("expected harness_audience_mixed_wildcard, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
+// TestChain_Step2_RequestAudienceInvalid_TwoConcrete — kind=request with
+// two concrete recipients (no wildcard, len != 1).
+func TestChain_Step2_RequestAudienceInvalid_TwoConcrete(t *testing.T) {
+	c, _, _, treg := newTestChain(t)
+	treg.Add(TypeView{
+		Type:           "feishu.chat.send",
+		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		MaxPendingMs:   10_000,
+		HandlerActorID: "tool:feishu",
+	})
+	env := newRequest("req-multi", "agent:alpha", "feishu.chat.send", "tool:feishu",
+		json.RawMessage(`{"title":"x"}`))
+	env.Audience = message.Audience{"tool:feishu", "agent:alpha"}
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
+	if res.RejectReason != message.HarnessRequestAudienceInvalid {
+		t.Fatalf("expected harness_request_audience_invalid, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
+// TestChain_Step2_ResponseAudienceInvalid — kind=response with len != 1.
+func TestChain_Step2_ResponseAudienceInvalid(t *testing.T) {
+	c, _, _, _ := newTestChain(t)
+	env := newResponse("r-multi", "agent:alpha", "parent-1", "agent.text",
+		json.RawMessage(`{"status":"completed"}`))
+	env.Audience = message.Audience{"agent:alpha", "user:demo"}
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
+	if res.RejectReason != message.HarnessResponseAudienceInvalid {
+		t.Fatalf("expected harness_response_audience_invalid, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
+// TestChain_Step2_EnvelopeUnknownField — raw-JSON path. Step 2 enforces
+// fail-closed unknown top-level fields per proto-layer0 §7.3 when the
+// caller plumbs the raw envelope via CtxWithRawEnvelope.
+func TestChain_Step2_EnvelopeUnknownField(t *testing.T) {
+	c, _, _, _ := newTestChain(t)
+	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
+	raw := []byte(`{"id":"evt-x","channel_id":"ch-1","kind":"event","type":"agent.text",` +
+		`"sender":{"id":"agent:alpha"},"audience":["*"],"ts":1700000000000,` +
+		`"payload":{"text":"hi"},"future_field":"future"}`)
+	ctx := CtxWithRawEnvelope(chainCallerCtx("agent:alpha"), raw)
+	res, _ := c.Write(ctx, env)
+	if res.RejectReason != message.HarnessEnvelopeUnknownField {
+		t.Fatalf("expected harness_envelope_unknown_field, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Round-3 Cluster F — Step 4 time-relation reject cases (harness_time_invalid).
+// ---------------------------------------------------------------------------
+
+// TestChain_Step4_TimeInvalid_NotBeforeBeforeTS — not_before < ts.
+func TestChain_Step4_TimeInvalid_NotBeforeBeforeTS(t *testing.T) {
+	c, _, _, _ := newTestChain(t)
+	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
+	earlier := env.TS - 1
+	env.NotBefore = &earlier
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
+	if res.RejectReason != message.HarnessTimeInvalid {
+		t.Fatalf("expected harness_time_invalid (not_before < ts), got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
+// TestChain_Step4_TimeInvalid_ExpiresAtBeforeTS — expires_at <= ts.
+func TestChain_Step4_TimeInvalid_ExpiresAtBeforeTS(t *testing.T) {
+	c, _, _, treg := newTestChain(t)
+	treg.Add(TypeView{
+		Type:           "feishu.chat.send",
+		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		MaxPendingMs:   10_000,
+		HandlerActorID: "tool:feishu",
+	})
+	env := newRequest("req-exp", "agent:alpha", "feishu.chat.send", "tool:feishu",
+		json.RawMessage(`{"title":"x"}`))
+	exp := env.TS // equal → reject
+	env.ExpiresAt = &exp
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
+	if res.RejectReason != message.HarnessTimeInvalid {
+		t.Fatalf("expected harness_time_invalid (expires_at <= ts), got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
+// TestChain_Step4_TimeInvalid_ExpiresAtBeforeNotBefore — expires_at <=
+// not_before. Both fields are explicitly set so the post-normalize check
+// fires regardless of default fill.
+func TestChain_Step4_TimeInvalid_ExpiresAtBeforeNotBefore(t *testing.T) {
+	c, _, _, treg := newTestChain(t)
+	treg.Add(TypeView{
+		Type:           "feishu.chat.send",
+		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		MaxPendingMs:   10_000,
+		HandlerActorID: "tool:feishu",
+	})
+	env := newRequest("req-nbe", "agent:alpha", "feishu.chat.send", "tool:feishu",
+		json.RawMessage(`{"title":"x"}`))
+	nb := env.TS + 100
+	exp := env.TS + 50 // exp < nb → reject
+	env.NotBefore = &nb
+	env.ExpiresAt = &exp
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
+	if res.RejectReason != message.HarnessTimeInvalid {
+		t.Fatalf("expected harness_time_invalid (expires_at <= not_before), got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
+// TestChain_Step4_TimeRelation_AcceptsValidFuture — sanity: not_before >
+// ts AND expires_at > not_before → accept.
+func TestChain_Step4_TimeRelation_AcceptsValidFuture(t *testing.T) {
+	c, _, _, _ := newTestChain(t)
+	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
+	nb := env.TS + 1000
+	exp := env.TS + 2000
+	env.NotBefore = &nb
+	env.ExpiresAt = &exp
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
+	if !res.Accepted() {
+		t.Fatalf("expected accept with valid future timing, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
 	}
 }
