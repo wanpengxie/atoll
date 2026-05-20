@@ -192,8 +192,8 @@ func TestHandleWriteMessage_RequestAudienceRejected(t *testing.T) {
 				Error string `json:"error"`
 			}
 			_ = json.NewDecoder(resp.Body).Decode(&errBody)
-			if !strings.Contains(errBody.Error, "request_audience_invalid") {
-				t.Errorf("error=%q want request_audience_invalid", errBody.Error)
+			if !strings.Contains(errBody.Error, "harness_request_audience_invalid") {
+				t.Errorf("error=%q want harness_request_audience_invalid", errBody.Error)
 			}
 		})
 	}

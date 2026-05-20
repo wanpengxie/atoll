@@ -387,7 +387,7 @@ type writeMessageReq struct {
 	// FIX-T8: caller may supply kind explicitly. When omitted the
 	// gateway fills the L1 §1.1 default for core types (and leaves
 	// it empty for business types — daemon harness will reject on
-	// step 5 with `kind_not_allowed`).
+	// step 5 with `harness_kind_not_allowed`).
 	Kind string `json:"kind"`
 }
 
@@ -413,12 +413,12 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 	// must carry exactly one concrete audience (L1 §10.2 step 5).
 	kind, ok := resolveKind(req.Type, message.Kind(req.Kind))
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "kind_not_allowed"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": string(message.HarnessKindNotAllowed)})
 		return
 	}
 	if kind == message.KindRequest {
 		if len(req.Audience) != 1 || req.Audience[0] == "" || req.Audience[0] == "*" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "request_audience_invalid"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": string(message.HarnessRequestAudienceInvalid)})
 			return
 		}
 	}

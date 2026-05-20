@@ -258,7 +258,7 @@ func classifyAskError(err error) int {
 	switch {
 	case he.Status == 409 && bodyParsed.RejectReason != "":
 		// Harness reject — pass the reason verbatim so xhs-cli's
-		// classifyExit can use it (e.g. "kind_not_allowed",
+		// classifyExit can use it (e.g. "harness_kind_not_allowed",
 		// "dedupe_match", "missing_caller_auth", ...).
 		writeAskReject(bodyParsed.RejectReason, bodyParsed.RejectDetail)
 		return askExitHarnessReject

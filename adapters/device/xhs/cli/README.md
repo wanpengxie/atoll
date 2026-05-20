@@ -66,7 +66,7 @@ stdout 一律单行 JSON：
 
 退出码：`0`=ok，`1`=运行/网络/业务错误，`3`=参数错误。
 
-`real` 模式错误 code 透传 daemon harness reason（如 `request_audience_invalid`、
+`real` 模式错误 code 透传 daemon harness reason（如 `harness_request_audience_invalid`、
 `actor_not_registered`），或 wrapper code：
 
 - `coagent_unavailable` — spawn coagent 失败（binary 缺失 / 无权限）

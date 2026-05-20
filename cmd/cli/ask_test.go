@@ -222,7 +222,7 @@ func TestAsk_HarnessReject(t *testing.T) {
 	t.Parallel()
 	bin := buildCLI(t)
 	srv, _ := newFakeGateway(t, http.StatusConflict, `{
-		"reject_reason": "kind_not_allowed",
+		"reject_reason": "harness_kind_not_allowed",
 		"reject_detail": "type x.y rejects kind=request"
 	}`)
 	_, stderr, code := runCLI(t, bin,
@@ -236,7 +236,7 @@ func TestAsk_HarnessReject(t *testing.T) {
 	if code != 3 {
 		t.Errorf("exit=%d want 3", code)
 	}
-	if !strings.Contains(stderr, `"reason":"kind_not_allowed"`) {
+	if !strings.Contains(stderr, `"reason":"harness_kind_not_allowed"`) {
 		t.Errorf("stderr missing reason: %q", stderr)
 	}
 }

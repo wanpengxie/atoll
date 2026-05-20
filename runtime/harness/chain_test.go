@@ -28,7 +28,7 @@ func TestChain_Step1_MissingCaller(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 	if res.RejectReason != message.HarnessAuthFailed {
-		t.Fatalf("expected auth_failed, got %s", res.RejectReason)
+		t.Fatalf("expected harness_auth_failed, got %s", res.RejectReason)
 	}
 }
 
@@ -41,7 +41,7 @@ func TestChain_Step1_ChannelMismatch(t *testing.T) {
 	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
 	res, _ := c.Write(ctx, env)
 	if res.RejectReason != message.HarnessAuthFailed {
-		t.Fatalf("expected auth_failed, got %s", res.RejectReason)
+		t.Fatalf("expected harness_auth_failed, got %s", res.RejectReason)
 	}
 }
 
@@ -79,7 +79,7 @@ func TestChain_Step2_ResponseMissingParent(t *testing.T) {
 	env := newResponse("r-1", "agent:alpha", "", "agent.text", json.RawMessage(`{"status":"completed"}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessResponseMissingParentID {
-		t.Fatalf("expected response_missing_parent_id, got %s", res.RejectReason)
+		t.Fatalf("expected harness_response_missing_parent_id, got %s", res.RejectReason)
 	}
 }
 
@@ -90,7 +90,7 @@ func TestChain_Step3_SenderMismatch(t *testing.T) {
 	env.Sender.ID = "agent:other"
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessSenderMismatch {
-		t.Fatalf("expected sender_mismatch, got %s", res.RejectReason)
+		t.Fatalf("expected harness_sender_mismatch, got %s", res.RejectReason)
 	}
 }
 
@@ -102,7 +102,7 @@ func TestChain_Step3_SenderKindTamper(t *testing.T) {
 	env.Sender.Kind = actor.KindSystem // alpha is an agent.
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessSenderKindMismatch {
-		t.Fatalf("expected sender_kind_mismatch, got %s", res.RejectReason)
+		t.Fatalf("expected harness_sender_kind_mismatch, got %s", res.RejectReason)
 	}
 }
 
@@ -132,7 +132,7 @@ func TestChain_Step3_Deregistered(t *testing.T) {
 	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessSenderDeregistered {
-		t.Fatalf("expected sender_deregistered, got %s", res.RejectReason)
+		t.Fatalf("expected harness_sender_deregistered, got %s", res.RejectReason)
 	}
 }
 
@@ -151,7 +151,7 @@ func TestChain_Step4_UnknownType(t *testing.T) {
 	}
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessUnknownType {
-		t.Fatalf("expected unknown_type, got %s", res.RejectReason)
+		t.Fatalf("expected harness_unknown_type, got %s", res.RejectReason)
 	}
 }
 
@@ -168,7 +168,7 @@ func TestChain_Step5_RequestAudienceInvalid(t *testing.T) {
 	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "*", json.RawMessage(`{"title":"x"}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessRequestAudienceInvalid {
-		t.Fatalf("expected request_audience_invalid, got %s", res.RejectReason)
+		t.Fatalf("expected harness_request_audience_invalid, got %s", res.RejectReason)
 	}
 }
 
@@ -184,7 +184,7 @@ func TestChain_Step5_AudienceActorNotRegistered(t *testing.T) {
 	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:does-not-exist", json.RawMessage(`{"title":"x"}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessAudienceActorNotRegistered {
-		t.Fatalf("expected audience_actor_not_registered, got %s", res.RejectReason)
+		t.Fatalf("expected harness_audience_actor_not_registered, got %s", res.RejectReason)
 	}
 }
 
@@ -201,7 +201,7 @@ func TestChain_Step5_AudienceHandlerMismatch(t *testing.T) {
 	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:other", json.RawMessage(`{"title":"x"}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessAudienceHandlerMismatch {
-		t.Fatalf("expected audience_handler_mismatch, got %s detail=%s",
+		t.Fatalf("expected harness_audience_handler_mismatch, got %s detail=%s",
 			res.RejectReason, res.RejectDetail)
 	}
 }
@@ -218,7 +218,7 @@ func TestChain_Step5_KindNotAllowed(t *testing.T) {
 	env := newEvent("agent:alpha", "feishu.chat.send", json.RawMessage(`{}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessKindNotAllowed {
-		t.Fatalf("expected kind_not_allowed, got %s", res.RejectReason)
+		t.Fatalf("expected harness_kind_not_allowed, got %s", res.RejectReason)
 	}
 }
 
@@ -241,7 +241,7 @@ func TestChain_Step6_PayloadSchema(t *testing.T) {
 	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu", json.RawMessage(`{}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessPayloadSchemaViolation {
-		t.Fatalf("expected payload_schema_violation, got %s", res.RejectReason)
+		t.Fatalf("expected harness_payload_schema_violation, got %s", res.RejectReason)
 	}
 }
 
@@ -263,7 +263,7 @@ func TestChain_Step6_PayloadSchemaFailsClosedWithoutValidator(t *testing.T) {
 	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu", json.RawMessage(`{}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessPayloadSchemaViolation {
-		t.Fatalf("expected payload_schema_violation, got %s", res.RejectReason)
+		t.Fatalf("expected harness_payload_schema_violation, got %s", res.RejectReason)
 	}
 	if res.RejectDetail != ErrPayloadValidatorMissing.Error() {
 		t.Fatalf("detail=%q want %q", res.RejectDetail, ErrPayloadValidatorMissing.Error())
@@ -350,13 +350,13 @@ func TestChain_Step7_DocRefsInvalid(t *testing.T) {
 	env.DocRefs = &bad
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessDocRefsInvalid {
-		t.Fatalf("expected doc_refs_invalid, got %s", res.RejectReason)
+		t.Fatalf("expected harness_doc_refs_invalid, got %s", res.RejectReason)
 	}
 	traversal := []string{"foo/../etc/passwd"}
 	env.DocRefs = &traversal
 	res, _ = c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessDocRefsInvalid {
-		t.Fatalf("expected doc_refs_invalid traversal, got %s", res.RejectReason)
+		t.Fatalf("expected harness_doc_refs_invalid traversal, got %s", res.RejectReason)
 	}
 }
 
@@ -367,7 +367,7 @@ func TestChain_Step8_ResponseParentInvalid(t *testing.T) {
 		json.RawMessage(`{"status":"completed"}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessResponseParentInvalid {
-		t.Fatalf("expected response_parent_invalid, got %s", res.RejectReason)
+		t.Fatalf("expected harness_response_parent_invalid, got %s", res.RejectReason)
 	}
 }
 
@@ -514,7 +514,7 @@ func TestChain_Step8_TerminalDuplicate(t *testing.T) {
 		t.Fatalf("Write second response: %v", err)
 	}
 	if res.RejectReason != message.HarnessTerminalDuplicate {
-		t.Fatalf("expected terminal_duplicate, got %s detail=%s", res.RejectReason, res.RejectDetail)
+		t.Fatalf("expected harness_terminal_duplicate, got %s detail=%s", res.RejectReason, res.RejectDetail)
 	}
 	_ = log
 }
@@ -599,7 +599,7 @@ func TestChain_CoreTypeKindLocked(t *testing.T) {
 	}
 	res, _ := c.Write(chainCallerCtx(actor.SystemActorID), env)
 	if res.RejectReason != message.HarnessKindNotAllowed {
-		t.Fatalf("expected kind_not_allowed, got %s", res.RejectReason)
+		t.Fatalf("expected harness_kind_not_allowed, got %s", res.RejectReason)
 	}
 }
 

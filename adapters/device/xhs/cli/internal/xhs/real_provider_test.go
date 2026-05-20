@@ -367,7 +367,7 @@ func TestPublishRealMode_NoContentInline(t *testing.T) {
 // surfaces as CodeError{Code=<reason>}.
 func TestRealProvider_CoagentReject(t *testing.T) {
 	p, fr := newTestProvider()
-	fr.SetError(&CodeError{Code: "request_audience_invalid", Msg: "type has no handler"})
+	fr.SetError(&CodeError{Code: "harness_request_audience_invalid", Msg: "type has no handler"})
 	_, err := p.Publish(context.Background(), PublishArgs{Title: "T", ContentPath: "/x.md"})
 	if err == nil {
 		t.Fatal("expected error")
@@ -376,8 +376,8 @@ func TestRealProvider_CoagentReject(t *testing.T) {
 	if !errors.As(err, &ce) {
 		t.Fatalf("expected *CodeError, got %T %v", err, err)
 	}
-	if ce.Code != "request_audience_invalid" {
-		t.Fatalf("code = %q; want request_audience_invalid", ce.Code)
+	if ce.Code != "harness_request_audience_invalid" {
+		t.Fatalf("code = %q; want harness_request_audience_invalid", ce.Code)
 	}
 }
 
