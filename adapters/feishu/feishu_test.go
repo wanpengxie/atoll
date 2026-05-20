@@ -460,8 +460,8 @@ func TestChatSendFeishuAPIFailureProducesTerminalFailure(t *testing.T) {
 		t.Fatalf("expected failed status, got %v; payload=%s",
 			payload["status"], string(resp.Payload))
 	}
-	if payload["reason"] != string(message.TerminalAdapterExecutionFailed) {
-		t.Fatalf("reason=%v want adapter_execution_failed", payload["reason"])
+	if payload["reason"] != string(message.TerminalReceiverInternalError) {
+		t.Fatalf("reason=%v want receiver_internal_error", payload["reason"])
 	}
 	if code, _ := payload["error_code"].(string); !strings.HasPrefix(code, "feishu_code_") {
 		t.Fatalf("error_code=%v want feishu_code_*", payload["error_code"])
@@ -502,8 +502,8 @@ func TestPayloadValidationFailsCleanTerminal(t *testing.T) {
 	if payload["status"] != "failed" {
 		t.Fatalf("expected failed status, got %v", payload["status"])
 	}
-	if payload["reason"] != string(message.TerminalAdapterExecutionFailed) {
-		t.Fatalf("reason=%v want adapter_execution_failed", payload["reason"])
+	if payload["reason"] != string(message.TerminalReceiverInternalError) {
+		t.Fatalf("reason=%v want receiver_internal_error", payload["reason"])
 	}
 	if payload["error_code"] != "payload_invalid" {
 		t.Fatalf("error_code=%v want payload_invalid", payload["error_code"])
@@ -571,8 +571,8 @@ func TestUnknownTypeProducesTerminalFailure(t *testing.T) {
 			if opts.Status != "failed" {
 				t.Fatalf("expected failed status, got %q", opts.Status)
 			}
-			if opts.Reason != string(message.TerminalAdapterExecutionFailed) {
-				t.Fatalf("expected reason=adapter_execution_failed, got %q", opts.Reason)
+			if opts.Reason != string(message.TerminalReceiverInternalError) {
+				t.Fatalf("expected reason=receiver_internal_error, got %q", opts.Reason)
 			}
 			var body map[string]any
 			if err := json.Unmarshal(payload, &body); err != nil {

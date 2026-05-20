@@ -155,7 +155,7 @@ func TestHandle_PanicOnDemand(t *testing.T) {
 
 // TestHandle_SkipRespond verifies the no-op mode used by acceptance
 // #5: Handle returns nil without calling Respond so the F3 timer
-// eventually emits adapter_default_timeout.
+// eventually emits unanswered_timeout.
 func TestHandle_SkipRespond(t *testing.T) {
 	resp := &fakeRespond{}
 	mod := xhs.New(xhs.Config{SkipRespond: true})

@@ -2,7 +2,7 @@
 // implements the contracts declared in kernel/adapter:
 //
 //   - F2 CorrelationTracker — request_id ↔ state lifecycle store.
-//   - F3 ErrorPolicy        — timer-driven adapter_default_timeout terminal.
+//   - F3 ErrorPolicy        — timer-driven unanswered_timeout terminal.
 //   - F4 StateStore         — pluggable persistent state seam (in-memory default).
 //   - F5 Respond            — terminal response builder + harness write.
 //   - F6 Manager            — Install / Dispatch / OnExternalCallback / RunGC / Shutdown.

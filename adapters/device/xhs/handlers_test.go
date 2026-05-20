@@ -188,7 +188,7 @@ func TestBuildRespondPayloadFailureSchema(t *testing.T) {
 
 	// publish: retry_after allowed.
 	body, status, reason, _ := buildRespondPayload(cb, TypePublish)
-	if status != "failed" || reason != string(message.TerminalAdapterExecutionFailed) {
+	if status != "failed" || reason != string(message.TerminalReceiverInternalError) {
 		t.Errorf("status/reason mismatch: %s / %s", status, reason)
 	}
 	publish := map[string]any{}
@@ -220,8 +220,8 @@ func TestBuildRespondPayloadUnknownStatus(t *testing.T) {
 	if status != "failed" {
 		t.Errorf("unknown status should resolve to failed; got %q", status)
 	}
-	if reason != string(message.TerminalAdapterExecutionFailed) {
-		t.Errorf("reason=%q want adapter_execution_failed", reason)
+	if reason != string(message.TerminalReceiverInternalError) {
+		t.Errorf("reason=%q want receiver_internal_error", reason)
 	}
 	var payload map[string]any
 	_ = json.Unmarshal(body, &payload)

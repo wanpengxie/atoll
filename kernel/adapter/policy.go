@@ -17,7 +17,7 @@ type ErrorPolicy interface {
 	// RegisterTimer arms the Ad-2 default timeout timer for one
 	// in-flight request. When the timer fires, the implementation MUST
 	// emit a terminal response with `payload={status:'failed', reason:
-	// 'adapter_default_timeout'}` via the framework Respond closure.
+	// 'unanswered_timeout'}` via the framework Respond closure.
 	//
 	// Returning an error indicates the implementation could not arm the
 	// timer — caller treats it as a hard failure (request abandoned).

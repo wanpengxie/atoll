@@ -464,8 +464,8 @@ func (m *Manager) Dispatch(ctx context.Context, env *message.Envelope) error {
 
 // runHandle wraps Module.Handle with a panic recover that emits a
 // failed terminal via ErrorPolicy.OnExternalError per L2 §8 F3 panic
-// safety. The terminal carries reason=adapter_panic + detail containing
-// the panic message and stack trace (closed-set reason from L1 §10.3.3).
+// safety. The terminal carries reason=receiver_internal_error + detail
+// containing the panic message and stack trace.
 func (m *Manager) runHandle(ctx context.Context, bm *boundModule, env *message.Envelope) (err error) {
 	defer func() {
 		r := recover()
@@ -483,7 +483,7 @@ func (m *Manager) runHandle(ctx context.Context, bm *boundModule, env *message.E
 			"adapter", bm.declaration.Name, "type", env.Type)
 		if perr := bm.policy.OnExternalError(ctx,
 			adapter.CorrelationKey(env.ID),
-			message.TerminalAdapterPanic,
+			message.TerminalReceiverInternalError,
 			detail,
 		); perr != nil {
 			m.cfg.Logger.Error("framework.dispatch.handle.panic.emit_failed",

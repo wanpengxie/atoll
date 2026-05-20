@@ -33,7 +33,7 @@ type TypeSchema struct {
 	// FallbackResponseSchema is the response-schema projection that
 	// MUST accept the L2 §1.4.2 mandated system fallback payloads:
 	//   {status:'failed', reason:'unanswered_timeout'}
-	//   {status:'failed', reason:'adapter_default_timeout'}
+	//   {status:'failed', reason:'receiver_internal_error'}
 	//   {status:'failed', reason:'receiver_unavailable'}
 	// REQUIRED when AllowedKinds includes request and the schema map
 	// is supplied; install rejects with fallback_response_schema_invalid
@@ -119,9 +119,9 @@ type Module interface {
 
 	// Handle translates one inbound kind=request envelope into outbound
 	// protocol traffic. Returning an error leaves the request pending —
-	// the F3 timer eventually emits adapter_default_timeout via the
-	// framework. Adapters typically return nil once the external call
-	// is launched + the correlation is tracked.
+	// the F3 timer eventually emits unanswered_timeout via the framework.
+	// Adapters typically return nil once the external call is launched +
+	// the correlation is tracked.
 	Handle(ctx context.Context, env *message.Envelope) error
 
 	// OnExternalCallback translates one inbound external callback (e.g.

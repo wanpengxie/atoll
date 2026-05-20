@@ -32,7 +32,8 @@ func TestAllStepIDs(t *testing.T) {
 }
 
 // TestAllRejectReasons enforces the L1 §10.3.1 closed-set contract.
-// channel_mismatch was removed in FIX-T1 — count must be 21.
+// channel_mismatch was removed in FIX-T1; reason validation adds the
+// Step 8 response reason invalid reject.
 func TestAllRejectReasons(t *testing.T) {
 	want := []message.HarnessRejectReason{
 		message.HarnessAuthFailed,
@@ -52,6 +53,7 @@ func TestAllRejectReasons(t *testing.T) {
 		message.HarnessResponseParentInvalid,
 		message.HarnessResponseUnauthorizedSender,
 		message.HarnessResponseAudienceMismatch,
+		message.HarnessResponseReasonInvalid,
 		message.HarnessTerminalDuplicate,
 		message.HarnessWorkerFencingStale,
 		message.HarnessEngineACLDenied,

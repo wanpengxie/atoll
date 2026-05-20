@@ -59,7 +59,7 @@ type CorrelationTracker interface {
 	MarkDone(ctx context.Context, requestID CorrelationKey) error
 
 	// MarkExpired advances pending → expired when the F3 timer fires
-	// the adapter_default_timeout terminal. Idempotent.
+	// the unanswered_timeout terminal. Idempotent.
 	MarkExpired(ctx context.Context, requestID CorrelationKey) error
 
 	// MarkRejected advances pending → rejected when harness returns a

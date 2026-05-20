@@ -29,6 +29,14 @@ import (
 
 func now() int64 { return time.Now().UnixMilli() }
 
+func terminalFailureReasonSet() map[string]struct{} {
+	out := make(map[string]struct{}, len(message.AllTerminalFailureReasons))
+	for _, reason := range message.AllTerminalFailureReasons {
+		out[string(reason)] = struct{}{}
+	}
+	return out
+}
+
 // TestDaemon_StartupPhases covers acceptance gate #1 (T3):
 //
 //	cmd/daemon equivalent assembles → scans channels/ → refreshes
@@ -607,6 +615,14 @@ func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
 			}
 		} else if has {
 			t.Errorf("%s: scheduler should have SKIPPED but emitted reason=%s", c.id, reason)
+		}
+	}
+
+	closedReasons := terminalFailureReasonSet()
+	for requestID, reason := range responses {
+		if _, ok := closedReasons[reason]; !ok {
+			t.Errorf("%s: runtime fallback emitted reason outside TerminalFailureReason closed set: %s",
+				requestID, reason)
 		}
 	}
 

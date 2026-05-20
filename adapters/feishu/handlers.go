@@ -187,7 +187,7 @@ func (m *Module) fail(ctx context.Context, env *message.Envelope, errorCode, det
 	}
 	_, err = m.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), payload, adapter.RespondOptions{
 		Status: "failed",
-		Reason: string(message.TerminalAdapterExecutionFailed),
+		Reason: string(message.TerminalReceiverInternalError),
 	})
 	if err != nil {
 		m.logger.Error("feishu.fail.respond.error",
@@ -199,7 +199,7 @@ func (m *Module) fail(ctx context.Context, env *message.Envelope, errorCode, det
 	m.logger.Warn("feishu.handler.failed",
 		"type", env.Type,
 		"request_id", env.ID,
-		"reason", string(message.TerminalAdapterExecutionFailed),
+		"reason", string(message.TerminalReceiverInternalError),
 		"error_code", errorCode,
 		"detail", redacted,
 	)

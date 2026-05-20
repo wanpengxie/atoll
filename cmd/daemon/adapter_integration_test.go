@@ -374,7 +374,7 @@ func TestIntegration_XhsPublish_Concurrent(t *testing.T) {
 // TestIntegration_XhsPublish_PanicEmitsFailedTerminal covers acceptance
 // #4 — scaffold configured with PanicOnHandle panics inside Handle,
 // framework recovers and emits failed terminal payload.reason=
-// receiver_unavailable with detail containing the panic stack.
+// receiver_internal_error with detail containing the panic stack.
 func TestIntegration_XhsPublish_PanicEmitsFailedTerminal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -410,8 +410,8 @@ func TestIntegration_XhsPublish_PanicEmitsFailedTerminal(t *testing.T) {
 	if payload["status"] != "failed" {
 		t.Errorf("payload.status=%v want failed", payload["status"])
 	}
-	if payload["reason"] != string(message.TerminalAdapterPanic) {
-		t.Errorf("payload.reason=%v want %s", payload["reason"], message.TerminalAdapterPanic)
+	if payload["reason"] != string(message.TerminalReceiverInternalError) {
+		t.Errorf("payload.reason=%v want %s", payload["reason"], message.TerminalReceiverInternalError)
 	}
 	detail, _ := payload["detail"].(string)
 	if detail == "" {
@@ -419,11 +419,11 @@ func TestIntegration_XhsPublish_PanicEmitsFailedTerminal(t *testing.T) {
 	}
 }
 
-// TestIntegration_XhsPublish_TimerEmitsAdapterDefaultTimeout covers
+// TestIntegration_XhsPublish_TimerEmitsUnansweredTimeout covers
 // acceptance #5 — scaffold configured with SkipRespond never replies,
 // the framework F3 timer (max_pending_ms) fires and emits a failed
-// terminal reason=adapter_default_timeout.
-func TestIntegration_XhsPublish_TimerEmitsAdapterDefaultTimeout(t *testing.T) {
+// terminal reason=unanswered_timeout.
+func TestIntegration_XhsPublish_TimerEmitsUnansweredTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -456,8 +456,8 @@ func TestIntegration_XhsPublish_TimerEmitsAdapterDefaultTimeout(t *testing.T) {
 	if payload["status"] != "failed" {
 		t.Errorf("payload.status=%v want failed", payload["status"])
 	}
-	if payload["reason"] != string(message.TerminalAdapterDefaultTimeout) {
-		t.Errorf("payload.reason=%v want %s", payload["reason"], message.TerminalAdapterDefaultTimeout)
+	if payload["reason"] != string(message.TerminalUnansweredTimeout) {
+		t.Errorf("payload.reason=%v want %s", payload["reason"], message.TerminalUnansweredTimeout)
 	}
 }
 
@@ -480,16 +480,16 @@ func countResponses(t *testing.T, db *sql.DB, requestID message.ID) int {
 // T147 acceptance C — the合并 ticket 价值: 当 xhs.publish 请求 envelope
 // expires_at 早于 adapter framework F3 deadline 时，scheduler 扫到
 // audience=tool:xhs-adapter MUST skip（receiver-kind=tool 分支），由
-// framework F3 timer 兜底 emit reason=adapter_default_timeout，确保 The
+// framework F3 timer 兜底 emit reason=unanswered_timeout，确保 The
 // One Law 单一终态 + 没有 terminal_duplicate.
 //
 // Wall-clock budget:
 //
 //	t=0      seed request with expires_at = now+200ms; adapter MaxPendingMs=1500ms
 //	t=600ms  poll: must be ZERO response rows (scheduler 已扫多次，tool skip)
-//	t≈1.5s   framework F3 emits failed reason=adapter_default_timeout
+//	t≈1.5s   framework F3 emits failed reason=unanswered_timeout
 //	t<4s     final poll asserts exactly ONE terminal response with the
-//	         adapter timeout reason.
+//	         unanswered timeout reason.
 func TestIntegration_LongPending_ToolReceiverSkippedByScheduler_F3Wins(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -534,8 +534,8 @@ func TestIntegration_LongPending_ToolReceiverSkippedByScheduler_F3Wins(t *testin
 	if payload["status"] != "failed" {
 		t.Errorf("payload.status=%v want failed", payload["status"])
 	}
-	if payload["reason"] != string(message.TerminalAdapterDefaultTimeout) {
-		t.Errorf("payload.reason=%v want %s", payload["reason"], message.TerminalAdapterDefaultTimeout)
+	if payload["reason"] != string(message.TerminalUnansweredTimeout) {
+		t.Errorf("payload.reason=%v want %s", payload["reason"], message.TerminalUnansweredTimeout)
 	}
 
 	// 3) After F3 fires, give the scheduler a few more ticks to confirm it

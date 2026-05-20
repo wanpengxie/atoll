@@ -224,11 +224,6 @@ func mergeResponsePayload(userPayload json.RawMessage, status, reason string, de
 	return out, nil
 }
 
-var frameworkInternalTerminalReasons = map[string]struct{}{
-	string(message.TerminalAdapterExecutionFailed): {},
-	string(message.TerminalAdapterPanic):           {},
-}
-
 func validateRespondReason(status, reason string) error {
 	if reason == "" {
 		return nil
@@ -240,9 +235,6 @@ func validateRespondReason(status, reason string) error {
 		if reason == string(allowed) {
 			return nil
 		}
-	}
-	if _, ok := frameworkInternalTerminalReasons[reason]; ok {
-		return nil
 	}
 	return fmt.Errorf("framework: RespondOptions.Reason %q not in terminal_failure_reason closed set", reason)
 }

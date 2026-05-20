@@ -39,7 +39,7 @@ type Config struct {
 
 	// SkipRespond, when true, makes Handle a no-op (no panic, no
 	// Respond). Used by acceptance #5 integration test to verify the
-	// framework F3 timer emits adapter_default_timeout reason.
+	// framework F3 timer emits unanswered_timeout reason.
 	SkipRespond bool
 }
 
@@ -119,7 +119,7 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 	}
 	if m.cfg.SkipRespond {
 		// Skip emitting the response — framework F3 timer eventually
-		// emits adapter_default_timeout (acceptance #5).
+		// emits unanswered_timeout (acceptance #5).
 		return nil
 	}
 

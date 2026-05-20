@@ -153,8 +153,8 @@ func TestAdapterFrameworkBootRecoverTimersUsesSQLiteStateStore(t *testing.T) {
 			if err := json.Unmarshal(got.Payload, &payload); err != nil {
 				t.Fatalf("decode response payload: %v", err)
 			}
-			if payload["reason"] != string(message.TerminalAdapterDefaultTimeout) {
-				t.Fatalf("reason=%v want %s", payload["reason"], message.TerminalAdapterDefaultTimeout)
+			if payload["reason"] != string(message.TerminalUnansweredTimeout) {
+				t.Fatalf("reason=%v want %s", payload["reason"], message.TerminalUnansweredTimeout)
 			}
 			return
 		}

@@ -719,7 +719,7 @@ func TestBridge_ChannelTypeToolTerminalFailureReturnsErrorResult(t *testing.T) {
 			return env.Type == "xhs.publish" && env.Kind == message.KindRequest
 		})
 		if err == nil {
-			ipc.triggers <- responseForRequest(req, json.RawMessage(`{"status":"failed","reason":"adapter_default_timeout"}`))
+			ipc.triggers <- responseForRequest(req, json.RawMessage(`{"status":"failed","reason":"unanswered_timeout"}`))
 		}
 		close(ipc.triggers)
 	}()
@@ -731,8 +731,8 @@ func TestBridge_ChannelTypeToolTerminalFailureReturnsErrorResult(t *testing.T) {
 		t.Fatalf("ToolResult.IsError=false; value=%#v", result.Value.Value)
 	}
 	value, ok := result.Value.Value.(map[string]any)
-	if !ok || value["error"] != "adapter_default_timeout" {
-		t.Fatalf("ToolResult value=%#v want error=adapter_default_timeout", result.Value.Value)
+	if !ok || value["error"] != "unanswered_timeout" {
+		t.Fatalf("ToolResult value=%#v want error=unanswered_timeout", result.Value.Value)
 	}
 }
 

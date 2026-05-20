@@ -62,7 +62,7 @@ func TestValidateFallbackResponseSchema(t *testing.T) {
 	bad := json.RawMessage(`{
 		"type":"object",
 		"required":["status","reason"],
-		"properties":{"reason":{"enum":["unanswered_timeout","adapter_default_timeout"]}}
+		"properties":{"reason":{"enum":["unanswered_timeout","receiver_unavailable"]}}
 	}`)
 	if err := ValidateFallbackResponseSchema(bad); err == nil {
 		t.Error("schema excluding terminal_failure_reason values should fail")

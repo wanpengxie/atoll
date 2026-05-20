@@ -129,7 +129,7 @@ func (p *DeviceProxy) SetFrameIDFactory(factory func() string) {
 //  2. Correlation.Reserve so a callback that races the network can
 //     still find the request id.
 //  3. ErrorPolicy.RegisterTimer arms the F3 default timeout fallback;
-//     fires `adapter_default_timeout` if the device never responds.
+//     fires `unanswered_timeout` if the device never responds.
 //  4. DeviceTransit.Send writes the frame onto the daemonbus mux. The
 //     concrete transit (T3 runtime/transit) owns persistence + retry;
 //     the proxy treats Send as fire-and-forget once it returns nil.

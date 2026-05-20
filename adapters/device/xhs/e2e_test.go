@@ -668,8 +668,8 @@ func TestTransitSendFailureRollsBack(t *testing.T) {
 
 func assertAdapterExecutionFailure(t *testing.T, call respondCall, wantErrorCode string) {
 	t.Helper()
-	if call.opts.Reason != string(message.TerminalAdapterExecutionFailed) {
-		t.Fatalf("reason=%q want %s", call.opts.Reason, message.TerminalAdapterExecutionFailed)
+	if call.opts.Reason != string(message.TerminalReceiverInternalError) {
+		t.Fatalf("reason=%q want %s", call.opts.Reason, message.TerminalReceiverInternalError)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(call.payload, &payload); err != nil {
@@ -683,7 +683,7 @@ func assertAdapterExecutionFailure(t *testing.T, call respondCall, wantErrorCode
 // TestF3TimeoutTerminal simulates the F3 default-timeout path: the
 // adapter sends successfully but no callback arrives. ErrorPolicy fires
 // OnExternalError with receiver_unavailable; downstream wiring (T3
-// framework) would Respond with the canonical adapter_default_timeout —
+// framework) would Respond with the canonical unanswered_timeout —
 // we mirror that path here by calling failNow via a synthetic stale
 // envelope.
 //

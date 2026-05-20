@@ -28,7 +28,7 @@ type terminalPayload struct {
 //
 // On RegisterTimer the policy stores the deadline + arms a timer. When
 // the timer fires the policy emits a terminal_failure response via the
-// adapter's RespondFunc with reason=adapter_default_timeout.
+// adapter's RespondFunc with reason=unanswered_timeout.
 type timerPolicy struct {
 	adapterName string
 	channelID   channel.ID
@@ -158,7 +158,7 @@ func (p *timerPolicy) OnExternalError(
 	return nil
 }
 
-// fire is the AfterFunc callback. It emits the adapter_default_timeout
+// fire is the AfterFunc callback. It emits the unanswered_timeout
 // terminal via Respond. We swallow most errors so a timer panic cannot
 // poison the rest of the daemon — anything non-trivial is logged.
 func (p *timerPolicy) fire(requestID adapter.CorrelationKey) {
@@ -174,7 +174,7 @@ func (p *timerPolicy) fire(requestID adapter.CorrelationKey) {
 	// timer fires; the harness Write only needs the channel scope which
 	// is bound into the closure.
 	ctx := context.Background()
-	payload, err := marshalTerminalPayload(string(message.TerminalAdapterDefaultTimeout), "")
+	payload, err := marshalTerminalPayload(string(message.TerminalUnansweredTimeout), "")
 	if err != nil {
 		p.logger.Error("framework.policy.timer_fire.marshal",
 			"adapter", p.adapterName, "request_id", requestID, "err", err.Error())
@@ -187,7 +187,7 @@ func (p *timerPolicy) fire(requestID adapter.CorrelationKey) {
 		}
 		res, err := p.respond(ctx, requestID, payload, adapter.RespondOptions{
 			Status: "failed",
-			Reason: string(message.TerminalAdapterDefaultTimeout),
+			Reason: string(message.TerminalUnansweredTimeout),
 		})
 		if err == nil {
 			p.logger.Info("framework.policy.timer_fired",

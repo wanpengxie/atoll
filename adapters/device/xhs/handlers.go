@@ -116,7 +116,7 @@ const (
 
 // normaliseStatus maps the wire status string to the closed outcome
 // set. Unknown / blank values resolve to outcomeUnknown so the adapter
-// emits a failed terminal with adapter_execution_failed and preserves
+// emits a failed terminal with receiver_internal_error and preserves
 // callback_status_unknown in payload.error_code.
 func normaliseStatus(raw string) callbackOutcome {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
@@ -153,12 +153,12 @@ func buildRespondPayload(cb Callback, requestType string) (json.RawMessage, stri
 		copyAllowedKeys(payload, cb.Result, resultAllowListFor(requestType))
 	case outcomeError:
 		status = "failed"
-		reason = string(message.TerminalAdapterExecutionFailed)
+		reason = string(message.TerminalReceiverInternalError)
 		payload["error_code"] = errorReason(cb.ErrorObj)
 		copyAllowedKeys(payload, cb.ErrorObj, errorAllowListFor(requestType))
 	default:
 		status = "failed"
-		reason = string(message.TerminalAdapterExecutionFailed)
+		reason = string(message.TerminalReceiverInternalError)
 		payload["error_code"] = "callback_status_unknown"
 	}
 

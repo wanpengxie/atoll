@@ -21,7 +21,7 @@ func TestValidateRespondReasonClosedSet(t *testing.T) {
 		{
 			name:   "terminal failure reason allowed",
 			status: "failed",
-			reason: string(message.TerminalAdapterExecutionFailed),
+			reason: string(message.TerminalReceiverInternalError),
 		},
 		{
 			name:    "reason requires failed status",

@@ -43,6 +43,7 @@ const (
 	HarnessResponseParentInvalid      HarnessRejectReason = "response_parent_invalid"
 	HarnessResponseUnauthorizedSender HarnessRejectReason = "harness_response_unauthorized_sender"
 	HarnessResponseAudienceMismatch   HarnessRejectReason = "harness_response_audience_mismatch"
+	HarnessResponseReasonInvalid      HarnessRejectReason = "harness_response_reason_invalid"
 	HarnessTerminalDuplicate          HarnessRejectReason = "terminal_duplicate"
 	HarnessWorkerFencingStale         HarnessRejectReason = "worker_fencing_stale"
 	HarnessEngineACLDenied            HarnessRejectReason = "engine_acl_denied"
@@ -69,6 +70,7 @@ var AllHarnessRejectReasons = []HarnessRejectReason{
 	HarnessResponseParentInvalid,
 	HarnessResponseUnauthorizedSender,
 	HarnessResponseAudienceMismatch,
+	HarnessResponseReasonInvalid,
 	HarnessTerminalDuplicate,
 	HarnessWorkerFencingStale,
 	HarnessEngineACLDenied,
@@ -107,6 +109,7 @@ func (r HarnessRejectReason) HTTPStatus() int {
 		HarnessAudienceActorNotRegistered,
 		HarnessAudienceHandlerMismatch,
 		HarnessResponseAudienceMismatch,
+		HarnessResponseReasonInvalid,
 		HarnessPayloadSchemaViolation,
 		HarnessDocRefsInvalid:
 		return 400
@@ -184,23 +187,17 @@ type TerminalFailureReason string
 
 // TerminalFailureReason closed set (per L1 §10.3.3).
 const (
-	TerminalUnansweredTimeout      TerminalFailureReason = "unanswered_timeout"
-	TerminalAdapterDefaultTimeout  TerminalFailureReason = "adapter_default_timeout"
-	TerminalReceiverUnavailable    TerminalFailureReason = "receiver_unavailable"
-	TerminalHumanUnansweredTimeout TerminalFailureReason = "human_unanswered_timeout"
-	TerminalAdapterExecutionFailed TerminalFailureReason = "adapter_execution_failed"
-	TerminalAdapterPanic           TerminalFailureReason = "adapter_panic"
+	TerminalUnansweredTimeout     TerminalFailureReason = "unanswered_timeout"
+	TerminalReceiverInternalError TerminalFailureReason = "receiver_internal_error"
+	TerminalReceiverUnavailable   TerminalFailureReason = "receiver_unavailable"
 )
 
 // AllTerminalFailureReasons enumerates every value of the
 // TerminalFailureReason closed set.
 var AllTerminalFailureReasons = []TerminalFailureReason{
 	TerminalUnansweredTimeout,
-	TerminalAdapterDefaultTimeout,
+	TerminalReceiverInternalError,
 	TerminalReceiverUnavailable,
-	TerminalHumanUnansweredTimeout,
-	TerminalAdapterExecutionFailed,
-	TerminalAdapterPanic,
 }
 
 // String returns the wire form of r.

@@ -62,7 +62,14 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 			Detail:       "parent_id is not kind=request: " + string(env.ParentID),
 		}, nil
 	}
-	if !audienceContains(parent.Audience, env.Sender.ID) && !isSystemTerminalFallback(env) {
+	systemFallback, reasonCheck := allowsSystemTerminalFallback(env)
+	if reasonCheck.invalid {
+		return khar.Outcome{
+			RejectReason: message.HarnessResponseReasonInvalid,
+			Detail:       reasonCheck.detail,
+		}, nil
+	}
+	if !audienceContains(parent.Audience, env.Sender.ID) && !systemFallback {
 		return khar.Outcome{
 			RejectReason: message.HarnessResponseUnauthorizedSender,
 			Detail:       "response sender is not in parent request audience: " + string(env.Sender.ID),
@@ -72,6 +79,12 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 		return khar.Outcome{
 			RejectReason: message.HarnessResponseAudienceMismatch,
 			Detail:       "response audience must equal parent request sender: " + string(parent.Sender.ID),
+		}, nil
+	}
+	if reasonCheck = checkFailedResponseReason(env.Payload); reasonCheck.invalid {
+		return khar.Outcome{
+			RejectReason: message.HarnessResponseReasonInvalid,
+			Detail:       reasonCheck.detail,
 		}, nil
 	}
 
@@ -112,33 +125,61 @@ func audienceExactlySender(audience message.Audience, sender actor.ActorID) bool
 	return len(audience) == 1 && audience[0] == sender
 }
 
-func isSystemTerminalFallback(env *message.Envelope) bool {
+type failedResponseReasonCheck struct {
+	failed    bool
+	hasReason bool
+	reason    string
+	invalid   bool
+	detail    string
+}
+
+func allowsSystemTerminalFallback(env *message.Envelope) (bool, failedResponseReasonCheck) {
 	if env.Sender.ID != actor.SystemActorID {
-		return false
+		return false, failedResponseReasonCheck{}
 	}
-	if len(env.Payload) == 0 {
-		return false
+	check := checkFailedResponseReason(env.Payload)
+	if check.invalid {
+		return false, check
+	}
+	return check.failed && check.hasReason && terminalFailureReasonAllowed(check.reason), check
+}
+
+func checkFailedResponseReason(payload []byte) failedResponseReasonCheck {
+	var check failedResponseReasonCheck
+	if len(payload) == 0 {
+		return check
 	}
 	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(env.Payload, &doc); err != nil {
-		return false
+	if err := json.Unmarshal(payload, &doc); err != nil {
+		return check
 	}
 	rawStatus, ok := doc["status"]
 	if !ok {
-		return false
+		return check
 	}
 	var status string
 	if err := json.Unmarshal(rawStatus, &status); err != nil || status != "failed" {
-		return false
+		return check
 	}
+	check.failed = true
 	rawReason, ok := doc["reason"]
 	if !ok {
-		return false
+		return check
 	}
-	var reason string
-	if err := json.Unmarshal(rawReason, &reason); err != nil {
-		return false
+	check.hasReason = true
+	if err := json.Unmarshal(rawReason, &check.reason); err != nil {
+		check.invalid = true
+		check.detail = "payload.reason must be a string"
+		return check
 	}
+	if !terminalFailureReasonAllowed(check.reason) {
+		check.invalid = true
+		check.detail = "payload.reason not in terminal_failure_reason closed set: " + check.reason
+	}
+	return check
+}
+
+func terminalFailureReasonAllowed(reason string) bool {
 	for _, r := range message.AllTerminalFailureReasons {
 		if reason == string(r) {
 			return true

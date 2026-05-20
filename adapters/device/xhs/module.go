@@ -30,7 +30,7 @@ type Config struct {
 	// DefaultSession is the device_session_id used when an inbound
 	// request payload omits one. Optional — if empty AND the payload
 	// also omits device_session_id, Module.Handle emits a synchronous
-	// failed terminal with terminal_failure_reason=adapter_execution_failed
+	// failed terminal with terminal_failure_reason=receiver_internal_error
 	// and payload.error_code="device_session_missing" rather than guessing.
 	DefaultSession devicetransit.DeviceSessionID
 
@@ -190,7 +190,7 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 
 	// Confirm the session is registered + reachable. The framework
 	// state-machine guarantees `active` is the only routable state;
-	// other states surface as adapter_execution_failed with a
+	// other states surface as receiver_internal_error with a
 	// device-specific payload.error_code.
 	sess, ok, err := m.sessions.Get(ctx, sid)
 	if err != nil {
@@ -308,7 +308,7 @@ func (m *Module) failNow(ctx context.Context, requestID string, terminalReason m
 	if marshalErr != nil {
 		payload = []byte(`{}`)
 	}
-	respondReason := message.TerminalAdapterExecutionFailed
+	respondReason := message.TerminalReceiverInternalError
 	if terminalReason != "" {
 		respondReason = terminalReason
 	}

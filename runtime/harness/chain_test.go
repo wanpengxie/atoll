@@ -424,6 +424,35 @@ func TestChain_Step8_ResponseUnauthorizedSender(t *testing.T) {
 	}
 }
 
+func TestChain_Step8_SystemTerminalFallbackRejectsInvalidReason(t *testing.T) {
+	c, _, _, treg := newTestChain(t)
+	treg.Add(TypeView{
+		Type:           "feishu.chat.send",
+		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		MaxPendingMs:   10_000,
+		HandlerActorID: "tool:feishu",
+	})
+
+	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu",
+		json.RawMessage(`{"title":"x"}`))
+	if r, err := c.Write(chainCallerCtx("agent:alpha"), req); err != nil || !r.Accepted() {
+		t.Fatalf("seed request: r=%+v err=%v", r, err)
+	}
+
+	legacyPanicReason := "adapter" + "_panic"
+	payload := json.RawMessage(`{"status":"failed","reason":"` + legacyPanicReason + `"}`)
+	resp := newResponse("resp-invalid-reason", actor.SystemActorID, "req-1", "feishu.chat.send", payload)
+	resp.Audience = message.Audience{"agent:alpha"}
+	res, err := c.Write(chainCallerCtx(actor.SystemActorID), resp)
+	if err != nil {
+		t.Fatalf("Write invalid system fallback: %v", err)
+	}
+	if res.RejectReason != message.HarnessResponseReasonInvalid {
+		t.Fatalf("expected harness_response_reason_invalid, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
 func TestChain_Step8_ResponseAudienceMismatch(t *testing.T) {
 	c, _, _, treg := newTestChain(t)
 	treg.Add(TypeView{

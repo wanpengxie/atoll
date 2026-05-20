@@ -465,7 +465,7 @@ func TestManagerDispatchRejectsChannelMismatch(t *testing.T) {
 	}
 }
 
-func TestManagerTimerFiresDefaultTimeout(t *testing.T) {
+func TestManagerTimerFiresUnansweredTimeout(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
@@ -507,8 +507,8 @@ func TestManagerTimerFiresDefaultTimeout(t *testing.T) {
 	if payload["status"] != "failed" {
 		t.Fatalf("payload.status=%v want failed", payload["status"])
 	}
-	if payload["reason"] != string(message.TerminalAdapterDefaultTimeout) {
-		t.Fatalf("payload.reason=%v want adapter_default_timeout", payload["reason"])
+	if payload["reason"] != string(message.TerminalUnansweredTimeout) {
+		t.Fatalf("payload.reason=%v want unanswered_timeout", payload["reason"])
 	}
 }
 
@@ -558,8 +558,8 @@ func TestManagerTimerRetriesTransientRespondWriteErrors(t *testing.T) {
 	if err := json.Unmarshal(written[2].Payload, &payload); err != nil {
 		t.Fatalf("decode final payload: %v", err)
 	}
-	if payload["reason"] != string(message.TerminalAdapterDefaultTimeout) {
-		t.Fatalf("payload.reason=%v want adapter_default_timeout", payload["reason"])
+	if payload["reason"] != string(message.TerminalUnansweredTimeout) {
+		t.Fatalf("payload.reason=%v want unanswered_timeout", payload["reason"])
 	}
 }
 
@@ -828,7 +828,7 @@ func TestManagerDeduplicatesResponseFromTerminalDuplicate(t *testing.T) {
 	}
 }
 
-func TestManagerHandlePanicEmitsAdapterPanic(t *testing.T) {
+func TestManagerHandlePanicEmitsReceiverInternalError(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
@@ -858,7 +858,7 @@ func TestManagerHandlePanicEmitsAdapterPanic(t *testing.T) {
 	if err := json.Unmarshal(written[0].Payload, &payload); err != nil {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
-	if payload["reason"] != string(message.TerminalAdapterPanic) {
-		t.Fatalf("payload.reason=%v want %s", payload["reason"], message.TerminalAdapterPanic)
+	if payload["reason"] != string(message.TerminalReceiverInternalError) {
+		t.Fatalf("payload.reason=%v want %s", payload["reason"], message.TerminalReceiverInternalError)
 	}
 }
