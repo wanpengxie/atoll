@@ -864,29 +864,12 @@ func TestChannelLock(t *testing.T) {
 		t.Error("ValidateWrite should fail on daemon_epoch mismatch")
 	}
 
-	// Upgrade epoch — bump owner_epoch (1 → 2). CAS uses owner_epoch
-	// for monotonic ordering since fencing_token is opaque random
-	// (proto-foundation §3.6.1).
-	ok, err := lock.UpgradeEpoch(ctx,
-		placement.FencingToken("tok-2"), placement.OwnerEpoch(2),
-		placement.DaemonID("daemon-B"), placement.DaemonEpoch(5), 2000)
-	if err != nil || !ok {
-		t.Fatalf("UpgradeEpoch: ok=%v err=%v", ok, err)
-	}
-	// Same-or-lower owner_epoch must be CAS-rejected even with a fresh token.
-	ok2, _ := lock.UpgradeEpoch(ctx,
-		placement.FencingToken("tok-3"), placement.OwnerEpoch(2),
-		placement.DaemonID("daemon-C"), placement.DaemonEpoch(6), 2100)
-	if ok2 {
-		t.Error("UpgradeEpoch CAS should reject same owner_epoch write")
-	}
-
 	// RefreshDaemon bumps only daemon_epoch.
 	if err := lock.RefreshDaemon(ctx, placement.DaemonEpoch(7), 3000); err != nil {
 		t.Fatal(err)
 	}
 	got, _, _ := lock.Get(ctx)
-	if got.DaemonEpoch != 7 || got.FencingToken != "tok-2" {
+	if got.DaemonEpoch != 7 || got.FencingToken != "tok-1" {
 		t.Errorf("after refresh got=%+v", got)
 	}
 }

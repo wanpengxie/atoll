@@ -211,8 +211,8 @@ func TestDaemon_OnCreateChannel_IdempotentReplay(t *testing.T) {
 }
 
 // TestDaemon_OnCreateChannel_HigherTokenRejected — daemon must NOT
-// silently UpgradeEpoch; reject a higher-token request after a
-// successful bind so server reconcile drives state.
+// silently rotate the channel_lock fencing tuple; reject a higher-token
+// request after a successful bind so server reconcile drives state.
 func TestDaemon_OnCreateChannel_HigherTokenRejected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

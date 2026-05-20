@@ -34,7 +34,6 @@ type ChannelLockRow struct {
 //     since each channel has its own sqlite, the row is effectively
 //     singleton).
 //   - INSERT happens during create_channel ACK preparation (lifecycle/create).
-//   - UpgradeEpoch bumps fencing_token / owner_epoch when a reclaim wins.
 //   - RefreshDaemon bumps daemon_epoch on every daemon process start
 //     (regardless of whether ownership changes) so stale worker IPC
 //     after daemon restart fails fence_check.
@@ -96,35 +95,6 @@ func (l *ChannelLock) Insert(ctx context.Context, row ChannelLockRow) error {
 	return nil
 }
 
-// UpgradeEpoch bumps fencing_token / owner_epoch when a reclaim wins
-// (or when a stale daemon is being reclaimed by a newer create_channel).
-// Rejects (returns no rows affected → ok=false) when the existing
-// owner_epoch is already >= newOwnerEpoch (CAS guard).
-//
-// Ordering uses owner_epoch — fencing_token is opaque random per
-// proto-foundation §3.6.1 and cannot be compared by magnitude.
-func (l *ChannelLock) UpgradeEpoch(
-	ctx context.Context,
-	newToken placement.FencingToken,
-	newOwnerEpoch placement.OwnerEpoch,
-	newDaemonID placement.DaemonID,
-	newDaemonEpoch placement.DaemonEpoch,
-	refreshedAt int64,
-) (bool, error) {
-	const q = `UPDATE channel_lock
-	             SET fencing_token=?, owner_epoch=?, daemon_id=?, daemon_epoch=?,
-	                 refreshed_at=?
-	             WHERE owner_epoch < ?`
-	res, err := l.db.ExecContext(ctx, q,
-		string(newToken), int64(newOwnerEpoch), string(newDaemonID), int64(newDaemonEpoch),
-		refreshedAt, int64(newOwnerEpoch))
-	if err != nil {
-		return false, fmt.Errorf("store: channel_lock upgrade: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
-}
-
 // RefreshDaemon updates daemon_epoch + refreshed_at without changing
 // fencing_token or owner_epoch. Called during boot phase 1 for every
 // channel the daemon claims to own, so stale worker IPC fails
@@ -145,7 +115,7 @@ func (l *ChannelLock) RefreshDaemon(
 // lifecycle/FencingChecker pre-flight at IPC boundary). It performs a
 // standalone Get → compare. For sqlite-mutation paths the caller MUST
 // instead use ValidateWriteTx so the check runs in the SAME transaction
-// as the INSERT and a concurrent UpgradeEpoch cannot slip between read
+// as the INSERT and a concurrent RefreshDaemon cannot slip between read
 // and write (FIX-T6).
 //
 // Returns nil when the supplied fencing_token + daemon_epoch match the
@@ -166,7 +136,7 @@ func (l *ChannelLock) ValidateWrite(
 // channel-local mutation (messages.Append, ledger.Reserve/Commit, etc.)
 // MUST call this BEFORE the actual write, inside the same *sql.Tx, so
 // the row-level lock semantics protect against a concurrent
-// UpgradeEpoch / RefreshDaemon racing with the write.
+// RefreshDaemon racing with the write.
 //
 // Returns ErrFencingStale when the channel_lock row is missing OR the
 // fencing tuple does not match. The caller is expected to rollback the

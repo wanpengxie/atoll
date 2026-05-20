@@ -96,7 +96,7 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kl
 	// 0) FIX-T6 fencing gate — when constructed with a *ChannelLock,
 	// every Append must present a matching (fencing_token, daemon_epoch)
 	// tuple via an explicit Append parameter. The check runs INSIDE
-	// the tx so a concurrent UpgradeEpoch cannot slip between SELECT
+	// the tx so a concurrent RefreshDaemon cannot slip between SELECT
 	// and INSERT. Failure path: typed *klog.AppendError so the harness
 	// chain maps it to message.HarnessWorkerFencingStale (closed-set
 	// reject). No outbox row is written.
