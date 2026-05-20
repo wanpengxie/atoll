@@ -30,11 +30,13 @@ type HumanCaller = daemonbus.HumanCaller
 // WriteMessageBody is the daemonbus `control.write_message` payload.
 // The daemon receives one per HTTP write the gateway accepts.
 //
-// `EnvelopePartial` carries the caller-shaped envelope (no id / no
-// sender). The daemon fills `sender` from `HumanCaller.MemberActorID`
-// + the actor_registry record, then derives `id = CanonicalHash(env)`
-// before invoking the harness chain (matches T1.9 §"daemon 收到 control.
-// write_message" flow).
+// `EnvelopePartial` carries the caller-shaped envelope including
+// `id` (caller-supplied per L0 §1.1, enforced at the gateway per
+// L3 §1.8.1). The daemon fills `sender` from `HumanCaller.
+// MemberActorID` + the actor_registry record, then invokes the
+// harness chain — which drives L1 §2.3 Step 3 dedupe off the
+// caller-supplied id. The daemon MUST NOT regenerate envelope.id
+// (R4-3 fix).
 type WriteMessageBody = daemonbus.WriteMessageBody
 
 // WriteMessageAckBody is the daemon → server reply. One ack per
@@ -294,15 +296,17 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 		env.Payload = []byte("{}")
 	}
 
-	// 6. Compute canonical-hash envelope.id BEFORE the chain so step
-	// 0.5 / step 8 can dedupe by id.
-	id, err := message.CanonicalHash(env)
-	if err != nil {
-		ack.RejectReason = RejectReasonInternal
-		ack.RejectDetail = "canonical_hash: " + err.Error()
+	// 6. R4-3: envelope.id MUST be supplied by the caller per L0 §1.1
+	// + L3 §1.8.1. The daemon does NOT regenerate; an empty id is a
+	// gateway-side contract bug (the gateway must binding:"required"
+	// the field) and is rejected at the daemon edge to keep the
+	// invariant local rather than silently allowing the harness to
+	// fail Step 2 with a less specific reason.
+	if env.ID == "" {
+		ack.RejectReason = RejectReasonAuthFailed
+		ack.RejectDetail = "envelope.id empty — caller MUST supply id per L3 §1.8.1"
 		return ack
 	}
-	env.ID = message.ID(id)
 
 	// 7. Invoke the harness chain — caller_context provides the
 	// authenticated principal for step 1 / step 3.

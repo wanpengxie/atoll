@@ -49,6 +49,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // askExitCodes mirror the archived daemon-go cmd/coagent contract.
@@ -97,6 +99,11 @@ func runWriteMessageCmd(name, kind string, args []string) int {
 		payload     = fs.String("payload", "", "inline JSON payload (mutually exclusive with --payload-file)")
 		payloadFile = fs.String("payload-file", "", "path to a JSON file containing the payload (preferred for large / sensitive payloads)")
 		visibility  = fs.String("visibility", "", "envelope visibility: public|private|system (default=public)")
+		// R4-3: caller MUST supply envelope.id per L3 §1.8.1. Default
+		// is a fresh uuid; agents that want L1 §2.3 idempotent retries
+		// (same id + same content) supply --message-id explicitly so
+		// re-runs collapse to one daemon append.
+		messageID = fs.String("message-id", "", "sender-provided envelope.id (default: fresh uuid; reuse to make a retry idempotent)")
 	)
 	serverURL, token := bindGlobalFlags(fs)
 	// Use a Buffer for parse errors so we can emit them as flat JSON to
@@ -165,8 +172,18 @@ func runWriteMessageCmd(name, kind string, args []string) int {
 		return askExitInfra
 	}
 
+	// R4-3: caller MUST supply envelope.id per L3 §1.8.1. Use the
+	// caller-provided --message-id when set so retries collapse via L1
+	// §2.3 dedupe; otherwise fall back to a fresh uuid for a one-shot
+	// invocation.
+	resolvedMessageID := strings.TrimSpace(*messageID)
+	if resolvedMessageID == "" {
+		resolvedMessageID = uuid.NewString()
+	}
+
 	// Compose the request body for the gateway POST.
 	body := map[string]any{
+		"id":      resolvedMessageID,
 		"type":    *typeName,
 		"kind":    kind,
 		"payload": rawPayload,

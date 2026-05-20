@@ -116,6 +116,7 @@ func TestAsk_HappyPath(t *testing.T) {
 	}
 
 	var got struct {
+		ID       string          `json:"id"`
 		Type     string          `json:"type"`
 		Kind     string          `json:"kind"`
 		Audience []string        `json:"audience"`
@@ -123,6 +124,10 @@ func TestAsk_HappyPath(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(fg.lastBody), &got); err != nil {
 		t.Fatalf("decode posted body: %v\nraw=%s", err, fg.lastBody)
+	}
+	// R4-3: caller MUST supply envelope.id; CLI defaults to a fresh uuid.
+	if got.ID == "" {
+		t.Errorf("posted body missing required envelope.id (R4-3); raw=%s", fg.lastBody)
 	}
 	if got.Type != "xhs.publish" || got.Kind != "request" {
 		t.Errorf("type/kind=%q/%q", got.Type, got.Kind)

@@ -84,6 +84,7 @@ func TestE2E_DaemonRestartMidXHSPublishRequest_RecoverPending(t *testing.T) {
 	})
 
 	req := postRawMessage(t, s, channelID, map[string]any{
+		"id":       "msg-adapter-restart-1",
 		"type":     "xhs.publish",
 		"kind":     "request",
 		"audience": []string{"tool:xhs-adapter"},

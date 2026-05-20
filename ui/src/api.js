@@ -21,6 +21,30 @@ export class APIError extends Error {
   }
 }
 
+// newEnvelopeID returns a fresh sender-provided envelope.id for
+// /api/channels/:chID/messages. We prefer crypto.randomUUID when
+// available (modern browsers + secure contexts) and fall back to a
+// hand-rolled v4-shape uuid built from crypto.getRandomValues so
+// callers in older / non-secure contexts still emit a distinct id.
+// Caller-supplied ids are what drives L1 §2.3 harness dedupe — see
+// proto-layer3.md §1.8.3.
+function newEnvelopeID() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const buf = new Uint8Array(16);
+    crypto.getRandomValues(buf);
+    buf[6] = (buf[6] & 0x0f) | 0x40; // v4
+    buf[8] = (buf[8] & 0x3f) | 0x80; // RFC4122 variant
+    const hex = Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  // Last-resort non-cryptographic fallback (shouldn't trigger in
+  // current target browsers, but keeps the API from throwing).
+  return 'msg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+
 async function request(method, path, body) {
   const init = {
     method,
@@ -67,10 +91,18 @@ export const api = {
   // Messages — send accepts an envelope shape so callers can drive
   // kind / audience / visibility explicitly; defaults keep current
   // behaviour ("public event of the given type") for the demo composer.
+  //
+  // R4-3: caller MUST supply envelope.id (L3 §1.8.1 sender-provided);
+  // re-emit the same id on retry to hit L1 §2.3 dedupe. When the caller
+  // omits id we generate a fresh per-request uuid so the first attempt
+  // succeeds (and any same-payload retry through that path would
+  // produce a new id, which is conservative — collapse-on-retry only
+  // kicks in for callers that thread their own id through).
   listMessages:     (chID, after = 0, limit = 200) =>
                       request('GET', `/api/channels/${chID}/messages?after=${after}&limit=${limit}`),
   sendMessage:      (chID, payload, type = 'human.text', opts = {}) =>
                       request('POST', `/api/channels/${chID}/messages`, {
+                        id: opts.id || newEnvelopeID(),
                         type,
                         payload,
                         visibility: opts.visibility || 'public',

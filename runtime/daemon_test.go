@@ -218,6 +218,8 @@ func TestDaemon_Phase3_DispatchesWriteMessage(t *testing.T) {
 		ChannelID:   chID,
 		HumanCaller: hc,
 		EnvelopePartial: message.Envelope{
+			// R4-3: caller-supplied envelope.id (L0 §1.1 / L3 §1.8.1).
+			ID:         "msg-daemon-1",
 			Type:       "human.text",
 			Kind:       message.KindEvent,
 			Payload:    json.RawMessage(`{"text":"hi"}`),
@@ -1086,6 +1088,8 @@ func TestDaemon_Phase3_ChannelAgent_Registered(t *testing.T) {
 		ChannelID:   chID,
 		HumanCaller: hc,
 		EnvelopePartial: message.Envelope{
+			// R4-3: caller-supplied envelope.id.
+			ID:         "msg-agent-1",
 			Type:       "human.text",
 			Kind:       message.KindEvent,
 			Payload:    json.RawMessage(`{"text":"hi agent"}`),
@@ -1261,6 +1265,10 @@ func TestDaemon_Phase3_WorkerReply(t *testing.T) {
 			ChannelID:   chID,
 			HumanCaller: hc,
 			EnvelopePartial: message.Envelope{
+				// R4-3: caller-supplied envelope.id (one per nonce so each
+				// iteration appends a distinct row; reuse would hit L1
+				// §2.3 dedupe).
+				ID:         message.ID("msg-iter-" + nonce),
 				Type:       "human.text",
 				Kind:       message.KindEvent,
 				Payload:    json.RawMessage(`{"text":"hi-` + nonce + `"}`),

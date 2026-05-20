@@ -378,6 +378,12 @@ func (a *App) handleBindChannel(c *gin.Context) {
 // ----------------------------------------------------------------------
 
 type writeMessageReq struct {
+	// R4-3: caller MUST supply envelope.id (L0 §1.1 sender-provided).
+	// This drives L1 §2.3 harness Step 3 dedupe so retries with the
+	// same id + same content collapse to one append. The gateway no
+	// longer fabricates an id on the caller's behalf — proto-layer3
+	// §1.8.1 / §1.8.3.
+	ID            string          `json:"id"          binding:"required"`
 	Type          string          `json:"type"        binding:"required"`
 	Payload       json.RawMessage `json:"payload"     binding:"required"`
 	ParentID      string          `json:"parent_id"`
@@ -451,6 +457,10 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		audience = append(audience, actor.ActorID(id))
 	}
 	envelope := message.Envelope{
+		// R4-3: id is caller-supplied (L0 §1.1 sender-provided);
+		// drives L1 §2.3 harness Step 3 dedupe. The gateway does
+		// not fabricate id on the caller's behalf.
+		ID:            message.ID(req.ID),
 		Type:          req.Type,
 		ChannelID:     channel.ID(channelID),
 		Sender:        message.Sender{Kind: actor.KindHuman, ID: actor.ActorID(member.MemberActorID)},

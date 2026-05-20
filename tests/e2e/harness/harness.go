@@ -36,6 +36,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	_ "modernc.org/sqlite"
 )
@@ -632,10 +633,23 @@ type PostMessageResponse struct {
 // PostMessage submits a human-authored text message. envType is
 // usually "human.text"; kindHint is forwarded as the optional `kind`
 // field (empty = let server pick the L1 default).
+//
+// R4-3: gateway now requires caller-supplied envelope.id (L3 §1.8.1).
+// We fill a fresh uuid per call so individual e2e cases don't have to
+// fabricate ids. Tests that exercise L1 §2.3 idempotent-retry semantics
+// use PostMessageWithID below to thread their own id.
 func (s *Stack) PostMessage(channelID, envType, text, kindHint string) PostMessageResponse {
+	return s.PostMessageWithID(channelID, uuid.NewString(), envType, text, kindHint)
+}
+
+// PostMessageWithID is the explicit-id variant. Tests that exercise
+// L1 §2.3 idempotent-retry / id-duplicate-conflict semantics use this
+// to reuse an id across submissions.
+func (s *Stack) PostMessageWithID(channelID, messageID, envType, text, kindHint string) PostMessageResponse {
 	s.t.Helper()
 	payload, _ := json.Marshal(map[string]string{"text": text})
 	body := map[string]any{
+		"id":      messageID,
 		"type":    envType,
 		"payload": json.RawMessage(payload),
 	}

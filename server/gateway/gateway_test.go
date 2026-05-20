@@ -169,6 +169,7 @@ func TestHandleWriteMessage_RequestAudienceRejected(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			payload := writeBody{
+				ID:       "msg-aud-" + tc.name,
 				Type:     "human.text",
 				Kind:     "request",
 				Payload:  json.RawMessage(`{"text":"hi"}`),
@@ -196,6 +197,183 @@ func TestHandleWriteMessage_RequestAudienceRejected(t *testing.T) {
 				t.Errorf("error=%q want harness_request_audience_invalid", errBody.Error)
 			}
 		})
+	}
+}
+
+// TestHandleWriteMessage_MissingID covers R4-3: caller MUST supply
+// envelope.id per L3 §1.8.1; the gateway's binding:"required" tag
+// MUST reject a missing id with HTTP 400 before any daemon work
+// happens. Without this guard the daemon would later reject with a
+// less specific reason (and earlier versions would silently auto-id
+// the envelope, masking the contract).
+func TestHandleWriteMessage_MissingID(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	sess := registerLoginAndCreateChannel(t, client, srv.URL, app, "missing-id@example.com")
+
+	payload := writeBody{
+		// ID intentionally omitted — gateway MUST 400.
+		Type:     "human.text",
+		Kind:     "event",
+		Payload:  json.RawMessage(`{"text":"no-id"}`),
+		Audience: []string{"*"},
+	}
+	raw, _ := json.Marshal(payload)
+	req, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/channels/"+sess.channelID+"/messages",
+		strings.NewReader(string(raw)))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: sess.session})
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400 (R4-3 caller MUST supply id)", resp.StatusCode)
+	}
+	var errBody struct {
+		Error string `json:"error"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&errBody)
+	// gin's binding error mentions the missing field by name; we just
+	// assert it surfaced via the standard error envelope.
+	if errBody.Error == "" {
+		t.Errorf("error body empty; want gin binding error mentioning id")
+	}
+}
+
+// TestHandleWriteMessage_CallerIDForwardedToDaemon covers R4-3: the
+// gateway MUST forward the caller-supplied envelope.id unchanged into
+// the daemon control.write_message frame. This is what makes L1 §2.3
+// Step 3 dedupe observable end-to-end (the daemon now rejects empty
+// ids at its edge — see TestWriteMessageHandler_EmptyEnvelopeID — so
+// any gateway-side regression would surface as a daemon reject).
+func TestHandleWriteMessage_CallerIDForwardedToDaemon(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	sess := registerLoginAndCreateChannel(t, client, srv.URL, app, "caller-id-fwd@example.com")
+
+	// Mount a stub daemon connection — same pattern as the existing
+	// correlation-inherit test above.
+	if err := app.Daemonbus().RegisterDaemon(ctx,
+		placement.DaemonID("d-callerid"), "h", "v", 0, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon: %v", err)
+	}
+	epoch, err := app.Daemonbus().IssueConnectionEpoch(ctx, placement.DaemonID("d-callerid"))
+	if err != nil {
+		t.Fatalf("IssueConnectionEpoch: %v", err)
+	}
+	svrTx, dmnTx := newPipePair()
+	conn := daemonbus.NewConnection(placement.DaemonID("d-callerid"), epoch, svrTx)
+	app.Daemonbus().Register(conn)
+	defer app.Daemonbus().Unregister(placement.DaemonID("d-callerid"))
+	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
+
+	p, createReq, err := app.Placements().Reserve(ctx,
+		channel.ID(sess.channelID),
+		placement.DaemonID("d-callerid"),
+		placement.ConnectionEpoch(epoch), nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	ack := placement.CreateChannelAck{
+		ChannelID:       p.ChannelID,
+		CreateRequestID: createReq.CreateRequestID,
+		OwnerEpoch:      p.OwnerEpoch,
+		FencingToken:    p.FencingToken,
+		DaemonID:        placement.DaemonID("d-callerid"),
+		Status:          placement.AckBound,
+	}
+	if ok, err := app.Placements().Activate(ctx, ack, placement.ConnectionEpoch(epoch)); err != nil || !ok {
+		t.Fatalf("Activate: ok=%v err=%v", ok, err)
+	}
+
+	const callerSuppliedID = "msg-caller-fwd-12345"
+
+	respCh := make(chan *http.Response, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		body, _ := json.Marshal(writeBody{
+			ID:       callerSuppliedID,
+			Type:     "human.text",
+			Kind:     string(message.KindEvent),
+			Payload:  json.RawMessage(`{"text":"hi"}`),
+			Audience: []string{"*"},
+		})
+		req, _ := http.NewRequest(http.MethodPost,
+			srv.URL+"/api/channels/"+sess.channelID+"/messages",
+			strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: sess.session})
+		resp, err := client.Do(req)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		respCh <- resp
+	}()
+
+	frame, err := dmnTx.ReadFrame(ctx)
+	if err != nil {
+		t.Fatalf("read write_message: %v", err)
+	}
+	var wmbody kerneldaemonbus.WriteMessageBody
+	if err := json.Unmarshal(frame.Payload, &wmbody); err != nil {
+		t.Fatalf("decode write body: %v", err)
+	}
+	if got := string(wmbody.EnvelopePartial.ID); got != callerSuppliedID {
+		t.Fatalf("gateway forwarded envelope.id=%q want caller-supplied %q (R4-3)",
+			got, callerSuppliedID)
+	}
+
+	// Ack with the same caller id so the gateway's response surfaces it.
+	ackBody := kerneldaemonbus.WriteMessageAckBody{
+		FrameID:   wmbody.FrameID,
+		Accepted:  true,
+		MessageID: message.ID(callerSuppliedID),
+		Seq:       1,
+	}
+	raw, _ := json.Marshal(ackBody)
+	if err := dmnTx.WriteFrame(ctx, kerneldaemonbus.Frame{
+		FrameID:               frame.FrameID,
+		FrameType:             kerneldaemonbus.FrameTypeControlWriteMessageAck,
+		DaemonID:              "d-callerid",
+		DaemonConnectionEpoch: epoch,
+		Payload:               raw,
+	}); err != nil {
+		t.Fatalf("write ack: %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("POST: %v", err)
+	case resp := <-respCh:
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d want 200", resp.StatusCode)
+		}
+		var out map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if out["message_id"] != callerSuppliedID {
+			t.Fatalf("response message_id=%v want %q (R4-3 echo)", out["message_id"], callerSuppliedID)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
 	}
 }
 
@@ -548,6 +726,7 @@ func TestHandleWriteMessageResponseInheritsParentCorrelation(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		body, _ := json.Marshal(writeBody{
+			ID:       "msg-response-corr",
 			Type:     "human.text",
 			Kind:     string(message.KindResponse),
 			ParentID: parent.ID.String(),
@@ -616,8 +795,10 @@ func TestHandleWriteMessageResponseInheritsParentCorrelation(t *testing.T) {
 }
 
 // writeBody mirrors writeMessageReq (unexported in gateway). Used by
-// TestHandleWriteMessage_* to build wire-shape JSON.
+// TestHandleWriteMessage_* to build wire-shape JSON. R4-3: `id` is
+// caller-supplied per L3 §1.8.1; tests fill a fresh uuid by default.
 type writeBody struct {
+	ID            string          `json:"id,omitempty"`
 	Type          string          `json:"type"`
 	Kind          string          `json:"kind,omitempty"`
 	Payload       json.RawMessage `json:"payload"`

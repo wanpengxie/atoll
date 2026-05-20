@@ -142,6 +142,10 @@ func newWriteMessageBody(t *testing.T, payload json.RawMessage, ts int64) transi
 		ChannelID:   testWriteChannel,
 		HumanCaller: hc,
 		EnvelopePartial: message.Envelope{
+			// R4-3: caller-supplied envelope.id (L0 §1.1 / L3 §1.8.1).
+			// The gateway stamps this from the inbound HTTP body; tests
+			// fabricate a stable id so retries within a test reuse it.
+			ID:         "msg-write-1",
 			Type:       "human.text",
 			Kind:       message.KindEvent,
 			Payload:    payload,
@@ -729,5 +733,65 @@ func TestWriteMessageHandler_NonceCacheDisabledByDefault(t *testing.T) {
 	}
 	if ack := h.Handle(context.Background(), body); !ack.Accepted {
 		t.Fatalf("replay accepted when window=0: %+v", ack)
+	}
+}
+
+// TestWriteMessageHandler_EmptyEnvelopeID covers R4-3: caller MUST
+// supply envelope.id per L3 §1.8.1. The daemon edge rejects an empty
+// id BEFORE invoking the harness chain so the contract violation
+// surfaces with a specific reason rather than a less-specific Step 2
+// envelope-shape reject downstream.
+func TestWriteMessageHandler_EmptyEnvelopeID(t *testing.T) {
+	t.Parallel()
+	reg := newStubRegistry()
+	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman, DisplayName: "Alice"})
+	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 1}}
+	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
+
+	body := newWriteMessageBody(t, nil, 9_900)
+	body.EnvelopePartial.ID = "" // wipe caller-supplied id
+
+	ack := h.Handle(context.Background(), body)
+	if ack.Accepted {
+		t.Fatalf("empty envelope.id MUST reject; got %+v", ack)
+	}
+	if ack.RejectReason != transit.RejectReasonAuthFailed {
+		t.Errorf("RejectReason=%q want %q (R4-3 caller-id missing)",
+			ack.RejectReason, transit.RejectReasonAuthFailed)
+	}
+	if chain.lastEnv != nil {
+		t.Error("harness chain MUST NOT see frames missing envelope.id (R4-3)")
+	}
+}
+
+// TestWriteMessageHandler_PreservesCallerID covers R4-3: the daemon
+// MUST forward the caller-supplied envelope.id unchanged into the
+// harness chain (no canonical-hash regeneration). This is what makes
+// L1 §2.3 Step 3 dedupe-on-retry observable from the caller's POV.
+func TestWriteMessageHandler_PreservesCallerID(t *testing.T) {
+	t.Parallel()
+	reg := newStubRegistry()
+	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman, DisplayName: "Alice"})
+	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 7}}
+	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
+
+	const callerID = "msg-caller-supplied-abc123"
+	body := newWriteMessageBody(t, nil, 9_900)
+	body.EnvelopePartial.ID = callerID
+
+	ack := h.Handle(context.Background(), body)
+	if !ack.Accepted {
+		t.Fatalf("Handle rejected: %+v", ack)
+	}
+	if chain.lastEnv == nil {
+		t.Fatal("chain never invoked")
+	}
+	if string(chain.lastEnv.ID) != callerID {
+		t.Errorf("daemon mutated envelope.id: got %q want %q (R4-3 invariant)",
+			chain.lastEnv.ID, callerID)
+	}
+	if string(ack.MessageID) != callerID {
+		t.Errorf("ack.MessageID=%q want caller id %q (R4-3 echo)",
+			ack.MessageID, callerID)
 	}
 }
