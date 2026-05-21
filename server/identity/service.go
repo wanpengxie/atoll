@@ -7,8 +7,8 @@
 // Authoritative spec: .dalek/pm/m1.5-tickets.md §T6 (identity 子目录) +
 // server-side sqlite schema 精简 (users / verification_codes / sessions).
 //
-// Demo-period constraints:
-//   - bcrypt cost = 4 (configurable; spec says demo)
+// Production constraints:
+//   - bcrypt cost defaults to 10; dev/tests may explicitly lower it via Config.
 //   - verification codes are 6-digit numeric, logged to stdout when
 //     IssueCode is called; production should plug in SMTP via
 //     ServiceOption + Service.notifyFn.
@@ -32,15 +32,19 @@ import (
 	"log"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// Default bcrypt cost — keep low for demo + tests so registration is
-// snappy. Override via Config.BcryptCost.
-const defaultBcryptCost = 4
+// MinProductionBcryptCost is the hardened floor enforced by gateway
+// production config.
+const MinProductionBcryptCost = 10
+
+// Default bcrypt cost. Override via Config.BcryptCost in dev/tests.
+const defaultBcryptCost = MinProductionBcryptCost
 
 // Default session TTL — refresh on every Authenticate call within the
 // remaining lifetime.
@@ -48,6 +52,11 @@ const defaultSessionTTL = 30 * 24 * time.Hour
 
 // Verification code TTL — 15 minutes, in line with typical demo flows.
 const defaultVerificationTTL = 15 * time.Minute
+
+const (
+	defaultAuthRateLimitWindow = time.Minute
+	defaultAuthRateLimitMax    = 20
+)
 
 // VerificationPurpose enumerates the lifecycle of a code. Demo only
 // needs PurposeRegister but the column is wired so adding reset /
@@ -91,6 +100,12 @@ type Config struct {
 	// default logs to stdout; production wires SMTP / SMS. nil keeps
 	// the default behaviour.
 	NotifyCode func(email, code string, purpose VerificationPurpose)
+	// AuthRateLimitWindow controls the in-memory issue/register/login
+	// route limiter. 0 uses the default.
+	AuthRateLimitWindow time.Duration
+	// AuthRateLimitMax is the max requests per key per window. 0 uses
+	// the default.
+	AuthRateLimitMax int
 }
 
 // Service is the identity facade — built once per process and shared
@@ -105,6 +120,7 @@ type Service struct {
 	sessionTTL      time.Duration
 	verificationTTL time.Duration
 	notify          func(email, code string, purpose VerificationPurpose)
+	authLimiter     *rateLimiter
 }
 
 // NewService constructs a Service rooted at db. The db must already
@@ -119,6 +135,12 @@ func NewService(db *sql.DB, cfg Config) *Service {
 	}
 	if cfg.VerificationTTL <= 0 {
 		cfg.VerificationTTL = defaultVerificationTTL
+	}
+	if cfg.AuthRateLimitWindow <= 0 {
+		cfg.AuthRateLimitWindow = defaultAuthRateLimitWindow
+	}
+	if cfg.AuthRateLimitMax <= 0 {
+		cfg.AuthRateLimitMax = defaultAuthRateLimitMax
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -138,6 +160,7 @@ func NewService(db *sql.DB, cfg Config) *Service {
 		sessionTTL:      cfg.SessionTTL,
 		verificationTTL: cfg.VerificationTTL,
 		notify:          notify,
+		authLimiter:     newRateLimiter(cfg.AuthRateLimitWindow, cfg.AuthRateLimitMax),
 	}
 }
 
@@ -200,3 +223,49 @@ func (s *Service) checkPassword(stored, pw string) error {
 
 // newID generates a UUID v4 — used as the user_id primary key.
 func newID() string { return uuid.NewString() }
+
+type rateLimitEntry struct {
+	windowStart time.Time
+	count       int
+}
+
+type rateLimiter struct {
+	mu      sync.Mutex
+	window  time.Duration
+	max     int
+	entries map[string]rateLimitEntry
+}
+
+func newRateLimiter(window time.Duration, max int) *rateLimiter {
+	return &rateLimiter{
+		window:  window,
+		max:     max,
+		entries: make(map[string]rateLimitEntry),
+	}
+}
+
+func (l *rateLimiter) allow(key string, now time.Time) bool {
+	if key == "" || l == nil {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.entries) > 1024 {
+		for k, entry := range l.entries {
+			if now.Sub(entry.windowStart) >= l.window {
+				delete(l.entries, k)
+			}
+		}
+	}
+	entry := l.entries[key]
+	if entry.windowStart.IsZero() || now.Sub(entry.windowStart) >= l.window {
+		l.entries[key] = rateLimitEntry{windowStart: now, count: 1}
+		return true
+	}
+	if entry.count >= l.max {
+		return false
+	}
+	entry.count++
+	l.entries[key] = entry
+	return true
+}

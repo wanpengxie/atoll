@@ -302,9 +302,13 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 			if err != nil {
 				return
 			}
+			current, err := s.ValidateToken(c.Request.Context(), sessionID, token)
+			if err != nil {
+				return
+			}
 			frame.DeviceSessionID = devicetransit.DeviceSessionID(sessionID)
-			frame.ChannelID = row.ChannelID
-			frame.AdapterActorID = row.AdapterActorID
+			frame.ChannelID = current.ChannelID
+			frame.AdapterActorID = current.AdapterActorID
 			if err := forwarder.ForwardDeviceFrame(c.Request.Context(), frame); err != nil {
 				return
 			}
@@ -412,5 +416,19 @@ func (s *Service) unregisterConnection(sessionID string, conn *Connection) bool 
 		return false
 	}
 	delete(s.sessions, sessionID)
+	return true
+}
+
+func (s *Service) closeCurrentConnection(sessionID string) bool {
+	s.mu.Lock()
+	conn := s.sessions[sessionID]
+	if conn != nil {
+		delete(s.sessions, sessionID)
+	}
+	s.mu.Unlock()
+	if conn == nil {
+		return false
+	}
+	_ = conn.Close()
 	return true
 }

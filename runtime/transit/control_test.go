@@ -122,6 +122,22 @@ func mustNewWriteHandler(t *testing.T, router transit.WriteMessageRouter, window
 	return h
 }
 
+func TestSignHumanCallerDisambiguatesPipeFields(t *testing.T) {
+	t.Parallel()
+	const legacyConcat = "ch|user|id|user:alice|7|nonce"
+	aLegacy := "ch|user" + "|" + "id" + "|" + string(actor.ActorID("user:alice")) + "|" + "7" + "|" + "nonce"
+	bLegacy := "ch" + "|" + "user|id" + "|" + string(actor.ActorID("user:alice")) + "|" + "7" + "|" + "nonce"
+	if aLegacy != legacyConcat || bLegacy != legacyConcat {
+		t.Fatalf("test setup no longer creates an old pipe-concat collision: %q %q", aLegacy, bLegacy)
+	}
+
+	a := transit.SignHumanCaller([]byte(testWriteSecret), "ch|user", "id", "user:alice", 7, "nonce")
+	b := transit.SignHumanCaller([]byte(testWriteSecret), "ch", "user|id", "user:alice", 7, "nonce")
+	if a == b {
+		t.Fatal("structured HumanCaller signatures collided for different field segmentation")
+	}
+}
+
 func newWriteMessageBody(t *testing.T, payload json.RawMessage, ts int64) transit.WriteMessageBody {
 	t.Helper()
 	hc := transit.HumanCaller{

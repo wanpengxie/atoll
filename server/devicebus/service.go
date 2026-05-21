@@ -36,8 +36,13 @@ import (
 	"github.com/wanpengxie/ActOS/server/channelaccess"
 )
 
-// Default token TTL (24h). Configurable via Config.
-const defaultTokenTTL = 24 * time.Hour
+// Default token TTL (30d). Configurable via Config.
+const defaultTokenTTL = 30 * 24 * time.Hour
+
+// defaultMaxSessionsPerUserChannel caps non-terminal sessions for one
+// (user_id, channel_id). Pending sessions count so failed bind storms cannot
+// grow the table without bound.
+const defaultMaxSessionsPerUserChannel = 8
 
 // State enumerates the T1.10 lifecycle:
 //
@@ -58,11 +63,12 @@ var AllStates = []State{StatePending, StateReady, StateActive, StateOffline, Sta
 
 // Errors returned by Service.
 var (
-	ErrSessionNotFound = errors.New("devicebus: session not found")
-	ErrTokenInvalid    = errors.New("devicebus: invalid token")
-	ErrSessionExpired  = errors.New("devicebus: session expired")
-	ErrSessionRevoked  = errors.New("devicebus: session revoked")
-	ErrSessionNotReady = errors.New("devicebus: session not ready")
+	ErrSessionNotFound      = errors.New("devicebus: session not found")
+	ErrTokenInvalid         = errors.New("devicebus: invalid token")
+	ErrSessionExpired       = errors.New("devicebus: session expired")
+	ErrSessionRevoked       = errors.New("devicebus: session revoked")
+	ErrSessionNotReady      = errors.New("devicebus: session not ready")
+	ErrSessionLimitExceeded = errors.New("devicebus: session limit exceeded")
 )
 
 // Config tunes Service.
@@ -72,6 +78,9 @@ type Config struct {
 	TokenSecret string
 	// TokenTTL overrides defaultTokenTTL. 0 → default.
 	TokenTTL time.Duration
+	// MaxSessionsPerUserChannel caps non-terminal sessions per
+	// (user_id, channel_id). 0 → default.
+	MaxSessionsPerUserChannel int
 	// AllowedOrigins is the exact Origin allowlist for browser WebSocket
 	// handshakes. Empty means deny browser-origin WS handshakes.
 	AllowedOrigins []string
@@ -99,7 +108,8 @@ type Service struct {
 	now func() time.Time
 	rng io.Reader
 
-	tokenTTL time.Duration
+	tokenTTL                  time.Duration
+	maxSessionsPerUserChannel int
 
 	mu       sync.Mutex
 	sessions map[string]*Connection // session_id → live WS connection
@@ -197,6 +207,10 @@ func NewService(db *sql.DB, cfg Config) *Service {
 	if ttl <= 0 {
 		ttl = defaultTokenTTL
 	}
+	maxSessions := cfg.MaxSessionsPerUserChannel
+	if maxSessions <= 0 {
+		maxSessions = defaultMaxSessionsPerUserChannel
+	}
 	allowed := make(map[string]struct{}, len(cfg.AllowedOrigins))
 	for _, origin := range cfg.AllowedOrigins {
 		origin = strings.TrimSpace(origin)
@@ -206,13 +220,14 @@ func NewService(db *sql.DB, cfg Config) *Service {
 		allowed[origin] = struct{}{}
 	}
 	return &Service{
-		db:             db,
-		cfg:            cfg,
-		now:            time.Now,
-		rng:            rand.Reader,
-		tokenTTL:       ttl,
-		sessions:       map[string]*Connection{},
-		allowedOrigins: allowed,
+		db:                        db,
+		cfg:                       cfg,
+		now:                       time.Now,
+		rng:                       rand.Reader,
+		tokenTTL:                  ttl,
+		maxSessionsPerUserChannel: maxSessions,
+		sessions:                  map[string]*Connection{},
+		allowedOrigins:            allowed,
 	}
 }
 
@@ -257,6 +272,9 @@ type IssueResult struct {
 	Session          Session
 	Token            string
 	TokenFingerprint string
+	// ReplacedSessions are same-device non-terminal sessions revoked during
+	// issue. The HTTP layer uses this to best-effort unbind daemon mirrors.
+	ReplacedSessions []Session
 }
 
 // TokenFingerprintLength is the number of hex characters retained from
@@ -269,6 +287,12 @@ const TokenFingerprintLength = 16
 // IssueSession allocates a fresh session_id + token, INSERTs the
 // device_sessions row in state=pending. Caller (gateway) should then
 // send `control.bind_device_session` to daemon to advance to ready.
+//
+// To keep issue idempotent for normal extension rebinds, existing
+// non-terminal sessions with the same (user_id, channel_id, device_id) are
+// revoked before the new row is inserted. Other devices are capped per
+// (user_id, channel_id) so pending/ready/active/offline rows cannot be
+// flooded indefinitely.
 func (s *Service) IssueSession(ctx context.Context, in IssueInput) (IssueResult, error) {
 	if in.DeviceID == "" || in.ChannelID == "" || in.UserID == "" || in.DaemonID == "" {
 		return IssueResult{}, fmt.Errorf("devicebus: device_id + channel_id + user_id + daemon_id required")
@@ -293,7 +317,61 @@ func (s *Service) IssueSession(ctx context.Context, in IssueInput) (IssueResult,
 	}
 
 	hashed := s.hashToken(token)
-	if _, err := s.db.ExecContext(
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return IssueResult{}, fmt.Errorf("devicebus: begin issue tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`UPDATE device_sessions
+		    SET state = 'expired', last_state_at = ?
+		  WHERE user_id = ?
+		    AND channel_id = ?
+		    AND state IN ('pending','ready','active','offline')
+		    AND expires_at < ?`,
+		now, in.UserID, string(in.ChannelID), now,
+	); err != nil {
+		return IssueResult{}, fmt.Errorf("devicebus: expire stale sessions during issue: %w", err)
+	}
+
+	replaced, err := sessionsForDevice(ctx, tx, in.UserID, in.ChannelID, in.DeviceID)
+	if err != nil {
+		return IssueResult{}, err
+	}
+	if len(replaced) > 0 {
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE device_sessions
+			    SET state = 'revoked', last_state_at = ?
+			  WHERE user_id = ?
+			    AND channel_id = ?
+			    AND device_id = ?
+			    AND state IN ('pending','ready','active','offline')`,
+			now, in.UserID, string(in.ChannelID), in.DeviceID,
+		); err != nil {
+			return IssueResult{}, fmt.Errorf("devicebus: revoke replaced sessions: %w", err)
+		}
+	}
+
+	var existing int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*)
+		   FROM device_sessions
+		  WHERE user_id = ?
+		    AND channel_id = ?
+		    AND state IN ('pending','ready','active','offline')`,
+		in.UserID, string(in.ChannelID),
+	).Scan(&existing); err != nil {
+		return IssueResult{}, fmt.Errorf("devicebus: count active sessions: %w", err)
+	}
+	if existing >= s.maxSessionsPerUserChannel {
+		return IssueResult{}, ErrSessionLimitExceeded
+	}
+
+	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO device_sessions (
 		   device_session_id, device_id, device_type, channel_id, user_id,
@@ -306,11 +384,58 @@ func (s *Service) IssueSession(ctx context.Context, in IssueInput) (IssueResult,
 	); err != nil {
 		return IssueResult{}, fmt.Errorf("devicebus: insert session: %w", err)
 	}
+	if err := tx.Commit(); err != nil {
+		return IssueResult{}, fmt.Errorf("devicebus: commit issue: %w", err)
+	}
+	for _, old := range replaced {
+		s.closeCurrentConnection(old.ID)
+	}
 	return IssueResult{
 		Session:          row,
 		Token:            token,
 		TokenFingerprint: fingerprintFromHash(hashed),
+		ReplacedSessions: replaced,
 	}, nil
+}
+
+func sessionsForDevice(ctx context.Context, tx *sql.Tx, userID string, channelID channel.ID, deviceID string) ([]Session, error) {
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT device_session_id, device_id, device_type, channel_id, user_id,
+		        daemon_id, adapter_actor_id, state, expires_at, created_at
+		   FROM device_sessions
+		  WHERE user_id = ?
+		    AND channel_id = ?
+		    AND device_id = ?
+		    AND state IN ('pending','ready','active','offline')`,
+		userID, string(channelID), deviceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("devicebus: list replaced sessions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Session
+	for rows.Next() {
+		var (
+			row   Session
+			state string
+			chID  string
+			dID   string
+		)
+		if err := rows.Scan(&row.ID, &row.DeviceID, &row.DeviceType, &chID, &row.UserID,
+			&dID, (*string)(&row.AdapterActorID), &state, &row.ExpiresAt, &row.CreatedAt); err != nil {
+			return nil, fmt.Errorf("devicebus: scan replaced session: %w", err)
+		}
+		row.ChannelID = channel.ID(chID)
+		row.DaemonID = placement.DaemonID(dID)
+		row.State = State(state)
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("devicebus: iterate replaced sessions: %w", err)
+	}
+	return out, nil
 }
 
 // fingerprintFromHash takes a hex-encoded HMAC and returns the leading
@@ -372,6 +497,7 @@ func (s *Service) Revoke(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("devicebus: revoke: %w", err)
 	}
+	s.closeCurrentConnection(sessionID)
 	return nil
 }
 

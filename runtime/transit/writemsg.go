@@ -4,10 +4,10 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
@@ -23,8 +23,8 @@ import (
 // origin of a write (L2 §9.1, T1.9 / FIX-T2 spec).
 //
 // The field layout MUST match daemonbus.HumanCaller
-// byte-for-byte — the daemon recomputes the HMAC over the same input
-// concatenation order (`channelID|userID|actorID|ts|nonce`).
+// byte-for-byte — the daemon recomputes the HMAC over the same structured
+// input encoding used by the gateway.
 type HumanCaller = daemonbus.HumanCaller
 
 // WriteMessageBody is the daemonbus `control.write_message` payload.
@@ -350,20 +350,32 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 	return ack
 }
 
-// SignHumanCaller produces the HMAC token over
-// `channelID|userID|actorID|ts|nonce` using SHA-256, hex-lowercase
-// output. Mirrors server/gateway/handlers.go signHumanCaller exactly so
+// SignHumanCaller produces the HMAC token over structured
+// (channelID, userID, actorID, ts, nonce) input using SHA-256,
+// hex-lowercase output. String fields are length-prefixed and ts is
+// fixed-width big-endian so embedded delimiters cannot cause field
+// confusion. Mirrors server/gateway/handlers.go signHumanCaller exactly so
 // the daemon-side verify recomputes the same bytes.
 func SignHumanCaller(secret []byte, channelID string, userID daemonbus.UserID, actorID actor.ActorID, ts int64, nonce string) string {
 	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(channelID))
-	mac.Write([]byte("|"))
-	mac.Write([]byte(string(userID)))
-	mac.Write([]byte("|"))
-	mac.Write([]byte(string(actorID)))
-	mac.Write([]byte("|"))
-	mac.Write([]byte(strconv.FormatInt(ts, 10)))
-	mac.Write([]byte("|"))
-	mac.Write([]byte(nonce))
+	mac.Write([]byte("coagent-human-caller-v2"))
+	writeHumanCallerField(mac, channelID)
+	writeHumanCallerField(mac, string(userID))
+	writeHumanCallerField(mac, string(actorID))
+	var tsBuf [8]byte
+	binary.BigEndian.PutUint64(tsBuf[:], uint64(ts))
+	mac.Write(tsBuf[:])
+	writeHumanCallerField(mac, nonce)
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func writeHumanCallerField(mac hashWriter, value string) {
+	var lenBuf [8]byte
+	binary.BigEndian.PutUint64(lenBuf[:], uint64(len(value)))
+	_, _ = mac.Write(lenBuf[:])
+	_, _ = mac.Write([]byte(value))
+}
+
+type hashWriter interface {
+	Write([]byte) (int, error)
 }

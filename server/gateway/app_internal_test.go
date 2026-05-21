@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/rs/zerolog"
+
+	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
 func withProductionOrigins(cfg Config) Config {
@@ -152,6 +154,51 @@ func TestWithDefaults_PopulatedSecrets_NoError(t *testing.T) {
 	}
 	if out.SessionSecret != "real-1" {
 		t.Errorf("SessionSecret rewritten: %q", out.SessionSecret)
+	}
+}
+
+func TestWithDefaults_RejectsLowBcryptCostInProduction(t *testing.T) {
+	t.Parallel()
+	cfg := withProductionOrigins(Config{
+		SessionSecret:      "real-1",
+		DaemonSharedSecret: "real-2",
+		DeviceTokenSecret:  "real-3",
+		HumanCallerSecret:  "real-4",
+		BcryptCost:         4,
+	})
+	_, err := withDefaults(cfg)
+	if err == nil {
+		t.Fatal("expected error on low production bcrypt cost")
+	}
+	var insec *ErrInsecureBcryptCost
+	if !errors.As(err, &insec) {
+		t.Fatalf("err type=%T want *ErrInsecureBcryptCost", err)
+	}
+
+	cfg.AllowDevSecrets = true
+	if _, err := withDefaults(cfg); err != nil {
+		t.Fatalf("AllowDevSecrets should permit explicit low test/dev bcrypt cost: %v", err)
+	}
+}
+
+func TestSignHumanCallerMatchesTransitAndDisambiguatesPipes(t *testing.T) {
+	t.Parallel()
+	app := &App{cfg: Config{HumanCallerSecret: "secret"}}
+
+	aLegacy := "ch|user" + "|" + "id" + "|" + "actor" + "|" + "123" + "|" + "nonce"
+	bLegacy := "ch" + "|" + "user|id" + "|" + "actor" + "|" + "123" + "|" + "nonce"
+	if aLegacy != bLegacy {
+		t.Fatalf("test setup no longer creates an old pipe-concat collision: %q %q", aLegacy, bLegacy)
+	}
+
+	a := app.signHumanCaller("ch|user", "id", "actor", 123, "nonce")
+	b := app.signHumanCaller("ch", "user|id", "actor", 123, "nonce")
+	if a == b {
+		t.Fatal("gateway structured signatures collided for different field segmentation")
+	}
+	daemonSide := transit.SignHumanCaller([]byte("secret"), "ch|user", "id", "actor", 123, "nonce")
+	if a != daemonSide {
+		t.Fatalf("gateway/runtime signatures differ: gateway=%s transit=%s", a, daemonSide)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -79,20 +80,23 @@ func run() error {
 	defer cancel()
 
 	app, err := gateway.New(ctx, gateway.Config{
-		DBPath:                    cfg.DBPath,
-		SessionSecret:             cfg.SessionSecret,
-		DaemonSharedSecret:        cfg.DaemonSharedSecret,
-		DeviceTokenSecret:         cfg.DeviceTokenSecret,
-		DeviceAllowedOrigins:      cfg.DeviceAllowedOrigins,
-		DeviceAllowMissingOrigin:  cfg.DeviceAllowMissingOrigin,
-		PushhubAllowedOrigins:     cfg.PushhubAllowedOrigins,
-		DaemonbusAllowedOrigins:   cfg.DaemonbusAllowedOrigins,
-		HumanCallerSecret:         cfg.HumanCallerSecret,
-		AllowDevSecrets:           cfg.AllowDevSecrets,
-		UIDistDir:                 cfg.UIDistDir,
-		ReconcileGracePeriod:      cfg.ReconcileGracePeriod,
-		ReconcileCreateTimeout:    cfg.ReconcileCreateTimeout,
-		ReconcileHeartbeatTimeout: cfg.ReconcileHeartbeatTimeout,
+		DBPath:                          cfg.DBPath,
+		SessionSecret:                   cfg.SessionSecret,
+		DaemonSharedSecret:              cfg.DaemonSharedSecret,
+		DeviceTokenSecret:               cfg.DeviceTokenSecret,
+		DeviceTokenTTL:                  cfg.DeviceTokenTTL,
+		DeviceMaxSessionsPerUserChannel: cfg.DeviceMaxSessionsPerUserChannel,
+		DeviceAllowedOrigins:            cfg.DeviceAllowedOrigins,
+		DeviceAllowMissingOrigin:        cfg.DeviceAllowMissingOrigin,
+		PushhubAllowedOrigins:           cfg.PushhubAllowedOrigins,
+		DaemonbusAllowedOrigins:         cfg.DaemonbusAllowedOrigins,
+		HumanCallerSecret:               cfg.HumanCallerSecret,
+		BcryptCost:                      cfg.BcryptCost,
+		AllowDevSecrets:                 cfg.AllowDevSecrets,
+		UIDistDir:                       cfg.UIDistDir,
+		ReconcileGracePeriod:            cfg.ReconcileGracePeriod,
+		ReconcileCreateTimeout:          cfg.ReconcileCreateTimeout,
+		ReconcileHeartbeatTimeout:       cfg.ReconcileHeartbeatTimeout,
 	})
 	if err != nil {
 		lg.Z().Error().Err(err).Str("event", "server.gateway_init_failed").Msg("gateway init failed")
@@ -135,21 +139,24 @@ func run() error {
 }
 
 type config struct {
-	HTTPAddr                  string
-	DBPath                    string
-	SessionSecret             string
-	DaemonSharedSecret        string
-	DeviceTokenSecret         string
-	DeviceAllowedOrigins      []string
-	DeviceAllowMissingOrigin  bool
-	PushhubAllowedOrigins     []string
-	DaemonbusAllowedOrigins   []string
-	HumanCallerSecret         string
-	AllowDevSecrets           bool
-	UIDistDir                 string
-	ReconcileGracePeriod      time.Duration
-	ReconcileCreateTimeout    time.Duration
-	ReconcileHeartbeatTimeout time.Duration
+	HTTPAddr                        string
+	DBPath                          string
+	SessionSecret                   string
+	DaemonSharedSecret              string
+	DeviceTokenSecret               string
+	DeviceTokenTTL                  time.Duration
+	DeviceMaxSessionsPerUserChannel int
+	DeviceAllowedOrigins            []string
+	DeviceAllowMissingOrigin        bool
+	PushhubAllowedOrigins           []string
+	DaemonbusAllowedOrigins         []string
+	HumanCallerSecret               string
+	BcryptCost                      int
+	AllowDevSecrets                 bool
+	UIDistDir                       string
+	ReconcileGracePeriod            time.Duration
+	ReconcileCreateTimeout          time.Duration
+	ReconcileHeartbeatTimeout       time.Duration
 }
 
 func loadConfig() config {
@@ -163,16 +170,19 @@ func loadConfig() config {
 		// the operator forgets to set the secrets. Pass --allow-dev-secrets
 		// (or COAGENT_ALLOW_DEV_SECRETS=1) to fall back to the dev sentinels
 		// with a startup warning.
-		SessionSecret:             os.Getenv("COAGENT_SESSION_SECRET"),
-		DaemonSharedSecret:        os.Getenv("COAGENT_DAEMON_SECRET"),
-		DeviceTokenSecret:         os.Getenv("COAGENT_DEVICE_SECRET"),
-		HumanCallerSecret:         os.Getenv("COAGENT_HUMAN_SECRET"),
-		AllowDevSecrets:           os.Getenv("COAGENT_ALLOW_DEV_SECRETS") == "1",
-		DeviceAllowMissingOrigin:  envBool("COAGENT_DEVICEBUS_ALLOW_MISSING_ORIGIN"),
-		UIDistDir:                 os.Getenv("COAGENT_UI_DIST"),
-		ReconcileGracePeriod:      60 * time.Second,
-		ReconcileCreateTimeout:    30 * time.Second,
-		ReconcileHeartbeatTimeout: 90 * time.Second,
+		SessionSecret:                   os.Getenv("COAGENT_SESSION_SECRET"),
+		DaemonSharedSecret:              os.Getenv("COAGENT_DAEMON_SECRET"),
+		DeviceTokenSecret:               os.Getenv("COAGENT_DEVICE_SECRET"),
+		DeviceTokenTTL:                  envDuration("COAGENT_DEVICE_TOKEN_TTL", 0),
+		DeviceMaxSessionsPerUserChannel: envInt("COAGENT_DEVICE_MAX_SESSIONS_PER_USER_CHANNEL", 0),
+		HumanCallerSecret:               os.Getenv("COAGENT_HUMAN_SECRET"),
+		BcryptCost:                      envInt("COAGENT_BCRYPT_COST", 0),
+		AllowDevSecrets:                 os.Getenv("COAGENT_ALLOW_DEV_SECRETS") == "1",
+		DeviceAllowMissingOrigin:        envBool("COAGENT_DEVICEBUS_ALLOW_MISSING_ORIGIN"),
+		UIDistDir:                       os.Getenv("COAGENT_UI_DIST"),
+		ReconcileGracePeriod:            60 * time.Second,
+		ReconcileCreateTimeout:          30 * time.Second,
+		ReconcileHeartbeatTimeout:       90 * time.Second,
 	}
 
 	flag.StringVar(&cfg.HTTPAddr, "addr", cfg.HTTPAddr, "HTTP listen address")
@@ -185,10 +195,16 @@ func loadConfig() config {
 		"Comma-separated exact Origin allowlist for /devicebus WebSocket handshakes")
 	flag.BoolVar(&cfg.DeviceAllowMissingOrigin, "devicebus-allow-missing-origin", cfg.DeviceAllowMissingOrigin,
 		"Allow /devicebus WebSocket handshakes with no Origin header (non-browser clients only)")
+	flag.DurationVar(&cfg.DeviceTokenTTL, "device-token-ttl", cfg.DeviceTokenTTL,
+		"Device session token TTL (default from server/devicebus is 720h = 30d)")
+	flag.IntVar(&cfg.DeviceMaxSessionsPerUserChannel, "device-max-sessions-per-user-channel", cfg.DeviceMaxSessionsPerUserChannel,
+		"Max non-terminal device sessions per user/channel (default from server/devicebus)")
 	flag.StringVar(&pushhubOrigins, "pushhub-allowed-origins", pushhubOrigins,
 		"Comma-separated exact Origin allowlist for /ws WebSocket handshakes")
 	flag.StringVar(&daemonbusOrigins, "daemonbus-allowed-origins", daemonbusOrigins,
 		"Comma-separated exact Origin allowlist for /daemonbus WebSocket handshakes")
+	flag.IntVar(&cfg.BcryptCost, "bcrypt-cost", cfg.BcryptCost,
+		"Bcrypt cost for password hashes (production default is 10; low values require --allow-dev-secrets)")
 	flag.DurationVar(&cfg.ReconcileGracePeriod, "reconcile-grace", cfg.ReconcileGracePeriod, "Cold start grace before stale reconcile begins")
 	flag.DurationVar(&cfg.ReconcileCreateTimeout, "create-timeout", cfg.ReconcileCreateTimeout, "Placement creating→orphan timeout")
 	flag.DurationVar(&cfg.ReconcileHeartbeatTimeout, "heartbeat-timeout", cfg.ReconcileHeartbeatTimeout, "Placement active→stale heartbeat timeout")
@@ -210,6 +226,36 @@ func envOr(key, fallback string) string {
 func envBool(key string) bool {
 	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
 	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func envInt(key string, fallback int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	if strings.HasSuffix(v, "d") {
+		days, err := strconv.Atoi(strings.TrimSuffix(v, "d"))
+		if err == nil {
+			return time.Duration(days) * 24 * time.Hour
+		}
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fallback
+	}
+	return d
 }
 
 func splitCSV(v string) []string {

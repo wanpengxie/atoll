@@ -5,13 +5,13 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -774,20 +774,28 @@ func validateWriteMessageRequired(req *writeMessageReq) error {
 }
 
 // signHumanCaller produces the HMAC token consumed by daemon when it
-// receives control.write_message. The daemon-side recomputation uses
-// the same secret + same input concatenation order (covers codex #12).
+// receives control.write_message. The daemon-side recomputation uses the
+// same structured input encoding: each string field is length-prefixed and
+// ts is fixed-width big-endian, so embedded delimiters cannot cause field
+// confusion.
 func (a *App) signHumanCaller(channelID, userID, actorID string, ts int64, nonce string) string {
 	mac := hmac.New(sha256.New, []byte(a.cfg.HumanCallerSecret))
-	mac.Write([]byte(channelID))
-	mac.Write([]byte("|"))
-	mac.Write([]byte(userID))
-	mac.Write([]byte("|"))
-	mac.Write([]byte(actorID))
-	mac.Write([]byte("|"))
-	mac.Write([]byte(strconv.FormatInt(ts, 10)))
-	mac.Write([]byte("|"))
-	mac.Write([]byte(nonce))
+	mac.Write([]byte("coagent-human-caller-v2"))
+	writeHumanCallerField(mac, channelID)
+	writeHumanCallerField(mac, userID)
+	writeHumanCallerField(mac, actorID)
+	var tsBuf [8]byte
+	binary.BigEndian.PutUint64(tsBuf[:], uint64(ts))
+	mac.Write(tsBuf[:])
+	writeHumanCallerField(mac, nonce)
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func writeHumanCallerField(w io.Writer, value string) {
+	var lenBuf [8]byte
+	binary.BigEndian.PutUint64(lenBuf[:], uint64(len(value)))
+	_, _ = w.Write(lenBuf[:])
+	_, _ = w.Write([]byte(value))
 }
 
 // nonceReader is the entropy source for newNonce. Defaults to

@@ -2,6 +2,7 @@ package devicebus
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -51,6 +52,10 @@ func (s *Service) handleIssue(c *gin.Context) {
 		DaemonID:   placement.DaemonID(req.DaemonID),
 	})
 	if err != nil {
+		if errors.Is(err, ErrSessionLimitExceeded) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -77,6 +82,14 @@ func (s *Service) handleIssue(c *gin.Context) {
 		})
 		return
 	}
+	for _, old := range res.ReplacedSessions {
+		_ = notifier.Unbind(c.Request.Context(), UnbindInput{
+			Session: old,
+			Reason:  "replaced",
+		})
+	}
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
 	c.JSON(http.StatusCreated, gin.H{
 		"device_session_id": res.Session.ID,
 		"token":             res.Token,

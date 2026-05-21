@@ -48,18 +48,21 @@ func SetLogger(l zerolog.Logger) { pkgLogger = l }
 
 // Config bundles the construction-time settings.
 type Config struct {
-	DBPath                    string
-	SessionSecret             string
-	DaemonSharedSecret        string
-	DeviceTokenSecret         string
-	DeviceAllowedOrigins      []string
-	DeviceAllowMissingOrigin  bool
-	PushhubAllowedOrigins     []string
-	DaemonbusAllowedOrigins   []string
-	HumanCallerSecret         string
-	ReconcileGracePeriod      time.Duration
-	ReconcileCreateTimeout    time.Duration
-	ReconcileHeartbeatTimeout time.Duration
+	DBPath                          string
+	SessionSecret                   string
+	DaemonSharedSecret              string
+	DeviceTokenSecret               string
+	DeviceTokenTTL                  time.Duration
+	DeviceMaxSessionsPerUserChannel int
+	DeviceAllowedOrigins            []string
+	DeviceAllowMissingOrigin        bool
+	PushhubAllowedOrigins           []string
+	DaemonbusAllowedOrigins         []string
+	HumanCallerSecret               string
+	BcryptCost                      int
+	ReconcileGracePeriod            time.Duration
+	ReconcileCreateTimeout          time.Duration
+	ReconcileHeartbeatTimeout       time.Duration
 
 	// UIDistDir is the absolute path to the ui/dist/ directory produced
 	// by `pnpm --filter ui build`. When non-empty, buildEngine wires a
@@ -129,6 +132,16 @@ func (e *ErrInsecureOrigin) Error() string {
 	return fmt.Sprintf("gateway: %s contains insecure origin %q (use exact origins only)", e.Field, e.Value)
 }
 
+// ErrInsecureBcryptCost is returned when production config explicitly lowers
+// bcrypt below the hardened minimum. Tests/dev may opt in via AllowDevSecrets.
+type ErrInsecureBcryptCost struct {
+	Cost int
+}
+
+func (e *ErrInsecureBcryptCost) Error() string {
+	return fmt.Sprintf("gateway: BcryptCost=%d below production minimum %d (raise it or pass --allow-dev-secrets for dev/test)", e.Cost, identity.MinProductionBcryptCost)
+}
+
 // App is the server façade. cmd/server holds one.
 type App struct {
 	cfg    Config
@@ -175,6 +188,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	}
 	app.identity = identity.NewService(db, identity.Config{
 		SessionSecret: cfg.SessionSecret,
+		BcryptCost:    cfg.BcryptCost,
 	})
 	app.catalog = catalog.NewService(db)
 	app.placements = placements.NewService(db, placements.Config{
@@ -192,9 +206,11 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		AllowedOrigins: cfg.DaemonbusAllowedOrigins,
 	})
 	app.devicebus = devicebus.NewService(db, devicebus.Config{
-		TokenSecret:        cfg.DeviceTokenSecret,
-		AllowedOrigins:     cfg.DeviceAllowedOrigins,
-		AllowMissingOrigin: cfg.DeviceAllowMissingOrigin,
+		TokenSecret:               cfg.DeviceTokenSecret,
+		TokenTTL:                  cfg.DeviceTokenTTL,
+		MaxSessionsPerUserChannel: cfg.DeviceMaxSessionsPerUserChannel,
+		AllowedOrigins:            cfg.DeviceAllowedOrigins,
+		AllowMissingOrigin:        cfg.DeviceAllowMissingOrigin,
 	})
 
 	// Wire viewcache → daemon resync via daemonbus.
@@ -274,6 +290,9 @@ func withDefaults(cfg Config) (Config, error) {
 	}
 	if cfg.ReconcileHeartbeatTimeout <= 0 {
 		cfg.ReconcileHeartbeatTimeout = 90 * time.Second
+	}
+	if cfg.BcryptCost > 0 && cfg.BcryptCost < identity.MinProductionBcryptCost && !cfg.AllowDevSecrets {
+		return cfg, &ErrInsecureBcryptCost{Cost: cfg.BcryptCost}
 	}
 
 	type secretSlot struct {

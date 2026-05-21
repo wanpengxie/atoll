@@ -48,6 +48,8 @@ func newTestApp(t *testing.T) *gateway.App {
 		PushhubAllowedOrigins:     []string{"http://gateway.test"},
 		DaemonbusAllowedOrigins:   []string{"http://gateway.test"},
 		HumanCallerSecret:         "test-human",
+		BcryptCost:                4,
+		AllowDevSecrets:           true,
 		ReconcileGracePeriod:      50 * time.Millisecond,
 		ReconcileCreateTimeout:    100 * time.Millisecond,
 		ReconcileHeartbeatTimeout: 200 * time.Millisecond,

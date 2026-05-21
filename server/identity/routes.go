@@ -2,7 +2,9 @@ package identity
 
 import (
 	"errors"
+	"net"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -37,6 +39,10 @@ func (s *Service) handleIssueCode(c *gin.Context) {
 	if purpose == "" {
 		purpose = PurposeRegister
 	}
+	if !s.allowAuthRoute("verification_issue", req.Email, c.Request.RemoteAddr) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate_limited"})
+		return
+	}
 	if _, err := s.IssueCode(c.Request.Context(), req.Email, purpose); err != nil {
 		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
 		return
@@ -70,6 +76,10 @@ func (s *Service) handleRegister(c *gin.Context) {
 	var req registerReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !s.allowAuthRoute("register", req.Email, c.Request.RemoteAddr) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate_limited"})
 		return
 	}
 	if _, err := s.Register(c.Request.Context(), RegisterInput(req)); err != nil {
@@ -114,6 +124,10 @@ func (s *Service) handleLogin(c *gin.Context) {
 	var req loginReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !s.allowAuthRoute("login", req.Email, c.Request.RemoteAddr) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate_limited"})
 		return
 	}
 	res, err := s.Login(c.Request.Context(), LoginInput(req))
@@ -169,4 +183,29 @@ func httpStatusFor(err error) int {
 		return http.StatusNotFound
 	}
 	return http.StatusInternalServerError
+}
+
+func (s *Service) allowAuthRoute(op, email, remoteAddr string) bool {
+	now := s.now()
+	email = normalizeEmail(email)
+	if email != "" && !s.authLimiter.allow(op+":email:"+email, now) {
+		return false
+	}
+	remote := remoteAddrKey(remoteAddr)
+	if remote != "" && !s.authLimiter.allow(op+":remote:"+remote, now) {
+		return false
+	}
+	return true
+}
+
+func remoteAddrKey(remoteAddr string) string {
+	remoteAddr = strings.TrimSpace(remoteAddr)
+	if remoteAddr == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil {
+		return host
+	}
+	return remoteAddr
 }
