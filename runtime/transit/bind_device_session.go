@@ -53,33 +53,26 @@ type UnbindDeviceSessionBody = daemonbus.UnbindDeviceSessionBody
 // purged the mirror row (or the row was already absent).
 type UnbindDeviceSessionAckBody = daemonbus.UnbindDeviceSessionAckBody
 
-// BindRejectReason is the closed daemon-edge reason set for bind/unbind
-// session acks.
-type BindRejectReason = daemonbus.BindRejectReason
+// DeviceSessionRejectReason is the closed device-session reason set.
+type DeviceSessionRejectReason = daemonbus.DeviceSessionRejectReason
 
-// Reject reasons emitted by the dispatcher / handler edge before the
-// adapter-specific session store is consulted. Closed set so server
-// log triage can branch on these without parsing free-form strings.
 const (
-	// BindRejectReasonDecodeFailed indicates the dispatcher could not
-	// JSON-decode the body. Surfaces as the Dispatcher's decode error
-	// (no ack emitted in that path — the bus reports the decode failure
-	// upward); listed here so future tightening of the rejected ack
-	// path can use it.
-	BindRejectReasonDecodeFailed = daemonbus.BindRejectReasonDecodeFailed
+	DeviceSessionRejectBindChannelNotActive      = daemonbus.DeviceSessionRejectBindChannelNotActive
+	DeviceSessionRejectBindAdapterNotPresent     = daemonbus.DeviceSessionRejectBindAdapterNotPresent
+	DeviceSessionRejectBindAdapterBindingInvalid = daemonbus.DeviceSessionRejectBindAdapterBindingInvalid
+	DeviceSessionRejectBindDeviceTypeUnsupported = daemonbus.DeviceSessionRejectBindDeviceTypeUnsupported
+	DeviceSessionRejectBindCapacityExceeded      = daemonbus.DeviceSessionRejectBindCapacityExceeded
+	DeviceSessionRejectBindInternalError         = daemonbus.DeviceSessionRejectBindInternalError
 
-	// BindRejectReasonHandlerMissing is the daemon-edge fallback when
-	// ControlHandlers.OnBindDeviceSession was never wired (e.g. a test
-	// dispatcher). The dispatcher emits this in the ack so the gateway
-	// can distinguish "daemon does not implement bind" from "daemon
-	// rejected bind".
-	BindRejectReasonHandlerMissing = daemonbus.BindRejectReasonHandlerMissing
+	DeviceSessionRejectTokenInvalid   = daemonbus.DeviceSessionRejectTokenInvalid
+	DeviceSessionRejectTokenExpired   = daemonbus.DeviceSessionRejectTokenExpired
+	DeviceSessionRejectSessionRevoked = daemonbus.DeviceSessionRejectSessionRevoked
+	DeviceSessionRejectSessionUnknown = daemonbus.DeviceSessionRejectSessionUnknown
 
-	// BindRejectReasonSessionStoreUpsert indicates the daemon failed to
-	// mirror a bind into its local device session store.
-	BindRejectReasonSessionStoreUpsert = daemonbus.BindRejectReasonSessionStoreUpsert
+	DeviceSessionRejectTransitPayloadTooLarge  = daemonbus.DeviceSessionRejectTransitPayloadTooLarge
+	DeviceSessionRejectTransitRouteUnavailable = daemonbus.DeviceSessionRejectTransitRouteUnavailable
+	DeviceSessionRejectTransitInternalError    = daemonbus.DeviceSessionRejectTransitInternalError
 
-	// BindRejectReasonSessionStoreDelete indicates the daemon failed to
-	// remove a local device session mirror during unbind.
-	BindRejectReasonSessionStoreDelete = daemonbus.BindRejectReasonSessionStoreDelete
+	DeviceSessionRejectUnbindSessionUnknown = daemonbus.DeviceSessionRejectUnbindSessionUnknown
+	DeviceSessionRejectUnbindInternalError  = daemonbus.DeviceSessionRejectUnbindInternalError
 )

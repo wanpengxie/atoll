@@ -23,6 +23,7 @@ import (
 	khlog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
 	"github.com/wanpengxie/ActOS/runtime/bootstrap"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/lifecycle"
@@ -99,8 +100,8 @@ type DaemonConfig struct {
 	// adapter modules with binding=runtime_inbound_via_relay can mirror the
 	// server's authoritative device_sessions row. Both are nil-safe — when
 	// unset, the transit dispatcher synthesises an Accepted=false ack with
-	// Reason=BindRejectReasonHandlerMissing so the server can distinguish
-	// "daemon does not implement bind" from "daemon rejected bind".
+	// the spec bind/unbind internal-error reason so the server can
+	// distinguish "daemon does not implement bind" from "daemon rejected bind".
 	OnBindDeviceSession   func(ctx context.Context, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody
 	OnUnbindDeviceSession func(ctx context.Context, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody
 
@@ -226,6 +227,7 @@ type channelRuntime struct {
 	chain         *harness.Chain
 	wrappedChain  *postHarnessChain
 	pusher        *transit.Pusher
+	pausePush     func()
 	deliverer     *scheduler.Deliverer
 	gateway       *trigger.Gateway
 	typeRegistry  *store.TypeRegistry
@@ -705,11 +707,18 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 	}
 
 	handlers := transit.ControlHandlers{
-		OnViewsyncAck:           ackHandler.Handle,
+		OnViewsyncAck: func(ctx context.Context, ack viewsync.AckFrame) error {
+			if ack.RejectReason == viewsync.RejectReasonMuxOwnerEpochStale {
+				d.pauseChannelPush(ack.ChannelID)
+				return nil
+			}
+			return ackHandler.Handle(ctx, ack)
+		},
 		OnViewsyncResyncRequest: resyncServer.ServeResync,
 		OnCreateChannel:         d.handleCreateChannel,
+		OnDaemonReclaim:         d.handleDaemonReclaim,
 		OnUnbindChannel:         d.handleUnbindChannel,
-		OnHeartbeatAck:          d.heartbeat.Handle(d.cfg.NowFn),
+		OnHeartbeatAck:          d.handleHeartbeatAck,
 		OnReclaimAccepted:       d.handleReclaimAccepted,
 		OnReclaimRejected:       d.handleReclaimRejected,
 		// T147 §A — central router for device_transit.* frames. Decodes
@@ -780,10 +789,10 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 	// sender snapshot-reads d.channels each tick through the runtime
 	// map lock shared with routeWrite / hot bind-unbind.
 	hb, err := transit.NewHeartbeatSender(transit.HeartbeatSenderConfig{
-		Client:   d.transit,
-		Period:   d.cfg.HeartbeatPeriod,
-		FrameID:  d.cfg.FrameIDGen,
-		Channels: d.snapshotOwnedChannels,
+		Client:       d.transit,
+		Period:       d.cfg.HeartbeatPeriod,
+		FrameID:      d.cfg.FrameIDGen,
+		HeldChannels: d.snapshotHeldChannels,
 	})
 	if err != nil {
 		return fmt.Errorf("runtime: build heartbeat sender: %w", err)
@@ -887,8 +896,7 @@ func nextBackoff(cur, maxB time.Duration) time.Duration {
 	return next
 }
 
-// snapshotOwnedChannels returns the current owned-channel ids. Used by
-// the heartbeat sender to populate HeartbeatBody.Channels each tick.
+// snapshotOwnedChannels returns the current owned-channel ids.
 // Same lock-free read pattern as routeWrite — the map is mutated only
 // by the dispatcher / phase-3 boot goroutines, never concurrently with
 // itself.
@@ -901,6 +909,34 @@ func (d *Daemon) snapshotOwnedChannels() []channel.ID {
 	out := make([]channel.ID, 0, len(d.channels))
 	for id := range d.channels {
 		out = append(out, id)
+	}
+	return out
+}
+
+// snapshotHeldChannels returns the current owned-channel fencing tuples
+// for control.heartbeat. It reads channel_lock on every tick so reclaim
+// fencing rotation is reflected without rebuilding the daemon runtime.
+func (d *Daemon) snapshotHeldChannels(ctx context.Context) []placement.HeartbeatHeldChannel {
+	d.channelsMu.RLock()
+	runtimes := make([]*channelRuntime, 0, len(d.channels))
+	for _, cr := range d.channels {
+		runtimes = append(runtimes, cr)
+	}
+	d.channelsMu.RUnlock()
+	if len(runtimes) == 0 {
+		return nil
+	}
+	out := make([]placement.HeartbeatHeldChannel, 0, len(runtimes))
+	for _, cr := range runtimes {
+		row, ok, err := cr.lock.Get(ctx)
+		if err != nil || !ok {
+			continue
+		}
+		out = append(out, placement.HeartbeatHeldChannel{
+			ChannelID:    cr.channelID,
+			OwnerEpoch:   row.OwnerEpoch,
+			FencingToken: row.FencingToken,
+		})
 	}
 	return out
 }
@@ -922,6 +958,14 @@ func (d *Daemon) deleteChannel(id channel.ID) {
 	d.channelsMu.Lock()
 	delete(d.channels, id)
 	d.channelsMu.Unlock()
+}
+
+func (d *Daemon) pauseChannelPush(id channel.ID) {
+	cr, ok := d.getChannel(id)
+	if !ok || cr.pausePush == nil {
+		return
+	}
+	cr.pausePush()
 }
 
 func (d *Daemon) snapshotChannelRuntimes() []*channelRuntime {
@@ -980,6 +1024,16 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		Cursors: d.cursors,
 		FrameID: d.cfg.FrameIDGen,
 		NowFn:   d.cfg.NowFn,
+		Fencing: func(ctx context.Context, _ channel.ID) (placement.OwnerEpoch, placement.FencingToken, error) {
+			row, ok, err := lock.Get(ctx)
+			if err != nil {
+				return 0, "", err
+			}
+			if !ok {
+				return 0, "", errors.New("runtime: channel_lock missing for viewsync push")
+			}
+			return row.OwnerEpoch, row.FencingToken, nil
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("pusher for %s: %w", lc.ChannelID, err)
@@ -1452,6 +1506,7 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 	// Per-channel context so Unload can stop the pusher independently
 	// of the global d.runCtx.
 	pusherCtx, pusherCancel := context.WithCancel(d.runCtx)
+	cr.pausePush = pusherCancel
 	d.wg.Add(1)
 	go func(p *transit.Pusher, id channel.ID) {
 		defer d.wg.Done()
@@ -1724,6 +1779,180 @@ func (d *Daemon) sendCreateAck(ctx context.Context, inboundFrameID daemonbus.Fra
 		daemonbus.FrameTypeControlCreateChannelAck, ack)
 }
 
+func (d *Daemon) handleDaemonReclaim(
+	ctx context.Context,
+	frame daemonbus.Frame,
+	req placement.DaemonReclaimRequest,
+) error {
+	reject := func(reason placement.ReclaimRejectReason) error {
+		return d.sendReclaimRejected(ctx, frame.FrameID, placement.ReclaimRejected{
+			ChannelID:       req.ChannelID,
+			CreateRequestID: req.CreateRequestID,
+			Reason:          reason,
+		})
+	}
+	if req.ChannelID == "" || req.CreateRequestID == "" || req.NewOwnerEpoch <= 0 {
+		return reject(placement.ReclaimRejectInternalError)
+	}
+	sqlitePath := filepath.Join(d.cfg.ChannelsDir, string(req.ChannelID), "channel.sqlite")
+	if _, err := os.Stat(sqlitePath); err != nil {
+		return reject(placement.ReclaimRejectStoreMissing)
+	}
+	db, err := d.openChannelDB(ctx, sqlitePath)
+	if err != nil {
+		return reject(placement.ReclaimRejectStoreMissing)
+	}
+	if ok, err := reclaimStoreComplete(ctx, db); err != nil || !ok {
+		if err != nil {
+			d.log.Warn().Err(err).
+				Str("event", "runtime.reclaim_completeness_check_failed").
+				Str("channel_id", string(req.ChannelID)).
+				Msg("failed to inspect reclaim store")
+		}
+		return reject(placement.ReclaimRejectCompletenessCheckFailed)
+	}
+	lock := store.NewChannelLock(db)
+	row, ok, err := lock.Get(ctx)
+	if err != nil {
+		return reject(placement.ReclaimRejectCompletenessCheckFailed)
+	}
+	if !ok || row.ChannelID != req.ChannelID {
+		return reject(placement.ReclaimRejectStoreMissing)
+	}
+	if row.OwnerEpoch == req.NewOwnerEpoch && row.DaemonID == placement.DaemonID(d.cfg.DaemonID) {
+		if !d.HasChannel(req.ChannelID) {
+			if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath); err != nil {
+				return reject(placement.ReclaimRejectInternalError)
+			}
+		}
+		return d.sendReclaimAccepted(ctx, frame.FrameID, placement.ReclaimAccepted{
+			ChannelID:       req.ChannelID,
+			CreateRequestID: req.CreateRequestID,
+			NewOwnerEpoch:   req.NewOwnerEpoch,
+			FencingToken:    row.FencingToken,
+		})
+	}
+	if row.OwnerEpoch+1 != req.NewOwnerEpoch {
+		return reject(placement.ReclaimRejectOwnerEpochInvalid)
+	}
+	fencingToken, err := placement.NewFencingToken()
+	if err != nil {
+		return reject(placement.ReclaimRejectInternalError)
+	}
+	now := d.cfg.NowFn()
+	newRow := row
+	newRow.FencingToken = fencingToken
+	newRow.OwnerEpoch = req.NewOwnerEpoch
+	newRow.DaemonID = placement.DaemonID(d.cfg.DaemonID)
+	newRow.DaemonEpoch = placement.DaemonEpoch(d.cfg.DaemonEpoch)
+	newRow.AcquiredAt = now
+	newRow.RefreshedAt = now
+	if err := lock.Takeover(ctx, newRow, row.OwnerEpoch); err != nil {
+		return reject(placement.ReclaimRejectInternalError)
+	}
+	if err := d.emitPlacementReclaimed(ctx, db, lock, req, row.OwnerEpoch, fencingToken); err != nil {
+		return reject(placement.ReclaimRejectInternalError)
+	}
+	if d.HasChannel(req.ChannelID) {
+		if err := d.unloader.Unload(ctx, req.ChannelID, lifecycle.UnloadStale); err != nil {
+			return reject(placement.ReclaimRejectInternalError)
+		}
+	}
+	if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath); err != nil {
+		return reject(placement.ReclaimRejectInternalError)
+	}
+	return d.sendReclaimAccepted(ctx, frame.FrameID, placement.ReclaimAccepted{
+		ChannelID:       req.ChannelID,
+		CreateRequestID: req.CreateRequestID,
+		NewOwnerEpoch:   req.NewOwnerEpoch,
+		FencingToken:    fencingToken,
+	})
+}
+
+func reclaimStoreComplete(ctx context.Context, db *sql.DB) (bool, error) {
+	for _, table := range []string{"messages", "actor_registry", "type_registry", "channel_lock"} {
+		var name string
+		err := db.QueryRowContext(
+			ctx,
+			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`,
+			table,
+		).Scan(&name)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+	var systemActor string
+	err := db.QueryRowContext(
+		ctx,
+		`SELECT actor_id FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`,
+		string(actor.SystemActorID),
+	).Scan(&systemActor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (d *Daemon) emitPlacementReclaimed(
+	ctx context.Context,
+	db *sql.DB,
+	lock *store.ChannelLock,
+	req placement.DaemonReclaimRequest,
+	previousOwnerEpoch placement.OwnerEpoch,
+	fencingToken placement.FencingToken,
+) error {
+	payload, err := json.Marshal(map[string]any{
+		"previous_owner_daemon": req.PreviousOwnerDaemon,
+		"new_owner_daemon":      d.cfg.DaemonID,
+		"previous_owner_epoch":  previousOwnerEpoch,
+		"new_owner_epoch":       req.NewOwnerEpoch,
+		"previous_state":        req.PreviousState,
+		"create_request_id":     req.CreateRequestID,
+	})
+	if err != nil {
+		return err
+	}
+	now := d.cfg.NowFn()
+	_, err = store.NewMessagesWithLock(db, lock).Append(ctx, &message.Envelope{
+		ID:         message.ID("system.placement.reclaimed:" + string(req.ChannelID) + ":" + string(req.CreateRequestID)),
+		TS:         now,
+		TSReceived: now,
+		ChannelID:  req.ChannelID,
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind:       message.KindEvent,
+		Type:       "system.placement.reclaimed",
+		Payload:    payload,
+		Visibility: message.VisibilitySystem,
+		Audience:   message.Audience{actor.SystemActorID},
+	}, khlog.FencingTuple{
+		Token: fencingToken,
+		Epoch: placement.DaemonEpoch(d.cfg.DaemonEpoch),
+	})
+	return err
+}
+
+func (d *Daemon) sendReclaimAccepted(ctx context.Context, inboundFrameID daemonbus.FrameID, ack placement.ReclaimAccepted) error {
+	frameID := string(inboundFrameID)
+	if frameID == "" {
+		frameID = d.cfg.FrameIDGen()
+	}
+	return d.transit.Send(ctx, frameID, daemonbus.FrameTypeControlReclaimAccepted, ack)
+}
+
+func (d *Daemon) sendReclaimRejected(ctx context.Context, inboundFrameID daemonbus.FrameID, rej placement.ReclaimRejected) error {
+	frameID := string(inboundFrameID)
+	if frameID == "" {
+		frameID = d.cfg.FrameIDGen()
+	}
+	return d.transit.Send(ctx, frameID, daemonbus.FrameTypeControlReclaimRejected, rej)
+}
+
 // unbindChannelBody is the minimal payload shape this daemon
 // understands for a control.unbind_channel frame. The kernel package
 // does not yet define a typed payload for this frame (M1.6 scope), so
@@ -1786,6 +2015,36 @@ func (d *Daemon) handleUnbindChannel(ctx context.Context, frame daemonbus.Frame)
 	ack.Status = "unbound"
 	return d.transit.Send(ctx, replyFrameID,
 		daemonbus.FrameTypeControlUnbindChannelAck, ack)
+}
+
+func (d *Daemon) handleHeartbeatAck(ctx context.Context, frame daemonbus.Frame) error {
+	if err := d.heartbeat.Handle(d.cfg.NowFn)(ctx, frame); err != nil {
+		return err
+	}
+	var body placement.HeartbeatAckPayload
+	if len(frame.Payload) == 0 {
+		return nil
+	}
+	if err := transit.DecodePayload(frame, &body); err != nil {
+		return fmt.Errorf("runtime: decode heartbeat_ack: %w", err)
+	}
+	for _, diff := range body.PlacementDiff {
+		switch diff.Action {
+		case placement.PlacementDiffActionOK:
+			continue
+		case placement.PlacementDiffActionReclaimPending:
+			d.pauseChannelPush(diff.ChannelID)
+		case placement.PlacementDiffActionUnbindPending:
+			if d.HasChannel(diff.ChannelID) {
+				_ = d.unloader.Unload(ctx, diff.ChannelID, lifecycle.UnloadOrphan)
+			}
+		case placement.PlacementDiffActionDirectoryMissing:
+			if d.HasChannel(diff.ChannelID) {
+				_ = d.unloader.Unload(ctx, diff.ChannelID, lifecycle.UnloadStale)
+			}
+		}
+	}
+	return nil
 }
 
 // reclaimAcceptedBody mirrors the wire payload server/gateway emits:

@@ -23,6 +23,7 @@ type ControlHandlers struct {
 	OnViewsyncResyncRequest func(ctx context.Context, frame viewsync.ResyncRequest) (viewsync.ResyncResponse, error)
 
 	OnCreateChannel   func(ctx context.Context, frame daemonbus.Frame, req placement.CreateChannelRequest) error
+	OnDaemonReclaim   func(ctx context.Context, frame daemonbus.Frame, req placement.DaemonReclaimRequest) error
 	OnUnbindChannel   func(ctx context.Context, frame daemonbus.Frame) error
 	OnReclaimAccepted func(ctx context.Context, frame daemonbus.Frame) error
 	OnReclaimRejected func(ctx context.Context, frame daemonbus.Frame) error
@@ -44,8 +45,7 @@ type ControlHandlers struct {
 	// `control.unbind_device_session_ack` so the gateway HTTP request
 	// waiting on SendAndAwait wakes up. Both callbacks are nil-safe:
 	// when unset the Dispatcher synthesises an Accepted=false ack with
-	// Reason=BindRejectReasonHandlerMissing so the server can branch
-	// "daemon does not implement bind" vs. "daemon rejected bind".
+	// Reason=bind_internal_error / unbind_internal_error.
 	OnBindDeviceSession   func(ctx context.Context, frame daemonbus.Frame, body BindDeviceSessionBody) BindDeviceSessionAckBody
 	OnUnbindDeviceSession func(ctx context.Context, frame daemonbus.Frame, body UnbindDeviceSessionBody) UnbindDeviceSessionAckBody
 
@@ -167,6 +167,16 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 		}
 		return d.handlers.OnCreateChannel(ctx, frame, req)
 
+	case daemonbus.FrameTypeControlDaemonReclaim:
+		if d.handlers.OnDaemonReclaim == nil {
+			return nil
+		}
+		var req placement.DaemonReclaimRequest
+		if err := DecodePayload(frame, &req); err != nil {
+			return fmt.Errorf("transit: decode control.daemon_reclaim: %w", err)
+		}
+		return d.handlers.OnDaemonReclaim(ctx, frame, req)
+
 	case daemonbus.FrameTypeControlUnbindChannel:
 		if d.handlers.OnUnbindChannel == nil {
 			return nil
@@ -230,7 +240,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 				FrameID:   body.FrameID,
 				SessionID: body.SessionID,
 				Accepted:  false,
-				Reason:    BindRejectReasonHandlerMissing,
+				Reason:    DeviceSessionRejectBindInternalError,
 				Detail:    "OnBindDeviceSession handler is nil",
 			}
 		} else {
@@ -261,7 +271,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 				FrameID:   body.FrameID,
 				SessionID: body.SessionID,
 				Accepted:  false,
-				Reason:    BindRejectReasonHandlerMissing,
+				Reason:    DeviceSessionRejectUnbindInternalError,
 				Detail:    "OnUnbindDeviceSession handler is nil",
 			}
 		} else {

@@ -501,3 +501,144 @@ func TestActivate_RejectsEmptyFencingToken(t *testing.T) {
 		t.Errorf("state=%q want creating (CAS should leave row untouched)", got.State)
 	}
 }
+
+func TestServerInitiatedReclaimReserveAndActivate(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+
+	p, _, err := svc.Reserve(ctx, channel.ID("ch-reclaim-srv"), placement.DaemonID("d-old"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if ok, err := svc.Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       p.ChannelID,
+		CreateRequestID: p.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "tok-old",
+		DaemonID:        p.DaemonID,
+		Status:          placement.AckBound,
+	}, 1); err != nil || !ok {
+		t.Fatalf("Activate ok=%v err=%v", ok, err)
+	}
+	if err := svc.Store().MarkStale(ctx, p.ChannelID, c.Now().UnixMilli()); err != nil {
+		t.Fatalf("MarkStale: %v", err)
+	}
+
+	reserved, req, ok, err := svc.ReserveReclaim(ctx, p.ChannelID, placement.DaemonID("d-new"), 7)
+	if err != nil || !ok {
+		t.Fatalf("ReserveReclaim ok=%v err=%v", ok, err)
+	}
+	if reserved.State != placement.StateCreating {
+		t.Fatalf("reserved state=%q want creating", reserved.State)
+	}
+	if reserved.OwnerEpoch != 2 || req.NewOwnerEpoch != 2 {
+		t.Fatalf("owner_epoch reserved=%d req=%d want 2", reserved.OwnerEpoch, req.NewOwnerEpoch)
+	}
+	if req.PreviousOwnerDaemon == nil || *req.PreviousOwnerDaemon != placement.DaemonID("d-old") {
+		t.Fatalf("previous_owner_daemon=%v want d-old", req.PreviousOwnerDaemon)
+	}
+	if req.PreviousState != placement.ReclaimOriginStale {
+		t.Fatalf("previous_state=%q want stale", req.PreviousState)
+	}
+
+	ok, err = svc.ActivateReclaim(ctx, placement.ReclaimAccepted{
+		ChannelID:       p.ChannelID,
+		CreateRequestID: req.CreateRequestID,
+		NewOwnerEpoch:   req.NewOwnerEpoch,
+		FencingToken:    "tok-new",
+	}, placement.DaemonID("d-new"), 7)
+	if err != nil || !ok {
+		t.Fatalf("ActivateReclaim ok=%v err=%v", ok, err)
+	}
+	got, _, err := svc.Get(ctx, p.ChannelID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != placement.StateActive || got.DaemonID != placement.DaemonID("d-new") {
+		t.Fatalf("post-reclaim state=%q daemon=%q", got.State, got.DaemonID)
+	}
+	if got.OwnerEpoch != 2 || got.FencingToken != "tok-new" {
+		t.Fatalf("post-reclaim epoch=%d token=%q", got.OwnerEpoch, got.FencingToken)
+	}
+}
+
+func TestObserveHeartbeatPlacementDiffActions(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+
+	p, _, err := svc.Reserve(ctx, channel.ID("ch-ok"), placement.DaemonID("d-1"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve ok: %v", err)
+	}
+	if ok, err := svc.Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       p.ChannelID,
+		CreateRequestID: p.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "tok-ok",
+		DaemonID:        p.DaemonID,
+		Status:          placement.AckBound,
+	}, 1); err != nil || !ok {
+		t.Fatalf("Activate ok=%v err=%v", ok, err)
+	}
+	other, _, err := svc.Reserve(ctx, channel.ID("ch-other"), placement.DaemonID("d-2"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve other: %v", err)
+	}
+	if ok, err := svc.Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       other.ChannelID,
+		CreateRequestID: other.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "tok-other",
+		DaemonID:        other.DaemonID,
+		Status:          placement.AckBound,
+	}, 1); err != nil || !ok {
+		t.Fatalf("Activate other ok=%v err=%v", ok, err)
+	}
+	stale, _, err := svc.Reserve(ctx, channel.ID("ch-stale"), placement.DaemonID("d-1"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve stale: %v", err)
+	}
+	if ok, err := svc.Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       stale.ChannelID,
+		CreateRequestID: stale.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "tok-stale",
+		DaemonID:        stale.DaemonID,
+		Status:          placement.AckBound,
+	}, 1); err != nil || !ok {
+		t.Fatalf("Activate stale ok=%v err=%v", ok, err)
+	}
+	if err := svc.Store().MarkStale(ctx, stale.ChannelID, c.Now().UnixMilli()); err != nil {
+		t.Fatalf("MarkStale: %v", err)
+	}
+
+	diff, err := svc.ObserveHeartbeat(ctx, placement.DaemonID("d-1"), []placement.HeartbeatHeldChannel{
+		{ChannelID: "ch-ok", OwnerEpoch: 1, FencingToken: "tok-ok"},
+		{ChannelID: "ch-ok", OwnerEpoch: 1, FencingToken: "wrong"},
+		{ChannelID: "ch-other", OwnerEpoch: 1, FencingToken: "tok-other"},
+		{ChannelID: "ch-stale", OwnerEpoch: 1, FencingToken: "tok-stale"},
+		{ChannelID: "ch-missing", OwnerEpoch: 1, FencingToken: "tok-missing"},
+	})
+	if err != nil {
+		t.Fatalf("ObserveHeartbeat: %v", err)
+	}
+	want := []placement.PlacementDiffAction{
+		placement.PlacementDiffActionOK,
+		placement.PlacementDiffActionReclaimPending,
+		placement.PlacementDiffActionUnbindPending,
+		placement.PlacementDiffActionReclaimPending,
+		placement.PlacementDiffActionDirectoryMissing,
+	}
+	if len(diff) != len(want) {
+		t.Fatalf("diff len=%d want %d", len(diff), len(want))
+	}
+	for i, action := range want {
+		if diff[i].Action != action {
+			t.Fatalf("diff[%d].Action=%q want %q (diff=%+v)", i, diff[i].Action, action, diff)
+		}
+	}
+}

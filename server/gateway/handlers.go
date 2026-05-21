@@ -36,10 +36,21 @@ import (
 // level subsystem services. Implements daemonbus.HandlersProvider.
 func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 	return daemonbus.Handlers{
-		OnPush: func(ctx context.Context, conn *daemonbus.Connection, frame viewsync.PushFrame) (viewsync.LastReceivedSeq, error) {
+		OnPush: func(ctx context.Context, conn *daemonbus.Connection, frame viewsync.PushFrame) (viewsync.AckFrame, error) {
+			ok, err := a.placements.ValidatePushFencing(ctx, frame.ChannelID, conn.DaemonID, frame.OwnerEpoch, frame.FencingToken)
+			if err != nil {
+				return viewsync.AckFrame{}, err
+			}
+			if !ok {
+				return viewsync.AckFrame{
+					ChannelID:    frame.ChannelID,
+					Accepted:     false,
+					RejectReason: viewsync.RejectReasonMuxOwnerEpochStale,
+				}, nil
+			}
 			res, err := a.viewcache.Apply(ctx, frame)
 			if err != nil {
-				return 0, err
+				return viewsync.AckFrame{}, err
 			}
 			// FIX-T5 fan-out: if a buffered gap just closed, Apply
 			// returns the just-newly-contiguous frames (current +
@@ -59,20 +70,31 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			case res.Outcome == viewsync.ApplyOutcomeContiguous:
 				a.pushhub.PushMessage(frame.ChannelID, frame.Seq, frame.Envelope)
 			}
-			return res.LastReceivedSeq, nil
+			return viewsync.AckFrame{
+				ChannelID:       frame.ChannelID,
+				LastReceivedSeq: res.LastReceivedSeq,
+				Accepted:        true,
+			}, nil
 		},
 		OnCreateChannelAck: func(ctx context.Context, conn *daemonbus.Connection, ack placement.CreateChannelAck) error {
 			_, err := a.placements.Activate(ctx, ack, placement.ConnectionEpoch(conn.ConnectionEpoch))
 			return err
 		},
-		OnHeartbeat: func(ctx context.Context, conn *daemonbus.Connection, payload daemonbus.HeartbeatPayload) error {
+		OnHeartbeat: func(ctx context.Context, conn *daemonbus.Connection, payload daemonbus.HeartbeatPayload) (placement.HeartbeatAckPayload, error) {
+			if payload.DaemonID != "" && payload.DaemonID != conn.DaemonID {
+				return placement.HeartbeatAckPayload{}, fmt.Errorf("daemonbus: heartbeat daemon_id %q does not match authenticated conn %q", payload.DaemonID, conn.DaemonID)
+			}
 			if err := a.daemonbus.RecordHeartbeat(ctx, conn.DaemonID); err != nil {
-				return err
+				return placement.HeartbeatAckPayload{}, err
 			}
-			for _, chID := range payload.Channels {
-				_ = a.placements.Heartbeat(ctx, chID, conn.DaemonID)
+			diff, err := a.placements.ObserveHeartbeat(ctx, conn.DaemonID, payload.HeldChannels)
+			if err != nil {
+				return placement.HeartbeatAckPayload{}, err
 			}
-			return nil
+			return placement.HeartbeatAckPayload{
+				HeartbeatSeq:  payload.HeartbeatSeq,
+				PlacementDiff: diff,
+			}, nil
 		},
 		OnReclaim: func(ctx context.Context, conn *daemonbus.Connection, req placement.ReclaimRequest) error {
 			// FIX-T4: req.DaemonID must match the WS-authenticated
@@ -199,6 +221,55 @@ func (a *App) Unbind(ctx context.Context, in devicebus.UnbindInput) error {
 		return fmt.Errorf("gateway: unbind_device_session rejected: %s", ack.Reason)
 	}
 	return nil
+}
+
+func (a *App) reclaimPlacement(ctx context.Context, p placement.Placement) error {
+	conn, ok := a.daemonbus.ConnectionFor(p.DaemonID)
+	if !ok {
+		return nil
+	}
+	reserved, req, ok, err := a.placements.ReserveReclaim(
+		ctx,
+		p.ChannelID,
+		p.DaemonID,
+		placement.ConnectionEpoch(conn.ConnectionEpoch),
+	)
+	if err != nil || !ok {
+		return err
+	}
+	reclaimCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ackFrame, err := conn.SendAndAwait(reclaimCtx, kerneldaemonbus.FrameTypeControlDaemonReclaim, req)
+	if err != nil {
+		return fmt.Errorf("gateway: daemon_reclaim send: %w", err)
+	}
+	switch ackFrame.FrameKind {
+	case kerneldaemonbus.FrameTypeControlReclaimAccepted:
+		var ack placement.ReclaimAccepted
+		if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
+			return fmt.Errorf("gateway: reclaim_accepted decode: %w", err)
+		}
+		if ack.ChannelID != reserved.ChannelID ||
+			ack.CreateRequestID != reserved.CreateRequestID ||
+			ack.NewOwnerEpoch != reserved.OwnerEpoch {
+			return fmt.Errorf("gateway: reclaim_accepted mismatch for %s", reserved.ChannelID)
+		}
+		_, err := a.placements.ActivateReclaim(
+			ctx,
+			ack,
+			p.DaemonID,
+			placement.ConnectionEpoch(conn.ConnectionEpoch),
+		)
+		return err
+	case kerneldaemonbus.FrameTypeControlReclaimRejected:
+		var rej placement.ReclaimRejected
+		if err := json.Unmarshal(ackFrame.Payload, &rej); err != nil {
+			return fmt.Errorf("gateway: reclaim_rejected decode: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("gateway: reclaim unexpected ack frame %s", ackFrame.FrameKind)
+	}
 }
 
 // ForwardDeviceFrame implements devicebus.TransitForwarder by wrapping

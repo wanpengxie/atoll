@@ -60,6 +60,7 @@ var (
 	ErrSessionNotFound = errors.New("devicebus: session not found")
 	ErrTokenInvalid    = errors.New("devicebus: invalid token")
 	ErrSessionExpired  = errors.New("devicebus: session expired")
+	ErrSessionRevoked  = errors.New("devicebus: session revoked")
 	ErrSessionNotReady = errors.New("devicebus: session not ready")
 )
 
@@ -440,7 +441,9 @@ func (s *Service) ValidateToken(ctx context.Context, sessionID, rawToken string)
 	switch row.State {
 	case StateReady, StateActive, StateOffline:
 		return row, nil
-	case StateExpired, StateRevoked:
+	case StateRevoked:
+		return Session{}, ErrSessionRevoked
+	case StateExpired:
 		return Session{}, ErrSessionExpired
 	default:
 		return Session{}, ErrSessionNotReady

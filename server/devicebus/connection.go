@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
+	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 )
 
@@ -250,7 +251,10 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 			if errors.Is(err, ErrSessionNotReady) {
 				status = http.StatusConflict
 			}
-			c.JSON(status, gin.H{"error": err.Error()})
+			c.JSON(status, gin.H{
+				"error":         err.Error(),
+				"reject_reason": string(deviceTokenRejectReason(err)),
+			})
 			return
 		}
 		upgrader := websocket.Upgrader{
@@ -305,6 +309,19 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 				return
 			}
 		}
+	}
+}
+
+func deviceTokenRejectReason(err error) kerneldaemonbus.DeviceSessionRejectReason {
+	switch {
+	case errors.Is(err, ErrTokenInvalid):
+		return kerneldaemonbus.DeviceSessionRejectTokenInvalid
+	case errors.Is(err, ErrSessionExpired):
+		return kerneldaemonbus.DeviceSessionRejectTokenExpired
+	case errors.Is(err, ErrSessionRevoked):
+		return kerneldaemonbus.DeviceSessionRejectSessionRevoked
+	default:
+		return kerneldaemonbus.DeviceSessionRejectSessionUnknown
 	}
 }
 

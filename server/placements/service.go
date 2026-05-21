@@ -36,6 +36,9 @@ type Service struct {
 	// implement the T1.7 cold-start grace.
 	startedAt time.Time
 	hasStart  bool
+
+	reclaimMu      sync.RWMutex
+	reclaimHandler func(context.Context, placement.Placement) error
 }
 
 // ChannelDaemonResolver is the narrow daemonbus dependency for
@@ -89,6 +92,25 @@ func (s *Service) WithStartedAt(t time.Time) *Service {
 
 // Store exposes the SQLStore (composition root + tests use this).
 func (s *Service) Store() *SQLStore { return s.store }
+
+// SetReclaimHandler wires the server composition root callback that
+// can push control.daemon_reclaim to a candidate daemon. placements
+// owns the SQL state machine; the gateway owns daemonbus routing.
+func (s *Service) SetReclaimHandler(h func(context.Context, placement.Placement) error) {
+	s.reclaimMu.Lock()
+	s.reclaimHandler = h
+	s.reclaimMu.Unlock()
+}
+
+func (s *Service) triggerReclaim(ctx context.Context, p placement.Placement) error {
+	s.reclaimMu.RLock()
+	h := s.reclaimHandler
+	s.reclaimMu.RUnlock()
+	if h == nil {
+		return nil
+	}
+	return h(ctx, p)
+}
 
 // Reserve performs proto-foundation §3.3.3 Phase 1 + impl-layer2 §3.2.1
 // — INSERT a placement row in 'creating' with owner_epoch=0 and an
@@ -204,6 +226,102 @@ func (s *Service) Heartbeat(ctx context.Context, channelID channel.ID, daemonID 
 	return s.store.Heartbeat(ctx, channelID, daemonID, s.now().UnixMilli())
 }
 
+// ObserveHeartbeat compares the daemon-held channel fencing tuples
+// against the placement table and returns the spec placement_diff closed
+// set. Exact active-owner matches also refresh last_heartbeat_at.
+func (s *Service) ObserveHeartbeat(
+	ctx context.Context,
+	daemonID placement.DaemonID,
+	held []placement.HeartbeatHeldChannel,
+) ([]placement.PlacementDiff, error) {
+	out := make([]placement.PlacementDiff, 0, len(held))
+	for _, h := range held {
+		diff, err := s.placementDiffForHeld(ctx, daemonID, h)
+		if err != nil {
+			return nil, err
+		}
+		if diff.Action == placement.PlacementDiffActionOK {
+			if err := s.Heartbeat(ctx, h.ChannelID, daemonID); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, diff)
+	}
+	return out, nil
+}
+
+func (s *Service) placementDiffForHeld(
+	ctx context.Context,
+	daemonID placement.DaemonID,
+	held placement.HeartbeatHeldChannel,
+) (placement.PlacementDiff, error) {
+	p, ok, err := s.store.Get(ctx, held.ChannelID)
+	if err != nil {
+		return placement.PlacementDiff{}, err
+	}
+	if !ok {
+		return placement.PlacementDiff{
+			ChannelID:   held.ChannelID,
+			ServerState: placement.PlacementDiffStateUnknown,
+			Action:      placement.PlacementDiffActionDirectoryMissing,
+		}, nil
+	}
+	owner := p.DaemonID
+	diff := placement.PlacementDiff{
+		ChannelID:         held.ChannelID,
+		ServerState:       heartbeatState(p.State),
+		ServerOwnerEpoch:  p.OwnerEpoch,
+		ServerOwnerDaemon: &owner,
+	}
+	switch {
+	case p.State == placement.StateActive &&
+		p.DaemonID == daemonID &&
+		p.OwnerEpoch == held.OwnerEpoch &&
+		p.FencingToken == held.FencingToken:
+		diff.Action = placement.PlacementDiffActionOK
+	case p.State == placement.StateActive && p.DaemonID != daemonID:
+		diff.Action = placement.PlacementDiffActionUnbindPending
+	case p.State == placement.StateOrphan || p.State == placement.StateStale:
+		diff.Action = placement.PlacementDiffActionReclaimPending
+	default:
+		diff.Action = placement.PlacementDiffActionReclaimPending
+	}
+	return diff, nil
+}
+
+func heartbeatState(state placement.State) placement.PlacementDiffState {
+	switch state {
+	case placement.StateActive:
+		return placement.PlacementDiffStateActive
+	case placement.StateOrphan:
+		return placement.PlacementDiffStateOrphan
+	case placement.StateStale:
+		return placement.PlacementDiffStateStale
+	default:
+		return placement.PlacementDiffStateUnknown
+	}
+}
+
+// ValidatePushFencing checks a daemon-sent viewsync.push before the
+// server applies it to viewcache. Any mismatch maps to the single
+// mux_owner_epoch_stale reject reason at the daemonbus layer.
+func (s *Service) ValidatePushFencing(
+	ctx context.Context,
+	channelID channel.ID,
+	daemonID placement.DaemonID,
+	ownerEpoch placement.OwnerEpoch,
+	fencingToken placement.FencingToken,
+) (bool, error) {
+	p, ok, err := s.store.Get(ctx, channelID)
+	if err != nil {
+		return false, err
+	}
+	if !ok || p.State != placement.StateActive || p.DaemonID != daemonID {
+		return false, nil
+	}
+	return p.OwnerEpoch == ownerEpoch && p.FencingToken == fencingToken, nil
+}
+
 // AcceptReclaim runs the reclaim CAS (L2 §1.4.11.4 step 2). daemonID
 // MUST be the WS-authenticated owner identifier (Connection.DaemonID)
 // — the SQL CAS pins it into the WHERE so a different daemon presenting
@@ -216,6 +334,69 @@ func (s *Service) AcceptReclaim(
 	newConnectionEpoch placement.ConnectionEpoch,
 ) (bool, error) {
 	return s.store.AcceptReclaim(ctx, channelID, daemonID, req, newConnectionEpoch, s.now().UnixMilli())
+}
+
+// ReserveReclaim starts server-initiated reclaim Phase 1.
+func (s *Service) ReserveReclaim(
+	ctx context.Context,
+	channelID channel.ID,
+	candidate placement.DaemonID,
+	connectionEpoch placement.ConnectionEpoch,
+) (placement.Placement, placement.DaemonReclaimRequest, bool, error) {
+	prev, ok, err := s.store.Get(ctx, channelID)
+	if err != nil {
+		return placement.Placement{}, placement.DaemonReclaimRequest{}, false, err
+	}
+	if !ok {
+		return placement.Placement{}, placement.DaemonReclaimRequest{}, false, nil
+	}
+	createReqID := placement.CreateRequestID(uuid.NewString())
+	out, ok, err := s.store.ReserveReclaim(ctx, channelID, candidate, connectionEpoch, createReqID, s.now().UnixMilli())
+	if err != nil || !ok {
+		return placement.Placement{}, placement.DaemonReclaimRequest{}, ok, err
+	}
+	prevOwner := prev.DaemonID
+	req := placement.DaemonReclaimRequest{
+		ChannelID:           out.ChannelID,
+		CreateRequestID:     out.CreateRequestID,
+		NewOwnerEpoch:       out.OwnerEpoch,
+		PreviousOwnerDaemon: &prevOwner,
+		PreviousState:       reclaimOrigin(prev.State),
+	}
+	return out, req, true, nil
+}
+
+// ActivateReclaim completes server-initiated reclaim Phase 3.
+func (s *Service) ActivateReclaim(
+	ctx context.Context,
+	ack placement.ReclaimAccepted,
+	daemonID placement.DaemonID,
+	newConnectionEpoch placement.ConnectionEpoch,
+) (bool, error) {
+	cur, ok, err := s.store.Get(ctx, ack.ChannelID)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, fmt.Errorf("placements: activate reclaim unknown channel %q", ack.ChannelID)
+	}
+	if cur.State != placement.StateCreating ||
+		cur.CreateRequestID != ack.CreateRequestID ||
+		cur.OwnerEpoch != ack.NewOwnerEpoch {
+		return false, nil
+	}
+	return s.store.CASActivateReclaim(ctx, ack, daemonID, newConnectionEpoch, s.now().UnixMilli())
+}
+
+func reclaimOrigin(state placement.State) placement.ReclaimOriginState {
+	switch state {
+	case placement.StateOrphan:
+		return placement.ReclaimOriginOrphan
+	case placement.StateStale:
+		return placement.ReclaimOriginStale
+	default:
+		return placement.ReclaimOriginActiveLost
+	}
 }
 
 // Get is a thin pass-through.
@@ -251,7 +432,8 @@ func (s *Service) MarkStartedAt() {
 }
 
 // ReconcileOnce runs a single reconcile sweep — creating→orphan
-// (always) + active→stale (only after row-local grace).
+// (always) + active→stale (only after row-local grace), then invokes
+// the optional reclaim handler for orphan/stale rows that are eligible.
 func (s *Service) ReconcileOnce(ctx context.Context) error {
 	s.MarkStartedAt()
 	now := s.now()
@@ -297,6 +479,29 @@ func (s *Service) ReconcileOnce(ctx context.Context) error {
 			continue
 		}
 		if err := s.store.MarkStale(ctx, p.ChannelID, now.UnixMilli()); err != nil {
+			return err
+		}
+	}
+
+	if err := s.triggerEligibleReclaims(ctx, placement.StateOrphan, cutoffGrace); err != nil {
+		return err
+	}
+	if err := s.triggerEligibleReclaims(ctx, placement.StateStale, now.UnixMilli()+1); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) triggerEligibleReclaims(ctx context.Context, state placement.State, cutoffMs int64) error {
+	rows, err := s.store.ListByState(ctx, state)
+	if err != nil {
+		return err
+	}
+	for _, p := range rows {
+		if p.EnteredStateAt > cutoffMs {
+			continue
+		}
+		if err := s.triggerReclaim(ctx, p); err != nil {
 			return err
 		}
 	}

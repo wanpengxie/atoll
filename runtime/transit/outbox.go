@@ -9,6 +9,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
 )
 
@@ -72,6 +73,11 @@ type EventEmitter struct {
 // tests can inject a counter.
 type FrameIDGen func() string
 
+// PushFencingFn returns the current owner fencing tuple for a channel.
+// Pusher calls it immediately before emitting each viewsync.push frame so
+// ownership changes are reflected without rebuilding the outbox row.
+type PushFencingFn func(ctx context.Context, channelID channel.ID) (placement.OwnerEpoch, placement.FencingToken, error)
+
 // Pusher drives the persistent view-sync outbox: it pulls pending rows,
 // emits viewsync.push frames via the daemonbus Client, marks them as
 // pushed, and watches the cursor tracker advance via incoming acks.
@@ -85,6 +91,7 @@ type Pusher struct {
 	pageSize  int
 	nowFn     func() int64
 	failHook  func(channel.ID, viewsync.Seq, error)
+	fencing   PushFencingFn
 	pollEvery time.Duration
 
 	// retry-counter + watermark state (L1 §8.1.5 observability).
@@ -113,6 +120,10 @@ type PusherConfig struct {
 	// view_sync_failed (L1 §8.1.5). Kept as a back-compat seam alongside
 	// the richer EventEmitter — both fire when present.
 	FailHook func(channel.ID, viewsync.Seq, error)
+	// Fencing supplies owner_epoch + fencing_token for every push frame.
+	// Nil is accepted for tests that exercise pusher mechanics only; such
+	// frames will carry zero-values and be rejected by a spec-aligned server.
+	Fencing PushFencingFn
 
 	// MaxRetriesBeforeEvent controls when a sustained push failure
 	// triggers Emitter.OnViewSyncFailed. Default = 5. Zero or negative
@@ -175,6 +186,7 @@ func NewPusher(cfg PusherConfig) (*Pusher, error) {
 		pageSize:     cfg.PageSize,
 		nowFn:        cfg.NowFn,
 		failHook:     cfg.FailHook,
+		fencing:      cfg.Fencing,
 		pollEvery:    cfg.PollEvery,
 		maxRetries:   cfg.MaxRetriesBeforeEvent,
 		watermark:    cfg.BacklogHighWatermark,
@@ -272,6 +284,19 @@ func (p *Pusher) Drain(ctx context.Context) (int, error) {
 	}
 	var sent int
 	for _, frame := range pending {
+		if p.fencing != nil {
+			ownerEpoch, fencingToken, err := p.fencing(ctx, frame.ChannelID)
+			if err != nil {
+				if p.failHook != nil {
+					p.failHook(frame.ChannelID, frame.Seq, err)
+				}
+				p.recordFailure(frame.ChannelID, frame.Seq, err)
+				p.checkBacklog(ctx, frame.ChannelID)
+				return sent, fmt.Errorf("transit: fencing seq=%d: %w", frame.Seq, err)
+			}
+			frame.OwnerEpoch = ownerEpoch
+			frame.FencingToken = fencingToken
+		}
 		if err := p.client.Send(ctx, p.frameID(), daemonbus.FrameTypeViewsyncPush, frame); err != nil {
 			if p.failHook != nil {
 				p.failHook(frame.ChannelID, frame.Seq, err)

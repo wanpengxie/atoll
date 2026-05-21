@@ -4,27 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
-	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
-// HeartbeatBody is the wire shape of `control.heartbeat`. Mirrors
-// server/daemonbus.HeartbeatPayload (json tag `channels`) so the
-// existing server-side decoder accepts it without touching server/.
-//
-// Per L2 placements semantics, the channels list is the snapshot of
-// channel ids the daemon currently still owns; the server refreshes
-// per-channel last_heartbeat_at as well as daemon-level last_heartbeat_at.
-type HeartbeatBody struct {
-	Channels []channel.ID `json:"channels"`
-}
+// HeartbeatBody is the wire shape of `control.heartbeat`.
+type HeartbeatBody = placement.HeartbeatPayload
 
-// ChannelsFn returns the daemon's current owned-channel snapshot. The
+// HeldChannelsFn returns the daemon's current owned-channel snapshot. The
 // HeartbeatSender invokes this on every tick; implementations MUST be
 // cheap and safe to call from a goroutine.
-type ChannelsFn func() []channel.ID
+type HeldChannelsFn func(context.Context) []placement.HeartbeatHeldChannel
 
 // HeartbeatSenderConfig wires a HeartbeatSender.
 type HeartbeatSenderConfig struct {
@@ -34,8 +27,9 @@ type HeartbeatSenderConfig struct {
 	Period time.Duration
 	// FrameID generates a unique frame id per emit. REQUIRED.
 	FrameID func() string
-	// Channels supplies the owned-channel snapshot. May be nil (empty list).
-	Channels ChannelsFn
+	// HeldChannels supplies the owned-channel fencing snapshot. May be nil
+	// (empty list).
+	HeldChannels HeldChannelsFn
 }
 
 // HeartbeatSender drives the daemon → server `control.heartbeat` ticker.
@@ -56,6 +50,7 @@ type HeartbeatSenderConfig struct {
 //     the only feedback signal (used by reclaim path).
 type HeartbeatSender struct {
 	cfg HeartbeatSenderConfig
+	seq atomic.Int64
 }
 
 // DefaultHeartbeatPeriod is the cadence used when HeartbeatSenderConfig.Period
@@ -75,8 +70,8 @@ func NewHeartbeatSender(cfg HeartbeatSenderConfig) (*HeartbeatSender, error) {
 	if cfg.Period <= 0 {
 		cfg.Period = DefaultHeartbeatPeriod
 	}
-	if cfg.Channels == nil {
-		cfg.Channels = func() []channel.ID { return nil }
+	if cfg.HeldChannels == nil {
+		cfg.HeldChannels = func(context.Context) []placement.HeartbeatHeldChannel { return nil }
 	}
 	return &HeartbeatSender{cfg: cfg}, nil
 }
@@ -88,7 +83,12 @@ func (s *HeartbeatSender) Period() time.Duration { return s.cfg.Period }
 // snapshot. Exposed so tests can drive a deterministic single emit
 // without running the Period ticker.
 func (s *HeartbeatSender) Emit(ctx context.Context) error {
-	body := HeartbeatBody{Channels: s.cfg.Channels()}
+	body := HeartbeatBody{
+		DaemonID:     placement.DaemonID(s.cfg.Client.DaemonID()),
+		HeartbeatSeq: s.seq.Add(1),
+		HeldChannels: s.cfg.HeldChannels(ctx),
+		Capacity:     nil,
+	}
 	if err := s.cfg.Client.Send(ctx, s.cfg.FrameID(), daemonbus.FrameTypeControlHeartbeat, body); err != nil {
 		return fmt.Errorf("transit: heartbeat emit: %w", err)
 	}

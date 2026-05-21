@@ -226,6 +226,141 @@ func (s *SQLStore) MarkOrphan(ctx context.Context, channelID channel.ID, nowMs i
 	return nil
 }
 
+// ReserveReclaim starts the server-initiated reclaim saga. It CASes an
+// orphan/stale placement back to creating, pins the candidate daemon,
+// rotates create_request_id, and bumps owner_epoch by exactly +1 before
+// the daemon_reclaim frame is sent.
+func (s *SQLStore) ReserveReclaim(
+	ctx context.Context,
+	channelID channel.ID,
+	candidate placement.DaemonID,
+	connectionEpoch placement.ConnectionEpoch,
+	createRequestID placement.CreateRequestID,
+	nowMs int64,
+) (placement.Placement, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return placement.Placement{}, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var (
+		p                            placement.Placement
+		state                        string
+		hostActor, fedOrigin, tenant sql.NullString
+	)
+	err = tx.QueryRowContext(
+		ctx,
+		`SELECT channel_id, daemon_id, state, owner_epoch, fencing_token,
+		        create_request_id, daemon_connection_epoch, last_heartbeat_at,
+		        created_at, activated_at, entered_state_at,
+		        host_actor_id, federated_origin, tenant_id
+		   FROM channel_placements WHERE channel_id = ?`,
+		string(channelID),
+	).Scan(
+		(*string)(&p.ChannelID), (*string)(&p.DaemonID), &state,
+		(*int64)(&p.OwnerEpoch), (*string)(&p.FencingToken),
+		(*string)(&p.CreateRequestID), (*int64)(&p.DaemonConnectionEpoch),
+		&p.LastHeartbeatAt, &p.CreatedAt, &p.ActivatedAt, &p.EnteredStateAt,
+		&hostActor, &fedOrigin, &tenant,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return placement.Placement{}, false, nil
+		}
+		return placement.Placement{}, false, fmt.Errorf("placements: ReserveReclaim get: %w", err)
+	}
+	p.State = placement.State(state)
+	p.HostActorID = hostActor.String
+	p.FederatedOrigin = fedOrigin.String
+	p.TenantID = placement.TenantID(tenant.String)
+	if p.State != placement.StateOrphan && p.State != placement.StateStale {
+		return placement.Placement{}, false, nil
+	}
+
+	newEpoch := p.OwnerEpoch + 1
+	res, err := tx.ExecContext(
+		ctx,
+		`UPDATE channel_placements
+		    SET state                   = 'creating',
+		        daemon_id               = ?,
+		        owner_epoch             = ?,
+		        fencing_token           = '',
+		        create_request_id       = ?,
+		        daemon_connection_epoch = ?,
+		        entered_state_at        = ?
+		  WHERE channel_id = ?
+		    AND state IN ('orphan','stale')
+		    AND owner_epoch = ?`,
+		string(candidate), int64(newEpoch), string(createRequestID),
+		int64(connectionEpoch), nowMs,
+		string(channelID), int64(p.OwnerEpoch),
+	)
+	if err != nil {
+		return placement.Placement{}, false, fmt.Errorf("placements: ReserveReclaim update: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return placement.Placement{}, false, err
+	}
+	if n != 1 {
+		return placement.Placement{}, false, nil
+	}
+	p.DaemonID = candidate
+	p.State = placement.StateCreating
+	p.OwnerEpoch = newEpoch
+	p.FencingToken = ""
+	p.CreateRequestID = createRequestID
+	p.DaemonConnectionEpoch = connectionEpoch
+	p.EnteredStateAt = nowMs
+	if err := tx.Commit(); err != nil {
+		return placement.Placement{}, false, err
+	}
+	return p, true, nil
+}
+
+// CASActivateReclaim completes server-initiated reclaim. The row is
+// already in creating with the new owner_epoch from Phase 1; Phase 3
+// accepts only the matching create_request_id/owner_epoch and writes
+// the daemon-generated fencing token.
+func (s *SQLStore) CASActivateReclaim(
+	ctx context.Context,
+	ack placement.ReclaimAccepted,
+	daemonID placement.DaemonID,
+	newConnectionEpoch placement.ConnectionEpoch,
+	nowMs int64,
+) (bool, error) {
+	if ack.FencingToken == "" {
+		return false, nil
+	}
+	res, err := s.db.ExecContext(
+		ctx,
+		`UPDATE channel_placements
+		    SET state                   = 'active',
+		        daemon_id               = ?,
+		        fencing_token           = ?,
+		        activated_at            = ?,
+		        entered_state_at        = ?,
+		        daemon_connection_epoch = ?,
+		        last_heartbeat_at       = ?
+		  WHERE channel_id        = ?
+		    AND create_request_id = ?
+		    AND state             = 'creating'
+		    AND owner_epoch       = ?`,
+		string(daemonID), string(ack.FencingToken),
+		nowMs, nowMs, int64(newConnectionEpoch), nowMs,
+		string(ack.ChannelID), string(ack.CreateRequestID), int64(ack.NewOwnerEpoch),
+	)
+	if err != nil {
+		return false, fmt.Errorf("placements: CASActivateReclaim: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 // AcceptReclaim runs the L2 §1.4.11.4 reclaim path — daemon reports
 // (channel_id, fencing_token, owner_epoch) on reconnect; server
 // validates state='active' + full tuple (channel_id, daemon_id,

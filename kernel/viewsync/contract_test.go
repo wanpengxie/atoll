@@ -18,9 +18,11 @@ func TestPushAckFramePayloadFields(t *testing.T) {
 	t.Parallel()
 
 	push := PushFrame{
-		ChannelID: "chan-A",
-		Seq:       42,
-		MessageID: "m-42",
+		ChannelID:    "chan-A",
+		Seq:          42,
+		MessageID:    "m-42",
+		OwnerEpoch:   1,
+		FencingToken: "tok-A",
 		Envelope: message.Envelope{
 			ID:         "m-42",
 			TS:         1,
@@ -33,13 +35,13 @@ func TestPushAckFramePayloadFields(t *testing.T) {
 			Audience:   message.Audience{"*"},
 		},
 	}
-	if got := jsonKeys(t, push); !equalSlices(got, []string{"channel_id", "envelope", "message_id", "seq"}) {
-		t.Errorf("PushFrame keys = %v, want [channel_id envelope message_id seq]", got)
+	if got := jsonKeys(t, push); !equalSlices(got, []string{"channel_id", "envelope", "fencing_token", "message_id", "owner_epoch", "seq"}) {
+		t.Errorf("PushFrame keys = %v, want [channel_id envelope fencing_token message_id owner_epoch seq]", got)
 	}
 
-	ack := AckFrame{ChannelID: "chan-A", LastReceivedSeq: 7}
-	if got := jsonKeys(t, ack); !equalSlices(got, []string{"channel_id", "last_received_seq"}) {
-		t.Errorf("AckFrame keys = %v, want [channel_id last_received_seq]", got)
+	ack := AckFrame{ChannelID: "chan-A", LastReceivedSeq: 7, Accepted: true}
+	if got := jsonKeys(t, ack); !equalSlices(got, []string{"accepted", "channel_id", "last_received_seq"}) {
+		t.Errorf("AckFrame keys = %v, want [accepted channel_id last_received_seq]", got)
 	}
 
 	rreq := ResyncRequest{ChannelID: "chan-A", SinceSeq: 2, UntilSeq: 5}

@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
@@ -23,7 +22,7 @@ type Handlers struct {
 	// OnPush is called for viewsync.push — implementation should
 	// hand the frame to viewcache.Apply and then send back ack via
 	// SendAck (or use the return value).
-	OnPush func(ctx context.Context, conn *Connection, frame viewsync.PushFrame) (viewsync.LastReceivedSeq, error)
+	OnPush func(ctx context.Context, conn *Connection, frame viewsync.PushFrame) (viewsync.AckFrame, error)
 
 	// OnCreateChannelAck handles control.create_channel_ack.
 	OnCreateChannelAck func(ctx context.Context, conn *Connection, ack placement.CreateChannelAck) error
@@ -31,7 +30,7 @@ type Handlers struct {
 	// OnHeartbeat handles control.heartbeat — refresh daemon
 	// last_heartbeat_at + per-channel heartbeat for active
 	// placements.
-	OnHeartbeat func(ctx context.Context, conn *Connection, payload HeartbeatPayload) error
+	OnHeartbeat func(ctx context.Context, conn *Connection, payload HeartbeatPayload) (placement.HeartbeatAckPayload, error)
 
 	// OnReclaim handles control.daemon_reclaim — server validates
 	// each channel and replies control.reclaim_accepted or
@@ -48,13 +47,8 @@ type Handlers struct {
 	OnDeviceTransitRecv func(ctx context.Context, conn *Connection, frame daemonbus.Frame) error
 }
 
-// HeartbeatPayload is the wire shape of `control.heartbeat`. Demo
-// period carries the list of channels the daemon claims to still
-// own — the gateway refreshes the per-channel heartbeat as well as
-// the daemon-level one.
-type HeartbeatPayload struct {
-	Channels []channel.ID `json:"channels"`
-}
+// HeartbeatPayload is the wire shape of `control.heartbeat`.
+type HeartbeatPayload = placement.HeartbeatPayload
 
 // Run consumes frames from the transport until ctx is cancelled or
 // the transport closes. Each frame is dispatched to the
@@ -89,13 +83,12 @@ func (c *Connection) Run(ctx context.Context, h Handlers) error {
 				if perr != nil {
 					return perr
 				}
-				lastSeq, err := h.OnPush(ctx, c, push)
+				ack, err := h.OnPush(ctx, c, push)
 				if err != nil {
 					return err
 				}
-				ack := viewsync.AckFrame{
-					ChannelID:       push.ChannelID,
-					LastReceivedSeq: lastSeq,
+				if ack.ChannelID == "" {
+					ack.ChannelID = push.ChannelID
 				}
 				if _, err := c.SendFrame(ctx, daemonbus.FrameTypeViewsyncAck, ack); err != nil {
 					return err
@@ -116,15 +109,20 @@ func (c *Connection) Run(ctx context.Context, h Handlers) error {
 			if err := json.Unmarshal(frame.Payload, &p); err != nil {
 				return fmt.Errorf("daemonbus: unmarshal heartbeat: %w", err)
 			}
+			ackPayload := placement.HeartbeatAckPayload{
+				HeartbeatSeq: p.HeartbeatSeq,
+			}
 			if h.OnHeartbeat != nil {
-				if err := h.OnHeartbeat(ctx, c, p); err != nil {
+				out, err := h.OnHeartbeat(ctx, c, p)
+				if err != nil {
 					return err
+				}
+				ackPayload = out
+				if ackPayload.HeartbeatSeq == 0 {
+					ackPayload.HeartbeatSeq = p.HeartbeatSeq
 				}
 			}
 			// Always reply heartbeat_ack so daemon RTT stays calibrated.
-			ackPayload := struct {
-				FrameID string `json:"frame_id"`
-			}{FrameID: frame.FrameID.String()}
 			if _, err := c.SendFrame(ctx, daemonbus.FrameTypeControlHeartbeatAck, ackPayload); err != nil {
 				return err
 			}

@@ -112,8 +112,8 @@ func TestIssueAndLifecycle(t *testing.T) {
 	if row.State != devicebus.StateRevoked {
 		t.Errorf("post-revoke state=%q", row.State)
 	}
-	if _, err := svc.ValidateToken(ctx, res.Session.ID, res.Token); err != devicebus.ErrSessionExpired {
-		t.Errorf("revoked validate err=%v want ErrSessionExpired", err)
+	if _, err := svc.ValidateToken(ctx, res.Session.ID, res.Token); err != devicebus.ErrSessionRevoked {
+		t.Errorf("revoked validate err=%v want ErrSessionRevoked", err)
 	}
 }
 

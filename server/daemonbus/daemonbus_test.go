@@ -176,9 +176,13 @@ func TestDispatchPushAndAck(t *testing.T) {
 
 	pushed := make(chan viewsync.PushFrame, 1)
 	handlers := daemonbus.Handlers{
-		OnPush: func(ctx context.Context, c *daemonbus.Connection, f viewsync.PushFrame) (viewsync.LastReceivedSeq, error) {
+		OnPush: func(ctx context.Context, c *daemonbus.Connection, f viewsync.PushFrame) (viewsync.AckFrame, error) {
 			pushed <- f
-			return viewsync.LastReceivedSeq(int64(f.Seq)), nil
+			return viewsync.AckFrame{
+				ChannelID:       f.ChannelID,
+				LastReceivedSeq: viewsync.LastReceivedSeq(int64(f.Seq)),
+				Accepted:        true,
+			}, nil
 		},
 	}
 
@@ -299,9 +303,9 @@ func TestStaleEpochDropped(t *testing.T) {
 
 	pushed := make(chan struct{}, 1)
 	handlers := daemonbus.Handlers{
-		OnPush: func(ctx context.Context, c *daemonbus.Connection, f viewsync.PushFrame) (viewsync.LastReceivedSeq, error) {
+		OnPush: func(ctx context.Context, c *daemonbus.Connection, f viewsync.PushFrame) (viewsync.AckFrame, error) {
 			pushed <- struct{}{}
-			return 0, nil
+			return viewsync.AckFrame{}, nil
 		},
 	}
 
