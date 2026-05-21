@@ -340,10 +340,23 @@ func (s *Service) ValidatePushFencing(
 	if err != nil {
 		return false, err
 	}
-	if !ok || p.State != placement.StateActive || p.DaemonID != daemonID {
+	if !ok || p.DaemonID != daemonID {
 		return false, nil
 	}
-	return p.OwnerEpoch == ownerEpoch && p.FencingToken == fencingToken, nil
+	switch p.State {
+	case placement.StateActive:
+		return p.OwnerEpoch == ownerEpoch && p.FencingToken == fencingToken, nil
+	case placement.StateCreating:
+		if p.OwnerEpoch != ownerEpoch {
+			return false, nil
+		}
+		if p.FencingToken == "" {
+			return fencingToken != "", nil
+		}
+		return p.FencingToken == fencingToken, nil
+	default:
+		return false, nil
+	}
 }
 
 // AcceptHeldChannel runs the cold-start held-channel report CAS. daemonID

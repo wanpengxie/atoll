@@ -564,6 +564,98 @@ func TestServerInitiatedReclaimReserveAndActivate(t *testing.T) {
 	}
 }
 
+func TestValidatePushFencingByPlacementState(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+
+	active, _, err := svc.Reserve(ctx, channel.ID("ch-push-active"), placement.DaemonID("d-active"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve active: %v", err)
+	}
+	if ok, err := svc.Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       active.ChannelID,
+		CreateRequestID: active.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "tok-active",
+		DaemonID:        active.DaemonID,
+		Result:          placement.CreateChannelAccepted,
+	}, 1); err != nil || !ok {
+		t.Fatalf("Activate active ok=%v err=%v", ok, err)
+	}
+	assertPush := func(name string, channelID channel.ID, daemonID placement.DaemonID, ownerEpoch placement.OwnerEpoch, fencingToken placement.FencingToken, want bool) {
+		t.Helper()
+		got, err := svc.ValidatePushFencing(ctx, channelID, daemonID, ownerEpoch, fencingToken)
+		if err != nil {
+			t.Fatalf("%s ValidatePushFencing: %v", name, err)
+		}
+		if got != want {
+			t.Fatalf("%s ValidatePushFencing=%v want %v", name, got, want)
+		}
+	}
+	assertPush("active matching", active.ChannelID, active.DaemonID, 1, "tok-active", true)
+	assertPush("active wrong token", active.ChannelID, active.DaemonID, 1, "tok-wrong", false)
+
+	reclaimSource, _, err := svc.Reserve(ctx, channel.ID("ch-push-reclaim"), placement.DaemonID("d-old"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve reclaim source: %v", err)
+	}
+	if ok, err := svc.Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       reclaimSource.ChannelID,
+		CreateRequestID: reclaimSource.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "tok-old",
+		DaemonID:        reclaimSource.DaemonID,
+		Result:          placement.CreateChannelAccepted,
+	}, 1); err != nil || !ok {
+		t.Fatalf("Activate reclaim source ok=%v err=%v", ok, err)
+	}
+	if err := svc.Store().MarkStale(ctx, reclaimSource.ChannelID, c.Now().UnixMilli()); err != nil {
+		t.Fatalf("MarkStale reclaim source: %v", err)
+	}
+	creating, _, ok, err := svc.ReserveReclaim(ctx, reclaimSource.ChannelID, placement.DaemonID("d-new"), 2)
+	if err != nil || !ok {
+		t.Fatalf("ReserveReclaim ok=%v err=%v", ok, err)
+	}
+	if creating.State != placement.StateCreating || creating.FencingToken != "" {
+		t.Fatalf("ReserveReclaim state=%q token=%q want creating with empty token", creating.State, creating.FencingToken)
+	}
+	assertPush("creating reclaim candidate", creating.ChannelID, placement.DaemonID("d-new"), creating.OwnerEpoch, "tok-daemon-generated", true)
+	assertPush("creating empty token", creating.ChannelID, placement.DaemonID("d-new"), creating.OwnerEpoch, "", false)
+	assertPush("creating wrong daemon", creating.ChannelID, placement.DaemonID("d-other"), creating.OwnerEpoch, "tok-daemon-generated", false)
+	assertPush("creating old epoch", creating.ChannelID, placement.DaemonID("d-new"), creating.OwnerEpoch-1, "tok-daemon-generated", false)
+
+	stale, _, err := svc.Reserve(ctx, channel.ID("ch-push-stale"), placement.DaemonID("d-stale"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve stale: %v", err)
+	}
+	if ok, err := svc.Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       stale.ChannelID,
+		CreateRequestID: stale.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "tok-stale",
+		DaemonID:        stale.DaemonID,
+		Result:          placement.CreateChannelAccepted,
+	}, 1); err != nil || !ok {
+		t.Fatalf("Activate stale ok=%v err=%v", ok, err)
+	}
+	if err := svc.Store().MarkStale(ctx, stale.ChannelID, c.Now().UnixMilli()); err != nil {
+		t.Fatalf("MarkStale: %v", err)
+	}
+	assertPush("stale rejected", stale.ChannelID, stale.DaemonID, 1, "tok-stale", false)
+
+	orphan, _, err := svc.Reserve(ctx, channel.ID("ch-push-orphan"), placement.DaemonID("d-orphan"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve orphan: %v", err)
+	}
+	if err := svc.Store().MarkOrphan(ctx, orphan.ChannelID, c.Now().UnixMilli()); err != nil {
+		t.Fatalf("MarkOrphan: %v", err)
+	}
+	assertPush("orphan rejected", orphan.ChannelID, orphan.DaemonID, orphan.OwnerEpoch, "tok-orphan", false)
+	assertPush("missing rejected", channel.ID("ch-push-missing"), placement.DaemonID("d-missing"), 1, "tok-missing", false)
+}
+
 func TestObserveHeartbeatPlacementDiffActions(t *testing.T) {
 	t.Parallel()
 	c := &clock{now: time.Unix(1_700_000_000, 0)}
