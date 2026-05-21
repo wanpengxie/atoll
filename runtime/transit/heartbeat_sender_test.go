@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
@@ -40,13 +40,16 @@ func TestHeartbeatSender_EmitsControlHeartbeat(t *testing.T) {
 	frameID := func() string {
 		return "hb-" + strconv.FormatInt(fid.Add(1), 10)
 	}
-	channels := []channel.ID{"ch-a", "ch-b"}
+	channels := []placement.HeartbeatHeldChannel{
+		{ChannelID: "ch-a", OwnerEpoch: 1, FencingToken: "tok-a"},
+		{ChannelID: "ch-b", OwnerEpoch: 2, FencingToken: "tok-b"},
+	}
 	sender, err := transit.NewHeartbeatSender(transit.HeartbeatSenderConfig{
 		Client:  client,
 		Period:  10 * time.Millisecond,
 		FrameID: frameID,
-		Channels: func() []channel.ID {
-			out := make([]channel.ID, len(channels))
+		HeldChannels: func(context.Context) []placement.HeartbeatHeldChannel {
+			out := make([]placement.HeartbeatHeldChannel, len(channels))
 			copy(out, channels)
 			return out
 		},
@@ -83,8 +86,20 @@ func TestHeartbeatSender_EmitsControlHeartbeat(t *testing.T) {
 		if err := json.Unmarshal(f.Payload, &body); err != nil {
 			t.Fatalf("decode payload: %v", err)
 		}
-		if len(body.Channels) != 2 || body.Channels[0] != "ch-a" || body.Channels[1] != "ch-b" {
-			t.Errorf("body.Channels=%v want [ch-a ch-b]", body.Channels)
+		if body.DaemonID != "daemon-test" {
+			t.Errorf("body.DaemonID=%q want daemon-test", body.DaemonID)
+		}
+		if body.HeartbeatSeq <= 0 {
+			t.Errorf("body.HeartbeatSeq=%d want > 0", body.HeartbeatSeq)
+		}
+		if len(body.HeldChannels) != 2 ||
+			body.HeldChannels[0].ChannelID != "ch-a" ||
+			body.HeldChannels[0].OwnerEpoch != 1 ||
+			body.HeldChannels[0].FencingToken != "tok-a" ||
+			body.HeldChannels[1].ChannelID != "ch-b" ||
+			body.HeldChannels[1].OwnerEpoch != 2 ||
+			body.HeldChannels[1].FencingToken != "tok-b" {
+			t.Errorf("body.HeldChannels=%v want fencing tuples", body.HeldChannels)
 		}
 		got++
 	}
@@ -129,8 +144,8 @@ func TestHeartbeatSender_NilChannelsFnSafe(t *testing.T) {
 	if err := json.Unmarshal(f.Payload, &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(body.Channels) != 0 {
-		t.Errorf("expected empty channels list, got %v", body.Channels)
+	if len(body.HeldChannels) != 0 {
+		t.Errorf("expected empty held_channels list, got %v", body.HeldChannels)
 	}
 }
 

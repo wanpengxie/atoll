@@ -3,6 +3,7 @@ package gateway_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -1033,6 +1034,25 @@ func TestMockDaemonViewSyncRoundTrip(t *testing.T) {
 
 	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
 
+	const pushOwnerEpoch placement.OwnerEpoch = 1
+	const pushFencingToken placement.FencingToken = "daemon-tok-ch-A"
+	_, req, err := app.Placements().Reserve(ctx, channel.ID("ch-A"), placement.DaemonID("mock-d1"), placement.ConnectionEpoch(epoch), nil)
+	if err != nil {
+		t.Fatalf("Reserve ch-A: %v", err)
+	}
+	ack := placement.CreateChannelAck{
+		FrameID:         "ack-ch-A",
+		ChannelID:       req.ChannelID,
+		CreateRequestID: req.CreateRequestID,
+		OwnerEpoch:      pushOwnerEpoch,
+		FencingToken:    pushFencingToken,
+		DaemonID:        placement.DaemonID("mock-d1"),
+		Status:          placement.AckBound,
+	}
+	if ok, err := app.Placements().Activate(ctx, ack, placement.ConnectionEpoch(epoch)); err != nil || !ok {
+		t.Fatalf("Activate ch-A ok=%v err=%v", ok, err)
+	}
+
 	send := func(ft kerneldaemonbus.FrameType, payload any) {
 		raw, _ := json.Marshal(payload)
 		if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
@@ -1046,8 +1066,11 @@ func TestMockDaemonViewSyncRoundTrip(t *testing.T) {
 	mkPush := func(seq viewsync.Seq) viewsync.PushFrame {
 		id := message.ID("m-" + itoa(int64(seq)))
 		return viewsync.PushFrame{
-			ChannelID: channel.ID("ch-A"), Seq: seq,
-			MessageID: id,
+			ChannelID:    channel.ID("ch-A"),
+			Seq:          seq,
+			MessageID:    id,
+			OwnerEpoch:   pushOwnerEpoch,
+			FencingToken: pushFencingToken,
 			Envelope: message.Envelope{
 				ID: id, TS: int64(seq) * 1000, ChannelID: "ch-A",
 				Sender: message.Sender{Kind: actor.KindAgent, ID: "a"},
@@ -1060,19 +1083,25 @@ func TestMockDaemonViewSyncRoundTrip(t *testing.T) {
 
 	expect := func(want viewsync.Seq) {
 		t.Helper()
-		f, err := dmn.ReadFrame(ctx)
-		if err != nil {
-			t.Fatalf("read ack: %v", err)
-		}
-		if f.FrameKind != kerneldaemonbus.FrameTypeViewsyncAck {
-			t.Fatalf("expected viewsync.ack, got %s", f.FrameKind)
-		}
-		var ack viewsync.AckFrame
-		if err := json.Unmarshal(f.Payload, &ack); err != nil {
-			t.Fatalf("decode ack: %v", err)
-		}
-		if int64(ack.LastReceivedSeq) != int64(want) {
-			t.Fatalf("ack=%d want %d", ack.LastReceivedSeq, want)
+		for {
+			f, err := dmn.ReadFrame(ctx)
+			if err != nil {
+				t.Fatalf("read ack: %v", err)
+			}
+			if f.FrameKind != kerneldaemonbus.FrameTypeViewsyncAck {
+				continue
+			}
+			var ack viewsync.AckFrame
+			if err := json.Unmarshal(f.Payload, &ack); err != nil {
+				t.Fatalf("decode ack: %v", err)
+			}
+			if int64(ack.LastReceivedSeq) != int64(want) {
+				t.Fatalf("ack=%d want %d", ack.LastReceivedSeq, want)
+			}
+			if !ack.Accepted {
+				t.Fatalf("ack rejected: %+v", ack)
+			}
+			return
 		}
 	}
 
@@ -1192,10 +1221,33 @@ func TestViewSyncGapDrainFanOut(t *testing.T) {
 	defer app.Daemonbus().Unregister(placement.DaemonID("d-fanout"))
 	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
 
+	const pushOwnerEpoch placement.OwnerEpoch = 1
+	const pushFencingToken placement.FencingToken = "daemon-tok-fanout"
+	_, req, err := app.Placements().Reserve(ctx, channel.ID("ch-fanout"), placement.DaemonID("d-fanout"), placement.ConnectionEpoch(epoch), nil)
+	if err != nil {
+		t.Fatalf("Reserve ch-fanout: %v", err)
+	}
+	ack := placement.CreateChannelAck{
+		FrameID:         "ack-ch-fanout",
+		ChannelID:       req.ChannelID,
+		CreateRequestID: req.CreateRequestID,
+		OwnerEpoch:      pushOwnerEpoch,
+		FencingToken:    pushFencingToken,
+		DaemonID:        placement.DaemonID("d-fanout"),
+		Status:          placement.AckBound,
+	}
+	if ok, err := app.Placements().Activate(ctx, ack, placement.ConnectionEpoch(epoch)); err != nil || !ok {
+		t.Fatalf("Activate ch-fanout ok=%v err=%v", ok, err)
+	}
+
 	mkPush := func(seq viewsync.Seq) viewsync.PushFrame {
 		id := message.ID("m-" + itoa(int64(seq)))
 		return viewsync.PushFrame{
-			ChannelID: channel.ID("ch-fanout"), Seq: seq, MessageID: id,
+			ChannelID:    channel.ID("ch-fanout"),
+			Seq:          seq,
+			MessageID:    id,
+			OwnerEpoch:   pushOwnerEpoch,
+			FencingToken: pushFencingToken,
 			Envelope: message.Envelope{
 				ID: id, TS: int64(seq) * 1000, ChannelID: "ch-fanout",
 				Sender: message.Sender{Kind: actor.KindAgent, ID: "a"},
@@ -1250,6 +1302,167 @@ func TestViewSyncGapDrainFanOut(t *testing.T) {
 		if obs[i].Seq != w {
 			t.Errorf("fan-out[%d].seq=%d want %d (full=%v)", i, obs[i].Seq, w, seqList(obs))
 		}
+	}
+	_ = conn.Close()
+}
+
+func TestViewSyncRejectsStaleFencingBeforeApply(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := app.Daemonbus().RegisterDaemon(ctx, placement.DaemonID("d-stale-push"), "h", "v", 0, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon: %v", err)
+	}
+	epoch, _ := app.Daemonbus().IssueConnectionEpoch(ctx, placement.DaemonID("d-stale-push"))
+	svr, dmn := newPipePair()
+	conn := daemonbus.NewConnection(placement.DaemonID("d-stale-push"), epoch, svr)
+	app.Daemonbus().Register(conn)
+	defer app.Daemonbus().Unregister(placement.DaemonID("d-stale-push"))
+	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
+
+	_, req, err := app.Placements().Reserve(ctx, channel.ID("ch-stale-push"), placement.DaemonID("d-stale-push"), placement.ConnectionEpoch(epoch), nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if ok, err := app.Placements().Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       req.ChannelID,
+		CreateRequestID: req.CreateRequestID,
+		OwnerEpoch:      2,
+		FencingToken:    "server-token",
+		DaemonID:        placement.DaemonID("d-stale-push"),
+		Status:          placement.AckBound,
+	}, placement.ConnectionEpoch(epoch)); err != nil || !ok {
+		t.Fatalf("Activate ok=%v err=%v", ok, err)
+	}
+
+	push := viewsync.PushFrame{
+		ChannelID:    "ch-stale-push",
+		Seq:          1,
+		MessageID:    "m-stale-push",
+		OwnerEpoch:   1,
+		FencingToken: "old-token",
+		Envelope: message.Envelope{
+			ID:         "m-stale-push",
+			TS:         1,
+			ChannelID:  "ch-stale-push",
+			Sender:     message.Sender{Kind: actor.KindAgent, ID: "a"},
+			Kind:       message.KindEvent,
+			Type:       "agent.text",
+			Payload:    json.RawMessage(`{}`),
+			Visibility: message.VisibilityPublic,
+			Audience:   message.Audience{message.AudienceWildcard},
+		},
+	}
+	raw, _ := json.Marshal(push)
+	if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+		FrameID:   "stale-push",
+		FrameKind: kerneldaemonbus.FrameTypeViewsyncPush,
+		DaemonID:  "d-stale-push", DaemonConnectionEpoch: epoch, Payload: raw,
+	}); err != nil {
+		t.Fatalf("write push: %v", err)
+	}
+	f, err := dmn.ReadFrame(ctx)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	var ack viewsync.AckFrame
+	if err := json.Unmarshal(f.Payload, &ack); err != nil {
+		t.Fatalf("decode ack: %v", err)
+	}
+	if ack.Accepted || ack.RejectReason != viewsync.RejectReasonMuxOwnerEpochStale {
+		t.Fatalf("ack=%+v want mux_owner_epoch_stale reject", ack)
+	}
+	cur, _ := app.Viewcache().Cursor(ctx, channel.ID("ch-stale-push"))
+	if cur != 0 {
+		t.Fatalf("cursor=%d want 0; stale push should not apply", cur)
+	}
+	_ = conn.Close()
+}
+
+func TestServerInitiatedReclaimRoundTripActivatesPlacement(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	const daemonID placement.DaemonID = "d-reclaim-saga"
+	if err := app.Daemonbus().RegisterDaemon(ctx, daemonID, "h", "v", 0, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon: %v", err)
+	}
+	epoch, _ := app.Daemonbus().IssueConnectionEpoch(ctx, daemonID)
+	svr, dmn := newPipePair()
+	conn := daemonbus.NewConnection(daemonID, epoch, svr)
+	app.Daemonbus().Register(conn)
+	defer app.Daemonbus().Unregister(daemonID)
+	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
+
+	_, createReq, err := app.Placements().Reserve(ctx, channel.ID("ch-reclaim-saga"), daemonID, placement.ConnectionEpoch(epoch), nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if ok, err := app.Placements().Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       createReq.ChannelID,
+		CreateRequestID: createReq.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "tok-before-reclaim",
+		DaemonID:        daemonID,
+		Status:          placement.AckBound,
+	}, placement.ConnectionEpoch(epoch)); err != nil || !ok {
+		t.Fatalf("Activate ok=%v err=%v", ok, err)
+	}
+	if err := app.Placements().Store().MarkStale(ctx, createReq.ChannelID, time.Now().Add(-time.Second).UnixMilli()); err != nil {
+		t.Fatalf("MarkStale: %v", err)
+	}
+
+	daemonDone := make(chan error, 1)
+	go func() {
+		frame, err := dmn.ReadFrame(ctx)
+		if err != nil {
+			daemonDone <- err
+			return
+		}
+		if frame.FrameKind != kerneldaemonbus.FrameTypeControlDaemonReclaim {
+			daemonDone <- fmt.Errorf("frame=%s want daemon_reclaim", frame.FrameKind)
+			return
+		}
+		var req placement.DaemonReclaimRequest
+		if err := json.Unmarshal(frame.Payload, &req); err != nil {
+			daemonDone <- err
+			return
+		}
+		if req.ChannelID != createReq.ChannelID || req.NewOwnerEpoch != 2 || req.PreviousState != placement.ReclaimOriginStale {
+			daemonDone <- fmt.Errorf("bad reclaim req: %+v", req)
+			return
+		}
+		raw, _ := json.Marshal(placement.ReclaimAccepted{
+			ChannelID:       req.ChannelID,
+			CreateRequestID: req.CreateRequestID,
+			NewOwnerEpoch:   req.NewOwnerEpoch,
+			FencingToken:    "tok-after-reclaim",
+		})
+		daemonDone <- dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+			FrameID:               frame.FrameID,
+			FrameKind:             kerneldaemonbus.FrameTypeControlReclaimAccepted,
+			DaemonID:              daemonID,
+			DaemonConnectionEpoch: epoch,
+			Payload:               raw,
+		})
+	}()
+
+	if err := app.Placements().ReconcileOnce(ctx); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	if err := <-daemonDone; err != nil {
+		t.Fatalf("daemon side: %v", err)
+	}
+	got, _, err := app.Placements().Get(ctx, createReq.ChannelID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != placement.StateActive || got.OwnerEpoch != 2 || got.FencingToken != "tok-after-reclaim" {
+		t.Fatalf("placement after reclaim=%+v", got)
 	}
 	_ = conn.Close()
 }

@@ -111,6 +111,45 @@ func (l *ChannelLock) RefreshDaemon(
 	return nil
 }
 
+// Takeover rotates the daemon ownership tuple during server-initiated
+// reclaim. It UPDATEs the existing channel_lock row only; reclaim must
+// never INSERT a new lock row because channel creation already happened.
+func (l *ChannelLock) Takeover(ctx context.Context, row ChannelLockRow, previousOwnerEpoch placement.OwnerEpoch) error {
+	if row.ChannelID == "" {
+		return errors.New("store: channel_lock takeover: empty channel_id")
+	}
+	if row.FencingToken == "" {
+		return errors.New("store: channel_lock takeover: empty fencing_token")
+	}
+	const q = `UPDATE channel_lock
+	             SET fencing_token = ?,
+	                 owner_epoch = ?,
+	                 daemon_id = ?,
+	                 daemon_epoch = ?,
+	                 acquired_at = ?,
+	                 refreshed_at = ?,
+	                 channel_type = ?
+	           WHERE channel_id = ?
+	             AND owner_epoch = ?`
+	res, err := l.db.ExecContext(ctx, q,
+		string(row.FencingToken), int64(row.OwnerEpoch),
+		string(row.DaemonID), int64(row.DaemonEpoch),
+		row.AcquiredAt, row.RefreshedAt, row.ChannelType,
+		string(row.ChannelID), int64(previousOwnerEpoch),
+	)
+	if err != nil {
+		return fmt.Errorf("store: channel_lock takeover: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: channel_lock takeover rows: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("store: channel_lock takeover lost CAS for %s", row.ChannelID)
+	}
+	return nil
+}
+
 // ValidateWrite is the fencing gate for non-tx callers (e.g.
 // lifecycle/FencingChecker pre-flight at IPC boundary). It performs a
 // standalone Get → compare. For sqlite-mutation paths the caller MUST

@@ -3,6 +3,7 @@ package viewsync
 import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
 // PushFrame is the payload of `viewsync.push` (L1 §8.3 row 1).
@@ -11,11 +12,21 @@ import (
 // daemon_connection_epoch / frame_id / sent_at — those header fields
 // belong to kernel/daemonbus.Frame, not here).
 type PushFrame struct {
-	ChannelID channel.ID       `json:"channel_id"`
-	Seq       Seq              `json:"seq"`
-	MessageID message.ID       `json:"message_id"`
-	Envelope  message.Envelope `json:"envelope"`
+	ChannelID    channel.ID             `json:"channel_id"`
+	Seq          Seq                    `json:"seq"`
+	MessageID    message.ID             `json:"message_id"`
+	Envelope     message.Envelope       `json:"envelope"`
+	OwnerEpoch   placement.OwnerEpoch   `json:"owner_epoch"`
+	FencingToken placement.FencingToken `json:"fencing_token"`
 }
+
+// RejectReason is the viewsync ack reject reason closed set used by the
+// daemonbus split-brain guard.
+type RejectReason string
+
+const (
+	RejectReasonMuxOwnerEpochStale RejectReason = "mux_owner_epoch_stale"
+)
 
 // AckFrame is the payload of `viewsync.ack` (L1 §8.3 row 2).
 //
@@ -24,6 +35,8 @@ type PushFrame struct {
 type AckFrame struct {
 	ChannelID       channel.ID      `json:"channel_id"`
 	LastReceivedSeq LastReceivedSeq `json:"last_received_seq"`
+	Accepted        bool            `json:"accepted"`
+	RejectReason    RejectReason    `json:"reject_reason,omitempty"`
 }
 
 // ResyncRequest is the payload of `viewsync.resync_request` (L1 §8.3

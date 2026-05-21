@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
 	"github.com/wanpengxie/ActOS/server/identity"
@@ -93,7 +94,10 @@ func (s *Service) handleRevoke(c *gin.Context) {
 		if getErr == ErrSessionNotFound {
 			status = http.StatusNotFound
 		}
-		c.JSON(status, gin.H{"error": getErr.Error()})
+		c.JSON(status, gin.H{
+			"error":         getErr.Error(),
+			"reject_reason": string(kerneldaemonbus.DeviceSessionRejectUnbindSessionUnknown),
+		})
 		return
 	}
 	if err := s.authorizeSession(c.Request.Context(), row, u.ID); err != nil {
@@ -125,7 +129,10 @@ func (s *Service) handleGet(c *gin.Context) {
 		if err == ErrSessionNotFound {
 			status = http.StatusNotFound
 		}
-		c.JSON(status, gin.H{"error": err.Error()})
+		c.JSON(status, gin.H{
+			"error":         err.Error(),
+			"reject_reason": string(kerneldaemonbus.DeviceSessionRejectSessionUnknown),
+		})
 		return
 	}
 	u := identity.UserFrom(c)

@@ -887,7 +887,7 @@ func TestDaemon_Phase3_ShutdownNoLeak(t *testing.T) {
 
 // TestDaemon_Phase3_HeartbeatSender covers M1.6-T1 part A: after
 // startPhase3 runs, the daemon must periodically emit
-// control.heartbeat frames carrying the owned-channel snapshot. Without
+// control.heartbeat frames carrying the owned-channel fencing snapshot. Without
 // this, server placements drift to `stale` 90s after boot (the bug T0
 // closing verification surfaced).
 func TestDaemon_Phase3_HeartbeatSender(t *testing.T) {
@@ -963,16 +963,16 @@ func TestDaemon_Phase3_HeartbeatSender(t *testing.T) {
 		got++
 	}
 
-	// The owned-channel snapshot must include the channel we seeded.
+	// The owned-channel snapshot must include the tuple we seeded.
 	found := false
-	for _, id := range firstBody.Channels {
-		if id == chID {
+	for _, held := range firstBody.HeldChannels {
+		if held.ChannelID == chID && held.OwnerEpoch == 1 && held.FencingToken == "tok-1" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("heartbeat body.Channels=%v missing seeded channel %s", firstBody.Channels, chID)
+		t.Errorf("heartbeat body.HeldChannels=%v missing seeded channel tuple %s", firstBody.HeldChannels, chID)
 	}
 }
 

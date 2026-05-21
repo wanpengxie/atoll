@@ -199,8 +199,8 @@ func TestDispatcher_BindDeviceSessionHandlerMissing(t *testing.T) {
 	if ack.Accepted {
 		t.Error("ack.Accepted=true with nil handler — expected false")
 	}
-	if ack.Reason != transit.BindRejectReasonHandlerMissing {
-		t.Errorf("ack.Reason=%q want %q", ack.Reason, transit.BindRejectReasonHandlerMissing)
+	if ack.Reason != transit.DeviceSessionRejectBindInternalError {
+		t.Errorf("ack.Reason=%q want %q", ack.Reason, transit.DeviceSessionRejectBindInternalError)
 	}
 	if ack.SessionID != body.SessionID {
 		t.Errorf("ack.SessionID=%q want %q", ack.SessionID, body.SessionID)

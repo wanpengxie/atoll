@@ -77,6 +77,41 @@ func newFencedEnvelope(id string) *message.Envelope {
 	}
 }
 
+func TestChannelLockTakeoverRotatesTupleWithoutInsert(t *testing.T) {
+	t.Parallel()
+	fx := newFencedFixture(t, "tok-old", 1)
+	ctx := context.Background()
+
+	if err := fx.lock.Takeover(ctx, store.ChannelLockRow{
+		ChannelID:    "ch-fence",
+		FencingToken: "tok-new",
+		OwnerEpoch:   2,
+		DaemonID:     "daemon-B",
+		DaemonEpoch:  9,
+		AcquiredAt:   2000,
+		RefreshedAt:  2000,
+	}, 1); err != nil {
+		t.Fatalf("Takeover: %v", err)
+	}
+	row, ok, err := fx.lock.Get(ctx)
+	if err != nil || !ok {
+		t.Fatalf("Get ok=%v err=%v", ok, err)
+	}
+	if row.FencingToken != "tok-new" || row.OwnerEpoch != 2 || row.DaemonID != "daemon-B" || row.DaemonEpoch != 9 {
+		t.Fatalf("row after takeover=%+v", row)
+	}
+	var count int
+	if err := fx.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_lock`).Scan(&count); err != nil {
+		t.Fatalf("count channel_lock: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("channel_lock rows=%d want 1", count)
+	}
+	if err := fx.lock.Takeover(ctx, row, 1); err == nil {
+		t.Fatalf("stale takeover CAS succeeded")
+	}
+}
+
 // outboxRowCount returns the number of view_sync_outbox rows — used to
 // prove the outbox is NOT polluted on a fencing-reject path (L1 §8.6).
 func outboxRowCount(t *testing.T, db *sql.DB) int {

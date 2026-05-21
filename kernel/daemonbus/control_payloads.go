@@ -45,12 +45,13 @@ type WriteMessageAckBody struct {
 	RejectDetail string     `json:"reject_detail,omitempty"`
 }
 
-// BindRejectReason is the closed daemon-edge reason set for bind/unbind
-// session acks. Details stay free-form in the sibling Detail field.
-type BindRejectReason string
+// DeviceSessionRejectReason is the impl-layer2 §5.6 closed reason set
+// for bind/token/transit/unbind device-session rejects. Details stay
+// free-form in the sibling Detail field.
+type DeviceSessionRejectReason string
 
 // String returns the wire form.
-func (r BindRejectReason) String() string { return string(r) }
+func (r DeviceSessionRejectReason) String() string { return string(r) }
 
 // BindDeviceSessionBody is the daemonbus control.bind_device_session
 // payload. The server emits it after allocating a device session row.
@@ -72,7 +73,7 @@ type BindDeviceSessionAckBody struct {
 	FrameID   FrameID                       `json:"frame_id"`
 	SessionID devicetransit.DeviceSessionID `json:"session_id,omitempty"`
 	Accepted  bool                          `json:"accepted"`
-	Reason    BindRejectReason              `json:"reason,omitempty"`
+	Reason    DeviceSessionRejectReason     `json:"reason,omitempty"`
 	Detail    string                        `json:"detail,omitempty"`
 }
 
@@ -91,24 +92,27 @@ type UnbindDeviceSessionAckBody struct {
 	FrameID   FrameID                       `json:"frame_id"`
 	SessionID devicetransit.DeviceSessionID `json:"session_id,omitempty"`
 	Accepted  bool                          `json:"accepted"`
-	Reason    BindRejectReason              `json:"reason,omitempty"`
+	Reason    DeviceSessionRejectReason     `json:"reason,omitempty"`
 	Detail    string                        `json:"detail,omitempty"`
 }
 
 const (
-	// BindRejectReasonDecodeFailed indicates a bind/unbind payload could
-	// not be decoded. Dispatchers surface this as a protocol error.
-	BindRejectReasonDecodeFailed BindRejectReason = "decode_failed"
+	DeviceSessionRejectBindChannelNotActive      DeviceSessionRejectReason = "bind_channel_not_active"
+	DeviceSessionRejectBindAdapterNotPresent     DeviceSessionRejectReason = "bind_adapter_not_present"
+	DeviceSessionRejectBindAdapterBindingInvalid DeviceSessionRejectReason = "bind_adapter_binding_invalid"
+	DeviceSessionRejectBindDeviceTypeUnsupported DeviceSessionRejectReason = "bind_device_type_unsupported"
+	DeviceSessionRejectBindCapacityExceeded      DeviceSessionRejectReason = "bind_capacity_exceeded"
+	DeviceSessionRejectBindInternalError         DeviceSessionRejectReason = "bind_internal_error"
 
-	// BindRejectReasonHandlerMissing is emitted when the daemon dispatcher
-	// has no bind/unbind lifecycle handler wired.
-	BindRejectReasonHandlerMissing BindRejectReason = "handler_missing"
+	DeviceSessionRejectTokenInvalid   DeviceSessionRejectReason = "device_token_invalid"
+	DeviceSessionRejectTokenExpired   DeviceSessionRejectReason = "device_token_expired"
+	DeviceSessionRejectSessionRevoked DeviceSessionRejectReason = "device_session_revoked"
+	DeviceSessionRejectSessionUnknown DeviceSessionRejectReason = "device_session_unknown"
 
-	// BindRejectReasonSessionStoreUpsert indicates the daemon failed to
-	// mirror a bind into its local device session store.
-	BindRejectReasonSessionStoreUpsert BindRejectReason = "session_store_upsert"
+	DeviceSessionRejectTransitPayloadTooLarge  DeviceSessionRejectReason = "transit_payload_too_large"
+	DeviceSessionRejectTransitRouteUnavailable DeviceSessionRejectReason = "transit_route_unavailable"
+	DeviceSessionRejectTransitInternalError    DeviceSessionRejectReason = "transit_internal_error"
 
-	// BindRejectReasonSessionStoreDelete indicates the daemon failed to
-	// remove a local device session mirror during unbind.
-	BindRejectReasonSessionStoreDelete BindRejectReason = "session_store_delete"
+	DeviceSessionRejectUnbindSessionUnknown DeviceSessionRejectReason = "unbind_session_unknown"
+	DeviceSessionRejectUnbindInternalError  DeviceSessionRejectReason = "unbind_internal_error"
 )

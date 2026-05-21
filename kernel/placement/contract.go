@@ -261,6 +261,113 @@ type ReclaimDecision struct {
 	Reason    string     `json:"reason,omitempty"` // populated only when Accepted == false
 }
 
+// ReclaimOriginState is the previous_state closed set in the
+// server-initiated control.daemon_reclaim payload.
+type ReclaimOriginState string
+
+const (
+	ReclaimOriginOrphan     ReclaimOriginState = "orphan"
+	ReclaimOriginStale      ReclaimOriginState = "stale"
+	ReclaimOriginActiveLost ReclaimOriginState = "active_lost"
+)
+
+// DaemonReclaimRequest is the server -> daemon control.daemon_reclaim
+// payload for the server-initiated reclaim saga. It is intentionally
+// distinct from ReclaimRequest, which is the older daemon cold-start
+// self-report shape.
+type DaemonReclaimRequest struct {
+	ChannelID           channel.ID         `json:"channel_id"`
+	CreateRequestID     CreateRequestID    `json:"create_request_id"`
+	NewOwnerEpoch       OwnerEpoch         `json:"new_owner_epoch"`
+	PreviousOwnerDaemon *DaemonID          `json:"previous_owner_daemon"`
+	PreviousState       ReclaimOriginState `json:"previous_state"`
+}
+
+// ReclaimRejectReason is the placement reclaim_* reject reason closed
+// set from impl-layer2 §3.7.
+type ReclaimRejectReason string
+
+const (
+	ReclaimRejectStoreMissing            ReclaimRejectReason = "reclaim_store_missing"
+	ReclaimRejectCompletenessCheckFailed ReclaimRejectReason = "reclaim_completeness_check_failed"
+	ReclaimRejectOwnerEpochInvalid       ReclaimRejectReason = "reclaim_owner_epoch_invalid"
+	ReclaimRejectInternalError           ReclaimRejectReason = "reclaim_internal_error"
+)
+
+// ReclaimAccepted is the daemon -> server control.reclaim_accepted
+// payload for a server-initiated reclaim.
+type ReclaimAccepted struct {
+	ChannelID       channel.ID      `json:"channel_id"`
+	CreateRequestID CreateRequestID `json:"create_request_id"`
+	NewOwnerEpoch   OwnerEpoch      `json:"new_owner_epoch"`
+	FencingToken    FencingToken    `json:"fencing_token"`
+}
+
+// ReclaimRejected is the daemon -> server control.reclaim_rejected
+// payload for a server-initiated reclaim.
+type ReclaimRejected struct {
+	ChannelID       channel.ID          `json:"channel_id"`
+	CreateRequestID CreateRequestID     `json:"create_request_id"`
+	Reason          ReclaimRejectReason `json:"reason"`
+}
+
+// HeartbeatHeldChannel is one daemon-held channel tuple inside
+// control.heartbeat.payload.
+type HeartbeatHeldChannel struct {
+	ChannelID    channel.ID   `json:"channel_id"`
+	OwnerEpoch   OwnerEpoch   `json:"owner_epoch"`
+	FencingToken FencingToken `json:"fencing_token"`
+}
+
+// HeartbeatPayload is the daemon -> server control.heartbeat.payload
+// shape from impl-layer2 §1.4.1.
+type HeartbeatPayload struct {
+	DaemonID     DaemonID               `json:"daemon_id"`
+	HeartbeatSeq int64                  `json:"heartbeat_seq"`
+	HeldChannels []HeartbeatHeldChannel `json:"held_channels"`
+	Capacity     map[string]interface{} `json:"capacity"`
+}
+
+// PlacementDiffState is the server_state closed set in
+// control.heartbeat_ack.payload. StateCreating is intentionally mapped
+// to PlacementDiffStateUnknown because the heartbeat schema exposes only
+// active/orphan/stale/unknown.
+type PlacementDiffState string
+
+const (
+	PlacementDiffStateActive  PlacementDiffState = "active"
+	PlacementDiffStateOrphan  PlacementDiffState = "orphan"
+	PlacementDiffStateStale   PlacementDiffState = "stale"
+	PlacementDiffStateUnknown PlacementDiffState = "unknown"
+)
+
+// PlacementDiffAction is the action closed set in
+// control.heartbeat_ack.payload.
+type PlacementDiffAction string
+
+const (
+	PlacementDiffActionOK               PlacementDiffAction = "ok"
+	PlacementDiffActionReclaimPending   PlacementDiffAction = "reclaim_pending"
+	PlacementDiffActionUnbindPending    PlacementDiffAction = "unbind_pending"
+	PlacementDiffActionDirectoryMissing PlacementDiffAction = "directory_missing"
+)
+
+// PlacementDiff is one server -> daemon heartbeat placement decision.
+type PlacementDiff struct {
+	ChannelID         channel.ID          `json:"channel_id"`
+	ServerState       PlacementDiffState  `json:"server_state"`
+	ServerOwnerEpoch  OwnerEpoch          `json:"server_owner_epoch"`
+	ServerOwnerDaemon *DaemonID           `json:"server_owner_daemon"`
+	Action            PlacementDiffAction `json:"action"`
+}
+
+// HeartbeatAckPayload is the server -> daemon control.heartbeat_ack.payload
+// shape from impl-layer2 §1.4.1.
+type HeartbeatAckPayload struct {
+	HeartbeatSeq  int64           `json:"heartbeat_seq"`
+	PlacementDiff []PlacementDiff `json:"placement_diff"`
+}
+
 // Store is the server-side placement store contract (L2 §1.4.11.1
 // channel_placements 表). server/placements implements it on top of
 // sqlite; tests can wire an in-memory implementation.
@@ -297,6 +404,28 @@ type Store interface {
 	// MarkOrphan transitions a creating placement to Orphan on create
 	// timeout (L2 §11.5). Idempotent.
 	MarkOrphan(ctx context.Context, channelID channel.ID, nowMs int64) error
+
+	// ReserveReclaim starts the server-initiated reclaim saga by CASing
+	// orphan/stale -> creating, rotating create_request_id, and bumping
+	// owner_epoch by exactly +1 before the wire frame is emitted.
+	ReserveReclaim(
+		ctx context.Context,
+		channelID channel.ID,
+		candidate DaemonID,
+		connectionEpoch ConnectionEpoch,
+		createRequestID CreateRequestID,
+		nowMs int64,
+	) (Placement, bool, error)
+
+	// CASActivateReclaim completes a server-initiated reclaim after the
+	// daemon returns its fresh fencing_token.
+	CASActivateReclaim(
+		ctx context.Context,
+		ack ReclaimAccepted,
+		daemonID DaemonID,
+		newConnectionEpoch ConnectionEpoch,
+		nowMs int64,
+	) (ok bool, err error)
 
 	// AcceptReclaim updates daemon_connection_epoch + last_heartbeat_at
 	// when a daemon's reclaim is accepted by the server (L2 §1.4.11.4
