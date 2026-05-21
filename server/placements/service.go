@@ -280,7 +280,7 @@ func (s *Service) placementDiffForHeld(
 		p.FencingToken == held.FencingToken:
 		diff.Action = placement.PlacementDiffActionOK
 	case p.State == placement.StateActive && p.DaemonID != daemonID:
-		diff.Action = placement.PlacementDiffActionUnbindPending
+		diff.Action = placement.PlacementDiffActionReclaimPending
 	case p.State == placement.StateOrphan || p.State == placement.StateStale:
 		diff.Action = placement.PlacementDiffActionReclaimPending
 	default:
@@ -322,18 +322,18 @@ func (s *Service) ValidatePushFencing(
 	return p.OwnerEpoch == ownerEpoch && p.FencingToken == fencingToken, nil
 }
 
-// AcceptReclaim runs the reclaim CAS (L2 §1.4.11.4 step 2). daemonID
+// AcceptHeldChannel runs the cold-start held-channel report CAS. daemonID
 // MUST be the WS-authenticated owner identifier (Connection.DaemonID)
 // — the SQL CAS pins it into the WHERE so a different daemon presenting
 // the same epoch/token cannot hijack ownership (FIX-T4 invariant).
-func (s *Service) AcceptReclaim(
+func (s *Service) AcceptHeldChannel(
 	ctx context.Context,
 	channelID channel.ID,
 	daemonID placement.DaemonID,
-	req placement.ReclaimChannel,
+	req placement.HeldChannel,
 	newConnectionEpoch placement.ConnectionEpoch,
 ) (bool, error) {
-	return s.store.AcceptReclaim(ctx, channelID, daemonID, req, newConnectionEpoch, s.now().UnixMilli())
+	return s.store.AcceptHeldChannel(ctx, channelID, daemonID, req, newConnectionEpoch, s.now().UnixMilli())
 }
 
 // ReserveReclaim starts server-initiated reclaim Phase 1.

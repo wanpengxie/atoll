@@ -106,29 +106,29 @@ func TestReconciler_ReclaimWatermarks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if rec.ReclaimAcceptedAt("ch-x") != 0 {
+	if rec.HeldChannelAcceptedAt("ch-x") != 0 {
 		t.Error("initial AcceptedAt should be 0")
 	}
-	if _, ok := rec.ReclaimRejectedReason("ch-x"); ok {
+	if _, ok := rec.HeldChannelRejectedReason("ch-x"); ok {
 		t.Error("initial RejectedReason should be unset")
 	}
 
-	rec.AcceptReclaim("ch-x")
-	if rec.ReclaimAcceptedAt("ch-x") == 0 {
+	rec.AcceptHeldChannel("ch-x")
+	if rec.HeldChannelAcceptedAt("ch-x") == 0 {
 		t.Error("AcceptedAt not stamped")
 	}
 	// Reject supersedes accept.
-	rec.RejectReclaim("ch-x", "stale")
-	if rec.ReclaimAcceptedAt("ch-x") != 0 {
+	rec.RejectHeldChannel("ch-x", "stale")
+	if rec.HeldChannelAcceptedAt("ch-x") != 0 {
 		t.Error("AcceptedAt should be cleared by Reject")
 	}
-	reason, ok := rec.ReclaimRejectedReason("ch-x")
+	reason, ok := rec.HeldChannelRejectedReason("ch-x")
 	if !ok || reason != "stale" {
 		t.Errorf("RejectedReason=%q ok=%v", reason, ok)
 	}
 	// Accept clears reject.
-	rec.AcceptReclaim("ch-x")
-	if _, ok := rec.ReclaimRejectedReason("ch-x"); ok {
+	rec.AcceptHeldChannel("ch-x")
+	if _, ok := rec.HeldChannelRejectedReason("ch-x"); ok {
 		t.Error("Reject should be cleared by Accept")
 	}
 }

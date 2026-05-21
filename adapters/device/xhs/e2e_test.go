@@ -785,7 +785,7 @@ func TestParseFailureEmitsOrphanCallbackEvents(t *testing.T) {
 	if written[0].Type != "adapter.xhs.orphan_callback" || written[0].Kind != message.KindEvent {
 		t.Fatalf("first event type/kind=%s/%s", written[0].Type, written[0].Kind)
 	}
-	if written[1].Type != "system.event" || written[1].Kind != message.KindEvent {
+	if written[1].Type != "core.system_event" || written[1].Kind != message.KindEvent {
 		t.Fatalf("second event type/kind=%s/%s", written[1].Type, written[1].Kind)
 	}
 	var adapterPayload map[string]any

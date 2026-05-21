@@ -66,7 +66,8 @@ type CallerContext struct {
 	ActorID actor.ActorID
 
 	// ChannelID is the channel binding the caller is authenticated for.
-	// Step 1 rejects (auth_failed) when it differs from envelope.channel_id.
+	// Step 0/1 rejects (harness_engine_acl_denied) when it differs from the
+	// harness-bound channel.
 	ChannelID channel.ID
 
 	// AllowProvidedSenderKind reports whether the caller transport is
@@ -83,10 +84,10 @@ type CallerContext struct {
 // Deps instance is shared across all step implementations.
 type Deps struct {
 	// ChannelID identifies which channel this harness is bound to. The
-	// chain enforces envelope.channel_id matches; mismatches collapse
-	// to auth_failed (the spec-defined closed-set value covering "caller
-	// has no permission on this channel" — channel_mismatch is NOT in
-	// the L1 §10.3.1 closed set).
+	// chain enforces envelope.channel_id matches. Caller-context channel
+	// mismatches reject as harness_engine_acl_denied at the entry gate;
+	// envelope.channel_id mismatches reject as harness_channel_mismatch in
+	// the envelope-shape step.
 	ChannelID channel.ID
 
 	// ActorRegistry resolves sender.id / audience[*] / handler_actor_id

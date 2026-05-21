@@ -361,8 +361,8 @@ func (s *SQLStore) CASActivateReclaim(
 	return n == 1, nil
 }
 
-// AcceptReclaim runs the L2 §1.4.11.4 reclaim path — daemon reports
-// (channel_id, fencing_token, owner_epoch) on reconnect; server
+// AcceptHeldChannel runs the cold-start held-channel report path —
+// daemon reports (channel_id, fencing_token, owner_epoch) on reconnect; server
 // validates state='active' + full tuple (channel_id, daemon_id,
 // owner_epoch, fencing_token) matches, then refreshes the
 // connection_epoch + heartbeat_at.
@@ -372,11 +372,11 @@ func (s *SQLStore) CASActivateReclaim(
 // (owner_epoch, fencing_token) tuple so a different daemon presenting
 // the same epoch/token cannot hijack ownership (FIX-T4 / L2 §1.4.11.4
 // + spec T1.4 invariant).
-func (s *SQLStore) AcceptReclaim(
+func (s *SQLStore) AcceptHeldChannel(
 	ctx context.Context,
 	channelID channel.ID,
 	daemonID placement.DaemonID,
-	req placement.ReclaimChannel,
+	req placement.HeldChannel,
 	newConnectionEpoch placement.ConnectionEpoch,
 	nowMs int64,
 ) (bool, error) {
@@ -397,7 +397,7 @@ func (s *SQLStore) AcceptReclaim(
 		int64(req.OwnerEpoch), string(req.FencingToken),
 	)
 	if err != nil {
-		return false, fmt.Errorf("placements: AcceptReclaim: %w", err)
+		return false, fmt.Errorf("placements: AcceptHeldChannel: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {

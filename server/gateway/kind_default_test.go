@@ -19,11 +19,11 @@ func TestResolveKind_DefaultsForCoreType(t *testing.T) {
 	// pre-m1.3 standalone agent.progress is collapsed into agent.text
 	// + visibility=system per §2.3.
 	cases := map[string]message.Kind{
-		"human.text":   message.KindEvent,
-		"agent.text":   message.KindEvent,
-		"system.event": message.KindEvent,
-		"file.created": message.KindEvent,
-		"file.updated": message.KindEvent,
+		"human.text":        message.KindEvent,
+		"agent.text":        message.KindEvent,
+		"core.system_event": message.KindEvent,
+		"file.created":      message.KindEvent,
+		"file.updated":      message.KindEvent,
 	}
 	for typeName, want := range cases {
 		got, ok := resolveKind(typeName, "")
@@ -53,11 +53,11 @@ func TestResolveKind_CallerOverride_AllowedCoreType(t *testing.T) {
 
 func TestResolveKind_CallerOverride_LockedCoreType(t *testing.T) {
 	t.Parallel()
-	// system.event / file.* lock kind to default; an explicit
+	// core.system_event / file.* lock kind to default; an explicit
 	// non-default value MUST be rejected. system.heartbeat is wire-only
 	// per impl-vocabulary §2.7 and intentionally NOT a core type — see
 	// R5-19.
-	locked := []string{"system.event", "file.created", "file.updated"}
+	locked := []string{"core.system_event", "file.created", "file.updated"}
 	for _, typ := range locked {
 		// Default-equal override → accepted.
 		if _, ok := resolveKind(typ, message.KindEvent); !ok {

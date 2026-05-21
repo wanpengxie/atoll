@@ -147,13 +147,13 @@ func TestBoot_LoadLocal(t *testing.T) {
 		t.Errorf("phase after LoadLocal = %s", boot.Phase())
 	}
 
-	// Phase 2 (no EmitReclaim → offline path).
-	res, err := boot.ReportReclaim(ctx)
+	// Phase 2 (no EmitHeldChannelsReport -> offline path).
+	res, err := boot.ReportHeldChannels(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.ReclaimAccepted) != 2 {
-		t.Errorf("offline reclaim should accept all owned: %v", res.ReclaimAccepted)
+	if len(res.HeldAccepted) != 2 {
+		t.Errorf("offline held-channel report should accept all owned: %v", res.HeldAccepted)
 	}
 
 	boot.MarkRecovering()

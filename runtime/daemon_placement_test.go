@@ -343,10 +343,10 @@ func TestDaemon_OnUnbindChannel(t *testing.T) {
 	}
 }
 
-// TestDaemon_OnReclaimRejected_UnloadsChannel covers T0.4 reject leg:
-// a reclaim_rejected frame for a mounted channel must drive the
+// TestDaemon_OnHeldChannelsAckRejected_UnloadsChannel covers T0.4 reject leg:
+// a held_channels_ack rejection for a mounted channel must drive the
 // per-channel unload path.
-func TestDaemon_OnReclaimRejected_UnloadsChannel(t *testing.T) {
+func TestDaemon_OnHeldChannelsAckRejected_UnloadsChannel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -361,14 +361,14 @@ func TestDaemon_OnReclaimRejected_UnloadsChannel(t *testing.T) {
 		t.Fatalf("create=%s", ack.Status)
 	}
 
-	// Inject reclaim_accepted with a rejected decision for chID.
+	// Inject held_channels_ack with a rejected decision for chID.
 	body := map[string]any{
 		"daemon_id": "daemon-A",
-		"decisions": []placement.ReclaimDecision{
+		"decisions": []placement.HeldChannelsDecision{
 			{ChannelID: chID, Accepted: false, Reason: "fencing mismatch"},
 		},
 	}
-	frame, _ := transit.Encode("frame-recl", daemonbus.FrameTypeControlReclaimAccepted,
+	frame, _ := transit.Encode("frame-held", daemonbus.FrameTypeControlHeldChannelsAck,
 		"server", d.Transit().Epoch(), now(), body)
 	if err := srv.SendToDaemon(ctx, frame); err != nil {
 		t.Fatal(err)
@@ -383,13 +383,13 @@ func TestDaemon_OnReclaimRejected_UnloadsChannel(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	if d.HasChannel(chID) {
-		t.Error("channel still mounted after reclaim_rejected decision")
+		t.Error("channel still mounted after held_channels_ack rejection")
 	}
 }
 
-// TestDaemon_OnReclaimAccepted_RecordsWatermark covers the accept leg
+// TestDaemon_OnHeldChannelsAckAccepted_RecordsWatermark covers the accept leg
 // — the bootstrap.Reconciler watermark must be stamped.
-func TestDaemon_OnReclaimAccepted_RecordsWatermark(t *testing.T) {
+func TestDaemon_OnHeldChannelsAckAccepted_RecordsWatermark(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -406,11 +406,11 @@ func TestDaemon_OnReclaimAccepted_RecordsWatermark(t *testing.T) {
 
 	body := map[string]any{
 		"daemon_id": "daemon-A",
-		"decisions": []placement.ReclaimDecision{
+		"decisions": []placement.HeldChannelsDecision{
 			{ChannelID: chID, Accepted: true},
 		},
 	}
-	frame, _ := transit.Encode("frame-recl-ok", daemonbus.FrameTypeControlReclaimAccepted,
+	frame, _ := transit.Encode("frame-held-ok", daemonbus.FrameTypeControlHeldChannelsAck,
 		"server", d.Transit().Epoch(), now(), body)
 	if err := srv.SendToDaemon(ctx, frame); err != nil {
 		t.Fatal(err)
@@ -418,12 +418,12 @@ func TestDaemon_OnReclaimAccepted_RecordsWatermark(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if d.Reconciler().ReclaimAcceptedAt(chID) > 0 {
+		if d.Reconciler().HeldChannelAcceptedAt(chID) > 0 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if d.Reconciler().ReclaimAcceptedAt(chID) == 0 {
+	if d.Reconciler().HeldChannelAcceptedAt(chID) == 0 {
 		t.Error("reconciler did not record accepted watermark")
 	}
 	if !d.HasChannel(chID) {

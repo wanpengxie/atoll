@@ -234,17 +234,17 @@ func TestRejectReasonAliasMatchesMessageReason(t *testing.T) {
 	assertReason(message.HarnessEngineACLDenied)
 }
 
-// TestRejectReasonHTTPStatus spot-checks the L2 §3.6.1 status map for
-// the closed set (covers the categories: sender/auth=403,
-// deregistered/fence=410, conflict=409, malformed=400).
+// TestRejectReasonHTTPStatus spot-checks the L3 §1.4.1 status map for
+// the closed set.
 func TestRejectReasonHTTPStatus(t *testing.T) {
 	cases := []struct {
 		r    message.HarnessRejectReason
 		want int
 	}{
 		{message.HarnessSenderMismatch, 403},
-		{message.HarnessSenderKindMismatch, 403},
-		{message.HarnessEngineACLDenied, 403},
+		{message.HarnessSenderKindMismatch, 400},
+		{message.HarnessAudienceMemberNotActive, 403},
+		{message.HarnessEngineACLDenied, 500},
 		{message.HarnessResponseUnauthorizedSender, 403},
 		{message.HarnessReservedTypeUnauthorizedSender, 403},
 		{message.HarnessSenderDeregistered, 410},

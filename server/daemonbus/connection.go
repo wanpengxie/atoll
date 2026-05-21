@@ -151,7 +151,7 @@ func buildFrame(ft daemonbus.FrameType, daemonID placement.DaemonID, epoch daemo
 		FrameKind:             ft,
 		DaemonID:              daemonID,
 		DaemonConnectionEpoch: epoch,
-		Ts:                nowMs(),
+		Ts:                    nowMs(),
 		Payload:               raw,
 	}, nil
 }
@@ -183,14 +183,14 @@ func DecodeCreateAck(frame daemonbus.Frame) (placement.CreateChannelAck, error) 
 	return out, nil
 }
 
-// DecodeReclaim parses control.daemon_reclaim payloads.
-func DecodeReclaim(frame daemonbus.Frame) (placement.ReclaimRequest, error) {
-	var out placement.ReclaimRequest
-	if frame.FrameKind != daemonbus.FrameTypeControlDaemonReclaim {
-		return out, fmt.Errorf("daemonbus: not daemon_reclaim frame: %s", frame.FrameKind)
+// DecodeHeldChannelsReport parses control.held_channels_report payloads.
+func DecodeHeldChannelsReport(frame daemonbus.Frame) (placement.HeldChannelsReport, error) {
+	var out placement.HeldChannelsReport
+	if frame.FrameKind != daemonbus.FrameTypeControlHeldChannelsReport {
+		return out, fmt.Errorf("daemonbus: not held_channels_report frame: %s", frame.FrameKind)
 	}
 	if err := json.Unmarshal(frame.Payload, &out); err != nil {
-		return out, fmt.Errorf("daemonbus: unmarshal reclaim: %w", err)
+		return out, fmt.Errorf("daemonbus: unmarshal held_channels_report: %w", err)
 	}
 	return out, nil
 }

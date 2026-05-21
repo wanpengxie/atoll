@@ -543,8 +543,8 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 		NowFn:       cfg.NowFn,
 		ChannelsDir: cfg.ChannelsDir,
 		LockOpener:  openLock,
-		// EmitReclaim left nil — T4 wires the WS client; until then the
-		// offline path treats all locally-owned channels as still ours.
+		// EmitHeldChannelsReport left nil — the offline path treats all
+		// locally-owned channels as still ours.
 	})
 	if err != nil {
 		_ = daemonDB.Close()
@@ -622,10 +622,10 @@ func (d *Daemon) RunPhases(ctx context.Context) error {
 		return fmt.Errorf("runtime: phase1 LoadLocal: %w", err)
 	}
 
-	// Phase 2: report reclaim (offline path = all owned accepted).
-	res, err := d.booter.ReportReclaim(ctx)
+	// Phase 2: report held channels (offline path = all owned accepted).
+	res, err := d.booter.ReportHeldChannels(ctx)
 	if err != nil {
-		return fmt.Errorf("runtime: phase2 ReportReclaim: %w", err)
+		return fmt.Errorf("runtime: phase2 ReportHeldChannels: %w", err)
 	}
 	d.bootRes = res
 
@@ -652,8 +652,8 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 	d.runCtx, d.runCancel = context.WithCancel(context.Background())
 
 	// 3.1 — per-channel runtime + outbox push.
-	acceptedSet := make(map[channel.ID]struct{}, len(d.bootRes.ReclaimAccepted))
-	for _, id := range d.bootRes.ReclaimAccepted {
+	acceptedSet := make(map[channel.ID]struct{}, len(d.bootRes.HeldAccepted))
+	for _, id := range d.bootRes.HeldAccepted {
 		acceptedSet[id] = struct{}{}
 	}
 	for _, lc := range d.bootRes.Local {
@@ -719,8 +719,7 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 		OnDaemonReclaim:         d.handleDaemonReclaim,
 		OnUnbindChannel:         d.handleUnbindChannel,
 		OnHeartbeatAck:          d.handleHeartbeatAck,
-		OnReclaimAccepted:       d.handleReclaimAccepted,
-		OnReclaimRejected:       d.handleReclaimRejected,
+		OnHeldChannelsAck:       d.handleHeldChannelsAck,
 		// T147 §A — central router for device_transit.* frames. Decodes
 		// the SendFrame, looks up the per-channel DeviceTransit by
 		// frame.ChannelID, and forwards via DispatchIncoming so the
@@ -2047,81 +2046,37 @@ func (d *Daemon) handleHeartbeatAck(ctx context.Context, frame daemonbus.Frame) 
 	return nil
 }
 
-// reclaimAcceptedBody mirrors the wire payload server/gateway emits:
-// {"daemon_id":..., "decisions":[ReclaimDecision...]}
-type reclaimAcceptedBody struct {
-	DaemonID  string                      `json:"daemon_id"`
-	Decisions []placement.ReclaimDecision `json:"decisions"`
+// heldChannelsAckBody mirrors the control.held_channels_ack payload
+// server/gateway emits.
+type heldChannelsAckBody struct {
+	DaemonID  string                           `json:"daemon_id"`
+	Decisions []placement.HeldChannelsDecision `json:"decisions"`
 }
 
-// handleReclaimAccepted — T0.4. The server bundles per-channel
-// reclaim decisions inside a single control.reclaim_accepted frame
-// (server/gateway/handlers.go), so this handler iterates each decision
-// and updates the bootstrap.Reconciler watermark; rejected entries
-// trigger the per-channel unload path to prevent zombie writes.
-func (d *Daemon) handleReclaimAccepted(ctx context.Context, frame daemonbus.Frame) error {
-	var body reclaimAcceptedBody
+// handleHeldChannelsAck records the server's cold-start held-channel
+// decisions. Rejected entries trigger unload so the daemon cannot keep
+// mutating a channel after ownership was revoked.
+func (d *Daemon) handleHeldChannelsAck(ctx context.Context, frame daemonbus.Frame) error {
+	var body heldChannelsAckBody
 	if len(frame.Payload) > 0 {
 		if err := json.Unmarshal(frame.Payload, &body); err != nil {
-			return fmt.Errorf("runtime: decode reclaim_accepted: %w", err)
+			return fmt.Errorf("runtime: decode held_channels_ack: %w", err)
 		}
 	}
 	for _, dec := range body.Decisions {
 		if dec.Accepted {
-			d.reconciler.AcceptReclaim(dec.ChannelID)
+			d.reconciler.AcceptHeldChannel(dec.ChannelID)
 			continue
 		}
-		d.reconciler.RejectReclaim(dec.ChannelID, dec.Reason)
+		d.reconciler.RejectHeldChannel(dec.ChannelID, dec.Reason)
 		// Trigger per-channel unload — zombie writes are forbidden once
 		// the server has revoked our ownership claim.
 		if d.HasChannel(dec.ChannelID) {
 			if err := d.unloader.Unload(ctx, dec.ChannelID, lifecycle.UnloadStale); err != nil {
 				d.log.Warn().Err(err).
-					Str("event", "runtime.reclaim_reject_unload_failed").
+					Str("event", "runtime.held_channels_reject_unload_failed").
 					Str("channel_id", string(dec.ChannelID)).
-					Msg("failed to unload channel after reclaim rejection")
-			}
-		}
-	}
-	return nil
-}
-
-// reclaimRejectedBody mirrors the alternative wire payload some servers
-// may emit as a dedicated frame_type. Currently the M1.5 server bundles
-// rejections inside control.reclaim_accepted, so this handler is a
-// future-proof companion that drives the same Reject path per channel.
-type reclaimRejectedBody struct {
-	DaemonID  string                      `json:"daemon_id"`
-	Decisions []placement.ReclaimDecision `json:"decisions"`
-	ChannelID channel.ID                  `json:"channel_id,omitempty"`
-	Reason    string                      `json:"reason,omitempty"`
-}
-
-// handleReclaimRejected — T0.4 companion. Accepts both the
-// per-channel single-shot shape ({channel_id, reason}) and the
-// bundled decisions shape so the handler is tolerant to either server
-// revision.
-func (d *Daemon) handleReclaimRejected(ctx context.Context, frame daemonbus.Frame) error {
-	var body reclaimRejectedBody
-	if len(frame.Payload) > 0 {
-		if err := json.Unmarshal(frame.Payload, &body); err != nil {
-			return fmt.Errorf("runtime: decode reclaim_rejected: %w", err)
-		}
-	}
-	rejected := body.Decisions
-	if len(rejected) == 0 && body.ChannelID != "" {
-		rejected = []placement.ReclaimDecision{
-			{ChannelID: body.ChannelID, Accepted: false, Reason: body.Reason},
-		}
-	}
-	for _, dec := range rejected {
-		d.reconciler.RejectReclaim(dec.ChannelID, dec.Reason)
-		if d.HasChannel(dec.ChannelID) {
-			if err := d.unloader.Unload(ctx, dec.ChannelID, lifecycle.UnloadStale); err != nil {
-				d.log.Warn().Err(err).
-					Str("event", "runtime.reclaim_rejected_unload_failed").
-					Str("channel_id", string(dec.ChannelID)).
-					Msg("failed to unload channel after reclaim_rejected")
+					Msg("failed to unload channel after held-channel rejection")
 			}
 		}
 	}

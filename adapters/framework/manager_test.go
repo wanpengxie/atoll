@@ -109,7 +109,7 @@ func newTestRequest(channelID channel.ID, sender, typ, requestID string) *messag
 		Type:       typ,
 		Payload:    json.RawMessage(`{"msg":"hi"}`),
 		Visibility: message.VisibilityPrivate,
-		Audience:   message.Audience{"tool:feishu"},
+		Audience:   message.Audience{"tool:feishu-adapter"},
 	}
 }
 
@@ -117,7 +117,7 @@ func TestManagerInstallSeedsTypeRegistry(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send", "feishu.chat.create"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
@@ -150,7 +150,7 @@ func TestManagerInstallDoesNotPublishTypeRowsWhenInitFails(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
@@ -225,14 +225,14 @@ func TestManagerInstallRejectsMissingActor(t *testing.T) {
 func TestManagerInstallRejectsBindingMismatch(t *testing.T) {
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actorreg.Record{
-		ID:      "tool:feishu",
+		ID:      "tool:feishu-adapter",
 		Kind:    actor.KindTool,
 		Binding: actor.BindingEmbedded,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
@@ -350,7 +350,7 @@ func TestManagerDispatchHandlesRequestAndRespond(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
@@ -382,8 +382,8 @@ func TestManagerDispatchHandlesRequestAndRespond(t *testing.T) {
 	if resp.Kind != message.KindResponse {
 		t.Fatalf("response kind=%s want response", resp.Kind)
 	}
-	if resp.Sender.ID != "tool:feishu" {
-		t.Fatalf("response sender.id=%s want tool:feishu", resp.Sender.ID)
+	if resp.Sender.ID != "tool:feishu-adapter" {
+		t.Fatalf("response sender.id=%s want tool:feishu-adapter", resp.Sender.ID)
 	}
 	if resp.Sender.Kind != actor.KindTool {
 		t.Fatalf("response sender.kind=%s want tool", resp.Sender.Kind)
@@ -414,7 +414,7 @@ func TestManagerDispatchRejectsUnknownAudience(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
@@ -433,7 +433,7 @@ func TestManagerDispatchRejectsUnknownType(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
@@ -451,7 +451,7 @@ func TestManagerDispatchRejectsChannelMismatch(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
@@ -469,7 +469,7 @@ func TestManagerTimerFiresUnansweredTimeout(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 50, // 50ms timeout
@@ -516,7 +516,7 @@ func TestManagerTimerRetriesTransientRespondWriteErrors(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 20,
@@ -568,7 +568,7 @@ func TestManagerTimerEmitsSystemEventAfterPermanentRespondWriteFailure(t *testin
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 20,
@@ -605,8 +605,8 @@ func TestManagerTimerEmitsSystemEventAfterPermanentRespondWriteFailure(t *testin
 		t.Fatalf("expected 3 failed responses plus system event, got %d", len(written))
 	}
 	event := written[3]
-	if event.Kind != message.KindEvent || event.Type != "system.event" {
-		t.Fatalf("last write kind/type=%s/%s want event/system.event", event.Kind, event.Type)
+	if event.Kind != message.KindEvent || event.Type != "core.system_event" {
+		t.Fatalf("last write kind/type=%s/%s want event/core.system_event", event.Kind, event.Type)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
@@ -635,7 +635,7 @@ func TestManagerRespondCancelsTimer(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 80,
@@ -672,7 +672,7 @@ func TestManagerOnExternalCallbackRoutes(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
@@ -700,7 +700,7 @@ func TestManagerOnExternalCallbackEmitsOrphanEvents(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
@@ -724,7 +724,7 @@ func TestManagerOnExternalCallbackEmitsOrphanEvents(t *testing.T) {
 	if written[0].Type != OrphanCallbackType("feishu") || written[0].Kind != message.KindEvent {
 		t.Fatalf("first event type/kind=%s/%s", written[0].Type, written[0].Kind)
 	}
-	if written[1].Type != "system.event" || written[1].Kind != message.KindEvent {
+	if written[1].Type != "core.system_event" || written[1].Kind != message.KindEvent {
 		t.Fatalf("second event type/kind=%s/%s", written[1].Type, written[1].Kind)
 	}
 	var adapterPayload map[string]any
@@ -748,7 +748,7 @@ func TestManagerShutdownCallsModule(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
@@ -771,7 +771,7 @@ func TestManagerInstalledAdapters(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
@@ -788,7 +788,7 @@ func TestManagerDeduplicatesResponseFromTerminalDuplicate(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
@@ -832,7 +832,7 @@ func TestManagerHandlePanicEmitsReceiverInternalError(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
@@ -880,14 +880,14 @@ func TestManagerHandlePanicEmitsReceiverInternalError(t *testing.T) {
 func TestManagerInstallRejectsStrictModeGap(t *testing.T) {
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actorreg.Record{
-		ID:      "tool:feishu",
+		ID:      "tool:feishu-adapter",
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeOutbound,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send", "feishu.chat.create"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
@@ -929,14 +929,14 @@ func TestManagerInstallRejectsStrictModeGap(t *testing.T) {
 func TestManagerInstallStrictModeAcceptsCompleteDeclarations(t *testing.T) {
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actorreg.Record{
-		ID:      "tool:feishu",
+		ID:      "tool:feishu-adapter",
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeOutbound,
 	})
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
-			ActorID:      "tool:feishu",
+			ActorID:      "tool:feishu-adapter",
 			Types:        []string{"feishu.chat.send", "feishu.chat.create"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,

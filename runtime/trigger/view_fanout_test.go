@@ -146,6 +146,28 @@ func TestViewFanout_PrivateSystemEmit_ScopedToSelfAndAudience(t *testing.T) {
 	}
 }
 
+// TestViewFanout_SystemVisibilityDefaultProjectionSkipsSubscribers documents
+// coagent's implementation-layer default projection policy: visibility=system
+// messages stay in the log, but do not fan out to ordinary WS/UI subscribers.
+func TestViewFanout_SystemVisibilityDefaultProjectionSkipsSubscribers(t *testing.T) {
+	reg := makeReg()
+	env := &message.Envelope{
+		ID:         "evt-system-visibility",
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind:       message.KindEvent,
+		Type:       "core.system_event",
+		Visibility: message.VisibilitySystem,
+		Audience:   message.Audience{"*"},
+	}
+	got, err := trigger.ViewFanout(context.Background(), env, reg, nil)
+	if err != nil {
+		t.Fatalf("ViewFanout: %v", err)
+	}
+	if got != nil {
+		t.Errorf("system visibility default projection fanout = %v, want nil", got)
+	}
+}
+
 // TestViewFanout_DroppedDeregistered — visibility=public must NOT enumerate
 // deregistered members (ListActive filter).
 func TestViewFanout_DroppedDeregistered(t *testing.T) {

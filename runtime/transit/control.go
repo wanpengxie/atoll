@@ -15,7 +15,7 @@ import (
 // has a nil-safe default: missing handler → frame logged and dropped.
 //
 // runtime/lifecycle wires CreateChannel + UnbindChannel + Heartbeat /
-// Reclaim handlers; runtime/transit ack_handler wires Ack; runtime/
+// held-channel handlers; runtime/transit ack_handler wires Ack; runtime/
 // daemon wires WriteMessage via a per-channel router (FIX-T2 /
 // server→daemon write-through path).
 type ControlHandlers struct {
@@ -25,8 +25,7 @@ type ControlHandlers struct {
 	OnCreateChannel   func(ctx context.Context, frame daemonbus.Frame, req placement.CreateChannelRequest) error
 	OnDaemonReclaim   func(ctx context.Context, frame daemonbus.Frame, req placement.DaemonReclaimRequest) error
 	OnUnbindChannel   func(ctx context.Context, frame daemonbus.Frame) error
-	OnReclaimAccepted func(ctx context.Context, frame daemonbus.Frame) error
-	OnReclaimRejected func(ctx context.Context, frame daemonbus.Frame) error
+	OnHeldChannelsAck func(ctx context.Context, frame daemonbus.Frame) error
 	OnHeartbeatAck    func(ctx context.Context, frame daemonbus.Frame) error
 	OnDeviceTransit   func(ctx context.Context, frame daemonbus.Frame) error
 
@@ -183,15 +182,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 		}
 		return d.handlers.OnUnbindChannel(ctx, frame)
 
-	case daemonbus.FrameTypeControlReclaimAccepted:
-		if d.handlers.OnReclaimAccepted != nil {
-			return d.handlers.OnReclaimAccepted(ctx, frame)
-		}
-		return nil
-
-	case daemonbus.FrameTypeControlReclaimRejected:
-		if d.handlers.OnReclaimRejected != nil {
-			return d.handlers.OnReclaimRejected(ctx, frame)
+	case daemonbus.FrameTypeControlHeldChannelsAck:
+		if d.handlers.OnHeldChannelsAck != nil {
+			return d.handlers.OnHeldChannelsAck(ctx, frame)
 		}
 		return nil
 

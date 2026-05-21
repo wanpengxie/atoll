@@ -490,6 +490,143 @@ func TestHandleWriteMessage_CallerIDForwardedToDaemon(t *testing.T) {
 	}
 }
 
+func TestHandleWriteMessageRejectUsesReasonHTTPStatus(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	sess := registerLoginAndCreateChannel(t, client, srv.URL, app, "reject-status@example.com")
+
+	if err := app.Daemonbus().RegisterDaemon(ctx,
+		placement.DaemonID("d-reject-status"), "h", "v", 0, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon: %v", err)
+	}
+	epoch, err := app.Daemonbus().IssueConnectionEpoch(ctx, placement.DaemonID("d-reject-status"))
+	if err != nil {
+		t.Fatalf("IssueConnectionEpoch: %v", err)
+	}
+	svrTx, dmnTx := newPipePair()
+	conn := daemonbus.NewConnection(placement.DaemonID("d-reject-status"), epoch, svrTx)
+	app.Daemonbus().Register(conn)
+	defer app.Daemonbus().Unregister(placement.DaemonID("d-reject-status"))
+	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
+
+	p, createReq, err := app.Placements().Reserve(ctx,
+		channel.ID(sess.channelID),
+		placement.DaemonID("d-reject-status"),
+		placement.ConnectionEpoch(epoch), nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	ack := placement.CreateChannelAck{
+		ChannelID:       p.ChannelID,
+		CreateRequestID: createReq.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "daemon-tok-reject-status",
+		DaemonID:        placement.DaemonID("d-reject-status"),
+		Status:          placement.AckBound,
+	}
+	if ok, err := app.Placements().Activate(ctx, ack, placement.ConnectionEpoch(epoch)); err != nil || !ok {
+		t.Fatalf("Activate: ok=%v err=%v", ok, err)
+	}
+
+	cases := []struct {
+		reason string
+		want   int
+	}{
+		{string(message.HarnessSenderKindMismatch), http.StatusBadRequest},
+		{string(message.HarnessAudienceMemberNotActive), http.StatusForbidden},
+		{string(message.HarnessSenderDeregistered), http.StatusGone},
+		{string(message.HarnessWorkerFencingStale), http.StatusGone},
+		{string(message.HarnessEngineACLDenied), http.StatusInternalServerError},
+		{"replay_nonce_seen", http.StatusConflict},
+	}
+
+	for i, tc := range cases {
+		tc := tc
+		t.Run(tc.reason, func(t *testing.T) {
+			msgID := fmt.Sprintf("msg-reject-status-%d", i)
+			respCh := make(chan *http.Response, 1)
+			errCh := make(chan error, 1)
+			go func() {
+				body, _ := json.Marshal(writeBody{
+					ID:       msgID,
+					Type:     "human.text",
+					Kind:     string(message.KindEvent),
+					Payload:  json.RawMessage(`{"text":"hi"}`),
+					Audience: []string{"*"},
+				})
+				req, _ := http.NewRequest(http.MethodPost,
+					srv.URL+"/api/channels/"+sess.channelID+"/messages",
+					strings.NewReader(string(body)))
+				req.Header.Set("Content-Type", "application/json")
+				req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: sess.session})
+				resp, err := client.Do(req)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				respCh <- resp
+			}()
+
+			frame, err := dmnTx.ReadFrame(ctx)
+			if err != nil {
+				t.Fatalf("read write_message: %v", err)
+			}
+			var wmbody kerneldaemonbus.WriteMessageBody
+			if err := json.Unmarshal(frame.Payload, &wmbody); err != nil {
+				t.Fatalf("decode write body: %v", err)
+			}
+			ackBody := kerneldaemonbus.WriteMessageAckBody{
+				FrameID:      wmbody.FrameID,
+				Accepted:     false,
+				RejectReason: tc.reason,
+				RejectDetail: "test reject",
+			}
+			raw, _ := json.Marshal(ackBody)
+			if err := dmnTx.WriteFrame(ctx, kerneldaemonbus.Frame{
+				FrameID:               frame.FrameID,
+				FrameKind:             kerneldaemonbus.FrameTypeControlWriteMessageAck,
+				DaemonID:              "d-reject-status",
+				DaemonConnectionEpoch: epoch,
+				Payload:               raw,
+			}); err != nil {
+				t.Fatalf("write ack: %v", err)
+			}
+
+			select {
+			case err := <-errCh:
+				t.Fatalf("POST: %v", err)
+			case resp := <-respCh:
+				defer func() { _ = resp.Body.Close() }()
+				if resp.StatusCode != tc.want {
+					t.Fatalf("status=%d want=%d for %s", resp.StatusCode, tc.want, tc.reason)
+				}
+				var out struct {
+					RejectReason string `json:"reject_reason"`
+					Error        string `json:"error"`
+				}
+				if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+					t.Fatalf("decode response: %v", err)
+				}
+				if out.RejectReason != tc.reason {
+					t.Fatalf("reject_reason=%q want %q", out.RejectReason, tc.reason)
+				}
+				if out.Error != "" {
+					t.Fatalf("error=%q want absent", out.Error)
+				}
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+		})
+	}
+}
+
 func TestDevicebusIssueRequiresChannelMembership(t *testing.T) {
 	t.Parallel()
 	app := newTestApp(t)
@@ -1467,12 +1604,12 @@ func TestServerInitiatedReclaimRoundTripActivatesPlacement(t *testing.T) {
 	_ = conn.Close()
 }
 
-// TestReclaimDaemonIDMismatch is the FIX-T4 regression: a daemonbus
-// connection authenticated as "d1" must not be able to reclaim
-// placements by setting `ReclaimRequest.DaemonID` to some other
+// TestHeldChannelsReportDaemonIDMismatch is the FIX-T4 regression: a
+// daemonbus connection authenticated as "d1" must not be able to report
+// placements by setting `HeldChannelsReport.DaemonID` to some other
 // daemon id. The dispatch hook must reject the frame (the Run loop
 // surfaces the error and terminates the connection).
-func TestReclaimDaemonIDMismatch(t *testing.T) {
+func TestHeldChannelsReportDaemonIDMismatch(t *testing.T) {
 	t.Parallel()
 	app := newTestApp(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1495,7 +1632,7 @@ func TestReclaimDaemonIDMismatch(t *testing.T) {
 		t.Fatalf("Reserve: %v", err)
 	}
 	// Phase 2 ack carries daemon-generated fencing tuple — capture it
-	// so the attacker's reclaim presents the post-activate values
+	// so the attacker's held-channel report presents the post-activate values
 	// persisted in placement.
 	const daemonOwnerEpoch placement.OwnerEpoch = 1
 	const daemonFencingTok placement.FencingToken = "daemon-tok-victim"
@@ -1517,12 +1654,12 @@ func TestReclaimDaemonIDMismatch(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- conn.Run(ctx, app.DaemonbusHandlers()) }()
 
-	// Attacker pushes a reclaim claiming to be "owner". OnReclaim
+	// Attacker pushes a held-channel report claiming to be "owner".
 	// MUST reject; conn.Run returns the validation error.
-	raw, _ := json.Marshal(placement.ReclaimRequest{
+	raw, _ := json.Marshal(placement.HeldChannelsReport{
 		DaemonID:    placement.DaemonID("owner"),
 		DaemonEpoch: 1,
-		Channels: []placement.ReclaimChannel{{
+		Channels: []placement.HeldChannel{{
 			ChannelID:    p.ChannelID,
 			FencingToken: daemonFencingTok,
 			OwnerEpoch:   daemonOwnerEpoch,
@@ -1530,7 +1667,7 @@ func TestReclaimDaemonIDMismatch(t *testing.T) {
 	})
 	if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
 		FrameID:               "f-attack",
-		FrameKind:             kerneldaemonbus.FrameTypeControlDaemonReclaim,
+		FrameKind:             kerneldaemonbus.FrameTypeControlHeldChannelsReport,
 		DaemonID:              "attacker",
 		DaemonConnectionEpoch: attackerEpoch,
 		Payload:               raw,

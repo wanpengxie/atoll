@@ -32,10 +32,10 @@ type Handlers struct {
 	// placements.
 	OnHeartbeat func(ctx context.Context, conn *Connection, payload HeartbeatPayload) (placement.HeartbeatAckPayload, error)
 
-	// OnReclaim handles control.daemon_reclaim — server validates
-	// each channel and replies control.reclaim_accepted or
-	// control.reclaim_rejected.
-	OnReclaim func(ctx context.Context, conn *Connection, req placement.ReclaimRequest) error
+	// OnHeldChannelsReport handles control.held_channels_report —
+	// server validates each held channel and replies
+	// control.held_channels_ack.
+	OnHeldChannelsReport func(ctx context.Context, conn *Connection, req placement.HeldChannelsReport) error
 
 	// OnDeviceTransitRecv handles device_transit.recv frames pushed BY
 	// the daemon (daemon → server → device). Per impl-layer2 §5.3.2
@@ -126,13 +126,13 @@ func (c *Connection) Run(ctx context.Context, h Handlers) error {
 			if _, err := c.SendFrame(ctx, daemonbus.FrameTypeControlHeartbeatAck, ackPayload); err != nil {
 				return err
 			}
-		case daemonbus.FrameTypeControlDaemonReclaim:
-			if h.OnReclaim != nil {
-				req, perr := DecodeReclaim(frame)
+		case daemonbus.FrameTypeControlHeldChannelsReport:
+			if h.OnHeldChannelsReport != nil {
+				req, perr := DecodeHeldChannelsReport(frame)
 				if perr != nil {
 					return perr
 				}
-				if err := h.OnReclaim(ctx, c, req); err != nil {
+				if err := h.OnHeldChannelsReport(ctx, c, req); err != nil {
 					return err
 				}
 			}

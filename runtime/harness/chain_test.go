@@ -19,7 +19,8 @@ func chainCallerCtx(actorID actor.ActorID) context.Context {
 	})
 }
 
-// TestChain_Step1_MissingCaller covers step 1 reject (auth_failed).
+// TestChain_Step1_MissingCaller covers Step 0/1 caller-principal reject
+// (harness_engine_acl_denied).
 func TestChain_Step1_MissingCaller(t *testing.T) {
 	c, _, _, _ := newTestChain(t)
 	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
@@ -163,7 +164,7 @@ func TestChain_Step5_RequestAudienceInvalid(t *testing.T) {
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 		MaxPendingMs:   10_000,
-		HandlerActorID: "tool:feishu",
+		HandlerActorID: "tool:feishu-adapter",
 	})
 	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "*", json.RawMessage(`{"title":"x"}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
@@ -179,7 +180,7 @@ func TestChain_Step5_AudienceActorNotRegistered(t *testing.T) {
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 		MaxPendingMs:   10_000,
-		HandlerActorID: "tool:feishu",
+		HandlerActorID: "tool:feishu-adapter",
 	})
 	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:does-not-exist", json.RawMessage(`{"title":"x"}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
@@ -196,7 +197,7 @@ func TestChain_Step5_AudienceHandlerMismatch(t *testing.T) {
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 		MaxPendingMs:   10_000,
-		HandlerActorID: "tool:feishu",
+		HandlerActorID: "tool:feishu-adapter",
 	})
 	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:other", json.RawMessage(`{"title":"x"}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
@@ -213,7 +214,7 @@ func TestChain_Step5_KindNotAllowed(t *testing.T) {
 	treg.Add(TypeView{
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest},
-		HandlerActorID: "tool:feishu",
+		HandlerActorID: "tool:feishu-adapter",
 	})
 	env := newEvent("agent:alpha", "feishu.chat.send", json.RawMessage(`{}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
@@ -236,7 +237,7 @@ func TestChain_Step5_DefaultExpiresAtByReceiverKind(t *testing.T) {
 		Type:           "tool.exec",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 		MaxPendingMs:   2500,
-		HandlerActorID: "tool:feishu",
+		HandlerActorID: "tool:feishu-adapter",
 	})
 
 	cases := []struct {
@@ -248,7 +249,7 @@ func TestChain_Step5_DefaultExpiresAtByReceiverKind(t *testing.T) {
 	}{
 		{
 			name:     "tool max_pending_ms",
-			env:      newRequest("req-tool", "agent:alpha", "tool.exec", "tool:feishu", json.RawMessage(`{}`)),
+			env:      newRequest("req-tool", "agent:alpha", "tool.exec", "tool:feishu-adapter", json.RawMessage(`{}`)),
 			want:     int64Ptr(1700000002500),
 			callerID: "agent:alpha",
 		},
@@ -337,17 +338,17 @@ func TestChain_Step8_ResponseStatusInvalid(t *testing.T) {
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 		MaxPendingMs:   10_000,
-		HandlerActorID: "tool:feishu",
+		HandlerActorID: "tool:feishu-adapter",
 	})
-	req := newRequest("req-status", "agent:alpha", "feishu.chat.send", "tool:feishu",
+	req := newRequest("req-status", "agent:alpha", "feishu.chat.send", "tool:feishu-adapter",
 		json.RawMessage(`{"title":"x"}`))
 	if r, err := c.Write(chainCallerCtx("agent:alpha"), req); err != nil || !r.Accepted() {
 		t.Fatalf("seed request: r=%+v err=%v", r, err)
 	}
-	resp := newResponse("resp-bogus-status", "tool:feishu", "req-status", "feishu.chat.send",
+	resp := newResponse("resp-bogus-status", "tool:feishu-adapter", "req-status", "feishu.chat.send",
 		json.RawMessage(`{"status":"in_progress"}`))
 	resp.Audience = message.Audience{"agent:alpha"}
-	res, _ := c.Write(chainCallerCtx("tool:feishu"), resp)
+	res, _ := c.Write(chainCallerCtx("tool:feishu-adapter"), resp)
 	if res.RejectReason != message.HarnessResponseStatusInvalid {
 		t.Fatalf("expected harness_response_status_invalid, got %s detail=%s",
 			res.RejectReason, res.RejectDetail)
@@ -360,19 +361,19 @@ func TestChain_Step8_ResponsePairingAcceptsAuthorizedResponder(t *testing.T) {
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 		MaxPendingMs:   10_000,
-		HandlerActorID: "tool:feishu",
+		HandlerActorID: "tool:feishu-adapter",
 	})
 
-	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu",
+	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu-adapter",
 		json.RawMessage(`{"title":"x"}`))
 	if r, err := c.Write(chainCallerCtx("agent:alpha"), req); err != nil || !r.Accepted() {
 		t.Fatalf("seed request: r=%+v err=%v", r, err)
 	}
 
-	resp := newResponse("resp-1", "tool:feishu", "req-1", "feishu.chat.send",
+	resp := newResponse("resp-1", "tool:feishu-adapter", "req-1", "feishu.chat.send",
 		json.RawMessage(`{"status":"completed"}`))
 	resp.Audience = message.Audience{"agent:alpha"}
-	res, err := c.Write(chainCallerCtx("tool:feishu"), resp)
+	res, err := c.Write(chainCallerCtx("tool:feishu-adapter"), resp)
 	if err != nil {
 		t.Fatalf("Write response: %v", err)
 	}
@@ -388,10 +389,10 @@ func TestChain_Step8_ResponseUnauthorizedSender(t *testing.T) {
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 		MaxPendingMs:   10_000,
-		HandlerActorID: "tool:feishu",
+		HandlerActorID: "tool:feishu-adapter",
 	})
 
-	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu",
+	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu-adapter",
 		json.RawMessage(`{"title":"x"}`))
 	if r, err := c.Write(chainCallerCtx("agent:alpha"), req); err != nil || !r.Accepted() {
 		t.Fatalf("seed request: r=%+v err=%v", r, err)
@@ -416,10 +417,10 @@ func TestChain_Step8_SystemTerminalFallbackRejectsInvalidReason(t *testing.T) {
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 		MaxPendingMs:   10_000,
-		HandlerActorID: "tool:feishu",
+		HandlerActorID: "tool:feishu-adapter",
 	})
 
-	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu",
+	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu-adapter",
 		json.RawMessage(`{"title":"x"}`))
 	if r, err := c.Write(chainCallerCtx("agent:alpha"), req); err != nil || !r.Accepted() {
 		t.Fatalf("seed request: r=%+v err=%v", r, err)
@@ -445,19 +446,19 @@ func TestChain_Step8_ResponseAudienceMismatch(t *testing.T) {
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 		MaxPendingMs:   10_000,
-		HandlerActorID: "tool:feishu",
+		HandlerActorID: "tool:feishu-adapter",
 	})
 
-	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu",
+	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu-adapter",
 		json.RawMessage(`{"title":"x"}`))
 	if r, err := c.Write(chainCallerCtx("agent:alpha"), req); err != nil || !r.Accepted() {
 		t.Fatalf("seed request: r=%+v err=%v", r, err)
 	}
 
-	resp := newResponse("resp-bad-audience", "tool:feishu", "req-1", "feishu.chat.send",
+	resp := newResponse("resp-bad-audience", "tool:feishu-adapter", "req-1", "feishu.chat.send",
 		json.RawMessage(`{"status":"failed"}`))
 	resp.Audience = message.Audience{"user:demo"}
-	res, err := c.Write(chainCallerCtx("tool:feishu"), resp)
+	res, err := c.Write(chainCallerCtx("tool:feishu-adapter"), resp)
 	if err != nil {
 		t.Fatalf("Write mismatched response: %v", err)
 	}
@@ -474,25 +475,25 @@ func TestChain_Step8_TerminalDuplicate(t *testing.T) {
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 		MaxPendingMs:   10_000,
-		HandlerActorID: "tool:feishu",
+		HandlerActorID: "tool:feishu-adapter",
 	})
 	// Seed a parent request and a terminal response.
-	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu",
+	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu-adapter",
 		json.RawMessage(`{"title":"x"}`))
 	if r, err := c.Write(chainCallerCtx("agent:alpha"), req); err != nil || !r.Accepted() {
 		t.Fatalf("seed request: r=%+v err=%v", r, err)
 	}
-	resp := newResponse("resp-1", "tool:feishu", "req-1", "feishu.chat.send",
+	resp := newResponse("resp-1", "tool:feishu-adapter", "req-1", "feishu.chat.send",
 		json.RawMessage(`{"status":"completed"}`))
 	resp.Audience = message.Audience{"agent:alpha"}
-	if r, err := c.Write(chainCallerCtx("tool:feishu"), resp); err != nil || !r.Accepted() {
+	if r, err := c.Write(chainCallerCtx("tool:feishu-adapter"), resp); err != nil || !r.Accepted() {
 		t.Fatalf("seed response: r=%+v err=%v", r, err)
 	}
 	// Second different response for the same parent → terminal_duplicate.
-	resp2 := newResponse("resp-2", "tool:feishu", "req-1", "feishu.chat.send",
+	resp2 := newResponse("resp-2", "tool:feishu-adapter", "req-1", "feishu.chat.send",
 		json.RawMessage(`{"status":"failed"}`))
 	resp2.Audience = message.Audience{"agent:alpha"}
-	res, err := c.Write(chainCallerCtx("tool:feishu"), resp2)
+	res, err := c.Write(chainCallerCtx("tool:feishu-adapter"), resp2)
 	if err != nil {
 		t.Fatalf("Write second response: %v", err)
 	}
@@ -567,15 +568,15 @@ func TestChain_AcceptAndAppendSetsSeq(t *testing.T) {
 	}
 }
 
-// TestChain_CoreTypeKindLocked — system.event must stay kind=event.
+// TestChain_CoreTypeKindLocked — core.system_event must stay kind=event.
 func TestChain_CoreTypeKindLocked(t *testing.T) {
 	c, _, _, _ := newTestChain(t)
 	env := &message.Envelope{
 		ID:        "evt-sys-1",
 		ChannelID: "ch-1",
 		TS:        testTS,
-		Type:      "system.event",
-		Kind:      message.KindRequest, // not allowed for system.event
+		Type:      "core.system_event",
+		Kind:      message.KindRequest, // not allowed for core.system_event
 		Sender:    message.Sender{ID: actor.SystemActorID},
 		Payload:   json.RawMessage(`{}`),
 		Audience:  message.Audience{"*"},
@@ -668,11 +669,11 @@ func TestChain_Step2_RequestAudienceInvalid_TwoConcrete(t *testing.T) {
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 		MaxPendingMs:   10_000,
-		HandlerActorID: "tool:feishu",
+		HandlerActorID: "tool:feishu-adapter",
 	})
-	env := newRequest("req-multi", "agent:alpha", "feishu.chat.send", "tool:feishu",
+	env := newRequest("req-multi", "agent:alpha", "feishu.chat.send", "tool:feishu-adapter",
 		json.RawMessage(`{"title":"x"}`))
-	env.Audience = message.Audience{"tool:feishu", "agent:alpha"}
+	env.Audience = message.Audience{"tool:feishu-adapter", "agent:alpha"}
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessRequestAudienceInvalid {
 		t.Fatalf("expected harness_request_audience_invalid, got %s detail=%s",
@@ -734,9 +735,9 @@ func TestChain_Step4_TimeInvalid_ExpiresAtBeforeTS(t *testing.T) {
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 		MaxPendingMs:   10_000,
-		HandlerActorID: "tool:feishu",
+		HandlerActorID: "tool:feishu-adapter",
 	})
-	env := newRequest("req-exp", "agent:alpha", "feishu.chat.send", "tool:feishu",
+	env := newRequest("req-exp", "agent:alpha", "feishu.chat.send", "tool:feishu-adapter",
 		json.RawMessage(`{"title":"x"}`))
 	exp := env.TS // equal → reject
 	env.ExpiresAt = &exp
@@ -756,9 +757,9 @@ func TestChain_Step4_TimeInvalid_ExpiresAtBeforeNotBefore(t *testing.T) {
 		Type:           "feishu.chat.send",
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 		MaxPendingMs:   10_000,
-		HandlerActorID: "tool:feishu",
+		HandlerActorID: "tool:feishu-adapter",
 	})
-	env := newRequest("req-nbe", "agent:alpha", "feishu.chat.send", "tool:feishu",
+	env := newRequest("req-nbe", "agent:alpha", "feishu.chat.send", "tool:feishu-adapter",
 		json.RawMessage(`{"title":"x"}`))
 	nb := env.TS + 100
 	exp := env.TS + 50 // exp < nb → reject

@@ -43,7 +43,7 @@ type OrphanCallbackEvent struct {
 }
 
 // EmitOrphanCallbackEvents writes the L1 §6.5 observability pair:
-// adapter.<name>.orphan_callback plus system.event(kind=correlation_lost).
+// adapter.<name>.orphan_callback plus core.system_event(kind=correlation_lost).
 // A nil Chain is treated as no-op so lower-level adapter unit tests can omit
 // the harness seam.
 func EmitOrphanCallbackEvents(ctx context.Context, ev OrphanCallbackEvent) error {
@@ -70,7 +70,7 @@ func EmitOrphanCallbackEvents(ctx context.Context, ev OrphanCallbackEvent) error
 		return err
 	}
 	return writeEvent(ctx, ev.Chain, eventEnvelope{
-		Type:      "system.event",
+		Type:      "core.system_event",
 		ChannelID: ev.ChannelID,
 		Sender:    message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
 		Now:       now,
@@ -102,7 +102,7 @@ func emitTimerTerminalFailedEvent(ctx context.Context, ev timerTerminalFailedEve
 		detail = ev.Err.Error()
 	}
 	return writeEvent(ctx, ev.Chain, eventEnvelope{
-		Type:      "system.event",
+		Type:      "core.system_event",
 		ChannelID: ev.ChannelID,
 		Sender:    message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
 		Now:       eventNow(ev.Clock),

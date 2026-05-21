@@ -37,7 +37,7 @@ export const CORE_TYPE = Object.freeze({
   HUMAN_TEXT: 'human.text',
   CHAT_TEXT: 'chat.text',  // legacy / demo alias used by current UI composer
   AGENT_TEXT: 'agent.text',
-  SYSTEM_EVENT: 'system.event',
+  SYSTEM_EVENT: 'core.system_event',
   SYSTEM_HEARTBEAT: 'system.heartbeat',
   FILE_CREATED: 'file.created',
   FILE_UPDATED: 'file.updated',

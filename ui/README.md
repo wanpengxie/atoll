@@ -160,7 +160,7 @@ Run a fresh server+daemon (`make build && bin/coagent-server` +
 | 7 | Publish a message with `audience=[<self-actor>]` | Border-left red @ highlight; sidebar badge +1 if channel not active |
 | 8 | Background tab + receive @ mention | Browser notification fires (after permission grant) |
 | 9 | Attach `.png` via doc_refs | Inline image preview, click to open original |
-| 10 | Receive a `system.event` | Bottom-of-chat "显示系统事件" toggle appears; expanding shows the event |
+| 10 | Receive a `core.system_event` | Bottom-of-chat "显示系统事件" toggle appears; expanding shows the event |
 | 11 | Receive a `failed terminal` (status=failed) | Thread status row shows "✗ 失败：<中文 reason>" |
 | 12 | Deregister an actor + send a new message | Sender name shows "(inactive)" grey tag |
 

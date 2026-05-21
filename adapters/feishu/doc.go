@@ -1,5 +1,5 @@
 // Package feishu is the M1.5 飞书 (Lark) outbound adapter. It runs as
-// an in-process daemon actor (tool:feishu) with
+// an in-process daemon actor (tool:feishu-adapter) with
 // Binding=runtime_outbound and handles every feishu.* request type by
 // calling the public Feishu OpenAPI on https://open.feishu.cn.
 //

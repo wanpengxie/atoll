@@ -118,7 +118,7 @@ export function groupTimeline(messages, opts) {
 
     // Pick the story's "primary" public message: the latest visible,
     // non-system, kind=event agent/human/tool reply. visibility=system
-    // messages cluster under the thinking block; system.events bucket.
+    // messages cluster under the thinking block; system events bucket.
     if (msg.visibility === VISIBILITY.SYSTEM) {
       if (msg.type === CORE_TYPE.AGENT_TEXT) {
         story.thinkingMessages.push(msg);

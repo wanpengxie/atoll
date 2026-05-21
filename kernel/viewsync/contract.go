@@ -77,7 +77,7 @@ type ApplyResult struct {
 type Pusher interface {
 	// EnqueuePush hands one envelope+seq to the outbox for asynchronous
 	// push to server. Returns immediately; failures are surfaced via
-	// system.event (L1 §8.1.5 view_sync_failed monitoring) — caller
+	// core.system_event (L1 §8.1.5 view_sync_failed monitoring) — caller
 	// MUST NOT block on push completion.
 	EnqueuePush(ctx context.Context, frame PushFrame) error
 

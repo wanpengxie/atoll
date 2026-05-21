@@ -235,30 +235,36 @@ func (a CreateChannelAck) Match(p Placement) bool {
 		a.DaemonID == p.DaemonID
 }
 
-// ReclaimRequest mirrors `control.daemon_reclaim` payload per L2
-// §1.4.11.4 — daemon reports the channels it claims to still own after
-// reconnecting. server validates each row against the placement table.
-type ReclaimRequest struct {
-	DaemonID    DaemonID         `json:"daemon_id"`
-	DaemonEpoch DaemonEpoch      `json:"daemon_epoch"`
-	Channels    []ReclaimChannel `json:"channels"`
+// HeldChannelsReport mirrors `control.held_channels_report` payload —
+// daemon reports the channels it claims to still own after reconnecting.
+// server validates each row against the placement table.
+type HeldChannelsReport struct {
+	DaemonID    DaemonID      `json:"daemon_id"`
+	DaemonEpoch DaemonEpoch   `json:"daemon_epoch"`
+	Channels    []HeldChannel `json:"channels"`
 }
 
-// ReclaimChannel is one entry in ReclaimRequest.Channels — the daemon
+// HeldChannel is one entry in HeldChannelsReport.Channels — the daemon
 // reports the (channel_id, fencing_token, owner_epoch) triple it has on
 // disk. Server validates against the placement record.
-type ReclaimChannel struct {
+type HeldChannel struct {
 	ChannelID    channel.ID   `json:"channel_id"`
 	FencingToken FencingToken `json:"fencing_token"`
 	OwnerEpoch   OwnerEpoch   `json:"owner_epoch"`
 }
 
-// ReclaimDecision is server's per-channel response to a reclaim request
-// (L2 §1.4.11.4 step 2 — accepted vs rejected).
-type ReclaimDecision struct {
+// HeldChannelsDecision is server's per-channel response to a held-channel
+// report.
+type HeldChannelsDecision struct {
 	ChannelID channel.ID `json:"channel_id"`
 	Accepted  bool       `json:"accepted"`
 	Reason    string     `json:"reason,omitempty"` // populated only when Accepted == false
+}
+
+// HeldChannelsAck is the server -> daemon control.held_channels_ack payload.
+type HeldChannelsAck struct {
+	DaemonID  DaemonID               `json:"daemon_id"`
+	Decisions []HeldChannelsDecision `json:"decisions"`
 }
 
 // ReclaimOriginState is the previous_state closed set in the
@@ -273,8 +279,8 @@ const (
 
 // DaemonReclaimRequest is the server -> daemon control.daemon_reclaim
 // payload for the server-initiated reclaim saga. It is intentionally
-// distinct from ReclaimRequest, which is the older daemon cold-start
-// self-report shape.
+// distinct from HeldChannelsReport, which is the daemon cold-start
+// self-report wire.
 type DaemonReclaimRequest struct {
 	ChannelID           channel.ID         `json:"channel_id"`
 	CreateRequestID     CreateRequestID    `json:"create_request_id"`
@@ -427,24 +433,24 @@ type Store interface {
 		nowMs int64,
 	) (ok bool, err error)
 
-	// AcceptReclaim updates daemon_connection_epoch + last_heartbeat_at
-	// when a daemon's reclaim is accepted by the server (L2 §1.4.11.4
-	// step 2 accepted branch). Returns ok=false when validation fails
-	// (caller should reject reclaim and let stale/orphan reconcile
-	// advance the row).
+	// AcceptHeldChannel updates daemon_connection_epoch + last_heartbeat_at
+	// when a daemon's held-channel report matches the authoritative
+	// placement tuple. Returns ok=false when validation fails (caller
+	// should reject the report and let stale/orphan reconcile advance
+	// the row).
 	//
 	// daemonID is the WS-authenticated owner identifier from
 	// Connection.DaemonID — the SQL CAS pins it into the WHERE clause
 	// alongside (channel_id, owner_epoch, fencing_token) so a different
 	// daemon presenting the same (epoch, token) tuple cannot hijack
 	// ownership (FIX-T4 / L2 §1.4.11.4 invariant — covers spec
-	// requirement T1.4 "AcceptReclaim matches daemon_id,
+	// requirement T1.4 "AcceptHeldChannel matches daemon_id,
 	// fencing_token, owner_epoch").
-	AcceptReclaim(
+	AcceptHeldChannel(
 		ctx context.Context,
 		channelID channel.ID,
 		daemonID DaemonID,
-		req ReclaimChannel,
+		req HeldChannel,
 		newConnectionEpoch ConnectionEpoch,
 		nowMs int64,
 	) (ok bool, err error)

@@ -14,7 +14,7 @@ import (
 
 // DefaultActorID is the actor_registry row this adapter binds to. The
 // daemon bootstrap is expected to seed this actor with binding=runtime_outbound.
-const DefaultActorID actor.ActorID = "tool:feishu"
+const DefaultActorID actor.ActorID = "tool:feishu-adapter"
 
 // DefaultMaxPendingMs is the per-request timeout (10s) used when the
 // caller does not override.

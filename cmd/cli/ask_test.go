@@ -259,7 +259,7 @@ func TestEmit_NoAudience(t *testing.T) {
 			"COAGENT_SESSION_TOKEN=t",
 			"COAGENT_CHANNEL_ID=ch-1",
 		},
-		[]string{"emit", "--type", "system.event", "--payload", `{"event":"foo"}`},
+		[]string{"emit", "--type", "core.system_event", "--payload", `{"event":"foo"}`},
 	)
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr)

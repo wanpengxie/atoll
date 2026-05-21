@@ -266,7 +266,7 @@ func setup(t *testing.T, mods ...func(*feishu.Module)) *setupResult {
 
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actorreg.Record{
-		ID:      "tool:feishu",
+		ID:      "tool:feishu-adapter",
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeOutbound,
 	})
@@ -307,7 +307,7 @@ func newRequest(typ, id, payload string) *message.Envelope {
 		Type:       typ,
 		Payload:    json.RawMessage(payload),
 		Visibility: message.VisibilityPrivate,
-		Audience:   message.Audience{"tool:feishu"},
+		Audience:   message.Audience{"tool:feishu-adapter"},
 	}
 }
 
@@ -323,8 +323,8 @@ func TestInstallRegistersTypesInTypeRegistry(t *testing.T) {
 		if !ok {
 			t.Fatalf("type_registry missing %s; rows=%+v", want, s.tregs)
 		}
-		if row.HandlerActorID != "tool:feishu" {
-			t.Fatalf("type=%s handler=%s want tool:feishu", want, row.HandlerActorID)
+		if row.HandlerActorID != "tool:feishu-adapter" {
+			t.Fatalf("type=%s handler=%s want tool:feishu-adapter", want, row.HandlerActorID)
 		}
 		if row.HandlerBinding != actor.BindingRuntimeOutbound {
 			t.Fatalf("type=%s binding=%s want runtime_outbound", want, row.HandlerBinding)
@@ -346,7 +346,7 @@ func TestInstallRejectsMissingCredentials(t *testing.T) {
 	)
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actorreg.Record{
-		ID: "tool:feishu", Kind: actor.KindTool, Binding: actor.BindingRuntimeOutbound,
+		ID: "tool:feishu-adapter", Kind: actor.KindTool, Binding: actor.BindingRuntimeOutbound,
 	})
 	mgr, _ := framework.NewManager(framework.ManagerConfig{
 		ChannelID:       "channel:test",
@@ -381,8 +381,8 @@ func TestChatSendEndToEnd(t *testing.T) {
 	if resp.Kind != message.KindResponse {
 		t.Fatalf("kind=%s want response", resp.Kind)
 	}
-	if resp.Sender.ID != "tool:feishu" {
-		t.Fatalf("sender.id=%s want tool:feishu", resp.Sender.ID)
+	if resp.Sender.ID != "tool:feishu-adapter" {
+		t.Fatalf("sender.id=%s want tool:feishu-adapter", resp.Sender.ID)
 	}
 	var payload map[string]any
 	_ = json.Unmarshal(resp.Payload, &payload)
@@ -565,7 +565,7 @@ func TestUnknownTypeProducesTerminalFailure(t *testing.T) {
 	)
 	if err := mod.Init(context.Background(), &adapter.ModuleContext{
 		AdapterName:    "feishu",
-		AdapterActorID: "tool:feishu",
+		AdapterActorID: "tool:feishu-adapter",
 		ChannelID:      "channel:test",
 		Respond: func(_ context.Context, _ adapter.CorrelationKey, payload json.RawMessage, opts adapter.RespondOptions) (adapter.RespondResult, error) {
 			if opts.Status != "failed" {

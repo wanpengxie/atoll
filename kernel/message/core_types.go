@@ -14,10 +14,9 @@ type CoreTypeRule struct {
 //	human.text · agent.text · core.system_event(*)
 //	system.heartbeat(**) · file.created · file.updated
 //
-// (*) The wire form `system.event` is the legacy m1.3 spelling that
-// impl-vocabulary §2.4 collapses into `core.system_event`. Code still
-// emits `system.event` while the rename is tracked separately; the
-// entry below remains so harness validation accepts it.
+// (*) `core.system_event` is the canonical v1 spelling for system events.
+// The pre-v1 dotted spelling is intentionally not accepted here:
+// this is a clean rename, not a type_registry alias.
 //
 // (**) `system.heartbeat` is wire-only — impl-vocabulary §2.7 +
 // proto-foundation §1.12 + proto-layer0 §3.1 specify it as a control
@@ -32,9 +31,9 @@ type CoreTypeRule struct {
 // (kimi bridge, mock bridge) emit progress as agent.text envelopes —
 // no separate type registration is needed.
 var CoreTypeTable = map[string]CoreTypeRule{
-	"human.text":   {DefaultKind: KindEvent, AllowOverride: true},
-	"agent.text":   {DefaultKind: KindEvent, AllowOverride: true},
-	"system.event": {DefaultKind: KindEvent, AllowOverride: false},
-	"file.created": {DefaultKind: KindEvent, AllowOverride: false},
-	"file.updated": {DefaultKind: KindEvent, AllowOverride: false},
+	"human.text":        {DefaultKind: KindEvent, AllowOverride: true},
+	"agent.text":        {DefaultKind: KindEvent, AllowOverride: true},
+	"core.system_event": {DefaultKind: KindEvent, AllowOverride: false},
+	"file.created":      {DefaultKind: KindEvent, AllowOverride: false},
+	"file.updated":      {DefaultKind: KindEvent, AllowOverride: false},
 }

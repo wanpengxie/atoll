@@ -34,7 +34,7 @@ type OutboxReader interface {
 // Emitted when a single seq exceeds MaxRetriesBeforeEvent within a Pusher.
 //
 // The caller (daemon composition root) decides how to surface this — the
-// production path runs it through the harness as a `system.event` envelope
+// production path runs it through the harness as a `core.system_event` envelope
 // with payload.kind="view_sync_failed". transit only invokes the callback
 // so the package stays free of harness dependencies (kernel/arch-lint).
 type ViewSyncFailedEvent struct {
@@ -51,7 +51,7 @@ type ViewSyncFailedEvent struct {
 // Emitted whenever a Drain ends with pendingCount > BacklogHighWatermark.
 //
 // The default threshold is 10000 rows (L1 §8.1.5 monitoring rec.).
-// Callers route this through harness as a `system.event` envelope with
+// Callers route this through harness as a `core.system_event` envelope with
 // payload.kind="view_sync_backlog_warn".
 type ViewSyncBacklogEvent struct {
 	ChannelID     channel.ID
@@ -116,7 +116,7 @@ type PusherConfig struct {
 	// no progress is being made. Default = 50ms.
 	PollEvery time.Duration
 	// FailHook is called when a push of a specific seq returns an error.
-	// May be nil — caller can use this to emit system.event
+	// May be nil — caller can use this to emit core.system_event
 	// view_sync_failed (L1 §8.1.5). Kept as a back-compat seam alongside
 	// the richer EventEmitter — both fire when present.
 	FailHook func(channel.ID, viewsync.Seq, error)

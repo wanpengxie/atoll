@@ -13,7 +13,7 @@ func TestInMemoryTypeRegistryUpsertAndLookup(t *testing.T) {
 	ctx := context.Background()
 	row := TypeRow{
 		Type:           "feishu.chat.send",
-		HandlerActorID: "tool:feishu",
+		HandlerActorID: "tool:feishu-adapter",
 		HandlerBinding: actor.BindingRuntimeOutbound,
 		MaxPendingMs:   30_000,
 	}

@@ -1,8 +1,8 @@
 package message
 
 // Reason is the interface every closed reason set satisfies. It bundles
-// the string form (for log / wire), the HTTP status mapping (per L2
-// §3.6.1; non-applicable cases return 0), and a stable class tag.
+// the string form (for log / wire), the HTTP status mapping (per
+// impl-layer3 §1.4.1; non-applicable cases return 0), and a stable class tag.
 //
 // Authoritative spec: L1 §10.3 partitions reason into 3 closed sets
 // (harness reject / install / terminal failure); L2 §3.6.1 lays down the
@@ -125,15 +125,20 @@ func (r HarnessRejectReason) String() string { return string(r) }
 func (r HarnessRejectReason) Class() string { return "harness_reject" }
 
 // HTTPStatus returns the HTTP status code the daemon-RPC binding MUST
-// emit when rejecting with this reason. Per L2 §3.6.1 table.
+// emit when rejecting with this reason. Per impl-layer3 §1.4.1 table.
 //
 // Returns 0 for unknown values (defensive: should be unreachable if the
 // caller restricts itself to the named constants).
 func (r HarnessRejectReason) HTTPStatus() int {
 	switch r {
-	case HarnessSenderMismatch, HarnessSenderKindMismatch, HarnessEngineACLDenied,
-		HarnessResponseUnauthorizedSender, HarnessReservedTypeUnauthorizedSender:
+	case HarnessSenderMismatch,
+		HarnessAudienceMemberNotActive,
+		HarnessAudienceHandlerMismatch,
+		HarnessResponseUnauthorizedSender,
+		HarnessReservedTypeUnauthorizedSender:
 		return 403
+	case HarnessEngineACLDenied:
+		return 500
 	case HarnessSenderDeregistered, HarnessWorkerFencingStale:
 		return 410
 	case HarnessIDDuplicateConflict, HarnessTerminalDuplicate:
@@ -146,7 +151,7 @@ func (r HarnessRejectReason) HTTPStatus() int {
 		HarnessEnvelopeUnknownField,
 		HarnessAudienceEmpty,
 		HarnessAudienceMixedWildcard,
-		HarnessAudienceMemberNotActive,
+		HarnessSenderKindMismatch,
 		HarnessResponseAudienceInvalid,
 		HarnessResponseMissingParent,
 		HarnessResponseParentNotFound,
@@ -155,7 +160,6 @@ func (r HarnessRejectReason) HTTPStatus() int {
 		HarnessTypeUnknown,
 		HarnessKindNotAllowedForType,
 		HarnessRequestAudienceInvalid,
-		HarnessAudienceHandlerMismatch,
 		HarnessResponseAudienceMismatch,
 		HarnessResponseReasonInvalid,
 		HarnessTimeInvalid:

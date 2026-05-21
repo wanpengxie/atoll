@@ -10,13 +10,15 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// ViewFanout resolves the set of channel members whose view cache MUST
-// receive `env` per proto-layer1 §4.1.3 (view fanout, visibility-driven,
-// normative). Unlike Resolve (which drives audience handler triggers),
-// ViewFanout is purely about which members can SEE the envelope:
+// ViewFanout resolves the set of channel members whose view cache receives
+// `env`. Unlike Resolve (which drives audience handler triggers), ViewFanout
+// is purely about which members can SEE the envelope:
 //
-//   - visibility = public  → every channel member view cache.
-//   - visibility = private → audience ∪ {sender} only.
+//   - visibility = public  → every channel member view cache (proto-layer1).
+//   - visibility = private → audience ∪ {sender} only (proto-layer1).
+//   - visibility = system  → no default WS/UI projection in coagent's L3
+//     implementation profile; audit/admin/debug readers can still read the
+//     persisted message log.
 //
 // Inputs:
 //
@@ -31,7 +33,7 @@ import (
 // The return value is deduped + sorted by actor id so the caller observes
 // a stable order. nil means "no view fanout" (no recipient).
 //
-// proto-layer1 §4.1.3 informative notes:
+// proto-layer1 §4.1.3 notes for public/private view fanout:
 //
 //   - System actor emit is NOT special-cased. visibility/audience on the
 //     envelope alone decides the result.
@@ -80,13 +82,11 @@ func ViewFanout(
 		return dedupeSort(visible), nil
 
 	case message.VisibilitySystem:
-		// proto-layer0 §2.4: system visibility is protocol-internal
-		// metadata / intermediate output (e.g. agent.text progress
-		// bubbles, placement notices). impl-vocabulary §2.3 specifies
-		// view fanout default-skips these — the envelope still persists
-		// in the channel log for audit, but no view cache receives it.
-		// Callers that want to observe system-visibility messages must
-		// read the message log directly.
+		// Coagent implementation profile / impl-layer3 §2.4.1 default
+		// subscriber policy: system-visibility messages are not projected
+		// to ordinary WS/UI subscribers by default. This is not a
+		// proto-layer1 normative delete or invisibility rule; the envelope
+		// remains in the channel log for audit/admin/debug read paths.
 		return nil, nil
 	}
 

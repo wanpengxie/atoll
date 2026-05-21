@@ -1,7 +1,7 @@
 // Package daemonbus declares the daemonbus mux frame schema — the
 // top-level wrapper that carries every control-plane / view-sync /
-// device-transit frame between daemon and server (L2 §9 daemonbus mux
-// frame spec). The frame_type closed set + shared header fields belong
+// device-transit frame between daemon and server (impl-layer2 §1).
+// The frame_type closed set + shared header fields belong
 // here; per-frame-type payloads live in kernel/viewsync, kernel/placement,
 // and kernel/devicetransit.
 package daemonbus
@@ -13,23 +13,23 @@ import (
 )
 
 // FrameType is the M1.5 closed set of daemonbus frame_type values. Per
-// L2 §9.1 there are three categories (viewsync.* / control.* /
+// impl-layer2 §1.2 there are three categories (viewsync.* / control.* /
 // device_transit.*) — each value is a string that matches the JSON
 // wire form 1:1.
 type FrameType string
 
-// FrameType closed set per L2 §9.1.
+// FrameType closed set per impl-layer2 §1.2.
 const (
 	// View-sync frames (also exposed via kernel/viewsync.FrameType — keep
 	// duplicated string values in sync; both packages reference L1 §8.3
-	// + L2 §9.1 as the source of truth).
+	// + impl-layer2 §1.2 as the source of truth).
 	FrameTypeViewsyncPush           FrameType = "viewsync.push"
 	FrameTypeViewsyncAck            FrameType = "viewsync.ack"
 	FrameTypeViewsyncResyncRequest  FrameType = "viewsync.resync_request"
 	FrameTypeViewsyncResyncResponse FrameType = "viewsync.resync_response"
 
 	// Control plane frames (placement / member sync / device session /
-	// human caller) per L2 §9.1.
+	// human caller) per impl-layer2 §1.2.
 	FrameTypeControlConnectionAccepted     FrameType = "control.connection_accepted"
 	FrameTypeControlCreateChannel          FrameType = "control.create_channel"
 	FrameTypeControlCreateChannelAck       FrameType = "control.create_channel_ack"
@@ -37,6 +37,8 @@ const (
 	FrameTypeControlUnbindChannelAck       FrameType = "control.unbind_channel_ack"
 	FrameTypeControlHeartbeat              FrameType = "control.heartbeat"
 	FrameTypeControlHeartbeatAck           FrameType = "control.heartbeat_ack"
+	FrameTypeControlHeldChannelsReport     FrameType = "control.held_channels_report"
+	FrameTypeControlHeldChannelsAck        FrameType = "control.held_channels_ack"
 	FrameTypeControlDaemonReclaim          FrameType = "control.daemon_reclaim"
 	FrameTypeControlReclaimAccepted        FrameType = "control.reclaim_accepted"
 	FrameTypeControlReclaimRejected        FrameType = "control.reclaim_rejected"
@@ -50,7 +52,7 @@ const (
 	FrameTypeControlWriteMessage           FrameType = "control.write_message"
 	FrameTypeControlWriteMessageAck        FrameType = "control.write_message_ack"
 
-	// Device transit frames per L2 §9.1 + L4 §2.6.4.
+	// Device transit frames per impl-layer2 §1.2 + L4 §2.6.4.
 	FrameTypeDeviceTransitSend  FrameType = "device_transit.send"
 	FrameTypeDeviceTransitRecv  FrameType = "device_transit.recv"
 	FrameTypeDeviceTransitAck   FrameType = "device_transit.ack"
@@ -73,6 +75,8 @@ var AllFrameTypes = []FrameType{
 	FrameTypeControlUnbindChannelAck,
 	FrameTypeControlHeartbeat,
 	FrameTypeControlHeartbeatAck,
+	FrameTypeControlHeldChannelsReport,
+	FrameTypeControlHeldChannelsAck,
 	FrameTypeControlDaemonReclaim,
 	FrameTypeControlReclaimAccepted,
 	FrameTypeControlReclaimRejected,
@@ -92,7 +96,7 @@ var AllFrameTypes = []FrameType{
 	FrameTypeDeviceTransitError,
 }
 
-// Category groups frame types by their L2 §9.1 category — used by
+// Category groups frame types by their impl-layer2 §1.2 category — used by
 // dispatch tables + tests.
 type Category string
 
@@ -102,7 +106,7 @@ const (
 	CategoryDeviceTransit Category = "device_transit"
 )
 
-// CategoryOf returns the L2 §9.1 category for a frame_type. Returns
+// CategoryOf returns the impl-layer2 §1.2 category for a frame_type. Returns
 // empty string for unknown values.
 func CategoryOf(ft FrameType) Category {
 	switch ft {
@@ -131,8 +135,8 @@ func (f FrameType) String() string { return string(f) }
 func (c Category) String() string { return string(c) }
 
 // ConnectionEpoch is the daemon-bus connection epoch (incremented on
-// every WS reconnect — L2 §9.4). Frames carry it so receivers can drop
-// frames from a stale connection.
+// every accepted WS connection). Post-handshake frames carry it so receivers
+// can drop frames from a stale connection before payload dispatch.
 type ConnectionEpoch int64
 
 // FrameID is the daemonbus mux frame identifier.
@@ -146,26 +150,26 @@ func (f FrameID) String() string { return string(f) }
 // device_transit.* — rides inside this outer envelope.
 //
 // Spec-canonical outer envelope field set (impl-layer2 §1.3):
-//   frame_kind            string     required — closed set (§1.2)
-//   frame_id              string     required — uniqueness within connection
-//   correlation_frame_id  string|null optional — pairs response back to its
-//                                     request frame's frame_id
-//   channel_id            string|null optional — channel-scope frames
-//                                     populate it; connection-level frames
-//                                     (e.g. heartbeat) leave it empty
-//   ts                    int64      required — sender emit time (ms epoch)
-//   payload               object     required — family-specific schema
 //
-// DaemonID / DaemonConnectionEpoch are NOT in impl-layer2 §1.3 outer
-// envelope. They survive in this Go struct because daemon identifies +
-// connection-epoch fencing are useful at framing time; whether they
-// should be promoted into spec is open.
+//	frame_kind            string     required — closed set (§1.2)
+//	frame_id              string     required — uniqueness within connection
+//	correlation_frame_id  string|null optional — pairs response back to its
+//	                                  request frame's frame_id
+//	channel_id            string|null optional — channel-scope frames
+//	                                  populate it; connection-level frames
+//	                                  (e.g. heartbeat) leave it empty
+//	daemon_id            string     required post-handshake — source daemon
+//	                                  on daemon→server frames, target daemon
+//	                                  on server→daemon frames
+//	daemon_connection_epoch int64    required post-handshake — server-assigned
+//	                                  connection epoch; validate before
+//	                                  payload dispatch
+//	ts                    int64      required — sender emit time (ms epoch)
+//	payload               object     required — family-specific schema
 //
-// TODO(R5-20-spec-followup): daemon_id / daemon_connection_epoch are
-// not declared in impl-layer2 §1.3 outer envelope schema. PM to decide
-// whether to (a) inscribe them into spec, or (b) demote them into
-// payload-level fields per family (e.g. control.heartbeat.payload
-// already carries daemon_id).
+// DaemonID / DaemonConnectionEpoch are spec-canonical mux headers, not
+// per-family payload identity. Payload fields with the same names are
+// legacy / diagnostic only and must not override the outer envelope.
 //
 // The Payload is a json.RawMessage so callers can decode it into the
 // type-specific struct (kernel/viewsync.PushFrame, kernel/placement.
@@ -185,16 +189,12 @@ type Frame struct {
 // HeaderFields lists the impl-layer2 §1.3 outer envelope field names
 // (excluding payload, in spec order). Used by frame_test.go to assert
 // the schema 1:1 with spec.
-//
-// daemon_id / daemon_connection_epoch are intentionally OMITTED here:
-// they are not in impl-layer2 §1.3 outer envelope schema (see
-// R5-20-spec-followup TODO on Frame above). They live on the Go struct
-// as omitempty extras for daemon identification + connection epoch
-// fencing; the spec-canonical field-set assertion stays clean.
 var HeaderFields = []string{
 	"frame_kind",
 	"frame_id",
 	"correlation_frame_id",
 	"channel_id",
+	"daemon_id",
+	"daemon_connection_epoch",
 	"ts",
 }

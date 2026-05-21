@@ -11,12 +11,12 @@ import (
 // validation and fence check. The harness consumes the CallerContext
 // attached via CtxWithCaller (set by the binding edge: workerhost,
 // control handler, adapter framework). When no caller is attached we
-// reject auth_failed (defensive — every legitimate edge wires it).
+// reject harness_engine_acl_denied (defensive — every legitimate edge wires it).
 //
 // Channel mismatch detection is split:
 //
 //   - caller.ChannelID vs the harness-bound channel is a *caller* identity
-//     mismatch (caller bound to the wrong channel) → auth_failed.
+//     mismatch (caller bound to the wrong channel) → harness_engine_acl_denied.
 //   - envelope.channel_id vs the harness-bound channel is an *envelope*
 //     shape error per proto-layer1 §2.2 #2 → harness_channel_mismatch,
 //     emitted by step_envelope_shape (Step 2). step 0+1 leaves the

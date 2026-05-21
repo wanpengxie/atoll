@@ -143,7 +143,7 @@ func newTestChain(t interface {
 	_ = areg.Insert(context.Background(), actorreg.Record{ID: "agent:alpha", Kind: actor.KindAgent, CreatedAt: 1})
 	_ = areg.Insert(context.Background(), actorreg.Record{ID: "user:demo", Kind: actor.KindHuman, CreatedAt: 1})
 	_ = areg.Insert(context.Background(), actorreg.Record{ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: 1})
-	_ = areg.Insert(context.Background(), actorreg.Record{ID: "tool:feishu", Kind: actor.KindTool, CreatedAt: 1})
+	_ = areg.Insert(context.Background(), actorreg.Record{ID: "tool:feishu-adapter", Kind: actor.KindTool, CreatedAt: 1})
 
 	log := newMemLog()
 	treg := NewInMemoryTypeRegistry()

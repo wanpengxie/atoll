@@ -7,7 +7,7 @@ package worker
 // M1.5 ships only the wiring shape — concrete tool implementations land
 // in adapters/ (T4 / T5).
 type ToolWrapper interface {
-	// Name returns the canonical actor id, e.g. "tool:feishu-chat".
+	// Name returns the canonical actor id, e.g. "tool:feishu-adapter".
 	Name() string
 }
 

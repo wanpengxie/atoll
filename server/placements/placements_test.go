@@ -316,11 +316,11 @@ func TestReclaim(t *testing.T) {
 	// generated during bootstrap (persisted into placement by CASActivate).
 	c.now = c.now.Add(5 * time.Second)
 	reclaimAt := c.now.UnixMilli()
-	got, err := svc.AcceptReclaim(ctx, p.ChannelID, p.DaemonID, placement.ReclaimChannel{
+	got, err := svc.AcceptHeldChannel(ctx, p.ChannelID, p.DaemonID, placement.HeldChannel{
 		ChannelID: p.ChannelID, FencingToken: daemonTok, OwnerEpoch: daemonEpoch,
 	}, 9)
 	if err != nil || !got {
-		t.Fatalf("AcceptReclaim ok=%v err=%v", got, err)
+		t.Fatalf("AcceptHeldChannel ok=%v err=%v", got, err)
 	}
 	reclaimed, _, err := svc.Get(ctx, p.ChannelID)
 	if err != nil {
@@ -331,14 +331,14 @@ func TestReclaim(t *testing.T) {
 	}
 
 	// Mismatched (epoch / token) reclaim rejected.
-	got, err = svc.AcceptReclaim(ctx, p.ChannelID, p.DaemonID, placement.ReclaimChannel{
+	got, err = svc.AcceptHeldChannel(ctx, p.ChannelID, p.DaemonID, placement.HeldChannel{
 		ChannelID: p.ChannelID, FencingToken: "tok-9999", OwnerEpoch: 9999,
 	}, 10)
 	if err != nil {
-		t.Fatalf("AcceptReclaim mismatch err: %v", err)
+		t.Fatalf("AcceptHeldChannel mismatch err: %v", err)
 	}
 	if got {
-		t.Errorf("AcceptReclaim mismatch ok=true; expected false")
+		t.Errorf("AcceptHeldChannel mismatch ok=true; expected false")
 	}
 }
 
@@ -371,7 +371,7 @@ func TestReclaimHijackDifferentDaemonID(t *testing.T) {
 	}
 
 	// The original owner reclaims with the correct tuple → accepted.
-	ok1, err := svc.AcceptReclaim(ctx, p.ChannelID, p.DaemonID, placement.ReclaimChannel{
+	ok1, err := svc.AcceptHeldChannel(ctx, p.ChannelID, p.DaemonID, placement.HeldChannel{
 		ChannelID: p.ChannelID, FencingToken: daemonTok, OwnerEpoch: daemonEpoch,
 	}, 7)
 	if err != nil || !ok1 {
@@ -380,7 +380,7 @@ func TestReclaimHijackDifferentDaemonID(t *testing.T) {
 
 	// A different daemon presents an identical (epoch, token) tuple →
 	// MUST be rejected (no row update).
-	ok2, err := svc.AcceptReclaim(ctx, p.ChannelID, placement.DaemonID("d-attacker"), placement.ReclaimChannel{
+	ok2, err := svc.AcceptHeldChannel(ctx, p.ChannelID, placement.DaemonID("d-attacker"), placement.HeldChannel{
 		ChannelID: p.ChannelID, FencingToken: daemonTok, OwnerEpoch: daemonEpoch,
 	}, 8)
 	if err != nil {
@@ -629,7 +629,8 @@ func TestObserveHeartbeatPlacementDiffActions(t *testing.T) {
 	want := []placement.PlacementDiffAction{
 		placement.PlacementDiffActionOK,
 		placement.PlacementDiffActionReclaimPending,
-		placement.PlacementDiffActionUnbindPending,
+		// daemon_id mismatch routes to reclaim_pending by impl-layer2 spec.
+		placement.PlacementDiffActionReclaimPending,
 		placement.PlacementDiffActionReclaimPending,
 		placement.PlacementDiffActionDirectoryMissing,
 	}

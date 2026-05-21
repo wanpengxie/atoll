@@ -96,31 +96,30 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 				PlacementDiff: diff,
 			}, nil
 		},
-		OnReclaim: func(ctx context.Context, conn *daemonbus.Connection, req placement.ReclaimRequest) error {
+		OnHeldChannelsReport: func(ctx context.Context, conn *daemonbus.Connection, req placement.HeldChannelsReport) error {
 			// FIX-T4: req.DaemonID must match the WS-authenticated
 			// Connection.DaemonID. A daemon must never speak for
 			// another daemon — without this guard a hostile / buggy
-			// daemon could reclaim placements it never owned by
+			// daemon could report placements it never owned by
 			// forging the payload-level daemon_id.
 			if req.DaemonID != conn.DaemonID {
-				return fmt.Errorf("daemonbus: reclaim daemon_id %q does not match authenticated conn %q", req.DaemonID, conn.DaemonID)
+				return fmt.Errorf("daemonbus: held_channels_report daemon_id %q does not match authenticated conn %q", req.DaemonID, conn.DaemonID)
 			}
-			out := make([]placement.ReclaimDecision, 0, len(req.Channels))
+			out := make([]placement.HeldChannelsDecision, 0, len(req.Channels))
 			for _, ch := range req.Channels {
-				ok, err := a.placements.AcceptReclaim(ctx, ch.ChannelID, conn.DaemonID, ch, placement.ConnectionEpoch(conn.ConnectionEpoch))
+				ok, err := a.placements.AcceptHeldChannel(ctx, ch.ChannelID, conn.DaemonID, ch, placement.ConnectionEpoch(conn.ConnectionEpoch))
 				if err != nil {
 					return err
 				}
 				if ok {
-					out = append(out, placement.ReclaimDecision{ChannelID: ch.ChannelID, Accepted: true})
+					out = append(out, placement.HeldChannelsDecision{ChannelID: ch.ChannelID, Accepted: true})
 				} else {
-					out = append(out, placement.ReclaimDecision{ChannelID: ch.ChannelID, Accepted: false, Reason: "fencing mismatch"})
+					out = append(out, placement.HeldChannelsDecision{ChannelID: ch.ChannelID, Accepted: false, Reason: "fencing mismatch"})
 				}
 			}
-			ft := kerneldaemonbus.FrameTypeControlReclaimAccepted
-			_, err := conn.SendFrame(ctx, ft, map[string]any{
-				"daemon_id": string(req.DaemonID),
-				"decisions": out,
+			_, err := conn.SendFrame(ctx, kerneldaemonbus.FrameTypeControlHeldChannelsAck, placement.HeldChannelsAck{
+				DaemonID:  req.DaemonID,
+				Decisions: out,
 			})
 			return err
 		},
@@ -515,7 +514,7 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 	// FIX-T8: server-side early kind normalize + request audience
 	// validation. Caller may supply `kind` explicitly; otherwise we
 	// apply the L1 §1.1 default. kind-locked core types (e.g.
-	// system.event) reject caller overrides. kind=request frames
+	// core.system_event) reject caller overrides. kind=request frames
 	// must carry exactly one concrete audience (L1 §10.2 step 5).
 	kind, ok := resolveKind(req.Type, message.Kind(req.Kind))
 	if !ok {
@@ -625,15 +624,25 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 			if ackBody.RejectReason != "" {
 				resp["reject_reason"] = ackBody.RejectReason
 				resp["reject_detail"] = ackBody.RejectDetail
-				// Surface harness rejects as 409 so `coagent ask` can
-				// map exit=3 onto stable harness reasons (L1 §10.3.1).
-				c.JSON(http.StatusConflict, resp)
+				c.JSON(writeMessageRejectStatus(ackBody.RejectReason), resp)
 				return
 			}
 			resp["accepted"] = ackBody.Accepted
 		}
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+func writeMessageRejectStatus(reason string) int {
+	for _, r := range message.AllHarnessRejectReasons {
+		if reason == r.String() {
+			if status := r.HTTPStatus(); status != 0 {
+				return status
+			}
+			return http.StatusConflict
+		}
+	}
+	return http.StatusConflict
 }
 
 // isJSONUnknownFieldError reports whether err is the error

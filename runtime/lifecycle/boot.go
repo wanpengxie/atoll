@@ -51,9 +51,9 @@ type LocalChannel struct {
 
 // BootResult is the outcome of a Boot run.
 type BootResult struct {
-	Local           []LocalChannel
-	ReclaimAccepted []channel.ID
-	ReclaimRejected []channel.ID
+	Local        []LocalChannel
+	HeldAccepted []channel.ID
+	HeldRejected []channel.ID
 }
 
 // BootConfig wires Boot.
@@ -68,11 +68,11 @@ type BootConfig struct {
 	// path. Provided by cmd/daemon (bridges path → *sql.DB).
 	LockOpener func(ctx context.Context, sqlitePath string) (*store.ChannelLock, error)
 
-	// EmitReclaim sends a control.daemon_reclaim frame to the server in
-	// phase 2. Returns the per-channel decisions. cmd/daemon supplies an
-	// impl that wraps the transit client. May be nil in tests — the
-	// caller will then drive the phase manually.
-	EmitReclaim func(ctx context.Context, req placement.ReclaimRequest) ([]placement.ReclaimDecision, error)
+	// EmitHeldChannelsReport sends a control.held_channels_report frame
+	// to the server in phase 2. Returns the per-channel decisions.
+	// cmd/daemon supplies an impl that wraps the transit client. May be
+	// nil in tests — the caller will then drive the phase manually.
+	EmitHeldChannelsReport func(ctx context.Context, req placement.HeldChannelsReport) ([]placement.HeldChannelsDecision, error)
 }
 
 // Bootstrapper runs the T1.6 phase 1/2/3/4 startup sequencer.
@@ -161,24 +161,25 @@ func (b *Bootstrapper) LoadLocal(ctx context.Context) ([]LocalChannel, error) {
 	return out, nil
 }
 
-// ReportReclaim runs phase 2: send control.daemon_reclaim with every
-// channel we believe we own, and apply the per-channel decisions.
+// ReportHeldChannels runs phase 2: send control.held_channels_report
+// with every channel we believe we own, and apply the per-channel
+// decisions.
 //
-// When BootConfig.EmitReclaim is nil this is a no-op (tests).
-func (b *Bootstrapper) ReportReclaim(ctx context.Context) (BootResult, error) {
+// When BootConfig.EmitHeldChannelsReport is nil this is a no-op (tests).
+func (b *Bootstrapper) ReportHeldChannels(ctx context.Context) (BootResult, error) {
 	b.phase = PhaseReclaiming
 	res := BootResult{Local: b.channels}
-	if b.cfg.EmitReclaim == nil {
+	if b.cfg.EmitHeldChannelsReport == nil {
 		// All local channels are assumed owned for offline tests.
 		for _, c := range b.channels {
 			if c.OwnedByUs {
-				res.ReclaimAccepted = append(res.ReclaimAccepted, c.ChannelID)
+				res.HeldAccepted = append(res.HeldAccepted, c.ChannelID)
 			}
 		}
 		return res, nil
 	}
 
-	req := placement.ReclaimRequest{
+	req := placement.HeldChannelsReport{
 		DaemonID:    b.cfg.DaemonID,
 		DaemonEpoch: b.cfg.DaemonEpoch,
 	}
@@ -186,7 +187,7 @@ func (b *Bootstrapper) ReportReclaim(ctx context.Context) (BootResult, error) {
 		if !c.OwnedByUs {
 			continue
 		}
-		req.Channels = append(req.Channels, placement.ReclaimChannel{
+		req.Channels = append(req.Channels, placement.HeldChannel{
 			ChannelID:    c.ChannelID,
 			FencingToken: c.Lock.FencingToken,
 			OwnerEpoch:   c.Lock.OwnerEpoch,
@@ -195,15 +196,15 @@ func (b *Bootstrapper) ReportReclaim(ctx context.Context) (BootResult, error) {
 	if len(req.Channels) == 0 {
 		return res, nil
 	}
-	decisions, err := b.cfg.EmitReclaim(ctx, req)
+	decisions, err := b.cfg.EmitHeldChannelsReport(ctx, req)
 	if err != nil {
-		return res, fmt.Errorf("lifecycle: emit reclaim: %w", err)
+		return res, fmt.Errorf("lifecycle: emit held_channels_report: %w", err)
 	}
 	for _, d := range decisions {
 		if d.Accepted {
-			res.ReclaimAccepted = append(res.ReclaimAccepted, d.ChannelID)
+			res.HeldAccepted = append(res.HeldAccepted, d.ChannelID)
 		} else {
-			res.ReclaimRejected = append(res.ReclaimRejected, d.ChannelID)
+			res.HeldRejected = append(res.HeldRejected, d.ChannelID)
 		}
 	}
 	return res, nil

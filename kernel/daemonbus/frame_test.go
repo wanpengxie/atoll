@@ -5,17 +5,19 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
-// TestFrameTypeClosedSetCardinality asserts the L2 §9.1 closed-set
-// cardinality. M1.5 = 4 viewsync + 19 control + 4 device_transit = 27.
+// TestFrameTypeClosedSetCardinality asserts the impl-layer2 §1.2 closed-set
+// cardinality. M1.5 = 4 viewsync + 21 control + 4 device_transit = 29.
 //
 // Exact values (in spec order) checked by TestAllFrameTypesSpecOrder.
 func TestFrameTypeClosedSetCardinality(t *testing.T) {
 	t.Parallel()
 
-	if got := len(AllFrameTypes); got != 27 {
-		t.Errorf("AllFrameTypes len = %d, want 27 (4 viewsync + 19 control + 4 device_transit)", got)
+	if got := len(AllFrameTypes); got != 29 {
+		t.Errorf("AllFrameTypes len = %d, want 29 (4 viewsync + 21 control + 4 device_transit)", got)
 	}
 
 	// Per-category breakdown — keeps the failure message specific when
@@ -27,8 +29,8 @@ func TestFrameTypeClosedSetCardinality(t *testing.T) {
 	if counts[CategoryViewsync] != 4 {
 		t.Errorf("viewsync frame count = %d, want 4", counts[CategoryViewsync])
 	}
-	if counts[CategoryControl] != 19 {
-		t.Errorf("control frame count = %d, want 19", counts[CategoryControl])
+	if counts[CategoryControl] != 21 {
+		t.Errorf("control frame count = %d, want 21", counts[CategoryControl])
 	}
 	if counts[CategoryDeviceTransit] != 4 {
 		t.Errorf("device_transit frame count = %d, want 4", counts[CategoryDeviceTransit])
@@ -36,7 +38,7 @@ func TestFrameTypeClosedSetCardinality(t *testing.T) {
 }
 
 // TestAllFrameTypesSpecOrder asserts the AllFrameTypes slice carries
-// the exact L2 §9.1 spec value list in spec order.
+// the exact impl-layer2 §1.2 spec value list in spec order.
 func TestAllFrameTypesSpecOrder(t *testing.T) {
 	t.Parallel()
 
@@ -54,6 +56,8 @@ func TestAllFrameTypesSpecOrder(t *testing.T) {
 		FrameTypeControlUnbindChannelAck,
 		FrameTypeControlHeartbeat,
 		FrameTypeControlHeartbeatAck,
+		FrameTypeControlHeldChannelsReport,
+		FrameTypeControlHeldChannelsAck,
 		FrameTypeControlDaemonReclaim,
 		FrameTypeControlReclaimAccepted,
 		FrameTypeControlReclaimRejected,
@@ -83,7 +87,7 @@ func TestAllFrameTypesSpecOrder(t *testing.T) {
 }
 
 // TestFrameTypeNamingConvention asserts every frame_type wire form
-// follows the L2 §9.1 prefix convention: viewsync.* / control.* /
+// follows the impl-layer2 §1.2 prefix convention: viewsync.* / control.* /
 // device_transit.* — anything outside the three prefixes is a closed-set
 // drift.
 func TestFrameTypeNamingConvention(t *testing.T) {
@@ -96,7 +100,7 @@ func TestFrameTypeNamingConvention(t *testing.T) {
 		case strings.HasPrefix(s, "control."):
 		case strings.HasPrefix(s, "device_transit."):
 		default:
-			t.Errorf("frame_type %q has no recognized L2 §9.1 prefix", ft)
+			t.Errorf("frame_type %q has no recognized impl-layer2 §1.2 prefix", ft)
 		}
 	}
 }
@@ -129,16 +133,12 @@ func TestCategoryOfRoundtripping(t *testing.T) {
 }
 
 // TestFrameHeaderFieldSet locks the impl-layer2 §1.3 daemonbus mux
-// outer envelope field set: 5 named header keys + 1 payload. The 5
+// outer envelope field set: 7 named header keys + 1 payload. The 7
 // names match HeaderFields.
 //
 // Spec-canonical fields (impl-layer2 §1.3): frame_kind / frame_id /
-// correlation_frame_id / channel_id / ts / payload.
-//
-// daemon_id / daemon_connection_epoch live on the Go struct as
-// omitempty extras (see R5-20-spec-followup TODO on Frame); they are
-// intentionally omitted from this test's input so the marshalled key
-// set asserts against the spec-canonical subset.
+// correlation_frame_id / channel_id / daemon_id /
+// daemon_connection_epoch / ts / payload.
 //
 // This is the verification artifact called out by m1.5-tickets.md §T1
 // acceptance criteria — "所有 frame_kind 字段集".
@@ -146,12 +146,14 @@ func TestFrameHeaderFieldSet(t *testing.T) {
 	t.Parallel()
 
 	frame := Frame{
-		FrameKind:          FrameTypeControlCreateChannel,
-		FrameID:            "f-1",
-		CorrelationFrameID: "f-0",
-		ChannelID:          "ch-1",
-		Ts:                 1700000000000,
-		Payload:            json.RawMessage(`{"x":1}`),
+		FrameKind:             FrameTypeControlCreateChannel,
+		FrameID:               "f-1",
+		CorrelationFrameID:    "f-0",
+		ChannelID:             "ch-1",
+		DaemonID:              placement.DaemonID("daemon-1"),
+		DaemonConnectionEpoch: 42,
+		Ts:                    1700000000000,
+		Payload:               json.RawMessage(`{"x":1}`),
 	}
 	raw, err := json.Marshal(frame)
 	if err != nil {
@@ -181,10 +183,10 @@ func TestFrameHeaderFieldSet(t *testing.T) {
 		}
 	}
 
-	// HeaderFields cardinality (5) is part of impl-layer2 §1.3 contract
+	// HeaderFields cardinality (7) is part of impl-layer2 §1.3 contract
 	// — guard against drift on the spec-side enumeration.
-	if len(HeaderFields) != 5 {
-		t.Errorf("HeaderFields len = %d, want 5", len(HeaderFields))
+	if len(HeaderFields) != 7 {
+		t.Errorf("HeaderFields len = %d, want 7", len(HeaderFields))
 	}
 }
 

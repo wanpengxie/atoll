@@ -101,8 +101,8 @@ func TestDaemon_StartupPhases(t *testing.T) {
 	if len(res.Local) != 2 {
 		t.Fatalf("expected 2 local channels, got %d", len(res.Local))
 	}
-	if len(res.ReclaimAccepted) != 2 {
-		t.Errorf("offline reclaim should accept all 2: %v", res.ReclaimAccepted)
+	if len(res.HeldAccepted) != 2 {
+		t.Errorf("offline held-channel report should accept all 2: %v", res.HeldAccepted)
 	}
 
 	// daemon_epoch should have been bumped to 42 on each owned channel.
