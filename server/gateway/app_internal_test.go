@@ -16,6 +16,13 @@ import (
 	"github.com/rs/zerolog"
 )
 
+func withProductionOrigins(cfg Config) Config {
+	cfg.DeviceAllowedOrigins = []string{"https://device.example"}
+	cfg.PushhubAllowedOrigins = []string{"https://ui.example"}
+	cfg.DaemonbusAllowedOrigins = []string{"https://ops.example"}
+	return cfg
+}
+
 func TestWithDefaults_RejectsEmptySecret(t *testing.T) {
 	t.Parallel()
 	// SessionSecret empty, everything else populated → fail-fast on
@@ -80,6 +87,9 @@ func TestWithDefaults_AllowDevSecrets(t *testing.T) {
 	if out.HumanCallerSecret != devHumanCallerSecret {
 		t.Errorf("HumanCallerSecret=%q", out.HumanCallerSecret)
 	}
+	if len(out.PushhubAllowedOrigins) == 0 || len(out.DaemonbusAllowedOrigins) == 0 {
+		t.Fatal("AllowDevSecrets should install dev WS origins")
+	}
 }
 
 // TestWithDefaults_AllowDevSecrets_EmitsJSONWarning verifies the
@@ -130,18 +140,61 @@ func TestWithDefaults_AllowDevSecrets_EmitsJSONWarning(t *testing.T) {
 
 func TestWithDefaults_PopulatedSecrets_NoError(t *testing.T) {
 	t.Parallel()
-	cfg := Config{
+	cfg := withProductionOrigins(Config{
 		SessionSecret:      "real-1",
 		DaemonSharedSecret: "real-2",
 		DeviceTokenSecret:  "real-3",
 		HumanCallerSecret:  "real-4",
-	}
+	})
 	out, err := withDefaults(cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if out.SessionSecret != "real-1" {
 		t.Errorf("SessionSecret rewritten: %q", out.SessionSecret)
+	}
+}
+
+func TestWithDefaults_RejectsMissingOriginAllowlist(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		SessionSecret:      "real-1",
+		DaemonSharedSecret: "real-2",
+		DeviceTokenSecret:  "real-3",
+		HumanCallerSecret:  "real-4",
+	}
+	_, err := withDefaults(cfg)
+	if err == nil {
+		t.Fatal("expected error on missing origin allowlist")
+	}
+	var insec *ErrInsecureOrigin
+	if !errors.As(err, &insec) {
+		t.Fatalf("err type=%T want *ErrInsecureOrigin", err)
+	}
+	if insec.Field != "DeviceAllowedOrigins" {
+		t.Errorf("Field=%q want DeviceAllowedOrigins", insec.Field)
+	}
+}
+
+func TestWithDefaults_RejectsWildcardOrigin(t *testing.T) {
+	t.Parallel()
+	cfg := withProductionOrigins(Config{
+		SessionSecret:      "real-1",
+		DaemonSharedSecret: "real-2",
+		DeviceTokenSecret:  "real-3",
+		HumanCallerSecret:  "real-4",
+	})
+	cfg.PushhubAllowedOrigins = []string{"*"}
+	_, err := withDefaults(cfg)
+	if err == nil {
+		t.Fatal("expected error on wildcard origin")
+	}
+	var insec *ErrInsecureOrigin
+	if !errors.As(err, &insec) {
+		t.Fatalf("err type=%T want *ErrInsecureOrigin", err)
+	}
+	if insec.Field != "PushhubAllowedOrigins" || insec.Value != "*" {
+		t.Errorf("Field=%q Value=%q", insec.Field, insec.Value)
 	}
 }
 

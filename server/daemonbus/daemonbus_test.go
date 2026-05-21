@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -26,13 +27,88 @@ import (
 
 func newSvc(t *testing.T) *daemonbus.Service {
 	t.Helper()
+	return newSvcWithConfig(t, daemonbus.Config{SharedSecret: "test-secret"})
+}
+
+func newSvcWithConfig(t *testing.T, cfg daemonbus.Config) *daemonbus.Service {
+	t.Helper()
 	ctx := context.Background()
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "db.sqlite"), store.OpenOptions{})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return daemonbus.NewService(db, daemonbus.Config{SharedSecret: "test-secret"})
+	return daemonbus.NewService(db, cfg)
+}
+
+func daemonbusWSServer(t *testing.T, svc *daemonbus.Service) string {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/daemonbus", svc.HandleWS(emptyHandlersProvider{}))
+	srv := httptest.NewServer(r)
+	t.Cleanup(func() { srv.Close() })
+	return "ws" + strings.TrimPrefix(srv.URL, "http") + "/daemonbus"
+}
+
+func TestHandleWSOriginPolicy(t *testing.T) {
+	t.Parallel()
+
+	const allowedOrigin = "https://ops.example"
+
+	t.Run("browser origin denied without allowlist", func(t *testing.T) {
+		t.Parallel()
+		svc := newSvcWithConfig(t, daemonbus.Config{SharedSecret: "test-secret"})
+		wsURL := daemonbusWSServer(t, svc)
+		header := http.Header{}
+		header.Set("Origin", allowedOrigin)
+		ws, resp, err := daemonWSDialer("d-origin-deny", "test-secret").Dial(wsURL, header)
+		if err == nil {
+			_ = ws.Close()
+			t.Fatal("dial with browser Origin and no allowlist succeeded")
+		}
+		if resp == nil {
+			t.Fatalf("dial response nil: %v", err)
+		}
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status=%d want 403", resp.StatusCode)
+		}
+	})
+
+	t.Run("browser origin allowed by exact allowlist", func(t *testing.T) {
+		t.Parallel()
+		svc := newSvcWithConfig(t, daemonbus.Config{
+			SharedSecret:   "test-secret",
+			AllowedOrigins: []string{allowedOrigin},
+		})
+		wsURL := daemonbusWSServer(t, svc)
+		header := http.Header{}
+		header.Set("Origin", allowedOrigin)
+		ws, resp, err := daemonWSDialer("d-origin-allow", "test-secret").Dial(wsURL, header)
+		if err != nil {
+			status := 0
+			if resp != nil {
+				status = resp.StatusCode
+			}
+			t.Fatalf("dial with allowlisted Origin failed: status=%d err=%v", status, err)
+		}
+		_ = ws.Close()
+	})
+
+	t.Run("missing origin allowed for non-browser daemon", func(t *testing.T) {
+		t.Parallel()
+		svc := newSvcWithConfig(t, daemonbus.Config{SharedSecret: "test-secret"})
+		wsURL := daemonbusWSServer(t, svc)
+		ws, resp, err := daemonWSDialer("d-origin-empty", "test-secret").Dial(wsURL, nil)
+		if err != nil {
+			status := 0
+			if resp != nil {
+				status = resp.StatusCode
+			}
+			t.Fatalf("dial without Origin failed: status=%d err=%v", status, err)
+		}
+		_ = ws.Close()
+	})
 }
 
 type fakeChannelDaemonResolver struct {

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -53,6 +54,8 @@ type Config struct {
 	DeviceTokenSecret         string
 	DeviceAllowedOrigins      []string
 	DeviceAllowMissingOrigin  bool
+	PushhubAllowedOrigins     []string
+	DaemonbusAllowedOrigins   []string
 	HumanCallerSecret         string
 	ReconcileGracePeriod      time.Duration
 	ReconcileCreateTimeout    time.Duration
@@ -87,6 +90,13 @@ const (
 	devHumanCallerSecret = "dev-human-caller-secret-change-me"
 )
 
+var devWSAllowedOrigins = []string{
+	"http://localhost:8832",
+	"http://127.0.0.1:8832",
+	"http://localhost:5173",
+	"http://127.0.0.1:5173",
+}
+
 // ErrInsecureSecret is returned by withDefaults when a required secret
 // is empty or equals one of the dev sentinels and AllowDevSecrets is
 // false. Wraps the offending config field name so cmd/server can print
@@ -102,6 +112,21 @@ func (e *ErrInsecureSecret) Error() string {
 		return fmt.Sprintf("gateway: %s empty (set the env var or pass --allow-dev-secrets)", e.Field)
 	}
 	return fmt.Sprintf("gateway: %s equals dev sentinel %q (set the env var or pass --allow-dev-secrets)", e.Field, e.Value)
+}
+
+// ErrInsecureOrigin is returned by withDefaults when a browser-facing
+// WebSocket Origin allowlist is missing or uses an allow-all sentinel in
+// production mode.
+type ErrInsecureOrigin struct {
+	Field string
+	Value string
+}
+
+func (e *ErrInsecureOrigin) Error() string {
+	if e.Value == "" {
+		return fmt.Sprintf("gateway: %s empty (set exact origins or pass --allow-dev-secrets)", e.Field)
+	}
+	return fmt.Sprintf("gateway: %s contains insecure origin %q (use exact origins only)", e.Field, e.Value)
 }
 
 // App is the server façade. cmd/server holds one.
@@ -159,9 +184,12 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		Logger:           &pkgLogger,
 	})
 	app.viewcache = viewcache.NewService(db)
-	app.pushhub = pushhub.NewService()
+	app.pushhub = pushhub.NewService(pushhub.Config{
+		AllowedOrigins: cfg.PushhubAllowedOrigins,
+	})
 	app.daemonbus = daemonbus.NewService(db, daemonbus.Config{
-		SharedSecret: cfg.DaemonSharedSecret,
+		SharedSecret:   cfg.DaemonSharedSecret,
+		AllowedOrigins: cfg.DaemonbusAllowedOrigins,
 	})
 	app.devicebus = devicebus.NewService(db, devicebus.Config{
 		TokenSecret:        cfg.DeviceTokenSecret,
@@ -275,5 +303,47 @@ func withDefaults(cfg Config) (Config, error) {
 			Msg("dev sentinel installed for missing/insecure secret — DO NOT USE IN PRODUCTION")
 		*s.ptr = s.devValue
 	}
+	type originSlot struct {
+		field string
+		ptr   *[]string
+	}
+	originSlots := []originSlot{
+		{"DeviceAllowedOrigins", &cfg.DeviceAllowedOrigins},
+		{"PushhubAllowedOrigins", &cfg.PushhubAllowedOrigins},
+		{"DaemonbusAllowedOrigins", &cfg.DaemonbusAllowedOrigins},
+	}
+	for _, s := range originSlots {
+		origins, bad := normalizeStartupOrigins(*s.ptr)
+		if bad != "" {
+			return cfg, &ErrInsecureOrigin{Field: s.field, Value: bad}
+		}
+		if len(origins) == 0 {
+			if !cfg.AllowDevSecrets {
+				return cfg, &ErrInsecureOrigin{Field: s.field}
+			}
+			origins = append([]string(nil), devWSAllowedOrigins...)
+		}
+		*s.ptr = origins
+	}
 	return cfg, nil
+}
+
+func normalizeStartupOrigins(origins []string) ([]string, string) {
+	out := make([]string, 0, len(origins))
+	seen := make(map[string]struct{}, len(origins))
+	for _, origin := range origins {
+		origin = strings.TrimSpace(origin)
+		if origin == "" {
+			continue
+		}
+		if origin == "*" {
+			return nil, origin
+		}
+		if _, ok := seen[origin]; ok {
+			continue
+		}
+		seen[origin] = struct{}{}
+		out = append(out, origin)
+	}
+	return out, ""
 }

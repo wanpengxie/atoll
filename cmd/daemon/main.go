@@ -126,16 +126,17 @@ func main() {
 	}
 	daemonLogger := lg.Z()
 	cfg := runtime.DaemonConfig{
-		DataDir:               *dataDir,
-		ChannelsDir:           filepath.Join(*dataDir, "channels"),
-		DaemonID:              *daemonID,
-		DaemonEpoch:           *daemonEpoch,
-		UseMockBus:            *mockBus,
-		ReplayWindow:          time.Duration(*replayWindowMs) * time.Millisecond,
-		ChannelTemplates:      buildChannelTemplates(*useScaffoldXHS),
-		OnChannelBoot:         wireAdapterFramework(xhsFactory),
-		OnBindDeviceSession:   deviceBinder.OnBind,
-		OnUnbindDeviceSession: deviceBinder.OnUnbind,
+		DataDir:                   *dataDir,
+		ChannelsDir:               filepath.Join(*dataDir, "channels"),
+		DaemonID:                  *daemonID,
+		DaemonEpoch:               *daemonEpoch,
+		UseMockBus:                *mockBus,
+		ReplayWindow:              time.Duration(*replayWindowMs) * time.Millisecond,
+		AllowReplayWindowDisabled: *mockBus && *replayWindowMs <= 0,
+		ChannelTemplates:          buildChannelTemplates(*useScaffoldXHS),
+		OnChannelBoot:             wireAdapterFramework(xhsFactory),
+		OnBindDeviceSession:       deviceBinder.OnBind,
+		OnUnbindDeviceSession:     deviceBinder.OnUnbind,
 		// M1.6 follow-up — agent self-awareness fix. The runtime daemon
 		// snapshots device sessions into the worker spawn context file
 		// so the kimi system prompt can surface "active device sessions"

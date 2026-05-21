@@ -52,9 +52,15 @@ type DaemonConfig struct {
 	// tests that don't drive the write path.
 	HumanCallerSecret []byte
 
-	// ReplayWindow caps |now - human_caller.ts|. Zero disables the
-	// check (M1.5 default).
+	// ReplayWindow caps |now - human_caller.ts|. Production callers must set
+	// a positive value; zero/negative only works when
+	// AllowReplayWindowDisabled is explicitly set for test/dev paths.
 	ReplayWindow time.Duration
+
+	// AllowReplayWindowDisabled permits ReplayWindow<=0 for tests/dev only.
+	// Production wiring must leave this false so replay protection cannot be
+	// disabled by an omitted config value.
+	AllowReplayWindowDisabled bool
 
 	// NowFn / FrameIDGen optional — production injects time.Now and uuid.
 	NowFn      func() int64
@@ -667,10 +673,11 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 
 	// 3.2 — transit dispatcher (one goroutine drains the recv side).
 	handler, err := transit.NewWriteMessageHandler(transit.WriteMessageHandlerConfig{
-		Secret:       d.cfg.HumanCallerSecret,
-		Router:       d.routeWrite,
-		NowMs:        d.cfg.NowFn,
-		ReplayWindow: d.cfg.ReplayWindow,
+		Secret:                    d.cfg.HumanCallerSecret,
+		Router:                    d.routeWrite,
+		NowMs:                     d.cfg.NowFn,
+		ReplayWindow:              d.cfg.ReplayWindow,
+		AllowReplayWindowDisabled: d.cfg.AllowReplayWindowDisabled,
 	})
 	switch {
 	case err == nil:

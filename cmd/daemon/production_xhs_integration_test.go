@@ -59,6 +59,7 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 		UseMockBus:        true,
 		NowFn:             nowMs,
 		HumanCallerSecret: []byte(integSecret),
+		ReplayWindow:      time.Minute,
 		SchedulerPeriod:   50 * time.Millisecond,
 		ChannelTemplates: map[string]runtime.ChannelTemplate{
 			XHSCreatorChannelType: {

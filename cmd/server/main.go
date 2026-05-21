@@ -85,6 +85,8 @@ func run() error {
 		DeviceTokenSecret:         cfg.DeviceTokenSecret,
 		DeviceAllowedOrigins:      cfg.DeviceAllowedOrigins,
 		DeviceAllowMissingOrigin:  cfg.DeviceAllowMissingOrigin,
+		PushhubAllowedOrigins:     cfg.PushhubAllowedOrigins,
+		DaemonbusAllowedOrigins:   cfg.DaemonbusAllowedOrigins,
 		HumanCallerSecret:         cfg.HumanCallerSecret,
 		AllowDevSecrets:           cfg.AllowDevSecrets,
 		UIDistDir:                 cfg.UIDistDir,
@@ -140,6 +142,8 @@ type config struct {
 	DeviceTokenSecret         string
 	DeviceAllowedOrigins      []string
 	DeviceAllowMissingOrigin  bool
+	PushhubAllowedOrigins     []string
+	DaemonbusAllowedOrigins   []string
 	HumanCallerSecret         string
 	AllowDevSecrets           bool
 	UIDistDir                 string
@@ -150,6 +154,8 @@ type config struct {
 
 func loadConfig() config {
 	deviceOrigins := os.Getenv("COAGENT_DEVICEBUS_ALLOWED_ORIGINS")
+	pushhubOrigins := os.Getenv("COAGENT_PUSHHUB_ALLOWED_ORIGINS")
+	daemonbusOrigins := os.Getenv("COAGENT_DAEMONBUS_ALLOWED_ORIGINS")
 	cfg := config{
 		HTTPAddr: envOr("COAGENT_SERVER_ADDR", ":8832"),
 		DBPath:   envOr("COAGENT_SERVER_DB", "data/server.db"),
@@ -179,12 +185,18 @@ func loadConfig() config {
 		"Comma-separated exact Origin allowlist for /devicebus WebSocket handshakes")
 	flag.BoolVar(&cfg.DeviceAllowMissingOrigin, "devicebus-allow-missing-origin", cfg.DeviceAllowMissingOrigin,
 		"Allow /devicebus WebSocket handshakes with no Origin header (non-browser clients only)")
+	flag.StringVar(&pushhubOrigins, "pushhub-allowed-origins", pushhubOrigins,
+		"Comma-separated exact Origin allowlist for /ws WebSocket handshakes")
+	flag.StringVar(&daemonbusOrigins, "daemonbus-allowed-origins", daemonbusOrigins,
+		"Comma-separated exact Origin allowlist for /daemonbus WebSocket handshakes")
 	flag.DurationVar(&cfg.ReconcileGracePeriod, "reconcile-grace", cfg.ReconcileGracePeriod, "Cold start grace before stale reconcile begins")
 	flag.DurationVar(&cfg.ReconcileCreateTimeout, "create-timeout", cfg.ReconcileCreateTimeout, "Placement creating→orphan timeout")
 	flag.DurationVar(&cfg.ReconcileHeartbeatTimeout, "heartbeat-timeout", cfg.ReconcileHeartbeatTimeout, "Placement active→stale heartbeat timeout")
 	flag.Parse()
 
 	cfg.DeviceAllowedOrigins = splitCSV(deviceOrigins)
+	cfg.PushhubAllowedOrigins = splitCSV(pushhubOrigins)
+	cfg.DaemonbusAllowedOrigins = splitCSV(daemonbusOrigins)
 	return cfg
 }
 

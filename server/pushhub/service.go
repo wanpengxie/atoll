@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,8 +52,12 @@ const pushhubIdleReadTimeout = 70 * time.Second
 // subscriber is closed and pumpRead exits.
 const pushhubPingWriteTimeout = 5 * time.Second
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+// Config tunes Service.
+type Config struct {
+	// AllowedOrigins is the exact Origin allowlist for browser WebSocket
+	// handshakes. Empty means deny browser-origin WS handshakes. Requests
+	// with no Origin header are allowed for non-browser clients.
+	AllowedOrigins []string
 }
 
 // Service holds the live subscriber registry.
@@ -73,6 +78,8 @@ type Service struct {
 	pingCadence      time.Duration
 	idleReadTimeout  time.Duration
 	pingWriteTimeout time.Duration
+
+	allowedOrigins map[string]struct{}
 }
 
 // PushedFrame is the in-memory shape delivered to test observers.
@@ -90,9 +97,14 @@ type pushObserver struct {
 }
 
 // NewService builds a Service.
-func NewService() *Service {
+func NewService(opts ...Config) *Service {
+	var cfg Config
+	if len(opts) > 0 {
+		cfg = opts[0]
+	}
 	return &Service{
-		subs: map[channel.ID]map[string]map[*subscriber]struct{}{},
+		subs:           map[channel.ID]map[string]map[*subscriber]struct{}{},
+		allowedOrigins: normalizeAllowedOrigins(cfg.AllowedOrigins),
 	}
 }
 
@@ -127,6 +139,31 @@ func (h *Service) keepaliveCfg() (time.Duration, time.Duration, time.Duration) {
 		pingWrite = pushhubPingWriteTimeout
 	}
 	return cadence, idle, pingWrite
+}
+
+func normalizeAllowedOrigins(origins []string) map[string]struct{} {
+	allowed := make(map[string]struct{}, len(origins))
+	for _, origin := range origins {
+		origin = strings.TrimSpace(origin)
+		if origin == "" {
+			continue
+		}
+		allowed[origin] = struct{}{}
+	}
+	return allowed
+}
+
+func (h *Service) upgrader() websocket.Upgrader {
+	return websocket.Upgrader{CheckOrigin: h.checkOrigin}
+}
+
+func (h *Service) checkOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	_, ok := h.allowedOrigins[origin]
+	return ok
 }
 
 func (h *Service) accessAuthorizer() channelaccess.Authorizer {
@@ -320,6 +357,7 @@ func (h *Service) HandleWS(ident *identity.Service) gin.HandlerFunc {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
 		}
+		upgrader := h.upgrader()
 		ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
 			return

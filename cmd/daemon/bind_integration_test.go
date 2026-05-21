@@ -45,6 +45,7 @@ func TestIntegration_BindDeviceSession_RoundTrip(t *testing.T) {
 		UseMockBus:        true,
 		NowFn:             nowMs,
 		HumanCallerSecret: []byte(integSecret),
+		ReplayWindow:      time.Minute,
 		SchedulerPeriod:   50 * time.Millisecond,
 		ChannelTemplates: map[string]runtime.ChannelTemplate{
 			"": {

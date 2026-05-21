@@ -40,6 +40,11 @@ type Config struct {
 	// Demo period uses one secret for every daemon.
 	SharedSecret string
 
+	// AllowedOrigins is the exact Origin allowlist for browser WebSocket
+	// handshakes. Empty means deny browser-origin WS handshakes. Requests
+	// with no Origin header are allowed for non-browser daemon clients.
+	AllowedOrigins []string
+
 	// PingCadence overrides DefaultPingCadence (tests). Zero =
 	// production default.
 	PingCadence time.Duration
@@ -64,15 +69,18 @@ type Service struct {
 	connGen     atomic.Uint64
 
 	channelDaemonResolver placements.ChannelDaemonResolver
+
+	allowedOrigins map[string]struct{}
 }
 
 // NewService builds a Service.
 func NewService(db *sql.DB, cfg Config) *Service {
 	return &Service{
-		db:          db,
-		cfg:         cfg,
-		now:         time.Now,
-		connections: map[placement.DaemonID]*Connection{},
+		db:             db,
+		cfg:            cfg,
+		now:            time.Now,
+		connections:    map[placement.DaemonID]*Connection{},
+		allowedOrigins: normalizeAllowedOrigins(cfg.AllowedOrigins),
 	}
 }
 

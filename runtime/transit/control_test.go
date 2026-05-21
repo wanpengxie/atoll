@@ -102,9 +102,10 @@ func stamper(ctx context.Context, actorID actor.ActorID, ch channel.ID) context.
 }
 
 const (
-	testWriteSecret  = "test-human-secret"
-	testWriteChannel = "ch-1"
-	testWriteActor   = "user:alice"
+	testWriteSecret          = "test-human-secret"
+	testWriteChannel         = "ch-1"
+	testWriteActor           = "user:alice"
+	defaultWriteReplayWindow = 60 * time.Second
 )
 
 func mustNewWriteHandler(t *testing.T, router transit.WriteMessageRouter, window time.Duration) *transit.WriteMessageHandler {
@@ -171,7 +172,7 @@ func TestWriteMessageHandler_Accept(t *testing.T) {
 	reg := newStubRegistry()
 	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman, DisplayName: "Alice"})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 42}}
-	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
+	h := mustNewWriteHandler(t, routerFor(chain, reg), defaultWriteReplayWindow)
 
 	body := newWriteMessageBody(t, nil, 9_900)
 	ack := h.Handle(context.Background(), body)
@@ -202,7 +203,7 @@ func TestWriteMessageHandler_BadHMAC(t *testing.T) {
 	reg := newStubRegistry()
 	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{}
-	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
+	h := mustNewWriteHandler(t, routerFor(chain, reg), defaultWriteReplayWindow)
 
 	body := newWriteMessageBody(t, nil, 9_900)
 	body.HumanCaller.ServerToken = "deadbeef"
@@ -243,7 +244,7 @@ func TestWriteMessageHandler_UnknownChannel(t *testing.T) {
 	router := func(_ context.Context, _ channel.ID) (transit.HarnessChain, actorreg.Registry, transit.CallerStamper, bool) {
 		return nil, nil, nil, false
 	}
-	h := mustNewWriteHandler(t, router, 0)
+	h := mustNewWriteHandler(t, router, defaultWriteReplayWindow)
 
 	body := newWriteMessageBody(t, nil, 9_900)
 	ack := h.Handle(context.Background(), body)
@@ -261,7 +262,7 @@ func TestWriteMessageHandler_UnknownChannel(t *testing.T) {
 func TestWriteMessageHandler_UnknownActor(t *testing.T) {
 	reg := newStubRegistry() // no record for testWriteActor
 	chain := &stubChain{}
-	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
+	h := mustNewWriteHandler(t, routerFor(chain, reg), defaultWriteReplayWindow)
 
 	body := newWriteMessageBody(t, nil, 9_900)
 	ack := h.Handle(context.Background(), body)
@@ -277,7 +278,7 @@ func TestWriteMessageHandler_DeregisteredActor(t *testing.T) {
 	reg := newStubRegistry()
 	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman, DeregisteredAt: 1})
 	chain := &stubChain{}
-	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
+	h := mustNewWriteHandler(t, routerFor(chain, reg), defaultWriteReplayWindow)
 
 	body := newWriteMessageBody(t, nil, 9_900)
 	ack := h.Handle(context.Background(), body)
@@ -296,7 +297,7 @@ func TestWriteMessageHandler_HarnessReject(t *testing.T) {
 		RejectReason: "harness_kind_not_allowed_for_type",
 		RejectDetail: "demo reject",
 	}}
-	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
+	h := mustNewWriteHandler(t, routerFor(chain, reg), defaultWriteReplayWindow)
 
 	body := newWriteMessageBody(t, nil, 9_900)
 	ack := h.Handle(context.Background(), body)
@@ -315,7 +316,7 @@ func TestWriteMessageHandler_HarnessError(t *testing.T) {
 	reg := newStubRegistry()
 	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{err: errors.New("store down")}
-	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
+	h := mustNewWriteHandler(t, routerFor(chain, reg), defaultWriteReplayWindow)
 
 	body := newWriteMessageBody(t, nil, 9_900)
 	ack := h.Handle(context.Background(), body)
@@ -339,7 +340,7 @@ func TestDispatcher_WriteMessageRoundTrip(t *testing.T) {
 	reg := newStubRegistry()
 	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 7}}
-	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
+	h := mustNewWriteHandler(t, routerFor(chain, reg), defaultWriteReplayWindow)
 
 	bus := transit.NewMockBus(64)
 	defer func() { _ = bus.Close() }()
@@ -453,7 +454,7 @@ func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
 	reg := newStubRegistry()
 	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 1}}
-	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
+	h := mustNewWriteHandler(t, routerFor(chain, reg), defaultWriteReplayWindow)
 
 	bus := transit.NewMockBus(64)
 	defer func() { _ = bus.Close() }()
@@ -723,22 +724,46 @@ func TestWriteMessageHandler_NonceReplay(t *testing.T) {
 	}
 }
 
-// TestWriteMessageHandler_NonceCacheDisabledByDefault confirms that
-// when ReplayWindow=0 the nonce cache is NOT engaged — duplicate
-// frames pass through (the M1.5 default daemon configuration).
-func TestWriteMessageHandler_NonceCacheDisabledByDefault(t *testing.T) {
+func TestWriteMessageHandler_RejectsDisabledReplayWindowByDefault(t *testing.T) {
+	t.Parallel()
+	reg := newStubRegistry()
+	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 1}}
+	_, err := transit.NewWriteMessageHandler(transit.WriteMessageHandlerConfig{
+		Secret:       []byte(testWriteSecret),
+		Router:       routerFor(chain, reg),
+		NowMs:        func() int64 { return 10_000 },
+		ReplayWindow: 0,
+	})
+	if err == nil {
+		t.Fatal("ReplayWindow=0 without opt-out should fail")
+	}
+}
+
+// TestWriteMessageHandler_ReplayWindowOptOutDisablesNonceCache confirms
+// the test/dev escape hatch is explicit: only AllowReplayWindowDisabled
+// permits ReplayWindow=0, and that path disables nonce replay tracking.
+func TestWriteMessageHandler_ReplayWindowOptOutDisablesNonceCache(t *testing.T) {
 	t.Parallel()
 	reg := newStubRegistry()
 	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 1}}
-	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
+	h, err := transit.NewWriteMessageHandler(transit.WriteMessageHandlerConfig{
+		Secret:                    []byte(testWriteSecret),
+		Router:                    routerFor(chain, reg),
+		NowMs:                     func() int64 { return 10_000 },
+		ReplayWindow:              0,
+		AllowReplayWindowDisabled: true,
+	})
+	if err != nil {
+		t.Fatalf("NewWriteMessageHandler with opt-out: %v", err)
+	}
 
 	body := newWriteMessageBody(t, nil, 9_900)
 	if ack := h.Handle(context.Background(), body); !ack.Accepted {
 		t.Fatalf("first: %+v", ack)
 	}
 	if ack := h.Handle(context.Background(), body); !ack.Accepted {
-		t.Fatalf("replay accepted when window=0: %+v", ack)
+		t.Fatalf("replay should be accepted when opt-out disables cache: %+v", ack)
 	}
 }
 
@@ -752,7 +777,7 @@ func TestWriteMessageHandler_EmptyEnvelopeID(t *testing.T) {
 	reg := newStubRegistry()
 	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman, DisplayName: "Alice"})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 1}}
-	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
+	h := mustNewWriteHandler(t, routerFor(chain, reg), defaultWriteReplayWindow)
 
 	body := newWriteMessageBody(t, nil, 9_900)
 	body.EnvelopePartial.ID = "" // wipe caller-supplied id
@@ -779,7 +804,7 @@ func TestWriteMessageHandler_PreservesCallerID(t *testing.T) {
 	reg := newStubRegistry()
 	reg.put(actorreg.Record{ID: testWriteActor, Kind: actor.KindHuman, DisplayName: "Alice"})
 	chain := &stubChain{result: transit.HarnessWriteResult{Seq: 7}}
-	h := mustNewWriteHandler(t, routerFor(chain, reg), 0)
+	h := mustNewWriteHandler(t, routerFor(chain, reg), defaultWriteReplayWindow)
 
 	const callerID = "msg-caller-supplied-abc123"
 	body := newWriteMessageBody(t, nil, 9_900)

@@ -70,16 +70,6 @@ const (
 	daemonWSKeyPrefix      = "key."
 )
 
-// upgrader is shared between daemonbus WS upgrades. Demo-period
-// allows any origin (gateway is single-host) — production should
-// tighten this. The `Subprotocols` list selects the real
-// `coagent.daemon.v1` protocol when offered; the `daemon.*` / `key.*`
-// slots are consumed server-side and deliberately not advertised here.
-var upgrader = websocket.Upgrader{
-	CheckOrigin:  func(r *http.Request) bool { return true },
-	Subprotocols: []string{DaemonWSSubprotocol},
-}
-
 // HandlersProvider is what the gateway implements to give daemonbus
 // the runtime hooks (push / ack / heartbeat / reclaim handlers).
 //
@@ -128,6 +118,10 @@ func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 			return
 		}
 
+		upgrader := websocket.Upgrader{
+			CheckOrigin:  s.checkOrigin,
+			Subprotocols: []string{DaemonWSSubprotocol},
+		}
 		ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
 			return
@@ -204,6 +198,27 @@ func parseDaemonWSSubprotocols(headers []string) (daemonID, key string, hasRealP
 		}
 	}
 	return daemonID, key, hasRealProto
+}
+
+func normalizeAllowedOrigins(origins []string) map[string]struct{} {
+	allowed := make(map[string]struct{}, len(origins))
+	for _, origin := range origins {
+		origin = strings.TrimSpace(origin)
+		if origin == "" {
+			continue
+		}
+		allowed[origin] = struct{}{}
+	}
+	return allowed
+}
+
+func (s *Service) checkOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	_, ok := s.allowedOrigins[origin]
+	return ok
 }
 
 // connectionAcceptedPayload mirrors the control.connection_accepted

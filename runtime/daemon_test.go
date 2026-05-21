@@ -181,6 +181,7 @@ func TestDaemon_Phase3_DispatchesWriteMessage(t *testing.T) {
 		UseMockBus:        true,
 		NowFn:             now,
 		HumanCallerSecret: []byte(secret),
+		ReplayWindow:      time.Minute,
 		SchedulerPeriod:   50 * time.Millisecond,
 	}
 	d, err := runtime.AssembleDaemon(ctx, cfg)
@@ -1026,6 +1027,7 @@ func TestDaemon_Phase3_ChannelAgent_Registered(t *testing.T) {
 		UseMockBus:        true,
 		NowFn:             now,
 		HumanCallerSecret: []byte(secret),
+		ReplayWindow:      time.Minute,
 		SchedulerPeriod:   50 * time.Millisecond,
 		HeartbeatPeriod:   time.Second,
 	}
@@ -1230,6 +1232,7 @@ func TestDaemon_Phase3_WorkerReply(t *testing.T) {
 		UseMockBus:        true,
 		NowFn:             now,
 		HumanCallerSecret: []byte(secret),
+		ReplayWindow:      time.Minute,
 		SchedulerPeriod:   50 * time.Millisecond,
 		HeartbeatPeriod:   time.Second,
 		WorkerSpawner:     spawner,

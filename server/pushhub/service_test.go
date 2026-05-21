@@ -42,7 +42,7 @@ func upgradeAndRun(t *testing.T, hub *Service, userID string) (*httptest.Server,
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.GET("/ws", func(c *gin.Context) {
-		up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		up := hub.upgrader()
 		ws, err := up.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
 			return
@@ -55,6 +55,77 @@ func upgradeAndRun(t *testing.T, hub *Service, userID string) (*httptest.Server,
 	srv := httptest.NewServer(r)
 	t.Cleanup(func() { srv.Close() })
 	return srv, "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+}
+
+func originPolicyServer(t *testing.T, hub *Service) string {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/ws", func(c *gin.Context) {
+		up := hub.upgrader()
+		ws, err := up.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			return
+		}
+		_ = ws.Close()
+	})
+	srv := httptest.NewServer(r)
+	t.Cleanup(func() { srv.Close() })
+	return "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+}
+
+func TestPushhubOriginPolicy(t *testing.T) {
+	t.Parallel()
+
+	const allowedOrigin = "https://ui.example"
+
+	t.Run("browser origin denied without allowlist", func(t *testing.T) {
+		t.Parallel()
+		wsURL := originPolicyServer(t, NewService())
+		header := http.Header{}
+		header.Set("Origin", allowedOrigin)
+		ws, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+		if err == nil {
+			_ = ws.Close()
+			t.Fatal("dial with browser Origin and no allowlist succeeded")
+		}
+		if resp == nil {
+			t.Fatalf("dial response nil: %v", err)
+		}
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status=%d want 403", resp.StatusCode)
+		}
+	})
+
+	t.Run("browser origin allowed by exact allowlist", func(t *testing.T) {
+		t.Parallel()
+		wsURL := originPolicyServer(t, NewService(Config{AllowedOrigins: []string{allowedOrigin}}))
+		header := http.Header{}
+		header.Set("Origin", allowedOrigin)
+		ws, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+		if err != nil {
+			status := 0
+			if resp != nil {
+				status = resp.StatusCode
+			}
+			t.Fatalf("dial with allowlisted Origin failed: status=%d err=%v", status, err)
+		}
+		_ = ws.Close()
+	})
+
+	t.Run("missing origin allowed for non-browser client", func(t *testing.T) {
+		t.Parallel()
+		wsURL := originPolicyServer(t, NewService())
+		ws, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			status := 0
+			if resp != nil {
+				status = resp.StatusCode
+			}
+			t.Fatalf("dial without Origin failed: status=%d err=%v", status, err)
+		}
+		_ = ws.Close()
+	})
 }
 
 // TestPushhub_IdleSubscriberReaped is the regression test for the

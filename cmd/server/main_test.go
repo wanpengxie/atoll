@@ -205,6 +205,42 @@ func TestServer_FailFastOnEmptySecrets(t *testing.T) {
 	}
 }
 
+func TestServer_FailFastOnMissingOriginAllowlists(t *testing.T) {
+	t.Parallel()
+	bin := buildServer(t)
+	addr := pickFreePort(t)
+	dbPath := filepath.Join(t.TempDir(), "server.db")
+
+	cmd := exec.Command(bin,
+		"-addr", addr,
+		"-db", dbPath,
+	)
+	cmd.Env = []string{
+		"PATH=" + envOrTest("PATH"),
+		"HOME=" + envOrTest("HOME"),
+		"COAGENT_GIN_MODE=test",
+		"COAGENT_SESSION_SECRET=session-secret",
+		"COAGENT_DAEMON_SECRET=daemon-secret",
+		"COAGENT_DEVICE_SECRET=device-secret",
+		"COAGENT_HUMAN_SECRET=human-secret",
+	}
+
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("server exited 0 with missing origin allowlists; want fail-fast\nstdout/err=%s", string(out))
+	}
+	ee, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("server Wait error not *ExitError: %v\nstdout/err=%s", err, string(out))
+	}
+	if code := ee.ExitCode(); code != 1 {
+		t.Errorf("exit code = %d want 1\nstdout/err=%s", code, string(out))
+	}
+	if combined := string(out); !strings.Contains(combined, "AllowedOrigins") {
+		t.Errorf("stderr did not surface origin allowlist field\nstdout/err=%s", combined)
+	}
+}
+
 // envOrTest is a tiny helper so the fail-fast test can build a clean
 // child env without losing PATH/HOME. Standalone (not the cmd/server
 // runtime's envOr) so the test stays independent of main.go internals.

@@ -153,10 +153,15 @@ type WriteMessageHandlerConfig struct {
 	NowMs func() int64
 
 	// ReplayWindow rejects HumanCaller frames whose `ts` differs from
-	// `NowMs()` by more than the window. Zero disables the check (FIX-
-	// T8 hardening lifts this). The window is symmetric (past AND
-	// future) so the daemon also drops far-future timestamps.
+	// `NowMs()` by more than the window. Must be >0 unless
+	// AllowReplayWindowDisabled is explicitly set for a test/dev path.
+	// The window is symmetric (past AND future) so the daemon also drops
+	// far-future timestamps.
 	ReplayWindow time.Duration
+
+	// AllowReplayWindowDisabled is a test/dev-only escape hatch. Production
+	// callers must leave this false so ReplayWindow<=0 fails fast.
+	AllowReplayWindowDisabled bool
 }
 
 // WriteMessageHandler is the daemon-side implementation of
@@ -168,7 +173,7 @@ type WriteMessageHandler struct {
 	cfg WriteMessageHandlerConfig
 
 	// nonceCache is the FIX-T8 per-channel replay guard. It is non-nil
-	// only when ReplayWindow > 0; entries expire after one window
+	// only when replay protection is enabled; entries expire after one window
 	// (older nonces would already be cut by the ts check).
 	nonceCache *nonceCache
 }
@@ -183,6 +188,12 @@ func NewWriteMessageHandler(cfg WriteMessageHandlerConfig) (*WriteMessageHandler
 	}
 	if cfg.NowMs == nil {
 		cfg.NowMs = func() int64 { return time.Now().UnixMilli() }
+	}
+	if cfg.ReplayWindow <= 0 {
+		if !cfg.AllowReplayWindowDisabled {
+			return nil, errors.New("transit: WriteMessageHandlerConfig.ReplayWindow must be > 0")
+		}
+		cfg.ReplayWindow = 0
 	}
 	h := &WriteMessageHandler{cfg: cfg}
 	if cfg.ReplayWindow > 0 {

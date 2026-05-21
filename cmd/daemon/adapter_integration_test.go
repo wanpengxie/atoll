@@ -50,6 +50,7 @@ func startIntegrationDaemon(t *testing.T, ctx context.Context, opts integDaemonO
 		UseMockBus:        true,
 		NowFn:             nowMs,
 		HumanCallerSecret: []byte(integSecret),
+		ReplayWindow:      time.Minute,
 		SchedulerPeriod:   period,
 		// M1.6-T5 phase-2 — wire the xhs-creator template so the
 		// bootstrap saga seeds tool:xhs-adapter into actor_registry
