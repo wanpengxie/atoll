@@ -120,7 +120,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 		return ErrStaleEpoch
 	}
 
-	switch frame.FrameType {
+	switch frame.FrameKind {
 	case daemonbus.FrameTypeViewsyncAck:
 		if d.handlers.OnViewsyncAck == nil {
 			return nil
@@ -279,7 +279,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 			daemonbus.FrameTypeControlUnbindDeviceSessionAck, ack)
 	}
 
-	if daemonbus.CategoryOf(frame.FrameType) == daemonbus.CategoryDeviceTransit {
+	if daemonbus.CategoryOf(frame.FrameKind) == daemonbus.CategoryDeviceTransit {
 		if d.handlers.OnDeviceTransit != nil {
 			return d.handlers.OnDeviceTransit(ctx, frame)
 		}

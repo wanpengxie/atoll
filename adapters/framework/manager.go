@@ -236,10 +236,28 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 	// Build type rows, but do not publish them until mod.Init succeeds.
 	// Otherwise an Init failure leaves a callable type_registry row with
 	// no live module behind it.
+	//
+	// TypeSchemas opt-in policy (R5-18):
+	//   - decl.TypeSchemas == nil  → adapter has NOT opted into strict
+	//     mode; every Types entry gets permissive defaults
+	//     (AllowedKinds = {event, request, response}, no payload
+	//     schema). install logs a warning so the gap is observable.
+	//   - decl.TypeSchemas != nil  → adapter has opted in; EVERY Types
+	//     entry MUST have a matching schema row. Missing rows fail-
+	//     closed with InstallTypeRegistryInvalid — no silent fall-back
+	//     to permissive defaults. This prevents the failure mode where
+	//     a partially-declared TypeSchemas map silently accepts
+	//     spec-disallowed kinds on the un-declared types (R5-18 motiv-
+	//     ation: spec is authoritative, adapter declares closed sets).
+	strictTypeSchemas := decl.TypeSchemas != nil
 	typeRows := make([]TypeRow, 0, len(decl.Types)+1)
 	for _, t := range decl.Types {
 		schema, hasSchema := decl.TypeSchemas[t]
 		if !hasSchema {
+			if strictTypeSchemas {
+				return fmt.Errorf("%w: adapter=%s type=%s: TypeSchemas declared but row missing — strict mode rejects permissive-default fallback (R5-18)",
+					asInstallError(message.InstallTypeRegistryInvalid), decl.Name, t)
+			}
 			schema = adapter.TypeSchema{
 				AllowedKinds: []message.Kind{
 					message.KindEvent,
@@ -638,8 +656,9 @@ func (m *Manager) InstalledAdapters() []string {
 // whose Declaration.Binding equals the supplied binding. Composition
 // roots use this to discover which adapters need binding-specific wiring
 // — notably the runtime_inbound_via_relay binding's inbound callback hook (the
-// daemon's per-channel SetDeviceCallback dispatches device_transit.recv
-// frames to the Manager.OnExternalCallback of these adapters).
+// daemon's per-channel SetDeviceCallback dispatches `device_transit.send`
+// frames — impl-layer2 §5.3.1 inbound — to the Manager.OnExternalCallback
+// of these adapters).
 //
 // Returns an empty slice (not nil) when no adapter matches so callers
 // can range over it without a nil check.

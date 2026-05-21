@@ -862,3 +862,106 @@ func TestManagerHandlePanicEmitsReceiverInternalError(t *testing.T) {
 		t.Fatalf("payload.reason=%v want %s", payload["reason"], message.TerminalReceiverInternalError)
 	}
 }
+
+// TestManagerInstallRejectsStrictModeGap (R5-18) — when an adapter
+// declares TypeSchemas (opting into strict mode) but a Types entry is
+// missing from the map, install MUST fail-closed with
+// InstallTypeRegistryInvalid rather than silently fall back to the
+// permissive default ({event, request, response}).
+//
+// Rationale: a partially-declared TypeSchemas map is a drift signal —
+// the adapter wanted strict per-payload schemas but forgot a row. The
+// missing row would default to "all three kinds allowed" which can
+// admit spec-disallowed kinds (e.g. kind=event on xhs.publish).
+func TestManagerInstallRejectsStrictModeGap(t *testing.T) {
+	registry := newMemoryActorRegistry()
+	_ = registry.Insert(context.Background(), actorreg.Record{
+		ID:      "tool:feishu",
+		Kind:    actor.KindTool,
+		Binding: actor.BindingRuntimeOutbound,
+	})
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu",
+			Types:        []string{"feishu.chat.send", "feishu.chat.create"},
+			Binding:      actor.BindingRuntimeOutbound,
+			MaxPendingMs: 30_000,
+			// Strict mode opt-in: TypeSchemas non-nil, but missing the
+			// "feishu.chat.create" row.
+			TypeSchemas: map[string]adapter.TypeSchema{
+				"feishu.chat.send": {
+					AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
+					FallbackResponseSchema: json.RawMessage(
+						`{"type":"object","required":["status","reason"]}`),
+				},
+			},
+		},
+	}
+	mgr, err := NewManager(ManagerConfig{
+		ChannelID:     "channel:test",
+		ActorRegistry: registry,
+		HarnessChain:  newFakeChain(),
+		RequestLookup: NewMemoryRequestLookup(nil),
+		Clock:         time.Now,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	err = mgr.Install(context.Background(), []adapter.Module{mod})
+	if err == nil {
+		t.Fatal("expected install to fail-closed on strict-mode gap")
+	}
+	var ie *InstallError
+	if !errors.As(err, &ie) {
+		t.Fatalf("expected *InstallError, got %T: %v", err, err)
+	}
+	if ie.Reason != message.InstallTypeRegistryInvalid {
+		t.Errorf("reason=%s want %s", ie.Reason, message.InstallTypeRegistryInvalid)
+	}
+}
+
+// TestManagerInstallStrictModeAcceptsCompleteSchemas — the positive
+// case: adapter declares TypeSchemas with every Types entry covered →
+// install succeeds.
+func TestManagerInstallStrictModeAcceptsCompleteSchemas(t *testing.T) {
+	registry := newMemoryActorRegistry()
+	_ = registry.Insert(context.Background(), actorreg.Record{
+		ID:      "tool:feishu",
+		Kind:    actor.KindTool,
+		Binding: actor.BindingRuntimeOutbound,
+	})
+	fallback := json.RawMessage(`{"type":"object","required":["status","reason"]}`)
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu",
+			Types:        []string{"feishu.chat.send", "feishu.chat.create"},
+			Binding:      actor.BindingRuntimeOutbound,
+			MaxPendingMs: 30_000,
+			TypeSchemas: map[string]adapter.TypeSchema{
+				"feishu.chat.send": {
+					AllowedKinds:           []message.Kind{message.KindRequest, message.KindResponse},
+					FallbackResponseSchema: fallback,
+				},
+				"feishu.chat.create": {
+					AllowedKinds:           []message.Kind{message.KindRequest, message.KindResponse},
+					FallbackResponseSchema: fallback,
+				},
+			},
+		},
+	}
+	mgr, err := NewManager(ManagerConfig{
+		ChannelID:     "channel:test",
+		ActorRegistry: registry,
+		HarnessChain:  newFakeChain(),
+		RequestLookup: NewMemoryRequestLookup(nil),
+		Clock:         time.Now,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := mgr.Install(context.Background(), []adapter.Module{mod}); err != nil {
+		t.Fatalf("Install (complete schemas): %v", err)
+	}
+}

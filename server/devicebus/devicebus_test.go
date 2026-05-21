@@ -184,8 +184,9 @@ func TestHandleWSRejectsPendingBeforeUpgrade(t *testing.T) {
 	srv := httptest.NewServer(r)
 	defer srv.Close()
 
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/devicebus?session_id=" + res.Session.ID + "&token=" + res.Token
-	ws, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/devicebus?session_id=" + res.Session.ID
+	dialer := deviceWSDialer(res.Token)
+	ws, resp, err := dialer.Dial(wsURL, nil)
 	if err == nil {
 		_ = ws.Close()
 		t.Fatal("pending session upgraded successfully")
@@ -227,10 +228,11 @@ func TestHandleWSRejectsNonAllowlistedOrigin(t *testing.T) {
 	srv := httptest.NewServer(r)
 	defer srv.Close()
 
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/devicebus?session_id=" + res.Session.ID + "&token=" + res.Token
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/devicebus?session_id=" + res.Session.ID
 	header := http.Header{}
 	header.Set("Origin", "https://evil.example")
-	ws, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+	dialer := deviceWSDialer(res.Token)
+	ws, resp, err := dialer.Dial(wsURL, header)
 	if err == nil {
 		_ = ws.Close()
 		t.Fatal("dial with non-allowlisted Origin succeeded")
@@ -284,6 +286,19 @@ type noopForwarder struct{}
 
 func (noopForwarder) ForwardDeviceFrame(context.Context, devicebus.DeviceFrame) error { return nil }
 
+// deviceWSDialer returns a gorilla dialer that offers the v4 device
+// subprotocol slots (real proto + token slot) on the handshake. Per
+// impl-layer3 §6.5.1 (R5-14) the token rides in Sec-WebSocket-Protocol,
+// not the URL query.
+func deviceWSDialer(token string) *websocket.Dialer {
+	d := *websocket.DefaultDialer
+	d.Subprotocols = []string{
+		"coagent.device.v1",
+		"token." + token,
+	}
+	return &d
+}
+
 // TestHandleWS_IdleDeviceTrippedByReadDeadline mirrors the daemonbus
 // keepalive regression test: a device WS that connects then ignores
 // server pings (no pong replies, no business reads) must be reaped
@@ -323,8 +338,9 @@ func TestHandleWS_IdleDeviceTrippedByReadDeadline(t *testing.T) {
 	srv := httptest.NewServer(r)
 	defer srv.Close()
 
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/devicebus?session_id=" + res.Session.ID + "&token=" + res.Token
-	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/devicebus?session_id=" + res.Session.ID
+	dialer := deviceWSDialer(res.Token)
+	ws, _, err := dialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

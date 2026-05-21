@@ -13,15 +13,15 @@ import (
 // kernel/devicetransit.DeviceTransit — the runtime_inbound_via_relay binding's
 // transport.
 //
-// Per T1.3:
+// Direction map (impl-layer2 §5.3):
 //
-//	adapter -> manager wraps envelope into SendFrame
-//	-> DeviceTransit.Send wraps it into a daemonbus device_transit.send
-//	   frame and writes to the daemonbus Client.
-//
-// Incoming device_transit.recv frames (server -> daemon) are routed by
-// the daemon's frame dispatcher to OnRecv, which fans out to the
-// adapter Manager via the OnRecvFn callback (wired in cmd/daemon).
+//   - DeviceTransit.Send packages an adapter→device payload into a
+//     daemonbus `device_transit.recv` frame (daemon → server →
+//     device, §5.3.2 outbound).
+//   - Inbound `device_transit.send` frames (device → server →
+//     daemon, §5.3.1 inbound) are routed by the daemon's frame
+//     dispatcher to OnRecv, which fans out to the adapter Manager
+//     via the OnRecvFn callback (wired in cmd/daemon).
 type DeviceTransit struct {
 	client    *Client
 	frameID   FrameIDGen
@@ -56,20 +56,21 @@ func NewDeviceTransit(cfg DeviceTransitConfig) (*DeviceTransit, error) {
 	}, nil
 }
 
-// Send implements devicetransit.DeviceTransit — packages a SendFrame into a
-// device_transit.send daemonbus frame. The returned frame_id is the one
-// the underlying daemonbus frame carries (also what ack/error frames
-// reference).
+// Send implements devicetransit.DeviceTransit — packages an
+// adapter→device SendFrame into a `device_transit.recv` daemonbus
+// frame (impl-layer2 §5.3.2 outbound: daemon → server → device). The
+// returned frame_id is the one the underlying daemonbus frame carries
+// (also what ack/error frames reference).
 func (d *DeviceTransit) Send(ctx context.Context, frame devicetransit.SendFrame) (devicetransit.FrameID, error) {
 	fid := d.frameID()
-	if err := d.client.Send(ctx, fid, daemonbus.FrameTypeDeviceTransitSend, frame); err != nil {
+	if err := d.client.Send(ctx, fid, daemonbus.FrameTypeDeviceTransitRecv, frame); err != nil {
 		return "", err
 	}
 	return devicetransit.FrameID(fid), nil
 }
 
 // Ack implements devicetransit.DeviceTransit (daemon-side outgoing ack, e.g.
-// daemon ACKs a device_transit.recv it processed successfully).
+// daemon ACKs a device_transit.send it processed successfully).
 func (d *DeviceTransit) Ack(ctx context.Context, frame devicetransit.AckFrame) error {
 	return d.client.Send(ctx, d.frameID(), daemonbus.FrameTypeDeviceTransitAck, frame)
 }
@@ -80,16 +81,18 @@ func (d *DeviceTransit) Error(ctx context.Context, frame devicetransit.ErrorFram
 }
 
 // DispatchIncoming routes a device_transit.* frame to the configured
-// callbacks. Called by the daemon's main frame loop.
+// callbacks. Called by the daemon's main frame loop. Per impl-layer2
+// §5.3.1, only `device_transit.send` arrives at the daemon (device →
+// adapter inbound direction); ack / error frames remain bidirectional.
 func (d *DeviceTransit) DispatchIncoming(ctx context.Context, frame daemonbus.Frame) error {
-	switch frame.FrameType {
-	case daemonbus.FrameTypeDeviceTransitSend, daemonbus.FrameTypeDeviceTransitRecv:
+	switch frame.FrameKind {
+	case daemonbus.FrameTypeDeviceTransitSend:
 		if d.onRecvFn == nil {
 			return nil
 		}
 		var payload devicetransit.SendFrame
 		if err := DecodePayload(frame, &payload); err != nil {
-			return fmt.Errorf("transit: decode device_transit.recv: %w", err)
+			return fmt.Errorf("transit: decode device_transit.send: %w", err)
 		}
 		return d.onRecvFn(ctx, payload)
 	case daemonbus.FrameTypeDeviceTransitAck:
@@ -111,5 +114,5 @@ func (d *DeviceTransit) DispatchIncoming(ctx context.Context, frame daemonbus.Fr
 		}
 		return d.onErrorFn(ctx, payload)
 	}
-	return fmt.Errorf("transit: DeviceTransit got non-device frame: %s", frame.FrameType)
+	return fmt.Errorf("transit: DeviceTransit got non-device frame: %s", frame.FrameKind)
 }

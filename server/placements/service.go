@@ -90,12 +90,17 @@ func (s *Service) WithStartedAt(t time.Time) *Service {
 // Store exposes the SQLStore (composition root + tests use this).
 func (s *Service) Store() *SQLStore { return s.store }
 
-// Reserve performs L2 §1.4.11.3 step 1 — generate a new
-// (owner_epoch, fencing_token, create_request_id) triple and INSERT
-// the row in 'creating'. Callers pick the daemonID upstream.
+// Reserve performs proto-foundation §3.3.3 Phase 1 + impl-layer2 §3.2.1
+// — INSERT a placement row in 'creating' with owner_epoch=0 and an
+// empty fencing_token. The fencing trust root is the daemon: the
+// daemon-side bootstrap saga (Phase 2) generates fencing_token + sets
+// owner_epoch=1 and returns them in the ack; the server writes those
+// values back via the Phase 3 CAS (Activate).
 //
 // Returns the (Placement, CreateChannelRequest) pair so the gateway
 // can immediately ship the control.create_channel frame to daemon.
+// Note the CreateChannelRequest deliberately does NOT carry
+// fencing_token / owner_epoch — those are daemon outputs, not inputs.
 //
 // This is the M1.5 demo-friendly entry point — the federation /
 // tenancy reservation columns introduced by m1.5-tickets §T10 are
@@ -127,18 +132,15 @@ func (s *Service) ReserveWith(
 	opts ReserveOptions,
 ) (placement.Placement, placement.CreateChannelRequest, error) {
 	now := s.now().UnixMilli()
-	epoch := placement.OwnerEpoch(now)
-	token, err := placement.NewFencingToken()
-	if err != nil {
-		return placement.Placement{}, placement.CreateChannelRequest{}, fmt.Errorf("placements: fencing token: %w", err)
-	}
 
+	// proto-foundation §3.3.3 Phase 1: state='creating', owner_epoch=0,
+	// fencing_token empty until daemon-side Phase 2 generates them.
 	p := placement.Placement{
 		ChannelID:             channelID,
 		DaemonID:              daemonID,
 		State:                 placement.StateCreating,
-		OwnerEpoch:            epoch,
-		FencingToken:          token,
+		OwnerEpoch:            0,
+		FencingToken:          "",
 		CreateRequestID:       placement.CreateRequestID(uuid.NewString()),
 		DaemonConnectionEpoch: connectionEpoch,
 		CreatedAt:             now,
@@ -155,12 +157,9 @@ func (s *Service) ReserveWith(
 	}
 
 	req := placement.CreateChannelRequest{
-		ChannelID:                     out.ChannelID,
-		CreateRequestID:               out.CreateRequestID,
-		OwnerEpoch:                    out.OwnerEpoch,
-		FencingToken:                  out.FencingToken,
-		DaemonConnectionEpochExpected: out.DaemonConnectionEpoch,
-		InitialMembers:                initialMembers,
+		ChannelID:       out.ChannelID,
+		CreateRequestID: out.CreateRequestID,
+		InitialMembers:  initialMembers,
 		// L4 channel-template key (catalog.Channel.Type) — daemon side
 		// resolves the template from this value during bootstrap saga
 		// (M1.6-T5 phase-2).

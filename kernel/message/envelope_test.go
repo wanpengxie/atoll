@@ -124,8 +124,8 @@ func TestAllEnumSets(t *testing.T) {
 	if got := len(actor.AllKinds); got != 4 {
 		t.Errorf("actor.AllKinds len = %d, want 4", got)
 	}
-	if got := len(AllVisibilities); got != 2 {
-		t.Errorf("AllVisibilities len = %d, want 2 (round-3 cluster F closed set)", got)
+	if got := len(AllVisibilities); got != 3 {
+		t.Errorf("AllVisibilities len = %d, want 3 (proto-layer0 §2.4 closed set: public/private/system)", got)
 	}
 	if got := len(HashInputFields); got != 14 {
 		t.Errorf("HashInputFields len = %d, want 14", got)

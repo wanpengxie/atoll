@@ -142,28 +142,59 @@ type FrameID string
 func (f FrameID) String() string { return string(f) }
 
 // Frame is the daemonbus mux wrapper carried over the WS connection
-// (L2 §9.2). Every frame — viewsync.*, control.*, device_transit.* —
-// rides inside this envelope.
+// (impl-layer2 §1.3). Every frame — viewsync.*, control.*,
+// device_transit.* — rides inside this outer envelope.
+//
+// Spec-canonical outer envelope field set (impl-layer2 §1.3):
+//   frame_kind            string     required — closed set (§1.2)
+//   frame_id              string     required — uniqueness within connection
+//   correlation_frame_id  string|null optional — pairs response back to its
+//                                     request frame's frame_id
+//   channel_id            string|null optional — channel-scope frames
+//                                     populate it; connection-level frames
+//                                     (e.g. heartbeat) leave it empty
+//   ts                    int64      required — sender emit time (ms epoch)
+//   payload               object     required — family-specific schema
+//
+// DaemonID / DaemonConnectionEpoch are NOT in impl-layer2 §1.3 outer
+// envelope. They survive in this Go struct because daemon identifies +
+// connection-epoch fencing are useful at framing time; whether they
+// should be promoted into spec is open.
+//
+// TODO(R5-20-spec-followup): daemon_id / daemon_connection_epoch are
+// not declared in impl-layer2 §1.3 outer envelope schema. PM to decide
+// whether to (a) inscribe them into spec, or (b) demote them into
+// payload-level fields per family (e.g. control.heartbeat.payload
+// already carries daemon_id).
 //
 // The Payload is a json.RawMessage so callers can decode it into the
 // type-specific struct (kernel/viewsync.PushFrame, kernel/placement.
 // CreateChannelRequest, etc.) without forcing kernel/daemonbus to
 // import every payload package.
 type Frame struct {
+	FrameKind             FrameType          `json:"frame_kind"`
 	FrameID               FrameID            `json:"frame_id"`
-	FrameType             FrameType          `json:"frame_type"`
-	DaemonID              placement.DaemonID `json:"daemon_id"`
-	DaemonConnectionEpoch ConnectionEpoch    `json:"daemon_connection_epoch"`
-	SentAt                int64              `json:"sent_at"`
+	CorrelationFrameID    FrameID            `json:"correlation_frame_id,omitempty"`
+	ChannelID             string             `json:"channel_id,omitempty"`
+	Ts                    int64              `json:"ts"`
 	Payload               json.RawMessage    `json:"payload"`
+	DaemonID              placement.DaemonID `json:"daemon_id,omitempty"`
+	DaemonConnectionEpoch ConnectionEpoch    `json:"daemon_connection_epoch,omitempty"`
 }
 
-// HeaderFields lists the 5 daemonbus mux header field names (excluding
-// payload). Used by frame_test.go to assert the schema 1:1 with L2 §9.2.
+// HeaderFields lists the impl-layer2 §1.3 outer envelope field names
+// (excluding payload, in spec order). Used by frame_test.go to assert
+// the schema 1:1 with spec.
+//
+// daemon_id / daemon_connection_epoch are intentionally OMITTED here:
+// they are not in impl-layer2 §1.3 outer envelope schema (see
+// R5-20-spec-followup TODO on Frame above). They live on the Go struct
+// as omitempty extras for daemon identification + connection epoch
+// fencing; the spec-canonical field-set assertion stays clean.
 var HeaderFields = []string{
+	"frame_kind",
 	"frame_id",
-	"frame_type",
-	"daemon_id",
-	"daemon_connection_epoch",
-	"sent_at",
+	"correlation_frame_id",
+	"channel_id",
+	"ts",
 }

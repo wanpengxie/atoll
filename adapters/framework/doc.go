@@ -25,10 +25,12 @@
 //   - embedded        — Handle runs on the daemon goroutine; no transport.
 //   - runtime_outbound     — Handle uses HTTPClient to reach an external API;
 //     callbacks flow through Manager.OnExternalCallback.
-//   - runtime_inbound_via_relay — Handle calls DeviceTransit.Send to push a
-//     device_transit.send frame through the daemonbus; callbacks flow
-//     through Manager.OnExternalCallback after server.devicebus delivers a
-//     device_transit.recv frame.
+//   - runtime_inbound_via_relay — Handle calls DeviceTransit.Send to push an
+//     adapter→device payload through the daemonbus as a
+//     `device_transit.recv` frame (impl-layer2 §5.3.2 outbound);
+//     callbacks flow through Manager.OnExternalCallback after
+//     server.devicebus delivers a `device_transit.send` frame (§5.3.1
+//     inbound) carrying the device-originated payload.
 //
 // All public types are safe for concurrent use unless noted otherwise.
 package framework

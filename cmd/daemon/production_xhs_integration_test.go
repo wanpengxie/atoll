@@ -96,8 +96,12 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 		t.Fatalf("activate session: %v", err)
 	}
 
+	// R5-18: xhs.publish request schema (domain-xhs-spec §1.1) requires
+	// title + content; the device adapter now ships strict TypeSchemas
+	// so missing required fields trip harness Step 6 instead of
+	// silently passing through the permissive default.
 	ack, send := writeRequestAndWaitForDeviceSend(t, ctx, d, srv, channelID, "req-prod-xhs", "user:alice",
-		devicexhs.TypePublish, []byte(`{"title":"hello","device_session_id":"sess-prod-xhs"}`))
+		devicexhs.TypePublish, []byte(`{"title":"hello","content":"world","device_session_id":"sess-prod-xhs"}`))
 	if !ack.Accepted {
 		t.Fatalf("write_message rejected: reason=%s detail=%s", ack.RejectReason, ack.RejectDetail)
 	}
@@ -246,7 +250,7 @@ func writeRequestAndWaitForDeviceSend(
 	for !gotAck || !gotSend {
 		select {
 		case <-deadline:
-			t.Fatalf("timed out waiting for write ack=%v and device_transit.send=%v", gotAck, gotSend)
+			t.Fatalf("timed out waiting for write ack=%v and device_transit.recv=%v", gotAck, gotSend)
 		default:
 		}
 		recvCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -255,15 +259,17 @@ func writeRequestAndWaitForDeviceSend(
 		if err != nil {
 			t.Fatalf("RecvFromDaemon: %v", err)
 		}
-		switch frame.FrameType {
+		switch frame.FrameKind {
 		case daemonbus.FrameTypeControlWriteMessageAck:
 			if err := transit.DecodePayload(frame, &ack); err != nil {
 				t.Fatalf("decode write ack: %v", err)
 			}
 			gotAck = true
-		case daemonbus.FrameTypeDeviceTransitSend:
+		case daemonbus.FrameTypeDeviceTransitRecv:
+			// impl-layer2 §5.3.2 outbound (adapter → device): daemon
+			// adapter pushes `device_transit.recv` toward the server.
 			if err := transit.DecodePayload(frame, &send); err != nil {
-				t.Fatalf("decode device send: %v", err)
+				t.Fatalf("decode device recv: %v", err)
 			}
 			gotSend = true
 		}

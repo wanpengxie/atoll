@@ -541,16 +541,17 @@ func safeBuf(t *teeBuf) string {
 
 // Register + Login a fresh user. Returns the user_id. The cookie jar
 // holds the resulting session token automatically.
+//
+// Per impl-layer3 §4.3.2, /api/identity/register returns 202 with an
+// opaque body (no user fields) regardless of whether the email was new
+// or already registered — see R4-9 / R5-13. The real user_id therefore
+// comes from the subsequent /login call, not the register response.
 func (s *Stack) RegisterAndLogin(email, password string) string {
 	s.t.Helper()
-	type regResp struct {
-		ID string `json:"id"`
-	}
-	var rr regResp
 	s.do("POST", "/api/identity/register", map[string]any{
 		"email":    email,
 		"password": password,
-	}, http.StatusCreated, &rr)
+	}, http.StatusAccepted, nil)
 	// Login sets the cookie.
 	var loginResp struct {
 		User struct {
@@ -1025,6 +1026,7 @@ type StoredMessage struct {
 	Kind       string
 	SenderKind string
 	SenderID   string
+	Visibility string
 	Payload    json.RawMessage
 }
 
@@ -1050,7 +1052,7 @@ func (s *Stack) ListChannelMessages(channelID string) []StoredMessage {
 	db := s.OpenChannelDB(channelID)
 	defer func() { _ = db.Close() }()
 	rows, err := db.QueryContext(s.ctx, `
-		SELECT seq, id, type, kind, sender_kind, sender_id, payload
+		SELECT seq, id, type, kind, sender_kind, sender_id, visibility, payload
 		FROM messages ORDER BY seq ASC`)
 	if err != nil {
 		s.t.Fatalf("harness: list messages: %v", err)
@@ -1061,7 +1063,7 @@ func (s *Stack) ListChannelMessages(channelID string) []StoredMessage {
 		var m StoredMessage
 		var payload string
 		if err := rows.Scan(&m.Seq, &m.ID, &m.Type, &m.Kind,
-			&m.SenderKind, &m.SenderID, &payload); err != nil {
+			&m.SenderKind, &m.SenderID, &m.Visibility, &payload); err != nil {
 			s.t.Fatalf("harness: scan: %v", err)
 		}
 		m.Payload = json.RawMessage(payload)

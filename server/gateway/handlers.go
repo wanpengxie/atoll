@@ -102,10 +102,14 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			})
 			return err
 		},
-		OnDeviceTransitSend: func(ctx context.Context, conn *daemonbus.Connection, frame kerneldaemonbus.Frame) error {
+		OnDeviceTransitRecv: func(ctx context.Context, conn *daemonbus.Connection, frame kerneldaemonbus.Frame) error {
+			// device_transit.recv = daemon adapter → server → device
+			// (impl-layer2 §5.3.2). The daemon-side adapter pushes a
+			// recv frame whose payload should be relayed to the device
+			// WS keyed by SendFrame.DeviceSessionID.
 			var sf devicetransit.SendFrame
 			if err := json.Unmarshal(frame.Payload, &sf); err != nil {
-				return fmt.Errorf("gateway: decode device_transit.send: %w", err)
+				return fmt.Errorf("gateway: decode device_transit.recv: %w", err)
 			}
 			return a.devicebus.SendFrameToDevice(ctx, sf.DeviceSessionID.String(), sf)
 		},
@@ -199,13 +203,16 @@ func (a *App) Unbind(ctx context.Context, in devicebus.UnbindInput) error {
 
 // ForwardDeviceFrame implements devicebus.TransitForwarder by wrapping
 // the shared device_transit payload in the daemonbus mux envelope.
+//
+// Direction: device → server → daemon adapter. Per impl-layer2 §5.3.1,
+// this inbound direction rides on `device_transit.send`.
 func (a *App) ForwardDeviceFrame(ctx context.Context, frame devicebus.DeviceFrame) error {
 	conn, err := a.daemonbus.ConnectionForChannel(ctx, frame.ChannelID.String())
 	if err != nil {
 		return err
 	}
 	frame.Direction = devicetransit.DirectionFromDevice
-	_, err = conn.SendFrame(ctx, kerneldaemonbus.FrameTypeDeviceTransitRecv, frame)
+	_, err = conn.SendFrame(ctx, kerneldaemonbus.FrameTypeDeviceTransitSend, frame)
 	return err
 }
 
@@ -398,8 +405,30 @@ type writeMessageReq struct {
 }
 
 func (a *App) handleWriteMessage(c *gin.Context) {
+	// impl-layer3 §1.8.1 normative: write-message endpoint MUST
+	// fail-closed reject unknown top-level fields (HTTP 400 with the
+	// `harness_envelope_unknown_field` reason — the same reason the
+	// daemon harness Step 2 would surface if the daemon decoded a
+	// fattened envelope). The default gin ShouldBindJSON silently
+	// accepts unknown fields, so we decode manually with
+	// DisallowUnknownFields and then run binding's required-field
+	// validation explicitly.
 	var req writeMessageReq
-	if err := c.ShouldBindJSON(&req); err != nil {
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		if isJSONUnknownFieldError(err) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":         string(message.HarnessEnvelopeUnknownField),
+				"reject_reason": string(message.HarnessEnvelopeUnknownField),
+				"reject_detail": err.Error(),
+			})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validateWriteMessageRequired(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -534,6 +563,36 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// isJSONUnknownFieldError reports whether err is the error
+// encoding/json's Decoder returns when DisallowUnknownFields fires.
+// The stdlib does not export a typed error, so we match the canonical
+// prefix string the decoder emits ("json: unknown field"). All other
+// JSON shape errors (missing field, type mismatch, syntax) fall through
+// to the generic 400 branch.
+func isJSONUnknownFieldError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.HasPrefix(err.Error(), "json: unknown field")
+}
+
+// validateWriteMessageRequired enforces the L3 §1.8.1 required-field
+// set without going through gin's validator. R5-16 swapped
+// ShouldBindJSON for a json.Decoder with DisallowUnknownFields, so the
+// `binding:"required"` struct tags no longer fire automatically.
+func validateWriteMessageRequired(req *writeMessageReq) error {
+	if req.ID == "" {
+		return fmt.Errorf("Key: 'writeMessageReq.ID' Error:Field validation for 'ID' failed on the 'required' tag")
+	}
+	if req.Type == "" {
+		return fmt.Errorf("Key: 'writeMessageReq.Type' Error:Field validation for 'Type' failed on the 'required' tag")
+	}
+	if len(req.Payload) == 0 {
+		return fmt.Errorf("Key: 'writeMessageReq.Payload' Error:Field validation for 'Payload' failed on the 'required' tag")
+	}
+	return nil
 }
 
 // signHumanCaller produces the HMAC token consumed by daemon when it

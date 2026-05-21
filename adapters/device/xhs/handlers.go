@@ -83,10 +83,11 @@ func buildCommand(env *message.Envelope) (cmd Command, sessionID devicetransit.D
 	return cmd, sessionID, deviceID, nil
 }
 
-// parseCallback decodes a device_transit.recv payload into a Callback
-// struct. The wire JSON is whatever the extension produced — the
-// framework de-dupes orphans before invoking OnExternalCallback so the
-// adapter can assume one canonical decode-and-act flow.
+// parseCallback decodes a `device_transit.send` payload (impl-layer2
+// §5.3.1 inbound — device → adapter) into a Callback struct. The wire
+// JSON is whatever the extension produced — the framework de-dupes
+// orphans before invoking OnExternalCallback so the adapter can assume
+// one canonical decode-and-act flow.
 func parseCallback(raw []byte) (Callback, error) {
 	var cb Callback
 	if len(raw) == 0 {

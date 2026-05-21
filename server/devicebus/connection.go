@@ -202,19 +202,46 @@ func (t *wsDeviceTransport) Close() error {
 
 // TransitForwarder is implemented by the gateway — it knows how to
 // reach the daemonbus connection for the channel + how to wrap a
-// DeviceFrame into a device_transit.recv daemonbus frame.
+// DeviceFrame into a `device_transit.send` daemonbus frame
+// (impl-layer2 §5.3.1 inbound — device → server → daemon adapter).
 type TransitForwarder interface {
 	ForwardDeviceFrame(ctx context.Context, frame DeviceFrame) error
 }
 
+// DeviceWSSubprotocol is the real WebSocket subprotocol negotiated on
+// the /devicebus handshake. Per impl-layer3 §6.5.1: the client offers
+// `coagent.device.v1, token.<token>`; the server selects (and echoes
+// back) ONLY `coagent.device.v1` — the `token.*` slot carries the
+// bearer token and MUST NOT be reflected back to the client.
+const DeviceWSSubprotocol = "coagent.device.v1"
+
+// deviceWSTokenPrefix is the prefix used on the `token.*` pseudo-
+// subprotocol slot to ferry the bearer token through `Sec-WebSocket-
+// Protocol`. token is everything after the prefix.
+const deviceWSTokenPrefix = "token."
+
 // HandleWS upgrades the device socket. The gateway passes a
 // TransitForwarder that knows how to route the frame to daemonbus.
+//
+// Handshake (impl-layer3 §6.5.1):
+//
+//   - URL:    /devicebus?session_id=<sid>
+//   - Header: Sec-WebSocket-Protocol: coagent.device.v1, token.<token>
+//
+// The server parses the offered subprotocols, extracts the token from
+// the `token.<token>` slot, validates (session_id, token), and on
+// success upgrades — selecting `coagent.device.v1` as the negotiated
+// subprotocol via the Upgrader (RFC 6455 requires the server to echo
+// the chosen subprotocol in the handshake response). The `token.*`
+// slot is deliberately NOT echoed back.
 func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sessionID := c.Query("session_id")
-		token := c.Query("token")
-		if sessionID == "" || token == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "session_id + token required"})
+		token, hasRealProto := parseDeviceWSSubprotocols(c.Request.Header.Values("Sec-WebSocket-Protocol"))
+		if sessionID == "" || token == "" || !hasRealProto {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "session_id query + Sec-WebSocket-Protocol: coagent.device.v1, token.<token> required",
+			})
 			return
 		}
 		row, err := s.ValidateToken(c.Request.Context(), sessionID, token)
@@ -226,7 +253,14 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 			c.JSON(status, gin.H{"error": err.Error()})
 			return
 		}
-		upgrader := websocket.Upgrader{CheckOrigin: s.checkOrigin}
+		upgrader := websocket.Upgrader{
+			CheckOrigin: s.checkOrigin,
+			// Only the real subprotocol is selected; the `token.*` slot
+			// is consumed server-side and MUST NOT be echoed back to the
+			// client (§6.5.1: "不 echo token.* 子协议——token 不应反射回
+			// client").
+			Subprotocols: []string{DeviceWSSubprotocol},
+		}
 		ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
 			return
@@ -274,6 +308,40 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 	}
 }
 
+// parseDeviceWSSubprotocols parses the Sec-WebSocket-Protocol header
+// values offered by the client and returns the extracted bearer token
+// plus whether the real `coagent.device.v1` subprotocol was offered.
+//
+// Per RFC 6455 §1.9 the header is a comma-separated list (possibly
+// across multiple header lines); gorilla/Gin keeps each header line as
+// a separate string. We split each value on `,`, trim spaces, then
+// classify:
+//
+//   - `coagent.device.v1` → real protocol present (handshake well-formed)
+//   - prefix `token.`     → bearer token (everything after the prefix)
+//   - anything else       → ignored (forward-compat for future slots)
+//
+// Returns ("", false) when the header is empty or missing the real
+// subprotocol; returns (token, true) when both are present.
+func parseDeviceWSSubprotocols(headers []string) (token string, hasRealProto bool) {
+	for _, line := range headers {
+		for _, part := range strings.Split(line, ",") {
+			p := strings.TrimSpace(part)
+			if p == "" {
+				continue
+			}
+			if p == DeviceWSSubprotocol {
+				hasRealProto = true
+				continue
+			}
+			if strings.HasPrefix(p, deviceWSTokenPrefix) {
+				token = strings.TrimPrefix(p, deviceWSTokenPrefix)
+			}
+		}
+	}
+	return token, hasRealProto
+}
+
 func (s *Service) checkOrigin(r *http.Request) bool {
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	if origin == "" {
@@ -284,8 +352,9 @@ func (s *Service) checkOrigin(r *http.Request) bool {
 }
 
 // SendFrameToDevice is invoked by the gateway when a daemon-pushed
-// device_transit.send frame arrives — looks up the local device
-// connection and forwards.
+// `device_transit.recv` frame arrives (impl-layer2 §5.3.2 outbound —
+// adapter → device) — looks up the local device connection and
+// forwards.
 func (s *Service) SendFrameToDevice(ctx context.Context, sessionID string, frame DeviceFrame) error {
 	s.mu.Lock()
 	conn, ok := s.sessions[sessionID]

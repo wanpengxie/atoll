@@ -37,7 +37,7 @@ func (b *busResyncer) RequestResync(ctx context.Context, channelID channel.ID, s
 	if err != nil {
 		return nil, err
 	}
-	if ackFrame.FrameType != kerneldaemonbus.FrameTypeViewsyncResyncResponse {
+	if ackFrame.FrameKind != kerneldaemonbus.FrameTypeViewsyncResyncResponse {
 		return nil, errors.New("gateway: resync response wrong frame_type")
 	}
 	var body viewsync.ResyncResponse

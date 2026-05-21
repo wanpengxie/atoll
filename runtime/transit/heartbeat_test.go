@@ -39,7 +39,7 @@ func TestHeartbeatTracker_Handle(t *testing.T) {
 	if handler == nil {
 		t.Fatal("Handle returned nil")
 	}
-	frame := daemonbus.Frame{FrameID: "hb-1", FrameType: daemonbus.FrameTypeControlHeartbeatAck}
+	frame := daemonbus.Frame{FrameID: "hb-1", FrameKind: daemonbus.FrameTypeControlHeartbeatAck}
 	if err := handler(context.Background(), frame); err != nil {
 		t.Fatalf("handler err: %v", err)
 	}

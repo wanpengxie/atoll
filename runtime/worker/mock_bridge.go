@@ -64,26 +64,29 @@ const (
 
 	// ScriptProgressMultiTurn drives the mock bridge through a
 	// deterministic "progress + final text" sequence for one trigger:
-	//   - emit N agent.progress envelopes (each carrying a turn_index +
-	//     tool_calls preview) so the UI / e2e harness can observe
-	//     intermediate per-turn updates.
-	//   - emit one terminal agent.text envelope with next_action=done.
+	//   - emit N progress envelopes (agent.text + visibility=system,
+	//     each carrying a turn_index + tool_calls preview) so the UI /
+	//     e2e harness can observe intermediate per-turn updates.
+	//   - emit one terminal agent.text (visibility=public) envelope
+	//     with next_action=done.
 	//
 	// N defaults to 2 (env EnvKeyMockProgressCount overrides). Used by
-	// tests/e2e/ to assert the agent.progress contract end-to-end
-	// without standing up a real LLM.
+	// tests/e2e/ to assert the progress contract end-to-end without
+	// standing up a real LLM. (Pre-m1.3 this was carried on a separate
+	// agent.progress type; impl-vocabulary §2.3 collapsed that into
+	// agent.text + visibility=system.)
 	ScriptProgressMultiTurn = "multi-turn-with-progress"
 
 	// EnvKeyMockProgressCount overrides the number of progress envelopes
-	// the multi-turn-with-progress script emits before the terminal
-	// agent.text. Defaults to 2.
+	// (agent.text + visibility=system) the multi-turn-with-progress
+	// script emits before the terminal agent.text. Defaults to 2.
 	EnvKeyMockProgressCount = "COAGENT_MOCK_PROGRESS_COUNT"
 
 	// EnvKeyMockDeviceSessionID — when set, the xhs-publish script
 	// stamps this value into the request payload.device_session_id so
-	// the adapter can route the device_transit.send frame to the right
-	// extension session. The harness sets this after issuing a device
-	// session.
+	// the adapter can route the outbound `device_transit.recv` frame
+	// (impl-layer2 §5.3.2) to the right extension session. The harness
+	// sets this after issuing a device session.
 	EnvKeyMockDeviceSessionID = "COAGENT_MOCK_DEVICE_SESSION_ID"
 )
 
@@ -408,9 +411,10 @@ func (m *MockBridge) reactXHSPublish(ctx context.Context, client *IPCClient, in 
 	return nil
 }
 
-// reactProgressMultiTurn emits N agent.progress envelopes followed by
-// one terminal agent.text envelope for a single trigger. N defaults to
-// 2 (env COAGENT_MOCK_PROGRESS_COUNT overrides, max 10 to avoid log
+// reactProgressMultiTurn emits N progress envelopes (agent.text +
+// visibility=system) followed by one terminal agent.text
+// (visibility=public) envelope for a single trigger. N defaults to 2
+// (env COAGENT_MOCK_PROGRESS_COUNT overrides, max 10 to avoid log
 // floods). Progress payloads mirror the kimi bridge contract:
 //
 //	{
@@ -464,10 +468,10 @@ func (m *MockBridge) reactProgressMultiTurn(ctx context.Context, client *IPCClie
 		env := message.Envelope{
 			ID:            message.ID(fmt.Sprintf("%s-progress-%d", m.EnvelopeIDFn(client.WorkerID(), m.turns+1), i)),
 			ChannelID:     client.ChannelID(),
-			Type:          "agent.progress",
+			Type:          "agent.text",
 			Kind:          message.KindEvent,
 			Sender:        message.Sender{Kind: actor.KindAgent, ID: client.WorkerActorID()},
-			Visibility:    message.VisibilityPublic,
+			Visibility:    message.VisibilitySystem,
 			Audience:      message.Audience{message.AudienceWildcard},
 			Payload:       body,
 			CorrelationID: in.CorrelationID,

@@ -128,21 +128,30 @@ func TestCategoryOfRoundtripping(t *testing.T) {
 	}
 }
 
-// TestFrameHeaderFieldSet locks the L2 §9.2 daemonbus mux header field
-// set: 5 named header keys + 1 payload. The 5 names match HeaderFields.
+// TestFrameHeaderFieldSet locks the impl-layer2 §1.3 daemonbus mux
+// outer envelope field set: 5 named header keys + 1 payload. The 5
+// names match HeaderFields.
+//
+// Spec-canonical fields (impl-layer2 §1.3): frame_kind / frame_id /
+// correlation_frame_id / channel_id / ts / payload.
+//
+// daemon_id / daemon_connection_epoch live on the Go struct as
+// omitempty extras (see R5-20-spec-followup TODO on Frame); they are
+// intentionally omitted from this test's input so the marshalled key
+// set asserts against the spec-canonical subset.
 //
 // This is the verification artifact called out by m1.5-tickets.md §T1
-// acceptance criteria — "所有 frame_type 字段集".
+// acceptance criteria — "所有 frame_kind 字段集".
 func TestFrameHeaderFieldSet(t *testing.T) {
 	t.Parallel()
 
 	frame := Frame{
-		FrameID:               "f-1",
-		FrameType:             FrameTypeControlCreateChannel,
-		DaemonID:              "daemon-1",
-		DaemonConnectionEpoch: 7,
-		SentAt:                1700000000000,
-		Payload:               json.RawMessage(`{"x":1}`),
+		FrameKind:          FrameTypeControlCreateChannel,
+		FrameID:            "f-1",
+		CorrelationFrameID: "f-0",
+		ChannelID:          "ch-1",
+		Ts:                 1700000000000,
+		Payload:            json.RawMessage(`{"x":1}`),
 	}
 	raw, err := json.Marshal(frame)
 	if err != nil {
@@ -172,8 +181,8 @@ func TestFrameHeaderFieldSet(t *testing.T) {
 		}
 	}
 
-	// HeaderFields cardinality (5) is part of L2 §9.2 contract — guard
-	// against drift on the spec-side enumeration.
+	// HeaderFields cardinality (5) is part of impl-layer2 §1.3 contract
+	// — guard against drift on the spec-side enumeration.
 	if len(HeaderFields) != 5 {
 		t.Errorf("HeaderFields len = %d, want 5", len(HeaderFields))
 	}

@@ -175,8 +175,6 @@ func createChannelOfType(
 	req := placement.CreateChannelRequest{
 		ChannelID:       channel.ID(channelID),
 		CreateRequestID: placement.CreateRequestID("req-" + channelID),
-		OwnerEpoch:      placement.OwnerEpoch(1),
-		FencingToken:    placement.FencingToken("tok-1"),
 		InitialMembers:  members,
 		ChannelType:     channelType,
 	}
@@ -202,7 +200,7 @@ func createChannelOfType(
 		if err != nil {
 			t.Fatalf("RecvFromDaemon %s: %v", channelID, err)
 		}
-		if f.FrameType != daemonbus.FrameTypeControlCreateChannelAck {
+		if f.FrameKind != daemonbus.FrameTypeControlCreateChannelAck {
 			continue
 		}
 		var ack placement.CreateChannelAck

@@ -57,21 +57,30 @@ func (k *Kind) Scan(src any) error {
 	}
 }
 
-// Visibility is the envelope `visibility` field — 2-value closed set
+// Visibility is the envelope `visibility` field — 3-value closed set
 // covering who in the channel can query-see this message.
 //
 // Authoritative spec: proto-layer0 §2.4 (round-3 cluster F). Once
 // written, visibility is immutable.
+//
+// Semantics:
+//   - public  — visible to every channel member.
+//   - private — only sender + actors in audience may see this message.
+//   - system  — protocol-internal metadata / intermediate output
+//     (e.g. agent.text progress bubbles, placement notices, bootstrap
+//     events). View fanout suppresses these from the default UI view;
+//     they still persist in the channel message log (audit trail).
 type Visibility string
 
 // Visibility enum — closed set per proto-layer0 §2.4.
 const (
 	VisibilityPublic  Visibility = "public"
 	VisibilityPrivate Visibility = "private"
+	VisibilitySystem  Visibility = "system"
 )
 
 // AllVisibilities enumerates every valid Visibility value, in spec order.
-var AllVisibilities = []Visibility{VisibilityPublic, VisibilityPrivate}
+var AllVisibilities = []Visibility{VisibilityPublic, VisibilityPrivate, VisibilitySystem}
 
 // String returns the wire form.
 func (v Visibility) String() string { return string(v) }

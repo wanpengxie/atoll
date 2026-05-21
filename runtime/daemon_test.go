@@ -124,7 +124,6 @@ func TestDaemon_StartupPhases(t *testing.T) {
 	// Saga is usable post-boot.
 	sagaCh := placement.CreateChannelRequest{
 		ChannelID: "ch-new", CreateRequestID: "req-new",
-		OwnerEpoch: 1, FencingToken: "tok-1",
 	}
 	if _, err := d.Saga().Bootstrap(ctx, "ch-new", sagaCh); err != nil {
 		t.Errorf("post-boot saga: %v", err)
@@ -254,7 +253,7 @@ func TestDaemon_Phase3_DispatchesWriteMessage(t *testing.T) {
 		if err != nil {
 			t.Fatalf("recv ack: %v", err)
 		}
-		if f.FrameType != daemonbus.FrameTypeControlWriteMessageAck {
+		if f.FrameKind != daemonbus.FrameTypeControlWriteMessageAck {
 			continue
 		}
 		if err := transit.DecodePayload(f, &ack); err != nil {
@@ -653,11 +652,12 @@ func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
 }
 
 // TestDaemon_DeviceTransit_InboundRoutesToPerChannelCallback covers
-// T147 §A daemon-side wiring: when a device_transit.recv frame arrives
-// at the daemonbus dispatcher, it must (1) decode the SendFrame to
-// recover the routing key (channel_id), (2) look up the per-channel
-// runtime, (3) hand the frame to that channel's *transit.DeviceTransit,
-// and (4) the DeviceTransit invokes the closure set via
+// the inbound (device → adapter) daemon-side wiring per impl-layer2
+// §5.3.1: when a `device_transit.send` frame arrives at the daemonbus
+// dispatcher, it must (1) decode the SendFrame to recover the routing
+// key (channel_id), (2) look up the per-channel runtime, (3) hand the
+// frame to that channel's *transit.DeviceTransit, and (4) the
+// DeviceTransit invokes the closure set via
 // ChannelHooks.SetDeviceCallback during OnChannelBoot.
 //
 // Verified end-to-end: frame on MockBus → daemon dispatcher → our
@@ -750,11 +750,11 @@ func TestDaemon_DeviceTransit_InboundRoutesToPerChannelCallback(t *testing.T) {
 			RequestID:       "req-1",
 			Payload:         []byte(payload),
 		}
-		frame, err := transit.Encode("frame-recv-"+string(targetCh),
-			daemonbus.FrameTypeDeviceTransitRecv,
+		frame, err := transit.Encode("frame-send-"+string(targetCh),
+			daemonbus.FrameTypeDeviceTransitSend,
 			"server", d.Transit().Epoch(), now(), body)
 		if err != nil {
-			t.Fatalf("encode device_transit.recv: %v", err)
+			t.Fatalf("encode device_transit.send: %v", err)
 		}
 		if err := srv.SendToDaemon(ctx, frame); err != nil {
 			t.Fatalf("SendToDaemon: %v", err)
@@ -950,7 +950,7 @@ func TestDaemon_Phase3_HeartbeatSender(t *testing.T) {
 		if err != nil {
 			t.Fatalf("only saw %d heartbeats before timeout: %v", got, err)
 		}
-		if f.FrameType != daemonbus.FrameTypeControlHeartbeat {
+		if f.FrameKind != daemonbus.FrameTypeControlHeartbeat {
 			continue
 		}
 		var body transit.HeartbeatBody
@@ -1120,7 +1120,7 @@ func TestDaemon_Phase3_ChannelAgent_Registered(t *testing.T) {
 		if err != nil {
 			t.Fatalf("recv ack: %v", err)
 		}
-		if f.FrameType != daemonbus.FrameTypeControlWriteMessageAck {
+		if f.FrameKind != daemonbus.FrameTypeControlWriteMessageAck {
 			continue
 		}
 		var ack transit.WriteMessageAckBody
@@ -1296,7 +1296,7 @@ func TestDaemon_Phase3_WorkerReply(t *testing.T) {
 			if err != nil {
 				t.Fatalf("recv ack: %v", err)
 			}
-			if f.FrameType != daemonbus.FrameTypeControlWriteMessageAck {
+			if f.FrameKind != daemonbus.FrameTypeControlWriteMessageAck {
 				continue
 			}
 			var ack transit.WriteMessageAckBody

@@ -141,7 +141,8 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 
 // OnExternalCallback is a no-op for the embedded scaffold — there is
 // no external transport to call back from. T3 device adapter replaces
-// this with the device_transit.recv decode path.
+// this with the inbound `device_transit.send` decode path (impl-layer2
+// §5.3.1 — device → adapter).
 func (m *Module) OnExternalCallback(_ context.Context, _ []byte) error {
 	return nil
 }

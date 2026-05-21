@@ -74,7 +74,7 @@ func sendCreateChannel(
 		if err != nil {
 			t.Fatalf("RecvFromDaemon: %v", err)
 		}
-		if f.FrameType != daemonbus.FrameTypeControlCreateChannelAck {
+		if f.FrameKind != daemonbus.FrameTypeControlCreateChannelAck {
 			continue
 		}
 		var ack placement.CreateChannelAck
@@ -99,8 +99,6 @@ func TestDaemon_OnCreateChannel_FreshBootstrap(t *testing.T) {
 	req := placement.CreateChannelRequest{
 		ChannelID:       "ch-new",
 		CreateRequestID: "req-fresh-1",
-		OwnerEpoch:      1,
-		FencingToken:    "tok-1",
 		InitialMembers: []placement.InitialMember{
 			{MemberActorID: "user:alice", Kind: "human", DisplayName: "Alice"},
 		},
@@ -116,25 +114,34 @@ func TestDaemon_OnCreateChannel_FreshBootstrap(t *testing.T) {
 	if ack.CreateRequestID != req.CreateRequestID {
 		t.Errorf("ack.CreateRequestID=%s want %s", ack.CreateRequestID, req.CreateRequestID)
 	}
-	if ack.OwnerEpoch != req.OwnerEpoch || ack.FencingToken != req.FencingToken {
-		t.Errorf("ack epoch/token=%d/%q want %d/%q",
-			ack.OwnerEpoch, ack.FencingToken, req.OwnerEpoch, req.FencingToken)
+	// Daemon is the trust root for fencing (proto-foundation §3.3.3
+	// Phase 2): owner_epoch=1 (fixed) and a fresh unguessable token.
+	if ack.OwnerEpoch != 1 {
+		t.Errorf("ack.OwnerEpoch=%d want 1 (Phase 2 fixed)", ack.OwnerEpoch)
+	}
+	if len(ack.FencingToken) != 32 {
+		t.Errorf("ack.FencingToken=%q (len=%d) want 32-char hex (daemon-generated)",
+			ack.FencingToken, len(ack.FencingToken))
 	}
 	if ack.DaemonID != "daemon-A" {
 		t.Errorf("ack.DaemonID=%s want daemon-A", ack.DaemonID)
 	}
-	// Match() against a placement record server would have at step 1.
+	// Match() pre-check uses saga identifiers only — owner_epoch /
+	// fencing_token are daemon outputs and not part of Match.
 	want := placement.Placement{
 		ChannelID:       req.ChannelID,
 		DaemonID:        "daemon-A",
 		State:           placement.StateCreating,
-		OwnerEpoch:      req.OwnerEpoch,
-		FencingToken:    req.FencingToken,
+		OwnerEpoch:      0,
+		FencingToken:    "",
 		CreateRequestID: req.CreateRequestID,
 	}
 	if !ack.Match(want) {
 		t.Errorf("ack does NOT match server placement (CAS would fail)")
 	}
+	// Capture the daemon-generated tuple for downstream assertions.
+	daemonOwnerEpoch := ack.OwnerEpoch
+	daemonFencingTok := ack.FencingToken
 
 	// channel.sqlite physically present + DDL applied + actor_registry
 	// has both system + alice rows.
@@ -154,7 +161,9 @@ func TestDaemon_OnCreateChannel_FreshBootstrap(t *testing.T) {
 	if _, ok, _ := reg.Lookup(ctx, "user:alice"); !ok {
 		t.Error("user:alice missing in actor_registry")
 	}
-	// channel_lock row present with daemon-A.
+	// channel_lock row present with daemon-A and the
+	// daemon-generated fencing tuple (NOT any server-supplied value —
+	// the daemon is the trust root).
 	lock := store.NewChannelLock(db)
 	row, ok, err := lock.Get(ctx)
 	if err != nil {
@@ -163,8 +172,12 @@ func TestDaemon_OnCreateChannel_FreshBootstrap(t *testing.T) {
 	if !ok {
 		t.Fatal("channel_lock row missing after OnCreateChannel")
 	}
-	if row.DaemonID != "daemon-A" || row.FencingToken != "tok-1" {
-		t.Errorf("channel_lock row=%+v", row)
+	if row.DaemonID != "daemon-A" {
+		t.Errorf("channel_lock.DaemonID=%q want daemon-A", row.DaemonID)
+	}
+	if row.OwnerEpoch != daemonOwnerEpoch || row.FencingToken != daemonFencingTok {
+		t.Errorf("channel_lock fencing tuple = (epoch=%d, token=%q) want (epoch=%d, token=%q) (ack must match disk)",
+			row.OwnerEpoch, row.FencingToken, daemonOwnerEpoch, daemonFencingTok)
 	}
 
 	// bootstrap_registry row marked completed.
@@ -198,7 +211,6 @@ func TestDaemon_OnCreateChannel_IdempotentReplay(t *testing.T) {
 
 	req := placement.CreateChannelRequest{
 		ChannelID: "ch-idem", CreateRequestID: "req-idem",
-		OwnerEpoch: 5, FencingToken: "tok-5",
 	}
 	a1 := sendCreateChannel(t, ctx, d, srv, req)
 	if a1.Status != placement.AckBound {
@@ -208,12 +220,22 @@ func TestDaemon_OnCreateChannel_IdempotentReplay(t *testing.T) {
 	if a2.Status != placement.AckBound {
 		t.Errorf("second ack=%s reason=%s (idempotent replay must AckBound)", a2.Status, a2.Reason)
 	}
+	// Idempotent replay MUST echo the same daemon-generated fencing
+	// tuple from the original bootstrap — the daemon is the trust
+	// root and the server's CAS depends on stable values across retries.
+	if a2.OwnerEpoch != a1.OwnerEpoch || a2.FencingToken != a1.FencingToken {
+		t.Errorf("idempotent replay returned a different fencing tuple: a1=(%d,%q) a2=(%d,%q)",
+			a1.OwnerEpoch, a1.FencingToken, a2.OwnerEpoch, a2.FencingToken)
+	}
 }
 
-// TestDaemon_OnCreateChannel_HigherTokenRejected — daemon must NOT
-// silently rotate the channel_lock fencing tuple; reject a higher-token
-// request after a successful bind so server reconcile drives state.
-func TestDaemon_OnCreateChannel_HigherTokenRejected(t *testing.T) {
+// TestDaemon_OnCreateChannel_ConflictingRequestRejected — after a
+// successful bind under create_request_id=req-A, a second create frame
+// for the SAME channel_id with a DIFFERENT create_request_id (req-B)
+// MUST be rejected. The daemon-side channel state is the trust root
+// (proto-foundation §3.3.3): the server is not allowed to silently
+// re-bootstrap a channel under a new saga id.
+func TestDaemon_OnCreateChannel_ConflictingRequestRejected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -221,22 +243,20 @@ func TestDaemon_OnCreateChannel_HigherTokenRejected(t *testing.T) {
 	defer func() { _ = d.Close() }()
 
 	bind := placement.CreateChannelRequest{
-		ChannelID: "ch-high", CreateRequestID: "req-A", OwnerEpoch: 3, FencingToken: "tok-3",
+		ChannelID: "ch-high", CreateRequestID: "req-A",
 	}
 	if ack := sendCreateChannel(t, ctx, d, srv, bind); ack.Status != placement.AckBound {
 		t.Fatalf("first bind=%s reason=%s", ack.Status, ack.Reason)
 	}
 
-	higher := bind
-	higher.CreateRequestID = "req-B"
-	higher.OwnerEpoch = 7
-	higher.FencingToken = "tok-7"
-	ack := sendCreateChannel(t, ctx, d, srv, higher)
+	conflicting := bind
+	conflicting.CreateRequestID = "req-B"
+	ack := sendCreateChannel(t, ctx, d, srv, conflicting)
 	if ack.Status != placement.AckRejected {
-		t.Fatalf("higher token expected reject, got %s", ack.Status)
+		t.Fatalf("conflicting create_request_id expected reject, got %s", ack.Status)
 	}
-	if ack.Reason != "local_lock_stale_higher_epoch_received" {
-		t.Errorf("ack.Reason=%q want local_lock_stale_higher_epoch_received", ack.Reason)
+	if ack.Reason != "create_request_id_mismatch" {
+		t.Errorf("ack.Reason=%q want create_request_id_mismatch", ack.Reason)
 	}
 }
 
@@ -252,7 +272,7 @@ func TestDaemon_OnUnbindChannel(t *testing.T) {
 
 	chID := channel.ID("ch-unbind")
 	req := placement.CreateChannelRequest{
-		ChannelID: chID, CreateRequestID: "req-unb", OwnerEpoch: 1, FencingToken: "tok-1",
+		ChannelID: chID, CreateRequestID: "req-unb",
 	}
 	if ack := sendCreateChannel(t, ctx, d, srv, req); ack.Status != placement.AckBound {
 		t.Fatalf("create=%s", ack.Status)
@@ -286,7 +306,7 @@ func TestDaemon_OnUnbindChannel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("recv: %v", err)
 		}
-		if f.FrameType != daemonbus.FrameTypeControlUnbindChannelAck {
+		if f.FrameKind != daemonbus.FrameTypeControlUnbindChannelAck {
 			continue
 		}
 		var ack struct {
@@ -335,7 +355,7 @@ func TestDaemon_OnReclaimRejected_UnloadsChannel(t *testing.T) {
 
 	chID := channel.ID("ch-recl-rej")
 	req := placement.CreateChannelRequest{
-		ChannelID: chID, CreateRequestID: "req-recl", OwnerEpoch: 1, FencingToken: "tok-1",
+		ChannelID: chID, CreateRequestID: "req-recl",
 	}
 	if ack := sendCreateChannel(t, ctx, d, srv, req); ack.Status != placement.AckBound {
 		t.Fatalf("create=%s", ack.Status)
@@ -378,7 +398,7 @@ func TestDaemon_OnReclaimAccepted_RecordsWatermark(t *testing.T) {
 
 	chID := channel.ID("ch-recl-ok")
 	req := placement.CreateChannelRequest{
-		ChannelID: chID, CreateRequestID: "req-recl-ok", OwnerEpoch: 1, FencingToken: "tok-1",
+		ChannelID: chID, CreateRequestID: "req-recl-ok",
 	}
 	if ack := sendCreateChannel(t, ctx, d, srv, req); ack.Status != placement.AckBound {
 		t.Fatalf("create=%s", ack.Status)

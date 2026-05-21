@@ -63,31 +63,33 @@ func TestTransitionMatrix(t *testing.T) {
 	}
 }
 
-// TestACKMatchExactFieldSet locks the L2 §1.4.11.3 step 5 CAS rule:
-// the ACK is only accepted when CreateRequestID + OwnerEpoch +
-// FencingToken + DaemonID ALL match the placement record. Each field
-// gets its own subtest so the failure message points to the broken
-// field.
-//
-// This is the verification artifact called out by m1.5-tickets.md §T1
-// acceptance criteria — "ACK 完整字段匹配".
+// TestACKMatchExactFieldSet locks the proto-foundation §3.3.3 +
+// impl-layer2 §3.2.2 rule: Match is the saga-identifier pre-check
+// (channel_id + create_request_id + daemon_id), NOT a comparison of
+// owner_epoch / fencing_token. The fencing tuple is the daemon's
+// authoritative output and arrives FROM the ack — it is written into
+// the placement row by the Phase 3 CAS, never compared against a
+// pre-existing value.
 func TestACKMatchExactFieldSet(t *testing.T) {
 	t.Parallel()
 
+	// Phase 1 placement: owner_epoch=0, fencing_token="" per
+	// proto-foundation §3.3.3.
 	base := Placement{
 		ChannelID:       channel.ID("chan-A"),
 		DaemonID:        "daemon-1",
 		State:           StateCreating,
-		OwnerEpoch:      7,
-		FencingToken:    "tok-7",
+		OwnerEpoch:      0,
+		FencingToken:    "",
 		CreateRequestID: "req-uuid-x",
 	}
+	// Phase 2 ack: daemon-generated owner_epoch=1 + fresh fencing_token.
 	ackOK := CreateChannelAck{
 		FrameID:         "f-1",
 		ChannelID:       channel.ID("chan-A"),
 		CreateRequestID: "req-uuid-x",
-		OwnerEpoch:      7,
-		FencingToken:    "tok-7",
+		OwnerEpoch:      1,
+		FencingToken:    "tok-daemon-generated",
 		DaemonID:        "daemon-1",
 		DaemonEpoch:     1,
 		Status:          AckBound,
@@ -107,14 +109,6 @@ func TestACKMatchExactFieldSet(t *testing.T) {
 		{
 			name: "create_request_id mismatch",
 			mod:  func(a *CreateChannelAck) { a.CreateRequestID = "req-uuid-other" },
-		},
-		{
-			name: "owner_epoch mismatch (off-by-one)",
-			mod:  func(a *CreateChannelAck) { a.OwnerEpoch = 8 },
-		},
-		{
-			name: "fencing_token mismatch",
-			mod:  func(a *CreateChannelAck) { a.FencingToken = "tok-8" },
 		},
 		{
 			name: "daemon_id mismatch",
@@ -142,13 +136,30 @@ func TestACKMatchExactFieldSet(t *testing.T) {
 		}
 	})
 	t.Run("status rejected does not affect Match", func(t *testing.T) {
-		// Match only checks the field-quad; downstream logic uses Status
-		// to decide whether to call CASActivate. Asserting Match true
-		// here proves the field-quad rule is exact.
+		// Match only checks saga identifiers; downstream logic uses
+		// Status to decide whether to call CASActivate. Asserting Match
+		// true here proves the saga-identifier rule is exact.
 		ack := ackOK
 		ack.Status = AckRejected
 		if !ack.Match(base) {
 			t.Errorf("status should not affect Match; got false")
+		}
+	})
+	// owner_epoch / fencing_token are daemon-generated outputs
+	// (proto-foundation §3.3.3 Phase 2) — they MUST NOT factor into
+	// Match. The Phase 3 CAS writes them into the placement row.
+	t.Run("owner_epoch is a daemon output not a Match predicate", func(t *testing.T) {
+		ack := ackOK
+		ack.OwnerEpoch = 99
+		if !ack.Match(base) {
+			t.Errorf("owner_epoch should not affect Match (daemon output); got false")
+		}
+	})
+	t.Run("fencing_token is a daemon output not a Match predicate", func(t *testing.T) {
+		ack := ackOK
+		ack.FencingToken = "some-other-token"
+		if !ack.Match(base) {
+			t.Errorf("fencing_token should not affect Match (daemon output); got false")
 		}
 	})
 }

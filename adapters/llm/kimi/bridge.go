@@ -474,14 +474,16 @@ func (b *Bridge) runTurn(
 // single Agent.Run wire stream. Each go-kimi soul "step" inside that run
 // emits a batch of ToolCallRequest events, followed by ToolCallResult
 // events as the tools complete. We use the first ToolCallResult of a
-// batch as the boundary to flush one `agent.progress` envelope: the LLM
-// finished one reasoning step (typed by `step_index`), is about to feed
-// tool results back to the next inference, and the UI gets a process
-// bubble so the user is not staring at silence for 30-60s.
+// batch as the boundary to flush one progress envelope (agent.text +
+// visibility=system, see emitTurnProgress): the LLM finished one
+// reasoning step (typed by `step_index`), is about to feed tool results
+// back to the next inference, and the UI gets a process bubble so the
+// user is not staring at silence for 30-60s.
 //
-// On TurnEnd the bridge emits the single `agent.text` terminal envelope.
-// Stream-level TextDelta keeps buffering into the final text — never as
-// envelope spam (chunk-spam was explicitly excluded by owner).
+// On TurnEnd the bridge emits the single terminal agent.text
+// (visibility=public) envelope. Stream-level TextDelta keeps buffering
+// into the final text — never as envelope spam (chunk-spam was
+// explicitly excluded by owner).
 type turnState struct {
 	textBuf       strings.Builder
 	pendingTools  []wireToolCall
@@ -492,17 +494,21 @@ type turnState struct {
 // consumeWire reads the wire stream and:
 //   - buffers TextDelta into the final text accumulator,
 //   - collects ToolCallRequest events into per-step batches,
-//   - emits one `agent.progress` envelope at each step boundary
-//     (first ToolCallResult after a ToolCallRequest batch),
-//   - emits one terminal `agent.text` envelope on TurnEnd.
+//   - emits one progress envelope (agent.text + visibility=system) at
+//     each step boundary (first ToolCallResult after a ToolCallRequest
+//     batch),
+//   - emits one terminal agent.text (visibility=public) envelope on
+//     TurnEnd.
 //
 // LLM streaming chunks are a transport-layer artifact and MUST NOT leak
 // into the v4 envelope layer (the One Law: business change = new
 // message; a chunk is not a business change). Per
 // v4-message-definition.md §single-response a request gets one final
-// response envelope; intermediate progress goes through the
-// <type>.progress event channel, here `agent.progress`. Owner decision
-// (M1.6): per-step progress + one terminal `agent.text` per turn.
+// response envelope; intermediate progress is the same `agent.text`
+// type carrying `visibility=system` per impl-vocabulary §2.3 (the
+// historical standalone `agent.progress` type was collapsed during
+// m1.3 freeze). Owner decision (M1.6): per-step progress + one
+// terminal agent.text per turn.
 func (b *Bridge) consumeWire(
 	ctx context.Context,
 	ipc IPCFacade,
@@ -631,8 +637,12 @@ func toolCallArgumentsJSON(args any) json.RawMessage {
 	return b
 }
 
-// emitTurnProgress writes one agent.progress envelope summarising a
-// completed step. Payload shape:
+// emitTurnProgress writes one progress envelope summarising a completed
+// step. Per impl-vocabulary §2.3 progress is `agent.text` carrying
+// `visibility=system` (intermediate output / not delivered to view by
+// default) — the old standalone `agent.progress` type was collapsed
+// into agent.text + visibility=system during the m1.3 freeze and is no
+// longer a registered core type. Payload shape:
 //
 //	{
 //	  "turn_index":  <1-based bridge turn>,
@@ -640,9 +650,9 @@ func toolCallArgumentsJSON(args any) json.RawMessage {
 //	  "tool_calls":  [{"name": "...", "preview": "..."}, ...],
 //	}
 //
-// Visibility=public so the UI surfaces it. The progress envelope sits
-// next to the eventual agent.text terminal envelope under the same
-// parent_id / correlation_id, so harness ordering keeps them grouped.
+// The progress envelope sits next to the eventual terminal agent.text
+// (visibility=public) envelope under the same parent_id /
+// correlation_id, so harness ordering keeps them grouped.
 func (b *Bridge) emitTurnProgress(
 	ctx context.Context,
 	ipc IPCFacade,
@@ -658,7 +668,7 @@ func (b *Bridge) emitTurnProgress(
 	if summary := summariseToolCalls(tools, 240); len(summary) > 0 {
 		payload["tool_calls"] = summary
 	}
-	return b.emitEnvelope(ctx, ipc, trigger, "agent.progress", message.VisibilityPublic, payload)
+	return b.emitEnvelope(ctx, ipc, trigger, "agent.text", message.VisibilitySystem, payload)
 }
 
 // emitTurnEnd writes the single terminal agent.text envelope for one
@@ -967,10 +977,11 @@ func parseOutputParts(parts any) outputParts {
 }
 
 // summariseToolCalls builds the `tool_calls` array carried on
-// agent.progress envelopes. Each entry is `{name, preview}` where
-// preview is a short truncated string built from the arguments JSON
-// — enough for an operator skimming the channel log to recognise what
-// the agent is doing without exposing the full payload.
+// progress envelopes (agent.text + visibility=system). Each entry is
+// `{name, preview}` where preview is a short truncated string built
+// from the arguments JSON — enough for an operator skimming the
+// channel log to recognise what the agent is doing without exposing
+// the full payload.
 func summariseToolCalls(tools []wireToolCall, maxPreview int) []map[string]string {
 	if len(tools) == 0 {
 		return nil

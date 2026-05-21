@@ -141,14 +141,18 @@ type Placement struct {
 }
 
 // CreateChannelRequest is the payload of `control.create_channel` frame
-// per L2 §1.4.11.3 step 2. Carried inside daemonbus mux Frame (L2 §9.2
-// header lives on the wrapper).
+// per proto-foundation §3.3.3 Phase 1 + impl-layer2 §3.2.1. The server
+// reserves the placement row in state='creating' with owner_epoch=0 and
+// an empty fencing_token, then pushes this frame to the candidate
+// daemon. The daemon is the trust root for fencing — it generates a
+// fresh unguessable fencing_token and sets owner_epoch=1 during Phase 2
+// bootstrap, and returns those values to the server in
+// CreateChannelAck (§3.2.2). This struct therefore MUST NOT carry
+// fencing_token / owner_epoch / connection_epoch_expected — those are
+// daemon-side obligations.
 type CreateChannelRequest struct {
-	ChannelID                     channel.ID      `json:"channel_id"`
-	CreateRequestID               CreateRequestID `json:"create_request_id"`
-	OwnerEpoch                    OwnerEpoch      `json:"owner_epoch"`
-	FencingToken                  FencingToken    `json:"fencing_token"`
-	DaemonConnectionEpochExpected ConnectionEpoch `json:"daemon_connection_epoch_expected"`
+	ChannelID       channel.ID      `json:"channel_id"`
+	CreateRequestID CreateRequestID `json:"create_request_id"`
 	// InitialMembers carries the channel's bootstrap members so daemon
 	// can populate actor_registry in the same bootstrap saga (T1.9 / L2
 	// §12.1). Each entry is an opaque JSON object the daemon decodes
@@ -165,6 +169,10 @@ type CreateChannelRequest struct {
 	// saga only seeds system + initial members and OnChannelBoot does
 	// not install any domain adapters. This preserves backward
 	// compatibility for pre-M1.6-T5 daemons.
+	//
+	// TODO: impl-layer2 §3.2.1 lists only initial_members/initial_types/
+	// initial_config/metadata as wire fields; channel_type should fold
+	// into one of those (likely initial_config) in a follow-up.
 	ChannelType string `json:"channel_type,omitempty"`
 }
 
@@ -187,11 +195,18 @@ const (
 )
 
 // CreateChannelAck is the payload of `control.create_channel_ack` frame
-// per L2 §1.4.11.3 step 4. **All four match-fields** (CreateRequestID,
-// OwnerEpoch, FencingToken, DaemonID) MUST equal the values server
-// recorded at step 1, otherwise the CAS in step 5 fails and the
-// placement does NOT advance to Active. This is the ACK 完整字段匹配
-// rule (covers codex #3 + #4).
+// per proto-foundation §3.3.3 Phase 2 + impl-layer2 §3.2.2. The daemon
+// is the trust root for fencing: it generates a fresh OwnerEpoch=1 and
+// an unguessable FencingToken during bootstrap and returns them inside
+// this ack. The server's Phase 3 CAS reads OwnerEpoch / FencingToken /
+// DaemonID FROM the ack and writes them into the placement row using
+// `(channel_id, create_request_id, state='creating')` as the CAS
+// predicate.
+//
+// Pre-check (Match) only verifies the saga identifiers
+// (channel_id + create_request_id) plus the candidate daemon — the
+// fencing tuple is the daemon's authoritative output and not a
+// comparison input.
 type CreateChannelAck struct {
 	FrameID         string          `json:"frame_id"`
 	ChannelID       channel.ID      `json:"channel_id"`
@@ -204,18 +219,19 @@ type CreateChannelAck struct {
 	Reason          string          `json:"reason,omitempty"`
 }
 
-// Match verifies the ACK matches every field of the placement record
-// (per L2 §1.4.11.3 step 5 CAS). Returns true when ALL of CreateRequestID,
-// OwnerEpoch, FencingToken, DaemonID match.
+// Match verifies the ACK targets the same saga the server reserved for
+// — channel_id + create_request_id + daemon_id must match the placement
+// candidate. OwnerEpoch / FencingToken are daemon-side outputs (the
+// daemon is the trust root for fencing — proto-foundation §3.3.3
+// Phase 2) and therefore MUST NOT be checked here; they are written
+// into the placement row by the Phase 3 CAS, not compared against a
+// pre-existing value.
 //
-// This is the kernel-side helper backing the server.placements step-5
-// SQL UPDATE WHERE — runtime/server uses it for a fast pre-check before
-// hitting sqlite, and tests use it to assert the field-match rule.
+// Used as a fast pre-check before hitting sqlite; tests use it to
+// assert the saga-identifier match rule.
 func (a CreateChannelAck) Match(p Placement) bool {
 	return a.ChannelID == p.ChannelID &&
 		a.CreateRequestID == p.CreateRequestID &&
-		a.OwnerEpoch == p.OwnerEpoch &&
-		a.FencingToken == p.FencingToken &&
 		a.DaemonID == p.DaemonID
 }
 

@@ -102,8 +102,8 @@ func TestDispatcher_BindDeviceSessionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ackFrame.FrameType != daemonbus.FrameTypeControlBindDeviceSessionAck {
-		t.Fatalf("ack frame type = %s", ackFrame.FrameType)
+	if ackFrame.FrameKind != daemonbus.FrameTypeControlBindDeviceSessionAck {
+		t.Fatalf("ack frame type = %s", ackFrame.FrameKind)
 	}
 	var ack transit.BindDeviceSessionAckBody
 	if err := transit.DecodePayload(ackFrame, &ack); err != nil {
@@ -189,8 +189,8 @@ func TestDispatcher_BindDeviceSessionHandlerMissing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ackFrame.FrameType != daemonbus.FrameTypeControlBindDeviceSessionAck {
-		t.Fatalf("ack frame type = %s", ackFrame.FrameType)
+	if ackFrame.FrameKind != daemonbus.FrameTypeControlBindDeviceSessionAck {
+		t.Fatalf("ack frame type = %s", ackFrame.FrameKind)
 	}
 	var ack transit.BindDeviceSessionAckBody
 	if err := transit.DecodePayload(ackFrame, &ack); err != nil {
@@ -287,8 +287,8 @@ func TestDispatcher_UnbindDeviceSessionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ackFrame.FrameType != daemonbus.FrameTypeControlUnbindDeviceSessionAck {
-		t.Fatalf("ack frame type = %s", ackFrame.FrameType)
+	if ackFrame.FrameKind != daemonbus.FrameTypeControlUnbindDeviceSessionAck {
+		t.Fatalf("ack frame type = %s", ackFrame.FrameKind)
 	}
 	var ack transit.UnbindDeviceSessionAckBody
 	if err := transit.DecodePayload(ackFrame, &ack); err != nil {

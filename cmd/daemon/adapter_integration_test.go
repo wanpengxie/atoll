@@ -83,8 +83,6 @@ func createChannel(t *testing.T, ctx context.Context, d *runtime.Daemon, srv *tr
 	req := placement.CreateChannelRequest{
 		ChannelID:       channel.ID(channelID),
 		CreateRequestID: placement.CreateRequestID("req-" + channelID),
-		OwnerEpoch:      placement.OwnerEpoch(1),
-		FencingToken:    placement.FencingToken("tok-1"),
 		InitialMembers:  members,
 		// M1.6-T5 phase-2 — tag the channel with the xhs-creator
 		// template so the daemon resolves the matching seeds /
@@ -114,7 +112,7 @@ func createChannel(t *testing.T, ctx context.Context, d *runtime.Daemon, srv *tr
 		if err != nil {
 			t.Fatalf("RecvFromDaemon: %v", err)
 		}
-		if f.FrameType != daemonbus.FrameTypeControlCreateChannelAck {
+		if f.FrameKind != daemonbus.FrameTypeControlCreateChannelAck {
 			continue
 		}
 		var ack placement.CreateChannelAck
@@ -196,7 +194,7 @@ func writeRequestWithExpiry(t *testing.T, ctx context.Context, d *runtime.Daemon
 		if err != nil {
 			t.Fatalf("RecvFromDaemon: %v", err)
 		}
-		if f.FrameType != daemonbus.FrameTypeControlWriteMessageAck {
+		if f.FrameKind != daemonbus.FrameTypeControlWriteMessageAck {
 			continue
 		}
 		var ack transit.WriteMessageAckBody

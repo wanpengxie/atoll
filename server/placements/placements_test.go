@@ -52,13 +52,22 @@ func TestCreatingToActiveHappyPath(t *testing.T) {
 	if p.EnteredStateAt != p.CreatedAt || p.EnteredStateAt == 0 {
 		t.Errorf("creating entered_state_at=%d created_at=%d", p.EnteredStateAt, p.CreatedAt)
 	}
-	if req.ChannelID != p.ChannelID || req.OwnerEpoch != p.OwnerEpoch || req.FencingToken != p.FencingToken {
+	if req.ChannelID != p.ChannelID || req.CreateRequestID != p.CreateRequestID {
 		t.Errorf("create request mismatch: %+v vs %+v", req, p)
 	}
+	// proto-foundation §3.3.3 Phase 1: server reserves with epoch=0 /
+	// empty fencing_token; the daemon is the trust root.
+	if p.OwnerEpoch != 0 || p.FencingToken != "" {
+		t.Errorf("Phase 1 placement should have epoch=0 / token=\"\"; got epoch=%d token=%q",
+			p.OwnerEpoch, p.FencingToken)
+	}
 
+	// Phase 2 ack carries the daemon-generated fencing tuple.
+	const daemonEpoch placement.OwnerEpoch = 1
+	const daemonTok placement.FencingToken = "daemon-generated-tok"
 	ack := placement.CreateChannelAck{
 		FrameID: "f-1", ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
-		OwnerEpoch: p.OwnerEpoch, FencingToken: p.FencingToken,
+		OwnerEpoch: daemonEpoch, FencingToken: daemonTok,
 		DaemonID: p.DaemonID, DaemonEpoch: 1, Status: placement.AckBound,
 	}
 	ok, err := svc.Activate(ctx, ack, 7)
@@ -79,11 +88,24 @@ func TestCreatingToActiveHappyPath(t *testing.T) {
 	if got.EnteredStateAt != got.ActivatedAt {
 		t.Errorf("entered_state_at=%d want activated_at=%d", got.EnteredStateAt, got.ActivatedAt)
 	}
+	// Phase 3 CAS must persist the daemon-supplied fencing tuple.
+	if got.OwnerEpoch != daemonEpoch || got.FencingToken != daemonTok {
+		t.Errorf("post-Activate epoch/token = %d/%q want %d/%q (Phase 3 CAS should write ack values)",
+			got.OwnerEpoch, got.FencingToken, daemonEpoch, daemonTok)
+	}
 }
 
-// TestACKMismatchRejected covers codex #3/#4 — each of the 4
-// match-fields is permuted; CAS must fail and the row must stay
-// in 'creating'.
+// TestACKMismatchRejected verifies the Phase 3 CAS predicate
+// (channel_id + create_request_id + daemon_id + state='creating')
+// plus the protocol obligation that the ack carry a non-empty
+// fencing_token (impl-layer2 §3.2.2). Mutating any predicate field —
+// or stripping the fencing_token / setting Status=rejected — must
+// leave the placement row in 'creating'.
+//
+// Note: owner_epoch / fencing_token are daemon outputs, not CAS
+// predicates, so mutating them alone (when otherwise valid) does NOT
+// fail the CAS. Their integrity is enforced by the daemon-side
+// channel_lock — separate test surface.
 func TestACKMismatchRejected(t *testing.T) {
 	t.Parallel()
 	c := &clock{now: time.Unix(1_700_000_000, 0)}
@@ -97,7 +119,7 @@ func TestACKMismatchRejected(t *testing.T) {
 
 	baseAck := placement.CreateChannelAck{
 		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
-		OwnerEpoch: p.OwnerEpoch, FencingToken: p.FencingToken,
+		OwnerEpoch: 1, FencingToken: "daemon-tok",
 		DaemonID: p.DaemonID, Status: placement.AckBound,
 	}
 
@@ -106,9 +128,8 @@ func TestACKMismatchRejected(t *testing.T) {
 		fn   func(a placement.CreateChannelAck) placement.CreateChannelAck
 	}{
 		{"wrong create_request_id", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.CreateRequestID = "bogus"; return a }},
-		{"wrong owner_epoch", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.OwnerEpoch++; return a }},
-		{"wrong fencing_token", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.FencingToken = "tok-mutated"; return a }},
 		{"wrong daemon_id", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.DaemonID = "other"; return a }},
+		{"empty fencing_token", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.FencingToken = ""; return a }},
 		{"rejected status", func(a placement.CreateChannelAck) placement.CreateChannelAck {
 			a.Status = placement.AckRejected
 			return a
@@ -176,14 +197,15 @@ func TestColdStartGrace(t *testing.T) {
 	ctx := context.Background()
 	svc.WithStartedAt(c.now.Add(-time.Hour))
 
-	// Reserve + activate at t=0.
+	// Reserve + activate at t=0. Daemon supplies the fencing tuple in
+	// the ack per proto-foundation §3.3.3 Phase 2.
 	p, _, err := svc.Reserve(ctx, channel.ID("ch-4"), placement.DaemonID("d-1"), 1, nil)
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
 	ack := placement.CreateChannelAck{
 		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
-		OwnerEpoch: p.OwnerEpoch, FencingToken: p.FencingToken,
+		OwnerEpoch: 1, FencingToken: "daemon-tok",
 		DaemonID: p.DaemonID, Status: placement.AckBound,
 	}
 	if ok, err := svc.Activate(ctx, ack, 1); err != nil || !ok {
@@ -227,7 +249,7 @@ func TestResolveDaemonForChannelActiveOnly(t *testing.T) {
 
 	ack := placement.CreateChannelAck{
 		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
-		OwnerEpoch: p.OwnerEpoch, FencingToken: p.FencingToken,
+		OwnerEpoch: 1, FencingToken: "daemon-tok",
 		DaemonID: p.DaemonID, Status: placement.AckBound,
 	}
 	if ok, err := svc.Activate(ctx, ack, 1); err != nil || !ok {
@@ -279,20 +301,23 @@ func TestReclaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
+	const daemonEpoch placement.OwnerEpoch = 1
+	const daemonTok placement.FencingToken = "daemon-tok-6"
 	ack := placement.CreateChannelAck{
 		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
-		OwnerEpoch: p.OwnerEpoch, FencingToken: p.FencingToken,
+		OwnerEpoch: daemonEpoch, FencingToken: daemonTok,
 		DaemonID: p.DaemonID, Status: placement.AckBound,
 	}
 	if ok, _ := svc.Activate(ctx, ack, 1); !ok {
 		t.Fatalf("Activate failed")
 	}
 
-	// Matching reclaim accepted.
+	// Matching reclaim accepted — daemon presents the tuple it
+	// generated during bootstrap (persisted into placement by CASActivate).
 	c.now = c.now.Add(5 * time.Second)
 	reclaimAt := c.now.UnixMilli()
 	got, err := svc.AcceptReclaim(ctx, p.ChannelID, p.DaemonID, placement.ReclaimChannel{
-		ChannelID: p.ChannelID, FencingToken: p.FencingToken, OwnerEpoch: p.OwnerEpoch,
+		ChannelID: p.ChannelID, FencingToken: daemonTok, OwnerEpoch: daemonEpoch,
 	}, 9)
 	if err != nil || !got {
 		t.Fatalf("AcceptReclaim ok=%v err=%v", got, err)
@@ -334,9 +359,11 @@ func TestReclaimHijackDifferentDaemonID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
+	const daemonEpoch placement.OwnerEpoch = 1
+	const daemonTok placement.FencingToken = "daemon-tok-hijack"
 	ack := placement.CreateChannelAck{
 		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
-		OwnerEpoch: p.OwnerEpoch, FencingToken: p.FencingToken,
+		OwnerEpoch: daemonEpoch, FencingToken: daemonTok,
 		DaemonID: p.DaemonID, Status: placement.AckBound,
 	}
 	if ok, _ := svc.Activate(ctx, ack, 1); !ok {
@@ -345,7 +372,7 @@ func TestReclaimHijackDifferentDaemonID(t *testing.T) {
 
 	// The original owner reclaims with the correct tuple → accepted.
 	ok1, err := svc.AcceptReclaim(ctx, p.ChannelID, p.DaemonID, placement.ReclaimChannel{
-		ChannelID: p.ChannelID, FencingToken: p.FencingToken, OwnerEpoch: p.OwnerEpoch,
+		ChannelID: p.ChannelID, FencingToken: daemonTok, OwnerEpoch: daemonEpoch,
 	}, 7)
 	if err != nil || !ok1 {
 		t.Fatalf("owner reclaim ok=%v err=%v", ok1, err)
@@ -354,7 +381,7 @@ func TestReclaimHijackDifferentDaemonID(t *testing.T) {
 	// A different daemon presents an identical (epoch, token) tuple →
 	// MUST be rejected (no row update).
 	ok2, err := svc.AcceptReclaim(ctx, p.ChannelID, placement.DaemonID("d-attacker"), placement.ReclaimChannel{
-		ChannelID: p.ChannelID, FencingToken: p.FencingToken, OwnerEpoch: p.OwnerEpoch,
+		ChannelID: p.ChannelID, FencingToken: daemonTok, OwnerEpoch: daemonEpoch,
 	}, 8)
 	if err != nil {
 		t.Fatalf("hijack reclaim err: %v", err)
@@ -373,44 +400,104 @@ func TestReclaimHijackDifferentDaemonID(t *testing.T) {
 	}
 }
 
-// TestReserve_GeneratesOpaqueFencingToken asserts the server-side
-// Reserve path generates a fresh unguessable fencing_token (32-char hex)
-// per proto-foundation §3.6.1, and that it is decoupled from OwnerEpoch
-// — two Reserve calls produce different tokens even when OwnerEpoch
-// would collide.
-func TestReserve_GeneratesOpaqueFencingToken(t *testing.T) {
+// TestReserve_DoesNotPreGenerateFencing asserts the trust-root
+// direction defined by proto-foundation §3.3.3: server Reserve writes
+// owner_epoch=0 and an empty fencing_token. The daemon-side Phase 2
+// bootstrap is the trust root for fencing — it generates the
+// unguessable token and returns it in the ack. The CreateChannelRequest
+// carries no fencing fields (impl-layer2 §3.2.1).
+func TestReserve_DoesNotPreGenerateFencing(t *testing.T) {
 	t.Parallel()
 	c := &clock{now: time.Unix(1_700_000_000, 0)}
 	svc := newSvc(t, c)
 	ctx := context.Background()
 
-	p1, req1, err := svc.Reserve(ctx, channel.ID("ch-A"), placement.DaemonID("d-1"), 1, nil)
+	p, req, err := svc.Reserve(ctx, channel.ID("ch-A"), placement.DaemonID("d-1"), 1, nil)
 	if err != nil {
-		t.Fatalf("Reserve A: %v", err)
-	}
-	// Bump clock so OwnerEpoch differs; we mainly care about token
-	// independence from epoch.
-	c.now = c.now.Add(1 * time.Second)
-	p2, _, err := svc.Reserve(ctx, channel.ID("ch-B"), placement.DaemonID("d-1"), 1, nil)
-	if err != nil {
-		t.Fatalf("Reserve B: %v", err)
+		t.Fatalf("Reserve: %v", err)
 	}
 
-	// Token shape: 32-char hex.
-	if len(p1.FencingToken) != 32 {
-		t.Errorf("FencingToken len=%d want 32 (token=%q)", len(p1.FencingToken), p1.FencingToken)
+	// Phase 1 placement carries epoch=0 / token="".
+	if p.OwnerEpoch != 0 {
+		t.Errorf("placement.OwnerEpoch=%d want 0 (daemon is the trust root)", p.OwnerEpoch)
 	}
-	// Token is independent of OwnerEpoch — not a stringified int64.
-	if string(p1.FencingToken) == "1700000000000" || p1.FencingToken == placement.FencingToken(p1.CreateRequestID) {
-		t.Errorf("FencingToken leaks epoch / request id: %q (epoch=%d)", p1.FencingToken, p1.OwnerEpoch)
+	if p.FencingToken != "" {
+		t.Errorf("placement.FencingToken=%q want empty (daemon is the trust root)", p.FencingToken)
 	}
-	// Two reserves → two different tokens.
-	if p1.FencingToken == p2.FencingToken {
-		t.Errorf("two Reserve calls returned identical token %q", p1.FencingToken)
+	// CreateRequestID must still be allocated by the server (saga id).
+	if req.CreateRequestID == "" || req.CreateRequestID != p.CreateRequestID {
+		t.Errorf("request.CreateRequestID=%q placement.CreateRequestID=%q want non-empty equal",
+			req.CreateRequestID, p.CreateRequestID)
 	}
-	// Request carries the same token as the placement record.
-	if req1.FencingToken != p1.FencingToken {
-		t.Errorf("CreateChannelRequest.FencingToken=%q want placement.FencingToken=%q",
-			req1.FencingToken, p1.FencingToken)
+}
+
+// TestActivate_WritesDaemonFencingTuple asserts the Phase 3 CAS reads
+// owner_epoch / fencing_token FROM the daemon's ack and persists them
+// into the placement row (proto-foundation §3.3.3 Phase 3 +
+// impl-layer2 §3.2.3).
+func TestActivate_WritesDaemonFencingTuple(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+
+	p, _, err := svc.Reserve(ctx, channel.ID("ch-write-ack"), placement.DaemonID("d-1"), 7, nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	const daemonEpoch placement.OwnerEpoch = 1
+	const daemonTok placement.FencingToken = "01234567890abcdef01234567890abcd"
+	ack := placement.CreateChannelAck{
+		FrameID: "f-write-ack", ChannelID: p.ChannelID,
+		CreateRequestID: p.CreateRequestID,
+		OwnerEpoch:      daemonEpoch, FencingToken: daemonTok,
+		DaemonID: p.DaemonID, DaemonEpoch: 1, Status: placement.AckBound,
+	}
+	ok, err := svc.Activate(ctx, ack, 7)
+	if err != nil || !ok {
+		t.Fatalf("Activate ok=%v err=%v", ok, err)
+	}
+	got, _, _ := svc.Get(ctx, p.ChannelID)
+	if got.State != placement.StateActive {
+		t.Errorf("state=%q want active", got.State)
+	}
+	if got.OwnerEpoch != daemonEpoch {
+		t.Errorf("OwnerEpoch=%d want %d (from ack)", got.OwnerEpoch, daemonEpoch)
+	}
+	if got.FencingToken != daemonTok {
+		t.Errorf("FencingToken=%q want %q (from ack)", got.FencingToken, daemonTok)
+	}
+}
+
+// TestActivate_RejectsEmptyFencingToken asserts the server refuses to
+// CAS when the daemon-side ack omits the fencing token (impl-layer2
+// §3.2.2 marks it required on the accept path). The placement row
+// stays in 'creating' so the reconcile loop can drive it to orphan.
+func TestActivate_RejectsEmptyFencingToken(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+
+	p, _, err := svc.Reserve(ctx, channel.ID("ch-empty-tok"), placement.DaemonID("d-1"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	ack := placement.CreateChannelAck{
+		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
+		OwnerEpoch: 1, FencingToken: "", // ← protocol violation: missing
+		DaemonID: p.DaemonID, Status: placement.AckBound,
+	}
+	ok, err := svc.Activate(ctx, ack, 1)
+	if err != nil {
+		t.Fatalf("Activate err=%v", err)
+	}
+	if ok {
+		t.Errorf("Activate ok=true but ack lacked fencing_token; CAS must reject")
+	}
+	got, _, _ := svc.Get(ctx, p.ChannelID)
+	if got.State != placement.StateCreating {
+		t.Errorf("state=%q want creating (CAS should leave row untouched)", got.State)
 	}
 }

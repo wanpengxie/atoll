@@ -88,8 +88,8 @@ func TestViewSync_E2E(t *testing.T) {
 		if err != nil {
 			t.Fatalf("server recv #%d: %v", i, err)
 		}
-		if f.FrameType != daemonbus.FrameTypeViewsyncPush {
-			t.Fatalf("frame #%d type = %s", i, f.FrameType)
+		if f.FrameKind != daemonbus.FrameTypeViewsyncPush {
+			t.Fatalf("frame #%d type = %s", i, f.FrameKind)
 		}
 		var pf viewsync.PushFrame
 		if err := transit.DecodePayload(f, &pf); err != nil {
@@ -311,8 +311,8 @@ func TestDispatcher_ResyncRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.FrameType != daemonbus.FrameTypeViewsyncResyncResponse {
-		t.Errorf("unexpected response frame: %s", resp.FrameType)
+	if resp.FrameKind != daemonbus.FrameTypeViewsyncResyncResponse {
+		t.Errorf("unexpected response frame: %s", resp.FrameKind)
 	}
 	var rr viewsync.ResyncResponse
 	_ = transit.DecodePayload(resp, &rr)

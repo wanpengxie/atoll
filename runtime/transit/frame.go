@@ -26,10 +26,10 @@ func Encode(
 	}
 	return daemonbus.Frame{
 		FrameID:               daemonbus.FrameID(frameID),
-		FrameType:             frameType,
+		FrameKind:             frameType,
 		DaemonID:              placement.DaemonID(daemonID),
 		DaemonConnectionEpoch: epoch,
-		SentAt:                sentAt,
+		Ts:                sentAt,
 		Payload:               raw,
 	}, nil
 }

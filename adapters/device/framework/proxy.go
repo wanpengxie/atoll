@@ -39,15 +39,17 @@ type DeviceProxyDeps struct {
 }
 
 // DeviceProxy translates one adapter-level request into the
-// kernel/devicetransit device_transit.send frame + the per-request bookkeeping
-// (correlation reserve, F3 timer arm). One instance per Module per
-// channel; constructed inside Module.Init after the framework hands
-// over a ModuleContext.
+// kernel/devicetransit outbound frame (carried on the wire as
+// `device_transit.recv`, impl-layer2 §5.3.2) + the per-request
+// bookkeeping (correlation reserve, F3 timer arm). One instance per
+// Module per channel; constructed inside Module.Init after the
+// framework hands over a ModuleContext.
 //
 // The proxy intentionally does NOT call ctx.Respond. The Module owns
-// the response phase — when device_transit.recv arrives, Module decodes
-// the payload + calls Respond with a domain-specific terminal. The
-// proxy holds the "outbound + bookkeeping" half only.
+// the response phase — when an inbound `device_transit.send` arrives
+// (§5.3.1), Module decodes the payload + calls Respond with a
+// domain-specific terminal. The proxy holds the "outbound +
+// bookkeeping" half only.
 type DeviceProxy struct {
 	// AdapterName is the adapter identifier (e.g. "xhs"). Echoed into
 	// log / observability events.

@@ -78,6 +78,16 @@ func ViewFanout(
 			visible = append(visible, env.Sender.ID)
 		}
 		return dedupeSort(visible), nil
+
+	case message.VisibilitySystem:
+		// proto-layer0 §2.4: system visibility is protocol-internal
+		// metadata / intermediate output (e.g. agent.text progress
+		// bubbles, placement notices). impl-vocabulary §2.3 specifies
+		// view fanout default-skips these — the envelope still persists
+		// in the channel log for audit, but no view cache receives it.
+		// Callers that want to observe system-visibility messages must
+		// read the message log directly.
+		return nil, nil
 	}
 
 	// Unknown visibility (defensive — Step 2 already rejected).

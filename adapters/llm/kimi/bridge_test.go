@@ -362,9 +362,14 @@ func TestBridge_RunEmitsSingleTerminalOnTextDelta(t *testing.T) {
 
 // TestBridge_RunEmitsProgressPerToolStep — when the wire stream carries
 // ToolCallRequest → ToolCallResult pairs inside one Agent.Run (the
-// go-kimi soul "step" boundary), the bridge MUST emit one
-// `agent.progress` envelope per step, BEFORE the terminal `agent.text`
-// envelope. With 2 step boundaries we expect 2 progress + 1 text.
+// go-kimi soul "step" boundary), the bridge MUST emit one progress
+// envelope per step, BEFORE the terminal agent.text envelope. With 2
+// step boundaries we expect 2 progress + 1 text.
+//
+// Progress envelopes share type `agent.text` with the terminal reply
+// but carry `visibility=system` per impl-vocabulary §2.3 (the
+// historical standalone `agent.progress` type was collapsed during
+// m1.3 freeze — see R5-19).
 func TestBridge_RunEmitsProgressPerToolStep(t *testing.T) {
 	b := mustBridge(t)
 	ipc := newFakeIPC()
@@ -433,13 +438,13 @@ func TestBridge_RunEmitsProgressPerToolStep(t *testing.T) {
 		t.Fatalf("expected 3 envelopes (2 progress + 1 text); got %d", len(written))
 	}
 
-	// Envelope 1 — progress for step 1 (shell).
+	// Envelope 1 — progress for step 1 (shell): agent.text + system.
 	p1 := written[0]
-	if p1.Type != "agent.progress" {
-		t.Fatalf("written[0].type=%q want agent.progress", p1.Type)
+	if p1.Type != "agent.text" {
+		t.Fatalf("written[0].type=%q want agent.text (progress)", p1.Type)
 	}
-	if p1.Visibility != message.VisibilityPublic {
-		t.Errorf("p1 visibility=%q want public", p1.Visibility)
+	if p1.Visibility != message.VisibilitySystem {
+		t.Errorf("p1 visibility=%q want system", p1.Visibility)
 	}
 	var pp1 map[string]any
 	if err := json.Unmarshal(p1.Payload, &pp1); err != nil {
@@ -463,10 +468,13 @@ func TestBridge_RunEmitsProgressPerToolStep(t *testing.T) {
 		t.Errorf("p1 tool preview=%q want contains 'ls -laR'", got)
 	}
 
-	// Envelope 2 — progress for step 2 (read_file).
+	// Envelope 2 — progress for step 2 (read_file): agent.text + system.
 	p2 := written[1]
-	if p2.Type != "agent.progress" {
-		t.Fatalf("written[1].type=%q want agent.progress", p2.Type)
+	if p2.Type != "agent.text" {
+		t.Fatalf("written[1].type=%q want agent.text (progress)", p2.Type)
+	}
+	if p2.Visibility != message.VisibilitySystem {
+		t.Errorf("p2 visibility=%q want system", p2.Visibility)
 	}
 	var pp2 map[string]any
 	if err := json.Unmarshal(p2.Payload, &pp2); err != nil {
@@ -484,10 +492,14 @@ func TestBridge_RunEmitsProgressPerToolStep(t *testing.T) {
 		t.Errorf("p2 tool name=%v want read_file", tc2["name"])
 	}
 
-	// Envelope 3 — terminal agent.text.
+	// Envelope 3 — terminal agent.text (visibility=public, the actual
+	// reply, distinct from the per-step progress bubbles above).
 	final := written[2]
 	if final.Type != "agent.text" {
 		t.Fatalf("written[2].type=%q want agent.text", final.Type)
+	}
+	if final.Visibility != message.VisibilityPublic {
+		t.Errorf("final visibility=%q want public", final.Visibility)
 	}
 	var fp map[string]any
 	if err := json.Unmarshal(final.Payload, &fp); err != nil {

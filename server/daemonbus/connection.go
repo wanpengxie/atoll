@@ -148,10 +148,10 @@ func buildFrame(ft daemonbus.FrameType, daemonID placement.DaemonID, epoch daemo
 	}
 	return daemonbus.Frame{
 		FrameID:               daemonbus.FrameID(newFrameID()),
-		FrameType:             ft,
+		FrameKind:             ft,
 		DaemonID:              daemonID,
 		DaemonConnectionEpoch: epoch,
-		SentAt:                nowMs(),
+		Ts:                nowMs(),
 		Payload:               raw,
 	}, nil
 }
@@ -159,8 +159,8 @@ func buildFrame(ft daemonbus.FrameType, daemonID placement.DaemonID, epoch daemo
 // DecodeViewsyncPush turns a daemonbus.Frame into kernel/viewsync.PushFrame.
 func DecodeViewsyncPush(frame daemonbus.Frame) (viewsync.PushFrame, error) {
 	var out viewsync.PushFrame
-	if frame.FrameType != daemonbus.FrameTypeViewsyncPush {
-		return out, fmt.Errorf("daemonbus: not push frame: %s", frame.FrameType)
+	if frame.FrameKind != daemonbus.FrameTypeViewsyncPush {
+		return out, fmt.Errorf("daemonbus: not push frame: %s", frame.FrameKind)
 	}
 	if err := json.Unmarshal(frame.Payload, &out); err != nil {
 		return out, fmt.Errorf("daemonbus: unmarshal push: %w", err)
@@ -171,8 +171,8 @@ func DecodeViewsyncPush(frame daemonbus.Frame) (viewsync.PushFrame, error) {
 // DecodeCreateAck turns a daemonbus.Frame into placement.CreateChannelAck.
 func DecodeCreateAck(frame daemonbus.Frame) (placement.CreateChannelAck, error) {
 	var out placement.CreateChannelAck
-	if frame.FrameType != daemonbus.FrameTypeControlCreateChannelAck {
-		return out, fmt.Errorf("daemonbus: not create_channel_ack frame: %s", frame.FrameType)
+	if frame.FrameKind != daemonbus.FrameTypeControlCreateChannelAck {
+		return out, fmt.Errorf("daemonbus: not create_channel_ack frame: %s", frame.FrameKind)
 	}
 	if err := json.Unmarshal(frame.Payload, &out); err != nil {
 		return out, fmt.Errorf("daemonbus: unmarshal ack: %w", err)
@@ -186,8 +186,8 @@ func DecodeCreateAck(frame daemonbus.Frame) (placement.CreateChannelAck, error) 
 // DecodeReclaim parses control.daemon_reclaim payloads.
 func DecodeReclaim(frame daemonbus.Frame) (placement.ReclaimRequest, error) {
 	var out placement.ReclaimRequest
-	if frame.FrameType != daemonbus.FrameTypeControlDaemonReclaim {
-		return out, fmt.Errorf("daemonbus: not daemon_reclaim frame: %s", frame.FrameType)
+	if frame.FrameKind != daemonbus.FrameTypeControlDaemonReclaim {
+		return out, fmt.Errorf("daemonbus: not daemon_reclaim frame: %s", frame.FrameKind)
 	}
 	if err := json.Unmarshal(frame.Payload, &out); err != nil {
 		return out, fmt.Errorf("daemonbus: unmarshal reclaim: %w", err)

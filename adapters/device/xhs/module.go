@@ -45,9 +45,10 @@ type Config struct {
 	// NewExternalCorrelationID mints the id placed in Command.CorrelationID
 	// when the adapter wants to hide envelope.id from the extension.
 	// Empty defaults to envelope.id directly (M1.5 baseline:
-	// device_transit.send.request_id carries the canonical id; no need
-	// for a daemon-internal external id like M1.3 had — extension
-	// echoes request_id back via device_transit.recv.request_id).
+	// outbound `device_transit.recv.request_id` (impl-layer2 §5.3.2)
+	// carries the canonical id; no need for a daemon-internal external
+	// id like M1.3 had — extension echoes request_id back via inbound
+	// `device_transit.send.request_id` (§5.3.1)).
 	NewExternalCorrelationID func(envelopeID string) string
 }
 
@@ -99,11 +100,18 @@ func New(cfg Config) (*Module, error) {
 
 // Declares returns the static adapter metadata. Called exactly once
 // per Install per channel by the framework (L2 §8.1).
+//
+// TypeSchemas (R5-18) — every xhs type in domain-xhs-spec §1.1–§1.6
+// ships a per-kind allowed_kinds + payload schema row. The framework
+// fails install closed when an adapter declares TypeSchemas but a
+// Types entry has no matching row (no silent permissive-default
+// fallback when the adapter has explicitly opted into strict mode).
 func (m *Module) Declares() adapter.Declaration {
 	return adapter.Declaration{
 		Name:         AdapterName,
 		ActorID:      m.cfg.AdapterActorID,
 		Types:        append([]string{}, AllTypes...),
+		TypeSchemas:  DeclarationTypeSchemas(),
 		Binding:      Binding,
 		MaxPendingMs: m.cfg.MaxPendingMs,
 	}
@@ -157,10 +165,11 @@ func (m *Module) Init(_ context.Context, mctx *adapter.ModuleContext) error {
 // L2 §8.6 step 3).
 func (m *Module) Shutdown(_ context.Context) error { return nil }
 
-// Handle translates one inbound kind=request envelope into a
-// device_transit.send frame. Synchronous failure paths emit a failed
-// terminal immediately so the agent observes a closed-set terminal reason
-// without waiting on the F3 fallback timer.
+// Handle translates one inbound kind=request envelope into an outbound
+// `device_transit.recv` frame (impl-layer2 §5.3.2 outbound — adapter →
+// device). Synchronous failure paths emit a failed terminal immediately
+// so the agent observes a closed-set terminal reason without waiting on
+// the F3 fallback timer.
 func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 	if m.mctx == nil || m.proxy == nil {
 		return errors.New("xhs.Handle: Init was not called")
@@ -222,7 +231,8 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 	return nil
 }
 
-// OnExternalCallback decodes a device_transit.recv payload + emits the
+// OnExternalCallback decodes a `device_transit.send` payload
+// (impl-layer2 §5.3.1 inbound — device → adapter) + emits the
 // terminal response via ctx.Respond.
 //
 // The framework de-dupes orphan callbacks before invoking — when this

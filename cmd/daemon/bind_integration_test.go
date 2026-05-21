@@ -165,7 +165,7 @@ func waitForAck(t *testing.T, ctx context.Context, srv *transit.MockServer, want
 		if err != nil {
 			t.Fatalf("RecvFromDaemon: %v", err)
 		}
-		if f.FrameType == want {
+		if f.FrameKind == want {
 			return f
 		}
 	}

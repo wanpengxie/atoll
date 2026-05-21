@@ -79,10 +79,11 @@ func TestEndToEndRegisterLoginCreateChannel(t *testing.T) {
 		t.Fatalf("read code: %v", err)
 	}
 
-	// Register.
+	// Register — per impl-layer3 §4.3.2 (R4-9 / R5-13), always returns
+	// 202 with an opaque body to prevent user-enumeration.
 	post(t, client, srv.URL+"/api/identity/register",
 		`{"email":"alice@example.com","password":"topsecret123","code":"`+code+`"}`,
-		http.StatusCreated)
+		http.StatusAccepted)
 
 	// Login — collect cookie for downstream calls.
 	loginResp := postRaw(t, client, srv.URL+"/api/identity/login",
@@ -248,6 +249,115 @@ func TestHandleWriteMessage_MissingID(t *testing.T) {
 	}
 }
 
+// TestHandleWriteMessage_UnknownFieldRejected covers R5-16 (impl-layer3
+// §1.8.1 normative): the write-message endpoint MUST fail-closed reject
+// any unknown top-level field with HTTP 400 + the
+// `harness_envelope_unknown_field` reason. The default gin decoder
+// silently accepts extra fields; R5-16 swaps in a json.Decoder with
+// DisallowUnknownFields so the daemon harness Step 2 invariant is
+// observable at the L3 surface.
+func TestHandleWriteMessage_UnknownFieldRejected(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	sess := registerLoginAndCreateChannel(t, client, srv.URL, app, "unknown-field@example.com")
+
+	// Hand-rolled JSON so we can include a top-level field that
+	// writeMessageReq does NOT declare — `not_a_field` is the canary.
+	raw := `{
+		"id":           "msg-unknown-1",
+		"type":         "human.text",
+		"kind":         "event",
+		"payload":      {"text":"hi"},
+		"audience":     ["*"],
+		"not_a_field":  "should reject"
+	}`
+	req, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/channels/"+sess.channelID+"/messages",
+		strings.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: sess.session})
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400 (impl-layer3 §1.8.1 unknown field fail-closed)", resp.StatusCode)
+	}
+	var errBody struct {
+		Error        string `json:"error"`
+		RejectReason string `json:"reject_reason"`
+		RejectDetail string `json:"reject_detail"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&errBody); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if errBody.RejectReason != "harness_envelope_unknown_field" {
+		t.Errorf("reject_reason=%q want harness_envelope_unknown_field", errBody.RejectReason)
+	}
+	if errBody.Error != "harness_envelope_unknown_field" {
+		t.Errorf("error=%q want harness_envelope_unknown_field", errBody.Error)
+	}
+	if !strings.Contains(errBody.RejectDetail, "not_a_field") {
+		t.Errorf("reject_detail=%q should mention the offending field name", errBody.RejectDetail)
+	}
+}
+
+// TestHandleWriteMessage_KnownFieldsStillAccepted is the positive
+// companion to UnknownFieldRejected — a request whose top-level field
+// set matches writeMessageReq exactly must still pass through the
+// decoder; the R5-16 swap to DisallowUnknownFields MUST NOT regress the
+// happy path.
+func TestHandleWriteMessage_KnownFieldsStillAccepted(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	sess := registerLoginAndCreateChannel(t, client, srv.URL, app, "known-fields@example.com")
+
+	payload := writeBody{
+		ID:       "msg-known-1",
+		Type:     "human.text",
+		Kind:     "event",
+		Payload:  json.RawMessage(`{"text":"hi"}`),
+		Audience: []string{"*"},
+	}
+	raw, _ := json.Marshal(payload)
+	req, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/channels/"+sess.channelID+"/messages",
+		strings.NewReader(string(raw)))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: sess.session})
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	// We don't assert 200/202 here — there is no daemon attached so
+	// the gateway will surface a 503 once it reaches
+	// ConnectionForChannel. The bar for this test is "the decode
+	// step accepted the body" — which is true for anything that is
+	// NOT 400-with-harness_envelope_unknown_field.
+	if resp.StatusCode == http.StatusBadRequest {
+		var errBody struct {
+			Error        string `json:"error"`
+			RejectReason string `json:"reject_reason"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&errBody)
+		if errBody.RejectReason == "harness_envelope_unknown_field" || errBody.Error == "harness_envelope_unknown_field" {
+			t.Fatalf("known-field request was wrongly rejected as unknown_field: %+v", errBody)
+		}
+	}
+}
+
 // TestHandleWriteMessage_CallerIDForwardedToDaemon covers R4-3: the
 // gateway MUST forward the caller-supplied envelope.id unchanged into
 // the daemon control.write_message frame. This is what makes L1 §2.3
@@ -289,11 +399,13 @@ func TestHandleWriteMessage_CallerIDForwardedToDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
+	// Phase 2 ack carries daemon-generated fencing tuple (proto-foundation
+	// §3.3.3 + impl-layer2 §3.2.2).
 	ack := placement.CreateChannelAck{
 		ChannelID:       p.ChannelID,
 		CreateRequestID: createReq.CreateRequestID,
-		OwnerEpoch:      p.OwnerEpoch,
-		FencingToken:    p.FencingToken,
+		OwnerEpoch:      1,
+		FencingToken:    "daemon-tok-callerid",
 		DaemonID:        placement.DaemonID("d-callerid"),
 		Status:          placement.AckBound,
 	}
@@ -349,7 +461,7 @@ func TestHandleWriteMessage_CallerIDForwardedToDaemon(t *testing.T) {
 	raw, _ := json.Marshal(ackBody)
 	if err := dmnTx.WriteFrame(ctx, kerneldaemonbus.Frame{
 		FrameID:               frame.FrameID,
-		FrameType:             kerneldaemonbus.FrameTypeControlWriteMessageAck,
+		FrameKind:             kerneldaemonbus.FrameTypeControlWriteMessageAck,
 		DaemonID:              "d-callerid",
 		DaemonConnectionEpoch: epoch,
 		Payload:               raw,
@@ -710,11 +822,12 @@ func TestHandleWriteMessageResponseInheritsParentCorrelation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
+	// Phase 2 ack carries daemon-generated fencing tuple.
 	ack := placement.CreateChannelAck{
 		ChannelID:       p.ChannelID,
 		CreateRequestID: createReq.CreateRequestID,
-		OwnerEpoch:      p.OwnerEpoch,
-		FencingToken:    p.FencingToken,
+		OwnerEpoch:      1,
+		FencingToken:    "daemon-tok-corr",
 		DaemonID:        placement.DaemonID("d-corr"),
 		Status:          placement.AckBound,
 	}
@@ -766,7 +879,7 @@ func TestHandleWriteMessageResponseInheritsParentCorrelation(t *testing.T) {
 	raw, _ := json.Marshal(ackBody)
 	if err := dmnTx.WriteFrame(ctx, kerneldaemonbus.Frame{
 		FrameID:               frame.FrameID,
-		FrameType:             kerneldaemonbus.FrameTypeControlWriteMessageAck,
+		FrameKind:             kerneldaemonbus.FrameTypeControlWriteMessageAck,
 		DaemonID:              "d-corr",
 		DaemonConnectionEpoch: epoch,
 		Payload:               raw,
@@ -833,7 +946,7 @@ func registerLoginAndCreateChannel(t *testing.T, c *http.Client, baseURL string,
 
 	post(t, c, baseURL+"/api/identity/register",
 		`{"email":"`+email+`","password":"topsecret123","code":"`+code+`"}`,
-		http.StatusCreated)
+		http.StatusAccepted)
 
 	loginResp := postRaw(t, c, baseURL+"/api/identity/login",
 		`{"email":"`+email+`","password":"topsecret123"}`, http.StatusOK)
@@ -923,7 +1036,7 @@ func TestMockDaemonViewSyncRoundTrip(t *testing.T) {
 	send := func(ft kerneldaemonbus.FrameType, payload any) {
 		raw, _ := json.Marshal(payload)
 		if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
-			FrameID: kerneldaemonbus.FrameID("f-" + ft.String()), FrameType: ft,
+			FrameID: kerneldaemonbus.FrameID("f-" + ft.String()), FrameKind: ft,
 			DaemonID: "mock-d1", DaemonConnectionEpoch: epoch, Payload: raw,
 		}); err != nil {
 			t.Fatalf("write %s: %v", ft, err)
@@ -951,8 +1064,8 @@ func TestMockDaemonViewSyncRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read ack: %v", err)
 		}
-		if f.FrameType != kerneldaemonbus.FrameTypeViewsyncAck {
-			t.Fatalf("expected viewsync.ack, got %s", f.FrameType)
+		if f.FrameKind != kerneldaemonbus.FrameTypeViewsyncAck {
+			t.Fatalf("expected viewsync.ack, got %s", f.FrameKind)
 		}
 		var ack viewsync.AckFrame
 		if err := json.Unmarshal(f.Payload, &ack); err != nil {
@@ -1009,14 +1122,17 @@ func TestMockDaemonCreateChannelACK(t *testing.T) {
 		t.Fatalf("Reserve: %v", err)
 	}
 
+	// Phase 2 ack carries daemon-generated fencing tuple (proto-foundation
+	// §3.3.3 + impl-layer2 §3.2.2). The Phase 3 CAS will write these
+	// values into the placement row.
 	ack := placement.CreateChannelAck{
 		FrameID: "ack-1", ChannelID: req.ChannelID, CreateRequestID: req.CreateRequestID,
-		OwnerEpoch: req.OwnerEpoch, FencingToken: req.FencingToken,
+		OwnerEpoch: 1, FencingToken: "daemon-tok-gateway",
 		DaemonID: placement.DaemonID("d1"), DaemonEpoch: 1, Status: placement.AckBound,
 	}
 	raw, _ := json.Marshal(ack)
 	if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
-		FrameID: "f-ack", FrameType: kerneldaemonbus.FrameTypeControlCreateChannelAck,
+		FrameID: "f-ack", FrameKind: kerneldaemonbus.FrameTypeControlCreateChannelAck,
 		DaemonID: "d1", DaemonConnectionEpoch: epoch, Payload: raw,
 	}); err != nil {
 		t.Fatalf("write ack: %v", err)
@@ -1093,7 +1209,7 @@ func TestViewSyncGapDrainFanOut(t *testing.T) {
 		raw, _ := json.Marshal(payload)
 		if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
 			FrameID:   kerneldaemonbus.FrameID("f-" + itoa(int64(payload.Seq))),
-			FrameType: kerneldaemonbus.FrameTypeViewsyncPush,
+			FrameKind: kerneldaemonbus.FrameTypeViewsyncPush,
 			DaemonID:  "d-fanout", DaemonConnectionEpoch: epoch, Payload: raw,
 		}); err != nil {
 			t.Fatalf("write push %d: %v", payload.Seq, err)
@@ -1165,9 +1281,14 @@ func TestReclaimDaemonIDMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
+	// Phase 2 ack carries daemon-generated fencing tuple — capture it
+	// so the attacker's reclaim presents the post-activate values
+	// persisted in placement.
+	const daemonOwnerEpoch placement.OwnerEpoch = 1
+	const daemonFencingTok placement.FencingToken = "daemon-tok-victim"
 	ack := placement.CreateChannelAck{
 		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
-		OwnerEpoch: p.OwnerEpoch, FencingToken: p.FencingToken,
+		OwnerEpoch: daemonOwnerEpoch, FencingToken: daemonFencingTok,
 		DaemonID: placement.DaemonID("owner"), Status: placement.AckBound,
 	}
 	if ok, err := app.Placements().Activate(ctx, ack, placement.ConnectionEpoch(ownerEpoch)); err != nil || !ok {
@@ -1190,13 +1311,13 @@ func TestReclaimDaemonIDMismatch(t *testing.T) {
 		DaemonEpoch: 1,
 		Channels: []placement.ReclaimChannel{{
 			ChannelID:    p.ChannelID,
-			FencingToken: p.FencingToken,
-			OwnerEpoch:   p.OwnerEpoch,
+			FencingToken: daemonFencingTok,
+			OwnerEpoch:   daemonOwnerEpoch,
 		}},
 	})
 	if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
 		FrameID:               "f-attack",
-		FrameType:             kerneldaemonbus.FrameTypeControlDaemonReclaim,
+		FrameKind:             kerneldaemonbus.FrameTypeControlDaemonReclaim,
 		DaemonID:              "attacker",
 		DaemonConnectionEpoch: attackerEpoch,
 		Payload:               raw,

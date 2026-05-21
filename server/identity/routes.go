@@ -51,23 +51,58 @@ type registerReq struct {
 	DisplayName string `json:"display_name"`
 }
 
+// handleRegister implements impl-layer3 §4.3.2 anti user-enumeration contract.
+//
+// Contract (R4-9 / R5-13):
+//   - Always returns 202 Accepted with the same `{status, detail}` body when
+//     request schema is valid — regardless of whether the email is new,
+//     already registered, or otherwise unprocessable downstream.
+//   - The response body MUST NOT expose user fields (id / email /
+//     display_name / created_at). Such fields would let callers probe
+//     whether an email is registered.
+//   - Structural validation errors (missing fields, password too short,
+//     bad code) still surface as 4xx — those are caller errors that don't
+//     leak existence of the underlying account.
+//   - Internal / downstream errors are swallowed into the 202 (they only
+//     hit server logs); the caller cannot distinguish "email already
+//     registered" from "fresh registration succeeded".
 func (s *Service) handleRegister(c *gin.Context) {
 	var req registerReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	user, err := s.Register(c.Request.Context(), RegisterInput(req))
-	if err != nil {
-		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
-		return
+	if _, err := s.Register(c.Request.Context(), RegisterInput(req)); err != nil {
+		// Structural / caller-side validation errors keep their 4xx
+		// status — they don't leak whether the email exists.
+		if status := userEnumerationSafeStatus(err); status != 0 {
+			c.JSON(status, gin.H{"error": err.Error()})
+			return
+		}
+		// Everything else (incl. ErrEmailAlreadyExists, internal errors)
+		// collapses into the canonical 202 response.
 	}
-	c.JSON(http.StatusCreated, gin.H{
-		"id":           user.ID,
-		"email":        user.Email,
-		"display_name": user.DisplayName,
-		"created_at":   user.CreatedAt,
+	c.JSON(http.StatusAccepted, gin.H{
+		"status": "registration_accepted",
+		"detail": "verification email sent if address is registrable",
 	})
+}
+
+// userEnumerationSafeStatus returns the HTTP status for register-time
+// errors that are safe to surface (structural / caller validation). It
+// returns 0 when the error would leak user-existence and must be folded
+// into the canonical 202 response.
+func userEnumerationSafeStatus(err error) int {
+	switch {
+	case errors.Is(err, ErrEmailRequired),
+		errors.Is(err, ErrPasswordRequired),
+		errors.Is(err, ErrPasswordTooShort),
+		errors.Is(err, ErrCodeRequired):
+		return http.StatusBadRequest
+	case errors.Is(err, ErrCodeInvalid):
+		return http.StatusUnauthorized
+	}
+	return 0
 }
 
 type loginReq struct {
@@ -126,8 +161,6 @@ func httpStatusFor(err error) int {
 		errors.Is(err, ErrPasswordTooShort),
 		errors.Is(err, ErrCodeRequired):
 		return http.StatusBadRequest
-	case errors.Is(err, ErrEmailAlreadyExists):
-		return http.StatusConflict
 	case errors.Is(err, ErrInvalidCredentials),
 		errors.Is(err, ErrSessionInvalid),
 		errors.Is(err, ErrCodeInvalid):

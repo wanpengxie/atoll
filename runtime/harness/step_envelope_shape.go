@@ -76,10 +76,11 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (kha
 	// Empty visibility is legal here (Step Normalize defaults to public).
 	if env.Visibility != "" &&
 		env.Visibility != message.VisibilityPublic &&
-		env.Visibility != message.VisibilityPrivate {
+		env.Visibility != message.VisibilityPrivate &&
+		env.Visibility != message.VisibilitySystem {
 		return khar.Outcome{
 			RejectReason: message.HarnessVisibilityInvalid,
-			Detail:       "envelope.visibility not in {public, private}",
+			Detail:       "envelope.visibility not in {public, private, system}",
 		}, nil
 	}
 

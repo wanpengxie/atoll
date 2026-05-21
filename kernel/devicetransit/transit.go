@@ -30,7 +30,10 @@ const (
 	DirectionFromDevice TransitDirection = "from_device"
 )
 
-// SendFrame is the `device_transit.send`/`device_transit.recv` payload.
+// SendFrame is the shared payload carried by both `device_transit.send`
+// (impl-layer2 §5.3.1 inbound — device → adapter) and
+// `device_transit.recv` (§5.3.2 outbound — adapter → device); the
+// Direction field disambiguates per-frame intent.
 type SendFrame struct {
 	ChannelID       channel.ID        `json:"channel_id"`
 	DeviceSessionID DeviceSessionID   `json:"device_session_id"`

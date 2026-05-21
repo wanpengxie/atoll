@@ -38,19 +38,14 @@ type Handlers struct {
 	// control.reclaim_rejected.
 	OnReclaim func(ctx context.Context, conn *Connection, req placement.ReclaimRequest) error
 
-	// OnDeviceTransitSend handles device_transit.send frames pushed BY
-	// the daemon (daemon → server → device). The gateway decodes the
-	// devicetransit.SendFrame body and asks the devicebus.Service to relay
-	// it to the device WS keyed by SendFrame.DeviceSessionID.
-	//
-	// Naming note (T147 §A-S1): pre-T147 this slot was misnamed
-	// OnDeviceTransitRecv and registered against FrameTypeDeviceTransitRecv
-	// — but recv is the device → server direction (the gateway's
-	// ForwardDeviceFrame produces those after a device WS read), so the
-	// daemon-sent frame never reached this hook. Phase-4 renames + flips
-	// the case to FrameTypeDeviceTransitSend so the wire shape matches
-	// the daemon's transit.DeviceTransit.Send call.
-	OnDeviceTransitSend func(ctx context.Context, conn *Connection, frame daemonbus.Frame) error
+	// OnDeviceTransitRecv handles device_transit.recv frames pushed BY
+	// the daemon (daemon → server → device). Per impl-layer2 §5.3.2
+	// this is the outbound (adapter → device) direction: daemon adapter
+	// emits the payload, server relays it to the device WS. The gateway
+	// decodes the devicetransit.SendFrame body and asks the
+	// devicebus.Service to relay it to the device WS keyed by
+	// SendFrame.DeviceSessionID.
+	OnDeviceTransitRecv func(ctx context.Context, conn *Connection, frame daemonbus.Frame) error
 }
 
 // HeartbeatPayload is the wire shape of `control.heartbeat`. Demo
@@ -87,7 +82,7 @@ func (c *Connection) Run(ctx context.Context, h Handlers) error {
 		matched := c.matchAck(frame)
 
 		// Then dispatch to typed handlers.
-		switch frame.FrameType {
+		switch frame.FrameKind {
 		case daemonbus.FrameTypeViewsyncPush:
 			if h.OnPush != nil {
 				push, perr := DecodeViewsyncPush(frame)
@@ -143,9 +138,9 @@ func (c *Connection) Run(ctx context.Context, h Handlers) error {
 					return err
 				}
 			}
-		case daemonbus.FrameTypeDeviceTransitSend:
-			if h.OnDeviceTransitSend != nil {
-				if err := h.OnDeviceTransitSend(ctx, c, frame); err != nil {
+		case daemonbus.FrameTypeDeviceTransitRecv:
+			if h.OnDeviceTransitRecv != nil {
+				if err := h.OnDeviceTransitRecv(ctx, c, frame); err != nil {
 					return err
 				}
 			}

@@ -124,9 +124,18 @@ func (s *SQLStore) ResolveDaemonForChannel(ctx context.Context, channelID channe
 	return placement.DaemonID(daemonID), true, nil
 }
 
-// CASActivate runs the L2 §1.4.11.3 step 5 CAS — UPDATE state to
-// active iff ALL of (create_request_id, owner_epoch, fencing_token,
-// daemon_id) match the ACK + state='creating'.
+// CASActivate runs the proto-foundation §3.3.3 Phase 3 CAS —
+// advance state to 'active' iff (channel_id, create_request_id,
+// state='creating') still match, then WRITE the daemon-generated
+// fencing tuple (owner_epoch, fencing_token) and the confirmed
+// daemon_id from the ack into the placement row. The fencing trust
+// root is the daemon (impl-layer2 §3.2.2): owner_epoch / fencing_token
+// arrive FROM the ack, they are NOT a CAS predicate.
+//
+// The CAS predicate is the minimal set that preserves saga identity —
+// channel_id + create_request_id + state='creating'. This rejects
+// concurrent reclaim / abandon (state changed) and stale ack replays
+// for a different saga (create_request_id mismatch).
 //
 // Returns ok=true on successful CAS; ok=false (no error) when the
 // CAS lost — callers should treat this as "ACK rejected" and let the
@@ -141,23 +150,35 @@ func (s *SQLStore) CASActivate(
 		// daemon explicitly rejected — never advance to active.
 		return false, nil
 	}
+	if ack.FencingToken == "" {
+		// daemon failed to supply the fencing token — protocol violation
+		// (impl-layer2 §3.2.2 marks fencing_token as required on the
+		// accept path). Reject so reconcile can drive the row to orphan.
+		return false, nil
+	}
+	// daemon_id is pinned in the WHERE clause to the candidate daemon
+	// the server reserved against at Phase 1 — defence-in-depth so an
+	// ack from a different daemon (which the Match pre-check already
+	// blocks) cannot still flip the row. owner_epoch / fencing_token
+	// are NOT in the WHERE clause: they are daemon outputs being
+	// written into the placement row, not predicates.
 	res, err := s.db.ExecContext(
 		ctx,
 		`UPDATE channel_placements
 		    SET state                    = 'active',
+		        owner_epoch              = ?,
+		        fencing_token            = ?,
 		        activated_at             = ?,
 		        entered_state_at         = ?,
 		        daemon_connection_epoch  = ?,
 		        last_heartbeat_at        = ?
 		  WHERE channel_id        = ?
 		    AND create_request_id = ?
-		    AND owner_epoch       = ?
-		    AND fencing_token     = ?
 		    AND daemon_id         = ?
 		    AND state             = 'creating'`,
+		int64(ack.OwnerEpoch), string(ack.FencingToken),
 		nowMs, nowMs, int64(newConnectionEpoch), nowMs,
 		string(ack.ChannelID), string(ack.CreateRequestID),
-		int64(ack.OwnerEpoch), string(ack.FencingToken),
 		string(ack.DaemonID),
 	)
 	if err != nil {

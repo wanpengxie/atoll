@@ -198,7 +198,7 @@ func TestDispatchPushAndAck(t *testing.T) {
 	}
 	rawPayload, _ := json.Marshal(pushFrame)
 	if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
-		FrameID: "p-1", FrameType: kerneldaemonbus.FrameTypeViewsyncPush,
+		FrameID: "p-1", FrameKind: kerneldaemonbus.FrameTypeViewsyncPush,
 		DaemonID: "d1", DaemonConnectionEpoch: 5, Payload: rawPayload,
 	}); err != nil {
 		t.Fatalf("write push: %v", err)
@@ -218,8 +218,8 @@ func TestDispatchPushAndAck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read ack: %v", err)
 	}
-	if ack.FrameType != kerneldaemonbus.FrameTypeViewsyncAck {
-		t.Errorf("ack frame_type=%q", ack.FrameType)
+	if ack.FrameKind != kerneldaemonbus.FrameTypeViewsyncAck {
+		t.Errorf("ack frame_type=%q", ack.FrameKind)
 	}
 
 	var ackBody viewsync.AckFrame
@@ -234,12 +234,12 @@ func TestDispatchPushAndAck(t *testing.T) {
 	<-runErr
 }
 
-// TestDispatch_DeviceTransitSend_RoutesToHandler covers the T147 §A-S1
-// routing fix: a daemon-sent device_transit.send frame must reach the
-// OnDeviceTransitSend hook (previously the dispatch case matched
-// FrameTypeDeviceTransitRecv — the wrong direction — so daemon pushes
-// were silently dropped on the server side).
-func TestDispatch_DeviceTransitSend_RoutesToHandler(t *testing.T) {
+// TestDispatch_DeviceTransitRecv_RoutesToHandler covers the R5-17
+// spec-aligned routing: a daemon-sent `device_transit.recv` frame
+// (impl-layer2 §5.3.2 outbound — adapter → device, daemon → server)
+// must reach the OnDeviceTransitRecv hook so the gateway can relay the
+// payload onto the device WS.
+func TestDispatch_DeviceTransitRecv_RoutesToHandler(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
@@ -249,7 +249,7 @@ func TestDispatch_DeviceTransitSend_RoutesToHandler(t *testing.T) {
 
 	got := make(chan kerneldaemonbus.Frame, 1)
 	handlers := daemonbus.Handlers{
-		OnDeviceTransitSend: func(_ context.Context, _ *daemonbus.Connection, f kerneldaemonbus.Frame) error {
+		OnDeviceTransitRecv: func(_ context.Context, _ *daemonbus.Connection, f kerneldaemonbus.Frame) error {
 			got <- f
 			return nil
 		},
@@ -265,8 +265,8 @@ func TestDispatch_DeviceTransitSend_RoutesToHandler(t *testing.T) {
 	}
 	raw, _ := json.Marshal(body)
 	if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
-		FrameID:               "frame-send-1",
-		FrameType:             kerneldaemonbus.FrameTypeDeviceTransitSend,
+		FrameID:               "frame-recv-1",
+		FrameKind:             kerneldaemonbus.FrameTypeDeviceTransitRecv,
 		DaemonID:              "d1",
 		DaemonConnectionEpoch: 5,
 		Payload:               raw,
@@ -275,14 +275,14 @@ func TestDispatch_DeviceTransitSend_RoutesToHandler(t *testing.T) {
 	}
 	select {
 	case f := <-got:
-		if f.FrameType != kerneldaemonbus.FrameTypeDeviceTransitSend {
-			t.Errorf("frame_type=%q want %q", f.FrameType, kerneldaemonbus.FrameTypeDeviceTransitSend)
+		if f.FrameKind != kerneldaemonbus.FrameTypeDeviceTransitRecv {
+			t.Errorf("frame_kind=%q want %q", f.FrameKind, kerneldaemonbus.FrameTypeDeviceTransitRecv)
 		}
-		if f.FrameID != "frame-send-1" {
+		if f.FrameID != "frame-recv-1" {
 			t.Errorf("frame_id=%q", f.FrameID)
 		}
 	case <-ctx.Done():
-		t.Fatal("OnDeviceTransitSend never invoked — dispatch routing still broken")
+		t.Fatal("OnDeviceTransitRecv never invoked — dispatch routing still broken")
 	}
 	_ = conn.Close()
 }
@@ -311,7 +311,7 @@ func TestStaleEpochDropped(t *testing.T) {
 	raw, _ := json.Marshal(pushFrame)
 	// Frame epoch = 3, server epoch = 5 → stale → dropped.
 	_ = dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
-		FrameID: "p-stale", FrameType: kerneldaemonbus.FrameTypeViewsyncPush,
+		FrameID: "p-stale", FrameKind: kerneldaemonbus.FrameTypeViewsyncPush,
 		DaemonID: "d1", DaemonConnectionEpoch: 3, Payload: raw,
 	})
 
@@ -372,8 +372,9 @@ func TestHandleWS_IdleClientTrippedByReadDeadline(t *testing.T) {
 	srv := httptest.NewServer(r)
 	defer srv.Close()
 
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/daemonbus?daemon_id=d1&key=test-secret"
-	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/daemonbus"
+	dialer := daemonWSDialer("d1", "test-secret")
+	ws, _, err := dialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -438,8 +439,9 @@ func TestHandleWS_PingKeepsConnAlive(t *testing.T) {
 	srv := httptest.NewServer(r)
 	defer srv.Close()
 
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/daemonbus?daemon_id=d2&key=test-secret"
-	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/daemonbus"
+	dialer := daemonWSDialer("d2", "test-secret")
+	ws, _, err := dialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -470,4 +472,18 @@ func TestHandleWS_PingKeepsConnAlive(t *testing.T) {
 	if _, ok := svc.ConnectionFor(placement.DaemonID("d2")); !ok {
 		t.Fatal("server unregistered a healthy (pong-responding) daemon")
 	}
+}
+
+// daemonWSDialer returns a gorilla dialer that offers the v4 daemon
+// subprotocol slots (real proto + daemon_id slot + key slot) on the
+// handshake. Per R5-15 the secret rides in Sec-WebSocket-Protocol, not
+// the URL query.
+func daemonWSDialer(daemonID, key string) *websocket.Dialer {
+	d := *websocket.DefaultDialer
+	d.Subprotocols = []string{
+		"coagent.daemon.v1",
+		"daemon." + daemonID,
+		"key." + key,
+	}
+	return &d
 }

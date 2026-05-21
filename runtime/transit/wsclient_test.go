@@ -51,24 +51,54 @@ func newWSHarness(t *testing.T) *wsHarness {
 }
 
 func (h *wsHarness) handle(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	if q.Get("daemon_id") != h.expectedID || q.Get("key") != h.expectedKey {
+	// R5-15: daemon_id + key now ride in Sec-WebSocket-Protocol
+	// subprotocol slots (`daemon.<id>`, `key.<secret>`), not URL query.
+	// The real protocol is `coagent.daemon.v1` and must be selected
+	// (echoed) by the server per RFC 6455 — accomplished by setting
+	// upgrader.Subprotocols.
+	var (
+		gotID, gotKey string
+		hasRealProto  bool
+	)
+	for _, line := range r.Header.Values("Sec-WebSocket-Protocol") {
+		for _, part := range strings.Split(line, ",") {
+			p := strings.TrimSpace(part)
+			switch {
+			case p == "coagent.daemon.v1":
+				hasRealProto = true
+			case strings.HasPrefix(p, "daemon."):
+				gotID = strings.TrimPrefix(p, "daemon.")
+			case strings.HasPrefix(p, "key."):
+				gotKey = strings.TrimPrefix(p, "key.")
+			}
+		}
+	}
+	if !hasRealProto || gotID != h.expectedID || gotKey != h.expectedKey {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	// Ensure the upgrader echoes back ONLY the real subprotocol — never
+	// the daemon.* / key.* slots (those carry secrets).
+	h.upgrader.Subprotocols = []string{"coagent.daemon.v1"}
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.t.Errorf("upgrade: %v", err)
 		return
 	}
+	// Defensive check that the negotiated subprotocol echoed back is
+	// the real protocol; a misconfigured server echoing `key.*` would
+	// be a credential leak.
+	if got := conn.Subprotocol(); got != "" && got != "coagent.daemon.v1" {
+		h.t.Errorf("server echoed unexpected subprotocol: %q", got)
+	}
 	epoch := h.epochAlloc.Add(1)
 	// Send connection_accepted frame the client expects.
 	frame := daemonbus.Frame{
 		FrameID:               "boot-1",
-		FrameType:             daemonbus.FrameTypeControlConnectionAccepted,
+		FrameKind:             daemonbus.FrameTypeControlConnectionAccepted,
 		DaemonID:              placement.DaemonID(h.expectedID),
 		DaemonConnectionEpoch: daemonbus.ConnectionEpoch(epoch),
-		SentAt:                time.Now().UnixMilli(),
+		Ts:                time.Now().UnixMilli(),
 		Payload:               []byte(`{"connection_epoch":` + itoaInt64(epoch) + `}`),
 	}
 	data, _ := json.Marshal(frame)
@@ -158,9 +188,9 @@ func TestWSClient_SendRecvRoundTrip(t *testing.T) {
 			// Echo back a control.heartbeat_ack so client can Recv.
 			ack := daemonbus.Frame{
 				FrameID:               "ack-1",
-				FrameType:             daemonbus.FrameTypeControlHeartbeatAck,
+				FrameKind:             daemonbus.FrameTypeControlHeartbeatAck,
 				DaemonConnectionEpoch: f.DaemonConnectionEpoch,
-				SentAt:                time.Now().UnixMilli(),
+				Ts:                time.Now().UnixMilli(),
 				Payload:               []byte(`{"frame_id":"` + f.FrameID + `"}`),
 			}
 			data, _ = json.Marshal(ack)
@@ -185,10 +215,10 @@ func TestWSClient_SendRecvRoundTrip(t *testing.T) {
 
 	frame := daemonbus.Frame{
 		FrameID:               "hb-1",
-		FrameType:             daemonbus.FrameTypeControlHeartbeat,
+		FrameKind:             daemonbus.FrameTypeControlHeartbeat,
 		DaemonID:              placement.DaemonID("daemon-A"),
 		DaemonConnectionEpoch: epoch,
-		SentAt:                time.Now().UnixMilli(),
+		Ts:                time.Now().UnixMilli(),
 		Payload:               []byte(`{"channels":[]}`),
 	}
 	if err := client.Send(ctx, frame); err != nil {
@@ -197,8 +227,8 @@ func TestWSClient_SendRecvRoundTrip(t *testing.T) {
 
 	select {
 	case got := <-serverFrameCh:
-		if got.FrameType != daemonbus.FrameTypeControlHeartbeat {
-			t.Errorf("server got frame_type=%s", got.FrameType)
+		if got.FrameKind != daemonbus.FrameTypeControlHeartbeat {
+			t.Errorf("server got frame_type=%s", got.FrameKind)
 		}
 		if got.FrameID != frame.FrameID {
 			t.Errorf("server got frame_id=%q want %q", got.FrameID, frame.FrameID)
@@ -211,8 +241,8 @@ func TestWSClient_SendRecvRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Recv: %v", err)
 	}
-	if got.FrameType != daemonbus.FrameTypeControlHeartbeatAck {
-		t.Errorf("got frame_type=%s", got.FrameType)
+	if got.FrameKind != daemonbus.FrameTypeControlHeartbeatAck {
+		t.Errorf("got frame_type=%s", got.FrameKind)
 	}
 }
 
@@ -320,10 +350,10 @@ func TestWSClient_WriteDeadlineUnblocksSendMu(t *testing.T) {
 	}
 	frame := daemonbus.Frame{
 		FrameID:               "stuck-1",
-		FrameType:             daemonbus.FrameTypeControlHeartbeat,
+		FrameKind:             daemonbus.FrameTypeControlHeartbeat,
 		DaemonID:              placement.DaemonID("daemon-A"),
 		DaemonConnectionEpoch: epoch,
-		SentAt:                time.Now().UnixMilli(),
+		Ts:                time.Now().UnixMilli(),
 		Payload:               []byte(`{"blob":"` + string(big) + `"}`),
 	}
 
@@ -413,10 +443,10 @@ func TestWSClient_SendFailureMarksConnDead(t *testing.T) {
 
 	frame := daemonbus.Frame{
 		FrameID:               "f-1",
-		FrameType:             daemonbus.FrameTypeControlHeartbeat,
+		FrameKind:             daemonbus.FrameTypeControlHeartbeat,
 		DaemonID:              placement.DaemonID("daemon-A"),
 		DaemonConnectionEpoch: epoch,
-		SentAt:                time.Now().UnixMilli(),
+		Ts:                time.Now().UnixMilli(),
 		Payload:               []byte(`{}`),
 	}
 	// First Send may succeed (queued in OS buffer before close fully

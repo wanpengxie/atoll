@@ -70,8 +70,8 @@ func TestHeartbeatSender_EmitsControlHeartbeat(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RecvFromDaemon: %v", err)
 		}
-		if f.FrameType != daemonbus.FrameTypeControlHeartbeat {
-			t.Fatalf("unexpected frame_type %q (want %q)", f.FrameType, daemonbus.FrameTypeControlHeartbeat)
+		if f.FrameKind != daemonbus.FrameTypeControlHeartbeat {
+			t.Fatalf("unexpected frame_type %q (want %q)", f.FrameKind, daemonbus.FrameTypeControlHeartbeat)
 		}
 		if f.DaemonID != "daemon-test" {
 			t.Errorf("frame.DaemonID=%q want daemon-test", f.DaemonID)
@@ -122,8 +122,8 @@ func TestHeartbeatSender_NilChannelsFnSafe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecvFromDaemon: %v", err)
 	}
-	if f.FrameType != daemonbus.FrameTypeControlHeartbeat {
-		t.Fatalf("frame_type=%q", f.FrameType)
+	if f.FrameKind != daemonbus.FrameTypeControlHeartbeat {
+		t.Fatalf("frame_type=%q", f.FrameKind)
 	}
 	var body transit.HeartbeatBody
 	if err := json.Unmarshal(f.Payload, &body); err != nil {

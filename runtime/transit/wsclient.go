@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,16 +41,34 @@ const DefaultWSWriteTimeout = 10 * time.Second
 // daemon is quiescent between ticks).
 const DefaultWSIdleReadTimeout = 70 * time.Second
 
+// daemonWSSubprotocol mirrors server/daemonbus.DaemonWSSubprotocol — the
+// real subprotocol negotiated on the /daemonbus handshake. Duplicated
+// here as a constant rather than imported to keep runtime/transit free
+// of the server/ dependency (kernel-purity-adjacent: this is the
+// daemon-side dialer; importing server/daemonbus would invert the
+// dependency direction).
+const daemonWSSubprotocol = "coagent.daemon.v1"
+
+// daemonWSDaemonIDPrefix / daemonWSKeyPrefix are the slot prefixes used
+// to ferry handshake identity + secret through `Sec-WebSocket-Protocol`.
+// Mirror of server/daemonbus.daemonWSDaemonIDPrefix / daemonWSKeyPrefix.
+const (
+	daemonWSDaemonIDPrefix = "daemon."
+	daemonWSKeyPrefix      = "key."
+)
+
 // WSClientConfig wires a WSClient — the production daemon-side transit
 // Transport that speaks gorilla/websocket against
 // `server/daemonbus.HandleWS`.
 //
-// The server side dials are auth'd via two query params:
+// Handshake auth: daemon_id + key travel in the `Sec-WebSocket-Protocol`
+// subprotocol header (R5-15: avoid URL-query leak into access logs /
+// proxy logs):
 //
-//	?daemon_id=<id>&key=<shared-secret>
+//	Sec-WebSocket-Protocol: coagent.daemon.v1, daemon.<id>, key.<secret>
 //
 // `host` and `version` are optional metadata the server records but
-// does not validate (kept for ops triage).
+// does not validate (non-secret; kept in URL query for ops triage).
 type WSClientConfig struct {
 	// URL is the daemonbus WS endpoint, e.g.
 	// "ws://localhost:8832/api/daemonbus". The trailing query string
@@ -174,9 +193,10 @@ func (c *WSClient) Connect(ctx context.Context) (daemonbus.ConnectionEpoch, erro
 	if err != nil {
 		return 0, fmt.Errorf("transit: parse URL: %w", err)
 	}
+	// host / version are non-secret operational metadata and stay in
+	// URL query (server uses them only for ops triage). daemon_id / key
+	// are secret — they move to Sec-WebSocket-Protocol below (R5-15).
 	q := u.Query()
-	q.Set("daemon_id", c.cfg.DaemonID)
-	q.Set("key", c.cfg.Key)
 	if c.cfg.Host != "" {
 		q.Set("host", c.cfg.Host)
 	}
@@ -185,13 +205,31 @@ func (c *WSClient) Connect(ctx context.Context) (daemonbus.ConnectionEpoch, erro
 	}
 	u.RawQuery = q.Encode()
 
+	// Sec-WebSocket-Protocol slot encoding:
+	//   coagent.daemon.v1     real subprotocol (server echoes only this)
+	//   daemon.<daemon_id>    handshake identity slot
+	//   key.<shared-secret>   bearer secret slot
+	//
+	// gorilla's dialer wires `Sec-WebSocket-Protocol` for us when we
+	// set Dialer.Subprotocols; we keep the slot order so the wire-level
+	// header matches the spec ordering exactly. Per RFC 6455 the server
+	// MAY pick any of the offered subprotocols, but our server selects
+	// only `coagent.daemon.v1` — extractEpoch + the existing
+	// connection_accepted handshake verifies post-upgrade liveness.
+	handshakeHeader := http.Header{}
+	handshakeHeader.Set("Sec-WebSocket-Protocol", strings.Join([]string{
+		daemonWSSubprotocol,
+		daemonWSDaemonIDPrefix + c.cfg.DaemonID,
+		daemonWSKeyPrefix + c.cfg.Key,
+	}, ", "))
+
 	dialCtx := ctx
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		dialCtx, cancel = context.WithTimeout(ctx, c.cfg.HandshakeTimeout)
 		defer cancel()
 	}
-	conn, _, err := c.cfg.Dialer.DialContext(dialCtx, u.String(), http.Header{})
+	conn, _, err := c.cfg.Dialer.DialContext(dialCtx, u.String(), handshakeHeader)
 	if err != nil {
 		c.log.Warn().Str("event", "transit.ws.dial_failed").
 			Str("url", u.String()).
@@ -430,7 +468,7 @@ func extractEpoch(frame daemonbus.Frame) (daemonbus.ConnectionEpoch, error) {
 		}
 	}
 	return 0, fmt.Errorf("transit: connection_accepted frame missing epoch (frame_type=%s)",
-		frame.FrameType)
+		frame.FrameKind)
 }
 
 // compile-time interface check

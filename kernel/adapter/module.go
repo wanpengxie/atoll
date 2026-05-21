@@ -125,8 +125,9 @@ type Module interface {
 	Handle(ctx context.Context, env *message.Envelope) error
 
 	// OnExternalCallback translates one inbound external callback (e.g.
-	// webhook body, WS message, device_transit.recv frame) into a
-	// Respond call. Framework de-dupes the callback before invoking
-	// (terminal already exists → not invoked).
+	// webhook body, WS message, `device_transit.send` frame —
+	// impl-layer2 §5.3.1 inbound) into a Respond call. Framework de-dupes
+	// the callback before invoking (terminal already exists → not
+	// invoked).
 	OnExternalCallback(ctx context.Context, payload []byte) error
 }

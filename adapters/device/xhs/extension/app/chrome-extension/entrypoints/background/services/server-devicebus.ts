@@ -1,7 +1,10 @@
 // services/server-devicebus.ts — coagent **server** devicebus WS client (v4).
 //
-// Protocol (T147 §A-E + L4 §2.6.4):
-//   - WS endpoint: wss://{server-host}/devicebus?session_id={sid}&token={tok}
+// Protocol (impl-layer3 §6.5.1 — R5-14):
+//   - WS endpoint: wss://{server-host}/devicebus?session_id={sid}
+//   - Handshake:   Sec-WebSocket-Protocol: coagent.device.v1, token.{tok}
+//                  (token rides in WS subprotocol slot — NOT URL query,
+//                   to avoid leaking into proxy/access logs)
 //   - Inbound DeviceFrame (daemon → server → device):
 //       {
 //         direction: "to_device",
@@ -207,21 +210,36 @@ export interface ServerDeviceConfig {
 // ─── WS URL helpers ──────────────────────────────────────────────────────
 
 /**
- * Build the v4 devicebus WS URL with session_id + token query params.
- * Returns "" when any required field is missing so callers can short-
- * circuit without trying to construct an invalid URL().
+ * Real WebSocket subprotocol negotiated on /devicebus — mirror of
+ * `server/devicebus.DeviceWSSubprotocol`. Server selects (and echoes
+ * back) this; never echoes the `token.*` slot.
+ */
+export const DEVICE_WS_SUBPROTOCOL = 'coagent.device.v1';
+
+/** Prefix used on the `token.*` pseudo-subprotocol slot. */
+export const DEVICE_WS_TOKEN_PREFIX = 'token.';
+
+/**
+ * Build the v4 devicebus WS URL with `session_id` in the query string.
+ * Per impl-layer3 §6.5.1 (R5-14) the bearer token does NOT go on the
+ * URL — it rides in `Sec-WebSocket-Protocol` (see
+ * `buildDeviceBusSubprotocols`). session_id is non-secret (forensics
+ * correlation only) and stays in the URL.
  *
- * Mirrors the daemon-direct legacy `resolveWsUrl()` shape.
+ * Returns "" when any required field is missing so callers can short-
+ * circuit without trying to construct an invalid URL.
  */
 export function buildDeviceBusUrl(cfg: ServerDeviceConfig): string {
   const base = (cfg.wsEndpoint ?? '').trim();
   const sid = (cfg.sessionId ?? '').trim();
   const tok = (cfg.token ?? '').trim();
+  // token is required at the config-validity gate, even though it no
+  // longer goes on the URL — without it the subprotocol header would
+  // be malformed and the upgrade would 400.
   if (!base || !sid || !tok) return '';
   try {
     const u = new URL(base);
     u.searchParams.set('session_id', sid);
-    u.searchParams.set('token', tok);
     return u.toString();
   } catch {
     return '';
@@ -229,12 +247,31 @@ export function buildDeviceBusUrl(cfg: ServerDeviceConfig): string {
 }
 
 /**
- * Redact the bearer token in a URL so it doesn't leak into chrome.storage.
- * Both `token` and `session_id` are sensitive; we mask `token` only —
- * `session_id` is needed for forensics correlation (it pairs with server
- * audit logs) and is non-secret after issuance.
+ * Build the `Sec-WebSocket-Protocol` subprotocol list the client offers
+ * on the /devicebus handshake (impl-layer3 §6.5.1):
  *
- * Equivalent to legacy `redactKey` for the new query shape.
+ *   `coagent.device.v1` — real subprotocol; server echoes this back
+ *   `token.<token>`     — bearer token slot; server consumes + does
+ *                         NOT echo (token must not be reflected to
+ *                         the client per RFC 6455 + spec)
+ *
+ * Returns an empty array when token is missing so callers can decide
+ * whether to abort the connect attempt. Pass the result as the second
+ * arg of `new WebSocket(url, protocols)`.
+ */
+export function buildDeviceBusSubprotocols(cfg: ServerDeviceConfig): string[] {
+  const tok = (cfg.token ?? '').trim();
+  if (!tok) return [];
+  return [DEVICE_WS_SUBPROTOCOL, `${DEVICE_WS_TOKEN_PREFIX}${tok}`];
+}
+
+/**
+ * Redact the bearer token if it ever appears in a URL — defence in
+ * depth for legacy callers. With R5-14 token no longer goes in the
+ * query string, so this is now a no-op for properly built URLs;
+ * retained because chrome.storage may still carry legacy entries.
+ *
+ * Equivalent to legacy `redactKey` for the new shape.
  */
 export function redactToken(url: string): string {
   if (!url) return url;
@@ -408,7 +445,14 @@ class CoagentServerDeviceClient {
 
       let socket: WebSocket;
       try {
-        socket = new this.wsCtor(url);
+        // R5-14: token rides in Sec-WebSocket-Protocol (subprotocol
+        // slot `token.<tok>`), NOT URL query. `this.config` is
+        // guaranteed non-null here because `connect()` short-circuits
+        // earlier on missing config; buildDeviceBusSubprotocols also
+        // returns [] when token is empty so the constructor will throw
+        // and the catch below surfaces a clear error.
+        const protocols = buildDeviceBusSubprotocols(this.config!);
+        socket = new this.wsCtor(url, protocols);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         void saveConnectionStatus({

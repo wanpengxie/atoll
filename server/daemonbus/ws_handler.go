@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,11 +51,33 @@ const DefaultServerIdleReadTimeout = 70 * time.Second
 // surfaces the disconnect.
 const DefaultPingWriteTimeout = 5 * time.Second
 
+// DaemonWSSubprotocol is the real WebSocket subprotocol negotiated on
+// the /daemonbus handshake. Daemon clients offer:
+//
+//	Sec-WebSocket-Protocol: coagent.daemon.v1, daemon.<daemon_id>, key.<key>
+//
+// Server selects (and echoes back per RFC 6455) ONLY
+// `coagent.daemon.v1` — the `daemon.*` / `key.*` slots are pseudo-
+// subprotocols ferrying handshake identity + secret and MUST NOT be
+// reflected in the upgrade response.
+const DaemonWSSubprotocol = "coagent.daemon.v1"
+
+// daemonWSDaemonIDPrefix / daemonWSKeyPrefix are the slot prefixes used
+// to ferry handshake identity (daemon_id) + shared secret (key) through
+// `Sec-WebSocket-Protocol`. Mirrors devicebus's `token.*` slot pattern.
+const (
+	daemonWSDaemonIDPrefix = "daemon."
+	daemonWSKeyPrefix      = "key."
+)
+
 // upgrader is shared between daemonbus WS upgrades. Demo-period
 // allows any origin (gateway is single-host) — production should
-// tighten this.
+// tighten this. The `Subprotocols` list selects the real
+// `coagent.daemon.v1` protocol when offered; the `daemon.*` / `key.*`
+// slots are consumed server-side and deliberately not advertised here.
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin:  func(r *http.Request) bool { return true },
+	Subprotocols: []string{DaemonWSSubprotocol},
 }
 
 // HandlersProvider is what the gateway implements to give daemonbus
@@ -69,7 +92,10 @@ type HandlersProvider interface {
 
 // HandleWS returns a gin.HandlerFunc that:
 //
-//  1. Reads daemon_id + key + version from query string
+//  1. Reads daemon_id + key from `Sec-WebSocket-Protocol` subprotocol
+//     header (offered as `coagent.daemon.v1, daemon.<daemon_id>,
+//     key.<key>`); reads `host` / `version` from URL query (operational
+//     metadata only — not secret, no URL-leak concern)
 //  2. Validates the key against Service.cfg.SharedSecret
 //  3. Issues a fresh connection_epoch
 //  4. Upgrades to WS + spawns Connection.Run
@@ -78,12 +104,14 @@ type HandlersProvider interface {
 // the connect frame with bcrypt(per-daemon-key) and verify.
 func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		daemonID := placement.DaemonID(c.Query("daemon_id"))
-		key := c.Query("key")
+		daemonIDRaw, key, hasRealProto := parseDaemonWSSubprotocols(c.Request.Header.Values("Sec-WebSocket-Protocol"))
+		daemonID := placement.DaemonID(daemonIDRaw)
 		host := c.Query("host")
 		version := c.Query("version")
-		if daemonID == "" || key == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "daemon_id + key required"})
+		if daemonID == "" || key == "" || !hasRealProto {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Sec-WebSocket-Protocol: coagent.daemon.v1, daemon.<daemon_id>, key.<key> required",
+			})
 			return
 		}
 		if key != s.cfg.SharedSecret {
@@ -141,6 +169,41 @@ func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 			_ = c.Error(err)
 		}
 	}
+}
+
+// parseDaemonWSSubprotocols parses the Sec-WebSocket-Protocol header
+// values offered by a daemon client and returns (daemon_id, key,
+// hasRealProto). Per RFC 6455 §1.9 the header is comma-separated; we
+// split each line on `,`, trim, then classify slots:
+//
+//   - `coagent.daemon.v1` → real protocol present
+//   - prefix `daemon.`    → daemon identity (everything after the prefix)
+//   - prefix `key.`       → shared secret  (everything after the prefix)
+//   - anything else       → ignored (forward-compat)
+//
+// Empty header or missing real protocol returns (_, _, false).
+func parseDaemonWSSubprotocols(headers []string) (daemonID, key string, hasRealProto bool) {
+	for _, line := range headers {
+		for _, part := range strings.Split(line, ",") {
+			p := strings.TrimSpace(part)
+			if p == "" {
+				continue
+			}
+			if p == DaemonWSSubprotocol {
+				hasRealProto = true
+				continue
+			}
+			if strings.HasPrefix(p, daemonWSDaemonIDPrefix) {
+				daemonID = strings.TrimPrefix(p, daemonWSDaemonIDPrefix)
+				continue
+			}
+			if strings.HasPrefix(p, daemonWSKeyPrefix) {
+				key = strings.TrimPrefix(p, daemonWSKeyPrefix)
+				continue
+			}
+		}
+	}
+	return daemonID, key, hasRealProto
 }
 
 // connectionAcceptedPayload mirrors the control.connection_accepted

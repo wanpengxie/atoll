@@ -1,7 +1,7 @@
 // Vitest unit tests for the v4 server-devicebus WS client (T147 §A-E).
 //
 // Coverage:
-//   - WS URL construction (`session_id` + `token` query, redactToken)
+//   - WS URL construction (`session_id` query; token in subprotocol)
 //   - happy path: inbound DeviceFrame{to_device, payload:Command} →
 //     handler → outbound DeviceFrame{from_device, payload:Callback}
 //   - unknown_cmd / handler throw → error Callback frame on the wire
@@ -52,6 +52,9 @@ vi.mock('./cmd-handlers', () => ({
 import {
   CoagentServerDeviceClientForTest,
   buildDeviceBusUrl,
+  buildDeviceBusSubprotocols,
+  DEVICE_WS_SUBPROTOCOL,
+  DEVICE_WS_TOKEN_PREFIX,
   readOutbox,
   redactToken,
   type DeviceFrame,
@@ -103,10 +106,18 @@ class FakeWebSocket {
   static CLOSED = 3;
   readyState = 0;
   url: string;
+  /** Subprotocols offered by the client at construct time. R5-14: the
+   *  bearer token rides in the `token.*` slot here, not on the URL. */
+  protocols: string[];
   sent: string[] = [];
   private listeners = new Map<string, ((ev: any) => void)[]>();
-  constructor(url: string) {
+  constructor(url: string, protocols?: string | string[]) {
     this.url = url;
+    this.protocols = Array.isArray(protocols)
+      ? protocols.slice()
+      : typeof protocols === 'string'
+        ? [protocols]
+        : [];
   }
   addEventListener(type: string, fn: (ev: any) => void) {
     const list = this.listeners.get(type) ?? [];
@@ -136,8 +147,8 @@ async function openClient(
   client: ReturnType<typeof makeClient>,
 ): Promise<FakeWebSocket> {
   let captured: FakeWebSocket | null = null;
-  const SocketCtor: any = function (this: any, url: string) {
-    const ws = new FakeWebSocket(url);
+  const SocketCtor: any = function (this: any, url: string, protocols?: string | string[]) {
+    const ws = new FakeWebSocket(url, protocols);
     captured = ws;
     return ws;
   };
@@ -163,11 +174,13 @@ afterEach(() => {
 // ─── URL builder + token redact ──────────────────────────────────────────
 
 describe('buildDeviceBusUrl', () => {
-  it('appends session_id and token query params', () => {
+  it('puts session_id in query and does NOT include token (R5-14)', () => {
     const url = buildDeviceBusUrl(makeConfig());
     expect(url).toContain('wss://coagent.example.com/devicebus');
     expect(url).toContain('session_id=sess-A');
-    expect(url).toContain('token=tok-secret');
+    // token must NOT appear in the URL — it rides in the WS subprotocol.
+    expect(url).not.toContain('token=');
+    expect(url).not.toContain('tok-secret');
   });
 
   it('returns empty when wsEndpoint is missing', () => {
@@ -178,7 +191,10 @@ describe('buildDeviceBusUrl', () => {
     expect(buildDeviceBusUrl(makeConfig({ sessionId: '' }))).toBe('');
   });
 
-  it('returns empty when token is missing', () => {
+  it('returns empty when token is missing (token gate still applies)', () => {
+    // Even though the URL no longer carries the token, an empty token
+    // would produce a malformed subprotocol header — callers should
+    // short-circuit at URL-build time.
     expect(buildDeviceBusUrl(makeConfig({ token: '' }))).toBe('');
   });
 
@@ -187,22 +203,49 @@ describe('buildDeviceBusUrl', () => {
   });
 });
 
-describe('redactToken', () => {
-  it('masks ?token=… to ?token=*** ', () => {
-    expect(redactToken('wss://h/devicebus?session_id=s&token=secret')).toBe(
-      'wss://h/devicebus?session_id=s&token=***',
-    );
+describe('buildDeviceBusSubprotocols', () => {
+  it('returns [coagent.device.v1, token.<token>] in that order', () => {
+    const protocols = buildDeviceBusSubprotocols(makeConfig());
+    expect(protocols).toEqual([
+      DEVICE_WS_SUBPROTOCOL,
+      `${DEVICE_WS_TOKEN_PREFIX}tok-secret`,
+    ]);
   });
 
-  it('masks &token=… mid-query without touching session_id', () => {
-    expect(redactToken('wss://h/devicebus?token=secret&session_id=s')).toBe(
-      'wss://h/devicebus?token=***&session_id=s',
+  it('returns [] when token is missing (cannot construct slot)', () => {
+    expect(buildDeviceBusSubprotocols(makeConfig({ token: '' }))).toEqual([]);
+  });
+});
+
+describe('redactToken', () => {
+  // Retained as a defence-in-depth helper in case legacy callers still
+  // build URLs with token=…; with R5-14 properly built URLs no longer
+  // carry the token at all.
+  it('masks ?token=… to ?token=*** when present (legacy URL shape)', () => {
+    expect(redactToken('wss://h/devicebus?session_id=s&token=secret')).toBe(
+      'wss://h/devicebus?session_id=s&token=***',
     );
   });
 
   it('passes through urls without token', () => {
     expect(redactToken('wss://h/devicebus')).toBe('wss://h/devicebus');
     expect(redactToken('')).toBe('');
+  });
+});
+
+describe('client sets token subprotocol on WS construct (R5-14)', () => {
+  it('offers coagent.device.v1 + token.<tok> via Sec-WebSocket-Protocol slot, NOT URL', async () => {
+    installFakeChromeStorage();
+    const client = makeClient();
+    const socket = await openClient(client);
+    // URL: session_id stays in query; token must NOT appear.
+    expect(socket.url).toContain('session_id=sess-A');
+    expect(socket.url).not.toContain('token=');
+    // Subprotocols: real protocol + token slot.
+    expect(socket.protocols).toEqual([
+      'coagent.device.v1',
+      'token.tok-secret',
+    ]);
   });
 });
 
@@ -532,8 +575,8 @@ function multiSocketCtor(): {
   sockets: FakeWebSocket[];
 } {
   const sockets: FakeWebSocket[] = [];
-  const Ctor: any = function (this: any, url: string) {
-    const ws = new FakeWebSocket(url);
+  const Ctor: any = function (this: any, url: string, protocols?: string | string[]) {
+    const ws = new FakeWebSocket(url, protocols);
     sockets.push(ws);
     return ws;
   };
@@ -555,8 +598,9 @@ describe('updateConfig identity swap (bind / rebind)', () => {
     const pOld = client.connect();
     await Promise.resolve();
     expect(sockets).toHaveLength(1);
+    // R5-14: session_id stays in URL; token rides in subprotocol slot.
     expect(sockets[0].url).toContain('session_id=sess-OLD');
-    expect(sockets[0].url).toContain('token=tok-OLD');
+    expect(sockets[0].protocols).toContain('token.tok-OLD');
 
     // Now swap identity via updateConfig — mirrors what
     // applyClients(cfg) does after the UI hands over a fresh token.
@@ -579,7 +623,7 @@ describe('updateConfig identity swap (bind / rebind)', () => {
     await Promise.resolve();
     expect(sockets).toHaveLength(2);
     expect(sockets[1].url).toContain('session_id=sess-NEW');
-    expect(sockets[1].url).toContain('token=tok-NEW');
+    expect(sockets[1].protocols).toContain('token.tok-NEW');
     sockets[1].triggerOpen();
     const newRes = await pNew;
     expect(newRes.success).toBe(true);

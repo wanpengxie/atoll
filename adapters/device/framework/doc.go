@@ -19,8 +19,10 @@
 //   - proxy.go     DeviceProxy bundles kernel/devicetransit.DeviceTransit +
 //     CorrelationTracker + ErrorPolicy so a Module.Handle
 //     body shrinks to "compose wire payload → proxy.Send".
-//     Implements the daemon-side half of the T1.3 §2.6.4
-//     device_transit.send / .recv / .ack / .error frame set.
+//     Implements the daemon-side half of the impl-layer2 §5.3
+//     device_transit.{send, recv, ack, error} frame set
+//     (send = §5.3.1 device → adapter inbound; recv = §5.3.2
+//     adapter → device outbound).
 //
 // Boundary discipline (go-arch-lint T2):
 //
