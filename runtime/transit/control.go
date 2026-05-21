@@ -43,7 +43,7 @@ type ControlHandlers struct {
 	// the returned ack as `control.bind_device_session_ack` /
 	// `control.unbind_device_session_ack` so the gateway HTTP request
 	// waiting on SendAndAwait wakes up. Both callbacks are nil-safe:
-	// when unset the Dispatcher synthesises an Accepted=false ack with
+	// when unset the Dispatcher synthesises a result=rejected ack with
 	// Reason=bind_internal_error / unbind_internal_error.
 	OnBindDeviceSession   func(ctx context.Context, frame daemonbus.Frame, body BindDeviceSessionBody) BindDeviceSessionAckBody
 	OnUnbindDeviceSession func(ctx context.Context, frame daemonbus.Frame, body UnbindDeviceSessionBody) UnbindDeviceSessionAckBody
@@ -230,19 +230,27 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 			// server can tell "daemon does not implement bind" apart
 			// from "daemon refused this specific bind".
 			ack = BindDeviceSessionAckBody{
-				FrameID:   body.FrameID,
-				SessionID: body.SessionID,
-				Accepted:  false,
-				Reason:    DeviceSessionRejectBindInternalError,
-				Detail:    "OnBindDeviceSession handler is nil",
+				FrameID:         body.FrameID,
+				ChannelID:       body.ChannelID,
+				BindRequestID:   body.BindRequestID,
+				DeviceSessionID: body.DeviceSessionID,
+				Result:          daemonbus.DeviceSessionBindRejected,
+				Reason:          DeviceSessionRejectBindInternalError,
+				Detail:          "OnBindDeviceSession handler is nil",
 			}
 		} else {
 			ack = d.handlers.OnBindDeviceSession(ctx, frame, body)
 			if ack.FrameID == "" {
 				ack.FrameID = body.FrameID
 			}
-			if ack.SessionID == "" {
-				ack.SessionID = body.SessionID
+			if ack.ChannelID == "" {
+				ack.ChannelID = body.ChannelID
+			}
+			if ack.BindRequestID == "" {
+				ack.BindRequestID = body.BindRequestID
+			}
+			if ack.DeviceSessionID == "" {
+				ack.DeviceSessionID = body.DeviceSessionID
 			}
 		}
 		// FIX-2026-05-18: echo inbound envelope frame_id. See viewsync
@@ -261,19 +269,23 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 		var ack UnbindDeviceSessionAckBody
 		if d.handlers.OnUnbindDeviceSession == nil {
 			ack = UnbindDeviceSessionAckBody{
-				FrameID:   body.FrameID,
-				SessionID: body.SessionID,
-				Accepted:  false,
-				Reason:    DeviceSessionRejectUnbindInternalError,
-				Detail:    "OnUnbindDeviceSession handler is nil",
+				FrameID:         body.FrameID,
+				ChannelID:       body.ChannelID,
+				DeviceSessionID: body.DeviceSessionID,
+				Result:          daemonbus.DeviceSessionBindRejected,
+				Reason:          DeviceSessionRejectUnbindInternalError,
+				Detail:          "OnUnbindDeviceSession handler is nil",
 			}
 		} else {
 			ack = d.handlers.OnUnbindDeviceSession(ctx, frame, body)
 			if ack.FrameID == "" {
 				ack.FrameID = body.FrameID
 			}
-			if ack.SessionID == "" {
-				ack.SessionID = body.SessionID
+			if ack.ChannelID == "" {
+				ack.ChannelID = body.ChannelID
+			}
+			if ack.DeviceSessionID == "" {
+				ack.DeviceSessionID = body.DeviceSessionID
 			}
 		}
 		// FIX-2026-05-18: echo inbound envelope frame_id. See viewsync

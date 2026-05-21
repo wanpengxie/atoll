@@ -30,6 +30,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
@@ -128,14 +129,14 @@ type Service struct {
 // retry the call after a transient network failure.
 type BindNotifier interface {
 	// Bind sends control.bind_device_session to the daemon owning the
-	// session's channel and waits for the ack. Returns nil on Accepted=true
+	// session's channel and waits for the ack. Returns nil on result=accepted
 	// ack; a wrapped error on any failure (daemon not connected, ack
 	// timeout, daemon rejection). The caller (handleIssue) maps the
 	// error to HTTP 5xx and does NOT advance the session state.
 	Bind(ctx context.Context, in BindInput) error
 
 	// Unbind sends control.unbind_device_session to the daemon. Returns
-	// nil when the ack reports Accepted=true OR when the daemon is no
+	// nil when the ack reports result=accepted OR when the daemon is no
 	// longer connected (best-effort tear-down: a fresh daemon reboot
 	// would not carry the mirror row anyway). Returns a wrapped error
 	// only on protocol / decode failures so the caller can surface a
@@ -225,24 +226,26 @@ func (s *Service) nowMs() int64 { return s.now().UnixMilli() }
 
 // Session is the public projection of one device_sessions row.
 type Session struct {
-	ID         string
-	DeviceID   string
-	DeviceType string
-	ChannelID  channel.ID
-	UserID     string
-	DaemonID   placement.DaemonID
-	State      State
-	ExpiresAt  int64
-	CreatedAt  int64
+	ID             string
+	DeviceID       string
+	DeviceType     string
+	ChannelID      channel.ID
+	UserID         string
+	DaemonID       placement.DaemonID
+	AdapterActorID actor.ActorID
+	State          State
+	ExpiresAt      int64
+	CreatedAt      int64
 }
 
 // IssueInput carries the issue-session call.
 type IssueInput struct {
-	DeviceID   string
-	DeviceType string
-	ChannelID  channel.ID
-	UserID     string
-	DaemonID   placement.DaemonID
+	DeviceID       string
+	DeviceType     string
+	ChannelID      channel.ID
+	UserID         string
+	DaemonID       placement.DaemonID
+	AdapterActorID actor.ActorID
 }
 
 // IssueResult carries the new session + raw token. The raw token is
@@ -279,10 +282,14 @@ func (s *Service) IssueSession(ctx context.Context, in IssueInput) (IssueResult,
 		return IssueResult{}, err
 	}
 
+	adapterActorID := in.AdapterActorID
+	if adapterActorID == "" {
+		adapterActorID = "tool:xhs-adapter"
+	}
 	row := Session{
 		ID: sessID, DeviceID: in.DeviceID, DeviceType: in.DeviceType,
 		ChannelID: in.ChannelID, UserID: in.UserID, DaemonID: in.DaemonID,
-		State: StatePending, ExpiresAt: exp, CreatedAt: now,
+		AdapterActorID: adapterActorID, State: StatePending, ExpiresAt: exp, CreatedAt: now,
 	}
 
 	hashed := s.hashToken(token)
@@ -290,11 +297,11 @@ func (s *Service) IssueSession(ctx context.Context, in IssueInput) (IssueResult,
 		ctx,
 		`INSERT INTO device_sessions (
 		   device_session_id, device_id, device_type, channel_id, user_id,
-		   daemon_id, token_hash, state, expires_at, created_at, last_state_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		   daemon_id, adapter_actor_id, token_hash, state, expires_at, created_at, last_state_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.ID, row.DeviceID, row.DeviceType,
 		string(row.ChannelID), row.UserID, string(row.DaemonID),
-		hashed, string(row.State),
+		string(row.AdapterActorID), hashed, string(row.State),
 		row.ExpiresAt, row.CreatedAt, row.CreatedAt,
 	); err != nil {
 		return IssueResult{}, fmt.Errorf("devicebus: insert session: %w", err)
@@ -397,11 +404,11 @@ func (s *Service) Get(ctx context.Context, sessionID string) (Session, error) {
 	err := s.db.QueryRowContext(
 		ctx,
 		`SELECT device_session_id, device_id, device_type, channel_id, user_id,
-		        daemon_id, state, expires_at, created_at
+		        daemon_id, adapter_actor_id, state, expires_at, created_at
 		   FROM device_sessions WHERE device_session_id = ?`,
 		sessionID,
 	).Scan(&row.ID, &row.DeviceID, &row.DeviceType, &chID, &row.UserID,
-		&dID, &state, &row.ExpiresAt, &row.CreatedAt)
+		&dID, (*string)(&row.AdapterActorID), &state, &row.ExpiresAt, &row.CreatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Session{}, ErrSessionNotFound

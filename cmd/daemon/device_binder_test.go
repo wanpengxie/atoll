@@ -6,6 +6,7 @@ import (
 
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
@@ -22,7 +23,8 @@ func TestDeviceSessionBinder_BindUpsertsRow(t *testing.T) {
 
 	body := transit.BindDeviceSessionBody{
 		FrameID:          "f-1",
-		SessionID:        devicetransit.DeviceSessionID("sess-A"),
+		BindRequestID:    "bind-req-1",
+		DeviceSessionID:  devicetransit.DeviceSessionID("sess-A"),
 		ChannelID:        channel.ID("ch-X"),
 		DeviceID:         "dev-1",
 		DeviceType:       "xhs",
@@ -33,17 +35,17 @@ func TestDeviceSessionBinder_BindUpsertsRow(t *testing.T) {
 	}
 	ack := binder.OnBind(context.Background(), body)
 
-	if !ack.Accepted {
-		t.Fatalf("ack.Accepted=false: %+v", ack)
+	if ack.Result != daemonbus.DeviceSessionBindAccepted {
+		t.Fatalf("ack.Result=%q: %+v", ack.Result, ack)
 	}
 	if ack.FrameID != body.FrameID {
 		t.Errorf("ack.FrameID=%q want %q", ack.FrameID, body.FrameID)
 	}
-	if ack.SessionID != body.SessionID {
-		t.Errorf("ack.SessionID=%q want %q", ack.SessionID, body.SessionID)
+	if ack.DeviceSessionID != body.DeviceSessionID {
+		t.Errorf("ack.DeviceSessionID=%q want %q", ack.DeviceSessionID, body.DeviceSessionID)
 	}
 
-	row, ok, err := store.Get(context.Background(), body.SessionID)
+	row, ok, err := store.Get(context.Background(), body.DeviceSessionID)
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
@@ -73,21 +75,22 @@ func TestDeviceSessionBinder_BindIdempotent(t *testing.T) {
 	binder := NewDeviceSessionBinder(store)
 
 	body := transit.BindDeviceSessionBody{
-		FrameID:    "f-1",
-		SessionID:  devicetransit.DeviceSessionID("sess-A"),
-		ChannelID:  channel.ID("ch-X"),
-		DeviceID:   "dev-1",
-		DeviceType: "xhs",
+		FrameID:         "f-1",
+		BindRequestID:   "bind-req-1",
+		DeviceSessionID: devicetransit.DeviceSessionID("sess-A"),
+		ChannelID:       channel.ID("ch-X"),
+		DeviceID:        "dev-1",
+		DeviceType:      "xhs",
 	}
-	if ack := binder.OnBind(context.Background(), body); !ack.Accepted {
+	if ack := binder.OnBind(context.Background(), body); ack.Result != daemonbus.DeviceSessionBindAccepted {
 		t.Fatalf("first OnBind: %+v", ack)
 	}
 	// Re-bind with a different fingerprint — must succeed and overwrite.
 	body.TokenFingerprint = "rotated00fingerpr"
-	if ack := binder.OnBind(context.Background(), body); !ack.Accepted {
+	if ack := binder.OnBind(context.Background(), body); ack.Result != daemonbus.DeviceSessionBindAccepted {
 		t.Fatalf("second OnBind: %+v", ack)
 	}
-	row, _, _ := store.Get(context.Background(), body.SessionID)
+	row, _, _ := store.Get(context.Background(), body.DeviceSessionID)
 	if row.TokenFingerprint != "rotated00fingerpr" {
 		t.Errorf("row.TokenFingerprint not refreshed: %q", row.TokenFingerprint)
 	}
@@ -104,30 +107,32 @@ func TestDeviceSessionBinder_UnbindDeletesRow(t *testing.T) {
 	binder := NewDeviceSessionBinder(store)
 
 	bind := transit.BindDeviceSessionBody{
-		FrameID:    "f-1",
-		SessionID:  devicetransit.DeviceSessionID("sess-A"),
-		ChannelID:  channel.ID("ch-X"),
-		DeviceID:   "dev-1",
-		DeviceType: "xhs",
+		FrameID:         "f-1",
+		BindRequestID:   "bind-req-1",
+		DeviceSessionID: devicetransit.DeviceSessionID("sess-A"),
+		ChannelID:       channel.ID("ch-X"),
+		DeviceID:        "dev-1",
+		DeviceType:      "xhs",
 	}
-	if ack := binder.OnBind(context.Background(), bind); !ack.Accepted {
+	if ack := binder.OnBind(context.Background(), bind); ack.Result != daemonbus.DeviceSessionBindAccepted {
 		t.Fatalf("OnBind: %+v", ack)
 	}
 
 	unbind := transit.UnbindDeviceSessionBody{
-		FrameID:   "f-2",
-		SessionID: bind.SessionID,
-		Reason:    "revoked",
+		FrameID:         "f-2",
+		DeviceSessionID: bind.DeviceSessionID,
+		ChannelID:       bind.ChannelID,
+		Reason:          "revoked",
 	}
 	ack := binder.OnUnbind(context.Background(), unbind)
-	if !ack.Accepted {
+	if ack.Result != daemonbus.DeviceSessionBindAccepted {
 		t.Fatalf("OnUnbind: %+v", ack)
 	}
-	if ack.SessionID != bind.SessionID {
-		t.Errorf("ack.SessionID=%q want %q", ack.SessionID, bind.SessionID)
+	if ack.DeviceSessionID != bind.DeviceSessionID {
+		t.Errorf("ack.DeviceSessionID=%q want %q", ack.DeviceSessionID, bind.DeviceSessionID)
 	}
 
-	if _, ok, _ := store.Get(context.Background(), bind.SessionID); ok {
+	if _, ok, _ := store.Get(context.Background(), bind.DeviceSessionID); ok {
 		t.Error("row still present after OnUnbind")
 	}
 }
@@ -141,10 +146,11 @@ func TestDeviceSessionBinder_UnbindMissingIsAccepted(t *testing.T) {
 	binder := NewDeviceSessionBinder(store)
 
 	ack := binder.OnUnbind(context.Background(), transit.UnbindDeviceSessionBody{
-		FrameID:   "f-1",
-		SessionID: devicetransit.DeviceSessionID("never-existed"),
+		FrameID:         "f-1",
+		DeviceSessionID: devicetransit.DeviceSessionID("never-existed"),
+		ChannelID:       "ch-X",
 	})
-	if !ack.Accepted {
-		t.Errorf("OnUnbind missing row: ack=%+v want Accepted=true", ack)
+	if ack.Result != daemonbus.DeviceSessionBindAccepted {
+		t.Errorf("OnUnbind missing row: ack=%+v want accepted", ack)
 	}
 }

@@ -92,7 +92,7 @@ func TestACKMatchExactFieldSet(t *testing.T) {
 		FencingToken:    "tok-daemon-generated",
 		DaemonID:        "daemon-1",
 		DaemonEpoch:     1,
-		Status:          AckBound,
+		Result:          CreateChannelAccepted,
 	}
 	if !ackOK.Match(base) {
 		t.Fatalf("baseline ACK should match placement; got false\n  ack: %+v\n  pl:  %+v", ackOK, base)
@@ -126,7 +126,7 @@ func TestACKMatchExactFieldSet(t *testing.T) {
 		})
 	}
 
-	// Daemon_epoch + Status + Reason must NOT factor into the match
+	// Daemon_epoch + Result must NOT factor into the match
 	// decision (they are recorded for audit / state, not for fencing).
 	t.Run("daemon_epoch difference is informational", func(t *testing.T) {
 		ack := ackOK
@@ -135,14 +135,14 @@ func TestACKMatchExactFieldSet(t *testing.T) {
 			t.Errorf("daemon_epoch should not affect Match; got false")
 		}
 	})
-	t.Run("status rejected does not affect Match", func(t *testing.T) {
+	t.Run("empty result does not affect Match", func(t *testing.T) {
 		// Match only checks saga identifiers; downstream logic uses
-		// Status to decide whether to call CASActivate. Asserting Match
+		// Result to decide whether to call CASActivate. Asserting Match
 		// true here proves the saga-identifier rule is exact.
 		ack := ackOK
-		ack.Status = AckRejected
+		ack.Result = ""
 		if !ack.Match(base) {
-			t.Errorf("status should not affect Match; got false")
+			t.Errorf("result should not affect Match; got false")
 		}
 	})
 	// owner_epoch / fencing_token are daemon-generated outputs
@@ -186,17 +186,13 @@ func TestErrPlacementExistsIsSentinel(t *testing.T) {
 	}
 }
 
-// TestAckStatusClosedSet asserts the L2 §1.4.11.3 step 4 AckStatus has
-// exactly the two spec values (bound | rejected) with the wire form
-// matching.
-func TestAckStatusClosedSet(t *testing.T) {
+// TestCreateChannelAckResultClosedSet asserts the L2 accept-path result
+// value.
+func TestCreateChannelAckResultClosedSet(t *testing.T) {
 	t.Parallel()
 
-	if AckBound != "bound" {
-		t.Errorf("AckBound = %q, want %q", AckBound, "bound")
-	}
-	if AckRejected != "rejected" {
-		t.Errorf("AckRejected = %q, want %q", AckRejected, "rejected")
+	if CreateChannelAccepted != "accepted" {
+		t.Errorf("CreateChannelAccepted = %q, want %q", CreateChannelAccepted, "accepted")
 	}
 }
 

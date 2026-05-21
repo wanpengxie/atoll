@@ -480,17 +480,20 @@ func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
 			OnBindDeviceSession: func(_ context.Context, _ daemonbus.Frame, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody {
 				bindCalled = true
 				return transit.BindDeviceSessionAckBody{
-					FrameID:   body.FrameID,
-					SessionID: body.SessionID,
-					Accepted:  true,
+					FrameID:         body.FrameID,
+					ChannelID:       body.ChannelID,
+					BindRequestID:   body.BindRequestID,
+					DeviceSessionID: body.DeviceSessionID,
+					Result:          daemonbus.DeviceSessionBindAccepted,
 				}
 			},
 			OnUnbindDeviceSession: func(_ context.Context, _ daemonbus.Frame, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody {
 				unbindCalled = true
 				return transit.UnbindDeviceSessionAckBody{
-					FrameID:   body.FrameID,
-					SessionID: body.SessionID,
-					Accepted:  true,
+					FrameID:         body.FrameID,
+					ChannelID:       body.ChannelID,
+					DeviceSessionID: body.DeviceSessionID,
+					Result:          daemonbus.DeviceSessionBindAccepted,
 				}
 			},
 			OnViewsyncResyncRequest: func(_ context.Context, _ viewsync.ResyncRequest) (viewsync.ResyncResponse, error) {
@@ -548,8 +551,10 @@ func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
 	caseBFrameID := "envelope-from-server-B"
 	{
 		bindBody := transit.BindDeviceSessionBody{
-			FrameID:   "body-frame-B",
-			SessionID: "sess-B",
+			FrameID:         "body-frame-B",
+			BindRequestID:   "bind-req-B",
+			DeviceSessionID: "sess-B",
+			ChannelID:       "ch-B",
 		}
 		reqFrame, _ := transit.Encode(caseBFrameID,
 			daemonbus.FrameTypeControlBindDeviceSession,
@@ -577,8 +582,9 @@ func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
 	caseCFrameID := "envelope-from-server-C"
 	{
 		ubBody := transit.UnbindDeviceSessionBody{
-			FrameID:   "body-frame-C",
-			SessionID: "sess-C",
+			FrameID:         "body-frame-C",
+			DeviceSessionID: "sess-C",
+			ChannelID:       "ch-C",
 		}
 		reqFrame, _ := transit.Encode(caseCFrameID,
 			daemonbus.FrameTypeControlUnbindDeviceSession,

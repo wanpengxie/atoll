@@ -183,6 +183,21 @@ func DecodeCreateAck(frame daemonbus.Frame) (placement.CreateChannelAck, error) 
 	return out, nil
 }
 
+// DecodeRejectChannel turns a daemonbus.Frame into placement.RejectChannel.
+func DecodeRejectChannel(frame daemonbus.Frame) (placement.RejectChannel, error) {
+	var out placement.RejectChannel
+	if frame.FrameKind != daemonbus.FrameTypeControlRejectChannel {
+		return out, fmt.Errorf("daemonbus: not reject_channel frame: %s", frame.FrameKind)
+	}
+	if err := json.Unmarshal(frame.Payload, &out); err != nil {
+		return out, fmt.Errorf("daemonbus: unmarshal reject_channel: %w", err)
+	}
+	if out.FrameID == "" {
+		out.FrameID = frame.FrameID.String()
+	}
+	return out, nil
+}
+
 // DecodeHeldChannelsReport parses control.held_channels_report payloads.
 func DecodeHeldChannelsReport(frame daemonbus.Frame) (placement.HeldChannelsReport, error) {
 	var out placement.HeldChannelsReport

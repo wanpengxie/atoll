@@ -39,9 +39,11 @@ func TestDispatcher_BindDeviceSessionRoundTrip(t *testing.T) {
 			OnBindDeviceSession: func(_ context.Context, _ daemonbus.Frame, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody {
 				received = body
 				return transit.BindDeviceSessionAckBody{
-					FrameID:   body.FrameID,
-					SessionID: body.SessionID,
-					Accepted:  true,
+					FrameID:         body.FrameID,
+					ChannelID:       body.ChannelID,
+					BindRequestID:   body.BindRequestID,
+					DeviceSessionID: body.DeviceSessionID,
+					Result:          daemonbus.DeviceSessionBindAccepted,
 				}
 			},
 		},
@@ -62,7 +64,8 @@ func TestDispatcher_BindDeviceSessionRoundTrip(t *testing.T) {
 
 	body := transit.BindDeviceSessionBody{
 		FrameID:          "frame-bind-1",
-		SessionID:        devicetransit.DeviceSessionID("sess-1"),
+		BindRequestID:    "bind-req-1",
+		DeviceSessionID:  devicetransit.DeviceSessionID("sess-1"),
 		ChannelID:        channel.ID("ch-X"),
 		DeviceID:         "dev-A",
 		DeviceType:       "xhs",
@@ -90,8 +93,8 @@ func TestDispatcher_BindDeviceSessionRoundTrip(t *testing.T) {
 		t.Fatal("dispatch never returned")
 	}
 
-	if received.SessionID != body.SessionID {
-		t.Errorf("handler received SessionID=%q want %q", received.SessionID, body.SessionID)
+	if received.DeviceSessionID != body.DeviceSessionID {
+		t.Errorf("handler received SessionID=%q want %q", received.DeviceSessionID, body.DeviceSessionID)
 	}
 	if received.TokenFingerprint != body.TokenFingerprint {
 		t.Errorf("handler received TokenFingerprint=%q want %q",
@@ -109,20 +112,20 @@ func TestDispatcher_BindDeviceSessionRoundTrip(t *testing.T) {
 	if err := transit.DecodePayload(ackFrame, &ack); err != nil {
 		t.Fatal(err)
 	}
-	if !ack.Accepted {
-		t.Errorf("ack.Accepted=false: %+v", ack)
+	if ack.Result != daemonbus.DeviceSessionBindAccepted {
+		t.Errorf("ack.Result=%q: %+v", ack.Result, ack)
 	}
 	if ack.FrameID != body.FrameID {
 		t.Errorf("ack.FrameID=%q want %q", ack.FrameID, body.FrameID)
 	}
-	if ack.SessionID != body.SessionID {
-		t.Errorf("ack.SessionID=%q want %q", ack.SessionID, body.SessionID)
+	if ack.DeviceSessionID != body.DeviceSessionID {
+		t.Errorf("ack.DeviceSessionID=%q want %q", ack.DeviceSessionID, body.DeviceSessionID)
 	}
 }
 
 // TestDispatcher_BindDeviceSessionHandlerMissing covers the nil-safe
 // fallback: when ControlHandlers.OnBindDeviceSession is nil, the
-// dispatcher MUST still emit a structured Accepted=false ack so the
+// dispatcher MUST still emit a structured result=rejected ack so the
 // gateway can distinguish "daemon does not implement bind" from
 // "daemon refused bind".
 func TestDispatcher_BindDeviceSessionHandlerMissing(t *testing.T) {
@@ -161,10 +164,11 @@ func TestDispatcher_BindDeviceSessionHandlerMissing(t *testing.T) {
 	}()
 
 	body := transit.BindDeviceSessionBody{
-		FrameID:   "frame-bind-2",
-		SessionID: devicetransit.DeviceSessionID("sess-2"),
-		ChannelID: channel.ID("ch-Y"),
-		DeviceID:  "dev-B",
+		FrameID:         "frame-bind-2",
+		BindRequestID:   "bind-req-2",
+		DeviceSessionID: devicetransit.DeviceSessionID("sess-2"),
+		ChannelID:       channel.ID("ch-Y"),
+		DeviceID:        "dev-B",
 	}
 	reqFrame, _ := transit.Encode(
 		"frame-srv-bind-2",
@@ -196,14 +200,14 @@ func TestDispatcher_BindDeviceSessionHandlerMissing(t *testing.T) {
 	if err := transit.DecodePayload(ackFrame, &ack); err != nil {
 		t.Fatal(err)
 	}
-	if ack.Accepted {
-		t.Error("ack.Accepted=true with nil handler — expected false")
+	if ack.Result != daemonbus.DeviceSessionBindRejected {
+		t.Errorf("ack.Result=%q with nil handler — expected rejected", ack.Result)
 	}
 	if ack.Reason != transit.DeviceSessionRejectBindInternalError {
 		t.Errorf("ack.Reason=%q want %q", ack.Reason, transit.DeviceSessionRejectBindInternalError)
 	}
-	if ack.SessionID != body.SessionID {
-		t.Errorf("ack.SessionID=%q want %q", ack.SessionID, body.SessionID)
+	if ack.DeviceSessionID != body.DeviceSessionID {
+		t.Errorf("ack.DeviceSessionID=%q want %q", ack.DeviceSessionID, body.DeviceSessionID)
 	}
 }
 
@@ -233,9 +237,10 @@ func TestDispatcher_UnbindDeviceSessionRoundTrip(t *testing.T) {
 			OnUnbindDeviceSession: func(_ context.Context, _ daemonbus.Frame, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody {
 				calledWith = body
 				return transit.UnbindDeviceSessionAckBody{
-					FrameID:   body.FrameID,
-					SessionID: body.SessionID,
-					Accepted:  true,
+					FrameID:         body.FrameID,
+					ChannelID:       body.ChannelID,
+					DeviceSessionID: body.DeviceSessionID,
+					Result:          daemonbus.DeviceSessionBindAccepted,
 				}
 			},
 		},
@@ -255,10 +260,10 @@ func TestDispatcher_UnbindDeviceSessionRoundTrip(t *testing.T) {
 	}()
 
 	body := transit.UnbindDeviceSessionBody{
-		FrameID:   "frame-unbind-1",
-		SessionID: devicetransit.DeviceSessionID("sess-1"),
-		ChannelID: channel.ID("ch-X"),
-		Reason:    "revoked",
+		FrameID:         "frame-unbind-1",
+		DeviceSessionID: devicetransit.DeviceSessionID("sess-1"),
+		ChannelID:       channel.ID("ch-X"),
+		Reason:          "revoked",
 	}
 	reqFrame, _ := transit.Encode(
 		"frame-srv-unbind",
@@ -294,7 +299,7 @@ func TestDispatcher_UnbindDeviceSessionRoundTrip(t *testing.T) {
 	if err := transit.DecodePayload(ackFrame, &ack); err != nil {
 		t.Fatal(err)
 	}
-	if !ack.Accepted {
-		t.Errorf("ack.Accepted=false: %+v", ack)
+	if ack.Result != daemonbus.DeviceSessionBindAccepted {
+		t.Errorf("ack.Result=%q: %+v", ack.Result, ack)
 	}
 }

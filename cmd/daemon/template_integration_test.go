@@ -207,8 +207,8 @@ func createChannelOfType(
 		if err := transit.DecodePayload(f, &ack); err != nil {
 			t.Fatalf("decode ack %s: %v", channelID, err)
 		}
-		if ack.Status != placement.AckBound {
-			t.Fatalf("create %s rejected: %s reason=%s", channelID, ack.Status, ack.Reason)
+		if ack.Result != placement.CreateChannelAccepted {
+			t.Fatalf("create %s rejected: %s", channelID, ack.Result)
 		}
 		return
 	}

@@ -408,7 +408,7 @@ func TestHandleWriteMessage_CallerIDForwardedToDaemon(t *testing.T) {
 		OwnerEpoch:      1,
 		FencingToken:    "daemon-tok-callerid",
 		DaemonID:        placement.DaemonID("d-callerid"),
-		Status:          placement.AckBound,
+		Result:          placement.CreateChannelAccepted,
 	}
 	if ok, err := app.Placements().Activate(ctx, ack, placement.ConnectionEpoch(epoch)); err != nil || !ok {
 		t.Fatalf("Activate: ok=%v err=%v", ok, err)
@@ -529,7 +529,7 @@ func TestHandleWriteMessageRejectUsesReasonHTTPStatus(t *testing.T) {
 		OwnerEpoch:      1,
 		FencingToken:    "daemon-tok-reject-status",
 		DaemonID:        placement.DaemonID("d-reject-status"),
-		Status:          placement.AckBound,
+		Result:          placement.CreateChannelAccepted,
 	}
 	if ok, err := app.Placements().Activate(ctx, ack, placement.ConnectionEpoch(epoch)); err != nil || !ok {
 		t.Fatalf("Activate: ok=%v err=%v", ok, err)
@@ -967,7 +967,7 @@ func TestHandleWriteMessageResponseInheritsParentCorrelation(t *testing.T) {
 		OwnerEpoch:      1,
 		FencingToken:    "daemon-tok-corr",
 		DaemonID:        placement.DaemonID("d-corr"),
-		Status:          placement.AckBound,
+		Result:          placement.CreateChannelAccepted,
 	}
 	if ok, err := app.Placements().Activate(ctx, ack, placement.ConnectionEpoch(epoch)); err != nil || !ok {
 		t.Fatalf("Activate: ok=%v err=%v", ok, err)
@@ -1184,7 +1184,7 @@ func TestMockDaemonViewSyncRoundTrip(t *testing.T) {
 		OwnerEpoch:      pushOwnerEpoch,
 		FencingToken:    pushFencingToken,
 		DaemonID:        placement.DaemonID("mock-d1"),
-		Status:          placement.AckBound,
+		Result:          placement.CreateChannelAccepted,
 	}
 	if ok, err := app.Placements().Activate(ctx, ack, placement.ConnectionEpoch(epoch)); err != nil || !ok {
 		t.Fatalf("Activate ch-A ok=%v err=%v", ok, err)
@@ -1294,7 +1294,7 @@ func TestMockDaemonCreateChannelACK(t *testing.T) {
 	ack := placement.CreateChannelAck{
 		FrameID: "ack-1", ChannelID: req.ChannelID, CreateRequestID: req.CreateRequestID,
 		OwnerEpoch: 1, FencingToken: "daemon-tok-gateway",
-		DaemonID: placement.DaemonID("d1"), DaemonEpoch: 1, Status: placement.AckBound,
+		DaemonID: placement.DaemonID("d1"), DaemonEpoch: 1, Result: placement.CreateChannelAccepted,
 	}
 	raw, _ := json.Marshal(ack)
 	if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
@@ -1371,7 +1371,7 @@ func TestViewSyncGapDrainFanOut(t *testing.T) {
 		OwnerEpoch:      pushOwnerEpoch,
 		FencingToken:    pushFencingToken,
 		DaemonID:        placement.DaemonID("d-fanout"),
-		Status:          placement.AckBound,
+		Result:          placement.CreateChannelAccepted,
 	}
 	if ok, err := app.Placements().Activate(ctx, ack, placement.ConnectionEpoch(epoch)); err != nil || !ok {
 		t.Fatalf("Activate ch-fanout ok=%v err=%v", ok, err)
@@ -1469,7 +1469,7 @@ func TestViewSyncRejectsStaleFencingBeforeApply(t *testing.T) {
 		OwnerEpoch:      2,
 		FencingToken:    "server-token",
 		DaemonID:        placement.DaemonID("d-stale-push"),
-		Status:          placement.AckBound,
+		Result:          placement.CreateChannelAccepted,
 	}, placement.ConnectionEpoch(epoch)); err != nil || !ok {
 		t.Fatalf("Activate ok=%v err=%v", ok, err)
 	}
@@ -1545,7 +1545,7 @@ func TestServerInitiatedReclaimRoundTripActivatesPlacement(t *testing.T) {
 		OwnerEpoch:      1,
 		FencingToken:    "tok-before-reclaim",
 		DaemonID:        daemonID,
-		Status:          placement.AckBound,
+		Result:          placement.CreateChannelAccepted,
 	}, placement.ConnectionEpoch(epoch)); err != nil || !ok {
 		t.Fatalf("Activate ok=%v err=%v", ok, err)
 	}
@@ -1639,7 +1639,7 @@ func TestHeldChannelsReportDaemonIDMismatch(t *testing.T) {
 	ack := placement.CreateChannelAck{
 		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
 		OwnerEpoch: daemonOwnerEpoch, FencingToken: daemonFencingTok,
-		DaemonID: placement.DaemonID("owner"), Status: placement.AckBound,
+		DaemonID: placement.DaemonID("owner"), Result: placement.CreateChannelAccepted,
 	}
 	if ok, err := app.Placements().Activate(ctx, ack, placement.ConnectionEpoch(ownerEpoch)); err != nil || !ok {
 		t.Fatalf("Activate: ok=%v err=%v", ok, err)

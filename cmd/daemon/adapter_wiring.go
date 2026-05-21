@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -128,7 +130,11 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 			if len(deviceAdapters) == 1 {
 				adapterName := deviceAdapters[0]
 				h.SetDeviceCallback(func(ctx context.Context, frame devicetransit.SendFrame) error {
-					return mgr.OnExternalCallback(ctx, adapterName, frame.Payload)
+					var body deviceframework.DeviceTransitBody
+					if err := json.Unmarshal(frame.Body, &body); err != nil {
+						return fmt.Errorf("cmd/daemon: decode device transit body: %w", err)
+					}
+					return mgr.OnExternalCallback(ctx, adapterName, body.Payload)
 				})
 			}
 		}
@@ -330,14 +336,21 @@ func (b *DeviceSessionBinder) SessionStore() deviceframework.SessionStore {
 // the same SessionID overwrites the row (T1.10 — replay safe).
 func (b *DeviceSessionBinder) OnBind(ctx context.Context, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody {
 	ack := transit.BindDeviceSessionAckBody{
-		FrameID:   body.FrameID,
-		SessionID: body.SessionID,
+		FrameID:         body.FrameID,
+		ChannelID:       body.ChannelID,
+		BindRequestID:   body.BindRequestID,
+		DeviceSessionID: body.DeviceSessionID,
+	}
+	adapterActorID := body.AdapterActorID
+	if adapterActorID == "" {
+		adapterActorID = devicexhs.DefaultAdapterActorID
 	}
 	sess := deviceframework.DeviceSession{
-		SessionID:  body.SessionID,
-		ChannelID:  body.ChannelID,
-		DeviceID:   body.DeviceID,
-		DeviceType: body.DeviceType,
+		SessionID:      body.DeviceSessionID,
+		ChannelID:      body.ChannelID,
+		AdapterActorID: adapterActorID,
+		DeviceID:       body.DeviceID,
+		DeviceType:     body.DeviceType,
 		// Authoritative server row transitions pending → ready on this
 		// ack; the daemon mirror jumps straight to ready so adapter
 		// modules see the eventual state immediately. T1.10 allows the
@@ -353,7 +366,7 @@ func (b *DeviceSessionBinder) OnBind(ctx context.Context, body transit.BindDevic
 		ack.Detail = err.Error()
 		return ack
 	}
-	ack.Accepted = true
+	ack.Result = daemonbus.DeviceSessionBindAccepted
 	return ack
 }
 
@@ -363,15 +376,16 @@ func (b *DeviceSessionBinder) OnBind(ctx context.Context, body transit.BindDevic
 // response, so this is best-effort tear-down only.
 func (b *DeviceSessionBinder) OnUnbind(ctx context.Context, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody {
 	ack := transit.UnbindDeviceSessionAckBody{
-		FrameID:   body.FrameID,
-		SessionID: body.SessionID,
+		FrameID:         body.FrameID,
+		ChannelID:       body.ChannelID,
+		DeviceSessionID: body.DeviceSessionID,
 	}
-	if err := b.store.Delete(ctx, body.SessionID); err != nil {
+	if err := b.store.Delete(ctx, body.DeviceSessionID); err != nil {
 		ack.Reason = transit.DeviceSessionRejectUnbindInternalError
 		ack.Detail = err.Error()
 		return ack
 	}
-	ack.Accepted = true
+	ack.Result = daemonbus.DeviceSessionBindAccepted
 	return ack
 }
 

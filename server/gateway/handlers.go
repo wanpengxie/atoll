@@ -80,6 +80,10 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			_, err := a.placements.Activate(ctx, ack, placement.ConnectionEpoch(conn.ConnectionEpoch))
 			return err
 		},
+		OnRejectChannel: func(ctx context.Context, conn *daemonbus.Connection, rej placement.RejectChannel) error {
+			_, err := a.placements.RejectCreate(ctx, rej)
+			return err
+		},
 		OnHeartbeat: func(ctx context.Context, conn *daemonbus.Connection, payload daemonbus.HeartbeatPayload) (placement.HeartbeatAckPayload, error) {
 			if payload.DaemonID != "" && payload.DaemonID != conn.DaemonID {
 				return placement.HeartbeatAckPayload{}, fmt.Errorf("daemonbus: heartbeat daemon_id %q does not match authenticated conn %q", payload.DaemonID, conn.DaemonID)
@@ -140,14 +144,14 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 // Bind implements devicebus.BindNotifier (T147 §A-S2). After
 // devicebus.IssueSession allocates the row in state=pending, the HTTP
 // handler calls Bind so the daemon mirrors the row and acks; on a
-// successful Accepted=true ack the caller advances pending → ready.
+// successful result=accepted ack the caller advances pending → ready.
 // Bind blocks until the ack arrives or the context is cancelled
 // (gin's request context).
 //
 // Errors:
 //   - daemon connection is missing → daemonbus.ErrDaemonNotRegistered
 //     wrapped with the daemon_id (HTTP 502 to client).
-//   - daemon ack reports Accepted=false → error string carries the
+//   - daemon ack reports result=rejected → error string carries the
 //     daemon-supplied Reason / Detail so triage points at the rejecting
 //     edge.
 //   - send / decode failure → wrapped error.
@@ -158,8 +162,10 @@ func (a *App) Bind(ctx context.Context, in devicebus.BindInput) error {
 	}
 	body := kerneldaemonbus.BindDeviceSessionBody{
 		FrameID:          kerneldaemonbus.FrameID(uuid.NewString()),
-		SessionID:        devicetransit.DeviceSessionID(in.Session.ID),
+		BindRequestID:    uuid.NewString(),
+		DeviceSessionID:  devicetransit.DeviceSessionID(in.Session.ID),
 		ChannelID:        in.Session.ChannelID,
+		AdapterActorID:   in.Session.AdapterActorID,
 		DeviceID:         in.Session.DeviceID,
 		DeviceType:       in.Session.DeviceType,
 		DaemonID:         in.Session.DaemonID,
@@ -175,7 +181,7 @@ func (a *App) Bind(ctx context.Context, in devicebus.BindInput) error {
 	if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
 		return fmt.Errorf("gateway: bind_device_session ack decode: %w", err)
 	}
-	if !ack.Accepted {
+	if ack.Result != kerneldaemonbus.DeviceSessionBindAccepted {
 		if ack.Reason == "" {
 			ack.Reason = "rejected"
 		}
@@ -200,10 +206,10 @@ func (a *App) Unbind(ctx context.Context, in devicebus.UnbindInput) error {
 		return nil
 	}
 	body := kerneldaemonbus.UnbindDeviceSessionBody{
-		FrameID:   kerneldaemonbus.FrameID(uuid.NewString()),
-		SessionID: devicetransit.DeviceSessionID(in.Session.ID),
-		ChannelID: in.Session.ChannelID,
-		Reason:    in.Reason,
+		FrameID:         kerneldaemonbus.FrameID(uuid.NewString()),
+		DeviceSessionID: devicetransit.DeviceSessionID(in.Session.ID),
+		ChannelID:       in.Session.ChannelID,
+		Reason:          in.Reason,
 	}
 	ackFrame, err := conn.SendAndAwait(ctx, kerneldaemonbus.FrameTypeControlUnbindDeviceSession, body)
 	if err != nil {
@@ -213,7 +219,7 @@ func (a *App) Unbind(ctx context.Context, in devicebus.UnbindInput) error {
 	if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
 		return fmt.Errorf("gateway: unbind_device_session ack decode: %w", err)
 	}
-	if !ack.Accepted {
+	if ack.Result != kerneldaemonbus.DeviceSessionBindAccepted {
 		if ack.Reason == "" {
 			ack.Reason = "rejected"
 		}
@@ -281,7 +287,6 @@ func (a *App) ForwardDeviceFrame(ctx context.Context, frame devicebus.DeviceFram
 	if err != nil {
 		return err
 	}
-	frame.Direction = devicetransit.DirectionFromDevice
 	_, err = conn.SendFrame(ctx, kerneldaemonbus.FrameTypeDeviceTransitSend, frame)
 	return err
 }

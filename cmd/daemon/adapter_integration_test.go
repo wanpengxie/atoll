@@ -77,7 +77,7 @@ func startIntegrationDaemon(t *testing.T, ctx context.Context, opts integDaemonO
 }
 
 // createChannel drives a CreateChannel frame through the mock bus and
-// waits for AckBound. It also drains any unrelated frames between.
+// waits for CreateChannelAccepted. It also drains any unrelated frames between.
 func createChannel(t *testing.T, ctx context.Context, d *runtime.Daemon, srv *transit.MockServer, channelID string, members []placement.InitialMember) {
 	t.Helper()
 	req := placement.CreateChannelRequest{
@@ -119,8 +119,8 @@ func createChannel(t *testing.T, ctx context.Context, d *runtime.Daemon, srv *tr
 		if err := transit.DecodePayload(f, &ack); err != nil {
 			t.Fatalf("decode ack: %v", err)
 		}
-		if ack.Status != placement.AckBound {
-			t.Fatalf("ack reject: %s reason=%s", ack.Status, ack.Reason)
+		if ack.Result != placement.CreateChannelAccepted {
+			t.Fatalf("ack reject: %s", ack.Result)
 		}
 		return
 	}

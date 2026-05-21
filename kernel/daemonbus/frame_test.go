@@ -10,14 +10,14 @@ import (
 )
 
 // TestFrameTypeClosedSetCardinality asserts the impl-layer2 §1.2 closed-set
-// cardinality. M1.5 = 4 viewsync + 21 control + 4 device_transit = 29.
+// cardinality. M1.5 = 4 viewsync + 21 control + 3 device_transit = 28.
 //
 // Exact values (in spec order) checked by TestAllFrameTypesSpecOrder.
 func TestFrameTypeClosedSetCardinality(t *testing.T) {
 	t.Parallel()
 
-	if got := len(AllFrameTypes); got != 29 {
-		t.Errorf("AllFrameTypes len = %d, want 29 (4 viewsync + 21 control + 4 device_transit)", got)
+	if got := len(AllFrameTypes); got != 28 {
+		t.Errorf("AllFrameTypes len = %d, want 28 (4 viewsync + 21 control + 3 device_transit)", got)
 	}
 
 	// Per-category breakdown — keeps the failure message specific when
@@ -32,8 +32,8 @@ func TestFrameTypeClosedSetCardinality(t *testing.T) {
 	if counts[CategoryControl] != 21 {
 		t.Errorf("control frame count = %d, want 21", counts[CategoryControl])
 	}
-	if counts[CategoryDeviceTransit] != 4 {
-		t.Errorf("device_transit frame count = %d, want 4", counts[CategoryDeviceTransit])
+	if counts[CategoryDeviceTransit] != 3 {
+		t.Errorf("device_transit frame count = %d, want 3", counts[CategoryDeviceTransit])
 	}
 }
 
@@ -74,7 +74,6 @@ func TestAllFrameTypesSpecOrder(t *testing.T) {
 		FrameTypeDeviceTransitSend,
 		FrameTypeDeviceTransitRecv,
 		FrameTypeDeviceTransitAck,
-		FrameTypeDeviceTransitError,
 	}
 	if len(AllFrameTypes) != len(want) {
 		t.Fatalf("AllFrameTypes len = %d, want %d", len(AllFrameTypes), len(want))

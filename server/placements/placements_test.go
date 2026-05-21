@@ -68,7 +68,7 @@ func TestCreatingToActiveHappyPath(t *testing.T) {
 	ack := placement.CreateChannelAck{
 		FrameID: "f-1", ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
 		OwnerEpoch: daemonEpoch, FencingToken: daemonTok,
-		DaemonID: p.DaemonID, DaemonEpoch: 1, Status: placement.AckBound,
+		DaemonID: p.DaemonID, DaemonEpoch: 1, Result: placement.CreateChannelAccepted,
 	}
 	ok, err := svc.Activate(ctx, ack, 7)
 	if err != nil {
@@ -120,7 +120,7 @@ func TestACKMismatchRejected(t *testing.T) {
 	baseAck := placement.CreateChannelAck{
 		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
 		OwnerEpoch: 1, FencingToken: "daemon-tok",
-		DaemonID: p.DaemonID, Status: placement.AckBound,
+		DaemonID: p.DaemonID, Result: placement.CreateChannelAccepted,
 	}
 
 	mutations := []struct {
@@ -130,8 +130,8 @@ func TestACKMismatchRejected(t *testing.T) {
 		{"wrong create_request_id", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.CreateRequestID = "bogus"; return a }},
 		{"wrong daemon_id", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.DaemonID = "other"; return a }},
 		{"empty fencing_token", func(a placement.CreateChannelAck) placement.CreateChannelAck { a.FencingToken = ""; return a }},
-		{"rejected status", func(a placement.CreateChannelAck) placement.CreateChannelAck {
-			a.Status = placement.AckRejected
+		{"missing accepted result", func(a placement.CreateChannelAck) placement.CreateChannelAck {
+			a.Result = ""
 			return a
 		}},
 	}
@@ -206,7 +206,7 @@ func TestColdStartGrace(t *testing.T) {
 	ack := placement.CreateChannelAck{
 		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
 		OwnerEpoch: 1, FencingToken: "daemon-tok",
-		DaemonID: p.DaemonID, Status: placement.AckBound,
+		DaemonID: p.DaemonID, Result: placement.CreateChannelAccepted,
 	}
 	if ok, err := svc.Activate(ctx, ack, 1); err != nil || !ok {
 		t.Fatalf("Activate ok=%v err=%v", ok, err)
@@ -250,7 +250,7 @@ func TestResolveDaemonForChannelActiveOnly(t *testing.T) {
 	ack := placement.CreateChannelAck{
 		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
 		OwnerEpoch: 1, FencingToken: "daemon-tok",
-		DaemonID: p.DaemonID, Status: placement.AckBound,
+		DaemonID: p.DaemonID, Result: placement.CreateChannelAccepted,
 	}
 	if ok, err := svc.Activate(ctx, ack, 1); err != nil || !ok {
 		t.Fatalf("Activate ok=%v err=%v", ok, err)
@@ -306,7 +306,7 @@ func TestReclaim(t *testing.T) {
 	ack := placement.CreateChannelAck{
 		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
 		OwnerEpoch: daemonEpoch, FencingToken: daemonTok,
-		DaemonID: p.DaemonID, Status: placement.AckBound,
+		DaemonID: p.DaemonID, Result: placement.CreateChannelAccepted,
 	}
 	if ok, _ := svc.Activate(ctx, ack, 1); !ok {
 		t.Fatalf("Activate failed")
@@ -364,7 +364,7 @@ func TestReclaimHijackDifferentDaemonID(t *testing.T) {
 	ack := placement.CreateChannelAck{
 		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
 		OwnerEpoch: daemonEpoch, FencingToken: daemonTok,
-		DaemonID: p.DaemonID, Status: placement.AckBound,
+		DaemonID: p.DaemonID, Result: placement.CreateChannelAccepted,
 	}
 	if ok, _ := svc.Activate(ctx, ack, 1); !ok {
 		t.Fatalf("Activate failed")
@@ -452,7 +452,7 @@ func TestActivate_WritesDaemonFencingTuple(t *testing.T) {
 		FrameID: "f-write-ack", ChannelID: p.ChannelID,
 		CreateRequestID: p.CreateRequestID,
 		OwnerEpoch:      daemonEpoch, FencingToken: daemonTok,
-		DaemonID: p.DaemonID, DaemonEpoch: 1, Status: placement.AckBound,
+		DaemonID: p.DaemonID, DaemonEpoch: 1, Result: placement.CreateChannelAccepted,
 	}
 	ok, err := svc.Activate(ctx, ack, 7)
 	if err != nil || !ok {
@@ -487,7 +487,7 @@ func TestActivate_RejectsEmptyFencingToken(t *testing.T) {
 	ack := placement.CreateChannelAck{
 		ChannelID: p.ChannelID, CreateRequestID: p.CreateRequestID,
 		OwnerEpoch: 1, FencingToken: "", // ← protocol violation: missing
-		DaemonID: p.DaemonID, Status: placement.AckBound,
+		DaemonID: p.DaemonID, Result: placement.CreateChannelAccepted,
 	}
 	ok, err := svc.Activate(ctx, ack, 1)
 	if err != nil {
@@ -518,7 +518,7 @@ func TestServerInitiatedReclaimReserveAndActivate(t *testing.T) {
 		OwnerEpoch:      1,
 		FencingToken:    "tok-old",
 		DaemonID:        p.DaemonID,
-		Status:          placement.AckBound,
+		Result:          placement.CreateChannelAccepted,
 	}, 1); err != nil || !ok {
 		t.Fatalf("Activate ok=%v err=%v", ok, err)
 	}
@@ -580,7 +580,7 @@ func TestObserveHeartbeatPlacementDiffActions(t *testing.T) {
 		OwnerEpoch:      1,
 		FencingToken:    "tok-ok",
 		DaemonID:        p.DaemonID,
-		Status:          placement.AckBound,
+		Result:          placement.CreateChannelAccepted,
 	}, 1); err != nil || !ok {
 		t.Fatalf("Activate ok=%v err=%v", ok, err)
 	}
@@ -594,7 +594,7 @@ func TestObserveHeartbeatPlacementDiffActions(t *testing.T) {
 		OwnerEpoch:      1,
 		FencingToken:    "tok-other",
 		DaemonID:        other.DaemonID,
-		Status:          placement.AckBound,
+		Result:          placement.CreateChannelAccepted,
 	}, 1); err != nil || !ok {
 		t.Fatalf("Activate other ok=%v err=%v", ok, err)
 	}
@@ -608,7 +608,7 @@ func TestObserveHeartbeatPlacementDiffActions(t *testing.T) {
 		OwnerEpoch:      1,
 		FencingToken:    "tok-stale",
 		DaemonID:        stale.DaemonID,
-		Status:          placement.AckBound,
+		Result:          placement.CreateChannelAccepted,
 	}, 1); err != nil || !ok {
 		t.Fatalf("Activate stale ok=%v err=%v", ok, err)
 	}

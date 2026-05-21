@@ -93,9 +93,8 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 			frame := devicetransit.SendFrame{
 				ChannelID:       mctx.ChannelID,
 				DeviceSessionID: "device-1",
-				Direction:       devicetransit.DirectionToDevice,
-				RequestID:       env.ID,
-				Payload:         env.Payload,
+				AdapterActorID:  mctx.AdapterActorID,
+				Body:            env.Payload,
 			}
 			seenFrame = &frame
 			_, err := mctx.DeviceTransit.Send(ctx, frame)
@@ -133,11 +132,11 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 	if seenFrame == nil {
 		t.Fatalf("expected DeviceTransit.Send to be called")
 	}
-	if seenFrame.RequestID != "req-vst-1" {
-		t.Fatalf("frame.RequestID=%s want req-vst-1", seenFrame.RequestID)
+	if seenFrame.AdapterActorID != "tool:xhs" {
+		t.Fatalf("frame.AdapterActorID=%s want tool:xhs", seenFrame.AdapterActorID)
 	}
-	if seenFrame.Direction != devicetransit.DirectionToDevice {
-		t.Fatalf("frame.Direction=%s want to_device", seenFrame.Direction)
+	if string(seenFrame.Body) != `{"ok":true}` {
+		t.Fatalf("frame.Body=%s want request payload", seenFrame.Body)
 	}
 	if len(transit.sent) != 1 {
 		t.Fatalf("expected 1 transit.Send call, got %d", len(transit.sent))

@@ -99,7 +99,7 @@ type DaemonConfig struct {
 	// root (cmd/daemon) wires these to the per-process SessionStore so
 	// adapter modules with binding=runtime_inbound_via_relay can mirror the
 	// server's authoritative device_sessions row. Both are nil-safe — when
-	// unset, the transit dispatcher synthesises an Accepted=false ack with
+	// unset, the transit dispatcher synthesises a result=rejected ack with
 	// the spec bind/unbind internal-error reason so the server can
 	// distinguish "daemon does not implement bind" from "daemon rejected bind".
 	OnBindDeviceSession   func(ctx context.Context, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody
@@ -1560,7 +1560,7 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 //   - Run the bootstrap saga (steps 1-5).
 //   - Insert channel_lock with the daemon-generated tuple.
 //   - Mark the saga completed and mount the new channel runtime.
-//   - Emit AckBound carrying (owner_epoch, fencing_token, daemon_id) so
+//   - Emit result=accepted carrying (owner_epoch, fencing_token, daemon_id) so
 //     the server's Phase 3 CAS can write them into the placement row.
 //
 // Idempotent-replay path: when the channel already has a channel_lock
@@ -1571,9 +1571,9 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 // is trying to allocate the same channel_id twice and we reject.
 //
 // Failure semantics:
-//   - saga.Bootstrap fails → AckRejected (reason=saga error). bootstrap_registry
+//   - saga.Bootstrap fails → control.reject_channel (reason=saga error). bootstrap_registry
 //     row stays 'in_progress'; reconcile loop rolls it back on next restart.
-//   - LoadOne / buildChannelRuntime fail → AckRejected; channel_lock row
+//   - LoadOne / buildChannelRuntime fail → control.reject_channel; channel_lock row
 //     remains so reconciler can drive recovery.
 func (d *Daemon) handleCreateChannel(
 	ctx context.Context,
@@ -1587,16 +1587,20 @@ func (d *Daemon) handleCreateChannel(
 		DaemonID:        placement.DaemonID(d.cfg.DaemonID),
 		DaemonEpoch:     placement.DaemonEpoch(d.cfg.DaemonEpoch),
 	}
+	reject := func(reason string) error {
+		return d.sendRejectChannel(ctx, frame.FrameID, placement.RejectChannel{
+			FrameID:         string(frame.FrameID),
+			ChannelID:       req.ChannelID,
+			CreateRequestID: req.CreateRequestID,
+			Reason:          reason,
+		})
+	}
 
 	if req.ChannelID == "" {
-		ack.Status = placement.AckRejected
-		ack.Reason = "empty_channel_id"
-		return d.sendCreateAck(ctx, frame.FrameID, ack)
+		return reject("empty_channel_id")
 	}
 	if req.CreateRequestID == "" {
-		ack.Status = placement.AckRejected
-		ack.Reason = "empty_create_request_id"
-		return d.sendCreateAck(ctx, frame.FrameID, ack)
+		return reject("empty_create_request_id")
 	}
 
 	sqlitePath := filepath.Join(d.cfg.ChannelsDir, string(req.ChannelID), "channel.sqlite")
@@ -1615,39 +1619,29 @@ func (d *Daemon) handleCreateChannel(
 	if sqliteExists {
 		existingLock, err := d.OpenChannelLock(ctx, sqlitePath)
 		if err != nil {
-			ack.Status = placement.AckRejected
-			ack.Reason = fmt.Sprintf("lock open: %v", err)
-			return d.sendCreateAck(ctx, frame.FrameID, ack)
+			return reject(fmt.Sprintf("lock open: %v", err))
 		}
 		row, ok, getErr := existingLock.Get(ctx)
 		if getErr != nil {
-			ack.Status = placement.AckRejected
-			ack.Reason = fmt.Sprintf("lock get: %v", getErr)
-			return d.sendCreateAck(ctx, frame.FrameID, ack)
+			return reject(fmt.Sprintf("lock get: %v", getErr))
 		}
 		if ok {
 			// daemon-side ownership check — a different daemon binary
 			// process is responsible for this channel, reject.
 			if row.DaemonID != placement.DaemonID(d.cfg.DaemonID) {
-				ack.Status = placement.AckRejected
-				ack.Reason = "daemon_id_mismatch"
-				return d.sendCreateAck(ctx, frame.FrameID, ack)
+				return reject("daemon_id_mismatch")
 			}
 			// Idempotency oracle: bootstrap_registry.create_request_id
 			// is the saga identifier — match it against req to decide
 			// whether this is a benign replay or a colliding new saga.
 			originalReqID, lookupErr := d.lookupBootstrapRequestID(ctx, req.ChannelID)
 			if lookupErr != nil {
-				ack.Status = placement.AckRejected
-				ack.Reason = fmt.Sprintf("bootstrap registry lookup: %v", lookupErr)
-				return d.sendCreateAck(ctx, frame.FrameID, ack)
+				return reject(fmt.Sprintf("bootstrap registry lookup: %v", lookupErr))
 			}
 			if originalReqID != string(req.CreateRequestID) {
 				// Server is asking us to create the same channel under a
 				// new saga id — local state is the source of truth, reject.
-				ack.Status = placement.AckRejected
-				ack.Reason = "create_request_id_mismatch"
-				return d.sendCreateAck(ctx, frame.FrameID, ack)
+				return reject("create_request_id_mismatch")
 			}
 			// Idempotent replay — re-emit the daemon-stored fencing tuple
 			// so the server's Phase 3 CAS sees consistent values across
@@ -1656,12 +1650,10 @@ func (d *Daemon) handleCreateChannel(
 			ack.FencingToken = row.FencingToken
 			if !d.HasChannel(req.ChannelID) {
 				if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath); err != nil {
-					ack.Status = placement.AckRejected
-					ack.Reason = fmt.Sprintf("mount existing: %v", err)
-					return d.sendCreateAck(ctx, frame.FrameID, ack)
+					return reject(fmt.Sprintf("mount existing: %v", err))
 				}
 			}
-			ack.Status = placement.AckBound
+			ack.Result = placement.CreateChannelAccepted
 			return d.sendCreateAck(ctx, frame.FrameID, ack)
 		}
 	}
@@ -1672,22 +1664,16 @@ func (d *Daemon) handleCreateChannel(
 	// bootstrap complete (step 7).
 	fencingToken, err := placement.NewFencingToken()
 	if err != nil {
-		ack.Status = placement.AckRejected
-		ack.Reason = fmt.Sprintf("fencing token: %v", err)
-		return d.sendCreateAck(ctx, frame.FrameID, ack)
+		return reject(fmt.Sprintf("fencing token: %v", err))
 	}
 	const bootstrapOwnerEpoch = placement.OwnerEpoch(1)
 
 	if _, err := d.saga.Bootstrap(ctx, req.ChannelID, req); err != nil {
-		ack.Status = placement.AckRejected
-		ack.Reason = fmt.Sprintf("saga: %v", err)
-		return d.sendCreateAck(ctx, frame.FrameID, ack)
+		return reject(fmt.Sprintf("saga: %v", err))
 	}
 	lockStore, err := d.OpenChannelLock(ctx, sqlitePath)
 	if err != nil {
-		ack.Status = placement.AckRejected
-		ack.Reason = fmt.Sprintf("lock open: %v", err)
-		return d.sendCreateAck(ctx, frame.FrameID, ack)
+		return reject(fmt.Sprintf("lock open: %v", err))
 	}
 	now := d.cfg.NowFn()
 	if err := lockStore.Insert(ctx, store.ChannelLockRow{
@@ -1703,24 +1689,18 @@ func (d *Daemon) handleCreateChannel(
 		// round-tripping the server.
 		ChannelType: req.ChannelType,
 	}); err != nil {
-		ack.Status = placement.AckRejected
-		ack.Reason = fmt.Sprintf("lock insert: %v", err)
-		return d.sendCreateAck(ctx, frame.FrameID, ack)
+		return reject(fmt.Sprintf("lock insert: %v", err))
 	}
 	if err := d.saga.Complete(ctx, string(req.CreateRequestID)); err != nil {
-		ack.Status = placement.AckRejected
-		ack.Reason = fmt.Sprintf("bootstrap complete: %v", err)
-		return d.sendCreateAck(ctx, frame.FrameID, ack)
+		return reject(fmt.Sprintf("bootstrap complete: %v", err))
 	}
 
 	if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath); err != nil {
-		ack.Status = placement.AckRejected
-		ack.Reason = fmt.Sprintf("mount: %v", err)
-		return d.sendCreateAck(ctx, frame.FrameID, ack)
+		return reject(fmt.Sprintf("mount: %v", err))
 	}
 	ack.OwnerEpoch = bootstrapOwnerEpoch
 	ack.FencingToken = fencingToken
-	ack.Status = placement.AckBound
+	ack.Result = placement.CreateChannelAccepted
 	return d.sendCreateAck(ctx, frame.FrameID, ack)
 }
 
@@ -1776,6 +1756,15 @@ func (d *Daemon) sendCreateAck(ctx context.Context, inboundFrameID daemonbus.Fra
 	}
 	return d.transit.Send(ctx, frameID,
 		daemonbus.FrameTypeControlCreateChannelAck, ack)
+}
+
+func (d *Daemon) sendRejectChannel(ctx context.Context, inboundFrameID daemonbus.FrameID, rej placement.RejectChannel) error {
+	frameID := string(inboundFrameID)
+	if frameID == "" {
+		frameID = d.cfg.FrameIDGen()
+	}
+	return d.transit.Send(ctx, frameID,
+		daemonbus.FrameTypeControlRejectChannel, rej)
 }
 
 func (d *Daemon) handleDaemonReclaim(
@@ -1906,18 +1895,19 @@ func (d *Daemon) emitPlacementReclaimed(
 	previousOwnerEpoch placement.OwnerEpoch,
 	fencingToken placement.FencingToken,
 ) error {
+	now := d.cfg.NowFn()
 	payload, err := json.Marshal(map[string]any{
-		"previous_owner_daemon": req.PreviousOwnerDaemon,
-		"new_owner_daemon":      d.cfg.DaemonID,
-		"previous_owner_epoch":  previousOwnerEpoch,
-		"new_owner_epoch":       req.NewOwnerEpoch,
-		"previous_state":        req.PreviousState,
-		"create_request_id":     req.CreateRequestID,
+		"channel_id":               req.ChannelID,
+		"new_owner_daemon_id":      d.cfg.DaemonID,
+		"new_owner_epoch":          req.NewOwnerEpoch,
+		"previous_owner_daemon_id": req.PreviousOwnerDaemon,
+		"previous_owner_epoch":     previousOwnerEpoch,
+		"reclaimed_from_state":     req.PreviousState,
+		"reclaimed_at":             now,
 	})
 	if err != nil {
 		return err
 	}
-	now := d.cfg.NowFn()
 	_, err = store.NewMessagesWithLock(db, lock).Append(ctx, &message.Envelope{
 		ID:         message.ID("system.placement.reclaimed:" + string(req.ChannelID) + ":" + string(req.CreateRequestID)),
 		TS:         now,
@@ -2130,7 +2120,7 @@ func (d *Daemon) routeWrite(_ context.Context, ch channel.ID) (transit.HarnessCh
 // CategoryDeviceTransit frame here; we decode the SendFrame envelope,
 // look up the per-channel runtime by frame.ChannelID, and hand the
 // frame to the channel's *transit.DeviceTransit for the recv-side
-// fan-out. Ack / Error frames don't carry channel_id at the kernel
+// fan-out. Ack frames don't carry channel_id at the kernel
 // level — for the M1.6 baseline (1 channel ↔ 1 device), we fan them
 // out to EVERY channel's DeviceTransit; each channel's correlation
 // tracker decides whether the frame matches an outstanding request.
@@ -2154,8 +2144,8 @@ func (d *Daemon) handleDeviceTransitFrame(ctx context.Context, frame daemonbus.F
 			return nil
 		}
 		return cr.deviceTransit.DispatchIncoming(ctx, frame)
-	case daemonbus.FrameTypeDeviceTransitAck, daemonbus.FrameTypeDeviceTransitError:
-		// No channel_id on ack/error — fan out to every channel; each
+	case daemonbus.FrameTypeDeviceTransitAck:
+		// No channel_id on ack — fan out to every channel; each
 		// channel's DeviceTransit checks frame_id correlation locally.
 		// Returns the first non-nil error so observability still surfaces
 		// the failure; downstream channels are best-effort.

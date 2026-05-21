@@ -50,7 +50,6 @@ type mockServer struct {
 	mu        sync.Mutex
 	sends     []mockServerSend
 	acks      []devicetransit.AckFrame
-	errFrames []devicetransit.ErrorFrame
 	failSend  error
 	nextFrame string
 	now       func() time.Time
@@ -79,13 +78,6 @@ func (m *mockServer) Ack(_ context.Context, frame devicetransit.AckFrame) error 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.acks = append(m.acks, frame)
-	return nil
-}
-
-func (m *mockServer) Error(_ context.Context, frame devicetransit.ErrorFrame) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.errFrames = append(m.errFrames, frame)
 	return nil
 }
 
@@ -373,12 +365,13 @@ func (h *harness) seedActiveSession(t *testing.T, sid string) devicetransit.Devi
 	t.Helper()
 	id := devicetransit.DeviceSessionID(sid)
 	if err := h.sessions.Upsert(context.Background(), framework.DeviceSession{
-		SessionID:  id,
-		ChannelID:  h.channelID,
-		DeviceID:   "device-" + sid,
-		DeviceType: "xhs",
-		State:      framework.StatePending,
-		BoundAt:    1_000_000,
+		SessionID:      id,
+		ChannelID:      h.channelID,
+		AdapterActorID: testAdapterActor,
+		DeviceID:       "device-" + sid,
+		DeviceType:     "xhs",
+		State:          framework.StatePending,
+		BoundAt:        1_000_000,
 	}); err != nil {
 		t.Fatalf("seed session: %v", err)
 	}
@@ -443,22 +436,29 @@ func TestPublishHappyPath(t *testing.T) {
 	if !ok {
 		t.Fatal("server captured no frame")
 	}
-	if frame.Direction != devicetransit.DirectionToDevice {
-		t.Errorf("direction=%q", frame.Direction)
-	}
 	if frame.DeviceSessionID != sid {
 		t.Errorf("session id=%q", frame.DeviceSessionID)
 	}
-	if frame.RequestID != env.ID {
-		t.Errorf("request_id=%q", frame.RequestID)
+	if frame.AdapterActorID != xhs.DefaultAdapterActorID {
+		t.Errorf("adapter_actor_id=%q", frame.AdapterActorID)
 	}
 	if frame.ChannelID != h.channelID {
 		t.Errorf("channel id=%q", frame.ChannelID)
 	}
+	var transitBody framework.DeviceTransitBody
+	if err := json.Unmarshal(frame.Body, &transitBody); err != nil {
+		t.Fatalf("decode transit body: %v", err)
+	}
+	if transitBody.Direction != framework.DirectionToDevice {
+		t.Errorf("direction=%q", transitBody.Direction)
+	}
+	if transitBody.RequestID != env.ID {
+		t.Errorf("request_id=%q", transitBody.RequestID)
+	}
 
 	// 2. Inspect Command JSON: cmd stripped, framework metadata excluded.
 	var cmd xhs.Command
-	if err := json.Unmarshal(frame.Payload, &cmd); err != nil {
+	if err := json.Unmarshal(transitBody.Payload, &cmd); err != nil {
 		t.Fatalf("decode wire payload: %v", err)
 	}
 	if cmd.Cmd != "publish" {

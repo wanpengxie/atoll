@@ -130,6 +130,7 @@ func TestSessionValidate(t *testing.T) {
 	full := DeviceSession{
 		SessionID:        "sess-1",
 		ChannelID:        "channel-1",
+		AdapterActorID:   "tool:xhs-adapter",
 		DeviceID:         "device-1",
 		DeviceType:       "xhs",
 		State:            StateReady,
@@ -146,6 +147,7 @@ func TestSessionValidate(t *testing.T) {
 	}{
 		{"missing-session", func(d *DeviceSession) { d.SessionID = "" }, "SessionID"},
 		{"missing-channel", func(d *DeviceSession) { d.ChannelID = "" }, "ChannelID"},
+		{"missing-adapter-actor", func(d *DeviceSession) { d.AdapterActorID = "" }, "AdapterActorID"},
 		{"missing-device", func(d *DeviceSession) { d.DeviceID = "" }, "DeviceID"},
 		{"missing-type", func(d *DeviceSession) { d.DeviceType = "" }, "DeviceType"},
 		{"bad-state", func(d *DeviceSession) { d.State = "wat" }, "State"},
@@ -170,7 +172,7 @@ func TestSessionValidate(t *testing.T) {
 // diff tools / docs).
 func TestSessionFieldsList(t *testing.T) {
 	want := []string{
-		"session_id", "channel_id", "device_id", "device_type",
+		"session_id", "channel_id", "adapter_actor_id", "device_id", "device_type",
 		"state", "bound_at", "last_active_at", "token_fingerprint",
 		"expires_at",
 	}
@@ -190,11 +192,12 @@ func TestInMemoryStoreUpsertGet(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 	sess := DeviceSession{
-		SessionID:  "sess-1",
-		ChannelID:  "channel-1",
-		DeviceID:   "device-1",
-		DeviceType: "xhs",
-		State:      StatePending,
+		SessionID:      "sess-1",
+		ChannelID:      "channel-1",
+		AdapterActorID: "tool:xhs-adapter",
+		DeviceID:       "device-1",
+		DeviceType:     "xhs",
+		State:          StatePending,
 	}
 	if err := store.Upsert(ctx, sess); err != nil {
 		t.Fatalf("upsert: %v", err)
@@ -229,7 +232,7 @@ func TestInMemoryStoreSetState(t *testing.T) {
 	store := NewInMemorySessionStore()
 	id := devicetransit.DeviceSessionID("sess-1")
 	mustUpsert(t, store, DeviceSession{
-		SessionID: id, ChannelID: "c", DeviceID: "d", DeviceType: "xhs",
+		SessionID: id, ChannelID: "c", AdapterActorID: "tool:xhs-adapter", DeviceID: "d", DeviceType: "xhs",
 		State: StatePending,
 	})
 	mustState(t, store, id, StateReady, 100)
@@ -241,7 +244,7 @@ func TestInMemoryStoreSetState(t *testing.T) {
 	store2 := NewInMemorySessionStore()
 	idleID := devicetransit.DeviceSessionID("sess-2")
 	mustUpsert(t, store2, DeviceSession{
-		SessionID: idleID, ChannelID: "c", DeviceID: "d", DeviceType: "xhs",
+		SessionID: idleID, ChannelID: "c", AdapterActorID: "tool:xhs-adapter", DeviceID: "d", DeviceType: "xhs",
 		State: StatePending,
 	})
 	if err := store2.SetState(ctx, idleID, StateActive, 0); err == nil {
@@ -259,15 +262,15 @@ func TestInMemoryStoreListByChannel(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 	mustUpsert(t, store, DeviceSession{
-		SessionID: "a", ChannelID: "c1", DeviceID: "d", DeviceType: "xhs",
+		SessionID: "a", ChannelID: "c1", AdapterActorID: "tool:xhs-adapter", DeviceID: "d", DeviceType: "xhs",
 		State: StateReady,
 	})
 	mustUpsert(t, store, DeviceSession{
-		SessionID: "b", ChannelID: "c1", DeviceID: "d2", DeviceType: "xhs",
+		SessionID: "b", ChannelID: "c1", AdapterActorID: "tool:xhs-adapter", DeviceID: "d2", DeviceType: "xhs",
 		State: StateReady,
 	})
 	mustUpsert(t, store, DeviceSession{
-		SessionID: "c", ChannelID: "c2", DeviceID: "d3", DeviceType: "xhs",
+		SessionID: "c", ChannelID: "c2", AdapterActorID: "tool:xhs-adapter", DeviceID: "d3", DeviceType: "xhs",
 		State: StateReady,
 	})
 	rows, err := store.ListByChannel(ctx, "c1")
@@ -284,7 +287,7 @@ func TestInMemoryStoreDelete(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 	mustUpsert(t, store, DeviceSession{
-		SessionID: "a", ChannelID: "c", DeviceID: "d", DeviceType: "xhs",
+		SessionID: "a", ChannelID: "c", AdapterActorID: "tool:xhs-adapter", DeviceID: "d", DeviceType: "xhs",
 		State: StateReady,
 	})
 	if err := store.Delete(ctx, "a"); err != nil {

@@ -57,43 +57,57 @@ func (r DeviceSessionRejectReason) String() string { return string(r) }
 // payload. The server emits it after allocating a device session row.
 type BindDeviceSessionBody struct {
 	FrameID          FrameID                       `json:"frame_id"`
-	SessionID        devicetransit.DeviceSessionID `json:"session_id"`
+	BindRequestID    string                        `json:"bind_request_id"`
+	DeviceSessionID  devicetransit.DeviceSessionID `json:"device_session_id"`
 	ChannelID        channel.ID                    `json:"channel_id"`
+	AdapterActorID   actor.ActorID                 `json:"adapter_actor_id"`
 	DeviceID         string                        `json:"device_id"`
 	DeviceType       string                        `json:"device_type"`
 	DaemonID         placement.DaemonID            `json:"daemon_id"`
 	TokenFingerprint string                        `json:"token_fingerprint"`
 	ExpiresAt        int64                         `json:"expires_at,omitempty"`
 	BoundAt          int64                         `json:"bound_at,omitempty"`
+	Metadata         map[string]string             `json:"metadata,omitempty"`
 }
+
+// DeviceSessionBindResult is the canonical bind/unbind ack result set.
+type DeviceSessionBindResult string
+
+const (
+	DeviceSessionBindAccepted DeviceSessionBindResult = "accepted"
+	DeviceSessionBindRejected DeviceSessionBindResult = "rejected"
+)
 
 // BindDeviceSessionAckBody is the daemon -> server reply for
 // control.bind_device_session.
 type BindDeviceSessionAckBody struct {
-	FrameID   FrameID                       `json:"frame_id"`
-	SessionID devicetransit.DeviceSessionID `json:"session_id,omitempty"`
-	Accepted  bool                          `json:"accepted"`
-	Reason    DeviceSessionRejectReason     `json:"reason,omitempty"`
-	Detail    string                        `json:"detail,omitempty"`
+	FrameID         FrameID                       `json:"frame_id"`
+	ChannelID       channel.ID                    `json:"channel_id"`
+	BindRequestID   string                        `json:"bind_request_id"`
+	Result          DeviceSessionBindResult       `json:"result"`
+	DeviceSessionID devicetransit.DeviceSessionID `json:"device_session_id,omitempty"`
+	Reason          DeviceSessionRejectReason     `json:"reason,omitempty"`
+	Detail          string                        `json:"detail,omitempty"`
 }
 
 // UnbindDeviceSessionBody is the daemonbus control.unbind_device_session
 // payload.
 type UnbindDeviceSessionBody struct {
-	FrameID   FrameID                       `json:"frame_id"`
-	SessionID devicetransit.DeviceSessionID `json:"session_id"`
-	ChannelID channel.ID                    `json:"channel_id,omitempty"`
-	Reason    string                        `json:"reason,omitempty"`
+	FrameID         FrameID                       `json:"frame_id"`
+	DeviceSessionID devicetransit.DeviceSessionID `json:"device_session_id"`
+	ChannelID       channel.ID                    `json:"channel_id"`
+	Reason          string                        `json:"reason,omitempty"`
 }
 
 // UnbindDeviceSessionAckBody is the daemon -> server reply for
 // control.unbind_device_session.
 type UnbindDeviceSessionAckBody struct {
-	FrameID   FrameID                       `json:"frame_id"`
-	SessionID devicetransit.DeviceSessionID `json:"session_id,omitempty"`
-	Accepted  bool                          `json:"accepted"`
-	Reason    DeviceSessionRejectReason     `json:"reason,omitempty"`
-	Detail    string                        `json:"detail,omitempty"`
+	FrameID         FrameID                       `json:"frame_id"`
+	ChannelID       channel.ID                    `json:"channel_id"`
+	Result          DeviceSessionBindResult       `json:"result"`
+	DeviceSessionID devicetransit.DeviceSessionID `json:"device_session_id,omitempty"`
+	Reason          DeviceSessionRejectReason     `json:"reason,omitempty"`
+	Detail          string                        `json:"detail,omitempty"`
 }
 
 const (

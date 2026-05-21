@@ -42,15 +42,13 @@ func startDaemon(t *testing.T, ctx context.Context, daemonID string) (*runtime.D
 	return d, d.Bus().ServerSide(), dataDir, channelsDir
 }
 
-// sendCreateChannel injects a control.create_channel frame with the
-// daemon's current connection epoch and waits up to 3s for the ACK.
-func sendCreateChannel(
+func sendCreateChannelFrame(
 	t *testing.T,
 	ctx context.Context,
 	d *runtime.Daemon,
 	srv *transit.MockServer,
 	req placement.CreateChannelRequest,
-) placement.CreateChannelAck {
+) daemonbus.Frame {
 	t.Helper()
 	frame, err := transit.Encode("frame-create-"+string(req.ChannelID),
 		daemonbus.FrameTypeControlCreateChannel,
@@ -74,20 +72,104 @@ func sendCreateChannel(
 		if err != nil {
 			t.Fatalf("RecvFromDaemon: %v", err)
 		}
-		if f.FrameKind != daemonbus.FrameTypeControlCreateChannelAck {
+		if f.FrameKind != daemonbus.FrameTypeControlCreateChannelAck &&
+			f.FrameKind != daemonbus.FrameTypeControlRejectChannel {
 			continue
 		}
-		var ack placement.CreateChannelAck
-		if err := transit.DecodePayload(f, &ack); err != nil {
-			t.Fatalf("decode ack: %v", err)
+		return f
+	}
+}
+
+// sendCreateChannel injects a control.create_channel frame with the
+// daemon's current connection epoch and waits up to 3s for the ACK.
+func sendCreateChannel(
+	t *testing.T,
+	ctx context.Context,
+	d *runtime.Daemon,
+	srv *transit.MockServer,
+	req placement.CreateChannelRequest,
+) placement.CreateChannelAck {
+	t.Helper()
+	f := sendCreateChannelFrame(t, ctx, d, srv, req)
+	if f.FrameKind != daemonbus.FrameTypeControlCreateChannelAck {
+		t.Fatalf("expected create_channel_ack, got %s", f.FrameKind)
+	}
+	var ack placement.CreateChannelAck
+	if err := transit.DecodePayload(f, &ack); err != nil {
+		t.Fatalf("decode ack: %v", err)
+	}
+	return ack
+}
+
+func sendCreateChannelReject(
+	t *testing.T,
+	ctx context.Context,
+	d *runtime.Daemon,
+	srv *transit.MockServer,
+	req placement.CreateChannelRequest,
+) placement.RejectChannel {
+	t.Helper()
+	f := sendCreateChannelFrame(t, ctx, d, srv, req)
+	if f.FrameKind != daemonbus.FrameTypeControlRejectChannel {
+		t.Fatalf("expected reject_channel, got %s", f.FrameKind)
+	}
+	var rej placement.RejectChannel
+	if err := transit.DecodePayload(f, &rej); err != nil {
+		t.Fatalf("decode reject: %v", err)
+	}
+	return rej
+}
+
+func sendDaemonReclaim(
+	t *testing.T,
+	ctx context.Context,
+	d *runtime.Daemon,
+	srv *transit.MockServer,
+	req placement.DaemonReclaimRequest,
+) placement.ReclaimAccepted {
+	t.Helper()
+	frame, err := transit.Encode("frame-reclaim-"+string(req.ChannelID),
+		daemonbus.FrameTypeControlDaemonReclaim,
+		"server", d.Transit().Epoch(), now(), req)
+	if err != nil {
+		t.Fatalf("encode reclaim: %v", err)
+	}
+	if err := srv.SendToDaemon(ctx, frame); err != nil {
+		t.Fatalf("SendToDaemon: %v", err)
+	}
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("did not receive reclaim result within 3s")
+		default:
 		}
-		return ack
+		recvCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		f, err := srv.RecvFromDaemon(recvCtx)
+		cancel()
+		if err != nil {
+			t.Fatalf("RecvFromDaemon: %v", err)
+		}
+		switch f.FrameKind {
+		case daemonbus.FrameTypeControlReclaimAccepted:
+			var ack placement.ReclaimAccepted
+			if err := transit.DecodePayload(f, &ack); err != nil {
+				t.Fatalf("decode reclaim accepted: %v", err)
+			}
+			return ack
+		case daemonbus.FrameTypeControlReclaimRejected:
+			var rej placement.ReclaimRejected
+			if err := transit.DecodePayload(f, &rej); err != nil {
+				t.Fatalf("decode reclaim rejected: %v", err)
+			}
+			t.Fatalf("reclaim rejected: %s", rej.Reason)
+		}
 	}
 }
 
 // TestDaemon_OnCreateChannel_FreshBootstrap covers T0.1 happy path:
 // server pushes control.create_channel → daemon runs saga → writes
-// channel_lock → mounts runtime → emits AckBound with all 5 match
+// channel_lock → mounts runtime → emits CreateChannelAccepted with all 5 match
 // fields populated → channel.sqlite exists with actor_registry rows.
 func TestDaemon_OnCreateChannel_FreshBootstrap(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -105,8 +187,8 @@ func TestDaemon_OnCreateChannel_FreshBootstrap(t *testing.T) {
 	}
 	ack := sendCreateChannel(t, ctx, d, srv, req)
 
-	if ack.Status != placement.AckBound {
-		t.Fatalf("ack.Status=%s reason=%s", ack.Status, ack.Reason)
+	if ack.Result != placement.CreateChannelAccepted {
+		t.Fatalf("ack.Result=%s", ack.Result)
 	}
 	if ack.ChannelID != req.ChannelID {
 		t.Errorf("ack.ChannelID=%s want %s", ack.ChannelID, req.ChannelID)
@@ -201,7 +283,7 @@ func TestDaemon_OnCreateChannel_FreshBootstrap(t *testing.T) {
 }
 
 // TestDaemon_OnCreateChannel_IdempotentReplay — replay with same tuple
-// must AckBound again without double-bootstrap.
+// must CreateChannelAccepted again without double-bootstrap.
 func TestDaemon_OnCreateChannel_IdempotentReplay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -213,12 +295,12 @@ func TestDaemon_OnCreateChannel_IdempotentReplay(t *testing.T) {
 		ChannelID: "ch-idem", CreateRequestID: "req-idem",
 	}
 	a1 := sendCreateChannel(t, ctx, d, srv, req)
-	if a1.Status != placement.AckBound {
-		t.Fatalf("first ack=%s reason=%s", a1.Status, a1.Reason)
+	if a1.Result != placement.CreateChannelAccepted {
+		t.Fatalf("first ack=%s", a1.Result)
 	}
 	a2 := sendCreateChannel(t, ctx, d, srv, req)
-	if a2.Status != placement.AckBound {
-		t.Errorf("second ack=%s reason=%s (idempotent replay must AckBound)", a2.Status, a2.Reason)
+	if a2.Result != placement.CreateChannelAccepted {
+		t.Errorf("second ack=%s (idempotent replay must CreateChannelAccepted)", a2.Result)
 	}
 	// Idempotent replay MUST echo the same daemon-generated fencing
 	// tuple from the original bootstrap — the daemon is the trust
@@ -245,18 +327,15 @@ func TestDaemon_OnCreateChannel_ConflictingRequestRejected(t *testing.T) {
 	bind := placement.CreateChannelRequest{
 		ChannelID: "ch-high", CreateRequestID: "req-A",
 	}
-	if ack := sendCreateChannel(t, ctx, d, srv, bind); ack.Status != placement.AckBound {
-		t.Fatalf("first bind=%s reason=%s", ack.Status, ack.Reason)
+	if ack := sendCreateChannel(t, ctx, d, srv, bind); ack.Result != placement.CreateChannelAccepted {
+		t.Fatalf("first bind=%s", ack.Result)
 	}
 
 	conflicting := bind
 	conflicting.CreateRequestID = "req-B"
-	ack := sendCreateChannel(t, ctx, d, srv, conflicting)
-	if ack.Status != placement.AckRejected {
-		t.Fatalf("conflicting create_request_id expected reject, got %s", ack.Status)
-	}
-	if ack.Reason != "create_request_id_mismatch" {
-		t.Errorf("ack.Reason=%q want create_request_id_mismatch", ack.Reason)
+	rej := sendCreateChannelReject(t, ctx, d, srv, conflicting)
+	if rej.Reason != "create_request_id_mismatch" {
+		t.Errorf("reject reason=%q want create_request_id_mismatch", rej.Reason)
 	}
 }
 
@@ -274,8 +353,8 @@ func TestDaemon_OnUnbindChannel(t *testing.T) {
 	req := placement.CreateChannelRequest{
 		ChannelID: chID, CreateRequestID: "req-unb",
 	}
-	if ack := sendCreateChannel(t, ctx, d, srv, req); ack.Status != placement.AckBound {
-		t.Fatalf("create=%s", ack.Status)
+	if ack := sendCreateChannel(t, ctx, d, srv, req); ack.Result != placement.CreateChannelAccepted {
+		t.Fatalf("create=%s", ack.Result)
 	}
 	if !d.HasChannel(chID) {
 		t.Fatal("channel not mounted after create")
@@ -357,8 +436,8 @@ func TestDaemon_OnHeldChannelsAckRejected_UnloadsChannel(t *testing.T) {
 	req := placement.CreateChannelRequest{
 		ChannelID: chID, CreateRequestID: "req-recl",
 	}
-	if ack := sendCreateChannel(t, ctx, d, srv, req); ack.Status != placement.AckBound {
-		t.Fatalf("create=%s", ack.Status)
+	if ack := sendCreateChannel(t, ctx, d, srv, req); ack.Result != placement.CreateChannelAccepted {
+		t.Fatalf("create=%s", ack.Result)
 	}
 
 	// Inject held_channels_ack with a rejected decision for chID.
@@ -400,8 +479,8 @@ func TestDaemon_OnHeldChannelsAckAccepted_RecordsWatermark(t *testing.T) {
 	req := placement.CreateChannelRequest{
 		ChannelID: chID, CreateRequestID: "req-recl-ok",
 	}
-	if ack := sendCreateChannel(t, ctx, d, srv, req); ack.Status != placement.AckBound {
-		t.Fatalf("create=%s", ack.Status)
+	if ack := sendCreateChannel(t, ctx, d, srv, req); ack.Result != placement.CreateChannelAccepted {
+		t.Fatalf("create=%s", ack.Result)
 	}
 
 	body := map[string]any{
@@ -428,6 +507,87 @@ func TestDaemon_OnHeldChannelsAckAccepted_RecordsWatermark(t *testing.T) {
 	}
 	if !d.HasChannel(chID) {
 		t.Error("accepted reclaim should NOT unload the channel")
+	}
+}
+
+func TestDaemon_OnDaemonReclaim_EmitsCanonicalReclaimedPayload(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	d, srv, _, channelsDir := startDaemon(t, ctx, "daemon-A")
+	defer func() { _ = d.Close() }()
+
+	chID := channel.ID("ch-reclaimed-payload")
+	createReq := placement.CreateChannelRequest{
+		ChannelID: chID, CreateRequestID: "req-reclaimed-create",
+	}
+	createAck := sendCreateChannel(t, ctx, d, srv, createReq)
+	if createAck.Result != placement.CreateChannelAccepted {
+		t.Fatalf("create=%s", createAck.Result)
+	}
+
+	previousDaemon := placement.DaemonID("daemon-stale")
+	reclaimReq := placement.DaemonReclaimRequest{
+		ChannelID:           chID,
+		CreateRequestID:     "req-reclaim-1",
+		NewOwnerEpoch:       createAck.OwnerEpoch + 1,
+		PreviousOwnerDaemon: &previousDaemon,
+		PreviousState:       placement.ReclaimOriginStale,
+	}
+	reclaimAck := sendDaemonReclaim(t, ctx, d, srv, reclaimReq)
+	if reclaimAck.NewOwnerEpoch != reclaimReq.NewOwnerEpoch {
+		t.Fatalf("reclaim epoch=%d want %d", reclaimAck.NewOwnerEpoch, reclaimReq.NewOwnerEpoch)
+	}
+
+	dbPath := filepath.Join(channelsDir, string(chID), "channel.sqlite")
+	db, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("open channel db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	var envelopeChannelID string
+	var envelopeTS int64
+	var rawPayload []byte
+	err = db.QueryRowContext(ctx, `
+		SELECT channel_id, ts, payload
+		FROM messages
+		WHERE type = 'system.placement.reclaimed'
+	`).Scan(&envelopeChannelID, &envelopeTS, &rawPayload)
+	if err != nil {
+		t.Fatalf("query placement reclaimed event: %v", err)
+	}
+	if envelopeChannelID != string(chID) {
+		t.Fatalf("envelope channel_id=%q want %q", envelopeChannelID, chID)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rawPayload, &payload); err != nil {
+		t.Fatalf("decode reclaimed payload: %v", err)
+	}
+	want := map[string]any{
+		"channel_id":               string(chID),
+		"new_owner_daemon_id":      "daemon-A",
+		"new_owner_epoch":          float64(reclaimReq.NewOwnerEpoch),
+		"previous_owner_daemon_id": string(previousDaemon),
+		"previous_owner_epoch":     float64(createAck.OwnerEpoch),
+		"reclaimed_from_state":     string(placement.ReclaimOriginStale),
+		"reclaimed_at":             float64(envelopeTS),
+	}
+	for key, wantValue := range want {
+		if got := payload[key]; got != wantValue {
+			t.Errorf("payload[%s]=%v want %v", key, got, wantValue)
+		}
+	}
+	for _, oldKey := range []string{
+		"previous_owner_daemon",
+		"new_owner_daemon",
+		"previous_state",
+		"create_request_id",
+	} {
+		if _, ok := payload[oldKey]; ok {
+			t.Errorf("payload unexpectedly contains old field %q", oldKey)
+		}
 	}
 }
 

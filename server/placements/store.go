@@ -146,7 +146,7 @@ func (s *SQLStore) CASActivate(
 	newConnectionEpoch placement.ConnectionEpoch,
 	nowMs int64,
 ) (bool, error) {
-	if ack.Status != placement.AckBound {
+	if ack.Result != placement.CreateChannelAccepted {
 		// daemon explicitly rejected — never advance to active.
 		return false, nil
 	}
@@ -187,6 +187,36 @@ func (s *SQLStore) CASActivate(
 	n, err := res.RowsAffected()
 	if err != nil {
 		return false, fmt.Errorf("placements: CASActivate rows: %w", err)
+	}
+	return n == 1, nil
+}
+
+// CASOrphanCreating transitions a specific creating saga to orphan after
+// daemon bootstrap rejection.
+func (s *SQLStore) CASOrphanCreating(
+	ctx context.Context,
+	channelID channel.ID,
+	createRequestID placement.CreateRequestID,
+	nowMs int64,
+) (bool, error) {
+	res, err := s.db.ExecContext(
+		ctx,
+		`UPDATE channel_placements
+		    SET state = 'orphan',
+		        entered_state_at = ?
+		  WHERE channel_id = ?
+		    AND create_request_id = ?
+		    AND state = 'creating'`,
+		nowMs,
+		string(channelID),
+		string(createRequestID),
+	)
+	if err != nil {
+		return false, fmt.Errorf("placements: CASOrphanCreating: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("placements: CASOrphanCreating rows: %w", err)
 	}
 	return n == 1, nil
 }

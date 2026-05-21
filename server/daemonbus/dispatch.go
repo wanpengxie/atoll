@@ -27,6 +27,9 @@ type Handlers struct {
 	// OnCreateChannelAck handles control.create_channel_ack.
 	OnCreateChannelAck func(ctx context.Context, conn *Connection, ack placement.CreateChannelAck) error
 
+	// OnRejectChannel handles control.reject_channel.
+	OnRejectChannel func(ctx context.Context, conn *Connection, rej placement.RejectChannel) error
+
 	// OnHeartbeat handles control.heartbeat — refresh daemon
 	// last_heartbeat_at + per-channel heartbeat for active
 	// placements.
@@ -101,6 +104,16 @@ func (c *Connection) Run(ctx context.Context, h Handlers) error {
 					return perr
 				}
 				if err := h.OnCreateChannelAck(ctx, c, ack); err != nil {
+					return err
+				}
+			}
+		case daemonbus.FrameTypeControlRejectChannel:
+			if h.OnRejectChannel != nil {
+				rej, perr := DecodeRejectChannel(frame)
+				if perr != nil {
+					return perr
+				}
+				if err := h.OnRejectChannel(ctx, c, rej); err != nil {
 					return err
 				}
 			}

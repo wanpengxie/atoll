@@ -2,6 +2,7 @@ package framework
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -20,7 +21,6 @@ type fakeTransit struct {
 	mu      sync.Mutex
 	sent    []devicetransit.SendFrame
 	acks    []devicetransit.AckFrame
-	errs    []devicetransit.ErrorFrame
 	nextID  string
 	sendErr error
 }
@@ -44,13 +44,6 @@ func (f *fakeTransit) Ack(_ context.Context, frame devicetransit.AckFrame) error
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.acks = append(f.acks, frame)
-	return nil
-}
-
-func (f *fakeTransit) Error(_ context.Context, frame devicetransit.ErrorFrame) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.errs = append(f.errs, frame)
 	return nil
 }
 
@@ -258,17 +251,24 @@ func TestSendRequestHappyPath(t *testing.T) {
 	if got.DeviceSessionID != "sess-1" {
 		t.Errorf("session mismatch: %q", got.DeviceSessionID)
 	}
-	if got.Direction != devicetransit.DirectionToDevice {
-		t.Errorf("direction mismatch: %q", got.Direction)
+	if got.AdapterActorID != actor.ActorID("tool:xhs-adapter") {
+		t.Errorf("adapter_actor_id mismatch: %q", got.AdapterActorID)
 	}
-	if got.RequestID != env.ID {
-		t.Errorf("request id mismatch: %q", got.RequestID)
+	var body DeviceTransitBody
+	if err := json.Unmarshal(got.Body, &body); err != nil {
+		t.Fatalf("decode transit body: %v", err)
 	}
-	if got.ExpiresAt != deadline {
-		t.Errorf("expires_at mismatch: %d", got.ExpiresAt)
+	if body.Direction != DirectionToDevice {
+		t.Errorf("direction mismatch: %q", body.Direction)
 	}
-	if string(got.Payload) != `{"cmd":"publish"}` {
-		t.Errorf("payload mismatch: %q", got.Payload)
+	if body.RequestID != env.ID {
+		t.Errorf("request id mismatch: %q", body.RequestID)
+	}
+	if body.ExpiresAt != deadline {
+		t.Errorf("expires_at mismatch: %d", body.ExpiresAt)
+	}
+	if string(body.Payload) != `{"cmd":"publish"}` {
+		t.Errorf("payload mismatch: %q", body.Payload)
 	}
 
 	// Correlation reserved + F3 timer armed.

@@ -22,7 +22,7 @@ import (
 //  1. Server side sends control.bind_device_session via the mock bus.
 //  2. Daemon dispatcher routes to the binder's OnBind hook.
 //  3. Binder Upserts the row into the shared SessionStore.
-//  4. Daemon emits control.bind_device_session_ack with Accepted=true.
+//  4. Daemon emits control.bind_device_session_ack with result=accepted.
 //
 // Then exercises unbind:
 //
@@ -68,7 +68,8 @@ func TestIntegration_BindDeviceSession_RoundTrip(t *testing.T) {
 	const sessionID devicetransit.DeviceSessionID = "sess-integ-1"
 	bindBody := transit.BindDeviceSessionBody{
 		FrameID:          "frame-bind-integ",
-		SessionID:        sessionID,
+		BindRequestID:    "bind-req-integ",
+		DeviceSessionID:  sessionID,
 		ChannelID:        channel.ID("ch-X"),
 		DeviceID:         "dev-1",
 		DeviceType:       "xhs",
@@ -94,11 +95,11 @@ func TestIntegration_BindDeviceSession_RoundTrip(t *testing.T) {
 	if err := transit.DecodePayload(ack, &bindAck); err != nil {
 		t.Fatalf("decode bind ack: %v", err)
 	}
-	if !bindAck.Accepted {
+	if bindAck.Result != daemonbus.DeviceSessionBindAccepted {
 		t.Fatalf("bind ack not accepted: %+v", bindAck)
 	}
-	if bindAck.SessionID != sessionID {
-		t.Errorf("ack.SessionID=%q want %q", bindAck.SessionID, sessionID)
+	if bindAck.DeviceSessionID != sessionID {
+		t.Errorf("ack.DeviceSessionID=%q want %q", bindAck.DeviceSessionID, sessionID)
 	}
 
 	// Row landed in the shared store.
@@ -118,10 +119,10 @@ func TestIntegration_BindDeviceSession_RoundTrip(t *testing.T) {
 
 	// Unbind round trip.
 	unbindBody := transit.UnbindDeviceSessionBody{
-		FrameID:   "frame-unbind-integ",
-		SessionID: sessionID,
-		ChannelID: bindBody.ChannelID,
-		Reason:    "revoked",
+		FrameID:         "frame-unbind-integ",
+		DeviceSessionID: sessionID,
+		ChannelID:       bindBody.ChannelID,
+		Reason:          "revoked",
 	}
 	unbindFrame, err := transit.Encode(
 		"frame-srv-unbind-integ",
@@ -139,7 +140,7 @@ func TestIntegration_BindDeviceSession_RoundTrip(t *testing.T) {
 	if err := transit.DecodePayload(unbindAckFrame, &unbindAck); err != nil {
 		t.Fatalf("decode unbind ack: %v", err)
 	}
-	if !unbindAck.Accepted {
+	if unbindAck.Result != daemonbus.DeviceSessionBindAccepted {
 		t.Fatalf("unbind ack not accepted: %+v", unbindAck)
 	}
 	if _, ok, _ := store.Get(ctx, sessionID); ok {

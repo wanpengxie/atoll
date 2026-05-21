@@ -304,7 +304,7 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 			}
 			frame.DeviceSessionID = devicetransit.DeviceSessionID(sessionID)
 			frame.ChannelID = row.ChannelID
-			frame.Direction = devicetransit.DirectionFromDevice
+			frame.AdapterActorID = row.AdapterActorID
 			if err := forwarder.ForwardDeviceFrame(c.Request.Context(), frame); err != nil {
 				return
 			}

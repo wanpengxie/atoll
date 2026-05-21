@@ -281,12 +281,11 @@ func TestManagerInstallRejectsTransitMissing(t *testing.T) {
 	}
 }
 
-// recordingTransit captures Send / Ack / Error calls.
+// recordingTransit captures Send / Ack calls.
 type recordingTransit struct {
 	mu    sync.Mutex
 	sent  []devicetransit.SendFrame
 	acks  []devicetransit.AckFrame
-	errs  []devicetransit.ErrorFrame
 	frame string
 }
 
@@ -302,13 +301,6 @@ func (r *recordingTransit) Ack(_ context.Context, frame devicetransit.AckFrame) 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.acks = append(r.acks, frame)
-	return nil
-}
-
-func (r *recordingTransit) Error(_ context.Context, frame devicetransit.ErrorFrame) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.errs = append(r.errs, frame)
 	return nil
 }
 

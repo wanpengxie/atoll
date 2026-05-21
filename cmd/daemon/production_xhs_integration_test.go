@@ -112,11 +112,15 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 	if send.DeviceSessionID != sessionID {
 		t.Errorf("send.DeviceSessionID=%q want %q", send.DeviceSessionID, sessionID)
 	}
-	if send.RequestID != ack.MessageID {
-		t.Errorf("send.RequestID=%q want canonical ack.MessageID=%q", send.RequestID, ack.MessageID)
+	var transitBody deviceframework.DeviceTransitBody
+	if err := json.Unmarshal(send.Body, &transitBody); err != nil {
+		t.Fatalf("decode device transit body: %v", err)
+	}
+	if transitBody.RequestID != ack.MessageID {
+		t.Errorf("body.RequestID=%q want canonical ack.MessageID=%q", transitBody.RequestID, ack.MessageID)
 	}
 	var cmd devicexhs.Command
-	if err := json.Unmarshal(send.Payload, &cmd); err != nil {
+	if err := json.Unmarshal(transitBody.Payload, &cmd); err != nil {
 		t.Fatalf("decode device command: %v", err)
 	}
 	if cmd.Type != devicexhs.CommandWireType || cmd.Cmd != "publish" {
@@ -169,7 +173,8 @@ func bindDeviceSession(
 	t.Helper()
 	body := transit.BindDeviceSessionBody{
 		FrameID:          daemonbus.FrameID("frame-bind-" + string(sessionID)),
-		SessionID:        sessionID,
+		BindRequestID:    "bind-req-" + string(sessionID),
+		DeviceSessionID:  sessionID,
 		ChannelID:        channelID,
 		DeviceID:         "device-" + string(sessionID),
 		DeviceType:       "xhs",
@@ -192,7 +197,7 @@ func bindDeviceSession(
 	if err := transit.DecodePayload(ackFrame, &ack); err != nil {
 		t.Fatalf("decode bind ack: %v", err)
 	}
-	if !ack.Accepted {
+	if ack.Result != daemonbus.DeviceSessionBindAccepted {
 		t.Fatalf("bind rejected: %+v", ack)
 	}
 }

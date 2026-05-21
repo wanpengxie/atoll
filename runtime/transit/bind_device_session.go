@@ -49,7 +49,7 @@ type BindDeviceSessionAckBody = daemonbus.BindDeviceSessionAckBody
 type UnbindDeviceSessionBody = daemonbus.UnbindDeviceSessionBody
 
 // UnbindDeviceSessionAckBody is the daemon → server reply. Mirrors
-// BindDeviceSessionAckBody — Accepted=true when the daemon successfully
+// BindDeviceSessionAckBody — result=accepted when the daemon successfully
 // purged the mirror row (or the row was already absent).
 type UnbindDeviceSessionAckBody = daemonbus.UnbindDeviceSessionAckBody
 

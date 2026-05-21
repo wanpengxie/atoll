@@ -185,13 +185,12 @@ type InitialMember struct {
 	Role          string        `json:"role"` // 'owner' | 'member'
 }
 
-// AckStatus is the closed status set inside CreateChannelAck (L2
-// §1.4.11.3 step 4 — `status: bound | rejected`).
-type AckStatus string
+// CreateChannelAckResult is the closed success result set inside
+// CreateChannelAck. Rejects are carried by control.reject_channel.
+type CreateChannelAckResult string
 
 const (
-	AckBound    AckStatus = "bound"
-	AckRejected AckStatus = "rejected"
+	CreateChannelAccepted CreateChannelAckResult = "accepted"
 )
 
 // CreateChannelAck is the payload of `control.create_channel_ack` frame
@@ -208,15 +207,24 @@ const (
 // fencing tuple is the daemon's authoritative output and not a
 // comparison input.
 type CreateChannelAck struct {
+	FrameID         string                 `json:"frame_id"`
+	ChannelID       channel.ID             `json:"channel_id"`
+	CreateRequestID CreateRequestID        `json:"create_request_id"`
+	OwnerEpoch      OwnerEpoch             `json:"owner_epoch"`
+	FencingToken    FencingToken           `json:"fencing_token"`
+	DaemonID        DaemonID               `json:"daemon_id"`
+	DaemonEpoch     DaemonEpoch            `json:"daemon_epoch"`
+	Result          CreateChannelAckResult `json:"result"`
+}
+
+// RejectChannel is the payload of `control.reject_channel` for
+// daemon-side bootstrap rejection.
+type RejectChannel struct {
 	FrameID         string          `json:"frame_id"`
 	ChannelID       channel.ID      `json:"channel_id"`
 	CreateRequestID CreateRequestID `json:"create_request_id"`
-	OwnerEpoch      OwnerEpoch      `json:"owner_epoch"`
-	FencingToken    FencingToken    `json:"fencing_token"`
-	DaemonID        DaemonID        `json:"daemon_id"`
-	DaemonEpoch     DaemonEpoch     `json:"daemon_epoch"`
-	Status          AckStatus       `json:"status"`
-	Reason          string          `json:"reason,omitempty"`
+	Reason          string          `json:"reason"`
+	Detail          string          `json:"detail,omitempty"`
 }
 
 // Match verifies the ACK targets the same saga the server reserved for

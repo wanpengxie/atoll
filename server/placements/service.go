@@ -191,7 +191,7 @@ func (s *Service) ReserveWith(
 }
 
 // Activate runs L2 §1.4.11.3 step 5 on a daemon ACK. It validates
-// the ACK's status before invoking the SQL CAS (ack.Match is also
+// the ACK's result before invoking the SQL CAS (ack.Match is also
 // checked client-side as a fast pre-check + diagnostic).
 //
 // Returns (ok, nil) when the CAS succeeded; (false, nil) when the
@@ -202,7 +202,7 @@ func (s *Service) Activate(
 	ack placement.CreateChannelAck,
 	newConnectionEpoch placement.ConnectionEpoch,
 ) (bool, error) {
-	if ack.Status != placement.AckBound {
+	if ack.Result != placement.CreateChannelAccepted {
 		return false, nil
 	}
 	cur, ok, err := s.store.Get(ctx, ack.ChannelID)
@@ -218,6 +218,16 @@ func (s *Service) Activate(
 		return false, nil
 	}
 	return s.store.CASActivate(ctx, ack, newConnectionEpoch, s.now().UnixMilli())
+}
+
+// RejectCreate marks a create-channel saga failed/orphan after the daemon
+// emits control.reject_channel. Reconcile owns final cleanup; this explicit
+// transition prevents a rejected saga from lingering until timeout.
+func (s *Service) RejectCreate(ctx context.Context, rej placement.RejectChannel) (bool, error) {
+	if rej.ChannelID == "" || rej.CreateRequestID == "" {
+		return false, nil
+	}
+	return s.store.CASOrphanCreating(ctx, rej.ChannelID, rej.CreateRequestID, s.now().UnixMilli())
 }
 
 // Heartbeat refreshes last_heartbeat_at on a control.heartbeat

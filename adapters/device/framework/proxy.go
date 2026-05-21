@@ -2,6 +2,7 @@ package framework
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -69,6 +70,28 @@ type DeviceProxy struct {
 	// Clock + frame id injection (test seams).
 	now        func() time.Time
 	newFrameID func() string
+}
+
+// TransitDirection is the adapter-framework body-level direction set.
+// It is deliberately not a daemonbus top-level field; L2 treats
+// devicetransit.SendFrame.Body as opaque.
+type TransitDirection string
+
+const (
+	DirectionToDevice   TransitDirection = "to_device"
+	DirectionFromDevice TransitDirection = "from_device"
+)
+
+// DeviceTransitBody is the xhs/framework-internal body schema carried
+// inside devicetransit.SendFrame.Body.
+type DeviceTransitBody struct {
+	Direction       TransitDirection  `json:"direction"`
+	RequestID       message.ID        `json:"request_id"`
+	ParentID        message.ID        `json:"parent_id,omitempty"`
+	CorrelationID   message.ID        `json:"correlation_id,omitempty"`
+	Payload         json.RawMessage   `json:"payload"`
+	EnvelopePartial *message.Envelope `json:"envelope_partial,omitempty"`
+	ExpiresAt       int64             `json:"expires_at,omitempty"`
 }
 
 // NewDeviceProxy validates deps + returns a ready proxy. The defaults
@@ -190,15 +213,24 @@ func (p *DeviceProxy) SendRequest(
 		return "", fmt.Errorf("framework.DeviceProxy.SendRequest: arm F3 timer: %w", err)
 	}
 
+	body, err := json.Marshal(DeviceTransitBody{
+		Direction:     DirectionToDevice,
+		RequestID:     env.ID,
+		ParentID:      env.ParentID,
+		CorrelationID: env.CorrelationID,
+		Payload:       append([]byte(nil), wirePayload...), // defensive copy — kernel transit may persist async
+		ExpiresAt:     deadlineMs,
+	})
+	if err != nil {
+		_ = p.deps.Policy.CancelTimer(ctx, requestKey)
+		_ = p.deps.Correlation.MarkExpired(ctx, requestKey)
+		return "", fmt.Errorf("framework.DeviceProxy.SendRequest: marshal transit body: %w", err)
+	}
 	frame := devicetransit.SendFrame{
-		ChannelID:       p.ChannelID,
 		DeviceSessionID: sessionID,
-		Direction:       devicetransit.DirectionToDevice,
-		RequestID:       env.ID,
-		ParentID:        env.ParentID,
-		CorrelationID:   env.CorrelationID,
-		Payload:         append([]byte(nil), wirePayload...), // defensive copy — kernel transit may persist async
-		ExpiresAt:       deadlineMs,
+		AdapterActorID:  p.AdapterActorID,
+		ChannelID:       p.ChannelID,
+		Body:            body,
 	}
 
 	sentFrameID, err := p.deps.Transit.Send(ctx, frame)

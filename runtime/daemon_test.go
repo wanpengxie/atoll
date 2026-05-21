@@ -722,7 +722,7 @@ func TestDaemon_DeviceTransit_InboundRoutesToPerChannelCallback(t *testing.T) {
 			h.SetDeviceCallback(func(_ context.Context, frame devicetransit.SendFrame) error {
 				observed <- observation{
 					channelID: string(frame.ChannelID),
-					payload:   string(frame.Payload),
+					payload:   string(frame.Body),
 				}
 				return nil
 			})
@@ -746,9 +746,8 @@ func TestDaemon_DeviceTransit_InboundRoutesToPerChannelCallback(t *testing.T) {
 		body := devicetransit.SendFrame{
 			ChannelID:       targetCh,
 			DeviceSessionID: "sess-1",
-			Direction:       devicetransit.DirectionFromDevice,
-			RequestID:       "req-1",
-			Payload:         []byte(payload),
+			AdapterActorID:  "tool:xhs-adapter",
+			Body:            []byte(payload),
 		}
 		frame, err := transit.Encode("frame-send-"+string(targetCh),
 			daemonbus.FrameTypeDeviceTransitSend,

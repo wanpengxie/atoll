@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 )
@@ -129,6 +130,7 @@ func (s DeviceState) CanTransitionTo(next DeviceState) bool {
 type DeviceSession struct {
 	SessionID        devicetransit.DeviceSessionID `json:"session_id"`
 	ChannelID        channel.ID                    `json:"channel_id"`
+	AdapterActorID   actor.ActorID                 `json:"adapter_actor_id"`
 	DeviceID         string                        `json:"device_id"`
 	DeviceType       string                        `json:"device_type"`
 	State            DeviceState                   `json:"state"`
@@ -143,6 +145,7 @@ type DeviceSession struct {
 var SessionFields = []string{
 	"session_id",
 	"channel_id",
+	"adapter_actor_id",
 	"device_id",
 	"device_type",
 	"state",
@@ -162,6 +165,9 @@ func (d DeviceSession) Validate() error {
 	}
 	if d.ChannelID == "" {
 		return errors.New("framework.DeviceSession: ChannelID is required")
+	}
+	if d.AdapterActorID == "" {
+		return errors.New("framework.DeviceSession: AdapterActorID is required")
 	}
 	if d.DeviceID == "" {
 		return errors.New("framework.DeviceSession: DeviceID is required")

@@ -6,8 +6,8 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // DeviceSessionID is the server-allocated identifier for one device session.
@@ -22,45 +22,33 @@ type FrameID string
 // String returns the wire form.
 func (f FrameID) String() string { return string(f) }
 
-// TransitDirection is the closed set of `direction` field values on SendFrame.
-type TransitDirection string
+// SendFrame is the canonical payload carried by both `device_transit.send`
+// (impl-layer2 §5.3.1 inbound — device → adapter) and
+// `device_transit.recv` (§5.3.2 outbound — adapter → device). Body is
+// intentionally opaque to L2; adapter/framework-specific request IDs,
+// payloads and deadlines live inside it.
+type SendFrame struct {
+	DeviceSessionID DeviceSessionID `json:"device_session_id"`
+	AdapterActorID  actor.ActorID   `json:"adapter_actor_id"`
+	ChannelID       channel.ID      `json:"channel_id"`
+	Body            json.RawMessage `json:"body"`
+	TransitSeq      int64           `json:"transit_seq,omitempty"`
+}
+
+// AckResult is the canonical transport-level device_transit.ack result.
+type AckResult string
 
 const (
-	DirectionToDevice   TransitDirection = "to_device"
-	DirectionFromDevice TransitDirection = "from_device"
+	AckDelivered AckResult = "delivered"
+	AckDropped   AckResult = "dropped"
 )
-
-// SendFrame is the shared payload carried by both `device_transit.send`
-// (impl-layer2 §5.3.1 inbound — device → adapter) and
-// `device_transit.recv` (§5.3.2 outbound — adapter → device); the
-// Direction field disambiguates per-frame intent.
-type SendFrame struct {
-	ChannelID       channel.ID        `json:"channel_id"`
-	DeviceSessionID DeviceSessionID   `json:"device_session_id"`
-	Direction       TransitDirection  `json:"direction"`
-	RequestID       message.ID        `json:"request_id"`
-	ParentID        message.ID        `json:"parent_id,omitempty"`
-	CorrelationID   message.ID        `json:"correlation_id,omitempty"`
-	Payload         json.RawMessage   `json:"payload"`
-	EnvelopePartial *message.Envelope `json:"envelope_partial,omitempty"`
-	ExpiresAt       int64             `json:"expires_at,omitempty"`
-}
 
 // AckFrame is the `device_transit.ack` payload.
 type AckFrame struct {
-	FrameID         FrameID         `json:"frame_id"`
-	DeviceSessionID DeviceSessionID `json:"device_session_id"`
-	ChannelID       channel.ID      `json:"channel_id"`
-	OK              bool            `json:"ok"`
-}
-
-// ErrorFrame is the `device_transit.error` payload.
-type ErrorFrame struct {
-	RequestID       message.ID      `json:"request_id"`
-	DeviceSessionID DeviceSessionID `json:"device_session_id"`
-	ChannelID       channel.ID      `json:"channel_id"`
-	Code            string          `json:"code"`
-	Message         string          `json:"message"`
+	CorrelationFrameID FrameID   `json:"correlation_frame_id"`
+	Result             AckResult `json:"result"`
+	Reason             string    `json:"reason,omitempty"`
+	Detail             string    `json:"detail,omitempty"`
 }
 
 // DeviceTransit is the kernel-level seam the runtime_inbound_via_relay binding uses
@@ -68,5 +56,4 @@ type ErrorFrame struct {
 type DeviceTransit interface {
 	Send(ctx context.Context, frame SendFrame) (frameID FrameID, err error)
 	Ack(ctx context.Context, frame AckFrame) error
-	Error(ctx context.Context, frame ErrorFrame) error
 }
