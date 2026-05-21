@@ -131,6 +131,43 @@ func TestCategoryOfRoundtripping(t *testing.T) {
 	}
 }
 
+func TestUnbindChannelPayloadABI(t *testing.T) {
+	t.Parallel()
+
+	body := UnbindChannelBody{
+		ChannelID:  "ch-1",
+		OwnerEpoch: 7,
+		Reason:     UnbindChannelReasonAbandon,
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	for _, key := range []string{`"channel_id"`, `"owner_epoch"`, `"reason"`} {
+		if !strings.Contains(got, key) {
+			t.Fatalf("UnbindChannelBody json=%s missing %s", got, key)
+		}
+	}
+
+	ack := UnbindChannelAckBody{
+		ChannelID:  "ch-1",
+		OwnerEpoch: 7,
+		Result:     UnbindChannelRejected,
+		Reason:     UnbindChannelRejectOwnerEpochStale,
+	}
+	raw, err = json.Marshal(ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = string(raw)
+	for _, key := range []string{`"channel_id"`, `"owner_epoch"`, `"result"`, `"reason"`} {
+		if !strings.Contains(got, key) {
+			t.Fatalf("UnbindChannelAckBody json=%s missing %s", got, key)
+		}
+	}
+}
+
 // TestFrameHeaderFieldSet locks the impl-layer2 §1.3 daemonbus mux
 // outer envelope field set: 7 named header keys + 1 payload. The 7
 // names match HeaderFields.

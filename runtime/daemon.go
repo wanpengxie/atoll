@@ -2014,41 +2014,22 @@ func (d *Daemon) sendReclaimRejected(ctx context.Context, inboundFrameID daemonb
 	return d.transit.Send(ctx, frameID, daemonbus.FrameTypeControlReclaimRejected, rej)
 }
 
-// unbindChannelBody is the minimal payload shape this daemon
-// understands for a control.unbind_channel frame. The kernel package
-// does not yet define a typed payload for this frame (M1.6 scope), so
-// we decode an inline JSON struct. The server only needs frame_id +
-// channel_id round-tripped on the ack.
-type unbindChannelBody struct {
-	FrameID   string     `json:"frame_id"`
-	ChannelID channel.ID `json:"channel_id"`
-}
-
-// unbindChannelAckBody is the response payload sent back as
-// control.unbind_channel_ack.
-type unbindChannelAckBody struct {
-	FrameID   string     `json:"frame_id"`
-	ChannelID channel.ID `json:"channel_id"`
-	Status    string     `json:"status"` // "unbound" | "not_found"
-	Reason    string     `json:"reason,omitempty"`
-}
-
 // handleUnbindChannel — T0.2. Closes the per-channel pusher
 // goroutine (via lifecycle.Unloader teardown), drops the runtime
 // entry from d.channels, and emits control.unbind_channel_ack. Does
 // NOT delete channels/<id>/ on disk — that's the GC schedule, not the
 // unbind path.
 func (d *Daemon) handleUnbindChannel(ctx context.Context, frame daemonbus.Frame) error {
-	var body unbindChannelBody
+	var body daemonbus.UnbindChannelBody
 	if len(frame.Payload) > 0 {
 		if err := json.Unmarshal(frame.Payload, &body); err != nil {
 			return fmt.Errorf("runtime: decode unbind_channel: %w", err)
 		}
 	}
-	if body.FrameID == "" {
-		body.FrameID = string(frame.FrameID)
+	ack := daemonbus.UnbindChannelAckBody{
+		ChannelID:  body.ChannelID,
+		OwnerEpoch: body.OwnerEpoch,
 	}
-	ack := unbindChannelAckBody{FrameID: body.FrameID, ChannelID: body.ChannelID}
 	// FIX-2026-05-18: echo inbound envelope frame_id (see sendCreateAck
 	// for the full root-cause comment). Empty inbound id falls back to
 	// the generator — only reachable under test stubs.
@@ -2057,23 +2038,45 @@ func (d *Daemon) handleUnbindChannel(ctx context.Context, frame daemonbus.Frame)
 		replyFrameID = d.cfg.FrameIDGen()
 	}
 	if body.ChannelID == "" {
-		ack.Status = "not_found"
-		ack.Reason = "empty_channel_id"
+		ack.Result = daemonbus.UnbindChannelRejected
+		ack.Reason = daemonbus.UnbindChannelRejectAlreadyReleased
 		return d.transit.Send(ctx, replyFrameID,
 			daemonbus.FrameTypeControlUnbindChannelAck, ack)
 	}
-	if !d.HasChannel(body.ChannelID) {
-		ack.Status = "not_found"
+	cr, ok := d.getChannel(body.ChannelID)
+	if !ok {
+		ack.Result = daemonbus.UnbindChannelRejected
+		ack.Reason = daemonbus.UnbindChannelRejectAlreadyReleased
+		return d.transit.Send(ctx, replyFrameID,
+			daemonbus.FrameTypeControlUnbindChannelAck, ack)
+	}
+	row, lockOK, err := cr.lock.Get(ctx)
+	if err != nil {
+		ack.Result = daemonbus.UnbindChannelRejected
+		ack.Reason = daemonbus.UnbindChannelRejectInternalError
+		return d.transit.Send(ctx, replyFrameID,
+			daemonbus.FrameTypeControlUnbindChannelAck, ack)
+	}
+	if !lockOK {
+		ack.Result = daemonbus.UnbindChannelRejected
+		ack.Reason = daemonbus.UnbindChannelRejectAlreadyReleased
+		return d.transit.Send(ctx, replyFrameID,
+			daemonbus.FrameTypeControlUnbindChannelAck, ack)
+	}
+	ack.OwnerEpoch = row.OwnerEpoch
+	if body.OwnerEpoch != row.OwnerEpoch {
+		ack.Result = daemonbus.UnbindChannelRejected
+		ack.Reason = daemonbus.UnbindChannelRejectOwnerEpochStale
 		return d.transit.Send(ctx, replyFrameID,
 			daemonbus.FrameTypeControlUnbindChannelAck, ack)
 	}
 	if err := d.unloader.Unload(ctx, body.ChannelID, lifecycle.UnloadOrphan); err != nil {
-		ack.Status = "not_found"
-		ack.Reason = err.Error()
+		ack.Result = daemonbus.UnbindChannelRejected
+		ack.Reason = daemonbus.UnbindChannelRejectInternalError
 		return d.transit.Send(ctx, replyFrameID,
 			daemonbus.FrameTypeControlUnbindChannelAck, ack)
 	}
-	ack.Status = "unbound"
+	ack.Result = daemonbus.UnbindChannelReleased
 	return d.transit.Send(ctx, replyFrameID,
 		daemonbus.FrameTypeControlUnbindChannelAck, ack)
 }

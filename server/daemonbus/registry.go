@@ -16,6 +16,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -89,6 +90,34 @@ func (s *Service) SetChannelDaemonResolver(r placements.ChannelDaemonResolver) {
 	s.mu.Lock()
 	s.channelDaemonResolver = r
 	s.mu.Unlock()
+}
+
+// ConnectedDaemons returns a stable snapshot of currently open daemon IDs.
+func (s *Service) ConnectedDaemons() []placement.DaemonID {
+	conns := s.ConnectedConnections()
+	out := make([]placement.DaemonID, 0, len(conns))
+	for _, conn := range conns {
+		out = append(out, conn.DaemonID)
+	}
+	return out
+}
+
+// ConnectedConnections returns a stable daemon_id-sorted snapshot of open
+// connections. Closed or nil registry entries are ignored.
+func (s *Service) ConnectedConnections() []*Connection {
+	s.mu.RLock()
+	out := make([]*Connection, 0, len(s.connections))
+	for _, conn := range s.connections {
+		if conn == nil || conn.IsClosed() {
+			continue
+		}
+		out = append(out, conn)
+	}
+	s.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].DaemonID < out[j].DaemonID
+	})
+	return out
 }
 
 // RegisterDaemon ensures a row exists in the daemons table for the

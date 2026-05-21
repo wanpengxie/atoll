@@ -260,6 +260,9 @@ func (s *Service) ConnectionFor(daemonID placement.DaemonID) (*Connection, bool)
 	s.mu.RLock()
 	conn, ok := s.connections[daemonID]
 	s.mu.RUnlock()
+	if !ok || conn == nil || conn.IsClosed() {
+		return nil, false
+	}
 	return conn, ok
 }
 

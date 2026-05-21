@@ -69,6 +69,38 @@ func TestUnregisterConnectionCompareAndDelete(t *testing.T) {
 	}
 }
 
+func TestConnectedDaemonsSortedFiltersClosed(t *testing.T) {
+	t.Parallel()
+	svc := newSvc(t)
+	zServer, _ := newPipePair()
+	aServer, _ := newPipePair()
+	mServer, _ := newPipePair()
+
+	zConn := daemonbus.NewConnection("z-daemon", 1, zServer)
+	aConn := daemonbus.NewConnection("a-daemon", 1, aServer)
+	mConn := daemonbus.NewConnection("m-daemon", 1, mServer)
+	svc.Register(zConn)
+	svc.Register(aConn)
+	svc.Register(mConn)
+	if err := mConn.Close(); err != nil {
+		t.Fatalf("close mConn: %v", err)
+	}
+
+	got := svc.ConnectedDaemons()
+	want := []placement.DaemonID{"a-daemon", "z-daemon"}
+	if len(got) != len(want) {
+		t.Fatalf("ConnectedDaemons=%v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ConnectedDaemons=%v want %v", got, want)
+		}
+	}
+	if _, ok := svc.ConnectionFor("m-daemon"); ok {
+		t.Fatal("ConnectionFor returned closed daemon")
+	}
+}
+
 func TestLookupDaemonForChannelUsesResolver(t *testing.T) {
 	t.Parallel()
 	svc := newSvc(t)

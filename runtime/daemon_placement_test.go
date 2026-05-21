@@ -515,17 +515,19 @@ func TestDaemon_OnUnbindChannel(t *testing.T) {
 	req := placement.CreateChannelRequest{
 		ChannelID: chID, CreateRequestID: "req-unb",
 	}
-	if ack := sendCreateChannel(t, ctx, d, srv, req); ack.Result != placement.CreateChannelAccepted {
-		t.Fatalf("create=%s", ack.Result)
+	createAck := sendCreateChannel(t, ctx, d, srv, req)
+	if createAck.Result != placement.CreateChannelAccepted {
+		t.Fatalf("create=%s", createAck.Result)
 	}
 	if !d.HasChannel(chID) {
 		t.Fatal("channel not mounted after create")
 	}
 
-	body := struct {
-		FrameID   string     `json:"frame_id"`
-		ChannelID channel.ID `json:"channel_id"`
-	}{FrameID: "unb-1", ChannelID: chID}
+	body := daemonbus.UnbindChannelBody{
+		ChannelID:  chID,
+		OwnerEpoch: createAck.OwnerEpoch,
+		Reason:     daemonbus.UnbindChannelReasonAbandon,
+	}
 	frame, _ := transit.Encode("frame-unbind", daemonbus.FrameTypeControlUnbindChannel,
 		"server", d.Transit().Epoch(), now(), body)
 	if err := srv.SendToDaemon(ctx, frame); err != nil {
@@ -550,18 +552,18 @@ func TestDaemon_OnUnbindChannel(t *testing.T) {
 		if f.FrameKind != daemonbus.FrameTypeControlUnbindChannelAck {
 			continue
 		}
-		var ack struct {
-			ChannelID channel.ID `json:"channel_id"`
-			Status    string     `json:"status"`
-		}
-		if err := transit.DecodePayload(f, &ack); err != nil {
+		var unbindAck daemonbus.UnbindChannelAckBody
+		if err := transit.DecodePayload(f, &unbindAck); err != nil {
 			t.Fatal(err)
 		}
-		if ack.Status != "unbound" {
-			t.Errorf("ack.Status=%q want unbound", ack.Status)
+		if unbindAck.Result != daemonbus.UnbindChannelReleased {
+			t.Errorf("ack.Result=%q want released", unbindAck.Result)
 		}
-		if ack.ChannelID != chID {
-			t.Errorf("ack.ChannelID=%q want %q", ack.ChannelID, chID)
+		if unbindAck.ChannelID != chID {
+			t.Errorf("ack.ChannelID=%q want %q", unbindAck.ChannelID, chID)
+		}
+		if unbindAck.OwnerEpoch != createAck.OwnerEpoch {
+			t.Errorf("ack.OwnerEpoch=%d want %d", unbindAck.OwnerEpoch, createAck.OwnerEpoch)
 		}
 		gotAck = true
 	}
@@ -581,6 +583,72 @@ func TestDaemon_OnUnbindChannel(t *testing.T) {
 	// Physical directory must NOT be deleted (unbind ≠ wipe).
 	if _, err := os.Stat(filepath.Join(channelsDir, string(chID))); err != nil {
 		t.Errorf("channel dir should still exist after unbind: %v", err)
+	}
+}
+
+func TestDaemon_OnUnbindChannelOwnerEpochMismatchRejects(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	d, srv, _, _ := startDaemon(t, ctx, "daemon-A")
+	defer func() { _ = d.Close() }()
+
+	chID := channel.ID("ch-unbind-mismatch")
+	req := placement.CreateChannelRequest{
+		ChannelID: chID, CreateRequestID: "req-unb-mismatch",
+	}
+	createAck := sendCreateChannel(t, ctx, d, srv, req)
+	if createAck.Result != placement.CreateChannelAccepted {
+		t.Fatalf("create=%s", createAck.Result)
+	}
+	if !d.HasChannel(chID) {
+		t.Fatal("channel not mounted after create")
+	}
+
+	body := daemonbus.UnbindChannelBody{
+		ChannelID:  chID,
+		OwnerEpoch: createAck.OwnerEpoch + 1,
+		Reason:     daemonbus.UnbindChannelReasonAbandon,
+	}
+	frame, _ := transit.Encode("frame-unbind-mismatch", daemonbus.FrameTypeControlUnbindChannel,
+		"server", d.Transit().Epoch(), now(), body)
+	if err := srv.SendToDaemon(ctx, frame); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("no unbind ack within 3s")
+		default:
+		}
+		recvCtx, c := context.WithTimeout(ctx, 1*time.Second)
+		f, err := srv.RecvFromDaemon(recvCtx)
+		c()
+		if err != nil {
+			t.Fatalf("recv: %v", err)
+		}
+		if f.FrameKind != daemonbus.FrameTypeControlUnbindChannelAck {
+			continue
+		}
+		var ack daemonbus.UnbindChannelAckBody
+		if err := transit.DecodePayload(f, &ack); err != nil {
+			t.Fatal(err)
+		}
+		if ack.Result != daemonbus.UnbindChannelRejected {
+			t.Fatalf("ack.Result=%q want rejected", ack.Result)
+		}
+		if ack.Reason != daemonbus.UnbindChannelRejectOwnerEpochStale {
+			t.Fatalf("ack.Reason=%q want owner_epoch_stale", ack.Reason)
+		}
+		if ack.OwnerEpoch != createAck.OwnerEpoch {
+			t.Fatalf("ack.OwnerEpoch=%d want %d", ack.OwnerEpoch, createAck.OwnerEpoch)
+		}
+		break
+	}
+	if !d.HasChannel(chID) {
+		t.Fatal("channel unmounted despite owner_epoch mismatch")
 	}
 }
 

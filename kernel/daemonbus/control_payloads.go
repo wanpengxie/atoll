@@ -110,6 +110,51 @@ type UnbindDeviceSessionAckBody struct {
 	Detail          string                        `json:"detail,omitempty"`
 }
 
+// UnbindChannelReason is the server -> daemon trigger classification for
+// control.unbind_channel per impl-layer2 §3.4.1.
+type UnbindChannelReason string
+
+const (
+	UnbindChannelReasonUserUnbind     UnbindChannelReason = "user_unbind"
+	UnbindChannelReasonAbandon        UnbindChannelReason = "abandon"
+	UnbindChannelReasonReclaimPreStep UnbindChannelReason = "reclaim_pre_step"
+)
+
+// UnbindChannelResult is the daemon -> server result set for
+// control.unbind_channel_ack.
+type UnbindChannelResult string
+
+const (
+	UnbindChannelReleased UnbindChannelResult = "released"
+	UnbindChannelRejected UnbindChannelResult = "rejected"
+)
+
+// UnbindChannelRejectReason is the daemon-side reject reason set for
+// control.unbind_channel_ack.
+type UnbindChannelRejectReason string
+
+const (
+	UnbindChannelRejectOwnerEpochStale UnbindChannelRejectReason = "unbind_owner_epoch_stale"
+	UnbindChannelRejectAlreadyReleased UnbindChannelRejectReason = "unbind_already_released"
+	UnbindChannelRejectInternalError   UnbindChannelRejectReason = "unbind_internal_error"
+)
+
+// UnbindChannelBody is the server -> daemon control.unbind_channel payload.
+type UnbindChannelBody struct {
+	ChannelID  channel.ID           `json:"channel_id"`
+	OwnerEpoch placement.OwnerEpoch `json:"owner_epoch"`
+	Reason     UnbindChannelReason  `json:"reason"`
+}
+
+// UnbindChannelAckBody is the daemon -> server control.unbind_channel_ack
+// payload.
+type UnbindChannelAckBody struct {
+	ChannelID  channel.ID                `json:"channel_id"`
+	OwnerEpoch placement.OwnerEpoch      `json:"owner_epoch"`
+	Result     UnbindChannelResult       `json:"result"`
+	Reason     UnbindChannelRejectReason `json:"reason,omitempty"`
+}
+
 const (
 	DeviceSessionRejectBindChannelNotActive      DeviceSessionRejectReason = "bind_channel_not_active"
 	DeviceSessionRejectBindAdapterNotPresent     DeviceSessionRejectReason = "bind_adapter_not_present"

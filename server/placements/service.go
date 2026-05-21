@@ -227,7 +227,21 @@ func (s *Service) RejectCreate(ctx context.Context, rej placement.RejectChannel)
 	if rej.ChannelID == "" || rej.CreateRequestID == "" {
 		return false, nil
 	}
-	return s.store.CASOrphanCreating(ctx, rej.ChannelID, rej.CreateRequestID, s.now().UnixMilli())
+	return s.OrphanCreating(ctx, rej.ChannelID, rej.CreateRequestID)
+}
+
+// OrphanCreating actively rolls back a specific creating saga. It is used
+// when Phase 3 CAS loses after the daemon may already hold the channel, so
+// callers do not have to wait for reconcile's create timeout.
+func (s *Service) OrphanCreating(
+	ctx context.Context,
+	channelID channel.ID,
+	createRequestID placement.CreateRequestID,
+) (bool, error) {
+	if channelID == "" || createRequestID == "" {
+		return false, nil
+	}
+	return s.store.CASOrphanCreating(ctx, channelID, createRequestID, s.now().UnixMilli())
 }
 
 // Heartbeat refreshes last_heartbeat_at on a control.heartbeat

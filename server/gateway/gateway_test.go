@@ -1316,6 +1316,74 @@ func TestMockDaemonCreateChannelACK(t *testing.T) {
 	t.Fatalf("placement never advanced to active")
 }
 
+func TestCreateChannelAckCASFalseOrphansAndUnbinds(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := app.Daemonbus().RegisterDaemon(ctx, placement.DaemonID("d-cas-false"), "h", "v", 0, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon: %v", err)
+	}
+	epoch, _ := app.Daemonbus().IssueConnectionEpoch(ctx, placement.DaemonID("d-cas-false"))
+
+	svr, dmn := newPipePair()
+	conn := daemonbus.NewConnection(placement.DaemonID("d-cas-false"), epoch, svr)
+	app.Daemonbus().Register(conn)
+	defer app.Daemonbus().Unregister(placement.DaemonID("d-cas-false"))
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- conn.Run(ctx, app.DaemonbusHandlers()) }()
+
+	_, req, err := app.Placements().Reserve(ctx, channel.ID("ch-cas-false"), placement.DaemonID("d-cas-false"), placement.ConnectionEpoch(epoch), nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	ack := placement.CreateChannelAck{
+		FrameID: "ack-cas-false", ChannelID: req.ChannelID, CreateRequestID: req.CreateRequestID,
+		OwnerEpoch: 1, FencingToken: "", DaemonID: placement.DaemonID("d-cas-false"),
+		Result: placement.CreateChannelAccepted,
+	}
+	raw, _ := json.Marshal(ack)
+	if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+		FrameID: "f-cas-false", FrameKind: kerneldaemonbus.FrameTypeControlCreateChannelAck,
+		DaemonID: "d-cas-false", DaemonConnectionEpoch: epoch, Payload: raw,
+	}); err != nil {
+		t.Fatalf("write ack: %v", err)
+	}
+
+	frame, err := dmn.ReadFrame(ctx)
+	if err != nil {
+		t.Fatalf("read unbind: %v", err)
+	}
+	if frame.FrameKind != kerneldaemonbus.FrameTypeControlUnbindChannel {
+		t.Fatalf("frame=%s want unbind_channel", frame.FrameKind)
+	}
+	var unbind kerneldaemonbus.UnbindChannelBody
+	if err := json.Unmarshal(frame.Payload, &unbind); err != nil {
+		t.Fatalf("decode unbind: %v", err)
+	}
+	if unbind.ChannelID != req.ChannelID || unbind.OwnerEpoch != 1 || unbind.Reason != kerneldaemonbus.UnbindChannelReasonAbandon {
+		t.Fatalf("unbind=%+v", unbind)
+	}
+	got, ok, err := app.Placements().Get(ctx, req.ChannelID)
+	if err != nil || !ok {
+		t.Fatalf("Get ok=%v err=%v", ok, err)
+	}
+	if got.State != placement.StateOrphan {
+		t.Fatalf("placement state=%s want orphan", got.State)
+	}
+
+	select {
+	case err := <-runDone:
+		if err == nil || !strings.Contains(err.Error(), "CAS rejected") {
+			t.Fatalf("Run err=%v want CAS rejected", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("connection did not surface CAS rejected error")
+	}
+}
+
 // TestViewSyncGapDrainFanOut covers FIX-T5: when the daemon pushes a
 // gap-then-fill sequence (1, 3, 2), the gateway must:
 //
@@ -1604,6 +1672,225 @@ func TestServerInitiatedReclaimRoundTripActivatesPlacement(t *testing.T) {
 	_ = conn.Close()
 }
 
+func TestServerInitiatedReclaimUsesOtherOnlineDaemonWhenPreviousOffline(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	const previous placement.DaemonID = "d-reclaim-prev-offline"
+	const candidate placement.DaemonID = "d-reclaim-candidate-online"
+	createReq, candidateEpoch, candidateDaemon := prepareStaleReclaimCandidate(t, app, ctx, "ch-reclaim-prev-offline", previous, candidate, false)
+
+	daemonDone := acceptReclaimOnDaemon(t, app, ctx, candidateDaemon, candidate, candidateEpoch, createReq.ChannelID, func(req placement.DaemonReclaimRequest) error {
+		if req.PreviousOwnerDaemon == nil || *req.PreviousOwnerDaemon != previous {
+			return fmt.Errorf("previous_owner_daemon=%v want %s", req.PreviousOwnerDaemon, previous)
+		}
+		return nil
+	})
+
+	if err := app.Placements().ReconcileOnce(ctx); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	if err := <-daemonDone; err != nil {
+		t.Fatalf("daemon side: %v", err)
+	}
+	got, _, err := app.Placements().Get(ctx, createReq.ChannelID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != placement.StateActive || got.DaemonID != candidate || got.DaemonConnectionEpoch != placement.ConnectionEpoch(candidateEpoch) {
+		t.Fatalf("placement after reclaim=%+v want active on %s", got, candidate)
+	}
+}
+
+func TestServerInitiatedReclaimPrefersOtherOnlineDaemon(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	const previous placement.DaemonID = "d-reclaim-prev-online"
+	const candidate placement.DaemonID = "d-reclaim-other-online"
+	createReq, candidateEpoch, candidateDaemon := prepareStaleReclaimCandidate(t, app, ctx, "ch-reclaim-other-online", previous, candidate, true)
+
+	daemonDone := acceptReclaimOnDaemon(t, app, ctx, candidateDaemon, candidate, candidateEpoch, createReq.ChannelID, nil)
+	if err := app.Placements().ReconcileOnce(ctx); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	if err := <-daemonDone; err != nil {
+		t.Fatalf("daemon side: %v", err)
+	}
+	got, _, err := app.Placements().Get(ctx, createReq.ChannelID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DaemonID != candidate {
+		t.Fatalf("reclaim daemon_id=%s want other online daemon %s", got.DaemonID, candidate)
+	}
+}
+
+func TestServerInitiatedReclaimFallsBackToPreviousOwnerWhenOnlyDaemonOnline(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	const previous placement.DaemonID = "d-reclaim-single"
+	if err := app.Daemonbus().RegisterDaemon(ctx, previous, "h", "v", 0, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon previous: %v", err)
+	}
+	previousEpoch, _ := app.Daemonbus().IssueConnectionEpoch(ctx, previous)
+	svr, dmn := newPipePair()
+	conn := daemonbus.NewConnection(previous, previousEpoch, svr)
+	app.Daemonbus().Register(conn)
+	defer app.Daemonbus().Unregister(previous)
+	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
+
+	createReq := createStalePlacement(t, app, ctx, "ch-reclaim-single", previous, placement.ConnectionEpoch(previousEpoch))
+	daemonDone := acceptReclaimOnDaemon(t, app, ctx, dmn, previous, previousEpoch, createReq.ChannelID, nil)
+	if err := app.Placements().ReconcileOnce(ctx); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	if err := <-daemonDone; err != nil {
+		t.Fatalf("daemon side: %v", err)
+	}
+	got, _, err := app.Placements().Get(ctx, createReq.ChannelID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DaemonID != previous || got.State != placement.StateActive {
+		t.Fatalf("placement after fallback reclaim=%+v", got)
+	}
+}
+
+func TestServerInitiatedReclaimNoCandidateReturnsErrorAndLeavesStale(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	const previous placement.DaemonID = "d-reclaim-none"
+	if err := app.Daemonbus().RegisterDaemon(ctx, previous, "h", "v", 0, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon previous: %v", err)
+	}
+	previousEpoch, _ := app.Daemonbus().IssueConnectionEpoch(ctx, previous)
+	createReq := createStalePlacement(t, app, ctx, "ch-reclaim-none", previous, placement.ConnectionEpoch(previousEpoch))
+
+	err := app.Placements().ReconcileOnce(ctx)
+	if err == nil || !strings.Contains(err.Error(), "reclaim no connected daemon candidate") {
+		t.Fatalf("ReconcileOnce err=%v want no connected daemon candidate", err)
+	}
+	got, _, err := app.Placements().Get(ctx, createReq.ChannelID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != placement.StateStale || got.DaemonID != previous {
+		t.Fatalf("placement after failed reclaim=%+v want stale previous owner", got)
+	}
+}
+
+func TestServerInitiatedReclaimCASFalseOrphansAndUnbinds(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	const daemonID placement.DaemonID = "d-reclaim-cas-false"
+	if err := app.Daemonbus().RegisterDaemon(ctx, daemonID, "h", "v", 0, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon: %v", err)
+	}
+	epoch, _ := app.Daemonbus().IssueConnectionEpoch(ctx, daemonID)
+	svr, dmn := newPipePair()
+	conn := daemonbus.NewConnection(daemonID, epoch, svr)
+	app.Daemonbus().Register(conn)
+	defer app.Daemonbus().Unregister(daemonID)
+	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
+
+	_, createReq, err := app.Placements().Reserve(ctx, channel.ID("ch-reclaim-cas-false"), daemonID, placement.ConnectionEpoch(epoch), nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if ok, err := app.Placements().Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       createReq.ChannelID,
+		CreateRequestID: createReq.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "tok-before-reclaim",
+		DaemonID:        daemonID,
+		Result:          placement.CreateChannelAccepted,
+	}, placement.ConnectionEpoch(epoch)); err != nil || !ok {
+		t.Fatalf("Activate ok=%v err=%v", ok, err)
+	}
+	if err := app.Placements().Store().MarkStale(ctx, createReq.ChannelID, time.Now().Add(-time.Second).UnixMilli()); err != nil {
+		t.Fatalf("MarkStale: %v", err)
+	}
+
+	daemonDone := make(chan error, 1)
+	go func() {
+		frame, err := dmn.ReadFrame(ctx)
+		if err != nil {
+			daemonDone <- err
+			return
+		}
+		var req placement.DaemonReclaimRequest
+		if err := json.Unmarshal(frame.Payload, &req); err != nil {
+			daemonDone <- err
+			return
+		}
+		raw, _ := json.Marshal(placement.ReclaimAccepted{
+			ChannelID:       req.ChannelID,
+			CreateRequestID: req.CreateRequestID,
+			NewOwnerEpoch:   req.NewOwnerEpoch,
+			FencingToken:    "",
+		})
+		if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+			FrameID:               frame.FrameID,
+			FrameKind:             kerneldaemonbus.FrameTypeControlReclaimAccepted,
+			DaemonID:              daemonID,
+			DaemonConnectionEpoch: epoch,
+			Payload:               raw,
+		}); err != nil {
+			daemonDone <- err
+			return
+		}
+		unbindFrame, err := dmn.ReadFrame(ctx)
+		if err != nil {
+			daemonDone <- err
+			return
+		}
+		if unbindFrame.FrameKind != kerneldaemonbus.FrameTypeControlUnbindChannel {
+			daemonDone <- fmt.Errorf("frame=%s want unbind_channel", unbindFrame.FrameKind)
+			return
+		}
+		var unbind kerneldaemonbus.UnbindChannelBody
+		if err := json.Unmarshal(unbindFrame.Payload, &unbind); err != nil {
+			daemonDone <- err
+			return
+		}
+		if unbind.ChannelID != req.ChannelID || unbind.OwnerEpoch != req.NewOwnerEpoch || unbind.Reason != kerneldaemonbus.UnbindChannelReasonAbandon {
+			daemonDone <- fmt.Errorf("bad unbind: %+v", unbind)
+			return
+		}
+		daemonDone <- nil
+	}()
+
+	err = app.Placements().ReconcileOnce(ctx)
+	if err == nil || !strings.Contains(err.Error(), "CAS rejected") {
+		t.Fatalf("ReconcileOnce err=%v want CAS rejected", err)
+	}
+	if err := <-daemonDone; err != nil {
+		t.Fatalf("daemon side: %v", err)
+	}
+	got, _, err := app.Placements().Get(ctx, createReq.ChannelID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != placement.StateOrphan {
+		t.Fatalf("placement after reclaim=%+v want orphan", got)
+	}
+	_ = conn.Close()
+}
+
 // TestHeldChannelsReportDaemonIDMismatch is the FIX-T4 regression: a
 // daemonbus connection authenticated as "d1" must not be able to report
 // placements by setting `HeldChannelsReport.DaemonID` to some other
@@ -1750,6 +2037,136 @@ func userIDByEmail(t *testing.T, app *gateway.App, email string) string {
 		t.Fatalf("userIDByEmail(%s): %v", email, err)
 	}
 	return id
+}
+
+func prepareStaleReclaimCandidate(
+	t *testing.T,
+	app *gateway.App,
+	ctx context.Context,
+	channelID string,
+	previous placement.DaemonID,
+	candidate placement.DaemonID,
+	previousOnline bool,
+) (placement.CreateChannelRequest, kerneldaemonbus.ConnectionEpoch, *pipeTransport) {
+	t.Helper()
+	if err := app.Daemonbus().RegisterDaemon(ctx, previous, "h", "v", 0, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon previous: %v", err)
+	}
+	previousEpoch, _ := app.Daemonbus().IssueConnectionEpoch(ctx, previous)
+	if previousOnline {
+		svr, _ := newPipePair()
+		conn := daemonbus.NewConnection(previous, previousEpoch, svr)
+		app.Daemonbus().Register(conn)
+		t.Cleanup(func() { app.Daemonbus().Unregister(previous) })
+	}
+	createReq := createStalePlacement(t, app, ctx, channelID, previous, placement.ConnectionEpoch(previousEpoch))
+
+	if err := app.Daemonbus().RegisterDaemon(ctx, candidate, "h", "v", 0, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon candidate: %v", err)
+	}
+	candidateEpoch, _ := app.Daemonbus().IssueConnectionEpoch(ctx, candidate)
+	svr, dmn := newPipePair()
+	conn := daemonbus.NewConnection(candidate, candidateEpoch, svr)
+	app.Daemonbus().Register(conn)
+	t.Cleanup(func() { app.Daemonbus().Unregister(candidate) })
+	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
+	return createReq, candidateEpoch, dmn
+}
+
+func createStalePlacement(
+	t *testing.T,
+	app *gateway.App,
+	ctx context.Context,
+	channelID string,
+	daemonID placement.DaemonID,
+	connectionEpoch placement.ConnectionEpoch,
+) placement.CreateChannelRequest {
+	t.Helper()
+	_, createReq, err := app.Placements().Reserve(ctx, channel.ID(channelID), daemonID, connectionEpoch, nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if ok, err := app.Placements().Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       createReq.ChannelID,
+		CreateRequestID: createReq.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    placement.FencingToken("tok-before-reclaim-" + channelID),
+		DaemonID:        daemonID,
+		Result:          placement.CreateChannelAccepted,
+	}, connectionEpoch); err != nil || !ok {
+		t.Fatalf("Activate ok=%v err=%v", ok, err)
+	}
+	if err := app.Placements().Store().MarkStale(ctx, createReq.ChannelID, time.Now().Add(-time.Second).UnixMilli()); err != nil {
+		t.Fatalf("MarkStale: %v", err)
+	}
+	return createReq
+}
+
+func acceptReclaimOnDaemon(
+	t *testing.T,
+	app *gateway.App,
+	ctx context.Context,
+	dmn *pipeTransport,
+	daemonID placement.DaemonID,
+	epoch kerneldaemonbus.ConnectionEpoch,
+	channelID channel.ID,
+	check func(placement.DaemonReclaimRequest) error,
+) <-chan error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		frame, err := dmn.ReadFrame(ctx)
+		if err != nil {
+			done <- err
+			return
+		}
+		if frame.FrameKind != kerneldaemonbus.FrameTypeControlDaemonReclaim {
+			done <- fmt.Errorf("frame=%s want daemon_reclaim", frame.FrameKind)
+			return
+		}
+		if frame.DaemonID != daemonID {
+			done <- fmt.Errorf("frame daemon_id=%s want %s", frame.DaemonID, daemonID)
+			return
+		}
+		var req placement.DaemonReclaimRequest
+		if err := json.Unmarshal(frame.Payload, &req); err != nil {
+			done <- err
+			return
+		}
+		if req.ChannelID != channelID || req.PreviousState != placement.ReclaimOriginStale {
+			done <- fmt.Errorf("bad reclaim req: %+v", req)
+			return
+		}
+		if check != nil {
+			if err := check(req); err != nil {
+				done <- err
+				return
+			}
+		}
+		got, _, err := app.Placements().Get(ctx, channelID)
+		if err != nil {
+			done <- err
+			return
+		}
+		if got.DaemonID != daemonID || got.State != placement.StateCreating {
+			done <- fmt.Errorf("reserved placement=%+v want creating on %s", got, daemonID)
+			return
+		}
+		raw, _ := json.Marshal(placement.ReclaimAccepted{
+			ChannelID:       req.ChannelID,
+			CreateRequestID: req.CreateRequestID,
+			NewOwnerEpoch:   req.NewOwnerEpoch,
+			FencingToken:    placement.FencingToken("tok-after-reclaim-" + string(daemonID)),
+		})
+		done <- dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+			FrameID:               frame.FrameID,
+			FrameKind:             kerneldaemonbus.FrameTypeControlReclaimAccepted,
+			DaemonID:              daemonID,
+			DaemonConnectionEpoch: epoch,
+			Payload:               raw,
+		})
+	}()
+	return done
 }
 
 // pipeTransport satisfies daemonbus.Transport in-memory.

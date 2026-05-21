@@ -77,8 +77,25 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			}, nil
 		},
 		OnCreateChannelAck: func(ctx context.Context, conn *daemonbus.Connection, ack placement.CreateChannelAck) error {
-			_, err := a.placements.Activate(ctx, ack, placement.ConnectionEpoch(conn.ConnectionEpoch))
-			return err
+			ok, err := a.placements.Activate(ctx, ack, placement.ConnectionEpoch(conn.ConnectionEpoch))
+			if err != nil {
+				return err
+			}
+			if ok {
+				return nil
+			}
+			orphanOK, orphanErr := a.placements.OrphanCreating(ctx, ack.ChannelID, ack.CreateRequestID)
+			unbindErr := a.sendUnbindChannel(ctx, conn, ack.ChannelID, ack.OwnerEpoch, kerneldaemonbus.UnbindChannelReasonAbandon)
+			switch {
+			case orphanErr != nil && unbindErr != nil:
+				return fmt.Errorf("gateway: create_channel_ack CAS rejected for %s; orphan: %v; unbind: %w", ack.ChannelID, orphanErr, unbindErr)
+			case orphanErr != nil:
+				return fmt.Errorf("gateway: create_channel_ack CAS rejected for %s; orphan: %w", ack.ChannelID, orphanErr)
+			case unbindErr != nil:
+				return fmt.Errorf("gateway: create_channel_ack CAS rejected for %s; unbind: %w", ack.ChannelID, unbindErr)
+			default:
+				return fmt.Errorf("gateway: create_channel_ack CAS rejected for %s; orphaned=%v rollback_sent=true", ack.ChannelID, orphanOK)
+			}
 		},
 		OnRejectChannel: func(ctx context.Context, conn *daemonbus.Connection, rej placement.RejectChannel) error {
 			_, err := a.placements.RejectCreate(ctx, rej)
@@ -229,14 +246,14 @@ func (a *App) Unbind(ctx context.Context, in devicebus.UnbindInput) error {
 }
 
 func (a *App) reclaimPlacement(ctx context.Context, p placement.Placement) error {
-	conn, ok := a.daemonbus.ConnectionFor(p.DaemonID)
+	conn, ok := a.reclaimCandidate(p.DaemonID)
 	if !ok {
-		return nil
+		return fmt.Errorf("gateway: reclaim no connected daemon candidate for %s", p.ChannelID)
 	}
 	reserved, req, ok, err := a.placements.ReserveReclaim(
 		ctx,
 		p.ChannelID,
-		p.DaemonID,
+		conn.DaemonID,
 		placement.ConnectionEpoch(conn.ConnectionEpoch),
 	)
 	if err != nil || !ok {
@@ -246,6 +263,9 @@ func (a *App) reclaimPlacement(ctx context.Context, p placement.Placement) error
 	defer cancel()
 	ackFrame, err := conn.SendAndAwait(reclaimCtx, kerneldaemonbus.FrameTypeControlDaemonReclaim, req)
 	if err != nil {
+		if _, orphanErr := a.placements.OrphanCreating(ctx, reserved.ChannelID, reserved.CreateRequestID); orphanErr != nil {
+			return fmt.Errorf("gateway: daemon_reclaim send: %w; orphan: %v", err, orphanErr)
+		}
 		return fmt.Errorf("gateway: daemon_reclaim send: %w", err)
 	}
 	switch ackFrame.FrameKind {
@@ -257,24 +277,97 @@ func (a *App) reclaimPlacement(ctx context.Context, p placement.Placement) error
 		if ack.ChannelID != reserved.ChannelID ||
 			ack.CreateRequestID != reserved.CreateRequestID ||
 			ack.NewOwnerEpoch != reserved.OwnerEpoch {
+			_, orphanErr := a.placements.OrphanCreating(ctx, reserved.ChannelID, reserved.CreateRequestID)
+			epoch := ack.NewOwnerEpoch
+			if epoch == 0 {
+				epoch = reserved.OwnerEpoch
+			}
+			unbindErr := a.sendUnbindChannel(ctx, conn, reserved.ChannelID, epoch, kerneldaemonbus.UnbindChannelReasonAbandon)
+			if orphanErr != nil || unbindErr != nil {
+				return fmt.Errorf("gateway: reclaim_accepted mismatch for %s; orphan: %v; unbind: %v", reserved.ChannelID, orphanErr, unbindErr)
+			}
 			return fmt.Errorf("gateway: reclaim_accepted mismatch for %s", reserved.ChannelID)
 		}
-		_, err := a.placements.ActivateReclaim(
+		ok, err := a.placements.ActivateReclaim(
 			ctx,
 			ack,
-			p.DaemonID,
+			conn.DaemonID,
 			placement.ConnectionEpoch(conn.ConnectionEpoch),
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+		_, orphanErr := a.placements.OrphanCreating(ctx, reserved.ChannelID, reserved.CreateRequestID)
+		unbindErr := a.sendUnbindChannel(ctx, conn, reserved.ChannelID, ack.NewOwnerEpoch, kerneldaemonbus.UnbindChannelReasonAbandon)
+		if orphanErr != nil || unbindErr != nil {
+			return fmt.Errorf("gateway: reclaim_accepted CAS rejected for %s; orphan: %v; unbind: %v", reserved.ChannelID, orphanErr, unbindErr)
+		}
+		return fmt.Errorf("gateway: reclaim_accepted CAS rejected for %s", reserved.ChannelID)
 	case kerneldaemonbus.FrameTypeControlReclaimRejected:
 		var rej placement.ReclaimRejected
 		if err := json.Unmarshal(ackFrame.Payload, &rej); err != nil {
 			return fmt.Errorf("gateway: reclaim_rejected decode: %w", err)
 		}
-		return nil
+		if rej.ChannelID != reserved.ChannelID || rej.CreateRequestID != reserved.CreateRequestID {
+			if _, orphanErr := a.placements.OrphanCreating(ctx, reserved.ChannelID, reserved.CreateRequestID); orphanErr != nil {
+				return fmt.Errorf("gateway: reclaim_rejected mismatch for %s; orphan: %w", reserved.ChannelID, orphanErr)
+			}
+			return fmt.Errorf("gateway: reclaim_rejected mismatch for %s", reserved.ChannelID)
+		}
+		switch rej.Reason {
+		case placement.ReclaimRejectStoreMissing,
+			placement.ReclaimRejectCompletenessCheckFailed,
+			placement.ReclaimRejectOwnerEpochInvalid,
+			placement.ReclaimRejectInternalError:
+			_, err := a.placements.OrphanCreating(ctx, reserved.ChannelID, reserved.CreateRequestID)
+			return err
+		default:
+			if _, orphanErr := a.placements.OrphanCreating(ctx, reserved.ChannelID, reserved.CreateRequestID); orphanErr != nil {
+				return orphanErr
+			}
+			return fmt.Errorf("gateway: reclaim_rejected unknown reason %q for %s", rej.Reason, reserved.ChannelID)
+		}
 	default:
+		if _, orphanErr := a.placements.OrphanCreating(ctx, reserved.ChannelID, reserved.CreateRequestID); orphanErr != nil {
+			return fmt.Errorf("gateway: reclaim unexpected ack frame %s; orphan: %w", ackFrame.FrameKind, orphanErr)
+		}
 		return fmt.Errorf("gateway: reclaim unexpected ack frame %s", ackFrame.FrameKind)
 	}
+}
+
+func (a *App) reclaimCandidate(previousOwner placement.DaemonID) (*daemonbus.Connection, bool) {
+	var previous *daemonbus.Connection
+	for _, conn := range a.daemonbus.ConnectedConnections() {
+		if conn.DaemonID != previousOwner {
+			return conn, true
+		}
+		previous = conn
+	}
+	if previous != nil {
+		return previous, true
+	}
+	return nil, false
+}
+
+func (a *App) sendUnbindChannel(
+	ctx context.Context,
+	conn *daemonbus.Connection,
+	channelID channel.ID,
+	ownerEpoch placement.OwnerEpoch,
+	reason kerneldaemonbus.UnbindChannelReason,
+) error {
+	if conn == nil || channelID == "" || ownerEpoch <= 0 {
+		return nil
+	}
+	_, err := conn.SendFrame(ctx, kerneldaemonbus.FrameTypeControlUnbindChannel, kerneldaemonbus.UnbindChannelBody{
+		ChannelID:  channelID,
+		OwnerEpoch: ownerEpoch,
+		Reason:     reason,
+	})
+	return err
 }
 
 // ForwardDeviceFrame implements devicebus.TransitForwarder by wrapping
