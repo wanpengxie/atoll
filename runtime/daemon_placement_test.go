@@ -2,14 +2,17 @@ package runtime_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/store"
@@ -40,6 +43,92 @@ func startDaemon(t *testing.T, ctx context.Context, daemonID string) (*runtime.D
 		t.Fatalf("RunPhases: %v", err)
 	}
 	return d, d.Bus().ServerSide(), dataDir, channelsDir
+}
+
+type channelCreatedEvent struct {
+	Seq           int64
+	ID            string
+	TS            int64
+	ChannelID     string
+	SenderKind    string
+	SenderID      string
+	Kind          string
+	Type          string
+	Visibility    string
+	Audience      []string
+	CorrelationID string
+	Payload       map[string]any
+}
+
+func loadChannelCreatedEvent(t *testing.T, ctx context.Context, db *sql.DB, chID channel.ID) channelCreatedEvent {
+	t.Helper()
+	var ev channelCreatedEvent
+	var audienceRaw, payloadRaw []byte
+	err := db.QueryRowContext(ctx, `
+		SELECT seq, id, ts, channel_id, sender_kind, sender_id, kind, type,
+		       visibility, audience, COALESCE(correlation_id, ''), payload
+		FROM messages
+		WHERE id = ?
+	`, "system.channel.created:"+string(chID)).Scan(
+		&ev.Seq, &ev.ID, &ev.TS, &ev.ChannelID, &ev.SenderKind, &ev.SenderID,
+		&ev.Kind, &ev.Type, &ev.Visibility, &audienceRaw, &ev.CorrelationID, &payloadRaw,
+	)
+	if err != nil {
+		t.Fatalf("query system.channel.created: %v", err)
+	}
+	if err := json.Unmarshal(audienceRaw, &ev.Audience); err != nil {
+		t.Fatalf("decode created audience: %v", err)
+	}
+	if err := json.Unmarshal(payloadRaw, &ev.Payload); err != nil {
+		t.Fatalf("decode created payload: %v", err)
+	}
+	return ev
+}
+
+func assertCanonicalChannelCreatedEvent(
+	t *testing.T,
+	ev channelCreatedEvent,
+	chID channel.ID,
+	daemonID string,
+	ownerEpoch placement.OwnerEpoch,
+) {
+	t.Helper()
+	if ev.Seq != 1 {
+		t.Errorf("system.channel.created seq=%d want 1", ev.Seq)
+	}
+	if ev.ID != "system.channel.created:"+string(chID) {
+		t.Errorf("created id=%q", ev.ID)
+	}
+	if ev.ChannelID != string(chID) {
+		t.Errorf("created channel_id=%q want %q", ev.ChannelID, chID)
+	}
+	if ev.SenderKind != string(actor.KindSystem) || ev.SenderID != string(actor.SystemActorID) {
+		t.Errorf("created sender=(%s,%s) want system actor", ev.SenderKind, ev.SenderID)
+	}
+	if ev.Kind != string(message.KindEvent) || ev.Type != "system.channel.created" {
+		t.Errorf("created kind/type=(%s,%s)", ev.Kind, ev.Type)
+	}
+	if ev.Visibility != string(message.VisibilitySystem) {
+		t.Errorf("created visibility=%q want system", ev.Visibility)
+	}
+	if len(ev.Audience) != 1 || ev.Audience[0] != string(message.AudienceWildcard) {
+		t.Errorf("created audience=%v want [*]", ev.Audience)
+	}
+	if ev.CorrelationID != "" {
+		t.Errorf("created correlation_id=%q want null", ev.CorrelationID)
+	}
+	if got := ev.Payload["channel_id"]; got != string(chID) {
+		t.Errorf("payload.channel_id=%v want %s", got, chID)
+	}
+	if got := ev.Payload["daemon_id"]; got != daemonID {
+		t.Errorf("payload.daemon_id=%v want %s", got, daemonID)
+	}
+	if got := ev.Payload["owner_epoch"]; got != float64(ownerEpoch) {
+		t.Errorf("payload.owner_epoch=%v want %d", got, ownerEpoch)
+	}
+	if got := ev.Payload["created_at"]; got != float64(ev.TS) {
+		t.Errorf("payload.created_at=%v want envelope ts %d", got, ev.TS)
+	}
 }
 
 func sendCreateChannelFrame(
@@ -261,6 +350,11 @@ func TestDaemon_OnCreateChannel_FreshBootstrap(t *testing.T) {
 		t.Errorf("channel_lock fencing tuple = (epoch=%d, token=%q) want (epoch=%d, token=%q) (ack must match disk)",
 			row.OwnerEpoch, row.FencingToken, daemonOwnerEpoch, daemonFencingTok)
 	}
+	created := loadChannelCreatedEvent(t, ctx, db, req.ChannelID)
+	assertCanonicalChannelCreatedEvent(t, created, req.ChannelID, "daemon-A", daemonOwnerEpoch)
+	if _, ok := created.Payload["channel_type"]; ok {
+		t.Errorf("payload.channel_type present for empty channel type: %v", created.Payload["channel_type"])
+	}
 
 	// bootstrap_registry row marked completed.
 	daemonDB := d.DaemonDB()
@@ -288,7 +382,7 @@ func TestDaemon_OnCreateChannel_IdempotentReplay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	d, srv, _, _ := startDaemon(t, ctx, "daemon-A")
+	d, srv, _, channelsDir := startDaemon(t, ctx, "daemon-A")
 	defer func() { _ = d.Close() }()
 
 	req := placement.CreateChannelRequest{
@@ -309,6 +403,74 @@ func TestDaemon_OnCreateChannel_IdempotentReplay(t *testing.T) {
 		t.Errorf("idempotent replay returned a different fencing tuple: a1=(%d,%q) a2=(%d,%q)",
 			a1.OwnerEpoch, a1.FencingToken, a2.OwnerEpoch, a2.FencingToken)
 	}
+	db, err := store.OpenChannel(ctx, filepath.Join(channelsDir, string(req.ChannelID), "channel.sqlite"), store.OpenOptions{SkipDDL: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE type='system.channel.created'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("system.channel.created count=%d want 1", count)
+	}
+	created := loadChannelCreatedEvent(t, ctx, db, req.ChannelID)
+	assertCanonicalChannelCreatedEvent(t, created, req.ChannelID, "daemon-A", a1.OwnerEpoch)
+}
+
+// TestDaemon_OnCreateChannel_ReplayRepairsMissingCreatedEvent covers the
+// crash window after channel_lock is durable but before the Layer 0
+// system.channel.created event was appended.
+func TestDaemon_OnCreateChannel_ReplayRepairsMissingCreatedEvent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	d, srv, _, channelsDir := startDaemon(t, ctx, "daemon-A")
+	defer func() { _ = d.Close() }()
+
+	req := placement.CreateChannelRequest{
+		ChannelID: "ch-created-repair", CreateRequestID: "req-created-repair",
+	}
+	sqlitePath, err := d.Saga().Bootstrap(ctx, req.ChannelID, req)
+	if err != nil {
+		t.Fatalf("pre-bootstrap saga: %v", err)
+	}
+	token, err := placement.NewFencingToken()
+	if err != nil {
+		t.Fatalf("fencing token: %v", err)
+	}
+	lockStore, err := d.OpenChannelLock(ctx, sqlitePath)
+	if err != nil {
+		t.Fatalf("open lock: %v", err)
+	}
+	ts := now()
+	if err := lockStore.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    req.ChannelID,
+		FencingToken: token,
+		OwnerEpoch:   1,
+		DaemonID:     "daemon-A",
+		DaemonEpoch:  placement.DaemonEpoch(d.Transit().Epoch()),
+		AcquiredAt:   ts,
+		RefreshedAt:  ts,
+	}); err != nil {
+		t.Fatalf("insert lock: %v", err)
+	}
+
+	ack := sendCreateChannel(t, ctx, d, srv, req)
+	if ack.Result != placement.CreateChannelAccepted {
+		t.Fatalf("ack.Result=%s", ack.Result)
+	}
+	if ack.FencingToken != token {
+		t.Errorf("ack.FencingToken=%q want repaired lock token %q", ack.FencingToken, token)
+	}
+	db, err := store.OpenChannel(ctx, filepath.Join(channelsDir, string(req.ChannelID), "channel.sqlite"), store.OpenOptions{SkipDDL: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	created := loadChannelCreatedEvent(t, ctx, db, req.ChannelID)
+	assertCanonicalChannelCreatedEvent(t, created, req.ChannelID, "daemon-A", 1)
 }
 
 // TestDaemon_OnCreateChannel_ConflictingRequestRejected — after a

@@ -1559,6 +1559,7 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 //   - Set owner_epoch=1 (proto-foundation §3.3.3 Phase 2 fixed value).
 //   - Run the bootstrap saga (steps 1-5).
 //   - Insert channel_lock with the daemon-generated tuple.
+//   - Append the singleton system.channel.created event as message seq=1.
 //   - Mark the saga completed and mount the new channel runtime.
 //   - Emit result=accepted carrying (owner_epoch, fencing_token, daemon_id) so
 //     the server's Phase 3 CAS can write them into the placement row.
@@ -1643,9 +1644,14 @@ func (d *Daemon) handleCreateChannel(
 				// new saga id — local state is the source of truth, reject.
 				return reject("create_request_id_mismatch")
 			}
-			// Idempotent replay — re-emit the daemon-stored fencing tuple
-			// so the server's Phase 3 CAS sees consistent values across
-			// retries.
+			// Idempotent replay — first repair the Layer 0 bootstrap
+			// event if the daemon crashed after writing channel_lock but
+			// before appending system.channel.created, then re-emit the
+			// daemon-stored fencing tuple so the server's Phase 3 CAS sees
+			// consistent values across retries.
+			if err := d.ensureChannelCreatedEvent(ctx, sqlitePath, existingLock, row); err != nil {
+				return reject(fmt.Sprintf("channel created event: %v", err))
+			}
 			ack.OwnerEpoch = row.OwnerEpoch
 			ack.FencingToken = row.FencingToken
 			if !d.HasChannel(req.ChannelID) {
@@ -1691,6 +1697,16 @@ func (d *Daemon) handleCreateChannel(
 	}); err != nil {
 		return reject(fmt.Sprintf("lock insert: %v", err))
 	}
+	if err := d.ensureChannelCreatedEvent(ctx, sqlitePath, lockStore, store.ChannelLockRow{
+		ChannelID:    req.ChannelID,
+		FencingToken: fencingToken,
+		OwnerEpoch:   bootstrapOwnerEpoch,
+		DaemonID:     placement.DaemonID(d.cfg.DaemonID),
+		DaemonEpoch:  placement.DaemonEpoch(d.cfg.DaemonEpoch),
+		ChannelType:  req.ChannelType,
+	}); err != nil {
+		return reject(fmt.Sprintf("channel created event: %v", err))
+	}
 	if err := d.saga.Complete(ctx, string(req.CreateRequestID)); err != nil {
 		return reject(fmt.Sprintf("bootstrap complete: %v", err))
 	}
@@ -1702,6 +1718,62 @@ func (d *Daemon) handleCreateChannel(
 	ack.FencingToken = fencingToken
 	ack.Result = placement.CreateChannelAccepted
 	return d.sendCreateAck(ctx, frame.FrameID, ack)
+}
+
+// ensureChannelCreatedEvent appends the Layer 0 bootstrap event before
+// saga completion / mount side effects. The deterministic id makes create
+// retries and crash repair idempotent; the seq guard keeps the vocabulary
+// invariant that system.channel.created is the first channel message.
+func (d *Daemon) ensureChannelCreatedEvent(
+	ctx context.Context,
+	sqlitePath string,
+	lock *store.ChannelLock,
+	row store.ChannelLockRow,
+) error {
+	db, err := d.openChannelDB(ctx, sqlitePath)
+	if err != nil {
+		return err
+	}
+	now := d.cfg.NowFn()
+	payloadMap := map[string]any{
+		"channel_id":  row.ChannelID,
+		"daemon_id":   row.DaemonID,
+		"owner_epoch": row.OwnerEpoch,
+		"created_at":  now,
+	}
+	if row.ChannelType != "" {
+		payloadMap["channel_type"] = row.ChannelType
+	}
+	payload, err := json.Marshal(payloadMap)
+	if err != nil {
+		return err
+	}
+	env := &message.Envelope{
+		ID:         message.ID("system.channel.created:" + string(row.ChannelID)),
+		TS:         now,
+		TSReceived: now,
+		ChannelID:  row.ChannelID,
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind:       message.KindEvent,
+		Type:       "system.channel.created",
+		Payload:    payload,
+		Visibility: message.VisibilitySystem,
+		Audience:   message.Audience{message.AudienceWildcard},
+	}
+	if env.CanonicalHash, err = message.CanonicalHash(*env); err != nil {
+		return fmt.Errorf("canonical hash: %w", err)
+	}
+	res, err := store.NewMessagesWithLock(db, lock).Append(ctx, env, khlog.FencingTuple{
+		Token: row.FencingToken,
+		Epoch: row.DaemonEpoch,
+	})
+	if err != nil {
+		return err
+	}
+	if res.Seq != 1 {
+		return fmt.Errorf("system.channel.created seq=%d want 1", res.Seq)
+	}
+	return nil
 }
 
 // lookupBootstrapRequestID returns the create_request_id that originally
