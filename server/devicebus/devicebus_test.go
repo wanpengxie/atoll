@@ -245,6 +245,62 @@ func TestHandleWSRejectsNonAllowlistedOrigin(t *testing.T) {
 	}
 }
 
+func TestHandleWSSubprotocolParserFailClosed(t *testing.T) {
+	t.Parallel()
+	svc := newSvc(t, nil)
+	ctx := context.Background()
+	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
+		DeviceID: "dev-A", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if err := svc.MarkBound(ctx, res.Session.ID); err != nil {
+		t.Fatalf("MarkBound: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/devicebus", svc.HandleWS(noopForwarder{}))
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/devicebus?session_id=" + res.Session.ID
+	cases := []struct {
+		name      string
+		protocols []string
+	}{
+		{
+			name:      "duplicate token slot",
+			protocols: []string{"coagent.device.v1", "token." + res.Token, "token.other"},
+		},
+		{
+			name:      "unknown slot",
+			protocols: []string{"coagent.device.v1", "token." + res.Token, "unknown.slot"},
+		},
+		{
+			name:      "duplicate real protocol",
+			protocols: []string{"coagent.device.v1", "coagent.device.v1", "token." + res.Token},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dialer := deviceWSDialerWithSubprotocols(tc.protocols...)
+			ws, resp, err := dialer.Dial(wsURL, nil)
+			if err == nil {
+				_ = ws.Close()
+				t.Fatalf("dial succeeded for malformed subprotocols: %v", tc.protocols)
+			}
+			if resp == nil {
+				t.Fatalf("dial response nil: %v", err)
+			}
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status=%d want 400", resp.StatusCode)
+			}
+		})
+	}
+}
+
 // TestIssueResultCarriesFingerprint covers T147 phase-4b — the issue
 // path returns a non-empty TokenFingerprint sized to TokenFingerprintLength
 // so the gateway can ship it into the daemon-side mirror without
@@ -291,11 +347,15 @@ func (noopForwarder) ForwardDeviceFrame(context.Context, devicebus.DeviceFrame) 
 // impl-layer3 §6.5.1 (R5-14) the token rides in Sec-WebSocket-Protocol,
 // not the URL query.
 func deviceWSDialer(token string) *websocket.Dialer {
-	d := *websocket.DefaultDialer
-	d.Subprotocols = []string{
+	return deviceWSDialerWithSubprotocols(
 		"coagent.device.v1",
-		"token." + token,
-	}
+		"token."+token,
+	)
+}
+
+func deviceWSDialerWithSubprotocols(protocols ...string) *websocket.Dialer {
+	d := *websocket.DefaultDialer
+	d.Subprotocols = protocols
 	return &d
 }
 

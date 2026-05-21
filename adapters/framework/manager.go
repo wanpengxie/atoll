@@ -306,6 +306,12 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 
 	// Build framework helpers.
 	state := NewNamespacedStateStore(m.cfg.StateStore, "adapter:"+decl.Name)
+	credentials := NewScopedCredentialStoreForDeclaration(m.cfg.CredentialStore, decl)
+	if receiver, ok := mod.(CredentialStoreReceiver); ok {
+		receiver.SetCredentialStore(credentials)
+	} else if declarationNeeds(decl, "credentials") {
+		return fmt.Errorf("framework: adapter %q declares credentials but does not accept a framework-scoped CredentialStore", decl.Name)
+	}
 	corr := newCorrelationTracker(decl.Name, state)
 	policy := newTimerPolicy(
 		decl.Name,
@@ -729,6 +735,15 @@ func validateDeclaration(d adapter.Declaration) error {
 func declHasType(d adapter.Declaration, t string) bool {
 	for _, candidate := range d.Types {
 		if candidate == t {
+			return true
+		}
+	}
+	return false
+}
+
+func declarationNeeds(d adapter.Declaration, need string) bool {
+	for _, candidate := range d.Needs {
+		if candidate == need {
 			return true
 		}
 	}

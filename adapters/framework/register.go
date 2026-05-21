@@ -14,13 +14,15 @@ import (
 // subset of ManagerConfig — only the seams an adapter Module
 // constructor actually needs. The daemon composition root builds Deps
 // from its ManagerConfig once and reuses the same bundle for every
-// factory call so adapters share infrastructure (HTTPClient pools,
-// credential store, etc.).
+// factory call so adapters share infrastructure such as HTTPClient pools.
 //
 // All fields are optional for tests; adapters MUST tolerate nils for
 // the fields they don't use.
 type Deps struct {
-	HTTPClient      *HTTPClient
+	HTTPClient *HTTPClient
+	// CredentialStore is kept for direct tests/manual Init. Production
+	// Manager.Install injects a scoped store via CredentialStoreReceiver
+	// after it has the adapter Declaration.
 	CredentialStore CredentialStore
 	StateStore      StateStore
 	Logger          Logger
@@ -35,7 +37,7 @@ func DepsFromManagerConfig(cfg ManagerConfig) Deps {
 	cfg.applyDefaults()
 	return Deps{
 		HTTPClient:      cfg.HTTPClient,
-		CredentialStore: cfg.CredentialStore,
+		CredentialStore: nil,
 		StateStore:      cfg.StateStore,
 		Logger:          cfg.Logger,
 		Metrics:         cfg.Metrics,

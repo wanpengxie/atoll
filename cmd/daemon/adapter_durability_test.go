@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"path/filepath"
@@ -85,7 +86,14 @@ func TestAdapterFrameworkBootRecoverTimersUsesSQLiteStateStore(t *testing.T) {
 	}
 	types := store.NewTypeRegistry(db, nowFn)
 	state := store.NewAdapterStateStore(db, nowFn)
-	creds := store.NewAdapterCredentialStore(db, nowFn)
+	box, err := store.NewAESGCMSecretBox(bytes.Repeat([]byte{0x24}, 32))
+	if err != nil {
+		t.Fatalf("NewAESGCMSecretBox: %v", err)
+	}
+	creds, err := store.NewAdapterCredentialStore(db, nowFn, box)
+	if err != nil {
+		t.Fatalf("NewAdapterCredentialStore: %v", err)
+	}
 	chain := &durabilityChain{}
 	req := &message.Envelope{
 		ID:            "req-durable",

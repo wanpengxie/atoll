@@ -13,7 +13,9 @@ package daemonbus
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -141,7 +143,7 @@ func (s *Service) RegisterDaemon(
 	capacity int,
 	keyMaterial string,
 ) error {
-	if keyMaterial != s.cfg.SharedSecret {
+	if !sharedSecretEqual(keyMaterial, s.cfg.SharedSecret) {
 		return ErrDaemonAuthFailed
 	}
 
@@ -240,14 +242,10 @@ func (s *Service) LookupDaemonForChannel(ctx context.Context, channelID channel.
 	return daemonID, nil
 }
 
-// hashKey is a thin string hash for the daemons.key_hash column.
-// Demo period uses bcrypt-of-secret elsewhere; here we just store a
-// SHA-256-ish marker so repeated registrations stay deterministic
-// without re-bcrypt per call (the auth check is direct equality on
-// the shared secret in RegisterDaemon).
+// hashKey stores a deterministic marker for the daemons.key_hash column.
+// The auth check above uses constant-time comparison against the configured
+// shared secret; this column is informational and must not contain the raw key.
 func hashKey(s string) string {
-	// We could use crypto/sha256 here; keeping the package free of
-	// crypto imports — the column is informational only because
-	// auth is direct string compare against SharedSecret.
-	return s
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }

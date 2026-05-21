@@ -94,17 +94,17 @@ type HandlersProvider interface {
 // the connect frame with bcrypt(per-daemon-key) and verify.
 func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		daemonIDRaw, key, hasRealProto := parseDaemonWSSubprotocols(c.Request.Header.Values("Sec-WebSocket-Protocol"))
+		daemonIDRaw, key, hasRealProto, parseOK := parseDaemonWSSubprotocols(c.Request.Header.Values("Sec-WebSocket-Protocol"))
 		daemonID := placement.DaemonID(daemonIDRaw)
 		host := c.Query("host")
 		version := c.Query("version")
-		if daemonID == "" || key == "" || !hasRealProto {
+		if !parseOK || daemonID == "" || key == "" || !hasRealProto {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": "Sec-WebSocket-Protocol: coagent.daemon.v1, daemon.<daemon_id>, key.<key> required",
 			})
 			return
 		}
-		if key != s.cfg.SharedSecret {
+		if !sharedSecretEqual(key, s.cfg.SharedSecret) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": ErrDaemonAuthFailed.Error()})
 			return
 		}
@@ -173,10 +173,12 @@ func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 //   - `coagent.daemon.v1` → real protocol present
 //   - prefix `daemon.`    → daemon identity (everything after the prefix)
 //   - prefix `key.`       → shared secret  (everything after the prefix)
-//   - anything else       → ignored (forward-compat)
+//   - anything else       → fail-closed
 //
 // Empty header or missing real protocol returns (_, _, false).
-func parseDaemonWSSubprotocols(headers []string) (daemonID, key string, hasRealProto bool) {
+func parseDaemonWSSubprotocols(headers []string) (daemonID, key string, hasRealProto bool, ok bool) {
+	ok = true
+	var seenDaemonID, seenKey bool
 	for _, line := range headers {
 		for _, part := range strings.Split(line, ",") {
 			p := strings.TrimSpace(part)
@@ -184,20 +186,32 @@ func parseDaemonWSSubprotocols(headers []string) (daemonID, key string, hasRealP
 				continue
 			}
 			if p == DaemonWSSubprotocol {
+				if hasRealProto {
+					return "", "", false, false
+				}
 				hasRealProto = true
 				continue
 			}
 			if strings.HasPrefix(p, daemonWSDaemonIDPrefix) {
+				if seenDaemonID {
+					return "", "", false, false
+				}
+				seenDaemonID = true
 				daemonID = strings.TrimPrefix(p, daemonWSDaemonIDPrefix)
 				continue
 			}
 			if strings.HasPrefix(p, daemonWSKeyPrefix) {
+				if seenKey {
+					return "", "", false, false
+				}
+				seenKey = true
 				key = strings.TrimPrefix(p, daemonWSKeyPrefix)
 				continue
 			}
+			return "", "", false, false
 		}
 	}
-	return daemonID, key, hasRealProto
+	return daemonID, key, hasRealProto, true
 }
 
 func normalizeAllowedOrigins(origins []string) map[string]struct{} {

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
 // CredentialStore is the F8 contract every adapter uses to fetch
@@ -22,6 +24,13 @@ type CredentialStore interface {
 	Get(ctx context.Context, key string) (value string, ok bool, err error)
 	Put(ctx context.Context, key, value string) error
 	Delete(ctx context.Context, key string) error
+}
+
+// CredentialStoreReceiver is implemented by modules that need credentials.
+// Manager injects a scoped CredentialStore after Declaration validation and
+// before Init, so adapters keep using logical keys such as "feishu.app_secret".
+type CredentialStoreReceiver interface {
+	SetCredentialStore(CredentialStore)
 }
 
 // ErrCredentialMissing is wrapped by adapters when a required credential
@@ -66,6 +75,53 @@ func (s *MemoryCredentialStore) Delete(_ context.Context, key string) error {
 	defer s.mu.Unlock()
 	delete(s.data, key)
 	return nil
+}
+
+// ScopedCredentialStore wraps a CredentialStore and prefixes every key with
+// an adapter-specific namespace. The namespace is invisible to adapters.
+type ScopedCredentialStore struct {
+	Inner CredentialStore
+	Scope string
+}
+
+// NewScopedCredentialStore returns a CredentialStore scoped under scope.
+func NewScopedCredentialStore(inner CredentialStore, scope string) *ScopedCredentialStore {
+	return &ScopedCredentialStore{Inner: inner, Scope: scope}
+}
+
+// NewScopedCredentialStoreForDeclaration derives the adapter credential
+// scope from framework-owned declaration metadata.
+func NewScopedCredentialStoreForDeclaration(inner CredentialStore, decl adapter.Declaration) *ScopedCredentialStore {
+	return NewScopedCredentialStore(inner, CredentialScopeForDeclaration(decl))
+}
+
+// CredentialScopeForDeclaration is the physical namespace Manager uses for
+// adapter credentials. It intentionally combines name and actor id so two
+// installed adapters cannot share credentials by colliding on logical keys.
+func CredentialScopeForDeclaration(decl adapter.Declaration) string {
+	if decl.Name == "" && decl.ActorID == "" {
+		return ""
+	}
+	return "adapter:" + decl.Name + ":actor:" + string(decl.ActorID)
+}
+
+func (s *ScopedCredentialStore) Get(ctx context.Context, key string) (string, bool, error) {
+	return s.Inner.Get(ctx, s.scope(key))
+}
+
+func (s *ScopedCredentialStore) Put(ctx context.Context, key, value string) error {
+	return s.Inner.Put(ctx, s.scope(key), value)
+}
+
+func (s *ScopedCredentialStore) Delete(ctx context.Context, key string) error {
+	return s.Inner.Delete(ctx, s.scope(key))
+}
+
+func (s *ScopedCredentialStore) scope(key string) string {
+	if s.Scope == "" {
+		return key
+	}
+	return s.Scope + ":" + key
 }
 
 // Redact returns a log-safe rendering of `secret`. The transformation

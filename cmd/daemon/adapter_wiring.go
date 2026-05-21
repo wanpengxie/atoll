@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -37,6 +40,8 @@ import (
 // channel". Returning a non-nil error fails the channel boot.
 type AdapterModuleFactory func(ctx context.Context, h runtime.ChannelHooks) (adapter.Module, error)
 
+const devAdapterCredentialSecret = "dev-adapter-credential-secret-change-me"
+
 // wireAdapterFramework returns a runtime.DaemonConfig.OnChannelBoot
 // callback that constructs an adapters/framework.Manager per channel
 // from the supplied factories, installs every produced Module, and
@@ -50,7 +55,30 @@ type AdapterModuleFactory func(ctx context.Context, h runtime.ChannelHooks) (ada
 // architectural boundary at the composition root rather than inside the
 // runtime package (go-arch-lint enforces runtime ↛ adapters).
 func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Context, h runtime.ChannelHooks) (func(context.Context) error, error) {
+	hook, err := wireAdapterFrameworkWithCredentialSecret([]byte(devAdapterCredentialSecret), factories...)
+	if err != nil {
+		panic(err)
+	}
+	return hook
+}
+
+func wireAdapterFrameworkWithCredentialSecret(secret []byte, factories ...AdapterModuleFactory) (func(ctx context.Context, h runtime.ChannelHooks) (func(context.Context) error, error), error) {
+	if len(secret) == 0 {
+		return nil, errors.New("cmd/daemon: adapter credential secret required")
+	}
+	key := deriveAdapterCredentialKey(secret)
+	box, err := runtimestore.NewAESGCMSecretBox(key[:])
+	if err != nil {
+		return nil, fmt.Errorf("cmd/daemon: adapter credential SecretBox: %w", err)
+	}
+	return wireAdapterFrameworkWithCredentialBox(box, factories...), nil
+}
+
+func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories ...AdapterModuleFactory) func(ctx context.Context, h runtime.ChannelHooks) (func(context.Context) error, error) {
 	return func(ctx context.Context, h runtime.ChannelHooks) (func(context.Context) error, error) {
+		if box == nil {
+			return nil, errors.New("cmd/daemon: adapter credential SecretBox required")
+		}
 		modules := make([]adapter.Module, 0, len(factories))
 		for _, f := range factories {
 			mod, err := f(ctx, h)
@@ -95,6 +123,10 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 		if err != nil {
 			return nil, fmt.Errorf("typeinstall.New(%s): %w", h.ChannelID, err)
 		}
+		credentialStore, err := runtimestore.NewAdapterCredentialStore(h.DB, h.NowFn, box)
+		if err != nil {
+			return nil, fmt.Errorf("adapter credential store for %s: %w", h.ChannelID, err)
+		}
 
 		mgr, err := framework.NewManager(framework.ManagerConfig{
 			ChannelID:       h.ChannelID,
@@ -104,7 +136,7 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 			HarnessChain:    adapterChain,
 			RequestLookup:   h.RequestLookup,
 			StateStore:      runtimestore.NewAdapterStateStore(h.DB, h.NowFn),
-			CredentialStore: runtimestore.NewAdapterCredentialStore(h.DB, h.NowFn),
+			CredentialStore: credentialStore,
 			Clock:           clock,
 			// T147 §A — daemon supplies the per-channel DeviceTransit so
 			// the framework can satisfy `runtime_inbound_via_relay` modules at
@@ -171,6 +203,17 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 			return mgr.Shutdown(shutdownCtx)
 		}, nil
 	}
+}
+
+func deriveAdapterCredentialKey(secret []byte) [32]byte {
+	// Implementation choice, not protocol semantics: derive the local
+	// sqlite-at-rest key from the daemon composition root secret with a
+	// fixed context string so the credential box gets exactly 32 bytes.
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write([]byte("coagent.adapter.credentials.v1"))
+	var out [32]byte
+	copy(out[:], mac.Sum(nil))
+	return out
 }
 
 // deliverThroughManager wraps Manager.Dispatch into the

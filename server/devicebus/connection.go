@@ -238,8 +238,8 @@ const deviceWSTokenPrefix = "token."
 func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sessionID := c.Query("session_id")
-		token, hasRealProto := parseDeviceWSSubprotocols(c.Request.Header.Values("Sec-WebSocket-Protocol"))
-		if sessionID == "" || token == "" || !hasRealProto {
+		token, hasRealProto, parseOK := parseDeviceWSSubprotocols(c.Request.Header.Values("Sec-WebSocket-Protocol"))
+		if !parseOK || sessionID == "" || token == "" || !hasRealProto {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": "session_id query + Sec-WebSocket-Protocol: coagent.device.v1, token.<token> required",
 			})
@@ -336,11 +336,12 @@ func deviceTokenRejectReason(err error) kerneldaemonbus.DeviceSessionRejectReaso
 //
 //   - `coagent.device.v1` → real protocol present (handshake well-formed)
 //   - prefix `token.`     → bearer token (everything after the prefix)
-//   - anything else       → ignored (forward-compat for future slots)
+//   - anything else       → fail-closed
 //
-// Returns ("", false) when the header is empty or missing the real
-// subprotocol; returns (token, true) when both are present.
-func parseDeviceWSSubprotocols(headers []string) (token string, hasRealProto bool) {
+// Returns ok=false for duplicate/unknown slots. Empty slots are ignored.
+func parseDeviceWSSubprotocols(headers []string) (token string, hasRealProto bool, ok bool) {
+	ok = true
+	var seenToken bool
 	for _, line := range headers {
 		for _, part := range strings.Split(line, ",") {
 			p := strings.TrimSpace(part)
@@ -348,15 +349,24 @@ func parseDeviceWSSubprotocols(headers []string) (token string, hasRealProto boo
 				continue
 			}
 			if p == DeviceWSSubprotocol {
+				if hasRealProto {
+					return "", false, false
+				}
 				hasRealProto = true
 				continue
 			}
 			if strings.HasPrefix(p, deviceWSTokenPrefix) {
+				if seenToken {
+					return "", false, false
+				}
+				seenToken = true
 				token = strings.TrimPrefix(p, deviceWSTokenPrefix)
+				continue
 			}
+			return "", false, false
 		}
 	}
-	return token, hasRealProto
+	return token, hasRealProto, true
 }
 
 func (s *Service) checkOrigin(r *http.Request) bool {

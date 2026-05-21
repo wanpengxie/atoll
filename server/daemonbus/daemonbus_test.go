@@ -111,6 +111,66 @@ func TestHandleWSOriginPolicy(t *testing.T) {
 	})
 }
 
+func TestHandleWSRejectsWrongSharedSecret(t *testing.T) {
+	t.Parallel()
+	svc := newSvcWithConfig(t, daemonbus.Config{SharedSecret: "test-secret"})
+	wsURL := daemonbusWSServer(t, svc)
+	ws, resp, err := daemonWSDialer("d-wrong-key", "wrong-secret").Dial(wsURL, nil)
+	if err == nil {
+		_ = ws.Close()
+		t.Fatal("dial with wrong daemon key succeeded")
+	}
+	if resp == nil {
+		t.Fatalf("dial response nil: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status=%d want 401", resp.StatusCode)
+	}
+}
+
+func TestHandleWSSubprotocolParserFailClosed(t *testing.T) {
+	t.Parallel()
+	svc := newSvcWithConfig(t, daemonbus.Config{SharedSecret: "test-secret"})
+	wsURL := daemonbusWSServer(t, svc)
+
+	cases := []struct {
+		name      string
+		protocols []string
+	}{
+		{
+			name:      "unknown slot",
+			protocols: []string{"coagent.daemon.v1", "daemon.d1", "key.test-secret", "unknown.slot"},
+		},
+		{
+			name:      "duplicate daemon slot",
+			protocols: []string{"coagent.daemon.v1", "daemon.d1", "daemon.d2", "key.test-secret"},
+		},
+		{
+			name:      "duplicate key slot",
+			protocols: []string{"coagent.daemon.v1", "daemon.d1", "key.test-secret", "key.other"},
+		},
+		{
+			name:      "duplicate real protocol",
+			protocols: []string{"coagent.daemon.v1", "coagent.daemon.v1", "daemon.d1", "key.test-secret"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ws, resp, err := daemonWSDialerWithSubprotocols(tc.protocols...).Dial(wsURL, nil)
+			if err == nil {
+				_ = ws.Close()
+				t.Fatalf("dial succeeded for malformed subprotocols: %v", tc.protocols)
+			}
+			if resp == nil {
+				t.Fatalf("dial response nil: %v", err)
+			}
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status=%d want 400", resp.StatusCode)
+			}
+		})
+	}
+}
+
 type fakeChannelDaemonResolver struct {
 	daemonID placement.DaemonID
 	ok       bool
@@ -591,11 +651,15 @@ func TestHandleWS_PingKeepsConnAlive(t *testing.T) {
 // handshake. Per R5-15 the secret rides in Sec-WebSocket-Protocol, not
 // the URL query.
 func daemonWSDialer(daemonID, key string) *websocket.Dialer {
-	d := *websocket.DefaultDialer
-	d.Subprotocols = []string{
+	return daemonWSDialerWithSubprotocols(
 		"coagent.daemon.v1",
-		"daemon." + daemonID,
-		"key." + key,
-	}
+		"daemon."+daemonID,
+		"key."+key,
+	)
+}
+
+func daemonWSDialerWithSubprotocols(protocols ...string) *websocket.Dialer {
+	d := *websocket.DefaultDialer
+	d.Subprotocols = protocols
 	return &d
 }

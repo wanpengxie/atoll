@@ -37,6 +37,13 @@ func WithDeps(deps framework.Deps) Option {
 	}
 }
 
+// SetCredentialStore is called by framework.Manager during Install with a
+// scoped credential view. Direct tests may still supply a store through
+// WithDeps before calling Init manually.
+func (m *Module) SetCredentialStore(store framework.CredentialStore) {
+	m.credStore = store
+}
+
 // WithActorID overrides the default actor id.
 func WithActorID(id actor.ActorID) Option {
 	return func(m *Module) { m.actorID = id }

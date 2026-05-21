@@ -104,14 +104,18 @@ func (s *AdapterStateStore) List(ctx context.Context, prefix string) ([]string, 
 type AdapterCredentialStore struct {
 	db    *sql.DB
 	nowFn func() int64
+	box   SecretBox
 }
 
 // NewAdapterCredentialStore returns a persistent credential key/value store.
-func NewAdapterCredentialStore(db *sql.DB, nowFn func() int64) *AdapterCredentialStore {
+func NewAdapterCredentialStore(db *sql.DB, nowFn func() int64, box SecretBox) (*AdapterCredentialStore, error) {
+	if box == nil {
+		return nil, errors.New("store: adapter credential SecretBox required")
+	}
 	if nowFn == nil {
 		nowFn = func() int64 { return time.Now().UnixMilli() }
 	}
-	return &AdapterCredentialStore{db: db, nowFn: nowFn}
+	return &AdapterCredentialStore{db: db, nowFn: nowFn, box: box}, nil
 }
 
 func (s *AdapterCredentialStore) Get(ctx context.Context, key string) (string, bool, error) {
@@ -123,20 +127,28 @@ func (s *AdapterCredentialStore) Get(ctx context.Context, key string) (string, b
 		}
 		return "", false, fmt.Errorf("store: adapter_credentials get: %w", err)
 	}
-	return value, true, nil
+	plaintext, err := s.box.Open(value, []byte(key))
+	if err != nil {
+		return "", false, fmt.Errorf("store: adapter_credentials open: %w", err)
+	}
+	return string(plaintext), true, nil
 }
 
 func (s *AdapterCredentialStore) Put(ctx context.Context, key, value string) error {
 	if key == "" {
 		return errAdapterCredentialKeyRequired
 	}
-	_, err := s.db.ExecContext(ctx,
+	sealed, err := s.box.Seal([]byte(value), []byte(key))
+	if err != nil {
+		return fmt.Errorf("store: adapter_credentials seal: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO adapter_credentials (key, value, updated_at)
 		 VALUES (?, ?, ?)
 		 ON CONFLICT(key) DO UPDATE SET
 		   value = excluded.value,
 		   updated_at = excluded.updated_at`,
-		key, value, s.nowFn(),
+		key, sealed, s.nowFn(),
 	)
 	if err != nil {
 		return fmt.Errorf("store: adapter_credentials put: %w", err)

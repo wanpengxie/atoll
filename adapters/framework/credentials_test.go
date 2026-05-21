@@ -5,6 +5,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
 func TestRedactKeepsEdges(t *testing.T) {
@@ -71,6 +74,43 @@ func TestMemoryCredentialStorePutRejectsEmptyKey(t *testing.T) {
 	s := NewMemoryCredentialStore()
 	if err := s.Put(context.Background(), "", "v"); err == nil {
 		t.Fatalf("Put empty key: expected error")
+	}
+}
+
+func TestScopedCredentialStoreScopesKeys(t *testing.T) {
+	ctx := context.Background()
+	inner := NewMemoryCredentialStore()
+	a := NewScopedCredentialStoreForDeclaration(inner, adapter.Declaration{
+		Name:    "adapter-a",
+		ActorID: actor.ActorID("tool:a"),
+	})
+	b := NewScopedCredentialStoreForDeclaration(inner, adapter.Declaration{
+		Name:    "adapter-b",
+		ActorID: actor.ActorID("tool:b"),
+	})
+	if err := a.Put(ctx, "shared.secret", "secret-a"); err != nil {
+		t.Fatalf("Put a: %v", err)
+	}
+	if err := b.Put(ctx, "shared.secret", "secret-b"); err != nil {
+		t.Fatalf("Put b: %v", err)
+	}
+	if got, ok, err := a.Get(ctx, "shared.secret"); err != nil || !ok || got != "secret-a" {
+		t.Fatalf("Get a = %q ok=%v err=%v", got, ok, err)
+	}
+	if got, ok, err := b.Get(ctx, "shared.secret"); err != nil || !ok || got != "secret-b" {
+		t.Fatalf("Get b = %q ok=%v err=%v", got, ok, err)
+	}
+	if _, ok, err := inner.Get(ctx, "shared.secret"); err != nil || ok {
+		t.Fatalf("unscoped Get ok=%v err=%v", ok, err)
+	}
+	if err := a.Delete(ctx, "shared.secret"); err != nil {
+		t.Fatalf("Delete a: %v", err)
+	}
+	if _, ok, err := a.Get(ctx, "shared.secret"); err != nil || ok {
+		t.Fatalf("Get deleted a ok=%v err=%v", ok, err)
+	}
+	if got, ok, err := b.Get(ctx, "shared.secret"); err != nil || !ok || got != "secret-b" {
+		t.Fatalf("Delete a affected b: got=%q ok=%v err=%v", got, ok, err)
 	}
 }
 

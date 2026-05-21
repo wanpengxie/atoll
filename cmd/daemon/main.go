@@ -124,6 +124,16 @@ func main() {
 	if *useScaffoldXHS {
 		xhsFactory = XHSScaffoldFactory(xhs.Config{})
 	}
+	adapterCredentialSecret := []byte(*humanSecret)
+	if len(adapterCredentialSecret) == 0 && *mockBus {
+		adapterCredentialSecret = []byte(devAdapterCredentialSecret)
+	}
+	adapterBootHook, err := wireAdapterFrameworkWithCredentialSecret(adapterCredentialSecret, xhsFactory)
+	if err != nil {
+		lg.Z().Error().Err(err).Str("event", "daemon.fail_fast").
+			Msg("adapter credential encryption key is required")
+		os.Exit(1)
+	}
 	daemonLogger := lg.Z()
 	cfg := runtime.DaemonConfig{
 		DataDir:                   *dataDir,
@@ -134,7 +144,7 @@ func main() {
 		ReplayWindow:              time.Duration(*replayWindowMs) * time.Millisecond,
 		AllowReplayWindowDisabled: *mockBus && *replayWindowMs <= 0,
 		ChannelTemplates:          buildChannelTemplates(*useScaffoldXHS),
-		OnChannelBoot:             wireAdapterFramework(xhsFactory),
+		OnChannelBoot:             adapterBootHook,
 		OnBindDeviceSession:       deviceBinder.OnBind,
 		OnUnbindDeviceSession:     deviceBinder.OnUnbind,
 		// M1.6 follow-up — agent self-awareness fix. The runtime daemon

@@ -247,19 +247,19 @@ func setup(t *testing.T, mods ...func(*feishu.Module)) *setupResult {
 
 	logger := &recordingLogger{}
 	credStore := framework.NewMemoryCredentialStore()
-	_ = credStore.Put(context.Background(), feishu.CredKeyAppID, "cli_app_001")
-	_ = credStore.Put(context.Background(), feishu.CredKeyAppSecret, "SECRET-zxcvbn0987654321")
 
 	mod := feishu.New(
 		feishu.WithBaseURL(srv.URL),
 		feishu.WithDeps(framework.Deps{
-			CredentialStore: credStore,
-			Logger:          logger,
-			Metrics:         framework.NoopMetrics{},
-			Clock:           time.Now,
+			Logger:  logger,
+			Metrics: framework.NoopMetrics{},
+			Clock:   time.Now,
 		}),
 		feishu.WithMaxPendingMs(2_000),
 	)
+	scopedCreds := framework.NewScopedCredentialStoreForDeclaration(credStore, mod.Declares())
+	_ = scopedCreds.Put(context.Background(), feishu.CredKeyAppID, "cli_app_001")
+	_ = scopedCreds.Put(context.Background(), feishu.CredKeyAppSecret, "SECRET-zxcvbn0987654321")
 	for _, m := range mods {
 		m(mod)
 	}
@@ -293,7 +293,7 @@ func setup(t *testing.T, mods ...func(*feishu.Module)) *setupResult {
 	t.Cleanup(func() { _ = mgr.Shutdown(context.Background()) })
 	return &setupResult{
 		mgr: mgr, chain: chain, lookup: lookup, fake: fake,
-		logger: logger, creds: credStore, tregs: tregs,
+		logger: logger, creds: scopedCreds, tregs: tregs,
 	}
 }
 
@@ -335,15 +335,15 @@ func TestInstallRegistersTypesInTypeRegistry(t *testing.T) {
 func TestInstallRejectsMissingCredentials(t *testing.T) {
 	logger := &recordingLogger{}
 	credStore := framework.NewMemoryCredentialStore()
-	// only app_id, no app_secret
-	_ = credStore.Put(context.Background(), feishu.CredKeyAppID, "cli_app_001")
 
 	mod := feishu.New(
 		feishu.WithDeps(framework.Deps{
-			CredentialStore: credStore,
-			Logger:          logger,
+			Logger: logger,
 		}),
 	)
+	// only app_id, no app_secret
+	scopedCreds := framework.NewScopedCredentialStoreForDeclaration(credStore, mod.Declares())
+	_ = scopedCreds.Put(context.Background(), feishu.CredKeyAppID, "cli_app_001")
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID: "tool:feishu-adapter", Kind: actor.KindTool, Binding: actor.BindingRuntimeOutbound,
