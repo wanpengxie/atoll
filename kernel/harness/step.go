@@ -11,10 +11,14 @@ import (
 // strictly in ascending ID order — there are no out-of-band steps.
 //
 // Step numbers loosely mirror the spec's §2.0 sequence (the spec lists
-// Step 0…Step 10; code collapses Step 0 + Step 1 into StepCallerAuth and
+// Step 0…Step 9; code collapses Step 0 + Step 1 into StepCallerAuth and
 // splits Step 5/7 into separate StepTypeRegistered + StepKindAndAudience
 // stages for engineering granularity). What matters protocol-wise is
 // physical execution ordering, which this file fixes.
+//
+// Level A note (proto-layer0 §1.4.1 / proto-layer1 §1.3 §2): payload is
+// opaque to the protocol layer; the harness no longer validates payload
+// schemas, so there is no payload-schema step in the chain.
 type StepID int
 
 // Step ids per proto-layer1 §2.0. Round 3 placed StepDedupe before
@@ -28,9 +32,8 @@ const (
 	StepSenderConsistent StepID = 4 // proto-layer1 §2.6 step 6  — sender × caller match; sender.kind from registry
 	StepTypeRegistered   StepID = 5 // proto-layer1 §2.5 step 5a — type ∈ (core ∪ registry) + reserved namespace authority
 	StepKindAndAudience  StepID = 6 // proto-layer1 §2.5/§2.7    — kind ∈ allowed_kinds + audience members active + handler match
-	StepPayloadSchema    StepID = 7 // proto-layer1 §2.8 step 8  — payload schema validation
-	StepResponsePairing  StepID = 8 // proto-layer1 §2.9 step 9  — response parent valid + The One Law uniqueness
-	StepEngineAppend     StepID = 9 // proto-layer1 §2.10 step 10 — engine append + dispatch (terminal step; emits row)
+	StepResponsePairing  StepID = 7 // proto-layer1 §2.8 Step 8  — terminal uniqueness + response parent valid + The One Law
+	StepEngineAppend     StepID = 8 // proto-layer1 §2.9 Step 9  — append + outbox (terminal step; emits row)
 )
 
 // AllStepIDs lists every step in physical execution order. The chain
@@ -44,7 +47,6 @@ var AllStepIDs = []StepID{
 	StepSenderConsistent,
 	StepTypeRegistered,
 	StepKindAndAudience,
-	StepPayloadSchema,
 	StepResponsePairing,
 	StepEngineAppend,
 }
@@ -66,7 +68,7 @@ type Outcome struct {
 	Detail string
 
 	// PartialMessageID is set on rejects that occurred AFTER the
-	// envelope.id was finalized (e.g. step 9 terminal_duplicate happens
+	// envelope.id was finalized (e.g. step 8 terminal_duplicate happens
 	// in the engine append transaction). Empty otherwise.
 	PartialMessageID message.ID
 

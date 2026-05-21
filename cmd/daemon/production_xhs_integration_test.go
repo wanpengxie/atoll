@@ -96,10 +96,11 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 		t.Fatalf("activate session: %v", err)
 	}
 
-	// R5-18: xhs.publish request schema (domain-xhs-spec §1.1) requires
-	// title + content; the device adapter now ships strict TypeSchemas
-	// so missing required fields trip harness Step 6 instead of
-	// silently passing through the permissive default.
+	// xhs.publish request payload (domain-xhs-spec §1.1) carries
+	// title + content for the production extension path. Per Level A
+	// (proto-layer0 §1.4.1) the protocol layer does not validate
+	// payload contents; payload consistency is enforced by the adapter
+	// boundary's per-type allow-lists, not by the harness.
 	ack, send := writeRequestAndWaitForDeviceSend(t, ctx, d, srv, channelID, "req-prod-xhs", "user:alice",
 		devicexhs.TypePublish, []byte(`{"title":"hello","content":"world","device_session_id":"sess-prod-xhs"}`))
 	if !ack.Accepted {

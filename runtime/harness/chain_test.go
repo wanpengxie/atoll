@@ -222,55 +222,12 @@ func TestChain_Step5_KindNotAllowed(t *testing.T) {
 	}
 }
 
-// TestChain_Step6_PayloadSchema — install a validator that always
-// rejects, send a request, observe reject reason.
-func TestChain_Step6_PayloadSchema(t *testing.T) {
-	c, _, _, treg := newTestChain(t)
-	treg.Add(TypeView{
-		Type:         "feishu.chat.send",
-		AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
-		SchemasByKind: map[message.Kind]json.RawMessage{
-			message.KindRequest: json.RawMessage(`{"type":"object","required":["title"]}`),
-		},
-		MaxPendingMs:   10_000,
-		HandlerActorID: "tool:feishu",
-	})
-	prev := DefaultPayloadValidator
-	SetPayloadValidator(func(_, _ []byte) error { return errFakeSchema })
-	defer SetPayloadValidator(prev)
-	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu", json.RawMessage(`{}`))
-	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
-	if res.RejectReason != message.HarnessPayloadSchemaInvalid {
-		t.Fatalf("expected harness_payload_schema_invalid, got %s", res.RejectReason)
-	}
-}
-
-func TestChain_Step6_PayloadSchemaFailsClosedWithoutValidator(t *testing.T) {
-	c, _, _, treg := newTestChain(t)
-	treg.Add(TypeView{
-		Type:         "feishu.chat.send",
-		AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
-		SchemasByKind: map[message.Kind]json.RawMessage{
-			message.KindRequest: json.RawMessage(`{"type":"object"}`),
-		},
-		MaxPendingMs:   10_000,
-		HandlerActorID: "tool:feishu",
-	})
-	prev := DefaultPayloadValidator
-	SetPayloadValidator(nil)
-	t.Cleanup(func() { SetPayloadValidator(prev) })
-
-	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu", json.RawMessage(`{}`))
-	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
-	// proto-layer1 §2.11.1: schema present but validator not wired →
-	// harness_schema_missing (distinct from harness_payload_schema_invalid).
-	if res.RejectReason != message.HarnessSchemaMissing {
-		t.Fatalf("expected harness_schema_missing, got %s", res.RejectReason)
-	}
-	if res.RejectDetail != ErrPayloadValidatorMissing.Error() {
-		t.Fatalf("detail=%q want %q", res.RejectDetail, ErrPayloadValidatorMissing.Error())
-	}
-}
+// Payload schema validation was removed in Level A (proto-layer0
+// §1.4.1 / proto-layer1 §1.3 §2): payload is opaque to the protocol
+// layer, type_registry stores no payload schemas, and the harness has
+// no payload-schema step. The former TestChain_Step6_PayloadSchema /
+// TestChain_Step6_PayloadSchemaFailsClosedWithoutValidator tests are
+// intentionally absent.
 
 func TestChain_Step5_DefaultExpiresAtByReceiverKind(t *testing.T) {
 	c, areg, _, treg := newTestChain(t)
@@ -338,14 +295,8 @@ func TestChain_Step5_DefaultExpiresAtByReceiverKind(t *testing.T) {
 
 func int64Ptr(v int64) *int64 { return &v }
 
-var errFakeSchema = &schemaError{msg: "missing field"}
-
-type schemaError struct{ msg string }
-
-func (e *schemaError) Error() string { return e.msg }
-
 // TestChain_Step8_ResponseParentNotFound — parent_id doesn't exist in
-// message_log → harness_response_parent_not_found per proto-layer1 §2.9.
+// message_log → harness_response_parent_not_found per proto-layer1 §2.8.
 func TestChain_Step8_ResponseParentNotFound(t *testing.T) {
 	c, _, _, _ := newTestChain(t)
 	env := newResponse("r-1", "agent:alpha", "missing-parent-id", "agent.text",
@@ -379,7 +330,7 @@ func TestChain_Step8_ResponseParentNotRequest(t *testing.T) {
 
 // TestChain_Step8_ResponseStatusInvalid — payload.status not in the
 // strict {completed, failed} closed set → harness_response_status_invalid
-// per proto-layer1 §2.9 #4.
+// per proto-layer1 §2.8 #4.
 func TestChain_Step8_ResponseStatusInvalid(t *testing.T) {
 	c, _, _, treg := newTestChain(t)
 	treg.Add(TypeView{

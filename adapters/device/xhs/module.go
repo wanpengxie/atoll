@@ -101,19 +101,23 @@ func New(cfg Config) (*Module, error) {
 // Declares returns the static adapter metadata. Called exactly once
 // per Install per channel by the framework (L2 §8.1).
 //
-// TypeSchemas (R5-18) — every xhs type in domain-xhs-spec §1.1–§1.6
-// ships a per-kind allowed_kinds + payload schema row. The framework
-// fails install closed when an adapter declares TypeSchemas but a
-// Types entry has no matching row (no silent permissive-default
-// fallback when the adapter has explicitly opted into strict mode).
+// TypeDeclarations — every xhs type in domain-xhs-spec §1.1–§1.6
+// ships a per-type allowed_kinds + terminal_convention row. The
+// framework fails install closed when an adapter declares
+// TypeDeclarations but a Types entry has no matching row (no silent
+// permissive-default fallback when the adapter has explicitly opted
+// into strict mode).
+//
+// Level A: payload schemas are NOT declared at the protocol layer
+// (proto-layer0 §1.4.1).
 func (m *Module) Declares() adapter.Declaration {
 	return adapter.Declaration{
-		Name:         AdapterName,
-		ActorID:      m.cfg.AdapterActorID,
-		Types:        append([]string{}, AllTypes...),
-		TypeSchemas:  DeclarationTypeSchemas(),
-		Binding:      Binding,
-		MaxPendingMs: m.cfg.MaxPendingMs,
+		Name:             AdapterName,
+		ActorID:          m.cfg.AdapterActorID,
+		Types:            append([]string{}, AllTypes...),
+		TypeDeclarations: DeclarationTypeDeclarations(),
+		Binding:          Binding,
+		MaxPendingMs:     m.cfg.MaxPendingMs,
 	}
 }
 

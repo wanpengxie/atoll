@@ -61,11 +61,7 @@ const (
 	HarnessResponseAudienceInvalid HarnessRejectReason = "harness_response_audience_invalid"
 	HarnessAudienceHandlerMismatch HarnessRejectReason = "harness_audience_handler_mismatch"
 
-	// Step 8 — Payload Schema
-	HarnessSchemaMissing        HarnessRejectReason = "harness_schema_missing"
-	HarnessPayloadSchemaInvalid HarnessRejectReason = "harness_payload_schema_invalid"
-
-	// Step 9 — Terminal Uniqueness + Response Parent Validation
+	// Step 8 — Terminal Uniqueness + Response Parent Validation
 	HarnessResponseMissingParent      HarnessRejectReason = "harness_response_missing_parent"
 	HarnessResponseParentNotFound     HarnessRejectReason = "harness_response_parent_not_found"
 	HarnessResponseParentNotRequest   HarnessRejectReason = "harness_response_parent_not_request"
@@ -78,6 +74,14 @@ const (
 	// Step 0 — Caller Principal Validation (pre-harness)
 	HarnessEngineACLDenied HarnessRejectReason = "harness_engine_acl_denied"
 )
+
+// Step 8 in this version covers Terminal Uniqueness + Response Parent
+// Validation (formerly Step 9). The Payload Schema step (formerly Step
+// 8) was removed when the protocol moved to Level A
+// (proto-layer0 §1.4.1): payload is opaque to the protocol layer, so
+// the harness no longer validates payload schemas. The reasons
+// `harness_schema_missing` and `harness_payload_schema_invalid` are no
+// longer part of the closed set.
 
 // AllHarnessRejectReasons enumerates every value of the HarnessRejectReason
 // closed set, in their proto-layer1 §2.11.1 listed order.
@@ -103,8 +107,6 @@ var AllHarnessRejectReasons = []HarnessRejectReason{
 	HarnessRequestAudienceInvalid,
 	HarnessResponseAudienceInvalid,
 	HarnessAudienceHandlerMismatch,
-	HarnessSchemaMissing,
-	HarnessPayloadSchemaInvalid,
 	HarnessResponseMissingParent,
 	HarnessResponseParentNotFound,
 	HarnessResponseParentNotRequest,
@@ -156,9 +158,7 @@ func (r HarnessRejectReason) HTTPStatus() int {
 		HarnessAudienceHandlerMismatch,
 		HarnessResponseAudienceMismatch,
 		HarnessResponseReasonInvalid,
-		HarnessTimeInvalid,
-		HarnessSchemaMissing,
-		HarnessPayloadSchemaInvalid:
+		HarnessTimeInvalid:
 		return 400
 	}
 	return 0
@@ -176,19 +176,17 @@ type InstallReason string
 
 // InstallReason closed set (per L1 §10.3.2 + L2 §3.6.1 install-time table).
 const (
-	InstallAdapterTimeoutMissing         InstallReason = "adapter_timeout_missing"
-	InstallFallbackResponseSchemaInvalid InstallReason = "fallback_response_schema_invalid"
-	InstallHandlerActorNotRegistered     InstallReason = "handler_actor_not_registered"
-	InstallHandlerActorBindingMismatch   InstallReason = "handler_actor_binding_mismatch"
-	InstallTypeRegistryInvalid           InstallReason = "type_registry_invalid"
-	InstallWorkerLockHeld                InstallReason = "worker_lock_held"
-	InstallBootstrapInProgress           InstallReason = "bootstrap_in_progress"
+	InstallAdapterTimeoutMissing       InstallReason = "adapter_timeout_missing"
+	InstallHandlerActorNotRegistered   InstallReason = "handler_actor_not_registered"
+	InstallHandlerActorBindingMismatch InstallReason = "handler_actor_binding_mismatch"
+	InstallTypeRegistryInvalid         InstallReason = "type_registry_invalid"
+	InstallWorkerLockHeld              InstallReason = "worker_lock_held"
+	InstallBootstrapInProgress         InstallReason = "bootstrap_in_progress"
 )
 
 // AllInstallReasons enumerates every value of the InstallReason closed set.
 var AllInstallReasons = []InstallReason{
 	InstallAdapterTimeoutMissing,
-	InstallFallbackResponseSchemaInvalid,
 	InstallHandlerActorNotRegistered,
 	InstallHandlerActorBindingMismatch,
 	InstallTypeRegistryInvalid,
@@ -212,7 +210,6 @@ func (r InstallReason) HTTPStatus() int {
 	case InstallWorkerLockHeld, InstallBootstrapInProgress:
 		return 409
 	case InstallAdapterTimeoutMissing,
-		InstallFallbackResponseSchemaInvalid,
 		InstallHandlerActorNotRegistered,
 		InstallHandlerActorBindingMismatch,
 		InstallTypeRegistryInvalid:

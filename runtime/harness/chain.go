@@ -13,9 +13,10 @@ import (
 )
 
 // Chain is the concrete runtime implementation of kernel/harness.Chain.
-// It assembles the 10 numbered steps declared in proto-layer1 §2.0 and
-// runs them in stable ascending-ID order, short-circuiting on the first
-// reject (or on the first idempotent dedupe hit).
+// It assembles the 9 numbered steps declared in proto-layer1 §2.0
+// (Step 0 entry gate + Step 1-9 main pipeline) and runs them in stable
+// ascending-ID order, short-circuiting on the first reject (or on the
+// first idempotent dedupe hit).
 //
 // Construct with New; Write is safe for concurrent use as long as Deps
 // implementations are concurrent-safe (the standard sqlite-backed store
@@ -43,12 +44,11 @@ func New(deps Deps) (*Chain, error) {
 		newStepSenderConsistent(deps),
 		newStepTypeRegistered(deps),
 		newStepKindAndAudience(deps),
-		newStepPayloadSchema(deps),
 		newStepResponsePairing(deps),
-		// StepEngineAppend (step 10) is fused into Chain.Write so the Step
+		// StepEngineAppend (step 9) is fused into Chain.Write so the Step
 		// interface can stay pure (no side-effects beyond envelope
 		// mutation). Keeping engine append out of the Step slice also
-		// lets unit tests run steps 0..9 in isolation with a stub Log.
+		// lets unit tests run steps 0..8 in isolation with a stub Log.
 	}
 	sort.SliceStable(steps, func(i, j int) bool { return steps[i].ID() < steps[j].ID() })
 

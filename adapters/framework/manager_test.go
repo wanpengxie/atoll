@@ -863,16 +863,20 @@ func TestManagerHandlePanicEmitsReceiverInternalError(t *testing.T) {
 	}
 }
 
-// TestManagerInstallRejectsStrictModeGap (R5-18) — when an adapter
-// declares TypeSchemas (opting into strict mode) but a Types entry is
+// TestManagerInstallRejectsStrictModeGap — when an adapter declares
+// TypeDeclarations (opting into strict mode) but a Types entry is
 // missing from the map, install MUST fail-closed with
 // InstallTypeRegistryInvalid rather than silently fall back to the
 // permissive default ({event, request, response}).
 //
-// Rationale: a partially-declared TypeSchemas map is a drift signal —
-// the adapter wanted strict per-payload schemas but forgot a row. The
-// missing row would default to "all three kinds allowed" which can
-// admit spec-disallowed kinds (e.g. kind=event on xhs.publish).
+// Rationale: a partially-declared TypeDeclarations map is a drift
+// signal — the adapter wanted strict per-type allowed_kinds but forgot
+// a row. The missing row would default to "all three kinds allowed"
+// which can admit spec-disallowed kinds (e.g. kind=event on xhs.publish).
+//
+// Level A (proto-layer0 §1.4.1 / proto-layer1 §1.3): payload schema is
+// NOT declared at the protocol layer; TypeDeclaration carries only
+// allowed_kinds + terminal_convention.
 func TestManagerInstallRejectsStrictModeGap(t *testing.T) {
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actorreg.Record{
@@ -887,13 +891,11 @@ func TestManagerInstallRejectsStrictModeGap(t *testing.T) {
 			Types:        []string{"feishu.chat.send", "feishu.chat.create"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
-			// Strict mode opt-in: TypeSchemas non-nil, but missing the
-			// "feishu.chat.create" row.
-			TypeSchemas: map[string]adapter.TypeSchema{
+			// Strict mode opt-in: TypeDeclarations non-nil, but missing
+			// the "feishu.chat.create" row.
+			TypeDeclarations: map[string]adapter.TypeDeclaration{
 				"feishu.chat.send": {
 					AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
-					FallbackResponseSchema: json.RawMessage(
-						`{"type":"object","required":["status","reason"]}`),
 				},
 			},
 		},
@@ -921,17 +923,16 @@ func TestManagerInstallRejectsStrictModeGap(t *testing.T) {
 	}
 }
 
-// TestManagerInstallStrictModeAcceptsCompleteSchemas — the positive
-// case: adapter declares TypeSchemas with every Types entry covered →
-// install succeeds.
-func TestManagerInstallStrictModeAcceptsCompleteSchemas(t *testing.T) {
+// TestManagerInstallStrictModeAcceptsCompleteDeclarations — the
+// positive case: adapter declares TypeDeclarations with every Types
+// entry covered → install succeeds.
+func TestManagerInstallStrictModeAcceptsCompleteDeclarations(t *testing.T) {
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actorreg.Record{
 		ID:      "tool:feishu",
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeOutbound,
 	})
-	fallback := json.RawMessage(`{"type":"object","required":["status","reason"]}`)
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
@@ -939,14 +940,12 @@ func TestManagerInstallStrictModeAcceptsCompleteSchemas(t *testing.T) {
 			Types:        []string{"feishu.chat.send", "feishu.chat.create"},
 			Binding:      actor.BindingRuntimeOutbound,
 			MaxPendingMs: 30_000,
-			TypeSchemas: map[string]adapter.TypeSchema{
+			TypeDeclarations: map[string]adapter.TypeDeclaration{
 				"feishu.chat.send": {
-					AllowedKinds:           []message.Kind{message.KindRequest, message.KindResponse},
-					FallbackResponseSchema: fallback,
+					AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
 				},
 				"feishu.chat.create": {
-					AllowedKinds:           []message.Kind{message.KindRequest, message.KindResponse},
-					FallbackResponseSchema: fallback,
+					AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
 				},
 			},
 		},
@@ -962,6 +961,6 @@ func TestManagerInstallStrictModeAcceptsCompleteSchemas(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 	if err := mgr.Install(context.Background(), []adapter.Module{mod}); err != nil {
-		t.Fatalf("Install (complete schemas): %v", err)
+		t.Fatalf("Install (complete declarations): %v", err)
 	}
 }

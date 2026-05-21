@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
@@ -99,32 +100,42 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (k
 		}, nil
 	}
 	if env.ExpiresAt == nil {
-		if out := s.defaultExpiresAt(env, rec.Kind, view, !isCore); !out.Continue() {
+		out, err := s.defaultExpiresAt(env, rec.Kind, view, !isCore)
+		if err != nil {
+			return khar.Outcome{}, err
+		}
+		if !out.Continue() {
 			return out, nil
 		}
 	}
 	return khar.Outcome{}, nil
 }
 
+// errTypeRegistryMaxPendingMissing is returned (as a non-protocol Go
+// error, NOT a closed-set harness reject) when the type_registry row
+// for a tool receiver is missing the max_pending_ms field. Install
+// already enforces this invariant (InstallAdapterTimeoutMissing); the
+// harness fails loudly via the runtime error path because the
+// condition reflects internal registry corruption, not a caller-visible
+// protocol violation.
+var errTypeRegistryMaxPendingMissing = errors.New("harness: type_registry row missing max_pending_ms for tool receiver (install invariant violated)")
+
 func (s *stepKindAndAudience) defaultExpiresAt(
 	env *message.Envelope,
 	receiverKind actor.Kind,
 	view TypeView,
 	hasTypeView bool,
-) khar.Outcome {
+) (khar.Outcome, error) {
 	var maxPendingMs int64
 	switch receiverKind {
 	case actor.KindTool:
 		if !hasTypeView || view.MaxPendingMs <= 0 {
 			// Type registry installed the tool handler but omitted
-			// max_pending_ms — install validator should have caught this,
-			// but harness fails closed using harness_schema_missing (the
-			// closest match in proto-layer1 §2.11.1 for "registry config
-			// the harness needs is absent").
-			return khar.Outcome{
-				RejectReason: message.HarnessSchemaMissing,
-				Detail:       "tool receiver requires type_registry.max_pending_ms to default expires_at",
-			}
+			// max_pending_ms — install validator should have caught this
+			// (InstallAdapterTimeoutMissing). Surface as a non-protocol
+			// runtime error so the failure is loud and the proto-layer1
+			// §2.11.1 closed reject set stays clean.
+			return khar.Outcome{}, fmt.Errorf("%w: type=%s", errTypeRegistryMaxPendingMissing, env.Type)
 		}
 		maxPendingMs = view.MaxPendingMs
 	case actor.KindAgent:
@@ -132,13 +143,13 @@ func (s *stepKindAndAudience) defaultExpiresAt(
 	case actor.KindSystem:
 		maxPendingMs = defaultSystemMaxPendingMs
 	case actor.KindHuman:
-		return khar.Outcome{}
+		return khar.Outcome{}, nil
 	default:
-		return khar.Outcome{}
+		return khar.Outcome{}, nil
 	}
 	deadline := s.deps.NowMs() + maxPendingMs
 	env.ExpiresAt = &deadline
-	return khar.Outcome{}
+	return khar.Outcome{}, nil
 }
 
 func kindAllowed(allowed []message.Kind, want message.Kind) bool {

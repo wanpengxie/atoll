@@ -1267,12 +1267,11 @@ func writeChannelContextSnapshot(
 		DisplayName string `json:"display_name,omitempty"`
 	}
 	type typeJSON struct {
-		Type           string                     `json:"type"`
-		HandlerActorID string                     `json:"handler_actor_id"`
-		HandlerBinding string                     `json:"handler_binding,omitempty"`
-		AllowedKinds   []string                   `json:"allowed_kinds,omitempty"`
-		SchemasByKind  map[string]json.RawMessage `json:"schemas_by_kind,omitempty"`
-		MaxPendingMs   int64                      `json:"max_pending_ms,omitempty"`
+		Type           string   `json:"type"`
+		HandlerActorID string   `json:"handler_actor_id"`
+		HandlerBinding string   `json:"handler_binding,omitempty"`
+		AllowedKinds   []string `json:"allowed_kinds,omitempty"`
+		MaxPendingMs   int64    `json:"max_pending_ms,omitempty"`
 	}
 	type deviceJSON struct {
 		SessionID  string `json:"session_id"`
@@ -1318,19 +1317,11 @@ func writeChannelContextSnapshot(
 			for _, k := range r.AllowedKinds {
 				allowed = append(allowed, string(k))
 			}
-			schemas := make(map[string]json.RawMessage, len(r.SchemasByKind))
-			for k, raw := range r.SchemasByKind {
-				if len(raw) == 0 {
-					continue
-				}
-				schemas[string(k)] = append(json.RawMessage(nil), raw...)
-			}
 			snap.Types = append(snap.Types, typeJSON{
 				Type:           r.Type,
 				HandlerActorID: string(r.HandlerActorID),
 				HandlerBinding: string(r.HandlerBinding),
 				AllowedKinds:   allowed,
-				SchemasByKind:  schemas,
 				MaxPendingMs:   r.MaxPendingMs,
 			})
 		}

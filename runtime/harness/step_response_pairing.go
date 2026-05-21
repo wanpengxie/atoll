@@ -9,7 +9,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// stepResponsePairing implements proto-layer1 §2.9 step 9 — The One Law
+// stepResponsePairing implements proto-layer1 §2.8 Step 8 — The One Law
 // / terminal-uniqueness contract. Applies only to kind=response.
 //
 // Concretely:
@@ -67,7 +67,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 		}, nil
 	}
 
-	// payload.status strict closed set — proto-layer1 §2.9 #4. Missing
+	// payload.status strict closed set — proto-layer1 §2.8 #4. Missing
 	// status (or non-string / out-of-set) → harness_response_status_invalid.
 	if !payloadStatusValid(env.Payload) {
 		return khar.Outcome{
@@ -203,7 +203,7 @@ func terminalFailureReasonAllowed(reason string) bool {
 }
 
 // payloadStatusValid returns true when payload.status is present and
-// equals one of the proto-layer1 §2.9 closed set {"completed","failed"}.
+// equals one of the proto-layer1 §2.8 closed set {"completed","failed"}.
 // Empty payload or missing/non-string status → false (caller rejects
 // with harness_response_status_invalid).
 func payloadStatusValid(payload []byte) bool {

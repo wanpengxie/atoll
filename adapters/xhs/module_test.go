@@ -45,7 +45,7 @@ func newRequest(t *testing.T, id, typ string) *message.Envelope {
 }
 
 // TestDeclares ensures the scaffold owns the canonical tool actor id +
-// declares the 6 closed-set types with TypeSchemas.
+// declares the 6 closed-set types with TypeDeclarations.
 func TestDeclares(t *testing.T) {
 	mod := xhs.New(xhs.Config{})
 	d := mod.Declares()
@@ -64,11 +64,11 @@ func TestDeclares(t *testing.T) {
 	if len(d.Types) != len(xhs.AllTypes) {
 		t.Errorf("Types=%v want %v", d.Types, xhs.AllTypes)
 	}
-	if got := d.TypeSchemas[xhs.TypePublish]; len(got.AllowedKinds) != 2 {
-		t.Errorf("TypeSchemas[%s].AllowedKinds=%v", xhs.TypePublish, got.AllowedKinds)
+	if got := d.TypeDeclarations[xhs.TypePublish]; len(got.AllowedKinds) != 2 {
+		t.Errorf("TypeDeclarations[%s].AllowedKinds=%v", xhs.TypePublish, got.AllowedKinds)
 	}
-	if got := d.TypeSchemas[xhs.TypeNoteArchived]; len(got.AllowedKinds) != 1 || got.AllowedKinds[0] != message.KindEvent {
-		t.Errorf("TypeSchemas[%s].AllowedKinds=%v want [event]", xhs.TypeNoteArchived, got.AllowedKinds)
+	if got := d.TypeDeclarations[xhs.TypeNoteArchived]; len(got.AllowedKinds) != 1 || got.AllowedKinds[0] != message.KindEvent {
+		t.Errorf("TypeDeclarations[%s].AllowedKinds=%v want [event]", xhs.TypeNoteArchived, got.AllowedKinds)
 	}
 }
 

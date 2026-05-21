@@ -72,12 +72,12 @@ func New(cfg Config) *Module {
 // composition root reads it once during Manager.Install.
 func (m *Module) Declares() adapter.Declaration {
 	return adapter.Declaration{
-		Name:         AdapterName,
-		ActorID:      m.actorID,
-		Types:        append([]string(nil), AllTypes...),
-		TypeSchemas:  declarationTypeSchemas(),
-		Binding:      Binding,
-		MaxPendingMs: m.maxPend,
+		Name:             AdapterName,
+		ActorID:          m.actorID,
+		Types:            append([]string(nil), AllTypes...),
+		TypeDeclarations: declarationTypeDeclarations(),
+		Binding:          Binding,
+		MaxPendingMs:     m.maxPend,
 	}
 }
 

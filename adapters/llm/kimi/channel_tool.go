@@ -233,12 +233,13 @@ func typeAllowsKind(typ TypeInfo, kind string) bool {
 	return false
 }
 
-func requestSchema(typ TypeInfo) json.RawMessage {
-	for kind, raw := range typ.SchemasByKind {
-		if strings.EqualFold(strings.TrimSpace(kind), string(message.KindRequest)) {
-			return validRawJSONOrDefault(raw, genericObjectSchema)
-		}
-	}
+// requestSchema returns the generic-object payload schema for an LLM
+// tool descriptor. Per protocol Level A (proto-layer0 §1.4.1), the
+// type_registry no longer carries payload schemas; payload consistency
+// is a product-layer concern, so the LLM tool wrapper exposes a
+// permissive object schema and leaves payload shape negotiation to the
+// caller/handler.
+func requestSchema(_ TypeInfo) json.RawMessage {
 	return cloneRawJSON(genericObjectSchema)
 }
 

@@ -2,7 +2,6 @@ package harness
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
@@ -14,10 +13,15 @@ import (
 
 // TypeView is the read-only projection of one type_registry row the
 // harness needs at write time. It mirrors the install-time fields the
-// adapter framework writes (allowed_kinds, schemas_by_kind, fallback
-// response schema, terminal_convention) — runtime/harness deliberately
+// adapter framework writes (allowed_kinds, terminal_convention,
+// handler_actor_id, max_pending_ms) — runtime/harness deliberately
 // keeps the contract minimal so multiple registry implementations
 // (in-memory, sqlite, federation) can fulfill it.
+//
+// Level A (proto-layer0 §1.4.1 / proto-layer1 §1.3): payload is opaque
+// to the protocol layer; the harness does NOT validate payload schemas
+// and the type_registry does NOT store payload schemas. Payload
+// consistency between caller and handler is a product-layer concern.
 type TypeView struct {
 	// Type is the envelope.type value, e.g. "feishu.chat.send".
 	Type string
@@ -25,10 +29,6 @@ type TypeView struct {
 	// AllowedKinds is the closed set of envelope.kind the harness will
 	// accept for this type (step 5 reject reason: kind_not_allowed).
 	AllowedKinds []message.Kind
-
-	// SchemasByKind maps kind → JSON Schema fragment validated against
-	// envelope.payload at step 6. Empty map = no schema enforcement.
-	SchemasByKind map[message.Kind]json.RawMessage
 
 	// MaxPendingMs is the per-type request timeout used when a request's
 	// receiver is a tool and the envelope omitted expires_at.
@@ -100,7 +100,7 @@ type Deps struct {
 	TypeRegistry TypeRegistry
 
 	// Log is the channel-local messages-table sink. Required — step 9
-	// engine append calls Log.Append; step 0.5 (and step 8 catch) calls
+	// engine append calls Log.Append; step 3 (and step 8 catch) calls
 	// Log.FindByID for dedupe / parent existence checks.
 	Log khlog.MessageLog
 

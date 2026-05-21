@@ -20,7 +20,6 @@ const (
 	systemEventCorrelationLost     = "correlation_lost"
 	systemEventTimerTerminalFailed = "adapter_timer_terminal_failed"
 	orphanCallbackPayloadKind      = "orphan_callback"
-	eventPayloadSchemaObject       = `{"type":"object"}`
 )
 
 var eventSeq atomic.Uint64

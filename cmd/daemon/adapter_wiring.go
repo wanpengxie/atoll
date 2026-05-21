@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -25,28 +24,6 @@ import (
 	runtimestore "github.com/wanpengxie/ActOS/runtime/store"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
-
-func wireHarnessPayloadValidator() {
-	harness.SetPayloadValidator(func(schema, payload []byte) error {
-		return framework.ValidatePayload(json.RawMessage(schema), payload)
-	})
-}
-
-func ensurePayloadValidatorForInstalledTypes(ctx context.Context, reg *runtimestore.TypeRegistry) error {
-	if harness.PayloadValidatorConfigured() || reg == nil {
-		return nil
-	}
-	rows, err := reg.List(ctx)
-	if err != nil {
-		return fmt.Errorf("list type_registry for payload validator check: %w", err)
-	}
-	for _, row := range rows {
-		if len(row.SchemasByKind) > 0 {
-			return fmt.Errorf("payload schema validator not configured for installed type %s", row.Type)
-		}
-	}
-	return nil
-}
 
 // AdapterModuleFactory builds one adapter.Module per channel. The
 // composition root supplies a list of factories to wireAdapterFramework;
@@ -71,7 +48,6 @@ type AdapterModuleFactory func(ctx context.Context, h runtime.ChannelHooks) (ada
 // runtime package (go-arch-lint enforces runtime ↛ adapters).
 func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Context, h runtime.ChannelHooks) (func(context.Context) error, error) {
 	return func(ctx context.Context, h runtime.ChannelHooks) (func(context.Context) error, error) {
-		wireHarnessPayloadValidator()
 		modules := make([]adapter.Module, 0, len(factories))
 		for _, f := range factories {
 			mod, err := f(ctx, h)
@@ -127,9 +103,6 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 			return nil, fmt.Errorf("framework.NewManager(%s): %w", h.ChannelID, err)
 		}
 		if err := mgr.Install(ctx, modules); err != nil {
-			return nil, fmt.Errorf("framework.Manager.Install(%s): %w", h.ChannelID, err)
-		}
-		if err := ensurePayloadValidatorForInstalledTypes(ctx, h.TypeRegistry); err != nil {
 			return nil, fmt.Errorf("framework.Manager.Install(%s): %w", h.ChannelID, err)
 		}
 		if err := mgr.BootRecoverTimers(ctx); err != nil {

@@ -10,9 +10,14 @@ import (
 // TestAllStepIDs covers the StepID closed set + ordering. The chain
 // now runs in single-loop ascending order with StepDedupe sitting
 // between StepEnvelopeShape and StepNormalize per proto-layer1 §2.3.
+//
+// Level A (proto-layer0 §1.4.1 / proto-layer1 §2): payload is opaque to
+// the protocol layer; the chain has no payload-schema step (formerly
+// Step 8). The numbered step set is 9 steps total
+// (Step 0 entry gate + Step 1-9 main pipeline → 9 StepIDs in code).
 func TestAllStepIDs(t *testing.T) {
-	if len(harness.AllStepIDs) != 10 {
-		t.Fatalf("AllStepIDs len=%d, want 10 (proto-layer1 §2.0)", len(harness.AllStepIDs))
+	if len(harness.AllStepIDs) != 9 {
+		t.Fatalf("AllStepIDs len=%d, want 9 (proto-layer1 §2.0)", len(harness.AllStepIDs))
 	}
 	want := []harness.StepID{
 		harness.StepCallerAuth,
@@ -22,7 +27,6 @@ func TestAllStepIDs(t *testing.T) {
 		harness.StepSenderConsistent,
 		harness.StepTypeRegistered,
 		harness.StepKindAndAudience,
-		harness.StepPayloadSchema,
 		harness.StepResponsePairing,
 		harness.StepEngineAppend,
 	}
@@ -83,8 +87,6 @@ func TestAllRejectReasons(t *testing.T) {
 		message.HarnessRequestAudienceInvalid,
 		message.HarnessResponseAudienceInvalid,
 		message.HarnessAudienceHandlerMismatch,
-		message.HarnessSchemaMissing,
-		message.HarnessPayloadSchemaInvalid,
 		message.HarnessResponseMissingParent,
 		message.HarnessResponseParentNotFound,
 		message.HarnessResponseParentNotRequest,
@@ -255,8 +257,6 @@ func TestRejectReasonHTTPStatus(t *testing.T) {
 		{message.HarnessResponseParentNotFound, 400},
 		{message.HarnessResponseParentNotRequest, 400},
 		{message.HarnessResponseAudienceMismatch, 400},
-		{message.HarnessSchemaMissing, 400},
-		{message.HarnessPayloadSchemaInvalid, 400},
 		{message.HarnessReservedTypeUnauthorizedSender, 403},
 	}
 	for _, tc := range cases {

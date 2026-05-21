@@ -234,10 +234,7 @@ func TestLoadChannelContextFile_RoundTrip(t *testing.T) {
 			Type:           "xhs.publish",
 			HandlerActorID: "tool:xhs-adapter",
 			AllowedKinds:   []string{"request"},
-			SchemasByKind: map[string]json.RawMessage{
-				"request": json.RawMessage(`{"type":"object","required":["title"]}`),
-			},
-			MaxPendingMs: 1234,
+			MaxPendingMs:   1234,
 		}},
 		Devices: []kimi.DeviceInfo{{SessionID: "s1", State: "active"}},
 	}
@@ -260,9 +257,6 @@ func TestLoadChannelContextFile_RoundTrip(t *testing.T) {
 	}
 	if got.Types[0].MaxPendingMs != 1234 {
 		t.Errorf("type max_pending_ms=%d want 1234", got.Types[0].MaxPendingMs)
-	}
-	if string(got.Types[0].SchemasByKind["request"]) != `{"type":"object","required":["title"]}` {
-		t.Errorf("request schema=%s", got.Types[0].SchemasByKind["request"])
 	}
 
 	// Empty path → ok=false, no error.
@@ -531,10 +525,7 @@ func TestBridge_ChannelTypeToolEmitsRequestAndReturnsResponse(t *testing.T) {
 				Type:           "xhs.publish",
 				HandlerActorID: "tool:xhs-adapter",
 				AllowedKinds:   []string{"request", "response"},
-				SchemasByKind: map[string]json.RawMessage{
-					"request": json.RawMessage(`{"type":"object","required":["title","content"]}`),
-				},
-				MaxPendingMs: 1000,
+				MaxPendingMs:   1000,
 			},
 			{
 				Type:           "xhs.note.archived",
@@ -558,8 +549,11 @@ func TestBridge_ChannelTypeToolEmitsRequestAndReturnsResponse(t *testing.T) {
 		if tool.Name() != "xhs.publish" {
 			return nil, fmt.Errorf("tool name=%q want xhs.publish", tool.Name())
 		}
-		if schema := string(tool.ParameterSchema()); !strings.Contains(schema, `"title"`) {
-			return nil, fmt.Errorf("tool schema=%s want title requirement", schema)
+		// Level A (proto-layer0 §1.4.1): TypeInfo no longer carries
+		// payload schemas; the channel-tool exposes a permissive
+		// generic-object schema. Just assert it parses as a JSON object.
+		if schema := string(tool.ParameterSchema()); !strings.Contains(schema, `"type":"object"`) {
+			return nil, fmt.Errorf("tool schema=%s want object", schema)
 		}
 		return &scriptedAgent{
 			emitFn: func(ctx context.Context, _ string) error {
@@ -647,7 +641,6 @@ func TestBridge_ChannelTypeToolTimeoutReturnsErrorResult(t *testing.T) {
 		Type:           "xhs.publish",
 		HandlerActorID: "tool:xhs-adapter",
 		AllowedKinds:   []string{"request"},
-		SchemasByKind:  map[string]json.RawMessage{"request": json.RawMessage(`{"type":"object"}`)},
 		MaxPendingMs:   20,
 	}}}
 	b, err := kimi.NewBridge(cfg)
@@ -697,7 +690,6 @@ func TestBridge_ChannelTypeToolTerminalFailureReturnsErrorResult(t *testing.T) {
 		Type:           "xhs.publish",
 		HandlerActorID: "tool:xhs-adapter",
 		AllowedKinds:   []string{"request"},
-		SchemasByKind:  map[string]json.RawMessage{"request": json.RawMessage(`{"type":"object"}`)},
 		MaxPendingMs:   1000,
 	}}}
 	b, err := kimi.NewBridge(cfg)

@@ -7,7 +7,7 @@ import (
 )
 
 // WriteResult is the outcome of a full Chain.Write invocation per L1
-// §10.2 (the harness write entry point) and L2 §3.6 (binding-specific
+// §2 (the harness write entry point) and L2 §3.6 (binding-specific
 // transport mapping — HTTP / Result.Err).
 type WriteResult struct {
 	// MessageID is the canonical envelope.id that was written (or
@@ -24,8 +24,9 @@ type WriteResult struct {
 	// inserted, returned id is the original.
 	Deduped bool
 
-	// RejectReason is set when one of the 9 steps rejected the write.
-	// Empty means accept (or dedupe). See L1 §10.3.1 closed set.
+	// RejectReason is set when one of the 9 steps (Step 0 entry gate +
+	// Step 1-9 main chain — see kernel/harness/step.go) rejected the
+	// write. Empty means accept (or dedupe). See L1 §2.11.1 closed set.
 	RejectReason RejectReason
 
 	// RejectDetail mirrors Outcome.Detail from the rejecting step.
@@ -42,17 +43,18 @@ type WriteResult struct {
 func (r WriteResult) Accepted() bool { return r.RejectReason == "" }
 
 // Chain is the Message-Write Harness top-level contract. Implementations
-// (runtime/harness, T3) compose the 9 Step instances into the L1 §10.2
-// validation chain.
+// (runtime/harness, T3) compose the Step instances into the L1 §2
+// validation chain (Step 0 entry gate + Step 1-9 main pipeline).
 //
 // Kernel only declares the interface — it does not assemble or run the
 // steps; that is the runtime's job. The Chain interface stays minimal
 // because every harness implementation (daemon-rpc, in-worker bus,
 // future tests) must agree on the entry-point shape.
 type Chain interface {
-	// Write executes Step 0..9 against `env` and returns the WriteResult.
-	// The envelope is patched in-place during Step Normalize (so the
-	// caller observes the post-normalize values via the same pointer).
+	// Write executes the full step chain against `env` and returns the
+	// WriteResult. The envelope is patched in-place during Step Normalize
+	// (so the caller observes the post-normalize values via the same
+	// pointer).
 	//
 	// Implementations MUST:
 	//   - Run the steps in StepID ascending order.

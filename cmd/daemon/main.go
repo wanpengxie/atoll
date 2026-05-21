@@ -69,8 +69,6 @@ func main() {
 	)
 	flag.Parse()
 
-	wireHarnessPayloadValidator()
-
 	if *daemonEpoch == 0 {
 		*daemonEpoch = time.Now().Unix()
 	}

@@ -2,7 +2,6 @@ package store_test
 
 import (
 	"context"
-	"encoding/json"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -28,22 +27,21 @@ func openChannelDB(t *testing.T) *store.TypeRegistry {
 
 // TestTypeRegistry_UpsertLookupRoundTrip exercises the happy path:
 // Upsert → Lookup returns equal row; HarnessView observes the same.
+//
+// Level A (proto-layer0 §1.4.1 / proto-layer1 §1.3): type_registry
+// stores NO payload schema fields, so no SchemasByKind /
+// FallbackResponseSchema assertions appear here.
 func TestTypeRegistry_UpsertLookupRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	reg := openChannelDB(t)
 
 	in := adapter.TypeRow{
-		Type:           "xhs.publish",
-		HandlerActorID: "tool:xhs-adapter",
-		HandlerBinding: actor.BindingEmbedded,
-		MaxPendingMs:   60_000,
-		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
-		SchemasByKind: map[message.Kind]json.RawMessage{
-			message.KindRequest:  json.RawMessage(`{"type":"object","required":["title"]}`),
-			message.KindResponse: json.RawMessage(`{"type":"object"}`),
-		},
-		FallbackResponseSchema: json.RawMessage(`{"type":"object"}`),
-		TerminalConvention:     adapter.TerminalPayloadStatus,
+		Type:               "xhs.publish",
+		HandlerActorID:     "tool:xhs-adapter",
+		HandlerBinding:     actor.BindingEmbedded,
+		MaxPendingMs:       60_000,
+		AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
+		TerminalConvention: adapter.TerminalPayloadStatus,
 	}
 
 	persisted, err := reg.Upsert(ctx, in)
@@ -62,13 +60,6 @@ func TestTypeRegistry_UpsertLookupRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(persisted.AllowedKinds, in.AllowedKinds) {
 		t.Errorf("allowed_kinds=%v want %v", persisted.AllowedKinds, in.AllowedKinds)
-	}
-	if !reflect.DeepEqual(persisted.SchemasByKind, in.SchemasByKind) {
-		t.Errorf("schemas_by_kind=%v want %v", persisted.SchemasByKind, in.SchemasByKind)
-	}
-	if string(persisted.FallbackResponseSchema) != string(in.FallbackResponseSchema) {
-		t.Errorf("fallback_response_schema=%s want %s",
-			persisted.FallbackResponseSchema, in.FallbackResponseSchema)
 	}
 
 	got, ok, err := reg.Lookup(ctx, "xhs.publish")

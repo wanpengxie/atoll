@@ -110,14 +110,17 @@ type ActorInfo struct {
 }
 
 // TypeInfo is one type_registry row projected into the LLM prompt.
+//
+// Level A (proto-layer0 §1.4.1): payload is opaque to the protocol
+// layer; the type_registry stores no payload schema fields, so no
+// payload-schema projection appears here either.
 type TypeInfo struct {
-	Type           string                     `json:"type"`             // e.g. "xhs.publish"
-	HandlerActorID string                     `json:"handler_actor_id"` // e.g. "tool:xhs-adapter"
-	HandlerBinding string                     `json:"handler_binding,omitempty"`
-	AllowedKinds   []string                   `json:"allowed_kinds,omitempty"` // subset of {event, request, response}
-	SchemasByKind  map[string]json.RawMessage `json:"schemas_by_kind,omitempty"`
-	MaxPendingMs   int64                      `json:"max_pending_ms,omitempty"`
-	Description    string                     `json:"description,omitempty"`
+	Type           string   `json:"type"`             // e.g. "xhs.publish"
+	HandlerActorID string   `json:"handler_actor_id"` // e.g. "tool:xhs-adapter"
+	HandlerBinding string   `json:"handler_binding,omitempty"`
+	AllowedKinds   []string `json:"allowed_kinds,omitempty"` // subset of {event, request, response}
+	MaxPendingMs   int64    `json:"max_pending_ms,omitempty"`
+	Description    string   `json:"description,omitempty"`
 }
 
 // DeviceInfo is one device_sessions row projected into the LLM prompt.

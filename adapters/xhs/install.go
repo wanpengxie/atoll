@@ -1,52 +1,30 @@
 package xhs
 
 import (
-	"encoding/json"
-
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// fallbackResponseSchema is the response-schema "failure branch"
-// projection install requires. The framework's
-// ValidateFallbackResponseSchema feeds it three sample failed payloads
-// and asserts they all parse — the schema below permits any object
-// (status + reason fields are not required at validation time, only
-// well-formed JSON object shape).
-var fallbackResponseSchema = json.RawMessage(`{"type":"object"}`)
-
-// requestSchema is the per-type request payload schema — kept lenient
-// for T2's mock path (object only).
-var requestSchema = json.RawMessage(`{"type":"object"}`)
-
-// responseSchema mirrors requestSchema — the mock Handle emits
-// {status, reason, ...} which always satisfies an object shape.
-var responseSchema = json.RawMessage(`{"type":"object"}`)
-
-// declarationTypeSchemas builds the kernel/adapter.TypeSchema map the
-// scaffold attaches to its Declaration. R/R types get
+// declarationTypeDeclarations builds the kernel/adapter.TypeDeclaration
+// map the scaffold attaches to its Declaration. R/R types get
 // AllowedKinds={request, response}, the event-only type gets
 // AllowedKinds={event}.
-func declarationTypeSchemas() map[string]adapter.TypeSchema {
-	out := make(map[string]adapter.TypeSchema, len(AllTypes))
+//
+// Level A (proto-layer0 §1.4.1 / proto-layer1 §1.3): payload schema is
+// NOT declared at the protocol layer; the type_registry does not store
+// payload schemas and the harness does not validate them.
+func declarationTypeDeclarations() map[string]adapter.TypeDeclaration {
+	out := make(map[string]adapter.TypeDeclaration, len(AllTypes))
 	for _, t := range RequestResponseTypes {
-		out[t] = adapter.TypeSchema{
-			AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
-			SchemasByKind: map[message.Kind]json.RawMessage{
-				message.KindRequest:  requestSchema,
-				message.KindResponse: responseSchema,
-			},
-			FallbackResponseSchema: fallbackResponseSchema,
-			TerminalConvention:     string(adapter.TerminalPayloadStatus),
+		out[t] = adapter.TypeDeclaration{
+			AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
+			TerminalConvention: string(adapter.TerminalPayloadStatus),
 		}
 	}
-	out[TypeNoteArchived] = adapter.TypeSchema{
-		AllowedKinds: []message.Kind{message.KindEvent},
-		SchemasByKind: map[message.Kind]json.RawMessage{
-			message.KindEvent: requestSchema,
-		},
+	out[TypeNoteArchived] = adapter.TypeDeclaration{
+		AllowedKinds:       []message.Kind{message.KindEvent},
 		TerminalConvention: string(adapter.TerminalPayloadStatus),
 	}
 	return out

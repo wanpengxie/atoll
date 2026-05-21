@@ -1,8 +1,6 @@
 package xhs
 
 import (
-	"encoding/json"
-
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -163,219 +161,51 @@ func errorAllowListFor(requestType string) map[string]struct{} {
 }
 
 // ------------------------------------------------------------------
-// TypeSchemas (R5-18): per-type allowed_kinds + payload schemas.
+// TypeDeclarations: per-type allowed_kinds + terminal_convention.
 //
 // Source of truth: domain-xhs-spec §1.1–§1.6 ("xhs Adapter Type
-// Catalog"). Each schema mirrors the spec table 1:1; the framework's
-// Step 6 (payload schema) + Step 4/5 (kind allow-list) consult these
-// at message-write time.
+// Catalog"). The framework's Step 5 (kind ∈ allowed_kinds) consults
+// these at message-write time.
 //
-// Notes:
-//   - The framework's M1.5 schema validator (adapters/framework/
-//     schema.go) only honors a subset of JSON Schema (type, required,
-//     properties, items, enum). additionalProperties=false is NOT
-//     enforced by the validator — the adapter boundary's per-type
-//     result/error allow-lists (allowedResultKeysByType /
-//     allowedErrorKeysByType above) carry the "drop unknown fields"
-//     guard for outbound responses; the R4-FIX-A regression test
-//     covers it.
-//   - Response.status enum (closed-set per proto-layer0 §2.5) is
-//     declared explicitly so a drift in adapter emit code surfaces at
-//     harness Step 6.
-//   - FallbackResponseSchema for every R/R type MUST accept the three
-//     L2 §1.4.2 system fallback payloads ({status:failed,
-//     reason:unanswered_timeout|receiver_internal_error|
-//     receiver_unavailable}); framework.ValidateFallbackResponseSchema
-//     asserts this at install.
+// Level A (proto-layer0 §1.4.1 / proto-layer1 §1.3): payload is opaque
+// to the protocol layer; payload schema is NOT installed into the
+// type_registry and the harness does NOT validate payload contents.
+// Payload consistency between adapter (`xhs.publish` etc.) and caller
+// is a product-layer concern — the adapter boundary's per-type
+// result/error allow-lists (allowedResultKeysByType /
+// allowedErrorKeysByType above) carry the outbound "drop unknown
+// fields" guard.
 // ------------------------------------------------------------------
 
-// fallbackResponseSchema is the response-failure projection shared by
-// every R/R xhs type. Lenient on properties (status / reason are the
-// only spec-mandated keys for system fallback emit); the per-type
-// response schema below carries the full closed-set guard.
-var fallbackResponseSchema = json.RawMessage(`{
-  "type": "object",
-  "required": ["status", "reason"],
-  "properties": {
-    "status": {"type": "string", "enum": ["failed"]},
-    "reason": {"type": "string"}
-  }
-}`)
-
-// publishRequestSchema — domain-xhs-spec §1.1 request payload.
-var publishRequestSchema = json.RawMessage(`{
-  "type": "object",
-  "required": ["title", "content"],
-  "properties": {
-    "title":   {"type": "string"},
-    "content": {"type": "string"},
-    "tags":    {"type": "array", "items": {"type": "string"}},
-    "images":  {"type": "array", "items": {"type": "string"}}
-  }
-}`)
-
-// publishResponseSchema — domain-xhs-spec §1.1 response payload.
-var publishResponseSchema = json.RawMessage(`{
-  "type": "object",
-  "required": ["status"],
-  "properties": {
-    "status":      {"type": "string", "enum": ["completed", "failed"]},
-    "reason":      {"type": "string"},
-    "note_id":     {"type": "string"},
-    "url":         {"type": "string"},
-    "device_id":   {"type": "string"},
-    "retry_after": {"type": "integer"},
-    "error_code":  {"type": "string"}
-  }
-}`)
-
-// searchRequestSchema — domain-xhs-spec §1.2 request payload.
-var searchRequestSchema = json.RawMessage(`{
-  "type": "object",
-  "required": ["query"],
-  "properties": {
-    "query": {"type": "string"},
-    "limit": {"type": "integer"}
-  }
-}`)
-
-// searchResponseSchema — domain-xhs-spec §1.2 response payload.
-var searchResponseSchema = json.RawMessage(`{
-  "type": "object",
-  "required": ["status"],
-  "properties": {
-    "status":  {"type": "string", "enum": ["completed", "failed"]},
-    "reason":  {"type": "string"},
-    "results": {"type": "array", "items": {"type": "object"}}
-  }
-}`)
-
-// noteFetchRequestSchema — domain-xhs-spec §1.3 request payload.
-var noteFetchRequestSchema = json.RawMessage(`{
-  "type": "object",
-  "required": ["note_id"],
-  "properties": {
-    "note_id": {"type": "string"}
-  }
-}`)
-
-// noteFetchResponseSchema — domain-xhs-spec §1.3 response payload.
-var noteFetchResponseSchema = json.RawMessage(`{
-  "type": "object",
-  "required": ["status"],
-  "properties": {
-    "status": {"type": "string", "enum": ["completed", "failed"]},
-    "reason": {"type": "string"},
-    "note":   {"type": "object"}
-  }
-}`)
-
-// recentFetchRequestSchema — domain-xhs-spec §1.4 request payload
-// (limit optional, no required keys).
-var recentFetchRequestSchema = json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "limit": {"type": "integer"}
-  }
-}`)
-
-// recentFetchResponseSchema — domain-xhs-spec §1.4 response payload.
-var recentFetchResponseSchema = json.RawMessage(`{
-  "type": "object",
-  "required": ["status"],
-  "properties": {
-    "status": {"type": "string", "enum": ["completed", "failed"]},
-    "reason": {"type": "string"},
-    "notes":  {"type": "array", "items": {"type": "object"}}
-  }
-}`)
-
-// cookieSyncRequestSchema — domain-xhs-spec §1.5 request payload
-// (empty properties; required = []).
-var cookieSyncRequestSchema = json.RawMessage(`{
-  "type": "object"
-}`)
-
-// cookieSyncResponseSchema — domain-xhs-spec §1.5 response payload.
-var cookieSyncResponseSchema = json.RawMessage(`{
-  "type": "object",
-  "required": ["status"],
-  "properties": {
-    "status": {"type": "string", "enum": ["completed", "failed"]},
-    "reason": {"type": "string"}
-  }
-}`)
-
-// noteArchivedEventSchema — domain-xhs-spec §1.6 event payload.
-// agent-emitted event-only; adapter does NOT emit but owns the type
-// per impl-vocabulary §3.0 design rule 5.
-var noteArchivedEventSchema = json.RawMessage(`{
-  "type": "object",
-  "required": ["note_id", "archive_path"],
-  "properties": {
-    "note_id":      {"type": "string"},
-    "archive_path": {"type": "string"},
-    "archived_at":  {"type": "integer"}
-  }
-}`)
-
-// DeclarationTypeSchemas returns the kernel/adapter.TypeSchema map the
-// Module attaches to its Declaration. Every xhs type in §1.1–§1.6
-// gets an entry — adapters/framework/manager.go fails install closed
-// when an adapter declares TypeSchemas but leaves a Types entry
-// without a row (R5-18 fail-closed policy).
-func DeclarationTypeSchemas() map[string]adapter.TypeSchema {
-	return map[string]adapter.TypeSchema{
+// DeclarationTypeDeclarations returns the kernel/adapter.TypeDeclaration
+// map the Module attaches to its Declaration. Every xhs type in
+// §1.1–§1.6 gets an entry — adapters/framework/manager.go fails install
+// closed when an adapter opts into strict mode (non-nil
+// TypeDeclarations) but leaves a Types entry without a row.
+func DeclarationTypeDeclarations() map[string]adapter.TypeDeclaration {
+	return map[string]adapter.TypeDeclaration{
 		TypePublish: {
-			AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
-			SchemasByKind: map[message.Kind]json.RawMessage{
-				message.KindRequest:  publishRequestSchema,
-				message.KindResponse: publishResponseSchema,
-			},
-			FallbackResponseSchema: fallbackResponseSchema,
-			TerminalConvention:     string(adapter.TerminalPayloadStatus),
+			AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
+			TerminalConvention: string(adapter.TerminalPayloadStatus),
 		},
 		TypeSearch: {
-			AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
-			SchemasByKind: map[message.Kind]json.RawMessage{
-				message.KindRequest:  searchRequestSchema,
-				message.KindResponse: searchResponseSchema,
-			},
-			FallbackResponseSchema: fallbackResponseSchema,
-			TerminalConvention:     string(adapter.TerminalPayloadStatus),
+			AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
+			TerminalConvention: string(adapter.TerminalPayloadStatus),
 		},
 		TypeNoteFetch: {
-			AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
-			SchemasByKind: map[message.Kind]json.RawMessage{
-				message.KindRequest:  noteFetchRequestSchema,
-				message.KindResponse: noteFetchResponseSchema,
-			},
-			FallbackResponseSchema: fallbackResponseSchema,
-			TerminalConvention:     string(adapter.TerminalPayloadStatus),
+			AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
+			TerminalConvention: string(adapter.TerminalPayloadStatus),
 		},
 		TypeRecentFetch: {
-			AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
-			SchemasByKind: map[message.Kind]json.RawMessage{
-				message.KindRequest:  recentFetchRequestSchema,
-				message.KindResponse: recentFetchResponseSchema,
-			},
-			FallbackResponseSchema: fallbackResponseSchema,
-			TerminalConvention:     string(adapter.TerminalPayloadStatus),
+			AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
+			TerminalConvention: string(adapter.TerminalPayloadStatus),
 		},
 		TypeCookieSync: {
-			AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
-			SchemasByKind: map[message.Kind]json.RawMessage{
-				message.KindRequest:  cookieSyncRequestSchema,
-				message.KindResponse: cookieSyncResponseSchema,
-			},
-			FallbackResponseSchema: fallbackResponseSchema,
-			TerminalConvention:     string(adapter.TerminalPayloadStatus),
+			AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
+			TerminalConvention: string(adapter.TerminalPayloadStatus),
 		},
 		TypeNoteArchived: {
-			AllowedKinds: []message.Kind{message.KindEvent},
-			SchemasByKind: map[message.Kind]json.RawMessage{
-				message.KindEvent: noteArchivedEventSchema,
-			},
+			AllowedKinds:       []message.Kind{message.KindEvent},
 			TerminalConvention: string(adapter.TerminalPayloadStatus),
 		},
 	}

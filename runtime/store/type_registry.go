@@ -18,8 +18,10 @@ import (
 // kernel/adapter.TypeRegistry (upsert + lookup + list at adapter install
 // time) over the channel-local type_registry table (L2 §1.4.2). It also
 // exposes a runtime/harness.TypeRegistry projection via HarnessView so
-// the harness Chain reads schemas from the same row Manager.Install
-// wrote.
+// the harness Chain reads the same row Manager.Install wrote.
+//
+// Level A (proto-layer0 §1.4.1 / proto-layer1 §1.3): payload is opaque
+// to the protocol layer; this registry stores NO payload schema fields.
 //
 // One *TypeRegistry per channel sqlite. Safe for concurrent use.
 type TypeRegistry struct {
@@ -50,21 +52,10 @@ func (r *TypeRegistry) Upsert(ctx context.Context, row adapter.TypeRow) (adapter
 	if err != nil {
 		return adapter.TypeRow{}, fmt.Errorf("store: type_registry upsert marshal allowed_kinds: %w", err)
 	}
-	schemasByKind, err := marshalSchemasByKind(row.SchemasByKind)
-	if err != nil {
-		return adapter.TypeRow{}, fmt.Errorf("store: type_registry upsert marshal schemas_by_kind: %w", err)
-	}
 
 	terminal := row.TerminalConvention
 	if terminal == "" {
 		terminal = adapter.TerminalPayloadStatus
-	}
-
-	var fallback any
-	if len(row.FallbackResponseSchema) == 0 {
-		fallback = nil
-	} else {
-		fallback = string(row.FallbackResponseSchema)
 	}
 
 	var maxPending any
@@ -82,27 +73,23 @@ func (r *TypeRegistry) Upsert(ctx context.Context, row adapter.TypeRow) (adapter
 	}
 
 	const q = `INSERT INTO type_registry
-		(type, allowed_kinds, schemas_by_kind, handler_binding, terminal_convention,
-		 max_pending_ms, handler_actor_id, fallback_response_schema, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?)
+		(type, allowed_kinds, handler_binding, terminal_convention,
+		 max_pending_ms, handler_actor_id, created_at)
+		VALUES (?,?,?,?,?,?,?)
 		ON CONFLICT(type) DO UPDATE SET
 			allowed_kinds            = excluded.allowed_kinds,
-			schemas_by_kind          = excluded.schemas_by_kind,
 			handler_binding          = excluded.handler_binding,
 			terminal_convention      = excluded.terminal_convention,
 			max_pending_ms           = excluded.max_pending_ms,
-			handler_actor_id         = excluded.handler_actor_id,
-			fallback_response_schema = excluded.fallback_response_schema
+			handler_actor_id         = excluded.handler_actor_id
 	`
 	if _, err := r.db.ExecContext(ctx, q,
 		row.Type,
 		allowedKinds,
-		schemasByKind,
 		string(row.HandlerBinding),
 		string(terminal),
 		maxPending,
 		handler,
-		fallback,
 		r.nowFn(),
 	); err != nil {
 		return adapter.TypeRow{}, fmt.Errorf("store: type_registry upsert %q: %w", row.Type, err)
@@ -127,9 +114,8 @@ func (r *TypeRegistry) Lookup(ctx context.Context, typeName string) (adapter.Typ
 // List satisfies kernel/adapter.TypeRegistry — returns every row sorted
 // by type for deterministic test output.
 func (r *TypeRegistry) List(ctx context.Context) ([]adapter.TypeRow, error) {
-	const q = `SELECT type, allowed_kinds, schemas_by_kind, handler_binding,
-	                  terminal_convention, max_pending_ms, handler_actor_id,
-	                  fallback_response_schema
+	const q = `SELECT type, allowed_kinds, handler_binding,
+	                  terminal_convention, max_pending_ms, handler_actor_id
 	             FROM type_registry`
 	rows, err := r.db.QueryContext(ctx, q)
 	if err != nil {
@@ -164,7 +150,6 @@ func (r *TypeRegistry) LookupView(ctx context.Context, typeName string) (harness
 	return harness.TypeView{
 		Type:               row.Type,
 		AllowedKinds:       append([]message.Kind(nil), row.AllowedKinds...),
-		SchemasByKind:      cloneSchemaMap(row.SchemasByKind),
 		MaxPendingMs:       row.MaxPendingMs,
 		HandlerActorID:     row.HandlerActorID,
 		TerminalConvention: string(row.TerminalConvention),
@@ -187,9 +172,8 @@ func (a typeRegistryHarnessAdapter) Lookup(ctx context.Context, typeName string)
 // ------------------------------------------------------------------
 
 func (r *TypeRegistry) lookup(ctx context.Context, typeName string) (adapter.TypeRow, bool, error) {
-	const q = `SELECT type, allowed_kinds, schemas_by_kind, handler_binding,
-	                  terminal_convention, max_pending_ms, handler_actor_id,
-	                  fallback_response_schema
+	const q = `SELECT type, allowed_kinds, handler_binding,
+	                  terminal_convention, max_pending_ms, handler_actor_id
 	             FROM type_registry WHERE type=?`
 	row, err := scanTypeRowSingle(r.db.QueryRowContext(ctx, q, typeName))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -210,38 +194,29 @@ func scanTypeRowSingle(row *sql.Row) (adapter.TypeRow, error) { return scanTypeR
 
 func scanTypeRowFrom(s typeRowScanner) (adapter.TypeRow, error) {
 	var (
-		typ, allowedRaw, schemasRaw, binding, terminal string
-		maxPending                                     sql.NullInt64
-		handler                                        sql.NullString
-		fallback                                       sql.NullString
+		typ, allowedRaw, binding, terminal string
+		maxPending                         sql.NullInt64
+		handler                            sql.NullString
 	)
-	if err := s.Scan(&typ, &allowedRaw, &schemasRaw, &binding, &terminal,
-		&maxPending, &handler, &fallback); err != nil {
+	if err := s.Scan(&typ, &allowedRaw, &binding, &terminal,
+		&maxPending, &handler); err != nil {
 		return adapter.TypeRow{}, err
 	}
 	allowed, err := unmarshalAllowedKinds(allowedRaw)
 	if err != nil {
 		return adapter.TypeRow{}, fmt.Errorf("store: type_registry scan allowed_kinds %q: %w", typ, err)
 	}
-	schemas, err := unmarshalSchemasByKind(schemasRaw)
-	if err != nil {
-		return adapter.TypeRow{}, fmt.Errorf("store: type_registry scan schemas_by_kind %q: %w", typ, err)
-	}
 	row := adapter.TypeRow{
 		Type:               typ,
 		HandlerBinding:     actor.Binding(binding),
 		TerminalConvention: adapter.TerminalConvention(terminal),
 		AllowedKinds:       allowed,
-		SchemasByKind:      schemas,
 	}
 	if maxPending.Valid {
 		row.MaxPendingMs = maxPending.Int64
 	}
 	if handler.Valid {
 		row.HandlerActorID = actor.ActorID(handler.String)
-	}
-	if fallback.Valid && fallback.String != "" {
-		row.FallbackResponseSchema = json.RawMessage(fallback.String)
 	}
 	return row, nil
 }
@@ -274,56 +249,6 @@ func unmarshalAllowedKinds(raw string) ([]message.Kind, error) {
 		out[i] = message.Kind(k)
 	}
 	return out, nil
-}
-
-func marshalSchemasByKind(in map[message.Kind]json.RawMessage) (string, error) {
-	if len(in) == 0 {
-		return "{}", nil
-	}
-	// Stable key order so round-trip equality holds across drivers.
-	keys := make([]string, 0, len(in))
-	for k := range in {
-		keys = append(keys, string(k))
-	}
-	sort.Strings(keys)
-	tmp := make(map[string]json.RawMessage, len(in))
-	for _, k := range keys {
-		tmp[k] = in[message.Kind(k)]
-	}
-	raw, err := json.Marshal(tmp)
-	if err != nil {
-		return "", err
-	}
-	return string(raw), nil
-}
-
-func unmarshalSchemasByKind(raw string) (map[message.Kind]json.RawMessage, error) {
-	if raw == "" || raw == "{}" {
-		return nil, nil
-	}
-	var tmp map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(raw), &tmp); err != nil {
-		return nil, err
-	}
-	if len(tmp) == 0 {
-		return nil, nil
-	}
-	out := make(map[message.Kind]json.RawMessage, len(tmp))
-	for k, v := range tmp {
-		out[message.Kind(k)] = v
-	}
-	return out, nil
-}
-
-func cloneSchemaMap(in map[message.Kind]json.RawMessage) map[message.Kind]json.RawMessage {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[message.Kind]json.RawMessage, len(in))
-	for k, v := range in {
-		out[k] = append(json.RawMessage(nil), v...)
-	}
-	return out
 }
 
 // Compile-time interface checks — both contracts stay in sync with code.

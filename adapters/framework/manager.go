@@ -19,17 +19,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-func cloneSchemaMap(in map[message.Kind]json.RawMessage) map[message.Kind]json.RawMessage {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[message.Kind]json.RawMessage, len(in))
-	for k, v := range in {
-		out[k] = append(json.RawMessage(nil), v...)
-	}
-	return out
-}
-
 // ManagerConfig parameterises NewManager. ChannelID, ActorRegistry,
 // TypeRegistry, HarnessChain, RequestLookup are required; the rest get
 // safe defaults when nil.
@@ -237,58 +226,55 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 	// Otherwise an Init failure leaves a callable type_registry row with
 	// no live module behind it.
 	//
-	// TypeSchemas opt-in policy (R5-18):
-	//   - decl.TypeSchemas == nil  → adapter has NOT opted into strict
-	//     mode; every Types entry gets permissive defaults
-	//     (AllowedKinds = {event, request, response}, no payload
-	//     schema). install logs a warning so the gap is observable.
-	//   - decl.TypeSchemas != nil  → adapter has opted in; EVERY Types
-	//     entry MUST have a matching schema row. Missing rows fail-
-	//     closed with InstallTypeRegistryInvalid — no silent fall-back
-	//     to permissive defaults. This prevents the failure mode where
-	//     a partially-declared TypeSchemas map silently accepts
-	//     spec-disallowed kinds on the un-declared types (R5-18 motiv-
-	//     ation: spec is authoritative, adapter declares closed sets).
-	strictTypeSchemas := decl.TypeSchemas != nil
+	// TypeDeclarations opt-in policy:
+	//   - decl.TypeDeclarations == nil  → adapter has NOT opted into
+	//     strict mode; every Types entry gets permissive defaults
+	//     (AllowedKinds = {event, request, response}). install logs a
+	//     warning so the gap is observable.
+	//   - decl.TypeDeclarations != nil  → adapter has opted in; EVERY
+	//     Types entry MUST have a matching declaration row. Missing rows
+	//     fail-closed with InstallTypeRegistryInvalid — no silent
+	//     fall-back to permissive defaults. This prevents the failure
+	//     mode where a partial map silently accepts spec-disallowed
+	//     kinds on the un-declared types.
+	strictTypeDeclarations := decl.TypeDeclarations != nil
 	typeRows := make([]TypeRow, 0, len(decl.Types)+1)
 	for _, t := range decl.Types {
-		schema, hasSchema := decl.TypeSchemas[t]
-		if !hasSchema {
-			if strictTypeSchemas {
-				return fmt.Errorf("%w: adapter=%s type=%s: TypeSchemas declared but row missing — strict mode rejects permissive-default fallback (R5-18)",
+		td, hasDecl := decl.TypeDeclarations[t]
+		if !hasDecl {
+			if strictTypeDeclarations {
+				return fmt.Errorf("%w: adapter=%s type=%s: TypeDeclarations declared but row missing — strict mode rejects permissive-default fallback",
 					asInstallError(message.InstallTypeRegistryInvalid), decl.Name, t)
 			}
-			schema = adapter.TypeSchema{
+			td = adapter.TypeDeclaration{
 				AllowedKinds: []message.Kind{
 					message.KindEvent,
 					message.KindRequest,
 					message.KindResponse,
 				},
 			}
-			m.cfg.Logger.Warn("framework.install.type_schema.permissive_default",
+			m.cfg.Logger.Warn("framework.install.type_decl.permissive_default",
 				"adapter", decl.Name,
 				"type", t,
-				"note", "decl.TypeSchemas[type] missing — using permissive defaults; harness will not enforce per-payload schema")
+				"note", "decl.TypeDeclarations[type] missing — using permissive defaults")
 		} else {
-			if err := ValidateTypeSchema(t, schema); err != nil {
+			if err := ValidateTypeDeclaration(t, td); err != nil {
 				return fmt.Errorf("framework: validate type=%s: %w", t, err)
 			}
 		}
 
-		conv := schema.TerminalConvention
+		conv := td.TerminalConvention
 		if conv == "" {
 			conv = string(TerminalPayloadStatus)
 		}
 
 		row := TypeRow{
-			Type:                   t,
-			HandlerActorID:         decl.ActorID,
-			HandlerBinding:         decl.Binding,
-			MaxPendingMs:           decl.MaxPendingMs,
-			AllowedKinds:           append([]message.Kind(nil), schema.AllowedKinds...),
-			SchemasByKind:          cloneSchemaMap(schema.SchemasByKind),
-			FallbackResponseSchema: append(json.RawMessage(nil), schema.FallbackResponseSchema...),
-			TerminalConvention:     TerminalConvention(conv),
+			Type:               t,
+			HandlerActorID:     decl.ActorID,
+			HandlerBinding:     decl.Binding,
+			MaxPendingMs:       decl.MaxPendingMs,
+			AllowedKinds:       append([]message.Kind(nil), td.AllowedKinds...),
+			TerminalConvention: TerminalConvention(conv),
 		}
 		if row.MaxPendingMs <= 0 {
 			return fmt.Errorf("%w: adapter=%s type=%s",
@@ -297,14 +283,11 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		typeRows = append(typeRows, row)
 	}
 	typeRows = append(typeRows, TypeRow{
-		Type:           OrphanCallbackType(decl.Name),
-		HandlerActorID: decl.ActorID,
-		HandlerBinding: decl.Binding,
-		MaxPendingMs:   decl.MaxPendingMs,
-		AllowedKinds:   []message.Kind{message.KindEvent},
-		SchemasByKind: map[message.Kind]json.RawMessage{
-			message.KindEvent: json.RawMessage(eventPayloadSchemaObject),
-		},
+		Type:               OrphanCallbackType(decl.Name),
+		HandlerActorID:     decl.ActorID,
+		HandlerBinding:     decl.Binding,
+		MaxPendingMs:       decl.MaxPendingMs,
+		AllowedKinds:       []message.Kind{message.KindEvent},
 		TerminalConvention: TerminalPayloadStatus,
 	})
 

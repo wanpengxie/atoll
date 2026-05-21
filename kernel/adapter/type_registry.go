@@ -2,7 +2,6 @@ package adapter
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -36,13 +35,14 @@ const (
 )
 
 // TypeRow is the per-row projection of one type_registry entry (L2
-// §1.4.2). Each row carries the fields the Message-Write Harness 9-step
-// chain (L1 §10.2) needs for steps 4 (type whitelist), 5 (kind × type +
-// audience handler), 6 (payload schema), and 8 (terminal convention).
+// §1.4.2). Each row carries the fields the Message-Write Harness chain
+// (proto-layer1 §2) needs for steps 5 (type ∈ registry + kind ∈
+// allowed_kinds), 7 (handler_actor_id audience match), and 8 (terminal
+// convention).
 //
-// All schema fields are JSON byte slices: implementations keep the
-// schema opaque so the validator can swap (M1.5 baseline uses a JSON
-// Schema subset; M1.x may drop in a full Draft 2020-12 library).
+// Level A (proto-layer0 §1.4.1 / proto-layer1 §1.3): payload is opaque
+// to the protocol layer; type_registry stores NO payload schema fields.
+// Payload consistency is a product-layer concern.
 type TypeRow struct {
 	// Type is the envelope.type value (e.g. "feishu.chat.send").
 	Type string
@@ -65,17 +65,6 @@ type TypeRow struct {
 	// Step 5 reject reason: kind_not_allowed.
 	AllowedKinds []message.Kind
 
-	// SchemasByKind maps kind → JSON Schema (opaque bytes). Keys MUST be
-	// a subset of AllowedKinds. Step 6 looks up the schema for the
-	// envelope's kind; missing key → payload_schema_violation.
-	SchemasByKind map[message.Kind]json.RawMessage
-
-	// FallbackResponseSchema is the response schema's "failure branch"
-	// projection. install validates it accepts the 3 spec-mandated
-	// system fallback payloads (L2 §1.4.2 install rules). Optional when
-	// AllowedKinds does NOT include request (no system fallback needed).
-	FallbackResponseSchema json.RawMessage
-
 	// TerminalConvention controls harness step 8 terminal computation.
 	// Default = payload_status. Optional when AllowedKinds excludes
 	// `response`.
@@ -85,11 +74,10 @@ type TypeRow struct {
 // Validate returns a friendly error when a field is missing or invalid.
 // Returns nil on success.
 //
-// Schema-shape validation (allowed_kinds + schemas_by_kind +
-// fallback_response_schema) is L1 §10.3.2 install_reason territory and
-// lives in framework.ValidateTypeSchema — Validate covers only the
-// surface-level non-empty + binding-format checks used by tests +
-// sqlite store.
+// Closed-set install validation (allowed_kinds non-empty / known kinds /
+// terminal_convention enum) lives in framework.ValidateTypeDeclaration;
+// Validate covers only the surface-level non-empty + binding-format
+// checks used by tests + sqlite store.
 func (t TypeRow) Validate() error {
 	if t.Type == "" {
 		return errors.New("adapter: TypeRow.Type required")
