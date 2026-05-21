@@ -175,6 +175,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	app.viewcache.SetResyncer(&busResyncer{bus: app.daemonbus, viewcache: app.viewcache})
 	app.viewcache.SetAccessAuthorizer(app)
 	app.pushhub.SetAccessAuthorizer(app)
+	app.placements.SetAccessAuthorizer(app)
 	app.catalog.SetSubscriptionRevoker(app.pushhub)
 
 	// T147 §A-S2 — bind / unbind device session frames flow through the
@@ -214,6 +215,15 @@ func (a *App) DB() *sql.DB                     { return a.db }
 func (a *App) AuthorizeChannelAccess(ctx context.Context, channelID, userID string) error {
 	_, err := a.catalog.GetChannelMember(ctx, channelID, userID)
 	return err
+}
+
+// MemberActorID implements channelaccess.MemberActorResolver.
+func (a *App) MemberActorID(ctx context.Context, channelID, userID string) (string, error) {
+	member, err := a.catalog.GetChannelMember(ctx, channelID, userID)
+	if err != nil {
+		return "", err
+	}
+	return member.MemberActorID, nil
 }
 
 // RunReconcile blocks until ctx is cancelled, running the placements

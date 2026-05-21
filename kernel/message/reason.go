@@ -180,12 +180,13 @@ type InstallReason string
 
 // InstallReason closed set (per L1 §10.3.2 + L2 §3.6.1 install-time table).
 const (
-	InstallAdapterTimeoutMissing       InstallReason = "adapter_timeout_missing"
-	InstallHandlerActorNotRegistered   InstallReason = "handler_actor_not_registered"
-	InstallHandlerActorBindingMismatch InstallReason = "handler_actor_binding_mismatch"
-	InstallTypeRegistryInvalid         InstallReason = "type_registry_invalid"
-	InstallWorkerLockHeld              InstallReason = "worker_lock_held"
-	InstallBootstrapInProgress         InstallReason = "bootstrap_in_progress"
+	InstallAdapterTimeoutMissing         InstallReason = "adapter_timeout_missing"
+	InstallHandlerActorNotRegistered     InstallReason = "handler_actor_not_registered"
+	InstallHandlerActorBindingMismatch   InstallReason = "handler_actor_binding_mismatch"
+	InstallTypeRegistryInvalid           InstallReason = "type_registry_invalid"
+	InstallTypeRegistryReservedNamespace InstallReason = "type_registry_reserved_namespace"
+	InstallWorkerLockHeld                InstallReason = "worker_lock_held"
+	InstallBootstrapInProgress           InstallReason = "bootstrap_in_progress"
 )
 
 // AllInstallReasons enumerates every value of the InstallReason closed set.
@@ -194,6 +195,7 @@ var AllInstallReasons = []InstallReason{
 	InstallHandlerActorNotRegistered,
 	InstallHandlerActorBindingMismatch,
 	InstallTypeRegistryInvalid,
+	InstallTypeRegistryReservedNamespace,
 	InstallWorkerLockHeld,
 	InstallBootstrapInProgress,
 }
@@ -216,7 +218,8 @@ func (r InstallReason) HTTPStatus() int {
 	case InstallAdapterTimeoutMissing,
 		InstallHandlerActorNotRegistered,
 		InstallHandlerActorBindingMismatch,
-		InstallTypeRegistryInvalid:
+		InstallTypeRegistryInvalid,
+		InstallTypeRegistryReservedNamespace:
 		return 400
 	}
 	return 0

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
@@ -46,6 +47,10 @@ func NewTypeRegistry(db *sql.DB, nowFn func() int64) *TypeRegistry {
 func (r *TypeRegistry) Upsert(ctx context.Context, row adapter.TypeRow) (adapter.TypeRow, error) {
 	if err := row.Validate(); err != nil {
 		return adapter.TypeRow{}, err
+	}
+	if strings.HasPrefix(row.Type, "system.") {
+		return adapter.TypeRow{}, fmt.Errorf("store: type_registry reserved namespace %q: %s",
+			row.Type, message.InstallTypeRegistryReservedNamespace)
 	}
 
 	allowedKinds, err := marshalAllowedKinds(row.AllowedKinds)

@@ -281,6 +281,24 @@ func (s *subscriber) sendSubscribeRejected(channelID channel.ID) {
 	}
 }
 
+func (s *subscriber) sendSubscribeRevoked(channelID channel.ID) {
+	payload := map[string]any{
+		"type":       "subscribe_revoked",
+		"channel_id": string(channelID),
+		"error":      "membership_revoked",
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	select {
+	case s.send <- raw:
+	case <-s.done:
+	default:
+		s.Close()
+	}
+}
+
 // HandleWS upgrades a front-end WS. The identity middleware MUST
 // have authenticated the request upstream (via cookie or Bearer).
 //
@@ -316,30 +334,39 @@ func (h *Service) HandleWS(ident *identity.Service) gin.HandlerFunc {
 // PushMessage fan-outs a stored message to every subscriber of the
 // channel. Called by gateway after viewcache.Apply commits.
 func (h *Service) PushMessage(channelID channel.ID, seq viewsync.Seq, env message.Envelope) {
-	payload := map[string]any{
-		"type":       "message",
-		"channel_id": string(channelID),
-		"seq":        int64(seq),
-		"envelope":   env,
-	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return
-	}
 	h.mu.RLock()
 	bucket := h.subs[channelID]
-	subs := make([]*subscriber, 0, len(bucket))
-	for _, perUser := range bucket {
+	type userSubscriber struct {
+		userID string
+		sub    *subscriber
+	}
+	snap := make([]userSubscriber, 0, len(bucket))
+	for userID, perUser := range bucket {
 		for s := range perUser {
-			subs = append(subs, s)
+			snap = append(snap, userSubscriber{userID: userID, sub: s})
 		}
 	}
 	h.mu.RUnlock()
 
-	for _, s := range subs {
+	auth := h.accessAuthorizer()
+	for _, target := range snap {
+		memberActorID, err := channelaccess.RequireMemberActor(context.Background(), auth, string(channelID), target.userID)
+		if err != nil || !channelaccess.VisibleToActor(env, memberActorID) {
+			continue
+		}
+		payload := map[string]any{
+			"type":       "message",
+			"channel_id": string(channelID),
+			"seq":        int64(seq),
+			"envelope":   env,
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			continue
+		}
 		select {
-		case s.send <- raw:
-		case <-s.done:
+		case target.sub.send <- raw:
+		case <-target.sub.done:
 		default:
 			// Slow subscriber — drop the frame. The client can
 			// recover via the REST resync endpoint.
@@ -434,6 +461,7 @@ func (h *Service) RevokeChannelUser(channelID channel.ID, userID string) {
 		return
 	}
 	for sub := range set {
+		sub.sendSubscribeRevoked(channelID)
 		delete(sub.chans, channelID)
 	}
 	delete(perUser, userID)

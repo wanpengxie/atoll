@@ -252,6 +252,48 @@ func TestManagerInstallRejectsBindingMismatch(t *testing.T) {
 	}
 }
 
+func TestManagerInstallRejectsReservedNamespaceType(t *testing.T) {
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "bad",
+			ActorID:      "tool:bad-adapter",
+			Types:        []string{"system.foo"},
+			Binding:      actor.BindingEmbedded,
+			MaxPendingMs: 30_000,
+			TypeDeclarations: map[string]adapter.TypeDeclaration{
+				"system.foo": {AllowedKinds: []message.Kind{message.KindEvent}},
+			},
+		},
+	}
+	registry := NewInMemoryTypeRegistry()
+	mgr, err := NewManager(ManagerConfig{
+		ChannelID:     "channel:test",
+		ActorRegistry: newMemoryActorRegistry(),
+		TypeRegistry:  registry,
+		HarnessChain:  newFakeChain(),
+		RequestLookup: NewMemoryRequestLookup(nil),
+		Clock:         time.Now,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := mgr.cfg.ActorRegistry.Insert(context.Background(), actorreg.Record{
+		ID:      mod.decl.ActorID,
+		Kind:    actor.KindTool,
+		Binding: actor.BindingEmbedded,
+	}); err != nil {
+		t.Fatalf("seed actor: %v", err)
+	}
+	err = mgr.Install(context.Background(), []adapter.Module{mod})
+	var ie *InstallError
+	if !errors.As(err, &ie) || ie.Reason != message.InstallTypeRegistryReservedNamespace {
+		t.Fatalf("expected type_registry_reserved_namespace, got %v", err)
+	}
+	if _, ok, err := registry.Lookup(context.Background(), "system.foo"); err != nil || ok {
+		t.Fatalf("reserved type row written ok=%v err=%v", ok, err)
+	}
+}
+
 func TestManagerInstallRejectsTransitMissing(t *testing.T) {
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actorreg.Record{

@@ -765,6 +765,244 @@ func TestViewcacheRoutesRequireChannelMembership(t *testing.T) {
 	}
 }
 
+func TestViewcacheMessagesApplyCallerVisibility(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	alice := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-view-visible@example.com")
+	_ = registerLoginAndCreateChannel(t, client, srv.URL, app, "bob-view-visible@example.com")
+	aliceID := userIDByEmail(t, app, "alice-view-visible@example.com")
+	bobID := userIDByEmail(t, app, "bob-view-visible@example.com")
+
+	addReq, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/channels/"+alice.channelID+"/members",
+		strings.NewReader(`{"user_id":"`+bobID+`"}`))
+	addReq.Header.Set("Content-Type", "application/json")
+	addReq.AddCookie(&http.Cookie{Name: identity.CookieName, Value: alice.session})
+	addResp, err := client.Do(addReq)
+	if err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+	_ = addResp.Body.Close()
+	if addResp.StatusCode != http.StatusCreated {
+		t.Fatalf("add member status=%d want 201", addResp.StatusCode)
+	}
+
+	ctx := context.Background()
+	seed := []message.Envelope{
+		{
+			ID:         "m-public",
+			ChannelID:  channel.ID(alice.channelID),
+			Type:       "agent.text",
+			Kind:       message.KindEvent,
+			Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
+			Payload:    json.RawMessage(`{"text":"public"}`),
+			Visibility: message.VisibilityPublic,
+			Audience:   message.Audience{message.AudienceWildcard},
+		},
+		{
+			ID:         "m-private-alice",
+			ChannelID:  channel.ID(alice.channelID),
+			Type:       "agent.text",
+			Kind:       message.KindEvent,
+			Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
+			Payload:    json.RawMessage(`{"text":"alice"}`),
+			Visibility: message.VisibilityPrivate,
+			Audience:   message.Audience{actor.ActorID("user:" + aliceID)},
+		},
+		{
+			ID:         "m-private-bob",
+			ChannelID:  channel.ID(alice.channelID),
+			Type:       "agent.text",
+			Kind:       message.KindEvent,
+			Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
+			Payload:    json.RawMessage(`{"text":"bob"}`),
+			Visibility: message.VisibilityPrivate,
+			Audience:   message.Audience{actor.ActorID("user:" + bobID)},
+		},
+		{
+			ID:         "m-system",
+			ChannelID:  channel.ID(alice.channelID),
+			Type:       "agent.text",
+			Kind:       message.KindEvent,
+			Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
+			Payload:    json.RawMessage(`{"text":"system"}`),
+			Visibility: message.VisibilitySystem,
+			Audience:   message.Audience{message.AudienceWildcard},
+		},
+	}
+	for i, env := range seed {
+		if _, err := app.Viewcache().Apply(ctx, viewsync.PushFrame{
+			ChannelID: channel.ID(alice.channelID),
+			Seq:       viewsync.Seq(i + 1),
+			MessageID: env.ID,
+			Envelope:  env,
+		}); err != nil {
+			t.Fatalf("seed viewcache seq=%d: %v", i+1, err)
+		}
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/channels/"+alice.channelID+"/messages?limit=50", nil)
+	req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: alice.session})
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET messages: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET messages status=%d want 200", resp.StatusCode)
+	}
+	var body struct {
+		Messages []message.Envelope `json:"messages"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode messages: %v", err)
+	}
+	got := make([]string, 0, len(body.Messages))
+	for _, env := range body.Messages {
+		got = append(got, env.ID.String())
+	}
+	want := []string{"m-public", "m-private-alice"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("visible messages=%v want %v", got, want)
+	}
+}
+
+func TestViewcacheLimitCapAndResyncRangeValidation(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	alice := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-view-limits@example.com")
+	ctx := context.Background()
+	for i := 1; i <= 501; i++ {
+		env := message.Envelope{
+			ID:         message.ID(fmt.Sprintf("m-%03d", i)),
+			ChannelID:  channel.ID(alice.channelID),
+			Type:       "agent.text",
+			Kind:       message.KindEvent,
+			Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
+			Payload:    json.RawMessage(`{}`),
+			Visibility: message.VisibilityPublic,
+			Audience:   message.Audience{message.AudienceWildcard},
+		}
+		if _, err := app.Viewcache().Apply(ctx, viewsync.PushFrame{
+			ChannelID: channel.ID(alice.channelID),
+			Seq:       viewsync.Seq(i),
+			MessageID: env.ID,
+			Envelope:  env,
+		}); err != nil {
+			t.Fatalf("seed viewcache seq=%d: %v", i, err)
+		}
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/channels/"+alice.channelID+"/messages?limit=999", nil)
+	req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: alice.session})
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET messages: %v", err)
+	}
+	var body struct {
+		Messages []message.Envelope `json:"messages"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode messages: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET messages status=%d want 200", resp.StatusCode)
+	}
+	if len(body.Messages) != 500 {
+		t.Fatalf("messages len=%d want capped 500", len(body.Messages))
+	}
+
+	badBodies := []string{
+		`{"since_seq":2,"until_seq":1}`,
+		`{"since_seq":-1,"until_seq":1}`,
+		`{"since_seq":1,"until_seq":501}`,
+	}
+	for _, bad := range badBodies {
+		req, _ := http.NewRequest(http.MethodPost,
+			srv.URL+"/api/channels/"+alice.channelID+"/resync",
+			strings.NewReader(bad))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: alice.session})
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST resync %s: %v", bad, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("POST resync %s status=%d want 400", bad, resp.StatusCode)
+		}
+	}
+}
+
+func TestPlacementsRoutesEnforceChannelMembership(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	alice := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-placement-acl@example.com")
+	bob := registerLoginAndCreateChannel(t, client, srv.URL, app, "bob-placement-acl@example.com")
+	ctx := context.Background()
+
+	if _, _, err := app.Placements().Reserve(ctx, channel.ID(alice.channelID), placement.DaemonID("d-alice"), 1, nil); err != nil {
+		t.Fatalf("reserve alice placement: %v", err)
+	}
+	if _, _, err := app.Placements().Reserve(ctx, channel.ID(bob.channelID), placement.DaemonID("d-bob"), 1, nil); err != nil {
+		t.Fatalf("reserve bob placement: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/placements/"+alice.channelID, nil)
+	req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: bob.session})
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET placement as non-member: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("GET placement status=%d want 403", resp.StatusCode)
+	}
+
+	listReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/placements?state=creating", nil)
+	listReq.AddCookie(&http.Cookie{Name: identity.CookieName, Value: bob.session})
+	listResp, err := client.Do(listReq)
+	if err != nil {
+		t.Fatalf("GET placements list: %v", err)
+	}
+	defer func() { _ = listResp.Body.Close() }()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET placements list status=%d want 200", listResp.StatusCode)
+	}
+	var body struct {
+		Placements []struct {
+			ChannelID string `json:"channel_id"`
+			DaemonID  string `json:"daemon_id"`
+		} `json:"placements"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode placements list: %v", err)
+	}
+	got := make(map[string]string, len(body.Placements))
+	for _, p := range body.Placements {
+		got[p.ChannelID] = p.DaemonID
+	}
+	if _, ok := got[alice.channelID]; ok {
+		t.Fatalf("list leaked alice channel placement: %+v", body.Placements)
+	}
+	if got[bob.channelID] != "d-bob" {
+		t.Fatalf("bob placement daemon=%q want d-bob; placements=%+v", got[bob.channelID], body.Placements)
+	}
+}
+
 func TestPushhubSubscribeRejectsNonMemberAndBlocksFanout(t *testing.T) {
 	t.Parallel()
 	app := newTestApp(t)
@@ -831,6 +1069,115 @@ func TestPushhubSubscribeRejectsNonMemberAndBlocksFanout(t *testing.T) {
 	}
 }
 
+func TestPushhubFanoutAppliesSubscriberVisibility(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	alice := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-push-visible@example.com")
+	bob := registerLoginAndCreateChannel(t, client, srv.URL, app, "bob-push-visible@example.com")
+	aliceID := userIDByEmail(t, app, "alice-push-visible@example.com")
+	bobID := userIDByEmail(t, app, "bob-push-visible@example.com")
+
+	addReq, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/channels/"+alice.channelID+"/members",
+		strings.NewReader(`{"user_id":"`+bobID+`"}`))
+	addReq.Header.Set("Content-Type", "application/json")
+	addReq.AddCookie(&http.Cookie{Name: identity.CookieName, Value: alice.session})
+	addResp, err := client.Do(addReq)
+	if err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+	_ = addResp.Body.Close()
+	if addResp.StatusCode != http.StatusCreated {
+		t.Fatalf("add member status=%d want 201", addResp.StatusCode)
+	}
+
+	dial := func(cookie string) *websocket.Conn {
+		t.Helper()
+		header := http.Header{}
+		header.Set("Cookie", (&http.Cookie{Name: identity.CookieName, Value: cookie}).String())
+		wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+		ws, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+		if err != nil {
+			status := 0
+			if resp != nil {
+				status = resp.StatusCode
+			}
+			t.Fatalf("dial pushhub: status=%d err=%v", status, err)
+		}
+		if err := ws.WriteJSON(map[string]string{"type": "subscribe", "channel_id": alice.channelID}); err != nil {
+			t.Fatalf("subscribe write: %v", err)
+		}
+		return ws
+	}
+	aliceWS := dial(alice.session)
+	defer func() { _ = aliceWS.Close() }()
+	bobWS := dial(bob.session)
+	defer func() { _ = bobWS.Close() }()
+	pollUntil(t, time.Second, func() bool {
+		return app.Pushhub().SubscriberCount(channel.ID(alice.channelID)) == 2
+	})
+
+	app.Pushhub().PushMessage(channel.ID(alice.channelID), 1, message.Envelope{
+		ID:         "m-public-push",
+		ChannelID:  channel.ID(alice.channelID),
+		Type:       "agent.text",
+		Kind:       message.KindEvent,
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
+		Payload:    json.RawMessage(`{"text":"public"}`),
+		Visibility: message.VisibilityPublic,
+		Audience:   message.Audience{message.AudienceWildcard},
+	})
+	for name, ws := range map[string]*websocket.Conn{"alice": aliceWS, "bob": bobWS} {
+		var frame struct {
+			Type     string           `json:"type"`
+			Envelope message.Envelope `json:"envelope"`
+		}
+		if err := ws.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatalf("%s set deadline: %v", name, err)
+		}
+		if err := ws.ReadJSON(&frame); err != nil {
+			t.Fatalf("%s read public: %v", name, err)
+		}
+		if frame.Type != "message" || frame.Envelope.ID != "m-public-push" {
+			t.Fatalf("%s public frame=%+v want m-public-push", name, frame)
+		}
+	}
+
+	app.Pushhub().PushMessage(channel.ID(alice.channelID), 2, message.Envelope{
+		ID:         "m-private-alice-push",
+		ChannelID:  channel.ID(alice.channelID),
+		Type:       "agent.text",
+		Kind:       message.KindEvent,
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
+		Payload:    json.RawMessage(`{"text":"alice"}`),
+		Visibility: message.VisibilityPrivate,
+		Audience:   message.Audience{actor.ActorID("user:" + aliceID)},
+	})
+	var privateFrame struct {
+		Type     string           `json:"type"`
+		Envelope message.Envelope `json:"envelope"`
+	}
+	if err := aliceWS.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("alice set deadline: %v", err)
+	}
+	if err := aliceWS.ReadJSON(&privateFrame); err != nil {
+		t.Fatalf("alice read private: %v", err)
+	}
+	if privateFrame.Type != "message" || privateFrame.Envelope.ID != "m-private-alice-push" {
+		t.Fatalf("alice private frame=%+v want m-private-alice-push", privateFrame)
+	}
+	if err := bobWS.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
+		t.Fatalf("bob set deadline: %v", err)
+	}
+	if _, raw, err := bobWS.ReadMessage(); err == nil {
+		t.Fatalf("bob received private message for alice: %s", string(raw))
+	}
+}
+
 func TestPushhubRevokesSubscriptionAfterMemberRemoval(t *testing.T) {
 	t.Parallel()
 	app := newTestApp(t)
@@ -894,6 +1241,21 @@ func TestPushhubRevokesSubscriptionAfterMemberRemoval(t *testing.T) {
 		return app.Pushhub().SubscriberCount(channel.ID(alice.channelID)) == 0
 	})
 
+	var revoked struct {
+		Type      string `json:"type"`
+		ChannelID string `json:"channel_id"`
+		Error     string `json:"error"`
+	}
+	if err := ws.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if err := ws.ReadJSON(&revoked); err != nil {
+		t.Fatalf("read revoke frame: %v", err)
+	}
+	if revoked.Type != "subscribe_revoked" || revoked.ChannelID != alice.channelID || revoked.Error != "membership_revoked" {
+		t.Fatalf("revoke frame=%+v want subscribe_revoked membership_revoked", revoked)
+	}
+
 	app.Pushhub().PushMessage(channel.ID(alice.channelID), 1, message.Envelope{
 		ID:         "m-after-revoke",
 		ChannelID:  channel.ID(alice.channelID),
@@ -908,7 +1270,7 @@ func TestPushhubRevokesSubscriptionAfterMemberRemoval(t *testing.T) {
 		t.Fatalf("set read deadline: %v", err)
 	}
 	if _, raw, err := ws.ReadMessage(); err == nil {
-		t.Fatalf("unexpected push after membership removal: %s", string(raw))
+		t.Fatalf("unexpected message after membership removal: %s", string(raw))
 	}
 }
 

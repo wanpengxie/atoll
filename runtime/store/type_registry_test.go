@@ -197,6 +197,23 @@ func TestTypeRegistry_UpsertRejectsInvalid(t *testing.T) {
 	}
 }
 
+func TestTypeRegistry_UpsertRejectsReservedNamespace(t *testing.T) {
+	ctx := context.Background()
+	reg := openChannelDB(t)
+	if _, err := reg.Upsert(ctx, adapter.TypeRow{
+		Type:           "system.foo",
+		HandlerActorID: "tool:x",
+		HandlerBinding: actor.BindingEmbedded,
+		MaxPendingMs:   100,
+		AllowedKinds:   []message.Kind{message.KindEvent},
+	}); err == nil {
+		t.Fatal("Upsert system.*: expected error")
+	}
+	if _, ok, err := reg.Lookup(ctx, "system.foo"); err != nil || ok {
+		t.Fatalf("reserved row written ok=%v err=%v", ok, err)
+	}
+}
+
 // TestTypeRegistry_DefaultTerminalConvention ensures empty
 // terminal_convention persists as payload_status (sqlite DEFAULT).
 func TestTypeRegistry_DefaultTerminalConvention(t *testing.T) {

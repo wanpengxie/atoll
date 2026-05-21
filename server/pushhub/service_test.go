@@ -20,6 +20,10 @@ func (allowAllAuth) AuthorizeChannelAccess(context.Context, string, string) erro
 	return nil
 }
 
+func (allowAllAuth) MemberActorID(_ context.Context, _ string, userID string) (string, error) {
+	return "user:" + userID, nil
+}
+
 // fakeIdentityAuthenticator stubs identity.Service.Authenticate by
 // hooking the HandleWS path with a direct upgrade — avoids pulling
 // in the full identity registration flow. Instead we build a tiny

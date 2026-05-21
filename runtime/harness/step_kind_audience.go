@@ -44,6 +44,14 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (k
 					env.Type, rule.DefaultKind),
 			}, nil
 		}
+	} else if _, reserved := reservedBootstrapTypeSet[env.Type]; reserved {
+		isCore = true
+		if env.Kind != message.KindEvent {
+			return khar.Outcome{
+				RejectReason: message.HarnessKindNotAllowedForType,
+				Detail:       fmt.Sprintf("reserved system type %s allows only kind=event", env.Type),
+			}, nil
+		}
 	} else {
 		// business type — look up allowed_kinds. unknown_type was already
 		// caught at step 4, so we expect a hit here.

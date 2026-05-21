@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
@@ -69,6 +70,7 @@ func TestIntegration_XHSCreatorTemplate_BootSeedsChannel(t *testing.T) {
 		t.Errorf("type_registry count=%d want >= %d (got=%v)",
 			len(gotTypes), len(xhs.AllTypes), gotTypes)
 	}
+	assertTypeInstalledMirror(t, ctx, xhsDB, xhs.AllTypes[0])
 
 	// B1.2 — actor_registry has tool:xhs-adapter from the template seed.
 	reg := store.NewActorRegistry(xhsDB)
@@ -236,6 +238,31 @@ func listTypeRegistryNames(t *testing.T, ctx context.Context, db *sql.DB) []stri
 	}
 	sort.Strings(out)
 	return out
+}
+
+func assertTypeInstalledMirror(t *testing.T, ctx context.Context, db *sql.DB, typ string) {
+	t.Helper()
+	const q = `SELECT payload FROM messages
+	           WHERE type='system.type.installed'
+	             AND json_extract(payload, '$.type')=?
+	           LIMIT 1`
+	var raw string
+	if err := db.QueryRowContext(ctx, q, typ).Scan(&raw); err != nil {
+		t.Fatalf("system.type.installed mirror for %s: %v", typ, err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("decode system.type.installed payload: %v", err)
+	}
+	if payload["type"] != typ ||
+		payload["handler_actor_id"] != string(xhs.DefaultAdapterActorID) ||
+		payload["handler_binding"] != string(actor.BindingEmbedded) ||
+		payload["mutation_kind"] != "create" {
+		t.Fatalf("system.type.installed payload=%v", payload)
+	}
+	if _, ok := payload["allowed_kinds"].([]any); !ok {
+		t.Fatalf("system.type.installed allowed_kinds missing/invalid: %v", payload)
+	}
 }
 
 func containsString(haystack []string, needle string) bool {

@@ -921,3 +921,26 @@ func TestChain_Step5_ReservedTypeSystemSenderAccepted(t *testing.T) {
 			res.RejectReason, res.RejectDetail)
 	}
 }
+
+func TestChain_Step5_NonReservedSystemTypeRejectedBeforeRegistry(t *testing.T) {
+	c, _, _, treg := newTestChain(t)
+	treg.Add(TypeView{
+		Type:         "system.foo",
+		AllowedKinds: []message.Kind{message.KindEvent},
+	})
+	env := &message.Envelope{
+		ID:        "evt-forged-system",
+		ChannelID: "ch-1",
+		TS:        testTS,
+		Type:      "system.foo",
+		Kind:      message.KindEvent,
+		Sender:    message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Payload:   json.RawMessage(`{}`),
+		Audience:  message.Audience{"*"},
+	}
+	res, _ := c.Write(chainCallerCtx(actor.SystemActorID), env)
+	if res.RejectReason != message.HarnessTypeUnknown {
+		t.Fatalf("expected harness_type_unknown, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}

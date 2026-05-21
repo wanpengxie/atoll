@@ -35,6 +35,12 @@ type ManagerConfig struct {
 	// time. Framework ships InMemoryTypeRegistry for tests.
 	TypeRegistry TypeRegistry
 
+	// TypeInstaller is the runtime-owned install path. Production wires
+	// this so adapter install goes through the shared install validator
+	// and emits the system.type.installed mutation mirror. Tests may omit
+	// it and use TypeRegistry directly.
+	TypeInstaller TypeInstaller
+
 	// HarnessChain is the kernel/harness write entry point — every
 	// adapter response flows through here.
 	HarnessChain harness.Chain
@@ -82,6 +88,13 @@ type ManagerConfig struct {
 	// GCInterval is how often Manager.RunGC scans for stale pending
 	// entries. Defaults to 30s.
 	GCInterval time.Duration
+}
+
+// TypeInstaller is the install-time service seam used by production.
+// It deliberately mirrors the registry Upsert shape so framework code
+// keeps constructing TypeRow values while runtime owns install semantics.
+type TypeInstaller interface {
+	InstallType(ctx context.Context, row TypeRow) (TypeRow, error)
 }
 
 func (c *ManagerConfig) applyDefaults() {
@@ -338,10 +351,11 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 	}
 
 	for _, row := range typeRows {
-		if _, err := m.cfg.TypeRegistry.Upsert(ctx, row); err != nil {
+		if _, err := m.installTypeRow(ctx, row); err != nil {
 			_ = mod.Shutdown(ctx)
+			reason := installReasonFromError(err)
 			return fmt.Errorf("%w: adapter=%s type=%s: %v",
-				asInstallError(message.InstallTypeRegistryInvalid), decl.Name, row.Type, err)
+				asInstallError(reason), decl.Name, row.Type, err)
 		}
 	}
 
@@ -367,6 +381,29 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		"types", decl.Types,
 		"channel_id", string(m.cfg.ChannelID))
 	return nil
+}
+
+func (m *Manager) installTypeRow(ctx context.Context, row TypeRow) (TypeRow, error) {
+	if m.cfg.TypeInstaller != nil {
+		return m.cfg.TypeInstaller.InstallType(ctx, row)
+	}
+	return m.cfg.TypeRegistry.Upsert(ctx, row)
+}
+
+type installReasoner interface {
+	InstallReason() message.InstallReason
+}
+
+func installReasonFromError(err error) message.InstallReason {
+	var ie *InstallError
+	if errors.As(err, &ie) && ie.Reason != "" {
+		return ie.Reason
+	}
+	var r installReasoner
+	if errors.As(err, &r) && r.InstallReason() != "" {
+		return r.InstallReason()
+	}
+	return message.InstallTypeRegistryInvalid
 }
 
 // BootRecoverTimers re-arms every pending request's F3 timer per L2

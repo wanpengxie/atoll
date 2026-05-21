@@ -47,7 +47,12 @@ func (s *stepTypeRegistered) Run(ctx context.Context, env *message.Envelope) (kh
 					Detail:       "reserved system type may only be emitted by channel system actor: " + env.Type,
 				}, nil
 			}
+			return khar.Outcome{}, nil
 		}
+		return khar.Outcome{
+			RejectReason: message.HarnessTypeUnknown,
+			Detail:       "non-reserved system namespace type is not installable: " + env.Type,
+		}, nil
 	}
 
 	if _, isCore := message.CoreTypeTable[env.Type]; isCore {

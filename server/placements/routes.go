@@ -6,6 +6,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/server/channelaccess"
+	"github.com/wanpengxie/ActOS/server/identity"
 )
 
 // RegisterRoutes mounts read-only placement endpoints — useful for
@@ -18,7 +20,12 @@ func (s *Service) RegisterRoutes(g *gin.RouterGroup) {
 }
 
 func (s *Service) handleGetPlacement(c *gin.Context) {
-	p, ok, err := s.Get(c.Request.Context(), channel.ID(c.Param("chID")))
+	chID := channel.ID(c.Param("chID"))
+	if err := s.authorizeChannel(c, chID); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+	p, ok, err := s.Get(c.Request.Context(), chID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -57,7 +64,12 @@ func (s *Service) handleListPlacements(c *gin.Context) {
 		return
 	}
 	out := make([]gin.H, 0, len(plist))
+	u := identity.UserFrom(c)
+	auth := s.accessAuthorizer()
 	for _, p := range plist {
+		if err := channelaccess.Require(c.Request.Context(), auth, string(p.ChannelID), u.ID); err != nil {
+			continue
+		}
 		out = append(out, gin.H{
 			"channel_id":       string(p.ChannelID),
 			"daemon_id":        string(p.DaemonID),
@@ -68,4 +80,9 @@ func (s *Service) handleListPlacements(c *gin.Context) {
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"placements": out})
+}
+
+func (s *Service) authorizeChannel(c *gin.Context, channelID channel.ID) error {
+	u := identity.UserFrom(c)
+	return channelaccess.Require(c.Request.Context(), s.accessAuthorizer(), string(channelID), u.ID)
 }

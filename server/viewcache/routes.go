@@ -13,6 +13,12 @@ import (
 	"github.com/wanpengxie/ActOS/server/identity"
 )
 
+const (
+	defaultMessagesLimit = 200
+	maxMessagesLimit     = 500
+	maxResyncRange       = 500
+)
+
 // RegisterRoutes mounts the read-only viewcache endpoints + the
 // front-end-triggered resync hook.
 func (s *Service) RegisterRoutes(g *gin.RouterGroup) {
@@ -23,12 +29,13 @@ func (s *Service) RegisterRoutes(g *gin.RouterGroup) {
 
 func (s *Service) handleMessages(c *gin.Context) {
 	chID := channel.ID(c.Param("chID"))
-	if err := s.authorizeChannel(c, chID); err != nil {
+	memberActorID, err := s.authorizeChannel(c, chID)
+	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
 	afterStr := c.DefaultQuery("after", "0")
-	limitStr := c.DefaultQuery("limit", "200")
+	limitStr := c.DefaultQuery("limit", strconv.Itoa(defaultMessagesLimit))
 	after, err := strconv.ParseInt(afterStr, 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "after must be integer"})
@@ -38,6 +45,13 @@ func (s *Service) handleMessages(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be integer"})
 		return
+	}
+	if limit <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be positive"})
+		return
+	}
+	if limit > maxMessagesLimit {
+		limit = maxMessagesLimit
 	}
 	msgs, err := s.Messages(c.Request.Context(), chID, viewsync.Seq(after), limit)
 	if err != nil {
@@ -58,6 +72,9 @@ func (s *Service) handleMessages(c *gin.Context) {
 		if env.TSReceived == 0 {
 			env.TSReceived = m.ReceivedAt
 		}
+		if !channelaccess.VisibleToActor(env, memberActorID) {
+			continue
+		}
 		envs = append(envs, env)
 	}
 	c.JSON(http.StatusOK, gin.H{"messages": envs})
@@ -65,7 +82,7 @@ func (s *Service) handleMessages(c *gin.Context) {
 
 func (s *Service) handleCursor(c *gin.Context) {
 	chID := channel.ID(c.Param("chID"))
-	if err := s.authorizeChannel(c, chID); err != nil {
+	if _, err := s.authorizeChannel(c, chID); err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
@@ -84,13 +101,25 @@ type resyncReq struct {
 
 func (s *Service) handleResync(c *gin.Context) {
 	chID := channel.ID(c.Param("chID"))
-	if err := s.authorizeChannel(c, chID); err != nil {
+	if _, err := s.authorizeChannel(c, chID); err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
 	var req resyncReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.SinceSeq < 0 || req.UntilSeq < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "since_seq and until_seq must be non-negative"})
+		return
+	}
+	if req.SinceSeq > req.UntilSeq {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "since_seq must be <= until_seq"})
+		return
+	}
+	if req.UntilSeq-req.SinceSeq+1 > maxResyncRange {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "resync range exceeds max 500"})
 		return
 	}
 	cur, err := s.TriggerResync(
@@ -105,7 +134,7 @@ func (s *Service) handleResync(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"last_received_seq": int64(cur)})
 }
 
-func (s *Service) authorizeChannel(c *gin.Context, channelID channel.ID) error {
+func (s *Service) authorizeChannel(c *gin.Context, channelID channel.ID) (string, error) {
 	u := identity.UserFrom(c)
-	return channelaccess.Require(c.Request.Context(), s.accessAuthorizer(), string(channelID), u.ID)
+	return channelaccess.RequireMemberActor(c.Request.Context(), s.accessAuthorizer(), string(channelID), u.ID)
 }

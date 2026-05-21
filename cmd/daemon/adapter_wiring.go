@@ -25,6 +25,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/scheduler"
 	runtimestore "github.com/wanpengxie/ActOS/runtime/store"
 	"github.com/wanpengxie/ActOS/runtime/transit"
+	"github.com/wanpengxie/ActOS/runtime/typeinstall"
 )
 
 // AdapterModuleFactory builds one adapter.Module per channel. The
@@ -84,10 +85,22 @@ func wireAdapterFramework(factories ...AdapterModuleFactory) func(ctx context.Co
 		if h.NowFn != nil {
 			clock = func() time.Time { return time.UnixMilli(h.NowFn()) }
 		}
+		installer, err := typeinstall.New(typeinstall.Config{
+			ChannelID:     h.ChannelID,
+			ActorRegistry: h.ActorRegistry,
+			TypeRegistry:  h.TypeRegistry,
+			HarnessChain:  h.HarnessChain,
+			NowFn:         h.NowFn,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("typeinstall.New(%s): %w", h.ChannelID, err)
+		}
+
 		mgr, err := framework.NewManager(framework.ManagerConfig{
 			ChannelID:       h.ChannelID,
 			ActorRegistry:   h.ActorRegistry,
 			TypeRegistry:    h.TypeRegistry,
+			TypeInstaller:   installer,
 			HarnessChain:    adapterChain,
 			RequestLookup:   h.RequestLookup,
 			StateStore:      runtimestore.NewAdapterStateStore(h.DB, h.NowFn),

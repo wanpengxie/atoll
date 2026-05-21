@@ -46,3 +46,31 @@ func TestAllHarnessRejectReasonsHaveHTTPStatus(t *testing.T) {
 		}
 	}
 }
+
+func TestAllInstallReasonsSpecClosedSet(t *testing.T) {
+	want := []InstallReason{
+		InstallAdapterTimeoutMissing,
+		InstallHandlerActorNotRegistered,
+		InstallHandlerActorBindingMismatch,
+		InstallTypeRegistryInvalid,
+		InstallTypeRegistryReservedNamespace,
+		InstallWorkerLockHeld,
+		InstallBootstrapInProgress,
+	}
+	if len(AllInstallReasons) != len(want) {
+		t.Fatalf("AllInstallReasons len=%d want %d", len(AllInstallReasons), len(want))
+	}
+	for i := range want {
+		if AllInstallReasons[i] != want[i] {
+			t.Fatalf("AllInstallReasons[%d]=%q want %q", i, AllInstallReasons[i], want[i])
+		}
+	}
+}
+
+func TestAllInstallReasonsHaveHTTPStatus(t *testing.T) {
+	for _, reason := range AllInstallReasons {
+		if got := reason.HTTPStatus(); got == 0 {
+			t.Errorf("%s HTTPStatus=0", reason)
+		}
+	}
+}

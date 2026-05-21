@@ -3,9 +3,11 @@ package framework
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // TerminalConvention re-exports kernel/adapter.TerminalConvention so
@@ -43,6 +45,9 @@ func NewInMemoryTypeRegistry() *InMemoryTypeRegistry {
 func (r *InMemoryTypeRegistry) Upsert(_ context.Context, row TypeRow) (TypeRow, error) {
 	if err := row.Validate(); err != nil {
 		return TypeRow{}, err
+	}
+	if strings.HasPrefix(row.Type, "system.") {
+		return TypeRow{}, &InstallError{Reason: message.InstallTypeRegistryReservedNamespace}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

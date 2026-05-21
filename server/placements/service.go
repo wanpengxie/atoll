@@ -13,6 +13,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/server/channelaccess"
 )
 
 // Config bundles reconcile knobs (T1.7).
@@ -39,6 +40,9 @@ type Service struct {
 
 	reclaimMu      sync.RWMutex
 	reclaimHandler func(context.Context, placement.Placement) error
+
+	accessMu sync.RWMutex
+	access   channelaccess.Authorizer
 }
 
 // ChannelDaemonResolver is the narrow daemonbus dependency for
@@ -72,6 +76,19 @@ func NewService(db *sql.DB, cfg Config) *Service {
 		now:   time.Now,
 		log:   log,
 	}
+}
+
+// SetAccessAuthorizer wires route-level channel membership checks.
+func (s *Service) SetAccessAuthorizer(a channelaccess.Authorizer) {
+	s.accessMu.Lock()
+	s.access = a
+	s.accessMu.Unlock()
+}
+
+func (s *Service) accessAuthorizer() channelaccess.Authorizer {
+	s.accessMu.RLock()
+	defer s.accessMu.RUnlock()
+	return s.access
 }
 
 // WithClock overrides the clock (tests).
