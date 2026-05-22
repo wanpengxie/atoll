@@ -252,7 +252,6 @@ func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 //
 // Empty header or missing real protocol returns (_, _, false).
 func parseDaemonWSSubprotocols(headers []string) (daemonID, key string, hasRealProto bool, ok bool) {
-	ok = true
 	var seenDaemonID, seenKey bool
 	for _, line := range headers {
 		for _, part := range strings.Split(line, ",") {

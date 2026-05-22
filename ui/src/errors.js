@@ -25,8 +25,9 @@ export const REASON_CLASS = Object.freeze({
 // Reason → class + 中文.
 //
 // Keep this table in lockstep with kernel/message.AllHarnessRejectReasons,
+// kernel/message.AllInstallReasons, kernel/message.AllTerminalFailureReasons,
 // kernel/daemonbus.MuxRejectReason, and daemon-edge write_message rejects.
-// Adding a new harness/mux/daemon-edge reject reason must update this file.
+// Adding a new wire reason must update this file.
 const REASON_TABLE = Object.freeze({
   // --- harness reject ---------------------------------------------------
   harness_worker_fencing_stale: ['protocol_system', 'worker fencing 已过期'],
@@ -91,6 +92,7 @@ const REASON_TABLE = Object.freeze({
   handler_actor_not_registered: ['install_system', 'handler actor 未注册'],
   handler_actor_binding_mismatch: ['install_system', 'handler binding 不匹配'],
   type_registry_invalid: ['install_system', 'type_registry 行非法'],
+  type_registry_reserved_namespace: ['install_system', 'type_registry 保留命名空间不可安装'],
   worker_lock_held: ['install_system', 'worker lock 被占'],
   bootstrap_in_progress: ['install_system', 'bootstrap 进行中'],
 });

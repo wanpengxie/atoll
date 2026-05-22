@@ -46,3 +46,17 @@ func (b *busResyncer) RequestResync(ctx context.Context, channelID channel.ID, s
 	}
 	return body.Messages, nil
 }
+
+func (a *App) NotifyResyncComplete(ctx context.Context, channelID channel.ID, lastReceivedSeq viewsync.LastReceivedSeq) error {
+	conn, err := a.daemonbus.ConnectionForChannel(ctx, string(channelID))
+	if err != nil {
+		return err
+	}
+	_, err = conn.SendFrame(ctx, kerneldaemonbus.FrameTypeViewsyncAck, viewsync.AckFrame{
+		ChannelID:       channelID,
+		LastReceivedSeq: lastReceivedSeq,
+		Accepted:        true,
+		ResyncCompleted: true,
+	})
+	return err
+}

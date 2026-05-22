@@ -354,7 +354,6 @@ func deviceTokenRejectReason(err error) kerneldaemonbus.DeviceSessionRejectReaso
 //
 // Returns ok=false for duplicate/unknown slots. Empty slots are ignored.
 func parseDeviceWSSubprotocols(headers []string) (token string, hasRealProto bool, ok bool) {
-	ok = true
 	var seenToken bool
 	for _, line := range headers {
 		for _, part := range strings.Split(line, ",") {

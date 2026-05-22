@@ -88,6 +88,7 @@ type Service struct {
 	reclaimSequence atomic.Int64
 
 	channelDaemonResolver placements.ChannelDaemonResolver
+	placementLoadReader   placements.DaemonLoadReader
 
 	allowedOrigins map[string]struct{}
 	log            *slog.Logger
@@ -141,6 +142,14 @@ func (s *Service) nowMs() int64 { return s.now().UnixMilli() }
 func (s *Service) SetChannelDaemonResolver(r placements.ChannelDaemonResolver) {
 	s.mu.Lock()
 	s.channelDaemonResolver = r
+	s.mu.Unlock()
+}
+
+// SetPlacementLoadReader wires placement-owned daemon load counts used by
+// scheduler candidate selection. Passing nil makes metrics report zero load.
+func (s *Service) SetPlacementLoadReader(r placements.DaemonLoadReader) {
+	s.mu.Lock()
+	s.placementLoadReader = r
 	s.mu.Unlock()
 }
 
@@ -213,28 +222,14 @@ func (s *Service) ConnectedConnectionMetrics(ctx context.Context) ([]ConnectionM
 	}
 
 	load := map[placement.DaemonID]int{}
-	rows, err = s.db.QueryContext(ctx, `
-		SELECT daemon_id, COUNT(*)
-		  FROM channel_placements
-		 WHERE state IN ('active','creating')
-		 GROUP BY daemon_id`)
-	if err != nil {
-		return nil, fmt.Errorf("daemonbus: query daemon load: %w", err)
-	}
-	for rows.Next() {
-		var id string
-		var count int
-		if err := rows.Scan(&id, &count); err != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("daemonbus: scan daemon load: %w", err)
+	s.mu.RLock()
+	loadReader := s.placementLoadReader
+	s.mu.RUnlock()
+	if loadReader != nil {
+		load, err = loadReader.ActiveOrCreatingCountsByDaemon(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("daemonbus: query daemon load: %w", err)
 		}
-		load[placement.DaemonID(id)] = count
-	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("daemonbus: close daemon load rows: %w", err)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("daemonbus: daemon load rows: %w", err)
 	}
 
 	s.reclaimMu.Lock()

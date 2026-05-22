@@ -24,7 +24,7 @@ export class APIError extends Error {
 // newEnvelopeID returns a fresh sender-provided envelope.id for
 // /api/channels/:chID/messages. We prefer crypto.randomUUID when
 // available (modern browsers + secure contexts) and fall back to a
-// hand-rolled v4-shape uuid built from crypto.getRandomValues so
+// hand-rolled random UUID shape built from crypto.getRandomValues so
 // callers in older / non-secure contexts still emit a distinct id.
 // Caller-supplied ids are what drives L1 §2.3 harness dedupe — see
 // proto-layer3.md §1.8.3.

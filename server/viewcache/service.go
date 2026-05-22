@@ -43,6 +43,10 @@ type Resyncer interface {
 	RequestResync(ctx context.Context, channelID channel.ID, since, until viewsync.Seq) ([]viewsync.ResyncMessage, error)
 }
 
+type ResyncCompletionNotifier interface {
+	NotifyResyncComplete(ctx context.Context, channelID channel.ID, lastReceivedSeq viewsync.LastReceivedSeq) error
+}
+
 // Service is the viewcache facade.
 type Service struct {
 	db  *sql.DB
@@ -51,7 +55,8 @@ type Service struct {
 	mu      sync.Mutex
 	buffers map[channel.ID]*channelBuffer
 
-	resyncer Resyncer
+	resyncer                 Resyncer
+	resyncCompletionNotifier ResyncCompletionNotifier
 
 	accessMu sync.RWMutex
 	access   channelaccess.Authorizer
@@ -99,6 +104,10 @@ func (s *Service) SetLogger(log *slog.Logger) {
 
 // SetResyncer plugs in the gap-recovery RPC client.
 func (s *Service) SetResyncer(r Resyncer) { s.resyncer = r }
+
+func (s *Service) SetResyncCompletionNotifier(n ResyncCompletionNotifier) {
+	s.resyncCompletionNotifier = n
+}
 
 // SetAccessAuthorizer wires the route-level channel access check.
 func (s *Service) SetAccessAuthorizer(a channelaccess.Authorizer) {
@@ -463,11 +472,9 @@ func (s *Service) RecoverGaps(ctx context.Context) error {
 	var gaps []gap
 	for rows.Next() {
 		var (
-			chID  string
-			cur   int64
-			min   int64
-			since = viewsync.Seq(0)
-			until = viewsync.Seq(0)
+			chID string
+			cur  int64
+			min  int64
 		)
 		if err := rows.Scan(&chID, &cur, &min); err != nil {
 			return fmt.Errorf("viewcache: recover gaps scan row: %w", err)
@@ -475,8 +482,8 @@ func (s *Service) RecoverGaps(ctx context.Context) error {
 		if min <= cur+1 {
 			continue
 		}
-		since = viewsync.Seq(cur + 1)
-		until = viewsync.Seq(min - 1)
+		since := viewsync.Seq(cur + 1)
+		until := viewsync.Seq(min - 1)
 		gaps = append(gaps, gap{channelID: channel.ID(chID), since: since, until: until})
 	}
 	if err := rows.Err(); err != nil {
@@ -657,6 +664,11 @@ func (s *Service) TriggerResync(ctx context.Context, channelID channel.ID, since
 	cur, err := s.Cursor(ctx, channelID)
 	if err != nil {
 		return 0, err
+	}
+	if s.resyncCompletionNotifier != nil {
+		if err := s.resyncCompletionNotifier.NotifyResyncComplete(ctx, channelID, cur); err != nil {
+			return 0, fmt.Errorf("viewcache: notify resync complete: %w", err)
+		}
 	}
 	return cur, nil
 }

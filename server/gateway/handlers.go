@@ -1009,13 +1009,13 @@ func isJSONUnknownFieldError(err error) bool {
 // `binding:"required"` struct tags no longer fire automatically.
 func validateWriteMessageRequired(req *writeMessageReq) error {
 	if req.ID == "" {
-		return fmt.Errorf("Key: 'writeMessageReq.ID' Error:Field validation for 'ID' failed on the 'required' tag")
+		return fmt.Errorf("writeMessageReq.ID is required")
 	}
 	if req.Type == "" {
-		return fmt.Errorf("Key: 'writeMessageReq.Type' Error:Field validation for 'Type' failed on the 'required' tag")
+		return fmt.Errorf("writeMessageReq.Type is required")
 	}
 	if len(req.Payload) == 0 {
-		return fmt.Errorf("Key: 'writeMessageReq.Payload' Error:Field validation for 'Payload' failed on the 'required' tag")
+		return fmt.Errorf("writeMessageReq.Payload is required")
 	}
 	return nil
 }

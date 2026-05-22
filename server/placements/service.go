@@ -54,6 +54,11 @@ type ChannelDaemonResolver interface {
 	ResolveDaemonForChannel(ctx context.Context, channelID channel.ID) (placement.DaemonID, bool, error)
 }
 
+// DaemonLoadReader exposes placement-owned load accounting to schedulers.
+type DaemonLoadReader interface {
+	ActiveOrCreatingCountsByDaemon(ctx context.Context) (map[placement.DaemonID]int, error)
+}
+
 // NewService builds a Service.
 func NewService(db *sql.DB, cfg Config) *Service {
 	if cfg.GracePeriod <= 0 {
@@ -302,6 +307,40 @@ func (s *Service) OrphanCreating(
 		}
 	}
 	return ok, nil
+}
+
+// OrphanCreatingPlacementTx is the transaction-scoped placement-state CAS
+// used by gateway rollback intents. It intentionally does not touch placement
+// sagas; the caller owns the companion rollback saga in the same transaction.
+func (s *Service) OrphanCreatingPlacementTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	channelID channel.ID,
+	createRequestID placement.CreateRequestID,
+	nowMs int64,
+) (bool, error) {
+	if tx == nil {
+		return false, errors.New("placements: transaction required")
+	}
+	if channelID == "" || createRequestID == "" {
+		return false, nil
+	}
+	return s.store.CASOrphanCreatingTx(ctx, tx, channelID, createRequestID, nowMs)
+}
+
+// ActiveOrCreatingCountsByDaemon returns load counts owned by each daemon.
+func (s *Service) ActiveOrCreatingCountsByDaemon(ctx context.Context) (map[placement.DaemonID]int, error) {
+	counts := map[placement.DaemonID]int{}
+	for _, state := range []placement.State{placement.StateActive, placement.StateCreating} {
+		placements, err := s.store.ListByState(ctx, state)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range placements {
+			counts[p.DaemonID]++
+		}
+	}
+	return counts, nil
 }
 
 // Heartbeat refreshes last_heartbeat_at on a control.heartbeat

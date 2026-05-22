@@ -29,7 +29,7 @@ func Encode(
 		FrameKind:             frameType,
 		DaemonID:              placement.DaemonID(daemonID),
 		DaemonConnectionEpoch: epoch,
-		Ts:                sentAt,
+		Ts:                    sentAt,
 		Payload:               raw,
 	}, nil
 }

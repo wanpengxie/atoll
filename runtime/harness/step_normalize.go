@@ -55,9 +55,9 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (khar.Ou
 		env.CorrelationID = env.ID
 	}
 
-		// payload baseline. proto-layer0 §1.1 admits a missing payload for
-		// kind=event; store and adapter handlers still expect a JSON object, so
-		// normalize substitutes `{}` on the wire before reaching them. Note:
+	// payload baseline. proto-layer0 §1.1 admits a missing payload for
+	// kind=event; store and adapter handlers still expect a JSON object, so
+	// normalize substitutes `{}` on the wire before reaching them. Note:
 	// StepDedupe ran BEFORE this substitution so canonical_hash sees the
 	// raw sender-provided payload (proto-layer1 §2.3).
 	if len(env.Payload) == 0 {

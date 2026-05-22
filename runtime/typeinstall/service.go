@@ -14,6 +14,7 @@ import (
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/ActOS/runtime/store"
 )
 
 // Config wires the runtime-owned type install path. The service is shared
@@ -35,9 +36,9 @@ type Service struct {
 
 type installRegistry interface {
 	adapter.TypeRegistry
-	BeginInstall(ctx context.Context, row adapter.TypeRow) (adapter.TypeRow, bool, error)
-	MarkInstalled(ctx context.Context, typeName string) error
-	MarkInstallFailed(ctx context.Context, typeName, reason string) error
+	BeginInstall(ctx context.Context, row adapter.TypeRow) (store.TypeInstallAttempt, error)
+	MarkInstalled(ctx context.Context, typeName, attemptID string) error
+	MarkInstallFailed(ctx context.Context, typeName, attemptID, reason string) error
 	RecoverInstalling(ctx context.Context, reason string) (int, error)
 }
 
@@ -77,7 +78,7 @@ func (s *Service) InstallType(ctx context.Context, row adapter.TypeRow) (adapter
 		return existing, nil
 	}
 
-	persisted, existed, err := s.registry.BeginInstall(ctx, row)
+	attempt, err := s.registry.BeginInstall(ctx, row)
 	if err != nil {
 		return adapter.TypeRow{}, &Error{
 			Reason: message.InstallTypeRegistryInvalid,
@@ -85,21 +86,21 @@ func (s *Service) InstallType(ctx context.Context, row adapter.TypeRow) (adapter
 		}
 	}
 	mutationKind := "create"
-	if existed {
+	if attempt.Existed {
 		mutationKind = "compatible_update"
 	}
 
-	if err := s.emitInstalled(ctx, persisted, mutationKind); err != nil {
-		_ = s.registry.MarkInstallFailed(context.WithoutCancel(ctx), persisted.Type, err.Error())
+	if err := s.emitInstalled(ctx, attempt.Row, attempt.AttemptID, mutationKind); err != nil {
+		_ = s.registry.MarkInstallFailed(context.WithoutCancel(ctx), attempt.Row.Type, attempt.AttemptID, err.Error())
 		return adapter.TypeRow{}, err
 	}
-	if err := s.registry.MarkInstalled(ctx, persisted.Type); err != nil {
+	if err := s.registry.MarkInstalled(ctx, attempt.Row.Type, attempt.AttemptID); err != nil {
 		return adapter.TypeRow{}, &Error{
 			Reason: message.InstallTypeRegistryInvalid,
-			Err:    fmt.Errorf("typeinstall: registry mark installed %s: %w", persisted.Type, err),
+			Err:    fmt.Errorf("typeinstall: registry mark installed %s: %w", attempt.Row.Type, err),
 		}
 	}
-	return persisted, nil
+	return attempt.Row, nil
 }
 
 func sameTypeRow(a, b adapter.TypeRow) bool {
@@ -188,20 +189,21 @@ func validateAllowedKinds(row adapter.TypeRow) error {
 	return nil
 }
 
-func (s *Service) emitInstalled(ctx context.Context, row adapter.TypeRow, mutationKind string) error {
+func (s *Service) emitInstalled(ctx context.Context, row adapter.TypeRow, attemptID, mutationKind string) error {
 	now := s.cfg.NowFn()
 	allowed := make([]string, len(row.AllowedKinds))
 	for i, k := range row.AllowedKinds {
 		allowed[i] = string(k)
 	}
 	payload, err := json.Marshal(map[string]any{
-		"type":             row.Type,
-		"allowed_kinds":    allowed,
-		"handler_actor_id": string(row.HandlerActorID),
-		"handler_binding":  string(row.HandlerBinding),
-		"max_pending_ms":   row.MaxPendingMs,
-		"installed_at":     now,
-		"mutation_kind":    mutationKind,
+		"type":               row.Type,
+		"allowed_kinds":      allowed,
+		"handler_actor_id":   string(row.HandlerActorID),
+		"handler_binding":    string(row.HandlerBinding),
+		"install_attempt_id": attemptID,
+		"max_pending_ms":     row.MaxPendingMs,
+		"installed_at":       now,
+		"mutation_kind":      mutationKind,
 	})
 	if err != nil {
 		return fmt.Errorf("typeinstall: marshal system.type.installed payload: %w", err)

@@ -216,14 +216,12 @@ func sanitizeName(name string, allowColon bool) string {
 		ok := r == '_' || unicode.IsLetter(r) || (i > 0 && unicode.IsDigit(r)) || (allowColon && r == ':')
 		if ok {
 			b.WriteRune(r)
-		} else if r == '.' || r == '-' || r == '/' || unicode.IsSpace(r) || unicode.IsDigit(r) {
-			b.WriteByte('_')
 		} else {
 			b.WriteByte('_')
 		}
 	}
 	out := b.String()
-	if out == "" || !(out[0] == '_' || out[0] == ':' || (out[0] >= 'A' && out[0] <= 'Z') || (out[0] >= 'a' && out[0] <= 'z')) {
+	if out == "" || (out[0] != '_' && out[0] != ':' && (out[0] < 'A' || out[0] > 'Z') && (out[0] < 'a' || out[0] > 'z')) {
 		out = "_" + out
 	}
 	return out

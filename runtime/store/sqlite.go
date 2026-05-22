@@ -158,6 +158,27 @@ func ensureDaemonLocalSchema(ctx context.Context, db *sql.DB) error {
 }
 
 func ensureChannelLocalSchema(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS type_registry_pending (
+		  install_attempt_id      TEXT PRIMARY KEY,
+		  type                    TEXT NOT NULL UNIQUE,
+		  allowed_kinds           TEXT NOT NULL,
+		  handler_binding         TEXT NOT NULL
+		                          CHECK (handler_binding IN ('embedded','runtime_outbound','runtime_inbound_via_relay')),
+		  terminal_convention     TEXT NOT NULL DEFAULT 'payload_status'
+		                          CHECK (terminal_convention IN ('payload_status','single-response')),
+		  max_pending_ms          INTEGER,
+		  handler_actor_id        TEXT,
+		  install_status          TEXT NOT NULL DEFAULT 'installing'
+		                          CHECK (install_status IN ('installing','failed')),
+		  install_error           TEXT NOT NULL DEFAULT '',
+		  created_at              INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS ix_type_registry_pending_type_status
+		  ON type_registry_pending(type, install_status);
+	`); err != nil {
+		return fmt.Errorf("store: ensure type_registry_pending: %w", err)
+	}
 	adds := map[string]string{
 		"install_status": "install_status TEXT NOT NULL DEFAULT 'installed' CHECK (install_status IN ('installing','installed','failed'))",
 		"install_error":  "install_error TEXT NOT NULL DEFAULT ''",

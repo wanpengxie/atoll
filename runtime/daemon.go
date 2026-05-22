@@ -286,6 +286,47 @@ type channelRuntime struct {
 	deviceCallback atomic.Value // func(ctx context.Context, frame devicetransit.SendFrame) error
 }
 
+type viewsyncBackpressureState struct {
+	rejectedCursor viewsync.LastReceivedSeq
+}
+
+type viewsyncBackpressureTracker struct {
+	mu     sync.Mutex
+	paused map[channel.ID]viewsyncBackpressureState
+}
+
+func (t *viewsyncBackpressureTracker) pause(id channel.ID, rejectedCursor viewsync.LastReceivedSeq) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.paused == nil {
+		t.paused = map[channel.ID]viewsyncBackpressureState{}
+	}
+	t.paused[id] = viewsyncBackpressureState{rejectedCursor: rejectedCursor}
+}
+
+func (t *viewsyncBackpressureTracker) resumeOnAck(ack viewsync.AckFrame) bool {
+	if !ack.Accepted {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	st, ok := t.paused[ack.ChannelID]
+	if !ok {
+		return false
+	}
+	if !ack.ResyncCompleted && ack.LastReceivedSeq <= st.rejectedCursor {
+		return false
+	}
+	delete(t.paused, ack.ChannelID)
+	return true
+}
+
+func (t *viewsyncBackpressureTracker) clear(id channel.ID) {
+	t.mu.Lock()
+	delete(t.paused, id)
+	t.mu.Unlock()
+}
+
 func (cr *channelRuntime) cancelPusher() {
 	if cr == nil {
 		return
@@ -440,12 +481,13 @@ type Daemon struct {
 	// / DomainPrompt into ChannelHooks (M1.6-T5 phase-2/3).
 	resolveTemplate func(channelType string) ChannelTemplate
 
-	channelsMu sync.RWMutex
-	channels   map[channel.ID]*channelRuntime
-	cursors    *transit.CursorTracker
-	dispatcher *transit.Dispatcher
-	schedTimer *scheduler.Timer
-	hbSender   *transit.HeartbeatSender
+	channelsMu   sync.RWMutex
+	channels     map[channel.ID]*channelRuntime
+	cursors      *transit.CursorTracker
+	dispatcher   *transit.Dispatcher
+	schedTimer   *scheduler.Timer
+	hbSender     *transit.HeartbeatSender
+	backpressure viewsyncBackpressureTracker
 
 	runCtx    context.Context
 	runCancel context.CancelFunc
@@ -755,7 +797,7 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 		func(ctx context.Context, ack viewsync.AckFrame) error {
 			switch ack.RejectReason {
 			case viewsync.RejectReasonViewsyncResyncBackpressure:
-				d.pauseChannelPushForBackpressure(ack.ChannelID)
+				d.pauseChannelPushForBackpressure(ack)
 			default:
 				d.freezeChannel(ctx, ack.ChannelID, string(ack.RejectReason))
 			}
@@ -779,7 +821,13 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 	}
 
 	handlers := transit.ControlHandlers{
-		OnViewsyncAck:           ackHandler.Handle,
+		OnViewsyncAck: func(ctx context.Context, ack viewsync.AckFrame) error {
+			if err := ackHandler.Handle(ctx, ack); err != nil {
+				return err
+			}
+			d.resumeChannelPushAfterBackpressure(ack)
+			return nil
+		},
 		OnViewsyncResyncRequest: resyncServer.ServeResync,
 		OnCreateChannel:         d.handleCreateChannel,
 		OnDaemonReclaim:         d.handleDaemonReclaim,
@@ -1014,23 +1062,6 @@ func nextBackoff(cur, maxB time.Duration) time.Duration {
 	return next
 }
 
-// snapshotOwnedChannels returns the current owned-channel ids.
-// Same lock-free read pattern as routeWrite — the map is mutated only
-// by the dispatcher / phase-3 boot goroutines, never concurrently with
-// itself.
-func (d *Daemon) snapshotOwnedChannels() []channel.ID {
-	d.channelsMu.RLock()
-	defer d.channelsMu.RUnlock()
-	if len(d.channels) == 0 {
-		return nil
-	}
-	out := make([]channel.ID, 0, len(d.channels))
-	for id := range d.channels {
-		out = append(out, id)
-	}
-	return out
-}
-
 // snapshotHeldChannels returns the current owned-channel fencing tuples
 // for control.heartbeat. It reads channel_lock on every tick so reclaim
 // fencing rotation is reflected without rebuilding the daemon runtime.
@@ -1073,6 +1104,7 @@ func (d *Daemon) setChannel(id channel.ID, cr *channelRuntime) {
 }
 
 func (d *Daemon) deleteChannel(id channel.ID) {
+	d.backpressure.clear(id)
 	d.channelsMu.Lock()
 	delete(d.channels, id)
 	d.channelsMu.Unlock()
@@ -1086,27 +1118,19 @@ func (d *Daemon) pauseChannelPush(id channel.ID) {
 	cr.cancelPusher()
 }
 
-func (d *Daemon) pauseChannelPushForBackpressure(id channel.ID) {
-	d.pauseChannelPush(id)
-	runCtx := d.runCtx
-	if runCtx == nil {
-		runCtx = context.Background()
+func (d *Daemon) pauseChannelPushForBackpressure(ack viewsync.AckFrame) {
+	d.backpressure.pause(ack.ChannelID, ack.LastReceivedSeq)
+	d.pauseChannelPush(ack.ChannelID)
+}
+
+func (d *Daemon) resumeChannelPushAfterBackpressure(ack viewsync.AckFrame) {
+	if d.backpressure.resumeOnAck(ack) {
+		d.startChannelPusherFor(ack.ChannelID)
 	}
-	d.wg.Add(1)
-	go func() {
-		defer d.wg.Done()
-		timer := time.NewTimer(500 * time.Millisecond)
-		defer timer.Stop()
-		select {
-		case <-runCtx.Done():
-			return
-		case <-timer.C:
-			d.startChannelPusherFor(id)
-		}
-	}()
 }
 
 func (d *Daemon) freezeChannel(ctx context.Context, id channel.ID, reason string) {
+	d.backpressure.clear(id)
 	cr, ok := d.getChannel(id)
 	if !ok {
 		return
@@ -1763,8 +1787,6 @@ func (d *Daemon) waitForInflightWrites(ctx context.Context) error {
 func (d *Daemon) drainForShutdown(ctx context.Context) {
 	d.draining.Store(true)
 	d.ready.Store(false)
-	d.drainMu.Lock()
-	d.drainMu.Unlock()
 
 	if err := d.waitForInflightWrites(ctx); err != nil {
 		d.log.Warn().Err(err).

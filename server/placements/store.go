@@ -31,6 +31,10 @@ type SQLStore struct {
 // NewSQLStore constructs a store rooted at db.
 func NewSQLStore(db *sql.DB) *SQLStore { return &SQLStore{db: db} }
 
+type execContext interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 // Reserve inserts the placement row in StateCreating (L2 §1.4.11.3
 // step 1). Returns ErrPlacementExists on PRIMARY KEY collision.
 //
@@ -243,17 +247,37 @@ func (s *SQLStore) CASOrphanCreating(
 	createRequestID placement.CreateRequestID,
 	nowMs int64,
 ) (bool, error) {
-	res, err := s.db.ExecContext(
-		ctx,
-		`UPDATE channel_placements
-		    SET state = 'orphan',
-		        entered_state_at = ?
-		  WHERE channel_id = ?
-		    AND create_request_id = ?
-		    AND state = 'creating'`,
-		nowMs,
-		string(channelID),
-		string(createRequestID),
+	return casOrphanCreating(ctx, s.db, channelID, createRequestID, nowMs)
+}
+
+// CASOrphanCreatingTx is the transaction-scoped form used when another
+// server component must persist companion state atomically while keeping
+// placement SQL owned by this package.
+func (s *SQLStore) CASOrphanCreatingTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	channelID channel.ID,
+	createRequestID placement.CreateRequestID,
+	nowMs int64,
+) (bool, error) {
+	return casOrphanCreating(ctx, tx, channelID, createRequestID, nowMs)
+}
+
+func casOrphanCreating(
+	ctx context.Context,
+	exec execContext,
+	channelID channel.ID,
+	createRequestID placement.CreateRequestID,
+	nowMs int64,
+) (bool, error) {
+	res, err := exec.ExecContext(ctx, `
+		UPDATE channel_placements
+		   SET state = 'orphan',
+		       entered_state_at = ?
+		 WHERE channel_id = ?
+		   AND create_request_id = ?
+		   AND state = 'creating'`,
+		nowMs, string(channelID), string(createRequestID),
 	)
 	if err != nil {
 		return false, fmt.Errorf("placements: CASOrphanCreating: %w", err)

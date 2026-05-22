@@ -152,11 +152,65 @@ func TestInstallType_MirrorEmitFail_MarkedFailed(t *testing.T) {
 	}
 }
 
+func TestInstallType_UpdateMirrorEmitFail_PreservesPriorInstalled(t *testing.T) {
+	ctx := context.Background()
+	chID := channel.ID("ch-typeinstall-update-fail")
+	actors, reg, msgs := newTypeInstallStores(t, chID, 33334)
+	chain, err := rtharness.New(rtharness.Deps{
+		ChannelID:     chID,
+		ActorRegistry: actors,
+		TypeRegistry:  reg.HarnessView(),
+		Log:           msgs,
+		NowMs:         func() int64 { return 33334 },
+	})
+	if err != nil {
+		t.Fatalf("harness.New: %v", err)
+	}
+	okSvc, err := typeinstall.New(typeinstall.Config{
+		ChannelID:     chID,
+		ActorRegistry: actors,
+		TypeRegistry:  reg,
+		HarnessChain:  chain,
+		NowFn:         func() int64 { return 33334 },
+	})
+	if err != nil {
+		t.Fatalf("typeinstall.New ok: %v", err)
+	}
+	original := typeInstallRow("xhs.update.fail")
+	if _, err := okSvc.InstallType(ctx, original); err != nil {
+		t.Fatalf("initial InstallType: %v", err)
+	}
+
+	failSvc, err := typeinstall.New(typeinstall.Config{
+		ChannelID:     chID,
+		ActorRegistry: actors,
+		TypeRegistry:  reg,
+		HarnessChain:  failingChain{err: errors.New("mirror unavailable")},
+		NowFn:         func() int64 { return 33335 },
+	})
+	if err != nil {
+		t.Fatalf("typeinstall.New fail: %v", err)
+	}
+	update := original
+	update.MaxPendingMs = 90_000
+	if _, err := failSvc.InstallType(ctx, update); err == nil {
+		t.Fatal("update InstallType succeeded despite mirror failure")
+	}
+
+	got, ok, err := reg.Lookup(ctx, original.Type)
+	if err != nil || !ok {
+		t.Fatalf("prior installed row missing ok=%v err=%v", ok, err)
+	}
+	if got.MaxPendingMs != original.MaxPendingMs {
+		t.Fatalf("installed max_pending=%d want preserved %d", got.MaxPendingMs, original.MaxPendingMs)
+	}
+}
+
 func TestInstallType_RecoveryAfterCrashMidEmit(t *testing.T) {
 	ctx := context.Background()
 	svc, reg, _ := newServiceFixture(t, "ch-typeinstall-recovery", 44444)
 	row := typeInstallRow("xhs.recovery")
-	if _, _, err := reg.BeginInstall(ctx, row); err != nil {
+	if _, err := reg.BeginInstall(ctx, row); err != nil {
 		t.Fatalf("BeginInstall: %v", err)
 	}
 	if _, ok, err := reg.Lookup(ctx, row.Type); err != nil || ok {
@@ -178,15 +232,64 @@ func TestInstallType_RecoveryAfterCrashMidEmit(t *testing.T) {
 	}
 }
 
+func TestInstallType_RecoveryWithStaleSameTypeMirror_DoesNotFalsePromote(t *testing.T) {
+	ctx := context.Background()
+	chID := channel.ID("ch-typeinstall-stale-mirror")
+	svc, reg, _ := newServiceFixture(t, chID, 55554)
+	original := typeInstallRow("xhs.stale.mirror")
+	if _, err := svc.InstallType(ctx, original); err != nil {
+		t.Fatalf("initial InstallType: %v", err)
+	}
+
+	update := original
+	update.MaxPendingMs = 120_000
+	attempt, err := reg.BeginInstall(ctx, update)
+	if err != nil {
+		t.Fatalf("BeginInstall update: %v", err)
+	}
+	if attempt.AttemptID == "" {
+		t.Fatal("pending install attempt id empty")
+	}
+	n, err := svc.RecoverInstalling(ctx, "crash recovered")
+	if err != nil {
+		t.Fatalf("RecoverInstalling: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("recovered=%d want 1", n)
+	}
+	got, ok, err := reg.Lookup(ctx, original.Type)
+	if err != nil || !ok {
+		t.Fatalf("Lookup after recovery ok=%v err=%v", ok, err)
+	}
+	if got.MaxPendingMs != original.MaxPendingMs {
+		t.Fatalf("stale mirror promoted update max_pending=%d want preserved %d", got.MaxPendingMs, original.MaxPendingMs)
+	}
+	status, reason, ok, err := reg.InstallStatus(ctx, original.Type)
+	if err != nil || !ok {
+		t.Fatalf("InstallStatus ok=%v err=%v", ok, err)
+	}
+	if status != store.TypeInstallStatusFailed || reason != "crash recovered" {
+		t.Fatalf("pending status=%q reason=%q want failed crash recovered", status, reason)
+	}
+}
+
 func TestInstallType_CrashAfterMirrorBeforeMark_RecoveryCompletesInstall(t *testing.T) {
 	ctx := context.Background()
 	chID := channel.ID("ch-typeinstall-recovery-complete")
 	svc, reg, msgs := newServiceFixture(t, chID, 55555)
 	row := typeInstallRow("xhs.recovery.complete")
-	if _, _, err := reg.BeginInstall(ctx, row); err != nil {
+	attempt, err := reg.BeginInstall(ctx, row)
+	if err != nil {
 		t.Fatalf("BeginInstall: %v", err)
 	}
-	payload := json.RawMessage(`{"type":"xhs.recovery.complete"}`)
+	payloadBytes, err := json.Marshal(map[string]string{
+		"type":               "xhs.recovery.complete",
+		"install_attempt_id": attempt.AttemptID,
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	payload := json.RawMessage(payloadBytes)
 	if _, err := msgs.Append(ctx, &message.Envelope{
 		ID:         "system.type.installed:xhs.recovery.complete:55555",
 		TS:         55555,

@@ -64,6 +64,38 @@ func TestOpenAndApply(t *testing.T) {
 	}
 }
 
+func TestRollbackIntent_SagaFKEnforced(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "server.db")
+	db, err := store.Open(ctx, path, store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	sagaID := "rollback:ch-fk:req-fk:1"
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO placement_rollback_intents (
+			saga_id, channel_id, create_request_id, owner_epoch, daemon_id,
+			daemon_connection_epoch, reason, attempts, last_attempt_at,
+			next_attempt_at, created_at, updated_at
+		) VALUES (?, 'ch-fk', 'req-fk', 1, 'd-fk', 1, 'test', 0, 0, 0, 1, 1)`,
+		sagaID,
+	); err != nil {
+		t.Fatalf("insert rollback intent: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO placement_rollback_intents (
+			saga_id, channel_id, create_request_id, owner_epoch, daemon_id,
+			daemon_connection_epoch, reason, attempts, last_attempt_at,
+			next_attempt_at, created_at, updated_at
+		) VALUES (?, 'ch-fk-2', 'req-fk-2', 2, 'd-fk', 1, 'test', 0, 0, 0, 1, 1)`,
+		sagaID,
+	); err == nil {
+		t.Fatal("duplicate rollback saga_id inserted; unique relationship not enforced")
+	}
+}
+
 // TestApplyIdempotent runs migrations twice on the same file and
 // confirms the second run is a no-op (no error, same row count).
 func TestApplyIdempotent(t *testing.T) {

@@ -38,6 +38,7 @@ type AckFrame struct {
 	LastReceivedSeq LastReceivedSeq `json:"last_received_seq"`
 	Accepted        bool            `json:"accepted"`
 	RejectReason    RejectReason    `json:"reject_reason,omitempty"`
+	ResyncCompleted bool            `json:"resync_completed,omitempty"`
 }
 
 // ResyncRequest is the payload of `viewsync.resync_request` (L1 §8.3
