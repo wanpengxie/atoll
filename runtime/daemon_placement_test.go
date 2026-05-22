@@ -14,6 +14,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/store"
 	"github.com/wanpengxie/ActOS/runtime/transit"
@@ -374,6 +375,62 @@ func TestDaemon_OnCreateChannel_FreshBootstrap(t *testing.T) {
 	}
 
 	_ = dataDir // silence unused
+}
+
+func TestDaemon_OnCreateChannel_CreateAckPrecedesFirstViewSyncPush(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	d, srv, _, _ := startDaemon(t, ctx, "daemon-A")
+	defer func() { _ = d.Close() }()
+
+	req := placement.CreateChannelRequest{
+		ChannelID:       "ch-create-ack-before-push",
+		CreateRequestID: "req-create-ack-before-push",
+	}
+	frame, err := transit.Encode("frame-create-ack-before-push",
+		daemonbus.FrameTypeControlCreateChannel,
+		"server", d.Transit().Epoch(), now(), req)
+	if err != nil {
+		t.Fatalf("encode create: %v", err)
+	}
+	if err := srv.SendToDaemon(ctx, frame); err != nil {
+		t.Fatalf("SendToDaemon: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("did not observe create ack or early push within 3s")
+		default:
+		}
+		recvCtx, c := context.WithTimeout(ctx, time.Second)
+		got, err := srv.RecvFromDaemon(recvCtx)
+		c()
+		if err != nil {
+			t.Fatalf("RecvFromDaemon: %v", err)
+		}
+		switch got.FrameKind {
+		case daemonbus.FrameTypeControlCreateChannelAck:
+			var ack placement.CreateChannelAck
+			if err := transit.DecodePayload(got, &ack); err != nil {
+				t.Fatalf("decode create ack: %v", err)
+			}
+			if ack.ChannelID != req.ChannelID || ack.Result != placement.CreateChannelAccepted {
+				t.Fatalf("create ack=%+v", ack)
+			}
+			return
+		case daemonbus.FrameTypeViewsyncPush:
+			var push viewsync.PushFrame
+			if err := transit.DecodePayload(got, &push); err != nil {
+				t.Fatalf("decode push: %v", err)
+			}
+			if push.ChannelID == req.ChannelID {
+				t.Fatalf("viewsync.push seq=%d arrived before create_channel_ack", push.Seq)
+			}
+		}
+	}
 }
 
 // TestDaemon_OnCreateChannel_IdempotentReplay — replay with same tuple

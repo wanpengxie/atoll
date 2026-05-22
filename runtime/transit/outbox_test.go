@@ -28,6 +28,7 @@ type fakeOutbox struct {
 	pushed     map[viewsync.Seq]bool
 	pendingN   int // PendingCount stub — caller mutates directly
 	pendingErr error
+	pageCalls  int
 }
 
 func newFakeOutbox(chID channel.ID, n int) *fakeOutbox {
@@ -62,6 +63,7 @@ func (f *fakeOutbox) ChannelID() channel.ID { return f.chID }
 func (f *fakeOutbox) PendingPage(_ context.Context, limit int) ([]viewsync.PushFrame, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.pageCalls++
 	out := make([]viewsync.PushFrame, 0, limit)
 	for _, p := range f.pending {
 		if f.pushed[p.Seq] {
@@ -102,6 +104,18 @@ func (f *fakeOutbox) PendingCount(_ context.Context) (int, error) {
 		return 0, f.pendingErr
 	}
 	return f.pendingN, nil
+}
+
+func (f *fakeOutbox) pendingPageCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pageCalls
+}
+
+func (f *fakeOutbox) pushedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.pushed)
 }
 
 // flakyTransport implements daemonbus.Transport but fails the first N
@@ -323,6 +337,40 @@ func TestPusher_BacklogWatermarkFiresOnceAboveThreshold(t *testing.T) {
 	defer eventMu.Unlock()
 	if len(events) != 2 {
 		t.Fatalf("after drop+rise expected 2 events; got %d", len(events))
+	}
+}
+
+func TestPusher_BackpressureOnHighWatermark(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	outbox := newFakeOutbox("ch-1", 5)
+	outbox.pendingN = 51
+
+	bus := transit.NewMockBus(64)
+	client, _ := transit.NewClient(transit.ClientConfig{DaemonID: "daemon-A", Transport: bus})
+	_, _ = client.Connect(ctx)
+
+	pusher, _ := transit.NewPusher(transit.PusherConfig{
+		Outbox:               outbox,
+		Client:               client,
+		Cursors:              transit.NewCursorTracker(),
+		FrameID:              atomicFrameID(),
+		BacklogHighWatermark: 50,
+	})
+
+	sent, err := pusher.Drain(ctx)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if sent != 0 {
+		t.Fatalf("sent=%d want 0 while backlog exceeds high watermark", sent)
+	}
+	if calls := outbox.pendingPageCalls(); calls != 0 {
+		t.Fatalf("PendingPage calls=%d want 0 under backpressure", calls)
+	}
+	if pushed := outbox.pushedCount(); pushed != 0 {
+		t.Fatalf("pushed rows=%d want 0 under backpressure", pushed)
 	}
 }
 

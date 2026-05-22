@@ -251,13 +251,18 @@ func (s *Service) Register(conn *Connection) {
 		return
 	}
 	var previous *Connection
+	var hook func(*Connection)
 	s.mu.Lock()
 	conn.Generation = s.connGen.Add(1)
 	previous = s.connections[conn.DaemonID]
 	s.connections[conn.DaemonID] = conn
+	hook = s.onRegister
 	s.mu.Unlock()
 	if previous != nil && previous != conn {
 		_ = previous.Close()
+	}
+	if hook != nil {
+		go hook(conn)
 	}
 }
 

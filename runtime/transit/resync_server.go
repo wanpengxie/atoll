@@ -23,6 +23,10 @@ type ResyncServer struct {
 	reader MessageRangeReader
 }
 
+// MaxResyncChunkSize bounds each daemon-side outbox read used to answer
+// a resync request. Larger closed intervals are paged by ServeResync.
+const MaxResyncChunkSize = 500
+
 // NewResyncServer builds a ResyncServer bound to one channel's reader.
 func NewResyncServer(reader MessageRangeReader) (*ResyncServer, error) {
 	if reader == nil {
@@ -41,14 +45,31 @@ func (s *ResyncServer) ServeResync(ctx context.Context, req viewsync.ResyncReque
 		return viewsync.ResyncResponse{}, fmt.Errorf("transit: resync range invalid: since=%d > until=%d",
 			req.SinceSeq, req.UntilSeq)
 	}
-	msgs, err := s.reader.MessagesByRange(ctx, req.SinceSeq, req.UntilSeq)
-	if err != nil {
-		return viewsync.ResyncResponse{}, fmt.Errorf("transit: resync read: %w", err)
+	var all []viewsync.ResyncMessage
+	for start := req.SinceSeq; start <= req.UntilSeq; {
+		chunkUntil := resyncChunkUntil(start, req.UntilSeq)
+		msgs, err := s.reader.MessagesByRange(ctx, start, chunkUntil)
+		if err != nil {
+			return viewsync.ResyncResponse{}, fmt.Errorf("transit: resync read: %w", err)
+		}
+		all = append(all, msgs...)
+		if chunkUntil == req.UntilSeq {
+			break
+		}
+		start = chunkUntil + 1
 	}
 	return viewsync.ResyncResponse{
 		ChannelID: req.ChannelID,
 		SinceSeq:  req.SinceSeq,
 		UntilSeq:  req.UntilSeq,
-		Messages:  msgs,
+		Messages:  all,
 	}, nil
+}
+
+func resyncChunkUntil(since, until viewsync.Seq) viewsync.Seq {
+	maxUntil := since + viewsync.Seq(MaxResyncChunkSize) - 1
+	if maxUntil < since || maxUntil > until {
+		return until
+	}
+	return maxUntil
 }

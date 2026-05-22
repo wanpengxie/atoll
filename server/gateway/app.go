@@ -216,6 +216,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 
 	// Wire viewcache → daemon resync via daemonbus.
 	app.daemonbus.SetChannelDaemonResolver(app.placements)
+	app.daemonbus.SetRegisterHook(app.retryRollbackIntentsForRegisteredDaemon)
 	app.placements.SetReclaimHandler(app.reclaimPlacement)
 	app.viewcache.SetResyncer(&busResyncer{bus: app.daemonbus, viewcache: app.viewcache})
 	app.viewcache.SetAccessAuthorizer(app)

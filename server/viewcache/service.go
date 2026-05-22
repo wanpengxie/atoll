@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -60,9 +61,20 @@ type Service struct {
 }
 
 type channelBuffer struct {
-	mu      sync.Mutex
-	pending map[viewsync.Seq]viewsync.PushFrame
+	mu             sync.Mutex
+	pending        map[viewsync.Seq]viewsync.PushFrame
+	pendingBytes   int
+	resyncPending  bool
+	resyncSince    viewsync.Seq
+	resyncUntil    viewsync.Seq
+	lastResyncAtMs int64
 }
+
+const (
+	defaultPendingFrameCap = 1000
+	defaultPendingBytesCap = 8 << 20
+	gapResyncCooldown      = 5 * time.Second
+)
 
 // NewService constructs a Service. Resyncer can be wired later via
 // SetResyncer.
@@ -200,18 +212,35 @@ func (s *Service) Apply(ctx context.Context, frame viewsync.PushFrame) (viewsync
 	// COMMIT — the buffer is a convenience for tests inspecting state;
 	// authoritative state lives in sqlite.
 	buf := s.bufferFor(frame.ChannelID)
+	frameBytes := pendingFrameBytes(frame, envJSON)
+	overflow := false
 	buf.mu.Lock()
 	switch outcome {
 	case viewsync.ApplyOutcomeGap:
-		buf.pending[frame.Seq] = frame
+		if len(buf.pending) >= defaultPendingFrameCap ||
+			buf.pendingBytes+frameBytes > defaultPendingBytesCap {
+			buf.pending = map[viewsync.Seq]viewsync.PushFrame{}
+			buf.pendingBytes = 0
+			overflow = true
+		} else if _, exists := buf.pending[frame.Seq]; !exists {
+			buf.pending[frame.Seq] = frame
+			buf.pendingBytes += frameBytes
+		}
 	case viewsync.ApplyOutcomeContiguous:
 		for seq := range buf.pending {
 			if seq <= newCur {
+				buf.pendingBytes -= pendingFrameBytes(buf.pending[seq], nil)
 				delete(buf.pending, seq)
 			}
 		}
+		if buf.pendingBytes < 0 {
+			buf.pendingBytes = 0
+		}
 	}
 	buf.mu.Unlock()
+	if overflow {
+		outcome = viewsync.ApplyOutcomeResyncRequired
+	}
 
 	// Build DrainedMessages payload. Convention (FIX-T5): nil unless at
 	// least one buffered row drained — then [current frame, ...extras]
@@ -232,12 +261,17 @@ func (s *Service) Apply(ctx context.Context, frame viewsync.PushFrame) (viewsync
 	// are deterministic (no flaky goroutine scheduling). We skip when
 	// neither a hook nor a resyncer is wired so service-level tests
 	// without a resyncer don't accumulate noisy goroutines.
-	if outcome == viewsync.ApplyOutcomeGap && gapSince <= gapUntil {
-		switch {
-		case s.fireResyncFn != nil:
-			s.fireResyncFn(frame.ChannelID, gapSince, gapUntil)
-		case s.resyncer != nil:
-			go s.fireResync(frame.ChannelID, gapSince, gapUntil)
+	if (outcome == viewsync.ApplyOutcomeGap || outcome == viewsync.ApplyOutcomeResyncRequired) &&
+		gapSince <= gapUntil &&
+		(s.fireResyncFn != nil || s.resyncer != nil) {
+		if since, until, ok := s.beginGapResync(frame.ChannelID, gapSince, gapUntil); ok {
+			switch {
+			case s.fireResyncFn != nil:
+				s.fireResyncFn(frame.ChannelID, since, until)
+				s.finishGapResync(frame.ChannelID)
+			case s.resyncer != nil:
+				go s.fireResync(frame.ChannelID, since, until)
+			}
 		}
 	}
 
@@ -253,7 +287,62 @@ func (s *Service) Apply(ctx context.Context, frame viewsync.PushFrame) (viewsync
 // scope and swallows errors — the next gap or a periodic reconcile
 // will retry. Production path only; tests intercept via fireResyncFn.
 func (s *Service) fireResync(channelID channel.ID, since, until viewsync.Seq) {
+	defer s.finishGapResync(channelID)
 	_, _ = s.TriggerResync(context.Background(), channelID, since, until)
+}
+
+func pendingFrameBytes(frame viewsync.PushFrame, envJSON []byte) int {
+	n := len(frame.MessageID) + 32
+	if envJSON != nil {
+		return n + len(envJSON)
+	}
+	if raw, err := json.Marshal(frame.Envelope); err == nil {
+		return n + len(raw)
+	}
+	return n
+}
+
+func capResyncWindow(since, until viewsync.Seq) (viewsync.Seq, viewsync.Seq) {
+	if since > until {
+		return since, until
+	}
+	maxUntil := since + viewsync.Seq(maxResyncRange) - 1
+	if until > maxUntil {
+		until = maxUntil
+	}
+	return since, until
+}
+
+func (s *Service) beginGapResync(channelID channel.ID, since, until viewsync.Seq) (viewsync.Seq, viewsync.Seq, bool) {
+	since, until = capResyncWindow(since, until)
+	buf := s.bufferFor(channelID)
+	now := nowMs()
+	buf.mu.Lock()
+	defer buf.mu.Unlock()
+	if buf.resyncPending {
+		if buf.resyncSince == 0 || since < buf.resyncSince {
+			buf.resyncSince = since
+		}
+		if until > buf.resyncUntil {
+			_, buf.resyncUntil = capResyncWindow(buf.resyncSince, until)
+		}
+		return 0, 0, false
+	}
+	if buf.lastResyncAtMs > 0 && now-buf.lastResyncAtMs < gapResyncCooldown.Milliseconds() {
+		return 0, 0, false
+	}
+	buf.resyncPending = true
+	buf.resyncSince = since
+	buf.resyncUntil = until
+	buf.lastResyncAtMs = now
+	return since, until, true
+}
+
+func (s *Service) finishGapResync(channelID channel.ID) {
+	buf := s.bufferFor(channelID)
+	buf.mu.Lock()
+	buf.resyncPending = false
+	buf.mu.Unlock()
 }
 
 // RecoverGaps scans durable viewcache state for committed out-of-order rows
@@ -313,13 +402,23 @@ func (s *Service) RecoverGaps(ctx context.Context) error {
 		return fmt.Errorf("viewcache: recover gaps close: %w", err)
 	}
 	for _, g := range gaps {
+		if s.fireResyncFn == nil && s.resyncer == nil {
+			continue
+		}
+		since, until, ok := s.beginGapResync(g.channelID, g.since, g.until)
+		if !ok {
+			continue
+		}
 		switch {
 		case s.fireResyncFn != nil:
-			s.fireResyncFn(g.channelID, g.since, g.until)
+			s.fireResyncFn(g.channelID, since, until)
+			s.finishGapResync(g.channelID)
 		case s.resyncer != nil:
-			if _, err := s.TriggerResync(ctx, g.channelID, g.since, g.until); err != nil {
+			if _, err := s.TriggerResync(ctx, g.channelID, since, until); err != nil {
+				s.finishGapResync(g.channelID)
 				return err
 			}
+			s.finishGapResync(g.channelID)
 		}
 	}
 	return nil
@@ -428,24 +527,35 @@ func (s *Service) TriggerResync(ctx context.Context, channelID channel.ID, since
 	if s.resyncer == nil {
 		return 0, fmt.Errorf("viewcache: no resyncer wired")
 	}
-	msgs, err := s.resyncer.RequestResync(ctx, channelID, since, until)
-	if err != nil {
-		return 0, fmt.Errorf("viewcache: resync rpc: %w", err)
+	if since > until {
+		return 0, fmt.Errorf("viewcache: resync range invalid: since=%d > until=%d", since, until)
 	}
-	// Apply in seq ascending order — daemon should return them sorted
-	// but enforce locally so a faulty daemon can't break us.
-	sort.SliceStable(msgs, func(i, j int) bool { return msgs[i].Seq < msgs[j].Seq })
 
-	for _, m := range msgs {
-		frame := viewsync.PushFrame{
-			ChannelID: channelID,
-			Seq:       m.Seq,
-			MessageID: m.MessageID,
-			Envelope:  m.Envelope,
+	for start := since; start <= until; {
+		_, chunkUntil := capResyncWindow(start, until)
+		msgs, err := s.resyncer.RequestResync(ctx, channelID, start, chunkUntil)
+		if err != nil {
+			return 0, fmt.Errorf("viewcache: resync rpc: %w", err)
 		}
-		if _, err := s.Apply(ctx, frame); err != nil {
-			return 0, err
+		// Apply in seq ascending order — daemon should return them sorted
+		// but enforce locally so a faulty daemon can't break us.
+		sort.SliceStable(msgs, func(i, j int) bool { return msgs[i].Seq < msgs[j].Seq })
+
+		for _, m := range msgs {
+			frame := viewsync.PushFrame{
+				ChannelID: channelID,
+				Seq:       m.Seq,
+				MessageID: m.MessageID,
+				Envelope:  m.Envelope,
+			}
+			if _, err := s.Apply(ctx, frame); err != nil {
+				return 0, err
+			}
 		}
+		if chunkUntil == until {
+			break
+		}
+		start = chunkUntil + 1
 	}
 	cur, err := s.Cursor(ctx, channelID)
 	if err != nil {

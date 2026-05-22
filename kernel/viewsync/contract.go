@@ -24,6 +24,13 @@ const (
 	// row was persisted but cursor did NOT advance. A Resync should be
 	// scheduled per L1 §8.5.
 	ApplyOutcomeGap
+
+	// ApplyOutcomeResyncRequired — the receiver persisted a gap frame but
+	// declined to retain more in-memory gap-buffer state because a
+	// per-channel safety cap was reached. A bounded Resync should be
+	// scheduled and producers should expect backpressure until the cursor
+	// advances.
+	ApplyOutcomeResyncRequired
 )
 
 // String returns a stable label for logging / tests.
@@ -35,6 +42,8 @@ func (o ApplyOutcome) String() string {
 		return "duplicate"
 	case ApplyOutcomeGap:
 		return "gap"
+	case ApplyOutcomeResyncRequired:
+		return "resync_required"
 	default:
 		return "unknown"
 	}

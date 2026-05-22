@@ -53,6 +53,7 @@ func TestOpenAndApply(t *testing.T) {
 		"device_sessions",
 		"view_cache_messages",
 		"view_cache_cursors",
+		"placement_rollback_intents",
 	}
 	for _, tbl := range wantTables {
 		var n int

@@ -234,7 +234,9 @@ func TestApplyGapTriggersResync(t *testing.T) {
 		t.Fatal("gap did not trigger resync")
 	}
 
-	// Push seq=5 — gap [2,4]; trigger expected (different window).
+	// Push seq=5 immediately after the first gap. R7-7 rate-limits
+	// automatic gap resyncs, so the durable row is retained but no
+	// second fire-and-forget trigger is emitted inside the cooldown.
 	r, err = svc.Apply(ctx, frame(5))
 	if err != nil {
 		t.Fatalf("Apply seq=5: %v", err)
@@ -244,11 +246,8 @@ func TestApplyGapTriggersResync(t *testing.T) {
 	}
 	select {
 	case c := <-calls:
-		if int64(c.since) != 2 || int64(c.until) != 4 {
-			t.Errorf("gap trigger window=[%d,%d] want [2,4]", c.since, c.until)
-		}
+		t.Fatalf("seq=5 fired resync during cooldown: [%d,%d]", c.since, c.until)
 	default:
-		t.Fatal("seq=5 gap did not trigger resync")
 	}
 }
 

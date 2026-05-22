@@ -238,16 +238,17 @@ func (p *Pusher) recordSuccess(seq viewsync.Seq) {
 	delete(p.failedNotify, seq)
 }
 
-// checkBacklog reads the outbox pending count and emits a
-// ViewSyncBacklogEvent when it crosses BacklogHighWatermark. Re-armed
+// checkBacklog reads the outbox pending count, emits a
+// ViewSyncBacklogEvent when it crosses BacklogHighWatermark, and returns
+// true while the pusher should throttle further Drain work. Re-armed
 // after the count drops back below the watermark.
-func (p *Pusher) checkBacklog(ctx context.Context, chID channel.ID) {
-	if p.watermark <= 0 || p.emitter.OnViewSyncBacklog == nil {
-		return
+func (p *Pusher) checkBacklog(ctx context.Context, chID channel.ID) bool {
+	if p.watermark <= 0 {
+		return false
 	}
 	n, err := p.outbox.PendingCount(ctx)
 	if err != nil {
-		return
+		return false
 	}
 	p.mu.Lock()
 	over := n > p.watermark
@@ -260,8 +261,8 @@ func (p *Pusher) checkBacklog(ctx context.Context, chID channel.ID) {
 	}
 	p.mu.Unlock()
 
-	if !emit {
-		return
+	if !emit || p.emitter.OnViewSyncBacklog == nil {
+		return over
 	}
 	lastPushed, lastAcked, _ := p.cursors.Get(chID)
 	p.emitter.OnViewSyncBacklog(ViewSyncBacklogEvent{
@@ -272,12 +273,16 @@ func (p *Pusher) checkBacklog(ctx context.Context, chID channel.ID) {
 		LastAckedSeq:  lastAcked,
 		NowMs:         p.nowFn(),
 	})
+	return over
 }
 
 // Drain pulls one batch of pending rows and pushes them. Returns
 // (n, err) where n is the number of frames successfully sent.
 // Production callers usually run Pump (Drain in a loop).
 func (p *Pusher) Drain(ctx context.Context) (int, error) {
+	if p.checkBacklog(ctx, p.outbox.ChannelID()) {
+		return 0, nil
+	}
 	pending, err := p.outbox.PendingPage(ctx, p.pageSize)
 	if err != nil {
 		return 0, fmt.Errorf("transit: drain pending: %w", err)

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -116,6 +117,16 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			if err := a.daemonbus.RecordHeartbeat(ctx, conn.DaemonID); err != nil {
 				return placement.HeartbeatAckPayload{}, err
 			}
+			go func(conn *daemonbus.Connection) {
+				retryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := a.retryRollbackIntentsForDaemon(retryCtx, conn); err != nil {
+					pkgLogger.Warn().Err(err).
+						Str("event", "placement.rollback_retry_failed").
+						Str("daemon_id", string(conn.DaemonID)).
+						Msg("placement rollback retry failed during heartbeat")
+				}
+			}(conn)
 			diff, err := a.placements.ObserveHeartbeat(ctx, conn.DaemonID, payload.HeldChannels)
 			if err != nil {
 				return placement.HeartbeatAckPayload{}, err
@@ -254,7 +265,10 @@ func (a *App) Unbind(ctx context.Context, in devicebus.UnbindInput) error {
 }
 
 func (a *App) reclaimPlacement(ctx context.Context, p placement.Placement) error {
-	conn, ok := a.reclaimCandidate(p.DaemonID)
+	conn, ok, err := a.reclaimCandidate(ctx, p.DaemonID, nil)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return fmt.Errorf("gateway: reclaim no connected daemon candidate for %s", p.ChannelID)
 	}
@@ -271,8 +285,8 @@ func (a *App) reclaimPlacement(ctx context.Context, p placement.Placement) error
 	defer cancel()
 	ackFrame, err := conn.SendAndAwait(reclaimCtx, kerneldaemonbus.FrameTypeControlDaemonReclaim, req)
 	if err != nil {
-		if _, orphanErr := a.placements.OrphanCreating(ctx, reserved.ChannelID, reserved.CreateRequestID); orphanErr != nil {
-			return fmt.Errorf("gateway: daemon_reclaim send: %w; orphan: %v", err, orphanErr)
+		if rollbackErr := a.reclaimRollback(ctx, conn, reserved, "daemon_reclaim_send_failed"); rollbackErr != nil {
+			return fmt.Errorf("gateway: daemon_reclaim send: %w; rollback: %v", err, rollbackErr)
 		}
 		return fmt.Errorf("gateway: daemon_reclaim send: %w", err)
 	}
@@ -280,19 +294,16 @@ func (a *App) reclaimPlacement(ctx context.Context, p placement.Placement) error
 	case kerneldaemonbus.FrameTypeControlReclaimAccepted:
 		var ack placement.ReclaimAccepted
 		if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
+			if rollbackErr := a.reclaimRollback(ctx, conn, reserved, "reclaim_accepted_decode_failed"); rollbackErr != nil {
+				return fmt.Errorf("gateway: reclaim_accepted decode: %w; rollback: %v", err, rollbackErr)
+			}
 			return fmt.Errorf("gateway: reclaim_accepted decode: %w", err)
 		}
 		if ack.ChannelID != reserved.ChannelID ||
 			ack.CreateRequestID != reserved.CreateRequestID ||
 			ack.NewOwnerEpoch != reserved.OwnerEpoch {
-			_, orphanErr := a.placements.OrphanCreating(ctx, reserved.ChannelID, reserved.CreateRequestID)
-			epoch := ack.NewOwnerEpoch
-			if epoch == 0 {
-				epoch = reserved.OwnerEpoch
-			}
-			unbindErr := a.sendUnbindChannel(ctx, conn, reserved.ChannelID, epoch, kerneldaemonbus.UnbindChannelReasonAbandon)
-			if orphanErr != nil || unbindErr != nil {
-				return fmt.Errorf("gateway: reclaim_accepted mismatch for %s; orphan: %v; unbind: %v", reserved.ChannelID, orphanErr, unbindErr)
+			if rollbackErr := a.reclaimRollback(ctx, conn, reserved, "reclaim_accepted_mismatch"); rollbackErr != nil {
+				return fmt.Errorf("gateway: reclaim_accepted mismatch for %s; rollback: %v", reserved.ChannelID, rollbackErr)
 			}
 			return fmt.Errorf("gateway: reclaim_accepted mismatch for %s", reserved.ChannelID)
 		}
@@ -306,22 +317,28 @@ func (a *App) reclaimPlacement(ctx context.Context, p placement.Placement) error
 			return err
 		}
 		if ok {
+			_ = a.deleteRollbackIntent(ctx, placementRollbackIntent{
+				ChannelID:       reserved.ChannelID,
+				CreateRequestID: reserved.CreateRequestID,
+				OwnerEpoch:      reserved.OwnerEpoch,
+			})
 			return nil
 		}
-		_, orphanErr := a.placements.OrphanCreating(ctx, reserved.ChannelID, reserved.CreateRequestID)
-		unbindErr := a.sendUnbindChannel(ctx, conn, reserved.ChannelID, ack.NewOwnerEpoch, kerneldaemonbus.UnbindChannelReasonAbandon)
-		if orphanErr != nil || unbindErr != nil {
-			return fmt.Errorf("gateway: reclaim_accepted CAS rejected for %s; orphan: %v; unbind: %v", reserved.ChannelID, orphanErr, unbindErr)
+		if rollbackErr := a.reclaimRollback(ctx, conn, reserved, "reclaim_accepted_cas_rejected"); rollbackErr != nil {
+			return fmt.Errorf("gateway: reclaim_accepted CAS rejected for %s; rollback: %v", reserved.ChannelID, rollbackErr)
 		}
 		return fmt.Errorf("gateway: reclaim_accepted CAS rejected for %s", reserved.ChannelID)
 	case kerneldaemonbus.FrameTypeControlReclaimRejected:
 		var rej placement.ReclaimRejected
 		if err := json.Unmarshal(ackFrame.Payload, &rej); err != nil {
+			if rollbackErr := a.reclaimRollback(ctx, conn, reserved, "reclaim_rejected_decode_failed"); rollbackErr != nil {
+				return fmt.Errorf("gateway: reclaim_rejected decode: %w; rollback: %v", err, rollbackErr)
+			}
 			return fmt.Errorf("gateway: reclaim_rejected decode: %w", err)
 		}
 		if rej.ChannelID != reserved.ChannelID || rej.CreateRequestID != reserved.CreateRequestID {
-			if _, orphanErr := a.placements.OrphanCreating(ctx, reserved.ChannelID, reserved.CreateRequestID); orphanErr != nil {
-				return fmt.Errorf("gateway: reclaim_rejected mismatch for %s; orphan: %w", reserved.ChannelID, orphanErr)
+			if rollbackErr := a.reclaimRollback(ctx, conn, reserved, "reclaim_rejected_mismatch"); rollbackErr != nil {
+				return fmt.Errorf("gateway: reclaim_rejected mismatch for %s; rollback: %v", reserved.ChannelID, rollbackErr)
 			}
 			return fmt.Errorf("gateway: reclaim_rejected mismatch for %s", reserved.ChannelID)
 		}
@@ -339,25 +356,56 @@ func (a *App) reclaimPlacement(ctx context.Context, p placement.Placement) error
 			return fmt.Errorf("gateway: reclaim_rejected unknown reason %q for %s", rej.Reason, reserved.ChannelID)
 		}
 	default:
-		if _, orphanErr := a.placements.OrphanCreating(ctx, reserved.ChannelID, reserved.CreateRequestID); orphanErr != nil {
-			return fmt.Errorf("gateway: reclaim unexpected ack frame %s; orphan: %w", ackFrame.FrameKind, orphanErr)
+		if rollbackErr := a.reclaimRollback(ctx, conn, reserved, "reclaim_unexpected_ack_frame"); rollbackErr != nil {
+			return fmt.Errorf("gateway: reclaim unexpected ack frame %s; rollback: %v", ackFrame.FrameKind, rollbackErr)
 		}
 		return fmt.Errorf("gateway: reclaim unexpected ack frame %s", ackFrame.FrameKind)
 	}
 }
 
-func (a *App) reclaimCandidate(previousOwner placement.DaemonID) (*daemonbus.Connection, bool) {
-	var previous *daemonbus.Connection
-	for _, conn := range a.daemonbus.ConnectedConnections() {
-		if conn.DaemonID != previousOwner {
-			return conn, true
+func (a *App) reclaimCandidate(ctx context.Context, previousOwner placement.DaemonID, excluded map[placement.DaemonID]bool) (*daemonbus.Connection, bool, error) {
+	metrics, err := a.daemonbus.ConnectedConnectionMetrics(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	filter := func(allowPrevious bool) []daemonbus.ConnectionMetrics {
+		out := make([]daemonbus.ConnectionMetrics, 0, len(metrics))
+		for _, m := range metrics {
+			if m.Connection == nil || m.Connection.IsClosed() {
+				continue
+			}
+			if excluded != nil && excluded[m.DaemonID] {
+				continue
+			}
+			if !allowPrevious && m.DaemonID == previousOwner {
+				continue
+			}
+			if m.Capacity > 0 && m.ActiveChannels >= m.Capacity {
+				continue
+			}
+			out = append(out, m)
 		}
-		previous = conn
+		return out
 	}
-	if previous != nil {
-		return previous, true
+	candidates := filter(false)
+	if len(candidates) == 0 {
+		candidates = filter(true)
 	}
-	return nil, false
+	if len(candidates) == 0 {
+		return nil, false, nil
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].ActiveChannels != candidates[j].ActiveChannels {
+			return candidates[i].ActiveChannels < candidates[j].ActiveChannels
+		}
+		if candidates[i].LastReclaimAt != candidates[j].LastReclaimAt {
+			return candidates[i].LastReclaimAt < candidates[j].LastReclaimAt
+		}
+		return candidates[i].DaemonID < candidates[j].DaemonID
+	})
+	chosen := candidates[0]
+	a.daemonbus.MarkReclaimAssigned(chosen.DaemonID)
+	return chosen.Connection, true, nil
 }
 
 func (a *App) sendUnbindChannel(

@@ -69,10 +69,24 @@ type Service struct {
 	mu          sync.RWMutex
 	connections map[placement.DaemonID]*Connection
 	connGen     atomic.Uint64
+	onRegister  func(*Connection)
+
+	reclaimMu       sync.Mutex
+	lastReclaimAt   map[placement.DaemonID]int64
+	reclaimSequence atomic.Int64
 
 	channelDaemonResolver placements.ChannelDaemonResolver
 
 	allowedOrigins map[string]struct{}
+}
+
+// SetRegisterHook installs an optional callback invoked after a connection
+// becomes the current registry entry. The gateway uses this to retry durable
+// server->daemon control intents on reconnect.
+func (s *Service) SetRegisterHook(h func(*Connection)) {
+	s.mu.Lock()
+	s.onRegister = h
+	s.mu.Unlock()
 }
 
 // NewService builds a Service.
@@ -82,6 +96,7 @@ func NewService(db *sql.DB, cfg Config) *Service {
 		cfg:            cfg,
 		now:            time.Now,
 		connections:    map[placement.DaemonID]*Connection{},
+		lastReclaimAt:  map[placement.DaemonID]int64{},
 		allowedOrigins: normalizeAllowedOrigins(cfg.AllowedOrigins),
 	}
 }
@@ -128,6 +143,99 @@ func (s *Service) ConnectedConnections() []*Connection {
 		return out[i].DaemonID < out[j].DaemonID
 	})
 	return out
+}
+
+// ConnectionMetrics is the scheduler-facing snapshot for one connected
+// daemon. ActiveChannels counts active + creating placements so a batch of
+// reclaim reservations contributes to load immediately.
+type ConnectionMetrics struct {
+	Connection      *Connection
+	DaemonID        placement.DaemonID
+	ConnectionEpoch daemonbus.ConnectionEpoch
+	ActiveChannels  int
+	Capacity        int
+	LastReclaimAt   int64
+}
+
+// ConnectedConnectionMetrics returns connected daemons annotated with
+// placement load, capacity and last reclaim assignment.
+func (s *Service) ConnectedConnectionMetrics(ctx context.Context) ([]ConnectionMetrics, error) {
+	conns := s.ConnectedConnections()
+	if len(conns) == 0 {
+		return nil, nil
+	}
+	capacity := map[placement.DaemonID]int{}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, capacity FROM daemons`)
+	if err != nil {
+		return nil, fmt.Errorf("daemonbus: query daemon capacity: %w", err)
+	}
+	for rows.Next() {
+		var id string
+		var cap int
+		if err := rows.Scan(&id, &cap); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("daemonbus: scan daemon capacity: %w", err)
+		}
+		capacity[placement.DaemonID(id)] = cap
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("daemonbus: close daemon capacity rows: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("daemonbus: daemon capacity rows: %w", err)
+	}
+
+	load := map[placement.DaemonID]int{}
+	rows, err = s.db.QueryContext(ctx, `
+		SELECT daemon_id, COUNT(*)
+		  FROM channel_placements
+		 WHERE state IN ('active','creating')
+		 GROUP BY daemon_id`)
+	if err != nil {
+		return nil, fmt.Errorf("daemonbus: query daemon load: %w", err)
+	}
+	for rows.Next() {
+		var id string
+		var count int
+		if err := rows.Scan(&id, &count); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("daemonbus: scan daemon load: %w", err)
+		}
+		load[placement.DaemonID(id)] = count
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("daemonbus: close daemon load rows: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("daemonbus: daemon load rows: %w", err)
+	}
+
+	s.reclaimMu.Lock()
+	defer s.reclaimMu.Unlock()
+	out := make([]ConnectionMetrics, 0, len(conns))
+	for _, conn := range conns {
+		out = append(out, ConnectionMetrics{
+			Connection:      conn,
+			DaemonID:        conn.DaemonID,
+			ConnectionEpoch: conn.ConnectionEpoch,
+			ActiveChannels:  load[conn.DaemonID],
+			Capacity:        capacity[conn.DaemonID],
+			LastReclaimAt:   s.lastReclaimAt[conn.DaemonID],
+		})
+	}
+	return out, nil
+}
+
+// MarkReclaimAssigned records a successful scheduler choice for round-robin
+// tie-breaking among equal-load daemons.
+func (s *Service) MarkReclaimAssigned(daemonID placement.DaemonID) {
+	if daemonID == "" {
+		return
+	}
+	seq := s.reclaimSequence.Add(1)
+	s.reclaimMu.Lock()
+	s.lastReclaimAt[daemonID] = seq
+	s.reclaimMu.Unlock()
 }
 
 // RegisterDaemon ensures a row exists in the daemons table for the

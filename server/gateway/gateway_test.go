@@ -2379,6 +2379,238 @@ func TestServerInitiatedReclaimCASFalseOrphansAndUnbinds(t *testing.T) {
 	_ = conn.Close()
 }
 
+func TestReclaim_TimeoutAfterTakeover_TriggersUnbindRetry(t *testing.T) {
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	conn, dmn, epoch, createReq := prepareRollbackReclaim(t, app, ctx, "ch-reclaim-timeout", "d-reclaim-timeout")
+	defer app.Daemonbus().Unregister(conn.DaemonID)
+
+	reclaimSeen := make(chan error, 1)
+	go func() {
+		frame, err := dmn.ReadFrame(ctx)
+		if err != nil {
+			reclaimSeen <- err
+			return
+		}
+		if frame.FrameKind != kerneldaemonbus.FrameTypeControlDaemonReclaim {
+			reclaimSeen <- fmt.Errorf("frame=%s want daemon_reclaim", frame.FrameKind)
+			return
+		}
+		reclaimSeen <- nil
+	}()
+
+	shortCtx, shortCancel := context.WithTimeout(ctx, 80*time.Millisecond)
+	err := app.Placements().ReconcileOnce(shortCtx)
+	shortCancel()
+	if err == nil {
+		t.Fatal("ReconcileOnce err=nil want timeout")
+	}
+	if err := <-reclaimSeen; err != nil {
+		t.Fatalf("daemon side: %v", err)
+	}
+	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 1)
+	drainRollbackUnbindNoAck(t, ctx, dmn, createReq.ChannelID)
+	triggerRollbackHeartbeatRetry(t, ctx, dmn, conn.DaemonID, epoch, createReq.ChannelID)
+	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 0)
+}
+
+func TestReclaim_MalformedAcceptedAck_TriggersUnbindRetry(t *testing.T) {
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	conn, dmn, epoch, createReq := prepareRollbackReclaim(t, app, ctx, "ch-reclaim-malformed", "d-reclaim-malformed")
+	defer app.Daemonbus().Unregister(conn.DaemonID)
+
+	done := replyToReclaim(t, ctx, dmn, conn.DaemonID, epoch, kerneldaemonbus.FrameTypeControlReclaimAccepted, []byte(`{"bad"`))
+	err := app.Placements().ReconcileOnce(ctx)
+	if err == nil || !strings.Contains(err.Error(), "reclaim_accepted decode") {
+		t.Fatalf("ReconcileOnce err=%v want reclaim_accepted decode", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("daemon side: %v", err)
+	}
+	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 1)
+	drainRollbackUnbindNoAck(t, ctx, dmn, createReq.ChannelID)
+	triggerRollbackHeartbeatRetry(t, ctx, dmn, conn.DaemonID, epoch, createReq.ChannelID)
+	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 0)
+}
+
+func TestReclaim_UnexpectedFrame_TriggersUnbindRetry(t *testing.T) {
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	conn, dmn, epoch, createReq := prepareRollbackReclaim(t, app, ctx, "ch-reclaim-unexpected", "d-reclaim-unexpected")
+	defer app.Daemonbus().Unregister(conn.DaemonID)
+
+	done := replyToReclaim(t, ctx, dmn, conn.DaemonID, epoch, kerneldaemonbus.FrameTypeControlHeartbeatAck, []byte(`{}`))
+	err := app.Placements().ReconcileOnce(ctx)
+	if err == nil || !strings.Contains(err.Error(), "unexpected ack frame") {
+		t.Fatalf("ReconcileOnce err=%v want unexpected ack frame", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("daemon side: %v", err)
+	}
+	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 1)
+	drainRollbackUnbindNoAck(t, ctx, dmn, createReq.ChannelID)
+	triggerRollbackHeartbeatRetry(t, ctx, dmn, conn.DaemonID, epoch, createReq.ChannelID)
+	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 0)
+}
+
+func TestReclaim_UnbindSendFailure_PersistsIntentForRetry(t *testing.T) {
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	conn, dmn, epoch, createReq := prepareRollbackReclaim(t, app, ctx, "ch-reclaim-unbind-send-fail", "d-reclaim-unbind-send-fail")
+
+	done := make(chan error, 1)
+	go func() {
+		frame, err := dmn.ReadFrame(ctx)
+		if err != nil {
+			done <- err
+			return
+		}
+		var req placement.DaemonReclaimRequest
+		if err := json.Unmarshal(frame.Payload, &req); err != nil {
+			done <- err
+			return
+		}
+		raw, _ := json.Marshal(placement.ReclaimAccepted{
+			ChannelID:       req.ChannelID,
+			CreateRequestID: req.CreateRequestID,
+			NewOwnerEpoch:   req.NewOwnerEpoch + 100,
+			FencingToken:    "tok-wrong-epoch",
+		})
+		if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+			FrameID:               frame.FrameID,
+			FrameKind:             kerneldaemonbus.FrameTypeControlReclaimAccepted,
+			DaemonID:              conn.DaemonID,
+			DaemonConnectionEpoch: epoch,
+			Payload:               raw,
+		}); err != nil {
+			done <- err
+			return
+		}
+		done <- conn.Close()
+	}()
+
+	err := app.Placements().ReconcileOnce(ctx)
+	if err == nil || !strings.Contains(err.Error(), "daemon_reclaim send") {
+		t.Fatalf("ReconcileOnce err=%v want daemon_reclaim send failure", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("daemon side: %v", err)
+	}
+	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 1)
+
+	app.Daemonbus().Unregister(conn.DaemonID)
+	svr2, dmn2 := newPipePair()
+	conn2 := daemonbus.NewConnection(conn.DaemonID, epoch+1, svr2)
+	retryDone := expectRollbackUnbindAndAck(t, ctx, dmn2, createReq.ChannelID)
+	app.Daemonbus().Register(conn2)
+	defer app.Daemonbus().Unregister(conn.DaemonID)
+	go func() { _ = conn2.Run(ctx, app.DaemonbusHandlers()) }()
+	if err := <-retryDone; err != nil {
+		t.Fatalf("retry daemon side: %v", err)
+	}
+	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 0)
+}
+
+func TestReclaimCandidate_3DaemonsBalancedDistribution(t *testing.T) {
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	counts := map[placement.DaemonID]int{}
+	var countsMu sync.Mutex
+	for _, id := range []placement.DaemonID{"d-balance-a", "d-balance-b", "d-balance-c"} {
+		_, dmn, epoch := registerReclaimDaemon(t, app, ctx, id, 0)
+		serveCountingReclaims(t, ctx, dmn, id, epoch, counts, &countsMu)
+	}
+	for i := 0; i < 100; i++ {
+		createStalePlacement(t, app, ctx, fmt.Sprintf("ch-balance-%03d", i), "d-balance-prev", 1)
+	}
+	if err := app.Placements().ReconcileOnce(ctx); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+
+	countsMu.Lock()
+	defer countsMu.Unlock()
+	for _, id := range []placement.DaemonID{"d-balance-a", "d-balance-b", "d-balance-c"} {
+		if counts[id] < 30 || counts[id] > 36 {
+			t.Fatalf("balanced count[%s]=%d want roughly 33; all=%v", id, counts[id], counts)
+		}
+	}
+}
+
+func TestReclaimCandidate_CapacityRespected(t *testing.T) {
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	counts := map[placement.DaemonID]int{}
+	var countsMu sync.Mutex
+	for _, spec := range []struct {
+		id       placement.DaemonID
+		capacity int
+	}{
+		{"d-cap-a", 20},
+		{"d-cap-b", 1},
+		{"d-cap-c", 20},
+	} {
+		_, dmn, epoch := registerReclaimDaemon(t, app, ctx, spec.id, spec.capacity)
+		serveCountingReclaims(t, ctx, dmn, spec.id, epoch, counts, &countsMu)
+	}
+	createStalePlacement(t, app, ctx, "ch-cap-b-existing", "d-cap-b", 1)
+	if ok, err := app.Placements().AcceptHeldChannel(ctx, "ch-cap-b-existing", "d-cap-b", placement.HeldChannel{
+		ChannelID:    "ch-cap-b-existing",
+		OwnerEpoch:   1,
+		FencingToken: "tok-before-reclaim-ch-cap-b-existing",
+	}, 1); err != nil || !ok {
+		t.Fatalf("reactivate B seed ok=%v err=%v", ok, err)
+	}
+	for i := 0; i < 12; i++ {
+		createStalePlacement(t, app, ctx, fmt.Sprintf("ch-cap-%02d", i), "d-cap-prev", 1)
+	}
+	if err := app.Placements().ReconcileOnce(ctx); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	countsMu.Lock()
+	defer countsMu.Unlock()
+	if counts["d-cap-b"] != 0 {
+		t.Fatalf("full daemon B received %d reclaims; counts=%v", counts["d-cap-b"], counts)
+	}
+	if counts["d-cap-a"] == 0 || counts["d-cap-c"] == 0 {
+		t.Fatalf("A/C should receive reclaims; counts=%v", counts)
+	}
+}
+
+func TestReclaimCandidate_ChosenFailFallback(t *testing.T) {
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	closedConn, _, _ := registerReclaimDaemon(t, app, ctx, "d-fallback-a", 0)
+	_ = closedConn.Close()
+	_, dmnB, epochB := registerReclaimDaemon(t, app, ctx, "d-fallback-b", 0)
+	counts := map[placement.DaemonID]int{}
+	var countsMu sync.Mutex
+	serveCountingReclaims(t, ctx, dmnB, "d-fallback-b", epochB, counts, &countsMu)
+	createStalePlacement(t, app, ctx, "ch-fallback", "d-fallback-prev", 1)
+	if err := app.Placements().ReconcileOnce(ctx); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	countsMu.Lock()
+	defer countsMu.Unlock()
+	if counts["d-fallback-b"] != 1 {
+		t.Fatalf("fallback daemon count=%d want 1; counts=%v", counts["d-fallback-b"], counts)
+	}
+}
+
 // TestHeldChannelsReportDaemonIDMismatch is the FIX-T4 regression: a
 // daemonbus connection authenticated as "d1" must not be able to report
 // placements by setting `HeldChannelsReport.DaemonID` to some other
@@ -2525,6 +2757,235 @@ func userIDByEmail(t *testing.T, app *gateway.App, email string) string {
 		t.Fatalf("userIDByEmail(%s): %v", email, err)
 	}
 	return id
+}
+
+func prepareRollbackReclaim(
+	t *testing.T,
+	app *gateway.App,
+	ctx context.Context,
+	channelID string,
+	daemonID placement.DaemonID,
+) (*daemonbus.Connection, *pipeTransport, kerneldaemonbus.ConnectionEpoch, placement.CreateChannelRequest) {
+	t.Helper()
+	if err := app.Daemonbus().RegisterDaemon(ctx, daemonID, "h", "v", 0, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon: %v", err)
+	}
+	epoch, _ := app.Daemonbus().IssueConnectionEpoch(ctx, daemonID)
+	svr, dmn := newPipePair()
+	conn := daemonbus.NewConnection(daemonID, epoch, svr)
+	app.Daemonbus().Register(conn)
+	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
+	createReq := createStalePlacement(t, app, ctx, channelID, daemonID, placement.ConnectionEpoch(epoch))
+	return conn, dmn, epoch, createReq
+}
+
+func replyToReclaim(
+	t *testing.T,
+	ctx context.Context,
+	dmn *pipeTransport,
+	daemonID placement.DaemonID,
+	epoch kerneldaemonbus.ConnectionEpoch,
+	kind kerneldaemonbus.FrameType,
+	payload []byte,
+) <-chan error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		frame, err := dmn.ReadFrame(ctx)
+		if err != nil {
+			done <- err
+			return
+		}
+		if frame.FrameKind != kerneldaemonbus.FrameTypeControlDaemonReclaim {
+			done <- fmt.Errorf("frame=%s want daemon_reclaim", frame.FrameKind)
+			return
+		}
+		done <- dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+			FrameID:               frame.FrameID,
+			FrameKind:             kind,
+			DaemonID:              daemonID,
+			DaemonConnectionEpoch: epoch,
+			Payload:               payload,
+		})
+	}()
+	return done
+}
+
+func assertRollbackIntentCount(t *testing.T, app *gateway.App, ctx context.Context, chID channel.ID, want int) {
+	t.Helper()
+	deadline := time.Now().Add(700 * time.Millisecond)
+	var got int
+	for {
+		if err := app.DB().QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM placement_rollback_intents WHERE channel_id = ?`,
+			string(chID),
+		).Scan(&got); err != nil {
+			t.Fatalf("rollback intent count: %v", err)
+		}
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rollback intents for %s = %d want %d", chID, got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func drainRollbackUnbindNoAck(t *testing.T, ctx context.Context, dmn *pipeTransport, chID channel.ID) {
+	t.Helper()
+	frame, err := dmn.ReadFrame(ctx)
+	if err != nil {
+		t.Fatalf("read initial rollback unbind: %v", err)
+	}
+	if frame.FrameKind != kerneldaemonbus.FrameTypeControlUnbindChannel {
+		t.Fatalf("initial rollback frame=%s want unbind_channel", frame.FrameKind)
+	}
+	var body kerneldaemonbus.UnbindChannelBody
+	if err := json.Unmarshal(frame.Payload, &body); err != nil {
+		t.Fatalf("decode initial unbind: %v", err)
+	}
+	if body.ChannelID != chID || body.Reason != kerneldaemonbus.UnbindChannelReasonAbandon {
+		t.Fatalf("initial unbind=%+v want channel %s abandon", body, chID)
+	}
+}
+
+func triggerRollbackHeartbeatRetry(
+	t *testing.T,
+	ctx context.Context,
+	dmn *pipeTransport,
+	daemonID placement.DaemonID,
+	epoch kerneldaemonbus.ConnectionEpoch,
+	chID channel.ID,
+) {
+	t.Helper()
+	retryDone := expectRollbackUnbindAndAck(t, ctx, dmn, chID)
+	raw, _ := json.Marshal(placement.HeartbeatPayload{
+		DaemonID:     daemonID,
+		HeartbeatSeq: 1,
+	})
+	if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+		FrameID:               kerneldaemonbus.FrameID("frame-heartbeat-retry-" + string(chID)),
+		FrameKind:             kerneldaemonbus.FrameTypeControlHeartbeat,
+		DaemonID:              daemonID,
+		DaemonConnectionEpoch: epoch,
+		Payload:               raw,
+	}); err != nil {
+		t.Fatalf("send heartbeat: %v", err)
+	}
+	if err := <-retryDone; err != nil {
+		t.Fatalf("heartbeat retry: %v", err)
+	}
+}
+
+func expectRollbackUnbindAndAck(
+	t *testing.T,
+	ctx context.Context,
+	dmn *pipeTransport,
+	chID channel.ID,
+) <-chan error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		var frame kerneldaemonbus.Frame
+		for {
+			got, err := dmn.ReadFrame(ctx)
+			if err != nil {
+				done <- err
+				return
+			}
+			if got.FrameKind != kerneldaemonbus.FrameTypeControlUnbindChannel {
+				continue
+			}
+			frame = got
+			break
+		}
+		var body kerneldaemonbus.UnbindChannelBody
+		if err := json.Unmarshal(frame.Payload, &body); err != nil {
+			done <- err
+			return
+		}
+		if body.ChannelID != chID || body.Reason != kerneldaemonbus.UnbindChannelReasonAbandon {
+			done <- fmt.Errorf("bad retry unbind: %+v", body)
+			return
+		}
+		raw, _ := json.Marshal(kerneldaemonbus.UnbindChannelAckBody{
+			ChannelID:  body.ChannelID,
+			OwnerEpoch: body.OwnerEpoch,
+			Result:     kerneldaemonbus.UnbindChannelReleased,
+		})
+		done <- dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+			FrameID:               frame.FrameID,
+			FrameKind:             kerneldaemonbus.FrameTypeControlUnbindChannelAck,
+			DaemonID:              frame.DaemonID,
+			DaemonConnectionEpoch: frame.DaemonConnectionEpoch,
+			Payload:               raw,
+		})
+	}()
+	return done
+}
+
+func registerReclaimDaemon(
+	t *testing.T,
+	app *gateway.App,
+	ctx context.Context,
+	id placement.DaemonID,
+	capacity int,
+) (*daemonbus.Connection, *pipeTransport, kerneldaemonbus.ConnectionEpoch) {
+	t.Helper()
+	if err := app.Daemonbus().RegisterDaemon(ctx, id, "h", "v", capacity, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon %s: %v", id, err)
+	}
+	epoch, _ := app.Daemonbus().IssueConnectionEpoch(ctx, id)
+	svr, dmn := newPipePair()
+	conn := daemonbus.NewConnection(id, epoch, svr)
+	app.Daemonbus().Register(conn)
+	t.Cleanup(func() { app.Daemonbus().Unregister(id) })
+	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
+	return conn, dmn, epoch
+}
+
+func serveCountingReclaims(
+	t *testing.T,
+	ctx context.Context,
+	dmn *pipeTransport,
+	daemonID placement.DaemonID,
+	epoch kerneldaemonbus.ConnectionEpoch,
+	counts map[placement.DaemonID]int,
+	countsMu *sync.Mutex,
+) {
+	t.Helper()
+	go func() {
+		for {
+			frame, err := dmn.ReadFrame(ctx)
+			if err != nil {
+				return
+			}
+			if frame.FrameKind != kerneldaemonbus.FrameTypeControlDaemonReclaim {
+				continue
+			}
+			var req placement.DaemonReclaimRequest
+			if err := json.Unmarshal(frame.Payload, &req); err != nil {
+				return
+			}
+			countsMu.Lock()
+			counts[daemonID]++
+			countsMu.Unlock()
+			raw, _ := json.Marshal(placement.ReclaimAccepted{
+				ChannelID:       req.ChannelID,
+				CreateRequestID: req.CreateRequestID,
+				NewOwnerEpoch:   req.NewOwnerEpoch,
+				FencingToken:    placement.FencingToken("tok-reclaim-" + string(daemonID) + "-" + string(req.ChannelID)),
+			})
+			_ = dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+				FrameID:               frame.FrameID,
+				FrameKind:             kerneldaemonbus.FrameTypeControlReclaimAccepted,
+				DaemonID:              daemonID,
+				DaemonConnectionEpoch: epoch,
+				Payload:               raw,
+			})
+		}
+	}()
 }
 
 func prepareStaleReclaimCandidate(

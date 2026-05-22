@@ -233,6 +233,7 @@ type channelRuntime struct {
 	chain         *harness.Chain
 	wrappedChain  *postHarnessChain
 	pusher        *transit.Pusher
+	pushMu        sync.Mutex
 	pausePush     func()
 	deliverer     *scheduler.Deliverer
 	gateway       *trigger.Gateway
@@ -271,6 +272,19 @@ type channelRuntime struct {
 	// has already wired the *transit.DeviceTransit). Reads are atomic;
 	// "" / nil means "no adapter wired yet — drop silently".
 	deviceCallback atomic.Value // func(ctx context.Context, frame devicetransit.SendFrame) error
+}
+
+func (cr *channelRuntime) cancelPusher() {
+	if cr == nil {
+		return
+	}
+	cr.pushMu.Lock()
+	cancel := cr.pausePush
+	cr.pausePush = nil
+	cr.pushMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // ChannelHooks bundles the per-channel seams exposed to a daemon
@@ -666,7 +680,7 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 		if _, ok := acceptedSet[lc.ChannelID]; !ok {
 			continue
 		}
-		if err := d.bootChannel(ctx, lc); err != nil {
+		if err := d.bootChannel(ctx, lc, true); err != nil {
 			return fmt.Errorf("runtime: channel %s: %w", lc.ChannelID, err)
 		}
 	}
@@ -968,10 +982,10 @@ func (d *Daemon) deleteChannel(id channel.ID) {
 
 func (d *Daemon) pauseChannelPush(id channel.ID) {
 	cr, ok := d.getChannel(id)
-	if !ok || cr.pausePush == nil {
+	if !ok {
 		return
 	}
-	cr.pausePush()
+	cr.cancelPusher()
 }
 
 func (d *Daemon) freezeChannel(ctx context.Context, id channel.ID, reason string) {
@@ -982,9 +996,7 @@ func (d *Daemon) freezeChannel(ctx context.Context, id channel.ID, reason string
 	if cr.wrappedChain != nil {
 		cr.wrappedChain.Freeze(reason)
 	}
-	if cr.pausePush != nil {
-		cr.pausePush()
-	}
+	cr.cancelPusher()
 	if cr.workerBridge != nil {
 		closeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		_ = cr.workerBridge.Close(closeCtx)
@@ -1455,7 +1467,7 @@ func (d *Daemon) CurrentWorkerIDFor(chID channel.ID) string {
 // both phase-3 cold-start AND the hot OnCreateChannel handler so the
 // two paths stay symmetric (single source of "what does it take to
 // bring a channel up").
-func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) error {
+func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel, startPusher bool) error {
 	cr, err := d.buildChannelRuntime(ctx, lc)
 	if err != nil {
 		return err
@@ -1532,25 +1544,6 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 		cr.teardown = teardown
 	}
 
-	// Per-channel context so Unload can stop the pusher independently
-	// of the global d.runCtx.
-	pusherCtx, pusherCancel := context.WithCancel(d.runCtx)
-	cr.pausePush = pusherCancel
-	d.wg.Add(1)
-	go func(p *transit.Pusher, id channel.ID) {
-		defer d.wg.Done()
-		if err := p.Pump(pusherCtx); err != nil {
-			if !errors.Is(err, context.Canceled) {
-				// Structured log so cmd/daemon JSON stream captures it
-				// alongside dispatcher/heartbeat events.
-				d.log.Warn().Err(err).
-					Str("event", "runtime.pusher_exited").
-					Str("channel_id", string(id)).
-					Msg("per-channel pusher exited with error")
-			}
-		}
-	}(cr.pusher, lc.ChannelID)
-
 	// Register the teardown: shut down worker bridge (T1) and adapter
 	// framework (T2 via cr.teardown), cancel pusher ctx, drop the
 	// runtime entry. Sqlite handle stays open — Close() reaps it at
@@ -1572,12 +1565,52 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel) err
 			}
 			cancel()
 		}
-		pusherCancel()
+		cr.cancelPusher()
 		d.deleteChannel(chID)
 		d.booter.Unload(chID)
 		return nil
 	})
+	if startPusher {
+		d.startChannelPusher(cr)
+	}
 	return nil
+}
+
+func (d *Daemon) startChannelPusher(cr *channelRuntime) {
+	if cr == nil || cr.pusher == nil {
+		return
+	}
+	cr.pushMu.Lock()
+	if cr.pausePush != nil {
+		cr.pushMu.Unlock()
+		return
+	}
+	pusherCtx, pusherCancel := context.WithCancel(d.runCtx)
+	cr.pausePush = pusherCancel
+	cr.pushMu.Unlock()
+
+	d.wg.Add(1)
+	go func(p *transit.Pusher, id channel.ID) {
+		defer d.wg.Done()
+		if err := p.Pump(pusherCtx); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				// Structured log so cmd/daemon JSON stream captures it
+				// alongside dispatcher/heartbeat events.
+				d.log.Warn().Err(err).
+					Str("event", "runtime.pusher_exited").
+					Str("channel_id", string(id)).
+					Msg("per-channel pusher exited with error")
+			}
+		}
+	}(cr.pusher, cr.channelID)
+}
+
+func (d *Daemon) startChannelPusherFor(id channel.ID) {
+	cr, ok := d.getChannel(id)
+	if !ok {
+		return
+	}
+	d.startChannelPusher(cr)
 }
 
 // handleCreateChannel is the OnCreateChannel handler — T0.1. It is the
@@ -1685,12 +1718,16 @@ func (d *Daemon) handleCreateChannel(
 			ack.OwnerEpoch = row.OwnerEpoch
 			ack.FencingToken = row.FencingToken
 			if !d.HasChannel(req.ChannelID) {
-				if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath); err != nil {
+				if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath, false); err != nil {
 					return reject(fmt.Sprintf("mount existing: %v", err))
 				}
 			}
 			ack.Result = placement.CreateChannelAccepted
-			return d.sendCreateAck(ctx, frame.FrameID, ack)
+			if err := d.sendCreateAck(ctx, frame.FrameID, ack); err != nil {
+				return err
+			}
+			d.startChannelPusherFor(req.ChannelID)
+			return nil
 		}
 	}
 
@@ -1741,13 +1778,17 @@ func (d *Daemon) handleCreateChannel(
 		return reject(fmt.Sprintf("bootstrap complete: %v", err))
 	}
 
-	if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath); err != nil {
+	if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath, false); err != nil {
 		return reject(fmt.Sprintf("mount: %v", err))
 	}
 	ack.OwnerEpoch = bootstrapOwnerEpoch
 	ack.FencingToken = fencingToken
 	ack.Result = placement.CreateChannelAccepted
-	return d.sendCreateAck(ctx, frame.FrameID, ack)
+	if err := d.sendCreateAck(ctx, frame.FrameID, ack); err != nil {
+		return err
+	}
+	d.startChannelPusherFor(req.ChannelID)
+	return nil
 }
 
 // ensureChannelCreatedEvent appends the Layer 0 bootstrap event before
@@ -1831,12 +1872,12 @@ func (d *Daemon) lookupBootstrapRequestID(ctx context.Context, channelID channel
 // + channel_lock already on disk: it runs lifecycle.Bootstrapper.LoadOne
 // + bootChannel so the new channel id becomes routable for
 // OnWriteMessage / viewsync without restarting the daemon.
-func (d *Daemon) mountExistingChannel(ctx context.Context, id channel.ID, sqlitePath string) error {
+func (d *Daemon) mountExistingChannel(ctx context.Context, id channel.ID, sqlitePath string, startPusher bool) error {
 	lc, err := d.booter.LoadOne(ctx, id, sqlitePath)
 	if err != nil {
 		return err
 	}
-	return d.bootChannel(ctx, lc)
+	return d.bootChannel(ctx, lc, startPusher)
 }
 
 // sendCreateAck wraps the transit Send for a CreateChannelAck. Pulled
@@ -1918,7 +1959,7 @@ func (d *Daemon) handleDaemonReclaim(
 			return reject(placement.ReclaimRejectInternalError)
 		}
 		if !d.HasChannel(req.ChannelID) {
-			if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath); err != nil {
+			if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath, true); err != nil {
 				return reject(placement.ReclaimRejectInternalError)
 			}
 		}
@@ -1955,7 +1996,7 @@ func (d *Daemon) handleDaemonReclaim(
 			return reject(placement.ReclaimRejectInternalError)
 		}
 	}
-	if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath); err != nil {
+	if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath, true); err != nil {
 		return reject(placement.ReclaimRejectInternalError)
 	}
 	return d.sendReclaimAccepted(ctx, frame.FrameID, placement.ReclaimAccepted{

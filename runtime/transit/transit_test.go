@@ -3,6 +3,7 @@ package transit_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -368,7 +369,76 @@ func TestDispatcher_ResyncRoundTrip(t *testing.T) {
 	}
 }
 
+func TestMessagesByRange_PagedResponse(t *testing.T) {
+	ctx := context.Background()
+	reader := &pagedResyncReader{chID: testChannelID}
+	resyncServer, err := transit.NewResyncServer(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := resyncServer.ServeResync(ctx, viewsync.ResyncRequest{
+		ChannelID: testChannelID,
+		SinceSeq:  1,
+		UntilSeq:  1200,
+	})
+	if err != nil {
+		t.Fatalf("ServeResync: %v", err)
+	}
+	if len(resp.Messages) != 1200 {
+		t.Fatalf("messages=%d want 1200", len(resp.Messages))
+	}
+	want := []resyncRange{{1, 500}, {501, 1000}, {1001, 1200}}
+	if len(reader.ranges) != len(want) {
+		t.Fatalf("ranges=%v want %v", reader.ranges, want)
+	}
+	for i := range want {
+		if reader.ranges[i] != want[i] {
+			t.Fatalf("range[%d]=%v want %v", i, reader.ranges[i], want[i])
+		}
+	}
+	for i, msg := range resp.Messages {
+		wantSeq := viewsync.Seq(i + 1)
+		if msg.Seq != wantSeq {
+			t.Fatalf("message[%d].Seq=%d want %d", i, msg.Seq, wantSeq)
+		}
+	}
+}
+
 // helpers ---------------------------------------------------------------
+
+type resyncRange struct {
+	since viewsync.Seq
+	until viewsync.Seq
+}
+
+type pagedResyncReader struct {
+	chID   channel.ID
+	ranges []resyncRange
+}
+
+func (r *pagedResyncReader) ChannelID() channel.ID { return r.chID }
+
+func (r *pagedResyncReader) MessagesByRange(
+	ctx context.Context,
+	since, until viewsync.Seq,
+) ([]viewsync.ResyncMessage, error) {
+	r.ranges = append(r.ranges, resyncRange{since: since, until: until})
+	if got := until - since + 1; got > viewsync.Seq(transit.MaxResyncChunkSize) {
+		return nil, errors.New("range exceeded chunk size")
+	}
+	out := make([]viewsync.ResyncMessage, 0, int(until-since+1))
+	for seq := since; seq <= until; seq++ {
+		env := newEnvelope(int(seq))
+		env.Seq = int64(seq)
+		out = append(out, viewsync.ResyncMessage{
+			Seq:       seq,
+			MessageID: env.ID,
+			Envelope:  *env,
+		})
+	}
+	return out, nil
+}
 
 func atomicFrameID() transit.FrameIDGen {
 	var n atomic.Int64
