@@ -586,6 +586,7 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 		cursors:         transit.NewCursorTracker(),
 		resolveTemplate: resolveTemplate,
 	}
+	reconciler.SetEnsureSystemChannelCreatedEvent(d.ensureBootstrapChannelCreatedEvent)
 
 	if cfg.UseMockBus {
 		d.bus = transit.NewMockBus(64)
@@ -704,13 +705,20 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 		return err
 	}
 
-	ackHandler, err := transit.NewAckHandlerForChannels(d.cursors, func(id channel.ID) (transit.OutboxAcker, bool) {
-		cr, ok := d.getChannel(id)
-		if !ok {
-			return nil, false
-		}
-		return cr.outbox, true
-	})
+	ackHandler, err := transit.NewAckHandlerForChannelsWithRejectHandler(
+		d.cursors,
+		func(id channel.ID) (transit.OutboxAcker, bool) {
+			cr, ok := d.getChannel(id)
+			if !ok {
+				return nil, false
+			}
+			return cr.outbox, true
+		},
+		func(ctx context.Context, ack viewsync.AckFrame) error {
+			d.freezeChannel(ctx, ack.ChannelID, string(ack.RejectReason))
+			return nil
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("runtime: build ack handler: %w", err)
 	}
@@ -728,16 +736,11 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 	}
 
 	handlers := transit.ControlHandlers{
-		OnViewsyncAck: func(ctx context.Context, ack viewsync.AckFrame) error {
-			if ack.RejectReason == viewsync.RejectReasonMuxOwnerEpochStale {
-				d.freezeChannel(ctx, ack.ChannelID, string(ack.RejectReason))
-				return nil
-			}
-			return ackHandler.Handle(ctx, ack)
-		},
+		OnViewsyncAck:           ackHandler.Handle,
 		OnViewsyncResyncRequest: resyncServer.ServeResync,
 		OnCreateChannel:         d.handleCreateChannel,
 		OnDaemonReclaim:         d.handleDaemonReclaim,
+		OnUpdateMembers:         d.handleUpdateMembers,
 		OnUnbindChannel:         d.handleUnbindChannel,
 		OnHeartbeatAck:          d.handleHeartbeatAck,
 		OnHeldChannelsAck:       d.handleHeldChannelsAck,
@@ -1715,6 +1718,9 @@ func (d *Daemon) handleCreateChannel(
 			if err := d.ensureChannelCreatedEvent(ctx, sqlitePath, existingLock, row); err != nil {
 				return reject(fmt.Sprintf("channel created event: %v", err))
 			}
+			if err := d.saga.Complete(ctx, string(req.CreateRequestID)); err != nil {
+				return reject(fmt.Sprintf("bootstrap complete: %v", err))
+			}
 			ack.OwnerEpoch = row.OwnerEpoch
 			ack.FencingToken = row.FencingToken
 			if !d.HasChannel(req.ChannelID) {
@@ -1744,6 +1750,9 @@ func (d *Daemon) handleCreateChannel(
 	if _, err := d.saga.Bootstrap(ctx, req.ChannelID, req); err != nil {
 		return reject(fmt.Sprintf("saga: %v", err))
 	}
+	if err := d.saga.MarkPhase(ctx, string(req.CreateRequestID), bootstrap.PhaseAwaitingAck); err != nil {
+		return reject(fmt.Sprintf("bootstrap phase: %v", err))
+	}
 	lockStore, err := d.OpenChannelLock(ctx, sqlitePath)
 	if err != nil {
 		return reject(fmt.Sprintf("lock open: %v", err))
@@ -1763,6 +1772,9 @@ func (d *Daemon) handleCreateChannel(
 		ChannelType: req.ChannelType,
 	}); err != nil {
 		return reject(fmt.Sprintf("lock insert: %v", err))
+	}
+	if err := d.saga.MarkPhase(ctx, string(req.CreateRequestID), bootstrap.PhasePartialTakeover); err != nil {
+		return reject(fmt.Sprintf("bootstrap phase: %v", err))
 	}
 	if err := d.ensureChannelCreatedEvent(ctx, sqlitePath, lockStore, store.ChannelLockRow{
 		ChannelID:    req.ChannelID,
@@ -1845,6 +1857,28 @@ func (d *Daemon) ensureChannelCreatedEvent(
 		return fmt.Errorf("system.channel.created seq=%d want 1", res.Seq)
 	}
 	return nil
+}
+
+func (d *Daemon) ensureBootstrapChannelCreatedEvent(ctx context.Context, channelID channel.ID, workdirPath string) error {
+	sqlitePath := filepath.Join(workdirPath, "channel.sqlite")
+	lockStore, err := d.OpenChannelLock(ctx, sqlitePath)
+	if err != nil {
+		return err
+	}
+	row, ok, err := lockStore.Get(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("channel_lock missing for %s", channelID)
+	}
+	if row.ChannelID == "" {
+		row.ChannelID = channelID
+	}
+	if row.ChannelID != channelID {
+		return fmt.Errorf("channel_lock channel_id=%s want %s", row.ChannelID, channelID)
+	}
+	return d.ensureChannelCreatedEvent(ctx, sqlitePath, lockStore, row)
 }
 
 // lookupBootstrapRequestID returns the create_request_id that originally
@@ -2090,6 +2124,71 @@ func (d *Daemon) sendReclaimRejected(ctx context.Context, inboundFrameID daemonb
 		frameID = d.cfg.FrameIDGen()
 	}
 	return d.transit.Send(ctx, frameID, daemonbus.FrameTypeControlReclaimRejected, rej)
+}
+
+func (d *Daemon) handleUpdateMembers(
+	ctx context.Context,
+	frame daemonbus.Frame,
+	body transit.UpdateMembersBody,
+) transit.UpdateMembersAckBody {
+	ack := transit.UpdateMembersAckBody{
+		FrameID:   frame.FrameID,
+		ChannelID: body.ChannelID,
+	}
+	if body.ChannelID == "" {
+		ack.RejectReason = "update_members_channel_id_required"
+		return ack
+	}
+	cr, ok := d.getChannel(body.ChannelID)
+	if !ok {
+		ack.RejectReason = "update_members_channel_unbound"
+		return ack
+	}
+	lockRow, lockOK, err := cr.lock.Get(ctx)
+	if err != nil {
+		ack.RejectReason = "update_members_lock_error"
+		ack.RejectDetail = err.Error()
+		return ack
+	}
+	if !lockOK {
+		ack.RejectReason = "update_members_lock_missing"
+		return ack
+	}
+	now := d.cfg.NowFn()
+	adds := make([]store.MemberActorAdd, 0, len(body.Adds))
+	for _, add := range body.Adds {
+		if add.MemberActorID == "" {
+			continue
+		}
+		kind := add.Kind
+		if kind == "" {
+			kind = actor.KindHuman
+		}
+		adds = append(adds, store.MemberActorAdd{
+			ID:          add.MemberActorID,
+			Kind:        kind,
+			DisplayName: add.DisplayName,
+			UserID:      string(add.UserID),
+			Role:        add.Role,
+			At:          now,
+		})
+	}
+	removes := make([]store.MemberActorRemove, 0, len(body.Removes))
+	for _, id := range body.Removes {
+		if id != "" {
+			removes = append(removes, store.MemberActorRemove{ID: id, At: now})
+		}
+	}
+	if err := cr.registry.ApplyMemberTransitions(ctx, body.ChannelID, adds, removes, khlog.FencingTuple{
+		Token: lockRow.FencingToken,
+		Epoch: lockRow.DaemonEpoch,
+	}); err != nil {
+		ack.RejectReason = "update_members_apply_failed"
+		ack.RejectDetail = err.Error()
+		return ack
+	}
+	ack.Accepted = true
+	return ack
 }
 
 // handleUnbindChannel — T0.2. Closes the per-channel pusher

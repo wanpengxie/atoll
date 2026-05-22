@@ -27,19 +27,26 @@ type AckRouter func(channel.ID) (OutboxAcker, bool)
 // channel cursor + outbox sink. Used by the daemon's transit
 // dispatcher when many channels share one daemonbus connection.
 type MultiAckHandler struct {
-	cursors *CursorTracker
-	router  AckRouter
+	cursors        *CursorTracker
+	router         AckRouter
+	onStaleFencing AckRejectHandler
 }
 
 // NewAckHandlerForChannels builds a MultiAckHandler.
 func NewAckHandlerForChannels(cursors *CursorTracker, router AckRouter) (*MultiAckHandler, error) {
+	return NewAckHandlerForChannelsWithRejectHandler(cursors, router, nil)
+}
+
+// NewAckHandlerForChannelsWithRejectHandler builds a MultiAckHandler with a
+// stale-fencing reject hook.
+func NewAckHandlerForChannelsWithRejectHandler(cursors *CursorTracker, router AckRouter, onStaleFencing AckRejectHandler) (*MultiAckHandler, error) {
 	if cursors == nil {
 		return nil, errors.New("transit: NewAckHandlerForChannels cursors nil")
 	}
 	if router == nil {
 		return nil, errors.New("transit: NewAckHandlerForChannels router nil")
 	}
-	return &MultiAckHandler{cursors: cursors, router: router}, nil
+	return &MultiAckHandler{cursors: cursors, router: router, onStaleFencing: onStaleFencing}, nil
 }
 
 // Handle implements the ControlHandlers.OnViewsyncAck signature.
@@ -52,6 +59,14 @@ func (h *MultiAckHandler) Handle(ctx context.Context, ack viewsync.AckFrame) err
 		return nil
 	}
 	if !ack.Accepted {
+		if ack.RejectReason == viewsync.RejectReasonMuxOwnerEpochStale {
+			if h.onStaleFencing != nil {
+				if err := h.onStaleFencing(ctx, ack); err != nil {
+					return fmt.Errorf("transit: multi ack stale fencing %s: %w", ack.ChannelID, err)
+				}
+			}
+			return nil
+		}
 		if err := sink.ResetAllPushed(ctx); err != nil {
 			return fmt.Errorf("transit: multi ack reset pushed %s: %w", ack.ChannelID, err)
 		}

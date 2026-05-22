@@ -270,6 +270,14 @@ type HeldChannelsDecision struct {
 	Reason    string     `json:"reason,omitempty"` // populated only when Accepted == false
 }
 
+const (
+	// HeldChannelStaleRequiresReclaim is returned when a daemon reports a
+	// locally-held stale placement. Stale is a trap state; ownership must be
+	// recovered through the server-initiated reclaim saga so owner_epoch and
+	// fencing_token rotate before writes resume.
+	HeldChannelStaleRequiresReclaim = "held_channel_stale_requires_reclaim"
+)
+
 // HeldChannelsAck is the server -> daemon control.held_channels_ack payload.
 type HeldChannelsAck struct {
 	DaemonID  DaemonID               `json:"daemon_id"`
@@ -462,7 +470,7 @@ type Store interface {
 		req HeldChannel,
 		newConnectionEpoch ConnectionEpoch,
 		nowMs int64,
-	) (ok bool, err error)
+	) (ok bool, rejectReason string, err error)
 }
 
 // ErrPlacementExists is returned by Store.Reserve when the channel_id
@@ -495,9 +503,10 @@ func CanTransition(from, to State) bool {
 		// orphan → creating (retry new daemon, owner_epoch+1).
 		return to == StateCreating
 	case StateStale:
-		// stale → active (original daemon reclaim, fencing match) |
-		// orphan (stale_timeout — M2+ migration trigger).
-		return to == StateActive || to == StateOrphan
+		// stale → creating (server-initiated reclaim, owner_epoch+1,
+		// fresh fencing_token) | orphan (stale_timeout — M2+ migration
+		// trigger). Bare stale → active is forbidden.
+		return to == StateCreating || to == StateOrphan
 	}
 	return false
 }

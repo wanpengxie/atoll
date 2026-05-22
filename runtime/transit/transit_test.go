@@ -139,7 +139,62 @@ func TestViewSync_E2E(t *testing.T) {
 	}
 }
 
-func TestAckHandler_NegativeAckKeepsOutboxRetryable(t *testing.T) {
+func TestAckHandler_MuxOwnerEpochStale_PausesChannelPumpAndReconciles(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.OpenChannel(ctx, filepath.Join(t.TempDir(), "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	msgs := store.NewMessages(db)
+	outbox := store.NewViewSyncOutbox(db, testChannelID)
+	for i := 0; i < 2; i++ {
+		if _, err := msgs.Append(ctx, newEnvelope(i+1), klog.FencingTuple{}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	if err := outbox.MarkPushed(ctx, 1, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := outbox.MarkPushed(ctx, 2, 101); err != nil {
+		t.Fatal(err)
+	}
+	var reconciled atomic.Int32
+	handler, err := transit.NewAckHandlerWithRejectHandler(outbox, transit.NewCursorTracker(), func(ctx context.Context, ack viewsync.AckFrame) error {
+		if ack.ChannelID != testChannelID || ack.RejectReason != viewsync.RejectReasonMuxOwnerEpochStale {
+			t.Fatalf("stale hook ack=%+v", ack)
+		}
+		reconciled.Add(1)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	advanced, err := handler.Handle(ctx, viewsync.AckFrame{
+		ChannelID:    testChannelID,
+		Accepted:     false,
+		RejectReason: viewsync.RejectReasonMuxOwnerEpochStale,
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if advanced {
+		t.Fatal("negative ack must not advance cursor")
+	}
+	if reconciled.Load() != 1 {
+		t.Fatalf("stale hook calls=%d want 1", reconciled.Load())
+	}
+	var pushedRows int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM view_sync_outbox WHERE status='pushed'`).Scan(&pushedRows); err != nil {
+		t.Fatal(err)
+	}
+	if pushedRows != 2 {
+		t.Fatalf("stale reject reset pushed rows; pushed=%d want 2 until reclaim resumes pump", pushedRows)
+	}
+}
+
+func TestAckHandler_TransientReject_ResetsPushed(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.OpenChannel(ctx, filepath.Join(t.TempDir(), "ch.sqlite"), store.OpenOptions{})
 	if err != nil {
@@ -167,7 +222,7 @@ func TestAckHandler_NegativeAckKeepsOutboxRetryable(t *testing.T) {
 	advanced, err := handler.Handle(ctx, viewsync.AckFrame{
 		ChannelID:    testChannelID,
 		Accepted:     false,
-		RejectReason: viewsync.RejectReasonMuxOwnerEpochStale,
+		RejectReason: viewsync.RejectReason("transient_internal"),
 	})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -181,6 +236,13 @@ func TestAckHandler_NegativeAckKeepsOutboxRetryable(t *testing.T) {
 	}
 	if len(pending) != 2 {
 		t.Fatalf("retryable rows=%d want 2", len(pending))
+	}
+	var pushedRows int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM view_sync_outbox WHERE status='pushed'`).Scan(&pushedRows); err != nil {
+		t.Fatal(err)
+	}
+	if pushedRows != 0 {
+		t.Fatalf("transient reject left pushed rows=%d want 0", pushedRows)
 	}
 }
 

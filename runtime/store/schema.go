@@ -71,10 +71,13 @@ CREATE TABLE IF NOT EXISTS type_registry (
   terminal_convention      TEXT NOT NULL DEFAULT 'payload_status'
                            CHECK (terminal_convention IN ('payload_status','single-response')),
   max_pending_ms           INTEGER,
-  handler_actor_id         TEXT,
-  domain                   TEXT,
-  created_at               INTEGER NOT NULL
-);
+	  handler_actor_id         TEXT,
+	  domain                   TEXT,
+	  install_status           TEXT NOT NULL DEFAULT 'installed'
+	                           CHECK (install_status IN ('installing','installed','failed')),
+	  install_error            TEXT NOT NULL DEFAULT '',
+	  created_at               INTEGER NOT NULL
+	);
 
 -- =============================================================
 -- 3) actor_cursors  (L2 §1.4.3)
@@ -212,14 +215,22 @@ const DaemonLocalDDL = `
 -- =============================================================
 CREATE TABLE IF NOT EXISTS bootstrap_registry (
   create_request_id  TEXT PRIMARY KEY,
-  channel_id         TEXT NOT NULL UNIQUE,
-  status             TEXT NOT NULL
-                     CHECK (status IN ('in_progress','completed','rolled_back')),
-  workdir_path       TEXT NOT NULL,
-  started_at         INTEGER NOT NULL,
-  completed_at       INTEGER,
-  rollback_reason    TEXT
-);
+	  channel_id         TEXT NOT NULL UNIQUE,
+	  status             TEXT NOT NULL
+	                     CHECK (status IN ('in_progress','completed','rolled_back')),
+	  phase              TEXT NOT NULL DEFAULT 'sent'
+	                     CHECK (phase IN ('sent','awaiting_ack','partial_takeover','completed','abandoned')),
+	  workdir_path       TEXT NOT NULL,
+	  sent_at            INTEGER NOT NULL DEFAULT 0,
+	  expected_ack_frame_kind TEXT NOT NULL DEFAULT 'control.create_channel_ack',
+	  terminal_status    TEXT NOT NULL DEFAULT '',
+	  abandonment_reason TEXT NOT NULL DEFAULT '',
+	  attempt_count      INTEGER NOT NULL DEFAULT 0,
+	  last_attempt_at    INTEGER NOT NULL DEFAULT 0,
+	  started_at         INTEGER NOT NULL,
+	  completed_at       INTEGER,
+	  rollback_reason    TEXT
+	);
 
 CREATE INDEX IF NOT EXISTS ix_bootstrap_status ON bootstrap_registry(status);
 `

@@ -223,6 +223,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	app.pushhub.SetAccessAuthorizer(app)
 	app.placements.SetAccessAuthorizer(app)
 	app.catalog.SetSubscriptionRevoker(app.pushhub)
+	app.catalog.SetPlacementHook(app)
 
 	// T147 §A-S2 — bind / unbind device session frames flow through the
 	// gateway's daemonbus client. devicebus's HTTP issue / revoke routes

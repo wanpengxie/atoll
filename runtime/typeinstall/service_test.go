@@ -11,6 +11,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/store"
@@ -88,27 +89,89 @@ func TestServiceInstallTypeRejectsReservedNamespace(t *testing.T) {
 	}
 }
 
+func TestInstallType_RegistryAndMirror_AtomicCommit(t *testing.T) {
+	ctx := context.Background()
+	chID := channel.ID("ch-typeinstall-atomic")
+	svc, reg, msgs := newServiceFixture(t, chID, 22222)
+	row := typeInstallRow("xhs.atomic")
+
+	if _, err := svc.InstallType(ctx, row); err != nil {
+		t.Fatalf("InstallType: %v", err)
+	}
+	if _, ok, err := reg.Lookup(ctx, row.Type); err != nil || !ok {
+		t.Fatalf("registry lookup ok=%v err=%v", ok, err)
+	}
+	status, reason, ok, err := reg.InstallStatus(ctx, row.Type)
+	if err != nil || !ok {
+		t.Fatalf("InstallStatus ok=%v err=%v", ok, err)
+	}
+	if status != store.TypeInstallStatusInstalled || reason != "" {
+		t.Fatalf("status=%q reason=%q want installed empty", status, reason)
+	}
+	if _, ok, err := msgs.FindByID(ctx, chID, "system.type.installed:xhs.atomic:22222"); err != nil || !ok {
+		t.Fatalf("mirror ok=%v err=%v", ok, err)
+	}
+}
+
+func TestInstallType_MirrorEmitFail_MarkedFailed(t *testing.T) {
+	ctx := context.Background()
+	chID := channel.ID("ch-typeinstall-fail")
+	actors, reg, _ := newTypeInstallStores(t, chID, 33333)
+	svc, err := typeinstall.New(typeinstall.Config{
+		ChannelID:     chID,
+		ActorRegistry: actors,
+		TypeRegistry:  reg,
+		HarnessChain:  failingChain{err: errors.New("mirror unavailable")},
+		NowFn:         func() int64 { return 33333 },
+	})
+	if err != nil {
+		t.Fatalf("typeinstall.New: %v", err)
+	}
+	row := typeInstallRow("xhs.fail")
+	if _, err := svc.InstallType(ctx, row); err == nil {
+		t.Fatal("InstallType succeeded despite mirror failure")
+	}
+	if _, ok, err := reg.Lookup(ctx, row.Type); err != nil || ok {
+		t.Fatalf("failed install visible in registry ok=%v err=%v", ok, err)
+	}
+	status, reason, ok, err := reg.InstallStatus(ctx, row.Type)
+	if err != nil || !ok {
+		t.Fatalf("InstallStatus ok=%v err=%v", ok, err)
+	}
+	if status != store.TypeInstallStatusFailed || reason == "" {
+		t.Fatalf("status=%q reason=%q want failed with reason", status, reason)
+	}
+}
+
+func TestInstallType_RecoveryAfterCrashMidEmit(t *testing.T) {
+	ctx := context.Background()
+	svc, reg, _ := newServiceFixture(t, "ch-typeinstall-recovery", 44444)
+	row := typeInstallRow("xhs.recovery")
+	if _, _, err := reg.BeginInstall(ctx, row); err != nil {
+		t.Fatalf("BeginInstall: %v", err)
+	}
+	if _, ok, err := reg.Lookup(ctx, row.Type); err != nil || ok {
+		t.Fatalf("installing row visible ok=%v err=%v", ok, err)
+	}
+	n, err := svc.RecoverInstalling(ctx, "crash recovered")
+	if err != nil {
+		t.Fatalf("RecoverInstalling: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("recovered=%d want 1", n)
+	}
+	status, reason, ok, err := reg.InstallStatus(ctx, row.Type)
+	if err != nil || !ok {
+		t.Fatalf("InstallStatus ok=%v err=%v", ok, err)
+	}
+	if status != store.TypeInstallStatusFailed || reason != "crash recovered" {
+		t.Fatalf("status=%q reason=%q", status, reason)
+	}
+}
+
 func newServiceFixture(t *testing.T, chID channel.ID, now int64) (*typeinstall.Service, *store.TypeRegistry, *store.Messages) {
 	t.Helper()
-	ctx := context.Background()
-	db, err := store.OpenChannel(ctx, filepath.Join(t.TempDir(), "ch.sqlite"), store.OpenOptions{})
-	if err != nil {
-		t.Fatalf("OpenChannel: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	actors := store.NewActorRegistry(db)
-	for _, rec := range []actorreg.Record{
-		{ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: now},
-		{ID: "tool:xhs-adapter", Kind: actor.KindTool, Binding: actor.BindingEmbedded, CreatedAt: now},
-	} {
-		if err := actors.Insert(ctx, rec); err != nil {
-			t.Fatalf("insert actor %s: %v", rec.ID, err)
-		}
-	}
-
-	reg := store.NewTypeRegistry(db, func() int64 { return now })
-	msgs := store.NewMessages(db)
+	actors, reg, msgs := newTypeInstallStores(t, chID, now)
 	chain, err := rtharness.New(rtharness.Deps{
 		ChannelID:     chID,
 		ActorRegistry: actors,
@@ -130,4 +193,47 @@ func newServiceFixture(t *testing.T, chID channel.ID, now int64) (*typeinstall.S
 		t.Fatalf("typeinstall.New: %v", err)
 	}
 	return svc, reg, msgs
+}
+
+func newTypeInstallStores(t *testing.T, _ channel.ID, now int64) (*store.ActorRegistry, *store.TypeRegistry, *store.Messages) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := store.OpenChannel(ctx, filepath.Join(t.TempDir(), "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	actors := store.NewActorRegistry(db)
+	for _, rec := range []actorreg.Record{
+		{ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: now},
+		{ID: "tool:xhs-adapter", Kind: actor.KindTool, Binding: actor.BindingEmbedded, CreatedAt: now},
+	} {
+		if err := actors.Insert(ctx, rec); err != nil {
+			t.Fatalf("insert actor %s: %v", rec.ID, err)
+		}
+	}
+	reg := store.NewTypeRegistry(db, func() int64 { return now })
+	msgs := store.NewMessages(db)
+	return actors, reg, msgs
+}
+
+func typeInstallRow(typeName string) adapter.TypeRow {
+	return adapter.TypeRow{
+		Type:               typeName,
+		HandlerActorID:     "tool:xhs-adapter",
+		HandlerBinding:     actor.BindingEmbedded,
+		MaxPendingMs:       60_000,
+		AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
+		TerminalConvention: adapter.TerminalPayloadStatus,
+	}
+}
+
+type failingChain struct {
+	err error
+	res khar.WriteResult
+}
+
+func (f failingChain) Write(context.Context, *message.Envelope) (khar.WriteResult, error) {
+	return f.res, f.err
 }

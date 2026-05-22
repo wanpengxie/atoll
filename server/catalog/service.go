@@ -39,6 +39,7 @@ type Service struct {
 	db                  *sql.DB
 	now                 func() time.Time
 	subscriptionRevoker SubscriptionRevoker
+	placementHook       PlacementHook
 }
 
 // NewService constructs a Service.
@@ -62,6 +63,12 @@ type SubscriptionRevoker interface {
 // SetSubscriptionRevoker wires the optional live-subscription revocation hook.
 func (s *Service) SetSubscriptionRevoker(r SubscriptionRevoker) {
 	s.subscriptionRevoker = r
+}
+
+// SetPlacementHook wires the daemon placement/member mirror hook used by
+// route handlers after catalog member rows are durably committed.
+func (s *Service) SetPlacementHook(h PlacementHook) {
+	s.placementHook = h
 }
 
 func (s *Service) nowMs() int64 { return s.now().UnixMilli() }

@@ -3,11 +3,15 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	klog "github.com/wanpengxie/ActOS/kernel/log"
+	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // ActorRegistry implements kernel/actorreg.Registry over a channel-local
@@ -144,4 +148,209 @@ func (r *ActorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int
 		return nil
 	}
 	return nil
+}
+
+// MemberActorAdd is one daemon-side actor registration transition derived
+// from catalog channel_members.
+type MemberActorAdd struct {
+	ID          actor.ActorID
+	Kind        actor.Kind
+	Binding     actor.Binding
+	DisplayName string
+	UserID      string
+	Role        string
+	At          int64
+}
+
+// MemberActorRemove is one daemon-side actor deregistration transition.
+type MemberActorRemove struct {
+	ID actor.ActorID
+	At int64
+}
+
+// ApplyMemberTransitions mutates actor_registry and appends the matching
+// system.actor.* mirror events in one sqlite transaction. Duplicate retries
+// are idempotent: already-active adds and already-deregistered removes do not
+// append a second event.
+func (r *ActorRegistry) ApplyMemberTransitions(
+	ctx context.Context,
+	channelID channel.ID,
+	adds []MemberActorAdd,
+	removes []MemberActorRemove,
+	fencing klog.FencingTuple,
+) error {
+	if channelID == "" {
+		return errors.New("store: actor member transition: empty channel_id")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: actor member transition begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	msgs := NewMessagesWithLock(r.db, NewChannelLock(r.db))
+	for _, add := range adds {
+		if add.ID == "" {
+			continue
+		}
+		if add.Kind == "" {
+			add.Kind = actor.KindHuman
+		}
+		if add.At == 0 {
+			return fmt.Errorf("store: actor member add %q missing timestamp", add.ID)
+		}
+		changed, err := r.applyMemberAddTx(ctx, tx, add)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			continue
+		}
+		env, err := actorRegisteredEnvelope(channelID, add)
+		if err != nil {
+			return err
+		}
+		if _, err := msgs.AppendTx(ctx, tx, env, fencing); err != nil {
+			return fmt.Errorf("store: actor registered mirror %q: %w", add.ID, err)
+		}
+	}
+	for _, remove := range removes {
+		if remove.ID == "" {
+			continue
+		}
+		if remove.At == 0 {
+			return fmt.Errorf("store: actor member remove %q missing timestamp", remove.ID)
+		}
+		changed, err := r.applyMemberRemoveTx(ctx, tx, remove)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			continue
+		}
+		env, err := actorDeregisteredEnvelope(channelID, remove)
+		if err != nil {
+			return err
+		}
+		if _, err := msgs.AppendTx(ctx, tx, env, fencing); err != nil {
+			return fmt.Errorf("store: actor deregistered mirror %q: %w", remove.ID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: actor member transition commit: %w", err)
+	}
+	return nil
+}
+
+func (r *ActorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add MemberActorAdd) (bool, error) {
+	var deregistered sql.NullInt64
+	err := tx.QueryRowContext(ctx, `SELECT deregistered_at FROM actor_registry WHERE actor_id=?`, string(add.ID)).Scan(&deregistered)
+	switch {
+	case err == nil:
+		if !deregistered.Valid {
+			return false, nil
+		}
+		_, err := tx.ExecContext(ctx,
+			`UPDATE actor_registry
+			    SET actor_kind=?, actor_binding=?, display_name=?, created_at=?, deregistered_at=NULL
+			  WHERE actor_id=?`,
+			string(add.Kind), nullableString(string(add.Binding)), nullableString(add.DisplayName), add.At, string(add.ID),
+		)
+		if err != nil {
+			return false, fmt.Errorf("store: actor reactivate %q: %w", add.ID, err)
+		}
+		return true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO actor_registry
+			   (actor_id, actor_kind, actor_binding, display_name, created_at, deregistered_at)
+			 VALUES (?, ?, ?, ?, ?, NULL)`,
+			string(add.ID), string(add.Kind), nullableString(string(add.Binding)), nullableString(add.DisplayName), add.At,
+		)
+		if err != nil {
+			return false, fmt.Errorf("store: actor member insert %q: %w", add.ID, err)
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO actor_cursors
+			   (actor_id, last_consumed_seq, last_consumed_id, updated_at)
+			 VALUES (?, 0, NULL, ?)`,
+			string(add.ID), add.At,
+		)
+		if err != nil {
+			return false, fmt.Errorf("store: actor member cursor seed %q: %w", add.ID, err)
+		}
+		return true, nil
+	default:
+		return false, fmt.Errorf("store: actor member lookup %q: %w", add.ID, err)
+	}
+}
+
+func (r *ActorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, remove MemberActorRemove) (bool, error) {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE actor_registry SET deregistered_at=? WHERE actor_id=? AND deregistered_at IS NULL`,
+		remove.At, string(remove.ID),
+	)
+	if err != nil {
+		return false, fmt.Errorf("store: actor member deregister %q: %w", remove.ID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+func actorRegisteredEnvelope(channelID channel.ID, add MemberActorAdd) (*message.Envelope, error) {
+	payload, err := json.Marshal(map[string]any{
+		"actor_id":      add.ID,
+		"actor_kind":    add.Kind,
+		"actor_binding": add.Binding,
+		"display_name":  add.DisplayName,
+		"user_id":       add.UserID,
+		"role":          add.Role,
+		"registered_at": add.At,
+	})
+	if err != nil {
+		return nil, err
+	}
+	env := &message.Envelope{
+		ID:         message.ID(fmt.Sprintf("system.actor.registered:%s:%d", add.ID, add.At)),
+		TS:         add.At,
+		TSReceived: add.At,
+		ChannelID:  channelID,
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind:       message.KindEvent,
+		Type:       "system.actor.registered",
+		Payload:    payload,
+		Visibility: message.VisibilitySystem,
+		Audience:   message.Audience{message.AudienceWildcard},
+	}
+	hash, err := message.CanonicalHash(*env)
+	env.CanonicalHash = hash
+	return env, err
+}
+
+func actorDeregisteredEnvelope(channelID channel.ID, remove MemberActorRemove) (*message.Envelope, error) {
+	payload, err := json.Marshal(map[string]any{
+		"actor_id":        remove.ID,
+		"deregistered_at": remove.At,
+	})
+	if err != nil {
+		return nil, err
+	}
+	env := &message.Envelope{
+		ID:         message.ID(fmt.Sprintf("system.actor.deregistered:%s:%d", remove.ID, remove.At)),
+		TS:         remove.At,
+		TSReceived: remove.At,
+		ChannelID:  channelID,
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind:       message.KindEvent,
+		Type:       "system.actor.deregistered",
+		Payload:    payload,
+		Visibility: message.VisibilitySystem,
+		Audience:   message.Audience{message.AudienceWildcard},
+	}
+	hash, err := message.CanonicalHash(*env)
+	env.CanonicalHash = hash
+	return env, err
 }

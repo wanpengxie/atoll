@@ -16,6 +16,16 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/store"
 )
 
+type Phase string
+
+const (
+	PhaseSent            Phase = "sent"
+	PhaseAwaitingAck     Phase = "awaiting_ack"
+	PhasePartialTakeover Phase = "partial_takeover"
+	PhaseCompleted       Phase = "completed"
+	PhaseAbandoned       Phase = "abandoned"
+)
+
 // TemplateView is the bootstrap-side projection of one L4 channel
 // template. The Saga consumes it inside Bootstrap to
 // (a) seed adapter tool actor rows so framework.Manager.Install can
@@ -233,6 +243,22 @@ func (s *Saga) Complete(ctx context.Context, createReq string) error {
 	return s.markCompleted(ctx, createReq)
 }
 
+func (s *Saga) MarkPhase(ctx context.Context, createReq string, phase Phase) error {
+	if createReq == "" {
+		return errors.New("bootstrap: phase empty create_request_id")
+	}
+	if phase == "" {
+		return errors.New("bootstrap: phase empty")
+	}
+	const upd = `UPDATE bootstrap_registry
+	             SET phase=?, last_attempt_at=?
+	             WHERE create_request_id=? AND status='in_progress'`
+	if _, err := s.daemonDB.ExecContext(ctx, upd, string(phase), s.nowFn(), createReq); err != nil {
+		return fmt.Errorf("bootstrap: registry phase: %w", err)
+	}
+	return nil
+}
+
 func (s *Saga) insertActorIfMissing(ctx context.Context, reg *store.ActorRegistry, rec actorreg.Record) error {
 	if rec.ID == "" {
 		return nil
@@ -252,11 +278,13 @@ func (s *Saga) insertActorIfMissing(ctx context.Context, reg *store.ActorRegistr
 }
 
 func (s *Saga) insertRegistry(ctx context.Context, createReq string, channelID channel.ID, workdir string) error {
+	now := s.nowFn()
 	const ins = `INSERT OR IGNORE INTO bootstrap_registry
-	   (create_request_id, channel_id, status, workdir_path, started_at)
-	   VALUES (?, ?, 'in_progress', ?, ?)`
+	   (create_request_id, channel_id, status, phase, workdir_path, sent_at,
+	    expected_ack_frame_kind, attempt_count, last_attempt_at, started_at)
+	   VALUES (?, ?, 'in_progress', 'sent', ?, ?, 'control.create_channel_ack', 1, ?, ?)`
 	if _, err := s.daemonDB.ExecContext(ctx, ins,
-		createReq, string(channelID), workdir, s.nowFn()); err != nil {
+		createReq, string(channelID), workdir, now, now, now); err != nil {
 		return fmt.Errorf("bootstrap: registry insert: %w", err)
 	}
 	return nil
@@ -264,8 +292,12 @@ func (s *Saga) insertRegistry(ctx context.Context, createReq string, channelID c
 
 func (s *Saga) markCompleted(ctx context.Context, createReq string) error {
 	const upd = `UPDATE bootstrap_registry
-	             SET status='completed', completed_at=?
-	             WHERE create_request_id=? AND status IN ('in_progress', 'completed')`
+		             SET status='completed',
+		                 phase='completed',
+		                 terminal_status='accepted',
+		                 abandonment_reason='',
+		                 completed_at=?
+		             WHERE create_request_id=? AND status IN ('in_progress', 'completed')`
 	if _, err := s.daemonDB.ExecContext(ctx, upd, s.nowFn(), createReq); err != nil {
 		return fmt.Errorf("bootstrap: registry complete: %w", err)
 	}

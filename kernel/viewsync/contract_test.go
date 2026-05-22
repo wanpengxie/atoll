@@ -55,6 +55,30 @@ func TestPushAckFramePayloadFields(t *testing.T) {
 	}
 }
 
+func TestAckFrame_RejectReason_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	in := AckFrame{
+		ChannelID:    "chan-A",
+		Accepted:     false,
+		RejectReason: RejectReasonMuxOwnerEpochStale,
+	}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := jsonKeys(t, in); !equalSlices(got, []string{"accepted", "channel_id", "last_received_seq", "reject_reason"}) {
+		t.Fatalf("AckFrame reject keys=%v", got)
+	}
+	var out AckFrame
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.RejectReason != RejectReasonMuxOwnerEpochStale || out.Accepted {
+		t.Fatalf("round trip ack=%+v", out)
+	}
+}
+
 // TestApplyStateMachineCoverage exercises the L1 §8.4 server apply rule
 // branches (in-order / out-of-order / duplicate / resync-overlap) by
 // driving a faithful in-memory implementation of the Receiver contract.

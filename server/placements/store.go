@@ -409,7 +409,26 @@ func (s *SQLStore) AcceptHeldChannel(
 	req placement.HeldChannel,
 	newConnectionEpoch placement.ConnectionEpoch,
 	nowMs int64,
-) (bool, error) {
+) (bool, string, error) {
+	var staleState string
+	err := s.db.QueryRowContext(
+		ctx,
+		`SELECT state FROM channel_placements
+		  WHERE channel_id = ?
+		    AND daemon_id = ?
+		    AND owner_epoch = ?
+		    AND fencing_token = ?
+		    AND state = 'stale'`,
+		string(channelID), string(daemonID),
+		int64(req.OwnerEpoch), string(req.FencingToken),
+	).Scan(&staleState)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, "", fmt.Errorf("placements: AcceptHeldChannel stale check: %w", err)
+	}
+	if staleState == string(placement.StateStale) {
+		return false, placement.HeldChannelStaleRequiresReclaim, nil
+	}
+
 	res, err := s.db.ExecContext(
 		ctx,
 		`UPDATE channel_placements
@@ -421,19 +440,19 @@ func (s *SQLStore) AcceptHeldChannel(
 		    AND daemon_id     = ?
 		    AND owner_epoch   = ?
 		    AND fencing_token = ?
-		    AND state IN ('active','stale')`,
+		    AND state         = 'active'`,
 		nowMs, int64(newConnectionEpoch), nowMs,
 		string(channelID), string(daemonID),
 		int64(req.OwnerEpoch), string(req.FencingToken),
 	)
 	if err != nil {
-		return false, fmt.Errorf("placements: AcceptHeldChannel: %w", err)
+		return false, "", fmt.Errorf("placements: AcceptHeldChannel: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
-	return n == 1, nil
+	return n == 1, "", nil
 }
 
 // Heartbeat refreshes last_heartbeat_at for an active placement.

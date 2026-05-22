@@ -99,8 +99,8 @@ func (o *ViewSyncOutbox) ResetPushed(ctx context.Context, seq viewsync.Seq) erro
 }
 
 // ResetAllPushed forces every pushed-but-unacked row back to pending.
-// Used after negative ack / stale fencing so a later pump does not skip
-// rows that were sent but never accepted by the server.
+// Used after transient negative ack so a later pump does not skip rows that
+// were sent but never accepted by the server.
 func (o *ViewSyncOutbox) ResetAllPushed(ctx context.Context) error {
 	const q = `UPDATE view_sync_outbox SET status='pending', pushed_at=NULL
 	            WHERE status='pushed'`

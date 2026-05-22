@@ -147,14 +147,17 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			}
 			out := make([]placement.HeldChannelsDecision, 0, len(req.Channels))
 			for _, ch := range req.Channels {
-				ok, err := a.placements.AcceptHeldChannel(ctx, ch.ChannelID, conn.DaemonID, ch, placement.ConnectionEpoch(conn.ConnectionEpoch))
+				ok, reason, err := a.placements.AcceptHeldChannel(ctx, ch.ChannelID, conn.DaemonID, ch, placement.ConnectionEpoch(conn.ConnectionEpoch))
 				if err != nil {
 					return err
 				}
 				if ok {
 					out = append(out, placement.HeldChannelsDecision{ChannelID: ch.ChannelID, Accepted: true})
 				} else {
-					out = append(out, placement.HeldChannelsDecision{ChannelID: ch.ChannelID, Accepted: false, Reason: "fencing mismatch"})
+					if reason == "" {
+						reason = "fencing mismatch"
+					}
+					out = append(out, placement.HeldChannelsDecision{ChannelID: ch.ChannelID, Accepted: false, Reason: reason})
 				}
 			}
 			_, err := conn.SendFrame(ctx, kerneldaemonbus.FrameTypeControlHeldChannelsAck, placement.HeldChannelsAck{
@@ -225,6 +228,79 @@ func (a *App) Bind(ctx context.Context, in devicebus.BindInput) error {
 			return fmt.Errorf("gateway: bind_device_session rejected: %s", ack.Reason)
 		}
 		return fmt.Errorf("gateway: bind_device_session rejected: %s — %s", ack.Reason, ack.Detail)
+	}
+	return nil
+}
+
+// OnChannelCreated implements catalog.PlacementHook. Channel bind sends the
+// full initial member set in control.create_channel, so create-time catalog
+// rows do not need an additional update_members frame.
+func (a *App) OnChannelCreated(ctx context.Context, ch catalog.Channel, members []catalog.ChannelMember) error {
+	return nil
+}
+
+// OnChannelMembersChanged implements catalog.PlacementHook by mirroring
+// catalog membership transitions into the owning daemon's actor_registry.
+func (a *App) OnChannelMembersChanged(ctx context.Context, channelID string, adds []catalog.ChannelMember, removes []string) error {
+	if channelID == "" || (len(adds) == 0 && len(removes) == 0) {
+		return nil
+	}
+	daemonID, ok, err := a.placements.ResolveDaemonForChannel(ctx, channel.ID(channelID))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		// Unbound channels get the full member set through the later
+		// control.create_channel initial_members payload.
+		return nil
+	}
+	conn, ok := a.daemonbus.ConnectionFor(daemonID)
+	if !ok {
+		return fmt.Errorf("gateway: update_members: daemon %s not connected", daemonID)
+	}
+	body := kerneldaemonbus.UpdateMembersBody{
+		FrameID:   kerneldaemonbus.FrameID(uuid.NewString()),
+		ChannelID: channel.ID(channelID),
+		Adds:      make([]kerneldaemonbus.UpdateMember, 0, len(adds)),
+		Removes:   make([]actor.ActorID, 0, len(removes)),
+	}
+	for _, m := range adds {
+		display := ""
+		if usr, err := a.identity.GetUser(ctx, m.UserID); err == nil {
+			display = usr.DisplayName
+			if display == "" {
+				display = usr.Email
+			}
+		}
+		body.Adds = append(body.Adds, kerneldaemonbus.UpdateMember{
+			UserID:        kerneldaemonbus.UserID(m.UserID),
+			MemberActorID: actor.ActorID(m.MemberActorID),
+			Kind:          actor.KindHuman,
+			Role:          m.Role,
+			DisplayName:   display,
+		})
+	}
+	for _, id := range removes {
+		if id != "" {
+			body.Removes = append(body.Removes, actor.ActorID(id))
+		}
+	}
+	ackFrame, err := conn.SendAndAwait(ctx, kerneldaemonbus.FrameTypeControlUpdateMembers, body)
+	if err != nil {
+		return fmt.Errorf("gateway: update_members send: %w", err)
+	}
+	if ackFrame.FrameKind != kerneldaemonbus.FrameTypeControlUpdateMembersAck {
+		return fmt.Errorf("gateway: update_members unexpected ack frame %s", ackFrame.FrameKind)
+	}
+	var ack kerneldaemonbus.UpdateMembersAckBody
+	if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
+		return fmt.Errorf("gateway: update_members ack decode: %w", err)
+	}
+	if !ack.Accepted {
+		if ack.RejectReason == "" {
+			ack.RejectReason = "rejected"
+		}
+		return fmt.Errorf("gateway: update_members rejected: %s %s", ack.RejectReason, ack.RejectDetail)
 	}
 	return nil
 }

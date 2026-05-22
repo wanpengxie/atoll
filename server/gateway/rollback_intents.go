@@ -35,34 +35,81 @@ func (a *App) persistRollbackIntent(
 		return nil
 	}
 	now := time.Now().UnixMilli()
-	_, err := a.db.ExecContext(ctx, `
-		INSERT INTO placement_rollback_intents (
-			channel_id, create_request_id, owner_epoch, daemon_id,
-			daemon_connection_epoch, reason, attempts, last_attempt_at,
-			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("gateway: persist rollback intent tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
+			INSERT INTO placement_rollback_intents (
+				channel_id, create_request_id, owner_epoch, daemon_id,
+				daemon_connection_epoch, reason, attempts, last_attempt_at,
+				created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
 		ON CONFLICT(channel_id, create_request_id, owner_epoch) DO UPDATE SET
 			daemon_id = excluded.daemon_id,
-			daemon_connection_epoch = excluded.daemon_connection_epoch,
-			reason = excluded.reason,
-			updated_at = excluded.updated_at`,
+				daemon_connection_epoch = excluded.daemon_connection_epoch,
+				reason = excluded.reason,
+				updated_at = excluded.updated_at`,
 		string(p.ChannelID), string(p.CreateRequestID), int64(p.OwnerEpoch),
 		string(conn.DaemonID), int64(conn.ConnectionEpoch), reason, now, now,
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("gateway: persist rollback intent: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+			INSERT INTO placement_sagas (
+				saga_id, channel_id, create_request_id, owner_epoch,
+				daemon_id, daemon_connection_epoch, saga_kind, phase,
+				sent_at, expected_ack_frame_kind, attempt_count, last_attempt_at,
+				created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, 'rollback', 'sent', ?, ?, 0, 0, ?, ?)
+			ON CONFLICT(saga_id) DO UPDATE SET
+				daemon_id = excluded.daemon_id,
+				daemon_connection_epoch = excluded.daemon_connection_epoch,
+				phase = 'sent',
+				terminal_status = '',
+				abandonment_reason = '',
+				updated_at = excluded.updated_at`,
+		rollbackSagaID(p.ChannelID, p.CreateRequestID, p.OwnerEpoch),
+		string(p.ChannelID), string(p.CreateRequestID), int64(p.OwnerEpoch),
+		string(conn.DaemonID), int64(conn.ConnectionEpoch),
+		now, string(kerneldaemonbus.FrameTypeControlUnbindChannelAck), now, now,
+	); err != nil {
+		return fmt.Errorf("gateway: persist rollback saga: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("gateway: persist rollback intent commit: %w", err)
 	}
 	return nil
 }
 
 func (a *App) deleteRollbackIntent(ctx context.Context, intent placementRollbackIntent) error {
-	_, err := a.db.ExecContext(ctx, `
-		DELETE FROM placement_rollback_intents
-		 WHERE channel_id = ? AND create_request_id = ? AND owner_epoch = ?`,
-		string(intent.ChannelID), string(intent.CreateRequestID), int64(intent.OwnerEpoch),
-	)
+	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("gateway: delete rollback intent tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
+			DELETE FROM placement_rollback_intents
+			 WHERE channel_id = ? AND create_request_id = ? AND owner_epoch = ?`,
+		string(intent.ChannelID), string(intent.CreateRequestID), int64(intent.OwnerEpoch),
+	); err != nil {
 		return fmt.Errorf("gateway: delete rollback intent: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+			UPDATE placement_sagas
+			   SET phase='completed',
+			       terminal_status='completed',
+			       abandonment_reason='',
+			       updated_at=?
+			 WHERE saga_id=?`,
+		time.Now().UnixMilli(),
+		rollbackSagaID(intent.ChannelID, intent.CreateRequestID, intent.OwnerEpoch),
+	); err != nil {
+		return fmt.Errorf("gateway: complete rollback saga: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("gateway: delete rollback intent commit: %w", err)
 	}
 	return nil
 }
@@ -124,18 +171,39 @@ func (a *App) listRollbackIntentsForDaemonQuery(
 
 func (a *App) incrementRollbackAttempt(ctx context.Context, intent placementRollbackIntent) error {
 	now := time.Now().UnixMilli()
-	_, err := a.db.ExecContext(ctx, `
-		UPDATE placement_rollback_intents
-		   SET attempts = attempts + 1,
-		       last_attempt_at = ?,
-		       updated_at = ?
-		 WHERE channel_id = ? AND create_request_id = ? AND owner_epoch = ?`,
-		now, now, string(intent.ChannelID), string(intent.CreateRequestID), int64(intent.OwnerEpoch),
-	)
+	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("gateway: increment rollback attempt tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
+			UPDATE placement_rollback_intents
+			   SET attempts = attempts + 1,
+			       last_attempt_at = ?,
+			       updated_at = ?
+			 WHERE channel_id = ? AND create_request_id = ? AND owner_epoch = ?`,
+		now, now, string(intent.ChannelID), string(intent.CreateRequestID), int64(intent.OwnerEpoch),
+	); err != nil {
 		return fmt.Errorf("gateway: increment rollback attempt: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `
+			UPDATE placement_sagas
+			   SET attempt_count = attempt_count + 1,
+			       last_attempt_at = ?,
+			       updated_at = ?
+			 WHERE saga_id=?`,
+		now, now, rollbackSagaID(intent.ChannelID, intent.CreateRequestID, intent.OwnerEpoch),
+	); err != nil {
+		return fmt.Errorf("gateway: increment rollback saga attempt: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("gateway: increment rollback attempt commit: %w", err)
+	}
 	return nil
+}
+
+func rollbackSagaID(channelID channel.ID, createRequestID placement.CreateRequestID, ownerEpoch placement.OwnerEpoch) string {
+	return fmt.Sprintf("rollback:%s:%s:%d", channelID, createRequestID, ownerEpoch)
 }
 
 func (a *App) rollbackIntentSuperseded(ctx context.Context, intent placementRollbackIntent) (bool, error) {

@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
 )
@@ -194,6 +195,20 @@ func (s *Service) ReserveWith(
 	if err != nil {
 		return placement.Placement{}, placement.CreateChannelRequest{}, err
 	}
+	if _, err := s.store.StartSaga(ctx, StartSagaInput{
+		ChannelID:             out.ChannelID,
+		CreateRequestID:       out.CreateRequestID,
+		OwnerEpoch:            out.OwnerEpoch,
+		DaemonID:              out.DaemonID,
+		DaemonConnectionEpoch: out.DaemonConnectionEpoch,
+		SagaKind:              SagaKindBootstrapReserve,
+		Phase:                 SagaPhaseSent,
+		SentAt:                now,
+		ExpectedAckFrameKind:  string(kerneldaemonbus.FrameTypeControlCreateChannelAck),
+		NowMs:                 now,
+	}); err != nil {
+		return placement.Placement{}, placement.CreateChannelRequest{}, err
+	}
 
 	req := placement.CreateChannelRequest{
 		ChannelID:       out.ChannelID,
@@ -234,7 +249,21 @@ func (s *Service) Activate(
 		// reconcile path will eventually transition to orphan.
 		return false, nil
 	}
-	return s.store.CASActivate(ctx, ack, newConnectionEpoch, s.now().UnixMilli())
+	now := s.now().UnixMilli()
+	ok, err = s.store.CASActivate(ctx, ack, newConnectionEpoch, now)
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		if saga, found, err := s.store.SagaForCreateRequest(ctx, SagaKindBootstrapReserve, ack.ChannelID, ack.CreateRequestID); err != nil {
+			return false, err
+		} else if found {
+			if err := s.store.CompleteSaga(ctx, saga.SagaID, "accepted", now); err != nil {
+				return false, err
+			}
+		}
+	}
+	return ok, nil
 }
 
 // RejectCreate marks a create-channel saga failed/orphan after the daemon
@@ -258,7 +287,23 @@ func (s *Service) OrphanCreating(
 	if channelID == "" || createRequestID == "" {
 		return false, nil
 	}
-	return s.store.CASOrphanCreating(ctx, channelID, createRequestID, s.now().UnixMilli())
+	now := s.now().UnixMilli()
+	ok, err := s.store.CASOrphanCreating(ctx, channelID, createRequestID, now)
+	if err != nil {
+		return false, err
+	}
+	for _, kind := range []SagaKind{SagaKindBootstrapReserve, SagaKindReclaimReserve} {
+		saga, found, err := s.store.SagaForCreateRequest(ctx, kind, channelID, createRequestID)
+		if err != nil {
+			return false, err
+		}
+		if found {
+			if err := s.store.AbandonSaga(ctx, saga.SagaID, "orphaned", now); err != nil {
+				return false, err
+			}
+		}
+	}
+	return ok, nil
 }
 
 // Heartbeat refreshes last_heartbeat_at on a control.heartbeat
@@ -388,7 +433,7 @@ func (s *Service) AcceptHeldChannel(
 	daemonID placement.DaemonID,
 	req placement.HeldChannel,
 	newConnectionEpoch placement.ConnectionEpoch,
-) (bool, error) {
+) (bool, string, error) {
 	return s.store.AcceptHeldChannel(ctx, channelID, daemonID, req, newConnectionEpoch, s.now().UnixMilli())
 }
 
@@ -410,6 +455,21 @@ func (s *Service) ReserveReclaim(
 	out, ok, err := s.store.ReserveReclaim(ctx, channelID, candidate, connectionEpoch, createReqID, s.now().UnixMilli())
 	if err != nil || !ok {
 		return placement.Placement{}, placement.DaemonReclaimRequest{}, ok, err
+	}
+	now := s.now().UnixMilli()
+	if _, err := s.store.StartSaga(ctx, StartSagaInput{
+		ChannelID:             out.ChannelID,
+		CreateRequestID:       out.CreateRequestID,
+		OwnerEpoch:            out.OwnerEpoch,
+		DaemonID:              out.DaemonID,
+		DaemonConnectionEpoch: out.DaemonConnectionEpoch,
+		SagaKind:              SagaKindReclaimReserve,
+		Phase:                 SagaPhaseSent,
+		SentAt:                now,
+		ExpectedAckFrameKind:  string(kerneldaemonbus.FrameTypeControlReclaimAccepted),
+		NowMs:                 now,
+	}); err != nil {
+		return placement.Placement{}, placement.DaemonReclaimRequest{}, false, err
 	}
 	prevOwner := prev.DaemonID
 	req := placement.DaemonReclaimRequest{
@@ -441,7 +501,21 @@ func (s *Service) ActivateReclaim(
 		cur.OwnerEpoch != ack.NewOwnerEpoch {
 		return false, nil
 	}
-	return s.store.CASActivateReclaim(ctx, ack, daemonID, newConnectionEpoch, s.now().UnixMilli())
+	now := s.now().UnixMilli()
+	activated, err := s.store.CASActivateReclaim(ctx, ack, daemonID, newConnectionEpoch, now)
+	if err != nil {
+		return false, err
+	}
+	if activated {
+		if saga, found, err := s.store.SagaForCreateRequest(ctx, SagaKindReclaimReserve, ack.ChannelID, ack.CreateRequestID); err != nil {
+			return false, err
+		} else if found {
+			if err := s.store.CompleteSaga(ctx, saga.SagaID, "accepted", now); err != nil {
+				return false, err
+			}
+		}
+	}
+	return activated, nil
 }
 
 func reclaimOrigin(state placement.State) placement.ReclaimOriginState {
@@ -509,6 +583,20 @@ func (s *Service) ReconcileOnce(ctx context.Context) error {
 		if err := s.store.MarkOrphan(ctx, p.ChannelID, now.UnixMilli()); err != nil {
 			return err
 		}
+		for _, kind := range []SagaKind{SagaKindBootstrapReserve, SagaKindReclaimReserve} {
+			saga, found, err := s.store.SagaForCreateRequest(ctx, kind, p.ChannelID, p.CreateRequestID)
+			if err != nil {
+				return err
+			}
+			if found {
+				if err := s.store.AbandonSaga(ctx, saga.SagaID, "create_timeout", now.UnixMilli()); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if err := s.store.AbandonTimedOutSagas(ctx, cutoffCreate, "phase_timeout", now.UnixMilli()); err != nil {
+		return err
 	}
 
 	// 2) active + last_heartbeat_at < cutoffHeart → stale only after

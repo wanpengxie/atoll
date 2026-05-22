@@ -30,6 +30,12 @@ type TypeRegistry struct {
 	nowFn func() int64
 }
 
+const (
+	TypeInstallStatusInstalling = "installing"
+	TypeInstallStatusInstalled  = "installed"
+	TypeInstallStatusFailed     = "failed"
+)
+
 // NewTypeRegistry builds the registry over the given channel sqlite.
 // nowFn stamps the created_at column on Upsert; passing nil falls back
 // to a no-op zero (callers that need real timestamps MUST inject NowFn).
@@ -45,6 +51,71 @@ func NewTypeRegistry(db *sql.DB, nowFn func() int64) *TypeRegistry {
 // Returns the persisted row (round-tripped through JSON marshal so
 // callers observe canonicalised bytes).
 func (r *TypeRegistry) Upsert(ctx context.Context, row adapter.TypeRow) (adapter.TypeRow, error) {
+	return r.upsertWithStatus(ctx, row, TypeInstallStatusInstalled, "")
+}
+
+// BeginInstall writes an installing row and returns whether an installed row
+// was visible before the install attempt began. Installing rows are intentionally
+// hidden from Lookup/List/HarnessView until MarkInstalled succeeds.
+func (r *TypeRegistry) BeginInstall(ctx context.Context, row adapter.TypeRow) (adapter.TypeRow, bool, error) {
+	_, existed, err := r.Lookup(ctx, row.Type)
+	if err != nil {
+		return adapter.TypeRow{}, false, err
+	}
+	persisted, err := r.upsertWithStatus(ctx, row, TypeInstallStatusInstalling, "")
+	return persisted, existed, err
+}
+
+func (r *TypeRegistry) MarkInstalled(ctx context.Context, typeName string) error {
+	if _, err := r.db.ExecContext(ctx,
+		`UPDATE type_registry SET install_status='installed', install_error='' WHERE type=?`,
+		typeName,
+	); err != nil {
+		return fmt.Errorf("store: type_registry mark installed %q: %w", typeName, err)
+	}
+	return nil
+}
+
+func (r *TypeRegistry) MarkInstallFailed(ctx context.Context, typeName, reason string) error {
+	if _, err := r.db.ExecContext(ctx,
+		`UPDATE type_registry SET install_status='failed', install_error=? WHERE type=?`,
+		reason, typeName,
+	); err != nil {
+		return fmt.Errorf("store: type_registry mark failed %q: %w", typeName, err)
+	}
+	return nil
+}
+
+func (r *TypeRegistry) RecoverInstalling(ctx context.Context, reason string) (int, error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE type_registry SET install_status='failed', install_error=? WHERE install_status='installing'`,
+		reason,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("store: type_registry recover installing: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: type_registry recover installing rows: %w", err)
+	}
+	return int(n), nil
+}
+
+func (r *TypeRegistry) InstallStatus(ctx context.Context, typeName string) (status, reason string, ok bool, err error) {
+	err = r.db.QueryRowContext(ctx,
+		`SELECT install_status, install_error FROM type_registry WHERE type=?`,
+		typeName,
+	).Scan(&status, &reason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, fmt.Errorf("store: type_registry install status %q: %w", typeName, err)
+	}
+	return status, reason, true, nil
+}
+
+func (r *TypeRegistry) upsertWithStatus(ctx context.Context, row adapter.TypeRow, installStatus, installError string) (adapter.TypeRow, error) {
 	if err := row.Validate(); err != nil {
 		return adapter.TypeRow{}, err
 	}
@@ -79,14 +150,16 @@ func (r *TypeRegistry) Upsert(ctx context.Context, row adapter.TypeRow) (adapter
 
 	const q = `INSERT INTO type_registry
 		(type, allowed_kinds, handler_binding, terminal_convention,
-		 max_pending_ms, handler_actor_id, created_at)
-		VALUES (?,?,?,?,?,?,?)
+		 max_pending_ms, handler_actor_id, install_status, install_error, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(type) DO UPDATE SET
 			allowed_kinds            = excluded.allowed_kinds,
 			handler_binding          = excluded.handler_binding,
 			terminal_convention      = excluded.terminal_convention,
 			max_pending_ms           = excluded.max_pending_ms,
-			handler_actor_id         = excluded.handler_actor_id
+			handler_actor_id         = excluded.handler_actor_id,
+			install_status          = excluded.install_status,
+			install_error           = excluded.install_error
 	`
 	if _, err := r.db.ExecContext(ctx, q,
 		row.Type,
@@ -95,12 +168,14 @@ func (r *TypeRegistry) Upsert(ctx context.Context, row adapter.TypeRow) (adapter
 		string(terminal),
 		maxPending,
 		handler,
+		installStatus,
+		installError,
 		r.nowFn(),
 	); err != nil {
 		return adapter.TypeRow{}, fmt.Errorf("store: type_registry upsert %q: %w", row.Type, err)
 	}
 
-	persisted, ok, err := r.lookup(ctx, row.Type)
+	persisted, ok, err := r.lookupAny(ctx, row.Type)
 	if err != nil {
 		return adapter.TypeRow{}, err
 	}
@@ -120,8 +195,9 @@ func (r *TypeRegistry) Lookup(ctx context.Context, typeName string) (adapter.Typ
 // by type for deterministic test output.
 func (r *TypeRegistry) List(ctx context.Context) ([]adapter.TypeRow, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
-	                  terminal_convention, max_pending_ms, handler_actor_id
-	             FROM type_registry`
+			                  terminal_convention, max_pending_ms, handler_actor_id
+			             FROM type_registry
+			            WHERE install_status='installed'`
 	rows, err := r.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("store: type_registry list: %w", err)
@@ -178,8 +254,21 @@ func (a typeRegistryHarnessAdapter) Lookup(ctx context.Context, typeName string)
 
 func (r *TypeRegistry) lookup(ctx context.Context, typeName string) (adapter.TypeRow, bool, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
-	                  terminal_convention, max_pending_ms, handler_actor_id
-	             FROM type_registry WHERE type=?`
+		                  terminal_convention, max_pending_ms, handler_actor_id
+		             FROM type_registry
+		            WHERE type=? AND install_status='installed'`
+	return r.lookupQuery(ctx, q, typeName)
+}
+
+func (r *TypeRegistry) lookupAny(ctx context.Context, typeName string) (adapter.TypeRow, bool, error) {
+	const q = `SELECT type, allowed_kinds, handler_binding,
+		                  terminal_convention, max_pending_ms, handler_actor_id
+		             FROM type_registry
+		            WHERE type=?`
+	return r.lookupQuery(ctx, q, typeName)
+}
+
+func (r *TypeRegistry) lookupQuery(ctx context.Context, q string, typeName string) (adapter.TypeRow, bool, error) {
 	row, err := scanTypeRowSingle(r.db.QueryRowContext(ctx, q, typeName))
 	if errors.Is(err, sql.ErrNoRows) {
 		return adapter.TypeRow{}, false, nil

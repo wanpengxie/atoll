@@ -29,7 +29,16 @@ type Config struct {
 // Service validates type_registry rows, writes them, and mirrors the
 // mutation as system.type.installed.
 type Service struct {
-	cfg Config
+	cfg      Config
+	registry installRegistry
+}
+
+type installRegistry interface {
+	adapter.TypeRegistry
+	BeginInstall(ctx context.Context, row adapter.TypeRow) (adapter.TypeRow, bool, error)
+	MarkInstalled(ctx context.Context, typeName string) error
+	MarkInstallFailed(ctx context.Context, typeName, reason string) error
+	RecoverInstalling(ctx context.Context, reason string) (int, error)
 }
 
 // New constructs a Service.
@@ -43,13 +52,17 @@ func New(cfg Config) (*Service, error) {
 	if cfg.TypeRegistry == nil {
 		return nil, fmt.Errorf("typeinstall: TypeRegistry required")
 	}
+	registry, ok := cfg.TypeRegistry.(installRegistry)
+	if !ok {
+		return nil, fmt.Errorf("typeinstall: TypeRegistry must support atomic install lifecycle")
+	}
 	if cfg.HarnessChain == nil {
 		return nil, fmt.Errorf("typeinstall: HarnessChain required")
 	}
 	if cfg.NowFn == nil {
 		cfg.NowFn = func() int64 { return time.Now().UnixMilli() }
 	}
-	return &Service{cfg: cfg}, nil
+	return &Service{cfg: cfg, registry: registry}, nil
 }
 
 // InstallType validates row, upserts type_registry, and emits the
@@ -59,27 +72,36 @@ func (s *Service) InstallType(ctx context.Context, row adapter.TypeRow) (adapter
 		return adapter.TypeRow{}, err
 	}
 
-	_, existed, err := s.cfg.TypeRegistry.Lookup(ctx, row.Type)
+	persisted, existed, err := s.registry.BeginInstall(ctx, row)
 	if err != nil {
-		return adapter.TypeRow{}, fmt.Errorf("typeinstall: lookup %s: %w", row.Type, err)
+		return adapter.TypeRow{}, &Error{
+			Reason: message.InstallTypeRegistryInvalid,
+			Err:    fmt.Errorf("typeinstall: registry begin install %s: %w", row.Type, err),
+		}
 	}
 	mutationKind := "create"
 	if existed {
 		mutationKind = "compatible_update"
 	}
 
-	persisted, err := s.cfg.TypeRegistry.Upsert(ctx, row)
-	if err != nil {
-		return adapter.TypeRow{}, &Error{
-			Reason: message.InstallTypeRegistryInvalid,
-			Err:    fmt.Errorf("typeinstall: registry upsert %s: %w", row.Type, err),
-		}
-	}
-
 	if err := s.emitInstalled(ctx, persisted, mutationKind); err != nil {
+		_ = s.registry.MarkInstallFailed(context.WithoutCancel(ctx), persisted.Type, err.Error())
 		return adapter.TypeRow{}, err
 	}
+	if err := s.registry.MarkInstalled(ctx, persisted.Type); err != nil {
+		return adapter.TypeRow{}, &Error{
+			Reason: message.InstallTypeRegistryInvalid,
+			Err:    fmt.Errorf("typeinstall: registry mark installed %s: %w", persisted.Type, err),
+		}
+	}
 	return persisted, nil
+}
+
+func (s *Service) RecoverInstalling(ctx context.Context, reason string) (int, error) {
+	if reason == "" {
+		reason = "crash recovered before system.type.installed"
+	}
+	return s.registry.RecoverInstalling(ctx, reason)
 }
 
 func (s *Service) validate(ctx context.Context, row adapter.TypeRow) error {

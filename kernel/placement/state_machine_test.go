@@ -44,8 +44,8 @@ func TestTransitionMatrix(t *testing.T) {
 		{from: StateActive, to: ""}: true,
 		// orphan → creating  (retry new daemon, owner_epoch+1)
 		{from: StateOrphan, to: StateCreating}: true,
-		// stale → active  (original daemon reclaim)
-		{from: StateStale, to: StateActive}: true,
+		// stale → creating  (server reclaim, owner_epoch+1, fresh fencing)
+		{from: StateStale, to: StateCreating}: true,
 		// stale → orphan  (stale_timeout — M2+ migration)
 		{from: StateStale, to: StateOrphan}: true,
 	}
@@ -60,6 +60,20 @@ func TestTransitionMatrix(t *testing.T) {
 				t.Errorf("CanTransition(%q → %q) = %v, want %v", from, to, got, want)
 			}
 		}
+	}
+}
+
+func TestPlacementTransitionMatrix_BareStaleToActiveRejected(t *testing.T) {
+	t.Parallel()
+
+	if CanTransition(StateStale, StateActive) {
+		t.Fatal("bare stale -> active transition must be rejected; reclaim must pass through creating")
+	}
+	if !CanTransition(StateStale, StateCreating) {
+		t.Fatal("stale reclaim path should transition stale -> creating")
+	}
+	if !CanTransition(StateCreating, StateActive) {
+		t.Fatal("reclaim completion should transition creating -> active")
 	}
 }
 

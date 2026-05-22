@@ -6,6 +6,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
 )
 
 // UserID is the server identity user identifier carried by human caller
@@ -14,6 +15,9 @@ type UserID string
 
 // String returns the wire form.
 func (u UserID) String() string { return string(u) }
+
+// AckPayload is the daemonbus-carried viewsync.ack payload.
+type AckPayload = viewsync.AckFrame
 
 // HumanCaller is the wire object the server attaches to
 // control.write_message so the daemon can authenticate the human origin.
@@ -41,6 +45,36 @@ type WriteMessageAckBody struct {
 	MessageID    message.ID `json:"message_id,omitempty"`
 	Seq          int64      `json:"seq,omitempty"`
 	Deduped      bool       `json:"deduped,omitempty"`
+	RejectReason string     `json:"reject_reason,omitempty"`
+	RejectDetail string     `json:"reject_detail,omitempty"`
+}
+
+// UpdateMember carries one actor membership row from the server catalog to
+// the daemon's channel-local actor_registry.
+type UpdateMember struct {
+	UserID        UserID        `json:"user_id"`
+	MemberActorID actor.ActorID `json:"member_actor_id"`
+	Kind          actor.Kind    `json:"kind"`
+	Role          string        `json:"role,omitempty"`
+	DisplayName   string        `json:"display_name,omitempty"`
+}
+
+// UpdateMembersBody is the server -> daemon control.update_members payload.
+// Adds register or reactivate actors; Removes soft-deregister active actors.
+type UpdateMembersBody struct {
+	FrameID   FrameID         `json:"frame_id"`
+	ChannelID channel.ID      `json:"channel_id"`
+	Adds      []UpdateMember  `json:"adds,omitempty"`
+	Removes   []actor.ActorID `json:"removes,omitempty"`
+}
+
+// UpdateMembersAckBody is the daemon -> server reply for
+// control.update_members. Accepted=false leaves the server catalog row
+// durable; callers retry through the hook path.
+type UpdateMembersAckBody struct {
+	FrameID      FrameID    `json:"frame_id"`
+	ChannelID    channel.ID `json:"channel_id"`
+	Accepted     bool       `json:"accepted"`
 	RejectReason string     `json:"reject_reason,omitempty"`
 	RejectDetail string     `json:"reject_detail,omitempty"`
 }

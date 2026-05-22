@@ -37,13 +37,33 @@ type OpenOptions struct {
 //	PRAGMA foreign_keys=ON
 //	PRAGMA busy_timeout=5000
 func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions) (*sql.DB, error) {
-	return openSqlite(ctx, dbPath, opts, ChannelLocalDDL)
+	db, err := openSqlite(ctx, dbPath, opts, ChannelLocalDDL)
+	if err != nil {
+		return nil, err
+	}
+	if !opts.SkipDDL && !opts.ReadOnly {
+		if err := ensureChannelLocalSchema(ctx, db); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
+	return db, nil
 }
 
 // OpenDaemon opens (creating if absent) the daemon-level sqlite at
 // dbPath, runs DaemonLocalDDL, and returns *sql.DB.
 func OpenDaemon(ctx context.Context, dbPath string, opts OpenOptions) (*sql.DB, error) {
-	return openSqlite(ctx, dbPath, opts, DaemonLocalDDL)
+	db, err := openSqlite(ctx, dbPath, opts, DaemonLocalDDL)
+	if err != nil {
+		return nil, err
+	}
+	if !opts.SkipDDL && !opts.ReadOnly {
+		if err := ensureDaemonLocalSchema(ctx, db); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
+	return db, nil
 }
 
 func openSqlite(ctx context.Context, dbPath string, opts OpenOptions, ddl string) (*sql.DB, error) {
@@ -110,4 +130,74 @@ func applyPragmas(ctx context.Context, db *sql.DB, opts OpenOptions) error {
 		}
 	}
 	return nil
+}
+
+func ensureDaemonLocalSchema(ctx context.Context, db *sql.DB) error {
+	adds := map[string]string{
+		"phase":                   "phase TEXT NOT NULL DEFAULT 'sent' CHECK (phase IN ('sent','awaiting_ack','partial_takeover','completed','abandoned'))",
+		"sent_at":                 "sent_at INTEGER NOT NULL DEFAULT 0",
+		"expected_ack_frame_kind": "expected_ack_frame_kind TEXT NOT NULL DEFAULT 'control.create_channel_ack'",
+		"terminal_status":         "terminal_status TEXT NOT NULL DEFAULT ''",
+		"abandonment_reason":      "abandonment_reason TEXT NOT NULL DEFAULT ''",
+		"attempt_count":           "attempt_count INTEGER NOT NULL DEFAULT 0",
+		"last_attempt_at":         "last_attempt_at INTEGER NOT NULL DEFAULT 0",
+	}
+	for col, ddl := range adds {
+		ok, err := columnExists(ctx, db, "bootstrap_registry", col)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, "ALTER TABLE bootstrap_registry ADD COLUMN "+ddl); err != nil {
+			return fmt.Errorf("store: add bootstrap_registry.%s: %w", col, err)
+		}
+	}
+	return nil
+}
+
+func ensureChannelLocalSchema(ctx context.Context, db *sql.DB) error {
+	adds := map[string]string{
+		"install_status": "install_status TEXT NOT NULL DEFAULT 'installed' CHECK (install_status IN ('installing','installed','failed'))",
+		"install_error":  "install_error TEXT NOT NULL DEFAULT ''",
+	}
+	for col, ddl := range adds {
+		ok, err := columnExists(ctx, db, "type_registry", col)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, "ALTER TABLE type_registry ADD COLUMN "+ddl); err != nil {
+			return fmt.Errorf("store: add type_registry.%s: %w", col, err)
+		}
+	}
+	return nil
+}
+
+func columnExists(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return false, fmt.Errorf("store: pragma table_info(%s): %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return false, fmt.Errorf("store: scan table_info(%s): %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("store: table_info(%s) rows: %w", table, err)
+	}
+	return false, nil
 }

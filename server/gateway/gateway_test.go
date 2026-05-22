@@ -2565,13 +2565,19 @@ func TestReclaimCandidate_CapacityRespected(t *testing.T) {
 		_, dmn, epoch := registerReclaimDaemon(t, app, ctx, spec.id, spec.capacity)
 		serveCountingReclaims(t, ctx, dmn, spec.id, epoch, counts, &countsMu)
 	}
-	createStalePlacement(t, app, ctx, "ch-cap-b-existing", "d-cap-b", 1)
-	if ok, err := app.Placements().AcceptHeldChannel(ctx, "ch-cap-b-existing", "d-cap-b", placement.HeldChannel{
-		ChannelID:    "ch-cap-b-existing",
-		OwnerEpoch:   1,
-		FencingToken: "tok-before-reclaim-ch-cap-b-existing",
+	_, activeReq, err := app.Placements().Reserve(ctx, "ch-cap-b-existing", "d-cap-b", 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve active B seed: %v", err)
+	}
+	if ok, err := app.Placements().Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       activeReq.ChannelID,
+		CreateRequestID: activeReq.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "tok-active-ch-cap-b-existing",
+		DaemonID:        "d-cap-b",
+		Result:          placement.CreateChannelAccepted,
 	}, 1); err != nil || !ok {
-		t.Fatalf("reactivate B seed ok=%v err=%v", ok, err)
+		t.Fatalf("activate B seed ok=%v err=%v", ok, err)
 	}
 	for i := 0; i < 12; i++ {
 		createStalePlacement(t, app, ctx, fmt.Sprintf("ch-cap-%02d", i), "d-cap-prev", 1)

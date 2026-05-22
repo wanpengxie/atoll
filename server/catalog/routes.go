@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -21,15 +22,8 @@ const catalogJSONBodyLimit = 64 << 10
 // Implementations MUST be idempotent — catalog calls them after the
 // channel + member rows are durably committed, so retrying is safe.
 type PlacementHook interface {
-	OnChannelCreated(ctx ctxLike, channel Channel, members []ChannelMember) error
-	OnChannelMembersChanged(ctx ctxLike, channelID string, adds []ChannelMember, removes []string) error
-}
-
-// ctxLike is a tiny shim so PlacementHook implementations can take a
-// context.Context without forcing this file to import "context"
-// twice; gin's Context implements it.
-type ctxLike interface {
-	Deadline() (deadline interface{}, ok bool)
+	OnChannelCreated(ctx context.Context, channel Channel, members []ChannelMember) error
+	OnChannelMembersChanged(ctx context.Context, channelID string, adds []ChannelMember, removes []string) error
 }
 
 // RegisterRoutes mounts the catalog endpoints. ident is required so
@@ -181,6 +175,12 @@ func (s *Service) handleAddChannelMember(c *gin.Context) {
 		httperr.Respond(c, "catalog.add_channel_member", httpStatusFor(err), err)
 		return
 	}
+	if s.placementHook != nil {
+		if err := s.placementHook.OnChannelMembersChanged(c.Request.Context(), c.Param("chID"), []ChannelMember{m}, nil); err != nil {
+			httperr.Internal(c, "catalog.add_channel_member.placement_hook", err)
+			return
+		}
+	}
 	c.JSON(http.StatusCreated, m)
 }
 
@@ -190,9 +190,20 @@ func (s *Service) handleRemoveChannelMember(c *gin.Context) {
 		httperr.Respond(c, "catalog.remove_channel_member.auth", httpStatusFor(err), err)
 		return
 	}
+	target, targetErr := s.GetChannelMember(c.Request.Context(), c.Param("chID"), c.Param("uid"))
+	if targetErr != nil && !errors.Is(targetErr, ErrNotChannelMember) {
+		httperr.Respond(c, "catalog.remove_channel_member.target", httpStatusFor(targetErr), targetErr)
+		return
+	}
 	if err := s.RemoveChannelMember(c.Request.Context(), c.Param("chID"), c.Param("uid")); err != nil {
 		httperr.Internal(c, "catalog.remove_channel_member", err)
 		return
+	}
+	if targetErr == nil && s.placementHook != nil {
+		if err := s.placementHook.OnChannelMembersChanged(c.Request.Context(), c.Param("chID"), nil, []string{target.MemberActorID}); err != nil {
+			httperr.Internal(c, "catalog.remove_channel_member.placement_hook", err)
+			return
+		}
 	}
 	if s.subscriptionRevoker != nil {
 		s.subscriptionRevoker.RevokeChannelUser(channel.ID(c.Param("chID")), c.Param("uid"))

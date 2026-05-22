@@ -2,10 +2,16 @@ package catalog_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/wanpengxie/ActOS/server/catalog"
+	"github.com/wanpengxie/ActOS/server/identity"
 	"github.com/wanpengxie/ActOS/server/store"
 )
 
@@ -118,4 +124,67 @@ func TestInitialMembersFor(t *testing.T) {
 	if out[0].DisplayName != "Display:u1" {
 		t.Errorf("display=%q", out[0].DisplayName)
 	}
+}
+
+func TestPlacementHook_OnChannelMembersChanged_FiresOnRouteWrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := newTestService(t)
+	ctx := context.Background()
+	ws, err := svc.CreateWorkspace(ctx, catalog.CreateWorkspaceInput{Name: "Demo", OwnerID: "u1"})
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	ch, _, err := svc.CreateChannel(ctx, catalog.CreateChannelInput{
+		WorkspaceID: ws.ID,
+		Name:        "general",
+		CreatorID:   "u1",
+	})
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+	hook := &recordingPlacementHook{}
+	svc.SetPlacementHook(hook)
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set("coagent.user", identity.User{ID: "u1"})
+		c.Next()
+	})
+	svc.RegisterRoutes(r.Group("/api"), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/channels/"+ch.ID+"/members", strings.NewReader(`{"user_id":"u2","member_actor_id":"user:u2","role":"member"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST member status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(hook.adds) != 1 || hook.adds[0].MemberActorID != "user:u2" || len(hook.removes) != 0 {
+		t.Fatalf("hook after add adds=%+v removes=%+v", hook.adds, hook.removes)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/channels/"+ch.ID+"/members/u2", nil)
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE member status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(hook.removes) != 1 || hook.removes[0] != "user:u2" {
+		t.Fatalf("hook removes=%+v", hook.removes)
+	}
+}
+
+type recordingPlacementHook struct {
+	adds    []catalog.ChannelMember
+	removes []string
+}
+
+func (h *recordingPlacementHook) OnChannelCreated(ctx context.Context, ch catalog.Channel, members []catalog.ChannelMember) error {
+	return nil
+}
+
+func (h *recordingPlacementHook) OnChannelMembersChanged(ctx context.Context, channelID string, adds []catalog.ChannelMember, removes []string) error {
+	h.adds = append(h.adds, adds...)
+	h.removes = append(h.removes, removes...)
+	return nil
 }

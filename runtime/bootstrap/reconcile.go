@@ -27,8 +27,9 @@ import (
 // channels gate downstream zombie-write protection; rejected channels
 // trigger the daemon's per-channel unload path.
 type Reconciler struct {
-	daemonDB *sql.DB
-	nowFn    func() int64
+	daemonDB           *sql.DB
+	nowFn              func() int64
+	ensureCreatedEvent func(context.Context, channel.ID, string) error
 
 	mu           sync.Mutex
 	heldAccepted map[channel.ID]int64  // channel_id -> confirmed_at
@@ -49,6 +50,16 @@ func NewReconciler(daemonDB *sql.DB, nowFn func() int64) (*Reconciler, error) {
 		heldAccepted: make(map[channel.ID]int64),
 		heldRejected: make(map[channel.ID]string),
 	}, nil
+}
+
+// SetEnsureSystemChannelCreatedEvent wires the idempotent event repair hook
+// used when crash recovery finds channel_lock already durable. The hook must
+// append system.channel.created if it is missing and no-op if it already exists.
+func (r *Reconciler) SetEnsureSystemChannelCreatedEvent(fn func(context.Context, channel.ID, string) error) {
+	if r == nil {
+		return
+	}
+	r.ensureCreatedEvent = fn
 }
 
 // AcceptHeldChannel records that the server accepted ownership of channelID
@@ -152,6 +163,11 @@ func (r *Reconciler) Run(ctx context.Context) ([]RolledBack, error) {
 			return nil, err
 		}
 		if hasLock {
+			if r.ensureCreatedEvent != nil {
+				if err := r.ensureCreatedEvent(ctx, rb.ChannelID, rb.WorkdirPath); err != nil {
+					return nil, err
+				}
+			}
 			if err := r.markCompleted(ctx, rb.CreateRequestID); err != nil {
 				return nil, err
 			}
@@ -167,8 +183,13 @@ func (r *Reconciler) Run(ctx context.Context) ([]RolledBack, error) {
 			}
 		}
 		const upd = `UPDATE bootstrap_registry
-		             SET status='rolled_back', rollback_reason='crash recovered', completed_at=?
-		             WHERE create_request_id=?`
+			             SET status='rolled_back',
+			                 phase='abandoned',
+			                 terminal_status='rolled_back',
+			                 abandonment_reason='crash recovered',
+			                 rollback_reason='crash recovered',
+			                 completed_at=?
+			             WHERE create_request_id=?`
 		if _, err := r.daemonDB.ExecContext(ctx, upd, r.nowFn(), rb.CreateRequestID); err != nil {
 			return nil, fmt.Errorf("bootstrap: reconcile update: %w", err)
 		}
@@ -178,8 +199,12 @@ func (r *Reconciler) Run(ctx context.Context) ([]RolledBack, error) {
 
 func (r *Reconciler) markCompleted(ctx context.Context, createRequestID string) error {
 	const upd = `UPDATE bootstrap_registry
-	             SET status='completed', completed_at=?
-	             WHERE create_request_id=? AND status='in_progress'`
+		             SET status='completed',
+		                 phase='completed',
+		                 terminal_status='accepted',
+		                 abandonment_reason='',
+		                 completed_at=?
+		             WHERE create_request_id=? AND status='in_progress'`
 	if _, err := r.daemonDB.ExecContext(ctx, upd, r.nowFn(), createRequestID); err != nil {
 		return fmt.Errorf("bootstrap: reconcile mark completed: %w", err)
 	}

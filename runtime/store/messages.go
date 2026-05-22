@@ -79,8 +79,8 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kl
 	// FIX-T10 protocol defense: Payload is a REQUIRED field per L0 §2.1
 	// (every envelope carries a payload object, even if the body is the
 	// empty JSON object `{}`). Silently coercing nil to `{}` masks
-		// caller bugs that bypass harness Step 4 normalize
-		// and lets non-canonical rows enter the store. Reject loudly so the
+	// caller bugs that bypass harness Step 4 normalize
+	// and lets non-canonical rows enter the store. Reject loudly so the
 	// caller (harness chain) is forced to materialize the payload before
 	// reaching the persistence sink.
 	if env.Payload == nil {
@@ -93,6 +93,32 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kl
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	res, err := m.AppendTx(ctx, tx, env, fencing)
+	if err != nil {
+		return klog.AppendResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return klog.AppendResult{}, fmt.Errorf("store: append commit: %w", err)
+	}
+	return res, nil
+}
+
+// AppendTx appends env using an existing transaction. It is used by internal
+// runtime lifecycle paths that must mutate a side table and append the mirror
+// event atomically.
+func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, fencing klog.FencingTuple) (klog.AppendResult, error) {
+	if tx == nil {
+		return klog.AppendResult{}, errors.New("store: append tx nil")
+	}
+	if env == nil {
+		return klog.AppendResult{}, errors.New("store: append nil envelope")
+	}
+	if env.ID == "" {
+		return klog.AppendResult{}, errors.New("store: append empty envelope.id")
+	}
+	if env.Payload == nil {
+		return klog.AppendResult{}, errors.New("store: append nil payload (harness step 4 must materialize payload before reaching store)")
+	}
 	// 0) FIX-T6 fencing gate — when constructed with a *ChannelLock,
 	// every Append must present a matching (fencing_token, daemon_epoch)
 	// tuple via an explicit Append parameter. The check runs INSIDE
@@ -114,9 +140,6 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kl
 		// we return Deduped=true with the existing seq. Caller (harness
 		// step 0.5) is responsible for verifying canonical-hash match
 		// before short-circuiting.
-		if err := tx.Commit(); err != nil {
-			return klog.AppendResult{}, fmt.Errorf("store: append dedupe commit: %w", err)
-		}
 		env.Seq = existingSeq
 		env.IsTerminal = existingTerm == 1
 		return klog.AppendResult{Seq: klog.Seq(existingSeq), IsTerminal: existingTerm == 1, Deduped: true}, nil
@@ -182,9 +205,6 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kl
 		return klog.AppendResult{}, fmt.Errorf("store: outbox insert: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return klog.AppendResult{}, fmt.Errorf("store: append commit: %w", err)
-	}
 	return klog.AppendResult{Seq: klog.Seq(seq), IsTerminal: env.IsTerminal, Deduped: false}, nil
 }
 

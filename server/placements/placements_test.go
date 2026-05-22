@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/server/placements"
 	"github.com/wanpengxie/ActOS/server/store"
@@ -316,11 +317,11 @@ func TestReclaim(t *testing.T) {
 	// generated during bootstrap (persisted into placement by CASActivate).
 	c.now = c.now.Add(5 * time.Second)
 	reclaimAt := c.now.UnixMilli()
-	got, err := svc.AcceptHeldChannel(ctx, p.ChannelID, p.DaemonID, placement.HeldChannel{
+	got, reason, err := svc.AcceptHeldChannel(ctx, p.ChannelID, p.DaemonID, placement.HeldChannel{
 		ChannelID: p.ChannelID, FencingToken: daemonTok, OwnerEpoch: daemonEpoch,
 	}, 9)
-	if err != nil || !got {
-		t.Fatalf("AcceptHeldChannel ok=%v err=%v", got, err)
+	if err != nil || !got || reason != "" {
+		t.Fatalf("AcceptHeldChannel ok=%v reason=%q err=%v", got, reason, err)
 	}
 	reclaimed, _, err := svc.Get(ctx, p.ChannelID)
 	if err != nil {
@@ -331,14 +332,14 @@ func TestReclaim(t *testing.T) {
 	}
 
 	// Mismatched (epoch / token) reclaim rejected.
-	got, err = svc.AcceptHeldChannel(ctx, p.ChannelID, p.DaemonID, placement.HeldChannel{
+	got, reason, err = svc.AcceptHeldChannel(ctx, p.ChannelID, p.DaemonID, placement.HeldChannel{
 		ChannelID: p.ChannelID, FencingToken: "tok-9999", OwnerEpoch: 9999,
 	}, 10)
 	if err != nil {
 		t.Fatalf("AcceptHeldChannel mismatch err: %v", err)
 	}
-	if got {
-		t.Errorf("AcceptHeldChannel mismatch ok=true; expected false")
+	if got || reason != "" {
+		t.Errorf("AcceptHeldChannel mismatch ok=%v reason=%q; expected false empty reason", got, reason)
 	}
 }
 
@@ -371,23 +372,23 @@ func TestReclaimHijackDifferentDaemonID(t *testing.T) {
 	}
 
 	// The original owner reclaims with the correct tuple → accepted.
-	ok1, err := svc.AcceptHeldChannel(ctx, p.ChannelID, p.DaemonID, placement.HeldChannel{
+	ok1, reason1, err := svc.AcceptHeldChannel(ctx, p.ChannelID, p.DaemonID, placement.HeldChannel{
 		ChannelID: p.ChannelID, FencingToken: daemonTok, OwnerEpoch: daemonEpoch,
 	}, 7)
-	if err != nil || !ok1 {
-		t.Fatalf("owner reclaim ok=%v err=%v", ok1, err)
+	if err != nil || !ok1 || reason1 != "" {
+		t.Fatalf("owner reclaim ok=%v reason=%q err=%v", ok1, reason1, err)
 	}
 
 	// A different daemon presents an identical (epoch, token) tuple →
 	// MUST be rejected (no row update).
-	ok2, err := svc.AcceptHeldChannel(ctx, p.ChannelID, placement.DaemonID("d-attacker"), placement.HeldChannel{
+	ok2, reason2, err := svc.AcceptHeldChannel(ctx, p.ChannelID, placement.DaemonID("d-attacker"), placement.HeldChannel{
 		ChannelID: p.ChannelID, FencingToken: daemonTok, OwnerEpoch: daemonEpoch,
 	}, 8)
 	if err != nil {
 		t.Fatalf("hijack reclaim err: %v", err)
 	}
-	if ok2 {
-		t.Fatalf("hijack reclaim accepted — daemon_id pin missing in SQL WHERE")
+	if ok2 || reason2 != "" {
+		t.Fatalf("hijack reclaim ok=%v reason=%q — daemon_id pin missing in SQL WHERE", ok2, reason2)
 	}
 
 	// Sanity: the row's daemon_id should still be the original owner.
@@ -397,6 +398,241 @@ func TestReclaimHijackDifferentDaemonID(t *testing.T) {
 	}
 	if got.DaemonID != p.DaemonID {
 		t.Errorf("post-hijack daemon_id=%q want %q (ownership leaked)", got.DaemonID, p.DaemonID)
+	}
+}
+
+func TestAcceptHeldChannel_StaleRejected_RequiresReclaim(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+
+	p, _, err := svc.Reserve(ctx, channel.ID("ch-stale-held"), placement.DaemonID("d-owner"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if ok, err := svc.Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       p.ChannelID,
+		CreateRequestID: p.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "tok-stale-held",
+		DaemonID:        p.DaemonID,
+		Result:          placement.CreateChannelAccepted,
+	}, 1); err != nil || !ok {
+		t.Fatalf("Activate ok=%v err=%v", ok, err)
+	}
+	if err := svc.Store().MarkStale(ctx, p.ChannelID, c.Now().UnixMilli()); err != nil {
+		t.Fatalf("MarkStale: %v", err)
+	}
+
+	ok, reason, err := svc.AcceptHeldChannel(ctx, p.ChannelID, p.DaemonID, placement.HeldChannel{
+		ChannelID:    p.ChannelID,
+		FencingToken: "tok-stale-held",
+		OwnerEpoch:   1,
+	}, 2)
+	if err != nil {
+		t.Fatalf("AcceptHeldChannel: %v", err)
+	}
+	if ok || reason != placement.HeldChannelStaleRequiresReclaim {
+		t.Fatalf("AcceptHeldChannel ok=%v reason=%q want stale reclaim reject", ok, reason)
+	}
+	got, _, err := svc.Get(ctx, p.ChannelID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != placement.StateStale || got.OwnerEpoch != 1 || got.FencingToken != "tok-stale-held" {
+		t.Fatalf("stale row mutated: state=%q epoch=%d token=%q", got.State, got.OwnerEpoch, got.FencingToken)
+	}
+
+	reserved, req, reclaimOK, err := svc.ReserveReclaim(ctx, p.ChannelID, placement.DaemonID("d-new"), 3)
+	if err != nil || !reclaimOK {
+		t.Fatalf("ReserveReclaim ok=%v err=%v", reclaimOK, err)
+	}
+	if reserved.State != placement.StateCreating || reserved.OwnerEpoch != 2 || reserved.FencingToken != "" {
+		t.Fatalf("ReserveReclaim state=%q epoch=%d token=%q", reserved.State, reserved.OwnerEpoch, reserved.FencingToken)
+	}
+	if ok, err := svc.ActivateReclaim(ctx, placement.ReclaimAccepted{
+		ChannelID:       p.ChannelID,
+		CreateRequestID: req.CreateRequestID,
+		NewOwnerEpoch:   req.NewOwnerEpoch,
+		FencingToken:    "tok-after-reclaim",
+	}, placement.DaemonID("d-new"), 3); err != nil || !ok {
+		t.Fatalf("ActivateReclaim ok=%v err=%v", ok, err)
+	}
+	got, _, err = svc.Get(ctx, p.ChannelID)
+	if err != nil {
+		t.Fatalf("Get post reclaim: %v", err)
+	}
+	if got.State != placement.StateActive || got.OwnerEpoch != 2 || got.FencingToken != "tok-after-reclaim" {
+		t.Fatalf("post reclaim state=%q epoch=%d token=%q", got.State, got.OwnerEpoch, got.FencingToken)
+	}
+}
+
+func TestPlacementSaga_BootstrapReserve_PhaseTracked(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+
+	p, _, err := svc.Reserve(ctx, channel.ID("ch-saga-bootstrap"), placement.DaemonID("d-1"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	saga, found, err := svc.Store().SagaForCreateRequest(ctx, placements.SagaKindBootstrapReserve, p.ChannelID, p.CreateRequestID)
+	if err != nil {
+		t.Fatalf("SagaForCreateRequest: %v", err)
+	}
+	if !found {
+		t.Fatal("bootstrap reserve saga missing")
+	}
+	if saga.Phase != placements.SagaPhaseSent || saga.ExpectedAckFrameKind != string(kerneldaemonbus.FrameTypeControlCreateChannelAck) {
+		t.Fatalf("saga phase=%q expected_ack=%q", saga.Phase, saga.ExpectedAckFrameKind)
+	}
+
+	if ok, err := svc.Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       p.ChannelID,
+		CreateRequestID: p.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "tok-saga-bootstrap",
+		DaemonID:        p.DaemonID,
+		Result:          placement.CreateChannelAccepted,
+	}, 1); err != nil || !ok {
+		t.Fatalf("Activate ok=%v err=%v", ok, err)
+	}
+	saga, found, err = svc.Store().GetSaga(ctx, saga.SagaID)
+	if err != nil || !found {
+		t.Fatalf("GetSaga found=%v err=%v", found, err)
+	}
+	if saga.Phase != placements.SagaPhaseCompleted || saga.TerminalStatus != "accepted" {
+		t.Fatalf("completed saga phase=%q terminal=%q", saga.Phase, saga.TerminalStatus)
+	}
+}
+
+func TestPlacementSaga_ReclaimReserve_PhaseTracked(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+
+	p, _, err := svc.Reserve(ctx, channel.ID("ch-saga-reclaim"), placement.DaemonID("d-old"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if ok, err := svc.Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       p.ChannelID,
+		CreateRequestID: p.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "tok-old-saga",
+		DaemonID:        p.DaemonID,
+		Result:          placement.CreateChannelAccepted,
+	}, 1); err != nil || !ok {
+		t.Fatalf("Activate ok=%v err=%v", ok, err)
+	}
+	if err := svc.Store().MarkStale(ctx, p.ChannelID, c.Now().UnixMilli()); err != nil {
+		t.Fatalf("MarkStale: %v", err)
+	}
+
+	reserved, req, ok, err := svc.ReserveReclaim(ctx, p.ChannelID, placement.DaemonID("d-new"), 2)
+	if err != nil || !ok {
+		t.Fatalf("ReserveReclaim ok=%v err=%v", ok, err)
+	}
+	saga, found, err := svc.Store().SagaForCreateRequest(ctx, placements.SagaKindReclaimReserve, reserved.ChannelID, reserved.CreateRequestID)
+	if err != nil {
+		t.Fatalf("SagaForCreateRequest: %v", err)
+	}
+	if !found {
+		t.Fatal("reclaim reserve saga missing")
+	}
+	if saga.Phase != placements.SagaPhaseSent || saga.ExpectedAckFrameKind != string(kerneldaemonbus.FrameTypeControlReclaimAccepted) {
+		t.Fatalf("saga phase=%q expected_ack=%q", saga.Phase, saga.ExpectedAckFrameKind)
+	}
+
+	if ok, err := svc.ActivateReclaim(ctx, placement.ReclaimAccepted{
+		ChannelID:       reserved.ChannelID,
+		CreateRequestID: req.CreateRequestID,
+		NewOwnerEpoch:   req.NewOwnerEpoch,
+		FencingToken:    "tok-new-saga",
+	}, placement.DaemonID("d-new"), 2); err != nil || !ok {
+		t.Fatalf("ActivateReclaim ok=%v err=%v", ok, err)
+	}
+	saga, found, err = svc.Store().GetSaga(ctx, saga.SagaID)
+	if err != nil || !found {
+		t.Fatalf("GetSaga found=%v err=%v", found, err)
+	}
+	if saga.Phase != placements.SagaPhaseCompleted || saga.TerminalStatus != "accepted" {
+		t.Fatalf("completed reclaim saga phase=%q terminal=%q", saga.Phase, saga.TerminalStatus)
+	}
+}
+
+func TestPlacementSaga_MidSagaCrash_RecoveryByPhase(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+	svc.MarkStartedAt()
+
+	p, _, err := svc.Reserve(ctx, channel.ID("ch-saga-crash"), placement.DaemonID("d-1"), 1, nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	saga, found, err := svc.Store().SagaForCreateRequest(ctx, placements.SagaKindBootstrapReserve, p.ChannelID, p.CreateRequestID)
+	if err != nil || !found {
+		t.Fatalf("bootstrap saga found=%v err=%v", found, err)
+	}
+	if err := svc.Store().MarkSagaPhase(ctx, saga.SagaID, placements.SagaPhasePartialTakeover, c.Now().UnixMilli()); err != nil {
+		t.Fatalf("MarkSagaPhase: %v", err)
+	}
+
+	c.now = c.now.Add(11 * time.Second)
+	if err := svc.ReconcileOnce(ctx); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	got, _, err := svc.Get(ctx, p.ChannelID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != placement.StateOrphan {
+		t.Fatalf("placement state=%q want orphan", got.State)
+	}
+	saga, found, err = svc.Store().GetSaga(ctx, saga.SagaID)
+	if err != nil || !found {
+		t.Fatalf("GetSaga found=%v err=%v", found, err)
+	}
+	if saga.Phase != placements.SagaPhaseAbandoned || saga.AbandonmentReason == "" {
+		t.Fatalf("saga phase=%q reason=%q want abandoned by recovery", saga.Phase, saga.AbandonmentReason)
+	}
+}
+
+func TestPlacementSaga_TimeoutAbandonment(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+
+	saga, err := svc.Store().StartSaga(ctx, placements.StartSagaInput{
+		SagaID:               "manual-timeout",
+		ChannelID:            "ch-saga-timeout",
+		CreateRequestID:      "req-timeout",
+		OwnerEpoch:           1,
+		DaemonID:             "d-1",
+		SagaKind:             placements.SagaKindBootstrapReserve,
+		Phase:                placements.SagaPhaseAwaitingAck,
+		SentAt:               c.Now().Add(-time.Minute).UnixMilli(),
+		ExpectedAckFrameKind: string(kerneldaemonbus.FrameTypeControlCreateChannelAck),
+		NowMs:                c.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("StartSaga: %v", err)
+	}
+	if err := svc.Store().AbandonTimedOutSagas(ctx, c.Now().Add(-10*time.Second).UnixMilli(), "phase_timeout", c.Now().UnixMilli()); err != nil {
+		t.Fatalf("AbandonTimedOutSagas: %v", err)
+	}
+	got, found, err := svc.Store().GetSaga(ctx, saga.SagaID)
+	if err != nil || !found {
+		t.Fatalf("GetSaga found=%v err=%v", found, err)
+	}
+	if got.Phase != placements.SagaPhaseAbandoned || got.TerminalStatus != "timeout" || got.AbandonmentReason != "phase_timeout" {
+		t.Fatalf("timeout saga phase=%q terminal=%q reason=%q", got.Phase, got.TerminalStatus, got.AbandonmentReason)
 	}
 }
 

@@ -2,12 +2,17 @@ package bootstrap_test
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	khlog "github.com/wanpengxie/ActOS/kernel/log"
+	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/bootstrap"
 	"github.com/wanpengxie/ActOS/runtime/store"
@@ -54,27 +59,27 @@ func TestSaga_Bootstrap(t *testing.T) {
 
 	// bootstrap_registry row stays in_progress until the caller has inserted
 	// channel_lock and invoked Complete.
-	var status string
+	var status, phase string
 	if err := daemonDB.QueryRowContext(ctx,
-		`SELECT status FROM bootstrap_registry WHERE create_request_id=?`,
+		`SELECT status, phase FROM bootstrap_registry WHERE create_request_id=?`,
 		"req-001",
-	).Scan(&status); err != nil {
+	).Scan(&status, &phase); err != nil {
 		t.Fatal(err)
 	}
-	if status != "in_progress" {
-		t.Errorf("bootstrap_registry status = %q", status)
+	if status != "in_progress" || phase != "sent" {
+		t.Errorf("bootstrap_registry status=%q phase=%q", status, phase)
 	}
 	if err := saga.Complete(ctx, "req-001"); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	if err := daemonDB.QueryRowContext(ctx,
-		`SELECT status FROM bootstrap_registry WHERE create_request_id=?`,
+		`SELECT status, phase FROM bootstrap_registry WHERE create_request_id=?`,
 		"req-001",
-	).Scan(&status); err != nil {
+	).Scan(&status, &phase); err != nil {
 		t.Fatal(err)
 	}
-	if status != "completed" {
-		t.Errorf("bootstrap_registry status after Complete = %q", status)
+	if status != "completed" || phase != "completed" {
+		t.Errorf("bootstrap_registry after Complete status=%q phase=%q", status, phase)
 	}
 
 	// Channel sqlite has system + alice in actor_registry.
@@ -275,4 +280,188 @@ func TestReconciler_RollsBackCompletedWithoutChannelLock(t *testing.T) {
 	if status != "rolled_back" {
 		t.Errorf("status = %q", status)
 	}
+}
+
+func TestReconcile_LockWrittenButEventMissing_EnsuresEventBeforeCompleted(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	daemonDB, _ := store.OpenDaemon(ctx, filepath.Join(root, "daemon.sqlite"), store.OpenOptions{})
+	defer func() { _ = daemonDB.Close() }()
+
+	channelDir, chDB := createLockedChannel(t, ctx, root, "lock-event-missing")
+	_ = chDB.Close()
+	if _, err := daemonDB.ExecContext(ctx, `INSERT INTO bootstrap_registry
+		(create_request_id, channel_id, status, phase, workdir_path, started_at)
+		VALUES (?, ?, 'in_progress', 'partial_takeover', ?, ?)`,
+		"req-lock-event-missing", "lock-event-missing", channelDir, now()); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := bootstrap.NewReconciler(daemonDB, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	rec.SetEnsureSystemChannelCreatedEvent(func(ctx context.Context, channelID channel.ID, workdirPath string) error {
+		called = true
+		var status string
+		if err := daemonDB.QueryRowContext(ctx, `SELECT status FROM bootstrap_registry WHERE create_request_id=?`,
+			"req-lock-event-missing").Scan(&status); err != nil {
+			return err
+		}
+		if status != "in_progress" {
+			t.Fatalf("ensure hook ran after completion: status=%q", status)
+		}
+		return appendSystemChannelCreated(ctx, workdirPath, channelID)
+	})
+
+	rolled, err := rec.Run(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rolled) != 0 {
+		t.Fatalf("rolled=%+v want none", rolled)
+	}
+	if !called {
+		t.Fatal("ensure hook was not called")
+	}
+	var status, phase string
+	if err := daemonDB.QueryRowContext(ctx, `SELECT status, phase FROM bootstrap_registry WHERE create_request_id=?`,
+		"req-lock-event-missing").Scan(&status, &phase); err != nil {
+		t.Fatal(err)
+	}
+	if status != "completed" || phase != "completed" {
+		t.Fatalf("registry status=%q phase=%q want completed/completed", status, phase)
+	}
+	if count := countCreatedEvents(t, ctx, channelDir); count != 1 {
+		t.Fatalf("system.channel.created count=%d want 1", count)
+	}
+}
+
+func TestReconcile_IdempotentEmit_NoOpIfEventAlreadyEmitted(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	daemonDB, _ := store.OpenDaemon(ctx, filepath.Join(root, "daemon.sqlite"), store.OpenOptions{})
+	defer func() { _ = daemonDB.Close() }()
+
+	channelDir, chDB := createLockedChannel(t, ctx, root, "lock-event-present")
+	_ = chDB.Close()
+	if err := appendSystemChannelCreated(ctx, channelDir, "lock-event-present"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := daemonDB.ExecContext(ctx, `INSERT INTO bootstrap_registry
+		(create_request_id, channel_id, status, phase, workdir_path, started_at)
+		VALUES (?, ?, 'in_progress', 'partial_takeover', ?, ?)`,
+		"req-lock-event-present", "lock-event-present", channelDir, now()); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := bootstrap.NewReconciler(daemonDB, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.SetEnsureSystemChannelCreatedEvent(func(ctx context.Context, channelID channel.ID, workdirPath string) error {
+		return appendSystemChannelCreated(ctx, workdirPath, channelID)
+	})
+	if _, err := rec.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if count := countCreatedEvents(t, ctx, channelDir); count != 1 {
+		t.Fatalf("system.channel.created count=%d want idempotent single row", count)
+	}
+}
+
+func createLockedChannel(t *testing.T, ctx context.Context, root, id string) (string, *sql.DB) {
+	t.Helper()
+	channelDir := filepath.Join(root, "channels", id)
+	if err := os.MkdirAll(channelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	chDB, err := store.OpenChannel(ctx, filepath.Join(channelDir, "channel.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := placement.NewFencingToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := store.NewChannelLock(chDB)
+	if err := lock.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    channel.ID(id),
+		FencingToken: token,
+		OwnerEpoch:   1,
+		DaemonID:     "daemon-A",
+		DaemonEpoch:  1,
+		AcquiredAt:   now(),
+		RefreshedAt:  now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return channelDir, chDB
+}
+
+func appendSystemChannelCreated(ctx context.Context, workdirPath string, channelID channel.ID) error {
+	sqlitePath := filepath.Join(workdirPath, "channel.sqlite")
+	db, err := store.OpenChannel(ctx, sqlitePath, store.OpenOptions{SkipDDL: true})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	lock := store.NewChannelLock(db)
+	row, ok, err := lock.Get(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return os.ErrNotExist
+	}
+	payload, err := json.Marshal(map[string]any{
+		"channel_id":  channelID,
+		"daemon_id":   row.DaemonID,
+		"owner_epoch": row.OwnerEpoch,
+		"created_at":  now(),
+	})
+	if err != nil {
+		return err
+	}
+	env := &message.Envelope{
+		ID:         message.ID("system.channel.created:" + string(channelID)),
+		TS:         now(),
+		TSReceived: now(),
+		ChannelID:  channelID,
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind:       message.KindEvent,
+		Type:       "system.channel.created",
+		Payload:    payload,
+		Visibility: message.VisibilitySystem,
+		Audience:   message.Audience{message.AudienceWildcard},
+	}
+	if env.CanonicalHash, err = message.CanonicalHash(*env); err != nil {
+		return err
+	}
+	res, err := store.NewMessagesWithLock(db, lock).Append(ctx, env, khlog.FencingTuple{
+		Token: row.FencingToken,
+		Epoch: row.DaemonEpoch,
+	})
+	if err != nil {
+		return err
+	}
+	if res.Seq != 1 {
+		return os.ErrInvalid
+	}
+	return nil
+}
+
+func countCreatedEvents(t *testing.T, ctx context.Context, workdirPath string) int {
+	t.Helper()
+	db, err := store.OpenChannel(ctx, filepath.Join(workdirPath, "channel.sqlite"), store.OpenOptions{SkipDDL: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE type='system.channel.created'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
 }

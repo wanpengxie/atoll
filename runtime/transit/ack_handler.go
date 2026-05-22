@@ -15,19 +15,29 @@ import (
 // One AckHandler per channel; the central transit dispatcher routes
 // incoming ack.ChannelID to the right handler.
 type AckHandler struct {
-	outbox  OutboxReader
-	cursors *CursorTracker
+	outbox         OutboxReader
+	cursors        *CursorTracker
+	onStaleFencing AckRejectHandler
 }
+
+type AckRejectHandler func(context.Context, viewsync.AckFrame) error
 
 // NewAckHandler builds an AckHandler bound to one channel's outbox.
 func NewAckHandler(outbox OutboxReader, cursors *CursorTracker) (*AckHandler, error) {
+	return NewAckHandlerWithRejectHandler(outbox, cursors, nil)
+}
+
+// NewAckHandlerWithRejectHandler builds an AckHandler with a stale-fencing
+// reject hook. The hook is where callers pause the channel pump and trigger
+// placement reconciliation.
+func NewAckHandlerWithRejectHandler(outbox OutboxReader, cursors *CursorTracker, onStaleFencing AckRejectHandler) (*AckHandler, error) {
 	if outbox == nil {
 		return nil, errors.New("transit: NewAckHandler outbox nil")
 	}
 	if cursors == nil {
 		return nil, errors.New("transit: NewAckHandler cursors nil")
 	}
-	return &AckHandler{outbox: outbox, cursors: cursors}, nil
+	return &AckHandler{outbox: outbox, cursors: cursors, onStaleFencing: onStaleFencing}, nil
 }
 
 // Handle applies an incoming viewsync.ack: advance last_acked_seq in
@@ -41,6 +51,14 @@ func (h *AckHandler) Handle(ctx context.Context, ack viewsync.AckFrame) (bool, e
 			ack.ChannelID, h.outbox.ChannelID())
 	}
 	if !ack.Accepted {
+		if ack.RejectReason == viewsync.RejectReasonMuxOwnerEpochStale {
+			if h.onStaleFencing != nil {
+				if err := h.onStaleFencing(ctx, ack); err != nil {
+					return false, fmt.Errorf("transit: ack stale fencing handler: %w", err)
+				}
+			}
+			return false, nil
+		}
 		if resetter, ok := h.outbox.(interface{ ResetAllPushed(context.Context) error }); ok {
 			if err := resetter.ResetAllPushed(ctx); err != nil {
 				return false, fmt.Errorf("transit: ack reset pushed: %w", err)

@@ -37,6 +37,11 @@ type ControlHandlers struct {
 	// development bootstrap path).
 	OnWriteMessage func(ctx context.Context, frame daemonbus.Frame, body WriteMessageBody) WriteMessageAckBody
 
+	// OnUpdateMembers handles server-driven channel member lifecycle
+	// transitions. The Dispatcher decodes the body, invokes the callback,
+	// and sends control.update_members_ack.
+	OnUpdateMembers func(ctx context.Context, frame daemonbus.Frame, body UpdateMembersBody) UpdateMembersAckBody
+
 	// OnBindDeviceSession / OnUnbindDeviceSession handle the
 	// server → daemon device-session lifecycle frames (T147 §A-S2).
 	// The Dispatcher decodes the body, invokes the callback, and SENDS
@@ -215,6 +220,35 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 		// resync_response branch for the full root-cause comment.
 		return d.client.Send(ctx, d.replyFrameID(frame),
 			daemonbus.FrameTypeControlWriteMessageAck, ack)
+
+	case daemonbus.FrameTypeControlUpdateMembers:
+		var body UpdateMembersBody
+		if err := DecodePayload(frame, &body); err != nil {
+			return fmt.Errorf("transit: decode control.update_members: %w", err)
+		}
+		if body.FrameID == "" {
+			body.FrameID = frame.FrameID
+		}
+		var ack UpdateMembersAckBody
+		if d.handlers.OnUpdateMembers == nil {
+			ack = UpdateMembersAckBody{
+				FrameID:      body.FrameID,
+				ChannelID:    body.ChannelID,
+				Accepted:     false,
+				RejectReason: "update_members_handler_missing",
+				RejectDetail: "OnUpdateMembers handler is nil",
+			}
+		} else {
+			ack = d.handlers.OnUpdateMembers(ctx, frame, body)
+			if ack.FrameID == "" {
+				ack.FrameID = body.FrameID
+			}
+			if ack.ChannelID == "" {
+				ack.ChannelID = body.ChannelID
+			}
+		}
+		return d.client.Send(ctx, d.replyFrameID(frame),
+			daemonbus.FrameTypeControlUpdateMembersAck, ack)
 
 	case daemonbus.FrameTypeControlBindDeviceSession:
 		var body BindDeviceSessionBody
