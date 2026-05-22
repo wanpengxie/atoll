@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -204,6 +205,126 @@ func TestHandleWriteMessage_RequestAudienceRejected(t *testing.T) {
 				t.Errorf("error=%q want harness_request_audience_invalid", errBody.Error)
 			}
 		})
+	}
+}
+
+func TestHandleWriteMessage_AudienceTooLarge(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	sess := registerLoginAndCreateChannel(t, client, srv.URL, app, "aud-cap@example.com")
+	aud := make([]string, 257)
+	for i := range aud {
+		aud[i] = "agent:" + itoa(int64(i))
+	}
+	body, _ := json.Marshal(writeBody{
+		ID:       "msg-aud-cap",
+		Type:     "human.text",
+		Kind:     "event",
+		Payload:  json.RawMessage(`{"text":"hi"}`),
+		Audience: aud,
+	})
+	req, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/channels/"+sess.channelID+"/messages",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: sess.session})
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400", resp.StatusCode)
+	}
+	var out struct {
+		Error string `json:"error"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out.Error != "audience_too_large" {
+		t.Fatalf("error=%q want audience_too_large", out.Error)
+	}
+}
+
+func TestIdentityBodyLimit(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	resp := postRaw(t, &http.Client{}, srv.URL+"/api/identity/login",
+		`{"email":"`+strings.Repeat("a", 70<<10)+`@example.com","password":"x"}`,
+		http.StatusRequestEntityTooLarge)
+	defer func() { _ = resp.Body.Close() }()
+}
+
+func TestDownloadsRejectsTraversalAndSymlinkEscape(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := store.Open(ctx, filepath.Join(root, "g.db"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	uiDir := filepath.Join(root, "ui")
+	downloads := filepath.Join(uiDir, "downloads")
+	if err := os.MkdirAll(downloads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(uiDir, "index.html"), []byte("index"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(downloads, "ok.txt"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "secret.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(downloads, "escape.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	app, err := gateway.New(ctx, gateway.Config{
+		DB:                      db,
+		SessionSecret:           "test-session",
+		DaemonSharedSecret:      "test-daemon",
+		DeviceTokenSecret:       "test-device",
+		DeviceAllowedOrigins:    []string{"http://gateway.test"},
+		PushhubAllowedOrigins:   []string{"http://gateway.test"},
+		DaemonbusAllowedOrigins: []string{"http://gateway.test"},
+		HumanCallerSecret:       "test-human",
+		BcryptCost:              4,
+		AllowDevSecrets:         true,
+		UIDistDir:               uiDir,
+	})
+	if err != nil {
+		t.Fatalf("gateway.New: %v", err)
+	}
+	t.Cleanup(func() { _ = app.Close() })
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	for _, path := range []string{"/downloads/ok.txt", "/downloads/../secret.txt", "/downloads/escape.txt"} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+		if path == "/downloads/ok.txt" {
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("%s status=%d want 200", path, resp.StatusCode)
+			}
+			continue
+		}
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s status=%d want 404", path, resp.StatusCode)
+		}
 	}
 }
 

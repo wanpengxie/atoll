@@ -162,6 +162,28 @@ func TestExpireDueSessions(t *testing.T) {
 	}
 }
 
+func TestExpireDueSessionsExpiresPending(t *testing.T) {
+	t.Parallel()
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, clock.Now)
+	ctx := context.Background()
+
+	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
+		DeviceID: "dev-pending", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	clock.now = clock.now.Add(2 * time.Hour)
+	if err := svc.ExpireDueSessions(ctx); err != nil {
+		t.Fatalf("Expire: %v", err)
+	}
+	row, _ := svc.Get(ctx, res.Session.ID)
+	if row.State != devicebus.StateExpired {
+		t.Errorf("pending state=%q want expired", row.State)
+	}
+}
+
 func TestDefaultTokenTTLIsThirtyDays(t *testing.T) {
 	t.Parallel()
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}

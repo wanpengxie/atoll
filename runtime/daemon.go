@@ -716,7 +716,7 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 	handlers := transit.ControlHandlers{
 		OnViewsyncAck: func(ctx context.Context, ack viewsync.AckFrame) error {
 			if ack.RejectReason == viewsync.RejectReasonMuxOwnerEpochStale {
-				d.pauseChannelPush(ack.ChannelID)
+				d.freezeChannel(ctx, ack.ChannelID, string(ack.RejectReason))
 				return nil
 			}
 			return ackHandler.Handle(ctx, ack)
@@ -972,6 +972,29 @@ func (d *Daemon) pauseChannelPush(id channel.ID) {
 		return
 	}
 	cr.pausePush()
+}
+
+func (d *Daemon) freezeChannel(ctx context.Context, id channel.ID, reason string) {
+	cr, ok := d.getChannel(id)
+	if !ok {
+		return
+	}
+	if cr.wrappedChain != nil {
+		cr.wrappedChain.Freeze(reason)
+	}
+	if cr.pausePush != nil {
+		cr.pausePush()
+	}
+	if cr.workerBridge != nil {
+		closeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		_ = cr.workerBridge.Close(closeCtx)
+		cancel()
+	}
+}
+
+func (d *Daemon) channelFrozen(id channel.ID) bool {
+	cr, ok := d.getChannel(id)
+	return ok && cr.wrappedChain != nil && cr.wrappedChain.IsFrozen()
 }
 
 func (d *Daemon) snapshotChannelRuntimes() []*channelRuntime {
@@ -1887,6 +1910,13 @@ func (d *Daemon) handleDaemonReclaim(
 		return reject(placement.ReclaimRejectStoreMissing)
 	}
 	if row.OwnerEpoch == req.NewOwnerEpoch && row.DaemonID == placement.DaemonID(d.cfg.DaemonID) {
+		previousOwnerEpoch := req.NewOwnerEpoch - 1
+		if previousOwnerEpoch < 0 {
+			previousOwnerEpoch = 0
+		}
+		if err := d.emitPlacementReclaimed(ctx, db, lock, req, previousOwnerEpoch, row.FencingToken); err != nil {
+			return reject(placement.ReclaimRejectInternalError)
+		}
 		if !d.HasChannel(req.ChannelID) {
 			if err := d.mountExistingChannel(ctx, req.ChannelID, sqlitePath); err != nil {
 				return reject(placement.ReclaimRejectInternalError)
@@ -2104,14 +2134,14 @@ func (d *Daemon) handleHeartbeatAck(ctx context.Context, frame daemonbus.Frame) 
 		case placement.PlacementDiffActionOK:
 			continue
 		case placement.PlacementDiffActionReclaimPending:
-			d.pauseChannelPush(diff.ChannelID)
+			d.freezeChannel(ctx, diff.ChannelID, string(diff.Action))
 		case placement.PlacementDiffActionUnbindPending:
 			if d.HasChannel(diff.ChannelID) {
-				_ = d.unloader.Unload(ctx, diff.ChannelID, lifecycle.UnloadOrphan)
+				_ = d.unloader.Unload(ctx, diff.ChannelID, lifecycle.UnloadUnbindPending)
 			}
 		case placement.PlacementDiffActionDirectoryMissing:
 			if d.HasChannel(diff.ChannelID) {
-				_ = d.unloader.Unload(ctx, diff.ChannelID, lifecycle.UnloadStale)
+				_ = d.unloader.Unload(ctx, diff.ChannelID, lifecycle.UnloadDirectoryMissing)
 			}
 		}
 	}
@@ -2220,6 +2250,9 @@ func (d *Daemon) handleDeviceTransitFrame(ctx context.Context, frame daemonbus.F
 		if err := transit.DecodePayload(frame, &payload); err != nil {
 			return fmt.Errorf("runtime: decode device_transit %s: %w", frame.FrameKind, err)
 		}
+		if d.channelFrozen(payload.ChannelID) {
+			return nil
+		}
 		cr, ok := d.getChannel(payload.ChannelID)
 		if !ok || cr.deviceTransit == nil {
 			// Unknown channel or no device transit wired — drop.
@@ -2233,7 +2266,7 @@ func (d *Daemon) handleDeviceTransitFrame(ctx context.Context, frame daemonbus.F
 		// the failure; downstream channels are best-effort.
 		var firstErr error
 		for _, cr := range d.snapshotChannelRuntimes() {
-			if cr.deviceTransit == nil {
+			if cr.deviceTransit == nil || (cr.wrappedChain != nil && cr.wrappedChain.IsFrozen()) {
 				continue
 			}
 			if err := cr.deviceTransit.DispatchIncoming(ctx, frame); err != nil && firstErr == nil {
@@ -2553,10 +2586,40 @@ type postHarnessChain struct {
 	messages *store.Messages
 	log      *zerolog.Logger
 	nowFn    func() int64
+
+	frozen       atomic.Bool
+	frozenReason atomic.Value // string
+}
+
+func (a *postHarnessChain) Freeze(reason string) {
+	a.frozen.Store(true)
+	if reason == "" {
+		reason = "channel_frozen"
+	}
+	a.frozenReason.Store(reason)
+}
+
+func (a *postHarnessChain) IsFrozen() bool {
+	return a != nil && a.frozen.Load()
 }
 
 // Write implements kernel/harness.Chain.
 func (a *postHarnessChain) Write(ctx context.Context, env *message.Envelope) (khar.WriteResult, error) {
+	if a.IsFrozen() {
+		reason, _ := a.frozenReason.Load().(string)
+		if reason == "" {
+			reason = "channel_frozen"
+		}
+		var messageID message.ID
+		if env != nil {
+			messageID = env.ID
+		}
+		return khar.WriteResult{
+			MessageID:    messageID,
+			RejectReason: message.HarnessWorkerFencingStale,
+			RejectDetail: "channel frozen: " + reason,
+		}, nil
+	}
 	res, err := a.chain.Write(ctx, env)
 	if err != nil {
 		return khar.WriteResult{}, err

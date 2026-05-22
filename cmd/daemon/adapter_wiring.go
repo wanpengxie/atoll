@@ -397,6 +397,26 @@ func (b *DeviceSessionBinder) OnBind(ctx context.Context, body transit.BindDevic
 		BindRequestID:   body.BindRequestID,
 		DeviceSessionID: body.DeviceSessionID,
 	}
+	if body.ChannelID == "" {
+		ack.Reason = transit.DeviceSessionRejectBindChannelNotActive
+		ack.Detail = "channel_id is required"
+		return ack
+	}
+	if body.DeviceSessionID == "" || body.DeviceID == "" {
+		ack.Reason = transit.DeviceSessionRejectBindInternalError
+		ack.Detail = "device_session_id and device_id are required"
+		return ack
+	}
+	if body.DeviceType != "" && body.DeviceType != "xhs" {
+		ack.Reason = transit.DeviceSessionRejectBindDeviceTypeUnsupported
+		ack.Detail = "device_type unsupported"
+		return ack
+	}
+	if body.AdapterActorID != "" && body.AdapterActorID != devicexhs.DefaultAdapterActorID {
+		ack.Reason = transit.DeviceSessionRejectBindAdapterNotPresent
+		ack.Detail = "adapter actor is not installed in this daemon"
+		return ack
+	}
 	adapterActorID := body.AdapterActorID
 	if adapterActorID == "" {
 		adapterActorID = devicexhs.DefaultAdapterActorID

@@ -32,15 +32,17 @@ func NewViewSyncOutbox(db *sql.DB, channelID channel.ID) *ViewSyncOutbox {
 // ChannelID returns the channel this outbox belongs to.
 func (o *ViewSyncOutbox) ChannelID() channel.ID { return o.channelID }
 
-// PendingPage returns up to `limit` outbox rows with status='pending',
-// ordered by seq ASC (the push order required by L1 §8.6).
+// PendingPage returns up to `limit` outbox rows that are not cumulatively
+// acked yet, ordered by seq ASC (the push order required by L1 §8.6).
+// status='pushed' remains retry-eligible until AckUpTo deletes it; a
+// daemon crash after Send but before ack must not strand the row.
 func (o *ViewSyncOutbox) PendingPage(ctx context.Context, limit int) ([]viewsync.PushFrame, error) {
 	if limit <= 0 {
 		limit = 64
 	}
 	const q = `SELECT seq, message_id, envelope_json
 	            FROM view_sync_outbox
-	            WHERE status='pending'
+	            WHERE status IN ('pending','pushed')
 	            ORDER BY seq ASC LIMIT ?`
 	rows, err := o.db.QueryContext(ctx, q, limit)
 	if err != nil {
@@ -73,11 +75,12 @@ func (o *ViewSyncOutbox) PendingPage(ctx context.Context, limit int) ([]viewsync
 	return out, nil
 }
 
-// MarkPushed flips status pending → pushed and records pushed_at.
-// Idempotent — re-pushing a 'pushed' row remains 'pushed'.
+// MarkPushed flips status pending/pushed → pushed and records pushed_at.
+// Idempotent — re-pushing a 'pushed' row refreshes pushed_at and remains
+// retry-eligible until AckUpTo deletes it.
 func (o *ViewSyncOutbox) MarkPushed(ctx context.Context, seq viewsync.Seq, pushedAt int64) error {
 	const q = `UPDATE view_sync_outbox SET status='pushed', pushed_at=?
-	            WHERE seq=? AND status='pending'`
+	            WHERE seq=? AND status IN ('pending','pushed')`
 	if _, err := o.db.ExecContext(ctx, q, pushedAt, int64(seq)); err != nil {
 		return fmt.Errorf("store: outbox mark pushed: %w", err)
 	}
@@ -95,6 +98,18 @@ func (o *ViewSyncOutbox) ResetPushed(ctx context.Context, seq viewsync.Seq) erro
 	return nil
 }
 
+// ResetAllPushed forces every pushed-but-unacked row back to pending.
+// Used after negative ack / stale fencing so a later pump does not skip
+// rows that were sent but never accepted by the server.
+func (o *ViewSyncOutbox) ResetAllPushed(ctx context.Context) error {
+	const q = `UPDATE view_sync_outbox SET status='pending', pushed_at=NULL
+	            WHERE status='pushed'`
+	if _, err := o.db.ExecContext(ctx, q); err != nil {
+		return fmt.Errorf("store: outbox reset all pushed: %w", err)
+	}
+	return nil
+}
+
 // AckUpTo deletes every outbox row with seq <= lastAckedSeq (L1 §8.6 GC
 // rule — server ack drives daemon-side outbox eviction).
 func (o *ViewSyncOutbox) AckUpTo(ctx context.Context, lastAckedSeq viewsync.Seq) error {
@@ -105,11 +120,11 @@ func (o *ViewSyncOutbox) AckUpTo(ctx context.Context, lastAckedSeq viewsync.Seq)
 	return nil
 }
 
-// PendingCount returns the number of rows currently in status='pending'.
-// Used by the transit Pusher to surface the L1 §8.1.5 backlog-watermark
-// observability event.
+// PendingCount returns the number of rows not cumulatively acked yet
+// (pending + pushed). Used by the transit Pusher to surface the L1 §8.1.5
+// backlog-watermark observability event.
 func (o *ViewSyncOutbox) PendingCount(ctx context.Context) (int, error) {
-	const q = `SELECT COUNT(*) FROM view_sync_outbox WHERE status='pending'`
+	const q = `SELECT COUNT(*) FROM view_sync_outbox WHERE status IN ('pending','pushed')`
 	var n int
 	if err := o.db.QueryRowContext(ctx, q).Scan(&n); err != nil {
 		return 0, fmt.Errorf("store: outbox pending count: %w", err)

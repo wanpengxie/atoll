@@ -154,21 +154,22 @@ type CreateChannelRequest struct {
 	ChannelID       channel.ID      `json:"channel_id"`
 	CreateRequestID CreateRequestID `json:"create_request_id"`
 	// InitialMembers carries the channel's bootstrap members so daemon
-	// can populate actor_registry in the same bootstrap saga (T1.9 / L2
-	// §12.1). Each entry is an opaque JSON object the daemon decodes
+	// can populate actor_registry in the same bootstrap saga (impl-layer2
+	// §3.2.1). Each entry is an opaque JSON object the daemon decodes
 	// against its own schema.
 	InitialMembers []InitialMember `json:"initial_members,omitempty"`
-	// ChannelType carries the L4 channel-template key (catalog.Channel.Type)
-	// the server resolved at reserve time — typically `"group"` (no
-	// template) or `"xhs-creator"` (M1.6-T5 first template). The daemon
-	// uses it to look up the per-type ChannelTemplate (actor seeds /
-	// workdir subdirs / domain prompt) so the bootstrap saga can specialise
-	// the new channel without touching the envelope schema.
+	// ChannelType carries the business channel-template key
+	// (catalog.Channel.Type) the server resolved at reserve time —
+	// typically `"group"` (no template) or `"xhs-creator"` (domain-xhs
+	// template). The daemon uses it to look up the per-type
+	// ChannelTemplate (actor seeds / workdir subdirs / domain prompt) so
+	// the bootstrap saga can specialise the new channel without touching
+	// the envelope schema.
 	//
 	// Empty string is treated as the legacy "no template" path — the
 	// saga only seeds system + initial members and OnChannelBoot does
 	// not install any domain adapters. This preserves backward
-	// compatibility for pre-M1.6-T5 daemons.
+	// compatibility for older daemons.
 	//
 	// TODO: impl-layer2 §3.2.1 lists only initial_members/initial_types/
 	// initial_config/metadata as wire fields; channel_type should fold

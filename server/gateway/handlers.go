@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -28,8 +29,15 @@ import (
 	"github.com/wanpengxie/ActOS/server/catalog"
 	"github.com/wanpengxie/ActOS/server/daemonbus"
 	"github.com/wanpengxie/ActOS/server/devicebus"
+	"github.com/wanpengxie/ActOS/server/httperr"
 	"github.com/wanpengxie/ActOS/server/identity"
 	"github.com/wanpengxie/ActOS/server/placements"
+)
+
+const (
+	controlJSONBodyLimit      = 64 << 10
+	writeMessageJSONBodyLimit = 1 << 20
+	maxWriteMessageAudience   = 256
 )
 
 // DaemonbusHandlers wires the daemonbus dispatch hooks to gateway-
@@ -419,8 +427,8 @@ func buildEngine(a *App) *gin.Engine {
 	a.devicebus.RegisterRoutes(auth)
 
 	// Channel-level orchestration: provisioning + message write.
-	auth.POST("/workspaces/:wsID/channels/:chID/bind", a.handleBindChannel)
-	auth.POST("/channels/:chID/messages", a.handleWriteMessage)
+	auth.POST("/workspaces/:wsID/channels/:chID/bind", httperr.MaxBodyBytes(controlJSONBodyLimit), a.handleBindChannel)
+	auth.POST("/channels/:chID/messages", httperr.MaxBodyBytes(writeMessageJSONBodyLimit), a.handleWriteMessage)
 
 	r.GET("/ws", a.pushhub.HandleWS(a.identity))
 	r.GET("/daemonbus", a.daemonbus.HandleWS(a))
@@ -438,13 +446,13 @@ func buildEngine(a *App) *gin.Engine {
 		// the cloudflare-cached-zip-broke-manifest.key incident.
 		downloadsDir := filepath.Join(dir, "downloads")
 		r.GET("/downloads/*filepath", func(c *gin.Context) {
-			name := c.Param("filepath")
-			if strings.Contains(name, "..") {
+			path, ok := safeDownloadPath(downloadsDir, c.Param("filepath"))
+			if !ok {
 				c.AbortWithStatus(http.StatusNotFound)
 				return
 			}
 			c.Header("Cache-Control", "no-cache, must-revalidate")
-			c.File(filepath.Join(downloadsDir, name))
+			c.File(path)
 		})
 		r.StaticFile("/favicon.svg", filepath.Join(dir, "favicon.svg"))
 		indexPath := filepath.Join(dir, "index.html")
@@ -497,7 +505,7 @@ func (a *App) handleBindChannel(c *gin.Context) {
 
 	members, err := a.catalog.ListChannelMembers(c.Request.Context(), ch.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httperr.Internal(c, "gateway.bind_channel.list_members", err)
 		return
 	}
 	displayFn := func(uid string) string {
@@ -538,7 +546,7 @@ func (a *App) handleBindChannel(c *gin.Context) {
 	// via the dispatch loop's OnCreateChannelAck hook which advances
 	// placement to active.
 	if _, err := conn.SendFrame(c.Request.Context(), kerneldaemonbus.FrameTypeControlCreateChannel, createReq); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httperr.Internal(c, "gateway.bind_channel.send_create", err)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{
@@ -600,6 +608,10 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if len(req.Audience) > maxWriteMessageAudience {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "audience_too_large"})
+		return
+	}
 	u := identity.UserFrom(c)
 	channelID := c.Param("chID")
 
@@ -635,7 +647,7 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 	ts := time.Now().UnixMilli()
 	nonce, err := newNonce()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "nonce: " + err.Error()})
+		httperr.Internal(c, "gateway.write_message.nonce", err)
 		return
 	}
 	caller := kerneldaemonbus.HumanCaller{
@@ -680,7 +692,7 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 	}
 	ack, err := conn.SendAndAwait(c.Request.Context(), kerneldaemonbus.FrameTypeControlWriteMessage, body)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httperr.Internal(c, "gateway.write_message.send", err)
 		return
 	}
 
@@ -741,6 +753,35 @@ func writeMessageRejectStatus(reason string) int {
 		}
 	}
 	return http.StatusConflict
+}
+
+func safeDownloadPath(root, param string) (string, bool) {
+	rel := strings.TrimPrefix(param, "/")
+	if rel == "" || filepath.IsAbs(rel) {
+		return "", false
+	}
+	clean := filepath.Clean(rel)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", false
+	}
+	rootReal, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", false
+	}
+	candidate := filepath.Join(rootReal, clean)
+	candidateReal, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", false
+	}
+	info, err := os.Stat(candidateReal)
+	if err != nil || info.IsDir() {
+		return "", false
+	}
+	relToRoot, err := filepath.Rel(rootReal, candidateReal)
+	if err != nil || relToRoot == ".." || strings.HasPrefix(relToRoot, ".."+string(os.PathSeparator)) || filepath.IsAbs(relToRoot) {
+		return "", false
+	}
+	return candidateReal, true
 }
 
 // isJSONUnknownFieldError reports whether err is the error

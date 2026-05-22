@@ -7,6 +7,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
+	"github.com/wanpengxie/ActOS/server/httperr"
 	"github.com/wanpengxie/ActOS/server/identity"
 )
 
@@ -27,7 +28,7 @@ func (s *Service) handleGetPlacement(c *gin.Context) {
 	}
 	p, ok, err := s.Get(c.Request.Context(), chID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httperr.Internal(c, "placements.get", err)
 		return
 	}
 	if !ok {
@@ -60,7 +61,7 @@ func (s *Service) handleListPlacements(c *gin.Context) {
 	}
 	plist, err := s.ListByState(c.Request.Context(), parseState(state))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httperr.Internal(c, "placements.list", err)
 		return
 	}
 	out := make([]gin.H, 0, len(plist))

@@ -135,7 +135,7 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 	if seenFrame.AdapterActorID != "tool:xhs" {
 		t.Fatalf("frame.AdapterActorID=%s want tool:xhs", seenFrame.AdapterActorID)
 	}
-	if string(seenFrame.Body) != `{"ok":true}` {
+	if string(seenFrame.Body) != `{"msg":"hi"}` {
 		t.Fatalf("frame.Body=%s want request payload", seenFrame.Body)
 	}
 	if len(transit.sent) != 1 {

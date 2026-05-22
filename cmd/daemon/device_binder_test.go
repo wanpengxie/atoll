@@ -99,6 +99,54 @@ func TestDeviceSessionBinder_BindIdempotent(t *testing.T) {
 	}
 }
 
+func TestDeviceSessionBinder_BindRejectReasons(t *testing.T) {
+	t.Parallel()
+	binder := NewDeviceSessionBinder(deviceframework.NewInMemorySessionStore())
+	base := transit.BindDeviceSessionBody{
+		FrameID:         "f-1",
+		BindRequestID:   "bind-req-1",
+		DeviceSessionID: "sess-A",
+		ChannelID:       "ch-X",
+		DeviceID:        "dev-1",
+		DeviceType:      "xhs",
+	}
+	cases := []struct {
+		name   string
+		mutate func(*transit.BindDeviceSessionBody)
+		reason daemonbus.DeviceSessionRejectReason
+	}{
+		{
+			name:   "missing channel",
+			mutate: func(b *transit.BindDeviceSessionBody) { b.ChannelID = "" },
+			reason: daemonbus.DeviceSessionRejectBindChannelNotActive,
+		},
+		{
+			name:   "unsupported device type",
+			mutate: func(b *transit.BindDeviceSessionBody) { b.DeviceType = "feishu_mobile" },
+			reason: daemonbus.DeviceSessionRejectBindDeviceTypeUnsupported,
+		},
+		{
+			name:   "adapter not present",
+			mutate: func(b *transit.BindDeviceSessionBody) { b.AdapterActorID = "tool:other" },
+			reason: daemonbus.DeviceSessionRejectBindAdapterNotPresent,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			body := base
+			tc.mutate(&body)
+			ack := binder.OnBind(context.Background(), body)
+			if ack.Result == daemonbus.DeviceSessionBindAccepted {
+				t.Fatalf("ack accepted; want reject %+v", ack)
+			}
+			if ack.Reason != tc.reason {
+				t.Fatalf("reason=%q want %q", ack.Reason, tc.reason)
+			}
+		})
+	}
+}
+
 // TestDeviceSessionBinder_UnbindDeletesRow verifies the happy unbind
 // path drops the mirror row.
 func TestDeviceSessionBinder_UnbindDeletesRow(t *testing.T) {

@@ -1,15 +1,15 @@
-// Package devicebus owns the server-side device session lifecycle —
+// Package devicebus owns the server-side device session lifecycle:
 // session_id allocation, token issuance (HMAC over session_id +
-// channel_id + expiry), state transitions per T1.10, and the
-// transit-frame forwarder that bridges device WebSockets to daemon
-// adapters via daemonbus device_transit.* frames.
+// channel_id + expiry), state transitions, and the transit-frame
+// forwarder that bridges device WebSockets to daemon adapters via
+// daemonbus device_transit.* frames.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T6 (devicebus 子目录)
-// + T1.3 (transit) + T1.10 (lifecycle).
+// Authoritative spec: .dalek/pm/impl-layer2.md §5 plus the xhs business
+// binding in .dalek/pm/domain-xhs-spec.md.
 //
 // Key invariant: device_session_id is allocated by THIS package
-// (server side). daemon adapter holds only a local cache (L4 §2.6.4
-// + codex #5). Transit frames carry the session_id; tokens travel
+// (server side). daemon adapter holds only a local cache per
+// impl-layer2 §5. Transit frames carry the session_id; tokens travel
 // only between server and device.
 package devicebus
 
@@ -44,7 +44,7 @@ const defaultTokenTTL = 30 * 24 * time.Hour
 // grow the table without bound.
 const defaultMaxSessionsPerUserChannel = 8
 
-// State enumerates the T1.10 lifecycle:
+// State enumerates the impl-layer2 §5 lifecycle:
 //
 //	pending → ready → active → offline → expired / revoked
 type State string
@@ -266,7 +266,7 @@ type IssueInput struct {
 // IssueResult carries the new session + raw token. The raw token is
 // never re-derivable from the row (only its HMAC hash is stored). The
 // TokenFingerprint is a short hex prefix of the HMAC suitable for audit
-// logs and for the daemon-side mirror row (per T1.10 — daemon stores
+// logs and for the daemon-side mirror row (impl-layer2 §5 — daemon stores
 // the fingerprint, never the raw token).
 type IssueResult struct {
 	Session          Session
@@ -501,15 +501,16 @@ func (s *Service) Revoke(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-// ExpireDueSessions transitions ready/active/offline → expired when
-// expires_at < now. Run by a background sweep.
+// ExpireDueSessions transitions pending/ready/active/offline → expired
+// when expires_at < now. Pending rows are included so a crash between
+// server INSERT and daemon bind cannot leak forever.
 func (s *Service) ExpireDueSessions(ctx context.Context) error {
 	now := s.nowMs()
 	_, err := s.db.ExecContext(
 		ctx,
 		`UPDATE device_sessions
 		    SET state = 'expired', last_state_at = ?
-		  WHERE state IN ('ready','active','offline')
+		  WHERE state IN ('pending','ready','active','offline')
 		    AND expires_at < ?`,
 		now, now,
 	)

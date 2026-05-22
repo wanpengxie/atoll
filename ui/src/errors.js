@@ -31,7 +31,6 @@ const REASON_TABLE = Object.freeze({
   missing_required_field: ['user_input', '缺少必填字段'],
   kind_invalid: ['user_input', 'kind 字段非法'],
   request_audience_invalid: ['user_input', 'request 必须恰好一个 audience'],
-  payload_schema_violation: ['user_input', 'payload 不符合 schema'],
   doc_refs_invalid: ['user_input', 'doc_refs 字段非法'],
   unknown_type: ['user_input', '未知 type'],
   kind_not_allowed: ['user_input', '此 type 不允许该 kind'],
@@ -60,7 +59,6 @@ const REASON_TABLE = Object.freeze({
 
   // --- install_system ---------------------------------------------------
   adapter_timeout_missing: ['install_system', 'adapter 未声明 max_pending_ms'],
-  fallback_response_schema_invalid: ['install_system', 'fallback response schema 非法'],
   handler_actor_not_registered: ['install_system', 'handler actor 未注册'],
   handler_actor_binding_mismatch: ['install_system', 'handler binding 不匹配'],
   type_registry_invalid: ['install_system', 'type_registry 行非法'],

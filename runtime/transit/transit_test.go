@@ -108,6 +108,7 @@ func TestViewSync_E2E(t *testing.T) {
 	advanced, err := ackHandler.Handle(ctx, viewsync.AckFrame{
 		ChannelID:       testChannelID,
 		LastReceivedSeq: viewsync.LastReceivedSeq(3),
+		Accepted:        true,
 	})
 	if err != nil {
 		t.Fatalf("ack handle: %v", err)
@@ -130,9 +131,55 @@ func TestViewSync_E2E(t *testing.T) {
 	advanced2, err := ackHandler.Handle(ctx, viewsync.AckFrame{
 		ChannelID:       testChannelID,
 		LastReceivedSeq: viewsync.LastReceivedSeq(3),
+		Accepted:        true,
 	})
 	if err != nil || advanced2 {
 		t.Errorf("repeat ack: advanced=%v err=%v", advanced2, err)
+	}
+}
+
+func TestAckHandler_NegativeAckKeepsOutboxRetryable(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.OpenChannel(ctx, filepath.Join(t.TempDir(), "ch.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	msgs := store.NewMessages(db)
+	outbox := store.NewViewSyncOutbox(db, testChannelID)
+	for i := 0; i < 2; i++ {
+		if _, err := msgs.Append(ctx, newEnvelope(i+1), klog.FencingTuple{}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	if err := outbox.MarkPushed(ctx, 1, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := outbox.MarkPushed(ctx, 2, 101); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := transit.NewAckHandler(outbox, transit.NewCursorTracker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	advanced, err := handler.Handle(ctx, viewsync.AckFrame{
+		ChannelID:    testChannelID,
+		Accepted:     false,
+		RejectReason: viewsync.RejectReasonMuxOwnerEpochStale,
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if advanced {
+		t.Fatal("negative ack must not advance cursor")
+	}
+	pending, err := outbox.PendingPage(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("retryable rows=%d want 2", len(pending))
 	}
 }
 

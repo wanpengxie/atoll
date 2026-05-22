@@ -378,6 +378,39 @@ func TestResyncCallsBackProtocol(t *testing.T) {
 	}
 }
 
+func TestRecoverGapsTriggersDurableGap(t *testing.T) {
+	t.Parallel()
+	svc := newSvc(t)
+	ctx := context.Background()
+
+	_, _ = svc.Apply(ctx, frame(1))
+	_, _ = svc.Apply(ctx, frame(4))
+
+	var gotSince, gotUntil viewsync.Seq
+	fake := &fakeResyncer{messages: func(since, until viewsync.Seq) []viewsync.ResyncMessage {
+		gotSince, gotUntil = since, until
+		return []viewsync.ResyncMessage{
+			{Seq: 2, MessageID: msgID(2), Envelope: frame(2).Envelope},
+			{Seq: 3, MessageID: msgID(3), Envelope: frame(3).Envelope},
+		}
+	}}
+	svc.SetResyncer(fake)
+
+	if err := svc.RecoverGaps(ctx); err != nil {
+		t.Fatalf("RecoverGaps: %v", err)
+	}
+	if gotSince != 2 || gotUntil != 3 {
+		t.Fatalf("gap window=[%d,%d] want [2,3]", gotSince, gotUntil)
+	}
+	cur, err := svc.Cursor(ctx, "ch-X")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur != 4 {
+		t.Fatalf("cursor=%d want 4", cur)
+	}
+}
+
 // TestApplyTransactionRollbackOnCrash simulates a COMMIT-before crash —
 // here we use a malformed envelope_json path: there isn't an easy
 // hook to abort COMMIT, so we exercise the rollback path indirectly

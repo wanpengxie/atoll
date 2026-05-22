@@ -139,8 +139,8 @@ func TestOutbox_MarkPushedAndAck(t *testing.T) {
 		t.Fatal(err)
 	}
 	pendingAfterPush, _ := outbox.PendingPage(ctx, 10)
-	if len(pendingAfterPush) != 2 {
-		t.Errorf("after mark-pushed expected 2 pending, got %d", len(pendingAfterPush))
+	if len(pendingAfterPush) != 3 {
+		t.Errorf("after mark-pushed expected 3 retry-eligible rows, got %d", len(pendingAfterPush))
 	}
 
 	if err := outbox.AckUpTo(ctx, viewsync.Seq(2)); err != nil {

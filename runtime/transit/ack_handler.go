@@ -40,6 +40,14 @@ func (h *AckHandler) Handle(ctx context.Context, ack viewsync.AckFrame) (bool, e
 		return false, fmt.Errorf("transit: ack channel %q != outbox channel %q",
 			ack.ChannelID, h.outbox.ChannelID())
 	}
+	if !ack.Accepted {
+		if resetter, ok := h.outbox.(interface{ ResetAllPushed(context.Context) error }); ok {
+			if err := resetter.ResetAllPushed(ctx); err != nil {
+				return false, fmt.Errorf("transit: ack reset pushed: %w", err)
+			}
+		}
+		return false, nil
+	}
 	if ack.LastReceivedSeq <= 0 {
 		return false, nil
 	}

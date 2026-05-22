@@ -29,6 +29,7 @@ import (
 	"syscall"
 	"time"
 
+	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
@@ -119,7 +120,17 @@ func main() {
 	// because the conversion is a composition-root concern (keeps
 	// `runtime` independent of `adapters/**` per arch-lint).
 	//
-	deviceBinder := NewDeviceSessionBinder(nil)
+	deviceSessionStore, closeDeviceSessionStore, err := deviceframework.OpenSQLiteSessionStore(
+		context.Background(),
+		filepath.Join(*dataDir, "device_sessions.sqlite"),
+	)
+	if err != nil {
+		lg.Z().Error().Err(err).Str("event", "daemon.fail_fast").
+			Msg("device session mirror store is required")
+		os.Exit(1)
+	}
+	defer func() { _ = closeDeviceSessionStore() }()
+	deviceBinder := NewDeviceSessionBinder(deviceSessionStore)
 	xhsFactory := DeviceXHSFactory(deviceBinder.SessionStore(), devicexhs.Config{})
 	if *useScaffoldXHS {
 		xhsFactory = XHSScaffoldFactory(xhs.Config{})

@@ -71,7 +71,7 @@ const xhsCreatorDomainPrompt = `你是 xhs（小红书）内容创作 agent。
 - event 类（自报事实）：xhs.note.archived
 
 业务 type 全集 + 每个 type 的 allowed_kinds + schema 看：
-` + "`sqlite3 messages.sqlite \"SELECT type, allowed_kinds, schemas_by_kind FROM type_registry WHERE domain='xhs'\"`" + `。
+` + "`sqlite3 messages.sqlite \"SELECT type, allowed_kinds, handler_binding, terminal_convention, max_pending_ms, handler_actor_id, domain FROM type_registry WHERE domain='xhs' OR type LIKE 'xhs.%'\"`" + `。
 `
 
 // WorkdirSubdirs returns the per-v4-layer4-spec §2.5 directory list

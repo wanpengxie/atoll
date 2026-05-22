@@ -269,7 +269,9 @@ func (s *Service) Heartbeat(ctx context.Context, channelID channel.ID, daemonID 
 
 // ObserveHeartbeat compares the daemon-held channel fencing tuples
 // against the placement table and returns the spec placement_diff closed
-// set. Exact active-owner matches also refresh last_heartbeat_at.
+// set. Only exact active-owner matches refresh last_heartbeat_at: a stale
+// owner, wrong epoch, orphan, or missing directory must not extend
+// liveness while the server is trying to reclaim or unload it.
 func (s *Service) ObserveHeartbeat(
 	ctx context.Context,
 	daemonID placement.DaemonID,

@@ -9,6 +9,7 @@ package gateway
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -271,9 +272,32 @@ func (a *App) MemberActorID(ctx context.Context, channelID, userID string) (stri
 }
 
 // RunReconcile blocks until ctx is cancelled, running the placements
-// reconcile loop.
+// reconcile loop plus lightweight server-side recovery sweeps.
 func (a *App) RunReconcile(ctx context.Context) {
-	a.placements.RunReconcile(ctx)
+	go a.placements.RunReconcile(ctx)
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	runSweeps := func() {
+		if err := a.devicebus.ExpireDueSessions(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			pkgLogger.Warn().Err(err).
+				Str("event", "devicebus.expire_failed").
+				Msg("device session expiry sweep failed")
+		}
+		if err := a.viewcache.RecoverGaps(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			pkgLogger.Warn().Err(err).
+				Str("event", "viewcache.gap_recover_failed").
+				Msg("viewcache gap recovery sweep failed")
+		}
+	}
+	runSweeps()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runSweeps()
+		}
+	}
 }
 
 // withDefaults applies reconcile-loop default durations and runs the

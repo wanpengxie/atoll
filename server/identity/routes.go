@@ -7,21 +7,25 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/wanpengxie/ActOS/server/httperr"
 )
+
+const identityJSONBodyLimit = 64 << 10
 
 // RegisterPublicRoutes mounts the unauthenticated endpoints on the
 // supplied router group (typically /api).
 func (s *Service) RegisterPublicRoutes(g *gin.RouterGroup) {
-	g.POST("/identity/verification/issue", s.handleIssueCode)
-	g.POST("/identity/register", s.handleRegister)
-	g.POST("/identity/login", s.handleLogin)
+	g.POST("/identity/verification/issue", httperr.MaxBodyBytes(identityJSONBodyLimit), s.handleIssueCode)
+	g.POST("/identity/register", httperr.MaxBodyBytes(identityJSONBodyLimit), s.handleRegister)
+	g.POST("/identity/login", httperr.MaxBodyBytes(identityJSONBodyLimit), s.handleLogin)
 }
 
 // RegisterAuthRoutes mounts the authenticated endpoints (must be
 // wrapped by AuthMiddleware upstream).
 func (s *Service) RegisterAuthRoutes(g *gin.RouterGroup) {
 	g.GET("/identity/me", s.handleMe)
-	g.POST("/identity/logout", s.handleLogout)
+	g.POST("/identity/logout", httperr.MaxBodyBytes(identityJSONBodyLimit), s.handleLogout)
 }
 
 type issueCodeReq struct {
@@ -44,7 +48,7 @@ func (s *Service) handleIssueCode(c *gin.Context) {
 		return
 	}
 	if _, err := s.IssueCode(c.Request.Context(), req.Email, purpose); err != nil {
-		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
+		httperr.Respond(c, "identity.issue_code", httpStatusFor(err), err)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"status": "issued"})
@@ -132,7 +136,7 @@ func (s *Service) handleLogin(c *gin.Context) {
 	}
 	res, err := s.Login(c.Request.Context(), LoginInput(req))
 	if err != nil {
-		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
+		httperr.Respond(c, "identity.login", httpStatusFor(err), err)
 		return
 	}
 	SetCookie(c, res.Token, res.Expires)
@@ -159,7 +163,7 @@ func (s *Service) handleMe(c *gin.Context) {
 func (s *Service) handleLogout(c *gin.Context) {
 	raw := ExtractTokenFromRequest(c.Request)
 	if err := s.Logout(c.Request.Context(), raw); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httperr.Internal(c, "identity.logout", err)
 		return
 	}
 	ClearCookie(c)

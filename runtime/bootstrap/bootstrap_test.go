@@ -175,6 +175,65 @@ func TestReconciler_RollsBackInProgress(t *testing.T) {
 	}
 }
 
+func TestReconciler_PreservesInProgressWithChannelLock(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	daemonDB, _ := store.OpenDaemon(ctx, filepath.Join(root, "daemon.sqlite"), store.OpenOptions{})
+	defer func() { _ = daemonDB.Close() }()
+
+	channelDir := filepath.Join(root, "channels", "locked")
+	if err := os.MkdirAll(channelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	chDB, err := store.OpenChannel(ctx, filepath.Join(channelDir, "channel.sqlite"), store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := placement.NewFencingToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := store.NewChannelLock(chDB)
+	if err := lock.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    "locked",
+		FencingToken: token,
+		OwnerEpoch:   1,
+		DaemonID:     "daemon-A",
+		DaemonEpoch:  1,
+		AcquiredAt:   now(),
+		RefreshedAt:  now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = chDB.Close()
+	if _, err := daemonDB.ExecContext(ctx, `INSERT INTO bootstrap_registry
+		(create_request_id, channel_id, status, workdir_path, started_at)
+		VALUES (?, ?, 'in_progress', ?, ?)`,
+		"req-locked", "locked", channelDir, now()); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := bootstrap.NewReconciler(daemonDB, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolled, err := rec.Run(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rolled) != 0 {
+		t.Fatalf("rolled = %+v, want none for locked local channel", rolled)
+	}
+	if _, err := os.Stat(channelDir); err != nil {
+		t.Fatalf("workdir should remain: %v", err)
+	}
+	var status string
+	_ = daemonDB.QueryRowContext(ctx, `SELECT status FROM bootstrap_registry WHERE create_request_id=?`, "req-locked").Scan(&status)
+	if status != "completed" {
+		t.Errorf("status = %q want completed", status)
+	}
+}
+
 func TestReconciler_RollsBackCompletedWithoutChannelLock(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

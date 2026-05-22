@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -14,8 +15,10 @@ import (
 )
 
 // Reconciler scans bootstrap_registry for rows left in 'in_progress'
-// state (a daemon crash mid-saga). Each such row is rolled back: the
-// workdir is removed and the row is marked 'rolled_back'.
+// state (a daemon crash mid-saga). Rows that have not reached
+// channel_lock are rollback-safe: the workdir is removed and the row is
+// marked 'rolled_back'. Rows that already have channel_lock are locally
+// complete and must be kept for create-channel ack replay.
 //
 // The Reconciler also tracks per-channel cold-start held-channel outcomes
 // for the daemon — when a `control.held_channels_ack` frame arrives, the
@@ -142,7 +145,22 @@ func (r *Reconciler) Run(ctx context.Context) ([]RolledBack, error) {
 	}
 	staging = append(staging, completedOrphans...)
 
+	var rollback []RolledBack
 	for _, rb := range staging {
+		hasLock, err := channelLockExists(ctx, rb.WorkdirPath)
+		if err != nil {
+			return nil, err
+		}
+		if hasLock {
+			if err := r.markCompleted(ctx, rb.CreateRequestID); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		rollback = append(rollback, rb)
+	}
+
+	for _, rb := range rollback {
 		if rb.WorkdirPath != "" {
 			if err := os.RemoveAll(rb.WorkdirPath); err != nil {
 				return nil, fmt.Errorf("bootstrap: reconcile rmdir %s: %w", rb.WorkdirPath, err)
@@ -155,7 +173,17 @@ func (r *Reconciler) Run(ctx context.Context) ([]RolledBack, error) {
 			return nil, fmt.Errorf("bootstrap: reconcile update: %w", err)
 		}
 	}
-	return staging, nil
+	return rollback, nil
+}
+
+func (r *Reconciler) markCompleted(ctx context.Context, createRequestID string) error {
+	const upd = `UPDATE bootstrap_registry
+	             SET status='completed', completed_at=?
+	             WHERE create_request_id=? AND status='in_progress'`
+	if _, err := r.daemonDB.ExecContext(ctx, upd, r.nowFn(), createRequestID); err != nil {
+		return fmt.Errorf("bootstrap: reconcile mark completed: %w", err)
+	}
+	return nil
 }
 
 func (r *Reconciler) completedWithoutLock(ctx context.Context) ([]RolledBack, error) {
@@ -202,6 +230,9 @@ func channelLockExists(ctx context.Context, workdir string) (bool, error) {
 	}
 	db, err := store.OpenChannel(ctx, sqlitePath, store.OpenOptions{SkipDDL: true})
 	if err != nil {
+		if strings.Contains(err.Error(), "file is not a database") {
+			return false, nil
+		}
 		return false, fmt.Errorf("bootstrap: reconcile open channel sqlite %s: %w", sqlitePath, err)
 	}
 	defer func() { _ = db.Close() }()

@@ -7,8 +7,11 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/server/httperr"
 	"github.com/wanpengxie/ActOS/server/identity"
 )
+
+const catalogJSONBodyLimit = 64 << 10
 
 // PlacementHook is the optional integration point that catalog calls
 // after creating / updating a channel — typically the gateway wires
@@ -34,13 +37,13 @@ type ctxLike interface {
 // nil the daemonbus-sync path is skipped.
 func (s *Service) RegisterRoutes(g *gin.RouterGroup, ident *identity.Service) {
 	g.GET("/workspaces", s.handleListWorkspaces)
-	g.POST("/workspaces", s.handleCreateWorkspace)
+	g.POST("/workspaces", httperr.MaxBodyBytes(catalogJSONBodyLimit), s.handleCreateWorkspace)
 	g.GET("/workspaces/:wsID", s.handleGetWorkspace)
 	g.GET("/workspaces/:wsID/channels", s.handleListChannels)
-	g.POST("/workspaces/:wsID/channels", s.handleCreateChannel)
+	g.POST("/workspaces/:wsID/channels", httperr.MaxBodyBytes(catalogJSONBodyLimit), s.handleCreateChannel)
 	g.GET("/channels/:chID", s.handleGetChannel)
 	g.GET("/channels/:chID/members", s.handleListChannelMembers)
-	g.POST("/channels/:chID/members", s.handleAddChannelMember)
+	g.POST("/channels/:chID/members", httperr.MaxBodyBytes(catalogJSONBodyLimit), s.handleAddChannelMember)
 	g.DELETE("/channels/:chID/members/:uid", s.handleRemoveChannelMember)
 }
 
@@ -48,7 +51,7 @@ func (s *Service) handleListWorkspaces(c *gin.Context) {
 	u := identity.UserFrom(c)
 	ws, err := s.ListWorkspaces(c.Request.Context(), u.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httperr.Internal(c, "catalog.list_workspaces", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"workspaces": ws})
@@ -69,7 +72,7 @@ func (s *Service) handleCreateWorkspace(c *gin.Context) {
 		Name: req.Name, OwnerID: u.ID,
 	})
 	if err != nil {
-		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
+		httperr.Respond(c, "catalog.create_workspace", httpStatusFor(err), err)
 		return
 	}
 	c.JSON(http.StatusCreated, ws)
@@ -79,7 +82,7 @@ func (s *Service) handleGetWorkspace(c *gin.Context) {
 	u := identity.UserFrom(c)
 	ws, err := s.GetWorkspace(c.Request.Context(), c.Param("wsID"), u.ID)
 	if err != nil {
-		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
+		httperr.Respond(c, "catalog.get_workspace", httpStatusFor(err), err)
 		return
 	}
 	c.JSON(http.StatusOK, ws)
@@ -89,7 +92,7 @@ func (s *Service) handleListChannels(c *gin.Context) {
 	u := identity.UserFrom(c)
 	chs, err := s.ListChannels(c.Request.Context(), c.Param("wsID"), u.ID)
 	if err != nil {
-		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
+		httperr.Respond(c, "catalog.list_channels", httpStatusFor(err), err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"channels": chs})
@@ -122,7 +125,7 @@ func (s *Service) handleCreateChannel(c *gin.Context) {
 		Members:     members,
 	})
 	if err != nil {
-		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
+		httperr.Respond(c, "catalog.create_channel", httpStatusFor(err), err)
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{
@@ -135,7 +138,7 @@ func (s *Service) handleGetChannel(c *gin.Context) {
 	u := identity.UserFrom(c)
 	ch, _, err := s.GetChannel(c.Request.Context(), c.Param("chID"), u.ID)
 	if err != nil {
-		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
+		httperr.Respond(c, "catalog.get_channel", httpStatusFor(err), err)
 		return
 	}
 	c.JSON(http.StatusOK, ch)
@@ -144,12 +147,12 @@ func (s *Service) handleGetChannel(c *gin.Context) {
 func (s *Service) handleListChannelMembers(c *gin.Context) {
 	u := identity.UserFrom(c)
 	if _, err := s.GetChannelMember(c.Request.Context(), c.Param("chID"), u.ID); err != nil {
-		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
+		httperr.Respond(c, "catalog.list_channel_members.auth", httpStatusFor(err), err)
 		return
 	}
 	members, err := s.ListChannelMembers(c.Request.Context(), c.Param("chID"))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httperr.Internal(c, "catalog.list_channel_members", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"members": members})
@@ -170,12 +173,12 @@ func (s *Service) handleAddChannelMember(c *gin.Context) {
 	u := identity.UserFrom(c)
 	// Only existing channel members can add.
 	if _, err := s.GetChannelMember(c.Request.Context(), c.Param("chID"), u.ID); err != nil {
-		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
+		httperr.Respond(c, "catalog.add_channel_member.auth", httpStatusFor(err), err)
 		return
 	}
 	m, err := s.AddChannelMember(c.Request.Context(), c.Param("chID"), NewMember(req))
 	if err != nil {
-		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
+		httperr.Respond(c, "catalog.add_channel_member", httpStatusFor(err), err)
 		return
 	}
 	c.JSON(http.StatusCreated, m)
@@ -184,11 +187,11 @@ func (s *Service) handleAddChannelMember(c *gin.Context) {
 func (s *Service) handleRemoveChannelMember(c *gin.Context) {
 	u := identity.UserFrom(c)
 	if _, err := s.GetChannelMember(c.Request.Context(), c.Param("chID"), u.ID); err != nil {
-		c.JSON(httpStatusFor(err), gin.H{"error": err.Error()})
+		httperr.Respond(c, "catalog.remove_channel_member.auth", httpStatusFor(err), err)
 		return
 	}
 	if err := s.RemoveChannelMember(c.Request.Context(), c.Param("chID"), c.Param("uid")); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httperr.Internal(c, "catalog.remove_channel_member", err)
 		return
 	}
 	if s.subscriptionRevoker != nil {

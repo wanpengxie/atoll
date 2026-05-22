@@ -256,6 +256,75 @@ func (s *Service) fireResync(channelID channel.ID, since, until viewsync.Seq) {
 	_, _ = s.TriggerResync(context.Background(), channelID, since, until)
 }
 
+// RecoverGaps scans durable viewcache state for committed out-of-order rows
+// that sit beyond the cursor and re-triggers the missing closed interval.
+// This is the crash-recovery counterpart to Apply's in-memory goroutine:
+// if the process dies after committing a gap but before fireResync runs,
+// startup / periodic reconcile can still make progress.
+func (s *Service) RecoverGaps(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT c.channel_id, c.last_received_seq, MIN(m.seq)
+		  FROM view_cache_cursors c
+		  JOIN view_cache_messages m
+		    ON m.channel_id = c.channel_id
+		   AND m.seq > c.last_received_seq + 1
+		 GROUP BY c.channel_id, c.last_received_seq`)
+	if err != nil {
+		return fmt.Errorf("viewcache: recover gaps scan: %w", err)
+	}
+	rowsClosed := false
+	closeRows := func() error {
+		if rowsClosed {
+			return nil
+		}
+		rowsClosed = true
+		return rows.Close()
+	}
+	defer func() { _ = closeRows() }()
+
+	type gap struct {
+		channelID channel.ID
+		since     viewsync.Seq
+		until     viewsync.Seq
+	}
+	var gaps []gap
+	for rows.Next() {
+		var (
+			chID  string
+			cur   int64
+			min   int64
+			since = viewsync.Seq(0)
+			until = viewsync.Seq(0)
+		)
+		if err := rows.Scan(&chID, &cur, &min); err != nil {
+			return fmt.Errorf("viewcache: recover gaps scan row: %w", err)
+		}
+		if min <= cur+1 {
+			continue
+		}
+		since = viewsync.Seq(cur + 1)
+		until = viewsync.Seq(min - 1)
+		gaps = append(gaps, gap{channelID: channel.ID(chID), since: since, until: until})
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("viewcache: recover gaps rows: %w", err)
+	}
+	if err := closeRows(); err != nil {
+		return fmt.Errorf("viewcache: recover gaps close: %w", err)
+	}
+	for _, g := range gaps {
+		switch {
+		case s.fireResyncFn != nil:
+			s.fireResyncFn(g.channelID, g.since, g.until)
+		case s.resyncer != nil:
+			if _, err := s.TriggerResync(ctx, g.channelID, g.since, g.until); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // Cursor returns the current last_received_seq for channelID.
 func (s *Service) Cursor(ctx context.Context, channelID channel.ID) (viewsync.LastReceivedSeq, error) {
 	var seq int64

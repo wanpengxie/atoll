@@ -53,6 +53,29 @@ type DeviceSessionRejectReason string
 // String returns the wire form.
 func (r DeviceSessionRejectReason) String() string { return string(r) }
 
+// MuxRejectReason is the impl-layer2 §1.8 daemonbus mux reject reason
+// closed set. These classify frame-envelope / connection-layer rejects,
+// not application-level write_message or device-session rejects.
+type MuxRejectReason string
+
+// String returns the wire form.
+func (r MuxRejectReason) String() string { return string(r) }
+
+const (
+	MuxRejectUnknownFrameKind           MuxRejectReason = "mux_unknown_frame_kind"
+	MuxRejectUnknownFrameField          MuxRejectReason = "mux_unknown_frame_field"
+	MuxRejectUnknownPayloadField        MuxRejectReason = "mux_unknown_payload_field"
+	MuxRejectPayloadSchemaInvalid       MuxRejectReason = "mux_payload_schema_invalid"
+	MuxRejectProtocolVersionUnsupported MuxRejectReason = "mux_protocol_version_unsupported"
+	MuxRejectAuthFailed                 MuxRejectReason = "mux_auth_failed"
+	MuxRejectDuplicateDaemon            MuxRejectReason = "mux_duplicate_daemon"
+	MuxRejectChannelIDUnknown           MuxRejectReason = "mux_channel_id_unknown"
+	MuxRejectOwnerEpochStale            MuxRejectReason = "mux_owner_epoch_stale"
+	MuxRejectFrameTooLarge              MuxRejectReason = "mux_frame_too_large"
+	MuxRejectIdleTimeout                MuxRejectReason = "mux_idle_timeout"
+	MuxRejectInternalError              MuxRejectReason = "mux_internal_error"
+)
+
 // BindDeviceSessionBody is the daemonbus control.bind_device_session
 // payload. The server emits it after allocating a device session row.
 type BindDeviceSessionBody struct {

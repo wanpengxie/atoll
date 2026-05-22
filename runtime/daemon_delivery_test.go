@@ -120,3 +120,22 @@ func TestPostHarnessChainDispatchFailureDoesNotMarkDelivered(t *testing.T) {
 		t.Fatalf("Attempts=%d want 1", got.Attempts)
 	}
 }
+
+func TestPostHarnessChainFrozenRejectsNilEnvelope(t *testing.T) {
+	wrapped := &postHarnessChain{}
+	wrapped.Freeze("reclaim_pending")
+
+	res, err := wrapped.Write(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if res.MessageID != "" {
+		t.Fatalf("MessageID=%q want empty", res.MessageID)
+	}
+	if res.RejectReason != message.HarnessWorkerFencingStale {
+		t.Fatalf("RejectReason=%s want %s", res.RejectReason, message.HarnessWorkerFencingStale)
+	}
+	if !strings.Contains(res.RejectDetail, "reclaim_pending") {
+		t.Fatalf("RejectDetail=%q want reclaim_pending", res.RejectDetail)
+	}
+}

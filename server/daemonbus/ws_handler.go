@@ -16,6 +16,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/server/httperr"
 )
 
 // DefaultServerWSWriteTimeout is the upper bound on a single WS write
@@ -114,7 +115,7 @@ func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 		}
 		epoch, err := s.IssueConnectionEpoch(c.Request.Context(), daemonID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			httperr.Internal(c, "daemonbus.issue_connection_epoch", err)
 			return
 		}
 

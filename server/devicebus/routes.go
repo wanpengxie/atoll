@@ -11,13 +11,16 @@ import (
 	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
+	"github.com/wanpengxie/ActOS/server/httperr"
 	"github.com/wanpengxie/ActOS/server/identity"
 )
+
+const deviceJSONBodyLimit = 64 << 10
 
 // RegisterRoutes mounts the issuance + revoke endpoints. Callers
 // must be authenticated upstream (gateway's identity middleware).
 func (s *Service) RegisterRoutes(g *gin.RouterGroup) {
-	g.POST("/channels/:chID/devices", s.handleIssue)
+	g.POST("/channels/:chID/devices", httperr.MaxBodyBytes(deviceJSONBodyLimit), s.handleIssue)
 	g.DELETE("/devices/:sid", s.handleRevoke)
 	g.GET("/devices/:sid", s.handleGet)
 }
@@ -56,7 +59,7 @@ func (s *Service) handleIssue(c *gin.Context) {
 			c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httperr.Internal(c, "devicebus.issue", err)
 		return
 	}
 	// T147 §A-S2 — push the bind frame to the owning daemon. The session
@@ -69,17 +72,24 @@ func (s *Service) handleIssue(c *gin.Context) {
 		TokenFingerprint: res.TokenFingerprint,
 	})
 	if bindErr != nil {
+		_ = s.Revoke(c.Request.Context(), res.Session.ID)
+		_ = notifier.Unbind(c.Request.Context(), UnbindInput{
+			Session: res.Session,
+			Reason:  "bind_failed",
+		})
 		c.JSON(http.StatusBadGateway, gin.H{
-			"error":             "bind_device_session: " + bindErr.Error(),
+			"error":             "bind_device_session_failed",
 			"device_session_id": res.Session.ID,
 		})
 		return
 	}
 	if err := s.MarkBound(c.Request.Context(), res.Session.ID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":             "mark_bound: " + err.Error(),
-			"device_session_id": res.Session.ID,
+		_ = s.Revoke(c.Request.Context(), res.Session.ID)
+		_ = notifier.Unbind(c.Request.Context(), UnbindInput{
+			Session: res.Session,
+			Reason:  "mark_bound_failed",
 		})
+		httperr.Internal(c, "devicebus.mark_bound", err)
 		return
 	}
 	for _, old := range res.ReplacedSessions {
@@ -107,6 +117,10 @@ func (s *Service) handleRevoke(c *gin.Context) {
 		if getErr == ErrSessionNotFound {
 			status = http.StatusNotFound
 		}
+		if status >= http.StatusInternalServerError {
+			httperr.Internal(c, "devicebus.revoke.get", getErr)
+			return
+		}
 		c.JSON(status, gin.H{
 			"error":         getErr.Error(),
 			"reject_reason": string(kerneldaemonbus.DeviceSessionRejectUnbindSessionUnknown),
@@ -129,7 +143,7 @@ func (s *Service) handleRevoke(c *gin.Context) {
 		})
 	}
 	if err := s.Revoke(c.Request.Context(), sid); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httperr.Internal(c, "devicebus.revoke", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "revoked"})
@@ -141,6 +155,10 @@ func (s *Service) handleGet(c *gin.Context) {
 		status := http.StatusInternalServerError
 		if err == ErrSessionNotFound {
 			status = http.StatusNotFound
+		}
+		if status >= http.StatusInternalServerError {
+			httperr.Internal(c, "devicebus.get", err)
+			return
 		}
 		c.JSON(status, gin.H{
 			"error":         err.Error(),

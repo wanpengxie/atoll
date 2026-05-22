@@ -10,6 +10,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
+	"github.com/wanpengxie/ActOS/server/httperr"
 	"github.com/wanpengxie/ActOS/server/identity"
 )
 
@@ -17,6 +18,7 @@ const (
 	defaultMessagesLimit = 200
 	maxMessagesLimit     = 500
 	maxResyncRange       = 500
+	resyncBodyLimit      = 1 << 20
 )
 
 // RegisterRoutes mounts the read-only viewcache endpoints + the
@@ -24,7 +26,7 @@ const (
 func (s *Service) RegisterRoutes(g *gin.RouterGroup) {
 	g.GET("/channels/:chID/messages", s.handleMessages)
 	g.GET("/channels/:chID/cursor", s.handleCursor)
-	g.POST("/channels/:chID/resync", s.handleResync)
+	g.POST("/channels/:chID/resync", httperr.MaxBodyBytes(resyncBodyLimit), s.handleResync)
 }
 
 func (s *Service) handleMessages(c *gin.Context) {
@@ -55,7 +57,7 @@ func (s *Service) handleMessages(c *gin.Context) {
 	}
 	msgs, err := s.Messages(c.Request.Context(), chID, viewsync.Seq(after), limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httperr.Internal(c, "viewcache.messages", err)
 		return
 	}
 	// Return a flat envelope array — UI consumes the same envelope shape
@@ -88,7 +90,7 @@ func (s *Service) handleCursor(c *gin.Context) {
 	}
 	cur, err := s.Cursor(c.Request.Context(), chID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httperr.Internal(c, "viewcache.cursor", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"last_received_seq": int64(cur)})
@@ -128,7 +130,7 @@ func (s *Service) handleResync(c *gin.Context) {
 		viewsync.Seq(req.SinceSeq), viewsync.Seq(req.UntilSeq),
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httperr.Internal(c, "viewcache.resync", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"last_received_seq": int64(cur)})

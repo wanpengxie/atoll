@@ -14,6 +14,7 @@ import (
 // a per-channel sink without exposing the full reader.
 type OutboxAcker interface {
 	AckUpTo(ctx context.Context, lastAckedSeq viewsync.Seq) error
+	ResetAllPushed(ctx context.Context) error
 }
 
 // AckRouter resolves a channel id → the outbox sink that should GC
@@ -43,14 +44,20 @@ func NewAckHandlerForChannels(cursors *CursorTracker, router AckRouter) (*MultiA
 
 // Handle implements the ControlHandlers.OnViewsyncAck signature.
 func (h *MultiAckHandler) Handle(ctx context.Context, ack viewsync.AckFrame) error {
-	if ack.LastReceivedSeq <= 0 {
-		return nil
-	}
 	sink, ok := h.router(ack.ChannelID)
 	if !ok {
 		// Drop silently — the channel was unloaded after the server
 		// emitted the ack. Returning nil keeps the dispatch loop
 		// running.
+		return nil
+	}
+	if !ack.Accepted {
+		if err := sink.ResetAllPushed(ctx); err != nil {
+			return fmt.Errorf("transit: multi ack reset pushed %s: %w", ack.ChannelID, err)
+		}
+		return nil
+	}
+	if ack.LastReceivedSeq <= 0 {
 		return nil
 	}
 	if !h.cursors.AdvanceAcked(ack.ChannelID, ack.LastReceivedSeq) {

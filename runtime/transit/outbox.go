@@ -25,8 +25,8 @@ type OutboxReader interface {
 	MarkPushed(ctx context.Context, seq viewsync.Seq, pushedAt int64) error
 	ResetPushed(ctx context.Context, seq viewsync.Seq) error
 	AckUpTo(ctx context.Context, lastAckedSeq viewsync.Seq) error
-	// PendingCount reports the number of rows currently in status='pending'
-	// (used for backlog watermark observability — L1 §8.1.5).
+	// PendingCount reports the number of rows not cumulatively acked yet
+	// (pending + pushed; used for backlog watermark observability — L1 §8.1.5).
 	PendingCount(ctx context.Context) (int, error)
 }
 
@@ -331,7 +331,19 @@ func (p *Pusher) Pump(ctx context.Context) error {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return ctx.Err()
 			}
-			return err
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(p.pollEvery)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				continue
+			}
 		}
 		if n == 0 {
 			// Reset the timer and wait.
