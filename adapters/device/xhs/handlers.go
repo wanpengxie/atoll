@@ -132,8 +132,9 @@ func normaliseStatus(raw string) callbackOutcome {
 
 // buildRespondPayload constructs the response payload for ctx.Respond
 // per the recovered request type. Applies the per-type allow-list
-// (resultAllowListFor / errorAllowListFor) so stowaway keys never reach
-// the harness Step 6 schema validator (R4-FIX-A).
+// (resultAllowListFor / errorAllowListFor) at the adapter boundary so
+// cross-type stowaway keys do not leak into caller-visible responses
+// (R4-FIX-A).
 //
 // Returns (payload, status, terminal reason). The caller wraps them
 // into adapter.RespondOptions.

@@ -11,16 +11,16 @@ import (
 const AdapterName = "xhs"
 
 // DefaultAdapterActorID is the canonical actor_registry id this adapter
-// owns. v4-message-definition §1.2.5 + L4 §2.1 mandate sender.id =
-// tool:xhs-adapter on every adapter-emitted response.
+// owns. domain-xhs-spec §1 and proto-foundation §2.7 keep adapter-emitted
+// responses under sender.id=tool:xhs-adapter.
 //
 // Concrete deployments MAY override the value via Config.AdapterActorID
 // if they run multiple xhs adapter instances in a channel (none today;
 // extension reserved).
 const DefaultAdapterActorID actor.ActorID = "tool:xhs-adapter"
 
-// Binding is the M1.5 closed-enum value this adapter declares. See
-// kernel/actor.BindingRuntimeInboundViaRelay + L1 §11.7.
+// Binding is the protocol binding this adapter declares. See
+// kernel/actor.BindingRuntimeInboundViaRelay + proto-layer0 §2.8.
 const Binding = actor.BindingRuntimeInboundViaRelay
 
 // DefaultMaxPendingMs mirrors the M1.3 xhs baseline (5 min). Large
@@ -29,7 +29,7 @@ const Binding = actor.BindingRuntimeInboundViaRelay
 // attention span.
 const DefaultMaxPendingMs int64 = 5 * 60 * 1000
 
-// Type names — closed set per L4 §2.1.
+// Type names — closed set per domain-xhs-spec §1.
 const (
 	TypePublish      = "xhs.publish"
 	TypeSearch       = "xhs.search"
@@ -92,12 +92,12 @@ type Callback struct {
 }
 
 // allowedResultKeysByType is the per-type result allow-list. Source:
-// L4 §2.2 response schemas; each entry lists every field the schema
+// domain-xhs-spec §1 response schemas; each entry lists every field the schema
 // declares beyond `status` / `reason` (which the adapter sets directly
 // via RespondOptions). Stowaway keys outside this set are dropped at
 // the adapter boundary — that is the R4-FIX-A regression guard (the
-// M1.3 union allow-list let cross-type fields slip through and trip
-// harness Step 6 silently, surfacing as F3 timeouts).
+// M1.3 union allow-list let cross-type fields slip through and confuse
+// callers waiting for the requested operation's response shape).
 //
 // Origins per spec:
 //

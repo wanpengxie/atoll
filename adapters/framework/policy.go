@@ -27,12 +27,12 @@ type terminalPayload struct {
 // bound module and tears it down on Shutdown.
 //
 // On RegisterTimer the policy stores the deadline + arms a timer. When
-// the timer fires the policy emits a terminal_failure response via the
-// adapter's RespondFunc with reason=unanswered_timeout.
+// the timer fires the policy emits a terminal_failure response through the
+// framework synthesized fallback path with reason=unanswered_timeout.
 type timerPolicy struct {
 	adapterName string
 	channelID   channel.ID
-	respond     adapter.RespondFunc
+	fallback    terminalFallbackFunc
 	chain       harness.Chain
 	correlation *memoryCorrelationTracker
 	logger      Logger
@@ -73,11 +73,9 @@ func newTimerPolicy(
 	}
 }
 
-// bindRespond wires the adapter-specific RespondFunc after the framework
-// has built it. Separated from constructor so newTimerPolicy can be
-// called before the Respond closure is composed.
-func (p *timerPolicy) bindRespond(respond adapter.RespondFunc) {
-	p.respond = respond
+// bindFallback wires the framework/runtime-owned terminal closure emitter.
+func (p *timerPolicy) bindFallback(fallback terminalFallbackFunc) {
+	p.fallback = fallback
 }
 
 // RegisterTimer arms a timer that fires at deadline. Repeated calls for
@@ -131,14 +129,14 @@ func (p *timerPolicy) OnExternalError(
 	if requestID == "" {
 		return errors.New("framework: OnExternalError requestID required")
 	}
-	if p.respond == nil {
-		return errors.New("framework: policy.respond not bound")
+	if p.fallback == nil {
+		return errors.New("framework: policy.fallback not bound")
 	}
 	payload, err := marshalTerminalPayload(string(reason), detail)
 	if err != nil {
 		return err
 	}
-	res, err := p.respond(ctx, requestID, payload, adapter.RespondOptions{
+	res, err := p.fallback(ctx, requestID, payload, adapter.RespondOptions{
 		Status: "failed",
 		Reason: string(reason),
 	})
@@ -159,14 +157,15 @@ func (p *timerPolicy) OnExternalError(
 }
 
 // fire is the AfterFunc callback. It emits the unanswered_timeout
-// terminal via Respond. We swallow most errors so a timer panic cannot
-// poison the rest of the daemon — anything non-trivial is logged.
+// terminal via the framework synthesized fallback path. We swallow most
+// errors so a timer panic cannot poison the rest of the daemon — anything
+// non-trivial is logged.
 func (p *timerPolicy) fire(requestID adapter.CorrelationKey) {
 	p.mu.Lock()
 	delete(p.timers, requestID)
 	p.mu.Unlock()
-	if p.respond == nil {
-		p.logger.Error("framework.policy.timer_fire.no_respond",
+	if p.fallback == nil {
+		p.logger.Error("framework.policy.timer_fire.no_fallback",
 			"adapter", p.adapterName, "request_id", requestID.String())
 		return
 	}
@@ -185,7 +184,7 @@ func (p *timerPolicy) fire(requestID adapter.CorrelationKey) {
 		if attempt > 1 {
 			time.Sleep(time.Duration(attempt-1) * 25 * time.Millisecond)
 		}
-		res, err := p.respond(ctx, requestID, payload, adapter.RespondOptions{
+		res, err := p.fallback(ctx, requestID, payload, adapter.RespondOptions{
 			Status: "failed",
 			Reason: string(message.TerminalUnansweredTimeout),
 		})

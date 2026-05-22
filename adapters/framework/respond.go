@@ -71,16 +71,44 @@ func buildRespond(cfg respondConfig) (adapter.RespondFunc, error) {
 		return nil, err
 	}
 	return func(ctx context.Context, requestID adapter.CorrelationKey, payload json.RawMessage, opts adapter.RespondOptions) (adapter.RespondResult, error) {
-		return runRespond(ctx, cfg, requestID, payload, opts)
+		return runRespondWithSender(ctx, cfg, requestID, payload, opts, message.Sender{
+			Kind: actor.KindTool,
+			ID:   cfg.adapterActorID,
+		})
 	}, nil
 }
 
-func runRespond(
+type terminalFallbackFunc func(
+	ctx context.Context,
+	requestID adapter.CorrelationKey,
+	payload json.RawMessage,
+	opts adapter.RespondOptions,
+) (adapter.RespondResult, error)
+
+// buildSynthesizedTerminalFallback returns the framework/runtime-owned
+// terminal closure path. It intentionally does not satisfy or expose
+// adapter.RespondFunc: adapter voluntary responses remain signed by the
+// adapter actor, while synthesized fallback terminals are signed by the
+// channel system actor.
+func buildSynthesizedTerminalFallback(cfg respondConfig) (terminalFallbackFunc, error) {
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, requestID adapter.CorrelationKey, payload json.RawMessage, opts adapter.RespondOptions) (adapter.RespondResult, error) {
+		return runRespondWithSender(ctx, cfg, requestID, payload, opts, message.Sender{
+			Kind: actor.KindSystem,
+			ID:   actor.SystemActorID,
+		})
+	}, nil
+}
+
+func runRespondWithSender(
 	ctx context.Context,
 	cfg respondConfig,
 	requestID adapter.CorrelationKey,
 	payload json.RawMessage,
 	opts adapter.RespondOptions,
+	sender message.Sender,
 ) (adapter.RespondResult, error) {
 	if requestID == "" {
 		return adapter.RespondResult{}, errors.New("framework: Respond requestID required")
@@ -139,7 +167,7 @@ func runRespond(
 		ID:            envID,
 		TS:            now,
 		ChannelID:     request.ChannelID,
-		Sender:        message.Sender{Kind: actor.KindTool, ID: cfg.adapterActorID},
+		Sender:        sender,
 		Kind:          message.KindResponse,
 		Type:          request.Type,
 		Payload:       mergedPayload,

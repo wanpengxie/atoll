@@ -225,13 +225,13 @@ func pollResponse(t *testing.T, db *sql.DB, requestID message.ID, timeout time.D
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		const q = `SELECT id, payload, COALESCE(parent_id,''), kind, is_terminal
+		const q = `SELECT id, payload, COALESCE(parent_id,''), kind, sender_kind, sender_id, is_terminal
 		             FROM messages WHERE parent_id=? AND kind='response' LIMIT 1`
 		var (
-			id, payload, parent, kind string
-			term                      int
+			id, payload, parent, kind, senderKind, senderID string
+			term                                            int
 		)
-		err := db.QueryRowContext(context.Background(), q, requestID.String()).Scan(&id, &payload, &parent, &kind, &term)
+		err := db.QueryRowContext(context.Background(), q, requestID.String()).Scan(&id, &payload, &parent, &kind, &senderKind, &senderID, &term)
 		if err == sql.ErrNoRows {
 			time.Sleep(20 * time.Millisecond)
 			continue
@@ -244,6 +244,7 @@ func pollResponse(t *testing.T, db *sql.DB, requestID message.ID, timeout time.D
 		env.Payload = json.RawMessage(payload)
 		env.Kind = message.Kind(kind)
 		env.ParentID = message.ID(parent)
+		env.Sender = message.Sender{Kind: actor.Kind(senderKind), ID: actor.ActorID(senderID)}
 		if term == 1 {
 			env.IsTerminal = true
 		}
@@ -305,6 +306,9 @@ func TestIntegration_XhsPublish_HappyPath(t *testing.T) {
 	// so the framework Respond uses the canonical id as parent_id. The
 	// ack carries that canonical id.
 	resp := pollResponse(t, db, ack.MessageID, 3*time.Second)
+	if resp.Sender.ID != xhs.DefaultAdapterActorID || resp.Sender.Kind != actor.KindTool {
+		t.Fatalf("voluntary response sender=(%s,%s) want tool adapter", resp.Sender.Kind, resp.Sender.ID)
+	}
 	var payload map[string]any
 	if err := json.Unmarshal(resp.Payload, &payload); err != nil {
 		t.Fatalf("response payload unmarshal: %v", err)
@@ -450,6 +454,9 @@ func TestIntegration_XhsPublish_TimerEmitsUnansweredTimeout(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	resp := pollResponse(t, db, ack.MessageID, 5*time.Second)
+	if resp.Sender.ID != actor.SystemActorID || resp.Sender.Kind != actor.KindSystem {
+		t.Fatalf("timer fallback sender=(%s,%s) want system actor", resp.Sender.Kind, resp.Sender.ID)
+	}
 	var payload map[string]any
 	_ = json.Unmarshal(resp.Payload, &payload)
 	if payload["status"] != "failed" {
@@ -528,6 +535,9 @@ func TestIntegration_LongPending_ToolReceiverSkippedByScheduler_F3Wins(t *testin
 
 	// 2) Adapter F3 timer eventually fires. Poll up to 5s.
 	resp := pollResponse(t, db, ack.MessageID, 5*time.Second)
+	if resp.Sender.ID != actor.SystemActorID || resp.Sender.Kind != actor.KindSystem {
+		t.Fatalf("timer fallback sender=(%s,%s) want system actor", resp.Sender.Kind, resp.Sender.ID)
+	}
 	var payload map[string]any
 	_ = json.Unmarshal(resp.Payload, &payload)
 	if payload["status"] != "failed" {

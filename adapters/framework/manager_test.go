@@ -536,8 +536,15 @@ func TestManagerTimerFiresUnansweredTimeout(t *testing.T) {
 	if len(written) != 1 {
 		t.Fatalf("expected 1 timer-fired write, got %d", len(written))
 	}
+	resp := written[0]
+	if resp.Sender.ID != actor.SystemActorID {
+		t.Fatalf("timer fallback sender.id=%s want system", resp.Sender.ID)
+	}
+	if resp.Sender.Kind != actor.KindSystem {
+		t.Fatalf("timer fallback sender.kind=%s want system", resp.Sender.Kind)
+	}
 	var payload map[string]any
-	_ = json.Unmarshal(written[0].Payload, &payload)
+	_ = json.Unmarshal(resp.Payload, &payload)
 	if payload["status"] != "failed" {
 		t.Fatalf("payload.status=%v want failed", payload["status"])
 	}
@@ -586,6 +593,9 @@ func TestManagerTimerRetriesTransientRespondWriteErrors(t *testing.T) {
 	for i, env := range written {
 		if env.Kind != message.KindResponse {
 			t.Fatalf("write %d kind=%s want response", i+1, env.Kind)
+		}
+		if env.Sender.ID != actor.SystemActorID || env.Sender.Kind != actor.KindSystem {
+			t.Fatalf("write %d sender=(%s,%s) want system actor", i+1, env.Sender.Kind, env.Sender.ID)
 		}
 	}
 	var payload map[string]any
@@ -887,6 +897,9 @@ func TestManagerHandlePanicEmitsReceiverInternalError(t *testing.T) {
 	written := chain.Written()
 	if len(written) != 1 {
 		t.Fatalf("written=%d want 1 failed terminal", len(written))
+	}
+	if written[0].Sender.ID != actor.SystemActorID || written[0].Sender.Kind != actor.KindSystem {
+		t.Fatalf("panic fallback sender=(%s,%s) want system actor", written[0].Sender.Kind, written[0].Sender.ID)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(written[0].Payload, &payload); err != nil {

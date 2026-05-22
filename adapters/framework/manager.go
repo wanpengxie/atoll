@@ -337,7 +337,22 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 	if err != nil {
 		return fmt.Errorf("framework: build respond for %s: %w", decl.Name, err)
 	}
-	policy.bindRespond(respond)
+	fallback, err := buildSynthesizedTerminalFallback(respondConfig{
+		adapterName:    decl.Name,
+		adapterActorID: decl.ActorID,
+		channelID:      m.cfg.ChannelID,
+		lookup:         m.cfg.RequestLookup,
+		chain:          m.cfg.HarnessChain,
+		correlation:    corr,
+		policy:         policy,
+		clock:          m.cfg.Clock,
+		logger:         m.cfg.Logger,
+		metrics:        m.cfg.Metrics,
+	})
+	if err != nil {
+		return fmt.Errorf("framework: build synthesized fallback for %s: %w", decl.Name, err)
+	}
+	policy.bindFallback(fallback)
 
 	mctx := &adapter.ModuleContext{
 		AdapterName:    decl.Name,

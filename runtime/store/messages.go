@@ -79,8 +79,8 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kl
 	// FIX-T10 protocol defense: Payload is a REQUIRED field per L0 §2.1
 	// (every envelope carries a payload object, even if the body is the
 	// empty JSON object `{}`). Silently coercing nil to `{}` masks
-	// caller bugs that bypass harness step 4 (payload schema validation)
-	// and lets unvalidated rows enter the store. Reject loudly so the
+		// caller bugs that bypass harness Step 4 normalize
+		// and lets non-canonical rows enter the store. Reject loudly so the
 	// caller (harness chain) is forced to materialize the payload before
 	// reaching the persistence sink.
 	if env.Payload == nil {

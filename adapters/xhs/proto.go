@@ -10,8 +10,8 @@ const AdapterName = "xhs-scaffold"
 
 // DefaultAdapterActorID is the canonical tool actor row this scaffold
 // binds — same id the T3 device adapter will own once the runtime_inbound_via_relay
-// path lands. v4-message-definition §1.2.5 mandates sender.id =
-// tool:xhs-adapter on every adapter-emitted response.
+// path lands. domain-xhs-spec §1 keeps adapter-emitted responses under
+// sender.id=tool:xhs-adapter.
 const DefaultAdapterActorID actor.ActorID = "tool:xhs-adapter"
 
 // Binding is the T2 closed-enum value — embedded so the daemon
@@ -26,7 +26,7 @@ const Binding = actor.BindingEmbedded
 // install (acceptance #6: missing max_pending_ms → adapter_timeout_missing).
 const DefaultMaxPendingMs int64 = 5 * 60 * 1000
 
-// Type names — same closed set the device adapter uses (L4 §2.1).
+// Type names — same closed set the device adapter uses (domain-xhs-spec §1).
 const (
 	TypePublish      = "xhs.publish"
 	TypeSearch       = "xhs.search"
