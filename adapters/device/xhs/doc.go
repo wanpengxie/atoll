@@ -33,9 +33,9 @@
 //
 // Authoritative spec references:
 //
-//   - .dalek/pm/m1.5-tickets.md §T5      (device transit 完整链路)
-//   - .dalek/pm/m1.5-tickets.md §T1.3    (device_transit frame field set)
-//   - .dalek/pm/v4-layer4-spec.md §2.6   (device-not-actor invariant)
-//   - .dalek/pm/v4-layer4-spec.md §2.2   (xhs response schemas — per-type
+//   - launch-ticket notes §T5      (device transit 完整链路)
+//   - launch-ticket notes §T1.3    (device_transit frame field set)
+//   - .dalek/pm/domain-xhs-spec.md §2.6  (device-not-actor invariant)
+//   - .dalek/pm/domain-xhs-spec.md §2.2  (xhs response schemas — per-type
 //     allow-list source)
 package xhs

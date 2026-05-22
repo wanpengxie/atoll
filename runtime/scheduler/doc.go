@@ -1,7 +1,7 @@
 // Package scheduler handles long-pending message scheduling and daemon
 // restart timer recovery.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T3 + L1 §5.3 / §6.4 /
+// Authoritative spec: launch-ticket notes §T3 + L1 §5.3 / §6.4 /
 // L2 §3.7.
 //
 // Files:

@@ -2,7 +2,7 @@
 // the server side. Channel metadata only — placement state lives in
 // server/placements (separate concern by spec §T6).
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T6 (catalog 子目录) +
+// Authoritative spec: launch-ticket notes §T6 (catalog 子目录) +
 // L1 §3 channel namespace + T1.9 channel-member sync.
 //
 // Key invariant: member_actor_id is unique per channel (DB-level

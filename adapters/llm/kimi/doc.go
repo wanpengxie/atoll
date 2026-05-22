@@ -18,9 +18,9 @@
 // Wire types → v4 envelope mapping (the "24 wire types" callout in the
 // ticket description maps to ~23 const lines in go-kimi/pkg/kimi/wire/
 // types.go). M1.6 scope is intentionally narrow + strictly single-response
-// per v4-message-definition.md (each request gets at most ONE response
-// envelope; streaming chunks are a transport-layer artifact and never
-// leak into the v4 envelope layer):
+// per proto-layer0 single-response semantics (each request gets at most
+// ONE response envelope; streaming chunks are a transport-layer artifact
+// and never leak into the protocol envelope layer):
 //
 //	wire.TextDelta    → pure buffer (NO envelope emitted). Deltas are
 //	                    accumulated locally; the final text is folded

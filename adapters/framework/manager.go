@@ -571,7 +571,8 @@ func (m *Manager) OnExternalCallback(ctx context.Context, adapterName string, pa
 	span := m.cfg.Tracer.StartSpan("adapter.callback", "adapter", adapterName)
 	defer span.End()
 	m.cfg.Metrics.IncCounter("adapter.callback", "adapter", adapterName)
-	if correlationID := callbackCorrelationID(payload); correlationID != "" {
+	correlationID := callbackCorrelationID(payload)
+	if correlationID != "" {
 		if _, ok, err := bm.correlation.Get(ctx, adapter.CorrelationKey(message.ID(correlationID))); err != nil {
 			return fmt.Errorf("framework: callback correlation lookup %s: %w", correlationID, err)
 		} else if !ok {
@@ -588,6 +589,41 @@ func (m *Manager) OnExternalCallback(ctx context.Context, adapterName string, pa
 			})
 		}
 	}
+	return m.runExternalCallback(ctx, bm, adapterName, payload, correlationID)
+}
+
+func (m *Manager) runExternalCallback(ctx context.Context, bm *boundModule, adapterName string, payload []byte, correlationID string) (err error) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		stack := string(debug.Stack())
+		detail := fmt.Sprintf("adapter %s callback panic: %v\n%s", adapterName, r, stack)
+		m.cfg.Logger.Error("framework.callback.panic",
+			"adapter", adapterName,
+			"correlation_id", correlationID,
+			"panic", fmt.Sprint(r))
+		m.cfg.Metrics.IncCounter("adapter.callback.panic", "adapter", adapterName)
+		if correlationID != "" {
+			if perr := bm.policy.OnExternalError(ctx,
+				adapter.CorrelationKey(message.ID(correlationID)),
+				message.TerminalReceiverInternalError,
+				detail,
+			); perr != nil {
+				m.cfg.Logger.Error("framework.callback.panic.emit_failed",
+					"adapter", adapterName,
+					"correlation_id", correlationID,
+					"err", perr.Error())
+				err = fmt.Errorf("adapter %s callback panicked and failed-terminal emit failed: %v / %w",
+					adapterName, r, perr)
+				return
+			}
+			err = fmt.Errorf("adapter %s callback panicked (failed terminal emitted): %v", adapterName, r)
+			return
+		}
+		err = fmt.Errorf("adapter %s callback panicked: %v", adapterName, r)
+	}()
 	return bm.module.OnExternalCallback(ctx, payload)
 }
 

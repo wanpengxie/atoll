@@ -45,7 +45,7 @@ type InstallSpec struct {
 	Types []TypeSeed
 }
 
-// DefaultInstallSpec returns the canonical M1.5 install seeds for the
+// DefaultInstallSpec returns the canonical launch install seeds for the
 // xhs adapter: one tool actor + 5 R/R types + 1 event-only type. Used
 // by composition root + by tests that need a known-good registry seed.
 //

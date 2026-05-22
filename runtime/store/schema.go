@@ -11,8 +11,8 @@ package store
 //   - L2 §1.4.6  actor_registry
 //   - L2 §1.4.9  worker_locks
 //   - L2 §1.4.10.1 action_ledger
-//   - L1 §8.6 / T3 view_sync_outbox  (M1.5 new)
-//   - L2 §1.4.11 / T3 channel_lock   (M1.5 new — daemon-side mirror
+//   - L1 §8.6 / T3 view_sync_outbox  (launch new)
+//   - L2 §1.4.11 / T3 channel_lock   (launch new — daemon-side mirror
 //     of channel_placements fencing fields)
 //
 // The DDL string is split into multiple CREATE statements; the

@@ -21,6 +21,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/pkg/requestctx"
 	"github.com/wanpengxie/ActOS/server/daemonbus"
 	"github.com/wanpengxie/ActOS/server/store"
 )
@@ -188,11 +189,18 @@ func TestUnregisterConnectionCompareAndDelete(t *testing.T) {
 	newServer, _ := newPipePair()
 	oldConn := daemonbus.NewConnection("daemon-1", 1, oldServer)
 	newConn := daemonbus.NewConnection("daemon-1", 2, newServer)
+	var unregistered []placement.DaemonID
+	svc.SetUnregisterHook(func(conn *daemonbus.Connection) {
+		unregistered = append(unregistered, conn.DaemonID)
+	})
 
 	svc.Register(oldConn)
 	svc.Register(newConn)
 	if svc.UnregisterConnection(oldConn) {
 		t.Fatal("old connection unregister removed current connection")
+	}
+	if len(unregistered) != 0 {
+		t.Fatalf("old connection fired unregister hook: %v", unregistered)
 	}
 	if got, ok := svc.ConnectionFor("daemon-1"); !ok || got != newConn {
 		t.Fatalf("current connection = %p ok=%v want %p", got, ok, newConn)
@@ -200,8 +208,76 @@ func TestUnregisterConnectionCompareAndDelete(t *testing.T) {
 	if !svc.UnregisterConnection(newConn) {
 		t.Fatal("current connection unregister did not remove entry")
 	}
+	if len(unregistered) != 1 || unregistered[0] != "daemon-1" {
+		t.Fatalf("unregister hook=%v want [daemon-1]", unregistered)
+	}
 	if _, ok := svc.ConnectionFor("daemon-1"); ok {
 		t.Fatal("connection still registered after current unregister")
+	}
+}
+
+func TestServiceCloseClosesConnectionsAndFiresUnregisterHooks(t *testing.T) {
+	t.Parallel()
+	svc := newSvc(t)
+	firstServer, _ := newPipePair()
+	secondServer, _ := newPipePair()
+	first := daemonbus.NewConnection("daemon-close-a", 1, firstServer)
+	second := daemonbus.NewConnection("daemon-close-b", 1, secondServer)
+	svc.Register(first)
+	svc.Register(second)
+
+	seen := map[placement.DaemonID]bool{}
+	svc.SetUnregisterHook(func(conn *daemonbus.Connection) {
+		seen[conn.DaemonID] = true
+	})
+	if err := svc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	for _, id := range []placement.DaemonID{"daemon-close-a", "daemon-close-b"} {
+		if !seen[id] {
+			t.Fatalf("unregister hook missing %s: %v", id, seen)
+		}
+		if _, ok := svc.ConnectionFor(id); ok {
+			t.Fatalf("connection %s still registered", id)
+		}
+	}
+	if !first.IsClosed() || !second.IsClosed() {
+		t.Fatalf("connections not closed: first=%v second=%v", first.IsClosed(), second.IsClosed())
+	}
+}
+
+func TestConnectionRunRecoversHandlerPanic(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	server, daemon := newPipePair()
+	conn := daemonbus.NewConnection(placement.DaemonID("daemon-panic"), 7, server)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- conn.Run(ctx, daemonbus.Handlers{
+			OnPush: func(context.Context, *daemonbus.Connection, viewsync.PushFrame) (viewsync.AckFrame, error) {
+				panic("server handler panic")
+			},
+		})
+	}()
+	raw, _ := json.Marshal(viewsync.PushFrame{ChannelID: "ch-panic", Seq: 1})
+	if err := daemon.WriteFrame(ctx, kerneldaemonbus.Frame{
+		FrameID:               "push-panic",
+		FrameKind:             kerneldaemonbus.FrameTypeViewsyncPush,
+		DaemonID:              "daemon-panic",
+		DaemonConnectionEpoch: 7,
+		Payload:               raw,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "dispatch panic") {
+			t.Fatalf("Run err=%v want dispatch panic", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Run did not return after panic")
 	}
 }
 
@@ -306,6 +382,25 @@ func (p *pipeTransport) Close() error {
 	return nil
 }
 
+func TestSendFrameCarriesRequestID(t *testing.T) {
+	t.Parallel()
+
+	serverTx, daemonTx := newPipePair()
+	conn := daemonbus.NewConnection("d1", 7, serverTx)
+	ctx := requestctx.WithRequestID(context.Background(), "req-123")
+
+	if _, err := conn.SendFrame(ctx, kerneldaemonbus.FrameTypeControlHeartbeatAck, map[string]any{"ok": true}); err != nil {
+		t.Fatalf("SendFrame: %v", err)
+	}
+	frame, err := daemonTx.ReadFrame(context.Background())
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if frame.RequestID != "req-123" {
+		t.Fatalf("RequestID=%q want req-123", frame.RequestID)
+	}
+}
+
 // TestRegisterAndIssueEpoch covers the daemons table + epoch counter.
 func TestRegisterAndIssueEpoch(t *testing.T) {
 	t.Parallel()
@@ -377,6 +472,31 @@ func TestHandleWSHandshakeCapacityPreserved(t *testing.T) {
 	}
 }
 
+func TestHandleWSReadLimitRejectsOversizedFrame(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	svc := newSvc(t)
+	wsURL := daemonbusWSServer(t, svc)
+
+	ws, _, err := daemonWSDialer("d-read-limit", "test-secret").Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = ws.Close() }()
+	_ = ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := ws.ReadMessage(); err != nil {
+		t.Fatalf("read accepted: %v", err)
+	}
+	oversized := strings.Repeat("x", int(daemonbus.DefaultServerWSReadLimit)+1)
+	if err := ws.WriteMessage(websocket.TextMessage, []byte(oversized)); err != nil {
+		t.Fatalf("write oversized frame: %v", err)
+	}
+	_ = ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := ws.ReadMessage(); err == nil {
+		t.Fatal("read succeeded after oversized frame")
+	}
+}
+
 func TestSendAndAwait_ClosedConnectionSafe(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -390,6 +510,73 @@ func TestSendAndAwait_ClosedConnectionSafe(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "connection closed before send") {
 		t.Fatalf("SendAndAwait err=%v want closed-before-send", err)
+	}
+	if !errors.Is(err, daemonbus.ErrConnectionClosed) {
+		t.Fatalf("SendAndAwait err=%v want ErrConnectionClosed", err)
+	}
+}
+
+func TestSendAndAwait_DefaultTimeout(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	svr, _ := newPipePair()
+	conn := daemonbus.NewConnection(placement.DaemonID("d-timeout"), 1, svr)
+	conn.SetSendAndAwaitOptions(10*time.Millisecond, 8)
+
+	_, err := conn.SendAndAwait(ctx, kerneldaemonbus.FrameTypeControlUpdateMembers, kerneldaemonbus.UpdateMembersBody{
+		ChannelID: channel.ID("ch-timeout"),
+	})
+	if !errors.Is(err, daemonbus.ErrSendAndAwaitTimeout) {
+		t.Fatalf("SendAndAwait err=%v want ErrSendAndAwaitTimeout", err)
+	}
+	if got := conn.PendingAwaitCount(); got != 0 {
+		t.Fatalf("pending count=%d want 0", got)
+	}
+}
+
+func TestSendAndAwait_PendingLimit(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svr, _ := newPipePair()
+	conn := daemonbus.NewConnection(placement.DaemonID("d-cap"), 1, svr)
+	conn.SetSendAndAwaitOptions(time.Second, 1)
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := conn.SendAndAwait(ctx, kerneldaemonbus.FrameTypeControlUpdateMembers, kerneldaemonbus.UpdateMembersBody{
+			ChannelID: channel.ID("ch-cap-1"),
+		})
+		errCh <- err
+	}()
+
+	deadline := time.After(time.Second)
+	for conn.PendingAwaitCount() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("first SendAndAwait never registered")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	_, err := conn.SendAndAwait(context.Background(), kerneldaemonbus.FrameTypeControlUpdateMembers, kerneldaemonbus.UpdateMembersBody{
+		ChannelID: channel.ID("ch-cap-2"),
+	})
+	if !errors.Is(err, daemonbus.ErrPendingAwaitLimitExceeded) {
+		t.Fatalf("SendAndAwait err=%v want ErrPendingAwaitLimitExceeded", err)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("first SendAndAwait err=%v want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first SendAndAwait did not exit after cancel")
 	}
 }
 

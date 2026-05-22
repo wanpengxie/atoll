@@ -1,6 +1,6 @@
 // unread.js — sidebar badge + cursor (last_consumed_seq) persistence.
 //
-// Authoritative spec: .dalek/pm/v4-layer3-spec.md §7.1 (未读 badge) +
+// Authoritative spec: .dalek/pm/impl-layer3.md §7.1 (未读 badge) +
 // §7.3 (通知规则 — visibility=system never counts).
 //
 // M1.6 demo persists cursor in localStorage. The spec mentions an

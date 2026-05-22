@@ -1,6 +1,6 @@
 // vite.config.js — front-end build for the coagent UI.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T7.
+// Authoritative spec: launch-ticket notes §T7.
 //
 // Layout:
 //   ui/index.html       — vite entry HTML (root)

@@ -182,11 +182,10 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 	return m.fail(ctx, env, "type_unsupported", fmt.Sprintf("feishu adapter does not handle %s", env.Type))
 }
 
-// OnExternalCallback is intentionally a no-op — feishu is outbound
-// only (M1.5 §T4 "不做" excludes inbound). Future inbound work will
-// fill this in.
+// OnExternalCallback is intentionally a no-op: the current feishu adapter
+// is outbound-only. Future inbound work will fill this in.
 func (m *Module) OnExternalCallback(_ context.Context, _ []byte) error {
 	m.logger.Warn("feishu.callback.dropped",
-		"note", "feishu adapter is outbound-only in M1.5")
+		"note", "feishu adapter is outbound-only in launch")
 	return nil
 }

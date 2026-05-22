@@ -166,6 +166,92 @@ func TestBoot_LoadLocal(t *testing.T) {
 	}
 }
 
+func TestBoot_LoadLocalQuarantinesCorruptChannelAndContinues(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	root := t.TempDir()
+	channelsDir := filepath.Join(root, "channels")
+
+	goodDir := filepath.Join(channelsDir, "ch-good")
+	if err := os.MkdirAll(goodDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	goodDB := filepath.Join(goodDir, "channel.sqlite")
+	db, err := store.OpenChannel(ctx, goodDB, store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := store.NewChannelLock(db)
+	if err := lock.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    "ch-good",
+		FencingToken: "tok-good", OwnerEpoch: 1,
+		DaemonID: "daemon-A", DaemonEpoch: 1,
+		AcquiredAt: now(), RefreshedAt: now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	badDir := filepath.Join(channelsDir, "ch-bad")
+	if err := os.MkdirAll(badDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	badDB := filepath.Join(badDir, "channel.sqlite")
+	if err := os.WriteFile(badDB, []byte("not sqlite"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var observed []lifecycle.QuarantinedChannel
+	opener := newLockOpener()
+	defer opener.Close()
+	boot, err := lifecycle.NewBootstrapper(lifecycle.BootConfig{
+		DaemonID:    "daemon-A",
+		DaemonEpoch: 42,
+		NowFn:       now,
+		ChannelsDir: channelsDir,
+		LockOpener:  opener.Open,
+		OnQuarantine: func(_ context.Context, q lifecycle.QuarantinedChannel) {
+			observed = append(observed, q)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	local, err := boot.LoadLocal(ctx)
+	if err != nil {
+		t.Fatalf("LoadLocal should continue past corrupt channel: %v", err)
+	}
+	if len(local) != 1 || local[0].ChannelID != "ch-good" {
+		t.Fatalf("local=%+v want only ch-good", local)
+	}
+	quarantined := boot.Quarantined()
+	if len(quarantined) != 1 || quarantined[0].ChannelID != "ch-bad" {
+		t.Fatalf("quarantined=%+v want ch-bad", quarantined)
+	}
+	if len(observed) != 1 || observed[0].ChannelID != "ch-bad" {
+		t.Fatalf("observed quarantine=%+v want ch-bad", observed)
+	}
+	if _, err := os.Stat(badDB + ".quarantine.json"); err != nil {
+		t.Fatalf("quarantine marker missing: %v", err)
+	}
+
+	res, err := boot.ReportHeldChannels(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.HeldAccepted) != 1 || res.HeldAccepted[0] != "ch-good" {
+		t.Fatalf("HeldAccepted=%v want ch-good", res.HeldAccepted)
+	}
+	if len(res.HeldRejected) != 1 || res.HeldRejected[0] != "ch-bad" {
+		t.Fatalf("HeldRejected=%v want ch-bad", res.HeldRejected)
+	}
+	if len(res.Quarantined) != 1 || res.Quarantined[0].ChannelID != "ch-bad" {
+		t.Fatalf("BootResult.Quarantined=%+v want ch-bad", res.Quarantined)
+	}
+}
+
 // TestBoot_LoadOne covers the M1.6-T0.1.1 hot-path entry point —
 // after saga.Bootstrap + channel_lock insert, LoadOne mounts the
 // channel into the bootstrapper's in-memory view, refreshes

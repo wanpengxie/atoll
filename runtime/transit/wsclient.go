@@ -41,6 +41,10 @@ const DefaultWSWriteTimeout = 10 * time.Second
 // daemon is quiescent between ticks).
 const DefaultWSIdleReadTimeout = 70 * time.Second
 
+// DefaultWSReadLimit caps a single inbound daemonbus frame at 4 MiB.
+// Larger frames are closed before JSON allocation/validation.
+const DefaultWSReadLimit int64 = 4 << 20
+
 // daemonWSSubprotocol mirrors server/daemonbus.DaemonWSSubprotocol — the
 // real subprotocol negotiated on the /daemonbus handshake. Duplicated
 // here as a constant rather than imported to keep runtime/transit free
@@ -245,6 +249,7 @@ func (c *WSClient) Connect(ctx context.Context) (daemonbus.ConnectionEpoch, erro
 			Msg("daemonbus dial failed")
 		return 0, fmt.Errorf("transit: dial %s: %w", u.String(), err)
 	}
+	conn.SetReadLimit(DefaultWSReadLimit)
 
 	// Read the server-issued connection_accepted frame to learn epoch.
 	deadline := time.Now().Add(c.cfg.HandshakeTimeout)

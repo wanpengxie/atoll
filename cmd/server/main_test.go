@@ -53,7 +53,7 @@ func TestServer_BootAndShutdown(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "server.db")
 
 	// `--allow-dev-secrets` mirrors the dev / CI gate so the boot path
-	// can run without injecting the 4 COAGENT_* env values (M1.5 FIX-T8
+	// can run without injecting the 4 COAGENT_* env values (launch FIX-T8
 	// fail-fast). M1.6-T7 phase-1 keeps the gate honest in prod by
 	// flipping gin into release mode when this flag is absent — the
 	// smoke test stays on the dev branch to avoid leaking secrets into

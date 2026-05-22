@@ -3,7 +3,7 @@
 // detection, the closed-interval Resync protocol, and the cursor +
 // messages tables defined by L1 §8 + T1.1 + T1.8.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T6 (viewcache) +
+// Authoritative spec: launch-ticket notes §T6 (viewcache) +
 // kernel/viewsync (Pusher / Receiver / Resyncer contracts).
 //
 // Concurrency model:
@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/pkg/requestctx"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
 )
 
@@ -43,7 +45,8 @@ type Resyncer interface {
 
 // Service is the viewcache facade.
 type Service struct {
-	db *sql.DB
+	db  *sql.DB
+	log *slog.Logger
 
 	mu      sync.Mutex
 	buffers map[channel.ID]*channelBuffer
@@ -81,8 +84,17 @@ const (
 func NewService(db *sql.DB) *Service {
 	return &Service{
 		db:      db,
+		log:     slog.Default().With("subsystem", "viewcache"),
 		buffers: map[channel.ID]*channelBuffer{},
 	}
+}
+
+// SetLogger overrides the structured logger. nil restores slog.Default.
+func (s *Service) SetLogger(log *slog.Logger) {
+	if log == nil {
+		log = slog.Default()
+	}
+	s.log = log.With("subsystem", "viewcache")
 }
 
 // SetResyncer plugs in the gap-recovery RPC client.
@@ -265,6 +277,12 @@ func (s *Service) Apply(ctx context.Context, frame viewsync.PushFrame) (viewsync
 		gapSince <= gapUntil &&
 		(s.fireResyncFn != nil || s.resyncer != nil) {
 		if since, until, ok := s.beginGapResync(frame.ChannelID, gapSince, gapUntil); ok {
+			s.log.Info("viewcache.gap_drain_started",
+				"request_id", requestctx.RequestID(ctx),
+				"channel_id", string(frame.ChannelID),
+				"since_seq", since,
+				"until_seq", until,
+				"trigger", "apply")
 			s.dispatchGapResync(frame.ChannelID, since, until)
 		}
 	}
@@ -282,7 +300,13 @@ func (s *Service) Apply(ctx context.Context, frame viewsync.PushFrame) (viewsync
 // will retry. Production path only; tests intercept via fireResyncFn.
 func (s *Service) fireResync(channelID channel.ID, since, until viewsync.Seq) {
 	defer s.finishGapResync(channelID, since, until)
-	_, _ = s.TriggerResync(context.Background(), channelID, since, until)
+	if _, err := s.TriggerResync(context.Background(), channelID, since, until); err != nil {
+		s.log.Warn("viewcache.gap_drain_failed",
+			"channel_id", string(channelID),
+			"since_seq", since,
+			"until_seq", until,
+			"error", err.Error())
+	}
 }
 
 func (s *Service) dispatchGapResync(channelID channel.ID, since, until viewsync.Seq) {
@@ -359,6 +383,10 @@ func (s *Service) finishGapResync(channelID channel.ID, completedSince, complete
 	if widenedSince == 0 || widenedUntil == 0 ||
 		(widenedSince >= completedSince && widenedUntil <= completedUntil) ||
 		(s.fireResyncFn == nil && s.resyncer == nil) {
+		s.log.Info("viewcache.gap_drain_finished",
+			"channel_id", string(channelID),
+			"since_seq", completedSince,
+			"until_seq", completedUntil)
 		return
 	}
 
@@ -371,9 +399,18 @@ func (s *Service) finishGapResync(channelID channel.ID, completedSince, complete
 		followSince, followUntil = maxSeq(widenedSince, completedUntil+1), widenedUntil
 	}
 	if followSince > followUntil {
+		s.log.Info("viewcache.gap_drain_finished",
+			"channel_id", string(channelID),
+			"since_seq", completedSince,
+			"until_seq", completedUntil)
 		return
 	}
 	if since, until, ok := s.startGapResync(channelID, followSince, followUntil, false); ok {
+		s.log.Info("viewcache.gap_drain_started",
+			"channel_id", string(channelID),
+			"since_seq", since,
+			"until_seq", until,
+			"trigger", "widened_followup")
 		s.dispatchGapResync(channelID, since, until)
 	}
 }
@@ -456,12 +493,25 @@ func (s *Service) RecoverGaps(ctx context.Context) error {
 		if !ok {
 			continue
 		}
+		s.log.Info("viewcache.gap_drain_started",
+			"request_id", requestctx.RequestID(ctx),
+			"channel_id", string(g.channelID),
+			"since_seq", since,
+			"until_seq", until,
+			"trigger", "recover_gaps")
 		switch {
 		case s.fireResyncFn != nil:
 			s.fireResyncFn(g.channelID, since, until)
 			s.finishGapResync(g.channelID, since, until)
 		case s.resyncer != nil:
 			if _, err := s.TriggerResync(ctx, g.channelID, since, until); err != nil {
+				s.log.Warn("viewcache.gap_drain_failed",
+					"request_id", requestctx.RequestID(ctx),
+					"channel_id", string(g.channelID),
+					"since_seq", since,
+					"until_seq", until,
+					"trigger", "recover_gaps",
+					"error", err.Error())
 				s.finishGapResync(g.channelID, since, until)
 				return err
 			}

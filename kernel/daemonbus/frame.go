@@ -12,7 +12,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
-// FrameType is the M1.5 closed set of daemonbus frame_type values. Per
+// FrameType is the launch closed set of daemonbus frame_type values. Per
 // impl-layer2 §1.2 there are three categories (viewsync.* / control.* /
 // device_transit.*) — each value is a string that matches the JSON
 // wire form 1:1.
@@ -176,6 +176,7 @@ type Frame struct {
 	FrameKind             FrameType          `json:"frame_kind"`
 	FrameID               FrameID            `json:"frame_id"`
 	CorrelationFrameID    FrameID            `json:"correlation_frame_id,omitempty"`
+	RequestID             string             `json:"request_id,omitempty"`
 	ChannelID             string             `json:"channel_id,omitempty"`
 	Ts                    int64              `json:"ts"`
 	Payload               json.RawMessage    `json:"payload"`
@@ -190,6 +191,7 @@ var HeaderFields = []string{
 	"frame_kind",
 	"frame_id",
 	"correlation_frame_id",
+	"request_id",
 	"channel_id",
 	"daemon_id",
 	"daemon_connection_epoch",

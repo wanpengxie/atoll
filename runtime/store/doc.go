@@ -1,7 +1,7 @@
 // Package store provides sqlite-backed implementations of kernel
 // channel-local interfaces.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T3 + L2 §1.4 schema.
+// Authoritative spec: launch-ticket notes §T3 + L2 §1.4 schema.
 //
 // Files:
 //

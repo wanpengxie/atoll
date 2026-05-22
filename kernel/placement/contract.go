@@ -16,7 +16,7 @@ import (
 )
 
 // State is the channel placement state per L2 §1.4.11.2 state machine
-// (M1.5 closed set: creating / active / orphan / stale).
+// (launch closed set: creating / active / orphan / stale).
 type State string
 
 const (
@@ -102,7 +102,7 @@ type UserID string
 func (u UserID) String() string { return string(u) }
 
 // TenantID is the multi-tenant scope identifier reserved per
-// .dalek/pm/m1.5-tickets.md §T10. M1.5 demo uses TenantID("") /
+// launch-ticket notes §T10. launch demo uses TenantID("") /
 // TenantID("default") and treats placements as a single shared pool;
 // M2+ SaaS deployments will scope placement selection / quota by
 // TenantID without changing the placement state machine.
@@ -113,12 +113,12 @@ func (t TenantID) String() string { return string(t) }
 
 // Placement mirrors the channel_placements row from L2 §1.4.11.1 plus
 // the three federation / tenancy columns reserved by
-// .dalek/pm/m1.5-tickets.md §T10 ("placements 表预留 federation 字段").
+// launch-ticket notes §T10 ("placements 表预留 federation 字段").
 //
 // HostActorID / FederatedOrigin / TenantID are zero-value ("") in
-// M1.5 demo deployments and stored as NULL in sqlite. Populating them
-// is M1.4 / federation / SaaS work and does NOT change the M1.5 state
-// machine — the columns are skipped by every M1.5 CAS / SELECT helper
+// launch demo deployments and stored as NULL in sqlite. Populating them
+// is M1.4 / federation / SaaS work and does NOT change the launch state
+// machine — the columns are skipped by every launch CAS / SELECT helper
 // that doesn't care about them.
 type Placement struct {
 	ChannelID             channel.ID
@@ -133,8 +133,8 @@ type Placement struct {
 	ActivatedAt           int64 // 0 until state advances to Active
 	EnteredStateAt        int64 // timestamp when State was last entered
 
-	// Federation / tenancy reservation columns per m1.5-tickets §T10.
-	// All three are "" / NULL in M1.5 demo deployments.
+	// Federation / tenancy reservation columns per launch-ticket notes §T10.
+	// All three are "" / NULL in launch demo deployments.
 	HostActorID     string   // M1.4 channel-as-actor: which channel-local actor exposes this channel externally
 	FederatedOrigin string   // M2+ federation: remote origin this channel mirrors (empty for native channels)
 	TenantID        TenantID // M2+ multi-tenant scope; "" / "default" in demo
@@ -371,9 +371,16 @@ type PlacementDiffAction string
 const (
 	PlacementDiffActionOK               PlacementDiffAction = "ok"
 	PlacementDiffActionReclaimPending   PlacementDiffAction = "reclaim_pending"
-	PlacementDiffActionUnbindPending    PlacementDiffAction = "unbind_pending"
 	PlacementDiffActionDirectoryMissing PlacementDiffAction = "directory_missing"
 )
+
+// AllPlacementDiffActions lists the v1 placement_diff action closed set in
+// wire order.
+var AllPlacementDiffActions = []PlacementDiffAction{
+	PlacementDiffActionOK,
+	PlacementDiffActionReclaimPending,
+	PlacementDiffActionDirectoryMissing,
+}
 
 // PlacementDiff is one server -> daemon heartbeat placement decision.
 type PlacementDiff struct {

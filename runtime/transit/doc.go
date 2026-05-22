@@ -1,7 +1,7 @@
 // Package transit is the daemon-side daemonbus client + view-sync push
 // engine.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T3 + L1 §8 (view sync)
+// Authoritative spec: launch-ticket notes §T3 + L1 §8 (view sync)
 // + L2 §9 (daemonbus mux frame) + L1 §11.7 (device transit).
 //
 // Files:

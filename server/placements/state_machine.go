@@ -14,8 +14,8 @@ func parseState(s string) placement.State {
 	return ""
 }
 
-// TenantDefault is the placeholder tenant id used by M1.5 demo
-// deployments per .dalek/pm/m1.5-tickets.md §T10 ("demo 期 = "" 或
+// TenantDefault is the placeholder tenant id used by launch demo
+// deployments per launch-ticket notes §T10 ("demo 期 = "" 或
 // "default""). Callers that don't care about multi-tenancy may write
 // the literal "" — both flow through nullableString to a NULL SQL
 // value. TenantDefault exists for callers that want an explicit,
@@ -23,13 +23,13 @@ func parseState(s string) placement.State {
 const TenantDefault placement.TenantID = "default"
 
 // ReserveOptions bundles the federation / tenancy / channel-as-actor
-// reservation fields that the M1.5 state machine threads through
-// Reserve → INSERT channel_placements per m1.5-tickets §T10. All
-// three fields default to "" → NULL in sqlite; M1.5 demo callers
+// reservation fields that the launch state machine threads through
+// Reserve → INSERT channel_placements per launch-ticket notes §T10. All
+// three fields default to "" → NULL in sqlite; launch demo callers
 // leave the struct at its zero value.
 //
 // Future M1.4 / federation / SaaS tickets populate one or more
-// fields; the M1.5 reserve / activate / reconcile paths ignore them.
+// fields; the launch reserve / activate / reconcile paths ignore them.
 type ReserveOptions struct {
 	// TenantID is the multi-tenant scope. "" / "default" in demo;
 	// M2+ SaaS deployments scope placement selection / quota by
@@ -39,12 +39,12 @@ type ReserveOptions struct {
 	// HostActorID is the channel-local actor id that this channel
 	// exposes externally for M1.4 channel-as-actor (m1.4-channel-as-
 	// actor-spec §10). Empty means the channel does not act as an
-	// addressable actor (M1.5 default).
+	// addressable actor (launch default).
 	HostActorID string
 
 	// FederatedOrigin is the remote origin (peer-server / region tag)
 	// this channel mirrors for M2+ federation. Empty means the channel
-	// is native, non-mirror (M1.5 default).
+	// is native, non-mirror (launch default).
 	FederatedOrigin string
 
 	// ChannelType is the L4 channel-template key (e.g. "xhs-creator")

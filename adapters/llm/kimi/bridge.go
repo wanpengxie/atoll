@@ -504,10 +504,10 @@ type turnState struct {
 //     TurnEnd.
 //
 // LLM streaming chunks are a transport-layer artifact and MUST NOT leak
-// into the v4 envelope layer (the One Law: business change = new
-// message; a chunk is not a business change). Per
-// v4-message-definition.md §single-response a request gets one final
-// response envelope; intermediate progress is the same `agent.text`
+// into the protocol envelope layer (the One Law: business change = new
+// message; a chunk is not a business change). Per proto-layer0
+// single-response semantics a request gets one final response envelope;
+// intermediate progress is the same `agent.text`
 // type carrying `visibility=system` per impl-vocabulary §2.3 (the
 // historical standalone `agent.progress` type was collapsed during
 // m1.3 freeze). Owner decision (M1.6): per-step progress + one

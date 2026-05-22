@@ -1,6 +1,6 @@
 // notify.js — browser Notification API for @ mentions + response landings.
 //
-// Authoritative spec: .dalek/pm/v4-layer3-spec.md §7.3 (通知规则).
+// Authoritative spec: .dalek/pm/impl-layer3.md §7.3 (通知规则).
 //
 // Triggers (after visibility guard, only when document is hidden):
 //   - kind=request, audience=[self], visibility=public → "有人问你"

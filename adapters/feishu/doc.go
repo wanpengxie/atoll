@@ -1,14 +1,14 @@
-// Package feishu is the M1.5 飞书 (Lark) outbound adapter. It runs as
+// Package feishu is the launch 飞书 (Lark) outbound adapter. It runs as
 // an in-process daemon actor (tool:feishu-adapter) with
 // Binding=runtime_outbound and handles every feishu.* request type by
 // calling the public Feishu OpenAPI on https://open.feishu.cn.
 //
-// Coverage (M1.5 baseline):
+// Coverage (launch baseline):
 //
 //   - feishu.chat.send   — POST /im/v1/messages (receive_id_type=chat_id)
 //   - feishu.chat.create — POST /im/v1/chats
 //
-// Inbound (Feishu events → channel) is out of scope for M1.5 per §T4
+// Inbound (Feishu events → channel) is out of scope for launch per §T4
 // "不做"; the adapter is outbound-only.
 //
 // Credential surface (read from framework.CredentialStore at Init):

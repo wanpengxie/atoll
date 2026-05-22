@@ -10,7 +10,7 @@
 // validates fencing_token + daemon_epoch before writing into
 // channel-local sqlite.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T3.
+// Authoritative spec: launch-ticket notes §T3.
 //
 // Files:
 //

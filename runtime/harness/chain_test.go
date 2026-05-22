@@ -3,11 +3,15 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -17,6 +21,146 @@ func chainCallerCtx(actorID actor.ActorID) context.Context {
 		ActorID:   actorID,
 		ChannelID: channel.ID("ch-1"),
 	})
+}
+
+func TestChain_PanicRecoveryReturnsError(t *testing.T) {
+	c, _, _, _ := newTestChain(t)
+	c.steps = []khar.Step{panicHarnessStep{}}
+	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"panic"}`))
+
+	res, err := c.Write(chainCallerCtx("agent:alpha"), env)
+	if err == nil {
+		t.Fatalf("Write err=nil result=%+v", res)
+	}
+	if !strings.Contains(err.Error(), "harness: panic") || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("panic error missing context: %v", err)
+	}
+}
+
+func TestChain_RejectObservabilityIncludesReasonAndCorrelation(t *testing.T) {
+	logger := &recordingHarnessLogger{}
+	metrics := newRecordingHarnessMetrics()
+	c, _, _, _ := newTestChain(t, func(d *Deps) {
+		d.Logger = logger
+		d.Metrics = metrics
+	})
+	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
+	env.CorrelationID = "corr-harness-1"
+	env.Kind = "bogus"
+
+	res, err := c.Write(chainCallerCtx("agent:alpha"), env)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if res.RejectReason != message.HarnessKindInvalid {
+		t.Fatalf("RejectReason=%s want %s", res.RejectReason, message.HarnessKindInvalid)
+	}
+	if got := metrics.counter("harness.reject", "reason", string(message.HarnessKindInvalid), "step", "envelope_shape"); got != 1 {
+		t.Fatalf("harness.reject counter=%d want 1", got)
+	}
+	if !logger.has("warn", "harness.write.reject", "reason", string(message.HarnessKindInvalid), "correlation_id", "corr-harness-1") {
+		t.Fatalf("missing reject log with reason + correlation_id: %+v", logger.lines())
+	}
+}
+
+type panicHarnessStep struct{}
+
+func (panicHarnessStep) ID() khar.StepID { return khar.StepCallerAuth }
+
+func (panicHarnessStep) Run(context.Context, *message.Envelope) (khar.Outcome, error) {
+	panic("boom")
+}
+
+type recordingHarnessLogger struct {
+	mu   sync.Mutex
+	logs []recordedHarnessLog
+}
+
+type recordedHarnessLog struct {
+	level string
+	msg   string
+	args  map[string]string
+}
+
+func (l *recordingHarnessLogger) Debug(msg string, args ...any) { l.record("debug", msg, args...) }
+func (l *recordingHarnessLogger) Warn(msg string, args ...any)  { l.record("warn", msg, args...) }
+func (l *recordingHarnessLogger) Error(msg string, args ...any) { l.record("error", msg, args...) }
+
+func (l *recordingHarnessLogger) record(level, msg string, args ...any) {
+	line := recordedHarnessLog{level: level, msg: msg, args: map[string]string{}}
+	for i := 0; i < len(args); i += 2 {
+		key := fmt.Sprint(args[i])
+		value := ""
+		if i+1 < len(args) {
+			value = fmt.Sprint(args[i+1])
+		}
+		line.args[key] = value
+	}
+	l.mu.Lock()
+	l.logs = append(l.logs, line)
+	l.mu.Unlock()
+}
+
+func (l *recordingHarnessLogger) has(level, msg string, fields ...string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, line := range l.logs {
+		if line.level != level || line.msg != msg {
+			continue
+		}
+		ok := true
+		for i := 0; i < len(fields); i += 2 {
+			if line.args[fields[i]] != fields[i+1] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *recordingHarnessLogger) lines() []recordedHarnessLog {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]recordedHarnessLog, len(l.logs))
+	copy(out, l.logs)
+	return out
+}
+
+type recordingHarnessMetrics struct {
+	mu       sync.Mutex
+	counters map[string]int64
+}
+
+func newRecordingHarnessMetrics() *recordingHarnessMetrics {
+	return &recordingHarnessMetrics{counters: map[string]int64{}}
+}
+
+func (m *recordingHarnessMetrics) IncCounter(name string, tags ...string) {
+	m.mu.Lock()
+	m.counters[metricKey(name, tags...)]++
+	m.mu.Unlock()
+}
+
+func (m *recordingHarnessMetrics) counter(name string, tags ...string) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.counters[metricKey(name, tags...)]
+}
+
+func metricKey(name string, tags ...string) string {
+	key := name
+	for i := 0; i < len(tags); i += 2 {
+		value := ""
+		if i+1 < len(tags) {
+			value = tags[i+1]
+		}
+		key += "|" + tags[i] + "=" + value
+	}
+	return key
 }
 
 // TestChain_Step1_MissingCaller covers Step 0/1 caller-principal reject

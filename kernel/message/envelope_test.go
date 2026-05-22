@@ -143,7 +143,7 @@ func TestAllEnumSets(t *testing.T) {
 //
 // Any drift on either side (Go struct adds a JSON field but spec table
 // doesn't, or spec exports a field but Go struct ignores it) trips the
-// test. This is the verification artifact called out by m1.5-tickets.md
+// test. This is the verification artifact called out by launch-ticket notes
 // §T1 acceptance criteria.
 func TestEnvelopeFieldSet1To1WithSpec(t *testing.T) {
 	t.Parallel()

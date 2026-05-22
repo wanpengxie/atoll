@@ -1,7 +1,8 @@
-// Package kernel is the protocol contract layer for coagent (M1.5+).
+// Package kernel is the protocol contract layer for coagent (launch+).
 //
 // It contains pure types, interfaces and pure functions that mirror the
-// v4 protocol spec (.dalek/pm/v4-layer{0,1,2,4}-spec.md). It owns no
+// current protocol specs (.dalek/pm/proto-layer*.md and impl-layer*.md).
+// It owns no
 // state, performs no IO, and depends on **no** external runtime libs
 // (no sqlite, no HTTP, no LLM SDK, no go-kimi).
 //
@@ -41,6 +42,6 @@
 //     daemonbus WS impl, etc.) live in runtime/ / server/ / adapters/
 //     and depend on kernel/, never the other way round.
 //
-// Spec cross-reference: .dalek/pm/m1.5-tickets.md §T1 (origin ticket
+// Spec cross-reference: launch-ticket notes §T1 (origin ticket
 // for the kernel layout) + §T2 (go-arch-lint enforce baseline).
 package kernel

@@ -112,7 +112,8 @@ func (s DeviceState) CanTransitionTo(next DeviceState) bool {
 //   - SessionID         server-allocated uuid (covers codex 必修 #5)
 //   - ChannelID         which channel this session is bound to
 //   - DeviceID          adapter-supplied device identifier (e.g. "xhs-chrome-default")
-//   - DeviceType        adapter family ("xhs", "feishu_mobile", …)
+//   - DeviceType        closed-set device client type
+//     ("xhs.chrome_extension", "xhs.mobile_webview", …)
 //   - State             T1.10 lifecycle state
 //   - BoundAt           ms epoch — daemon ACK time
 //   - LastActiveAt      ms epoch — last device WS observed activity (0 if never)

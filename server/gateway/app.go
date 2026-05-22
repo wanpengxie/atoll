@@ -3,7 +3,7 @@
 // into one gin Engine and runs the background reconcile / expire
 // sweeps.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T6.
+// Authoritative spec: launch-ticket notes §T6.
 package gateway
 
 import (
@@ -222,6 +222,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	// Wire viewcache → daemon resync via daemonbus.
 	app.daemonbus.SetChannelDaemonResolver(app.placements)
 	app.daemonbus.SetRegisterHook(app.retryRollbackIntentsForRegisteredDaemon)
+	app.daemonbus.SetUnregisterHook(app.handleDaemonDisconnect)
 	app.placements.SetReclaimHandler(app.reclaimPlacement)
 	app.viewcache.SetResyncer(&busResyncer{bus: app.daemonbus, viewcache: app.viewcache})
 	app.viewcache.SetAccessAuthorizer(app)
@@ -242,6 +243,11 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 
 // Close releases the database handle.
 func (a *App) Close() error {
+	if a.daemonbus != nil {
+		if err := a.daemonbus.Close(); err != nil {
+			return err
+		}
+	}
 	if a.closer != nil {
 		return a.closer()
 	}
@@ -261,6 +267,29 @@ func (a *App) Daemonbus() *daemonbus.Service   { return a.daemonbus }
 func (a *App) Devicebus() *devicebus.Service   { return a.devicebus }
 func (a *App) Pushhub() *pushhub.Service       { return a.pushhub }
 func (a *App) DB() *sql.DB                     { return a.db }
+
+func (a *App) handleDaemonDisconnect(conn *daemonbus.Connection) {
+	if conn == nil || a.placements == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	changed, err := a.placements.MarkDaemonStale(ctx, conn.DaemonID, "daemon_disconnect")
+	if err != nil {
+		pkgLogger.Warn().Err(err).
+			Str("event", "placement.daemon_disconnect_handoff_failed").
+			Str("daemon_id", string(conn.DaemonID)).
+			Msg("daemon disconnect handoff failed")
+		return
+	}
+	if len(changed) > 0 {
+		pkgLogger.Info().
+			Str("event", "placement.daemon_disconnect_handoff").
+			Str("daemon_id", string(conn.DaemonID)).
+			Int("channels", len(changed)).
+			Msg("daemon disconnect marked owned placements stale")
+	}
+}
 
 // AuthorizeChannelAccess implements devicebus.AccessAuthorizer using the
 // catalog membership table.

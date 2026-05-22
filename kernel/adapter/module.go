@@ -66,7 +66,7 @@ type Declaration struct {
 	// every type (install logs a warning so the gap is observable).
 	TypeDeclarations map[string]TypeDeclaration
 
-	// Binding is the M1.5 tri-class transport for this adapter (L1 §11.7).
+	// Binding is the launch tri-class transport for this adapter (L1 §11.7).
 	// Determines which framework helpers run (in-process dispatch /
 	// outbound HTTP / runtime_inbound_via_relay + DeviceTransit).
 	Binding actor.Binding
@@ -101,7 +101,7 @@ type Module interface {
 	Init(ctx context.Context, mctx *ModuleContext) error
 
 	// Shutdown cancels in-flight work + releases external connections.
-	// M1.5 baseline: best-effort, invoked from Manager.Shutdown only.
+	// launch baseline: best-effort, invoked from Manager.Shutdown only.
 	Shutdown(ctx context.Context) error
 
 	// Handle translates one inbound kind=request envelope into outbound

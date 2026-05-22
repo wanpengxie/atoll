@@ -4,7 +4,7 @@
 // stdout, NO SMTP) and the auth middleware that pulls user_id from the
 // cookie for downstream handlers.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T6 (identity 子目录) +
+// Authoritative spec: launch-ticket notes §T6 (identity 子目录) +
 // server-side sqlite schema 精简 (users / verification_codes / sessions).
 //
 // Production constraints:

@@ -1,4 +1,4 @@
-// Package framework provides the concrete M1.5 adapter framework that
+// Package framework provides the concrete launch adapter framework that
 // implements the contracts declared in kernel/adapter:
 //
 //   - F2 CorrelationTracker — request_id ↔ state lifecycle store.

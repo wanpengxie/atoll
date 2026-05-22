@@ -132,7 +132,7 @@ func TestSessionValidate(t *testing.T) {
 		ChannelID:        "channel-1",
 		AdapterActorID:   "tool:xhs-adapter",
 		DeviceID:         "device-1",
-		DeviceType:       "xhs",
+		DeviceType:       "xhs.chrome_extension",
 		State:            StateReady,
 		BoundAt:          1000,
 		TokenFingerprint: "abc",
@@ -196,7 +196,7 @@ func TestInMemoryStoreUpsertGet(t *testing.T) {
 		ChannelID:      "channel-1",
 		AdapterActorID: "tool:xhs-adapter",
 		DeviceID:       "device-1",
-		DeviceType:     "xhs",
+		DeviceType:     "xhs.chrome_extension",
 		State:          StatePending,
 	}
 	if err := store.Upsert(ctx, sess); err != nil {
@@ -232,7 +232,7 @@ func TestInMemoryStoreSetState(t *testing.T) {
 	store := NewInMemorySessionStore()
 	id := devicetransit.DeviceSessionID("sess-1")
 	mustUpsert(t, store, DeviceSession{
-		SessionID: id, ChannelID: "c", AdapterActorID: "tool:xhs-adapter", DeviceID: "d", DeviceType: "xhs",
+		SessionID: id, ChannelID: "c", AdapterActorID: "tool:xhs-adapter", DeviceID: "d", DeviceType: "xhs.chrome_extension",
 		State: StatePending,
 	})
 	mustState(t, store, id, StateReady, 100)
@@ -244,7 +244,7 @@ func TestInMemoryStoreSetState(t *testing.T) {
 	store2 := NewInMemorySessionStore()
 	idleID := devicetransit.DeviceSessionID("sess-2")
 	mustUpsert(t, store2, DeviceSession{
-		SessionID: idleID, ChannelID: "c", AdapterActorID: "tool:xhs-adapter", DeviceID: "d", DeviceType: "xhs",
+		SessionID: idleID, ChannelID: "c", AdapterActorID: "tool:xhs-adapter", DeviceID: "d", DeviceType: "xhs.chrome_extension",
 		State: StatePending,
 	})
 	if err := store2.SetState(ctx, idleID, StateActive, 0); err == nil {
@@ -262,15 +262,15 @@ func TestInMemoryStoreListByChannel(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 	mustUpsert(t, store, DeviceSession{
-		SessionID: "a", ChannelID: "c1", AdapterActorID: "tool:xhs-adapter", DeviceID: "d", DeviceType: "xhs",
+		SessionID: "a", ChannelID: "c1", AdapterActorID: "tool:xhs-adapter", DeviceID: "d", DeviceType: "xhs.chrome_extension",
 		State: StateReady,
 	})
 	mustUpsert(t, store, DeviceSession{
-		SessionID: "b", ChannelID: "c1", AdapterActorID: "tool:xhs-adapter", DeviceID: "d2", DeviceType: "xhs",
+		SessionID: "b", ChannelID: "c1", AdapterActorID: "tool:xhs-adapter", DeviceID: "d2", DeviceType: "xhs.chrome_extension",
 		State: StateReady,
 	})
 	mustUpsert(t, store, DeviceSession{
-		SessionID: "c", ChannelID: "c2", AdapterActorID: "tool:xhs-adapter", DeviceID: "d3", DeviceType: "xhs",
+		SessionID: "c", ChannelID: "c2", AdapterActorID: "tool:xhs-adapter", DeviceID: "d3", DeviceType: "xhs.chrome_extension",
 		State: StateReady,
 	})
 	rows, err := store.ListByChannel(ctx, "c1")
@@ -287,7 +287,7 @@ func TestInMemoryStoreDelete(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemorySessionStore()
 	mustUpsert(t, store, DeviceSession{
-		SessionID: "a", ChannelID: "c", AdapterActorID: "tool:xhs-adapter", DeviceID: "d", DeviceType: "xhs",
+		SessionID: "a", ChannelID: "c", AdapterActorID: "tool:xhs-adapter", DeviceID: "d", DeviceType: "xhs.chrome_extension",
 		State: StateReady,
 	})
 	if err := store.Delete(ctx, "a"); err != nil {

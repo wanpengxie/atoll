@@ -14,6 +14,7 @@ import (
 
 	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
+	"github.com/wanpengxie/ActOS/pkg/requestctx"
 )
 
 // DefaultDeviceWSWriteTimeout caps a single device-side WS write.
@@ -33,6 +34,10 @@ const DefaultDevicePingCadence = 30 * time.Second
 // ping cadence absorbs one missed pong without false-positive
 // teardown.
 const DefaultDeviceIdleReadTimeout = 70 * time.Second
+
+// DefaultDeviceWSReadLimit caps a single inbound devicebus frame at 4 MiB.
+// Larger frames are closed before JSON allocation/validation.
+const DefaultDeviceWSReadLimit int64 = 4 << 20
 
 // DefaultDevicePingWriteTimeout caps a single ping write; on failure
 // the conn is closed and the read loop unwedges.
@@ -230,11 +235,15 @@ const deviceWSTokenPrefix = "token."
 //   - Header: Sec-WebSocket-Protocol: coagent.device.v1, token.<token>
 //
 // The server parses the offered subprotocols, extracts the token from
-// the `token.<token>` slot, validates (session_id, token), and on
-// success upgrades — selecting `coagent.device.v1` as the negotiated
-// subprotocol via the Upgrader (RFC 6455 requires the server to echo
-// the chosen subprotocol in the handshake response). The `token.*`
-// slot is deliberately NOT echoed back.
+// the `token.<token>` slot, validates (session_id, token), and on success
+// upgrades. The durable session states accepted for this handshake are
+// ready, active, and offline: ready is the first connect, active is a
+// duplicate connect that replaces the previous live socket, and offline is
+// reconnect after a drop. Pending and terminal states reject with
+// session_not_ready / token_expired / session_revoked. The Upgrader selects
+// `coagent.device.v1` as the negotiated subprotocol (RFC 6455 requires the
+// server to echo the chosen subprotocol in the handshake response). The
+// `token.*` slot is deliberately NOT echoed back.
 func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sessionID := c.Query("session_id")
@@ -269,6 +278,7 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 		if err != nil {
 			return
 		}
+		ws.SetReadLimit(DefaultDeviceWSReadLimit)
 		tx := newWSDeviceTransport(ws)
 		cadence := s.cfg.PingCadence
 		if cadence <= 0 {
@@ -384,14 +394,80 @@ func (s *Service) checkOrigin(r *http.Request) bool {
 
 // SendFrameToDevice is invoked by the gateway when a daemon-pushed
 // `device_transit.recv` frame arrives (impl-layer2 §5.3.2 outbound —
-// adapter → device) — looks up the local device connection and
-// forwards.
+// adapter → device) — looks up the local device connection, rechecks the
+// durable session state/time, and forwards only for a still-active session.
 func (s *Service) SendFrameToDevice(ctx context.Context, sessionID string, frame DeviceFrame) error {
 	s.mu.Lock()
 	conn, ok := s.sessions[sessionID]
 	s.mu.Unlock()
 	if !ok {
+		s.log.Warn("devicebus.outbound_rejected",
+			"reason", "session_not_found",
+			"request_id", requestctx.RequestID(ctx),
+			"device_session_id", sessionID,
+		)
 		return ErrSessionNotFound
+	}
+	row, err := s.Get(ctx, sessionID)
+	if err != nil {
+		s.closeCurrentConnection(sessionID)
+		s.log.Warn("devicebus.outbound_rejected",
+			"reason", "session_lookup_failed",
+			"request_id", requestctx.RequestID(ctx),
+			"device_session_id", sessionID,
+			"error", err.Error(),
+		)
+		return err
+	}
+	now := s.nowMs()
+	if now > row.ExpiresAt {
+		if err := s.expireSessionIfDue(ctx, sessionID, now); err != nil {
+			return err
+		}
+		s.closeCurrentConnection(sessionID)
+		s.log.Warn("devicebus.outbound_rejected",
+			"reason", "expired",
+			"request_id", requestctx.RequestID(ctx),
+			"device_session_id", sessionID,
+			"channel_id", string(row.ChannelID),
+			"device_id", row.DeviceID,
+			"expires_at", row.ExpiresAt,
+		)
+		return ErrSessionExpired
+	}
+	switch row.State {
+	case StateActive:
+	case StateExpired:
+		s.closeCurrentConnection(sessionID)
+		s.log.Warn("devicebus.outbound_rejected",
+			"reason", "expired_state",
+			"request_id", requestctx.RequestID(ctx),
+			"device_session_id", sessionID,
+			"channel_id", string(row.ChannelID),
+			"device_id", row.DeviceID,
+		)
+		return ErrSessionExpired
+	case StateRevoked:
+		s.closeCurrentConnection(sessionID)
+		s.log.Warn("devicebus.outbound_rejected",
+			"reason", "revoked",
+			"request_id", requestctx.RequestID(ctx),
+			"device_session_id", sessionID,
+			"channel_id", string(row.ChannelID),
+			"device_id", row.DeviceID,
+		)
+		return ErrSessionRevoked
+	default:
+		s.closeCurrentConnection(sessionID)
+		s.log.Warn("devicebus.outbound_rejected",
+			"reason", "not_active",
+			"request_id", requestctx.RequestID(ctx),
+			"device_session_id", sessionID,
+			"channel_id", string(row.ChannelID),
+			"device_id", row.DeviceID,
+			"state", string(row.State),
+		)
+		return ErrSessionNotReady
 	}
 	return conn.SendToDevice(ctx, frame)
 }

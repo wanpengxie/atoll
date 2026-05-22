@@ -815,7 +815,7 @@ func TestDevicebusSessionAccessRequiresOwnerOrChannelMembership(t *testing.T) {
 	aliceID := userIDByEmail(t, app, "alice-device-owner@example.com")
 
 	res, err := app.Devicebus().IssueSession(context.Background(), devicebus.IssueInput{
-		DeviceID: "dev-alice", ChannelID: channel.ID(alice.channelID), UserID: aliceID, DaemonID: "d1",
+		DeviceID: "dev-alice", DeviceType: "xhs.chrome_extension", ChannelID: channel.ID(alice.channelID), UserID: aliceID, DaemonID: "d1",
 	})
 	if err != nil {
 		t.Fatalf("IssueSession: %v", err)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/pkg/requestctx"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
@@ -344,6 +346,129 @@ func TestWriteMessageHandler_HarnessError(t *testing.T) {
 	}
 }
 
+func TestWriteMessageHandler_RejectObservabilityIncludesReasonAndCorrelation(t *testing.T) {
+	logger := &recordingTransitLogger{}
+	metrics := newRecordingTransitMetrics()
+	h, err := transit.NewWriteMessageHandler(transit.WriteMessageHandlerConfig{
+		Secret:       []byte(testWriteSecret),
+		Router:       routerFor(&stubChain{}, newStubRegistry()),
+		NowMs:        func() int64 { return 10_000 },
+		ReplayWindow: defaultWriteReplayWindow,
+		Logger:       logger,
+		Metrics:      metrics,
+	})
+	if err != nil {
+		t.Fatalf("NewWriteMessageHandler: %v", err)
+	}
+	body := newWriteMessageBody(t, nil, 9_900)
+	body.FrameID = "frame-observe"
+	body.EnvelopePartial.CorrelationID = "corr-transit-1"
+	body.HumanCaller.ServerToken = "bad-token"
+
+	ack := h.Handle(context.Background(), body)
+	if ack.Accepted || ack.RejectReason != transit.RejectReasonAuthFailed {
+		t.Fatalf("ack=%+v want auth_failed reject", ack)
+	}
+	if got := metrics.counter("write_message.reject", "reason", transit.RejectReasonAuthFailed); got != 1 {
+		t.Fatalf("write_message.reject counter=%d want 1", got)
+	}
+	if !logger.has("warn", "write_message.reject", "reason", transit.RejectReasonAuthFailed, "correlation_id", "corr-transit-1") {
+		t.Fatalf("missing reject log with reason + correlation_id: %+v", logger.lines())
+	}
+}
+
+type recordingTransitLogger struct {
+	mu   sync.Mutex
+	logs []recordedTransitLog
+}
+
+type recordedTransitLog struct {
+	level string
+	msg   string
+	args  map[string]string
+}
+
+func (l *recordingTransitLogger) Debug(msg string, args ...any) { l.record("debug", msg, args...) }
+func (l *recordingTransitLogger) Warn(msg string, args ...any)  { l.record("warn", msg, args...) }
+func (l *recordingTransitLogger) Error(msg string, args ...any) { l.record("error", msg, args...) }
+
+func (l *recordingTransitLogger) record(level, msg string, args ...any) {
+	line := recordedTransitLog{level: level, msg: msg, args: map[string]string{}}
+	for i := 0; i < len(args); i += 2 {
+		key := fmt.Sprint(args[i])
+		value := ""
+		if i+1 < len(args) {
+			value = fmt.Sprint(args[i+1])
+		}
+		line.args[key] = value
+	}
+	l.mu.Lock()
+	l.logs = append(l.logs, line)
+	l.mu.Unlock()
+}
+
+func (l *recordingTransitLogger) has(level, msg string, fields ...string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, line := range l.logs {
+		if line.level != level || line.msg != msg {
+			continue
+		}
+		ok := true
+		for i := 0; i < len(fields); i += 2 {
+			if line.args[fields[i]] != fields[i+1] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *recordingTransitLogger) lines() []recordedTransitLog {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]recordedTransitLog, len(l.logs))
+	copy(out, l.logs)
+	return out
+}
+
+type recordingTransitMetrics struct {
+	mu       sync.Mutex
+	counters map[string]int64
+}
+
+func newRecordingTransitMetrics() *recordingTransitMetrics {
+	return &recordingTransitMetrics{counters: map[string]int64{}}
+}
+
+func (m *recordingTransitMetrics) IncCounter(name string, tags ...string) {
+	m.mu.Lock()
+	m.counters[transitMetricKey(name, tags...)]++
+	m.mu.Unlock()
+}
+
+func (m *recordingTransitMetrics) counter(name string, tags ...string) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.counters[transitMetricKey(name, tags...)]
+}
+
+func transitMetricKey(name string, tags ...string) string {
+	key := name
+	for i := 0; i < len(tags); i += 2 {
+		value := ""
+		if i+1 < len(tags) {
+			value = tags[i+1]
+		}
+		key += "|" + tags[i] + "=" + value
+	}
+	return key
+}
+
 // --- Dispatcher integration ---------------------------------------------
 
 // TestDispatcher_WriteMessageRoundTrip verifies the dispatcher decodes a
@@ -375,6 +500,13 @@ func TestDispatcher_WriteMessageRoundTrip(t *testing.T) {
 		FrameID: atomicFrameID(),
 		Handlers: transit.ControlHandlers{
 			OnWriteMessage: func(ctx context.Context, _ daemonbus.Frame, body transit.WriteMessageBody) transit.WriteMessageAckBody {
+				if got := requestctx.RequestID(ctx); got != "req-http-1" {
+					return transit.WriteMessageAckBody{
+						FrameID:      body.FrameID,
+						RejectReason: transit.RejectReasonInternal,
+						RejectDetail: "request_id not propagated: " + got,
+					}
+				}
 				return h.Handle(ctx, body)
 			},
 		},
@@ -401,6 +533,7 @@ func TestDispatcher_WriteMessageRoundTrip(t *testing.T) {
 	reqFrame, _ := transit.Encode("frame-srv-1",
 		daemonbus.FrameTypeControlWriteMessage,
 		"server", client.Epoch(), 0, body)
+	reqFrame.RequestID = "req-http-1"
 	if err := server.SendToDaemon(ctx, reqFrame); err != nil {
 		t.Fatal(err)
 	}
@@ -435,6 +568,9 @@ func TestDispatcher_WriteMessageRoundTrip(t *testing.T) {
 	if ack.FrameID != body.FrameID {
 		t.Errorf("ack.FrameID=%q want %q", ack.FrameID, body.FrameID)
 	}
+	if ackFrame.RequestID != "req-http-1" {
+		t.Errorf("ackFrame.RequestID=%q want req-http-1", ackFrame.RequestID)
+	}
 	if ack.MessageID == "" {
 		t.Error("ack.MessageID empty")
 	}
@@ -450,17 +586,69 @@ func TestDispatcher_WriteMessageRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDispatcher_WriteMessagePanicReturnsRejectedAck(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	bus := transit.NewMockBus(64)
+	defer func() { _ = bus.Close() }()
+	client, err := transit.NewClient(transit.ClientConfig{
+		DaemonID: "daemon-A", Transport: bus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := transit.NewDispatcher(transit.DispatcherConfig{
+		Client:  client,
+		FrameID: atomicFrameID(),
+		Handlers: transit.ControlHandlers{
+			OnWriteMessage: func(context.Context, daemonbus.Frame, transit.WriteMessageBody) transit.WriteMessageAckBody {
+				panic("write panic")
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := newWriteMessageBody(t, nil, 10_100)
+	frame, _ := transit.Encode("frame-panic",
+		daemonbus.FrameTypeControlWriteMessage,
+		"server", client.Epoch(), 0, body)
+	if err := dispatcher.Dispatch(ctx, frame); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	ackFrame, err := bus.ServerSide().RecvFromDaemon(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ack transit.WriteMessageAckBody
+	if err := transit.DecodePayload(ackFrame, &ack); err != nil {
+		t.Fatal(err)
+	}
+	if ack.Accepted || ack.RejectReason != transit.RejectReasonInternal {
+		t.Fatalf("ack=%+v want internal reject", ack)
+	}
+	if ack.FrameID != body.FrameID {
+		t.Fatalf("ack.FrameID=%q want %q", ack.FrameID, body.FrameID)
+	}
+}
+
 // TestDispatcher_AckEnvelopeFrameIDEchoesInbound is the explicit
 // regression for the 2026-05-18 daemonbus ack-pairing bug: every ack
-// path on the daemon side (write_message_ack / bind_device_session_ack
-// / unbind_device_session_ack / viewsync.resync_response /
-// create_channel_ack / unbind_channel_ack) MUST emit an envelope
+// path on the daemon side (write_message_ack / update_members_ack /
+// bind_device_session_ack / unbind_device_session_ack /
+// viewsync.resync_response / create_channel_ack / unbind_channel_ack)
+// MUST emit an envelope
 // frame_id that equals the inbound envelope frame_id, otherwise
 // server/daemonbus.Connection.SendAndAwait can never pair the ack
 // against its pending entry and the gateway HTTP request times out
 // (cloudflare 524 in production).
 //
-// Covers the four SendAndAwait-bound paths through Dispatcher; the
+// Covers the five SendAndAwait-bound paths through Dispatcher; the
 // daemon.go-owned create_channel_ack / unbind_channel_ack paths are
 // not routed through Dispatcher and are exercised by their own tests.
 func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
@@ -486,6 +674,7 @@ func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
 
 	bindCalled := false
 	unbindCalled := false
+	updateCalled := false
 	resyncCalled := false
 	dispatcher, err := transit.NewDispatcher(transit.DispatcherConfig{
 		Client:  client,
@@ -511,6 +700,14 @@ func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
 					ChannelID:       body.ChannelID,
 					DeviceSessionID: body.DeviceSessionID,
 					Result:          daemonbus.DeviceSessionBindAccepted,
+				}
+			},
+			OnUpdateMembers: func(_ context.Context, _ daemonbus.Frame, body transit.UpdateMembersBody) transit.UpdateMembersAckBody {
+				updateCalled = true
+				return transit.UpdateMembersAckBody{
+					FrameID:   body.FrameID,
+					ChannelID: body.ChannelID,
+					Accepted:  true,
 				}
 			},
 			OnViewsyncResyncRequest: func(_ context.Context, _ viewsync.ResyncRequest) (viewsync.ResyncResponse, error) {
@@ -625,11 +822,45 @@ func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
 		}
 	}
 
-	// --- Case D: viewsync.resync_request ---
+	// --- Case D: control.update_members ---
 	caseDFrameID := "envelope-from-server-D"
 	{
-		req := viewsync.ResyncRequest{ChannelID: "ch-1", SinceSeq: 1, UntilSeq: 5}
+		updateBody := transit.UpdateMembersBody{
+			FrameID:   "body-frame-D",
+			ChannelID: "ch-D",
+			Adds: []daemonbus.UpdateMember{{
+				UserID:        "user-D",
+				MemberActorID: "user:member-D",
+				Kind:          actor.KindHuman,
+			}},
+		}
 		reqFrame, _ := transit.Encode(caseDFrameID,
+			daemonbus.FrameTypeControlUpdateMembers,
+			"server", client.Epoch(), 0, updateBody)
+		if err := server.SendToDaemon(ctx, reqFrame); err != nil {
+			t.Fatal(err)
+		}
+		ackFrame, err := server.RecvFromDaemon(ctx)
+		if err != nil {
+			t.Fatalf("update_members ack recv: %v", err)
+		}
+		if ackFrame.FrameKind != daemonbus.FrameTypeControlUpdateMembersAck {
+			t.Fatalf("update_members ack type=%s", ackFrame.FrameKind)
+		}
+		if ackFrame.FrameID != daemonbus.FrameID(caseDFrameID) {
+			t.Errorf("update_members_ack envelope frame_id=%q want %q",
+				ackFrame.FrameID, caseDFrameID)
+		}
+		if !updateCalled {
+			t.Error("OnUpdateMembers not invoked")
+		}
+	}
+
+	// --- Case E: viewsync.resync_request ---
+	caseEFrameID := "envelope-from-server-E"
+	{
+		req := viewsync.ResyncRequest{ChannelID: "ch-1", SinceSeq: 1, UntilSeq: 5}
+		reqFrame, _ := transit.Encode(caseEFrameID,
 			daemonbus.FrameTypeViewsyncResyncRequest,
 			"server", client.Epoch(), 0, req)
 		if err := server.SendToDaemon(ctx, reqFrame); err != nil {
@@ -642,9 +873,9 @@ func TestDispatcher_AckEnvelopeFrameIDEchoesInbound(t *testing.T) {
 		if ackFrame.FrameKind != daemonbus.FrameTypeViewsyncResyncResponse {
 			t.Fatalf("resync resp type=%s", ackFrame.FrameKind)
 		}
-		if ackFrame.FrameID != daemonbus.FrameID(caseDFrameID) {
+		if ackFrame.FrameID != daemonbus.FrameID(caseEFrameID) {
 			t.Errorf("viewsync.resync_response envelope frame_id=%q want %q",
-				ackFrame.FrameID, caseDFrameID)
+				ackFrame.FrameID, caseEFrameID)
 		}
 		if !resyncCalled {
 			t.Error("OnViewsyncResyncRequest not invoked")

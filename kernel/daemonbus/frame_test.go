@@ -10,7 +10,7 @@ import (
 )
 
 // TestFrameTypeClosedSetCardinality asserts the impl-layer2 §1.2 closed-set
-// cardinality. M1.5 = 4 viewsync + 21 control + 3 device_transit = 28.
+// cardinality. launch = 4 viewsync + 21 control + 3 device_transit = 28.
 //
 // Exact values (in spec order) checked by TestAllFrameTypesSpecOrder.
 func TestFrameTypeClosedSetCardinality(t *testing.T) {
@@ -169,14 +169,14 @@ func TestUnbindChannelPayloadABI(t *testing.T) {
 }
 
 // TestFrameHeaderFieldSet locks the impl-layer2 §1.3 daemonbus mux
-// outer envelope field set: 7 named header keys + 1 payload. The 7
+// outer envelope field set: 8 named header keys + 1 payload. The 8
 // names match HeaderFields.
 //
 // Spec-canonical fields (impl-layer2 §1.3): frame_kind / frame_id /
-// correlation_frame_id / channel_id / daemon_id /
+// correlation_frame_id / request_id / channel_id / daemon_id /
 // daemon_connection_epoch / ts / payload.
 //
-// This is the verification artifact called out by m1.5-tickets.md §T1
+// This is the verification artifact called out by launch-ticket notes §T1
 // acceptance criteria — "所有 frame_kind 字段集".
 func TestFrameHeaderFieldSet(t *testing.T) {
 	t.Parallel()
@@ -185,6 +185,7 @@ func TestFrameHeaderFieldSet(t *testing.T) {
 		FrameKind:             FrameTypeControlCreateChannel,
 		FrameID:               "f-1",
 		CorrelationFrameID:    "f-0",
+		RequestID:             "req-1",
 		ChannelID:             "ch-1",
 		DaemonID:              placement.DaemonID("daemon-1"),
 		DaemonConnectionEpoch: 42,
@@ -219,10 +220,10 @@ func TestFrameHeaderFieldSet(t *testing.T) {
 		}
 	}
 
-	// HeaderFields cardinality (7) is part of impl-layer2 §1.3 contract
+	// HeaderFields cardinality (8) is part of impl-layer2 §1.3 contract
 	// — guard against drift on the spec-side enumeration.
-	if len(HeaderFields) != 7 {
-		t.Errorf("HeaderFields len = %d, want 7", len(HeaderFields))
+	if len(HeaderFields) != 8 {
+		t.Errorf("HeaderFields len = %d, want 8", len(HeaderFields))
 	}
 }
 

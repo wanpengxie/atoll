@@ -21,7 +21,7 @@ func TestSQLiteSessionStorePersistsAcrossReopen(t *testing.T) {
 		ChannelID:        "ch-1",
 		AdapterActorID:   "tool:xhs-adapter",
 		DeviceID:         "dev-1",
-		DeviceType:       "xhs",
+		DeviceType:       "xhs.chrome_extension",
 		State:            deviceframework.StateReady,
 		BoundAt:          100,
 		TokenFingerprint: "abc",

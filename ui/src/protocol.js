@@ -1,7 +1,7 @@
 // protocol.js — v4 envelope closed enums + visibility/kind predicates.
 //
-// Authoritative spec: .dalek/pm/v4-layer0-spec.md §2 (envelope) +
-// .dalek/pm/v4-layer3-spec.md §2-§9 (chat-as-UI render matrix).
+// Authoritative spec: .dalek/pm/proto-layer0.md §2 (envelope) +
+// .dalek/pm/impl-layer3.md §2-§9 (chat-as-UI render matrix).
 //
 // All renderer / unread / notify modules import constants and predicates
 // from this single file so the spec's closed sets stay in one place. Drift

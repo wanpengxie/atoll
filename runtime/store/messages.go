@@ -32,7 +32,7 @@ import (
 //     UNIQUE INDEX violation per L2 §1.4.1).
 //  3. INSERT the view_sync_outbox row keyed by seq (drives daemon push).
 //
-// IsTerminal computation is **simplified** for M1.5 T3: response rows
+// IsTerminal computation is **simplified** for launch T3: response rows
 // with non-empty parent_id are treated terminal by default (L2 §1.4.1
 // `payload_status` convention) unless the row's type_registry entry
 // declares `single-response` — which the harness step 8 has already

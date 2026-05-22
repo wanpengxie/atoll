@@ -1,17 +1,17 @@
-# Top-level Makefile — M1.5 工程纪律入口
+# Top-level Makefile — launch 工程纪律入口
 #
-# Spec: .dalek/pm/m1.5-tickets.md §T8
+# Spec: launch-ticket notes §T8
 # 顶层 target 与 §15.1 对齐：install / build / build-go / build-ui / build-ext /
 # test / lint / migrate / dev / clean
 #
 # 容错策略：对未到位的目录 / 配置 / 命令做 graceful skip（打印 `[skip] …`
-# 并继续）。M1.5 之后单栈：build-go / lint 只面向根 module
+# 并继续）。launch 之后单栈：build-go / lint 只面向根 module
 # （cmd/{server,daemon,worker,cli}），不存在第二个 go module。
 
 SHELL := /usr/bin/env bash
 
 .PHONY: install build build-go build-ui build-ext extension-zip test lint migrate dev clean \
-        lint-go lint-arch lint-banned-words lint-kernel-protocol lint-docs \
+        lint-go lint-arch lint-banned-words lint-protocol-refs lint-kernel-protocol lint-docs \
         fmt-check e2e-smoke
 
 # v5 Go 二进制（cmd/<bin>/main.go 由 T6/T7 落地）。
@@ -27,7 +27,7 @@ install:
 	pnpm install
 	@echo "[install] go install lint / migrate tools"
 	@# fail-fast: if a required tool cannot install, exit non-zero so CI can
-	@# enforce the gate. M1.5-T8 acceptance: silent [warn] fallbacks were
+	@# enforce the gate. launch-T8 acceptance: silent [warn] fallbacks were
 	@# letting the lint gate pass even when tools were missing.
 	@command -v golangci-lint >/dev/null 2>&1 || \
 	  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
@@ -110,10 +110,11 @@ test:
 #   2) golangci-lint        Go 代码风格 / 静态检查
 #   3) go-arch-lint         component-level import 边界（T2 提供 .go-arch-lint.yml）
 #   4) banned-words         分层文本扫描（CODE_DIRS / ACTIVE_SPEC 严格 + 历史 grandfather）
-#   5) 协议合规             kernel/ Go test（T1 提供 envelope_test / kind_test / reason_test / contract_test）
-#   6) 文档 lint            .dalek/pm 文档交叉引用路径校验
+#   5) stale protocol refs  禁止代码注释继续引用已迁移协议文件
+#   6) 协议合规             kernel/ Go test（T1 提供 envelope_test / kind_test / reason_test / contract_test）
+#   7) 文档 lint            .dalek/pm 文档交叉引用路径校验
 # ----------------------------------------------------------------------------
-lint: fmt-check lint-go lint-arch lint-banned-words lint-kernel-protocol lint-docs
+lint: fmt-check lint-go lint-arch lint-banned-words lint-protocol-refs lint-kernel-protocol lint-docs
 
 # fmt-check — gofmt diff guard. Refuse to ship unformatted Go.
 # Fails fast (exit 1) when gofmt -l reports any file.
@@ -132,7 +133,7 @@ fmt-check:
 
 lint-go:
 	@# 范围：lint-go 覆盖根模块（kernel/ runtime/ adapters/ server/ cmd/ pkg/）。
-	@# M1.5 单栈：只有一个 go module，不会有第二个 go module。
+	@# launch 单栈：只有一个 go module，不会有第二个 go module。
 	@# fail-fast: tool 缺失直接 exit 1，让 CI gate 能 enforce（不再 [skip]）。
 	@if [ ! -f go.mod ]; then \
 	  echo "[lint-go] root go.mod absent" >&2; \
@@ -163,6 +164,10 @@ lint-arch:
 lint-banned-words:
 	@echo "[lint-banned-words] scripts/lint-banned-words.sh"
 	@bash scripts/lint-banned-words.sh
+
+lint-protocol-refs:
+	@echo "[lint-protocol-refs] scripts/lint-protocol-refs.sh"
+	@bash scripts/lint-protocol-refs.sh
 
 lint-kernel-protocol:
 	@if [ -d kernel ] && [ -f go.mod ]; then \

@@ -16,6 +16,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/pkg/requestctx"
 )
 
 // HumanCaller is the wire object the server attaches to
@@ -162,7 +163,39 @@ type WriteMessageHandlerConfig struct {
 	// AllowReplayWindowDisabled is a test/dev-only escape hatch. Production
 	// callers must leave this false so ReplayWindow<=0 fails fast.
 	AllowReplayWindowDisabled bool
+
+	// Logger receives daemon-edge write_message reject diagnostics. nil →
+	// NoopLogger.
+	Logger Logger
+
+	// Metrics receives daemon-edge write_message reject counters. nil →
+	// NoopMetrics.
+	Metrics Metrics
 }
+
+// Logger is the minimal structured logger used by write_message handling.
+type Logger interface {
+	Debug(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}
+
+// NoopLogger drops every log call.
+type NoopLogger struct{}
+
+func (NoopLogger) Debug(string, ...any) {}
+func (NoopLogger) Warn(string, ...any)  {}
+func (NoopLogger) Error(string, ...any) {}
+
+// Metrics is the minimal counter seam used by write_message handling.
+type Metrics interface {
+	IncCounter(name string, tags ...string)
+}
+
+// NoopMetrics drops every metric call.
+type NoopMetrics struct{}
+
+func (NoopMetrics) IncCounter(string, ...string) {}
 
 // WriteMessageHandler is the daemon-side implementation of
 // `control.write_message`. It exposes a single Handle method that the
@@ -189,6 +222,12 @@ func NewWriteMessageHandler(cfg WriteMessageHandlerConfig) (*WriteMessageHandler
 	if cfg.NowMs == nil {
 		cfg.NowMs = func() int64 { return time.Now().UnixMilli() }
 	}
+	if cfg.Logger == nil {
+		cfg.Logger = NoopLogger{}
+	}
+	if cfg.Metrics == nil {
+		cfg.Metrics = NoopMetrics{}
+	}
 	if cfg.ReplayWindow <= 0 {
 		if !cfg.AllowReplayWindowDisabled {
 			return nil, errors.New("transit: WriteMessageHandlerConfig.ReplayWindow must be > 0")
@@ -212,9 +251,7 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 	ack := WriteMessageAckBody{FrameID: body.FrameID}
 
 	if body.ChannelID == "" {
-		ack.RejectReason = RejectReasonInternal
-		ack.RejectDetail = "channel_id empty"
-		return ack
+		return h.reject(ctx, body, ack, RejectReasonInternal, "channel_id empty")
 	}
 
 	// 1. HMAC verify — constant-time.
@@ -226,9 +263,7 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 		body.HumanCaller.Nonce,
 	)
 	if !hmac.Equal([]byte(expect), []byte(body.HumanCaller.ServerToken)) {
-		ack.RejectReason = RejectReasonAuthFailed
-		ack.RejectDetail = "human_caller token mismatch"
-		return ack
+		return h.reject(ctx, body, ack, RejectReasonAuthFailed, "human_caller token mismatch")
 	}
 
 	// 2. Optional replay-window check. FIX-T8: split clock-skew rejects
@@ -242,17 +277,13 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 			delta = -delta
 		}
 		if time.Duration(delta)*time.Millisecond > h.cfg.ReplayWindow {
-			ack.RejectReason = RejectReasonReplayWindow
-			ack.RejectDetail = "human_caller ts outside replay window"
-			return ack
+			return h.reject(ctx, body, ack, RejectReasonReplayWindow, "human_caller ts outside replay window")
 		}
 		// Per-channel nonce LRU — reject re-use of the same nonce
 		// within one window. The cache is keyed by (channelID, nonce)
 		// and TTL-expires entries lazily.
 		if !h.nonceCache.observe(string(body.ChannelID), body.HumanCaller.Nonce, nowMs) {
-			ack.RejectReason = RejectReasonReplayNonce
-			ack.RejectDetail = "human_caller nonce already seen within replay window"
-			return ack
+			return h.reject(ctx, body, ack, RejectReasonReplayNonce, "human_caller nonce already seen within replay window")
 		}
 	}
 
@@ -260,28 +291,20 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 	chID := body.ChannelID
 	chain, registry, stamp, ok := h.cfg.Router(ctx, chID)
 	if !ok {
-		ack.RejectReason = RejectReasonChannelUnbound
-		ack.RejectDetail = fmt.Sprintf("channel %s not owned by this daemon", body.ChannelID)
-		return ack
+		return h.reject(ctx, body, ack, RejectReasonChannelUnbound, fmt.Sprintf("channel %s not owned by this daemon", body.ChannelID))
 	}
 
 	// 4. Verify the claimed actor exists + is active.
 	actorID := body.HumanCaller.MemberActorID
 	if actorID == "" {
-		ack.RejectReason = RejectReasonAuthFailed
-		ack.RejectDetail = "human_caller member_actor_id empty"
-		return ack
+		return h.reject(ctx, body, ack, RejectReasonAuthFailed, "human_caller member_actor_id empty")
 	}
 	rec, exists, err := registry.Lookup(ctx, actorID)
 	if err != nil {
-		ack.RejectReason = RejectReasonInternal
-		ack.RejectDetail = "actor lookup: " + err.Error()
-		return ack
+		return h.reject(ctx, body, ack, RejectReasonInternal, "actor lookup: "+err.Error())
 	}
 	if !exists || !rec.IsActive() {
-		ack.RejectReason = RejectReasonAuthFailed
-		ack.RejectDetail = "member_actor_id unknown or deregistered"
-		return ack
+		return h.reject(ctx, body, ack, RejectReasonAuthFailed, "member_actor_id unknown or deregistered")
 	}
 
 	// 5. Stamp `sender` from the registry record + force channel_id /
@@ -314,9 +337,7 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 	// invariant local rather than silently allowing the harness to
 	// fail Step 2 with a less specific reason.
 	if env.ID == "" {
-		ack.RejectReason = RejectReasonAuthFailed
-		ack.RejectDetail = "envelope.id empty — caller MUST supply id per L3 §1.8.1"
-		return ack
+		return h.reject(ctx, body, ack, RejectReasonAuthFailed, "envelope.id empty — caller MUST supply id per L3 §1.8.1")
 	}
 
 	// 7. Invoke the harness chain — caller_context provides the
@@ -327,26 +348,39 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 	}
 	res, err := chain.Write(chainCtx, &env)
 	if err != nil {
-		ack.RejectReason = RejectReasonInternal
-		ack.RejectDetail = "harness write: " + err.Error()
 		ack.MessageID = env.ID
-		return ack
+		return h.reject(ctx, body, ack, RejectReasonInternal, "harness write: "+err.Error())
 	}
 	ack.MessageID = res.MessageID
 	if ack.MessageID == "" {
 		ack.MessageID = env.ID
 	}
 	if !res.Accepted() {
-		ack.RejectReason = res.RejectReason
-		ack.RejectDetail = res.RejectDetail
 		if res.PartialMessageID != "" {
 			ack.MessageID = res.PartialMessageID
 		}
-		return ack
+		return h.reject(ctx, body, ack, res.RejectReason, res.RejectDetail)
 	}
 	ack.Accepted = true
 	ack.Seq = res.Seq
 	ack.Deduped = res.Deduped
+	return ack
+}
+
+func (h *WriteMessageHandler) reject(ctx context.Context, body WriteMessageBody, ack WriteMessageAckBody, reason, detail string) WriteMessageAckBody {
+	ack.RejectReason = reason
+	ack.RejectDetail = detail
+	h.cfg.Metrics.IncCounter("write_message.reject", "reason", reason)
+	h.cfg.Logger.Warn("write_message.reject",
+		"reason", reason,
+		"detail", detail,
+		"frame_id", string(body.FrameID),
+		"channel_id", string(body.ChannelID),
+		"message_id", string(ack.MessageID),
+		"correlation_id", string(body.EnvelopePartial.CorrelationID),
+		"request_id", requestctx.RequestID(ctx),
+		"member_actor_id", string(body.HumanCaller.MemberActorID),
+	)
 	return ack
 }
 

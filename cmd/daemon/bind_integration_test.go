@@ -73,7 +73,7 @@ func TestIntegration_BindDeviceSession_RoundTrip(t *testing.T) {
 		DeviceSessionID:  sessionID,
 		ChannelID:        channel.ID("ch-X"),
 		DeviceID:         "dev-1",
-		DeviceType:       "xhs",
+		DeviceType:       "xhs.chrome_extension",
 		DaemonID:         "daemon-bind-integ",
 		TokenFingerprint: "1234567890abcdef",
 		ExpiresAt:        90_000,

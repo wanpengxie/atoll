@@ -3,7 +3,7 @@
 // Resyncer interfaces that runtime/transit (daemon side) and
 // server/viewcache (server side) implement.
 //
-// Authoritative spec: L1 §8 (M1.5 view sync complete state machine —
+// Authoritative spec: L1 §8 (launch view sync complete state machine —
 // outbox + cursor + ack + gap + resync).
 package viewsync
 

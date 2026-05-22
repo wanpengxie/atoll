@@ -4,12 +4,12 @@ package channel
 // deployments leave OrgID empty (single-org); M2+ federation populates
 // it to express cross-org channel mirrors.
 //
-// Carved out as a kernel/ type to satisfy m1.5-tickets §T10 ("M1.5 完成
+// Carved out as a kernel/ type to satisfy launch-ticket notes §T10 ("launch 完成
 // 时确保后续 federation / SaaS 平滑加, 不需要重写"). The protocol layer
 // can refer to a channel via Ref without forcing single-org semantics
 // onto every downstream caller.
 type Ref struct {
-	OrgID string // empty in single-org deployments (M1.5 demo)
+	OrgID string // empty in single-org deployments (launch demo)
 	ID    ID
 }
 

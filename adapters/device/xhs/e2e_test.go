@@ -1,6 +1,6 @@
 package xhs_test
 
-// End-to-end harness for the xhs adapter on top of the M1.5
+// End-to-end harness for the xhs adapter on top of the launch
 // runtime_inbound_via_relay binding (T5 acceptance).
 //
 // Scope:
@@ -369,7 +369,7 @@ func (h *harness) seedActiveSession(t *testing.T, sid string) devicetransit.Devi
 		ChannelID:      h.channelID,
 		AdapterActorID: testAdapterActor,
 		DeviceID:       "device-" + sid,
-		DeviceType:     "xhs",
+		DeviceType:     "xhs.chrome_extension",
 		State:          framework.StatePending,
 		BoundAt:        1_000_000,
 	}); err != nil {

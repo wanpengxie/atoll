@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -51,6 +52,33 @@ func newE2EChain(t *testing.T, db *sql.DB, channelID channel.ID, workerActor act
 }
 
 func now() int64 { return time.Now().UnixMilli() }
+
+func TestExecSpawnerCheckReady(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "worker")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&workerhost.ExecSpawner{BinaryPath: bin}).CheckReady(ctx); err != nil {
+		t.Fatalf("CheckReady executable: %v", err)
+	}
+
+	noExec := filepath.Join(dir, "worker-noexec")
+	if err := os.WriteFile(noExec, []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&workerhost.ExecSpawner{BinaryPath: noExec}).CheckReady(ctx); err == nil || !strings.Contains(err.Error(), "not executable") {
+		t.Fatalf("CheckReady noexec err=%v want not executable", err)
+	}
+
+	missing := filepath.Join(dir, "missing")
+	if err := (&workerhost.ExecSpawner{BinaryPath: missing}).CheckReady(ctx); err == nil {
+		t.Fatal("CheckReady missing binary succeeded")
+	}
+}
 
 // TestLeaseAcquireRelease verifies the worker_locks CAS Acquire + sweep.
 func TestLeaseAcquireRelease(t *testing.T) {

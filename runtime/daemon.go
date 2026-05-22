@@ -24,6 +24,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/pkg/metrics"
 	"github.com/wanpengxie/ActOS/runtime/bootstrap"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/lifecycle"
@@ -83,6 +84,10 @@ type DaemonConfig struct {
 	// runtime/daemon_test relies on the counter probe to assert
 	// trigger fan-out without paying the spawn cost.
 	WorkerSpawner workerhost.Spawner
+
+	// WorkerReadinessPeriod controls the periodic worker prerequisite check
+	// for spawners that implement workerhost.ReadinessChecker. Defaults to 30s.
+	WorkerReadinessPeriod time.Duration
 
 	// PostBoot is invoked once phase 4 starts. May be nil. Used by
 	// tests to inspect state without racing with shutdown.
@@ -152,6 +157,13 @@ type DaemonConfig struct {
 	// path (generic group channels) so cmd/daemon can register both
 	// `""` and `"xhs-creator"` in one map without losing the fallback.
 	ChannelTemplates map[string]ChannelTemplate
+
+	// ShutdownDrainTimeout bounds graceful shutdown's drain phase. During
+	// that phase the daemon stops accepting new write_message frames,
+	// waits for in-flight write handlers, emits one final long-pending
+	// fallback scan, then unloads owned channels before closing the bus.
+	// Defaults to 5s.
+	ShutdownDrainTimeout time.Duration
 }
 
 // DeviceSessionInfo is the runtime-package projection of one device
@@ -187,7 +199,7 @@ type ChannelTemplate struct {
 	// WorkdirSubdirs lists relative directory paths the bootstrap saga
 	// mkdirs inside <ChannelsDir>/<channelID>/ during step 5c. The
 	// xhs-creator template ships ["published-notes", "drafts", "assets"]
-	// per v4-layer4-spec §2.5. Entries are treated as path components
+	// per domain-xhs-spec §2.5. Entries are treated as path components
 	// joined with channelDir; "../" or absolute escapes are rejected.
 	WorkdirSubdirs []string
 
@@ -439,6 +451,10 @@ type Daemon struct {
 	runCancel context.CancelFunc
 	wg        sync.WaitGroup
 
+	drainMu        sync.Mutex
+	draining       atomic.Bool
+	inflightWrites sync.WaitGroup
+
 	// owned-channels barrier — phase 3 closes this once per-channel
 	// seams are wired so OnWriteMessage can return channel_unbound for
 	// any frame that arrives before bootstrap completes.
@@ -495,11 +511,22 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 	if cfg.SchedulerPeriod <= 0 {
 		cfg.SchedulerPeriod = time.Second
 	}
+	if cfg.WorkerReadinessPeriod <= 0 {
+		cfg.WorkerReadinessPeriod = 30 * time.Second
+	}
 	if cfg.ReconnectInitialBackoff <= 0 {
 		cfg.ReconnectInitialBackoff = time.Second
 	}
 	if cfg.ReconnectMaxBackoff <= 0 {
 		cfg.ReconnectMaxBackoff = 30 * time.Second
+	}
+	if cfg.ShutdownDrainTimeout <= 0 {
+		cfg.ShutdownDrainTimeout = 5 * time.Second
+	}
+	if checker, ok := cfg.WorkerSpawner.(workerhost.ReadinessChecker); ok {
+		if err := checker.CheckReady(ctx); err != nil {
+			return nil, fmt.Errorf("runtime: worker readiness: %w", err)
+		}
 	}
 	if !cfg.UseMockBus && cfg.WSConfig == nil {
 		return nil, errors.New("runtime: DaemonConfig.WSConfig required when UseMockBus=false")
@@ -563,6 +590,16 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 		NowFn:       cfg.NowFn,
 		ChannelsDir: cfg.ChannelsDir,
 		LockOpener:  openLock,
+		OnQuarantine: func(_ context.Context, q lifecycle.QuarantinedChannel) {
+			log.Error().
+				Str("event", "runtime.channel_quarantined").
+				Str("channel_id", string(q.ChannelID)).
+				Str("sqlite_path", q.SQLitePath).
+				Str("reason", q.Reason).
+				Int64("quarantined_at", q.QuarantinedAt).
+				Msg("channel sqlite quarantined during warm start")
+			metrics.Default().IncCounter("runtime.channel.quarantined", "channel_id", string(q.ChannelID))
+		},
 		// EmitHeldChannelsReport left nil — the offline path treats all
 		// locally-owned channels as still ours.
 	})
@@ -693,6 +730,7 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 		NowMs:                     d.cfg.NowFn,
 		ReplayWindow:              d.cfg.ReplayWindow,
 		AllowReplayWindowDisabled: d.cfg.AllowReplayWindowDisabled,
+		Logger:                    daemonKVLogger{log: &d.log},
 	})
 	switch {
 	case err == nil:
@@ -757,6 +795,14 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 	}
 	if handler != nil {
 		handlers.OnWriteMessage = func(ctx context.Context, _ daemonbus.Frame, body transit.WriteMessageBody) transit.WriteMessageAckBody {
+			if !d.beginWrite() {
+				return transit.WriteMessageAckBody{
+					FrameID:      body.FrameID,
+					RejectReason: transit.RejectReasonChannelUnbound,
+					RejectDetail: "daemon is shutting down",
+				}
+			}
+			defer d.endWrite()
 			return handler.Handle(ctx, body)
 		}
 	}
@@ -786,7 +832,7 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 		d.runDispatcherSupervised(d.runCtx, dispatcher)
 	}()
 
-	// 3.3 — long-pending scheduler. M1.5 has no concrete fallback path;
+	// 3.3 — long-pending scheduler. launch has no concrete fallback path;
 	// the scan callback iterates per-channel hooks (currently a no-op
 	// until trigger gateway / T3 fills in the fallback emit). The
 	// goroutine still ticks so cmd/daemon proves graceful shutdown.
@@ -838,7 +884,51 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 	}()
 
 	d.ready.Store(true)
+	d.startWorkerReadinessMonitor()
 	return nil
+}
+
+func (d *Daemon) startWorkerReadinessMonitor() {
+	checker, ok := d.cfg.WorkerSpawner.(workerhost.ReadinessChecker)
+	if !ok {
+		return
+	}
+	period := d.cfg.WorkerReadinessPeriod
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		ticker := time.NewTicker(period)
+		defer ticker.Stop()
+		ready := true
+		for {
+			select {
+			case <-d.runCtx.Done():
+				return
+			case <-ticker.C:
+				if err := checker.CheckReady(d.runCtx); err != nil {
+					d.ready.Store(false)
+					metrics.Default().IncCounter("runtime.worker.readiness", "result", "failed")
+					if ready {
+						d.log.Error().Err(err).
+							Str("event", "runtime.worker_readiness_failed").
+							Msg("worker readiness check failed")
+					}
+					ready = false
+					continue
+				}
+				metrics.Default().IncCounter("runtime.worker.readiness", "result", "ok")
+				if !ready {
+					d.log.Info().
+						Str("event", "runtime.worker_readiness_restored").
+						Msg("worker readiness check restored")
+				}
+				ready = true
+				if !d.draining.Load() {
+					d.ready.Store(true)
+				}
+			}
+		}
+	}()
 }
 
 // runDispatcherSupervised drives transit.Dispatcher.Loop and, on
@@ -1081,7 +1171,8 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 			Token: lc.Lock.FencingToken,
 			Epoch: lc.Lock.DaemonEpoch,
 		},
-		NowMs: d.cfg.NowFn,
+		NowMs:  d.cfg.NowFn,
+		Logger: daemonKVLogger{log: &d.log},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("harness for %s: %w", lc.ChannelID, err)
@@ -1639,6 +1730,65 @@ func (d *Daemon) startChannelPusherFor(id channel.ID) {
 		return
 	}
 	d.startChannelPusher(cr)
+}
+
+func (d *Daemon) beginWrite() bool {
+	d.drainMu.Lock()
+	defer d.drainMu.Unlock()
+	if d.draining.Load() || !d.ready.Load() {
+		return false
+	}
+	d.inflightWrites.Add(1)
+	return true
+}
+
+func (d *Daemon) endWrite() {
+	d.inflightWrites.Done()
+}
+
+func (d *Daemon) waitForInflightWrites(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		d.inflightWrites.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (d *Daemon) drainForShutdown(ctx context.Context) {
+	d.draining.Store(true)
+	d.ready.Store(false)
+	d.drainMu.Lock()
+	d.drainMu.Unlock()
+
+	if err := d.waitForInflightWrites(ctx); err != nil {
+		d.log.Warn().Err(err).
+			Str("event", "runtime.shutdown_drain_timeout").
+			Msg("timed out waiting for in-flight write handlers")
+	}
+	if err := ctx.Err(); err == nil {
+		if err := d.scanLongPending(ctx, d.cfg.NowFn()); err != nil {
+			d.log.Warn().Err(err).
+				Str("event", "runtime.shutdown_fallback_scan_failed").
+				Msg("final long-pending fallback scan failed during shutdown")
+		}
+	}
+	for _, cr := range d.snapshotChannelRuntimes() {
+		if cr.wrappedChain != nil {
+			cr.wrappedChain.Freeze("daemon_shutdown")
+		}
+		if err := d.unloader.Unload(ctx, cr.channelID, lifecycle.UnloadShutdown); err != nil {
+			d.log.Warn().Err(err).
+				Str("event", "runtime.shutdown_unload_failed").
+				Str("channel_id", string(cr.channelID)).
+				Msg("failed to unload channel during shutdown")
+		}
+	}
 }
 
 // handleCreateChannel is the OnCreateChannel handler — T0.1. It is the
@@ -2326,10 +2476,6 @@ func (d *Daemon) handleHeartbeatAck(ctx context.Context, frame daemonbus.Frame) 
 			continue
 		case placement.PlacementDiffActionReclaimPending:
 			d.freezeChannel(ctx, diff.ChannelID, string(diff.Action))
-		case placement.PlacementDiffActionUnbindPending:
-			if d.HasChannel(diff.ChannelID) {
-				_ = d.unloader.Unload(ctx, diff.ChannelID, lifecycle.UnloadUnbindPending)
-			}
 		case placement.PlacementDiffActionDirectoryMissing:
 			if d.HasChannel(diff.ChannelID) {
 				_ = d.unloader.Unload(ctx, diff.ChannelID, lifecycle.UnloadDirectoryMissing)
@@ -2404,6 +2550,9 @@ func (d *Daemon) openChannelDB(ctx context.Context, sqlitePath string) (*sql.DB,
 // — dedupe / deferred / reject paths skip dispatch so we honor
 // at-least-once-by-message.id (§6.2).
 func (d *Daemon) routeWrite(_ context.Context, ch channel.ID) (transit.HarnessChain, actorreg.Registry, transit.CallerStamper, bool) {
+	if d.draining.Load() || !d.ready.Load() {
+		return nil, nil, nil, false
+	}
 	cr, ok := d.getChannel(ch)
 	if !ok {
 		return nil, nil, nil, false
@@ -2913,9 +3062,61 @@ func (d *Daemon) OpenChannelLock(ctx context.Context, sqlitePath string) (*store
 	return store.NewChannelLock(db), nil
 }
 
-// Close cancels phase-3 goroutines and releases all open sqlite
-// handles + the transit bus.
+type daemonKVLogger struct{ log *zerolog.Logger }
+
+func (l daemonKVLogger) Debug(msg string, args ...any) {
+	if l.log == nil {
+		return
+	}
+	zerologEventFromArgs(l.log.Debug(), args...).Msg(msg)
+}
+
+func (l daemonKVLogger) Warn(msg string, args ...any) {
+	if l.log == nil {
+		return
+	}
+	zerologEventFromArgs(l.log.Warn(), args...).Msg(msg)
+}
+
+func (l daemonKVLogger) Error(msg string, args ...any) {
+	if l.log == nil {
+		return
+	}
+	zerologEventFromArgs(l.log.Error(), args...).Msg(msg)
+}
+
+func zerologEventFromArgs(e *zerolog.Event, args ...any) *zerolog.Event {
+	for i := 0; i < len(args); i += 2 {
+		key := fmt.Sprint(args[i])
+		var value any
+		if i+1 < len(args) {
+			value = args[i+1]
+		}
+		switch v := value.(type) {
+		case string:
+			e = e.Str(key, v)
+		case int:
+			e = e.Int(key, v)
+		case int64:
+			e = e.Int64(key, v)
+		case bool:
+			e = e.Bool(key, v)
+		case error:
+			e = e.Err(v)
+		default:
+			e = e.Interface(key, v)
+		}
+	}
+	return e
+}
+
+// Close runs the bounded shutdown coordinator, cancels phase-3 goroutines,
+// and releases all open sqlite handles + the transit bus.
 func (d *Daemon) Close() error {
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), d.cfg.ShutdownDrainTimeout)
+	d.drainForShutdown(drainCtx)
+	drainCancel()
+
 	if d.runCancel != nil {
 		d.runCancel()
 	}

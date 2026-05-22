@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/pkg/metrics"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/store"
 	"github.com/wanpengxie/ActOS/runtime/transit"
@@ -321,6 +323,23 @@ func TestIntegration_XhsPublish_HappyPath(t *testing.T) {
 	}
 	if !resp.IsTerminal {
 		t.Error("response not marked terminal")
+	}
+}
+
+func TestAdapterFrameworkMetricsWired(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	d, srv, _ := startIntegrationDaemon(t, ctx, integDaemonOpts{})
+	defer func() { _ = d.Close() }()
+
+	createChannel(t, ctx, d, srv, "ch-integ-metrics", []placement.InitialMember{
+		{MemberActorID: "user:alice", Kind: "human", DisplayName: "Alice"},
+	})
+
+	out := metrics.Default().RenderPrometheus()
+	if !strings.Contains(out, "adapter_install_ok") || !strings.Contains(out, `adapter="xhs-scaffold"`) {
+		t.Fatalf("adapter framework metrics were not exported:\n%s", out)
 	}
 }
 

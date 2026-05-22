@@ -1,7 +1,7 @@
 // Package ipc defines the daemon ↔ worker IPC protocol — the length-
 // prefixed JSON wire format both sides speak.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T3 (worker IPC protocol).
+// Authoritative spec: launch-ticket notes §T3 (worker IPC protocol).
 //
 // Both runtime/workerhost (daemon side) and runtime/worker (worker
 // subprocess side) import this package. It is deliberately small: only
@@ -161,7 +161,7 @@ type ReplyPayload struct {
 // TriggerPayload is the daemon → worker push body for KindTrigger
 // frames. Carries one fully-resolved envelope (already through harness
 // chain) plus the correlation_id the worker MUST propagate when
-// emitting downstream envelopes (per v4-layer1-spec correlation
+// emitting downstream envelopes (per proto-layer1 correlation
 // propagation rules) and the channel cursor at the time the envelope
 // was dispatched (the worker bridge uses this to align its read view
 // against the channel log).

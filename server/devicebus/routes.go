@@ -11,6 +11,7 @@ import (
 	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
+	serverdaemonbus "github.com/wanpengxie/ActOS/server/daemonbus"
 	"github.com/wanpengxie/ActOS/server/httperr"
 	"github.com/wanpengxie/ActOS/server/identity"
 )
@@ -55,6 +56,13 @@ func (s *Service) handleIssue(c *gin.Context) {
 		DaemonID:   placement.DaemonID(req.DaemonID),
 	})
 	if err != nil {
+		if errors.Is(err, ErrDeviceTypeUnsupported) {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{
+				"error":         err.Error(),
+				"reject_reason": "device_type_invalid",
+			})
+			return
+		}
 		if errors.Is(err, ErrSessionLimitExceeded) {
 			c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
 			return
@@ -77,7 +85,16 @@ func (s *Service) handleIssue(c *gin.Context) {
 			Session: res.Session,
 			Reason:  "bind_failed",
 		})
-		c.JSON(http.StatusBadGateway, gin.H{
+		status := http.StatusBadGateway
+		switch {
+		case errors.Is(bindErr, serverdaemonbus.ErrPendingAwaitLimitExceeded):
+			status = http.StatusTooManyRequests
+		case errors.Is(bindErr, serverdaemonbus.ErrSendAndAwaitTimeout):
+			status = http.StatusGatewayTimeout
+		case errors.Is(bindErr, serverdaemonbus.ErrConnectionClosed):
+			status = http.StatusServiceUnavailable
+		}
+		c.JSON(status, gin.H{
 			"error":             "bind_device_session_failed",
 			"device_session_id": res.Session.ID,
 		})

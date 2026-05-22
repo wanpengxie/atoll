@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lint-docs.sh — documentation cross-reference checker
 #
-# spec: .dalek/pm/m1.5-tickets.md §T8 #5 (5) 文档 lint
+# spec: launch-ticket notes §T8 #5 (5) 文档 lint
 #
 # 校验范围：当前现役文档（.dalek/pm/*.md 顶层，不含 archive/ 和 reviews/）
 #   1) 任意 ".dalek/pm/<file>.md" 路径引用必须真实存在

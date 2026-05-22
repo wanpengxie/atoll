@@ -27,7 +27,7 @@ func TestDeviceSessionBinder_BindUpsertsRow(t *testing.T) {
 		DeviceSessionID:  devicetransit.DeviceSessionID("sess-A"),
 		ChannelID:        channel.ID("ch-X"),
 		DeviceID:         "dev-1",
-		DeviceType:       "xhs",
+		DeviceType:       "xhs.chrome_extension",
 		DaemonID:         "daemon-A",
 		TokenFingerprint: "abc123def4567890",
 		ExpiresAt:        50_000,
@@ -80,7 +80,7 @@ func TestDeviceSessionBinder_BindIdempotent(t *testing.T) {
 		DeviceSessionID: devicetransit.DeviceSessionID("sess-A"),
 		ChannelID:       channel.ID("ch-X"),
 		DeviceID:        "dev-1",
-		DeviceType:      "xhs",
+		DeviceType:      "xhs.chrome_extension",
 	}
 	if ack := binder.OnBind(context.Background(), body); ack.Result != daemonbus.DeviceSessionBindAccepted {
 		t.Fatalf("first OnBind: %+v", ack)
@@ -108,7 +108,7 @@ func TestDeviceSessionBinder_BindRejectReasons(t *testing.T) {
 		DeviceSessionID: "sess-A",
 		ChannelID:       "ch-X",
 		DeviceID:        "dev-1",
-		DeviceType:      "xhs",
+		DeviceType:      "xhs.chrome_extension",
 	}
 	cases := []struct {
 		name   string
@@ -160,7 +160,7 @@ func TestDeviceSessionBinder_UnbindDeletesRow(t *testing.T) {
 		DeviceSessionID: devicetransit.DeviceSessionID("sess-A"),
 		ChannelID:       channel.ID("ch-X"),
 		DeviceID:        "dev-1",
-		DeviceType:      "xhs",
+		DeviceType:      "xhs.chrome_extension",
 	}
 	if ack := binder.OnBind(context.Background(), bind); ack.Result != daemonbus.DeviceSessionBindAccepted {
 		t.Fatalf("OnBind: %+v", ack)

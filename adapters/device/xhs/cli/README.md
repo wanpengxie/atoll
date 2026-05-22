@@ -1,6 +1,6 @@
 # coagent-xhs
 
-coagent 的 xhs 业务命令行（M1.3-T14 v4 重写；M1.5-T5 从 `xhs-cli/`
+coagent 的 xhs 业务命令行（M1.3-T14 v4 重写；launch-T5 从 `xhs-cli/`
 重组到 `adapters/device/xhs/cli/`，并入根 go module）。
 
 5 个子命令（按 L4 §2.3 对齐）：
@@ -30,7 +30,7 @@ go build -o coagent-xhs ./adapters/device/xhs/cli   # binary 输出到当前目�
 ```
 
 `real` 模式需要 `coagent` binary 在 PATH，或通过 `COAGENT_BIN` env
-显式指定路径。`coagent` 主入口在 M1.5 由 cmd/cli (T7) 提供；T7
+显式指定路径。`coagent` 主入口在 launch 由 cmd/cli (T7) 提供；T7
 完成前可继续使用 archived daemon-go cmd/coagent 构建产物作 stub。
 
 ## Provider 切换

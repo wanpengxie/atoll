@@ -2,7 +2,7 @@
 // composition root, applies migrations, and serves HTTP + WS over
 // the configured address.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T6.
+// Authoritative spec: launch-ticket notes §T6.
 package main
 
 import (
@@ -21,6 +21,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/ActOS/pkg/logger"
+	"github.com/wanpengxie/ActOS/pkg/metrics"
+	"github.com/wanpengxie/ActOS/pkg/observability"
 	"github.com/wanpengxie/ActOS/server/gateway"
 )
 
@@ -71,6 +73,7 @@ func run() error {
 	lg.Z().Info().
 		Str("event", "server.starting").
 		Str("addr", cfg.HTTPAddr).
+		Str("debug_addr", cfg.DebugAddr).
 		Str("db", cfg.DBPath).
 		Str("gin_mode", gin.Mode()).
 		Bool("allow_dev_secrets", cfg.AllowDevSecrets).
@@ -118,6 +121,20 @@ func run() error {
 		}
 	}()
 
+	var debugSrv *http.Server
+	if cfg.DebugAddr != "" {
+		debugSrv = observability.NewServer(cfg.DebugAddr, metrics.Default())
+		go func() {
+			lg.Z().Info().
+				Str("event", "server.debug_listen").
+				Str("addr", cfg.DebugAddr).
+				Msg("debug listen")
+			if err := debugSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("debug server: %w", err)
+			}
+		}()
+	}
+
 	go app.RunReconcile(ctx)
 
 	select {
@@ -134,12 +151,19 @@ func run() error {
 		lg.Z().Error().Err(err).Str("event", "server.shutdown_error").Msg("http shutdown error")
 		return fmt.Errorf("http shutdown: %w", err)
 	}
+	if debugSrv != nil {
+		if err := debugSrv.Shutdown(shutdownCtx); err != nil {
+			lg.Z().Error().Err(err).Str("event", "server.debug_shutdown_error").Msg("debug shutdown error")
+			return fmt.Errorf("debug shutdown: %w", err)
+		}
+	}
 	lg.Z().Info().Str("event", "server.stopped").Msg("server stopped cleanly")
 	return nil
 }
 
 type config struct {
 	HTTPAddr                        string
+	DebugAddr                       string
 	DBPath                          string
 	SessionSecret                   string
 	DaemonSharedSecret              string
@@ -164,8 +188,9 @@ func loadConfig() config {
 	pushhubOrigins := os.Getenv("COAGENT_PUSHHUB_ALLOWED_ORIGINS")
 	daemonbusOrigins := os.Getenv("COAGENT_DAEMONBUS_ALLOWED_ORIGINS")
 	cfg := config{
-		HTTPAddr: envOr("COAGENT_SERVER_ADDR", ":8832"),
-		DBPath:   envOr("COAGENT_SERVER_DB", "data/server.db"),
+		HTTPAddr:  envOr("COAGENT_SERVER_ADDR", ":8832"),
+		DebugAddr: envOr("COAGENT_DEBUG_ADDR", ":9090"),
+		DBPath:    envOr("COAGENT_SERVER_DB", "data/server.db"),
 		// FIX-T8: env defaults are empty so gateway.New fails fast when
 		// the operator forgets to set the secrets. Pass --allow-dev-secrets
 		// (or COAGENT_ALLOW_DEV_SECRETS=1) to fall back to the dev sentinels
@@ -186,6 +211,7 @@ func loadConfig() config {
 	}
 
 	flag.StringVar(&cfg.HTTPAddr, "addr", cfg.HTTPAddr, "HTTP listen address")
+	flag.StringVar(&cfg.DebugAddr, "debug-addr", cfg.DebugAddr, "Debug listen address for non-contract /metrics and /debug/pprof endpoints; empty disables")
 	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "Path to server sqlite database")
 	flag.StringVar(&cfg.UIDistDir, "ui-dist", cfg.UIDistDir,
 		"Path to ui/dist directory; when set, served as SPA at /. Empty (default) = API only.")

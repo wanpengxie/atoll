@@ -910,6 +910,45 @@ func TestManagerHandlePanicEmitsReceiverInternalError(t *testing.T) {
 	}
 }
 
+func TestManagerExternalCallbackPanicEmitsReceiverInternalError(t *testing.T) {
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu-adapter",
+			Types:        []string{"feishu.chat.send"},
+			Binding:      actor.BindingRuntimeOutbound,
+			MaxPendingMs: 30_000,
+		},
+		onCallback: func(context.Context, []byte, *adapter.ModuleContext) error {
+			panic("callback boom")
+		},
+	}
+	mgr, chain, lookup, _, _ := newTestManager(t, mod)
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
+
+	req := newTestRequest("channel:test", "agent:a", "feishu.chat.send", "req-callback-panic")
+	lookup.Put(req)
+	if err := mgr.Dispatch(context.Background(), req); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	err := mgr.OnExternalCallback(context.Background(), "feishu", []byte(`{"correlation_id":"req-callback-panic"}`))
+	if err == nil {
+		t.Fatal("OnExternalCallback should surface adapter callback panic")
+	}
+
+	written := chain.Written()
+	if len(written) != 1 {
+		t.Fatalf("written=%d want 1 failed terminal", len(written))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(written[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload["reason"] != string(message.TerminalReceiverInternalError) {
+		t.Fatalf("payload.reason=%v want %s", payload["reason"], message.TerminalReceiverInternalError)
+	}
+}
+
 // TestManagerInstallRejectsStrictModeGap — when an adapter declares
 // TypeDeclarations (opting into strict mode) but a Types entry is
 // missing from the map, install MUST fail-closed with

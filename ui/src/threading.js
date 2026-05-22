@@ -1,6 +1,6 @@
 // threading.js — correlation_id + parent_id grouping for chat folding.
 //
-// Authoritative spec: .dalek/pm/v4-layer3-spec.md §3 (中间产出折叠 + Claude
+// Authoritative spec: .dalek/pm/impl-layer3.md §3 (中间产出折叠 + Claude
 // Code TUI 模式) + §3.2 (折叠分组规则).
 //
 // Pure functions only — feed normalised envelopes (the renderer-friendly

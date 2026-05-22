@@ -15,8 +15,8 @@ const (
 	UnloadIdle             UnloadReason = "idle"              // long inactivity → free resources
 	UnloadOrphan           UnloadReason = "orphan"            // server marked orphan
 	UnloadStale            UnloadReason = "stale"             // server marked stale
-	UnloadUnbindPending    UnloadReason = "unbind_pending"    // server requested unbind quarantine
 	UnloadDirectoryMissing UnloadReason = "directory_missing" // local channel directory is missing
+	UnloadShutdown         UnloadReason = "shutdown"          // daemon process is leaving ownership
 )
 
 // Unloader closes a channel's in-memory state (open *sql.DB, push pump,

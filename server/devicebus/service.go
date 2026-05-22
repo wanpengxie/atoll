@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,7 +33,9 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/pkg/requestctx"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
 )
 
@@ -63,12 +66,13 @@ var AllStates = []State{StatePending, StateReady, StateActive, StateOffline, Sta
 
 // Errors returned by Service.
 var (
-	ErrSessionNotFound      = errors.New("devicebus: session not found")
-	ErrTokenInvalid         = errors.New("devicebus: invalid token")
-	ErrSessionExpired       = errors.New("devicebus: session expired")
-	ErrSessionRevoked       = errors.New("devicebus: session revoked")
-	ErrSessionNotReady      = errors.New("devicebus: session not ready")
-	ErrSessionLimitExceeded = errors.New("devicebus: session limit exceeded")
+	ErrSessionNotFound       = errors.New("devicebus: session not found")
+	ErrTokenInvalid          = errors.New("devicebus: invalid token")
+	ErrSessionExpired        = errors.New("devicebus: session expired")
+	ErrSessionRevoked        = errors.New("devicebus: session revoked")
+	ErrSessionNotReady       = errors.New("devicebus: session not ready")
+	ErrSessionLimitExceeded  = errors.New("devicebus: session limit exceeded")
+	ErrDeviceTypeUnsupported = errors.New("devicebus: device_type unsupported")
 )
 
 // Config tunes Service.
@@ -99,6 +103,9 @@ type Config struct {
 	// PingWriteTimeout overrides DefaultDevicePingWriteTimeout (tests).
 	// Zero = production default.
 	PingWriteTimeout time.Duration
+
+	// Logger receives structured devicebus events. nil → slog.Default.
+	Logger *slog.Logger
 }
 
 // Service is the devicebus facade.
@@ -125,6 +132,7 @@ type Service struct {
 	access   channelaccess.Authorizer
 
 	allowedOrigins map[string]struct{}
+	log            *slog.Logger
 }
 
 // BindNotifier is the lifecycle hook the gateway implements so the
@@ -219,6 +227,10 @@ func NewService(db *sql.DB, cfg Config) *Service {
 		}
 		allowed[origin] = struct{}{}
 	}
+	log := cfg.Logger
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Service{
 		db:                        db,
 		cfg:                       cfg,
@@ -228,6 +240,7 @@ func NewService(db *sql.DB, cfg Config) *Service {
 		maxSessionsPerUserChannel: maxSessions,
 		sessions:                  map[string]*Connection{},
 		allowedOrigins:            allowed,
+		log:                       log.With("subsystem", "devicebus"),
 	}
 }
 
@@ -296,6 +309,18 @@ const TokenFingerprintLength = 16
 func (s *Service) IssueSession(ctx context.Context, in IssueInput) (IssueResult, error) {
 	if in.DeviceID == "" || in.ChannelID == "" || in.UserID == "" || in.DaemonID == "" {
 		return IssueResult{}, fmt.Errorf("devicebus: device_id + channel_id + user_id + daemon_id required")
+	}
+	if !devicetransit.IsXHSDeviceType(in.DeviceType) {
+		s.log.Warn("devicebus.issue_rejected",
+			"reason", "device_type_unsupported",
+			"request_id", requestctx.RequestID(ctx),
+			"device_id", in.DeviceID,
+			"device_type", in.DeviceType,
+			"channel_id", string(in.ChannelID),
+			"user_id", in.UserID,
+			"daemon_id", string(in.DaemonID),
+		)
+		return IssueResult{}, ErrDeviceTypeUnsupported
 	}
 	now := s.nowMs()
 	exp := s.now().Add(s.tokenTTL).UnixMilli()
@@ -390,6 +415,17 @@ func (s *Service) IssueSession(ctx context.Context, in IssueInput) (IssueResult,
 	for _, old := range replaced {
 		s.closeCurrentConnection(old.ID)
 	}
+	s.log.Info("devicebus.token_issued",
+		"request_id", requestctx.RequestID(ctx),
+		"device_session_id", row.ID,
+		"device_id", row.DeviceID,
+		"device_type", row.DeviceType,
+		"channel_id", string(row.ChannelID),
+		"user_id", row.UserID,
+		"daemon_id", string(row.DaemonID),
+		"expires_at", row.ExpiresAt,
+		"replaced_sessions", len(replaced),
+	)
 	return IssueResult{
 		Session:          row,
 		Token:            token,
@@ -506,16 +542,70 @@ func (s *Service) Revoke(ctx context.Context, sessionID string) error {
 // server INSERT and daemon bind cannot leak forever.
 func (s *Service) ExpireDueSessions(ctx context.Context) error {
 	now := s.nowMs()
-	_, err := s.db.ExecContext(
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("devicebus: begin expire tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT device_session_id
+		   FROM device_sessions
+		  WHERE state IN ('pending','ready','active','offline')
+		    AND expires_at < ?`,
+		now,
+	)
+	if err != nil {
+		return fmt.Errorf("devicebus: list expiring sessions: %w", err)
+	}
+	var expiredIDs []string
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("devicebus: scan expiring session: %w", err)
+		}
+		expiredIDs = append(expiredIDs, sessionID)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("devicebus: close expiring rows: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("devicebus: iterate expiring sessions: %w", err)
+	}
+
+	if _, err := tx.ExecContext(
 		ctx,
 		`UPDATE device_sessions
 		    SET state = 'expired', last_state_at = ?
 		  WHERE state IN ('pending','ready','active','offline')
 		    AND expires_at < ?`,
 		now, now,
+	); err != nil {
+		return fmt.Errorf("devicebus: expire: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("devicebus: commit expire: %w", err)
+	}
+	for _, sessionID := range expiredIDs {
+		s.closeCurrentConnection(sessionID)
+	}
+	return nil
+}
+
+func (s *Service) expireSessionIfDue(ctx context.Context, sessionID string, now int64) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`UPDATE device_sessions
+		    SET state = 'expired', last_state_at = ?
+		  WHERE device_session_id = ?
+		    AND state IN ('pending','ready','active','offline')
+		    AND expires_at < ?`,
+		now, sessionID, now,
 	)
 	if err != nil {
-		return fmt.Errorf("devicebus: expire: %w", err)
+		return fmt.Errorf("devicebus: expire session: %w", err)
 	}
 	return nil
 }
@@ -548,9 +638,10 @@ func (s *Service) Get(ctx context.Context, sessionID string) (Session, error) {
 	return row, nil
 }
 
-// ValidateToken returns the Session iff the raw token matches the
-// stored hash + session is in a state that allows connection (ready /
-// active / offline) and not expired.
+// ValidateToken returns the Session iff the raw token matches the stored
+// hash, the session has not expired, and the durable state allows a WS
+// handshake: ready (first connect), active (duplicate connect replacing the
+// previous socket), or offline (reconnect).
 func (s *Service) ValidateToken(ctx context.Context, sessionID, rawToken string) (Session, error) {
 	row, err := s.Get(ctx, sessionID)
 	if err != nil {
@@ -566,20 +657,58 @@ func (s *Service) ValidateToken(ctx context.Context, sessionID, rawToken string)
 		return Session{}, err
 	}
 	if !hmac.Equal([]byte(stored), []byte(s.hashToken(rawToken))) {
+		s.log.Warn("devicebus.token_invalid",
+			"reason", "token_hash_mismatch",
+			"request_id", requestctx.RequestID(ctx),
+			"device_session_id", sessionID,
+			"channel_id", string(row.ChannelID),
+			"device_id", row.DeviceID,
+			"device_type", row.DeviceType,
+		)
 		return Session{}, ErrTokenInvalid
 	}
 
 	if s.now().UnixMilli() > row.ExpiresAt {
+		s.log.Warn("devicebus.token_invalid",
+			"reason", "expired",
+			"request_id", requestctx.RequestID(ctx),
+			"device_session_id", sessionID,
+			"channel_id", string(row.ChannelID),
+			"device_id", row.DeviceID,
+			"expires_at", row.ExpiresAt,
+		)
 		return Session{}, ErrSessionExpired
 	}
 	switch row.State {
 	case StateReady, StateActive, StateOffline:
 		return row, nil
 	case StateRevoked:
+		s.log.Warn("devicebus.token_invalid",
+			"reason", "revoked",
+			"request_id", requestctx.RequestID(ctx),
+			"device_session_id", sessionID,
+			"channel_id", string(row.ChannelID),
+			"device_id", row.DeviceID,
+		)
 		return Session{}, ErrSessionRevoked
 	case StateExpired:
+		s.log.Warn("devicebus.token_invalid",
+			"reason", "expired_state",
+			"request_id", requestctx.RequestID(ctx),
+			"device_session_id", sessionID,
+			"channel_id", string(row.ChannelID),
+			"device_id", row.DeviceID,
+		)
 		return Session{}, ErrSessionExpired
 	default:
+		s.log.Warn("devicebus.token_invalid",
+			"reason", "not_ready",
+			"request_id", requestctx.RequestID(ctx),
+			"device_session_id", sessionID,
+			"channel_id", string(row.ChannelID),
+			"device_id", row.DeviceID,
+			"state", string(row.State),
+		)
 		return Session{}, ErrSessionNotReady
 	}
 }
@@ -610,7 +739,7 @@ func (s *Service) transition(ctx context.Context, sessionID string, from, to Sta
 // hashToken (see below), so a compromised store row cannot be
 // replayed against the device WS endpoint.
 //
-// FIX-T10 spec alignment: an earlier draft of m1.5-tickets.md
+// FIX-T10 spec alignment: an earlier draft of launch-ticket notes
 // described `token.go` as "HMAC over device_id + channel_id +
 // expiry". That wording suggested a deterministic derivation, which
 // would (a) leak token recoverability to anyone with the secret and

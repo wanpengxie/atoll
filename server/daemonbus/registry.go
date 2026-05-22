@@ -2,7 +2,7 @@
 // authentication, mux-frame dispatch loop, heartbeat tracking and
 // channel-to-daemon routing (L2 §9 + T6 spec).
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T6 (daemonbus 子目录)
+// Authoritative spec: launch-ticket notes §T6 (daemonbus 子目录)
 // + kernel/daemonbus (Frame schema) + kernel/placement (placement
 // state machine).
 //
@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -58,6 +59,16 @@ type Config struct {
 	// PingWriteTimeout overrides DefaultPingWriteTimeout (tests).
 	// Zero = production default.
 	PingWriteTimeout time.Duration
+
+	// Logger receives structured daemonbus server events. nil → slog.Default.
+	Logger *slog.Logger
+
+	// SendAndAwaitTimeout bounds server->daemon ACK waits. Zero = default.
+	SendAndAwaitTimeout time.Duration
+
+	// PendingAwaitLimit caps outstanding SendAndAwait waiters per daemon.
+	// Zero = default.
+	PendingAwaitLimit int
 }
 
 // Service is the daemonbus facade.
@@ -66,10 +77,11 @@ type Service struct {
 	cfg Config
 	now func() time.Time
 
-	mu          sync.RWMutex
-	connections map[placement.DaemonID]*Connection
-	connGen     atomic.Uint64
-	onRegister  func(*Connection)
+	mu           sync.RWMutex
+	connections  map[placement.DaemonID]*Connection
+	connGen      atomic.Uint64
+	onRegister   func(*Connection)
+	onUnregister func(*Connection)
 
 	reclaimMu       sync.Mutex
 	lastReclaimAt   map[placement.DaemonID]int64
@@ -78,6 +90,7 @@ type Service struct {
 	channelDaemonResolver placements.ChannelDaemonResolver
 
 	allowedOrigins map[string]struct{}
+	log            *slog.Logger
 }
 
 // SetRegisterHook installs an optional callback invoked after a connection
@@ -89,8 +102,21 @@ func (s *Service) SetRegisterHook(h func(*Connection)) {
 	s.mu.Unlock()
 }
 
+// SetUnregisterHook installs an optional callback invoked after the current
+// connection for a daemon leaves the registry. The hook is not called for an
+// older socket that loses a reconnect race.
+func (s *Service) SetUnregisterHook(h func(*Connection)) {
+	s.mu.Lock()
+	s.onUnregister = h
+	s.mu.Unlock()
+}
+
 // NewService builds a Service.
 func NewService(db *sql.DB, cfg Config) *Service {
+	log := cfg.Logger
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Service{
 		db:             db,
 		cfg:            cfg,
@@ -98,6 +124,7 @@ func NewService(db *sql.DB, cfg Config) *Service {
 		connections:    map[placement.DaemonID]*Connection{},
 		lastReclaimAt:  map[placement.DaemonID]int64{},
 		allowedOrigins: normalizeAllowedOrigins(cfg.AllowedOrigins),
+		log:            log.With("subsystem", "daemonbus"),
 	}
 }
 

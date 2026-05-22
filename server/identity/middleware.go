@@ -97,6 +97,7 @@ func (s *Service) AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 		c.Set(ginUserKey, u)
+		c.Request = c.Request.WithContext(WithUserContext(c.Request.Context(), u))
 		c.Next()
 	}
 }

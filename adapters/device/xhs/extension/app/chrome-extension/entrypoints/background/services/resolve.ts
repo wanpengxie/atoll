@@ -3,7 +3,7 @@
 // Popup 主入口 1-key 流程：用户填 `coagentServerUrl + apiKey`，扩展走
 // `POST {coagentServerUrl}/api/device/resolve` 反查 device 全套连接信息。
 //
-// 接口（M1.5 后由 server/devicebus 等 Go 实现承担同合同；早期 Node 实现
+// 接口（launch 后由 server/devicebus 等 Go 实现承担同合同；早期 Node 实现
 // 已归档）：
 //   POST {SERVER_URL}/api/device/resolve
 //   body: { api_key: "<sk_dev_xxx>" }

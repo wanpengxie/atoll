@@ -10,14 +10,15 @@ import "github.com/wanpengxie/ActOS/kernel/daemonbus"
 // the server transitions the authoritative session row pending → ready
 // on a successful ack.
 //
-// Field origin (m1.5-tickets §T1.3 + T1.10):
+// Field origin (launch-ticket notes §T1.3 + T1.10):
 //
 //   - SessionID         server-allocated uuid (single-ownership; daemon
 //     MUST treat it as opaque).
 //   - ChannelID         which channel this session is bound to.
 //   - DeviceID          adapter-supplied device identifier (e.g.
 //     "xhs-chrome-default").
-//   - DeviceType        adapter family ("xhs", "feishu_mobile", …).
+//   - DeviceType        closed-set device client type
+//     ("xhs.chrome_extension", "xhs.mobile_webview", …).
 //   - DaemonID          owner of the channel at the time the bind was
 //     issued; daemons MAY reject a bind frame whose
 //     DaemonID does not match the receiving daemon

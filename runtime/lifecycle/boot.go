@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -49,11 +50,22 @@ type LocalChannel struct {
 	OwnedByUs  bool // true iff Lock.DaemonID matches current daemon
 }
 
+// QuarantinedChannel records a channel-local store that failed warm-start
+// inspection. Daemon-wide metadata corruption remains fail-fast; only one
+// channel directory is skipped.
+type QuarantinedChannel struct {
+	ChannelID     channel.ID `json:"channel_id"`
+	SQLitePath    string     `json:"sqlite_path"`
+	Reason        string     `json:"reason"`
+	QuarantinedAt int64      `json:"quarantined_at"`
+}
+
 // BootResult is the outcome of a Boot run.
 type BootResult struct {
 	Local        []LocalChannel
 	HeldAccepted []channel.ID
 	HeldRejected []channel.ID
+	Quarantined  []QuarantinedChannel
 }
 
 // BootConfig wires Boot.
@@ -73,13 +85,18 @@ type BootConfig struct {
 	// cmd/daemon supplies an impl that wraps the transit client. May be
 	// nil in tests — the caller will then drive the phase manually.
 	EmitHeldChannelsReport func(ctx context.Context, req placement.HeldChannelsReport) ([]placement.HeldChannelsDecision, error)
+
+	// OnQuarantine is called when a single channel sqlite is skipped during
+	// warm start. It is best-effort observability; callback errors are ignored.
+	OnQuarantine func(context.Context, QuarantinedChannel)
 }
 
 // Bootstrapper runs the T1.6 phase 1/2/3/4 startup sequencer.
 type Bootstrapper struct {
-	cfg      BootConfig
-	phase    Phase
-	channels []LocalChannel
+	cfg        BootConfig
+	phase      Phase
+	channels   []LocalChannel
+	quarantine []QuarantinedChannel
 }
 
 // NewBootstrapper builds a Bootstrapper.
@@ -109,6 +126,7 @@ func (b *Bootstrapper) Phase() Phase { return b.phase }
 // Returns the list of local channels seen.
 func (b *Bootstrapper) LoadLocal(ctx context.Context) ([]LocalChannel, error) {
 	b.phase = PhaseLoadingLocal
+	b.quarantine = nil
 	entries, err := os.ReadDir(b.cfg.ChannelsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -126,15 +144,20 @@ func (b *Bootstrapper) LoadLocal(ctx context.Context) ([]LocalChannel, error) {
 		channelID := channel.ID(ent.Name())
 		sqlitePath := filepath.Join(b.cfg.ChannelsDir, ent.Name(), "channel.sqlite")
 		if _, err := os.Stat(sqlitePath); err != nil {
+			if !os.IsNotExist(err) {
+				b.quarantineChannel(ctx, channelID, sqlitePath, fmt.Errorf("stat channel sqlite: %w", err))
+			}
 			continue
 		}
 		lock, err := b.cfg.LockOpener(ctx, sqlitePath)
 		if err != nil {
-			return nil, fmt.Errorf("lifecycle: open lock for %s: %w", channelID, err)
+			b.quarantineChannel(ctx, channelID, sqlitePath, fmt.Errorf("open lock: %w", err))
+			continue
 		}
 		row, ok, err := lock.Get(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("lifecycle: read lock for %s: %w", channelID, err)
+			b.quarantineChannel(ctx, channelID, sqlitePath, fmt.Errorf("read lock: %w", err))
+			continue
 		}
 		if !ok {
 			// channel sqlite exists but no lock — unbound; skip.
@@ -146,7 +169,8 @@ func (b *Bootstrapper) LoadLocal(ctx context.Context) ([]LocalChannel, error) {
 		// bump is harmless and gets overwritten by next reclaim.
 		if owned {
 			if err := lock.RefreshDaemon(ctx, b.cfg.DaemonEpoch, b.cfg.NowFn()); err != nil {
-				return nil, fmt.Errorf("lifecycle: refresh daemon_epoch %s: %w", channelID, err)
+				b.quarantineChannel(ctx, channelID, sqlitePath, fmt.Errorf("refresh daemon_epoch: %w", err))
+				continue
 			}
 			row.DaemonEpoch = b.cfg.DaemonEpoch
 		}
@@ -161,6 +185,36 @@ func (b *Bootstrapper) LoadLocal(ctx context.Context) ([]LocalChannel, error) {
 	return out, nil
 }
 
+// Quarantined returns a snapshot of channel stores skipped during LoadLocal.
+func (b *Bootstrapper) Quarantined() []QuarantinedChannel {
+	out := make([]QuarantinedChannel, len(b.quarantine))
+	copy(out, b.quarantine)
+	return out
+}
+
+func (b *Bootstrapper) quarantineChannel(ctx context.Context, channelID channel.ID, sqlitePath string, cause error) {
+	q := QuarantinedChannel{
+		ChannelID:     channelID,
+		SQLitePath:    sqlitePath,
+		Reason:        cause.Error(),
+		QuarantinedAt: b.cfg.NowFn(),
+	}
+	b.quarantine = append(b.quarantine, q)
+	_ = writeQuarantineMarker(sqlitePath, q)
+	if b.cfg.OnQuarantine != nil {
+		b.cfg.OnQuarantine(ctx, q)
+	}
+}
+
+func writeQuarantineMarker(sqlitePath string, q QuarantinedChannel) error {
+	raw, err := json.MarshalIndent(q, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	return os.WriteFile(sqlitePath+".quarantine.json", raw, 0o644)
+}
+
 // ReportHeldChannels runs phase 2: send control.held_channels_report
 // with every channel we believe we own, and apply the per-channel
 // decisions.
@@ -168,7 +222,10 @@ func (b *Bootstrapper) LoadLocal(ctx context.Context) ([]LocalChannel, error) {
 // When BootConfig.EmitHeldChannelsReport is nil this is a no-op (tests).
 func (b *Bootstrapper) ReportHeldChannels(ctx context.Context) (BootResult, error) {
 	b.phase = PhaseReclaiming
-	res := BootResult{Local: b.channels}
+	res := BootResult{Local: b.channels, Quarantined: b.Quarantined()}
+	for _, q := range b.quarantine {
+		res.HeldRejected = append(res.HeldRejected, q.ChannelID)
+	}
 	if b.cfg.EmitHeldChannelsReport == nil {
 		// All local channels are assumed owned for offline tests.
 		for _, c := range b.channels {

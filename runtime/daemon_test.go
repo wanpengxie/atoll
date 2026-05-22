@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,6 +21,7 @@ import (
 	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/pkg/metrics"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/lifecycle"
 	"github.com/wanpengxie/ActOS/runtime/store"
@@ -28,6 +31,79 @@ import (
 )
 
 func now() int64 { return time.Now().UnixMilli() }
+
+func TestAssembleDaemonFailsFastOnMissingWorkerBinary(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dataDir := t.TempDir()
+	_, err := runtime.AssembleDaemon(ctx, runtime.DaemonConfig{
+		DataDir:       dataDir,
+		ChannelsDir:   filepath.Join(dataDir, "channels"),
+		DaemonID:      "daemon-worker-missing",
+		DaemonEpoch:   1,
+		UseMockBus:    true,
+		NowFn:         now,
+		WorkerSpawner: &workerhost.ExecSpawner{BinaryPath: filepath.Join(dataDir, "missing-worker")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "worker readiness") {
+		t.Fatalf("AssembleDaemon err=%v want worker readiness failure", err)
+	}
+}
+
+type readinessSpawner struct {
+	fail atomic.Bool
+}
+
+func (s *readinessSpawner) Spawn(context.Context, string, []string) (workerhost.WorkerProc, error) {
+	return workerhost.WorkerProc{}, errors.New("unused")
+}
+
+func (s *readinessSpawner) CheckReady(context.Context) error {
+	if s.fail.Load() {
+		return errors.New("worker binary not ready")
+	}
+	return nil
+}
+
+func TestDaemonWorkerReadinessMonitorRecordsFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dataDir := t.TempDir()
+	spawner := &readinessSpawner{}
+	d, err := runtime.AssembleDaemon(ctx, runtime.DaemonConfig{
+		DataDir:               dataDir,
+		ChannelsDir:           filepath.Join(dataDir, "channels"),
+		DaemonID:              "daemon-worker-readiness",
+		DaemonEpoch:           1,
+		UseMockBus:            true,
+		NowFn:                 now,
+		WorkerSpawner:         spawner,
+		WorkerReadinessPeriod: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("AssembleDaemon: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	if err := d.RunPhases(ctx); err != nil {
+		t.Fatalf("RunPhases: %v", err)
+	}
+
+	spawner.fail.Store(true)
+	deadline := time.After(time.Second)
+	for {
+		if strings.Contains(metrics.Default().RenderPrometheus(), `runtime_worker_readiness{result="failed"}`) {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("worker readiness failure metric not recorded")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
 
 func terminalFailureReasonSet() map[string]struct{} {
 	out := make(map[string]struct{}, len(message.AllTerminalFailureReasons))
@@ -794,6 +870,93 @@ func TestDaemon_DeviceTransit_InboundRoutesToPerChannelCallback(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Close blocked — phase 3 goroutine leak")
+	}
+}
+
+func TestDaemon_CloseRunsFinalFallbackScanAndUnloadsChannels(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dataDir := t.TempDir()
+	channelsDir := filepath.Join(dataDir, "channels")
+	chID := channel.ID("ch-shutdown-drain")
+	chDir := filepath.Join(channelsDir, string(chID))
+	if err := os.MkdirAll(chDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(chDir, "channel.sqlite")
+	db, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := store.NewChannelLock(db)
+	if err := lock.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    chID,
+		FencingToken: "tok-1", OwnerEpoch: 1,
+		DaemonID: "daemon-shutdown", DaemonEpoch: 1,
+		AcquiredAt: now(), RefreshedAt: now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	areg := store.NewActorRegistry(db)
+	for _, rec := range []actorreg.Record{
+		{ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: now()},
+		{ID: "agent:caller", Kind: actor.KindAgent, CreatedAt: now()},
+		{ID: "agent:receiver", Kind: actor.KindAgent, CreatedAt: now()},
+	} {
+		if err := areg.Insert(ctx, rec); err != nil {
+			t.Fatalf("seed actor %s: %v", rec.ID, err)
+		}
+	}
+	expiredAt := now() - 1000
+	if _, err := store.NewMessages(db).Append(ctx, &message.Envelope{
+		ID:         "req-shutdown",
+		TS:         now(),
+		TSReceived: now(),
+		ChannelID:  chID,
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:caller"},
+		Kind:       message.KindRequest,
+		Type:       "human.text",
+		Payload:    json.RawMessage(`{"text":"please close me"}`),
+		Visibility: message.VisibilityPublic,
+		Audience:   message.Audience{"agent:receiver"},
+		ExpiresAt:  &expiredAt,
+	}, klog.FencingTuple{}); err != nil {
+		t.Fatalf("seed request: %v", err)
+	}
+	_ = db.Close()
+
+	d, err := runtime.AssembleDaemon(ctx, runtime.DaemonConfig{
+		DataDir:              dataDir,
+		ChannelsDir:          channelsDir,
+		DaemonID:             "daemon-shutdown",
+		DaemonEpoch:          42,
+		UseMockBus:           true,
+		NowFn:                now,
+		SchedulerPeriod:      time.Hour,
+		ShutdownDrainTimeout: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("AssembleDaemon: %v", err)
+	}
+	if err := d.RunPhases(ctx); err != nil {
+		t.Fatalf("RunPhases: %v", err)
+	}
+	if !d.HasChannel(chID) {
+		t.Fatalf("daemon did not register channel %s", chID)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if d.HasChannel(chID) {
+		t.Fatal("channel still registered after Close")
+	}
+	responses, err := queryTerminalResponses(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("query responses: %v", err)
+	}
+	if responses["req-shutdown"] != string(message.TerminalUnansweredTimeout) {
+		t.Fatalf("shutdown fallback response=%q want %q", responses["req-shutdown"], message.TerminalUnansweredTimeout)
 	}
 }
 

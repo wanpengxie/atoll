@@ -98,7 +98,7 @@ func (h *wsHarness) handle(w http.ResponseWriter, r *http.Request) {
 		FrameKind:             daemonbus.FrameTypeControlConnectionAccepted,
 		DaemonID:              placement.DaemonID(h.expectedID),
 		DaemonConnectionEpoch: daemonbus.ConnectionEpoch(epoch),
-		Ts:                time.Now().UnixMilli(),
+		Ts:                    time.Now().UnixMilli(),
 		Payload:               []byte(`{"connection_epoch":` + itoaInt64(epoch) + `}`),
 	}
 	data, _ := json.Marshal(frame)
@@ -173,6 +173,43 @@ func TestWSClient_ConnectAndEpoch(t *testing.T) {
 	}
 }
 
+func TestWSClient_ReadLimitRejectsOversizedFrame(t *testing.T) {
+	h := newWSHarness(t)
+	client, err := transit.NewWSClient(transit.WSClientConfig{
+		URL:      h.WSURL(),
+		DaemonID: "daemon-A",
+		Key:      "sek-1",
+		Version:  "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	conn := h.Conn()
+	if conn == nil {
+		t.Fatal("server conn nil")
+	}
+	oversized := strings.Repeat("x", int(transit.DefaultWSReadLimit)+1)
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- conn.WriteMessage(websocket.TextMessage, []byte(oversized))
+	}()
+	if _, err := client.Recv(ctx); err == nil {
+		t.Fatal("Recv succeeded for oversized frame")
+	}
+	select {
+	case <-writeDone:
+	case <-ctx.Done():
+		t.Fatal("server oversized write did not finish")
+	}
+}
+
 func TestWSClient_SendRecvRoundTrip(t *testing.T) {
 	h := newWSHarness(t)
 	serverFrameCh := make(chan daemonbus.Frame, 1)
@@ -190,7 +227,7 @@ func TestWSClient_SendRecvRoundTrip(t *testing.T) {
 				FrameID:               "ack-1",
 				FrameKind:             daemonbus.FrameTypeControlHeartbeatAck,
 				DaemonConnectionEpoch: f.DaemonConnectionEpoch,
-				Ts:                time.Now().UnixMilli(),
+				Ts:                    time.Now().UnixMilli(),
 				Payload:               []byte(`{"frame_id":"` + f.FrameID + `"}`),
 			}
 			data, _ = json.Marshal(ack)
@@ -218,7 +255,7 @@ func TestWSClient_SendRecvRoundTrip(t *testing.T) {
 		FrameKind:             daemonbus.FrameTypeControlHeartbeat,
 		DaemonID:              placement.DaemonID("daemon-A"),
 		DaemonConnectionEpoch: epoch,
-		Ts:                time.Now().UnixMilli(),
+		Ts:                    time.Now().UnixMilli(),
 		Payload:               []byte(`{"channels":[]}`),
 	}
 	if err := client.Send(ctx, frame); err != nil {
@@ -353,7 +390,7 @@ func TestWSClient_WriteDeadlineUnblocksSendMu(t *testing.T) {
 		FrameKind:             daemonbus.FrameTypeControlHeartbeat,
 		DaemonID:              placement.DaemonID("daemon-A"),
 		DaemonConnectionEpoch: epoch,
-		Ts:                time.Now().UnixMilli(),
+		Ts:                    time.Now().UnixMilli(),
 		Payload:               []byte(`{"blob":"` + string(big) + `"}`),
 	}
 
@@ -446,7 +483,7 @@ func TestWSClient_SendFailureMarksConnDead(t *testing.T) {
 		FrameKind:             daemonbus.FrameTypeControlHeartbeat,
 		DaemonID:              placement.DaemonID("daemon-A"),
 		DaemonConnectionEpoch: epoch,
-		Ts:                time.Now().UnixMilli(),
+		Ts:                    time.Now().UnixMilli(),
 		Payload:               []byte(`{}`),
 	}
 	// First Send may succeed (queued in OS buffer before close fully

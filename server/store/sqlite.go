@@ -3,7 +3,7 @@
 // idempotent migration runner that applies the .up.sql files embedded
 // alongside this package.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T6 (server-side sqlite
+// Authoritative spec: launch-ticket notes §T6 (server-side sqlite
 // schema 精简 + WAL 模式).
 //
 // Driver: modernc.org/sqlite (pure Go, no cgo). Registered under name

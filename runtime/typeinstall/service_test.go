@@ -77,19 +77,24 @@ func TestServiceInstallTypeEmitsMirrorEvent(t *testing.T) {
 func TestServiceInstallTypeRejectsReservedNamespace(t *testing.T) {
 	ctx := context.Background()
 	svc, reg, _ := newServiceFixture(t, "ch-typeinstall", 12345)
-	_, err := svc.InstallType(ctx, adapter.TypeRow{
-		Type:           "system.foo",
-		HandlerActorID: "tool:xhs-adapter",
-		HandlerBinding: actor.BindingEmbedded,
-		MaxPendingMs:   60_000,
-		AllowedKinds:   []message.Kind{message.KindEvent},
-	})
-	var ie *typeinstall.Error
-	if !errors.As(err, &ie) || ie.Reason != message.InstallTypeRegistryReservedNamespace {
-		t.Fatalf("expected type_registry_reserved_namespace, got %v", err)
-	}
-	if _, ok, err := reg.Lookup(ctx, "system.foo"); err != nil || ok {
-		t.Fatalf("reserved row written ok=%v err=%v", ok, err)
+	for _, typeName := range []string{
+		"system.foo",
+		"system.type.installed",
+	} {
+		_, err := svc.InstallType(ctx, adapter.TypeRow{
+			Type:           typeName,
+			HandlerActorID: "tool:xhs-adapter",
+			HandlerBinding: actor.BindingEmbedded,
+			MaxPendingMs:   60_000,
+			AllowedKinds:   []message.Kind{message.KindEvent},
+		})
+		var ie *typeinstall.Error
+		if !errors.As(err, &ie) || ie.Reason != message.InstallTypeRegistryReservedNamespace {
+			t.Fatalf("%s: expected type_registry_reserved_namespace, got %v", typeName, err)
+		}
+		if _, ok, err := reg.Lookup(ctx, typeName); err != nil || ok {
+			t.Fatalf("%s: reserved row written ok=%v err=%v", typeName, ok, err)
+		}
 	}
 }
 

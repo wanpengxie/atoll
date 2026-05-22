@@ -1,8 +1,13 @@
 package devicebus_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -20,6 +25,8 @@ import (
 	"github.com/wanpengxie/ActOS/server/identity"
 	"github.com/wanpengxie/ActOS/server/store"
 )
+
+const validDeviceType = "xhs.chrome_extension"
 
 func newSvc(t *testing.T, clock func() time.Time) *devicebus.Service {
 	t.Helper()
@@ -45,7 +52,7 @@ func TestIssueAndLifecycle(t *testing.T) {
 	ctx := context.Background()
 
 	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-A", DeviceType: "xhs",
+		DeviceID: "dev-A", DeviceType: validDeviceType,
 		ChannelID: channel.ID("ch-X"), UserID: "u1",
 		DaemonID: placement.DaemonID("d1"),
 	})
@@ -119,19 +126,110 @@ func TestIssueAndLifecycle(t *testing.T) {
 	}
 }
 
+func TestTokenLifecycleStructuredLogs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "d.db"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	svc := devicebus.NewService(db, devicebus.Config{
+		TokenSecret: "secret",
+		TokenTTL:    time.Hour,
+		Logger:      logger,
+	})
+
+	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
+		DeviceID: "dev-log", DeviceType: validDeviceType, ChannelID: "ch-log", UserID: "u1", DaemonID: "d1",
+	})
+	if err != nil {
+		t.Fatalf("IssueSession: %v", err)
+	}
+	if got := buf.String(); !strings.Contains(got, "devicebus.token_issued") || !strings.Contains(got, res.Session.ID) {
+		t.Fatalf("token_issued log missing session id; got %s", got)
+	}
+
+	if _, err := svc.ValidateToken(ctx, res.Session.ID, "wrong-token"); !errors.Is(err, devicebus.ErrTokenInvalid) {
+		t.Fatalf("ValidateToken wrong token err=%v want ErrTokenInvalid", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "devicebus.token_invalid") || !strings.Contains(got, "token_hash_mismatch") {
+		t.Fatalf("token_invalid log missing reason; got %s", got)
+	}
+}
+
 func TestValidateTokenRejectsPendingSession(t *testing.T) {
 	t.Parallel()
 	svc := newSvc(t, nil)
 	ctx := context.Background()
 
 	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-A", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-A", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	})
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
 	if _, err := svc.ValidateToken(ctx, res.Session.ID, res.Token); !errors.Is(err, devicebus.ErrSessionNotReady) {
 		t.Fatalf("ValidateToken pending err=%v want ErrSessionNotReady", err)
+	}
+}
+
+func TestValidateTokenHandshakeStateTable(t *testing.T) {
+	t.Parallel()
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, clock.Now)
+	ctx := context.Background()
+
+	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
+		DeviceID: "dev-handshake", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, err := svc.ValidateToken(ctx, res.Session.ID, res.Token); !errors.Is(err, devicebus.ErrSessionNotReady) {
+		t.Fatalf("pending ValidateToken err=%v want ErrSessionNotReady", err)
+	}
+	if err := svc.MarkBound(ctx, res.Session.ID); err != nil {
+		t.Fatalf("MarkBound: %v", err)
+	}
+	if _, err := svc.ValidateToken(ctx, res.Session.ID, res.Token); err != nil {
+		t.Fatalf("ready ValidateToken: %v", err)
+	}
+	if err := svc.MarkActive(ctx, res.Session.ID); err != nil {
+		t.Fatalf("MarkActive: %v", err)
+	}
+	if _, err := svc.ValidateToken(ctx, res.Session.ID, res.Token); err != nil {
+		t.Fatalf("active duplicate-connect ValidateToken: %v", err)
+	}
+	if err := svc.MarkOffline(ctx, res.Session.ID); err != nil {
+		t.Fatalf("MarkOffline: %v", err)
+	}
+	if _, err := svc.ValidateToken(ctx, res.Session.ID, res.Token); err != nil {
+		t.Fatalf("offline reconnect ValidateToken: %v", err)
+	}
+	if err := svc.Revoke(ctx, res.Session.ID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if _, err := svc.ValidateToken(ctx, res.Session.ID, res.Token); !errors.Is(err, devicebus.ErrSessionRevoked) {
+		t.Fatalf("revoked ValidateToken err=%v want ErrSessionRevoked", err)
+	}
+
+	expired, err := svc.IssueSession(ctx, devicebus.IssueInput{
+		DeviceID: "dev-expired-handshake", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+	})
+	if err != nil {
+		t.Fatalf("Issue expired: %v", err)
+	}
+	if err := svc.MarkBound(ctx, expired.Session.ID); err != nil {
+		t.Fatalf("MarkBound expired: %v", err)
+	}
+	clock.now = clock.now.Add(2 * time.Hour)
+	if _, err := svc.ValidateToken(ctx, expired.Session.ID, expired.Token); !errors.Is(err, devicebus.ErrSessionExpired) {
+		t.Fatalf("expired ValidateToken err=%v want ErrSessionExpired", err)
 	}
 }
 
@@ -142,7 +240,7 @@ func TestExpireDueSessions(t *testing.T) {
 	ctx := context.Background()
 
 	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-A", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-A", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	})
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
@@ -169,7 +267,7 @@ func TestExpireDueSessionsExpiresPending(t *testing.T) {
 	ctx := context.Background()
 
 	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-pending", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-pending", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	})
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
@@ -196,7 +294,7 @@ func TestDefaultTokenTTLIsThirtyDays(t *testing.T) {
 	svc := devicebus.NewService(db, devicebus.Config{TokenSecret: "secret"}).WithClock(clock.Now)
 
 	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-A", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-A", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	})
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
@@ -222,13 +320,13 @@ func TestIssueSessionReplacesSameDeviceAndCapsUserChannel(t *testing.T) {
 	})
 
 	first, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-A", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-A", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	})
 	if err != nil {
 		t.Fatalf("Issue first: %v", err)
 	}
 	second, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-A", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-A", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	})
 	if err != nil {
 		t.Fatalf("Issue replacement: %v", err)
@@ -245,12 +343,12 @@ func TestIssueSessionReplacesSameDeviceAndCapsUserChannel(t *testing.T) {
 	}
 
 	if _, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-B", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-B", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	}); err != nil {
 		t.Fatalf("Issue second device: %v", err)
 	}
 	if _, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-C", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-C", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	}); !errors.Is(err, devicebus.ErrSessionLimitExceeded) {
 		t.Fatalf("Issue over cap err=%v want ErrSessionLimitExceeded", err)
 	}
@@ -290,7 +388,7 @@ func TestHandleIssueReturnsTokenWithNoStoreHeaders(t *testing.T) {
 	svc.RegisterRoutes(api)
 
 	req, _ := http.NewRequest(http.MethodPost, "/api/channels/ch-X/devices",
-		strings.NewReader(`{"device_id":"dev-A","device_type":"xhs","daemon_id":"d1"}`))
+		strings.NewReader(`{"device_id":"dev-A","device_type":"xhs.chrome_extension","daemon_id":"d1"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: login.Token})
 	rec := httptest.NewRecorder()
@@ -307,6 +405,19 @@ func TestHandleIssueReturnsTokenWithNoStoreHeaders(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"token"`) {
 		t.Fatalf("issue response should include one-time raw token: %s", rec.Body.String())
 	}
+
+	badReq, _ := http.NewRequest(http.MethodPost, "/api/channels/ch-X/devices",
+		strings.NewReader(`{"device_id":"dev-B","device_type":"xhs","daemon_id":"d1"}`))
+	badReq.Header.Set("Content-Type", "application/json")
+	badReq.AddCookie(&http.Cookie{Name: identity.CookieName, Value: login.Token})
+	badRec := httptest.NewRecorder()
+	r.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unsupported device_type status=%d want 422 body=%s", badRec.Code, badRec.Body.String())
+	}
+	if !strings.Contains(badRec.Body.String(), `"reject_reason":"device_type_invalid"`) {
+		t.Fatalf("unsupported device_type body missing reject reason: %s", badRec.Body.String())
+	}
 }
 
 func TestAllStatesClosedSet(t *testing.T) {
@@ -321,7 +432,7 @@ func TestHandleWSRejectsPendingBeforeUpgrade(t *testing.T) {
 	svc := newSvc(t, nil)
 	ctx := context.Background()
 	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-A", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-A", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	})
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
@@ -362,7 +473,7 @@ func TestHandleWSRejectsNonAllowlistedOrigin(t *testing.T) {
 		AllowedOrigins: []string{"https://allowed.example"},
 	})
 	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-A", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-A", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	})
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
@@ -399,7 +510,7 @@ func TestHandleWSSubprotocolParserFailClosed(t *testing.T) {
 	svc := newSvc(t, nil)
 	ctx := context.Background()
 	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-A", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-A", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	})
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
@@ -450,6 +561,64 @@ func TestHandleWSSubprotocolParserFailClosed(t *testing.T) {
 	}
 }
 
+func TestHandleWSRejectsLegacySignedPayloadToken(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "d.db"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	svc := devicebus.NewService(db, devicebus.Config{
+		TokenSecret:        "secret",
+		TokenTTL:           time.Hour,
+		AllowMissingOrigin: true,
+	})
+	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
+		DeviceID: "dev-legacy-token", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if err := svc.MarkBound(ctx, res.Session.ID); err != nil {
+		t.Fatalf("MarkBound: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/devicebus", svc.HandleWS(noopForwarder{}))
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/devicebus?session_id=" + res.Session.ID
+	legacyToken := legacySignedPayloadToken([]byte("secret"), `{"sid":"`+res.Session.ID+`","cid":"ch-X","did":"dev-legacy-token","iat":1,"exp":9999999999999}`)
+	ws, resp, err := deviceWSDialer(legacyToken).Dial(wsURL, nil)
+	if err == nil {
+		_ = ws.Close()
+		t.Fatal("legacy signed-payload token upgraded successfully")
+	}
+	if resp == nil {
+		t.Fatalf("legacy token dial response nil: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("legacy token status=%d want 401", resp.StatusCode)
+	}
+
+	ws, _, err = deviceWSDialer(res.Token).Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("server-issued opaque token dial: %v", err)
+	}
+	_ = ws.Close()
+}
+
+func legacySignedPayloadToken(secret []byte, body string) string {
+	encodedBody := base64.RawURLEncoding.EncodeToString([]byte(body))
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(encodedBody))
+	encodedSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return encodedBody + "." + encodedSig
+}
+
 // TestIssueResultCarriesFingerprint covers T147 phase-4b — the issue
 // path returns a non-empty TokenFingerprint sized to TokenFingerprintLength
 // so the gateway can ship it into the daemon-side mirror without
@@ -460,7 +629,7 @@ func TestIssueResultCarriesFingerprint(t *testing.T) {
 	ctx := context.Background()
 
 	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-A", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-A", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	})
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
@@ -473,7 +642,7 @@ func TestIssueResultCarriesFingerprint(t *testing.T) {
 	// Issue a second session — different sessions MUST have different
 	// fingerprints because the raw tokens differ.
 	res2, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-B", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-B", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	})
 	if err != nil {
 		t.Fatalf("Issue 2: %v", err)
@@ -560,6 +729,50 @@ func deviceWSDialerWithSubprotocols(protocols ...string) *websocket.Dialer {
 	return &d
 }
 
+func TestHandleWSReadLimitRejectsOversizedFrame(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "d.db"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	svc := devicebus.NewService(db, devicebus.Config{
+		TokenSecret:        "secret",
+		TokenTTL:           time.Hour,
+		AllowMissingOrigin: true,
+	})
+	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
+		DeviceID: "dev-read-limit", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if err := svc.MarkBound(ctx, res.Session.ID); err != nil {
+		t.Fatalf("MarkBound: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/devicebus", svc.HandleWS(noopForwarder{}))
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/devicebus?session_id=" + res.Session.ID
+	ws, _, err := deviceWSDialer(res.Token).Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = ws.Close() }()
+	oversized := strings.Repeat("x", int(devicebus.DefaultDeviceWSReadLimit)+1)
+	if err := ws.WriteMessage(websocket.TextMessage, []byte(oversized)); err != nil {
+		t.Fatalf("write oversized frame: %v", err)
+	}
+	_ = ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := ws.ReadMessage(); err == nil {
+		t.Fatal("read succeeded after oversized frame")
+	}
+}
+
 // TestHandleWS_IdleDeviceTrippedByReadDeadline mirrors the daemonbus
 // keepalive regression test: a device WS that connects then ignores
 // server pings (no pong replies, no business reads) must be reaped
@@ -584,7 +797,7 @@ func TestHandleWS_IdleDeviceTrippedByReadDeadline(t *testing.T) {
 		PingWriteTimeout:   250 * time.Millisecond,
 	})
 	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-idle", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-idle", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	})
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
@@ -641,7 +854,7 @@ func TestHandleWS_RevokeClosesLiveConnectionBeforeForward(t *testing.T) {
 		AllowMissingOrigin: true,
 	})
 	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-race", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-race", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	})
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
@@ -702,7 +915,7 @@ func TestHandleWS_RechecksExpiredSessionBeforeForward(t *testing.T) {
 		AllowMissingOrigin: true,
 	}).WithClock(clock.Now)
 	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
-		DeviceID: "dev-exp", ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+		DeviceID: "dev-exp", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
 	})
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
@@ -739,5 +952,78 @@ func TestHandleWS_RechecksExpiredSessionBeforeForward(t *testing.T) {
 	_ = ws.SetReadDeadline(time.Now().Add(time.Second))
 	if _, _, err := ws.ReadMessage(); err == nil {
 		t.Fatal("expired device WS remained readable/open")
+	}
+}
+
+func TestSendFrameToDeviceRejectsExpiredSessionBeforeOutbound(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "d.db"), store.OpenOptions{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	svc := devicebus.NewService(db, devicebus.Config{
+		TokenSecret:        "secret",
+		TokenTTL:           time.Hour,
+		AllowMissingOrigin: true,
+	}).WithClock(clock.Now)
+	res, err := svc.IssueSession(ctx, devicebus.IssueInput{
+		DeviceID: "dev-exp-out", DeviceType: validDeviceType, ChannelID: "ch-X", UserID: "u1", DaemonID: "d1",
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if err := svc.MarkBound(ctx, res.Session.ID); err != nil {
+		t.Fatalf("MarkBound: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/devicebus", svc.HandleWS(noopForwarder{}))
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/devicebus?session_id=" + res.Session.ID
+	ws, _, err := deviceWSDialer(res.Token).Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = ws.Close() }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		row, err := svc.Get(ctx, res.Session.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if row.State == devicebus.StateActive {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	row, err := svc.Get(ctx, res.Session.ID)
+	if err != nil {
+		t.Fatalf("Get active: %v", err)
+	}
+	if row.State != devicebus.StateActive {
+		t.Fatalf("state=%q want active", row.State)
+	}
+
+	clock.now = clock.now.Add(2 * time.Hour)
+	if err := svc.SendFrameToDevice(ctx, res.Session.ID, devicebus.DeviceFrame{TransitSeq: 99}); !errors.Is(err, devicebus.ErrSessionExpired) {
+		t.Fatalf("SendFrameToDevice expired err=%v want ErrSessionExpired", err)
+	}
+	row, err = svc.Get(ctx, res.Session.ID)
+	if err != nil {
+		t.Fatalf("Get expired: %v", err)
+	}
+	if row.State != devicebus.StateExpired {
+		t.Fatalf("state=%q want expired", row.State)
+	}
+	_ = ws.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := ws.ReadMessage(); err == nil {
+		t.Fatal("expired outbound path delivered a frame or left WS open")
 	}
 }

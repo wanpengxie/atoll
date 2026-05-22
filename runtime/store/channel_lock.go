@@ -10,7 +10,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
-// ChannelLockRow mirrors the channel_lock table row (M1.5-T3 — daemon
+// ChannelLockRow mirrors the channel_lock table row (launch-T3 — daemon
 // side fencing fields per T1.4).
 type ChannelLockRow struct {
 	ChannelID    channel.ID

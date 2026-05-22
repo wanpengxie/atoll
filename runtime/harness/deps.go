@@ -55,6 +55,32 @@ type TypeRegistry interface {
 	Lookup(ctx context.Context, typeName string) (TypeView, bool, error)
 }
 
+// Logger is the minimal structured logger used by the harness hot path.
+// It mirrors the adapter framework's Logger shape without importing the
+// framework package into runtime/harness.
+type Logger interface {
+	Debug(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}
+
+// NoopLogger drops every log call.
+type NoopLogger struct{}
+
+func (NoopLogger) Debug(string, ...any) {}
+func (NoopLogger) Warn(string, ...any)  {}
+func (NoopLogger) Error(string, ...any) {}
+
+// Metrics is the minimal counter seam used for harness reject accounting.
+type Metrics interface {
+	IncCounter(name string, tags ...string)
+}
+
+// NoopMetrics drops every metric call.
+type NoopMetrics struct{}
+
+func (NoopMetrics) IncCounter(string, ...string) {}
+
 // CallerContext carries the principal + transport metadata the harness
 // needs to verify a write. It is plumbed through context.Context (see
 // CtxWithCaller / CallerFromCtx) so step implementations do not need a
@@ -113,6 +139,12 @@ type Deps struct {
 	// NowMs returns unix-ms (engine ts_received write source). Defaults
 	// to time.Now when nil.
 	NowMs func() int64
+
+	// Logger receives per-step pass/reject diagnostics. nil → NoopLogger.
+	Logger Logger
+
+	// Metrics receives per-reject counters. nil → NoopMetrics.
+	Metrics Metrics
 }
 
 // Validate returns nil when Deps is wired enough to assemble a Chain.

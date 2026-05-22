@@ -22,11 +22,32 @@ func TestStateClosedSet(t *testing.T) {
 	}
 }
 
+func TestPlacementDiffActionClosedSet(t *testing.T) {
+	t.Parallel()
+
+	want := []PlacementDiffAction{
+		PlacementDiffActionOK,
+		PlacementDiffActionReclaimPending,
+		PlacementDiffActionDirectoryMissing,
+	}
+	if got := len(AllPlacementDiffActions); got != len(want) {
+		t.Fatalf("AllPlacementDiffActions len = %d, want %d", got, len(want))
+	}
+	for i, action := range AllPlacementDiffActions {
+		if action != want[i] {
+			t.Errorf("AllPlacementDiffActions[%d] = %q, want %q", i, action, want[i])
+		}
+		if action == "unbind_pending" {
+			t.Fatal("unbind_pending is not a v1 placement_diff action")
+		}
+	}
+}
+
 // TestTransitionMatrix locks the L2 §1.4.11.2 state-machine transition
 // rules. Every (from, to) pair from the spec table must be Allowed; any
 // pair not on the spec table must be Forbidden.
 //
-// This is the verification artifact called out by m1.5-tickets.md §T1
+// This is the verification artifact called out by launch-ticket notes §T1
 // acceptance criteria — "状态转换矩阵".
 func TestTransitionMatrix(t *testing.T) {
 	t.Parallel()

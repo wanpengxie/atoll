@@ -5,8 +5,8 @@
 //
 // Authoritative spec:
 //
-//   - Envelope fields           — L0 §2.1 (.dalek/pm/v4-layer0-spec.md)
-//   - Kind closed set           — L0 §3.1 invariant I7 + v4-message-definition §3
+//   - Envelope fields           — L0 §2.1 (.dalek/pm/proto-layer0.md)
+//   - Kind closed set           — L0 §3.1 invariant I7 + proto-layer0 §3
 //   - Visibility enum           — L0 §2.4
 //   - Reason closed sets        — L1 §10.3
 //   - Canonical hash            — L2 §1.4.10.2

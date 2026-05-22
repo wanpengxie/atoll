@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # lint-banned-words.sh — banned-word lint for coagent (covers codex 必修 #14)
 #
-# spec: .dalek/pm/m1.5-tickets.md §T8 #5
-#       .dalek/pm/m1.5-server-rewrite-and-restructure.md §15.2.2
+# spec: .dalek/pm/proto-foundation.md + .dalek/pm/impl-vocabulary.md
 #
 # 分层扫描：
 #   CODE_DIRS   (kernel runtime adapters server cmd pkg ui)      — 严格禁止
-#   ACTIVE_SPEC (.dalek/pm/v4-* + .dalek/pm/m1.5-*)               — 严格禁止
+#   ACTIVE_SPEC (.dalek/pm/proto-* + impl-* + domain-*)           — 严格禁止
 #   历史/讨论文档 grandfather（不在 ACTIVE_SPEC 列表里，不扫）
 #   archive/ 默认 grep 排除（lightcone/* 等已归档到 archive/）
 #
@@ -27,14 +26,13 @@ set -euo pipefail
 CODE_DIRS=(kernel runtime adapters server cmd pkg ui scripts)
 
 ACTIVE_SPEC=(
-  .dalek/pm/v4-message-definition.md
-  .dalek/pm/v4-layer0-spec.md
-  .dalek/pm/v4-layer1-spec.md
-  .dalek/pm/v4-layer2-spec.md
-  .dalek/pm/v4-layer3-spec.md
-  .dalek/pm/v4-layer4-spec.md
-  .dalek/pm/m1.5-server-rewrite-and-restructure.md
-  .dalek/pm/m1.5-tickets.md
+  .dalek/pm/proto-foundation.md
+  .dalek/pm/proto-layer0.md
+  .dalek/pm/proto-layer1.md
+  .dalek/pm/impl-layer2.md
+  .dalek/pm/impl-layer3.md
+  .dalek/pm/impl-vocabulary.md
+  .dalek/pm/domain-xhs-spec.md
 )
 
 # 公共目录排除（grep -r 用）
@@ -44,7 +42,7 @@ EXCLUDES=(
   --exclude-dir=dist
   --exclude-dir=.git
   --exclude=lint-banned-words.sh
-  # M1.5-T5: pnpm 锁文件的 integrity hash (base64) 会偶发包含 "mcp"
+  # launch-T5: pnpm 锁文件的 integrity hash (base64) 会偶发包含 "mcp"
   # 子串，纯属字符级 false positive；锁文件本身由 pnpm 生成，无人写。
   --exclude=pnpm-lock.yaml
 )

@@ -28,6 +28,12 @@ type Spawner interface {
 	Spawn(ctx context.Context, leaseID string, extraEnv []string) (WorkerProc, error)
 }
 
+// ReadinessChecker is implemented by spawners that can validate prerequisites
+// without starting a worker process.
+type ReadinessChecker interface {
+	CheckReady(ctx context.Context) error
+}
+
 // WorkerProc is the daemon-side handle on a running worker.
 type WorkerProc struct {
 	LeaseID string
@@ -44,6 +50,28 @@ type ExecSpawner struct {
 	Args       []string
 }
 
+// CheckReady validates that the worker binary exists and has at least one
+// execute bit set. It does not execute the binary.
+func (s *ExecSpawner) CheckReady(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.BinaryPath == "" {
+		return errors.New("workerhost: ExecSpawner.BinaryPath empty")
+	}
+	info, err := os.Stat(s.BinaryPath)
+	if err != nil {
+		return fmt.Errorf("workerhost: stat worker binary %s: %w", s.BinaryPath, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("workerhost: worker binary %s is a directory", s.BinaryPath)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("workerhost: worker binary %s is not executable", s.BinaryPath)
+	}
+	return nil
+}
+
 // Spawn starts the worker binary.
 //
 // The per-Spawn extraEnv list (M1.6-T5 phase-3) is appended after the
@@ -58,6 +86,9 @@ type ExecSpawner struct {
 func (s *ExecSpawner) Spawn(ctx context.Context, leaseID string, extraEnv []string) (WorkerProc, error) {
 	if s.BinaryPath == "" {
 		return WorkerProc{}, errors.New("workerhost: ExecSpawner.BinaryPath empty")
+	}
+	if err := s.CheckReady(ctx); err != nil {
+		return WorkerProc{}, err
 	}
 	if leaseID == "" {
 		return WorkerProc{}, errors.New("workerhost: ExecSpawner.Spawn empty leaseID")

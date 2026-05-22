@@ -8,7 +8,7 @@ package cli
 //   - The xhs adapter sees ONE publish at a time; it cannot economically
 //     check the whole-channel history for a prior completed publish
 //     with the same note_id without re-implementing a query layer.
-//   - Spec v4-layer4 §2.5 declares "duplicate publish refusal" as a
+//   - domain-xhs-spec §2.5 declares "duplicate publish refusal" as a
 //     business invariant; CLI is the right place because (a) the agent
 //     drives publish through the CLI, (b) the channel.sqlite is local
 //     to the daemon spawning the CLI, (c) the rejection happens BEFORE

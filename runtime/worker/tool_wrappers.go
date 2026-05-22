@@ -4,7 +4,7 @@ package worker
 // agent loop can call routes through one of these, which in turn
 // converts the call into a v4 envelope + dispatches via IPCClient.
 //
-// M1.5 ships only the wiring shape — concrete tool implementations land
+// launch ships only the wiring shape — concrete tool implementations land
 // in adapters/ (T4 / T5).
 type ToolWrapper interface {
 	// Name returns the canonical actor id, e.g. "tool:feishu-adapter".

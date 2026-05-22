@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync/atomic"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/pkg/requestctx"
 )
 
 // Handlers is the set of hooks dispatch invokes when daemon-sent
@@ -70,97 +72,133 @@ func (c *Connection) Run(ctx context.Context, h Handlers) error {
 			}
 			return err
 		}
+		frameCtx := ctx
+		if frame.RequestID != "" {
+			frameCtx = requestctx.WithRequestID(ctx, frame.RequestID)
+		}
 		// Stale-connection frame guard (L2 §9.4): drop frames whose
 		// epoch is less than the current connection epoch.
 		if frame.DaemonConnectionEpoch != c.ConnectionEpoch {
+			if c.log != nil {
+				c.log.Warn("daemonbus.frame_rejected",
+					"reason", "stale_connection_epoch",
+					"request_id", requestctx.RequestID(frameCtx),
+					"daemon_id", string(c.DaemonID),
+					"frame_id", string(frame.FrameID),
+					"frame_kind", string(frame.FrameKind),
+					"connection_epoch", int64(c.ConnectionEpoch),
+					"frame_connection_epoch", int64(frame.DaemonConnectionEpoch),
+				)
+			}
 			continue
 		}
 		// Wake any SendAndAwait waiters first.
 		matched := c.matchAck(frame)
 
-		// Then dispatch to typed handlers.
-		switch frame.FrameKind {
-		case daemonbus.FrameTypeViewsyncPush:
-			if h.OnPush != nil {
-				push, perr := DecodeViewsyncPush(frame)
-				if perr != nil {
-					return perr
-				}
-				ack, err := h.OnPush(ctx, c, push)
-				if err != nil {
-					return err
-				}
-				if ack.ChannelID == "" {
-					ack.ChannelID = push.ChannelID
-				}
-				if _, err := c.SendFrame(ctx, daemonbus.FrameTypeViewsyncAck, ack); err != nil {
-					return err
-				}
+		if err := c.dispatchFrame(frameCtx, h, frame, matched); err != nil {
+			if c.log != nil {
+				c.log.Warn("daemonbus.frame_dispatch_failed",
+					"request_id", requestctx.RequestID(frameCtx),
+					"daemon_id", string(c.DaemonID),
+					"frame_id", string(frame.FrameID),
+					"frame_kind", string(frame.FrameKind),
+					"connection_epoch", int64(c.ConnectionEpoch),
+					"error", err.Error(),
+				)
 			}
-		case daemonbus.FrameTypeControlCreateChannelAck:
-			if h.OnCreateChannelAck != nil {
-				ack, perr := DecodeCreateAck(frame)
-				if perr != nil {
-					return perr
-				}
-				if err := h.OnCreateChannelAck(ctx, c, ack); err != nil {
-					return err
-				}
-			}
-		case daemonbus.FrameTypeControlRejectChannel:
-			if h.OnRejectChannel != nil {
-				rej, perr := DecodeRejectChannel(frame)
-				if perr != nil {
-					return perr
-				}
-				if err := h.OnRejectChannel(ctx, c, rej); err != nil {
-					return err
-				}
-			}
-		case daemonbus.FrameTypeControlHeartbeat:
-			var p HeartbeatPayload
-			if err := json.Unmarshal(frame.Payload, &p); err != nil {
-				return fmt.Errorf("daemonbus: unmarshal heartbeat: %w", err)
-			}
-			ackPayload := placement.HeartbeatAckPayload{
-				HeartbeatSeq: p.HeartbeatSeq,
-			}
-			if h.OnHeartbeat != nil {
-				out, err := h.OnHeartbeat(ctx, c, p)
-				if err != nil {
-					return err
-				}
-				ackPayload = out
-				if ackPayload.HeartbeatSeq == 0 {
-					ackPayload.HeartbeatSeq = p.HeartbeatSeq
-				}
-			}
-			// Always reply heartbeat_ack so daemon RTT stays calibrated.
-			if _, err := c.SendFrame(ctx, daemonbus.FrameTypeControlHeartbeatAck, ackPayload); err != nil {
-				return err
-			}
-		case daemonbus.FrameTypeControlHeldChannelsReport:
-			if h.OnHeldChannelsReport != nil {
-				req, perr := DecodeHeldChannelsReport(frame)
-				if perr != nil {
-					return perr
-				}
-				if err := h.OnHeldChannelsReport(ctx, c, req); err != nil {
-					return err
-				}
-			}
-		case daemonbus.FrameTypeDeviceTransitRecv:
-			if h.OnDeviceTransitRecv != nil {
-				if err := h.OnDeviceTransitRecv(ctx, c, frame); err != nil {
-					return err
-				}
-			}
-		default:
-			// Unhandled frame types fall through — the ack-match above
-			// already handled SendAndAwait pairings.
-			_ = matched
+			return err
 		}
 	}
+}
+
+func (c *Connection) dispatchFrame(ctx context.Context, h Handlers, frame daemonbus.Frame, matched bool) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("daemonbus: dispatch panic on %s: %v\n%s", frame.FrameKind, r, debug.Stack())
+		}
+	}()
+	switch frame.FrameKind {
+	case daemonbus.FrameTypeViewsyncPush:
+		if h.OnPush != nil {
+			push, perr := DecodeViewsyncPush(frame)
+			if perr != nil {
+				return perr
+			}
+			ack, err := h.OnPush(ctx, c, push)
+			if err != nil {
+				return err
+			}
+			if ack.ChannelID == "" {
+				ack.ChannelID = push.ChannelID
+			}
+			if _, err := c.SendFrame(ctx, daemonbus.FrameTypeViewsyncAck, ack); err != nil {
+				return err
+			}
+		}
+	case daemonbus.FrameTypeControlCreateChannelAck:
+		if h.OnCreateChannelAck != nil {
+			ack, perr := DecodeCreateAck(frame)
+			if perr != nil {
+				return perr
+			}
+			if err := h.OnCreateChannelAck(ctx, c, ack); err != nil {
+				return err
+			}
+		}
+	case daemonbus.FrameTypeControlRejectChannel:
+		if h.OnRejectChannel != nil {
+			rej, perr := DecodeRejectChannel(frame)
+			if perr != nil {
+				return perr
+			}
+			if err := h.OnRejectChannel(ctx, c, rej); err != nil {
+				return err
+			}
+		}
+	case daemonbus.FrameTypeControlHeartbeat:
+		var p HeartbeatPayload
+		if err := json.Unmarshal(frame.Payload, &p); err != nil {
+			return fmt.Errorf("daemonbus: unmarshal heartbeat: %w", err)
+		}
+		ackPayload := placement.HeartbeatAckPayload{
+			HeartbeatSeq: p.HeartbeatSeq,
+		}
+		if h.OnHeartbeat != nil {
+			out, err := h.OnHeartbeat(ctx, c, p)
+			if err != nil {
+				return err
+			}
+			ackPayload = out
+			if ackPayload.HeartbeatSeq == 0 {
+				ackPayload.HeartbeatSeq = p.HeartbeatSeq
+			}
+		}
+		// Always reply heartbeat_ack so daemon RTT stays calibrated.
+		if _, err := c.SendFrame(ctx, daemonbus.FrameTypeControlHeartbeatAck, ackPayload); err != nil {
+			return err
+		}
+	case daemonbus.FrameTypeControlHeldChannelsReport:
+		if h.OnHeldChannelsReport != nil {
+			req, perr := DecodeHeldChannelsReport(frame)
+			if perr != nil {
+				return perr
+			}
+			if err := h.OnHeldChannelsReport(ctx, c, req); err != nil {
+				return err
+			}
+		}
+	case daemonbus.FrameTypeDeviceTransitRecv:
+		if h.OnDeviceTransitRecv != nil {
+			if err := h.OnDeviceTransitRecv(ctx, c, frame); err != nil {
+				return err
+			}
+		}
+	default:
+		// Unhandled frame types fall through — the ack-match above
+		// already handled SendAndAwait pairings.
+		_ = matched
+	}
+	return nil
 }
 
 var monotonic atomic.Uint64

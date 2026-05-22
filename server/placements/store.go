@@ -4,7 +4,7 @@
 // plus the reconcile loop from T1.7 (cold start grace + heartbeat
 // timeout).
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T6 (placements) +
+// Authoritative spec: launch-ticket notes §T6 (placements) +
 // kernel/placement contract.
 //
 // Concurrency: every method is safe under concurrent use — sqlite
@@ -35,9 +35,9 @@ func NewSQLStore(db *sql.DB) *SQLStore { return &SQLStore{db: db} }
 // step 1). Returns ErrPlacementExists on PRIMARY KEY collision.
 //
 // The three federation / tenancy columns (host_actor_id /
-// federated_origin / tenant_id, reserved by m1.5-tickets §T10) are
+// federated_origin / tenant_id, reserved by launch-ticket notes §T10) are
 // written as NULL when the corresponding placement field is empty;
-// M1.5 demo callers therefore leave the columns NULL without any
+// launch demo callers therefore leave the columns NULL without any
 // extra parameter.
 func (s *SQLStore) Reserve(ctx context.Context, p placement.Placement) (placement.Placement, error) {
 	if p.ChannelID == "" {
@@ -628,7 +628,7 @@ func (s *SQLStore) ListByDaemon(ctx context.Context, daemonID placement.DaemonID
 }
 
 // nullableString converts a Go string to sql.NullString — empty
-// string maps to NULL so M1.5 demo callers leave the federation /
+// string maps to NULL so launch demo callers leave the federation /
 // tenancy columns NULL without extra parameters.
 func nullableString(s string) sql.NullString {
 	if s == "" {

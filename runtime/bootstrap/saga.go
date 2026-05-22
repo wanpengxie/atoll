@@ -54,7 +54,7 @@ type TemplateView struct {
 }
 
 // Saga is the daemon-side channel bootstrap orchestrator (L2 §3.6
-// bootstrap_registry 9-step). For M1.5-T3 we ship a lean variant
+// bootstrap_registry 9-step). For launch-T3 we ship a lean variant
 // covering the data-plane steps the protocol requires; richer features
 // (per-channel adapters / type_registry preload / placement reconciliation)
 // land in T4 / T5 / T6.

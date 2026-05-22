@@ -17,6 +17,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/pkg/requestctx"
 	"github.com/wanpengxie/ActOS/server/httperr"
 )
 
@@ -45,6 +46,10 @@ const DefaultPingCadence = 30 * time.Second
 // runtime/transit.DefaultWSIdleReadTimeout — kept in sync so neither
 // side trips first on the steady-state.
 const DefaultServerIdleReadTimeout = 70 * time.Second
+
+// DefaultServerWSReadLimit caps a single inbound daemonbus frame at 4 MiB.
+// Larger frames are closed by gorilla before JSON allocation/validation.
+const DefaultServerWSReadLimit int64 = 4 << 20
 
 // DefaultPingWriteTimeout caps a single WS ping write. Pings travel
 // via WriteControl which itself takes a deadline; if the peer is gone
@@ -104,27 +109,55 @@ func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 		if raw := c.Query("capacity"); raw != "" {
 			n, err := strconv.Atoi(raw)
 			if err != nil || n < 0 {
+				s.log.Warn("daemonbus.connection_rejected",
+					"reason", "bad_capacity",
+					"request_id", requestctx.RequestID(c.Request.Context()),
+					"daemon_id", string(daemonID),
+					"capacity", raw,
+				)
 				c.JSON(http.StatusBadRequest, gin.H{"error": "capacity must be a non-negative integer"})
 				return
 			}
 			capacity = n
 		}
 		if !parseOK || daemonID == "" || key == "" || !hasRealProto {
+			s.log.Warn("daemonbus.connection_rejected",
+				"reason", "bad_subprotocol",
+				"request_id", requestctx.RequestID(c.Request.Context()),
+				"daemon_id", string(daemonID),
+			)
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": "Sec-WebSocket-Protocol: coagent.daemon.v1, daemon.<daemon_id>, key.<key> required",
 			})
 			return
 		}
 		if !sharedSecretEqual(key, s.cfg.SharedSecret) {
+			s.log.Warn("daemonbus.connection_rejected",
+				"reason", "auth_failed",
+				"request_id", requestctx.RequestID(c.Request.Context()),
+				"daemon_id", string(daemonID),
+			)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": ErrDaemonAuthFailed.Error()})
 			return
 		}
 		if err := s.RegisterDaemon(c.Request.Context(), daemonID, host, version, capacity, key); err != nil {
+			s.log.Warn("daemonbus.connection_rejected",
+				"reason", "register_failed",
+				"request_id", requestctx.RequestID(c.Request.Context()),
+				"daemon_id", string(daemonID),
+				"error", err.Error(),
+			)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
 		}
 		epoch, err := s.IssueConnectionEpoch(c.Request.Context(), daemonID)
 		if err != nil {
+			s.log.Error("daemonbus.connection_rejected",
+				"reason", "epoch_failed",
+				"request_id", requestctx.RequestID(c.Request.Context()),
+				"daemon_id", string(daemonID),
+				"error", err.Error(),
+			)
 			httperr.Internal(c, "daemonbus.issue_connection_epoch", err)
 			return
 		}
@@ -135,11 +168,20 @@ func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 		}
 		ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
+			s.log.Warn("daemonbus.connection_rejected",
+				"reason", "upgrade_failed",
+				"request_id", requestctx.RequestID(c.Request.Context()),
+				"daemon_id", string(daemonID),
+				"error", err.Error(),
+			)
 			return
 		}
+		ws.SetReadLimit(DefaultServerWSReadLimit)
 
 		tx := newWSTransport(ws)
 		conn := NewConnection(daemonID, epoch, tx)
+		conn.SetSendAndAwaitOptions(s.cfg.SendAndAwaitTimeout, s.cfg.PendingAwaitLimit)
+		conn.log = s.log
 		// Start the keepalive pinger now that the conn is wired. The
 		// pinger stops when the conn closes (via Close → ws.Close →
 		// ping write error → pinger goroutine exits). Config can
@@ -160,6 +202,14 @@ func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 		tx.startPinger(cadence, pingWrite, idle)
 		s.Register(conn)
 		defer s.UnregisterConnection(conn)
+		s.log.Info("daemonbus.connection_accepted",
+			"request_id", requestctx.RequestID(c.Request.Context()),
+			"daemon_id", string(daemonID),
+			"connection_epoch", int64(epoch),
+			"host", host,
+			"version", version,
+			"capacity", capacity,
+		)
 
 		// Send the connection_accepted frame so daemon learns its
 		// epoch (mirrors the L2 §9.4 contract).
@@ -169,9 +219,23 @@ func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 		})
 
 		if err := conn.Run(c.Request.Context(), provider.DaemonbusHandlers()); err != nil {
+			s.log.Warn("daemonbus.connection_closed",
+				"reason", "run_error",
+				"request_id", requestctx.RequestID(c.Request.Context()),
+				"daemon_id", string(daemonID),
+				"connection_epoch", int64(epoch),
+				"error", err.Error(),
+			)
 			// log via gin context for ops visibility — keep it stderr
 			// rather than fatal.
 			_ = c.Error(err)
+		} else {
+			s.log.Info("daemonbus.connection_closed",
+				"reason", "normal",
+				"request_id", requestctx.RequestID(c.Request.Context()),
+				"daemon_id", string(daemonID),
+				"connection_epoch", int64(epoch),
+			)
 		}
 	}
 }
@@ -290,14 +354,47 @@ func (s *Service) UnregisterConnection(conn *Connection) bool {
 	if conn == nil {
 		return false
 	}
+	var hook func(*Connection)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	current := s.connections[conn.DaemonID]
 	if current != conn || current.Generation != conn.Generation {
+		s.mu.Unlock()
 		return false
 	}
 	delete(s.connections, conn.DaemonID)
+	hook = s.onUnregister
+	s.mu.Unlock()
+	if hook != nil {
+		hook(conn)
+	}
 	return true
+}
+
+// Close closes every current daemon connection and removes it from the
+// registry. Hooks run after each connection is deleted so placement handoff
+// uses the same path as an actual WS disconnect.
+func (s *Service) Close() error {
+	s.mu.Lock()
+	conns := make([]*Connection, 0, len(s.connections))
+	for _, conn := range s.connections {
+		if conn != nil {
+			conns = append(conns, conn)
+		}
+	}
+	s.connections = map[placement.DaemonID]*Connection{}
+	hook := s.onUnregister
+	s.mu.Unlock()
+
+	var errs []error
+	for _, conn := range conns {
+		if err := conn.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		if hook != nil {
+			hook(conn)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // ConnectionFor returns the open Connection for daemonID, if any.

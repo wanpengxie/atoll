@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sort"
 	"time"
 
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	khlog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/pkg/requestctx"
 )
 
 // Chain is the concrete runtime implementation of kernel/harness.Chain.
@@ -35,6 +37,12 @@ func New(deps Deps) (*Chain, error) {
 	if deps.NowMs == nil {
 		deps.NowMs = func() int64 { return time.Now().UnixMilli() }
 	}
+	if deps.Logger == nil {
+		deps.Logger = NoopLogger{}
+	}
+	if deps.Metrics == nil {
+		deps.Metrics = NoopMetrics{}
+	}
 
 	steps := []khar.Step{
 		newStepCallerAuth(deps),
@@ -58,7 +66,12 @@ func New(deps Deps) (*Chain, error) {
 // Write runs the chain against env per proto-layer1 §2.0. The envelope
 // is mutated in place during StepNormalize so the caller observes
 // default-filled fields when the call returns.
-func (c *Chain) Write(ctx context.Context, env *message.Envelope) (khar.WriteResult, error) {
+func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res khar.WriteResult, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("harness: panic: %v\n%s", r, debug.Stack())
+		}
+	}()
 	if env == nil {
 		return khar.WriteResult{}, errors.New("harness: nil envelope")
 	}
@@ -69,12 +82,22 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (khar.WriteRes
 	for _, s := range c.steps {
 		out, err := s.Run(ctx, env)
 		if err != nil {
+			c.observeError(ctx, env, s.ID(), err)
 			return khar.WriteResult{}, err
 		}
 		if out.Deduped {
 			env.Seq = out.ExistingSeq
 			env.IsTerminal = out.ExistingIsTerminal
 			env.TSReceived = out.ExistingTSReceived
+			c.deps.Logger.Debug("harness.write.dedupe",
+				"step", int(s.ID()),
+				"step_name", stepName(s.ID()),
+				"channel_id", string(env.ChannelID),
+				"message_id", string(env.ID),
+				"correlation_id", string(env.CorrelationID),
+				"request_id", requestctx.RequestID(ctx),
+				"seq", out.ExistingSeq,
+			)
 			return khar.WriteResult{
 				MessageID: env.ID,
 				Seq:       out.ExistingSeq,
@@ -82,8 +105,10 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (khar.WriteRes
 			}, nil
 		}
 		if !out.Continue() {
+			c.observeReject(ctx, env, s.ID(), out.RejectReason, out.Detail)
 			return rejectFromOutcome(out, env), nil
 		}
+		c.observePass(ctx, env, s.ID())
 	}
 
 	// StepEngineAppend — canonical sink. The chain has by this point
@@ -91,11 +116,12 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (khar.WriteRes
 	// every other field; the store implementation is responsible for
 	// outbox / sequence allocation per L1 §8.6 / L2 §1.4.1.
 	env.TSReceived = c.deps.NowMs()
-	res, err := c.deps.Log.Append(ctx, env, c.deps.Fencing)
+	appendRes, err := c.deps.Log.Append(ctx, env, c.deps.Fencing)
 	if err != nil {
 		// Map the typed AppendError to a closed-set reject when possible.
 		var appErr *khlog.AppendError
 		if errors.As(err, &appErr) {
+			c.observeReject(ctx, env, khar.StepEngineAppend, appErr.Reason, appErr.Detail)
 			return khar.WriteResult{
 				MessageID:        appErr.PartialMessageID,
 				RejectReason:     appErr.Reason,
@@ -103,14 +129,88 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (khar.WriteRes
 				PartialMessageID: appErr.PartialMessageID,
 			}, nil
 		}
+		c.observeError(ctx, env, khar.StepEngineAppend, err)
 		return khar.WriteResult{}, fmt.Errorf("harness: engine append: %w", err)
 	}
 
+	c.observePass(ctx, env, khar.StepEngineAppend)
 	return khar.WriteResult{
 		MessageID: env.ID,
-		Seq:       int64(res.Seq),
-		Deduped:   res.Deduped,
+		Seq:       int64(appendRes.Seq),
+		Deduped:   appendRes.Deduped,
 	}, nil
+}
+
+func (c *Chain) observePass(ctx context.Context, env *message.Envelope, step khar.StepID) {
+	c.deps.Logger.Debug("harness.write.step_ok",
+		"step", int(step),
+		"step_name", stepName(step),
+		"channel_id", string(env.ChannelID),
+		"message_id", string(env.ID),
+		"correlation_id", string(env.CorrelationID),
+		"request_id", requestctx.RequestID(ctx),
+		"type", env.Type,
+		"kind", string(env.Kind),
+	)
+}
+
+func (c *Chain) observeReject(ctx context.Context, env *message.Envelope, step khar.StepID, reason message.HarnessRejectReason, detail string) {
+	if reason == "" {
+		return
+	}
+	c.deps.Metrics.IncCounter("harness.reject", "reason", string(reason), "step", stepName(step))
+	c.deps.Logger.Warn("harness.write.reject",
+		"step", int(step),
+		"step_name", stepName(step),
+		"reason", string(reason),
+		"detail", detail,
+		"channel_id", string(env.ChannelID),
+		"message_id", string(env.ID),
+		"correlation_id", string(env.CorrelationID),
+		"request_id", requestctx.RequestID(ctx),
+		"type", env.Type,
+		"kind", string(env.Kind),
+	)
+}
+
+func (c *Chain) observeError(ctx context.Context, env *message.Envelope, step khar.StepID, err error) {
+	c.deps.Metrics.IncCounter("harness.error", "step", stepName(step))
+	c.deps.Logger.Error("harness.write.error",
+		"step", int(step),
+		"step_name", stepName(step),
+		"error", err.Error(),
+		"channel_id", string(env.ChannelID),
+		"message_id", string(env.ID),
+		"correlation_id", string(env.CorrelationID),
+		"request_id", requestctx.RequestID(ctx),
+		"type", env.Type,
+		"kind", string(env.Kind),
+	)
+}
+
+func stepName(step khar.StepID) string {
+	switch step {
+	case khar.StepCallerAuth:
+		return "caller_auth"
+	case khar.StepEnvelopeShape:
+		return "envelope_shape"
+	case khar.StepDedupe:
+		return "dedupe"
+	case khar.StepNormalize:
+		return "normalize"
+	case khar.StepSenderConsistent:
+		return "sender_consistent"
+	case khar.StepTypeRegistered:
+		return "type_registered"
+	case khar.StepKindAndAudience:
+		return "kind_and_audience"
+	case khar.StepResponsePairing:
+		return "response_pairing"
+	case khar.StepEngineAppend:
+		return "engine_append"
+	default:
+		return fmt.Sprintf("step_%d", step)
+	}
 }
 
 // rejectFromOutcome packages a step outcome into a WriteResult.

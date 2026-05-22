@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +28,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/pkg/requestctx"
 	"github.com/wanpengxie/ActOS/server/catalog"
 	"github.com/wanpengxie/ActOS/server/daemonbus"
 	"github.com/wanpengxie/ActOS/server/devicebus"
@@ -263,6 +265,13 @@ func (a *App) OnChannelMembersChanged(ctx context.Context, channelID string, add
 	}
 	conn, ok := a.daemonbus.ConnectionFor(daemonID)
 	if !ok {
+		pkgLogger.Warn().
+			Str("event", "gateway.update_members_rejected").
+			Str("request_id", requestctx.RequestID(ctx)).
+			Str("channel_id", channelID).
+			Str("daemon_id", string(daemonID)).
+			Str("reason", "daemon_not_connected").
+			Msg("update_members frame not sent")
 		return fmt.Errorf("gateway: update_members: daemon %s not connected", daemonID)
 	}
 	body := kerneldaemonbus.UpdateMembersBody{
@@ -292,23 +301,72 @@ func (a *App) OnChannelMembersChanged(ctx context.Context, channelID string, add
 			body.Removes = append(body.Removes, actor.ActorID(id))
 		}
 	}
+	pkgLogger.Info().
+		Str("event", "gateway.update_members_send").
+		Str("request_id", requestctx.RequestID(ctx)).
+		Str("channel_id", channelID).
+		Str("daemon_id", string(daemonID)).
+		Str("frame_id", string(body.FrameID)).
+		Int("add_count", len(body.Adds)).
+		Int("remove_count", len(body.Removes)).
+		Msg("sending update_members frame")
 	ackFrame, err := conn.SendAndAwait(ctx, kerneldaemonbus.FrameTypeControlUpdateMembers, body)
 	if err != nil {
+		pkgLogger.Warn().Err(err).
+			Str("event", "gateway.update_members_failed").
+			Str("request_id", requestctx.RequestID(ctx)).
+			Str("channel_id", channelID).
+			Str("daemon_id", string(daemonID)).
+			Str("frame_id", string(body.FrameID)).
+			Msg("update_members send failed")
 		return fmt.Errorf("gateway: update_members send: %w", err)
 	}
 	if ackFrame.FrameKind != kerneldaemonbus.FrameTypeControlUpdateMembersAck {
+		pkgLogger.Warn().
+			Str("event", "gateway.update_members_rejected").
+			Str("request_id", requestctx.RequestID(ctx)).
+			Str("channel_id", channelID).
+			Str("daemon_id", string(daemonID)).
+			Str("frame_id", string(body.FrameID)).
+			Str("ack_frame_kind", string(ackFrame.FrameKind)).
+			Str("reason", "unexpected_ack_frame").
+			Msg("update_members ack rejected")
 		return fmt.Errorf("gateway: update_members unexpected ack frame %s", ackFrame.FrameKind)
 	}
 	var ack kerneldaemonbus.UpdateMembersAckBody
 	if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
+		pkgLogger.Warn().Err(err).
+			Str("event", "gateway.update_members_rejected").
+			Str("request_id", requestctx.RequestID(ctx)).
+			Str("channel_id", channelID).
+			Str("daemon_id", string(daemonID)).
+			Str("frame_id", string(body.FrameID)).
+			Str("reason", "ack_decode_failed").
+			Msg("update_members ack decode failed")
 		return fmt.Errorf("gateway: update_members ack decode: %w", err)
 	}
 	if !ack.Accepted {
 		if ack.RejectReason == "" {
 			ack.RejectReason = "rejected"
 		}
+		pkgLogger.Warn().
+			Str("event", "gateway.update_members_rejected").
+			Str("request_id", requestctx.RequestID(ctx)).
+			Str("channel_id", channelID).
+			Str("daemon_id", string(daemonID)).
+			Str("frame_id", string(body.FrameID)).
+			Str("reason", ack.RejectReason).
+			Str("detail", ack.RejectDetail).
+			Msg("update_members ack rejected")
 		return fmt.Errorf("gateway: update_members rejected: %s %s", ack.RejectReason, ack.RejectDetail)
 	}
+	pkgLogger.Info().
+		Str("event", "gateway.update_members_accepted").
+		Str("request_id", requestctx.RequestID(ctx)).
+		Str("channel_id", channelID).
+		Str("daemon_id", string(daemonID)).
+		Str("frame_id", string(body.FrameID)).
+		Msg("update_members ack accepted")
 	return nil
 }
 
@@ -536,6 +594,7 @@ func (a *App) correlationForParent(ctx context.Context, channelID string, parent
 // the surface stays auditable.
 func buildEngine(a *App) *gin.Engine {
 	r := gin.New()
+	r.Use(requestIDMiddleware())
 	r.Use(gin.Recovery())
 
 	r.GET("/healthz", func(c *gin.Context) {
@@ -820,6 +879,9 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 	}
 	ack, err := conn.SendAndAwait(c.Request.Context(), kerneldaemonbus.FrameTypeControlWriteMessage, body)
 	if err != nil {
+		if respondDaemonbusAwaitError(c, err) {
+			return
+		}
 		httperr.Internal(c, "gateway.write_message.send", err)
 		return
 	}
@@ -881,6 +943,22 @@ func writeMessageRejectStatus(reason string) int {
 		}
 	}
 	return http.StatusConflict
+}
+
+func respondDaemonbusAwaitError(c *gin.Context, err error) bool {
+	switch {
+	case errors.Is(err, daemonbus.ErrPendingAwaitLimitExceeded):
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+		return true
+	case errors.Is(err, daemonbus.ErrSendAndAwaitTimeout):
+		c.JSON(http.StatusGatewayTimeout, gin.H{"error": err.Error()})
+		return true
+	case errors.Is(err, daemonbus.ErrConnectionClosed):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		return true
+	default:
+		return false
+	}
 }
 
 func safeDownloadPath(root, param string) (string, bool) {

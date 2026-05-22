@@ -14,7 +14,7 @@ import (
 
 // nonceCache is a tiny per-channel TTL set. The current implementation
 // keeps a map per channel and prunes expired entries lazily on every
-// observe call. M1.5 traffic is low enough that a per-call sweep is
+// observe call. launch traffic is low enough that a per-call sweep is
 // cheaper than a background goroutine; revisit if the cache grows
 // beyond ~10k entries / channel.
 type nonceCache struct {

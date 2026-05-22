@@ -106,7 +106,7 @@ func (s *LeaseStore) Acquire(
 	}
 
 	return Lease{
-		ID:           agentID, // one lease per agent for M1.5
+		ID:           agentID, // one lease per agent for launch
 		ChannelID:    "",      // set by caller
 		WorkerID:     workerID,
 		FencingToken: fencing,

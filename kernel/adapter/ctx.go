@@ -42,7 +42,7 @@ type ModuleContext struct {
 	// canonical-id derivation.
 	Respond RespondFunc
 
-	// HarnessChain is the M1.5 entry-point caller for raw harness
+	// HarnessChain is the launch entry-point caller for raw harness
 	// writes (used by adapters that need to emit non-response messages
 	// — e.g. orphan_callback events).
 	HarnessChain harness.Chain

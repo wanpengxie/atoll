@@ -23,6 +23,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/pkg/metrics"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/scheduler"
@@ -138,6 +139,8 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 			StateStore:      runtimestore.NewAdapterStateStore(h.DB, h.NowFn),
 			CredentialStore: credentialStore,
 			Clock:           clock,
+			Logger:          frameworkZerologLogger{log: h.Logger, channelID: h.ChannelID},
+			Metrics:         metrics.Default(),
 			// T147 §A — daemon supplies the per-channel DeviceTransit so
 			// the framework can satisfy `runtime_inbound_via_relay` modules at
 			// Install time (manager.installOne refuses such a module
@@ -255,6 +258,76 @@ func deliverThroughManager(mgr adapter.Manager, adapterID actor.ActorID, channel
 	}
 }
 
+type frameworkZerologLogger struct {
+	log       *zerolog.Logger
+	channelID channel.ID
+}
+
+func (l frameworkZerologLogger) Debug(msg string, args ...any) {
+	if l.log == nil {
+		return
+	}
+	frameworkLogEvent(l.log.Debug(), l.channelID, args...).Msg(msg)
+}
+
+func (l frameworkZerologLogger) Info(msg string, args ...any) {
+	if l.log == nil {
+		return
+	}
+	frameworkLogEvent(l.log.Info(), l.channelID, args...).Msg(msg)
+}
+
+func (l frameworkZerologLogger) Warn(msg string, args ...any) {
+	if l.log == nil {
+		return
+	}
+	frameworkLogEvent(l.log.Warn(), l.channelID, args...).Msg(msg)
+}
+
+func (l frameworkZerologLogger) Error(msg string, args ...any) {
+	if l.log == nil {
+		return
+	}
+	frameworkLogEvent(l.log.Error(), l.channelID, args...).Msg(msg)
+}
+
+func frameworkLogEvent(e *zerolog.Event, channelID channel.ID, args ...any) *zerolog.Event {
+	if channelID != "" {
+		e = e.Str("channel_id", string(channelID))
+	}
+	for i := 0; i < len(args); i += 2 {
+		key, ok := args[i].(string)
+		if !ok || key == "" {
+			continue
+		}
+		var value any
+		if i+1 < len(args) {
+			value = args[i+1]
+		}
+		switch v := value.(type) {
+		case string:
+			e = e.Str(key, v)
+		case fmt.Stringer:
+			e = e.Str(key, v.String())
+		case int:
+			e = e.Int(key, v)
+		case int64:
+			e = e.Int64(key, v)
+		case uint64:
+			e = e.Uint64(key, v)
+		case bool:
+			e = e.Bool(key, v)
+		case error:
+			e = e.Err(v)
+		case nil:
+			e = e.Str(key, "")
+		default:
+			e = e.Interface(key, v)
+		}
+	}
+	return e
+}
+
 // adapterCallerChain wraps a kernel/harness.Chain and stamps the
 // CallerContext to env.Sender.ID when the envelope carries an explicit
 // actor sender. Used by the adapter framework so its inner chain.Write calls
@@ -300,8 +373,8 @@ func XHSScaffoldFactory(cfg xhs.Config) AdapterModuleFactory {
 	}
 }
 
-// XHSCreatorChannelType is the catalog.Channel.Type value the L4
-// xhs-creator template binds (per v4-layer4-spec). cmd/daemon registers
+// XHSCreatorChannelType is the catalog.Channel.Type value the domain-xhs
+// xhs-creator template binds. cmd/daemon registers
 // a ChannelTemplate under this key and the AdapterModuleFactory closures
 // install the xhs adapter only for channels carrying it.
 const XHSCreatorChannelType = "xhs-creator"
@@ -407,7 +480,7 @@ func (b *DeviceSessionBinder) OnBind(ctx context.Context, body transit.BindDevic
 		ack.Detail = "device_session_id and device_id are required"
 		return ack
 	}
-	if body.DeviceType != "" && body.DeviceType != "xhs" {
+	if !devicetransit.IsXHSDeviceType(body.DeviceType) {
 		ack.Reason = transit.DeviceSessionRejectBindDeviceTypeUnsupported
 		ack.Detail = "device_type unsupported"
 		return ack

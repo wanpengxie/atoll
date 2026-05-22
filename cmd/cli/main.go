@@ -1,6 +1,6 @@
 // Package main is the coagent management CLI binary.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T7 (cmd/cli 子命令).
+// Authoritative spec: launch-ticket notes §T7 (cmd/cli 子命令).
 //
 // Sub-commands:
 //

@@ -2,8 +2,8 @@ package xhs
 
 import "github.com/wanpengxie/ActOS/kernel/actorreg"
 
-// ChannelType is the catalog.Channel.Type key the L4 xhs-creator
-// template binds (v4-layer4-spec §2). Re-exported here so cmd/daemon /
+// ChannelType is the catalog.Channel.Type key the domain-xhs xhs-creator
+// template binds (§2). Re-exported here so cmd/daemon /
 // gateway / future template registry pin one constant.
 const ChannelType = "xhs-creator"
 
@@ -15,7 +15,7 @@ const ChannelType = "xhs-creator"
 // wires into DaemonConfig.ChannelTemplates without taking a runtime
 // dependency on this package.
 //
-// Authoritative spec: .dalek/pm/v4-layer4-spec.md §0.2 / §1.x / §2.x.
+// Authoritative spec: .dalek/pm/domain-xhs-spec.md §0.2 / §1.x / §2.x.
 // Each Template entry is read-only; constructor functions return fresh
 // slices so callers may not mutate the canonical seeds.
 type Template struct {
@@ -30,7 +30,7 @@ type Template struct {
 
 	// WorkdirSubdirs lists relative directory paths the bootstrap
 	// saga mkdirs inside <ChannelsDir>/<channelID>/ during step 5c.
-	// Per v4-layer4-spec §2.5: published-notes/, drafts/, assets/.
+	// Per domain-xhs-spec §2.5: published-notes/, drafts/, assets/.
 	WorkdirSubdirs []string
 
 	// DomainPrompt is the L4 §2.4 prompt segment cmd/daemon injects
@@ -43,7 +43,7 @@ type Template struct {
 // string constant so the prompt-cache stays stable across builds and
 // can be hashed for grep-able telemetry (M1.6-T5 acceptance B3).
 //
-// Authoritative source: .dalek/pm/v4-layer4-spec.md §2.4 (verbatim).
+// Authoritative source: .dalek/pm/domain-xhs-spec.md §2.4 (verbatim).
 const xhsCreatorDomainPrompt = `你是 xhs（小红书）内容创作 agent。
 
 你的工作流：
@@ -74,7 +74,7 @@ const xhsCreatorDomainPrompt = `你是 xhs（小红书）内容创作 agent。
 ` + "`sqlite3 messages.sqlite \"SELECT type, allowed_kinds, handler_binding, terminal_convention, max_pending_ms, handler_actor_id, domain FROM type_registry WHERE domain='xhs' OR type LIKE 'xhs.%'\"`" + `。
 `
 
-// WorkdirSubdirs returns the per-v4-layer4-spec §2.5 directory list
+// WorkdirSubdirs returns the domain-xhs-spec §2.5 directory list
 // the bootstrap saga mkdirs alongside the channel sqlite. Returned as
 // a fresh slice so callers can append safely.
 func WorkdirSubdirs() []string {

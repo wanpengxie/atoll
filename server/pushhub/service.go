@@ -3,7 +3,9 @@
 // every WS-subscribed front-end user that is currently a member of
 // the channel.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T6 (pushhub 子目录).
+// Authoritative contract: pushhub fan-out is ordered per subscriber,
+// suppresses duplicate channel seq values, and closes slow subscribers
+// so clients reconnect and resync instead of silently missing frames.
 //
 // Demo-period: single-instance; no Redis pub/sub. Production would
 // replace Service.broadcast with a pub/sub backend so multiple server
@@ -13,6 +15,7 @@ package pushhub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -24,6 +27,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/pkg/metrics"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
 	"github.com/wanpengxie/ActOS/server/identity"
 )
@@ -48,6 +52,10 @@ const pushhubPingCadence = 30 * time.Second
 // the subscriber. ~2.3× pushhubPingCadence absorbs one missed pong.
 const pushhubIdleReadTimeout = 70 * time.Second
 
+// pushhubWSReadLimit caps a single inbound UI control frame at 4 MiB.
+// Larger frames are closed before JSON allocation/validation.
+const pushhubWSReadLimit int64 = 4 << 20
+
 // pushhubPingWriteTimeout caps a single ping write; on failure the
 // subscriber is closed and pumpRead exits.
 const pushhubPingWriteTimeout = 5 * time.Second
@@ -58,6 +66,12 @@ type Config struct {
 	// handshakes. Empty means deny browser-origin WS handshakes. Requests
 	// with no Origin header are allowed for non-browser clients.
 	AllowedOrigins []string
+
+	// Logger receives structured pushhub events. nil means slog.Default.
+	Logger *slog.Logger
+
+	// Metrics receives pushhub fan-out counters. nil means metrics.Default.
+	Metrics *metrics.Registry
 }
 
 // Service holds the live subscriber registry.
@@ -80,6 +94,8 @@ type Service struct {
 	pingWriteTimeout time.Duration
 
 	allowedOrigins map[string]struct{}
+	log            *slog.Logger
+	metrics        *metrics.Registry
 }
 
 // PushedFrame is the in-memory shape delivered to test observers.
@@ -102,9 +118,20 @@ func NewService(opts ...Config) *Service {
 	if len(opts) > 0 {
 		cfg = opts[0]
 	}
+	log := cfg.Logger
+	if log == nil {
+		log = slog.Default()
+	}
+	log = log.With("subsystem", "pushhub")
+	reg := cfg.Metrics
+	if reg == nil {
+		reg = metrics.Default()
+	}
 	return &Service{
 		subs:           map[channel.ID]map[string]map[*subscriber]struct{}{},
 		allowedOrigins: normalizeAllowedOrigins(cfg.AllowedOrigins),
+		log:            log,
+		metrics:        reg,
 	}
 }
 
@@ -181,6 +208,12 @@ type subscriber struct {
 	once    sync.Once
 	done    chan struct{}
 	writeMu sync.Mutex
+	mu      sync.Mutex
+
+	// lastEnqueued is the per-channel duplicate detector for server-to-UI
+	// delivery. It records the highest seq accepted into send, not merely
+	// observed by PushMessage.
+	lastEnqueued map[channel.ID]viewsync.Seq
 
 	// keepalive parameters captured at construction (so test overrides
 	// don't race with production defaults).
@@ -196,6 +229,7 @@ func newSubscriber(ws *websocket.Conn, userID string, pingCadence, idleReadTimeo
 		chans:            map[channel.ID]struct{}{},
 		send:             make(chan []byte, 64),
 		done:             make(chan struct{}),
+		lastEnqueued:     map[channel.ID]viewsync.Seq{},
 		pingCadence:      pingCadence,
 		idleReadTimeout:  idleReadTimeout,
 		pingWriteTimeout: pingWriteTimeout,
@@ -206,8 +240,39 @@ func newSubscriber(ws *websocket.Conn, userID string, pingCadence, idleReadTimeo
 func (s *subscriber) Close() {
 	s.once.Do(func() {
 		close(s.done)
-		_ = s.ws.Close()
+		if s.ws != nil {
+			_ = s.ws.Close()
+		}
 	})
+}
+
+type subscriberEnqueueResult string
+
+const (
+	subscriberEnqueueDelivered  subscriberEnqueueResult = "delivered"
+	subscriberEnqueueDuplicate  subscriberEnqueueResult = "duplicate"
+	subscriberEnqueueClosed     subscriberEnqueueResult = "closed"
+	subscriberEnqueueSlowClosed subscriberEnqueueResult = "slow_closed"
+)
+
+func (s *subscriber) enqueueMessage(channelID channel.ID, seq viewsync.Seq, raw []byte) subscriberEnqueueResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if last, ok := s.lastEnqueued[channelID]; ok && seq <= last {
+		return subscriberEnqueueDuplicate
+	}
+
+	select {
+	case s.send <- raw:
+		s.lastEnqueued[channelID] = seq
+		return subscriberEnqueueDelivered
+	case <-s.done:
+		return subscriberEnqueueClosed
+	default:
+		s.Close()
+		return subscriberEnqueueSlowClosed
+	}
 }
 
 // pumpWrite drains the send channel onto the WS and emits periodic
@@ -362,6 +427,7 @@ func (h *Service) HandleWS(ident *identity.Service) gin.HandlerFunc {
 		if err != nil {
 			return
 		}
+		ws.SetReadLimit(pushhubWSReadLimit)
 		cadence, idle, pingWrite := h.keepaliveCfg()
 		sub := newSubscriber(ws, user.ID, cadence, idle, pingWrite)
 		go sub.pumpWrite()
@@ -369,8 +435,11 @@ func (h *Service) HandleWS(ident *identity.Service) gin.HandlerFunc {
 	}
 }
 
-// PushMessage fan-outs a stored message to every subscriber of the
-// channel. Called by gateway after viewcache.Apply commits.
+// PushMessage fan-outs a stored message to every subscriber of the channel.
+// Called by gateway after viewcache.Apply commits. The server-to-subscriber
+// contract is at-least-once by channel seq until the subscriber becomes too
+// slow; duplicate seq values are suppressed per subscriber, and a full queue
+// closes the subscriber so the client reconnects and resyncs explicitly.
 func (h *Service) PushMessage(channelID channel.ID, seq viewsync.Seq, env message.Envelope) {
 	h.mu.RLock()
 	bucket := h.subs[channelID]
@@ -402,12 +471,21 @@ func (h *Service) PushMessage(channelID channel.ID, seq viewsync.Seq, env messag
 		if err != nil {
 			continue
 		}
-		select {
-		case target.sub.send <- raw:
-		case <-target.sub.done:
-		default:
-			// Slow subscriber — drop the frame. The client can
-			// recover via the REST resync endpoint.
+		result := target.sub.enqueueMessage(channelID, seq, raw)
+		h.recordFanoutResult(result)
+		switch result {
+		case subscriberEnqueueDuplicate:
+			h.log.Debug("pushhub.fanout_duplicate",
+				"channel_id", string(channelID),
+				"seq", int64(seq),
+				"user_id", target.userID,
+			)
+		case subscriberEnqueueSlowClosed:
+			h.log.Warn("pushhub.fanout_slow_subscriber_closed",
+				"channel_id", string(channelID),
+				"seq", int64(seq),
+				"user_id", target.userID,
+			)
 		}
 	}
 
@@ -425,6 +503,12 @@ func (h *Service) PushMessage(channelID channel.ID, seq viewsync.Seq, env messag
 			continue
 		}
 		o.fn(pf)
+	}
+}
+
+func (h *Service) recordFanoutResult(result subscriberEnqueueResult) {
+	if h.metrics != nil {
+		h.metrics.IncCounter("pushhub.fanout", "result", string(result))
 	}
 }
 

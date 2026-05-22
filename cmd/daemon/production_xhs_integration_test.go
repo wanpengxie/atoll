@@ -178,7 +178,7 @@ func bindDeviceSession(
 		DeviceSessionID:  sessionID,
 		ChannelID:        channelID,
 		DeviceID:         "device-" + string(sessionID),
-		DeviceType:       "xhs",
+		DeviceType:       "xhs.chrome_extension",
 		DaemonID:         "daemon-prod-xhs",
 		TokenFingerprint: "prod123456789abc",
 		BoundAt:          nowMs(),

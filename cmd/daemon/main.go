@@ -1,6 +1,6 @@
 // Package main wires the coagent daemon binary.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T3 (acceptance gate #1
+// Authoritative spec: launch-ticket notes §T3 (acceptance gate #1
 // — cmd/daemon can start; scans channels/ directory in T1.6 phase 1/2/3/4
 // order) and FIX-T2 (operational loop assembly + WS client + write_message
 // handler).
@@ -23,6 +23,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -34,6 +35,8 @@ import (
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/pkg/logger"
+	"github.com/wanpengxie/ActOS/pkg/metrics"
+	"github.com/wanpengxie/ActOS/pkg/observability"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/transit"
 	"github.com/wanpengxie/ActOS/runtime/workerhost"
@@ -68,6 +71,8 @@ func main() {
 			"path to the coagent-worker subprocess binary; empty disables worker spawning (channel-agent triggers become no-op)")
 		workerProvider = flag.String("worker-provider", envOrDefault("COAGENT_WORKER_PROVIDER", "kimi"),
 			"value passed as --provider to spawned workers (mock|kimi). Also via COAGENT_WORKER_PROVIDER env.")
+		debugAddr = flag.String("debug-addr", envOrDefault("COAGENT_DAEMON_DEBUG_ADDR", ":9091"),
+			"Debug listen address for non-contract /metrics and /debug/pprof endpoints; empty disables")
 	)
 	flag.Parse()
 
@@ -221,9 +226,32 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	var debugSrv *http.Server
+	if *debugAddr != "" {
+		debugSrv = observability.NewServer(*debugAddr, metrics.Default())
+		go func() {
+			lg.Z().Info().
+				Str("event", "daemon.debug_listen").
+				Str("addr", *debugAddr).
+				Msg("debug listen")
+			if err := debugSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				lg.Z().Error().Err(err).Str("event", "daemon.debug_error").Msg("debug server error")
+				os.Exit(1)
+			}
+		}()
+	}
+
 	if err := runtime.RunDaemon(ctx, cfg); err != nil {
 		lg.Z().Error().Err(err).Str("event", "daemon.exit_error").Msg("daemon exited with error")
 		os.Exit(1)
+	}
+	if debugSrv != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := debugSrv.Shutdown(shutdownCtx); err != nil {
+			lg.Z().Error().Err(err).Str("event", "daemon.debug_shutdown_error").Msg("debug shutdown error")
+			os.Exit(1)
+		}
 	}
 	lg.Z().Info().Str("event", "daemon.stopped").Msg("daemon stopped cleanly")
 }
@@ -265,7 +293,7 @@ func defaultDataDir() string {
 //
 //   - ""          legacy / unspecified channels — no template seeds.
 //   - "group"     generic group chat — no template seeds.
-//   - "xhs-creator" L4 xhs-creator template (v4-layer4-spec §2): seeds
+//   - "xhs-creator" domain-xhs xhs-creator template (§2): seeds
 //     tool:xhs-adapter into actor_registry, mkdirs published-notes/ /
 //     drafts/ / assets/ inside the channel workdir, and ships the
 //     §2.4 domain prompt segment for the worker spawn env (phase-3).

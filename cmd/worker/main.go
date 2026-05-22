@@ -1,6 +1,6 @@
 // Package main wires the coagent worker subprocess binary.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T3 (worker IPC-only
+// Authoritative spec: launch-ticket notes §T3 (worker IPC-only
 // constraint — codex review #9).
 //
 // The worker binary is a thin shell: it constructs runtime/worker.Runtime

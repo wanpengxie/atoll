@@ -14,6 +14,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/pkg/requestctx"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
 )
 
@@ -142,8 +143,8 @@ func (s *Service) triggerReclaim(ctx context.Context, p placement.Placement) err
 // Note the CreateChannelRequest deliberately does NOT carry
 // fencing_token / owner_epoch — those are daemon outputs, not inputs.
 //
-// This is the M1.5 demo-friendly entry point — the federation /
-// tenancy reservation columns introduced by m1.5-tickets §T10 are
+// This is the launch demo-friendly entry point — the federation /
+// tenancy reservation columns introduced by launch-ticket notes §T10 are
 // left at their zero value (NULL in sqlite). Callers that need to
 // populate them MUST use ReserveWith.
 func (s *Service) Reserve(
@@ -160,7 +161,7 @@ func (s *Service) Reserve(
 // It threads ReserveOptions (TenantID / HostActorID / FederatedOrigin)
 // through the placement record without changing the state machine.
 //
-// M1.5 demo flows can keep calling Reserve; this entry point is for
+// launch demo flows can keep calling Reserve; this entry point is for
 // M1.4 channel-as-actor + M2+ federation / SaaS callers that need to
 // populate the reservation columns at insert time.
 func (s *Service) ReserveWith(
@@ -185,7 +186,7 @@ func (s *Service) ReserveWith(
 		DaemonConnectionEpoch: connectionEpoch,
 		CreatedAt:             now,
 		EnteredStateAt:        now,
-		// Federation / tenancy reservation per m1.5-tickets §T10.
+		// Federation / tenancy reservation per launch-ticket notes §T10.
 		// Zero values land as NULL in sqlite via nullableString.
 		HostActorID:     opts.HostActorID,
 		FederatedOrigin: opts.FederatedOrigin,
@@ -533,6 +534,49 @@ func (s *Service) ListByDaemon(ctx context.Context, daemonID placement.DaemonID)
 	return s.store.ListByDaemon(ctx, daemonID)
 }
 
+// MarkDaemonStale transitions every active placement owned by daemonID to
+// stale immediately and invokes the reclaim hook for each affected channel.
+// This is the deterministic handoff path used when a daemon connection
+// leaves intentionally or the server is shutting down; heartbeat timeout is
+// only a fallback for missed disconnect signals.
+func (s *Service) MarkDaemonStale(ctx context.Context, daemonID placement.DaemonID, reason string) ([]placement.Placement, error) {
+	if daemonID == "" {
+		return nil, nil
+	}
+	rows, err := s.store.ListByDaemon(ctx, daemonID)
+	if err != nil {
+		return nil, err
+	}
+	nowMs := s.now().UnixMilli()
+	var changed []placement.Placement
+	var errs []error
+	for _, p := range rows {
+		if p.State != placement.StateActive {
+			continue
+		}
+		if err := s.store.MarkStale(ctx, p.ChannelID, nowMs); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		p.State = placement.StateStale
+		p.EnteredStateAt = nowMs
+		changed = append(changed, p)
+		s.log.Info().
+			Str("event", "placement.transition").
+			Str("request_id", requestctx.RequestID(ctx)).
+			Str("channel_id", string(p.ChannelID)).
+			Str("daemon_id", string(daemonID)).
+			Str("from_state", string(placement.StateActive)).
+			Str("to_state", string(placement.StateStale)).
+			Str("reason", reason).
+			Msg("placement marked stale after daemon left")
+		if err := s.triggerReclaim(ctx, p); err != nil {
+			errs = append(errs, fmt.Errorf("placements: trigger reclaim %s: %w", p.ChannelID, err))
+		}
+	}
+	return changed, errors.Join(errs...)
+}
+
 // ResolveDaemonForChannel returns the active daemon currently owning
 // channelID. ok=false means the channel has no active placement.
 func (s *Service) ResolveDaemonForChannel(ctx context.Context, channelID channel.ID) (placement.DaemonID, bool, error) {
@@ -577,6 +621,15 @@ func (s *Service) ReconcileOnce(ctx context.Context) error {
 		if err := s.store.MarkOrphan(ctx, p.ChannelID, now.UnixMilli()); err != nil {
 			return err
 		}
+		s.log.Info().
+			Str("event", "placement.transition").
+			Str("request_id", requestctx.RequestID(ctx)).
+			Str("channel_id", string(p.ChannelID)).
+			Str("daemon_id", string(p.DaemonID)).
+			Str("from_state", string(placement.StateCreating)).
+			Str("to_state", string(placement.StateOrphan)).
+			Str("reason", "create_timeout").
+			Msg("placement transitioned")
 		for _, kind := range []SagaKind{SagaKindBootstrapReserve, SagaKindReclaimReserve} {
 			saga, found, err := s.store.SagaForCreateRequest(ctx, kind, p.ChannelID, p.CreateRequestID)
 			if err != nil {
@@ -619,6 +672,15 @@ func (s *Service) ReconcileOnce(ctx context.Context) error {
 		if err := s.store.MarkStale(ctx, p.ChannelID, now.UnixMilli()); err != nil {
 			return err
 		}
+		s.log.Info().
+			Str("event", "placement.transition").
+			Str("request_id", requestctx.RequestID(ctx)).
+			Str("channel_id", string(p.ChannelID)).
+			Str("daemon_id", string(p.DaemonID)).
+			Str("from_state", string(placement.StateActive)).
+			Str("to_state", string(placement.StateStale)).
+			Str("reason", "heartbeat_timeout").
+			Msg("placement transitioned")
 	}
 
 	if err := s.triggerEligibleReclaims(ctx, placement.StateOrphan, cutoffGrace); err != nil {

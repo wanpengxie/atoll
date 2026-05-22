@@ -1,6 +1,6 @@
-// Package runtime is the daemon-side execution engine for coagent (M1.5+).
+// Package runtime is the daemon-side execution engine for coagent (launch+).
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T3.
+// Authoritative spec: launch-ticket notes §T3.
 //
 // runtime/ owns:
 //

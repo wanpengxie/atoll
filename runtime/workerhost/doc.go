@@ -1,6 +1,6 @@
 // Package workerhost is the daemon-side host for worker subprocesses.
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T3 (worker lease model)
+// Authoritative spec: launch-ticket notes §T3 (worker lease model)
 // + codex review #10 (lease vs heartbeat + daemon_epoch fencing)
 // + .dalek/pm/m1.6-tickets.md §T1 (per-channel WorkerBridge).
 //

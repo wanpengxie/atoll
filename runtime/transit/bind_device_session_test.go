@@ -68,7 +68,7 @@ func TestDispatcher_BindDeviceSessionRoundTrip(t *testing.T) {
 		DeviceSessionID:  devicetransit.DeviceSessionID("sess-1"),
 		ChannelID:        channel.ID("ch-X"),
 		DeviceID:         "dev-A",
-		DeviceType:       "xhs",
+		DeviceType:       "xhs.chrome_extension",
 		DaemonID:         "daemon-A",
 		TokenFingerprint: "deadbeefcafebabe",
 		ExpiresAt:        12_345,

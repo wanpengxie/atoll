@@ -9,7 +9,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 )
 
-// InMemorySessionStore is the M1.5 reference implementation of
+// InMemorySessionStore is the launch reference implementation of
 // SessionStore backed by a sync.RWMutex + map. It is the test default
 // (every framework / adapter / e2e test imports it from this package)
 // and is also a defensible production fallback for daemon processes

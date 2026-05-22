@@ -44,7 +44,7 @@ type Config struct {
 
 	// NewExternalCorrelationID mints the id placed in Command.CorrelationID
 	// when the adapter wants to hide envelope.id from the extension.
-	// Empty defaults to envelope.id directly (M1.5 baseline:
+	// Empty defaults to envelope.id directly (launch baseline:
 	// outbound `device_transit.recv.request_id` (impl-layer2 §5.3.2)
 	// carries the canonical id; no need for a daemon-internal external
 	// id like M1.3 had — extension echoes request_id back via inbound

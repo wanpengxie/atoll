@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// Env names — aligned with the coagent CLI (M1.5 cmd/cli main entry
+// Env names — aligned with the coagent CLI (launch cmd/cli main entry
 // will be supplied by T7; pre-T7 builds reuse the archived daemon-go
 // cmd/coagent binary) + L4 §2.3.2.
 //
@@ -312,7 +312,7 @@ type execCoagentRunner struct{}
 // Run implements CoagentRunner by spawning `coagent ask ...`.
 //
 // Exit code mapping mirrors the archived daemon-go cmd/coagent entry
-// (M1.5-T7 cmd/cli will publish the same contract):
+// (launch-T7 cmd/cli will publish the same contract):
 //
 //	0 success                 → unmarshal stdout
 //	2 usage / bad args        → CodeError{coagent_usage_error}

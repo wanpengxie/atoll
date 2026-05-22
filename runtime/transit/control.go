@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/pkg/requestctx"
 )
 
 // ControlHandlers is the set of callbacks the central frame dispatcher
@@ -33,7 +35,7 @@ type ControlHandlers struct {
 	// dispatch path (FIX-T2). The Dispatcher decodes the frame body
 	// into WriteMessageBody, invokes this callback, and SENDS the
 	// returned ack as `control.write_message_ack`. The callback is
-	// nil-safe — when unset, the frame is dropped silently (M1.5
+	// nil-safe — when unset, the frame is dropped silently (launch
 	// development bootstrap path).
 	OnWriteMessage func(ctx context.Context, frame daemonbus.Frame, body WriteMessageBody) WriteMessageAckBody
 
@@ -114,7 +116,12 @@ var ErrStaleEpoch = errors.New("transit: stale connection epoch")
 
 // Dispatch one incoming frame to the right handler. Returns the handler
 // error (or nil) so the caller (Loop) can decide whether to disconnect.
-func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error {
+func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("transit: dispatch panic: %v\n%s", r, debug.Stack())
+		}
+	}()
 	// FIX-T8 — drop frames whose epoch does not match the current
 	// daemonbus connection epoch (L2 §9.4 stale-frame guard). Epoch 0
 	// means "client never connected" — Loop only fires after Connect,
@@ -122,6 +129,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 	// the test stub that ignores epoch alive without weakening prod.
 	if cur := d.client.Epoch(); cur != 0 && frame.DaemonConnectionEpoch != cur {
 		return ErrStaleEpoch
+	}
+	if frame.RequestID != "" {
+		ctx = requestctx.WithRequestID(ctx, frame.RequestID)
 	}
 
 	switch frame.FrameKind {
@@ -212,7 +222,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 			// pair the ack with the HTTP request.
 			body.FrameID = frame.FrameID
 		}
-		ack := d.handlers.OnWriteMessage(ctx, frame, body)
+		ack := d.callWriteMessage(ctx, frame, body)
 		if ack.FrameID == "" {
 			ack.FrameID = body.FrameID
 		}
@@ -339,6 +349,23 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) error 
 		return d.handlers.Unknown(ctx, frame)
 	}
 	return nil
+}
+
+func (d *Dispatcher) callWriteMessage(ctx context.Context, frame daemonbus.Frame, body WriteMessageBody) (ack WriteMessageAckBody) {
+	defer func() {
+		if r := recover(); r != nil {
+			ack = WriteMessageAckBody{
+				FrameID:      body.FrameID,
+				MessageID:    body.EnvelopePartial.ID,
+				RejectReason: RejectReasonInternal,
+				RejectDetail: fmt.Sprintf("write_message handler panic: %v", r),
+			}
+			if ack.FrameID == "" {
+				ack.FrameID = frame.FrameID
+			}
+		}
+	}()
+	return d.handlers.OnWriteMessage(ctx, frame, body)
 }
 
 // Loop drives Recv → Dispatch in a tight loop until ctx is cancelled or

@@ -1,6 +1,6 @@
 // media.js — inline rendering of envelope doc_refs.
 //
-// Authoritative spec: .dalek/pm/v4-layer3-spec.md §4 (Inline 媒体渲染).
+// Authoritative spec: .dalek/pm/impl-layer3.md §4 (Inline 媒体渲染).
 //
 // Triggered when a message envelope carries doc_refs whose path extensions
 // match the §4.1 inline-media table. Renderer hands us:

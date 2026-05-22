@@ -1,7 +1,7 @@
 // Package lifecycle implements the daemon-side channel lifecycle:
 // placement state machine (T1.4) + startup phase barriers (T1.6).
 //
-// Authoritative spec: .dalek/pm/m1.5-tickets.md §T3 + L2 §1.4.11
+// Authoritative spec: launch-ticket notes §T3 + L2 §1.4.11
 // (channel_placements) + L2 §3.6.* (daemon startup phases).
 //
 // Files:

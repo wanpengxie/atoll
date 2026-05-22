@@ -3,7 +3,7 @@
 Coagent 的 chrome 端 device 实现。承载 5 个小红书业务命令
 （publish / search / recent.fetch / note.fetch / cookie.sync）。
 
-> M1.5-T5：本目录从 `devices/xhs-extension` 重组到
+> launch-T5：本目录从 `devices/xhs-extension` 重组到
 > `adapters/device/xhs/extension`（go-arch-lint adapters/ 顶层化的一部分）。
 > 协议从 daemon WS 直连（M1.3 baseline）切到 via_server_transit binding
 > （连 server WS，承载 daemon ↔ adapter 的 device_transit 帧）—— 协议层
@@ -13,16 +13,16 @@ Coagent 的 chrome 端 device 实现。承载 5 个小红书业务命令
 > 来源历史：M1.1-T2 一次性 rsync 自外部模板，之后在 coagent 仓库独立
 > 维护。
 
-## 架构（M1.5 via_server_transit 目标态）
+## 架构（launch via_server_transit 目标态）
 
 ```
 agent (channel-agent)
   ↓ SDK Bash / 直接 envelope
-adapters/device/xhs (Go, M1.5-T5)
+adapters/device/xhs (Go, launch-T5)
   ↓ kernel/devicetransit.DeviceTransit.Send(device_transit.send frame)
-runtime/transit (M1.5-T3) → daemonbus mux → server.devicebus (M1.5-T6)
+runtime/transit (launch-T3) → daemonbus mux → server.devicebus (launch-T6)
   ↓ device WS endpoint
-本插件 (M1.5-T5)
+本插件 (launch-T5)
   ↓ services/coagent-device.ts dispatch → tools/*.ts handler
 xhs.com / creator.xiaohongshu.com
   ↓ device_transit.recv frame

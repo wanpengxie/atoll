@@ -23,7 +23,7 @@ func runDaemon(args []string) {
 
 // runDaemonStatus aggregates server health + active placements per
 // daemon as a stand-in for a dedicated /api/daemons listing (which
-// the server doesn't expose publicly at M1.5).
+// the server doesn't expose publicly at launch).
 func runDaemonStatus(args []string) {
 	fs := flag.NewFlagSet("daemon status", flag.ExitOnError)
 	serverURL, token := bindGlobalFlags(fs)

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/pkg/requestctx"
 )
 
 // Transport is the daemonbus transport abstraction (WS in production, or
@@ -100,6 +101,7 @@ func (c *Client) Send(ctx context.Context, frameID string, frameType daemonbus.F
 	if err != nil {
 		return err
 	}
+	frame.RequestID = requestctx.RequestID(ctx)
 	return c.transport.Send(ctx, frame)
 }
 

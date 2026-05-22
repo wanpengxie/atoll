@@ -96,6 +96,59 @@ func TestCreatingToActiveHappyPath(t *testing.T) {
 	}
 }
 
+func TestMarkDaemonStaleTransitionsActiveAndTriggersReclaim(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+
+	active, _, err := svc.Reserve(ctx, channel.ID("ch-daemon-leave-active"), placement.DaemonID("d-leaving"), 11, nil)
+	if err != nil {
+		t.Fatalf("Reserve active: %v", err)
+	}
+	ack := placement.CreateChannelAck{
+		FrameID: "f-active", ChannelID: active.ChannelID, CreateRequestID: active.CreateRequestID,
+		OwnerEpoch: 1, FencingToken: "tok-active",
+		DaemonID: active.DaemonID, DaemonEpoch: 1, Result: placement.CreateChannelAccepted,
+	}
+	if ok, err := svc.Activate(ctx, ack, 11); err != nil || !ok {
+		t.Fatalf("Activate active ok=%v err=%v", ok, err)
+	}
+	creating, _, err := svc.Reserve(ctx, channel.ID("ch-daemon-leave-creating"), placement.DaemonID("d-leaving"), 11, nil)
+	if err != nil {
+		t.Fatalf("Reserve creating: %v", err)
+	}
+
+	var reclaimed []channel.ID
+	svc.SetReclaimHandler(func(_ context.Context, p placement.Placement) error {
+		reclaimed = append(reclaimed, p.ChannelID)
+		return nil
+	})
+	c.now = c.now.Add(time.Second)
+
+	changed, err := svc.MarkDaemonStale(ctx, placement.DaemonID("d-leaving"), "test_disconnect")
+	if err != nil {
+		t.Fatalf("MarkDaemonStale: %v", err)
+	}
+	if len(changed) != 1 || changed[0].ChannelID != active.ChannelID {
+		t.Fatalf("changed=%+v want only active channel", changed)
+	}
+	if len(reclaimed) != 1 || reclaimed[0] != active.ChannelID {
+		t.Fatalf("reclaimed=%v want %s", reclaimed, active.ChannelID)
+	}
+	gotActive, _, _ := svc.Get(ctx, active.ChannelID)
+	if gotActive.State != placement.StateStale {
+		t.Fatalf("active state=%q want stale", gotActive.State)
+	}
+	gotCreating, _, _ := svc.Get(ctx, creating.ChannelID)
+	if gotCreating.State != placement.StateCreating {
+		t.Fatalf("creating state=%q want creating", gotCreating.State)
+	}
+	if daemonID, ok, err := svc.ResolveDaemonForChannel(ctx, active.ChannelID); err != nil || ok || daemonID != "" {
+		t.Fatalf("ResolveDaemonForChannel after stale daemon=%q ok=%v err=%v", daemonID, ok, err)
+	}
+}
+
 // TestACKMismatchRejected verifies the Phase 3 CAS predicate
 // (channel_id + create_request_id + daemon_id + state='creating')
 // plus the protocol obligation that the ack carry a non-empty

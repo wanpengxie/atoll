@@ -2,6 +2,7 @@ package pushhub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/pkg/metrics"
 )
 
 // allowAllAuth lets every subscribe through — pushhub keepalive tests
@@ -241,5 +248,104 @@ func TestPushhub_HealthyClientStaysSubscribed(t *testing.T) {
 
 	if hub.SubscriberCount("ch-2") != 1 {
 		t.Fatalf("healthy subscriber reaped: count=%d", hub.SubscriberCount("ch-2"))
+	}
+}
+
+func TestPushMessageSuppressesDuplicateSeqPerSubscriber(t *testing.T) {
+	t.Parallel()
+
+	reg := metrics.NewRegistry()
+	hub := NewService(Config{Metrics: reg})
+	hub.SetAccessAuthorizer(allowAllAuth{})
+	ch := channel.ID("ch-dup")
+	sub := newPushhubTestSubscriber("u1", 4)
+	registerPushhubTestSubscriber(hub, ch, sub)
+
+	hub.PushMessage(ch, 1, pushhubTestEnvelope(ch, "m-1"))
+	hub.PushMessage(ch, 1, pushhubTestEnvelope(ch, "m-1-duplicate"))
+	if got := len(sub.send); got != 1 {
+		t.Fatalf("queued frames after duplicate = %d, want 1", got)
+	}
+
+	hub.PushMessage(ch, 2, pushhubTestEnvelope(ch, "m-2"))
+	if got := len(sub.send); got != 2 {
+		t.Fatalf("queued frames after next seq = %d, want 2", got)
+	}
+
+	raw := <-sub.send
+	var frame struct {
+		Seq int64 `json:"seq"`
+	}
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		t.Fatalf("unmarshal pushed frame: %v", err)
+	}
+	if frame.Seq != 1 {
+		t.Fatalf("first pushed seq = %d, want 1", frame.Seq)
+	}
+	if !strings.Contains(reg.RenderPrometheus(), `pushhub_fanout{result="duplicate"} 1`) {
+		t.Fatalf("duplicate metric missing:\n%s", reg.RenderPrometheus())
+	}
+}
+
+func TestPushMessageSlowSubscriberClosedOnFullQueue(t *testing.T) {
+	t.Parallel()
+
+	reg := metrics.NewRegistry()
+	hub := NewService(Config{Metrics: reg})
+	hub.SetAccessAuthorizer(allowAllAuth{})
+	ch := channel.ID("ch-slow")
+	sub := newPushhubTestSubscriber("u1", 1)
+	registerPushhubTestSubscriber(hub, ch, sub)
+	sub.send <- []byte(`{"type":"busy"}`)
+
+	hub.PushMessage(ch, 1, pushhubTestEnvelope(ch, "m-1"))
+
+	select {
+	case <-sub.done:
+	default:
+		t.Fatal("slow subscriber was not closed")
+	}
+	if !strings.Contains(reg.RenderPrometheus(), `pushhub_fanout{result="slow_closed"} 1`) {
+		t.Fatalf("slow_closed metric missing:\n%s", reg.RenderPrometheus())
+	}
+}
+
+func newPushhubTestSubscriber(userID string, sendCap int) *subscriber {
+	return &subscriber{
+		userID:       userID,
+		chans:        map[channel.ID]struct{}{},
+		send:         make(chan []byte, sendCap),
+		done:         make(chan struct{}),
+		lastEnqueued: map[channel.ID]viewsync.Seq{},
+	}
+}
+
+func registerPushhubTestSubscriber(hub *Service, ch channel.ID, sub *subscriber) {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if _, ok := hub.subs[ch]; !ok {
+		hub.subs[ch] = map[string]map[*subscriber]struct{}{}
+	}
+	if _, ok := hub.subs[ch][sub.userID]; !ok {
+		hub.subs[ch][sub.userID] = map[*subscriber]struct{}{}
+	}
+	hub.subs[ch][sub.userID][sub] = struct{}{}
+	sub.chans[ch] = struct{}{}
+}
+
+func pushhubTestEnvelope(ch channel.ID, id message.ID) message.Envelope {
+	return message.Envelope{
+		ID:        id,
+		TS:        time.Now().UnixMilli(),
+		ChannelID: ch,
+		Sender: message.Sender{
+			Kind: actor.KindHuman,
+			ID:   actor.ActorID("user:u1"),
+			Name: "User",
+		},
+		Kind:       message.KindEvent,
+		Type:       "test.event",
+		Payload:    json.RawMessage(`{}`),
+		Visibility: message.VisibilityPublic,
 	}
 }
