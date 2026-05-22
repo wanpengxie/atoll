@@ -7,7 +7,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/server/httperr"
 	"github.com/wanpengxie/ActOS/server/identity"
 )
@@ -175,12 +174,6 @@ func (s *Service) handleAddChannelMember(c *gin.Context) {
 		httperr.Respond(c, "catalog.add_channel_member", httpStatusFor(err), err)
 		return
 	}
-	if s.placementHook != nil {
-		if err := s.placementHook.OnChannelMembersChanged(c.Request.Context(), c.Param("chID"), []ChannelMember{m}, nil); err != nil {
-			httperr.Internal(c, "catalog.add_channel_member.placement_hook", err)
-			return
-		}
-	}
 	c.JSON(http.StatusCreated, m)
 }
 
@@ -190,23 +183,9 @@ func (s *Service) handleRemoveChannelMember(c *gin.Context) {
 		httperr.Respond(c, "catalog.remove_channel_member.auth", httpStatusFor(err), err)
 		return
 	}
-	target, targetErr := s.GetChannelMember(c.Request.Context(), c.Param("chID"), c.Param("uid"))
-	if targetErr != nil && !errors.Is(targetErr, ErrNotChannelMember) {
-		httperr.Respond(c, "catalog.remove_channel_member.target", httpStatusFor(targetErr), targetErr)
-		return
-	}
 	if err := s.RemoveChannelMember(c.Request.Context(), c.Param("chID"), c.Param("uid")); err != nil {
 		httperr.Internal(c, "catalog.remove_channel_member", err)
 		return
-	}
-	if targetErr == nil && s.placementHook != nil {
-		if err := s.placementHook.OnChannelMembersChanged(c.Request.Context(), c.Param("chID"), nil, []string{target.MemberActorID}); err != nil {
-			httperr.Internal(c, "catalog.remove_channel_member.placement_hook", err)
-			return
-		}
-	}
-	if s.subscriptionRevoker != nil {
-		s.subscriptionRevoker.RevokeChannelUser(channel.ID(c.Param("chID")), c.Param("uid"))
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "removed"})
 }

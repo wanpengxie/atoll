@@ -191,22 +191,19 @@ func (s *Service) ReserveWith(
 		FederatedOrigin: opts.FederatedOrigin,
 		TenantID:        tenantOrDefault(opts.TenantID),
 	}
-	out, err := s.store.Reserve(ctx, p)
-	if err != nil {
-		return placement.Placement{}, placement.CreateChannelRequest{}, err
-	}
-	if _, err := s.store.StartSaga(ctx, StartSagaInput{
-		ChannelID:             out.ChannelID,
-		CreateRequestID:       out.CreateRequestID,
-		OwnerEpoch:            out.OwnerEpoch,
-		DaemonID:              out.DaemonID,
-		DaemonConnectionEpoch: out.DaemonConnectionEpoch,
+	out, _, err := s.store.ReserveWithSaga(ctx, p, StartSagaInput{
+		ChannelID:             p.ChannelID,
+		CreateRequestID:       p.CreateRequestID,
+		OwnerEpoch:            p.OwnerEpoch,
+		DaemonID:              p.DaemonID,
+		DaemonConnectionEpoch: p.DaemonConnectionEpoch,
 		SagaKind:              SagaKindBootstrapReserve,
 		Phase:                 SagaPhaseSent,
 		SentAt:                now,
 		ExpectedAckFrameKind:  string(kerneldaemonbus.FrameTypeControlCreateChannelAck),
 		NowMs:                 now,
-	}); err != nil {
+	})
+	if err != nil {
 		return placement.Placement{}, placement.CreateChannelRequest{}, err
 	}
 
@@ -452,24 +449,21 @@ func (s *Service) ReserveReclaim(
 		return placement.Placement{}, placement.DaemonReclaimRequest{}, false, nil
 	}
 	createReqID := placement.CreateRequestID(uuid.NewString())
-	out, ok, err := s.store.ReserveReclaim(ctx, channelID, candidate, connectionEpoch, createReqID, s.now().UnixMilli())
-	if err != nil || !ok {
-		return placement.Placement{}, placement.DaemonReclaimRequest{}, ok, err
-	}
 	now := s.now().UnixMilli()
-	if _, err := s.store.StartSaga(ctx, StartSagaInput{
-		ChannelID:             out.ChannelID,
-		CreateRequestID:       out.CreateRequestID,
-		OwnerEpoch:            out.OwnerEpoch,
-		DaemonID:              out.DaemonID,
-		DaemonConnectionEpoch: out.DaemonConnectionEpoch,
+	out, ok, err := s.store.ReserveReclaimWithSaga(ctx, channelID, candidate, connectionEpoch, createReqID, now, StartSagaInput{
+		ChannelID:             channelID,
+		CreateRequestID:       createReqID,
+		OwnerEpoch:            prev.OwnerEpoch + 1,
+		DaemonID:              candidate,
+		DaemonConnectionEpoch: connectionEpoch,
 		SagaKind:              SagaKindReclaimReserve,
 		Phase:                 SagaPhaseSent,
 		SentAt:                now,
 		ExpectedAckFrameKind:  string(kerneldaemonbus.FrameTypeControlReclaimAccepted),
 		NowMs:                 now,
-	}); err != nil {
-		return placement.Placement{}, placement.DaemonReclaimRequest{}, false, err
+	})
+	if err != nil || !ok {
+		return placement.Placement{}, placement.DaemonReclaimRequest{}, ok, err
 	}
 	prevOwner := prev.DaemonID
 	req := placement.DaemonReclaimRequest{

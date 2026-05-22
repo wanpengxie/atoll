@@ -85,7 +85,12 @@ func (s *Service) AddChannelMember(ctx context.Context, channelID string, m NewM
 	if row.Role == "" {
 		row.Role = "member"
 	}
-	if _, err := s.db.ExecContext(
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ChannelMember{}, fmt.Errorf("begin member add: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO channel_members (channel_id, user_id, member_actor_id, role, joined_at)
 		 VALUES (?, ?, ?, ?, ?)`,
@@ -98,19 +103,48 @@ func (s *Service) AddChannelMember(ctx context.Context, channelID string, m NewM
 		}
 		return ChannelMember{}, fmt.Errorf("insert member: %w", err)
 	}
+	if err := s.enqueueMemberTransitionTx(ctx, tx, row, memberTransitionKindAdd, row.JoinedAt); err != nil {
+		return ChannelMember{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ChannelMember{}, fmt.Errorf("commit member add: %w", err)
+	}
 	return row, nil
 }
 
 // RemoveChannelMember deletes (channelID, userID). Idempotent — no
 // error when row is absent.
 func (s *Service) RemoveChannelMember(ctx context.Context, channelID, userID string) error {
-	_, err := s.db.ExecContext(
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin member remove: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var m ChannelMember
+	err = tx.QueryRowContext(ctx,
+		`SELECT channel_id, user_id, member_actor_id, role, joined_at
+		   FROM channel_members
+		  WHERE channel_id = ? AND user_id = ?`,
+		channelID, userID,
+	).Scan(&m.ChannelID, &m.UserID, &m.MemberActorID, &m.Role, &m.JoinedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("lookup member remove: %w", err)
+	}
+	if _, err := tx.ExecContext(
 		ctx,
 		`DELETE FROM channel_members WHERE channel_id = ? AND user_id = ?`,
 		channelID, userID,
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("delete member: %w", err)
+	}
+	if err := s.enqueueMemberTransitionTx(ctx, tx, m, memberTransitionKindRemove, s.nowMs()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit member remove: %w", err)
 	}
 	return nil
 }

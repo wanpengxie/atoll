@@ -331,6 +331,68 @@ func TestRegisterAndIssueEpoch(t *testing.T) {
 	}
 }
 
+func TestHandleWSHandshakeCapacityPreserved(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	svc := newSvc(t)
+	ctx := context.Background()
+	wsURL := daemonbusWSServer(t, svc)
+
+	ws, _, err := daemonWSDialer("d-capacity-new", "test-secret").Dial(wsURL+"?capacity=7", nil)
+	if err != nil {
+		t.Fatalf("dial with capacity: %v", err)
+	}
+	_ = ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := ws.ReadMessage(); err != nil {
+		t.Fatalf("read accepted: %v", err)
+	}
+	metrics, err := svc.ConnectedConnectionMetrics(ctx)
+	if err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	if len(metrics) != 1 || metrics[0].Capacity != 7 {
+		t.Fatalf("metrics=%+v want capacity 7", metrics)
+	}
+	_ = ws.Close()
+	svc.Unregister("d-capacity-new")
+
+	if err := svc.RegisterDaemon(ctx, "d-capacity-existing", "host", "v1", 9, "test-secret"); err != nil {
+		t.Fatalf("pre-register: %v", err)
+	}
+	ws, _, err = daemonWSDialer("d-capacity-existing", "test-secret").Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial preserving capacity: %v", err)
+	}
+	defer func() { _ = ws.Close() }()
+	_ = ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := ws.ReadMessage(); err != nil {
+		t.Fatalf("read accepted existing: %v", err)
+	}
+	metrics, err = svc.ConnectedConnectionMetrics(ctx)
+	if err != nil {
+		t.Fatalf("metrics existing: %v", err)
+	}
+	if len(metrics) != 1 || metrics[0].Capacity != 9 {
+		t.Fatalf("metrics existing=%+v want preserved capacity 9", metrics)
+	}
+}
+
+func TestSendAndAwait_ClosedConnectionSafe(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	svr, _ := newPipePair()
+	conn := daemonbus.NewConnection(placement.DaemonID("d-closed"), 1, svr)
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	_, err := conn.SendAndAwait(ctx, kerneldaemonbus.FrameTypeControlUpdateMembers, kerneldaemonbus.UpdateMembersBody{
+		ChannelID: channel.ID("ch-closed"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "connection closed before send") {
+		t.Fatalf("SendAndAwait err=%v want closed-before-send", err)
+	}
+}
+
 // TestDispatchPushAndAck routes a viewsync.push through the dispatch
 // loop and confirms the handler is invoked + a viewsync.ack is sent
 // back with the correct cursor.

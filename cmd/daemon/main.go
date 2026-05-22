@@ -59,6 +59,7 @@ func main() {
 			"reject control.write_message frames whose ts differs from now() by more than this many milliseconds (0 = disabled; mock-bus/dev only)")
 		host         = flag.String("host", "", "optional host metadata reported to the daemonbus registry")
 		versionFlag  = flag.String("version", "", "optional version metadata reported to the daemonbus registry")
+		capacity     = flag.Int("capacity", 0, "optional max active channel capacity reported to the daemonbus registry")
 		allowDevMode = flag.Bool("allow-dev-secrets", false,
 			"dev mode: pretty-printed console logs + relax --key / --human-caller-secret requirement when paired with --mock-bus")
 		useScaffoldXHS = flag.Bool("use-scaffold-xhs", false,
@@ -174,6 +175,7 @@ func main() {
 			Key:      *daemonKey,
 			Host:     *host,
 			Version:  *versionFlag,
+			Capacity: *capacity,
 		}
 	}
 

@@ -88,6 +88,11 @@ type WSClientConfig struct {
 	Host    string
 	Version string
 
+	// Capacity is the maximum active channel count this daemon advertises.
+	// Zero means "unspecified"; the server preserves any previous non-zero
+	// capacity on reconnect.
+	Capacity int
+
 	// Dialer overrides the websocket dialer (tests inject a dialer
 	// pointing at httptest.Server.URL). Defaults to
 	// websocket.DefaultDialer when nil.
@@ -202,6 +207,9 @@ func (c *WSClient) Connect(ctx context.Context) (daemonbus.ConnectionEpoch, erro
 	}
 	if c.cfg.Version != "" {
 		q.Set("version", c.cfg.Version)
+	}
+	if c.cfg.Capacity > 0 {
+		q.Set("capacity", fmt.Sprintf("%d", c.cfg.Capacity))
 	}
 	u.RawQuery = q.Encode()
 

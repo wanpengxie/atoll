@@ -265,13 +265,7 @@ func (s *Service) Apply(ctx context.Context, frame viewsync.PushFrame) (viewsync
 		gapSince <= gapUntil &&
 		(s.fireResyncFn != nil || s.resyncer != nil) {
 		if since, until, ok := s.beginGapResync(frame.ChannelID, gapSince, gapUntil); ok {
-			switch {
-			case s.fireResyncFn != nil:
-				s.fireResyncFn(frame.ChannelID, since, until)
-				s.finishGapResync(frame.ChannelID)
-			case s.resyncer != nil:
-				go s.fireResync(frame.ChannelID, since, until)
-			}
+			s.dispatchGapResync(frame.ChannelID, since, until)
 		}
 	}
 
@@ -287,8 +281,18 @@ func (s *Service) Apply(ctx context.Context, frame viewsync.PushFrame) (viewsync
 // scope and swallows errors — the next gap or a periodic reconcile
 // will retry. Production path only; tests intercept via fireResyncFn.
 func (s *Service) fireResync(channelID channel.ID, since, until viewsync.Seq) {
-	defer s.finishGapResync(channelID)
+	defer s.finishGapResync(channelID, since, until)
 	_, _ = s.TriggerResync(context.Background(), channelID, since, until)
+}
+
+func (s *Service) dispatchGapResync(channelID channel.ID, since, until viewsync.Seq) {
+	switch {
+	case s.fireResyncFn != nil:
+		s.fireResyncFn(channelID, since, until)
+		s.finishGapResync(channelID, since, until)
+	case s.resyncer != nil:
+		go s.fireResync(channelID, since, until)
+	}
 }
 
 func pendingFrameBytes(frame viewsync.PushFrame, envJSON []byte) int {
@@ -314,6 +318,10 @@ func capResyncWindow(since, until viewsync.Seq) (viewsync.Seq, viewsync.Seq) {
 }
 
 func (s *Service) beginGapResync(channelID channel.ID, since, until viewsync.Seq) (viewsync.Seq, viewsync.Seq, bool) {
+	return s.startGapResync(channelID, since, until, true)
+}
+
+func (s *Service) startGapResync(channelID channel.ID, since, until viewsync.Seq, respectCooldown bool) (viewsync.Seq, viewsync.Seq, bool) {
 	since, until = capResyncWindow(since, until)
 	buf := s.bufferFor(channelID)
 	now := nowMs()
@@ -328,7 +336,7 @@ func (s *Service) beginGapResync(channelID channel.ID, since, until viewsync.Seq
 		}
 		return 0, 0, false
 	}
-	if buf.lastResyncAtMs > 0 && now-buf.lastResyncAtMs < gapResyncCooldown.Milliseconds() {
+	if respectCooldown && buf.lastResyncAtMs > 0 && now-buf.lastResyncAtMs < gapResyncCooldown.Milliseconds() {
 		return 0, 0, false
 	}
 	buf.resyncPending = true
@@ -338,11 +346,50 @@ func (s *Service) beginGapResync(channelID channel.ID, since, until viewsync.Seq
 	return since, until, true
 }
 
-func (s *Service) finishGapResync(channelID channel.ID) {
+func (s *Service) finishGapResync(channelID channel.ID, completedSince, completedUntil viewsync.Seq) {
 	buf := s.bufferFor(channelID)
+	var followSince, followUntil viewsync.Seq
 	buf.mu.Lock()
+	widenedSince, widenedUntil := buf.resyncSince, buf.resyncUntil
 	buf.resyncPending = false
+	buf.resyncSince = 0
+	buf.resyncUntil = 0
 	buf.mu.Unlock()
+
+	if widenedSince == 0 || widenedUntil == 0 ||
+		(widenedSince >= completedSince && widenedUntil <= completedUntil) ||
+		(s.fireResyncFn == nil && s.resyncer == nil) {
+		return
+	}
+
+	switch {
+	case widenedSince < completedSince && widenedUntil > completedUntil:
+		followSince, followUntil = widenedSince, widenedUntil
+	case widenedSince < completedSince:
+		followSince, followUntil = widenedSince, minSeq(widenedUntil, completedSince-1)
+	default:
+		followSince, followUntil = maxSeq(widenedSince, completedUntil+1), widenedUntil
+	}
+	if followSince > followUntil {
+		return
+	}
+	if since, until, ok := s.startGapResync(channelID, followSince, followUntil, false); ok {
+		s.dispatchGapResync(channelID, since, until)
+	}
+}
+
+func minSeq(a, b viewsync.Seq) viewsync.Seq {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxSeq(a, b viewsync.Seq) viewsync.Seq {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // RecoverGaps scans durable viewcache state for committed out-of-order rows
@@ -412,13 +459,13 @@ func (s *Service) RecoverGaps(ctx context.Context) error {
 		switch {
 		case s.fireResyncFn != nil:
 			s.fireResyncFn(g.channelID, since, until)
-			s.finishGapResync(g.channelID)
+			s.finishGapResync(g.channelID, since, until)
 		case s.resyncer != nil:
 			if _, err := s.TriggerResync(ctx, g.channelID, since, until); err != nil {
-				s.finishGapResync(g.channelID)
+				s.finishGapResync(g.channelID, since, until)
 				return err
 			}
-			s.finishGapResync(g.channelID)
+			s.finishGapResync(g.channelID, since, until)
 		}
 	}
 	return nil

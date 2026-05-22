@@ -238,11 +238,10 @@ func (p *Pusher) recordSuccess(seq viewsync.Seq) {
 	delete(p.failedNotify, seq)
 }
 
-// checkBacklog reads the outbox pending count, emits a
-// ViewSyncBacklogEvent when it crosses BacklogHighWatermark, and returns
-// true while the pusher should throttle further Drain work. Re-armed
-// after the count drops back below the watermark.
-func (p *Pusher) checkBacklog(ctx context.Context, chID channel.ID) bool {
+// observeBacklog reads the outbox pending count and emits a
+// ViewSyncBacklogEvent when it crosses BacklogHighWatermark. Drain never
+// stops on this signal; producer admission owns throttling.
+func (p *Pusher) observeBacklog(ctx context.Context, chID channel.ID) bool {
 	if p.watermark <= 0 {
 		return false
 	}
@@ -280,9 +279,7 @@ func (p *Pusher) checkBacklog(ctx context.Context, chID channel.ID) bool {
 // (n, err) where n is the number of frames successfully sent.
 // Production callers usually run Pump (Drain in a loop).
 func (p *Pusher) Drain(ctx context.Context) (int, error) {
-	if p.checkBacklog(ctx, p.outbox.ChannelID()) {
-		return 0, nil
-	}
+	p.observeBacklog(ctx, p.outbox.ChannelID())
 	pending, err := p.outbox.PendingPage(ctx, p.pageSize)
 	if err != nil {
 		return 0, fmt.Errorf("transit: drain pending: %w", err)
@@ -296,7 +293,7 @@ func (p *Pusher) Drain(ctx context.Context) (int, error) {
 					p.failHook(frame.ChannelID, frame.Seq, err)
 				}
 				p.recordFailure(frame.ChannelID, frame.Seq, err)
-				p.checkBacklog(ctx, frame.ChannelID)
+				p.observeBacklog(ctx, frame.ChannelID)
 				return sent, fmt.Errorf("transit: fencing seq=%d: %w", frame.Seq, err)
 			}
 			frame.OwnerEpoch = ownerEpoch
@@ -309,7 +306,7 @@ func (p *Pusher) Drain(ctx context.Context) (int, error) {
 			p.recordFailure(frame.ChannelID, frame.Seq, err)
 			// Outbox row stays in pending state; backlog watermark may
 			// also be tripping right now — surface it before returning.
-			p.checkBacklog(ctx, frame.ChannelID)
+			p.observeBacklog(ctx, frame.ChannelID)
 			return sent, fmt.Errorf("transit: send seq=%d: %w", frame.Seq, err)
 		}
 		if err := p.outbox.MarkPushed(ctx, frame.Seq, p.nowFn()); err != nil {
@@ -321,7 +318,7 @@ func (p *Pusher) Drain(ctx context.Context) (int, error) {
 	}
 	// Even on a clean drain, check the backlog so a slow-ack situation
 	// (push succeeded but ack hasn't arrived) still trips the watermark.
-	p.checkBacklog(ctx, p.outbox.ChannelID())
+	p.observeBacklog(ctx, p.outbox.ChannelID())
 	return sent, nil
 }
 

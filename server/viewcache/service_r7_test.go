@@ -110,7 +110,7 @@ func (r *blockingR7Resyncer) RequestResync(
 	}
 }
 
-func TestGapResync_OverlappingWindows_Coalesced(t *testing.T) {
+func TestGapResync_WidenedWindow_ScheduledAfterFinish(t *testing.T) {
 	svc := newR7Service(t)
 	ctx := context.Background()
 	resyncer := &blockingR7Resyncer{
@@ -143,8 +143,16 @@ func TestGapResync_OverlappingWindows_Coalesced(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 	close(resyncer.release)
-	if got := resyncer.calls.Load(); got != 1 {
-		t.Fatalf("resync calls=%d want 1", got)
+	select {
+	case got := <-resyncer.called:
+		if got != [2]viewsync.Seq{3, 4} {
+			t.Fatalf("follow-up resync window=%v want [3 4]", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("widened resync window was not scheduled after first finished")
+	}
+	if got := resyncer.calls.Load(); got != 2 {
+		t.Fatalf("resync calls=%d want 2", got)
 	}
 }
 

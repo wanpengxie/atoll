@@ -96,12 +96,18 @@ func (c *Connection) SendAndAwait(ctx context.Context, ft daemonbus.FrameType, p
 	}
 	ch := make(chan daemonbus.Frame, 1)
 	c.mu.Lock()
+	if c.pending == nil {
+		c.mu.Unlock()
+		return daemonbus.Frame{}, errors.New("daemonbus: connection closed before send")
+	}
 	c.pending[frame.FrameID] = ch
 	c.mu.Unlock()
 
 	defer func() {
 		c.mu.Lock()
-		delete(c.pending, frame.FrameID)
+		if c.pending != nil {
+			delete(c.pending, frame.FrameID)
+		}
 		c.mu.Unlock()
 	}()
 
@@ -126,6 +132,10 @@ func (c *Connection) SendAndAwait(ctx context.Context, ft daemonbus.FrameType, p
 // one is registered for the frame_id.
 func (c *Connection) matchAck(frame daemonbus.Frame) bool {
 	c.mu.Lock()
+	if c.pending == nil {
+		c.mu.Unlock()
+		return false
+	}
 	ch, ok := c.pending[frame.FrameID]
 	c.mu.Unlock()
 	if !ok {

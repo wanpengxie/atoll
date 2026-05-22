@@ -66,6 +66,22 @@ func SagaID(kind SagaKind, channelID channel.ID, createRequestID placement.Creat
 }
 
 func (s *SQLStore) StartSaga(ctx context.Context, in StartSagaInput) (PlacementSaga, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PlacementSaga{}, fmt.Errorf("placements: StartSaga tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	out, err := s.startSagaTx(ctx, tx, in)
+	if err != nil {
+		return PlacementSaga{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return PlacementSaga{}, fmt.Errorf("placements: StartSaga commit: %w", err)
+	}
+	return out, nil
+}
+
+func (s *SQLStore) startSagaTx(ctx context.Context, tx *sql.Tx, in StartSagaInput) (PlacementSaga, error) {
 	if in.SagaID == "" {
 		in.SagaID = SagaID(in.SagaKind, in.ChannelID, in.CreateRequestID, in.OwnerEpoch)
 	}
@@ -81,8 +97,8 @@ func (s *SQLStore) StartSaga(ctx context.Context, in StartSagaInput) (PlacementS
 	if in.ChannelID == "" || in.SagaKind == "" {
 		return PlacementSaga{}, errors.New("placements: StartSaga channel_id and saga_kind required")
 	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO placement_sagas (
+	_, err := tx.ExecContext(ctx, `
+			INSERT INTO placement_sagas (
 			saga_id, channel_id, create_request_id, owner_epoch,
 			daemon_id, daemon_connection_epoch, saga_kind, phase,
 			sent_at, expected_ack_frame_kind, created_at, updated_at
@@ -103,7 +119,7 @@ func (s *SQLStore) StartSaga(ctx context.Context, in StartSagaInput) (PlacementS
 	if err != nil {
 		return PlacementSaga{}, fmt.Errorf("placements: StartSaga: %w", err)
 	}
-	out, ok, err := s.GetSaga(ctx, in.SagaID)
+	out, ok, err := getSagaTx(ctx, tx, in.SagaID)
 	if err != nil {
 		return PlacementSaga{}, err
 	}
@@ -128,7 +144,7 @@ func (s *SQLStore) CompleteSaga(ctx context.Context, sagaID, terminalStatus stri
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE placement_sagas
 		    SET phase='completed', terminal_status=?, abandonment_reason='', updated_at=?
-		  WHERE saga_id=?`,
+		  WHERE saga_id=? AND phase != 'abandoned'`,
 		terminalStatus, nowMs, sagaID,
 	)
 	if err != nil {
@@ -152,6 +168,23 @@ func (s *SQLStore) AbandonSaga(ctx context.Context, sagaID, reason string, nowMs
 
 func (s *SQLStore) GetSaga(ctx context.Context, sagaID string) (PlacementSaga, bool, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT
+			saga_id, channel_id, create_request_id, owner_epoch, daemon_id,
+			daemon_connection_epoch, saga_kind, phase, sent_at,
+			expected_ack_frame_kind, terminal_status, abandonment_reason,
+			attempt_count, last_attempt_at, created_at, updated_at
+		FROM placement_sagas WHERE saga_id=?`, sagaID)
+	out, err := scanSaga(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PlacementSaga{}, false, nil
+	}
+	if err != nil {
+		return PlacementSaga{}, false, err
+	}
+	return out, true, nil
+}
+
+func getSagaTx(ctx context.Context, tx *sql.Tx, sagaID string) (PlacementSaga, bool, error) {
+	row := tx.QueryRowContext(ctx, `SELECT
 			saga_id, channel_id, create_request_id, owner_epoch, daemon_id,
 			daemon_connection_epoch, saga_kind, phase, sent_at,
 			expected_ack_frame_kind, terminal_status, abandonment_reason,
@@ -193,9 +226,10 @@ func (s *SQLStore) AbandonTimedOutSagas(ctx context.Context, cutoffSentAt int64,
 		       terminal_status='timeout',
 		       abandonment_reason=?,
 		       updated_at=?
-		 WHERE phase IN ('sent','awaiting_ack','partial_takeover')
-		   AND sent_at > 0
-		   AND sent_at <= ?`,
+ WHERE phase IN ('sent','awaiting_ack','partial_takeover')
+   AND saga_kind != 'rollback'
+   AND sent_at > 0
+   AND sent_at <= ?`,
 		reason, nowMs, cutoffSentAt,
 	)
 	if err != nil {

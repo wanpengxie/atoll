@@ -25,7 +25,8 @@ type PushFrame struct {
 type RejectReason string
 
 const (
-	RejectReasonMuxOwnerEpochStale RejectReason = "mux_owner_epoch_stale"
+	RejectReasonMuxOwnerEpochStale         RejectReason = "mux_owner_epoch_stale"
+	RejectReasonViewsyncResyncBackpressure RejectReason = "viewsync_resync_backpressure"
 )
 
 // AckFrame is the payload of `viewsync.ack` (L1 §8.3 row 2).

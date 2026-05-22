@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -99,6 +100,15 @@ func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 		daemonID := placement.DaemonID(daemonIDRaw)
 		host := c.Query("host")
 		version := c.Query("version")
+		capacity := 0
+		if raw := c.Query("capacity"); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "capacity must be a non-negative integer"})
+				return
+			}
+			capacity = n
+		}
 		if !parseOK || daemonID == "" || key == "" || !hasRealProto {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": "Sec-WebSocket-Protocol: coagent.daemon.v1, daemon.<daemon_id>, key.<key> required",
@@ -109,7 +119,7 @@ func (s *Service) HandleWS(provider HandlersProvider) gin.HandlerFunc {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": ErrDaemonAuthFailed.Error()})
 			return
 		}
-		if err := s.RegisterDaemon(c.Request.Context(), daemonID, host, version, 0, key); err != nil {
+		if err := s.RegisterDaemon(c.Request.Context(), daemonID, host, version, capacity, key); err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
 		}

@@ -260,11 +260,14 @@ func (s *Service) RegisterDaemon(
 		ctx,
 		`INSERT INTO daemons (id, host, version, capacity, key_hash, connection_epoch, last_heartbeat_at, created_at)
 		 VALUES (?, ?, ?, ?, ?, 0, 0, ?)
-		 ON CONFLICT(id) DO UPDATE SET
-		   host = excluded.host,
-		   version = excluded.version,
-		   capacity = excluded.capacity,
-		   key_hash = excluded.key_hash`,
+			 ON CONFLICT(id) DO UPDATE SET
+			   host = excluded.host,
+			   version = excluded.version,
+			   capacity = CASE
+			     WHEN excluded.capacity > 0 THEN excluded.capacity
+			     ELSE daemons.capacity
+			   END,
+			   key_hash = excluded.key_hash`,
 		string(daemonID), host, version, capacity, hashKey(keyMaterial), now,
 	)
 	if err != nil {

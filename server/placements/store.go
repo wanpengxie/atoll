@@ -72,6 +72,50 @@ func (s *SQLStore) Reserve(ctx context.Context, p placement.Placement) (placemen
 	return p, nil
 }
 
+func (s *SQLStore) ReserveWithSaga(ctx context.Context, p placement.Placement, saga StartSagaInput) (placement.Placement, PlacementSaga, error) {
+	if p.ChannelID == "" {
+		return placement.Placement{}, PlacementSaga{}, errors.New("placements: channel_id required")
+	}
+	if p.State == "" {
+		p.State = placement.StateCreating
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return placement.Placement{}, PlacementSaga{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(
+		ctx,
+		`INSERT INTO channel_placements (
+		   channel_id, daemon_id, state, owner_epoch, fencing_token,
+		   create_request_id, daemon_connection_epoch, last_heartbeat_at,
+		   created_at, activated_at, entered_state_at,
+		   host_actor_id, federated_origin, tenant_id
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		string(p.ChannelID), string(p.DaemonID), string(p.State),
+		int64(p.OwnerEpoch), string(p.FencingToken),
+		string(p.CreateRequestID), int64(p.DaemonConnectionEpoch),
+		p.LastHeartbeatAt, p.CreatedAt, p.ActivatedAt, p.EnteredStateAt,
+		nullableString(p.HostActorID),
+		nullableString(p.FederatedOrigin),
+		nullableString(string(p.TenantID)),
+	)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return placement.Placement{}, PlacementSaga{}, &placement.ErrPlacementExists{ChannelID: p.ChannelID}
+		}
+		return placement.Placement{}, PlacementSaga{}, fmt.Errorf("placements: insert: %w", err)
+	}
+	started, err := s.startSagaTx(ctx, tx, saga)
+	if err != nil {
+		return placement.Placement{}, PlacementSaga{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return placement.Placement{}, PlacementSaga{}, err
+	}
+	return p, started, nil
+}
+
 // Get returns the placement row for channelID.
 func (s *SQLStore) Get(ctx context.Context, channelID channel.ID) (placement.Placement, bool, error) {
 	var p placement.Placement
@@ -268,6 +312,30 @@ func (s *SQLStore) ReserveReclaim(
 	createRequestID placement.CreateRequestID,
 	nowMs int64,
 ) (placement.Placement, bool, error) {
+	return s.reserveReclaim(ctx, channelID, candidate, connectionEpoch, createRequestID, nowMs, nil)
+}
+
+func (s *SQLStore) ReserveReclaimWithSaga(
+	ctx context.Context,
+	channelID channel.ID,
+	candidate placement.DaemonID,
+	connectionEpoch placement.ConnectionEpoch,
+	createRequestID placement.CreateRequestID,
+	nowMs int64,
+	saga StartSagaInput,
+) (placement.Placement, bool, error) {
+	return s.reserveReclaim(ctx, channelID, candidate, connectionEpoch, createRequestID, nowMs, &saga)
+}
+
+func (s *SQLStore) reserveReclaim(
+	ctx context.Context,
+	channelID channel.ID,
+	candidate placement.DaemonID,
+	connectionEpoch placement.ConnectionEpoch,
+	createRequestID placement.CreateRequestID,
+	nowMs int64,
+	saga *StartSagaInput,
+) (placement.Placement, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return placement.Placement{}, false, err
@@ -343,6 +411,11 @@ func (s *SQLStore) ReserveReclaim(
 	p.CreateRequestID = createRequestID
 	p.DaemonConnectionEpoch = connectionEpoch
 	p.EnteredStateAt = nowMs
+	if saga != nil {
+		if _, err := s.startSagaTx(ctx, tx, *saga); err != nil {
+			return placement.Placement{}, false, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return placement.Placement{}, false, err
 	}

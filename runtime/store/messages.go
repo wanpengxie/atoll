@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -49,6 +50,12 @@ type Messages struct {
 	lock *ChannelLock // optional — when non-nil, Append enforces fencing.
 }
 
+const (
+	viewSyncOutboxHighWatermark = 10000
+	viewSyncOutboxLowWatermark  = viewSyncOutboxHighWatermark / 2
+	viewSyncOutboxThrottleSleep = 50 * time.Millisecond
+)
+
 // NewMessages returns a *Messages bound to the channel sqlite WITHOUT
 // fencing enforcement. Use this constructor for store-level unit tests
 // (transit_test / store_test) and helper paths that seed rows before
@@ -86,6 +93,9 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kl
 	if env.Payload == nil {
 		return klog.AppendResult{}, errors.New("store: append nil payload (harness step 4 must materialize payload before reaching store)")
 	}
+	if err := m.waitForViewSyncOutboxAdmission(ctx); err != nil {
+		return klog.AppendResult{}, err
+	}
 
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -101,6 +111,33 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kl
 		return klog.AppendResult{}, fmt.Errorf("store: append commit: %w", err)
 	}
 	return res, nil
+}
+
+func (m *Messages) waitForViewSyncOutboxAdmission(ctx context.Context) error {
+	blocking := false
+	for {
+		var n int
+		if err := m.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM view_sync_outbox WHERE status IN ('pending','pushed')`,
+		).Scan(&n); err != nil {
+			return fmt.Errorf("store: view-sync outbox admission count: %w", err)
+		}
+		threshold := viewSyncOutboxHighWatermark
+		if blocking {
+			threshold = viewSyncOutboxLowWatermark
+		}
+		if n < threshold || (!blocking && n <= viewSyncOutboxHighWatermark) {
+			return nil
+		}
+		blocking = true
+		timer := time.NewTimer(viewSyncOutboxThrottleSleep)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // AppendTx appends env using an existing transaction. It is used by internal

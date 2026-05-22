@@ -59,10 +59,11 @@ func (h *MultiAckHandler) Handle(ctx context.Context, ack viewsync.AckFrame) err
 		return nil
 	}
 	if !ack.Accepted {
-		if ack.RejectReason == viewsync.RejectReasonMuxOwnerEpochStale {
+		if ack.RejectReason == viewsync.RejectReasonMuxOwnerEpochStale ||
+			ack.RejectReason == viewsync.RejectReasonViewsyncResyncBackpressure {
 			if h.onStaleFencing != nil {
 				if err := h.onStaleFencing(ctx, ack); err != nil {
-					return fmt.Errorf("transit: multi ack stale fencing %s: %w", ack.ChannelID, err)
+					return fmt.Errorf("transit: multi ack reject %s: %w", ack.ChannelID, err)
 				}
 			}
 			return nil

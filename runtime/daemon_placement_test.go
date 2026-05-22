@@ -12,6 +12,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
@@ -528,6 +529,79 @@ func TestDaemon_OnCreateChannel_ReplayRepairsMissingCreatedEvent(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	created := loadChannelCreatedEvent(t, ctx, db, req.ChannelID)
 	assertCanonicalChannelCreatedEvent(t, created, req.ChannelID, "daemon-A", 1)
+}
+
+func TestEnsureChannelCreatedEvent_CorruptLogQuarantine(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	d, srv, _, channelsDir := startDaemon(t, ctx, "daemon-A")
+	defer func() { _ = d.Close() }()
+
+	req := placement.CreateChannelRequest{
+		ChannelID: "ch-created-corrupt", CreateRequestID: "req-created-corrupt",
+	}
+	sqlitePath, err := d.Saga().Bootstrap(ctx, req.ChannelID, req)
+	if err != nil {
+		t.Fatalf("pre-bootstrap saga: %v", err)
+	}
+	token, err := placement.NewFencingToken()
+	if err != nil {
+		t.Fatalf("fencing token: %v", err)
+	}
+	lockStore, err := d.OpenChannelLock(ctx, sqlitePath)
+	if err != nil {
+		t.Fatalf("open lock: %v", err)
+	}
+	ts := now()
+	if err := lockStore.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    req.ChannelID,
+		FencingToken: token,
+		OwnerEpoch:   1,
+		DaemonID:     "daemon-A",
+		DaemonEpoch:  placement.DaemonEpoch(d.Transit().Epoch()),
+		AcquiredAt:   ts,
+		RefreshedAt:  ts,
+	}); err != nil {
+		t.Fatalf("insert lock: %v", err)
+	}
+	db, err := store.OpenChannel(ctx, filepath.Join(channelsDir, string(req.ChannelID), "channel.sqlite"), store.OpenOptions{SkipDDL: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := store.NewMessages(db).Append(ctx, &message.Envelope{
+		ID:         "corrupt:first",
+		TS:         ts,
+		TSReceived: ts,
+		ChannelID:  req.ChannelID,
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind:       message.KindEvent,
+		Type:       "custom.first",
+		Payload:    json.RawMessage(`{}`),
+		Visibility: message.VisibilitySystem,
+		Audience:   message.Audience{message.AudienceWildcard},
+	}, klog.FencingTuple{}); err != nil {
+		t.Fatalf("append corrupt first message: %v", err)
+	}
+
+	rej := sendCreateChannelReject(t, ctx, d, srv, req)
+	if rej.Reason == "" {
+		t.Fatalf("reject reason empty, want corrupt log rejection")
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("messages count=%d want no seq=2 repair append", count)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE type='system.channel.created'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("system.channel.created count=%d want 0 for corrupt log", count)
+	}
 }
 
 // TestDaemon_OnCreateChannel_ConflictingRequestRejected — after a

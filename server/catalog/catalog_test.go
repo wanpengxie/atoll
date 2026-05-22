@@ -2,14 +2,17 @@ package catalog_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/server/catalog"
 	"github.com/wanpengxie/ActOS/server/identity"
 	"github.com/wanpengxie/ActOS/server/store"
@@ -159,6 +162,9 @@ func TestPlacementHook_OnChannelMembersChanged_FiresOnRouteWrite(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("POST member status=%d body=%s", rec.Code, rec.Body.String())
 	}
+	if _, err := svc.ProcessDueMemberTransitions(ctx, 10); err != nil {
+		t.Fatalf("process add transition: %v", err)
+	}
 	if len(hook.adds) != 1 || hook.adds[0].MemberActorID != "user:u2" || len(hook.removes) != 0 {
 		t.Fatalf("hook after add adds=%+v removes=%+v", hook.adds, hook.removes)
 	}
@@ -169,14 +175,142 @@ func TestPlacementHook_OnChannelMembersChanged_FiresOnRouteWrite(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("DELETE member status=%d body=%s", rec.Code, rec.Body.String())
 	}
+	if _, err := svc.ProcessDueMemberTransitions(ctx, 10); err != nil {
+		t.Fatalf("process remove transition: %v", err)
+	}
 	if len(hook.removes) != 1 || hook.removes[0] != "user:u2" {
 		t.Fatalf("hook removes=%+v", hook.removes)
+	}
+}
+
+func TestCatalogMember_DaemonOffline_QueuesTransitionOutbox(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc, ch := setupMemberRouteTest(t)
+	hook := &recordingPlacementHook{fail: true}
+	svc.SetPlacementHook(hook)
+
+	r := routeWithUser(svc, "u1")
+	req := httptest.NewRequest(http.MethodPost, "/api/channels/"+ch.ID+"/members", strings.NewReader(`{"user_id":"u2","member_actor_id":"user:u2"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST member status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if n, err := svc.PendingMemberTransitionCount(context.Background()); err != nil || n != 1 {
+		t.Fatalf("pending transitions=%d err=%v want 1", n, err)
+	}
+	if _, err := svc.ProcessDueMemberTransitions(context.Background(), 10); err == nil {
+		t.Fatal("ProcessDueMemberTransitions err=nil want offline mirror failure")
+	}
+	if n, err := svc.PendingMemberTransitionCount(context.Background()); err != nil || n != 1 {
+		t.Fatalf("pending transitions after failure=%d err=%v want 1", n, err)
+	}
+}
+
+func TestMemberTransitionOutbox_RetryAfterDaemonReconnect(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	base := time.UnixMilli(1_000)
+	now := base
+	svc.WithClock(func() time.Time { return now })
+	ws, err := svc.CreateWorkspace(ctx, catalog.CreateWorkspaceInput{Name: "Demo", OwnerID: "u1"})
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	ch, _, err := svc.CreateChannel(ctx, catalog.CreateChannelInput{WorkspaceID: ws.ID, Name: "general", CreatorID: "u1"})
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+	hook := &recordingPlacementHook{fail: true}
+	svc.SetPlacementHook(hook)
+	if _, err := svc.AddChannelMember(ctx, ch.ID, catalog.NewMember{UserID: "u2", MemberActorID: "user:u2"}); err != nil {
+		t.Fatalf("AddChannelMember: %v", err)
+	}
+	if _, err := svc.ProcessDueMemberTransitions(ctx, 10); err == nil {
+		t.Fatal("first process err=nil want offline failure")
+	}
+	hook.fail = false
+	now = base.Add(3 * time.Minute)
+	if _, err := svc.ProcessDueMemberTransitions(ctx, 10); err != nil {
+		t.Fatalf("retry process: %v", err)
+	}
+	if n, err := svc.PendingMemberTransitionCount(ctx); err != nil || n != 0 {
+		t.Fatalf("pending after retry=%d err=%v want 0", n, err)
+	}
+	if len(hook.adds) != 1 || hook.adds[0].MemberActorID != "user:u2" {
+		t.Fatalf("hook adds=%+v want retried mirror", hook.adds)
+	}
+}
+
+func TestCatalogMember_RetrySafe_DoesNotDuplicateMirror(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	ws, err := svc.CreateWorkspace(ctx, catalog.CreateWorkspaceInput{Name: "Demo", OwnerID: "u1"})
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	ch, _, err := svc.CreateChannel(ctx, catalog.CreateChannelInput{WorkspaceID: ws.ID, Name: "general", CreatorID: "u1"})
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+	hook := &recordingPlacementHook{}
+	svc.SetPlacementHook(hook)
+	if _, err := svc.AddChannelMember(ctx, ch.ID, catalog.NewMember{UserID: "u2", MemberActorID: "user:u2"}); err != nil {
+		t.Fatalf("AddChannelMember: %v", err)
+	}
+	if _, err := svc.AddChannelMember(ctx, ch.ID, catalog.NewMember{UserID: "u2", MemberActorID: "user:u2"}); !errors.Is(err, catalog.ErrMemberExists) {
+		t.Fatalf("duplicate AddChannelMember err=%v want ErrMemberExists", err)
+	}
+	if n, err := svc.PendingMemberTransitionCount(ctx); err != nil || n != 1 {
+		t.Fatalf("pending transitions=%d err=%v want 1", n, err)
+	}
+	if _, err := svc.ProcessDueMemberTransitions(ctx, 10); err != nil {
+		t.Fatalf("process transitions: %v", err)
+	}
+	if len(hook.adds) != 1 {
+		t.Fatalf("hook adds=%d want exactly one mirror", len(hook.adds))
+	}
+}
+
+func TestCatalogMember_RemoveSubscriptionRevokedEvenIfDaemonOffline(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	ws, err := svc.CreateWorkspace(ctx, catalog.CreateWorkspaceInput{Name: "Demo", OwnerID: "u1"})
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	ch, _, err := svc.CreateChannel(ctx, catalog.CreateChannelInput{
+		WorkspaceID: ws.ID,
+		Name:        "general",
+		CreatorID:   "u1",
+		Members:     []catalog.NewMember{{UserID: "u2", MemberActorID: "user:u2"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+	revoker := &recordingRevoker{}
+	hook := &recordingPlacementHook{fail: true}
+	svc.SetSubscriptionRevoker(revoker)
+	svc.SetPlacementHook(hook)
+	if err := svc.RemoveChannelMember(ctx, ch.ID, "u2"); err != nil {
+		t.Fatalf("RemoveChannelMember: %v", err)
+	}
+	if _, err := svc.ProcessDueMemberTransitions(ctx, 10); err == nil {
+		t.Fatal("process remove err=nil want daemon mirror failure")
+	}
+	if revoker.calls != 1 || revoker.channelID != channel.ID(ch.ID) || revoker.userID != "u2" {
+		t.Fatalf("revoker=%+v want one u2 revoke", revoker)
+	}
+	if n, err := svc.PendingMemberTransitionCount(ctx); err != nil || n != 1 {
+		t.Fatalf("pending after failed remove=%d err=%v want 1", n, err)
 	}
 }
 
 type recordingPlacementHook struct {
 	adds    []catalog.ChannelMember
 	removes []string
+	fail    bool
 }
 
 func (h *recordingPlacementHook) OnChannelCreated(ctx context.Context, ch catalog.Channel, members []catalog.ChannelMember) error {
@@ -184,7 +318,47 @@ func (h *recordingPlacementHook) OnChannelCreated(ctx context.Context, ch catalo
 }
 
 func (h *recordingPlacementHook) OnChannelMembersChanged(ctx context.Context, channelID string, adds []catalog.ChannelMember, removes []string) error {
+	if h.fail {
+		return errors.New("daemon offline")
+	}
 	h.adds = append(h.adds, adds...)
 	h.removes = append(h.removes, removes...)
 	return nil
+}
+
+type recordingRevoker struct {
+	calls     int
+	channelID channel.ID
+	userID    string
+}
+
+func (r *recordingRevoker) RevokeChannelUser(channelID channel.ID, userID string) {
+	r.calls++
+	r.channelID = channelID
+	r.userID = userID
+}
+
+func setupMemberRouteTest(t *testing.T) (*catalog.Service, catalog.Channel) {
+	t.Helper()
+	svc := newTestService(t)
+	ctx := context.Background()
+	ws, err := svc.CreateWorkspace(ctx, catalog.CreateWorkspaceInput{Name: "Demo", OwnerID: "u1"})
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	ch, _, err := svc.CreateChannel(ctx, catalog.CreateChannelInput{WorkspaceID: ws.ID, Name: "general", CreatorID: "u1"})
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+	return svc, ch
+}
+
+func routeWithUser(svc *catalog.Service, userID string) *gin.Engine {
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set("coagent.user", identity.User{ID: userID})
+		c.Next()
+	})
+	svc.RegisterRoutes(r.Group("/api"), nil)
+	return r
 }

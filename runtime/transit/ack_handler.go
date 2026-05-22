@@ -51,10 +51,11 @@ func (h *AckHandler) Handle(ctx context.Context, ack viewsync.AckFrame) (bool, e
 			ack.ChannelID, h.outbox.ChannelID())
 	}
 	if !ack.Accepted {
-		if ack.RejectReason == viewsync.RejectReasonMuxOwnerEpochStale {
+		if ack.RejectReason == viewsync.RejectReasonMuxOwnerEpochStale ||
+			ack.RejectReason == viewsync.RejectReasonViewsyncResyncBackpressure {
 			if h.onStaleFencing != nil {
 				if err := h.onStaleFencing(ctx, ack); err != nil {
-					return false, fmt.Errorf("transit: ack stale fencing handler: %w", err)
+					return false, fmt.Errorf("transit: ack reject handler: %w", err)
 				}
 			}
 			return false, nil

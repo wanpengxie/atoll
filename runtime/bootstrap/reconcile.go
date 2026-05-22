@@ -36,6 +36,21 @@ type Reconciler struct {
 	heldRejected map[channel.ID]string // channel_id -> reject reason
 }
 
+type BootstrapLogCorruptError struct {
+	ChannelID channel.ID
+	Detail    string
+}
+
+func (e *BootstrapLogCorruptError) Error() string {
+	if e == nil {
+		return "bootstrap_log_corrupt"
+	}
+	if e.Detail == "" {
+		return fmt.Sprintf("bootstrap_log_corrupt: channel %s", e.ChannelID)
+	}
+	return fmt.Sprintf("bootstrap_log_corrupt: channel %s: %s", e.ChannelID, e.Detail)
+}
+
 // NewReconciler builds a Reconciler.
 func NewReconciler(daemonDB *sql.DB, nowFn func() int64) (*Reconciler, error) {
 	if daemonDB == nil {
@@ -165,6 +180,13 @@ func (r *Reconciler) Run(ctx context.Context) ([]RolledBack, error) {
 		if hasLock {
 			if r.ensureCreatedEvent != nil {
 				if err := r.ensureCreatedEvent(ctx, rb.ChannelID, rb.WorkdirPath); err != nil {
+					var corrupt *BootstrapLogCorruptError
+					if errors.As(err, &corrupt) {
+						if markErr := r.markQuarantined(ctx, rb.CreateRequestID, err.Error()); markErr != nil {
+							return nil, markErr
+						}
+						continue
+					}
 					return nil, err
 				}
 			}
@@ -207,6 +229,21 @@ func (r *Reconciler) markCompleted(ctx context.Context, createRequestID string) 
 		             WHERE create_request_id=? AND status='in_progress'`
 	if _, err := r.daemonDB.ExecContext(ctx, upd, r.nowFn(), createRequestID); err != nil {
 		return fmt.Errorf("bootstrap: reconcile mark completed: %w", err)
+	}
+	return nil
+}
+
+func (r *Reconciler) markQuarantined(ctx context.Context, createRequestID, reason string) error {
+	const upd = `UPDATE bootstrap_registry
+		             SET status='rolled_back',
+		                 phase='abandoned',
+		                 terminal_status='quarantined',
+		                 abandonment_reason=?,
+		                 rollback_reason=?,
+		                 completed_at=?
+		             WHERE create_request_id=? AND status='in_progress'`
+	if _, err := r.daemonDB.ExecContext(ctx, upd, reason, reason, r.nowFn(), createRequestID); err != nil {
+		return fmt.Errorf("bootstrap: reconcile mark quarantined: %w", err)
 	}
 	return nil
 }

@@ -71,6 +71,11 @@ func (s *Service) InstallType(ctx context.Context, row adapter.TypeRow) (adapter
 	if err := s.validate(ctx, row); err != nil {
 		return adapter.TypeRow{}, err
 	}
+	if existing, ok, err := s.registry.Lookup(ctx, row.Type); err != nil {
+		return adapter.TypeRow{}, fmt.Errorf("typeinstall: registry lookup %s: %w", row.Type, err)
+	} else if ok && sameTypeRow(existing, row) {
+		return existing, nil
+	}
 
 	persisted, existed, err := s.registry.BeginInstall(ctx, row)
 	if err != nil {
@@ -95,6 +100,30 @@ func (s *Service) InstallType(ctx context.Context, row adapter.TypeRow) (adapter
 		}
 	}
 	return persisted, nil
+}
+
+func sameTypeRow(a, b adapter.TypeRow) bool {
+	if a.Type != b.Type ||
+		a.HandlerActorID != b.HandlerActorID ||
+		a.HandlerBinding != b.HandlerBinding ||
+		a.MaxPendingMs != b.MaxPendingMs ||
+		normalizeTerminal(a.TerminalConvention) != normalizeTerminal(b.TerminalConvention) ||
+		len(a.AllowedKinds) != len(b.AllowedKinds) {
+		return false
+	}
+	for i := range a.AllowedKinds {
+		if a.AllowedKinds[i] != b.AllowedKinds[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeTerminal(in adapter.TerminalConvention) adapter.TerminalConvention {
+	if in == "" {
+		return adapter.TerminalPayloadStatus
+	}
+	return in
 }
 
 func (s *Service) RecoverInstalling(ctx context.Context, reason string) (int, error) {

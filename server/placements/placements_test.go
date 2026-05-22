@@ -636,6 +636,83 @@ func TestPlacementSaga_TimeoutAbandonment(t *testing.T) {
 	}
 }
 
+func TestReserveWithSaga_InsertFailureRollsBackPlacement(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+	now := c.Now().UnixMilli()
+	p := placement.Placement{
+		ChannelID:             "ch-saga-insert-fail",
+		DaemonID:              "d-1",
+		State:                 placement.StateCreating,
+		CreateRequestID:       "req-saga-insert-fail",
+		DaemonConnectionEpoch: 1,
+		CreatedAt:             now,
+		EnteredStateAt:        now,
+	}
+	if _, _, err := svc.Store().ReserveWithSaga(ctx, p, placements.StartSagaInput{
+		SagaID:          "bad-saga-kind",
+		ChannelID:       p.ChannelID,
+		CreateRequestID: p.CreateRequestID,
+		SagaKind:        placements.SagaKind("invalid_kind"),
+		Phase:           placements.SagaPhaseSent,
+		SentAt:          now,
+		NowMs:           now,
+	}); err == nil {
+		t.Fatal("ReserveWithSaga err=nil want saga insert failure")
+	}
+	if _, ok, err := svc.Get(ctx, p.ChannelID); err != nil || ok {
+		t.Fatalf("placement persisted after saga failure ok=%v err=%v", ok, err)
+	}
+}
+
+func TestRollbackSaga_AbandonedCannotTransitionToCompleted(t *testing.T) {
+	t.Parallel()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	svc := newSvc(t, c)
+	ctx := context.Background()
+	now := c.Now().UnixMilli()
+	saga, err := svc.Store().StartSaga(ctx, placements.StartSagaInput{
+		SagaID:               "rollback-abandoned",
+		ChannelID:            "ch-rollback-abandoned",
+		CreateRequestID:      "req-rollback-abandoned",
+		OwnerEpoch:           4,
+		DaemonID:             "d-1",
+		SagaKind:             placements.SagaKindRollback,
+		Phase:                placements.SagaPhaseSent,
+		SentAt:               now - int64(time.Hour/time.Millisecond),
+		ExpectedAckFrameKind: string(kerneldaemonbus.FrameTypeControlUnbindChannelAck),
+		NowMs:                now,
+	})
+	if err != nil {
+		t.Fatalf("StartSaga: %v", err)
+	}
+	if err := svc.Store().AbandonSaga(ctx, saga.SagaID, "max_attempts", now+1); err != nil {
+		t.Fatalf("AbandonSaga: %v", err)
+	}
+	if err := svc.Store().CompleteSaga(ctx, saga.SagaID, "completed", now+2); err != nil {
+		t.Fatalf("CompleteSaga: %v", err)
+	}
+	got, found, err := svc.Store().GetSaga(ctx, saga.SagaID)
+	if err != nil || !found {
+		t.Fatalf("GetSaga found=%v err=%v", found, err)
+	}
+	if got.Phase != placements.SagaPhaseAbandoned || got.TerminalStatus != "abandoned" {
+		t.Fatalf("saga phase=%q terminal=%q want abandoned", got.Phase, got.TerminalStatus)
+	}
+	if err := svc.Store().AbandonTimedOutSagas(ctx, now+10, "phase_timeout", now+3); err != nil {
+		t.Fatalf("AbandonTimedOutSagas: %v", err)
+	}
+	got, _, err = svc.Store().GetSaga(ctx, saga.SagaID)
+	if err != nil {
+		t.Fatalf("GetSaga after timeout: %v", err)
+	}
+	if got.AbandonmentReason != "max_attempts" {
+		t.Fatalf("rollback saga abandonment_reason=%q want max_attempts", got.AbandonmentReason)
+	}
+}
+
 // TestReserve_DoesNotPreGenerateFencing asserts the trust-root
 // direction defined by proto-foundation §3.3.3: server Reserve writes
 // owner_epoch=0 and an empty fencing_token. The daemon-side Phase 2

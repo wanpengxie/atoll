@@ -1363,6 +1363,9 @@ func TestPushhubRevokesSubscriptionAfterMemberRemoval(t *testing.T) {
 	if delResp.StatusCode != http.StatusOK {
 		t.Fatalf("delete member status=%d want 200", delResp.StatusCode)
 	}
+	if _, err := app.Catalog().ProcessDueMemberTransitions(context.Background(), 10); err != nil {
+		t.Fatalf("process member transition: %v", err)
+	}
 	pollUntil(t, time.Second, func() bool {
 		return app.Pushhub().SubscriberCount(channel.ID(alice.channelID)) == 0
 	})
@@ -2412,7 +2415,7 @@ func TestReclaim_TimeoutAfterTakeover_TriggersUnbindRetry(t *testing.T) {
 	}
 	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 1)
 	drainRollbackUnbindNoAck(t, ctx, dmn, createReq.ChannelID)
-	triggerRollbackHeartbeatRetry(t, ctx, dmn, conn.DaemonID, epoch, createReq.ChannelID)
+	triggerRollbackHeartbeatRetry(t, app, ctx, dmn, conn.DaemonID, epoch, createReq.ChannelID)
 	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 0)
 }
 
@@ -2434,7 +2437,7 @@ func TestReclaim_MalformedAcceptedAck_TriggersUnbindRetry(t *testing.T) {
 	}
 	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 1)
 	drainRollbackUnbindNoAck(t, ctx, dmn, createReq.ChannelID)
-	triggerRollbackHeartbeatRetry(t, ctx, dmn, conn.DaemonID, epoch, createReq.ChannelID)
+	triggerRollbackHeartbeatRetry(t, app, ctx, dmn, conn.DaemonID, epoch, createReq.ChannelID)
 	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 0)
 }
 
@@ -2456,7 +2459,29 @@ func TestReclaim_UnexpectedFrame_TriggersUnbindRetry(t *testing.T) {
 	}
 	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 1)
 	drainRollbackUnbindNoAck(t, ctx, dmn, createReq.ChannelID)
-	triggerRollbackHeartbeatRetry(t, ctx, dmn, conn.DaemonID, epoch, createReq.ChannelID)
+	triggerRollbackHeartbeatRetry(t, app, ctx, dmn, conn.DaemonID, epoch, createReq.ChannelID)
+	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 0)
+}
+
+func TestReclaim_PostTakeoverInternalError_TriggersUnbindRetry(t *testing.T) {
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	conn, dmn, epoch, createReq := prepareRollbackReclaim(t, app, ctx, "ch-reclaim-internal-error", "d-reclaim-internal-error")
+	defer app.Daemonbus().Unregister(conn.DaemonID)
+
+	done := rejectReclaimOnDaemon(t, ctx, dmn, conn.DaemonID, epoch, placement.ReclaimRejectInternalError)
+	err := app.Placements().ReconcileOnce(ctx)
+	if err == nil || !strings.Contains(err.Error(), "rollback") {
+		t.Fatalf("ReconcileOnce err=%v want rollback failure after internal reject", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("daemon side: %v", err)
+	}
+	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 1)
+	drainRollbackUnbindNoAck(t, ctx, dmn, createReq.ChannelID)
+	triggerRollbackHeartbeatRetry(t, app, ctx, dmn, conn.DaemonID, epoch, createReq.ChannelID)
 	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 0)
 }
 
@@ -2511,12 +2536,92 @@ func TestReclaim_UnbindSendFailure_PersistsIntentForRetry(t *testing.T) {
 	svr2, dmn2 := newPipePair()
 	conn2 := daemonbus.NewConnection(conn.DaemonID, epoch+1, svr2)
 	retryDone := expectRollbackUnbindAndAck(t, ctx, dmn2, createReq.ChannelID)
+	if _, err := app.DB().ExecContext(ctx,
+		`UPDATE placement_rollback_intents SET next_attempt_at = 0 WHERE channel_id = ?`,
+		string(createReq.ChannelID),
+	); err != nil {
+		t.Fatalf("mark rollback intent due: %v", err)
+	}
 	app.Daemonbus().Register(conn2)
 	defer app.Daemonbus().Unregister(conn.DaemonID)
 	go func() { _ = conn2.Run(ctx, app.DaemonbusHandlers()) }()
 	if err := <-retryDone; err != nil {
 		t.Fatalf("retry daemon side: %v", err)
 	}
+	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 0)
+}
+
+func TestRollbackIntent_OwnerEpochStaleAck_TreatedAsCleanup(t *testing.T) {
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	conn, dmn, epoch, createReq := prepareRollbackReclaim(t, app, ctx, "ch-rollback-stale-ack", "d-rollback-stale-ack")
+	defer app.Daemonbus().Unregister(conn.DaemonID)
+
+	done := rejectReclaimOnDaemon(t, ctx, dmn, conn.DaemonID, epoch, placement.ReclaimRejectInternalError)
+	err := app.Placements().ReconcileOnce(ctx)
+	if err == nil || !strings.Contains(err.Error(), "rollback") {
+		t.Fatalf("ReconcileOnce err=%v want rollback failure after internal reject", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("daemon side: %v", err)
+	}
+	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 1)
+	drainRollbackUnbindNoAck(t, ctx, dmn, createReq.ChannelID)
+
+	if _, err := app.DB().ExecContext(ctx,
+		`UPDATE placement_rollback_intents SET next_attempt_at = 0 WHERE channel_id = ?`,
+		string(createReq.ChannelID),
+	); err != nil {
+		t.Fatalf("mark rollback intent due: %v", err)
+	}
+	retryDone := expectRollbackUnbindAndAckOwnerEpochStale(t, ctx, dmn, createReq.ChannelID)
+	raw, _ := json.Marshal(placement.HeartbeatPayload{
+		DaemonID:     conn.DaemonID,
+		HeartbeatSeq: 1,
+	})
+	if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+		FrameID:               "frame-heartbeat-stale-ack",
+		FrameKind:             kerneldaemonbus.FrameTypeControlHeartbeat,
+		DaemonID:              conn.DaemonID,
+		DaemonConnectionEpoch: epoch,
+		Payload:               raw,
+	}); err != nil {
+		t.Fatalf("send heartbeat: %v", err)
+	}
+	if err := <-retryDone; err != nil {
+		t.Fatalf("heartbeat retry: %v", err)
+	}
+	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 0)
+}
+
+func TestReclaimRollback_CrashBetweenIntentAndOrphan_RecoveryOK(t *testing.T) {
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	conn, dmn, epoch, createReq := prepareRollbackReclaim(t, app, ctx, "ch-rollback-atomic", "d-rollback-atomic")
+	defer app.Daemonbus().Unregister(conn.DaemonID)
+
+	done := rejectReclaimOnDaemon(t, ctx, dmn, conn.DaemonID, epoch, placement.ReclaimRejectInternalError)
+	err := app.Placements().ReconcileOnce(ctx)
+	if err == nil || !strings.Contains(err.Error(), "rollback") {
+		t.Fatalf("ReconcileOnce err=%v want rollback failure after internal reject", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("daemon side: %v", err)
+	}
+	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 1)
+	got, _, err := app.Placements().Get(ctx, createReq.ChannelID)
+	if err != nil {
+		t.Fatalf("Get placement: %v", err)
+	}
+	if got.State != placement.StateOrphan {
+		t.Fatalf("placement state=%s want orphan with rollback intent persisted", got.State)
+	}
+	drainRollbackUnbindNoAck(t, ctx, dmn, createReq.ChannelID)
+	triggerRollbackHeartbeatRetry(t, app, ctx, dmn, conn.DaemonID, epoch, createReq.ChannelID)
 	assertRollbackIntentCount(t, app, ctx, createReq.ChannelID, 0)
 }
 
@@ -2617,6 +2722,35 @@ func TestReclaimCandidate_ChosenFailFallback(t *testing.T) {
 	}
 }
 
+func TestReclaimCandidate_FailedAssignmentDoesNotBumpRR(t *testing.T) {
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	connA, dmnA, epochA := registerReclaimDaemon(t, app, ctx, "d-rr-a", 0)
+	_, _, _ = registerReclaimDaemon(t, app, ctx, "d-rr-b", 0)
+
+	first := createStalePlacement(t, app, ctx, "ch-rr-failed", "d-rr-prev", 1)
+	done := rejectReclaimOnDaemon(t, ctx, dmnA, connA.DaemonID, epochA, placement.ReclaimRejectInternalError)
+	err := app.Placements().ReconcileOnce(ctx)
+	if err == nil || !strings.Contains(err.Error(), "rollback") {
+		t.Fatalf("first ReconcileOnce err=%v want rollback failure", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("first daemon side: %v", err)
+	}
+	drainRollbackUnbindNoAck(t, ctx, dmnA, first.ChannelID)
+	metrics, err := app.Daemonbus().ConnectedConnectionMetrics(ctx)
+	if err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	for _, m := range metrics {
+		if m.DaemonID == connA.DaemonID && m.LastReclaimAt != 0 {
+			t.Fatalf("failed reclaim bumped RR last_reclaim_at=%d want 0", m.LastReclaimAt)
+		}
+	}
+}
+
 // TestHeldChannelsReportDaemonIDMismatch is the FIX-T4 regression: a
 // daemonbus connection authenticated as "d1" must not be able to report
 // placements by setting `HeldChannelsReport.DaemonID` to some other
@@ -2712,6 +2846,102 @@ func TestHeldChannelsReportDaemonIDMismatch(t *testing.T) {
 	}
 
 	_ = conn.Close()
+}
+
+func TestChannelMembersBackfill_DaemonReconnectReplaysFullMemberSet(t *testing.T) {
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := srv.Client()
+	sess := registerLoginAndCreateChannel(t, client, srv.URL, app, "member-backfill@example.com")
+	chID := channel.ID(sess.channelID)
+	daemonID := placement.DaemonID("d-member-backfill")
+	if err := app.Daemonbus().RegisterDaemon(ctx, daemonID, "localhost", "v0", 32, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon: %v", err)
+	}
+	epoch, err := app.Daemonbus().IssueConnectionEpoch(ctx, daemonID)
+	if err != nil {
+		t.Fatalf("IssueConnectionEpoch: %v", err)
+	}
+	svrTx, dmn := newPipePair()
+	conn := daemonbus.NewConnection(daemonID, epoch, svrTx)
+	app.Daemonbus().Register(conn)
+	defer app.Daemonbus().Unregister(daemonID)
+	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
+
+	_, req, err := app.Placements().Reserve(ctx, chID, daemonID, placement.ConnectionEpoch(epoch), nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if ok, err := app.Placements().Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       req.ChannelID,
+		CreateRequestID: req.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "tok-member-backfill",
+		DaemonID:        daemonID,
+		Result:          placement.CreateChannelAccepted,
+	}, placement.ConnectionEpoch(epoch)); err != nil || !ok {
+		t.Fatalf("Activate ok=%v err=%v", ok, err)
+	}
+
+	reportRaw, _ := json.Marshal(placement.HeldChannelsReport{
+		DaemonID:    daemonID,
+		DaemonEpoch: 1,
+		Channels: []placement.HeldChannel{{
+			ChannelID:    chID,
+			OwnerEpoch:   1,
+			FencingToken: "tok-member-backfill",
+		}},
+	})
+	if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+		FrameID:               "held-member-backfill",
+		FrameKind:             kerneldaemonbus.FrameTypeControlHeldChannelsReport,
+		DaemonID:              daemonID,
+		DaemonConnectionEpoch: epoch,
+		Payload:               reportRaw,
+	}); err != nil {
+		t.Fatalf("write held report: %v", err)
+	}
+
+	var body kerneldaemonbus.UpdateMembersBody
+	for {
+		frame, err := dmn.ReadFrame(ctx)
+		if err != nil {
+			t.Fatalf("read daemon frame: %v", err)
+		}
+		if frame.FrameKind != kerneldaemonbus.FrameTypeControlUpdateMembers {
+			continue
+		}
+		if err := json.Unmarshal(frame.Payload, &body); err != nil {
+			t.Fatalf("decode update_members: %v", err)
+		}
+		ackRaw, _ := json.Marshal(kerneldaemonbus.UpdateMembersAckBody{
+			ChannelID: body.ChannelID,
+			Accepted:  true,
+		})
+		if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+			FrameID:               frame.FrameID,
+			FrameKind:             kerneldaemonbus.FrameTypeControlUpdateMembersAck,
+			DaemonID:              daemonID,
+			DaemonConnectionEpoch: epoch,
+			Payload:               ackRaw,
+		}); err != nil {
+			t.Fatalf("ack update_members: %v", err)
+		}
+		break
+	}
+	if body.ChannelID != chID {
+		t.Fatalf("update_members channel=%s want %s", body.ChannelID, chID)
+	}
+	if len(body.Adds) != 1 || len(body.Removes) != 0 {
+		t.Fatalf("update_members adds=%+v removes=%+v want full one-member replay", body.Adds, body.Removes)
+	}
+	if body.Adds[0].MemberActorID == "" || body.Adds[0].UserID == "" {
+		t.Fatalf("update_members member missing actor/user: %+v", body.Adds[0])
+	}
 }
 
 // ----------------------------------------------------------------------
@@ -2817,6 +3047,47 @@ func replyToReclaim(
 	return done
 }
 
+func rejectReclaimOnDaemon(
+	t *testing.T,
+	ctx context.Context,
+	dmn *pipeTransport,
+	daemonID placement.DaemonID,
+	epoch kerneldaemonbus.ConnectionEpoch,
+	reason placement.ReclaimRejectReason,
+) <-chan error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		frame, err := dmn.ReadFrame(ctx)
+		if err != nil {
+			done <- err
+			return
+		}
+		if frame.FrameKind != kerneldaemonbus.FrameTypeControlDaemonReclaim {
+			done <- fmt.Errorf("frame=%s want daemon_reclaim", frame.FrameKind)
+			return
+		}
+		var req placement.DaemonReclaimRequest
+		if err := json.Unmarshal(frame.Payload, &req); err != nil {
+			done <- err
+			return
+		}
+		raw, _ := json.Marshal(placement.ReclaimRejected{
+			ChannelID:       req.ChannelID,
+			CreateRequestID: req.CreateRequestID,
+			Reason:          reason,
+		})
+		done <- dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+			FrameID:               frame.FrameID,
+			FrameKind:             kerneldaemonbus.FrameTypeControlReclaimRejected,
+			DaemonID:              daemonID,
+			DaemonConnectionEpoch: epoch,
+			Payload:               raw,
+		})
+	}()
+	return done
+}
+
 func assertRollbackIntentCount(t *testing.T, app *gateway.App, ctx context.Context, chID channel.ID, want int) {
 	t.Helper()
 	deadline := time.Now().Add(700 * time.Millisecond)
@@ -2858,6 +3129,7 @@ func drainRollbackUnbindNoAck(t *testing.T, ctx context.Context, dmn *pipeTransp
 
 func triggerRollbackHeartbeatRetry(
 	t *testing.T,
+	app *gateway.App,
 	ctx context.Context,
 	dmn *pipeTransport,
 	daemonID placement.DaemonID,
@@ -2865,6 +3137,12 @@ func triggerRollbackHeartbeatRetry(
 	chID channel.ID,
 ) {
 	t.Helper()
+	if _, err := app.DB().ExecContext(ctx,
+		`UPDATE placement_rollback_intents SET next_attempt_at = 0 WHERE channel_id = ?`,
+		string(chID),
+	); err != nil {
+		t.Fatalf("mark rollback intent due: %v", err)
+	}
 	retryDone := expectRollbackUnbindAndAck(t, ctx, dmn, chID)
 	raw, _ := json.Marshal(placement.HeartbeatPayload{
 		DaemonID:     daemonID,
@@ -2919,6 +3197,54 @@ func expectRollbackUnbindAndAck(
 			ChannelID:  body.ChannelID,
 			OwnerEpoch: body.OwnerEpoch,
 			Result:     kerneldaemonbus.UnbindChannelReleased,
+		})
+		done <- dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+			FrameID:               frame.FrameID,
+			FrameKind:             kerneldaemonbus.FrameTypeControlUnbindChannelAck,
+			DaemonID:              frame.DaemonID,
+			DaemonConnectionEpoch: frame.DaemonConnectionEpoch,
+			Payload:               raw,
+		})
+	}()
+	return done
+}
+
+func expectRollbackUnbindAndAckOwnerEpochStale(
+	t *testing.T,
+	ctx context.Context,
+	dmn *pipeTransport,
+	chID channel.ID,
+) <-chan error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		var frame kerneldaemonbus.Frame
+		for {
+			got, err := dmn.ReadFrame(ctx)
+			if err != nil {
+				done <- err
+				return
+			}
+			if got.FrameKind != kerneldaemonbus.FrameTypeControlUnbindChannel {
+				continue
+			}
+			frame = got
+			break
+		}
+		var body kerneldaemonbus.UnbindChannelBody
+		if err := json.Unmarshal(frame.Payload, &body); err != nil {
+			done <- err
+			return
+		}
+		if body.ChannelID != chID || body.Reason != kerneldaemonbus.UnbindChannelReasonAbandon {
+			done <- fmt.Errorf("bad retry unbind: %+v", body)
+			return
+		}
+		raw, _ := json.Marshal(kerneldaemonbus.UnbindChannelAckBody{
+			ChannelID:  body.ChannelID,
+			OwnerEpoch: body.OwnerEpoch + 1,
+			Result:     kerneldaemonbus.UnbindChannelRejected,
+			Reason:     kerneldaemonbus.UnbindChannelRejectOwnerEpochStale,
 		})
 		done <- dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
 			FrameID:               frame.FrameID,

@@ -340,7 +340,7 @@ func TestPusher_BacklogWatermarkFiresOnceAboveThreshold(t *testing.T) {
 	}
 }
 
-func TestPusher_BackpressureOnHighWatermark(t *testing.T) {
+func TestPusher_BacklogDrainsUnderWatermark(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -363,14 +363,14 @@ func TestPusher_BackpressureOnHighWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
-	if sent != 0 {
-		t.Fatalf("sent=%d want 0 while backlog exceeds high watermark", sent)
+	if sent != 5 {
+		t.Fatalf("sent=%d want queued frames to drain while backlog exceeds high watermark", sent)
 	}
-	if calls := outbox.pendingPageCalls(); calls != 0 {
-		t.Fatalf("PendingPage calls=%d want 0 under backpressure", calls)
+	if calls := outbox.pendingPageCalls(); calls != 1 {
+		t.Fatalf("PendingPage calls=%d want 1 while consumer drains backlog", calls)
 	}
-	if pushed := outbox.pushedCount(); pushed != 0 {
-		t.Fatalf("pushed rows=%d want 0 under backpressure", pushed)
+	if pushed := outbox.pushedCount(); pushed != 5 {
+		t.Fatalf("pushed rows=%d want drained rows marked pushed", pushed)
 	}
 }
 

@@ -61,6 +61,14 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			if err != nil {
 				return viewsync.AckFrame{}, err
 			}
+			if res.Outcome == viewsync.ApplyOutcomeResyncRequired {
+				return viewsync.AckFrame{
+					ChannelID:       frame.ChannelID,
+					LastReceivedSeq: res.LastReceivedSeq,
+					Accepted:        false,
+					RejectReason:    viewsync.RejectReasonViewsyncResyncBackpressure,
+				}, nil
+			}
 			// FIX-T5 fan-out: if a buffered gap just closed, Apply
 			// returns the just-newly-contiguous frames (current +
 			// previously buffered) in ApplyResult.DrainedMessages —
@@ -117,16 +125,7 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			if err := a.daemonbus.RecordHeartbeat(ctx, conn.DaemonID); err != nil {
 				return placement.HeartbeatAckPayload{}, err
 			}
-			go func(conn *daemonbus.Connection) {
-				retryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				if err := a.retryRollbackIntentsForDaemon(retryCtx, conn); err != nil {
-					pkgLogger.Warn().Err(err).
-						Str("event", "placement.rollback_retry_failed").
-						Str("daemon_id", string(conn.DaemonID)).
-						Msg("placement rollback retry failed during heartbeat")
-				}
-			}(conn)
+			a.retryRollbackIntentsAsync(conn, "placement.rollback_retry_failed_during_heartbeat", false)
 			diff, err := a.placements.ObserveHeartbeat(ctx, conn.DaemonID, payload.HeldChannels)
 			if err != nil {
 				return placement.HeartbeatAckPayload{}, err
@@ -146,6 +145,7 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 				return fmt.Errorf("daemonbus: held_channels_report daemon_id %q does not match authenticated conn %q", req.DaemonID, conn.DaemonID)
 			}
 			out := make([]placement.HeldChannelsDecision, 0, len(req.Channels))
+			acceptedChannels := make([]channel.ID, 0, len(req.Channels))
 			for _, ch := range req.Channels {
 				ok, reason, err := a.placements.AcceptHeldChannel(ctx, ch.ChannelID, conn.DaemonID, ch, placement.ConnectionEpoch(conn.ConnectionEpoch))
 				if err != nil {
@@ -153,6 +153,7 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 				}
 				if ok {
 					out = append(out, placement.HeldChannelsDecision{ChannelID: ch.ChannelID, Accepted: true})
+					acceptedChannels = append(acceptedChannels, ch.ChannelID)
 				} else {
 					if reason == "" {
 						reason = "fencing mismatch"
@@ -164,7 +165,13 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 				DaemonID:  req.DaemonID,
 				Decisions: out,
 			})
-			return err
+			if err != nil {
+				return err
+			}
+			for _, chID := range acceptedChannels {
+				a.syncChannelMembersForChannelAsync(string(chID))
+			}
+			return nil
 		},
 		OnDeviceTransitRecv: func(ctx context.Context, conn *daemonbus.Connection, frame kerneldaemonbus.Frame) error {
 			// device_transit.recv = daemon adapter → server → device
@@ -398,6 +405,7 @@ func (a *App) reclaimPlacement(ctx context.Context, p placement.Placement) error
 				CreateRequestID: reserved.CreateRequestID,
 				OwnerEpoch:      reserved.OwnerEpoch,
 			})
+			a.daemonbus.MarkReclaimAssigned(conn.DaemonID)
 			return nil
 		}
 		if rollbackErr := a.reclaimRollback(ctx, conn, reserved, "reclaim_accepted_cas_rejected"); rollbackErr != nil {
@@ -418,19 +426,16 @@ func (a *App) reclaimPlacement(ctx context.Context, p placement.Placement) error
 			}
 			return fmt.Errorf("gateway: reclaim_rejected mismatch for %s", reserved.ChannelID)
 		}
-		switch rej.Reason {
-		case placement.ReclaimRejectStoreMissing,
-			placement.ReclaimRejectCompletenessCheckFailed,
-			placement.ReclaimRejectOwnerEpochInvalid,
-			placement.ReclaimRejectInternalError:
-			_, err := a.placements.OrphanCreating(ctx, reserved.ChannelID, reserved.CreateRequestID)
-			return err
-		default:
-			if _, orphanErr := a.placements.OrphanCreating(ctx, reserved.ChannelID, reserved.CreateRequestID); orphanErr != nil {
-				return orphanErr
-			}
+		if rollbackErr := a.reclaimRollback(ctx, conn, reserved, "reclaim_rejected_"+string(rej.Reason)); rollbackErr != nil {
+			return fmt.Errorf("gateway: reclaim_rejected %q for %s; rollback: %v", rej.Reason, reserved.ChannelID, rollbackErr)
+		}
+		if rej.Reason != placement.ReclaimRejectStoreMissing &&
+			rej.Reason != placement.ReclaimRejectCompletenessCheckFailed &&
+			rej.Reason != placement.ReclaimRejectOwnerEpochInvalid &&
+			rej.Reason != placement.ReclaimRejectInternalError {
 			return fmt.Errorf("gateway: reclaim_rejected unknown reason %q for %s", rej.Reason, reserved.ChannelID)
 		}
+		return nil
 	default:
 		if rollbackErr := a.reclaimRollback(ctx, conn, reserved, "reclaim_unexpected_ack_frame"); rollbackErr != nil {
 			return fmt.Errorf("gateway: reclaim unexpected ack frame %s; rollback: %v", ackFrame.FrameKind, rollbackErr)
@@ -480,7 +485,6 @@ func (a *App) reclaimCandidate(ctx context.Context, previousOwner placement.Daem
 		return candidates[i].DaemonID < candidates[j].DaemonID
 	})
 	chosen := candidates[0]
-	a.daemonbus.MarkReclaimAssigned(chosen.DaemonID)
 	return chosen.Connection, true, nil
 }
 

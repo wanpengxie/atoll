@@ -715,7 +715,12 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 			return cr.outbox, true
 		},
 		func(ctx context.Context, ack viewsync.AckFrame) error {
-			d.freezeChannel(ctx, ack.ChannelID, string(ack.RejectReason))
+			switch ack.RejectReason {
+			case viewsync.RejectReasonViewsyncResyncBackpressure:
+				d.pauseChannelPushForBackpressure(ack.ChannelID)
+			default:
+				d.freezeChannel(ctx, ack.ChannelID, string(ack.RejectReason))
+			}
 			return nil
 		},
 	)
@@ -989,6 +994,26 @@ func (d *Daemon) pauseChannelPush(id channel.ID) {
 		return
 	}
 	cr.cancelPusher()
+}
+
+func (d *Daemon) pauseChannelPushForBackpressure(id channel.ID) {
+	d.pauseChannelPush(id)
+	runCtx := d.runCtx
+	if runCtx == nil {
+		runCtx = context.Background()
+	}
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		timer := time.NewTimer(500 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-runCtx.Done():
+			return
+		case <-timer.C:
+			d.startChannelPusherFor(id)
+		}
+	}()
 }
 
 func (d *Daemon) freezeChannel(ctx context.Context, id channel.ID, reason string) {
@@ -1846,6 +1871,13 @@ func (d *Daemon) ensureChannelCreatedEvent(
 	if env.CanonicalHash, err = message.CanonicalHash(*env); err != nil {
 		return fmt.Errorf("canonical hash: %w", err)
 	}
+	createdExists, err := ensureChannelCreatedPreflight(ctx, db, env)
+	if err != nil {
+		return err
+	}
+	if createdExists {
+		return nil
+	}
 	res, err := store.NewMessagesWithLock(db, lock).Append(ctx, env, khlog.FencingTuple{
 		Token: row.FencingToken,
 		Epoch: row.DaemonEpoch,
@@ -1857,6 +1889,25 @@ func (d *Daemon) ensureChannelCreatedEvent(
 		return fmt.Errorf("system.channel.created seq=%d want 1", res.Seq)
 	}
 	return nil
+}
+
+func ensureChannelCreatedPreflight(ctx context.Context, db *sql.DB, env *message.Envelope) (bool, error) {
+	var seq int64
+	var id, typ string
+	err := db.QueryRowContext(ctx, `SELECT seq, id, type FROM messages ORDER BY seq ASC LIMIT 1`).Scan(&seq, &id, &typ)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("system.channel.created preflight: %w", err)
+	}
+	if seq == 1 && id == string(env.ID) && typ == env.Type {
+		return true, nil
+	}
+	return false, &bootstrap.BootstrapLogCorruptError{
+		ChannelID: env.ChannelID,
+		Detail:    fmt.Sprintf("seq=1 id=%q type=%q, want id=%q type=%q", id, typ, env.ID, env.Type),
+	}
 }
 
 func (d *Daemon) ensureBootstrapChannelCreatedEvent(ctx context.Context, channelID channel.ID, workdirPath string) error {

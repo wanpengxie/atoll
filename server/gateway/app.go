@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -157,6 +158,9 @@ type App struct {
 	pushhub    *pushhub.Service
 	daemonbus  *daemonbus.Service
 	devicebus  *devicebus.Service
+
+	rollbackRetryMu     sync.Mutex
+	rollbackRetryActive map[string]struct{}
 }
 
 // New builds a composed App.
@@ -183,9 +187,10 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	}
 
 	app := &App{
-		cfg:    cfg,
-		db:     db,
-		closer: closer,
+		cfg:                 cfg,
+		db:                  db,
+		closer:              closer,
+		rollbackRetryActive: map[string]struct{}{},
 	}
 	app.identity = identity.NewService(db, identity.Config{
 		SessionSecret: cfg.SessionSecret,
@@ -289,6 +294,16 @@ func (a *App) RunReconcile(ctx context.Context) {
 			pkgLogger.Warn().Err(err).
 				Str("event", "viewcache.gap_recover_failed").
 				Msg("viewcache gap recovery sweep failed")
+		}
+		if err := a.sweepRollbackIntents(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			pkgLogger.Warn().Err(err).
+				Str("event", "placement.rollback_sweep_failed").
+				Msg("placement rollback intent sweep failed")
+		}
+		if _, err := a.catalog.ProcessDueMemberTransitions(ctx, 100); err != nil && !errors.Is(err, context.Canceled) {
+			pkgLogger.Warn().Err(err).
+				Str("event", "catalog.member_transition_failed").
+				Msg("catalog member transition outbox processing failed")
 		}
 	}
 	runSweeps()
