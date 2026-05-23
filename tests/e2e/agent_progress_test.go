@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -153,20 +154,32 @@ func TestE2E_AgentProgress_EmittedPerTurn(t *testing.T) {
 	// Ordering: in seq ASC, expect human.text first, then both progress
 	// rows, then the terminal reply last. The harness sorts
 	// ListChannelMessages by seq so we can index by position in `all`.
+	//
+	// Skip leading reserved-namespace events (system.*) injected at
+	// channel bootstrap (e.g. system.channel.created) — proto-layer0
+	// reserved system.* set is part of the bootstrap stream and not
+	// part of the business message sequence under test.
 	all := s.ListChannelMessages(chID)
-	if len(all) < 4 {
-		t.Fatalf("expected >=4 rows total; got %d", len(all))
+	business := make([]harness.StoredMessage, 0, len(all))
+	for _, row := range all {
+		if strings.HasPrefix(row.Type, "system.") {
+			continue
+		}
+		business = append(business, row)
 	}
-	if all[0].Type != "human.text" {
-		t.Errorf("row 0 type=%q want human.text", all[0].Type)
+	if len(business) < 4 {
+		t.Fatalf("expected >=4 business rows; got %d (from %d total)", len(business), len(all))
 	}
-	if p, _ := classify(all[1]); !p {
-		t.Errorf("row 1 type=%q visibility=%q want agent.text+system (first progress)", all[1].Type, all[1].Visibility)
+	if business[0].Type != "human.text" {
+		t.Errorf("business row 0 type=%q want human.text", business[0].Type)
 	}
-	if p, _ := classify(all[2]); !p {
-		t.Errorf("row 2 type=%q visibility=%q want agent.text+system (second progress)", all[2].Type, all[2].Visibility)
+	if p, _ := classify(business[1]); !p {
+		t.Errorf("business row 1 type=%q visibility=%q want agent.text+system (first progress)", business[1].Type, business[1].Visibility)
 	}
-	if _, term := classify(all[3]); !term {
-		t.Errorf("row 3 type=%q visibility=%q want agent.text+public (terminal)", all[3].Type, all[3].Visibility)
+	if p, _ := classify(business[2]); !p {
+		t.Errorf("business row 2 type=%q visibility=%q want agent.text+system (second progress)", business[2].Type, business[2].Visibility)
+	}
+	if _, term := classify(business[3]); !term {
+		t.Errorf("business row 3 type=%q visibility=%q want agent.text+public (terminal)", business[3].Type, business[3].Visibility)
 	}
 }

@@ -35,10 +35,10 @@ func TestE2E_DaemonRestartMidXHSPublishRequest_RecoverPending(t *testing.T) {
 	channelID := s.CreateChannel(wsID, "ch-xhs-"+uniqSuffix(), "xhs-creator")
 	s.BindChannel(wsID, channelID)
 
-	placement, ok := s.GetPlacement(channelID)
-	if !ok || placement.State != "active" {
-		t.Fatalf("placement after bind = %+v ok=%v", placement, ok)
-	}
+	placement := harness.EventuallyValue(t, "placement reaches active", 5*time.Second, func() (harness.PlacementRow, bool) {
+		p, ok := s.GetPlacement(channelID)
+		return p, ok && p.State == "active"
+	})
 
 	deviceID := "device-" + uniqSuffix()
 	issued := s.IssueDeviceSession(channelID, deviceID, placement.DaemonID)

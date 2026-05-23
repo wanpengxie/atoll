@@ -50,13 +50,12 @@ func TestE2E_DeviceSessionBind_FullFourStep(t *testing.T) {
 	// Step 1 — placement lookup so we know which daemon to bind against.
 	// The UI flow uses GET /api/placements/:chID; we shortcut via the
 	// harness sqlite read which exercises the same daemon_id stamp.
-	placement, ok := s.GetPlacement(channelID)
-	if !ok {
-		t.Fatalf("placement missing after BindChannel")
-	}
-	if placement.State != "active" {
-		t.Fatalf("placement.state=%q want active", placement.State)
-	}
+	// BindChannel returns before daemon claim → placement.State="active"
+	// sync; poll until active so daemon is ready to receive bind.
+	placement := harness.EventuallyValue(t, "placement reaches active", 5*time.Second, func() (harness.PlacementRow, bool) {
+		p, ok := s.GetPlacement(channelID)
+		return p, ok && p.State == "active"
+	})
 
 	// Step 2 — issue a session.
 	deviceID := "device-" + uniqSuffix()

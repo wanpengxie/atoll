@@ -717,7 +717,7 @@ func (s *Stack) IssueDeviceSession(channelID, deviceID, daemonIDArg string) Issu
 	var resp IssueDeviceSessionResponse
 	s.do("POST", "/api/channels/"+channelID+"/devices", map[string]any{
 		"device_id":   deviceID,
-		"device_type": "xhs",
+		"device_type": "xhs.chrome_extension",
 		"daemon_id":   daemonIDArg,
 	}, http.StatusCreated, &resp)
 	return resp
@@ -861,8 +861,12 @@ func (s *Stack) ServerURLBase() string { return s.ServerURL }
 // DevicebusWSURL composes the wss/ws URL for the /devicebus endpoint
 // with the session_id + token query params.
 func (s *Stack) DevicebusWSURL(sessionID, token string) string {
-	return fmt.Sprintf("ws://127.0.0.1:%d/devicebus?session_id=%s&token=%s",
-		s.ServerPort, url.QueryEscape(sessionID), url.QueryEscape(token))
+	// impl-layer3 §6.5.1: token moves to Sec-WebSocket-Protocol slot
+	// (`coagent.device.v1, token.<token>`); URL only carries session_id.
+	// The token arg is kept in the signature so call sites stay stable.
+	_ = token
+	return fmt.Sprintf("ws://127.0.0.1:%d/devicebus?session_id=%s",
+		s.ServerPort, url.QueryEscape(sessionID))
 }
 
 // RestartDaemon kills the daemon process and starts a fresh one with

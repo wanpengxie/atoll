@@ -118,6 +118,10 @@ func NewMockExtension(t *testing.T, ctx context.Context, cfg MockExtensionConfig
 	header.Set("Origin", origin)
 	dialer := *websocket.DefaultDialer
 	dialer.HandshakeTimeout = 5 * time.Second
+	// impl-layer3 §6.5.1: device WS token rides Sec-WebSocket-Protocol
+	// (`coagent.device.v1, token.<token>`). gorilla wires the offered
+	// subprotocols into the handshake header when Subprotocols is set.
+	dialer.Subprotocols = []string{"coagent.device.v1", "token." + cfg.Token}
 	conn, resp, err := dialer.DialContext(ctx, cfg.WSURL, header)
 	if err != nil {
 		status := -1
