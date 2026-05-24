@@ -139,21 +139,29 @@ func buildBridge(provider string, maxTurns int) (worker.Bridge, error) {
 		// fork (M1.6-T5 phase-3) so the L4 template segment is
 		// available without an IPC round-trip.
 		//
-		// COAGENT_CHANNEL_CONTEXT_FILE (when set) points at a JSON
-		// snapshot the daemon wrote at spawn time containing the
-		// channel's actor_registry / type_registry / device_sessions
-		// rows — folded into the system prompt so the LLM knows what
-		// tools and devices exist in its channel. Missing / malformed
-		// files are non-fatal (log + continue) so a partially-staged
-		// rollout still boots; the agent just falls back to the
-		// pre-injection behaviour (no appendix) until the next spawn.
-		channelCtx, ok, ctxErr := kimi.LoadChannelContextFile(os.Getenv(kimi.EnvKeyChannelContextFile))
-		if ctxErr != nil {
-			fmt.Fprintf(os.Stderr, "worker: channel context load failed (continuing without appendix): %v\n", ctxErr)
+		// COAGENT_CHANNEL_DB points at channel.sqlite — the
+		// authoritative actor_registry / type_registry source. The
+		// worker opens it read-only and snapshots channel state at
+		// boot to seed the system prompt and the LLM `AdditionalTools`
+		// list. Mid-session registry mutations are picked up via the
+		// same store (kimi bridge re-queries on each turn boundary
+		// where dynamic re-registration is feasible). This replaces
+		// the prior `worker-context.json` static snapshot file the
+		// daemon used to write at spawn time — that file froze tool /
+		// actor state at spawn time and could not reflect subsequent
+		// type install / actor register events.
+		channelStore, storeErr := kimi.OpenChannelStore(os.Getenv(kimi.EnvKeyChannelDB))
+		if storeErr != nil {
+			fmt.Fprintf(os.Stderr, "worker: channel store open failed (continuing without context): %v\n", storeErr)
 		}
-		_ = ok // ok=false simply means "no appendix" — same path as the legacy channels
+		channelID := os.Getenv(kimi.EnvKeyChannelID)
+		channelType := os.Getenv(kimi.EnvKeyChannelType)
+		channelCtx, ctxErr := channelStore.Snapshot(context.Background(), channelID, channelType)
+		if ctxErr != nil {
+			fmt.Fprintf(os.Stderr, "worker: channel snapshot failed (continuing without appendix): %v\n", ctxErr)
+		}
 		basePrompt := kimi.BuildBasePrompt(
-			os.Getenv(kimi.EnvKeyChannelType),
+			channelType,
 			os.Getenv(kimi.EnvKeyDomainPrompt),
 			channelCtx,
 		)
@@ -162,6 +170,7 @@ func buildBridge(provider string, maxTurns int) (worker.Bridge, error) {
 			return nil, err
 		}
 		cfg.ChannelContext = channelCtx
+		cfg.ChannelStore = channelStore
 		kb, err := kimi.NewBridge(cfg)
 		if err != nil {
 			return nil, fmt.Errorf("kimi bridge: %w", err)

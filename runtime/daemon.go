@@ -1365,35 +1365,14 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 			"COAGENT_CHANNEL_ID="+string(cr.channelID),
 			"COAGENT_CHANNEL_DB="+filepath.Join(d.cfg.ChannelsDir, string(cr.channelID), "channel.sqlite"),
 		)
-		// M1.6 follow-up — agent self-awareness fix. PreSpawn snapshots
-		// the channel's actor_registry / type_registry / device_sessions
-		// at every Spawner.Spawn call (i.e. fresh on first trigger after
-		// boot and on every worker re-spawn after crash). Snapshot is
-		// taken AFTER OnChannelBoot has installed adapter types, so the
-		// type_registry list is complete by the time the worker boots.
-		// File path lives inside the channel workdir so it shares the
-		// same lifecycle as the channel sqlite (cleaned up on channel
-		// archive). Worker reads it via COAGENT_CHANNEL_CONTEXT_FILE.
-		channelCtxPath := filepath.Join(d.cfg.ChannelsDir, string(cr.channelID), "worker-context.json")
-		channelIDCopy := cr.channelID
-		channelTypeCopy := lockRow.ChannelType
-		registryCopy := cr.registry
-		typeRegistryCopy := cr.typeRegistry
-		deviceListerCopy := d.cfg.ListDeviceSessionsForChannel
-		preSpawn := func(spawnCtx context.Context) ([]string, error) {
-			if err := writeChannelContextSnapshot(
-				spawnCtx,
-				channelCtxPath,
-				channelIDCopy,
-				channelTypeCopy,
-				registryCopy,
-				typeRegistryCopy,
-				deviceListerCopy,
-			); err != nil {
-				return nil, err
-			}
-			return []string{"COAGENT_CHANNEL_CONTEXT_FILE=" + channelCtxPath}, nil
-		}
+		// worker spawn no longer needs a pre-spawn snapshot file —
+		// the channel-local sqlite is the live source of truth and the
+		// worker (kimi bridge) opens it via COAGENT_CHANNEL_DB. See the
+		// commit that introduced kimi.ChannelStore for the rationale:
+		// the prior worker-context.json froze type_registry / actor_registry
+		// state at worker spawn time, so any subsequent install / register
+		// event could not reach the LLM tool list without a respawn.
+		var preSpawn func(context.Context) ([]string, error)
 		bridge, err := workerhost.NewBridge(workerhost.BridgeConfig{
 			ChannelID:     cr.channelID,
 			AgentID:       cr.channelAgentID,
@@ -1482,127 +1461,6 @@ func (d *Daemon) buildWorkerEnvForChannel(channelType string) []string {
 // assert the prompt env shape without spawning a real worker.
 func (d *Daemon) WorkerEnvForChannel(channelType string) []string {
 	return d.buildWorkerEnvForChannel(channelType)
-}
-
-// writeChannelContextSnapshot snapshots the channel's actor_registry +
-// type_registry + (optional) device_sessions rows and persists a JSON
-// file at path. The worker subprocess reads this file via the
-// COAGENT_CHANNEL_CONTEXT_FILE env var and folds it into the kimi
-// system prompt (M1.6 follow-up — agent self-awareness fix).
-//
-// The JSON shape matches adapters/llm/kimi.ChannelContext so the
-// worker can json.Unmarshal directly without a re-encoding step. We
-// keep the shape inline here (anonymous structs) rather than import
-// adapters/** because go-arch-lint forbids runtime ↛ adapters.
-// Drift between the two shapes is caught by an integration test (a
-// new test in daemon_test) that round-trips a snapshot through the
-// worker bridge's loader.
-//
-// Errors are returned unwrapped so the caller (PreSpawn closure) can
-// decide whether to abort the spawn. Today every error is non-fatal:
-// the worker boots without the appendix, same as a legacy channel.
-func writeChannelContextSnapshot(
-	ctx context.Context,
-	path string,
-	channelID channel.ID,
-	channelType string,
-	registry *store.ActorRegistry,
-	types *store.TypeRegistry,
-	deviceLister func(ctx context.Context, ch channel.ID) []DeviceSessionInfo,
-) error {
-	type actorJSON struct {
-		ActorID     string `json:"actor_id"`
-		Kind        string `json:"kind"`
-		Binding     string `json:"binding,omitempty"`
-		DisplayName string `json:"display_name,omitempty"`
-	}
-	type typeJSON struct {
-		Type           string   `json:"type"`
-		HandlerActorID string   `json:"handler_actor_id"`
-		HandlerBinding string   `json:"handler_binding,omitempty"`
-		AllowedKinds   []string `json:"allowed_kinds,omitempty"`
-		MaxPendingMs   int64    `json:"max_pending_ms,omitempty"`
-	}
-	type deviceJSON struct {
-		SessionID  string `json:"session_id"`
-		DeviceID   string `json:"device_id,omitempty"`
-		DeviceType string `json:"device_type,omitempty"`
-		State      string `json:"state,omitempty"`
-	}
-	type snapshotJSON struct {
-		ChannelID   string       `json:"channel_id,omitempty"`
-		ChannelType string       `json:"channel_type,omitempty"`
-		Actors      []actorJSON  `json:"actors,omitempty"`
-		Types       []typeJSON   `json:"types,omitempty"`
-		Devices     []deviceJSON `json:"devices,omitempty"`
-	}
-
-	snap := snapshotJSON{
-		ChannelID:   string(channelID),
-		ChannelType: channelType,
-	}
-
-	if registry != nil {
-		actors, err := registry.ListActive(ctx)
-		if err != nil {
-			return fmt.Errorf("runtime: snapshot actor_registry %s: %w", channelID, err)
-		}
-		for _, a := range actors {
-			snap.Actors = append(snap.Actors, actorJSON{
-				ActorID:     string(a.ID),
-				Kind:        string(a.Kind),
-				Binding:     string(a.Binding),
-				DisplayName: a.DisplayName,
-			})
-		}
-	}
-
-	if types != nil {
-		rows, err := types.List(ctx)
-		if err != nil {
-			return fmt.Errorf("runtime: snapshot type_registry %s: %w", channelID, err)
-		}
-		for _, r := range rows {
-			allowed := make([]string, 0, len(r.AllowedKinds))
-			for _, k := range r.AllowedKinds {
-				allowed = append(allowed, string(k))
-			}
-			snap.Types = append(snap.Types, typeJSON{
-				Type:           r.Type,
-				HandlerActorID: string(r.HandlerActorID),
-				HandlerBinding: string(r.HandlerBinding),
-				AllowedKinds:   allowed,
-				MaxPendingMs:   r.MaxPendingMs,
-			})
-		}
-	}
-
-	if deviceLister != nil {
-		for _, d := range deviceLister(ctx, channelID) {
-			// deviceJSON is structurally identical to DeviceSessionInfo;
-			// staticcheck S1016 prefers the explicit conversion to a
-			// field-by-field literal copy.
-			snap.Devices = append(snap.Devices, deviceJSON(d))
-		}
-	}
-
-	// MarshalIndent for human grep-ability — the file is small (single
-	// channel, typically <100 actors/types/devices) and is written at
-	// worker spawn cadence (rare), so the extra bytes are cheap.
-	data, err := json.MarshalIndent(snap, "", "  ")
-	if err != nil {
-		return fmt.Errorf("runtime: snapshot marshal %s: %w", channelID, err)
-	}
-	// Channel workdir already exists by this point (bootstrap saga
-	// step 5c mkdirs it before any ensureChannelAgent runs); but be
-	// defensive in case a test wires the daemon without the saga.
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return fmt.Errorf("runtime: snapshot mkdir %s: %w", channelID, err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("runtime: snapshot write %s: %w", channelID, err)
-	}
-	return nil
 }
 
 // CurrentWorkerIDFor returns the id of the worker subprocess currently

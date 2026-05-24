@@ -35,10 +35,10 @@ func TestE2E_PostMessage_Dedupe_IdempotentRetry(t *testing.T) {
 	fixedTS := time.Now().UnixMilli()
 
 	first := postMessageRaw(t, s, chID, map[string]any{
-		"id":      fixedID,
-		"type":    "human.text",
-		"payload": json.RawMessage(`{"text":"hello"}`),
-		"ts":      fixedTS,
+		"id":       fixedID,
+		"type":     "human.text",
+		"payload":  json.RawMessage(`{"text":"hello"}`),
+		"ts":       fixedTS,
 		"audience": []string{"agent:channel-agent"},
 	}, http.StatusOK)
 	if !first.Accepted {
@@ -55,10 +55,10 @@ func TestE2E_PostMessage_Dedupe_IdempotentRetry(t *testing.T) {
 	}
 
 	second := postMessageRaw(t, s, chID, map[string]any{
-		"id":      fixedID,
-		"type":    "human.text",
-		"payload": json.RawMessage(`{"text":"hello"}`),
-		"ts":      fixedTS,
+		"id":       fixedID,
+		"type":     "human.text",
+		"payload":  json.RawMessage(`{"text":"hello"}`),
+		"ts":       fixedTS,
 		"audience": []string{"agent:channel-agent"},
 	}, http.StatusOK)
 	if !second.Accepted {

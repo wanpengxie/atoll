@@ -44,36 +44,32 @@ const (
 	EnvKeyChannelType  = "COAGENT_CHANNEL_TYPE"
 	EnvKeyDomainPrompt = "COAGENT_DOMAIN_PROMPT"
 
-	// EnvKeyChannelContextFile points at a per-spawn JSON snapshot of
-	// the channel's actor_registry / type_registry / device_sessions
-	// rows. The daemon writes it at worker spawn time (see
-	// runtime/daemon.ensureChannelAgent) and cmd/worker loads it before
-	// constructing the kimi Bridge so the worker's system prompt knows
-	// which tool actors / business types / active devices exist in its
-	// channel — without that injection the agent is blind and falls
-	// back to host-filesystem exploration on "what tools do I have"
-	// style questions.
+	// EnvKeyChannelID + EnvKeyChannelDB are daemon-set spawn env vars
+	// pointing the worker at its own channel-local sqlite (the
+	// authoritative actor_registry / type_registry source). The kimi
+	// bridge opens channel.sqlite read-only via OpenChannelStore and
+	// snapshots the registries at boot (system prompt + initial LLM
+	// tool list) and on each turn boundary (dynamic LLM tool refresh
+	// when the agent allows it).
 	//
-	// Empty / missing file is allowed (legacy channels) — the bridge
-	// emits the L0-L2 + L4 prompt without the channel-context appendix.
-	EnvKeyChannelContextFile = "COAGENT_CHANNEL_CONTEXT_FILE"
+	// These replace the legacy `COAGENT_CHANNEL_CONTEXT_FILE` static
+	// JSON snapshot the daemon used to write at worker spawn time —
+	// that file froze channel state at spawn and could not reflect
+	// later type install / actor register events.
+	EnvKeyChannelID = "COAGENT_CHANNEL_ID"
+	EnvKeyChannelDB = "COAGENT_CHANNEL_DB"
 )
 
-// ChannelContext is the static per-spawn snapshot of the channel's
-// registries that the daemon hands to the worker so the LLM system
-// prompt can carry an authoritative list of "who lives in this channel
-// and what types they handle". The struct is intentionally narrow —
-// only fields the LLM needs to answer "what tools do I have / who can
-// I talk to" without re-resolving anything at runtime.
+// ChannelContext is a snapshot of the channel-local registries the LLM
+// system prompt + tool list need (actor list + type list). Produced by
+// ChannelStore.Snapshot from channel.sqlite — channel.sqlite is the
+// authoritative truth, ChannelContext is just a transport struct used
+// to thread the data through BuildBasePrompt and Config.
 //
-// Loaded once at worker spawn (JSON file pointed at by
-// EnvKeyChannelContextFile) and folded into BuildBasePrompt. The
-// prompt-cache stays warm because the snapshot is byte-stable across
-// turns within a single worker subprocess; channel-registry mutations
-// inside the same worker session are NOT reflected — that's a
-// deliberate trade so prompt caching survives. If a registry change
-// must reach the LLM mid-session, push it as a regular conversation
-// message (the dynamic channel), not as a prompt mutation.
+// Prompt-cache friendliness: a freshly-snapshotted ChannelContext is
+// byte-stable as long as channel.sqlite has not changed; consumers
+// that re-snapshot (per-turn refresh) MUST treat any field difference
+// as a cache invalidation signal.
 type ChannelContext struct {
 	// ChannelID is the channel this snapshot describes. Surfaces in the
 	// rendered prompt header so a debug operator can grep session logs.
@@ -131,32 +127,6 @@ type DeviceInfo struct {
 	State      string `json:"state,omitempty"` // pending | ready | active | offline | expired | revoked
 }
 
-// LoadChannelContextFile reads a JSON ChannelContext from disk. Returns
-// a zero ChannelContext + ok=false when the path is empty, the file is
-// missing, or the JSON is malformed — these are non-fatal so the
-// worker falls back to "no channel context appendix" rather than
-// crashing on a stale daemon spawn env. The error (when non-nil) is
-// returned alongside so cmd/worker can log it on stderr without
-// killing the boot.
-func LoadChannelContextFile(path string) (ChannelContext, bool, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ChannelContext{}, false, nil
-	}
-	data, err := os.ReadFile(path) //nolint:gosec // path comes from the daemon spawn env, not user input
-	if err != nil {
-		return ChannelContext{}, false, fmt.Errorf("kimi: channel context read %q: %w", path, err)
-	}
-	if len(strings.TrimSpace(string(data))) == 0 {
-		return ChannelContext{}, false, nil
-	}
-	var ctx ChannelContext
-	if err := json.Unmarshal(data, &ctx); err != nil {
-		return ChannelContext{}, false, fmt.Errorf("kimi: channel context json decode %q: %w", path, err)
-	}
-	return ctx, true, nil
-}
-
 // Config drives a Bridge. All fields optional unless documented; sane
 // defaults come from NewConfigFromEnv.
 type Config struct {
@@ -183,10 +153,20 @@ type Config struct {
 	// long as it stays byte-stable across turns.
 	SystemPrompt string
 
-	// ChannelContext is the same per-spawn registry snapshot folded into
-	// SystemPrompt. The bridge also consumes it structurally to derive
-	// go-kimi AdditionalTools for channel-local request types.
+	// ChannelContext is the snapshot folded into SystemPrompt at boot.
+	// The bridge also derives go-kimi AdditionalTools from
+	// ChannelContext.Types — that initial tool list seeds the kimi
+	// agent so the LLM has channel-local request tools available on
+	// turn 1 without a sqlite round-trip.
 	ChannelContext ChannelContext
+
+	// ChannelStore is the live read-only handle onto channel.sqlite.
+	// When non-nil the bridge re-snapshots the registries on turn
+	// boundaries so dynamic type install / actor register events
+	// observed inside the worker subprocess can refresh the LLM tool
+	// list without a respawn. Nil store falls back to the boot-time
+	// ChannelContext (frozen for the lifetime of this worker process).
+	ChannelStore *ChannelStore
 
 	// MaxTurns caps the bridge — same semantics as MockBridge. A
 	// non-positive value means UNLIMITED: the LLM itself decides when

@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -217,56 +215,6 @@ func TestBuildBasePrompt_WithChannelContext(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("base prompt missing %q\nfull prompt:\n%s", want, got)
 		}
-	}
-}
-
-// TestLoadChannelContextFile_RoundTrip ensures the JSON shape the
-// daemon writes matches what cmd/worker reads. Guards the env-file
-// hand-off contract.
-func TestLoadChannelContextFile_RoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "ctx.json")
-	original := kimi.ChannelContext{
-		ChannelID:   "abc",
-		ChannelType: "xhs-creator",
-		Actors:      []kimi.ActorInfo{{ActorID: "system", Kind: "system"}},
-		Types: []kimi.TypeInfo{{
-			Type:           "xhs.publish",
-			HandlerActorID: "tool:xhs-adapter",
-			AllowedKinds:   []string{"request"},
-			MaxPendingMs:   1234,
-		}},
-		Devices: []kimi.DeviceInfo{{SessionID: "s1", State: "active"}},
-	}
-	buf, err := json.Marshal(original)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, buf, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got, ok, err := kimi.LoadChannelContextFile(path)
-	if err != nil {
-		t.Fatalf("LoadChannelContextFile: %v", err)
-	}
-	if !ok {
-		t.Fatal("LoadChannelContextFile ok=false")
-	}
-	if got.ChannelID != "abc" || len(got.Actors) != 1 || len(got.Types) != 1 || len(got.Devices) != 1 {
-		t.Errorf("round-trip mismatch: %#v", got)
-	}
-	if got.Types[0].MaxPendingMs != 1234 {
-		t.Errorf("type max_pending_ms=%d want 1234", got.Types[0].MaxPendingMs)
-	}
-
-	// Empty path → ok=false, no error.
-	if _, ok, err := kimi.LoadChannelContextFile(""); err != nil || ok {
-		t.Errorf("empty path: want ok=false err=nil, got ok=%v err=%v", ok, err)
-	}
-
-	// Missing file → error.
-	if _, _, err := kimi.LoadChannelContextFile(filepath.Join(dir, "missing.json")); err == nil {
-		t.Error("missing file: want error, got nil")
 	}
 }
 
