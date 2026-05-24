@@ -101,7 +101,7 @@ func triggerEnv(id string) kimi.TriggerPayload {
 			Sender:     message.Sender{Kind: actor.KindHuman, ID: "user-A"},
 			Kind:       message.KindEvent,
 			Payload:    body,
-			Audience:   message.Audience{message.AudienceWildcard},
+			Audience:   message.Audience{actor.SystemActorID},
 		},
 		CorrelationID: "corr-1",
 		Cursor:        42,

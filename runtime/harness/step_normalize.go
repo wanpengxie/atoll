@@ -31,10 +31,9 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (khar.Ou
 		return khar.Outcome{}, nil
 	}
 
-	// audience default → ['*'].
-	if env.Audience == nil {
-		env.Audience = message.Audience{message.AudienceWildcard}
-	}
+	// audience is now caller-owned (post wildcard removal). nil ≠ empty
+	// for downstream step 5 audience cardinality check: nil treated as
+	// "empty" → harness_audience_empty.
 
 	// visibility default → public.
 	if env.Visibility == "" {

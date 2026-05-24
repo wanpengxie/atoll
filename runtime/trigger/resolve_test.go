@@ -121,27 +121,6 @@ func makeReg() *memRegistry {
 	)
 }
 
-func TestResolve_WildcardExpand_StripsSender(t *testing.T) {
-	reg := makeReg()
-	env := &message.Envelope{
-		ID:         "m-1",
-		Sender:     message.Sender{Kind: actor.KindHuman, ID: "user:demo"},
-		Kind:       message.KindEvent,
-		Type:       "human.text",
-		Payload:    json.RawMessage(`{}`),
-		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{"*"},
-	}
-	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []actor.ActorID{"agent:alpha", "agent:beta", "system"}
-	if !equalIDs(got, want) {
-		t.Errorf("audience = %v, want %v", got, want)
-	}
-}
-
 func TestResolve_ExplicitAudience_OnlyListed(t *testing.T) {
 	reg := makeReg()
 	env := &message.Envelope{
@@ -197,7 +176,7 @@ func TestResolve_VisibilityIgnoredByTrigger(t *testing.T) {
 		vis  message.Visibility
 		aud  message.Audience
 	}{
-		{"public+wildcard", message.VisibilityPublic, message.Audience{"*"}},
+		{"public+wildcard", message.VisibilityPublic, message.Audience{"agent:beta"}},
 		{"private+concrete", message.VisibilityPrivate, message.Audience{"agent:beta"}},
 	}
 	for _, tc := range cases {
@@ -231,7 +210,7 @@ func TestResolve_SystemHeartbeat_Suppressed(t *testing.T) {
 		Type:       "system.heartbeat",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPrivate,
-		Audience:   message.Audience{"*"},
+		Audience:   message.Audience{"agent:beta"},
 	}
 	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{})
 	if err != nil {
@@ -242,37 +221,13 @@ func TestResolve_SystemHeartbeat_Suppressed(t *testing.T) {
 	}
 }
 
-func TestResolve_SelfTriggerBan_DropsSender(t *testing.T) {
+func TestResolve_SelfAddressed_TriggersSender(t *testing.T) {
+	// Post wildcard removal: sender_id in audience literal triggers sender —
+	// this is the agent self-schedule entry point (replaces the prior
+	// BypassSelfTriggerBan mechanism).
 	reg := makeReg()
 	env := &message.Envelope{
-		ID:         "m-agent-broadcast",
-		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:alpha"},
-		Kind:       message.KindEvent,
-		Type:       "agent.text",
-		Payload:    json.RawMessage(`{}`),
-		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{"*"},
-	}
-	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range got {
-		if id == "agent:alpha" {
-			t.Errorf("sender agent:alpha should be filtered out, got %v", got)
-		}
-	}
-	// And the spec example: agent_A | agent.text | event | public | ['*'] → A 以外所有 agent
-	want := []actor.ActorID{"agent:beta", "system", "user:demo"}
-	if !equalIDs(got, want) {
-		t.Errorf("audience = %v, want %v", got, want)
-	}
-}
-
-func TestResolve_BypassSelfTriggerBan_KeepsSender(t *testing.T) {
-	reg := makeReg()
-	env := &message.Envelope{
-		ID:         "m-future",
+		ID:         "m-self-schedule",
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:alpha"},
 		Kind:       message.KindEvent,
 		Type:       "agent.text",
@@ -280,8 +235,7 @@ func TestResolve_BypassSelfTriggerBan_KeepsSender(t *testing.T) {
 		Visibility: message.VisibilityPublic,
 		Audience:   message.Audience{"agent:alpha"},
 	}
-	// scheduler / system upstream dispatch: bypass the §5.1 step 3 filter.
-	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{BypassSelfTriggerBan: true})
+	got, err := trigger.Resolve(context.Background(), env, reg, trigger.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +245,10 @@ func TestResolve_BypassSelfTriggerBan_KeepsSender(t *testing.T) {
 	}
 }
 
-func TestResolve_EmptyAudience_TreatedAsWildcard(t *testing.T) {
+func TestResolve_EmptyAudience_NoFanout(t *testing.T) {
+	// Post wildcard removal: empty audience → empty fanout (no implicit
+	// broadcast). Harness step 1 will catch and reject empty audience at
+	// the chain boundary; trigger Resolve treats it as a no-op.
 	reg := makeReg()
 	env := &message.Envelope{
 		ID:         "m-empty-aud",
@@ -306,9 +263,8 @@ func TestResolve_EmptyAudience_TreatedAsWildcard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []actor.ActorID{"agent:alpha", "agent:beta", "system"}
-	if !equalIDs(got, want) {
-		t.Errorf("empty audience should expand to wildcard, got %v want %v", got, want)
+	if len(got) != 0 {
+		t.Errorf("empty audience should produce empty fan-out, got %v", got)
 	}
 }
 
@@ -343,7 +299,7 @@ func TestGateway_Dispatch_ImmediateInvokesDeliverer(t *testing.T) {
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{"*"},
+		Audience:   message.Audience{"agent:beta"},
 	}
 	res, err := gw.Dispatch(context.Background(), env, trigger.Options{})
 	if err != nil {
@@ -376,7 +332,7 @@ func TestGateway_Dispatch_ReturnsDeliverError(t *testing.T) {
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{"*"},
+		Audience:   message.Audience{"agent:beta"},
 	}
 	res, err := gw.Dispatch(context.Background(), env, trigger.Options{})
 	if !errors.Is(err, wantErr) {
@@ -411,7 +367,7 @@ func TestGateway_Dispatch_FutureMessageDeferred(t *testing.T) {
 		Type:       "human.text",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{"*"},
+		Audience:   message.Audience{"agent:beta"},
 		NotBefore:  &notBefore,
 	}
 	res, err := gw.Dispatch(context.Background(), env, trigger.Options{})
@@ -426,7 +382,7 @@ func TestGateway_Dispatch_FutureMessageDeferred(t *testing.T) {
 	}
 	// Advance the clock past not_before — Dispatch must now proceed.
 	now.Store(2500)
-	res, err = gw.Dispatch(context.Background(), env, trigger.Options{BypassSelfTriggerBan: true})
+	res, err = gw.Dispatch(context.Background(), env, trigger.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +412,7 @@ func TestGateway_Dispatch_SystemHeartbeatNoDeliverer(t *testing.T) {
 		Type:       "system.heartbeat",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPrivate,
-		Audience:   message.Audience{"*"},
+		Audience:   message.Audience{"agent:beta"},
 	}
 	res, err := gw.Dispatch(context.Background(), env, trigger.Options{})
 	if err != nil {

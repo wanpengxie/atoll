@@ -113,7 +113,7 @@ func assertCanonicalChannelCreatedEvent(
 	if ev.Visibility != string(message.VisibilitySystem) {
 		t.Errorf("created visibility=%q want system", ev.Visibility)
 	}
-	if len(ev.Audience) != 1 || ev.Audience[0] != string(message.AudienceWildcard) {
+	if len(ev.Audience) != 1 || ev.Audience[0] != string(actor.SystemActorID) {
 		t.Errorf("created audience=%v want [*]", ev.Audience)
 	}
 	if ev.CorrelationID != "" {
@@ -580,7 +580,7 @@ func TestEnsureChannelCreatedEvent_CorruptLogQuarantine(t *testing.T) {
 		Type:       "custom.first",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilitySystem,
-		Audience:   message.Audience{message.AudienceWildcard},
+		Audience:   message.Audience{actor.SystemActorID},
 	}, klog.FencingTuple{}); err != nil {
 		t.Fatalf("append corrupt first message: %v", err)
 	}

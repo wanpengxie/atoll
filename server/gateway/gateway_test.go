@@ -854,7 +854,7 @@ func TestViewcacheRoutesRequireChannelMembership(t *testing.T) {
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Payload:    json.RawMessage(`{"text":"secret"}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{message.AudienceWildcard},
+		Audience:   message.Audience{actor.SystemActorID},
 	}
 	if _, err := app.Viewcache().Apply(ctx, viewsync.PushFrame{
 		ChannelID: channel.ID(alice.channelID),
@@ -927,7 +927,7 @@ func TestViewcacheMessagesApplyCallerVisibility(t *testing.T) {
 			Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 			Payload:    json.RawMessage(`{"text":"public"}`),
 			Visibility: message.VisibilityPublic,
-			Audience:   message.Audience{message.AudienceWildcard},
+			Audience:   message.Audience{actor.SystemActorID},
 		},
 		{
 			ID:         "m-private-alice",
@@ -957,7 +957,7 @@ func TestViewcacheMessagesApplyCallerVisibility(t *testing.T) {
 			Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 			Payload:    json.RawMessage(`{"text":"system"}`),
 			Visibility: message.VisibilitySystem,
-			Audience:   message.Audience{message.AudienceWildcard},
+			Audience:   message.Audience{actor.SystemActorID},
 		},
 	}
 	for i, env := range seed {
@@ -1015,7 +1015,7 @@ func TestViewcacheLimitCapAndResyncRangeValidation(t *testing.T) {
 			Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 			Payload:    json.RawMessage(`{}`),
 			Visibility: message.VisibilityPublic,
-			Audience:   message.Audience{message.AudienceWildcard},
+			Audience:   message.Audience{actor.SystemActorID},
 		}
 		if _, err := app.Viewcache().Apply(ctx, viewsync.PushFrame{
 			ChannelID: channel.ID(alice.channelID),
@@ -1185,7 +1185,7 @@ func TestPushhubSubscribeRejectsNonMemberAndBlocksFanout(t *testing.T) {
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Payload:    json.RawMessage(`{"text":"secret"}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{message.AudienceWildcard},
+		Audience:   message.Audience{actor.SystemActorID},
 	})
 	if err := ws.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
 		t.Fatalf("set read deadline: %v", err)
@@ -1255,7 +1255,7 @@ func TestPushhubFanoutAppliesSubscriberVisibility(t *testing.T) {
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Payload:    json.RawMessage(`{"text":"public"}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{message.AudienceWildcard},
+		Audience:   message.Audience{actor.SystemActorID},
 	})
 	for name, ws := range map[string]*websocket.Conn{"alice": aliceWS, "bob": bobWS} {
 		var frame struct {
@@ -1393,7 +1393,7 @@ func TestPushhubRevokesSubscriptionAfterMemberRemoval(t *testing.T) {
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 		Payload:    json.RawMessage(`{"text":"secret"}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{message.AudienceWildcard},
+		Audience:   message.Audience{actor.SystemActorID},
 	})
 	if err := ws.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
 		t.Fatalf("set read deadline: %v", err)
@@ -1704,7 +1704,7 @@ func TestMockDaemonViewSyncRoundTrip(t *testing.T) {
 				Sender: message.Sender{Kind: actor.KindAgent, ID: "a"},
 				Kind:   message.KindEvent, Type: "agent.text",
 				Payload:    json.RawMessage(`{}`),
-				Visibility: message.VisibilityPublic, Audience: message.Audience{message.AudienceWildcard},
+				Visibility: message.VisibilityPublic, Audience: message.Audience{actor.SystemActorID},
 			},
 		}
 	}
@@ -1949,7 +1949,7 @@ func TestViewSyncGapDrainFanOut(t *testing.T) {
 				Sender: message.Sender{Kind: actor.KindAgent, ID: "a"},
 				Kind:   message.KindEvent, Type: "agent.text",
 				Payload:    json.RawMessage(`{}`),
-				Visibility: message.VisibilityPublic, Audience: message.Audience{message.AudienceWildcard},
+				Visibility: message.VisibilityPublic, Audience: message.Audience{actor.SystemActorID},
 			},
 		}
 	}
@@ -2048,7 +2048,7 @@ func TestViewSyncRejectsStaleFencingBeforeApply(t *testing.T) {
 			Type:       "agent.text",
 			Payload:    json.RawMessage(`{}`),
 			Visibility: message.VisibilityPublic,
-			Audience:   message.Audience{message.AudienceWildcard},
+			Audience:   message.Audience{actor.SystemActorID},
 		},
 	}
 	raw, _ := json.Marshal(push)

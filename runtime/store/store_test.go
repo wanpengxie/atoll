@@ -64,7 +64,7 @@ func TestMessageAppend_OutboxRoundTrip(t *testing.T) {
 		Type:       "channel.created",
 		Payload:    json.RawMessage(`{"ok":true}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{"*"},
+		Audience:   message.Audience{"agent:channel-agent"},
 	}
 	res, err := msgs.Append(ctx, env, klog.FencingTuple{})
 	if err != nil {
@@ -176,7 +176,7 @@ func TestMessages_PendingDue_FutureMessagesGated(t *testing.T) {
 			Type:       "tick",
 			Payload:    json.RawMessage(`{}`),
 			Visibility: message.VisibilityPublic,
-			Audience:   message.Audience{"*"},
+			Audience:   message.Audience{"agent:channel-agent"},
 			NotBefore:  notBefore,
 		}
 	}
@@ -411,7 +411,7 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 		Type:       "noise.tick",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{"*"},
+		Audience:   message.Audience{"agent:channel-agent"},
 		ExpiresAt:  &pastDeadline,
 	}, klog.FencingTuple{}); err != nil {
 		t.Fatalf("append evt-overdue: %v", err)
@@ -633,7 +633,7 @@ func newSimpleEnvelope(seq int) *message.Envelope {
 		Type:       "tick",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{"*"},
+		Audience:   message.Audience{"agent:channel-agent"},
 	}
 }
 

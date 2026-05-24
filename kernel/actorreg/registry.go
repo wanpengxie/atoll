@@ -45,3 +45,28 @@ type Registry interface {
 	// deregistered id.
 	Deregister(ctx context.Context, id actor.ActorID, at int64) error
 }
+
+// ActiveAudienceExcept returns the list of active actor ids in the
+// channel, excluding the supplied ids. Helper for emit points that used
+// to use audience=["*"] for channel-wide broadcasts; after wildcard
+// removal, callers enumerate the receivers explicitly. Excludes the
+// sender itself by convention so a system event does not fanout-trigger
+// the emitter actor.
+func ActiveAudienceExcept(ctx context.Context, reg Registry, exclude ...actor.ActorID) ([]actor.ActorID, error) {
+	rows, err := reg.ListActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	excludeSet := make(map[actor.ActorID]struct{}, len(exclude))
+	for _, id := range exclude {
+		excludeSet[id] = struct{}{}
+	}
+	out := make([]actor.ActorID, 0, len(rows))
+	for _, rec := range rows {
+		if _, drop := excludeSet[rec.ID]; drop {
+			continue
+		}
+		out = append(out, rec.ID)
+	}
+	return out, nil
+}

@@ -111,7 +111,7 @@ func TestViewFanout_PublicSystemEmit_NotSpecialCased(t *testing.T) {
 		Kind:       message.KindEvent,
 		Type:       "system.actor.registered",
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{"*"},
+		Audience:   message.Audience{"agent:beta"},
 	}
 	got, err := trigger.ViewFanout(context.Background(), env, reg, nil)
 	if err != nil {
@@ -157,7 +157,7 @@ func TestViewFanout_SystemVisibilityDefaultProjectionSkipsSubscribers(t *testing
 		Kind:       message.KindEvent,
 		Type:       "core.system_event",
 		Visibility: message.VisibilitySystem,
-		Audience:   message.Audience{"*"},
+		Audience:   message.Audience{"agent:beta"},
 	}
 	got, err := trigger.ViewFanout(context.Background(), env, reg, nil)
 	if err != nil {
@@ -181,7 +181,7 @@ func TestViewFanout_DroppedDeregistered(t *testing.T) {
 		Kind:       message.KindEvent,
 		Type:       "agent.text",
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{"*"},
+		Audience:   message.Audience{"agent:beta"},
 	}
 	got, err := trigger.ViewFanout(context.Background(), env, reg, nil)
 	if err != nil {
@@ -205,7 +205,7 @@ func TestViewFanout_ExplicitMembersOverrideRegistry(t *testing.T) {
 		Kind:       message.KindEvent,
 		Type:       "agent.text",
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{"*"},
+		Audience:   message.Audience{"agent:beta"},
 	}
 	members := []actor.ActorID{"user:demo"} // narrow override
 	got, err := trigger.ViewFanout(context.Background(), env, reg, members)
@@ -257,7 +257,7 @@ func TestViewFanout_RequiresRegistryOrMembers(t *testing.T) {
 		Kind:       message.KindEvent,
 		Type:       "agent.text",
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{"*"},
+		Audience:   message.Audience{"agent:beta"},
 	}
 	if _, err := trigger.ViewFanout(context.Background(), env, nil, nil); err == nil {
 		t.Error("expected error when registry+members both nil, got nil")

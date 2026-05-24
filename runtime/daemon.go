@@ -1400,14 +1400,26 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 			WorkerActorID: cr.channelAgentID,
 			Spawner:       d.cfg.WorkerSpawner,
 			LeaseStore:    leaseStore,
-			Chain:         cr.chain,
-			Ledger:        cr.ledger,
-			NowFn:         d.cfg.NowFn,
-			FencingToken:  lockRow.FencingToken,
-			DaemonEpoch:   lockRow.DaemonEpoch,
-			ServeCtx:      d.runCtx,
-			WorkerEnv:     workerEnv,
-			PreSpawn:      preSpawn,
+			// Worker IPC writes use the bare chain — they don't need
+			// post-harness gateway.Dispatch (the audience derives from
+			// trigger context; receiver fan-out goes through their own
+			// inbound trigger path). After wildcard removal, scheduler
+			// scanLongPending can no longer fan-out a worker emit back
+			// to the worker itself (audience is a literal actor_id
+			// list, so the worker only appears when explicitly self-
+			// addressed via the agent self-schedule entry point), so
+			// the MarkDelivered safety net the wrapped chain provided
+			// is no longer load-bearing. Going through wrappedChain
+			// here would synchronously block the IPC handler on
+			// downstream worker spawn / handshake.
+			Chain:        cr.chain,
+			Ledger:       cr.ledger,
+			NowFn:        d.cfg.NowFn,
+			FencingToken: lockRow.FencingToken,
+			DaemonEpoch:  lockRow.DaemonEpoch,
+			ServeCtx:     d.runCtx,
+			WorkerEnv:    workerEnv,
+			PreSpawn:     preSpawn,
 		})
 		if err != nil {
 			return fmt.Errorf("runtime: ensure channel-agent bridge %s: %w", cr.channelID, err)
@@ -2038,7 +2050,10 @@ func (d *Daemon) ensureChannelCreatedEvent(
 		Type:       "system.channel.created",
 		Payload:    payload,
 		Visibility: message.VisibilitySystem,
-		Audience:   message.Audience{message.AudienceWildcard},
+		// audience=[system] — system observes its own emit; no business
+		// actor fan-out. Channel-agent / tool know channel state through
+		// worker spawn context / actor_registry, not via trigger.
+		Audience: message.Audience{actor.SystemActorID},
 	}
 	if env.CanonicalHash, err = message.CanonicalHash(*env); err != nil {
 		return fmt.Errorf("canonical hash: %w", err)
@@ -2722,9 +2737,12 @@ func (d *Daemon) scanLongPending(ctx context.Context, nowMs int64) error {
 		}
 		for i := range due {
 			env := due[i]
-			// scheduler is the dispatch-path upstream — bypass §5.1
-			// step 3 self-trigger ban (L1 §5.3 explicit semantics).
-			if _, derr := cr.gateway.Dispatch(ctx, &env, trigger.Options{BypassSelfTriggerBan: true}); derr != nil {
+			// scheduler dispatch-path upstream. Self-trigger ban /
+			// bypass option were removed after wildcard semantics
+			// dropped — every audience entry is now a literal actor_id
+			// list and self-scheduling is expressed by including the
+			// sender id in audience.
+			if _, derr := cr.gateway.Dispatch(ctx, &env, trigger.Options{}); derr != nil {
 				d.log.Warn().Err(derr).
 					Str("event", "runtime.scheduler_dispatch_failed").
 					Str("channel_id", string(chID)).

@@ -63,19 +63,10 @@ func ViewFanout(
 		return listActiveSorted(ctx, reg)
 
 	case message.VisibilityPrivate:
-		// audience ∪ {sender}.
+		// audience ∪ {sender}. After wildcard removal every audience entry
+		// is a literal actor_id.
 		visible := make([]actor.ActorID, 0, len(env.Audience)+1)
-		for _, a := range env.Audience {
-			if a == message.AudienceWildcard {
-				// harness Step 2 rejects visibility=private + audience=['*']
-				// — this branch only fires for adapter/test callers that
-				// bypass the chain. Be conservative: drop the wildcard
-				// rather than expanding to "everyone" (which would
-				// contradict private semantics).
-				continue
-			}
-			visible = append(visible, a)
-		}
+		visible = append(visible, env.Audience...)
 		if env.Sender.ID != "" {
 			visible = append(visible, env.Sender.ID)
 		}

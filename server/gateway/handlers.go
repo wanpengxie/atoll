@@ -179,12 +179,30 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			// device_transit.recv = daemon adapter → server → device
 			// (impl-layer2 §5.3.2). The daemon-side adapter pushes a
 			// recv frame whose payload should be relayed to the device
-			// WS keyed by SendFrame.DeviceSessionID.
+			// WS keyed by SendFrame.DeviceSessionID. The WS wire is the
+			// flat devicebus.DeviceFrame so we unwrap SendFrame.Body
+			// (opaque to kernel) into the WS schema before relaying.
 			var sf devicetransit.SendFrame
 			if err := json.Unmarshal(frame.Payload, &sf); err != nil {
 				return fmt.Errorf("gateway: decode device_transit.recv: %w", err)
 			}
-			return a.devicebus.SendFrameToDevice(ctx, sf.DeviceSessionID.String(), sf)
+			var body deviceFrameBody
+			if len(sf.Body) > 0 {
+				if err := json.Unmarshal(sf.Body, &body); err != nil {
+					return fmt.Errorf("gateway: decode device_transit.recv body: %w", err)
+				}
+			}
+			df := devicebus.DeviceFrame{
+				Direction:       body.Direction,
+				DeviceSessionID: string(sf.DeviceSessionID),
+				ChannelID:       string(sf.ChannelID),
+				RequestID:       body.RequestID,
+				ParentID:        body.ParentID,
+				CorrelationID:   body.CorrelationID,
+				Payload:         body.Payload,
+				ExpiresAt:       body.ExpiresAt,
+			}
+			return a.devicebus.SendFrameToDevice(ctx, df.DeviceSessionID, df)
 		},
 	}
 }
@@ -565,17 +583,49 @@ func (a *App) sendUnbindChannel(
 }
 
 // ForwardDeviceFrame implements devicebus.TransitForwarder by wrapping
-// the shared device_transit payload in the daemonbus mux envelope.
+// the flat /devicebus wire frame into a devicetransit.SendFrame and
+// pushing it through the daemonbus mux.
 //
 // Direction: device → server → daemon adapter. Per impl-layer2 §5.3.1,
-// this inbound direction rides on `device_transit.send`.
-func (a *App) ForwardDeviceFrame(ctx context.Context, frame devicebus.DeviceFrame) error {
-	conn, err := a.daemonbus.ConnectionForChannel(ctx, frame.ChannelID.String())
+// this inbound direction rides on `device_transit.send`. The daemon
+// framework decodes SendFrame.Body as deviceFrameBody (mirror of
+// adapters/device/framework.DeviceTransitBody serial shape).
+func (a *App) ForwardDeviceFrame(ctx context.Context, frame devicebus.DeviceFrame, adapterActorID actor.ActorID) error {
+	body, err := json.Marshal(deviceFrameBody{
+		Direction:     frame.Direction,
+		RequestID:     frame.RequestID,
+		ParentID:      frame.ParentID,
+		CorrelationID: frame.CorrelationID,
+		Payload:       frame.Payload,
+		ExpiresAt:     frame.ExpiresAt,
+	})
+	if err != nil {
+		return fmt.Errorf("gateway: marshal device_transit.send body: %w", err)
+	}
+	sf := devicetransit.SendFrame{
+		DeviceSessionID: devicetransit.DeviceSessionID(frame.DeviceSessionID),
+		ChannelID:       channel.ID(frame.ChannelID),
+		AdapterActorID:  adapterActorID,
+		Body:            body,
+	}
+	conn, err := a.daemonbus.ConnectionForChannel(ctx, frame.ChannelID)
 	if err != nil {
 		return err
 	}
-	_, err = conn.SendFrame(ctx, kerneldaemonbus.FrameTypeDeviceTransitSend, frame)
+	_, err = conn.SendFrame(ctx, kerneldaemonbus.FrameTypeDeviceTransitSend, sf)
 	return err
+}
+
+// deviceFrameBody mirrors adapters/device/framework.DeviceTransitBody on
+// the wire so server can wrap/unwrap the opaque devicetransit.SendFrame.Body
+// without importing adapters/** (architecturally forbidden by go-arch-lint).
+type deviceFrameBody struct {
+	Direction     string          `json:"direction"`
+	RequestID     string          `json:"request_id,omitempty"`
+	ParentID      string          `json:"parent_id,omitempty"`
+	CorrelationID string          `json:"correlation_id,omitempty"`
+	Payload       json.RawMessage `json:"payload,omitempty"`
+	ExpiresAt     int64           `json:"expires_at,omitempty"`
 }
 
 func (a *App) correlationForParent(ctx context.Context, channelID string, parentID message.ID) message.ID {
@@ -765,6 +815,13 @@ type writeMessageReq struct {
 	// it empty for business types — daemon harness will reject on
 	// step 5 with `harness_kind_not_allowed`).
 	Kind string `json:"kind"`
+	// TS is the sender-provided envelope timestamp (ms epoch). Part of
+	// the L1 §2.3 canonical_hash domain (kernel/message/canonical.go
+	// envelopeHashInput) — callers MUST resend the same TS when
+	// retrying an idempotent write; otherwise the second POST trips
+	// harness_id_duplicate_conflict at Step 3. Server stamps
+	// time.Now() only when TS is omitted (0).
+	TS int64 `json:"ts"`
 }
 
 func (a *App) handleWriteMessage(c *gin.Context) {
@@ -831,7 +888,10 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		return
 	}
 
-	ts := time.Now().UnixMilli()
+	ts := req.TS
+	if ts <= 0 {
+		ts = time.Now().UnixMilli()
+	}
 	nonce, err := newNonce()
 	if err != nil {
 		httperr.Internal(c, "gateway.write_message.nonce", err)

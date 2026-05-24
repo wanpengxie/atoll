@@ -82,7 +82,6 @@ func TestAllRejectReasons(t *testing.T) {
 		message.HarnessSenderKindMismatch,
 		message.HarnessSenderMismatch,
 		message.HarnessAudienceEmpty,
-		message.HarnessAudienceMixedWildcard,
 		message.HarnessAudienceMemberNotActive,
 		message.HarnessRequestAudienceInvalid,
 		message.HarnessResponseAudienceInvalid,

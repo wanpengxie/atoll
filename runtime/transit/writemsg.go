@@ -322,9 +322,9 @@ func (h *WriteMessageHandler) Handle(ctx context.Context, body WriteMessageBody)
 	if env.Visibility == "" {
 		env.Visibility = message.VisibilityPublic
 	}
-	if len(env.Audience) == 0 {
-		env.Audience = message.Audience{message.AudienceWildcard}
-	}
+	// audience is caller-owned post wildcard removal. Empty audience
+	// falls through to harness Step 1 envelope_shape harness_audience_empty
+	// reject — the caller must supply an explicit actor_id list.
 	// Ensure non-null payload (canonical hash refuses empty).
 	if len(env.Payload) == 0 {
 		env.Payload = []byte("{}")

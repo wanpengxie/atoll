@@ -168,7 +168,7 @@ func newWriteMessageBody(t *testing.T, payload json.RawMessage, ts int64) transi
 			Type:       "human.text",
 			Kind:       message.KindEvent,
 			Payload:    payload,
-			Audience:   message.Audience{"*"},
+			Audience:   message.Audience{"agent:channel-agent"},
 			Visibility: message.VisibilityPublic,
 			TS:         ts,
 		},

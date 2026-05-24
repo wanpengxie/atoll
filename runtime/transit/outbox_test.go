@@ -46,7 +46,7 @@ func newFakeOutbox(chID channel.ID, n int) *fakeOutbox {
 				Kind:       message.KindEvent,
 				Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:a"},
 				Payload:    json.RawMessage(`{}`),
-				Audience:   message.Audience{"*"},
+				Audience:   message.Audience{"agent:channel-agent"},
 			},
 		})
 	}

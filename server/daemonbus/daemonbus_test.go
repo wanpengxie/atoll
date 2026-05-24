@@ -614,7 +614,7 @@ func TestDispatchPushAndAck(t *testing.T) {
 			Sender: message.Sender{Kind: actor.KindAgent, ID: "a"},
 			Kind:   message.KindEvent, Type: "agent.text",
 			Payload:    json.RawMessage(`{}`),
-			Visibility: message.VisibilityPublic, Audience: message.Audience{message.AudienceWildcard},
+			Visibility: message.VisibilityPublic, Audience: message.Audience{actor.SystemActorID},
 		},
 	}
 	rawPayload, _ := json.Marshal(pushFrame)

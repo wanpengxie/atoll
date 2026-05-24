@@ -178,7 +178,7 @@ func newEvent(senderID actor.ActorID, t string, payload json.RawMessage) *messag
 		Type:      t,
 		Kind:      message.KindEvent,
 		Payload:   payload,
-		Audience:  message.Audience{"*"},
+		Audience:  message.Audience{"agent:channel-agent"},
 	}
 }
 

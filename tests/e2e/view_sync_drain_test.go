@@ -213,9 +213,10 @@ func prefixed(prefix string, n int) []string {
 func probePost(t *testing.T, s *harness.Stack, channelID, text string) bool {
 	t.Helper()
 	body, _ := json.Marshal(map[string]any{
-		"id":      "probe-" + text,
-		"type":    "human.text",
-		"payload": json.RawMessage(`{"text":"` + text + `"}`),
+		"id":       "probe-" + text,
+		"type":     "human.text",
+		"payload":  json.RawMessage(`{"text":"` + text + `"}`),
+		"audience": []string{"agent:channel-agent"},
 	})
 	req, err := http.NewRequest("POST", s.ServerURLBase()+"/api/channels/"+channelID+"/messages",
 		bytes.NewReader(body))

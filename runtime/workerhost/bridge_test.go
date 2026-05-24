@@ -284,7 +284,7 @@ func triggerEnvelope(id string, seq int64) *message.Envelope {
 		Sender:        message.Sender{Kind: actor.KindHuman, ID: "user:alice"},
 		Kind:          message.KindEvent,
 		Visibility:    message.VisibilityPublic,
-		Audience:      message.Audience{"*"},
+		Audience:      message.Audience{"agent:channel-agent"},
 		Payload:       json.RawMessage(`{"text":"hi"}`),
 		Seq:           seq,
 		CorrelationID: "corr-1",

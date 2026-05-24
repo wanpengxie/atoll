@@ -653,6 +653,10 @@ func (s *Stack) PostMessageWithID(channelID, messageID, envType, text, kindHint 
 		"id":      messageID,
 		"type":    envType,
 		"payload": json.RawMessage(payload),
+		// Post wildcard removal — user-to-agent reply is the default
+		// human-message pattern; the channel-agent actor id is fixed by
+		// L4 §channel-agent (kernel/actor/actor.go::ChannelAgentActorID).
+		"audience": []string{"agent:channel-agent"},
 	}
 	if kindHint != "" {
 		body["kind"] = kindHint

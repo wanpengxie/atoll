@@ -73,7 +73,7 @@ func newFencedEnvelope(id string) *message.Envelope {
 		Type:       "channel.created",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{"*"},
+		Audience:   message.Audience{"agent:channel-agent"},
 	}
 }
 

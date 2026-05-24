@@ -434,7 +434,7 @@ func appendSystemChannelCreated(ctx context.Context, workdirPath string, channel
 		Type:       "system.channel.created",
 		Payload:    payload,
 		Visibility: message.VisibilitySystem,
-		Audience:   message.Audience{message.AudienceWildcard},
+		Audience:   message.Audience{actor.SystemActorID},
 	}
 	if env.CanonicalHash, err = message.CanonicalHash(*env); err != nil {
 		return err

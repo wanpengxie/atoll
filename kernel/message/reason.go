@@ -55,7 +55,6 @@ const (
 
 	// Step 7 — Audience Validate
 	HarnessAudienceEmpty           HarnessRejectReason = "harness_audience_empty"
-	HarnessAudienceMixedWildcard   HarnessRejectReason = "harness_audience_mixed_wildcard"
 	HarnessAudienceMemberNotActive HarnessRejectReason = "harness_audience_member_not_active"
 	HarnessRequestAudienceInvalid  HarnessRejectReason = "harness_request_audience_invalid"
 	HarnessResponseAudienceInvalid HarnessRejectReason = "harness_response_audience_invalid"
@@ -102,7 +101,6 @@ var AllHarnessRejectReasons = []HarnessRejectReason{
 	HarnessSenderKindMismatch,
 	HarnessSenderMismatch,
 	HarnessAudienceEmpty,
-	HarnessAudienceMixedWildcard,
 	HarnessAudienceMemberNotActive,
 	HarnessRequestAudienceInvalid,
 	HarnessResponseAudienceInvalid,
@@ -150,7 +148,6 @@ func (r HarnessRejectReason) HTTPStatus() int {
 		HarnessVisibilityAudienceInvalid,
 		HarnessEnvelopeUnknownField,
 		HarnessAudienceEmpty,
-		HarnessAudienceMixedWildcard,
 		HarnessSenderKindMismatch,
 		HarnessResponseAudienceInvalid,
 		HarnessResponseMissingParent,

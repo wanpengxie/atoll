@@ -40,7 +40,7 @@ func r7Frame(seq viewsync.Seq) viewsync.PushFrame {
 			Type:       "agent.text",
 			Payload:    json.RawMessage(`{}`),
 			Visibility: message.VisibilityPublic,
-			Audience:   message.Audience{message.AudienceWildcard},
+			Audience:   message.Audience{actor.SystemActorID},
 			Seq:        int64(seq),
 		},
 	}

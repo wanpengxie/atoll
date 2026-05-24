@@ -12,8 +12,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/pkg/requestctx"
 )
 
@@ -63,10 +63,32 @@ type DeviceTransport interface {
 	Close() error
 }
 
-// DeviceFrame is the shared device_transit payload contract. The
-// device WS and daemonbus mux carry the same JSON body; only the outer
-// transport envelope differs.
-type DeviceFrame = devicetransit.SendFrame
+// DeviceFrame is the flat /devicebus WebSocket wire frame exchanged
+// between server and device clients (chrome extension / mock extension).
+// Mirrors adapters/device/xhs/extension/packages/shared/src/constants.ts:58:
+//
+//	DeviceFrame{direction, device_session_id, channel_id,
+//	            request_id, correlation_id, payload, expires_at}
+//
+// devicetransit.SendFrame (with opaque Body) is the daemon ↔ server
+// transport envelope; server bridges the two formats in
+// gateway.ForwardDeviceFrame / gateway.OnDeviceTransitRecv. AdapterActorID
+// and TransitSeq belong to the daemonbus envelope, not this wire frame.
+type DeviceFrame struct {
+	Direction       string          `json:"direction"`
+	DeviceSessionID string          `json:"device_session_id"`
+	ChannelID       string          `json:"channel_id"`
+	RequestID       string          `json:"request_id,omitempty"`
+	ParentID        string          `json:"parent_id,omitempty"`
+	CorrelationID   string          `json:"correlation_id,omitempty"`
+	Payload         json.RawMessage `json:"payload,omitempty"`
+	ExpiresAt       int64           `json:"expires_at,omitempty"`
+	// TransitSeq is the daemonbus-side sequence; kept on the wire
+	// struct only so legacy test fixtures keep compiling. New code
+	// SHOULD NOT populate this on the WS frame — the canonical channel
+	// for transit_seq is devicetransit.SendFrame.TransitSeq.
+	TransitSeq int64 `json:"transit_seq,omitempty"`
+}
 
 // NewConnection wires a transport.
 func NewConnection(s Session, tx DeviceTransport) *Connection {
@@ -210,8 +232,13 @@ func (t *wsDeviceTransport) Close() error {
 // reach the daemonbus connection for the channel + how to wrap a
 // DeviceFrame into a `device_transit.send` daemonbus frame
 // (impl-layer2 §5.3.1 inbound — device → server → daemon adapter).
+//
+// adapterActorID is the bound actor from the device_sessions row — the
+// flat DeviceFrame doesn't carry it (it's a daemonbus envelope field).
+// Gateway stamps it into devicetransit.SendFrame.AdapterActorID when
+// wrapping the inbound frame for daemon delivery.
 type TransitForwarder interface {
-	ForwardDeviceFrame(ctx context.Context, frame DeviceFrame) error
+	ForwardDeviceFrame(ctx context.Context, frame DeviceFrame, adapterActorID actor.ActorID) error
 }
 
 // DeviceWSSubprotocol is the real WebSocket subprotocol negotiated on
@@ -316,10 +343,9 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 			if err != nil {
 				return
 			}
-			frame.DeviceSessionID = devicetransit.DeviceSessionID(sessionID)
-			frame.ChannelID = current.ChannelID
-			frame.AdapterActorID = current.AdapterActorID
-			if err := forwarder.ForwardDeviceFrame(c.Request.Context(), frame); err != nil {
+			frame.DeviceSessionID = sessionID
+			frame.ChannelID = string(current.ChannelID)
+			if err := forwarder.ForwardDeviceFrame(c.Request.Context(), frame, current.AdapterActorID); err != nil {
 				return
 			}
 		}

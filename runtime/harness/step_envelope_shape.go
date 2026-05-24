@@ -84,34 +84,21 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (kha
 		}, nil
 	}
 
-	// (5) audience cardinality + wildcard form — proto-layer0 §2.3.
+	// (5) audience cardinality — proto-layer0 §2.3.
+	// Wildcard "*" was removed from the audience closed set (owner
+	// reframed addressing as Erlang-style explicit `pid ! msg`); every
+	// audience entry MUST be a literal actor_id.
 	if len(env.Audience) == 0 {
 		return khar.Outcome{
 			RejectReason: message.HarnessAudienceEmpty,
 			Detail:       "envelope.audience empty",
 		}, nil
 	}
-	hasWildcard := false
-	for _, a := range env.Audience {
-		if a == message.AudienceWildcard {
-			hasWildcard = true
-			break
-		}
-	}
-	if hasWildcard && len(env.Audience) > 1 {
-		return khar.Outcome{
-			RejectReason: message.HarnessAudienceMixedWildcard,
-			Detail:       "envelope.audience contains '*' mixed with concrete actors",
-		}, nil
-	}
 	if env.Kind == message.KindRequest {
-		// request must address either ['*'] or exactly one concrete actor
-		// (the broader Step 5/7 layer narrows further; here we only fail
-		// the structural case of multi-element-no-wildcard).
-		if !hasWildcard && len(env.Audience) != 1 {
+		if len(env.Audience) != 1 {
 			return khar.Outcome{
 				RejectReason: message.HarnessRequestAudienceInvalid,
-				Detail:       "kind=request requires audience=[<concrete-actor>] or ['*']",
+				Detail:       "kind=request requires audience cardinality 1",
 			}, nil
 		}
 	}
@@ -122,14 +109,6 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (kha
 				Detail:       "kind=response requires audience cardinality 1",
 			}, nil
 		}
-	}
-
-	// (6) visibility ↔ audience consistency — proto-layer1 §4.1.3.
-	if env.Visibility == message.VisibilityPrivate && hasWildcard {
-		return khar.Outcome{
-			RejectReason: message.HarnessVisibilityAudienceInvalid,
-			Detail:       "visibility=private with audience=['*'] is semantically inconsistent",
-		}, nil
 	}
 
 	// (7) response.parent_id non-null — One Law extra-strong constraint.

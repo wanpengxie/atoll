@@ -577,7 +577,7 @@ func newEnvelope(seq int) *message.Envelope {
 		Type:       "tick",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{"*"},
+		Audience:   message.Audience{"agent:channel-agent"},
 	}
 }
 

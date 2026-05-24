@@ -292,7 +292,7 @@ func TestChain_Step4_UnknownType(t *testing.T) {
 		Kind:      message.KindEvent,
 		Sender:    message.Sender{ID: "agent:alpha"},
 		Payload:   json.RawMessage(`{}`),
-		Audience:  message.Audience{"*"},
+		Audience:  message.Audience{"agent:channel-agent"},
 	}
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessTypeUnknown {
@@ -723,7 +723,7 @@ func TestChain_CoreTypeKindLocked(t *testing.T) {
 		Kind:      message.KindRequest, // not allowed for core.system_event
 		Sender:    message.Sender{ID: actor.SystemActorID},
 		Payload:   json.RawMessage(`{}`),
-		Audience:  message.Audience{"*"},
+		Audience:  message.Audience{"agent:channel-agent"},
 	}
 	res, _ := c.Write(chainCallerCtx(actor.SystemActorID), env)
 	if res.RejectReason != message.HarnessKindNotAllowedForType {
@@ -767,19 +767,6 @@ func TestChain_Step2_VisibilityInvalid(t *testing.T) {
 }
 
 // TestChain_Step2_VisibilityAudienceInvalid — visibility=private +
-// audience=['*'] is a semantic contradiction (private with broadcast).
-func TestChain_Step2_VisibilityAudienceInvalid(t *testing.T) {
-	c, _, _, _ := newTestChain(t)
-	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
-	env.Visibility = message.VisibilityPrivate
-	env.Audience = message.Audience{"*"}
-	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
-	if res.RejectReason != message.HarnessVisibilityAudienceInvalid {
-		t.Fatalf("expected harness_visibility_audience_invalid, got %s detail=%s",
-			res.RejectReason, res.RejectDetail)
-	}
-}
-
 // TestChain_Step2_AudienceEmpty — explicit empty audience after the
 // shape stage (caller can construct one even though newEvent fills ['*']).
 func TestChain_Step2_AudienceEmpty(t *testing.T) {
@@ -789,18 +776,6 @@ func TestChain_Step2_AudienceEmpty(t *testing.T) {
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessAudienceEmpty {
 		t.Fatalf("expected harness_audience_empty, got %s detail=%s",
-			res.RejectReason, res.RejectDetail)
-	}
-}
-
-// TestChain_Step2_AudienceMixedWildcard — '*' mixed with concrete actors.
-func TestChain_Step2_AudienceMixedWildcard(t *testing.T) {
-	c, _, _, _ := newTestChain(t)
-	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
-	env.Audience = message.Audience{"*", "agent:alpha"}
-	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
-	if res.RejectReason != message.HarnessAudienceMixedWildcard {
-		t.Fatalf("expected harness_audience_mixed_wildcard, got %s detail=%s",
 			res.RejectReason, res.RejectDetail)
 	}
 }
@@ -1032,7 +1007,7 @@ func TestChain_Step5_ReservedTypeUnauthorizedSender(t *testing.T) {
 		Kind:      message.KindEvent,
 		Sender:    message.Sender{ID: "agent:alpha"},
 		Payload:   json.RawMessage(`{}`),
-		Audience:  message.Audience{"*"},
+		Audience:  message.Audience{"agent:channel-agent"},
 	}
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessReservedTypeUnauthorizedSender {
@@ -1057,7 +1032,7 @@ func TestChain_Step5_ReservedTypeSystemSenderAccepted(t *testing.T) {
 		Kind:      message.KindEvent,
 		Sender:    message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
 		Payload:   json.RawMessage(`{}`),
-		Audience:  message.Audience{"*"},
+		Audience:  message.Audience{"agent:channel-agent"},
 	}
 	res, _ := c.Write(chainCallerCtx(actor.SystemActorID), env)
 	if !res.Accepted() {
@@ -1080,7 +1055,7 @@ func TestChain_Step5_NonReservedSystemTypeRejectedBeforeRegistry(t *testing.T) {
 		Kind:      message.KindEvent,
 		Sender:    message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
 		Payload:   json.RawMessage(`{}`),
-		Audience:  message.Audience{"*"},
+		Audience:  message.Audience{"agent:channel-agent"},
 	}
 	res, _ := c.Write(chainCallerCtx(actor.SystemActorID), env)
 	if res.RejectReason != message.HarnessTypeUnknown {

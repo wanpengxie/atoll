@@ -217,7 +217,7 @@ func (s *Service) emitInstalled(ctx context.Context, row adapter.TypeRow, attemp
 		Type:       "system.type.installed",
 		Payload:    payload,
 		Visibility: message.VisibilitySystem,
-		Audience:   message.Audience{message.AudienceWildcard},
+		Audience:   message.Audience{actor.SystemActorID},
 	}
 	chainCtx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{
 		ActorID:                 actor.SystemActorID,

@@ -323,7 +323,7 @@ func actorRegisteredEnvelope(channelID channel.ID, add MemberActorAdd) (*message
 		Type:       "system.actor.registered",
 		Payload:    payload,
 		Visibility: message.VisibilitySystem,
-		Audience:   message.Audience{message.AudienceWildcard},
+		Audience:   message.Audience{actor.SystemActorID},
 	}
 	hash, err := message.CanonicalHash(*env)
 	env.CanonicalHash = hash
@@ -348,7 +348,7 @@ func actorDeregisteredEnvelope(channelID channel.ID, remove MemberActorRemove) (
 		Type:       "system.actor.deregistered",
 		Payload:    payload,
 		Visibility: message.VisibilitySystem,
-		Audience:   message.Audience{message.AudienceWildcard},
+		Audience:   message.Audience{actor.SystemActorID},
 	}
 	hash, err := message.CanonicalHash(*env)
 	env.CanonicalHash = hash

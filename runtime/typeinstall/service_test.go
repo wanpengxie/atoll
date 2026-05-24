@@ -52,8 +52,11 @@ func TestServiceInstallTypeEmitsMirrorEvent(t *testing.T) {
 	if env.Sender.ID != actor.SystemActorID || env.Sender.Kind != actor.KindSystem {
 		t.Fatalf("mirror sender=%+v", env.Sender)
 	}
-	if env.Visibility != message.VisibilitySystem || !env.Audience.IsWildcard() {
-		t.Fatalf("mirror visibility=%s audience=%v", env.Visibility, env.Audience)
+	if env.Visibility != message.VisibilitySystem {
+		t.Fatalf("mirror visibility=%s want system", env.Visibility)
+	}
+	if len(env.Audience) != 1 || env.Audience[0] != actor.SystemActorID {
+		t.Fatalf("mirror audience=%v want [system]", env.Audience)
 	}
 
 	var payload map[string]any
@@ -300,7 +303,7 @@ func TestInstallType_CrashAfterMirrorBeforeMark_RecoveryCompletesInstall(t *test
 		Type:       "system.type.installed",
 		Payload:    payload,
 		Visibility: message.VisibilitySystem,
-		Audience:   message.Audience{message.AudienceWildcard},
+		Audience:   message.Audience{actor.SystemActorID},
 	}, klog.FencingTuple{}); err != nil {
 		t.Fatalf("append mirror: %v", err)
 	}

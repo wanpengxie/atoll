@@ -14,23 +14,10 @@ import (
 // trigger fan-out per L1 §5.2 (system.heartbeat).
 const TypeSystemHeartbeat = "system.heartbeat"
 
-// Options tunes per-call decisions that are NOT carried inside the
-// envelope. Today the only switch is BypassSelfTriggerBan — see L1 §5.3
-// dispatch-path semantics.
-type Options struct {
-	// BypassSelfTriggerBan, when true, disables the L1 §5.1 step 3
-	// "sender 自己不被 self-trigger" filter. Callers SHOULD set this true
-	// when the dispatch-path upstream is NOT the original sender:
-	//
-	//   - scheduler ticking a future-message back to its own author
-	//     (§5.3 explicit case).
-	//   - system long-pending fallback writing a terminal response on
-	//     behalf of a stuck request (§6.4 — system upstream).
-	//
-	// Default false matches the harness immediate-write path where the
-	// upstream IS the sender.
-	BypassSelfTriggerBan bool
-}
+// Options is reserved for future per-call dispatch knobs. Empty today —
+// wildcard / self-trigger-ban / bypass machinery were removed after
+// owner reframed addressing as Erlang-style explicit `pid ! msg`.
+type Options struct{}
 
 // Resolve implements the L1 §5.1 decision matrix.
 //
@@ -42,13 +29,18 @@ type Options struct {
 // should hand this envelope to via runtime/scheduler.Deliverer. It is
 // deduped + sorted by actor id so the caller observes a stable order.
 //
-// Errors come from the registry (lookup IO); decision-layer rejects
-// surface as an empty audience, not an error — fan-out cannot fail.
+// Addressing semantics (post wildcard removal):
+//
+//   - audience MUST be a literal list of actor_ids. Empty → empty
+//     fan-out (no receiver, message is observation-only).
+//   - sender's own id may legitimately appear in audience — that is the
+//     self-schedule entry point and is fan-out unchanged.
+//   - non-active / unknown actor_ids are silently dropped.
 func Resolve(
 	ctx context.Context,
 	env *message.Envelope,
 	reg actorreg.Registry,
-	opts Options,
+	_ Options,
 ) ([]actor.ActorID, error) {
 	if env == nil {
 		return nil, fmt.Errorf("trigger: nil envelope")
@@ -57,70 +49,36 @@ func Resolve(
 		return nil, fmt.Errorf("trigger: nil registry")
 	}
 
-	// (1) Noise filter — system.heartbeat never fan-outs (L1 §5.2 explicit
-	// row). Evaluated independently of visibility so that an unusual
-	// visibility=public heartbeat (e.g. test fixture) still gets suppressed.
+	// (1) Noise filter — system.heartbeat never fan-outs (L1 §5.2).
 	if env.Type == TypeSystemHeartbeat {
 		return nil, nil
 	}
 
-	// (2) Trigger fan-out is audience-driven, NOT visibility-driven
-	// (proto-layer1 §4.1.2). The view fanout layer (§4.1.3) is the
-	// component that filters by visibility for view-cache delivery; trigger
-	// fan-out treats every visibility uniformly and only consults audience.
-	//
-	// Round 3 cluster F removes the older visibility-suppress branch here
-	// — its job moved to ViewFanout (visibility=private hides the message
-	// from non-audience view caches, but the audience handler still fires).
-
-	// (3) Audience expand — proto-layer1 §4.1.2.
+	// (2) Audience resolve — literal list, drop inactive.
 	candidates, err := expandAudience(ctx, env, reg)
 	if err != nil {
 		return nil, err
 	}
 
-	// (4) Self-trigger ban — L1 §5.1 step 3.
-	if !opts.BypassSelfTriggerBan {
-		candidates = filterOut(candidates, env.Sender.ID)
-	}
-
-	// (5) Dedupe + stable sort. The audience slice may carry the same
-	// id twice (caller error) or the wildcard plus an explicit id; ensure
-	// a single ordering invariant for downstream Deliverer.
+	// (3) Dedupe + stable sort.
 	return dedupeSort(candidates), nil
 }
 
 // expandAudience converts envelope.audience into a concrete actor set.
 //
-// `[*]` (wildcard) or empty → registry.ListActive(). Explicit list →
-// per-id Lookup, dropping missing or deregistered rows (matches the L1
-// §5.1 "active member" requirement; harness step 5 already validated
-// kind=request audience, but for kind=event/response we still trim
-// stale ids defensively).
+// Each entry must be a literal actor_id. Missing or deregistered rows
+// are dropped (matches L1 §5.1 "active member" requirement).
 func expandAudience(
 	ctx context.Context,
 	env *message.Envelope,
 	reg actorreg.Registry,
 ) ([]actor.ActorID, error) {
-	if isWildcard(env.Audience) {
-		rows, err := reg.ListActive(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("trigger: list active: %w", err)
-		}
-		out := make([]actor.ActorID, 0, len(rows))
-		for _, rec := range rows {
-			out = append(out, rec.ID)
-		}
-		return out, nil
+	if len(env.Audience) == 0 {
+		return nil, nil
 	}
-
 	out := make([]actor.ActorID, 0, len(env.Audience))
 	for _, raw := range env.Audience {
-		if raw == "" || raw == message.AudienceWildcard {
-			// Mixed-wildcard payloads are caller error; ignore the marker
-			// rather than blowing up. The validated harness path never
-			// produces this — defense in depth for adapter framework
-			// edges that bypass the chain in error.
+		if raw == "" {
 			continue
 		}
 		id := actor.ActorID(raw)
@@ -134,34 +92,6 @@ func expandAudience(
 		out = append(out, rec.ID)
 	}
 	return out, nil
-}
-
-// isWildcard reports whether the audience slice means "everyone in the
-// channel" per L1 §5.1 step 2. Empty slice is treated as wildcard so
-// callers that forget to default `audience=['*']` still get correct
-// fan-out (harness step 0 normalize fills it, but in-process callers
-// that bypass the chain may not).
-func isWildcard(aud message.Audience) bool {
-	if len(aud) == 0 {
-		return true
-	}
-	return aud.IsWildcard()
-}
-
-// filterOut drops the given id from the slice. Preserves order; callers
-// dedupeSort afterwards.
-func filterOut(ids []actor.ActorID, drop actor.ActorID) []actor.ActorID {
-	if drop == "" {
-		return ids
-	}
-	out := ids[:0]
-	for _, id := range ids {
-		if id == drop {
-			continue
-		}
-		out = append(out, id)
-	}
-	return out
 }
 
 // dedupeSort removes duplicates and returns a slice sorted by actor id.

@@ -75,7 +75,7 @@ export default function DeviceBind({ channelID, me }) {
       const session = await api.issueDeviceSession(channelID, {
         device_id: info.device_id,
         daemon_id: daemonID,
-        device_type: 'xhs-extension',
+        device_type: 'xhs.chrome_extension',
       });
       const resp = await setDeviceToken({
         token: session.token,

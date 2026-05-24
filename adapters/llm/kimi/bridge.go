@@ -740,6 +740,10 @@ func (b *Bridge) emitEnvelope(
 		return fmt.Errorf("kimi: marshal payload: %w", err)
 	}
 	now := b.cfg.NowFn()
+	// Reply audience derives from the trigger sender — Erlang-style
+	// `From` routing. The worker has no awareness of other actors and
+	// always emits back to whoever sent the trigger.
+	audience := workerReplyAudience(trigger.Envelope.Sender.ID)
 	env := message.Envelope{
 		ID:            b.envelopeID(ipc, now),
 		ChannelID:     ipc.ChannelID(),
@@ -747,7 +751,7 @@ func (b *Bridge) emitEnvelope(
 		Kind:          message.KindEvent,
 		Sender:        message.Sender{Kind: actor.KindAgent, ID: ipc.WorkerActorID()},
 		Visibility:    visibility,
-		Audience:      message.Audience{message.AudienceWildcard},
+		Audience:      audience,
 		Payload:       body,
 		CorrelationID: trigger.CorrelationID,
 		ParentID:      trigger.Envelope.ID,
@@ -755,6 +759,16 @@ func (b *Bridge) emitEnvelope(
 		TSReceived:    now,
 	}
 	return ipc.WriteEnvelope(ctx, env)
+}
+
+// workerReplyAudience returns the audience for a worker reply. Falls
+// back to the system actor when the trigger sender id is empty (boot
+// path / boot-failed terminal error).
+func workerReplyAudience(triggerSender actor.ActorID) message.Audience {
+	if triggerSender == "" {
+		return message.Audience{actor.SystemActorID}
+	}
+	return message.Audience{triggerSender}
 }
 
 // emitTerminal is a helper for the max-turns / explicit-done envelope.
@@ -791,13 +805,16 @@ func (b *Bridge) emitTerminalLLMError(
 	body, _ := json.Marshal(payload)
 	now := b.cfg.NowFn()
 	env := message.Envelope{
-		ID:            b.envelopeID(ipc, now),
-		ChannelID:     ipc.ChannelID(),
-		Type:          "agent.text",
-		Kind:          message.KindEvent,
-		Sender:        message.Sender{Kind: actor.KindAgent, ID: ipc.WorkerActorID()},
-		Visibility:    message.VisibilityPublic,
-		Audience:      message.Audience{message.AudienceWildcard},
+		ID:         b.envelopeID(ipc, now),
+		ChannelID:  ipc.ChannelID(),
+		Type:       "agent.text",
+		Kind:       message.KindEvent,
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: ipc.WorkerActorID()},
+		Visibility: message.VisibilityPublic,
+		// LLM-error terminal: emit as observation-only addressed to
+		// system (no business actor fan-out). The originating trigger
+		// sender is not available on this path.
+		Audience:      message.Audience{actor.SystemActorID},
 		Payload:       body,
 		ParentID:      parentEnvID,
 		CorrelationID: correlationID,

@@ -314,7 +314,7 @@ func (m *MockBridge) react(ctx context.Context, client *IPCClient, in ipc.Trigge
 		Kind:          message.KindEvent,
 		Sender:        message.Sender{Kind: actor.KindAgent, ID: client.WorkerActorID()},
 		Visibility:    message.VisibilityPublic,
-		Audience:      message.Audience{message.AudienceWildcard},
+		Audience:      mockReplyAudience(in.Envelope.Sender.ID),
 		Payload:       payload,
 		CorrelationID: in.CorrelationID, // L1 propagation
 		ParentID:      in.Envelope.ID,
@@ -472,7 +472,7 @@ func (m *MockBridge) reactProgressMultiTurn(ctx context.Context, client *IPCClie
 			Kind:          message.KindEvent,
 			Sender:        message.Sender{Kind: actor.KindAgent, ID: client.WorkerActorID()},
 			Visibility:    message.VisibilitySystem,
-			Audience:      message.Audience{message.AudienceWildcard},
+			Audience:      mockReplyAudience(in.Envelope.Sender.ID),
 			Payload:       body,
 			CorrelationID: in.CorrelationID,
 			ParentID:      in.Envelope.ID,
@@ -500,7 +500,7 @@ func (m *MockBridge) reactProgressMultiTurn(ctx context.Context, client *IPCClie
 		Kind:          message.KindEvent,
 		Sender:        message.Sender{Kind: actor.KindAgent, ID: client.WorkerActorID()},
 		Visibility:    message.VisibilityPublic,
-		Audience:      message.Audience{message.AudienceWildcard},
+		Audience:      mockReplyAudience(in.Envelope.Sender.ID),
 		Payload:       body,
 		CorrelationID: in.CorrelationID,
 		ParentID:      in.Envelope.ID,
@@ -530,7 +530,9 @@ func (m *MockBridge) emitTerminal(ctx context.Context, client *IPCClient) error 
 		Kind:       message.KindEvent,
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: client.WorkerActorID()},
 		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{message.AudienceWildcard},
+		// max-turns terminal has no trigger context (caller emits as a
+		// budget watchdog); addressed to system as observation-only.
+		Audience:   message.Audience{actor.SystemActorID},
 		Payload:    payload,
 		TS:         m.NowFn(),
 		TSReceived: m.NowFn(),
@@ -539,4 +541,14 @@ func (m *MockBridge) emitTerminal(ctx context.Context, client *IPCClient) error 
 		return err
 	}
 	return nil
+}
+
+// mockReplyAudience returns the reply audience for a worker reaction —
+// Erlang-style "reply to From". Falls back to system when the trigger
+// sender id is unset (boot trigger / synthetic test fixtures).
+func mockReplyAudience(triggerSender actor.ActorID) message.Audience {
+	if triggerSender == "" {
+		return message.Audience{actor.SystemActorID}
+	}
+	return message.Audience{triggerSender}
 }

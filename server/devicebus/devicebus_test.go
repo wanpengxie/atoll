@@ -19,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/server/devicebus"
@@ -658,7 +659,9 @@ func (f *fakeClock) Now() time.Time { return f.now }
 
 type noopForwarder struct{}
 
-func (noopForwarder) ForwardDeviceFrame(context.Context, devicebus.DeviceFrame) error { return nil }
+func (noopForwarder) ForwardDeviceFrame(context.Context, devicebus.DeviceFrame, actor.ActorID) error {
+	return nil
+}
 
 type allowAllAuthorizer struct{}
 
@@ -680,7 +683,7 @@ func newRecordingForwarder() *recordingForwarder {
 	return &recordingForwarder{ch: make(chan struct{}, 8)}
 }
 
-func (f *recordingForwarder) ForwardDeviceFrame(_ context.Context, frame devicebus.DeviceFrame) error {
+func (f *recordingForwarder) ForwardDeviceFrame(_ context.Context, frame devicebus.DeviceFrame, _ actor.ActorID) error {
 	f.mu.Lock()
 	f.frames = append(f.frames, frame)
 	f.mu.Unlock()

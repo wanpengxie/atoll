@@ -33,21 +33,11 @@ func (id *ID) Scan(src any) error {
 	}
 }
 
-// Audience is the envelope audience list. The "*" entry is the channel
-// wildcard; other entries are channel-local actor ids.
+// Audience is the envelope audience list. Each entry is a channel-local
+// actor id; the wildcard `"*"` is removed from the closed set — broadcast
+// must be expressed by enumerating the explicit receiver actor_id list.
+// Self-scheduling is expressed by including the sender's own actor_id.
 type Audience []actor.ActorID
-
-const AudienceWildcard actor.ActorID = "*"
-
-// IsWildcard reports whether this audience contains the channel wildcard.
-func (a Audience) IsWildcard() bool {
-	for _, id := range a {
-		if id == AudienceWildcard {
-			return true
-		}
-	}
-	return false
-}
 
 // Strings returns a copy of the wire string values.
 func (a Audience) Strings() []string {
