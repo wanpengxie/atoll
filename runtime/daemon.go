@@ -207,6 +207,14 @@ type ChannelTemplate struct {
 	// the worker base prompt at spawn time (M1.6-T5 phase-3 will plumb
 	// this via env). Empty = no domain prompt (legacy channels).
 	DomainPrompt string
+
+	// HumanCallerDefaultAudience is the audience the daemon fills in for
+	// HumanCaller-authored envelopes (UI HTTP POST) when the caller did
+	// not supply one. Channel template owns the routing convention so
+	// callers (UI / SDK) need not know channel-local actor ids. Empty
+	// slice means "no default — caller MUST supply audience or harness
+	// will reject with harness_audience_empty".
+	HumanCallerDefaultAudience []actor.ActorID
 }
 
 // ChannelAgentID is the well-known actor id every per-channel runtime
@@ -257,6 +265,13 @@ type channelRuntime struct {
 	// so the deliverer handler closure does not need to import the
 	// package-level symbol. (M1.6-T1)
 	channelAgentID actor.ActorID
+
+	// humanCallerDefaultAudience is filled into HumanCaller-authored
+	// envelopes whose audience was left empty by the caller. Sourced
+	// from ChannelTemplate.HumanCallerDefaultAudience so each channel
+	// type owns its own routing convention (HTTP / SDK callers don't
+	// need to know channel-local actor ids).
+	humanCallerDefaultAudience []actor.ActorID
 
 	// channelAgentTriggers counts every envelope dispatched to the
 	// channel-agent handler. (M1.6-T1)
@@ -851,6 +866,16 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 				}
 			}
 			defer d.endWrite()
+			// HumanCaller-authored envelopes inherit the channel
+			// template's default audience when the caller (UI / SDK)
+			// left it empty. The convention lives with the channel
+			// template (ChannelTemplate.HumanCallerDefaultAudience) so
+			// callers do not need to know channel-local actor ids.
+			if len(body.EnvelopePartial.Audience) == 0 {
+				if cr, ok := d.getChannel(body.ChannelID); ok && len(cr.humanCallerDefaultAudience) > 0 {
+					body.EnvelopePartial.Audience = append(message.Audience(nil), cr.humanCallerDefaultAudience...)
+				}
+			}
 			return handler.Handle(ctx, body)
 		}
 	}
@@ -1262,9 +1287,10 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		pusher:         pusher,
 		deliverer:      deliverer,
 		gateway:        gw,
-		typeRegistry:   typeRegistry,
-		requestLookup:  requestLookup,
-		channelAgentID: ChannelAgentID,
+		typeRegistry:               typeRegistry,
+		requestLookup:              requestLookup,
+		channelAgentID:             ChannelAgentID,
+		humanCallerDefaultAudience: d.resolveTemplate(lc.Lock.ChannelType).HumanCallerDefaultAudience,
 	}
 
 	// T147 §A — per-channel devicetransit.DeviceTransit. The instance shares

@@ -33,6 +33,7 @@ import (
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/pkg/logger"
 	"github.com/wanpengxie/ActOS/pkg/metrics"
@@ -303,10 +304,17 @@ func defaultDataDir() string {
 // that may import both `adapters/**` and `runtime/**` per arch-lint.
 func buildChannelTemplates(useScaffoldXHS bool) map[string]runtime.ChannelTemplate {
 	out := make(map[string]runtime.ChannelTemplate, 3)
+	// Convention: HumanCaller (UI) message defaults route to the channel
+	// agent for handling. Templates that need different routing override
+	// HumanCallerDefaultAudience.
+	defaultHumanAudience := []actor.ActorID{runtime.ChannelAgentID}
+
 	// Empty + "group" share the generic no-template projection. We
 	// register both so the daemon resolver returns a stable zero-value
 	// for either key without falling through to the "" default twice.
-	generic := runtime.ChannelTemplate{}
+	generic := runtime.ChannelTemplate{
+		HumanCallerDefaultAudience: defaultHumanAudience,
+	}
 	out[""] = generic
 	out["group"] = generic
 
@@ -316,9 +324,10 @@ func buildChannelTemplates(useScaffoldXHS bool) map[string]runtime.ChannelTempla
 		adapterSeeds = tpl.AdapterActorSeeds
 	}
 	out[tpl.ChannelType] = runtime.ChannelTemplate{
-		AdapterActorSeeds: adapterSeeds,
-		WorkdirSubdirs:    tpl.WorkdirSubdirs,
-		DomainPrompt:      tpl.DomainPrompt,
+		AdapterActorSeeds:          adapterSeeds,
+		WorkdirSubdirs:             tpl.WorkdirSubdirs,
+		DomainPrompt:               tpl.DomainPrompt,
+		HumanCallerDefaultAudience: defaultHumanAudience,
 	}
 	return out
 }
