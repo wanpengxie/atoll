@@ -494,8 +494,11 @@ func TestBridge_ChannelTypeToolEmitsRequestAndReturnsResponse(t *testing.T) {
 			return nil, fmt.Errorf("AdditionalTools len=%d want 1", len(ac.AdditionalTools))
 		}
 		tool := ac.AdditionalTools[0]
-		if tool.Name() != "xhs.publish" {
-			return nil, fmt.Errorf("tool name=%q want xhs.publish", tool.Name())
+		// LLM-facing tool name is sanitized (Anthropic / OpenAI tool name
+		// regex rejects `.`); envelope.type keeps the canonical
+		// "xhs.publish" form via tool.CanonicalType().
+		if tool.Name() != "xhs_publish" {
+			return nil, fmt.Errorf("tool name=%q want xhs_publish", tool.Name())
 		}
 		// Level A (proto-layer0 §1.4.1): TypeInfo no longer carries
 		// payload schemas; the channel-tool exposes a permissive

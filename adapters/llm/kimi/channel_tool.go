@@ -42,7 +42,35 @@ type ChannelTypeTool struct {
 
 var _ gokimitools.Tool = (*ChannelTypeTool)(nil)
 
-func (t *ChannelTypeTool) Name() string { return strings.TrimSpace(t.typeName) }
+// Name returns the LLM-tool-facing identifier — a sanitized form of the
+// channel type name. Anthropic / OpenAI function-calling APIs require
+// tool names matching `^[a-zA-Z0-9_-]+$`, which rejects the canonical
+// envelope.type form (e.g. "xhs.publish" — the dot is illegal). We
+// substitute `.` → `_` (e.g. "xhs.publish" → "xhs_publish") and keep
+// the original typeName for the actual envelope.type when Execute
+// emits the envelope downstream.
+func (t *ChannelTypeTool) Name() string { return sanitizeToolName(t.typeName) }
+
+// CanonicalType returns the original envelope.type for this tool. The
+// LLM never sees this form (Name() exposes the sanitized variant), but
+// the bridge uses it when constructing the outbound envelope.
+func (t *ChannelTypeTool) CanonicalType() string { return strings.TrimSpace(t.typeName) }
+
+// sanitizeToolName converts a channel type name into a form acceptable
+// to the Anthropic / OpenAI function-calling tool-name regex. Idempotent
+// for already-sanitized inputs.
+func sanitizeToolName(typeName string) string {
+	typeName = strings.TrimSpace(typeName)
+	if typeName == "" {
+		return ""
+	}
+	// Replace `.` (the only character canonical envelope.type uses that
+	// fails the regex) with `_`. Any other illegal character introduced
+	// by future type names should be added here as a single source of
+	// truth — sanitizeToolName is the only producer of LLM-facing
+	// tool ids.
+	return strings.ReplaceAll(typeName, ".", "_")
+}
 
 func (t *ChannelTypeTool) Description() string {
 	if t == nil {
@@ -146,7 +174,11 @@ func (b *Bridge) executeChannelTool(
 	env := message.Envelope{
 		ID:            b.envelopeID(ipc, now),
 		ChannelID:     ipc.ChannelID(),
-		Type:          tool.Name(),
+		// envelope.type uses the canonical channel type (e.g.
+		// "xhs.publish") — NOT the LLM-tool-name form returned by
+		// tool.Name(), which is sanitized for the Anthropic / OpenAI
+		// tool-name regex.
+		Type:          tool.CanonicalType(),
 		Kind:          message.KindRequest,
 		Sender:        message.Sender{Kind: actor.KindAgent, ID: ipc.WorkerActorID()},
 		Visibility:    message.VisibilityPublic,
