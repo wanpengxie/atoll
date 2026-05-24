@@ -172,8 +172,8 @@ func (b *Bridge) executeChannelTool(
 	now := b.cfg.NowFn()
 	expiresAt := now + int64(timeout/time.Millisecond)
 	env := message.Envelope{
-		ID:            b.envelopeID(ipc, now),
-		ChannelID:     ipc.ChannelID(),
+		ID:        b.envelopeID(ipc, now),
+		ChannelID: ipc.ChannelID(),
 		// envelope.type uses the canonical channel type (e.g.
 		// "xhs.publish") — NOT the LLM-tool-name form returned by
 		// tool.Name(), which is sanitized for the Anthropic / OpenAI

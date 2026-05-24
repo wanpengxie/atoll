@@ -30,12 +30,17 @@ const Binding = actor.BindingRuntimeInboundViaRelay
 const DefaultMaxPendingMs int64 = 5 * 60 * 1000
 
 // Type names — closed set per domain-xhs-spec §1.
+//
+// xhs.cookie.sync was retired: in chrome-extension mode the adapter
+// never owns cookie state (browser holds it transparently; extension
+// fetch automatically carries the right cookies for the xiaohongshu
+// domain). The legacy "sync cookie" RPC was a holdover from a CLI-mode
+// design where a background process needed cookies pushed to it.
 const (
 	TypePublish      = "xhs.publish"
 	TypeSearch       = "xhs.search"
 	TypeNoteFetch    = "xhs.note.fetch"
 	TypeRecentFetch  = "xhs.recent.fetch"
-	TypeCookieSync   = "xhs.cookie.sync"
 	TypeNoteArchived = "xhs.note.archived" // event-only (extension push)
 )
 
@@ -47,7 +52,6 @@ var RequestResponseTypes = []string{
 	TypeSearch,
 	TypeNoteFetch,
 	TypeRecentFetch,
-	TypeCookieSync,
 }
 
 // AllTypes is the full closed set Declares() exposes, including the
@@ -122,7 +126,6 @@ var allowedResultKeysByType = map[string]map[string]struct{}{
 	TypeRecentFetch: {
 		"notes": {},
 	},
-	TypeCookieSync: {},
 }
 
 // allowedErrorKeysByType is the failure-path per-type allow-list for
@@ -139,7 +142,6 @@ var allowedErrorKeysByType = map[string]map[string]struct{}{
 	TypeSearch:      {},
 	TypeNoteFetch:   {},
 	TypeRecentFetch: {},
-	TypeCookieSync:  {},
 }
 
 // resultAllowListFor returns the per-type result allow-list, or the
@@ -197,10 +199,6 @@ func DeclarationTypeDeclarations() map[string]adapter.TypeDeclaration {
 			TerminalConvention: string(adapter.TerminalPayloadStatus),
 		},
 		TypeRecentFetch: {
-			AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-			TerminalConvention: string(adapter.TerminalPayloadStatus),
-		},
-		TypeCookieSync: {
 			AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
 			TerminalConvention: string(adapter.TerminalPayloadStatus),
 		},

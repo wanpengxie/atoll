@@ -14,7 +14,6 @@ func TestTypeClosedSet(t *testing.T) {
 		TypeSearch:       true,
 		TypeNoteFetch:    true,
 		TypeRecentFetch:  true,
-		TypeCookieSync:   true,
 		TypeNoteArchived: true,
 	}
 	if len(AllTypes) != len(want) {
@@ -47,7 +46,7 @@ func TestAllowListShapes(t *testing.T) {
 	if _, ok := allowedResultKeysByType[TypePublish]["device_id"]; !ok {
 		t.Error("publish result allow-list should contain device_id")
 	}
-	for _, ty := range []string{TypeSearch, TypeNoteFetch, TypeRecentFetch, TypeCookieSync} {
+	for _, ty := range []string{TypeSearch, TypeNoteFetch, TypeRecentFetch} {
 		if _, ok := allowedResultKeysByType[ty]["device_id"]; ok {
 			t.Errorf("%s result allow-list must NOT contain device_id (R4-FIX-A)", ty)
 		}
@@ -59,7 +58,7 @@ func TestAllowListShapes(t *testing.T) {
 	if _, ok := allowedErrorKeysByType[TypePublish]["device_id"]; !ok {
 		t.Error("publish error allow-list should contain device_id")
 	}
-	for _, ty := range []string{TypeSearch, TypeNoteFetch, TypeRecentFetch, TypeCookieSync} {
+	for _, ty := range []string{TypeSearch, TypeNoteFetch, TypeRecentFetch} {
 		if _, ok := allowedErrorKeysByType[ty]["device_id"]; ok {
 			t.Errorf("%s error allow-list must NOT contain device_id (R4-FIX-A)", ty)
 		}
@@ -117,7 +116,7 @@ func TestDeclarationTypeDeclarationsCoversEveryType(t *testing.T) {
 //   - event-only (note.archived) → {event}
 func TestTypeDeclarationsAllowedKindsSpec(t *testing.T) {
 	decls := DeclarationTypeDeclarations()
-	rr := []string{TypePublish, TypeSearch, TypeNoteFetch, TypeRecentFetch, TypeCookieSync}
+	rr := []string{TypePublish, TypeSearch, TypeNoteFetch, TypeRecentFetch}
 	for _, ty := range rr {
 		got := decls[ty].AllowedKinds
 		if len(got) != 2 {
