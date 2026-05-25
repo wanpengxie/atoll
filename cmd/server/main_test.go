@@ -61,6 +61,7 @@ func TestServer_BootAndShutdown(t *testing.T) {
 	cmd := exec.Command(bin,
 		"-addr", addr,
 		"-db", dbPath,
+		"-debug-addr", "",
 		"-allow-dev-secrets",
 	)
 

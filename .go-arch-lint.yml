@@ -161,11 +161,12 @@ deps:
   pkg:
     # M1.6-T7 phase-2: pkg/logger ships a tiny zerolog facade reused by
     # cmd/* (server / daemon / worker) to emit structured JSON to stdout.
-    # zerolog stays the only vendor pkg/** depends on so this stays a
-    # leaf utility, not a kitchen-sink.
+    # T169 adds pkg/coagentsdk, a public SDK that talks to /ws using the
+    # same gorilla websocket client already used by the repo's e2e tests.
     mayDependOn: [kernel, pkg]
     canUse:
       - zerolog
+      - gorilla
 
   tests:
     # tests/** is end-to-end smoke infrastructure — composition-root

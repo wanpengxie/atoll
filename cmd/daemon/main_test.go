@@ -102,6 +102,7 @@ func TestDaemon_BootAndShutdown(t *testing.T) {
 		"--data-dir", dataDir,
 		"--daemon-id", "daemon-smoke",
 		"--daemon-epoch", "1",
+		"--debug-addr", "",
 		"--worker-bin", "",
 	)
 	var stdout, stderr bytes.Buffer

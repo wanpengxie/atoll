@@ -154,6 +154,11 @@ type Options struct {
 	// test enable e.g. COAGENT_MOCK_SCRIPT=xhs-publish without forking
 	// the harness — entries replace any default in lower precedence.
 	ExtraDaemonEnv []string
+
+	// UseScaffoldXHS installs the in-process xhs scaffold instead of the
+	// production device-transit adapter. Tests that only need deterministic
+	// xhs.* request/response semantics can avoid pairing a mock extension.
+	UseScaffoldXHS bool
 }
 
 // Start launches a fresh stack with random ports + tmp data dir. The
@@ -295,6 +300,19 @@ func (s *Stack) Stop() {
 // Login are reused for subsequent requests automatically.
 func (s *Stack) Client() *http.Client { return s.client }
 
+// SessionToken returns the raw coagent_session cookie for the current user.
+func (s *Stack) SessionToken() string {
+	s.t.Helper()
+	httpURL, _ := url.Parse(s.ServerURL)
+	for _, c := range s.client.Jar.Cookies(httpURL) {
+		if c.Name == "coagent_session" {
+			return c.Value
+		}
+	}
+	s.t.Fatal("harness: coagent_session cookie missing; call RegisterAndLogin first")
+	return ""
+}
+
 // ChannelSqlitePath returns the absolute path to a channel's local
 // daemon-side sqlite file. Test assertions on stored envelopes hit
 // this file directly with database/sql.
@@ -314,6 +332,7 @@ func (s *Stack) startServer(bin string) {
 	args := []string{
 		"--addr", fmt.Sprintf("127.0.0.1:%d", s.ServerPort),
 		"--db", s.ServerDB,
+		"--debug-addr", "",
 		"--allow-dev-secrets",
 	}
 	if len(s.opts.DeviceAllowedOrigins) > 0 {
@@ -366,9 +385,13 @@ func (s *Stack) spawnDaemon(daemonBin, workerBin, id, dataDir string, extraEnv [
 		"--server-url", wsURL,
 		"--key", daemonSecret,
 		"--human-caller-secret", humanSecret,
+		"--debug-addr", "",
 		"--worker-bin", workerBin,
 		"--worker-provider", "mock",
 		"--replay-window-ms", "300000",
+	}
+	if s.opts.UseScaffoldXHS {
+		args = append(args, "--use-scaffold-xhs")
 	}
 	cmd := exec.CommandContext(s.ctx, daemonBin, args...)
 	env := append(os.Environ(),
