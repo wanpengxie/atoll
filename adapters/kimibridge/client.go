@@ -44,6 +44,17 @@ type CommandError struct {
 	Message string `json:"message,omitempty"`
 }
 
+// StatusResponse mirrors the kimi-webbridge daemon's GET /status body.
+type StatusResponse struct {
+	Running            bool   `json:"running"`
+	Version            string `json:"version,omitempty"`
+	Port               int    `json:"port,omitempty"`
+	UptimeSeconds      int64  `json:"uptime_seconds,omitempty"`
+	ExtensionConnected bool   `json:"extension_connected"`
+	ExtensionID        string `json:"extension_id,omitempty"`
+	ExtensionVersion   string `json:"extension_version,omitempty"`
+}
+
 // Succeeded reports whether the daemon flagged the tool call as
 // successful. Centralised so callers don't have to remember that the
 // wire field is `ok`, not the more common `success`.
@@ -121,6 +132,29 @@ func (c *Client) Call(ctx context.Context, req CommandRequest) (*CommandResponse
 			errMsg = fmt.Sprintf("kimi-webbridge HTTP %d", resp.StatusCode)
 		}
 		return &out, resp.StatusCode, fmt.Errorf("kimi-webbridge daemon: %s", errMsg)
+	}
+	return &out, resp.StatusCode, nil
+}
+
+// Status probes the local kimi-webbridge daemon. Transport failures mean
+// the daemon is unreachable; a successful response may still report a
+// disconnected extension.
+func (c *Client) Status(ctx context.Context) (*StatusResponse, int, error) {
+	if c.http == nil {
+		return nil, 0, errors.New("kimibridge.Client.Status: http client nil")
+	}
+	resp, err := c.http.Do(ctx, http.MethodGet, "/status", nil, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("kimibridge.Client.Status: transport: %w", err)
+	}
+	var out StatusResponse
+	if len(resp.Body) > 0 {
+		if jerr := json.Unmarshal(resp.Body, &out); jerr != nil {
+			return nil, resp.StatusCode, fmt.Errorf("kimibridge.Client.Status: decode response: %w (body=%s)", jerr, snippet(resp.Body))
+		}
+	}
+	if resp.StatusCode >= 400 {
+		return &out, resp.StatusCode, fmt.Errorf("kimi-webbridge status HTTP %d", resp.StatusCode)
 	}
 	return &out, resp.StatusCode, nil
 }

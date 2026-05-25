@@ -25,11 +25,10 @@ const DefaultAdapterActorID actor.ActorID = "tool:xhs-adapter"
 // kernel/actor.BindingRuntimeInboundViaRelay + proto-layer0 §2.8.
 const Binding = actor.BindingRuntimeInboundViaRelay
 
-// DefaultMaxPendingMs mirrors the M1.3 xhs baseline (5 min). Large
-// enough to absorb Chrome extension throttling; short enough that a
-// hanging request surfaces a F3 default_timeout terminal within human
-// attention span.
-const DefaultMaxPendingMs int64 = 5 * 60 * 1000
+// DefaultMaxPendingMs is the sane per-request default. Long-running
+// xhs operations must opt in with an explicit override instead of
+// inheriting a broad framework default.
+const DefaultMaxPendingMs int64 = 30 * 1000
 
 // Type names — closed set per domain-xhs-spec §1.
 //

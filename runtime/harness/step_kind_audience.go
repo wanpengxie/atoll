@@ -13,6 +13,7 @@ import (
 const (
 	defaultAgentMaxPendingMs  int64 = 24 * 60 * 60 * 1000
 	defaultSystemMaxPendingMs int64 = 60 * 60 * 1000
+	defaultActorMaxPendingMs  int64 = 30 * 1000
 )
 
 // stepKindAndAudience implements L1 §10.2 step 5:
@@ -32,8 +33,9 @@ func (s *stepKindAndAudience) ID() khar.StepID { return khar.StepKindAndAudience
 
 func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (khar.Outcome, error) {
 	var (
-		view   TypeView
-		isCore bool
+		view            TypeView
+		isCore          bool
+		isReservedActor bool
 	)
 	if rule, ok := message.CoreTypeTable[env.Type]; ok {
 		isCore = true
@@ -50,6 +52,15 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (k
 			return khar.Outcome{
 				RejectReason: message.HarnessKindNotAllowedForType,
 				Detail:       fmt.Sprintf("reserved system type %s allows only kind=event", env.Type),
+			}, nil
+		}
+	} else if rule, reserved := reservedActorTypeSet[env.Type]; reserved {
+		isCore = true
+		isReservedActor = true
+		if !kindAllowed(rule.AllowedKinds, env.Kind) {
+			return khar.Outcome{
+				RejectReason: message.HarnessKindNotAllowedForType,
+				Detail:       fmt.Sprintf("reserved actor type %s does not allow kind=%s", env.Type, env.Kind),
 			}, nil
 		}
 	} else {
@@ -108,6 +119,11 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (k
 		}, nil
 	}
 	if env.ExpiresAt == nil {
+		if isReservedActor {
+			deadline := s.deps.NowMs() + defaultActorMaxPendingMs
+			env.ExpiresAt = &deadline
+			return khar.Outcome{}, nil
+		}
 		out, err := s.defaultExpiresAt(env, rec.Kind, view, !isCore)
 		if err != nil {
 			return khar.Outcome{}, err

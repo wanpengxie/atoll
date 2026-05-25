@@ -26,7 +26,22 @@ const (
 func (s *Service) RegisterRoutes(g *gin.RouterGroup) {
 	g.GET("/channels/:chID/messages", s.handleMessages)
 	g.GET("/channels/:chID/cursor", s.handleCursor)
+	g.GET("/channels/:chID/actors", s.handleActors)
 	g.POST("/channels/:chID/resync", httperr.MaxBodyBytes(resyncBodyLimit), s.handleResync)
+}
+
+func (s *Service) handleActors(c *gin.Context) {
+	chID := channel.ID(c.Param("chID"))
+	if _, err := s.authorizeChannel(c, chID); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+	snapshot, err := s.ActorSnapshot(c.Request.Context(), chID)
+	if err != nil {
+		httperr.Internal(c, "viewcache.actors", err)
+		return
+	}
+	c.JSON(http.StatusOK, snapshot)
 }
 
 func (s *Service) handleMessages(c *gin.Context) {

@@ -33,7 +33,7 @@ type Config struct {
 	AdapterActorID actor.ActorID
 
 	// MaxPendingMs overrides the per-type pending budget. Zero defaults
-	// to DefaultMaxPendingMs (5 min).
+	// to DefaultMaxPendingMs (30s).
 	MaxPendingMs int64
 
 	// Now is a clock injection point for tests. Defaults to time.Now.
@@ -54,9 +54,9 @@ type Config struct {
 //
 // Cross-binding helpers in use:
 //   - adapters/framework.FailNow: synchronous failure path (Handle gate
-//     + payload decode + push error)
+//   - payload decode + push error)
 //   - adapters/device/framework.LifecycleTracker: device state machine
-//     + lifecycle event emission (delegated from OnRuntimeEvent)
+//   - lifecycle event emission (delegated from OnRuntimeEvent)
 type Module struct {
 	cfg        Config
 	mctx       *adapter.ModuleContext
@@ -195,6 +195,43 @@ func (m *Module) Init(_ context.Context, mctx *adapter.ModuleContext) error {
 // the next daemon boot (Manager.BootRecoverTimers re-arms them per
 // L2 §8.6 step 3).
 func (m *Module) Shutdown(_ context.Context) error { return nil }
+
+// Heartbeat reports the current device lifecycle state to the adapter
+// framework. It does not probe the extension; devicebus lifecycle
+// events are the source of truth and the heartbeat is only a fallback
+// projection into actor_registry readiness.
+func (m *Module) Heartbeat(_ context.Context) (adapter.HeartbeatReport, error) {
+	state := m.DeviceState()
+	report := adapter.HeartbeatReport{
+		CheckedAt: m.now(),
+		Detail: map[string]any{
+			"device_state": string(state),
+		},
+	}
+	switch state {
+	case DeviceStateOnline:
+		report.Available = true
+		report.Reason = "ok"
+	case DeviceStateTokenExpired:
+		report.Available = false
+		report.Reason = "token_expired"
+	default:
+		report.Available = false
+		report.Reason = "device_offline"
+	}
+	return report, nil
+}
+
+// Status enriches actor.status with xhs lifecycle detail.
+func (m *Module) Status(ctx context.Context) (adapter.StatusReport, error) {
+	hb, err := m.Heartbeat(ctx)
+	return adapter.StatusReport{
+		Available: hb.Available,
+		Reason:    hb.Reason,
+		Detail:    hb.Detail,
+		CheckedAt: hb.CheckedAt,
+	}, err
+}
 
 // Handle translates one inbound kind=request envelope into an outbound
 // `device_transit.recv` frame (impl-layer2 §5.3.2 outbound — adapter →

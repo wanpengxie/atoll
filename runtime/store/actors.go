@@ -27,12 +27,18 @@ func NewActorRegistry(db *sql.DB) *ActorRegistry { return &ActorRegistry{db: db}
 func (r *ActorRegistry) Lookup(ctx context.Context, id actor.ActorID) (actorreg.Record, bool, error) {
 	const q = `SELECT actor_id, actor_kind, COALESCE(actor_binding,''),
 	                 COALESCE(display_name,''), created_at,
-	                 COALESCE(deregistered_at,0)
+	                 COALESCE(deregistered_at,0),
+	                 COALESCE(ready_state,'unknown'),
+	                 COALESCE(ready_reason,'unknown'),
+	                 COALESCE(ready_detail,'{}'),
+	                 COALESCE(last_ready_at,0),
+	                 COALESCE(last_state_change_at,0)
 	            FROM actor_registry WHERE actor_id=?`
 	var rec actorreg.Record
-	var kind, binding string
+	var kind, binding, readyState, readyReason, readyDetail string
 	err := r.db.QueryRowContext(ctx, q, string(id)).Scan(
 		&rec.ID, &kind, &binding, &rec.DisplayName, &rec.CreatedAt, &rec.DeregisteredAt,
+		&readyState, &readyReason, &readyDetail, &rec.Readiness.LastReadyAt, &rec.Readiness.LastStateChangeAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return actorreg.Record{}, false, nil
@@ -42,6 +48,10 @@ func (r *ActorRegistry) Lookup(ctx context.Context, id actor.ActorID) (actorreg.
 	}
 	rec.Kind = actor.Kind(kind)
 	rec.Binding = actor.Binding(binding)
+	rec.Readiness.State = actorreg.ReadinessState(readyState)
+	rec.Readiness.Reason = readyReason
+	rec.Readiness.Detail = json.RawMessage(readyDetail)
+	rec.Readiness = rec.Readiness.Normalize()
 	return rec, true, nil
 }
 
@@ -62,7 +72,12 @@ func (r *ActorRegistry) Exists(ctx context.Context, id actor.ActorID) (bool, err
 // ListActive implements actorreg.Registry.
 func (r *ActorRegistry) ListActive(ctx context.Context) ([]actorreg.Record, error) {
 	const q = `SELECT actor_id, actor_kind, COALESCE(actor_binding,''),
-	                 COALESCE(display_name,''), created_at
+	                 COALESCE(display_name,''), created_at,
+	                 COALESCE(ready_state,'unknown'),
+	                 COALESCE(ready_reason,'unknown'),
+	                 COALESCE(ready_detail,'{}'),
+	                 COALESCE(last_ready_at,0),
+	                 COALESCE(last_state_change_at,0)
 	            FROM actor_registry
 	            WHERE deregistered_at IS NULL
 	            ORDER BY actor_id`
@@ -75,12 +90,17 @@ func (r *ActorRegistry) ListActive(ctx context.Context) ([]actorreg.Record, erro
 	var out []actorreg.Record
 	for rows.Next() {
 		var rec actorreg.Record
-		var kind, binding string
-		if err := rows.Scan(&rec.ID, &kind, &binding, &rec.DisplayName, &rec.CreatedAt); err != nil {
+		var kind, binding, readyState, readyReason, readyDetail string
+		if err := rows.Scan(&rec.ID, &kind, &binding, &rec.DisplayName, &rec.CreatedAt,
+			&readyState, &readyReason, &readyDetail, &rec.Readiness.LastReadyAt, &rec.Readiness.LastStateChangeAt); err != nil {
 			return nil, fmt.Errorf("store: list active actors scan: %w", err)
 		}
 		rec.Kind = actor.Kind(kind)
 		rec.Binding = actor.Binding(binding)
+		rec.Readiness.State = actorreg.ReadinessState(readyState)
+		rec.Readiness.Reason = readyReason
+		rec.Readiness.Detail = json.RawMessage(readyDetail)
+		rec.Readiness = rec.Readiness.Normalize()
 		out = append(out, rec)
 	}
 	if err := rows.Err(); err != nil {
@@ -101,9 +121,14 @@ func (r *ActorRegistry) Insert(ctx context.Context, rec actorreg.Record) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	readiness := rec.Readiness.Normalize()
+	if readiness.LastStateChangeAt == 0 {
+		readiness.LastStateChangeAt = rec.CreatedAt
+	}
 	const insActor = `INSERT INTO actor_registry
-	   (actor_id, actor_kind, actor_binding, display_name, created_at, deregistered_at)
-	   VALUES (?, ?, ?, ?, ?, NULL)`
+	   (actor_id, actor_kind, actor_binding, display_name, created_at, deregistered_at,
+	    ready_state, ready_reason, ready_detail, last_ready_at, last_state_change_at)
+	   VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`
 	var binding any
 	if rec.Binding == "" {
 		binding = nil
@@ -118,6 +143,8 @@ func (r *ActorRegistry) Insert(ctx context.Context, rec actorreg.Record) error {
 	}
 	if _, err := tx.ExecContext(ctx, insActor,
 		string(rec.ID), string(rec.Kind), binding, displayName, rec.CreatedAt,
+		string(readiness.State), readiness.Reason, string(readiness.Detail),
+		readiness.LastReadyAt, readiness.LastStateChangeAt,
 	); err != nil {
 		return fmt.Errorf("store: actor insert %q: %w", rec.ID, err)
 	}
@@ -148,6 +175,85 @@ func (r *ActorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int
 		return nil
 	}
 	return nil
+}
+
+// UpdateReadiness writes the actor_registry readiness projection and
+// reports whether the externally visible state/reason changed.
+func (r *ActorRegistry) UpdateReadiness(ctx context.Context, id actor.ActorID, update actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
+	if id == "" {
+		return actorreg.ReadinessTransition{}, errors.New("store: actor readiness update: empty ID")
+	}
+	next := actorreg.Readiness{
+		State:  update.State,
+		Reason: update.Reason,
+		Detail: append(json.RawMessage(nil), update.Detail...),
+	}.Normalize()
+	switch next.State {
+	case actorreg.ReadinessReady, actorreg.ReadinessNotReady, actorreg.ReadinessUnknown:
+	default:
+		return actorreg.ReadinessTransition{}, fmt.Errorf("store: actor readiness update %q invalid state %q", id, next.State)
+	}
+	if !json.Valid(next.Detail) {
+		return actorreg.ReadinessTransition{}, fmt.Errorf("store: actor readiness update %q invalid detail JSON", id)
+	}
+	checkedAt := update.CheckedAt
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return actorreg.ReadinessTransition{}, fmt.Errorf("store: actor readiness update begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var prev actorreg.Readiness
+	var prevState, prevReason, prevDetail string
+	err = tx.QueryRowContext(ctx, `
+		SELECT COALESCE(ready_state,'unknown'),
+		       COALESCE(ready_reason,'unknown'),
+		       COALESCE(ready_detail,'{}'),
+		       COALESCE(last_ready_at,0),
+		       COALESCE(last_state_change_at,0)
+		  FROM actor_registry
+		 WHERE actor_id=?`, string(id)).
+		Scan(&prevState, &prevReason, &prevDetail, &prev.LastReadyAt, &prev.LastStateChangeAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return actorreg.ReadinessTransition{}, fmt.Errorf("store: actor readiness update %q: actor not found", id)
+	}
+	if err != nil {
+		return actorreg.ReadinessTransition{}, fmt.Errorf("store: actor readiness update lookup %q: %w", id, err)
+	}
+	prev.State = actorreg.ReadinessState(prevState)
+	prev.Reason = prevReason
+	prev.Detail = json.RawMessage(prevDetail)
+	prev = prev.Normalize()
+
+	changed := prev.State != next.State || prev.Reason != next.Reason
+	lastReadyAt := prev.LastReadyAt
+	if next.State == actorreg.ReadinessReady {
+		lastReadyAt = checkedAt
+	}
+	lastStateChangeAt := prev.LastStateChangeAt
+	if changed {
+		lastStateChangeAt = checkedAt
+	}
+	next.LastReadyAt = lastReadyAt
+	next.LastStateChangeAt = lastStateChangeAt
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE actor_registry
+		   SET ready_state=?,
+		       ready_reason=?,
+		       ready_detail=?,
+		       last_ready_at=?,
+		       last_state_change_at=?
+		 WHERE actor_id=?`,
+		string(next.State), next.Reason, string(next.Detail),
+		next.LastReadyAt, next.LastStateChangeAt, string(id)); err != nil {
+		return actorreg.ReadinessTransition{}, fmt.Errorf("store: actor readiness update %q: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return actorreg.ReadinessTransition{}, fmt.Errorf("store: actor readiness update commit: %w", err)
+	}
+	return actorreg.ReadinessTransition{Previous: prev, Current: next, Changed: changed}, nil
 }
 
 // MemberActorAdd is one daemon-side actor registration transition derived
@@ -252,9 +358,11 @@ func (r *ActorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add Me
 		}
 		_, err := tx.ExecContext(ctx,
 			`UPDATE actor_registry
-			    SET actor_kind=?, actor_binding=?, display_name=?, created_at=?, deregistered_at=NULL
+			    SET actor_kind=?, actor_binding=?, display_name=?, created_at=?, deregistered_at=NULL,
+			        ready_state='unknown', ready_reason='unknown', ready_detail='{}',
+			        last_ready_at=0, last_state_change_at=?
 			  WHERE actor_id=?`,
-			string(add.Kind), nullableString(string(add.Binding)), nullableString(add.DisplayName), add.At, string(add.ID),
+			string(add.Kind), nullableString(string(add.Binding)), nullableString(add.DisplayName), add.At, add.At, string(add.ID),
 		)
 		if err != nil {
 			return false, fmt.Errorf("store: actor reactivate %q: %w", add.ID, err)
@@ -263,9 +371,10 @@ func (r *ActorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add Me
 	case errors.Is(err, sql.ErrNoRows):
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO actor_registry
-			   (actor_id, actor_kind, actor_binding, display_name, created_at, deregistered_at)
-			 VALUES (?, ?, ?, ?, ?, NULL)`,
-			string(add.ID), string(add.Kind), nullableString(string(add.Binding)), nullableString(add.DisplayName), add.At,
+			   (actor_id, actor_kind, actor_binding, display_name, created_at, deregistered_at,
+			    ready_state, ready_reason, ready_detail, last_ready_at, last_state_change_at)
+			 VALUES (?, ?, ?, ?, ?, NULL, 'unknown', 'unknown', '{}', 0, ?)`,
+			string(add.ID), string(add.Kind), nullableString(string(add.Binding)), nullableString(add.DisplayName), add.At, add.At,
 		)
 		if err != nil {
 			return false, fmt.Errorf("store: actor member insert %q: %w", add.ID, err)

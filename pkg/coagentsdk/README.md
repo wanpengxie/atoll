@@ -24,5 +24,27 @@ if !res.OK {
 fmt.Printf("response payload: %s\n", res.Data)
 ```
 
+Readiness is exposed through `ListActors` and the reserved `actor.status`
+request:
+
+```go
+actors, err := client.ListActors(ctx, "ch_123")
+if err != nil {
+	return err
+}
+for _, a := range actors {
+	fmt.Printf("%s ready=%v reason=%s\n", a.ActorID, a.Ready, a.ReadyReason)
+}
+
+status, err := client.ActorStatus(ctx, "ch_123", "tool:kimi-webbridge")
+if err != nil {
+	return err
+}
+fmt.Printf("kimi-webbridge available=%v reason=%s\n", status.Available, status.Reason)
+```
+
+Default `CallActor` timeout is 30s. Pass `CallActorRequest.Timeout` only when a
+specific type has an explicit longer `max_pending_ms` budget.
+
 `SessionToken` is the raw value of the `coagent_session` cookie. The SDK sends
 it as a cookie on both HTTP and WebSocket requests.

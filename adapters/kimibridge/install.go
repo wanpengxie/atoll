@@ -60,6 +60,15 @@ func DefaultInstallSpec(maxPendingMs int64) InstallSpec {
 			MaxPendingMs:   maxPendingMs,
 		})
 	}
+	for _, t := range EventOnlyTypes {
+		types = append(types, TypeSeed{
+			Type:           t,
+			HandlerActorID: actorSeed.ID,
+			HandlerBinding: Binding,
+			MaxPendingMs:   maxPendingMs,
+			AllowEvent:     true,
+		})
+	}
 	return InstallSpec{Actor: actorSeed, Types: types}
 }
 

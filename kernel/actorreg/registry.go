@@ -2,6 +2,7 @@ package actorreg
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 )
@@ -44,6 +45,29 @@ type Registry interface {
 	// baseline — implementations should reject Insert of a previously
 	// deregistered id.
 	Deregister(ctx context.Context, id actor.ActorID, at int64) error
+}
+
+// ReadinessUpdate is the write shape accepted by readiness-aware
+// registries. CheckedAt is ms epoch; callers should stamp it from their
+// local clock before invoking the registry.
+type ReadinessUpdate struct {
+	State     ReadinessState
+	Reason    string
+	Detail    json.RawMessage
+	CheckedAt int64
+}
+
+// ReadinessTransition is returned after a readiness write.
+type ReadinessTransition struct {
+	Previous Readiness
+	Current  Readiness
+	Changed  bool
+}
+
+// ReadinessUpdater is an optional extension implemented by registries
+// that can persist actor readiness.
+type ReadinessUpdater interface {
+	UpdateReadiness(ctx context.Context, id actor.ActorID, update ReadinessUpdate) (ReadinessTransition, error)
 }
 
 // ActiveAudienceExcept returns the list of active actor ids in the

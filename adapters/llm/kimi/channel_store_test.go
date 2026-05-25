@@ -24,7 +24,12 @@ CREATE TABLE actor_registry (
   actor_binding TEXT,
   display_name TEXT,
   created_at INTEGER NOT NULL,
-  deregistered_at INTEGER
+  deregistered_at INTEGER,
+  ready_state TEXT NOT NULL DEFAULT 'unknown',
+  ready_reason TEXT NOT NULL DEFAULT 'unknown',
+  ready_detail TEXT NOT NULL DEFAULT '{}',
+  last_ready_at INTEGER NOT NULL DEFAULT 0,
+  last_state_change_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE type_registry (
   type TEXT PRIMARY KEY,
@@ -44,8 +49,10 @@ CREATE TABLE adapter_state (
 		t.Fatalf("ddl: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO actor_registry
-		(actor_id, actor_kind, actor_binding, display_name, created_at)
-		VALUES ('tool:xhs-adapter', 'tool', 'embedded', 'xhs', 1)`); err != nil {
+		(actor_id, actor_kind, actor_binding, display_name, created_at,
+		 ready_state, ready_reason, ready_detail, last_ready_at, last_state_change_at)
+		VALUES ('tool:xhs-adapter', 'tool', 'embedded', 'xhs', 1,
+		 'not_ready', 'device_offline', '{"device_state":"offline"}', 1000, 2000)`); err != nil {
 		t.Fatalf("insert actor: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO type_registry
@@ -90,6 +97,10 @@ CREATE TABLE adapter_state (
 	}
 	if len(snapshot.Actors) != 1 || snapshot.Actors[0].Description != "XHS automation" || snapshot.Actors[0].SkillDoc == "" {
 		t.Fatalf("actor metadata not merged: %+v", snapshot.Actors)
+	}
+	if snapshot.Actors[0].Ready || snapshot.Actors[0].ReadyReason != "device_offline" ||
+		snapshot.Actors[0].LastReadyAt != 1000 || snapshot.Actors[0].LastStateChangeAt != 2000 {
+		t.Fatalf("actor readiness not loaded: %+v", snapshot.Actors[0])
 	}
 	if len(snapshot.Types) != 1 {
 		t.Fatalf("types len=%d want 1", len(snapshot.Types))

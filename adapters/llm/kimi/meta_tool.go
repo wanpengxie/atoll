@@ -237,9 +237,19 @@ func formatActorRegistryForLLM(snapshot ChannelContext) map[string]any {
 			"actor_id":    a.ActorID,
 			"description": a.Description,
 			"kind":        a.Kind,
+			"ready":       a.Ready,
 		}
 		if a.Binding != "" {
 			entry["binding"] = a.Binding
+		}
+		if a.ReadyReason != "" {
+			entry["ready_reason"] = a.ReadyReason
+		}
+		if a.LastReadyAt > 0 {
+			entry["last_ready_at"] = a.LastReadyAt
+		}
+		if a.LastStateChangeAt > 0 {
+			entry["last_state_change_at"] = a.LastStateChangeAt
 		}
 		if a.DisplayName != "" {
 			entry["display_name"] = a.DisplayName

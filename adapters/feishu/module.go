@@ -16,9 +16,9 @@ import (
 // daemon bootstrap is expected to seed this actor with binding=runtime_outbound.
 const DefaultActorID actor.ActorID = "tool:feishu-adapter"
 
-// DefaultMaxPendingMs is the per-request timeout (10s) used when the
+// DefaultMaxPendingMs is the per-request timeout (30s) used when the
 // caller does not override.
-const DefaultMaxPendingMs int64 = 10_000
+const DefaultMaxPendingMs int64 = 30_000
 
 // Option mutates a Module during construction. Designed so the daemon
 // can pass overrides (custom BaseURL for testing, custom Logger, etc.)
@@ -165,6 +165,40 @@ func (m *Module) Shutdown(_ context.Context) error {
 		m.tokens.invalidate()
 	}
 	return nil
+}
+
+// Heartbeat reports the installed outbound adapter baseline. Feishu has
+// no persistent connection lifecycle; Init already validates the
+// credential bundle, and each Handle performs its own HTTP call.
+func (m *Module) Heartbeat(_ context.Context) (adapter.HeartbeatReport, error) {
+	checkedAt := m.clock()
+	if m.client == nil {
+		return adapter.HeartbeatReport{
+			Available: false,
+			Reason:    "initializing",
+			CheckedAt: checkedAt,
+		}, nil
+	}
+	return adapter.HeartbeatReport{
+		Available: true,
+		Reason:    "ok",
+		CheckedAt: checkedAt,
+		Detail: map[string]any{
+			"app_id":             m.creds.AppID,
+			"credentials_loaded": true,
+		},
+	}, nil
+}
+
+// Status enriches actor.status with the same credential baseline.
+func (m *Module) Status(ctx context.Context) (adapter.StatusReport, error) {
+	hb, err := m.Heartbeat(ctx)
+	return adapter.StatusReport{
+		Available: hb.Available,
+		Reason:    hb.Reason,
+		Detail:    hb.Detail,
+		CheckedAt: hb.CheckedAt,
+	}, err
 }
 
 // Handle dispatches by env.Type. Unknown types are rejected with a

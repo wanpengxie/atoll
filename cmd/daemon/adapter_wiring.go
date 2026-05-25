@@ -129,17 +129,18 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 		}
 
 		mgr, err := framework.NewManager(framework.ManagerConfig{
-			ChannelID:       h.ChannelID,
-			ActorRegistry:   h.ActorRegistry,
-			TypeRegistry:    h.TypeRegistry,
-			TypeInstaller:   installer,
-			HarnessChain:    adapterChain,
-			RequestLookup:   h.RequestLookup,
-			StateStore:      runtimestore.NewAdapterStateStore(h.DB, h.NowFn),
-			CredentialStore: credentialStore,
-			Clock:           clock,
-			Logger:          frameworkZerologLogger{log: h.Logger, channelID: h.ChannelID},
-			Metrics:         metrics.Default(),
+			ChannelID:                 h.ChannelID,
+			ActorRegistry:             h.ActorRegistry,
+			TypeRegistry:              h.TypeRegistry,
+			TypeInstaller:             installer,
+			HarnessChain:              adapterChain,
+			RequestLookup:             h.RequestLookup,
+			StateStore:                runtimestore.NewAdapterStateStore(h.DB, h.NowFn),
+			CredentialStore:           credentialStore,
+			Clock:                     clock,
+			Logger:                    frameworkZerologLogger{log: h.Logger, channelID: h.ChannelID},
+			Metrics:                   metrics.Default(),
+			EmitInitialReadinessEvent: true,
 			// T147 §A — daemon supplies the per-channel DeviceTransit so
 			// the framework can satisfy `runtime_inbound_via_relay` modules at
 			// Install time (manager.installOne refuses such a module
@@ -162,7 +163,7 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 
 		// T147 §A — wire the inbound device→daemon callback. M1.6
 		// baseline supports one runtime_inbound_via_relay adapter per channel.
-			// M1.7 owns actor_id → adapter routing; until that lands, more
+		// M1.7 owns actor_id → adapter routing; until that lands, more
 		// than one transit adapter is a composition bug and must fail
 		// loudly instead of broadcasting callbacks to every adapter.
 		if h.SetDeviceCallback != nil {

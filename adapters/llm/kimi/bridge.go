@@ -99,12 +99,17 @@ type ChannelContext struct {
 
 // ActorInfo is one actor_registry row projected into the LLM prompt.
 type ActorInfo struct {
-	ActorID     string `json:"actor_id"`
-	Kind        string `json:"kind"`                   // human | agent | tool | system
-	Binding     string `json:"binding,omitempty"`      // empty for human/system; embedded / runtime_inbound_via_relay / runtime_outbound for tools
-	DisplayName string `json:"display_name,omitempty"` // optional human-readable label
-	Description string `json:"description,omitempty"`  // optional actor-CLI one-line positioning
-	SkillDoc    string `json:"skill_doc,omitempty"`    // optional actor-CLI markdown usage guide
+	ActorID           string          `json:"actor_id"`
+	Kind              string          `json:"kind"`                   // human | agent | tool | system
+	Binding           string          `json:"binding,omitempty"`      // empty for human/system; embedded / runtime_inbound_via_relay / runtime_outbound for tools
+	DisplayName       string          `json:"display_name,omitempty"` // optional human-readable label
+	Description       string          `json:"description,omitempty"`  // optional actor-CLI one-line positioning
+	SkillDoc          string          `json:"skill_doc,omitempty"`    // optional actor-CLI markdown usage guide
+	Ready             bool            `json:"ready"`
+	ReadyReason       string          `json:"ready_reason,omitempty"`
+	ReadyDetail       json.RawMessage `json:"ready_detail,omitempty"`
+	LastReadyAt       int64           `json:"last_ready_at,omitempty"`
+	LastStateChangeAt int64           `json:"last_state_change_at,omitempty"`
 }
 
 // TypeInfo is one type_registry row projected into the LLM prompt.
@@ -1123,6 +1128,14 @@ func renderChannelContext(c ChannelContext) string {
 			if a.Binding != "" {
 				b.WriteString(", binding=")
 				b.WriteString(a.Binding)
+			}
+			if a.Kind == string(actor.KindTool) {
+				b.WriteString(", ready=")
+				b.WriteString(fmt.Sprint(a.Ready))
+				if a.ReadyReason != "" {
+					b.WriteString(", reason=")
+					b.WriteString(a.ReadyReason)
+				}
 			}
 			b.WriteString(")")
 			if a.DisplayName != "" {

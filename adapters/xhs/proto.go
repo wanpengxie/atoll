@@ -19,12 +19,10 @@ const DefaultAdapterActorID actor.ActorID = "tool:xhs-adapter"
 // this to BindingRuntimeInboundViaRelay when the device adapter goes live.
 const Binding = actor.BindingEmbedded
 
-// DefaultMaxPendingMs mirrors the device adapter baseline (5 min). The
-// framework arms an F3 timer of this duration on every request; T2's
-// mock path replies synchronously inside Handle so the timer never
-// fires in the happy path, but the field still feeds type_registry
-// install (acceptance #6: missing max_pending_ms → adapter_timeout_missing).
-const DefaultMaxPendingMs int64 = 5 * 60 * 1000
+// DefaultMaxPendingMs is the sane per-request default. Long-running
+// xhs operations must opt in with an explicit override instead of
+// inheriting a broad framework default.
+const DefaultMaxPendingMs int64 = 30 * 1000
 
 // Type names — same closed set the device adapter uses (domain-xhs-spec §1).
 const (

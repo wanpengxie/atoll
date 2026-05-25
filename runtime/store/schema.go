@@ -120,7 +120,13 @@ CREATE TABLE IF NOT EXISTS actor_registry (
                             OR actor_binding IN ('embedded','runtime_outbound','runtime_inbound_via_relay')),
   display_name       TEXT,
   created_at         INTEGER NOT NULL,
-  deregistered_at    INTEGER
+  deregistered_at    INTEGER,
+  ready_state        TEXT NOT NULL DEFAULT 'unknown'
+                     CHECK (ready_state IN ('ready','not_ready','unknown')),
+  ready_reason       TEXT NOT NULL DEFAULT 'unknown',
+  ready_detail       TEXT NOT NULL DEFAULT '{}',
+  last_ready_at      INTEGER NOT NULL DEFAULT 0,
+  last_state_change_at INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS ix_actor_registry_active

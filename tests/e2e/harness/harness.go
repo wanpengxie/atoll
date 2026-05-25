@@ -640,6 +640,10 @@ func (s *Stack) BindChannel(workspaceID, channelID string) {
 		_, err := os.Stat(s.ChannelSqlitePath(channelID))
 		return err == nil
 	})
+	Eventually(s.t, "channel placement active", 10*time.Second, func() bool {
+		p, ok := s.GetPlacement(channelID)
+		return ok && p.State == "active"
+	})
 }
 
 // PostMessageResponse is the decoded /messages POST body.

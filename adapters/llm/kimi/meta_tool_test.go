@@ -37,6 +37,9 @@ func TestListActorsIncludesDescriptions(t *testing.T) {
 	if xhsActor["description"] != "XHS automation" {
 		t.Fatalf("actor description=%v", xhsActor["description"])
 	}
+	if xhsActor["ready"] != true || xhsActor["ready_reason"] != "ok" {
+		t.Fatalf("actor readiness fields missing: %+v", xhsActor)
+	}
 	typesForActor := xhsActor["types"].([]map[string]any)
 	if typesForActor[0]["description"] != "Archive notification" || typesForActor[1]["description"] != "Publish a note" {
 		t.Fatalf("type descriptions not present: %+v", typesForActor)
@@ -153,6 +156,9 @@ func TestDescribeActorReturnsSkillDocAndTypes(t *testing.T) {
 	if value["actor_id"] != "tool:xhs-adapter" || value["description"] != "XHS automation" || value["skill_doc"] == "" {
 		t.Fatalf("actor value=%+v", value)
 	}
+	if value["ready"] != true || value["ready_reason"] != "ok" {
+		t.Fatalf("actor readiness value=%+v", value)
+	}
 	types := value["types"].([]map[string]any)
 	if len(types) != 2 {
 		t.Fatalf("types len=%d want 2", len(types))
@@ -261,12 +267,17 @@ func metaChannelContext() ChannelContext {
 				DisplayName: "xhs",
 				Description: "XHS automation",
 				SkillDoc:    "Use this actor to publish notes.",
+				Ready:       true,
+				ReadyReason: "ok",
+				LastReadyAt: 1_700_000_000_000,
 			},
 			{
 				ActorID:     "tool:other",
 				Kind:        "tool",
 				Binding:     "embedded",
 				Description: "Other actor",
+				Ready:       false,
+				ReadyReason: "device_offline",
 			},
 		},
 		Types: []TypeInfo{

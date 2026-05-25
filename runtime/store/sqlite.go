@@ -195,6 +195,25 @@ func ensureChannelLocalSchema(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("store: add type_registry.%s: %w", col, err)
 		}
 	}
+	actorAdds := map[string]string{
+		"ready_state":          "ready_state TEXT NOT NULL DEFAULT 'unknown' CHECK (ready_state IN ('ready','not_ready','unknown'))",
+		"ready_reason":         "ready_reason TEXT NOT NULL DEFAULT 'unknown'",
+		"ready_detail":         "ready_detail TEXT NOT NULL DEFAULT '{}'",
+		"last_ready_at":        "last_ready_at INTEGER NOT NULL DEFAULT 0",
+		"last_state_change_at": "last_state_change_at INTEGER NOT NULL DEFAULT 0",
+	}
+	for col, ddl := range actorAdds {
+		ok, err := columnExists(ctx, db, "actor_registry", col)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, "ALTER TABLE actor_registry ADD COLUMN "+ddl); err != nil {
+			return fmt.Errorf("store: add actor_registry.%s: %w", col, err)
+		}
+	}
 	return nil
 }
 
