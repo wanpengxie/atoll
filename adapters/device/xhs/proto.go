@@ -54,8 +54,18 @@ const (
 	TypeNoteFetch   = "xhs.note.fetch"
 	TypeRecentFetch = "xhs.recent.fetch"
 
-	// Event-only type (extension push).
-	TypeNoteArchived = "xhs.note.archived"
+	// Event-only types — adapter-emitted observability into the channel.
+	// TypeNoteArchived: extension reports a note moved to archive (xhs DOM
+	// signal, not adapter lifecycle).
+	// TypeDeviceOnline / TypeDeviceOffline: adapter projects its device
+	// runtime state into the channel so other actors (UI, agent) can
+	// observe device availability without reaching into transport state.
+	// These events are NOT collaboration truth — they're an operational
+	// projection the adapter chooses to publish; replay-derived state of
+	// the channel is unaffected if the events are filtered out.
+	TypeNoteArchived  = "xhs.note.archived"
+	TypeDeviceOnline  = "xhs.device.online"
+	TypeDeviceOffline = "xhs.device.offline"
 
 	// New R/R types — wire cmd = type suffix with `_` → `-`.
 	TypePublishLongContent = "xhs.publish_long_content"
@@ -90,11 +100,18 @@ var RequestResponseTypes = []string{
 	TypeGetTrendingTopics,
 }
 
+// EventOnlyTypes is the subset adapter emits as kind=event only.
+var EventOnlyTypes = []string{
+	TypeNoteArchived,
+	TypeDeviceOnline,
+	TypeDeviceOffline,
+}
+
 // AllTypes is the full closed set Declares() exposes, including the
-// event-only TypeNoteArchived row so type_registry consistency holds
+// event-only rows so type_registry consistency holds
 // ("adapter owns the actor → adapter declares every type that
 // references the actor as handler").
-var AllTypes = append(append([]string{}, RequestResponseTypes...), TypeNoteArchived)
+var AllTypes = append(append([]string{}, RequestResponseTypes...), EventOnlyTypes...)
 
 // typeToWireCmd maps adapter type → chrome extension's daemon cmd name.
 // Legacy 4 types are special-cased; new types follow `_`→`-` conversion
@@ -317,6 +334,14 @@ func DeclarationTypeDeclarations() map[string]adapter.TypeDeclaration {
 		TypeGetCreatorMetrics:  rr,
 		TypeGetTrendingTopics:  rr,
 		TypeNoteArchived: {
+			AllowedKinds:       []message.Kind{message.KindEvent},
+			TerminalConvention: string(adapter.TerminalPayloadStatus),
+		},
+		TypeDeviceOnline: {
+			AllowedKinds:       []message.Kind{message.KindEvent},
+			TerminalConvention: string(adapter.TerminalPayloadStatus),
+		},
+		TypeDeviceOffline: {
 			AllowedKinds:       []message.Kind{message.KindEvent},
 			TerminalConvention: string(adapter.TerminalPayloadStatus),
 		},

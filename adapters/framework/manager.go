@@ -627,6 +627,78 @@ func (m *Manager) runExternalCallback(ctx context.Context, bm *boundModule, adap
 	return bm.module.OnExternalCallback(ctx, payload)
 }
 
+// OnRuntimeEvent fans a runtime lifecycle signal out to every bound
+// Module that implements adapter.RuntimeEventAware and matches the
+// event's (ChannelID, AdapterActorID) routing key. Spec ref: proto-
+// layer1 §3.6 O6 Lifecycle Awareness — the adapter framework owns the
+// runtime-event delivery contract; this is the device-binding hook on
+// top of channel-level boot/fence/shutdown wired by the composition
+// root.
+//
+// Routing rules:
+//   - If evt.AdapterActorID is non-empty, only the Module whose
+//     Declaration.ActorID matches receives the event.
+//   - If evt.AdapterActorID is empty, every Module on this channel
+//     whose binding accepts lifecycle events (currently only
+//     runtime_inbound_via_relay) receives the event.
+//
+// Errors are collected; the first non-nil error is returned so that
+// callers can observe failures, but remaining Modules still see the
+// event. Panics are recovered and logged so one bad Module cannot
+// take down the whole dispatcher.
+func (m *Manager) OnRuntimeEvent(ctx context.Context, evt adapter.RuntimeEvent) error {
+	if evt.ChannelID != "" && m.cfg.ChannelID != "" && evt.ChannelID != m.cfg.ChannelID {
+		// Wrong channel — drop silently. The composition root routes
+		// events by channel id; a mismatch here is a wiring bug, not
+		// per-module concern.
+		return nil
+	}
+
+	m.mu.RLock()
+	bound := make([]*boundModule, 0, len(m.byName))
+	for _, bm := range m.byName {
+		bound = append(bound, bm)
+	}
+	m.mu.RUnlock()
+
+	var firstErr error
+	for _, bm := range bound {
+		if evt.AdapterActorID != "" && bm.declaration.ActorID != evt.AdapterActorID {
+			continue
+		}
+		aware, ok := bm.module.(adapter.RuntimeEventAware)
+		if !ok {
+			continue
+		}
+		if err := m.dispatchRuntimeEvent(ctx, bm, aware, evt); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (m *Manager) dispatchRuntimeEvent(
+	ctx context.Context,
+	bm *boundModule,
+	aware adapter.RuntimeEventAware,
+	evt adapter.RuntimeEvent,
+) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			stack := string(debug.Stack())
+			m.cfg.Logger.Error("framework.runtime_event.panic",
+				"adapter", bm.declaration.Name,
+				"event_kind", string(evt.Kind),
+				"panic", fmt.Sprint(r),
+				"stack", stack)
+			m.cfg.Metrics.IncCounter("adapter.runtime_event.panic", "adapter", bm.declaration.Name)
+			err = fmt.Errorf("adapter %s OnRuntimeEvent panicked: %v", bm.declaration.Name, r)
+		}
+	}()
+	m.cfg.Metrics.IncCounter("adapter.runtime_event", "adapter", bm.declaration.Name, "event_kind", string(evt.Kind))
+	return aware.OnRuntimeEvent(ctx, evt)
+}
+
 func callbackCorrelationID(payload []byte) string {
 	var body struct {
 		CorrelationID string `json:"correlation_id"`

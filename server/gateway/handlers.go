@@ -545,6 +545,59 @@ func (a *App) sendUnbindChannel(
 	return err
 }
 
+// NotifyDeviceLifecycle implements devicebus.LifecycleNotifier. It
+// pushes a `device_transit.lifecycle` daemonbus frame to the daemon
+// owning the channel so the adapter framework can project the
+// device-state machine.
+//
+// At-least-once delivery is best-effort: if the owning daemon is not
+// connected the frame is dropped silently (the daemon's reclaim path
+// will resync the connection state on reconnect — this signal is an
+// optimization, not closure-critical).
+func (a *App) NotifyDeviceLifecycle(
+	ctx context.Context,
+	channelID channel.ID,
+	actorID actor.ActorID,
+	event devicetransit.LifecycleEvent,
+	deviceID string,
+	detail string,
+) {
+	if channelID == "" || actorID == "" {
+		return
+	}
+	conn, err := a.daemonbus.ConnectionForChannel(ctx, string(channelID))
+	if err != nil {
+		// Daemon offline / channel not bound — drop. The composition
+		// root will re-emit a "connected" lifecycle on the next
+		// channel boot via the actor-token routing record.
+		pkgLogger.Debug().
+			Str("event", "gateway.device_lifecycle_dropped").
+			Str("channel_id", string(channelID)).
+			Str("actor_id", string(actorID)).
+			Str("lifecycle_event", string(event)).
+			Err(err).
+			Msg("daemon connection unavailable; device lifecycle dropped")
+		return
+	}
+	payload := devicetransit.LifecycleFrame{
+		AdapterActorID: actorID,
+		ChannelID:      channelID,
+		Event:          event,
+		DeviceID:       deviceID,
+		Ts:             time.Now().UnixMilli(),
+		Detail:         detail,
+	}
+	if _, err := conn.SendFrame(ctx, kerneldaemonbus.FrameTypeDeviceTransitLifecycle, payload); err != nil {
+		pkgLogger.Warn().
+			Str("event", "gateway.device_lifecycle_send_failed").
+			Str("channel_id", string(channelID)).
+			Str("actor_id", string(actorID)).
+			Str("lifecycle_event", string(event)).
+			Err(err).
+			Msg("device lifecycle frame send failed")
+	}
+}
+
 // ForwardDeviceFrame implements devicebus.TransitForwarder by wrapping
 // the flat /devicebus wire frame into a devicetransit.SendFrame and
 // pushing it through the daemonbus mux.

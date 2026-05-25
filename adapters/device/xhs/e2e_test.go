@@ -345,6 +345,23 @@ func newHarness(t *testing.T) *harness {
 	if err := module.Init(ctx, mctx); err != nil {
 		t.Fatalf("module.Init: %v", err)
 	}
+	// Simulate the devicebus connected lifecycle so the module's Handle
+	// gate treats the device as reachable. Production wires this via
+	// adapter_wiring.go's SetDeviceLifecycleCallback → Manager.OnRuntimeEvent.
+	if err := module.OnRuntimeEvent(ctx, adapter.RuntimeEvent{
+		Kind:           adapter.RuntimeEventDeviceLifecycle,
+		ChannelID:      mctx.ChannelID,
+		AdapterActorID: testAdapterActor,
+		DeviceLifecycle: &devicetransit.LifecycleFrame{
+			AdapterActorID: testAdapterActor,
+			ChannelID:      mctx.ChannelID,
+			Event:          devicetransit.LifecycleConnected,
+			DeviceID:       "device-test",
+			Ts:             1_000_000,
+		},
+	}); err != nil {
+		t.Fatalf("module.OnRuntimeEvent connected: %v", err)
+	}
 	return &harness{
 		module:    module,
 		server:    server,

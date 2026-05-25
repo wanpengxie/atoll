@@ -50,3 +50,45 @@ type DeviceTransit interface {
 	Send(ctx context.Context, frame SendFrame) (frameID FrameID, err error)
 	Ack(ctx context.Context, frame AckFrame) error
 }
+
+// LifecycleEvent enumerates the device runtime lifecycle signals the
+// server pushes back to the daemon-side adapter so the adapter can
+// project its own device-state without polling transport plumbing.
+// Spec ref: impl-layer2 §5 device session routing (post-t167 actor-token
+// model — devicebus connection register / unregister maps to these
+// events). The semantics are inbound only (server → daemon → adapter);
+// adapter never emits this enum back through the transit path.
+type LifecycleEvent string
+
+const (
+	// LifecycleConnected — devicebus ws upgraded + actor route registered.
+	LifecycleConnected LifecycleEvent = "connected"
+	// LifecycleDisconnected — devicebus ws read loop ended (clean close or
+	// transport error). Server detects, pushes to daemon.
+	LifecycleDisconnected LifecycleEvent = "disconnected"
+	// LifecycleTokenExpired — server-side ValidateToken refused a frame
+	// because the actor token is past expires_at. Adapter MUST treat the
+	// device as unreachable until re-bind.
+	LifecycleTokenExpired LifecycleEvent = "token_expired"
+)
+
+// LifecycleFrame is the payload carried by daemonbus
+// `device_transit.lifecycle` frames. Server emits one per ws connection
+// register / unregister / token expiry; daemon dispatches to the adapter
+// module that owns (channel_id, adapter_actor_id).
+type LifecycleFrame struct {
+	AdapterActorID actor.ActorID  `json:"adapter_actor_id"`
+	ChannelID      channel.ID     `json:"channel_id"`
+	Event          LifecycleEvent `json:"event"`
+	// DeviceID is the user-facing device identifier the server registered
+	// the token against (informative; adapters that distinguish devices
+	// internally read it from the actor-token row).
+	DeviceID string `json:"device_id,omitempty"`
+	// Ts is server emit time (ms epoch). Adapters use it to order events
+	// and reject stale lifecycle frames (e.g. an out-of-order "connected"
+	// arriving after a later "disconnected").
+	Ts int64 `json:"ts,omitempty"`
+	// Detail is an optional human-readable reason; not part of the closed
+	// set, used for observability only.
+	Detail string `json:"detail,omitempty"`
+}

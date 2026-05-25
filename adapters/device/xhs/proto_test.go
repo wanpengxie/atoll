@@ -15,8 +15,10 @@ func TestTypeClosedSet(t *testing.T) {
 		TypeSearch:      true,
 		TypeNoteFetch:   true,
 		TypeRecentFetch: true,
-		// Event-only.
-		TypeNoteArchived: true,
+		// Event-only — extension push + adapter lifecycle projection.
+		TypeNoteArchived:  true,
+		TypeDeviceOnline:  true,
+		TypeDeviceOffline: true,
 		// New 10 R/R types — chrome extension tool surface.
 		TypePublishLongContent: true,
 		TypePublishStatus:      true,
@@ -39,16 +41,22 @@ func TestTypeClosedSet(t *testing.T) {
 	}
 }
 
-// TestRequestResponseSubset assert RequestResponseTypes excludes the
-// event-only TypeNoteArchived.
+// TestRequestResponseSubset assert RequestResponseTypes excludes
+// every event-only type (TypeNoteArchived + the two device lifecycle
+// projection events).
 func TestRequestResponseSubset(t *testing.T) {
+	eventOnly := map[string]bool{
+		TypeNoteArchived:  true,
+		TypeDeviceOnline:  true,
+		TypeDeviceOffline: true,
+	}
 	for _, ty := range RequestResponseTypes {
-		if ty == TypeNoteArchived {
+		if eventOnly[ty] {
 			t.Errorf("RequestResponseTypes should not include event-only %q", ty)
 		}
 	}
-	if len(RequestResponseTypes) != len(AllTypes)-1 {
-		t.Errorf("expected RequestResponseTypes to be AllTypes - 1 (one event-only)")
+	if len(RequestResponseTypes) != len(AllTypes)-len(eventOnly) {
+		t.Errorf("expected RequestResponseTypes to be AllTypes - %d event-only entries", len(eventOnly))
 	}
 }
 
@@ -143,9 +151,11 @@ func TestTypeDeclarationsAllowedKindsSpec(t *testing.T) {
 			t.Errorf("%s: allowed_kinds=%v want {request, response}", ty, got)
 		}
 	}
-	ev := decls[TypeNoteArchived].AllowedKinds
-	if len(ev) != 1 || ev[0] != message.KindEvent {
-		t.Errorf("%s: allowed_kinds=%v want [event]", TypeNoteArchived, ev)
+	for _, ty := range EventOnlyTypes {
+		ev := decls[ty].AllowedKinds
+		if len(ev) != 1 || ev[0] != message.KindEvent {
+			t.Errorf("%s: allowed_kinds=%v want [event]", ty, ev)
+		}
 	}
 }
 

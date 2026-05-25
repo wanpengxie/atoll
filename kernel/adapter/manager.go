@@ -43,6 +43,17 @@ type Manager interface {
 	// before invoking.
 	OnExternalCallback(ctx context.Context, adapterName string, payload []byte) error
 
+	// OnRuntimeEvent fans a RuntimeEvent out to every installed Module
+	// that implements RuntimeEventAware AND matches the event's
+	// (ChannelID, AdapterActorID) routing key. Modules without the
+	// sub-interface are skipped silently; framework drops events with
+	// no matching Module.
+	//
+	// Errors are aggregated: the first non-nil error from a Module is
+	// returned; remaining Modules still receive the event. Implementations
+	// MUST NOT panic — a panicking Module is logged and skipped.
+	OnRuntimeEvent(ctx context.Context, evt RuntimeEvent) error
+
 	// RunGC starts the periodic GC ticker that scans every adapter's
 	// correlation table for expired entries (best-effort cleanup;
 	// the F3 timer already covers terminal correctness).

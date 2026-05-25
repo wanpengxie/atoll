@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
 	"github.com/wanpengxie/ActOS/pkg/requestctx"
@@ -30,6 +31,12 @@ type ControlHandlers struct {
 	OnHeldChannelsAck func(ctx context.Context, frame daemonbus.Frame) error
 	OnHeartbeatAck    func(ctx context.Context, frame daemonbus.Frame) error
 	OnDeviceTransit   func(ctx context.Context, frame daemonbus.Frame) error
+	// OnDeviceLifecycle handles `device_transit.lifecycle` frames the
+	// server pushes when a devicebus ws connect / disconnect / token
+	// expiry happens. Daemon routes these to the adapter framework so
+	// the owning adapter can project the device state machine inside
+	// its own black box (proto-layer1 §3.6 O6 + impl-layer2 §5).
+	OnDeviceLifecycle func(ctx context.Context, frame daemonbus.Frame, evt devicetransit.LifecycleFrame) error
 
 	// OnWriteMessage handles the daemon-side `control.write_message`
 	// dispatch path (FIX-T2). The Dispatcher decodes the frame body
@@ -252,6 +259,16 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) (err e
 	}
 
 	if daemonbus.CategoryOf(frame.FrameKind) == daemonbus.CategoryDeviceTransit {
+		if frame.FrameKind == daemonbus.FrameTypeDeviceTransitLifecycle {
+			if d.handlers.OnDeviceLifecycle == nil {
+				return nil
+			}
+			var evt devicetransit.LifecycleFrame
+			if err := DecodePayload(frame, &evt); err != nil {
+				return fmt.Errorf("transit: decode device_transit.lifecycle: %w", err)
+			}
+			return d.handlers.OnDeviceLifecycle(ctx, frame, evt)
+		}
 		if d.handlers.OnDeviceTransit != nil {
 			return d.handlers.OnDeviceTransit(ctx, frame)
 		}

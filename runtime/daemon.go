@@ -260,6 +260,14 @@ type channelRuntime struct {
 	// has already wired the *transit.DeviceTransit). Reads are atomic;
 	// "" / nil means "no adapter wired yet — drop silently".
 	deviceCallback atomic.Value // func(ctx context.Context, frame devicetransit.SendFrame) error
+
+	// deviceLifecycleCallback receives device_transit.lifecycle events
+	// the server pushes when a devicebus ws connect / disconnect / token
+	// expiry happens. Wired through ChannelHooks.SetDeviceLifecycleCallback
+	// during channel boot; routed by handleDeviceLifecycleFrame after
+	// the (channel_id, actor_id) routing key lookup. atomic.Value /
+	// swap rules mirror deviceCallback.
+	deviceLifecycleCallback atomic.Value // func(ctx context.Context, evt devicetransit.LifecycleFrame) error
 }
 
 type viewsyncBackpressureState struct {
@@ -406,6 +414,13 @@ type ChannelHooks struct {
 	// hot-swap escape hatch when a channel's adapter set changes.
 	// Passing nil clears the binding (frames are dropped silently).
 	SetDeviceCallback func(func(ctx context.Context, frame devicetransit.SendFrame) error)
+
+	// SetDeviceLifecycleCallback wires the inbound `device_transit.lifecycle`
+	// callback. The composition root supplies a closure that translates
+	// the LifecycleFrame into adapter.RuntimeEvent and calls
+	// framework.Manager.OnRuntimeEvent. Per-channel hot-swap rules
+	// mirror SetDeviceCallback. Nil clears the binding (frames dropped).
+	SetDeviceLifecycleCallback func(func(ctx context.Context, evt devicetransit.LifecycleFrame) error)
 }
 
 // buildTemplateResolver returns a closure that picks the ChannelTemplate
@@ -815,7 +830,8 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 		// the SendFrame, looks up the per-channel DeviceTransit by
 		// frame.ChannelID, and forwards via DispatchIncoming so the
 		// channel's framework.Manager fans out to Module.OnExternalCallback.
-		OnDeviceTransit: d.handleDeviceTransitFrame,
+		OnDeviceTransit:   d.handleDeviceTransitFrame,
+		OnDeviceLifecycle: d.handleDeviceLifecycleFrame,
 	}
 	if handler != nil {
 		handlers.OnWriteMessage = func(ctx context.Context, _ daemonbus.Frame, body transit.WriteMessageBody) transit.WriteMessageAckBody {
@@ -1523,6 +1539,13 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel, sta
 					return
 				}
 				capturedCR.deviceCallback.Store(cb)
+			}
+			hooks.SetDeviceLifecycleCallback = func(cb func(context.Context, devicetransit.LifecycleFrame) error) {
+				if cb == nil {
+					capturedCR.deviceLifecycleCallback.Store(func(context.Context, devicetransit.LifecycleFrame) error { return nil })
+					return
+				}
+				capturedCR.deviceLifecycleCallback.Store(cb)
 			}
 		}
 		teardown, hookErr := d.cfg.OnChannelBoot(ctx, hooks)
@@ -2487,6 +2510,37 @@ func (d *Daemon) handleDeviceTransitFrame(ctx context.Context, frame daemonbus.F
 		return firstErr
 	}
 	return nil
+}
+
+// handleDeviceLifecycleFrame routes a `device_transit.lifecycle` frame
+// to the owning channel's adapter framework so the adapter Module can
+// project its device-state machine without reaching into transport
+// plumbing. Spec ref: proto-layer1 §3.6 O6 + impl-layer2 §5 (post-t167
+// actor-token routing model).
+//
+// Unknown channels / frozen channels / channels without a wired
+// lifecycle callback are dropped silently — the same at-least-once
+// rationale as handleDeviceTransitFrame.
+func (d *Daemon) handleDeviceLifecycleFrame(ctx context.Context, frame daemonbus.Frame, evt devicetransit.LifecycleFrame) error {
+	channelID := evt.ChannelID
+	if channelID == "" {
+		channelID = channel.ID(frame.ChannelID)
+	}
+	if channelID == "" {
+		return nil
+	}
+	if d.channelFrozen(channelID) {
+		return nil
+	}
+	cr, ok := d.getChannel(channelID)
+	if !ok {
+		return nil
+	}
+	cb, _ := cr.deviceLifecycleCallback.Load().(func(context.Context, devicetransit.LifecycleFrame) error)
+	if cb == nil {
+		return nil
+	}
+	return cb(ctx, evt)
 }
 
 // transitChainBridge adapts a kernel/harness.Chain to the transit

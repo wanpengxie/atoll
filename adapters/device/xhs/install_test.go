@@ -34,14 +34,21 @@ func TestDefaultInstallSpec(t *testing.T) {
 			t.Errorf("type %s max pending=%d want %d", s.Type, s.MaxPendingMs, DefaultMaxPendingMs)
 		}
 		if s.AllowEvent {
-			if s.Type != TypeNoteArchived {
-				t.Errorf("only %q should be event-only; got %q", TypeNoteArchived, s.Type)
+			isEventOnly := false
+			for _, ev := range EventOnlyTypes {
+				if s.Type == ev {
+					isEventOnly = true
+					break
+				}
+			}
+			if !isEventOnly {
+				t.Errorf("type %q marked AllowEvent but not in EventOnlyTypes %v", s.Type, EventOnlyTypes)
 			}
 			eventCount++
 		}
 	}
-	if eventCount != 1 {
-		t.Errorf("expected 1 event-only type seed; got %d", eventCount)
+	if eventCount != len(EventOnlyTypes) {
+		t.Errorf("expected %d event-only type seeds; got %d", len(EventOnlyTypes), eventCount)
 	}
 }
 

@@ -71,13 +71,15 @@ func DefaultInstallSpec(maxPendingMs int64) InstallSpec {
 			MaxPendingMs:   maxPendingMs,
 		})
 	}
-	types = append(types, TypeSeed{
-		Type:           TypeNoteArchived,
-		HandlerActorID: actorSeed.ID,
-		HandlerBinding: Binding,
-		MaxPendingMs:   maxPendingMs,
-		AllowEvent:     true,
-	})
+	for _, t := range EventOnlyTypes {
+		types = append(types, TypeSeed{
+			Type:           t,
+			HandlerActorID: actorSeed.ID,
+			HandlerBinding: Binding,
+			MaxPendingMs:   maxPendingMs,
+			AllowEvent:     true,
+		})
+	}
 	return InstallSpec{Actor: actorSeed, Types: types}
 }
 

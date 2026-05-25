@@ -49,6 +49,21 @@ type Config struct {
 	Logger *slog.Logger
 }
 
+// LifecycleNotifier receives devicebus connection lifecycle signals
+// (register / unregister / token expiry) so the gateway can forward
+// them to the owning daemon as `device_transit.lifecycle` frames.
+// The notifier is optional; when nil, lifecycle signals are dropped.
+type LifecycleNotifier interface {
+	NotifyDeviceLifecycle(
+		ctx context.Context,
+		channelID channel.ID,
+		actorID actor.ActorID,
+		event devicetransit.LifecycleEvent,
+		deviceID string,
+		detail string,
+	)
+}
+
 type Service struct {
 	db  *sql.DB
 	cfg Config
@@ -64,8 +79,26 @@ type Service struct {
 	accessMu sync.RWMutex
 	access   channelaccess.Authorizer
 
+	lifecycleMu sync.RWMutex
+	lifecycle   LifecycleNotifier
+
 	allowedOrigins map[string]struct{}
 	log            *slog.Logger
+}
+
+// SetLifecycleNotifier installs the lifecycle notifier hook. Safe to
+// call concurrently with WS handshakes; the latest non-nil notifier
+// wins. Passing nil silently disables lifecycle emission.
+func (s *Service) SetLifecycleNotifier(n LifecycleNotifier) {
+	s.lifecycleMu.Lock()
+	s.lifecycle = n
+	s.lifecycleMu.Unlock()
+}
+
+func (s *Service) lifecycleNotifier() LifecycleNotifier {
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	return s.lifecycle
 }
 
 type AccessAuthorizer = channelaccess.Authorizer

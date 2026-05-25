@@ -87,6 +87,13 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	assertProductionXHSBindings(t, ctx, db)
 
+	// Simulate the devicebus ws-register lifecycle signal so the
+	// adapter's runtime-event state machine treats the device as
+	// reachable. In production this frame is pushed by
+	// server.gateway.NotifyDeviceLifecycle when the extension's
+	// /devicebus WS handshake succeeds.
+	pushDeviceLifecycleConnected(t, ctx, srv, channelID, devicexhs.DefaultAdapterActorID)
+
 	// xhs.publish request payload (domain-xhs-spec §1.1) carries
 	// title + content for the production extension path. Per Level A
 	// (proto-layer0 §1.4.1) the protocol layer does not validate
@@ -148,6 +155,50 @@ func assertProductionXHSBindings(t *testing.T, ctx context.Context, db *sql.DB) 
 	if binding != string(actor.BindingRuntimeInboundViaRelay) {
 		t.Fatalf("type_registry xhs.publish binding=%q want %q", binding, actor.BindingRuntimeInboundViaRelay)
 	}
+}
+
+// pushDeviceLifecycleConnected pushes a `device_transit.lifecycle`
+// frame from the mock server side so the daemon's adapter framework
+// projects the device into the "online" state. Mirrors the production
+// path where server.gateway.NotifyDeviceLifecycle would emit the same
+// frame after a devicebus ws handshake succeeds.
+func pushDeviceLifecycleConnected(
+	t *testing.T,
+	ctx context.Context,
+	srv *transit.MockServer,
+	channelID string,
+	adapterActorID actor.ActorID,
+) {
+	t.Helper()
+	ts := nowMs()
+	lf := devicetransit.LifecycleFrame{
+		AdapterActorID: adapterActorID,
+		ChannelID:      channel.ID(channelID),
+		Event:          devicetransit.LifecycleConnected,
+		DeviceID:       "device-test",
+		Ts:             ts,
+	}
+	frame, err := transit.Encode(
+		"frame-lifecycle-connected",
+		daemonbus.FrameTypeDeviceTransitLifecycle,
+		"server",
+		1,
+		ts,
+		lf,
+	)
+	if err != nil {
+		t.Fatalf("encode device_transit.lifecycle: %v", err)
+	}
+	frame.ChannelID = channelID
+	if err := srv.SendToDaemon(ctx, frame); err != nil {
+		t.Fatalf("SendToDaemon device_transit.lifecycle: %v", err)
+	}
+	// Give the dispatcher a moment to apply the state transition before
+	// the caller fires the publish request. The adapter framework
+	// processes lifecycle synchronously, but the mock daemonbus runs on
+	// a goroutine so the next SendToDaemon could otherwise race the
+	// state store.
+	time.Sleep(50 * time.Millisecond)
 }
 
 func writeRequestAndWaitForDeviceSend(

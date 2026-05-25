@@ -232,6 +232,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	app.catalog.SetPlacementHook(app)
 
 	app.devicebus.SetAccessAuthorizer(app)
+	app.devicebus.SetLifecycleNotifier(app)
 
 	app.engine = buildEngine(app)
 	return app, nil

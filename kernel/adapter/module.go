@@ -4,8 +4,68 @@ import (
 	"context"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
+
+// RuntimeEvent is a lifecycle signal pushed from the channel runtime
+// into a Module so the adapter can own its own device-state machine
+// without reading transport-layer plumbing.
+//
+// The framework dispatches one RuntimeEvent per signal source:
+//   - devicebus ws register / unregister / token-expiry (binding =
+//     runtime_inbound_via_relay) → device-lifecycle event.
+//
+// Other binding kinds (embedded / runtime_outbound) currently receive
+// nothing; the channel-lifecycle hooks (boot / fence-loss / shutdown,
+// proto-layer1 §3.6 O6) are wired separately by the framework
+// composition root, not through this enum.
+//
+// Modules opt in by implementing RuntimeEventAware; modules that don't
+// implement it never see RuntimeEvents and the framework drops them
+// silently.
+type RuntimeEvent struct {
+	// Kind is the event source / closed set.
+	Kind RuntimeEventKind
+
+	// ChannelID is the channel this signal belongs to. Always non-empty.
+	// A Module instance is bound to exactly one channel so this MUST equal
+	// ModuleContext.ChannelID; the framework rejects mismatches before
+	// invoking the hook.
+	ChannelID channel.ID
+
+	// AdapterActorID echoes the adapter actor identity the runtime event
+	// applies to. For runtime_inbound_via_relay this is always the
+	// Module's own actor id; included so future multi-actor-per-module
+	// implementations stay possible.
+	AdapterActorID actor.ActorID
+
+	// DeviceLifecycle is non-nil iff Kind == RuntimeEventDeviceLifecycle.
+	// Carries the devicebus-side connect / disconnect / token-expired
+	// signal. See kernel/devicetransit.LifecycleFrame for the wire shape.
+	DeviceLifecycle *devicetransit.LifecycleFrame
+}
+
+// RuntimeEventKind enumerates the runtime-event sources a Module can
+// receive. Closed set; new kinds are protocol-level additions.
+type RuntimeEventKind string
+
+const (
+	// RuntimeEventDeviceLifecycle — devicebus connection lifecycle
+	// (register / unregister / token expired) for binding =
+	// runtime_inbound_via_relay adapters.
+	RuntimeEventDeviceLifecycle RuntimeEventKind = "device_lifecycle"
+)
+
+// RuntimeEventAware is the optional Module sub-interface. Modules that
+// want device / channel lifecycle signals implement this method; the
+// framework type-asserts and skips delivery when absent. Method is
+// invoked off the main Handle goroutine; implementations MUST be
+// concurrency-safe with Handle / OnExternalCallback / Shutdown.
+type RuntimeEventAware interface {
+	OnRuntimeEvent(ctx context.Context, evt RuntimeEvent) error
+}
 
 // TypeDeclaration is the per-type install metadata an adapter declares
 // for the Message-Write Harness install path (L2 §1.4.2). Payload

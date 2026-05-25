@@ -182,6 +182,17 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 					}
 					return mgr.OnExternalCallback(ctx, adapterName, body.Payload)
 				})
+				if h.SetDeviceLifecycleCallback != nil {
+					channelID := h.ChannelID
+					h.SetDeviceLifecycleCallback(func(ctx context.Context, evt devicetransit.LifecycleFrame) error {
+						return mgr.OnRuntimeEvent(ctx, adapter.RuntimeEvent{
+							Kind:            adapter.RuntimeEventDeviceLifecycle,
+							ChannelID:       channelID,
+							AdapterActorID:  evt.AdapterActorID,
+							DeviceLifecycle: &evt,
+						})
+					})
+				}
 			}
 		}
 

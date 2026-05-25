@@ -49,9 +49,10 @@ const (
 	FrameTypeControlWriteMessageAck        FrameType = "control.write_message_ack"
 
 	// Device transit frames per impl-layer2 §1.2 + L4 §2.6.4.
-	FrameTypeDeviceTransitSend FrameType = "device_transit.send"
-	FrameTypeDeviceTransitRecv FrameType = "device_transit.recv"
-	FrameTypeDeviceTransitAck  FrameType = "device_transit.ack"
+	FrameTypeDeviceTransitSend      FrameType = "device_transit.send"
+	FrameTypeDeviceTransitRecv      FrameType = "device_transit.recv"
+	FrameTypeDeviceTransitAck       FrameType = "device_transit.ack"
+	FrameTypeDeviceTransitLifecycle FrameType = "device_transit.lifecycle"
 )
 
 // AllFrameTypes lists every daemonbus frame_type in spec order — used
@@ -84,6 +85,7 @@ var AllFrameTypes = []FrameType{
 	FrameTypeDeviceTransitSend,
 	FrameTypeDeviceTransitRecv,
 	FrameTypeDeviceTransitAck,
+	FrameTypeDeviceTransitLifecycle,
 }
 
 // Category groups frame types by their impl-layer2 §1.2 category — used by
@@ -107,7 +109,8 @@ func CategoryOf(ft FrameType) Category {
 		return CategoryViewsync
 	case FrameTypeDeviceTransitSend,
 		FrameTypeDeviceTransitRecv,
-		FrameTypeDeviceTransitAck:
+		FrameTypeDeviceTransitAck,
+		FrameTypeDeviceTransitLifecycle:
 		return CategoryDeviceTransit
 	}
 	// Anything starting with "control." (the rest of the closed set).

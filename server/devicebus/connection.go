@@ -14,6 +14,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/pkg/requestctx"
 )
 
@@ -317,6 +318,16 @@ func (s *Service) SendFrameToDevice(ctx context.Context, channelID channel.ID, a
 	}
 	if s.nowMs() > row.ExpiresAt {
 		_ = s.RevokeActor(ctx, channelID, actorID)
+		if n := s.lifecycleNotifier(); n != nil {
+			n.NotifyDeviceLifecycle(
+				ctx,
+				channelID,
+				actorID,
+				devicetransit.LifecycleTokenExpired,
+				row.DeviceID,
+				"actor token past expires_at",
+			)
+		}
 		return ErrTokenExpired
 	}
 	frame.ActorID = string(actorID)
@@ -335,17 +346,38 @@ func (s *Service) registerConnection(channelID channel.ID, actorID actor.ActorID
 	if previous != nil && previous != conn {
 		_ = previous.Close()
 	}
+	if n := s.lifecycleNotifier(); n != nil {
+		n.NotifyDeviceLifecycle(
+			context.Background(),
+			channelID,
+			actorID,
+			devicetransit.LifecycleConnected,
+			conn.Registration.DeviceID,
+			"",
+		)
+	}
 }
 
 func (s *Service) unregisterConnection(channelID channel.ID, actorID actor.ActorID, conn *Connection) bool {
 	key := routeKey(channelID, actorID)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	current := s.routes[key]
 	if current != conn || current.Generation != conn.Generation {
+		s.mu.Unlock()
 		return false
 	}
 	delete(s.routes, key)
+	s.mu.Unlock()
+	if n := s.lifecycleNotifier(); n != nil {
+		n.NotifyDeviceLifecycle(
+			context.Background(),
+			channelID,
+			actorID,
+			devicetransit.LifecycleDisconnected,
+			conn.Registration.DeviceID,
+			"",
+		)
+	}
 	return true
 }
 
