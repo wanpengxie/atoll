@@ -123,6 +123,8 @@ func (m *Module) DeviceState() DeviceState {
 // (proto-layer0 §1.4.1).
 func (m *Module) Declares() adapter.Declaration {
 	return adapter.Declaration{
+		Description:      actorDescription,
+		SkillDoc:         actorSkillDoc,
 		Name:             AdapterName,
 		ActorID:          m.cfg.AdapterActorID,
 		Types:            append([]string{}, AllTypes...),

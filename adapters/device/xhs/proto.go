@@ -314,36 +314,27 @@ func IsResultPassThrough(requestType string) bool {
 // closed when an adapter opts into strict mode (non-nil
 // TypeDeclarations) but leaves a Types entry without a row.
 func DeclarationTypeDeclarations() map[string]adapter.TypeDeclaration {
-	rr := adapter.TypeDeclaration{
-		AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-		TerminalConvention: string(adapter.TerminalPayloadStatus),
+	rrKinds := []message.Kind{message.KindRequest, message.KindResponse}
+	evKinds := []message.Kind{message.KindEvent}
+	out := make(map[string]adapter.TypeDeclaration, len(AllTypes))
+	for _, t := range AllTypes {
+		row := typeMeta[t]
+		row.TerminalConvention = string(adapter.TerminalPayloadStatus)
+		if isEventOnlyType(t) {
+			row.AllowedKinds = evKinds
+		} else {
+			row.AllowedKinds = rrKinds
+		}
+		out[t] = row
 	}
-	return map[string]adapter.TypeDeclaration{
-		TypePublish:            rr,
-		TypeSearch:             rr,
-		TypeNoteFetch:          rr,
-		TypeRecentFetch:        rr,
-		TypePublishLongContent: rr,
-		TypePublishStatus:      rr,
-		TypeCheckLoginStatus:   rr,
-		TypeInjectScript:       rr,
-		TypeAnalyzeMyProfile:   rr,
-		TypeAnalyzeProfile:     rr,
-		TypeGetNoteComments:    rr,
-		TypeGetNoteAnalytics:   rr,
-		TypeGetCreatorMetrics:  rr,
-		TypeGetTrendingTopics:  rr,
-		TypeNoteArchived: {
-			AllowedKinds:       []message.Kind{message.KindEvent},
-			TerminalConvention: string(adapter.TerminalPayloadStatus),
-		},
-		TypeDeviceOnline: {
-			AllowedKinds:       []message.Kind{message.KindEvent},
-			TerminalConvention: string(adapter.TerminalPayloadStatus),
-		},
-		TypeDeviceOffline: {
-			AllowedKinds:       []message.Kind{message.KindEvent},
-			TerminalConvention: string(adapter.TerminalPayloadStatus),
-		},
+	return out
+}
+
+func isEventOnlyType(t string) bool {
+	for _, e := range EventOnlyTypes {
+		if e == t {
+			return true
+		}
 	}
+	return false
 }

@@ -135,13 +135,13 @@ func ActionForType(envelopeType string) (string, bool) {
 // mode (non-nil TypeDeclarations) but leaves a Types entry without a
 // row.
 func DeclarationTypeDeclarations() map[string]adapter.TypeDeclaration {
-	rr := adapter.TypeDeclaration{
-		AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-		TerminalConvention: string(adapter.TerminalPayloadStatus),
-	}
+	allowed := []message.Kind{message.KindRequest, message.KindResponse}
 	out := make(map[string]adapter.TypeDeclaration, len(AllTypes))
 	for _, t := range AllTypes {
-		out[t] = rr
+		row := typeMeta[t]
+		row.AllowedKinds = allowed
+		row.TerminalConvention = string(adapter.TerminalPayloadStatus)
+		out[t] = row
 	}
 	return out
 }

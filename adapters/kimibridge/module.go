@@ -111,6 +111,8 @@ func New(cfg Config, opts ...Option) (*Module, error) {
 // per Install per channel by the framework (L2 §8.1).
 func (m *Module) Declares() adapter.Declaration {
 	return adapter.Declaration{
+		Description:      actorDescription,
+		SkillDoc:         actorSkillDoc,
 		Name:             AdapterName,
 		ActorID:          m.cfg.AdapterActorID,
 		Types:            append([]string{}, AllTypes...),
