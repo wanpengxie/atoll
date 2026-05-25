@@ -150,7 +150,7 @@ export class SyncCookiesTool extends BaseTool {
   }
 
   /**
-   * 同步 Cookie 到 coagent daemon device session 端点（spec §4.3）。
+   * 同步 Cookie 到 coagent daemon device state 端点（spec §4.3）。
    * URL: POST {daemonHttpBase}/api/device/{deviceId}/session
    * Header: Authorization: Bearer {device_api_key}
    * Body: {cookies:[{name,value,domain,path,expires,httpOnly,secure,sameSite}], login_state}
@@ -208,13 +208,13 @@ export class SyncCookiesTool extends BaseTool {
         return {
           success: false,
           message: errorMessage
-            ? `device session 上报失败 (${response.status}): ${errorMessage}`
-            : `device session 上报失败 (${response.status})`,
+            ? `device state 上报失败 (${response.status}): ${errorMessage}`
+            : `device state 上报失败 (${response.status})`,
         };
       }
 
       // R3-T4 FX7 / round-2 review codex#t59.2：成功路径以前是
-      //   `device session 已上报: ${bodyText}` —— 把 daemon 回的整段 result（含
+      //   `device state 已上报: ${bodyText}` —— 把 daemon 回的整段 result（含
       //   完整 cookies 数组、access-token / web_session 真值）拼进用户可见 message
       //   + console log。
       // 修复：daemon 改返回脱敏 envelope `{user_id, login_state, cookie_count,
@@ -234,8 +234,8 @@ export class SyncCookiesTool extends BaseTool {
         success: true,
         message:
           cookieCount != null
-            ? `device session 已上报 (${cookieCount} cookies)`
-            : 'device session 已上报',
+            ? `device state 已上报 (${cookieCount} cookies)`
+            : 'device state 已上报',
       };
     } catch (error) {
       return {

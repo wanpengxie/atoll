@@ -72,7 +72,7 @@ COMMANDS
   channel ls       List workspaces + channels visible to the caller
   channel show     Show a single channel
   channel create   Create a channel inside a workspace
-  device register  Issue a device session token for a channel
+  device register  Register a device actor token for a channel
   daemon status    Report server health + active daemon placements
   ask              Write a kind=request envelope (audience required)
   emit             Write a kind=event envelope (audience optional)

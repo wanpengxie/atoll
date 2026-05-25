@@ -7,33 +7,32 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
-	serverdaemonbus "github.com/wanpengxie/ActOS/server/daemonbus"
 	"github.com/wanpengxie/ActOS/server/httperr"
 	"github.com/wanpengxie/ActOS/server/identity"
 )
 
 const deviceJSONBodyLimit = 64 << 10
+const defaultActorID actor.ActorID = "tool:xhs-adapter"
 
-// RegisterRoutes mounts the issuance + revoke endpoints. Callers
-// must be authenticated upstream (gateway's identity middleware).
 func (s *Service) RegisterRoutes(g *gin.RouterGroup) {
-	g.POST("/channels/:chID/devices", httperr.MaxBodyBytes(deviceJSONBodyLimit), s.handleIssue)
-	g.DELETE("/devices/:sid", s.handleRevoke)
-	g.GET("/devices/:sid", s.handleGet)
+	g.POST("/channels/:chID/device-actor", httperr.MaxBodyBytes(deviceJSONBodyLimit), s.handleRegisterActor)
+	g.DELETE("/channels/:chID/device-actor/:actorID", s.handleRevokeActor)
+	g.GET("/channels/:chID/device-actor/:actorID", s.handleGetActor)
 }
 
-type issueReq struct {
-	DeviceID   string `json:"device_id"   binding:"required"`
+type registerReq struct {
+	ActorID    string `json:"actor_id"`
+	DeviceID   string `json:"device_id" binding:"required"`
 	DeviceType string `json:"device_type"`
-	DaemonID   string `json:"daemon_id"   binding:"required"`
+	DaemonID   string `json:"daemon_id" binding:"required"`
 }
 
-func (s *Service) handleIssue(c *gin.Context) {
-	var req issueReq
+func (s *Service) handleRegisterActor(c *gin.Context) {
+	var req registerReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -43,12 +42,12 @@ func (s *Service) handleIssue(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
-	notifier := s.bindNotifier()
-	if notifier == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "devicebus: bind notifier unavailable"})
-		return
+	actorID := actor.ActorID(req.ActorID)
+	if actorID == "" {
+		actorID = defaultActorID
 	}
-	res, err := s.IssueSession(c.Request.Context(), IssueInput{
+	res, err := s.RegisterActor(c.Request.Context(), RegisterInput{
+		ActorID:    actorID,
 		DeviceID:   req.DeviceID,
 		DeviceType: req.DeviceType,
 		ChannelID:  channel.ID(c.Param("chID")),
@@ -63,139 +62,72 @@ func (s *Service) handleIssue(c *gin.Context) {
 			})
 			return
 		}
-		if errors.Is(err, ErrSessionLimitExceeded) {
-			c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
-			return
-		}
-		httperr.Internal(c, "devicebus.issue", err)
+		httperr.Internal(c, "devicebus.register_actor", err)
 		return
-	}
-	// T147 §A-S2 — push the bind frame to the owning daemon. The session
-	// row was already INSERTed in state=pending; advance pending → ready
-	// only when the daemon ACKs. A failure here leaves the row pending
-	// so a follow-up reconciler / retry can pick it up without confusing
-	// the client (no half-ready sessions advertised over HTTP).
-	bindErr := notifier.Bind(c.Request.Context(), BindInput{
-		Session:          res.Session,
-		TokenFingerprint: res.TokenFingerprint,
-	})
-	if bindErr != nil {
-		_ = s.Revoke(c.Request.Context(), res.Session.ID)
-		_ = notifier.Unbind(c.Request.Context(), UnbindInput{
-			Session: res.Session,
-			Reason:  "bind_failed",
-		})
-		status := http.StatusBadGateway
-		switch {
-		case errors.Is(bindErr, serverdaemonbus.ErrPendingAwaitLimitExceeded):
-			status = http.StatusTooManyRequests
-		case errors.Is(bindErr, serverdaemonbus.ErrSendAndAwaitTimeout):
-			status = http.StatusGatewayTimeout
-		case errors.Is(bindErr, serverdaemonbus.ErrConnectionClosed):
-			status = http.StatusServiceUnavailable
-		}
-		c.JSON(status, gin.H{
-			"error":             "bind_device_session_failed",
-			"device_session_id": res.Session.ID,
-		})
-		return
-	}
-	if err := s.MarkBound(c.Request.Context(), res.Session.ID); err != nil {
-		_ = s.Revoke(c.Request.Context(), res.Session.ID)
-		_ = notifier.Unbind(c.Request.Context(), UnbindInput{
-			Session: res.Session,
-			Reason:  "mark_bound_failed",
-		})
-		httperr.Internal(c, "devicebus.mark_bound", err)
-		return
-	}
-	for _, old := range res.ReplacedSessions {
-		_ = notifier.Unbind(c.Request.Context(), UnbindInput{
-			Session: old,
-			Reason:  "replaced",
-		})
 	}
 	c.Header("Cache-Control", "no-store")
 	c.Header("Pragma", "no-cache")
 	c.JSON(http.StatusCreated, gin.H{
-		"device_session_id": res.Session.ID,
+		"actor_id":          string(res.Registration.ActorID),
 		"token":             res.Token,
-		"expires_at":        res.Session.ExpiresAt,
+		"expires_at":        res.Registration.ExpiresAt,
 		"token_fingerprint": res.TokenFingerprint,
 	})
 }
 
-func (s *Service) handleRevoke(c *gin.Context) {
-	sid := c.Param("sid")
+func (s *Service) handleRevokeActor(c *gin.Context) {
 	u := identity.UserFrom(c)
-	row, getErr := s.Get(c.Request.Context(), sid)
-	if getErr != nil {
+	row, err := s.GetActor(c.Request.Context(), channel.ID(c.Param("chID")), actor.ActorID(c.Param("actorID")))
+	if err != nil {
 		status := http.StatusInternalServerError
-		if getErr == ErrSessionNotFound {
+		if errors.Is(err, ErrRegistrationNotFound) {
 			status = http.StatusNotFound
 		}
 		if status >= http.StatusInternalServerError {
-			httperr.Internal(c, "devicebus.revoke.get", getErr)
+			httperr.Internal(c, "devicebus.revoke_actor.get", err)
 			return
 		}
-		c.JSON(status, gin.H{
-			"error":         getErr.Error(),
-			"reject_reason": string(kerneldaemonbus.DeviceSessionRejectUnbindSessionUnknown),
-		})
+		c.JSON(status, gin.H{"error": err.Error(), "reject_reason": "actor_registration_unknown"})
 		return
 	}
-	if err := s.authorizeSession(c.Request.Context(), row, u.ID); err != nil {
+	if err := s.authorizeActor(c.Request.Context(), row, u.ID); err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
-	// T147 §A-S2 — best-effort daemon notification BEFORE flipping the
-	// authoritative row to revoked. If the daemon ack fails we still
-	// proceed with the local Revoke (idempotent): a stale mirror row
-	// inside a daemon process is acceptable because every subsequent
-	// device WS handshake re-validates against the server's row state.
-	if notifier := s.bindNotifier(); notifier != nil {
-		_ = notifier.Unbind(c.Request.Context(), UnbindInput{
-			Session: row,
-			Reason:  "revoked",
-		})
-	}
-	if err := s.Revoke(c.Request.Context(), sid); err != nil {
-		httperr.Internal(c, "devicebus.revoke", err)
+	if err := s.RevokeActor(c.Request.Context(), row.ChannelID, row.ActorID); err != nil && !errors.Is(err, ErrRegistrationNotFound) {
+		httperr.Internal(c, "devicebus.revoke_actor", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "revoked"})
 }
 
-func (s *Service) handleGet(c *gin.Context) {
-	row, err := s.Get(c.Request.Context(), c.Param("sid"))
+func (s *Service) handleGetActor(c *gin.Context) {
+	row, err := s.GetActor(c.Request.Context(), channel.ID(c.Param("chID")), actor.ActorID(c.Param("actorID")))
 	if err != nil {
 		status := http.StatusInternalServerError
-		if err == ErrSessionNotFound {
+		if errors.Is(err, ErrRegistrationNotFound) {
 			status = http.StatusNotFound
 		}
 		if status >= http.StatusInternalServerError {
-			httperr.Internal(c, "devicebus.get", err)
+			httperr.Internal(c, "devicebus.get_actor", err)
 			return
 		}
-		c.JSON(status, gin.H{
-			"error":         err.Error(),
-			"reject_reason": string(kerneldaemonbus.DeviceSessionRejectSessionUnknown),
-		})
+		c.JSON(status, gin.H{"error": err.Error(), "reject_reason": "actor_registration_unknown"})
 		return
 	}
 	u := identity.UserFrom(c)
-	if err := s.authorizeSession(c.Request.Context(), row, u.ID); err != nil {
+	if err := s.authorizeActor(c.Request.Context(), row, u.ID); err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"device_session_id": row.ID,
-		"device_id":         row.DeviceID,
-		"channel_id":        string(row.ChannelID),
-		"daemon_id":         string(row.DaemonID),
-		"state":             string(row.State),
-		"expires_at":        row.ExpiresAt,
-		"created_at":        row.CreatedAt,
+		"actor_id":    string(row.ActorID),
+		"channel_id":  string(row.ChannelID),
+		"daemon_id":   string(row.DaemonID),
+		"device_id":   row.DeviceID,
+		"device_type": row.DeviceType,
+		"expires_at":  row.ExpiresAt,
+		"created_at":  row.CreatedAt,
 	})
 }
 
@@ -203,7 +135,7 @@ func (s *Service) authorizeChannel(ctx context.Context, channelID, userID string
 	return channelaccess.Require(ctx, s.accessAuthorizer(), channelID, userID)
 }
 
-func (s *Service) authorizeSession(ctx context.Context, row Session, userID string) error {
+func (s *Service) authorizeActor(ctx context.Context, row ActorRegistration, userID string) error {
 	if row.UserID == userID {
 		return nil
 	}

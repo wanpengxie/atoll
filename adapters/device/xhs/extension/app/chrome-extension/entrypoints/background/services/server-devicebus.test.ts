@@ -1,7 +1,7 @@
 // Vitest unit tests for the v4 server-devicebus WS client (T147 §A-E).
 //
 // Coverage:
-//   - WS URL construction (`session_id` query; token in subprotocol)
+//   - WS URL construction (`actor_id` query; token in subprotocol)
 //   - happy path: inbound DeviceFrame{to_device, payload:Command} →
 //     handler → outbound DeviceFrame{from_device, payload:Callback}
 //   - unknown_cmd / handler throw → error Callback frame on the wire
@@ -85,7 +85,7 @@ function installFakeChromeStorage(): { store: Record<string, unknown> } {
 function makeConfig(over: Partial<ServerDeviceConfig> = {}): ServerDeviceConfig {
   return {
     wsEndpoint: 'wss://coagent.example.com/devicebus',
-    sessionId: 'sess-A',
+    actorId: 'sess-A',
     token: 'tok-secret',
     channelId: 'ch-1',
     autoReconnect: true,
@@ -174,10 +174,10 @@ afterEach(() => {
 // ─── URL builder + token redact ──────────────────────────────────────────
 
 describe('buildDeviceBusUrl', () => {
-  it('puts session_id in query and does NOT include token (R5-14)', () => {
+  it('puts actor_id in query and does NOT include token (R5-14)', () => {
     const url = buildDeviceBusUrl(makeConfig());
     expect(url).toContain('wss://coagent.example.com/devicebus');
-    expect(url).toContain('session_id=sess-A');
+    expect(url).toContain('actor_id=sess-A');
     // token must NOT appear in the URL — it rides in the WS subprotocol.
     expect(url).not.toContain('token=');
     expect(url).not.toContain('tok-secret');
@@ -187,8 +187,8 @@ describe('buildDeviceBusUrl', () => {
     expect(buildDeviceBusUrl(makeConfig({ wsEndpoint: '' }))).toBe('');
   });
 
-  it('returns empty when sessionId is missing', () => {
-    expect(buildDeviceBusUrl(makeConfig({ sessionId: '' }))).toBe('');
+  it('returns empty when actorId is missing', () => {
+    expect(buildDeviceBusUrl(makeConfig({ actorId: '' }))).toBe('');
   });
 
   it('returns empty when token is missing (token gate still applies)', () => {
@@ -222,8 +222,8 @@ describe('redactToken', () => {
   // build URLs with token=…; with R5-14 properly built URLs no longer
   // carry the token at all.
   it('masks ?token=… to ?token=*** when present (legacy URL shape)', () => {
-    expect(redactToken('wss://h/devicebus?session_id=s&token=secret')).toBe(
-      'wss://h/devicebus?session_id=s&token=***',
+    expect(redactToken('wss://h/devicebus?actor_id=s&token=secret')).toBe(
+      'wss://h/devicebus?actor_id=s&token=***',
     );
   });
 
@@ -238,8 +238,8 @@ describe('client sets token subprotocol on WS construct (R5-14)', () => {
     installFakeChromeStorage();
     const client = makeClient();
     const socket = await openClient(client);
-    // URL: session_id stays in query; token must NOT appear.
-    expect(socket.url).toContain('session_id=sess-A');
+    // URL: actor_id stays in query; token must NOT appear.
+    expect(socket.url).toContain('actor_id=sess-A');
     expect(socket.url).not.toContain('token=');
     // Subprotocols: real protocol + token slot.
     expect(socket.protocols).toEqual([
@@ -265,7 +265,7 @@ describe('handleToDeviceFrame', () => {
 
     const inbound: DeviceFrame = {
       direction: 'to_device',
-      device_session_id: 'sess-A',
+      actor_id: 'sess-A',
       channel_id: 'ch-1',
       request_id: 'req-1',
       correlation_id: 'req-1',
@@ -282,7 +282,7 @@ describe('handleToDeviceFrame', () => {
     expect(socket.sent).toHaveLength(1);
     const out = JSON.parse(socket.sent[0]) as DeviceFrame;
     expect(out.direction).toBe('from_device');
-    expect(out.device_session_id).toBe('sess-A');
+    expect(out.actor_id).toBe('sess-A');
     expect(out.channel_id).toBe('ch-1');
     expect(out.request_id).toBe('req-1');
     expect(out.correlation_id).toBe('req-1');
@@ -303,7 +303,7 @@ describe('handleToDeviceFrame', () => {
     socket.fire('message', {
       data: JSON.stringify({
         direction: 'to_device',
-        device_session_id: 'sess-A',
+        actor_id: 'sess-A',
         channel_id: 'ch-1',
         request_id: 'req-2',
         correlation_id: 'req-2',
@@ -339,7 +339,7 @@ describe('handleToDeviceFrame', () => {
     socket.fire('message', {
       data: JSON.stringify({
         direction: 'to_device',
-        device_session_id: 'sess-A',
+        actor_id: 'sess-A',
         channel_id: 'ch-1',
         request_id: 'req-3',
         correlation_id: 'req-3',
@@ -368,7 +368,7 @@ describe('handleToDeviceFrame', () => {
     socket.fire('message', {
       data: JSON.stringify({
         direction: 'to_device',
-        device_session_id: 'sess-A',
+        actor_id: 'sess-A',
         channel_id: 'ch-1',
         request_id: 'req-4',
         correlation_id: 'req-4',
@@ -391,7 +391,7 @@ describe('handleToDeviceFrame', () => {
     socket.fire('message', {
       data: JSON.stringify({
         direction: 'from_device',
-        device_session_id: 'sess-A',
+        actor_id: 'sess-A',
         channel_id: 'ch-1',
         payload: { ignored: true },
       }),
@@ -418,7 +418,7 @@ describe('postCallback', () => {
     expect(socket.sent).toHaveLength(1);
     const out = JSON.parse(socket.sent[0]) as DeviceFrame;
     expect(out.direction).toBe('from_device');
-    expect(out.device_session_id).toBe('sess-A');
+    expect(out.actor_id).toBe('sess-A');
     expect(out.channel_id).toBe('ch-1');
     expect(out.correlation_id).toBe('corr-A');
     expect((out.payload as any).status).toBe('ok');
@@ -481,7 +481,7 @@ describe('outbox enqueue + drain on reconnect', () => {
       const stale: OutboxEntry = {
         frame: {
           direction: 'from_device',
-          device_session_id: 'sess-A',
+          actor_id: 'sess-A',
           channel_id: 'ch-1',
           request_id: 'old',
           correlation_id: 'old',
@@ -492,7 +492,7 @@ describe('outbox enqueue + drain on reconnect', () => {
       const fresh: OutboxEntry = {
         frame: {
           direction: 'from_device',
-          device_session_id: 'sess-A',
+          actor_id: 'sess-A',
           channel_id: 'ch-1',
           request_id: 'fresh',
           correlation_id: 'fresh',
@@ -568,7 +568,7 @@ describe('connectOnce open+error race', () => {
 // close reconnect budget, and the race where a close handler fires
 // AFTER hardReset / identity swap and tries to respawn under the old
 // token. They use a multi-socket SocketFactory so we can observe what
-// URL (session_id / token) each connect attempt is targeting.
+// URL (actor_id / token) each connect attempt is targeting.
 
 function multiSocketCtor(): {
   ctor: typeof WebSocket;
@@ -588,7 +588,7 @@ describe('updateConfig identity swap (bind / rebind)', () => {
   it('setDeviceToken-style new identity cancels in-flight connect + closes prior socket before new opens', async () => {
     installFakeChromeStorage();
     const client = new CoagentServerDeviceClientForTest();
-    client.updateConfig(makeConfig({ sessionId: 'sess-OLD', token: 'tok-OLD' }));
+    client.updateConfig(makeConfig({ actorId: 'sess-OLD', token: 'tok-OLD' }));
     const { ctor, sockets } = multiSocketCtor();
     client.setWebSocketImpl(ctor);
 
@@ -598,13 +598,13 @@ describe('updateConfig identity swap (bind / rebind)', () => {
     const pOld = client.connect();
     await Promise.resolve();
     expect(sockets).toHaveLength(1);
-    // R5-14: session_id stays in URL; token rides in subprotocol slot.
-    expect(sockets[0].url).toContain('session_id=sess-OLD');
+    // R5-14: actor_id stays in URL; token rides in subprotocol slot.
+    expect(sockets[0].url).toContain('actor_id=sess-OLD');
     expect(sockets[0].protocols).toContain('token.tok-OLD');
 
     // Now swap identity via updateConfig — mirrors what
     // applyClients(cfg) does after the UI hands over a fresh token.
-    client.updateConfig(makeConfig({ sessionId: 'sess-NEW', token: 'tok-NEW' }));
+    client.updateConfig(makeConfig({ actorId: 'sess-NEW', token: 'tok-NEW' }));
 
     // The in-flight OLD promise must resolve (canceled) — without
     // the hard-reset fix, this would hang forever and the next
@@ -622,7 +622,7 @@ describe('updateConfig identity swap (bind / rebind)', () => {
     const pNew = client.connect();
     await Promise.resolve();
     expect(sockets).toHaveLength(2);
-    expect(sockets[1].url).toContain('session_id=sess-NEW');
+    expect(sockets[1].url).toContain('actor_id=sess-NEW');
     expect(sockets[1].protocols).toContain('token.tok-NEW');
     sockets[1].triggerOpen();
     const newRes = await pNew;
@@ -667,12 +667,12 @@ describe('unbindDevice full cleanup', () => {
     // Subsequent connect() must NOT short-circuit via the stale
     // connectInFlight; it must build a fresh WS attempt instead.
     // Restore the config so connect() doesn't bail on DEVICE_NOT_CONFIGURED.
-    client.updateConfig(makeConfig({ sessionId: 'sess-FRESH', token: 'tok-FRESH' }));
+    client.updateConfig(makeConfig({ actorId: 'sess-FRESH', token: 'tok-FRESH' }));
     const p2 = client.connect();
     await Promise.resolve();
     // A new socket must have been created (no hang).
     expect(sockets.length).toBeGreaterThanOrEqual(2);
-    expect(sockets[sockets.length - 1].url).toContain('session_id=sess-FRESH');
+    expect(sockets[sockets.length - 1].url).toContain('actor_id=sess-FRESH');
     sockets[sockets.length - 1].triggerOpen();
     const res2 = await p2;
     expect(res2.success).toBe(true);
@@ -729,7 +729,7 @@ describe('unbindDevice full cleanup', () => {
     }
 
     // Now bind a brand new identity — budget should be reset.
-    client.updateConfig(makeConfig({ sessionId: 'sess-NEW', token: 'tok-NEW' }));
+    client.updateConfig(makeConfig({ actorId: 'sess-NEW', token: 'tok-NEW' }));
     const p = client.connect();
     await Promise.resolve();
     sockets[sockets.length - 1].triggerOpen();
@@ -854,7 +854,7 @@ describe('stale socket close after generation bump', () => {
 
     // Identity swap (bind new token). This bumps generation and
     // closes the stale socket via hardReset.
-    client.updateConfig(makeConfig({ sessionId: 'sess-B', token: 'tok-B' }));
+    client.updateConfig(makeConfig({ actorId: 'sess-B', token: 'tok-B' }));
     const pCanceled = await p;
     expect(pCanceled.success).toBe(false);
 
@@ -869,7 +869,7 @@ describe('stale socket close after generation bump', () => {
 
     // No socket targeting sess-A should ever appear AFTER the swap.
     for (let i = 1; i < sockets.length; i++) {
-      expect(sockets[i].url).not.toContain('session_id=sess-A');
+      expect(sockets[i].url).not.toContain('actor_id=sess-A');
     }
   });
 });

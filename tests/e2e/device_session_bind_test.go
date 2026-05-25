@@ -10,33 +10,26 @@ import (
 	"github.com/wanpengxie/ActOS/tests/e2e/harness"
 )
 
-// TestE2E_DeviceSessionBind_FullFourStep covers phase-2 case 2.
+// TestE2E_DeviceActorRegister_FullHandshake covers phase-2 case 2.
 //
-// The four step bind flow (UI side, see ui/src/components/DeviceBind.jsx):
+// The registration + handshake flow (UI side, see ui/src/components/DeviceBind.jsx):
 //
 //  1. GET /api/placements/:chID — derive daemon_id (we already know it
 //     here so step 1 collapses to a placement lookup the harness owns).
-//  2. POST /api/channels/:chID/devices — server allocates device_session
-//     row in state=pending, signs token, ACKs daemon-side bind frame
-//     (notifier.Bind → daemonbus control.bind_device_session → daemon
-//     mirror Upsert → ack), then transitions pending→ready and returns
-//     the raw token to the caller.
-//  3. Mock extension opens wss://server/devicebus?session_id=&token=
+//  2. POST /api/channels/:chID/device-actor — server registers the
+//     adapter actor token and returns the raw token to the caller.
+//  3. Mock extension opens wss://server/devicebus?actor_id=...
 //     with Origin=chrome-extension://<test-id> — server's checkOrigin
 //     accepts because Options.DeviceAllowedOrigins pre-declared it.
-//  4. WS connect triggers MarkActive in the server (ready → active).
 //
 // Regression targets:
 //   - Origin allowlist drift (today's bug: missing `chrome-extension://*`
 //     entry → handshake 403 → DeviceBind UI stuck).
 //   - Token verification path (HMAC over hash) so an invalid token is
 //     rejected with 401 not 5xx.
-//   - daemon-side mirror sync — after bind ack the daemon must hold the
-//     session in its in-memory store before the WS open path tries to
-//     route inbound frames against it.
-//   - State row visibility: the device_sessions row in server.db carries
-//     the right channel_id + daemon_id + token_hash (16-hex prefix).
-func TestE2E_DeviceSessionBind_FullFourStep(t *testing.T) {
+//   - Registration row visibility: the server.db row carries the right
+//     actor_id + channel_id + daemon_id + token_hash.
+func TestE2E_DeviceActorRegister_FullHandshake(t *testing.T) {
 	s := harness.Start(t, harness.Options{
 		DeviceAllowedOrigins: []string{harness.MockExtensionOriginID},
 	})
@@ -51,38 +44,34 @@ func TestE2E_DeviceSessionBind_FullFourStep(t *testing.T) {
 	// The UI flow uses GET /api/placements/:chID; we shortcut via the
 	// harness sqlite read which exercises the same daemon_id stamp.
 	// BindChannel returns before daemon claim → placement.State="active"
-	// sync; poll until active so daemon is ready to receive bind.
+	// sync; poll until active so daemon is ready for device traffic.
 	placement := harness.EventuallyValue(t, "placement reaches active", 5*time.Second, func() (harness.PlacementRow, bool) {
 		p, ok := s.GetPlacement(channelID)
 		return p, ok && p.State == "active"
 	})
 
-	// Step 2 — issue a session.
+	// Step 2 — register an actor token.
 	deviceID := "device-" + uniqSuffix()
-	issued := s.IssueDeviceSession(channelID, deviceID, placement.DaemonID)
-	if issued.DeviceSessionID == "" || issued.Token == "" {
-		t.Fatalf("issue returned empty: %+v", issued)
+	issued := s.RegisterDeviceActor(channelID, deviceID, placement.DaemonID)
+	if issued.ActorID == "" || issued.Token == "" {
+		t.Fatalf("register returned empty: %+v", issued)
 	}
 	if issued.ExpiresAt < time.Now().UnixMilli() {
 		t.Fatalf("expires_at=%d already in the past", issued.ExpiresAt)
 	}
 
-	// device_sessions row should be in state=ready after the daemon ack.
-	row, ok := s.GetDeviceSession(issued.DeviceSessionID)
+	row, ok := s.GetDeviceActor(channelID, issued.ActorID)
 	if !ok {
-		t.Fatalf("device_sessions row missing for %s", issued.DeviceSessionID)
-	}
-	if row.State != "ready" {
-		t.Fatalf("device_sessions.state=%q want ready (daemon ack path broken)", row.State)
+		t.Fatalf("device actor row missing for %s", issued.ActorID)
 	}
 	if row.ChannelID != channelID {
-		t.Errorf("device_sessions.channel_id=%q want %q", row.ChannelID, channelID)
+		t.Errorf("device_actor_tokens.channel_id=%q want %q", row.ChannelID, channelID)
 	}
 	if row.DaemonID != placement.DaemonID {
-		t.Errorf("device_sessions.daemon_id=%q want %q", row.DaemonID, placement.DaemonID)
+		t.Errorf("device_actor_tokens.daemon_id=%q want %q", row.DaemonID, placement.DaemonID)
 	}
 	if row.DeviceID != deviceID {
-		t.Errorf("device_sessions.device_id=%q want %q", row.DeviceID, deviceID)
+		t.Errorf("device_actor_tokens.device_id=%q want %q", row.DeviceID, deviceID)
 	}
 	if len(row.TokenHash) != 64 { // HMAC-SHA-256 hex = 64 chars
 		t.Errorf("token_hash len=%d want 64", len(row.TokenHash))
@@ -92,40 +81,29 @@ func TestE2E_DeviceSessionBind_FullFourStep(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ext := harness.NewMockExtension(t, ctx, harness.MockExtensionConfig{
-		WSURL:     s.DevicebusWSURL(issued.DeviceSessionID, issued.Token),
-		SessionID: issued.DeviceSessionID,
+		WSURL:     s.DevicebusWSURL(issued.ActorID, issued.Token),
+		ActorID:   issued.ActorID,
 		Token:     issued.Token,
 		ChannelID: channelID,
 		DeviceID:  deviceID,
 	})
 	_ = ext // we don't dispatch commands in this case; the connect itself is the assertion
 
-	// Step 4 — server MarkActive transitions ready → active inside the
-	// HandleWS upgrader. Poll the row until it flips.
-	harness.Eventually(t, "device session reaches active", 5*time.Second, func() bool {
-		r, ok := s.GetDeviceSession(issued.DeviceSessionID)
-		return ok && r.State == "active"
-	})
-
 	// Bad-token guard: a malformed token must NOT promote a fresh
-	// session to active. Issue a second session, dial with the wrong
-	// token, expect dial to fail (we attempt via the harness ServerURL
+	// registration. Issue a second token, dial with the wrong token,
+	// expect dial to fail (we attempt via the harness ServerURL
 	// in a separate connection — using NewMockExtension would Fatal).
-	otherIssued := s.IssueDeviceSession(channelID, "device-other-"+uniqSuffix(), placement.DaemonID)
-	badURL := s.DevicebusWSURL(otherIssued.DeviceSessionID, "wrong-token-not-the-real-one")
+	otherIssued := s.RegisterDeviceActor(channelID, "device-other-"+uniqSuffix(), placement.DaemonID)
+	badURL := s.DevicebusWSURL(otherIssued.ActorID, "wrong-token-not-the-real-one")
 	if err := dialExpectingFailure(ctx, badURL, harness.MockExtensionOriginID); err == nil {
 		t.Fatalf("/devicebus accepted bogus token — server checkToken broken")
 	}
 
-	// Other-session row stays in ready (NOT active) because the dial
-	// was rejected before MarkActive ran.
-	other, ok := s.GetDeviceSession(otherIssued.DeviceSessionID)
+	other, ok := s.GetDeviceActor(channelID, otherIssued.ActorID)
 	if !ok {
-		t.Fatalf("other session row missing")
+		t.Fatalf("other actor row missing")
 	}
-	if other.State != "ready" {
-		t.Errorf("other session state=%q want ready (failed dial advanced state)", other.State)
-	}
+	_ = other
 }
 
 // dialExpectingFailure attempts a /devicebus handshake and returns

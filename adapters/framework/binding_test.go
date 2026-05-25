@@ -91,10 +91,9 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 				t.Fatalf("runtime_inbound_via_relay mctx.DeviceTransit nil")
 			}
 			frame := devicetransit.SendFrame{
-				ChannelID:       mctx.ChannelID,
-				DeviceSessionID: "device-1",
-				AdapterActorID:  mctx.AdapterActorID,
-				Body:            env.Payload,
+				ChannelID:      mctx.ChannelID,
+				AdapterActorID: mctx.AdapterActorID,
+				Body:           env.Payload,
 			}
 			seenFrame = &frame
 			_, err := mctx.DeviceTransit.Send(ctx, frame)

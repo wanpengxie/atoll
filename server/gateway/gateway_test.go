@@ -753,7 +753,7 @@ func TestHandleWriteMessageRejectUsesReasonHTTPStatus(t *testing.T) {
 	}
 }
 
-func TestDevicebusIssueRequiresChannelMembership(t *testing.T) {
+func TestDevicebusRegisterActorRequiresChannelMembership(t *testing.T) {
 	t.Parallel()
 	app := newTestApp(t)
 	srv := httptest.NewServer(app.Handler())
@@ -764,13 +764,13 @@ func TestDevicebusIssueRequiresChannelMembership(t *testing.T) {
 	bob := registerLoginAndCreateChannel(t, client, srv.URL, app, "bob-devbus@example.com")
 
 	req, _ := http.NewRequest(http.MethodPost,
-		srv.URL+"/api/channels/"+alice.channelID+"/devices",
+		srv.URL+"/api/channels/"+alice.channelID+"/device-actor",
 		strings.NewReader(`{"device_id":"dev-bob","device_type":"xhs","daemon_id":"d1"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: bob.session})
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("POST devices: %v", err)
+		t.Fatalf("POST device-actor: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusForbidden {
@@ -778,32 +778,7 @@ func TestDevicebusIssueRequiresChannelMembership(t *testing.T) {
 	}
 }
 
-func TestDevicebusIssueFailsClosedWithoutBindNotifier(t *testing.T) {
-	t.Parallel()
-	app := newTestApp(t)
-	app.Devicebus().SetBindNotifier(nil)
-	srv := httptest.NewServer(app.Handler())
-	defer srv.Close()
-
-	client := &http.Client{}
-	alice := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-devbus-nil-notifier@example.com")
-
-	req, _ := http.NewRequest(http.MethodPost,
-		srv.URL+"/api/channels/"+alice.channelID+"/devices",
-		strings.NewReader(`{"device_id":"dev-alice","device_type":"xhs","daemon_id":"d1"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: alice.session})
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("POST devices: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d want 503", resp.StatusCode)
-	}
-}
-
-func TestDevicebusSessionAccessRequiresOwnerOrChannelMembership(t *testing.T) {
+func TestDevicebusActorAccessRequiresOwnerOrChannelMembership(t *testing.T) {
 	t.Parallel()
 	app := newTestApp(t)
 	srv := httptest.NewServer(app.Handler())
@@ -814,19 +789,24 @@ func TestDevicebusSessionAccessRequiresOwnerOrChannelMembership(t *testing.T) {
 	bob := registerLoginAndCreateChannel(t, client, srv.URL, app, "bob-device-attacker@example.com")
 	aliceID := userIDByEmail(t, app, "alice-device-owner@example.com")
 
-	res, err := app.Devicebus().IssueSession(context.Background(), devicebus.IssueInput{
-		DeviceID: "dev-alice", DeviceType: "xhs.chrome_extension", ChannelID: channel.ID(alice.channelID), UserID: aliceID, DaemonID: "d1",
+	res, err := app.Devicebus().RegisterActor(context.Background(), devicebus.RegisterInput{
+		ActorID:    "tool:xhs-adapter",
+		DeviceID:   "dev-alice",
+		DeviceType: "xhs.chrome_extension",
+		ChannelID:  channel.ID(alice.channelID),
+		UserID:     aliceID,
+		DaemonID:   "d1",
 	})
 	if err != nil {
-		t.Fatalf("IssueSession: %v", err)
+		t.Fatalf("RegisterActor: %v", err)
 	}
 
 	for _, method := range []string{http.MethodGet, http.MethodDelete} {
-		req, _ := http.NewRequest(method, srv.URL+"/api/devices/"+res.Session.ID, nil)
+		req, _ := http.NewRequest(method, srv.URL+"/api/channels/"+alice.channelID+"/device-actor/"+string(res.Registration.ActorID), nil)
 		req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: bob.session})
 		resp, err := client.Do(req)
 		if err != nil {
-			t.Fatalf("%s devices: %v", method, err)
+			t.Fatalf("%s device-actor: %v", method, err)
 		}
 		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusForbidden {

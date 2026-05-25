@@ -702,24 +702,23 @@ func (s *Stack) DialPushWS() *websocket.Conn {
 	return ws
 }
 
-// IssueDeviceSessionResponse mirrors POST /api/channels/:chID/devices.
-type IssueDeviceSessionResponse struct {
-	DeviceSessionID string `json:"device_session_id"`
-	Token           string `json:"token"`
-	ExpiresAt       int64  `json:"expires_at"`
+// RegisterDeviceActorResponse mirrors POST /api/channels/:chID/device-actor.
+type RegisterDeviceActorResponse struct {
+	ActorID          string `json:"actor_id"`
+	Token            string `json:"token"`
+	ExpiresAt        int64  `json:"expires_at"`
+	TokenFingerprint string `json:"token_fingerprint"`
 }
 
-// IssueDeviceSession calls the gateway's device session issue endpoint
-// and returns the freshly minted session_id + raw token.  Wraps the four
-// step bind: (1) caller already knows the channel + daemon, (2) caller
-// uses the returned token to open a /devicebus WS handshake.
-func (s *Stack) IssueDeviceSession(channelID, deviceID, daemonIDArg string) IssueDeviceSessionResponse {
+// RegisterDeviceActor calls the gateway's actor registration endpoint
+// and returns the actor id + raw token used to open /devicebus.
+func (s *Stack) RegisterDeviceActor(channelID, deviceID, daemonIDArg string) RegisterDeviceActorResponse {
 	s.t.Helper()
 	if daemonIDArg == "" {
 		daemonIDArg = daemonID
 	}
-	var resp IssueDeviceSessionResponse
-	s.do("POST", "/api/channels/"+channelID+"/devices", map[string]any{
+	var resp RegisterDeviceActorResponse
+	s.do("POST", "/api/channels/"+channelID+"/device-actor", map[string]any{
 		"device_id":   deviceID,
 		"device_type": "xhs.chrome_extension",
 		"daemon_id":   daemonIDArg,
@@ -767,43 +766,42 @@ func (s *Stack) GetPlacement(channelID string) (PlacementRow, bool) {
 	return row, true
 }
 
-// DeviceSessionRow captures the columns device session bind tests
-// assert on. token_hash is included so tests can verify it equals the
-// HMAC over the raw token they received from IssueDeviceSession.
-type DeviceSessionRow struct {
-	ID        string
+// DeviceActorRow captures the columns device actor registration tests
+// assert on. token_hash is included so tests can verify a hashed token
+// was persisted rather than the raw credential.
+type DeviceActorRow struct {
+	ActorID   string
 	DeviceID  string
 	ChannelID string
 	DaemonID  string
-	State     string
+	Type      string
 	TokenHash string
 	ExpiresAt int64
 	CreatedAt int64
 }
 
-// GetDeviceSession reads the device_sessions row directly. Returns false
-// when no row exists. Used by case 2 to assert state=ready / active and
-// that the row carries the right channel + daemon ids.
-func (s *Stack) GetDeviceSession(sessionID string) (DeviceSessionRow, bool) {
+// GetDeviceActor reads the device_actor_tokens row directly. Returns false
+// when no row exists.
+func (s *Stack) GetDeviceActor(channelID, actorID string) (DeviceActorRow, bool) {
 	s.t.Helper()
 	db, err := sql.Open("sqlite", "file:"+s.ServerDB+"?mode=ro")
 	if err != nil {
 		s.t.Fatalf("harness: open server.db: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	var row DeviceSessionRow
+	var row DeviceActorRow
 	err = db.QueryRowContext(s.ctx, `
-		SELECT device_session_id, device_id, channel_id, daemon_id,
-		       state, token_hash, expires_at, created_at
-		FROM device_sessions WHERE device_session_id=?`, sessionID).Scan(
-		&row.ID, &row.DeviceID, &row.ChannelID, &row.DaemonID,
-		&row.State, &row.TokenHash, &row.ExpiresAt, &row.CreatedAt,
+		SELECT actor_id, device_id, channel_id, daemon_id,
+		       device_type, token_hash, expires_at, created_at
+		FROM device_actor_tokens WHERE channel_id=? AND actor_id=?`, channelID, actorID).Scan(
+		&row.ActorID, &row.DeviceID, &row.ChannelID, &row.DaemonID,
+		&row.Type, &row.TokenHash, &row.ExpiresAt, &row.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
-		return DeviceSessionRow{}, false
+		return DeviceActorRow{}, false
 	}
 	if err != nil {
-		s.t.Fatalf("harness: device session lookup: %v", err)
+		s.t.Fatalf("harness: device actor lookup: %v", err)
 	}
 	return row, true
 }
@@ -863,14 +861,14 @@ func (s *Stack) ChannelSqlitePathFor(daemonName, channelID string) string {
 func (s *Stack) ServerURLBase() string { return s.ServerURL }
 
 // DevicebusWSURL composes the wss/ws URL for the /devicebus endpoint
-// with the session_id + token query params.
-func (s *Stack) DevicebusWSURL(sessionID, token string) string {
+// with the actor_id query param.
+func (s *Stack) DevicebusWSURL(actorID, token string) string {
 	// impl-layer3 §6.5.1: token moves to Sec-WebSocket-Protocol slot
-	// (`coagent.device.v1, token.<token>`); URL only carries session_id.
+	// (`coagent.device.v1, token.<token>`); URL only carries actor_id.
 	// The token arg is kept in the signature so call sites stay stable.
 	_ = token
-	return fmt.Sprintf("ws://127.0.0.1:%d/devicebus?session_id=%s",
-		s.ServerPort, url.QueryEscape(sessionID))
+	return fmt.Sprintf("ws://127.0.0.1:%d/devicebus?actor_id=%s",
+		s.ServerPort, url.QueryEscape(actorID))
 }
 
 // RestartDaemon kills the daemon process and starts a fresh one with

@@ -26,30 +26,9 @@ var _ = context.TODO
 //     so the channel-local sqlite carries both the trigger and the
 //     request row in monotonic seq order.
 //
-// What this test does NOT pin (deferred):
-//
-//	The full round trip (mock extension receives the device frame,
-//	replies with a Callback, adapter writes the response envelope back
-//	to channel.sqlite) requires the daemon to receive the
-//	`device_session_id` at xhs.publish emit time. Plumbing it through
-//	needs one of:
-//	  (a) the mock bridge to read the device sessions from channel
-//	      sqlite (no IPC seam exists for that today), or
-//	  (b) the device session id to be set in the daemon's env BEFORE
-//	      the worker is spawned — but the device session is allocated
-//	      AFTER the daemon is up and bound, so the env can't carry it
-//	      without a daemon restart cycle that defeats the e2e budget.
-//
-// The owner's deferral note is in the phase-2 brief: "如果耗时太多
-// (>4 小时)，case 3 留 stub 标 TODO". This file IS the stub: it
-// guards the part of the wiring that case 1+2 produces (request
-// envelope reaches channel.sqlite), and leaves the remainder TODO.
-//
-// Owner action to complete the round trip: either add a daemon flag
-// `--default-device-session-id=<id>` that primes devicexhs.Config
-// .DefaultSession on boot, or add an IPC seam so the mock bridge can
-// pull the current device sessions from the channel-local sqlite at
-// react time. Either change unblocks the response leg.
+// This test pins the agent-emit leg. The full device round trip is
+// covered by adapter-focused e2e cases that register the device actor
+// and attach a mock extension before sending the request.
 func TestE2E_XHSPublish_AgentEmitsRequest(t *testing.T) {
 	s := harness.Start(t, harness.Options{
 		DeviceAllowedOrigins: []string{harness.MockExtensionOriginID},

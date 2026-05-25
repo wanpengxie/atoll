@@ -138,12 +138,12 @@ export function getDeviceInfo() {
 }
 
 /**
- * setDeviceToken — hand off a fresh session bundle. `expires_at` is
+ * setDeviceToken — hand off a fresh actor token bundle. `expires_at` is
  * informational (extension client doesn't auto-refresh in M1.6).
  */
 export function setDeviceToken({
   server_ws_url,
-  device_session_id,
+  actor_id,
   token,
   channel_id,
   user_id,
@@ -153,7 +153,7 @@ export function setDeviceToken({
   return sendMessage({
     action: 'setDeviceToken',
     server_ws_url,
-    device_session_id,
+    actor_id,
     token,
     channel_id,
     user_id,
@@ -164,7 +164,7 @@ export function setDeviceToken({
 
 /**
  * unbindDevice — tell the extension to drop its current binding.
- * Pairs with the server-side DELETE /api/devices/:sid revoke call.
+ * Pairs with the server-side device actor revoke call.
  */
 export function unbindDevice() {
   return sendMessage({ action: 'unbindDevice' });

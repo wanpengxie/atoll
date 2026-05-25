@@ -132,9 +132,9 @@ describe('CookieSyncService listener identity (M1.1 Fix-T4 §2)', () => {
 
 // R3-T4 FX7 / round-2 review codex#t59.2 — SyncCookiesTool.execute() must NOT
 // concatenate the daemon's response body verbatim into the user-visible message
-// (previous implementation `device session 已上报: ${bodyText}` leaked cookie
-// names + values). After the daemon-side redaction (channel-manager.js
-// deviceSessionUpdate), the response is `{ok:true, result:{user_id, login_state,
+  // (previous implementation `device state 已上报: ${bodyText}` leaked cookie
+  // names + values). After the daemon-side redaction (channel-manager.js
+  // deviceStateUpdate), the response is `{ok:true, result:{user_id, login_state,
 // cookie_count, last_updated_at, expires_at}}` and the extension renders only
 // the cookie count.
 describe('SyncCookiesTool.execute response handling (R3-T4 FX7)', () => {
@@ -218,7 +218,7 @@ describe('SyncCookiesTool.execute response handling (R3-T4 FX7)', () => {
     const text = result.content[0]?.text ?? '';
     const parsed = JSON.parse(text);
     expect(parsed.success).toBe(true);
-    expect(parsed.message).toBe('device session 已上报 (2 cookies)');
+    expect(parsed.message).toBe('device state 已上报 (2 cookies)');
     // Defense-in-depth: even the full serialized result must not leak raw cookie
     // values (cookieCount field on the wrapper is fine — it's an integer).
     const serialized = JSON.stringify(result);
@@ -241,7 +241,7 @@ describe('SyncCookiesTool.execute response handling (R3-T4 FX7)', () => {
     const result = await tool.execute();
     const parsed = JSON.parse(result.content[0]?.text ?? '');
     expect(parsed.success).toBe(true);
-    expect(parsed.message).toBe('device session 已上报');
+    expect(parsed.message).toBe('device state 已上报');
   });
 
   it('renders structured error message on daemon 4xx without leaking raw body', async () => {
@@ -293,7 +293,7 @@ describe('SyncCookiesTool.execute response handling (R3-T4 FX7)', () => {
     const tool = new SyncCookiesTool();
     const result = await tool.execute();
     const parsed = JSON.parse(result.content[0]?.text ?? '');
-    expect(parsed.message).toBe('device session 已上报 (2 cookies)');
+    expect(parsed.message).toBe('device state 已上报 (2 cookies)');
     expect(parsed.message).not.toContain('LEAKED');
     expect(parsed.message).not.toContain('ALSO_LEAKED');
     expect(parsed.message).not.toContain('web_session');

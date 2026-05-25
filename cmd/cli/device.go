@@ -23,12 +23,12 @@ func runDevice(args []string) {
 	}
 }
 
-// runDeviceRegister issues a device session for a channel via
-// POST /api/channels/:chID/devices and prints the returned token.
+// runDeviceRegister registers the device actor for a channel via
+// POST /api/channels/:chID/device-actor and prints the returned token.
 func runDeviceRegister(args []string) {
 	fs := flag.NewFlagSet("device register", flag.ExitOnError)
 	channelID := fs.String("channel", "", "channel id (required)")
-	deviceType := fs.String("type", "xhs", "device type (default 'xhs')")
+	deviceType := fs.String("type", "xhs.chrome_extension", "device type (default 'xhs.chrome_extension')")
 	daemonID := fs.String("daemon", "", "daemon id that will own this device (required)")
 	deviceID := fs.String("device-id", "", "stable device id (default: random uuid)")
 	serverURL, token := bindGlobalFlags(fs)
@@ -52,7 +52,7 @@ func runDeviceRegister(args []string) {
 		"daemon_id":   *daemonID,
 	}
 	var out map[string]any
-	if err := c.do("POST", "/api/channels/"+*channelID+"/devices", req, &out); err != nil {
+	if err := c.do("POST", "/api/channels/"+*channelID+"/device-actor", req, &out); err != nil {
 		fatal(err)
 	}
 	emitJSON(out)

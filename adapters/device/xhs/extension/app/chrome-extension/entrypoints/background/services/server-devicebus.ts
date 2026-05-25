@@ -1,14 +1,14 @@
 // services/server-devicebus.ts — coagent **server** devicebus WS client (v4).
 //
 // Protocol (impl-layer3 §6.5.1 — R5-14):
-//   - WS endpoint: wss://{server-host}/devicebus?session_id={sid}
+//   - WS endpoint: wss://{server-host}/devicebus?actor_id={actor_id}
 //   - Handshake:   Sec-WebSocket-Protocol: coagent.device.v1, token.{tok}
 //                  (token rides in WS subprotocol slot — NOT URL query,
 //                   to avoid leaking into proxy/access logs)
 //   - Inbound DeviceFrame (daemon → server → device):
 //       {
 //         direction: "to_device",
-//         device_session_id, channel_id,
+//         actor_id, channel_id,
 //         request_id, correlation_id,
 //         payload: <Command JSON> { type:"command", correlation_id, cmd, params },
 //         expires_at?: ms epoch
@@ -16,7 +16,7 @@
 //   - Outbound DeviceFrame (device → server → daemon):
 //       {
 //         direction: "from_device",
-//         device_session_id, channel_id,
+//         actor_id, channel_id,
 //         request_id, correlation_id,
 //         payload: <Callback JSON> { correlation_id, status, result?, error?, device_id? },
 //       }
@@ -65,7 +65,7 @@ import { saveConnectionStatus } from '../connection-state';
  */
 export interface DeviceFrame {
   direction: 'to_device' | 'from_device';
-  device_session_id: string;
+  actor_id: string;
   channel_id: string;
   request_id?: string;
   correlation_id?: string;
@@ -169,7 +169,7 @@ function isOutboxEntry(value: unknown): value is OutboxEntry {
   const f = v.frame as Record<string, unknown>;
   return (
     f.direction === 'from_device' &&
-    typeof f.device_session_id === 'string' &&
+    typeof f.actor_id === 'string' &&
     typeof f.channel_id === 'string' &&
     typeof v.enqueued_at === 'number'
   );
@@ -182,18 +182,18 @@ function isOutboxEntry(value: unknown): value is OutboxEntry {
  * background entrypoint composes it from `ConnectionConfig` (read from
  * chrome.storage.local) — see `index.ts` for the mapping.
  *
- * Required fields: `wsEndpoint`, `sessionId`, `token`, `channelId`.
- * `deviceSessionId` is the same value as the server-side device_session_id
- * (carried in every outbound DeviceFrame); it equals `sessionId` here —
+ * Required fields: `wsEndpoint`, `actorId`, `token`, `channelId`.
+ * `deviceActorId` is the same value as the server-side actor_id
+ * (carried in every outbound DeviceFrame); it equals `actorId` here —
  * server.devicebus uses one id for both WS handshake and frame routing.
  * `userId` is informational (forensic logging only).
  */
 export interface ServerDeviceConfig {
   /** Base WS URL, e.g. `wss://coagent.example.com/devicebus`. */
   wsEndpoint: string;
-  /** server-allocated device_session_id (= WS handshake `session_id`). */
-  sessionId: string;
-  /** server-issued bearer token (HMAC of session+channel+expiry, 24h TTL). */
+  /** server-allocated actor_id (= WS handshake `actor_id`). */
+  actorId: string;
+  /** server-issued bearer token for this actor registration. */
   token: string;
   /** channel_id this device is bound to — pass-through on every outbound
    *  DeviceFrame so the daemon-side `OnDeviceTransit` routes to the right
@@ -220,10 +220,10 @@ export const DEVICE_WS_SUBPROTOCOL = 'coagent.device.v1';
 export const DEVICE_WS_TOKEN_PREFIX = 'token.';
 
 /**
- * Build the v4 devicebus WS URL with `session_id` in the query string.
+ * Build the v4 devicebus WS URL with `actor_id` in the query string.
  * Per impl-layer3 §6.5.1 (R5-14) the bearer token does NOT go on the
  * URL — it rides in `Sec-WebSocket-Protocol` (see
- * `buildDeviceBusSubprotocols`). session_id is non-secret (forensics
+ * `buildDeviceBusSubprotocols`). actor_id is non-secret (forensics
  * correlation only) and stays in the URL.
  *
  * Returns "" when any required field is missing so callers can short-
@@ -231,15 +231,15 @@ export const DEVICE_WS_TOKEN_PREFIX = 'token.';
  */
 export function buildDeviceBusUrl(cfg: ServerDeviceConfig): string {
   const base = (cfg.wsEndpoint ?? '').trim();
-  const sid = (cfg.sessionId ?? '').trim();
+  const actor = (cfg.actorId ?? '').trim();
   const tok = (cfg.token ?? '').trim();
   // token is required at the config-validity gate, even though it no
   // longer goes on the URL — without it the subprotocol header would
   // be malformed and the upgrade would 400.
-  if (!base || !sid || !tok) return '';
+  if (!base || !actor || !tok) return '';
   try {
     const u = new URL(base);
-    u.searchParams.set('session_id', sid);
+    u.searchParams.set('actor_id', actor);
     return u.toString();
   } catch {
     return '';
@@ -332,9 +332,9 @@ class CoagentServerDeviceClient {
    * (pending connect promise resolvers, scheduled reconnect callbacks,
    * close-event handlers of stale sockets) capture the generation they
    * were spawned under and self-abort when `this.generation` has moved
-   * on. Fixes the stale-session reconnect-loop race documented in
+   * on. Fixes the stale-actor reconnect-loop race documented in
    * https://github.com/wanpengxie/ActOS issue: extension reconnects to a
-   * revoked session_id even after the UI hands over a fresh token.
+   * revoked actor_id even after the UI hands over a fresh token.
    */
   private generation = 0;
   /**
@@ -355,7 +355,7 @@ class CoagentServerDeviceClient {
 
   /**
    * Replace the device config. When the WS-handshake-affecting fields
-   * (`sessionId` / `token` / `wsEndpoint`) change vs the previous
+   * (`actorId` / `token` / `wsEndpoint`) change vs the previous
    * config, this is an atomic identity swap — we bump the generation
    * counter so any in-flight connect/reconnect attached to the previous
    * identity self-cancels, close the active socket, clear the reconnect
@@ -369,7 +369,7 @@ class CoagentServerDeviceClient {
     const next: ServerDeviceConfig = { ...config };
     const identityChanged =
       !prev ||
-      (prev.sessionId ?? '') !== (next.sessionId ?? '') ||
+      (prev.actorId ?? '') !== (next.actorId ?? '') ||
       (prev.token ?? '') !== (next.token ?? '') ||
       (prev.wsEndpoint ?? '') !== (next.wsEndpoint ?? '');
     this.config = next;
@@ -496,7 +496,7 @@ class CoagentServerDeviceClient {
         // Different-generation OR replaced-socket close: stale socket
         // from a previous identity that's being shut down — drop it
         // quietly. Critically we DO NOT settle()/scheduleReconnect()
-        // here, otherwise a revoked-session close lingering after
+        // here, otherwise a revoked-actor close lingering after
         // updateConfig() would respawn a stale-token reconnect.
         if (this.generation !== gen) return;
         if (this.socket !== socket) return;
@@ -576,7 +576,7 @@ class CoagentServerDeviceClient {
 
   /**
    * Hard reset triggered when the device identity changes (different
-   * sessionId / token / endpoint) or when the user explicitly unbinds.
+   * actorId / token / endpoint) or when the user explicitly unbinds.
    *
    * Atomically:
    *   - bumps the generation so all in-flight callbacks self-cancel
@@ -615,7 +615,7 @@ class CoagentServerDeviceClient {
   disconnect(): void {
     // disconnect is the explicit "stop and forget" — full hard reset
     // so a stray reconnect timer / pending promise from a prior
-    // session_id can't fire after the user unbinds. Previously this
+    // actor_id can't fire after the user unbinds. Previously this
     // only cleared shouldReconnect+timer+socket, leaving currentUrl
     // populated and connectInFlight hung; if the WS close handler ran
     // BEFORE disconnect (e.g. server revoked mid-flight), the close
@@ -775,7 +775,7 @@ class CoagentServerDeviceClient {
     const cfg = this.config;
     const out: DeviceFrame = {
       direction: 'from_device',
-      device_session_id: inbound.device_session_id || (cfg?.sessionId ?? ''),
+      actor_id: inbound.actor_id || (cfg?.actorId ?? ''),
       channel_id: inbound.channel_id || (cfg?.channelId ?? ''),
       request_id: inbound.request_id,
       correlation_id: inbound.correlation_id || body.correlation_id,
@@ -810,7 +810,7 @@ class CoagentServerDeviceClient {
    *
    * Recovery path (SW evict → cold start → state replay): the inbound
    * DeviceFrame metadata is no longer in memory, so the v4 client
-   * synthesises the outbound frame from `ConnectionConfig` (session_id +
+   * synthesises the outbound frame from `ConnectionConfig` (actor_id +
    * channel_id) + the persisted correlationId — the daemon's framework
    * routes the recovered callback by `payload.correlation_id` (= inbound
    * envelope.id), and the outer `correlation_id` slot also carries the
@@ -833,7 +833,7 @@ class CoagentServerDeviceClient {
     };
     const frame: DeviceFrame = {
       direction: 'from_device',
-      device_session_id: cfg.sessionId,
+      actor_id: cfg.actorId,
       channel_id: cfg.channelId,
       request_id: correlationId,
       correlation_id: correlationId,

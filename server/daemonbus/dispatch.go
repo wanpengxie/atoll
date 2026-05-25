@@ -48,7 +48,7 @@ type Handlers struct {
 	// emits the payload, server relays it to the device WS. The gateway
 	// decodes the devicetransit.SendFrame body and asks the
 	// devicebus.Service to relay it to the device WS keyed by
-	// SendFrame.DeviceSessionID.
+	// channel_id + adapter_actor_id.
 	OnDeviceTransitRecv func(ctx context.Context, conn *Connection, frame daemonbus.Frame) error
 }
 

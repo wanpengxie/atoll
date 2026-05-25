@@ -27,9 +27,9 @@
 //   - adapters/device/xhs imports only kernel/* + pkg/* + standard
 //     library + the sibling adapters/device/framework.
 //   - The envelope sender on every emitted response equals
-//     adapters/device/xhs.DefaultAdapterActorID. device_id /
-//     device_session_id stay inside the payload (L4 §2.6 — device is
-//     NOT an actor).
+//     adapters/device/xhs.DefaultAdapterActorID. Device connection identity
+//     stays in server/devicebus; payloads carry only business parameters
+//     (L4 §2.6 — device is NOT an actor).
 //
 // Authoritative spec references:
 //

@@ -26,13 +26,13 @@ const MockExtensionOriginID = "chrome-extension://e2e-test-extension-id-00000000
 // MockExtension decode failures — which is exactly the regression guard
 // we want.
 type DeviceFrame struct {
-	Direction       string          `json:"direction"`
-	DeviceSessionID string          `json:"device_session_id"`
-	ChannelID       string          `json:"channel_id"`
-	RequestID       string          `json:"request_id,omitempty"`
-	CorrelationID   string          `json:"correlation_id,omitempty"`
-	Payload         json.RawMessage `json:"payload"`
-	ExpiresAt       int64           `json:"expires_at,omitempty"`
+	Direction     string          `json:"direction"`
+	ActorID       string          `json:"actor_id"`
+	ChannelID     string          `json:"channel_id"`
+	RequestID     string          `json:"request_id,omitempty"`
+	CorrelationID string          `json:"correlation_id,omitempty"`
+	Payload       json.RawMessage `json:"payload"`
+	ExpiresAt     int64           `json:"expires_at,omitempty"`
 }
 
 // CommandPayload is the inner JSON the device extension sees in every
@@ -67,7 +67,7 @@ type CallbackPayload struct {
 type MockExtension struct {
 	t         *testing.T
 	conn      *websocket.Conn
-	sessionID string
+	actorID   string
 	channelID string
 	deviceID  string
 
@@ -81,13 +81,12 @@ type MockExtension struct {
 	onCommand func(CommandPayload) CallbackPayload
 }
 
-// MockExtensionConfig wires a MockExtension before Connect. SessionID,
+// MockExtensionConfig wires a MockExtension before Connect. ActorID,
 // Token, and the WS URL are required. ChannelID + DeviceID are stamped
-// into outbound frames so the mock matches the server-issued device
-// session row.
+// into outbound frames so the mock matches the server registration.
 type MockExtensionConfig struct {
 	WSURL     string
-	SessionID string
+	ActorID   string
 	Token     string
 	ChannelID string
 	DeviceID  string
@@ -107,8 +106,8 @@ type MockExtensionConfig struct {
 // handshake itself is broken — surface it).
 func NewMockExtension(t *testing.T, ctx context.Context, cfg MockExtensionConfig) *MockExtension {
 	t.Helper()
-	if cfg.SessionID == "" || cfg.Token == "" || cfg.WSURL == "" {
-		t.Fatalf("harness: MockExtension config missing session_id/token/ws_url: %+v", cfg)
+	if cfg.ActorID == "" || cfg.Token == "" || cfg.WSURL == "" {
+		t.Fatalf("harness: MockExtension config missing actor_id/token/ws_url: %+v", cfg)
 	}
 	origin := cfg.Origin
 	if origin == "" {
@@ -134,7 +133,7 @@ func NewMockExtension(t *testing.T, ctx context.Context, cfg MockExtensionConfig
 	m := &MockExtension{
 		t:         t,
 		conn:      conn,
-		sessionID: cfg.SessionID,
+		actorID:   cfg.ActorID,
 		channelID: cfg.ChannelID,
 		deviceID:  cfg.DeviceID,
 		commands:  make(chan CommandPayload, 16),
@@ -258,12 +257,12 @@ func (m *MockExtension) sendCallback(inbound DeviceFrame, body CallbackPayload) 
 	}
 	payload, _ := json.Marshal(body)
 	out := DeviceFrame{
-		Direction:       "from_device",
-		DeviceSessionID: m.sessionID,
-		ChannelID:       inbound.ChannelID,
-		RequestID:       inbound.RequestID,
-		CorrelationID:   inbound.CorrelationID,
-		Payload:         payload,
+		Direction:     "from_device",
+		ActorID:       m.actorID,
+		ChannelID:     inbound.ChannelID,
+		RequestID:     inbound.RequestID,
+		CorrelationID: inbound.CorrelationID,
+		Payload:       payload,
 	}
 	if out.ChannelID == "" {
 		out.ChannelID = m.channelID
@@ -312,6 +311,6 @@ func (m *MockExtension) WaitForCommand(name string, timeout time.Duration) Comma
 // Sprintf is a tiny helper exported so tests can include the mock's id
 // in failure messages without referencing private state.
 func (m *MockExtension) String() string {
-	return fmt.Sprintf("MockExtension(session=%s channel=%s device=%s)",
-		m.sessionID, m.channelID, m.deviceID)
+	return fmt.Sprintf("MockExtension(actor=%s channel=%s device=%s)",
+		m.actorID, m.channelID, m.deviceID)
 }

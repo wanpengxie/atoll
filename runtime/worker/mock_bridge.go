@@ -82,12 +82,6 @@ const (
 	// script emits before the terminal agent.text. Defaults to 2.
 	EnvKeyMockProgressCount = "COAGENT_MOCK_PROGRESS_COUNT"
 
-	// EnvKeyMockDeviceSessionID — when set, the xhs-publish script
-	// stamps this value into the request payload.device_session_id so
-	// the adapter can route the outbound `device_transit.recv` frame
-	// (impl-layer2 §5.3.2) to the right extension session. The harness
-	// sets this after issuing a device session.
-	EnvKeyMockDeviceSessionID = "COAGENT_MOCK_DEVICE_SESSION_ID"
 )
 
 // MockBridge is the deterministic Bridge implementation cmd/worker
@@ -386,9 +380,6 @@ func (m *MockBridge) reactXHSPublish(ctx context.Context, client *IPCClient, in 
 	body := map[string]any{
 		"title":   "hello",
 		"content": "world",
-	}
-	if sid := m.EnvLookup(EnvKeyMockDeviceSessionID); sid != "" {
-		body["device_session_id"] = sid
 	}
 	payload, _ := json.Marshal(body)
 	env := message.Envelope{

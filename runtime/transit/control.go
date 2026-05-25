@@ -44,17 +44,6 @@ type ControlHandlers struct {
 	// and sends control.update_members_ack.
 	OnUpdateMembers func(ctx context.Context, frame daemonbus.Frame, body UpdateMembersBody) UpdateMembersAckBody
 
-	// OnBindDeviceSession / OnUnbindDeviceSession handle the
-	// server → daemon device-session lifecycle frames (T147 §A-S2).
-	// The Dispatcher decodes the body, invokes the callback, and SENDS
-	// the returned ack as `control.bind_device_session_ack` /
-	// `control.unbind_device_session_ack` so the gateway HTTP request
-	// waiting on SendAndAwait wakes up. Both callbacks are nil-safe:
-	// when unset the Dispatcher synthesises a result=rejected ack with
-	// Reason=bind_internal_error / unbind_internal_error.
-	OnBindDeviceSession   func(ctx context.Context, frame daemonbus.Frame, body BindDeviceSessionBody) BindDeviceSessionAckBody
-	OnUnbindDeviceSession func(ctx context.Context, frame daemonbus.Frame, body UnbindDeviceSessionBody) UnbindDeviceSessionAckBody
-
 	// Unknown is invoked for any frame_type not handled above. May be
 	// nil — default is to drop silently.
 	Unknown func(ctx context.Context, frame daemonbus.Frame) error
@@ -260,82 +249,6 @@ func (d *Dispatcher) Dispatch(ctx context.Context, frame daemonbus.Frame) (err e
 		return d.client.Send(ctx, d.replyFrameID(frame),
 			daemonbus.FrameTypeControlUpdateMembersAck, ack)
 
-	case daemonbus.FrameTypeControlBindDeviceSession:
-		var body BindDeviceSessionBody
-		if err := DecodePayload(frame, &body); err != nil {
-			return fmt.Errorf("transit: decode control.bind_device_session: %w", err)
-		}
-		if body.FrameID == "" {
-			body.FrameID = frame.FrameID
-		}
-		var ack BindDeviceSessionAckBody
-		if d.handlers.OnBindDeviceSession == nil {
-			// Handler not wired — emit a structured reject so the
-			// server can tell "daemon does not implement bind" apart
-			// from "daemon refused this specific bind".
-			ack = BindDeviceSessionAckBody{
-				FrameID:         body.FrameID,
-				ChannelID:       body.ChannelID,
-				BindRequestID:   body.BindRequestID,
-				DeviceSessionID: body.DeviceSessionID,
-				Result:          daemonbus.DeviceSessionBindRejected,
-				Reason:          DeviceSessionRejectBindInternalError,
-				Detail:          "OnBindDeviceSession handler is nil",
-			}
-		} else {
-			ack = d.handlers.OnBindDeviceSession(ctx, frame, body)
-			if ack.FrameID == "" {
-				ack.FrameID = body.FrameID
-			}
-			if ack.ChannelID == "" {
-				ack.ChannelID = body.ChannelID
-			}
-			if ack.BindRequestID == "" {
-				ack.BindRequestID = body.BindRequestID
-			}
-			if ack.DeviceSessionID == "" {
-				ack.DeviceSessionID = body.DeviceSessionID
-			}
-		}
-		// FIX-2026-05-18: echo inbound envelope frame_id. See viewsync
-		// resync_response branch for the full root-cause comment.
-		return d.client.Send(ctx, d.replyFrameID(frame),
-			daemonbus.FrameTypeControlBindDeviceSessionAck, ack)
-
-	case daemonbus.FrameTypeControlUnbindDeviceSession:
-		var body UnbindDeviceSessionBody
-		if err := DecodePayload(frame, &body); err != nil {
-			return fmt.Errorf("transit: decode control.unbind_device_session: %w", err)
-		}
-		if body.FrameID == "" {
-			body.FrameID = frame.FrameID
-		}
-		var ack UnbindDeviceSessionAckBody
-		if d.handlers.OnUnbindDeviceSession == nil {
-			ack = UnbindDeviceSessionAckBody{
-				FrameID:         body.FrameID,
-				ChannelID:       body.ChannelID,
-				DeviceSessionID: body.DeviceSessionID,
-				Result:          daemonbus.DeviceSessionBindRejected,
-				Reason:          DeviceSessionRejectUnbindInternalError,
-				Detail:          "OnUnbindDeviceSession handler is nil",
-			}
-		} else {
-			ack = d.handlers.OnUnbindDeviceSession(ctx, frame, body)
-			if ack.FrameID == "" {
-				ack.FrameID = body.FrameID
-			}
-			if ack.ChannelID == "" {
-				ack.ChannelID = body.ChannelID
-			}
-			if ack.DeviceSessionID == "" {
-				ack.DeviceSessionID = body.DeviceSessionID
-			}
-		}
-		// FIX-2026-05-18: echo inbound envelope frame_id. See viewsync
-		// resync_response branch for the full root-cause comment.
-		return d.client.Send(ctx, d.replyFrameID(frame),
-			daemonbus.FrameTypeControlUnbindDeviceSessionAck, ack)
 	}
 
 	if daemonbus.CategoryOf(frame.FrameKind) == daemonbus.CategoryDeviceTransit {

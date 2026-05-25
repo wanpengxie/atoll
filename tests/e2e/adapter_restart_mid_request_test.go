@@ -41,7 +41,7 @@ func TestE2E_DaemonRestartMidXHSPublishRequest_RecoverPending(t *testing.T) {
 	})
 
 	deviceID := "device-" + uniqSuffix()
-	issued := s.IssueDeviceSession(channelID, deviceID, placement.DaemonID)
+	issued := s.RegisterDeviceActor(channelID, deviceID, placement.DaemonID)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -52,8 +52,8 @@ func TestE2E_DaemonRestartMidXHSPublishRequest_RecoverPending(t *testing.T) {
 
 	commandSeen := make(chan harness.CommandPayload, 1)
 	_ = harness.NewMockExtension(t, ctx, harness.MockExtensionConfig{
-		WSURL:     s.DevicebusWSURL(issued.DeviceSessionID, issued.Token),
-		SessionID: issued.DeviceSessionID,
+		WSURL:     s.DevicebusWSURL(issued.ActorID, issued.Token),
+		ActorID:   issued.ActorID,
 		Token:     issued.Token,
 		ChannelID: channelID,
 		DeviceID:  deviceID,
@@ -78,20 +78,14 @@ func TestE2E_DaemonRestartMidXHSPublishRequest_RecoverPending(t *testing.T) {
 		},
 	})
 
-	harness.Eventually(t, "device session active", 5*time.Second, func() bool {
-		row, ok := s.GetDeviceSession(issued.DeviceSessionID)
-		return ok && row.State == "active"
-	})
-
 	req := postRawMessage(t, s, channelID, map[string]any{
 		"id":       "msg-adapter-restart-1",
 		"type":     "xhs.publish",
 		"kind":     "request",
 		"audience": []string{"tool:xhs-adapter"},
 		"payload": map[string]any{
-			"device_session_id": issued.DeviceSessionID,
-			"title":             "restart recovery",
-			"content":           "callback after daemon restart",
+			"title":   "restart recovery",
+			"content": "callback after daemon restart",
 		},
 	})
 	if !req.Accepted || req.MessageID == "" {

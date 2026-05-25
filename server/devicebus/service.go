@@ -1,16 +1,5 @@
-// Package devicebus owns the server-side device session lifecycle:
-// session_id allocation, token issuance (HMAC over session_id +
-// channel_id + expiry), state transitions, and the transit-frame
-// forwarder that bridges device WebSockets to daemon adapters via
-// daemonbus device_transit.* frames.
-//
-// Authoritative spec: .dalek/pm/impl-layer2.md §5 plus the xhs business
-// binding in .dalek/pm/domain-xhs-spec.md.
-//
-// Key invariant: device_session_id is allocated by THIS package
-// (server side). daemon adapter holds only a local cache per
-// impl-layer2 §5. Transit frames carry the session_id; tokens travel
-// only between server and device.
+// Package devicebus owns the server-side actor registration used by
+// browser devices to attach to a channel-local adapter actor.
 package devicebus
 
 import (
@@ -29,8 +18,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
@@ -39,94 +26,40 @@ import (
 	"github.com/wanpengxie/ActOS/server/channelaccess"
 )
 
-// Default token TTL (30d). Configurable via Config.
 const defaultTokenTTL = 30 * 24 * time.Hour
 
-// defaultMaxSessionsPerUserChannel caps non-terminal sessions for one
-// (user_id, channel_id). Pending sessions count so failed bind storms cannot
-// grow the table without bound.
-const defaultMaxSessionsPerUserChannel = 8
-
-// State enumerates the impl-layer2 §5 lifecycle:
-//
-//	pending → ready → active → offline → expired / revoked
-type State string
-
-const (
-	StatePending State = "pending"
-	StateReady   State = "ready"
-	StateActive  State = "active"
-	StateOffline State = "offline"
-	StateExpired State = "expired"
-	StateRevoked State = "revoked"
-)
-
-// AllStates is the closed set for tests / state-machine assertions.
-var AllStates = []State{StatePending, StateReady, StateActive, StateOffline, StateExpired, StateRevoked}
-
-// Errors returned by Service.
 var (
-	ErrSessionNotFound       = errors.New("devicebus: session not found")
-	ErrTokenInvalid          = errors.New("devicebus: invalid token")
-	ErrSessionExpired        = errors.New("devicebus: session expired")
-	ErrSessionRevoked        = errors.New("devicebus: session revoked")
-	ErrSessionNotReady       = errors.New("devicebus: session not ready")
-	ErrSessionLimitExceeded  = errors.New("devicebus: session limit exceeded")
+	ErrRegistrationNotFound = errors.New("devicebus: actor registration not found")
+	ErrTokenInvalid         = errors.New("devicebus: invalid token")
+	ErrTokenExpired         = errors.New("devicebus: token expired")
 	ErrDeviceTypeUnsupported = errors.New("devicebus: device_type unsupported")
 )
 
-// Config tunes Service.
 type Config struct {
-	// TokenSecret is the HMAC key used to derive the token from
-	// session_id + channel_id + expiry. Required.
 	TokenSecret string
-	// TokenTTL overrides defaultTokenTTL. 0 → default.
-	TokenTTL time.Duration
-	// MaxSessionsPerUserChannel caps non-terminal sessions per
-	// (user_id, channel_id). 0 → default.
-	MaxSessionsPerUserChannel int
-	// AllowedOrigins is the exact Origin allowlist for browser WebSocket
-	// handshakes. Empty means deny browser-origin WS handshakes.
-	AllowedOrigins []string
-	// AllowMissingOrigin explicitly permits requests with no Origin header
-	// (for non-browser clients). The zero value is fail-closed.
+	TokenTTL    time.Duration
+
+	AllowedOrigins     []string
 	AllowMissingOrigin bool
 
-	// PingCadence overrides DefaultDevicePingCadence (tests). Zero =
-	// production default.
-	PingCadence time.Duration
-
-	// IdleReadTimeout overrides DefaultDeviceIdleReadTimeout (tests).
-	// Zero = production default.
+	PingCadence     time.Duration
 	IdleReadTimeout time.Duration
-
-	// PingWriteTimeout overrides DefaultDevicePingWriteTimeout (tests).
-	// Zero = production default.
 	PingWriteTimeout time.Duration
 
-	// Logger receives structured devicebus events. nil → slog.Default.
 	Logger *slog.Logger
 }
 
-// Service is the devicebus facade.
 type Service struct {
 	db  *sql.DB
 	cfg Config
 	now func() time.Time
 	rng io.Reader
 
-	tokenTTL                  time.Duration
-	maxSessionsPerUserChannel int
+	tokenTTL time.Duration
 
-	mu       sync.Mutex
-	sessions map[string]*Connection // session_id → live WS connection
-	connGen  atomic.Uint64
-
-	// notifierMu guards notifier. The notifier itself is composed late
-	// by the gateway (after Service construction) because daemonbus is
-	// not visible to this package — see SetBindNotifier.
-	notifierMu sync.RWMutex
-	notifier   BindNotifier
+	mu      sync.Mutex
+	routes  map[string]*Connection
+	connGen atomic.Uint64
 
 	accessMu sync.RWMutex
 	access   channelaccess.Authorizer
@@ -135,61 +68,8 @@ type Service struct {
 	log            *slog.Logger
 }
 
-// BindNotifier is the lifecycle hook the gateway implements so the
-// devicebus HTTP handlers can pump bind / unbind frames into daemonbus
-// without taking a direct dependency on the daemonbus package (which
-// lives at a higher composition layer and would create an import cycle).
-//
-// Wire one instance via Service.SetBindNotifier during gateway.New.
-// Bind is invoked after IssueSession succeeds and before MarkBound is
-// called; Unbind is invoked before Revoke. Both methods MUST be
-// idempotent on the daemon side because handleIssue / handleRevoke can
-// retry the call after a transient network failure.
-type BindNotifier interface {
-	// Bind sends control.bind_device_session to the daemon owning the
-	// session's channel and waits for the ack. Returns nil on result=accepted
-	// ack; a wrapped error on any failure (daemon not connected, ack
-	// timeout, daemon rejection). The caller (handleIssue) maps the
-	// error to HTTP 5xx and does NOT advance the session state.
-	Bind(ctx context.Context, in BindInput) error
-
-	// Unbind sends control.unbind_device_session to the daemon. Returns
-	// nil when the ack reports result=accepted OR when the daemon is no
-	// longer connected (best-effort tear-down: a fresh daemon reboot
-	// would not carry the mirror row anyway). Returns a wrapped error
-	// only on protocol / decode failures so the caller can surface a
-	// 5xx.
-	Unbind(ctx context.Context, in UnbindInput) error
-}
-
-// BindInput is the payload the gateway needs to construct the
-// daemonbus control.bind_device_session frame.
-type BindInput struct {
-	Session          Session
-	TokenFingerprint string
-}
-
-// UnbindInput is the payload for control.unbind_device_session.
-type UnbindInput struct {
-	Session Session
-	Reason  string
-}
-
-// AccessAuthorizer validates that an authenticated user may access a channel.
 type AccessAuthorizer = channelaccess.Authorizer
 
-// SetBindNotifier wires the lifecycle notifier. Safe to call multiple
-// times; a subsequent call replaces the previous binding (gateway
-// reload). Pass nil to clear the binding — handleIssue will then refuse
-// to issue sessions (HTTP 503).
-func (s *Service) SetBindNotifier(n BindNotifier) {
-	s.notifierMu.Lock()
-	s.notifier = n
-	s.notifierMu.Unlock()
-}
-
-// SetAccessAuthorizer wires the route-level channel access check. Safe to
-// replace at runtime for tests.
 func (s *Service) SetAccessAuthorizer(a channelaccess.Authorizer) {
 	s.accessMu.Lock()
 	s.access = a
@@ -202,49 +82,34 @@ func (s *Service) accessAuthorizer() channelaccess.Authorizer {
 	return s.access
 }
 
-// bindNotifier returns the currently wired notifier (or nil).
-func (s *Service) bindNotifier() BindNotifier {
-	s.notifierMu.RLock()
-	defer s.notifierMu.RUnlock()
-	return s.notifier
-}
-
-// NewService builds a Service.
 func NewService(db *sql.DB, cfg Config) *Service {
 	ttl := cfg.TokenTTL
 	if ttl <= 0 {
 		ttl = defaultTokenTTL
 	}
-	maxSessions := cfg.MaxSessionsPerUserChannel
-	if maxSessions <= 0 {
-		maxSessions = defaultMaxSessionsPerUserChannel
-	}
 	allowed := make(map[string]struct{}, len(cfg.AllowedOrigins))
 	for _, origin := range cfg.AllowedOrigins {
 		origin = strings.TrimSpace(origin)
-		if origin == "" {
-			continue
+		if origin != "" {
+			allowed[origin] = struct{}{}
 		}
-		allowed[origin] = struct{}{}
 	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Service{
-		db:                        db,
-		cfg:                       cfg,
-		now:                       time.Now,
-		rng:                       rand.Reader,
-		tokenTTL:                  ttl,
-		maxSessionsPerUserChannel: maxSessions,
-		sessions:                  map[string]*Connection{},
-		allowedOrigins:            allowed,
-		log:                       log.With("subsystem", "devicebus"),
+		db:             db,
+		cfg:            cfg,
+		now:            time.Now,
+		rng:            rand.Reader,
+		tokenTTL:       ttl,
+		routes:         map[string]*Connection{},
+		allowedOrigins: allowed,
+		log:            log.With("subsystem", "devicebus"),
 	}
 }
 
-// WithClock overrides the clock (tests).
 func (s *Service) WithClock(now func() time.Time) *Service {
 	s.now = now
 	return s
@@ -252,232 +117,225 @@ func (s *Service) WithClock(now func() time.Time) *Service {
 
 func (s *Service) nowMs() int64 { return s.now().UnixMilli() }
 
-// Session is the public projection of one device_sessions row.
-type Session struct {
-	ID             string
-	DeviceID       string
-	DeviceType     string
-	ChannelID      channel.ID
-	UserID         string
-	DaemonID       placement.DaemonID
-	AdapterActorID actor.ActorID
-	State          State
-	ExpiresAt      int64
-	CreatedAt      int64
+type ActorRegistration struct {
+	ActorID    actor.ActorID
+	ChannelID  channel.ID
+	UserID     string
+	DaemonID   placement.DaemonID
+	DeviceID   string
+	DeviceType string
+	ExpiresAt  int64
+	CreatedAt  int64
 }
 
-// IssueInput carries the issue-session call.
-type IssueInput struct {
-	DeviceID       string
-	DeviceType     string
-	ChannelID      channel.ID
-	UserID         string
-	DaemonID       placement.DaemonID
-	AdapterActorID actor.ActorID
+type RegisterInput struct {
+	ActorID    actor.ActorID
+	ChannelID  channel.ID
+	UserID     string
+	DaemonID   placement.DaemonID
+	DeviceID   string
+	DeviceType string
 }
 
-// IssueResult carries the new session + raw token. The raw token is
-// never re-derivable from the row (only its HMAC hash is stored). The
-// TokenFingerprint is a short hex prefix of the HMAC suitable for audit
-// logs and for the daemon-side mirror row (impl-layer2 §5 — daemon stores
-// the fingerprint, never the raw token).
-type IssueResult struct {
-	Session          Session
+type RegisterResult struct {
+	Registration     ActorRegistration
 	Token            string
 	TokenFingerprint string
-	// ReplacedSessions are same-device non-terminal sessions revoked during
-	// issue. The HTTP layer uses this to best-effort unbind daemon mirrors.
-	ReplacedSessions []Session
 }
 
-// TokenFingerprintLength is the number of hex characters retained from
-// the HMAC tail when populating IssueResult.TokenFingerprint and the
-// daemon-mirror DeviceSession.TokenFingerprint. 16 hex chars = 64 bits
-// — long enough to identify a token in audit logs without leaking the
-// signing material. Matches adapters/device/framework.FingerprintLength.
 const TokenFingerprintLength = 16
 
-// IssueSession allocates a fresh session_id + token, INSERTs the
-// device_sessions row in state=pending. Caller (gateway) should then
-// send `control.bind_device_session` to daemon to advance to ready.
-//
-// To keep issue idempotent for normal extension rebinds, existing
-// non-terminal sessions with the same (user_id, channel_id, device_id) are
-// revoked before the new row is inserted. Other devices are capped per
-// (user_id, channel_id) so pending/ready/active/offline rows cannot be
-// flooded indefinitely.
-func (s *Service) IssueSession(ctx context.Context, in IssueInput) (IssueResult, error) {
-	if in.DeviceID == "" || in.ChannelID == "" || in.UserID == "" || in.DaemonID == "" {
-		return IssueResult{}, fmt.Errorf("devicebus: device_id + channel_id + user_id + daemon_id required")
+func (s *Service) RegisterActor(ctx context.Context, in RegisterInput) (RegisterResult, error) {
+	if in.ActorID == "" {
+		in.ActorID = "tool:xhs-adapter"
+	}
+	if in.ChannelID == "" || in.UserID == "" || in.DaemonID == "" || in.DeviceID == "" {
+		return RegisterResult{}, fmt.Errorf("devicebus: actor_id + channel_id + user_id + daemon_id + device_id required")
 	}
 	if !devicetransit.IsXHSDeviceType(in.DeviceType) {
-		s.log.Warn("devicebus.issue_rejected",
+		s.log.Warn("devicebus.register_rejected",
 			"reason", "device_type_unsupported",
 			"request_id", requestctx.RequestID(ctx),
+			"actor_id", string(in.ActorID),
 			"device_id", in.DeviceID,
 			"device_type", in.DeviceType,
 			"channel_id", string(in.ChannelID),
 			"user_id", in.UserID,
 			"daemon_id", string(in.DaemonID),
 		)
-		return IssueResult{}, ErrDeviceTypeUnsupported
+		return RegisterResult{}, ErrDeviceTypeUnsupported
 	}
 	now := s.nowMs()
 	exp := s.now().Add(s.tokenTTL).UnixMilli()
-
-	sessID := uuid.NewString()
-	token, err := s.deriveToken(sessID, in.ChannelID, exp)
+	token, err := s.deriveToken()
 	if err != nil {
-		return IssueResult{}, err
+		return RegisterResult{}, err
 	}
-
-	adapterActorID := in.AdapterActorID
-	if adapterActorID == "" {
-		adapterActorID = "tool:xhs-adapter"
-	}
-	row := Session{
-		ID: sessID, DeviceID: in.DeviceID, DeviceType: in.DeviceType,
-		ChannelID: in.ChannelID, UserID: in.UserID, DaemonID: in.DaemonID,
-		AdapterActorID: adapterActorID, State: StatePending, ExpiresAt: exp, CreatedAt: now,
-	}
-
 	hashed := s.hashToken(token)
+	row := ActorRegistration{
+		ActorID: in.ActorID, ChannelID: in.ChannelID, UserID: in.UserID,
+		DaemonID: in.DaemonID, DeviceID: in.DeviceID, DeviceType: in.DeviceType,
+		ExpiresAt: exp, CreatedAt: now,
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return IssueResult{}, fmt.Errorf("devicebus: begin issue tx: %w", err)
+		return RegisterResult{}, fmt.Errorf("devicebus: begin register tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.ExecContext(
-		ctx,
-		`UPDATE device_sessions
-		    SET state = 'expired', last_state_at = ?
-		  WHERE user_id = ?
-		    AND channel_id = ?
-		    AND state IN ('pending','ready','active','offline')
-		    AND expires_at < ?`,
-		now, in.UserID, string(in.ChannelID), now,
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM device_actor_tokens WHERE actor_id = ? AND channel_id = ?`,
+		string(row.ActorID), string(row.ChannelID),
 	); err != nil {
-		return IssueResult{}, fmt.Errorf("devicebus: expire stale sessions during issue: %w", err)
+		return RegisterResult{}, fmt.Errorf("devicebus: replace actor token: %w", err)
 	}
-
-	replaced, err := sessionsForDevice(ctx, tx, in.UserID, in.ChannelID, in.DeviceID)
-	if err != nil {
-		return IssueResult{}, err
-	}
-	if len(replaced) > 0 {
-		if _, err := tx.ExecContext(
-			ctx,
-			`UPDATE device_sessions
-			    SET state = 'revoked', last_state_at = ?
-			  WHERE user_id = ?
-			    AND channel_id = ?
-			    AND device_id = ?
-			    AND state IN ('pending','ready','active','offline')`,
-			now, in.UserID, string(in.ChannelID), in.DeviceID,
-		); err != nil {
-			return IssueResult{}, fmt.Errorf("devicebus: revoke replaced sessions: %w", err)
-		}
-	}
-
-	var existing int
-	if err := tx.QueryRowContext(
-		ctx,
-		`SELECT COUNT(*)
-		   FROM device_sessions
-		  WHERE user_id = ?
-		    AND channel_id = ?
-		    AND state IN ('pending','ready','active','offline')`,
-		in.UserID, string(in.ChannelID),
-	).Scan(&existing); err != nil {
-		return IssueResult{}, fmt.Errorf("devicebus: count active sessions: %w", err)
-	}
-	if existing >= s.maxSessionsPerUserChannel {
-		return IssueResult{}, ErrSessionLimitExceeded
-	}
-
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO device_sessions (
-		   device_session_id, device_id, device_type, channel_id, user_id,
-		   daemon_id, adapter_actor_id, token_hash, state, expires_at, created_at, last_state_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		row.ID, row.DeviceID, row.DeviceType,
-		string(row.ChannelID), row.UserID, string(row.DaemonID),
-		string(row.AdapterActorID), hashed, string(row.State),
-		row.ExpiresAt, row.CreatedAt, row.CreatedAt,
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO device_actor_tokens (
+		  token_hash, actor_id, channel_id, user_id, daemon_id,
+		  device_id, device_type, expires_at, created_at, last_active_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+		hashed, string(row.ActorID), string(row.ChannelID), row.UserID,
+		string(row.DaemonID), row.DeviceID, row.DeviceType, row.ExpiresAt, row.CreatedAt,
 	); err != nil {
-		return IssueResult{}, fmt.Errorf("devicebus: insert session: %w", err)
+		return RegisterResult{}, fmt.Errorf("devicebus: insert actor token: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return IssueResult{}, fmt.Errorf("devicebus: commit issue: %w", err)
+		return RegisterResult{}, fmt.Errorf("devicebus: commit register: %w", err)
 	}
-	for _, old := range replaced {
-		s.closeCurrentConnection(old.ID)
-	}
-	s.log.Info("devicebus.token_issued",
+	s.closeCurrentConnection(row.ChannelID, row.ActorID)
+	s.log.Info("devicebus.actor_token_issued",
 		"request_id", requestctx.RequestID(ctx),
-		"device_session_id", row.ID,
-		"device_id", row.DeviceID,
-		"device_type", row.DeviceType,
+		"actor_id", string(row.ActorID),
 		"channel_id", string(row.ChannelID),
 		"user_id", row.UserID,
 		"daemon_id", string(row.DaemonID),
+		"device_id", row.DeviceID,
+		"device_type", row.DeviceType,
 		"expires_at", row.ExpiresAt,
-		"replaced_sessions", len(replaced),
 	)
-	return IssueResult{
-		Session:          row,
+	return RegisterResult{
+		Registration:     row,
 		Token:            token,
 		TokenFingerprint: fingerprintFromHash(hashed),
-		ReplacedSessions: replaced,
 	}, nil
 }
 
-func sessionsForDevice(ctx context.Context, tx *sql.Tx, userID string, channelID channel.ID, deviceID string) ([]Session, error) {
-	rows, err := tx.QueryContext(
-		ctx,
-		`SELECT device_session_id, device_id, device_type, channel_id, user_id,
-		        daemon_id, adapter_actor_id, state, expires_at, created_at
-		   FROM device_sessions
-		  WHERE user_id = ?
-		    AND channel_id = ?
-		    AND device_id = ?
-		    AND state IN ('pending','ready','active','offline')`,
-		userID, string(channelID), deviceID,
-	)
+func (s *Service) GetActor(ctx context.Context, channelID channel.ID, actorID actor.ActorID) (ActorRegistration, error) {
+	var row ActorRegistration
+	var chID, aID, daemonID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT actor_id, channel_id, user_id, daemon_id, device_id,
+		       device_type, expires_at, created_at
+		  FROM device_actor_tokens
+		 WHERE actor_id = ? AND channel_id = ?
+		 ORDER BY created_at DESC
+		 LIMIT 1`,
+		string(actorID), string(channelID),
+	).Scan(&aID, &chID, &row.UserID, &daemonID, &row.DeviceID,
+		&row.DeviceType, &row.ExpiresAt, &row.CreatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("devicebus: list replaced sessions: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []Session
-	for rows.Next() {
-		var (
-			row   Session
-			state string
-			chID  string
-			dID   string
-		)
-		if err := rows.Scan(&row.ID, &row.DeviceID, &row.DeviceType, &chID, &row.UserID,
-			&dID, (*string)(&row.AdapterActorID), &state, &row.ExpiresAt, &row.CreatedAt); err != nil {
-			return nil, fmt.Errorf("devicebus: scan replaced session: %w", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ActorRegistration{}, ErrRegistrationNotFound
 		}
-		row.ChannelID = channel.ID(chID)
-		row.DaemonID = placement.DaemonID(dID)
-		row.State = State(state)
-		out = append(out, row)
+		return ActorRegistration{}, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("devicebus: iterate replaced sessions: %w", err)
-	}
-	return out, nil
+	row.ActorID = actor.ActorID(aID)
+	row.ChannelID = channel.ID(chID)
+	row.DaemonID = placement.DaemonID(daemonID)
+	return row, nil
 }
 
-// fingerprintFromHash takes a hex-encoded HMAC and returns the leading
-// TokenFingerprintLength characters as the audit fingerprint. The full
-// hash is kept in the device_sessions row for verification; only the
-// truncated form leaves the server (daemon mirror + audit log).
+func (s *Service) RevokeActor(ctx context.Context, channelID channel.ID, actorID actor.ActorID) error {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM device_actor_tokens WHERE actor_id = ? AND channel_id = ?`,
+		string(actorID), string(channelID),
+	)
+	if err != nil {
+		return fmt.Errorf("devicebus: revoke actor token: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	s.closeCurrentConnection(channelID, actorID)
+	if n == 0 {
+		return ErrRegistrationNotFound
+	}
+	return nil
+}
+
+func (s *Service) ExpireDueTokens(ctx context.Context) error {
+	now := s.nowMs()
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT channel_id, actor_id FROM device_actor_tokens WHERE expires_at < ?`,
+		now,
+	)
+	if err != nil {
+		return fmt.Errorf("devicebus: list expired actor tokens: %w", err)
+	}
+	var expired []ActorRegistration
+	for rows.Next() {
+		var chID, actorID string
+		if err := rows.Scan(&chID, &actorID); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("devicebus: scan expired actor token: %w", err)
+		}
+		expired = append(expired, ActorRegistration{ChannelID: channel.ID(chID), ActorID: actor.ActorID(actorID)})
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("devicebus: close expired actor token rows: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("devicebus: iterate expired actor tokens: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM device_actor_tokens WHERE expires_at < ?`,
+		now,
+	); err != nil {
+		return fmt.Errorf("devicebus: expire actor tokens: %w", err)
+	}
+	for _, r := range expired {
+		s.closeCurrentConnection(r.ChannelID, r.ActorID)
+	}
+	return nil
+}
+
+func (s *Service) ValidateToken(ctx context.Context, actorID actor.ActorID, rawToken string) (ActorRegistration, error) {
+	hashed := s.hashToken(rawToken)
+	var row ActorRegistration
+	var chID, aID, daemonID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT actor_id, channel_id, user_id, daemon_id, device_id,
+		       device_type, expires_at, created_at
+		  FROM device_actor_tokens
+		 WHERE actor_id = ? AND token_hash = ?`,
+		string(actorID), hashed,
+	).Scan(&aID, &chID, &row.UserID, &daemonID, &row.DeviceID,
+		&row.DeviceType, &row.ExpiresAt, &row.CreatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.log.Warn("devicebus.token_invalid",
+				"reason", "token_hash_mismatch",
+				"request_id", requestctx.RequestID(ctx),
+				"actor_id", string(actorID),
+			)
+			return ActorRegistration{}, ErrTokenInvalid
+		}
+		return ActorRegistration{}, err
+	}
+	row.ActorID = actor.ActorID(aID)
+	row.ChannelID = channel.ID(chID)
+	row.DaemonID = placement.DaemonID(daemonID)
+	if s.nowMs() > row.ExpiresAt {
+		_ = s.RevokeActor(ctx, row.ChannelID, row.ActorID)
+		s.log.Warn("devicebus.token_invalid",
+			"reason", "expired",
+			"request_id", requestctx.RequestID(ctx),
+			"actor_id", string(row.ActorID),
+			"channel_id", string(row.ChannelID),
+			"expires_at", row.ExpiresAt,
+		)
+		return ActorRegistration{}, ErrTokenExpired
+	}
+	return row, nil
+}
+
 func fingerprintFromHash(hashed string) string {
 	if len(hashed) <= TokenFingerprintLength {
 		return hashed
@@ -485,272 +343,7 @@ func fingerprintFromHash(hashed string) string {
 	return hashed[:TokenFingerprintLength]
 }
 
-// MarkBound advances pending → ready when daemon ACKs
-// control.bind_device_session.
-func (s *Service) MarkBound(ctx context.Context, sessionID string) error {
-	return s.transition(ctx, sessionID, StatePending, StateReady)
-}
-
-// MarkActive advances ready/offline → active when the device WS
-// connects with a valid token.
-func (s *Service) MarkActive(ctx context.Context, sessionID string) error {
-	now := s.nowMs()
-	res, err := s.db.ExecContext(
-		ctx,
-		`UPDATE device_sessions
-		    SET state = 'active', last_state_at = ?
-			  WHERE device_session_id = ?
-			    AND state IN ('ready','offline','active')`,
-		now, sessionID,
-	)
-	if err != nil {
-		return fmt.Errorf("devicebus: mark active: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrSessionNotFound
-	}
-	return nil
-}
-
-// MarkOffline transitions active → offline when device WS drops.
-func (s *Service) MarkOffline(ctx context.Context, sessionID string) error {
-	return s.transition(ctx, sessionID, StateActive, StateOffline)
-}
-
-// Revoke transitions any non-terminal state → revoked. Called when
-// user explicitly revokes or channel is deleted.
-func (s *Service) Revoke(ctx context.Context, sessionID string) error {
-	now := s.nowMs()
-	_, err := s.db.ExecContext(
-		ctx,
-		`UPDATE device_sessions
-		    SET state = 'revoked', last_state_at = ?
-		  WHERE device_session_id = ?
-		    AND state NOT IN ('expired','revoked')`,
-		now, sessionID,
-	)
-	if err != nil {
-		return fmt.Errorf("devicebus: revoke: %w", err)
-	}
-	s.closeCurrentConnection(sessionID)
-	return nil
-}
-
-// ExpireDueSessions transitions pending/ready/active/offline → expired
-// when expires_at < now. Pending rows are included so a crash between
-// server INSERT and daemon bind cannot leak forever.
-func (s *Service) ExpireDueSessions(ctx context.Context) error {
-	now := s.nowMs()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("devicebus: begin expire tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	rows, err := tx.QueryContext(
-		ctx,
-		`SELECT device_session_id
-		   FROM device_sessions
-		  WHERE state IN ('pending','ready','active','offline')
-		    AND expires_at < ?`,
-		now,
-	)
-	if err != nil {
-		return fmt.Errorf("devicebus: list expiring sessions: %w", err)
-	}
-	var expiredIDs []string
-	for rows.Next() {
-		var sessionID string
-		if err := rows.Scan(&sessionID); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("devicebus: scan expiring session: %w", err)
-		}
-		expiredIDs = append(expiredIDs, sessionID)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("devicebus: close expiring rows: %w", err)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("devicebus: iterate expiring sessions: %w", err)
-	}
-
-	if _, err := tx.ExecContext(
-		ctx,
-		`UPDATE device_sessions
-		    SET state = 'expired', last_state_at = ?
-		  WHERE state IN ('pending','ready','active','offline')
-		    AND expires_at < ?`,
-		now, now,
-	); err != nil {
-		return fmt.Errorf("devicebus: expire: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("devicebus: commit expire: %w", err)
-	}
-	for _, sessionID := range expiredIDs {
-		s.closeCurrentConnection(sessionID)
-	}
-	return nil
-}
-
-func (s *Service) expireSessionIfDue(ctx context.Context, sessionID string, now int64) error {
-	_, err := s.db.ExecContext(
-		ctx,
-		`UPDATE device_sessions
-		    SET state = 'expired', last_state_at = ?
-		  WHERE device_session_id = ?
-		    AND state IN ('pending','ready','active','offline')
-		    AND expires_at < ?`,
-		now, sessionID, now,
-	)
-	if err != nil {
-		return fmt.Errorf("devicebus: expire session: %w", err)
-	}
-	return nil
-}
-
-// Get returns the row for sessionID.
-func (s *Service) Get(ctx context.Context, sessionID string) (Session, error) {
-	var (
-		row   Session
-		state string
-		chID  string
-		dID   string
-	)
-	err := s.db.QueryRowContext(
-		ctx,
-		`SELECT device_session_id, device_id, device_type, channel_id, user_id,
-		        daemon_id, adapter_actor_id, state, expires_at, created_at
-		   FROM device_sessions WHERE device_session_id = ?`,
-		sessionID,
-	).Scan(&row.ID, &row.DeviceID, &row.DeviceType, &chID, &row.UserID,
-		&dID, (*string)(&row.AdapterActorID), &state, &row.ExpiresAt, &row.CreatedAt)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Session{}, ErrSessionNotFound
-		}
-		return Session{}, err
-	}
-	row.ChannelID = channel.ID(chID)
-	row.DaemonID = placement.DaemonID(dID)
-	row.State = State(state)
-	return row, nil
-}
-
-// ValidateToken returns the Session iff the raw token matches the stored
-// hash, the session has not expired, and the durable state allows a WS
-// handshake: ready (first connect), active (duplicate connect replacing the
-// previous socket), or offline (reconnect).
-func (s *Service) ValidateToken(ctx context.Context, sessionID, rawToken string) (Session, error) {
-	row, err := s.Get(ctx, sessionID)
-	if err != nil {
-		return Session{}, err
-	}
-
-	var stored string
-	if err := s.db.QueryRowContext(
-		ctx,
-		`SELECT token_hash FROM device_sessions WHERE device_session_id = ?`,
-		sessionID,
-	).Scan(&stored); err != nil {
-		return Session{}, err
-	}
-	if !hmac.Equal([]byte(stored), []byte(s.hashToken(rawToken))) {
-		s.log.Warn("devicebus.token_invalid",
-			"reason", "token_hash_mismatch",
-			"request_id", requestctx.RequestID(ctx),
-			"device_session_id", sessionID,
-			"channel_id", string(row.ChannelID),
-			"device_id", row.DeviceID,
-			"device_type", row.DeviceType,
-		)
-		return Session{}, ErrTokenInvalid
-	}
-
-	if s.now().UnixMilli() > row.ExpiresAt {
-		s.log.Warn("devicebus.token_invalid",
-			"reason", "expired",
-			"request_id", requestctx.RequestID(ctx),
-			"device_session_id", sessionID,
-			"channel_id", string(row.ChannelID),
-			"device_id", row.DeviceID,
-			"expires_at", row.ExpiresAt,
-		)
-		return Session{}, ErrSessionExpired
-	}
-	switch row.State {
-	case StateReady, StateActive, StateOffline:
-		return row, nil
-	case StateRevoked:
-		s.log.Warn("devicebus.token_invalid",
-			"reason", "revoked",
-			"request_id", requestctx.RequestID(ctx),
-			"device_session_id", sessionID,
-			"channel_id", string(row.ChannelID),
-			"device_id", row.DeviceID,
-		)
-		return Session{}, ErrSessionRevoked
-	case StateExpired:
-		s.log.Warn("devicebus.token_invalid",
-			"reason", "expired_state",
-			"request_id", requestctx.RequestID(ctx),
-			"device_session_id", sessionID,
-			"channel_id", string(row.ChannelID),
-			"device_id", row.DeviceID,
-		)
-		return Session{}, ErrSessionExpired
-	default:
-		s.log.Warn("devicebus.token_invalid",
-			"reason", "not_ready",
-			"request_id", requestctx.RequestID(ctx),
-			"device_session_id", sessionID,
-			"channel_id", string(row.ChannelID),
-			"device_id", row.DeviceID,
-			"state", string(row.State),
-		)
-		return Session{}, ErrSessionNotReady
-	}
-}
-
-// transition is the generic state-machine helper.
-func (s *Service) transition(ctx context.Context, sessionID string, from, to State) error {
-	now := s.nowMs()
-	res, err := s.db.ExecContext(
-		ctx,
-		`UPDATE device_sessions
-		    SET state = ?, last_state_at = ?
-		  WHERE device_session_id = ? AND state = ?`,
-		string(to), now, sessionID, string(from),
-	)
-	if err != nil {
-		return fmt.Errorf("devicebus: transition %s→%s: %w", from, to, err)
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrSessionNotFound
-	}
-	return nil
-}
-
-// deriveToken returns a random 32-byte opaque bearer token (hex-
-// encoded, 64 chars). The raw token is handed back to the device
-// once; the server persists only HMAC-SHA-256(raw, TokenSecret) via
-// hashToken (see below), so a compromised store row cannot be
-// replayed against the device WS endpoint.
-//
-// FIX-T10 spec alignment: an earlier draft of launch-ticket notes
-// described `token.go` as "HMAC over device_id + channel_id +
-// expiry". That wording suggested a deterministic derivation, which
-// would (a) leak token recoverability to anyone with the secret and
-// (b) make rotation a global event. The spec was updated alongside
-// this implementation to describe the actual model: random opaque
-// token + server-side HMAC at rest. The sessionID / channelID /
-// expiresMs parameters are kept on the signature for call-site
-// readability and forward compatibility (future versions may bind
-// the random token to a session-scoped MAC), but they are NOT mixed
-// into the token value itself.
-func (s *Service) deriveToken(sessionID string, channelID channel.ID, expiresMs int64) (string, error) {
+func (s *Service) deriveToken() (string, error) {
 	buf := make([]byte, 32)
 	if _, err := io.ReadFull(s.rng, buf); err != nil {
 		return "", fmt.Errorf("devicebus: rng: %w", err)
@@ -758,10 +351,12 @@ func (s *Service) deriveToken(sessionID string, channelID channel.ID, expiresMs 
 	return hex.EncodeToString(buf), nil
 }
 
-// hashToken returns the HMAC-SHA-256 hex of raw token using
-// TokenSecret as the key.
 func (s *Service) hashToken(raw string) string {
 	mac := hmac.New(sha256.New, []byte(s.cfg.TokenSecret))
-	mac.Write([]byte(raw))
+	_, _ = mac.Write([]byte(raw))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func routeKey(channelID channel.ID, actorID actor.ActorID) string {
+	return string(channelID) + "\x00" + string(actorID)
 }

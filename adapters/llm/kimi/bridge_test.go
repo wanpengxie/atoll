@@ -172,7 +172,7 @@ func TestBuildBasePrompt_WithDomain(t *testing.T) {
 
 // TestBuildBasePrompt_WithChannelContext exercises the channel-context
 // appendix (M1.6 follow-up — agent self-awareness fix). Asserts that
-// actor_registry rows, type_registry rows, and device_sessions rows
+// actor_registry rows, type_registry rows, and optional device actor rows
 // render into the prompt as markdown so the LLM can answer "what
 // tools do I have / who else is in this channel" without exploring
 // host filesystem.
@@ -192,7 +192,7 @@ func TestBuildBasePrompt_WithChannelContext(t *testing.T) {
 			{Type: "xhs.note.fetch", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "runtime_inbound_via_relay", AllowedKinds: []string{"request", "response"}},
 		},
 		Devices: []kimi.DeviceInfo{
-			{SessionID: "de67872c", DeviceID: "chrome-default", DeviceType: "xhs-chrome", State: "active"},
+			{ActorID: "tool:xhs-adapter", DeviceID: "chrome-default", DeviceType: "xhs-chrome", Status: "connected"},
 		},
 	}
 	got := kimi.BuildBasePrompt("xhs-creator", "domain body", ctx)
@@ -207,9 +207,9 @@ func TestBuildBasePrompt_WithChannelContext(t *testing.T) {
 		"300000",
 		"xhs.search",
 		"xhs.note.fetch",
-		"## Active device sessions",
-		"de67872c",
-		"state=active",
+		"## Device actors",
+		"tool:xhs-adapter",
+		"status=connected",
 		"domain body",
 	} {
 		if !strings.Contains(got, want) {

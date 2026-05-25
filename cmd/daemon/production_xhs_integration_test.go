@@ -47,8 +47,6 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	sessionStore := deviceframework.NewInMemorySessionStore()
-	binder := NewDeviceSessionBinder(sessionStore)
 	dataDir := t.TempDir()
 	channelsDir := filepath.Join(dataDir, "channels")
 	cfg := runtime.DaemonConfig{
@@ -68,9 +66,7 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 				DomainPrompt:      xhs.DomainPrompt(),
 			},
 		},
-		OnChannelBoot:         wireAdapterFramework(DeviceXHSFactory(sessionStore, devicexhs.Config{})),
-		OnBindDeviceSession:   binder.OnBind,
-		OnUnbindDeviceSession: binder.OnUnbind,
+		OnChannelBoot: wireAdapterFramework(DeviceXHSFactory(devicexhs.Config{})),
 	}
 	d, err := runtime.AssembleDaemon(ctx, cfg)
 	if err != nil {
@@ -91,27 +87,21 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	assertProductionXHSBindings(t, ctx, db)
 
-	const sessionID devicetransit.DeviceSessionID = "sess-prod-xhs"
-	bindDeviceSession(t, ctx, d, srv, sessionID, channel.ID(channelID))
-	if err := sessionStore.SetState(ctx, sessionID, deviceframework.StateActive, nowMs()); err != nil {
-		t.Fatalf("activate session: %v", err)
-	}
-
 	// xhs.publish request payload (domain-xhs-spec §1.1) carries
 	// title + content for the production extension path. Per Level A
 	// (proto-layer0 §1.4.1) the protocol layer does not validate
 	// payload contents; payload consistency is enforced by the adapter
 	// boundary's per-type allow-lists, not by the harness.
 	ack, send := writeRequestAndWaitForDeviceSend(t, ctx, d, srv, channelID, "req-prod-xhs", "user:alice",
-		devicexhs.TypePublish, []byte(`{"title":"hello","content":"world","device_session_id":"sess-prod-xhs"}`))
+		devicexhs.TypePublish, []byte(`{"title":"hello","content":"world"}`))
 	if !ack.Accepted {
 		t.Fatalf("write_message rejected: reason=%s detail=%s", ack.RejectReason, ack.RejectDetail)
 	}
 	if send.ChannelID != channel.ID(channelID) {
 		t.Errorf("send.ChannelID=%q want %q", send.ChannelID, channelID)
 	}
-	if send.DeviceSessionID != sessionID {
-		t.Errorf("send.DeviceSessionID=%q want %q", send.DeviceSessionID, sessionID)
+	if send.AdapterActorID != devicexhs.DefaultAdapterActorID {
+		t.Errorf("send.AdapterActorID=%q want %q", send.AdapterActorID, devicexhs.DefaultAdapterActorID)
 	}
 	var transitBody deviceframework.DeviceTransitBody
 	if err := json.Unmarshal(send.Body, &transitBody); err != nil {
@@ -126,9 +116,6 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 	}
 	if cmd.Type != devicexhs.CommandWireType || cmd.Cmd != "publish" {
 		t.Fatalf("device command=%+v want command/publish", cmd)
-	}
-	if _, ok := cmd.Params["device_session_id"]; ok {
-		t.Fatalf("device_session_id leaked into device params: %+v", cmd.Params)
 	}
 }
 
@@ -160,46 +147,6 @@ func assertProductionXHSBindings(t *testing.T, ctx context.Context, db *sql.DB) 
 	}
 	if binding != string(actor.BindingRuntimeInboundViaRelay) {
 		t.Fatalf("type_registry xhs.publish binding=%q want %q", binding, actor.BindingRuntimeInboundViaRelay)
-	}
-}
-
-func bindDeviceSession(
-	t *testing.T,
-	ctx context.Context,
-	d *runtime.Daemon,
-	srv *transit.MockServer,
-	sessionID devicetransit.DeviceSessionID,
-	channelID channel.ID,
-) {
-	t.Helper()
-	body := transit.BindDeviceSessionBody{
-		FrameID:          daemonbus.FrameID("frame-bind-" + string(sessionID)),
-		BindRequestID:    "bind-req-" + string(sessionID),
-		DeviceSessionID:  sessionID,
-		ChannelID:        channelID,
-		DeviceID:         "device-" + string(sessionID),
-		DeviceType:       "xhs.chrome_extension",
-		DaemonID:         "daemon-prod-xhs",
-		TokenFingerprint: "prod123456789abc",
-		BoundAt:          nowMs(),
-		ExpiresAt:        nowMs() + 60_000,
-	}
-	frame, err := transit.Encode("frame-srv-bind-"+string(sessionID),
-		daemonbus.FrameTypeControlBindDeviceSession,
-		"server", d.Transit().Epoch(), nowMs(), body)
-	if err != nil {
-		t.Fatalf("encode bind: %v", err)
-	}
-	if err := srv.SendToDaemon(ctx, frame); err != nil {
-		t.Fatalf("SendToDaemon bind: %v", err)
-	}
-	ackFrame := waitForAck(t, ctx, srv, daemonbus.FrameTypeControlBindDeviceSessionAck)
-	var ack transit.BindDeviceSessionAckBody
-	if err := transit.DecodePayload(ackFrame, &ack); err != nil {
-		t.Fatalf("decode bind ack: %v", err)
-	}
-	if ack.Result != daemonbus.DeviceSessionBindAccepted {
-		t.Fatalf("bind rejected: %+v", ack)
 	}
 }
 

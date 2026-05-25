@@ -90,10 +90,9 @@ type ChannelContext struct {
 	// emit for a given user request.
 	Types []TypeInfo `json:"types,omitempty"`
 
-	// Devices is the active device_sessions list (per-daemon mirror of
-	// server.device_sessions). Surfaces session_id / device_id /
-	// state — enough for the LLM to confirm that e.g. the xhs Chrome
-	// extension is online before promising a publish flow.
+	// Devices is an optional active device actor projection. It is empty
+	// for normal channel-store snapshots; tests and future diagnostics can
+	// use it to show which device actor route is available.
 	Devices []DeviceInfo `json:"devices,omitempty"`
 }
 
@@ -119,12 +118,12 @@ type TypeInfo struct {
 	Description    string   `json:"description,omitempty"`
 }
 
-// DeviceInfo is one device_sessions row projected into the LLM prompt.
+// DeviceInfo is one device actor route projected into the LLM prompt.
 type DeviceInfo struct {
-	SessionID  string `json:"session_id"`
+	ActorID    string `json:"actor_id"`
 	DeviceID   string `json:"device_id,omitempty"`
 	DeviceType string `json:"device_type,omitempty"`
-	State      string `json:"state,omitempty"` // pending | ready | active | offline | expired | revoked
+	Status     string `json:"status,omitempty"`
 }
 
 // Config drives a Bridge. All fields optional unless documented; sane
@@ -1152,10 +1151,10 @@ func renderChannelContext(c ChannelContext) string {
 	}
 
 	if len(c.Devices) > 0 {
-		b.WriteString("\n## Active device sessions\n")
+		b.WriteString("\n## Device actors\n")
 		for _, d := range c.Devices {
 			b.WriteString("- ")
-			b.WriteString(d.SessionID)
+			b.WriteString(d.ActorID)
 			if d.DeviceType != "" {
 				b.WriteString(" (")
 				b.WriteString(d.DeviceType)
@@ -1165,9 +1164,9 @@ func renderChannelContext(c ChannelContext) string {
 				}
 				b.WriteString(")")
 			}
-			if d.State != "" {
-				b.WriteString(" state=")
-				b.WriteString(d.State)
+			if d.Status != "" {
+				b.WriteString(" status=")
+				b.WriteString(d.Status)
 			}
 			b.WriteString("\n")
 		}

@@ -19,7 +19,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -28,7 +27,6 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/scheduler"
 	runtimestore "github.com/wanpengxie/ActOS/runtime/store"
-	"github.com/wanpengxie/ActOS/runtime/transit"
 	"github.com/wanpengxie/ActOS/runtime/typeinstall"
 )
 
@@ -163,7 +161,7 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 
 		// T147 §A — wire the inbound device→daemon callback. M1.6
 		// baseline supports one runtime_inbound_via_relay adapter per channel.
-		// M1.7 owns session_id → adapter routing; until that lands, more
+			// M1.7 owns actor_id → adapter routing; until that lands, more
 		// than one transit adapter is a composition bug and must fail
 		// loudly instead of broadcasting callbacks to every adapter.
 		if h.SetDeviceCallback != nil {
@@ -381,32 +379,21 @@ const XHSCreatorChannelType = "xhs-creator"
 
 // DeviceXHSFactory returns an AdapterModuleFactory that installs the
 // production xhs device adapter (adapters/device/xhs) configured to run
-// over the runtime_inbound_via_relay binding — daemon → server → device WS,
-// per M1.6-T3 §A. The supplied sessionStore is reused across every
-// channel (per-daemon mirror of server.device_sessions). When nil, a
-// fresh framework.InMemorySessionStore is created — sufficient for
-// development / e2e harnesses that don't yet wire sqlite mirroring (the
-// store lives only in daemon memory and is rebuilt from server-issued
-// control.bind_device_session frames after every restart).
+// over the runtime_inbound_via_relay binding — daemon → server → device WS.
+// Routing is actor-based: the module sends through its adapter actor id
+// and the server maps channel_id + actor_id to the live device socket.
 //
 // Composition root contract: the caller MUST swap XHSScaffoldFactory
 // for this one in the OnChannelBoot wiring AND ensure the channel's
 // actor_registry seeds the xhs adapter actor with binding=runtime_inbound_via_relay
 // (not embedded — the framework Install path otherwise rejects the
 // module per L2 §1.4.6 binding consistency).
-func DeviceXHSFactory(sessionStore deviceframework.SessionStore, cfg devicexhs.Config) AdapterModuleFactory {
+func DeviceXHSFactory(cfg devicexhs.Config) AdapterModuleFactory {
 	return func(_ context.Context, h runtime.ChannelHooks) (adapter.Module, error) {
 		if h.ChannelType != XHSCreatorChannelType {
 			return nil, nil
 		}
-		effective := cfg
-		if effective.SessionStore == nil {
-			if sessionStore == nil {
-				sessionStore = deviceframework.NewInMemorySessionStore()
-			}
-			effective.SessionStore = sessionStore
-		}
-		return devicexhs.New(effective)
+		return devicexhs.New(cfg)
 	}
 }
 
@@ -420,160 +407,5 @@ func DeviceXHSActorSeed() actorreg.Record {
 		ID:      devicexhs.DefaultAdapterActorID,
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeInboundViaRelay,
-	}
-}
-
-// DeviceSessionBinder couples a shared framework.SessionStore with the
-// daemon-level control.bind_device_session / control.unbind_device_session
-// handlers (T147 §A-S2 phase-4b). cmd/daemon constructs one binder per
-// process: the store is shared across every channel (per-channel routing
-// happens by DeviceSession.ChannelID), and the handlers map bind / unbind
-// frames into Upsert / Delete calls.
-//
-// Wire the binder via:
-//
-//	binder := NewDeviceSessionBinder(deviceframework.NewInMemorySessionStore())
-//	cfg.OnBindDeviceSession   = binder.OnBind
-//	cfg.OnUnbindDeviceSession = binder.OnUnbind
-//	cfg.OnChannelBoot         = wireAdapterFramework(
-//	    DeviceXHSFactory(binder.SessionStore(), devicexhs.Config{...}),
-//	)
-type DeviceSessionBinder struct {
-	store deviceframework.SessionStore
-}
-
-// NewDeviceSessionBinder wires a binder over the supplied store. When
-// store is nil a fresh InMemorySessionStore is allocated — sufficient
-// for development / e2e harnesses without sqlite mirroring.
-func NewDeviceSessionBinder(store deviceframework.SessionStore) *DeviceSessionBinder {
-	if store == nil {
-		store = deviceframework.NewInMemorySessionStore()
-	}
-	return &DeviceSessionBinder{store: store}
-}
-
-// SessionStore exposes the shared store so the composition root can
-// pass it into DeviceXHSFactory.
-func (b *DeviceSessionBinder) SessionStore() deviceframework.SessionStore {
-	return b.store
-}
-
-// OnBind handles control.bind_device_session. Maps the wire payload into
-// a framework.DeviceSession in state=ready (server-side state machine has
-// already INSERTed the row in pending and will MarkBound on ack), then
-// Upserts into the per-daemon SessionStore. Idempotent: re-running with
-// the same SessionID overwrites the row (T1.10 — replay safe).
-func (b *DeviceSessionBinder) OnBind(ctx context.Context, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody {
-	ack := transit.BindDeviceSessionAckBody{
-		FrameID:         body.FrameID,
-		ChannelID:       body.ChannelID,
-		BindRequestID:   body.BindRequestID,
-		DeviceSessionID: body.DeviceSessionID,
-	}
-	if body.ChannelID == "" {
-		ack.Reason = transit.DeviceSessionRejectBindChannelNotActive
-		ack.Detail = "channel_id is required"
-		return ack
-	}
-	if body.DeviceSessionID == "" || body.DeviceID == "" {
-		ack.Reason = transit.DeviceSessionRejectBindInternalError
-		ack.Detail = "device_session_id and device_id are required"
-		return ack
-	}
-	if !devicetransit.IsXHSDeviceType(body.DeviceType) {
-		ack.Reason = transit.DeviceSessionRejectBindDeviceTypeUnsupported
-		ack.Detail = "device_type unsupported"
-		return ack
-	}
-	if body.AdapterActorID != "" && body.AdapterActorID != devicexhs.DefaultAdapterActorID {
-		ack.Reason = transit.DeviceSessionRejectBindAdapterNotPresent
-		ack.Detail = "adapter actor is not installed in this daemon"
-		return ack
-	}
-	adapterActorID := body.AdapterActorID
-	if adapterActorID == "" {
-		adapterActorID = devicexhs.DefaultAdapterActorID
-	}
-	sess := deviceframework.DeviceSession{
-		SessionID:      body.DeviceSessionID,
-		ChannelID:      body.ChannelID,
-		AdapterActorID: adapterActorID,
-		DeviceID:       body.DeviceID,
-		DeviceType:     body.DeviceType,
-		// Authoritative server row transitions pending → ready on this
-		// ack; the daemon mirror jumps straight to ready so adapter
-		// modules see the eventual state immediately. T1.10 allows the
-		// daemon to skip the pending intermediate because the daemon
-		// never observes "pending → ready" as two distinct events.
-		State:            deviceframework.StateReady,
-		BoundAt:          body.BoundAt,
-		TokenFingerprint: body.TokenFingerprint,
-		ExpiresAt:        body.ExpiresAt,
-	}
-	if err := b.store.Upsert(ctx, sess); err != nil {
-		ack.Reason = transit.DeviceSessionRejectBindInternalError
-		ack.Detail = err.Error()
-		return ack
-	}
-	ack.Result = daemonbus.DeviceSessionBindAccepted
-	return ack
-}
-
-// OnUnbind handles control.unbind_device_session. Deletes the mirror
-// row idempotently (missing row is not an error). The server's
-// authoritative row stays revoked / expired regardless of the daemon
-// response, so this is best-effort tear-down only.
-func (b *DeviceSessionBinder) OnUnbind(ctx context.Context, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody {
-	ack := transit.UnbindDeviceSessionAckBody{
-		FrameID:         body.FrameID,
-		ChannelID:       body.ChannelID,
-		DeviceSessionID: body.DeviceSessionID,
-	}
-	if err := b.store.Delete(ctx, body.DeviceSessionID); err != nil {
-		ack.Reason = transit.DeviceSessionRejectUnbindInternalError
-		ack.Detail = err.Error()
-		return ack
-	}
-	ack.Result = daemonbus.DeviceSessionBindAccepted
-	return ack
-}
-
-// listDeviceSessionsForChannel returns the DaemonConfig.ListDeviceSessionsForChannel
-// closure backed by the supplied DeviceSessionBinder's SessionStore (M1.6
-// follow-up — agent self-awareness fix). The runtime daemon calls this
-// inside the worker spawn PreSpawn hook so the kimi system prompt
-// surfaces the channel's active device sessions to the LLM. Errors from
-// the store are swallowed and treated as "no sessions" — the worker
-// boots with an empty devices section, same as a channel that never
-// bound any device.
-//
-// Composition-root only: the runtime package cannot import
-// adapters/device/framework directly (arch-lint forbids
-// runtime ↛ adapters), so this adapter lives in cmd/daemon and
-// translates framework.DeviceSession → runtime.DeviceSessionInfo on
-// the way out.
-func listDeviceSessionsForChannel(binder *DeviceSessionBinder) func(ctx context.Context, ch channel.ID) []runtime.DeviceSessionInfo {
-	if binder == nil {
-		return nil
-	}
-	store := binder.SessionStore()
-	if store == nil {
-		return nil
-	}
-	return func(ctx context.Context, ch channel.ID) []runtime.DeviceSessionInfo {
-		rows, err := store.ListByChannel(ctx, ch)
-		if err != nil || len(rows) == 0 {
-			return nil
-		}
-		out := make([]runtime.DeviceSessionInfo, 0, len(rows))
-		for _, r := range rows {
-			out = append(out, runtime.DeviceSessionInfo{
-				SessionID:  string(r.SessionID),
-				DeviceID:   r.DeviceID,
-				DeviceType: r.DeviceType,
-				State:      string(r.State),
-			})
-		}
-		return out
 	}
 }

@@ -13,94 +13,51 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/pkg/requestctx"
 )
 
-// DefaultDeviceWSWriteTimeout caps a single device-side WS write.
-// Mirror of the daemonbus floor — see runtime/transit/wsclient.go for
-// the rationale: a stuck send buffer would otherwise deadlock the
-// write goroutine while holding wsDeviceTransport.mu.
 const DefaultDeviceWSWriteTimeout = 10 * time.Second
-
-// DefaultDevicePingCadence is how often the server pings the device.
-// 30s gives ~3× margin against the cloudflare tunnel ~100s idle
-// reaper. Pings use gorilla WriteControl (bypasses application-frame
-// mutex) so a stuck app write cannot starve them.
 const DefaultDevicePingCadence = 30 * time.Second
-
-// DefaultDeviceIdleReadTimeout is the maximum time the server will
-// block reading from a device WS before declaring it dead. ~2.3× the
-// ping cadence absorbs one missed pong without false-positive
-// teardown.
 const DefaultDeviceIdleReadTimeout = 70 * time.Second
-
-// DefaultDeviceWSReadLimit caps a single inbound devicebus frame at 4 MiB.
-// Larger frames are closed before JSON allocation/validation.
 const DefaultDeviceWSReadLimit int64 = 4 << 20
-
-// DefaultDevicePingWriteTimeout caps a single ping write; on failure
-// the conn is closed and the read loop unwedges.
 const DefaultDevicePingWriteTimeout = 5 * time.Second
 
-// Connection wraps one open device WS — sender of device_transit
-// frames to the daemon (via daemonbus) + receiver of frames pushed
-// back from the daemon.
 type Connection struct {
-	Session    Session
-	transport  DeviceTransport
-	Generation uint64
+	Registration ActorRegistration
+	transport    DeviceTransport
+	Generation   uint64
 
 	closeOnce sync.Once
 	closed    chan struct{}
 }
 
-// DeviceTransport is the wire-level interface — gorilla/websocket
-// implementation lives below; tests use an in-memory pipe.
 type DeviceTransport interface {
 	ReadFrame(ctx context.Context) (DeviceFrame, error)
 	WriteFrame(ctx context.Context, frame DeviceFrame) error
 	Close() error
 }
 
-// DeviceFrame is the flat /devicebus WebSocket wire frame exchanged
-// between server and device clients (chrome extension / mock extension).
-// Mirrors adapters/device/xhs/extension/packages/shared/src/constants.ts:58:
-//
-//	DeviceFrame{direction, device_session_id, channel_id,
-//	            request_id, correlation_id, payload, expires_at}
-//
-// devicetransit.SendFrame (with opaque Body) is the daemon ↔ server
-// transport envelope; server bridges the two formats in
-// gateway.ForwardDeviceFrame / gateway.OnDeviceTransitRecv. AdapterActorID
-// and TransitSeq belong to the daemonbus envelope, not this wire frame.
 type DeviceFrame struct {
-	Direction       string          `json:"direction"`
-	DeviceSessionID string          `json:"device_session_id"`
-	ChannelID       string          `json:"channel_id"`
-	RequestID       string          `json:"request_id,omitempty"`
-	ParentID        string          `json:"parent_id,omitempty"`
-	CorrelationID   string          `json:"correlation_id,omitempty"`
-	Payload         json.RawMessage `json:"payload,omitempty"`
-	ExpiresAt       int64           `json:"expires_at,omitempty"`
-	// TransitSeq is the daemonbus-side sequence; kept on the wire
-	// struct only so legacy test fixtures keep compiling. New code
-	// SHOULD NOT populate this on the WS frame — the canonical channel
-	// for transit_seq is devicetransit.SendFrame.TransitSeq.
-	TransitSeq int64 `json:"transit_seq,omitempty"`
+	Direction     string          `json:"direction"`
+	ActorID       string          `json:"actor_id"`
+	ChannelID     string          `json:"channel_id"`
+	RequestID     string          `json:"request_id,omitempty"`
+	ParentID      string          `json:"parent_id,omitempty"`
+	CorrelationID string          `json:"correlation_id,omitempty"`
+	Payload       json.RawMessage `json:"payload,omitempty"`
+	ExpiresAt     int64           `json:"expires_at,omitempty"`
+	TransitSeq    int64           `json:"transit_seq,omitempty"`
 }
 
-// NewConnection wires a transport.
-func NewConnection(s Session, tx DeviceTransport) *Connection {
+func NewConnection(r ActorRegistration, tx DeviceTransport) *Connection {
 	return &Connection{
-		Session:   s,
-		transport: tx,
-		closed:    make(chan struct{}),
+		Registration: r,
+		transport:    tx,
+		closed:       make(chan struct{}),
 	}
 }
 
-// SendToDevice writes one frame to the device — used by the daemon→
-// device fan-out path.
 func (c *Connection) SendToDevice(ctx context.Context, frame DeviceFrame) error {
 	if c.IsClosed() {
 		return errors.New("devicebus: connection closed")
@@ -108,7 +65,6 @@ func (c *Connection) SendToDevice(ctx context.Context, frame DeviceFrame) error 
 	return c.transport.WriteFrame(ctx, frame)
 }
 
-// IsClosed reports whether the connection has shut down.
 func (c *Connection) IsClosed() bool {
 	select {
 	case <-c.closed:
@@ -118,7 +74,6 @@ func (c *Connection) IsClosed() bool {
 	}
 }
 
-// Close shuts down the transport.
 func (c *Connection) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closed)
@@ -127,12 +82,6 @@ func (c *Connection) Close() error {
 	return nil
 }
 
-// wsDeviceTransport adapts gorilla to DeviceTransport.
-//
-// Keepalive: ping/pong identical to server/daemonbus/wsTransport.
-// Server pings the device every cadence via WriteControl; PongHandler
-// + per-read refresh keeps the read deadline alive; an idle peer
-// trips the deadline after idleReadTimeout and the conn closes.
 type wsDeviceTransport struct {
 	mu sync.Mutex
 	ws *websocket.Conn
@@ -171,11 +120,7 @@ func (t *wsDeviceTransport) startPinger(cadence, pingWriteTimeout, idleReadTimeo
 			case <-t.stopPing:
 				return
 			case <-ticker.C:
-				err := ws.WriteControl(
-					websocket.PingMessage,
-					nil,
-					time.Now().Add(pingWriteTimeout),
-				)
+				err := ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(pingWriteTimeout))
 				if err != nil {
 					_ = ws.Close()
 					return
@@ -199,6 +144,7 @@ func (t *wsDeviceTransport) ReadFrame(ctx context.Context) (DeviceFrame, error) 
 	}
 	return f, nil
 }
+
 func (t *wsDeviceTransport) WriteFrame(ctx context.Context, f DeviceFrame) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -206,8 +152,6 @@ func (t *wsDeviceTransport) WriteFrame(ctx context.Context, f DeviceFrame) error
 	if err != nil {
 		return err
 	}
-	// Always cap with a write deadline — same fix as daemonbus
-	// wsTransport (avoids stuck send buffer blocking the mu).
 	deadline := time.Now().Add(DefaultDeviceWSWriteTimeout)
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline
@@ -219,6 +163,7 @@ func (t *wsDeviceTransport) WriteFrame(ctx context.Context, f DeviceFrame) error
 	}
 	return nil
 }
+
 func (t *wsDeviceTransport) Close() error {
 	t.stopOnce.Do(func() {
 		if t.stopPing != nil {
@@ -228,77 +173,34 @@ func (t *wsDeviceTransport) Close() error {
 	return t.ws.Close()
 }
 
-// TransitForwarder is implemented by the gateway — it knows how to
-// reach the daemonbus connection for the channel + how to wrap a
-// DeviceFrame into a `device_transit.send` daemonbus frame
-// (impl-layer2 §5.3.1 inbound — device → server → daemon adapter).
-//
-// adapterActorID is the bound actor from the device_sessions row — the
-// flat DeviceFrame doesn't carry it (it's a daemonbus envelope field).
-// Gateway stamps it into devicetransit.SendFrame.AdapterActorID when
-// wrapping the inbound frame for daemon delivery.
 type TransitForwarder interface {
 	ForwardDeviceFrame(ctx context.Context, frame DeviceFrame, adapterActorID actor.ActorID) error
 }
 
-// DeviceWSSubprotocol is the real WebSocket subprotocol negotiated on
-// the /devicebus handshake. Per impl-layer3 §6.5.1: the client offers
-// `coagent.device.v1, token.<token>`; the server selects (and echoes
-// back) ONLY `coagent.device.v1` — the `token.*` slot carries the
-// bearer token and MUST NOT be reflected back to the client.
 const DeviceWSSubprotocol = "coagent.device.v1"
-
-// deviceWSTokenPrefix is the prefix used on the `token.*` pseudo-
-// subprotocol slot to ferry the bearer token through `Sec-WebSocket-
-// Protocol`. token is everything after the prefix.
 const deviceWSTokenPrefix = "token."
 
-// HandleWS upgrades the device socket. The gateway passes a
-// TransitForwarder that knows how to route the frame to daemonbus.
-//
-// Handshake (impl-layer3 §6.5.1):
-//
-//   - URL:    /devicebus?session_id=<sid>
-//   - Header: Sec-WebSocket-Protocol: coagent.device.v1, token.<token>
-//
-// The server parses the offered subprotocols, extracts the token from
-// the `token.<token>` slot, validates (session_id, token), and on success
-// upgrades. The durable session states accepted for this handshake are
-// ready, active, and offline: ready is the first connect, active is a
-// duplicate connect that replaces the previous live socket, and offline is
-// reconnect after a drop. Pending and terminal states reject with
-// session_not_ready / token_expired / session_revoked. The Upgrader selects
-// `coagent.device.v1` as the negotiated subprotocol (RFC 6455 requires the
-// server to echo the chosen subprotocol in the handshake response). The
-// `token.*` slot is deliberately NOT echoed back.
 func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		sessionID := c.Query("session_id")
+		actorID := actor.ActorID(strings.TrimSpace(c.Query("actor_id")))
 		token, hasRealProto, parseOK := parseDeviceWSSubprotocols(c.Request.Header.Values("Sec-WebSocket-Protocol"))
-		if !parseOK || sessionID == "" || token == "" || !hasRealProto {
+		if !parseOK || actorID == "" || token == "" || !hasRealProto {
 			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "session_id query + Sec-WebSocket-Protocol: coagent.device.v1, token.<token> required",
+				"error": "actor_id query + Sec-WebSocket-Protocol: coagent.device.v1, token.<token> required",
 			})
 			return
 		}
-		row, err := s.ValidateToken(c.Request.Context(), sessionID, token)
+		row, err := s.ValidateToken(c.Request.Context(), actorID, token)
 		if err != nil {
 			status := http.StatusUnauthorized
-			if errors.Is(err, ErrSessionNotReady) {
-				status = http.StatusConflict
-			}
 			c.JSON(status, gin.H{
 				"error":         err.Error(),
-				"reject_reason": string(deviceTokenRejectReason(err)),
+				"reject_reason": actorTokenRejectReason(err),
 			})
 			return
 		}
 		upgrader := websocket.Upgrader{
-			CheckOrigin: s.checkOrigin,
-			// Only the real subprotocol is selected; the `token.*` slot
-			// is consumed server-side and MUST NOT be echoed back to the
-			// client (§6.5.1: "不 echo token.* 子协议——token 不应反射回
-			// client").
+			CheckOrigin:  s.checkOrigin,
 			Subprotocols: []string{DeviceWSSubprotocol},
 		}
 		ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -321,16 +223,9 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 		}
 		tx.startPinger(cadence, pingWrite, idle)
 		conn := NewConnection(row, tx)
-		s.registerConnection(sessionID, conn)
-		if err := s.MarkActive(c.Request.Context(), sessionID); err != nil {
-			s.unregisterConnection(sessionID, conn)
-			_ = conn.Close()
-			return
-		}
+		s.registerConnection(row.ChannelID, row.ActorID, conn)
 		defer func() {
-			if s.unregisterConnection(sessionID, conn) {
-				_ = s.MarkOffline(c.Request.Context(), sessionID)
-			}
+			_ = s.unregisterConnection(row.ChannelID, row.ActorID, conn)
 			_ = conn.Close()
 		}()
 
@@ -339,46 +234,30 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 			if err != nil {
 				return
 			}
-			current, err := s.ValidateToken(c.Request.Context(), sessionID, token)
+			current, err := s.ValidateToken(c.Request.Context(), actorID, token)
 			if err != nil {
 				return
 			}
-			frame.DeviceSessionID = sessionID
+			frame.ActorID = string(current.ActorID)
 			frame.ChannelID = string(current.ChannelID)
-			if err := forwarder.ForwardDeviceFrame(c.Request.Context(), frame, current.AdapterActorID); err != nil {
+			if err := forwarder.ForwardDeviceFrame(c.Request.Context(), frame, current.ActorID); err != nil {
 				return
 			}
 		}
 	}
 }
 
-func deviceTokenRejectReason(err error) kerneldaemonbus.DeviceSessionRejectReason {
+func actorTokenRejectReason(err error) string {
 	switch {
 	case errors.Is(err, ErrTokenInvalid):
-		return kerneldaemonbus.DeviceSessionRejectTokenInvalid
-	case errors.Is(err, ErrSessionExpired):
-		return kerneldaemonbus.DeviceSessionRejectTokenExpired
-	case errors.Is(err, ErrSessionRevoked):
-		return kerneldaemonbus.DeviceSessionRejectSessionRevoked
+		return "device_token_invalid"
+	case errors.Is(err, ErrTokenExpired):
+		return "device_token_expired"
 	default:
-		return kerneldaemonbus.DeviceSessionRejectSessionUnknown
+		return "device_actor_unknown"
 	}
 }
 
-// parseDeviceWSSubprotocols parses the Sec-WebSocket-Protocol header
-// values offered by the client and returns the extracted bearer token
-// plus whether the real `coagent.device.v1` subprotocol was offered.
-//
-// Per RFC 6455 §1.9 the header is a comma-separated list (possibly
-// across multiple header lines); gorilla/Gin keeps each header line as
-// a separate string. We split each value on `,`, trim spaces, then
-// classify:
-//
-//   - `coagent.device.v1` → real protocol present (handshake well-formed)
-//   - prefix `token.`     → bearer token (everything after the prefix)
-//   - anything else       → fail-closed
-//
-// Returns ok=false for duplicate/unknown slots. Empty slots are ignored.
 func parseDeviceWSSubprotocols(headers []string) (token string, hasRealProto bool, ok bool) {
 	var seenToken bool
 	for _, line := range headers {
@@ -417,114 +296,65 @@ func (s *Service) checkOrigin(r *http.Request) bool {
 	return ok
 }
 
-// SendFrameToDevice is invoked by the gateway when a daemon-pushed
-// `device_transit.recv` frame arrives (impl-layer2 §5.3.2 outbound —
-// adapter → device) — looks up the local device connection, rechecks the
-// durable session state/time, and forwards only for a still-active session.
-func (s *Service) SendFrameToDevice(ctx context.Context, sessionID string, frame DeviceFrame) error {
+func (s *Service) SendFrameToDevice(ctx context.Context, channelID channel.ID, actorID actor.ActorID, frame DeviceFrame) error {
+	key := routeKey(channelID, actorID)
 	s.mu.Lock()
-	conn, ok := s.sessions[sessionID]
+	conn, ok := s.routes[key]
 	s.mu.Unlock()
 	if !ok {
 		s.log.Warn("devicebus.outbound_rejected",
-			"reason", "session_not_found",
+			"reason", "route_not_found",
 			"request_id", requestctx.RequestID(ctx),
-			"device_session_id", sessionID,
+			"actor_id", string(actorID),
+			"channel_id", string(channelID),
 		)
-		return ErrSessionNotFound
+		return ErrRegistrationNotFound
 	}
-	row, err := s.Get(ctx, sessionID)
+	row, err := s.GetActor(ctx, channelID, actorID)
 	if err != nil {
-		s.closeCurrentConnection(sessionID)
-		s.log.Warn("devicebus.outbound_rejected",
-			"reason", "session_lookup_failed",
-			"request_id", requestctx.RequestID(ctx),
-			"device_session_id", sessionID,
-			"error", err.Error(),
-		)
+		s.closeCurrentConnection(channelID, actorID)
 		return err
 	}
-	now := s.nowMs()
-	if now > row.ExpiresAt {
-		if err := s.expireSessionIfDue(ctx, sessionID, now); err != nil {
-			return err
-		}
-		s.closeCurrentConnection(sessionID)
-		s.log.Warn("devicebus.outbound_rejected",
-			"reason", "expired",
-			"request_id", requestctx.RequestID(ctx),
-			"device_session_id", sessionID,
-			"channel_id", string(row.ChannelID),
-			"device_id", row.DeviceID,
-			"expires_at", row.ExpiresAt,
-		)
-		return ErrSessionExpired
+	if s.nowMs() > row.ExpiresAt {
+		_ = s.RevokeActor(ctx, channelID, actorID)
+		return ErrTokenExpired
 	}
-	switch row.State {
-	case StateActive:
-	case StateExpired:
-		s.closeCurrentConnection(sessionID)
-		s.log.Warn("devicebus.outbound_rejected",
-			"reason", "expired_state",
-			"request_id", requestctx.RequestID(ctx),
-			"device_session_id", sessionID,
-			"channel_id", string(row.ChannelID),
-			"device_id", row.DeviceID,
-		)
-		return ErrSessionExpired
-	case StateRevoked:
-		s.closeCurrentConnection(sessionID)
-		s.log.Warn("devicebus.outbound_rejected",
-			"reason", "revoked",
-			"request_id", requestctx.RequestID(ctx),
-			"device_session_id", sessionID,
-			"channel_id", string(row.ChannelID),
-			"device_id", row.DeviceID,
-		)
-		return ErrSessionRevoked
-	default:
-		s.closeCurrentConnection(sessionID)
-		s.log.Warn("devicebus.outbound_rejected",
-			"reason", "not_active",
-			"request_id", requestctx.RequestID(ctx),
-			"device_session_id", sessionID,
-			"channel_id", string(row.ChannelID),
-			"device_id", row.DeviceID,
-			"state", string(row.State),
-		)
-		return ErrSessionNotReady
-	}
+	frame.ActorID = string(actorID)
+	frame.ChannelID = string(channelID)
 	return conn.SendToDevice(ctx, frame)
 }
 
-func (s *Service) registerConnection(sessionID string, conn *Connection) {
+func (s *Service) registerConnection(channelID channel.ID, actorID actor.ActorID, conn *Connection) {
 	var previous *Connection
+	key := routeKey(channelID, actorID)
 	s.mu.Lock()
 	conn.Generation = s.connGen.Add(1)
-	previous = s.sessions[sessionID]
-	s.sessions[sessionID] = conn
+	previous = s.routes[key]
+	s.routes[key] = conn
 	s.mu.Unlock()
 	if previous != nil && previous != conn {
 		_ = previous.Close()
 	}
 }
 
-func (s *Service) unregisterConnection(sessionID string, conn *Connection) bool {
+func (s *Service) unregisterConnection(channelID channel.ID, actorID actor.ActorID, conn *Connection) bool {
+	key := routeKey(channelID, actorID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current := s.sessions[sessionID]
+	current := s.routes[key]
 	if current != conn || current.Generation != conn.Generation {
 		return false
 	}
-	delete(s.sessions, sessionID)
+	delete(s.routes, key)
 	return true
 }
 
-func (s *Service) closeCurrentConnection(sessionID string) bool {
+func (s *Service) closeCurrentConnection(channelID channel.ID, actorID actor.ActorID) bool {
+	key := routeKey(channelID, actorID)
 	s.mu.Lock()
-	conn := s.sessions[sessionID]
+	conn := s.routes[key]
 	if conn != nil {
-		delete(s.sessions, sessionID)
+		delete(s.routes, key)
 	}
 	s.mu.Unlock()
 	if conn == nil {

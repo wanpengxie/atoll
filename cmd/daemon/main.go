@@ -30,7 +30,6 @@ import (
 	"syscall"
 	"time"
 
-	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
@@ -127,18 +126,12 @@ func main() {
 	// because the conversion is a composition-root concern (keeps
 	// `runtime` independent of `adapters/**` per arch-lint).
 	//
-	deviceSessionStore, closeDeviceSessionStore, err := deviceframework.OpenSQLiteSessionStore(
-		context.Background(),
-		filepath.Join(*dataDir, "device_sessions.sqlite"),
-	)
-	if err != nil {
+	if err := migrateLegacyDeviceMirrorFile(context.Background(), *dataDir, lg.Z()); err != nil {
 		lg.Z().Error().Err(err).Str("event", "daemon.fail_fast").
-			Msg("device session mirror store is required")
+			Msg("legacy device route mirror migration failed")
 		os.Exit(1)
 	}
-	defer func() { _ = closeDeviceSessionStore() }()
-	deviceBinder := NewDeviceSessionBinder(deviceSessionStore)
-	xhsFactory := DeviceXHSFactory(deviceBinder.SessionStore(), devicexhs.Config{})
+	xhsFactory := DeviceXHSFactory(devicexhs.Config{})
 	if *useScaffoldXHS {
 		xhsFactory = XHSScaffoldFactory(xhs.Config{})
 	}
@@ -163,15 +156,7 @@ func main() {
 		AllowReplayWindowDisabled: *mockBus && *replayWindowMs <= 0,
 		ChannelTemplates:          buildChannelTemplates(*useScaffoldXHS),
 		OnChannelBoot:             adapterBootHook,
-		OnBindDeviceSession:       deviceBinder.OnBind,
-		OnUnbindDeviceSession:     deviceBinder.OnUnbind,
-		// M1.6 follow-up — agent self-awareness fix. The runtime daemon
-		// snapshots device sessions into the worker spawn context file
-		// so the kimi system prompt can surface "active device sessions"
-		// to the LLM. Composition-root callback so runtime/** does not
-		// need to import adapters/device/framework (arch-lint forbids it).
-		ListDeviceSessionsForChannel: listDeviceSessionsForChannel(deviceBinder),
-		Logger:                       daemonLogger,
+		Logger:                    daemonLogger,
 	}
 
 	if !*mockBus {

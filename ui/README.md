@@ -70,8 +70,8 @@ The SPA targets the Go gateway routes documented in
 | Write message     | `POST /api/channels/:chID/messages`            |
 | Live updates      | `GET  /ws` (native WebSocket; subscribe frames) |
 | Get placement     | `GET  /api/placements/:chID`                   |
-| Issue device sess | `POST /api/channels/:chID/devices`             |
-| Revoke device     | `DELETE /api/devices/:sid`                     |
+| Register device actor | `POST /api/channels/:chID/device-actor`    |
+| Revoke device actor   | `DELETE /api/channels/:chID/device-actor/:actorID` |
 
 Auth is by cookie (`coagent_session`, `HttpOnly`, `SameSite=Lax`) —
 all fetches set `credentials: 'include'`.
@@ -79,7 +79,7 @@ all fetches set `credentials: 'include'`.
 ## Bind Chrome extension (T148 / M1.6-T6)
 
 The chat header has a "Bind Chrome extension" button that hands a
-fresh device session token to the coagent xhs-extension via
+fresh device actor token to the coagent xhs-extension via
 `chrome.runtime.sendMessage`. Pre-reqs:
 
 1. Install the unpacked extension from

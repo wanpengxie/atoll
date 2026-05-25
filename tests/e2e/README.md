@@ -61,7 +61,7 @@ See `runtime/worker/mock_bridge.go` (`EnvKeyMockSingleShot`,
 
 ## Out of scope (second pass candidates)
 
-* device session bind / xhs adapter publish path (needs an extension
+* device actor handshake / xhs adapter publish path (needs an extension
   WS client mock; non-trivial to fake without a Chromium-like
   upgrader)
 * multi-daemon reclaim races

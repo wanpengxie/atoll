@@ -11,7 +11,7 @@ import {
 } from '../extension.js';
 
 export default function DeviceBind({ channelID, me }) {
-  const [bind, setBind] = useState(null); // { device_session_id, channel_id, user_id }
+  const [bind, setBind] = useState(null); // { actor_id, channel_id, user_id }
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [available, setAvailable] = useState(false);
@@ -27,17 +27,17 @@ export default function DeviceBind({ channelID, me }) {
       try {
         const info = await getDeviceInfo();
         if (!alive) return;
-        if (info.status === 'ok' && info.bound && info.bound.channel_id === channelID && info.bound.device_session_id) {
+        if (info.status === 'ok' && info.bound && info.bound.channel_id === channelID && info.bound.actor_id) {
           // Extension self-reports a bind, but cross-check server: the
-          // session might have been revoked / wiped server-side while
+          // actor token might have been revoked / wiped server-side while
           // the extension was offline. Only restore "bound" UI when
           // server confirms it's still ours.
           try {
-            const server = await api.getDeviceSession?.(info.bound.device_session_id);
+            const server = await api.getDeviceActor?.(channelID, info.bound.actor_id);
             if (!alive) return;
-            if (server && (server.state === 'active' || server.state === 'ready')) {
+            if (server && server.actor_id === info.bound.actor_id) {
               setBind({
-                device_session_id: info.bound.device_session_id,
+                actor_id: info.bound.actor_id,
                 channel_id: info.bound.channel_id,
                 user_id: info.bound.user_id,
               });
@@ -58,8 +58,8 @@ export default function DeviceBind({ channelID, me }) {
     setStatus('');
     try {
       // Force-clear any stale token / WS state inside the extension
-      // background before issuing a fresh session — fixes the case where
-      // a previously revoked session_id is being retried in a loop.
+      // background before issuing a fresh actor token — fixes the case where
+      // a previously revoked actor_id is being retried in a loop.
       try { await unbindDevice(); } catch (_) {}
       const info = await getDeviceInfo();
       if (info.status !== 'ok') {
@@ -72,23 +72,23 @@ export default function DeviceBind({ channelID, me }) {
         setStatus('channel 还没绑定到 daemon');
         return;
       }
-      const session = await api.issueDeviceSession(channelID, {
+      const registration = await api.registerDeviceActor(channelID, {
         device_id: info.device_id,
         daemon_id: daemonID,
         device_type: 'xhs.chrome_extension',
       });
       const resp = await setDeviceToken({
-        token: session.token,
+        token: registration.token,
         server_ws_url: defaultServerWsUrl(),
-        device_session_id: session.device_session_id,
+        actor_id: registration.actor_id,
         channel_id: channelID,
         user_id: me.id,
         device_id: info.device_id,
-        expires_at: session.expires_at,
+        expires_at: registration.expires_at,
       });
       if (resp.status === 'connected') {
         setBind({
-          device_session_id: session.device_session_id,
+          actor_id: registration.actor_id,
           channel_id: channelID,
           user_id: me.id,
         });
@@ -107,11 +107,11 @@ export default function DeviceBind({ channelID, me }) {
     if (!bind) return;
     setBusy(true);
     try {
-      // Server-side revoke is best-effort — session row may already be
+      // Server-side revoke is best-effort — actor token may already be
       // gone (manual cleanup, daemon restart, etc). Either way, we MUST
       // clear the extension-side state so the UI / WS reconnect loop
-      // doesn't keep retrying a dead session_id.
-      try { await api.revokeDeviceSession(bind.device_session_id); } catch (_) {}
+      // doesn't keep retrying a dead actor_id.
+      try { await api.revokeDeviceActor(channelID, bind.actor_id); } catch (_) {}
       await unbindDevice();
       setBind(null);
       setStatus('已解绑');

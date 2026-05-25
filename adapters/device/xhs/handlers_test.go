@@ -25,7 +25,7 @@ func sampleRequest(t string, payload string) *message.Envelope {
 // "xhs." prefix (M1.3 compatibility).
 func TestBuildCommandStripsXhsPrefix(t *testing.T) {
 	env := sampleRequest(TypePublish, `{"title":"hi"}`)
-	cmd, _, _, err := buildCommand(env)
+	cmd, err := buildCommand(env)
 	if err != nil {
 		t.Fatalf("buildCommand: %v", err)
 	}
@@ -43,52 +43,40 @@ func TestBuildCommandStripsXhsPrefix(t *testing.T) {
 	}
 }
 
-// TestBuildCommandStripsFrameworkMetadata verifies device_id +
-// device_session_id never reach Params (they belong to the framework /
-// envelope layer, not the device wire schema).
-func TestBuildCommandStripsFrameworkMetadata(t *testing.T) {
-	env := sampleRequest(TypePublish, `{"title":"hi","device_id":"d","device_session_id":"sess-x","extra":1}`)
-	cmd, sid, did, err := buildCommand(env)
+// TestBuildCommandTreatsPayloadAsDomainData verifies routing metadata is
+// not extracted from payload. The adapter forwards the caller's object as
+// command params; route selection lives in the envelope audience.
+func TestBuildCommandTreatsPayloadAsDomainData(t *testing.T) {
+	env := sampleRequest(TypePublish, `{"title":"hi","extra":1}`)
+	cmd, err := buildCommand(env)
 	if err != nil {
 		t.Fatalf("buildCommand: %v", err)
 	}
-	if _, present := cmd.Params["device_id"]; present {
-		t.Error("Params should not contain device_id")
-	}
-	if _, present := cmd.Params["device_session_id"]; present {
-		t.Error("Params should not contain device_session_id")
-	}
 	if cmd.Params["extra"] != float64(1) { // JSON numbers decode to float64
 		t.Errorf("Params extras should pass through; got %v", cmd.Params)
-	}
-	if string(sid) != "sess-x" {
-		t.Errorf("session id=%q want \"sess-x\"", sid)
-	}
-	if did != "d" {
-		t.Errorf("device id=%q want \"d\"", did)
 	}
 }
 
 // TestBuildCommandRejectsBadInputs covers the precondition error paths.
 func TestBuildCommandRejectsBadInputs(t *testing.T) {
-	if _, _, _, err := buildCommand(nil); err == nil {
+	if _, err := buildCommand(nil); err == nil {
 		t.Error("nil envelope should error")
 	}
 	env := sampleRequest("", `{}`)
-	if _, _, _, err := buildCommand(env); err == nil {
+	if _, err := buildCommand(env); err == nil {
 		t.Error("empty type should error")
 	}
 	env = sampleRequest("not.xhs", `{}`)
-	if _, _, _, err := buildCommand(env); err == nil {
+	if _, err := buildCommand(env); err == nil {
 		t.Error("type without xhs. prefix should error")
 	}
 	env = sampleRequest(TypePublish, `{`)
-	if _, _, _, err := buildCommand(env); err == nil {
+	if _, err := buildCommand(env); err == nil {
 		t.Error("malformed payload should error")
 	}
 	env = sampleRequest(TypePublish, `{}`)
 	env.ID = ""
-	if _, _, _, err := buildCommand(env); err == nil {
+	if _, err := buildCommand(env); err == nil {
 		t.Error("blank envelope id should error")
 	}
 }
@@ -273,7 +261,7 @@ func TestNormaliseStatus(t *testing.T) {
 // payload map. Builds the same input twice and compares.
 func TestBuildCommandDoesNotMutatePayloadView(t *testing.T) {
 	env := sampleRequest(TypePublish, `{"title":"hi","device_id":"d"}`)
-	cmd, _, _, err := buildCommand(env)
+	cmd, err := buildCommand(env)
 	if err != nil {
 		t.Fatalf("buildCommand: %v", err)
 	}

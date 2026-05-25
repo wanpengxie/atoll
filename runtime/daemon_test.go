@@ -821,10 +821,9 @@ func TestDaemon_DeviceTransit_InboundRoutesToPerChannelCallback(t *testing.T) {
 	pushFrame := func(targetCh channel.ID, payload string) {
 		t.Helper()
 		body := devicetransit.SendFrame{
-			ChannelID:       targetCh,
-			DeviceSessionID: "sess-1",
-			AdapterActorID:  "tool:xhs-adapter",
-			Body:            []byte(payload),
+			ChannelID:      targetCh,
+			AdapterActorID: "tool:xhs-adapter",
+			Body:           []byte(payload),
 		}
 		frame, err := transit.Encode("frame-send-"+string(targetCh),
 			daemonbus.FrameTypeDeviceTransitSend,

@@ -50,7 +50,7 @@ func TestOpenAndApply(t *testing.T) {
 		"channel_members",
 		"channel_placements",
 		"daemons",
-		"device_sessions",
+		"device_actor_tokens",
 		"view_cache_messages",
 		"view_cache_cursors",
 		"placement_rollback_intents",

@@ -59,7 +59,7 @@ popup（popup 的 1-key 流程仍可用但标 deprecated）。流程：
 1. 用户在 coagent web UI 登录 → 进入 channel
 2. 点击 chat header 的 "绑定 Chrome extension"
 3. UI 通过 `chrome.runtime.sendMessage(EXTENSION_ID, ...)` 把 server 颁发的
-   `device_session_id + token` 注入 extension
+   `actor_id + token` 注入 extension
 4. extension 写 `chrome.storage.local` + 接 server `/devicebus` WS
 
 构建侧配置（**生产环境必填**）：

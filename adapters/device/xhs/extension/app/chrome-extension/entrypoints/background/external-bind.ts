@@ -13,15 +13,15 @@
 // Actions (web UI → extension):
 //   1. getDeviceInfo  → returns persistent device_id (auto-generates on
 //                       first call), extension version, and current
-//                       channel/session metadata if already bound.
-//   2. setDeviceToken → persists the v4 session bundle
-//                       (server_ws_url, device_session_id, token,
+//                       channel/actor metadata if already bound.
+//   2. setDeviceToken → persists the v4 actor token bundle
+//                       (server_ws_url, actor_id, token,
 //                       channel_id, user_id, device_id, expires_at) and
 //                       opens the WS. Returns {status:'connected'} on
 //                       success or {status:'failed', reason} otherwise.
 //   3. unbindDevice   → disconnects the active WS, clears v4 fields
 //                       from storage (server-side revoke happens
-//                       independently via DELETE /api/devices/:sid).
+//                       independently via the server device-actor API).
 //
 // Security:
 //   - Layer 1 (Chrome): manifest `externally_connectable.matches`. Only
@@ -47,7 +47,7 @@ export type OriginMatcher = string;
  *  closed discriminator the web UI keys off. */
 export type ExternalBindResponse =
   | { status: 'ok'; device_id: string; version: string; bound?: BoundSnapshot }
-  | { status: 'connected'; device_session_id: string; channel_id: string; user_id?: string }
+  | { status: 'connected'; actor_id: string; channel_id: string; user_id?: string }
   | { status: 'unbound' }
   | { status: 'failed'; reason: ExternalBindFailureReason; detail?: string };
 
@@ -57,7 +57,7 @@ export type ExternalBindResponse =
 export interface BoundSnapshot {
   channel_id?: string;
   user_id?: string;
-  device_session_id?: string;
+  actor_id?: string;
   server_ws_url?: string;
 }
 
@@ -76,7 +76,7 @@ export interface ExternalBindMessage {
   action: ExternalBindAction;
   /** setDeviceToken payload — see `validateSetDeviceTokenPayload`. */
   server_ws_url?: string;
-  device_session_id?: string;
+  actor_id?: string;
   token?: string;
   channel_id?: string;
   user_id?: string;
@@ -211,7 +211,7 @@ function validateSetDeviceTokenPayload(
   msg: ExternalBindMessage,
 ): { ok: true } | { ok: false; reason: 'invalid_payload'; detail: string } {
   if (!nonEmpty(msg.server_ws_url)) return fail('server_ws_url required');
-  if (!nonEmpty(msg.device_session_id)) return fail('device_session_id required');
+  if (!nonEmpty(msg.actor_id)) return fail('actor_id required');
   if (!nonEmpty(msg.token)) return fail('token required');
   if (!nonEmpty(msg.channel_id)) return fail('channel_id required');
   if (!nonEmpty(msg.device_id)) return fail('device_id required');
@@ -283,7 +283,7 @@ async function handleGetDeviceInfo(deps: ExternalBindDeps): Promise<ExternalBind
     const snapshot: BoundSnapshot = {
       channel_id: cfg.channelId || undefined,
       user_id: cfg.userId || undefined,
-      device_session_id: cfg.deviceSessionId || undefined,
+      actor_id: cfg.deviceActorId || undefined,
       server_ws_url: cfg.serverWsEndpoint || undefined,
     };
     return {
@@ -308,8 +308,8 @@ async function handleSetDeviceToken(
   try {
     const patch: Partial<ConnectionConfig> = {
       serverWsEndpoint: message.server_ws_url!.trim(),
-      deviceSessionId: message.device_session_id!.trim(),
-      deviceSessionToken: message.token!.trim(),
+      deviceActorId: message.actor_id!.trim(),
+      deviceActorToken: message.token!.trim(),
       channelId: message.channel_id!.trim(),
       deviceId: message.device_id!.trim(),
       autoReconnect: true,
@@ -345,7 +345,7 @@ async function handleSetDeviceToken(
     }
     return {
       status: 'connected',
-      device_session_id: cfg.deviceSessionId ?? '',
+      actor_id: cfg.deviceActorId ?? '',
       channel_id: cfg.channelId ?? '',
       user_id: cfg.userId,
     };
@@ -364,14 +364,14 @@ async function handleUnbindDevice(deps: ExternalBindDeps): Promise<ExternalBindR
     // can re-bind to a different channel later without re-generating its id.
     const cleared = await deps.saveConfig({
       serverWsEndpoint: '',
-      deviceSessionId: '',
-      deviceSessionToken: '',
+      deviceActorId: '',
+      deviceActorToken: '',
       channelId: '',
       autoReconnect: false,
     });
     // Push the cleared config into both transport clients. Previously
     // we only called disconnectAll(), which left the v4 client's
-    // internal `this.config` holding the stale token+session_id. If
+    // internal `this.config` holding the stale token+actor_id. If
     // anything later triggered connect() (SW restart auto-connect,
     // background race), the client would happily rebuild a WS URL
     // from the dead credentials and spin a reconnect loop. After this

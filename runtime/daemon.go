@@ -105,30 +105,6 @@ type DaemonConfig struct {
 	// the channel is not added to the active map.
 	OnChannelBoot func(ctx context.Context, h ChannelHooks) (teardown func(context.Context) error, err error)
 
-	// OnBindDeviceSession / OnUnbindDeviceSession (T147 §A-S2) handle
-	// the server → daemon device-session lifecycle frames. The composition
-	// root (cmd/daemon) wires these to the per-process SessionStore so
-	// adapter modules with binding=runtime_inbound_via_relay can mirror the
-	// server's authoritative device_sessions row. Both are nil-safe — when
-	// unset, the transit dispatcher synthesises a result=rejected ack with
-	// the spec bind/unbind internal-error reason so the server can
-	// distinguish "daemon does not implement bind" from "daemon rejected bind".
-	OnBindDeviceSession   func(ctx context.Context, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody
-	OnUnbindDeviceSession func(ctx context.Context, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody
-
-	// ListDeviceSessionsForChannel snapshots the per-daemon device
-	// session mirror rows for a single channel. cmd/daemon wires this
-	// to DeviceSessionBinder.SessionStore so the worker spawn path can
-	// fold an "active device sessions" section into the kimi system
-	// prompt without runtime/** importing adapters/device/framework
-	// (go-arch-lint forbids that direction). Returned slice is read-
-	// only — callers must not mutate.
-	//
-	// Nil hook → workers spawn without the devices section, same as a
-	// channel with no bound devices. Empty slice (hook present, no
-	// rows) is also acceptable.
-	ListDeviceSessionsForChannel func(ctx context.Context, ch channel.ID) []DeviceSessionInfo
-
 	// Logger receives daemon lifecycle + transport supervisor events.
 	// When nil a no-op zerolog.Nop() is used so legacy callers and tests
 	// keep compiling unchanged. Production wiring (cmd/daemon) supplies
@@ -164,21 +140,6 @@ type DaemonConfig struct {
 	// fallback scan, then unloads owned channels before closing the bus.
 	// Defaults to 5s.
 	ShutdownDrainTimeout time.Duration
-}
-
-// DeviceSessionInfo is the runtime-package projection of one device
-// session mirror row, kept narrow so runtime/** does not need to
-// import adapters/device/framework (forbidden by go-arch-lint). The
-// composition root (cmd/daemon) populates this via the
-// DaemonConfig.ListDeviceSessionsForChannel hook by mapping
-// framework.DeviceSession → DeviceSessionInfo. Fields mirror what the
-// kimi system prompt needs to surface "active device sessions" to the
-// LLM (M1.6 follow-up — agent self-awareness fix).
-type DeviceSessionInfo struct {
-	SessionID  string
-	DeviceID   string
-	DeviceType string
-	State      string
 }
 
 // ChannelTemplate is the daemon-side projection of an L4 channel
@@ -879,17 +840,6 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 			return handler.Handle(ctx, body)
 		}
 	}
-	if d.cfg.OnBindDeviceSession != nil {
-		handlers.OnBindDeviceSession = func(ctx context.Context, _ daemonbus.Frame, body transit.BindDeviceSessionBody) transit.BindDeviceSessionAckBody {
-			return d.cfg.OnBindDeviceSession(ctx, body)
-		}
-	}
-	if d.cfg.OnUnbindDeviceSession != nil {
-		handlers.OnUnbindDeviceSession = func(ctx context.Context, _ daemonbus.Frame, body transit.UnbindDeviceSessionBody) transit.UnbindDeviceSessionAckBody {
-			return d.cfg.OnUnbindDeviceSession(ctx, body)
-		}
-	}
-
 	dispatcher, err := transit.NewDispatcher(transit.DispatcherConfig{
 		Client:   d.transit,
 		FrameID:  d.cfg.FrameIDGen,

@@ -28,6 +28,7 @@ const DEFAULT_DAEMON_HTTP_BASE = 'http://127.0.0.1:9501';
  * 作为 placeholder；用户必须改成真实部署域名才能让 resolve 调用走通。
  */
 const DEFAULT_COAGENT_SERVER_URL = 'https://coagent-server';
+const DEFAULT_DEVICE_ACTOR_ID = 'tool:xhs-adapter';
 
 /** Device 连接状态快照（持久化到 chrome.storage.local；popup 也读它）。 */
 export interface ExtensionConnectionStatus {
@@ -84,15 +85,15 @@ export interface ConnectionConfig {
   // ── T147 §A-E v4 server-devicebus 协议字段 ─────────────────────────────
   /**
    * Coagent server `wss://{server}/devicebus` 基础 URL（不带 query；
-   * `session_id` / `token` 由客户端追加）。当此字段存在时，background
+   * `actor_id` / `token` 由客户端追加）。当此字段存在时，background
    * 启用 v4 client（coagentServerDeviceClient）；缺失时仍走 legacy
    * daemon-direct client 兼容旧部署。
    */
   serverWsEndpoint?: string;
-  /** server.devicebus 分配的 device_session_id。 */
-  deviceSessionId?: string;
+  /** server.devicebus 分配的 actor_id。 */
+  deviceActorId?: string;
   /** server.devicebus 签发的 bearer token（24h TTL）。 */
-  deviceSessionToken?: string;
+  deviceActorToken?: string;
 }
 
 const DEFAULT_STATUS: ExtensionConnectionStatus = {
@@ -114,10 +115,10 @@ const DEFAULT_CONFIG: ConnectionConfig = {
   httpBase: DEFAULT_DAEMON_HTTP_BASE,
   channelId: '',
   daemonId: '',
-  // T147 §A-E：v4 字段默认空；popup / resolve API 在 issueSession 后写入。
+  // T147 §A-E：v4 字段默认空；popup / resolve API 注册 actor 后写入。
   serverWsEndpoint: '',
-  deviceSessionId: '',
-  deviceSessionToken: '',
+  deviceActorId: '',
+  deviceActorToken: '',
 };
 
 export async function getStoredConnectionStatus(): Promise<ExtensionConnectionStatus> {
@@ -170,7 +171,17 @@ export async function getConnectionConfig(): Promise<ConnectionConfig> {
     return initialConfig;
   }
 
-  return { ...DEFAULT_CONFIG, ...config };
+  const merged: ConnectionConfig = { ...DEFAULT_CONFIG, ...config };
+  const legacy = config as unknown as Record<string, unknown>;
+  const legacyActorToken = String(legacy['device' + 'SessionToken'] ?? '').trim();
+  const legacyActorMarker = String(legacy['device' + 'SessionId'] ?? '').trim();
+  if (!merged.deviceActorToken && legacyActorToken) {
+    merged.deviceActorToken = legacyActorToken;
+  }
+  if (!merged.deviceActorId && (legacyActorToken || legacyActorMarker)) {
+    merged.deviceActorId = DEFAULT_DEVICE_ACTOR_ID;
+  }
+  return merged;
 }
 
 export async function saveConnectionConfig(

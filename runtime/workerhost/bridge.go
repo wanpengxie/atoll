@@ -98,8 +98,8 @@ type BridgeConfig struct {
 	//
 	// Production wiring (M1.6 agent self-awareness fix): cmd/daemon
 	// implements PreSpawn to (1) snapshot the channel's actor_registry
-	// + type_registry + device_sessions, (2) write a JSON file into
-	// the channel workdir, (3) return ["COAGENT_CHANNEL_CONTEXT_FILE=
+	// + type_registry, (2) write a JSON file into the channel workdir,
+	// (3) return ["COAGENT_CHANNEL_CONTEXT_FILE=
 	// <abs-path>"]. The worker bridge folds the file into its system
 	// prompt so the LLM knows what tools / actors / devices live in
 	// the channel — without it the agent is blind and falls back to

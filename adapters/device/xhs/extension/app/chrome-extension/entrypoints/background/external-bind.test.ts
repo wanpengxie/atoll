@@ -49,8 +49,8 @@ function makeConfig(over: Partial<ConnectionConfig> = {}): ConnectionConfig {
     channelId: '',
     daemonId: '',
     serverWsEndpoint: '',
-    deviceSessionId: '',
-    deviceSessionToken: '',
+    deviceActorId: '',
+    deviceActorToken: '',
     ...over,
   };
 }
@@ -258,7 +258,7 @@ describe('getDeviceInfo', () => {
       deviceId: 'xhs-dev',
       channelId: 'ch-1',
       userId: 'user-A',
-      deviceSessionId: 'sess-X',
+      deviceActorId: 'sess-X',
       serverWsEndpoint: 'wss://app.coagent.dev/devicebus',
     });
     const res = await handleExternalMessage({ action: 'getDeviceInfo' }, senderOk(), deps);
@@ -267,7 +267,7 @@ describe('getDeviceInfo', () => {
       expect(res.bound).toEqual({
         channel_id: 'ch-1',
         user_id: 'user-A',
-        device_session_id: 'sess-X',
+        actor_id: 'sess-X',
         server_ws_url: 'wss://app.coagent.dev/devicebus',
       });
     }
@@ -282,7 +282,7 @@ describe('setDeviceToken', () => {
   const baseMsg: ExternalBindMessage = {
     action: 'setDeviceToken',
     server_ws_url: 'wss://app.coagent.dev/devicebus',
-    device_session_id: 'sess-A',
+    actor_id: 'sess-A',
     token: 'tok-A',
     channel_id: 'ch-1',
     user_id: 'user-1',
@@ -295,7 +295,7 @@ describe('setDeviceToken', () => {
     const res = await handleExternalMessage(baseMsg, senderOk(), deps);
     expect(res.status).toBe('connected');
     if (res.status === 'connected') {
-      expect(res.device_session_id).toBe('sess-A');
+      expect(res.actor_id).toBe('sess-A');
       expect(res.channel_id).toBe('ch-1');
       expect(res.user_id).toBe('user-1');
     }
@@ -303,8 +303,8 @@ describe('setDeviceToken', () => {
     expect(state.saves).toEqual([
       {
         serverWsEndpoint: 'wss://app.coagent.dev/devicebus',
-        deviceSessionId: 'sess-A',
-        deviceSessionToken: 'tok-A',
+        deviceActorId: 'sess-A',
+        deviceActorToken: 'tok-A',
         channelId: 'ch-1',
         deviceId: 'xhs-dev-A',
         autoReconnect: true,
@@ -332,7 +332,7 @@ describe('setDeviceToken', () => {
   });
 
   it.each([
-    ['device_session_id', { device_session_id: '' }],
+    ['actor_id', { actor_id: '' }],
     ['token', { token: '' }],
     ['channel_id', { channel_id: '' }],
     ['device_id', { device_id: '' }],
@@ -422,8 +422,8 @@ describe('unbindDevice', () => {
   it('clears v4 fields, calls disconnectAll, keeps device_id', async () => {
     const { deps, state, disconnectAll } = makeDeps({
       deviceId: 'xhs-keep',
-      deviceSessionId: 'sess-A',
-      deviceSessionToken: 'tok-A',
+      deviceActorId: 'sess-A',
+      deviceActorToken: 'tok-A',
       channelId: 'ch-1',
       serverWsEndpoint: 'wss://app.coagent.dev/devicebus',
     });
@@ -433,8 +433,8 @@ describe('unbindDevice', () => {
     expect(state.saves).toEqual([
       {
         serverWsEndpoint: '',
-        deviceSessionId: '',
-        deviceSessionToken: '',
+        deviceActorId: '',
+        deviceActorToken: '',
         channelId: '',
         autoReconnect: false,
       },

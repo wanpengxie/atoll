@@ -54,12 +54,12 @@ export const EXTENSION_CONSTANTS = {
  * T147 §A-E — Server devicebus 协议常量（v4，L4 §2.6.4 DeviceFrame 形态）。
  *
  * 与 legacy COAGENT_DEVICE_PROTOCOL 的本质差异：
- *   - WS 端点：wss://{server-host}/devicebus?session_id=...&token=...
- *   - 帧形态：DeviceFrame{direction, device_session_id, channel_id,
+ *   - WS 端点：wss://{server-host}/devicebus?actor_id=...
+ *   - 帧形态：DeviceFrame{direction, actor_id, channel_id,
  *     request_id, correlation_id, payload, expires_at}，payload 内嵌
  *     Command/Callback JSON。
  *   - 回调通道：全 WS（不再 HTTP POST /api/device/{id}/callback）。
- *   - 鉴权：session token 通过 WS query 一次性鉴权，不再附带 api_key。
+ *   - 鉴权：actor token 通过 WS subprotocol 一次性鉴权，不再附带 api_key。
  *
  * mock / real provider 切换仍由 background tools registry 决定（与协议
  * 层无关），cmd-handlers.ts 路由保持原样。
@@ -85,7 +85,7 @@ export const COAGENT_SERVER_DEVICEBUS_PROTOCOL = {
    * 1000/1001 (clean) before we give up. Server-side 401/403 handshake
    * rejection surfaces to the JS WS API as a code-1006 close (the auth
    * status frame never reaches user-space). Without a cap, the
-   * background SW will retry a revoked session_id indefinitely — bug
+   * background SW will retry a revoked actor_id indefinitely — bug
    * report `[ServerDeviceBus] WS closed code:1006` in tight loop.
    *
    * After this many attempts we stop the loop, clear the stored token
@@ -97,8 +97,8 @@ export const COAGENT_SERVER_DEVICEBUS_PROTOCOL = {
    * WS close codes considered "clean intentional close" — never trigger
    * reconnect. 1000 = normal closure, 1001 = going-away (SW unload).
    * 4401/4403 are coagent server-side custom codes for auth failure
-   * (token expired / session revoked); when the server CAN send a close
-   * frame (handshake succeeded then session got revoked mid-stream),
+   * (token expired / actor registration revoked); when the server CAN
+   * send a close frame (handshake succeeded then actor token got revoked),
    * these codes tell us the token is dead and reconnect is futile.
    */
   WS_CLOSE_CODE_NORMAL: 1000,

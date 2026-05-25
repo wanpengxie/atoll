@@ -234,7 +234,7 @@ func TestSendRequestHappyPath(t *testing.T) {
 	deadline := int64(2_000_000)
 	env.ExpiresAt = &deadline
 
-	frameID, err := p.SendRequest(ctx, env, "sess-1", []byte(`{"cmd":"publish"}`))
+	frameID, err := p.SendRequest(ctx, env, []byte(`{"cmd":"publish"}`))
 	if err != nil {
 		t.Fatalf("SendRequest: %v", err)
 	}
@@ -247,9 +247,6 @@ func TestSendRequestHappyPath(t *testing.T) {
 	got := tr.sent[0]
 	if got.ChannelID != channel.ID("channel-1") {
 		t.Errorf("channel mismatch: %q", got.ChannelID)
-	}
-	if got.DeviceSessionID != "sess-1" {
-		t.Errorf("session mismatch: %q", got.DeviceSessionID)
 	}
 	if got.AdapterActorID != actor.ActorID("tool:xhs-adapter") {
 		t.Errorf("adapter_actor_id mismatch: %q", got.AdapterActorID)
@@ -285,7 +282,7 @@ func TestSendRequestRejectsWrongKind(t *testing.T) {
 	p, _, _, _ := buildProxy(t)
 	env := sampleRequestEnv()
 	env.Kind = message.KindEvent
-	if _, err := p.SendRequest(ctx, env, "sess", []byte(`{}`)); err == nil {
+	if _, err := p.SendRequest(ctx, env, []byte(`{}`)); err == nil {
 		t.Error("non-request kind should be rejected")
 	}
 }
@@ -295,12 +292,8 @@ func TestSendRequestRejectsBlankIDs(t *testing.T) {
 	p, _, _, _ := buildProxy(t)
 	env := sampleRequestEnv()
 	env.ID = ""
-	if _, err := p.SendRequest(ctx, env, "sess", []byte(`{}`)); err == nil {
+	if _, err := p.SendRequest(ctx, env, []byte(`{}`)); err == nil {
 		t.Error("blank envelope id should be rejected")
-	}
-	env = sampleRequestEnv()
-	if _, err := p.SendRequest(ctx, env, "", []byte(`{}`)); err == nil {
-		t.Error("blank session id should be rejected")
 	}
 }
 
@@ -311,7 +304,7 @@ func TestSendRequestTransitFailureRollsBack(t *testing.T) {
 	tr.sendErr = sentinel
 
 	env := sampleRequestEnv()
-	_, err := p.SendRequest(ctx, env, "sess-1", []byte(`{}`))
+	_, err := p.SendRequest(ctx, env, []byte(`{}`))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -333,7 +326,7 @@ func TestSendRequestPolicyArmFailureRollsBack(t *testing.T) {
 	pol.armErr = errors.New("arm fail")
 
 	env := sampleRequestEnv()
-	if _, err := p.SendRequest(ctx, env, "sess-1", []byte(`{}`)); err == nil {
+	if _, err := p.SendRequest(ctx, env, []byte(`{}`)); err == nil {
 		t.Fatal("expected timer arm error")
 	}
 	if !cor.expired[adapter.CorrelationKey(env.ID)] {

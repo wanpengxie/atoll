@@ -16,12 +16,12 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// ErrDeviceSessionUnreachable is the proxy-level error every adapter
+// ErrDeviceRouteUnavailable is the proxy-level error every adapter
 // translates to a closed-set terminal failure when DeviceTransit.Send
-// reports the session cannot carry the frame right now. Adapters may
-// preserve device-specific detail in payload.error_code; the proxy
+// reports the actor route cannot carry the frame right now. Adapters
+// may preserve device-specific detail in payload.error_code; the proxy
 // itself stays neutral.
-var ErrDeviceSessionUnreachable = errors.New("framework.DeviceProxy: device session unreachable")
+var ErrDeviceRouteUnavailable = errors.New("framework.DeviceProxy: device actor route unavailable")
 
 // DeviceProxyDeps bundles the kernel-level seams the proxy needs. Used
 // by NewDeviceProxy to keep the constructor signature flat + by tests
@@ -170,7 +170,6 @@ func (p *DeviceProxy) SetFrameIDFactory(factory func() string) {
 func (p *DeviceProxy) SendRequest(
 	ctx context.Context,
 	env *message.Envelope,
-	sessionID devicetransit.DeviceSessionID,
 	wirePayload []byte,
 ) (frameID string, err error) {
 	if env == nil {
@@ -179,9 +178,6 @@ func (p *DeviceProxy) SendRequest(
 	if env.Kind != message.KindRequest {
 		return "", fmt.Errorf("framework.DeviceProxy.SendRequest: envelope kind must be %q, got %q",
 			message.KindRequest, env.Kind)
-	}
-	if sessionID == "" {
-		return "", errors.New("framework.DeviceProxy.SendRequest: device session id is required")
 	}
 	if env.ID == "" {
 		return "", errors.New("framework.DeviceProxy.SendRequest: envelope id is required")
@@ -227,10 +223,9 @@ func (p *DeviceProxy) SendRequest(
 		return "", fmt.Errorf("framework.DeviceProxy.SendRequest: marshal transit body: %w", err)
 	}
 	frame := devicetransit.SendFrame{
-		DeviceSessionID: sessionID,
-		AdapterActorID:  p.AdapterActorID,
-		ChannelID:       p.ChannelID,
-		Body:            body,
+		AdapterActorID: p.AdapterActorID,
+		ChannelID:      p.ChannelID,
+		Body:           body,
 	}
 
 	sentFrameID, err := p.deps.Transit.Send(ctx, frame)

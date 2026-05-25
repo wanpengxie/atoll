@@ -68,10 +68,9 @@ func (s *ChannelStore) Close() error {
 
 // Snapshot reads the current actor_registry + type_registry rows. The
 // returned ChannelContext mirrors the legacy JSON-file shape so kimi
-// bridge consumers do not have to fork. DeviceSessions is left empty —
-// device session state lives in daemon.sqlite (a different process's
-// state) and is intentionally not exposed to the worker through this
-// store; tool layers (e.g. xhs adapter) own device session routing.
+// bridge consumers do not have to fork. Device actor connection state is
+// intentionally not exposed through this channel store; server/devicebus
+// owns the live route.
 func (s *ChannelStore) Snapshot(ctx context.Context, channelID, channelType string) (ChannelContext, error) {
 	out := ChannelContext{
 		ChannelID:   channelID,

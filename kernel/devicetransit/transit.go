@@ -10,12 +10,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 )
 
-// DeviceSessionID is the server-allocated identifier for one device session.
-type DeviceSessionID string
-
-// String returns the wire form.
-func (d DeviceSessionID) String() string { return string(d) }
-
 // FrameID is the device-transit frame identifier returned by daemonbus.
 type FrameID string
 
@@ -28,11 +22,10 @@ func (f FrameID) String() string { return string(f) }
 // intentionally opaque to L2; adapter/framework-specific request IDs,
 // payloads and deadlines live inside it.
 type SendFrame struct {
-	DeviceSessionID DeviceSessionID `json:"device_session_id"`
-	AdapterActorID  actor.ActorID   `json:"adapter_actor_id"`
-	ChannelID       channel.ID      `json:"channel_id"`
-	Body            json.RawMessage `json:"body"`
-	TransitSeq      int64           `json:"transit_seq,omitempty"`
+	AdapterActorID actor.ActorID   `json:"adapter_actor_id"`
+	ChannelID      channel.ID      `json:"channel_id"`
+	Body           json.RawMessage `json:"body"`
+	TransitSeq     int64           `json:"transit_seq,omitempty"`
 }
 
 // AckResult is the canonical transport-level device_transit.ack result.

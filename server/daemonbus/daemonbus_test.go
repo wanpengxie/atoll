@@ -678,11 +678,11 @@ func TestDispatch_DeviceTransitRecv_RoutesToHandler(t *testing.T) {
 	go func() { _ = conn.Run(ctx, handlers) }()
 
 	body := map[string]any{
-		"channel_id":        "ch-A",
-		"device_session_id": "sess-1",
-		"direction":         "to_device",
-		"request_id":        "req-1",
-		"payload":           []byte(`{"cmd":"publish"}`),
+		"channel_id":       "ch-A",
+		"adapter_actor_id": "tool:xhs-adapter",
+		"direction":        "to_device",
+		"request_id":       "req-1",
+		"payload":          []byte(`{"cmd":"publish"}`),
 	}
 	raw, _ := json.Marshal(body)
 	if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{

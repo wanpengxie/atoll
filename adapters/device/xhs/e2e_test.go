@@ -308,7 +308,6 @@ type harness struct {
 	policy    *fakePolicy
 	registry  *fakeActorRegistry
 	respond   *fakeRespondHarness
-	sessions  *framework.InMemorySessionStore
 	channelID channel.ID
 	mctx      *adapter.ModuleContext
 }
@@ -326,10 +325,8 @@ func newHarness(t *testing.T) *harness {
 
 	resp := &fakeRespondHarness{registry: reg, adapterActor: testAdapterActor}
 
-	sessions := framework.NewInMemorySessionStore()
 	module, err := xhs.New(xhs.Config{
 		AdapterActorID: testAdapterActor,
-		SessionStore:   sessions,
 		Now:            func() time.Time { return time.UnixMilli(1_000_000) },
 	})
 	if err != nil {
@@ -355,61 +352,19 @@ func newHarness(t *testing.T) *harness {
 		policy:    policy,
 		registry:  reg,
 		respond:   resp,
-		sessions:  sessions,
 		channelID: mctx.ChannelID,
 		mctx:      mctx,
 	}
 }
 
-func (h *harness) seedActiveSession(t *testing.T, sid string) devicetransit.DeviceSessionID {
-	t.Helper()
-	id := devicetransit.DeviceSessionID(sid)
-	if err := h.sessions.Upsert(context.Background(), framework.DeviceSession{
-		SessionID:      id,
-		ChannelID:      h.channelID,
-		AdapterActorID: testAdapterActor,
-		DeviceID:       "device-" + sid,
-		DeviceType:     "xhs.chrome_extension",
-		State:          framework.StatePending,
-		BoundAt:        1_000_000,
-	}); err != nil {
-		t.Fatalf("seed session: %v", err)
-	}
-	if err := h.sessions.SetState(context.Background(), id, framework.StateReady, 1_000_001); err != nil {
-		t.Fatalf("seed ready: %v", err)
-	}
-	if err := h.sessions.SetState(context.Background(), id, framework.StateActive, 1_000_002); err != nil {
-		t.Fatalf("seed active: %v", err)
-	}
-	return id
-}
-
-func (h *harness) request(envID, ty, payload, sessionID string) *message.Envelope {
-	if sessionID == "" {
-		return &message.Envelope{
-			ID:        message.ID(envID),
-			ChannelID: h.channelID,
-			Sender:    message.Sender{Kind: actor.KindAgent, ID: "agent:test"},
-			Kind:      message.KindRequest,
-			Type:      ty,
-			Payload:   []byte(payload),
-			TS:        1_000_000,
-		}
-	}
-	var orig map[string]any
-	_ = json.Unmarshal([]byte(payload), &orig)
-	if orig == nil {
-		orig = map[string]any{}
-	}
-	orig["device_session_id"] = sessionID
-	body, _ := json.Marshal(orig)
+func (h *harness) request(envID, ty, payload string) *message.Envelope {
 	return &message.Envelope{
 		ID:        message.ID(envID),
 		ChannelID: h.channelID,
 		Sender:    message.Sender{Kind: actor.KindAgent, ID: "agent:test"},
 		Kind:      message.KindRequest,
 		Type:      ty,
-		Payload:   body,
+		Payload:   []byte(payload),
 		TS:        1_000_000,
 	}
 }
@@ -422,10 +377,8 @@ func (h *harness) request(envID, ty, payload, sessionID string) *message.Envelop
 func TestPublishHappyPath(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
-	sid := h.seedActiveSession(t, "sess-publish")
-
 	env := h.request("env-publish", xhs.TypePublish,
-		`{"title":"hi","content":"body"}`, string(sid))
+		`{"title":"hi","content":"body"}`)
 
 	if err := h.module.Handle(ctx, env); err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -435,9 +388,6 @@ func TestPublishHappyPath(t *testing.T) {
 	frame, ok := h.server.lastSend()
 	if !ok {
 		t.Fatal("server captured no frame")
-	}
-	if frame.DeviceSessionID != sid {
-		t.Errorf("session id=%q", frame.DeviceSessionID)
 	}
 	if frame.AdapterActorID != xhs.DefaultAdapterActorID {
 		t.Errorf("adapter_actor_id=%q", frame.AdapterActorID)
@@ -456,16 +406,13 @@ func TestPublishHappyPath(t *testing.T) {
 		t.Errorf("request_id=%q", transitBody.RequestID)
 	}
 
-	// 2. Inspect Command JSON: cmd stripped, framework metadata excluded.
+	// 2. Inspect Command JSON: cmd stripped, domain params preserved.
 	var cmd xhs.Command
 	if err := json.Unmarshal(transitBody.Payload, &cmd); err != nil {
 		t.Fatalf("decode wire payload: %v", err)
 	}
 	if cmd.Cmd != "publish" {
 		t.Errorf("cmd=%q", cmd.Cmd)
-	}
-	if _, present := cmd.Params["device_session_id"]; present {
-		t.Error("framework metadata leaked into Command.Params")
 	}
 	if cmd.Params["title"] != "hi" {
 		t.Errorf("params['title']=%v", cmd.Params["title"])
@@ -540,9 +487,6 @@ func TestPublishHappyPath(t *testing.T) {
 	if h.registry.exists("device-sess-publish") {
 		t.Error("device id must not appear in actor_registry (L4 §2.6)")
 	}
-	if h.registry.exists(actor.ActorID("device:sess-publish")) {
-		t.Error("device session id must not appear in actor_registry (L4 §2.6)")
-	}
 }
 
 // TestSearchPerTypeAllowList confirms the R4-FIX-A regression guard
@@ -550,9 +494,8 @@ func TestPublishHappyPath(t *testing.T) {
 func TestSearchPerTypeAllowList(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
-	sid := h.seedActiveSession(t, "sess-search")
 	env := h.request("env-search", xhs.TypeSearch,
-		`{"keyword":"abc"}`, string(sid))
+		`{"keyword":"abc"}`)
 
 	if err := h.module.Handle(ctx, env); err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -585,74 +528,15 @@ func TestSearchPerTypeAllowList(t *testing.T) {
 	}
 }
 
-// TestDeviceOfflineSession seeds an offline session and verifies the
-// adapter short-circuits to a failed terminal with a closed-set reason.
-func TestDeviceOfflineSession(t *testing.T) {
-	ctx := context.Background()
-	h := newHarness(t)
-	sid := h.seedActiveSession(t, "sess-off")
-	// Take it offline.
-	if err := h.sessions.SetState(ctx, sid, framework.StateOffline, 1_000_500); err != nil {
-		t.Fatalf("set offline: %v", err)
-	}
-
-	env := h.request("env-off", xhs.TypePublish, `{"title":"x"}`, string(sid))
-	if err := h.module.Handle(ctx, env); err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-
-	if len(h.server.sends) != 0 {
-		t.Errorf("offline session should not produce a frame; got %d", len(h.server.sends))
-	}
-	if got := len(h.respond.calls); got != 1 {
-		t.Fatalf("respond calls=%d want 1", got)
-	}
-	call := h.respond.calls[0]
-	if call.opts.Status != "failed" {
-		t.Errorf("status=%q want failed", call.opts.Status)
-	}
-	assertAdapterExecutionFailure(t, call, "device_offline")
-	if call.sender != testAdapterActor {
-		t.Errorf("sender=%q want %q", call.sender, testAdapterActor)
-	}
-}
-
-// TestDeviceSessionMissing covers the synchronous fail when payload
-// omits device_session_id and Config has no default.
-func TestDeviceSessionMissing(t *testing.T) {
-	ctx := context.Background()
-	h := newHarness(t)
-	env := h.request("env-miss", xhs.TypePublish, `{"title":"x"}`, "")
-	if err := h.module.Handle(ctx, env); err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	call := h.respond.calls[0]
-	assertAdapterExecutionFailure(t, call, "device_session_missing")
-}
-
-// TestDeviceSessionUnknown covers the case where a session id is
-// supplied but no mirror row exists.
-func TestDeviceSessionUnknown(t *testing.T) {
-	ctx := context.Background()
-	h := newHarness(t)
-	env := h.request("env-unknown", xhs.TypePublish, `{"title":"x"}`, "sess-ghost")
-	if err := h.module.Handle(ctx, env); err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	call := h.respond.calls[0]
-	assertAdapterExecutionFailure(t, call, "device_session_unknown")
-}
-
 // TestTransitSendFailureRollsBack covers the path where DeviceTransit.Send
 // fails — the adapter must emit a synchronous failed terminal and roll
 // back correlation + timer.
 func TestTransitSendFailureRollsBack(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
-	sid := h.seedActiveSession(t, "sess-fail")
 	h.server.failSend = errors.New("ws gone")
 
-	env := h.request("env-fail", xhs.TypePublish, `{"title":"x"}`, string(sid))
+	env := h.request("env-fail", xhs.TypePublish, `{"title":"x"}`)
 	if err := h.module.Handle(ctx, env); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -693,9 +577,8 @@ func assertAdapterExecutionFailure(t *testing.T, call respondCall, wantErrorCode
 func TestF3TimeoutTerminal(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
-	sid := h.seedActiveSession(t, "sess-timeout")
 
-	env := h.request("env-timeout", xhs.TypePublish, `{"title":"x"}`, string(sid))
+	env := h.request("env-timeout", xhs.TypePublish, `{"title":"x"}`)
 	if err := h.module.Handle(ctx, env); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -725,8 +608,7 @@ func TestF3TimeoutTerminal(t *testing.T) {
 func TestSenderHarnessGuard(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
-	sid := h.seedActiveSession(t, "sess-guard")
-	env := h.request("env-guard", xhs.TypePublish, `{"title":"x"}`, string(sid))
+	env := h.request("env-guard", xhs.TypePublish, `{"title":"x"}`)
 	if err := h.module.Handle(ctx, env); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -810,8 +692,7 @@ func TestParseFailureEmitsOrphanCallbackEvents(t *testing.T) {
 func TestDuplicateCallbackIsDropped(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
-	sid := h.seedActiveSession(t, "sess-dup")
-	env := h.request("env-dup", xhs.TypePublish, `{"title":"x"}`, string(sid))
+	env := h.request("env-dup", xhs.TypePublish, `{"title":"x"}`)
 	if err := h.module.Handle(ctx, env); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -832,7 +713,7 @@ func TestDuplicateCallbackIsDropped(t *testing.T) {
 // TestModuleInitRequiresDeviceTransit guards the codex 警告 #15 wire-up:
 // missing DeviceTransit MUST fail at Init.
 func TestModuleInitRequiresDeviceTransit(t *testing.T) {
-	module, err := xhs.New(xhs.Config{SessionStore: framework.NewInMemorySessionStore()})
+	module, err := xhs.New(xhs.Config{})
 	if err != nil {
 		t.Fatalf("xhs.New: %v", err)
 	}

@@ -32,7 +32,7 @@ func TestValidateRespondReasonClosedSet(t *testing.T) {
 		{
 			name:    "open set rejected",
 			status:  "failed",
-			reason:  "device_session_missing",
+			reason:  "adapter_route_missing",
 			wantErr: "closed set",
 		},
 	}

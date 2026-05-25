@@ -179,7 +179,7 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			// device_transit.recv = daemon adapter → server → device
 			// (impl-layer2 §5.3.2). The daemon-side adapter pushes a
 			// recv frame whose payload should be relayed to the device
-			// WS keyed by SendFrame.DeviceSessionID. The WS wire is the
+			// WS keyed by channel_id + adapter_actor_id. The WS wire is the
 			// flat devicebus.DeviceFrame so we unwrap SendFrame.Body
 			// (opaque to kernel) into the WS schema before relaying.
 			var sf devicetransit.SendFrame
@@ -194,7 +194,7 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			}
 			df := devicebus.DeviceFrame{
 				Direction:       body.Direction,
-				DeviceSessionID: string(sf.DeviceSessionID),
+				ActorID:         string(sf.AdapterActorID),
 				ChannelID:       string(sf.ChannelID),
 				RequestID:       body.RequestID,
 				ParentID:        body.ParentID,
@@ -202,61 +202,9 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 				Payload:         body.Payload,
 				ExpiresAt:       body.ExpiresAt,
 			}
-			return a.devicebus.SendFrameToDevice(ctx, df.DeviceSessionID, df)
+			return a.devicebus.SendFrameToDevice(ctx, sf.ChannelID, sf.AdapterActorID, df)
 		},
 	}
-}
-
-// Bind implements devicebus.BindNotifier (T147 §A-S2). After
-// devicebus.IssueSession allocates the row in state=pending, the HTTP
-// handler calls Bind so the daemon mirrors the row and acks; on a
-// successful result=accepted ack the caller advances pending → ready.
-// Bind blocks until the ack arrives or the context is cancelled
-// (gin's request context).
-//
-// Errors:
-//   - daemon connection is missing → daemonbus.ErrDaemonNotRegistered
-//     wrapped with the daemon_id (HTTP 502 to client).
-//   - daemon ack reports result=rejected → error string carries the
-//     daemon-supplied Reason / Detail so triage points at the rejecting
-//     edge.
-//   - send / decode failure → wrapped error.
-func (a *App) Bind(ctx context.Context, in devicebus.BindInput) error {
-	conn, ok := a.daemonbus.ConnectionFor(in.Session.DaemonID)
-	if !ok {
-		return fmt.Errorf("gateway: bind_device_session: daemon %s not connected", in.Session.DaemonID)
-	}
-	body := kerneldaemonbus.BindDeviceSessionBody{
-		FrameID:          kerneldaemonbus.FrameID(uuid.NewString()),
-		BindRequestID:    uuid.NewString(),
-		DeviceSessionID:  devicetransit.DeviceSessionID(in.Session.ID),
-		ChannelID:        in.Session.ChannelID,
-		AdapterActorID:   in.Session.AdapterActorID,
-		DeviceID:         in.Session.DeviceID,
-		DeviceType:       in.Session.DeviceType,
-		DaemonID:         in.Session.DaemonID,
-		TokenFingerprint: in.TokenFingerprint,
-		ExpiresAt:        in.Session.ExpiresAt,
-		BoundAt:          in.Session.CreatedAt,
-	}
-	ackFrame, err := conn.SendAndAwait(ctx, kerneldaemonbus.FrameTypeControlBindDeviceSession, body)
-	if err != nil {
-		return fmt.Errorf("gateway: bind_device_session send: %w", err)
-	}
-	var ack kerneldaemonbus.BindDeviceSessionAckBody
-	if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
-		return fmt.Errorf("gateway: bind_device_session ack decode: %w", err)
-	}
-	if ack.Result != kerneldaemonbus.DeviceSessionBindAccepted {
-		if ack.Reason == "" {
-			ack.Reason = "rejected"
-		}
-		if ack.Detail == "" {
-			return fmt.Errorf("gateway: bind_device_session rejected: %s", ack.Reason)
-		}
-		return fmt.Errorf("gateway: bind_device_session rejected: %s — %s", ack.Reason, ack.Detail)
-	}
-	return nil
 }
 
 // OnChannelCreated implements catalog.PlacementHook. Channel bind sends the
@@ -385,41 +333,6 @@ func (a *App) OnChannelMembersChanged(ctx context.Context, channelID string, add
 		Str("daemon_id", string(daemonID)).
 		Str("frame_id", string(body.FrameID)).
 		Msg("update_members ack accepted")
-	return nil
-}
-
-// Unbind implements devicebus.BindNotifier — sends
-// control.unbind_device_session and waits for the ack. Daemon
-// disconnection is NOT an error (best-effort tear-down: a daemon that
-// reboots reloads its mirror from server-emitted bind frames anyway).
-// Any other failure is wrapped so the HTTP caller can surface a 502.
-func (a *App) Unbind(ctx context.Context, in devicebus.UnbindInput) error {
-	conn, ok := a.daemonbus.ConnectionFor(in.Session.DaemonID)
-	if !ok {
-		// Daemon offline — server row revoke proceeds; the daemon
-		// reloads from server on the next bind cycle.
-		return nil
-	}
-	body := kerneldaemonbus.UnbindDeviceSessionBody{
-		FrameID:         kerneldaemonbus.FrameID(uuid.NewString()),
-		DeviceSessionID: devicetransit.DeviceSessionID(in.Session.ID),
-		ChannelID:       in.Session.ChannelID,
-		Reason:          in.Reason,
-	}
-	ackFrame, err := conn.SendAndAwait(ctx, kerneldaemonbus.FrameTypeControlUnbindDeviceSession, body)
-	if err != nil {
-		return fmt.Errorf("gateway: unbind_device_session send: %w", err)
-	}
-	var ack kerneldaemonbus.UnbindDeviceSessionAckBody
-	if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
-		return fmt.Errorf("gateway: unbind_device_session ack decode: %w", err)
-	}
-	if ack.Result != kerneldaemonbus.DeviceSessionBindAccepted {
-		if ack.Reason == "" {
-			ack.Reason = "rejected"
-		}
-		return fmt.Errorf("gateway: unbind_device_session rejected: %s", ack.Reason)
-	}
 	return nil
 }
 
@@ -603,10 +516,9 @@ func (a *App) ForwardDeviceFrame(ctx context.Context, frame devicebus.DeviceFram
 		return fmt.Errorf("gateway: marshal device_transit.send body: %w", err)
 	}
 	sf := devicetransit.SendFrame{
-		DeviceSessionID: devicetransit.DeviceSessionID(frame.DeviceSessionID),
-		ChannelID:       channel.ID(frame.ChannelID),
-		AdapterActorID:  adapterActorID,
-		Body:            body,
+		ChannelID:      channel.ID(frame.ChannelID),
+		AdapterActorID: adapterActorID,
+		Body:           body,
 	}
 	conn, err := a.daemonbus.ConnectionForChannel(ctx, frame.ChannelID)
 	if err != nil {

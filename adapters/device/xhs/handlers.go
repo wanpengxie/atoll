@@ -6,81 +6,53 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// payloadMetadataKeys is the closed set of request-payload keys the
-// adapter strips before forwarding to the extension. These are the
-// daemon-side / framework metadata that have no extension semantics:
-//
-//   - device_id          extension already routes by WS session
-//   - device_session_id  framework metadata; consumed by Module.Handle
-//
-// Anything else flows through as Command.Params.
-var payloadMetadataKeys = map[string]struct{}{
-	"device_id":         {},
-	"device_session_id": {},
-}
-
 // buildCommand transforms one inbound kind=request envelope into a
-// wire-form Command + extracts the device_session_id slot that the
-// Module needs for routing.
-//
-// `sessionID` is the value of payload.device_session_id when present;
-// empty string when absent (Module falls back to Config.DefaultSession).
+// wire-form Command. Routing is envelope-level: Module.Handle sends to
+// the adapter actor route selected by envelope.audience, and payload is
+// treated as domain data only.
 //
 // Errors are surfaced as plain Go errors; the caller (Module.Handle)
 // decides whether they map to a synchronous Respond / failed terminal.
-func buildCommand(env *message.Envelope) (cmd Command, sessionID devicetransit.DeviceSessionID, deviceID string, err error) {
+func buildCommand(env *message.Envelope) (Command, error) {
 	if env == nil {
-		return Command{}, "", "", errors.New("xhs.buildCommand: envelope is nil")
+		return Command{}, errors.New("xhs.buildCommand: envelope is nil")
 	}
 	if env.Type == "" {
-		return Command{}, "", "", errors.New("xhs.buildCommand: envelope.type is empty")
+		return Command{}, errors.New("xhs.buildCommand: envelope.type is empty")
 	}
 	if !strings.HasPrefix(env.Type, "xhs.") {
-		return Command{}, "", "", fmt.Errorf("xhs.buildCommand: type %q lacks xhs. prefix", env.Type)
+		return Command{}, fmt.Errorf("xhs.buildCommand: type %q lacks xhs. prefix", env.Type)
 	}
 	if env.ID == "" {
-		return Command{}, "", "", errors.New("xhs.buildCommand: envelope.id is empty")
+		return Command{}, errors.New("xhs.buildCommand: envelope.id is empty")
 	}
 
-	// Decode payload as JSON object so we can extract framework metadata
-	// + carry the remaining keys through as Params.
+	// Decode payload as JSON object so the extension receives domain
+	// params in the same shape the caller supplied.
 	var payload map[string]any
 	if len(env.Payload) > 0 {
 		if err := json.Unmarshal(env.Payload, &payload); err != nil {
-			return Command{}, "", "", fmt.Errorf("xhs.buildCommand: payload decode: %w", err)
+			return Command{}, fmt.Errorf("xhs.buildCommand: payload decode: %w", err)
 		}
 	} else {
 		payload = map[string]any{}
 	}
 
-	if v, ok := payload["device_session_id"].(string); ok {
-		sessionID = devicetransit.DeviceSessionID(strings.TrimSpace(v))
-	}
-	if v, ok := payload["device_id"].(string); ok {
-		deviceID = strings.TrimSpace(v)
-	}
-
-	// Strip framework metadata so extension sees only its own domain
-	// schema. Build a fresh map; never mutate the unmarshalled view.
 	params := make(map[string]any, len(payload))
 	for k, v := range payload {
-		if _, drop := payloadMetadataKeys[k]; drop {
-			continue
-		}
 		params[k] = v
 	}
 
-	cmd = Command{
+	cmd := Command{
 		Type:          CommandWireType,
 		CorrelationID: env.ID.String(),
 		Cmd:           strings.TrimPrefix(env.Type, "xhs."),
 		Params:        params,
 	}
-	return cmd, sessionID, deviceID, nil
+	return cmd, nil
 }
 
 // parseCallback decodes a `device_transit.send` payload (impl-layer2

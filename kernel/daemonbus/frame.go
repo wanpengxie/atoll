@@ -28,8 +28,8 @@ const (
 	FrameTypeViewsyncResyncRequest  FrameType = "viewsync.resync_request"
 	FrameTypeViewsyncResyncResponse FrameType = "viewsync.resync_response"
 
-	// Control plane frames (placement / member sync / device session /
-	// human caller) per impl-layer2 §1.2.
+	// Control plane frames (placement / member sync / human caller) per
+	// impl-layer2 §1.2.
 	FrameTypeControlConnectionAccepted     FrameType = "control.connection_accepted"
 	FrameTypeControlCreateChannel          FrameType = "control.create_channel"
 	FrameTypeControlCreateChannelAck       FrameType = "control.create_channel_ack"
@@ -43,10 +43,6 @@ const (
 	FrameTypeControlReclaimAccepted        FrameType = "control.reclaim_accepted"
 	FrameTypeControlReclaimRejected        FrameType = "control.reclaim_rejected"
 	FrameTypeControlRejectChannel          FrameType = "control.reject_channel"
-	FrameTypeControlBindDeviceSession      FrameType = "control.bind_device_session"
-	FrameTypeControlBindDeviceSessionAck   FrameType = "control.bind_device_session_ack"
-	FrameTypeControlUnbindDeviceSession    FrameType = "control.unbind_device_session"
-	FrameTypeControlUnbindDeviceSessionAck FrameType = "control.unbind_device_session_ack"
 	FrameTypeControlUpdateMembers          FrameType = "control.update_members"
 	FrameTypeControlUpdateMembersAck       FrameType = "control.update_members_ack"
 	FrameTypeControlWriteMessage           FrameType = "control.write_message"
@@ -80,10 +76,6 @@ var AllFrameTypes = []FrameType{
 	FrameTypeControlReclaimAccepted,
 	FrameTypeControlReclaimRejected,
 	FrameTypeControlRejectChannel,
-	FrameTypeControlBindDeviceSession,
-	FrameTypeControlBindDeviceSessionAck,
-	FrameTypeControlUnbindDeviceSession,
-	FrameTypeControlUnbindDeviceSessionAck,
 	FrameTypeControlUpdateMembers,
 	FrameTypeControlUpdateMembersAck,
 	FrameTypeControlWriteMessage,

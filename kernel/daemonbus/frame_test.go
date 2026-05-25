@@ -10,14 +10,14 @@ import (
 )
 
 // TestFrameTypeClosedSetCardinality asserts the impl-layer2 §1.2 closed-set
-// cardinality. launch = 4 viewsync + 21 control + 3 device_transit = 28.
+// cardinality. current = 4 viewsync + 17 control + 3 device_transit = 24.
 //
 // Exact values (in spec order) checked by TestAllFrameTypesSpecOrder.
 func TestFrameTypeClosedSetCardinality(t *testing.T) {
 	t.Parallel()
 
-	if got := len(AllFrameTypes); got != 28 {
-		t.Errorf("AllFrameTypes len = %d, want 28 (4 viewsync + 21 control + 3 device_transit)", got)
+	if got := len(AllFrameTypes); got != 24 {
+		t.Errorf("AllFrameTypes len = %d, want 24 (4 viewsync + 17 control + 3 device_transit)", got)
 	}
 
 	// Per-category breakdown — keeps the failure message specific when
@@ -29,8 +29,8 @@ func TestFrameTypeClosedSetCardinality(t *testing.T) {
 	if counts[CategoryViewsync] != 4 {
 		t.Errorf("viewsync frame count = %d, want 4", counts[CategoryViewsync])
 	}
-	if counts[CategoryControl] != 21 {
-		t.Errorf("control frame count = %d, want 21", counts[CategoryControl])
+	if counts[CategoryControl] != 17 {
+		t.Errorf("control frame count = %d, want 17", counts[CategoryControl])
 	}
 	if counts[CategoryDeviceTransit] != 3 {
 		t.Errorf("device_transit frame count = %d, want 3", counts[CategoryDeviceTransit])
@@ -62,10 +62,6 @@ func TestAllFrameTypesSpecOrder(t *testing.T) {
 		FrameTypeControlReclaimAccepted,
 		FrameTypeControlReclaimRejected,
 		FrameTypeControlRejectChannel,
-		FrameTypeControlBindDeviceSession,
-		FrameTypeControlBindDeviceSessionAck,
-		FrameTypeControlUnbindDeviceSession,
-		FrameTypeControlUnbindDeviceSessionAck,
 		FrameTypeControlUpdateMembers,
 		FrameTypeControlUpdateMembersAck,
 		FrameTypeControlWriteMessage,

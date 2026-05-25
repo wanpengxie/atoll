@@ -8,8 +8,8 @@
 //     / 配置存取 / 手动 cookie sync / 直接 EXECUTE_TOOL 调试）。
 //
 // T147 §A-E：根据 ConnectionConfig 选择 v4 server-devicebus client 或 legacy
-// daemon-direct client：当 `serverWsEndpoint + deviceSessionId +
-// deviceSessionToken` 三件套齐时走 v4；否则保留 legacy 路径兼容老配置。
+// daemon-direct client：当 `serverWsEndpoint + deviceActorId +
+// deviceActorToken` 三件套齐时走 v4；否则保留 legacy 路径兼容老配置。
 // 两条客户端都实现 `connect / disconnect / updateConfig / postCallback`
 // — `activeDeviceClient()` 在每次 dispatch 时按当前 config 选择，确保 popup
 // 切换配置后立刻生效，无需 SW 重启。
@@ -64,7 +64,7 @@ let connectionConfig: ConnectionConfig;
  * Tag identifying which device transport binding is in use for the
  * currently-loaded ConnectionConfig:
  *   - 'server' → T147 §A-E v4 path via `coagentServerDeviceClient` to
- *     `wss://{server}/devicebus?session_id=...&token=...`
+ *     `wss://{server}/devicebus?actor_id=...`
  *   - 'daemon' → legacy M1.1/M1.2 daemon-direct path via
  *     `coagentDeviceClient` to `ws://{daemon}/device/{id}?key=...`
  *   - 'none'   → config incomplete; no client should connect.
@@ -81,8 +81,8 @@ function selectTransport(cfg: ConnectionConfig): DeviceTransport {
 function toServerDeviceConfig(cfg: ConnectionConfig): ServerDeviceConfig {
   return {
     wsEndpoint: (cfg.serverWsEndpoint ?? '').trim(),
-    sessionId: (cfg.deviceSessionId ?? '').trim(),
-    token: (cfg.deviceSessionToken ?? '').trim(),
+    actorId: (cfg.deviceActorId ?? '').trim(),
+    token: (cfg.deviceActorToken ?? '').trim(),
     channelId: (cfg.channelId ?? '').trim(),
     autoReconnect: cfg.autoReconnect !== false,
     userId: cfg.userId,
@@ -159,8 +159,8 @@ export default defineBackground(() => {
       console.log('[Background] device config incomplete, skip auto-connect', {
         transport,
         hasServerWs: Boolean(connectionConfig.serverWsEndpoint),
-        hasSessionId: Boolean(connectionConfig.deviceSessionId),
-        hasSessionToken: Boolean(connectionConfig.deviceSessionToken),
+        hasActorId: Boolean(connectionConfig.deviceActorId),
+        hasActorToken: Boolean(connectionConfig.deviceActorToken),
         hasLegacyUrl: Boolean(connectionConfig.serverUrl),
         hasLegacyKey: Boolean(connectionConfig.apiKey),
         hasDeviceId: Boolean(connectionConfig.deviceId),
@@ -216,7 +216,7 @@ export default defineBackground(() => {
               sendResponse({
                 success: false,
                 error:
-                  'Device 配置不完整：需要 server WS + session_id + token（v4），或 daemon WS + api key + device id（legacy）。',
+                  'Device 配置不完整：需要 server WS + actor_id + token（v4），或 daemon WS + api key + device id（legacy）。',
               });
               break;
             }
@@ -243,7 +243,7 @@ export default defineBackground(() => {
             console.log('[Background] device config saved', {
               transport,
               hasServerWs: Boolean(connectionConfig.serverWsEndpoint),
-              hasSessionId: Boolean(connectionConfig.deviceSessionId),
+              hasActorId: Boolean(connectionConfig.deviceActorId),
               hasLegacyUrl: Boolean(connectionConfig.serverUrl),
               hasLegacyKey: Boolean(connectionConfig.apiKey),
               deviceId: connectionConfig.deviceId,
@@ -324,10 +324,10 @@ export default defineBackground(() => {
   // T148 (M1.6-T6): externally-connectable handshake. Web UI hosted on
   // an allowed origin (see wxt.config.ts externally_connectable.matches)
   // calls `chrome.runtime.sendMessage(EXTENSION_ID, {action, ...})` to
-  // hand off a fresh device_session_token, bypassing the popup
+  // hand off a fresh device actor token, bypassing the popup
   // RESOLVE_AND_CONNECT manual flow. Three actions:
   //   - getDeviceInfo  → returns persistent device_id (auto-generated)
-  //   - setDeviceToken → writes v4 session bundle + opens WS
+  //   - setDeviceToken → writes v4 actor token bundle + opens WS
   //   - unbindDevice   → clears v4 fields + disconnects
   //
   // All policy / origin validation lives in external-bind.ts so the
@@ -420,12 +420,12 @@ function handleToolResult(payload: any) {
   });
 }
 
-/** v4 server-devicebus transport readiness: server endpoint + session_id + token. */
+/** v4 server-devicebus transport readiness: server endpoint + actor_id + token. */
 function hasServerDeviceConfig(cfg: ConnectionConfig): boolean {
   return Boolean(
     (cfg.serverWsEndpoint ?? '').trim() &&
-      (cfg.deviceSessionId ?? '').trim() &&
-      (cfg.deviceSessionToken ?? '').trim(),
+      (cfg.deviceActorId ?? '').trim() &&
+      (cfg.deviceActorToken ?? '').trim(),
   );
 }
 

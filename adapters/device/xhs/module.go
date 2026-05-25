@@ -12,12 +12,10 @@ import (
 	adapterframework "github.com/wanpengxie/ActOS/adapters/framework"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// Config tunes a Module instance. Only SessionStore is mandatory at
-// construction time; everything else carries a defensible default.
+// Config tunes a Module instance. Everything carries a defensible default.
 type Config struct {
 	// AdapterActorID overrides the actor_registry id this Module owns.
 	// Empty defaults to DefaultAdapterActorID (`tool:xhs-adapter`).
@@ -26,18 +24,6 @@ type Config struct {
 	// MaxPendingMs overrides the per-type pending budget. Zero defaults
 	// to DefaultMaxPendingMs (5 min).
 	MaxPendingMs int64
-
-	// DefaultSession is the device_session_id used when an inbound
-	// request payload omits one. Optional — if empty AND the payload
-	// also omits device_session_id, Module.Handle emits a synchronous
-	// failed terminal with terminal_failure_reason=receiver_internal_error
-	// and payload.error_code="device_session_missing" rather than guessing.
-	DefaultSession devicetransit.DeviceSessionID
-
-	// SessionStore is the daemon-side mirror table for device sessions.
-	// Required: Module.Handle consults it to confirm the target session
-	// is in a state that can route traffic before pushing a frame.
-	SessionStore framework.SessionStore
 
 	// Now is a clock injection point for tests. Defaults to time.Now.
 	Now func() time.Time
@@ -58,7 +44,6 @@ type Module struct {
 	cfg        Config
 	mctx       *adapter.ModuleContext
 	proxy      *framework.DeviceProxy
-	sessions   framework.SessionStore
 	now        func() time.Time
 	externalID func(string) string
 
@@ -74,9 +59,6 @@ type Module struct {
 // front so a misconfigured wire-up fails at composition root rather
 // than at first request dispatch.
 func New(cfg Config) (*Module, error) {
-	if cfg.SessionStore == nil {
-		return nil, errors.New("xhs.New: Config.SessionStore is required")
-	}
 	if cfg.AdapterActorID == "" {
 		cfg.AdapterActorID = DefaultAdapterActorID
 	}
@@ -91,7 +73,6 @@ func New(cfg Config) (*Module, error) {
 	}
 	return &Module{
 		cfg:         cfg,
-		sessions:    cfg.SessionStore,
 		now:         cfg.Now,
 		externalID:  cfg.NewExternalCorrelationID,
 		pendingType: map[string]string{},
@@ -185,35 +166,13 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 		return fmt.Errorf("xhs.Handle: envelope kind must be %q, got %q", message.KindRequest, env.Kind)
 	}
 
-	cmd, sid, _, err := buildCommand(env)
+	cmd, err := buildCommand(env)
 	if err != nil {
 		return m.failNow(ctx, env.ID.String(), "", "payload_decode_failed", err.Error())
 	}
 
 	if newID := m.externalID(env.ID.String()); newID != "" {
 		cmd.CorrelationID = newID
-	}
-
-	if sid == "" {
-		sid = m.cfg.DefaultSession
-	}
-	if sid == "" {
-		return m.failNow(ctx, env.ID.String(), "", "device_session_missing", "")
-	}
-
-	// Confirm the session is registered + reachable. The framework
-	// state-machine guarantees `active` is the only routable state;
-	// other states surface as receiver_internal_error with a
-	// device-specific payload.error_code.
-	sess, ok, err := m.sessions.Get(ctx, sid)
-	if err != nil {
-		return m.failNow(ctx, env.ID.String(), "", "session_store_unavailable", err.Error())
-	}
-	if !ok {
-		return m.failNow(ctx, env.ID.String(), "", "device_session_unknown", string(sid))
-	}
-	if !sess.State.IsReachable() {
-		return m.failNow(ctx, env.ID.String(), "", "device_offline", fmt.Sprintf("session state=%s", sess.State))
 	}
 
 	wirePayload, err := json.Marshal(cmd)
@@ -226,7 +185,7 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 	// terminal (success or cancel) inside completePending.
 	m.setPendingType(env.ID.String(), env.Type)
 
-	if _, err := m.proxy.SendRequest(ctx, env, sid, wirePayload); err != nil {
+	if _, err := m.proxy.SendRequest(ctx, env, wirePayload); err != nil {
 		// SendRequest already rolled back correlation + timer; clear our
 		// local stash too.
 		m.clearPendingType(env.ID.String())

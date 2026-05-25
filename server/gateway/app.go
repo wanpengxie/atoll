@@ -50,21 +50,20 @@ func SetLogger(l zerolog.Logger) { pkgLogger = l }
 
 // Config bundles the construction-time settings.
 type Config struct {
-	DBPath                          string
-	SessionSecret                   string
-	DaemonSharedSecret              string
-	DeviceTokenSecret               string
-	DeviceTokenTTL                  time.Duration
-	DeviceMaxSessionsPerUserChannel int
-	DeviceAllowedOrigins            []string
-	DeviceAllowMissingOrigin        bool
-	PushhubAllowedOrigins           []string
-	DaemonbusAllowedOrigins         []string
-	HumanCallerSecret               string
-	BcryptCost                      int
-	ReconcileGracePeriod            time.Duration
-	ReconcileCreateTimeout          time.Duration
-	ReconcileHeartbeatTimeout       time.Duration
+	DBPath                    string
+	SessionSecret             string
+	DaemonSharedSecret        string
+	DeviceTokenSecret         string
+	DeviceTokenTTL            time.Duration
+	DeviceAllowedOrigins      []string
+	DeviceAllowMissingOrigin  bool
+	PushhubAllowedOrigins     []string
+	DaemonbusAllowedOrigins   []string
+	HumanCallerSecret         string
+	BcryptCost                int
+	ReconcileGracePeriod      time.Duration
+	ReconcileCreateTimeout    time.Duration
+	ReconcileHeartbeatTimeout time.Duration
 
 	// UIDistDir is the absolute path to the ui/dist/ directory produced
 	// by `pnpm --filter ui build`. When non-empty, buildEngine wires a
@@ -212,11 +211,10 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		AllowedOrigins: cfg.DaemonbusAllowedOrigins,
 	})
 	app.devicebus = devicebus.NewService(db, devicebus.Config{
-		TokenSecret:               cfg.DeviceTokenSecret,
-		TokenTTL:                  cfg.DeviceTokenTTL,
-		MaxSessionsPerUserChannel: cfg.DeviceMaxSessionsPerUserChannel,
-		AllowedOrigins:            cfg.DeviceAllowedOrigins,
-		AllowMissingOrigin:        cfg.DeviceAllowMissingOrigin,
+		TokenSecret:        cfg.DeviceTokenSecret,
+		TokenTTL:           cfg.DeviceTokenTTL,
+		AllowedOrigins:     cfg.DeviceAllowedOrigins,
+		AllowMissingOrigin: cfg.DeviceAllowMissingOrigin,
 	})
 
 	// Wire viewcache → daemon resync via daemonbus.
@@ -233,10 +231,6 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	app.catalog.SetSubscriptionRevoker(app.pushhub)
 	app.catalog.SetPlacementHook(app)
 
-	// T147 §A-S2 — bind / unbind device session frames flow through the
-	// gateway's daemonbus client. devicebus's HTTP issue / revoke routes
-	// invoke the notifier so the daemon mirror stays in sync.
-	app.devicebus.SetBindNotifier(app)
 	app.devicebus.SetAccessAuthorizer(app)
 
 	app.engine = buildEngine(app)
@@ -316,10 +310,10 @@ func (a *App) RunReconcile(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	runSweeps := func() {
-		if err := a.devicebus.ExpireDueSessions(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		if err := a.devicebus.ExpireDueTokens(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			pkgLogger.Warn().Err(err).
 				Str("event", "devicebus.expire_failed").
-				Msg("device session expiry sweep failed")
+				Msg("device actor token expiry sweep failed")
 		}
 		if err := a.viewcache.RecoverGaps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			pkgLogger.Warn().Err(err).

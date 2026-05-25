@@ -25,7 +25,7 @@ func uniqSuffix() string {
 }
 
 // httpHeaderWithOrigin builds a single-entry Header with the named
-// Origin — small helper used by device session bind cases that want a
+// Origin — small helper used by device actor handshake cases that want a
 // rejected handshake (no full MockExtension wrap).
 func httpHeaderWithOrigin(origin string) http.Header {
 	h := http.Header{}
