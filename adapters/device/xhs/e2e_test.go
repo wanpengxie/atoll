@@ -333,6 +333,12 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("xhs.New: %v", err)
 	}
 
+	// LifecycleTracker emits channel events via HarnessChain on
+	// every state transition; provide a capturing fake so tests that
+	// don't pin lifecycle behaviour still get a valid Init. Tests
+	// that need to assert event writes can replace it on the harness.
+	defaultChain := &eventChain{}
+
 	mctx := &adapter.ModuleContext{
 		AdapterName:    xhs.AdapterName,
 		AdapterActorID: testAdapterActor,
@@ -341,6 +347,7 @@ func newHarness(t *testing.T) *harness {
 		ErrorPolicy:    policy,
 		Respond:        resp.RespondFunc(),
 		DeviceTransit:  server,
+		HarnessChain:   defaultChain,
 	}
 	if err := module.Init(ctx, mctx); err != nil {
 		t.Fatalf("module.Init: %v", err)

@@ -6,35 +6,24 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/wanpengxie/ActOS/adapters/device/framework"
 	adapterframework "github.com/wanpengxie/ActOS/adapters/framework"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// DeviceState is the closed set of device runtime states the xhs adapter
-// projects from its devicebus connection lifecycle. Spec ref:
-// proto-layer1 §3.6 O6 (adapter owns its black-box runtime state).
-type DeviceState string
+// DeviceState re-exports framework.DeviceState so xhs callers don't
+// need to import the device framework package for the closed set.
+type DeviceState = framework.DeviceState
 
 const (
-	// DeviceStateUnknown is the initial state before any lifecycle event
-	// arrives. Handle treats unknown as offline — fail-fast so the LLM
-	// gets a clean terminal instead of waiting on F3 default timeout.
-	DeviceStateUnknown DeviceState = "unknown"
-	// DeviceStateOnline — extension WS is registered + reachable.
-	DeviceStateOnline DeviceState = "online"
-	// DeviceStateOffline — extension WS closed cleanly or unexpectedly.
-	DeviceStateOffline DeviceState = "offline"
-	// DeviceStateTokenExpired — actor token past expires_at; re-bind
-	// required from the UI. Distinct from offline because the recovery
-	// path is different (re-issue token vs reload extension).
-	DeviceStateTokenExpired DeviceState = "token_expired"
+	DeviceStateUnknown      = framework.DeviceStateUnknown
+	DeviceStateOnline       = framework.DeviceStateOnline
+	DeviceStateOffline      = framework.DeviceStateOffline
+	DeviceStateTokenExpired = framework.DeviceStateTokenExpired
 )
 
 // Config tunes a Module instance. Everything carries a defensible default.
@@ -62,10 +51,17 @@ type Config struct {
 
 // Module implements kernel/adapter.Module for the xhs device adapter.
 // One instance per channel per daemon process.
+//
+// Cross-binding helpers in use:
+//   - adapters/framework.FailNow: synchronous failure path (Handle gate
+//     + payload decode + push error)
+//   - adapters/device/framework.LifecycleTracker: device state machine
+//     + lifecycle event emission (delegated from OnRuntimeEvent)
 type Module struct {
 	cfg        Config
 	mctx       *adapter.ModuleContext
 	proxy      *framework.DeviceProxy
+	lifecycle  *framework.LifecycleTracker
 	now        func() time.Time
 	externalID func(string) string
 
@@ -75,24 +71,6 @@ type Module struct {
 	// the framework correlation entry. Cleared on success / cancel.
 	pendingMu   sync.Mutex
 	pendingType map[string]string
-
-	// deviceState tracks the adapter-owned runtime state derived from
-	// devicebus lifecycle signals (RuntimeEventDeviceLifecycle). atomic
-	// store so Handle / OnExternalCallback / OnRuntimeEvent paths read
-	// without locking. Stores a DeviceState string.
-	deviceState atomic.Value // DeviceState
-
-	// deviceID is the last-known device identifier the actor token was
-	// issued against. Informative — included in the emitted lifecycle
-	// channel events so UI / agent can tell two browsers apart when the
-	// channel is rebound across hardware.
-	deviceIDMu sync.RWMutex
-	deviceID   string
-
-	// stateChangeMu serialises state transitions so a parallel
-	// connected/disconnected race produces a single channel event per
-	// distinct state, not two. Only OnRuntimeEvent takes this lock.
-	stateChangeMu sync.Mutex
 }
 
 // New constructs a Module from cfg. Validates the required fields up
@@ -117,20 +95,18 @@ func New(cfg Config) (*Module, error) {
 		externalID:  cfg.NewExternalCorrelationID,
 		pendingType: map[string]string{},
 	}
-	m.deviceState.Store(DeviceStateUnknown)
 	return m, nil
 }
 
 // DeviceState returns the adapter's current view of its device runtime
-// state. Exposed for tests + observability; production callers should
-// subscribe to the channel events (TypeDeviceOnline / TypeDeviceOffline)
-// rather than poll.
+// state via the embedded LifecycleTracker. Exposed for tests +
+// observability; production callers should subscribe to the channel
+// events (TypeDeviceOnline / TypeDeviceOffline) rather than poll.
 func (m *Module) DeviceState() DeviceState {
-	v, _ := m.deviceState.Load().(DeviceState)
-	if v == "" {
+	if m.lifecycle == nil {
 		return DeviceStateUnknown
 	}
-	return v
+	return m.lifecycle.State()
 }
 
 // Declares returns the static adapter metadata. Called exactly once
@@ -196,6 +172,22 @@ func (m *Module) Init(_ context.Context, mctx *adapter.ModuleContext) error {
 	proxy.SetClock(m.now)
 	m.mctx = mctx
 	m.proxy = proxy
+
+	lifecycle, err := framework.NewLifecycleTracker(framework.LifecycleTrackerConfig{
+		EventTypes: map[framework.DeviceState]string{
+			framework.DeviceStateOnline:       TypeDeviceOnline,
+			framework.DeviceStateOffline:      TypeDeviceOffline,
+			framework.DeviceStateTokenExpired: TypeDeviceOffline,
+		},
+		AdapterActorID: mctx.AdapterActorID,
+		ChannelID:      mctx.ChannelID,
+		HarnessChain:   mctx.HarnessChain,
+		Clock:          m.now,
+	})
+	if err != nil {
+		return fmt.Errorf("xhs.Init: build LifecycleTracker: %w", err)
+	}
+	m.lifecycle = lifecycle
 	return nil
 }
 
@@ -227,12 +219,22 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 	case DeviceStateOnline:
 		// fall through to dispatch path
 	case DeviceStateTokenExpired:
-		return m.failNow(ctx, env.ID.String(), message.TerminalReceiverUnavailable, "device_token_expired", "extension pairing token expired; re-bind via UI")
+		return adapterframework.FailNow(ctx, m.mctx, adapterframework.FailNowParams{
+			RequestID:      env.ID,
+			TerminalReason: message.TerminalReceiverUnavailable,
+			ErrorCode:      "device_token_expired",
+			Detail:         "extension pairing token expired; re-bind via UI",
+		})
 	default:
 		// DeviceStateOffline / DeviceStateUnknown — adapter knows the
 		// device isn't reachable; emit failed terminal without trying
 		// the wire.
-		return m.failNow(ctx, env.ID.String(), message.TerminalReceiverUnavailable, "device_offline", "extension is not connected for this channel")
+		return adapterframework.FailNow(ctx, m.mctx, adapterframework.FailNowParams{
+			RequestID:      env.ID,
+			TerminalReason: message.TerminalReceiverUnavailable,
+			ErrorCode:      "device_offline",
+			Detail:         "extension is not connected for this channel",
+		})
 	}
 
 	cmd, err := buildCommand(env)
@@ -328,45 +330,25 @@ func (m *Module) OnExternalCallback(ctx context.Context, raw []byte) error {
 	return err
 }
 
-// failNow emits a failed terminal via the framework Respond closure
-// (sender = adapter actor, kind = response). Used for synchronous
-// Handle failures (bad payload, missing session, push error). Errors
-// from the underlying Respond bubble up to the caller (Manager.Dispatch
-// surfaces them in the observability stream).
-//
-// The `terminalReason` parameter is the message.TerminalFailureReason
-// value to feed ErrorPolicy.OnExternalError when the failure path
-// wants the policy hook (some failures — payload decode — are pre-
-// transit and don't need it; pass empty string to skip).
+// failNow is the xhs-specific shim around adapterframework.FailNow.
+// Wraps the cross-binding helper with the adapter's domain bookkeeping
+// (per-request pendingType stash + DeviceProxy.CancelInFlight which
+// owns both the F3 timer cancel + correlation mark on the device
+// transit path).
 func (m *Module) failNow(ctx context.Context, requestID string, terminalReason message.TerminalFailureReason, errorCode, detail string) error {
 	if m.mctx == nil {
 		return fmt.Errorf("xhs.failNow: Init was not called (error_code=%s)", errorCode)
 	}
-	fields := map[string]any{"error_code": errorCode}
-	if detail != "" {
-		fields["detail"] = detail
+	if m.proxy != nil {
+		m.proxy.CancelInFlight(ctx, requestID)
 	}
-	payload, marshalErr := json.Marshal(fields)
-	if marshalErr != nil {
-		payload = []byte(`{}`)
-	}
-	respondReason := message.TerminalReceiverInternalError
-	if terminalReason != "" {
-		respondReason = terminalReason
-	}
-	opts := adapter.RespondOptions{Status: "failed", Reason: string(respondReason)}
-
-	if terminalReason != "" {
-		_ = m.mctx.ErrorPolicy.OnExternalError(ctx, adapter.CorrelationKey(message.ID(requestID)), terminalReason, detail)
-	}
-
-	// Walk back the framework bookkeeping so the F3 default-timeout
-	// timer does not also fire later.
-	m.proxy.CancelInFlight(ctx, requestID)
 	m.clearPendingType(requestID)
-
-	_, err := m.mctx.Respond(ctx, adapter.CorrelationKey(message.ID(requestID)), payload, opts)
-	return err
+	return adapterframework.FailNow(ctx, m.mctx, adapterframework.FailNowParams{
+		RequestID:      message.ID(requestID),
+		TerminalReason: terminalReason,
+		ErrorCode:      errorCode,
+		Detail:         detail,
+	})
 }
 
 // setPendingType / getPendingType / clearPendingType keep the per-
@@ -395,123 +377,17 @@ func (m *Module) clearPendingType(requestID string) {
 	delete(m.pendingType, requestID)
 }
 
-// OnRuntimeEvent implements adapter.RuntimeEventAware. The framework
-// dispatches devicebus connect / disconnect / token-expiry signals
-// through this hook so the adapter can project them into its
-// device-state machine without reaching into transport plumbing.
-//
-// Per impl-layer2 §5 + proto-layer1 §3.6 O6:
-//   - signal source: server-side devicebus connection register /
-//     unregister / token check;
-//   - propagation: server → daemonbus → daemon ControlHandlers →
-//     framework.Manager → here;
-//   - effect: adapter mutates its private device-state field and
-//     publishes a `xhs.device.online` / `xhs.device.offline` event to
-//     the channel so UI / agent can observe.
+// OnRuntimeEvent implements adapter.RuntimeEventAware. Delegates to the
+// shared LifecycleTracker which owns the device state machine + channel
+// event emission boilerplate. Per impl-layer2 §5 + proto-layer1 §3.6
+// O6 the adapter remains the source of truth for "device alive"; this
+// hook is just the wire path that signals state mutations.
 func (m *Module) OnRuntimeEvent(ctx context.Context, evt adapter.RuntimeEvent) error {
 	if evt.Kind != adapter.RuntimeEventDeviceLifecycle || evt.DeviceLifecycle == nil {
 		return nil
 	}
-	lf := evt.DeviceLifecycle
-	next := DeviceStateUnknown
-	eventType := ""
-	switch lf.Event {
-	case devicetransit.LifecycleConnected:
-		next = DeviceStateOnline
-		eventType = TypeDeviceOnline
-	case devicetransit.LifecycleDisconnected:
-		next = DeviceStateOffline
-		eventType = TypeDeviceOffline
-	case devicetransit.LifecycleTokenExpired:
-		next = DeviceStateTokenExpired
-		eventType = TypeDeviceOffline
-	default:
-		// Unknown lifecycle event — log and drop. Future-proofing for
-		// kernel devicetransit closed-set additions.
-		return nil
+	if m.lifecycle == nil {
+		return errors.New("xhs.OnRuntimeEvent: Init was not called (lifecycle tracker nil)")
 	}
-
-	m.stateChangeMu.Lock()
-	prev := m.DeviceState()
-	if prev == next {
-		m.stateChangeMu.Unlock()
-		return nil
-	}
-	m.deviceState.Store(next)
-	if lf.DeviceID != "" {
-		m.deviceIDMu.Lock()
-		m.deviceID = lf.DeviceID
-		m.deviceIDMu.Unlock()
-	}
-	m.stateChangeMu.Unlock()
-
-	return m.emitDeviceLifecycle(ctx, eventType, lf, prev, next)
-}
-
-// emitDeviceLifecycle writes a `xhs.device.online` / `xhs.device.offline`
-// event envelope into the channel so UI and other actors can observe
-// the adapter's device state. Failures are best-effort and logged via
-// the harness chain return; state transition has already committed.
-func (m *Module) emitDeviceLifecycle(
-	ctx context.Context,
-	eventType string,
-	lf *devicetransit.LifecycleFrame,
-	prev, next DeviceState,
-) error {
-	if m.mctx == nil || m.mctx.HarnessChain == nil {
-		return nil
-	}
-	if eventType == "" {
-		return nil
-	}
-	payload := map[string]any{
-		"device_state":    string(next),
-		"previous_state":  string(prev),
-		"lifecycle_event": string(lf.Event),
-	}
-	if lf.DeviceID != "" {
-		payload["device_id"] = lf.DeviceID
-	}
-	if lf.Detail != "" {
-		payload["detail"] = lf.Detail
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("xhs.OnRuntimeEvent: marshal payload: %w", err)
-	}
-	now := m.now().UnixMilli()
-	env := &message.Envelope{
-		ID:        envelopeID(m.mctx.AdapterActorID, lf.Event, now),
-		ChannelID: m.mctx.ChannelID,
-		Type:      eventType,
-		Kind:      message.KindEvent,
-		Sender: message.Sender{
-			Kind: actor.KindTool,
-			ID:   m.mctx.AdapterActorID,
-		},
-		// Visibility=system: UI default-folds these in the chat view but
-		// still receives them on the /ws push, so the device-status
-		// indicator can update without polling.
-		// Audience=[SystemActorID]: this is an observability event; no
-		// other actor needs to be triggered as a handler. The visibility
-		// channel is what drives view fanout (proto-layer1 §4.1.3).
-		Visibility: message.VisibilitySystem,
-		Audience:   message.Audience{actor.SystemActorID},
-		Payload:    body,
-		TS:         now,
-		TSReceived: now,
-	}
-	if _, err := m.mctx.HarnessChain.Write(ctx, env); err != nil {
-		return fmt.Errorf("xhs.OnRuntimeEvent: harness write %s: %w", eventType, err)
-	}
-	return nil
-}
-
-// envelopeID derives a deterministic-shape id for adapter lifecycle
-// events. Format: `event:<actor_id>:<lifecycle_kind>:<ts_ms>`. Not
-// cryptographically unique; harness step 8 dedupes if a same-ts event
-// somehow recurs (shouldn't, lifecycle changes are state-machine
-// driven).
-func envelopeID(actorID actor.ActorID, lifecycleKind devicetransit.LifecycleEvent, tsMs int64) message.ID {
-	return message.ID(fmt.Sprintf("event:%s:%s:%d", actorID, lifecycleKind, tsMs))
+	return m.lifecycle.Apply(ctx, *evt.DeviceLifecycle)
 }
