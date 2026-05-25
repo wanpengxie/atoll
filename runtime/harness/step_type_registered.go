@@ -22,6 +22,21 @@ var reservedBootstrapTypeSet = map[string]struct{}{
 	"system.placement.reclaimed": {},
 }
 
+type reservedActorTypeRule struct {
+	AllowedKinds []message.Kind
+	SystemOnly   bool
+}
+
+var reservedActorTypeSet = map[string]reservedActorTypeRule{
+	"actor.status": {
+		AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
+	},
+	"actor.readiness.changed": {
+		AllowedKinds: []message.Kind{message.KindEvent},
+		SystemOnly:   true,
+	},
+}
+
 // stepTypeRegistered implements proto-layer1 §2.5 step 5 — `type ∈ (core
 // ∪ type_registry)` plus the reserved-namespace authority check. Core
 // types pass through to the kind/audience step; business types require a
@@ -53,6 +68,22 @@ func (s *stepTypeRegistered) Run(ctx context.Context, env *message.Envelope) (kh
 			RejectReason: message.HarnessTypeUnknown,
 			Detail:       "non-reserved system namespace type is not installable: " + env.Type,
 		}, nil
+	}
+	if strings.HasPrefix(env.Type, "actor.") {
+		rule, reserved := reservedActorTypeSet[env.Type]
+		if !reserved {
+			return khar.Outcome{
+				RejectReason: message.HarnessTypeUnknown,
+				Detail:       "non-reserved actor namespace type is not installable: " + env.Type,
+			}, nil
+		}
+		if rule.SystemOnly && (env.Sender.Kind != actor.KindSystem || env.Sender.ID != actor.SystemActorID) {
+			return khar.Outcome{
+				RejectReason: message.HarnessReservedTypeUnauthorizedSender,
+				Detail:       "reserved actor type may only be emitted by channel system actor: " + env.Type,
+			}, nil
+		}
+		return khar.Outcome{}, nil
 	}
 
 	if _, isCore := message.CoreTypeTable[env.Type]; isCore {

@@ -117,11 +117,13 @@ func emitTimerTerminalFailedEvent(ctx context.Context, ev timerTerminalFailedEve
 }
 
 type eventEnvelope struct {
-	Type      string
-	ChannelID channel.ID
-	Sender    message.Sender
-	Now       int64
-	Payload   map[string]any
+	Type       string
+	ChannelID  channel.ID
+	Sender     message.Sender
+	Now        int64
+	Payload    map[string]any
+	Visibility message.Visibility
+	Audience   message.Audience
 }
 
 func writeEvent(ctx context.Context, chain harness.Chain, ev eventEnvelope) error {
@@ -131,6 +133,14 @@ func writeEvent(ctx context.Context, chain harness.Chain, ev eventEnvelope) erro
 	}
 	hash := sha256.Sum256(body)
 	seq := eventSeq.Add(1)
+	visibility := ev.Visibility
+	if visibility == "" {
+		visibility = message.VisibilityPrivate
+	}
+	audience := ev.Audience
+	if len(audience) == 0 {
+		audience = message.Audience{actor.SystemActorID}
+	}
 	// Round-3 cluster F: visibility=system was removed from the
 	// proto-layer0 §2.4 closed set. Ops events (correlation_lost /
 	// adapter_timer_terminal_failed) now follow §4.1.3 informative
@@ -145,8 +155,8 @@ func writeEvent(ctx context.Context, chain harness.Chain, ev eventEnvelope) erro
 		Kind:       message.KindEvent,
 		Type:       ev.Type,
 		Payload:    body,
-		Visibility: message.VisibilityPrivate,
-		Audience:   message.Audience{actor.SystemActorID},
+		Visibility: visibility,
+		Audience:   audience,
 	}
 	res, err := chain.Write(ctx, env)
 	if err != nil {

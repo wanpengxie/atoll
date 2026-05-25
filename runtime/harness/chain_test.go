@@ -1063,3 +1063,63 @@ func TestChain_Step5_NonReservedSystemTypeRejectedBeforeRegistry(t *testing.T) {
 			res.RejectReason, res.RejectDetail)
 	}
 }
+
+func TestChain_Step5_ActorStatusReservedRequestAcceptedWithoutTypeRegistry(t *testing.T) {
+	c, _, _, _ := newTestChain(t)
+	env := newRequest("req-actor-status", "agent:alpha", "actor.status", "tool:feishu-adapter", json.RawMessage(`{}`))
+	res, err := c.Write(chainCallerCtx("agent:alpha"), env)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if !res.Accepted() {
+		t.Fatalf("actor.status rejected: %s detail=%s", res.RejectReason, res.RejectDetail)
+	}
+	if env.ExpiresAt == nil || *env.ExpiresAt != testTS+defaultActorMaxPendingMs {
+		t.Fatalf("actor.status expires_at=%v want %d", env.ExpiresAt, testTS+defaultActorMaxPendingMs)
+	}
+}
+
+func TestChain_Step5_ActorReadinessChangedSystemOnly(t *testing.T) {
+	c, _, _, _ := newTestChain(t)
+	env := &message.Envelope{
+		ID:        "evt-readiness-ok",
+		ChannelID: "ch-1",
+		TS:        testTS,
+		Type:      "actor.readiness.changed",
+		Kind:      message.KindEvent,
+		Sender:    message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Payload:   json.RawMessage(`{"actor_id":"tool:feishu-adapter"}`),
+		Audience:  message.Audience{actor.SystemActorID},
+	}
+	res, err := c.Write(chainCallerCtx(actor.SystemActorID), env)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if !res.Accepted() {
+		t.Fatalf("system readiness event rejected: %s detail=%s", res.RejectReason, res.RejectDetail)
+	}
+
+	forged := *env
+	forged.ID = "evt-readiness-forged"
+	forged.Sender = message.Sender{ID: "agent:alpha"}
+	res, err = c.Write(chainCallerCtx("agent:alpha"), &forged)
+	if err != nil {
+		t.Fatalf("Write forged: %v", err)
+	}
+	if res.RejectReason != message.HarnessReservedTypeUnauthorizedSender {
+		t.Fatalf("forged readiness reason=%s detail=%s", res.RejectReason, res.RejectDetail)
+	}
+}
+
+func TestChain_Step5_NonReservedActorTypeRejectedBeforeRegistry(t *testing.T) {
+	c, _, _, treg := newTestChain(t)
+	treg.Add(TypeView{
+		Type:         "actor.custom",
+		AllowedKinds: []message.Kind{message.KindEvent},
+	})
+	env := newEvent("agent:alpha", "actor.custom", json.RawMessage(`{}`))
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
+	if res.RejectReason != message.HarnessTypeUnknown {
+		t.Fatalf("expected harness_type_unknown, got %s detail=%s", res.RejectReason, res.RejectDetail)
+	}
+}

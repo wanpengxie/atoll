@@ -46,7 +46,7 @@ func (r *InMemoryTypeRegistry) Upsert(_ context.Context, row TypeRow) (TypeRow, 
 	if err := row.Validate(); err != nil {
 		return TypeRow{}, err
 	}
-	if strings.HasPrefix(row.Type, "system.") {
+	if strings.HasPrefix(row.Type, "system.") || strings.HasPrefix(row.Type, "actor.") {
 		return TypeRow{}, &InstallError{Reason: message.InstallTypeRegistryReservedNamespace}
 	}
 	r.mu.Lock()

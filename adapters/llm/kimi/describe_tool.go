@@ -86,12 +86,16 @@ func (t *DescribeActorTool) Execute(ctx context.Context, params json.RawMessage)
 	})
 
 	value := map[string]any{
-		"actor_id":    actorInfo.ActorID,
-		"description": actorInfo.Description,
-		"kind":        actorInfo.Kind,
-		"binding":     actorInfo.Binding,
-		"skill_doc":   actorInfo.SkillDoc,
-		"types":       typeSummaries,
+		"actor_id":             actorInfo.ActorID,
+		"description":          actorInfo.Description,
+		"kind":                 actorInfo.Kind,
+		"binding":              actorInfo.Binding,
+		"skill_doc":            actorInfo.SkillDoc,
+		"ready":                actorInfo.Ready,
+		"ready_reason":         actorInfo.ReadyReason,
+		"last_ready_at":        actorInfo.LastReadyAt,
+		"last_state_change_at": actorInfo.LastStateChangeAt,
+		"types":                typeSummaries,
 	}
 	if actorInfo.DisplayName != "" {
 		value["display_name"] = actorInfo.DisplayName

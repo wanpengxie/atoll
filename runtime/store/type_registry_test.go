@@ -200,17 +200,19 @@ func TestTypeRegistry_UpsertRejectsInvalid(t *testing.T) {
 func TestTypeRegistry_UpsertRejectsReservedNamespace(t *testing.T) {
 	ctx := context.Background()
 	reg := openChannelDB(t)
-	if _, err := reg.Upsert(ctx, adapter.TypeRow{
-		Type:           "system.foo",
-		HandlerActorID: "tool:x",
-		HandlerBinding: actor.BindingEmbedded,
-		MaxPendingMs:   100,
-		AllowedKinds:   []message.Kind{message.KindEvent},
-	}); err == nil {
-		t.Fatal("Upsert system.*: expected error")
-	}
-	if _, ok, err := reg.Lookup(ctx, "system.foo"); err != nil || ok {
-		t.Fatalf("reserved row written ok=%v err=%v", ok, err)
+	for _, typ := range []string{"system.foo", "actor.custom"} {
+		if _, err := reg.Upsert(ctx, adapter.TypeRow{
+			Type:           typ,
+			HandlerActorID: "tool:x",
+			HandlerBinding: actor.BindingEmbedded,
+			MaxPendingMs:   100,
+			AllowedKinds:   []message.Kind{message.KindEvent},
+		}); err == nil {
+			t.Fatalf("Upsert %s: expected error", typ)
+		}
+		if _, ok, err := reg.Lookup(ctx, typ); err != nil || ok {
+			t.Fatalf("reserved row %s written ok=%v err=%v", typ, ok, err)
+		}
 	}
 }
 

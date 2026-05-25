@@ -244,7 +244,7 @@ func (r *TypeRegistry) upsertWithStatusTx(ctx context.Context, tx *sql.Tx, row a
 	if err := row.Validate(); err != nil {
 		return adapter.TypeRow{}, err
 	}
-	if strings.HasPrefix(row.Type, "system.") {
+	if strings.HasPrefix(row.Type, "system.") || strings.HasPrefix(row.Type, "actor.") {
 		return adapter.TypeRow{}, fmt.Errorf("store: type_registry reserved namespace %q: %s",
 			row.Type, message.InstallTypeRegistryReservedNamespace)
 	}
@@ -314,7 +314,7 @@ func (r *TypeRegistry) insertPendingInstallTx(ctx context.Context, tx *sql.Tx, a
 	if err := row.Validate(); err != nil {
 		return adapter.TypeRow{}, err
 	}
-	if strings.HasPrefix(row.Type, "system.") {
+	if strings.HasPrefix(row.Type, "system.") || strings.HasPrefix(row.Type, "actor.") {
 		return adapter.TypeRow{}, fmt.Errorf("store: type_registry reserved namespace %q: %s",
 			row.Type, message.InstallTypeRegistryReservedNamespace)
 	}

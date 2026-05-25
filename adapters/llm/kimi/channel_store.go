@@ -105,7 +105,12 @@ func (s *ChannelStore) Snapshot(ctx context.Context, channelID, channelType stri
 func (s *ChannelStore) listActors(ctx context.Context) ([]ActorInfo, error) {
 	const q = `SELECT actor_id, actor_kind,
 	                  COALESCE(actor_binding, ''),
-	                  COALESCE(display_name, '')
+	                  COALESCE(display_name, ''),
+	                  COALESCE(ready_state, 'unknown'),
+	                  COALESCE(ready_reason, 'unknown'),
+	                  COALESCE(ready_detail, '{}'),
+	                  COALESCE(last_ready_at, 0),
+	                  COALESCE(last_state_change_at, 0)
 	             FROM actor_registry
 	            WHERE deregistered_at IS NULL
 	         ORDER BY actor_id ASC`
@@ -117,9 +122,13 @@ func (s *ChannelStore) listActors(ctx context.Context) ([]ActorInfo, error) {
 	var out []ActorInfo
 	for rows.Next() {
 		var a ActorInfo
-		if err := rows.Scan(&a.ActorID, &a.Kind, &a.Binding, &a.DisplayName); err != nil {
+		var readyState, readyDetail string
+		if err := rows.Scan(&a.ActorID, &a.Kind, &a.Binding, &a.DisplayName,
+			&readyState, &a.ReadyReason, &readyDetail, &a.LastReadyAt, &a.LastStateChangeAt); err != nil {
 			return nil, fmt.Errorf("kimi: channel store scan actor: %w", err)
 		}
+		a.Ready = readyState == "ready"
+		a.ReadyDetail = json.RawMessage(readyDetail)
 		out = append(out, a)
 	}
 	if err := rows.Err(); err != nil {

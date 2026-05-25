@@ -2,6 +2,7 @@ package framework
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"time"
@@ -28,6 +29,7 @@ func (r *memoryActorRegistry) Insert(_ context.Context, rec actorreg.Record) err
 	if _, dup := r.rows[rec.ID]; dup {
 		return errors.New("duplicate actor")
 	}
+	rec.Readiness = rec.Readiness.Normalize()
 	r.rows[rec.ID] = rec
 	return nil
 }
@@ -68,6 +70,33 @@ func (r *memoryActorRegistry) Deregister(_ context.Context, id actor.ActorID, at
 	rec.DeregisteredAt = at
 	r.rows[id] = rec
 	return nil
+}
+
+func (r *memoryActorRegistry) UpdateReadiness(_ context.Context, id actor.ActorID, update actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.rows[id]
+	if !ok {
+		return actorreg.ReadinessTransition{}, errors.New("not found")
+	}
+	prev := rec.Readiness.Normalize()
+	next := actorreg.Readiness{
+		State:  update.State,
+		Reason: update.Reason,
+		Detail: append(json.RawMessage(nil), update.Detail...),
+	}.Normalize()
+	changed := prev.State != next.State || prev.Reason != next.Reason
+	next.LastReadyAt = prev.LastReadyAt
+	if next.State == actorreg.ReadinessReady {
+		next.LastReadyAt = update.CheckedAt
+	}
+	next.LastStateChangeAt = prev.LastStateChangeAt
+	if changed {
+		next.LastStateChangeAt = update.CheckedAt
+	}
+	rec.Readiness = next
+	r.rows[id] = rec
+	return actorreg.ReadinessTransition{Previous: prev, Current: next, Changed: changed}, nil
 }
 
 // fakeChain implements harness.Chain for tests. It records every Write

@@ -135,7 +135,7 @@ func (s *Service) RecoverInstalling(ctx context.Context, reason string) (int, er
 }
 
 func (s *Service) validate(ctx context.Context, row adapter.TypeRow) error {
-	if strings.HasPrefix(row.Type, "system.") {
+	if strings.HasPrefix(row.Type, "system.") || strings.HasPrefix(row.Type, "actor.") {
 		return &Error{Reason: message.InstallTypeRegistryReservedNamespace, Err: fmt.Errorf("typeinstall: reserved namespace type %q", row.Type)}
 	}
 	if err := row.Validate(); err != nil {

@@ -60,18 +60,31 @@ func (m *stubModule) OnExternalCallback(ctx context.Context, payload []byte) err
 	return nil
 }
 
-func newTestManager(t *testing.T, mod *stubModule, opts ...func(*ManagerConfig)) (*Manager, *fakeChain, *MemoryRequestLookup, *memoryActorRegistry, *fixedClock) {
+type heartbeatModule struct {
+	*stubModule
+	report adapter.HeartbeatReport
+	err    error
+	calls  atomic.Int32
+}
+
+func (m *heartbeatModule) Heartbeat(context.Context) (adapter.HeartbeatReport, error) {
+	m.calls.Add(1)
+	return m.report, m.err
+}
+
+func newTestManager(t *testing.T, mod adapter.Module, opts ...func(*ManagerConfig)) (*Manager, *fakeChain, *MemoryRequestLookup, *memoryActorRegistry, *fixedClock) {
 	t.Helper()
 	clock := newFixedClock(time.Unix(1_700_000_000, 0))
 	chain := newFakeChain()
 	lookup := NewMemoryRequestLookup(nil)
 	registry := newMemoryActorRegistry()
+	decl := mod.Declares()
 
 	// Pre-seed actor row matching the module's declaration.
 	if err := registry.Insert(context.Background(), actorreg.Record{
-		ID:      mod.decl.ActorID,
+		ID:      decl.ActorID,
 		Kind:    actor.KindTool,
-		Binding: actor.Binding(mod.decl.Binding),
+		Binding: actor.Binding(decl.Binding),
 	}); err != nil {
 		t.Fatalf("seed actor: %v", err)
 	}
@@ -201,6 +214,72 @@ func TestManagerInstallPersistsDeclarationCatalog(t *testing.T) {
 	}
 	if len(doc.PayloadFields) != 1 || doc.PayloadFields[0].Name != "text" {
 		t.Fatalf("catalog payload fields=%+v", doc.PayloadFields)
+	}
+}
+
+func TestManagerInstallHeartbeatUpdatesReadinessAndEmitsTransition(t *testing.T) {
+	mod := &heartbeatModule{
+		stubModule: &stubModule{
+			decl: adapter.Declaration{
+				Name:         "feishu",
+				ActorID:      "tool:feishu-adapter",
+				Types:        []string{"feishu.chat.send"},
+				Binding:      actor.BindingRuntimeOutbound,
+				MaxPendingMs: 30_000,
+			},
+		},
+		report: adapter.HeartbeatReport{
+			Available: false,
+			Reason:    "upstream_unreachable",
+			Detail:    map[string]any{"probe": "failed"},
+			CheckedAt: time.UnixMilli(1_700_000_001_000),
+		},
+	}
+	mgr, chain, _, registry, _ := newTestManager(t, mod, func(cfg *ManagerConfig) {
+		cfg.EmitInitialReadinessEvent = true
+		cfg.HeartbeatInterval = time.Hour
+	})
+	t.Cleanup(func() { _ = mgr.Shutdown(context.Background()) })
+
+	if got := mod.calls.Load(); got != 1 {
+		t.Fatalf("heartbeat calls=%d want 1 initial probe", got)
+	}
+	rec, ok, err := registry.Lookup(context.Background(), "tool:feishu-adapter")
+	if err != nil || !ok {
+		t.Fatalf("lookup actor ok=%v err=%v", ok, err)
+	}
+	if rec.Readiness.State != actorreg.ReadinessNotReady || rec.Readiness.Reason != "upstream_unreachable" {
+		t.Fatalf("readiness=%+v", rec.Readiness)
+	}
+	if rec.Readiness.LastStateChangeAt != 1_700_000_001_000 {
+		t.Fatalf("last_state_change_at=%d", rec.Readiness.LastStateChangeAt)
+	}
+
+	written := chain.Written()
+	if len(written) != 1 {
+		t.Fatalf("written=%d want readiness event", len(written))
+	}
+	ev := written[0]
+	if ev.Type != "actor.readiness.changed" || ev.Sender.ID != actor.SystemActorID || ev.Visibility != message.VisibilityPublic {
+		t.Fatalf("readiness event envelope=%+v", ev)
+	}
+	var payload struct {
+		ActorID string `json:"actor_id"`
+		Current struct {
+			Ready  bool   `json:"ready"`
+			State  string `json:"state"`
+			Reason string `json:"reason"`
+			Detail struct {
+				Probe string `json:"probe"`
+			} `json:"detail"`
+		} `json:"current"`
+	}
+	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal readiness payload: %v", err)
+	}
+	if payload.ActorID != "tool:feishu-adapter" || payload.Current.Ready || payload.Current.State != "not_ready" ||
+		payload.Current.Reason != "upstream_unreachable" || payload.Current.Detail.Probe != "failed" {
+		t.Fatalf("readiness payload=%+v", payload)
 	}
 }
 
@@ -499,6 +578,100 @@ func TestManagerDispatchHandlesRequestAndRespond(t *testing.T) {
 	}
 	if payload["message_id"] != "feishu-12345" {
 		t.Fatalf("payload.message_id=%v want feishu-12345", payload["message_id"])
+	}
+}
+
+func TestManagerDispatchActorStatusBypassesReadinessPrecheck(t *testing.T) {
+	called := false
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu-adapter",
+			Types:        []string{"feishu.chat.send"},
+			Binding:      actor.BindingRuntimeOutbound,
+			MaxPendingMs: 30_000,
+		},
+		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {
+			called = true
+			return nil
+		},
+	}
+	mgr, chain, lookup, registry, _ := newTestManager(t, mod)
+	_, err := registry.UpdateReadiness(context.Background(), "tool:feishu-adapter", actorreg.ReadinessUpdate{
+		State:     actorreg.ReadinessNotReady,
+		Reason:    "upstream_unreachable",
+		Detail:    json.RawMessage(`{"probe":"failed"}`),
+		CheckedAt: 1_700_000_001_000,
+	})
+	if err != nil {
+		t.Fatalf("UpdateReadiness: %v", err)
+	}
+
+	req := newTestRequest("channel:test", "agent:author", "actor.status", "req-status")
+	lookup.Put(req)
+	if err := mgr.Dispatch(context.Background(), req); err != nil {
+		t.Fatalf("Dispatch actor.status: %v", err)
+	}
+	if called {
+		t.Fatal("actor.status must be handled by framework, not Module.Handle")
+	}
+	written := chain.Written()
+	if len(written) != 1 {
+		t.Fatalf("written=%d want 1", len(written))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(written[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload["status"] != "completed" || payload["available"] != false || payload["reason"] != "upstream_unreachable" {
+		t.Fatalf("actor.status payload=%v", payload)
+	}
+}
+
+func TestManagerDispatchPrecheckNotReadyFailsWithoutHandle(t *testing.T) {
+	called := false
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu-adapter",
+			Types:        []string{"feishu.chat.send"},
+			Binding:      actor.BindingRuntimeOutbound,
+			MaxPendingMs: 30_000,
+		},
+		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {
+			called = true
+			return nil
+		},
+	}
+	mgr, chain, lookup, registry, _ := newTestManager(t, mod)
+	_, err := registry.UpdateReadiness(context.Background(), "tool:feishu-adapter", actorreg.ReadinessUpdate{
+		State:     actorreg.ReadinessNotReady,
+		Reason:    "device_offline",
+		Detail:    json.RawMessage(`{"device_state":"offline"}`),
+		CheckedAt: 1_700_000_001_000,
+	})
+	if err != nil {
+		t.Fatalf("UpdateReadiness: %v", err)
+	}
+
+	req := newTestRequest("channel:test", "agent:author", "feishu.chat.send", "req-offline")
+	lookup.Put(req)
+	if err := mgr.Dispatch(context.Background(), req); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if called {
+		t.Fatal("not-ready precheck must not enter Module.Handle")
+	}
+	written := chain.Written()
+	if len(written) != 1 {
+		t.Fatalf("written=%d want 1 failed terminal", len(written))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(written[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload["status"] != "failed" || payload["reason"] != string(message.TerminalReceiverUnavailable) || payload["error_code"] != "device_offline" {
+		t.Fatalf("precheck payload=%v", payload)
 	}
 }
 

@@ -288,8 +288,6 @@ func envelopeDeadline(env *message.Envelope, enqueuedAt int64) int64 {
 }
 
 // defaultPendingMs is the framework-level fallback per-request budget
-// when the envelope omits ExpiresAt. 5 minutes mirrors the M1.3
-// xhs.defaultMaxPendingMs constant — long enough for a Chrome extension
-// reload + short enough that hung requests still surface within human
-// attention span.
-const defaultPendingMs int64 = 5 * 60 * 1000
+// when the envelope omits ExpiresAt. Long-running business operations
+// must opt in with an explicit type/config override.
+const defaultPendingMs int64 = 30 * 1000

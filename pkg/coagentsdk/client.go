@@ -22,7 +22,7 @@ import (
 
 const (
 	defaultHTTPTimeout = 30 * time.Second
-	defaultCallTimeout = 60 * time.Second
+	defaultCallTimeout = 30 * time.Second
 	sessionCookieName  = "coagent_session"
 )
 
@@ -54,6 +54,43 @@ type CallActorError struct {
 	Code         string `json:"code"`
 	Message      string `json:"message"`
 	RecoveryHint string `json:"recovery_hint,omitempty"`
+}
+
+type ActorInfo struct {
+	ActorID           string          `json:"actor_id"`
+	Kind              string          `json:"kind,omitempty"`
+	Binding           string          `json:"binding,omitempty"`
+	DisplayName       string          `json:"display_name,omitempty"`
+	Ready             bool            `json:"ready"`
+	ReadyReason       string          `json:"ready_reason,omitempty"`
+	ReadyDetail       json.RawMessage `json:"ready_detail,omitempty"`
+	LastReadyAt       int64           `json:"last_ready_at,omitempty"`
+	LastStateChangeAt int64           `json:"last_state_change_at,omitempty"`
+	Types             []ActorTypeInfo `json:"types,omitempty"`
+}
+
+type ActorTypeInfo struct {
+	Type           string   `json:"type"`
+	AllowedKinds   []string `json:"allowed_kinds,omitempty"`
+	HandlerBinding string   `json:"handler_binding,omitempty"`
+	MaxPendingMs   int64    `json:"max_pending_ms,omitempty"`
+}
+
+type ActorStatusResult struct {
+	Available         bool            `json:"available"`
+	Reason            string          `json:"reason,omitempty"`
+	Kind              string          `json:"kind,omitempty"`
+	Binding           string          `json:"binding,omitempty"`
+	LastReadyAt       int64           `json:"last_ready_at,omitempty"`
+	LastStateChangeAt int64           `json:"last_state_change_at,omitempty"`
+	Detail            json.RawMessage `json:"detail,omitempty"`
+	CheckedAt         int64           `json:"checked_at,omitempty"`
+	Raw               json.RawMessage `json:"-"`
+}
+
+type actorListResponse struct {
+	ChannelID string      `json:"channel_id"`
+	Actors    []ActorInfo `json:"actors"`
 }
 
 type emitRequest struct {
@@ -145,6 +182,70 @@ func (c *Client) CallActor(ctx context.Context, req CallActorRequest) (*CallActo
 	}
 
 	return c.waitResponse(ctx, ws, req, matchIDs, timeout)
+}
+
+func (c *Client) ListActors(ctx context.Context, channelID string) ([]ActorInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(channelID) == "" {
+		return nil, fmt.Errorf("coagentsdk: channel_id is required")
+	}
+	baseURL, err := normalizeBaseURL(c.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	var out actorListResponse
+	if err := c.doJSON(ctx, c.httpClient(), http.MethodGet, baseURL+"/api/channels/"+url.PathEscape(channelID)+"/actors", nil, &out); err != nil {
+		return nil, fmt.Errorf("coagentsdk: list actors: %w", err)
+	}
+	return out.Actors, nil
+}
+
+func (c *Client) ActorStatus(ctx context.Context, channelID, actorID string) (*ActorStatusResult, error) {
+	res, err := c.CallActor(ctx, CallActorRequest{
+		ChannelID: channelID,
+		ActorID:   actorID,
+		Type:      "actor.status",
+		Payload:   json.RawMessage(`{}`),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return nil, fmt.Errorf("coagentsdk: actor.status returned nil result")
+	}
+	if !res.OK {
+		if res.Error != nil {
+			return nil, fmt.Errorf("coagentsdk: actor.status failed: %s: %s", res.Error.Code, res.Error.Message)
+		}
+		return nil, fmt.Errorf("coagentsdk: actor.status failed")
+	}
+	var payload struct {
+		Status            string          `json:"status"`
+		Available         bool            `json:"available"`
+		Reason            string          `json:"reason"`
+		Kind              string          `json:"kind"`
+		Binding           string          `json:"binding"`
+		LastReadyAt       int64           `json:"last_ready_at"`
+		LastStateChangeAt int64           `json:"last_state_change_at"`
+		Detail            json.RawMessage `json:"detail"`
+		CheckedAt         int64           `json:"checked_at"`
+	}
+	if err := json.Unmarshal(res.Raw, &payload); err != nil {
+		return nil, fmt.Errorf("coagentsdk: decode actor.status: %w", err)
+	}
+	return &ActorStatusResult{
+		Available:         payload.Available,
+		Reason:            payload.Reason,
+		Kind:              payload.Kind,
+		Binding:           payload.Binding,
+		LastReadyAt:       payload.LastReadyAt,
+		LastStateChangeAt: payload.LastStateChangeAt,
+		Detail:            append(json.RawMessage(nil), payload.Detail...),
+		CheckedAt:         payload.CheckedAt,
+		Raw:               append(json.RawMessage(nil), res.Raw...),
+	}, nil
 }
 
 func validateCallActorRequest(req CallActorRequest) error {

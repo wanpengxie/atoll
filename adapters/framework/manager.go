@@ -88,6 +88,24 @@ type ManagerConfig struct {
 	// GCInterval is how often Manager.RunGC scans for stale pending
 	// entries. Defaults to 30s.
 	GCInterval time.Duration
+
+	// HeartbeatInterval overrides the binding-specific readiness
+	// heartbeat cadence. Zero uses embedded=60s, runtime_outbound=15s,
+	// runtime_inbound_via_relay=30s.
+	HeartbeatInterval time.Duration
+
+	// HeartbeatTimeout bounds one Heartbeater call. Defaults to 5s.
+	HeartbeatTimeout time.Duration
+
+	// StatusTimeout bounds optional StatusReporter enrichment for
+	// actor.status. Defaults to 5s.
+	StatusTimeout time.Duration
+
+	// EmitInitialReadinessEvent controls whether the initial readiness
+	// observation after Install emits actor.readiness.changed. Unit tests
+	// leave this false to avoid install-time writes; production daemon
+	// enables it so server-side projections can bootstrap from view-sync.
+	EmitInitialReadinessEvent bool
 }
 
 // TypeInstaller is the install-time service seam used by production.
@@ -121,6 +139,12 @@ func (c *ManagerConfig) applyDefaults() {
 	}
 	if c.GCInterval <= 0 {
 		c.GCInterval = 30 * time.Second
+	}
+	if c.HeartbeatTimeout <= 0 {
+		c.HeartbeatTimeout = 5 * time.Second
+	}
+	if c.StatusTimeout <= 0 {
+		c.StatusTimeout = 5 * time.Second
 	}
 }
 
@@ -162,6 +186,9 @@ type boundModule struct {
 	correlation *memoryCorrelationTracker
 	policy      *timerPolicy
 	state       *NamespacedStateStore
+
+	heartbeatCancel context.CancelFunc
+	heartbeatDone   chan struct{}
 }
 
 // NewManager constructs a Manager. Caller MUST call Install before
@@ -402,6 +429,7 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		"binding", string(decl.Binding),
 		"types", decl.Types,
 		"channel_id", string(m.cfg.ChannelID))
+	m.startReadiness(ctx, bm)
 	return nil
 }
 
@@ -421,6 +449,179 @@ func (m *Manager) persistDeclarationCatalog(ctx context.Context, state StateStor
 			"adapter", decl.Name,
 			"err", err.Error())
 	}
+}
+
+func (m *Manager) startReadiness(ctx context.Context, bm *boundModule) {
+	if bm == nil {
+		return
+	}
+	if _, ok := bm.module.(adapter.Heartbeater); !ok {
+		m.applyReadiness(ctx, bm, actorreg.ReadinessUpdate{
+			State:     actorreg.ReadinessReady,
+			Reason:    "ok",
+			Detail:    readinessDetail(map[string]any{"binding": string(bm.declaration.Binding)}),
+			CheckedAt: m.cfg.Clock().UnixMilli(),
+		}, m.cfg.EmitInitialReadinessEvent)
+		return
+	}
+
+	m.runHeartbeatOnce(ctx, bm, m.cfg.EmitInitialReadinessEvent)
+
+	hbCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	bm.heartbeatCancel = cancel
+	bm.heartbeatDone = done
+	interval := m.heartbeatInterval(bm.declaration.Binding)
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbCtx.Done():
+				return
+			case <-ticker.C:
+				m.runHeartbeatOnce(hbCtx, bm, true)
+			}
+		}
+	}()
+}
+
+func (m *Manager) heartbeatInterval(binding actor.Binding) time.Duration {
+	if m.cfg.HeartbeatInterval > 0 {
+		return m.cfg.HeartbeatInterval
+	}
+	switch binding {
+	case actor.BindingEmbedded:
+		return 60 * time.Second
+	case actor.BindingRuntimeOutbound:
+		return 15 * time.Second
+	case actor.BindingRuntimeInboundViaRelay:
+		return 30 * time.Second
+	default:
+		return 30 * time.Second
+	}
+}
+
+func (m *Manager) runHeartbeatOnce(ctx context.Context, bm *boundModule, emitEvent bool) {
+	hb, ok := bm.module.(adapter.Heartbeater)
+	if !ok {
+		return
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, m.cfg.HeartbeatTimeout)
+	report, err := hb.Heartbeat(probeCtx)
+	cancel()
+	now := m.cfg.Clock()
+	if err != nil {
+		report = adapter.HeartbeatReport{
+			Available: false,
+			Reason:    "unknown",
+			Detail:    map[string]any{"error": err.Error()},
+			CheckedAt: now,
+		}
+	}
+	if report.CheckedAt.IsZero() {
+		report.CheckedAt = now
+	}
+	state := actorreg.ReadinessNotReady
+	if report.Available {
+		state = actorreg.ReadinessReady
+	}
+	reason := report.Reason
+	if reason == "" {
+		if report.Available {
+			reason = "ok"
+		} else {
+			reason = "unknown"
+		}
+	}
+	m.applyReadiness(ctx, bm, actorreg.ReadinessUpdate{
+		State:     state,
+		Reason:    reason,
+		Detail:    readinessDetail(report.Detail),
+		CheckedAt: report.CheckedAt.UnixMilli(),
+	}, emitEvent)
+}
+
+func (m *Manager) applyReadiness(ctx context.Context, bm *boundModule, update actorreg.ReadinessUpdate, emitEvent bool) {
+	updater, ok := m.cfg.ActorRegistry.(actorreg.ReadinessUpdater)
+	if !ok {
+		m.cfg.Logger.Warn("framework.readiness.registry_missing",
+			"adapter", bm.declaration.Name,
+			"actor_id", string(bm.declaration.ActorID))
+		return
+	}
+	tr, err := updater.UpdateReadiness(ctx, bm.declaration.ActorID, update)
+	if err != nil {
+		m.cfg.Logger.Warn("framework.readiness.update_failed",
+			"adapter", bm.declaration.Name,
+			"actor_id", string(bm.declaration.ActorID),
+			"err", err.Error())
+		return
+	}
+	if emitEvent && tr.Changed {
+		if err := m.emitReadinessChanged(ctx, bm, tr); err != nil {
+			m.cfg.Logger.Warn("framework.readiness.event_failed",
+				"adapter", bm.declaration.Name,
+				"actor_id", string(bm.declaration.ActorID),
+				"err", err.Error())
+		}
+	}
+}
+
+func (m *Manager) emitReadinessChanged(ctx context.Context, bm *boundModule, tr actorreg.ReadinessTransition) error {
+	changedAt := tr.Current.LastStateChangeAt
+	if changedAt == 0 {
+		changedAt = m.cfg.Clock().UnixMilli()
+	}
+	return writeEvent(ctx, m.cfg.HarnessChain, eventEnvelope{
+		Type:       "actor.readiness.changed",
+		ChannelID:  m.cfg.ChannelID,
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Now:        changedAt,
+		Visibility: message.VisibilityPublic,
+		Audience:   message.Audience{actor.SystemActorID},
+		Payload: map[string]any{
+			"actor_id":   string(bm.declaration.ActorID),
+			"previous":   readinessPayload(tr.Previous),
+			"current":    readinessPayload(tr.Current),
+			"changed_at": changedAt,
+		},
+	})
+}
+
+func readinessDetail(detail map[string]any) json.RawMessage {
+	if len(detail) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	raw, err := json.Marshal(detail)
+	if err != nil {
+		return json.RawMessage(`{"error":"detail_marshal_failed"}`)
+	}
+	return raw
+}
+
+func readinessPayload(r actorreg.Readiness) map[string]any {
+	r = r.Normalize()
+	return map[string]any{
+		"ready":                r.State == actorreg.ReadinessReady,
+		"state":                string(r.State),
+		"reason":               r.Reason,
+		"detail":               rawJSONObject(r.Detail),
+		"last_ready_at":        r.LastReadyAt,
+		"last_state_change_at": r.LastStateChangeAt,
+	}
+}
+
+func rawJSONObject(raw json.RawMessage) map[string]any {
+	if len(raw) == 0 {
+		return map[string]any{}
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil || out == nil {
+		return map[string]any{}
+	}
+	return out
 }
 
 func (m *Manager) installTypeRow(ctx context.Context, row TypeRow) (TypeRow, error) {
@@ -495,10 +696,20 @@ func (m *Manager) Dispatch(ctx context.Context, env *message.Envelope) error {
 		return fmt.Errorf("framework: Dispatch no module bound to actor %s", target)
 	}
 
+	if env.Type == "actor.status" {
+		return m.respondActorStatus(ctx, bm, env)
+	}
+
 	// Verify the type is one the adapter declared.
 	if !declHasType(bm.declaration, env.Type) {
 		return fmt.Errorf("framework: Dispatch type %s not declared by adapter %s",
 			env.Type, bm.declaration.Name)
+	}
+
+	if unavailable, err := m.respondIfNotReady(ctx, bm, env); err != nil {
+		return err
+	} else if unavailable {
+		return nil
 	}
 
 	span := m.cfg.Tracer.StartSpan("adapter.dispatch",
@@ -538,6 +749,109 @@ func (m *Manager) Dispatch(ctx context.Context, env *message.Envelope) error {
 		return err
 	}
 	return nil
+}
+
+func (m *Manager) respondActorStatus(ctx context.Context, bm *boundModule, env *message.Envelope) error {
+	rec, ok, err := m.cfg.ActorRegistry.Lookup(ctx, bm.declaration.ActorID)
+	if err != nil {
+		return fmt.Errorf("framework: actor.status lookup %s: %w", bm.declaration.ActorID, err)
+	}
+	if !ok {
+		rec = actorreg.Record{
+			ID:      bm.declaration.ActorID,
+			Kind:    actor.KindTool,
+			Binding: bm.declaration.Binding,
+		}
+	}
+	readiness := rec.Readiness.Normalize()
+	detail := rawJSONObject(readiness.Detail)
+	checkedAt := m.cfg.Clock().UnixMilli()
+
+	if reporter, ok := bm.module.(adapter.StatusReporter); ok {
+		statusCtx, cancel := context.WithTimeout(ctx, m.cfg.StatusTimeout)
+		report, err := reporter.Status(statusCtx)
+		cancel()
+		if err != nil {
+			m.cfg.Logger.Warn("framework.actor_status.reporter_error",
+				"adapter", bm.declaration.Name,
+				"actor_id", string(bm.declaration.ActorID),
+				"err", err.Error())
+		} else {
+			for k, v := range report.Detail {
+				detail[k] = v
+			}
+			if !report.CheckedAt.IsZero() {
+				checkedAt = report.CheckedAt.UnixMilli()
+			}
+		}
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"available":            readiness.State == actorreg.ReadinessReady,
+		"reason":               readiness.Reason,
+		"kind":                 string(rec.Kind),
+		"binding":              string(rec.Binding),
+		"last_ready_at":        readiness.LastReadyAt,
+		"last_state_change_at": readiness.LastStateChangeAt,
+		"detail":               detail,
+		"checked_at":           checkedAt,
+	})
+	if err != nil {
+		return fmt.Errorf("framework: actor.status marshal: %w", err)
+	}
+	_, err = bm.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), payload, adapter.RespondOptions{
+		Status: "completed",
+	})
+	return err
+}
+
+func (m *Manager) respondIfNotReady(ctx context.Context, bm *boundModule, env *message.Envelope) (bool, error) {
+	rec, ok, err := m.cfg.ActorRegistry.Lookup(ctx, bm.declaration.ActorID)
+	if err != nil {
+		return false, fmt.Errorf("framework: readiness pre-check lookup %s: %w", bm.declaration.ActorID, err)
+	}
+	if !ok {
+		return false, nil
+	}
+	readiness := rec.Readiness.Normalize()
+	if readiness.State != actorreg.ReadinessNotReady {
+		return false, nil
+	}
+	detail := fmt.Sprintf("actor not ready (last state change at %d): %s",
+		readiness.LastStateChangeAt, string(readiness.Detail))
+	payload, err := json.Marshal(map[string]any{
+		"error_code":    readiness.Reason,
+		"detail":        detail,
+		"recovery_hint": recoveryHintForReadiness(bm.declaration.Name, readiness.Reason),
+	})
+	if err != nil {
+		return false, fmt.Errorf("framework: readiness pre-check marshal: %w", err)
+	}
+	_, err = bm.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), payload, adapter.RespondOptions{
+		Status: "failed",
+		Reason: string(message.TerminalReceiverUnavailable),
+	})
+	if err != nil {
+		return false, err
+	}
+	m.cfg.Metrics.IncCounter("adapter.dispatch.precheck_unavailable",
+		"adapter", bm.declaration.Name, "reason", readiness.Reason)
+	return true, nil
+}
+
+func recoveryHintForReadiness(adapterName, reason string) string {
+	switch reason {
+	case "device_offline":
+		return "Call list_actors to see current readiness; wait for xhs.device.online or actor.readiness.changed before retrying"
+	case "token_expired", "device_token_expired":
+		return "Re-bind the device, then wait for actor.readiness.changed before retrying"
+	case "extension_disconnected":
+		return "Reload the browser extension or page, then call list_actors before retrying"
+	case "daemon_unreachable", "upstream_unreachable":
+		return "Start the upstream daemon, then wait for actor.readiness.changed before retrying"
+	default:
+		return fmt.Sprintf("Call list_actors to see current readiness for %s before retrying", adapterName)
+	}
 }
 
 // runHandle wraps Module.Handle with a panic recover that emits a
@@ -715,7 +1029,13 @@ func (m *Manager) dispatchRuntimeEvent(
 		}
 	}()
 	m.cfg.Metrics.IncCounter("adapter.runtime_event", "adapter", bm.declaration.Name, "event_kind", string(evt.Kind))
-	return aware.OnRuntimeEvent(ctx, evt)
+	if err := aware.OnRuntimeEvent(ctx, evt); err != nil {
+		return err
+	}
+	if _, ok := bm.module.(adapter.Heartbeater); ok {
+		m.runHeartbeatOnce(ctx, bm, true)
+	}
+	return nil
 }
 
 func callbackCorrelationID(payload []byte) string {
@@ -799,6 +1119,18 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 
 	var firstErr error
 	for _, bm := range mods {
+		if bm.heartbeatCancel != nil {
+			bm.heartbeatCancel()
+			if bm.heartbeatDone != nil {
+				select {
+				case <-bm.heartbeatDone:
+				case <-ctx.Done():
+					if firstErr == nil {
+						firstErr = fmt.Errorf("framework: shutdown %s heartbeat: %w", bm.declaration.Name, ctx.Err())
+					}
+				}
+			}
+		}
 		bm.policy.shutdown()
 		if err := bm.module.Shutdown(ctx); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("framework: shutdown %s: %w", bm.declaration.Name, err)

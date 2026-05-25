@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -66,6 +67,40 @@ const (
 // concurrency-safe with Handle / OnExternalCallback / Shutdown.
 type RuntimeEventAware interface {
 	OnRuntimeEvent(ctx context.Context, evt RuntimeEvent) error
+}
+
+// Heartbeater is the optional Module sub-interface for adapters that
+// can report live readiness to the framework. Implementations must
+// return promptly; the framework calls it with a short deadline.
+type Heartbeater interface {
+	Heartbeat(ctx context.Context) (HeartbeatReport, error)
+}
+
+// HeartbeatReport is the binding-specific readiness observation a
+// Heartbeater returns. Reason values are convention-level diagnostics
+// such as ok, initializing, upstream_unreachable, device_offline,
+// token_expired, shutdown, extension_disconnected, and unknown.
+type HeartbeatReport struct {
+	Available bool
+	Reason    string
+	Detail    map[string]any
+	CheckedAt time.Time
+}
+
+// StatusReporter optionally enriches actor.status responses. The
+// framework always provides a registry-backed baseline; this hook only
+// adds binding-specific detail under a short deadline.
+type StatusReporter interface {
+	Status(ctx context.Context) (StatusReport, error)
+}
+
+// StatusReport carries optional detail for actor.status. Empty fields
+// leave the registry-backed baseline unchanged.
+type StatusReport struct {
+	Available bool
+	Reason    string
+	Detail    map[string]any
+	CheckedAt time.Time
 }
 
 // FieldDoc describes one product-layer payload field for actor-CLI

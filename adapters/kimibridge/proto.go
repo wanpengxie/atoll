@@ -46,11 +46,9 @@ const Binding = actor.BindingRuntimeOutbound
 // Override via Config.BaseURL for tests / custom ports.
 const DefaultBaseURL = "http://127.0.0.1:10086"
 
-// DefaultMaxPendingMs is the per-request timeout. Browser ops (navigate,
-// snapshot, screenshot) can legitimately take 10-30s; 60s gives slack
-// for slow networks / heavy pages without letting a stuck call linger
-// past human attention span.
-const DefaultMaxPendingMs int64 = 60_000
+// DefaultMaxPendingMs is the sane per-request timeout. Browser ops that
+// need longer than 30s must opt in with an explicit override.
+const DefaultMaxPendingMs int64 = 30_000
 
 // Type names — closed set per SKILL.md §Tools. Names use the
 // `kimibridge.<action>` convention (impl-vocabulary §3.0 #1: namespace
@@ -70,6 +68,9 @@ const (
 	TypeListTabs     = "kimibridge.list_tabs"
 	TypeCloseTab     = "kimibridge.close_tab"
 	TypeCloseSession = "kimibridge.close_session"
+
+	TypeDaemonOnline  = "kimibridge.daemon.online"
+	TypeDaemonOffline = "kimibridge.daemon.offline"
 )
 
 // RequestResponseTypes is the closed set of request/response types this
@@ -92,12 +93,14 @@ var RequestResponseTypes = []string{
 	TypeCloseSession,
 }
 
-// AllTypes is the full closed set Declares() exposes. v1 has no
-// event-only types; AllTypes == RequestResponseTypes. Kept as a
-// distinct slice for parity with other adapters (xhs splits R/R vs
-// event-only) and so adding lifecycle / observability events later
-// stays mechanical.
-var AllTypes = append([]string{}, RequestResponseTypes...)
+// EventOnlyTypes is the adapter-specific daemon lifecycle projection.
+var EventOnlyTypes = []string{
+	TypeDaemonOnline,
+	TypeDaemonOffline,
+}
+
+// AllTypes is the full closed set Declares() exposes.
+var AllTypes = append(append([]string{}, RequestResponseTypes...), EventOnlyTypes...)
 
 // typeToAction maps a coagent envelope.type to the wire `action` field
 // the daemon expects on POST /command. The adapter side keeps the
@@ -129,11 +132,10 @@ func ActionForType(envelopeType string) (string, bool) {
 }
 
 // DeclarationTypeDeclarations returns the kernel/adapter.TypeDeclaration
-// map the Module attaches to its Declaration. All 13 tools are
-// request/response with payload_status terminal convention. The
-// framework fails install closed when an adapter opts into strict
-// mode (non-nil TypeDeclarations) but leaves a Types entry without a
-// row.
+// map the Module attaches to its Declaration. Browser tools are
+// request/response; daemon lifecycle projections are event-only. The
+// framework fails install closed when an adapter opts into strict mode
+// (non-nil TypeDeclarations) but leaves a Types entry without a row.
 func DeclarationTypeDeclarations() map[string]adapter.TypeDeclaration {
 	allowed := []message.Kind{message.KindRequest, message.KindResponse}
 	out := make(map[string]adapter.TypeDeclaration, len(AllTypes))
@@ -142,6 +144,13 @@ func DeclarationTypeDeclarations() map[string]adapter.TypeDeclaration {
 		row.AllowedKinds = allowed
 		row.TerminalConvention = string(adapter.TerminalPayloadStatus)
 		out[t] = row
+	}
+	ev := adapter.TypeDeclaration{
+		AllowedKinds:       []message.Kind{message.KindEvent},
+		TerminalConvention: string(adapter.TerminalPayloadStatus),
+	}
+	for _, t := range EventOnlyTypes {
+		out[t] = ev
 	}
 	return out
 }

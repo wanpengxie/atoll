@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/wanpengxie/ActOS/adapters/framework"
@@ -24,7 +25,7 @@ type Config struct {
 	BaseURL string
 
 	// MaxPendingMs overrides the per-request timeout. Zero defaults to
-	// DefaultMaxPendingMs (60 s).
+	// DefaultMaxPendingMs (30s).
 	MaxPendingMs int64
 
 	// DefaultSession is the `session` field stamped onto every
@@ -81,6 +82,10 @@ type Module struct {
 	logger     framework.Logger
 	metrics    framework.Metrics
 	now        func() time.Time
+
+	statusMu     sync.Mutex
+	daemonKnown  bool
+	daemonOnline bool
 }
 
 // New constructs a Module from Config + optional overrides. Returns an
@@ -103,6 +108,12 @@ func New(cfg Config, opts ...Option) (*Module, error) {
 	m := &Module{cfg: cfg, now: cfg.Now}
 	for _, opt := range opts {
 		opt(m)
+	}
+	if m.logger == nil {
+		m.logger = framework.NoopLogger{}
+	}
+	if m.metrics == nil {
+		m.metrics = framework.NoopMetrics{}
 	}
 	return m, nil
 }
@@ -161,6 +172,114 @@ func (m *Module) Init(_ context.Context, mctx *adapter.ModuleContext) error {
 // across adapters); the per-Module wrapper has no resources to release.
 // Pending requests resolve via the F3 timer on the next daemon boot.
 func (m *Module) Shutdown(_ context.Context) error { return nil }
+
+// Heartbeat probes the local kimi-webbridge daemon and reports the
+// combined daemon+extension readiness into actor_registry.
+func (m *Module) Heartbeat(ctx context.Context) (adapter.HeartbeatReport, error) {
+	report := m.probeStatus(ctx)
+	m.maybeEmitDaemonEvent(ctx, report)
+	return report, nil
+}
+
+// Status enriches actor.status with the latest daemon / extension
+// probe detail without emitting lifecycle events.
+func (m *Module) Status(ctx context.Context) (adapter.StatusReport, error) {
+	report := m.probeStatus(ctx)
+	return adapter.StatusReport{
+		Available: report.Available,
+		Reason:    report.Reason,
+		Detail:    report.Detail,
+		CheckedAt: report.CheckedAt,
+	}, nil
+}
+
+func (m *Module) probeStatus(ctx context.Context) adapter.HeartbeatReport {
+	checkedAt := m.now()
+	if m.client == nil {
+		return adapter.HeartbeatReport{
+			Available: false,
+			Reason:    "initializing",
+			CheckedAt: checkedAt,
+			Detail: map[string]any{
+				"daemon_url": m.cfg.BaseURL,
+			},
+		}
+	}
+	status, httpStatus, err := m.client.Status(ctx)
+	if err != nil {
+		return adapter.HeartbeatReport{
+			Available: false,
+			Reason:    "daemon_unreachable",
+			CheckedAt: checkedAt,
+			Detail: map[string]any{
+				"daemon_url":  m.cfg.BaseURL,
+				"http_status": httpStatus,
+				"error":       err.Error(),
+			},
+		}
+	}
+	detail := map[string]any{
+		"daemon_url":          m.cfg.BaseURL,
+		"running":             status.Running,
+		"version":             status.Version,
+		"port":                status.Port,
+		"uptime_seconds":      status.UptimeSeconds,
+		"extension_connected": status.ExtensionConnected,
+		"extension_id":        status.ExtensionID,
+		"extension_version":   status.ExtensionVersion,
+	}
+	switch {
+	case !status.Running:
+		return adapter.HeartbeatReport{Available: false, Reason: "daemon_unreachable", Detail: detail, CheckedAt: checkedAt}
+	case !status.ExtensionConnected:
+		return adapter.HeartbeatReport{Available: false, Reason: "extension_disconnected", Detail: detail, CheckedAt: checkedAt}
+	default:
+		return adapter.HeartbeatReport{Available: true, Reason: "ok", Detail: detail, CheckedAt: checkedAt}
+	}
+}
+
+func (m *Module) maybeEmitDaemonEvent(ctx context.Context, report adapter.HeartbeatReport) {
+	online := report.Reason != "daemon_unreachable" && report.Reason != "initializing"
+	m.statusMu.Lock()
+	known := m.daemonKnown
+	changed := known && m.daemonOnline != online
+	m.daemonKnown = true
+	m.daemonOnline = online
+	m.statusMu.Unlock()
+	if !changed || m.mctx == nil || m.mctx.HarnessChain == nil {
+		return
+	}
+	eventType := TypeDaemonOffline
+	if online {
+		eventType = TypeDaemonOnline
+	}
+	body, err := json.Marshal(map[string]any{
+		"available":  online,
+		"reason":     report.Reason,
+		"detail":     report.Detail,
+		"checked_at": report.CheckedAt.UnixMilli(),
+	})
+	if err != nil {
+		m.logger.Warn("kimibridge.daemon_event.marshal", "err", err.Error())
+		return
+	}
+	now := report.CheckedAt.UnixMilli()
+	env := &message.Envelope{
+		ID:         message.ID(fmt.Sprintf("event:%s:%s:%d", m.mctx.AdapterActorID, eventType, now)),
+		TS:         now,
+		TSReceived: now,
+		ChannelID:  m.mctx.ChannelID,
+		Sender:     message.Sender{Kind: actor.KindTool, ID: m.mctx.AdapterActorID},
+		Kind:       message.KindEvent,
+		Type:       eventType,
+		Payload:    body,
+		Visibility: message.VisibilityPublic,
+		Audience:   message.Audience{actor.SystemActorID},
+	}
+	if _, err := m.mctx.HarnessChain.Write(ctx, env); err != nil {
+		m.logger.Warn("kimibridge.daemon_event.write", "event_type", eventType, "err", err.Error())
+	}
+}
 
 // Handle dispatches one inbound kind=request envelope to the
 // kimi-webbridge daemon. Translates envelope.type → wire action,
