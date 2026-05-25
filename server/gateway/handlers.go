@@ -230,7 +230,11 @@ func (a *App) synthesizeDeviceUnreachableCallback(
 		msg = "extension pairing token expired; re-pair the browser extension"
 	}
 	cbPayload, err := json.Marshal(map[string]any{
-		"correlation_id": body.CorrelationID,
+		// Callback.correlation_id matches the envelope.id (carried as
+		// request_id on the device_transit wire), not the chain
+		// correlation_id. Adapter framework uses this to look up the
+		// pending request entry; mismatch falls through as orphan.
+		"correlation_id": body.RequestID,
 		"status":         "error",
 		"error": map[string]any{
 			"code":    code,
