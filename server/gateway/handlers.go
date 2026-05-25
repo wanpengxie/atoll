@@ -202,9 +202,55 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 				Payload:         body.Payload,
 				ExpiresAt:       body.ExpiresAt,
 			}
-			return a.devicebus.SendFrameToDevice(ctx, sf.ChannelID, sf.AdapterActorID, df)
+			err := a.devicebus.SendFrameToDevice(ctx, sf.ChannelID, sf.AdapterActorID, df)
+			if errors.Is(err, devicebus.ErrRegistrationNotFound) || errors.Is(err, devicebus.ErrTokenExpired) {
+				return a.synthesizeDeviceUnreachableCallback(ctx, sf, body, err)
+			}
+			return err
 		},
 	}
+}
+
+// synthesizeDeviceUnreachableCallback emits a failed device_transit.send
+// callback back to the originating daemon adapter when no live extension
+// is registered for the target (channel_id, actor_id). The adapter
+// processes it as a normal failure response envelope, so the LLM caller
+// gets a clean `device_not_bound` terminal instead of a torn-down
+// daemonbus connection.
+func (a *App) synthesizeDeviceUnreachableCallback(
+	ctx context.Context,
+	sf devicetransit.SendFrame,
+	body deviceFrameBody,
+	cause error,
+) error {
+	code := "device_not_bound"
+	msg := "no extension is registered for this channel + adapter actor"
+	if errors.Is(cause, devicebus.ErrTokenExpired) {
+		code = "device_token_expired"
+		msg = "extension pairing token expired; re-pair the browser extension"
+	}
+	cbPayload, err := json.Marshal(map[string]any{
+		"correlation_id": body.CorrelationID,
+		"status":         "error",
+		"error": map[string]any{
+			"code":    code,
+			"message": msg,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("gateway: marshal synthetic unreachable callback: %w", err)
+	}
+	df := devicebus.DeviceFrame{
+		Direction:     "send",
+		ActorID:       string(sf.AdapterActorID),
+		ChannelID:     string(sf.ChannelID),
+		RequestID:     body.RequestID,
+		ParentID:      body.ParentID,
+		CorrelationID: body.CorrelationID,
+		Payload:       cbPayload,
+		ExpiresAt:     body.ExpiresAt,
+	}
+	return a.ForwardDeviceFrame(ctx, df, sf.AdapterActorID)
 }
 
 // OnChannelCreated implements catalog.PlacementHook. Channel bind sends the
