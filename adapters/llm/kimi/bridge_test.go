@@ -12,6 +12,7 @@ import (
 	"time"
 
 	kimierrors "github.com/wanpengxie/go-kimi/pkg/kimi/errors"
+	gokimitools "github.com/wanpengxie/go-kimi/pkg/kimi/tools"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
 
@@ -20,6 +21,20 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
+
+// pickToolByName looks up an AdditionalTools entry by Name(). Returns
+// nil when absent — caller fails the test.
+func pickToolByName(tools []gokimitools.Tool, name string) gokimitools.Tool {
+	for _, t := range tools {
+		if t == nil {
+			continue
+		}
+		if t.Name() == name {
+			return t
+		}
+	}
+	return nil
+}
 
 // fakeIPC is a minimal IPCFacade satisfying the bridge contract for
 // tests. Envelopes written via WriteEnvelope land on `written` so the
@@ -196,17 +211,20 @@ func TestBuildBasePrompt_WithChannelContext(t *testing.T) {
 		},
 	}
 	got := kimi.BuildBasePrompt("xhs-creator", "domain body", ctx)
+	// Substrate-native tool surface: the markdown table of every type
+	// was retired in favour of `call_actor` + `list_actors` meta tools
+	// (see meta_tool.go). Prompt now mentions the invocation pattern +
+	// the count of request-callable types; per-type names + schemas
+	// live in list_actors output, not the prompt.
 	for _, want := range []string{
 		"# Channel context (xhs-creator)",
 		"channel_id: f9831154-ch",
 		"## Actors in this channel",
 		"tool:xhs-adapter",
 		"binding=runtime_inbound_via_relay",
-		"## Tool / business types available",
-		"xhs.publish",
-		"300000",
-		"xhs.search",
-		"xhs.note.fetch",
+		"## Tool invocation",
+		"list_actors",
+		"call_actor",
 		"## Device actors",
 		"tool:xhs-adapter",
 		"status=connected",
@@ -490,34 +508,32 @@ func TestBridge_ChannelTypeToolEmitsRequestAndReturnsResponse(t *testing.T) {
 	resultCh := make(chan types.ToolResult, 1)
 
 	kimi.SetAgentFactory(b, func(ac kimi.AgentConfig) (kimi.Agent, error) {
-		if len(ac.AdditionalTools) != 1 {
-			return nil, fmt.Errorf("AdditionalTools len=%d want 1", len(ac.AdditionalTools))
+		// Substrate-native meta-tool surface: call_actor + list_actors.
+		// Direct per-type injection was retired in favour of the
+		// uniform envelope invocation primitive (see meta_tool.go +
+		// channel_tool.go::channelTools).
+		if len(ac.AdditionalTools) != 2 {
+			return nil, fmt.Errorf("AdditionalTools len=%d want 2 (call_actor + list_actors)", len(ac.AdditionalTools))
 		}
-		tool := ac.AdditionalTools[0]
-		// LLM-facing tool name is sanitized (Anthropic / OpenAI tool name
-		// regex rejects `.`); envelope.type keeps the canonical
-		// "xhs.publish" form via tool.CanonicalType().
-		if tool.Name() != "xhs_publish" {
-			return nil, fmt.Errorf("tool name=%q want xhs_publish", tool.Name())
+		callActor := pickToolByName(ac.AdditionalTools, "call_actor")
+		if callActor == nil {
+			return nil, fmt.Errorf("call_actor tool missing from AdditionalTools")
 		}
-		// Level A (proto-layer0 §1.4.1): TypeInfo no longer carries
-		// payload schemas; the channel-tool exposes a permissive
-		// generic-object schema. Just assert it parses as a JSON object.
-		if schema := string(tool.ParameterSchema()); !strings.Contains(schema, `"type":"object"`) {
-			return nil, fmt.Errorf("tool schema=%s want object", schema)
+		if schema := string(callActor.ParameterSchema()); !strings.Contains(schema, `"actor_id"`) {
+			return nil, fmt.Errorf("call_actor schema missing actor_id: %s", schema)
 		}
 		return &scriptedAgent{
 			emitFn: func(ctx context.Context, _ string) error {
 				emitter := kimi.BridgeWireEmitter(b)
 				call := types.ToolCall{
 					ID:        "call-xhs-publish",
-					Name:      "xhs.publish",
-					Arguments: map[string]any{"title": "hello", "content": "world"},
+					Name:      "call_actor",
+					Arguments: map[string]any{"actor_id": "tool:xhs-adapter", "type": "xhs.publish", "payload": map[string]any{"title": "hello", "content": "world"}},
 				}
 				if err := emitter.Emit(wire.ToolCallRequest{ID: call.ID, ToolCall: call}); err != nil {
 					return err
 				}
-				result, err := tool.Execute(ctx, json.RawMessage(`{"title":"hello","content":"world"}`))
+				result, err := callActor.Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs-adapter","type":"xhs.publish","payload":{"title":"hello","content":"world"}}`))
 				if err != nil {
 					return err
 				}
@@ -601,10 +617,13 @@ func TestBridge_ChannelTypeToolTimeoutReturnsErrorResult(t *testing.T) {
 	ipc := newFakeIPC()
 	resultCh := make(chan types.ToolResult, 1)
 	kimi.SetAgentFactory(b, func(ac kimi.AgentConfig) (kimi.Agent, error) {
-		tool := ac.AdditionalTools[0]
+		callActor := pickToolByName(ac.AdditionalTools, "call_actor")
+		if callActor == nil {
+			return nil, fmt.Errorf("call_actor tool missing")
+		}
 		return &scriptedAgent{
 			emitFn: func(ctx context.Context, _ string) error {
-				result, err := tool.Execute(ctx, json.RawMessage(`{"title":"slow"}`))
+				result, err := callActor.Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs-adapter","type":"xhs.publish","payload":{"title":"slow"}}`))
 				if err != nil {
 					return err
 				}
@@ -650,10 +669,13 @@ func TestBridge_ChannelTypeToolTerminalFailureReturnsErrorResult(t *testing.T) {
 	ipc := newFakeIPC()
 	resultCh := make(chan types.ToolResult, 1)
 	kimi.SetAgentFactory(b, func(ac kimi.AgentConfig) (kimi.Agent, error) {
-		tool := ac.AdditionalTools[0]
+		callActor := pickToolByName(ac.AdditionalTools, "call_actor")
+		if callActor == nil {
+			return nil, fmt.Errorf("call_actor tool missing")
+		}
 		return &scriptedAgent{
 			emitFn: func(ctx context.Context, _ string) error {
-				result, err := tool.Execute(ctx, json.RawMessage(`{"title":"boom"}`))
+				result, err := callActor.Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs-adapter","type":"xhs.publish","payload":{"title":"boom"}}`))
 				if err != nil {
 					return err
 				}

@@ -31,6 +31,7 @@ import (
 	"time"
 
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
+	"github.com/wanpengxie/ActOS/adapters/kimibridge"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
@@ -135,11 +136,19 @@ func main() {
 	if *useScaffoldXHS {
 		xhsFactory = XHSScaffoldFactory(xhs.Config{})
 	}
+	// kimi-webbridge: another tool actor on the same xhs-creator
+	// channel — gives the agent generic browser automation
+	// (navigate/click/fill/...) alongside the xhs-specific tools. The
+	// local kimi-webbridge daemon must already be running
+	// (~/.kimi-webbridge/bin/kimi-webbridge status); if not, Handle
+	// emits failed terminals (receiver_unavailable) until the daemon
+	// comes up.
+	kimibridgeFactory := KimiWebBridgeFactory(kimibridge.Config{}, XHSCreatorChannelType)
 	adapterCredentialSecret := []byte(*humanSecret)
 	if len(adapterCredentialSecret) == 0 && *mockBus {
 		adapterCredentialSecret = []byte(devAdapterCredentialSecret)
 	}
-	adapterBootHook, err := wireAdapterFrameworkWithCredentialSecret(adapterCredentialSecret, xhsFactory)
+	adapterBootHook, err := wireAdapterFrameworkWithCredentialSecret(adapterCredentialSecret, xhsFactory, kimibridgeFactory)
 	if err != nil {
 		lg.Z().Error().Err(err).Str("event", "daemon.fail_fast").
 			Msg("adapter credential encryption key is required")
@@ -308,6 +317,12 @@ func buildChannelTemplates(useScaffoldXHS bool) map[string]runtime.ChannelTempla
 	if useScaffoldXHS {
 		adapterSeeds = tpl.AdapterActorSeeds
 	}
+	// xhs-creator channel also hosts the kimi-webbridge adapter — the
+	// agent gets both xhs-specific tools (xhs.publish / xhs.search /
+	// ...) AND generic browser automation (kimibridge.navigate /
+	// click / fill / ...). Two tool actors, independent type
+	// namespaces, no overlap.
+	adapterSeeds = append(adapterSeeds, KimiWebBridgeActorSeed())
 	out[tpl.ChannelType] = runtime.ChannelTemplate{
 		AdapterActorSeeds:          adapterSeeds,
 		WorkdirSubdirs:             tpl.WorkdirSubdirs,

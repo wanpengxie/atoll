@@ -104,32 +104,33 @@ func (t *ChannelTypeTool) Execute(ctx context.Context, params json.RawMessage) (
 	return t.bridge.executeChannelTool(ctx, runtime.ipc, runtime.trigger, t, payload), nil
 }
 
+// channelTools returns the meta-tool surface the LLM sees: a fixed
+// pair (call_actor + list_actors) that exploits the envelope
+// protocol's uniformity instead of fanning out one tool per
+// channel-local type.
+//
+// Substrate rationale (vision §1.1 + proto-foundation §2.5):
+//   - Every adapter exposes the same wire shape (kind=request envelope
+//     + handler actor_id + payload). Direct per-type tool injection
+//     was a transitional shim borrowed from no-standardization worlds
+//     (raw MCP / OpenAI function-calling) where each tool had a
+//     distinct RPC. Once standardization is in, a single invocation
+//     primitive carries them all.
+//   - Live discovery via list_actors keeps the LLM surface O(1) in
+//     the channel's type count + handles dynamic type_registry
+//     mutations without a worker respawn.
+//
+// Trade-off: LLMs trained on direct injection need a system-prompt
+// nudge ("call list_actors first") to use this pattern reliably. See
+// buildChannelContextSection in bridge.go for the prompt phrasing.
 func (b *Bridge) channelTools() []gokimitools.Tool {
 	if b == nil {
 		return nil
 	}
-	out := make([]gokimitools.Tool, 0, len(b.cfg.ChannelContext.Types))
-	seen := map[string]struct{}{}
-	for _, typ := range b.cfg.ChannelContext.Types {
-		typeName := strings.TrimSpace(typ.Type)
-		handler := strings.TrimSpace(typ.HandlerActorID)
-		if typeName == "" || handler == "" || !typeAllowsKind(typ, string(message.KindRequest)) {
-			continue
-		}
-		if _, dup := seen[typeName]; dup {
-			continue
-		}
-		seen[typeName] = struct{}{}
-		out = append(out, &ChannelTypeTool{
-			typeName:       typeName,
-			handlerActorID: handler,
-			description:    typ.Description,
-			payloadSchema:  requestSchema(typ),
-			timeout:        channelToolTimeout(typ.MaxPendingMs),
-			bridge:         b,
-		})
+	return []gokimitools.Tool{
+		&CallActorTool{bridge: b},
+		&ListActorsTool{bridge: b},
 	}
-	return out
 }
 
 func (b *Bridge) routeTriggers(ctx context.Context, in <-chan TriggerPayload) <-chan TriggerPayload {
@@ -158,6 +159,10 @@ func (b *Bridge) routeTriggers(ctx context.Context, in <-chan TriggerPayload) <-
 	return out
 }
 
+// executeChannelTool is retained as a thin wrapper around
+// executeChannelRequest so the legacy ChannelTypeTool path (still used
+// by tests + any external embedder that constructs a *ChannelTypeTool
+// directly) keeps working with the new generic implementation.
 func (b *Bridge) executeChannelTool(
 	ctx context.Context,
 	ipc IPCFacade,
@@ -169,21 +174,44 @@ func (b *Bridge) executeChannelTool(
 	if timeout <= 0 {
 		timeout = channelToolDefaultTimeout
 	}
+	return b.executeChannelRequest(ctx, ipc, trigger, channelRequestSpec{
+		ToolName:       tool.Name(),
+		EnvelopeType:   tool.CanonicalType(),
+		HandlerActorID: tool.handlerActorID,
+		Payload:        payload,
+		Timeout:        timeout,
+	})
+}
+
+// executeChannelRequest is the generic envelope-dispatch path the
+// meta tools (call_actor) and the legacy per-type ChannelTypeTool
+// share. Builds the kind=request envelope, registers a pending wait
+// keyed on envelope.id, ships through ipc.WriteEnvelope, and blocks
+// until the matching response arrives (or timeout / ctx cancel).
+//
+// All error / success result shapes go through channelToolResultFromResponse
+// and channelToolErrorResult — same wire as before so existing tests
+// + observability stay valid.
+func (b *Bridge) executeChannelRequest(
+	ctx context.Context,
+	ipc IPCFacade,
+	trigger TriggerPayload,
+	spec channelRequestSpec,
+) types.ToolResult {
+	if spec.Timeout <= 0 {
+		spec.Timeout = channelToolDefaultTimeout
+	}
 	now := b.cfg.NowFn()
-	expiresAt := now + int64(timeout/time.Millisecond)
+	expiresAt := now + int64(spec.Timeout/time.Millisecond)
 	env := message.Envelope{
-		ID:        b.envelopeID(ipc, now),
-		ChannelID: ipc.ChannelID(),
-		// envelope.type uses the canonical channel type (e.g.
-		// "xhs.publish") — NOT the LLM-tool-name form returned by
-		// tool.Name(), which is sanitized for the Anthropic / OpenAI
-		// tool-name regex.
-		Type:          tool.CanonicalType(),
+		ID:            b.envelopeID(ipc, now),
+		ChannelID:     ipc.ChannelID(),
+		Type:          strings.TrimSpace(spec.EnvelopeType),
 		Kind:          message.KindRequest,
 		Sender:        message.Sender{Kind: actor.KindAgent, ID: ipc.WorkerActorID()},
 		Visibility:    message.VisibilityPublic,
-		Audience:      message.Audience{actor.ActorID(tool.handlerActorID)},
-		Payload:       payload,
+		Audience:      message.Audience{actor.ActorID(spec.HandlerActorID)},
+		Payload:       spec.Payload,
 		ParentID:      trigger.Envelope.ID,
 		CorrelationID: channelToolCorrelationID(trigger),
 		ExpiresAt:     &expiresAt,
@@ -194,21 +222,24 @@ func (b *Bridge) executeChannelTool(
 	responseCh := b.registerPendingTool(env.ID)
 	defer b.unregisterPendingTool(env.ID)
 	if err := ipc.WriteEnvelope(ctx, env); err != nil {
-		return channelToolErrorResult(tool.Name(), fmt.Sprintf("emit channel request %s: %v", tool.Name(), err))
+		return channelToolErrorResult(spec.ToolName,
+			fmt.Sprintf("emit channel request %s: %v", spec.EnvelopeType, err))
 	}
 
-	timer := time.NewTimer(timeout)
+	timer := time.NewTimer(spec.Timeout)
 	defer timer.Stop()
 	select {
 	case response, ok := <-responseCh:
 		if !ok {
-			return channelToolErrorResult(tool.Name(), "channel tool response wait closed")
+			return channelToolErrorResult(spec.ToolName, "channel request response wait closed")
 		}
-		return channelToolResultFromResponse(tool.Name(), response.trigger.Envelope)
+		return channelToolResultFromResponse(spec.ToolName, response.trigger.Envelope)
 	case <-timer.C:
-		return channelToolErrorResult(tool.Name(), fmt.Sprintf("channel tool %s timed out after %s", tool.Name(), timeout))
+		return channelToolErrorResult(spec.ToolName,
+			fmt.Sprintf("channel request %s timed out after %s", spec.EnvelopeType, spec.Timeout))
 	case <-ctx.Done():
-		return channelToolErrorResult(tool.Name(), fmt.Sprintf("channel tool %s canceled: %v", tool.Name(), ctx.Err()))
+		return channelToolErrorResult(spec.ToolName,
+			fmt.Sprintf("channel request %s canceled: %v", spec.EnvelopeType, ctx.Err()))
 	}
 }
 

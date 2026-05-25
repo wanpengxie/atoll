@@ -1,0 +1,317 @@
+package kimi
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	gokimitools "github.com/wanpengxie/go-kimi/pkg/kimi/tools"
+	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
+
+	"github.com/wanpengxie/ActOS/kernel/message"
+)
+
+// Meta-tool strategy (substrate-native): instead of injecting one
+// gokimi.Tool per channel-local type (which scales linearly with the
+// adapter / type count + bloats every prompt with redundant schema), we
+// inject TWO generic tools that exploit the envelope protocol's
+// uniformity:
+//
+//   list_actors — re-snapshots the channel's actor_registry +
+//                 type_registry and returns it as structured JSON. LLM
+//                 calls this when it doesn't know what's available
+//                 (or when a new type was just installed — type_registry
+//                 mutations are live, so the next list_actors picks
+//                 them up without a worker respawn).
+//
+//   call_actor  — emits one kind=request envelope to the named
+//                 (actor_id, type) and waits for the response. The
+//                 wire path is identical to the per-type ChannelTypeTool;
+//                 only the LLM-visible surface changed.
+//
+// Spec ref:
+//   - proto-foundation §2.5 Adapter Pattern: all adapters share
+//     envelope+kind=request as the uniform invocation primitive
+//   - impl-vocabulary §3 adapter-specific type catalog (productized
+//     schema lives in product-layer docs, not in protocol)
+//   - vision §1.2 self-reference: actor_registry / type_registry are
+//     queryable channel state, so the LLM can discover at runtime
+//
+// Token / scaling story:
+//   - Old: N type-tools × ~200 token each = O(N) prompt baseline
+//   - New: 2 meta tools × ~150 token = O(1) baseline; +1 list_actors
+//     payload per task (~1.5k for 30 types, cached across turns)
+
+// CallActorTool is the generic envelope dispatch primitive.
+type CallActorTool struct {
+	bridge *Bridge
+}
+
+var _ gokimitools.Tool = (*CallActorTool)(nil)
+
+func (t *CallActorTool) Name() string { return "call_actor" }
+
+func (t *CallActorTool) Description() string {
+	return strings.TrimSpace(`
+Invoke any tool actor or sub-agent in this channel by emitting a kind=request envelope.
+This is the universal invocation primitive — every adapter (browser automation, business APIs,
+device controllers) and every sub-agent is reached through this single tool.
+
+Workflow:
+  1. Call list_actors first to discover what actors + types exist (call it only
+     once per task; the result stays in your context).
+  2. Choose the (actor_id, type) pair matching your need.
+  3. Build the payload matching the type's expected shape. list_actors returns
+     the description / allowed_kinds hint; payload schemas are product-layer
+     conventions described per-adapter — when unsure, start with the minimal
+     known-good shape and iterate based on response error.
+  4. Call call_actor — the response payload arrives in your tool result.
+     On failure the result.is_error flag is set and result.value.error names
+     the reason (closed-set: receiver_unavailable / receiver_internal_error /
+     unanswered_timeout) plus a free-text payload field with adapter detail.
+`)
+}
+
+// callActorSchema is intentionally permissive on `payload`. Per Level A
+// (proto-layer0 §1.4.1) the protocol layer does not validate payload
+// schemas; the adapter handler is the boundary that enforces shape.
+var callActorSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "actor_id": {"type": "string", "description": "Target actor id, e.g. tool:xhs-adapter or agent:research-assistant. Look up via list_actors."},
+    "type": {"type": "string", "description": "Envelope type to send, e.g. xhs.publish or kimibridge.navigate. MUST be a request-allowed type for the chosen actor."},
+    "payload": {"type": "object", "description": "Type-specific payload. Shape is per-adapter convention; consult list_actors output for hints."}
+  },
+  "required": ["actor_id", "type"]
+}`)
+
+func (t *CallActorTool) ParameterSchema() json.RawMessage { return cloneRawJSON(callActorSchema) }
+
+type callActorParams struct {
+	ActorID string          `json:"actor_id"`
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+}
+
+func (t *CallActorTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
+	if t == nil || t.bridge == nil {
+		return channelToolErrorResult("call_actor", "call_actor tool not configured"), nil
+	}
+	var p callActorParams
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return channelToolErrorResult("call_actor", fmt.Sprintf("invalid params: %v", err)), nil
+		}
+	}
+	p.ActorID = strings.TrimSpace(p.ActorID)
+	p.Type = strings.TrimSpace(p.Type)
+	if p.ActorID == "" {
+		return channelToolErrorResult("call_actor", "actor_id is required (call list_actors to discover)"), nil
+	}
+	if p.Type == "" {
+		return channelToolErrorResult("call_actor", "type is required (call list_actors to discover)"), nil
+	}
+
+	snapshot := t.bridge.refreshChannelContext(ctx)
+	typeInfo, found := findHandlerType(snapshot, p.Type, p.ActorID)
+	if !found {
+		return channelToolErrorResult("call_actor",
+			fmt.Sprintf("type %q with handler_actor_id %q not found in this channel — call list_actors to see what's available", p.Type, p.ActorID)), nil
+	}
+	if !typeAllowsKind(typeInfo, string(message.KindRequest)) {
+		return channelToolErrorResult("call_actor",
+			fmt.Sprintf("type %q is not request-callable (allowed_kinds=%v)", p.Type, typeInfo.AllowedKinds)), nil
+	}
+
+	runtime, ok := ctx.Value(channelToolRuntimeKey{}).(channelToolRuntime)
+	if !ok || runtime.ipc == nil {
+		return channelToolErrorResult("call_actor", "call_actor invoked outside a bridge turn"), nil
+	}
+
+	payload, err := normalizeToolPayload(p.Payload)
+	if err != nil {
+		return channelToolErrorResult("call_actor", err.Error()), nil
+	}
+
+	return t.bridge.executeChannelRequest(ctx, runtime.ipc, runtime.trigger, channelRequestSpec{
+		ToolName:       "call_actor",
+		EnvelopeType:   p.Type,
+		HandlerActorID: p.ActorID,
+		Payload:        payload,
+		Timeout:        channelToolTimeout(typeInfo.MaxPendingMs),
+	}), nil
+}
+
+// ListActorsTool returns the channel's actor + type registry as
+// structured JSON. Bridge re-snapshots from channel.sqlite on every
+// call so type_registry mutations (system.type.installed) are visible
+// immediately — no worker respawn required.
+type ListActorsTool struct {
+	bridge *Bridge
+}
+
+var _ gokimitools.Tool = (*ListActorsTool)(nil)
+
+func (t *ListActorsTool) Name() string { return "list_actors" }
+
+func (t *ListActorsTool) Description() string {
+	return strings.TrimSpace(`
+Discover what actors (tool adapters, agents, system actors) and request-callable types
+exist in this channel. Returns:
+  - actors: each with actor_id, kind, binding, and the types it handles
+  - types per actor: name, description, allowed_kinds, max_pending_ms hint
+
+Call this once at the start of a task (or whenever you suspect new tools have appeared
+mid-conversation — the type registry is live). The response is stable enough to cache
+in your reasoning context across multiple turns. Use the result to pick (actor_id, type)
+pairs for call_actor.
+`)
+}
+
+func (t *ListActorsTool) ParameterSchema() json.RawMessage {
+	return cloneRawJSON(json.RawMessage(`{"type":"object","properties":{}}`))
+}
+
+func (t *ListActorsTool) Execute(ctx context.Context, _ json.RawMessage) (types.ToolResult, error) {
+	if t == nil || t.bridge == nil {
+		return channelToolErrorResult("list_actors", "list_actors tool not configured"), nil
+	}
+	snapshot := t.bridge.refreshChannelContext(ctx)
+	return types.ToolResult{
+		Name:  "list_actors",
+		Value: types.ToolReturnValue{Value: formatActorRegistryForLLM(snapshot)},
+	}, nil
+}
+
+// formatActorRegistryForLLM projects a ChannelContext into the JSON
+// shape the LLM consumes. Groups types by handler_actor_id so the
+// model reasons "this actor handles these types" naturally instead of
+// having to correlate flat lists.
+//
+// Orphan types (handler_actor_id non-empty but no matching actor row,
+// or handler_actor_id empty) appear under a sentinel "_orphan" key —
+// rare in healthy channels but kept visible for debugging.
+func formatActorRegistryForLLM(snapshot ChannelContext) map[string]any {
+	actorIndex := make(map[string]ActorInfo, len(snapshot.Actors))
+	for _, a := range snapshot.Actors {
+		actorIndex[strings.TrimSpace(a.ActorID)] = a
+	}
+	typesByActor := map[string][]map[string]any{}
+	for _, ty := range snapshot.Types {
+		handler := strings.TrimSpace(ty.HandlerActorID)
+		entry := map[string]any{
+			"type":          ty.Type,
+			"allowed_kinds": ty.AllowedKinds,
+		}
+		if ty.Description != "" {
+			entry["description"] = ty.Description
+		}
+		if ty.MaxPendingMs > 0 {
+			entry["max_pending_ms"] = ty.MaxPendingMs
+		}
+		if handler == "" {
+			typesByActor["_orphan"] = append(typesByActor["_orphan"], entry)
+			continue
+		}
+		typesByActor[handler] = append(typesByActor[handler], entry)
+	}
+
+	actorKeys := make([]string, 0, len(actorIndex))
+	for k := range actorIndex {
+		actorKeys = append(actorKeys, k)
+	}
+	sort.Strings(actorKeys)
+
+	out := make([]map[string]any, 0, len(actorKeys))
+	for _, id := range actorKeys {
+		a := actorIndex[id]
+		entry := map[string]any{
+			"actor_id": a.ActorID,
+			"kind":     a.Kind,
+		}
+		if a.Binding != "" {
+			entry["binding"] = a.Binding
+		}
+		if a.DisplayName != "" {
+			entry["display_name"] = a.DisplayName
+		}
+		ts := typesByActor[id]
+		// Sort types deterministically so identical snapshots produce
+		// identical responses (stable cache for the LLM).
+		sort.Slice(ts, func(i, j int) bool {
+			return fmt.Sprint(ts[i]["type"]) < fmt.Sprint(ts[j]["type"])
+		})
+		entry["types"] = ts
+		out = append(out, entry)
+	}
+
+	result := map[string]any{
+		"actors":     out,
+		"channel_id": snapshot.ChannelID,
+	}
+	if snapshot.ChannelType != "" {
+		result["channel_type"] = snapshot.ChannelType
+	}
+	if orphan := typesByActor["_orphan"]; len(orphan) > 0 {
+		result["orphan_types"] = orphan
+	}
+	return result
+}
+
+// refreshChannelContext returns the freshest possible ChannelContext.
+// When the bridge was constructed with a ChannelStore (production
+// daemon path), this re-snapshots channel.sqlite live so dynamic
+// type_registry mutations are visible immediately. Otherwise falls
+// back to the boot-time snapshot stored in cfg.ChannelContext (test
+// path / mock harness).
+//
+// Errors are intentionally swallowed: list_actors / call_actor MUST
+// always return some usable result. The boot snapshot is a safe stale
+// view.
+func (b *Bridge) refreshChannelContext(ctx context.Context) ChannelContext {
+	if b == nil {
+		return ChannelContext{}
+	}
+	if b.cfg.ChannelStore == nil {
+		return b.cfg.ChannelContext
+	}
+	snapshot, err := b.cfg.ChannelStore.Snapshot(ctx, string(b.cfg.ChannelContext.ChannelID), b.cfg.ChannelContext.ChannelType)
+	if err != nil {
+		return b.cfg.ChannelContext
+	}
+	return snapshot
+}
+
+// findHandlerType returns the TypeInfo whose Type == name AND
+// HandlerActorID == handler. Returns (zero, false) when either no
+// type matches or the type's handler doesn't match the caller-supplied
+// actor — both are dispatch errors the LLM should see as a single
+// "no such (actor, type) pair" failure.
+func findHandlerType(snapshot ChannelContext, name, handler string) (TypeInfo, bool) {
+	name = strings.TrimSpace(name)
+	handler = strings.TrimSpace(handler)
+	if name == "" || handler == "" {
+		return TypeInfo{}, false
+	}
+	for _, ty := range snapshot.Types {
+		if strings.TrimSpace(ty.Type) == name && strings.TrimSpace(ty.HandlerActorID) == handler {
+			return ty, true
+		}
+	}
+	return TypeInfo{}, false
+}
+
+// channelRequestSpec is the bag of fields a single call_actor /
+// (legacy) ChannelTypeTool invocation needs to emit + wait. Lets
+// executeChannelRequest stay generic so both meta tools and any future
+// specialized tool share one wire/response/timeout path.
+type channelRequestSpec struct {
+	ToolName       string
+	EnvelopeType   string
+	HandlerActorID string
+	Payload        json.RawMessage
+	Timeout        time.Duration
+}

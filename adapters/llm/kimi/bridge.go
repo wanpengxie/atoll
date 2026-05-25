@@ -1127,27 +1127,24 @@ func renderChannelContext(c ChannelContext) string {
 	}
 
 	if len(c.Types) > 0 {
-		b.WriteString("\n## Tool / business types available\n")
-		b.WriteString("| type | handler_actor_id | binding | allowed_kinds | max_pending_ms |\n")
-		b.WriteString("|---|---|---|---|---|\n")
-		for _, t := range c.Types {
-			b.WriteString("| ")
-			b.WriteString(t.Type)
-			b.WriteString(" | ")
-			b.WriteString(t.HandlerActorID)
-			b.WriteString(" | ")
-			if t.HandlerBinding != "" {
-				b.WriteString(t.HandlerBinding)
-			}
-			b.WriteString(" | ")
-			b.WriteString(strings.Join(t.AllowedKinds, ", "))
-			b.WriteString(" | ")
-			if t.MaxPendingMs > 0 {
-				fmt.Fprintf(&b, "%d", t.MaxPendingMs)
-			}
-			b.WriteString(" |\n")
-		}
-		b.WriteString("\nTo call a tool, emit an envelope with the matching type, kind=request, and audience=[handler_actor_id]. The harness routes the request; the tool replies with kind=response carrying the same correlation_id.\n")
+		// Tool surface (substrate-native invocation):
+		//
+		//   list_actors — call once at task start (or whenever you
+		//                 suspect new tools have been installed) to
+		//                 see the full actor + type registry. Cache
+		//                 the result in your reasoning context.
+		//   call_actor  — invoke any (actor_id, type) pair the
+		//                 registry exposes. The envelope protocol
+		//                 carries every adapter uniformly.
+		//
+		// We deliberately do NOT inline a markdown table of every
+		// type here — the Anthropic / OpenAI native tools API list
+		// (already bundled with this turn) lists call_actor +
+		// list_actors with full input_schema. Listing every type
+		// twice (once in tools API, once in prompt) was the legacy
+		// inject-per-type fallback; the substrate-native path is one
+		// list_actors round-trip per task.
+		fmt.Fprintf(&b, "\n## Tool invocation\nThis channel exposes %d request-callable type(s) spanning the actors listed above. Use the `list_actors` tool to see the structured registry (actor_id + type list + descriptions), then `call_actor` to invoke. The registry is live — newly installed types appear in the next list_actors call without restart.\n", countRequestTypes(c.Types))
 	}
 
 	if len(c.Devices) > 0 {
@@ -1173,6 +1170,20 @@ func renderChannelContext(c ChannelContext) string {
 	}
 
 	return b.String()
+}
+
+// countRequestTypes counts TypeInfo rows whose allowed_kinds contains
+// "request" — these are the ones invokable via call_actor. Used by
+// the system prompt builder to give the LLM a numeric hint about how
+// many tools list_actors will return.
+func countRequestTypes(types []TypeInfo) int {
+	n := 0
+	for _, t := range types {
+		if typeAllowsKind(t, string(message.KindRequest)) {
+			n++
+		}
+	}
+	return n
 }
 
 // platformTeachingPrompt is the L0-L2 stable prefix every coagent

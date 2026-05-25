@@ -14,6 +14,7 @@ import (
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/framework"
+	"github.com/wanpengxie/ActOS/adapters/kimibridge"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
@@ -418,5 +419,34 @@ func DeviceXHSActorSeed() actorreg.Record {
 		ID:      devicexhs.DefaultAdapterActorID,
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeInboundViaRelay,
+	}
+}
+
+// KimiWebBridgeFactory returns an AdapterModuleFactory that installs
+// the kimi-webbridge adapter on every channel of the given channel
+// type. Binding=runtime_outbound — the adapter dials the local
+// kimi-webbridge daemon (~/.kimi-webbridge/bin/kimi-webbridge,
+// http://127.0.0.1:10086) from inside the daemon process.
+//
+// Pair with KimiWebBridgeActorSeed via ChannelTemplate.AdapterActorSeeds
+// so the install validator sees the actor before the type registry
+// install runs.
+func KimiWebBridgeFactory(cfg kimibridge.Config, channelType string) AdapterModuleFactory {
+	return func(_ context.Context, h runtime.ChannelHooks) (adapter.Module, error) {
+		if channelType != "" && h.ChannelType != channelType {
+			return nil, nil
+		}
+		return kimibridge.New(cfg, kimibridge.WithDeps(framework.Deps{}))
+	}
+}
+
+// KimiWebBridgeActorSeed returns the actor_registry seed row for the
+// kimi-webbridge adapter. Binding=runtime_outbound; one actor per
+// channel (single kimi-webbridge daemon per host in v1).
+func KimiWebBridgeActorSeed() actorreg.Record {
+	return actorreg.Record{
+		ID:      kimibridge.DefaultAdapterActorID,
+		Kind:    actor.KindTool,
+		Binding: kimibridge.Binding,
 	}
 }
