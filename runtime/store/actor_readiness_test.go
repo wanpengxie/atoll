@@ -81,4 +81,48 @@ func TestActorRegistry_UpdateReadinessTracksTransitions(t *testing.T) {
 	if string(rec.Readiness.Detail) != `{"device_state":"offline"}` {
 		t.Fatalf("lookup detail=%s", string(rec.Readiness.Detail))
 	}
+
+	// not_ready → ready recovery path (R6 invariant: LastReadyAt must
+	// move forward, LastStateChangeAt records the recovery moment).
+	tr, err = reg.UpdateReadiness(ctx, "tool:xhs-adapter", actorreg.ReadinessUpdate{
+		State:     actorreg.ReadinessReady,
+		Reason:    "ok",
+		Detail:    json.RawMessage(`{"device_state":"online"}`),
+		CheckedAt: 4000,
+	})
+	if err != nil {
+		t.Fatalf("UpdateReadiness recovery: %v", err)
+	}
+	if !tr.Changed {
+		t.Fatalf("recovery transition not flagged Changed: %+v", tr)
+	}
+	if tr.Previous.State != actorreg.ReadinessNotReady {
+		t.Fatalf("recovery previous=%s want not_ready", tr.Previous.State)
+	}
+	if tr.Current.State != actorreg.ReadinessReady {
+		t.Fatalf("recovery current=%s want ready", tr.Current.State)
+	}
+	if tr.Current.LastReadyAt != 4000 {
+		t.Fatalf("recovery LastReadyAt=%d want 4000 (recovery moment)", tr.Current.LastReadyAt)
+	}
+	if tr.Current.LastStateChangeAt != 4000 {
+		t.Fatalf("recovery LastStateChangeAt=%d want 4000", tr.Current.LastStateChangeAt)
+	}
+
+	// Steady ready after recovery: LastStateChangeAt frozen, LastReadyAt
+	// advances.
+	tr, err = reg.UpdateReadiness(ctx, "tool:xhs-adapter", actorreg.ReadinessUpdate{
+		State:     actorreg.ReadinessReady,
+		Reason:    "ok",
+		CheckedAt: 4500,
+	})
+	if err != nil {
+		t.Fatalf("UpdateReadiness post-recovery steady: %v", err)
+	}
+	if tr.Changed {
+		t.Fatalf("post-recovery steady should not flag Changed: %+v", tr)
+	}
+	if tr.Current.LastReadyAt != 4500 || tr.Current.LastStateChangeAt != 4000 {
+		t.Fatalf("post-recovery steady timestamps=%+v", tr.Current)
+	}
 }

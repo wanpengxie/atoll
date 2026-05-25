@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/kimibridge"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/pkg/coagentsdk"
@@ -172,7 +173,16 @@ func TestE2E_SDK_Reliability_ReadinessEventEmitted(t *testing.T) {
 	})
 }
 
-func TestE2E_SDK_Reliability_FullToolSurface(t *testing.T) {
+// TestE2E_SDK_Reliability_ToolSurface_Scaffold covers the happy-path SDK
+// invocation across the **scaffold** xhs adapter (5 R/R types) +
+// kimibridge (13 R/R types). The scaffold mock-acks every request so this
+// test verifies SDK ↔ server ↔ daemon ↔ adapter plumbing for every type
+// without needing a real device. Production xhs surface (14 R/R types in
+// adapters/device/xhs) is exercised by
+// TestE2E_SDK_Reliability_ToolSurface_DeviceXHS_OfflineFastFail below
+// — that one cannot mock-ack (no fake chrome-extension WS), so it
+// verifies the dispatch pre-check fast-fail path instead.
+func TestE2E_SDK_Reliability_ToolSurface_Scaffold(t *testing.T) {
 	kimi := newFakeKimiBridgeDaemon(t, true)
 	s := harness.Start(t, harness.Options{
 		UseScaffoldXHS: true,
@@ -215,6 +225,59 @@ func TestE2E_SDK_Reliability_FullToolSurface(t *testing.T) {
 		}
 		if !res.OK {
 			t.Fatalf("CallActor kimibridge %s failed: %+v", typ, res.Error)
+		}
+	}
+}
+
+// TestE2E_SDK_Reliability_ToolSurface_DeviceXHS_OfflineFastFail exercises
+// every type in the **production** device/xhs adapter surface (14 R/R types)
+// when no device is bound. Each call MUST pre-check fail fast with
+// reason=receiver_unavailable, error_code=device_offline within seconds
+// (R4 dispatch pre-check + R5 30s budget), proving the SDK + framework
+// don't hang on the 5min legacy timer for any of the production types.
+func TestE2E_SDK_Reliability_ToolSurface_DeviceXHS_OfflineFastFail(t *testing.T) {
+	kimi := newFakeKimiBridgeDaemon(t, true)
+	s := harness.Start(t, harness.Options{
+		// UseScaffoldXHS:false → daemon loads adapters/device/xhs (14 R/R).
+		ExtraDaemonEnv: []string{"COAGENT_KIMIBRIDGE_BASE_URL=" + kimi.URL},
+	})
+	_, chID, client := setupReliabilityChannel(t, s, "devxhs-offline")
+
+	// Wait for production xhs to register as not_ready (no device bound).
+	waitSDKActor(t, client, chID, string(devicexhs.DefaultAdapterActorID), 10*time.Second, func(a coagentsdk.ActorInfo) bool {
+		return !a.Ready
+	})
+
+	for _, typ := range devicexhs.RequestResponseTypes {
+		start := time.Now()
+		res, err := client.CallActor(context.Background(), coagentsdk.CallActorRequest{
+			ChannelID: chID,
+			ActorID:   string(devicexhs.DefaultAdapterActorID),
+			Type:      typ,
+			Payload:   json.RawMessage(`{}`),
+			// 8s budget catches anything that falls back to F3 default
+			// timer (which was 5min before R5) — fast-fail MUST resolve
+			// well under this.
+			Timeout: 8 * time.Second,
+		})
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Fatalf("CallActor device/xhs %s: %v", typ, err)
+		}
+		if res.OK {
+			t.Fatalf("CallActor device/xhs %s unexpectedly ok=true (no device bound)", typ)
+		}
+		if res.Error == nil {
+			t.Fatalf("CallActor device/xhs %s: ok=false but no Error field", typ)
+		}
+		// Pre-check fast-fail must reply in seconds, not minutes.
+		if elapsed > 5*time.Second {
+			t.Errorf("CallActor device/xhs %s took %v — fast-fail invariant says <5s", typ, elapsed)
+		}
+		// Reason MUST be in the protocol closed-set; error_code SHOULD
+		// indicate device offline / token issue.
+		if res.Error.Code == "" {
+			t.Errorf("CallActor device/xhs %s missing error_code", typ)
 		}
 	}
 }

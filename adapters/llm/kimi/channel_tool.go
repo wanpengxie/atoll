@@ -14,7 +14,13 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-const channelToolDefaultTimeout = 5 * time.Minute
+// channelToolDefaultTimeout is the fallback Execute timeout when a
+// type's MaxPendingMs is absent. R5 invariant (actor-adapter.md §7.2):
+// "sane default timeout — SDK 30s / max_pending_ms 30s". Long-running
+// adapter types MUST declare an explicit MaxPendingMs override; the
+// default is deliberately tight so a misconfigured type fails fast
+// instead of blocking the agent loop for minutes.
+const channelToolDefaultTimeout = 30 * time.Second
 
 var genericObjectSchema = json.RawMessage(`{"type":"object"}`)
 

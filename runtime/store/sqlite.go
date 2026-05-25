@@ -41,7 +41,13 @@ func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions) (*sql.DB,
 	if err != nil {
 		return nil, err
 	}
-	if !opts.SkipDDL && !opts.ReadOnly {
+	// Schema migrations are idempotent (column-add guarded by columnExists)
+	// and MUST run on every writable open — including SkipDDL=true callers
+	// (runtime/daemon.go caches existing channel sqlites with SkipDDL=true
+	// to skip the CREATE TABLE baseline, but those caches need new columns
+	// like actor_registry.ready_state to materialise on old channels).
+	// Only ReadOnly skips, since migrations write DDL.
+	if !opts.ReadOnly {
 		if err := ensureChannelLocalSchema(ctx, db); err != nil {
 			_ = db.Close()
 			return nil, err

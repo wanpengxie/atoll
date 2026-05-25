@@ -78,16 +78,18 @@ func FailNow(ctx context.Context, mctx *adapter.ModuleContext, p FailNowParams) 
 
 	corKey := adapter.CorrelationKey(p.RequestID)
 
-	// Notify the F3 ErrorPolicy hook so it records the failure
-	// observability event. Skipped for pre-transit failures
-	// (TerminalReason empty) because no timer was ever armed.
-	if p.TerminalReason != "" && mctx.ErrorPolicy != nil {
-		_ = mctx.ErrorPolicy.OnExternalError(ctx, corKey, p.TerminalReason, p.Detail)
-	}
-
-	// Walk back framework bookkeeping so the F3 default-timeout
+	// Walk back framework bookkeeping FIRST so the F3 default-timeout
 	// timer does not also fire later AND orphan correlation entries
-	// don't linger past the response. Both ops are idempotent.
+	// don't linger. Both ops are idempotent.
+	//
+	// Do NOT call ErrorPolicy.OnExternalError here: that helper itself
+	// emits a terminal response via the framework fallback path with the
+	// reason payload only (no error_code), which deterministic-id dedup
+	// would then prefer over the adapter-specific Respond below — the
+	// caller would lose the error_code + detail FailNow was meant to
+	// surface. FailNow owns the terminal write end-to-end; F3 observability
+	// for pre-transit / state-gate failures is captured by the adapter's
+	// own logging / metrics path, not by emitting a duplicate response.
 	if mctx.ErrorPolicy != nil {
 		_ = mctx.ErrorPolicy.CancelTimer(ctx, corKey)
 	}
@@ -95,7 +97,7 @@ func FailNow(ctx context.Context, mctx *adapter.ModuleContext, p FailNowParams) 
 		_ = mctx.Correlation.MarkExpired(ctx, corKey)
 	}
 
-	_, err = mctx.Respond(ctx, adapter.CorrelationKey(p.RequestID), payload, adapter.RespondOptions{
+	_, err = mctx.Respond(ctx, corKey, payload, adapter.RespondOptions{
 		Status: "failed",
 		Reason: string(respondReason),
 	})

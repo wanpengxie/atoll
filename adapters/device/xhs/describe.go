@@ -38,9 +38,10 @@ const actorSkillDoc = "" +
 	"- `xhs.get_creator_metrics` — creator-centre metrics.\n" +
 	"- `xhs.get_trending_topics` — trending / hot-search listings.\n" +
 	"\n" +
-	"Three observability events the adapter emits:\n" +
+	"Three observability events on this channel:\n" +
 	"\n" +
-	"- `xhs.device.online` / `xhs.device.offline` — adapter's device state projection (subscribe instead of polling lifecycle).\n" +
+	"- `actor.readiness.changed` — framework emits on every adapter readiness transition (public visibility, recommended subscription point for retry-after-online flows).\n" +
+	"- `xhs.device.online` / `xhs.device.offline` — adapter-specific device-state projections (system visibility, used by daemon-side observability tooling; not directly visible to SDK subscribers).\n" +
 	"- `xhs.note.archived` — agent-emitted (NOT adapter) when an agent moves a note to `archive/`.\n" +
 	"\n" +
 	"## Typical workflow\n" +
@@ -53,8 +54,8 @@ const actorSkillDoc = "" +
 	"## Device state gate\n" +
 	"\n" +
 	"Every request fails fast with `reason=receiver_unavailable, error_code=device_offline` " +
-	"when the extension is disconnected. Subscribe to `xhs.device.online` / `xhs.device.offline` " +
-	"to know when retries are worthwhile rather than retrying blindly.\n" +
+	"when the extension is disconnected. Subscribe to `actor.readiness.changed` filtered on " +
+	"`actor_id=tool:xhs-adapter` to know when retries are worthwhile rather than retrying blindly.\n" +
 	"\n" +
 	"## Common error surface\n" +
 	"\n" +
