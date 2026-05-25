@@ -20,16 +20,52 @@ type CommandRequest struct {
 	Session string          `json:"session,omitempty"`
 }
 
-// CommandResponse is the daemon's reply envelope. The daemon wraps
-// every tool result in a generic envelope with `success` + `data` (or
-// `error`). The adapter passes `Data` through to coagent.Respond as
-// payload (Level A — adapter doesn't reshape business fields beyond
-// the success/failure dichotomy).
+// CommandResponse is the daemon's reply envelope.
+//
+// Observed wire (kimi-webbridge v1.9.13):
+//
+//	success: {"ok": true, "data": {...tool-specific fields...}}
+//	failure: {"ok": false, "error": {"code": "<closed-set>", "message": "..."}}
+//
+// We mirror that shape verbatim so the JSON unmarshal stays lossless,
+// then expose convenience accessors (Succeeded / ErrorMessage /
+// ErrorCode) so callers don't reach into the nested struct.
 type CommandResponse struct {
-	Success bool            `json:"success"`
-	Data    json.RawMessage `json:"data,omitempty"`
-	Error   string          `json:"error,omitempty"`
-	Code    string          `json:"code,omitempty"`
+	OK    bool            `json:"ok"`
+	Data  json.RawMessage `json:"data,omitempty"`
+	Error *CommandError   `json:"error,omitempty"`
+}
+
+// CommandError is the nested error object the daemon returns when
+// ok=false. Fields are informative; coagent surfaces them as
+// payload.error_code + payload.detail on the failed terminal.
+type CommandError struct {
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+// Succeeded reports whether the daemon flagged the tool call as
+// successful. Centralised so callers don't have to remember that the
+// wire field is `ok`, not the more common `success`.
+func (r *CommandResponse) Succeeded() bool {
+	return r != nil && r.OK
+}
+
+// ErrorCode returns the daemon-supplied error code (empty when none).
+func (r *CommandResponse) ErrorCode() string {
+	if r == nil || r.Error == nil {
+		return ""
+	}
+	return r.Error.Code
+}
+
+// ErrorMessage returns the daemon-supplied error message (empty when
+// none).
+func (r *CommandResponse) ErrorMessage() string {
+	if r == nil || r.Error == nil {
+		return ""
+	}
+	return r.Error.Message
 }
 
 // Client is a thin wrapper around framework.HTTPClient that knows the
@@ -78,9 +114,9 @@ func (c *Client) Call(ctx context.Context, req CommandRequest) (*CommandResponse
 	}
 	if resp.StatusCode >= 400 {
 		// HTTP-level failure (5xx daemon error, 4xx schema reject).
-		// Promote `out.Error` / `out.Code` to surface what the daemon
-		// said. Caller maps to failed terminal.
-		errMsg := out.Error
+		// Promote out.Error message so the caller has a single
+		// human-readable string for the failed terminal.
+		errMsg := out.ErrorMessage()
 		if errMsg == "" {
 			errMsg = fmt.Sprintf("kimi-webbridge HTTP %d", resp.StatusCode)
 		}

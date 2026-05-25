@@ -207,9 +207,9 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 		// or rejected the call. Map to receiver_unavailable so the
 		// LLM gets a clean closed-set reason; preserve adapter detail
 		// in error_code for diagnostics.
-		errCode := "daemon_call_failed"
-		if cmdResp != nil && cmdResp.Code != "" {
-			errCode = cmdResp.Code
+		errCode := cmdResp.ErrorCode()
+		if errCode == "" {
+			errCode = "daemon_call_failed"
 		}
 		return framework.FailNow(ctx, m.mctx, framework.FailNowParams{
 			RequestID:      env.ID,
@@ -220,12 +220,12 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 	}
 
 	// Daemon returned 2xx + JSON envelope. Two business outcomes:
-	if !cmdResp.Success {
+	if !cmdResp.Succeeded() {
 		// Tool-level failure (e.g. "no tab found", "selector did not
-		// match"). Surface daemon's error message + code; map to
-		// receiver_internal_error since the daemon was reachable and
-		// chose to reject.
-		errCode := cmdResp.Code
+		// match", "no extension connected"). Surface daemon's error
+		// message + code; map to receiver_internal_error since the
+		// daemon was reachable and chose to reject.
+		errCode := cmdResp.ErrorCode()
 		if errCode == "" {
 			errCode = "tool_failed"
 		}
@@ -233,7 +233,7 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 			RequestID:      env.ID,
 			TerminalReason: message.TerminalReceiverInternalError,
 			ErrorCode:      errCode,
-			Detail:         cmdResp.Error,
+			Detail:         cmdResp.ErrorMessage(),
 		})
 	}
 
