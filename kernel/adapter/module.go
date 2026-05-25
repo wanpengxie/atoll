@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -67,6 +68,25 @@ type RuntimeEventAware interface {
 	OnRuntimeEvent(ctx context.Context, evt RuntimeEvent) error
 }
 
+// FieldDoc describes one product-layer payload field for actor-CLI
+// describe_type output. It is convention metadata only: the protocol
+// layer still treats payloads as opaque JSON.
+type FieldDoc struct {
+	Name        string `json:"name"`
+	Required    bool   `json:"required,omitempty"`
+	Description string `json:"description,omitempty"`
+	Example     any    `json:"example,omitempty"`
+}
+
+// ErrorDoc documents one adapter-specific response payload error_code
+// for actor-CLI describe_type output. Meta-tool error codes remain a
+// separate closed set.
+type ErrorDoc struct {
+	Code        string `json:"code"`
+	Description string `json:"description,omitempty"`
+	Recovery    string `json:"recovery,omitempty"`
+}
+
 // TypeDeclaration is the per-type install metadata an adapter declares
 // for the Message-Write Harness install path (L2 §1.4.2). Payload
 // schema is intentionally absent: protocol Level A
@@ -91,6 +111,27 @@ type TypeDeclaration struct {
 	// "single-response". Empty string is normalised to "payload_status"
 	// at install time.
 	TerminalConvention string
+
+	// Description is optional product-layer convention metadata used by
+	// list_actors / describe_actor / describe_type. Install validation
+	// does not require it.
+	Description string
+
+	// PayloadExample is an optional product-layer example returned by
+	// describe_type. The protocol layer does not validate it.
+	PayloadExample json.RawMessage
+
+	// PayloadFields is optional field-by-field product-layer guidance
+	// returned by describe_type.
+	PayloadFields []FieldDoc
+
+	// ErrorCodes is the optional adapter-specific error catalog returned
+	// by describe_type. These codes are distinct from the meta-tool
+	// closed set.
+	ErrorCodes []ErrorDoc
+
+	// Notes is optional markdown guidance returned by describe_type.
+	Notes string
 }
 
 // Declaration is the static metadata an adapter Module exposes at
@@ -140,6 +181,14 @@ type Declaration struct {
 	// Needs is the optional helper opt-in list (L2 §8.1 declares.needs).
 	// Currently informational — Manager wires every helper unconditionally.
 	Needs []string
+
+	// Description is optional actor-CLI convention metadata: one-line
+	// actor positioning for list_actors and describe_actor.
+	Description string
+
+	// SkillDoc is optional markdown usage guidance returned by
+	// describe_actor after the LLM has selected this actor.
+	SkillDoc string
 }
 
 // Module is the contract every adapter implements (L2 §8.1 F1). The

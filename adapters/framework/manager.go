@@ -379,6 +379,7 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 				asInstallError(reason), decl.Name, row.Type, err)
 		}
 	}
+	m.persistDeclarationCatalog(ctx, state, decl)
 
 	bm := &boundModule{
 		module:      mod,
@@ -402,6 +403,24 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		"types", decl.Types,
 		"channel_id", string(m.cfg.ChannelID))
 	return nil
+}
+
+func (m *Manager) persistDeclarationCatalog(ctx context.Context, state StateStore, decl adapter.Declaration) {
+	if state == nil {
+		return
+	}
+	raw, err := json.Marshal(adapter.DeclarationCatalogFromDeclaration(decl))
+	if err != nil {
+		m.cfg.Logger.Warn("framework.install.declaration_catalog.marshal",
+			"adapter", decl.Name,
+			"err", err.Error())
+		return
+	}
+	if err := state.Put(ctx, adapter.DeclarationConventionStateKey, raw); err != nil {
+		m.cfg.Logger.Warn("framework.install.declaration_catalog.persist",
+			"adapter", decl.Name,
+			"err", err.Error())
+	}
 }
 
 func (m *Manager) installTypeRow(ctx context.Context, row TypeRow) (TypeRow, error) {

@@ -17,7 +17,7 @@ import (
 // Meta-tool strategy (substrate-native): instead of injecting one
 // gokimi.Tool per channel-local type (which scales linearly with the
 // adapter / type count + bloats every prompt with redundant schema), we
-// inject TWO generic tools that exploit the envelope protocol's
+// inject FOUR generic tools that exploit the envelope protocol's
 // uniformity:
 //
 //   list_actors — re-snapshots the channel's actor_registry +
@@ -26,6 +26,11 @@ import (
 //                 (or when a new type was just installed — type_registry
 //                 mutations are live, so the next list_actors picks
 //                 them up without a worker respawn).
+//
+//   describe_actor — returns one actor's skill doc and type summary.
+//
+//   describe_type  — returns one request-callable type's payload
+//                    example, field docs, error catalog, and notes.
 //
 //   call_actor  — emits one kind=request envelope to the named
 //                 (actor_id, type) and waits for the response. The
@@ -42,7 +47,7 @@ import (
 //
 // Token / scaling story:
 //   - Old: N type-tools × ~200 token each = O(N) prompt baseline
-//   - New: 2 meta tools × ~150 token = O(1) baseline; +1 list_actors
+//   - New: 4 meta tools × ~150 token = O(1) baseline; +1 list_actors
 //     payload per task (~1.5k for 30 types, cached across turns)
 
 // CallActorTool is the generic envelope dispatch primitive.
@@ -63,15 +68,12 @@ device controllers) and every sub-agent is reached through this single tool.
 Workflow:
   1. Call list_actors first to discover what actors + types exist (call it only
      once per task; the result stays in your context).
-  2. Choose the (actor_id, type) pair matching your need.
-  3. Build the payload matching the type's expected shape. list_actors returns
-     the description / allowed_kinds hint; payload schemas are product-layer
-     conventions described per-adapter — when unsure, start with the minimal
-     known-good shape and iterate based on response error.
+  2. Call describe_actor when you need the actor's workflows.
+  3. Call describe_type when you need payload_example, payload_fields, notes, or
+     adapter-specific error codes for the selected type.
   4. Call call_actor — the response payload arrives in your tool result.
-     On failure the result.is_error flag is set and result.value.error names
-     the reason (closed-set: receiver_unavailable / receiver_internal_error /
-     unanswered_timeout) plus a free-text payload field with adapter detail.
+     On failure the result is {ok:false,error:{code,message,recovery_hint,detail?}}
+     where code is the actor-CLI closed set.
 `)
 }
 
@@ -98,51 +100,56 @@ type callActorParams struct {
 
 func (t *CallActorTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
 	if t == nil || t.bridge == nil {
-		return channelToolErrorResult("call_actor", "call_actor tool not configured"), nil
+		return actorCLIErrorResult("call_actor", actorCLIInternalError, "call_actor tool not configured", "Retry after the bridge is configured", nil), nil
 	}
 	var p callActorParams
 	if len(params) > 0 {
 		if err := json.Unmarshal(params, &p); err != nil {
-			return channelToolErrorResult("call_actor", fmt.Sprintf("invalid params: %v", err)), nil
+			return payloadInvalidError("call_actor", "", "", fmt.Sprintf("invalid params: %v", err)), nil
 		}
 	}
 	p.ActorID = strings.TrimSpace(p.ActorID)
 	p.Type = strings.TrimSpace(p.Type)
 	if p.ActorID == "" {
-		return channelToolErrorResult("call_actor", "actor_id is required (call list_actors to discover)"), nil
+		return payloadInvalidError("call_actor", p.ActorID, p.Type, "actor_id is required (call list_actors to discover)"), nil
 	}
 	if p.Type == "" {
-		return channelToolErrorResult("call_actor", "type is required (call list_actors to discover)"), nil
+		return payloadInvalidError("call_actor", p.ActorID, p.Type, "type is required (call list_actors to discover)"), nil
 	}
 
 	snapshot := t.bridge.refreshChannelContext(ctx)
-	typeInfo, found := findHandlerType(snapshot, p.Type, p.ActorID)
+	if _, ok := findActor(snapshot, p.ActorID); !ok {
+		return unknownActorError("call_actor", p.ActorID), nil
+	}
+	typeInfo, found := findType(snapshot, p.Type)
 	if !found {
-		return channelToolErrorResult("call_actor",
-			fmt.Sprintf("type %q with handler_actor_id %q not found in this channel — call list_actors to see what's available", p.Type, p.ActorID)), nil
+		return unknownTypeError("call_actor", p.ActorID, p.Type), nil
+	}
+	if strings.TrimSpace(typeInfo.HandlerActorID) != p.ActorID {
+		return actorTypeMismatchError("call_actor", p.ActorID, p.Type, typeInfo.HandlerActorID), nil
 	}
 	if !typeAllowsKind(typeInfo, string(message.KindRequest)) {
-		return channelToolErrorResult("call_actor",
-			fmt.Sprintf("type %q is not request-callable (allowed_kinds=%v)", p.Type, typeInfo.AllowedKinds)), nil
+		return kindDisallowedError("call_actor", p.Type, typeInfo.AllowedKinds), nil
 	}
 
 	runtime, ok := ctx.Value(channelToolRuntimeKey{}).(channelToolRuntime)
 	if !ok || runtime.ipc == nil {
-		return channelToolErrorResult("call_actor", "call_actor invoked outside a bridge turn"), nil
+		return actorCLIErrorResult("call_actor", actorCLIInternalError, "call_actor invoked outside a bridge turn", "Retry from inside an active bridge turn", nil), nil
 	}
 
 	payload, err := normalizeToolPayload(p.Payload)
 	if err != nil {
-		return channelToolErrorResult("call_actor", err.Error()), nil
+		return payloadInvalidError("call_actor", p.ActorID, p.Type, err.Error()), nil
 	}
 
-	return t.bridge.executeChannelRequest(ctx, runtime.ipc, runtime.trigger, channelRequestSpec{
+	result := t.bridge.executeChannelRequest(ctx, runtime.ipc, runtime.trigger, channelRequestSpec{
 		ToolName:       "call_actor",
 		EnvelopeType:   p.Type,
 		HandlerActorID: p.ActorID,
 		Payload:        payload,
 		Timeout:        channelToolTimeout(typeInfo.MaxPendingMs),
-	}), nil
+	})
+	return normalizeCallActorError(result, p.ActorID, p.Type), nil
 }
 
 // ListActorsTool returns the channel's actor + type registry as
@@ -204,10 +211,8 @@ func formatActorRegistryForLLM(snapshot ChannelContext) map[string]any {
 		handler := strings.TrimSpace(ty.HandlerActorID)
 		entry := map[string]any{
 			"type":          ty.Type,
+			"description":   ty.Description,
 			"allowed_kinds": ty.AllowedKinds,
-		}
-		if ty.Description != "" {
-			entry["description"] = ty.Description
 		}
 		if ty.MaxPendingMs > 0 {
 			entry["max_pending_ms"] = ty.MaxPendingMs
@@ -229,8 +234,9 @@ func formatActorRegistryForLLM(snapshot ChannelContext) map[string]any {
 	for _, id := range actorKeys {
 		a := actorIndex[id]
 		entry := map[string]any{
-			"actor_id": a.ActorID,
-			"kind":     a.Kind,
+			"actor_id":    a.ActorID,
+			"description": a.Description,
+			"kind":        a.Kind,
 		}
 		if a.Binding != "" {
 			entry["binding"] = a.Binding
@@ -285,11 +291,37 @@ func (b *Bridge) refreshChannelContext(ctx context.Context) ChannelContext {
 	return snapshot
 }
 
+// findActor returns the ActorInfo whose ActorID matches actorID.
+func findActor(snapshot ChannelContext, actorID string) (ActorInfo, bool) {
+	actorID = strings.TrimSpace(actorID)
+	if actorID == "" {
+		return ActorInfo{}, false
+	}
+	for _, a := range snapshot.Actors {
+		if strings.TrimSpace(a.ActorID) == actorID {
+			return a, true
+		}
+	}
+	return ActorInfo{}, false
+}
+
+// findType returns the TypeInfo whose Type matches name.
+func findType(snapshot ChannelContext, name string) (TypeInfo, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return TypeInfo{}, false
+	}
+	for _, ty := range snapshot.Types {
+		if strings.TrimSpace(ty.Type) == name {
+			return ty, true
+		}
+	}
+	return TypeInfo{}, false
+}
+
 // findHandlerType returns the TypeInfo whose Type == name AND
-// HandlerActorID == handler. Returns (zero, false) when either no
-// type matches or the type's handler doesn't match the caller-supplied
-// actor — both are dispatch errors the LLM should see as a single
-// "no such (actor, type) pair" failure.
+// HandlerActorID == handler. Kept for legacy callers that need the
+// combined predicate.
 func findHandlerType(snapshot ChannelContext, name, handler string) (TypeInfo, bool) {
 	name = strings.TrimSpace(name)
 	handler = strings.TrimSpace(handler)

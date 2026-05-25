@@ -224,6 +224,8 @@ func TestBuildBasePrompt_WithChannelContext(t *testing.T) {
 		"binding=runtime_inbound_via_relay",
 		"## Tool invocation",
 		"list_actors",
+		"describe_actor",
+		"describe_type",
 		"call_actor",
 		"## Device actors",
 		"tool:xhs-adapter",
@@ -486,6 +488,9 @@ func TestBridge_RunEmitsProgressPerToolStep(t *testing.T) {
 func TestBridge_ChannelTypeToolEmitsRequestAndReturnsResponse(t *testing.T) {
 	cfg := mustConfig(t)
 	cfg.ChannelContext = kimi.ChannelContext{
+		Actors: []kimi.ActorInfo{
+			{ActorID: "tool:xhs-adapter", Kind: "tool", Binding: "runtime_inbound_via_relay"},
+		},
 		Types: []kimi.TypeInfo{
 			{
 				Type:           "xhs.publish",
@@ -508,12 +513,17 @@ func TestBridge_ChannelTypeToolEmitsRequestAndReturnsResponse(t *testing.T) {
 	resultCh := make(chan types.ToolResult, 1)
 
 	kimi.SetAgentFactory(b, func(ac kimi.AgentConfig) (kimi.Agent, error) {
-		// Substrate-native meta-tool surface: call_actor + list_actors.
+		// Substrate-native actor-CLI meta-tool surface.
 		// Direct per-type injection was retired in favour of the
 		// uniform envelope invocation primitive (see meta_tool.go +
 		// channel_tool.go::channelTools).
-		if len(ac.AdditionalTools) != 2 {
-			return nil, fmt.Errorf("AdditionalTools len=%d want 2 (call_actor + list_actors)", len(ac.AdditionalTools))
+		if len(ac.AdditionalTools) != 4 {
+			return nil, fmt.Errorf("AdditionalTools len=%d want 4 (actor-CLI verbs)", len(ac.AdditionalTools))
+		}
+		for _, name := range []string{"list_actors", "describe_actor", "describe_type"} {
+			if pickToolByName(ac.AdditionalTools, name) == nil {
+				return nil, fmt.Errorf("%s tool missing from AdditionalTools", name)
+			}
 		}
 		callActor := pickToolByName(ac.AdditionalTools, "call_actor")
 		if callActor == nil {
@@ -604,12 +614,17 @@ func TestBridge_ChannelTypeToolEmitsRequestAndReturnsResponse(t *testing.T) {
 
 func TestBridge_ChannelTypeToolTimeoutReturnsErrorResult(t *testing.T) {
 	cfg := mustConfig(t)
-	cfg.ChannelContext = kimi.ChannelContext{Types: []kimi.TypeInfo{{
-		Type:           "xhs.publish",
-		HandlerActorID: "tool:xhs-adapter",
-		AllowedKinds:   []string{"request"},
-		MaxPendingMs:   20,
-	}}}
+	cfg.ChannelContext = kimi.ChannelContext{
+		Actors: []kimi.ActorInfo{
+			{ActorID: "tool:xhs-adapter", Kind: "tool", Binding: "runtime_inbound_via_relay"},
+		},
+		Types: []kimi.TypeInfo{{
+			Type:           "xhs.publish",
+			HandlerActorID: "tool:xhs-adapter",
+			AllowedKinds:   []string{"request"},
+			MaxPendingMs:   20,
+		}},
+	}
 	b, err := kimi.NewBridge(cfg)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
@@ -656,12 +671,17 @@ func TestBridge_ChannelTypeToolTimeoutReturnsErrorResult(t *testing.T) {
 
 func TestBridge_ChannelTypeToolTerminalFailureReturnsErrorResult(t *testing.T) {
 	cfg := mustConfig(t)
-	cfg.ChannelContext = kimi.ChannelContext{Types: []kimi.TypeInfo{{
-		Type:           "xhs.publish",
-		HandlerActorID: "tool:xhs-adapter",
-		AllowedKinds:   []string{"request"},
-		MaxPendingMs:   1000,
-	}}}
+	cfg.ChannelContext = kimi.ChannelContext{
+		Actors: []kimi.ActorInfo{
+			{ActorID: "tool:xhs-adapter", Kind: "tool", Binding: "runtime_inbound_via_relay"},
+		},
+		Types: []kimi.TypeInfo{{
+			Type:           "xhs.publish",
+			HandlerActorID: "tool:xhs-adapter",
+			AllowedKinds:   []string{"request"},
+			MaxPendingMs:   1000,
+		}},
+	}
 	b, err := kimi.NewBridge(cfg)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
@@ -708,8 +728,12 @@ func TestBridge_ChannelTypeToolTerminalFailureReturnsErrorResult(t *testing.T) {
 		t.Fatalf("ToolResult.IsError=false; value=%#v", result.Value.Value)
 	}
 	value, ok := result.Value.Value.(map[string]any)
-	if !ok || value["error"] != "unanswered_timeout" {
-		t.Fatalf("ToolResult value=%#v want error=unanswered_timeout", result.Value.Value)
+	if !ok {
+		t.Fatalf("ToolResult value=%T want map", result.Value.Value)
+	}
+	errObj, ok := value["error"].(map[string]any)
+	if !ok || errObj["code"] != "timeout" {
+		t.Fatalf("ToolResult value=%#v want error.code=timeout", result.Value.Value)
 	}
 }
 

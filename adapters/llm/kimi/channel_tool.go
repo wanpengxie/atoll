@@ -105,13 +105,13 @@ func (t *ChannelTypeTool) Execute(ctx context.Context, params json.RawMessage) (
 }
 
 // channelTools returns the meta-tool surface the LLM sees: a fixed
-// pair (call_actor + list_actors) that exploits the envelope
+// actor-CLI verb set that exploits the envelope
 // protocol's uniformity instead of fanning out one tool per
 // channel-local type.
 //
 // Substrate rationale (vision §1.1 + proto-foundation §2.5):
 //   - Every adapter exposes the same wire shape (kind=request envelope
-//     + handler actor_id + payload). Direct per-type tool injection
+//   - handler actor_id + payload). Direct per-type tool injection
 //     was a transitional shim borrowed from no-standardization worlds
 //     (raw MCP / OpenAI function-calling) where each tool had a
 //     distinct RPC. Once standardization is in, a single invocation
@@ -130,6 +130,8 @@ func (b *Bridge) channelTools() []gokimitools.Tool {
 	return []gokimitools.Tool{
 		&CallActorTool{bridge: b},
 		&ListActorsTool{bridge: b},
+		&DescribeActorTool{bridge: b},
+		&DescribeTypeTool{bridge: b},
 	}
 }
 

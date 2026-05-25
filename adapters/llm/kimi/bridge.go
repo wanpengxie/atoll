@@ -27,6 +27,7 @@ import (
 	_ "github.com/wanpengxie/go-kimi/pkg/kimi/llm/anthropic"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -102,6 +103,8 @@ type ActorInfo struct {
 	Kind        string `json:"kind"`                   // human | agent | tool | system
 	Binding     string `json:"binding,omitempty"`      // empty for human/system; embedded / runtime_inbound_via_relay / runtime_outbound for tools
 	DisplayName string `json:"display_name,omitempty"` // optional human-readable label
+	Description string `json:"description,omitempty"`  // optional actor-CLI one-line positioning
+	SkillDoc    string `json:"skill_doc,omitempty"`    // optional actor-CLI markdown usage guide
 }
 
 // TypeInfo is one type_registry row projected into the LLM prompt.
@@ -110,12 +113,16 @@ type ActorInfo struct {
 // layer; the type_registry stores no payload schema fields, so no
 // payload-schema projection appears here either.
 type TypeInfo struct {
-	Type           string   `json:"type"`             // e.g. "xhs.publish"
-	HandlerActorID string   `json:"handler_actor_id"` // e.g. "tool:xhs-adapter"
-	HandlerBinding string   `json:"handler_binding,omitempty"`
-	AllowedKinds   []string `json:"allowed_kinds,omitempty"` // subset of {event, request, response}
-	MaxPendingMs   int64    `json:"max_pending_ms,omitempty"`
-	Description    string   `json:"description,omitempty"`
+	Type           string             `json:"type"`             // e.g. "xhs.publish"
+	HandlerActorID string             `json:"handler_actor_id"` // e.g. "tool:xhs-adapter"
+	HandlerBinding string             `json:"handler_binding,omitempty"`
+	AllowedKinds   []string           `json:"allowed_kinds,omitempty"` // subset of {event, request, response}
+	MaxPendingMs   int64              `json:"max_pending_ms,omitempty"`
+	Description    string             `json:"description,omitempty"`
+	PayloadExample json.RawMessage    `json:"payload_example,omitempty"`
+	PayloadFields  []adapter.FieldDoc `json:"payload_fields,omitempty"`
+	ErrorCodes     []adapter.ErrorDoc `json:"error_codes,omitempty"`
+	Notes          string             `json:"notes,omitempty"`
 }
 
 // DeviceInfo is one device actor route projected into the LLM prompt.
@@ -1129,22 +1136,19 @@ func renderChannelContext(c ChannelContext) string {
 	if len(c.Types) > 0 {
 		// Tool surface (substrate-native invocation):
 		//
-		//   list_actors — call once at task start (or whenever you
-		//                 suspect new tools have been installed) to
-		//                 see the full actor + type registry. Cache
-		//                 the result in your reasoning context.
-		//   call_actor  — invoke any (actor_id, type) pair the
-		//                 registry exposes. The envelope protocol
-		//                 carries every adapter uniformly.
+		//   list_actors    — scan the full actor + type registry.
+		//   describe_actor — fetch one actor's skill doc.
+		//   describe_type  — fetch payload examples and error docs.
+		//   call_actor     — invoke any request-callable pair.
 		//
 		// We deliberately do NOT inline a markdown table of every
 		// type here — the Anthropic / OpenAI native tools API list
-		// (already bundled with this turn) lists call_actor +
-		// list_actors with full input_schema. Listing every type
+		// (already bundled with this turn) lists the actor-CLI meta
+		// tools with full input_schema. Listing every type
 		// twice (once in tools API, once in prompt) was the legacy
 		// inject-per-type fallback; the substrate-native path is one
 		// list_actors round-trip per task.
-		fmt.Fprintf(&b, "\n## Tool invocation\nThis channel exposes %d request-callable type(s) spanning the actors listed above. Use the `list_actors` tool to see the structured registry (actor_id + type list + descriptions), then `call_actor` to invoke. The registry is live — newly installed types appear in the next list_actors call without restart.\n", countRequestTypes(c.Types))
+		fmt.Fprintf(&b, "\n## Tool invocation\nThis channel exposes %d request-callable type(s) spanning the actors listed above. Use `list_actors` for the universe scan, `describe_actor(actor_id)` to deep-dive one actor's skill doc and workflows, `describe_type(actor_id, type)` to fetch a specific type's payload example and error codes, then `call_actor` to invoke. The registry is live - newly installed types appear in the next list_actors call without restart.\n", countRequestTypes(c.Types))
 	}
 
 	if len(c.Devices) > 0 {

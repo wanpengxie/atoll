@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/wanpengxie/ActOS/kernel/adapter"
+
 	_ "modernc.org/sqlite" // register driver
 )
 
@@ -91,6 +93,11 @@ func (s *ChannelStore) Snapshot(ctx context.Context, channelID, channelType stri
 	} else {
 		out.Types = types
 	}
+	if catalogs, err := s.listDeclarationCatalogs(ctx); err != nil {
+		return out, err
+	} else {
+		mergeDeclarationCatalogs(&out, catalogs)
+	}
 
 	return out, nil
 }
@@ -119,6 +126,78 @@ func (s *ChannelStore) listActors(ctx context.Context) ([]ActorInfo, error) {
 		return nil, fmt.Errorf("kimi: channel store actor rows: %w", err)
 	}
 	return out, nil
+}
+
+func (s *ChannelStore) listDeclarationCatalogs(ctx context.Context) ([]adapter.DeclarationCatalog, error) {
+	const q = `SELECT key, value
+	             FROM adapter_state
+	            WHERE substr(key, 1, 8) = 'adapter:'
+	         ORDER BY key ASC`
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("kimi: channel store list declaration catalogs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []adapter.DeclarationCatalog
+	suffix := ":" + adapter.DeclarationConventionStateKey
+	for rows.Next() {
+		var (
+			key string
+			raw []byte
+		)
+		if err := rows.Scan(&key, &raw); err != nil {
+			return nil, fmt.Errorf("kimi: channel store scan declaration catalog: %w", err)
+		}
+		if !strings.HasSuffix(key, suffix) {
+			continue
+		}
+		var catalog adapter.DeclarationCatalog
+		if err := json.Unmarshal(raw, &catalog); err != nil {
+			return nil, fmt.Errorf("kimi: channel store decode declaration catalog %q: %w", key, err)
+		}
+		out = append(out, catalog)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("kimi: channel store declaration catalog rows: %w", err)
+	}
+	return out, nil
+}
+
+func mergeDeclarationCatalogs(out *ChannelContext, catalogs []adapter.DeclarationCatalog) {
+	if out == nil || len(catalogs) == 0 {
+		return
+	}
+	actorIndex := make(map[string]int, len(out.Actors))
+	for i := range out.Actors {
+		actorIndex[strings.TrimSpace(out.Actors[i].ActorID)] = i
+	}
+	typeIndex := make(map[string]int, len(out.Types))
+	for i := range out.Types {
+		typeIndex[strings.TrimSpace(out.Types[i].Type)] = i
+	}
+	for _, catalog := range catalogs {
+		actorID := strings.TrimSpace(string(catalog.ActorID))
+		if actorID != "" {
+			if idx, ok := actorIndex[actorID]; ok {
+				out.Actors[idx].Description = catalog.Description
+				out.Actors[idx].SkillDoc = catalog.SkillDoc
+			}
+		}
+		for typeName, doc := range catalog.Types {
+			idx, ok := typeIndex[strings.TrimSpace(typeName)]
+			if !ok {
+				continue
+			}
+			if actorID != "" && strings.TrimSpace(out.Types[idx].HandlerActorID) != actorID {
+				continue
+			}
+			out.Types[idx].Description = doc.Description
+			out.Types[idx].PayloadExample = cloneRawJSON(doc.PayloadExample)
+			out.Types[idx].PayloadFields = append([]adapter.FieldDoc(nil), doc.PayloadFields...)
+			out.Types[idx].ErrorCodes = append([]adapter.ErrorDoc(nil), doc.ErrorCodes...)
+			out.Types[idx].Notes = doc.Notes
+		}
+	}
 }
 
 func (s *ChannelStore) listTypes(ctx context.Context) ([]TypeInfo, error) {

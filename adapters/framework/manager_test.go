@@ -146,6 +146,64 @@ func TestManagerInstallSeedsTypeRegistry(t *testing.T) {
 	}
 }
 
+func TestManagerInstallPersistsDeclarationCatalog(t *testing.T) {
+	state := NewMemoryStateStore()
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu-adapter",
+			Types:        []string{"feishu.chat.send"},
+			Binding:      actor.BindingRuntimeOutbound,
+			MaxPendingMs: 30_000,
+			Description:  "Feishu messaging",
+			SkillDoc:     "Use this actor to send Feishu messages.",
+			TypeDeclarations: map[string]adapter.TypeDeclaration{
+				"feishu.chat.send": {
+					AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
+					TerminalConvention: string(adapter.TerminalPayloadStatus),
+					Description:        "Send a chat message",
+					PayloadExample:     json.RawMessage(`{"text":"hello"}`),
+					PayloadFields: []adapter.FieldDoc{{
+						Name:        "text",
+						Required:    true,
+						Description: "Message text",
+					}},
+					ErrorCodes: []adapter.ErrorDoc{{
+						Code:     "send_failed",
+						Recovery: "Retry with a valid chat id",
+					}},
+					Notes: "Text messages only.",
+				},
+			},
+		},
+	}
+	_, _, _, _, _ = newTestManager(t, mod, func(cfg *ManagerConfig) {
+		cfg.StateStore = state
+	})
+
+	raw, ok, err := state.Get(context.Background(), "adapter:feishu:"+adapter.DeclarationConventionStateKey)
+	if err != nil {
+		t.Fatalf("state get: %v", err)
+	}
+	if !ok {
+		t.Fatalf("declaration catalog not persisted")
+	}
+	var catalog adapter.DeclarationCatalog
+	if err := json.Unmarshal(raw, &catalog); err != nil {
+		t.Fatalf("decode catalog: %v", err)
+	}
+	if catalog.Description != "Feishu messaging" || catalog.SkillDoc == "" {
+		t.Fatalf("catalog actor metadata=%+v", catalog)
+	}
+	doc := catalog.Types["feishu.chat.send"]
+	if doc.Description != "Send a chat message" || string(doc.PayloadExample) != `{"text":"hello"}` {
+		t.Fatalf("catalog type metadata=%+v", doc)
+	}
+	if len(doc.PayloadFields) != 1 || doc.PayloadFields[0].Name != "text" {
+		t.Fatalf("catalog payload fields=%+v", doc.PayloadFields)
+	}
+}
+
 func TestManagerInstallDoesNotPublishTypeRowsWhenInitFails(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{

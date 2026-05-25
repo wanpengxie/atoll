@@ -1,6 +1,7 @@
 package framework
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -23,6 +24,30 @@ func TestValidateTypeDeclaration_HappyPath(t *testing.T) {
 	}
 	if err := ValidateTypeDeclaration("biz.x", td); err != nil {
 		t.Errorf("happy path: %v", err)
+	}
+}
+
+func TestValidateTypeDeclaration_AcceptsOptionalConventionFields(t *testing.T) {
+	td := adapter.TypeDeclaration{
+		AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
+		TerminalConvention: "payload_status",
+		Description:        "Publish a note",
+		PayloadExample:     json.RawMessage(`{"title":"hello"}`),
+		PayloadFields: []adapter.FieldDoc{{
+			Name:        "title",
+			Required:    true,
+			Description: "Note title",
+			Example:     "hello",
+		}},
+		ErrorCodes: []adapter.ErrorDoc{{
+			Code:        "publish_timeout",
+			Description: "Publishing timed out",
+			Recovery:    "Retry after checking the browser session",
+		}},
+		Notes: "Use concise titles.",
+	}
+	if err := ValidateTypeDeclaration("biz.publish", td); err != nil {
+		t.Fatalf("optional convention fields should not affect validation: %v", err)
 	}
 }
 
