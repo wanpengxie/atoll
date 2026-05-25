@@ -169,7 +169,12 @@ export const COAGENT_DEVICE_PROTOCOL = {
 } as const;
 
 /**
- * 5 个 device cmd 名称（spec §6.2.3）。
+ * 14 个 device cmd 名称（daemon → extension WS）。命名沿用历史 5 cmd 风格
+ * （kebab-case；与原始 xhs_<name> 工具名 underscore→dash 对齐）。
+ *
+ * 这是 adapter `typeToWireCmd` 的下游：daemon 发 envelope.type=xhs.<suffix>
+ * → adapter handlers.go WireCmdFor() → wire cmd → cmd-handlers-init.ts
+ * 路由到对应 *Tool.execute()。
  */
 export const COAGENT_DEVICE_COMMANDS = {
   PUBLISH: 'publish',
@@ -177,6 +182,15 @@ export const COAGENT_DEVICE_COMMANDS = {
   GET_MY_RECENT: 'get-my-recent',
   GET_NOTE: 'get-note',
   PUBLISH_STATUS: 'publish-status',
+  PUBLISH_LONG_CONTENT: 'publish-long-content',
+  CHECK_LOGIN_STATUS: 'check-login-status',
+  INJECT_SCRIPT: 'inject-script',
+  ANALYZE_MY_PROFILE: 'analyze-my-profile',
+  ANALYZE_PROFILE: 'analyze-profile',
+  GET_NOTE_COMMENTS: 'get-note-comments',
+  GET_NOTE_ANALYTICS: 'get-note-analytics',
+  GET_CREATOR_METRICS: 'get-creator-metrics',
+  GET_TRENDING_TOPICS: 'get-trending-topics',
 } as const;
 
 export type CoagentDeviceCommand =

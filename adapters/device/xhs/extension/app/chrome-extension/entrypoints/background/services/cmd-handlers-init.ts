@@ -32,10 +32,18 @@ import {
 } from './cmd-handlers';
 
 import { PublishContentTool } from '../tools/publish-content';
+import { PublishLongContentTool } from '../tools/publish-long-content';
 import { SearchFeedsTool } from '../tools/search-feeds';
+import { CheckLoginStatusTool } from '../tools/check-login';
+import { InjectScriptTool } from '../tools/inject-script';
 import { XhsGetNoteTool } from '../tools/xiaohongshu/get-note';
 import { XhsGetMyRecentTool } from '../tools/xiaohongshu/get-my-recent';
 import { XhsPublishStatusTool } from '../tools/xiaohongshu/publish-status';
+import { XhsGetNoteCommentsTool } from '../tools/xiaohongshu/get-note-comments';
+import { XhsGetNoteAnalyticsTool } from '../tools/xiaohongshu/get-note-analytics';
+import { XhsGetCreatorMetricsTool } from '../tools/xiaohongshu/get-creator-metrics';
+import { XhsGetTrendingTopicsTool } from '../tools/xiaohongshu/get-trending-topics';
+import { XhsAnalyzeMyProfileTool, XhsAnalyzeProfileTool } from '../tools/xiaohongshu/analyze-profile';
 
 let initialized = false;
 
@@ -43,32 +51,26 @@ export function initCoagentDeviceCmdHandlers(): void {
   if (initialized) return;
   initialized = true;
 
-  const publishTool = new PublishContentTool();
-  const searchTool = new SearchFeedsTool();
-  const getNoteTool = new XhsGetNoteTool();
-  const getMyRecentTool = new XhsGetMyRecentTool();
-  const publishStatusTool = new XhsPublishStatusTool();
-
-  registerCommandHandler(
-    COAGENT_DEVICE_COMMANDS.PUBLISH,
-    wrapTool(publishTool, COAGENT_DEVICE_COMMANDS.PUBLISH)
-  );
-  registerCommandHandler(
-    COAGENT_DEVICE_COMMANDS.SEARCH,
-    wrapTool(searchTool, COAGENT_DEVICE_COMMANDS.SEARCH)
-  );
-  registerCommandHandler(
-    COAGENT_DEVICE_COMMANDS.GET_NOTE,
-    wrapTool(getNoteTool, COAGENT_DEVICE_COMMANDS.GET_NOTE)
-  );
-  registerCommandHandler(
-    COAGENT_DEVICE_COMMANDS.GET_MY_RECENT,
-    wrapTool(getMyRecentTool, COAGENT_DEVICE_COMMANDS.GET_MY_RECENT)
-  );
-  registerCommandHandler(
-    COAGENT_DEVICE_COMMANDS.PUBLISH_STATUS,
-    wrapTool(publishStatusTool, COAGENT_DEVICE_COMMANDS.PUBLISH_STATUS)
-  );
+  // 注册顺序对应 COAGENT_DEVICE_COMMANDS 的 14 条 cmd（5 legacy + 9 new）。
+  const registrations: Array<[CoagentDeviceCommand, ToolLike]> = [
+    [COAGENT_DEVICE_COMMANDS.PUBLISH,             new PublishContentTool()],
+    [COAGENT_DEVICE_COMMANDS.SEARCH,              new SearchFeedsTool()],
+    [COAGENT_DEVICE_COMMANDS.GET_NOTE,            new XhsGetNoteTool()],
+    [COAGENT_DEVICE_COMMANDS.GET_MY_RECENT,       new XhsGetMyRecentTool()],
+    [COAGENT_DEVICE_COMMANDS.PUBLISH_STATUS,      new XhsPublishStatusTool()],
+    [COAGENT_DEVICE_COMMANDS.PUBLISH_LONG_CONTENT, new PublishLongContentTool()],
+    [COAGENT_DEVICE_COMMANDS.CHECK_LOGIN_STATUS,  new CheckLoginStatusTool()],
+    [COAGENT_DEVICE_COMMANDS.INJECT_SCRIPT,       new InjectScriptTool()],
+    [COAGENT_DEVICE_COMMANDS.ANALYZE_MY_PROFILE,  new XhsAnalyzeMyProfileTool()],
+    [COAGENT_DEVICE_COMMANDS.ANALYZE_PROFILE,     new XhsAnalyzeProfileTool()],
+    [COAGENT_DEVICE_COMMANDS.GET_NOTE_COMMENTS,   new XhsGetNoteCommentsTool()],
+    [COAGENT_DEVICE_COMMANDS.GET_NOTE_ANALYTICS,  new XhsGetNoteAnalyticsTool()],
+    [COAGENT_DEVICE_COMMANDS.GET_CREATOR_METRICS, new XhsGetCreatorMetricsTool()],
+    [COAGENT_DEVICE_COMMANDS.GET_TRENDING_TOPICS, new XhsGetTrendingTopicsTool()],
+  ];
+  for (const [cmd, tool] of registrations) {
+    registerCommandHandler(cmd, wrapTool(tool, cmd));
+  }
 
   console.log('[CoagentDeviceCmd] registered handlers', Object.values(COAGENT_DEVICE_COMMANDS));
 }

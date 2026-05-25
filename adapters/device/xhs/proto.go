@@ -1,6 +1,8 @@
 package xhs
 
 import (
+	"strings"
+
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -36,12 +38,36 @@ const DefaultMaxPendingMs int64 = 5 * 60 * 1000
 // fetch automatically carries the right cookies for the xiaohongshu
 // domain). The legacy "sync cookie" RPC was a holdover from a CLI-mode
 // design where a background process needed cookies pushed to it.
+//
+// Naming: legacy 4 R/R types keep their original spelling for backward
+// compatibility (xhs.publish, xhs.search, xhs.note.fetch, xhs.recent.fetch).
+// New types adopt the convention `xhs.<tool_suffix>` where `<tool_suffix>`
+// is the chrome extension's tool name with the `xhs_` prefix stripped
+// (e.g. xhs_publish_long_content → xhs.publish_long_content). The
+// adapter→extension wire `cmd` field is resolved via typeToWireCmd
+// (handlers.go) instead of naive TrimPrefix, because legacy names like
+// `xhs.note.fetch` don't reduce to the extension cmd `get-note`.
 const (
-	TypePublish      = "xhs.publish"
-	TypeSearch       = "xhs.search"
-	TypeNoteFetch    = "xhs.note.fetch"
-	TypeRecentFetch  = "xhs.recent.fetch"
-	TypeNoteArchived = "xhs.note.archived" // event-only (extension push)
+	// Legacy 4 R/R types — wire cmd resolved via typeToWireCmd map.
+	TypePublish     = "xhs.publish"
+	TypeSearch      = "xhs.search"
+	TypeNoteFetch   = "xhs.note.fetch"
+	TypeRecentFetch = "xhs.recent.fetch"
+
+	// Event-only type (extension push).
+	TypeNoteArchived = "xhs.note.archived"
+
+	// New R/R types — wire cmd = type suffix with `_` → `-`.
+	TypePublishLongContent = "xhs.publish_long_content"
+	TypePublishStatus      = "xhs.publish_status"
+	TypeCheckLoginStatus   = "xhs.check_login_status"
+	TypeInjectScript       = "xhs.inject_script"
+	TypeAnalyzeMyProfile   = "xhs.analyze_my_profile"
+	TypeAnalyzeProfile     = "xhs.analyze_profile"
+	TypeGetNoteComments    = "xhs.get_note_comments"
+	TypeGetNoteAnalytics   = "xhs.get_note_analytics"
+	TypeGetCreatorMetrics  = "xhs.get_creator_metrics"
+	TypeGetTrendingTopics  = "xhs.get_trending_topics"
 )
 
 // RequestResponseTypes is the subset that travels request → response.
@@ -52,6 +78,16 @@ var RequestResponseTypes = []string{
 	TypeSearch,
 	TypeNoteFetch,
 	TypeRecentFetch,
+	TypePublishLongContent,
+	TypePublishStatus,
+	TypeCheckLoginStatus,
+	TypeInjectScript,
+	TypeAnalyzeMyProfile,
+	TypeAnalyzeProfile,
+	TypeGetNoteComments,
+	TypeGetNoteAnalytics,
+	TypeGetCreatorMetrics,
+	TypeGetTrendingTopics,
 }
 
 // AllTypes is the full closed set Declares() exposes, including the
@@ -59,6 +95,43 @@ var RequestResponseTypes = []string{
 // ("adapter owns the actor → adapter declares every type that
 // references the actor as handler").
 var AllTypes = append(append([]string{}, RequestResponseTypes...), TypeNoteArchived)
+
+// typeToWireCmd maps adapter type → chrome extension's daemon cmd name.
+// Legacy 4 types are special-cased; new types follow `_`→`-` conversion
+// on the suffix. This replaces the previous naive
+// `strings.TrimPrefix(env.Type, "xhs.")` which produced `note.fetch`
+// for xhs.note.fetch — a name the extension never registered.
+var typeToWireCmd = map[string]string{
+	// Legacy — extension's existing 4 cmd handlers.
+	TypePublish:     "publish",
+	TypeSearch:      "search",
+	TypeNoteFetch:   "get-note",
+	TypeRecentFetch: "get-my-recent",
+
+	// New 10 — kebab-case to match the extension's existing convention
+	// (publish-status, get-my-recent style).
+	TypePublishLongContent: "publish-long-content",
+	TypePublishStatus:      "publish-status",
+	TypeCheckLoginStatus:   "check-login-status",
+	TypeInjectScript:       "inject-script",
+	TypeAnalyzeMyProfile:   "analyze-my-profile",
+	TypeAnalyzeProfile:     "analyze-profile",
+	TypeGetNoteComments:    "get-note-comments",
+	TypeGetNoteAnalytics:   "get-note-analytics",
+	TypeGetCreatorMetrics:  "get-creator-metrics",
+	TypeGetTrendingTopics:  "get-trending-topics",
+}
+
+// WireCmdFor returns the extension-facing `cmd` value for a given
+// adapter type. Returns the bare suffix as a fail-open default when the
+// type is unknown — buildCommand still emits a Command, and the
+// extension will surface `not_implemented` if the cmd is unregistered.
+func WireCmdFor(envelopeType string) string {
+	if v, ok := typeToWireCmd[envelopeType]; ok {
+		return v
+	}
+	return strings.TrimPrefix(envelopeType, "xhs.")
+}
 
 // Command is the outbound wire frame the xhs adapter pushes to the
 // Chrome extension. It rides inside the `device_transit.recv` frame's
@@ -139,9 +212,19 @@ var allowedErrorKeysByType = map[string]map[string]struct{}{
 		"retry_after": {},
 		"device_id":   {},
 	},
-	TypeSearch:      {},
-	TypeNoteFetch:   {},
-	TypeRecentFetch: {},
+	TypeSearch:             {},
+	TypeNoteFetch:          {},
+	TypeRecentFetch:        {},
+	TypePublishLongContent: {},
+	TypePublishStatus:      {},
+	TypeCheckLoginStatus:   {},
+	TypeInjectScript:       {},
+	TypeAnalyzeMyProfile:   {},
+	TypeAnalyzeProfile:     {},
+	TypeGetNoteComments:    {},
+	TypeGetNoteAnalytics:   {},
+	TypeGetCreatorMetrics:  {},
+	TypeGetTrendingTopics:  {},
 }
 
 // resultAllowListFor returns the per-type result allow-list, or the
@@ -160,6 +243,35 @@ func errorAllowListFor(requestType string) map[string]struct{} {
 		return v
 	}
 	return map[string]struct{}{}
+}
+
+// passThroughResultTypes lists R/R types whose result payload is
+// variable-shape JSON pass-through (analytics, profile dumps,
+// inject_script return values, etc.). For these the adapter does NOT
+// apply resultAllowListFor — the extension's tool output flows back
+// into envelope.payload as-is.
+//
+// The original 4 strict types (publish/search/note.fetch/recent.fetch)
+// retain the closed allow-list per R4-FIX-A. Unknown / drifted types
+// still fail-closed (resultAllowListFor returns empty), preventing
+// silent stowaway leaks from undeclared types.
+var passThroughResultTypes = map[string]bool{
+	TypePublishLongContent: true,
+	TypePublishStatus:      true,
+	TypeCheckLoginStatus:   true,
+	TypeInjectScript:       true,
+	TypeAnalyzeMyProfile:   true,
+	TypeAnalyzeProfile:     true,
+	TypeGetNoteComments:    true,
+	TypeGetNoteAnalytics:   true,
+	TypeGetCreatorMetrics:  true,
+	TypeGetTrendingTopics:  true,
+}
+
+// IsResultPassThrough reports whether buildRespondPayload should bypass
+// resultAllowListFor for this type and copy the whole result object.
+func IsResultPassThrough(requestType string) bool {
+	return passThroughResultTypes[requestType]
 }
 
 // ------------------------------------------------------------------
@@ -185,23 +297,25 @@ func errorAllowListFor(requestType string) map[string]struct{} {
 // closed when an adapter opts into strict mode (non-nil
 // TypeDeclarations) but leaves a Types entry without a row.
 func DeclarationTypeDeclarations() map[string]adapter.TypeDeclaration {
+	rr := adapter.TypeDeclaration{
+		AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
+		TerminalConvention: string(adapter.TerminalPayloadStatus),
+	}
 	return map[string]adapter.TypeDeclaration{
-		TypePublish: {
-			AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-			TerminalConvention: string(adapter.TerminalPayloadStatus),
-		},
-		TypeSearch: {
-			AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-			TerminalConvention: string(adapter.TerminalPayloadStatus),
-		},
-		TypeNoteFetch: {
-			AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-			TerminalConvention: string(adapter.TerminalPayloadStatus),
-		},
-		TypeRecentFetch: {
-			AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-			TerminalConvention: string(adapter.TerminalPayloadStatus),
-		},
+		TypePublish:            rr,
+		TypeSearch:             rr,
+		TypeNoteFetch:          rr,
+		TypeRecentFetch:        rr,
+		TypePublishLongContent: rr,
+		TypePublishStatus:      rr,
+		TypeCheckLoginStatus:   rr,
+		TypeInjectScript:       rr,
+		TypeAnalyzeMyProfile:   rr,
+		TypeAnalyzeProfile:     rr,
+		TypeGetNoteComments:    rr,
+		TypeGetNoteAnalytics:   rr,
+		TypeGetCreatorMetrics:  rr,
+		TypeGetTrendingTopics:  rr,
 		TypeNoteArchived: {
 			AllowedKinds:       []message.Kind{message.KindEvent},
 			TerminalConvention: string(adapter.TerminalPayloadStatus),

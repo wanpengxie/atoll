@@ -49,7 +49,7 @@ func buildCommand(env *message.Envelope) (Command, error) {
 	cmd := Command{
 		Type:          CommandWireType,
 		CorrelationID: env.ID.String(),
-		Cmd:           strings.TrimPrefix(env.Type, "xhs."),
+		Cmd:           WireCmdFor(env.Type),
 		Params:        params,
 	}
 	return cmd, nil
@@ -124,12 +124,30 @@ func buildRespondPayload(cb Callback, requestType string) (json.RawMessage, stri
 	reason := ""
 	switch normaliseStatus(cb.Status) {
 	case outcomeOK:
-		copyAllowedKeys(payload, cb.Result, resultAllowListFor(requestType))
+		if IsResultPassThrough(requestType) {
+			for k, v := range cb.Result {
+				if _, reserved := payload[k]; reserved {
+					continue
+				}
+				payload[k] = v
+			}
+		} else {
+			copyAllowedKeys(payload, cb.Result, resultAllowListFor(requestType))
+		}
 	case outcomeError:
 		status = "failed"
 		reason = string(message.TerminalReceiverInternalError)
 		payload["error_code"] = errorReason(cb.ErrorObj)
-		copyAllowedKeys(payload, cb.ErrorObj, errorAllowListFor(requestType))
+		if IsResultPassThrough(requestType) {
+			for k, v := range cb.ErrorObj {
+				if _, reserved := payload[k]; reserved {
+					continue
+				}
+				payload[k] = v
+			}
+		} else {
+			copyAllowedKeys(payload, cb.ErrorObj, errorAllowListFor(requestType))
+		}
 	default:
 		status = "failed"
 		reason = string(message.TerminalReceiverInternalError)

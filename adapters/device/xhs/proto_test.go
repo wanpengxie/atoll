@@ -10,11 +10,24 @@ import (
 // TestTypeClosedSet asserts AllTypes is 1:1 with the L4 §2.1 closed set.
 func TestTypeClosedSet(t *testing.T) {
 	want := map[string]bool{
-		TypePublish:      true,
-		TypeSearch:       true,
-		TypeNoteFetch:    true,
-		TypeRecentFetch:  true,
+		// Legacy 4 R/R types.
+		TypePublish:     true,
+		TypeSearch:      true,
+		TypeNoteFetch:   true,
+		TypeRecentFetch: true,
+		// Event-only.
 		TypeNoteArchived: true,
+		// New 10 R/R types — chrome extension tool surface.
+		TypePublishLongContent: true,
+		TypePublishStatus:      true,
+		TypeCheckLoginStatus:   true,
+		TypeInjectScript:       true,
+		TypeAnalyzeMyProfile:   true,
+		TypeAnalyzeProfile:     true,
+		TypeGetNoteComments:    true,
+		TypeGetNoteAnalytics:   true,
+		TypeGetCreatorMetrics:  true,
+		TypeGetTrendingTopics:  true,
 	}
 	if len(AllTypes) != len(want) {
 		t.Fatalf("AllTypes length %d != want %d", len(AllTypes), len(want))
@@ -110,13 +123,12 @@ func TestDeclarationTypeDeclarationsCoversEveryType(t *testing.T) {
 }
 
 // TestTypeDeclarationsAllowedKindsSpec asserts each xhs type's
-// AllowedKinds matches domain-xhs-spec §1.1–§1.6:
-//   - R/R types (publish/search/note.fetch/recent.fetch/cookie.sync)
-//     → {request, response}
+// AllowedKinds matches domain-xhs-spec §1.x:
+//   - R/R types → {request, response}
 //   - event-only (note.archived) → {event}
 func TestTypeDeclarationsAllowedKindsSpec(t *testing.T) {
 	decls := DeclarationTypeDeclarations()
-	rr := []string{TypePublish, TypeSearch, TypeNoteFetch, TypeRecentFetch}
+	rr := RequestResponseTypes
 	for _, ty := range rr {
 		got := decls[ty].AllowedKinds
 		if len(got) != 2 {

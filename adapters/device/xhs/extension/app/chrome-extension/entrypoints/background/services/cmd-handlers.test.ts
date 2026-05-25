@@ -16,6 +16,15 @@ vi.mock('coagent-xhs-shared', () => ({
     GET_MY_RECENT: 'get-my-recent',
     GET_NOTE: 'get-note',
     PUBLISH_STATUS: 'publish-status',
+    PUBLISH_LONG_CONTENT: 'publish-long-content',
+    CHECK_LOGIN_STATUS: 'check-login-status',
+    INJECT_SCRIPT: 'inject-script',
+    ANALYZE_MY_PROFILE: 'analyze-my-profile',
+    ANALYZE_PROFILE: 'analyze-profile',
+    GET_NOTE_COMMENTS: 'get-note-comments',
+    GET_NOTE_ANALYTICS: 'get-note-analytics',
+    GET_CREATOR_METRICS: 'get-creator-metrics',
+    GET_TRENDING_TOPICS: 'get-trending-topics',
   },
 }));
 
@@ -68,12 +77,21 @@ function wrapToolLocal(tool: ToolLike, cmd: string): CommandHandler {
 }
 
 describe('isKnownCommand', () => {
-  it('accepts the 5 spec commands', () => {
+  it('accepts the 14 spec commands', () => {
     expect(isKnownCommand('publish')).toBe(true);
     expect(isKnownCommand('search')).toBe(true);
     expect(isKnownCommand('get-my-recent')).toBe(true);
     expect(isKnownCommand('get-note')).toBe(true);
     expect(isKnownCommand('publish-status')).toBe(true);
+    expect(isKnownCommand('publish-long-content')).toBe(true);
+    expect(isKnownCommand('check-login-status')).toBe(true);
+    expect(isKnownCommand('inject-script')).toBe(true);
+    expect(isKnownCommand('analyze-my-profile')).toBe(true);
+    expect(isKnownCommand('analyze-profile')).toBe(true);
+    expect(isKnownCommand('get-note-comments')).toBe(true);
+    expect(isKnownCommand('get-note-analytics')).toBe(true);
+    expect(isKnownCommand('get-creator-metrics')).toBe(true);
+    expect(isKnownCommand('get-trending-topics')).toBe(true);
   });
 
   it('rejects unknown / mistyped commands', () => {
