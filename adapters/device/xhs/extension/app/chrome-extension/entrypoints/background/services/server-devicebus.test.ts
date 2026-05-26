@@ -143,9 +143,7 @@ class FakeWebSocket {
   }
 }
 
-async function openClient(
-  client: ReturnType<typeof makeClient>,
-): Promise<FakeWebSocket> {
+async function openClient(client: ReturnType<typeof makeClient>): Promise<FakeWebSocket> {
   let captured: FakeWebSocket | null = null;
   const SocketCtor: any = function (this: any, url: string, protocols?: string | string[]) {
     const ws = new FakeWebSocket(url, protocols);
@@ -206,10 +204,7 @@ describe('buildDeviceBusUrl', () => {
 describe('buildDeviceBusSubprotocols', () => {
   it('returns [coagent.device.v1, token.<token>] in that order', () => {
     const protocols = buildDeviceBusSubprotocols(makeConfig());
-    expect(protocols).toEqual([
-      DEVICE_WS_SUBPROTOCOL,
-      `${DEVICE_WS_TOKEN_PREFIX}tok-secret`,
-    ]);
+    expect(protocols).toEqual([DEVICE_WS_SUBPROTOCOL, `${DEVICE_WS_TOKEN_PREFIX}tok-secret`]);
   });
 
   it('returns [] when token is missing (cannot construct slot)', () => {
@@ -223,7 +218,7 @@ describe('redactToken', () => {
   // carry the token at all.
   it('masks ?token=… to ?token=*** when present (legacy URL shape)', () => {
     expect(redactToken('wss://h/devicebus?actor_id=s&token=secret')).toBe(
-      'wss://h/devicebus?actor_id=s&token=***',
+      'wss://h/devicebus?actor_id=s&token=***'
     );
   });
 
@@ -242,10 +237,7 @@ describe('client sets token subprotocol on WS construct (R5-14)', () => {
     expect(socket.url).toContain('actor_id=sess-A');
     expect(socket.url).not.toContain('token=');
     // Subprotocols: real protocol + token slot.
-    expect(socket.protocols).toEqual([
-      'coagent.device.v1',
-      'token.tok-secret',
-    ]);
+    expect(socket.protocols).toEqual(['coagent.device.v1', 'token.tok-secret']);
   });
 });
 
@@ -514,9 +506,7 @@ describe('outbox enqueue + drain on reconnect', () => {
       expect(await readOutbox()).toEqual([]);
 
       // GC log line for the stale entry.
-      const gcLog = warn.mock.calls.find(
-        (args) => args[0] === '[ServerDeviceBus] outbox.dropped',
-      );
+      const gcLog = warn.mock.calls.find((args) => args[0] === '[ServerDeviceBus] outbox.dropped');
       expect(gcLog).toBeDefined();
       expect(gcLog![1]).toMatchObject({
         correlation_id: 'old',
@@ -583,6 +573,43 @@ function multiSocketCtor(): {
   Ctor.OPEN = 1;
   return { ctor: Ctor as unknown as typeof WebSocket, sockets };
 }
+
+describe('connect idempotency', () => {
+  it('reuses the in-flight connect attempt when connect() is called twice before open', async () => {
+    installFakeChromeStorage();
+    const client = makeClient();
+    const { ctor, sockets } = multiSocketCtor();
+    client.setWebSocketImpl(ctor);
+
+    const first = client.connect();
+    const second = client.connect();
+    await Promise.resolve();
+
+    expect(sockets).toHaveLength(1);
+    sockets[0].triggerOpen();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(firstResult.success).toBe(true);
+    expect(secondResult.success).toBe(true);
+    expect(sockets).toHaveLength(1);
+  });
+
+  it('returns success without opening a new socket when already connected to the same URL', async () => {
+    installFakeChromeStorage();
+    const client = makeClient();
+    const { ctor, sockets } = multiSocketCtor();
+    client.setWebSocketImpl(ctor);
+
+    const first = client.connect();
+    await Promise.resolve();
+    sockets[0].triggerOpen();
+    await first;
+
+    const second = await client.connect();
+
+    expect(second.success).toBe(true);
+    expect(sockets).toHaveLength(1);
+  });
+});
 
 describe('updateConfig identity swap (bind / rebind)', () => {
   it('setDeviceToken-style new identity cancels in-flight connect + closes prior socket before new opens', async () => {

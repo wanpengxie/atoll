@@ -114,6 +114,10 @@ export const COAGENT_SERVER_DEVICEBUS_PROTOCOL = {
   OUTBOX_STORAGE_KEY: 'coagent_server_device_outbox',
   OUTBOX_MAX_SIZE: 200,
   OUTBOX_MAX_AGE_MS: 7 * 24 * 60 * 60 * 1000,
+  /** chrome.alarms name for the MV3 service worker keep-alive ticker. */
+  KEEPALIVE_ALARM_NAME: 'coagent-keepalive',
+  /** 0.4min = 24s, below Chrome MV3's ~30s service worker idle threshold. */
+  KEEPALIVE_PERIOD_MIN: 0.4,
 } as const;
 
 /**
@@ -166,6 +170,9 @@ export const COAGENT_DEVICE_PROTOCOL = {
    * unbounded growth when the daemon never replies (e.g. wedged service).
    */
   CALLBACK_OUTBOX_MAX_AGE_MS: 7 * 24 * 60 * 60 * 1000, // 7 days
+  /** Keep legacy daemon transport on the same MV3 service worker alarm cadence. */
+  KEEPALIVE_ALARM_NAME: 'coagent-keepalive',
+  KEEPALIVE_PERIOD_MIN: 0.4,
 } as const;
 
 /**

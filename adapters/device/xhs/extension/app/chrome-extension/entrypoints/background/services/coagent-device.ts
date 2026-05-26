@@ -29,10 +29,7 @@
 //
 // 此模块不直接连 chrome.cookies；cookie sync 由 tools/sync-cookies.ts 单独处理。
 
-import {
-  COAGENT_DEVICE_PROTOCOL,
-  ERROR_MESSAGES,
-} from 'coagent-xhs-shared';
+import { COAGENT_DEVICE_PROTOCOL, ERROR_MESSAGES } from 'coagent-xhs-shared';
 import type { ConnectionConfig } from '../connection-state';
 import { saveConnectionStatus } from '../connection-state';
 import {
@@ -122,7 +119,9 @@ function isPendingCallbackEntry(value: unknown): value is PendingCallbackEntry {
   const v = value as Record<string, unknown>;
   if (!v.body || typeof v.body !== 'object') return false;
   const body = v.body as Record<string, unknown>;
-  return typeof body.correlation_id === 'string' && (body.status === 'ok' || body.status === 'error');
+  return (
+    typeof body.correlation_id === 'string' && (body.status === 'ok' || body.status === 'error')
+  );
 }
 
 /**
@@ -223,7 +222,11 @@ class CoagentDeviceClient {
 
     // Close any previous socket cleanly first.
     if (this.socket) {
-      try { this.socket.close(1000, 'reconnect'); } catch { /* ignore */ }
+      try {
+        this.socket.close(1000, 'reconnect');
+      } catch {
+        /* ignore */
+      }
       this.socket = null;
     }
 
@@ -261,11 +264,18 @@ class CoagentDeviceClient {
       }
 
       this.socket = socket;
-      console.info('[CoagentDevice] connecting', { url: safeUrl });
+      console.warn('[CoagentDevice] connecting', {
+        at: Date.now(),
+        url: safeUrl,
+        attempt: this.reconnectAttempt + 1,
+      });
 
       socket.addEventListener('open', () => {
         if (this.socket !== socket) return;
-        console.info('[CoagentDevice] WS opened', { url: safeUrl });
+        console.warn('[CoagentDevice] WS open', {
+          at: Date.now(),
+          url: safeUrl,
+        });
         this.reconnectAttempt = 0;
         void saveConnectionStatus({
           connected: true,
@@ -287,6 +297,7 @@ class CoagentDeviceClient {
         if (this.socket !== socket) return;
         const reason = event.reason || 'WebSocket closed';
         console.warn('[CoagentDevice] WS closed', {
+          at: Date.now(),
           url: safeUrl,
           code: event.code,
           wasClean: event.wasClean,
@@ -310,7 +321,11 @@ class CoagentDeviceClient {
           typeof ErrorEvent !== 'undefined' && event instanceof ErrorEvent
             ? event.message
             : (event && (event as any).message) || 'WebSocket error';
-        console.error('[CoagentDevice] WS error', { url: safeUrl, message });
+        console.warn('[CoagentDevice] WS error', {
+          at: Date.now(),
+          url: safeUrl,
+          message,
+        });
         void saveConnectionStatus({
           connected: false,
           reconnecting: this.shouldReconnect,
@@ -325,10 +340,18 @@ class CoagentDeviceClient {
   }
 
   disconnect(): void {
+    console.warn('[CoagentDevice] reconnect abandoned', {
+      at: Date.now(),
+      reason: 'disconnect',
+    });
     this.shouldReconnect = false;
     this.clearReconnectTimer();
     if (this.socket) {
-      try { this.socket.close(1000, 'disconnect'); } catch { /* ignore */ }
+      try {
+        this.socket.close(1000, 'disconnect');
+      } catch {
+        /* ignore */
+      }
       this.socket = null;
     }
     void saveConnectionStatus({ connected: false, reconnecting: false });
@@ -341,7 +364,11 @@ class CoagentDeviceClient {
     const cap = COAGENT_DEVICE_PROTOCOL.RECONNECT_MAX_MS;
     const delay = Math.min(cap, base * Math.pow(2, this.reconnectAttempt));
     this.reconnectAttempt += 1;
-    console.info('[CoagentDevice] schedule reconnect', { attempt: this.reconnectAttempt, delay });
+    console.warn('[CoagentDevice] schedule reconnect', {
+      at: Date.now(),
+      attempt: this.reconnectAttempt,
+      delay,
+    });
     this.reconnectTimer = setTimeout(() => {
       void this.connect();
     }, delay);
@@ -394,7 +421,7 @@ class CoagentDeviceClient {
     const rejected = Array.isArray(frame.rejected)
       ? frame.rejected.filter(
           (v): v is { correlation_id: string; code?: string; message?: string } =>
-            !!v && typeof v === 'object' && typeof (v as any).correlation_id === 'string',
+            !!v && typeof v === 'object' && typeof (v as any).correlation_id === 'string'
         )
       : [];
     if (accepted.length === 0 && rejected.length === 0) return;
@@ -410,14 +437,17 @@ class CoagentDeviceClient {
 
     const toRemove = new Set<string>([
       ...accepted,
-      ...rejected.map((r) => r.correlation_id).filter((id) => typeof id === 'string' && id.length > 0),
+      ...rejected
+        .map((r) => r.correlation_id)
+        .filter((id) => typeof id === 'string' && id.length > 0),
     ]);
     if (toRemove.size === 0) return;
     const existing = await readPendingCallbacks();
     const survivors = existing.filter((entry) => !toRemove.has(entry.body.correlation_id));
     if (survivors.length !== existing.length) {
       await writePendingCallbacks(survivors);
-      console.info('[CoagentDevice] callback_replay_ack consumed outbox entries', {
+      console.warn('[CoagentDevice] callback_replay_ack consumed outbox entries', {
+        at: Date.now(),
         accepted: accepted.length,
         rejected: rejected.length,
         outbox_remaining: survivors.length,
@@ -439,7 +469,8 @@ class CoagentDeviceClient {
     const params = (frame.params ?? {}) as Record<string, unknown>;
     const session = frame.session ?? null;
 
-    console.info('[CoagentDevice] dispatch command', {
+    console.warn('[CoagentDevice] dispatch command', {
+      at: Date.now(),
       correlationId,
       cmd,
       hasSession: Boolean(session?.cookies?.length),
@@ -544,6 +575,11 @@ class CoagentDeviceClient {
       correlation_id: correlationId,
       ...payload,
     };
+    console.warn('[CoagentDevice] postCallback', {
+      at: Date.now(),
+      correlation_id: correlationId,
+      status: payload.status,
+    });
 
     const result = await this.sendCallbackWithRetry(url, apiKey, body);
     if (result === 'ok' || result === 'terminal') return;
@@ -566,7 +602,7 @@ class CoagentDeviceClient {
   private async sendCallbackWithRetry(
     url: string,
     apiKey: string,
-    body: CallbackBody,
+    body: CallbackBody
   ): Promise<'ok' | 'terminal' | 'exhausted'> {
     const backoff = COAGENT_DEVICE_PROTOCOL.CALLBACK_RETRY_BACKOFF_MS_LIST;
     const totalAttempts = 1 + backoff.length;
@@ -591,12 +627,12 @@ class CoagentDeviceClient {
   private async attemptCallbackOnce(
     url: string,
     apiKey: string,
-    body: CallbackBody,
+    body: CallbackBody
   ): Promise<'ok' | 'retry' | 'terminal'> {
     const controller = new AbortController();
     const timer = setTimeout(
       () => controller.abort(),
-      COAGENT_DEVICE_PROTOCOL.CALLBACK_RETRY_TIMEOUT_MS,
+      COAGENT_DEVICE_PROTOCOL.CALLBACK_RETRY_TIMEOUT_MS
     );
     try {
       const resp = await this.fetchImpl(url, {
@@ -711,7 +747,8 @@ class CoagentDeviceClient {
     });
     try {
       socket.send(frame);
-      console.info('[CoagentDevice] drained pending callbacks via WS replay', {
+      console.warn('[CoagentDevice] drained pending callbacks via WS replay', {
+        at: Date.now(),
         count: payloads.length,
       });
       // Refresh last_attempt_at so the next GC tick measures from this send,
