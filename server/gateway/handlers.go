@@ -203,7 +203,7 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 				ExpiresAt:     body.ExpiresAt,
 			}
 			err := a.devicebus.SendFrameToActor(ctx, sf.ChannelID, sf.AdapterActorID, df)
-			if errors.Is(err, devicebus.ErrRegistrationNotFound) || errors.Is(err, devicebus.ErrTokenExpired) {
+			if errors.Is(err, devicebus.ErrRegistrationNotFound) {
 				return a.synthesizeDeviceUnreachableCallback(ctx, sf, body, err)
 			}
 			return err
@@ -224,11 +224,7 @@ func (a *App) synthesizeDeviceUnreachableCallback(
 	cause error,
 ) error {
 	code := "device_not_bound"
-	msg := "no extension is registered for this channel + adapter actor"
-	if errors.Is(cause, devicebus.ErrTokenExpired) {
-		code = "device_token_expired"
-		msg = "extension pairing token expired; re-pair the browser extension"
-	}
+	msg := "no proxy daemon is registered for this channel + adapter actor"
 	cbPayload, err := json.Marshal(map[string]any{
 		// Callback.correlation_id matches the envelope.id (carried as
 		// request_id on the device_transit wire), not the chain
@@ -753,7 +749,7 @@ func buildEngine(a *App) *gin.Engine {
 
 	r.GET("/ws", a.pushhub.HandleWS(a.identity))
 	r.GET("/daemonbus", a.daemonbus.HandleWS(a))
-	r.GET("/devicebus", a.devicebus.HandleWS(a))
+	r.GET("/devicebus", handleDeprecatedDevicebusV1)
 	r.GET("/devicebus/v2/connect", a.devicebus.HandleWSV2(a))
 
 	// SPA static serving: when UIDistDir is configured, serve the
@@ -799,6 +795,13 @@ func buildEngine(a *App) *gin.Engine {
 		})
 	}
 	return r
+}
+
+func handleDeprecatedDevicebusV1(c *gin.Context) {
+	c.JSON(http.StatusGone, gin.H{
+		"error":         "devicebus v1 has been retired; use /devicebus/v2/connect through coagent-proxy",
+		"reject_reason": "devicebus_v1_retired",
+	})
 }
 
 // ----------------------------------------------------------------------

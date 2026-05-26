@@ -8,7 +8,6 @@
 //	coagent channel ls    [--workspace <id>]
 //	coagent channel show  <chID>
 //	coagent channel create --workspace <ws> --name <name> [--type group]
-//	coagent device register --channel <ch> --type xhs --daemon <id> [--device-id <id>]
 //	coagent daemon status
 //	coagent ask     --type <T> --audience <A> [--channel <id>] (--payload <json> | --payload-file <p>)
 //	coagent emit    --type <T>                [--channel <id>] (--payload <json> | --payload-file <p>)
@@ -40,8 +39,6 @@ func main() {
 		runKernel(args)
 	case "channel":
 		runChannel(args)
-	case "device":
-		runDevice(args)
 	case "daemon":
 		runDaemon(args)
 	case "ask":
@@ -72,7 +69,6 @@ COMMANDS
   channel ls       List workspaces + channels visible to the caller
   channel show     Show a single channel
   channel create   Create a channel inside a workspace
-  device register  Register a device actor token for a channel
   daemon status    Report server health + active daemon placements
   ask              Write a kind=request envelope (audience required)
   emit             Write a kind=event envelope (audience optional)

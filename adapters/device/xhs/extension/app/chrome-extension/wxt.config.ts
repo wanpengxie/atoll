@@ -62,9 +62,9 @@ export default defineConfig({
     // behaviour for the distributed build.
     ...(manifestKey ? ({ key: manifestKey } as any) : {}),
 
-    // T148 (M1.6-T6): allow the coagent web UI to inject device actor
-    // tokens via chrome.runtime.sendMessage. See the comment block above
-    // for the security model.
+    // Allow approved coagent web origins to call the diagnostic
+    // externally-connectable surface. See external-bind.ts for the
+    // runtime origin re-check.
     externally_connectable: {
       matches: externallyConnectableMatches,
     },

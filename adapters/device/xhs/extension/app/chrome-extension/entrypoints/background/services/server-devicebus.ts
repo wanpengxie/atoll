@@ -1,10 +1,8 @@
-// services/server-devicebus.ts — coagent **server** devicebus WS client (v4).
+// services/server-devicebus.ts — coagent local proxy daemon WS client.
 //
-// Protocol (impl-layer3 §6.5.1 — R5-14):
-//   - WS endpoint: wss://{server-host}/devicebus?actor_id={actor_id}
-//   - Handshake:   Sec-WebSocket-Protocol: coagent.device.v1, token.{tok}
-//                  (token rides in WS subprotocol slot — NOT URL query,
-//                   to avoid leaking into proxy/access logs)
+// Protocol:
+//   - WS endpoint: ws://127.0.0.1:<port> (default ws://127.0.0.1:10387)
+//   - On open:     {"frame_type":"hello","actor_id":"tool:xhs"}
 //   - Inbound DeviceFrame (daemon → server → device):
 //       {
 //         direction: "to_device",
@@ -26,22 +24,15 @@
 //   - On open: drain outbox of any callback DeviceFrames that were
 //     enqueued while disconnected.
 //   - Inbound `to_device` frame: decode embedded Command payload, dispatch
-//     via cmd-handlers (same registry as legacy `coagent-device.ts`), then
-//     send back a `from_device` DeviceFrame with the Callback payload.
+//     via cmd-handlers, then send back a `from_device` DeviceFrame with
+//     the Callback payload.
 //   - Unknown / non-`command` inner payloads short-circuit to an error
 //     Callback so the adapter framework sees a terminal response instead
 //     of timing out.
 //
-// Differences from legacy `coagent-device.ts`:
-//   - Single transport (WS) — no HTTP callback retry path, no
-//     callback_replay_ack handshake. The outbox only handles the
-//     "WS-down-while-response-ready" case; daemon-side framework's orphan
-//     filter (correlation_id) protects against duplicate sends on
-//     reconnect.
-//   - No device api_key on the wire; the server-issued session token is
-//     consumed once at WS handshake.
-//   - Tests use `setWebSocketImpl` test seam exactly as the legacy module
-//     to keep the harness shape comparable.
+// The retired direct-to-server actor-token transport is intentionally
+// absent: no server devicebus query URL, no direct-server subprotocol,
+// and no actor token state.
 
 import { COAGENT_SERVER_DEVICEBUS_PROTOCOL, ERROR_MESSAGES } from 'coagent-xhs-shared';
 import { type CommandFrame, getCommandHandler, isKnownCommand } from './cmd-handlers';
@@ -68,8 +59,7 @@ export interface DeviceFrame {
   expires_at?: number;
 }
 
-/** Inner payload for direction="to_device" frames. Same shape as the
- *  legacy daemon-direct command frame so `cmd-handlers.ts` works as-is. */
+/** Inner payload for direction="to_device" frames. */
 export interface CommandPayload {
   type: 'command';
   correlation_id: string;
@@ -89,9 +79,7 @@ export interface CallbackPayload {
   device_id?: string;
 }
 
-/** R3-T4 FX9 — public surface kept compatible with `coagent-device.ts`
- *  so `recoverPublishWaitStates` can pass `postCallback` opaque to
- *  whichever client is installed. */
+/** R3-T4 FX9 — public callback surface used by recovery helpers. */
 export interface CallbackBody {
   correlation_id: string;
   status: 'ok' | 'error';
@@ -175,24 +163,19 @@ function isOutboxEntry(value: unknown): value is OutboxEntry {
  * background entrypoint composes it from `ConnectionConfig` (read from
  * chrome.storage.local) — see `index.ts` for the mapping.
  *
- * Required fields: `wsEndpoint`, `actorId`, `token`, `channelId`.
- * `deviceActorId` is the same value as the server-side actor_id
- * (carried in every outbound DeviceFrame); it equals `actorId` here —
- * server.devicebus uses one id for both WS handshake and frame routing.
- * `userId` is informational (forensic logging only).
+ * Required fields: `wsEndpoint`, `actorId`. The actor id is the local
+ * proxy module selected by the hello frame and carried in outbound
+ * DeviceFrames.
  */
 export interface ServerDeviceConfig {
-  /** Transport mode: server=legacy direct server.devicebus, proxy=local proxy daemon. */
-  mode?: 'server' | 'proxy';
-  /** Base WS URL, e.g. `wss://coagent.example.com/devicebus`. */
+  /** Transport mode: local proxy daemon. */
+  mode?: 'proxy';
+  /** Local proxy daemon WS URL, e.g. `ws://127.0.0.1:10387`. */
   wsEndpoint: string;
-  /** server-allocated actor_id (= WS handshake `actor_id`). */
+  /** Local proxy actor id sent in the hello frame. */
   actorId: string;
-  /** server-issued bearer token for this actor registration. */
-  token: string;
-  /** channel_id this device is bound to — pass-through on every outbound
-   *  DeviceFrame so the daemon-side `OnDeviceTransit` routes to the right
-   *  per-channel adapter manager. */
+  /** Channel id is supplied by server inbound frames; recovered callbacks
+   *  may leave this empty in proxy mode. */
   channelId: string;
   /** Auto reconnect on close (default true). */
   autoReconnect?: boolean;
@@ -204,81 +187,17 @@ export interface ServerDeviceConfig {
 
 // ─── WS URL helpers ──────────────────────────────────────────────────────
 
-/**
- * Real WebSocket subprotocol negotiated on /devicebus — mirror of
- * `server/devicebus.DeviceWSSubprotocol`. Server selects (and echoes
- * back) this; never echoes the `token.*` slot.
- */
-export const DEVICE_WS_SUBPROTOCOL = 'coagent.device.v1';
-
-/** Prefix used on the `token.*` pseudo-subprotocol slot. */
-export const DEVICE_WS_TOKEN_PREFIX = 'token.';
-
-/**
- * Build the v4 devicebus WS URL with `actor_id` in the query string.
- * Per impl-layer3 §6.5.1 (R5-14) the bearer token does NOT go on the
- * URL — it rides in `Sec-WebSocket-Protocol` (see
- * `buildDeviceBusSubprotocols`). actor_id is non-secret (forensics
- * correlation only) and stays in the URL.
- *
- * Returns "" when any required field is missing so callers can short-
- * circuit without trying to construct an invalid URL.
- */
+/** Build the local proxy daemon WS URL. */
 export function buildDeviceBusUrl(cfg: ServerDeviceConfig): string {
-  const proxyMode = isProxyMode(cfg);
   const base = (cfg.wsEndpoint ?? '').trim();
   const actor = (cfg.actorId ?? '').trim();
-  const tok = (cfg.token ?? '').trim();
   if (!base || !actor) return '';
-  // Direct server mode still requires the actor token. Proxy mode is
-  // localhost-trusted: no token, no pairing, no subprotocol auth.
-  if (!proxyMode && !tok) return '';
   try {
     const u = new URL(base);
-    if (!proxyMode) {
-      u.searchParams.set('actor_id', actor);
-    }
     return u.toString();
   } catch {
     return '';
   }
-}
-
-/**
- * Build the `Sec-WebSocket-Protocol` subprotocol list the client offers
- * on the /devicebus handshake (impl-layer3 §6.5.1):
- *
- *   `coagent.device.v1` — real subprotocol; server echoes this back
- *   `token.<token>`     — bearer token slot; server consumes + does
- *                         NOT echo (token must not be reflected to
- *                         the client per RFC 6455 + spec)
- *
- * Returns an empty array when token is missing so callers can decide
- * whether to abort the connect attempt. Pass the result as the second
- * arg of `new WebSocket(url, protocols)`.
- */
-export function buildDeviceBusSubprotocols(cfg: ServerDeviceConfig): string[] {
-  if (isProxyMode(cfg)) return [];
-  const tok = (cfg.token ?? '').trim();
-  if (!tok) return [];
-  return [DEVICE_WS_SUBPROTOCOL, `${DEVICE_WS_TOKEN_PREFIX}${tok}`];
-}
-
-function isProxyMode(cfg: ServerDeviceConfig | null | undefined): boolean {
-  return cfg?.mode === 'proxy';
-}
-
-/**
- * Redact the bearer token if it ever appears in a URL — defence in
- * depth for legacy callers. With R5-14 token no longer goes in the
- * query string, so this is now a no-op for properly built URLs;
- * retained because chrome.storage may still carry legacy entries.
- *
- * Equivalent to legacy `redactKey` for the new shape.
- */
-export function redactToken(url: string): string {
-  if (!url) return url;
-  return url.replace(/([?&])token=[^&#]*/gi, '$1token=***');
 }
 
 // ─── Inner-payload (de)serialisation helpers ─────────────────────────────
@@ -331,13 +250,11 @@ class CoagentServerDeviceClient {
   private connectInFlight: Promise<ConnectResult> | null = null;
   /**
    * Generation counter that increments on every reset (disconnect /
-   * updateConfig with a different token / unbind). All async paths
+   * updateConfig with a different endpoint / unbind). All async paths
    * (pending connect promise resolvers, scheduled reconnect callbacks,
    * close-event handlers of stale sockets) capture the generation they
    * were spawned under and self-abort when `this.generation` has moved
-   * on. Fixes the stale-actor reconnect-loop race documented in
-   * https://github.com/wanpengxie/ActOS issue: extension reconnects to a
-   * revoked actor_id even after the UI hands over a fresh token.
+   * on.
    */
   private generation = 0;
   /**
@@ -359,9 +276,9 @@ class CoagentServerDeviceClient {
   }
 
   /**
-   * Replace the device config. When the WS-handshake-affecting fields
-   * (`actorId` / `token` / `wsEndpoint`) change vs the previous
-   * config, this is an atomic identity swap — we bump the generation
+   * Replace the device config. When the local proxy identity
+   * (`actorId` / `wsEndpoint`) changes vs the previous config, this is
+   * an atomic identity swap — we bump the generation
    * counter so any in-flight connect/reconnect attached to the previous
    * identity self-cancels, close the active socket, clear the reconnect
    * timer, reset the backoff attempt counter, and settle any hung
@@ -374,9 +291,8 @@ class CoagentServerDeviceClient {
     const next: ServerDeviceConfig = { ...config };
     const identityChanged =
       !prev ||
-      (prev.mode ?? 'server') !== (next.mode ?? 'server') ||
+      (prev.mode ?? 'proxy') !== (next.mode ?? 'proxy') ||
       (prev.actorId ?? '') !== (next.actorId ?? '') ||
-      (prev.token ?? '') !== (next.token ?? '') ||
       (prev.wsEndpoint ?? '') !== (next.wsEndpoint ?? '');
     this.config = next;
     if (identityChanged) {
@@ -431,7 +347,7 @@ class CoagentServerDeviceClient {
       this.socket = null;
     }
 
-    const safeUrl = redactToken(url);
+    const safeUrl = url;
     await saveConnectionStatus({
       connected: false,
       reconnecting: this.shouldReconnect,
@@ -455,14 +371,7 @@ class CoagentServerDeviceClient {
 
       let socket: WebSocket;
       try {
-        // R5-14: token rides in Sec-WebSocket-Protocol (subprotocol
-        // slot `token.<tok>`), NOT URL query. `this.config` is
-        // guaranteed non-null here because `connect()` short-circuits
-        // earlier on missing config; buildDeviceBusSubprotocols also
-        // returns [] when token is empty so the constructor will throw
-        // and the catch below surfaces a clear error.
-        const protocols = buildDeviceBusSubprotocols(this.config!);
-        socket = new this.wsCtor(url, protocols);
+        socket = new this.wsCtor(url, []);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.warn('[ServerDeviceBus] connect failed', {
@@ -490,28 +399,26 @@ class CoagentServerDeviceClient {
       socket.addEventListener('open', () => {
         if (this.generation !== gen) return;
         if (this.socket !== socket) return;
-        if (isProxyMode(this.config)) {
-          try {
-            socket.send(JSON.stringify({
-              frame_type: 'hello',
-              actor_id: (this.config?.actorId ?? '').trim(),
-            }));
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            void saveConnectionStatus({
-              connected: false,
-              reconnecting: false,
-              serverUrl: safeUrl,
-              lastError: message,
-            });
-            settle({ success: false, error: message });
-            return;
-          }
+        try {
+          socket.send(JSON.stringify({
+            frame_type: 'hello',
+            actor_id: (this.config?.actorId ?? '').trim(),
+          }));
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          void saveConnectionStatus({
+            connected: false,
+            reconnecting: false,
+            serverUrl: safeUrl,
+            lastError: message,
+          });
+          settle({ success: false, error: message });
+          return;
         }
         console.warn('[ServerDeviceBus] WS open', {
           at: Date.now(),
           url: safeUrl,
-          mode: this.config?.mode ?? 'server',
+          mode: this.config?.mode ?? 'proxy',
         });
         this.reconnectAttempt = 0;
         void saveConnectionStatus({
@@ -538,7 +445,7 @@ class CoagentServerDeviceClient {
         // from a previous identity that's being shut down — drop it
         // quietly. Critically we DO NOT settle()/scheduleReconnect()
         // here, otherwise a revoked-actor close lingering after
-        // updateConfig() would respawn a stale-token reconnect.
+        // updateConfig() would respawn a stale reconnect.
         if (this.generation !== gen) return;
         if (this.socket !== socket) return;
         const reason = event.reason || 'WebSocket closed';
@@ -550,11 +457,8 @@ class CoagentServerDeviceClient {
           reason,
         });
         this.socket = null;
-        // Auth-failure close codes from server (token revoked / expired):
-        // stop the reconnect loop, clear the dead URL, and surface
-        // lastError. The next bindFlow's updateConfig() will reset
-        // shouldReconnect anyway. Without this guard a 4401/4403 from
-        // server would spam reconnects with the same dead token.
+        // Auth-failure close codes from a proxy/server hop stop the
+        // reconnect loop, clear the dead URL, and surface lastError.
         const isAuthFail =
           event.code === COAGENT_SERVER_DEVICEBUS_PROTOCOL.WS_CLOSE_CODE_AUTH_FAILED ||
           event.code === COAGENT_SERVER_DEVICEBUS_PROTOCOL.WS_CLOSE_CODE_SESSION_REVOKED;
@@ -571,7 +475,7 @@ class CoagentServerDeviceClient {
         }
         // Bound the dirty-close (1006-style) reconnect loop. After N
         // consecutive non-clean closes without a successful handshake,
-        // we give up rather than spam the server with a revoked token.
+        // we give up rather than keep cycling a dead local endpoint.
         // `reconnectAttempt` is reset on a successful `open`, so a
         // legitimately bouncing network does not exhaust the budget.
         const isCleanClose =
@@ -626,7 +530,7 @@ class CoagentServerDeviceClient {
 
   /**
    * Hard reset triggered when the device identity changes (different
-   * actorId / token / endpoint) or when the user explicitly unbinds.
+   * actorId / endpoint) or when the user explicitly unbinds.
    *
    * Atomically:
    *   - bumps the generation so all in-flight callbacks self-cancel
@@ -682,7 +586,7 @@ class CoagentServerDeviceClient {
     // populated and connectInFlight hung; if the WS close handler ran
     // BEFORE disconnect (e.g. server revoked mid-flight), the close
     // path scheduled a reconnect that would respawn under the old
-    // token.
+    // identity.
     this.hardResetForIdentitySwap('disconnect');
     void saveConnectionStatus({ connected: false, reconnecting: false });
   }
@@ -867,9 +771,8 @@ class CoagentServerDeviceClient {
   }
 
   /**
-   * Public API kept compatible with legacy `coagent-device.ts` so the
-   * existing `recoverPublishWaitStates` helper can drive either client
-   * via the same signature.
+   * Public API used by `recoverPublishWaitStates` after MV3 service
+   * worker eviction.
    *
    * Recovery path (SW evict → cold start → state replay): the inbound
    * DeviceFrame metadata is no longer in memory, so the v4 client

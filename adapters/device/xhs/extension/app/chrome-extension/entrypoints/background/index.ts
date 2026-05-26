@@ -2,31 +2,25 @@
 //
 // M1.1-T2 起：
 //   - 启动 tools registry（沿用 fork 母本的 5 大类工具实现，复用）
-//   - 启动 device WS 客户端（services/coagent-device.ts 或 server-devicebus.ts）
+//   - 启动本机 proxy daemon WS 客户端（services/server-devicebus.ts proxy mode）
 //   - chrome.storage.local 保存 device 配置
 //   - chrome.runtime.onMessage 仍提供 popup ↔ background 桥（连接 / 断开 / 状态查询
 //     / 配置存取 / 手动 cookie sync / 直接 EXECUTE_TOOL 调试）。
 //
-// T147 §A-E：根据 ConnectionConfig 选择 v4 server-devicebus client 或 legacy
-// daemon-direct client：当 `serverWsEndpoint + deviceActorId +
-// deviceActorToken` 三件套齐时走 v4；否则保留 legacy 路径兼容老配置。
-// 两条客户端都实现 `connect / disconnect / updateConfig / postCallback`
-// — `activeDeviceClient()` 在每次 dispatch 时按当前 config 选择，确保 popup
-// 切换配置后立刻生效，无需 SW 重启。
+// T178/T5：extension 只保留 proxy_endpoint mode。旧 direct-to-server
+// actor-token path 和 daemon-direct / resolve fallback 已下线。
 
 import { initToolsRegistry, handleCallTool } from './tools';
 import {
-  ConnectionConfig,
-  DEFAULT_PROXY_ACTOR_ID,
-  getConnectionConfig,
-  saveConnectionConfig,
-  getStoredConnectionStatus,
-  getDefaultProxyEndpoint,
+	ConnectionConfig,
+	DEFAULT_PROXY_ACTOR_ID,
+	getConnectionConfig,
+	saveConnectionConfig,
+	getStoredConnectionStatus,
+	getDefaultProxyEndpoint,
 } from './connection-state';
 import { cookieSyncService } from './tools/sync-cookies';
-import { coagentDeviceClient } from './services/coagent-device';
 import { coagentServerDeviceClient, type ServerDeviceConfig } from './services/server-devicebus';
-import { resolveDeviceConfig } from './services/resolve';
 import { recoverPublishWaitStates } from './tools/publish-content';
 import { registerKeepaliveAlarm } from './keepalive';
 import {
@@ -43,63 +37,37 @@ interface ExecuteToolPayload {
 
 type BackgroundRequest =
   | { type: 'EXECUTE_TOOL'; payload: ExecuteToolPayload }
-  | { type: 'CHECK_CONNECTION' }
-  | { type: 'GET_STATUS' }
-  | { type: 'TOOL_RESULT'; payload: any }
-  | { type: 'CONNECT_DEVICE'; payload?: Partial<ConnectionConfig> }
-  | { type: 'CONNECT_PROXY_DAEMON'; payload?: { proxyEndpoint?: string } }
-  | { type: 'DISCONNECT_DEVICE' }
-  | { type: 'GET_CONNECTION_CONFIG' }
-  | { type: 'SAVE_CONNECTION_CONFIG'; payload: Partial<ConnectionConfig> }
-  | {
-      // M1.2-T3: popup 主入口 1-key 流程。Background 调 coagent resolve API
-      // 拿全套连接信息，落 storage，再触发 coagent device WS connect。
-      type: 'RESOLVE_AND_CONNECT';
-      payload: { coagentServerUrl: string; apiKey: string };
-    }
-  | { type: 'SYNC_COOKIES' };
+	| { type: 'CHECK_CONNECTION' }
+	| { type: 'GET_STATUS' }
+	| { type: 'TOOL_RESULT'; payload: any }
+	| { type: 'CONNECT_PROXY_DAEMON'; payload?: { proxyEndpoint?: string } }
+	| { type: 'DISCONNECT_DEVICE' }
+	| { type: 'GET_CONNECTION_CONFIG' }
+	| { type: 'SYNC_COOKIES' };
 
 let connectionConfig: ConnectionConfig | null = null;
 let connectionConfigLoad: Promise<ConnectionConfig> | null = null;
 
 /**
- * Tag identifying which device transport binding is in use for the
- * currently-loaded ConnectionConfig:
- *   - 'server' → T147 §A-E v4 path via `coagentServerDeviceClient` to
- *     `wss://{server}/devicebus?actor_id=...`
- *   - 'daemon' → legacy M1.1/M1.2 daemon-direct path via
- *     `coagentDeviceClient` to `ws://{daemon}/device/{id}?key=...`
- *   - 'none'   → config incomplete; no client should connect.
+ * Tag identifying whether the proxy endpoint config is connectable.
  */
-type DeviceTransport = 'proxy' | 'server' | 'daemon' | 'none';
+type DeviceTransport = 'proxy' | 'none';
 
 function selectTransport(cfg: ConnectionConfig | null | undefined): DeviceTransport {
-  if (!cfg) return 'none';
-  if (cfg.connectionMode === 'proxy') return hasProxyDeviceConfig(cfg) ? 'proxy' : 'none';
-  if (cfg.connectionMode === 'server') return hasServerDeviceConfig(cfg) ? 'server' : 'none';
-  if (cfg.connectionMode === 'legacy') return hasLegacyDeviceConfig(cfg) ? 'daemon' : 'none';
-  if (hasServerDeviceConfig(cfg)) return 'server';
-  if (hasLegacyDeviceConfig(cfg)) return 'daemon';
-  return 'none';
+	if (!cfg) return 'none';
+	if (cfg.connectionMode === 'proxy') return hasProxyDeviceConfig(cfg) ? 'proxy' : 'none';
+	return 'none';
 }
 
-/** Translate the persistent ConnectionConfig into the v4 client's input. */
+/** Translate the persistent ConnectionConfig into the proxy client input. */
 function toServerDeviceConfig(cfg: ConnectionConfig): ServerDeviceConfig {
-  const proxyMode = cfg.connectionMode === 'proxy';
-  return {
-    mode: proxyMode ? 'proxy' : 'server',
-    wsEndpoint: proxyMode
-      ? (cfg.proxyEndpoint ?? getDefaultProxyEndpoint()).trim()
-      : (cfg.serverWsEndpoint ?? '').trim(),
-    actorId: proxyMode
-      ? ((cfg.deviceActorId ?? '').trim() || DEFAULT_PROXY_ACTOR_ID)
-      : (cfg.deviceActorId ?? '').trim(),
-    token: proxyMode ? '' : (cfg.deviceActorToken ?? '').trim(),
-    channelId: (cfg.channelId ?? '').trim(),
-    autoReconnect: cfg.autoReconnect !== false,
-    userId: cfg.userId,
-    deviceId: cfg.deviceId,
-  };
+	return {
+		mode: 'proxy',
+		wsEndpoint: (cfg.proxyEndpoint ?? getDefaultProxyEndpoint()).trim(),
+		actorId: ((cfg.deviceActorId ?? '').trim() || DEFAULT_PROXY_ACTOR_ID),
+		channelId: '',
+		autoReconnect: cfg.autoReconnect !== false,
+	};
 }
 
 /**
@@ -108,8 +76,7 @@ function toServerDeviceConfig(cfg: ConnectionConfig): ServerDeviceConfig {
  * the inactive one stays idle). Calling this is idempotent.
  */
 function applyClients(cfg: ConnectionConfig): void {
-  coagentDeviceClient.updateConfig(cfg);
-  coagentServerDeviceClient.updateConfig(toServerDeviceConfig(cfg));
+	coagentServerDeviceClient.updateConfig(toServerDeviceConfig(cfg));
 }
 
 function loadConnectionConfig(): Promise<ConnectionConfig> {
@@ -129,14 +96,11 @@ function loadConnectionConfig(): Promise<ConnectionConfig> {
 }
 
 /**
- * activeDeviceClient returns the client paired with the currently
- * configured transport. Both share the `connect / disconnect / postCallback`
- * surface used by the rest of background. Callers MUST NOT cache the
- * returned reference across config saves — `applyClients()` may flip
- * the active transport on the next dispatch.
+ * activeDeviceClient returns the proxy transport client. Callers MUST NOT
+ * cache the returned reference across config saves.
  */
 function activeDeviceClient(): {
-  transport: DeviceTransport;
+	transport: DeviceTransport;
   connect: () => Promise<{ success: boolean; error?: string }>;
   disconnect: () => void;
   postCallback: (
@@ -145,37 +109,20 @@ function activeDeviceClient(): {
       status: 'ok' | 'error';
       result: Record<string, unknown> | null;
       error: { code: string; message: string } | null;
-    }
-  ) => Promise<void>;
+		}
+	  ) => Promise<void>;
 } {
-  const transport = selectTransport(connectionConfig);
-  if (transport === 'server') {
-    return {
-      transport,
-      connect: () => coagentServerDeviceClient.connect(),
-      disconnect: () => coagentServerDeviceClient.disconnect(),
-      postCallback: (id, p) => coagentServerDeviceClient.postCallback(id, p),
-    };
-  }
-  if (transport === 'proxy') {
-    return {
-      transport,
-      connect: () => coagentServerDeviceClient.connect(),
-      disconnect: () => coagentServerDeviceClient.disconnect(),
-      postCallback: (id, p) => coagentServerDeviceClient.postCallback(id, p),
-    };
-  }
-  return {
-    transport,
-    connect: () => coagentDeviceClient.connect(),
-    disconnect: () => coagentDeviceClient.disconnect(),
-    postCallback: (id, p) => coagentDeviceClient.postCallback(id, p),
-  };
+	const transport = selectTransport(connectionConfig);
+	return {
+		transport,
+		connect: () => coagentServerDeviceClient.connect(),
+		disconnect: () => coagentServerDeviceClient.disconnect(),
+		postCallback: (id, p) => coagentServerDeviceClient.postCallback(id, p),
+	};
 }
 
 function disconnectAll(): void {
-  coagentDeviceClient.disconnect();
-  coagentServerDeviceClient.disconnect();
+	coagentServerDeviceClient.disconnect();
 }
 
 export default defineBackground(() => {
@@ -197,29 +144,23 @@ export default defineBackground(() => {
   (async () => {
     connectionConfig = await loadConnectionConfig();
     const transport = selectTransport(connectionConfig);
-    if (connectionConfig.autoReconnect && transport !== 'none') {
-      console.warn('[Background] auto-connecting device transport', {
-        at: Date.now(),
-        transport,
-      });
-      void activeDeviceClient().connect();
-    } else {
-      console.warn('[Background] device config incomplete, skip auto-connect', {
-        at: Date.now(),
-        transport,
-        hasServerWs: Boolean(connectionConfig.serverWsEndpoint),
-        hasActorId: Boolean(connectionConfig.deviceActorId),
-        hasActorToken: Boolean(connectionConfig.deviceActorToken),
-        hasLegacyUrl: Boolean(connectionConfig.serverUrl),
-        hasLegacyKey: Boolean(connectionConfig.apiKey),
-        hasDeviceId: Boolean(connectionConfig.deviceId),
-      });
-    }
+		if (connectionConfig.autoReconnect && transport !== 'none') {
+			console.warn('[Background] auto-connecting device transport', {
+				at: Date.now(),
+				transport,
+			});
+			void activeDeviceClient().connect();
+		} else {
+			console.warn('[Background] device config incomplete, skip auto-connect', {
+				at: Date.now(),
+				transport,
+				proxyEndpoint: connectionConfig.proxyEndpoint,
+			});
+		}
     // R3-T4 FX9：MV3 SW evict 后，由 publish_wait:* storage 条目恢复
     // publish-wait 收尾。recovery 走 activeDeviceClient().postCallback —
-    // 当 v4 transport 启用时由 server-devicebus 直接走 WS 回 callback；
-    // legacy transport 走 HTTP 兜底 + outbox。两者底层都有 outbox，断网
-    // 期间入队，下次连上自动 replay。
+			// proxy transport 由 server-devicebus 直接走 WS 回 callback；
+			// 断网期间入队，下次连上自动 replay。
     void recoverPublishWaitStates({
       postCallback: (correlationId, payload) =>
         activeDeviceClient().postCallback(correlationId, payload),
@@ -259,41 +200,22 @@ export default defineBackground(() => {
             sendResponse({ success: true });
             break;
           }
-          case 'CONNECT_DEVICE': {
-            const patch: Partial<ConnectionConfig> = { ...(request.payload ?? {}) };
-            if (!patch.connectionMode && (patch.serverUrl ?? '').trim()) {
-              patch.connectionMode = 'legacy';
-            }
-            connectionConfig = await saveConnectionConfig(patch);
-            applyClients(connectionConfig);
-            const transport = selectTransport(connectionConfig);
-            if (transport === 'none') {
-              sendResponse({
-                success: false,
-                error:
-                  'Device 配置不完整：需要 server WS + actor_id + token（v4），或 daemon WS + api key + device id（legacy）。',
-              });
-              break;
-            }
-            const result = await activeDeviceClient().connect();
-            sendResponse(result);
-            break;
-          }
-          case 'CONNECT_PROXY_DAEMON': {
-            const endpoint = String(request.payload?.proxyEndpoint ?? getDefaultProxyEndpoint()).trim();
-            connectionConfig = await saveConnectionConfig({
-              connectionMode: 'proxy',
-              proxyEndpoint: endpoint || getDefaultProxyEndpoint(),
-              deviceActorId: DEFAULT_PROXY_ACTOR_ID,
-              deviceActorToken: '',
-              serverWsEndpoint: '',
-              channelId: '',
-              autoReconnect: true,
-              serverUrl: '',
-              wsUrl: '',
-            });
-            disconnectAll();
-            applyClients(connectionConfig);
+				case 'CONNECT_PROXY_DAEMON': {
+					const endpoint = String(request.payload?.proxyEndpoint ?? getDefaultProxyEndpoint()).trim();
+					connectionConfig = await saveConnectionConfig({
+						connectionMode: 'proxy',
+						proxyEndpoint: endpoint || getDefaultProxyEndpoint(),
+						deviceActorId: DEFAULT_PROXY_ACTOR_ID,
+						channelId: '',
+						autoReconnect: true,
+						serverUrl: '',
+						wsUrl: '',
+						apiKey: '',
+						daemonHttpBase: '',
+						httpBase: '',
+					});
+					disconnectAll();
+					applyClients(connectionConfig);
             const result = await activeDeviceClient().connect();
             sendResponse({ ...result, config: connectionConfig });
             break;
@@ -304,86 +226,10 @@ export default defineBackground(() => {
             break;
           }
           case 'GET_CONNECTION_CONFIG': {
-            connectionConfig = await getConnectionConfig();
-            sendResponse({ success: true, config: connectionConfig });
-            break;
-          }
-          case 'SAVE_CONNECTION_CONFIG': {
-            const patch: Partial<ConnectionConfig> = { ...request.payload };
-            if (!patch.connectionMode && (patch.serverUrl ?? '').trim()) {
-              patch.connectionMode = 'legacy';
-            }
-            connectionConfig = await saveConnectionConfig(patch);
-            // 配置变更：先断开两条 transport，再统一 update（不自动重连，由 popup 触发）。
-            disconnectAll();
-            applyClients(connectionConfig);
-            const transport = selectTransport(connectionConfig);
-            console.log('[Background] device config saved', {
-              transport,
-              hasServerWs: Boolean(connectionConfig.serverWsEndpoint),
-              hasActorId: Boolean(connectionConfig.deviceActorId),
-              hasLegacyUrl: Boolean(connectionConfig.serverUrl),
-              hasLegacyKey: Boolean(connectionConfig.apiKey),
-              deviceId: connectionConfig.deviceId,
-              userId: connectionConfig.userId,
-            });
-            sendResponse({ success: true, config: connectionConfig });
-            break;
-          }
-          case 'RESOLVE_AND_CONNECT': {
-            // M1.2-T3 popup 主入口 1-key 流程。
-            const { coagentServerUrl, apiKey } = request.payload ?? ({} as any);
-            const result = await resolveDeviceConfig({
-              serverUrl: String(coagentServerUrl ?? ''),
-              apiKey: String(apiKey ?? ''),
-            });
-            if (!result.ok) {
-              // resolve 失败 → 不写 storage，把错误透给 popup 显示。
-              console.warn('[Background] device.resolve failed', {
-                kind: result.error.kind,
-                status: result.error.status,
-                message: result.error.message,
-              });
-              sendResponse({
-                success: false,
-                error: result.error.message,
-                errorKind: result.error.kind,
-              });
-              break;
-            }
-            // 写完整 device config（含 wsUrl/httpBase 别名）。
-            const patch: Partial<ConnectionConfig> = {
-              coagentServerUrl: String(coagentServerUrl ?? '').trim(),
-              connectionMode: 'legacy',
-              apiKey: String(apiKey ?? '').trim(),
-              serverUrl: result.data.ws_url, // canonical（legacy daemon WS）
-              wsUrl: result.data.ws_url, // 别名
-              daemonHttpBase: result.data.http_url, // canonical（callback / sync-cookies）
-              httpBase: result.data.http_url, // 别名
-              deviceId: result.data.device_id,
-              userId: result.data.user_id,
-              channelId: result.data.channel_id,
-              daemonId: result.data.daemon_id,
-            };
-            connectionConfig = await saveConnectionConfig(patch);
-            // 切换连接：先断旧再 update，再 connect。
-            disconnectAll();
-            applyClients(connectionConfig);
-            console.warn('[Background] device.resolve ok', {
-              at: Date.now(),
-              transport: selectTransport(connectionConfig),
-              deviceId: connectionConfig.deviceId,
-              channelId: connectionConfig.channelId,
-              daemonId: connectionConfig.daemonId,
-            });
-            const connectResult = await activeDeviceClient().connect();
-            sendResponse({
-              success: connectResult.success,
-              error: connectResult.error,
-              config: connectionConfig,
-            });
-            break;
-          }
+					connectionConfig = await getConnectionConfig();
+					sendResponse({ success: true, config: connectionConfig });
+					break;
+				}
           case 'SYNC_COOKIES': {
             console.log('[Background] Manual cookie sync requested');
             const result = await cookieSyncService.syncNow();
@@ -407,12 +253,10 @@ export default defineBackground(() => {
 
   // T148 (M1.6-T6): externally-connectable handshake. Web UI hosted on
   // an allowed origin (see wxt.config.ts externally_connectable.matches)
-  // calls `chrome.runtime.sendMessage(EXTENSION_ID, {action, ...})` to
-  // hand off a fresh device actor token, bypassing the popup
-  // RESOLVE_AND_CONNECT manual flow. Three actions:
+  // calls `chrome.runtime.sendMessage(EXTENSION_ID, {action, ...})` for
+  // lightweight diagnostics. T178/T5 removed the old token bind action:
   //   - getDeviceInfo  → returns persistent device_id (auto-generated)
-  //   - setDeviceToken → writes v4 actor token bundle + opens WS
-  //   - unbindDevice   → clears v4 fields + disconnects
+  //   - unbindDevice   → disconnects proxy transport
   //
   // All policy / origin validation lives in external-bind.ts so the
   // surface is unit-testable; here we only wire chrome APIs to the
@@ -446,12 +290,10 @@ export default defineBackground(() => {
         connectionConfig = cfg;
         return cfg;
       });
-    },
-    disconnectAll: () => disconnectAll(),
-    applyClients: (cfg) => applyClients(cfg),
-    connect: () => activeDeviceClient().connect(),
-    extensionVersion: chrome.runtime.getManifest().version ?? '0.0.0',
-    allowedOrigins: runtimeAllowedOrigins,
+	    },
+	    disconnectAll: () => disconnectAll(),
+	    extensionVersion: chrome.runtime.getManifest().version ?? '0.0.0',
+	    allowedOrigins: runtimeAllowedOrigins,
     generateDeviceID: () => {
       // crypto.randomUUID is available in MV3 service workers (Chrome 92+).
       const c: any = (globalThis as any).crypto;
@@ -512,26 +354,10 @@ function handleToolResult(payload: any) {
   });
 }
 
-/** v4 server-devicebus transport readiness: server endpoint + actor_id + token. */
-function hasServerDeviceConfig(cfg: ConnectionConfig): boolean {
-  return Boolean(
-    (cfg.serverWsEndpoint ?? '').trim() &&
-    (cfg.deviceActorId ?? '').trim() &&
-    (cfg.deviceActorToken ?? '').trim()
-  );
-}
-
 /** Local proxy daemon transport readiness: endpoint + actor id, no token. */
 function hasProxyDeviceConfig(cfg: ConnectionConfig): boolean {
   return Boolean(
     (cfg.proxyEndpoint ?? getDefaultProxyEndpoint()).trim() &&
     ((cfg.deviceActorId ?? '').trim() || DEFAULT_PROXY_ACTOR_ID)
-  );
-}
-
-/** Legacy daemon-direct transport readiness: daemon WS + api key + device id. */
-function hasLegacyDeviceConfig(cfg: ConnectionConfig): boolean {
-  return Boolean(
-    (cfg.serverUrl ?? '').trim() && (cfg.apiKey ?? '').trim() && (cfg.deviceId ?? '').trim()
   );
 }

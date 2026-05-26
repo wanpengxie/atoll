@@ -51,18 +51,11 @@ export const EXTENSION_CONSTANTS = {
 } as const;
 
 /**
- * T147 §A-E — Server devicebus 协议常量（v4，L4 §2.6.4 DeviceFrame 形态）。
+ * Local proxy daemon DeviceFrame constants.
  *
- * 与 legacy COAGENT_DEVICE_PROTOCOL 的本质差异：
- *   - WS 端点：wss://{server-host}/devicebus?actor_id=...
- *   - 帧形态：DeviceFrame{direction, actor_id, channel_id,
- *     request_id, correlation_id, payload, expires_at}，payload 内嵌
- *     Command/Callback JSON。
- *   - 回调通道：全 WS（不再 HTTP POST /api/device/{id}/callback）。
- *   - 鉴权：actor token 通过 WS subprotocol 一次性鉴权，不再附带 api_key。
- *
- * mock / real provider 切换仍由 background tools registry 决定（与协议
- * 层无关），cmd-handlers.ts 路由保持原样。
+ * The extension connects to coagent-proxy on localhost, sends a hello
+ * frame naming the local actor, then exchanges DeviceFrame command and
+ * callback payloads over the same WS.
  */
 export const COAGENT_SERVER_DEVICEBUS_PROTOCOL = {
   /** WS URL path mounted on the coagent server gin engine. */
@@ -82,24 +75,16 @@ export const COAGENT_SERVER_DEVICEBUS_PROTOCOL = {
   RECONNECT_MAX_MS: 30_000,
   /**
    * Hard cap on consecutive reconnect attempts that close with code !=
-   * 1000/1001 (clean) before we give up. Server-side 401/403 handshake
-   * rejection surfaces to the JS WS API as a code-1006 close (the auth
-   * status frame never reaches user-space). Without a cap, the
-   * background SW will retry a revoked actor_id indefinitely — bug
-   * report `[ServerDeviceBus] WS closed code:1006` in tight loop.
-   *
-   * After this many attempts we stop the loop, clear the stored token
-   * so a stale value can't trigger SW-restart auto-reconnect, and
-   * surface lastError to the popup so the user re-runs bindFlow.
+   * 1000/1001 (clean) before we give up. This prevents the background
+   * service worker from spinning forever when the local proxy endpoint
+   * is unavailable.
    */
   RECONNECT_MAX_ATTEMPTS_AFTER_DIRTY_CLOSE: 5,
   /**
    * WS close codes considered "clean intentional close" — never trigger
    * reconnect. 1000 = normal closure, 1001 = going-away (SW unload).
-   * 4401/4403 are coagent server-side custom codes for auth failure
-   * (token expired / actor registration revoked); when the server CAN
-   * send a close frame (handshake succeeded then actor token got revoked),
-   * these codes tell us the token is dead and reconnect is futile.
+   * 4401/4403 are custom policy close codes. If an intermediate proxy
+   * sends one, reconnect is futile until user action changes config.
    */
   WS_CLOSE_CODE_NORMAL: 1000,
   WS_CLOSE_CODE_GOING_AWAY: 1001,
