@@ -23,12 +23,10 @@ import {
 } from './connection-state';
 import { cookieSyncService } from './tools/sync-cookies';
 import { coagentDeviceClient } from './services/coagent-device';
-import {
-  coagentServerDeviceClient,
-  type ServerDeviceConfig,
-} from './services/server-devicebus';
+import { coagentServerDeviceClient, type ServerDeviceConfig } from './services/server-devicebus';
 import { resolveDeviceConfig } from './services/resolve';
 import { recoverPublishWaitStates } from './tools/publish-content';
+import { registerKeepaliveAlarm } from './keepalive';
 import {
   handleExternalMessage,
   type ExternalBindMessage,
@@ -58,7 +56,8 @@ type BackgroundRequest =
     }
   | { type: 'SYNC_COOKIES' };
 
-let connectionConfig: ConnectionConfig;
+let connectionConfig: ConnectionConfig | null = null;
+let connectionConfigLoad: Promise<ConnectionConfig> | null = null;
 
 /**
  * Tag identifying which device transport binding is in use for the
@@ -71,7 +70,8 @@ let connectionConfig: ConnectionConfig;
  */
 type DeviceTransport = 'server' | 'daemon' | 'none';
 
-function selectTransport(cfg: ConnectionConfig): DeviceTransport {
+function selectTransport(cfg: ConnectionConfig | null | undefined): DeviceTransport {
+  if (!cfg) return 'none';
   if (hasServerDeviceConfig(cfg)) return 'server';
   if (hasLegacyDeviceConfig(cfg)) return 'daemon';
   return 'none';
@@ -100,6 +100,22 @@ function applyClients(cfg: ConnectionConfig): void {
   coagentServerDeviceClient.updateConfig(toServerDeviceConfig(cfg));
 }
 
+function loadConnectionConfig(): Promise<ConnectionConfig> {
+  if (connectionConfig) return Promise.resolve(connectionConfig);
+  if (!connectionConfigLoad) {
+    connectionConfigLoad = getConnectionConfig()
+      .then((cfg) => {
+        connectionConfig = cfg;
+        applyClients(cfg);
+        return cfg;
+      })
+      .finally(() => {
+        connectionConfigLoad = null;
+      });
+  }
+  return connectionConfigLoad;
+}
+
 /**
  * activeDeviceClient returns the client paired with the currently
  * configured transport. Both share the `connect / disconnect / postCallback`
@@ -117,7 +133,7 @@ function activeDeviceClient(): {
       status: 'ok' | 'error';
       result: Record<string, unknown> | null;
       error: { code: string; message: string } | null;
-    },
+    }
   ) => Promise<void>;
 } {
   const transport = selectTransport(connectionConfig);
@@ -143,20 +159,33 @@ function disconnectAll(): void {
 }
 
 export default defineBackground(() => {
-  console.log('🚀 Coagent xhs-extension Background script initialized');
+  console.warn('[Boot] service worker started', {
+    at: Date.now(),
+    version: chrome.runtime.getManifest().version ?? '0.0.0',
+  });
+
+  registerKeepaliveAlarm({
+    alarms: chrome.alarms,
+    loadConnectionConfig,
+    selectTransport,
+    activeDeviceClient,
+  });
 
   initToolsRegistry();
 
   // 异步初始化，不阻塞 Service Worker 启动。
   (async () => {
-    connectionConfig = await getConnectionConfig();
-    applyClients(connectionConfig);
+    connectionConfig = await loadConnectionConfig();
     const transport = selectTransport(connectionConfig);
     if (connectionConfig.autoReconnect && transport !== 'none') {
-      console.info('[Background] auto-connecting device transport', { transport });
+      console.warn('[Background] auto-connecting device transport', {
+        at: Date.now(),
+        transport,
+      });
       void activeDeviceClient().connect();
     } else {
-      console.log('[Background] device config incomplete, skip auto-connect', {
+      console.warn('[Background] device config incomplete, skip auto-connect', {
+        at: Date.now(),
         transport,
         hasServerWs: Boolean(connectionConfig.serverWsEndpoint),
         hasActorId: Boolean(connectionConfig.deviceActorId),
@@ -177,7 +206,10 @@ export default defineBackground(() => {
     })
       .then((summaries) => {
         if (summaries.length > 0) {
-          console.info('[Background] publish-wait recovery summaries', summaries);
+          console.warn('[Background] publish-wait recovery summaries', {
+            at: Date.now(),
+            summaries,
+          });
         }
       })
       .catch((err) => {
@@ -266,17 +298,21 @@ export default defineBackground(() => {
                 status: result.error.status,
                 message: result.error.message,
               });
-              sendResponse({ success: false, error: result.error.message, errorKind: result.error.kind });
+              sendResponse({
+                success: false,
+                error: result.error.message,
+                errorKind: result.error.kind,
+              });
               break;
             }
             // 写完整 device config（含 wsUrl/httpBase 别名）。
             const patch: Partial<ConnectionConfig> = {
               coagentServerUrl: String(coagentServerUrl ?? '').trim(),
               apiKey: String(apiKey ?? '').trim(),
-              serverUrl: result.data.ws_url,        // canonical（legacy daemon WS）
-              wsUrl: result.data.ws_url,            // 别名
+              serverUrl: result.data.ws_url, // canonical（legacy daemon WS）
+              wsUrl: result.data.ws_url, // 别名
               daemonHttpBase: result.data.http_url, // canonical（callback / sync-cookies）
-              httpBase: result.data.http_url,       // 别名
+              httpBase: result.data.http_url, // 别名
               deviceId: result.data.device_id,
               userId: result.data.user_id,
               channelId: result.data.channel_id,
@@ -286,7 +322,8 @@ export default defineBackground(() => {
             // 切换连接：先断旧再 update，再 connect。
             disconnectAll();
             applyClients(connectionConfig);
-            console.info('[Background] device.resolve ok', {
+            console.warn('[Background] device.resolve ok', {
+              at: Date.now(),
               transport: selectTransport(connectionConfig),
               deviceId: connectionConfig.deviceId,
               channelId: connectionConfig.channelId,
@@ -341,9 +378,11 @@ export default defineBackground(() => {
   // edit a second list here; the handler's defense-in-depth check will
   // simply mirror whatever Chrome already enforced upstream.
   const manifestMatches =
-    (chrome.runtime.getManifest() as chrome.runtime.Manifest & {
-      externally_connectable?: { matches?: string[] };
-    }).externally_connectable?.matches ?? [];
+    (
+      chrome.runtime.getManifest() as chrome.runtime.Manifest & {
+        externally_connectable?: { matches?: string[] };
+      }
+    ).externally_connectable?.matches ?? [];
   const runtimeAllowedOrigins =
     manifestMatches.length > 0
       ? manifestMatches
@@ -386,10 +425,16 @@ export default defineBackground(() => {
         id: sender?.id,
         tab: sender?.tab ? { id: sender.tab.id } : undefined,
       };
-      console.log('[Background] Received external message', { action: message?.action, sender: narrowSender });
+      console.log('[Background] Received external message', {
+        action: message?.action,
+        sender: narrowSender,
+      });
       void handleExternalMessage(message, narrowSender, externalDeps)
         .then((response) => {
-          console.log('[Background] External message response', { action: message?.action, status: response.status });
+          console.log('[Background] External message response', {
+            action: message?.action,
+            status: response.status,
+          });
           sendResponse(response);
         })
         .catch((err) => {
@@ -401,7 +446,7 @@ export default defineBackground(() => {
           });
         });
       return true; // async sendResponse — Chrome keeps the channel open.
-    },
+    }
   );
 
   chrome.runtime.onInstalled.addListener((details) => {
@@ -424,16 +469,14 @@ function handleToolResult(payload: any) {
 function hasServerDeviceConfig(cfg: ConnectionConfig): boolean {
   return Boolean(
     (cfg.serverWsEndpoint ?? '').trim() &&
-      (cfg.deviceActorId ?? '').trim() &&
-      (cfg.deviceActorToken ?? '').trim(),
+    (cfg.deviceActorId ?? '').trim() &&
+    (cfg.deviceActorToken ?? '').trim()
   );
 }
 
 /** Legacy daemon-direct transport readiness: daemon WS + api key + device id. */
 function hasLegacyDeviceConfig(cfg: ConnectionConfig): boolean {
   return Boolean(
-    (cfg.serverUrl ?? '').trim() &&
-      (cfg.apiKey ?? '').trim() &&
-      (cfg.deviceId ?? '').trim(),
+    (cfg.serverUrl ?? '').trim() && (cfg.apiKey ?? '').trim() && (cfg.deviceId ?? '').trim()
   );
 }

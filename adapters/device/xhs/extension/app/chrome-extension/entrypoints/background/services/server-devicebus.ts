@@ -43,15 +43,8 @@
 //   - Tests use `setWebSocketImpl` test seam exactly as the legacy module
 //     to keep the harness shape comparable.
 
-import {
-  COAGENT_SERVER_DEVICEBUS_PROTOCOL,
-  ERROR_MESSAGES,
-} from 'coagent-xhs-shared';
-import {
-  type CommandFrame,
-  getCommandHandler,
-  isKnownCommand,
-} from './cmd-handlers';
+import { COAGENT_SERVER_DEVICEBUS_PROTOCOL, ERROR_MESSAGES } from 'coagent-xhs-shared';
+import { type CommandFrame, getCommandHandler, isKnownCommand } from './cmd-handlers';
 import { saveConnectionStatus } from '../connection-state';
 
 // ─── Wire shapes ─────────────────────────────────────────────────────────
@@ -348,6 +341,8 @@ class CoagentServerDeviceClient {
   private pendingSettle: ((result: ConnectResult) => void) | null = null;
   /** Test seam — overridden via `setWebSocketImpl`. */
   private wsCtor: typeof WebSocket = WebSocket;
+  private inboundFrameCount = 0;
+  private seenInboundFrameTypes = new Set<string>();
 
   setWebSocketImpl(impl: typeof WebSocket): void {
     this.wsCtor = impl;
@@ -417,7 +412,11 @@ class CoagentServerDeviceClient {
 
     // Close any previous socket cleanly first.
     if (this.socket) {
-      try { this.socket.close(1000, 'reconnect'); } catch { /* ignore */ }
+      try {
+        this.socket.close(1000, 'reconnect');
+      } catch {
+        /* ignore */
+      }
       this.socket = null;
     }
 
@@ -455,6 +454,11 @@ class CoagentServerDeviceClient {
         socket = new this.wsCtor(url, protocols);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        console.warn('[ServerDeviceBus] connect failed', {
+          at: Date.now(),
+          url: safeUrl,
+          error: message,
+        });
         void saveConnectionStatus({
           connected: false,
           reconnecting: false,
@@ -466,12 +470,19 @@ class CoagentServerDeviceClient {
       }
 
       this.socket = socket;
-      console.info('[ServerDeviceBus] connecting', { url: safeUrl });
+      console.warn('[ServerDeviceBus] connecting', {
+        at: Date.now(),
+        url: safeUrl,
+        attempt: this.reconnectAttempt + 1,
+      });
 
       socket.addEventListener('open', () => {
         if (this.generation !== gen) return;
         if (this.socket !== socket) return;
-        console.info('[ServerDeviceBus] WS opened', { url: safeUrl });
+        console.warn('[ServerDeviceBus] WS open', {
+          at: Date.now(),
+          url: safeUrl,
+        });
         this.reconnectAttempt = 0;
         void saveConnectionStatus({
           connected: true,
@@ -502,6 +513,7 @@ class CoagentServerDeviceClient {
         if (this.socket !== socket) return;
         const reason = event.reason || 'WebSocket closed';
         console.warn('[ServerDeviceBus] WS closed', {
+          at: Date.now(),
           url: safeUrl,
           code: event.code,
           wasClean: event.wasClean,
@@ -518,8 +530,10 @@ class CoagentServerDeviceClient {
           event.code === COAGENT_SERVER_DEVICEBUS_PROTOCOL.WS_CLOSE_CODE_SESSION_REVOKED;
         if (isAuthFail) {
           console.warn('[ServerDeviceBus] auth-failure close — abandoning reconnect', {
+            at: Date.now(),
+            reason: 'auth_failed',
             code: event.code,
-            reason,
+            closeReason: reason,
           });
           this.shouldReconnect = false;
           this.currentUrl = null;
@@ -538,10 +552,12 @@ class CoagentServerDeviceClient {
           this.reconnectAttempt >=
             COAGENT_SERVER_DEVICEBUS_PROTOCOL.RECONNECT_MAX_ATTEMPTS_AFTER_DIRTY_CLOSE;
         if (exhausted) {
-          console.warn(
-            '[ServerDeviceBus] reconnect budget exhausted — abandoning loop',
-            { attempts: this.reconnectAttempt, code: event.code },
-          );
+          console.warn('[ServerDeviceBus] reconnect budget exhausted — abandoning loop', {
+            at: Date.now(),
+            reason: 'budget_exhausted',
+            attempts: this.reconnectAttempt,
+            code: event.code,
+          });
           this.shouldReconnect = false;
           this.currentUrl = null;
         }
@@ -562,7 +578,11 @@ class CoagentServerDeviceClient {
           typeof ErrorEvent !== 'undefined' && event instanceof ErrorEvent
             ? event.message
             : (event && (event as any).message) || 'WebSocket error';
-        console.error('[ServerDeviceBus] WS error', { url: safeUrl, message });
+        console.warn('[ServerDeviceBus] WS error', {
+          at: Date.now(),
+          url: safeUrl,
+          message,
+        });
         void saveConnectionStatus({
           connected: false,
           reconnecting: this.shouldReconnect,
@@ -590,7 +610,8 @@ class CoagentServerDeviceClient {
    */
   private hardResetForIdentitySwap(reason: string): void {
     this.generation += 1;
-    console.info('[ServerDeviceBus] hard reset', {
+    console.warn('[ServerDeviceBus] hard reset', {
+      at: Date.now(),
       reason,
       generation: this.generation,
     });
@@ -599,7 +620,9 @@ class CoagentServerDeviceClient {
       this.pendingSettle = null;
       try {
         s({ success: false, error: `canceled: ${reason}` });
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
     this.connectInFlight = null;
     this.clearReconnectTimer();
@@ -607,12 +630,21 @@ class CoagentServerDeviceClient {
     this.currentUrl = null;
     this.shouldReconnect = false;
     if (this.socket) {
-      try { this.socket.close(1000, 'reset'); } catch { /* ignore */ }
+      try {
+        this.socket.close(1000, 'reset');
+      } catch {
+        /* ignore */
+      }
       this.socket = null;
     }
   }
 
   disconnect(): void {
+    console.warn('[ServerDeviceBus] reconnect abandoned', {
+      at: Date.now(),
+      reason: 'disconnect',
+      generation: this.generation,
+    });
     // disconnect is the explicit "stop and forget" — full hard reset
     // so a stray reconnect timer / pending promise from a prior
     // actor_id can't fire after the user unbinds. Previously this
@@ -633,7 +665,8 @@ class CoagentServerDeviceClient {
     const cap = COAGENT_SERVER_DEVICEBUS_PROTOCOL.RECONNECT_MAX_MS;
     const delay = Math.min(cap, base * Math.pow(2, this.reconnectAttempt));
     this.reconnectAttempt += 1;
-    console.info('[ServerDeviceBus] schedule reconnect', {
+    console.warn('[ServerDeviceBus] schedule reconnect', {
+      at: Date.now(),
       attempt: this.reconnectAttempt,
       delay,
       generation: gen,
@@ -667,6 +700,7 @@ class CoagentServerDeviceClient {
     }
     if (!parsed || typeof parsed !== 'object') return;
     const frame = parsed as DeviceFrame;
+    this.logInboundFrame(frame);
     // Only `to_device` frames are addressed at us; anything else is
     // probably an echo of our own outbound — drop quietly.
     if (frame.direction !== COAGENT_SERVER_DEVICEBUS_PROTOCOL.DIRECTION_TO_DEVICE) {
@@ -708,7 +742,8 @@ class CoagentServerDeviceClient {
       return;
     }
 
-    console.info('[ServerDeviceBus] dispatch command', {
+    console.warn('[ServerDeviceBus] dispatch command', {
+      at: Date.now(),
       correlationId,
       cmd: cmd.cmd,
       hasSession: Boolean(cmd.session?.cookies?.length),
@@ -768,10 +803,7 @@ class CoagentServerDeviceClient {
   }
 
   /** Build + send a `from_device` DeviceFrame echoing the inbound IDs. */
-  private async replyCallback(
-    inbound: DeviceFrame,
-    body: CallbackPayload,
-  ): Promise<void> {
+  private async replyCallback(inbound: DeviceFrame, body: CallbackPayload): Promise<void> {
     const cfg = this.config;
     const out: DeviceFrame = {
       direction: 'from_device',
@@ -795,6 +827,7 @@ class CoagentServerDeviceClient {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
       try {
         this.socket.send(text);
+        console.warn('[ServerDeviceBus] sent frame', frameLogDetails(frame));
         return;
       } catch (err) {
         console.warn('[ServerDeviceBus] socket.send failed; enqueuing', err);
@@ -818,13 +851,18 @@ class CoagentServerDeviceClient {
    */
   async postCallback(
     correlationId: string,
-    payload: Omit<CallbackBody, 'correlation_id'>,
+    payload: Omit<CallbackBody, 'correlation_id'>
   ): Promise<void> {
     const cfg = this.config;
     if (!cfg) {
       console.warn('[ServerDeviceBus] postCallback: no config');
       return;
     }
+    console.warn('[ServerDeviceBus] postCallback', {
+      at: Date.now(),
+      correlation_id: correlationId,
+      status: payload.status,
+    });
     const cb: CallbackPayload = {
       correlation_id: correlationId,
       status: payload.status,
@@ -913,11 +951,28 @@ class CoagentServerDeviceClient {
     }
     await writeOutbox(survivors);
     if (sent > 0) {
-      console.info('[ServerDeviceBus] drained outbox callbacks', {
+      console.warn('[ServerDeviceBus] drained outbox callbacks', {
+        at: Date.now(),
         sent,
         kept: survivors.length,
       });
     }
+  }
+
+  private logInboundFrame(frame: DeviceFrame): void {
+    this.inboundFrameCount += 1;
+    const frameType = payloadType(frame.payload);
+    const firstType = !this.seenInboundFrameTypes.has(frameType);
+    if (firstType) this.seenInboundFrameTypes.add(frameType);
+    if (!firstType && this.inboundFrameCount % 10 !== 0) return;
+    console.warn('[ServerDeviceBus] inbound frame received', {
+      at: Date.now(),
+      count: this.inboundFrameCount,
+      direction: frame.direction,
+      frame_type: frameType,
+      request_id: frame.request_id,
+      correlation_id: frame.correlation_id,
+    });
   }
 }
 
@@ -936,6 +991,24 @@ function pickCorrelationId(frame: DeviceFrame, fallback: string): string {
     return frame.request_id.trim();
   }
   return fallback;
+}
+
+function frameLogDetails(frame: DeviceFrame): Record<string, unknown> {
+  return {
+    at: Date.now(),
+    direction: frame.direction,
+    frame_type: payloadType(frame.payload),
+    request_id: frame.request_id,
+    correlation_id: frame.correlation_id,
+  };
+}
+
+function payloadType(payload: unknown): string {
+  if (payload && typeof payload === 'object') {
+    const type = (payload as Record<string, unknown>).type;
+    if (typeof type === 'string' && type) return type;
+  }
+  return typeof payload;
 }
 
 export const coagentServerDeviceClient = new CoagentServerDeviceClient();
