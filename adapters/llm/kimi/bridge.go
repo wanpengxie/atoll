@@ -400,6 +400,14 @@ func (b *Bridge) buildAgent(provider llm.ChatProvider, emitter wire.Emitter) (ki
 		Provider:        provider,
 		WireEmitter:     emitter,
 		AdditionalTools: b.channelTools(),
+		// SkillRoots: empty non-nil slice = hermetic skill discovery.
+		// coagent's worker MUST NOT pick up arbitrary SKILL.md files from
+		// the user's $HOME/.kimi/skills (those belong to other tools like
+		// Claude Code's skill catalog). go-kimi's DefaultSkillRoots would
+		// otherwise scan there and either inject unrelated skills into
+		// our agent or fail boot on parse errors. Hermetic = the agent
+		// sees only the channel-type catalog we explicitly install.
+		SkillRoots: []string{},
 		Overrides: gokimi.AgentOverrides{
 			SystemPrompt: b.cfg.SystemPrompt,
 			Model:        b.cfg.Model,
