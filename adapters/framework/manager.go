@@ -699,6 +699,9 @@ func (m *Manager) Dispatch(ctx context.Context, env *message.Envelope) error {
 	if env.Type == "actor.status" {
 		return m.respondActorStatus(ctx, bm, env)
 	}
+	if env.Type == "actor.describe" {
+		return m.respondActorDescribe(ctx, bm, env)
+	}
 
 	// Verify the type is one the adapter declared.
 	if !declHasType(bm.declaration, env.Type) {
@@ -800,6 +803,82 @@ func (m *Manager) respondActorStatus(ctx context.Context, bm *boundModule, env *
 		return fmt.Errorf("framework: actor.status marshal: %w", err)
 	}
 	_, err = bm.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), payload, adapter.RespondOptions{
+		Status: "completed",
+	})
+	return err
+}
+
+// respondActorDescribe answers the actor.describe reserved type with the
+// adapter's static Declaration projection. The data is sourced directly
+// from Module.Declares() — daemon is the single source of truth, server
+// is just transport. No server-side mirror, no event emission.
+//
+// Optional payload `{"type": "<name>"}` filters to a single type's full
+// metadata; omitted payload returns the full actor projection.
+func (m *Manager) respondActorDescribe(ctx context.Context, bm *boundModule, env *message.Envelope) error {
+	decl := bm.declaration
+	catalog := adapter.DeclarationCatalogFromDeclaration(decl)
+
+	var filter struct {
+		Type string `json:"type,omitempty"`
+	}
+	if len(env.Payload) > 0 {
+		_ = json.Unmarshal(env.Payload, &filter)
+	}
+
+	if filter.Type != "" {
+		typeDoc, ok := catalog.Types[filter.Type]
+		typeDecl, declOK := decl.TypeDeclarations[filter.Type]
+		if !ok && !declOK {
+			payload, _ := json.Marshal(map[string]any{
+				"status":     "failed",
+				"reason":     string(message.TerminalReceiverInternalError),
+				"error_code": "unknown_type",
+				"detail":     fmt.Sprintf("actor %s does not declare type %q", decl.ActorID, filter.Type),
+			})
+			_, err := bm.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), payload, adapter.RespondOptions{
+				Status: "failed",
+				Reason: string(message.TerminalReceiverInternalError),
+			})
+			return err
+		}
+		allowedKinds := make([]string, 0, len(typeDecl.AllowedKinds))
+		for _, k := range typeDecl.AllowedKinds {
+			allowedKinds = append(allowedKinds, string(k))
+		}
+		body, err := json.Marshal(map[string]any{
+			"actor_id":        string(decl.ActorID),
+			"type":            filter.Type,
+			"description":     typeDoc.Description,
+			"payload_example": typeDoc.PayloadExample,
+			"payload_fields":  typeDoc.PayloadFields,
+			"error_codes":     typeDoc.ErrorCodes,
+			"notes":           typeDoc.Notes,
+			"allowed_kinds":   allowedKinds,
+			"max_pending_ms":  decl.MaxPendingMs,
+			"handler_binding": string(decl.Binding),
+		})
+		if err != nil {
+			return fmt.Errorf("framework: actor.describe type marshal: %w", err)
+		}
+		_, err = bm.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), body, adapter.RespondOptions{
+			Status: "completed",
+		})
+		return err
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"actor_id":    string(decl.ActorID),
+		"name":        decl.Name,
+		"binding":     string(decl.Binding),
+		"description": catalog.Description,
+		"skill_doc":   catalog.SkillDoc,
+		"types":       catalog.Types,
+	})
+	if err != nil {
+		return fmt.Errorf("framework: actor.describe marshal: %w", err)
+	}
+	_, err = bm.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), body, adapter.RespondOptions{
 		Status: "completed",
 	})
 	return err

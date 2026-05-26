@@ -31,6 +31,15 @@ var reservedActorTypeSet = map[string]reservedActorTypeRule{
 	"actor.status": {
 		AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
 	},
+	// actor.describe returns the actor's static Declaration projection
+	// (description / skill_doc / per-type payload_example / payload_fields
+	// / error_codes+recovery / notes). Framework-intercepted in the
+	// adapter dispatch path; never reaches Module.Handle. Pull-based:
+	// no server-side mirror, no event emission — daemon is the single
+	// source of truth, SDK reads via CallActor.
+	"actor.describe": {
+		AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
+	},
 	"actor.readiness.changed": {
 		AllowedKinds: []message.Kind{message.KindEvent},
 		SystemOnly:   true,

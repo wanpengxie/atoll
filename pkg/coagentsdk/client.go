@@ -248,6 +248,125 @@ func (c *Client) ActorStatus(ctx context.Context, channelID, actorID string) (*A
 	}, nil
 }
 
+// DescribeActorResult is the full Declaration projection returned by
+// Client.DescribeActor — the actor-CLI describe_actor surface backed
+// by the actor.describe reserved type (framework-intercepted; daemon
+// is single source of truth).
+type DescribeActorResult struct {
+	ActorID     string                     `json:"actor_id"`
+	Name        string                     `json:"name,omitempty"`
+	Binding     string                     `json:"binding,omitempty"`
+	Description string                     `json:"description,omitempty"`
+	SkillDoc    string                     `json:"skill_doc,omitempty"`
+	Types       map[string]TypeConventionDoc `json:"types,omitempty"`
+	Raw         json.RawMessage            `json:"-"`
+}
+
+// TypeConventionDoc mirrors kernel/adapter.TypeConventionDoc for the wire.
+type TypeConventionDoc struct {
+	Description    string          `json:"description,omitempty"`
+	PayloadExample json.RawMessage `json:"payload_example,omitempty"`
+	PayloadFields  []FieldDoc      `json:"payload_fields,omitempty"`
+	ErrorCodes     []ErrorDoc      `json:"error_codes,omitempty"`
+	Notes          string          `json:"notes,omitempty"`
+}
+
+// FieldDoc mirrors kernel/adapter.FieldDoc.
+type FieldDoc struct {
+	Name        string `json:"name"`
+	Required    bool   `json:"required,omitempty"`
+	Description string `json:"description,omitempty"`
+	Example     any    `json:"example,omitempty"`
+}
+
+// ErrorDoc mirrors kernel/adapter.ErrorDoc.
+type ErrorDoc struct {
+	Code        string `json:"code"`
+	Description string `json:"description,omitempty"`
+	Recovery    string `json:"recovery,omitempty"`
+}
+
+// DescribeTypeResult is the single-type projection returned by
+// Client.DescribeType.
+type DescribeTypeResult struct {
+	ActorID        string          `json:"actor_id"`
+	Type           string          `json:"type"`
+	Description    string          `json:"description,omitempty"`
+	PayloadExample json.RawMessage `json:"payload_example,omitempty"`
+	PayloadFields  []FieldDoc      `json:"payload_fields,omitempty"`
+	ErrorCodes     []ErrorDoc      `json:"error_codes,omitempty"`
+	Notes          string          `json:"notes,omitempty"`
+	AllowedKinds   []string        `json:"allowed_kinds,omitempty"`
+	MaxPendingMs   int64           `json:"max_pending_ms,omitempty"`
+	HandlerBinding string          `json:"handler_binding,omitempty"`
+	Raw            json.RawMessage `json:"-"`
+}
+
+// DescribeActor returns the actor's static Declaration projection
+// (description / skill_doc / per-type metadata). Implemented as sugar
+// over CallActor with the actor.describe reserved type — framework
+// intercepts at dispatch, daemon answers from Module.Declares() with
+// no server-side mirror.
+func (c *Client) DescribeActor(ctx context.Context, channelID, actorID string) (*DescribeActorResult, error) {
+	res, err := c.CallActor(ctx, CallActorRequest{
+		ChannelID: channelID,
+		ActorID:   actorID,
+		Type:      "actor.describe",
+		Payload:   json.RawMessage(`{}`),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return nil, fmt.Errorf("coagentsdk: actor.describe returned nil result")
+	}
+	if !res.OK {
+		if res.Error != nil {
+			return nil, fmt.Errorf("coagentsdk: actor.describe failed: %s: %s", res.Error.Code, res.Error.Message)
+		}
+		return nil, fmt.Errorf("coagentsdk: actor.describe failed")
+	}
+	var out DescribeActorResult
+	if err := json.Unmarshal(res.Data, &out); err != nil {
+		return nil, fmt.Errorf("coagentsdk: decode actor.describe: %w", err)
+	}
+	out.Raw = append(json.RawMessage(nil), res.Data...)
+	return &out, nil
+}
+
+// DescribeType returns one type's full metadata. Filter is passed via
+// payload so a single CallActor round-trip carries it.
+func (c *Client) DescribeType(ctx context.Context, channelID, actorID, typeName string) (*DescribeTypeResult, error) {
+	if strings.TrimSpace(typeName) == "" {
+		return nil, fmt.Errorf("coagentsdk: type is required")
+	}
+	body, _ := json.Marshal(map[string]string{"type": typeName})
+	res, err := c.CallActor(ctx, CallActorRequest{
+		ChannelID: channelID,
+		ActorID:   actorID,
+		Type:      "actor.describe",
+		Payload:   body,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return nil, fmt.Errorf("coagentsdk: actor.describe(type=%s) returned nil result", typeName)
+	}
+	if !res.OK {
+		if res.Error != nil {
+			return nil, fmt.Errorf("coagentsdk: actor.describe(type=%s) failed: %s: %s", typeName, res.Error.Code, res.Error.Message)
+		}
+		return nil, fmt.Errorf("coagentsdk: actor.describe(type=%s) failed", typeName)
+	}
+	var out DescribeTypeResult
+	if err := json.Unmarshal(res.Data, &out); err != nil {
+		return nil, fmt.Errorf("coagentsdk: decode actor.describe(type=%s): %w", typeName, err)
+	}
+	out.Raw = append(json.RawMessage(nil), res.Data...)
+	return &out, nil
+}
+
 func validateCallActorRequest(req CallActorRequest) error {
 	switch {
 	case strings.TrimSpace(req.ChannelID) == "":

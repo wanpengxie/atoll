@@ -531,6 +531,94 @@ func TestE2E_SDK_CmdAdapter_NonZeroExit(t *testing.T) {
 	}
 }
 
+// TestE2E_SDK_CmdAdapter_Describe verifies the actor.describe reserved
+// type path: SDK calls DescribeActor + DescribeType, framework intercepts
+// at dispatch, daemon answers from Module.Declares() — server is dumb
+// pipe per INVARIANT-0 (no server-side metadata cache).
+func TestE2E_SDK_CmdAdapter_Describe(t *testing.T) {
+	kimi := newFakeKimiBridgeDaemon(t, true)
+	s := harness.Start(t, harness.Options{
+		UseScaffoldXHS: true,
+		ExtraDaemonEnv: []string{"COAGENT_KIMIBRIDGE_BASE_URL=" + kimi.URL},
+	})
+	_, chID, client := setupReliabilityChannelWithType(t, s, "cmd-describe", "cmd-sandbox")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Wait for cmd actor to be installed + ready.
+	waitSDKActor(t, client, chID, string(cmd.DefaultAdapterActorID), 10*time.Second, func(a coagentsdk.ActorInfo) bool {
+		return a.Ready
+	})
+
+	// DescribeActor — must return Description + SkillDoc + Types map.
+	actor, err := client.DescribeActor(ctx, chID, string(cmd.DefaultAdapterActorID))
+	if err != nil {
+		t.Fatalf("DescribeActor: %v", err)
+	}
+	if actor.Description == "" {
+		t.Fatalf("DescribeActor returned empty Description")
+	}
+	if len(actor.SkillDoc) < 100 {
+		t.Errorf("DescribeActor SkillDoc too short: %d chars", len(actor.SkillDoc))
+	}
+	if _, ok := actor.Types[cmd.TypeExec]; !ok {
+		t.Fatalf("DescribeActor types missing %s; got %v", cmd.TypeExec, mapKeys(actor.Types))
+	}
+
+	// DescribeType cmd.exec — full payload schema hints + error_codes.
+	exec, err := client.DescribeType(ctx, chID, string(cmd.DefaultAdapterActorID), cmd.TypeExec)
+	if err != nil {
+		t.Fatalf("DescribeType cmd.exec: %v", err)
+	}
+	if exec.Description == "" {
+		t.Fatalf("DescribeType cmd.exec Description empty")
+	}
+	if len(exec.PayloadExample) == 0 {
+		t.Fatalf("DescribeType cmd.exec PayloadExample empty")
+	}
+	if len(exec.PayloadFields) == 0 {
+		t.Fatalf("DescribeType cmd.exec PayloadFields empty")
+	}
+	if len(exec.ErrorCodes) == 0 {
+		t.Fatalf("DescribeType cmd.exec ErrorCodes empty")
+	}
+	// Every error_code MUST carry a recovery hint (actor-adapter.md F.6).
+	for _, ec := range exec.ErrorCodes {
+		if ec.Recovery == "" {
+			t.Errorf("error_code %q missing recovery hint", ec.Code)
+		}
+	}
+	if exec.HandlerBinding != "embedded" {
+		t.Errorf("HandlerBinding=%q want embedded", exec.HandlerBinding)
+	}
+	hasRequest := false
+	for _, k := range exec.AllowedKinds {
+		if k == "request" {
+			hasRequest = true
+		}
+	}
+	if !hasRequest {
+		t.Errorf("AllowedKinds=%v missing request", exec.AllowedKinds)
+	}
+
+	// DescribeType on unknown type — fail-shaped envelope, error_code=unknown_type.
+	_, err = client.DescribeType(ctx, chID, string(cmd.DefaultAdapterActorID), "cmd.totally_not_a_real_type")
+	if err == nil {
+		t.Fatalf("DescribeType unknown type: want error")
+	}
+	if !strings.Contains(err.Error(), "unknown_type") {
+		t.Errorf("err=%v should mention unknown_type", err)
+	}
+}
+
+func mapKeys(m map[string]coagentsdk.TypeConventionDoc) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // TestE2E_SDK_CmdAdapter_Which exercises the cheap pre-flight verb
 // that the skill_doc tells agents to run before cmd.exec.
 func TestE2E_SDK_CmdAdapter_Which(t *testing.T) {
