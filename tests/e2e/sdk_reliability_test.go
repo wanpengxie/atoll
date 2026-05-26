@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/ActOS/adapters/cmd"
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/kimibridge"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
@@ -283,11 +284,15 @@ func TestE2E_SDK_Reliability_ToolSurface_DeviceXHS_OfflineFastFail(t *testing.T)
 }
 
 func setupReliabilityChannel(t *testing.T, s *harness.Stack, name string) (string, string, *coagentsdk.Client) {
+	return setupReliabilityChannelWithType(t, s, name, "xhs-creator")
+}
+
+func setupReliabilityChannelWithType(t *testing.T, s *harness.Stack, name, channelType string) (string, string, *coagentsdk.Client) {
 	t.Helper()
 	email := "reliability-" + name + "+" + uniqSuffix() + "@e2e.local"
 	s.RegisterAndLogin(email, "password-e2e-12345")
 	wsID := s.CreateWorkspace("ws-" + name + "-" + uniqSuffix())
-	chID := s.CreateChannel(wsID, "ch-"+name+"-"+uniqSuffix(), "xhs-creator")
+	chID := s.CreateChannel(wsID, "ch-"+name+"-"+uniqSuffix(), channelType)
 	s.BindChannel(wsID, chID)
 	return wsID, chID, &coagentsdk.Client{
 		BaseURL:      s.ServerURLBase(),
@@ -348,4 +353,228 @@ func newFakeKimiBridgeDaemon(t *testing.T, extensionConnected bool) *httptest.Se
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// ============================================================
+// cmd cli-adapter — actor-cli-pattern §19.3 living e2e
+// ============================================================
+//
+// Drives a real CLI binary (echo / false / sleep / a non-allowed one)
+// through the SDK 4-verb chain on a `cmd-sandbox` channel. Verifies the
+// new adapter (added 2026-05-26) honours the full A-H exposed surface
+// + R1-R6 reliability invariants from actor-adapter.md.
+
+// TestE2E_SDK_CmdAdapter_FullChain walks the canonical agent cognitive
+// chain (actor-adapter.md §5) as far as the current SDK surface allows:
+//
+//   Step 1 Discover    → list_actors finds tool:cmd + its types
+//   Step 2 Pre-flight  → readiness=ready (embedded baseline)
+//   Step 3 Plan        → cmd.which to pre-flight the binary
+//   Step 4 Execute     → call_actor echo "hello"
+//   Step 5 Interpret   → success, decode {stdout, exit_code, ...}
+//
+// describe_actor / describe_type endpoints are not yet exposed via SDK
+// (worker bridge only — see actor-adapter.md §16 SDK gap); LLM-side
+// agents get them through the kimi meta-tool path.
+func TestE2E_SDK_CmdAdapter_FullChain(t *testing.T) {
+	kimi := newFakeKimiBridgeDaemon(t, true)
+	s := harness.Start(t, harness.Options{
+		UseScaffoldXHS: true,
+		ExtraDaemonEnv: []string{"COAGENT_KIMIBRIDGE_BASE_URL=" + kimi.URL},
+	})
+	_, chID, client := setupReliabilityChannelWithType(t, s, "cmd-fullchain", "cmd-sandbox")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Step 1: Discover — universe contains tool:cmd with its 2 types.
+	// cmd-sandbox channel binds ONLY tool:cmd; xhs / kimibridge MUST NOT
+	// appear here (per CmdSandboxChannelType gate in CmdFactory).
+	universe := waitSDKActor(t, client, chID, string(cmd.DefaultAdapterActorID), 10*time.Second, func(a coagentsdk.ActorInfo) bool {
+		return a.Ready && len(a.Types) >= len(cmd.AllTypes)
+	})
+	// AllTypes (cmd.exec, cmd.which) MUST be present. The framework
+	// auto-registers `adapter.<name>.orphan_callback` for F7 observability,
+	// which appears here too — tolerate it without flagging unexpected.
+	want := map[string]bool{cmd.TypeExec: false, cmd.TypeWhich: false}
+	for _, ty := range universe.Types {
+		if _, ok := want[ty.Type]; ok {
+			want[ty.Type] = true
+		}
+	}
+	for ty, seen := range want {
+		if !seen {
+			t.Errorf("cmd actor missing type %s in list_actors (got %+v)", ty, universe.Types)
+		}
+	}
+	allActors, err := client.ListActors(ctx, chID)
+	if err != nil {
+		t.Fatalf("ListActors: %v", err)
+	}
+	for _, a := range allActors {
+		if a.ActorID == string(devicexhs.DefaultAdapterActorID) || a.ActorID == string(kimibridge.DefaultAdapterActorID) {
+			t.Errorf("cmd-sandbox channel leaked %s actor", a.ActorID)
+		}
+	}
+
+	// Step 2: Pre-flight via cmd.which — `echo` exists + allowed.
+	whichRes, err := client.CallActor(ctx, coagentsdk.CallActorRequest{
+		ChannelID: chID,
+		ActorID:   string(cmd.DefaultAdapterActorID),
+		Type:      cmd.TypeWhich,
+		Payload:   json.RawMessage(`{"binary":"echo"}`),
+		Timeout:   5 * time.Second,
+	})
+	if err != nil || !whichRes.OK {
+		t.Fatalf("which echo failed: err=%v error=%+v", err, whichRes.Error)
+	}
+	var which cmd.WhichResponse
+	_ = json.Unmarshal(whichRes.Data, &which)
+	if !which.Allowed || which.Path == "" {
+		t.Fatalf("which echo allowed=%v path=%q", which.Allowed, which.Path)
+	}
+
+	// Step 3+4: Execute — real echo.
+	res, err := client.CallActor(ctx, coagentsdk.CallActorRequest{
+		ChannelID: chID,
+		ActorID:   string(cmd.DefaultAdapterActorID),
+		Type:      cmd.TypeExec,
+		Payload:   json.RawMessage(`{"binary":"echo","args":["hello","world"]}`),
+		Timeout:   10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("CallActor cmd.exec echo: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("CallActor cmd.exec echo failed: %+v", res.Error)
+	}
+	var execResp cmd.ExecResponse
+	if err := json.Unmarshal(res.Data, &execResp); err != nil {
+		t.Fatalf("decode ExecResponse: %v raw=%s", err, string(res.Data))
+	}
+	if execResp.Stdout != "hello world\n" {
+		t.Fatalf("stdout=%q want \"hello world\\n\"", execResp.Stdout)
+	}
+	if execResp.ExitCode != 0 {
+		t.Fatalf("exit_code=%d want 0", execResp.ExitCode)
+	}
+}
+
+// TestE2E_SDK_CmdAdapter_BinaryNotAllowed verifies the allowlist
+// fail-closed semantics surface to the SDK as a failed terminal with
+// the documented error_code + recovery hint.
+func TestE2E_SDK_CmdAdapter_BinaryNotAllowed(t *testing.T) {
+	kimi := newFakeKimiBridgeDaemon(t, true)
+	s := harness.Start(t, harness.Options{
+		UseScaffoldXHS: true,
+		ExtraDaemonEnv: []string{"COAGENT_KIMIBRIDGE_BASE_URL=" + kimi.URL},
+	})
+	_, chID, client := setupReliabilityChannelWithType(t, s, "cmd-deny", "cmd-sandbox")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	res, err := client.CallActor(ctx, coagentsdk.CallActorRequest{
+		ChannelID: chID,
+		ActorID:   string(cmd.DefaultAdapterActorID),
+		Type:      cmd.TypeExec,
+		Payload:   json.RawMessage(`{"binary":"rm","args":["-rf","/"]}`),
+		Timeout:   5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("CallActor: %v", err)
+	}
+	if res.OK {
+		t.Fatalf("rm allowed through allowlist; this is a security regression")
+	}
+	if res.Error == nil || res.Error.Code != "binary_not_allowed" {
+		t.Fatalf("error code=%q want binary_not_allowed", func() string {
+			if res.Error == nil {
+				return "<nil>"
+			}
+			return res.Error.Code
+		}())
+	}
+}
+
+// TestE2E_SDK_CmdAdapter_NonZeroExit verifies that a non-zero exit
+// code is delivered as a SUCCESS terminal (status=completed) — the
+// binary ran; the caller decides what to do with exit_code.
+func TestE2E_SDK_CmdAdapter_NonZeroExit(t *testing.T) {
+	kimi := newFakeKimiBridgeDaemon(t, true)
+	s := harness.Start(t, harness.Options{
+		UseScaffoldXHS: true,
+		ExtraDaemonEnv: []string{"COAGENT_KIMIBRIDGE_BASE_URL=" + kimi.URL},
+	})
+	_, chID, client := setupReliabilityChannelWithType(t, s, "cmd-false", "cmd-sandbox")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	res, err := client.CallActor(ctx, coagentsdk.CallActorRequest{
+		ChannelID: chID,
+		ActorID:   string(cmd.DefaultAdapterActorID),
+		Type:      cmd.TypeExec,
+		Payload:   json.RawMessage(`{"binary":"false"}`),
+		Timeout:   5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("CallActor: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("false exited non-zero but terminal=failed (binary did run): %+v", res.Error)
+	}
+	var execResp cmd.ExecResponse
+	_ = json.Unmarshal(res.Data, &execResp)
+	if execResp.ExitCode == 0 {
+		t.Fatalf("exit_code=0; expected non-zero from `false`")
+	}
+}
+
+// TestE2E_SDK_CmdAdapter_Which exercises the cheap pre-flight verb
+// that the skill_doc tells agents to run before cmd.exec.
+func TestE2E_SDK_CmdAdapter_Which(t *testing.T) {
+	kimi := newFakeKimiBridgeDaemon(t, true)
+	s := harness.Start(t, harness.Options{
+		UseScaffoldXHS: true,
+		ExtraDaemonEnv: []string{"COAGENT_KIMIBRIDGE_BASE_URL=" + kimi.URL},
+	})
+	_, chID, client := setupReliabilityChannelWithType(t, s, "cmd-which", "cmd-sandbox")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Allowed + present.
+	res, err := client.CallActor(ctx, coagentsdk.CallActorRequest{
+		ChannelID: chID,
+		ActorID:   string(cmd.DefaultAdapterActorID),
+		Type:      cmd.TypeWhich,
+		Payload:   json.RawMessage(`{"binary":"echo"}`),
+		Timeout:   3 * time.Second,
+	})
+	if err != nil || !res.OK {
+		t.Fatalf("which echo: err=%v err_obj=%+v", err, res.Error)
+	}
+	var w cmd.WhichResponse
+	_ = json.Unmarshal(res.Data, &w)
+	if !w.Allowed || w.Path == "" {
+		t.Fatalf("which echo allowed=%v path=%q want true, non-empty", w.Allowed, w.Path)
+	}
+
+	// Disallowed binary — which still reports it cleanly with allowed=false.
+	res2, err := client.CallActor(ctx, coagentsdk.CallActorRequest{
+		ChannelID: chID,
+		ActorID:   string(cmd.DefaultAdapterActorID),
+		Type:      cmd.TypeWhich,
+		Payload:   json.RawMessage(`{"binary":"rm"}`),
+		Timeout:   3 * time.Second,
+	})
+	if err != nil || !res2.OK {
+		t.Fatalf("which rm: err=%v err_obj=%+v", err, res2.Error)
+	}
+	var w2 cmd.WhichResponse
+	_ = json.Unmarshal(res2.Data, &w2)
+	if w2.Allowed {
+		t.Fatalf("rm allowed=true (allowlist regression)")
+	}
 }
