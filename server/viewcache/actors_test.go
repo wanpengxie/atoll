@@ -22,6 +22,10 @@ func TestActorSnapshotProjectsTypesAndReadiness(t *testing.T) {
 			"actor_kind":    "tool",
 			"actor_binding": "runtime_inbound_via_relay",
 			"display_name":  "xhs",
+			"proxy_host": map[string]any{
+				"daemon_id":   "daemon-event",
+				"daemon_name": "Envelope Laptop",
+			},
 		}),
 		actorSnapshotFrame(chID, 2, "system.type.installed", map[string]any{
 			"type":             "xhs.publish",
@@ -50,7 +54,7 @@ func TestActorSnapshotProjectsTypesAndReadiness(t *testing.T) {
 	if _, err := svc.db.ExecContext(ctx, `
 		INSERT INTO daemons
 		  (id, key_hash, channel_id, owner_id, name, api_key, api_key_prefix, status, created_at)
-		VALUES ('daemon-proxy', '', ?, 'user-1', 'Laptop', 'dk_test', 'dk_test...', 'online', 1000)`,
+		VALUES ('daemon-sql', '', ?, 'user-1', 'SQL Laptop', 'dk_test', 'dk_test...', 'online', 1000)`,
 		string(chID),
 	); err != nil {
 		t.Fatalf("insert daemon: %v", err)
@@ -58,7 +62,7 @@ func TestActorSnapshotProjectsTypesAndReadiness(t *testing.T) {
 	if _, err := svc.db.ExecContext(ctx, `
 		INSERT INTO daemon_active_actors
 		  (channel_id, actor_id, daemon_id, registered_at, last_seen_at)
-		VALUES (?, 'tool:xhs-adapter', 'daemon-proxy', 1000, 2000)`,
+		VALUES (?, 'tool:xhs-adapter', 'daemon-sql', 1000, 2000)`,
 		string(chID),
 	); err != nil {
 		t.Fatalf("insert active actor: %v", err)
@@ -88,8 +92,50 @@ func TestActorSnapshotProjectsTypesAndReadiness(t *testing.T) {
 	if len(a.Types) != 1 || a.Types[0].Type != "xhs.publish" || a.Types[0].MaxPendingMs != 30_000 {
 		t.Fatalf("types=%+v", a.Types)
 	}
-	if a.DaemonID != "daemon-proxy" || a.DaemonName != "Laptop" {
-		t.Fatalf("daemon projection=%+v", a)
+	if a.DaemonID != "daemon-event" || a.DaemonName != "Envelope Laptop" {
+		t.Fatalf("daemon projection=%+v; want envelope proxy_host, not daemon_active_actors", a)
+	}
+}
+
+func TestActorSnapshotDoesNotDeriveHostFromDaemonActiveActors(t *testing.T) {
+	svc := newR7Service(t)
+	ctx := context.Background()
+	chID := channel.ID("ch-actors-no-host")
+
+	if _, err := svc.Apply(ctx, actorSnapshotFrame(chID, 1, "system.actor.registered", map[string]any{
+		"actor_id":      "tool:proxy",
+		"actor_kind":    "tool",
+		"actor_binding": "runtime_inbound_via_relay",
+		"display_name":  "proxy",
+	})); err != nil {
+		t.Fatalf("Apply registered: %v", err)
+	}
+	if _, err := svc.db.ExecContext(ctx, `
+		INSERT INTO daemons
+		  (id, key_hash, channel_id, owner_id, name, api_key, api_key_prefix, status, created_at)
+		VALUES ('daemon-sql-only', '', ?, 'user-1', 'SQL Only', 'dk_test', 'dk_test...', 'online', 1000)`,
+		string(chID),
+	); err != nil {
+		t.Fatalf("insert daemon: %v", err)
+	}
+	if _, err := svc.db.ExecContext(ctx, `
+		INSERT INTO daemon_active_actors
+		  (channel_id, actor_id, daemon_id, registered_at, last_seen_at)
+		VALUES (?, 'tool:proxy', 'daemon-sql-only', 1000, 2000)`,
+		string(chID),
+	); err != nil {
+		t.Fatalf("insert active actor: %v", err)
+	}
+
+	got, err := svc.ActorSnapshot(ctx, chID)
+	if err != nil {
+		t.Fatalf("ActorSnapshot: %v", err)
+	}
+	if len(got.Actors) != 1 {
+		t.Fatalf("actors=%+v", got.Actors)
+	}
+	if a := got.Actors[0]; a.DaemonID != "" || a.DaemonName != "" {
+		t.Fatalf("host metadata came from daemon_active_actors: %+v", a)
 	}
 }
 

@@ -2285,6 +2285,7 @@ func (d *Daemon) handleUpdateMembers(
 			UserID:      string(add.UserID),
 			Role:        add.Role,
 			At:          now,
+			ProxyHost:   memberActorProxyHost(add.ProxyHost),
 		})
 	}
 	removes := make([]store.MemberActorRemove, 0, len(body.Removes))
@@ -2322,6 +2323,16 @@ func hasProxyActorUpdate(body daemonbus.UpdateMembersBody) bool {
 		}
 	}
 	return false
+}
+
+func memberActorProxyHost(host *daemonbus.ProxyHost) store.MemberActorProxyHost {
+	if host == nil {
+		return store.MemberActorProxyHost{}
+	}
+	return store.MemberActorProxyHost{
+		DaemonID:   string(host.DaemonID),
+		DaemonName: host.DaemonName,
+	}
 }
 
 // handleUnbindChannel — T0.2. Closes the per-channel pusher

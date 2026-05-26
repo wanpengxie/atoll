@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
@@ -55,6 +56,48 @@ func TestCatalogPostMember_DaemonActorRegistered_MirrorEventAppended(t *testing.
 	}
 	if _, ok, err := reg.Lookup(ctx, "user:stale"); err != nil || ok {
 		t.Fatalf("stale actor row ok=%v err=%v; actor mutation must roll back with mirror failure", ok, err)
+	}
+}
+
+func TestProxyHostMetadataEmittedInActorRegisteredMirror(t *testing.T) {
+	ctx := context.Background()
+	chID := channel.ID("ch-proxy-host")
+	db, lock, fencing := newMemberTransitionFixture(t, chID)
+	reg := store.NewActorRegistry(db)
+
+	err := reg.ApplyMemberTransitions(ctx, chID, []store.MemberActorAdd{{
+		ID:          "tool:kimi",
+		Kind:        actor.KindTool,
+		Binding:     actor.BindingRuntimeInboundViaRelay,
+		DisplayName: "kimi",
+		UserID:      "u-proxy",
+		Role:        "proxy_daemon",
+		At:          1000,
+		ProxyHost: store.MemberActorProxyHost{
+			DaemonID:   "daemon-proxy",
+			DaemonName: "Proxy Laptop",
+		},
+	}}, nil, fencing)
+	if err != nil {
+		t.Fatalf("ApplyMemberTransitions add: %v", err)
+	}
+
+	msgs := store.NewMessagesWithLock(db, lock)
+	env, ok, err := msgs.FindByID(ctx, chID, "system.actor.registered:tool:kimi:1000")
+	if err != nil || !ok {
+		t.Fatalf("registered mirror ok=%v err=%v", ok, err)
+	}
+	var payload struct {
+		ProxyHost struct {
+			DaemonID   string `json:"daemon_id"`
+			DaemonName string `json:"daemon_name"`
+		} `json:"proxy_host"`
+	}
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("payload JSON: %v", err)
+	}
+	if payload.ProxyHost.DaemonID != "daemon-proxy" || payload.ProxyHost.DaemonName != "Proxy Laptop" {
+		t.Fatalf("proxy_host=%+v", payload.ProxyHost)
 	}
 }
 

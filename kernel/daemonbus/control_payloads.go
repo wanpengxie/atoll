@@ -60,6 +60,15 @@ type UpdateMember struct {
 	Role          string          `json:"role,omitempty"`
 	DisplayName   string          `json:"display_name,omitempty"`
 	CapabilitySet json.RawMessage `json:"capability_set,omitempty"`
+	ProxyHost     *ProxyHost      `json:"proxy_host,omitempty"`
+}
+
+// ProxyHost is optional actor host metadata for proxy-daemon actors. It is
+// carried through control.update_members so the cloud daemon can emit an
+// envelope-observable system.actor.registered declaration.
+type ProxyHost struct {
+	DaemonID   placement.DaemonID `json:"daemon_id,omitempty"`
+	DaemonName string             `json:"daemon_name,omitempty"`
 }
 
 // UpdateMembersBody is the server -> daemon control.update_members payload.

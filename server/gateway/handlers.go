@@ -481,6 +481,10 @@ func (a *App) NotifyProxyDaemonReady(ctx context.Context, d devicebus.Daemon, re
 			Role:          "proxy_daemon",
 			DisplayName:   string(readyActor.ActorID),
 			CapabilitySet: readyActor.CapabilitySet,
+			ProxyHost: &kerneldaemonbus.ProxyHost{
+				DaemonID:   d.ID,
+				DaemonName: d.Name,
+			},
 		})
 	}
 	return a.sendProxyUpdateMembers(ctx, body)

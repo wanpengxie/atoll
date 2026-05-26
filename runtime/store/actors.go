@@ -266,6 +266,15 @@ type MemberActorAdd struct {
 	UserID      string
 	Role        string
 	At          int64
+	ProxyHost   MemberActorProxyHost
+}
+
+// MemberActorProxyHost is optional metadata for proxy-daemon-hosted actors.
+// It is emitted in system.actor.registered only; actor_registry remains the
+// daemon-local framework registry, not a host metadata store.
+type MemberActorProxyHost struct {
+	DaemonID   string
+	DaemonName string
 }
 
 // MemberActorRemove is one daemon-side actor deregistration transition.
@@ -410,7 +419,7 @@ func (r *ActorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, rem
 }
 
 func actorRegisteredEnvelope(channelID channel.ID, add MemberActorAdd) (*message.Envelope, error) {
-	payload, err := json.Marshal(map[string]any{
+	payloadMap := map[string]any{
 		"actor_id":      add.ID,
 		"actor_kind":    add.Kind,
 		"actor_binding": add.Binding,
@@ -418,7 +427,14 @@ func actorRegisteredEnvelope(channelID channel.ID, add MemberActorAdd) (*message
 		"user_id":       add.UserID,
 		"role":          add.Role,
 		"registered_at": add.At,
-	})
+	}
+	if add.ProxyHost.DaemonID != "" || add.ProxyHost.DaemonName != "" {
+		payloadMap["proxy_host"] = map[string]any{
+			"daemon_id":   add.ProxyHost.DaemonID,
+			"daemon_name": add.ProxyHost.DaemonName,
+		}
+	}
+	payload, err := json.Marshal(payloadMap)
 	if err != nil {
 		return nil, err
 	}

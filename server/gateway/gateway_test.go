@@ -3100,6 +3100,97 @@ func TestChannelMembersBackfill_DaemonReconnectReplaysFullMemberSet(t *testing.T
 	}
 }
 
+func TestNotifyProxyDaemonReadyCarriesProxyHostMetadata(t *testing.T) {
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	sess := registerLoginAndCreateChannel(t, client, srv.URL, app, "proxy-host@example.com")
+	chID := channel.ID(sess.channelID)
+	cloudDaemonID := placement.DaemonID("d-proxy-host-cloud")
+	if err := app.Daemonbus().RegisterDaemon(ctx, cloudDaemonID, "localhost", "v0", 32, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon: %v", err)
+	}
+	epoch, err := app.Daemonbus().IssueConnectionEpoch(ctx, cloudDaemonID)
+	if err != nil {
+		t.Fatalf("IssueConnectionEpoch: %v", err)
+	}
+	svrTx, dmn := newPipePair()
+	conn := daemonbus.NewConnection(cloudDaemonID, epoch, svrTx)
+	app.Daemonbus().Register(conn)
+	defer app.Daemonbus().Unregister(cloudDaemonID)
+	go func() { _ = conn.Run(ctx, app.DaemonbusHandlers()) }()
+
+	_, req, err := app.Placements().Reserve(ctx, chID, cloudDaemonID, placement.ConnectionEpoch(epoch), nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if ok, err := app.Placements().Activate(ctx, placement.CreateChannelAck{
+		ChannelID:       req.ChannelID,
+		CreateRequestID: req.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "tok-proxy-host",
+		DaemonID:        cloudDaemonID,
+		Result:          placement.CreateChannelAccepted,
+	}, placement.ConnectionEpoch(epoch)); err != nil || !ok {
+		t.Fatalf("Activate ok=%v err=%v", ok, err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- app.NotifyProxyDaemonReady(ctx, devicebus.Daemon{
+			ID:        "daemon-proxy-host",
+			ChannelID: chID,
+			OwnerID:   "user-proxy-host",
+			Name:      "Proxy Host",
+		}, devicebus.DaemonReadyInput{
+			Actors: []devicebus.ReadyActor{{
+				ActorID:       "tool:proxy-host",
+				CapabilitySet: json.RawMessage(`{"types":["proxy.host"]}`),
+			}},
+		})
+	}()
+
+	frame, err := dmn.ReadFrame(ctx)
+	if err != nil {
+		t.Fatalf("read daemon frame: %v", err)
+	}
+	if frame.FrameKind != kerneldaemonbus.FrameTypeControlUpdateMembers {
+		t.Fatalf("frame kind=%s", frame.FrameKind)
+	}
+	var body kerneldaemonbus.UpdateMembersBody
+	if err := json.Unmarshal(frame.Payload, &body); err != nil {
+		t.Fatalf("decode update_members: %v", err)
+	}
+	if len(body.Adds) != 1 || body.Adds[0].ProxyHost == nil {
+		t.Fatalf("proxy update_members missing proxy_host: %+v", body.Adds)
+	}
+	if got := body.Adds[0].ProxyHost; got.DaemonID != "daemon-proxy-host" || got.DaemonName != "Proxy Host" {
+		t.Fatalf("proxy_host=%+v", got)
+	}
+
+	ackRaw, _ := json.Marshal(kerneldaemonbus.UpdateMembersAckBody{
+		FrameID:   body.FrameID,
+		ChannelID: body.ChannelID,
+		Accepted:  true,
+	})
+	if err := dmn.WriteFrame(ctx, kerneldaemonbus.Frame{
+		FrameID:               frame.FrameID,
+		FrameKind:             kerneldaemonbus.FrameTypeControlUpdateMembersAck,
+		DaemonID:              cloudDaemonID,
+		DaemonConnectionEpoch: epoch,
+		Payload:               ackRaw,
+	}); err != nil {
+		t.Fatalf("ack update_members: %v", err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("NotifyProxyDaemonReady: %v", err)
+	}
+}
+
 // ----------------------------------------------------------------------
 // Test helpers
 // ----------------------------------------------------------------------

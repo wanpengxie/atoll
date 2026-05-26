@@ -98,6 +98,10 @@ func (s *Service) ActorSnapshot(ctx context.Context, channelID channel.ID) (Acto
 				ActorKind    string `json:"actor_kind"`
 				ActorBinding string `json:"actor_binding"`
 				DisplayName  string `json:"display_name"`
+				ProxyHost    struct {
+					DaemonID   string `json:"daemon_id"`
+					DaemonName string `json:"daemon_name"`
+				} `json:"proxy_host"`
 			}
 			if err := json.Unmarshal(env.Payload, &payload); err != nil {
 				continue
@@ -106,6 +110,8 @@ func (s *Service) ActorSnapshot(ctx context.Context, channelID channel.ID) (Acto
 			a.Kind = payload.ActorKind
 			a.Binding = payload.ActorBinding
 			a.DisplayName = payload.DisplayName
+			a.DaemonID = payload.ProxyHost.DaemonID
+			a.DaemonName = payload.ProxyHost.DaemonName
 		case "system.actor.deregistered":
 			var payload struct {
 				ActorID string `json:"actor_id"`
@@ -173,32 +179,6 @@ func (s *Service) ActorSnapshot(ctx context.Context, channelID channel.ID) (Acto
 	}
 	if err := rows.Err(); err != nil {
 		return ActorSnapshot{}, fmt.Errorf("viewcache: actor snapshot rows: %w", err)
-	}
-
-	daemonRows, err := s.db.QueryContext(ctx, `
-		SELECT a.actor_id, a.daemon_id, d.name
-		  FROM daemon_active_actors a
-		  JOIN daemons d ON d.id = a.daemon_id
-		 WHERE a.channel_id = ?
-		 ORDER BY a.actor_id`, string(channelID))
-	if err != nil {
-		return ActorSnapshot{}, fmt.Errorf("viewcache: actor daemon projection query: %w", err)
-	}
-	for daemonRows.Next() {
-		var actorID, daemonID, daemonName string
-		if err := daemonRows.Scan(&actorID, &daemonID, &daemonName); err != nil {
-			_ = daemonRows.Close()
-			return ActorSnapshot{}, fmt.Errorf("viewcache: actor daemon projection scan: %w", err)
-		}
-		a := ensureActor(actorID)
-		a.DaemonID = daemonID
-		a.DaemonName = daemonName
-	}
-	if err := daemonRows.Close(); err != nil {
-		return ActorSnapshot{}, fmt.Errorf("viewcache: actor daemon projection close: %w", err)
-	}
-	if err := daemonRows.Err(); err != nil {
-		return ActorSnapshot{}, fmt.Errorf("viewcache: actor daemon projection rows: %w", err)
 	}
 
 	out := make([]ActorViewRow, 0, len(actors))
