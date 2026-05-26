@@ -29,9 +29,9 @@ import (
 const defaultTokenTTL = 30 * 24 * time.Hour
 
 var (
-	ErrRegistrationNotFound = errors.New("devicebus: actor registration not found")
-	ErrTokenInvalid         = errors.New("devicebus: invalid token")
-	ErrTokenExpired         = errors.New("devicebus: token expired")
+	ErrRegistrationNotFound  = errors.New("devicebus: actor registration not found")
+	ErrTokenInvalid          = errors.New("devicebus: invalid token")
+	ErrTokenExpired          = errors.New("devicebus: token expired")
 	ErrDeviceTypeUnsupported = errors.New("devicebus: device_type unsupported")
 )
 
@@ -42,8 +42,8 @@ type Config struct {
 	AllowedOrigins     []string
 	AllowMissingOrigin bool
 
-	PingCadence     time.Duration
-	IdleReadTimeout time.Duration
+	PingCadence      time.Duration
+	IdleReadTimeout  time.Duration
 	PingWriteTimeout time.Duration
 
 	Logger *slog.Logger

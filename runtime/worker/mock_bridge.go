@@ -81,7 +81,6 @@ const (
 	// (agent.text + visibility=system) the multi-turn-with-progress
 	// script emits before the terminal agent.text. Defaults to 2.
 	EnvKeyMockProgressCount = "COAGENT_MOCK_PROGRESS_COUNT"
-
 )
 
 // MockBridge is the deterministic Bridge implementation cmd/worker

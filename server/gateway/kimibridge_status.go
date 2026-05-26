@@ -38,9 +38,9 @@ func (a *App) handleKimiBridgeStatus(c *gin.Context) {
 	resp, err := a.kimiBridgeStatusFetcher()
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
-			"available": false,
-			"reason":    "daemon_unreachable",
-			"detail":    err.Error(),
+			"available":  false,
+			"reason":     "daemon_unreachable",
+			"detail":     err.Error(),
 			"daemon_url": kimiBridgeDaemonURL,
 		})
 		return
@@ -70,7 +70,7 @@ func (a *App) kimiBridgeStatusFetcher() (kimiBridgeStatusReply, error) {
 	if err != nil {
 		return kimiBridgeStatusReply{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return kimiBridgeStatusReply{}, err

@@ -119,8 +119,8 @@ func (t *ChannelTypeTool) Execute(ctx context.Context, params json.RawMessage) (
 //   - Every adapter exposes the same wire shape (kind=request envelope
 //   - handler actor_id + payload). Direct per-type tool injection
 //     was a transitional shim borrowed from no-standardization worlds
-//     (raw MCP / OpenAI function-calling) where each tool had a
-//     distinct RPC. Once standardization is in, a single invocation
+//     (legacy tool APIs / OpenAI function-calling) where each tool had
+//     a distinct RPC. Once standardization is in, a single invocation
 //     primitive carries them all.
 //   - Live discovery via list_actors keeps the LLM surface O(1) in
 //     the channel's type count + handles dynamic type_registry
@@ -302,16 +302,6 @@ func typeAllowsKind(typ TypeInfo, kind string) bool {
 		}
 	}
 	return false
-}
-
-// requestSchema returns the generic-object payload schema for an LLM
-// tool descriptor. Per protocol Level A (proto-layer0 §1.4.1), the
-// type_registry no longer carries payload schemas; payload consistency
-// is a product-layer concern, so the LLM tool wrapper exposes a
-// permissive object schema and leaves payload shape negotiation to the
-// caller/handler.
-func requestSchema(_ TypeInfo) json.RawMessage {
-	return cloneRawJSON(genericObjectSchema)
 }
 
 func channelToolTimeout(maxPendingMs int64) time.Duration {

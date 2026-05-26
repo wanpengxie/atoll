@@ -329,23 +329,6 @@ func findType(snapshot ChannelContext, name string) (TypeInfo, bool) {
 	return TypeInfo{}, false
 }
 
-// findHandlerType returns the TypeInfo whose Type == name AND
-// HandlerActorID == handler. Kept for legacy callers that need the
-// combined predicate.
-func findHandlerType(snapshot ChannelContext, name, handler string) (TypeInfo, bool) {
-	name = strings.TrimSpace(name)
-	handler = strings.TrimSpace(handler)
-	if name == "" || handler == "" {
-		return TypeInfo{}, false
-	}
-	for _, ty := range snapshot.Types {
-		if strings.TrimSpace(ty.Type) == name && strings.TrimSpace(ty.HandlerActorID) == handler {
-			return ty, true
-		}
-	}
-	return TypeInfo{}, false
-}
-
 // channelRequestSpec is the bag of fields a single call_actor /
 // (legacy) ChannelTypeTool invocation needs to emit + wait. Lets
 // executeChannelRequest stay generic so both meta tools and any future

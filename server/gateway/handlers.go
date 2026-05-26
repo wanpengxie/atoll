@@ -193,14 +193,14 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 				}
 			}
 			df := devicebus.DeviceFrame{
-				Direction:       body.Direction,
-				ActorID:         string(sf.AdapterActorID),
-				ChannelID:       string(sf.ChannelID),
-				RequestID:       body.RequestID,
-				ParentID:        body.ParentID,
-				CorrelationID:   body.CorrelationID,
-				Payload:         body.Payload,
-				ExpiresAt:       body.ExpiresAt,
+				Direction:     body.Direction,
+				ActorID:       string(sf.AdapterActorID),
+				ChannelID:     string(sf.ChannelID),
+				RequestID:     body.RequestID,
+				ParentID:      body.ParentID,
+				CorrelationID: body.CorrelationID,
+				Payload:       body.Payload,
+				ExpiresAt:     body.ExpiresAt,
 			}
 			err := a.devicebus.SendFrameToDevice(ctx, sf.ChannelID, sf.AdapterActorID, df)
 			if errors.Is(err, devicebus.ErrRegistrationNotFound) || errors.Is(err, devicebus.ErrTokenExpired) {

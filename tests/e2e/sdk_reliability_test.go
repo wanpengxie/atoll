@@ -349,4 +349,3 @@ func newFakeKimiBridgeDaemon(t *testing.T, extensionConnected bool) *httptest.Se
 	t.Cleanup(srv.Close)
 	return srv
 }
-

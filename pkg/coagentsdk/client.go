@@ -253,13 +253,13 @@ func (c *Client) ActorStatus(ctx context.Context, channelID, actorID string) (*A
 // by the actor.describe reserved type (framework-intercepted; daemon
 // is single source of truth).
 type DescribeActorResult struct {
-	ActorID     string                     `json:"actor_id"`
-	Name        string                     `json:"name,omitempty"`
-	Binding     string                     `json:"binding,omitempty"`
-	Description string                     `json:"description,omitempty"`
-	SkillDoc    string                     `json:"skill_doc,omitempty"`
+	ActorID     string                       `json:"actor_id"`
+	Name        string                       `json:"name,omitempty"`
+	Binding     string                       `json:"binding,omitempty"`
+	Description string                       `json:"description,omitempty"`
+	SkillDoc    string                       `json:"skill_doc,omitempty"`
 	Types       map[string]TypeConventionDoc `json:"types,omitempty"`
-	Raw         json.RawMessage            `json:"-"`
+	Raw         json.RawMessage              `json:"-"`
 }
 
 // TypeConventionDoc mirrors kernel/adapter.TypeConventionDoc for the wire.

@@ -55,6 +55,7 @@ func TestOpenAndApply(t *testing.T) {
 		"view_cache_cursors",
 		"placement_rollback_intents",
 		"placement_sagas",
+		"daemon_active_actors",
 	}
 	for _, tbl := range wantTables {
 		var n int

@@ -185,12 +185,7 @@ func (m *Module) Heartbeat(ctx context.Context) (adapter.HeartbeatReport, error)
 // probe detail without emitting lifecycle events.
 func (m *Module) Status(ctx context.Context) (adapter.StatusReport, error) {
 	report := m.probeStatus(ctx)
-	return adapter.StatusReport{
-		Available: report.Available,
-		Reason:    report.Reason,
-		Detail:    report.Detail,
-		CheckedAt: report.CheckedAt,
-	}, nil
+	return adapter.StatusReport(report), nil
 }
 
 func (m *Module) probeStatus(ctx context.Context) adapter.HeartbeatReport {

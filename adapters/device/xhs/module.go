@@ -227,12 +227,7 @@ func (m *Module) Heartbeat(_ context.Context) (adapter.HeartbeatReport, error) {
 // Status enriches actor.status with xhs lifecycle detail.
 func (m *Module) Status(ctx context.Context) (adapter.StatusReport, error) {
 	hb, err := m.Heartbeat(ctx)
-	return adapter.StatusReport{
-		Available: hb.Available,
-		Reason:    hb.Reason,
-		Detail:    hb.Detail,
-		CheckedAt: hb.CheckedAt,
-	}, err
+	return adapter.StatusReport(hb), err
 }
 
 // Handle translates one inbound kind=request envelope into an outbound

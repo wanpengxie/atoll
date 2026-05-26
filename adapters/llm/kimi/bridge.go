@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1139,7 +1140,7 @@ func renderChannelContext(c ChannelContext) string {
 			}
 			if a.Kind == string(actor.KindTool) {
 				b.WriteString(", ready=")
-				b.WriteString(fmt.Sprint(a.Ready))
+				b.WriteString(strconv.FormatBool(a.Ready))
 				if a.ReadyReason != "" {
 					b.WriteString(", reason=")
 					b.WriteString(a.ReadyReason)

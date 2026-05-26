@@ -42,6 +42,11 @@ components:
   kernel: { in: kernel/** }
 
   # ─────────────────────────────────────────────────────────────────────
+  # internal — repo-private pure contract/types packages.
+  # ─────────────────────────────────────────────────────────────────────
+  internal: { in: internal/** }
+
+  # ─────────────────────────────────────────────────────────────────────
   # runtime_ipc — daemon ↔ worker IPC wire types (Frame, Codec, payloads).
   # Pure: imports only kernel + stdlib. Shared by runtime (daemon-side
   # workerhost) and runtime_worker (worker subprocess). Splitting it out
@@ -113,6 +118,10 @@ deps:
     # Pure wire-types package. Closed at project boundary: kernel + stdlib only.
     mayDependOn: [kernel]
     # No anyVendorDeps — runtime_ipc is closed (no sqlite, no gin, no kimi).
+
+  internal:
+    # Repo-private contracts stay pure: kernel + stdlib only.
+    mayDependOn: [kernel, internal]
 
   runtime:
     mayDependOn: [kernel, runtime, runtime_ipc, runtime_worker, pkg]
