@@ -66,10 +66,6 @@ components:
   # adapters — adapter implementations. Landed by T4 / T5.
   # Invariants #4 + #5.
   # ─────────────────────────────────────────────────────────────────────
-  # Deprecated T3 schema-only package for the old direct kimibridge actor.
-  # Keep it separate so arch lint rejects any daemon/runtime implementation
-  # dependency creeping back into adapters/kimibridge.
-  adapters_kimibridge_schema: { in: adapters/kimibridge/** }
   adapters:
     in:
       - adapters/device/**
@@ -153,13 +149,8 @@ deps:
     # Sub-packages within adapters/** MAY import each other (same pattern
     # as server/**). The boundary that matters is adapters → server and
     # adapters → runtime (both excluded by NOT listing them here).
-    mayDependOn: [kernel, adapters, adapters_kimibridge_schema, pkg]
+    mayDependOn: [kernel, adapters, pkg]
     anyVendorDeps: true
-
-  adapters_kimibridge_schema:
-    # Schema/type declarations only. No adapters/framework, no HTTP client,
-    # no runtime/server/cmd dependencies.
-    mayDependOn: [kernel, adapters_kimibridge_schema]
 
   server:
     # server uses sqlite for its OWN view-cache / placements / identity
@@ -197,5 +188,5 @@ deps:
     # tests/** is end-to-end smoke infrastructure — composition-root
     # posture mirroring cmd/**. Freely imports every internal component
     # plus any vendor it needs (sqlite, gorilla websocket, etc.).
-    mayDependOn: [kernel, runtime, runtime_worker, runtime_ipc, adapters, adapters_kimibridge_schema, server, pkg, tests]
+    mayDependOn: [kernel, runtime, runtime_worker, runtime_ipc, adapters, server, pkg, tests]
     anyVendorDeps: true

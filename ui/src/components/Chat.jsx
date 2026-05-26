@@ -3,7 +3,6 @@ import { api } from '../api.js';
 import { ChannelSocket } from '../ws.js';
 import { aggregateEnvelopes } from '../aggregation.js';
 import DeviceBind from './DeviceBind.jsx';
-import KimiBridgeStatus from './KimiBridgeStatus.jsx';
 
 export default function Chat({ channelID, channel, me }) {
   const [messages, setMessages] = useState([]);
@@ -89,7 +88,6 @@ export default function Chat({ channelID, channel, me }) {
         <h2>{(channel && (channel.name || channel.Name)) || '…'}</h2>
         <span className="muted">{channel?.type || channel?.Type || ''}</span>
         <DeviceBind channelID={channelID} me={me} />
-        <KimiBridgeStatus />
       </header>
 
       <ol className="messages" ref={listRef}>

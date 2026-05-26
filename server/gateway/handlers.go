@@ -815,12 +815,6 @@ func buildEngine(a *App) *gin.Engine {
 	auth.POST("/workspaces/:wsID/channels/:chID/bind", httperr.MaxBodyBytes(controlJSONBodyLimit), a.handleBindChannel)
 	auth.POST("/channels/:chID/messages", httperr.MaxBodyBytes(writeMessageJSONBodyLimit), a.handleWriteMessage)
 
-	// kimi-webbridge status proxy — UI calls this to render the
-	// "Kimi WebBridge connected" indicator. The local kimi-webbridge
-	// daemon exposes /status on 127.0.0.1:10086 but lacks CORS
-	// headers, so the browser can't hit it directly. We proxy.
-	auth.GET("/kimibridge/status", a.handleKimiBridgeStatus)
-
 	r.GET("/ws", a.pushhub.HandleWS(a.identity))
 	r.GET("/daemonbus", a.daemonbus.HandleWS(a))
 	r.GET("/devicebus", handleDeprecatedDevicebusV1)
