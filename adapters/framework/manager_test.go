@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	proxyfacade "github.com/wanpengxie/ActOS/adapters/framework/proxy_facade"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
@@ -625,6 +626,109 @@ func TestManagerDispatchActorStatusBypassesReadinessPrecheck(t *testing.T) {
 	}
 	if payload["status"] != "completed" || payload["available"] != false || payload["reason"] != "upstream_unreachable" {
 		t.Fatalf("actor.status payload=%v", payload)
+	}
+}
+
+func TestProxyFacadeReservedDescribeStatusUsesFrameworkState(t *testing.T) {
+	decl, err := proxyfacade.DeclarationFromCapability("tool:kimi", json.RawMessage(`{
+		"name":"kimi",
+		"description":"Local Kimi bridge",
+		"types":["kimi.ask"],
+		"type_declarations":{"kimi.ask":{
+			"AllowedKinds":["request","response"],
+			"TerminalConvention":"payload_status",
+			"Description":"Ask local Kimi"
+		}},
+		"max_pending_ms":12000
+	}`))
+	if err != nil {
+		t.Fatalf("DeclarationFromCapability: %v", err)
+	}
+	mod, err := proxyfacade.New(decl)
+	if err != nil {
+		t.Fatalf("proxyfacade.New: %v", err)
+	}
+	mgr, chain, lookup, registry, _ := newTestManager(t, mod, func(cfg *ManagerConfig) {
+		cfg.DeviceTransit = &recordingTransit{}
+	})
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
+
+	describeReq := newTestRequest("channel:test", "agent:author", "actor.describe", "req-proxy-desc")
+	describeReq.Audience = message.Audience{"tool:kimi"}
+	lookup.Put(describeReq)
+	if err := mgr.Dispatch(context.Background(), describeReq); err != nil {
+		t.Fatalf("Dispatch actor.describe: %v", err)
+	}
+	written := chain.Written()
+	if len(written) != 1 {
+		t.Fatalf("written=%d want 1 describe response", len(written))
+	}
+	var describe map[string]any
+	if err := json.Unmarshal(written[0].Payload, &describe); err != nil {
+		t.Fatalf("describe payload: %v", err)
+	}
+	if describe["actor_id"] != "tool:kimi" || describe["binding"] != string(actor.BindingRuntimeInboundViaRelay) {
+		t.Fatalf("describe=%v", describe)
+	}
+	types, ok := describe["types"].(map[string]any)
+	if !ok {
+		t.Fatalf("describe types=%T %v", describe["types"], describe["types"])
+	}
+	if _, ok := types["kimi.ask"]; !ok {
+		t.Fatalf("describe types missing kimi.ask: %v", types)
+	}
+
+	readinessEvent, err := json.Marshal(message.Envelope{
+		ID:        "evt-proxy-readiness",
+		ChannelID: "channel:test",
+		Sender:    message.Sender{Kind: actor.KindTool, ID: "tool:kimi"},
+		Kind:      message.KindEvent,
+		Type:      "actor.readiness.changed",
+		Payload: json.RawMessage(`{
+			"actor_id":"tool:kimi",
+			"changed_at":1700000001000,
+			"current":{
+				"ready":false,
+				"reason":"local_unreachable",
+				"detail":{"port":10086},
+				"last_state_change_at":1700000001000
+			}
+		}`),
+	})
+	if err != nil {
+		t.Fatalf("marshal readiness event: %v", err)
+	}
+	if err := mgr.OnExternalCallback(context.Background(), decl.Name, readinessEvent); err != nil {
+		t.Fatalf("OnExternalCallback readiness: %v", err)
+	}
+	rec, ok, err := registry.Lookup(context.Background(), "tool:kimi")
+	if err != nil || !ok {
+		t.Fatalf("Lookup proxy actor ok=%v err=%v", ok, err)
+	}
+	if rec.Readiness.State != actorreg.ReadinessNotReady || rec.Readiness.Reason != "local_unreachable" {
+		t.Fatalf("readiness=%+v", rec.Readiness)
+	}
+
+	statusReq := newTestRequest("channel:test", "agent:author", "actor.status", "req-proxy-status")
+	statusReq.Audience = message.Audience{"tool:kimi"}
+	lookup.Put(statusReq)
+	if err := mgr.Dispatch(context.Background(), statusReq); err != nil {
+		t.Fatalf("Dispatch actor.status: %v", err)
+	}
+	written = chain.Written()
+	if len(written) != 3 {
+		t.Fatalf("written=%d want describe + readiness event + status", len(written))
+	}
+	var status map[string]any
+	if err := json.Unmarshal(written[2].Payload, &status); err != nil {
+		t.Fatalf("status payload: %v", err)
+	}
+	if status["available"] != false || status["reason"] != "local_unreachable" {
+		t.Fatalf("status=%v", status)
+	}
+	detail, ok := status["detail"].(map[string]any)
+	if !ok || detail["port"] != float64(10086) {
+		t.Fatalf("status detail=%T %v", status["detail"], status["detail"])
 	}
 }
 

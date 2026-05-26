@@ -210,6 +210,22 @@ func TestDaemonV2HandshakeReadyHeartbeatAndDisconnect(t *testing.T) {
 		t.Fatal("business frame not forwarded")
 	}
 
+	if err := svc.SendFrameToActor(ctx, "ch-proxy", "tool:kimi", DeviceFrame{
+		Direction: "to_device",
+		RequestID: "out-1",
+		Payload:   json.RawMessage(`{"prompt":"hello"}`),
+	}); err != nil {
+		t.Fatalf("SendFrameToActor: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	var outbound DeviceFrame
+	if err := conn.ReadJSON(&outbound); err != nil {
+		t.Fatalf("read outbound actor frame: %v", err)
+	}
+	if outbound.ChannelID != "ch-proxy" || outbound.ActorID != "tool:kimi" || outbound.RequestID != "out-1" {
+		t.Fatalf("outbound frame=%+v", outbound)
+	}
+
 	_ = conn.Close()
 	eventually(t, "disconnect clears projection", time.Second, func() bool {
 		var status string
