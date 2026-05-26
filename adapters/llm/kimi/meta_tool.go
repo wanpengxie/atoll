@@ -84,7 +84,7 @@ var callActorSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "actor_id": {"type": "string", "description": "Target actor id, e.g. tool:xhs-adapter or agent:research-assistant. Look up via list_actors."},
-    "type": {"type": "string", "description": "Envelope type to send, e.g. xhs.publish or kimibridge.navigate. MUST be a request-allowed type for the chosen actor."},
+    "type": {"type": "string", "description": "Envelope type to send, e.g. xhs.publish or kimi.command. MUST be a request-allowed type for the chosen actor."},
     "payload": {"type": "object", "description": "Type-specific payload. Shape is per-adapter convention; consult list_actors output for hints."}
   },
   "required": ["actor_id", "type"]

@@ -1,24 +1,9 @@
-// Package kimibridge implements the coagent adapter for Kimi WebBridge —
-// a local browser-automation daemon + Chrome extension pair that lets
-// AI agents drive the user's real browser (with login sessions). The
-// adapter speaks HTTP to the daemon at `http://127.0.0.1:10086/command`.
+// Package kimibridge contains the deprecated Kimi WebBridge schema that
+// used to be hosted directly by the coagent daemon.
 //
-// Protocol reference (the canonical source — adapter mirrors this 1:1):
-//
-//	~/.claude/skills/kimi-webbridge/SKILL.md
-//
-// Architecture (adapter perspective):
-//
-//	coagent agent → envelope(kind=request, type=kimibridge.<tool>)
-//	  → adapter Module.Handle
-//	    → HTTP POST 127.0.0.1:10086/command {action, args, session}
-//	      ← JSON response
-//	    → Respond (kind=response, status=completed/failed)
-//
-// Binding is actor.BindingRuntimeOutbound because the adapter actively
-// dials the daemon — same shape as feishu (out-bound HTTP), distinct
-// from xhs (which uses runtime_inbound_via_relay because the device
-// initiates the WS).
+// Deprecated: the daemon-side runtime_outbound adapter was removed. New
+// Kimi WebBridge calls must go through the proxy daemon actor in
+// adapters/proxy/actors/kimi.
 package kimibridge
 
 import (
@@ -27,27 +12,22 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// AdapterName is the framework module name; daemon routes
-// Manager.OnExternalCallback by this string (unused on outbound path
-// but required by Module.Declares for observability events).
+// AdapterName is the deprecated framework module name kept for schema
+// compatibility.
 const AdapterName = "kimibridge"
 
-// DefaultAdapterActorID is the canonical actor_registry id this
-// adapter owns. Multiple kimi-webbridge instances in a channel would
-// override via Config.AdapterActorID; v1 single instance.
+// DefaultAdapterActorID is the deprecated direct daemon actor id.
 const DefaultAdapterActorID actor.ActorID = "tool:kimi-webbridge"
 
-// Binding is the protocol binding: adapter actively dials the local
-// daemon over HTTP.
+// Binding is the deprecated direct adapter binding kept for legacy
+// schema references. It is no longer installed by cmd/daemon.
 const Binding = actor.BindingRuntimeOutbound
 
-// DefaultBaseURL is where the Kimi WebBridge daemon listens by default
-// after install (see ~/.kimi-webbridge/bin/kimi-webbridge status).
-// Override via Config.BaseURL for tests / custom ports.
+// DefaultBaseURL is the legacy local daemon endpoint.
 const DefaultBaseURL = "http://127.0.0.1:10086"
 
-// DefaultMaxPendingMs is the sane per-request timeout. Browser ops that
-// need longer than 30s must opt in with an explicit override.
+// DefaultMaxPendingMs is the legacy per-request timeout retained in
+// type declarations.
 const DefaultMaxPendingMs int64 = 30_000
 
 // Type names — closed set per SKILL.md §Tools. Names use the
@@ -131,9 +111,9 @@ func ActionForType(envelopeType string) (string, bool) {
 	return a, ok
 }
 
-// DeclarationTypeDeclarations returns the kernel/adapter.TypeDeclaration
-// map the Module attaches to its Declaration. Browser tools are
-// request/response; daemon lifecycle projections are event-only. The
+// DeclarationTypeDeclarations returns the legacy kernel/adapter
+// TypeDeclaration map. Browser tools are request/response; daemon
+// lifecycle projections are event-only. The
 // framework fails install closed when an adapter opts into strict mode
 // (non-nil TypeDeclarations) but leaves a Types entry without a row.
 func DeclarationTypeDeclarations() map[string]adapter.TypeDeclaration {

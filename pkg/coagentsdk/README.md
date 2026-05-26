@@ -36,11 +36,11 @@ for _, a := range actors {
 	fmt.Printf("%s ready=%v reason=%s\n", a.ActorID, a.Ready, a.ReadyReason)
 }
 
-status, err := client.ActorStatus(ctx, "ch_123", "tool:kimi-webbridge")
+status, err := client.ActorStatus(ctx, "ch_123", "tool:kimi")
 if err != nil {
 	return err
 }
-fmt.Printf("kimi-webbridge available=%v reason=%s\n", status.Available, status.Reason)
+fmt.Printf("kimi proxy available=%v reason=%s\n", status.Available, status.Reason)
 ```
 
 Default `CallActor` timeout is 30s. Pass `CallActorRequest.Timeout` only when a

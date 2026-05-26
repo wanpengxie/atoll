@@ -5,69 +5,39 @@ package e2e
 import (
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
-	"github.com/wanpengxie/ActOS/adapters/kimibridge"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/pkg/coagentsdk"
 	"github.com/wanpengxie/ActOS/tests/e2e/harness"
 )
 
-func TestE2E_SDK_Reliability_KimibridgeAvailableExtensionDisconnected(t *testing.T) {
-	kimi := newFakeKimiBridgeDaemon(t, false)
-	s := harness.Start(t, harness.Options{
-		UseScaffoldXHS: true,
-		ExtraDaemonEnv: []string{"COAGENT_KIMIBRIDGE_BASE_URL=" + kimi.URL},
-	})
+func TestE2E_SDK_Reliability_DaemonDoesNotDirectHostKimibridge(t *testing.T) {
+	s := harness.Start(t, harness.Options{UseScaffoldXHS: true})
 	_, chID, client := setupReliabilityChannel(t, s, "kb-disconnected")
 
-	kimiActor := waitSDKActor(t, client, chID, string(kimibridge.DefaultAdapterActorID), 10*time.Second, func(a coagentsdk.ActorInfo) bool {
-		return !a.Ready && a.ReadyReason == "extension_disconnected"
+	harness.Eventually(t, "xhs actor registered without direct kimibridge", 10*time.Second, func() bool {
+		actors, err := client.ListActors(context.Background(), chID)
+		if err != nil {
+			return false
+		}
+		var sawXHS bool
+		for _, a := range actors {
+			if a.ActorID == "tool:kimi-webbridge" {
+				t.Fatalf("daemon directly hosted deprecated kimibridge actor: %+v", a)
+			}
+			if a.ActorID == string(xhs.DefaultAdapterActorID) {
+				sawXHS = true
+			}
+		}
+		return sawXHS
 	})
-	if len(kimiActor.Types) == 0 {
-		t.Fatalf("kimibridge actor has no types: %+v", kimiActor)
-	}
-
-	status, err := client.ActorStatus(context.Background(), chID, string(kimibridge.DefaultAdapterActorID))
-	if err != nil {
-		t.Fatalf("ActorStatus: %v", err)
-	}
-	if status.Available || status.Reason != "extension_disconnected" {
-		t.Fatalf("ActorStatus=%+v", status)
-	}
-
-	start := time.Now()
-	res, err := client.CallActor(context.Background(), coagentsdk.CallActorRequest{
-		ChannelID: chID,
-		ActorID:   string(kimibridge.DefaultAdapterActorID),
-		Type:      kimibridge.TypeNavigate,
-		Payload:   json.RawMessage(`{"url":"https://example.invalid"}`),
-		Timeout:   5 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("CallActor: %v", err)
-	}
-	if res.OK || res.Error == nil || res.Error.Code != "extension_disconnected" {
-		t.Fatalf("CallActor result=%+v", res)
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("pre-check took %s; expected fail-fast, not SDK timeout", elapsed)
-	}
-	if !strings.Contains(res.Error.RecoveryHint, "extension") {
-		t.Fatalf("recovery_hint=%q", res.Error.RecoveryHint)
-	}
 }
 
 func TestE2E_SDK_Reliability_XHSDeviceOffline(t *testing.T) {
-	kimi := newFakeKimiBridgeDaemon(t, true)
-	s := harness.Start(t, harness.Options{
-		ExtraDaemonEnv: []string{"COAGENT_KIMIBRIDGE_BASE_URL=" + kimi.URL},
-	})
+	s := harness.Start(t, harness.Options{})
 	_, chID, client := setupReliabilityChannel(t, s, "xhs-offline")
 
 	waitSDKActor(t, client, chID, string(xhs.DefaultAdapterActorID), 10*time.Second, func(a coagentsdk.ActorInfo) bool {
@@ -94,11 +64,7 @@ func TestE2E_SDK_Reliability_XHSDeviceOffline(t *testing.T) {
 }
 
 func TestE2E_SDK_Reliability_EmbeddedScaffoldReady(t *testing.T) {
-	kimi := newFakeKimiBridgeDaemon(t, true)
-	s := harness.Start(t, harness.Options{
-		UseScaffoldXHS: true,
-		ExtraDaemonEnv: []string{"COAGENT_KIMIBRIDGE_BASE_URL=" + kimi.URL},
-	})
+	s := harness.Start(t, harness.Options{UseScaffoldXHS: true})
 	_, chID, client := setupReliabilityChannel(t, s, "scaffold-ready")
 
 	waitSDKActor(t, client, chID, string(xhs.DefaultAdapterActorID), 10*time.Second, func(a coagentsdk.ActorInfo) bool {
@@ -121,10 +87,8 @@ func TestE2E_SDK_Reliability_EmbeddedScaffoldReady(t *testing.T) {
 }
 
 func TestE2E_SDK_Reliability_ReadinessEventEmitted(t *testing.T) {
-	kimi := newFakeKimiBridgeDaemon(t, true)
 	s := harness.Start(t, harness.Options{
 		DeviceAllowedOrigins: []string{harness.MockExtensionOriginID},
-		ExtraDaemonEnv:       []string{"COAGENT_KIMIBRIDGE_BASE_URL=" + kimi.URL},
 	})
 	_, chID, client := setupReliabilityChannel(t, s, "readiness-event")
 
@@ -174,26 +138,18 @@ func TestE2E_SDK_Reliability_ReadinessEventEmitted(t *testing.T) {
 }
 
 // TestE2E_SDK_Reliability_ToolSurface_Scaffold covers the happy-path SDK
-// invocation across the **scaffold** xhs adapter (5 R/R types) +
-// kimibridge (13 R/R types). The scaffold mock-acks every request so this
-// test verifies SDK ↔ server ↔ daemon ↔ adapter plumbing for every type
-// without needing a real device. Production xhs surface (14 R/R types in
-// adapters/device/xhs) is exercised by
+// invocation across the **scaffold** xhs adapter (5 R/R types). The
+// scaffold mock-acks every request so this test verifies SDK ↔ server ↔
+// daemon ↔ adapter plumbing without needing a real device. Production xhs
+// surface (14 R/R types in adapters/device/xhs) is exercised by
 // TestE2E_SDK_Reliability_ToolSurface_DeviceXHS_OfflineFastFail below
 // — that one cannot mock-ack (no fake chrome-extension WS), so it
 // verifies the dispatch pre-check fast-fail path instead.
 func TestE2E_SDK_Reliability_ToolSurface_Scaffold(t *testing.T) {
-	kimi := newFakeKimiBridgeDaemon(t, true)
-	s := harness.Start(t, harness.Options{
-		UseScaffoldXHS: true,
-		ExtraDaemonEnv: []string{"COAGENT_KIMIBRIDGE_BASE_URL=" + kimi.URL},
-	})
+	s := harness.Start(t, harness.Options{UseScaffoldXHS: true})
 	_, chID, client := setupReliabilityChannel(t, s, "full-surface")
 
 	waitSDKActor(t, client, chID, string(xhs.DefaultAdapterActorID), 10*time.Second, func(a coagentsdk.ActorInfo) bool {
-		return a.Ready
-	})
-	waitSDKActor(t, client, chID, string(kimibridge.DefaultAdapterActorID), 10*time.Second, func(a coagentsdk.ActorInfo) bool {
 		return a.Ready
 	})
 
@@ -212,21 +168,6 @@ func TestE2E_SDK_Reliability_ToolSurface_Scaffold(t *testing.T) {
 			t.Fatalf("CallActor xhs %s failed: %+v", typ, res.Error)
 		}
 	}
-	for _, typ := range kimibridge.RequestResponseTypes {
-		res, err := client.CallActor(context.Background(), coagentsdk.CallActorRequest{
-			ChannelID: chID,
-			ActorID:   string(kimibridge.DefaultAdapterActorID),
-			Type:      typ,
-			Payload:   json.RawMessage(`{}`),
-			Timeout:   5 * time.Second,
-		})
-		if err != nil {
-			t.Fatalf("CallActor kimibridge %s: %v", typ, err)
-		}
-		if !res.OK {
-			t.Fatalf("CallActor kimibridge %s failed: %+v", typ, res.Error)
-		}
-	}
 }
 
 // TestE2E_SDK_Reliability_ToolSurface_DeviceXHS_OfflineFastFail exercises
@@ -236,11 +177,8 @@ func TestE2E_SDK_Reliability_ToolSurface_Scaffold(t *testing.T) {
 // (R4 dispatch pre-check + R5 30s budget), proving the SDK + framework
 // don't hang on the 5min legacy timer for any of the production types.
 func TestE2E_SDK_Reliability_ToolSurface_DeviceXHS_OfflineFastFail(t *testing.T) {
-	kimi := newFakeKimiBridgeDaemon(t, true)
-	s := harness.Start(t, harness.Options{
-		// UseScaffoldXHS:false → daemon loads adapters/device/xhs (14 R/R).
-		ExtraDaemonEnv: []string{"COAGENT_KIMIBRIDGE_BASE_URL=" + kimi.URL},
-	})
+	// UseScaffoldXHS:false → daemon loads adapters/device/xhs (14 R/R).
+	s := harness.Start(t, harness.Options{})
 	_, chID, client := setupReliabilityChannel(t, s, "devxhs-offline")
 
 	// Wait for production xhs to register as not_ready (no device bound).
@@ -316,36 +254,4 @@ func waitSDKActor(
 		}
 		return coagentsdk.ActorInfo{}, false
 	})
-}
-
-func newFakeKimiBridgeDaemon(t *testing.T, extensionConnected bool) *httptest.Server {
-	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"running":             true,
-			"version":             "e2e-fake",
-			"port":                0,
-			"uptime_seconds":      7,
-			"extension_connected": extensionConnected,
-			"extension_id":        "e2e-extension",
-			"extension_version":   "test",
-		})
-	})
-	mux.HandleFunc("/command", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Action string `json:"action"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok": true,
-			"data": map[string]any{
-				"action": req.Action,
-				"ok":     true,
-			},
-		})
-	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return srv
 }

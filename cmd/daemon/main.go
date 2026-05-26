@@ -31,7 +31,6 @@ import (
 	"time"
 
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
-	"github.com/wanpengxie/ActOS/adapters/kimibridge"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
@@ -72,8 +71,6 @@ func main() {
 			"path to the coagent-worker subprocess binary; empty disables worker spawning (channel-agent triggers become no-op)")
 		workerProvider = flag.String("worker-provider", envOrDefault("COAGENT_WORKER_PROVIDER", "kimi"),
 			"value passed as --provider to spawned workers (mock|kimi). Also via COAGENT_WORKER_PROVIDER env.")
-		kimibridgeBaseURL = flag.String("kimibridge-base-url", envOrDefault("COAGENT_KIMIBRIDGE_BASE_URL", ""),
-			"optional kimi-webbridge daemon HTTP base URL; empty uses adapter default")
 		debugAddr = flag.String("debug-addr", envOrDefault("COAGENT_DAEMON_DEBUG_ADDR", ":9091"),
 			"Debug listen address for non-contract /metrics and /debug/pprof endpoints; empty disables")
 	)
@@ -138,19 +135,11 @@ func main() {
 	if *useScaffoldXHS {
 		xhsFactory = XHSScaffoldFactory(xhs.Config{})
 	}
-	// kimi-webbridge: another tool actor on the same xhs-creator
-	// channel — gives the agent generic browser automation
-	// (navigate/click/fill/...) alongside the xhs-specific tools. The
-	// local kimi-webbridge daemon must already be running
-	// (~/.kimi-webbridge/bin/kimi-webbridge status); if not, Handle
-	// emits failed terminals (receiver_unavailable) until the daemon
-	// comes up.
-	kimibridgeFactory := KimiWebBridgeFactory(kimibridge.Config{BaseURL: *kimibridgeBaseURL}, XHSCreatorChannelType)
 	adapterCredentialSecret := []byte(*humanSecret)
 	if len(adapterCredentialSecret) == 0 && *mockBus {
 		adapterCredentialSecret = []byte(devAdapterCredentialSecret)
 	}
-	adapterBootHook, err := wireAdapterFrameworkWithCredentialSecret(adapterCredentialSecret, xhsFactory, kimibridgeFactory)
+	adapterBootHook, err := wireAdapterFrameworkWithCredentialSecret(adapterCredentialSecret, xhsFactory)
 	if err != nil {
 		lg.Z().Error().Err(err).Str("event", "daemon.fail_fast").
 			Msg("adapter credential encryption key is required")
@@ -319,12 +308,6 @@ func buildChannelTemplates(useScaffoldXHS bool) map[string]runtime.ChannelTempla
 	if useScaffoldXHS {
 		adapterSeeds = tpl.AdapterActorSeeds
 	}
-	// xhs-creator channel also hosts the kimi-webbridge adapter — the
-	// agent gets both xhs-specific tools (xhs.publish / xhs.search /
-	// ...) AND generic browser automation (kimibridge.navigate /
-	// click / fill / ...). Two tool actors, independent type
-	// namespaces, no overlap.
-	adapterSeeds = append(adapterSeeds, KimiWebBridgeActorSeed())
 	out[tpl.ChannelType] = runtime.ChannelTemplate{
 		AdapterActorSeeds:          adapterSeeds,
 		WorkdirSubdirs:             tpl.WorkdirSubdirs,

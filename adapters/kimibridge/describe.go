@@ -6,15 +6,13 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
-// actorDescription is the one-line actor positioning returned by
-// list_actors / describe_actor (actor-cli-pattern §9).
-const actorDescription = "Drive the user's real browser through Kimi WebBridge (local daemon + Chrome extension). Use to navigate, click, fill, screenshot, evaluate JS, and read accessibility snapshots on live web pages."
+// ActorDescription is the deprecated direct actor positioning retained
+// for schema consumers.
+const ActorDescription = "Drive the user's real browser through Kimi WebBridge (local daemon + Chrome extension). Use to navigate, click, fill, screenshot, evaluate JS, and read accessibility snapshots on live web pages."
 
-// actorSkillDoc is the markdown usage guide returned by describe_actor
-// once an agent selects this actor. Mirrors ~/.claude/skills/kimi-webbridge/SKILL.md
-// but trimmed to LLM consumption (no shell health-check section — the
-// daemon health is the deployer's responsibility, not the agent's).
-const actorSkillDoc = "" +
+// ActorSkillDoc is the deprecated direct actor usage guide retained for
+// schema consumers.
+const ActorSkillDoc = "" +
 	"# kimi-webbridge\n" +
 	"\n" +
 	"Drives a real Chromium browser through a local daemon at `http://127.0.0.1:10086`. " +

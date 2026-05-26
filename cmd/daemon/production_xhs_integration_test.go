@@ -27,23 +27,18 @@ func TestBuildChannelTemplates_DefaultsToDeviceXHSBinding(t *testing.T) {
 	t.Parallel()
 
 	prod := buildChannelTemplates(false)[XHSCreatorChannelType]
-	// xhs-creator channel hosts two adapters: tool:xhs-adapter
-	// (runtime_inbound_via_relay → chrome extension) +
-	// tool:kimi-webbridge (runtime_outbound → local kimi-webbridge
-	// daemon for generic browser automation).
-	if len(prod.AdapterActorSeeds) != 2 {
-		t.Fatalf("prod seeds len=%d want 2 (xhs + kimibridge)", len(prod.AdapterActorSeeds))
+	// xhs-creator channel hosts the xhs adapter directly. Generic browser
+	// automation is hosted by the external proxy daemon, not by cmd/daemon.
+	if len(prod.AdapterActorSeeds) != 1 {
+		t.Fatalf("prod seeds len=%d want 1 (xhs only)", len(prod.AdapterActorSeeds))
 	}
 	if prod.AdapterActorSeeds[0].Binding != actor.BindingRuntimeInboundViaRelay {
 		t.Fatalf("prod xhs binding=%q want %q", prod.AdapterActorSeeds[0].Binding, actor.BindingRuntimeInboundViaRelay)
 	}
-	if prod.AdapterActorSeeds[1].Binding != actor.BindingRuntimeOutbound {
-		t.Fatalf("prod kimibridge binding=%q want %q", prod.AdapterActorSeeds[1].Binding, actor.BindingRuntimeOutbound)
-	}
 
 	scaffold := buildChannelTemplates(true)[XHSCreatorChannelType]
-	if len(scaffold.AdapterActorSeeds) != 2 {
-		t.Fatalf("scaffold seeds len=%d want 2 (xhs scaffold + kimibridge)", len(scaffold.AdapterActorSeeds))
+	if len(scaffold.AdapterActorSeeds) != 1 {
+		t.Fatalf("scaffold seeds len=%d want 1 (xhs scaffold only)", len(scaffold.AdapterActorSeeds))
 	}
 	if scaffold.AdapterActorSeeds[0].Binding != actor.BindingEmbedded {
 		t.Fatalf("scaffold xhs binding=%q want %q", scaffold.AdapterActorSeeds[0].Binding, actor.BindingEmbedded)
