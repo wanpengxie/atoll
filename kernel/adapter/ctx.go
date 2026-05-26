@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/harness"
@@ -52,6 +53,12 @@ type ModuleContext struct {
 	// framework refuses to call Handle when DeviceTransit is required
 	// but absent (T3 composition root wires it).
 	DeviceTransit devicetransit.DeviceTransit
+
+	// ActorReadiness updates the actor_registry readiness projection without
+	// implying a transport-level heartbeat source. Modules that already receive
+	// envelope-observable readiness events can persist the projection here and
+	// write the event through HarnessChain.
+	ActorReadiness actorreg.ReadinessUpdater
 }
 
 // RespondOptions adjusts the Respond call (L2 §8.5 + L1 §11.1 Ad-2).

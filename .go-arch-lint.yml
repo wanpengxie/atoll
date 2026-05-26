@@ -153,7 +153,7 @@ deps:
     # other — that is the intra-component composition root pattern.
     # The boundary that matters is server → runtime/** + server →
     # adapters/**, both excluded by NOT listing them here.
-    mayDependOn: [kernel, server, pkg]
+    mayDependOn: [kernel, internal, server, pkg]
     canUse:
       - sqlite_driver
       - gin

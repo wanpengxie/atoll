@@ -66,6 +66,8 @@ type ActorInfo struct {
 	ReadyDetail       json.RawMessage `json:"ready_detail,omitempty"`
 	LastReadyAt       int64           `json:"last_ready_at,omitempty"`
 	LastStateChangeAt int64           `json:"last_state_change_at,omitempty"`
+	DaemonID          string          `json:"daemon_id,omitempty"`
+	DaemonName        string          `json:"daemon_name,omitempty"`
 	Types             []ActorTypeInfo `json:"types,omitempty"`
 }
 

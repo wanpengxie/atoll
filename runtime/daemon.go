@@ -268,6 +268,11 @@ type channelRuntime struct {
 	// the (channel_id, actor_id) routing key lookup. atomic.Value /
 	// swap rules mirror deviceCallback.
 	deviceLifecycleCallback atomic.Value // func(ctx context.Context, evt devicetransit.LifecycleFrame) error
+
+	// proxyActorCallback receives proxy-daemon actor add/remove metadata
+	// carried on control.update_members. cmd/daemon owns the concrete
+	// adapter/framework install because runtime/** cannot import adapters/**.
+	proxyActorCallback atomic.Value // func(ctx context.Context, body daemonbus.UpdateMembersBody) error
 }
 
 type viewsyncBackpressureState struct {
@@ -421,6 +426,12 @@ type ChannelHooks struct {
 	// framework.Manager.OnRuntimeEvent. Per-channel hot-swap rules
 	// mirror SetDeviceCallback. Nil clears the binding (frames dropped).
 	SetDeviceLifecycleCallback func(func(ctx context.Context, evt devicetransit.LifecycleFrame) error)
+
+	// SetProxyActorCallback wires proxy-daemon actor registration metadata
+	// into the composition root. Runtime applies the actor_registry mutation
+	// first, then invokes this callback so cmd/daemon can install the
+	// matching adapters/framework/proxy_facade module and type rows.
+	SetProxyActorCallback func(func(ctx context.Context, body daemonbus.UpdateMembersBody) error)
 }
 
 // buildTemplateResolver returns a closure that picks the ChannelTemplate
@@ -1547,6 +1558,13 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel, sta
 				}
 				capturedCR.deviceLifecycleCallback.Store(cb)
 			}
+			hooks.SetProxyActorCallback = func(cb func(context.Context, daemonbus.UpdateMembersBody) error) {
+				if cb == nil {
+					capturedCR.proxyActorCallback.Store(func(context.Context, daemonbus.UpdateMembersBody) error { return nil })
+					return
+				}
+				capturedCR.proxyActorCallback.Store(cb)
+			}
 		}
 		teardown, hookErr := d.cfg.OnChannelBoot(ctx, hooks)
 		if hookErr != nil {
@@ -2262,6 +2280,7 @@ func (d *Daemon) handleUpdateMembers(
 		adds = append(adds, store.MemberActorAdd{
 			ID:          add.MemberActorID,
 			Kind:        kind,
+			Binding:     add.Binding,
 			DisplayName: add.DisplayName,
 			UserID:      string(add.UserID),
 			Role:        add.Role,
@@ -2282,8 +2301,27 @@ func (d *Daemon) handleUpdateMembers(
 		ack.RejectDetail = err.Error()
 		return ack
 	}
+	if hasProxyActorUpdate(body) {
+		cb, _ := cr.proxyActorCallback.Load().(func(context.Context, daemonbus.UpdateMembersBody) error)
+		if cb != nil {
+			if err := cb(ctx, body); err != nil {
+				ack.RejectReason = "update_members_proxy_facade_failed"
+				ack.RejectDetail = err.Error()
+				return ack
+			}
+		}
+	}
 	ack.Accepted = true
 	return ack
+}
+
+func hasProxyActorUpdate(body daemonbus.UpdateMembersBody) bool {
+	for _, add := range body.Adds {
+		if add.Kind == actor.KindTool && add.Binding == actor.BindingRuntimeInboundViaRelay {
+			return true
+		}
+	}
+	return false
 }
 
 // handleUnbindChannel — T0.2. Closes the per-channel pusher

@@ -47,6 +47,22 @@ func TestActorSnapshotProjectsTypesAndReadiness(t *testing.T) {
 			t.Fatalf("Apply seq=%d: %v", frame.Seq, err)
 		}
 	}
+	if _, err := svc.db.ExecContext(ctx, `
+		INSERT INTO daemons
+		  (id, key_hash, channel_id, owner_id, name, api_key, api_key_prefix, status, created_at)
+		VALUES ('daemon-proxy', '', ?, 'user-1', 'Laptop', 'dk_test', 'dk_test...', 'online', 1000)`,
+		string(chID),
+	); err != nil {
+		t.Fatalf("insert daemon: %v", err)
+	}
+	if _, err := svc.db.ExecContext(ctx, `
+		INSERT INTO daemon_active_actors
+		  (channel_id, actor_id, daemon_id, registered_at, last_seen_at)
+		VALUES (?, 'tool:xhs-adapter', 'daemon-proxy', 1000, 2000)`,
+		string(chID),
+	); err != nil {
+		t.Fatalf("insert active actor: %v", err)
+	}
 
 	got, err := svc.ActorSnapshot(ctx, chID)
 	if err != nil {
@@ -71,6 +87,9 @@ func TestActorSnapshotProjectsTypesAndReadiness(t *testing.T) {
 	}
 	if len(a.Types) != 1 || a.Types[0].Type != "xhs.publish" || a.Types[0].MaxPendingMs != 30_000 {
 		t.Fatalf("types=%+v", a.Types)
+	}
+	if a.DaemonID != "daemon-proxy" || a.DaemonName != "Laptop" {
+		t.Fatalf("daemon projection=%+v", a)
 	}
 }
 

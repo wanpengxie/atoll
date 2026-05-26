@@ -1,6 +1,8 @@
 package daemonbus
 
 import (
+	"encoding/json"
+
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -51,11 +53,13 @@ type WriteMessageAckBody struct {
 // UpdateMember carries one actor membership row from the server catalog to
 // the daemon's channel-local actor_registry.
 type UpdateMember struct {
-	UserID        UserID        `json:"user_id"`
-	MemberActorID actor.ActorID `json:"member_actor_id"`
-	Kind          actor.Kind    `json:"kind"`
-	Role          string        `json:"role,omitempty"`
-	DisplayName   string        `json:"display_name,omitempty"`
+	UserID        UserID          `json:"user_id"`
+	MemberActorID actor.ActorID   `json:"member_actor_id"`
+	Kind          actor.Kind      `json:"kind"`
+	Binding       actor.Binding   `json:"actor_binding,omitempty"`
+	Role          string          `json:"role,omitempty"`
+	DisplayName   string          `json:"display_name,omitempty"`
+	CapabilitySet json.RawMessage `json:"capability_set,omitempty"`
 }
 
 // UpdateMembersBody is the server -> daemon control.update_members payload.

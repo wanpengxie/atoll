@@ -202,7 +202,7 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 				Payload:       body.Payload,
 				ExpiresAt:     body.ExpiresAt,
 			}
-			err := a.devicebus.SendFrameToDevice(ctx, sf.ChannelID, sf.AdapterActorID, df)
+			err := a.devicebus.SendFrameToActor(ctx, sf.ChannelID, sf.AdapterActorID, df)
 			if errors.Is(err, devicebus.ErrRegistrationNotFound) || errors.Is(err, devicebus.ErrTokenExpired) {
 				return a.synthesizeDeviceUnreachableCallback(ctx, sf, body, err)
 			}
@@ -383,6 +383,69 @@ func (a *App) OnChannelMembersChanged(ctx context.Context, channelID string, add
 		Str("daemon_id", string(daemonID)).
 		Str("frame_id", string(body.FrameID)).
 		Msg("update_members ack accepted")
+	return nil
+}
+
+// NotifyProxyDaemonReady implements devicebus.ProxyDaemonNotifier. It reuses
+// control.update_members to make proxy-hosted tool actors visible to the cloud
+// daemon actor_registry before cmd/daemon installs the matching facade module.
+func (a *App) NotifyProxyDaemonReady(ctx context.Context, d devicebus.Daemon, ready devicebus.DaemonReadyInput) error {
+	if d.ChannelID == "" || len(ready.Actors) == 0 {
+		return nil
+	}
+	body := kerneldaemonbus.UpdateMembersBody{
+		FrameID:   kerneldaemonbus.FrameID(uuid.NewString()),
+		ChannelID: d.ChannelID,
+		Adds:      make([]kerneldaemonbus.UpdateMember, 0, len(ready.Actors)),
+	}
+	for _, readyActor := range ready.Actors {
+		if readyActor.ActorID == "" {
+			continue
+		}
+		body.Adds = append(body.Adds, kerneldaemonbus.UpdateMember{
+			UserID:        kerneldaemonbus.UserID(d.OwnerID),
+			MemberActorID: readyActor.ActorID,
+			Kind:          actor.KindTool,
+			Binding:       actor.BindingRuntimeInboundViaRelay,
+			Role:          "proxy_daemon",
+			DisplayName:   string(readyActor.ActorID),
+			CapabilitySet: readyActor.CapabilitySet,
+		})
+	}
+	return a.sendProxyUpdateMembers(ctx, body)
+}
+
+func (a *App) NotifyProxyDaemonOffline(ctx context.Context, d devicebus.Daemon, actors []actor.ActorID) error {
+	if d.ChannelID == "" || len(actors) == 0 {
+		return nil
+	}
+	body := kerneldaemonbus.UpdateMembersBody{
+		FrameID:   kerneldaemonbus.FrameID(uuid.NewString()),
+		ChannelID: d.ChannelID,
+		Removes:   append([]actor.ActorID(nil), actors...),
+	}
+	return a.sendProxyUpdateMembers(ctx, body)
+}
+
+func (a *App) sendProxyUpdateMembers(ctx context.Context, body kerneldaemonbus.UpdateMembersBody) error {
+	conn, err := a.daemonbus.ConnectionForChannel(ctx, string(body.ChannelID))
+	if err != nil {
+		return err
+	}
+	ackFrame, err := conn.SendAndAwait(ctx, kerneldaemonbus.FrameTypeControlUpdateMembers, body)
+	if err != nil {
+		return err
+	}
+	if ackFrame.FrameKind != kerneldaemonbus.FrameTypeControlUpdateMembersAck {
+		return fmt.Errorf("gateway: proxy update_members unexpected ack %s", ackFrame.FrameKind)
+	}
+	var ack kerneldaemonbus.UpdateMembersAckBody
+	if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
+		return fmt.Errorf("gateway: decode proxy update_members ack: %w", err)
+	}
+	if !ack.Accepted {
+		return fmt.Errorf("gateway: proxy update_members rejected: %s %s", ack.RejectReason, ack.RejectDetail)
+	}
 	return nil
 }
 
@@ -691,6 +754,7 @@ func buildEngine(a *App) *gin.Engine {
 	r.GET("/ws", a.pushhub.HandleWS(a.identity))
 	r.GET("/daemonbus", a.daemonbus.HandleWS(a))
 	r.GET("/devicebus", a.devicebus.HandleWS(a))
+	r.GET("/devicebus/v2/connect", a.devicebus.HandleWSV2(a))
 
 	// SPA static serving: when UIDistDir is configured, serve the
 	// pnpm-build artifact at "/" plus a NoRoute fallback to index.html
@@ -716,7 +780,7 @@ func buildEngine(a *App) *gin.Engine {
 		indexPath := filepath.Join(dir, "index.html")
 		r.NoRoute(func(c *gin.Context) {
 			p := c.Request.URL.Path
-			if strings.HasPrefix(p, "/api/") || p == "/ws" || p == "/daemonbus" || p == "/devicebus" {
+			if strings.HasPrefix(p, "/api/") || p == "/ws" || p == "/daemonbus" || strings.HasPrefix(p, "/devicebus") {
 				c.JSON(http.StatusNotFound, gin.H{"error": "not_found"})
 				return
 			}

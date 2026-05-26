@@ -1,0 +1,242 @@
+// Package proxy_facade provides the cloud-daemon-side facade for actors
+// hosted behind the proxy daemon v2 transport.
+package proxy_facade
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
+	"github.com/wanpengxie/ActOS/kernel/message"
+)
+
+const DefaultMaxPendingMs int64 = 30_000
+
+type ProxyFacadeModule struct {
+	decl adapter.Declaration
+	mctx *adapter.ModuleContext
+}
+
+type CapabilitySet struct {
+	Name             string                             `json:"name,omitempty"`
+	Description      string                             `json:"description,omitempty"`
+	SkillDoc         string                             `json:"skill_doc,omitempty"`
+	Types            []string                           `json:"types,omitempty"`
+	TypeDeclarations map[string]adapter.TypeDeclaration `json:"type_declarations,omitempty"`
+	MaxPendingMs     int64                              `json:"max_pending_ms,omitempty"`
+}
+
+type transitBody struct {
+	Direction     string          `json:"direction"`
+	RequestID     string          `json:"request_id,omitempty"`
+	ParentID      string          `json:"parent_id,omitempty"`
+	CorrelationID string          `json:"correlation_id,omitempty"`
+	Payload       json.RawMessage `json:"payload,omitempty"`
+	ExpiresAt     int64           `json:"expires_at,omitempty"`
+}
+
+type readinessChangedPayload struct {
+	ActorID   actor.ActorID `json:"actor_id"`
+	ChangedAt int64         `json:"changed_at"`
+	Current   struct {
+		Ready             bool            `json:"ready"`
+		Reason            string          `json:"reason"`
+		Detail            json.RawMessage `json:"detail"`
+		LastReadyAt       int64           `json:"last_ready_at"`
+		LastStateChangeAt int64           `json:"last_state_change_at"`
+	} `json:"current"`
+}
+
+func New(decl adapter.Declaration) (*ProxyFacadeModule, error) {
+	decl = normalizeDeclaration(decl)
+	if err := validateDeclaration(decl); err != nil {
+		return nil, err
+	}
+	return &ProxyFacadeModule{decl: decl}, nil
+}
+
+func DeclarationFromCapability(actorID actor.ActorID, capability json.RawMessage) (adapter.Declaration, error) {
+	var cap CapabilitySet
+	if len(capability) > 0 {
+		if err := json.Unmarshal(capability, &cap); err != nil {
+			return adapter.Declaration{}, fmt.Errorf("proxy_facade: decode capability_set: %w", err)
+		}
+	}
+	name := cap.Name
+	if name == "" {
+		name = strings.TrimPrefix(string(actorID), "tool:")
+	}
+	return normalizeDeclaration(adapter.Declaration{
+		Name:             name,
+		ActorID:          actorID,
+		Types:            cap.Types,
+		TypeDeclarations: cap.TypeDeclarations,
+		Binding:          actor.BindingRuntimeInboundViaRelay,
+		MaxPendingMs:     cap.MaxPendingMs,
+		Description:      cap.Description,
+		SkillDoc:         cap.SkillDoc,
+	}), nil
+}
+
+func (m *ProxyFacadeModule) Declares() adapter.Declaration {
+	return m.decl
+}
+
+func (m *ProxyFacadeModule) SuppressInitialReadiness() bool { return true }
+
+func (m *ProxyFacadeModule) Init(_ context.Context, mctx *adapter.ModuleContext) error {
+	if mctx == nil {
+		return errors.New("proxy_facade: ModuleContext required")
+	}
+	if mctx.DeviceTransit == nil {
+		return errors.New("proxy_facade: DeviceTransit required")
+	}
+	m.mctx = mctx
+	return nil
+}
+
+func (m *ProxyFacadeModule) Shutdown(context.Context) error { return nil }
+
+func (m *ProxyFacadeModule) Handle(ctx context.Context, env *message.Envelope) error {
+	if m.mctx == nil || m.mctx.DeviceTransit == nil {
+		return errors.New("proxy_facade: not initialized")
+	}
+	if env == nil {
+		return errors.New("proxy_facade: nil envelope")
+	}
+	raw, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("proxy_facade: marshal envelope: %w", err)
+	}
+	body := transitBody{
+		Direction:     "to_device",
+		RequestID:     string(env.ID),
+		ParentID:      string(env.ParentID),
+		CorrelationID: string(env.CorrelationID),
+		Payload:       raw,
+	}
+	if env.ExpiresAt != nil {
+		body.ExpiresAt = *env.ExpiresAt
+	}
+	bodyRaw, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("proxy_facade: marshal transit body: %w", err)
+	}
+	_, err = m.mctx.DeviceTransit.Send(ctx, devicetransit.SendFrame{
+		AdapterActorID: m.decl.ActorID,
+		ChannelID:      env.ChannelID,
+		Body:           bodyRaw,
+	})
+	if err != nil {
+		return fmt.Errorf("proxy_facade: send device transit: %w", err)
+	}
+	return nil
+}
+
+func (m *ProxyFacadeModule) OnExternalCallback(ctx context.Context, payload []byte) error {
+	if m.mctx == nil {
+		return errors.New("proxy_facade: not initialized")
+	}
+	var env message.Envelope
+	if err := json.Unmarshal(payload, &env); err != nil {
+		return fmt.Errorf("proxy_facade: decode callback envelope: %w", err)
+	}
+	if env.ID == "" {
+		return errors.New("proxy_facade: callback envelope id required")
+	}
+	if env.ChannelID == "" {
+		env.ChannelID = m.mctx.ChannelID
+	}
+	if env.Sender.ID == "" {
+		env.Sender = message.Sender{Kind: actor.KindTool, ID: m.decl.ActorID}
+	}
+	if env.Type == "actor.readiness.changed" && m.mctx.ActorReadiness != nil {
+		if err := m.updateReadinessFromEvent(ctx, &env); err != nil {
+			return err
+		}
+	}
+	return writeCallbackEnvelope(ctx, m.mctx, &env)
+}
+
+func (m *ProxyFacadeModule) updateReadinessFromEvent(ctx context.Context, env *message.Envelope) error {
+	var payload readinessChangedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return fmt.Errorf("proxy_facade: decode readiness event: %w", err)
+	}
+	actorID := payload.ActorID
+	if actorID == "" {
+		actorID = m.decl.ActorID
+	}
+	state := actorreg.ReadinessNotReady
+	if payload.Current.Ready {
+		state = actorreg.ReadinessReady
+	}
+	checkedAt := payload.ChangedAt
+	if checkedAt == 0 {
+		checkedAt = payload.Current.LastStateChangeAt
+	}
+	if checkedAt == 0 {
+		return errors.New("proxy_facade: readiness event missing changed_at")
+	}
+	if len(payload.Current.Detail) == 0 {
+		payload.Current.Detail = json.RawMessage(`{}`)
+	}
+	if _, err := m.mctx.ActorReadiness.UpdateReadiness(ctx, actorID, actorreg.ReadinessUpdate{
+		State:     state,
+		Reason:    payload.Current.Reason,
+		Detail:    payload.Current.Detail,
+		CheckedAt: checkedAt,
+	}); err != nil {
+		return fmt.Errorf("proxy_facade: update readiness: %w", err)
+	}
+	return nil
+}
+
+func writeCallbackEnvelope(ctx context.Context, mctx *adapter.ModuleContext, env *message.Envelope) error {
+	res, err := mctx.HarnessChain.Write(ctx, env)
+	if err != nil {
+		return err
+	}
+	if !res.Accepted() {
+		return fmt.Errorf("proxy_facade: callback envelope rejected: %s %s", res.RejectReason, res.RejectDetail)
+	}
+	return nil
+}
+
+func normalizeDeclaration(decl adapter.Declaration) adapter.Declaration {
+	decl.Name = strings.TrimSpace(decl.Name)
+	if decl.Name == "" && decl.ActorID != "" {
+		decl.Name = strings.TrimPrefix(string(decl.ActorID), "tool:")
+	}
+	if decl.Binding == "" {
+		decl.Binding = actor.BindingRuntimeInboundViaRelay
+	}
+	if decl.MaxPendingMs <= 0 {
+		decl.MaxPendingMs = DefaultMaxPendingMs
+	}
+	return decl
+}
+
+func validateDeclaration(decl adapter.Declaration) error {
+	if decl.Name == "" {
+		return errors.New("proxy_facade: declaration name required")
+	}
+	if decl.ActorID == "" {
+		return errors.New("proxy_facade: actor_id required")
+	}
+	if decl.Binding != actor.BindingRuntimeInboundViaRelay {
+		return fmt.Errorf("proxy_facade: binding must be %s", actor.BindingRuntimeInboundViaRelay)
+	}
+	if len(decl.Types) == 0 {
+		return errors.New("proxy_facade: at least one type required")
+	}
+	return nil
+}
+
+var _ adapter.Module = (*ProxyFacadeModule)(nil)

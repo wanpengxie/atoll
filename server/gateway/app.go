@@ -233,6 +233,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 
 	app.devicebus.SetAccessAuthorizer(app)
 	app.devicebus.SetLifecycleNotifier(app)
+	app.devicebus.SetProxyDaemonNotifier(app)
 
 	app.engine = buildEngine(app)
 	return app, nil

@@ -10,11 +10,15 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
+	proxycontract "github.com/wanpengxie/ActOS/internal/proxy/contract"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
+	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/pkg/metrics"
 	"github.com/wanpengxie/ActOS/pkg/requestctx"
 )
 
@@ -33,6 +37,16 @@ type Connection struct {
 	closed    chan struct{}
 }
 
+type DaemonConnection struct {
+	Daemon     Daemon
+	transport  DeviceTransport
+	Generation uint64
+	SessionID  string
+
+	closeOnce sync.Once
+	closed    chan struct{}
+}
+
 type DeviceTransport interface {
 	ReadFrame(ctx context.Context) (DeviceFrame, error)
 	WriteFrame(ctx context.Context, frame DeviceFrame) error
@@ -40,15 +54,21 @@ type DeviceTransport interface {
 }
 
 type DeviceFrame struct {
-	Direction     string          `json:"direction"`
-	ActorID       string          `json:"actor_id"`
-	ChannelID     string          `json:"channel_id"`
-	RequestID     string          `json:"request_id,omitempty"`
-	ParentID      string          `json:"parent_id,omitempty"`
-	CorrelationID string          `json:"correlation_id,omitempty"`
-	Payload       json.RawMessage `json:"payload,omitempty"`
-	ExpiresAt     int64           `json:"expires_at,omitempty"`
-	TransitSeq    int64           `json:"transit_seq,omitempty"`
+	Direction     string                  `json:"direction"`
+	FrameType     proxycontract.FrameType `json:"frame_type,omitempty"`
+	ActorID       string                  `json:"actor_id"`
+	ChannelID     string                  `json:"channel_id"`
+	RequestID     string                  `json:"request_id,omitempty"`
+	ParentID      string                  `json:"parent_id,omitempty"`
+	CorrelationID string                  `json:"correlation_id,omitempty"`
+	Payload       json.RawMessage         `json:"payload,omitempty"`
+	ExpiresAt     int64                   `json:"expires_at,omitempty"`
+	TransitSeq    int64                   `json:"transit_seq,omitempty"`
+
+	Hostname     string                       `json:"hostname,omitempty"`
+	HostLabel    string                       `json:"host_label,omitempty"`
+	Actors       []proxycontract.ReadyActorV2 `json:"actors,omitempty"`
+	ProxyVersion string                       `json:"proxy_version,omitempty"`
 }
 
 func NewConnection(r ActorRegistration, tx DeviceTransport) *Connection {
@@ -59,9 +79,25 @@ func NewConnection(r ActorRegistration, tx DeviceTransport) *Connection {
 	}
 }
 
+func NewDaemonConnection(d Daemon, tx DeviceTransport, sessionID string) *DaemonConnection {
+	return &DaemonConnection{
+		Daemon:    d,
+		transport: tx,
+		SessionID: sessionID,
+		closed:    make(chan struct{}),
+	}
+}
+
 func (c *Connection) SendToDevice(ctx context.Context, frame DeviceFrame) error {
 	if c.IsClosed() {
 		return errors.New("devicebus: connection closed")
+	}
+	return c.transport.WriteFrame(ctx, frame)
+}
+
+func (c *DaemonConnection) SendToDaemon(ctx context.Context, frame DeviceFrame) error {
+	if c.IsClosed() {
+		return errors.New("devicebus: daemon connection closed")
 	}
 	return c.transport.WriteFrame(ctx, frame)
 }
@@ -75,7 +111,24 @@ func (c *Connection) IsClosed() bool {
 	}
 }
 
+func (c *DaemonConnection) IsClosed() bool {
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
+}
+
 func (c *Connection) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.closed)
+		_ = c.transport.Close()
+	})
+	return nil
+}
+
+func (c *DaemonConnection) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closed)
 		_ = c.transport.Close()
@@ -248,6 +301,166 @@ func (s *Service) HandleWS(forwarder TransitForwarder) gin.HandlerFunc {
 	}
 }
 
+func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		apiKey := strings.TrimSpace(c.Query(proxycontract.QueryParamApiKey))
+		if apiKey == "" || !hasDeviceWSSubprotocol(c.Request.Header.Values("Sec-WebSocket-Protocol"), proxycontract.WSSubprotocolV2) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "valid api key and coagent.device.v2 subprotocol required"})
+			return
+		}
+		daemon, err := s.GetDaemonByAPIKey(c.Request.Context(), apiKey)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid api key"})
+			return
+		}
+		upgrader := websocket.Upgrader{
+			CheckOrigin:  s.checkDaemonOrigin,
+			Subprotocols: []string{proxycontract.WSSubprotocolV2},
+		}
+		ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			return
+		}
+		ws.SetReadLimit(DefaultDeviceWSReadLimit)
+		tx := newWSDeviceTransport(ws)
+		cadence := s.cfg.PingCadence
+		if cadence <= 0 {
+			cadence = DefaultDevicePingCadence
+		}
+		idle := s.cfg.IdleReadTimeout
+		if idle <= 0 {
+			idle = DefaultDeviceIdleReadTimeout
+		}
+		pingWrite := s.cfg.PingWriteTimeout
+		if pingWrite <= 0 {
+			pingWrite = DefaultDevicePingWriteTimeout
+		}
+		tx.startPinger(cadence, pingWrite, idle)
+		conn := NewDaemonConnection(daemon, tx, "daemon-session-"+s.newConnectionID())
+		s.registerDaemonConnection(daemon, conn)
+		if err := s.MarkDaemonOnline(context.WithoutCancel(c.Request.Context()), daemon.ID); err != nil {
+			s.log.Warn("devicebus.daemon_online_failed",
+				"daemon_id", string(daemon.ID),
+				"channel_id", string(daemon.ChannelID),
+				"daemon_session_id", conn.SessionID,
+				"err", err.Error(),
+			)
+			_ = conn.Close()
+			return
+		}
+		s.log.Info("devicebus.daemon_connected",
+			"daemon_id", string(daemon.ID),
+			"daemon_name", daemon.Name,
+			"channel_id", string(daemon.ChannelID),
+			"daemon_session_id", conn.SessionID,
+		)
+		defer func() {
+			s.unregisterDaemonConnection(daemon.ID, conn)
+			_ = conn.Close()
+		}()
+
+		first, err := conn.transport.ReadFrame(c.Request.Context())
+		if err != nil {
+			return
+		}
+		if first.FrameType != proxycontract.FrameTypeReady {
+			s.log.Warn("devicebus.daemon_ready_rejected",
+				"reason", "first_frame_not_ready",
+				"daemon_id", string(daemon.ID),
+				"channel_id", string(daemon.ChannelID),
+				"daemon_session_id", conn.SessionID,
+				"frame_type", string(first.FrameType),
+			)
+			return
+		}
+		if err := s.ApplyDaemonReady(context.WithoutCancel(c.Request.Context()), daemon, readyInputFromFrame(first)); err != nil {
+			s.log.Warn("devicebus.daemon_ready_rejected",
+				"reason", "ready_apply_failed",
+				"daemon_id", string(daemon.ID),
+				"channel_id", string(daemon.ChannelID),
+				"daemon_session_id", conn.SessionID,
+				"err", err.Error(),
+			)
+			return
+		}
+		if n := s.proxyDaemonNotifier(); n != nil {
+			if err := n.NotifyProxyDaemonReady(context.WithoutCancel(c.Request.Context()), daemon, readyInputFromFrame(first)); err != nil {
+				s.log.Warn("devicebus.daemon_ready_notify_failed",
+					"daemon_id", string(daemon.ID),
+					"channel_id", string(daemon.ChannelID),
+					"daemon_session_id", conn.SessionID,
+					"err", err.Error(),
+				)
+				return
+			}
+		}
+		s.log.Info("devicebus.daemon_ready",
+			"daemon_id", string(daemon.ID),
+			"channel_id", string(daemon.ChannelID),
+			"daemon_session_id", conn.SessionID,
+			"actors", len(first.Actors),
+			"hostname", first.Hostname,
+			"proxy_version", first.ProxyVersion,
+		)
+
+		for {
+			frame, err := conn.transport.ReadFrame(c.Request.Context())
+			if err != nil {
+				return
+			}
+			switch frame.FrameType {
+			case proxycontract.FrameTypeHeartbeat:
+				if err := s.HeartbeatDaemon(context.WithoutCancel(c.Request.Context()), daemon.ID); err != nil {
+					s.log.Warn("devicebus.daemon_heartbeat_failed",
+						"daemon_id", string(daemon.ID),
+						"channel_id", string(daemon.ChannelID),
+						"daemon_session_id", conn.SessionID,
+						"err", err.Error(),
+					)
+					return
+				}
+				continue
+			case proxycontract.FrameTypeReady, proxycontract.FrameTypeShutdown:
+				s.log.Warn("devicebus.daemon_frame_rejected",
+					"reason", "unexpected_reserved_frame",
+					"daemon_id", string(daemon.ID),
+					"channel_id", string(daemon.ChannelID),
+					"daemon_session_id", conn.SessionID,
+					"frame_type", string(frame.FrameType),
+				)
+				return
+			case "":
+				if strings.TrimSpace(frame.ActorID) == "" {
+					return
+				}
+				if !s.daemonOwnsActor(daemon.ID, daemon.ChannelID, actor.ActorID(frame.ActorID)) {
+					s.log.Warn("devicebus.daemon_frame_rejected",
+						"reason", "actor_not_registered",
+						"daemon_id", string(daemon.ID),
+						"channel_id", string(daemon.ChannelID),
+						"daemon_session_id", conn.SessionID,
+						"actor_id", frame.ActorID,
+					)
+					return
+				}
+				frame.ChannelID = string(daemon.ChannelID)
+				if err := forwarder.ForwardDeviceFrame(c.Request.Context(), frame, actor.ActorID(frame.ActorID)); err != nil {
+					return
+				}
+			default:
+				s.log.Warn("devicebus.daemon_frame_rejected",
+					"reason", "unknown_frame_type",
+					"daemon_id", string(daemon.ID),
+					"channel_id", string(daemon.ChannelID),
+					"daemon_session_id", conn.SessionID,
+					"frame_type", string(frame.FrameType),
+				)
+				return
+			}
+		}
+	}
+}
+
 func actorTokenRejectReason(err error) string {
 	switch {
 	case errors.Is(err, ErrTokenInvalid):
@@ -288,10 +501,30 @@ func parseDeviceWSSubprotocols(headers []string) (token string, hasRealProto boo
 	return token, hasRealProto, true
 }
 
+func hasDeviceWSSubprotocol(headers []string, want string) bool {
+	for _, line := range headers {
+		for _, part := range strings.Split(line, ",") {
+			if strings.TrimSpace(part) == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (s *Service) checkOrigin(r *http.Request) bool {
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	if origin == "" {
 		return s.cfg.AllowMissingOrigin
+	}
+	_, ok := s.allowedOrigins[origin]
+	return ok
+}
+
+func (s *Service) checkDaemonOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
 	}
 	_, ok := s.allowedOrigins[origin]
 	return ok
@@ -333,6 +566,33 @@ func (s *Service) SendFrameToDevice(ctx context.Context, channelID channel.ID, a
 	frame.ActorID = string(actorID)
 	frame.ChannelID = string(channelID)
 	return conn.SendToDevice(ctx, frame)
+}
+
+func (s *Service) SendFrameToActor(ctx context.Context, channelID channel.ID, actorID actor.ActorID, frame DeviceFrame) error {
+	key := routeKey(channelID, actorID)
+	s.mu.Lock()
+	daemonID, hasProxyRoute := s.actorToDaemon[key]
+	var dconn *DaemonConnection
+	if hasProxyRoute {
+		dconn = s.daemonConns[daemonID]
+	}
+	s.mu.Unlock()
+	if !hasProxyRoute {
+		return s.SendFrameToDevice(ctx, channelID, actorID, frame)
+	}
+	if dconn == nil || dconn.IsClosed() {
+		s.log.Warn("devicebus.proxy_outbound_rejected",
+			"reason", "daemon_route_not_connected",
+			"request_id", requestctx.RequestID(ctx),
+			"actor_id", string(actorID),
+			"channel_id", string(channelID),
+			"daemon_id", string(daemonID),
+		)
+		return ErrRegistrationNotFound
+	}
+	frame.ActorID = string(actorID)
+	frame.ChannelID = string(channelID)
+	return dconn.SendToDaemon(ctx, frame)
 }
 
 func (s *Service) registerConnection(channelID channel.ID, actorID actor.ActorID, conn *Connection) {
@@ -394,4 +654,120 @@ func (s *Service) closeCurrentConnection(channelID channel.ID, actorID actor.Act
 	}
 	_ = conn.Close()
 	return true
+}
+
+func (s *Service) registerDaemonConnection(d Daemon, conn *DaemonConnection) {
+	var previous *DaemonConnection
+	s.mu.Lock()
+	conn.Generation = s.connGen.Add(1)
+	previous = s.daemonConns[d.ID]
+	s.daemonConns[d.ID] = conn
+	s.mu.Unlock()
+	if previous != nil && previous != conn {
+		metrics.Default().IncCounter("devicebus.daemon.reconnect",
+			"daemon_id", string(d.ID),
+			"channel_id", string(d.ChannelID),
+		)
+		_ = previous.Close()
+	}
+}
+
+func (s *Service) unregisterDaemonConnection(daemonID placement.DaemonID, conn *DaemonConnection) bool {
+	actors, _ := s.ListDaemonActiveActorIDs(context.Background(), daemonID)
+	s.mu.Lock()
+	current := s.daemonConns[daemonID]
+	if current != conn || current.Generation != conn.Generation {
+		s.mu.Unlock()
+		return false
+	}
+	delete(s.daemonConns, daemonID)
+	s.clearDaemonActorRoutesLocked(daemonID)
+	s.mu.Unlock()
+	ctx := context.Background()
+	if err := s.MarkDaemonOffline(ctx, daemonID); err != nil {
+		s.log.Warn("devicebus.daemon_offline_failed",
+			"daemon_id", string(daemonID),
+			"daemon_session_id", conn.SessionID,
+			"err", err.Error(),
+		)
+	}
+	if err := s.clearDaemonActiveActors(ctx, daemonID); err != nil {
+		s.log.Warn("devicebus.daemon_clear_active_failed",
+			"daemon_id", string(daemonID),
+			"daemon_session_id", conn.SessionID,
+			"err", err.Error(),
+		)
+	}
+	if n := s.proxyDaemonNotifier(); n != nil && len(actors) > 0 {
+		if err := n.NotifyProxyDaemonOffline(ctx, conn.Daemon, actors); err != nil {
+			s.log.Warn("devicebus.daemon_offline_notify_failed",
+				"daemon_id", string(daemonID),
+				"daemon_session_id", conn.SessionID,
+				"err", err.Error(),
+			)
+		}
+	}
+	s.log.Info("devicebus.daemon_disconnected",
+		"daemon_id", string(daemonID),
+		"channel_id", string(conn.Daemon.ChannelID),
+		"daemon_session_id", conn.SessionID,
+	)
+	return true
+}
+
+func (s *Service) closeDaemonConnection(daemonID placement.DaemonID, sendShutdown bool) bool {
+	s.mu.Lock()
+	conn := s.daemonConns[daemonID]
+	if conn != nil {
+		delete(s.daemonConns, daemonID)
+		s.clearDaemonActorRoutesLocked(daemonID)
+	}
+	s.mu.Unlock()
+	if conn == nil {
+		return false
+	}
+	if sendShutdown {
+		ctx, cancel := context.WithTimeout(context.Background(), DefaultDeviceWSWriteTimeout)
+		_ = conn.SendToDaemon(ctx, DeviceFrame{
+			Direction: "to_device",
+			FrameType: proxycontract.FrameTypeShutdown,
+		})
+		cancel()
+	}
+	_ = conn.Close()
+	return true
+}
+
+func (s *Service) clearDaemonActorRoutesLocked(daemonID placement.DaemonID) {
+	for key, got := range s.actorToDaemon {
+		if got == daemonID {
+			delete(s.actorToDaemon, key)
+		}
+	}
+}
+
+func (s *Service) daemonOwnsActor(daemonID placement.DaemonID, channelID channel.ID, actorID actor.ActorID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.actorToDaemon[routeKey(channelID, actorID)] == daemonID
+}
+
+func (s *Service) newConnectionID() string {
+	return uuid.NewString()
+}
+
+func readyInputFromFrame(frame DeviceFrame) DaemonReadyInput {
+	actors := make([]ReadyActor, 0, len(frame.Actors))
+	for _, a := range frame.Actors {
+		actors = append(actors, ReadyActor{
+			ActorID:       actor.ActorID(strings.TrimSpace(a.ActorID)),
+			CapabilitySet: append(json.RawMessage(nil), a.CapabilitySet...),
+		})
+	}
+	return DaemonReadyInput{
+		Hostname:     frame.Hostname,
+		HostLabel:    frame.HostLabel,
+		ProxyVersion: frame.ProxyVersion,
+		Actors:       actors,
+	}
 }

@@ -64,6 +64,11 @@ type LifecycleNotifier interface {
 	)
 }
 
+type ProxyDaemonNotifier interface {
+	NotifyProxyDaemonReady(ctx context.Context, daemon Daemon, ready DaemonReadyInput) error
+	NotifyProxyDaemonOffline(ctx context.Context, daemon Daemon, actors []actor.ActorID) error
+}
+
 type Service struct {
 	db  *sql.DB
 	cfg Config
@@ -72,15 +77,20 @@ type Service struct {
 
 	tokenTTL time.Duration
 
-	mu      sync.Mutex
-	routes  map[string]*Connection
-	connGen atomic.Uint64
+	mu            sync.Mutex
+	routes        map[string]*Connection
+	daemonConns   map[placement.DaemonID]*DaemonConnection
+	actorToDaemon map[string]placement.DaemonID
+	connGen       atomic.Uint64
 
 	accessMu sync.RWMutex
 	access   channelaccess.Authorizer
 
 	lifecycleMu sync.RWMutex
 	lifecycle   LifecycleNotifier
+
+	proxyDaemonMu sync.RWMutex
+	proxyDaemon   ProxyDaemonNotifier
 
 	allowedOrigins map[string]struct{}
 	log            *slog.Logger
@@ -99,6 +109,18 @@ func (s *Service) lifecycleNotifier() LifecycleNotifier {
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
 	return s.lifecycle
+}
+
+func (s *Service) SetProxyDaemonNotifier(n ProxyDaemonNotifier) {
+	s.proxyDaemonMu.Lock()
+	s.proxyDaemon = n
+	s.proxyDaemonMu.Unlock()
+}
+
+func (s *Service) proxyDaemonNotifier() ProxyDaemonNotifier {
+	s.proxyDaemonMu.RLock()
+	defer s.proxyDaemonMu.RUnlock()
+	return s.proxyDaemon
 }
 
 type AccessAuthorizer = channelaccess.Authorizer
@@ -138,6 +160,8 @@ func NewService(db *sql.DB, cfg Config) *Service {
 		rng:            rand.Reader,
 		tokenTTL:       ttl,
 		routes:         map[string]*Connection{},
+		daemonConns:    map[placement.DaemonID]*DaemonConnection{},
+		actorToDaemon:  map[string]placement.DaemonID{},
 		allowedOrigins: allowed,
 		log:            log.With("subsystem", "devicebus"),
 	}

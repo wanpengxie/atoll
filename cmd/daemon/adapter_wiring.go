@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -14,12 +15,14 @@ import (
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/framework"
+	proxyfacade "github.com/wanpengxie/ActOS/adapters/framework/proxy_facade"
 	"github.com/wanpengxie/ActOS/adapters/kimibridge"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -161,40 +164,95 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 		gcCtx, gcCancel := context.WithCancel(context.Background())
 		go mgr.RunGC(gcCtx)
 
-		// T147 §A — wire the inbound device→daemon callback. M1.6
-		// baseline supports one runtime_inbound_via_relay adapter per channel.
-		// M1.7 owns actor_id → adapter routing; until that lands, more
-		// than one transit adapter is a composition bug and must fail
-		// loudly instead of broadcasting callbacks to every adapter.
-		if h.SetDeviceCallback != nil {
-			deviceAdapters := mgr.AdaptersByBinding(actor.BindingRuntimeInboundViaRelay)
-			if len(deviceAdapters) > 1 {
-				panic(fmt.Sprintf(
-					"cmd/daemon: multiple runtime_inbound_via_relay adapters for channel %s; M1.7 routing required before enabling more than one: %v",
-					h.ChannelID,
-					deviceAdapters,
-				))
+		deviceRouteMu := sync.RWMutex{}
+		deviceAdapterByActor := map[actor.ActorID]string{}
+		for _, mod := range modules {
+			decl := mod.Declares()
+			if decl.Binding == actor.BindingRuntimeInboundViaRelay {
+				deviceAdapterByActor[decl.ActorID] = decl.Name
 			}
-			if len(deviceAdapters) == 1 {
-				adapterName := deviceAdapters[0]
-				h.SetDeviceCallback(func(ctx context.Context, frame devicetransit.SendFrame) error {
-					var body deviceframework.DeviceTransitBody
-					if err := json.Unmarshal(frame.Body, &body); err != nil {
-						return fmt.Errorf("cmd/daemon: decode device transit body: %w", err)
+		}
+
+		proxyMu := sync.Mutex{}
+		proxyInstalled := map[actor.ActorID]struct{}{}
+		for _, mod := range modules {
+			proxyInstalled[mod.Declares().ActorID] = struct{}{}
+		}
+		if h.SetProxyActorCallback != nil {
+			h.SetProxyActorCallback(func(ctx context.Context, body kerneldaemonbus.UpdateMembersBody) error {
+				proxyMu.Lock()
+				defer proxyMu.Unlock()
+				for _, add := range body.Adds {
+					if add.Kind != actor.KindTool || add.Binding != actor.BindingRuntimeInboundViaRelay {
+						continue
 					}
-					return mgr.OnExternalCallback(ctx, adapterName, body.Payload)
-				})
-				if h.SetDeviceLifecycleCallback != nil {
-					channelID := h.ChannelID
-					h.SetDeviceLifecycleCallback(func(ctx context.Context, evt devicetransit.LifecycleFrame) error {
-						return mgr.OnRuntimeEvent(ctx, adapter.RuntimeEvent{
-							Kind:            adapter.RuntimeEventDeviceLifecycle,
-							ChannelID:       channelID,
-							AdapterActorID:  evt.AdapterActorID,
-							DeviceLifecycle: &evt,
-						})
-					})
+					if _, ok := proxyInstalled[add.MemberActorID]; ok {
+						continue
+					}
+					decl, err := proxyfacade.DeclarationFromCapability(add.MemberActorID, add.CapabilitySet)
+					if err != nil {
+						return fmt.Errorf("cmd/daemon: proxy facade declaration %s: %w", add.MemberActorID, err)
+					}
+					mod, err := proxyfacade.New(decl)
+					if err != nil {
+						return fmt.Errorf("cmd/daemon: proxy facade module %s: %w", add.MemberActorID, err)
+					}
+					if err := mgr.Install(ctx, []adapter.Module{mod}); err != nil {
+						return fmt.Errorf("cmd/daemon: proxy facade install %s: %w", add.MemberActorID, err)
+					}
+					h.Deliverer.Register(decl.ActorID,
+						deliverThroughManager(mgr, decl.ActorID, h.ChannelID, h.Logger))
+					deviceRouteMu.Lock()
+					deviceAdapterByActor[decl.ActorID] = decl.Name
+					deviceRouteMu.Unlock()
+					proxyInstalled[decl.ActorID] = struct{}{}
+					if h.Logger != nil {
+						h.Logger.Info().
+							Str("event", "daemon.proxy_facade_installed").
+							Str("channel_id", string(h.ChannelID)).
+							Str("actor_id", string(decl.ActorID)).
+							Int("type_count", len(decl.Types)).
+							Msg("proxy facade actor installed")
+					}
 				}
+				return nil
+			})
+		}
+
+		// T147 §A — wire the inbound device→daemon callback. T1 proxy
+		// facade adds actor_id → adapter routing so runtime_inbound_via_relay
+		// adapters can coexist as long as device_transit.SendFrame carries
+		// AdapterActorID.
+		if h.SetDeviceCallback != nil {
+			h.SetDeviceCallback(func(ctx context.Context, frame devicetransit.SendFrame) error {
+				deviceRouteMu.RLock()
+				adapterName := deviceAdapterByActor[frame.AdapterActorID]
+				deviceRouteMu.RUnlock()
+				if adapterName == "" {
+					return nil
+				}
+				var body deviceframework.DeviceTransitBody
+				if err := json.Unmarshal(frame.Body, &body); err != nil {
+					return fmt.Errorf("cmd/daemon: decode device transit body: %w", err)
+				}
+				return mgr.OnExternalCallback(ctx, adapterName, body.Payload)
+			})
+			if h.SetDeviceLifecycleCallback != nil {
+				channelID := h.ChannelID
+				h.SetDeviceLifecycleCallback(func(ctx context.Context, evt devicetransit.LifecycleFrame) error {
+					deviceRouteMu.RLock()
+					adapterName := deviceAdapterByActor[evt.AdapterActorID]
+					deviceRouteMu.RUnlock()
+					if adapterName == "" {
+						return nil
+					}
+					return mgr.OnRuntimeEvent(ctx, adapter.RuntimeEvent{
+						Kind:            adapter.RuntimeEventDeviceLifecycle,
+						ChannelID:       channelID,
+						AdapterActorID:  evt.AdapterActorID,
+						DeviceLifecycle: &evt,
+					})
+				})
 			}
 		}
 

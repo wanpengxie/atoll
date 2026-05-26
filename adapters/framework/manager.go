@@ -191,6 +191,10 @@ type boundModule struct {
 	heartbeatDone   chan struct{}
 }
 
+type initialReadinessSuppressor interface {
+	SuppressInitialReadiness() bool
+}
+
 // NewManager constructs a Manager. Caller MUST call Install before
 // Dispatch / OnExternalCallback.
 func NewManager(cfg ManagerConfig) (*Manager, error) {
@@ -389,6 +393,7 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		ErrorPolicy:    policy,
 		Respond:        respond,
 		HarnessChain:   m.cfg.HarnessChain,
+		ActorReadiness: readinessUpdaterFromRegistry(m.cfg.ActorRegistry),
 	}
 	if decl.Binding == actor.BindingRuntimeInboundViaRelay {
 		mctx.DeviceTransit = m.cfg.DeviceTransit
@@ -455,6 +460,9 @@ func (m *Manager) startReadiness(ctx context.Context, bm *boundModule) {
 	if bm == nil {
 		return
 	}
+	if suppressor, ok := bm.module.(initialReadinessSuppressor); ok && suppressor.SuppressInitialReadiness() {
+		return
+	}
 	if _, ok := bm.module.(adapter.Heartbeater); !ok {
 		m.applyReadiness(ctx, bm, actorreg.ReadinessUpdate{
 			State:     actorreg.ReadinessReady,
@@ -485,6 +493,11 @@ func (m *Manager) startReadiness(ctx context.Context, bm *boundModule) {
 			}
 		}
 	}()
+}
+
+func readinessUpdaterFromRegistry(reg actorreg.Registry) actorreg.ReadinessUpdater {
+	updater, _ := reg.(actorreg.ReadinessUpdater)
+	return updater
 }
 
 func (m *Manager) heartbeatInterval(binding actor.Binding) time.Duration {
