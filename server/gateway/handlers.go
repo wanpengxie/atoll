@@ -819,6 +819,11 @@ func buildEngine(a *App) *gin.Engine {
 	r.GET("/daemonbus", a.daemonbus.HandleWS(a))
 	r.GET("/devicebus/v2/connect", a.devicebus.HandleWSV2(a))
 
+	// /install/* — proxy daemon one-line installer + per-platform binary
+	// downloads. Public (no auth) so the curl|sh flow works before the
+	// user has any session. Only wired when InstallerDir is configured.
+	a.registerInstallRoutes(r)
+
 	// SPA static serving: when UIDistDir is configured, serve the
 	// pnpm-build artifact at "/" plus a NoRoute fallback to index.html
 	// so client-side routes (e.g. /channel/123) still hand off to the
@@ -843,7 +848,7 @@ func buildEngine(a *App) *gin.Engine {
 		indexPath := filepath.Join(dir, "index.html")
 		r.NoRoute(func(c *gin.Context) {
 			p := c.Request.URL.Path
-			if strings.HasPrefix(p, "/api/") || p == "/ws" || p == "/daemonbus" || strings.HasPrefix(p, "/devicebus") {
+			if strings.HasPrefix(p, "/api/") || p == "/ws" || p == "/daemonbus" || strings.HasPrefix(p, "/devicebus") || strings.HasPrefix(p, "/install/") {
 				c.JSON(http.StatusNotFound, gin.H{"error": "not_found"})
 				return
 			}

@@ -70,6 +70,13 @@ type Config struct {
 	// a separate vite dev server during local development.
 	UIDistDir string
 
+	// InstallerDir is the absolute path to a directory containing
+	// coagent-proxy_<os>_<arch> binaries served at /install/<filename>.
+	// When non-empty, the gateway also serves /install/proxy.sh (the
+	// one-line bootstrap script templated with this server's origin).
+	// Empty (the default) disables the /install/* routes entirely.
+	InstallerDir string
+
 	// AllowDevSecrets controls FIX-T8 secret fail-fast. When false (the
 	// production default), any empty secret or any value equal to a
 	// well-known dev sentinel causes gateway.New to return an error.

@@ -1,13 +1,12 @@
 import React, { useMemo, useState } from 'react';
 import { api } from '../api.js';
 
-function defaultServerWS() {
+function defaultServerOrigin() {
   const configured = (import.meta.env?.VITE_SERVER_URL || '').trim();
   const fallback = window.location.port === '5173' ? 'http://localhost:8832' : window.location.origin;
   const source = configured || fallback;
   try {
     const u = new URL(source, window.location.origin);
-    u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
     u.search = '';
     u.hash = '';
     if (u.pathname === '/') {
@@ -15,12 +14,16 @@ function defaultServerWS() {
     }
     return u.toString().replace(/\/$/, '');
   } catch {
-    return 'ws://localhost:8832';
+    return 'http://localhost:8832';
   }
 }
 
-function startCommand(apiKey, serverWS) {
-  return `coagent-proxy start --api-key ${apiKey} --server-ws ${serverWS}`;
+// installCommand returns the single curl-pipe-sh one-liner the user should
+// paste into a Mac/Linux terminal. The server's /install/proxy.sh endpoint
+// bakes the server origin into the script, so only the api-key is needed
+// as an argument here. Pre-launch UX target — see install-proxy.sh.
+function installCommand(apiKey, serverOrigin) {
+  return `curl -fsSL ${serverOrigin}/install/proxy.sh | sh -s -- --api-key ${apiKey}`;
 }
 
 async function copyText(text) {
@@ -45,12 +48,12 @@ export default function AddDeviceDialog({ channelID, open, onClose, onCreated })
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
-  const serverWS = useMemo(() => defaultServerWS(), []);
+  const serverOrigin = useMemo(() => defaultServerOrigin(), []);
 
   if (!open) return null;
 
   const apiKey = created?.apiKey || created?.api_key || created?.APIKey || '';
-  const command = apiKey ? startCommand(apiKey, serverWS) : '';
+  const command = apiKey ? installCommand(apiKey, serverOrigin) : '';
 
   function close() {
     setName('');
@@ -122,7 +125,7 @@ export default function AddDeviceDialog({ channelID, open, onClose, onCreated })
               <h3 id="add-device-title">设备已创建</h3>
               <button type="button" className="device-icon-btn" onClick={close} aria-label="关闭">×</button>
             </div>
-            <p className="device-dialog-note">API Key 只显示一次，关闭后只能看到 prefix。</p>
+            <p className="device-dialog-note">在该设备的终端运行下面命令一键安装 + 启动。API Key 只显示一次，关闭后只能看到 prefix。</p>
             <div className="device-command" title={command}>{command}</div>
             {error && <div className="device-dialog-error">{error}</div>}
             <div className="device-dialog-actions">

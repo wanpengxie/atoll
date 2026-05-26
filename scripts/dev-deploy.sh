@@ -53,10 +53,24 @@ done
 if [ "${SKIP_BUILD:-0}" = "1" ]; then
   blue "[deploy] step 2: SKIP_BUILD=1, skipping go build"
 else
-  blue "[deploy] step 2: go build server / daemon / worker / cli"
+  blue "[deploy] step 2: go build server / daemon / worker / cli / proxy"
   mkdir -p bin
   for b in server daemon worker cli; do
     go build -o "bin/coagent-$b" "./cmd/$b" || fail "go build cmd/$b"
+  done
+  # Native proxy binary for direct local use + cross-compiled installer
+  # binaries served by /install/coagent-proxy_<os>_<arch>. The installer
+  # set is what one-line `curl … | sh` fetches when a remote user installs
+  # the daemon on their own machine. We keep coverage to the platforms
+  # spec §13 #2 lists as MVP: linux/darwin × amd64/arm64.
+  go build -o "bin/coagent-proxy" "./cmd/coagent-proxy" || fail "go build cmd/coagent-proxy"
+  mkdir -p bin/installers
+  for os_arch in linux_amd64 linux_arm64 darwin_amd64 darwin_arm64; do
+    goos="${os_arch%_*}"
+    goarch="${os_arch##*_}"
+    out="bin/installers/coagent-proxy_${os_arch}"
+    GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$out" "./cmd/coagent-proxy" \
+      || fail "cross-build coagent-proxy ${os_arch}"
   done
 fi
 
@@ -115,6 +129,7 @@ nohup ./bin/coagent-server \
   -db "$DB_PATH" \
   -addr :8832 \
   -ui-dist ./ui/dist \
+  -installer-dir ./bin/installers \
   > "$SERVER_LOG" 2>&1 &
 disown
 SERVER_PID=$!

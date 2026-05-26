@@ -94,6 +94,7 @@ func run() error {
 		BcryptCost:                cfg.BcryptCost,
 		AllowDevSecrets:           cfg.AllowDevSecrets,
 		UIDistDir:                 cfg.UIDistDir,
+		InstallerDir:              cfg.InstallerDir,
 		ReconcileGracePeriod:      cfg.ReconcileGracePeriod,
 		ReconcileCreateTimeout:    cfg.ReconcileCreateTimeout,
 		ReconcileHeartbeatTimeout: cfg.ReconcileHeartbeatTimeout,
@@ -172,6 +173,7 @@ type config struct {
 	BcryptCost                int
 	AllowDevSecrets           bool
 	UIDistDir                 string
+	InstallerDir              string
 	ReconcileGracePeriod      time.Duration
 	ReconcileCreateTimeout    time.Duration
 	ReconcileHeartbeatTimeout time.Duration
@@ -196,6 +198,7 @@ func loadConfig() config {
 		AllowDevSecrets:           os.Getenv("COAGENT_ALLOW_DEV_SECRETS") == "1",
 		DeviceAllowMissingOrigin:  envBool("COAGENT_DEVICEBUS_ALLOW_MISSING_ORIGIN"),
 		UIDistDir:                 os.Getenv("COAGENT_UI_DIST"),
+		InstallerDir:              os.Getenv("COAGENT_INSTALLER_DIR"),
 		ReconcileGracePeriod:      60 * time.Second,
 		ReconcileCreateTimeout:    30 * time.Second,
 		ReconcileHeartbeatTimeout: 90 * time.Second,
@@ -206,6 +209,8 @@ func loadConfig() config {
 	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "Path to server sqlite database")
 	flag.StringVar(&cfg.UIDistDir, "ui-dist", cfg.UIDistDir,
 		"Path to ui/dist directory; when set, served as SPA at /. Empty (default) = API only.")
+	flag.StringVar(&cfg.InstallerDir, "installer-dir", cfg.InstallerDir,
+		"Path to dir containing coagent-proxy_<os>_<arch> binaries; when set, served at /install/<file>. Empty (default) = /install/* disabled.")
 	flag.BoolVar(&cfg.AllowDevSecrets, "allow-dev-secrets", cfg.AllowDevSecrets,
 		"Allow empty / dev-sentinel secrets (dev-only; required for the legacy --change-me defaults)")
 	flag.StringVar(&deviceOrigins, "devicebus-allowed-origins", deviceOrigins,
