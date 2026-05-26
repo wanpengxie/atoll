@@ -16,9 +16,13 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	proxyfacade "github.com/wanpengxie/ActOS/adapters/framework/proxy_facade"
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
+	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
@@ -1594,6 +1598,178 @@ func pollUntil(t *testing.T, timeout time.Duration, fn func() bool) {
 	}
 	if !fn() {
 		t.Fatalf("condition not met within %s", timeout)
+	}
+}
+
+func TestDeviceTransitNoRouteProxyFacadePayloadSynthesizesTerminalEnvelope(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	const daemonID placement.DaemonID = "d-proxy-no-route"
+	const chID channel.ID = "ch-proxy-no-route"
+	const adapterActor actor.ActorID = "tool:kimi"
+
+	if err := app.Daemonbus().RegisterDaemon(ctx, daemonID, "h", "v", 0, "test-daemon"); err != nil {
+		t.Fatalf("RegisterDaemon: %v", err)
+	}
+	epoch, err := app.Daemonbus().IssueConnectionEpoch(ctx, daemonID)
+	if err != nil {
+		t.Fatalf("IssueConnectionEpoch: %v", err)
+	}
+	svr, dmn := newPipePair()
+	conn := daemonbus.NewConnection(daemonID, epoch, svr)
+	app.Daemonbus().Register(conn)
+	defer app.Daemonbus().Unregister(daemonID)
+
+	p, createReq, err := app.Placements().Reserve(ctx, chID, daemonID, placement.ConnectionEpoch(epoch), nil)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	ack := placement.CreateChannelAck{
+		FrameID:         "ack-proxy-no-route",
+		ChannelID:       p.ChannelID,
+		CreateRequestID: createReq.CreateRequestID,
+		OwnerEpoch:      1,
+		FencingToken:    "daemon-tok-proxy-no-route",
+		DaemonID:        daemonID,
+		Result:          placement.CreateChannelAccepted,
+	}
+	if ok, err := app.Placements().Activate(ctx, ack, placement.ConnectionEpoch(epoch)); err != nil || !ok {
+		t.Fatalf("Activate: ok=%v err=%v", ok, err)
+	}
+
+	req := message.Envelope{
+		ID:            "req-proxy-no-route",
+		TS:            1_700_000_000_000,
+		ChannelID:     chID,
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: "agent:author"},
+		Kind:          message.KindRequest,
+		Type:          "kimi.ask",
+		Payload:       json.RawMessage(`{"prompt":"hi"}`),
+		CorrelationID: "trace-proxy-no-route",
+		Visibility:    message.VisibilityPublic,
+		Audience:      message.Audience{adapterActor},
+	}
+	reqRaw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request envelope: %v", err)
+	}
+	bodyRaw, err := json.Marshal(struct {
+		Direction     string          `json:"direction"`
+		RequestID     string          `json:"request_id,omitempty"`
+		CorrelationID string          `json:"correlation_id,omitempty"`
+		Payload       json.RawMessage `json:"payload,omitempty"`
+	}{
+		Direction:     "to_device",
+		RequestID:     req.ID.String(),
+		CorrelationID: req.CorrelationID.String(),
+		Payload:       reqRaw,
+	})
+	if err != nil {
+		t.Fatalf("marshal transit body: %v", err)
+	}
+	sf := devicetransit.SendFrame{
+		AdapterActorID: adapterActor,
+		ChannelID:      chID,
+		Body:           bodyRaw,
+	}
+	framePayload, err := json.Marshal(sf)
+	if err != nil {
+		t.Fatalf("marshal device_transit.recv payload: %v", err)
+	}
+	if err := app.DaemonbusHandlers().OnDeviceTransitRecv(ctx, conn, kerneldaemonbus.Frame{
+		FrameKind:             kerneldaemonbus.FrameTypeDeviceTransitRecv,
+		DaemonID:              daemonID,
+		DaemonConnectionEpoch: epoch,
+		Payload:               framePayload,
+	}); err != nil {
+		t.Fatalf("OnDeviceTransitRecv: %v", err)
+	}
+
+	outFrame, err := dmn.ReadFrame(ctx)
+	if err != nil {
+		t.Fatalf("read synthetic callback frame: %v", err)
+	}
+	if outFrame.FrameKind != kerneldaemonbus.FrameTypeDeviceTransitSend {
+		t.Fatalf("frame kind=%q want %q", outFrame.FrameKind, kerneldaemonbus.FrameTypeDeviceTransitSend)
+	}
+	var outSF devicetransit.SendFrame
+	if err := json.Unmarshal(outFrame.Payload, &outSF); err != nil {
+		t.Fatalf("decode synthetic send frame: %v", err)
+	}
+	if outSF.AdapterActorID != adapterActor || outSF.ChannelID != chID {
+		t.Fatalf("send frame=%+v want actor=%s channel=%s", outSF, adapterActor, chID)
+	}
+	var outBody struct {
+		Direction     string          `json:"direction"`
+		RequestID     string          `json:"request_id,omitempty"`
+		CorrelationID string          `json:"correlation_id,omitempty"`
+		Payload       json.RawMessage `json:"payload,omitempty"`
+	}
+	if err := json.Unmarshal(outSF.Body, &outBody); err != nil {
+		t.Fatalf("decode synthetic transit body: %v", err)
+	}
+	if outBody.RequestID != req.ID.String() || outBody.CorrelationID != req.CorrelationID.String() {
+		t.Fatalf("transit body request/correlation=%s/%s", outBody.RequestID, outBody.CorrelationID)
+	}
+
+	var resp message.Envelope
+	if err := json.Unmarshal(outBody.Payload, &resp); err != nil {
+		t.Fatalf("synthetic payload is not an envelope: %v", err)
+	}
+	if resp.Kind != message.KindResponse || resp.ParentID != req.ID || resp.Type != req.Type {
+		t.Fatalf("response identity=%+v", resp)
+	}
+	if resp.CorrelationID != req.CorrelationID {
+		t.Fatalf("correlation_id=%q want %q", resp.CorrelationID, req.CorrelationID)
+	}
+	if resp.Sender.ID != actor.SystemActorID || resp.Sender.Kind != actor.KindSystem {
+		t.Fatalf("sender=%+v want system fallback", resp.Sender)
+	}
+	if len(resp.Audience) != 1 || resp.Audience[0] != req.Sender.ID {
+		t.Fatalf("audience=%v want %s", resp.Audience, req.Sender.ID)
+	}
+	var payload struct {
+		Status    string `json:"status"`
+		Reason    string `json:"reason"`
+		ErrorCode string `json:"error_code"`
+	}
+	if err := json.Unmarshal(resp.Payload, &payload); err != nil {
+		t.Fatalf("decode response payload: %v", err)
+	}
+	if payload.Status != "failed" ||
+		payload.Reason != string(message.TerminalReceiverUnavailable) ||
+		payload.ErrorCode != "device_not_bound" {
+		t.Fatalf("response payload=%+v", payload)
+	}
+
+	mod, err := proxyfacade.New(adapter.Declaration{
+		Name:         "kimi",
+		ActorID:      adapterActor,
+		Types:        []string{req.Type},
+		Binding:      actor.BindingRuntimeInboundViaRelay,
+		MaxPendingMs: 30_000,
+	})
+	if err != nil {
+		t.Fatalf("proxy facade New: %v", err)
+	}
+	chain := &proxyFacadeCaptureChain{}
+	if err := mod.Init(ctx, &adapter.ModuleContext{
+		AdapterName:    "kimi",
+		AdapterActorID: adapterActor,
+		ChannelID:      chID,
+		DeviceTransit:  proxyFacadeNoopTransit{},
+		HarnessChain:   chain,
+	}); err != nil {
+		t.Fatalf("proxy facade Init: %v", err)
+	}
+	if err := mod.OnExternalCallback(ctx, outBody.Payload); err != nil {
+		t.Fatalf("proxy facade OnExternalCallback rejected synthetic envelope: %v", err)
+	}
+	if chain.env == nil || chain.env.ID != resp.ID || chain.env.ParentID != req.ID {
+		t.Fatalf("proxy facade wrote env=%+v want response=%s parent=%s", chain.env, resp.ID, req.ID)
 	}
 }
 
@@ -3454,6 +3630,23 @@ func (p *pipeTransport) WriteFrame(ctx context.Context, f kerneldaemonbus.Frame)
 	}
 }
 func (p *pipeTransport) Close() error { return nil }
+
+type proxyFacadeNoopTransit struct{}
+
+func (proxyFacadeNoopTransit) Send(context.Context, devicetransit.SendFrame) (devicetransit.FrameID, error) {
+	return "noop-frame", nil
+}
+
+func (proxyFacadeNoopTransit) Ack(context.Context, devicetransit.AckFrame) error { return nil }
+
+type proxyFacadeCaptureChain struct {
+	env *message.Envelope
+}
+
+func (c *proxyFacadeCaptureChain) Write(_ context.Context, env *message.Envelope) (khar.WriteResult, error) {
+	c.env = env
+	return khar.WriteResult{MessageID: env.ID, Seq: 1}, nil
+}
 
 // seqList extracts the seq field of every captured PushedFrame; used
 // for readable failure messages in fan-out ordering tests.

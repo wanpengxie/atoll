@@ -1132,11 +1132,16 @@ func (m *Manager) dispatchRuntimeEvent(
 
 func callbackCorrelationID(payload []byte) string {
 	var body struct {
-		CorrelationID string `json:"correlation_id"`
-		RequestID     string `json:"request_id"`
+		Kind          message.Kind `json:"kind"`
+		ParentID      string       `json:"parent_id"`
+		CorrelationID string       `json:"correlation_id"`
+		RequestID     string       `json:"request_id"`
 	}
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return ""
+	}
+	if body.Kind == message.KindResponse && body.ParentID != "" {
+		return body.ParentID
 	}
 	if body.CorrelationID != "" {
 		return body.CorrelationID

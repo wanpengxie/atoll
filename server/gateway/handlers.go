@@ -204,7 +204,7 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 			}
 			err := a.devicebus.SendFrameToActor(ctx, sf.ChannelID, sf.AdapterActorID, df)
 			if errors.Is(err, devicebus.ErrRegistrationNotFound) {
-				return a.synthesizeDeviceUnreachableCallback(ctx, sf, body, err)
+				return a.synthesizeDeviceUnreachableCallback(ctx, sf, body)
 			}
 			return err
 		},
@@ -221,22 +221,8 @@ func (a *App) synthesizeDeviceUnreachableCallback(
 	ctx context.Context,
 	sf devicetransit.SendFrame,
 	body deviceFrameBody,
-	cause error,
 ) error {
-	code := "device_not_bound"
-	msg := "no proxy daemon is registered for this channel + adapter actor"
-	cbPayload, err := json.Marshal(map[string]any{
-		// Callback.correlation_id matches the envelope.id (carried as
-		// request_id on the device_transit wire), not the chain
-		// correlation_id. Adapter framework uses this to look up the
-		// pending request entry; mismatch falls through as orphan.
-		"correlation_id": body.RequestID,
-		"status":         "error",
-		"error": map[string]any{
-			"code":    code,
-			"message": msg,
-		},
-	})
+	cbPayload, err := synthesizeDeviceUnreachablePayload(sf, body)
 	if err != nil {
 		return fmt.Errorf("gateway: marshal synthetic unreachable callback: %w", err)
 	}
@@ -251,6 +237,90 @@ func (a *App) synthesizeDeviceUnreachableCallback(
 		ExpiresAt:     body.ExpiresAt,
 	}
 	return a.ForwardDeviceFrame(ctx, df, sf.AdapterActorID)
+}
+
+func synthesizeDeviceUnreachablePayload(sf devicetransit.SendFrame, body deviceFrameBody) (json.RawMessage, error) {
+	if req, ok := decodeProxyFacadeRequestEnvelope(body.Payload); ok {
+		return synthesizeProxyFacadeUnreachableResponse(sf, req)
+	}
+	return synthesizeLegacyDeviceUnreachableCallback(body)
+}
+
+func decodeProxyFacadeRequestEnvelope(raw json.RawMessage) (message.Envelope, bool) {
+	if len(raw) == 0 {
+		return message.Envelope{}, false
+	}
+	var env message.Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return message.Envelope{}, false
+	}
+	if env.ID == "" || env.Kind != message.KindRequest || env.Type == "" || env.Sender.ID == "" {
+		return message.Envelope{}, false
+	}
+	return env, true
+}
+
+func synthesizeProxyFacadeUnreachableResponse(sf devicetransit.SendFrame, req message.Envelope) (json.RawMessage, error) {
+	const (
+		code = "device_not_bound"
+		msg  = "no proxy daemon is registered for this channel + adapter actor"
+	)
+	payloadFields := map[string]any{
+		"status":     "failed",
+		"reason":     string(message.TerminalReceiverUnavailable),
+		"error_code": code,
+		"detail":     msg,
+	}
+	if len(req.Audience) > 0 {
+		payloadFields["missing_actor_id"] = req.Audience[0].String()
+	}
+	payload, err := json.Marshal(payloadFields)
+	if err != nil {
+		return nil, err
+	}
+	correlationID := req.CorrelationID
+	if correlationID == "" {
+		correlationID = req.ID
+	}
+	visibility := req.Visibility
+	if visibility == "" {
+		visibility = message.VisibilityPublic
+	}
+	channelID := req.ChannelID
+	if channelID == "" {
+		channelID = sf.ChannelID
+	}
+	resp := message.Envelope{
+		ID:            message.ID("response:" + req.ID.String() + ":sys-" + string(message.TerminalReceiverUnavailable)),
+		TS:            time.Now().UnixMilli(),
+		ChannelID:     channelID,
+		Sender:        message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind:          message.KindResponse,
+		Type:          req.Type,
+		Payload:       payload,
+		ParentID:      req.ID,
+		CorrelationID: correlationID,
+		Visibility:    visibility,
+		Audience:      message.Audience{req.Sender.ID},
+	}
+	return json.Marshal(resp)
+}
+
+func synthesizeLegacyDeviceUnreachableCallback(body deviceFrameBody) (json.RawMessage, error) {
+	code := "device_not_bound"
+	msg := "no proxy daemon is registered for this channel + adapter actor"
+	return json.Marshal(map[string]any{
+		// Callback.correlation_id matches the envelope.id (carried as
+		// request_id on the device_transit wire), not the chain
+		// correlation_id. Adapter framework uses this to look up the
+		// pending request entry; mismatch falls through as orphan.
+		"correlation_id": body.RequestID,
+		"status":         "error",
+		"error": map[string]any{
+			"code":    code,
+			"message": msg,
+		},
+	})
 }
 
 // OnChannelCreated implements catalog.PlacementHook. Channel bind sends the

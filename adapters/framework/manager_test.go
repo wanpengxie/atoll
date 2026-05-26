@@ -1074,6 +1074,24 @@ func TestManagerOnExternalCallbackRoutes(t *testing.T) {
 	}
 }
 
+func TestCallbackCorrelationIDUsesResponseParentID(t *testing.T) {
+	raw, err := json.Marshal(message.Envelope{
+		ID:            "resp-1",
+		Kind:          message.KindResponse,
+		ParentID:      "req-1",
+		CorrelationID: "trace-1",
+	})
+	if err != nil {
+		t.Fatalf("marshal response envelope: %v", err)
+	}
+	if got := callbackCorrelationID(raw); got != "req-1" {
+		t.Fatalf("callbackCorrelationID(response envelope)=%q want parent_id", got)
+	}
+	if got := callbackCorrelationID([]byte(`{"correlation_id":"legacy-corr","request_id":"legacy-req"}`)); got != "legacy-corr" {
+		t.Fatalf("callbackCorrelationID(legacy)=%q want legacy-corr", got)
+	}
+}
+
 func TestManagerOnExternalCallbackEmitsOrphanEvents(t *testing.T) {
 	var routed atomic.Bool
 	mod := &stubModule{
