@@ -17,9 +17,11 @@
 import { initToolsRegistry, handleCallTool } from './tools';
 import {
   ConnectionConfig,
+  DEFAULT_PROXY_ACTOR_ID,
   getConnectionConfig,
   saveConnectionConfig,
   getStoredConnectionStatus,
+  getDefaultProxyEndpoint,
 } from './connection-state';
 import { cookieSyncService } from './tools/sync-cookies';
 import { coagentDeviceClient } from './services/coagent-device';
@@ -45,6 +47,7 @@ type BackgroundRequest =
   | { type: 'GET_STATUS' }
   | { type: 'TOOL_RESULT'; payload: any }
   | { type: 'CONNECT_DEVICE'; payload?: Partial<ConnectionConfig> }
+  | { type: 'CONNECT_PROXY_DAEMON'; payload?: { proxyEndpoint?: string } }
   | { type: 'DISCONNECT_DEVICE' }
   | { type: 'GET_CONNECTION_CONFIG' }
   | { type: 'SAVE_CONNECTION_CONFIG'; payload: Partial<ConnectionConfig> }
@@ -68,10 +71,13 @@ let connectionConfigLoad: Promise<ConnectionConfig> | null = null;
  *     `coagentDeviceClient` to `ws://{daemon}/device/{id}?key=...`
  *   - 'none'   → config incomplete; no client should connect.
  */
-type DeviceTransport = 'server' | 'daemon' | 'none';
+type DeviceTransport = 'proxy' | 'server' | 'daemon' | 'none';
 
 function selectTransport(cfg: ConnectionConfig | null | undefined): DeviceTransport {
   if (!cfg) return 'none';
+  if (cfg.connectionMode === 'proxy') return hasProxyDeviceConfig(cfg) ? 'proxy' : 'none';
+  if (cfg.connectionMode === 'server') return hasServerDeviceConfig(cfg) ? 'server' : 'none';
+  if (cfg.connectionMode === 'legacy') return hasLegacyDeviceConfig(cfg) ? 'daemon' : 'none';
   if (hasServerDeviceConfig(cfg)) return 'server';
   if (hasLegacyDeviceConfig(cfg)) return 'daemon';
   return 'none';
@@ -79,10 +85,16 @@ function selectTransport(cfg: ConnectionConfig | null | undefined): DeviceTransp
 
 /** Translate the persistent ConnectionConfig into the v4 client's input. */
 function toServerDeviceConfig(cfg: ConnectionConfig): ServerDeviceConfig {
+  const proxyMode = cfg.connectionMode === 'proxy';
   return {
-    wsEndpoint: (cfg.serverWsEndpoint ?? '').trim(),
-    actorId: (cfg.deviceActorId ?? '').trim(),
-    token: (cfg.deviceActorToken ?? '').trim(),
+    mode: proxyMode ? 'proxy' : 'server',
+    wsEndpoint: proxyMode
+      ? (cfg.proxyEndpoint ?? getDefaultProxyEndpoint()).trim()
+      : (cfg.serverWsEndpoint ?? '').trim(),
+    actorId: proxyMode
+      ? ((cfg.deviceActorId ?? '').trim() || DEFAULT_PROXY_ACTOR_ID)
+      : (cfg.deviceActorId ?? '').trim(),
+    token: proxyMode ? '' : (cfg.deviceActorToken ?? '').trim(),
     channelId: (cfg.channelId ?? '').trim(),
     autoReconnect: cfg.autoReconnect !== false,
     userId: cfg.userId,
@@ -138,6 +150,14 @@ function activeDeviceClient(): {
 } {
   const transport = selectTransport(connectionConfig);
   if (transport === 'server') {
+    return {
+      transport,
+      connect: () => coagentServerDeviceClient.connect(),
+      disconnect: () => coagentServerDeviceClient.disconnect(),
+      postCallback: (id, p) => coagentServerDeviceClient.postCallback(id, p),
+    };
+  }
+  if (transport === 'proxy') {
     return {
       transport,
       connect: () => coagentServerDeviceClient.connect(),
@@ -240,7 +260,10 @@ export default defineBackground(() => {
             break;
           }
           case 'CONNECT_DEVICE': {
-            const patch = request.payload ?? {};
+            const patch: Partial<ConnectionConfig> = { ...(request.payload ?? {}) };
+            if (!patch.connectionMode && (patch.serverUrl ?? '').trim()) {
+              patch.connectionMode = 'legacy';
+            }
             connectionConfig = await saveConnectionConfig(patch);
             applyClients(connectionConfig);
             const transport = selectTransport(connectionConfig);
@@ -256,6 +279,25 @@ export default defineBackground(() => {
             sendResponse(result);
             break;
           }
+          case 'CONNECT_PROXY_DAEMON': {
+            const endpoint = String(request.payload?.proxyEndpoint ?? getDefaultProxyEndpoint()).trim();
+            connectionConfig = await saveConnectionConfig({
+              connectionMode: 'proxy',
+              proxyEndpoint: endpoint || getDefaultProxyEndpoint(),
+              deviceActorId: DEFAULT_PROXY_ACTOR_ID,
+              deviceActorToken: '',
+              serverWsEndpoint: '',
+              channelId: '',
+              autoReconnect: true,
+              serverUrl: '',
+              wsUrl: '',
+            });
+            disconnectAll();
+            applyClients(connectionConfig);
+            const result = await activeDeviceClient().connect();
+            sendResponse({ ...result, config: connectionConfig });
+            break;
+          }
           case 'DISCONNECT_DEVICE': {
             disconnectAll();
             sendResponse({ success: true });
@@ -267,7 +309,11 @@ export default defineBackground(() => {
             break;
           }
           case 'SAVE_CONNECTION_CONFIG': {
-            connectionConfig = await saveConnectionConfig(request.payload);
+            const patch: Partial<ConnectionConfig> = { ...request.payload };
+            if (!patch.connectionMode && (patch.serverUrl ?? '').trim()) {
+              patch.connectionMode = 'legacy';
+            }
+            connectionConfig = await saveConnectionConfig(patch);
             // 配置变更：先断开两条 transport，再统一 update（不自动重连，由 popup 触发）。
             disconnectAll();
             applyClients(connectionConfig);
@@ -308,6 +354,7 @@ export default defineBackground(() => {
             // 写完整 device config（含 wsUrl/httpBase 别名）。
             const patch: Partial<ConnectionConfig> = {
               coagentServerUrl: String(coagentServerUrl ?? '').trim(),
+              connectionMode: 'legacy',
               apiKey: String(apiKey ?? '').trim(),
               serverUrl: result.data.ws_url, // canonical（legacy daemon WS）
               wsUrl: result.data.ws_url, // 别名
@@ -471,6 +518,14 @@ function hasServerDeviceConfig(cfg: ConnectionConfig): boolean {
     (cfg.serverWsEndpoint ?? '').trim() &&
     (cfg.deviceActorId ?? '').trim() &&
     (cfg.deviceActorToken ?? '').trim()
+  );
+}
+
+/** Local proxy daemon transport readiness: endpoint + actor id, no token. */
+function hasProxyDeviceConfig(cfg: ConnectionConfig): boolean {
+  return Boolean(
+    (cfg.proxyEndpoint ?? getDefaultProxyEndpoint()).trim() &&
+    ((cfg.deviceActorId ?? '').trim() || DEFAULT_PROXY_ACTOR_ID)
   );
 }
 

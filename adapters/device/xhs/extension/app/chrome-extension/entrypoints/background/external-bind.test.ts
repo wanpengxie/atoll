@@ -307,6 +307,7 @@ describe('setDeviceToken', () => {
         deviceActorToken: 'tok-A',
         channelId: 'ch-1',
         deviceId: 'xhs-dev-A',
+        connectionMode: 'server',
         autoReconnect: true,
         userId: 'user-1',
         serverUrl: '',
@@ -316,6 +317,31 @@ describe('setDeviceToken', () => {
     expect(disconnectAll).toHaveBeenCalledOnce();
     expect(applyClients).toHaveBeenCalledOnce();
     expect(connect).toHaveBeenCalledOnce();
+  });
+
+  it('proxy mode: setDeviceToken is a no-op and does not require token fields', async () => {
+    const { deps, state, disconnectAll, applyClients, connect } = makeDeps({
+      connectionMode: 'proxy',
+      proxyEndpoint: 'ws://127.0.0.1:10387',
+      deviceActorId: 'tool:xhs',
+      channelId: 'ch-proxy',
+      userId: 'user-proxy',
+    });
+    const res = await handleExternalMessage(
+      { action: 'setDeviceToken' } as ExternalBindMessage,
+      senderOk(),
+      deps,
+    );
+    expect(res.status).toBe('connected');
+    if (res.status === 'connected') {
+      expect(res.actor_id).toBe('tool:xhs');
+      expect(res.channel_id).toBe('ch-proxy');
+      expect(res.user_id).toBe('user-proxy');
+    }
+    expect(state.saves).toEqual([]);
+    expect(disconnectAll).not.toHaveBeenCalled();
+    expect(applyClients).not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
   });
 
   it('missing server_ws_url returns invalid_payload', async () => {

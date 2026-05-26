@@ -17,7 +17,7 @@ const (
 	DefaultPort     = 10387
 )
 
-var DefaultEnabledActors = []actor.ActorID{"tool:kimi"}
+var DefaultEnabledActors = []actor.ActorID{"tool:kimi", "tool:xhs"}
 
 type Config struct {
 	APIKey        string                            `json:"api_key"`

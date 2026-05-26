@@ -16,7 +16,40 @@
       <section class="connection-card">
         <div class="connection-card__header">
           <div>
-            <h2>🛰️ Coagent Device</h2>
+            <h2>本机 proxy daemon</h2>
+            <p>
+              启动 coagent-proxy 后点击连接。此模式只探寻本机
+              proxy daemon，不需要 token 或配对码。
+            </p>
+          </div>
+          <StatusIndicator :status="proxyStatusKind" :text="proxyStatusText" />
+        </div>
+
+        <el-form label-position="top" class="connection-form">
+          <el-form-item label="Proxy endpoint" class="server-url-item">
+            <el-input
+              v-model="proxyForm.proxyEndpoint"
+              :placeholder="defaultProxyEndpoint"
+            />
+          </el-form-item>
+
+          <div class="connection-form__actions">
+            <el-button
+              type="primary"
+              :loading="proxyConnecting"
+              @click="connectProxyDaemon"
+              class="action-btn action-btn--primary"
+            >
+              连接本机 proxy daemon
+            </el-button>
+          </div>
+        </el-form>
+      </section>
+
+      <section class="connection-card">
+        <div class="connection-card__header">
+          <div>
+            <h2>Legacy direct mode</h2>
             <p>
               填 Coagent api-key + 点 "连接"，扩展自动从 coagent server 反查
               daemon 连接信息并建立 WebSocket 长连。
@@ -159,6 +192,7 @@ import {
   getDefaultWebSocketUrl,
   getDefaultDaemonHttpBase,
   getDefaultCoagentServerUrl,
+  getDefaultProxyEndpoint,
 } from '@/entrypoints/background/connection-state';
 import { ElMessage } from 'element-plus';
 
@@ -166,6 +200,15 @@ const store = useAppStore();
 
 const defaultDaemonHttpBase = getDefaultDaemonHttpBase();
 const defaultCoagentServerUrl = getDefaultCoagentServerUrl();
+const defaultProxyEndpoint = getDefaultProxyEndpoint();
+
+// ── proxy daemon 主动探寻 ─────────────────────────────────────────────
+const proxyForm = ref({
+  proxyEndpoint: defaultProxyEndpoint,
+});
+const proxyConnecting = ref(false);
+const proxyModeActive = ref(false);
+const proxyProbeState = ref<'idle' | 'detected' | 'not_detected'>('idle');
 
 // ── 主入口表单（1-key resolve 流程）────────────────────────────────────
 const primaryForm = ref({
@@ -192,6 +235,18 @@ const configLoaded = ref(false);
 
 // ── 连接状态徽章 ──────────────────────────────────────────────────────
 type StatusKind = 'connected' | 'disconnected' | 'error' | 'loading';
+const proxyStatusKind = computed<StatusKind>(() => {
+  if (proxyConnecting.value) return 'loading';
+  if (proxyModeActive.value && store.connectionStatus.connected) return 'connected';
+  if (proxyProbeState.value === 'not_detected') return 'error';
+  return 'disconnected';
+});
+const proxyStatusText = computed(() => {
+  if (proxyConnecting.value) return '探寻中...';
+  if (proxyModeActive.value && store.connectionStatus.connected) return '已连接本机 daemon';
+  if (proxyProbeState.value === 'not_detected') return '未检测到本机 daemon';
+  return '未连接';
+});
 const connectionStatus = computed<StatusKind>(() => {
   if (resolving.value || store.connectionStatus.reconnecting) return 'loading';
   if (!store.connectionStatus.connected) {
@@ -217,6 +272,8 @@ const loadConnectionConfig = async () => {
   if (response?.success) {
     const c = response.config ?? {};
     // 主入口：coagentServerUrl 优先；没填过用默认。apiKey 用 device key 同字段。
+    proxyForm.value.proxyEndpoint = c.proxyEndpoint || defaultProxyEndpoint;
+    proxyModeActive.value = c.connectionMode === 'proxy';
     primaryForm.value.coagentServerUrl =
       c.coagentServerUrl || defaultCoagentServerUrl;
     primaryForm.value.apiKey = c.apiKey || '';
@@ -230,6 +287,29 @@ const loadConnectionConfig = async () => {
     advancedForm.value.userId = c.userId || '';
   }
   configLoaded.value = true;
+};
+
+const connectProxyDaemon = async () => {
+  proxyConnecting.value = true;
+  primaryError.value = '';
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'CONNECT_PROXY_DAEMON',
+      payload: {
+        proxyEndpoint: proxyForm.value.proxyEndpoint || defaultProxyEndpoint,
+      },
+    });
+    if (response?.success) {
+      proxyModeActive.value = true;
+      proxyProbeState.value = 'detected';
+      ElMessage.success('已连接本机 proxy daemon');
+    } else {
+      proxyProbeState.value = 'not_detected';
+      ElMessage.error(response?.error || '未检测到本机 proxy daemon');
+    }
+  } finally {
+    proxyConnecting.value = false;
+  }
 };
 
 // ── 主入口 connect（resolve + connect 一步走） ─────────────────────────
@@ -272,6 +352,7 @@ const connectViaResolve = async () => {
 
 // ── Advanced：旧 5 字段直连 / 保存 ─────────────────────────────────────
 const buildAdvancedPayload = () => ({
+  connectionMode: 'legacy',
   serverUrl: advancedForm.value.serverUrl,
   autoReconnect: advancedForm.value.autoReconnect,
   apiKey: advancedForm.value.apiKey,
@@ -344,6 +425,7 @@ function syncConnectionStatus(status: any) {
   });
   // 一旦真正连上，清空主入口的临时错误显示。
   if (status.connected) primaryError.value = '';
+  if (proxyModeActive.value && status.connected) proxyProbeState.value = 'detected';
 }
 
 const messageListener = (message: any) => {

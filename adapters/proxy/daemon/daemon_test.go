@@ -96,9 +96,10 @@ func TestDaemonRunRoundTrip(t *testing.T) {
 		ServerWS:      server.URL,
 		EnabledActors: []actor.ActorID{"tool:fake"},
 	}, Options{
-		Registry:          reg,
-		ReadinessInterval: time.Hour,
-		HeartbeatInterval: time.Hour,
+		Registry:           reg,
+		DisableLocalListen: true,
+		ReadinessInterval:  time.Hour,
+		HeartbeatInterval:  time.Hour,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

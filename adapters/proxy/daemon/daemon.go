@@ -31,25 +31,27 @@ type Logger interface {
 }
 
 type Options struct {
-	Registry          *Registry
-	Logger            Logger
-	Version           string
-	Dialer            *websocket.Dialer
-	Hostname          string
-	HeartbeatInterval time.Duration
-	ReadinessInterval time.Duration
-	ReconnectInitial  time.Duration
-	ReconnectMax      time.Duration
-	Clock             func() time.Time
+	Registry           *Registry
+	Logger             Logger
+	Version            string
+	Dialer             *websocket.Dialer
+	Hostname           string
+	DisableLocalListen bool
+	HeartbeatInterval  time.Duration
+	ReadinessInterval  time.Duration
+	ReconnectInitial   time.Duration
+	ReconnectMax       time.Duration
+	Clock              func() time.Time
 }
 
 type Daemon struct {
-	cfg      Config
-	registry *Registry
-	log      Logger
-	version  string
-	dialer   *websocket.Dialer
-	hostname string
+	cfg                Config
+	registry           *Registry
+	log                Logger
+	version            string
+	dialer             *websocket.Dialer
+	hostname           string
+	disableLocalListen bool
 
 	heartbeatInterval time.Duration
 	readinessInterval time.Duration
@@ -109,18 +111,19 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 		opts.Clock = time.Now
 	}
 	return &Daemon{
-		cfg:               cfg,
-		registry:          opts.Registry,
-		log:               opts.Logger,
-		version:           opts.Version,
-		dialer:            opts.Dialer,
-		hostname:          hostname,
-		heartbeatInterval: opts.HeartbeatInterval,
-		readinessInterval: opts.ReadinessInterval,
-		reconnectInitial:  opts.ReconnectInitial,
-		reconnectMax:      opts.ReconnectMax,
-		clock:             opts.Clock,
-		readiness:         map[actor.ActorID]readinessState{},
+		cfg:                cfg,
+		registry:           opts.Registry,
+		log:                opts.Logger,
+		version:            opts.Version,
+		dialer:             opts.Dialer,
+		hostname:           hostname,
+		disableLocalListen: opts.DisableLocalListen,
+		heartbeatInterval:  opts.HeartbeatInterval,
+		readinessInterval:  opts.ReadinessInterval,
+		reconnectInitial:   opts.ReconnectInitial,
+		reconnectMax:       opts.ReconnectMax,
+		clock:              opts.Clock,
+		readiness:          map[actor.ActorID]readinessState{},
 	}, nil
 }
 
@@ -138,6 +141,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 	})
 	if d.initErr != nil {
 		return d.initErr
+	}
+	if !d.disableLocalListen {
+		local, err := StartLocalListener(ctx, d.cfg.Port, d.registry, d.log)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := local.Shutdown(shutdownCtx); err != nil {
+				d.log.Printf("proxy local listener shutdown: %v", err)
+			}
+		}()
 	}
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

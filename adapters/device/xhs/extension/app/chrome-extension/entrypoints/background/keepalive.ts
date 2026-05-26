@@ -1,7 +1,7 @@
 import { COAGENT_SERVER_DEVICEBUS_PROTOCOL } from 'coagent-xhs-shared';
 import type { ConnectionConfig } from './connection-state';
 
-type DeviceTransport = 'server' | 'daemon' | 'none';
+type DeviceTransport = 'proxy' | 'server' | 'daemon' | 'none';
 
 interface ConnectResult {
   success: boolean;

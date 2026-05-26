@@ -23,12 +23,16 @@
 import { EXTENSION_CONSTANTS } from 'coagent-xhs-shared';
 
 const DEFAULT_DAEMON_HTTP_BASE = 'http://127.0.0.1:9501';
+const DEFAULT_PROXY_ENDPOINT = 'ws://127.0.0.1:10387';
 /**
  * M1.2-T3 — popup 主入口默认 coagent server URL。`https://coagent-server`
  * 作为 placeholder；用户必须改成真实部署域名才能让 resolve 调用走通。
  */
 const DEFAULT_COAGENT_SERVER_URL = 'https://coagent-server';
 const DEFAULT_DEVICE_ACTOR_ID = 'tool:xhs-adapter';
+export const DEFAULT_PROXY_ACTOR_ID = 'tool:xhs';
+
+export type ConnectionMode = 'proxy' | 'server' | 'legacy';
 
 /** Device 连接状态快照（持久化到 chrome.storage.local；popup 也读它）。 */
 export interface ExtensionConnectionStatus {
@@ -94,6 +98,18 @@ export interface ConnectionConfig {
   deviceActorId?: string;
   /** server.devicebus 签发的 bearer token（24h TTL）。 */
   deviceActorToken?: string;
+
+  // ── T177 T4：proxy daemon localhost 主动探寻模式 ───────────────────────
+  /**
+   * Explicit transport mode selected by popup/user action.
+   * - proxy: local proxy daemon at proxyEndpoint, no token.
+   * - server: legacy direct server.devicebus actor token path.
+   * - legacy: older daemon-direct /device/{id}?key path.
+   * Empty means infer from populated fields for backward compatibility.
+   */
+  connectionMode?: ConnectionMode;
+  /** Local proxy daemon endpoint. Defaults to ws://127.0.0.1:10387. */
+  proxyEndpoint?: string;
 }
 
 const DEFAULT_STATUS: ExtensionConnectionStatus = {
@@ -119,6 +135,7 @@ const DEFAULT_CONFIG: ConnectionConfig = {
   serverWsEndpoint: '',
   deviceActorId: '',
   deviceActorToken: '',
+  proxyEndpoint: DEFAULT_PROXY_ENDPOINT,
 };
 
 export async function getStoredConnectionStatus(): Promise<ExtensionConnectionStatus> {
@@ -254,4 +271,8 @@ export function getDefaultDaemonHttpBase(): string {
  */
 export function getDefaultCoagentServerUrl(): string {
   return DEFAULT_COAGENT_SERVER_URL;
+}
+
+export function getDefaultProxyEndpoint(): string {
+  return DEFAULT_PROXY_ENDPOINT;
 }

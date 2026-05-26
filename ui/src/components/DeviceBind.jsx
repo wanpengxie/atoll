@@ -125,7 +125,7 @@ export default function DeviceBind({ channelID, me }) {
   if (!available) {
     return (
       <span className="device-bind muted" title={extensionUnavailableReason() || ''}>
-        Chrome extension 未安装 ·{' '}
+        先安装 xhs extension，并启动本机 proxy daemon ·{' '}
         <a href="/downloads/coagent-extension.zip" download>
           下载
         </a>
@@ -135,16 +135,19 @@ export default function DeviceBind({ channelID, me }) {
 
   return (
     <div className="device-bind">
+      <span className="muted device-bind-guide">
+        先启动 coagent-proxy，再在扩展 popup 连接本机 proxy daemon
+      </span>
       {bind ? (
         <>
-          <span className="muted">✅ 已绑定</span>
+          <span className="muted">legacy direct 已绑定</span>
           <button type="button" className="ghost" onClick={unbindFlow} disabled={busy}>
             解绑
           </button>
         </>
       ) : (
         <button type="button" onClick={bindFlow} disabled={busy || !channelID}>
-          {busy ? '…' : '绑定 Chrome extension'}
+          {busy ? '…' : 'Legacy direct 绑定'}
         </button>
       )}
       {status && <span className="muted device-bind-status">{status}</span>}

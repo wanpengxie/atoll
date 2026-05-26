@@ -79,6 +79,11 @@ func startCommand(configPath *string) *cobra.Command {
 			}); err != nil {
 				return err
 			}
+			if err := reg.Register(proxydaemon.DefaultXHSProxyActorID, func() (actorapi.ActorModule, error) {
+				return proxydaemon.NewXHSLocalModule(), nil
+			}); err != nil {
+				return err
+			}
 			logger, closeLog, err := newProxyLogger()
 			if err != nil {
 				return err
@@ -106,7 +111,7 @@ func startCommand(configPath *string) *cobra.Command {
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "daemon API key")
 	cmd.Flags().StringVar(&serverWS, "server-ws", "", "server websocket base or /devicebus/v2/connect URL")
 	cmd.Flags().IntVar(&port, "port", 0, "reserved local proxy port (default 10387)")
-	cmd.Flags().StringVar(&enabledActors, "enabled-actors", "", "comma-separated actor ids (default tool:kimi)")
+	cmd.Flags().StringVar(&enabledActors, "enabled-actors", "", "comma-separated actor ids (default tool:kimi,tool:xhs)")
 	return cmd
 }
 
@@ -147,7 +152,7 @@ func installCommand(configPath *string) *cobra.Command {
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "daemon API key")
 	cmd.Flags().StringVar(&serverWS, "server-ws", "", "server websocket base or /devicebus/v2/connect URL")
 	cmd.Flags().IntVar(&port, "port", proxydaemon.DefaultPort, "reserved local proxy port")
-	cmd.Flags().StringVar(&enabledActors, "enabled-actors", "tool:kimi", "comma-separated actor ids")
+	cmd.Flags().StringVar(&enabledActors, "enabled-actors", "tool:kimi,tool:xhs", "comma-separated actor ids")
 	return cmd
 }
 

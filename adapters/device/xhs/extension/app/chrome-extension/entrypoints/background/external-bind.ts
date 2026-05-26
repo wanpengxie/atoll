@@ -35,7 +35,7 @@
 // reason?, ...}` so the web UI can branch on status without parsing
 // English error strings.
 
-import type { ConnectionConfig } from './connection-state';
+import { DEFAULT_PROXY_ACTOR_ID, type ConnectionConfig } from './connection-state';
 
 /** Allowed origin patterns (manifest-style match patterns). The
  *  background script reads these at install time from the build-time
@@ -59,6 +59,8 @@ export interface BoundSnapshot {
   user_id?: string;
   actor_id?: string;
   server_ws_url?: string;
+  connection_mode?: ConnectionConfig['connectionMode'];
+  proxy_endpoint?: string;
 }
 
 /** Closed set of failure reasons. Web UI maps these to friendly text. */
@@ -286,6 +288,8 @@ async function handleGetDeviceInfo(deps: ExternalBindDeps): Promise<ExternalBind
       actor_id: cfg.deviceActorId || undefined,
       server_ws_url: cfg.serverWsEndpoint || undefined,
     };
+    if (cfg.connectionMode) snapshot.connection_mode = cfg.connectionMode;
+    if (cfg.proxyEndpoint) snapshot.proxy_endpoint = cfg.proxyEndpoint;
     return {
       status: 'ok',
       device_id: deviceID,
@@ -301,6 +305,20 @@ async function handleSetDeviceToken(
   message: ExternalBindMessage,
   deps: ExternalBindDeps,
 ): Promise<ExternalBindResponse> {
+  let current: ConnectionConfig;
+  try {
+    current = await deps.getConfig();
+  } catch (err) {
+    return errorResponse(err);
+  }
+  if (current.connectionMode === 'proxy') {
+    return {
+      status: 'connected',
+      actor_id: current.deviceActorId || DEFAULT_PROXY_ACTOR_ID,
+      channel_id: current.channelId || '',
+      user_id: current.userId,
+    };
+  }
   const validation = validateSetDeviceTokenPayload(message);
   if (!validation.ok) {
     return { status: 'failed', reason: validation.reason, detail: validation.detail };
@@ -312,6 +330,7 @@ async function handleSetDeviceToken(
       deviceActorToken: message.token!.trim(),
       channelId: message.channel_id!.trim(),
       deviceId: message.device_id!.trim(),
+      connectionMode: 'server',
       autoReconnect: true,
     };
     if (nonEmpty(message.user_id)) patch.userId = message.user_id!.trim();

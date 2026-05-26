@@ -102,6 +102,7 @@ export default defineConfig({
       'https://creator.douyin.com/*',
       // 本地开发
       'http://127.0.0.1/*',
+      'ws://127.0.0.1/*',
       'http://localhost/*',
     ],
 

@@ -18,7 +18,7 @@ func TestConfigNormalizeDefaults(t *testing.T) {
 	if cfg.Port != DefaultPort {
 		t.Fatalf("port = %d want %d", cfg.Port, DefaultPort)
 	}
-	if len(cfg.EnabledActors) != 1 || cfg.EnabledActors[0] != actor.ActorID("tool:kimi") {
+	if len(cfg.EnabledActors) != 2 || cfg.EnabledActors[0] != actor.ActorID("tool:kimi") || cfg.EnabledActors[1] != actor.ActorID("tool:xhs") {
 		t.Fatalf("enabled actors = %+v", cfg.EnabledActors)
 	}
 	if err := cfg.Validate(); err != nil {

@@ -182,6 +182,8 @@ function isOutboxEntry(value: unknown): value is OutboxEntry {
  * `userId` is informational (forensic logging only).
  */
 export interface ServerDeviceConfig {
+  /** Transport mode: server=legacy direct server.devicebus, proxy=local proxy daemon. */
+  mode?: 'server' | 'proxy';
   /** Base WS URL, e.g. `wss://coagent.example.com/devicebus`. */
   wsEndpoint: string;
   /** server-allocated actor_id (= WS handshake `actor_id`). */
@@ -223,16 +225,19 @@ export const DEVICE_WS_TOKEN_PREFIX = 'token.';
  * circuit without trying to construct an invalid URL.
  */
 export function buildDeviceBusUrl(cfg: ServerDeviceConfig): string {
+  const proxyMode = isProxyMode(cfg);
   const base = (cfg.wsEndpoint ?? '').trim();
   const actor = (cfg.actorId ?? '').trim();
   const tok = (cfg.token ?? '').trim();
-  // token is required at the config-validity gate, even though it no
-  // longer goes on the URL — without it the subprotocol header would
-  // be malformed and the upgrade would 400.
-  if (!base || !actor || !tok) return '';
+  if (!base || !actor) return '';
+  // Direct server mode still requires the actor token. Proxy mode is
+  // localhost-trusted: no token, no pairing, no subprotocol auth.
+  if (!proxyMode && !tok) return '';
   try {
     const u = new URL(base);
-    u.searchParams.set('actor_id', actor);
+    if (!proxyMode) {
+      u.searchParams.set('actor_id', actor);
+    }
     return u.toString();
   } catch {
     return '';
@@ -253,9 +258,14 @@ export function buildDeviceBusUrl(cfg: ServerDeviceConfig): string {
  * arg of `new WebSocket(url, protocols)`.
  */
 export function buildDeviceBusSubprotocols(cfg: ServerDeviceConfig): string[] {
+  if (isProxyMode(cfg)) return [];
   const tok = (cfg.token ?? '').trim();
   if (!tok) return [];
   return [DEVICE_WS_SUBPROTOCOL, `${DEVICE_WS_TOKEN_PREFIX}${tok}`];
+}
+
+function isProxyMode(cfg: ServerDeviceConfig | null | undefined): boolean {
+  return cfg?.mode === 'proxy';
 }
 
 /**
@@ -364,6 +374,7 @@ class CoagentServerDeviceClient {
     const next: ServerDeviceConfig = { ...config };
     const identityChanged =
       !prev ||
+      (prev.mode ?? 'server') !== (next.mode ?? 'server') ||
       (prev.actorId ?? '') !== (next.actorId ?? '') ||
       (prev.token ?? '') !== (next.token ?? '') ||
       (prev.wsEndpoint ?? '') !== (next.wsEndpoint ?? '');
@@ -479,9 +490,28 @@ class CoagentServerDeviceClient {
       socket.addEventListener('open', () => {
         if (this.generation !== gen) return;
         if (this.socket !== socket) return;
+        if (isProxyMode(this.config)) {
+          try {
+            socket.send(JSON.stringify({
+              frame_type: 'hello',
+              actor_id: (this.config?.actorId ?? '').trim(),
+            }));
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            void saveConnectionStatus({
+              connected: false,
+              reconnecting: false,
+              serverUrl: safeUrl,
+              lastError: message,
+            });
+            settle({ success: false, error: message });
+            return;
+          }
+        }
         console.warn('[ServerDeviceBus] WS open', {
           at: Date.now(),
           url: safeUrl,
+          mode: this.config?.mode ?? 'server',
         });
         this.reconnectAttempt = 0;
         void saveConnectionStatus({

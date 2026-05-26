@@ -199,6 +199,18 @@ describe('buildDeviceBusUrl', () => {
   it('returns empty when wsEndpoint is not a valid URL', () => {
     expect(buildDeviceBusUrl(makeConfig({ wsEndpoint: 'not a url' }))).toBe('');
   });
+
+  it('proxy mode uses the local endpoint as-is and does not require token', () => {
+    const url = buildDeviceBusUrl(makeConfig({
+      mode: 'proxy',
+      wsEndpoint: 'ws://127.0.0.1:10387',
+      actorId: 'tool:xhs',
+      token: '',
+    }));
+    expect(url).toBe('ws://127.0.0.1:10387/');
+    expect(url).not.toContain('actor_id=');
+    expect(url).not.toContain('token=');
+  });
 });
 
 describe('buildDeviceBusSubprotocols', () => {
@@ -209,6 +221,15 @@ describe('buildDeviceBusSubprotocols', () => {
 
   it('returns [] when token is missing (cannot construct slot)', () => {
     expect(buildDeviceBusSubprotocols(makeConfig({ token: '' }))).toEqual([]);
+  });
+
+  it('proxy mode returns no subprotocols', () => {
+    expect(buildDeviceBusSubprotocols(makeConfig({
+      mode: 'proxy',
+      wsEndpoint: 'ws://127.0.0.1:10387',
+      actorId: 'tool:xhs',
+      token: '',
+    }))).toEqual([]);
   });
 });
 
@@ -238,6 +259,27 @@ describe('client sets token subprotocol on WS construct (R5-14)', () => {
     expect(socket.url).not.toContain('token=');
     // Subprotocols: real protocol + token slot.
     expect(socket.protocols).toEqual(['coagent.device.v1', 'token.tok-secret']);
+  });
+});
+
+describe('proxy mode local hello', () => {
+  it('connects without token subprotocol and sends actor hello frame on open', async () => {
+    installFakeChromeStorage();
+    const client = makeClient({
+      mode: 'proxy',
+      wsEndpoint: 'ws://127.0.0.1:10387',
+      actorId: 'tool:xhs',
+      token: '',
+      channelId: '',
+    });
+    const socket = await openClient(client);
+    expect(socket.url).toBe('ws://127.0.0.1:10387/');
+    expect(socket.protocols).toEqual([]);
+    expect(socket.sent).toHaveLength(1);
+    expect(JSON.parse(socket.sent[0])).toEqual({
+      frame_type: 'hello',
+      actor_id: 'tool:xhs',
+    });
   });
 });
 
