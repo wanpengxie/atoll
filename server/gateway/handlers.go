@@ -203,8 +203,8 @@ func (a *App) DaemonbusHandlers() daemonbus.Handlers {
 				ExpiresAt:     body.ExpiresAt,
 			}
 			err := a.devicebus.SendFrameToActor(ctx, sf.ChannelID, sf.AdapterActorID, df)
-			if errors.Is(err, devicebus.ErrRegistrationNotFound) {
-				return a.synthesizeDeviceUnreachableCallback(ctx, sf, body)
+			if errors.Is(err, devicebus.ErrRegistrationNotFound) || errors.Is(err, devicebus.ErrTokenExpired) {
+				return a.synthesizeDeviceUnreachableCallback(ctx, sf, body, err)
 			}
 			return err
 		},
@@ -221,8 +221,9 @@ func (a *App) synthesizeDeviceUnreachableCallback(
 	ctx context.Context,
 	sf devicetransit.SendFrame,
 	body deviceFrameBody,
+	cause error,
 ) error {
-	cbPayload, err := synthesizeDeviceUnreachablePayload(sf, body)
+	cbPayload, err := synthesizeDeviceUnreachablePayload(sf, body, cause)
 	if err != nil {
 		return fmt.Errorf("gateway: marshal synthetic unreachable callback: %w", err)
 	}
@@ -239,11 +240,11 @@ func (a *App) synthesizeDeviceUnreachableCallback(
 	return a.ForwardDeviceFrame(ctx, df, sf.AdapterActorID)
 }
 
-func synthesizeDeviceUnreachablePayload(sf devicetransit.SendFrame, body deviceFrameBody) (json.RawMessage, error) {
+func synthesizeDeviceUnreachablePayload(sf devicetransit.SendFrame, body deviceFrameBody, cause error) (json.RawMessage, error) {
 	if req, ok := decodeProxyFacadeRequestEnvelope(body.Payload); ok {
 		return synthesizeProxyFacadeUnreachableResponse(sf, req)
 	}
-	return synthesizeLegacyDeviceUnreachableCallback(body)
+	return synthesizeLegacyDeviceUnreachableCallback(body, cause)
 }
 
 func decodeProxyFacadeRequestEnvelope(raw json.RawMessage) (message.Envelope, bool) {
@@ -306,9 +307,13 @@ func synthesizeProxyFacadeUnreachableResponse(sf devicetransit.SendFrame, req me
 	return json.Marshal(resp)
 }
 
-func synthesizeLegacyDeviceUnreachableCallback(body deviceFrameBody) (json.RawMessage, error) {
+func synthesizeLegacyDeviceUnreachableCallback(body deviceFrameBody, cause error) (json.RawMessage, error) {
 	code := "device_not_bound"
-	msg := "no proxy daemon is registered for this channel + adapter actor"
+	msg := "no extension is registered for this channel + adapter actor"
+	if errors.Is(cause, devicebus.ErrTokenExpired) {
+		code = "device_token_expired"
+		msg = "extension pairing token expired; re-pair the browser extension"
+	}
 	return json.Marshal(map[string]any{
 		// Callback.correlation_id matches the envelope.id (carried as
 		// request_id on the device_transit wire), not the chain
@@ -819,7 +824,7 @@ func buildEngine(a *App) *gin.Engine {
 
 	r.GET("/ws", a.pushhub.HandleWS(a.identity))
 	r.GET("/daemonbus", a.daemonbus.HandleWS(a))
-	r.GET("/devicebus", handleDeprecatedDevicebusV1)
+	r.GET("/devicebus", a.devicebus.HandleWS(a))
 	r.GET("/devicebus/v2/connect", a.devicebus.HandleWSV2(a))
 
 	// SPA static serving: when UIDistDir is configured, serve the
@@ -865,13 +870,6 @@ func buildEngine(a *App) *gin.Engine {
 		})
 	}
 	return r
-}
-
-func handleDeprecatedDevicebusV1(c *gin.Context) {
-	c.JSON(http.StatusGone, gin.H{
-		"error":         "devicebus v1 has been retired; use /devicebus/v2/connect through coagent-proxy",
-		"reject_reason": "devicebus_v1_retired",
-	})
 }
 
 // ----------------------------------------------------------------------

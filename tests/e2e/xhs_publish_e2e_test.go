@@ -31,6 +31,7 @@ var _ = context.TODO
 // and attach a mock extension before sending the request.
 func TestE2E_XHSPublish_AgentEmitsRequest(t *testing.T) {
 	s := harness.Start(t, harness.Options{
+		DeviceAllowedOrigins: []string{harness.MockExtensionOriginID},
 		ExtraDaemonEnv: []string{
 			"COAGENT_MOCK_SCRIPT=xhs-publish",
 		},

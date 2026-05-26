@@ -116,4 +116,26 @@ export const api = {
                         audience: opts.audience,
                         parent_id: opts.parent_id,
                       }),
+
+  // T148 (M1.6-T6) — device actor registration (issued by server/devicebus).
+  //
+  // getPlacement → which daemon currently owns this channel. Web UI
+  // needs the daemon_id to register the device actor; placement is
+  // populated by the M1.6-T0 control plane after channel bind.
+  // Returns 404 if the channel has no active placement yet (user must
+  // bind the channel first).
+  getPlacement:       (chID) =>
+                        request('GET',  `/api/placements/${chID}`),
+  // POST a fresh device actor token. Server (devicebus) returns
+  // {actor_id, token, expires_at, token_fingerprint}.
+  registerDeviceActor: (chID, body) =>
+                        request('POST', `/api/channels/${chID}/device-actor`, body),
+  // Revoke an issued actor token. The extension's WS will be closed
+  // server-side as well.
+  revokeDeviceActor:(chID, actorID) =>
+                        request('DELETE', `/api/channels/${chID}/device-actor/${encodeURIComponent(actorID)}`),
+  // Cross-check an actor_id server-side. 404 → no longer valid; UI uses
+  // this to reconcile extension-cached bind against server truth.
+  getDeviceActor:   (chID, actorID) =>
+                        request('GET',    `/api/channels/${chID}/device-actor/${encodeURIComponent(actorID)}`),
 };

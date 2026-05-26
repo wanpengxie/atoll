@@ -5,7 +5,7 @@
 // from the page context; Chrome routes the message here when manifest
 // `externally_connectable.matches` accepts the sender origin.
 //
-// This module owns the **protocol surface** (2 actions) + the **origin
+// This module owns the **protocol surface** (3 actions) + the **origin
 // allowlist enforcement**. WS lifecycle / persistence are delegated via
 // the `ExternalBindDeps` adapter so the handler stays unit-testable
 // without dragging the WS client / chrome storage into vitest.
@@ -13,9 +13,15 @@
 // Actions (web UI → extension):
 //   1. getDeviceInfo  → returns persistent device_id (auto-generates on
 //                       first call), extension version, and current
-//                       proxy daemon metadata if already configured.
-//   2. unbindDevice   → disconnects the active proxy WS and disables
-//                       auto-reconnect.
+//                       channel/actor metadata if already bound.
+//   2. setDeviceToken → persists the v4 actor token bundle
+//                       (server_ws_url, actor_id, token,
+//                       channel_id, user_id, device_id, expires_at) and
+//                       opens the WS. Returns {status:'connected'} on
+//                       success or {status:'failed', reason} otherwise.
+//   3. unbindDevice   → disconnects the active WS, clears v4 fields
+//                       from storage (server-side revoke happens
+//                       independently via the server device-actor API).
 //
 // Security:
 //   - Layer 1 (Chrome): manifest `externally_connectable.matches`. Only
@@ -25,11 +31,11 @@
 //     touching storage or the WS client. Belt-and-suspenders so a
 //     wildcard manifest mistake doesn't immediately leak token writes.
 //
-// All responses are shaped as `{status:'ok'|'unbound'|'failed',
+// All responses are shaped as `{status:'ok'|'connected'|'unbound'|'failed',
 // reason?, ...}` so the web UI can branch on status without parsing
 // English error strings.
 
-import { type ConnectionConfig } from './connection-state';
+import { DEFAULT_PROXY_ACTOR_ID, type ConnectionConfig } from './connection-state';
 
 /** Allowed origin patterns (manifest-style match patterns). The
  *  background script reads these at install time from the build-time
@@ -41,6 +47,7 @@ export type OriginMatcher = string;
  *  closed discriminator the web UI keys off. */
 export type ExternalBindResponse =
   | { status: 'ok'; device_id: string; version: string; bound?: BoundSnapshot }
+  | { status: 'connected'; actor_id: string; channel_id: string; user_id?: string }
   | { status: 'unbound' }
   | { status: 'failed'; reason: ExternalBindFailureReason; detail?: string };
 
@@ -48,6 +55,10 @@ export type ExternalBindResponse =
  *  if this extension is already bound to a channel (e.g. show "rebind"
  *  instead of "bind"). Empty fields mean "not bound to that field". */
 export interface BoundSnapshot {
+  channel_id?: string;
+  user_id?: string;
+  actor_id?: string;
+  server_ws_url?: string;
   connection_mode?: ConnectionConfig['connectionMode'];
   proxy_endpoint?: string;
 }
@@ -56,13 +67,24 @@ export interface BoundSnapshot {
 export type ExternalBindFailureReason =
   | 'origin_not_allowed'
   | 'invalid_payload'
+  | 'ws_connect_failed'
+  | 'ws_connect_timeout'
   | 'internal_error';
 
-/** Known external actions. Anything else surfaces as `invalid_payload`. */
-export type ExternalBindAction = 'getDeviceInfo' | 'unbindDevice';
+/** Three known actions. Anything else surfaces as `invalid_payload`. */
+export type ExternalBindAction = 'getDeviceInfo' | 'setDeviceToken' | 'unbindDevice';
 
 export interface ExternalBindMessage {
   action: ExternalBindAction;
+  /** setDeviceToken payload — see `validateSetDeviceTokenPayload`. */
+  server_ws_url?: string;
+  actor_id?: string;
+  token?: string;
+  channel_id?: string;
+  user_id?: string;
+  device_id?: string;
+  expires_at?: number;
+  device_type?: string;
 }
 
 /** Minimal `chrome.runtime.MessageSender` projection — keeps deps small
@@ -84,8 +106,14 @@ export interface ExternalBindDeps {
   getConfig: () => Promise<ConnectionConfig>;
   /** Save a partial ConnectionConfig patch; returns the merged result. */
   saveConfig: (patch: Partial<ConnectionConfig>) => Promise<ConnectionConfig>;
-  /** Drop the active transport client. Idempotent. */
+  /** Drop both transport clients (legacy + v4). Idempotent. */
   disconnectAll: () => void;
+  /** Push the latest config into both clients (idempotent — only the
+   *  active transport actually connects on next `connect()`). */
+  applyClients: (cfg: ConnectionConfig) => void;
+  /** Trigger the active client's `connect()`. Returns `{success,error?}`
+   *  in line with the WS client's existing surface. */
+  connect: () => Promise<{ success: boolean; error?: string }>;
   /** Extension version (manifest.version) — surfaced by getDeviceInfo. */
   extensionVersion: string;
   /** Allowlist of match patterns (e.g. `https://*.coagent.dev/*`). */
@@ -93,7 +121,16 @@ export interface ExternalBindDeps {
   /** UUID generator — tests inject a deterministic counter. Returns a
    *  string suitable as a device_id; production uses `crypto.randomUUID()`. */
   generateDeviceID: () => string;
+  /** Optional WS-open wait. setDeviceToken returns once this resolves
+   *  (or times out) so the UI sees a real connected/failed terminal.
+   *  Default implementation: await connect() result only. */
+  waitForOpen?: (timeoutMs: number) => Promise<{ open: boolean; error?: string }>;
 }
+
+/** Default WS-open wait used in production. Resolves on the first
+ *  `connected:true` push from connection-state.broadcast or on timeout.
+ *  Tests inject a deterministic shim. */
+export const DEFAULT_OPEN_TIMEOUT_MS = 5_000;
 
 /**
  * Validate a sender against an allowlist of manifest match patterns.
@@ -168,6 +205,40 @@ function matchPattern(pattern: OriginMatcher, scheme: string, host: string): boo
 }
 
 /**
+ * Validate setDeviceToken payload. Returns null on success, a failure
+ * reason string on validation error. Keeps each missing-field branch
+ * narrow so the UI debug logs pinpoint which side dropped data.
+ */
+function validateSetDeviceTokenPayload(
+  msg: ExternalBindMessage,
+): { ok: true } | { ok: false; reason: 'invalid_payload'; detail: string } {
+  if (!nonEmpty(msg.server_ws_url)) return fail('server_ws_url required');
+  if (!nonEmpty(msg.actor_id)) return fail('actor_id required');
+  if (!nonEmpty(msg.token)) return fail('token required');
+  if (!nonEmpty(msg.channel_id)) return fail('channel_id required');
+  if (!nonEmpty(msg.device_id)) return fail('device_id required');
+  // Sanity check the WS URL shape — we don't want to write malformed
+  // URLs into storage and then have the client log a confusing parse error.
+  try {
+    const u = new URL(msg.server_ws_url!);
+    if (u.protocol !== 'ws:' && u.protocol !== 'wss:') {
+      return fail('server_ws_url must be ws[s]://');
+    }
+  } catch {
+    return fail('server_ws_url is not a valid URL');
+  }
+  return { ok: true };
+
+  function fail(detail: string): { ok: false; reason: 'invalid_payload'; detail: string } {
+    return { ok: false, reason: 'invalid_payload', detail };
+  }
+}
+
+function nonEmpty(v: unknown): boolean {
+  return typeof v === 'string' && v.trim().length > 0;
+}
+
+/**
  * Main entrypoint. The background script registers a chrome listener
  * that funnels everything through here. Pure function modulo deps —
  * tests pass synthetic `ExternalBindDeps` and `ExternalSender`.
@@ -190,6 +261,8 @@ export async function handleExternalMessage(
   switch (message.action) {
     case 'getDeviceInfo':
       return handleGetDeviceInfo(deps);
+    case 'setDeviceToken':
+      return handleSetDeviceToken(message, deps);
     case 'unbindDevice':
       return handleUnbindDevice(deps);
     default:
@@ -209,7 +282,12 @@ async function handleGetDeviceInfo(deps: ExternalBindDeps): Promise<ExternalBind
       deviceID = deps.generateDeviceID();
       cfg = await deps.saveConfig({ deviceId: deviceID });
     }
-    const snapshot: BoundSnapshot = {};
+    const snapshot: BoundSnapshot = {
+      channel_id: cfg.channelId || undefined,
+      user_id: cfg.userId || undefined,
+      actor_id: cfg.deviceActorId || undefined,
+      server_ws_url: cfg.serverWsEndpoint || undefined,
+    };
     if (cfg.connectionMode) snapshot.connection_mode = cfg.connectionMode;
     if (cfg.proxyEndpoint) snapshot.proxy_endpoint = cfg.proxyEndpoint;
     return {
@@ -223,13 +301,103 @@ async function handleGetDeviceInfo(deps: ExternalBindDeps): Promise<ExternalBind
   }
 }
 
+async function handleSetDeviceToken(
+  message: ExternalBindMessage,
+  deps: ExternalBindDeps,
+): Promise<ExternalBindResponse> {
+  let current: ConnectionConfig;
+  try {
+    current = await deps.getConfig();
+  } catch (err) {
+    return errorResponse(err);
+  }
+  if (current.connectionMode === 'proxy') {
+    return {
+      status: 'connected',
+      actor_id: current.deviceActorId || DEFAULT_PROXY_ACTOR_ID,
+      channel_id: current.channelId || '',
+      user_id: current.userId,
+    };
+  }
+  const validation = validateSetDeviceTokenPayload(message);
+  if (!validation.ok) {
+    return { status: 'failed', reason: validation.reason, detail: validation.detail };
+  }
+  try {
+    const patch: Partial<ConnectionConfig> = {
+      serverWsEndpoint: message.server_ws_url!.trim(),
+      deviceActorId: message.actor_id!.trim(),
+      deviceActorToken: message.token!.trim(),
+      channelId: message.channel_id!.trim(),
+      deviceId: message.device_id!.trim(),
+      connectionMode: 'server',
+      autoReconnect: true,
+    };
+    if (nonEmpty(message.user_id)) patch.userId = message.user_id!.trim();
+    // Drop the legacy daemon-direct fields so selectTransport() picks v4.
+    patch.serverUrl = '';
+    patch.wsUrl = '';
+    const cfg = await deps.saveConfig(patch);
+    // Tear down both transports first — config may have flipped from
+    // legacy to v4, and we don't want a stale legacy socket lingering.
+    deps.disconnectAll();
+    deps.applyClients(cfg);
+    const connectResult = await deps.connect();
+    if (!connectResult.success) {
+      return {
+        status: 'failed',
+        reason: connectResult.error?.includes('timeout') ? 'ws_connect_timeout' : 'ws_connect_failed',
+        detail: connectResult.error,
+      };
+    }
+    // Optional: wait for first `open` event so the UI feedback reflects
+    // a real WS handshake, not just "connect() returned success".
+    if (deps.waitForOpen) {
+      const opened = await deps.waitForOpen(DEFAULT_OPEN_TIMEOUT_MS);
+      if (!opened.open) {
+        return {
+          status: 'failed',
+          reason: 'ws_connect_timeout',
+          detail: opened.error || 'no open event within timeout',
+        };
+      }
+    }
+    return {
+      status: 'connected',
+      actor_id: cfg.deviceActorId ?? '',
+      channel_id: cfg.channelId ?? '',
+      user_id: cfg.userId,
+    };
+  } catch (err) {
+    return errorResponse(err);
+  }
+}
+
 async function handleUnbindDevice(deps: ExternalBindDeps): Promise<ExternalBindResponse> {
   try {
+    // Tear down WS / reconnect loop FIRST so a parallel reconnect timer
+    // can't fire mid-clear and respawn the loop with the still-cached
+    // stale token.
     deps.disconnectAll();
-    await deps.saveConfig({
+    // Clear v4 fields but keep deviceId persistent — same physical browser
+    // can re-bind to a different channel later without re-generating its id.
+    const cleared = await deps.saveConfig({
+      serverWsEndpoint: '',
+      deviceActorId: '',
+      deviceActorToken: '',
+      channelId: '',
       autoReconnect: false,
-      connectionMode: undefined,
     });
+    // Push the cleared config into both transport clients. Previously
+    // we only called disconnectAll(), which left the v4 client's
+    // internal `this.config` holding the stale token+actor_id. If
+    // anything later triggered connect() (SW restart auto-connect,
+    // background race), the client would happily rebuild a WS URL
+    // from the dead credentials and spin a reconnect loop. After this
+    // step the client's identity differs from the previous one, so
+    // updateConfig()'s identity-swap path bumps the generation and
+    // settles any hung pending promise.
+    deps.applyClients(cleared);
     return { status: 'unbound' };
   } catch (err) {
     return errorResponse(err);

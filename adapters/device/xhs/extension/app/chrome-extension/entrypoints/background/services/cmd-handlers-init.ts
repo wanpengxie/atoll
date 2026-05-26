@@ -1,13 +1,13 @@
 // services/cmd-handlers-init.ts — 在 background 启动时把 5 个 daemon cmd 接到具体 tool。
 //
-// proxy WS 推 `{cmd, params, session}` → server-devicebus.ts 调
+// daemon WS 推 `{cmd, params, session}` → coagent-device.ts 调
 // `getCommandHandler(cmd)(params, session)`。本文件负责一次性注册全部 5 个 cmd。
 //
 // 设计取舍：
 //   - 把 frame.params 直接当成 *Tool.execute() 的入参（小红书工具入参基本是 plain object，
 //     无 schema 约束；后端 daemon 端已校验过），失败即抛错。
 //   - 把 ToolResult.content[0].text 解 JSON 作为 callback `result.data`。
-//   - 工具内 isError=true 时，把 text 作为 message 抛 Error → server-devicebus.ts 回 error envelope。
+//   - 工具内 isError=true 时，把 text 作为 message 抛 Error → coagent-device.ts 回 error envelope。
 //     若 text 是 JSON 且含 `code` 字段（M1.1 Fix-T4 §1：publish_timeout/publish_canceled），
 //     则透传该 code，不被 `${cmd}_failed` 默认值覆盖，daemon 端能识别为结构化失败。
 //

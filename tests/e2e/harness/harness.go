@@ -46,11 +46,12 @@ const (
 	defaultPollInterval = 50 * time.Millisecond
 	defaultPollTimeout  = 10 * time.Second
 
-	// daemonSecret / sessionSecret / humanSecret are
+	// daemonSecret / sessionSecret / deviceSecret / humanSecret are
 	// fixed test sentinels. Real secrets are loaded from environment
 	// in production; here we want determinism + reproducible failures.
 	daemonSecret  = "e2e-daemon-secret-fixed-for-tests"
 	sessionSecret = "e2e-session-secret-fixed-for-tests"
+	deviceSecret  = "e2e-device-secret-fixed-for-tests"
 	humanSecret   = "e2e-human-secret-fixed-for-tests"
 
 	// daemonID — the test stack uses a single daemon registered under
@@ -127,8 +128,9 @@ type Options struct {
 	Verbose bool
 
 	// DeviceAllowedOrigins forwards `--devicebus-allowed-origins` to the
-	// server for proxy daemon browser-origin handshake tests. Empty
-	// keeps the production posture.
+	// server. Tests that need /devicebus WS handshakes (mock extension)
+	// must pre-declare the chrome-extension://test-ext-id origin here.
+	// Empty (the default) keeps the deny-all production posture.
 	DeviceAllowedOrigins []string
 
 	// FastReconcile shrinks the server-side placement reconcile knobs so
@@ -348,6 +350,7 @@ func (s *Stack) startServer(bin string) {
 	cmd.Env = append(os.Environ(),
 		"COAGENT_SESSION_SECRET="+sessionSecret,
 		"COAGENT_DAEMON_SECRET="+daemonSecret,
+		"COAGENT_DEVICE_SECRET="+deviceSecret,
 		"COAGENT_HUMAN_SECRET="+humanSecret,
 		"COAGENT_GIN_MODE=release",
 		"COAGENT_LOG_LEVEL=info",
@@ -726,6 +729,30 @@ func (s *Stack) DialPushWS() *websocket.Conn {
 	return ws
 }
 
+// RegisterDeviceActorResponse mirrors POST /api/channels/:chID/device-actor.
+type RegisterDeviceActorResponse struct {
+	ActorID          string `json:"actor_id"`
+	Token            string `json:"token"`
+	ExpiresAt        int64  `json:"expires_at"`
+	TokenFingerprint string `json:"token_fingerprint"`
+}
+
+// RegisterDeviceActor calls the gateway's actor registration endpoint
+// and returns the actor id + raw token used to open /devicebus.
+func (s *Stack) RegisterDeviceActor(channelID, deviceID, daemonIDArg string) RegisterDeviceActorResponse {
+	s.t.Helper()
+	if daemonIDArg == "" {
+		daemonIDArg = daemonID
+	}
+	var resp RegisterDeviceActorResponse
+	s.do("POST", "/api/channels/"+channelID+"/device-actor", map[string]any{
+		"device_id":   deviceID,
+		"device_type": "xhs.chrome_extension",
+		"daemon_id":   daemonIDArg,
+	}, http.StatusCreated, &resp)
+	return resp
+}
+
 // PlacementRow captures the columns multi-daemon reclaim tests assert on.
 type PlacementRow struct {
 	ChannelID       string
@@ -762,6 +789,46 @@ func (s *Stack) GetPlacement(channelID string) (PlacementRow, bool) {
 	}
 	if err != nil {
 		s.t.Fatalf("harness: placement lookup: %v", err)
+	}
+	return row, true
+}
+
+// DeviceActorRow captures the columns device actor registration tests
+// assert on. token_hash is included so tests can verify a hashed token
+// was persisted rather than the raw credential.
+type DeviceActorRow struct {
+	ActorID   string
+	DeviceID  string
+	ChannelID string
+	DaemonID  string
+	Type      string
+	TokenHash string
+	ExpiresAt int64
+	CreatedAt int64
+}
+
+// GetDeviceActor reads the device_actor_tokens row directly. Returns false
+// when no row exists.
+func (s *Stack) GetDeviceActor(channelID, actorID string) (DeviceActorRow, bool) {
+	s.t.Helper()
+	db, err := sql.Open("sqlite", "file:"+s.ServerDB+"?mode=ro")
+	if err != nil {
+		s.t.Fatalf("harness: open server.db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var row DeviceActorRow
+	err = db.QueryRowContext(s.ctx, `
+		SELECT actor_id, device_id, channel_id, daemon_id,
+		       device_type, token_hash, expires_at, created_at
+		FROM device_actor_tokens WHERE channel_id=? AND actor_id=?`, channelID, actorID).Scan(
+		&row.ActorID, &row.DeviceID, &row.ChannelID, &row.DaemonID,
+		&row.Type, &row.TokenHash, &row.ExpiresAt, &row.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return DeviceActorRow{}, false
+	}
+	if err != nil {
+		s.t.Fatalf("harness: device actor lookup: %v", err)
 	}
 	return row, true
 }
@@ -819,6 +886,17 @@ func (s *Stack) ChannelSqlitePathFor(daemonName, channelID string) string {
 
 // ServerURLBase returns the http base url (no trailing slash).
 func (s *Stack) ServerURLBase() string { return s.ServerURL }
+
+// DevicebusWSURL composes the wss/ws URL for the /devicebus endpoint
+// with the actor_id query param.
+func (s *Stack) DevicebusWSURL(actorID, token string) string {
+	// impl-layer3 §6.5.1: token moves to Sec-WebSocket-Protocol slot
+	// (`coagent.device.v1, token.<token>`); URL only carries actor_id.
+	// The token arg is kept in the signature so call sites stay stable.
+	_ = token
+	return fmt.Sprintf("ws://127.0.0.1:%d/devicebus?actor_id=%s",
+		s.ServerPort, url.QueryEscape(actorID))
+}
 
 // RestartDaemon kills the daemon process and starts a fresh one with
 // the same data dir + daemon-id. Tests rely on this to assert the

@@ -31,6 +31,7 @@ func TestWithDefaults_RejectsEmptySecret(t *testing.T) {
 	// SessionSecret.
 	cfg := Config{
 		DaemonSharedSecret: "abcd",
+		DeviceTokenSecret:  "abcd",
 		HumanCallerSecret:  "abcd",
 	}
 	_, err := withDefaults(cfg)
@@ -51,6 +52,7 @@ func TestWithDefaults_RejectsDevSentinel(t *testing.T) {
 	cfg := Config{
 		SessionSecret:      "real",
 		DaemonSharedSecret: devDaemonSecret, // <- dev sentinel
+		DeviceTokenSecret:  "real",
 		HumanCallerSecret:  "real",
 	}
 	_, err := withDefaults(cfg)
@@ -81,6 +83,9 @@ func TestWithDefaults_AllowDevSecrets(t *testing.T) {
 	if out.DaemonSharedSecret != devDaemonSecret {
 		t.Errorf("DaemonSharedSecret=%q", out.DaemonSharedSecret)
 	}
+	if out.DeviceTokenSecret != devDeviceSecret {
+		t.Errorf("DeviceTokenSecret=%q", out.DeviceTokenSecret)
+	}
 	if out.HumanCallerSecret != devHumanCallerSecret {
 		t.Errorf("HumanCallerSecret=%q", out.HumanCallerSecret)
 	}
@@ -102,14 +107,14 @@ func TestWithDefaults_AllowDevSecrets_EmitsJSONWarning(t *testing.T) {
 	var buf bytes.Buffer
 	pkgLogger = zerolog.New(&buf).With().Timestamp().Logger()
 
-	cfg := Config{AllowDevSecrets: true} // all required secrets empty → warnings
+	cfg := Config{AllowDevSecrets: true} // all 4 secrets empty → 4 warnings
 	if _, err := withDefaults(cfg); err != nil {
 		t.Fatalf("AllowDevSecrets=true should not error: %v", err)
 	}
 
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("expected 3 warn lines, got %d:\n%s", len(lines), buf.String())
+	if len(lines) != 4 {
+		t.Fatalf("expected 4 warn lines, got %d:\n%s", len(lines), buf.String())
 	}
 	fields := map[string]bool{}
 	for _, line := range lines {
@@ -128,7 +133,7 @@ func TestWithDefaults_AllowDevSecrets_EmitsJSONWarning(t *testing.T) {
 			fields[f] = true
 		}
 	}
-	for _, want := range []string{"SessionSecret", "DaemonSharedSecret", "HumanCallerSecret"} {
+	for _, want := range []string{"SessionSecret", "DaemonSharedSecret", "DeviceTokenSecret", "HumanCallerSecret"} {
 		if !fields[want] {
 			t.Errorf("missing dev_sentinel_used warning for field %q\nlines=%s", want, buf.String())
 		}
@@ -140,7 +145,8 @@ func TestWithDefaults_PopulatedSecrets_NoError(t *testing.T) {
 	cfg := withProductionOrigins(Config{
 		SessionSecret:      "real-1",
 		DaemonSharedSecret: "real-2",
-		HumanCallerSecret:  "real-3",
+		DeviceTokenSecret:  "real-3",
+		HumanCallerSecret:  "real-4",
 	})
 	out, err := withDefaults(cfg)
 	if err != nil {
@@ -156,7 +162,8 @@ func TestWithDefaults_RejectsLowBcryptCostInProduction(t *testing.T) {
 	cfg := withProductionOrigins(Config{
 		SessionSecret:      "real-1",
 		DaemonSharedSecret: "real-2",
-		HumanCallerSecret:  "real-3",
+		DeviceTokenSecret:  "real-3",
+		HumanCallerSecret:  "real-4",
 		BcryptCost:         4,
 	})
 	_, err := withDefaults(cfg)
@@ -200,7 +207,8 @@ func TestWithDefaults_RejectsMissingOriginAllowlist(t *testing.T) {
 	cfg := Config{
 		SessionSecret:      "real-1",
 		DaemonSharedSecret: "real-2",
-		HumanCallerSecret:  "real-3",
+		DeviceTokenSecret:  "real-3",
+		HumanCallerSecret:  "real-4",
 	}
 	_, err := withDefaults(cfg)
 	if err == nil {
@@ -220,7 +228,8 @@ func TestWithDefaults_RejectsWildcardOrigin(t *testing.T) {
 	cfg := withProductionOrigins(Config{
 		SessionSecret:      "real-1",
 		DaemonSharedSecret: "real-2",
-		HumanCallerSecret:  "real-3",
+		DeviceTokenSecret:  "real-3",
+		HumanCallerSecret:  "real-4",
 	})
 	cfg.PushhubAllowedOrigins = []string{"*"}
 	_, err := withDefaults(cfg)

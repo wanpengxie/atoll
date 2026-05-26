@@ -1,6 +1,7 @@
 // Package gateway is the server composition root — wires identity /
 // catalog / placements / viewcache / daemonbus / devicebus / pushhub
-// into one gin Engine and runs the background reconcile sweeps.
+// into one gin Engine and runs the background reconcile / expire
+// sweeps.
 //
 // Authoritative spec: launch-ticket notes §T6.
 package gateway
@@ -52,6 +53,8 @@ type Config struct {
 	DBPath                    string
 	SessionSecret             string
 	DaemonSharedSecret        string
+	DeviceTokenSecret         string
+	DeviceTokenTTL            time.Duration
 	DeviceAllowedOrigins      []string
 	DeviceAllowMissingOrigin  bool
 	PushhubAllowedOrigins     []string
@@ -87,6 +90,7 @@ type Config struct {
 const (
 	devSessionSecret     = "dev-session-secret-change-me"
 	devDaemonSecret      = "dev-daemon-secret-change-me"
+	devDeviceSecret      = "dev-device-secret-change-me"
 	devHumanCallerSecret = "dev-human-caller-secret-change-me"
 )
 
@@ -207,6 +211,8 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		AllowedOrigins: cfg.DaemonbusAllowedOrigins,
 	})
 	app.devicebus = devicebus.NewService(db, devicebus.Config{
+		TokenSecret:        cfg.DeviceTokenSecret,
+		TokenTTL:           cfg.DeviceTokenTTL,
 		AllowedOrigins:     cfg.DeviceAllowedOrigins,
 		AllowMissingOrigin: cfg.DeviceAllowMissingOrigin,
 	})
@@ -226,6 +232,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	app.catalog.SetPlacementHook(app)
 
 	app.devicebus.SetAccessAuthorizer(app)
+	app.devicebus.SetLifecycleNotifier(app)
 	app.devicebus.SetProxyDaemonNotifier(app)
 
 	app.engine = buildEngine(app)
@@ -305,6 +312,11 @@ func (a *App) RunReconcile(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	runSweeps := func() {
+		if err := a.devicebus.ExpireDueTokens(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			pkgLogger.Warn().Err(err).
+				Str("event", "devicebus.expire_failed").
+				Msg("device actor token expiry sweep failed")
+		}
 		if err := a.viewcache.RecoverGaps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			pkgLogger.Warn().Err(err).
 				Str("event", "viewcache.gap_recover_failed").
@@ -359,6 +371,7 @@ func withDefaults(cfg Config) (Config, error) {
 	slots := []secretSlot{
 		{"SessionSecret", &cfg.SessionSecret, devSessionSecret},
 		{"DaemonSharedSecret", &cfg.DaemonSharedSecret, devDaemonSecret},
+		{"DeviceTokenSecret", &cfg.DeviceTokenSecret, devDeviceSecret},
 		{"HumanCallerSecret", &cfg.HumanCallerSecret, devHumanCallerSecret},
 	}
 	for _, s := range slots {

@@ -70,20 +70,17 @@ The SPA targets the Go gateway routes documented in
 | Write message     | `POST /api/channels/:chID/messages`            |
 | Live updates      | `GET  /ws` (native WebSocket; subscribe frames) |
 | Get placement     | `GET  /api/placements/:chID`                   |
-| Register proxy daemon | `POST /api/channels/:chID/daemons`          |
-| List proxy daemons | `GET  /api/channels/:chID/daemons`           |
-| Revoke proxy daemon | `DELETE /api/channels/:chID/daemons/:daemonID` |
+| Register device actor | `POST /api/channels/:chID/device-actor`    |
+| Revoke device actor   | `DELETE /api/channels/:chID/device-actor/:actorID` |
 
 Auth is by cookie (`coagent_session`, `HttpOnly`, `SameSite=Lax`) —
 all fetches set `credentials: 'include'`.
 
-## Bind Chrome extension through coagent-proxy
+## Bind Chrome extension (T148 / M1.6-T6)
 
-The chat header links the extension download and points users at the
-local `coagent-proxy` flow. The xhs extension connects to the local
-proxy daemon endpoint; server-side device actor token binding is retired.
-
-Pre-reqs:
+The chat header has a "Bind Chrome extension" button that hands a
+fresh device actor token to the coagent xhs-extension via
+`chrome.runtime.sendMessage`. Pre-reqs:
 
 1. Install the unpacked extension from
    `adapters/device/xhs/extension/app/chrome-extension` (or the Chrome

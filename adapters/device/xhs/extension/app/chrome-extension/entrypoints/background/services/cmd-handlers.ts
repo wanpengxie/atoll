@@ -1,11 +1,11 @@
 // services/cmd-handlers.ts — coagent device cmd 适配层。
 //
 // daemon 通过 WS 推 `{type:"command", correlation_id, cmd, params, session}`，
-// server-devicebus.ts 收到后调用 dispatchCommand(frame) → 这里：
+// coagent-device.ts 收到后调用 dispatchCommand(frame) → 这里：
 //   - 校验 cmd 合法
 //   - 把 params 映射到 background 内部既有 *Tool.execute() 入参
 //   - 把 ToolResult.content[0].text 解 JSON 作为 callback `result`
-//   - 异常 → throw Error；server-devicebus.ts 捕获后回 `{status:"error", error:{code,message}}`
+//   - 异常 → throw Error；coagent-device.ts 捕获后回 `{status:"error", error:{code,message}}`
 //
 // phase-4 中 5 个 cmd 都接到具体 tool；phase-3 打通骨架（publish 已接 PublishContentTool，
 // 其他 cmd 标记 not_implemented，待 phase-4 完成）。

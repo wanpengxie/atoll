@@ -50,6 +50,7 @@ func TestOpenAndApply(t *testing.T) {
 		"channel_members",
 		"channel_placements",
 		"daemons",
+		"device_actor_tokens",
 		"view_cache_messages",
 		"view_cache_cursors",
 		"placement_rollback_intents",
@@ -61,15 +62,6 @@ func TestOpenAndApply(t *testing.T) {
 		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+tbl).Scan(&n); err != nil {
 			t.Errorf("table %q absent or unreadable: %v", tbl, err)
 		}
-	}
-	var legacyDeviceActorTokens int
-	if err := db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='device_actor_tokens'",
-	).Scan(&legacyDeviceActorTokens); err != nil {
-		t.Fatalf("query sqlite_master: %v", err)
-	}
-	if legacyDeviceActorTokens != 0 {
-		t.Fatalf("legacy device_actor_tokens table still exists")
 	}
 }
 

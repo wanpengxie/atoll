@@ -86,6 +86,8 @@ func run() error {
 		DBPath:                    cfg.DBPath,
 		SessionSecret:             cfg.SessionSecret,
 		DaemonSharedSecret:        cfg.DaemonSharedSecret,
+		DeviceTokenSecret:         cfg.DeviceTokenSecret,
+		DeviceTokenTTL:            cfg.DeviceTokenTTL,
 		DeviceAllowedOrigins:      cfg.DeviceAllowedOrigins,
 		DeviceAllowMissingOrigin:  cfg.DeviceAllowMissingOrigin,
 		PushhubAllowedOrigins:     cfg.PushhubAllowedOrigins,
@@ -164,6 +166,8 @@ type config struct {
 	DBPath                    string
 	SessionSecret             string
 	DaemonSharedSecret        string
+	DeviceTokenSecret         string
+	DeviceTokenTTL            time.Duration
 	DeviceAllowedOrigins      []string
 	DeviceAllowMissingOrigin  bool
 	PushhubAllowedOrigins     []string
@@ -191,6 +195,8 @@ func loadConfig() config {
 		// with a startup warning.
 		SessionSecret:             os.Getenv("COAGENT_SESSION_SECRET"),
 		DaemonSharedSecret:        os.Getenv("COAGENT_DAEMON_SECRET"),
+		DeviceTokenSecret:         os.Getenv("COAGENT_DEVICE_SECRET"),
+		DeviceTokenTTL:            envDuration("COAGENT_DEVICE_TOKEN_TTL", 0),
 		HumanCallerSecret:         os.Getenv("COAGENT_HUMAN_SECRET"),
 		BcryptCost:                envInt("COAGENT_BCRYPT_COST", 0),
 		AllowDevSecrets:           os.Getenv("COAGENT_ALLOW_DEV_SECRETS") == "1",
@@ -212,6 +218,8 @@ func loadConfig() config {
 		"Comma-separated exact Origin allowlist for /devicebus WebSocket handshakes")
 	flag.BoolVar(&cfg.DeviceAllowMissingOrigin, "devicebus-allow-missing-origin", cfg.DeviceAllowMissingOrigin,
 		"Allow /devicebus WebSocket handshakes with no Origin header (non-browser clients only)")
+	flag.DurationVar(&cfg.DeviceTokenTTL, "device-token-ttl", cfg.DeviceTokenTTL,
+		"Device actor token TTL (default from server/devicebus is 720h = 30d)")
 	flag.StringVar(&pushhubOrigins, "pushhub-allowed-origins", pushhubOrigins,
 		"Comma-separated exact Origin allowlist for /ws WebSocket handshakes")
 	flag.StringVar(&daemonbusOrigins, "daemonbus-allowed-origins", daemonbusOrigins,
@@ -251,6 +259,24 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	if strings.HasSuffix(v, "d") {
+		days, err := strconv.Atoi(strings.TrimSuffix(v, "d"))
+		if err == nil {
+			return time.Duration(days) * 24 * time.Hour
+		}
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fallback
+	}
+	return d
 }
 
 func splitCSV(v string) []string {

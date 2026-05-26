@@ -162,7 +162,7 @@ func TestServer_BootAndShutdown(t *testing.T) {
 
 // TestServer_FailFastOnEmptySecrets is the M1.6-T7 phase-1 acceptance
 // for the production fail-fast path. The server MUST exit 1 within a
-// few hundred ms when the COAGENT_* secrets are empty and the
+// few hundred ms when the 4 COAGENT_* secrets are empty and the
 // `--allow-dev-secrets` escape hatch is not set. The stderr message
 // MUST surface the offending field name so an operator misconfiguring
 // e.g. COAGENT_SESSION_SECRET can grep the cause without reading the
@@ -200,6 +200,7 @@ func TestServer_FailFastOnEmptySecrets(t *testing.T) {
 	combined := string(out)
 	if !strings.Contains(combined, "SessionSecret") &&
 		!strings.Contains(combined, "DaemonSharedSecret") &&
+		!strings.Contains(combined, "DeviceTokenSecret") &&
 		!strings.Contains(combined, "HumanCallerSecret") {
 		t.Errorf("stderr did not surface offending secret field name\nstdout/err=%s", combined)
 	}
@@ -221,6 +222,7 @@ func TestServer_FailFastOnMissingOriginAllowlists(t *testing.T) {
 		"COAGENT_GIN_MODE=test",
 		"COAGENT_SESSION_SECRET=session-secret",
 		"COAGENT_DAEMON_SECRET=daemon-secret",
+		"COAGENT_DEVICE_SECRET=device-secret",
 		"COAGENT_HUMAN_SECRET=human-secret",
 	}
 

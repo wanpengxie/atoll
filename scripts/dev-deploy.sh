@@ -41,7 +41,7 @@ blue "[deploy] step 1: source .env"
 set -a; source .env; set +a
 
 for var in COAGENT_DAEMON_SECRET COAGENT_HUMAN_SECRET COAGENT_SESSION_SECRET \
-           COAGENT_DEVICEBUS_ALLOWED_ORIGINS \
+           COAGENT_DEVICE_SECRET COAGENT_DEVICEBUS_ALLOWED_ORIGINS \
            COAGENT_PUSHHUB_ALLOWED_ORIGINS COAGENT_DAEMONBUS_ALLOWED_ORIGINS \
            KIMI_API_KEY KIMI_BASE_URL KIMI_MODEL; do
   [ -n "${!var:-}" ] || fail "env var $var empty in .env"

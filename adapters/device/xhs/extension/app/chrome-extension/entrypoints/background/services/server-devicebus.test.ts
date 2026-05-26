@@ -1,7 +1,7 @@
-// Vitest unit tests for the proxy-only local devicebus WS client.
+// Vitest unit tests for the v4 server-devicebus WS client (T147 §A-E).
 //
 // Coverage:
-//   - WS URL construction (local proxy endpoint only)
+//   - WS URL construction (`actor_id` query; token in subprotocol)
 //   - happy path: inbound DeviceFrame{to_device, payload:Command} →
 //     handler → outbound DeviceFrame{from_device, payload:Callback}
 //   - unknown_cmd / handler throw → error Callback frame on the wire
@@ -52,7 +52,11 @@ vi.mock('./cmd-handlers', () => ({
 import {
   CoagentServerDeviceClientForTest,
   buildDeviceBusUrl,
+  buildDeviceBusSubprotocols,
+  DEVICE_WS_SUBPROTOCOL,
+  DEVICE_WS_TOKEN_PREFIX,
   readOutbox,
+  redactToken,
   type DeviceFrame,
   type OutboxEntry,
   type ServerDeviceConfig,
@@ -80,10 +84,10 @@ function installFakeChromeStorage(): { store: Record<string, unknown> } {
 
 function makeConfig(over: Partial<ServerDeviceConfig> = {}): ServerDeviceConfig {
   return {
-    mode: 'proxy',
-    wsEndpoint: 'ws://127.0.0.1:10387',
-    actorId: 'tool:xhs',
-    channelId: '',
+    wsEndpoint: 'wss://coagent.example.com/devicebus',
+    actorId: 'sess-A',
+    token: 'tok-secret',
+    channelId: 'ch-1',
     autoReconnect: true,
     userId: 'user-1',
     deviceId: 'dev-1',
@@ -102,8 +106,8 @@ class FakeWebSocket {
   static CLOSED = 3;
   readyState = 0;
   url: string;
-  /** Subprotocols offered by the client at construct time. Proxy mode
-   *  should not offer any. */
+  /** Subprotocols offered by the client at construct time. R5-14: the
+   *  bearer token rides in the `token.*` slot here, not on the URL. */
   protocols: string[];
   sent: string[] = [];
   private listeners = new Map<string, ((ev: any) => void)[]>();
@@ -139,10 +143,7 @@ class FakeWebSocket {
   }
 }
 
-async function openClient(
-  client: ReturnType<typeof makeClient>,
-  opts: { keepInitialSent?: boolean } = {},
-): Promise<FakeWebSocket> {
+async function openClient(client: ReturnType<typeof makeClient>): Promise<FakeWebSocket> {
   let captured: FakeWebSocket | null = null;
   const SocketCtor: any = function (this: any, url: string, protocols?: string | string[]) {
     const ws = new FakeWebSocket(url, protocols);
@@ -157,7 +158,6 @@ async function openClient(
   await p;
   // Allow drainOutbox microtask to flush.
   await new Promise((r) => setTimeout(r, 0));
-  if (!opts.keepInitialSent) captured!.sent = [];
   return captured!;
 }
 
@@ -169,14 +169,16 @@ afterEach(() => {
   delete (globalThis as any).chrome;
 });
 
-// ─── URL builder ─────────────────────────────────────────────────────────
+// ─── URL builder + token redact ──────────────────────────────────────────
 
 describe('buildDeviceBusUrl', () => {
-  it('returns the local proxy endpoint without actor or token query state', () => {
+  it('puts actor_id in query and does NOT include token (R5-14)', () => {
     const url = buildDeviceBusUrl(makeConfig());
-    expect(url).toBe('ws://127.0.0.1:10387/');
-    expect(url).not.toContain('actor_id=');
+    expect(url).toContain('wss://coagent.example.com/devicebus');
+    expect(url).toContain('actor_id=sess-A');
+    // token must NOT appear in the URL — it rides in the WS subprotocol.
     expect(url).not.toContain('token=');
+    expect(url).not.toContain('tok-secret');
   });
 
   it('returns empty when wsEndpoint is missing', () => {
@@ -187,16 +189,90 @@ describe('buildDeviceBusUrl', () => {
     expect(buildDeviceBusUrl(makeConfig({ actorId: '' }))).toBe('');
   });
 
+  it('returns empty when token is missing (token gate still applies)', () => {
+    // Even though the URL no longer carries the token, an empty token
+    // would produce a malformed subprotocol header — callers should
+    // short-circuit at URL-build time.
+    expect(buildDeviceBusUrl(makeConfig({ token: '' }))).toBe('');
+  });
+
   it('returns empty when wsEndpoint is not a valid URL', () => {
     expect(buildDeviceBusUrl(makeConfig({ wsEndpoint: 'not a url' }))).toBe('');
+  });
+
+  it('proxy mode uses the local endpoint as-is and does not require token', () => {
+    const url = buildDeviceBusUrl(makeConfig({
+      mode: 'proxy',
+      wsEndpoint: 'ws://127.0.0.1:10387',
+      actorId: 'tool:xhs',
+      token: '',
+    }));
+    expect(url).toBe('ws://127.0.0.1:10387/');
+    expect(url).not.toContain('actor_id=');
+    expect(url).not.toContain('token=');
+  });
+});
+
+describe('buildDeviceBusSubprotocols', () => {
+  it('returns [coagent.device.v1, token.<token>] in that order', () => {
+    const protocols = buildDeviceBusSubprotocols(makeConfig());
+    expect(protocols).toEqual([DEVICE_WS_SUBPROTOCOL, `${DEVICE_WS_TOKEN_PREFIX}tok-secret`]);
+  });
+
+  it('returns [] when token is missing (cannot construct slot)', () => {
+    expect(buildDeviceBusSubprotocols(makeConfig({ token: '' }))).toEqual([]);
+  });
+
+  it('proxy mode returns no subprotocols', () => {
+    expect(buildDeviceBusSubprotocols(makeConfig({
+      mode: 'proxy',
+      wsEndpoint: 'ws://127.0.0.1:10387',
+      actorId: 'tool:xhs',
+      token: '',
+    }))).toEqual([]);
+  });
+});
+
+describe('redactToken', () => {
+  // Retained as a defence-in-depth helper in case legacy callers still
+  // build URLs with token=…; with R5-14 properly built URLs no longer
+  // carry the token at all.
+  it('masks ?token=… to ?token=*** when present (legacy URL shape)', () => {
+    expect(redactToken('wss://h/devicebus?actor_id=s&token=secret')).toBe(
+      'wss://h/devicebus?actor_id=s&token=***'
+    );
+  });
+
+  it('passes through urls without token', () => {
+    expect(redactToken('wss://h/devicebus')).toBe('wss://h/devicebus');
+    expect(redactToken('')).toBe('');
+  });
+});
+
+describe('client sets token subprotocol on WS construct (R5-14)', () => {
+  it('offers coagent.device.v1 + token.<tok> via Sec-WebSocket-Protocol slot, NOT URL', async () => {
+    installFakeChromeStorage();
+    const client = makeClient();
+    const socket = await openClient(client);
+    // URL: actor_id stays in query; token must NOT appear.
+    expect(socket.url).toContain('actor_id=sess-A');
+    expect(socket.url).not.toContain('token=');
+    // Subprotocols: real protocol + token slot.
+    expect(socket.protocols).toEqual(['coagent.device.v1', 'token.tok-secret']);
   });
 });
 
 describe('proxy mode local hello', () => {
-  it('connects without subprotocols and sends actor hello frame on open', async () => {
+  it('connects without token subprotocol and sends actor hello frame on open', async () => {
     installFakeChromeStorage();
-    const client = makeClient();
-    const socket = await openClient(client, { keepInitialSent: true });
+    const client = makeClient({
+      mode: 'proxy',
+      wsEndpoint: 'ws://127.0.0.1:10387',
+      actorId: 'tool:xhs',
+      token: '',
+      channelId: '',
+    });
+    const socket = await openClient(client);
     expect(socket.url).toBe('ws://127.0.0.1:10387/');
     expect(socket.protocols).toEqual([]);
     expect(socket.sent).toHaveLength(1);
@@ -376,8 +452,8 @@ describe('postCallback', () => {
     expect(socket.sent).toHaveLength(1);
     const out = JSON.parse(socket.sent[0]) as DeviceFrame;
     expect(out.direction).toBe('from_device');
-    expect(out.actor_id).toBe('tool:xhs');
-    expect(out.channel_id).toBe('');
+    expect(out.actor_id).toBe('sess-A');
+    expect(out.channel_id).toBe('ch-1');
     expect(out.correlation_id).toBe('corr-A');
     expect((out.payload as any).status).toBe('ok');
   });
@@ -402,9 +478,9 @@ describe('outbox enqueue + drain on reconnect', () => {
     expect(pending[0].frame.direction).toBe('from_device');
 
     // Now connect → open should drain.
-    const socket = await openClient(client, { keepInitialSent: true });
-    expect(socket.sent).toHaveLength(2);
-    const drained = JSON.parse(socket.sent[1]) as DeviceFrame;
+    const socket = await openClient(client);
+    expect(socket.sent).toHaveLength(1);
+    const drained = JSON.parse(socket.sent[0]) as DeviceFrame;
     expect(drained.correlation_id).toBe('corr-1');
     // Successful drain clears outbox.
     expect(await readOutbox()).toEqual([]);
@@ -461,11 +537,11 @@ describe('outbox enqueue + drain on reconnect', () => {
       store[OUTBOX_KEY] = [stale, fresh];
 
       const client = makeClient();
-      const socket = await openClient(client, { keepInitialSent: true });
+      const socket = await openClient(client);
 
       // Only the fresh frame should have gone out.
-      expect(socket.sent).toHaveLength(2);
-      const out = JSON.parse(socket.sent[1]) as DeviceFrame;
+      expect(socket.sent).toHaveLength(1);
+      const out = JSON.parse(socket.sent[0]) as DeviceFrame;
       expect(out.correlation_id).toBe('fresh');
 
       // Outbox cleared (fresh sent + clear; stale GC'd).
@@ -520,9 +596,11 @@ describe('connectOnce open+error race', () => {
 // ─── Reconnect-loop bug fixes (bind/unbind/identity-swap) ────────────────
 //
 // These tests pin the four scenarios called out in the device-bind bug
-// report: proxy identity swap, unbindDevice full cleanup, dirty-close
-// reconnect budget, and the race where a close handler fires AFTER
-// hardReset / identity swap and tries to respawn under the old actor.
+// report: setDeviceToken atomic swap, unbindDevice full cleanup, dirty-
+// close reconnect budget, and the race where a close handler fires
+// AFTER hardReset / identity swap and tries to respawn under the old
+// token. They use a multi-socket SocketFactory so we can observe what
+// URL (actor_id / token) each connect attempt is targeting.
 
 function multiSocketCtor(): {
   ctor: typeof WebSocket;
@@ -576,25 +654,26 @@ describe('connect idempotency', () => {
 });
 
 describe('updateConfig identity swap (bind / rebind)', () => {
-  it('new proxy actor identity cancels in-flight connect + closes prior socket before new opens', async () => {
+  it('setDeviceToken-style new identity cancels in-flight connect + closes prior socket before new opens', async () => {
     installFakeChromeStorage();
     const client = new CoagentServerDeviceClientForTest();
-    client.updateConfig(makeConfig({ actorId: 'tool:old' }));
+    client.updateConfig(makeConfig({ actorId: 'sess-OLD', token: 'tok-OLD' }));
     const { ctor, sockets } = multiSocketCtor();
     client.setWebSocketImpl(ctor);
 
     // Kick off connect with OLD identity; do NOT fire open yet so the
-    // promise stays pending — simulates the local proxy stalling the
+    // promise stays pending — simulates the server stalling the
     // handshake while UI is mid-rebind.
     const pOld = client.connect();
     await Promise.resolve();
     expect(sockets).toHaveLength(1);
-    expect(sockets[0].url).toBe('ws://127.0.0.1:10387/');
-    expect(sockets[0].protocols).toEqual([]);
+    // R5-14: actor_id stays in URL; token rides in subprotocol slot.
+    expect(sockets[0].url).toContain('actor_id=sess-OLD');
+    expect(sockets[0].protocols).toContain('token.tok-OLD');
 
-    // Now swap identity via updateConfig — mirrors what applyClients(cfg)
-    // does after the popup selects a new proxy actor.
-    client.updateConfig(makeConfig({ actorId: 'tool:new' }));
+    // Now swap identity via updateConfig — mirrors what
+    // applyClients(cfg) does after the UI hands over a fresh token.
+    client.updateConfig(makeConfig({ actorId: 'sess-NEW', token: 'tok-NEW' }));
 
     // The in-flight OLD promise must resolve (canceled) — without
     // the hard-reset fix, this would hang forever and the next
@@ -604,23 +683,19 @@ describe('updateConfig identity swap (bind / rebind)', () => {
     expect(oldRes.error).toMatch(/canceled/);
 
     // The OLD socket must have been closed by the reset (readyState
-    // = CLOSED), so even if the proxy close frame arrives late
+    // = CLOSED), so even if the server-side close frame arrives late
     // it hits the dropped-stale-socket path.
     expect(sockets[0].readyState).toBe(FakeWebSocket.CLOSED);
 
-    // Now connect with NEW identity and verify the hello frame.
+    // Now connect with NEW identity and verify the URL.
     const pNew = client.connect();
     await Promise.resolve();
     expect(sockets).toHaveLength(2);
-    expect(sockets[1].url).toBe('ws://127.0.0.1:10387/');
-    expect(sockets[1].protocols).toEqual([]);
+    expect(sockets[1].url).toContain('actor_id=sess-NEW');
+    expect(sockets[1].protocols).toContain('token.tok-NEW');
     sockets[1].triggerOpen();
     const newRes = await pNew;
     expect(newRes.success).toBe(true);
-    expect(JSON.parse(sockets[1].sent[0])).toEqual({
-      frame_type: 'hello',
-      actor_id: 'tool:new',
-    });
   });
 
   it('same-identity updateConfig (autoReconnect flip) does not bounce the socket', async () => {
@@ -650,7 +725,7 @@ describe('unbindDevice full cleanup', () => {
     expect(sockets).toHaveLength(1);
     expect(sockets[0].readyState).toBe(0); // not yet open
 
-    // Unbind disconnect path must settle the pending
+    // Unbind (server-side disconnect path) must settle the pending
     // promise + clear connectInFlight + clear currentUrl. Without
     // the hard-reset fix, this connect promise would hang forever.
     client.disconnect();
@@ -661,12 +736,12 @@ describe('unbindDevice full cleanup', () => {
     // Subsequent connect() must NOT short-circuit via the stale
     // connectInFlight; it must build a fresh WS attempt instead.
     // Restore the config so connect() doesn't bail on DEVICE_NOT_CONFIGURED.
-    client.updateConfig(makeConfig({ actorId: 'tool:fresh' }));
+    client.updateConfig(makeConfig({ actorId: 'sess-FRESH', token: 'tok-FRESH' }));
     const p2 = client.connect();
     await Promise.resolve();
     // A new socket must have been created (no hang).
     expect(sockets.length).toBeGreaterThanOrEqual(2);
-    expect(sockets[sockets.length - 1].url).toBe('ws://127.0.0.1:10387/');
+    expect(sockets[sockets.length - 1].url).toContain('actor_id=sess-FRESH');
     sockets[sockets.length - 1].triggerOpen();
     const res2 = await p2;
     expect(res2.success).toBe(true);
@@ -686,7 +761,7 @@ describe('unbindDevice full cleanup', () => {
     // User unbinds.
     client.disconnect();
 
-    // Now simulate a stray late close event from the proxy side
+    // Now simulate a stray late close event from the server side
     // (e.g. WS close frame arriving after the local hardReset).
     // The close handler must NOT schedule a reconnect, MUST NOT
     // create a new socket, and MUST not flip shouldReconnect back on.
@@ -699,7 +774,7 @@ describe('unbindDevice full cleanup', () => {
 
   it('disconnect() then reconnect with new config opens new WS within attempt budget', async () => {
     // Sanity guard: ensure the cap doesn't carry across identity
-    // swaps. After a fresh actor the budget MUST be reset, otherwise
+    // swaps. After a fresh token the budget MUST be reset, otherwise
     // a user with a flaky network in session A could hit "stuck"
     // when they bind session B.
     installFakeChromeStorage();
@@ -723,7 +798,7 @@ describe('unbindDevice full cleanup', () => {
     }
 
     // Now bind a brand new identity — budget should be reset.
-    client.updateConfig(makeConfig({ actorId: 'tool:new' }));
+    client.updateConfig(makeConfig({ actorId: 'sess-NEW', token: 'tok-NEW' }));
     const p = client.connect();
     await Promise.resolve();
     sockets[sockets.length - 1].triggerOpen();
@@ -846,21 +921,24 @@ describe('stale socket close after generation bump', () => {
     await Promise.resolve();
     const stale = sockets[0];
 
-    // Identity swap (new proxy actor). This bumps generation and
+    // Identity swap (bind new token). This bumps generation and
     // closes the stale socket via hardReset.
-    client.updateConfig(makeConfig({ actorId: 'tool:b' }));
+    client.updateConfig(makeConfig({ actorId: 'sess-B', token: 'tok-B' }));
     const pCanceled = await p;
     expect(pCanceled.success).toBe(false);
 
-    // Now the proxy close frame arrives late on the stale socket
+    // Now the server's close frame arrives late on the stale socket
     // with a dirty code. The close handler must self-cancel via
     // generation guard and MUST NOT schedule a new socket using the
-    // stale actor. After waiting a beat there should still be only
+    // stale token. After waiting a beat there should still be only
     // one extra socket from the identity-swap reconnect path (or
     // zero if no auto-connect was triggered).
     stale.fire('close', { code: 1006, reason: 'late', wasClean: false });
     await new Promise((r) => setTimeout(r, 50));
 
-    expect(sockets).toHaveLength(1);
+    // No socket targeting sess-A should ever appear AFTER the swap.
+    for (let i = 1; i < sockets.length; i++) {
+      expect(sockets[i].url).not.toContain('actor_id=sess-A');
+    }
   });
 });

@@ -27,16 +27,16 @@ function makeConfig(over: Partial<ConnectionConfig> = {}): ConnectionConfig {
     httpBase: 'http://127.0.0.1:9501',
     channelId: 'ch-1',
     daemonId: '',
-    connectionMode: 'proxy',
-    proxyEndpoint: 'ws://127.0.0.1:10387',
-    deviceActorId: 'tool:xhs',
+    serverWsEndpoint: 'wss://coagent.example.com/devicebus',
+    deviceActorId: 'actor-1',
+    deviceActorToken: 'tok-1',
     ...over,
   };
 }
 
 function makeDeps(
   opts: {
-    transport?: 'proxy' | 'none';
+    transport?: 'server' | 'daemon' | 'none';
     connectResult?: { success: boolean; error?: string };
   } = {}
 ): {
@@ -46,7 +46,7 @@ function makeDeps(
   connect: ReturnType<typeof vi.fn>;
   warn: ReturnType<typeof vi.fn>;
 } {
-  const transport = opts.transport ?? 'proxy';
+  const transport = opts.transport ?? 'server';
   const create = vi.fn();
   const addListener = vi.fn();
   const connect = vi.fn(async () => opts.connectResult ?? { success: true });
@@ -106,7 +106,7 @@ describe('handleKeepaliveAlarm', () => {
     expect(connect).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith('[Keepalive] alarm fired', {
       at: 123,
-      transport: 'proxy',
+      transport: 'server',
     });
   });
 
@@ -131,7 +131,7 @@ describe('handleKeepaliveAlarm', () => {
 
     expect(warn).toHaveBeenCalledWith('[Keepalive] reconnect-on-alarm failed', {
       at: 123,
-      transport: 'proxy',
+      transport: 'server',
       error: 'offline',
     });
   });
