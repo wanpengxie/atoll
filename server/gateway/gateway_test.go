@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -753,58 +752,6 @@ func TestHandleWriteMessageRejectUsesReasonHTTPStatus(t *testing.T) {
 				t.Fatal(ctx.Err())
 			}
 		})
-	}
-}
-
-func TestDevicebusLegacyActorEndpointsGone(t *testing.T) {
-	t.Parallel()
-	app := newTestApp(t)
-	srv := httptest.NewServer(app.Handler())
-	defer srv.Close()
-
-	client := &http.Client{}
-	alice := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-devbus-gone@example.com")
-
-	cases := []struct {
-		method string
-		path   string
-		body   string
-	}{
-		{
-			method: http.MethodPost,
-			path:   "/api/channels/" + alice.channelID + "/device-actor",
-			body:   `{"device_id":"dev","device_type":"xhs","daemon_id":"d1"}`,
-		},
-		{method: http.MethodGet, path: "/api/channels/" + alice.channelID + "/device-actor/tool%3Axhs-adapter"},
-		{method: http.MethodDelete, path: "/api/channels/" + alice.channelID + "/device-actor/tool%3Axhs-adapter"},
-	}
-	for _, tc := range cases {
-		var body io.Reader
-		if tc.body != "" {
-			body = strings.NewReader(tc.body)
-		}
-		req, _ := http.NewRequest(tc.method, srv.URL+tc.path, body)
-		if tc.body != "" {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: alice.session})
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatalf("%s device-actor: %v", tc.method, err)
-		}
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusGone {
-			t.Fatalf("%s status=%d want 410", tc.method, resp.StatusCode)
-		}
-	}
-
-	resp, err := client.Get(srv.URL + "/devicebus")
-	if err != nil {
-		t.Fatalf("GET /devicebus: %v", err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusGone {
-		t.Fatalf("GET /devicebus status=%d want 410", resp.StatusCode)
 	}
 }
 

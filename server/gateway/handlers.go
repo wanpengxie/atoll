@@ -817,7 +817,6 @@ func buildEngine(a *App) *gin.Engine {
 
 	r.GET("/ws", a.pushhub.HandleWS(a.identity))
 	r.GET("/daemonbus", a.daemonbus.HandleWS(a))
-	r.GET("/devicebus", handleDeprecatedDevicebusV1)
 	r.GET("/devicebus/v2/connect", a.devicebus.HandleWSV2(a))
 
 	// SPA static serving: when UIDistDir is configured, serve the
@@ -863,13 +862,6 @@ func buildEngine(a *App) *gin.Engine {
 		})
 	}
 	return r
-}
-
-func handleDeprecatedDevicebusV1(c *gin.Context) {
-	c.JSON(http.StatusGone, gin.H{
-		"error":         "devicebus v1 has been retired; use /devicebus/v2/connect through coagent-proxy",
-		"reject_reason": "devicebus_v1_retired",
-	})
 }
 
 // ----------------------------------------------------------------------

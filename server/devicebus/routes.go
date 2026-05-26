@@ -18,9 +18,6 @@ import (
 const deviceJSONBodyLimit = 64 << 10
 
 func (s *Service) RegisterRoutes(g *gin.RouterGroup) {
-	g.POST("/channels/:chID/device-actor", httperr.MaxBodyBytes(deviceJSONBodyLimit), s.handleDeprecatedDeviceActor)
-	g.DELETE("/channels/:chID/device-actor/:actorID", s.handleDeprecatedDeviceActor)
-	g.GET("/channels/:chID/device-actor/:actorID", s.handleDeprecatedDeviceActor)
 	g.POST("/channels/:chID/daemons", httperr.MaxBodyBytes(deviceJSONBodyLimit), s.handleCreateDaemon)
 	g.GET("/channels/:chID/daemons", s.handleListDaemons)
 	g.DELETE("/channels/:chID/daemons/:daemonID", s.handleDeleteDaemon)
@@ -126,13 +123,6 @@ func (s *Service) handleDeleteDaemon(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
-}
-
-func (s *Service) handleDeprecatedDeviceActor(c *gin.Context) {
-	c.JSON(http.StatusGone, gin.H{
-		"error":         "device actor token endpoints have been retired; use proxy daemon installation flow",
-		"reject_reason": "device_actor_tokens_retired",
-	})
 }
 
 func (s *Service) authorizeChannel(ctx context.Context, channelID, userID string) error {
