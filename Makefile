@@ -10,7 +10,7 @@
 
 SHELL := /usr/bin/env bash
 
-.PHONY: install build build-go build-ui build-ext extension-zip test lint migrate dev clean \
+.PHONY: install build build-go proxy-build build-ui build-ext extension-zip test lint migrate dev clean \
         lint-go lint-arch lint-banned-words lint-protocol-refs lint-kernel-protocol lint-docs \
         fmt-check e2e-smoke
 
@@ -54,6 +54,15 @@ build-go:
 	  done; \
 	else \
 	  echo "[skip] root go.mod absent (T2 pending)"; \
+	fi
+
+proxy-build:
+	@mkdir -p bin
+	@if [ -f go.mod ]; then \
+	  echo "[proxy-build] cmd/coagent-proxy -> bin/coagent-proxy"; \
+	  go build -o bin/coagent-proxy ./cmd/coagent-proxy; \
+	else \
+	  echo "[skip] root go.mod absent"; \
 	fi
 
 build-ui: extension-zip
