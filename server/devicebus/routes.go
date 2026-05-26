@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -15,19 +14,24 @@ import (
 	"github.com/wanpengxie/ActOS/server/identity"
 )
 
-const deviceJSONBodyLimit = 64 << 10
+// DeviceJSONBodyLimit is the max body size accepted on daemon-create.
+// Exported so the gateway-side wrapper (which owns the POST route now)
+// can apply the same limit.
+const DeviceJSONBodyLimit = 64 << 10
 
 func (s *Service) RegisterRoutes(g *gin.RouterGroup) {
-	g.POST("/channels/:chID/daemons", httperr.MaxBodyBytes(deviceJSONBodyLimit), s.handleCreateDaemon)
+	// POST /channels/:chID/daemons is owned by gateway (handleCreateDaemonWithAutoBind)
+	// so the create call can lazy-bind the channel to a cloud daemon
+	// before the proxy daemon row is issued. devicebus.Service still
+	// exposes CreateDaemon for that gateway handler to call.
 	g.GET("/channels/:chID/daemons", s.handleListDaemons)
 	g.DELETE("/channels/:chID/daemons/:daemonID", s.handleDeleteDaemon)
 }
 
-type createDaemonReq struct {
-	Name string `json:"name" binding:"required"`
-}
-
-type daemonResp struct {
+// DaemonResp is the JSON shape returned by daemons endpoints. Exported so
+// gateway-side wrappers (auto-bind on POST /channels/:chID/daemons) can
+// reuse it without duplicating field names.
+type DaemonResp struct {
 	ID            string `json:"id"`
 	ChannelID     string `json:"channel_id"`
 	OwnerID       string `json:"owner_id"`
@@ -41,8 +45,11 @@ type daemonResp struct {
 	APIKey        string `json:"apiKey,omitempty"`
 }
 
-func daemonResponse(d Daemon, apiKey string) daemonResp {
-	return daemonResp{
+// DaemonResponse maps a Daemon row plus the single-display apiKey into
+// the JSON envelope the daemons API returns. Exported alongside DaemonResp
+// so gateway can call CreateDaemon directly without re-serializing.
+func DaemonResponse(d Daemon, apiKey string) DaemonResp {
+	return DaemonResp{
 		ID:            string(d.ID),
 		ChannelID:     string(d.ChannelID),
 		OwnerID:       d.OwnerID,
@@ -57,37 +64,6 @@ func daemonResponse(d Daemon, apiKey string) daemonResp {
 	}
 }
 
-func (s *Service) handleCreateDaemon(c *gin.Context) {
-	var req createDaemonReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
-		return
-	}
-	u := identity.UserFrom(c)
-	chID := channel.ID(c.Param("chID"))
-	if err := s.authorizeChannel(c.Request.Context(), string(chID), u.ID); err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		return
-	}
-	row, apiKey, err := s.CreateDaemon(c.Request.Context(), CreateDaemonInput{
-		ChannelID: chID,
-		OwnerID:   u.ID,
-		Name:      req.Name,
-	})
-	if err != nil {
-		httperr.Internal(c, "devicebus.create_daemon", err)
-		return
-	}
-	c.Header("Cache-Control", "no-store")
-	c.Header("Pragma", "no-cache")
-	c.JSON(http.StatusCreated, daemonResponse(row, apiKey))
-}
-
 func (s *Service) handleListDaemons(c *gin.Context) {
 	u := identity.UserFrom(c)
 	chID := channel.ID(c.Param("chID"))
@@ -100,9 +76,9 @@ func (s *Service) handleListDaemons(c *gin.Context) {
 		httperr.Internal(c, "devicebus.list_daemons", err)
 		return
 	}
-	out := make([]daemonResp, 0, len(rows))
+	out := make([]DaemonResp, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, daemonResponse(row, ""))
+		out = append(out, DaemonResponse(row, ""))
 	}
 	c.JSON(http.StatusOK, gin.H{"daemons": out})
 }

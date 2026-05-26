@@ -810,6 +810,9 @@ func buildEngine(a *App) *gin.Engine {
 	a.placements.RegisterRoutes(auth)
 	a.viewcache.RegisterRoutes(auth)
 	a.devicebus.RegisterRoutes(auth)
+	// POST /channels/:chID/daemons is gateway-owned (not devicebus) so the
+	// handler can lazy auto-bind the channel to a cloud daemon when needed.
+	auth.POST("/channels/:chID/daemons", httperr.MaxBodyBytes(devicebus.DeviceJSONBodyLimit), a.handleCreateDaemonWithAutoBind)
 
 	// Channel-level orchestration: provisioning + message write.
 	auth.POST("/workspaces/:wsID/channels/:chID/bind", httperr.MaxBodyBytes(controlJSONBodyLimit), a.handleBindChannel)
@@ -944,6 +947,118 @@ func (a *App) handleBindChannel(c *gin.Context) {
 		"daemon_id":         string(daemonID),
 		"create_request_id": string(createReq.CreateRequestID),
 	})
+}
+
+// ----------------------------------------------------------------------
+// Proxy daemon create with lazy auto-bind
+// ----------------------------------------------------------------------
+//
+// POST /api/channels/:chID/daemons {name} is owned by the gateway (not by
+// devicebus.RegisterRoutes) because issuing a proxy daemon row before the
+// channel has a cloud daemon placement leads to the proxy WS handshake
+// looping on `daemonbus: no daemon for channel`. Auto-bind here keeps the
+// UX one-shot from the user's point of view: "add device" → apiKey out
+// → curl|sh → online, with no manual bind step in between.
+
+type createDaemonReqV2 struct {
+	Name string `json:"name" binding:"required"`
+}
+
+func (a *App) handleCreateDaemonWithAutoBind(c *gin.Context) {
+	var req createDaemonReqV2
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
+		return
+	}
+	u := identity.UserFrom(c)
+	ctx := c.Request.Context()
+	chID := channel.ID(c.Param("chID"))
+
+	// Verify the caller is a member of the channel; reuses the catalog's
+	// existing auth check so this endpoint matches the existing
+	// /channels/:chID surface.
+	ch, _, err := a.catalog.GetChannel(ctx, string(chID), u.ID)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Lazy auto-bind: if the channel has no active placement yet, attach
+	// it to a connected cloud daemon. Pre-launch dev runs a single cloud
+	// daemon (daemon-dev); a future placement policy can choose smarter
+	// here without changing the surface.
+	if _, bound, err := a.placements.ResolveDaemonForChannel(ctx, chID); err != nil {
+		httperr.Internal(c, "gateway.create_daemon.resolve_placement", err)
+		return
+	} else if !bound {
+		if err := a.autoBindChannel(ctx, ch); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":         err.Error(),
+				"reject_reason": "auto_bind_failed",
+			})
+			return
+		}
+	}
+
+	row, apiKey, err := a.devicebus.CreateDaemon(ctx, devicebus.CreateDaemonInput{
+		ChannelID: chID,
+		OwnerID:   u.ID,
+		Name:      name,
+	})
+	if err != nil {
+		httperr.Internal(c, "gateway.create_daemon", err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
+	c.JSON(http.StatusCreated, devicebus.DaemonResponse(row, apiKey))
+}
+
+// autoBindChannel picks an available cloud daemon and runs the same bind
+// sequence as handleBindChannel. Returns an error when no cloud daemon is
+// currently connected (caller maps that to 503).
+func (a *App) autoBindChannel(ctx context.Context, ch catalog.Channel) error {
+	conns := a.daemonbus.ConnectedConnections()
+	if len(conns) == 0 {
+		return errors.New("no cloud daemon connected; cannot auto-bind channel")
+	}
+	chosen := conns[0]
+	daemonID := chosen.DaemonID
+
+	members, err := a.catalog.ListChannelMembers(ctx, ch.ID)
+	if err != nil {
+		return fmt.Errorf("list members: %w", err)
+	}
+	displayFn := func(uid string) string {
+		usr, _ := a.identity.GetUser(ctx, uid)
+		if usr.DisplayName != "" {
+			return usr.DisplayName
+		}
+		return usr.Email
+	}
+	initial := catalog.InitialMembersFor(members, displayFn)
+
+	_, createReq, err := a.placements.ReserveWith(
+		ctx,
+		channel.ID(ch.ID),
+		daemonID,
+		placement.ConnectionEpoch(chosen.ConnectionEpoch),
+		initial,
+		placements.ReserveOptions{ChannelType: ch.Type},
+	)
+	if err != nil {
+		return fmt.Errorf("reserve: %w", err)
+	}
+
+	if _, err := chosen.SendFrame(ctx, kerneldaemonbus.FrameTypeControlCreateChannel, createReq); err != nil {
+		return fmt.Errorf("send create_channel: %w", err)
+	}
+	return nil
 }
 
 // ----------------------------------------------------------------------
