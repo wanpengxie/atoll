@@ -117,8 +117,9 @@ func (s *Service) ActorSnapshot(ctx context.Context, channelID channel.ID) (Acto
 				ActorID string `json:"actor_id"`
 			}
 			if err := json.Unmarshal(env.Payload, &payload); err == nil && payload.ActorID != "" {
+				// Type declarations are historical envelope facts; only
+				// actor liveness changes on deregistration.
 				delete(actors, payload.ActorID)
-				delete(typesByActor, payload.ActorID)
 			}
 		case "system.type.installed":
 			var payload struct {
