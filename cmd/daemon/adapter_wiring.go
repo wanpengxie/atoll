@@ -93,9 +93,10 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 			}
 			modules = append(modules, mod)
 		}
-		if len(modules) == 0 {
-			// Nothing to install for this channel — return a no-op teardown
-			// so callers can rely on a non-nil teardown closure.
+		if len(modules) == 0 && h.SetProxyActorCallback == nil {
+			// Nothing to install or dynamically extend for this channel —
+			// return a no-op teardown so callers can rely on a non-nil
+			// teardown closure.
 			return func(context.Context) error { return nil }, nil
 		}
 
@@ -155,8 +156,10 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 		if err != nil {
 			return nil, fmt.Errorf("framework.NewManager(%s): %w", h.ChannelID, err)
 		}
-		if err := mgr.Install(ctx, modules); err != nil {
-			return nil, fmt.Errorf("framework.Manager.Install(%s): %w", h.ChannelID, err)
+		if len(modules) > 0 {
+			if err := mgr.Install(ctx, modules); err != nil {
+				return nil, fmt.Errorf("framework.Manager.Install(%s): %w", h.ChannelID, err)
+			}
 		}
 		if err := mgr.BootRecoverTimers(ctx); err != nil {
 			return nil, fmt.Errorf("framework.Manager.BootRecoverTimers(%s): %w", h.ChannelID, err)
