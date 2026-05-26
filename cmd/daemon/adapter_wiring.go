@@ -11,7 +11,6 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/wanpengxie/ActOS/adapters/cmd"
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/framework"
@@ -451,34 +450,4 @@ func KimiWebBridgeActorSeed() actorreg.Record {
 		Kind:    actor.KindTool,
 		Binding: kimibridge.Binding,
 	}
-}
-
-// CmdSandboxChannelType is the catalog.Channel.Type value that hosts
-// the generic cmd cli-adapter. Reserved for the substrate-side cli-
-// adapter sandbox / e2e — production channels do NOT bind cmd by
-// default because the install allowlist is install-time policy, not
-// per-channel.
-const CmdSandboxChannelType = "cmd-sandbox"
-
-// CmdFactory returns an AdapterModuleFactory that installs the cmd
-// cli-adapter for channels carrying CmdSandboxChannelType. Binding=
-// embedded — Module exec's the requested binary inside the daemon
-// process subject to cfg.AllowedBinaries.
-//
-// Composition root passes cfg (with allowlist + optional clock /
-// LookPath hooks) so different deployments can widen / narrow the
-// allowlist without touching the adapter.
-func CmdFactory(cfg cmd.Config) AdapterModuleFactory {
-	return func(_ context.Context, h runtime.ChannelHooks) (adapter.Module, error) {
-		if h.ChannelType != CmdSandboxChannelType {
-			return nil, nil
-		}
-		return cmd.New(cfg), nil
-	}
-}
-
-// CmdActorSeed returns the actor_registry seed for the cmd cli-adapter.
-// Pair with CmdFactory via ChannelTemplate.AdapterActorSeeds.
-func CmdActorSeed() actorreg.Record {
-	return cmd.ActorSeed()
 }

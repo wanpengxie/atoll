@@ -30,7 +30,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wanpengxie/ActOS/adapters/cmd"
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/kimibridge"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
@@ -147,16 +146,11 @@ func main() {
 	// emits failed terminals (receiver_unavailable) until the daemon
 	// comes up.
 	kimibridgeFactory := KimiWebBridgeFactory(kimibridge.Config{BaseURL: *kimibridgeBaseURL}, XHSCreatorChannelType)
-	// cmd cli-adapter: only installs on channels created with the
-	// CmdSandboxChannelType. Production channels never bind cmd by
-	// default — install policy (allowlist) is per-deployment, not
-	// per-channel.
-	cmdFactory := CmdFactory(cmd.Config{})
 	adapterCredentialSecret := []byte(*humanSecret)
 	if len(adapterCredentialSecret) == 0 && *mockBus {
 		adapterCredentialSecret = []byte(devAdapterCredentialSecret)
 	}
-	adapterBootHook, err := wireAdapterFrameworkWithCredentialSecret(adapterCredentialSecret, xhsFactory, kimibridgeFactory, cmdFactory)
+	adapterBootHook, err := wireAdapterFrameworkWithCredentialSecret(adapterCredentialSecret, xhsFactory, kimibridgeFactory)
 	if err != nil {
 		lg.Z().Error().Err(err).Str("event", "daemon.fail_fast").
 			Msg("adapter credential encryption key is required")
@@ -335,14 +329,6 @@ func buildChannelTemplates(useScaffoldXHS bool) map[string]runtime.ChannelTempla
 		AdapterActorSeeds:          adapterSeeds,
 		WorkdirSubdirs:             tpl.WorkdirSubdirs,
 		DomainPrompt:               tpl.DomainPrompt,
-		HumanCallerDefaultAudience: defaultHumanAudience,
-	}
-	// cmd-sandbox channel hosts the generic cli-adapter for e2e + dev
-	// exploration of actor-cli-pattern §19.3. Single tool actor
-	// (tool:cmd, binding=embedded); allowlist enforced at install time
-	// by the adapter Config, not the channel template.
-	out[CmdSandboxChannelType] = runtime.ChannelTemplate{
-		AdapterActorSeeds:          []actorreg.Record{CmdActorSeed()},
 		HumanCallerDefaultAudience: defaultHumanAudience,
 	}
 	return out
