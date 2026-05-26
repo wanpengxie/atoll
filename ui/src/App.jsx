@@ -3,6 +3,7 @@ import { api, APIError } from './api.js';
 import Auth from './components/Auth.jsx';
 import Sidebar from './components/Sidebar.jsx';
 import Chat from './components/Chat.jsx';
+import DeviceList from './components/DeviceList.jsx';
 
 export default function App() {
   const [me, setMe] = useState(null);
@@ -11,6 +12,7 @@ export default function App() {
   const [activeWorkspaceID, setActiveWorkspaceID] = useState(null);
   const [channels, setChannels] = useState([]);
   const [activeChannelID, setActiveChannelID] = useState(null);
+  const [activeChannelTab, setActiveChannelTab] = useState('chat');
 
   // Boot: try to restore session via cookie.
   useEffect(() => {
@@ -67,6 +69,10 @@ export default function App() {
     })();
   }, [activeWorkspaceID]);
 
+  useEffect(() => {
+    setActiveChannelTab('chat');
+  }, [activeChannelID]);
+
   async function refreshWorkspaces() {
     const res = await api.listWorkspaces();
     setWorkspaces(res.workspaces || []);
@@ -91,6 +97,8 @@ export default function App() {
   if (!me) {
     return <Auth onAuthed={setMe} />;
   }
+
+  const activeChannel = channels.find((c) => (c.id || c.ID) === activeChannelID);
 
   return (
     <>
@@ -124,11 +132,35 @@ export default function App() {
           }}
           onLogout={handleLogout}
         />
-        <Chat
-          channelID={activeChannelID}
-          channel={channels.find((c) => (c.id || c.ID) === activeChannelID)}
-          me={me}
-        />
+        <main className="channel-main">
+          {activeChannelID && (
+            <nav className="channel-tabs" aria-label="channel views">
+              <button
+                type="button"
+                className={activeChannelTab === 'chat' ? 'active' : ''}
+                onClick={() => setActiveChannelTab('chat')}
+              >
+                聊天
+              </button>
+              <button
+                type="button"
+                className={activeChannelTab === 'devices' ? 'active' : ''}
+                onClick={() => setActiveChannelTab('devices')}
+              >
+                我的设备
+              </button>
+            </nav>
+          )}
+          {activeChannelTab === 'devices' ? (
+            <DeviceList channelID={activeChannelID} channel={activeChannel} me={me} />
+          ) : (
+            <Chat
+              channelID={activeChannelID}
+              channel={activeChannel}
+              me={me}
+            />
+          )}
+        </main>
       </div>
     </>
   );
