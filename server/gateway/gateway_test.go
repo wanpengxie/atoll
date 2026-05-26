@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,7 +27,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
 	"github.com/wanpengxie/ActOS/server/daemonbus"
-	"github.com/wanpengxie/ActOS/server/devicebus"
 	"github.com/wanpengxie/ActOS/server/gateway"
 	"github.com/wanpengxie/ActOS/server/identity"
 	"github.com/wanpengxie/ActOS/server/pushhub"
@@ -48,7 +48,6 @@ func newTestApp(t *testing.T) *gateway.App {
 		DB:                        db,
 		SessionSecret:             "test-session",
 		DaemonSharedSecret:        "test-daemon",
-		DeviceTokenSecret:         "test-device",
 		DeviceAllowedOrigins:      []string{"http://gateway.test"},
 		PushhubAllowedOrigins:     []string{"http://gateway.test"},
 		DaemonbusAllowedOrigins:   []string{"http://gateway.test"},
@@ -298,7 +297,6 @@ func TestDownloadsRejectsTraversalAndSymlinkEscape(t *testing.T) {
 		DB:                      db,
 		SessionSecret:           "test-session",
 		DaemonSharedSecret:      "test-daemon",
-		DeviceTokenSecret:       "test-device",
 		DeviceAllowedOrigins:    []string{"http://gateway.test"},
 		PushhubAllowedOrigins:   []string{"http://gateway.test"},
 		DaemonbusAllowedOrigins: []string{"http://gateway.test"},
@@ -757,65 +755,55 @@ func TestHandleWriteMessageRejectUsesReasonHTTPStatus(t *testing.T) {
 	}
 }
 
-func TestDevicebusRegisterActorRequiresChannelMembership(t *testing.T) {
+func TestDevicebusLegacyActorEndpointsGone(t *testing.T) {
 	t.Parallel()
 	app := newTestApp(t)
 	srv := httptest.NewServer(app.Handler())
 	defer srv.Close()
 
 	client := &http.Client{}
-	alice := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-devbus@example.com")
-	bob := registerLoginAndCreateChannel(t, client, srv.URL, app, "bob-devbus@example.com")
+	alice := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-devbus-gone@example.com")
 
-	req, _ := http.NewRequest(http.MethodPost,
-		srv.URL+"/api/channels/"+alice.channelID+"/device-actor",
-		strings.NewReader(`{"device_id":"dev-bob","device_type":"xhs","daemon_id":"d1"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: bob.session})
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("POST device-actor: %v", err)
+	cases := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{
+			method: http.MethodPost,
+			path:   "/api/channels/" + alice.channelID + "/device-actor",
+			body:   `{"device_id":"dev","device_type":"xhs","daemon_id":"d1"}`,
+		},
+		{method: http.MethodGet, path: "/api/channels/" + alice.channelID + "/device-actor/tool%3Axhs-adapter"},
+		{method: http.MethodDelete, path: "/api/channels/" + alice.channelID + "/device-actor/tool%3Axhs-adapter"},
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status=%d want 403", resp.StatusCode)
-	}
-}
-
-func TestDevicebusActorAccessRequiresOwnerOrChannelMembership(t *testing.T) {
-	t.Parallel()
-	app := newTestApp(t)
-	srv := httptest.NewServer(app.Handler())
-	defer srv.Close()
-
-	client := &http.Client{}
-	alice := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-device-owner@example.com")
-	bob := registerLoginAndCreateChannel(t, client, srv.URL, app, "bob-device-attacker@example.com")
-	aliceID := userIDByEmail(t, app, "alice-device-owner@example.com")
-
-	res, err := app.Devicebus().RegisterActor(context.Background(), devicebus.RegisterInput{
-		ActorID:    "tool:xhs-adapter",
-		DeviceID:   "dev-alice",
-		DeviceType: "xhs.chrome_extension",
-		ChannelID:  channel.ID(alice.channelID),
-		UserID:     aliceID,
-		DaemonID:   "d1",
-	})
-	if err != nil {
-		t.Fatalf("RegisterActor: %v", err)
-	}
-
-	for _, method := range []string{http.MethodGet, http.MethodDelete} {
-		req, _ := http.NewRequest(method, srv.URL+"/api/channels/"+alice.channelID+"/device-actor/"+string(res.Registration.ActorID), nil)
-		req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: bob.session})
+	for _, tc := range cases {
+		var body io.Reader
+		if tc.body != "" {
+			body = strings.NewReader(tc.body)
+		}
+		req, _ := http.NewRequest(tc.method, srv.URL+tc.path, body)
+		if tc.body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: alice.session})
 		resp, err := client.Do(req)
 		if err != nil {
-			t.Fatalf("%s device-actor: %v", method, err)
+			t.Fatalf("%s device-actor: %v", tc.method, err)
 		}
 		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusForbidden {
-			t.Fatalf("%s status=%d want 403", method, resp.StatusCode)
+		if resp.StatusCode != http.StatusGone {
+			t.Fatalf("%s status=%d want 410", tc.method, resp.StatusCode)
 		}
+	}
+
+	resp, err := client.Get(srv.URL + "/devicebus")
+	if err != nil {
+		t.Fatalf("GET /devicebus: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("GET /devicebus status=%d want 410", resp.StatusCode)
 	}
 }
 

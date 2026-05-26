@@ -28,11 +28,6 @@ vi.mock('../connection-state', () => ({
   getConnectionConfig: vi.fn(async () => ({})),
 }));
 
-// Provide a minimal coagent-device shim so the import resolves.
-vi.mock('../services/coagent-device', () => ({
-  deriveHttpBaseFromWsUrl: vi.fn(() => 'http://127.0.0.1:9501'),
-}));
-
 interface FakeListenerSet<F extends (...args: any[]) => any> {
   listeners: Set<F>;
   addListener: (fn: F) => void;

@@ -1,209 +1,97 @@
 # Coagent · 小红书 Device
 
-Coagent 的 chrome 端 device 实现。承载 5 个小红书业务命令
-（publish / search / recent.fetch / note.fetch / cookie.sync）。
+Coagent 的 Chrome 端 xhs device 实现，承载 publish / search / recent.fetch /
+note.fetch / cookie.sync 等小红书业务命令。
 
-> launch-T5：本目录从 `devices/xhs-extension` 重组到
-> `adapters/device/xhs/extension`（go-arch-lint adapters/ 顶层化的一部分）。
-> 协议从 daemon WS 直连（M1.3 baseline）切到 via_server_transit binding
-> （连 server WS，承载 daemon ↔ adapter 的 device_transit 帧）—— 协议层
-> 切换的完整落地等 T6 server.devicebus + T7 cmd/* 接入；T5 阶段保留旧
-> WS 客户端代码，server WS / token 接入分阶段添加，参见 `services/`。
->
-> 来源历史：M1.1-T2 一次性 rsync 自外部模板，之后在 coagent 仓库独立
-> 维护。
-
-## 架构（launch via_server_transit 目标态）
+当前连接模型是 coagent-proxy：
 
 ```
 agent (channel-agent)
-  ↓ SDK Bash / 直接 envelope
-adapters/device/xhs (Go, launch-T5)
-  ↓ kernel/devicetransit.DeviceTransit.Send(device_transit.send frame)
-runtime/transit (launch-T3) → daemonbus mux → server.devicebus (launch-T6)
-  ↓ device WS endpoint
-本插件 (launch-T5)
-  ↓ services/coagent-device.ts dispatch → tools/*.ts handler
-xhs.com / creator.xiaohongshu.com
-  ↓ device_transit.recv frame
-server.devicebus → daemonbus → runtime/transit → adapter.OnExternalCallback
-  ↓ ctx.Respond (sender=tool:xhs-adapter)
-channel log（device 不出现在 actor_registry — L4 §2.6）
+  -> adapters/device/xhs
+  -> runtime/transit -> daemonbus -> server.devicebus v2
+  -> coagent-proxy local endpoint
+  -> extension services/server-devicebus.ts
+  -> tools/*.ts
+  -> xhs.com / creator.xiaohongshu.com
 ```
+
+Extension 只连接本机 proxy endpoint。旧的 server 下发 actor token / 直连
+server devicebus / resolve fallback 流程已下线。
 
 ## 开发 / 构建
 
 ```bash
 cd adapters/device/xhs/extension
-pnpm install               # 第一次运行需要拉依赖
-pnpm dev                   # WXT dev 模式（实时重载）
-pnpm build                 # 生产构建：app/chrome-extension/.output/chrome-mv3/
+pnpm install
+pnpm dev
+pnpm build
 ```
 
-`pnpm install` 期间会先构建 `packages/shared`（tsup），再链接到 `app/chrome-extension`。
+生产构建输出在 `app/chrome-extension/.output/chrome-mv3/`。
 
-## 加载到 Chrome（load unpacked）
+## 加载到 Chrome
 
 1. 打开 `chrome://extensions/`
 2. 启用 "开发者模式"
 3. 点 "加载已解压的扩展程序"
-4. 选择 `app/chrome-extension/.output/chrome-mv3/` 目录（或 `chrome-mv3-dev/`）
+4. 选择 `app/chrome-extension/.output/chrome-mv3/` 或 dev 输出目录
 
-## Daemon 配置
+## Proxy 配置
 
-### M1.6-T6 主流程：web UI 一键绑定（推荐）
+1. 用户在 server UI 为 channel 创建 proxy daemon 并拿到 daemon api key。
+2. 启动 `coagent-proxy`，由 proxy daemon 连接 server `/devicebus/v2/connect`。
+3. 在 extension popup 输入本机 proxy endpoint，默认 `ws://127.0.0.1:10387`。
+4. Extension 连接本机 endpoint 并发送 hello 选择 `tool:xhs`。
 
-从 M1.6 开始，**正式 onboarding 路径是 web UI 端按钮**，不再要求用户手动填
-popup（popup 的 1-key 流程仍可用但标 deprecated）。流程：
-
-1. 用户在 coagent web UI 登录 → 进入 channel
-2. 点击 chat header 的 "绑定 Chrome extension"
-3. UI 通过 `chrome.runtime.sendMessage(EXTENSION_ID, ...)` 把 server 颁发的
-   `actor_id + token` 注入 extension
-4. extension 写 `chrome.storage.local` + 接 server `/devicebus` WS
-
-构建侧配置（**生产环境必填**）：
-
-| Env (extension build) | 作用 | 示例 |
-|---|---|---|
-| `COAGENT_WEB_ORIGINS` | 写入 `manifest.externally_connectable.matches`，决定哪些 origin 可以调 `chrome.runtime.sendMessage` 到本扩展 | `https://app.coagent.dev/*,http://localhost:*/*` |
-
-| Env (UI build) | 作用 | 示例 |
-|---|---|---|
-| `VITE_COAGENT_EXTENSION_ID` | UI 调 `sendMessage` 时用的目标 extension id | `ngghjmpccpgmfgblbifmlmjnnpfknhka` |
-
-不设 `COAGENT_WEB_ORIGINS` 时，dev 默认只允许 `http://localhost:*/*` +
-`http://127.0.0.1:*/*`；prod 部署到真实域名时必须重新构建 extension 并把
-domain 加入此 env，否则 Chrome 直接拒绝 message 不会触发 background。
-
-安全双层：
-1. Chrome 在 manifest 层强制 origin 匹配；
-2. background 的 `external-bind.ts::isAllowedSenderOrigin` 二次校验
-   `sender.origin`，匹配名单与 manifest 同源（运行时从 `chrome.runtime
-   .getManifest().externally_connectable.matches` 读取）。
-
-### 旧流程：popup 1-key（已 deprecated；保留为 debug 路径）
-
-打开扩展 popup，主入口只填 2 项：
-
-| 字段 | 说明 | 示例 |
-|---|---|---|
-| Coagent api-key | 在 coagent server 创建 device 时分配的 key | `sk_dev_xxx` |
-| Server URL | coagent server 部署地址；popup 默认 `https://coagent-server`，必须改成真实部署域名 | `https://coagent.example.com` |
-
-点 "连接" 后扩展走 `POST {Server URL}/api/device/resolve {api_key}`，
-反查到对应 daemon 的 `ws_url / http_url / device_id / user_id / channel_id /
-daemon_id`，落 `chrome.storage.local`，然后用 daemon WS URL 建立长连。
-
-resolve 失败（网络 / 401 / 404 / 429 / server 5xx）会在 popup 内显示中文友好
-错误，并提示「若 server 不可达，可展开 Advanced 直接配 daemon 5 字段」。
-
-### Advanced 折叠：旧 5 字段（dev / test）
-
-popup 下方 "⚙️ Advanced" 折叠区保留旧 5 字段，跳过 coagent resolve 直接连
-daemon。多用于 coagent server 暂不可用、本地起 daemon 调试等场景：
-
-| 字段 | 说明 | 示例 |
-|---|---|---|
-| Daemon WebSocket URL | 长连地址；若不带 path，自动追加 `/device/{deviceId}` | `ws://127.0.0.1:9501` 或 `ws://host:9501/device/xhs-laptop-001` |
-| Daemon HTTP base | callback / session POST 的根 URL | `http://127.0.0.1:9501` |
-| Device ID | 与 daemon `DEVICE_KEYS` 中的 deviceId 一致 | `xhs-laptop-001` |
-| Device API Key | 与 daemon `DEVICE_KEYS` 中对应 device 的 key 一致 | `sk_dev_xxx` |
-| 主人 user_id（可选） | 写入 session sync 的 user_id | `user-001` |
-
-### Storage shape
-
-配置写入 `chrome.storage.local`（key = `coagent_device_config`）：
+Storage 写入 `chrome.storage.local`，key 为 `coagent_device_config`：
 
 ```jsonc
 {
-  // 主入口字段
-  "coagentServerUrl": "https://coagent.example.com",
-
-  // Daemon 连接字段（resolve 自动填，或 advanced 手动填）
-  // serverUrl / wsUrl 为同一个值的 canonical+alias；daemonHttpBase / httpBase 同理
-  "serverUrl":      "ws://daemon-host:9501/device/xhs-laptop-001",
-  "wsUrl":          "ws://daemon-host:9501/device/xhs-laptop-001",
-  "daemonHttpBase": "http://daemon-host:9501",
-  "httpBase":       "http://daemon-host:9501",
-
-  "deviceId":  "xhs-laptop-001",
-  "apiKey":    "sk_dev_xxx",
-  "userId":    "user-001",
-
-  // Resolve 元数据（仅 main 入口流程会填，备用）
-  "channelId": "ch-1",
-  "daemonId":  "daemon-1",
-
+  "connectionMode": "proxy",
+  "proxyEndpoint": "ws://127.0.0.1:10387",
+  "deviceActorId": "tool:xhs",
   "autoReconnect": true
 }
 ```
 
-Service Worker 启动时若 `serverUrl/apiKey/deviceId` 三项齐全且 `autoReconnect`
-为 true，会自动连接。旧版本（仅含 `serverUrl/daemonHttpBase/apiKey/deviceId/
-userId/autoReconnect` 的 advanced shape）天然兼容，加载时新增字段为空不影响。
+Service Worker 启动时若 `connectionMode=proxy` 且 `autoReconnect=true`，会自动
+连接本机 proxy endpoint。
 
-## 命令协议（spec §4）
+## 命令协议
 
-入站 frame（daemon → ext）：
+入站 frame：
+
 ```jsonc
 {
   "type": "command",
   "correlation_id": "01HXX...",
-  "cmd": "publish",                  // publish | search | get-my-recent | get-note | publish-status
-  "params": { /* 命令参数 */ },
-  "session": { "cookies": [...], "user_id": "..." }
+  "cmd": "publish",
+  "params": {},
+  "session": { "cookies": [], "user_id": "..." }
 }
 ```
 
-完成回调（ext → daemon HTTP）：
-```
-POST {DAEMON_HTTP}/api/device/{deviceId}/callback
-Authorization: Bearer {device_api_key}
-Content-Type: application/json
+完成回调通过同一条 proxy WS 返回：
+
+```jsonc
 {
+  "direction": "from_device",
+  "actor_id": "tool:xhs",
   "correlation_id": "01HXX...",
-  "status": "ok" | "error",
-  "result": {...} | null,
-  "error": {"code": "...", "message": "..."} | null
+  "payload": {
+    "correlation_id": "01HXX...",
+    "status": "ok",
+    "result": {},
+    "error": null
+  }
 }
 ```
-
-cookie 同步（spec §6.2.4）：
-```
-POST {DAEMON_HTTP}/api/device/{deviceId}/session
-Authorization: Bearer {device_api_key}
-Content-Type: application/json
-{ "user_id": "user-001", "cookies": [...], "login_state": "logged_in" | "unknown" }
-```
-
-## 5 个命令
-
-| cmd | handler | 说明 |
-|---|---|---|
-| `publish` | `tools/publish-content.ts` | 跳到发布页 → DOM/CDP 输入 → 用户确认发布；返回 `{success, manualPublishPending, ...}` |
-| `search` | `tools/search-feeds.ts` | 搜索小红书 feed，返回 feeds 数组 |
-| `get-my-recent` | `tools/xiaohongshu/get-my-recent.ts`（衍生自 analyze-my-profile） | 当前登录账号最近 N 条笔记 |
-| `get-note` | `tools/xiaohongshu/get-note.ts`（新增） | 拿单条 note 详情；需要 url 含 xsec_token 或显式传 xsec_token |
-| `publish-status` | `tools/xiaohongshu/publish-status.ts`（新增，包 get-note-analytics） | `published` / `not_found` / `unknown` |
 
 ## 调试
 
-- Service Worker 日志：`chrome://extensions/` → 找到扩展 → "Service Worker" → console
-- popup 日志：右键扩展图标 → "审查弹出窗口" → console
-- 长连断开：`chrome.storage.local.get('coagent_device_status')` 看快照；popup 上方状态指示器同步
-- Cookie sync：成功后 daemon `<data>/users/{user_id}/xhs-session.json` 会被原子覆盖
+- Service Worker 日志：`chrome://extensions/` -> 扩展 -> "Service Worker"
+- popup 日志：右键扩展图标 -> "审查弹出窗口"
+- 连接快照：`chrome.storage.local.get('coagent_device_status')`
 
-## 常见问题
-
-**connect 报 "Device 配置不完整"** — daemon WS URL / device api key / device id 任一为空。检查 popup（主入口走 resolve 自动填；advanced 需要全填）。
-
-**主入口 resolve 报 "Server 不可达 / 超时"** — 检查 Server URL 是否填的真实 coagent 部署域名（默认 `https://coagent-server` 是 placeholder）。临时绕过：展开 Advanced，手动填 daemon 5 字段。
-
-**callback 返回非 2xx** — daemon 校验 device_api_key 失败或 correlation_id 已过期；service worker console 会打印 `callback non-2xx` 含 status 与 body。
-
-**publish 调起后没有动作** — 检查是否在 xhs.com 已登录；publish handler 不会自己代登录，需要用户已登录 xhs。
-
-## 许可证
-
-MIT。
+常见连接失败优先检查本机 `coagent-proxy` 是否已启动，以及 popup endpoint 与
+proxy 监听端口是否一致。

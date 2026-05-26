@@ -5,7 +5,6 @@ import {
 } from 'coagent-xhs-shared';
 import { BaseTool } from './base-tool';
 import { getConnectionConfig } from '../connection-state';
-import { deriveHttpBaseFromWsUrl } from '../services/coagent-device';
 
 /**
  * 需要同步的小红书 Cookie 名称
@@ -21,6 +20,22 @@ const REQUIRED_COOKIE_NAMES = [
   'webBuild',
   'xsecappid',
 ];
+
+export function deriveHttpBaseFromWsUrl(wsUrl: string): string {
+  const raw = (wsUrl ?? '').trim();
+  if (!raw) return '';
+  try {
+    const u = new URL(raw);
+    if (u.protocol === 'ws:') u.protocol = 'http:';
+    if (u.protocol === 'wss:') u.protocol = 'https:';
+    u.pathname = '';
+    u.search = '';
+    u.hash = '';
+    return u.toString().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
 
 /**
  * Cookie 同步工具

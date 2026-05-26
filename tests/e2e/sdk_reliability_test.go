@@ -86,57 +86,6 @@ func TestE2E_SDK_Reliability_EmbeddedScaffoldReady(t *testing.T) {
 	}
 }
 
-func TestE2E_SDK_Reliability_ReadinessEventEmitted(t *testing.T) {
-	s := harness.Start(t, harness.Options{
-		DeviceAllowedOrigins: []string{harness.MockExtensionOriginID},
-	})
-	_, chID, client := setupReliabilityChannel(t, s, "readiness-event")
-
-	placement := harness.EventuallyValue(t, "placement reaches active", 5*time.Second, func() (harness.PlacementRow, bool) {
-		p, ok := s.GetPlacement(chID)
-		return p, ok && p.State == "active"
-	})
-	deviceID := "device-" + uniqSuffix()
-	issued := s.RegisterDeviceActor(chID, deviceID, placement.DaemonID)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	_ = harness.NewMockExtension(t, ctx, harness.MockExtensionConfig{
-		WSURL:     s.DevicebusWSURL(issued.ActorID, issued.Token),
-		ActorID:   issued.ActorID,
-		Token:     issued.Token,
-		ChannelID: chID,
-		DeviceID:  deviceID,
-	})
-
-	waitSDKActor(t, client, chID, string(xhs.DefaultAdapterActorID), 10*time.Second, func(a coagentsdk.ActorInfo) bool {
-		return a.Ready && a.ReadyReason == "ok"
-	})
-	harness.Eventually(t, "readiness and xhs lifecycle events", 10*time.Second, func() bool {
-		var readinessReady, xhsOnline bool
-		for _, m := range s.ListChannelMessages(chID) {
-			switch m.Type {
-			case "actor.readiness.changed":
-				var payload struct {
-					ActorID string `json:"actor_id"`
-					Current struct {
-						Ready  bool   `json:"ready"`
-						Reason string `json:"reason"`
-					} `json:"current"`
-				}
-				if json.Unmarshal(m.Payload, &payload) == nil &&
-					payload.ActorID == string(xhs.DefaultAdapterActorID) &&
-					payload.Current.Ready &&
-					payload.Current.Reason == "ok" {
-					readinessReady = true
-				}
-			case "xhs.device.online":
-				xhsOnline = true
-			}
-		}
-		return readinessReady && xhsOnline
-	})
-}
-
 // TestE2E_SDK_Reliability_ToolSurface_Scaffold covers the happy-path SDK
 // invocation across the **scaffold** xhs adapter (5 R/R types). The
 // scaffold mock-acks every request so this test verifies SDK ↔ server ↔
