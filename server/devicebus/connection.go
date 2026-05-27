@@ -321,18 +321,29 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 				if strings.TrimSpace(frame.ActorID) == "" {
 					return
 				}
-				if !s.daemonOwnsActor(daemon.ID, daemon.ChannelID, actor.ActorID(frame.ActorID)) {
+				actorID := actor.ActorID(frame.ActorID)
+				targetChannel := channel.ID(strings.TrimSpace(frame.ChannelID))
+				if targetChannel == "" {
+					// Multi-channel daemon may host the same actor in N
+					// channels. With no explicit channel_id on the
+					// inbound frame, route to the unique attached
+					// channel for this (daemon, actor) pair. If multiple
+					// match we reject (ambiguous — caller MUST stamp
+					// channel_id when serving more than one channel).
+					targetChannel = s.resolveDaemonActorChannel(daemon.ID, actorID)
+				}
+				if targetChannel == "" || !s.daemonOwnsActor(daemon.ID, targetChannel, actorID) {
 					s.log.Warn("devicebus.daemon_frame_rejected",
 						"reason", "actor_not_registered",
 						"daemon_id", string(daemon.ID),
-						"channel_id", string(daemon.ChannelID),
+						"channel_id", string(targetChannel),
 						"daemon_session_id", conn.SessionID,
 						"actor_id", frame.ActorID,
 					)
 					return
 				}
-				frame.ChannelID = string(daemon.ChannelID)
-				if err := forwarder.ForwardDeviceFrame(c.Request.Context(), frame, actor.ActorID(frame.ActorID)); err != nil {
+				frame.ChannelID = string(targetChannel)
+				if err := forwarder.ForwardDeviceFrame(c.Request.Context(), frame, actorID); err != nil {
 					return
 				}
 			default:
@@ -484,9 +495,29 @@ func (s *Service) closeDaemonConnection(daemonID placement.DaemonID, sendShutdow
 	return true
 }
 
+// KickDaemonForReload closes the daemon's ws (no shutdown frame) so its
+// reconnect path fires immediately and the next ready frame picks up
+// whatever attachments + actors are now in DB. Returns true if a
+// connection was actually closed (i.e. daemon was online).
+func (s *Service) KickDaemonForReload(daemonID placement.DaemonID) bool {
+	return s.closeDaemonConnection(daemonID, false)
+}
+
 func (s *Service) clearDaemonActorRoutesLocked(daemonID placement.DaemonID) {
 	for key, got := range s.actorToDaemon {
 		if got == daemonID {
+			delete(s.actorToDaemon, key)
+		}
+	}
+}
+
+// clearDaemonChannelRoutesLocked drops only the (channel, *) → daemon
+// entries — used by DetachDaemonFromChannel when the daemon stays
+// connected but loses one channel of attachment.
+func (s *Service) clearDaemonChannelRoutesLocked(daemonID placement.DaemonID, channelID channel.ID) {
+	prefix := routeKey(channelID, "")
+	for key, got := range s.actorToDaemon {
+		if got == daemonID && strings.HasPrefix(key, prefix) {
 			delete(s.actorToDaemon, key)
 		}
 	}
@@ -496,6 +527,29 @@ func (s *Service) daemonOwnsActor(daemonID placement.DaemonID, channelID channel
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.actorToDaemon[routeKey(channelID, actorID)] == daemonID
+}
+
+// resolveDaemonActorChannel returns the unique channel id where this
+// daemon owns the actor. Called when an inbound frame lacks channel_id
+// (legacy single-channel ext flow). Empty return means either zero or
+// >1 matches — caller treats both as "ambiguous, reject the frame".
+func (s *Service) resolveDaemonActorChannel(daemonID placement.DaemonID, actorID actor.ActorID) channel.ID {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var found channel.ID
+	suffix := "\x00" + string(actorID)
+	for key, got := range s.actorToDaemon {
+		if got != daemonID || !strings.HasSuffix(key, suffix) {
+			continue
+		}
+		if found != "" {
+			// Ambiguous — daemon serves this actor in multiple
+			// channels and the caller didn't disambiguate.
+			return ""
+		}
+		found = channel.ID(strings.TrimSuffix(key, suffix))
+	}
+	return found
 }
 
 func (s *Service) newConnectionID() string {

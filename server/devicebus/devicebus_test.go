@@ -46,12 +46,14 @@ func TestDaemonV2HandshakeReadyHeartbeatAndDisconnect(t *testing.T) {
 	svc := NewService(testDB(t), Config{})
 	forwarder := &captureForwarder{ch: make(chan DeviceFrame, 1)}
 	daemon, apiKey, err := svc.CreateDaemon(ctx, CreateDaemonInput{
-		ChannelID: "ch-proxy",
-		OwnerID:   "user-1",
-		Name:      "Laptop",
+		OwnerID: "user-1",
+		Name:    "Laptop",
 	})
 	if err != nil {
 		t.Fatalf("CreateDaemon: %v", err)
+	}
+	if err := svc.AttachDaemonToChannel(ctx, daemon.ID, "ch-proxy"); err != nil {
+		t.Fatalf("AttachDaemonToChannel: %v", err)
 	}
 
 	router := gin.New()
@@ -150,13 +152,19 @@ func TestDaemonV2InvalidKeyAndDuplicateActor(t *testing.T) {
 	ctx := context.Background()
 	svc := NewService(testDB(t), Config{})
 	forwarder := &captureForwarder{ch: make(chan DeviceFrame, 1)}
-	first, firstKey, err := svc.CreateDaemon(ctx, CreateDaemonInput{ChannelID: "ch-proxy", OwnerID: "user-1", Name: "First"})
+	first, firstKey, err := svc.CreateDaemon(ctx, CreateDaemonInput{OwnerID: "user-1", Name: "First"})
 	if err != nil {
 		t.Fatalf("CreateDaemon first: %v", err)
 	}
-	_, secondKey, err := svc.CreateDaemon(ctx, CreateDaemonInput{ChannelID: "ch-proxy", OwnerID: "user-1", Name: "Second"})
+	if err := svc.AttachDaemonToChannel(ctx, first.ID, "ch-proxy"); err != nil {
+		t.Fatalf("AttachDaemonToChannel first: %v", err)
+	}
+	second, secondKey, err := svc.CreateDaemon(ctx, CreateDaemonInput{OwnerID: "user-1", Name: "Second"})
 	if err != nil {
 		t.Fatalf("CreateDaemon second: %v", err)
+	}
+	if err := svc.AttachDaemonToChannel(ctx, second.ID, "ch-proxy"); err != nil {
+		t.Fatalf("AttachDaemonToChannel second: %v", err)
 	}
 
 	router := gin.New()

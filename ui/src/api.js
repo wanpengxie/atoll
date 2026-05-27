@@ -89,10 +89,19 @@ export const api = {
   listMembers:      (chID)                      => request('GET',  `/api/channels/${chID}/members`).then((r) => ({ members: r.members || [] })),
   listActors:       (chID)                      => request('GET',  `/api/channels/${chID}/actors`).then((r) => ({ ...r, actors: r?.actors || [] })),
 
-  // Proxy daemons
+  // Proxy daemons — channel view (attached only)
   listDaemons:      (chID)                      => request('GET',  `/api/channels/${chID}/daemons`).then((r) => ({ daemons: r?.daemons || [] })),
+  // Composite: create new daemon row + attach to current channel.
   createDaemon:     (chID, input)               => request('POST', `/api/channels/${chID}/daemons`, input),
-  revokeDaemon:     (chID, daemonID)            => request('DELETE', `/api/channels/${chID}/daemons/${daemonID}`),
+  // Attach existing owner daemons to current channel (no create).
+  attachDaemons:    (chID, daemonIDs)           => request('POST', `/api/channels/${chID}/daemons/attach`, { daemon_ids: daemonIDs }),
+  // Detach a daemon from this channel; daemon row stays.
+  detachDaemon:     (chID, daemonID)            => request('DELETE', `/api/channels/${chID}/daemons/${daemonID}/attach`),
+  // Owner-scoped list (all of caller's daemons, attached or not). Used
+  // by the attach UI so the picker covers every device the owner has.
+  listOwnerDaemons: ()                          => request('GET',  `/api/daemons`).then((r) => ({ daemons: r?.daemons || [] })),
+  // Revoke a daemon outright (deletes the row + cascade attachments).
+  revokeDaemon:     (daemonID)                  => request('DELETE', `/api/daemons/${daemonID}`),
 
   // Messages — send accepts an envelope shape so callers can drive
   // kind / audience / visibility explicitly; defaults keep current

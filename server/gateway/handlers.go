@@ -452,49 +452,80 @@ func (a *App) OnChannelMembersChanged(ctx context.Context, channelID string, add
 	return nil
 }
 
-// NotifyProxyDaemonReady implements devicebus.ProxyDaemonNotifier. It reuses
-// control.update_members to make proxy-hosted tool actors visible to the cloud
-// daemon actor_registry before cmd/daemon installs the matching facade module.
+// NotifyProxyDaemonReady fires one control.update_members frame per
+// channel the daemon is currently attached to so every cloud daemon
+// facade hosting one of those channels learns about the new tool
+// actors. If d.AttachedChannels is empty (an unattached daemon has
+// just gone online) this no-ops — the daemon is online-but-idle until
+// the owner attaches it to a channel.
 func (a *App) NotifyProxyDaemonReady(ctx context.Context, d devicebus.Daemon, ready devicebus.DaemonReadyInput) error {
-	if d.ChannelID == "" || len(ready.Actors) == 0 {
+	if len(ready.Actors) == 0 {
 		return nil
 	}
-	body := kerneldaemonbus.UpdateMembersBody{
-		FrameID:   kerneldaemonbus.FrameID(uuid.NewString()),
-		ChannelID: d.ChannelID,
-		Adds:      make([]kerneldaemonbus.UpdateMember, 0, len(ready.Actors)),
+	channels := d.AttachedChannels
+	if len(channels) == 0 && d.ChannelID != "" {
+		// Legacy single-channel callers (pre-T7) supplied d.ChannelID
+		// directly; preserve that path so existing call sites keep
+		// working even before they're refactored to thread attachments.
+		channels = []channel.ID{d.ChannelID}
 	}
-	for _, readyActor := range ready.Actors {
-		if readyActor.ActorID == "" {
+	for _, chID := range channels {
+		body := kerneldaemonbus.UpdateMembersBody{
+			FrameID:   kerneldaemonbus.FrameID(uuid.NewString()),
+			ChannelID: chID,
+			Adds:      make([]kerneldaemonbus.UpdateMember, 0, len(ready.Actors)),
+		}
+		for _, readyActor := range ready.Actors {
+			if readyActor.ActorID == "" {
+				continue
+			}
+			body.Adds = append(body.Adds, kerneldaemonbus.UpdateMember{
+				UserID:        kerneldaemonbus.UserID(d.OwnerID),
+				MemberActorID: readyActor.ActorID,
+				Kind:          actor.KindTool,
+				Binding:       actor.BindingRuntimeInboundViaRelay,
+				Role:          "proxy_daemon",
+				DisplayName:   string(readyActor.ActorID),
+				CapabilitySet: readyActor.CapabilitySet,
+				ProxyHost: &kerneldaemonbus.ProxyHost{
+					DaemonID:   d.ID,
+					DaemonName: d.Name,
+				},
+			})
+		}
+		if len(body.Adds) == 0 {
 			continue
 		}
-		body.Adds = append(body.Adds, kerneldaemonbus.UpdateMember{
-			UserID:        kerneldaemonbus.UserID(d.OwnerID),
-			MemberActorID: readyActor.ActorID,
-			Kind:          actor.KindTool,
-			Binding:       actor.BindingRuntimeInboundViaRelay,
-			Role:          "proxy_daemon",
-			DisplayName:   string(readyActor.ActorID),
-			CapabilitySet: readyActor.CapabilitySet,
-			ProxyHost: &kerneldaemonbus.ProxyHost{
-				DaemonID:   d.ID,
-				DaemonName: d.Name,
-			},
-		})
+		if err := a.sendProxyUpdateMembers(ctx, body); err != nil {
+			return fmt.Errorf("channel %s: %w", chID, err)
+		}
 	}
-	return a.sendProxyUpdateMembers(ctx, body)
+	return nil
 }
 
+// NotifyProxyDaemonOffline fires one update_members(removes=actors)
+// frame per channel currently attached to the daemon — same multi-
+// channel semantics as the ready notifier. Legacy single-channel call
+// sites still work via d.ChannelID when AttachedChannels is empty.
 func (a *App) NotifyProxyDaemonOffline(ctx context.Context, d devicebus.Daemon, actors []actor.ActorID) error {
-	if d.ChannelID == "" || len(actors) == 0 {
+	if len(actors) == 0 {
 		return nil
 	}
-	body := kerneldaemonbus.UpdateMembersBody{
-		FrameID:   kerneldaemonbus.FrameID(uuid.NewString()),
-		ChannelID: d.ChannelID,
-		Removes:   append([]actor.ActorID(nil), actors...),
+	channels := d.AttachedChannels
+	if len(channels) == 0 && d.ChannelID != "" {
+		channels = []channel.ID{d.ChannelID}
 	}
-	return a.sendProxyUpdateMembers(ctx, body)
+	for _, chID := range channels {
+		body := kerneldaemonbus.UpdateMembersBody{
+			FrameID:   kerneldaemonbus.FrameID(uuid.NewString()),
+			ChannelID: chID,
+			Removes:   append([]actor.ActorID(nil), actors...),
+		}
+		if err := a.sendProxyUpdateMembers(ctx, body); err != nil {
+			return fmt.Errorf("channel %s: %w", chID, err)
+		}
+	}
+	return nil
 }
 
 func (a *App) sendProxyUpdateMembers(ctx context.Context, body kerneldaemonbus.UpdateMembersBody) error {
@@ -813,6 +844,15 @@ func buildEngine(a *App) *gin.Engine {
 	// POST /channels/:chID/daemons is gateway-owned (not devicebus) so the
 	// handler can lazy auto-bind the channel to a cloud daemon when needed.
 	auth.POST("/channels/:chID/daemons", httperr.MaxBodyBytes(devicebus.DeviceJSONBodyLimit), a.handleCreateDaemonWithAutoBind)
+	// Attach/detach existing owner daemons to/from a channel. Attach runs
+	// the same auto-bind + facade-install flow as create; detach removes
+	// the (daemon, channel) row plus the daemon_active_actors projections
+	// scoped to that channel and notifies the cloud daemon facade.
+	auth.POST("/channels/:chID/daemons/attach", httperr.MaxBodyBytes(devicebus.DeviceJSONBodyLimit), a.handleAttachDaemon)
+	auth.DELETE("/channels/:chID/daemons/:daemonID/attach", a.handleDetachDaemon)
+	// Owner-scoped revoke. Removes the daemon row + all attachments.
+	// Lives under /api/daemons (no :chID) because it spans channels.
+	auth.DELETE("/daemons/:daemonID", a.handleRevokeDaemon)
 
 	// Channel-level orchestration: provisioning + message write.
 	auth.POST("/workspaces/:wsID/channels/:chID/bind", httperr.MaxBodyBytes(controlJSONBodyLimit), a.handleBindChannel)
@@ -1006,17 +1046,159 @@ func (a *App) handleCreateDaemonWithAutoBind(c *gin.Context) {
 	}
 
 	row, apiKey, err := a.devicebus.CreateDaemon(ctx, devicebus.CreateDaemonInput{
-		ChannelID: chID,
-		OwnerID:   u.ID,
-		Name:      name,
+		OwnerID: u.ID,
+		Name:    name,
 	})
 	if err != nil {
 		httperr.Internal(c, "gateway.create_daemon", err)
 		return
 	}
+	// Composite create + attach to the current channel — matches the
+	// existing "add device from channel page" UX. Owner can later
+	// attach the daemon to additional channels via the attach API.
+	if err := a.devicebus.AttachDaemonToChannel(ctx, row.ID, chID); err != nil {
+		httperr.Internal(c, "gateway.create_daemon.attach", err)
+		return
+	}
+	// Reflect the attach in the returned snapshot so the UI doesn't
+	// need a second GET to know the daemon is bound to this channel.
+	row.AttachedChannels = []channel.ID{chID}
 	c.Header("Cache-Control", "no-store")
 	c.Header("Pragma", "no-cache")
 	c.JSON(http.StatusCreated, devicebus.DaemonResponse(row, apiKey))
+}
+
+// handleAttachDaemon attaches one or more existing owner daemons to the
+// channel. Runs the auto-bind path if the channel has no placement yet
+// (so attaching a daemon to a fresh channel does the same work the
+// composite create flow does), then INSERT OR IGNORE for each daemon
+// into daemon_channel_attachments. If the daemon is currently connected,
+// triggers a follow-up facade install via NotifyProxyDaemonReady so the
+// new channel sees its actors immediately.
+type attachDaemonReq struct {
+	DaemonIDs []string `json:"daemon_ids" binding:"required"`
+}
+
+func (a *App) handleAttachDaemon(c *gin.Context) {
+	var req attachDaemonReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(req.DaemonIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "daemon_ids required"})
+		return
+	}
+	u := identity.UserFrom(c)
+	ctx := c.Request.Context()
+	chID := channel.ID(c.Param("chID"))
+	ch, _, err := a.catalog.GetChannel(ctx, string(chID), u.ID)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+	if _, bound, err := a.placements.ResolveDaemonForChannel(ctx, chID); err != nil {
+		httperr.Internal(c, "gateway.attach_daemon.resolve_placement", err)
+		return
+	} else if !bound {
+		if err := a.autoBindChannel(ctx, ch); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":         err.Error(),
+				"reject_reason": "auto_bind_failed",
+			})
+			return
+		}
+	}
+	attached := make([]string, 0, len(req.DaemonIDs))
+	kicked := make([]string, 0, len(req.DaemonIDs))
+	for _, raw := range req.DaemonIDs {
+		daemonID := placement.DaemonID(strings.TrimSpace(raw))
+		if daemonID == "" {
+			continue
+		}
+		row, err := a.devicebus.GetDaemonByID(ctx, daemonID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error(), "reject_reason": "daemon_unknown", "daemon_id": string(daemonID)})
+			return
+		}
+		if row.OwnerID != u.ID {
+			c.JSON(http.StatusForbidden, gin.H{"error": "daemon not owned by caller", "daemon_id": string(daemonID)})
+			return
+		}
+		if err := a.devicebus.AttachDaemonToChannel(ctx, daemonID, chID); err != nil {
+			httperr.Internal(c, "gateway.attach_daemon", err)
+			return
+		}
+		attached = append(attached, string(daemonID))
+		// If the daemon ws is live, kick it so its reconnect path re-
+		// reads attachments and re-sends ready with the new channel
+		// included. Capability_set isn't persisted server-side so we
+		// can't synthesize the UpdateMembers frame from cache —
+		// reconnect is the cheapest "tell me your full state again"
+		// signal. ~1-2s blip on the client side. Offline daemons
+		// pick up the new attachment on their next ws connect.
+		if a.devicebus.KickDaemonForReload(daemonID) {
+			kicked = append(kicked, string(daemonID))
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"attached": attached, "kicked": kicked})
+}
+
+// handleDetachDaemon removes one (daemon, channel) attachment + clears
+// per-channel active actors + notifies the cloud daemon facade for that
+// channel to retire its facade install. Daemon itself stays online.
+func (a *App) handleDetachDaemon(c *gin.Context) {
+	u := identity.UserFrom(c)
+	ctx := c.Request.Context()
+	chID := channel.ID(c.Param("chID"))
+	daemonID := placement.DaemonID(c.Param("daemonID"))
+	if _, _, err := a.catalog.GetChannel(ctx, string(chID), u.ID); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+	row, err := a.devicebus.GetDaemonByID(ctx, daemonID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error(), "reject_reason": "daemon_unknown"})
+		return
+	}
+	if row.OwnerID != u.ID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "daemon not owned by caller"})
+		return
+	}
+	actors, _ := a.devicebus.ListDaemonActiveActorIDs(ctx, daemonID)
+	if err := a.devicebus.DetachDaemonFromChannel(ctx, daemonID, chID); err != nil {
+		httperr.Internal(c, "gateway.detach_daemon", err)
+		return
+	}
+	if len(actors) > 0 {
+		clone := row
+		clone.ChannelID = chID
+		_ = a.NotifyProxyDaemonOffline(ctx, clone, actors)
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "detached"})
+}
+
+// handleRevokeDaemon revokes a daemon outright: deletes the row + all
+// attachments (cascade via FK), notifies offline on every attached
+// channel, and closes the ws if open.
+func (a *App) handleRevokeDaemon(c *gin.Context) {
+	u := identity.UserFrom(c)
+	ctx := c.Request.Context()
+	daemonID := placement.DaemonID(c.Param("daemonID"))
+	row, err := a.devicebus.GetDaemonByID(ctx, daemonID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error(), "reject_reason": "daemon_unknown"})
+		return
+	}
+	if row.OwnerID != u.ID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "daemon not owned by caller"})
+		return
+	}
+	if err := a.devicebus.DeleteDaemon(ctx, daemonID); err != nil {
+		httperr.Internal(c, "gateway.revoke_daemon", err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "revoked"})
 }
 
 // autoBindChannel picks an available cloud daemon and runs the same bind

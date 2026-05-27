@@ -27,13 +27,13 @@ function actorTypes(actor) {
   return rows.map((t) => t.type || t.Type).filter(Boolean);
 }
 
-export default function DeviceCard({ daemon, actors, onRevoke, revoking }) {
+export default function DeviceCard({ daemon, actors, onToggleAttach, onRevoke, revoking, attached = true }) {
   const online = daemon.status === 'online';
   const revoked = Boolean(daemon.revoked);
   const statusLabel = revoked ? '已撤销' : (online ? 'online' : 'offline');
 
   return (
-    <article className={`device-card ${online ? 'online' : 'offline'} ${revoked ? 'revoked' : ''}`}>
+    <article className={`device-card ${online ? 'online' : 'offline'} ${attached ? 'attached' : 'detached'} ${revoked ? 'revoked' : ''}`}>
       <header className="device-card-head">
         <div className={`device-status-dot ${online ? 'online' : 'offline'}`} />
         <div className="device-title-block">
@@ -91,11 +91,19 @@ export default function DeviceCard({ daemon, actors, onRevoke, revoking }) {
       <footer className="device-card-actions">
         <button
           type="button"
+          className={attached ? 'device-secondary-btn' : 'device-primary-btn'}
+          onClick={() => onToggleAttach?.(daemon)}
+          disabled={revoking || revoked}
+        >
+          {attached ? '从本 channel 解除' : '附加到本 channel'}
+        </button>
+        <button
+          type="button"
           className="device-danger-btn"
           onClick={() => onRevoke?.(daemon)}
           disabled={revoking || revoked}
         >
-          {revoking ? '撤销中...' : (revoked ? '已撤销' : '撤销')}
+          {revoking ? '处理中...' : (revoked ? '已撤销' : '彻底删除')}
         </button>
       </footer>
     </article>

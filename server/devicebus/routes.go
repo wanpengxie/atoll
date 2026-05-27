@@ -2,13 +2,11 @@ package devicebus
 
 import (
 	"context"
-	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
 	"github.com/wanpengxie/ActOS/server/httperr"
 	"github.com/wanpengxie/ActOS/server/identity"
@@ -20,12 +18,18 @@ import (
 const DeviceJSONBodyLimit = 64 << 10
 
 func (s *Service) RegisterRoutes(g *gin.RouterGroup) {
-	// POST /channels/:chID/daemons is owned by gateway (handleCreateDaemonWithAutoBind)
-	// so the create call can lazy-bind the channel to a cloud daemon
-	// before the proxy daemon row is issued. devicebus.Service still
-	// exposes CreateDaemon for that gateway handler to call.
+	// POST /channels/:chID/daemons (composite create + attach) is owned
+	// by gateway (handleCreateDaemonWithAutoBind) so it can auto-bind
+	// the channel before the daemon row is issued. POST/.../attach +
+	// DELETE/.../attach/:id (detach existing) are owned by gateway too
+	// so attach can drive on-the-fly facade install when the daemon is
+	// already connected. Devicebus retains the data-layer methods.
 	g.GET("/channels/:chID/daemons", s.handleListDaemons)
-	g.DELETE("/channels/:chID/daemons/:daemonID", s.handleDeleteDaemon)
+	// Owner-scoped daemon catalog. Lives under /api/daemons (no :chID).
+	// Listing here lets the "+ 新建设备" + "勾选已有 daemon" UI render a
+	// single picker across all the owner's daemons regardless of which
+	// channels they're attached to.
+	g.GET("/daemons", s.handleListOwnerDaemons)
 }
 
 // DaemonResp is the JSON shape returned by daemons endpoints. Exported so
@@ -83,22 +87,34 @@ func (s *Service) handleListDaemons(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"daemons": out})
 }
 
-func (s *Service) handleDeleteDaemon(c *gin.Context) {
+// handleListOwnerDaemons returns every daemon owned by the caller plus
+// the list of channel ids currently attached to each. Drives the per-
+// channel attach UI: the dialog renders one checkbox per daemon with
+// `attached_channels` pre-filled so the user sees current state.
+func (s *Service) handleListOwnerDaemons(c *gin.Context) {
 	u := identity.UserFrom(c)
-	chID := channel.ID(c.Param("chID"))
-	if err := s.authorizeChannel(c.Request.Context(), string(chID), u.ID); err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+	rows, err := s.ListDaemonsByOwner(c.Request.Context(), u.ID)
+	if err != nil {
+		httperr.Internal(c, "devicebus.list_owner_daemons", err)
 		return
 	}
-	if err := s.DeleteDaemon(c.Request.Context(), chID, placement.DaemonID(c.Param("daemonID"))); err != nil {
-		if errors.Is(err, ErrDaemonNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error(), "reject_reason": "daemon_unknown"})
-			return
+	type ownerDaemonResp struct {
+		DaemonResp
+		AttachedChannels []string `json:"attached_channels"`
+	}
+	out := make([]ownerDaemonResp, 0, len(rows))
+	for _, row := range rows {
+		attached, _ := s.ListDaemonAttachments(c.Request.Context(), row.ID)
+		ids := make([]string, 0, len(attached))
+		for _, ch := range attached {
+			ids = append(ids, string(ch))
 		}
-		httperr.Internal(c, "devicebus.delete_daemon", err)
-		return
+		out = append(out, ownerDaemonResp{
+			DaemonResp:       DaemonResponse(row, ""),
+			AttachedChannels: ids,
+		})
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+	c.JSON(http.StatusOK, gin.H{"daemons": out})
 }
 
 func (s *Service) authorizeChannel(ctx context.Context, channelID, userID string) error {
