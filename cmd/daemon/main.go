@@ -33,7 +33,6 @@ import (
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/pkg/logger"
 	"github.com/wanpengxie/ActOS/pkg/metrics"
 	"github.com/wanpengxie/ActOS/pkg/observability"
@@ -131,15 +130,21 @@ func main() {
 			Msg("legacy device route mirror migration failed")
 		os.Exit(1)
 	}
-	xhsFactory := DeviceXHSFactory(devicexhs.Config{})
-	if *useScaffoldXHS {
-		xhsFactory = XHSScaffoldFactory(xhs.Config{})
-	}
+	// T4 retires daemon-side xhs adapter (mirroring T3 kimibridge retirement).
+	// xhs business types are now serviced by the proxy facade installed
+	// dynamically via SetProxyActorCallback when the user proxy daemon
+	// connects with `tool:xhs` in its ready frame. We keep the xhs-creator
+	// channel template's WorkdirSubdirs + DomainPrompt (business knowledge)
+	// but drop the AdapterModuleFactory wiring so framework's "xhs" Name
+	// slot stays open for the proxy facade.
+	_ = devicexhs.Config{}
+	_ = xhs.Config{}
+	_ = *useScaffoldXHS
 	adapterCredentialSecret := []byte(*humanSecret)
 	if len(adapterCredentialSecret) == 0 && *mockBus {
 		adapterCredentialSecret = []byte(devAdapterCredentialSecret)
 	}
-	adapterBootHook, err := wireAdapterFrameworkWithCredentialSecret(adapterCredentialSecret, xhsFactory)
+	adapterBootHook, err := wireAdapterFrameworkWithCredentialSecret(adapterCredentialSecret)
 	if err != nil {
 		lg.Z().Error().Err(err).Str("event", "daemon.fail_fast").
 			Msg("adapter credential encryption key is required")
@@ -303,13 +308,17 @@ func buildChannelTemplates(useScaffoldXHS bool) map[string]runtime.ChannelTempla
 	out[""] = generic
 	out["group"] = generic
 
+	// T4: drop daemon-side xhs adapter actor seed. xhs is now hosted in
+	// the user-machine proxy daemon and the cloud daemon facade installs
+	// itself dynamically when proxy daemon ready frame arrives, seeding
+	// the `tool:xhs` actor row at that point. Keeping the template's
+	// WorkdirSubdirs + DomainPrompt (xhs business knowledge) ensures
+	// xhs-creator channels still ship the right workdir + prompt without
+	// the conflicting framework adapter Name="xhs" pre-install.
+	_ = useScaffoldXHS
 	tpl := xhs.XHSCreatorTemplate()
-	adapterSeeds := []actorreg.Record{DeviceXHSActorSeed()}
-	if useScaffoldXHS {
-		adapterSeeds = tpl.AdapterActorSeeds
-	}
 	out[tpl.ChannelType] = runtime.ChannelTemplate{
-		AdapterActorSeeds:          adapterSeeds,
+		AdapterActorSeeds:          nil, // proxy facade seeds tool:xhs dynamically
 		WorkdirSubdirs:             tpl.WorkdirSubdirs,
 		DomainPrompt:               tpl.DomainPrompt,
 		HumanCallerDefaultAudience: defaultHumanAudience,

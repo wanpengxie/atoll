@@ -23,25 +23,25 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
-func TestBuildChannelTemplates_DefaultsToDeviceXHSBinding(t *testing.T) {
+func TestBuildChannelTemplates_XHSCreatorHasNoAdapterSeeds(t *testing.T) {
 	t.Parallel()
 
-	prod := buildChannelTemplates(false)[XHSCreatorChannelType]
-	// xhs-creator channel hosts the xhs adapter directly. Generic browser
-	// automation is hosted by the external proxy daemon, not by cmd/daemon.
-	if len(prod.AdapterActorSeeds) != 1 {
-		t.Fatalf("prod seeds len=%d want 1 (xhs only)", len(prod.AdapterActorSeeds))
-	}
-	if prod.AdapterActorSeeds[0].Binding != actor.BindingRuntimeInboundViaRelay {
-		t.Fatalf("prod xhs binding=%q want %q", prod.AdapterActorSeeds[0].Binding, actor.BindingRuntimeInboundViaRelay)
-	}
-
-	scaffold := buildChannelTemplates(true)[XHSCreatorChannelType]
-	if len(scaffold.AdapterActorSeeds) != 1 {
-		t.Fatalf("scaffold seeds len=%d want 1 (xhs scaffold only)", len(scaffold.AdapterActorSeeds))
-	}
-	if scaffold.AdapterActorSeeds[0].Binding != actor.BindingEmbedded {
-		t.Fatalf("scaffold xhs binding=%q want %q", scaffold.AdapterActorSeeds[0].Binding, actor.BindingEmbedded)
+	// T4 retired the daemon-side xhs adapter; proxy facade now installs
+	// itself dynamically when the user proxy daemon arrives. Template
+	// keeps WorkdirSubdirs + DomainPrompt (xhs business knowledge) but
+	// no longer pre-seeds an adapter actor row (would conflict with the
+	// facade's `tool:xhs` install).
+	for _, scaffold := range []bool{false, true} {
+		tpl := buildChannelTemplates(scaffold)[XHSCreatorChannelType]
+		if len(tpl.AdapterActorSeeds) != 0 {
+			t.Fatalf("scaffold=%v: AdapterActorSeeds len=%d want 0", scaffold, len(tpl.AdapterActorSeeds))
+		}
+		if len(tpl.WorkdirSubdirs) == 0 {
+			t.Fatalf("scaffold=%v: WorkdirSubdirs empty; expected xhs subdirs", scaffold)
+		}
+		if tpl.DomainPrompt == "" {
+			t.Fatalf("scaffold=%v: DomainPrompt empty", scaffold)
+		}
 	}
 }
 
