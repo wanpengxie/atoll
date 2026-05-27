@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { ChannelSocket } from '../ws.js';
 import { aggregateEnvelopes } from '../aggregation.js';
-import DeviceBind from './DeviceBind.jsx';
 
 export default function Chat({ channelID, channel, me }) {
   const [messages, setMessages] = useState([]);
@@ -87,7 +86,6 @@ export default function Chat({ channelID, channel, me }) {
       <header className="chat-header">
         <h2>{(channel && (channel.name || channel.Name)) || '…'}</h2>
         <span className="muted">{channel?.type || channel?.Type || ''}</span>
-        <DeviceBind channelID={channelID} me={me} />
       </header>
 
       <ol className="messages" ref={listRef}>
