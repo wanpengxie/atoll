@@ -80,18 +80,18 @@ extension-zip:
 	@if [ ! -f adapters/device/xhs/extension/app/chrome-extension/package.json ]; then \
 	  echo "[skip] extension-zip: xhs extension package not present"; \
 	else \
-	  echo "[extension-zip] pnpm --filter coagent-xhs-extension zip"; \
+	  echo "[extension-zip] wxt build + manual zip (avoids chokidar inotify limit)"; \
 	  COAGENT_EXTENSION_KEY_FILE=$$(pwd)/.dev-secrets/extension-key.pub.b64 \
 	  COAGENT_WEB_DOMAIN=$${COAGENT_WEB_DOMAIN:-lightcone.onestudio.cc} \
-	    pnpm --filter coagent-xhs-extension zip; \
+	  CHOKIDAR_USEPOLLING=1 \
+	    pnpm --filter coagent-xhs-extension build; \
+	  ext_dist=adapters/device/xhs/extension/app/chrome-extension/dist; \
+	  out_zip=$$ext_dist/coagent-xhs-extension-1.1.0.zip; \
+	  rm -f "$$out_zip"; \
+	  (cd $$ext_dist/chrome-mv3 && zip -rq ../coagent-xhs-extension-1.1.0.zip .); \
 	  mkdir -p ui/public/downloads; \
-	  zip=$$(ls -t adapters/device/xhs/extension/app/chrome-extension/dist/*-chrome.zip adapters/device/xhs/extension/app/chrome-extension/dist/coagent-xhs-extension-*.zip 2>/dev/null | head -1); \
-	  if [ -z "$$zip" ]; then \
-	    echo "[extension-zip] no zip artifact found under app/chrome-extension/dist/" >&2; \
-	    exit 1; \
-	  fi; \
-	  cp "$$zip" ui/public/downloads/coagent-extension.zip; \
-	  echo "[extension-zip] $$zip -> ui/public/downloads/coagent-extension.zip"; \
+	  cp "$$out_zip" ui/public/downloads/coagent-extension.zip; \
+	  echo "[extension-zip] $$out_zip -> ui/public/downloads/coagent-extension.zip"; \
 	fi
 
 build-ext:
