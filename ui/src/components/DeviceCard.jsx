@@ -89,22 +89,26 @@ export default function DeviceCard({ daemon, actors, onToggleAttach, onRevoke, r
       </div>
 
       <footer className="device-card-actions">
-        <button
-          type="button"
-          className={attached ? 'device-secondary-btn' : 'device-primary-btn'}
-          onClick={() => onToggleAttach?.(daemon)}
-          disabled={revoking || revoked}
-        >
-          {attached ? '从本 channel 解除' : '附加到本 channel'}
-        </button>
-        <button
-          type="button"
-          className="device-danger-btn"
-          onClick={() => onRevoke?.(daemon)}
-          disabled={revoking || revoked}
-        >
-          {revoking ? '处理中...' : (revoked ? '已撤销' : '彻底删除')}
-        </button>
+        {onToggleAttach && (
+          <button
+            type="button"
+            className={attached ? 'device-secondary-btn' : 'device-primary-btn'}
+            onClick={() => onToggleAttach?.(daemon)}
+            disabled={revoking || revoked}
+          >
+            {attached ? '从本 channel 解除' : '附加到本 channel'}
+          </button>
+        )}
+        {onRevoke && (
+          <button
+            type="button"
+            className="device-danger-btn"
+            onClick={() => onRevoke?.(daemon)}
+            disabled={revoking || revoked}
+          >
+            {revoking ? '处理中...' : (revoked ? '已撤销' : '彻底删除')}
+          </button>
+        )}
       </footer>
     </article>
   );

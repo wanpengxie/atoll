@@ -100,6 +100,9 @@ export const api = {
   // Owner-scoped list (all of caller's daemons, attached or not). Used
   // by the attach UI so the picker covers every device the owner has.
   listOwnerDaemons: ()                          => request('GET',  `/api/daemons`).then((r) => ({ daemons: r?.daemons || [] })),
+  // Create a new owner daemon (no channel attach). Channel attach is
+  // a separate user action in the per-channel device tab.
+  createOwnerDaemon:(input)                     => request('POST', `/api/daemons`, input),
   // Revoke a daemon outright (deletes the row + cascade attachments).
   revokeDaemon:     (daemonID)                  => request('DELETE', `/api/daemons/${daemonID}`),
 

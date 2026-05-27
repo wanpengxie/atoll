@@ -850,8 +850,9 @@ func buildEngine(a *App) *gin.Engine {
 	// scoped to that channel and notifies the cloud daemon facade.
 	auth.POST("/channels/:chID/daemons/attach", httperr.MaxBodyBytes(devicebus.DeviceJSONBodyLimit), a.handleAttachDaemon)
 	auth.DELETE("/channels/:chID/daemons/:daemonID/attach", a.handleDetachDaemon)
-	// Owner-scoped revoke. Removes the daemon row + all attachments.
-	// Lives under /api/daemons (no :chID) because it spans channels.
+	// Owner-scoped daemon CRUD. Lives under /api/daemons (no :chID)
+	// because daemons span channels.
+	auth.POST("/daemons", httperr.MaxBodyBytes(devicebus.DeviceJSONBodyLimit), a.handleCreateOwnerDaemon)
 	auth.DELETE("/daemons/:daemonID", a.handleRevokeDaemon)
 
 	// Channel-level orchestration: provisioning + message write.
@@ -1176,6 +1177,35 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 		_ = a.NotifyProxyDaemonOffline(ctx, clone, actors)
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "detached"})
+}
+
+// handleCreateOwnerDaemon issues a new daemon row scoped to the caller.
+// No channel context — the device is "installed" but not yet attached
+// to any channel. Channel attach is a separate user action in the
+// per-channel device tab.
+func (a *App) handleCreateOwnerDaemon(c *gin.Context) {
+	var req createDaemonReqV2
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
+		return
+	}
+	u := identity.UserFrom(c)
+	row, apiKey, err := a.devicebus.CreateDaemon(c.Request.Context(), devicebus.CreateDaemonInput{
+		OwnerID: u.ID,
+		Name:    name,
+	})
+	if err != nil {
+		httperr.Internal(c, "gateway.create_owner_daemon", err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
+	c.JSON(http.StatusCreated, devicebus.DaemonResponse(row, apiKey))
 }
 
 // handleRevokeDaemon revokes a daemon outright: deletes the row + all

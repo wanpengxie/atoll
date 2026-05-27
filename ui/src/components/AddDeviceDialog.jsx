@@ -42,7 +42,7 @@ async function copyText(text) {
   document.body.removeChild(el);
 }
 
-export default function AddDeviceDialog({ channelID, open, onClose, onCreated }) {
+export default function AddDeviceDialog({ channelID = null, open, onClose, onCreated }) {
   const [name, setName] = useState('');
   const [created, setCreated] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -67,11 +67,16 @@ export default function AddDeviceDialog({ channelID, open, onClose, onCreated })
   async function submit(e) {
     e.preventDefault();
     const trimmed = name.trim();
-    if (!trimmed || !channelID) return;
+    if (!trimmed) return;
     setBusy(true);
     setError('');
     try {
-      const row = await api.createDaemon(channelID, { name: trimmed });
+      // channelID set → composite create + attach to this channel.
+      // channelID null → owner-scoped create only (called from the
+      // standalone 我的设备 page; attach happens later in channel UI).
+      const row = channelID
+        ? await api.createDaemon(channelID, { name: trimmed })
+        : await api.createOwnerDaemon({ name: trimmed });
       setCreated(row);
       setCopied(false);
       onCreated?.(row);

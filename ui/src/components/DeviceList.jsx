@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
-import AddDeviceDialog from './AddDeviceDialog.jsx';
 import DeviceCard from './DeviceCard.jsx';
 import ExtensionPanel from './ExtensionPanel.jsx';
 
@@ -56,7 +55,6 @@ export default function DeviceList({ channelID, channel }) {
   const [refreshing, setRefreshing] = useState(false);
   const [busyDaemonID, setBusyDaemonID] = useState('');
   const [error, setError] = useState('');
-  const [addOpen, setAddOpen] = useState(false);
   const [lastLoadedAt, setLastLoadedAt] = useState(0);
 
   const refresh = useCallback(async (mode = 'refresh') => {
@@ -124,32 +122,6 @@ export default function DeviceList({ channelID, channel }) {
     }
   }
 
-  async function handleRevoke(daemon) {
-    if (!daemon?.id) return;
-    if (!window.confirm(`彻底删除设备「${daemon.name || daemon.id}」？\n所有 channel 的 attach 关系会一并清除。`)) return;
-    setBusyDaemonID(daemon.id);
-    setError('');
-    try {
-      await api.revokeDaemon(daemon.id);
-      await refresh('refresh');
-    } catch (err) {
-      setError(err.message || String(err));
-    } finally {
-      setBusyDaemonID('');
-    }
-  }
-
-  function handleCreated(row) {
-    // Composite create response already attaches to current channel.
-    const daemon = normalizeDaemon(row);
-    setDaemons((prev) => {
-      const without = prev.filter((d) => d.id !== daemon.id);
-      const merged = { ...daemon, attached_channels: [channelID, ...(daemon.attached_channels || []).filter((c) => c !== channelID)] };
-      return [merged, ...without];
-    });
-    refresh('refresh');
-  }
-
   if (!channelID) {
     return (
       <section className="device-page">
@@ -165,16 +137,13 @@ export default function DeviceList({ channelID, channel }) {
     <section className="device-page">
       <header className="device-page-header">
         <div>
-          <h2>我的设备</h2>
-          <span>{channel?.name || channel?.Name || channelID}</span>
+          <h2>本 channel 的设备</h2>
+          <span>{channel?.name || channel?.Name || channelID} · 勾选已有设备 attach；新建设备到左侧「我的设备」</span>
         </div>
         <div className="device-toolbar">
           {lastLoadedAt > 0 && <span className="device-refresh-time">{formatRefreshTime(lastLoadedAt)}</span>}
           <button type="button" className="device-secondary-btn" onClick={() => refresh('refresh')} disabled={refreshing || loading}>
             {refreshing ? '刷新中...' : '刷新'}
-          </button>
-          <button type="button" className="device-primary-btn" onClick={() => setAddOpen(true)}>
-            + 新建设备
           </button>
         </div>
       </header>
@@ -187,9 +156,8 @@ export default function DeviceList({ channelID, channel }) {
         <div className="device-empty">载入中...</div>
       ) : daemons.length === 0 ? (
         <div className="device-empty">
-          <strong>还没有设备</strong>
-          <p className="device-empty-hint">点击「+ 新建设备」在自己机器上装一个 proxy daemon</p>
-          <button type="button" className="device-primary-btn" onClick={() => setAddOpen(true)}>+ 新建设备</button>
+          <strong>还没有任何设备</strong>
+          <p className="device-empty-hint">先在左侧「我的设备」页面新建一台 proxy daemon，再回到这里勾选 attach</p>
         </div>
       ) : (
         <>
@@ -205,7 +173,6 @@ export default function DeviceList({ channelID, channel }) {
                   actors={actorsByDaemon.get(daemon.id) || []}
                   attached
                   onToggleAttach={() => handleToggleAttach(daemon)}
-                  onRevoke={() => handleRevoke(daemon)}
                   revoking={busyDaemonID === daemon.id}
                 />
               ))}
@@ -223,7 +190,6 @@ export default function DeviceList({ channelID, channel }) {
                     actors={[]}
                     attached={false}
                     onToggleAttach={() => handleToggleAttach(daemon)}
-                    onRevoke={() => handleRevoke(daemon)}
                     revoking={busyDaemonID === daemon.id}
                   />
                 ))}
@@ -233,12 +199,6 @@ export default function DeviceList({ channelID, channel }) {
         </>
       )}
 
-      <AddDeviceDialog
-        channelID={channelID}
-        open={addOpen}
-        onClose={() => setAddOpen(false)}
-        onCreated={handleCreated}
-      />
     </section>
   );
 }

@@ -4,6 +4,7 @@ import Auth from './components/Auth.jsx';
 import Sidebar from './components/Sidebar.jsx';
 import Chat from './components/Chat.jsx';
 import DeviceList from './components/DeviceList.jsx';
+import MyDevicesPage from './components/MyDevicesPage.jsx';
 
 export default function App() {
   const [me, setMe] = useState(null);
@@ -13,6 +14,9 @@ export default function App() {
   const [channels, setChannels] = useState([]);
   const [activeChannelID, setActiveChannelID] = useState(null);
   const [activeChannelTab, setActiveChannelTab] = useState('chat');
+  // activeView lets a sidebar entry like "我的设备" supersede the
+  // channel area. null/empty → channel mode (Chat / DeviceList).
+  const [activeView, setActiveView] = useState(null);
 
   // Boot: try to restore session via cookie.
   useEffect(() => {
@@ -110,8 +114,10 @@ export default function App() {
           activeWorkspaceID={activeWorkspaceID}
           channels={channels}
           activeChannelID={activeChannelID}
-          onSelectWorkspace={setActiveWorkspaceID}
-          onSelectChannel={setActiveChannelID}
+          activeView={activeView}
+          onSelectWorkspace={(id) => { setActiveView(null); setActiveWorkspaceID(id); }}
+          onSelectChannel={(id) => { setActiveView(null); setActiveChannelID(id); }}
+          onSelectView={(v) => { setActiveView(v); }}
           onCreateWorkspace={async (name) => {
             await api.createWorkspace(name);
             await refreshWorkspaces();
@@ -133,32 +139,38 @@ export default function App() {
           onLogout={handleLogout}
         />
         <main className="channel-main">
-          {activeChannelID && (
-            <nav className="channel-tabs" aria-label="channel views">
-              <button
-                type="button"
-                className={activeChannelTab === 'chat' ? 'active' : ''}
-                onClick={() => setActiveChannelTab('chat')}
-              >
-                聊天
-              </button>
-              <button
-                type="button"
-                className={activeChannelTab === 'devices' ? 'active' : ''}
-                onClick={() => setActiveChannelTab('devices')}
-              >
-                我的设备
-              </button>
-            </nav>
-          )}
-          {activeChannelTab === 'devices' ? (
-            <DeviceList channelID={activeChannelID} channel={activeChannel} me={me} />
+          {activeView === 'my-devices' ? (
+            <MyDevicesPage channelsByID={Object.fromEntries(channels.map((c) => [c.id || c.ID, c]))} />
           ) : (
-            <Chat
-              channelID={activeChannelID}
-              channel={activeChannel}
-              me={me}
-            />
+            <>
+              {activeChannelID && (
+                <nav className="channel-tabs" aria-label="channel views">
+                  <button
+                    type="button"
+                    className={activeChannelTab === 'chat' ? 'active' : ''}
+                    onClick={() => setActiveChannelTab('chat')}
+                  >
+                    聊天
+                  </button>
+                  <button
+                    type="button"
+                    className={activeChannelTab === 'devices' ? 'active' : ''}
+                    onClick={() => setActiveChannelTab('devices')}
+                  >
+                    设备
+                  </button>
+                </nav>
+              )}
+              {activeChannelTab === 'devices' ? (
+                <DeviceList channelID={activeChannelID} channel={activeChannel} me={me} />
+              ) : (
+                <Chat
+                  channelID={activeChannelID}
+                  channel={activeChannel}
+                  me={me}
+                />
+              )}
+            </>
           )}
         </main>
       </div>

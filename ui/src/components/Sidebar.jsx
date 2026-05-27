@@ -10,8 +10,10 @@ export default function Sidebar({
   activeWorkspaceID,
   channels,
   activeChannelID,
+  activeView,
   onSelectWorkspace,
   onSelectChannel,
+  onSelectView,
   onCreateWorkspace,
   onCreateChannel,
   onLogout,
@@ -26,6 +28,18 @@ export default function Sidebar({
       </div>
 
       <div className="sidebar-body">
+        <div className="sidebar-section">
+          <div className="sidebar-label">全局</div>
+          <ul className="sidebar-list">
+            <li
+              className={`sidebar-list-item ${activeView === 'my-devices' ? 'active' : ''}`}
+              onClick={() => onSelectView?.('my-devices')}
+            >
+              <span>🖥 我的设备</span>
+            </li>
+          </ul>
+        </div>
+
         <SidebarSection
           label="Workspaces"
           createPlaceholder="workspace 名称"
