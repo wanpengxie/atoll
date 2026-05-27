@@ -125,6 +125,49 @@ function disconnectAll(): void {
 	coagentServerDeviceClient.disconnect();
 }
 
+/**
+ * connectToLocalProxy — single source of truth for "connect this
+ * extension to the local proxy daemon". Both the internal popup message
+ * handler and the external-bind action (called from the web UI) funnel
+ * through here so the user gets identical behaviour regardless of which
+ * surface they triggered it from.
+ *
+ * Steps:
+ *   1. Normalize endpoint (fall back to default ws://127.0.0.1:10387).
+ *   2. Persist a proxy-mode ConnectionConfig (clears legacy fields so
+ *      selectTransport() picks 'proxy' deterministically).
+ *   3. Drop the current transport client and re-apply with the new cfg.
+ *   4. Trigger an explicit connect() so a fresh WS attempt fires
+ *      immediately (autoReconnect alone would race the caller).
+ */
+async function connectToLocalProxy(rawEndpoint: string | undefined): Promise<{
+	connected: boolean;
+	endpoint: string;
+	error?: string;
+}> {
+	const endpoint = (rawEndpoint ?? '').trim() || getDefaultProxyEndpoint();
+	connectionConfig = await saveConnectionConfig({
+		connectionMode: 'proxy',
+		proxyEndpoint: endpoint,
+		deviceActorId: DEFAULT_PROXY_ACTOR_ID,
+		channelId: '',
+		autoReconnect: true,
+		serverUrl: '',
+		wsUrl: '',
+		apiKey: '',
+		daemonHttpBase: '',
+		httpBase: '',
+	});
+	disconnectAll();
+	applyClients(connectionConfig);
+	const result = await activeDeviceClient().connect();
+	return {
+		connected: Boolean(result.success),
+		endpoint,
+		error: result.error,
+	};
+}
+
 export default defineBackground(() => {
   console.warn('[Boot] service worker started', {
     at: Date.now(),
@@ -201,25 +244,14 @@ export default defineBackground(() => {
             break;
           }
 				case 'CONNECT_PROXY_DAEMON': {
-					const endpoint = String(request.payload?.proxyEndpoint ?? getDefaultProxyEndpoint()).trim();
-					connectionConfig = await saveConnectionConfig({
-						connectionMode: 'proxy',
-						proxyEndpoint: endpoint || getDefaultProxyEndpoint(),
-						deviceActorId: DEFAULT_PROXY_ACTOR_ID,
-						channelId: '',
-						autoReconnect: true,
-						serverUrl: '',
-						wsUrl: '',
-						apiKey: '',
-						daemonHttpBase: '',
-						httpBase: '',
+					const result = await connectToLocalProxy(request.payload?.proxyEndpoint);
+					sendResponse({
+						success: result.connected,
+						error: result.error,
+						config: connectionConfig,
 					});
-					disconnectAll();
-					applyClients(connectionConfig);
-            const result = await activeDeviceClient().connect();
-            sendResponse({ ...result, config: connectionConfig });
-            break;
-          }
+					break;
+				}
           case 'DISCONNECT_DEVICE': {
             disconnectAll();
             sendResponse({ success: true });
@@ -294,6 +326,8 @@ export default defineBackground(() => {
 	    disconnectAll: () => disconnectAll(),
 	    extensionVersion: chrome.runtime.getManifest().version ?? '0.0.0',
 	    allowedOrigins: runtimeAllowedOrigins,
+	    getConnectionStatus: () => getStoredConnectionStatus(),
+	    connectProxy: (endpoint) => connectToLocalProxy(endpoint),
     generateDeviceID: () => {
       // crypto.randomUUID is available in MV3 service workers (Chrome 92+).
       const c: any = (globalThis as any).crypto;

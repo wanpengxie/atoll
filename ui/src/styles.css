@@ -2486,3 +2486,94 @@ body::after {
     width: 100%;
   }
 }
+
+/* ─── ExtensionPanel ───────────────────────────────────────────────── */
+.ext-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.ext-panel-connected {
+  border-color: var(--online);
+  background: color-mix(in srgb, var(--online) 8%, var(--surface));
+}
+.ext-panel-disconnected {
+  border-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+}
+.ext-panel-not-installed {
+  border-color: var(--border-2);
+  background: var(--surface-2);
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.ext-panel-probing {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.ext-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ext-panel-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+.ext-panel-muted { color: var(--text-muted); font-size: 13px; }
+.ext-panel-link {
+  color: var(--accent);
+  text-decoration: underline;
+  font-size: 13px;
+}
+.ext-status-pill {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--text-muted);
+}
+.ext-status-pill.on  { background: color-mix(in srgb, var(--online) 22%, transparent); color: var(--online); }
+.ext-status-pill.off { background: color-mix(in srgb, var(--warning) 22%, transparent); color: var(--text); }
+.ext-panel-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.ext-panel-meta code {
+  background: var(--surface-3);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.ext-panel-error {
+  color: var(--danger);
+  font-size: 12px;
+}
+.ext-panel-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.ext-panel-input {
+  flex: 1;
+  min-width: 220px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  background: var(--surface);
+  color: var(--text);
+}

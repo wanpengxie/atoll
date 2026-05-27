@@ -50,6 +50,31 @@ function makeDeps(
   };
   const disconnectAll = vi.fn();
   const uuids = (opts.uuidSequence ?? ['uuid-1', 'uuid-2']).slice();
+  const status = {
+    connected: false as boolean,
+    serverUrl: '',
+    reconnecting: false,
+    lastError: '' as string,
+    lastUpdated: 0,
+  };
+  const connectProxy = vi.fn(async (endpoint?: string) => {
+    const ep = (endpoint ?? '').trim() || 'ws://127.0.0.1:10387';
+    state.saves.push({
+      connectionMode: 'proxy',
+      proxyEndpoint: ep,
+      autoReconnect: true,
+    });
+    state.config = {
+      ...state.config,
+      connectionMode: 'proxy',
+      proxyEndpoint: ep,
+      autoReconnect: true,
+    };
+    status.connected = true;
+    status.lastError = '';
+    status.lastUpdated = 1;
+    return { connected: true, endpoint: ep };
+  });
   const deps: ExternalBindDeps = {
     getConfig: async () => state.config,
     saveConfig: async (patch) => {
@@ -61,8 +86,10 @@ function makeDeps(
     extensionVersion: '1.2.3-test',
     allowedOrigins: ALLOWED,
     generateDeviceID: () => `xhs-${uuids.shift() ?? 'fallback'}`,
+    getConnectionStatus: async () => ({ ...status }),
+    connectProxy,
   };
-  return { deps, state, disconnectAll };
+  return { deps, state, disconnectAll, connectProxy, status };
 }
 
 function senderOk(origin = 'https://app.coagent.dev'): ExternalSender {
@@ -167,6 +194,7 @@ describe('getDeviceInfo', () => {
       expect(res.bound).toEqual({
         connection_mode: 'proxy',
         proxy_endpoint: 'ws://127.0.0.1:10387',
+        connected: false,
       });
     }
     expect(state.saves).toEqual([]);

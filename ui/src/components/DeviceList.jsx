@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
 import AddDeviceDialog from './AddDeviceDialog.jsx';
 import DeviceCard from './DeviceCard.jsx';
+import ExtensionPanel from './ExtensionPanel.jsx';
 
 const POLL_INTERVAL_MS = 10_000;
 
@@ -175,6 +176,8 @@ export default function DeviceList({ channelID, channel }) {
       </header>
 
       {error && <div className="device-error">{error}</div>}
+
+      <ExtensionPanel />
 
       {loading ? (
         <div className="device-empty">载入中...</div>

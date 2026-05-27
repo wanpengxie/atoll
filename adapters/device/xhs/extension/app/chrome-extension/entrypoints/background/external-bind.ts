@@ -13,9 +13,17 @@
 // Actions (web UI → extension):
 //   1. getDeviceInfo  → returns persistent device_id (auto-generates on
 //                       first call), extension version, and current
-//                       proxy daemon metadata if already configured.
+//                       proxy daemon metadata if already configured —
+//                       INCLUDING the realtime `connected` flag and
+//                       `last_error` from chrome.storage so the web UI
+//                       can show live status without the user opening
+//                       the popup.
 //   2. unbindDevice   → disconnects the active proxy WS and disables
 //                       auto-reconnect.
+//   3. connectProxy   → set proxy endpoint config + open WS to local
+//                       daemon; returns realtime connected snapshot.
+//                       This is what surfaces "connect / reconnect"
+//                       to the web UI so the popup is optional.
 //
 // Security:
 //   - Layer 1 (Chrome): manifest `externally_connectable.matches`. Only
@@ -29,7 +37,10 @@
 // reason?, ...}` so the web UI can branch on status without parsing
 // English error strings.
 
-import { type ConnectionConfig } from './connection-state';
+import {
+  type ConnectionConfig,
+  type ExtensionConnectionStatus,
+} from './connection-state';
 
 /** Allowed origin patterns (manifest-style match patterns). The
  *  background script reads these at install time from the build-time
@@ -40,29 +51,53 @@ export type OriginMatcher = string;
 /** Stable shape returned by every external action. `status` is the
  *  closed discriminator the web UI keys off. */
 export type ExternalBindResponse =
-  | { status: 'ok'; device_id: string; version: string; bound?: BoundSnapshot }
+  | {
+      status: 'ok';
+      device_id: string;
+      version: string;
+      bound?: BoundSnapshot;
+    }
+  | {
+      status: 'connected';
+      endpoint: string;
+      bound: BoundSnapshot;
+    }
   | { status: 'unbound' }
   | { status: 'failed'; reason: ExternalBindFailureReason; detail?: string };
 
 /** Current bind snapshot surfaced by getDeviceInfo so the UI can tell
  *  if this extension is already bound to a channel (e.g. show "rebind"
- *  instead of "bind"). Empty fields mean "not bound to that field". */
+ *  instead of "bind"). Empty fields mean "not bound to that field".
+ *  Realtime fields (`connected`, `last_error`) come from the persisted
+ *  `ExtensionConnectionStatus`; they tell the web UI whether the WS is
+ *  actually up right now, not just whether config was saved. */
 export interface BoundSnapshot {
   connection_mode?: ConnectionConfig['connectionMode'];
   proxy_endpoint?: string;
+  connected?: boolean;
+  reconnecting?: boolean;
+  last_error?: string;
+  last_updated?: number;
 }
 
 /** Closed set of failure reasons. Web UI maps these to friendly text. */
 export type ExternalBindFailureReason =
   | 'origin_not_allowed'
   | 'invalid_payload'
-  | 'internal_error';
+  | 'internal_error'
+  | 'connect_failed';
 
 /** Known external actions. Anything else surfaces as `invalid_payload`. */
-export type ExternalBindAction = 'getDeviceInfo' | 'unbindDevice';
+export type ExternalBindAction =
+  | 'getDeviceInfo'
+  | 'unbindDevice'
+  | 'connectProxy';
 
 export interface ExternalBindMessage {
   action: ExternalBindAction;
+  /** Optional proxyEndpoint override for connectProxy. Empty / missing
+   *  falls back to the extension's default (ws://127.0.0.1:10387). */
+  proxy_endpoint?: string;
 }
 
 /** Minimal `chrome.runtime.MessageSender` projection — keeps deps small
@@ -93,6 +128,14 @@ export interface ExternalBindDeps {
   /** UUID generator — tests inject a deterministic counter. Returns a
    *  string suitable as a device_id; production uses `crypto.randomUUID()`. */
   generateDeviceID: () => string;
+  /** Realtime WS status snapshot — drives the `connected` / `last_error`
+   *  fields surfaced through getDeviceInfo. Source of truth is the
+   *  persisted ExtensionConnectionStatus in chrome.storage.local. */
+  getConnectionStatus: () => Promise<ExtensionConnectionStatus>;
+  /** Apply a proxy-mode config (endpoint + auto-reconnect) and open the
+   *  WS. Returns the post-attempt connected flag so the web UI can
+   *  surface success / failure synchronously. */
+  connectProxy: (endpoint?: string) => Promise<{ connected: boolean; endpoint: string; error?: string }>;
 }
 
 /**
@@ -192,6 +235,8 @@ export async function handleExternalMessage(
       return handleGetDeviceInfo(deps);
     case 'unbindDevice':
       return handleUnbindDevice(deps);
+    case 'connectProxy':
+      return handleConnectProxy(deps, message.proxy_endpoint);
     default:
       return {
         status: 'failed',
@@ -209,9 +254,8 @@ async function handleGetDeviceInfo(deps: ExternalBindDeps): Promise<ExternalBind
       deviceID = deps.generateDeviceID();
       cfg = await deps.saveConfig({ deviceId: deviceID });
     }
-    const snapshot: BoundSnapshot = {};
-    if (cfg.connectionMode) snapshot.connection_mode = cfg.connectionMode;
-    if (cfg.proxyEndpoint) snapshot.proxy_endpoint = cfg.proxyEndpoint;
+    const status = await deps.getConnectionStatus();
+    const snapshot = buildSnapshot(cfg, status);
     return {
       status: 'ok',
       device_id: deviceID,
@@ -221,6 +265,46 @@ async function handleGetDeviceInfo(deps: ExternalBindDeps): Promise<ExternalBind
   } catch (err) {
     return errorResponse(err);
   }
+}
+
+async function handleConnectProxy(
+  deps: ExternalBindDeps,
+  endpoint: string | undefined,
+): Promise<ExternalBindResponse> {
+  try {
+    const result = await deps.connectProxy(endpoint);
+    const cfg = await deps.getConfig();
+    const status = await deps.getConnectionStatus();
+    const snapshot = buildSnapshot(cfg, status);
+    if (!result.connected) {
+      return {
+        status: 'failed',
+        reason: 'connect_failed',
+        detail: result.error || 'WS did not reach connected state',
+      };
+    }
+    return {
+      status: 'connected',
+      endpoint: result.endpoint,
+      bound: snapshot,
+    };
+  } catch (err) {
+    return errorResponse(err);
+  }
+}
+
+function buildSnapshot(
+  cfg: ConnectionConfig,
+  status: ExtensionConnectionStatus,
+): BoundSnapshot {
+  const snapshot: BoundSnapshot = {};
+  if (cfg.connectionMode) snapshot.connection_mode = cfg.connectionMode;
+  if (cfg.proxyEndpoint) snapshot.proxy_endpoint = cfg.proxyEndpoint;
+  snapshot.connected = Boolean(status.connected);
+  if (status.reconnecting) snapshot.reconnecting = true;
+  if (status.lastError) snapshot.last_error = status.lastError;
+  if (status.lastUpdated) snapshot.last_updated = status.lastUpdated;
+  return snapshot;
 }
 
 async function handleUnbindDevice(deps: ExternalBindDeps): Promise<ExternalBindResponse> {
