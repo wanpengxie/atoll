@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
+	"log"
 	"strings"
 	"time"
 
@@ -20,36 +18,18 @@ import (
 
 type Config struct {
 	ActorID        actor.ActorID `json:"actor_id,omitempty"`
-	BaseURL        string        `json:"base_url,omitempty"`
 	TimeoutMs      int64         `json:"timeout_ms,omitempty"`
 	DefaultSession string        `json:"default_session,omitempty"`
 }
 
 type Module struct {
-	cfg        Config
-	httpClient *http.Client
-	baseURL    *url.URL
-}
+	cfg    Config
+	server *Server
 
-type CommandResponse struct {
-	OK    *bool           `json:"ok,omitempty"`
-	Data  json.RawMessage `json:"data,omitempty"`
-	Error *CommandError   `json:"error,omitempty"`
-}
-
-type CommandError struct {
-	Code    string `json:"code,omitempty"`
-	Message string `json:"message,omitempty"`
-}
-
-type StatusResponse struct {
-	Running            bool   `json:"running"`
-	Version            string `json:"version,omitempty"`
-	Port               int    `json:"port,omitempty"`
-	UptimeSeconds      int64  `json:"uptime_seconds,omitempty"`
-	ExtensionConnected bool   `json:"extension_connected"`
-	ExtensionID        string `json:"extension_id,omitempty"`
-	ExtensionVersion   string `json:"extension_version,omitempty"`
+	serverStartPort       int
+	serverFallbackPort    int
+	serverPingInterval    time.Duration
+	serverMissedPongLimit int
 }
 
 func New() *Module {
@@ -67,7 +47,7 @@ func (m *Module) Declaration() adapter.Declaration {
 	return Declaration(m.ActorID(), m.maxPendingMs())
 }
 
-func (m *Module) Init(_ context.Context, cfg actorapi.ModuleConfig) error {
+func (m *Module) Init(ctx context.Context, cfg actorapi.ModuleConfig) error {
 	parsed := Config{}
 	if len(cfg.Raw) > 0 {
 		if err := json.Unmarshal(cfg.Raw, &parsed); err != nil {
@@ -77,55 +57,42 @@ func (m *Module) Init(_ context.Context, cfg actorapi.ModuleConfig) error {
 	if parsed.ActorID == "" {
 		parsed.ActorID = DefaultAdapterActorID
 	}
-	if parsed.BaseURL == "" {
-		parsed.BaseURL = DefaultBaseURL
-	}
 	if parsed.TimeoutMs <= 0 {
 		parsed.TimeoutMs = DefaultMaxPendingMs
 	}
-	u, err := url.Parse(strings.TrimRight(parsed.BaseURL, "/"))
-	if err != nil {
-		return fmt.Errorf("kimi proxy module base_url: %w", err)
+	if m.server != nil {
+		_ = m.server.Shutdown(context.Background())
+		m.server = nil
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("kimi proxy module base_url scheme %q unsupported", u.Scheme)
+	server, err := StartServer(ctx, serverOptions{
+		Port:            m.listenStartPort(),
+		FallbackPort:    m.listenFallbackPort(),
+		PingInterval:    m.serverPingInterval,
+		MissedPongLimit: m.serverMissedPongLimit,
+	})
+	if err != nil {
+		return fmt.Errorf("kimi proxy module ws server: %w", err)
 	}
 	m.cfg = parsed
-	m.baseURL = u
-	m.httpClient = &http.Client{Timeout: time.Duration(parsed.TimeoutMs) * time.Millisecond}
+	m.server = server
+	log.Printf("kimi proxy module ws server listening: %s", server.Addr())
 	return nil
 }
 
-func (m *Module) Shutdown(context.Context) error { return nil }
+func (m *Module) Shutdown(ctx context.Context) error {
+	if m.server == nil {
+		return nil
+	}
+	err := m.server.Shutdown(ctx)
+	m.server = nil
+	return err
+}
 
-func (m *Module) Readiness(ctx context.Context) (bool, string, error) {
-	if m.httpClient == nil || m.baseURL == nil {
+func (m *Module) Readiness(context.Context) (bool, string, error) {
+	if m.server == nil {
 		return false, "initializing", nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.endpoint("/status"), nil)
-	if err != nil {
-		return false, "probe_error", err
-	}
-	resp, err := m.httpClient.Do(req)
-	if err != nil {
-		return false, "daemon_unreachable", nil
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 400 {
-		return false, "daemon_unreachable", nil
-	}
-	var status StatusResponse
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return true, "ok", nil
-	}
-	if err := json.Unmarshal(raw, &status); err != nil {
-		return false, "probe_error", err
-	}
-	if !status.Running {
-		return false, "daemon_unreachable", nil
-	}
-	if !status.ExtensionConnected {
+	if !m.server.HasConnectedExtension() {
 		return false, "extension_disconnected", nil
 	}
 	return true, "ok", nil
@@ -148,13 +115,11 @@ func (m *Module) Handle(ctx context.Context, env message.Envelope) (message.Enve
 			return message.Envelope{}, err
 		}
 		return m.completedResponse(env, mustJSON(map[string]any{
-			"available": ready,
-			"reason":    reason,
-			"kind":      string(actor.KindTool),
-			"binding":   string(actor.BindingRuntimeInboundViaRelay),
-			"detail": map[string]any{
-				"base_url": m.cfg.BaseURL,
-			},
+			"available":  ready,
+			"reason":     reason,
+			"kind":       string(actor.KindTool),
+			"binding":    string(actor.BindingRuntimeInboundViaRelay),
+			"detail":     m.statusDetail(),
 			"checked_at": time.Now().UnixMilli(),
 		})), nil
 	case TypeCommand:
@@ -162,67 +127,20 @@ func (m *Module) Handle(ctx context.Context, env message.Envelope) (message.Enve
 		return m.failedResponse(env, message.TerminalReceiverInternalError, "unknown_type",
 			fmt.Sprintf("kimi proxy module does not handle type %q", env.Type)), nil
 	}
-	if m.httpClient == nil || m.baseURL == nil {
-		return m.failedResponse(env, message.TerminalReceiverUnavailable, "daemon_unreachable", "kimi module not initialized"), nil
+	if m.server == nil {
+		return m.failedResponse(env, message.TerminalReceiverUnavailable, "daemon_unreachable", "kimi embedded ws server is not initialized"), nil
 	}
-	body, err := normalizeCommandPayload(env.Payload, m.cfg.DefaultSession)
+	name, args, err := normalizeCommandPayload(env.Payload, m.cfg.DefaultSession)
 	if err != nil {
 		return m.failedResponse(env, message.TerminalReceiverInternalError, "payload_decode_failed", err.Error()), nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.endpoint("/command"), bytes.NewReader(body))
+	callCtx, cancel := m.callContext(ctx)
+	defer cancel()
+	raw, err := m.server.CallTool(callCtx, name, args)
 	if err != nil {
-		return message.Envelope{}, err
+		return m.failedResponseForCallError(env, err), nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	resp, err := m.httpClient.Do(req)
-	if err != nil {
-		return m.failedResponse(env, message.TerminalReceiverUnavailable, "daemon_unreachable", err.Error()), nil
-	}
-	defer func() { _ = resp.Body.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return message.Envelope{}, err
-	}
-	if resp.StatusCode >= 400 {
-		code, detail := errorFromCommandBody(raw)
-		if code == "" {
-			code = "daemon_call_failed"
-		}
-		if detail == "" {
-			detail = fmt.Sprintf("kimi-webbridge HTTP %d", resp.StatusCode)
-		}
-		return m.failedResponse(env, message.TerminalReceiverUnavailable, code, detail), nil
-	}
-	return m.responseFromCommandBody(env, raw)
-}
-
-func (m *Module) responseFromCommandBody(req message.Envelope, raw json.RawMessage) (message.Envelope, error) {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return m.completedResponse(req, json.RawMessage(`{}`)), nil
-	}
-	var wrapped CommandResponse
-	if err := json.Unmarshal(raw, &wrapped); err == nil && (wrapped.OK != nil || wrapped.Error != nil || len(wrapped.Data) > 0) {
-		if wrapped.OK != nil && !*wrapped.OK {
-			code := "tool_failed"
-			detail := "kimi-webbridge command failed"
-			if wrapped.Error != nil {
-				if wrapped.Error.Code != "" {
-					code = wrapped.Error.Code
-				}
-				if wrapped.Error.Message != "" {
-					detail = wrapped.Error.Message
-				}
-			}
-			return m.failedResponse(req, message.TerminalReceiverInternalError, code, detail), nil
-		}
-		data := wrapped.Data
-		if len(data) == 0 {
-			data = json.RawMessage(`{}`)
-		}
-		return m.completedResponse(req, ensureJSONObject(data)), nil
-	}
-	return m.completedResponse(req, ensureJSONObject(raw)), nil
+	return m.completedResponse(env, ensureJSONObject(raw)), nil
 }
 
 func (m *Module) completedResponse(req message.Envelope, payload json.RawMessage) message.Envelope {
@@ -235,6 +153,24 @@ func (m *Module) failedResponse(req message.Envelope, reason message.TerminalFai
 		"detail":     detail,
 	})
 	return responseEnvelope(time.Now, req, m.ActorID(), payloadWithStatus(payload, "failed", string(reason)))
+}
+
+func (m *Module) failedResponseForCallError(req message.Envelope, err error) message.Envelope {
+	var toolErr *ToolError
+	switch {
+	case errors.Is(err, ErrExtensionDisconnected):
+		return m.failedResponse(req, message.TerminalReceiverUnavailable, "extension_disconnected", err.Error())
+	case errors.Is(err, ErrServerClosed):
+		return m.failedResponse(req, message.TerminalReceiverUnavailable, "daemon_unreachable", err.Error())
+	case errors.Is(err, ErrUnknownTool):
+		return m.failedResponse(req, message.TerminalReceiverInternalError, "payload_decode_failed", err.Error())
+	case errors.As(err, &toolErr):
+		return m.failedResponse(req, message.TerminalReceiverInternalError, "tool_failed", toolErr.Error())
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return m.failedResponse(req, message.TerminalReceiverUnavailable, "daemon_call_failed", err.Error())
+	default:
+		return m.failedResponse(req, message.TerminalReceiverUnavailable, "daemon_call_failed", err.Error())
+	}
 }
 
 func responseEnvelope(clock func() time.Time, req message.Envelope, sender actor.ActorID, payload json.RawMessage) message.Envelope {
@@ -266,36 +202,78 @@ func responseEnvelope(clock func() time.Time, req message.Envelope, sender actor
 	}
 }
 
-func normalizeCommandPayload(raw json.RawMessage, defaultSession string) (json.RawMessage, error) {
+func normalizeCommandPayload(raw json.RawMessage, defaultSession string) (string, json.RawMessage, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
-		return nil, errors.New("payload is required")
+		return "", nil, errors.New("payload is required")
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
-		return nil, fmt.Errorf("payload must be a JSON object: %w", err)
+		return "", nil, fmt.Errorf("payload must be a JSON object: %w", err)
 	}
 	if len(fields) == 0 {
-		return nil, errors.New("payload must include action")
+		return "", nil, errors.New("payload must include action")
 	}
-	if _, ok := fields["action"]; !ok {
-		return nil, errors.New("payload.action is required")
+	name, err := stringField(fields, "action", true)
+	if err != nil {
+		return "", nil, err
 	}
-	if defaultSession != "" {
-		if _, ok := fields["session"]; !ok {
-			session, _ := json.Marshal(defaultSession)
-			fields["session"] = session
-			return json.Marshal(fields)
+	name = strings.TrimSpace(name)
+	if !isKimiToolName(name) {
+		return "", nil, fmt.Errorf("payload.action %q is not a supported Kimi WebBridge tool", name)
+	}
+
+	args := map[string]json.RawMessage{}
+	if rawArgs, ok := fields["args"]; ok && len(bytes.TrimSpace(rawArgs)) > 0 && string(bytes.TrimSpace(rawArgs)) != "null" {
+		if err := json.Unmarshal(rawArgs, &args); err != nil || args == nil {
+			if err == nil {
+				err = errors.New("payload.args must be a JSON object")
+			}
+			return "", nil, fmt.Errorf("payload.args must be a JSON object: %w", err)
 		}
 	}
-	return raw, nil
+	session := strings.TrimSpace(defaultSession)
+	if _, ok := fields["session"]; ok {
+		session, err = stringField(fields, "session", false)
+		if err != nil {
+			return "", nil, err
+		}
+		session = strings.TrimSpace(session)
+	}
+	if session != "" {
+		if _, exists := args["_session"]; !exists {
+			rawSession, _ := json.Marshal(session)
+			args["_session"] = rawSession
+		}
+	}
+	out, err := json.Marshal(args)
+	if err != nil {
+		return "", nil, err
+	}
+	return name, out, nil
 }
 
-func errorFromCommandBody(raw json.RawMessage) (string, string) {
-	var wrapped CommandResponse
-	if err := json.Unmarshal(raw, &wrapped); err != nil || wrapped.Error == nil {
-		return "", snippet(raw)
+func stringField(fields map[string]json.RawMessage, name string, required bool) (string, error) {
+	raw, ok := fields[name]
+	if !ok {
+		if required {
+			return "", fmt.Errorf("payload.%s is required", name)
+		}
+		return "", nil
 	}
-	return wrapped.Error.Code, wrapped.Error.Message
+	if len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+		if required {
+			return "", fmt.Errorf("payload.%s is required", name)
+		}
+		return "", nil
+	}
+	var out string
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("payload.%s must be a string: %w", name, err)
+	}
+	if required && strings.TrimSpace(out) == "" {
+		return "", fmt.Errorf("payload.%s is required", name)
+	}
+	return out, nil
 }
 
 func ensureJSONObject(raw json.RawMessage) json.RawMessage {
@@ -328,10 +306,42 @@ func mustJSON(v any) json.RawMessage {
 	return raw
 }
 
-func (m *Module) endpoint(path string) string {
-	u := *m.baseURL
-	u.Path = strings.TrimRight(u.Path, "/") + path
-	return u.String()
+func (m *Module) statusDetail() map[string]any {
+	detail := map[string]any{
+		"listen_addr":         "",
+		"port":                0,
+		"extension_connected": false,
+		"extension_version":   "",
+	}
+	if m.server == nil {
+		return detail
+	}
+	detail["listen_addr"] = m.server.Addr()
+	detail["port"] = m.server.Port()
+	detail["extension_connected"] = m.server.HasConnectedExtension()
+	detail["extension_version"] = m.server.ExtensionVersion()
+	return detail
+}
+
+func (m *Module) callContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, time.Duration(m.maxPendingMs())*time.Millisecond)
+}
+
+func (m *Module) listenStartPort() int {
+	if m.serverStartPort > 0 {
+		return m.serverStartPort
+	}
+	return DefaultWSPort
+}
+
+func (m *Module) listenFallbackPort() int {
+	if m.serverFallbackPort > 0 {
+		return m.serverFallbackPort
+	}
+	return DefaultWSFallbackPort
 }
 
 func (m *Module) maxPendingMs() int64 {
@@ -339,14 +349,6 @@ func (m *Module) maxPendingMs() int64 {
 		return m.cfg.TimeoutMs
 	}
 	return DefaultMaxPendingMs
-}
-
-func snippet(raw []byte) string {
-	const max = 256
-	if len(raw) <= max {
-		return string(raw)
-	}
-	return string(raw[:max]) + "...(truncated)"
 }
 
 var _ actorapi.ActorModule = (*Module)(nil)
