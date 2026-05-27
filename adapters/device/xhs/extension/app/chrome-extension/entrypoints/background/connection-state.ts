@@ -83,6 +83,11 @@ const DEFAULT_CONFIG: ConnectionConfig = {
   httpBase: DEFAULT_DAEMON_HTTP_BASE,
   channelId: '',
   daemonId: '',
+  // T7 UX: ext defaults to proxy mode so a freshly-loaded extension
+  // auto-connects to the local proxy daemon on background boot — no
+  // popup / web-UI button press required. The user only sees a button
+  // when they need to override (different port / dev work).
+  connectionMode: 'proxy',
   deviceActorId: DEFAULT_PROXY_ACTOR_ID,
   proxyEndpoint: DEFAULT_PROXY_ENDPOINT,
 };

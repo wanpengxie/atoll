@@ -319,7 +319,7 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 				return
 			case "":
 				if strings.TrimSpace(frame.ActorID) == "" {
-					return
+					continue
 				}
 				actorID := actor.ActorID(frame.ActorID)
 				targetChannel := channel.ID(strings.TrimSpace(frame.ChannelID))
@@ -333,18 +333,34 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 					targetChannel = s.resolveDaemonActorChannel(daemon.ID, actorID)
 				}
 				if targetChannel == "" || !s.daemonOwnsActor(daemon.ID, targetChannel, actorID) {
-					s.log.Warn("devicebus.daemon_frame_rejected",
+					// Drop the frame but keep the ws alive: an idle
+					// daemon (no attachments yet) or a transient
+					// readiness event from before attach can both hit
+					// this path. Closing the ws used to cause an
+					// install loop where the daemon reconnected,
+					// re-sent ready, fired the same orphan frame, and
+					// got kicked again. With `continue` the connection
+					// stays up and UI shows the daemon as online while
+					// the user attaches channels via the UI.
+					s.log.Warn("devicebus.daemon_frame_dropped",
 						"reason", "actor_not_registered",
 						"daemon_id", string(daemon.ID),
 						"channel_id", string(targetChannel),
 						"daemon_session_id", conn.SessionID,
 						"actor_id", frame.ActorID,
 					)
-					return
+					continue
 				}
 				frame.ChannelID = string(targetChannel)
 				if err := forwarder.ForwardDeviceFrame(c.Request.Context(), frame, actorID); err != nil {
-					return
+					s.log.Warn("devicebus.daemon_frame_forward_failed",
+						"daemon_id", string(daemon.ID),
+						"channel_id", string(targetChannel),
+						"daemon_session_id", conn.SessionID,
+						"actor_id", frame.ActorID,
+						"err", err.Error(),
+					)
+					continue
 				}
 			default:
 				s.log.Warn("devicebus.daemon_frame_rejected",
