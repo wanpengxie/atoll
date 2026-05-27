@@ -55,8 +55,14 @@ type DeviceTransport = 'proxy' | 'none';
 
 function selectTransport(cfg: ConnectionConfig | null | undefined): DeviceTransport {
 	if (!cfg) return 'none';
-	if (cfg.connectionMode === 'proxy') return hasProxyDeviceConfig(cfg) ? 'proxy' : 'none';
-	return 'none';
+	// T7: proxy mode is the only mode the ext supports. As long as the
+	// config carries a usable proxyEndpoint, treat it as proxy and let
+	// background boot auto-connect — no popup click required. The
+	// `connectionMode` field is kept for back-compat reads but is no
+	// longer the gate (it used to default to undefined on legacy
+	// installs, which made selectTransport return 'none' and silently
+	// refused to auto-connect until the user opened popup).
+	return hasProxyDeviceConfig(cfg) ? 'proxy' : 'none';
 }
 
 /** Translate the persistent ConnectionConfig into the proxy client input. */
