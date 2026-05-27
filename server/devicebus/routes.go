@@ -2,6 +2,7 @@ package devicebus
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -87,10 +88,11 @@ func (s *Service) handleListDaemons(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"daemons": out})
 }
 
-// handleListOwnerDaemons returns every daemon owned by the caller plus
-// the list of channel ids currently attached to each. Drives the per-
-// channel attach UI: the dialog renders one checkbox per daemon with
-// `attached_channels` pre-filled so the user sees current state.
+// handleListOwnerDaemons returns every daemon owned by the caller plus:
+//   - attached_channels: the channels currently linked (drives the
+//     per-channel attach checkboxes)
+//   - hosted_actors:     the adapter manifest from the last ready frame
+//     (drives the 我的设备 page adapter chips)
 func (s *Service) handleListOwnerDaemons(c *gin.Context) {
 	u := identity.UserFrom(c)
 	rows, err := s.ListDaemonsByOwner(c.Request.Context(), u.ID)
@@ -98,9 +100,15 @@ func (s *Service) handleListOwnerDaemons(c *gin.Context) {
 		httperr.Internal(c, "devicebus.list_owner_daemons", err)
 		return
 	}
+	type hostedActorResp struct {
+		ActorID       string `json:"actor_id"`
+		CapabilitySet any    `json:"capability_set,omitempty"`
+		LastReadyAt   int64  `json:"last_ready_at"`
+	}
 	type ownerDaemonResp struct {
 		DaemonResp
-		AttachedChannels []string `json:"attached_channels"`
+		AttachedChannels []string          `json:"attached_channels"`
+		HostedActors     []hostedActorResp `json:"hosted_actors"`
 	}
 	out := make([]ownerDaemonResp, 0, len(rows))
 	for _, row := range rows {
@@ -109,9 +117,23 @@ func (s *Service) handleListOwnerDaemons(c *gin.Context) {
 		for _, ch := range attached {
 			ids = append(ids, string(ch))
 		}
+		hosted, _ := s.ListDaemonHostedActors(c.Request.Context(), row.ID)
+		hostedResp := make([]hostedActorResp, 0, len(hosted))
+		for _, h := range hosted {
+			var cap any
+			if len(h.CapabilitySet) > 0 {
+				_ = json.Unmarshal(h.CapabilitySet, &cap)
+			}
+			hostedResp = append(hostedResp, hostedActorResp{
+				ActorID:       string(h.ActorID),
+				CapabilitySet: cap,
+				LastReadyAt:   h.LastReadyAt,
+			})
+		}
 		out = append(out, ownerDaemonResp{
 			DaemonResp:       DaemonResponse(row, ""),
 			AttachedChannels: ids,
+			HostedActors:     hostedResp,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"daemons": out})

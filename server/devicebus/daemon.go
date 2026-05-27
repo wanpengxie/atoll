@@ -148,6 +148,47 @@ func (s *Service) DetachDaemonFromChannel(ctx context.Context, daemonID placemen
 	return nil
 }
 
+// HostedActor describes one adapter the daemon advertised in its last
+// ready frame. capability_set is the raw JSON payload; UI parses for
+// display name + type list.
+type HostedActor struct {
+	ActorID       actor.ActorID
+	CapabilitySet json.RawMessage
+	LastReadyAt   int64
+}
+
+// ListDaemonHostedActors returns the adapter manifest the daemon
+// advertised in its most recent ready frame, irrespective of channel
+// attachments. Drives the global "我的设备" page's adapter chips.
+func (s *Service) ListDaemonHostedActors(ctx context.Context, daemonID placement.DaemonID) ([]HostedActor, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT actor_id, COALESCE(capability_set,''), last_ready_at
+		  FROM daemon_hosted_actors
+		 WHERE daemon_id = ?
+		 ORDER BY actor_id`, string(daemonID))
+	if err != nil {
+		return nil, fmt.Errorf("devicebus: list hosted actors: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []HostedActor
+	for rows.Next() {
+		var id, cap string
+		var at int64
+		if err := rows.Scan(&id, &cap, &at); err != nil {
+			return nil, fmt.Errorf("devicebus: scan hosted actor: %w", err)
+		}
+		out = append(out, HostedActor{
+			ActorID:       actor.ActorID(id),
+			CapabilitySet: json.RawMessage(cap),
+			LastReadyAt:   at,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("devicebus: hosted actor rows: %w", err)
+	}
+	return out, nil
+}
+
 // ListDaemonAttachments returns the channels currently attached to a
 // daemon. Used by ws ready handling to know where to install proxy
 // facades.
@@ -377,6 +418,17 @@ func (s *Service) ApplyDaemonReady(ctx context.Context, d Daemon, ready DaemonRe
 		return fmt.Errorf("devicebus: ready clear daemon actors: %w", err)
 	}
 
+	// Refresh the per-daemon hosted-adapter manifest. This is independent
+	// of channel attachments — it records "what this machine claims to
+	// host" so the global 我的设备 page can show every adapter even when
+	// the daemon is not yet attached to any channel.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM daemon_hosted_actors WHERE daemon_id = ?`,
+		string(d.ID),
+	); err != nil {
+		return fmt.Errorf("devicebus: ready clear hosted actors: %w", err)
+	}
+
 	seen := map[actor.ActorID]struct{}{}
 	for _, a := range ready.Actors {
 		actorID := actor.ActorID(strings.TrimSpace(string(a.ActorID)))
@@ -387,6 +439,21 @@ func (s *Service) ApplyDaemonReady(ctx context.Context, d Daemon, ready DaemonRe
 			return fmt.Errorf("%w: duplicate actor %s", ErrDaemonActorConflict, actorID)
 		}
 		seen[actorID] = struct{}{}
+
+		// Always record hosted manifest entry, even when no channels
+		// attached (UI shows the adapter as available-but-unbound).
+		capability := ""
+		if len(a.CapabilitySet) > 0 {
+			capability = string(a.CapabilitySet)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO daemon_hosted_actors
+			  (daemon_id, actor_id, capability_set, last_ready_at)
+			VALUES (?, ?, ?, ?)`,
+			string(d.ID), string(actorID), capability, now,
+		); err != nil {
+			return fmt.Errorf("devicebus: ready insert hosted actor: %w", err)
+		}
 
 		// Insert one row per (attached channel × actor). Skip the
 		// loop entirely if the daemon is unattached — it just goes

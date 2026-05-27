@@ -18,7 +18,17 @@ function normalizeDaemon(row) {
     last_heartbeat: row.last_heartbeat ?? row.lastHeartbeat ?? row.LastHeartbeat ?? 0,
     created_at: row.created_at ?? row.createdAt ?? row.CreatedAt ?? 0,
     attached_channels: row.attached_channels || row.attachedChannels || [],
+    hosted_actors: row.hosted_actors || row.hostedActors || [],
   };
+}
+
+function actorIcon(actorID) {
+  if (actorID.includes('kimi')) return '🧠';
+  if (actorID.includes('xhs')) return '📕';
+  if (actorID.includes('shell')) return '💻';
+  if (actorID.includes('file')) return '📁';
+  if (actorID.includes('browser')) return '🌐';
+  return '🔧';
 }
 
 function formatRefreshTime(ms) {
@@ -151,18 +161,34 @@ export default function MyDevicesPage({ channelsByID = {} }) {
                 </div>
 
                 <div className="device-card-section">
-                  <div className="device-section-title">已 attach 的 channels</div>
-                  {daemon.attached_channels.length === 0 ? (
-                    <div className="device-actor-empty">尚未 attach 到任何 channel</div>
+                  <div className="device-section-title">本机插件 (adapters)</div>
+                  {daemon.hosted_actors.length === 0 ? (
+                    <div className="device-actor-empty">
+                      {online ? '尚未上报，等首个 ready frame' : 'daemon 离线，状态未知'}
+                    </div>
                   ) : (
-                    <ul className="device-actor-list">
-                      {daemon.attached_channels.map((chID) => (
-                        <li key={chID} className="device-actor-row">
-                          <div className="device-actor-main">
-                            <strong>{channelName(chID)}</strong>
-                            <span>{chID}</span>
+                    <ul className="adapter-chip-list">
+                      {daemon.hosted_actors.map((h) => (
+                        <li key={h.actor_id} className={`adapter-chip ${online ? 'online' : 'offline'}`}>
+                          <span className="adapter-icon">{actorIcon(h.actor_id)}</span>
+                          <div className="adapter-meta">
+                            <strong>{h.actor_id}</strong>
+                            <span>{online ? '已就绪' : '未运行'}</span>
                           </div>
                         </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
+                <div className="device-card-section">
+                  <div className="device-section-title">已 attach 的 channels</div>
+                  {daemon.attached_channels.length === 0 ? (
+                    <div className="device-actor-empty">未 attach 到任何 channel</div>
+                  ) : (
+                    <ul className="device-attached-list">
+                      {daemon.attached_channels.map((chID) => (
+                        <li key={chID}>{channelName(chID)}</li>
                       ))}
                     </ul>
                   )}

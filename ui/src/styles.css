@@ -2577,3 +2577,140 @@ body::after {
   background: var(--surface);
   color: var(--text);
 }
+
+/* ─── Adapter chips (in MyDevicesPage daemon card) ───────────────── */
+.adapter-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.adapter-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+.adapter-chip.online {
+  border-color: var(--online);
+  background: color-mix(in srgb, var(--online) 10%, var(--surface-2));
+}
+.adapter-chip.offline {
+  opacity: 0.7;
+}
+.adapter-icon { font-size: 16px; }
+.adapter-meta {
+  display: flex;
+  flex-direction: column;
+}
+.adapter-meta strong { font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
+.adapter-meta span { font-size: 11px; color: var(--text-muted); }
+
+.device-attached-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.device-attached-list li {
+  background: var(--surface-3);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+/* ─── ChannelDeviceBar (in chat header) ─────────────────────────── */
+.channel-device-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+.channel-device-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.channel-device-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  font-family: ui-monospace, Menlo, monospace;
+  cursor: help;
+}
+.channel-device-chip.ready {
+  border-color: var(--online);
+  background: color-mix(in srgb, var(--online) 18%, transparent);
+  color: var(--online);
+}
+.channel-device-chip.not-ready {
+  border-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+  color: var(--text);
+}
+.channel-device-chip.offline {
+  opacity: 0.55;
+}
+.channel-device-empty { font-size: 12px; }
+
+/* ─── BindDeviceDialog (drawer-style attach picker) ─────────────── */
+.device-bind-dialog {
+  max-width: 480px;
+}
+.bind-daemon-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.bind-daemon-row {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.bind-daemon-row.attached {
+  border-color: var(--online);
+  background: color-mix(in srgb, var(--online) 6%, var(--surface));
+}
+.bind-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+.bind-daemon-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.bind-daemon-info strong { font-size: 13px; }
+.bind-daemon-actors {
+  display: flex;
+  gap: 4px;
+}
+.adapter-icon-small { font-size: 16px; }
+.device-empty-inline {
+  padding: 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}

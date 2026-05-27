@@ -3,7 +3,6 @@ import { api, APIError } from './api.js';
 import Auth from './components/Auth.jsx';
 import Sidebar from './components/Sidebar.jsx';
 import Chat from './components/Chat.jsx';
-import DeviceList from './components/DeviceList.jsx';
 import MyDevicesPage from './components/MyDevicesPage.jsx';
 
 export default function App() {
@@ -13,9 +12,8 @@ export default function App() {
   const [activeWorkspaceID, setActiveWorkspaceID] = useState(null);
   const [channels, setChannels] = useState([]);
   const [activeChannelID, setActiveChannelID] = useState(null);
-  const [activeChannelTab, setActiveChannelTab] = useState('chat');
   // activeView lets a sidebar entry like "我的设备" supersede the
-  // channel area. null/empty → channel mode (Chat / DeviceList).
+  // channel area. null/empty → Chat (channel mode).
   const [activeView, setActiveView] = useState(null);
 
   // Boot: try to restore session via cookie.
@@ -72,10 +70,6 @@ export default function App() {
       }
     })();
   }, [activeWorkspaceID]);
-
-  useEffect(() => {
-    setActiveChannelTab('chat');
-  }, [activeChannelID]);
 
   async function refreshWorkspaces() {
     const res = await api.listWorkspaces();
@@ -142,35 +136,11 @@ export default function App() {
           {activeView === 'my-devices' ? (
             <MyDevicesPage channelsByID={Object.fromEntries(channels.map((c) => [c.id || c.ID, c]))} />
           ) : (
-            <>
-              {activeChannelID && (
-                <nav className="channel-tabs" aria-label="channel views">
-                  <button
-                    type="button"
-                    className={activeChannelTab === 'chat' ? 'active' : ''}
-                    onClick={() => setActiveChannelTab('chat')}
-                  >
-                    聊天
-                  </button>
-                  <button
-                    type="button"
-                    className={activeChannelTab === 'devices' ? 'active' : ''}
-                    onClick={() => setActiveChannelTab('devices')}
-                  >
-                    设备
-                  </button>
-                </nav>
-              )}
-              {activeChannelTab === 'devices' ? (
-                <DeviceList channelID={activeChannelID} channel={activeChannel} me={me} />
-              ) : (
-                <Chat
-                  channelID={activeChannelID}
-                  channel={activeChannel}
-                  me={me}
-                />
-              )}
-            </>
+            <Chat
+              channelID={activeChannelID}
+              channel={activeChannel}
+              me={me}
+            />
           )}
         </main>
       </div>
