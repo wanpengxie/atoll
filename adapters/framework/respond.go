@@ -99,6 +99,135 @@ func buildRespond(cfg respondConfig) (adapter.RespondFunc, error) {
 	}, nil
 }
 
+// buildProvisional returns a closure satisfying kernel/adapter.ProvisionalFunc.
+//
+// Unlike buildRespond, provisional responses do NOT participate in closure
+// (proto-foundation §1.6 / proto-layer0 §2.5): the framework emits a
+// kind=response envelope with payload.status in the provisional subset
+// (Layer 2 core or Layer 3 namespace extension), then returns. The pending
+// correlation entry + F3 timer remain in place so the final Respond / Fail
+// or O3 fallback still resolves the request.
+//
+// Harness Step 8 enforces both the payload.status closed/half-open set
+// and namespace ownership (sender local-name match for Layer 3); this
+// helper does not duplicate that validation — it just builds the
+// envelope, calls the chain, and reports the result.
+func buildProvisional(cfg respondConfig) (adapter.ProvisionalFunc, error) {
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, requestID adapter.CorrelationKey, status string, payload json.RawMessage, opts adapter.ProvisionalOptions) (adapter.RespondResult, error) {
+		if requestID == "" {
+			return adapter.RespondResult{}, errors.New("framework: Provisional requestID required")
+		}
+		if status == "" {
+			return adapter.RespondResult{}, errors.New("framework: Provisional status required")
+		}
+		if status == "completed" || status == "failed" {
+			return adapter.RespondResult{}, fmt.Errorf("framework: Provisional status %q is a final status — use Respond/Fail", status)
+		}
+
+		// validatePendingTerminalRequest gives us the same lookup +
+		// ownership checks Respond uses. Provisional reuses it because
+		// the parent_id constraint, channel scope, and adapter audience
+		// match are identical; only the closure side-effects differ.
+		request, _, err := validatePendingTerminalRequest(ctx, cfg, requestID, terminalValidationMode{
+			requireDeclaredResponseType: true,
+		})
+		if err != nil {
+			return adapter.RespondResult{}, fmt.Errorf("framework: provisional request invalid: %w", err)
+		}
+
+		mergedPayload, err := mergeProvisionalPayload(payload, status)
+		if err != nil {
+			return adapter.RespondResult{}, err
+		}
+
+		hash, err := message.CanonicalHashPayload(mergedPayload)
+		if err != nil {
+			return adapter.RespondResult{}, fmt.Errorf("framework: provisional hash: %w", err)
+		}
+		envID := message.ID("response:" + requestID.String() + ":provisional:" + status + ":" + hash)
+
+		visibility := opts.Visibility
+		if visibility == "" {
+			visibility = request.Visibility
+		}
+
+		audience := opts.Audience
+		if len(audience) == 0 {
+			audience = message.Audience{request.Sender.ID}
+		} else {
+			audience = append(message.Audience(nil), audience...)
+			if len(audience) != 1 || audience[0] != request.Sender.ID {
+				return adapter.RespondResult{}, fmt.Errorf("framework: provisional audience %v does not match parent sender %s",
+					audience, request.Sender.ID)
+			}
+		}
+
+		correlationID := request.CorrelationID
+		if correlationID == "" {
+			correlationID = request.ID
+		}
+
+		now := cfg.clock().UnixMilli()
+		env := &message.Envelope{
+			ID:            envID,
+			TS:            now,
+			ChannelID:     request.ChannelID,
+			Sender:        message.Sender{Kind: actor.KindTool, ID: cfg.adapterActorID},
+			Kind:          message.KindResponse,
+			Type:          request.Type,
+			Payload:       mergedPayload,
+			ParentID:      message.ID(requestID),
+			CorrelationID: correlationID,
+			Visibility:    visibility,
+			Audience:      audience,
+		}
+
+		res, err := cfg.chain.Write(ctx, env)
+		if err != nil {
+			return adapter.RespondResult{}, fmt.Errorf("framework: provisional chain write: %w", err)
+		}
+		result := adapter.RespondResult{MessageID: res.MessageID}
+		if res.RejectReason != "" {
+			// Provisional MUST NOT touch pending registry / F3 timer
+			// regardless of outcome. terminal_duplicate is a final-only
+			// signal so we surface it as an error here; harness will
+			// also reject final-after-provisional and provisional-after-
+			// final as zombie chain rejections.
+			return result, fmt.Errorf("framework: provisional rejected: %s (%s)", res.RejectReason, res.RejectDetail)
+		}
+		cfg.metrics.IncCounter("adapter.provisional.ok",
+			"adapter", cfg.adapterName,
+			"status", status)
+		return result, nil
+	}, nil
+}
+
+// mergeProvisionalPayload returns the user payload merged with the
+// provisional status field. Mirrors mergeResponsePayload but does NOT
+// inject reason / dedupe — those are final-response semantics only.
+func mergeProvisionalPayload(userPayload json.RawMessage, status string) (json.RawMessage, error) {
+	var fields map[string]any
+	if len(userPayload) == 0 || string(userPayload) == "null" {
+		fields = map[string]any{}
+	} else {
+		if err := json.Unmarshal(userPayload, &fields); err != nil {
+			return nil, fmt.Errorf("framework: provisional payload must be a JSON object: %w", err)
+		}
+		if fields == nil {
+			fields = map[string]any{}
+		}
+	}
+	fields["status"] = status
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return nil, fmt.Errorf("framework: marshal provisional payload: %w", err)
+	}
+	return out, nil
+}
+
 func buildFail(respond adapter.RespondFunc) adapter.FailFunc {
 	return func(ctx context.Context, requestID adapter.CorrelationKey, payload json.RawMessage, opts adapter.FailOptions) (adapter.RespondResult, error) {
 		reason := opts.Reason
@@ -162,6 +291,22 @@ func buildCompleteExternalResponse(cfg respondConfig, decl adapter.Declaration) 
 		if !declAllowsKind(decl, env.Type, message.KindResponse) {
 			return adapter.RespondResult{}, fmt.Errorf("framework: complete external response type %s is not response-capable for adapter %s",
 				env.Type, decl.Name)
+		}
+		// CompleteExternalResponse is the final-only sibling of Respond for
+		// external callback paths: on success it cancels F3 and closes the
+		// pending correlation. Provisional statuses (Layer 2 core or Layer 3
+		// extension) MUST be emitted via the runtime/proxy_facade provisional
+		// path, NOT here, otherwise INVARIANT-11 (Closure) breaks — the
+		// caller would silently resolve the request without a final.
+		status, err := extractPayloadStatus(env.Payload)
+		if err != nil {
+			return adapter.RespondResult{}, fmt.Errorf("framework: complete external response payload invalid: %w", err)
+		}
+		if !message.IsFinalStatus(status) {
+			return adapter.RespondResult{}, fmt.Errorf(
+				"framework: complete external response payload.status must be final (completed or failed); got %q — provisional responses must use the Provisional path",
+				status,
+			)
 		}
 		if len(env.Audience) != 1 || env.Audience[0] != request.Sender.ID {
 			return adapter.RespondResult{}, fmt.Errorf("framework: complete external response audience %v does not match parent sender %s",
@@ -245,6 +390,19 @@ func runRespondWithSender(
 	status := opts.Status
 	if status == "" {
 		status = "completed"
+	}
+	// Respond/Fail are the final-only terminal closure path. Provisional
+	// statuses (Layer 2 core: received/queued/processing/deferred/unavailable;
+	// Layer 3: <adapter>.<name>) MUST go through ctx.Provisional — otherwise
+	// the closure side-effects below (chain write tagged is_terminal +
+	// finishTerminalLifecycle's MarkDone + CancelTimer) would resolve the
+	// request prematurely and break INVARIANT-11 (Closure). We reject before
+	// any side effect: pending/F3 stay untouched.
+	if !message.IsFinalStatus(status) {
+		return adapter.RespondResult{}, fmt.Errorf(
+			"framework: Respond/Fail status must be final (completed or failed); got %q — use ctx.Provisional for non-terminal interim responses",
+			status,
+		)
 	}
 	if err := validateRespondReason(status, opts.Reason); err != nil {
 		return adapter.RespondResult{}, err
@@ -450,6 +608,30 @@ func mergeResponsePayload(userPayload json.RawMessage, status, reason string, de
 		return nil, fmt.Errorf("framework: marshal merged payload: %w", err)
 	}
 	return out, nil
+}
+
+// extractPayloadStatus parses an arbitrary response payload (already a
+// JSON object per response contract) and returns the value of the
+// payload.status field. Empty payload / null / missing status all yield
+// "" so the caller can apply final-status validation uniformly. Non-string
+// status fields produce an error.
+func extractPayloadStatus(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", nil
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return "", fmt.Errorf("response payload must be a JSON object: %w", err)
+	}
+	v, ok := fields["status"]
+	if !ok {
+		return "", nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("response payload.status must be a string, got %T", v)
+	}
+	return s, nil
 }
 
 func validateRespondReason(status, reason string) error {

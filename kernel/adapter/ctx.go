@@ -65,6 +65,31 @@ type ModuleContext struct {
 	// LookupPendingRequest exposes read-only request lifecycle state to
 	// callback decoders. It does not grant mutation authority.
 	LookupPendingRequest PendingRequestLookupFunc
+
+	// Provisional emits one non-terminal interim response (kind=response,
+	// payload.status ∈ provisional subset) for a pending request without
+	// resolving its closure (proto-foundation §1.6.3 + proto-layer0 §2.5).
+	//
+	// Callers may invoke Provisional multiple times per request, but only
+	// before the final Respond / Fail — emitting a provisional after a
+	// final response is rejected by harness Step 8 as a zombie chain
+	// (harness_provisional_after_final).
+	//
+	// Status MUST be a valid provisional status:
+	//   - Layer 2 core (closed set): received / queued / processing /
+	//     deferred / unavailable.
+	//   - Layer 3 extension: <adapter_short_name>.<name> where the
+	//     namespace matches sender.id local-name; harness enforces format,
+	//     namespace ownership, and core/final shadowing
+	//     (harness_response_status_namespace_mismatch /
+	//     harness_response_status_invalid).
+	//
+	// The framework reuses the Respond envelope shape (audience = parent
+	// request sender, parent_id = requestID, type = request.type, sender =
+	// adapter actor). Unlike Respond, it does NOT touch the pending
+	// correlation registry or F3 timer; the request remains in flight until
+	// the final Respond / Fail or O3 fallback.
+	Provisional ProvisionalFunc
 }
 
 // RespondOptions adjusts the Respond call (L2 §8.5 + L1 §11.1 Ad-2).
@@ -112,6 +137,34 @@ type RespondFunc func(
 	requestID CorrelationKey,
 	payload json.RawMessage,
 	opts RespondOptions,
+) (RespondResult, error)
+
+// ProvisionalOptions adjusts the Provisional call. Status is supplied as
+// a positional argument; this struct carries the optional knobs.
+type ProvisionalOptions struct {
+	// Visibility overrides the default response visibility (which
+	// inherits from the request). Empty = inherit.
+	Visibility message.Visibility
+
+	// Audience overrides the response audience. Empty = use the request's
+	// sender as the single audience entry (the canonical "respond to
+	// caller" path; Layer 0 §2.5 keeps provisional audience cardinality
+	// at 1).
+	Audience message.Audience
+}
+
+// ProvisionalFunc is the adapter-facing provisional response helper. The
+// framework constructs the envelope (kind=response, sender=adapter actor,
+// parent_id=requestID, payload includes status + user-supplied fields)
+// and writes it through the harness chain. Final closure state (pending
+// registry + F3 timer) is intentionally untouched — provisional response
+// does not resolve the request.
+type ProvisionalFunc func(
+	ctx context.Context,
+	requestID CorrelationKey,
+	status string,
+	payload json.RawMessage,
+	opts ProvisionalOptions,
 ) (RespondResult, error)
 
 // FailOptions adjusts a failed terminal emitted through FailFunc.

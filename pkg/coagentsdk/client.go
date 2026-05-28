@@ -6,13 +6,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -25,8 +24,6 @@ const (
 	defaultCallTimeout = 30 * time.Second
 	sessionCookieName  = "coagent_session"
 )
-
-var subscribeSettleDelay = 50 * time.Millisecond
 
 // Client is a minimal Go SDK client for calling an actor inside a channel.
 type Client struct {
@@ -48,6 +45,84 @@ type CallActorResult struct {
 	Data  json.RawMessage `json:"data,omitempty"`
 	Error *CallActorError `json:"error,omitempty"`
 	Raw   json.RawMessage `json:"-"`
+}
+
+// SubmitResult is what Submit returns once the request has been accepted
+// by the server. RequestID is the envelope id the caller passes to Watch
+// / Await — the client preserves caller-supplied ids when set, otherwise
+// it generates one and surfaces it here.
+//
+// SinceSeq is the channel cursor captured BEFORE the emit POST. Callers
+// that subscribe AFTER Submit pass it to Watch via WithSinceSeq so the
+// server's replay window covers the request's reply even if it landed
+// in viewcache before the WS subscribe completed. Without it the
+// subscribe-after-submit ordering creates a race: server may process the
+// request and emit final before the WS subscription is registered, and
+// the client never sees the final response (the D18 / F27 bug).
+type SubmitResult struct {
+	RequestID string
+	SinceSeq  int64
+}
+
+// SubmitRequest mirrors CallActorRequest but is intended for the
+// Submit + Watch / Await split surface: callers that need streaming
+// access to provisional responses, or fan-in across many in-flight
+// requests, use it instead of CallActor (which collapses everything
+// into one blocking final-response call).
+type SubmitRequest struct {
+	ChannelID string
+	ActorID   string
+	Type      string
+	Payload   json.RawMessage
+	// RequestID overrides the auto-generated envelope id when non-empty.
+	// Callers that want a deterministic id (idempotency / pre-allocated
+	// correlation ids) supply it here.
+	RequestID string
+}
+
+// WatchEvent is one frame on the Watch stream. Either Envelope is
+// non-nil (a substrate envelope matched parent_id == requestID), or
+// Err is non-nil (transport / decode failure terminating the watch).
+// Final responses (payload.status ∈ {completed, failed}) are delivered
+// with IsFinal=true so consumers can detect closure without re-parsing
+// the payload.
+type WatchEvent struct {
+	Envelope *message.Envelope
+	// IsFinal mirrors the protocol-level is_terminal derivation: true
+	// when Envelope is a kind=response with payload.status ∈
+	// {completed, failed}. Provisional responses (Layer 2 core + Layer
+	// 3 extension) keep IsFinal=false.
+	IsFinal bool
+	Err     error
+}
+
+// WatchHandle is the live subscription returned by Watch. Consumers
+// range over Events() until the channel closes, then call Close to
+// release resources (Close is idempotent + safe to call from any
+// goroutine).
+type WatchHandle struct {
+	events chan WatchEvent
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// Events returns the receive-only stream of envelopes whose
+// parent_id == requestID. The channel closes when the watch is closed
+// or the underlying transport terminates.
+func (w *WatchHandle) Events() <-chan WatchEvent { return w.events }
+
+// Close stops the watch and releases the underlying WebSocket. Safe
+// to call multiple times.
+func (w *WatchHandle) Close() {
+	if w == nil {
+		return
+	}
+	if w.cancel != nil {
+		w.cancel()
+	}
+	if w.done != nil {
+		<-w.done
+	}
 }
 
 type CallActorError struct {
@@ -168,9 +243,11 @@ func (c *Client) CallActor(ctx context.Context, req CallActorRequest) (*CallActo
 	}); err != nil {
 		return nil, fmt.Errorf("coagentsdk: websocket subscribe: %w", err)
 	}
-	if err := waitSubscribeSettle(ctx); err != nil {
-		return timeoutResult(req, timeout), nil
-	}
+	// Subscribe replay (server pushhub) covers the race window between
+	// the WS subscribe frame and the emit POST: even if the daemon emits
+	// the final response before the server-side subscription is
+	// registered, the since_seq=cursor replay will deliver it. No
+	// settle-delay needed.
 
 	requestID, err := newRequestID()
 	if err != nil {
@@ -186,6 +263,319 @@ func (c *Client) CallActor(ctx context.Context, req CallActorRequest) (*CallActo
 	}
 
 	return c.waitResponse(ctx, ws, req, matchIDs, timeout)
+}
+
+// Submit emits a kind=request envelope without waiting for the response.
+// Callers pair Submit with Watch (for streaming provisional + final) or
+// Await (for blocking on the final response). The returned RequestID is
+// the envelope id; pass it to Watch / Await for correlation.
+//
+// Submit + Watch / Await is the "first-class async" surface: the client
+// does NOT hold any pending future, so multiple in-flight requests fan
+// in over one shared substrate connection without sync wrap collapsing
+// them into RPC.
+//
+// Race fix (D18 / F27): Submit captures the channel cursor BEFORE the
+// emit POST and returns it as SubmitResult.SinceSeq. Callers MUST pass
+// this seq to Watch / WatchFrom (or Await) so the server's subscribe
+// replay window covers the request's reply even when it lands in
+// viewcache before the client's WS subscribe completes.
+func (c *Client) Submit(ctx context.Context, req SubmitRequest) (SubmitResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validateSubmitRequest(req); err != nil {
+		return SubmitResult{}, err
+	}
+	baseURL, err := normalizeBaseURL(c.BaseURL)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	hc := c.httpClient()
+	requestID := req.RequestID
+	if requestID == "" {
+		requestID, err = newRequestID()
+		if err != nil {
+			return SubmitResult{}, err
+		}
+	}
+	// Capture the cursor BEFORE emit so a subsequent Watch with
+	// WithSinceSeq(cursor) replays everything the substrate has appended
+	// since (including the reply if it lands before the watch
+	// subscribes server-side).
+	cursor, err := c.fetchCursor(ctx, hc, baseURL, req.ChannelID)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	callReq := CallActorRequest{
+		ChannelID: req.ChannelID,
+		ActorID:   req.ActorID,
+		Type:      req.Type,
+		Payload:   req.Payload,
+	}
+	if _, err := c.emitRequest(ctx, hc, baseURL, callReq, requestID); err != nil {
+		return SubmitResult{}, err
+	}
+	return SubmitResult{RequestID: requestID, SinceSeq: cursor}, nil
+}
+
+// Cursor returns the server's current last_received_seq for channelID.
+// Callers that want to subscribe-after-submit (e.g. fire-and-forget
+// flows that materialize a Watch later) capture this BEFORE the
+// emit POST and pass it to Watch via WithSinceSeq.
+func (c *Client) Cursor(ctx context.Context, channelID string) (int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(channelID) == "" {
+		return 0, fmt.Errorf("coagentsdk: channel_id is required")
+	}
+	baseURL, err := normalizeBaseURL(c.BaseURL)
+	if err != nil {
+		return 0, err
+	}
+	return c.fetchCursor(ctx, c.httpClient(), baseURL, channelID)
+}
+
+// WatchOption configures Watch. Today only WithSinceSeq is supported.
+type WatchOption func(*watchOptions)
+
+type watchOptions struct {
+	sinceSeq    int64
+	sinceSeqSet bool
+}
+
+// WithSinceSeq overrides the auto-fetched cursor: Watch will subscribe
+// with the supplied since_seq so the server replays any persisted
+// envelope with seq > sinceSeq. Pair with SubmitResult.SinceSeq for
+// subscribe-after-submit flows so an early-completing request isn't
+// lost in the race between emit POST and WS subscribe.
+func WithSinceSeq(sinceSeq int64) WatchOption {
+	return func(o *watchOptions) {
+		o.sinceSeq = sinceSeq
+		o.sinceSeqSet = true
+	}
+}
+
+// Watch opens a streaming subscription on the channel WebSocket and
+// delivers every envelope whose parent_id matches requestID. The
+// stream includes both provisional and final responses; consumers
+// inspect WatchEvent.IsFinal to detect closure.
+//
+// The stream is owned by the caller — close it via WatchHandle.Close
+// (Close is also fired automatically when ctx is cancelled). The watch
+// subscribes with a since_seq cursor: by default it fetches the
+// channel's current cursor first (preserves the legacy "subscribe-then-
+// submit" ordering); callers that submit BEFORE starting the watch MUST
+// pass WithSinceSeq(SubmitResult.SinceSeq) to avoid the race where the
+// reply lands in viewcache before the subscribe completes server-side.
+func (c *Client) Watch(ctx context.Context, channelID, requestID string, opts ...WatchOption) (*WatchHandle, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(channelID) == "" {
+		return nil, fmt.Errorf("coagentsdk: channel_id is required")
+	}
+	if strings.TrimSpace(requestID) == "" {
+		return nil, fmt.Errorf("coagentsdk: request_id is required")
+	}
+	var wopts watchOptions
+	for _, o := range opts {
+		o(&wopts)
+	}
+	baseURL, err := normalizeBaseURL(c.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	hc := c.httpClient()
+	var cursor int64
+	if wopts.sinceSeqSet {
+		cursor = wopts.sinceSeq
+	} else {
+		cursor, err = c.fetchCursor(ctx, hc, baseURL, channelID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	wsURL, err := websocketURL(baseURL)
+	if err != nil {
+		return nil, err
+	}
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	ws, _, err := c.dialWebSocket(watchCtx, wsURL)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("coagentsdk: websocket connect: %w", err)
+	}
+	if err := ws.WriteJSON(map[string]any{
+		"type":       "subscribe",
+		"channel_id": channelID,
+		"since_seq":  cursor,
+	}); err != nil {
+		_ = ws.Close()
+		cancel()
+		return nil, fmt.Errorf("coagentsdk: websocket subscribe: %w", err)
+	}
+
+	events := make(chan WatchEvent, 16)
+	done := make(chan struct{})
+	// closeWS guards the single Close call so the ctx-watcher and the
+	// read goroutine's defer don't race on gorilla's underlying conn.
+	var closeWSOnce sync.Once
+	closeWS := func() { closeWSOnce.Do(func() { _ = ws.Close() }) }
+
+	// ctx-watcher: when watchCtx fires, close the ws to interrupt the
+	// blocking ReadMessage. This is the *only* unblock mechanism — we
+	// deliberately do NOT use per-iter SetReadDeadline, because gorilla
+	// marks the connection corrupt after the first i/o timeout
+	// (`hideTempErr` drops Temporary()), and any subsequent ReadMessage
+	// spins toward gorilla's 1000-call panic "repeated read on failed
+	// websocket connection". The tight 1ns window returned by the old
+	// nextReadWindow once ctx expired made the spin instant.
+	stopWatcher := make(chan struct{})
+	go func() {
+		select {
+		case <-watchCtx.Done():
+			closeWS()
+		case <-stopWatcher:
+		}
+	}()
+
+	go func() {
+		defer close(done)
+		defer close(events)
+		defer closeWS()
+		defer close(stopWatcher)
+		// Defensive: if gorilla ever panics on a corrupted conn after
+		// ctx cancel, swallow it. The caller has already asked us to
+		// shut down via watchCtx; surfacing a panic into the SDK
+		// goroutine would kill the process.
+		defer func() {
+			if r := recover(); r != nil {
+				if watchCtx.Err() == nil {
+					// Unexpected panic outside ctx cancel — re-raise.
+					panic(r)
+				}
+			}
+		}()
+		for {
+			if err := watchCtx.Err(); err != nil {
+				return
+			}
+			mt, raw, err := ws.ReadMessage()
+			if err != nil {
+				if watchCtx.Err() != nil {
+					return
+				}
+				select {
+				case events <- WatchEvent{Err: fmt.Errorf("coagentsdk: websocket read: %w", err)}:
+				case <-watchCtx.Done():
+				}
+				return
+			}
+			if mt != websocket.TextMessage {
+				continue
+			}
+			var frame wsPushFrame
+			if err := json.Unmarshal(raw, &frame); err != nil {
+				continue
+			}
+			if frame.Type != "message" || frame.ChannelID != channelID || len(frame.Envelope) == 0 {
+				continue
+			}
+			var env message.Envelope
+			if err := json.Unmarshal(frame.Envelope, &env); err != nil {
+				continue
+			}
+			if env.ParentID.String() != requestID {
+				continue
+			}
+			ev := WatchEvent{Envelope: &env}
+			if env.Kind == message.KindResponse {
+				status, perr := parsePayloadStatus(env.Payload)
+				if perr != nil {
+					select {
+					case events <- WatchEvent{Err: perr}:
+					case <-watchCtx.Done():
+					}
+					return
+				}
+				ev.IsFinal = message.IsFinalStatus(status)
+			}
+			select {
+			case events <- ev:
+			case <-watchCtx.Done():
+				return
+			}
+			if ev.IsFinal {
+				// Final response closes the request — stop reading.
+				return
+			}
+		}
+	}()
+
+	return &WatchHandle{events: events, cancel: cancel, done: done}, nil
+}
+
+// Await blocks until the final response (payload.status ∈
+// {completed, failed}) for requestID arrives on channelID, or the
+// supplied timeout elapses. Provisional responses are silently dropped;
+// callers that need to observe them should use Watch instead.
+//
+// Await is sugar over Watch — internally it filters the watch stream to
+// the first IsFinal event and converts it to a CallActorResult. Timeout
+// failure does NOT cancel substrate state: the daemon may still emit a
+// final response later (Watch can observe it if the caller reconnects).
+//
+// opts forward to Watch — pass WithSinceSeq(SubmitResult.SinceSeq) when
+// awaiting a request that was Submit'd before this Await call.
+func (c *Client) Await(ctx context.Context, channelID, requestID string, timeout time.Duration, opts ...WatchOption) (*CallActorResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if timeout <= 0 {
+		timeout = defaultCallTimeout
+	}
+	awaitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	watch, err := c.Watch(awaitCtx, channelID, requestID, opts...)
+	if err != nil {
+		return nil, err
+	}
+	defer watch.Close()
+	for {
+		select {
+		case <-awaitCtx.Done():
+			return timeoutResult(CallActorRequest{ChannelID: channelID, Type: requestID}, timeout), nil
+		case ev, ok := <-watch.Events():
+			if !ok {
+				return timeoutResult(CallActorRequest{ChannelID: channelID, Type: requestID}, timeout), nil
+			}
+			if ev.Err != nil {
+				return nil, ev.Err
+			}
+			if ev.Envelope == nil || !ev.IsFinal {
+				continue
+			}
+			return resultFromResponse(*ev.Envelope)
+		}
+	}
+}
+
+func validateSubmitRequest(req SubmitRequest) error {
+	switch {
+	case strings.TrimSpace(req.ChannelID) == "":
+		return fmt.Errorf("coagentsdk: channel_id is required")
+	case strings.TrimSpace(req.ActorID) == "":
+		return fmt.Errorf("coagentsdk: actor_id is required")
+	case strings.TrimSpace(req.Type) == "":
+		return fmt.Errorf("coagentsdk: type is required")
+	}
+	if len(req.Payload) > 0 && !json.Valid(req.Payload) {
+		return fmt.Errorf("coagentsdk: payload must be valid JSON")
+	}
+	return nil
 }
 
 // ListActors returns the server's display projection for channel actors.
@@ -523,31 +913,41 @@ func (c *Client) dialWebSocket(ctx context.Context, wsURL string) (*websocket.Co
 	return dialer.DialContext(ctx, wsURL, header)
 }
 
-func waitSubscribeSettle(ctx context.Context) error {
-	if subscribeSettleDelay <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(subscribeSettleDelay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func (c *Client) waitResponse(ctx context.Context, ws *websocket.Conn, req CallActorRequest, matchIDs map[string]struct{}, timeout time.Duration) (*CallActorResult, error) {
+func (c *Client) waitResponse(ctx context.Context, ws *websocket.Conn, req CallActorRequest, matchIDs map[string]struct{}, timeout time.Duration) (result *CallActorResult, err error) {
+	// Same ctx-cancel-via-ws.Close pattern as Watch: gorilla's
+	// SetReadDeadline-based polling marks the conn corrupt after the
+	// first i/o timeout and risks the "repeated read on failed
+	// websocket connection" panic. Instead, fire a watcher that closes
+	// the ws when ctx expires, and let ReadMessage block indefinitely.
+	var closeOnce sync.Once
+	closeWS := func() { closeOnce.Do(func() { _ = ws.Close() }) }
+	stopWatcher := make(chan struct{})
+	defer close(stopWatcher)
+	go func() {
+		select {
+		case <-ctx.Done():
+			closeWS()
+		case <-stopWatcher:
+		}
+	}()
+	defer func() {
+		// Recover swallows gorilla's panic on a corrupted-after-close
+		// conn so the caller goroutine doesn't crash mid-test/CLI run.
+		// If ctx is still alive we propagate (real bug, not shutdown).
+		if r := recover(); r != nil {
+			if ctx.Err() == nil {
+				panic(r)
+			}
+			result = timeoutResult(req, timeout)
+			err = nil
+		}
+	}()
 	for {
 		if err := ctx.Err(); err != nil {
 			return timeoutResult(req, timeout), nil
 		}
-		_ = ws.SetReadDeadline(time.Now().Add(nextReadWindow(ctx)))
 		mt, raw, err := ws.ReadMessage()
 		if err != nil {
-			if isTimeout(err) {
-				continue
-			}
 			if ctx.Err() != nil {
 				return timeoutResult(req, timeout), nil
 			}
@@ -573,27 +973,35 @@ func (c *Client) waitResponse(ctx context.Context, ws *websocket.Conn, req CallA
 		if _, ok := matchIDs[env.ParentID.String()]; !ok {
 			continue
 		}
+		// CallActor only resolves on a final response (proto-foundation
+		// §1.6.3). Provisional responses (payload.status ∈ Layer 2/3) on
+		// the same parent_id are silently dropped here — callers that
+		// need to observe them must use Submit + Watch instead.
+		status, parseErr := parsePayloadStatus(env.Payload)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if !message.IsFinalStatus(status) {
+			continue
+		}
 		return resultFromResponse(env)
 	}
 }
 
-func nextReadWindow(ctx context.Context) time.Duration {
-	window := 500 * time.Millisecond
-	if deadline, ok := ctx.Deadline(); ok {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return time.Nanosecond
-		}
-		if remaining < window {
-			return remaining
-		}
+// parsePayloadStatus extracts the response envelope's payload.status
+// field. Returns an empty string when payload is empty / malformed; the
+// error path is reserved for genuinely undecodable payloads.
+func parsePayloadStatus(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 {
+		return "", nil
 	}
-	return window
-}
-
-func isTimeout(err error) bool {
-	var netErr net.Error
-	return err != nil && (strings.Contains(err.Error(), "i/o timeout") || (errors.As(err, &netErr) && netErr.Timeout()))
+	var obj struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return "", fmt.Errorf("coagentsdk: response payload must be a JSON object: %w", err)
+	}
+	return obj.Status, nil
 }
 
 func resultFromResponse(env message.Envelope) (*CallActorResult, error) {

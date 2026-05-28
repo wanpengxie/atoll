@@ -368,6 +368,10 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 	if err != nil {
 		return fmt.Errorf("framework: build respond for %s: %w", decl.Name, err)
 	}
+	provisional, err := buildProvisional(respondCfg)
+	if err != nil {
+		return fmt.Errorf("framework: build provisional for %s: %w", decl.Name, err)
+	}
 	fallback, err := buildSynthesizedTerminalFallback(respondConfig{
 		adapterName:    decl.Name,
 		adapterActorID: decl.ActorID,
@@ -395,6 +399,7 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		AdapterActorID:           decl.ActorID,
 		ChannelID:                m.cfg.ChannelID,
 		Respond:                  respond,
+		Provisional:              provisional,
 		Fail:                     buildFail(respond),
 		CompleteExternalResponse: completeExternalResponse,
 		EmitEvent:                buildEmitEvent(respondCfg, decl),

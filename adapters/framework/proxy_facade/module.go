@@ -131,8 +131,111 @@ func (m *ProxyFacadeModule) OnExternalCallback(ctx context.Context, payload []by
 	if env.Type == "actor.readiness.changed" {
 		return m.updateReadinessFromEvent(ctx, &env)
 	}
+	// Response envelopes are polymorphic per proto-foundation §1.6.3:
+	// payload.status ∈ {completed, failed} are final and close the
+	// correlation; any other status is provisional and must NOT touch
+	// the pending registry / F3 timer. Routing every response through
+	// CompleteExternalResponse would prematurely fire CorrelationDone on
+	// the first provisional and reject the trailing final as a
+	// terminal_duplicate — breaking provisional streams from proxy-hosted
+	// actors.
+	if env.Kind == message.KindResponse {
+		status, statusErr := extractPayloadStatus(env.Payload)
+		if statusErr != nil {
+			return fmt.Errorf("proxy_facade: decode callback payload.status: %w", statusErr)
+		}
+		if !message.IsFinalStatus(status) {
+			return m.handleProvisionalCallback(ctx, &env, status)
+		}
+	}
 	_, err := m.mctx.CompleteExternalResponse(ctx, &env)
 	return err
+}
+
+// handleProvisionalCallback routes a provisional response envelope from
+// the proxy daemon transport through ModuleContext.Provisional so the
+// framework builds a fresh response envelope without touching the
+// pending correlation entry / F3 timer. The original envelope's
+// sender / audience / type are reused via the request lookup inside
+// Provisional; we only forward the parent_id (= request id), the
+// status, and the user-supplied payload fields.
+func (m *ProxyFacadeModule) handleProvisionalCallback(ctx context.Context, env *message.Envelope, status string) error {
+	if m.mctx.Provisional == nil {
+		return errors.New("proxy_facade: Provisional helper unavailable; provisional response callback cannot be routed")
+	}
+	if env.ParentID == "" {
+		return errors.New("proxy_facade: provisional callback parent_id required")
+	}
+	if env.ChannelID == "" {
+		return errors.New("proxy_facade: provisional callback channel_id required")
+	}
+	if env.ChannelID != m.mctx.ChannelID {
+		return fmt.Errorf("proxy_facade: provisional channel mismatch: callback=%s manager=%s", env.ChannelID, m.mctx.ChannelID)
+	}
+	if env.Sender.ID != m.mctx.AdapterActorID {
+		return fmt.Errorf("proxy_facade: provisional sender mismatch: callback=%s adapter=%s", env.Sender.ID, m.mctx.AdapterActorID)
+	}
+	// The framework Provisional helper re-merges status onto the payload;
+	// strip it from the inbound copy so we don't pass duplicate fields.
+	userFields, err := payloadWithoutStatus(env.Payload)
+	if err != nil {
+		return fmt.Errorf("proxy_facade: prepare provisional payload: %w", err)
+	}
+	_, err = m.mctx.Provisional(
+		ctx,
+		adapter.CorrelationKey(env.ParentID),
+		status,
+		userFields,
+		adapter.ProvisionalOptions{
+			Visibility: env.Visibility,
+			Audience:   env.Audience,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("proxy_facade: emit provisional: %w", err)
+	}
+	return nil
+}
+
+// extractPayloadStatus pulls payload.status out of a response envelope
+// payload without imposing a typed schema on the rest of the payload.
+// Empty payload / missing status both return "" which IsFinalStatus
+// reports as non-final — for the proxy_facade callback path that means
+// we treat a missing status as provisional. The harness will still
+// reject the chain write if the status is malformed.
+func extractPayloadStatus(payload json.RawMessage) (string, error) {
+	if len(payload) == 0 || string(payload) == "null" {
+		return "", nil
+	}
+	var fields struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return "", err
+	}
+	return fields.Status, nil
+}
+
+// payloadWithoutStatus returns the payload object with the top-level
+// "status" key removed. Used before handing the payload to
+// ModuleContext.Provisional which re-injects the status itself.
+func payloadWithoutStatus(payload json.RawMessage) (json.RawMessage, error) {
+	if len(payload) == 0 || string(payload) == "null" {
+		return json.RawMessage(`{}`), nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return nil, fmt.Errorf("payload must be a JSON object: %w", err)
+	}
+	if fields == nil {
+		return json.RawMessage(`{}`), nil
+	}
+	delete(fields, "status")
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (m *ProxyFacadeModule) updateReadinessFromEvent(ctx context.Context, env *message.Envelope) error {

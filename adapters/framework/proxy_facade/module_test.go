@@ -3,6 +3,7 @@ package proxy_facade
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
@@ -37,6 +38,9 @@ func TestProxyFacadeHandleSendsEnvelopeViaDeviceTransit(t *testing.T) {
 		AdapterActorID: decl.ActorID,
 		ChannelID:      "ch-1",
 		CompleteExternalResponse: func(context.Context, *message.Envelope) (adapter.RespondResult, error) {
+			return adapter.RespondResult{}, nil
+		},
+		Provisional: func(context.Context, adapter.CorrelationKey, string, json.RawMessage, adapter.ProvisionalOptions) (adapter.RespondResult, error) {
 			return adapter.RespondResult{}, nil
 		},
 		UpdateReadiness: func(context.Context, actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
@@ -95,6 +99,9 @@ func TestProxyFacadeCallbackWritesEnvelope(t *testing.T) {
 		ForwardExternalRequest: func(context.Context, *message.Envelope, adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
 			return adapter.ExternalRequestResult{}, nil
 		},
+		Provisional: func(context.Context, adapter.CorrelationKey, string, json.RawMessage, adapter.ProvisionalOptions) (adapter.RespondResult, error) {
+			return adapter.RespondResult{}, nil
+		},
 		UpdateReadiness: func(context.Context, actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
 			return actorreg.ReadinessTransition{}, nil
 		},
@@ -144,6 +151,9 @@ func TestProxyFacadeReadinessRejectsForgedAuthority(t *testing.T) {
 			return adapter.ExternalRequestResult{}, nil
 		},
 		CompleteExternalResponse: func(context.Context, *message.Envelope) (adapter.RespondResult, error) {
+			return adapter.RespondResult{}, nil
+		},
+		Provisional: func(context.Context, adapter.CorrelationKey, string, json.RawMessage, adapter.ProvisionalOptions) (adapter.RespondResult, error) {
 			return adapter.RespondResult{}, nil
 		},
 		UpdateReadiness: func(context.Context, actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
@@ -218,5 +228,225 @@ func TestProxyFacadeReadinessRejectsForgedAuthority(t *testing.T) {
 				t.Fatalf("%s must not update readiness, updates before=%d after=%d", tc.name, before, updates)
 			}
 		})
+	}
+}
+
+// captureCalls counts invocations on the Provisional / CompleteExternalResponse
+// paths so tests can assert proxy_facade routes provisional vs final correctly.
+type captureCalls struct {
+	provisional []provisionalCall
+	finals      []*message.Envelope
+}
+
+type provisionalCall struct {
+	requestID adapter.CorrelationKey
+	status    string
+	payload   json.RawMessage
+	opts      adapter.ProvisionalOptions
+}
+
+func newModuleWithCapture(t *testing.T) (*ProxyFacadeModule, *captureCalls) {
+	t.Helper()
+	mod, err := New(adapter.Declaration{
+		Name:         "proxy-echo",
+		ActorID:      "tool:proxy-echo",
+		Types:        []string{"proxy.echo"},
+		Binding:      actor.BindingRuntimeInboundViaRelay,
+		MaxPendingMs: 30_000,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	calls := &captureCalls{}
+	if err := mod.Init(context.Background(), &adapter.ModuleContext{
+		AdapterName:    "proxy-echo",
+		AdapterActorID: "tool:proxy-echo",
+		ChannelID:      "ch-1",
+		ForwardExternalRequest: func(context.Context, *message.Envelope, adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
+			return adapter.ExternalRequestResult{}, nil
+		},
+		CompleteExternalResponse: func(_ context.Context, env *message.Envelope) (adapter.RespondResult, error) {
+			calls.finals = append(calls.finals, env)
+			return adapter.RespondResult{MessageID: env.ID}, nil
+		},
+		Provisional: func(_ context.Context, requestID adapter.CorrelationKey, status string, payload json.RawMessage, opts adapter.ProvisionalOptions) (adapter.RespondResult, error) {
+			calls.provisional = append(calls.provisional, provisionalCall{
+				requestID: requestID,
+				status:    status,
+				payload:   append(json.RawMessage(nil), payload...),
+				opts:      opts,
+			})
+			return adapter.RespondResult{MessageID: "msg-prov"}, nil
+		},
+		UpdateReadiness: func(context.Context, actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
+			return actorreg.ReadinessTransition{}, nil
+		},
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	return mod, calls
+}
+
+func mustEncodeEnvelope(t *testing.T, env message.Envelope) []byte {
+	t.Helper()
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("encode envelope: %v", err)
+	}
+	return raw
+}
+
+func provisionalEnvelope(id, status string) message.Envelope {
+	return message.Envelope{
+		ID:            message.ID(id),
+		ChannelID:     "ch-1",
+		Sender:        message.Sender{Kind: actor.KindTool, ID: "tool:proxy-echo"},
+		Kind:          message.KindResponse,
+		Type:          "proxy.echo",
+		ParentID:      "req-1",
+		CorrelationID: "req-1",
+		Payload:       json.RawMessage(`{"status":"` + status + `","note":"working"}`),
+		Audience:      message.Audience{"agent:author"},
+	}
+}
+
+func finalEnvelope(id, status string) message.Envelope {
+	return message.Envelope{
+		ID:            message.ID(id),
+		ChannelID:     "ch-1",
+		Sender:        message.Sender{Kind: actor.KindTool, ID: "tool:proxy-echo"},
+		Kind:          message.KindResponse,
+		Type:          "proxy.echo",
+		ParentID:      "req-1",
+		CorrelationID: "req-1",
+		Payload:       json.RawMessage(`{"status":"` + status + `","echo":"ping"}`),
+		Audience:      message.Audience{"agent:author"},
+	}
+}
+
+func TestProxyFacadeCallbackRoutesProvisionalThroughProvisional(t *testing.T) {
+	mod, calls := newModuleWithCapture(t)
+
+	raw := mustEncodeEnvelope(t, provisionalEnvelope("prov-1", "processing"))
+	if err := mod.OnExternalCallback(context.Background(), raw); err != nil {
+		t.Fatalf("OnExternalCallback provisional: %v", err)
+	}
+	if len(calls.finals) != 0 {
+		t.Fatalf("provisional must NOT call CompleteExternalResponse; got %d final calls", len(calls.finals))
+	}
+	if len(calls.provisional) != 1 {
+		t.Fatalf("provisional must call Provisional exactly once; got %d", len(calls.provisional))
+	}
+	got := calls.provisional[0]
+	if got.requestID != adapter.CorrelationKey("req-1") {
+		t.Fatalf("provisional requestID=%s want req-1", got.requestID)
+	}
+	if got.status != "processing" {
+		t.Fatalf("provisional status=%s want processing", got.status)
+	}
+	if len(got.opts.Audience) != 1 || got.opts.Audience[0] != "agent:author" {
+		t.Fatalf("provisional audience=%v want [agent:author]", got.opts.Audience)
+	}
+	// payload forwarded to Provisional must NOT pre-contain status —
+	// the framework helper re-injects it. We DO expect the user-supplied
+	// fields to survive (note=working).
+	var payload map[string]any
+	if err := json.Unmarshal(got.payload, &payload); err != nil {
+		t.Fatalf("decode forwarded payload: %v raw=%s", err, string(got.payload))
+	}
+	if _, hasStatus := payload["status"]; hasStatus {
+		t.Fatalf("forwarded payload must not carry status; got %v", payload)
+	}
+	if payload["note"] != "working" {
+		t.Fatalf("forwarded payload missing user fields; got %v", payload)
+	}
+}
+
+func TestProxyFacadeCallbackRoutesFinalThroughCompleteExternalResponse(t *testing.T) {
+	mod, calls := newModuleWithCapture(t)
+
+	for _, status := range []string{"completed", "failed"} {
+		raw := mustEncodeEnvelope(t, finalEnvelope("final-"+status, status))
+		if err := mod.OnExternalCallback(context.Background(), raw); err != nil {
+			t.Fatalf("OnExternalCallback final %s: %v", status, err)
+		}
+	}
+	if len(calls.provisional) != 0 {
+		t.Fatalf("final responses must NOT call Provisional; got %d provisional calls", len(calls.provisional))
+	}
+	if len(calls.finals) != 2 {
+		t.Fatalf("expected 2 final calls; got %d", len(calls.finals))
+	}
+}
+
+func TestProxyFacadeCallbackProvisionalThenFinalLeavesCorrelationUntilFinal(t *testing.T) {
+	mod, calls := newModuleWithCapture(t)
+
+	// First: two provisionals must not touch CompleteExternalResponse,
+	// meaning correlation/F3 remain in place.
+	for i, status := range []string{"received", "processing"} {
+		raw := mustEncodeEnvelope(t, provisionalEnvelope(fmt.Sprintf("prov-%d", i), status))
+		if err := mod.OnExternalCallback(context.Background(), raw); err != nil {
+			t.Fatalf("OnExternalCallback provisional %s: %v", status, err)
+		}
+		if len(calls.finals) != 0 {
+			t.Fatalf("after %d provisionals, finals must remain 0; got %d", i+1, len(calls.finals))
+		}
+	}
+	if len(calls.provisional) != 2 {
+		t.Fatalf("expected 2 provisional calls; got %d", len(calls.provisional))
+	}
+	// Then: the final response closes the correlation (CompleteExternalResponse).
+	raw := mustEncodeEnvelope(t, finalEnvelope("final-1", "completed"))
+	if err := mod.OnExternalCallback(context.Background(), raw); err != nil {
+		t.Fatalf("OnExternalCallback final: %v", err)
+	}
+	if len(calls.finals) != 1 {
+		t.Fatalf("expected 1 final call after final response; got %d", len(calls.finals))
+	}
+	if len(calls.provisional) != 2 {
+		t.Fatalf("provisional count must stay at 2; got %d", len(calls.provisional))
+	}
+}
+
+func TestProxyFacadeCallbackProvisionalChannelMismatchRejected(t *testing.T) {
+	mod, calls := newModuleWithCapture(t)
+	env := provisionalEnvelope("prov-mismatch", "processing")
+	env.ChannelID = "ch-other"
+	raw := mustEncodeEnvelope(t, env)
+	if err := mod.OnExternalCallback(context.Background(), raw); err == nil {
+		t.Fatalf("provisional callback with wrong channel must be rejected")
+	}
+	if len(calls.provisional) != 0 || len(calls.finals) != 0 {
+		t.Fatalf("rejected provisional must not invoke any path; got prov=%d final=%d",
+			len(calls.provisional), len(calls.finals))
+	}
+}
+
+func TestProxyFacadeCallbackProvisionalSenderMismatchRejected(t *testing.T) {
+	mod, calls := newModuleWithCapture(t)
+	env := provisionalEnvelope("prov-bad-sender", "processing")
+	env.Sender = message.Sender{Kind: actor.KindTool, ID: "tool:not-us"}
+	raw := mustEncodeEnvelope(t, env)
+	if err := mod.OnExternalCallback(context.Background(), raw); err == nil {
+		t.Fatalf("provisional callback with foreign sender must be rejected")
+	}
+	if len(calls.provisional) != 0 || len(calls.finals) != 0 {
+		t.Fatalf("rejected provisional must not invoke any path; got prov=%d final=%d",
+			len(calls.provisional), len(calls.finals))
+	}
+}
+
+func TestProxyFacadeCallbackProvisionalMissingParentRejected(t *testing.T) {
+	mod, calls := newModuleWithCapture(t)
+	env := provisionalEnvelope("prov-no-parent", "processing")
+	env.ParentID = ""
+	raw := mustEncodeEnvelope(t, env)
+	if err := mod.OnExternalCallback(context.Background(), raw); err == nil {
+		t.Fatalf("provisional callback without parent_id must be rejected")
+	}
+	if len(calls.provisional) != 0 || len(calls.finals) != 0 {
+		t.Fatalf("rejected provisional must not invoke any path; got prov=%d final=%d",
+			len(calls.provisional), len(calls.finals))
 	}
 }
