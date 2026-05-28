@@ -91,10 +91,12 @@ func TestAllRejectReasons(t *testing.T) {
 		message.HarnessResponseParentNotFound,
 		message.HarnessResponseParentNotRequest,
 		message.HarnessResponseStatusInvalid,
+		message.HarnessResponseStatusNamespaceMismatch,
 		message.HarnessResponseReasonInvalid,
 		message.HarnessResponseUnauthorizedSender,
 		message.HarnessResponseAudienceMismatch,
 		message.HarnessTerminalDuplicate,
+		message.HarnessProvisionalAfterFinal,
 		message.HarnessEngineACLDenied,
 	}
 	if len(message.AllHarnessRejectReasons) != len(want) {

@@ -3,14 +3,18 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// stepResponsePairing implements proto-layer1 §2.8 Step 8 — The One Law
-// / terminal-uniqueness contract. Applies only to kind=response.
+// stepResponsePairing implements proto-layer1 §2.8 Step 8 — Final
+// Response Uniqueness + Response Parent Validation. Applies only to
+// kind=response.
 //
 // Concretely:
 //
@@ -18,24 +22,39 @@ import (
 //     harness_response_parent_not_found.
 //   - parent.kind must equal "request"; otherwise →
 //     harness_response_parent_not_request.
-//   - payload.status MUST be one of {"completed","failed"}; otherwise →
-//     harness_response_status_invalid.
+//   - payload.status MUST belong to the proto-layer0 §2.5 half-closed
+//     set:
+//
+//     – Layer 1 final (strict closed): {"completed","failed"} → is_terminal=true.
+//     – Layer 2 provisional core (strict closed):
+//     {"received","queued","processing","deferred","unavailable"} → is_terminal=false.
+//     – Layer 3 provisional business extension (regex
+//     `^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`): namespace part must not
+//     collide with any Layer 1 / Layer 2 status name AND must equal
+//     the sender.id local-name (everything after the last `:`). Anti-
+//     spoofing per proto-layer0 §2.5.3. Otherwise →
+//     harness_response_status_invalid or
+//     harness_response_status_namespace_mismatch.
+//   - When status=failed (Layer 1 final), payload.reason MUST be in the
+//     terminal_failure_reason closed set; otherwise →
+//     harness_response_reason_invalid.
 //   - response.sender must be one of the parent request's audience actors,
 //     and response.audience must target the parent request sender exactly.
 //     Trusted system terminal-failure fallbacks are the only sender
 //     exception; they still must target the parent request sender.
-//   - is_terminal is computed per type_registry.terminal_convention:
-//     core types collapse to single-response semantics; business types
-//     read payload.status (or single-response, when set).
-//   - same-parent_id duplicate is enforced at engine append (the
-//     store's UNIQUE constraint maps to terminal_duplicate). This step
-//     does NOT pre-scan store; the store's unique-index plus the
-//     classifyAppendErr mapping in runtime/store handles concurrency
-//     correctly per L2 §1.4.1 invariant.
-//
-// We DO perform a non-authoritative early check (FindByID parent) so
-// the harness can return the appropriate reject before any sqlite
-// transaction starts — saves a roundtrip on obviously wrong responses.
+//   - Zombie chain defence (proto-layer1 §2.8 #8): when the log already
+//     contains a final response for the same parent, a new final →
+//     harness_terminal_duplicate; a new provisional →
+//     harness_provisional_after_final. The ux_terminal_response_per_request
+//     UNIQUE INDEX in store.schema is the authoritative defence for the
+//     former (catching concurrent racers that slip past this pre-check);
+//     this step surfaces the closed-set reject for both in the
+//     non-racing single-writer path.
+//   - is_terminal is computed from the payload.status classification:
+//     Layer 1 → true; Layer 2 / Layer 3 → false. proto-layer0 §2.5.1
+//     replaces the prior type_registry.terminal_convention dispatch —
+//     terminal_convention rows kept in the schema for backward storage
+//     compat but no longer drive harness classification.
 type stepResponsePairing struct {
 	deps Deps
 }
@@ -67,12 +86,12 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 		}, nil
 	}
 
-	// payload.status strict closed set — proto-layer1 §2.8 #4. Missing
-	// status (or non-string / out-of-set) → harness_response_status_invalid.
-	if !payloadStatusValid(env.Payload) {
+	// payload.status half-closed-set classification — proto-layer0 §2.5.
+	statusCls := classifyResponseStatus(env.Payload, env.Sender.ID)
+	if statusCls.reject != "" {
 		return khar.Outcome{
-			RejectReason: message.HarnessResponseStatusInvalid,
-			Detail:       "payload.status must be one of {completed, failed}",
+			RejectReason: statusCls.reject,
+			Detail:       statusCls.detail,
 		}, nil
 	}
 
@@ -102,27 +121,30 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 		}, nil
 	}
 
-	// Compute is_terminal.
-	if _, isCore := message.CoreTypeTable[env.Type]; isCore {
-		env.IsTerminal = true
-		return khar.Outcome{}, nil
-	}
-	if s.deps.TypeRegistry == nil {
-		// Defensive — without type_registry we cannot decide terminal
-		// convention; default to payload_status which still surfaces
-		// completed/failed as terminal.
-		env.IsTerminal = payloadStatusTerminal(env.Payload)
-		return khar.Outcome{}, nil
-	}
-	view, ok, err := s.deps.TypeRegistry.Lookup(ctx, env.Type)
+	// Zombie chain defence (proto-layer1 §2.8 #8). A pre-existing final
+	// response for the same parent forbids any further row: another
+	// final is a duplicate; a provisional after final is a zombie.
+	hasFinal, err := s.deps.Log.HasFinalResponse(ctx, s.deps.ChannelID, env.ParentID)
 	if err != nil {
 		return khar.Outcome{}, err
 	}
-	if !ok || view.TerminalConvention == "" || view.TerminalConvention == "payload_status" {
-		env.IsTerminal = payloadStatusTerminal(env.Payload)
-	} else {
-		env.IsTerminal = true
+	if hasFinal {
+		if statusCls.isFinal {
+			return khar.Outcome{
+				RejectReason: message.HarnessTerminalDuplicate,
+				Detail:       "final response already exists for parent: " + string(env.ParentID),
+			}, nil
+		}
+		return khar.Outcome{
+			RejectReason: message.HarnessProvisionalAfterFinal,
+			Detail:       "provisional response after final is forbidden for parent: " + string(env.ParentID),
+		}, nil
 	}
+
+	// is_terminal derives purely from the Layer 1 final closed set.
+	// type_registry.terminal_convention rows are no longer consulted —
+	// the proto-layer0 §2.5.1 derivation is uniform across all types.
+	env.IsTerminal = statusCls.isFinal
 	return khar.Outcome{}, nil
 }
 
@@ -202,46 +224,120 @@ func terminalFailureReasonAllowed(reason string) bool {
 	return false
 }
 
-// payloadStatusValid returns true when payload.status is present and
-// equals one of the proto-layer1 §2.8 closed set {"completed","failed"}.
-// Empty payload or missing/non-string status → false (caller rejects
-// with harness_response_status_invalid).
-func payloadStatusValid(payload []byte) bool {
-	if len(payload) == 0 {
-		return false
-	}
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &doc); err != nil {
-		return false
-	}
-	raw, ok := doc["status"]
-	if !ok {
-		return false
-	}
-	var status string
-	if err := json.Unmarshal(raw, &status); err != nil {
-		return false
-	}
-	return status == "completed" || status == "failed"
+// layer2ProvisionalStatuses is the Layer 2 provisional core closed set
+// per proto-layer0 §2.5.2. Expansion is a protocol-level revision.
+var layer2ProvisionalStatuses = map[string]struct{}{
+	"received":    {},
+	"queued":      {},
+	"processing":  {},
+	"deferred":    {},
+	"unavailable": {},
 }
 
-// payloadStatusTerminal returns true when payload.status is one of
-// {"completed","failed"} per L1 §10.2.
-func payloadStatusTerminal(payload []byte) bool {
+// layer3StatusRegex enforces the Layer 3 provisional business extension
+// grammar per proto-layer0 §2.5.3:
+//
+//	^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$
+//
+// Exactly one `.`; both halves non-empty; first character of each half a
+// lowercase letter (no leading digit / underscore); remaining characters
+// drawn from [a-z0-9_].
+var layer3StatusRegex = regexp.MustCompile(`^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`)
+
+// statusClassification is the structured outcome of payload.status
+// half-closed-set classification.
+type statusClassification struct {
+	// isFinal is true when the status belongs to the Layer 1 final
+	// closed set ({"completed","failed"}). Layer 2 / Layer 3 statuses
+	// are provisional and isFinal=false.
+	isFinal bool
+
+	// reject, when non-empty, names the closed-set reject reason the
+	// caller MUST return; detail is the human-readable explanation.
+	reject message.HarnessRejectReason
+	detail string
+}
+
+// classifyResponseStatus runs the proto-layer0 §2.5 half-closed-set
+// classification on env.Payload's `status` field. senderID is used for
+// the Layer 3 namespace ownership check.
+func classifyResponseStatus(payload []byte, senderID actor.ActorID) statusClassification {
+	status, ok := extractPayloadStatus(payload)
+	if !ok {
+		return statusClassification{
+			reject: message.HarnessResponseStatusInvalid,
+			detail: "payload.status missing or non-string",
+		}
+	}
+	if message.IsFinalStatus(status) {
+		return statusClassification{isFinal: true}
+	}
+	if _, ok := layer2ProvisionalStatuses[status]; ok {
+		return statusClassification{isFinal: false}
+	}
+	if layer3StatusRegex.MatchString(status) {
+		namespace := status[:strings.IndexByte(status, '.')]
+		if _, ok := layer2ProvisionalStatuses[namespace]; ok {
+			return statusClassification{
+				reject: message.HarnessResponseStatusInvalid,
+				detail: fmt.Sprintf("payload.status namespace %q collides with Layer 2 provisional name", namespace),
+			}
+		}
+		if message.IsFinalStatus(namespace) {
+			return statusClassification{
+				reject: message.HarnessResponseStatusInvalid,
+				detail: fmt.Sprintf("payload.status namespace %q collides with Layer 1 final name", namespace),
+			}
+		}
+		expected := senderLocalName(senderID)
+		if namespace != expected {
+			return statusClassification{
+				reject: message.HarnessResponseStatusNamespaceMismatch,
+				detail: fmt.Sprintf("payload.status namespace %q must equal sender local-name %q", namespace, expected),
+			}
+		}
+		return statusClassification{isFinal: false}
+	}
+	return statusClassification{
+		reject: message.HarnessResponseStatusInvalid,
+		detail: fmt.Sprintf("payload.status %q not in any of {Layer 1 final, Layer 2 provisional, Layer 3 <ns>.<name>}", status),
+	}
+}
+
+// extractPayloadStatus pulls the `status` string from the response
+// payload. Returns ok=false when the payload is empty, malformed JSON,
+// missing `status`, or has a non-string `status`.
+func extractPayloadStatus(payload []byte) (string, bool) {
 	if len(payload) == 0 {
-		return false
+		return "", false
 	}
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &doc); err != nil {
-		return false
+		return "", false
 	}
 	raw, ok := doc["status"]
 	if !ok {
-		return false
+		return "", false
 	}
 	var status string
 	if err := json.Unmarshal(raw, &status); err != nil {
-		return false
+		return "", false
 	}
-	return status == "completed" || status == "failed"
+	return status, true
+}
+
+// senderLocalName derives the local-name portion of a sender.id per
+// proto-layer0 §2.5.3 namespace ownership rule: everything after the
+// last `:`, falling back to the full id when no `:` is present.
+//
+//	"tool:xhs"       → "xhs"
+//	"agent:planner"  → "planner"
+//	"daemon"         → "daemon"
+//	"a:b:c"          → "c"
+func senderLocalName(id actor.ActorID) string {
+	s := string(id)
+	if i := strings.LastIndexByte(s, ':'); i >= 0 {
+		return s[i+1:]
+	}
+	return s
 }

@@ -40,8 +40,13 @@ type TypeView struct {
 	// (audience_handler_mismatch).
 	HandlerActorID actor.ActorID
 
-	// TerminalConvention controls step 8 is_terminal computation.
-	// Empty defaults to payload_status.
+	// TerminalConvention is a legacy type_registry knob retained for
+	// storage compatibility. Since proto-layer0 §2.5.1 reframed
+	// is_terminal as a uniform `(kind == response && payload.status ∈
+	// {completed, failed})` derivation, the harness no longer consults
+	// this field. It survives in TypeView so the type_registry sqlite
+	// row schema stays stable; future cleanups may drop it once the
+	// registry column is retired.
 	TerminalConvention string
 }
 

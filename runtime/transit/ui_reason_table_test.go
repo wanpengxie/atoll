@@ -106,12 +106,14 @@ func expectedHarnessUIClass(reason message.HarnessRejectReason) string {
 		message.HarnessSenderKindMismatch,
 		message.HarnessSenderDeregistered,
 		message.HarnessAudienceMemberNotActive,
-		message.HarnessResponseUnauthorizedSender:
+		message.HarnessResponseUnauthorizedSender,
+		message.HarnessResponseStatusNamespaceMismatch:
 		return "identity"
 	case message.HarnessWorkerFencingStale,
 		message.HarnessReservedTypeUnauthorizedSender,
 		message.HarnessAudienceHandlerMismatch,
 		message.HarnessTerminalDuplicate,
+		message.HarnessProvisionalAfterFinal,
 		message.HarnessEngineACLDenied:
 		return "protocol_system"
 	default:

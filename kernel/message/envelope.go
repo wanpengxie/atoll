@@ -99,6 +99,24 @@ type Envelope struct {
 	CanonicalHash string `json:"-"`
 }
 
+// IsFinalStatus reports whether the given payload.status value belongs
+// to the Layer 1 final closed set per proto-layer0 §2.5.1. The Layer 1
+// set is strictly closed at {"completed","failed"}; expanding it
+// requires a protocol-level revision (proto-foundation §F.closure_policy
+// guards uniqueness of the final response).
+//
+// Provisional response statuses — both the Layer 2 core closed set
+// (received / queued / processing / deferred / unavailable) and Layer 3
+// business namespace extensions (`<adapter>.<name>`) — are NOT final
+// and return false here. is_terminal derivation uses this helper:
+//
+//	is_terminal = (kind == "response" && IsFinalStatus(payload.status))
+//
+// per proto-layer0 §2.5.1 and proto-foundation §1.6.3.
+func IsFinalStatus(status string) bool {
+	return status == "completed" || status == "failed"
+}
+
 // HashInputFields lists the top-level keys (in alphabetical order)
 // that feed CanonicalHash per L2 §1.4.10.2.
 //

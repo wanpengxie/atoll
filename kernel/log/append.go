@@ -94,4 +94,16 @@ type MessageLog interface {
 	// against the stored sender-provided hash without recomputing from
 	// the post-normalize row.
 	LookupCanonicalHash(ctx context.Context, channelID channel.ID, id message.ID) (hash string, ok bool, err error)
+
+	// HasFinalResponse reports whether the channel log already contains
+	// a kind=response row pointing at parentID with payload.status in
+	// the Layer 1 final closed set ({"completed","failed"}). It is the
+	// non-authoritative pre-check harness Step 8 uses to distinguish
+	// final-after-final (→ harness_terminal_duplicate) from
+	// provisional-after-final (→ harness_provisional_after_final). The
+	// engine append UNIQUE INDEX on (parent_id) WHERE is_terminal=1 is
+	// the authoritative defence against the former; this lookup is the
+	// only way to surface the latter, which the partial index cannot
+	// catch by definition.
+	HasFinalResponse(ctx context.Context, channelID channel.ID, parentID message.ID) (bool, error)
 }

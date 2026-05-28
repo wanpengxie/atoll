@@ -121,6 +121,16 @@ func (l *memLog) FindByID(_ context.Context, _ channel.ID, id message.ID) (messa
 	return row, ok, nil
 }
 
+func (l *memLog) HasFinalResponse(_ context.Context, _ channel.ID, parentID message.ID) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if parentID == "" {
+		return false, nil
+	}
+	_, ok := l.terminal[parentID]
+	return ok, nil
+}
+
 func (l *memLog) LookupCanonicalHash(_ context.Context, _ channel.ID, id message.ID) (string, bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

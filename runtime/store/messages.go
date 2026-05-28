@@ -457,6 +457,40 @@ func (m *Messages) MarkDeliveryError(ctx context.Context, id message.ID, atMs in
 	return nil
 }
 
+// HasFinalResponse implements log.MessageLog. Returns true when at
+// least one kind=response row exists for parent_id=parentID with the
+// row's is_terminal column set — store layer has already materialised
+// the (kind==response && payload.status ∈ {completed, failed})
+// derivation per proto-layer0 §2.5.1 + L2 §1.4.1, so the bit is the
+// canonical "final exists" answer.
+//
+// Used by harness Step 8 (proto-layer1 §2.8) to distinguish
+// final-after-final from provisional-after-final. The
+// `ux_terminal_response_per_request` UNIQUE INDEX guards final-after-
+// final at INSERT time; this query is the pre-check that lets the
+// harness reject provisional-after-final with the correct closed-set
+// reason instead of silently appending a zombie row.
+func (m *Messages) HasFinalResponse(ctx context.Context, channelID channel.ID, parentID message.ID) (bool, error) {
+	_ = channelID // per-channel sqlite already scopes the query
+	if parentID == "" {
+		return false, nil
+	}
+	const q = `SELECT 1 FROM messages
+	            WHERE parent_id = ?
+	              AND kind = 'response'
+	              AND is_terminal = 1
+	            LIMIT 1`
+	var one int
+	switch err := m.db.QueryRowContext(ctx, q, parentID).Scan(&one); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	default:
+		return false, fmt.Errorf("store: has final response: %w", err)
+	}
+}
+
 // LookupCanonicalHash implements log.MessageLog — returns the row's
 // stored canonical_hash for StepDedupe's pre-normalize comparison
 // (proto-layer1 §2.3).
