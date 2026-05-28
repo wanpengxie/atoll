@@ -510,11 +510,15 @@ func countResponses(t *testing.T, db *sql.DB, requestID message.ID) int {
 // framework F3 timer 兜底 emit reason=unanswered_timeout，确保 The
 // One Law 单一终态 + 没有 terminal_duplicate.
 //
-// Wall-clock budget:
+// Wall-clock budget (post a39746d: framework F3 deadline = min(now+MaxPendingMs,
+// env.expires_at) — see reservePendingRequest):
 //
-//	t=0      seed request with expires_at = now+200ms; adapter MaxPendingMs=1500ms
-//	t=600ms  poll: must be ZERO response rows (scheduler 已扫多次，tool skip)
-//	t≈1.5s   framework F3 emits failed reason=unanswered_timeout
+//	t=0      seed request with expires_at = now+1500ms; adapter MaxPendingMs=400ms
+//	         → F3 fires at ~t=400ms (MaxPendingMs is the binding deadline)
+//	t=200ms  poll: must be ZERO response rows (scheduler has scanned ~6
+//	         times, MaxPendingMs not yet hit, env.expires_at still in future
+//	         → scheduler ignores; F3 hasn't fired)
+//	t≈400ms  framework F3 emits failed reason=unanswered_timeout
 //	t<4s     final poll asserts exactly ONE terminal response with the
 //	         unanswered timeout reason.
 func TestIntegration_LongPending_ToolReceiverSkippedByScheduler_F3Wins(t *testing.T) {
@@ -524,7 +528,7 @@ func TestIntegration_LongPending_ToolReceiverSkippedByScheduler_F3Wins(t *testin
 	d, srv, channelsDir := startIntegrationDaemon(t, ctx, integDaemonOpts{
 		XHSConfig: testXHSConfig{
 			SkipRespond:  true,
-			MaxPendingMs: 1500, // F3 deadline ~1.5s after Handle
+			MaxPendingMs: 400, // F3 deadline ~400ms after Handle (binding constraint)
 		},
 		SchedulerPeriod: 30 * time.Millisecond, // aggressive scan loop
 	})
@@ -536,7 +540,7 @@ func TestIntegration_LongPending_ToolReceiverSkippedByScheduler_F3Wins(t *testin
 	})
 
 	const requestID = "req-join-1"
-	expiresAt := nowMs() + 200 // expires well before MaxPendingMs deadline
+	expiresAt := nowMs() + 1500 // expires AFTER MaxPendingMs so F3 deadline = MaxPendingMs
 	ack := writeRequestWithExpiry(t, ctx, d, srv, channelID, requestID,
 		"user:alice", devicexhs.TypePublish, []byte(`{"title":"slow"}`), &expiresAt)
 	if !ack.Accepted {
@@ -546,15 +550,16 @@ func TestIntegration_LongPending_ToolReceiverSkippedByScheduler_F3Wins(t *testin
 	_, db := openChannelMessages(t, channelsDir, channelID)
 	defer func() { _ = db.Close() }()
 
-	// 1) Mid-flight check at 600ms: expires_at lapsed long ago, scheduler
-	//    has scanned ~20 times (period=30ms), MaxPendingMs not yet hit.
-	//    There MUST be no response row — tool-skip branch holds.
-	time.Sleep(600 * time.Millisecond)
+	// 1) Mid-flight check at 200ms: scheduler has scanned ~6 times (period=30ms).
+	//    envelope.expires_at not yet lapsed (1500ms), so scheduler's expires_at
+	//    gate already ignores the row. F3 (~400ms) also not yet fired.
+	//    There MUST be no response row.
+	time.Sleep(200 * time.Millisecond)
 	if c := countResponses(t, db, ack.MessageID); c != 0 {
 		t.Fatalf("scheduler emitted %d terminal(s) before F3 fired — tool-skip branch broken", c)
 	}
 
-	// 2) Adapter F3 timer eventually fires. Poll up to 5s.
+	// 2) Adapter F3 timer eventually fires (~t=400ms). Poll up to 5s.
 	resp := pollResponse(t, db, ack.MessageID, 5*time.Second)
 	if resp.Sender.ID != actor.SystemActorID || resp.Sender.Kind != actor.KindSystem {
 		t.Fatalf("timer fallback sender=(%s,%s) want system actor", resp.Sender.Kind, resp.Sender.ID)

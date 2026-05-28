@@ -18,8 +18,11 @@ import (
 	"os/exec"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // fakeGateway is a tiny stub for POST /api/channels/:chID/messages.
@@ -327,5 +330,464 @@ func TestAnswer_HappyPath(t *testing.T) {
 	_ = json.Unmarshal([]byte(fg.lastBody), &got)
 	if got["kind"] != "response" || got["parent_id"] != "req-1" {
 		t.Errorf("body kind/parent_id=%v/%v raw=%s", got["kind"], got["parent_id"], fg.lastBody)
+	}
+}
+
+// =====================================================================
+// `--watch` surface (response-multitype-refactor §3.7 G).
+// =====================================================================
+
+// watchFakeServer simulates the gateway HTTP POST + cursor + WS push
+// surface the SDK's Watch() consumes. The test scripts a sequence of
+// response envelopes (provisional + final) the WS handler emits after
+// the SDK subscribes; the request id the gateway saw at POST time is
+// stamped as parent_id on every emitted envelope.
+type watchFakeServer struct {
+	srv *httptest.Server
+
+	mu          sync.Mutex
+	postedReqID string
+	posted      chan struct{}
+}
+
+// runWatchFakeServer boots a watchFakeServer scripted to emit the
+// supplied response payloads (each `{"status":"...","detail":"..."}`).
+// kind=response envelopes are pushed in order with parent_id == the
+// envelope id the CLI POST'd.
+func runWatchFakeServer(t *testing.T, payloads []json.RawMessage) *watchFakeServer {
+	t.Helper()
+	w := &watchFakeServer{posted: make(chan struct{}, 1)}
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/channels/ch-1/cursor", func(rw http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(rw).Encode(map[string]int64{"last_received_seq": 0})
+	})
+	mux.HandleFunc("/api/channels/ch-1/messages", func(rw http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		var body struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(raw, &body)
+		w.mu.Lock()
+		w.postedReqID = body.ID
+		w.mu.Unlock()
+		select {
+		case w.posted <- struct{}{}:
+		default:
+		}
+		_ = json.NewEncoder(rw).Encode(map[string]any{
+			"message_id":     body.ID,
+			"correlation_id": body.ID,
+			"frame_id":       "frame-1",
+			"accepted":       true,
+		})
+	})
+	mux.HandleFunc("/ws", func(rw http.ResponseWriter, r *http.Request) {
+		ws, err := upgrader.Upgrade(rw, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = ws.Close() }()
+		var sub map[string]any
+		if err := ws.ReadJSON(&sub); err != nil {
+			return
+		}
+		if sub["type"] != "subscribe" {
+			return
+		}
+		// Wait for POST so the parent_id is known before we emit.
+		select {
+		case <-w.posted:
+		case <-time.After(5 * time.Second):
+			return
+		}
+		w.mu.Lock()
+		parentID := w.postedReqID
+		w.mu.Unlock()
+
+		for i, payload := range payloads {
+			// Tiny gap between frames so the CLI side definitely sees
+			// each frame as a separate read on stderr.
+			time.Sleep(10 * time.Millisecond)
+			env := map[string]any{
+				"id":         "resp-" + watchTestItoa(i),
+				"channel_id": "ch-1",
+				"sender":     map[string]any{"kind": "tool", "id": "tool:xhs"},
+				"kind":       "response",
+				"type":       "xhs.publish",
+				"audience":   []string{"user:alice"},
+				"payload":    payload,
+				"parent_id":  parentID,
+				"ts":         time.Now().UnixMilli(),
+				"visibility": "public",
+			}
+			envRaw, _ := json.Marshal(env)
+			frame := map[string]any{
+				"type":       "message",
+				"channel_id": "ch-1",
+				"seq":        int64(i + 1),
+				"envelope":   json.RawMessage(envRaw),
+			}
+			if err := ws.WriteJSON(frame); err != nil {
+				return
+			}
+		}
+		// Keep the socket open until the client closes — the CLI side
+		// closes after observing the final response.
+		<-r.Context().Done()
+	})
+	w.srv = httptest.NewServer(mux)
+	t.Cleanup(w.srv.Close)
+	return w
+}
+
+func watchTestItoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	out := ""
+	for i > 0 {
+		out = string(rune('0'+i%10)) + out
+		i /= 10
+	}
+	return out
+}
+
+// TestAsk_Watch_StreamsProvisionalAndFinal — the canonical happy path.
+// Stream is `received` → `processing` → `completed`. CLI must:
+//   - stream the two provisional statuses to stderr (⏳ lines)
+//   - print the final payload JSON to stdout
+//   - exit 0
+//   - keep the legacy emit-ack trace on stderr too
+func TestAsk_Watch_StreamsProvisionalAndFinal(t *testing.T) {
+	t.Parallel()
+	bin := buildCLI(t)
+	fake := runWatchFakeServer(t, []json.RawMessage{
+		json.RawMessage(`{"status":"received"}`),
+		json.RawMessage(`{"status":"processing","detail":"40% done"}`),
+		json.RawMessage(`{"status":"completed","note_id":"n-1"}`),
+	})
+
+	stdout, stderr, code := runCLI(t, bin,
+		[]string{
+			"COAGENT_SERVER_URL=" + fake.srv.URL,
+			"COAGENT_SESSION_TOKEN=tok",
+			"COAGENT_CHANNEL_ID=ch-1",
+		},
+		[]string{
+			"ask",
+			"--type", "xhs.publish",
+			"--audience", "tool:xhs",
+			"--payload", `{"title":"hi"}`,
+			"--watch",
+			"--timeout", "5s",
+		})
+	if code != 0 {
+		t.Fatalf("exit=%d (want 0) stderr=%q stdout=%q", code, stderr, stdout)
+	}
+
+	// stdout must carry the final payload (and ONLY the final payload —
+	// the legacy ack moves to stderr under --watch).
+	var finalPayload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &finalPayload); err != nil {
+		t.Fatalf("stdout final payload not JSON: %v\nraw=%q", err, stdout)
+	}
+	if finalPayload["status"] != "completed" || finalPayload["note_id"] != "n-1" {
+		t.Errorf("final payload=%v want status=completed,note_id=n-1", finalPayload)
+	}
+
+	// stderr must carry both provisional traces in order, plus the
+	// emitted-ack line.
+	if !strings.Contains(stderr, "coagent: emitted ") {
+		t.Errorf("stderr missing emitted-ack trace: %q", stderr)
+	}
+	if !strings.Contains(stderr, "⏳ received") {
+		t.Errorf("stderr missing 'received' provisional: %q", stderr)
+	}
+	idxR := strings.Index(stderr, "⏳ received")
+	idxP := strings.Index(stderr, "⏳ processing")
+	if idxP < 0 || idxP < idxR {
+		t.Errorf("stderr order broken: received=%d processing=%d full=%q", idxR, idxP, stderr)
+	}
+}
+
+// TestAsk_Watch_FinalFailedMapsExitCode — when the final response is
+// status=failed, the CLI exits with askExitWatchFailed (8) and emits a
+// reject blob with reason="response_failed" + detail mirroring
+// payload.reason (proto-layer0 §2.6 terminal failure closed set).
+func TestAsk_Watch_FinalFailedMapsExitCode(t *testing.T) {
+	t.Parallel()
+	bin := buildCLI(t)
+	fake := runWatchFakeServer(t, []json.RawMessage{
+		json.RawMessage(`{"status":"received"}`),
+		json.RawMessage(`{"status":"failed","reason":"receiver_unavailable","detail":"xhs offline"}`),
+	})
+
+	stdout, stderr, code := runCLI(t, bin,
+		[]string{
+			"COAGENT_SERVER_URL=" + fake.srv.URL,
+			"COAGENT_SESSION_TOKEN=tok",
+			"COAGENT_CHANNEL_ID=ch-1",
+		},
+		[]string{
+			"ask",
+			"--type", "xhs.publish",
+			"--audience", "tool:xhs",
+			"--payload", `{"title":"hi"}`,
+			"--watch",
+			"--timeout", "5s",
+		})
+	if code != 8 {
+		t.Fatalf("exit=%d want 8; stderr=%q stdout=%q", code, stderr, stdout)
+	}
+	// stdout still carries the final payload so callers can parse the
+	// failure detail programmatically.
+	if !strings.Contains(stdout, `"status":"failed"`) {
+		t.Errorf("stdout missing failed payload: %q", stdout)
+	}
+	if !strings.Contains(stderr, `"reason":"response_failed"`) {
+		t.Errorf("stderr missing response_failed reject: %q", stderr)
+	}
+	if !strings.Contains(stderr, "receiver_unavailable") {
+		t.Errorf("stderr missing terminal failure reason detail: %q", stderr)
+	}
+}
+
+// TestAsk_Watch_TimeoutWhenNoFinal — when only provisionals arrive
+// before the timeout, CLI exits with askExitWatchTimeout (7).
+func TestAsk_Watch_TimeoutWhenNoFinal(t *testing.T) {
+	t.Parallel()
+	bin := buildCLI(t)
+	fake := runWatchFakeServer(t, []json.RawMessage{
+		json.RawMessage(`{"status":"received"}`),
+		json.RawMessage(`{"status":"processing"}`),
+	})
+
+	_, stderr, code := runCLI(t, bin,
+		[]string{
+			"COAGENT_SERVER_URL=" + fake.srv.URL,
+			"COAGENT_SESSION_TOKEN=tok",
+			"COAGENT_CHANNEL_ID=ch-1",
+		},
+		[]string{
+			"ask",
+			"--type", "xhs.publish",
+			"--audience", "tool:xhs",
+			"--payload", `{"title":"hi"}`,
+			"--watch",
+			"--timeout", "300ms",
+		})
+	if code != 7 {
+		t.Fatalf("exit=%d want 7 (watch_timeout); stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, `"reason":"watch_timeout"`) {
+		t.Errorf("stderr missing watch_timeout reject: %q", stderr)
+	}
+}
+
+// TestAsk_Watch_FastFinalRecoveredViaReplay is the F27 race regression:
+// the actor's final response lands in the channel log BEFORE the CLI's
+// WS subscribe completes server-side. Without server-side replay the
+// CLI would block on the WS waiting for a push that already happened,
+// then time out. With the fix the CLI captures cursor before POST and
+// passes it as since_seq=N to the subscribe; the server's replay window
+// pushes the persisted final down to the CLI on subscribe.
+func TestAsk_Watch_FastFinalRecoveredViaReplay(t *testing.T) {
+	t.Parallel()
+	bin := buildCLI(t)
+	fake := runFastFinalFakeServer(t, json.RawMessage(`{"status":"completed","note_id":"n-fast"}`))
+
+	stdout, stderr, code := runCLI(t, bin,
+		[]string{
+			"COAGENT_SERVER_URL=" + fake.srv.URL,
+			"COAGENT_SESSION_TOKEN=tok",
+			"COAGENT_CHANNEL_ID=ch-1",
+		},
+		[]string{
+			"ask",
+			"--type", "xhs.publish",
+			"--audience", "tool:xhs",
+			"--payload", `{"title":"hi"}`,
+			"--watch",
+			"--timeout", "3s",
+		})
+	if code != 0 {
+		t.Fatalf("exit=%d (want 0 — replay should have recovered fast-final) stderr=%q stdout=%q", code, stderr, stdout)
+	}
+	var finalPayload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &finalPayload); err != nil {
+		t.Fatalf("stdout final payload not JSON: %v\nraw=%q", err, stdout)
+	}
+	if finalPayload["status"] != "completed" || finalPayload["note_id"] != "n-fast" {
+		t.Errorf("final payload=%v want status=completed,note_id=n-fast", finalPayload)
+	}
+}
+
+// fastFinalFakeServer simulates the F27 race: the server appends the
+// final response to its in-memory log AT EMIT TIME, then the WS handler
+// honours since_seq replay so the persisted final can be re-served to
+// a late subscriber.
+type fastFinalFakeServer struct {
+	srv *httptest.Server
+}
+
+func runFastFinalFakeServer(t *testing.T, finalPayload json.RawMessage) *fastFinalFakeServer {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+
+	type persistedFrame struct {
+		seq int64
+		raw json.RawMessage
+	}
+	var (
+		mu        sync.Mutex
+		persisted []persistedFrame
+		// Capture the request id seen at POST so the WS handler can
+		// stamp it as parent_id on the persisted response.
+		postedID    string
+		emitDoneCh  = make(chan struct{})
+		emitDoneRef = &sync.Once{}
+	)
+	closeEmitDoneOnce := func() {
+		emitDoneRef.Do(func() { close(emitDoneCh) })
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/channels/ch-1/cursor", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		cur := int64(0)
+		if len(persisted) > 0 {
+			cur = persisted[len(persisted)-1].seq
+		}
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]int64{"last_received_seq": cur})
+	})
+	mux.HandleFunc("/api/channels/ch-1/messages", func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		var body struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(raw, &body)
+		// "Fast final": persist the response at seq=1 INSIDE the emit
+		// POST so any later WS subscribe with since_seq=0 can replay it.
+		env := map[string]any{
+			"id":         "resp-fast",
+			"channel_id": "ch-1",
+			"sender":     map[string]any{"kind": "tool", "id": "tool:xhs"},
+			"kind":       "response",
+			"type":       "xhs.publish",
+			"audience":   []string{"user:alice"},
+			"payload":    finalPayload,
+			"parent_id":  body.ID,
+			"ts":         time.Now().UnixMilli(),
+			"visibility": "public",
+		}
+		envRaw, _ := json.Marshal(env)
+		mu.Lock()
+		postedID = body.ID
+		persisted = append(persisted, persistedFrame{seq: 1, raw: envRaw})
+		mu.Unlock()
+		closeEmitDoneOnce()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"message_id":     body.ID,
+			"correlation_id": body.ID,
+			"frame_id":       "frame-1",
+			"accepted":       true,
+		})
+	})
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		ws, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = ws.Close() }()
+		var sub map[string]any
+		if err := ws.ReadJSON(&sub); err != nil {
+			return
+		}
+		if sub["type"] != "subscribe" {
+			return
+		}
+		sinceSeq := int64(0)
+		switch v := sub["since_seq"].(type) {
+		case float64:
+			sinceSeq = int64(v)
+		case int64:
+			sinceSeq = v
+		}
+		// Wait for the emit to land before serving replay so the test
+		// deterministically exercises the late-subscribe path.
+		select {
+		case <-emitDoneCh:
+		case <-r.Context().Done():
+			return
+		}
+		_ = postedID // captured under mu; not needed for the test
+		mu.Lock()
+		snapshot := make([]persistedFrame, len(persisted))
+		copy(snapshot, persisted)
+		mu.Unlock()
+		for _, p := range snapshot {
+			if p.seq <= sinceSeq {
+				continue
+			}
+			frame := map[string]any{
+				"type":       "message",
+				"channel_id": "ch-1",
+				"seq":        p.seq,
+				"envelope":   p.raw,
+			}
+			if err := ws.WriteJSON(frame); err != nil {
+				return
+			}
+		}
+		<-r.Context().Done()
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return &fastFinalFakeServer{srv: srv}
+}
+
+// TestAsk_NoWatchKeepsLegacyBehavior — explicit guard that the default
+// (no --watch flag) path is unchanged: stdout carries the gateway ack,
+// stderr is silent, exit is 0. Existing xhs-cli RealProvider depends on
+// this.
+func TestAsk_NoWatchKeepsLegacyBehavior(t *testing.T) {
+	t.Parallel()
+	bin := buildCLI(t)
+	srv, _ := newFakeGateway(t, http.StatusOK, `{
+		"frame_id": "frame-no-watch",
+		"message_id": "msg-no-watch",
+		"correlation_id": "msg-no-watch",
+		"accepted": true
+	}`)
+
+	stdout, stderr, code := runCLI(t, bin,
+		[]string{
+			"COAGENT_SERVER_URL=" + srv.URL,
+			"COAGENT_SESSION_TOKEN=tok",
+			"COAGENT_CHANNEL_ID=ch-1",
+		},
+		[]string{
+			"ask",
+			"--type", "xhs.publish",
+			"--audience", "tool:xhs",
+			"--payload", `{"title":"hi"}`,
+		})
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q stdout=%q", code, stderr, stdout)
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("stdout: %v raw=%q", err, stdout)
+	}
+	if out["id"] != "msg-no-watch" {
+		t.Errorf("stdout id=%v want msg-no-watch", out["id"])
+	}
+	if strings.Contains(stderr, "⏳") || strings.Contains(stderr, "emitted ") {
+		t.Errorf("stderr should be silent without --watch: %q", stderr)
 	}
 }

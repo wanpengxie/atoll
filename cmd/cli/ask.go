@@ -42,6 +42,7 @@ package main
 // real_provider.go (classifyExit). KEEP IN SYNC when changing codes.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -49,13 +50,21 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/wanpengxie/ActOS/pkg/coagentsdk"
 )
 
 // askExitCodes mirror the archived daemon-go cmd/coagent contract.
 // Internal constants — external callers should never hard-code these
 // numbers; instead use the named exit code in stderr triage.
+//
+// Codes 7-9 are the response-multitype-refactor §3.7 G additions for
+// the `--watch` surface. They sit above the legacy 0-6 set so existing
+// xhs-cli classifyExit logic keeps working unchanged for non-watch
+// invocations.
 const (
 	askExitOK            = 0
 	askExitUsage         = 2
@@ -63,6 +72,17 @@ const (
 	askExitInfra         = 4
 	askExitNoBinding     = 5
 	askExitFlagFormat    = 6
+	// askExitWatchTimeout — `--watch` deadline elapsed before a final
+	// response (payload.status ∈ {completed, failed}) arrived. The
+	// substrate may still emit final later; the CLI just stopped waiting.
+	askExitWatchTimeout = 7
+	// askExitWatchFailed — final response arrived with
+	// payload.status="failed". The reason (proto-layer0 §2.6 terminal
+	// failure closed set) is echoed in the stderr reject blob.
+	askExitWatchFailed = 8
+	// askExitWatchInfra — watch transport / decode failure before any
+	// final response was observed (websocket drop, malformed envelope).
+	askExitWatchInfra = 9
 )
 
 // runAsk dispatches `coagent ask --type T --audience A [...] --payload-file P`
@@ -104,6 +124,14 @@ func runWriteMessageCmd(name, kind string, args []string) int {
 		// (same id + same content) supply --message-id explicitly so
 		// re-runs collapse to one daemon append.
 		messageID = fs.String("message-id", "", "sender-provided envelope.id (default: fresh uuid; reuse to make a retry idempotent)")
+		// `--watch` / `--timeout` are the response-multitype-refactor
+		// §3.7 G surface: after the request is accepted, subscribe to
+		// the channel log and stream provisional responses to stderr
+		// until a final response (payload.status ∈ {completed, failed})
+		// arrives or the timeout elapses. Defaults preserve the legacy
+		// emit-and-return behaviour so existing callers are unaffected.
+		watch       = fs.Bool("watch", false, "after emit, stream provisional + final responses (kind=request only; default: emit-and-return)")
+		watchTimout = fs.Duration("timeout", 30*time.Second, "max time to wait for a final response when --watch is set")
 	)
 	serverURL, token := bindGlobalFlags(fs)
 	// Use a Buffer for parse errors so we can emit them as flat JSON to
@@ -208,6 +236,24 @@ func runWriteMessageCmd(name, kind string, args []string) int {
 		body["visibility"] = *visibility
 	}
 
+	// `--watch` race fix (D18 / F27): the CLI subscribes AFTER the POST
+	// (see runAskWatch), so we must capture the channel cursor BEFORE
+	// the emit. Otherwise a fast actor that emits its final response
+	// before the WS subscribe completes lands in viewcache at seq>cursor
+	// when the WS subscribes — and the subscribe's since_seq=cursor
+	// replay would miss it. We pre-fetch the cursor here so the watch
+	// later replays from this exact seq, covering the race window.
+	var watchSinceSeq int64
+	if *watch && kind == "request" {
+		sdkClient := &coagentsdk.Client{BaseURL: resolvedURL, SessionToken: resolvedToken}
+		cur, cerr := sdkClient.Cursor(context.Background(), chID)
+		if cerr != nil {
+			writeAskReject(askErrInfra, "watch: fetch cursor: "+cerr.Error())
+			return askExitWatchInfra
+		}
+		watchSinceSeq = cur
+	}
+
 	var ack map[string]any
 	if err := c.do("POST", "/api/channels/"+chID+"/messages", body, &ack); err != nil {
 		return classifyAskError(err)
@@ -246,6 +292,28 @@ func runWriteMessageCmd(name, kind string, args []string) int {
 		out["dedupe"] = true
 	}
 
+	// `--watch` (kind=request only) keeps the existing ack on stderr as
+	// a structured trace line (so wrapper CLIs that read stdout JSON
+	// still only see the final response there), then streams provisional
+	// responses to stderr and exits when the final response arrives.
+	if *watch && kind == "request" {
+		ackLine, _ := json.Marshal(out)
+		fmt.Fprintf(os.Stderr, "coagent: emitted %s\n", string(ackLine))
+		requestID, _ := out["id"].(string)
+		if strings.TrimSpace(requestID) == "" {
+			writeAskReject(askErrInfra, "watch: missing request id from gateway ack")
+			return askExitWatchInfra
+		}
+		return runAskWatch(askWatchParams{
+			ServerURL: resolvedURL,
+			Token:     resolvedToken,
+			ChannelID: chID,
+			RequestID: requestID,
+			Timeout:   *watchTimout,
+			SinceSeq:  watchSinceSeq,
+		})
+	}
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(out); err != nil {
@@ -253,6 +321,146 @@ func runWriteMessageCmd(name, kind string, args []string) int {
 		return askExitInfra
 	}
 	return askExitOK
+}
+
+// askWatchParams carries the resolved transport / correlation values
+// runAskWatch needs to drive the SDK Watch loop.
+type askWatchParams struct {
+	ServerURL string
+	Token     string
+	ChannelID string
+	RequestID string
+	Timeout   time.Duration
+	// SinceSeq is the channel cursor captured BEFORE the emit POST. Watch
+	// subscribes with since_seq=SinceSeq so any envelope appended to the
+	// channel between the cursor capture and the WS subscribe is replayed
+	// — covers the subscribe-after-submit race (D18 / F27).
+	SinceSeq int64
+}
+
+// runAskWatch subscribes via the SDK's Watch handle and dispatches each
+// envelope by (kind, payload.status):
+//
+//   - kind=event           → ignored (one-line stderr trace, no dispatch)
+//   - kind=response final  → write final payload JSON to stdout, exit per status
+//   - kind=response prov.  → write `⏳ <status>: <detail>` to stderr, keep waiting
+//
+// On timeout the function emits a reject blob to stderr and exits with
+// askExitWatchTimeout. The substrate may still emit the final response
+// later — this is the caller-side deadline, not a substrate cancel.
+func runAskWatch(p askWatchParams) int {
+	if strings.TrimSpace(p.ServerURL) == "" {
+		writeAskReject(askErrInfra, "watch: server URL is required (set --server-url or COAGENT_SERVER_URL)")
+		return askExitWatchInfra
+	}
+	if p.Timeout <= 0 {
+		p.Timeout = 30 * time.Second
+	}
+	client := &coagentsdk.Client{
+		BaseURL:      p.ServerURL,
+		SessionToken: p.Token,
+	}
+	// Two distinct contexts:
+	//   - watchCtx is the SDK lifetime; we cancel it explicitly (via
+	//     watch.Close()) on every exit path so the SDK read goroutine
+	//     unwinds cleanly without racing on a tiny read deadline.
+	//   - timer drives the user-facing deadline. We deliberately do NOT
+	//     wire the timeout into the SDK context, because the SDK's
+	//     nextReadWindow shrinks the read deadline to ~1ns once ctx is
+	//     past — that races with gorilla's "no repeated reads after
+	//     error" invariant. Closing via watch.Close() is the clean exit.
+	watchCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watch, err := client.Watch(watchCtx, p.ChannelID, p.RequestID, coagentsdk.WithSinceSeq(p.SinceSeq))
+	if err != nil {
+		writeAskReject(askErrInfra, "watch: subscribe: "+err.Error())
+		return askExitWatchInfra
+	}
+	defer watch.Close()
+
+	timer := time.NewTimer(p.Timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-timer.C:
+			writeAskReject("watch_timeout", fmt.Sprintf("no final response within %s for request %s", p.Timeout, p.RequestID))
+			return askExitWatchTimeout
+		case ev, ok := <-watch.Events():
+			if !ok {
+				writeAskReject("watch_timeout", fmt.Sprintf("watch closed without final response for request %s", p.RequestID))
+				return askExitWatchTimeout
+			}
+			if ev.Err != nil {
+				writeAskReject(askErrInfra, "watch: "+ev.Err.Error())
+				return askExitWatchInfra
+			}
+			if ev.Envelope == nil {
+				continue
+			}
+			env := ev.Envelope
+			switch string(env.Kind) {
+			case "event":
+				// Side-channel observation; trace one line so debug
+				// shows it but don't drive any state transition.
+				fmt.Fprintf(os.Stderr, "coagent: watch: event type=%s id=%s (ignored)\n", env.Type, string(env.ID))
+				continue
+			case "response":
+				status, detail := decodeResponsePayload(env.Payload)
+				if !ev.IsFinal {
+					// Provisional — stream to stderr, keep waiting.
+					fmt.Fprintf(os.Stderr, "coagent: watch: ⏳ %s: %s\n", status, detail)
+					continue
+				}
+				// Final response — emit the payload to stdout so
+				// downstream pipelines can JSON-parse it, then exit per
+				// completed / failed split.
+				if _, err := os.Stdout.Write(append([]byte(env.Payload), '\n')); err != nil {
+					writeAskReject(askErrInfra, "watch: write stdout: "+err.Error())
+					return askExitWatchInfra
+				}
+				if status == "completed" {
+					return askExitOK
+				}
+				// status="failed" → emit reject blob + non-zero exit.
+				// proto-layer0 §2.6 terminal failure reason closed set
+				// (unanswered_timeout / receiver_internal_error /
+				// receiver_unavailable) is echoed verbatim in detail.
+				writeAskReject("response_failed", detail)
+				return askExitWatchFailed
+			default:
+				// kind=request: shouldn't happen (parent_id filter
+				// excludes non-replies). Log and keep waiting.
+				fmt.Fprintf(os.Stderr, "coagent: watch: unexpected kind=%s (ignored)\n", env.Kind)
+			}
+		}
+	}
+}
+
+// decodeResponsePayload extracts (status, detail) from a response
+// envelope payload. detail prefers payload.reason (terminal failure
+// closed set), then payload.detail, then payload.message, then a
+// truncated raw fallback so the human-readable line is never empty.
+func decodeResponsePayload(raw json.RawMessage) (status, detail string) {
+	if len(raw) == 0 {
+		return "", ""
+	}
+	var obj struct {
+		Status  string `json:"status"`
+		Reason  string `json:"reason"`
+		Detail  string `json:"detail"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return "", truncate(string(raw), 80)
+	}
+	status = obj.Status
+	detail = firstNonEmpty(obj.Reason, obj.Detail, obj.Message)
+	if detail == "" {
+		detail = truncate(string(raw), 80)
+	}
+	return status, detail
 }
 
 // askErrCode-style sentinels — these are the strings emitted in the
