@@ -4,6 +4,8 @@ node_modules/
 dist/
 # T5 xhs CLI dev build product (adapters/device/xhs/cli)
 /coagent-xhs
+# root cli build artifact (go build -o cli ./cmd/cli)
+/cli
 /bin/
 .dalek/*
 !.dalek/pm/
@@ -21,3 +23,4 @@ bin/
 
 # UI build artifacts: chrome extension zip is staged here by `make extension-zip`
 ui/public/downloads/
+/.cache/
