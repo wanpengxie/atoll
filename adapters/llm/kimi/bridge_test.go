@@ -866,6 +866,217 @@ func TestBridge_ClassifyLLMError_NetworkBuckets(t *testing.T) {
 	}
 }
 
+// TestBridge_CallActorToolProvisionalBeforeFinalDoesNotResolveEarly
+// asserts the end-to-end async-aware path: when the daemon delivers a
+// Layer 2 provisional response (`status=processing`) before the final
+// (`status=completed`), the bridge's call_actor tool MUST wait for the
+// final and return that payload to the LLM — provisional traffic is
+// quarantined per response-multitype-refactor.md §3.4 D v1 ("ignore
+// provisional, still wait for final").
+//
+// Also covers the Layer 3 namespace case: a `xhs.login_queued`
+// provisional in between two responses must not short-circuit the
+// future either.
+func TestBridge_CallActorToolProvisionalBeforeFinalDoesNotResolveEarly(t *testing.T) {
+	cfg := mustConfig(t)
+	cfg.ChannelContext = kimi.ChannelContext{
+		Actors: []kimi.ActorInfo{
+			{ActorID: "tool:xhs", Kind: "tool", Binding: "runtime_inbound_via_relay"},
+		},
+		Types: []kimi.TypeInfo{{
+			Type:           "xhs.publish",
+			HandlerActorID: "tool:xhs",
+			AllowedKinds:   []string{"request", "response"},
+			MaxPendingMs:   2000,
+		}},
+	}
+	b, err := kimi.NewBridge(cfg)
+	if err != nil {
+		t.Fatalf("NewBridge: %v", err)
+	}
+	ipc := newFakeIPC()
+	resultCh := make(chan types.ToolResult, 1)
+
+	kimi.SetAgentFactory(b, func(ac kimi.AgentConfig) (kimi.Agent, error) {
+		callActor := pickToolByName(ac.AdditionalTools, "call_actor")
+		if callActor == nil {
+			return nil, fmt.Errorf("call_actor tool missing")
+		}
+		return &scriptedAgent{
+			emitFn: func(ctx context.Context, _ string) error {
+				emitter := kimi.BridgeWireEmitter(b)
+				call := types.ToolCall{
+					ID:        "call-prov-final",
+					Name:      "call_actor",
+					Arguments: map[string]any{"actor_id": "tool:xhs", "type": "xhs.publish", "payload": map[string]any{"title": "hello"}},
+				}
+				if err := emitter.Emit(wire.ToolCallRequest{ID: call.ID, ToolCall: call}); err != nil {
+					return err
+				}
+				result, err := callActor.Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{"title":"hello"}}`))
+				if err != nil {
+					return err
+				}
+				resultCh <- result
+				if err := emitter.Emit(wire.ToolCallResult{ID: call.ID, Result: result}); err != nil {
+					return err
+				}
+				if err := emitter.Emit(wire.TextDelta{Delta: "published"}); err != nil {
+					return err
+				}
+				return emitter.Emit(wire.TurnEnd{StopReason: "end_turn"})
+			},
+		}, nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	injectErr := make(chan error, 1)
+	go func() {
+		ipc.triggers <- triggerEnv("t-prov-final")
+		req, err := waitForWritten(ctx, ipc, func(env message.Envelope) bool {
+			return env.Type == "xhs.publish" && env.Kind == message.KindRequest
+		})
+		if err != nil {
+			injectErr <- err
+			return
+		}
+
+		// 1. Layer 2 core provisional — must NOT resolve the future.
+		ipc.triggers <- responseForRequest(req, json.RawMessage(`{"status":"processing","progress":"uploading"}`))
+		// 2. Layer 3 business namespace provisional — must NOT resolve.
+		ipc.triggers <- responseForRequest(req, json.RawMessage(`{"status":"xhs.login_queued","queue_position":3}`))
+		// Brief pause so the bridge demonstrably did not resolve early.
+		// (50ms is generous — dispatch is sync.)
+		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-resultCh:
+			injectErr <- fmt.Errorf("call_actor resolved on provisional before final arrived")
+			return
+		default:
+		}
+		// 3. Final completed — resolves the future.
+		ipc.triggers <- responseForRequest(req, json.RawMessage(`{"status":"completed","note_id":"n-2","url":"https://xhs.test/n-2"}`))
+		close(ipc.triggers)
+		injectErr <- nil
+	}()
+
+	if err := b.Run(ctx, ipc); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := <-injectErr; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-resultCh:
+		if result.IsError {
+			t.Fatalf("ToolResult.IsError=true; value=%#v", result.Value.Value)
+		}
+		value, ok := result.Value.Value.(map[string]any)
+		if !ok {
+			t.Fatalf("ToolResult value=%T want map", result.Value.Value)
+		}
+		if value["note_id"] != "n-2" {
+			t.Errorf("ToolResult note_id=%v want n-2 (final payload)", value["note_id"])
+		}
+	default:
+		t.Fatal("call_actor never received the final response")
+	}
+}
+
+// TestBridge_CallActorToolProvisionalOnlyTimesOut asserts that when
+// only provisional responses arrive (no final), the bridge times out as
+// if no response was received at all — provisional traffic alone must
+// not satisfy max_pending_ms. Mirrors the existing
+// TestBridge_CallActorToolTimeoutReturnsErrorResult shape but with a
+// provisional response injected between the request and the timeout.
+func TestBridge_CallActorToolProvisionalOnlyTimesOut(t *testing.T) {
+	cfg := mustConfig(t)
+	cfg.ChannelContext = kimi.ChannelContext{
+		Actors: []kimi.ActorInfo{
+			{ActorID: "tool:xhs", Kind: "tool", Binding: "runtime_inbound_via_relay"},
+		},
+		Types: []kimi.TypeInfo{{
+			Type:           "xhs.publish",
+			HandlerActorID: "tool:xhs",
+			AllowedKinds:   []string{"request", "response"},
+			MaxPendingMs:   100,
+		}},
+	}
+	b, err := kimi.NewBridge(cfg)
+	if err != nil {
+		t.Fatalf("NewBridge: %v", err)
+	}
+	ipc := newFakeIPC()
+	resultCh := make(chan types.ToolResult, 1)
+
+	kimi.SetAgentFactory(b, func(ac kimi.AgentConfig) (kimi.Agent, error) {
+		callActor := pickToolByName(ac.AdditionalTools, "call_actor")
+		if callActor == nil {
+			return nil, fmt.Errorf("call_actor tool missing")
+		}
+		return &scriptedAgent{
+			emitFn: func(ctx context.Context, _ string) error {
+				result, err := callActor.Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{"title":"slow"}}`))
+				if err != nil {
+					return err
+				}
+				resultCh <- result
+				emitter := kimi.BridgeWireEmitter(b)
+				if err := emitter.Emit(wire.ToolCallResult{ID: "call-prov-timeout", Result: result}); err != nil {
+					return err
+				}
+				return emitter.Emit(wire.TurnEnd{StopReason: "end_turn"})
+			},
+		}, nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go func() {
+		ipc.triggers <- triggerEnv("t-prov-timeout")
+		req, err := waitForWritten(ctx, ipc, func(env message.Envelope) bool {
+			return env.Type == "xhs.publish" && env.Kind == message.KindRequest
+		})
+		if err != nil {
+			close(ipc.triggers)
+			return
+		}
+		// Drip provisional updates but never send the final.
+		ipc.triggers <- responseForRequest(req, json.RawMessage(`{"status":"processing"}`))
+		ipc.triggers <- responseForRequest(req, json.RawMessage(`{"status":"queued"}`))
+		// Do not close ipc.triggers here — callActor.Execute is waiting
+		// on its own timeout (max_pending_ms=100). Closing triggers
+		// would tear the bridge down before the timeout returns the
+		// ToolResult.
+	}()
+
+	// We expect Run to keep going until either Execute times out (ToolResult
+	// flows + TurnEnd) or ctx fires. The scripted agent emits TurnEnd as
+	// soon as Execute returns.
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- b.Run(ctx, ipc) }()
+
+	select {
+	case result := <-resultCh:
+		if !result.IsError {
+			t.Fatalf("ToolResult.IsError=false; want timeout error; value=%#v", result.Value.Value)
+		}
+		if !strings.Contains(fmt.Sprint(result.Value.Value), "timed out") {
+			t.Errorf("ToolResult value=%#v want timeout text", result.Value.Value)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("call_actor did not time out on provisional-only stream")
+	}
+	cancel()
+	// Drain Run; it may return ctx.Err or a clean nil — either is fine.
+	select {
+	case <-runErrCh:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+}
+
 // TestBridge_RunMaxTurnsExit — feed N triggers (N = MaxTurns) and
 // assert the bridge emits the canonical max_turns terminal envelope.
 func TestBridge_RunMaxTurnsExit(t *testing.T) {

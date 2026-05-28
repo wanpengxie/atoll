@@ -477,7 +477,13 @@ func (b *Bridge) runTurn(
 		select {
 		case runErr := <-runErrCh:
 			if runErr != nil && !errors.Is(runErr, context.Canceled) {
-				return errors.Join(consumeErr, runErr)
+				// Agent.Run failed (e.g. provider 429 / 500 / auth) and
+				// consumeWire reported a missing TurnEnd. The provider
+				// error is the meaningful signal — emit a public failed
+				// terminal envelope so the LLM error surfaces in the
+				// channel log instead of being swallowed by the
+				// no-TurnEnd consumeErr.
+				return b.emitTerminalLLMError(ctx, ipc, runErr, trigger.Envelope.ID, terminalErrorCorrelationID(trigger))
 			}
 			return consumeErr
 		case <-ctx.Done():

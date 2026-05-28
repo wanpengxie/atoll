@@ -144,6 +144,9 @@ func (m *Module) Init(_ context.Context, mctx *adapter.ModuleContext) error {
 	if mctx.ForwardExternalRequest == nil {
 		return errors.New("xhs.Init: ModuleContext.ForwardExternalRequest is nil; runtime_inbound_via_relay binding requires framework external transport")
 	}
+	if mctx.Provisional == nil {
+		return errors.New("xhs.Init: ModuleContext.Provisional is nil; phase 2 first-class async refactor requires the framework provisional emit helper")
+	}
 	if mctx.LookupPendingRequest == nil {
 		return errors.New("xhs.Init: ModuleContext.LookupPendingRequest is nil")
 	}
@@ -277,6 +280,32 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 
 	if _, err := m.proxy.SendRequest(ctx, env, wirePayload); err != nil {
 		return m.failNow(ctx, env.ID.String(), "", "device_push_failed", err.Error())
+	}
+
+	// Phase 2 first-class async (response-multitype-refactor §3.4 D-xhs):
+	// emit a Layer 2 `received` provisional so callers see "I got it,
+	// forwarded to the extension" before the final terminal lands. The
+	// emit is best-effort: a failed provisional MUST NOT roll back the
+	// successful forward (the request is still pending and the F3 timer
+	// will close it on the slow path). We log via the framework's
+	// metrics path (buildProvisional already increments
+	// adapter.provisional.ok); a failure here surfaces as a Handle
+	// non-error since the request state is unchanged.
+	provisionalPayload, payloadErr := buildProvisionalPayload(
+		"received",
+		"forwarded to xhs extension",
+		map[string]any{
+			"forwarded_at_ms": m.now().UnixMilli(),
+		},
+	)
+	if payloadErr == nil {
+		_, _ = m.mctx.Provisional(
+			ctx,
+			adapter.CorrelationKey(env.ID),
+			"received",
+			provisionalPayload,
+			adapter.ProvisionalOptions{},
+		)
 	}
 	return nil
 }

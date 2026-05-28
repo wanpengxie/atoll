@@ -174,6 +174,30 @@ func (b *Bridge) unregisterPendingTool(id message.ID) {
 	b.pendingMu.Unlock()
 }
 
+// dispatchToolResponse intercepts kind=response envelopes whose
+// parent_id matches an in-flight executeChannelRequest pending entry.
+//
+// Returns true when the envelope belongs to the bridge's tool-response
+// machinery (the caller acks the trigger and stops forwarding it to the
+// LLM as a fresh turn input). Returns false to let routeTriggers forward
+// the envelope to the LLM as a new turn.
+//
+// Provisional vs final dispatch (response-multitype-refactor.md §3.4 D):
+//   - **Final** (payload.status ∈ {completed, failed} — Layer 1 closed
+//     set per proto-layer0 §2.5.1): close the pending tool slot so the
+//     blocked executeChannelRequest call returns the result to the LLM.
+//   - **Provisional** (Layer 2 core: received / queued / processing /
+//     deferred / unavailable; Layer 3 namespace: `<adapter>.<name>`):
+//     swallow the trigger (treat as bridge-internal progress) but leave
+//     pendingTools[parent] alive — the LLM stays parked on the final.
+//
+// v1 trade-off (deliberate, per spec §3.4 D notes): provisional payloads
+// are NOT surfaced back to the LLM as progress events yet. The substrate
+// for a progress channel + system-prompt nudge is future work
+// (response-multitype-refactor.md §3.4 D: "v1 阶段最简：忽略 provisional,
+// 仍等 final"). What matters here is that provisional traffic does NOT
+// resolve the future and does NOT leak into the LLM trigger stream where
+// it would surface as a spurious new turn.
 func (b *Bridge) dispatchToolResponse(trigger TriggerPayload) bool {
 	if trigger.Envelope.Kind != message.KindResponse {
 		return false
@@ -182,13 +206,25 @@ func (b *Bridge) dispatchToolResponse(trigger TriggerPayload) bool {
 	if parentID == "" {
 		return false
 	}
+	status := parseResponseStatus(trigger.Envelope.Payload)
+	final := message.IsFinalStatus(status)
+
 	b.pendingMu.Lock()
 	ch, ok := b.pendingTools[parentID]
-	if ok {
+	if ok && final {
 		delete(b.pendingTools, parentID)
 	}
 	b.pendingMu.Unlock()
 	if !ok {
+		// No pending tool entry: late / duplicate / orphan response.
+		// Quarantine identically for provisional + final — neither
+		// belongs in the LLM trigger stream.
+		return true
+	}
+	if !final {
+		// Provisional: keep the slot alive so the final response (or
+		// substrate F3 timeout) resolves executeChannelRequest. The
+		// payload is intentionally not pushed to ch — see godoc.
 		return true
 	}
 	select {
@@ -197,6 +233,28 @@ func (b *Bridge) dispatchToolResponse(trigger TriggerPayload) bool {
 	}
 	close(ch)
 	return true
+}
+
+// parseResponseStatus is a defensive `payload.status` extractor used on
+// the dispatchToolResponse hot path. An empty string return means
+// "status absent / payload unparseable" — the caller treats that as a
+// non-final response so a malformed status field cannot accidentally
+// resolve the LLM's future. Final status enforcement lives upstream in
+// the daemon harness (runtime/harness step_response_pairing) — by the
+// time an envelope reaches the kimi bridge the harness has already
+// validated `payload.status` is in the {Layer 1 final, Layer 2 core,
+// Layer 3 `<ns>.<name>`} closed sets.
+func parseResponseStatus(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var obj struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(obj.Status)
 }
 
 func typeAllowsKind(typ TypeInfo, kind string) bool {

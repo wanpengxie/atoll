@@ -66,6 +66,21 @@ const (
 	TypeDeviceOnline  = "xhs.device.online"
 	TypeDeviceOffline = "xhs.device.offline"
 
+	// Layer 3 provisional response namespaces — non-terminal interim
+	// statuses the adapter may emit via ctx.Provisional while a request
+	// is in flight (proto-foundation §1.6.3 + proto-layer0 §2.5).
+	//
+	// Format: `xhs.<name>` — the namespace MUST match the adapter actor
+	// id local-name ("tool:xhs" → "xhs") or harness Step 8 rejects with
+	// harness_response_status_namespace_mismatch. We do NOT register
+	// these into type_registry (v1 spec leaves Layer 3 namespaces free-
+	// form; agents read the string and act).
+	//
+	// XhsStatusLoginQueued models the case where the extension defers a
+	// request because the xiaohongshu session is not logged in and the
+	// adapter is waiting on a login flow before forwarding.
+	XhsStatusLoginQueued = "xhs.login_queued"
+
 	// New R/R types — wire cmd = type suffix with `_` → `-`.
 	TypePublishLongContent = "xhs.publish_long_content"
 	TypePublishStatus      = "xhs.publish_status"

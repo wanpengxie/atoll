@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -246,12 +247,13 @@ type respondCall struct {
 }
 
 type fakeRespondHarness struct {
-	mu           sync.Mutex
-	calls        []respondCall
-	registry     *fakeActorRegistry
-	adapterActor actor.ActorID
-	cor          *fakeCorrelation
-	policy       *fakePolicy
+	mu            sync.Mutex
+	calls         []respondCall
+	provisionals  []provisionalCall
+	registry      *fakeActorRegistry
+	adapterActor  actor.ActorID
+	cor           *fakeCorrelation
+	policy        *fakePolicy
 }
 
 // newRespondFunc returns a RespondFunc closure that the framework hands
@@ -295,6 +297,46 @@ func (h *fakeRespondHarness) FailFunc() adapter.FailFunc {
 			Status: "failed",
 			Reason: string(reason),
 		})
+	}
+}
+
+// provisionalCall captures the arguments the framework would hand
+// ctx.Provisional through the wire. Unlike RespondFunc the provisional
+// path MUST NOT touch correlation / timer state (proto-foundation
+// §1.6.3): only the final Respond/Fail closes the request.
+type provisionalCall struct {
+	requestID adapter.CorrelationKey
+	status    string
+	payload   json.RawMessage
+	opts      adapter.ProvisionalOptions
+	sender    actor.ActorID
+}
+
+// ProvisionalFunc returns a closure satisfying adapter.ProvisionalFunc.
+// Mirrors RespondFunc's harness semantics (sender registry check) but
+// leaves pending correlation + F3 timer untouched. Tests assert the
+// recorded sequence to verify Module.Handle's provisional emit.
+func (h *fakeRespondHarness) ProvisionalFunc() adapter.ProvisionalFunc {
+	return func(_ context.Context, requestID adapter.CorrelationKey, status string, payload json.RawMessage, opts adapter.ProvisionalOptions) (adapter.RespondResult, error) {
+		if !h.registry.exists(h.adapterActor) {
+			return adapter.RespondResult{}, errors.New("fakeRespondHarness: adapter actor not in registry — harness reject (sender_mismatch)")
+		}
+		if status == "" {
+			return adapter.RespondResult{}, errors.New("fakeRespondHarness: provisional status required")
+		}
+		if message.IsFinalStatus(status) {
+			return adapter.RespondResult{}, fmt.Errorf("fakeRespondHarness: provisional status %q is a final status", status)
+		}
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.provisionals = append(h.provisionals, provisionalCall{
+			requestID: requestID,
+			status:    status,
+			payload:   append(json.RawMessage(nil), payload...),
+			opts:      opts,
+			sender:    h.adapterActor,
+		})
+		return adapter.RespondResult{MessageID: message.ID("msg-prov-" + requestID.String() + ":" + status)}, nil
 	}
 }
 
@@ -453,6 +495,7 @@ func newHarness(t *testing.T) *harness {
 		LookupPendingRequest: cor.Get,
 		EmitEvent:            emitEventFunc(defaultChain, testAdapterActor, "channel-test"),
 		ReportOrphanCallback: reportOrphanCallbackFunc(defaultChain, xhs.AdapterName, testAdapterActor, "channel-test"),
+		Provisional:          resp.ProvisionalFunc(),
 	}
 	if err := module.Init(ctx, mctx); err != nil {
 		t.Fatalf("module.Init: %v", err)
@@ -936,5 +979,172 @@ func TestModuleInitRequiresForwardExternalRequest(t *testing.T) {
 	}
 	if err := module.Init(context.Background(), mctx); err == nil || !strings.Contains(err.Error(), "ForwardExternalRequest") {
 		t.Errorf("Init must require ForwardExternalRequest; got %v", err)
+	}
+}
+
+// TestHandleEmitsProvisionalReceived covers the phase 2 first-class
+// async refactor (response-multitype-refactor §3.4 D-xhs): after a
+// successful ForwardExternalRequest the adapter MUST emit one Layer 2
+// `received` provisional so callers see "I got it, forwarded to the
+// extension" before the eventual final terminal.
+//
+// The provisional emit:
+//   - is exactly one (Handle's provisional emit point).
+//   - has status == "received" (Layer 2 core closed set).
+//   - carries adapter-owned informational payload (forwarded_at_ms +
+//     detail) and the framework merges `status` into the final body.
+//   - does NOT touch correlation / F3 timer (provisional response is
+//     not a closure event).
+//   - precedes the final Respond chronologically — the channel log
+//     ordering [request, provisional, final] is enforced by the
+//     fakeRespondHarness call ordering.
+func TestHandleEmitsProvisionalReceived(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	env := h.request("env-prov-received", xhs.TypePublish, `{"title":"hi"}`)
+
+	if err := h.dispatch(ctx, env); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	// 1. Exactly one provisional emit after a successful forward.
+	if got := len(h.respond.provisionals); got != 1 {
+		t.Fatalf("provisional emits = %d want 1", got)
+	}
+	prov := h.respond.provisionals[0]
+	if prov.requestID != adapter.CorrelationKey(env.ID) {
+		t.Errorf("provisional requestID=%q want %q", prov.requestID, env.ID)
+	}
+	if prov.status != "received" {
+		t.Errorf("provisional status=%q want received", prov.status)
+	}
+	if prov.sender != testAdapterActor {
+		t.Errorf("provisional sender=%q want %q", prov.sender, testAdapterActor)
+	}
+	var provPayload map[string]any
+	if err := json.Unmarshal(prov.payload, &provPayload); err != nil {
+		t.Fatalf("provisional payload unmarshal: %v", err)
+	}
+	if _, ok := provPayload["forwarded_at_ms"]; !ok {
+		t.Errorf("provisional payload missing forwarded_at_ms: %v", provPayload)
+	}
+
+	// 2. Correlation + F3 timer still live (provisional does not close).
+	if h.respond.cor.done[adapter.CorrelationKey(env.ID)] {
+		t.Error("provisional must not mark correlation done")
+	}
+	if h.policy.cancelled[adapter.CorrelationKey(env.ID)] {
+		t.Error("provisional must not cancel F3 timer")
+	}
+
+	// 3. Final Respond hasn't fired yet either — provisional is alone.
+	if got := len(h.respond.calls); got != 0 {
+		t.Fatalf("respond.calls = %d want 0 before callback", got)
+	}
+
+	// 4. Deliver the final callback; assert ordering [provisional, final]
+	//    holds and the final terminal closes the request.
+	callback := xhs.Callback{
+		CorrelationID: env.ID.String(),
+		Status:        "ok",
+		Result:        map[string]any{"note_id": "n1", "url": "https://x/n1"},
+	}
+	raw, _ := json.Marshal(callback)
+	if err := h.module.OnExternalCallback(ctx, raw); err != nil {
+		t.Fatalf("OnExternalCallback: %v", err)
+	}
+	if got := len(h.respond.provisionals); got != 1 {
+		t.Errorf("provisional count must stay 1 after final, got %d", got)
+	}
+	if got := len(h.respond.calls); got != 1 {
+		t.Fatalf("final respond calls = %d want 1", got)
+	}
+	if !h.respond.cor.done[adapter.CorrelationKey(env.ID)] {
+		t.Error("final terminal should close correlation")
+	}
+}
+
+// TestHandleSkipsProvisionalOnForwardFailure covers the failure path:
+// when ForwardExternalRequest fails the adapter emits a failed terminal
+// via failNow and MUST NOT also emit a provisional `received` (the
+// forward never completed, so "received and forwarded" is a lie).
+func TestHandleSkipsProvisionalOnForwardFailure(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	h.server.failSend = errors.New("ws gone")
+	env := h.request("env-prov-fail", xhs.TypePublish, `{"title":"x"}`)
+
+	if err := h.dispatch(ctx, env); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := len(h.respond.provisionals); got != 0 {
+		t.Errorf("forward failure must not emit provisional, got %d", got)
+	}
+	if got := len(h.respond.calls); got != 1 {
+		t.Fatalf("forward failure should emit one failed terminal, got %d", got)
+	}
+}
+
+// TestHandleSkipsProvisionalWhenOffline covers the device-state gate:
+// when the lifecycle tracker reports offline / token-expired Handle
+// short-circuits to failNow BEFORE the forward. No provisional emit.
+func TestHandleSkipsProvisionalWhenOffline(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	// Force the lifecycle state back to offline.
+	if err := h.module.OnRuntimeEvent(ctx, adapter.RuntimeEvent{
+		Kind:           adapter.RuntimeEventDeviceLifecycle,
+		ChannelID:      h.channelID,
+		AdapterActorID: testAdapterActor,
+		DeviceLifecycle: &devicetransit.LifecycleFrame{
+			AdapterActorID: testAdapterActor,
+			ChannelID:      h.channelID,
+			Event:          devicetransit.LifecycleDisconnected,
+			DeviceID:       "device-test",
+			Ts:             1_000_000,
+		},
+	}); err != nil {
+		t.Fatalf("OnRuntimeEvent disconnect: %v", err)
+	}
+
+	env := h.request("env-prov-offline", xhs.TypePublish, `{"title":"x"}`)
+	if err := h.dispatch(ctx, env); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := len(h.respond.provisionals); got != 0 {
+		t.Errorf("offline gate must not emit provisional, got %d", got)
+	}
+}
+
+// TestModuleInitRequiresProvisional guards phase 2 wire-up: a missing
+// ctx.Provisional helper MUST fail at Init so a daemon misconfiguration
+// is loud rather than silently dropping every provisional.
+func TestModuleInitRequiresProvisional(t *testing.T) {
+	module, err := xhs.New(xhs.Config{})
+	if err != nil {
+		t.Fatalf("xhs.New: %v", err)
+	}
+	mctx := &adapter.ModuleContext{
+		Respond: func(context.Context, adapter.CorrelationKey, json.RawMessage, adapter.RespondOptions) (adapter.RespondResult, error) {
+			return adapter.RespondResult{}, nil
+		},
+		Fail: func(context.Context, adapter.CorrelationKey, json.RawMessage, adapter.FailOptions) (adapter.RespondResult, error) {
+			return adapter.RespondResult{}, nil
+		},
+		ForwardExternalRequest: func(context.Context, *message.Envelope, adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
+			return adapter.ExternalRequestResult{}, nil
+		},
+		LookupPendingRequest: func(context.Context, adapter.CorrelationKey) (adapter.CorrelationEntry, bool, error) {
+			return adapter.CorrelationEntry{}, false, nil
+		},
+		EmitEvent: func(context.Context, string, json.RawMessage, adapter.EmitEventOptions) (message.ID, error) {
+			return "", nil
+		},
+		ReportOrphanCallback: func(context.Context, adapter.OrphanCallbackReport) error { return nil },
+		ChannelID:            "c",
+		// Provisional intentionally nil.
+	}
+	if err := module.Init(context.Background(), mctx); err == nil || !strings.Contains(err.Error(), "Provisional") {
+		t.Errorf("Init must require Provisional; got %v", err)
 	}
 }

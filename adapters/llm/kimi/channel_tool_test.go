@@ -132,3 +132,148 @@ func toolTrigger(kind message.Kind, id, parentID string) TriggerPayload {
 		CorrelationID: message.ID(parentID),
 	}
 }
+
+// toolTriggerWithStatus is the provisional-aware variant of toolTrigger.
+// status is written verbatim into payload.status so tests can exercise
+// every position of the proto-layer0 §2.5.1 closed-set lattice: Layer 1
+// final (completed/failed), Layer 2 core provisional (processing,
+// queued, …), and Layer 3 business namespace (xhs.login_queued, …).
+func toolTriggerWithStatus(kind message.Kind, id, parentID, status string) TriggerPayload {
+	tp := toolTrigger(kind, id, parentID)
+	tp.Envelope.Payload = []byte(`{"status":"` + status + `"}`)
+	return tp
+}
+
+// TestDispatchToolResponseProvisionalDoesNotResolveFuture asserts that
+// kind=response envelopes carrying a Layer 2 provisional status
+// (`processing` in the closed core set per proto-layer0 §2.5.1) are
+// quarantined from the LLM trigger stream but DO NOT close the pending
+// tool entry. A subsequent final (`completed`) resolves the future as
+// usual. This is the v1 provisional behaviour from
+// response-multitype-refactor.md §3.4 D.
+func TestDispatchToolResponseProvisionalDoesNotResolveFuture(t *testing.T) {
+	b := &Bridge{}
+	ch := b.registerPendingTool("tool-req-1")
+	defer b.unregisterPendingTool("tool-req-1")
+
+	// Provisional `processing` — Layer 2 core. Should be quarantined
+	// (returns true) but neither push to ch nor close it.
+	if !b.dispatchToolResponse(toolTriggerWithStatus(message.KindResponse, "response-prov", "tool-req-1", "processing")) {
+		t.Fatal("provisional response was not quarantined")
+	}
+	select {
+	case got, ok := <-ch:
+		if !ok {
+			t.Fatal("pending tool channel closed by provisional response")
+		}
+		t.Fatalf("provisional response leaked into pending tool channel: %v", got.trigger.Envelope.ID)
+	case <-time.After(50 * time.Millisecond):
+		// expected — pending tool stays parked.
+	}
+	b.pendingMu.Lock()
+	_, stillPending := b.pendingTools["tool-req-1"]
+	b.pendingMu.Unlock()
+	if !stillPending {
+		t.Fatal("pending tool entry erased by provisional response (should persist until final)")
+	}
+
+	// Final `completed` — Layer 1. Should resolve the future and close
+	// the channel as the legacy single-response path did.
+	if !b.dispatchToolResponse(toolTriggerWithStatus(message.KindResponse, "response-final", "tool-req-1", "completed")) {
+		t.Fatal("final response was not dispatched")
+	}
+	select {
+	case got, ok := <-ch:
+		if !ok {
+			t.Fatal("final response closed channel before sending payload")
+		}
+		if got.trigger.Envelope.ID != "response-final" {
+			t.Fatalf("future resolved with id=%s want response-final", got.trigger.Envelope.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("future did not resolve on final response")
+	}
+}
+
+// TestDispatchToolResponseLayer3ProvisionalNamespace asserts that the
+// Layer 3 business namespace provisional pattern (`<adapter>.<name>`,
+// e.g. `xhs.login_queued`) is treated identically to Layer 2 core
+// provisional — keeps the pending entry alive. proto-layer0 §2.5.1
+// places anything matching `<ns>.<name>` outside the Layer 1 final
+// closed set, so it must not resolve the LLM's future.
+func TestDispatchToolResponseLayer3ProvisionalNamespace(t *testing.T) {
+	b := &Bridge{}
+	ch := b.registerPendingTool("tool-req-l3")
+	defer b.unregisterPendingTool("tool-req-l3")
+
+	if !b.dispatchToolResponse(toolTriggerWithStatus(message.KindResponse, "response-l3", "tool-req-l3", "xhs.login_queued")) {
+		t.Fatal("Layer 3 provisional was not quarantined")
+	}
+	select {
+	case got := <-ch:
+		t.Fatalf("Layer 3 provisional leaked into pending channel: %s", got.trigger.Envelope.ID)
+	case <-time.After(50 * time.Millisecond):
+	}
+	b.pendingMu.Lock()
+	_, stillPending := b.pendingTools["tool-req-l3"]
+	b.pendingMu.Unlock()
+	if !stillPending {
+		t.Fatal("Layer 3 provisional erased pending entry")
+	}
+}
+
+// TestDispatchToolResponseProvisionalStatusVariants exercises every
+// Layer 2 core provisional status from proto-layer0 §2.5.1 closed set:
+// received / queued / processing / deferred / unavailable. All five
+// must quarantine without closing the pending future.
+func TestDispatchToolResponseProvisionalStatusVariants(t *testing.T) {
+	for _, status := range []string{"received", "queued", "processing", "deferred", "unavailable"} {
+		status := status
+		t.Run(status, func(t *testing.T) {
+			b := &Bridge{}
+			parent := message.ID("tool-req-" + status)
+			ch := b.registerPendingTool(parent)
+			defer b.unregisterPendingTool(parent)
+
+			if !b.dispatchToolResponse(toolTriggerWithStatus(message.KindResponse, "response-"+status, parent.String(), status)) {
+				t.Fatalf("provisional %q not quarantined", status)
+			}
+			select {
+			case got := <-ch:
+				t.Fatalf("provisional %q leaked into pending channel: %s", status, got.trigger.Envelope.ID)
+			case <-time.After(20 * time.Millisecond):
+			}
+			b.pendingMu.Lock()
+			_, ok := b.pendingTools[parent]
+			b.pendingMu.Unlock()
+			if !ok {
+				t.Fatalf("provisional %q erased pending entry", status)
+			}
+		})
+	}
+}
+
+// TestDispatchToolResponseFinalFailedResolvesFuture asserts the Layer 1
+// `failed` status (the other half of the closed final set alongside
+// `completed`) also resolves the pending future. Without this the LLM
+// would wait until F3 timeout on every error path.
+func TestDispatchToolResponseFinalFailedResolvesFuture(t *testing.T) {
+	b := &Bridge{}
+	ch := b.registerPendingTool("tool-req-fail")
+	defer b.unregisterPendingTool("tool-req-fail")
+
+	if !b.dispatchToolResponse(toolTriggerWithStatus(message.KindResponse, "response-fail", "tool-req-fail", "failed")) {
+		t.Fatal("failed final response not dispatched")
+	}
+	select {
+	case got, ok := <-ch:
+		if !ok {
+			t.Fatal("channel closed without payload")
+		}
+		if got.trigger.Envelope.ID != "response-fail" {
+			t.Fatalf("future resolved with id=%s", got.trigger.Envelope.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("failed final did not resolve future")
+	}
+}

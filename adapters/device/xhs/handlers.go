@@ -161,6 +161,40 @@ func buildRespondPayload(cb Callback, requestType string) (json.RawMessage, stri
 	return body, status, reason, nil
 }
 
+// buildProvisionalPayload constructs the adapter-owned payload object
+// for ctx.Provisional emit (proto-foundation §1.6.3 / proto-layer0 §2.5
+// Layer 2 + Layer 3). The framework merges payload["status"] = status
+// itself, so callers MUST pass the same status value they hand
+// ctx.Provisional; the helper just exposes a tidy place to attach the
+// adapter-owned informational fields (device_id, forwarded_at_ms,
+// detail). Returning a JSON object keeps the framework's
+// mergeProvisionalPayload happy (non-object payloads are rejected).
+//
+// The optional `fields` argument lets the caller layer extra keys onto
+// the payload (e.g. `{"device_id": "..."}` for `received` after
+// forwarding to the extension); nil leaves the payload at the minimal
+// `{"detail": ...}` (or empty) shape.
+func buildProvisionalPayload(status, detail string, fields map[string]any) (json.RawMessage, error) {
+	payload := map[string]any{}
+	for k, v := range fields {
+		payload[k] = v
+	}
+	if status != "" {
+		// Carry status as a hint inside the body too; the framework will
+		// overwrite the top-level field, but the duplicate makes adapter
+		// log inspection trivial when only the raw payload is captured.
+		payload["status"] = status
+	}
+	if detail != "" {
+		payload["detail"] = detail
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("xhs.buildProvisionalPayload: marshal: %w", err)
+	}
+	return body, nil
+}
+
 // errorReason picks a human-readable reason string from the callback
 // error object. Falls back to "callback_failed" when neither `reason`
 // nor `code` are set.
