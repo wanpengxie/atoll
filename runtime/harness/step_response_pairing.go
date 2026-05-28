@@ -20,8 +20,10 @@ import (
 //
 //   - response.parent_id must point to an existing message; missing →
 //     harness_response_parent_not_found.
+//
 //   - parent.kind must equal "request"; otherwise →
 //     harness_response_parent_not_request.
+//
 //   - payload.status MUST belong to the proto-layer0 §2.5 half-closed
 //     set:
 //
@@ -35,13 +37,16 @@ import (
 //     spoofing per proto-layer0 §2.5.3. Otherwise →
 //     harness_response_status_invalid or
 //     harness_response_status_namespace_mismatch.
+//
 //   - When status=failed (Layer 1 final), payload.reason MUST be in the
 //     terminal_failure_reason closed set; otherwise →
 //     harness_response_reason_invalid.
+//
 //   - response.sender must be one of the parent request's audience actors,
 //     and response.audience must target the parent request sender exactly.
 //     Trusted system terminal-failure fallbacks are the only sender
 //     exception; they still must target the parent request sender.
+//
 //   - Zombie chain defence (proto-layer1 §2.8 #8): when the log already
 //     contains a final response for the same parent, a new final →
 //     harness_terminal_duplicate; a new provisional →
@@ -50,6 +55,7 @@ import (
 //     former (catching concurrent racers that slip past this pre-check);
 //     this step surfaces the closed-set reject for both in the
 //     non-racing single-writer path.
+//
 //   - is_terminal is computed from the payload.status classification:
 //     Layer 1 → true; Layer 2 / Layer 3 → false. proto-layer0 §2.5.1
 //     replaces the prior type_registry.terminal_convention dispatch —

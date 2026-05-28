@@ -122,14 +122,13 @@ func (t *CallActorTool) Execute(ctx context.Context, params json.RawMessage) (ty
 	if !found {
 		return unknownTypeError("call_actor", p.ActorID, p.Type), nil
 	}
-	timeout := channelToolDefaultTimeout
 	if strings.TrimSpace(typeInfo.HandlerActorID) != p.ActorID {
 		return actorTypeMismatchError("call_actor", p.ActorID, p.Type, typeInfo.HandlerActorID), nil
 	}
 	if !typeAllowsKind(typeInfo, string(message.KindRequest)) {
 		return kindDisallowedError("call_actor", p.Type, typeInfo.AllowedKinds), nil
 	}
-	timeout = channelToolTimeout(typeInfo.MaxPendingMs)
+	timeout := channelToolTimeout(typeInfo.MaxPendingMs)
 
 	runtime, ok := ctx.Value(channelToolRuntimeKey{}).(channelToolRuntime)
 	if !ok || runtime.ipc == nil {

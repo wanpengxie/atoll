@@ -62,16 +62,16 @@ const (
 	HarnessAudienceHandlerMismatch HarnessRejectReason = "harness_audience_handler_mismatch"
 
 	// Step 8 — Terminal Uniqueness + Response Parent Validation
-	HarnessResponseMissingParent             HarnessRejectReason = "harness_response_missing_parent"
-	HarnessResponseParentNotFound            HarnessRejectReason = "harness_response_parent_not_found"
-	HarnessResponseParentNotRequest          HarnessRejectReason = "harness_response_parent_not_request"
-	HarnessResponseStatusInvalid             HarnessRejectReason = "harness_response_status_invalid"
-	HarnessResponseStatusNamespaceMismatch   HarnessRejectReason = "harness_response_status_namespace_mismatch"
-	HarnessResponseReasonInvalid             HarnessRejectReason = "harness_response_reason_invalid"
-	HarnessResponseUnauthorizedSender        HarnessRejectReason = "harness_response_unauthorized_sender"
-	HarnessResponseAudienceMismatch          HarnessRejectReason = "harness_response_audience_mismatch"
-	HarnessTerminalDuplicate                 HarnessRejectReason = "harness_terminal_duplicate"
-	HarnessProvisionalAfterFinal             HarnessRejectReason = "harness_provisional_after_final"
+	HarnessResponseMissingParent           HarnessRejectReason = "harness_response_missing_parent"
+	HarnessResponseParentNotFound          HarnessRejectReason = "harness_response_parent_not_found"
+	HarnessResponseParentNotRequest        HarnessRejectReason = "harness_response_parent_not_request"
+	HarnessResponseStatusInvalid           HarnessRejectReason = "harness_response_status_invalid"
+	HarnessResponseStatusNamespaceMismatch HarnessRejectReason = "harness_response_status_namespace_mismatch"
+	HarnessResponseReasonInvalid           HarnessRejectReason = "harness_response_reason_invalid"
+	HarnessResponseUnauthorizedSender      HarnessRejectReason = "harness_response_unauthorized_sender"
+	HarnessResponseAudienceMismatch        HarnessRejectReason = "harness_response_audience_mismatch"
+	HarnessTerminalDuplicate               HarnessRejectReason = "harness_terminal_duplicate"
+	HarnessProvisionalAfterFinal           HarnessRejectReason = "harness_provisional_after_final"
 
 	// Step 0 — Caller Principal Validation (pre-harness)
 	HarnessEngineACLDenied HarnessRejectReason = "harness_engine_acl_denied"

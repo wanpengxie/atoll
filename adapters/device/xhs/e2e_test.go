@@ -247,13 +247,13 @@ type respondCall struct {
 }
 
 type fakeRespondHarness struct {
-	mu            sync.Mutex
-	calls         []respondCall
-	provisionals  []provisionalCall
-	registry      *fakeActorRegistry
-	adapterActor  actor.ActorID
-	cor           *fakeCorrelation
-	policy        *fakePolicy
+	mu           sync.Mutex
+	calls        []respondCall
+	provisionals []provisionalCall
+	registry     *fakeActorRegistry
+	adapterActor actor.ActorID
+	cor          *fakeCorrelation
+	policy       *fakePolicy
 }
 
 // newRespondFunc returns a RespondFunc closure that the framework hands

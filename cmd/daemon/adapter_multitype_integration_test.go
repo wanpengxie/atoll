@@ -290,8 +290,8 @@ func TestIntegration_MultitypeLayer1FailedSetsTerminalReason(t *testing.T) {
 	defer cancel()
 
 	cfg := testXHSConfig{
-		FinalStatus:  "failed",
-		FailedReason: string(message.TerminalReceiverInternalError),
+		FinalStatus:     "failed",
+		FailedReason:    string(message.TerminalReceiverInternalError),
 		ResponsePayload: json.RawMessage(`{"error":"boom"}`),
 	}
 	d, srv, channelsDir := startIntegrationDaemon(t, ctx, integDaemonOpts{XHSConfig: cfg})

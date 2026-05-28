@@ -22,8 +22,6 @@ import (
 // instead of blocking the agent loop for minutes.
 const channelToolDefaultTimeout = 30 * time.Second
 
-var genericObjectSchema = json.RawMessage(`{"type":"object"}`)
-
 type channelToolRuntimeKey struct{}
 
 type channelToolRuntime struct {
@@ -292,14 +290,6 @@ func normalizeToolPayload(raw json.RawMessage) (json.RawMessage, error) {
 		return nil, fmt.Errorf("channel tool payload is not valid JSON: %q", text)
 	}
 	return cloneRawJSON(json.RawMessage(text)), nil
-}
-
-func validRawJSONOrDefault(raw json.RawMessage, fallback json.RawMessage) json.RawMessage {
-	text := strings.TrimSpace(string(raw))
-	if text == "" || text == "null" || !json.Valid([]byte(text)) {
-		return cloneRawJSON(fallback)
-	}
-	return cloneRawJSON(json.RawMessage(text))
 }
 
 func cloneRawJSON(raw json.RawMessage) json.RawMessage {

@@ -503,7 +503,7 @@ func validatePendingTerminalRequest(
 		return nil, adapter.CorrelationEntry{}, fmt.Errorf("type %s is not response-capable for adapter %s", request.Type, cfg.declaration.Name)
 	}
 	if !mode.requireDeclaredResponseType && !declAllowsKind(cfg.declaration, request.Type, message.KindResponse) {
-		if !(mode.allowReservedActorTypes && isReservedActorResponseType(request.Type)) {
+		if !mode.allowReservedActorTypes || !isReservedActorResponseType(request.Type) {
 			return nil, adapter.CorrelationEntry{}, fmt.Errorf("type %s is not response-capable for adapter %s", request.Type, cfg.declaration.Name)
 		}
 	}
