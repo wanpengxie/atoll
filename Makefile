@@ -11,7 +11,7 @@
 SHELL := /usr/bin/env bash
 
 .PHONY: install build build-go proxy-build build-ui build-ext extension-zip test lint migrate dev clean \
-        lint-go lint-arch lint-banned-words lint-protocol-refs lint-kernel-protocol lint-docs \
+        lint-go lint-arch lint-architecture-boundaries lint-banned-words lint-protocol-refs lint-kernel-protocol lint-docs \
         fmt-check e2e-smoke
 
 # v5 Go 二进制（cmd/<bin>/main.go 由 T6/T7 落地）。
@@ -118,12 +118,13 @@ test:
 #   1) fmt-check            gofmt 格式一致性（CI 拒不规整代码）
 #   2) golangci-lint        Go 代码风格 / 静态检查
 #   3) go-arch-lint         component-level import 边界（T2 提供 .go-arch-lint.yml）
-#   4) banned-words         分层文本扫描（CODE_DIRS / ACTIVE_SPEC 严格 + 历史 grandfather）
-#   5) stale protocol refs  禁止代码注释继续引用已迁移协议文件
-#   6) 协议合规             kernel/ Go test（T1 提供 envelope_test / kind_test / reason_test / contract_test）
-#   7) 文档 lint            .dalek/pm 文档交叉引用路径校验
+#   4) architecture-boundaries A-line raw capability / read-side truth guard
+#   5) banned-words         分层文本扫描（CODE_DIRS / ACTIVE_SPEC 严格 + 历史 grandfather）
+#   6) stale protocol refs  禁止代码注释继续引用已迁移协议文件
+#   7) 协议合规             kernel/ Go test（T1 提供 envelope_test / kind_test / reason_test / contract_test）
+#   8) 文档 lint            .dalek/pm 文档交叉引用路径校验
 # ----------------------------------------------------------------------------
-lint: fmt-check lint-go lint-arch lint-banned-words lint-protocol-refs lint-kernel-protocol lint-docs
+lint: fmt-check lint-go lint-arch lint-architecture-boundaries lint-banned-words lint-protocol-refs lint-kernel-protocol lint-docs
 
 # fmt-check — gofmt diff guard. Refuse to ship unformatted Go.
 # Fails fast (exit 1) when gofmt -l reports any file.
@@ -169,6 +170,10 @@ lint-arch:
 	@go-arch-lint check --arch-file .go-arch-lint.yml
 	@echo "[lint-arch] placements SQL boundary"
 	@bash scripts/lint-placements-sql-boundary.sh
+
+lint-architecture-boundaries:
+	@echo "[lint-architecture-boundaries] scripts/lint-architecture-boundaries.sh"
+	@bash scripts/lint-architecture-boundaries.sh
 
 lint-banned-words:
 	@echo "[lint-banned-words] scripts/lint-banned-words.sh"

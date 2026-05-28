@@ -1,9 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../api.js';
 import AddDeviceDialog from './AddDeviceDialog.jsx';
 import ExtensionPanel from './ExtensionPanel.jsx';
 
-const POLL_INTERVAL_MS = 10_000;
+const POLL_INTERVAL_MS = 15_000;
 
 function normalizeDaemon(row) {
   return {
@@ -48,6 +48,114 @@ function formatHeartbeat(ms) {
   }).format(new Date(n));
 }
 
+function actorIDOf(row) {
+  return row.actor_id || row.actorID || row.ActorID || '';
+}
+
+function activeChannelsOf(row) {
+  return row.active_channels || row.activeChannels || row.ActiveChannels || [];
+}
+
+function facadeStateOf(row) {
+  return row.facade_state || row.facadeState || row.FacadeState || 'unknown';
+}
+
+function facadeInstalled(row) {
+  return row.facade_installed === true || row.facadeInstalled === true || row.FacadeInstalled === true || facadeStateOf(row) === 'installed';
+}
+
+function actorChipState(daemon, hostedActor) {
+  const actorID = actorIDOf(hostedActor);
+  const readyState = hostedActor.ready_state || hostedActor.readyState || hostedActor.ReadyState || 'unknown';
+  const readyReason = hostedActor.ready_reason || hostedActor.readyReason || hostedActor.ReadyReason || '';
+  const checkedAt = Number(
+    hostedActor.readiness_checked_at ||
+    hostedActor.readinessCheckedAt ||
+    hostedActor.ReadinessCheckedAt ||
+    0
+  );
+  const actorReady =
+    hostedActor.actor_readiness_ready === true ||
+    hostedActor.actorReadinessReady === true ||
+    hostedActor.ActorReadinessReady === true ||
+    hostedActor.ready === true ||
+    hostedActor.Ready === true ||
+    readyState === 'ready';
+  const routeActive =
+    hostedActor.route_active === true ||
+    hostedActor.routeActive === true ||
+    hostedActor.RouteActive === true ||
+    activeChannelsOf(hostedActor).length > 0;
+  const facadeReady = facadeInstalled(hostedActor);
+  const facadeState = facadeStateOf(hostedActor);
+  const facadeDetail = hostedActor.facade_detail || hostedActor.facadeDetail || hostedActor.FacadeDetail || '';
+  const callable =
+    (hostedActor.callable === true ||
+      hostedActor.Callable === true ||
+      (daemon.status === 'online' && routeActive && facadeReady && actorReady)) &&
+    daemon.status === 'online' &&
+    routeActive &&
+    facadeReady &&
+    actorReady;
+  if (daemon.status !== 'online') {
+    return { actorID, state: 'offline', label: 'daemon 离线' };
+  }
+  if ((daemon.attached_channels || []).length === 0) {
+    return { actorID, state: 'unbound', label: '未绑定 channel' };
+  }
+  if (!routeActive) {
+    return {
+      actorID,
+      state: 'unbound',
+      label: '路由同步中',
+      checkedAt,
+      detail: '已 attach，等待 daemon ready route',
+    };
+  }
+  if (!facadeReady) {
+    if (facadeState === 'failed') {
+      return {
+        actorID,
+        state: 'not-ready',
+        label: 'facade 安装失败',
+        checkedAt,
+        detail: facadeDetail || 'update_members rejected',
+      };
+    }
+    return {
+      actorID,
+      state: 'unbound',
+      label: 'facade 安装中',
+      checkedAt,
+      detail: facadeState,
+    };
+  }
+  if (callable) {
+    return {
+      actorID,
+      state: 'ready',
+      label: '可调用',
+      checkedAt,
+      detail: readyReason && readyReason !== 'ok' ? readyReason : '',
+    };
+  }
+  if (readyState === 'unknown') {
+    return {
+      actorID,
+      state: 'unknown',
+      label: '状态未知',
+      checkedAt,
+    };
+  }
+  return {
+    actorID,
+    state: 'not-ready',
+    label: `不可用${readyReason ? ` · ${readyReason}` : ''}`,
+    checkedAt,
+    detail: readyReason || 'not_ready',
+  };
+}
+
 // MyDevicesPage is the standalone owner-scoped daemon catalog. Entry
 // lives in the sidebar under "全局 · 我的设备". This is where daemons
 // are created and revoked; per-channel device pages only attach /
@@ -67,7 +175,8 @@ export default function MyDevicesPage({ channelsByID = {} }) {
     setError('');
     try {
       const res = await api.listOwnerDaemons();
-      setDaemons((res.daemons || []).map(normalizeDaemon));
+      const list = (res.daemons || []).map(normalizeDaemon);
+      setDaemons(list);
       setLastLoadedAt(Date.now());
     } catch (err) {
       setError(err.message || String(err));
@@ -128,6 +237,33 @@ export default function MyDevicesPage({ channelsByID = {} }) {
 
       {error && <div className="device-error">{error}</div>}
 
+      <div className="ext-downloads-bar">
+        <div className="ext-downloads-title">浏览器扩展</div>
+        <div className="ext-downloads-links">
+          <a
+            className="ext-download-card"
+            href="/downloads/coagent-extension.zip"
+            download
+          >
+            <strong>coagent-xhs 扩展</strong>
+            <span>下载后在 chrome://extensions 加载；默认连接本机 proxy daemon</span>
+          </a>
+          <a
+            className="ext-download-card"
+            href="https://chromewebstore.google.com/detail/kimi-webbridge/fldmhceldgbpfpkbgopacenieobmligc"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <strong>Kimi WebBridge 扩展</strong>
+            <span>Chrome Web Store；由 coagent-proxy 的 Kimi adapter 接入</span>
+          </a>
+        </div>
+        <p className="ext-downloads-note">
+          设备页创建/删除 proxy daemon；channel 顶部「绑定设备」只负责把 daemon attach 到当前 channel。
+          xhs 扩展连接本机 endpoint，不在云端页面里配 token。
+        </p>
+      </div>
+
       <ExtensionPanel />
 
       {loading ? (
@@ -164,20 +300,34 @@ export default function MyDevicesPage({ channelsByID = {} }) {
                   <div className="device-section-title">本机插件 (adapters)</div>
                   {daemon.hosted_actors.length === 0 ? (
                     <div className="device-actor-empty">
-                      {online ? '尚未上报，等首个 ready frame' : 'daemon 离线，状态未知'}
+                      {online ? '尚未上报 adapter manifest' : 'daemon 离线，状态未知'}
                     </div>
                   ) : (
                     <ul className="adapter-chip-list">
-                      {daemon.hosted_actors.map((h) => (
-                        <li key={h.actor_id} className={`adapter-chip ${online ? 'online' : 'offline'}`}>
-                          <span className="adapter-icon">{actorIcon(h.actor_id)}</span>
-                          <div className="adapter-meta">
-                            <strong>{h.actor_id}</strong>
-                            <span>{online ? '已就绪' : '未运行'}</span>
-                          </div>
-                        </li>
-                      ))}
+                      {daemon.hosted_actors.map((h) => {
+                        const chip = actorChipState(daemon, h);
+                        return (
+                          <li key={chip.actorID} className={`adapter-chip ${chip.state}`}>
+                            <span className="adapter-icon">{actorIcon(chip.actorID)}</span>
+                            <div className="adapter-meta">
+                              <strong>{chip.actorID}</strong>
+                              <span>{chip.label}</span>
+                              {chip.checkedAt > 0 && (
+                                <span className="adapter-checkedat">
+                                  checked · {formatHeartbeat(chip.checkedAt)}
+                                </span>
+                              )}
+                              {chip.detail && <span className="adapter-checkedat">{chip.detail}</span>}
+                            </div>
+                          </li>
+                        );
+                      })}
                     </ul>
+                  )}
+                  {daemon.hosted_actors.length > 0 && online && daemon.attached_channels.length === 0 && (
+                    <p className="device-section-note">
+                      这台 daemon 尚未绑定到 channel；进入 channel 顶部「绑定设备」后，agent 才能调用这些 adapter。
+                    </p>
                   )}
                 </div>
 

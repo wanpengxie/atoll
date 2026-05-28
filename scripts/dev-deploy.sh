@@ -125,13 +125,14 @@ fi
 # -----------------------------------------------------------------------------
 blue "[deploy] step 5: start server :8832"
 mkdir -p "$DATA_DIR"
-nohup ./bin/coagent-server \
+# Start services in a new session so non-interactive runners that clean up
+# their own process group do not tear down the deployed stack on exit.
+setsid ./bin/coagent-server \
   -db "$DB_PATH" \
   -addr :8832 \
   -ui-dist ./ui/dist \
   -installer-dir ./bin/installers \
   > "$SERVER_LOG" 2>&1 &
-disown
 SERVER_PID=$!
 
 for i in $(seq 1 15); do
@@ -155,14 +156,13 @@ done
 # Step 6: start daemon, wait daemonbus.ws.connected
 # -----------------------------------------------------------------------------
 blue "[deploy] step 6: start daemon → $DAEMONBUS_URL"
-nohup ./bin/coagent-daemon \
+setsid ./bin/coagent-daemon \
   -server-url "$DAEMONBUS_URL" \
   -key "$COAGENT_DAEMON_SECRET" \
   -human-caller-secret "$COAGENT_HUMAN_SECRET" \
   -data-dir "$DAEMON_DATA" \
   -daemon-id daemon-dev \
   > "$DAEMON_LOG" 2>&1 &
-disown
 DAEMON_PID=$!
 
 EPOCH=""

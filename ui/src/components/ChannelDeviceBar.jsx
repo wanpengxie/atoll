@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
 
-const POLL_INTERVAL_MS = 10_000;
+const REFRESH_MS = 15_000;
 
 function actorIcon(actorID) {
   if (actorID.includes('kimi')) return '🧠';
@@ -22,69 +22,135 @@ function normalizeDaemon(row) {
   };
 }
 
-function normalizeActor(row) {
+function actorIDOf(row) {
+  return row.actor_id || row.actorID || row.ActorID || '';
+}
+
+function activeChannelsOf(row) {
+  return row.active_channels || row.activeChannels || row.ActiveChannels || [];
+}
+
+function routeActiveFor(hostedActor, channelID) {
+  const active = activeChannelsOf(hostedActor);
+  if (active.length > 0) return active.includes(channelID);
+  return hostedActor.route_active === true || hostedActor.routeActive === true || hostedActor.RouteActive === true;
+}
+
+function facadeStateOf(row) {
+  return row.facade_state || row.facadeState || row.FacadeState || 'unknown';
+}
+
+function facadeInstalled(row) {
+  return row.facade_installed === true || row.facadeInstalled === true || row.FacadeInstalled === true || facadeStateOf(row) === 'installed';
+}
+
+function statusLabel(hostedActor, online, channelID) {
+  if (!online) return { state: 'offline', label: 'daemon 离线' };
+  const readyState = hostedActor.ready_state || hostedActor.readyState || hostedActor.ReadyState || 'unknown';
+  const readyReason = hostedActor.ready_reason || hostedActor.readyReason || hostedActor.ReadyReason || '';
+  const checkedAt = Number(
+    hostedActor.readiness_checked_at ||
+    hostedActor.readinessCheckedAt ||
+    hostedActor.ReadinessCheckedAt ||
+    0
+  );
+  const actorReady =
+    hostedActor.actor_readiness_ready === true ||
+    hostedActor.actorReadinessReady === true ||
+    hostedActor.ActorReadinessReady === true ||
+    hostedActor.ready === true ||
+    hostedActor.Ready === true ||
+    readyState === 'ready';
+  const routeActive = routeActiveFor(hostedActor, channelID);
+  const facadeReady = facadeInstalled(hostedActor);
+  const facadeState = facadeStateOf(hostedActor);
+  const facadeDetail = hostedActor.facade_detail || hostedActor.facadeDetail || hostedActor.FacadeDetail || '';
+  const callable =
+    (hostedActor.callable === true || hostedActor.Callable === true || (actorReady && routeActive && facadeReady)) &&
+    actorReady &&
+    routeActive &&
+    facadeReady;
+  if (callable) {
+    return {
+      state: 'ready',
+      label: '可调用',
+      detail: readyReason && readyReason !== 'ok' ? readyReason : '',
+      checkedAt,
+    };
+  }
+  if (!routeActive) {
+    return { state: 'unbound', label: '路由同步中', detail: 'daemon 已绑定，adapter route 尚未 active', checkedAt };
+  }
+  if (!facadeReady) {
+    if (facadeState === 'failed') {
+      return { state: 'not-ready', label: 'facade 安装失败', detail: facadeDetail || 'update_members rejected', checkedAt };
+    }
+    return { state: 'unbound', label: 'facade 安装中', detail: facadeState, checkedAt };
+  }
+  if (readyState === 'unknown') {
+    return { state: 'unknown', label: '状态未知', checkedAt };
+  }
   return {
-    actor_id: row.actor_id || row.actorID || row.ActorID,
-    ready: Boolean(row.ready ?? row.Ready),
-    ready_reason: row.ready_reason || row.readyReason || 'unknown',
-    daemon_id: row.daemon_id || row.daemonID || row.DaemonID || '',
+    state: 'not-ready',
+    label: readyReason ? `不可用 · ${readyReason}` : '不可用',
+    detail: readyReason || 'not_ready',
+    checkedAt,
   };
 }
 
-// ChannelDeviceBar = chat header status strip + bind-device button.
-// Shows one chip per adapter that's currently active in this channel
-// (driven by /api/channels/:chID/actors), with color reflecting ready
-// state. The「绑定设备」button opens a drawer where the user picks
-// owner daemons to attach/detach for this channel.
+// ChannelDeviceBar renders adapter readiness from the server-side projection
+// of actor.readiness.changed events. The browser does not probe adapters.
 export default function ChannelDeviceBar({ channelID }) {
-  const [attached, setAttached] = useState([]); // daemons attached to this channel
-  const [actors, setActors] = useState([]);
-  const [ownerDaemons, setOwnerDaemons] = useState([]); // all owner daemons (for attach modal)
+  const [attached, setAttached] = useState([]);            // daemons attached to this channel
+  const [ownerDaemons, setOwnerDaemons] = useState([]);    // for attach modal
   const [bindOpen, setBindOpen] = useState(false);
-  const [busy, setBusy] = useState(''); // daemon_id being toggled
+  const [busy, setBusy] = useState('');                    // daemon_id being toggled
   const [error, setError] = useState('');
 
   const refresh = useCallback(async () => {
-    if (!channelID) return;
+    if (!channelID) return [];
     try {
-      const [attachedRes, actorRes, ownerRes] = await Promise.all([
-        api.listDaemons(channelID),
-        api.listActors(channelID),
-        api.listOwnerDaemons(),
-      ]);
-      setAttached((attachedRes.daemons || []).map(normalizeDaemon));
-      setActors((actorRes.actors || []).map(normalizeActor));
-      setOwnerDaemons((ownerRes.daemons || []).map(normalizeDaemon));
+      const ownerRes = await api.listOwnerDaemons();
+      const owner = (ownerRes.daemons || []).map(normalizeDaemon);
+      const att = owner.filter((d) => (d.attached_channels || []).includes(channelID));
+      setAttached(att);
+      setOwnerDaemons(owner);
+      return att;
     } catch (err) {
       setError(err.message || String(err));
+      return [];
     }
   }, [channelID]);
 
   useEffect(() => {
     if (!channelID) return undefined;
     refresh();
-    const t = window.setInterval(refresh, POLL_INTERVAL_MS);
+    const t = window.setInterval(refresh, REFRESH_MS);
     return () => window.clearInterval(t);
   }, [channelID, refresh]);
 
   const chips = useMemo(() => {
-    // Show one chip per actor present on the channel + daemon online state.
-    const daemonByID = new Map(attached.map((d) => [d.id, d]));
-    return actors
-      .filter((a) => a.actor_id && a.daemon_id)
-      .map((a) => {
-        const daemon = daemonByID.get(a.daemon_id);
-        const online = daemon?.status === 'online';
-        return {
-          key: `${a.daemon_id}:${a.actor_id}`,
-          actor_id: a.actor_id,
-          ready: a.ready,
-          online,
-          reason: a.ready_reason,
-          daemon_name: daemon?.name || a.daemon_id,
-        };
-      });
-  }, [actors, attached]);
+    const out = [];
+    for (const d of attached) {
+      for (const h of d.hosted_actors || []) {
+        const actorID = actorIDOf(h);
+        if (!actorID) continue;
+        const key = `${d.id}:${actorID}`;
+        const online = d.status === 'online';
+        const live = statusLabel(h, online, channelID);
+        out.push({
+          key,
+          actor_id: actorID,
+          state: live.state,
+          label: live.label,
+          detail: live.detail,
+          checkedAt: live.checkedAt,
+          daemon_name: d.name || d.id,
+        });
+      }
+    }
+    return out;
+  }, [attached]);
 
   function isAttached(daemonID) {
     return attached.some((d) => d.id === daemonID);
@@ -116,18 +182,21 @@ export default function ChannelDeviceBar({ channelID }) {
         {chips.length === 0 ? (
           <span className="channel-device-empty muted">未绑定设备 / 无 adapter</span>
         ) : (
-          chips.map((chip) => {
-            const cls = chip.ready ? 'ready' : (chip.online ? 'not-ready' : 'offline');
-            const tip = chip.ready
-              ? `${chip.actor_id} ready · via ${chip.daemon_name}`
-              : `${chip.actor_id} not ready (${chip.reason}) · via ${chip.daemon_name}`;
-            return (
-              <span key={chip.key} className={`channel-device-chip ${cls}`} title={tip}>
-                <span className="adapter-icon">{actorIcon(chip.actor_id)}</span>
-                <span>{chip.actor_id}</span>
+          chips.map((chip) => (
+            <span key={chip.key} className={`channel-device-chip ${chip.state}`}>
+              <span className="adapter-icon">{actorIcon(chip.actor_id)}</span>
+              <span className="chip-actor">{chip.actor_id}</span>
+              <span className="chip-state">· {chip.label}</span>
+              <span className="chip-pop">
+                <strong>{chip.actor_id}</strong>
+                <span>状态: {chip.label}</span>
+                <span>来自: {chip.daemon_name}</span>
+                {chip.checkedAt > 0 && <span>checked: {new Date(chip.checkedAt).toLocaleTimeString('zh-CN')}</span>}
+                {chip.detail && <span className="muted">{chip.detail}</span>}
+                <span className="muted">daemon online + channel route + facade ack + actor.readiness.changed 投影</span>
               </span>
-            );
-          })
+            </span>
+          ))
         )}
       </div>
       <button type="button" className="device-secondary-btn" onClick={() => setBindOpen(true)}>
@@ -153,14 +222,14 @@ export default function ChannelDeviceBar({ channelID }) {
             ) : (
               <ul className="bind-daemon-list">
                 {ownerDaemons.map((d) => {
-                  const attached = isAttached(d.id);
+                  const attachedNow = isAttached(d.id);
                   const online = d.status === 'online';
                   return (
-                    <li key={d.id} className={`bind-daemon-row ${attached ? 'attached' : ''}`}>
+                    <li key={d.id} className={`bind-daemon-row ${attachedNow ? 'attached' : ''}`}>
                       <label className="bind-checkbox">
                         <input
                           type="checkbox"
-                          checked={attached}
+                          checked={attachedNow}
                           disabled={busy === d.id}
                           onChange={() => toggle(d)}
                         />
@@ -172,8 +241,8 @@ export default function ChannelDeviceBar({ channelID }) {
                         </div>
                         <div className="bind-daemon-actors">
                           {(d.hosted_actors || []).map((h) => (
-                            <span key={h.actor_id} className="adapter-icon-small" title={h.actor_id}>
-                              {actorIcon(h.actor_id)}
+                            <span key={actorIDOf(h)} className="adapter-icon-small" title={actorIDOf(h)}>
+                              {actorIcon(actorIDOf(h))}
                             </span>
                           ))}
                         </div>

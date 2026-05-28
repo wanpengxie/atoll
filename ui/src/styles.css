@@ -2092,6 +2092,60 @@ body::after {
   line-height: 1.4;
 }
 
+.ext-downloads-bar {
+  margin: 12px 22px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.ext-downloads-title {
+  margin-bottom: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ext-downloads-links {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ext-download-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.ext-download-card:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+}
+
+.ext-download-card strong {
+  font-size: 13px;
+}
+
+.ext-download-card span,
+.ext-downloads-note {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ext-downloads-note {
+  margin: 8px 0 0;
+}
+
 .device-grid {
   flex: 1 1 auto;
   min-height: 0;
@@ -2465,6 +2519,15 @@ body::after {
     padding: 12px 14px 18px;
   }
 
+  .ext-downloads-bar {
+    margin-left: 14px;
+    margin-right: 14px;
+  }
+
+  .ext-downloads-links {
+    grid-template-columns: 1fr;
+  }
+
   .device-meta-grid {
     grid-template-columns: 1fr;
   }
@@ -2597,12 +2660,44 @@ body::after {
   border: 1px solid var(--border);
   font-size: 12px;
 }
-.adapter-chip.online {
+.adapter-chip.ready {
   border-color: var(--online);
-  background: color-mix(in srgb, var(--online) 10%, var(--surface-2));
+  background: color-mix(in srgb, var(--online) 12%, var(--surface-2));
+  color: var(--online);
+}
+.adapter-chip.not-ready {
+  border-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 10%, var(--surface-2));
+}
+.adapter-chip.hosted {
+  border-color: rgba(0,114,206,0.22);
+  background: color-mix(in srgb, var(--agent) 8%, var(--surface-2));
+}
+.adapter-chip.probing {
+  border-style: dashed;
+  opacity: 0.8;
+}
+.adapter-chip.unknown {
+  border-color: color-mix(in srgb, var(--text-muted) 30%, var(--border));
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+.adapter-chip.unbound {
+  border-color: color-mix(in srgb, var(--text-muted) 30%, var(--border));
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-style: italic;
 }
 .adapter-chip.offline {
-  opacity: 0.7;
+  opacity: 0.6;
+  border-style: dashed;
+}
+.adapter-checkedat { font-size: 10px !important; color: var(--text-muted); }
+.device-section-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 8px 0 0;
+  line-height: 1.5;
 }
 .adapter-icon { font-size: 16px; }
 .adapter-meta {
@@ -2640,30 +2735,78 @@ body::after {
   flex-wrap: wrap;
 }
 .channel-device-chip {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 8px;
+  padding: 2px 10px;
   font-size: 12px;
   border-radius: 999px;
   background: var(--surface-3);
   border: 1px solid var(--border);
   font-family: ui-monospace, Menlo, monospace;
-  cursor: help;
+  cursor: default;
 }
+.channel-device-chip .chip-actor { font-weight: 600; }
+.channel-device-chip .chip-state { color: var(--text-muted); font-size: 11px; }
 .channel-device-chip.ready {
   border-color: var(--online);
   background: color-mix(in srgb, var(--online) 18%, transparent);
   color: var(--online);
 }
+.channel-device-chip.ready .chip-state { color: color-mix(in srgb, var(--online) 80%, var(--text)); }
 .channel-device-chip.not-ready {
   border-color: var(--warning);
   background: color-mix(in srgb, var(--warning) 18%, transparent);
   color: var(--text);
 }
+.channel-device-chip.hosted {
+  border-color: rgba(0,114,206,0.24);
+  background: color-mix(in srgb, var(--agent) 12%, var(--surface-3));
+  color: var(--text);
+}
+.channel-device-chip.unbound {
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
+  background: color-mix(in srgb, var(--warning) 10%, var(--surface-3));
+  color: var(--text);
+  border-style: dashed;
+}
+.channel-device-chip.unknown {
+  border-color: color-mix(in srgb, var(--text-muted) 30%, var(--border));
+  background: var(--surface-3);
+  color: var(--text-muted);
+}
+.channel-device-chip.probing {
+  border-color: color-mix(in srgb, var(--text-muted) 40%, var(--border));
+  background: var(--surface-3);
+  color: var(--text-muted);
+  border-style: dashed;
+}
 .channel-device-chip.offline {
   opacity: 0.55;
+  border-style: dashed;
 }
+.channel-device-chip .chip-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 50;
+  display: none;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 180px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  box-shadow: 0 6px 24px rgba(0,0,0,0.18);
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.channel-device-chip:hover .chip-pop { display: flex; }
+.channel-device-chip .chip-pop strong { font-size: 12px; }
 .channel-device-empty { font-size: 12px; }
 
 /* ─── BindDeviceDialog (drawer-style attach picker) ─────────────── */

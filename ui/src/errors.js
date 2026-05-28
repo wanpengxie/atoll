@@ -46,7 +46,7 @@ const REASON_TABLE = Object.freeze({
   harness_sender_kind_mismatch: ['identity', 'sender kind 与 actor_registry 不符'],
   harness_sender_deregistered: ['identity', 'sender actor 已注销'],
   harness_audience_empty: ['user_input', 'audience 不能为空'],
-  harness_audience_mixed_wildcard: ['user_input', 'audience 不能同时包含 * 与具体成员'],
+  harness_audience_wildcard_forbidden: ['user_input', 'audience 不再支持 *，请使用明确 actor id'],
   harness_audience_member_not_active: ['identity', 'audience 成员不可用'],
   harness_request_audience_invalid: ['user_input', 'request 必须恰好一个 audience'],
   harness_response_audience_invalid: ['user_input', 'response audience 非法'],
