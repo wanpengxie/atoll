@@ -103,6 +103,19 @@ func (m *XHSLocalModule) Shutdown(context.Context) error {
 	return nil
 }
 
+func (m *XHSLocalModule) OnUpstreamAck(_ context.Context, frame DeviceFrame) error {
+	sess := m.currentSession()
+	if sess == nil {
+		return nil
+	}
+	frame.Direction = "to_device"
+	frame.FrameType = FrameTypeAck
+	if frame.ActorID == "" {
+		frame.ActorID = string(m.ActorID())
+	}
+	return sess.writeJSON(frame)
+}
+
 func (m *XHSLocalModule) Readiness(context.Context) (bool, string, error) {
 	if m.currentSession() == nil {
 		return false, "extension_disconnected", nil
@@ -376,7 +389,7 @@ func responseEnvelopeFromPayload(clock func() time.Time, req message.Envelope, s
 		visibility = message.VisibilityPublic
 	}
 	now := clock().UnixMilli()
-	return message.Envelope{
+	resp := message.Envelope{
 		ID:            message.ID("response:" + req.ID.String() + ":" + hash),
 		TS:            now,
 		ChannelID:     req.ChannelID,
@@ -389,6 +402,11 @@ func responseEnvelopeFromPayload(clock func() time.Time, req message.Envelope, s
 		Visibility:    visibility,
 		Audience:      message.Audience{req.Sender.ID},
 	}
+	if req.ExpiresAt != nil {
+		exp := *req.ExpiresAt
+		resp.ExpiresAt = &exp
+	}
+	return resp
 }
 
 func payloadWithStatus(raw json.RawMessage, status, reason string) json.RawMessage {

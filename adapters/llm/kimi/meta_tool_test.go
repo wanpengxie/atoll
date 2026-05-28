@@ -26,7 +26,7 @@ func TestListActorsIncludesDescriptions(t *testing.T) {
 	}
 	var xhsActor map[string]any
 	for _, candidate := range actors {
-		if candidate["actor_id"] == "tool:xhs-adapter" {
+		if candidate["actor_id"] == "tool:xhs" {
 			xhsActor = candidate
 			break
 		}
@@ -61,7 +61,7 @@ func TestCallActorClosedSetPreflightErrors(t *testing.T) {
 		},
 		{
 			name:   "unknown_type",
-			params: `{"actor_id":"tool:xhs-adapter","type":"xhs.missing","payload":{}}`,
+			params: `{"actor_id":"tool:xhs","type":"xhs.missing","payload":{}}`,
 			want:   "unknown_type",
 		},
 		{
@@ -71,12 +71,12 @@ func TestCallActorClosedSetPreflightErrors(t *testing.T) {
 		},
 		{
 			name:   "kind_disallowed",
-			params: `{"actor_id":"tool:xhs-adapter","type":"xhs.note.archived","payload":{}}`,
+			params: `{"actor_id":"tool:xhs","type":"xhs.note.archived","payload":{}}`,
 			want:   "kind_disallowed",
 		},
 		{
 			name:   "payload_invalid",
-			params: `{"actor_id":"tool:xhs-adapter","type":"xhs.publish","payload":`,
+			params: `{"actor_id":"tool:xhs","type":"xhs.publish","payload":`,
 			want:   "payload_invalid",
 		},
 	}
@@ -122,7 +122,7 @@ func TestCallActorClosedSetRuntimeErrors(t *testing.T) {
 				req := <-ipc.writes
 				b.dispatchToolResponse(metaResponseForRequest(req, tc.responsePayload))
 			}()
-			result, err := (&CallActorTool{bridge: b}).Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs-adapter","type":"xhs.publish","payload":{"title":"hello"}}`))
+			result, err := (&CallActorTool{bridge: b}).Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{"title":"hello"}}`))
 			if err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
@@ -138,7 +138,7 @@ func TestCallActorClosedSetRuntimeErrors(t *testing.T) {
 			ipc:     ipc,
 			trigger: metaTrigger(),
 		})
-		result, err := (&CallActorTool{bridge: b}).Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs-adapter","type":"xhs.publish","payload":{}}`))
+		result, err := (&CallActorTool{bridge: b}).Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{}}`))
 		if err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
@@ -148,12 +148,12 @@ func TestCallActorClosedSetRuntimeErrors(t *testing.T) {
 
 func TestDescribeActorReturnsSkillDocAndTypes(t *testing.T) {
 	b := metaToolBridge(t)
-	result, err := (&DescribeActorTool{bridge: b}).Execute(context.Background(), json.RawMessage(`{"actor_id":"tool:xhs-adapter"}`))
+	result, err := (&DescribeActorTool{bridge: b}).Execute(context.Background(), json.RawMessage(`{"actor_id":"tool:xhs"}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	value := result.Value.Value.(map[string]any)
-	if value["actor_id"] != "tool:xhs-adapter" || value["description"] != "XHS automation" || value["skill_doc"] == "" {
+	if value["actor_id"] != "tool:xhs" || value["description"] != "XHS automation" || value["skill_doc"] == "" {
 		t.Fatalf("actor value=%+v", value)
 	}
 	if value["ready"] != true || value["ready_reason"] != "ok" {
@@ -176,12 +176,12 @@ func TestDescribeActorUnknownActorReturnsClosedSetError(t *testing.T) {
 
 func TestDescribeTypeReturnsFullConventionFields(t *testing.T) {
 	b := metaToolBridge(t)
-	result, err := (&DescribeTypeTool{bridge: b}).Execute(context.Background(), json.RawMessage(`{"actor_id":"tool:xhs-adapter","type":"xhs.publish"}`))
+	result, err := (&DescribeTypeTool{bridge: b}).Execute(context.Background(), json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish"}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	value := result.Value.Value.(map[string]any)
-	if value["actor_id"] != "tool:xhs-adapter" || value["type"] != "xhs.publish" || value["description"] != "Publish a note" {
+	if value["actor_id"] != "tool:xhs" || value["type"] != "xhs.publish" || value["description"] != "Publish a note" {
 		t.Fatalf("describe_type value=%+v", value)
 	}
 	example := value["payload_example"].(map[string]any)
@@ -211,7 +211,7 @@ func TestDescribeTypeClosedSetErrors(t *testing.T) {
 	}{
 		{
 			name:   "unknown_type",
-			params: `{"actor_id":"tool:xhs-adapter","type":"xhs.missing"}`,
+			params: `{"actor_id":"tool:xhs","type":"xhs.missing"}`,
 			want:   "unknown_type",
 		},
 		{
@@ -221,7 +221,7 @@ func TestDescribeTypeClosedSetErrors(t *testing.T) {
 		},
 		{
 			name:   "kind_disallowed",
-			params: `{"actor_id":"tool:xhs-adapter","type":"xhs.note.archived"}`,
+			params: `{"actor_id":"tool:xhs","type":"xhs.note.archived"}`,
 			want:   "kind_disallowed",
 		},
 	}
@@ -261,7 +261,7 @@ func metaChannelContext() ChannelContext {
 		ChannelID: "ch-test",
 		Actors: []ActorInfo{
 			{
-				ActorID:     "tool:xhs-adapter",
+				ActorID:     "tool:xhs",
 				Kind:        "tool",
 				Binding:     "embedded",
 				DisplayName: "xhs",
@@ -283,7 +283,7 @@ func metaChannelContext() ChannelContext {
 		Types: []TypeInfo{
 			{
 				Type:           "xhs.publish",
-				HandlerActorID: "tool:xhs-adapter",
+				HandlerActorID: "tool:xhs",
 				HandlerBinding: "embedded",
 				AllowedKinds:   []string{"request", "response"},
 				MaxPendingMs:   50,
@@ -303,7 +303,7 @@ func metaChannelContext() ChannelContext {
 			},
 			{
 				Type:           "xhs.note.archived",
-				HandlerActorID: "tool:xhs-adapter",
+				HandlerActorID: "tool:xhs",
 				HandlerBinding: "embedded",
 				AllowedKinds:   []string{"event"},
 				Description:    "Archive notification",

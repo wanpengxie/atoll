@@ -75,6 +75,10 @@ type readinessState struct {
 	LastStateChangeAt int64
 }
 
+type upstreamAckHandler interface {
+	OnUpstreamAck(context.Context, DeviceFrame) error
+}
+
 func New(cfg Config, opts Options) (*Daemon, error) {
 	cfg = cfg.Normalize()
 	if err := cfg.Validate(); err != nil {
@@ -241,6 +245,8 @@ func (d *Daemon) runConnection(ctx context.Context, conn *WSConnection) error {
 		switch frame.FrameType {
 		case FrameTypeShutdown:
 			return ErrShutdown
+		case FrameTypeAck:
+			d.handleAckFrame(connCtx, frame)
 		case FrameTypeReady, FrameTypeHeartbeat:
 			return fmt.Errorf("proxy daemon: unexpected server frame_type %q", frame.FrameType)
 		case "":
@@ -248,6 +254,21 @@ func (d *Daemon) runConnection(ctx context.Context, conn *WSConnection) error {
 		default:
 			return fmt.Errorf("proxy daemon: unknown server frame_type %q", frame.FrameType)
 		}
+	}
+}
+
+func (d *Daemon) handleAckFrame(ctx context.Context, frame DeviceFrame) {
+	actorID := actor.ActorID(frame.ActorID)
+	mod, ok := d.registry.Get(actorID)
+	if !ok {
+		return
+	}
+	ackHandler, ok := mod.(upstreamAckHandler)
+	if !ok {
+		return
+	}
+	if err := ackHandler.OnUpstreamAck(ctx, frame); err != nil {
+		d.log.Printf("proxy ack handler failed actor=%s request=%s: %v", actorID, frame.RequestID, err)
 	}
 }
 
@@ -381,6 +402,7 @@ func (d *Daemon) readinessEnvelope(id actor.ActorID, state readinessState) messa
 			"last_ready_at":        state.LastReadyAt,
 			"last_state_change_at": state.LastStateChangeAt,
 		},
+		"checked_at": now,
 		"changed_at": state.LastStateChangeAt,
 	})
 	return message.Envelope{
@@ -407,6 +429,10 @@ func (d *Daemon) handleBusinessFrame(ctx context.Context, conn *WSConnection, fr
 			d.log.Printf("proxy frame decode failed actor=%s: %v", actorID, err)
 			return
 		}
+		start := d.clock()
+		if env.Type == "actor.status" {
+			d.log.Printf("proxy actor.status received actor=%s request=%s", actorID, env.ID)
+		}
 		var reqCtx context.Context
 		var cancel context.CancelFunc
 		if env.ExpiresAt != nil && *env.ExpiresAt > 0 {
@@ -422,6 +448,10 @@ func (d *Daemon) handleBusinessFrame(ctx context.Context, conn *WSConnection, fr
 		}
 		if err := d.sendEnvelope(ctx, conn, actorID, resp); err != nil {
 			d.log.Printf("proxy response send failed actor=%s request=%s: %v", actorID, env.ID, err)
+			return
+		}
+		if env.Type == "actor.status" {
+			d.log.Printf("proxy actor.status responded actor=%s request=%s duration_ms=%d", actorID, env.ID, d.clock().Sub(start).Milliseconds())
 		}
 	}()
 }
@@ -431,11 +461,23 @@ func (d *Daemon) sendEnvelope(ctx context.Context, conn *WSConnection, actorID a
 	if err != nil {
 		return err
 	}
-	return conn.WriteFrame(ctx, DeviceFrame{
+	frame := DeviceFrame{
 		Direction: "from_device",
 		ActorID:   string(actorID),
+		ChannelID: string(env.ChannelID),
 		Payload:   raw,
-	})
+	}
+	if env.Kind == message.KindResponse {
+		frame.RequestID = env.ParentID.String()
+		frame.CorrelationID = env.CorrelationID.String()
+		if frame.CorrelationID == "" {
+			frame.CorrelationID = frame.RequestID
+		}
+	}
+	if env.ExpiresAt != nil {
+		frame.ExpiresAt = *env.ExpiresAt
+	}
+	return conn.WriteFrame(ctx, frame)
 }
 
 func failedResponse(clock func() time.Time, req message.Envelope, sender actor.ActorID, reason message.TerminalFailureReason, code, detail string) message.Envelope {
@@ -454,7 +496,7 @@ func failedResponse(clock func() time.Time, req message.Envelope, sender actor.A
 		correlationID = req.ID
 	}
 	now := clock().UnixMilli()
-	return message.Envelope{
+	resp := message.Envelope{
 		ID:            message.ID("response:" + req.ID.String() + ":" + hash),
 		TS:            now,
 		ChannelID:     req.ChannelID,
@@ -467,6 +509,11 @@ func failedResponse(clock func() time.Time, req message.Envelope, sender actor.A
 		Visibility:    req.Visibility,
 		Audience:      message.Audience{req.Sender.ID},
 	}
+	if req.ExpiresAt != nil {
+		exp := *req.ExpiresAt
+		resp.ExpiresAt = &exp
+	}
+	return resp
 }
 
 type capabilitySet struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -70,6 +71,7 @@ func DaemonResponse(d Daemon, apiKey string) DaemonResp {
 }
 
 func (s *Service) handleListDaemons(c *gin.Context) {
+	start := time.Now()
 	u := identity.UserFrom(c)
 	chID := channel.ID(c.Param("chID"))
 	if err := s.authorizeChannel(c.Request.Context(), string(chID), u.ID); err != nil {
@@ -85,6 +87,11 @@ func (s *Service) handleListDaemons(c *gin.Context) {
 	for _, row := range rows {
 		out = append(out, DaemonResponse(row, ""))
 	}
+	s.log.Info("devicebus.list_daemons_completed",
+		"channel_id", string(chID),
+		"count", len(out),
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
 	c.JSON(http.StatusOK, gin.H{"daemons": out})
 }
 
@@ -94,6 +101,7 @@ func (s *Service) handleListDaemons(c *gin.Context) {
 //   - hosted_actors:     the adapter manifest from the last ready frame
 //     (drives the 我的设备 page adapter chips)
 func (s *Service) handleListOwnerDaemons(c *gin.Context) {
+	start := time.Now()
 	u := identity.UserFrom(c)
 	rows, err := s.ListDaemonsByOwner(c.Request.Context(), u.ID)
 	if err != nil {
@@ -101,9 +109,26 @@ func (s *Service) handleListOwnerDaemons(c *gin.Context) {
 		return
 	}
 	type hostedActorResp struct {
-		ActorID       string `json:"actor_id"`
-		CapabilitySet any    `json:"capability_set,omitempty"`
-		LastReadyAt   int64  `json:"last_ready_at"`
+		ActorID              string          `json:"actor_id"`
+		CapabilitySet        any             `json:"capability_set,omitempty"`
+		ActiveChannels       []string        `json:"active_channels"`
+		RouteActive          bool            `json:"route_active"`
+		FacadeInstalled      bool            `json:"facade_installed"`
+		FacadeState          string          `json:"facade_state"`
+		FacadeDetail         string          `json:"facade_detail,omitempty"`
+		FacadeUpdatedAt      int64           `json:"facade_updated_at"`
+		DaemonOnline         bool            `json:"daemon_online"`
+		ActorReadinessReady  bool            `json:"actor_readiness_ready"`
+		ActorReadinessState  string          `json:"actor_readiness_state"`
+		Callable             bool            `json:"callable"`
+		Ready                bool            `json:"ready"`
+		ReadyState           string          `json:"ready_state"`
+		ReadyReason          string          `json:"ready_reason"`
+		ReadyDetail          json.RawMessage `json:"ready_detail,omitempty"`
+		ReadinessCheckedAt   int64           `json:"readiness_checked_at"`
+		LastReadyAt          int64           `json:"last_ready_at"`
+		LastStateChangeAt    int64           `json:"last_state_change_at"`
+		OperationalStateNote string          `json:"operational_state_note,omitempty"`
 	}
 	type ownerDaemonResp struct {
 		DaemonResp
@@ -124,10 +149,35 @@ func (s *Service) handleListOwnerDaemons(c *gin.Context) {
 			if len(h.CapabilitySet) > 0 {
 				_ = json.Unmarshal(h.CapabilitySet, &cap)
 			}
+			activeChannels := make([]string, 0, len(h.ActiveChannels))
+			for _, chID := range h.ActiveChannels {
+				activeChannels = append(activeChannels, string(chID))
+			}
+			daemonOnline := row.Status == "online"
+			actorReady := h.ReadyState == "ready"
+			routeActive := len(activeChannels) > 0
+			facadeInstalled := h.FacadeState == "installed"
 			hostedResp = append(hostedResp, hostedActorResp{
-				ActorID:       string(h.ActorID),
-				CapabilitySet: cap,
-				LastReadyAt:   h.LastReadyAt,
+				ActorID:              string(h.ActorID),
+				CapabilitySet:        cap,
+				ActiveChannels:       activeChannels,
+				RouteActive:          routeActive,
+				FacadeInstalled:      facadeInstalled,
+				FacadeState:          h.FacadeState,
+				FacadeDetail:         h.FacadeDetail,
+				FacadeUpdatedAt:      h.FacadeUpdatedAt,
+				DaemonOnline:         daemonOnline,
+				ActorReadinessReady:  actorReady,
+				ActorReadinessState:  h.ReadyState,
+				Callable:             daemonOnline && routeActive && facadeInstalled && actorReady,
+				Ready:                actorReady,
+				ReadyState:           h.ReadyState,
+				ReadyReason:          h.ReadyReason,
+				ReadyDetail:          append(json.RawMessage(nil), h.ReadyDetail...),
+				ReadinessCheckedAt:   h.ReadinessCheckedAt,
+				LastReadyAt:          h.LastReadyAt,
+				LastStateChangeAt:    h.LastStateChangeAt,
+				OperationalStateNote: "display projection; actor.status is authoritative for a single actor",
 			})
 		}
 		out = append(out, ownerDaemonResp{
@@ -136,6 +186,11 @@ func (s *Service) handleListOwnerDaemons(c *gin.Context) {
 			HostedActors:     hostedResp,
 		})
 	}
+	s.log.Info("devicebus.list_owner_daemons_completed",
+		"owner_id", u.ID,
+		"count", len(out),
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
 	c.JSON(http.StatusOK, gin.H{"daemons": out})
 }
 

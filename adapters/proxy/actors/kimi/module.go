@@ -187,7 +187,7 @@ func responseEnvelope(clock func() time.Time, req message.Envelope, sender actor
 	if visibility == "" {
 		visibility = message.VisibilityPublic
 	}
-	return message.Envelope{
+	resp := message.Envelope{
 		ID:            message.ID("response:" + req.ID.String() + ":" + hash),
 		TS:            now,
 		ChannelID:     req.ChannelID,
@@ -200,6 +200,11 @@ func responseEnvelope(clock func() time.Time, req message.Envelope, sender actor
 		Visibility:    visibility,
 		Audience:      message.Audience{req.Sender.ID},
 	}
+	if req.ExpiresAt != nil {
+		exp := *req.ExpiresAt
+		resp.ExpiresAt = &exp
+	}
+	return resp
 }
 
 func normalizeCommandPayload(raw json.RawMessage, defaultSession string) (string, json.RawMessage, error) {

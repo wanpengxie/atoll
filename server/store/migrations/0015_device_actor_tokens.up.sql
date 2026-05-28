@@ -25,7 +25,7 @@ INSERT OR IGNORE INTO device_actor_tokens (
 )
 SELECT
     token_hash,
-    COALESCE(NULLIF(adapter_actor_id, ''), 'tool:xhs-adapter') AS actor_id,
+    COALESCE(NULLIF(adapter_actor_id, ''), 'tool:xhs') AS actor_id,
     channel_id,
     user_id,
     daemon_id,

@@ -187,7 +187,7 @@ func TestBuildBasePrompt_WithDomain(t *testing.T) {
 
 // TestBuildBasePrompt_WithChannelContext exercises the channel-context
 // appendix (M1.6 follow-up — agent self-awareness fix). Asserts that
-// actor_registry rows, type_registry rows, and optional device actor rows
+// actor catalog rows, type catalog rows, and optional device actor rows
 // render into the prompt as markdown so the LLM can answer "what
 // tools do I have / who else is in this channel" without exploring
 // host filesystem.
@@ -198,16 +198,16 @@ func TestBuildBasePrompt_WithChannelContext(t *testing.T) {
 		Actors: []kimi.ActorInfo{
 			{ActorID: "system", Kind: "system"},
 			{ActorID: "agent:channel-agent", Kind: "agent", DisplayName: "channel agent"},
-			{ActorID: "tool:xhs-adapter", Kind: "tool", Binding: "runtime_inbound_via_relay"},
+			{ActorID: "tool:xhs", Kind: "tool", Binding: "runtime_inbound_via_relay"},
 			{ActorID: "user:2cc317ee", Kind: "human", DisplayName: "Wanpeng Xie"},
 		},
 		Types: []kimi.TypeInfo{
-			{Type: "xhs.publish", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "runtime_inbound_via_relay", AllowedKinds: []string{"request", "response", "event"}, MaxPendingMs: 300_000},
-			{Type: "xhs.search", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "runtime_inbound_via_relay", AllowedKinds: []string{"request", "response"}},
-			{Type: "xhs.note.fetch", HandlerActorID: "tool:xhs-adapter", HandlerBinding: "runtime_inbound_via_relay", AllowedKinds: []string{"request", "response"}},
+			{Type: "xhs.publish", HandlerActorID: "tool:xhs", HandlerBinding: "runtime_inbound_via_relay", AllowedKinds: []string{"request", "response", "event"}, MaxPendingMs: 300_000},
+			{Type: "xhs.search", HandlerActorID: "tool:xhs", HandlerBinding: "runtime_inbound_via_relay", AllowedKinds: []string{"request", "response"}},
+			{Type: "xhs.note.fetch", HandlerActorID: "tool:xhs", HandlerBinding: "runtime_inbound_via_relay", AllowedKinds: []string{"request", "response"}},
 		},
 		Devices: []kimi.DeviceInfo{
-			{ActorID: "tool:xhs-adapter", DeviceID: "chrome-default", DeviceType: "xhs-chrome", Status: "connected"},
+			{ActorID: "tool:xhs", DeviceID: "chrome-default", DeviceType: "xhs-chrome", Status: "connected"},
 		},
 	}
 	got := kimi.BuildBasePrompt("xhs-creator", "domain body", ctx)
@@ -220,7 +220,7 @@ func TestBuildBasePrompt_WithChannelContext(t *testing.T) {
 		"# Channel context (xhs-creator)",
 		"channel_id: f9831154-ch",
 		"## Actors in this channel",
-		"tool:xhs-adapter",
+		"tool:xhs",
 		"binding=runtime_inbound_via_relay",
 		"## Tool invocation",
 		"list_actors",
@@ -228,7 +228,7 @@ func TestBuildBasePrompt_WithChannelContext(t *testing.T) {
 		"describe_type",
 		"call_actor",
 		"## Device actors",
-		"tool:xhs-adapter",
+		"tool:xhs",
 		"status=connected",
 		"domain body",
 	} {
@@ -489,18 +489,18 @@ func TestBridge_ChannelTypeToolEmitsRequestAndReturnsResponse(t *testing.T) {
 	cfg := mustConfig(t)
 	cfg.ChannelContext = kimi.ChannelContext{
 		Actors: []kimi.ActorInfo{
-			{ActorID: "tool:xhs-adapter", Kind: "tool", Binding: "runtime_inbound_via_relay"},
+			{ActorID: "tool:xhs", Kind: "tool", Binding: "runtime_inbound_via_relay"},
 		},
 		Types: []kimi.TypeInfo{
 			{
 				Type:           "xhs.publish",
-				HandlerActorID: "tool:xhs-adapter",
+				HandlerActorID: "tool:xhs",
 				AllowedKinds:   []string{"request", "response"},
 				MaxPendingMs:   1000,
 			},
 			{
 				Type:           "xhs.note.archived",
-				HandlerActorID: "tool:xhs-adapter",
+				HandlerActorID: "tool:xhs",
 				AllowedKinds:   []string{"event"},
 			},
 		},
@@ -538,12 +538,12 @@ func TestBridge_ChannelTypeToolEmitsRequestAndReturnsResponse(t *testing.T) {
 				call := types.ToolCall{
 					ID:        "call-xhs-publish",
 					Name:      "call_actor",
-					Arguments: map[string]any{"actor_id": "tool:xhs-adapter", "type": "xhs.publish", "payload": map[string]any{"title": "hello", "content": "world"}},
+					Arguments: map[string]any{"actor_id": "tool:xhs", "type": "xhs.publish", "payload": map[string]any{"title": "hello", "content": "world"}},
 				}
 				if err := emitter.Emit(wire.ToolCallRequest{ID: call.ID, ToolCall: call}); err != nil {
 					return err
 				}
-				result, err := callActor.Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs-adapter","type":"xhs.publish","payload":{"title":"hello","content":"world"}}`))
+				result, err := callActor.Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{"title":"hello","content":"world"}}`))
 				if err != nil {
 					return err
 				}
@@ -571,8 +571,8 @@ func TestBridge_ChannelTypeToolEmitsRequestAndReturnsResponse(t *testing.T) {
 			injectErr <- err
 			return
 		}
-		if req.Audience[0] != "tool:xhs-adapter" {
-			injectErr <- fmt.Errorf("request audience=%v want [tool:xhs-adapter]", req.Audience)
+		if req.Audience[0] != "tool:xhs" {
+			injectErr <- fmt.Errorf("request audience=%v want [tool:xhs]", req.Audience)
 			return
 		}
 		if req.ParentID != "t-tool" || req.CorrelationID != "corr-1" {
@@ -616,11 +616,11 @@ func TestBridge_ChannelTypeToolTimeoutReturnsErrorResult(t *testing.T) {
 	cfg := mustConfig(t)
 	cfg.ChannelContext = kimi.ChannelContext{
 		Actors: []kimi.ActorInfo{
-			{ActorID: "tool:xhs-adapter", Kind: "tool", Binding: "runtime_inbound_via_relay"},
+			{ActorID: "tool:xhs", Kind: "tool", Binding: "runtime_inbound_via_relay"},
 		},
 		Types: []kimi.TypeInfo{{
 			Type:           "xhs.publish",
-			HandlerActorID: "tool:xhs-adapter",
+			HandlerActorID: "tool:xhs",
 			AllowedKinds:   []string{"request"},
 			MaxPendingMs:   20,
 		}},
@@ -638,7 +638,7 @@ func TestBridge_ChannelTypeToolTimeoutReturnsErrorResult(t *testing.T) {
 		}
 		return &scriptedAgent{
 			emitFn: func(ctx context.Context, _ string) error {
-				result, err := callActor.Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs-adapter","type":"xhs.publish","payload":{"title":"slow"}}`))
+				result, err := callActor.Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{"title":"slow"}}`))
 				if err != nil {
 					return err
 				}
@@ -673,11 +673,11 @@ func TestBridge_ChannelTypeToolTerminalFailureReturnsErrorResult(t *testing.T) {
 	cfg := mustConfig(t)
 	cfg.ChannelContext = kimi.ChannelContext{
 		Actors: []kimi.ActorInfo{
-			{ActorID: "tool:xhs-adapter", Kind: "tool", Binding: "runtime_inbound_via_relay"},
+			{ActorID: "tool:xhs", Kind: "tool", Binding: "runtime_inbound_via_relay"},
 		},
 		Types: []kimi.TypeInfo{{
 			Type:           "xhs.publish",
-			HandlerActorID: "tool:xhs-adapter",
+			HandlerActorID: "tool:xhs",
 			AllowedKinds:   []string{"request"},
 			MaxPendingMs:   1000,
 		}},
@@ -695,7 +695,7 @@ func TestBridge_ChannelTypeToolTerminalFailureReturnsErrorResult(t *testing.T) {
 		}
 		return &scriptedAgent{
 			emitFn: func(ctx context.Context, _ string) error {
-				result, err := callActor.Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs-adapter","type":"xhs.publish","payload":{"title":"boom"}}`))
+				result, err := callActor.Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{"title":"boom"}}`))
 				if err != nil {
 					return err
 				}

@@ -679,7 +679,7 @@ func TestDispatch_DeviceTransitRecv_RoutesToHandler(t *testing.T) {
 
 	body := map[string]any{
 		"channel_id":       "ch-A",
-		"adapter_actor_id": "tool:xhs-adapter",
+		"adapter_actor_id": "tool:xhs",
 		"direction":        "to_device",
 		"request_id":       "req-1",
 		"payload":          []byte(`{"cmd":"publish"}`),

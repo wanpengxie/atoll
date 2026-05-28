@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
 	"github.com/wanpengxie/ActOS/pkg/metrics"
@@ -212,12 +213,19 @@ func (c *Connection) awaitContext(ctx context.Context) (context.Context, context
 // matchAck delivers an incoming frame to a SendAndAwait waiter, if
 // one is registered for the frame_id.
 func (c *Connection) matchAck(frame daemonbus.Frame) bool {
+	ackID := frame.FrameID
+	if frame.FrameKind == daemonbus.FrameTypeDeviceTransitAck {
+		var ack devicetransit.AckFrame
+		if err := json.Unmarshal(frame.Payload, &ack); err == nil && ack.CorrelationFrameID != "" {
+			ackID = daemonbus.FrameID(ack.CorrelationFrameID)
+		}
+	}
 	c.mu.Lock()
 	if c.pending == nil {
 		c.mu.Unlock()
 		return false
 	}
-	ch, ok := c.pending[frame.FrameID]
+	ch, ok := c.pending[ackID]
 	c.mu.Unlock()
 	if !ok {
 		return false

@@ -152,17 +152,40 @@ func (s *Service) DetachDaemonFromChannel(ctx context.Context, daemonID placemen
 // ready frame. capability_set is the raw JSON payload; UI parses for
 // display name + type list.
 type HostedActor struct {
-	ActorID       actor.ActorID
-	CapabilitySet json.RawMessage
-	LastReadyAt   int64
+	ActorID            actor.ActorID
+	CapabilitySet      json.RawMessage
+	ActiveChannels     []channel.ID
+	FacadeState        string
+	FacadeDetail       string
+	FacadeUpdatedAt    int64
+	ReadyState         string
+	ReadyReason        string
+	ReadyDetail        json.RawMessage
+	ReadinessCheckedAt int64
+	LastReadyAt        int64
+	LastStateChangeAt  int64
 }
 
 // ListDaemonHostedActors returns the adapter manifest the daemon
 // advertised in its most recent ready frame, irrespective of channel
 // attachments. Drives the global "我的设备" page's adapter chips.
 func (s *Service) ListDaemonHostedActors(ctx context.Context, daemonID placement.DaemonID) ([]HostedActor, error) {
+	activeChannels, err := s.listDaemonActiveActorChannels(ctx, daemonID)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT actor_id, COALESCE(capability_set,''), last_ready_at
+		SELECT actor_id,
+		       COALESCE(capability_set,''),
+		       COALESCE(facade_state,'unknown'),
+		       COALESCE(facade_detail,''),
+		       COALESCE(facade_updated_at,0),
+		       COALESCE(ready_state,'unknown'),
+		       COALESCE(ready_reason,'unknown'),
+		       COALESCE(ready_detail,'{}'),
+		       COALESCE(readiness_checked_at,0),
+		       COALESCE(last_ready_at,0),
+		       COALESCE(last_state_change_at,0)
 		  FROM daemon_hosted_actors
 		 WHERE daemon_id = ?
 		 ORDER BY actor_id`, string(daemonID))
@@ -172,19 +195,132 @@ func (s *Service) ListDaemonHostedActors(ctx context.Context, daemonID placement
 	defer func() { _ = rows.Close() }()
 	var out []HostedActor
 	for rows.Next() {
-		var id, cap string
-		var at int64
-		if err := rows.Scan(&id, &cap, &at); err != nil {
+		var id, cap, facadeState, facadeDetail, readyState, readyReason, readyDetail string
+		var facadeUpdatedAt, checkedAt, lastReadyAt, lastStateChangeAt int64
+		if err := rows.Scan(&id, &cap, &facadeState, &facadeDetail, &facadeUpdatedAt, &readyState, &readyReason, &readyDetail, &checkedAt, &lastReadyAt, &lastStateChangeAt); err != nil {
 			return nil, fmt.Errorf("devicebus: scan hosted actor: %w", err)
 		}
 		out = append(out, HostedActor{
-			ActorID:       actor.ActorID(id),
-			CapabilitySet: json.RawMessage(cap),
-			LastReadyAt:   at,
+			ActorID:            actor.ActorID(id),
+			CapabilitySet:      json.RawMessage(cap),
+			ActiveChannels:     append([]channel.ID(nil), activeChannels[actor.ActorID(id)]...),
+			FacadeState:        facadeState,
+			FacadeDetail:       facadeDetail,
+			FacadeUpdatedAt:    facadeUpdatedAt,
+			ReadyState:         readyState,
+			ReadyReason:        readyReason,
+			ReadyDetail:        json.RawMessage(readyDetail),
+			ReadinessCheckedAt: checkedAt,
+			LastReadyAt:        lastReadyAt,
+			LastStateChangeAt:  lastStateChangeAt,
 		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("devicebus: hosted actor rows: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Service) MarkDaemonFacadeState(ctx context.Context, daemonID placement.DaemonID, actors []actor.ActorID, state, detail string) error {
+	if daemonID == "" || len(actors) == 0 {
+		return nil
+	}
+	state = strings.TrimSpace(state)
+	if state == "" {
+		state = "unknown"
+	}
+	now := s.nowMs()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("devicebus: facade state begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, actorID := range actors {
+		if actorID == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE daemon_hosted_actors
+			   SET facade_state=?,
+			       facade_detail=?,
+			       facade_updated_at=?
+			 WHERE daemon_id=? AND actor_id=?`,
+			state, strings.TrimSpace(detail), now, string(daemonID), string(actorID),
+		); err != nil {
+			return fmt.Errorf("devicebus: update facade state %s/%s: %w", daemonID, actorID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("devicebus: facade state commit: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) invalidateDaemonRuntimeState(ctx context.Context, daemonID placement.DaemonID, detail string) error {
+	if daemonID == "" {
+		return nil
+	}
+	actors, _ := s.ListDaemonActiveActorIDs(ctx, daemonID)
+	if err := s.MarkDaemonOffline(ctx, daemonID); err != nil {
+		return err
+	}
+	if err := s.clearDaemonActiveActors(ctx, daemonID); err != nil {
+		return err
+	}
+	if err := s.MarkDaemonFacadeState(ctx, daemonID, actors, "offline", detail); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) InvalidateRuntimeProjections(ctx context.Context, reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "server runtime projection reset"
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE daemons SET status='offline' WHERE api_key <> ''`); err != nil {
+		return fmt.Errorf("devicebus: invalidate daemon status: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM daemon_active_actors`); err != nil {
+		return fmt.Errorf("devicebus: invalidate active actors: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE daemon_hosted_actors
+		   SET facade_state='offline',
+		       facade_detail=?,
+		       facade_updated_at=?`,
+		reason, s.nowMs(),
+	); err != nil {
+		return fmt.Errorf("devicebus: invalidate facade state: %w", err)
+	}
+	s.mu.Lock()
+	s.actorToDaemon = map[string]placement.DaemonID{}
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Service) listDaemonActiveActorChannels(ctx context.Context, daemonID placement.DaemonID) (map[actor.ActorID][]channel.ID, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT actor_id, channel_id
+		   FROM daemon_active_actors
+		  WHERE daemon_id=?
+		  ORDER BY actor_id, channel_id`,
+		string(daemonID),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("devicebus: list daemon active actor channels: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[actor.ActorID][]channel.ID{}
+	for rows.Next() {
+		var actorID, channelID string
+		if err := rows.Scan(&actorID, &channelID); err != nil {
+			return nil, fmt.Errorf("devicebus: scan daemon active actor channel: %w", err)
+		}
+		out[actor.ActorID(actorID)] = append(out[actor.ActorID(actorID)], channel.ID(channelID))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("devicebus: active actor channel rows: %w", err)
 	}
 	return out, nil
 }
@@ -446,11 +582,15 @@ func (s *Service) ApplyDaemonReady(ctx context.Context, d Daemon, ready DaemonRe
 		if len(a.CapabilitySet) > 0 {
 			capability = string(a.CapabilitySet)
 		}
+		facadeState := "not_attached"
+		if len(d.AttachedChannels) > 0 {
+			facadeState = "pending"
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO daemon_hosted_actors
-			  (daemon_id, actor_id, capability_set, last_ready_at)
-			VALUES (?, ?, ?, ?)`,
-			string(d.ID), string(actorID), capability, now,
+			  (daemon_id, actor_id, capability_set, last_ready_at, facade_state, facade_updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			string(d.ID), string(actorID), capability, now, facadeState, now,
 		); err != nil {
 			return fmt.Errorf("devicebus: ready insert hosted actor: %w", err)
 		}

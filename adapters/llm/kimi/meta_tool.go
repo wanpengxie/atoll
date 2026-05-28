@@ -20,12 +20,11 @@ import (
 // inject FOUR generic tools that exploit the envelope protocol's
 // uniformity:
 //
-//   list_actors — re-snapshots the channel's actor_registry +
-//                 type_registry and returns it as structured JSON. LLM
-//                 calls this when it doesn't know what's available
-//                 (or when a new type was just installed — type_registry
-//                 mutations are live, so the next list_actors picks
-//                 them up without a worker respawn).
+//   list_actors — returns the daemon-provided bootstrap actor/type
+//                 display snapshot as structured JSON. LLM calls this
+//                 when it doesn't know what's available. The snapshot
+//                 is advisory; live truth still flows through envelope
+//                 calls and framework validation.
 //
 //   describe_actor — returns one actor's skill doc and type summary.
 //
@@ -42,8 +41,8 @@ import (
 //     envelope+kind=request as the uniform invocation primitive
 //   - impl-vocabulary §3 adapter-specific type catalog (productized
 //     schema lives in product-layer docs, not in protocol)
-//   - vision §1.2 self-reference: actor_registry / type_registry are
-//     queryable channel state, so the LLM can discover at runtime
+//   - vision §1.2 self-reference: actor/type catalogs can be surfaced
+//     as prompt context while current actor truth remains envelope-only
 //
 // Token / scaling story:
 //   - Old: N type-tools × ~200 token each = O(N) prompt baseline
@@ -66,8 +65,8 @@ This is the universal invocation primitive — every adapter (browser automation
 device controllers) and every sub-agent is reached through this single tool.
 
 Workflow:
-  1. Call list_actors first to discover what actors + types exist (call it only
-     once per task; the result stays in your context).
+  1. Call list_actors first to inspect the daemon-provided bootstrap actor/type
+     display snapshot.
   2. Call describe_actor when you need the actor's workflows.
   3. Call describe_type when you need payload_example, payload_fields, notes, or
      adapter-specific error codes for the selected type.
@@ -83,7 +82,7 @@ Workflow:
 var callActorSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
-    "actor_id": {"type": "string", "description": "Target actor id, e.g. tool:xhs-adapter or agent:research-assistant. Look up via list_actors."},
+    "actor_id": {"type": "string", "description": "Target actor id, e.g. tool:xhs or agent:research-assistant. Look up via list_actors."},
     "type": {"type": "string", "description": "Envelope type to send, e.g. xhs.publish or kimi.command. MUST be a request-allowed type for the chosen actor."},
     "payload": {"type": "object", "description": "Type-specific payload. Shape is per-adapter convention; consult list_actors output for hints."}
   },
@@ -117,7 +116,7 @@ func (t *CallActorTool) Execute(ctx context.Context, params json.RawMessage) (ty
 		return payloadInvalidError("call_actor", p.ActorID, p.Type, "type is required (call list_actors to discover)"), nil
 	}
 
-	snapshot := t.bridge.refreshChannelContext(ctx)
+	snapshot := t.bridge.channelContext()
 	if _, ok := findActor(snapshot, p.ActorID); !ok {
 		return unknownActorError("call_actor", p.ActorID), nil
 	}
@@ -125,12 +124,14 @@ func (t *CallActorTool) Execute(ctx context.Context, params json.RawMessage) (ty
 	if !found {
 		return unknownTypeError("call_actor", p.ActorID, p.Type), nil
 	}
+	timeout := channelToolDefaultTimeout
 	if strings.TrimSpace(typeInfo.HandlerActorID) != p.ActorID {
 		return actorTypeMismatchError("call_actor", p.ActorID, p.Type, typeInfo.HandlerActorID), nil
 	}
 	if !typeAllowsKind(typeInfo, string(message.KindRequest)) {
 		return kindDisallowedError("call_actor", p.Type, typeInfo.AllowedKinds), nil
 	}
+	timeout = channelToolTimeout(typeInfo.MaxPendingMs)
 
 	runtime, ok := ctx.Value(channelToolRuntimeKey{}).(channelToolRuntime)
 	if !ok || runtime.ipc == nil {
@@ -147,15 +148,15 @@ func (t *CallActorTool) Execute(ctx context.Context, params json.RawMessage) (ty
 		EnvelopeType:   p.Type,
 		HandlerActorID: p.ActorID,
 		Payload:        payload,
-		Timeout:        channelToolTimeout(typeInfo.MaxPendingMs),
+		Timeout:        timeout,
 	})
 	return normalizeCallActorError(result, p.ActorID, p.Type), nil
 }
 
-// ListActorsTool returns the channel's actor + type registry as
-// structured JSON. Bridge re-snapshots from channel.sqlite on every
-// call so type_registry mutations (system.type.installed) are visible
-// immediately — no worker respawn required.
+// ListActorsTool returns the daemon-provided bootstrap actor + type
+// display snapshot as structured JSON. It is not current operational
+// truth; call_actor uses the envelope path and lets the daemon/harness
+// validate current actor/type state.
 type ListActorsTool struct {
 	bridge *Bridge
 }
@@ -171,10 +172,10 @@ exist in this channel. Returns:
   - actors: each with actor_id, kind, binding, and the types it handles
   - types per actor: name, description, allowed_kinds, max_pending_ms hint
 
-Call this once at the start of a task (or whenever you suspect new tools have appeared
-mid-conversation — the type registry is live). The response is stable enough to cache
-in your reasoning context across multiple turns. Use the result to pick (actor_id, type)
-pairs for call_actor.
+Call this once at the start of a task. The response is a daemon-built bootstrap snapshot,
+stable enough to cache in your reasoning context across multiple turns. Use it as a hint
+for (actor_id, type) pairs; call_actor and describe_* use the envelope path for live
+validation.
 `)
 }
 
@@ -186,7 +187,7 @@ func (t *ListActorsTool) Execute(ctx context.Context, _ json.RawMessage) (types.
 	if t == nil || t.bridge == nil {
 		return channelToolErrorResult("list_actors", "list_actors tool not configured"), nil
 	}
-	snapshot := t.bridge.refreshChannelContext(ctx)
+	snapshot := t.bridge.channelContext()
 	return types.ToolResult{
 		Name:  "list_actors",
 		Value: types.ToolReturnValue{Value: formatActorRegistryForLLM(snapshot)},
@@ -277,28 +278,11 @@ func formatActorRegistryForLLM(snapshot ChannelContext) map[string]any {
 	return result
 }
 
-// refreshChannelContext returns the freshest possible ChannelContext.
-// When the bridge was constructed with a ChannelStore (production
-// daemon path), this re-snapshots channel.sqlite live so dynamic
-// type_registry mutations are visible immediately. Otherwise falls
-// back to the boot-time snapshot stored in cfg.ChannelContext (test
-// path / mock harness).
-//
-// Errors are intentionally swallowed: list_actors / call_actor MUST
-// always return some usable result. The boot snapshot is a safe stale
-// view.
-func (b *Bridge) refreshChannelContext(ctx context.Context) ChannelContext {
+func (b *Bridge) channelContext() ChannelContext {
 	if b == nil {
 		return ChannelContext{}
 	}
-	if b.cfg.ChannelStore == nil {
-		return b.cfg.ChannelContext
-	}
-	snapshot, err := b.cfg.ChannelStore.Snapshot(ctx, string(b.cfg.ChannelContext.ChannelID), b.cfg.ChannelContext.ChannelType)
-	if err != nil {
-		return b.cfg.ChannelContext
-	}
-	return snapshot
+	return b.cfg.ChannelContext
 }
 
 // findActor returns the ActorInfo whose ActorID matches actorID.

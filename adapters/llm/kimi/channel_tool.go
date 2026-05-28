@@ -35,8 +35,8 @@ type toolResponse struct {
 	trigger TriggerPayload
 }
 
-// ChannelTypeTool exposes one channel-local type_registry request type as
-// a go-kimi function-calling tool.
+// ChannelTypeTool exposes one channel-local request type as a go-kimi
+// function-calling tool.
 type ChannelTypeTool struct {
 	typeName       string
 	handlerActorID string
@@ -122,9 +122,9 @@ func (t *ChannelTypeTool) Execute(ctx context.Context, params json.RawMessage) (
 //     (legacy tool APIs / OpenAI function-calling) where each tool had
 //     a distinct RPC. Once standardization is in, a single invocation
 //     primitive carries them all.
-//   - Live discovery via list_actors keeps the LLM surface O(1) in
-//     the channel's type count + handles dynamic type_registry
-//     mutations without a worker respawn.
+//   - Bootstrap discovery via list_actors keeps the LLM surface O(1)
+//     in the channel's type count. Live validation still happens in
+//     the daemon/harness/adapter path on each envelope call.
 //
 // Trade-off: LLMs trained on direct injection need a system-prompt
 // nudge ("call list_actors first") to use this pattern reliably. See
@@ -141,7 +141,7 @@ func (b *Bridge) channelTools() []gokimitools.Tool {
 	}
 }
 
-func (b *Bridge) routeTriggers(ctx context.Context, in <-chan TriggerPayload) <-chan TriggerPayload {
+func (b *Bridge) routeTriggers(ctx context.Context, ipc IPCFacade, in <-chan TriggerPayload) <-chan TriggerPayload {
 	out := make(chan TriggerPayload, 32)
 	go func() {
 		defer close(out)
@@ -154,6 +154,9 @@ func (b *Bridge) routeTriggers(ctx context.Context, in <-chan TriggerPayload) <-
 					return
 				}
 				if b.dispatchToolResponse(payload) {
+					if err := ackTrigger(ctx, ipc, payload, true, ""); err != nil {
+						return
+					}
 					continue
 				}
 				select {

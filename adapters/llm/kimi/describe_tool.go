@@ -63,7 +63,17 @@ func (t *DescribeActorTool) Execute(ctx context.Context, params json.RawMessage)
 		return payloadInvalidError("describe_actor", "", "", "actor_id is required (call list_actors to discover)"), nil
 	}
 
-	snapshot := t.bridge.refreshChannelContext(ctx)
+	if runtime, ok := ctx.Value(channelToolRuntimeKey{}).(channelToolRuntime); ok && runtime.ipc != nil {
+		return t.bridge.executeChannelRequest(ctx, runtime.ipc, runtime.trigger, channelRequestSpec{
+			ToolName:       "describe_actor",
+			EnvelopeType:   "actor.describe",
+			HandlerActorID: p.ActorID,
+			Payload:        cloneRawJSON(json.RawMessage(`{}`)),
+			Timeout:        channelToolDefaultTimeout,
+		}), nil
+	}
+
+	snapshot := t.bridge.channelContext()
 	actorInfo, ok := findActor(snapshot, p.ActorID)
 	if !ok {
 		return unknownActorError("describe_actor", p.ActorID), nil
@@ -164,7 +174,18 @@ func (t *DescribeTypeTool) Execute(ctx context.Context, params json.RawMessage) 
 		return payloadInvalidError("describe_type", p.ActorID, p.Type, "type is required (call describe_actor to discover)"), nil
 	}
 
-	snapshot := t.bridge.refreshChannelContext(ctx)
+	if runtime, ok := ctx.Value(channelToolRuntimeKey{}).(channelToolRuntime); ok && runtime.ipc != nil {
+		payload, _ := json.Marshal(map[string]string{"type": p.Type})
+		return t.bridge.executeChannelRequest(ctx, runtime.ipc, runtime.trigger, channelRequestSpec{
+			ToolName:       "describe_type",
+			EnvelopeType:   "actor.describe",
+			HandlerActorID: p.ActorID,
+			Payload:        payload,
+			Timeout:        channelToolDefaultTimeout,
+		}), nil
+	}
+
+	snapshot := t.bridge.channelContext()
 	if _, ok := findActor(snapshot, p.ActorID); !ok {
 		return unknownActorError("describe_type", p.ActorID), nil
 	}

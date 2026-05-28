@@ -236,7 +236,7 @@ func (a *App) synthesizeDeviceUnreachableCallback(
 		Payload:       cbPayload,
 		ExpiresAt:     body.ExpiresAt,
 	}
-	return a.ForwardDeviceFrame(ctx, df, sf.AdapterActorID)
+	return a.forwardDeviceFrame(ctx, df, sf.AdapterActorID, false)
 }
 
 func synthesizeDeviceUnreachablePayload(sf devicetransit.SendFrame, body deviceFrameBody) (json.RawMessage, error) {
@@ -771,6 +771,10 @@ func (a *App) NotifyDeviceLifecycle(
 // framework decodes SendFrame.Body as deviceFrameBody (mirror of
 // adapters/device/framework.DeviceTransitBody serial shape).
 func (a *App) ForwardDeviceFrame(ctx context.Context, frame devicebus.DeviceFrame, adapterActorID actor.ActorID) error {
+	return a.forwardDeviceFrame(ctx, frame, adapterActorID, true)
+}
+
+func (a *App) forwardDeviceFrame(ctx context.Context, frame devicebus.DeviceFrame, adapterActorID actor.ActorID, awaitAck bool) error {
 	body, err := json.Marshal(deviceFrameBody{
 		Direction:     frame.Direction,
 		RequestID:     frame.RequestID,
@@ -791,8 +795,36 @@ func (a *App) ForwardDeviceFrame(ctx context.Context, frame devicebus.DeviceFram
 	if err != nil {
 		return err
 	}
-	_, err = conn.SendFrame(ctx, kerneldaemonbus.FrameTypeDeviceTransitSend, sf)
-	return err
+	if !awaitAck {
+		_, err = conn.SendFrame(ctx, kerneldaemonbus.FrameTypeDeviceTransitSend, sf)
+		return err
+	}
+	ackFrame, err := conn.SendAndAwait(ctx, kerneldaemonbus.FrameTypeDeviceTransitSend, sf)
+	if err != nil {
+		return err
+	}
+	if ackFrame.FrameKind != kerneldaemonbus.FrameTypeDeviceTransitAck {
+		return fmt.Errorf("gateway: device_transit.send got ack kind %s", ackFrame.FrameKind)
+	}
+	var ack devicetransit.AckFrame
+	if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
+		return fmt.Errorf("gateway: decode device_transit.ack: %w", err)
+	}
+	switch ack.Result {
+	case devicetransit.AckAccepted, devicetransit.AckDelivered:
+		return nil
+	case devicetransit.AckRejectedPermanent, devicetransit.AckRejectedRetryable, devicetransit.AckDropped:
+		if ack.Reason == "" {
+			ack.Reason = string(ack.Result)
+		}
+		result := ack.Result
+		if result == devicetransit.AckDropped {
+			result = devicetransit.AckRejectedPermanent
+		}
+		return devicetransit.NewAckError(result, ack.Reason, ack.Detail, nil)
+	default:
+		return fmt.Errorf("gateway: device_transit callback ack result %q", ack.Result)
+	}
 }
 
 // deviceFrameBody mirrors adapters/device/framework.DeviceTransitBody on
@@ -1283,13 +1315,14 @@ type writeMessageReq struct {
 	// same id + same content collapse to one append. The gateway no
 	// longer fabricates an id on the caller's behalf — proto-layer3
 	// §1.8.1 / §1.8.3.
-	ID            string          `json:"id"          binding:"required"`
-	Type          string          `json:"type"        binding:"required"`
-	Payload       json.RawMessage `json:"payload"     binding:"required"`
-	ParentID      string          `json:"parent_id"`
-	CorrelationID string          `json:"correlation_id"`
-	Audience      []string        `json:"audience"`
-	Visibility    string          `json:"visibility"`
+	ID               string                     `json:"id"          binding:"required"`
+	Type             string                     `json:"type"        binding:"required"`
+	Payload          json.RawMessage            `json:"payload"     binding:"required"`
+	ParentID         string                     `json:"parent_id"`
+	CorrelationID    string                     `json:"correlation_id"`
+	CrossChannelRefs *[]message.CrossChannelRef `json:"cross_channel_refs"`
+	Audience         []string                   `json:"audience"`
+	Visibility       string                     `json:"visibility"`
 	// FIX-T8: caller may supply kind explicitly. When omitted the
 	// gateway fills the L1 §1.1 default for core types (and leaves
 	// it empty for business types — daemon harness will reject on
@@ -1336,6 +1369,16 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "audience_too_large"})
 		return
 	}
+	if len(req.Audience) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": string(message.HarnessAudienceEmpty)})
+		return
+	}
+	for _, id := range req.Audience {
+		if id == "*" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": string(message.HarnessAudienceWildcardForbidden)})
+			return
+		}
+	}
 	u := identity.UserFrom(c)
 	channelID := c.Param("chID")
 
@@ -1356,8 +1399,14 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		return
 	}
 	if kind == message.KindRequest {
-		if len(req.Audience) != 1 || req.Audience[0] == "" || req.Audience[0] == "*" {
+		if len(req.Audience) != 1 || req.Audience[0] == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": string(message.HarnessRequestAudienceInvalid)})
+			return
+		}
+	}
+	if kind == message.KindResponse {
+		if len(req.Audience) != 1 || req.Audience[0] == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": string(message.HarnessResponseAudienceInvalid)})
 			return
 		}
 	}
@@ -1396,17 +1445,18 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		// R4-3: id is caller-supplied (L0 §1.1 sender-provided);
 		// drives L1 §2.3 harness Step 3 dedupe. The gateway does
 		// not fabricate id on the caller's behalf.
-		ID:            message.ID(req.ID),
-		Type:          req.Type,
-		ChannelID:     channel.ID(channelID),
-		Sender:        message.Sender{Kind: actor.KindHuman, ID: actor.ActorID(member.MemberActorID)},
-		Kind:          kind,
-		Payload:       req.Payload,
-		ParentID:      message.ID(req.ParentID),
-		CorrelationID: message.ID(req.CorrelationID),
-		Audience:      audience,
-		Visibility:    vis,
-		TS:            ts,
+		ID:               message.ID(req.ID),
+		Type:             req.Type,
+		ChannelID:        channel.ID(channelID),
+		Sender:           message.Sender{Kind: actor.KindHuman, ID: actor.ActorID(member.MemberActorID)},
+		Kind:             kind,
+		Payload:          req.Payload,
+		ParentID:         message.ID(req.ParentID),
+		CorrelationID:    message.ID(req.CorrelationID),
+		CrossChannelRefs: req.CrossChannelRefs,
+		Audience:         audience,
+		Visibility:       vis,
+		TS:               ts,
 	}
 	if kind == message.KindResponse && envelope.ParentID != "" && envelope.CorrelationID == "" {
 		envelope.CorrelationID = a.correlationForParent(c.Request.Context(), channelID, envelope.ParentID)

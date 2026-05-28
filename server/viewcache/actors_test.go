@@ -18,7 +18,7 @@ func TestActorSnapshotProjectsTypesAndReadiness(t *testing.T) {
 
 	frames := []viewsync.PushFrame{
 		actorSnapshotFrame(chID, 1, "system.actor.registered", map[string]any{
-			"actor_id":      "tool:xhs-adapter",
+			"actor_id":      "tool:xhs",
 			"actor_kind":    "tool",
 			"actor_binding": "runtime_inbound_via_relay",
 			"display_name":  "xhs",
@@ -30,12 +30,12 @@ func TestActorSnapshotProjectsTypesAndReadiness(t *testing.T) {
 		actorSnapshotFrame(chID, 2, "system.type.installed", map[string]any{
 			"type":             "xhs.publish",
 			"allowed_kinds":    []string{"request", "response"},
-			"handler_actor_id": "tool:xhs-adapter",
+			"handler_actor_id": "tool:xhs",
 			"handler_binding":  "runtime_inbound_via_relay",
 			"max_pending_ms":   30_000,
 		}),
 		actorSnapshotFrame(chID, 3, "actor.readiness.changed", map[string]any{
-			"actor_id":   "tool:xhs-adapter",
+			"actor_id":   "tool:xhs",
 			"changed_at": 3000,
 			"current": map[string]any{
 				"ready":                false,
@@ -62,7 +62,7 @@ func TestActorSnapshotProjectsTypesAndReadiness(t *testing.T) {
 	if _, err := svc.db.ExecContext(ctx, `
 		INSERT INTO daemon_active_actors
 		  (channel_id, actor_id, daemon_id, registered_at, last_seen_at)
-		VALUES (?, 'tool:xhs-adapter', 'daemon-sql', 1000, 2000)`,
+		VALUES (?, 'tool:xhs', 'daemon-sql', 1000, 2000)`,
 		string(chID),
 	); err != nil {
 		t.Fatalf("insert active actor: %v", err)
@@ -76,7 +76,7 @@ func TestActorSnapshotProjectsTypesAndReadiness(t *testing.T) {
 		t.Fatalf("snapshot=%+v", got)
 	}
 	a := got.Actors[0]
-	if a.ActorID != "tool:xhs-adapter" || a.Kind != "tool" || a.Binding != "runtime_inbound_via_relay" {
+	if a.ActorID != "tool:xhs" || a.Kind != "tool" || a.Binding != "runtime_inbound_via_relay" {
 		t.Fatalf("actor row=%+v", a)
 	}
 	if a.Ready || a.ReadyReason != "device_offline" || a.LastReadyAt != 2000 || a.LastStateChangeAt != 3000 {

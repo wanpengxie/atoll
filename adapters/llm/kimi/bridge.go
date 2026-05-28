@@ -46,32 +46,18 @@ const (
 	EnvKeyChannelType  = "COAGENT_CHANNEL_TYPE"
 	EnvKeyDomainPrompt = "COAGENT_DOMAIN_PROMPT"
 
-	// EnvKeyChannelID + EnvKeyChannelDB are daemon-set spawn env vars
-	// pointing the worker at its own channel-local sqlite (the
-	// authoritative actor_registry / type_registry source). The kimi
-	// bridge opens channel.sqlite read-only via OpenChannelStore and
-	// snapshots the registries at boot (system prompt + initial LLM
-	// tool list) and on each turn boundary (dynamic LLM tool refresh
-	// when the agent allows it).
-	//
-	// These replace the legacy `COAGENT_CHANNEL_CONTEXT_FILE` static
-	// JSON snapshot the daemon used to write at worker spawn time —
-	// that file froze channel state at spawn and could not reflect
-	// later type install / actor register events.
-	EnvKeyChannelID = "COAGENT_CHANNEL_ID"
-	EnvKeyChannelDB = "COAGENT_CHANNEL_DB"
+	// EnvKeyChannelID identifies the daemon-owned channel context for
+	// this worker. EnvKeyChannelContext carries a daemon-built bootstrap
+	// actor/type display snapshot; current actor state is still queried
+	// through envelope calls such as actor.status / actor.describe.
+	EnvKeyChannelID      = "COAGENT_CHANNEL_ID"
+	EnvKeyChannelContext = "COAGENT_CHANNEL_CONTEXT_JSON"
 )
 
-// ChannelContext is a snapshot of the channel-local registries the LLM
-// system prompt + tool list need (actor list + type list). Produced by
-// ChannelStore.Snapshot from channel.sqlite — channel.sqlite is the
-// authoritative truth, ChannelContext is just a transport struct used
-// to thread the data through BuildBasePrompt and Config.
-//
-// Prompt-cache friendliness: a freshly-snapshotted ChannelContext is
-// byte-stable as long as channel.sqlite has not changed; consumers
-// that re-snapshot (per-turn refresh) MUST treat any field difference
-// as a cache invalidation signal.
+// ChannelContext is a daemon-built bootstrap display snapshot of the
+// channel's actor/type catalog. It is prompt context, not current actor
+// truth. Current metadata/status flows through actor.describe /
+// actor.status reserved envelope calls.
 type ChannelContext struct {
 	// ChannelID is the channel this snapshot describes. Surfaces in the
 	// rendered prompt header so a debug operator can grep session logs.
@@ -81,24 +67,22 @@ type ChannelContext struct {
 	// Empty for legacy / generic channels.
 	ChannelType string `json:"channel_type,omitempty"`
 
-	// Actors is the active set from actor_registry (deregistered rows
-	// filtered out). Includes system / human members / agent self /
-	// tool adapters. Order: actor_id ascending (matches store.ActorRegistry.ListActive).
+	// Actors is the daemon-provided active actor catalog. Includes
+	// system / human members / agent self / tool adapters.
 	Actors []ActorInfo `json:"actors,omitempty"`
 
-	// Types is the channel-local type_registry list — every business
-	// type the harness will accept, plus its handler actor binding and
-	// allowed kinds. The LLM uses this to pick which envelope.type to
-	// emit for a given user request.
+	// Types is the daemon-provided business type catalog plus handler
+	// actor binding and allowed kinds. The LLM uses this to pick which
+	// envelope.type to emit for a given user request.
 	Types []TypeInfo `json:"types,omitempty"`
 
 	// Devices is an optional active device actor projection. It is empty
-	// for normal channel-store snapshots; tests and future diagnostics can
-	// use it to show which device actor route is available.
+	// for normal bootstrap snapshots; tests and future diagnostics can use
+	// it to show which device actor route is available.
 	Devices []DeviceInfo `json:"devices,omitempty"`
 }
 
-// ActorInfo is one actor_registry row projected into the LLM prompt.
+// ActorInfo is one actor catalog row projected into the LLM prompt.
 type ActorInfo struct {
 	ActorID           string          `json:"actor_id"`
 	Kind              string          `json:"kind"`                   // human | agent | tool | system
@@ -113,14 +97,14 @@ type ActorInfo struct {
 	LastStateChangeAt int64           `json:"last_state_change_at,omitempty"`
 }
 
-// TypeInfo is one type_registry row projected into the LLM prompt.
+// TypeInfo is one request type projected into the LLM prompt.
 //
 // Level A (proto-layer0 §1.4.1): payload is opaque to the protocol
-// layer; the type_registry stores no payload schema fields, so no
+// layer; the bootstrap type catalog stores no payload schema fields, so no
 // payload-schema projection appears here either.
 type TypeInfo struct {
 	Type           string             `json:"type"`             // e.g. "xhs.publish"
-	HandlerActorID string             `json:"handler_actor_id"` // e.g. "tool:xhs-adapter"
+	HandlerActorID string             `json:"handler_actor_id"` // e.g. "tool:xhs"
 	HandlerBinding string             `json:"handler_binding,omitempty"`
 	AllowedKinds   []string           `json:"allowed_kinds,omitempty"` // subset of {event, request, response}
 	MaxPendingMs   int64              `json:"max_pending_ms,omitempty"`
@@ -165,20 +149,9 @@ type Config struct {
 	// long as it stays byte-stable across turns.
 	SystemPrompt string
 
-	// ChannelContext is the snapshot folded into SystemPrompt at boot.
-	// The bridge also derives go-kimi AdditionalTools from
-	// ChannelContext.Types — that initial tool list seeds the kimi
-	// agent so the LLM has channel-local request tools available on
-	// turn 1 without a sqlite round-trip.
+	// ChannelContext is the daemon-owned bootstrap snapshot folded into
+	// SystemPrompt at boot.
 	ChannelContext ChannelContext
-
-	// ChannelStore is the live read-only handle onto channel.sqlite.
-	// When non-nil the bridge re-snapshots the registries on turn
-	// boundaries so dynamic type install / actor register events
-	// observed inside the worker subprocess can refresh the LLM tool
-	// list without a respawn. Nil store falls back to the boot-time
-	// ChannelContext (frozen for the lifetime of this worker process).
-	ChannelStore *ChannelStore
 
 	// MaxTurns caps the bridge — same semantics as MockBridge. A
 	// non-positive value means UNLIMITED: the LLM itself decides when
@@ -238,6 +211,10 @@ type IPCFacade interface {
 	WriteEnvelope(ctx context.Context, env message.Envelope) error
 }
 
+type triggerAcker interface {
+	AckTrigger(ctx context.Context, trigger TriggerPayload, accepted bool, reason string) error
+}
+
 // TriggerPayload is the local mirror of runtime/ipc.TriggerPayload —
 // duplicated here so adapters/llm/kimi avoids pulling runtime/** in.
 // cmd/worker writes a one-liner converter that fan-outs the IPCClient
@@ -246,6 +223,33 @@ type TriggerPayload struct {
 	Envelope      message.Envelope
 	CorrelationID message.ID
 	Cursor        int64
+	AckID         string
+}
+
+func ackTrigger(ctx context.Context, ipc IPCFacade, trigger TriggerPayload, accepted bool, reason string) error {
+	acker, ok := ipc.(triggerAcker)
+	if !ok {
+		return nil
+	}
+	return acker.AckTrigger(ctx, trigger, accepted, reason)
+}
+
+type terminalEmittedError struct {
+	cause error
+}
+
+func (e terminalEmittedError) Error() string {
+	if e.cause == nil {
+		return ""
+	}
+	return e.cause.Error()
+}
+
+func (e terminalEmittedError) Unwrap() error { return e.cause }
+
+func isTerminalEmittedError(err error) bool {
+	var handled terminalEmittedError
+	return errors.As(err, &handled)
 }
 
 // Bridge drives one go-kimi Agent per worker process. Run blocks until
@@ -351,7 +355,7 @@ func (b *Bridge) Run(ctx context.Context, ipc IPCFacade) error {
 	defer stopRouter()
 
 	turns := 0
-	triggers := b.routeTriggers(runCtx, ipc.Triggers())
+	triggers := b.routeTriggers(runCtx, ipc, ipc.Triggers())
 	for {
 		select {
 		case <-ctx.Done():
@@ -362,9 +366,16 @@ func (b *Bridge) Run(ctx context.Context, ipc IPCFacade) error {
 			}
 			turns++
 			if err := b.runTurn(ctx, ipc, agent, wireCh, payload, turns); err != nil {
-				// runTurn already emitted a terminal envelope; surface
-				// the error to Runtime so the caller can decide whether
-				// to exit non-zero.
+				// Terminal-emitted errors have already produced an
+				// observable failure envelope; lower-level write/consume
+				// failures are nacked so the daemon can retry delivery.
+				if isTerminalEmittedError(err) {
+					if ackErr := ackTrigger(ctx, ipc, payload, true, ""); ackErr != nil {
+						return ackErr
+					}
+				} else {
+					_ = ackTrigger(ctx, ipc, payload, false, err.Error())
+				}
 				return err
 			}
 			// MaxTurns > 0 enforces a cap (deterministic exit for tests).
@@ -376,9 +387,16 @@ func (b *Bridge) Run(ctx context.Context, ipc IPCFacade) error {
 					"text":        "kimi bridge reached max_turns",
 					"next_action": "done",
 				}); err != nil {
+					_ = ackTrigger(ctx, ipc, payload, false, err.Error())
+					return err
+				}
+				if err := ackTrigger(ctx, ipc, payload, true, ""); err != nil {
 					return err
 				}
 				return nil
+			}
+			if err := ackTrigger(ctx, ipc, payload, true, ""); err != nil {
+				return err
 			}
 		}
 	}
@@ -549,13 +567,12 @@ func (b *Bridge) consumeWire(
 					drained = false
 				}
 			}
-			// No TurnEnd seen. Do NOT emit a partial envelope here —
-			// the caller's failed-terminal path will surface the error
-			// with the full accumulated text once we return nil.
-			return nil
+			// No TurnEnd means no terminal agent.text was emitted. Treat it
+			// as delivery failure so the trigger is not ACKed as handled.
+			return errors.New("kimi: agent completed without TurnEnd")
 		case msg, ok := <-wireCh:
 			if !ok {
-				return nil
+				return errors.New("kimi: wire channel closed before TurnEnd")
 			}
 			done, err := b.handleWireMsg(ctx, ipc, msg, state, trigger, turnIndex)
 			if err != nil {
@@ -724,9 +741,9 @@ func (b *Bridge) emitTurnEnd(
 	return b.emitEnvelope(ctx, ipc, trigger, "agent.text", message.VisibilityPublic, payload)
 }
 
-// emitEnvelope assembles + writes one envelope. Audience is the
-// channel wildcard so the daemon's harness routes it to viewcache +
-// pushhub like any human-visible event.
+// emitEnvelope assembles + writes one envelope. Audience is derived
+// from the trigger sender so the daemon routes it to the conversation
+// participant without wildcard fanout.
 func (b *Bridge) emitEnvelope(
 	ctx context.Context,
 	ipc IPCFacade,
@@ -824,7 +841,7 @@ func (b *Bridge) emitTerminalLLMError(
 	if writeErr := ipc.WriteEnvelope(ctx, env); writeErr != nil {
 		return errors.Join(err, writeErr)
 	}
-	return err
+	return terminalEmittedError{cause: err}
 }
 
 func terminalErrorCorrelationID(trigger TriggerPayload) message.ID {
@@ -1158,7 +1175,7 @@ func renderChannelContext(c ChannelContext) string {
 	if len(c.Types) > 0 {
 		// Tool surface (substrate-native invocation):
 		//
-		//   list_actors    — scan the full actor + type registry.
+		//   list_actors    — inspect the bootstrap actor + type catalog.
 		//   describe_actor — fetch one actor's skill doc.
 		//   describe_type  — fetch payload examples and error docs.
 		//   call_actor     — invoke any request-callable pair.
@@ -1169,8 +1186,8 @@ func renderChannelContext(c ChannelContext) string {
 		// tools with full input_schema. Listing every type
 		// twice (once in tools API, once in prompt) was the legacy
 		// inject-per-type fallback; the substrate-native path is one
-		// list_actors round-trip per task.
-		fmt.Fprintf(&b, "\n## Tool invocation\nThis channel exposes %d request-callable type(s) spanning the actors listed above. Use `list_actors` for the universe scan, `describe_actor(actor_id)` to deep-dive one actor's skill doc and workflows, `describe_type(actor_id, type)` to fetch a specific type's payload example and error codes, then `call_actor` to invoke. The registry is live - newly installed types appear in the next list_actors call without restart.\n", countRequestTypes(c.Types))
+		// list_actors read per task.
+		fmt.Fprintf(&b, "\n## Tool invocation\nThis channel exposes %d request-callable type(s) spanning the actors listed above. Use `list_actors` for the bootstrap catalog, `describe_actor(actor_id)` to deep-dive one actor's skill doc and workflows, `describe_type(actor_id, type)` to fetch a specific type's payload example and error codes, then `call_actor` to invoke. The catalog is a bootstrap hint; live validation happens on each envelope call.\n", countRequestTypes(c.Types))
 	}
 
 	if len(c.Devices) > 0 {

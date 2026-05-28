@@ -17,6 +17,7 @@ import (
 
 	proxycontract "github.com/wanpengxie/ActOS/internal/proxy/contract"
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/server/store"
 )
 
@@ -38,6 +39,31 @@ func (f *captureForwarder) ForwardDeviceFrame(_ context.Context, frame DeviceFra
 	frame.ActorID = string(adapterActorID)
 	f.ch <- frame
 	return nil
+}
+
+type failingNotifier struct{}
+
+func (f failingNotifier) NotifyProxyDaemonReady(context.Context, Daemon, DaemonReadyInput) error {
+	return context.Canceled
+}
+
+func (f failingNotifier) NotifyProxyDaemonOffline(context.Context, Daemon, []actor.ActorID) error {
+	return nil
+}
+
+func readNextNonAckFrame(t *testing.T, conn *websocket.Conn) DeviceFrame {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	for {
+		var frame DeviceFrame
+		if err := conn.ReadJSON(&frame); err != nil {
+			t.Fatalf("read outbound actor frame: %v", err)
+		}
+		if frame.FrameType == proxycontract.FrameTypeAck {
+			continue
+		}
+		return frame
+	}
 }
 
 func TestDaemonV2HandshakeReadyHeartbeatAndDisconnect(t *testing.T) {
@@ -89,6 +115,55 @@ func TestDaemonV2HandshakeReadyHeartbeatAndDisconnect(t *testing.T) {
 		return status == "online" && hostname == "host-1" && version == "0.1.0" && n == 2
 	})
 
+	readinessPayload := json.RawMessage(`{"actor_id":"tool:kimi","current":{"ready":false,"state":"not_ready","reason":"daemon_unreachable","detail":{"endpoint":"127.0.0.1:10086"},"last_ready_at":111,"last_state_change_at":222},"checked_at":444,"changed_at":333}`)
+	readinessEnv := message.Envelope{
+		ID:         "event:readiness:test",
+		TS:         333,
+		ChannelID:  "ch-proxy",
+		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind:       message.KindEvent,
+		Type:       "actor.readiness.changed",
+		Payload:    readinessPayload,
+		Visibility: message.VisibilityPublic,
+		Audience:   message.Audience{actor.SystemActorID},
+	}
+	rawReadiness, err := json.Marshal(readinessEnv)
+	if err != nil {
+		t.Fatalf("marshal readiness envelope: %v", err)
+	}
+	if err := conn.WriteJSON(DeviceFrame{
+		Direction: "from_device",
+		ActorID:   "tool:kimi",
+		Payload:   rawReadiness,
+	}); err != nil {
+		t.Fatalf("write readiness event: %v", err)
+	}
+	eventually(t, "readiness projection", time.Second, func() bool {
+		var state, reason, detail string
+		var checkedAt, lastReadyAt, lastStateChangeAt int64
+		err := svc.db.QueryRow(`
+			SELECT ready_state, ready_reason, ready_detail,
+			       readiness_checked_at, last_ready_at, last_state_change_at
+			  FROM daemon_hosted_actors
+			 WHERE daemon_id=? AND actor_id='tool:kimi'`, string(daemon.ID)).
+			Scan(&state, &reason, &detail, &checkedAt, &lastReadyAt, &lastStateChangeAt)
+		return err == nil &&
+			state == "not_ready" &&
+			reason == "daemon_unreachable" &&
+			strings.Contains(detail, "127.0.0.1:10086") &&
+			checkedAt == 444 &&
+			lastReadyAt == 111 &&
+			lastStateChangeAt == 222
+	})
+	select {
+	case got := <-forwarder.ch:
+		if got.ActorID != "tool:kimi" {
+			t.Fatalf("readiness forward actor=%+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("readiness event was not forwarded")
+	}
+
 	if err := conn.WriteJSON(DeviceFrame{Direction: "from_device", FrameType: proxycontract.FrameTypeHeartbeat}); err != nil {
 		t.Fatalf("write heartbeat: %v", err)
 	}
@@ -124,11 +199,7 @@ func TestDaemonV2HandshakeReadyHeartbeatAndDisconnect(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SendFrameToActor: %v", err)
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
-	var outbound DeviceFrame
-	if err := conn.ReadJSON(&outbound); err != nil {
-		t.Fatalf("read outbound actor frame: %v", err)
-	}
+	outbound := readNextNonAckFrame(t, conn)
 	if outbound.ChannelID != "ch-proxy" || outbound.ActorID != "tool:kimi" || outbound.RequestID != "out-1" {
 		t.Fatalf("outbound frame=%+v", outbound)
 	}
@@ -145,6 +216,58 @@ func TestDaemonV2HandshakeReadyHeartbeatAndDisconnect(t *testing.T) {
 		}
 		return status == "offline" && n == 0
 	})
+}
+
+func TestDaemonV2KeepsConnectionWhenReadyNotifyFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	svc := NewService(testDB(t), Config{})
+	svc.SetProxyDaemonNotifier(failingNotifier{})
+	forwarder := &captureForwarder{ch: make(chan DeviceFrame, 1)}
+	daemon, apiKey, err := svc.CreateDaemon(ctx, CreateDaemonInput{
+		OwnerID: "user-1",
+		Name:    "Laptop",
+	})
+	if err != nil {
+		t.Fatalf("CreateDaemon: %v", err)
+	}
+	if err := svc.AttachDaemonToChannel(ctx, daemon.ID, "ch-proxy"); err != nil {
+		t.Fatalf("AttachDaemonToChannel: %v", err)
+	}
+
+	router := gin.New()
+	router.GET(proxycontract.WSPathV2, svc.HandleWSV2(forwarder))
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	conn := dialProxyDaemon(t, srv.URL, apiKey)
+	if err := conn.WriteJSON(DeviceFrame{
+		Direction: "from_device",
+		FrameType: proxycontract.FrameTypeReady,
+		Actors:    []proxycontract.ReadyActorV2{{ActorID: "tool:kimi"}},
+	}); err != nil {
+		t.Fatalf("write ready: %v", err)
+	}
+	eventually(t, "route after notify failure", time.Second, func() bool {
+		return svc.daemonOwnsActor(daemon.ID, "ch-proxy", "tool:kimi")
+	})
+
+	if err := svc.SendFrameToActor(ctx, "ch-proxy", "tool:kimi", DeviceFrame{
+		Direction: "to_device",
+		RequestID: "out-after-notify-failure",
+		Payload:   json.RawMessage(`{"ok":true}`),
+	}); err != nil {
+		t.Fatalf("SendFrameToActor after notify failure: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	var outbound DeviceFrame
+	if err := conn.ReadJSON(&outbound); err != nil {
+		t.Fatalf("connection closed after notify failure: %v", err)
+	}
+	if outbound.RequestID != "out-after-notify-failure" {
+		t.Fatalf("outbound=%+v", outbound)
+	}
+	_ = conn.Close()
 }
 
 func TestDaemonV2InvalidKeyAndDuplicateActor(t *testing.T) {

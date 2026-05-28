@@ -17,11 +17,11 @@ import (
 
 	proxyfacade "github.com/wanpengxie/ActOS/adapters/framework/proxy_facade"
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
-	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/kernel/viewsync"
@@ -171,10 +171,11 @@ func TestHandleWriteMessage_RequestAudienceRejected(t *testing.T) {
 	cases := []struct {
 		name     string
 		audience []string
+		wantErr  string
 	}{
-		{"wildcard", []string{"*"}},
-		{"empty", []string{}},
-		{"multi", []string{"agent:a", "agent:b"}},
+		{"wildcard", []string{"*"}, string(message.HarnessAudienceWildcardForbidden)},
+		{"empty", []string{}, string(message.HarnessAudienceEmpty)},
+		{"multi", []string{"agent:a", "agent:b"}, string(message.HarnessRequestAudienceInvalid)},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -204,8 +205,8 @@ func TestHandleWriteMessage_RequestAudienceRejected(t *testing.T) {
 				Error string `json:"error"`
 			}
 			_ = json.NewDecoder(resp.Body).Decode(&errBody)
-			if !strings.Contains(errBody.Error, "harness_request_audience_invalid") {
-				t.Errorf("error=%q want harness_request_audience_invalid", errBody.Error)
+			if !strings.Contains(errBody.Error, tc.wantErr) {
+				t.Errorf("error=%q want %s", errBody.Error, tc.wantErr)
 			}
 		})
 	}
@@ -350,7 +351,7 @@ func TestHandleWriteMessage_MissingID(t *testing.T) {
 		Type:     "human.text",
 		Kind:     "event",
 		Payload:  json.RawMessage(`{"text":"no-id"}`),
-		Audience: []string{"*"},
+		Audience: []string{"agent:alpha"},
 	}
 	raw, _ := json.Marshal(payload)
 	req, _ := http.NewRequest(http.MethodPost,
@@ -401,7 +402,7 @@ func TestHandleWriteMessage_UnknownFieldRejected(t *testing.T) {
 		"type":         "human.text",
 		"kind":         "event",
 		"payload":      {"text":"hi"},
-		"audience":     ["*"],
+		"audience":     ["agent:alpha"],
 		"not_a_field":  "should reject"
 	}`
 	req, _ := http.NewRequest(http.MethodPost,
@@ -451,12 +452,19 @@ func TestHandleWriteMessage_KnownFieldsStillAccepted(t *testing.T) {
 	client := &http.Client{}
 	sess := registerLoginAndCreateChannel(t, client, srv.URL, app, "known-fields@example.com")
 
+	crossNote := "source thread"
+	crossRefs := []message.CrossChannelRef{{
+		ChannelID: "ch-source",
+		MessageID: "msg-source",
+		Note:      &crossNote,
+	}}
 	payload := writeBody{
-		ID:       "msg-known-1",
-		Type:     "human.text",
-		Kind:     "event",
-		Payload:  json.RawMessage(`{"text":"hi"}`),
-		Audience: []string{"*"},
+		ID:               "msg-known-1",
+		Type:             "human.text",
+		Kind:             "event",
+		Payload:          json.RawMessage(`{"text":"hi"}`),
+		CrossChannelRefs: &crossRefs,
+		Audience:         []string{"agent:alpha"},
 	}
 	raw, _ := json.Marshal(payload)
 	req, _ := http.NewRequest(http.MethodPost,
@@ -543,16 +551,23 @@ func TestHandleWriteMessage_CallerIDForwardedToDaemon(t *testing.T) {
 	}
 
 	const callerSuppliedID = "msg-caller-fwd-12345"
+	crossNote := "source thread"
+	crossRefs := []message.CrossChannelRef{{
+		ChannelID: "ch-source",
+		MessageID: "msg-source",
+		Note:      &crossNote,
+	}}
 
 	respCh := make(chan *http.Response, 1)
 	errCh := make(chan error, 1)
 	go func() {
 		body, _ := json.Marshal(writeBody{
-			ID:       callerSuppliedID,
-			Type:     "human.text",
-			Kind:     string(message.KindEvent),
-			Payload:  json.RawMessage(`{"text":"hi"}`),
-			Audience: []string{"*"},
+			ID:               callerSuppliedID,
+			Type:             "human.text",
+			Kind:             string(message.KindEvent),
+			Payload:          json.RawMessage(`{"text":"hi"}`),
+			CrossChannelRefs: &crossRefs,
+			Audience:         []string{"agent:alpha"},
 		})
 		req, _ := http.NewRequest(http.MethodPost,
 			srv.URL+"/api/channels/"+sess.channelID+"/messages",
@@ -578,6 +593,13 @@ func TestHandleWriteMessage_CallerIDForwardedToDaemon(t *testing.T) {
 	if got := string(wmbody.EnvelopePartial.ID); got != callerSuppliedID {
 		t.Fatalf("gateway forwarded envelope.id=%q want caller-supplied %q (R4-3)",
 			got, callerSuppliedID)
+	}
+	gotRefs := wmbody.EnvelopePartial.CrossChannelRefs
+	if gotRefs == nil || len(*gotRefs) != 1 ||
+		(*gotRefs)[0].ChannelID != crossRefs[0].ChannelID ||
+		(*gotRefs)[0].MessageID != crossRefs[0].MessageID ||
+		(*gotRefs)[0].Note == nil || *(*gotRefs)[0].Note != crossNote {
+		t.Fatalf("gateway forwarded cross_channel_refs=%+v want %+v", gotRefs, crossRefs)
 	}
 
 	// Ack with the same caller id so the gateway's response surfaces it.
@@ -687,7 +709,7 @@ func TestHandleWriteMessageRejectUsesReasonHTTPStatus(t *testing.T) {
 					Type:     "human.text",
 					Kind:     string(message.KindEvent),
 					Payload:  json.RawMessage(`{"text":"hi"}`),
-					Audience: []string{"*"},
+					Audience: []string{"agent:alpha"},
 				})
 				req, _ := http.NewRequest(http.MethodPost,
 					srv.URL+"/api/channels/"+sess.channelID+"/messages",
@@ -1460,13 +1482,14 @@ func TestHandleWriteMessageResponseInheritsParentCorrelation(t *testing.T) {
 // TestHandleWriteMessage_* to build wire-shape JSON. R4-3: `id` is
 // caller-supplied per L3 §1.8.1; tests fill a fresh uuid by default.
 type writeBody struct {
-	ID            string          `json:"id,omitempty"`
-	Type          string          `json:"type"`
-	Kind          string          `json:"kind,omitempty"`
-	Payload       json.RawMessage `json:"payload"`
-	ParentID      string          `json:"parent_id,omitempty"`
-	CorrelationID string          `json:"correlation_id,omitempty"`
-	Audience      []string        `json:"audience"`
+	ID               string                     `json:"id,omitempty"`
+	Type             string                     `json:"type"`
+	Kind             string                     `json:"kind,omitempty"`
+	Payload          json.RawMessage            `json:"payload"`
+	ParentID         string                     `json:"parent_id,omitempty"`
+	CorrelationID    string                     `json:"correlation_id,omitempty"`
+	CrossChannelRefs *[]message.CrossChannelRef `json:"cross_channel_refs,omitempty"`
+	Audience         []string                   `json:"audience"`
 }
 
 // registerLoginAndCreateChannel is a small fixture that returns a
@@ -1708,8 +1731,16 @@ func TestDeviceTransitNoRouteProxyFacadePayloadSynthesizesTerminalEnvelope(t *te
 		AdapterName:    "kimi",
 		AdapterActorID: adapterActor,
 		ChannelID:      chID,
-		DeviceTransit:  proxyFacadeNoopTransit{},
-		HarnessChain:   chain,
+		ForwardExternalRequest: func(context.Context, *message.Envelope, adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
+			return adapter.ExternalRequestResult{FrameID: "noop-frame"}, nil
+		},
+		UpdateReadiness: func(context.Context, actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
+			return actorreg.ReadinessTransition{}, nil
+		},
+		CompleteExternalResponse: func(_ context.Context, env *message.Envelope) (adapter.RespondResult, error) {
+			chain.env = env
+			return adapter.RespondResult{MessageID: env.ID}, nil
+		},
 	}); err != nil {
 		t.Fatalf("proxy facade Init: %v", err)
 	}
@@ -3670,21 +3701,8 @@ func (p *pipeTransport) WriteFrame(ctx context.Context, f kerneldaemonbus.Frame)
 }
 func (p *pipeTransport) Close() error { return nil }
 
-type proxyFacadeNoopTransit struct{}
-
-func (proxyFacadeNoopTransit) Send(context.Context, devicetransit.SendFrame) (devicetransit.FrameID, error) {
-	return "noop-frame", nil
-}
-
-func (proxyFacadeNoopTransit) Ack(context.Context, devicetransit.AckFrame) error { return nil }
-
 type proxyFacadeCaptureChain struct {
 	env *message.Envelope
-}
-
-func (c *proxyFacadeCaptureChain) Write(_ context.Context, env *message.Envelope) (khar.WriteResult, error) {
-	c.env = env
-	return khar.WriteResult{MessageID: env.ID, Seq: 1}, nil
 }
 
 // seqList extracts the seq field of every captured PushedFrame; used

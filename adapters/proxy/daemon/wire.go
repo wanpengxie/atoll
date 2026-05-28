@@ -8,6 +8,7 @@ const (
 	FrameTypeReady     FrameType = "ready"
 	FrameTypeHeartbeat FrameType = "heartbeat"
 	FrameTypeShutdown  FrameType = "shutdown"
+	FrameTypeAck       FrameType = "ack"
 )
 
 const (

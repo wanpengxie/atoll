@@ -31,7 +31,6 @@ import (
 	"time"
 
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
-	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/pkg/logger"
 	"github.com/wanpengxie/ActOS/pkg/metrics"
@@ -64,8 +63,6 @@ func main() {
 		capacity     = flag.Int("capacity", 0, "optional max active channel capacity reported to the daemonbus registry")
 		allowDevMode = flag.Bool("allow-dev-secrets", false,
 			"dev mode: pretty-printed console logs + relax --key / --human-caller-secret requirement when paired with --mock-bus")
-		useScaffoldXHS = flag.Bool("use-scaffold-xhs", false,
-			"dev/test fallback: install the in-process xhs scaffold instead of the production device transit adapter")
 		workerBin = flag.String("worker-bin", defaultWorkerBin(),
 			"path to the coagent-worker subprocess binary; empty disables worker spawning (channel-agent triggers become no-op)")
 		workerProvider = flag.String("worker-provider", envOrDefault("COAGENT_WORKER_PROVIDER", "kimi"),
@@ -117,29 +114,19 @@ func main() {
 		}
 	}
 
-	// M1.6-T5 phase-2 — register both the legacy / generic "group"
-	// template (empty seeds, no domain prompt) and the xhs-creator
-	// template (tool:xhs-adapter actor seed + published-notes/drafts/
-	// assets/ workdir + L4 §2.4 domain prompt). cmd/daemon converts
-	// the adapter-owned xhs.Template into the runtime projection here
-	// because the conversion is a composition-root concern (keeps
-	// `runtime` independent of `adapters/**` per arch-lint).
-	//
+	// Register the generic "group" template and the xhs-creator template.
+	// xhs-creator keeps only workdir/prompt data locally; proxy-hosted actors
+	// and type rows arrive later through control.update_members.
 	if err := migrateLegacyDeviceMirrorFile(context.Background(), *dataDir, lg.Z()); err != nil {
 		lg.Z().Error().Err(err).Str("event", "daemon.fail_fast").
 			Msg("legacy device route mirror migration failed")
 		os.Exit(1)
 	}
-	// T4 retires daemon-side xhs adapter (mirroring T3 kimibridge retirement).
-	// xhs business types are now serviced by the proxy facade installed
+	// xhs business types are serviced only by the proxy facade installed
 	// dynamically via SetProxyActorCallback when the user proxy daemon
-	// connects with `tool:xhs` in its ready frame. We keep the xhs-creator
-	// channel template's WorkdirSubdirs + DomainPrompt (business knowledge)
-	// but drop the AdapterModuleFactory wiring so framework's "xhs" Name
-	// slot stays open for the proxy facade.
-	_ = devicexhs.Config{}
-	_ = xhs.Config{}
-	_ = *useScaffoldXHS
+	// connects with `tool:xhs` in its ready frame. The xhs-creator channel
+	// template keeps only WorkdirSubdirs + DomainPrompt; it does not seed
+	// an adapter actor or install a daemon-side xhs module.
 	adapterCredentialSecret := []byte(*humanSecret)
 	if len(adapterCredentialSecret) == 0 && *mockBus {
 		adapterCredentialSecret = []byte(devAdapterCredentialSecret)
@@ -159,7 +146,7 @@ func main() {
 		UseMockBus:                *mockBus,
 		ReplayWindow:              time.Duration(*replayWindowMs) * time.Millisecond,
 		AllowReplayWindowDisabled: *mockBus && *replayWindowMs <= 0,
-		ChannelTemplates:          buildChannelTemplates(*useScaffoldXHS),
+		ChannelTemplates:          buildChannelTemplates(),
 		OnChannelBoot:             adapterBootHook,
 		Logger:                    daemonLogger,
 	}
@@ -211,7 +198,6 @@ func main() {
 		Int64("daemon_epoch", *daemonEpoch).
 		Str("data_dir", *dataDir).
 		Bool("mock_bus", *mockBus).
-		Bool("use_scaffold_xhs", *useScaffoldXHS).
 		Msg("coagent-daemon starting")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -284,15 +270,15 @@ func defaultDataDir() string {
 //
 //   - ""          legacy / unspecified channels — no template seeds.
 //   - "group"     generic group chat — no template seeds.
-//   - "xhs-creator" domain-xhs xhs-creator template (§2): seeds
-//     tool:xhs-adapter into actor_registry, mkdirs published-notes/ /
-//     drafts/ / assets/ inside the channel workdir, and ships the
-//     §2.4 domain prompt segment for the worker spawn env (phase-3).
+//   - "xhs-creator" domain-xhs xhs-creator template (§2): mkdirs
+//     published-notes/ / drafts/ / assets/ inside the channel workdir,
+//     and ships the domain prompt segment for the worker spawn env.
 //
-// The conversion from the adapter-owned xhs.Template to the runtime
-// projection lives here because the composition root is the only layer
-// that may import both `adapters/**` and `runtime/**` per arch-lint.
-func buildChannelTemplates(useScaffoldXHS bool) map[string]runtime.ChannelTemplate {
+// Actor/type rows for xhs are installed dynamically by proxy facade when
+// the proxy daemon advertises tool:xhs.
+const XHSCreatorChannelType = devicexhs.ChannelType
+
+func buildChannelTemplates() map[string]runtime.ChannelTemplate {
 	out := make(map[string]runtime.ChannelTemplate, 3)
 	// Convention: HumanCaller (UI) message defaults route to the channel
 	// agent for handling. Templates that need different routing override
@@ -315,8 +301,7 @@ func buildChannelTemplates(useScaffoldXHS bool) map[string]runtime.ChannelTempla
 	// WorkdirSubdirs + DomainPrompt (xhs business knowledge) ensures
 	// xhs-creator channels still ship the right workdir + prompt without
 	// the conflicting framework adapter Name="xhs" pre-install.
-	_ = useScaffoldXHS
-	tpl := xhs.XHSCreatorTemplate()
+	tpl := devicexhs.XHSCreatorTemplate()
 	out[tpl.ChannelType] = runtime.ChannelTemplate{
 		AdapterActorSeeds:          nil, // proxy facade seeds tool:xhs dynamically
 		WorkdirSubdirs:             tpl.WorkdirSubdirs,

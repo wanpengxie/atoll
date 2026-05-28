@@ -99,7 +99,7 @@ func NewService(db *sql.DB, cfg Config) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Service{
+	svc := &Service{
 		db:             db,
 		cfg:            cfg,
 		now:            time.Now,
@@ -109,6 +109,12 @@ func NewService(db *sql.DB, cfg Config) *Service {
 		allowedOrigins: allowed,
 		log:            log.With("subsystem", "devicebus"),
 	}
+	if err := svc.InvalidateRuntimeProjections(context.Background(), "server devicebus service started"); err != nil {
+		svc.log.Warn("devicebus.runtime_projection_invalidate_failed",
+			"err", err.Error(),
+		)
+	}
+	return svc
 }
 
 func (s *Service) WithClock(now func() time.Time) *Service {

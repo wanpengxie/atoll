@@ -16,6 +16,7 @@ import (
 	proxycontract "github.com/wanpengxie/ActOS/internal/proxy/contract"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/pkg/metrics"
 	"github.com/wanpengxie/ActOS/pkg/requestctx"
@@ -60,6 +61,19 @@ type DeviceFrame struct {
 	Actors       []proxycontract.ReadyActorV2 `json:"actors,omitempty"`
 	ProxyVersion string                       `json:"proxy_version,omitempty"`
 }
+
+type DeviceFrameAckPayload struct {
+	Status    string `json:"status"`
+	Reason    string `json:"reason,omitempty"`
+	Detail    string `json:"detail,omitempty"`
+	Retryable bool   `json:"retryable,omitempty"`
+}
+
+const (
+	DeviceFrameAckAccepted          = "accepted"
+	DeviceFrameAckRejectedPermanent = "rejected_permanent"
+	DeviceFrameAckRejectedRetryable = "rejected_retryable"
+)
 
 func NewDaemonConnection(d Daemon, tx DeviceTransport, sessionID string) *DaemonConnection {
 	return &DaemonConnection{
@@ -261,7 +275,8 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 			)
 			return
 		}
-		if err := s.ApplyDaemonReady(context.WithoutCancel(c.Request.Context()), daemon, readyInputFromFrame(first)); err != nil {
+		readyInput := readyInputFromFrame(first)
+		if err := s.ApplyDaemonReady(context.WithoutCancel(c.Request.Context()), daemon, readyInput); err != nil {
 			s.log.Warn("devicebus.daemon_ready_rejected",
 				"reason", "ready_apply_failed",
 				"daemon_id", string(daemon.ID),
@@ -272,14 +287,30 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 			return
 		}
 		if n := s.proxyDaemonNotifier(); n != nil {
-			if err := n.NotifyProxyDaemonReady(context.WithoutCancel(c.Request.Context()), daemon, readyInputFromFrame(first)); err != nil {
+			if err := n.NotifyProxyDaemonReady(context.WithoutCancel(c.Request.Context()), daemon, readyInput); err != nil {
 				s.log.Warn("devicebus.daemon_ready_notify_failed",
 					"daemon_id", string(daemon.ID),
 					"channel_id", string(daemon.ChannelID),
 					"daemon_session_id", conn.SessionID,
 					"err", err.Error(),
 				)
-				return
+				if markErr := s.MarkDaemonFacadeState(context.WithoutCancel(c.Request.Context()), daemon.ID, readyActorIDs(readyInput), "failed", err.Error()); markErr != nil {
+					s.log.Warn("devicebus.daemon_facade_state_failed",
+						"daemon_id", string(daemon.ID),
+						"daemon_session_id", conn.SessionID,
+						"state", "failed",
+						"err", markErr.Error(),
+					)
+				}
+			} else {
+				if markErr := s.MarkDaemonFacadeState(context.WithoutCancel(c.Request.Context()), daemon.ID, readyActorIDs(readyInput), "installed", ""); markErr != nil {
+					s.log.Warn("devicebus.daemon_facade_state_failed",
+						"daemon_id", string(daemon.ID),
+						"daemon_session_id", conn.SessionID,
+						"state", "installed",
+						"err", markErr.Error(),
+					)
+				}
 			}
 		}
 		s.log.Info("devicebus.daemon_ready",
@@ -321,6 +352,7 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 				if strings.TrimSpace(frame.ActorID) == "" {
 					continue
 				}
+				s.projectActorReadinessFrame(context.WithoutCancel(c.Request.Context()), daemon.ID, frame)
 				actorID := actor.ActorID(frame.ActorID)
 				targetChannel := channel.ID(strings.TrimSpace(frame.ChannelID))
 				if targetChannel == "" {
@@ -349,19 +381,24 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 						"daemon_session_id", conn.SessionID,
 						"actor_id", frame.ActorID,
 					)
+					s.sendCallbackAck(c.Request.Context(), conn, frame, DeviceFrameAckRejectedRetryable, "actor_not_registered", "actor is not attached to this daemon route")
 					continue
 				}
 				frame.ChannelID = string(targetChannel)
 				if err := forwarder.ForwardDeviceFrame(c.Request.Context(), frame, actorID); err != nil {
+					status, reason, detail := callbackAckFromError(err)
 					s.log.Warn("devicebus.daemon_frame_forward_failed",
 						"daemon_id", string(daemon.ID),
 						"channel_id", string(targetChannel),
 						"daemon_session_id", conn.SessionID,
 						"actor_id", frame.ActorID,
+						"ack_status", status,
 						"err", err.Error(),
 					)
+					s.sendCallbackAck(c.Request.Context(), conn, frame, status, reason, detail)
 					continue
 				}
+				s.sendCallbackAck(c.Request.Context(), conn, frame, DeviceFrameAckAccepted, "", "")
 			default:
 				s.log.Warn("devicebus.daemon_frame_rejected",
 					"reason", "unknown_frame_type",
@@ -429,6 +466,64 @@ func (s *Service) SendFrameToActor(ctx context.Context, channelID channel.ID, ac
 	return dconn.SendToDaemon(ctx, frame)
 }
 
+func (s *Service) sendCallbackAck(ctx context.Context, conn *DaemonConnection, frame DeviceFrame, status, reason, detail string) {
+	if conn == nil || (strings.TrimSpace(frame.RequestID) == "" && strings.TrimSpace(frame.CorrelationID) == "") {
+		return
+	}
+	payload, err := json.Marshal(DeviceFrameAckPayload{
+		Status:    status,
+		Reason:    reason,
+		Detail:    detail,
+		Retryable: status == DeviceFrameAckRejectedRetryable,
+	})
+	if err != nil {
+		s.log.Warn("devicebus.callback_ack_marshal_failed",
+			"daemon_id", string(conn.Daemon.ID),
+			"daemon_session_id", conn.SessionID,
+			"request_id", frame.RequestID,
+			"err", err.Error(),
+		)
+		return
+	}
+	ackCtx, cancel := context.WithTimeout(ctx, DefaultDeviceWSWriteTimeout)
+	defer cancel()
+	if err := conn.SendToDaemon(ackCtx, DeviceFrame{
+		Direction:     "to_device",
+		FrameType:     proxycontract.FrameTypeAck,
+		ActorID:       frame.ActorID,
+		ChannelID:     frame.ChannelID,
+		RequestID:     frame.RequestID,
+		CorrelationID: frame.CorrelationID,
+		ExpiresAt:     frame.ExpiresAt,
+		Payload:       payload,
+	}); err != nil {
+		s.log.Warn("devicebus.callback_ack_failed",
+			"daemon_id", string(conn.Daemon.ID),
+			"daemon_session_id", conn.SessionID,
+			"request_id", frame.RequestID,
+			"status", status,
+			"err", err.Error(),
+		)
+	}
+}
+
+func callbackAckFromError(err error) (status, reason, detail string) {
+	var ackErr *devicetransit.AckError
+	if errors.As(err, &ackErr) {
+		reason = ackErr.Reason
+		detail = ackErr.Detail
+		switch ackErr.Result {
+		case devicetransit.AckAccepted, devicetransit.AckDelivered:
+			return DeviceFrameAckAccepted, reason, detail
+		case devicetransit.AckRejectedPermanent, devicetransit.AckDropped:
+			return DeviceFrameAckRejectedPermanent, reason, detail
+		case devicetransit.AckRejectedRetryable:
+			return DeviceFrameAckRejectedRetryable, reason, detail
+		}
+	}
+	return DeviceFrameAckRejectedRetryable, "forward_failed", err.Error()
+}
+
 func (s *Service) registerDaemonConnection(d Daemon, conn *DaemonConnection) {
 	var previous *DaemonConnection
 	s.mu.Lock()
@@ -466,6 +561,13 @@ func (s *Service) unregisterDaemonConnection(daemonID placement.DaemonID, conn *
 	}
 	if err := s.clearDaemonActiveActors(ctx, daemonID); err != nil {
 		s.log.Warn("devicebus.daemon_clear_active_failed",
+			"daemon_id", string(daemonID),
+			"daemon_session_id", conn.SessionID,
+			"err", err.Error(),
+		)
+	}
+	if err := s.MarkDaemonFacadeState(ctx, daemonID, actors, "offline", "daemon websocket disconnected"); err != nil {
+		s.log.Warn("devicebus.daemon_facade_offline_failed",
 			"daemon_id", string(daemonID),
 			"daemon_session_id", conn.SessionID,
 			"err", err.Error(),
@@ -516,7 +618,23 @@ func (s *Service) closeDaemonConnection(daemonID placement.DaemonID, sendShutdow
 // whatever attachments + actors are now in DB. Returns true if a
 // connection was actually closed (i.e. daemon was online).
 func (s *Service) KickDaemonForReload(daemonID placement.DaemonID) bool {
-	return s.closeDaemonConnection(daemonID, false)
+	ctx := context.Background()
+	if !s.closeDaemonConnection(daemonID, false) {
+		if err := s.invalidateDaemonRuntimeState(ctx, daemonID, "daemon reload requested without live websocket"); err != nil {
+			s.log.Warn("devicebus.daemon_reload_invalidate_failed",
+				"daemon_id", string(daemonID),
+				"err", err.Error(),
+			)
+		}
+		return false
+	}
+	if err := s.invalidateDaemonRuntimeState(ctx, daemonID, "daemon websocket closed for reload"); err != nil {
+		s.log.Warn("devicebus.daemon_reload_invalidate_failed",
+			"daemon_id", string(daemonID),
+			"err", err.Error(),
+		)
+	}
+	return true
 }
 
 func (s *Service) clearDaemonActorRoutesLocked(daemonID placement.DaemonID) {
@@ -570,6 +688,16 @@ func (s *Service) resolveDaemonActorChannel(daemonID placement.DaemonID, actorID
 
 func (s *Service) newConnectionID() string {
 	return uuid.NewString()
+}
+
+func readyActorIDs(in DaemonReadyInput) []actor.ActorID {
+	out := make([]actor.ActorID, 0, len(in.Actors))
+	for _, a := range in.Actors {
+		if a.ActorID != "" {
+			out = append(out, a.ActorID)
+		}
+	}
+	return out
 }
 
 func readyInputFromFrame(frame DeviceFrame) DaemonReadyInput {

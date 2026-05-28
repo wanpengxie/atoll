@@ -36,7 +36,7 @@ func TestRouteTriggersQuarantinesLateToolResponse(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	in := make(chan TriggerPayload, 2)
-	out := b.routeTriggers(ctx, in)
+	out := b.routeTriggers(ctx, nil, in)
 
 	in <- toolTrigger(message.KindResponse, "late-response", "tool-req-missing")
 	in <- toolTrigger(message.KindRequest, "normal-trigger", "")
@@ -124,7 +124,7 @@ func toolTrigger(kind message.Kind, id, parentID string) TriggerPayload {
 			ChannelID:     "ch-kimi",
 			Type:          "xhs.publish",
 			Kind:          kind,
-			Sender:        message.Sender{Kind: actor.KindTool, ID: "tool:xhs-adapter"},
+			Sender:        message.Sender{Kind: actor.KindTool, ID: "tool:xhs"},
 			ParentID:      message.ID(parentID),
 			CorrelationID: message.ID(parentID),
 			Payload:       []byte(`{"status":"completed"}`),
