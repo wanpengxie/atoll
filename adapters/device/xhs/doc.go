@@ -1,5 +1,5 @@
 // Package xhs is the first concrete v5 device adapter — it owns the
-// `tool:xhs-adapter` actor on every channel that carries an xhs binding
+// `tool:xhs` actor on every channel that carries an xhs binding
 // and translates kind=request envelopes (`xhs.publish`, `xhs.search`,
 // `xhs.note.fetch`, `xhs.recent.fetch`, `xhs.cookie.sync`) into device
 // commands carried by the runtime_inbound_via_relay binding (L1 §11.7) +
@@ -18,7 +18,7 @@
 //     adapters/device/framework.DeviceProxy for the
 //     correlate + send + arm-timer trio.
 //   - install.go    InstallSpec helper consumed by cmd/daemon (T7) to
-//     seed actor_registry (`tool:xhs-adapter`) +
+//     seed actor_registry (`tool:xhs`) +
 //     type_registry (5 R/R + 1 event row,
 //     handler_binding=runtime_inbound_via_relay).
 //

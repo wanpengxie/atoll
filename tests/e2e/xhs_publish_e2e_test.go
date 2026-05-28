@@ -20,7 +20,7 @@ var _ = context.TODO
 // What this test pins (positive):
 //   - The mock bridge's xhs-publish script correctly translates a
 //     human.text trigger containing "publish" into a kind=request
-//     envelope of type=xhs.publish addressed to tool:xhs-adapter,
+//     envelope of type=xhs.publish addressed to tool:xhs,
 //     authored as sender=agent:channel-agent.
 //   - The harness chain steps 1-9 accept the request (no rejections),
 //     so the channel-local sqlite carries both the trigger and the

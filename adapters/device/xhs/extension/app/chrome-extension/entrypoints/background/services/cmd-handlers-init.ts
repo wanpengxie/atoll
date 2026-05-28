@@ -95,10 +95,19 @@ function wrapTool(tool: ToolLike, cmd: CoagentDeviceCommand): CommandHandler {
     // state（SW evict 时由 background recovery 兜底重发 callback）。
     // 字段命名 `__correlationId` 表明是平台注入元数据，工具实现读完即用，
     // 不会跑到页面侧脚本。
-    const augmented =
-      context?.correlationId
-        ? { ...(params ?? {}), __correlationId: context.correlationId }
-        : params ?? {};
+    const augmented = { ...(params ?? {}) } as Record<string, unknown>;
+    if (context?.correlationId) {
+      augmented.__correlationId = context.correlationId;
+    }
+    if (context?.requestId) {
+      augmented.__requestId = context.requestId;
+    }
+    if (context?.outerCorrelationId) {
+      augmented.__outerCorrelationId = context.outerCorrelationId;
+    }
+    if (typeof context?.expiresAt === 'number') {
+      augmented.__expiresAt = context.expiresAt;
+    }
     const inner = await tool.execute(augmented);
     if (inner.isError) {
       const text = String(inner.content?.[0]?.text ?? `${tool.name} failed`);

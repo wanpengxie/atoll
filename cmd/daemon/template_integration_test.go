@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,8 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/adapters/xhs"
-	"github.com/wanpengxie/ActOS/kernel/actor"
+	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/placement"
@@ -21,30 +19,27 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
-// TestIntegration_XHSCreatorTemplate_BootSeedsChannel verifies M1.6-T5
-// phase-2 acceptance B1-B4 end-to-end:
+// TestIntegration_XHSCreatorTemplate_BootSeedsChannel verifies the current
+// xhs-creator template shape end-to-end:
 //
 //	B1. POST channel.create type=xhs-creator → daemon receives
 //	    control.create_channel with ChannelType="xhs-creator" → bootstrap
 //	    saga + adapter framework install populate channel sqlite:
-//	      - type_registry has all 6 xhs.* business types,
-//	      - actor_registry has tool:xhs-adapter,
+//	      - no static xhs actor/type rows before the proxy daemon attaches,
 //	      - channel_lock.channel_type persisted as "xhs-creator".
 //	B2. Workdir physically contains published-notes/, drafts/, assets/
 //	    (saga step 5c — workdir subdirs from xhs-creator template).
 //	B3. DomainPrompt projection is wired (resolver returns the L4 §2.4
 //	    prompt segment for type=xhs-creator); smoke-checked by the
 //	    well-known L4 §2.4 first-line marker.
-//	B4. A "group" channel created with type="group" does NOT install the
-//	    xhs adapter (XHSScaffoldFactory gating works), so the same daemon
-//	    hosting both channels keeps the boundary clean — no xhs.* types
-//	    in the group channel's type_registry, no tool:xhs-adapter in its
-//	    actor_registry, and no xhs workdir subdirs on disk.
+//	B4. A "group" channel created with type="group" keeps the boundary
+//	    clean — no xhs.* types in the group channel's type_registry,
+//	    no tool:xhs in its actor_registry, and no xhs workdir subdirs on disk.
 func TestIntegration_XHSCreatorTemplate_BootSeedsChannel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	d, srv, channelsDir := startIntegrationDaemon(t, ctx, integDaemonOpts{})
+	d, srv, channelsDir := startIntegrationDaemon(t, ctx, integDaemonOpts{NoTestXHS: true})
 	defer func() { _ = d.Close() }()
 
 	// --- xhs-creator channel (createChannel helper sets ChannelType) ---
@@ -59,30 +54,23 @@ func TestIntegration_XHSCreatorTemplate_BootSeedsChannel(t *testing.T) {
 	}
 	defer func() { _ = xhsDB.Close() }()
 
-	// B1.1 — type_registry contains all 6 xhs.* business types.
+	// B1.1 — xhs types are not statically seeded. The proxy facade installs
+	// them only after the proxy daemon advertises tool:xhs.
 	gotTypes := listTypeRegistryNames(t, ctx, xhsDB)
-	for _, want := range xhs.AllTypes {
-		if !containsString(gotTypes, want) {
-			t.Errorf("type_registry missing %q (got=%v)", want, gotTypes)
+	for _, banned := range devicexhs.AllTypes {
+		if containsString(gotTypes, banned) {
+			t.Errorf("type_registry statically seeded xhs business type %q (got=%v)", banned, gotTypes)
 		}
 	}
-	if len(gotTypes) < len(xhs.AllTypes) {
-		t.Errorf("type_registry count=%d want >= %d (got=%v)",
-			len(gotTypes), len(xhs.AllTypes), gotTypes)
-	}
-	assertTypeInstalledMirror(t, ctx, xhsDB, xhs.AllTypes[0])
 
-	// B1.2 — actor_registry has tool:xhs-adapter from the template seed.
+	// B1.2 — actor_registry does not have tool:xhs until proxy facade install.
 	reg := store.NewActorRegistry(xhsDB)
-	rec, ok, err := reg.Lookup(ctx, xhs.DefaultAdapterActorID)
+	_, ok, err := reg.Lookup(ctx, devicexhs.DefaultAdapterActorID)
 	if err != nil {
-		t.Fatalf("actor_registry lookup %s: %v", xhs.DefaultAdapterActorID, err)
+		t.Fatalf("actor_registry lookup %s: %v", devicexhs.DefaultAdapterActorID, err)
 	}
-	if !ok {
-		t.Fatalf("actor_registry missing %s — saga step 5b did not seed", xhs.DefaultAdapterActorID)
-	}
-	if rec.Binding != actor.BindingEmbedded {
-		t.Errorf("adapter actor binding=%q want %q", rec.Binding, actor.BindingEmbedded)
+	if ok {
+		t.Fatalf("actor_registry statically seeded %s before proxy facade attach", devicexhs.DefaultAdapterActorID)
 	}
 
 	// B1.3 — channel_lock.channel_type persisted so cold-start resolves
@@ -101,7 +89,7 @@ func TestIntegration_XHSCreatorTemplate_BootSeedsChannel(t *testing.T) {
 
 	// B2 — workdir subdirs from saga step 5c.
 	xhsChannelDir := filepath.Join(channelsDir, "ch-xhs")
-	for _, sub := range xhs.WorkdirSubdirs() {
+	for _, sub := range devicexhs.WorkdirSubdirs() {
 		got := filepath.Join(xhsChannelDir, sub)
 		fi, err := os.Stat(got)
 		if err != nil {
@@ -117,7 +105,7 @@ func TestIntegration_XHSCreatorTemplate_BootSeedsChannel(t *testing.T) {
 	// daemon's resolver hands the same string back through ChannelHooks
 	// for phase-3 worker spawn env). Asserts the L4 §2.4 first-line
 	// marker so phase-3 can grep telemetry for the same prefix.
-	prompt := xhs.DomainPrompt()
+	prompt := devicexhs.DomainPrompt()
 	if len(prompt) < 128 {
 		t.Errorf("domain prompt suspiciously short (%d bytes)", len(prompt))
 	}
@@ -141,19 +129,19 @@ func TestIntegration_XHSCreatorTemplate_BootSeedsChannel(t *testing.T) {
 	defer func() { _ = groupDB.Close() }()
 
 	gotGroupTypes := listTypeRegistryNames(t, ctx, groupDB)
-	for _, banned := range xhs.AllTypes {
+	for _, banned := range devicexhs.AllTypes {
 		if containsString(gotGroupTypes, banned) {
 			t.Errorf("ch-group leaked xhs business type %q into type_registry", banned)
 		}
 	}
 	groupReg := store.NewActorRegistry(groupDB)
-	if _, ok, _ := groupReg.Lookup(ctx, xhs.DefaultAdapterActorID); ok {
-		t.Errorf("ch-group leaked %s actor — XHSScaffoldFactory gating broken", xhs.DefaultAdapterActorID)
+	if _, ok, _ := groupReg.Lookup(ctx, devicexhs.DefaultAdapterActorID); ok {
+		t.Errorf("ch-group leaked %s actor", devicexhs.DefaultAdapterActorID)
 	}
 
 	// Group channel ALSO must not get the xhs workdir subdirs.
 	groupChannelDir := filepath.Join(channelsDir, "ch-group")
-	for _, sub := range xhs.WorkdirSubdirs() {
+	for _, sub := range devicexhs.WorkdirSubdirs() {
 		got := filepath.Join(groupChannelDir, sub)
 		if _, err := os.Stat(got); err == nil {
 			t.Errorf("ch-group should not have xhs subdir %s", got)
@@ -238,31 +226,6 @@ func listTypeRegistryNames(t *testing.T, ctx context.Context, db *sql.DB) []stri
 	}
 	sort.Strings(out)
 	return out
-}
-
-func assertTypeInstalledMirror(t *testing.T, ctx context.Context, db *sql.DB, typ string) {
-	t.Helper()
-	const q = `SELECT payload FROM messages
-	           WHERE type='system.type.installed'
-	             AND json_extract(payload, '$.type')=?
-	           LIMIT 1`
-	var raw string
-	if err := db.QueryRowContext(ctx, q, typ).Scan(&raw); err != nil {
-		t.Fatalf("system.type.installed mirror for %s: %v", typ, err)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		t.Fatalf("decode system.type.installed payload: %v", err)
-	}
-	if payload["type"] != typ ||
-		payload["handler_actor_id"] != string(xhs.DefaultAdapterActorID) ||
-		payload["handler_binding"] != string(actor.BindingEmbedded) ||
-		payload["mutation_kind"] != "create" {
-		t.Fatalf("system.type.installed payload=%v", payload)
-	}
-	if _, ok := payload["allowed_kinds"].([]any); !ok {
-		t.Fatalf("system.type.installed allowed_kinds missing/invalid: %v", payload)
-	}
 }
 
 func containsString(haystack []string, needle string) bool {

@@ -39,8 +39,8 @@ const (
 
 // AdapterActor is the canonical adapter actor id the audience flag
 // points at on every xhs ask invocation. Keep in sync with
-// daemon-go/internal/adapters/xhs.AdapterActorID.
-const AdapterActor = "tool:xhs-adapter"
+// canonical proxy-hosted xhs actor id.
+const AdapterActor = "tool:xhs"
 
 // Business types — v4 (L4 §2.1). Note the renames from the legacy
 // device.command.send convention.
@@ -120,7 +120,7 @@ type CoagentResult struct {
 }
 
 // RealProvider 把 5 命令统一翻译成 spawn `coagent ask --type xhs.X
-// --audience tool:xhs-adapter --payload <json>`。
+// --audience tool:xhs --payload <json>`。
 //
 // 行为契约：
 //  1. 命令仅 dispatch，不阻塞等结果（与 legacy 一致）。

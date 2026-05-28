@@ -22,7 +22,7 @@ func NewRootCommand() *cobra.Command {
 5 个子命令：publish / search / recent / get-note / sync-cookie
 
 real 模式内部 spawn %s 子进程，按 L4 §2.3.2 把命令翻译成
-"%s ask --type xhs.<op> --audience tool:xhs-adapter --payload ..."。
+"%s ask --type xhs.<op> --audience tool:xhs --payload ..."。
 legacy 命令 publish-status 已废弃；改为新增 sync-cookie（对应 v4
 xhs.cookie.sync type）。
 

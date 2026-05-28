@@ -55,7 +55,7 @@ const actorSkillDoc = "" +
 	"\n" +
 	"Every request fails fast with `reason=receiver_unavailable, error_code=device_offline` " +
 	"when the extension is disconnected. Subscribe to `actor.readiness.changed` filtered on " +
-	"`actor_id=tool:xhs-adapter` to know when retries are worthwhile rather than retrying blindly.\n" +
+	"`actor_id=tool:xhs` to know when retries are worthwhile rather than retrying blindly.\n" +
 	"\n" +
 	"## Common error surface\n" +
 	"\n" +

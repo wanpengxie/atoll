@@ -13,12 +13,9 @@ import (
 	"github.com/rs/zerolog"
 
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
-	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/adapters/framework"
 	proxyfacade "github.com/wanpengxie/ActOS/adapters/framework/proxy_facade"
-	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
@@ -191,16 +188,23 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 					if _, ok := proxyInstalled[add.MemberActorID]; ok {
 						continue
 					}
-					decl, err := proxyfacade.DeclarationFromCapability(add.MemberActorID, add.CapabilitySet)
-					if err != nil {
-						return fmt.Errorf("cmd/daemon: proxy facade declaration %s: %w", add.MemberActorID, err)
+					decl, installed := mgr.DeclarationForActor(add.MemberActorID)
+					if !installed {
+						var err error
+						decl, err = proxyfacade.DeclarationFromCapability(add.MemberActorID, add.CapabilitySet)
+						if err != nil {
+							return fmt.Errorf("cmd/daemon: proxy facade declaration %s: %w", add.MemberActorID, err)
+						}
+						mod, err := proxyfacade.New(decl)
+						if err != nil {
+							return fmt.Errorf("cmd/daemon: proxy facade module %s: %w", add.MemberActorID, err)
+						}
+						if err := mgr.Install(ctx, []adapter.Module{mod}); err != nil {
+							return fmt.Errorf("cmd/daemon: proxy facade install %s: %w", add.MemberActorID, err)
+						}
 					}
-					mod, err := proxyfacade.New(decl)
-					if err != nil {
-						return fmt.Errorf("cmd/daemon: proxy facade module %s: %w", add.MemberActorID, err)
-					}
-					if err := mgr.Install(ctx, []adapter.Module{mod}); err != nil {
-						return fmt.Errorf("cmd/daemon: proxy facade install %s: %w", add.MemberActorID, err)
+					if err := mgr.RecoverTimersForActor(ctx, decl.ActorID); err != nil {
+						return fmt.Errorf("cmd/daemon: proxy facade recover timers %s: %w", add.MemberActorID, err)
 					}
 					h.Deliverer.Register(decl.ActorID,
 						deliverThroughManager(mgr, decl.ActorID, h.ChannelID, h.Logger))
@@ -231,13 +235,30 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 				adapterName := deviceAdapterByActor[frame.AdapterActorID]
 				deviceRouteMu.RUnlock()
 				if adapterName == "" {
-					return nil
+					return devicetransit.NewAckError(
+						devicetransit.AckRejectedRetryable,
+						"adapter_route_not_found",
+						fmt.Sprintf("no adapter route for actor %s", frame.AdapterActorID),
+						nil,
+					)
 				}
 				var body deviceframework.DeviceTransitBody
 				if err := json.Unmarshal(frame.Body, &body); err != nil {
 					return fmt.Errorf("cmd/daemon: decode device transit body: %w", err)
 				}
-				return mgr.OnExternalCallback(ctx, adapterName, body.Payload)
+				callbackChannelID := frame.ChannelID
+				if callbackChannelID == "" {
+					callbackChannelID = h.ChannelID
+				}
+				return mgr.OnExternalCallbackFrame(ctx, adapterName, adapter.ExternalCallbackFrame{
+					ChannelID:      callbackChannelID,
+					AdapterActorID: frame.AdapterActorID,
+					RequestID:      body.RequestID,
+					ParentID:       body.ParentID,
+					CorrelationID:  body.CorrelationID,
+					ExpiresAt:      body.ExpiresAt,
+					Payload:        body.Payload,
+				})
 			})
 			if h.SetDeviceLifecycleCallback != nil {
 				channelID := h.ChannelID
@@ -311,10 +332,10 @@ func deliverThroughManager(mgr adapter.Manager, adapterID actor.ActorID, channel
 			AllowProvidedSenderKind: true,
 		})
 		if err := mgr.Dispatch(stamped, env); err != nil {
-			// Log + swallow so the gateway's at-least-once contract holds
-			// (a single failed Dispatch must NOT abort the harness write
-			// path). The framework already emitted any required failed
-			// terminal via ErrorPolicy.
+			// Surface the error to trigger.Gateway so the origin row
+			// remains retryable. framework.Manager returns nil when it
+			// has accepted responsibility by reserving the request or
+			// writing a terminal failure.
 			if logger != nil {
 				logger.Warn().Err(err).
 					Str("event", "daemon.adapter_dispatch_failed").
@@ -323,7 +344,7 @@ func deliverThroughManager(mgr adapter.Manager, adapterID actor.ActorID, channel
 					Str("adapter_id", string(adapterID)).
 					Msg("adapter manager dispatch failed")
 			}
-			return nil
+			return err
 		}
 		return nil
 	}
@@ -423,62 +444,4 @@ func (c *adapterCallerChain) Write(ctx context.Context, env *message.Envelope) (
 		})
 	}
 	return c.inner.Write(ctx, env)
-}
-
-// XHSScaffoldFactory returns an AdapterModuleFactory that installs the
-// adapters/xhs embedded scaffold (M1.6-T2). cmd/daemon supplies it
-// during DaemonConfig assembly. T3 will replace this with the
-// adapters/device/xhs factory once DeviceTransit is wired.
-//
-// M1.6-T5 phase-2 — the factory is gated by ChannelHooks.ChannelType:
-// it installs only for channels created with type=="xhs-creator" (the
-// L4 template that declares xhs.* business types). Channels created
-// with any other type (e.g. "group" / "") get a no-op factory so the
-// xhs adapter does not pollute generic channels.
-func XHSScaffoldFactory(cfg xhs.Config) AdapterModuleFactory {
-	return func(_ context.Context, h runtime.ChannelHooks) (adapter.Module, error) {
-		if h.ChannelType != XHSCreatorChannelType {
-			return nil, nil
-		}
-		return xhs.New(cfg), nil
-	}
-}
-
-// XHSCreatorChannelType is the catalog.Channel.Type value the domain-xhs
-// xhs-creator template binds. cmd/daemon registers
-// a ChannelTemplate under this key and the AdapterModuleFactory closures
-// install the xhs adapter only for channels carrying it.
-const XHSCreatorChannelType = "xhs-creator"
-
-// DeviceXHSFactory returns an AdapterModuleFactory that installs the
-// production xhs device adapter (adapters/device/xhs) configured to run
-// over the runtime_inbound_via_relay binding — daemon → server → device WS.
-// Routing is actor-based: the module sends through its adapter actor id
-// and the server maps channel_id + actor_id to the live device socket.
-//
-// Composition root contract: the caller MUST swap XHSScaffoldFactory
-// for this one in the OnChannelBoot wiring AND ensure the channel's
-// actor_registry seeds the xhs adapter actor with binding=runtime_inbound_via_relay
-// (not embedded — the framework Install path otherwise rejects the
-// module per L2 §1.4.6 binding consistency).
-func DeviceXHSFactory(cfg devicexhs.Config) AdapterModuleFactory {
-	return func(_ context.Context, h runtime.ChannelHooks) (adapter.Module, error) {
-		if h.ChannelType != XHSCreatorChannelType {
-			return nil, nil
-		}
-		return devicexhs.New(cfg)
-	}
-}
-
-// DeviceXHSActorSeed returns the actor_registry seed row for the xhs
-// device adapter using the runtime_inbound_via_relay binding. Counterpart to
-// adapters/xhs.DefaultActorSeed (which seeds the embedded scaffold).
-// cmd/daemon plugs the result into ChannelTemplate.AdapterActorSeeds
-// when swapping the in-process scaffold for the real device adapter.
-func DeviceXHSActorSeed() actorreg.Record {
-	return actorreg.Record{
-		ID:      devicexhs.DefaultAdapterActorID,
-		Kind:    actor.KindTool,
-		Binding: actor.BindingRuntimeInboundViaRelay,
-	}
 }

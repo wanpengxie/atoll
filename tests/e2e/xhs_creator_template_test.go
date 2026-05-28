@@ -5,68 +5,45 @@ package e2e
 import (
 	"os"
 	"testing"
-	"time"
 
 	"github.com/wanpengxie/ActOS/tests/e2e/harness"
 )
 
-// TestE2E_XHSCreatorChannel_BootstrapSeedsTool covers phase-2 case 1.
+// TestE2E_XHSCreatorChannel_TemplateDoesNotSeedTool covers the current
+// proxy-facade production model.
 //
-// Wiring under test: cmd/daemon.buildChannelTemplates(false) returns a
-// production-flavoured xhs-creator ChannelTemplate (DeviceXHSActorSeed
-// with binding=runtime_inbound_via_relay + WorkdirSubdirs = published-notes/
-// drafts/ assets/). When a channel is created with type="xhs-creator"
+// Wiring under test: cmd/daemon.buildChannelTemplates returns an xhs-creator
+// ChannelTemplate with WorkdirSubdirs = published-notes/ drafts/ assets/ and
+// no actor/type seeds. When a channel is created with type="xhs-creator"
 // the bootstrap saga MUST:
 //
-//  1. Insert tool:xhs-adapter into actor_registry with kind=tool +
-//     binding=runtime_inbound_via_relay.
+//  1. Not insert tool:xhs into actor_registry. The proxy facade installs it
+//     only after the proxy daemon advertises the actor.
 //  2. Mkdir each declared workdir subdir under the channel root.
-//
-// Regression target: the owner observed type=group channels lacking the
-// adapter actor (legitimate — generic group template carries no seeds)
-// and concluded type=xhs-creator was required for xhs.publish to work.
-// This test pins the wiring: creating a channel with the right type
-// MUST seed the actor, and creating one without MUST NOT (so the gate
-// at adapter Install time stays meaningful).
-func TestE2E_XHSCreatorChannel_BootstrapSeedsTool(t *testing.T) {
+func TestE2E_XHSCreatorChannel_TemplateDoesNotSeedTool(t *testing.T) {
 	s := harness.Start(t, harness.Options{})
 
 	email := "xhstpl+" + uniqSuffix() + "@e2e.local"
 	s.RegisterAndLogin(email, "password-e2e-12345")
 	wsID := s.CreateWorkspace("ws-xhstpl-" + uniqSuffix())
 
-	// Counterpoint: a type=group channel must NOT carry the xhs adapter
-	// seed (template gating proof — see cmd/daemon.buildChannelTemplates
-	// + XHSScaffoldFactory's ChannelType check).
+	// Counterpoint: a type=group channel must not carry xhs workdir data.
 	groupID := s.CreateChannel(wsID, "ch-group-"+uniqSuffix(), "group")
 	s.BindChannel(wsID, groupID)
 
-	// Main case: type=xhs-creator must materialise the adapter row +
-	// the three template workdir subdirs.
+	// Main case: type=xhs-creator materialises only workdir subdirs. The
+	// actor/type rows arrive later through proxy facade.
 	xhsID := s.CreateChannel(wsID, "ch-xhs-"+uniqSuffix(), "xhs-creator")
 	s.BindChannel(wsID, xhsID)
 
-	// actor_registry assertions — both channels' sqlite has the system
-	// + initial member actor already, but only the xhs-creator one must
-	// also have tool:xhs-adapter.
-	harness.Eventually(t, "tool:xhs-adapter seeded into xhs channel", 5*time.Second, func() bool {
-		return countActor(t, s, xhsID, "tool:xhs-adapter") == 1
-	})
-
-	if got := countActor(t, s, groupID, "tool:xhs-adapter"); got != 0 {
-		t.Errorf("group channel actor_registry contains tool:xhs-adapter (count=%d) — template gating broken", got)
+	if got := countActor(t, s, xhsID, "tool:xhs"); got != 0 {
+		t.Errorf("xhs channel actor_registry statically contains tool:xhs (count=%d)", got)
+	}
+	if got := countActor(t, s, groupID, "tool:xhs"); got != 0 {
+		t.Errorf("group channel actor_registry contains tool:xhs (count=%d)", got)
 	}
 
-	// Kind + binding round-trip — full row sanity check.
-	row := lookupActor(t, s, xhsID, "tool:xhs-adapter")
-	if row.Kind != "tool" {
-		t.Errorf("tool:xhs-adapter kind=%q want tool", row.Kind)
-	}
-	if row.Binding != "runtime_inbound_via_relay" {
-		t.Errorf("tool:xhs-adapter binding=%q want runtime_inbound_via_relay", row.Binding)
-	}
-
-	// Workdir subdirs — exact set declared by adapters/xhs.WorkdirSubdirs().
+	// Workdir subdirs — exact set declared by the xhs creator template.
 	for _, sub := range []string{"published-notes", "drafts", "assets"} {
 		path := s.ChannelSqlitePath(xhsID)
 		dir := dirOf(path) + "/" + sub
@@ -74,15 +51,6 @@ func TestE2E_XHSCreatorChannel_BootstrapSeedsTool(t *testing.T) {
 			t.Errorf("xhs channel workdir missing %s: %v", sub, err)
 		}
 	}
-}
-
-// actorRow is a stripped-down projection of the channel-local
-// actor_registry row. Tests only assert on the columns covered by the
-// template snapshot.
-type actorRow struct {
-	ID      string
-	Kind    string
-	Binding string
 }
 
 func countActor(t *testing.T, s *harness.Stack, channelID, actorID string) int {
@@ -94,22 +62,6 @@ func countActor(t *testing.T, s *harness.Stack, channelID, actorID string) int {
 		t.Fatalf("count actor: %v", err)
 	}
 	return n
-}
-
-func lookupActor(t *testing.T, s *harness.Stack, channelID, actorID string) actorRow {
-	t.Helper()
-	db := s.OpenChannelDB(channelID)
-	defer func() { _ = db.Close() }()
-	var row actorRow
-	var binding *string
-	if err := db.QueryRow(`SELECT actor_id, actor_kind, actor_binding FROM actor_registry WHERE actor_id=?`,
-		actorID).Scan(&row.ID, &row.Kind, &binding); err != nil {
-		t.Fatalf("lookup actor %s: %v", actorID, err)
-	}
-	if binding != nil {
-		row.Binding = *binding
-	}
-	return row
 }
 
 // dirOf returns the directory of a file path without dragging in

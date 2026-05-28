@@ -250,6 +250,8 @@ type fakeRespondHarness struct {
 	calls        []respondCall
 	registry     *fakeActorRegistry
 	adapterActor actor.ActorID
+	cor          *fakeCorrelation
+	policy       *fakePolicy
 }
 
 // newRespondFunc returns a RespondFunc closure that the framework hands
@@ -272,7 +274,27 @@ func (h *fakeRespondHarness) RespondFunc() adapter.RespondFunc {
 			opts:      opts,
 			sender:    h.adapterActor,
 		})
+		if h.cor != nil {
+			_ = h.cor.MarkDone(context.Background(), requestID)
+		}
+		if h.policy != nil {
+			_ = h.policy.CancelTimer(context.Background(), requestID)
+		}
 		return adapter.RespondResult{MessageID: message.ID("msg-" + requestID.String()), Deduped: false}, nil
+	}
+}
+
+func (h *fakeRespondHarness) FailFunc() adapter.FailFunc {
+	respond := h.RespondFunc()
+	return func(ctx context.Context, requestID adapter.CorrelationKey, payload json.RawMessage, opts adapter.FailOptions) (adapter.RespondResult, error) {
+		reason := opts.Reason
+		if reason == "" {
+			reason = message.TerminalReceiverInternalError
+		}
+		return respond(ctx, requestID, payload, adapter.RespondOptions{
+			Status: "failed",
+			Reason: string(reason),
+		})
 	}
 }
 
@@ -297,9 +319,67 @@ func (c *eventChain) Written() []*message.Envelope {
 	return out
 }
 
+func emitEventFunc(chain *eventChain, adapterActor actor.ActorID, channelID channel.ID) adapter.EmitEventFunc {
+	return func(ctx context.Context, eventType string, payload json.RawMessage, opts adapter.EmitEventOptions) (message.ID, error) {
+		if chain == nil {
+			return "", nil
+		}
+		visibility := opts.Visibility
+		if visibility == "" {
+			visibility = message.VisibilityPrivate
+		}
+		audience := opts.Audience
+		if len(audience) == 0 {
+			audience = message.Audience{actor.SystemActorID}
+		}
+		env := &message.Envelope{
+			ID:         message.ID("event:" + eventType),
+			ChannelID:  channelID,
+			Sender:     message.Sender{Kind: actor.KindTool, ID: adapterActor},
+			Kind:       message.KindEvent,
+			Type:       eventType,
+			Payload:    append(json.RawMessage(nil), payload...),
+			Visibility: visibility,
+			Audience:   audience,
+			TS:         1_000_000,
+			TSReceived: 1_000_000,
+		}
+		_, err := chain.Write(ctx, env)
+		if err != nil {
+			return "", err
+		}
+		return env.ID, nil
+	}
+}
+
+func reportOrphanCallbackFunc(chain *eventChain, adapterName string, adapterActor actor.ActorID, channelID channel.ID) adapter.OrphanCallbackFunc {
+	return func(ctx context.Context, report adapter.OrphanCallbackReport) error {
+		if chain == nil {
+			return nil
+		}
+		payload := map[string]any{
+			"kind":    "orphan_callback",
+			"adapter": adapterName,
+			"detail":  report.Detail,
+		}
+		if report.CorrelationID != "" {
+			payload["correlation_id"] = report.CorrelationID
+		}
+		if len(report.Payload) > 0 {
+			payload["payload"] = string(report.Payload)
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		_, err = emitEventFunc(chain, adapterActor, channelID)(ctx, "adapter."+adapterName+".orphan_callback", raw, adapter.EmitEventOptions{})
+		return err
+	}
+}
+
 // ---- helpers ------------------------------------------------------------
 
-const testAdapterActor actor.ActorID = "tool:xhs-adapter"
+const testAdapterActor actor.ActorID = "tool:xhs"
 
 type harness struct {
 	module    *xhs.Module
@@ -323,7 +403,7 @@ func newHarness(t *testing.T) *harness {
 	reg.insert(testAdapterActor)
 	reg.insert("agent:test")
 
-	resp := &fakeRespondHarness{registry: reg, adapterActor: testAdapterActor}
+	resp := &fakeRespondHarness{registry: reg, adapterActor: testAdapterActor, cor: cor, policy: policy}
 
 	module, err := xhs.New(xhs.Config{
 		AdapterActorID: testAdapterActor,
@@ -333,7 +413,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("xhs.New: %v", err)
 	}
 
-	// LifecycleTracker emits channel events via HarnessChain on
+	// LifecycleTracker emits channel events via EmitEvent on
 	// every state transition; provide a capturing fake so tests that
 	// don't pin lifecycle behaviour still get a valid Init. Tests
 	// that need to assert event writes can replace it on the harness.
@@ -343,11 +423,36 @@ func newHarness(t *testing.T) *harness {
 		AdapterName:    xhs.AdapterName,
 		AdapterActorID: testAdapterActor,
 		ChannelID:      "channel-test",
-		Correlation:    cor,
-		ErrorPolicy:    policy,
 		Respond:        resp.RespondFunc(),
-		DeviceTransit:  server,
-		HarnessChain:   defaultChain,
+		Fail:           resp.FailFunc(),
+		ForwardExternalRequest: func(ctx context.Context, env *message.Envelope, payload adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
+			body := framework.DeviceTransitBody{
+				Direction:     framework.DirectionToDevice,
+				RequestID:     env.ID,
+				ParentID:      env.ParentID,
+				CorrelationID: env.CorrelationID,
+				Payload:       json.RawMessage(payload),
+			}
+			if env.ExpiresAt != nil {
+				body.ExpiresAt = *env.ExpiresAt
+			}
+			raw, err := json.Marshal(body)
+			if err != nil {
+				return adapter.ExternalRequestResult{}, err
+			}
+			frameID, err := server.Send(ctx, devicetransit.SendFrame{
+				AdapterActorID: testAdapterActor,
+				ChannelID:      env.ChannelID,
+				Body:           raw,
+			})
+			if err != nil {
+				return adapter.ExternalRequestResult{}, err
+			}
+			return adapter.ExternalRequestResult{FrameID: frameID.String()}, nil
+		},
+		LookupPendingRequest: cor.Get,
+		EmitEvent:            emitEventFunc(defaultChain, testAdapterActor, "channel-test"),
+		ReportOrphanCallback: reportOrphanCallbackFunc(defaultChain, xhs.AdapterName, testAdapterActor, "channel-test"),
 	}
 	if err := module.Init(ctx, mctx); err != nil {
 		t.Fatalf("module.Init: %v", err)
@@ -393,6 +498,31 @@ func (h *harness) request(envID, ty, payload string) *message.Envelope {
 	}
 }
 
+func (h *harness) dispatch(ctx context.Context, env *message.Envelope) error {
+	deadline := env.TS + xhs.DefaultMaxPendingMs
+	if env.ExpiresAt == nil {
+		exp := deadline
+		env.ExpiresAt = &exp
+	}
+	_, err := h.cor.Reserve(ctx, adapter.CorrelationEntry{
+		RequestID:     adapter.CorrelationKey(env.ID),
+		CorrelationID: env.CorrelationID,
+		ChannelID:     env.ChannelID,
+		AudienceActor: testAdapterActor,
+		ParentID:      env.ID,
+		EnqueuedAt:    env.TS,
+		ExpiresAt:     deadline,
+		State:         adapter.CorrelationPending,
+	})
+	if err != nil {
+		return err
+	}
+	if err := h.policy.RegisterTimer(ctx, adapter.CorrelationKey(env.ID), time.UnixMilli(deadline)); err != nil {
+		return err
+	}
+	return h.module.Handle(ctx, env)
+}
+
 // ---- E2E tests ----------------------------------------------------------
 
 // TestPublishHappyPath walks the canonical lifecycle: register a session,
@@ -404,7 +534,7 @@ func TestPublishHappyPath(t *testing.T) {
 	env := h.request("env-publish", xhs.TypePublish,
 		`{"title":"hi","content":"body"}`)
 
-	if err := h.module.Handle(ctx, env); err != nil {
+	if err := h.dispatch(ctx, env); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 
@@ -521,7 +651,7 @@ func TestSearchPerTypeAllowList(t *testing.T) {
 	env := h.request("env-search", xhs.TypeSearch,
 		`{"keyword":"abc"}`)
 
-	if err := h.module.Handle(ctx, env); err != nil {
+	if err := h.dispatch(ctx, env); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 
@@ -552,16 +682,16 @@ func TestSearchPerTypeAllowList(t *testing.T) {
 	}
 }
 
-// TestTransitSendFailureRollsBack covers the path where DeviceTransit.Send
-// fails — the adapter must emit a synchronous failed terminal and roll
-// back correlation + timer.
+// TestTransitSendFailureRollsBack covers the path where external forwarding
+// fails — the adapter must emit a synchronous failed terminal through the
+// framework write-first lifecycle path.
 func TestTransitSendFailureRollsBack(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
 	h.server.failSend = errors.New("ws gone")
 
 	env := h.request("env-fail", xhs.TypePublish, `{"title":"x"}`)
-	if err := h.module.Handle(ctx, env); err != nil {
+	if err := h.dispatch(ctx, env); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	call := h.respond.calls[0]
@@ -569,8 +699,8 @@ func TestTransitSendFailureRollsBack(t *testing.T) {
 	if !h.policy.cancelled[adapter.CorrelationKey(env.ID)] {
 		t.Error("timer should be cancelled on push failure")
 	}
-	if !h.cor.expired[adapter.CorrelationKey(env.ID)] {
-		t.Error("correlation should be expired on push failure")
+	if !h.cor.done[adapter.CorrelationKey(env.ID)] {
+		t.Error("correlation should be done on failed terminal")
 	}
 }
 
@@ -603,7 +733,7 @@ func TestF3TimeoutTerminal(t *testing.T) {
 	h := newHarness(t)
 
 	env := h.request("env-timeout", xhs.TypePublish, `{"title":"x"}`)
-	if err := h.module.Handle(ctx, env); err != nil {
+	if err := h.dispatch(ctx, env); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	// Simulate the F3 timer firing: in production the framework would
@@ -633,7 +763,7 @@ func TestSenderHarnessGuard(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
 	env := h.request("env-guard", xhs.TypePublish, `{"title":"x"}`)
-	if err := h.module.Handle(ctx, env); err != nil {
+	if err := h.dispatch(ctx, env); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 
@@ -671,11 +801,78 @@ func TestOrphanCallbackIsDropped(t *testing.T) {
 	}
 }
 
+func TestCallbackFrameRejectsInnerCorrelationMismatch(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	env := h.request("env-frame", xhs.TypePublish, `{"title":"hi","content":"body"}`)
+	if err := h.dispatch(ctx, env); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	callback := xhs.Callback{
+		CorrelationID: "env-other",
+		Status:        "ok",
+		Result:        map[string]any{"note_id": "n"},
+	}
+	raw, _ := json.Marshal(callback)
+	err := h.module.OnExternalCallbackFrame(ctx, adapter.ExternalCallbackFrame{
+		ChannelID:      h.channelID,
+		AdapterActorID: testAdapterActor,
+		RequestID:      env.ID,
+		CorrelationID:  env.ID,
+		ExpiresAt:      *env.ExpiresAt,
+		Payload:        raw,
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not match outer request_id") {
+		t.Fatalf("expected outer identity mismatch, got %v", err)
+	}
+	if len(h.respond.calls) != 0 {
+		t.Fatalf("mismatched callback must not Respond; got %d", len(h.respond.calls))
+	}
+}
+
+func TestCallbackFrameParseFailureFailsRequest(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	env := h.request("env-frame-parse", xhs.TypePublish, `{"title":"hi","content":"body"}`)
+	if err := h.dispatch(ctx, env); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	err := h.module.OnExternalCallbackFrame(ctx, adapter.ExternalCallbackFrame{
+		ChannelID:      h.channelID,
+		AdapterActorID: testAdapterActor,
+		RequestID:      env.ID,
+		CorrelationID:  env.ID,
+		ExpiresAt:      *env.ExpiresAt,
+		Payload:        json.RawMessage(`{"status":"ok"}`),
+	})
+	if err != nil {
+		t.Fatalf("malformed callback frame should be converted to failed terminal: %v", err)
+	}
+	if len(h.respond.calls) != 1 {
+		t.Fatalf("malformed callback frame should emit one failed terminal, got %d", len(h.respond.calls))
+	}
+	call := h.respond.calls[0]
+	if call.opts.Status != "failed" || call.opts.Reason != string(message.TerminalReceiverInternalError) {
+		t.Fatalf("failed terminal opts=%+v", call.opts)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(call.payload, &payload); err != nil {
+		t.Fatalf("decode fail payload: %v", err)
+	}
+	if payload["error_code"] != "callback_malformed" {
+		t.Fatalf("error_code=%v want callback_malformed", payload["error_code"])
+	}
+	if !h.cor.done[adapter.CorrelationKey(env.ID)] {
+		t.Fatalf("failed terminal should close correlation")
+	}
+}
+
 func TestParseFailureEmitsOrphanCallbackEvents(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
 	chain := &eventChain{}
-	h.mctx.HarnessChain = chain
+	h.mctx.ReportOrphanCallback = reportOrphanCallbackFunc(chain, xhs.AdapterName, testAdapterActor, h.channelID)
 
 	err := h.module.OnExternalCallback(ctx, []byte(`{"status":"ok"}`))
 	if err == nil || !strings.Contains(err.Error(), "missing correlation_id") {
@@ -685,14 +882,11 @@ func TestParseFailureEmitsOrphanCallbackEvents(t *testing.T) {
 		t.Fatalf("parse failure must not produce a Respond; got %d", len(h.respond.calls))
 	}
 	written := chain.Written()
-	if len(written) != 2 {
-		t.Fatalf("expected orphan callback + system event writes, got %d", len(written))
+	if len(written) != 1 {
+		t.Fatalf("expected orphan callback event write, got %d", len(written))
 	}
 	if written[0].Type != "adapter.xhs.orphan_callback" || written[0].Kind != message.KindEvent {
 		t.Fatalf("first event type/kind=%s/%s", written[0].Type, written[0].Kind)
-	}
-	if written[1].Type != "core.system_event" || written[1].Kind != message.KindEvent {
-		t.Fatalf("second event type/kind=%s/%s", written[1].Type, written[1].Kind)
 	}
 	var adapterPayload map[string]any
 	if err := json.Unmarshal(written[0].Payload, &adapterPayload); err != nil {
@@ -700,13 +894,6 @@ func TestParseFailureEmitsOrphanCallbackEvents(t *testing.T) {
 	}
 	if adapterPayload["kind"] != "orphan_callback" || adapterPayload["detail"] == "" {
 		t.Fatalf("orphan payload=%v", adapterPayload)
-	}
-	var systemPayload map[string]any
-	if err := json.Unmarshal(written[1].Payload, &systemPayload); err != nil {
-		t.Fatalf("decode system payload: %v", err)
-	}
-	if systemPayload["kind"] != "correlation_lost" || systemPayload["severity"] != "warn" {
-		t.Fatalf("system payload=%v", systemPayload)
 	}
 }
 
@@ -717,7 +904,7 @@ func TestDuplicateCallbackIsDropped(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
 	env := h.request("env-dup", xhs.TypePublish, `{"title":"x"}`)
-	if err := h.module.Handle(ctx, env); err != nil {
+	if err := h.dispatch(ctx, env); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	// Pretend F3 expired before the device callback arrived.
@@ -734,22 +921,20 @@ func TestDuplicateCallbackIsDropped(t *testing.T) {
 	}
 }
 
-// TestModuleInitRequiresDeviceTransit guards the codex 警告 #15 wire-up:
-// missing DeviceTransit MUST fail at Init.
-func TestModuleInitRequiresDeviceTransit(t *testing.T) {
+// TestModuleInitRequiresForwardExternalRequest guards the runtime_inbound
+// wire-up: missing semantic external forward MUST fail at Init.
+func TestModuleInitRequiresForwardExternalRequest(t *testing.T) {
 	module, err := xhs.New(xhs.Config{})
 	if err != nil {
 		t.Fatalf("xhs.New: %v", err)
 	}
 	mctx := &adapter.ModuleContext{
-		Correlation: newFakeCorrelation(),
-		ErrorPolicy: newFakePolicy(),
 		Respond: func(context.Context, adapter.CorrelationKey, json.RawMessage, adapter.RespondOptions) (adapter.RespondResult, error) {
 			return adapter.RespondResult{}, nil
 		},
 		ChannelID: "c",
 	}
-	if err := module.Init(context.Background(), mctx); err == nil || !strings.Contains(err.Error(), "DeviceTransit") {
-		t.Errorf("Init must require DeviceTransit; got %v", err)
+	if err := module.Init(context.Background(), mctx); err == nil || !strings.Contains(err.Error(), "ForwardExternalRequest") {
+		t.Errorf("Init must require ForwardExternalRequest; got %v", err)
 	}
 }

@@ -12,23 +12,23 @@ import (
 // to route Manager.OnExternalCallback to this Module.
 const AdapterName = "xhs"
 
-// DefaultAdapterActorID is the canonical actor_registry id this adapter
-// owns. domain-xhs-spec §1 and proto-foundation §2.7 keep adapter-emitted
-// responses under sender.id=tool:xhs-adapter.
+// DefaultAdapterActorID is the canonical actor_registry id exposed by the
+// proxy daemon for the xhs actor. Cloud daemon production installs this
+// actor through proxy facade, not through a static daemon-side xhs adapter.
 //
 // Concrete deployments MAY override the value via Config.AdapterActorID
 // if they run multiple xhs adapter instances in a channel (none today;
 // extension reserved).
-const DefaultAdapterActorID actor.ActorID = "tool:xhs-adapter"
+const DefaultAdapterActorID actor.ActorID = "tool:xhs"
 
 // Binding is the protocol binding this adapter declares. See
 // kernel/actor.BindingRuntimeInboundViaRelay + proto-layer0 §2.8.
 const Binding = actor.BindingRuntimeInboundViaRelay
 
-// DefaultMaxPendingMs is the sane per-request default. Long-running
-// xhs operations must opt in with an explicit override instead of
-// inheriting a broad framework default.
-const DefaultMaxPendingMs int64 = 30 * 1000
+// DefaultMaxPendingMs is the domain-xhs-spec per-request budget
+// (300s). XHS browser/extension operations can legitimately take
+// longer than the generic framework default.
+const DefaultMaxPendingMs int64 = 300 * 1000
 
 // Type names — closed set per domain-xhs-spec §1.
 //
@@ -154,8 +154,7 @@ func WireCmdFor(envelopeType string) string {
 // payload field (impl-layer2 §5.3.2 outbound — adapter → device).
 //
 // Field shape stays compatible with the M1.3 legacy extension wire
-// (see the archived daemon-go xhs adapter; module path
-// internal/adapters/xhs/device_client.go) so a rolling upgrade keeps
+// (see the archived daemon-go xhs device client) so the extension code keeps
 // the extension code unchanged on the inbound command path. The CorrelationID slot carries the request_id from
 // device_transit.recv.request_id, which equals envelope.id — the
 // extension echoes it back inside Callback.RequestID.

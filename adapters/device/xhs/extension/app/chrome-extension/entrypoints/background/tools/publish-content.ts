@@ -74,6 +74,12 @@ export interface PublishWaitOptions {
    * 不传时只在内存里运行（与 R3 之前的行为一致），SW evict 后丢失。
    */
   correlationId?: string;
+  /** Framework-owned outer callback request id from the inbound DeviceFrame. */
+  requestId?: string;
+  /** Framework-owned outer correlation id from the inbound DeviceFrame. */
+  outerCorrelationId?: string;
+  /** Framework-owned request deadline from the inbound DeviceFrame. */
+  expiresAt?: number;
   /**
    * R3-T4 FX9：wait 起始时间（ms epoch）。recovery re-arm 路径需要传原始
    * startedAt 以保留全局 deadline 不变；普通 dispatch 路径默认 Date.now()。
@@ -107,6 +113,9 @@ export interface PublishWaitOptions {
  */
 export interface PublishWaitState {
   correlationId: string;
+  requestId?: string;
+  outerCorrelationId?: string;
+  expiresAt?: number;
   tabId: number;
   /** ms epoch；entry 初次写入；recovery 不改。 */
   startedAt: number;
@@ -228,6 +237,9 @@ function normalizePublishWaitState(v: unknown): PublishWaitState | null {
     : startedAt + (r.timeoutMs as number);
   return {
     correlationId: r.correlationId,
+    requestId: typeof r.requestId === 'string' ? r.requestId : undefined,
+    outerCorrelationId: typeof r.outerCorrelationId === 'string' ? r.outerCorrelationId : undefined,
+    expiresAt: typeof r.expiresAt === 'number' ? r.expiresAt : undefined,
     tabId: r.tabId,
     startedAt,
     timeoutMs,
@@ -357,11 +369,20 @@ export function waitForPublishCompletion(
   // 才能保证 N 次 SW evict 后 derived deadline 不收缩。
   const correlationId = opts.correlationId ?? null;
   const startedAt = opts.startedAt ?? Date.now();
-  const deadlineAt = opts.deadlineAt ?? Date.now() + timeoutMs;
+  const deadlineAt = opts.deadlineAt ?? opts.expiresAt ?? Date.now() + timeoutMs;
   const storage = opts.storageLocal ?? defaultStorageLocal();
   if (correlationId && storage) {
     void writePublishWaitState(
-      { correlationId, tabId, startedAt, timeoutMs, deadlineAt },
+      {
+        correlationId,
+        requestId: opts.requestId,
+        outerCorrelationId: opts.outerCorrelationId,
+        expiresAt: opts.expiresAt,
+        tabId,
+        startedAt,
+        timeoutMs,
+        deadlineAt,
+      },
       storage,
     );
   }
@@ -517,11 +538,18 @@ export interface PublishWaitRecoveryDeps {
   postCallback: (
     correlationId: string,
     payload: { status: 'ok' | 'error'; result: Record<string, unknown> | null; error: { code: string; message: string } | null },
+    transport?: PublishCallbackTransport,
   ) => Promise<void>;
   /** 当前时间（ms epoch）；测试注入便于断言超时分支。 */
   now?: () => number;
   /** 重 register listener 时复用的 chromeApi（默认走真实 chrome.* API）。 */
   chromeApi?: PublishWaitOptions['chromeApi'];
+}
+
+export interface PublishCallbackTransport {
+  requestId?: string;
+  outerCorrelationId?: string;
+  expiresAt?: number;
 }
 
 /** Recovery 单条状态的处理结果，便于 background 日志 / 单测断言。 */
@@ -535,6 +563,14 @@ export type PublishWaitRecoveryOutcome =
 export interface PublishWaitRecoverySummary {
   correlationId: string;
   outcome: PublishWaitRecoveryOutcome;
+}
+
+function callbackTransportFromWaitState(state: PublishWaitState): PublishCallbackTransport {
+  return {
+    requestId: state.requestId,
+    outerCorrelationId: state.outerCorrelationId,
+    expiresAt: state.expiresAt,
+  };
 }
 
 /**
@@ -587,7 +623,7 @@ export async function recoverPublishWaitStates(
           status: 'error',
           result: null,
           error: { code: 'publish_timeout', message: `publish wait timed out (recovered after deadline ${deadline})` },
-        });
+        }, callbackTransportFromWaitState(state));
         await removePublishWaitState(state.correlationId, storage ?? undefined);
         summaries.push({ correlationId: state.correlationId, outcome: 'timeout' });
         continue;
@@ -605,7 +641,7 @@ export async function recoverPublishWaitStates(
           status: 'error',
           result: null,
           error: { code: 'publish_canceled', message: `publish tab no longer exists (tabId=${state.tabId})` },
-        });
+        }, callbackTransportFromWaitState(state));
         await removePublishWaitState(state.correlationId, storage ?? undefined);
         summaries.push({ correlationId: state.correlationId, outcome: 'canceled_tab_missing' });
         continue;
@@ -617,7 +653,7 @@ export async function recoverPublishWaitStates(
           status: 'ok',
           result: { url: tabUrl, note_id: detailMatch[1] },
           error: null,
-        });
+        }, callbackTransportFromWaitState(state));
         await removePublishWaitState(state.correlationId, storage ?? undefined);
         summaries.push({ correlationId: state.correlationId, outcome: 'completed_detail' });
         continue;
@@ -633,6 +669,9 @@ export async function recoverPublishWaitStates(
           timeoutMs: state.timeoutMs,
           deadlineAt: state.deadlineAt,
           correlationId: state.correlationId,
+          requestId: state.requestId,
+          outerCorrelationId: state.outerCorrelationId,
+          expiresAt: state.expiresAt,
           startedAt: state.startedAt,
           chromeApi: deps.chromeApi,
           storageLocal: storage ?? undefined,
@@ -642,7 +681,7 @@ export async function recoverPublishWaitStates(
               status: 'ok',
               result: { url: completion.url, note_id: completion.note_id },
               error: null,
-            }),
+            }, callbackTransportFromWaitState(state)),
           )
           .catch((err: any) =>
             deps.postCallback(state.correlationId, {
@@ -652,7 +691,7 @@ export async function recoverPublishWaitStates(
                 code: typeof err?.code === 'string' ? err.code : 'publish_failed',
                 message: err instanceof Error ? err.message : String(err),
               },
-            }),
+            }, callbackTransportFromWaitState(state)),
           );
         summaries.push({ correlationId: state.correlationId, outcome: 'rearmed_listener' });
         continue;
@@ -662,7 +701,7 @@ export async function recoverPublishWaitStates(
         status: 'error',
         result: null,
         error: { code: 'publish_canceled', message: `publish tab navigated away to non-detail page during SW evict: ${tabUrl}` },
-      });
+      }, callbackTransportFromWaitState(state));
       await removePublishWaitState(state.correlationId, storage ?? undefined);
       summaries.push({ correlationId: state.correlationId, outcome: 'canceled_navigated_away' });
     } catch (err) {
@@ -1804,6 +1843,18 @@ export class PublishContentTool extends BaseTool {
           typeof (args as any)?.__correlationId === 'string'
             ? ((args as any).__correlationId as string)
             : undefined;
+        const requestId =
+          typeof (args as any)?.__requestId === 'string'
+            ? ((args as any).__requestId as string)
+            : undefined;
+        const outerCorrelationId =
+          typeof (args as any)?.__outerCorrelationId === 'string'
+            ? ((args as any).__outerCorrelationId as string)
+            : undefined;
+        const expiresAt =
+          typeof (args as any)?.__expiresAt === 'number'
+            ? ((args as any).__expiresAt as number)
+            : undefined;
         pushToolLog(
           'tool.wait_publish.start',
           `tabId=${tab.id} corr=${correlationId ?? 'n/a'}`,
@@ -1811,6 +1862,9 @@ export class PublishContentTool extends BaseTool {
         const completion = await waitForPublishCompletion(tab.id, {
           timeoutMs: DEFAULT_PUBLISH_WAIT_TIMEOUT_MS,
           correlationId,
+          requestId,
+          outerCorrelationId,
+          expiresAt,
         });
         pushToolLog(
           'tool.wait_publish.done',

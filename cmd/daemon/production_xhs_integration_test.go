@@ -10,9 +10,7 @@ import (
 
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
-	"github.com/wanpengxie/ActOS/adapters/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
@@ -31,21 +29,19 @@ func TestBuildChannelTemplates_XHSCreatorHasNoAdapterSeeds(t *testing.T) {
 	// keeps WorkdirSubdirs + DomainPrompt (xhs business knowledge) but
 	// no longer pre-seeds an adapter actor row (would conflict with the
 	// facade's `tool:xhs` install).
-	for _, scaffold := range []bool{false, true} {
-		tpl := buildChannelTemplates(scaffold)[XHSCreatorChannelType]
-		if len(tpl.AdapterActorSeeds) != 0 {
-			t.Fatalf("scaffold=%v: AdapterActorSeeds len=%d want 0", scaffold, len(tpl.AdapterActorSeeds))
-		}
-		if len(tpl.WorkdirSubdirs) == 0 {
-			t.Fatalf("scaffold=%v: WorkdirSubdirs empty; expected xhs subdirs", scaffold)
-		}
-		if tpl.DomainPrompt == "" {
-			t.Fatalf("scaffold=%v: DomainPrompt empty", scaffold)
-		}
+	tpl := buildChannelTemplates()[XHSCreatorChannelType]
+	if len(tpl.AdapterActorSeeds) != 0 {
+		t.Fatalf("AdapterActorSeeds len=%d want 0", len(tpl.AdapterActorSeeds))
+	}
+	if len(tpl.WorkdirSubdirs) == 0 {
+		t.Fatal("WorkdirSubdirs empty; expected xhs subdirs")
+	}
+	if tpl.DomainPrompt == "" {
+		t.Fatal("DomainPrompt empty")
 	}
 }
 
-func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
+func TestIntegration_ProductionXHSPublishUsesProxyFacade(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -61,14 +57,8 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 		HumanCallerSecret: []byte(integSecret),
 		ReplayWindow:      time.Minute,
 		SchedulerPeriod:   50 * time.Millisecond,
-		ChannelTemplates: map[string]runtime.ChannelTemplate{
-			XHSCreatorChannelType: {
-				AdapterActorSeeds: []actorreg.Record{DeviceXHSActorSeed()},
-				WorkdirSubdirs:    xhs.WorkdirSubdirs(),
-				DomainPrompt:      xhs.DomainPrompt(),
-			},
-		},
-		OnChannelBoot: wireAdapterFramework(DeviceXHSFactory(devicexhs.Config{})),
+		ChannelTemplates:  buildChannelTemplates(),
+		OnChannelBoot:     wireAdapterFramework(),
 	}
 	d, err := runtime.AssembleDaemon(ctx, cfg)
 	if err != nil {
@@ -87,20 +77,10 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 
 	db := openChannelDBForTest(t, channelsDir, channelID)
 	defer func() { _ = db.Close() }()
+
+	attachProxyXHSActor(t, ctx, d, srv, channelID)
 	assertProductionXHSBindings(t, ctx, db)
 
-	// Simulate the devicebus ws-register lifecycle signal so the
-	// adapter's runtime-event state machine treats the device as
-	// reachable. In production this frame is pushed by
-	// server.gateway.NotifyDeviceLifecycle when the extension's
-	// /devicebus WS handshake succeeds.
-	pushDeviceLifecycleConnected(t, ctx, srv, channelID, devicexhs.DefaultAdapterActorID)
-
-	// xhs.publish request payload (domain-xhs-spec §1.1) carries
-	// title + content for the production extension path. Per Level A
-	// (proto-layer0 §1.4.1) the protocol layer does not validate
-	// payload contents; payload consistency is enforced by the adapter
-	// boundary's per-type allow-lists, not by the harness.
 	ack, send := writeRequestAndWaitForDeviceSend(t, ctx, d, srv, channelID, "req-prod-xhs", "user:alice",
 		devicexhs.TypePublish, []byte(`{"title":"hello","content":"world"}`))
 	if !ack.Accepted {
@@ -119,12 +99,14 @@ func TestIntegration_ProductionXHSPublishEmitsDeviceTransitSend(t *testing.T) {
 	if transitBody.RequestID != ack.MessageID {
 		t.Errorf("body.RequestID=%q want canonical ack.MessageID=%q", transitBody.RequestID, ack.MessageID)
 	}
-	var cmd devicexhs.Command
-	if err := json.Unmarshal(transitBody.Payload, &cmd); err != nil {
-		t.Fatalf("decode device command: %v", err)
+	var forwarded message.Envelope
+	if err := json.Unmarshal(transitBody.Payload, &forwarded); err != nil {
+		t.Fatalf("decode proxy facade forwarded envelope: %v", err)
 	}
-	if cmd.Type != devicexhs.CommandWireType || cmd.Cmd != "publish" {
-		t.Fatalf("device command=%+v want command/publish", cmd)
+	if forwarded.ID != ack.MessageID || forwarded.Type != devicexhs.TypePublish ||
+		len(forwarded.Audience) != 1 || forwarded.Audience[0] != devicexhs.DefaultAdapterActorID {
+		t.Fatalf("forwarded envelope=%+v want id=%s type=%s audience=%s",
+			forwarded, ack.MessageID, devicexhs.TypePublish, devicexhs.DefaultAdapterActorID)
 	}
 }
 
@@ -150,57 +132,80 @@ func assertProductionXHSBindings(t *testing.T, ctx context.Context, db *sql.DB) 
 	if rec.Binding != actor.BindingRuntimeInboundViaRelay {
 		t.Fatalf("actor binding=%q want %q", rec.Binding, actor.BindingRuntimeInboundViaRelay)
 	}
-	var binding string
-	if err := db.QueryRowContext(ctx, `SELECT handler_binding FROM type_registry WHERE type=?`, devicexhs.TypePublish).Scan(&binding); err != nil {
+	var handlerActor, binding string
+	if err := db.QueryRowContext(ctx, `SELECT handler_actor_id, handler_binding FROM type_registry WHERE type=?`, devicexhs.TypePublish).Scan(&handlerActor, &binding); err != nil {
 		t.Fatalf("type_registry xhs.publish binding: %v", err)
+	}
+	if handlerActor != string(devicexhs.DefaultAdapterActorID) {
+		t.Fatalf("type_registry xhs.publish actor=%q want %q", handlerActor, devicexhs.DefaultAdapterActorID)
 	}
 	if binding != string(actor.BindingRuntimeInboundViaRelay) {
 		t.Fatalf("type_registry xhs.publish binding=%q want %q", binding, actor.BindingRuntimeInboundViaRelay)
 	}
 }
 
-// pushDeviceLifecycleConnected pushes a `device_transit.lifecycle`
-// frame from the mock server side so the daemon's adapter framework
-// projects the device into the "online" state. Mirrors the production
-// path where server.gateway.NotifyDeviceLifecycle would emit the same
-// frame after a devicebus ws handshake succeeds.
-func pushDeviceLifecycleConnected(
+func attachProxyXHSActor(
 	t *testing.T,
 	ctx context.Context,
+	d *runtime.Daemon,
 	srv *transit.MockServer,
 	channelID string,
-	adapterActorID actor.ActorID,
 ) {
 	t.Helper()
 	ts := nowMs()
-	lf := devicetransit.LifecycleFrame{
-		AdapterActorID: adapterActorID,
-		ChannelID:      channel.ID(channelID),
-		Event:          devicetransit.LifecycleConnected,
-		DeviceID:       "device-test",
-		Ts:             ts,
+	capability, err := json.Marshal(map[string]any{
+		"name":              devicexhs.AdapterName,
+		"types":             devicexhs.AllTypes,
+		"type_declarations": devicexhs.DeclarationTypeDeclarations(),
+		"max_pending_ms":    devicexhs.DefaultMaxPendingMs,
+	})
+	if err != nil {
+		t.Fatalf("marshal xhs capability: %v", err)
 	}
 	frame, err := transit.Encode(
-		"frame-lifecycle-connected",
-		daemonbus.FrameTypeDeviceTransitLifecycle,
+		"frame-update-xhs-proxy",
+		daemonbus.FrameTypeControlUpdateMembers,
 		"server",
-		1,
+		d.Transit().Epoch(),
 		ts,
-		lf,
+		transit.UpdateMembersBody{
+			FrameID:   "frame-update-xhs-proxy",
+			ChannelID: channel.ID(channelID),
+			Adds: []daemonbus.UpdateMember{{
+				MemberActorID: devicexhs.DefaultAdapterActorID,
+				Kind:          actor.KindTool,
+				Binding:       actor.BindingRuntimeInboundViaRelay,
+				DisplayName:   "xhs",
+				CapabilitySet: capability,
+			}},
+		},
 	)
 	if err != nil {
-		t.Fatalf("encode device_transit.lifecycle: %v", err)
+		t.Fatalf("encode proxy update_members: %v", err)
 	}
 	frame.ChannelID = channelID
 	if err := srv.SendToDaemon(ctx, frame); err != nil {
-		t.Fatalf("SendToDaemon device_transit.lifecycle: %v", err)
+		t.Fatalf("SendToDaemon update_members: %v", err)
 	}
-	// Give the dispatcher a moment to apply the state transition before
-	// the caller fires the publish request. The adapter framework
-	// processes lifecycle synchronously, but the mock daemonbus runs on
-	// a goroutine so the next SendToDaemon could otherwise race the
-	// state store.
-	time.Sleep(50 * time.Millisecond)
+	for {
+		recvCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		f, err := srv.RecvFromDaemon(recvCtx)
+		cancel()
+		if err != nil {
+			t.Fatalf("RecvFromDaemon update_members ack: %v", err)
+		}
+		if f.FrameKind != daemonbus.FrameTypeControlUpdateMembersAck {
+			continue
+		}
+		var ack transit.UpdateMembersAckBody
+		if err := transit.DecodePayload(f, &ack); err != nil {
+			t.Fatalf("decode update_members ack: %v", err)
+		}
+		if !ack.Accepted {
+			t.Fatalf("update_members rejected: %s %s", ack.RejectReason, ack.RejectDetail)
+		}
+		return
+	}
 }
 
 func writeRequestAndWaitForDeviceSend(

@@ -5,7 +5,7 @@
 //
 //   - MockProvider：返回固定 fixture（直接同步结果）。
 //   - RealProvider：把命令翻译成 v4 message envelope —— 通过 spawn
-//     `coagent ask --type xhs.<op> --audience tool:xhs-adapter` 子进程
+//     `coagent ask --type xhs.<op> --audience tool:xhs` 子进程
 //     发到 daemon RPC。立即返回 dispatch ack（含 correlation_id），
 //     不阻塞等真实结果。
 //

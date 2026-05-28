@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/adapters/xhs"
+	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -27,11 +27,12 @@ const integSecret = "integ-secret"
 func nowMs() int64 { return time.Now().UnixMilli() }
 
 // integDaemonOpts overrides selected DaemonConfig fields for individual
-// sub-tests — most cases just want the default xhs scaffold but the
-// panic / timeout acceptance tests need a different xhs.Config.
+// sub-tests. These tests use a package-local fake xhs module so the
+// production daemon remains proxy-facade only.
 type integDaemonOpts struct {
-	XHSConfig       xhs.Config
+	XHSConfig       testXHSConfig
 	SchedulerPeriod time.Duration
+	NoTestXHS       bool
 }
 
 func startIntegrationDaemon(t *testing.T, ctx context.Context, opts integDaemonOpts) (*runtime.Daemon, *transit.MockServer, string) {
@@ -44,6 +45,19 @@ func startIntegrationDaemon(t *testing.T, ctx context.Context, opts integDaemonO
 		period = 50 * time.Millisecond
 	}
 
+	channelTemplates := map[string]runtime.ChannelTemplate{
+		XHSCreatorChannelType: {
+			AdapterActorSeeds: []actorreg.Record{testXHSActorSeed()},
+			WorkdirSubdirs:    devicexhs.WorkdirSubdirs(),
+			DomainPrompt:      devicexhs.DomainPrompt(),
+		},
+	}
+	onChannelBoot := wireAdapterFramework(testXHSFactory(opts.XHSConfig))
+	if opts.NoTestXHS {
+		channelTemplates = buildChannelTemplates()
+		onChannelBoot = wireAdapterFramework()
+	}
+
 	cfg := runtime.DaemonConfig{
 		DataDir:           dataDir,
 		ChannelsDir:       channelsDir,
@@ -54,19 +68,8 @@ func startIntegrationDaemon(t *testing.T, ctx context.Context, opts integDaemonO
 		HumanCallerSecret: []byte(integSecret),
 		ReplayWindow:      time.Minute,
 		SchedulerPeriod:   period,
-		// M1.6-T5 phase-2 — wire the xhs-creator template so the
-		// bootstrap saga seeds tool:xhs-adapter into actor_registry
-		// and the per-channel adapter framework Install path can find
-		// it. createChannel below tags each fresh channel with
-		// ChannelType="xhs-creator" so XHSScaffoldFactory installs.
-		ChannelTemplates: map[string]runtime.ChannelTemplate{
-			XHSCreatorChannelType: {
-				AdapterActorSeeds: []actorreg.Record{xhs.DefaultActorSeed()},
-				WorkdirSubdirs:    xhs.WorkdirSubdirs(),
-				DomainPrompt:      xhs.DomainPrompt(),
-			},
-		},
-		OnChannelBoot: wireAdapterFramework(XHSScaffoldFactory(opts.XHSConfig)),
+		ChannelTemplates:  channelTemplates,
+		OnChannelBoot:     onChannelBoot,
 	}
 
 	d, err := runtime.AssembleDaemon(ctx, cfg)
@@ -88,9 +91,8 @@ func createChannel(t *testing.T, ctx context.Context, d *runtime.Daemon, srv *tr
 		CreateRequestID: placement.CreateRequestID("req-" + channelID),
 		InitialMembers:  members,
 		// M1.6-T5 phase-2 — tag the channel with the xhs-creator
-		// template so the daemon resolves the matching seeds /
-		// workdir subdirs / domain prompt and XHSScaffoldFactory
-		// installs the xhs adapter.
+		// template so the daemon resolves the matching test seeds /
+		// workdir subdirs / domain prompt.
 		ChannelType: XHSCreatorChannelType,
 	}
 	frame, err := transit.Encode("frame-create-"+channelID,
@@ -165,7 +167,7 @@ func writeRequestWithExpiry(t *testing.T, ctx context.Context, d *runtime.Daemon
 			Type:     envType,
 			Kind:     message.KindRequest,
 			Payload:  json.RawMessage(payload),
-			Audience: message.Audience{xhs.DefaultAdapterActorID},
+			Audience: message.Audience{devicexhs.DefaultAdapterActorID},
 			// Visibility omitted — writemsg.go defaults to Public so the
 			// trigger.Gateway audience-expand sees the explicit list (Private
 			// would short-circuit Resolve to nil per L1 §5.1 visibility
@@ -271,7 +273,7 @@ func pollResponse(t *testing.T, db *sql.DB, requestID message.ID, timeout time.D
 // TestIntegration_XhsPublish_HappyPath covers acceptance #1, #2 and the
 // regression sweep:
 //
-//	create channel via CreateChannel frame → saga seeds tool:xhs-adapter
+//	create channel via CreateChannel frame → saga seeds tool:xhs
 //	+ user:alice → daemon mounts channel → OnChannelBoot installs xhs
 //	scaffold via framework.Manager → write_message kind=request for
 //	xhs.publish → trigger gateway dispatches to scaffold via deliverer →
@@ -296,7 +298,7 @@ func TestIntegration_XhsPublish_HappyPath(t *testing.T) {
 
 	const requestID = "req-publish-1"
 	ack := writeRequest(t, ctx, d, srv, channelID, requestID, "user:alice",
-		xhs.TypePublish, []byte(`{"title":"hello"}`))
+		devicexhs.TypePublish, []byte(`{"title":"hello"}`))
 	if !ack.Accepted {
 		t.Fatalf("write_message rejected: reason=%s detail=%s", ack.RejectReason, ack.RejectDetail)
 	}
@@ -308,7 +310,7 @@ func TestIntegration_XhsPublish_HappyPath(t *testing.T) {
 	// so the framework Respond uses the canonical id as parent_id. The
 	// ack carries that canonical id.
 	resp := pollResponse(t, db, ack.MessageID, 3*time.Second)
-	if resp.Sender.ID != xhs.DefaultAdapterActorID || resp.Sender.Kind != actor.KindTool {
+	if resp.Sender.ID != devicexhs.DefaultAdapterActorID || resp.Sender.Kind != actor.KindTool {
 		t.Fatalf("voluntary response sender=(%s,%s) want tool adapter", resp.Sender.Kind, resp.Sender.ID)
 	}
 	var payload map[string]any
@@ -338,7 +340,7 @@ func TestAdapterFrameworkMetricsWired(t *testing.T) {
 	})
 
 	out := metrics.Default().RenderPrometheus()
-	if !strings.Contains(out, "adapter_install_ok") || !strings.Contains(out, `adapter="xhs-scaffold"`) {
+	if !strings.Contains(out, "adapter_install_ok") || !strings.Contains(out, `adapter="xhs"`) {
 		t.Fatalf("adapter framework metrics were not exported:\n%s", out)
 	}
 }
@@ -362,7 +364,7 @@ func TestIntegration_XhsPublish_Concurrent(t *testing.T) {
 	canonical := make([]message.ID, 0, len(requestIDs))
 	for i, rid := range requestIDs {
 		ack := writeRequest(t, ctx, d, srv, channelID, rid, "user:alice",
-			xhs.TypePublish, []byte(`{"title":"t-`+rid+`"}`))
+			devicexhs.TypePublish, []byte(`{"title":"t-`+rid+`"}`))
 		if !ack.Accepted {
 			t.Fatalf("req=%s rejected: %s", rid, ack.RejectReason)
 		}
@@ -402,7 +404,7 @@ func TestIntegration_XhsPublish_PanicEmitsFailedTerminal(t *testing.T) {
 	defer cancel()
 
 	d, srv, channelsDir := startIntegrationDaemon(t, ctx, integDaemonOpts{
-		XHSConfig: xhs.Config{PanicOnHandle: true},
+		XHSConfig: testXHSConfig{PanicOnHandle: true},
 	})
 	defer func() { _ = d.Close() }()
 
@@ -413,7 +415,7 @@ func TestIntegration_XhsPublish_PanicEmitsFailedTerminal(t *testing.T) {
 
 	const requestID = "req-panic-1"
 	ack := writeRequest(t, ctx, d, srv, channelID, requestID, "user:alice",
-		xhs.TypePublish, []byte(`{"title":"boom"}`))
+		devicexhs.TypePublish, []byte(`{"title":"boom"}`))
 	if !ack.Accepted {
 		// Even on panic the write_message ack should still report Accepted
 		// because the harness chain finished writing the request row; the
@@ -450,7 +452,7 @@ func TestIntegration_XhsPublish_TimerEmitsUnansweredTimeout(t *testing.T) {
 	defer cancel()
 
 	d, srv, channelsDir := startIntegrationDaemon(t, ctx, integDaemonOpts{
-		XHSConfig: xhs.Config{
+		XHSConfig: testXHSConfig{
 			SkipRespond:  true,
 			MaxPendingMs: 250, // short timeout so the test runs quickly
 		},
@@ -464,7 +466,7 @@ func TestIntegration_XhsPublish_TimerEmitsUnansweredTimeout(t *testing.T) {
 
 	const requestID = "req-timer-1"
 	ack := writeRequest(t, ctx, d, srv, channelID, requestID, "user:alice",
-		xhs.TypePublish, []byte(`{"title":"slow"}`))
+		devicexhs.TypePublish, []byte(`{"title":"slow"}`))
 	if !ack.Accepted {
 		t.Fatalf("write_message rejected: %s", ack.RejectReason)
 	}
@@ -504,7 +506,7 @@ func countResponses(t *testing.T, db *sql.DB, requestID message.ID) int {
 // TestIntegration_LongPending_ToolReceiverSkippedByScheduler_F3Wins covers
 // T147 acceptance C — the合并 ticket 价值: 当 xhs.publish 请求 envelope
 // expires_at 早于 adapter framework F3 deadline 时，scheduler 扫到
-// audience=tool:xhs-adapter MUST skip（receiver-kind=tool 分支），由
+// audience=tool:xhs MUST skip（receiver-kind=tool 分支），由
 // framework F3 timer 兜底 emit reason=unanswered_timeout，确保 The
 // One Law 单一终态 + 没有 terminal_duplicate.
 //
@@ -520,7 +522,7 @@ func TestIntegration_LongPending_ToolReceiverSkippedByScheduler_F3Wins(t *testin
 	defer cancel()
 
 	d, srv, channelsDir := startIntegrationDaemon(t, ctx, integDaemonOpts{
-		XHSConfig: xhs.Config{
+		XHSConfig: testXHSConfig{
 			SkipRespond:  true,
 			MaxPendingMs: 1500, // F3 deadline ~1.5s after Handle
 		},
@@ -536,7 +538,7 @@ func TestIntegration_LongPending_ToolReceiverSkippedByScheduler_F3Wins(t *testin
 	const requestID = "req-join-1"
 	expiresAt := nowMs() + 200 // expires well before MaxPendingMs deadline
 	ack := writeRequestWithExpiry(t, ctx, d, srv, channelID, requestID,
-		"user:alice", xhs.TypePublish, []byte(`{"title":"slow"}`), &expiresAt)
+		"user:alice", devicexhs.TypePublish, []byte(`{"title":"slow"}`), &expiresAt)
 	if !ack.Accepted {
 		t.Fatalf("write_message rejected: %s", ack.RejectReason)
 	}

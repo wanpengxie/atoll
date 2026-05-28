@@ -45,9 +45,9 @@ type InstallSpec struct {
 	Types []TypeSeed
 }
 
-// DefaultInstallSpec returns the canonical launch install seeds for the
-// xhs adapter: one tool actor + 5 R/R types + 1 event-only type. Used
-// by composition root + by tests that need a known-good registry seed.
+// DefaultInstallSpec returns seed rows for tests and non-production harnesses
+// that instantiate this module directly. Production cloud daemon installs
+// tool:xhs dynamically through proxy facade from the proxy daemon ready frame.
 //
 // The actor id defaults to DefaultAdapterActorID; callers that supply a
 // non-default Config.AdapterActorID should override Actor.ID + every

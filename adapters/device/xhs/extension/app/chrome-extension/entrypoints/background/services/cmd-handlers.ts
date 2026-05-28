@@ -39,6 +39,9 @@ export interface CommandResultEnvelope {
  */
 export interface CommandContext {
   correlationId?: string;
+  requestId?: string;
+  outerCorrelationId?: string;
+  expiresAt?: number;
 }
 
 export type CommandHandler = (

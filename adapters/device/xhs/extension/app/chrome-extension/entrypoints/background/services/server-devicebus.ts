@@ -16,6 +16,7 @@
 //         direction: "from_device",
 //         actor_id, channel_id,
 //         request_id, correlation_id,
+//         expires_at,
 //         payload: <Callback JSON> { correlation_id, status, result?, error?, device_id? },
 //       }
 //
@@ -49,6 +50,7 @@ import { saveConnectionStatus } from '../connection-state';
  */
 export interface DeviceFrame {
   direction: 'to_device' | 'from_device';
+  frame_type?: 'ack' | string;
   actor_id: string;
   channel_id: string;
   request_id?: string;
@@ -77,6 +79,13 @@ export interface CallbackPayload {
   result?: Record<string, unknown> | null;
   error?: { code?: string; message?: string } | null;
   device_id?: string;
+}
+
+export interface CallbackAckPayload {
+  status: 'accepted' | 'rejected_permanent' | 'rejected_retryable';
+  reason?: string;
+  detail?: string;
+  retryable?: boolean;
 }
 
 /** R3-T4 FX9 — public callback surface used by recovery helpers. */
@@ -141,6 +150,21 @@ export async function writeOutbox(entries: OutboxEntry[]): Promise<void> {
   } catch (err) {
     console.warn('[ServerDeviceBus] writeOutbox failed', err);
   }
+}
+
+async function removeOutboxEntry(frame: Pick<DeviceFrame, 'request_id' | 'correlation_id'>): Promise<void> {
+  const corr = String(frame.correlation_id ?? '').trim();
+  const requestId = String(frame.request_id ?? '').trim();
+  if (!corr && !requestId) return;
+  const existing = await readOutbox();
+  const next = existing.filter((entry) => {
+    const entryCorr = String(entry.frame.correlation_id ?? '').trim();
+    const entryRequest = String(entry.frame.request_id ?? '').trim();
+    if (requestId && entryRequest === requestId) return false;
+    if (!requestId && corr && entryCorr === corr) return false;
+    return true;
+  });
+  if (next.length !== existing.length) await writeOutbox(next);
 }
 
 function isOutboxEntry(value: unknown): value is OutboxEntry {
@@ -236,6 +260,21 @@ function decodeCommandPayload(raw: unknown): CommandPayload | null {
     cmd.session = o.session as CommandPayload['session'];
   }
   return cmd;
+}
+
+function decodeAckPayload(raw: unknown): CallbackAckPayload | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const status = o.status;
+  if (status !== 'accepted' && status !== 'rejected_permanent' && status !== 'rejected_retryable') {
+    return null;
+  }
+  return {
+    status,
+    reason: typeof o.reason === 'string' ? o.reason : undefined,
+    detail: typeof o.detail === 'string' ? o.detail : undefined,
+    retryable: typeof o.retryable === 'boolean' ? o.retryable : undefined,
+  };
 }
 
 // ─── Client ──────────────────────────────────────────────────────────────
@@ -635,6 +674,10 @@ class CoagentServerDeviceClient {
     if (!parsed || typeof parsed !== 'object') return;
     const frame = parsed as DeviceFrame;
     this.logInboundFrame(frame);
+    if (frame.frame_type === 'ack') {
+      await this.handleAckFrame(frame);
+      return;
+    }
     // Only `to_device` frames are addressed at us; anything else is
     // probably an echo of our own outbound — drop quietly.
     if (frame.direction !== COAGENT_SERVER_DEVICEBUS_PROTOCOL.DIRECTION_TO_DEVICE) {
@@ -642,6 +685,26 @@ class CoagentServerDeviceClient {
       return;
     }
     await this.handleToDeviceFrame(frame);
+  }
+
+  private async handleAckFrame(frame: DeviceFrame): Promise<void> {
+    const ack = decodeAckPayload(frame.payload);
+    if (!ack) {
+      console.warn('[ServerDeviceBus] invalid callback ack ignored', {
+        request_id: frame.request_id,
+        correlation_id: frame.correlation_id,
+      });
+      return;
+    }
+    console.warn('[ServerDeviceBus] callback ack', {
+      request_id: frame.request_id,
+      correlation_id: frame.correlation_id,
+      status: ack.status,
+      reason: ack.reason,
+    });
+    if (ack.status === 'accepted' || ack.status === 'rejected_permanent') {
+      await removeOutboxEntry(frame);
+    }
   }
 
   /**
@@ -711,6 +774,9 @@ class CoagentServerDeviceClient {
     try {
       const envelope = await handler(cmd.params ?? {}, cmd.session ?? null, {
         correlationId,
+        requestId: typeof frame.request_id === 'string' ? frame.request_id : undefined,
+        outerCorrelationId: typeof frame.correlation_id === 'string' ? frame.correlation_id : undefined,
+        expiresAt: typeof frame.expires_at === 'number' ? frame.expires_at : undefined,
       });
       await this.replyCallback(frame, {
         correlation_id: correlationId,
@@ -739,12 +805,21 @@ class CoagentServerDeviceClient {
   /** Build + send a `from_device` DeviceFrame echoing the inbound IDs. */
   private async replyCallback(inbound: DeviceFrame, body: CallbackPayload): Promise<void> {
     const cfg = this.config;
+    const outerCorrelationId = String(inbound.correlation_id ?? '').trim();
+    if (!outerCorrelationId) {
+      console.warn('[ServerDeviceBus] replyCallback: missing outer correlation_id; dropping unsafe callback', {
+        request_id: inbound.request_id,
+        body_correlation_id: body.correlation_id,
+      });
+      return;
+    }
     const out: DeviceFrame = {
       direction: 'from_device',
       actor_id: inbound.actor_id || (cfg?.actorId ?? ''),
       channel_id: inbound.channel_id || (cfg?.channelId ?? ''),
       request_id: inbound.request_id,
-      correlation_id: inbound.correlation_id || body.correlation_id,
+      correlation_id: outerCorrelationId,
+      expires_at: inbound.expires_at,
       payload: body,
     };
     await this.sendOrEnqueue(out);
@@ -757,38 +832,66 @@ class CoagentServerDeviceClient {
    * resend a frame on reconnect without breaking The One Law.
    */
   private async sendOrEnqueue(frame: DeviceFrame): Promise<void> {
+    await this.enqueueOutbox(frame);
     const text = JSON.stringify(frame);
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
       try {
         this.socket.send(text);
-        console.warn('[ServerDeviceBus] sent frame', frameLogDetails(frame));
+        console.warn('[ServerDeviceBus] sent frame; awaiting ack', frameLogDetails(frame));
         return;
       } catch (err) {
-        console.warn('[ServerDeviceBus] socket.send failed; enqueuing', err);
+        console.warn('[ServerDeviceBus] socket.send failed; keeping outbox entry', err);
       }
     }
-    await this.enqueueOutbox(frame);
   }
 
   /**
    * Public API used by `recoverPublishWaitStates` after MV3 service
    * worker eviction.
    *
-   * Recovery path (SW evict → cold start → state replay): the inbound
-   * DeviceFrame metadata is no longer in memory, so the v4 client
-   * synthesises the outbound frame from `ConnectionConfig` (actor_id +
-   * channel_id) + the persisted correlationId — the daemon's framework
-   * routes the recovered callback by `payload.correlation_id` (= inbound
-   * envelope.id), and the outer `correlation_id` slot also carries the
-   * same value as the device-wire correlation key.
+   * Recovery path (SW evict → cold start → state replay): callers must
+   * provide the framework-owned outer request metadata persisted from
+   * the original inbound DeviceFrame. Without it the extension refuses to
+   * send a lifecycle callback, because payload correlation alone is not
+   * authority to complete a daemon-side request.
    */
   async postCallback(
     correlationId: string,
-    payload: Omit<CallbackBody, 'correlation_id'>
+    payload: Omit<CallbackBody, 'correlation_id'>,
+    transport?: {
+      requestId?: string;
+      outerCorrelationId?: string;
+      expiresAt?: number;
+    }
   ): Promise<void> {
     const cfg = this.config;
     if (!cfg) {
       console.warn('[ServerDeviceBus] postCallback: no config');
+      return;
+    }
+    const requestId = String(transport?.requestId ?? '').trim();
+    if (!requestId) {
+      console.warn('[ServerDeviceBus] postCallback: missing outer request_id; dropping unsafe recovered callback', {
+        at: Date.now(),
+        correlation_id: correlationId,
+      });
+      return;
+    }
+    if (typeof transport?.expiresAt !== 'number' || transport.expiresAt <= 0) {
+      console.warn('[ServerDeviceBus] postCallback: missing outer expires_at; dropping unsafe recovered callback', {
+        at: Date.now(),
+        correlation_id: correlationId,
+        request_id: requestId,
+      });
+      return;
+    }
+    const outerCorrelationId = String(transport?.outerCorrelationId ?? '').trim();
+    if (!outerCorrelationId) {
+      console.warn('[ServerDeviceBus] postCallback: missing outer correlation_id; dropping unsafe recovered callback', {
+        at: Date.now(),
+        correlation_id: correlationId,
+        request_id: requestId,
+      });
       return;
     }
     console.warn('[ServerDeviceBus] postCallback', {
@@ -806,8 +909,9 @@ class CoagentServerDeviceClient {
       direction: 'from_device',
       actor_id: cfg.actorId,
       channel_id: cfg.channelId,
-      request_id: correlationId,
-      correlation_id: correlationId,
+      request_id: requestId,
+      correlation_id: outerCorrelationId,
+      expires_at: transport.expiresAt,
       payload: cb,
     };
     await this.sendOrEnqueue(frame);
@@ -818,13 +922,17 @@ class CoagentServerDeviceClient {
   private async enqueueOutbox(frame: DeviceFrame): Promise<void> {
     const existing = await readOutbox();
     const now = Date.now();
+    const requestId = String(frame.request_id ?? '').trim();
     const corr = String(frame.correlation_id ?? '').trim();
-    const filtered = corr
-      ? existing.filter((e) => String(e.frame.correlation_id ?? '') !== corr)
-      : existing.slice();
+    const filtered = existing.filter((e) => {
+      if (requestId) return String(e.frame.request_id ?? '').trim() !== requestId;
+      if (corr) return String(e.frame.correlation_id ?? '').trim() !== corr;
+      return true;
+    });
     filtered.push({ frame, enqueued_at: now, last_attempt_at: now });
     await writeOutbox(filtered);
-    console.warn('[ServerDeviceBus] callback enqueued (WS down)', {
+    console.warn('[ServerDeviceBus] callback pending ack', {
+      request_id: requestId,
       correlation_id: corr,
       outbox_size: filtered.length,
     });
@@ -864,9 +972,9 @@ class CoagentServerDeviceClient {
       return;
     }
 
-    // Sent successfully → clear from outbox. Failed → keep & try next
-    // reconnect. We refresh last_attempt_at on the failure path so GC
-    // measures from the most recent attempt, not the original enqueue.
+    // Sent successfully still stays in outbox until an ack arrives. Failed
+    // sends also stay retryable for the next reconnect. Refresh
+    // last_attempt_at on every attempt so GC measures from recent activity.
     const survivors: OutboxEntry[] = [];
     let sent = 0;
     for (const entry of live) {
@@ -874,6 +982,7 @@ class CoagentServerDeviceClient {
       try {
         socket.send(text);
         sent += 1;
+        survivors.push({ ...entry, last_attempt_at: now });
       } catch (err) {
         console.warn('[ServerDeviceBus] drain send failed; keeping entry', {
           correlation_id: entry.frame.correlation_id,

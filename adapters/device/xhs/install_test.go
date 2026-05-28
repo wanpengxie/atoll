@@ -9,6 +9,9 @@ import (
 // TestDefaultInstallSpec asserts the canonical seed bundle: one tool
 // actor + 5 R/R types + 1 event-only.
 func TestDefaultInstallSpec(t *testing.T) {
+	if DefaultMaxPendingMs != 300_000 {
+		t.Fatalf("DefaultMaxPendingMs=%d want 300000", DefaultMaxPendingMs)
+	}
 	spec := DefaultInstallSpec(0)
 	if spec.Actor.ID != DefaultAdapterActorID {
 		t.Errorf("actor id=%q want %q", spec.Actor.ID, DefaultAdapterActorID)
@@ -66,7 +69,7 @@ func TestDefaultInstallSpecMaxPendingOverride(t *testing.T) {
 // TestWithActorIDPropagates ensures override updates every row.
 func TestWithActorIDPropagates(t *testing.T) {
 	base := DefaultInstallSpec(0)
-	override := actor.ActorID("tool:xhs-adapter-shadow")
+	override := actor.ActorID("tool:xhs-shadow")
 	got := base.WithActorID(override)
 	if got.Actor.ID != override {
 		t.Errorf("actor id not propagated: %q", got.Actor.ID)

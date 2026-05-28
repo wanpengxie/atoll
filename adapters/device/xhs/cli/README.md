@@ -15,7 +15,7 @@ coagent-xhs sync-cookie
 
 > **M1.3-T14 变更**：legacy `device.command.send` RPC 入口下线；real
 > provider 改为 spawn `coagent ask --type xhs.<op> --audience
-> tool:xhs-adapter`（L4 §2.3.2 "CLI 是 daemon RPC 的 domain wrapper"）。
+> tool:xhs`（L4 §2.3.2 "CLI 是 daemon RPC 的 domain wrapper"）。
 >
 > - `xhs.get-my-recent`  → `xhs.recent.fetch`（CLI 子命令也从 `get-my-recent` 改名 `recent`）
 > - `xhs.get-note`       → `xhs.note.fetch`
@@ -90,6 +90,5 @@ real provider 通过注入 `CoagentRunner` stub 验证 argv / payload / env 拼�
 
 ## 范围
 
-M1.3-T14 落 binary 本身的 v4 改造；daemon-go 端 `xhs` adapter（
-`daemon-go/internal/adapters/xhs`）与 extension callback HTTP handler 由同
-ticket 同步交付。
+M1.3-T14 落 binary 本身的 v4 改造；当前 xhs actor 由本机 proxy daemon
+以 `tool:xhs` 暴露，extension callback 走 proxy/device transit 链路。

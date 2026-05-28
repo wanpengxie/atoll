@@ -25,7 +25,6 @@ func newPublishCmd() *cobra.Command {
 		contentPath string
 		imagesCSV   string
 		tagsCSV     string
-		noteID      string
 	)
 
 	cmd := &cobra.Command{
@@ -43,21 +42,6 @@ func newPublishCmd() *cobra.Command {
 			tags := splitCSV(tagsCSV)
 
 			runWithProvider(cmd, func(ctx context.Context, p xhs.Provider) (any, error) {
-				// M1.6-T5 phase-4: business-invariant dedupe. When the
-				// agent passes --note-id (typically a retry after a
-				// prior dispatch ack), we refuse the second publish if
-				// the local channel sqlite already shows a TERMINAL
-				// completed publish response for that note_id. The
-				// check is a no-op when COAGENT_CHANNEL_DB or
-				// --note-id is empty (covers fresh publishes and unit
-				// tests that don't supply a db).
-				if matched, derr := dedupePublish(ctx, noteID); derr == nil && matched {
-					return nil, NewCLIError(
-						"duplicate_publish",
-						"note_id %q already has a terminal completed publish in this channel",
-						strings.TrimSpace(noteID),
-					)
-				}
 				pubArgs := xhs.PublishArgs{
 					Title: title,
 					Tags:  tags,
@@ -97,7 +81,6 @@ func newPublishCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&contentPath, "content", "c", "", "笔记正文文件路径（必填）")
 	cmd.Flags().StringVar(&imagesCSV, "images", "", "图片路径（逗号分隔）")
 	cmd.Flags().StringVar(&tagsCSV, "tags", "", "标签（逗号分隔）")
-	cmd.Flags().StringVar(&noteID, "note-id", "", "已有 note_id（M1.6-T5 phase-4 业务自检：若本 channel 已有 terminal completed 行则拒绝重复 publish）")
 
 	return cmd
 }

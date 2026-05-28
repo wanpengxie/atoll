@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/adapters/device/framework"
-	adapterframework "github.com/wanpengxie/ActOS/adapters/framework"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -29,23 +29,20 @@ const (
 // Config tunes a Module instance. Everything carries a defensible default.
 type Config struct {
 	// AdapterActorID overrides the actor_registry id this Module owns.
-	// Empty defaults to DefaultAdapterActorID (`tool:xhs-adapter`).
+	// Empty defaults to DefaultAdapterActorID (`tool:xhs`).
 	AdapterActorID actor.ActorID
 
 	// MaxPendingMs overrides the per-type pending budget. Zero defaults
-	// to DefaultMaxPendingMs (30s).
+	// to DefaultMaxPendingMs (300s).
 	MaxPendingMs int64
 
 	// Now is a clock injection point for tests. Defaults to time.Now.
 	Now func() time.Time
 
-	// NewExternalCorrelationID mints the id placed in Command.CorrelationID
-	// when the adapter wants to hide envelope.id from the extension.
-	// Empty defaults to envelope.id directly (launch baseline:
-	// outbound `device_transit.recv.request_id` (impl-layer2 §5.3.2)
-	// carries the canonical id; no need for a daemon-internal external
-	// id like M1.3 had — extension echoes request_id back via inbound
-	// `device_transit.send.request_id` (§5.3.1)).
+	// NewExternalCorrelationID is retained for config compatibility, but
+	// the runtime_inbound_via_relay path uses envelope.id as the only
+	// lifecycle identity. The callback bridge preserves outer request_id
+	// and this adapter refuses callbacks whose inner correlation disagrees.
 	NewExternalCorrelationID func(envelopeID string) string
 }
 
@@ -53,8 +50,8 @@ type Config struct {
 // One instance per channel per daemon process.
 //
 // Cross-binding helpers in use:
-//   - adapters/framework.FailNow: synchronous failure path (Handle gate
-//   - payload decode + push error)
+//   - ModuleContext.Fail: synchronous failure path (Handle gate,
+//     payload decode, and push error)
 //   - adapters/device/framework.LifecycleTracker: device state machine
 //   - lifecycle event emission (delegated from OnRuntimeEvent)
 type Module struct {
@@ -135,25 +132,26 @@ func (m *Module) Declares() adapter.Declaration {
 }
 
 // Init captures the framework-provided ModuleContext + constructs the
-// DeviceProxy that wraps DeviceTransit + Correlation + ErrorPolicy.
-// Returns an error if DeviceTransit is absent (the framework MUST
-// inject it for runtime_inbound_via_relay bindings — covers codex warning
-// #15).
+// DeviceProxy that wraps the framework's external request semantic
+// capability.
 func (m *Module) Init(_ context.Context, mctx *adapter.ModuleContext) error {
 	if mctx == nil {
 		return errors.New("xhs.Init: ModuleContext is nil")
 	}
-	if mctx.DeviceTransit == nil {
-		return errors.New("xhs.Init: ModuleContext.DeviceTransit is nil; runtime_inbound_via_relay binding requires runtime/transit to wire it (T3)")
-	}
-	if mctx.Correlation == nil {
-		return errors.New("xhs.Init: ModuleContext.Correlation is nil")
-	}
-	if mctx.ErrorPolicy == nil {
-		return errors.New("xhs.Init: ModuleContext.ErrorPolicy is nil")
-	}
 	if mctx.Respond == nil {
 		return errors.New("xhs.Init: ModuleContext.Respond is nil")
+	}
+	if mctx.ForwardExternalRequest == nil {
+		return errors.New("xhs.Init: ModuleContext.ForwardExternalRequest is nil; runtime_inbound_via_relay binding requires framework external transport")
+	}
+	if mctx.LookupPendingRequest == nil {
+		return errors.New("xhs.Init: ModuleContext.LookupPendingRequest is nil")
+	}
+	if mctx.EmitEvent == nil {
+		return errors.New("xhs.Init: ModuleContext.EmitEvent is nil")
+	}
+	if mctx.ReportOrphanCallback == nil {
+		return errors.New("xhs.Init: ModuleContext.ReportOrphanCallback is nil")
 	}
 	if mctx.AdapterActorID == "" {
 		mctx.AdapterActorID = m.cfg.AdapterActorID
@@ -163,9 +161,8 @@ func (m *Module) Init(_ context.Context, mctx *adapter.ModuleContext) error {
 		mctx.AdapterActorID,
 		mctx.ChannelID,
 		framework.DeviceProxyDeps{
-			Transit:     mctx.DeviceTransit,
-			Correlation: mctx.Correlation,
-			Policy:      mctx.ErrorPolicy,
+			Forward:       mctx.ForwardExternalRequest,
+			LookupPending: mctx.LookupPendingRequest,
 		},
 	)
 	if err != nil {
@@ -183,7 +180,7 @@ func (m *Module) Init(_ context.Context, mctx *adapter.ModuleContext) error {
 		},
 		AdapterActorID: mctx.AdapterActorID,
 		ChannelID:      mctx.ChannelID,
-		HarnessChain:   mctx.HarnessChain,
+		EmitEvent:      mctx.EmitEvent,
 		Clock:          m.now,
 	})
 	if err != nil {
@@ -253,31 +250,19 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 	case DeviceStateOnline:
 		// fall through to dispatch path
 	case DeviceStateTokenExpired:
-		return adapterframework.FailNow(ctx, m.mctx, adapterframework.FailNowParams{
-			RequestID:      env.ID,
-			TerminalReason: message.TerminalReceiverUnavailable,
-			ErrorCode:      "device_token_expired",
-			Detail:         "extension pairing token expired; re-bind via UI",
-		})
+		return m.failNow(ctx, env.ID.String(), message.TerminalReceiverUnavailable,
+			"device_token_expired", "extension pairing token expired; re-bind via UI")
 	default:
 		// DeviceStateOffline / DeviceStateUnknown — adapter knows the
 		// device isn't reachable; emit failed terminal without trying
 		// the wire.
-		return adapterframework.FailNow(ctx, m.mctx, adapterframework.FailNowParams{
-			RequestID:      env.ID,
-			TerminalReason: message.TerminalReceiverUnavailable,
-			ErrorCode:      "device_offline",
-			Detail:         "extension is not connected for this channel",
-		})
+		return m.failNow(ctx, env.ID.String(), message.TerminalReceiverUnavailable,
+			"device_offline", "extension is not connected for this channel")
 	}
 
 	cmd, err := buildCommand(env)
 	if err != nil {
 		return m.failNow(ctx, env.ID.String(), "", "payload_decode_failed", err.Error())
-	}
-
-	if newID := m.externalID(env.ID.String()); newID != "" {
-		cmd.CorrelationID = newID
 	}
 
 	wirePayload, err := json.Marshal(cmd)
@@ -291,9 +276,6 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 	m.setPendingType(env.ID.String(), env.Type)
 
 	if _, err := m.proxy.SendRequest(ctx, env, wirePayload); err != nil {
-		// SendRequest already rolled back correlation + timer; clear our
-		// local stash too.
-		m.clearPendingType(env.ID.String())
 		return m.failNow(ctx, env.ID.String(), "", "device_push_failed", err.Error())
 	}
 	return nil
@@ -308,26 +290,51 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 // correlation state so a duplicate inbound (e.g. extension retransmit
 // after a network hiccup) does not double-Respond.
 func (m *Module) OnExternalCallback(ctx context.Context, raw []byte) error {
+	cb, err := m.parseExternalCallback(ctx, raw)
+	if err != nil {
+		return err
+	}
+	return m.completeExternalCallback(ctx, cb, cb.CorrelationID)
+}
+
+func (m *Module) OnExternalCallbackFrame(ctx context.Context, frame adapter.ExternalCallbackFrame) error {
+	requestID := frame.RequestID.String()
+	if requestID == "" {
+		return errors.New("xhs.OnExternalCallbackFrame: outer request_id required")
+	}
+	cb, err := m.parseExternalCallback(ctx, frame.Payload)
+	if err != nil {
+		if failErr := m.failNow(ctx, requestID, message.TerminalReceiverInternalError, "callback_malformed", err.Error()); failErr != nil {
+			return devicetransit.NewAckError(devicetransit.AckRejectedRetryable, "callback_terminal_failed", "", failErr)
+		}
+		return nil
+	}
+	if cb.CorrelationID != requestID {
+		return fmt.Errorf("xhs.OnExternalCallbackFrame: callback correlation_id %s does not match outer request_id %s",
+			cb.CorrelationID, requestID)
+	}
+	return m.completeExternalCallback(ctx, cb, requestID)
+}
+
+func (m *Module) parseExternalCallback(ctx context.Context, raw []byte) (Callback, error) {
 	if m.mctx == nil || m.proxy == nil {
-		return errors.New("xhs.OnExternalCallback: Init was not called")
+		return Callback{}, errors.New("xhs.OnExternalCallback: Init was not called")
 	}
 	cb, err := parseCallback(raw)
 	if err != nil {
-		if emitErr := adapterframework.EmitOrphanCallbackEvents(ctx, adapterframework.OrphanCallbackEvent{
-			AdapterName:    AdapterName,
-			AdapterActorID: m.mctx.AdapterActorID,
-			ChannelID:      m.mctx.ChannelID,
-			Chain:          m.mctx.HarnessChain,
-			Clock:          m.now,
-			Detail:         err.Error(),
-			Payload:        raw,
+		if emitErr := m.mctx.ReportOrphanCallback(ctx, adapter.OrphanCallbackReport{
+			Detail:  err.Error(),
+			Payload: append(json.RawMessage(nil), raw...),
 		}); emitErr != nil {
-			return fmt.Errorf("xhs.OnExternalCallback: emit parse failure event: %w", emitErr)
+			return Callback{}, fmt.Errorf("xhs.OnExternalCallback: emit parse failure event: %w", emitErr)
 		}
-		return err
+		return Callback{}, err
 	}
+	return cb, nil
+}
 
-	entry, ok, err := m.proxy.LookupInFlight(ctx, cb.CorrelationID)
+func (m *Module) completeExternalCallback(ctx context.Context, cb Callback, requestID string) error {
+	entry, ok, err := m.proxy.LookupInFlight(ctx, requestID)
 	if err != nil {
 		return fmt.Errorf("xhs.OnExternalCallback: lookup correlation: %w", err)
 	}
@@ -343,46 +350,58 @@ func (m *Module) OnExternalCallback(ctx context.Context, raw []byte) error {
 		return nil
 	}
 
-	requestType := m.getPendingType(cb.CorrelationID)
+	requestType := m.getPendingType(requestID)
 
 	body, status, reason, err := buildRespondPayload(cb, requestType)
 	if err != nil {
 		return err
 	}
 
-	// Mark the correlation done before Respond so a race between F3 and
-	// the success path does not double-emit.
-	if err := m.proxy.CompleteInFlight(ctx, cb.CorrelationID); err != nil {
-		return err
-	}
-	m.clearPendingType(cb.CorrelationID)
-
-	_, err = m.mctx.Respond(ctx, adapter.CorrelationKey(message.ID(cb.CorrelationID)), body, adapter.RespondOptions{
+	_, err = m.mctx.Respond(ctx, adapter.CorrelationKey(message.ID(requestID)), body, adapter.RespondOptions{
 		Status: status,
 		Reason: reason,
 	})
+	if err == nil {
+		m.clearPendingType(requestID)
+	}
 	return err
 }
 
-// failNow is the xhs-specific shim around adapterframework.FailNow.
-// Wraps the cross-binding helper with the adapter's domain bookkeeping
-// (per-request pendingType stash + DeviceProxy.CancelInFlight which
-// owns both the F3 timer cancel + correlation mark on the device
-// transit path).
+// failNow is the xhs-specific shim around ModuleContext.Fail.
+// It clears the adapter's local pending type only after the framework
+// write-first failed terminal path succeeds.
 func (m *Module) failNow(ctx context.Context, requestID string, terminalReason message.TerminalFailureReason, errorCode, detail string) error {
 	if m.mctx == nil {
 		return fmt.Errorf("xhs.failNow: Init was not called (error_code=%s)", errorCode)
 	}
-	if m.proxy != nil {
-		m.proxy.CancelInFlight(ctx, requestID)
+	if requestID == "" {
+		return fmt.Errorf("xhs.failNow: requestID empty (error_code=%s)", errorCode)
 	}
-	m.clearPendingType(requestID)
-	return adapterframework.FailNow(ctx, m.mctx, adapterframework.FailNowParams{
-		RequestID:      message.ID(requestID),
-		TerminalReason: terminalReason,
-		ErrorCode:      errorCode,
-		Detail:         detail,
+	if errorCode == "" {
+		return fmt.Errorf("xhs.failNow: errorCode empty for request %s", requestID)
+	}
+	if m.mctx.Fail == nil {
+		return fmt.Errorf("xhs.failNow: ModuleContext.Fail is nil (request=%s error_code=%s)", requestID, errorCode)
+	}
+	fields := map[string]any{"error_code": errorCode}
+	if detail != "" {
+		fields["detail"] = detail
+	}
+	payload, err := json.Marshal(fields)
+	if err != nil {
+		payload = []byte(`{}`)
+	}
+	reason := terminalReason
+	if reason == "" {
+		reason = message.TerminalReceiverInternalError
+	}
+	_, err = m.mctx.Fail(ctx, adapter.CorrelationKey(message.ID(requestID)), payload, adapter.FailOptions{
+		Reason: reason,
 	})
+	if err == nil {
+		m.clearPendingType(requestID)
+	}
+	return err
 }
 
 // setPendingType / getPendingType / clearPendingType keep the per-

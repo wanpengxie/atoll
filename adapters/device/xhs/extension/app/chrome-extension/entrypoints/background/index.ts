@@ -115,7 +115,12 @@ function activeDeviceClient(): {
       status: 'ok' | 'error';
       result: Record<string, unknown> | null;
       error: { code: string; message: string } | null;
-		}
+		},
+    transport?: {
+      requestId?: string;
+      outerCorrelationId?: string;
+      expiresAt?: number;
+    }
 	  ) => Promise<void>;
 } {
 	const transport = selectTransport(connectionConfig);
@@ -123,7 +128,7 @@ function activeDeviceClient(): {
 		transport,
 		connect: () => coagentServerDeviceClient.connect(),
 		disconnect: () => coagentServerDeviceClient.disconnect(),
-		postCallback: (id, p) => coagentServerDeviceClient.postCallback(id, p),
+		postCallback: (id, p, transport) => coagentServerDeviceClient.postCallback(id, p, transport),
 	};
 }
 
@@ -211,8 +216,8 @@ export default defineBackground(() => {
 			// proxy transport 由 server-devicebus 直接走 WS 回 callback；
 			// 断网期间入队，下次连上自动 replay。
     void recoverPublishWaitStates({
-      postCallback: (correlationId, payload) =>
-        activeDeviceClient().postCallback(correlationId, payload),
+      postCallback: (correlationId, payload, transport) =>
+        activeDeviceClient().postCallback(correlationId, payload, transport),
     })
       .then((summaries) => {
         if (summaries.length > 0) {
