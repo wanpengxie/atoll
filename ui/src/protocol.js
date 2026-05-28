@@ -32,6 +32,160 @@ export const SENDER_KIND = Object.freeze({
 // --- Audience wildcard (L1 §10.2 step 5) ---------------------------------
 export const AUDIENCE_WILDCARD = '*';
 
+// --- Response payload.status (Layer 1 final + Layer 2 provisional core) --
+//
+// Authoritative spec: .dalek/pm/proto-layer0.md §2.5 (semi-closed:
+// Layer 1 strict-closed final + Layer 2 strict-closed provisional core
+// + Layer 3 half-open business extension `<adapter>.<name>`).
+//
+// is_terminal derives from (kind, payload.status) — see
+// proto-foundation.md §1.6.3:
+//
+//   is_terminal = (kind == "response" && status ∈ Layer 1)
+//
+// Layer 3 namespace must equal sender.id's local-name (the substring
+// after the last ":" — e.g. "tool:xhs" → "xhs"); UI does not enforce
+// (harness does) but the helper exposes the parser so renderers can
+// pick the right icon / label.
+
+export const FINAL_STATUS = Object.freeze({
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+});
+
+export const PROVISIONAL_STATUS = Object.freeze({
+  RECEIVED: 'received',
+  QUEUED: 'queued',
+  PROCESSING: 'processing',
+  DEFERRED: 'deferred',
+  UNAVAILABLE: 'unavailable',
+});
+
+const FINAL_SET = new Set(Object.values(FINAL_STATUS));
+const PROVISIONAL_CORE_SET = new Set(Object.values(PROVISIONAL_STATUS));
+const LAYER3_RE = /^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$/;
+
+/**
+ * Whether a payload.status is a Layer-1 final status (completed | failed).
+ * Mirrors Go's kernel/message.IsFinalStatus — the harness uses the same
+ * predicate to derive is_terminal.
+ */
+export function isFinalStatus(status) {
+  return typeof status === 'string' && FINAL_SET.has(status);
+}
+
+/**
+ * Whether a payload.status is a Layer-2 provisional core status
+ * (received / queued / processing / deferred / unavailable).
+ */
+export function isProvisionalCoreStatus(status) {
+  return typeof status === 'string' && PROVISIONAL_CORE_SET.has(status);
+}
+
+/**
+ * Whether a payload.status is a Layer-3 business extension
+ * (matches `<namespace>.<name>` and the namespace is not a Layer-1/2 name).
+ * Note: UI does not enforce sender-namespace ownership — that's harness
+ * Step 8 — so a malformed envelope reaching the renderer is logged but
+ * still rendered.
+ */
+export function isLayer3ProvisionalStatus(status) {
+  if (typeof status !== 'string' || !LAYER3_RE.test(status)) return false;
+  const ns = status.split('.', 1)[0];
+  if (FINAL_SET.has(ns) || PROVISIONAL_CORE_SET.has(ns)) return false;
+  return true;
+}
+
+/**
+ * Whether a payload.status is provisional (Layer 2 core OR Layer 3
+ * extension). The negation of isFinalStatus on a syntactically valid
+ * status — i.e. anything not in {completed, failed} that the harness
+ * would still accept.
+ */
+export function isProvisionalStatus(status) {
+  return isProvisionalCoreStatus(status) || isLayer3ProvisionalStatus(status);
+}
+
+/**
+ * Whether an envelope is a provisional response (kind=response and
+ * payload.status is not in Layer 1 final).
+ */
+export function isProvisionalResponse(envelope) {
+  if (!envelope) return false;
+  const kind = envelope.kind || envelope.Kind;
+  if (kind !== KIND.RESPONSE) return false;
+  const status = envelope.payload?.status || envelope.payload?.Status || '';
+  return isProvisionalStatus(status);
+}
+
+/**
+ * Whether an envelope is a final response (kind=response and
+ * payload.status ∈ {completed, failed}).
+ */
+export function isFinalResponse(envelope) {
+  if (!envelope) return false;
+  const kind = envelope.kind || envelope.Kind;
+  if (kind !== KIND.RESPONSE) return false;
+  const status = envelope.payload?.status || envelope.payload?.Status || '';
+  return isFinalStatus(status);
+}
+
+/**
+ * Parse a Layer-3 status into { namespace, name }. Returns null for
+ * Layer-1 / Layer-2 / malformed status. UI uses the namespace to map
+ * provisional updates to a specific adapter (e.g. `xhs.login_queued`
+ * pins to the xhs device chip).
+ */
+export function parseLayer3Status(status) {
+  if (!isLayer3ProvisionalStatus(status)) return null;
+  const dot = status.indexOf('.');
+  return { namespace: status.slice(0, dot), name: status.slice(dot + 1) };
+}
+
+/**
+ * Extract local-name from an actor.id (the substring after the last
+ * ":"). Matches the harness namespace-ownership check (proto-layer0
+ * §2.5.3). UI uses this to associate a provisional response with the
+ * device chip whose actor sent it.
+ */
+export function actorLocalName(actorID) {
+  if (typeof actorID !== 'string' || actorID.length === 0) return '';
+  const colon = actorID.lastIndexOf(':');
+  return colon < 0 ? actorID : actorID.slice(colon + 1);
+}
+
+// --- Provisional render hints --------------------------------------------
+//
+// Single source of truth for Layer-2 core status → human label + icon.
+// Layer-3 statuses fall through to {icon:'🔄', label:<raw string>} so
+// the agent / UI sees exactly what the adapter emitted (B-4 spec
+// decision: substrate透传给 agent / UI).
+
+const PROVISIONAL_LABELS = Object.freeze({
+  received: { icon: '📥', label: '已收到', tone: 'received' },
+  queued: { icon: '⏳', label: '排队中', tone: 'queued' },
+  processing: { icon: '🔄', label: '处理中', tone: 'processing' },
+  deferred: { icon: '⏰', label: '已推迟', tone: 'deferred' },
+  unavailable: { icon: '⚠️', label: '暂不可用', tone: 'unavailable' },
+});
+
+/**
+ * Resolve a provisional status to a display hint { icon, label, tone }.
+ * Layer-2 core gets a curated Chinese label; Layer-3 extension gets the
+ * raw status string back (per spec §2.5.3 — UI is allowed to render the
+ * namespace badge however it likes, but the string is authoritative).
+ */
+export function provisionalDisplay(status) {
+  const core = PROVISIONAL_LABELS[status];
+  if (core) return core;
+  if (isLayer3ProvisionalStatus(status)) {
+    return { icon: '🔄', label: status, tone: 'extension' };
+  }
+  // Unknown status (shouldn't happen — harness rejects) — show the
+  // raw value so it's debuggable rather than swallowed.
+  return { icon: '❔', label: status || '未知状态', tone: 'unknown' };
+}
+
 // --- Core types we render specially (L3 §2.2 Core type 渲染) -------------
 export const CORE_TYPE = Object.freeze({
   HUMAN_TEXT: 'human.text',

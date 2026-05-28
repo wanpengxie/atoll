@@ -1,5 +1,11 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
+import { ChannelSocket } from '../ws.js';
+import {
+  isProvisionalResponse,
+  isFinalResponse,
+  provisionalDisplay,
+} from '../protocol.js';
 import AddDeviceDialog from './AddDeviceDialog.jsx';
 import ExtensionPanel from './ExtensionPanel.jsx';
 
@@ -192,6 +198,111 @@ export default function MyDevicesPage({ channelsByID = {} }) {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
+  // In-flight provisional state per (channel × parent_id).
+  //
+  // Tracks "request <parent_id> is mid-flight" so device cards can show
+  // a small spinner badge with the last-known status (queued /
+  // processing / <adapter>.<name>). When a final response arrives for
+  // the request (parent_id), the entry is dropped — regardless of who
+  // sent the final.
+  //
+  // Indexed by parent_id (not sender) because the system fallback
+  // closure (proto-foundation.md §1.6.3 / §1.6.5) emits a final whose
+  // sender is the system actor, not the original adapter that emitted
+  // the provisional ticks. A sender-keyed map would never find the
+  // adapter's entry → spinner stuck forever.
+  //
+  // The original adapter sender is stored as a field of the entry so
+  // the per-actor projection still knows which device chip to badge.
+  //
+  // Map<channelID, Map<parent_id, { sender, lastStatus, lastSeen }>>
+  const [inFlight, setInFlight] = useState(() => new Map());
+
+  // Subscribe to all attached channels for the current owner so device
+  // cards can observe provisional ticks even when the user isn't
+  // looking at any specific channel chat. One WS connection covers all
+  // subscriptions thanks to ChannelSocket multiplexing.
+  const socketRef = useRef(null);
+  const subscribedChannels = useMemo(() => {
+    const s = new Set();
+    for (const d of daemons) for (const ch of d.attached_channels || []) s.add(ch);
+    return s;
+  }, [daemons]);
+
+  useEffect(() => {
+    const socket = new ChannelSocket((chID, _seq, envelope) => {
+      if (!envelope) return;
+      const isProv = isProvisionalResponse(envelope);
+      const isFinal = isFinalResponse(envelope);
+      if (!isProv && !isFinal) return;
+      const pid = envelope.parent_id || envelope.parentID || '';
+      if (!pid) return; // without parent_id we can't correlate prov→final
+      const senderID = envelope.sender?.id || envelope.sender_id || '';
+
+      setInFlight((prev) => {
+        const next = new Map(prev);
+        const chMap = new Map(next.get(chID) || new Map());
+        if (isFinal) {
+          // Drop the in-flight entry for this request regardless of who
+          // sent the final. System fallback closure (proto-foundation
+          // §1.6.3/§1.6.5) lands here with sender=system; the adapter
+          // that originally produced the provisional ticks must still
+          // get its spinner cleared.
+          chMap.delete(pid);
+        } else {
+          if (!senderID) return prev; // provisional must identify the adapter
+          const existing = chMap.get(pid);
+          chMap.set(pid, {
+            // Sender is captured from the first provisional tick and
+            // kept stable thereafter — the adapter doing the work
+            // shouldn't change mid-request.
+            sender: existing?.sender || senderID,
+            lastStatus: envelope.payload?.status || envelope.payload?.Status || '',
+            lastSeen: Date.now(),
+          });
+        }
+        if (chMap.size === 0) next.delete(chID);
+        else next.set(chID, chMap);
+        return next;
+      });
+    });
+    socketRef.current = socket;
+    socket.start();
+    return () => {
+      socket.stop?.();
+      socketRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    for (const chID of subscribedChannels) socket.subscribe(chID);
+    return () => {
+      for (const chID of subscribedChannels) socket.unsubscribe(chID);
+    };
+  }, [subscribedChannels]);
+
+  // Aggregate in-flight state per actor_id across all channels. A device
+  // card chip is "busy" if any of its attached channels has a live
+  // in-flight request whose provisional ticks came from that actor;
+  // the headline shows the most recent status (regardless of channel
+  // and parent_id).
+  const inFlightByActor = useMemo(() => {
+    const out = new Map();
+    for (const [, chMap] of inFlight) {
+      for (const [, entry] of chMap) {
+        const senderID = entry.sender;
+        if (!senderID) continue;
+        const existing = out.get(senderID);
+        if (!existing || entry.lastSeen > existing.lastSeen) {
+          out.set(senderID, entry);
+        }
+      }
+    }
+    return out;
+  }, [inFlight]);
+
   function channelName(id) {
     const ch = channelsByID[id];
     if (!ch) return id;
@@ -306,12 +417,23 @@ export default function MyDevicesPage({ channelsByID = {} }) {
                     <ul className="adapter-chip-list">
                       {daemon.hosted_actors.map((h) => {
                         const chip = actorChipState(daemon, h);
+                        const busy = inFlightByActor.get(chip.actorID);
+                        const busyDisplay = busy ? provisionalDisplay(busy.lastStatus) : null;
                         return (
-                          <li key={chip.actorID} className={`adapter-chip ${chip.state}`}>
+                          <li
+                            key={chip.actorID}
+                            className={`adapter-chip ${chip.state}${busy ? ' in-flight' : ''}`}
+                          >
                             <span className="adapter-icon">{actorIcon(chip.actorID)}</span>
                             <div className="adapter-meta">
                               <strong>{chip.actorID}</strong>
                               <span>{chip.label}</span>
+                              {busyDisplay && (
+                                <span className="adapter-inflight">
+                                  <span aria-hidden="true">{busyDisplay.icon}</span>
+                                  <span>{busyDisplay.label}</span>
+                                </span>
+                              )}
                               {chip.checkedAt > 0 && (
                                 <span className="adapter-checkedat">
                                   checked · {formatHeartbeat(chip.checkedAt)}

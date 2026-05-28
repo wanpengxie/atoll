@@ -55,10 +55,12 @@ const REASON_TABLE = Object.freeze({
   harness_response_parent_not_found: ['user_input', 'response parent 不存在'],
   harness_response_parent_not_request: ['user_input', 'response parent 不是 request'],
   harness_response_status_invalid: ['user_input', 'response status 非法'],
+  harness_response_status_namespace_mismatch: ['identity', 'response status namespace 与 sender 不匹配'],
   harness_response_reason_invalid: ['user_input', 'response reason 非法'],
   harness_response_unauthorized_sender: ['identity', 'response sender 无权回复该 request'],
   harness_response_audience_mismatch: ['user_input', 'response audience 与 request 不匹配'],
   harness_terminal_duplicate: ['protocol_system', '重复 terminal'],
+  harness_provisional_after_final: ['protocol_system', 'final response 之后不可再发 provisional'],
   harness_engine_acl_denied: ['protocol_system', '服务器内部权限异常'],
 
   // --- daemonbus mux reject --------------------------------------------

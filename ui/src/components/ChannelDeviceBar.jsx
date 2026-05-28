@@ -100,7 +100,14 @@ function statusLabel(hostedActor, online, channelID) {
 
 // ChannelDeviceBar renders adapter readiness from the server-side projection
 // of actor.readiness.changed events. The browser does not probe adapters.
-export default function ChannelDeviceBar({ channelID }) {
+//
+// inFlightActors (optional Set<string>): actor IDs that currently have at
+// least one provisional response without a matching final response in the
+// channel log (Chat.jsx derives this from the message stream). Chips for
+// those actors get an in-flight spinner badge so the user can see at a
+// glance "this adapter is working on something right now".
+export default function ChannelDeviceBar({ channelID, inFlightActors }) {
+  const inFlight = inFlightActors instanceof Set ? inFlightActors : null;
   const [attached, setAttached] = useState([]);            // daemons attached to this channel
   const [ownerDaemons, setOwnerDaemons] = useState([]);    // for attach modal
   const [bindOpen, setBindOpen] = useState(false);
@@ -182,21 +189,33 @@ export default function ChannelDeviceBar({ channelID }) {
         {chips.length === 0 ? (
           <span className="channel-device-empty muted">未绑定设备 / 无 adapter</span>
         ) : (
-          chips.map((chip) => (
-            <span key={chip.key} className={`channel-device-chip ${chip.state}`}>
-              <span className="adapter-icon">{actorIcon(chip.actor_id)}</span>
-              <span className="chip-actor">{chip.actor_id}</span>
-              <span className="chip-state">· {chip.label}</span>
-              <span className="chip-pop">
-                <strong>{chip.actor_id}</strong>
-                <span>状态: {chip.label}</span>
-                <span>来自: {chip.daemon_name}</span>
-                {chip.checkedAt > 0 && <span>checked: {new Date(chip.checkedAt).toLocaleTimeString('zh-CN')}</span>}
-                {chip.detail && <span className="muted">{chip.detail}</span>}
-                <span className="muted">daemon online + channel route + facade ack + actor.readiness.changed 投影</span>
+          chips.map((chip) => {
+            const busy = inFlight ? inFlight.has(chip.actor_id) : false;
+            return (
+              <span
+                key={chip.key}
+                className={`channel-device-chip ${chip.state}${busy ? ' in-flight' : ''}`}
+              >
+                <span className="adapter-icon">{actorIcon(chip.actor_id)}</span>
+                <span className="chip-actor">{chip.actor_id}</span>
+                <span className="chip-state">· {chip.label}</span>
+                {busy && (
+                  <span className="chip-inflight-badge" aria-label="in-flight">
+                    🔄
+                  </span>
+                )}
+                <span className="chip-pop">
+                  <strong>{chip.actor_id}</strong>
+                  <span>状态: {chip.label}</span>
+                  <span>来自: {chip.daemon_name}</span>
+                  {chip.checkedAt > 0 && <span>checked: {new Date(chip.checkedAt).toLocaleTimeString('zh-CN')}</span>}
+                  {chip.detail && <span className="muted">{chip.detail}</span>}
+                  {busy && <span className="muted">正在处理 in-flight request</span>}
+                  <span className="muted">daemon online + channel route + facade ack + actor.readiness.changed 投影</span>
+                </span>
               </span>
-            </span>
-          ))
+            );
+          })
         )}
       </div>
       <button type="button" className="device-secondary-btn" onClick={() => setBindOpen(true)}>

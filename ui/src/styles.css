@@ -2857,3 +2857,134 @@ body::after {
   color: var(--text-muted);
   font-size: 13px;
 }
+
+/* ─── Provisional response — in-flight "in-progress" card in chat ─── */
+/*
+ * Provisional response (kind=response, payload.status not in {completed,
+ * failed}) is the SIP 1xx analogue: receiver acknowledging it sees the
+ * request, is queued / processing, or — Layer 3 — emitting a business-
+ * level status (e.g. `xhs.login_queued`). The card replaces itself with
+ * the final response row when the final lands; see Chat.jsx
+ * groupRenderEntries.
+ */
+.message-row.provisional {
+  align-self: flex-start;
+  max-width: 70%;
+  background: var(--surface-3);
+  border: 1px dashed color-mix(in srgb, var(--brown-light) 50%, var(--border));
+  border-radius: 8px;
+  padding: 6px 10px;
+  box-shadow: none;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.message-row.provisional.provisional-received,
+.message-row.provisional.provisional-queued {
+  border-color: color-mix(in srgb, var(--text-muted) 40%, var(--border));
+}
+.message-row.provisional.provisional-processing,
+.message-row.provisional.provisional-extension {
+  border-color: color-mix(in srgb, var(--agent) 35%, var(--border));
+}
+.message-row.provisional.provisional-deferred,
+.message-row.provisional.provisional-unavailable {
+  border-color: color-mix(in srgb, var(--warning) 55%, var(--border));
+  background: color-mix(in srgb, var(--warning) 6%, var(--surface-3));
+}
+.message-row.provisional .provisional-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 2px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11.5px;
+}
+.message-row.provisional .provisional-spinner {
+  font-size: 14px;
+  display: inline-block;
+  animation: provisional-spin 1.6s linear infinite;
+}
+.message-row.provisional.provisional-deferred .provisional-spinner,
+.message-row.provisional.provisional-unavailable .provisional-spinner,
+.message-row.provisional.provisional-received .provisional-spinner,
+.message-row.provisional.provisional-queued .provisional-spinner {
+  animation: none; /* only "processing" / Layer-3 active states spin */
+}
+.message-row.provisional .provisional-headline {
+  color: var(--text);
+  font-weight: 600;
+}
+.message-row.provisional .provisional-adapter {
+  color: var(--brown-light);
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+}
+.message-row.provisional .provisional-sender {
+  margin-left: auto;
+  font-size: 10.5px;
+}
+.message-row.provisional .provisional-hints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.message-row.provisional .provisional-hint {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--surface-1);
+}
+.message-row.provisional .provisional-trail {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+}
+.message-row.provisional .provisional-trail-tick {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.message-row.provisional .provisional-trail-icon {
+  font-size: 11px;
+}
+
+@keyframes provisional-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* In-flight badge on ChannelDeviceBar chip + MyDevicesPage adapter chip.
+ * Marks a device whose hosted actor currently has provisional responses
+ * outstanding (no matching final yet). */
+.channel-device-chip.in-flight,
+.adapter-chip.in-flight {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--agent) 45%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--agent) 25%, transparent);
+}
+.channel-device-chip .chip-inflight-badge {
+  display: inline-block;
+  font-size: 11px;
+  animation: provisional-spin 1.6s linear infinite;
+}
+.adapter-chip .adapter-inflight {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--agent) 75%, var(--text));
+  font-family: 'IBM Plex Mono', monospace;
+}
+.adapter-chip .adapter-inflight > span:first-child {
+  display: inline-block;
+  animation: provisional-spin 1.6s linear infinite;
+}
