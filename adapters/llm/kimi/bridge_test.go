@@ -485,7 +485,7 @@ func TestBridge_RunEmitsProgressPerToolStep(t *testing.T) {
 	}
 }
 
-func TestBridge_ChannelTypeToolEmitsRequestAndReturnsResponse(t *testing.T) {
+func TestBridge_CallActorToolEmitsRequestAndReturnsResponse(t *testing.T) {
 	cfg := mustConfig(t)
 	cfg.ChannelContext = kimi.ChannelContext{
 		Actors: []kimi.ActorInfo{
@@ -612,7 +612,7 @@ func TestBridge_ChannelTypeToolEmitsRequestAndReturnsResponse(t *testing.T) {
 	}
 }
 
-func TestBridge_ChannelTypeToolTimeoutReturnsErrorResult(t *testing.T) {
+func TestBridge_CallActorToolTimeoutReturnsErrorResult(t *testing.T) {
 	cfg := mustConfig(t)
 	cfg.ChannelContext = kimi.ChannelContext{
 		Actors: []kimi.ActorInfo{
@@ -669,7 +669,7 @@ func TestBridge_ChannelTypeToolTimeoutReturnsErrorResult(t *testing.T) {
 	}
 }
 
-func TestBridge_ChannelTypeToolTerminalFailureReturnsErrorResult(t *testing.T) {
+func TestBridge_CallActorToolTerminalFailureReturnsErrorResult(t *testing.T) {
 	cfg := mustConfig(t)
 	cfg.ChannelContext = kimi.ChannelContext{
 		Actors: []kimi.ActorInfo{

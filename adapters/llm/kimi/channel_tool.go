@@ -35,81 +35,6 @@ type toolResponse struct {
 	trigger TriggerPayload
 }
 
-// ChannelTypeTool exposes one channel-local request type as a go-kimi
-// function-calling tool.
-type ChannelTypeTool struct {
-	typeName       string
-	handlerActorID string
-	description    string
-	payloadSchema  json.RawMessage
-	timeout        time.Duration
-	bridge         *Bridge
-}
-
-var _ gokimitools.Tool = (*ChannelTypeTool)(nil)
-
-// Name returns the LLM-tool-facing identifier — a sanitized form of the
-// channel type name. Anthropic / OpenAI function-calling APIs require
-// tool names matching `^[a-zA-Z0-9_-]+$`, which rejects the canonical
-// envelope.type form (e.g. "xhs.publish" — the dot is illegal). We
-// substitute `.` → `_` (e.g. "xhs.publish" → "xhs_publish") and keep
-// the original typeName for the actual envelope.type when Execute
-// emits the envelope downstream.
-func (t *ChannelTypeTool) Name() string { return sanitizeToolName(t.typeName) }
-
-// CanonicalType returns the original envelope.type for this tool. The
-// LLM never sees this form (Name() exposes the sanitized variant), but
-// the bridge uses it when constructing the outbound envelope.
-func (t *ChannelTypeTool) CanonicalType() string { return strings.TrimSpace(t.typeName) }
-
-// sanitizeToolName converts a channel type name into a form acceptable
-// to the Anthropic / OpenAI function-calling tool-name regex. Idempotent
-// for already-sanitized inputs.
-func sanitizeToolName(typeName string) string {
-	typeName = strings.TrimSpace(typeName)
-	if typeName == "" {
-		return ""
-	}
-	// Replace `.` (the only character canonical envelope.type uses that
-	// fails the regex) with `_`. Any other illegal character introduced
-	// by future type names should be added here as a single source of
-	// truth — sanitizeToolName is the only producer of LLM-facing
-	// tool ids.
-	return strings.ReplaceAll(typeName, ".", "_")
-}
-
-func (t *ChannelTypeTool) Description() string {
-	if t == nil {
-		return ""
-	}
-	if desc := strings.TrimSpace(t.description); desc != "" {
-		return desc
-	}
-	return fmt.Sprintf("Channel request tool %s. Emits a kind=request envelope to %s and waits for a kind=response.", t.Name(), t.handlerActorID)
-}
-
-func (t *ChannelTypeTool) ParameterSchema() json.RawMessage {
-	if t == nil {
-		return cloneRawJSON(genericObjectSchema)
-	}
-	return validRawJSONOrDefault(t.payloadSchema, genericObjectSchema)
-}
-
-func (t *ChannelTypeTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
-	if t == nil || t.bridge == nil || t.Name() == "" {
-		return channelToolErrorResult("", "channel tool is not configured"), nil
-	}
-	payload, err := normalizeToolPayload(params)
-	if err != nil {
-		return channelToolErrorResult(t.Name(), err.Error()), nil
-	}
-	runtime, ok := ctx.Value(channelToolRuntimeKey{}).(channelToolRuntime)
-	if !ok || runtime.ipc == nil {
-		return channelToolErrorResult(t.Name(), "channel tool called outside a bridge turn"), nil
-	}
-	return t.bridge.executeChannelTool(ctx, runtime.ipc, runtime.trigger, t, payload), nil
-}
-
 // channelTools returns the meta-tool surface the LLM sees: a fixed
 // actor-CLI verb set that exploits the envelope
 // protocol's uniformity instead of fanning out one tool per
@@ -170,33 +95,9 @@ func (b *Bridge) routeTriggers(ctx context.Context, ipc IPCFacade, in <-chan Tri
 	return out
 }
 
-// executeChannelTool is retained as a thin wrapper around
-// executeChannelRequest so the legacy ChannelTypeTool path (still used
-// by tests + any external embedder that constructs a *ChannelTypeTool
-// directly) keeps working with the new generic implementation.
-func (b *Bridge) executeChannelTool(
-	ctx context.Context,
-	ipc IPCFacade,
-	trigger TriggerPayload,
-	tool *ChannelTypeTool,
-	payload json.RawMessage,
-) types.ToolResult {
-	timeout := tool.timeout
-	if timeout <= 0 {
-		timeout = channelToolDefaultTimeout
-	}
-	return b.executeChannelRequest(ctx, ipc, trigger, channelRequestSpec{
-		ToolName:       tool.Name(),
-		EnvelopeType:   tool.CanonicalType(),
-		HandlerActorID: tool.handlerActorID,
-		Payload:        payload,
-		Timeout:        timeout,
-	})
-}
-
 // executeChannelRequest is the generic envelope-dispatch path the
-// meta tools (call_actor) and the legacy per-type ChannelTypeTool
-// share. Builds the kind=request envelope, registers a pending wait
+// meta tools (call_actor) use. Builds the kind=request envelope,
+// registers a pending wait
 // keyed on envelope.id, ships through ipc.WriteEnvelope, and blocks
 // until the matching response arrives (or timeout / ctx cancel).
 //

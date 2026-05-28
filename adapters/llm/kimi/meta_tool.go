@@ -32,9 +32,7 @@ import (
 //                    example, field docs, error catalog, and notes.
 //
 //   call_actor  — emits one kind=request envelope to the named
-//                 (actor_id, type) and waits for the response. The
-//                 wire path is identical to the per-type ChannelTypeTool;
-//                 only the LLM-visible surface changed.
+//                 (actor_id, type) and waits for the response.
 //
 // Spec ref:
 //   - proto-foundation §2.5 Adapter Pattern: all adapters share
@@ -313,10 +311,10 @@ func findType(snapshot ChannelContext, name string) (TypeInfo, bool) {
 	return TypeInfo{}, false
 }
 
-// channelRequestSpec is the bag of fields a single call_actor /
-// (legacy) ChannelTypeTool invocation needs to emit + wait. Lets
-// executeChannelRequest stay generic so both meta tools and any future
-// specialized tool share one wire/response/timeout path.
+// channelRequestSpec is the bag of fields a single call_actor
+// invocation needs to emit + wait. Lets executeChannelRequest stay
+// generic so meta tools and any future specialized tool share one
+// wire/response/timeout path.
 type channelRequestSpec struct {
 	ToolName       string
 	EnvelopeType   string
