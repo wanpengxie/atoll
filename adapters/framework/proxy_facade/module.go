@@ -12,7 +12,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -30,15 +29,6 @@ type CapabilitySet struct {
 	Types            []string                           `json:"types,omitempty"`
 	TypeDeclarations map[string]adapter.TypeDeclaration `json:"type_declarations,omitempty"`
 	MaxPendingMs     int64                              `json:"max_pending_ms,omitempty"`
-}
-
-type transitBody struct {
-	Direction     string          `json:"direction"`
-	RequestID     string          `json:"request_id,omitempty"`
-	ParentID      string          `json:"parent_id,omitempty"`
-	CorrelationID string          `json:"correlation_id,omitempty"`
-	Payload       json.RawMessage `json:"payload,omitempty"`
-	ExpiresAt     int64           `json:"expires_at,omitempty"`
 }
 
 type readinessChangedPayload struct {
@@ -94,8 +84,14 @@ func (m *ProxyFacadeModule) Init(_ context.Context, mctx *adapter.ModuleContext)
 	if mctx == nil {
 		return errors.New("proxy_facade: ModuleContext required")
 	}
-	if mctx.DeviceTransit == nil {
-		return errors.New("proxy_facade: DeviceTransit required")
+	if mctx.ForwardExternalRequest == nil {
+		return errors.New("proxy_facade: ForwardExternalRequest required")
+	}
+	if mctx.CompleteExternalResponse == nil {
+		return errors.New("proxy_facade: CompleteExternalResponse required")
+	}
+	if mctx.UpdateReadiness == nil {
+		return errors.New("proxy_facade: UpdateReadiness required")
 	}
 	m.mctx = mctx
 	return nil
@@ -104,7 +100,7 @@ func (m *ProxyFacadeModule) Init(_ context.Context, mctx *adapter.ModuleContext)
 func (m *ProxyFacadeModule) Shutdown(context.Context) error { return nil }
 
 func (m *ProxyFacadeModule) Handle(ctx context.Context, env *message.Envelope) error {
-	if m.mctx == nil || m.mctx.DeviceTransit == nil {
+	if m.mctx == nil || m.mctx.ForwardExternalRequest == nil {
 		return errors.New("proxy_facade: not initialized")
 	}
 	if env == nil {
@@ -114,25 +110,7 @@ func (m *ProxyFacadeModule) Handle(ctx context.Context, env *message.Envelope) e
 	if err != nil {
 		return fmt.Errorf("proxy_facade: marshal envelope: %w", err)
 	}
-	body := transitBody{
-		Direction:     "to_device",
-		RequestID:     string(env.ID),
-		ParentID:      string(env.ParentID),
-		CorrelationID: string(env.CorrelationID),
-		Payload:       raw,
-	}
-	if env.ExpiresAt != nil {
-		body.ExpiresAt = *env.ExpiresAt
-	}
-	bodyRaw, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("proxy_facade: marshal transit body: %w", err)
-	}
-	_, err = m.mctx.DeviceTransit.Send(ctx, devicetransit.SendFrame{
-		AdapterActorID: m.decl.ActorID,
-		ChannelID:      env.ChannelID,
-		Body:           bodyRaw,
-	})
+	_, err = m.mctx.ForwardExternalRequest(ctx, env, adapter.ExternalRequestPayload(raw))
 	if err != nil {
 		return fmt.Errorf("proxy_facade: send device transit: %w", err)
 	}
@@ -150,28 +128,39 @@ func (m *ProxyFacadeModule) OnExternalCallback(ctx context.Context, payload []by
 	if env.ID == "" {
 		return errors.New("proxy_facade: callback envelope id required")
 	}
-	if env.ChannelID == "" {
-		env.ChannelID = m.mctx.ChannelID
+	if env.Type == "actor.readiness.changed" {
+		return m.updateReadinessFromEvent(ctx, &env)
 	}
-	if env.Sender.ID == "" {
-		env.Sender = message.Sender{Kind: actor.KindTool, ID: m.decl.ActorID}
-	}
-	if env.Type == "actor.readiness.changed" && m.mctx.ActorReadiness != nil {
-		if err := m.updateReadinessFromEvent(ctx, &env); err != nil {
-			return err
-		}
-	}
-	return writeCallbackEnvelope(ctx, m.mctx, &env)
+	_, err := m.mctx.CompleteExternalResponse(ctx, &env)
+	return err
 }
 
 func (m *ProxyFacadeModule) updateReadinessFromEvent(ctx context.Context, env *message.Envelope) error {
+	if env.Type != "actor.readiness.changed" {
+		return fmt.Errorf("proxy_facade: readiness callback type=%s (must be actor.readiness.changed)", env.Type)
+	}
+	if env.Kind != message.KindEvent {
+		return fmt.Errorf("proxy_facade: readiness callback kind=%s (must be event)", env.Kind)
+	}
+	if env.Sender.Kind != actor.KindSystem || env.Sender.ID != actor.SystemActorID {
+		return fmt.Errorf("proxy_facade: readiness sender mismatch: sender=(%s,%s)", env.Sender.Kind, env.Sender.ID)
+	}
+	if env.ChannelID == "" {
+		return errors.New("proxy_facade: readiness channel_id required")
+	}
+	if env.ChannelID != m.mctx.ChannelID {
+		return fmt.Errorf("proxy_facade: readiness channel mismatch: event=%s manager=%s", env.ChannelID, m.mctx.ChannelID)
+	}
 	var payload readinessChangedPayload
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
 		return fmt.Errorf("proxy_facade: decode readiness event: %w", err)
 	}
 	actorID := payload.ActorID
 	if actorID == "" {
-		actorID = m.decl.ActorID
+		return errors.New("proxy_facade: readiness payload actor_id required")
+	}
+	if actorID != m.decl.ActorID {
+		return fmt.Errorf("proxy_facade: readiness actor mismatch: payload=%s facade=%s", actorID, m.decl.ActorID)
 	}
 	state := actorreg.ReadinessNotReady
 	if payload.Current.Ready {
@@ -181,30 +170,22 @@ func (m *ProxyFacadeModule) updateReadinessFromEvent(ctx context.Context, env *m
 	if checkedAt == 0 {
 		checkedAt = payload.Current.LastStateChangeAt
 	}
+	if checkedAt == 0 && state == actorreg.ReadinessReady {
+		checkedAt = payload.Current.LastReadyAt
+	}
 	if checkedAt == 0 {
 		return errors.New("proxy_facade: readiness event missing changed_at")
 	}
 	if len(payload.Current.Detail) == 0 {
 		payload.Current.Detail = json.RawMessage(`{}`)
 	}
-	if _, err := m.mctx.ActorReadiness.UpdateReadiness(ctx, actorID, actorreg.ReadinessUpdate{
+	if _, err := m.mctx.UpdateReadiness(ctx, actorreg.ReadinessUpdate{
 		State:     state,
 		Reason:    payload.Current.Reason,
 		Detail:    payload.Current.Detail,
 		CheckedAt: checkedAt,
 	}); err != nil {
 		return fmt.Errorf("proxy_facade: update readiness: %w", err)
-	}
-	return nil
-}
-
-func writeCallbackEnvelope(ctx context.Context, mctx *adapter.ModuleContext, env *message.Envelope) error {
-	res, err := mctx.HarnessChain.Write(ctx, env)
-	if err != nil {
-		return err
-	}
-	if !res.Accepted() {
-		return fmt.Errorf("proxy_facade: callback envelope rejected: %s %s", res.RejectReason, res.RejectDetail)
 	}
 	return nil
 }

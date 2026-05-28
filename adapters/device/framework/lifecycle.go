@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
-	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -62,7 +62,7 @@ const (
 //	    },
 //	    AdapterActorID: mctx.AdapterActorID,
 //	    ChannelID:      mctx.ChannelID,
-//	    HarnessChain:   mctx.HarnessChain,
+//	    EmitEvent:      mctx.EmitEvent,
 //	    Clock:          m.now,
 //	})
 //
@@ -97,10 +97,10 @@ type LifecycleTrackerConfig struct {
 	// carry it on envelope.channel_id.
 	ChannelID channel.ID
 
-	// HarnessChain is the post-harness wrapper the adapter received in
-	// ModuleContext.HarnessChain. Used to write each lifecycle event.
-	// Required when EventTypes is non-empty; ignored otherwise.
-	HarnessChain khar.Chain
+	// EmitEvent is the semantic event capability the adapter received
+	// in ModuleContext. Required when EventTypes is non-empty; ignored
+	// otherwise.
+	EmitEvent adapter.EmitEventFunc
 
 	// Clock returns the current wall time. Default time.Now.
 	Clock func() time.Time
@@ -124,13 +124,13 @@ func (c *LifecycleTrackerConfig) applyDefaults() {
 
 // NewLifecycleTracker validates config + returns a tracker starting in
 // DeviceStateUnknown. Returns an error when EventTypes is non-empty
-// but HarnessChain / AdapterActorID / ChannelID is missing — that
+// but EmitEvent / AdapterActorID / ChannelID is missing — that
 // combo would silently swallow events at emit time.
 func NewLifecycleTracker(cfg LifecycleTrackerConfig) (*LifecycleTracker, error) {
 	cfg.applyDefaults()
 	if len(cfg.EventTypes) > 0 {
-		if cfg.HarnessChain == nil {
-			return nil, errors.New("framework.LifecycleTracker: EventTypes non-empty but HarnessChain nil")
+		if cfg.EmitEvent == nil {
+			return nil, errors.New("framework.LifecycleTracker: EventTypes non-empty but EmitEvent nil")
 		}
 		if cfg.AdapterActorID == "" {
 			return nil, errors.New("framework.LifecycleTracker: AdapterActorID empty")
@@ -157,7 +157,7 @@ func (lt *LifecycleTracker) State() DeviceState {
 // Apply consumes one inbound devicetransit.LifecycleFrame: maps the
 // wire event to the target state, transitions if different from the
 // current, and (when EventTypes has an entry for the new state) emits
-// a channel envelope via the configured HarnessChain.
+// a channel envelope via the configured EmitEvent semantic path.
 //
 // Same-state events are no-ops — the adapter doesn't see duplicate
 // `xhs.device.online` events when devicebus emits multiple "connected"
@@ -172,15 +172,24 @@ func (lt *LifecycleTracker) Apply(ctx context.Context, evt devicetransit.Lifecyc
 	}
 
 	lt.mu.Lock()
+	defer lt.mu.Unlock()
 	prev := lt.State()
 	if prev == next {
-		lt.mu.Unlock()
 		return nil
 	}
-	lt.state.Store(next)
-	lt.mu.Unlock()
 
-	return lt.emitTransition(ctx, prev, next, evt)
+	eventType, ok := lt.cfg.EventTypes[next]
+	if !ok || eventType == "" {
+		// Local-only transition: no channel-observable projection exists for
+		// this state, so updating the adapter's in-memory gate is sufficient.
+		lt.state.Store(next)
+		return nil
+	}
+	if err := lt.emitTransition(ctx, eventType, prev, next, evt); err != nil {
+		return err
+	}
+	lt.state.Store(next)
+	return nil
 }
 
 func mapLifecycleEvent(e devicetransit.LifecycleEvent) (DeviceState, bool) {
@@ -197,18 +206,14 @@ func mapLifecycleEvent(e devicetransit.LifecycleEvent) (DeviceState, bool) {
 
 func (lt *LifecycleTracker) emitTransition(
 	ctx context.Context,
+	eventType string,
 	prev, next DeviceState,
 	evt devicetransit.LifecycleFrame,
 ) error {
-	eventType, ok := lt.cfg.EventTypes[next]
-	if !ok || eventType == "" {
-		// State updated but adapter chose not to emit this transition.
-		return nil
-	}
-	if lt.cfg.HarnessChain == nil {
+	if lt.cfg.EmitEvent == nil {
 		// Config validated this at NewLifecycleTracker; defensive
 		// guard in case the field was zeroed post-construction.
-		return errors.New("framework.LifecycleTracker.Apply: HarnessChain nil")
+		return errors.New("framework.LifecycleTracker.Apply: EmitEvent nil")
 	}
 
 	payload := map[string]any{
@@ -227,39 +232,11 @@ func (lt *LifecycleTracker) emitTransition(
 		return fmt.Errorf("framework.LifecycleTracker.Apply: marshal payload: %w", err)
 	}
 
-	now := lt.cfg.Clock().UnixMilli()
-	env := &message.Envelope{
-		ID:        lifecycleEnvelopeID(lt.cfg.AdapterActorID, evt.Event, now),
-		ChannelID: lt.cfg.ChannelID,
-		Type:      eventType,
-		Kind:      message.KindEvent,
-		Sender: message.Sender{
-			Kind: actor.KindTool,
-			ID:   lt.cfg.AdapterActorID,
-		},
-		// Visibility=system: UI default-folds these in the chat view
-		// but still receives them via /ws push, so a real-time device
-		// status indicator updates without polling.
-		// Audience=[SystemActorID]: observability event; no actor needs
-		// to be triggered as a handler. View fanout is what drives UI
-		// subscribers (proto-layer1 §4.1.3).
+	if _, err := lt.cfg.EmitEvent(ctx, eventType, body, adapter.EmitEventOptions{
 		Visibility: message.VisibilitySystem,
 		Audience:   message.Audience{lt.cfg.SystemActorID},
-		Payload:    body,
-		TS:         now,
-		TSReceived: now,
-	}
-	if _, err := lt.cfg.HarnessChain.Write(ctx, env); err != nil {
-		return fmt.Errorf("framework.LifecycleTracker.Apply: harness write %s: %w", eventType, err)
+	}); err != nil {
+		return fmt.Errorf("framework.LifecycleTracker.Apply: emit event %s: %w", eventType, err)
 	}
 	return nil
-}
-
-// lifecycleEnvelopeID derives a deterministic-shape id for lifecycle
-// events. Format: `event:<actor_id>:<lifecycle_kind>:<ts_ms>`. Not
-// cryptographically unique; harness step 8 dedupes if a same-ts event
-// somehow recurs (shouldn't, lifecycle changes are state-machine
-// driven).
-func lifecycleEnvelopeID(actorID actor.ActorID, lifecycleKind devicetransit.LifecycleEvent, tsMs int64) message.ID {
-	return message.ID(fmt.Sprintf("event:%s:%s:%d", actorID, lifecycleKind, tsMs))
 }

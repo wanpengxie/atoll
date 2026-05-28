@@ -56,13 +56,9 @@ type ManagerConfig struct {
 	DeviceTransit devicetransit.DeviceTransit
 
 	// HTTPClient is optional; modules with Binding == BindingRuntimeOutbound
-	// receive it via ModuleContext (extension surface — kernel/adapter
-	// does not currently expose the field; the framework attaches it
-	// behind a typed assertion through ModuleContext.HarnessChain not
-	// applicable here, so adapters call a per-module accessor —
-	// see ModuleContext below). When nil for an runtime_outbound module,
-	// Install logs a warning but still proceeds (tests may provide
-	// their own client via the Init phase).
+	// receive it through adapter-specific setup rather than ModuleContext.
+	// When nil for an runtime_outbound module, Install logs a warning but
+	// still proceeds (tests may provide their own client via Init).
 	HTTPClient *HTTPClient
 
 	// StateStore is the F4 persistent state seam. The framework wires a
@@ -174,6 +170,8 @@ type Manager struct {
 	modules []*boundModule
 	byActor map[actor.ActorID]*boundModule
 	byName  map[string]*boundModule
+
+	readinessMu sync.Mutex
 
 	gcCancel context.CancelFunc
 }
@@ -327,7 +325,7 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		typeRows = append(typeRows, row)
 	}
 	typeRows = append(typeRows, TypeRow{
-		Type:               OrphanCallbackType(decl.Name),
+		Type:               orphanCallbackType(decl.Name),
 		HandlerActorID:     decl.ActorID,
 		HandlerBinding:     decl.Binding,
 		MaxPendingMs:       decl.MaxPendingMs,
@@ -353,10 +351,11 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		m.cfg.ChannelID,
 		m.cfg.HarnessChain,
 	)
-	respond, err := buildRespond(respondConfig{
+	respondCfg := respondConfig{
 		adapterName:    decl.Name,
 		adapterActorID: decl.ActorID,
 		channelID:      m.cfg.ChannelID,
+		declaration:    decl,
 		lookup:         m.cfg.RequestLookup,
 		chain:          m.cfg.HarnessChain,
 		correlation:    corr,
@@ -364,7 +363,8 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		clock:          m.cfg.Clock,
 		logger:         m.cfg.Logger,
 		metrics:        m.cfg.Metrics,
-	})
+	}
+	respond, err := buildRespond(respondCfg)
 	if err != nil {
 		return fmt.Errorf("framework: build respond for %s: %w", decl.Name, err)
 	}
@@ -372,6 +372,7 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		adapterName:    decl.Name,
 		adapterActorID: decl.ActorID,
 		channelID:      m.cfg.ChannelID,
+		declaration:    decl,
 		lookup:         m.cfg.RequestLookup,
 		chain:          m.cfg.HarnessChain,
 		correlation:    corr,
@@ -384,19 +385,27 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		return fmt.Errorf("framework: build synthesized fallback for %s: %w", decl.Name, err)
 	}
 	policy.bindFallback(fallback)
+	completeExternalResponse, err := buildCompleteExternalResponse(respondCfg, decl)
+	if err != nil {
+		return fmt.Errorf("framework: build external response completer for %s: %w", decl.Name, err)
+	}
 
 	mctx := &adapter.ModuleContext{
-		AdapterName:    decl.Name,
-		AdapterActorID: decl.ActorID,
-		ChannelID:      m.cfg.ChannelID,
-		Correlation:    corr,
-		ErrorPolicy:    policy,
-		Respond:        respond,
-		HarnessChain:   m.cfg.HarnessChain,
-		ActorReadiness: readinessUpdaterFromRegistry(m.cfg.ActorRegistry),
-	}
-	if decl.Binding == actor.BindingRuntimeInboundViaRelay {
-		mctx.DeviceTransit = m.cfg.DeviceTransit
+		AdapterName:              decl.Name,
+		AdapterActorID:           decl.ActorID,
+		ChannelID:                m.cfg.ChannelID,
+		Respond:                  respond,
+		Fail:                     buildFail(respond),
+		CompleteExternalResponse: completeExternalResponse,
+		EmitEvent:                buildEmitEvent(respondCfg, decl),
+		ReportOrphanCallback:     buildReportOrphanCallback(respondCfg, decl),
+		ForwardExternalRequest:   m.buildForwardExternalRequest(decl, corr),
+		UpdateReadiness: func(ctx context.Context, update actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
+			return m.updateReadinessForDeclaration(ctx, decl, update, true)
+		},
+		LookupPendingRequest: func(ctx context.Context, requestID adapter.CorrelationKey) (adapter.CorrelationEntry, bool, error) {
+			return corr.Get(ctx, requestID)
+		},
 	}
 
 	if err := mod.Init(ctx, mctx); err != nil {
@@ -495,11 +504,6 @@ func (m *Manager) startReadiness(ctx context.Context, bm *boundModule) {
 	}()
 }
 
-func readinessUpdaterFromRegistry(reg actorreg.Registry) actorreg.ReadinessUpdater {
-	updater, _ := reg.(actorreg.ReadinessUpdater)
-	return updater
-}
-
 func (m *Manager) heartbeatInterval(binding actor.Binding) time.Duration {
 	if m.cfg.HeartbeatInterval > 0 {
 		return m.cfg.HeartbeatInterval
@@ -557,37 +561,104 @@ func (m *Manager) runHeartbeatOnce(ctx context.Context, bm *boundModule, emitEve
 }
 
 func (m *Manager) applyReadiness(ctx context.Context, bm *boundModule, update actorreg.ReadinessUpdate, emitEvent bool) {
-	updater, ok := m.cfg.ActorRegistry.(actorreg.ReadinessUpdater)
-	if !ok {
-		m.cfg.Logger.Warn("framework.readiness.registry_missing",
-			"adapter", bm.declaration.Name,
-			"actor_id", string(bm.declaration.ActorID))
-		return
-	}
-	tr, err := updater.UpdateReadiness(ctx, bm.declaration.ActorID, update)
+	_, err := m.updateReadinessForDeclaration(ctx, bm.declaration, update, emitEvent)
 	if err != nil {
 		m.cfg.Logger.Warn("framework.readiness.update_failed",
 			"adapter", bm.declaration.Name,
 			"actor_id", string(bm.declaration.ActorID),
 			"err", err.Error())
-		return
-	}
-	if emitEvent && tr.Changed {
-		if err := m.emitReadinessChanged(ctx, bm, tr); err != nil {
-			m.cfg.Logger.Warn("framework.readiness.event_failed",
-				"adapter", bm.declaration.Name,
-				"actor_id", string(bm.declaration.ActorID),
-				"err", err.Error())
-		}
 	}
 }
 
-func (m *Manager) emitReadinessChanged(ctx context.Context, bm *boundModule, tr actorreg.ReadinessTransition) error {
-	changedAt := tr.Current.LastStateChangeAt
+func (m *Manager) updateReadinessForDeclaration(
+	ctx context.Context,
+	decl adapter.Declaration,
+	update actorreg.ReadinessUpdate,
+	emitEvent bool,
+) (actorreg.ReadinessTransition, error) {
+	updater, ok := m.cfg.ActorRegistry.(actorreg.ReadinessUpdater)
+	if !ok {
+		return actorreg.ReadinessTransition{}, fmt.Errorf("framework: readiness updater missing")
+	}
+	m.readinessMu.Lock()
+	defer m.readinessMu.Unlock()
+	tr, err := m.computeReadinessTransition(ctx, decl.ActorID, update)
+	if err != nil {
+		return actorreg.ReadinessTransition{}, err
+	}
+	if emitEvent && tr.Changed {
+		if err := m.emitReadinessChangedForDeclaration(ctx, decl, tr, update.CheckedAt); err != nil {
+			return tr, err
+		}
+	}
+	tr, err = updater.UpdateReadiness(ctx, decl.ActorID, update)
+	if err != nil {
+		return actorreg.ReadinessTransition{}, err
+	}
+	return tr, nil
+}
+
+func (m *Manager) computeReadinessTransition(
+	ctx context.Context,
+	actorID actor.ActorID,
+	update actorreg.ReadinessUpdate,
+) (actorreg.ReadinessTransition, error) {
+	rec, ok, err := m.cfg.ActorRegistry.Lookup(ctx, actorID)
+	if err != nil {
+		return actorreg.ReadinessTransition{}, err
+	}
+	if !ok {
+		return actorreg.ReadinessTransition{}, fmt.Errorf("framework: readiness actor %s not found", actorID)
+	}
+	prev := rec.Readiness.Normalize()
+	next := actorreg.Readiness{
+		State:  update.State,
+		Reason: update.Reason,
+		Detail: append(json.RawMessage(nil), update.Detail...),
+	}.Normalize()
+	switch next.State {
+	case actorreg.ReadinessReady, actorreg.ReadinessNotReady, actorreg.ReadinessUnknown:
+	default:
+		return actorreg.ReadinessTransition{}, fmt.Errorf("framework: readiness update %s invalid state %q", actorID, next.State)
+	}
+	if !json.Valid(next.Detail) {
+		return actorreg.ReadinessTransition{}, fmt.Errorf("framework: readiness update %s invalid detail JSON", actorID)
+	}
+	stateReasonChanged := prev.State != next.State || prev.Reason != next.Reason
+	next.LastReadyAt = prev.LastReadyAt
+	if next.State == actorreg.ReadinessReady {
+		next.LastReadyAt = update.CheckedAt
+	}
+	next.LastStateChangeAt = prev.LastStateChangeAt
+	if stateReasonChanged {
+		next.LastStateChangeAt = update.CheckedAt
+	}
+	changed := readinessProjectionChanged(prev, next)
+	return actorreg.ReadinessTransition{Previous: prev, Current: next, Changed: changed}, nil
+}
+
+func readinessProjectionChanged(prev, next actorreg.Readiness) bool {
+	prev = prev.Normalize()
+	next = next.Normalize()
+	return prev.State != next.State ||
+		prev.Reason != next.Reason ||
+		string(prev.Detail) != string(next.Detail) ||
+		prev.LastReadyAt != next.LastReadyAt ||
+		prev.LastStateChangeAt != next.LastStateChangeAt
+}
+
+func (m *Manager) emitReadinessChangedForDeclaration(ctx context.Context, decl adapter.Declaration, tr actorreg.ReadinessTransition, checkedAt int64) error {
+	changedAt := checkedAt
+	if changedAt == 0 {
+		changedAt = tr.Current.LastStateChangeAt
+	}
+	if changedAt == 0 {
+		changedAt = tr.Current.LastReadyAt
+	}
 	if changedAt == 0 {
 		changedAt = m.cfg.Clock().UnixMilli()
 	}
-	return writeEvent(ctx, m.cfg.HarnessChain, eventEnvelope{
+	_, err := writeEvent(ctx, m.cfg.HarnessChain, eventEnvelope{
 		Type:       "actor.readiness.changed",
 		ChannelID:  m.cfg.ChannelID,
 		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
@@ -595,12 +666,13 @@ func (m *Manager) emitReadinessChanged(ctx context.Context, bm *boundModule, tr 
 		Visibility: message.VisibilityPublic,
 		Audience:   message.Audience{actor.SystemActorID},
 		Payload: map[string]any{
-			"actor_id":   string(bm.declaration.ActorID),
+			"actor_id":   string(decl.ActorID),
 			"previous":   readinessPayload(tr.Previous),
 			"current":    readinessPayload(tr.Current),
 			"changed_at": changedAt,
 		},
 	})
+	return err
 }
 
 func readinessDetail(detail map[string]any) json.RawMessage {
@@ -644,6 +716,117 @@ func (m *Manager) installTypeRow(ctx context.Context, row TypeRow) (TypeRow, err
 	return m.cfg.TypeRegistry.Upsert(ctx, row)
 }
 
+type externalRequestTransitBody struct {
+	Direction     string                         `json:"direction"`
+	RequestID     message.ID                     `json:"request_id"`
+	ParentID      message.ID                     `json:"parent_id"`
+	CorrelationID message.ID                     `json:"correlation_id"`
+	ExpiresAt     int64                          `json:"expires_at"`
+	Payload       adapter.ExternalRequestPayload `json:"payload"`
+}
+
+func (m *Manager) buildForwardExternalRequest(decl adapter.Declaration, corr *memoryCorrelationTracker) adapter.ExternalRequestFunc {
+	return func(ctx context.Context, env *message.Envelope, payload adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
+		if env == nil {
+			return adapter.ExternalRequestResult{}, errors.New("framework: ForwardExternalRequest envelope nil")
+		}
+		if m.cfg.DeviceTransit == nil {
+			return adapter.ExternalRequestResult{}, errors.New("framework: ForwardExternalRequest DeviceTransit not wired")
+		}
+		if env.Kind != message.KindRequest {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest envelope kind=%s (must be request)", env.Kind)
+		}
+		if env.ID == "" {
+			return adapter.ExternalRequestResult{}, errors.New("framework: ForwardExternalRequest envelope id required")
+		}
+		if env.ChannelID != m.cfg.ChannelID {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest channel mismatch: envelope=%s manager=%s",
+				env.ChannelID, m.cfg.ChannelID)
+		}
+		if len(env.Audience) == 0 || env.Audience[0] != decl.ActorID {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest audience %v does not target %s",
+				env.Audience, decl.ActorID)
+		}
+		if !declAllowsKind(decl, env.Type, message.KindRequest) {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest type %s is not request-capable for adapter %s",
+				env.Type, decl.Name)
+		}
+		found, ok, err := m.cfg.RequestLookup.FindByID(ctx, env.ID)
+		if err != nil {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest lookup %s: %w", env.ID, err)
+		}
+		if !ok || found == nil {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest request %s not found", env.ID)
+		}
+		if found.Kind != message.KindRequest || found.ChannelID != env.ChannelID || found.Type != env.Type {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest lookup mismatch for %s", env.ID)
+		}
+		if len(found.Audience) == 0 || found.Audience[0] != decl.ActorID {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest lookup audience %v does not target %s",
+				found.Audience, decl.ActorID)
+		}
+		if len(env.Audience) != len(found.Audience) {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest audience mismatch: envelope=%v lookup=%v",
+				env.Audience, found.Audience)
+		}
+		for i := range env.Audience {
+			if env.Audience[i] != found.Audience[i] {
+				return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest audience mismatch: envelope=%v lookup=%v",
+					env.Audience, found.Audience)
+			}
+		}
+		if env.ExpiresAt == nil {
+			return adapter.ExternalRequestResult{}, errors.New("framework: ForwardExternalRequest envelope expires_at required")
+		}
+		if found.ExpiresAt == nil || *found.ExpiresAt != *env.ExpiresAt {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest expires_at mismatch: envelope=%d lookup=%v",
+				*env.ExpiresAt, found.ExpiresAt)
+		}
+		entry, ok, err := corr.Get(ctx, adapter.CorrelationKey(env.ID))
+		if err != nil {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest correlation lookup %s: %w", env.ID, err)
+		}
+		if !ok {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest no pending correlation for %s", env.ID)
+		}
+		if entry.State != adapter.CorrelationPending {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest correlation %s state=%s (must be pending)",
+				env.ID, entry.State)
+		}
+		if entry.ChannelID != m.cfg.ChannelID || entry.AudienceActor != decl.ActorID || entry.ParentID != env.ID {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest correlation owner mismatch for %s", env.ID)
+		}
+		if entry.ExpiresAt != *env.ExpiresAt {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest correlation expires_at mismatch: entry=%d envelope=%d",
+				entry.ExpiresAt, *env.ExpiresAt)
+		}
+		correlationID := found.CorrelationID
+		if correlationID == "" {
+			correlationID = found.ID
+		}
+		body, err := json.Marshal(externalRequestTransitBody{
+			Direction:     "to_device",
+			RequestID:     found.ID,
+			ParentID:      found.ParentID,
+			CorrelationID: correlationID,
+			ExpiresAt:     *found.ExpiresAt,
+			Payload:       append(adapter.ExternalRequestPayload(nil), payload...),
+		})
+		if err != nil {
+			return adapter.ExternalRequestResult{}, fmt.Errorf("framework: ForwardExternalRequest marshal transit body: %w", err)
+		}
+		frameID, err := m.cfg.DeviceTransit.Send(ctx, devicetransit.SendFrame{
+			AdapterActorID: decl.ActorID,
+			ChannelID:      m.cfg.ChannelID,
+			Body:           body,
+		})
+		if err != nil {
+			return adapter.ExternalRequestResult{}, err
+		}
+		return adapter.ExternalRequestResult{FrameID: frameID.String()}, nil
+	}
+}
+
 type installReasoner interface {
 	InstallReason() message.InstallReason
 }
@@ -666,21 +849,54 @@ func (m *Manager) BootRecoverTimers(ctx context.Context) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, bm := range m.modules {
-		if err := bm.correlation.recoverFromStore(ctx); err != nil {
-			return fmt.Errorf("framework: recover %s: %w", bm.declaration.Name, err)
+		if err := m.recoverTimersForBoundModule(ctx, bm); err != nil {
+			return err
 		}
-		pending, err := bm.correlation.ListPending(ctx)
-		if err != nil {
-			return fmt.Errorf("framework: list pending %s: %w", bm.declaration.Name, err)
-		}
-		for _, e := range pending {
-			deadline := time.UnixMilli(e.ExpiresAt)
-			if err := bm.policy.RegisterTimer(ctx, e.RequestID, deadline); err != nil {
-				m.cfg.Logger.Warn("framework.recover.register_timer",
-					"adapter", bm.declaration.Name,
-					"request_id", e.RequestID,
-					"err", err.Error())
-			}
+	}
+	return nil
+}
+
+// RecoverTimersForActor rehydrates and re-arms pending requests for one
+// dynamically installed actor. Composition roots call this immediately
+// after proxy facade Install, before exposing the actor as callable.
+func (m *Manager) RecoverTimersForActor(ctx context.Context, actorID actor.ActorID) error {
+	m.mu.RLock()
+	bm := m.byActor[actorID]
+	m.mu.RUnlock()
+	if bm == nil {
+		return fmt.Errorf("framework: recover actor %s: not installed", actorID)
+	}
+	return m.recoverTimersForBoundModule(ctx, bm)
+}
+
+// DeclarationForActor returns the installed declaration for an actor.
+// Composition roots use it to resume dynamic proxy facade wiring after a
+// partial install without calling Install a second time.
+func (m *Manager) DeclarationForActor(actorID actor.ActorID) (adapter.Declaration, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	bm := m.byActor[actorID]
+	if bm == nil {
+		return adapter.Declaration{}, false
+	}
+	return bm.declaration, true
+}
+
+func (m *Manager) recoverTimersForBoundModule(ctx context.Context, bm *boundModule) error {
+	if err := bm.correlation.recoverFromStore(ctx); err != nil {
+		return fmt.Errorf("framework: recover %s: %w", bm.declaration.Name, err)
+	}
+	pending, err := bm.correlation.ListPending(ctx)
+	if err != nil {
+		return fmt.Errorf("framework: list pending %s: %w", bm.declaration.Name, err)
+	}
+	for _, e := range pending {
+		deadline := time.UnixMilli(e.ExpiresAt)
+		if err := bm.policy.RegisterTimer(ctx, e.RequestID, deadline); err != nil {
+			m.cfg.Logger.Warn("framework.recover.register_timer",
+				"adapter", bm.declaration.Name,
+				"request_id", e.RequestID,
+				"err", err.Error())
 		}
 	}
 	return nil
@@ -710,16 +926,26 @@ func (m *Manager) Dispatch(ctx context.Context, env *message.Envelope) error {
 	}
 
 	if env.Type == "actor.status" {
+		if err := m.reservePendingRequest(ctx, bm, env); err != nil {
+			return err
+		}
 		return m.respondActorStatus(ctx, bm, env)
 	}
 	if env.Type == "actor.describe" {
+		if err := m.reservePendingRequest(ctx, bm, env); err != nil {
+			return err
+		}
 		return m.respondActorDescribe(ctx, bm, env)
 	}
 
 	// Verify the type is one the adapter declared.
-	if !declHasType(bm.declaration, env.Type) {
-		return fmt.Errorf("framework: Dispatch type %s not declared by adapter %s",
+	if !declAllowsKind(bm.declaration, env.Type, message.KindRequest) {
+		return fmt.Errorf("framework: Dispatch type %s is not request-capable for adapter %s",
 			env.Type, bm.declaration.Name)
+	}
+
+	if err := m.reservePendingRequest(ctx, bm, env); err != nil {
+		return err
 	}
 
 	if unavailable, err := m.respondIfNotReady(ctx, bm, env); err != nil {
@@ -732,25 +958,6 @@ func (m *Manager) Dispatch(ctx context.Context, env *message.Envelope) error {
 		"adapter", bm.declaration.Name, "type", env.Type)
 	defer span.End()
 
-	// Reserve correlation entry + register timer.
-	now := m.cfg.Clock()
-	deadline := now.Add(time.Duration(bm.declaration.MaxPendingMs) * time.Millisecond)
-	entry := adapter.CorrelationEntry{
-		RequestID:     adapter.CorrelationKey(env.ID),
-		CorrelationID: env.CorrelationID,
-		ChannelID:     env.ChannelID,
-		AudienceActor: bm.declaration.ActorID,
-		ParentID:      env.ID,
-		EnqueuedAt:    now.UnixMilli(),
-		ExpiresAt:     deadline.UnixMilli(),
-		State:         adapter.CorrelationPending,
-	}
-	if _, err := bm.correlation.Reserve(ctx, entry); err != nil {
-		return fmt.Errorf("framework: dispatch reserve: %w", err)
-	}
-	if err := bm.policy.RegisterTimer(ctx, adapter.CorrelationKey(env.ID), deadline); err != nil {
-		return fmt.Errorf("framework: dispatch register timer: %w", err)
-	}
 	m.cfg.Metrics.IncCounter("adapter.dispatch",
 		"adapter", bm.declaration.Name, "type", env.Type)
 
@@ -762,7 +969,52 @@ func (m *Manager) Dispatch(ctx context.Context, env *message.Envelope) error {
 			"err", err.Error())
 		m.cfg.Metrics.IncCounter("adapter.dispatch.handle_error",
 			"adapter", bm.declaration.Name, "type", env.Type)
-		return err
+		if isTerminalWriteFailure(err) {
+			return err
+		}
+		if entry, ok, getErr := bm.correlation.Get(ctx, adapter.CorrelationKey(env.ID)); getErr != nil {
+			return fmt.Errorf("framework: dispatch handle error correlation lookup failed: %w (handle error: %v)", getErr, err)
+		} else if ok && entry.State != adapter.CorrelationPending {
+			return fmt.Errorf("framework: dispatch handle error after terminal response: %w", err)
+		}
+		if perr := bm.policy.OnExternalError(ctx,
+			adapter.CorrelationKey(env.ID),
+			message.TerminalReceiverInternalError,
+			err.Error(),
+		); perr != nil {
+			return fmt.Errorf("framework: dispatch handle error terminal failed: %w (handle error: %v)", perr, err)
+		}
+		return fmt.Errorf("framework: dispatch handle error terminal emitted: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) reservePendingRequest(ctx context.Context, bm *boundModule, env *message.Envelope) error {
+	now := m.cfg.Clock()
+	deadline := now.Add(time.Duration(bm.declaration.MaxPendingMs) * time.Millisecond)
+	deadlineMs := deadline.UnixMilli()
+	if env.ExpiresAt != nil && *env.ExpiresAt > 0 {
+		deadlineMs = *env.ExpiresAt
+		deadline = time.UnixMilli(deadlineMs)
+	} else {
+		exp := deadlineMs
+		env.ExpiresAt = &exp
+	}
+	entry := adapter.CorrelationEntry{
+		RequestID:     adapter.CorrelationKey(env.ID),
+		CorrelationID: env.CorrelationID,
+		ChannelID:     env.ChannelID,
+		AudienceActor: bm.declaration.ActorID,
+		ParentID:      env.ID,
+		EnqueuedAt:    now.UnixMilli(),
+		ExpiresAt:     deadlineMs,
+		State:         adapter.CorrelationPending,
+	}
+	if _, err := bm.correlation.Reserve(ctx, entry); err != nil {
+		return fmt.Errorf("framework: dispatch reserve: %w", err)
+	}
+	if err := bm.policy.RegisterTimer(ctx, adapter.CorrelationKey(env.ID), deadline); err != nil {
+		return fmt.Errorf("framework: dispatch register timer: %w", err)
 	}
 	return nil
 }
@@ -815,7 +1067,7 @@ func (m *Manager) respondActorStatus(ctx context.Context, bm *boundModule, env *
 	if err != nil {
 		return fmt.Errorf("framework: actor.status marshal: %w", err)
 	}
-	_, err = bm.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), payload, adapter.RespondOptions{
+	_, err = m.respondReservedWithAdapterActor(ctx, bm, env, payload, adapter.RespondOptions{
 		Status: "completed",
 	})
 	return err
@@ -849,7 +1101,7 @@ func (m *Manager) respondActorDescribe(ctx context.Context, bm *boundModule, env
 				"error_code": "unknown_type",
 				"detail":     fmt.Sprintf("actor %s does not declare type %q", decl.ActorID, filter.Type),
 			})
-			_, err := bm.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), payload, adapter.RespondOptions{
+			_, err := m.respondReservedWithAdapterActor(ctx, bm, env, payload, adapter.RespondOptions{
 				Status: "failed",
 				Reason: string(message.TerminalReceiverInternalError),
 			})
@@ -874,7 +1126,7 @@ func (m *Manager) respondActorDescribe(ctx context.Context, bm *boundModule, env
 		if err != nil {
 			return fmt.Errorf("framework: actor.describe type marshal: %w", err)
 		}
-		_, err = bm.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), body, adapter.RespondOptions{
+		_, err = m.respondReservedWithAdapterActor(ctx, bm, env, body, adapter.RespondOptions{
 			Status: "completed",
 		})
 		return err
@@ -891,10 +1143,37 @@ func (m *Manager) respondActorDescribe(ctx context.Context, bm *boundModule, env
 	if err != nil {
 		return fmt.Errorf("framework: actor.describe marshal: %w", err)
 	}
-	_, err = bm.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), body, adapter.RespondOptions{
+	_, err = m.respondReservedWithAdapterActor(ctx, bm, env, body, adapter.RespondOptions{
 		Status: "completed",
 	})
 	return err
+}
+
+func (m *Manager) respondReservedWithAdapterActor(
+	ctx context.Context,
+	bm *boundModule,
+	env *message.Envelope,
+	payload json.RawMessage,
+	opts adapter.RespondOptions,
+) (adapter.RespondResult, error) {
+	return runRespondWithSender(ctx, respondConfig{
+		adapterName:    bm.declaration.Name,
+		adapterActorID: bm.declaration.ActorID,
+		channelID:      m.cfg.ChannelID,
+		declaration:    bm.declaration,
+		lookup:         m.cfg.RequestLookup,
+		chain:          m.cfg.HarnessChain,
+		correlation:    bm.correlation,
+		policy:         bm.policy,
+		clock:          m.cfg.Clock,
+		logger:         m.cfg.Logger,
+		metrics:        m.cfg.Metrics,
+	}, adapter.CorrelationKey(env.ID), payload, opts, message.Sender{
+		Kind: actor.KindTool,
+		ID:   bm.declaration.ActorID,
+	}, terminalValidationMode{
+		allowReservedActorTypes: true,
+	})
 }
 
 func (m *Manager) respondIfNotReady(ctx context.Context, bm *boundModule, env *message.Envelope) (bool, error) {
@@ -947,9 +1226,9 @@ func recoveryHintForReadiness(adapterName, reason string) string {
 }
 
 // runHandle wraps Module.Handle with a panic recover that emits a
-// failed terminal via ErrorPolicy.OnExternalError per L2 §8 F3 panic
-// safety. The terminal carries reason=receiver_internal_error + detail
-// containing the panic message and stack trace.
+// failed terminal through Dispatch's common handle-error path per L2 §8
+// F3 panic safety. The terminal carries reason=receiver_internal_error
+// + detail containing the panic message and stack trace.
 func (m *Manager) runHandle(ctx context.Context, bm *boundModule, env *message.Envelope) (err error) {
 	defer func() {
 		r := recover()
@@ -965,20 +1244,7 @@ func (m *Manager) runHandle(ctx context.Context, bm *boundModule, env *message.E
 			"panic", fmt.Sprint(r))
 		m.cfg.Metrics.IncCounter("adapter.dispatch.handle_panic",
 			"adapter", bm.declaration.Name, "type", env.Type)
-		if perr := bm.policy.OnExternalError(ctx,
-			adapter.CorrelationKey(env.ID),
-			message.TerminalReceiverInternalError,
-			detail,
-		); perr != nil {
-			m.cfg.Logger.Error("framework.dispatch.handle.panic.emit_failed",
-				"adapter", bm.declaration.Name,
-				"request_id", env.ID,
-				"err", perr.Error())
-			err = fmt.Errorf("adapter %s panicked and failed-terminal emit failed: %v / %w",
-				bm.declaration.Name, r, perr)
-			return
-		}
-		err = fmt.Errorf("adapter %s panicked (failed terminal emitted): %v", bm.declaration.Name, r)
+		err = fmt.Errorf("%s", detail)
 	}()
 	return bm.module.Handle(ctx, env)
 }
@@ -1002,7 +1268,7 @@ func (m *Manager) OnExternalCallback(ctx context.Context, adapterName string, pa
 			return fmt.Errorf("framework: callback correlation lookup %s: %w", correlationID, err)
 		} else if !ok {
 			m.cfg.Metrics.IncCounter("adapter.callback.orphan", "adapter", adapterName)
-			return EmitOrphanCallbackEvents(ctx, OrphanCallbackEvent{
+			ev := orphanCallbackEvent{
 				AdapterName:    adapterName,
 				AdapterActorID: bm.declaration.ActorID,
 				ChannelID:      m.cfg.ChannelID,
@@ -1011,13 +1277,161 @@ func (m *Manager) OnExternalCallback(ctx context.Context, adapterName string, pa
 				CorrelationID:  correlationID,
 				Detail:         "correlation lookup miss",
 				Payload:        payload,
-			})
+			}
+			if err := emitOrphanCallbackEvents(ctx, ev); err != nil {
+				return err
+			}
+			return emitCorrelationLostSystemEvent(ctx, m.cfg.HarnessChain, ev)
 		}
 	}
 	return m.runExternalCallback(ctx, bm, adapterName, payload, correlationID)
 }
 
+// OnExternalCallbackFrame routes an inbound callback while preserving the
+// framework-owned transport identity that wrapped the adapter-domain payload.
+func (m *Manager) OnExternalCallbackFrame(ctx context.Context, adapterName string, frame adapter.ExternalCallbackFrame) error {
+	m.mu.RLock()
+	bm, ok := m.byName[adapterName]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("framework: OnExternalCallbackFrame unknown adapter %q", adapterName)
+	}
+	if frame.ChannelID == "" {
+		return errors.New("framework: OnExternalCallbackFrame channel_id required")
+	}
+	if frame.ChannelID != m.cfg.ChannelID {
+		return fmt.Errorf("framework: OnExternalCallbackFrame channel mismatch: frame=%s manager=%s",
+			frame.ChannelID, m.cfg.ChannelID)
+	}
+	if frame.AdapterActorID != "" && frame.AdapterActorID != bm.declaration.ActorID {
+		return fmt.Errorf("framework: OnExternalCallbackFrame actor mismatch: frame=%s adapter=%s",
+			frame.AdapterActorID, bm.declaration.ActorID)
+	}
+	if len(frame.Payload) == 0 {
+		return errors.New("framework: OnExternalCallbackFrame payload required")
+	}
+	payload, isReadiness, err := normalizeExternalCallbackPayload(frame)
+	if err != nil {
+		return err
+	}
+	frame.Payload = payload
+
+	span := m.cfg.Tracer.StartSpan("adapter.callback", "adapter", adapterName)
+	defer span.End()
+	m.cfg.Metrics.IncCounter("adapter.callback", "adapter", adapterName)
+
+	if isReadiness {
+		return m.runExternalCallbackFrame(ctx, bm, adapterName, frame, "")
+	}
+	requestID := frame.RequestID
+	if requestID == "" {
+		err := errors.New("framework: OnExternalCallbackFrame request_id required")
+		return devicetransit.NewAckError(devicetransit.AckRejectedPermanent, "request_id_required", "", err)
+	}
+	payloadCorrelationID := callbackCorrelationID(payload)
+	if payloadCorrelationID != "" && payloadCorrelationID != requestID.String() {
+		err := fmt.Errorf("framework: OnExternalCallbackFrame payload correlation %s does not match outer request_id %s",
+			payloadCorrelationID, requestID)
+		return devicetransit.NewAckError(devicetransit.AckRejectedPermanent, "correlation_mismatch", "", err)
+	}
+	entry, ok, err := bm.correlation.Get(ctx, adapter.CorrelationKey(requestID))
+	if err != nil {
+		return fmt.Errorf("framework: callback correlation lookup %s: %w", requestID, err)
+	}
+	if !ok {
+		correlationID := requestID.String()
+		m.cfg.Metrics.IncCounter("adapter.callback.orphan", "adapter", adapterName)
+		ev := orphanCallbackEvent{
+			AdapterName:    adapterName,
+			AdapterActorID: bm.declaration.ActorID,
+			ChannelID:      m.cfg.ChannelID,
+			Chain:          m.cfg.HarnessChain,
+			Clock:          m.cfg.Clock,
+			CorrelationID:  correlationID,
+			Detail:         "correlation lookup miss",
+			Payload:        payload,
+		}
+		if err := emitOrphanCallbackEvents(ctx, ev); err != nil {
+			return err
+		}
+		return emitCorrelationLostSystemEvent(ctx, m.cfg.HarnessChain, ev)
+	}
+	if entry.ChannelID != m.cfg.ChannelID || entry.AudienceActor != bm.declaration.ActorID || entry.ParentID != requestID {
+		err := fmt.Errorf("framework: OnExternalCallbackFrame correlation owner mismatch for %s", requestID)
+		return devicetransit.NewAckError(devicetransit.AckRejectedPermanent, "correlation_owner_mismatch", "", err)
+	}
+	if entry.State != adapter.CorrelationPending {
+		err := fmt.Errorf("framework: OnExternalCallbackFrame correlation %s state=%s (must be pending)",
+			requestID, entry.State)
+		switch entry.State {
+		case adapter.CorrelationDone:
+			return devicetransit.NewAckError(devicetransit.AckAccepted, "duplicate_terminal", "", err)
+		case adapter.CorrelationExpired:
+			return devicetransit.NewAckError(devicetransit.AckRejectedPermanent, "callback_expired", "", err)
+		default:
+			return devicetransit.NewAckError(devicetransit.AckRejectedPermanent, "callback_closed", "", err)
+		}
+	}
+	expectedCorrelationID := entry.CorrelationID
+	if expectedCorrelationID == "" {
+		expectedCorrelationID = entry.ParentID
+	}
+	if frame.CorrelationID == "" {
+		err := errors.New("framework: OnExternalCallbackFrame correlation_id required")
+		return devicetransit.NewAckError(devicetransit.AckRejectedPermanent, "correlation_id_required", "", err)
+	}
+	if frame.CorrelationID != expectedCorrelationID {
+		err := fmt.Errorf("framework: OnExternalCallbackFrame correlation_id mismatch: frame=%s expected=%s",
+			frame.CorrelationID, expectedCorrelationID)
+		return devicetransit.NewAckError(devicetransit.AckRejectedPermanent, "correlation_id_mismatch", "", err)
+	}
+	if frame.ExpiresAt == 0 {
+		err := errors.New("framework: OnExternalCallbackFrame expires_at required")
+		return devicetransit.NewAckError(devicetransit.AckRejectedPermanent, "expires_at_required", "", err)
+	}
+	if entry.ExpiresAt != frame.ExpiresAt {
+		err := fmt.Errorf("framework: OnExternalCallbackFrame expires_at mismatch: frame=%d entry=%d",
+			frame.ExpiresAt, entry.ExpiresAt)
+		return devicetransit.NewAckError(devicetransit.AckRejectedPermanent, "expires_at_mismatch", "", err)
+	}
+	if m.cfg.Clock().UnixMilli() > frame.ExpiresAt {
+		m.cfg.Metrics.IncCounter("adapter.callback.expired", "adapter", adapterName)
+		ev := orphanCallbackEvent{
+			AdapterName:    adapterName,
+			AdapterActorID: bm.declaration.ActorID,
+			ChannelID:      m.cfg.ChannelID,
+			Chain:          m.cfg.HarnessChain,
+			Clock:          m.cfg.Clock,
+			CorrelationID:  requestID.String(),
+			Detail:         "callback arrived after expires_at",
+			Payload:        payload,
+		}
+		if err := emitOrphanCallbackEvents(ctx, ev); err != nil {
+			return err
+		}
+		err := fmt.Errorf("framework: OnExternalCallbackFrame callback expired: now=%d expires_at=%d",
+			m.cfg.Clock().UnixMilli(), frame.ExpiresAt)
+		return devicetransit.NewAckError(devicetransit.AckRejectedPermanent, "callback_expired", "", err)
+	}
+	return m.runExternalCallbackFrame(ctx, bm, adapterName, frame, requestID.String())
+}
+
 func (m *Manager) runExternalCallback(ctx context.Context, bm *boundModule, adapterName string, payload []byte, correlationID string) (err error) {
+	return m.runExternalCallbackInvoke(ctx, bm, adapterName, correlationID, func() error {
+		return bm.module.OnExternalCallback(ctx, payload)
+	})
+}
+
+func (m *Manager) runExternalCallbackFrame(ctx context.Context, bm *boundModule, adapterName string, frame adapter.ExternalCallbackFrame, correlationID string) error {
+	if aware, ok := bm.module.(adapter.ExternalCallbackFrameAware); ok {
+		return m.runExternalCallbackInvoke(ctx, bm, adapterName, correlationID, func() error {
+			return aware.OnExternalCallbackFrame(ctx, frame)
+		})
+	}
+	return m.runExternalCallback(ctx, bm, adapterName, frame.Payload, correlationID)
+}
+
+func (m *Manager) runExternalCallbackInvoke(ctx context.Context, bm *boundModule, adapterName string, correlationID string, invoke func() error) (err error) {
 	defer func() {
 		r := recover()
 		if r == nil {
@@ -1049,7 +1463,7 @@ func (m *Manager) runExternalCallback(ctx context.Context, bm *boundModule, adap
 		}
 		err = fmt.Errorf("adapter %s callback panicked: %v", adapterName, r)
 	}()
-	return bm.module.OnExternalCallback(ctx, payload)
+	return invoke()
 }
 
 // OnRuntimeEvent fans a runtime lifecycle signal out to every bound
@@ -1128,6 +1542,29 @@ func (m *Manager) dispatchRuntimeEvent(
 		m.runHeartbeatOnce(ctx, bm, true)
 	}
 	return nil
+}
+
+func normalizeExternalCallbackPayload(frame adapter.ExternalCallbackFrame) ([]byte, bool, error) {
+	payload := append([]byte(nil), frame.Payload...)
+	var env message.Envelope
+	if err := json.Unmarshal(payload, &env); err != nil {
+		return payload, false, nil
+	}
+	isEnvelope := env.Kind != "" || env.ID != "" || env.ParentID != "" || env.Sender.ID != ""
+	if !isEnvelope {
+		return payload, false, nil
+	}
+	if env.ChannelID == "" {
+		env.ChannelID = frame.ChannelID
+	} else if env.ChannelID != frame.ChannelID {
+		return nil, false, fmt.Errorf("framework: callback envelope channel mismatch: envelope=%s frame=%s",
+			env.ChannelID, frame.ChannelID)
+	}
+	raw, err := json.Marshal(env)
+	if err != nil {
+		return nil, false, fmt.Errorf("framework: marshal callback envelope: %w", err)
+	}
+	return raw, env.Kind == message.KindEvent && env.Type == "actor.readiness.changed", nil
 }
 
 func callbackCorrelationID(payload []byte) string {
@@ -1306,6 +1743,22 @@ func validateDeclaration(d adapter.Declaration) error {
 func declHasType(d adapter.Declaration, t string) bool {
 	for _, candidate := range d.Types {
 		if candidate == t {
+			return true
+		}
+	}
+	return false
+}
+
+func declAllowsKind(d adapter.Declaration, t string, k message.Kind) bool {
+	if !declHasType(d, t) {
+		return false
+	}
+	td, ok := d.TypeDeclarations[t]
+	if !ok {
+		return d.TypeDeclarations == nil
+	}
+	for _, allowed := range td.AllowedKinds {
+		if allowed == k {
 			return true
 		}
 	}

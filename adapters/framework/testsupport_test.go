@@ -85,15 +85,20 @@ func (r *memoryActorRegistry) UpdateReadiness(_ context.Context, id actor.ActorI
 		Reason: update.Reason,
 		Detail: append(json.RawMessage(nil), update.Detail...),
 	}.Normalize()
-	changed := prev.State != next.State || prev.Reason != next.Reason
+	stateReasonChanged := prev.State != next.State || prev.Reason != next.Reason
 	next.LastReadyAt = prev.LastReadyAt
 	if next.State == actorreg.ReadinessReady {
 		next.LastReadyAt = update.CheckedAt
 	}
 	next.LastStateChangeAt = prev.LastStateChangeAt
-	if changed {
+	if stateReasonChanged {
 		next.LastStateChangeAt = update.CheckedAt
 	}
+	changed := prev.State != next.State ||
+		prev.Reason != next.Reason ||
+		string(prev.Detail) != string(next.Detail) ||
+		prev.LastReadyAt != next.LastReadyAt ||
+		prev.LastStateChangeAt != next.LastStateChangeAt
 	rec.Readiness = next
 	r.rows[id] = rec
 	return actorreg.ReadinessTransition{Previous: prev, Current: next, Changed: changed}, nil

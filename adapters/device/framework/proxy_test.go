@@ -17,36 +17,6 @@ import (
 
 // ---- test fakes ---------------------------------------------------------
 
-type fakeTransit struct {
-	mu      sync.Mutex
-	sent    []devicetransit.SendFrame
-	acks    []devicetransit.AckFrame
-	nextID  string
-	sendErr error
-}
-
-func (f *fakeTransit) Send(_ context.Context, frame devicetransit.SendFrame) (devicetransit.FrameID, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.sendErr != nil {
-		return "", f.sendErr
-	}
-	f.sent = append(f.sent, frame)
-	if f.nextID != "" {
-		id := f.nextID
-		f.nextID = ""
-		return devicetransit.FrameID(id), nil
-	}
-	return "frame-default", nil
-}
-
-func (f *fakeTransit) Ack(_ context.Context, frame devicetransit.AckFrame) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.acks = append(f.acks, frame)
-	return nil
-}
-
 type fakeCorrelation struct {
 	mu         sync.Mutex
 	pending    map[adapter.CorrelationKey]adapter.CorrelationEntry
@@ -160,24 +130,50 @@ func (f *fakePolicy) OnExternalError(_ context.Context, id adapter.CorrelationKe
 	return nil
 }
 
+type forwardCall struct {
+	env     *message.Envelope
+	payload adapter.ExternalRequestPayload
+}
+
+type forwardRecorder struct {
+	mu      sync.Mutex
+	calls   []forwardCall
+	frameID string
+	err     error
+}
+
+func (f *forwardRecorder) fn(_ context.Context, env *message.Envelope, payload adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return adapter.ExternalRequestResult{}, f.err
+	}
+	cp := *env
+	f.calls = append(f.calls, forwardCall{env: &cp, payload: append(adapter.ExternalRequestPayload(nil), payload...)})
+	frameID := f.frameID
+	if frameID == "" {
+		frameID = "frame-default"
+	}
+	return adapter.ExternalRequestResult{FrameID: frameID}, nil
+}
+
 // ---- helpers ------------------------------------------------------------
 
-func buildProxy(t *testing.T) (*DeviceProxy, *fakeTransit, *fakeCorrelation, *fakePolicy) {
+func buildProxy(t *testing.T) (*DeviceProxy, *forwardRecorder, *fakeCorrelation, *fakePolicy) {
 	t.Helper()
-	tr := &fakeTransit{}
+	forward := &forwardRecorder{}
 	cor := newFakeCorrelation()
 	pol := newFakePolicy()
-	p, err := NewDeviceProxy("xhs", "tool:xhs-adapter", channel.ID("channel-1"), DeviceProxyDeps{
-		Transit:     tr,
-		Correlation: cor,
-		Policy:      pol,
+	p, err := NewDeviceProxy("xhs", "tool:xhs", channel.ID("channel-1"), DeviceProxyDeps{
+		Forward:       forward.fn,
+		LookupPending: cor.Get,
 	})
 	if err != nil {
 		t.Fatalf("NewDeviceProxy: %v", err)
 	}
 	p.SetClock(func() time.Time { return time.UnixMilli(1_000_000) })
 	p.SetFrameIDFactory(func() string { return "frame-fixed" })
-	return p, tr, cor, pol
+	return p, forward, cor, pol
 }
 
 func sampleRequestEnv() *message.Envelope {
@@ -189,6 +185,7 @@ func sampleRequestEnv() *message.Envelope {
 		Type:          "xhs.publish",
 		Payload:       []byte(`{"title":"x"}`),
 		CorrelationID: "corr-1",
+		Audience:      message.Audience{"tool:xhs"},
 		TS:            1_000_000,
 	}
 }
@@ -197,7 +194,7 @@ func sampleRequestEnv() *message.Envelope {
 
 func TestNewDeviceProxyValidation(t *testing.T) {
 	deps := DeviceProxyDeps{
-		Transit: &fakeTransit{}, Correlation: newFakeCorrelation(), Policy: newFakePolicy(),
+		Forward: (&forwardRecorder{}).fn,
 	}
 	if _, err := NewDeviceProxy("", "tool:x", "c", deps); err == nil {
 		t.Error("missing adapterName should error")
@@ -209,26 +206,16 @@ func TestNewDeviceProxyValidation(t *testing.T) {
 		t.Error("missing channel id should error")
 	}
 	bad := deps
-	bad.Transit = nil
+	bad.Forward = nil
 	if _, err := NewDeviceProxy("x", "tool:x", "c", bad); err == nil {
-		t.Error("missing transit should error")
-	}
-	bad = deps
-	bad.Correlation = nil
-	if _, err := NewDeviceProxy("x", "tool:x", "c", bad); err == nil {
-		t.Error("missing correlation should error")
-	}
-	bad = deps
-	bad.Policy = nil
-	if _, err := NewDeviceProxy("x", "tool:x", "c", bad); err == nil {
-		t.Error("missing policy should error")
+		t.Error("missing forward should error")
 	}
 }
 
 func TestSendRequestHappyPath(t *testing.T) {
 	ctx := context.Background()
-	p, tr, cor, pol := buildProxy(t)
-	tr.nextID = "frame-from-transit"
+	p, forward, cor, pol := buildProxy(t)
+	forward.frameID = "frame-from-transit"
 
 	env := sampleRequestEnv()
 	deadline := int64(2_000_000)
@@ -241,39 +228,27 @@ func TestSendRequestHappyPath(t *testing.T) {
 	if frameID != "frame-from-transit" {
 		t.Errorf("frameID=%q want frame-from-transit", frameID)
 	}
-	if len(tr.sent) != 1 {
-		t.Fatalf("expected 1 sent frame, got %d", len(tr.sent))
+	if len(forward.calls) != 1 {
+		t.Fatalf("expected 1 forwarded frame, got %d", len(forward.calls))
 	}
-	got := tr.sent[0]
-	if got.ChannelID != channel.ID("channel-1") {
-		t.Errorf("channel mismatch: %q", got.ChannelID)
+	got := forward.calls[0]
+	if got.env.ChannelID != channel.ID("channel-1") {
+		t.Errorf("channel mismatch: %q", got.env.ChannelID)
 	}
-	if got.AdapterActorID != actor.ActorID("tool:xhs-adapter") {
-		t.Errorf("adapter_actor_id mismatch: %q", got.AdapterActorID)
+	if got.env.Audience[0] != actor.ActorID("tool:xhs") {
+		t.Errorf("audience mismatch: %q", got.env.Audience)
 	}
-	var body DeviceTransitBody
-	if err := json.Unmarshal(got.Body, &body); err != nil {
-		t.Fatalf("decode transit body: %v", err)
-	}
-	if body.Direction != DirectionToDevice {
-		t.Errorf("direction mismatch: %q", body.Direction)
-	}
-	if body.RequestID != env.ID {
-		t.Errorf("request id mismatch: %q", body.RequestID)
-	}
-	if body.ExpiresAt != deadline {
-		t.Errorf("expires_at mismatch: %d", body.ExpiresAt)
-	}
-	if string(body.Payload) != `{"cmd":"publish"}` {
-		t.Errorf("payload mismatch: %q", body.Payload)
+	if string(got.payload) != `{"cmd":"publish"}` {
+		t.Errorf("payload mismatch: %q", got.payload)
 	}
 
-	// Correlation reserved + F3 timer armed.
-	if _, ok, _ := cor.Get(ctx, adapter.CorrelationKey(env.ID)); !ok {
-		t.Error("correlation reserve missing")
+	// DeviceProxy must not reserve correlation or arm a second timer;
+	// Manager.Dispatch owns that lifecycle.
+	if _, ok, _ := cor.Get(ctx, adapter.CorrelationKey(env.ID)); ok {
+		t.Error("DeviceProxy must not reserve correlation")
 	}
-	if _, ok := pol.timers[adapter.CorrelationKey(env.ID)]; !ok {
-		t.Error("F3 timer not armed")
+	if _, ok := pol.timers[adapter.CorrelationKey(env.ID)]; ok {
+		t.Error("DeviceProxy must not arm F3 timer")
 	}
 }
 
@@ -299,9 +274,9 @@ func TestSendRequestRejectsBlankIDs(t *testing.T) {
 
 func TestSendRequestTransitFailureRollsBack(t *testing.T) {
 	ctx := context.Background()
-	p, tr, cor, pol := buildProxy(t)
+	p, forward, cor, pol := buildProxy(t)
 	sentinel := errors.New("transit gone")
-	tr.sendErr = sentinel
+	forward.err = sentinel
 
 	env := sampleRequestEnv()
 	_, err := p.SendRequest(ctx, env, []byte(`{}`))
@@ -311,52 +286,11 @@ func TestSendRequestTransitFailureRollsBack(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Errorf("error chain should wrap sentinel: %v", err)
 	}
-	// Timer cancelled + correlation expired so caller can emit terminal.
-	if !pol.cancelled[adapter.CorrelationKey(env.ID)] {
-		t.Error("F3 timer should be cancelled on transit failure")
+	if pol.cancelled[adapter.CorrelationKey(env.ID)] {
+		t.Error("DeviceProxy must not cancel timer on forward failure")
 	}
-	if !cor.expired[adapter.CorrelationKey(env.ID)] {
-		t.Error("correlation should be marked expired on transit failure")
-	}
-}
-
-func TestSendRequestPolicyArmFailureRollsBack(t *testing.T) {
-	ctx := context.Background()
-	p, _, cor, pol := buildProxy(t)
-	pol.armErr = errors.New("arm fail")
-
-	env := sampleRequestEnv()
-	if _, err := p.SendRequest(ctx, env, []byte(`{}`)); err == nil {
-		t.Fatal("expected timer arm error")
-	}
-	if !cor.expired[adapter.CorrelationKey(env.ID)] {
-		t.Error("correlation must be expired when timer arm fails")
-	}
-}
-
-func TestCancelInFlight(t *testing.T) {
-	ctx := context.Background()
-	p, _, cor, pol := buildProxy(t)
-	p.CancelInFlight(ctx, "req-1")
-	if !pol.cancelled["req-1"] {
-		t.Error("timer not cancelled")
-	}
-	if !cor.expired["req-1"] {
-		t.Error("correlation not expired")
-	}
-}
-
-func TestCompleteInFlight(t *testing.T) {
-	ctx := context.Background()
-	p, _, cor, pol := buildProxy(t)
-	if err := p.CompleteInFlight(ctx, "req-1"); err != nil {
-		t.Fatalf("complete: %v", err)
-	}
-	if !pol.cancelled["req-1"] {
-		t.Error("timer not cancelled on complete")
-	}
-	if !cor.done["req-1"] {
-		t.Error("correlation not marked done")
+	if cor.expired[adapter.CorrelationKey(env.ID)] {
+		t.Error("DeviceProxy must not mark correlation expired on forward failure")
 	}
 }
 
@@ -379,6 +313,42 @@ func TestLookupInFlight(t *testing.T) {
 	}
 	if _, ok, _ := p.LookupInFlight(ctx, "ghost"); ok {
 		t.Error("ghost should miss")
+	}
+}
+
+func TestLifecycleTrackerDoesNotStoreStateWhenEventEmitFails(t *testing.T) {
+	sentinel := errors.New("write failed")
+	lt, err := NewLifecycleTracker(LifecycleTrackerConfig{
+		EventTypes:     map[DeviceState]string{DeviceStateOnline: "xhs.device.online"},
+		AdapterActorID: "tool:xhs",
+		ChannelID:      "channel-1",
+		EmitEvent: func(context.Context, string, json.RawMessage, adapter.EmitEventOptions) (message.ID, error) {
+			return "", sentinel
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLifecycleTracker: %v", err)
+	}
+
+	err = lt.Apply(context.Background(), devicetransit.LifecycleFrame{Event: devicetransit.LifecycleConnected})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Apply err=%v want sentinel", err)
+	}
+	if got := lt.State(); got != DeviceStateUnknown {
+		t.Fatalf("state=%s want %s", got, DeviceStateUnknown)
+	}
+}
+
+func TestLifecycleTrackerStoresLocalOnlyTransition(t *testing.T) {
+	lt, err := NewLifecycleTracker(LifecycleTrackerConfig{})
+	if err != nil {
+		t.Fatalf("NewLifecycleTracker: %v", err)
+	}
+	if err := lt.Apply(context.Background(), devicetransit.LifecycleFrame{Event: devicetransit.LifecycleConnected}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := lt.State(); got != DeviceStateOnline {
+		t.Fatalf("state=%s want %s", got, DeviceStateOnline)
 	}
 }
 

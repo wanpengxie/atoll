@@ -9,13 +9,12 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // TestInProcessBindingFullPath covers the embedded binding end-to-end:
 //   - Install verifies actor binding == embedded.
-//   - Module Init receives a mctx with DeviceTransit == nil.
+//   - Module Init receives only semantic write/transport capabilities.
 //   - Handle responds synchronously; framework writes the response.
 func TestInProcessBindingFullPath(t *testing.T) {
 	mod := &stubModule{
@@ -36,12 +35,11 @@ func TestInProcessBindingFullPath(t *testing.T) {
 	mgr, chain, lookup, _, _ := newTestManager(t, mod)
 	defer func() { _ = mgr.Shutdown(context.Background()) }()
 
-	// In-process modules must NOT have DeviceTransit wired.
 	if mod.mctx == nil {
 		t.Fatalf("mctx nil")
 	}
-	if mod.mctx.DeviceTransit != nil {
-		t.Fatalf("embedded mctx.DeviceTransit should be nil, got %T", mod.mctx.DeviceTransit)
+	if mod.mctx.ForwardExternalRequest == nil {
+		t.Fatalf("ForwardExternalRequest not wired")
 	}
 
 	req := newTestRequest("channel:test", "agent:a", "calc.add", "req-ip-1")
@@ -62,10 +60,9 @@ func TestInProcessBindingFullPath(t *testing.T) {
 }
 
 // TestViaServerTransitBindingFullPath covers runtime_inbound_via_relay:
-//   - Install verifies actor binding == runtime_inbound_via_relay + DeviceTransit injected.
-//   - Module Init receives a mctx with DeviceTransit != nil.
-//   - Handle calls DeviceTransit.Send (the daemon-transit seam) — not the
-//     external HTTP API.
+//   - Install verifies actor binding == runtime_inbound_via_relay + DeviceTransit available to framework.
+//   - Module Init receives ForwardExternalRequest, not raw DeviceTransit.
+//   - Handle calls ForwardExternalRequest.
 //   - Module eventually responds (via simulated OnExternalCallback path).
 func TestViaServerTransitBindingFullPath(t *testing.T) {
 	transit := &recordingTransit{}
@@ -77,7 +74,6 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 		ID: "tool:xhs", Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay,
 	})
 
-	var seenFrame *devicetransit.SendFrame
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "xhs",
@@ -87,16 +83,10 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 			MaxPendingMs: 5_000,
 		},
 		handle: func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
-			if mctx.DeviceTransit == nil {
-				t.Fatalf("runtime_inbound_via_relay mctx.DeviceTransit nil")
+			if mctx.ForwardExternalRequest == nil {
+				t.Fatalf("runtime_inbound_via_relay ForwardExternalRequest nil")
 			}
-			frame := devicetransit.SendFrame{
-				ChannelID:      mctx.ChannelID,
-				AdapterActorID: mctx.AdapterActorID,
-				Body:           env.Payload,
-			}
-			seenFrame = &frame
-			_, err := mctx.DeviceTransit.Send(ctx, frame)
+			_, err := mctx.ForwardExternalRequest(ctx, env, adapter.ExternalRequestPayload(env.Payload))
 			return err
 		},
 	}
@@ -117,9 +107,8 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 	}
 	defer func() { _ = mgr.Shutdown(context.Background()) }()
 
-	// Verify mctx wiring.
-	if mod.mctx.DeviceTransit == nil {
-		t.Fatalf("DeviceTransit not wired into mctx for runtime_inbound_via_relay")
+	if mod.mctx.ForwardExternalRequest == nil {
+		t.Fatalf("ForwardExternalRequest not wired into mctx for runtime_inbound_via_relay")
 	}
 
 	req := newTestRequest("channel:test", "agent:a", "xhs.publish", "req-vst-1")
@@ -128,17 +117,19 @@ func TestViaServerTransitBindingFullPath(t *testing.T) {
 	if err := mgr.Dispatch(context.Background(), req); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
-	if seenFrame == nil {
-		t.Fatalf("expected DeviceTransit.Send to be called")
+	if len(transit.sent) != 1 {
+		t.Fatalf("expected 1 transit.Send call, got %d", len(transit.sent))
 	}
+	seenFrame := transit.sent[0]
 	if seenFrame.AdapterActorID != "tool:xhs" {
 		t.Fatalf("frame.AdapterActorID=%s want tool:xhs", seenFrame.AdapterActorID)
 	}
-	if string(seenFrame.Body) != `{"msg":"hi"}` {
-		t.Fatalf("frame.Body=%s want request payload", seenFrame.Body)
+	var body externalRequestTransitBody
+	if err := json.Unmarshal(seenFrame.Body, &body); err != nil {
+		t.Fatalf("decode frame.Body: %v", err)
 	}
-	if len(transit.sent) != 1 {
-		t.Fatalf("expected 1 transit.Send call, got %d", len(transit.sent))
+	if body.Direction != "to_device" || body.RequestID != req.ID || string(body.Payload) != `{"msg":"hi"}` {
+		t.Fatalf("frame.Body=%+v want framework-stamped request payload", body)
 	}
 	// IMPORTANT: runtime_inbound_via_relay Handle must NOT write to harness
 	// directly — the response comes back via OnExternalCallback later.
@@ -189,20 +180,26 @@ func TestOutboundHTTPBindingMCtxShape(t *testing.T) {
 	if mod.mctx == nil {
 		t.Fatalf("mctx nil")
 	}
-	if mod.mctx.DeviceTransit != nil {
-		t.Fatalf("runtime_outbound should not receive DeviceTransit")
-	}
-	if mod.mctx.HarnessChain == nil {
-		t.Fatalf("HarnessChain not wired")
-	}
 	if mod.mctx.Respond == nil {
 		t.Fatalf("Respond not wired")
 	}
-	if mod.mctx.Correlation == nil {
-		t.Fatalf("Correlation not wired")
+	if mod.mctx.Fail == nil {
+		t.Fatalf("Fail not wired")
 	}
-	if mod.mctx.ErrorPolicy == nil {
-		t.Fatalf("ErrorPolicy not wired")
+	if mod.mctx.EmitEvent == nil {
+		t.Fatalf("EmitEvent not wired")
+	}
+	if mod.mctx.CompleteExternalResponse == nil {
+		t.Fatalf("CompleteExternalResponse not wired")
+	}
+	if mod.mctx.ForwardExternalRequest == nil {
+		t.Fatalf("ForwardExternalRequest not wired")
+	}
+	if mod.mctx.UpdateReadiness == nil {
+		t.Fatalf("UpdateReadiness not wired")
+	}
+	if mod.mctx.LookupPendingRequest == nil {
+		t.Fatalf("LookupPendingRequest not wired")
 	}
 }
 

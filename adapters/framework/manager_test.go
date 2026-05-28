@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,6 +28,7 @@ type stubModule struct {
 	initErr    error
 	handle     func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error
 	onCallback func(ctx context.Context, payload []byte, mctx *adapter.ModuleContext) error
+	onFrame    func(ctx context.Context, frame adapter.ExternalCallbackFrame, mctx *adapter.ModuleContext) error
 	shutdown   func() error
 }
 
@@ -59,6 +61,13 @@ func (m *stubModule) OnExternalCallback(ctx context.Context, payload []byte) err
 		return m.onCallback(ctx, payload, m.mctx)
 	}
 	return nil
+}
+
+func (m *stubModule) OnExternalCallbackFrame(ctx context.Context, frame adapter.ExternalCallbackFrame) error {
+	if m.onFrame != nil {
+		return m.onFrame(ctx, frame, m.mctx)
+	}
+	return m.OnExternalCallback(ctx, frame.Payload)
 }
 
 type heartbeatModule struct {
@@ -148,15 +157,33 @@ func TestManagerInstallSeedsTypeRegistry(t *testing.T) {
 	if _, ok, _ := registry.Lookup(context.Background(), "feishu.chat.create"); !ok {
 		t.Fatalf("type_registry missing feishu.chat.create")
 	}
-	orphan, ok, err := registry.Lookup(context.Background(), OrphanCallbackType("feishu"))
+	orphan, ok, err := registry.Lookup(context.Background(), orphanCallbackType("feishu"))
 	if err != nil {
 		t.Fatalf("lookup orphan callback type: %v", err)
 	}
 	if !ok {
-		t.Fatalf("type_registry missing %s", OrphanCallbackType("feishu"))
+		t.Fatalf("type_registry missing %s", orphanCallbackType("feishu"))
 	}
 	if len(orphan.AllowedKinds) != 1 || orphan.AllowedKinds[0] != message.KindEvent {
 		t.Fatalf("orphan callback allowed kinds=%v want [event]", orphan.AllowedKinds)
+	}
+}
+
+func TestEmitEventRejectsFrameworkOwnedOrphanCallbackType(t *testing.T) {
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu-adapter",
+			Types:        []string{"feishu.chat.send"},
+			Binding:      actor.BindingRuntimeOutbound,
+			MaxPendingMs: 30_000,
+		},
+	}
+	_, _, _, _, _ = newTestManager(t, mod)
+
+	_, err := mod.mctx.EmitEvent(context.Background(), orphanCallbackType("feishu"), json.RawMessage(`{}`), adapter.EmitEventOptions{})
+	if err == nil || !strings.Contains(err.Error(), "ReportOrphanCallback") {
+		t.Fatalf("EmitEvent orphan callback should be rejected with ReportOrphanCallback guidance, got %v", err)
 	}
 }
 
@@ -284,6 +311,47 @@ func TestManagerInstallHeartbeatUpdatesReadinessAndEmitsTransition(t *testing.T)
 	}
 }
 
+func TestReadinessDetailChangeRequiresAcceptedEventBeforeProjection(t *testing.T) {
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu-adapter",
+			Types:        []string{"feishu.chat.send"},
+			Binding:      actor.BindingRuntimeOutbound,
+			MaxPendingMs: 30_000,
+		},
+	}
+	_, chain, _, registry, _ := newTestManager(t, mod)
+	if _, err := registry.UpdateReadiness(context.Background(), "tool:feishu-adapter", actorreg.ReadinessUpdate{
+		State:     actorreg.ReadinessReady,
+		Reason:    "ok",
+		Detail:    json.RawMessage(`{"probe":"old"}`),
+		CheckedAt: 1_000,
+	}); err != nil {
+		t.Fatalf("seed readiness: %v", err)
+	}
+	chain.errs = []error{errors.New("write failed")}
+
+	if _, err := mod.mctx.UpdateReadiness(context.Background(), actorreg.ReadinessUpdate{
+		State:     actorreg.ReadinessReady,
+		Reason:    "ok",
+		Detail:    json.RawMessage(`{"probe":"new"}`),
+		CheckedAt: 2_000,
+	}); err == nil {
+		t.Fatal("UpdateReadiness should fail when readiness event write fails")
+	}
+	rec, ok, err := registry.Lookup(context.Background(), "tool:feishu-adapter")
+	if err != nil || !ok {
+		t.Fatalf("lookup actor ok=%v err=%v", ok, err)
+	}
+	if string(rec.Readiness.Detail) != `{"probe":"old"}` || rec.Readiness.LastReadyAt != 1_000 {
+		t.Fatalf("readiness projection changed despite event failure: %+v", rec.Readiness)
+	}
+	if written := chain.Written(); len(written) != 1 || written[0].Type != "actor.readiness.changed" {
+		t.Fatalf("written=%d want failed readiness event attempt", len(written))
+	}
+}
+
 func TestManagerInstallDoesNotPublishTypeRowsWhenInitFails(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
@@ -321,7 +389,7 @@ func TestManagerInstallDoesNotPublishTypeRowsWhenInitFails(t *testing.T) {
 	if _, ok, err := types.Lookup(context.Background(), "feishu.chat.send"); err != nil || ok {
 		t.Fatalf("type row after failed init ok=%v err=%v", ok, err)
 	}
-	if _, ok, err := types.Lookup(context.Background(), OrphanCallbackType("feishu")); err != nil || ok {
+	if _, ok, err := types.Lookup(context.Background(), orphanCallbackType("feishu")); err != nil || ok {
 		t.Fatalf("orphan type row after failed init ok=%v err=%v", ok, err)
 	}
 }
@@ -512,9 +580,8 @@ func TestManagerInstallAcceptsTransitWhenWired(t *testing.T) {
 	if err := mgr.Install(context.Background(), []adapter.Module{mod}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	// ModuleContext.DeviceTransit must be wired.
-	if mod.mctx == nil || mod.mctx.DeviceTransit == nil {
-		t.Fatalf("DeviceTransit not wired in mctx")
+	if mod.mctx == nil || mod.mctx.ForwardExternalRequest == nil {
+		t.Fatalf("ForwardExternalRequest not wired in mctx")
 	}
 }
 
@@ -579,6 +646,64 @@ func TestManagerDispatchHandlesRequestAndRespond(t *testing.T) {
 	}
 	if payload["message_id"] != "feishu-12345" {
 		t.Fatalf("payload.message_id=%v want feishu-12345", payload["message_id"])
+	}
+}
+
+func TestManagerRespondRejectsUnownedOrNonResponseCapableParent(t *testing.T) {
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu-adapter",
+			Types:        []string{"feishu.chat.send", "feishu.event"},
+			Binding:      actor.BindingRuntimeOutbound,
+			MaxPendingMs: 30_000,
+			TypeDeclarations: map[string]adapter.TypeDeclaration{
+				"feishu.chat.send": {AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse}},
+				"feishu.event":     {AllowedKinds: []message.Kind{message.KindEvent}},
+			},
+		},
+	}
+	mod.handle = func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
+		if _, err := mctx.Respond(ctx, "req-other-actor", json.RawMessage(`{}`), adapter.RespondOptions{Status: "completed"}); err == nil {
+			t.Fatal("Respond must reject a parent request owned by another actor")
+		}
+		if _, err := mctx.Respond(ctx, "req-event-only", json.RawMessage(`{}`), adapter.RespondOptions{Status: "completed"}); err == nil {
+			t.Fatal("Respond must reject non response-capable request type")
+		}
+		_, err := mctx.Respond(ctx, adapter.CorrelationKey(env.ID), json.RawMessage(`{"ok":true}`), adapter.RespondOptions{Status: "completed"})
+		return err
+	}
+	mgr, chain, lookup, _, clock := newTestManager(t, mod)
+
+	other := newTestRequest("channel:test", "agent:author", "feishu.chat.send", "req-other-actor")
+	other.Audience = message.Audience{"tool:other"}
+	lookup.Put(other)
+
+	eventOnly := newTestRequest("channel:test", "agent:author", "feishu.event", "req-event-only")
+	eventOnly.Audience = message.Audience{"tool:feishu-adapter"}
+	lookup.Put(eventOnly)
+	bm := mgr.byName["feishu"]
+	_, err := bm.correlation.Reserve(context.Background(), adapter.CorrelationEntry{
+		RequestID:     "req-event-only",
+		ChannelID:     "channel:test",
+		AudienceActor: "tool:feishu-adapter",
+		ParentID:      "req-event-only",
+		EnqueuedAt:    clock.Now().UnixMilli(),
+		ExpiresAt:     clock.Now().Add(30 * time.Second).UnixMilli(),
+		State:         adapter.CorrelationPending,
+	})
+	if err != nil {
+		t.Fatalf("Reserve event-only: %v", err)
+	}
+
+	req := newTestRequest("channel:test", "agent:author", "feishu.chat.send", "req-owned-ok")
+	lookup.Put(req)
+	if err := mgr.Dispatch(context.Background(), req); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	written := chain.Written()
+	if len(written) != 1 || written[0].ParentID != "req-owned-ok" {
+		t.Fatalf("written=%v want only owned response", written)
 	}
 }
 
@@ -681,7 +806,7 @@ func TestProxyFacadeReservedDescribeStatusUsesFrameworkState(t *testing.T) {
 	readinessEvent, err := json.Marshal(message.Envelope{
 		ID:        "evt-proxy-readiness",
 		ChannelID: "channel:test",
-		Sender:    message.Sender{Kind: actor.KindTool, ID: "tool:kimi"},
+		Sender:    message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
 		Kind:      message.KindEvent,
 		Type:      "actor.readiness.changed",
 		Payload: json.RawMessage(`{
@@ -729,6 +854,59 @@ func TestProxyFacadeReservedDescribeStatusUsesFrameworkState(t *testing.T) {
 	detail, ok := status["detail"].(map[string]any)
 	if !ok || detail["port"] != float64(10086) {
 		t.Fatalf("status detail=%T %v", status["detail"], status["detail"])
+	}
+}
+
+func TestManagerOnExternalCallbackFrameStampsReadinessChannel(t *testing.T) {
+	decl := adapter.Declaration{
+		Name:         "kimi",
+		ActorID:      "tool:kimi",
+		Types:        []string{"kimi.ask"},
+		Binding:      actor.BindingRuntimeInboundViaRelay,
+		MaxPendingMs: 30_000,
+		TypeDeclarations: map[string]adapter.TypeDeclaration{
+			"kimi.ask": {AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse}},
+		},
+	}
+	mod, err := proxyfacade.New(decl)
+	if err != nil {
+		t.Fatalf("proxyfacade.New: %v", err)
+	}
+	mgr, _, _, registry, _ := newTestManager(t, mod, func(cfg *ManagerConfig) {
+		cfg.DeviceTransit = &recordingTransit{}
+	})
+	raw, err := json.Marshal(message.Envelope{
+		ID:     "evt-proxy-readiness",
+		Sender: message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind:   message.KindEvent,
+		Type:   "actor.readiness.changed",
+		Payload: json.RawMessage(`{
+			"actor_id":"tool:kimi",
+			"changed_at":1700000001000,
+			"current":{
+				"ready":false,
+				"reason":"local_unreachable",
+				"detail":{"port":10086},
+				"last_state_change_at":1700000001000
+			}
+		}`),
+	})
+	if err != nil {
+		t.Fatalf("marshal readiness event: %v", err)
+	}
+	if err := mgr.OnExternalCallbackFrame(context.Background(), decl.Name, adapter.ExternalCallbackFrame{
+		ChannelID:      "channel:test",
+		AdapterActorID: decl.ActorID,
+		Payload:        raw,
+	}); err != nil {
+		t.Fatalf("OnExternalCallbackFrame readiness: %v", err)
+	}
+	rec, ok, err := registry.Lookup(context.Background(), "tool:kimi")
+	if err != nil || !ok {
+		t.Fatalf("Lookup proxy actor ok=%v err=%v", ok, err)
+	}
+	if rec.Readiness.State != actorreg.ReadinessNotReady || rec.Readiness.Reason != "local_unreachable" {
+		t.Fatalf("readiness=%+v", rec.Readiness)
 	}
 }
 
@@ -1000,7 +1178,13 @@ func TestManagerTimerEmitsSystemEventAfterPermanentRespondWriteFailure(t *testin
 	if got := metrics.Counter("adapter.policy.timer_terminal_failed", "adapter", "feishu"); got != 1 {
 		t.Fatalf("timer_terminal_failed metric=%d want 1", got)
 	}
-	entry, ok, err := mod.mctx.Correlation.Get(context.Background(), "req-timer-terminal-failed")
+	mgr.mu.RLock()
+	bm := mgr.byName["feishu"]
+	mgr.mu.RUnlock()
+	if bm == nil {
+		t.Fatalf("bound module not found")
+	}
+	entry, ok, err := bm.correlation.Get(context.Background(), "req-timer-terminal-failed")
 	if err != nil {
 		t.Fatalf("correlation get: %v", err)
 	}
@@ -1092,6 +1276,42 @@ func TestCallbackCorrelationIDUsesResponseParentID(t *testing.T) {
 	}
 }
 
+func TestManagerOnExternalCallbackFrameRejectsPayloadIdentityMismatch(t *testing.T) {
+	routed := atomic.Bool{}
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "xhs",
+			ActorID:      "tool:xhs",
+			Types:        []string{"xhs.search"},
+			Binding:      actor.BindingRuntimeInboundViaRelay,
+			MaxPendingMs: 30_000,
+			TypeDeclarations: map[string]adapter.TypeDeclaration{
+				"xhs.search": {AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse}},
+			},
+		},
+		onFrame: func(context.Context, adapter.ExternalCallbackFrame, *adapter.ModuleContext) error {
+			routed.Store(true)
+			return nil
+		},
+	}
+	mgr, _, _, _, _ := newTestManager(t, mod, func(cfg *ManagerConfig) {
+		cfg.DeviceTransit = &recordingTransit{}
+	})
+	err := mgr.OnExternalCallbackFrame(context.Background(), mod.decl.Name, adapter.ExternalCallbackFrame{
+		ChannelID:      "channel:test",
+		AdapterActorID: mod.decl.ActorID,
+		RequestID:      "req-good",
+		CorrelationID:  "req-good",
+		Payload:        json.RawMessage(`{"correlation_id":"req-evil","status":"ok"}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "payload correlation") {
+		t.Fatalf("expected payload identity mismatch, got %v", err)
+	}
+	if routed.Load() {
+		t.Fatal("mismatched callback must not route into module")
+	}
+}
+
 func TestManagerOnExternalCallbackEmitsOrphanEvents(t *testing.T) {
 	var routed atomic.Bool
 	mod := &stubModule{
@@ -1118,7 +1338,7 @@ func TestManagerOnExternalCallbackEmitsOrphanEvents(t *testing.T) {
 	if len(written) != 2 {
 		t.Fatalf("expected orphan callback + system event writes, got %d", len(written))
 	}
-	if written[0].Type != OrphanCallbackType("feishu") || written[0].Kind != message.KindEvent {
+	if written[0].Type != orphanCallbackType("feishu") || written[0].Kind != message.KindEvent {
 		t.Fatalf("first event type/kind=%s/%s", written[0].Type, written[0].Kind)
 	}
 	if written[1].Type != "core.system_event" || written[1].Kind != message.KindEvent {
@@ -1222,6 +1442,495 @@ func TestManagerDeduplicatesResponseFromTerminalDuplicate(t *testing.T) {
 	}
 	if dedupedResult.MessageID != "response:existing" {
 		t.Fatalf("expected PartialMessageID surfaced, got %q", dedupedResult.MessageID)
+	}
+}
+
+func TestManagerTerminalDuplicateCompletesLifecycle(t *testing.T) {
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu-adapter",
+			Types:        []string{"feishu.chat.send"},
+			Binding:      actor.BindingRuntimeOutbound,
+			MaxPendingMs: 30_000,
+		},
+	}
+	mod.handle = func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
+		_, err := mctx.Respond(ctx, adapter.CorrelationKey(env.ID), json.RawMessage(`{}`), adapter.RespondOptions{Status: "completed"})
+		return err
+	}
+	mgr, chain, lookup, _, _ := newTestManager(t, mod)
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
+	chain.results = []harness.WriteResult{{
+		RejectReason:     message.HarnessTerminalDuplicate,
+		PartialMessageID: "response:existing",
+	}}
+
+	req := newTestRequest("channel:test", "agent:a", "feishu.chat.send", "req-dup-lifecycle")
+	lookup.Put(req)
+	if err := mgr.Dispatch(context.Background(), req); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	bm := mgr.byName["feishu"]
+	entry, ok, err := bm.correlation.Get(context.Background(), "req-dup-lifecycle")
+	if err != nil || !ok {
+		t.Fatalf("correlation ok=%v err=%v", ok, err)
+	}
+	if entry.State != adapter.CorrelationDone {
+		t.Fatalf("correlation state=%s want done", entry.State)
+	}
+	bm.policy.mu.Lock()
+	_, timerStillArmed := bm.policy.timers["req-dup-lifecycle"]
+	bm.policy.mu.Unlock()
+	if timerStillArmed {
+		t.Fatal("terminal_duplicate must cancel F3 timer")
+	}
+}
+
+func TestManagerRespondWriteFailureLeavesPendingTimer(t *testing.T) {
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu-adapter",
+			Types:        []string{"feishu.chat.send"},
+			Binding:      actor.BindingRuntimeOutbound,
+			MaxPendingMs: 30_000,
+		},
+	}
+	mod.handle = func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
+		_, err := mctx.Respond(ctx, adapter.CorrelationKey(env.ID), json.RawMessage(`{}`), adapter.RespondOptions{Status: "completed"})
+		return err
+	}
+	mgr, chain, lookup, _, _ := newTestManager(t, mod)
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
+	chain.errs = []error{errors.New("store down")}
+
+	req := newTestRequest("channel:test", "agent:a", "feishu.chat.send", "req-write-fail")
+	lookup.Put(req)
+	if err := mgr.Dispatch(context.Background(), req); err == nil {
+		t.Fatal("Dispatch should surface respond write failure")
+	}
+	bm := mgr.byName["feishu"]
+	entry, ok, err := bm.correlation.Get(context.Background(), "req-write-fail")
+	if err != nil || !ok {
+		t.Fatalf("correlation ok=%v err=%v", ok, err)
+	}
+	if entry.State != adapter.CorrelationPending {
+		t.Fatalf("correlation state=%s want pending", entry.State)
+	}
+	bm.policy.mu.Lock()
+	_, timerStillArmed := bm.policy.timers["req-write-fail"]
+	bm.policy.mu.Unlock()
+	if !timerStillArmed {
+		t.Fatal("write failure must leave F3 timer armed")
+	}
+}
+
+func TestProxyFacadeCallbackCompletesAndCancelsTimer(t *testing.T) {
+	decl, err := proxyfacade.DeclarationFromCapability("tool:kimi", json.RawMessage(`{
+		"name":"kimi",
+		"types":["kimi.ask"],
+		"type_declarations":{"kimi.ask":{"AllowedKinds":["request","response"]}},
+		"max_pending_ms":30000
+	}`))
+	if err != nil {
+		t.Fatalf("DeclarationFromCapability: %v", err)
+	}
+	mod, err := proxyfacade.New(decl)
+	if err != nil {
+		t.Fatalf("proxyfacade.New: %v", err)
+	}
+	mgr, chain, lookup, _, _ := newTestManager(t, mod, func(cfg *ManagerConfig) {
+		cfg.DeviceTransit = &recordingTransit{}
+	})
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
+
+	req := newTestRequest("channel:test", "agent:a", "kimi.ask", "req-proxy-ok")
+	req.Audience = message.Audience{"tool:kimi"}
+	req.CorrelationID = "corr-proxy-ok"
+	lookup.Put(req)
+	if err := mgr.Dispatch(context.Background(), req); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	resp := message.Envelope{
+		ID:            "resp-proxy-ok",
+		ChannelID:     "channel:test",
+		Sender:        message.Sender{Kind: actor.KindTool, ID: "tool:kimi"},
+		Kind:          message.KindResponse,
+		Type:          "kimi.ask",
+		ParentID:      req.ID,
+		CorrelationID: req.CorrelationID,
+		Payload:       json.RawMessage(`{"status":"completed","answer":"ok"}`),
+		Audience:      message.Audience{"agent:a"},
+	}
+	raw, _ := json.Marshal(resp)
+	if err := mgr.OnExternalCallback(context.Background(), decl.Name, raw); err != nil {
+		t.Fatalf("OnExternalCallback: %v", err)
+	}
+	if written := chain.Written(); len(written) != 1 || written[0].ID != "resp-proxy-ok" {
+		t.Fatalf("written=%v want proxy response only", written)
+	}
+	bm := mgr.byName[decl.Name]
+	entry, ok, err := bm.correlation.Get(context.Background(), "req-proxy-ok")
+	if err != nil || !ok {
+		t.Fatalf("correlation ok=%v err=%v", ok, err)
+	}
+	if entry.State != adapter.CorrelationDone {
+		t.Fatalf("correlation state=%s want done", entry.State)
+	}
+	bm.policy.mu.Lock()
+	_, timerStillArmed := bm.policy.timers["req-proxy-ok"]
+	bm.policy.mu.Unlock()
+	if timerStillArmed {
+		t.Fatal("proxy callback completion must cancel F3 timer")
+	}
+}
+
+func TestProxyFacadeForgedCallbackRejected(t *testing.T) {
+	decl, err := proxyfacade.DeclarationFromCapability("tool:kimi", json.RawMessage(`{
+		"name":"kimi",
+		"types":["kimi.ask"],
+		"type_declarations":{"kimi.ask":{"AllowedKinds":["request","response"]}},
+		"max_pending_ms":30000
+	}`))
+	if err != nil {
+		t.Fatalf("DeclarationFromCapability: %v", err)
+	}
+	mod, err := proxyfacade.New(decl)
+	if err != nil {
+		t.Fatalf("proxyfacade.New: %v", err)
+	}
+	mgr, chain, lookup, _, _ := newTestManager(t, mod, func(cfg *ManagerConfig) {
+		cfg.DeviceTransit = &recordingTransit{}
+	})
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
+
+	req := newTestRequest("channel:test", "agent:a", "kimi.ask", "req-proxy-forged")
+	req.Audience = message.Audience{"tool:kimi"}
+	lookup.Put(req)
+	if err := mgr.Dispatch(context.Background(), req); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	forged := message.Envelope{
+		ID:        "resp-proxy-forged",
+		ChannelID: "channel:test",
+		Sender:    message.Sender{Kind: actor.KindTool, ID: "tool:xhs"},
+		Kind:      message.KindResponse,
+		Type:      "kimi.ask",
+		ParentID:  req.ID,
+		Payload:   json.RawMessage(`{"status":"completed"}`),
+		Audience:  message.Audience{"agent:a"},
+	}
+	raw, _ := json.Marshal(forged)
+	if err := mgr.OnExternalCallback(context.Background(), decl.Name, raw); err == nil {
+		t.Fatal("forged sender callback should be rejected")
+	}
+	if written := chain.Written(); len(written) != 0 {
+		t.Fatalf("forged callback must not write, got %d writes", len(written))
+	}
+	bm := mgr.byName[decl.Name]
+	entry, ok, err := bm.correlation.Get(context.Background(), "req-proxy-forged")
+	if err != nil || !ok {
+		t.Fatalf("correlation ok=%v err=%v", ok, err)
+	}
+	if entry.State != adapter.CorrelationPending {
+		t.Fatalf("correlation state=%s want pending", entry.State)
+	}
+}
+
+func TestCompleteExternalResponseRejectsForgedFields(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*message.Envelope)
+	}{
+		{
+			name: "empty_channel",
+			mutate: func(env *message.Envelope) {
+				env.ChannelID = ""
+			},
+		},
+		{
+			name: "wrong_channel",
+			mutate: func(env *message.Envelope) {
+				env.ChannelID = "channel:other"
+			},
+		},
+		{
+			name: "wrong_type",
+			mutate: func(env *message.Envelope) {
+				env.Type = "kimi.other"
+			},
+		},
+		{
+			name: "wrong_parent",
+			mutate: func(env *message.Envelope) {
+				env.ParentID = "req-missing"
+			},
+		},
+		{
+			name: "wrong_audience",
+			mutate: func(env *message.Envelope) {
+				env.Audience = message.Audience{"agent:other"}
+			},
+		},
+		{
+			name: "wrong_correlation",
+			mutate: func(env *message.Envelope) {
+				env.CorrelationID = "corr-other"
+			},
+		},
+		{
+			name: "empty_sender",
+			mutate: func(env *message.Envelope) {
+				env.Sender = message.Sender{}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			decl, err := proxyfacade.DeclarationFromCapability("tool:kimi", json.RawMessage(`{
+				"name":"kimi",
+				"types":["kimi.ask"],
+				"type_declarations":{"kimi.ask":{"AllowedKinds":["request","response"]}},
+				"max_pending_ms":30000
+			}`))
+			if err != nil {
+				t.Fatalf("DeclarationFromCapability: %v", err)
+			}
+			mod, err := proxyfacade.New(decl)
+			if err != nil {
+				t.Fatalf("proxyfacade.New: %v", err)
+			}
+			mgr, chain, lookup, _, _ := newTestManager(t, mod, func(cfg *ManagerConfig) {
+				cfg.DeviceTransit = &recordingTransit{}
+			})
+			defer func() { _ = mgr.Shutdown(context.Background()) }()
+
+			req := newTestRequest("channel:test", "agent:a", "kimi.ask", "req-proxy-"+tc.name)
+			req.Audience = message.Audience{"tool:kimi"}
+			req.CorrelationID = message.ID("corr-proxy-" + tc.name)
+			lookup.Put(req)
+			if err := mgr.Dispatch(context.Background(), req); err != nil {
+				t.Fatalf("Dispatch: %v", err)
+			}
+
+			resp := &message.Envelope{
+				ID:            message.ID("resp-proxy-" + tc.name),
+				ChannelID:     "channel:test",
+				Sender:        message.Sender{Kind: actor.KindTool, ID: "tool:kimi"},
+				Kind:          message.KindResponse,
+				Type:          "kimi.ask",
+				ParentID:      req.ID,
+				CorrelationID: req.CorrelationID,
+				Payload:       json.RawMessage(`{"status":"completed"}`),
+				Audience:      message.Audience{"agent:a"},
+			}
+			tc.mutate(resp)
+			bm := mgr.byName[decl.Name]
+			if _, err := bm.mctx.CompleteExternalResponse(context.Background(), resp); err == nil {
+				t.Fatalf("%s forged response should be rejected", tc.name)
+			}
+			if written := chain.Written(); len(written) != 0 {
+				t.Fatalf("%s forged response must not write, got %d writes", tc.name, len(written))
+			}
+			entry, ok, err := bm.correlation.Get(context.Background(), adapter.CorrelationKey(req.ID))
+			if err != nil || !ok {
+				t.Fatalf("correlation ok=%v err=%v", ok, err)
+			}
+			if entry.State != adapter.CorrelationPending {
+				t.Fatalf("correlation state=%s want pending", entry.State)
+			}
+		})
+	}
+}
+
+func TestForwardExternalRequestRejectsNonPendingRequest(t *testing.T) {
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "xhs",
+			ActorID:      "tool:xhs",
+			Types:        []string{"xhs.search"},
+			Binding:      actor.BindingRuntimeInboundViaRelay,
+			MaxPendingMs: 30_000,
+			TypeDeclarations: map[string]adapter.TypeDeclaration{
+				"xhs.search": {AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse}},
+			},
+		},
+	}
+	transit := &recordingTransit{}
+	_, _, lookup, _, _ := newTestManager(t, mod, func(cfg *ManagerConfig) {
+		cfg.DeviceTransit = transit
+	})
+	exp := int64(1_700_000_030_000)
+	req := newTestRequest("channel:test", "agent:a", "xhs.search", "req-not-pending")
+	req.Audience = message.Audience{"tool:xhs"}
+	req.ExpiresAt = &exp
+	lookup.Put(req)
+
+	if _, err := mod.mctx.ForwardExternalRequest(context.Background(), req, adapter.ExternalRequestPayload(`{}`)); err == nil {
+		t.Fatal("ForwardExternalRequest must reject request without pending correlation")
+	}
+	transit.mu.Lock()
+	sent := len(transit.sent)
+	transit.mu.Unlock()
+	if sent != 0 {
+		t.Fatalf("ForwardExternalRequest sent %d frames for non-pending request", sent)
+	}
+}
+
+func TestForwardExternalRequestStampsTransitBodyFromRequest(t *testing.T) {
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "xhs",
+			ActorID:      "tool:xhs",
+			Types:        []string{"xhs.search"},
+			Binding:      actor.BindingRuntimeInboundViaRelay,
+			MaxPendingMs: 30_000,
+			TypeDeclarations: map[string]adapter.TypeDeclaration{
+				"xhs.search": {AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse}},
+			},
+		},
+		handle: func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
+			_, err := mctx.ForwardExternalRequest(ctx, env, adapter.ExternalRequestPayload(`{"request_id":"evil","correlation_id":"evil","expires_at":1}`))
+			return err
+		},
+	}
+	transit := &recordingTransit{}
+	mgr, _, lookup, _, _ := newTestManager(t, mod, func(cfg *ManagerConfig) {
+		cfg.DeviceTransit = transit
+	})
+	exp := int64(1_700_000_030_000)
+	req := newTestRequest("channel:test", "agent:a", "xhs.search", "req-forward")
+	req.Audience = message.Audience{"tool:xhs"}
+	req.ParentID = "parent-1"
+	req.CorrelationID = "corr-forward"
+	req.ExpiresAt = &exp
+	lookup.Put(req)
+
+	if err := mgr.Dispatch(context.Background(), req); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	transit.mu.Lock()
+	defer transit.mu.Unlock()
+	if len(transit.sent) != 1 {
+		t.Fatalf("sent=%d want 1", len(transit.sent))
+	}
+	var body externalRequestTransitBody
+	if err := json.Unmarshal(transit.sent[0].Body, &body); err != nil {
+		t.Fatalf("decode transit body: %v", err)
+	}
+	if body.Direction != "to_device" || body.RequestID != req.ID || body.ParentID != req.ParentID ||
+		body.CorrelationID != req.CorrelationID || body.ExpiresAt != exp {
+		t.Fatalf("framework-stamped body=%+v request=%+v", body, req)
+	}
+	if string(body.Payload) != `{"request_id":"evil","correlation_id":"evil","expires_at":1}` {
+		t.Fatalf("payload=%s", body.Payload)
+	}
+}
+
+func TestManagerRecoverTimersForActorRearmsDynamicInstallPending(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStateStore()
+	clock := newFixedClock(time.Unix(1_700_000_000, 0))
+	decl, err := proxyfacade.DeclarationFromCapability("tool:kimi", json.RawMessage(`{
+		"name":"kimi",
+		"types":["kimi.ask"],
+		"type_declarations":{"kimi.ask":{"AllowedKinds":["request","response"]}},
+		"max_pending_ms":30000
+	}`))
+	if err != nil {
+		t.Fatalf("DeclarationFromCapability: %v", err)
+	}
+	newRegistry := func(t *testing.T) *memoryActorRegistry {
+		t.Helper()
+		reg := newMemoryActorRegistry()
+		if err := reg.Insert(ctx, actorreg.Record{
+			ID:      "tool:kimi",
+			Kind:    actor.KindTool,
+			Binding: actor.BindingRuntimeInboundViaRelay,
+		}); err != nil {
+			t.Fatalf("Insert actor: %v", err)
+		}
+		return reg
+	}
+
+	mod1, err := proxyfacade.New(decl)
+	if err != nil {
+		t.Fatalf("proxyfacade.New mod1: %v", err)
+	}
+	lookup1 := NewMemoryRequestLookup(nil)
+	mgr1, err := NewManager(ManagerConfig{
+		ChannelID:     "channel:test",
+		ActorRegistry: newRegistry(t),
+		HarnessChain:  newFakeChain(),
+		RequestLookup: lookup1,
+		StateStore:    store,
+		DeviceTransit: &recordingTransit{},
+		Clock:         clock.Now,
+		Logger:        &recordingLogger{},
+		Metrics:       NewMemoryMetrics(),
+		Tracer:        NoopTracer{},
+	})
+	if err != nil {
+		t.Fatalf("NewManager 1: %v", err)
+	}
+	if err := mgr1.Install(ctx, []adapter.Module{mod1}); err != nil {
+		t.Fatalf("Install 1: %v", err)
+	}
+	req := newTestRequest("channel:test", "agent:a", "kimi.ask", "req-recover")
+	req.Audience = message.Audience{"tool:kimi"}
+	lookup1.Put(req)
+	if err := mgr1.Dispatch(ctx, req); err != nil {
+		t.Fatalf("Dispatch 1: %v", err)
+	}
+	if err := mgr1.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown 1: %v", err)
+	}
+
+	mod2, err := proxyfacade.New(decl)
+	if err != nil {
+		t.Fatalf("proxyfacade.New mod2: %v", err)
+	}
+	lookup2 := NewMemoryRequestLookup(map[string]*message.Envelope{"req-recover": req})
+	mgr2, err := NewManager(ManagerConfig{
+		ChannelID:     "channel:test",
+		ActorRegistry: newRegistry(t),
+		HarnessChain:  newFakeChain(),
+		RequestLookup: lookup2,
+		StateStore:    store,
+		DeviceTransit: &recordingTransit{},
+		Clock:         clock.Now,
+		Logger:        &recordingLogger{},
+		Metrics:       NewMemoryMetrics(),
+		Tracer:        NoopTracer{},
+	})
+	if err != nil {
+		t.Fatalf("NewManager 2: %v", err)
+	}
+	if err := mgr2.Install(ctx, []adapter.Module{mod2}); err != nil {
+		t.Fatalf("Install 2: %v", err)
+	}
+	defer func() { _ = mgr2.Shutdown(ctx) }()
+	bm := mgr2.byName[decl.Name]
+	if _, ok, err := bm.correlation.Get(ctx, "req-recover"); err != nil || ok {
+		t.Fatalf("pre-recover correlation ok=%v err=%v", ok, err)
+	}
+	if err := mgr2.RecoverTimersForActor(ctx, "tool:kimi"); err != nil {
+		t.Fatalf("RecoverTimersForActor: %v", err)
+	}
+	entry, ok, err := bm.correlation.Get(ctx, "req-recover")
+	if err != nil || !ok {
+		t.Fatalf("post-recover correlation ok=%v err=%v", ok, err)
+	}
+	if entry.State != adapter.CorrelationPending {
+		t.Fatalf("correlation state=%s want pending", entry.State)
+	}
+	bm.policy.mu.Lock()
+	_, timerArmed := bm.policy.timers["req-recover"]
+	bm.policy.mu.Unlock()
+	if !timerArmed {
+		t.Fatal("RecoverTimersForActor must re-arm pending timer")
 	}
 }
 

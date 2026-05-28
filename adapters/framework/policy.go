@@ -157,9 +157,11 @@ func (p *timerPolicy) OnExternalError(
 }
 
 // fire is the AfterFunc callback. It emits the unanswered_timeout
-// terminal via the framework synthesized fallback path. We swallow most
-// errors so a timer panic cannot poison the rest of the daemon — anything
-// non-trivial is logged.
+// terminal via the framework synthesized fallback path. If terminal
+// writing fails after bounded retries, the policy emits an operational
+// system event and closes the correlation as expired. It does not re-arm
+// indefinitely; repeated terminal attempts here caused retry storms when
+// the underlying write path was unhealthy.
 func (p *timerPolicy) fire(requestID adapter.CorrelationKey) {
 	p.mu.Lock()
 	delete(p.timers, requestID)
@@ -204,12 +206,6 @@ func (p *timerPolicy) fire(requestID adapter.CorrelationKey) {
 			"adapter", p.adapterName, "request_id", requestID.String(), "attempt", attempt, "err", err.Error())
 	}
 	p.metrics.IncCounter("adapter.policy.timer_terminal_failed", "adapter", p.adapterName)
-	if p.correlation != nil {
-		if err := p.correlation.MarkExpired(ctx, requestID); err != nil {
-			p.logger.Error("framework.policy.timer_fire.mark_expired",
-				"adapter", p.adapterName, "request_id", requestID.String(), "err", err.Error())
-		}
-	}
 	if err := emitTimerTerminalFailedEvent(ctx, timerTerminalFailedEvent{
 		AdapterName: p.adapterName,
 		ChannelID:   p.channelID,
@@ -219,6 +215,26 @@ func (p *timerPolicy) fire(requestID adapter.CorrelationKey) {
 		Err:         lastErr,
 	}); err != nil {
 		p.logger.Error("framework.policy.timer_fire.event_failed",
+			"adapter", p.adapterName, "request_id", requestID.String(), "err", err.Error())
+	}
+	if p.correlation == nil {
+		p.logger.Error("framework.policy.timer_fire.expire_no_correlation",
+			"adapter", p.adapterName, "request_id", requestID.String())
+		return
+	}
+	entry, ok, err := p.correlation.Get(ctx, requestID)
+	if err != nil {
+		p.logger.Error("framework.policy.timer_fire.expire_lookup_failed",
+			"adapter", p.adapterName, "request_id", requestID.String(), "err", err.Error())
+		return
+	}
+	if !ok || entry.State != adapter.CorrelationPending {
+		p.logger.Warn("framework.policy.timer_fire.expire_stopped",
+			"adapter", p.adapterName, "request_id", requestID.String(), "state", string(entry.State), "found", ok)
+		return
+	}
+	if err := p.correlation.MarkExpired(ctx, requestID); err != nil {
+		p.logger.Error("framework.policy.timer_fire.expire_failed",
 			"adapter", p.adapterName, "request_id", requestID.String(), "err", err.Error())
 	}
 }

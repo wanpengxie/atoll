@@ -24,14 +24,14 @@ const (
 
 var eventSeq atomic.Uint64
 
-// OrphanCallbackType returns the per-adapter event type used when an external
+// orphanCallbackType returns the per-adapter event type used when an external
 // callback cannot be correlated to a pending request.
-func OrphanCallbackType(adapterName string) string {
+func orphanCallbackType(adapterName string) string {
 	return fmt.Sprintf("adapter.%s.orphan_callback", adapterName)
 }
 
-// OrphanCallbackEvent describes one uncorrelatable external callback.
-type OrphanCallbackEvent struct {
+// orphanCallbackEvent describes one uncorrelatable external callback.
+type orphanCallbackEvent struct {
 	AdapterName    string
 	AdapterActorID actor.ActorID
 	ChannelID      channel.ID
@@ -42,15 +42,13 @@ type OrphanCallbackEvent struct {
 	Payload        []byte
 }
 
-// EmitOrphanCallbackEvents writes the L1 §6.5 observability pair:
-// adapter.<name>.orphan_callback plus core.system_event(kind=correlation_lost).
-// A nil Chain is treated as no-op so lower-level adapter unit tests can omit
-// the harness seam.
-func EmitOrphanCallbackEvents(ctx context.Context, ev OrphanCallbackEvent) error {
+// emitOrphanCallbackEvents writes the L1 §6.5 adapter observability event:
+// adapter.<name>.orphan_callback. Callers that need a system event emit it
+// explicitly after this succeeds.
+func emitOrphanCallbackEvents(ctx context.Context, ev orphanCallbackEvent) error {
 	if ev.Chain == nil {
 		return nil
 	}
-	now := eventNow(ev.Clock)
 	adapterPayload := map[string]any{
 		"kind":           orphanCallbackPayloadKind,
 		"adapter":        ev.AdapterName,
@@ -60,20 +58,29 @@ func EmitOrphanCallbackEvents(ctx context.Context, ev OrphanCallbackEvent) error
 	if len(ev.Payload) > 0 {
 		adapterPayload["payload"] = string(ev.Payload)
 	}
-	if err := writeEvent(ctx, ev.Chain, eventEnvelope{
-		Type:      OrphanCallbackType(ev.AdapterName),
-		ChannelID: ev.ChannelID,
-		Sender:    message.Sender{Kind: actor.KindTool, ID: ev.AdapterActorID},
-		Now:       now,
-		Payload:   adapterPayload,
-	}); err != nil {
+	raw, err := json.Marshal(adapterPayload)
+	if err != nil {
 		return err
 	}
-	return writeEvent(ctx, ev.Chain, eventEnvelope{
+	_, err = writeEvent(ctx, ev.Chain, eventEnvelope{
+		Type:       orphanCallbackType(ev.AdapterName),
+		ChannelID:  ev.ChannelID,
+		Sender:     message.Sender{Kind: actor.KindTool, ID: ev.AdapterActorID},
+		Now:        eventNow(ev.Clock),
+		PayloadRaw: raw,
+	})
+	return err
+}
+
+func emitCorrelationLostSystemEvent(ctx context.Context, chain harness.Chain, ev orphanCallbackEvent) error {
+	if chain == nil {
+		return nil
+	}
+	_, err := writeEvent(ctx, chain, eventEnvelope{
 		Type:      "core.system_event",
 		ChannelID: ev.ChannelID,
 		Sender:    message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
-		Now:       now,
+		Now:       eventNow(ev.Clock),
 		Payload: map[string]any{
 			"severity":       "warn",
 			"kind":           systemEventCorrelationLost,
@@ -82,6 +89,7 @@ func EmitOrphanCallbackEvents(ctx context.Context, ev OrphanCallbackEvent) error
 			"detail":         ev.Detail,
 		},
 	})
+	return err
 }
 
 type timerTerminalFailedEvent struct {
@@ -101,7 +109,7 @@ func emitTimerTerminalFailedEvent(ctx context.Context, ev timerTerminalFailedEve
 	if ev.Err != nil {
 		detail = ev.Err.Error()
 	}
-	return writeEvent(ctx, ev.Chain, eventEnvelope{
+	_, err := writeEvent(ctx, ev.Chain, eventEnvelope{
 		Type:      "core.system_event",
 		ChannelID: ev.ChannelID,
 		Sender:    message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
@@ -114,6 +122,7 @@ func emitTimerTerminalFailedEvent(ctx context.Context, ev timerTerminalFailedEve
 			"detail":     detail,
 		},
 	})
+	return err
 }
 
 type eventEnvelope struct {
@@ -122,14 +131,19 @@ type eventEnvelope struct {
 	Sender     message.Sender
 	Now        int64
 	Payload    map[string]any
+	PayloadRaw json.RawMessage
 	Visibility message.Visibility
 	Audience   message.Audience
 }
 
-func writeEvent(ctx context.Context, chain harness.Chain, ev eventEnvelope) error {
-	body, err := json.Marshal(ev.Payload)
-	if err != nil {
-		return err
+func writeEvent(ctx context.Context, chain harness.Chain, ev eventEnvelope) (message.ID, error) {
+	body := append(json.RawMessage(nil), ev.PayloadRaw...)
+	if len(body) == 0 {
+		var err error
+		body, err = json.Marshal(ev.Payload)
+		if err != nil {
+			return "", err
+		}
 	}
 	hash := sha256.Sum256(body)
 	seq := eventSeq.Add(1)
@@ -146,8 +160,9 @@ func writeEvent(ctx context.Context, chain harness.Chain, ev eventEnvelope) erro
 	// adapter_timer_terminal_failed) now follow §4.1.3 informative
 	// guidance for ops events: visibility=private + audience=[channel
 	// system actor] so they stay out of user view caches.
+	envID := message.ID(fmt.Sprintf("event:%s:%d:%d:%s", ev.Type, ev.Now, seq, hex.EncodeToString(hash[:])[:16]))
 	env := &message.Envelope{
-		ID:         message.ID(fmt.Sprintf("event:%s:%d:%d:%s", ev.Type, ev.Now, seq, hex.EncodeToString(hash[:])[:16])),
+		ID:         envID,
 		TS:         ev.Now,
 		TSReceived: ev.Now,
 		ChannelID:  ev.ChannelID,
@@ -160,12 +175,55 @@ func writeEvent(ctx context.Context, chain harness.Chain, ev eventEnvelope) erro
 	}
 	res, err := chain.Write(ctx, env)
 	if err != nil {
-		return fmt.Errorf("framework: write event %s: %w", ev.Type, err)
+		return "", fmt.Errorf("framework: write event %s: %w", ev.Type, err)
 	}
 	if res.RejectReason != "" {
-		return fmt.Errorf("framework: write event %s rejected: %s (%s)", ev.Type, res.RejectReason, res.RejectDetail)
+		return "", fmt.Errorf("framework: write event %s rejected: %s (%s)", ev.Type, res.RejectReason, res.RejectDetail)
 	}
-	return nil
+	return envID, nil
+}
+
+func buildEmitEvent(cfg respondConfig, decl adapter.Declaration) adapter.EmitEventFunc {
+	return func(ctx context.Context, eventType string, payload json.RawMessage, opts adapter.EmitEventOptions) (message.ID, error) {
+		if eventType == "" {
+			return "", fmt.Errorf("framework: EmitEvent type required")
+		}
+		if eventType == orphanCallbackType(decl.Name) {
+			return "", fmt.Errorf("framework: EmitEvent type %s is framework-owned; use ReportOrphanCallback", eventType)
+		}
+		if !declAllowsKind(decl, eventType, message.KindEvent) {
+			return "", fmt.Errorf("framework: EmitEvent type %s is not event-capable for adapter %s", eventType, decl.Name)
+		}
+		if len(payload) == 0 {
+			payload = json.RawMessage(`{}`)
+		}
+		now := eventNow(cfg.clock)
+		env := eventEnvelope{
+			Type:       eventType,
+			ChannelID:  cfg.channelID,
+			Sender:     message.Sender{Kind: actor.KindTool, ID: cfg.adapterActorID},
+			Now:        now,
+			PayloadRaw: append(json.RawMessage(nil), payload...),
+			Visibility: opts.Visibility,
+			Audience:   opts.Audience,
+		}
+		return writeEvent(ctx, cfg.chain, env)
+	}
+}
+
+func buildReportOrphanCallback(cfg respondConfig, decl adapter.Declaration) adapter.OrphanCallbackFunc {
+	return func(ctx context.Context, report adapter.OrphanCallbackReport) error {
+		return emitOrphanCallbackEvents(ctx, orphanCallbackEvent{
+			AdapterName:    decl.Name,
+			AdapterActorID: decl.ActorID,
+			ChannelID:      cfg.channelID,
+			Chain:          cfg.chain,
+			Clock:          cfg.clock,
+			CorrelationID:  report.CorrelationID,
+			Detail:         report.Detail,
+			Payload:        append([]byte(nil), report.Payload...),
+		})
+	}
 }
 
 func eventNow(clock func() time.Time) int64 {

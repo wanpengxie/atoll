@@ -12,7 +12,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -27,30 +26,26 @@ var ErrDeviceRouteUnavailable = errors.New("framework.DeviceProxy: device actor 
 // by NewDeviceProxy to keep the constructor signature flat + by tests
 // to swap fakes wholesale.
 type DeviceProxyDeps struct {
-	// Transit is the DeviceTransit kernel seam (kernel/devicetransit.DeviceTransit).
-	// Required.
-	Transit devicetransit.DeviceTransit
+	// Forward sends the already accepted request through the
+	// framework-owned external transport path. Required.
+	Forward adapter.ExternalRequestFunc
 
-	// Correlation is the F2 tracker scoped to this adapter. Required.
-	Correlation adapter.CorrelationTracker
-
-	// Policy is the F3 timeout / retry emitter. Required — the proxy
-	// arms a timer on every Send.
-	Policy adapter.ErrorPolicy
+	// LookupPending is optional read-only lifecycle state for callback
+	// decoders.
+	LookupPending adapter.PendingRequestLookupFunc
 }
 
 // DeviceProxy translates one adapter-level request into the
-// kernel/devicetransit outbound frame (carried on the wire as
-// `device_transit.recv`, impl-layer2 §5.3.2) + the per-request
-// bookkeeping (correlation reserve, F3 timer arm). One instance per
+// kernel/devicetransit outbound frame body (carried on the wire as
+// `device_transit.recv`, impl-layer2 §5.3.2). One instance per
 // Module per channel; constructed inside Module.Init after the
 // framework hands over a ModuleContext.
 //
 // The proxy intentionally does NOT call ctx.Respond. The Module owns
 // the response phase — when an inbound `device_transit.send` arrives
 // (§5.3.1), Module decodes the payload + calls Respond with a
-// domain-specific terminal. The proxy holds the "outbound +
-// bookkeeping" half only.
+// domain-specific terminal. Request lifecycle reserve/timer ownership
+// remains in adapters/framework.Manager.Dispatch.
 type DeviceProxy struct {
 	// AdapterName is the adapter identifier (e.g. "xhs"). Echoed into
 	// log / observability events.
@@ -112,14 +107,8 @@ func NewDeviceProxy(
 	if channelID == "" {
 		return nil, errors.New("framework.NewDeviceProxy: channelID is required")
 	}
-	if deps.Transit == nil {
-		return nil, errors.New("framework.NewDeviceProxy: DeviceTransit is required (T3 runtime/transit wires it)")
-	}
-	if deps.Correlation == nil {
-		return nil, errors.New("framework.NewDeviceProxy: CorrelationTracker is required")
-	}
-	if deps.Policy == nil {
-		return nil, errors.New("framework.NewDeviceProxy: ErrorPolicy is required")
+	if deps.Forward == nil {
+		return nil, errors.New("framework.NewDeviceProxy: ForwardExternalRequest is required")
 	}
 	return &DeviceProxy{
 		AdapterName:    adapterName,
@@ -147,15 +136,12 @@ func (p *DeviceProxy) SetFrameIDFactory(factory func() string) {
 }
 
 // SendRequest is the per-request entry point Modules call from Handle.
-// It bundles every runtime_inbound_via_relay invariant the daemon side owes
-// the harness:
+// It bundles every runtime_inbound_via_relay transport invariant:
 //
 //  1. Pre-flight envelope sanity — non-nil + kind=request.
-//  2. Correlation.Reserve so a callback that races the network can
-//     still find the request id.
-//  3. ErrorPolicy.RegisterTimer arms the F3 default timeout fallback;
-//     fires `unanswered_timeout` if the device never responds.
-//  4. DeviceTransit.Send writes the frame onto the daemonbus mux. The
+//  2. Pass only the domain payload to ForwardExternalRequest.
+//  3. ForwardExternalRequest stamps request identity/deadline and writes
+//     the frame onto the daemonbus mux. The
 //     concrete transit (T3 runtime/transit) owns persistence + retry;
 //     the proxy treats Send as fire-and-forget once it returns nil.
 //
@@ -163,10 +149,9 @@ func (p *DeviceProxy) SetFrameIDFactory(factory func() string) {
 // the proxy treats it as opaque bytes. The adapter is responsible for
 // serializing its protocol (e.g. xhs.Command JSON).
 //
-// On any failure path the proxy walks back: cancel the F3 timer if
-// armed, mark the correlation expired if reserved, so the caller can
-// emit a synchronous terminal without leaving the framework with a
-// dangling pending entry.
+// On failure the caller emits a synchronous failed terminal through
+// ModuleContext.Fail; pending/timer state is left for that write-first
+// semantic path to close.
 func (p *DeviceProxy) SendRequest(
 	ctx context.Context,
 	env *message.Envelope,
@@ -183,90 +168,21 @@ func (p *DeviceProxy) SendRequest(
 		return "", errors.New("framework.DeviceProxy.SendRequest: envelope id is required")
 	}
 
-	enqueuedAt := p.now().UnixMilli()
-	deadlineMs := envelopeDeadline(env, enqueuedAt)
-	deadline := time.UnixMilli(deadlineMs)
-
-	entry := adapter.CorrelationEntry{
-		RequestID:     adapter.CorrelationKey(env.ID),
-		CorrelationID: env.CorrelationID,
-		ChannelID:     p.ChannelID,
-		AudienceActor: p.AdapterActorID,
-		ParentID:      env.ID,
-		EnqueuedAt:    enqueuedAt,
-		ExpiresAt:     deadlineMs,
-		State:         adapter.CorrelationPending,
-	}
-	if _, err := p.deps.Correlation.Reserve(ctx, entry); err != nil {
-		return "", fmt.Errorf("framework.DeviceProxy.SendRequest: reserve correlation: %w", err)
-	}
-
-	requestKey := adapter.CorrelationKey(env.ID)
-	if err := p.deps.Policy.RegisterTimer(ctx, requestKey, deadline); err != nil {
-		// Best-effort cleanup: expire the correlation so the framework
-		// observes the abandoned reserve.
-		_ = p.deps.Correlation.MarkExpired(ctx, requestKey)
-		return "", fmt.Errorf("framework.DeviceProxy.SendRequest: arm F3 timer: %w", err)
-	}
-
-	body, err := json.Marshal(DeviceTransitBody{
-		Direction:     DirectionToDevice,
-		RequestID:     env.ID,
-		ParentID:      env.ParentID,
-		CorrelationID: env.CorrelationID,
-		Payload:       append([]byte(nil), wirePayload...), // defensive copy — kernel transit may persist async
-		ExpiresAt:     deadlineMs,
-	})
+	res, err := p.deps.Forward(ctx, env, adapter.ExternalRequestPayload(append([]byte(nil), wirePayload...)))
 	if err != nil {
-		_ = p.deps.Policy.CancelTimer(ctx, requestKey)
-		_ = p.deps.Correlation.MarkExpired(ctx, requestKey)
-		return "", fmt.Errorf("framework.DeviceProxy.SendRequest: marshal transit body: %w", err)
+		return "", fmt.Errorf("framework.DeviceProxy.SendRequest: forward external request: %w", err)
 	}
-	frame := devicetransit.SendFrame{
-		AdapterActorID: p.AdapterActorID,
-		ChannelID:      p.ChannelID,
-		Body:           body,
-	}
-
-	sentFrameID, err := p.deps.Transit.Send(ctx, frame)
-	if err != nil {
-		// Walk back the reserves so caller can emit synchronous terminal.
-		_ = p.deps.Policy.CancelTimer(ctx, requestKey)
-		_ = p.deps.Correlation.MarkExpired(ctx, requestKey)
-		return "", fmt.Errorf("framework.DeviceProxy.SendRequest: transit send: %w", err)
-	}
-	return sentFrameID.String(), nil
-}
-
-// CancelInFlight is the adapter-driven escape hatch. Called when the
-// adapter has decided to short-circuit a pending request (e.g. push
-// failure → emit synchronous terminal). Cancels the F3 timer + marks
-// the correlation expired. Idempotent.
-func (p *DeviceProxy) CancelInFlight(ctx context.Context, requestID string) {
-	key := adapter.CorrelationKey(message.ID(requestID))
-	_ = p.deps.Policy.CancelTimer(ctx, key)
-	_ = p.deps.Correlation.MarkExpired(ctx, key)
-}
-
-// CompleteInFlight is the success-path counterpart. Called by the
-// Module right before emitting ctx.Respond on a recv frame. Cancels the
-// F3 timer + marks correlation done. Idempotent.
-func (p *DeviceProxy) CompleteInFlight(ctx context.Context, requestID string) error {
-	key := adapter.CorrelationKey(message.ID(requestID))
-	if err := p.deps.Policy.CancelTimer(ctx, key); err != nil {
-		return fmt.Errorf("framework.DeviceProxy.CompleteInFlight: cancel timer: %w", err)
-	}
-	if err := p.deps.Correlation.MarkDone(ctx, key); err != nil {
-		return fmt.Errorf("framework.DeviceProxy.CompleteInFlight: mark done: %w", err)
-	}
-	return nil
+	return res.FrameID, nil
 }
 
 // LookupInFlight returns the correlation entry for a recv frame. Useful
 // when the adapter has nothing but a request_id on the wire and needs
 // the original envelope.type / audience to build the response payload.
 func (p *DeviceProxy) LookupInFlight(ctx context.Context, requestID string) (adapter.CorrelationEntry, bool, error) {
-	return p.deps.Correlation.Get(ctx, adapter.CorrelationKey(message.ID(requestID)))
+	if p.deps.LookupPending == nil {
+		return adapter.CorrelationEntry{}, false, nil
+	}
+	return p.deps.LookupPending(ctx, adapter.CorrelationKey(message.ID(requestID)))
 }
 
 // envelopeDeadline picks the deadline (wall-ms) for the F3 timer.

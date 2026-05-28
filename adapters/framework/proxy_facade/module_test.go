@@ -6,31 +6,17 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
-	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-type captureTransit struct {
-	frame devicetransit.SendFrame
-}
-
-func (t *captureTransit) Send(_ context.Context, frame devicetransit.SendFrame) (devicetransit.FrameID, error) {
-	t.frame = frame
-	return "frame-1", nil
-}
-
-func (t *captureTransit) Ack(context.Context, devicetransit.AckFrame) error { return nil }
-
-type captureChain struct {
-	env *message.Envelope
-}
-
-func (c *captureChain) Write(_ context.Context, env *message.Envelope) (khar.WriteResult, error) {
-	c.env = env
-	return khar.WriteResult{MessageID: env.ID, Seq: 1}, nil
+type captureExternal struct {
+	channelID channel.ID
+	actorID   actor.ActorID
+	payload   adapter.ExternalRequestPayload
+	env       *message.Envelope
 }
 
 func TestProxyFacadeHandleSendsEnvelopeViaDeviceTransit(t *testing.T) {
@@ -45,14 +31,23 @@ func TestProxyFacadeHandleSendsEnvelopeViaDeviceTransit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	transit := &captureTransit{}
-	chain := &captureChain{}
+	capture := &captureExternal{}
 	if err := mod.Init(context.Background(), &adapter.ModuleContext{
 		AdapterName:    decl.Name,
 		AdapterActorID: decl.ActorID,
 		ChannelID:      "ch-1",
-		DeviceTransit:  transit,
-		HarnessChain:   chain,
+		CompleteExternalResponse: func(context.Context, *message.Envelope) (adapter.RespondResult, error) {
+			return adapter.RespondResult{}, nil
+		},
+		UpdateReadiness: func(context.Context, actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
+			return actorreg.ReadinessTransition{}, nil
+		},
+		ForwardExternalRequest: func(_ context.Context, env *message.Envelope, payload adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
+			capture.channelID = env.ChannelID
+			capture.actorID = decl.ActorID
+			capture.payload = append(adapter.ExternalRequestPayload(nil), payload...)
+			return adapter.ExternalRequestResult{FrameID: "frame-1"}, nil
+		},
 	}); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -69,18 +64,11 @@ func TestProxyFacadeHandleSendsEnvelopeViaDeviceTransit(t *testing.T) {
 	if err := mod.Handle(context.Background(), env); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if transit.frame.AdapterActorID != "tool:kimi" || transit.frame.ChannelID != channel.ID("ch-1") {
-		t.Fatalf("send frame=%+v", transit.frame)
-	}
-	var body transitBody
-	if err := json.Unmarshal(transit.frame.Body, &body); err != nil {
-		t.Fatalf("body JSON: %v", err)
-	}
-	if body.Direction != "to_device" || body.RequestID != "req-1" {
-		t.Fatalf("body=%+v", body)
+	if capture.actorID != "tool:kimi" || capture.channelID != channel.ID("ch-1") {
+		t.Fatalf("forward actor/channel=%s/%s", capture.actorID, capture.channelID)
 	}
 	var got message.Envelope
-	if err := json.Unmarshal(body.Payload, &got); err != nil {
+	if err := json.Unmarshal(capture.payload, &got); err != nil {
 		t.Fatalf("payload envelope: %v", err)
 	}
 	if got.ID != env.ID || got.Type != env.Type || got.Audience[0] != "tool:kimi" {
@@ -99,13 +87,21 @@ func TestProxyFacadeCallbackWritesEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	chain := &captureChain{}
+	capture := &captureExternal{}
 	if err := mod.Init(context.Background(), &adapter.ModuleContext{
 		AdapterName:    "kimi",
 		AdapterActorID: "tool:kimi",
 		ChannelID:      "ch-1",
-		DeviceTransit:  &captureTransit{},
-		HarnessChain:   chain,
+		ForwardExternalRequest: func(context.Context, *message.Envelope, adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
+			return adapter.ExternalRequestResult{}, nil
+		},
+		UpdateReadiness: func(context.Context, actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
+			return actorreg.ReadinessTransition{}, nil
+		},
+		CompleteExternalResponse: func(_ context.Context, env *message.Envelope) (adapter.RespondResult, error) {
+			capture.env = env
+			return adapter.RespondResult{MessageID: env.ID}, nil
+		},
 	}); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -123,7 +119,104 @@ func TestProxyFacadeCallbackWritesEnvelope(t *testing.T) {
 	if err := mod.OnExternalCallback(context.Background(), raw); err != nil {
 		t.Fatalf("OnExternalCallback: %v", err)
 	}
-	if chain.env == nil || chain.env.ID != "resp-1" || chain.env.Sender.ID != "tool:kimi" {
-		t.Fatalf("written env=%+v", chain.env)
+	if capture.env == nil || capture.env.ID != "resp-1" || capture.env.Sender.ID != "tool:kimi" {
+		t.Fatalf("completed env=%+v", capture.env)
+	}
+}
+
+func TestProxyFacadeReadinessRejectsForgedAuthority(t *testing.T) {
+	mod, err := New(adapter.Declaration{
+		Name:         "kimi",
+		ActorID:      "tool:kimi",
+		Types:        []string{"kimi.ask"},
+		Binding:      actor.BindingRuntimeInboundViaRelay,
+		MaxPendingMs: 30_000,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	var updates int
+	if err := mod.Init(context.Background(), &adapter.ModuleContext{
+		AdapterName:    "kimi",
+		AdapterActorID: "tool:kimi",
+		ChannelID:      "ch-1",
+		ForwardExternalRequest: func(context.Context, *message.Envelope, adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
+			return adapter.ExternalRequestResult{}, nil
+		},
+		CompleteExternalResponse: func(context.Context, *message.Envelope) (adapter.RespondResult, error) {
+			return adapter.RespondResult{}, nil
+		},
+		UpdateReadiness: func(context.Context, actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
+			updates++
+			return actorreg.ReadinessTransition{}, nil
+		},
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	base := func() *message.Envelope {
+		return &message.Envelope{
+			ID:        "evt-ready",
+			ChannelID: "ch-1",
+			Sender:    message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+			Kind:      message.KindEvent,
+			Type:      "actor.readiness.changed",
+			Payload: json.RawMessage(`{
+				"actor_id":"tool:kimi",
+				"changed_at":1700000001000,
+				"current":{"ready":true,"reason":"ok","detail":{},"last_state_change_at":1700000001000}
+			}`),
+		}
+	}
+	cases := []struct {
+		name   string
+		mutate func(*message.Envelope)
+	}{
+		{
+			name: "wrong_sender",
+			mutate: func(env *message.Envelope) {
+				env.Sender = message.Sender{Kind: actor.KindTool, ID: "tool:kimi"}
+			},
+		},
+		{
+			name: "wrong_type",
+			mutate: func(env *message.Envelope) {
+				env.Type = "kimi.ask"
+			},
+		},
+		{
+			name: "empty_channel",
+			mutate: func(env *message.Envelope) {
+				env.ChannelID = ""
+			},
+		},
+		{
+			name: "wrong_channel",
+			mutate: func(env *message.Envelope) {
+				env.ChannelID = "ch-other"
+			},
+		},
+		{
+			name: "missing_actor",
+			mutate: func(env *message.Envelope) {
+				env.Payload = json.RawMessage(`{
+					"changed_at":1700000001000,
+					"current":{"ready":true,"reason":"ok","detail":{},"last_state_change_at":1700000001000}
+				}`)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := updates
+			env := base()
+			tc.mutate(env)
+			if err := mod.updateReadinessFromEvent(context.Background(), env); err == nil {
+				t.Fatalf("%s readiness event should be rejected", tc.name)
+			}
+			if updates != before {
+				t.Fatalf("%s must not update readiness, updates before=%d after=%d", tc.name, before, updates)
+			}
+		})
 	}
 }
