@@ -540,6 +540,97 @@ func TestSubmitAwait_FastFinalRecoveredViaReplay(t *testing.T) {
 	assertJSONEqual(t, res.Data, `{"note_id":"n-fast"}`)
 }
 
+// TestSubmitAndAwait_FastFinalRecoveredViaReplay is the NF3 regression:
+// the one-call SubmitAndAwait sugar MUST thread the submit-time cursor
+// into the watch automatically, so a fast final emitted before the WS
+// subscribe is recovered via replay WITHOUT the caller passing
+// WithSinceSeq manually. Same race scenario as the D18 Submit+Await test.
+func TestSubmitAndAwait_FastFinalRecoveredViaReplay(t *testing.T) {
+	t.Parallel()
+	srv := newReplayFakeServer(t, replayFakeConfig{
+		CursorAtSubmit:  10,
+		FinalSeq:        11,
+		FinalPayload:    json.RawMessage(`{"status":"completed","note_id":"n-sugar"}`),
+		EmitBeforeReply: true,
+	})
+	defer srv.Close()
+
+	client := &Client{BaseURL: srv.URL, SessionToken: "tok"}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	res, err := client.SubmitAndAwait(ctx, SubmitRequest{
+		ChannelID: "ch-1",
+		ActorID:   "tool:xhs",
+		Type:      "xhs.publish",
+		Payload:   json.RawMessage(`{"title":"hi"}`),
+	}, 2*time.Second)
+	if err != nil {
+		t.Fatalf("SubmitAndAwait: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("result not OK: %+v", res.Error)
+	}
+	assertJSONEqual(t, res.Data, `{"note_id":"n-sugar"}`)
+}
+
+// TestSubmitAndWatch_StreamsFinal verifies the one-call SubmitAndWatch
+// sugar opens a stream that delivers the (fast) final response, again
+// without the caller threading SinceSeq by hand (NF3).
+func TestSubmitAndWatch_StreamsFinal(t *testing.T) {
+	t.Parallel()
+	srv := newReplayFakeServer(t, replayFakeConfig{
+		CursorAtSubmit:  10,
+		FinalSeq:        11,
+		FinalPayload:    json.RawMessage(`{"status":"completed","note_id":"n-stream"}`),
+		EmitBeforeReply: true,
+	})
+	defer srv.Close()
+
+	client := &Client{BaseURL: srv.URL, SessionToken: "tok"}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	watch, err := client.SubmitAndWatch(ctx, SubmitRequest{
+		ChannelID: "ch-1",
+		ActorID:   "tool:xhs",
+		Type:      "xhs.publish",
+		Payload:   json.RawMessage(`{"title":"hi"}`),
+	})
+	if err != nil {
+		t.Fatalf("SubmitAndWatch: %v", err)
+	}
+	defer watch.Close()
+
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case <-deadline.C:
+			t.Fatalf("SubmitAndWatch: timed out waiting for final response")
+		case ev, ok := <-watch.Events():
+			if !ok {
+				t.Fatalf("SubmitAndWatch: stream closed before final")
+			}
+			if ev.Err != nil {
+				t.Fatalf("SubmitAndWatch event err: %v", ev.Err)
+			}
+			if ev.Envelope == nil || !ev.IsFinal {
+				continue
+			}
+			res, err := resultFromResponse(*ev.Envelope)
+			if err != nil {
+				t.Fatalf("resultFromResponse: %v", err)
+			}
+			if !res.OK {
+				t.Fatalf("final not OK: %+v", res.Error)
+			}
+			assertJSONEqual(t, res.Data, `{"note_id":"n-stream"}`)
+			return
+		}
+	}
+}
+
 // replayFakeConfig parameterises newReplayFakeServer for the
 // fast-final race scenario.
 type replayFakeConfig struct {

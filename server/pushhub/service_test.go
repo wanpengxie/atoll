@@ -396,7 +396,7 @@ func TestSubscribeReplay_DeliversPersistedFramesSinceSeq(t *testing.T) {
 
 	sub := newPushhubTestSubscriber("u1", 16)
 	// Subscribe with since_seq=0: replay [1, 3] then live.
-	if err := hub.subscribe(context.Background(), sub, ch, 0); err != nil {
+	if err := hub.subscribe(context.Background(), sub, ch, seqPtr(0)); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 
@@ -430,7 +430,7 @@ func TestSubscribeReplay_SinceSeqSkipsAlreadySeen(t *testing.T) {
 	hub.SetReplayer(fr)
 
 	sub := newPushhubTestSubscriber("u1", 16)
-	if err := hub.subscribe(context.Background(), sub, ch, 2); err != nil {
+	if err := hub.subscribe(context.Background(), sub, ch, seqPtr(2)); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 
@@ -438,6 +438,80 @@ func TestSubscribeReplay_SinceSeqSkipsAlreadySeen(t *testing.T) {
 	want := []int64{3}
 	if !equalSeqs(got, want) {
 		t.Fatalf("delivered seqs=%v want=%v", got, want)
+	}
+}
+
+// TestSubscribeLiveOnly_NilSinceSeqDoesNotReplay verifies NF1: a
+// subscribe whose since_seq field is absent (nil) MUST NOT replay any
+// persisted backlog — the UI already loaded history over HTTP, and a
+// replay here would re-deliver every historical row and duplicate the
+// chat. Only live pushes after subscribe are delivered.
+func TestSubscribeLiveOnly_NilSinceSeqDoesNotReplay(t *testing.T) {
+	t.Parallel()
+
+	hub := NewService()
+	hub.SetAccessAuthorizer(allowAllAuth{})
+	ch := channel.ID("ch-live-only")
+
+	fr := &fakeReplayer{}
+	fr.seed(ch, []ReplayMessage{
+		{Seq: 1, Envelope: pushhubTestEnvelope(ch, "m-1")},
+		{Seq: 2, Envelope: pushhubTestEnvelope(ch, "m-2")},
+		{Seq: 3, Envelope: pushhubTestEnvelope(ch, "m-3")},
+	})
+	hub.SetReplayer(fr)
+
+	sub := newPushhubTestSubscriber("u1", 16)
+	// Live-only subscribe: since_seq absent (nil).
+	if err := hub.subscribe(context.Background(), sub, ch, nil); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	// No replay should have happened.
+	fr.mu.Lock()
+	calls := fr.calls
+	fr.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("replayer invoked %d times for live-only subscribe; want 0", calls)
+	}
+
+	// Only live pushes after subscribe are delivered.
+	hub.PushMessage(ch, 4, pushhubTestEnvelope(ch, "m-4"))
+	hub.PushMessage(ch, 5, pushhubTestEnvelope(ch, "m-5"))
+
+	got := drainSeqs(sub, 2, 300*time.Millisecond)
+	want := []int64{4, 5}
+	if !equalSeqs(got, want) {
+		t.Fatalf("delivered seqs=%v want=%v (live-only must not replay history)", got, want)
+	}
+}
+
+// TestSubscribeReplay_ExplicitZeroReplaysFromStart verifies NF1's other
+// half: an explicit since_seq=0 (distinct from absent) DOES replay from
+// the beginning. This is the SDK/CLI subscribe-after-submit path.
+func TestSubscribeReplay_ExplicitZeroReplaysFromStart(t *testing.T) {
+	t.Parallel()
+
+	hub := NewService()
+	hub.SetAccessAuthorizer(allowAllAuth{})
+	ch := channel.ID("ch-explicit-zero")
+
+	fr := &fakeReplayer{}
+	fr.seed(ch, []ReplayMessage{
+		{Seq: 1, Envelope: pushhubTestEnvelope(ch, "m-1")},
+		{Seq: 2, Envelope: pushhubTestEnvelope(ch, "m-2")},
+	})
+	hub.SetReplayer(fr)
+
+	sub := newPushhubTestSubscriber("u1", 16)
+	if err := hub.subscribe(context.Background(), sub, ch, seqPtr(0)); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	got := drainSeqs(sub, 2, 300*time.Millisecond)
+	want := []int64{1, 2}
+	if !equalSeqs(got, want) {
+		t.Fatalf("delivered seqs=%v want=%v (explicit 0 must replay from start)", got, want)
 	}
 }
 
@@ -470,7 +544,7 @@ func TestSubscribeReplay_LivePushDuringReplayIsReordered(t *testing.T) {
 	subscribeDone := make(chan struct{})
 	go func() {
 		defer close(subscribeDone)
-		if err := hub.subscribe(context.Background(), sub, ch, 0); err != nil {
+		if err := hub.subscribe(context.Background(), sub, ch, seqPtr(0)); err != nil {
 			t.Errorf("subscribe: %v", err)
 		}
 	}()
@@ -547,6 +621,13 @@ func drainSeqs(sub *subscriber, n int, deadline time.Duration) []int64 {
 		}
 	}
 	return out
+}
+
+// seqPtr returns a *viewsync.Seq for the replay-from-N subscribe form.
+// A nil *viewsync.Seq means live-only (no replay).
+func seqPtr(n int64) *viewsync.Seq {
+	s := viewsync.Seq(n)
+	return &s
 }
 
 func equalSeqs(a, b []int64) bool {

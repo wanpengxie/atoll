@@ -57,24 +57,22 @@ it as a cookie on both HTTP and WebSocket requests.
 `unavailable` plus Layer 3 namespace extensions like `xhs.login_queued`)
 without collapsing them to RPC.
 
+Prefer the one-call sugar `SubmitAndWatch` / `SubmitAndAwait`: they emit
+the request and open the watch in a single step, threading the submit-time
+cursor into the subscription automatically so a fast final (emitted before
+the WS subscribe completes) is never lost.
+
 ```go
 client := &coagentsdk.Client{BaseURL: "http://127.0.0.1:8832", SessionToken: tok}
 
-// Submit returns immediately with the envelope id assigned to the request.
-res, err := client.Submit(ctx, coagentsdk.SubmitRequest{
+// SubmitAndWatch emits the request AND opens the stream in one call,
+// auto-threading the submit-time cursor into the watch's since_seq.
+watch, err := client.SubmitAndWatch(ctx, coagentsdk.SubmitRequest{
     ChannelID: "ch_123",
     ActorID:   "tool:xhs",
     Type:      "xhs.publish",
     Payload:   json.RawMessage(`{"title":"hello"}`),
 })
-if err != nil {
-    return err
-}
-
-// Watch streams every envelope (provisional + final) whose parent_id
-// matches the request id. The stream closes after the final response or
-// when the caller calls Close().
-watch, err := client.Watch(ctx, "ch_123", res.RequestID)
 if err != nil {
     return err
 }
@@ -96,11 +94,18 @@ for ev := range watch.Events() {
 }
 ```
 
-`Await(ctx, channelID, requestID, timeout)` is sugar around `Watch` that
-filters to the final response (`payload.status ∈ {completed, failed}`) and
-returns a `CallActorResult`. Provisional responses are silently dropped.
-Timeout failure does NOT cancel substrate state — the daemon may still emit
-the final response later; reconnect with `Watch` to observe it.
+`SubmitAndAwait(ctx, req, timeout)` is the blocking-on-final counterpart:
+it emits the request and returns the final `CallActorResult`, threading the
+submit-time cursor automatically. Provisional responses are silently
+dropped. Timeout failure does NOT cancel substrate state — the daemon may
+still emit the final response later; reconnect with `Watch` to observe it.
+
+The lower-level `Submit` + `Watch` / `Await` API is still available for
+callers that need to split the two steps (e.g. fan-in across many in-flight
+requests). When using it manually you MUST pass
+`WithSinceSeq(res.SinceSeq)` to `Watch` / `Await` to avoid losing a fast
+final — `SubmitAndWatch` / `SubmitAndAwait` exist precisely to remove that
+footgun.
 
 Layer 3 status names follow `<adapter>.<name>` (e.g. `xhs.login_queued`).
 The namespace must match the sender actor's local name; the harness rejects

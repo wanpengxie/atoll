@@ -491,14 +491,23 @@ func (s *subscriber) pumpRead(ctx context.Context, hub *Service) {
 		var ctrl struct {
 			Type      string     `json:"type"`
 			ChannelID channel.ID `json:"channel_id"`
-			SinceSeq  int64      `json:"since_seq"`
+			// SinceSeq is a pointer so the absent field (live-only
+			// subscribe) is distinguishable from an explicit 0 (replay
+			// from the very beginning). nil → live-only, no replay; a
+			// present value (including 0) → replay seq > since_seq.
+			SinceSeq *int64 `json:"since_seq"`
 		}
 		if err := json.Unmarshal(raw, &ctrl); err != nil {
 			continue
 		}
 		switch ctrl.Type {
 		case "subscribe":
-			if err := hub.subscribe(ctx, s, ctrl.ChannelID, viewsync.Seq(ctrl.SinceSeq)); err != nil {
+			var since *viewsync.Seq
+			if ctrl.SinceSeq != nil {
+				s := viewsync.Seq(*ctrl.SinceSeq)
+				since = &s
+			}
+			if err := hub.subscribe(ctx, s, ctrl.ChannelID, since); err != nil {
 				s.sendSubscribeRejected(ctrl.ChannelID)
 			}
 		case "unsubscribe":
@@ -693,15 +702,22 @@ func (h *Service) RegisterPushObserverForTest(channelID channel.ID, fn func(Push
 //     so a row that was both persisted (replayed) and pushed live
 //     (during step 2-3 race) is not re-sent.
 //
-// sinceSeq=0 means "live only — no replay, just register". sinceSeq>0
-// triggers replay. The replay/live boundary is invisible to the client:
-// it sees one ordered, dedup'd stream regardless.
-func (h *Service) subscribe(ctx context.Context, sub *subscriber, channelID channel.ID, sinceSeq viewsync.Seq) error {
+// sinceSeq distinguishes two intents via pointer presence:
+//   - nil       → live only: register and stream future pushes, replay
+//     nothing. This is the default for a fresh UI subscribe that already
+//     loaded history via the HTTP messages endpoint — replaying here
+//     would duplicate every historical row in the client.
+//   - non-nil   → replay every persisted envelope with seq > *sinceSeq
+//     (an explicit 0 replays from the very beginning), then stream live.
+//
+// The replay/live boundary is invisible to the client: it sees one
+// ordered, dedup'd stream regardless.
+func (h *Service) subscribe(ctx context.Context, sub *subscriber, channelID channel.ID, sinceSeq *viewsync.Seq) error {
 	if err := channelaccess.Require(ctx, h.accessAuthorizer(), string(channelID), sub.userID); err != nil {
 		return err
 	}
 	replayer := h.currentReplayer()
-	doReplay := sinceSeq >= 0 && replayer != nil
+	doReplay := sinceSeq != nil && replayer != nil
 
 	// Phase 1: arm replay buffer (if any), then register sub in h.subs.
 	// This is two locks (sub.mu, h.mu) acquired in disjoint critical
@@ -732,8 +748,11 @@ func (h *Service) subscribe(ctx context.Context, sub *subscriber, channelID chan
 
 	// Phase 2: drive the replay loop. We page through the viewcache
 	// rows in pushhubReplayBatchSize chunks so a channel with a huge
-	// backlog doesn't load every row into memory at once.
-	cursor := sinceSeq
+	// backlog doesn't load every row into memory at once. The replayer
+	// bounds its rows to the contiguous cursor (last_received_seq), so
+	// gap-buffered rows beyond the cursor are NOT replayed here — they
+	// arrive via live fanout once the gap fills (NF2 contiguity).
+	cursor := *sinceSeq
 	auth := h.accessAuthorizer()
 	memberActorID, memberErr := channelaccess.RequireMemberActor(ctx, auth, string(channelID), sub.userID)
 	for {

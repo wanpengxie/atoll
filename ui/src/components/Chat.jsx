@@ -45,7 +45,21 @@ export default function Chat({ channelID, channel, me }) {
     if (!channelID) return;
     const socket = new ChannelSocket((chID, seq, envelope) => {
       if (chID !== channelID) return;
-      setMessages((prev) => [...prev, envelope]);
+      setMessages((prev) => {
+        // Idempotent append keyed by envelope id. WS is live-only (the
+        // server does NOT replay history on a since_seq-less subscribe),
+        // so the HTTP initial load owns history. The only overlap is the
+        // narrow race where a message arrives between the HTTP query and
+        // the WS subscribe registering server-side — dedup by id keeps
+        // that from double-rendering. (NF1)
+        const id = envelope?.id || envelope?.ID;
+        if (id) {
+          for (const m of prev) {
+            if ((m?.id || m?.ID) === id) return prev;
+          }
+        }
+        return [...prev, envelope];
+      });
     });
     socketRef.current = socket;
     socket.start();

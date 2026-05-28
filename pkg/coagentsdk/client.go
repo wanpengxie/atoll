@@ -277,9 +277,14 @@ func (c *Client) CallActor(ctx context.Context, req CallActorRequest) (*CallActo
 //
 // Race fix (D18 / F27): Submit captures the channel cursor BEFORE the
 // emit POST and returns it as SubmitResult.SinceSeq. Callers MUST pass
-// this seq to Watch / WatchFrom (or Await) so the server's subscribe
-// replay window covers the request's reply even when it lands in
-// viewcache before the client's WS subscribe completes.
+// this seq to Watch / WatchFrom (or Await) via WithSinceSeq so the
+// server's subscribe replay window covers the request's reply even when
+// it lands in viewcache before the client's WS subscribe completes.
+//
+// Forgetting WithSinceSeq silently loses a fast final (NF3). Prefer the
+// SubmitAndAwait / SubmitAndWatch sugar, which threads SinceSeq for you;
+// reach for raw Submit + Watch only when splitting the steps is required
+// (e.g. fan-in across many in-flight requests).
 func (c *Client) Submit(ctx context.Context, req SubmitRequest) (SubmitResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -317,6 +322,36 @@ func (c *Client) Submit(ctx context.Context, req SubmitRequest) (SubmitResult, e
 		return SubmitResult{}, err
 	}
 	return SubmitResult{RequestID: requestID, SinceSeq: cursor}, nil
+}
+
+// SubmitAndAwait is the one-call ergonomic form of Submit + Await: it
+// emits the request and blocks for the final response, automatically
+// threading the cursor captured at submit time into the watch's
+// since_seq so a fast final emitted before the WS subscribe completes is
+// never lost (the NF3 footgun — callers using Submit + Await manually
+// must remember WithSinceSeq(result.SinceSeq); this method removes that
+// requirement). Use Submit + Watch(WithSinceSeq(...)) directly only when
+// you need to observe provisional responses.
+func (c *Client) SubmitAndAwait(ctx context.Context, req SubmitRequest, timeout time.Duration) (*CallActorResult, error) {
+	res, err := c.Submit(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return c.Await(ctx, req.ChannelID, res.RequestID, timeout, WithSinceSeq(res.SinceSeq))
+}
+
+// SubmitAndWatch is the one-call ergonomic form of Submit + Watch: it
+// emits the request and opens a streaming subscription, automatically
+// threading the submit-time cursor into the watch's since_seq so neither
+// provisional ticks nor a fast final are lost in the emit→subscribe race
+// (the NF3 footgun). The returned WatchHandle is owned by the caller —
+// close it via WatchHandle.Close.
+func (c *Client) SubmitAndWatch(ctx context.Context, req SubmitRequest) (*WatchHandle, error) {
+	res, err := c.Submit(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return c.Watch(ctx, req.ChannelID, res.RequestID, WithSinceSeq(res.SinceSeq))
 }
 
 // Cursor returns the server's current last_received_seq for channelID.

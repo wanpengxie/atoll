@@ -46,12 +46,29 @@ func (a viewcacheReplayer) ReplayMessages(ctx context.Context, channelID channel
 	if a.vc == nil {
 		return nil, nil
 	}
+	// NF2 contiguity bound: viewcache persists gap-buffered rows (a row
+	// whose seq is beyond the contiguous cursor because an earlier seq
+	// hasn't arrived). Replaying those would hand the client a seq jump
+	// that bypasses the live fanout's contiguous-cursor invariant. Cap
+	// the replay window to last_received_seq so we only ever replay the
+	// contiguous prefix; the gap-buffered tail is delivered via live
+	// fanout once the missing seqs fill and the cursor advances.
+	cursor, err := a.vc.Cursor(ctx, channelID)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := a.vc.Messages(ctx, channelID, afterSeq, limit)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]pushhub.ReplayMessage, 0, len(rows))
 	for _, r := range rows {
+		if r.Seq > viewsync.Seq(cursor) {
+			// Gap-buffered row beyond the contiguous cursor — stop here.
+			// Messages returns seq-ascending, so every remaining row is
+			// also beyond the cursor.
+			break
+		}
 		out = append(out, pushhub.ReplayMessage{Seq: r.Seq, Envelope: r.Envelope})
 	}
 	return out, nil
