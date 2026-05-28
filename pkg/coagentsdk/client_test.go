@@ -25,7 +25,7 @@ func TestCallActorHappyPath(t *testing.T) {
 
 	res, err := (&Client{BaseURL: srv.URL, SessionToken: "tok"}).CallActor(context.Background(), CallActorRequest{
 		ChannelID: "ch-1",
-		ActorID:   "tool:xhs-adapter",
+		ActorID:   "tool:xhs",
 		Type:      "xhs.publish",
 		Payload:   json.RawMessage(`{"title":"hello"}`),
 		Timeout:   time.Second,
@@ -49,7 +49,7 @@ func TestCallActorFailedResponse(t *testing.T) {
 
 	res, err := (&Client{BaseURL: srv.URL}).CallActor(context.Background(), CallActorRequest{
 		ChannelID: "ch-1",
-		ActorID:   "tool:xhs-adapter",
+		ActorID:   "tool:xhs",
 		Type:      "xhs.publish",
 		Payload:   json.RawMessage(`{"title":"hello"}`),
 		Timeout:   time.Second,
@@ -72,7 +72,7 @@ func TestCallActorTimeout(t *testing.T) {
 
 	res, err := (&Client{BaseURL: srv.URL}).CallActor(context.Background(), CallActorRequest{
 		ChannelID: "ch-1",
-		ActorID:   "tool:xhs-adapter",
+		ActorID:   "tool:xhs",
 		Type:      "xhs.publish",
 		Payload:   json.RawMessage(`{"title":"hello"}`),
 		Timeout:   30 * time.Millisecond,
@@ -92,7 +92,7 @@ func TestCallActorHTTPErrorOnEmit(t *testing.T) {
 
 	_, err := (&Client{BaseURL: srv.URL}).CallActor(context.Background(), CallActorRequest{
 		ChannelID: "ch-1",
-		ActorID:   "tool:xhs-adapter",
+		ActorID:   "tool:xhs",
 		Type:      "xhs.publish",
 		Payload:   json.RawMessage(`{"title":"hello"}`),
 		Timeout:   time.Second,
@@ -107,7 +107,7 @@ func TestListActorsDecodesReadiness(t *testing.T) {
 		ActorListPayload: json.RawMessage(`{
 			"channel_id": "ch-1",
 			"actors": [{
-				"actor_id": "tool:xhs-adapter",
+				"actor_id": "tool:xhs",
 				"kind": "tool",
 				"binding": "runtime_inbound_via_relay",
 				"ready": false,
@@ -133,7 +133,7 @@ func TestListActorsDecodesReadiness(t *testing.T) {
 		t.Fatalf("actors len=%d", len(actors))
 	}
 	got := actors[0]
-	if got.ActorID != "tool:xhs-adapter" || got.Ready || got.ReadyReason != "device_offline" {
+	if got.ActorID != "tool:xhs" || got.Ready || got.ReadyReason != "device_offline" {
 		t.Fatalf("actor=%+v", got)
 	}
 	if got.LastReadyAt != 1700000001000 || got.LastStateChangeAt != 1700000002000 {
@@ -148,7 +148,7 @@ func TestActorStatusUsesReservedActorStatusCall(t *testing.T) {
 	withNoSubscribeDelay(t)
 	srv := newMockSDKServer(t, mockConfig{
 		WantRequestType: "actor.status",
-		WantAudience:    "tool:xhs-adapter",
+		WantAudience:    "tool:xhs",
 		ResponsePayload: json.RawMessage(`{
 			"status":"completed",
 			"available":false,
@@ -163,7 +163,7 @@ func TestActorStatusUsesReservedActorStatusCall(t *testing.T) {
 	})
 	defer srv.Close()
 
-	status, err := (&Client{BaseURL: srv.URL}).ActorStatus(context.Background(), "ch-1", "tool:xhs-adapter")
+	status, err := (&Client{BaseURL: srv.URL}).ActorStatus(context.Background(), "ch-1", "tool:xhs")
 	if err != nil {
 		t.Fatalf("ActorStatus: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestCallActorWebSocketConnectError(t *testing.T) {
 
 	_, err := (&Client{BaseURL: srv.URL}).CallActor(context.Background(), CallActorRequest{
 		ChannelID: "ch-1",
-		ActorID:   "tool:xhs-adapter",
+		ActorID:   "tool:xhs",
 		Type:      "xhs.publish",
 		Payload:   json.RawMessage(`{"title":"hello"}`),
 		Timeout:   time.Second,
@@ -252,7 +252,7 @@ func newMockSDKServer(t *testing.T, cfg mockConfig) *httptest.Server {
 		}
 		wantAudience := cfg.WantAudience
 		if wantAudience == "" {
-			wantAudience = "tool:xhs-adapter"
+			wantAudience = "tool:xhs"
 		}
 		if len(body.Audience) != 1 || body.Audience[0] != wantAudience {
 			t.Errorf("audience=%v", body.Audience)
@@ -302,7 +302,7 @@ func newMockSDKServer(t *testing.T, cfg mockConfig) *httptest.Server {
 				ChannelID: channel.ID("ch-1"),
 				Sender: message.Sender{
 					Kind: actor.KindTool,
-					ID:   actor.ActorID("tool:xhs-adapter"),
+					ID:   actor.ActorID("tool:xhs"),
 				},
 				Kind:       message.KindResponse,
 				Type:       req.typ,

@@ -28,6 +28,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -139,29 +140,16 @@ func buildBridge(provider string, maxTurns int) (worker.Bridge, error) {
 		// fork (M1.6-T5 phase-3) so the L4 template segment is
 		// available without an IPC round-trip.
 		//
-		// COAGENT_CHANNEL_DB points at channel.sqlite — the
-		// authoritative actor_registry / type_registry source. The
-		// worker opens it read-only and snapshots channel state at
-		// boot to seed the system prompt and the LLM `AdditionalTools`
-		// list. Mid-session registry mutations are picked up via the
-		// same store (kimi bridge re-queries on each turn boundary
-		// where dynamic re-registration is feasible). This replaces
-		// the prior `worker-context.json` static snapshot file the
-		// daemon used to write at spawn time — that file froze tool /
-		// actor state at spawn time and could not reflect subsequent
-		// type install / actor register events.
-		channelStore, storeErr := kimi.OpenChannelStore(os.Getenv(kimi.EnvKeyChannelDB))
-		if storeErr != nil {
-			fmt.Fprintf(os.Stderr, "worker: channel store open failed (continuing without context): %v\n", storeErr)
-		}
-		channelID := os.Getenv(kimi.EnvKeyChannelID)
-		channelType := os.Getenv(kimi.EnvKeyChannelType)
-		channelCtx, ctxErr := channelStore.Snapshot(context.Background(), channelID, channelType)
+		// COAGENT_CHANNEL_CONTEXT_JSON is a daemon-built bootstrap
+		// display snapshot. The worker never opens channel.sqlite;
+		// current actor state/metadata must be queried through
+		// envelope calls such as actor.status / actor.describe.
+		channelCtx, ctxErr := parseKimiChannelContextEnv()
 		if ctxErr != nil {
-			fmt.Fprintf(os.Stderr, "worker: channel snapshot failed (continuing without appendix): %v\n", ctxErr)
+			fmt.Fprintf(os.Stderr, "worker: channel context parse failed (continuing with minimal context): %v\n", ctxErr)
 		}
 		basePrompt := kimi.BuildBasePrompt(
-			channelType,
+			os.Getenv(kimi.EnvKeyChannelType),
 			os.Getenv(kimi.EnvKeyDomainPrompt),
 			channelCtx,
 		)
@@ -170,7 +158,6 @@ func buildBridge(provider string, maxTurns int) (worker.Bridge, error) {
 			return nil, err
 		}
 		cfg.ChannelContext = channelCtx
-		cfg.ChannelStore = channelStore
 		kb, err := kimi.NewBridge(cfg)
 		if err != nil {
 			return nil, fmt.Errorf("kimi bridge: %w", err)
@@ -182,6 +169,27 @@ func buildBridge(provider string, maxTurns int) (worker.Bridge, error) {
 	default:
 		return nil, fmt.Errorf("worker: unknown --provider %q (want mock|kimi)", provider)
 	}
+}
+
+func parseKimiChannelContextEnv() (kimi.ChannelContext, error) {
+	ctx := kimi.ChannelContext{
+		ChannelID:   os.Getenv(kimi.EnvKeyChannelID),
+		ChannelType: os.Getenv(kimi.EnvKeyChannelType),
+	}
+	raw := strings.TrimSpace(os.Getenv(kimi.EnvKeyChannelContext))
+	if raw == "" {
+		return ctx, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &ctx); err != nil {
+		return ctx, err
+	}
+	if ctx.ChannelID == "" {
+		ctx.ChannelID = os.Getenv(kimi.EnvKeyChannelID)
+	}
+	if ctx.ChannelType == "" {
+		ctx.ChannelType = os.Getenv(kimi.EnvKeyChannelType)
+	}
+	return ctx, nil
 }
 
 // kimiIPCAdapter bridges runtime/worker.IPCClient → adapters/llm/kimi.
@@ -212,10 +220,18 @@ func (a *kimiIPCAdapter) Triggers() <-chan kimi.TriggerPayload {
 				Envelope:      p.Envelope,
 				CorrelationID: p.CorrelationID,
 				Cursor:        p.Cursor,
+				AckID:         p.AckID,
 			}
 		}
 	}()
 	return out
+}
+
+func (a *kimiIPCAdapter) AckTrigger(ctx context.Context, trigger kimi.TriggerPayload, accepted bool, reason string) error {
+	return a.client.AckTrigger(ctx, ipc.TriggerPayload{
+		Cursor: trigger.Cursor,
+		AckID:  trigger.AckID,
+	}, accepted, reason)
 }
 
 // WriteEnvelope forwards to IPCClient.WriteMessage and discards the

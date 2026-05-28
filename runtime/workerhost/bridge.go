@@ -113,7 +113,8 @@ type BridgeConfig struct {
 	// this field was added.
 	PreSpawn func(ctx context.Context) (extraEnv []string, err error)
 
-	// PushTimeout caps one daemon → worker trigger write. Default 5s.
+	// PushTimeout caps one daemon → worker trigger processing ACK.
+	// Default 30s, aligned with the normal request pending budget.
 	PushTimeout time.Duration
 
 	// OnPushDrop observes trigger pushes that failed or timed out. It is
@@ -156,8 +157,9 @@ func (s *workerSession) dead() bool {
 	}
 }
 
-// NewBridge builds a Bridge. Defaults to a 5s handshake timeout and
-// a background ServeCtx when callers don't pass either.
+// NewBridge builds a Bridge. Defaults to a 5s handshake timeout, a 30s
+// trigger ACK timeout, and a background ServeCtx when callers don't pass
+// them.
 func NewBridge(cfg BridgeConfig) (*Bridge, error) {
 	if cfg.ChannelID == "" {
 		return nil, errors.New("workerhost: BridgeConfig.ChannelID empty")
@@ -187,7 +189,7 @@ func NewBridge(cfg BridgeConfig) (*Bridge, error) {
 		cfg.HandshakeTimeout = 5 * time.Second
 	}
 	if cfg.PushTimeout <= 0 {
-		cfg.PushTimeout = 5 * time.Second
+		cfg.PushTimeout = 30 * time.Second
 	}
 	if cfg.WorkerIDPrefix == "" {
 		cfg.WorkerIDPrefix = "w"
@@ -238,7 +240,7 @@ func (m *Bridge) OnTrigger(ctx context.Context, _ actor.ActorID, env *message.En
 	}
 	m.mu.Unlock()
 
-	pushCtx, cancel := context.WithTimeout(ctx, m.cfg.PushTimeout)
+	pushCtx, cancel := context.WithTimeout(ctx, m.triggerPushTimeout(env))
 	err := sess.host.PushTrigger(pushCtx, payload)
 	cancel()
 	if err != nil {
@@ -250,6 +252,18 @@ func (m *Bridge) OnTrigger(ctx context.Context, _ actor.ActorID, env *message.En
 		return fmt.Errorf("workerhost: push trigger: %w", err)
 	}
 	return nil
+}
+
+func (m *Bridge) triggerPushTimeout(env *message.Envelope) time.Duration {
+	timeout := m.cfg.PushTimeout
+	if env == nil || env.ExpiresAt == nil {
+		return timeout
+	}
+	remainingMS := *env.ExpiresAt - m.cfg.NowFn()
+	if remainingMS <= 0 {
+		return time.Nanosecond
+	}
+	return time.Duration(remainingMS) * time.Millisecond
 }
 
 func (m *Bridge) onPushFailure(sess *workerSession, envelopeID string, err error) {

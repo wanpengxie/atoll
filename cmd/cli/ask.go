@@ -5,7 +5,7 @@ package main
 // These three commands are the domain-CLI wrapper layer described in
 // L4 §2.3.2 — they translate agent-friendly invocations
 //
-//	coagent ask --type xhs.publish --audience tool:xhs-adapter --payload-file p.json
+//	coagent ask --type xhs.publish --audience tool:xhs --payload-file p.json
 //
 // into a single POST to the server gateway
 //
@@ -93,7 +93,7 @@ func runWriteMessageCmd(name, kind string, args []string) int {
 
 	var (
 		typeName    = fs.String("type", "", "v4 envelope.type (required)")
-		audienceCSV = fs.String("audience", "", "audience actor ids (comma-separated; required when kind=request)")
+		audienceCSV = fs.String("audience", "", "audience actor ids (comma-separated; required)")
 		parentID    = fs.String("parent-id", "", "parent message id (required when kind=response)")
 		channel     = fs.String("channel", "", "channel id (env COAGENT_CHANNEL_ID; required)")
 		payload     = fs.String("payload", "", "inline JSON payload (mutually exclusive with --payload-file)")
@@ -130,10 +130,20 @@ func runWriteMessageCmd(name, kind string, args []string) int {
 	}
 
 	audience := splitCSV(*audienceCSV)
-	if kind == "request" {
-		// L1 §10.2 step 5: requests must have exactly one concrete audience.
-		if len(audience) != 1 || audience[0] == "" || audience[0] == "*" {
-			writeAskReject(askErrUsage, "--audience must be exactly one concrete actor id for kind=request")
+	if len(audience) == 0 {
+		writeAskReject(askErrUsage, "--audience is required")
+		return askExitUsage
+	}
+	for _, id := range audience {
+		if id == "" || id == "*" {
+			writeAskReject(askErrUsage, "--audience must contain only concrete actor ids")
+			return askExitUsage
+		}
+	}
+	if kind == "request" || kind == "response" {
+		// L1 §10.2: requests/responses must address exactly one actor.
+		if len(audience) != 1 {
+			writeAskReject(askErrUsage, "--audience must be exactly one concrete actor id for kind="+kind)
 			return askExitUsage
 		}
 	}

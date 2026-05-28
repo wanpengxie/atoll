@@ -7,8 +7,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
-	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -32,33 +30,41 @@ type ModuleContext struct {
 	// channel sqlite — L1 §11.5 / L2 §8.6).
 	ChannelID channel.ID
 
-	// Correlation is the F2 tracker scoped to this adapter.
-	Correlation CorrelationTracker
-
-	// ErrorPolicy is the F3 timeout / retry / fallback emitter.
-	ErrorPolicy ErrorPolicy
-
 	// Respond is the F5 helper that wraps the adapter's outbound
 	// terminal response. Hides harness invocation + Ad-2 dedupe race +
 	// canonical-id derivation.
 	Respond RespondFunc
 
-	// HarnessChain is the launch entry-point caller for raw harness
-	// writes (used by adapters that need to emit non-response messages
-	// — e.g. orphan_callback events).
-	HarnessChain harness.Chain
+	// Fail emits a failed terminal response through the same write-first
+	// lifecycle path as Respond.
+	Fail FailFunc
 
-	// DeviceTransit is non-nil iff Declaration.Binding ==
-	// BindingRuntimeInboundViaRelay. Other binding types receive nil; the
-	// framework refuses to call Handle when DeviceTransit is required
-	// but absent (T3 composition root wires it).
-	DeviceTransit devicetransit.DeviceTransit
+	// CompleteExternalResponse completes a pending request from an
+	// externally supplied response envelope after framework validation.
+	CompleteExternalResponse ExternalResponseFunc
 
-	// ActorReadiness updates the actor_registry readiness projection without
-	// implying a transport-level heartbeat source. Modules that already receive
-	// envelope-observable readiness events can persist the projection here and
-	// write the event through HarnessChain.
-	ActorReadiness actorreg.ReadinessUpdater
+	// EmitEvent emits an adapter-owned event. It cannot emit responses.
+	EmitEvent EmitEventFunc
+
+	// ReportOrphanCallback emits the framework-owned orphan callback
+	// observability event for this adapter actor. The adapter supplies only
+	// callback diagnostics; framework stamps adapter/channel identity and
+	// the event type.
+	ReportOrphanCallback OrphanCallbackFunc
+
+	// ForwardExternalRequest sends an already accepted request to an
+	// external transport without owning request lifecycle state. The
+	// adapter supplies only the domain payload; the framework stamps the
+	// transport wrapper identity from the accepted envelope.
+	ForwardExternalRequest ExternalRequestFunc
+
+	// UpdateReadiness updates this adapter actor's readiness through the
+	// framework-owned readiness path.
+	UpdateReadiness ReadinessFunc
+
+	// LookupPendingRequest exposes read-only request lifecycle state to
+	// callback decoders. It does not grant mutation authority.
+	LookupPendingRequest PendingRequestLookupFunc
 }
 
 // RespondOptions adjusts the Respond call (L2 §8.5 + L1 §11.1 Ad-2).
@@ -107,3 +113,110 @@ type RespondFunc func(
 	payload json.RawMessage,
 	opts RespondOptions,
 ) (RespondResult, error)
+
+// FailOptions adjusts a failed terminal emitted through FailFunc.
+type FailOptions struct {
+	// Reason is the closed-set terminal failure reason. Empty defaults
+	// to receiver_internal_error.
+	Reason message.TerminalFailureReason
+
+	// Visibility overrides the default response visibility.
+	Visibility message.Visibility
+
+	// Audience overrides the response audience.
+	Audience message.Audience
+}
+
+// FailFunc is the adapter-facing failed terminal helper. The framework
+// writes first, then closes correlation/timer only after accepted or
+// terminal_duplicate.
+type FailFunc func(
+	ctx context.Context,
+	requestID CorrelationKey,
+	payload json.RawMessage,
+	opts FailOptions,
+) (RespondResult, error)
+
+// ExternalResponseFunc completes a request with a response envelope
+// produced outside the channel daemon. The framework validates the
+// envelope against the pending parent request before writing.
+type ExternalResponseFunc func(
+	ctx context.Context,
+	env *message.Envelope,
+) (RespondResult, error)
+
+// EmitEventOptions adjusts adapter event emission.
+type EmitEventOptions struct {
+	Visibility message.Visibility
+	Audience   message.Audience
+}
+
+// EmitEventFunc emits one adapter-owned event. Implementations must
+// reject non-event writes.
+type EmitEventFunc func(
+	ctx context.Context,
+	eventType string,
+	payload json.RawMessage,
+	opts EmitEventOptions,
+) (message.ID, error)
+
+// OrphanCallbackReport describes an inbound callback that could not be
+// parsed or correlated by an adapter. It intentionally carries no adapter
+// identity fields; framework derives those from the installed Declaration.
+type OrphanCallbackReport struct {
+	CorrelationID string
+	Detail        string
+	Payload       json.RawMessage
+}
+
+// OrphanCallbackFunc emits the canonical orphan-callback adapter event.
+// It cannot emit arbitrary events or responses.
+type OrphanCallbackFunc func(
+	ctx context.Context,
+	report OrphanCallbackReport,
+) error
+
+// ExternalRequestResult is returned after forwarding an external
+// request to transport.
+type ExternalRequestResult struct {
+	FrameID string
+}
+
+// ExternalRequestPayload is the adapter-owned domain payload carried
+// inside the framework-owned external transport wrapper.
+type ExternalRequestPayload json.RawMessage
+
+func (p ExternalRequestPayload) MarshalJSON() ([]byte, error) {
+	return json.RawMessage(p).MarshalJSON()
+}
+
+func (p *ExternalRequestPayload) UnmarshalJSON(data []byte) error {
+	if p == nil {
+		return nil
+	}
+	*p = append((*p)[:0], data...)
+	return nil
+}
+
+// ExternalRequestFunc forwards a request envelope and domain payload to
+// the runtime-owned external transport. It does not reserve or close
+// pending lifecycle state, and it does not accept caller-stamped transport
+// identity fields.
+type ExternalRequestFunc func(
+	ctx context.Context,
+	env *message.Envelope,
+	payload ExternalRequestPayload,
+) (ExternalRequestResult, error)
+
+// ReadinessFunc updates readiness for this adapter actor only.
+type ReadinessFunc func(
+	ctx context.Context,
+	update actorreg.ReadinessUpdate,
+) (actorreg.ReadinessTransition, error)
+
+// PendingRequestLookupFunc exposes a read-only snapshot of a pending
+// request lifecycle entry.
+type PendingRequestLookupFunc func(
+	ctx context.Context,
+	requestID CorrelationKey,
+) (CorrelationEntry, bool, error)

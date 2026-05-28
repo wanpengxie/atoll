@@ -55,9 +55,9 @@ const (
 	// envelope addressed to the channel-agent target. The worker's
 	// Bridge consumes these via IPCClient.Triggers(); it MAY call
 	// WriteMessage to emit a reaction envelope. The worker MUST answer
-	// each trigger with KindTriggerAck on the same frame ID once it has
-	// either accepted the payload into its local trigger budget or
-	// rejected it.
+	// each trigger with KindTriggerAck on the same frame ID once a bridge
+	// has either handled the payload or rejected it. IPCClient queueing is
+	// not an ACK boundary.
 	KindTrigger Kind = "trigger"
 	// KindTriggerAck is the worker → daemon acknowledgement for one
 	// KindTrigger frame. Accepted=false is a negative acknowledgement:
@@ -164,11 +164,13 @@ type ReplyPayload struct {
 // emitting downstream envelopes (per proto-layer1 correlation
 // propagation rules) and the channel cursor at the time the envelope
 // was dispatched (the worker bridge uses this to align its read view
-// against the channel log).
+// against the channel log). AckID is the trigger frame ID that must be
+// echoed by KindTriggerAck.
 type TriggerPayload struct {
 	Envelope      message.Envelope `json:"envelope"`
 	CorrelationID message.ID       `json:"correlation_id,omitempty"`
 	Cursor        int64            `json:"cursor,omitempty"`
+	AckID         string           `json:"ack_id,omitempty"`
 }
 
 // TriggerAckPayload is the worker → daemon response body for

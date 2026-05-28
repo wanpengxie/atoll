@@ -10,7 +10,7 @@ client := &coagentsdk.Client{
 
 res, err := client.CallActor(ctx, coagentsdk.CallActorRequest{
 	ChannelID: "ch_123",
-	ActorID:   "tool:xhs-adapter",
+	ActorID:   "tool:xhs",
 	Type:      "xhs.publish",
 	Payload:   json.RawMessage(`{"title":"hello","content":"world"}`),
 	Timeout:   30 * time.Second,
@@ -24,8 +24,8 @@ if !res.OK {
 fmt.Printf("response payload: %s\n", res.Data)
 ```
 
-Readiness is exposed through `ListActors` and the reserved `actor.status`
-request:
+`ListActors` is a display/catalog projection. For current readiness of one
+actor, use the reserved `actor.status` request:
 
 ```go
 actors, err := client.ListActors(ctx, "ch_123")
@@ -33,7 +33,7 @@ if err != nil {
 	return err
 }
 for _, a := range actors {
-	fmt.Printf("%s ready=%v reason=%s\n", a.ActorID, a.Ready, a.ReadyReason)
+	fmt.Printf("%s projected_ready=%v reason=%s\n", a.ActorID, a.Ready, a.ReadyReason)
 }
 
 status, err := client.ActorStatus(ctx, "ch_123", "tool:kimi")

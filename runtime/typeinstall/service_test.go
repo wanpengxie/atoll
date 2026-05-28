@@ -29,7 +29,7 @@ func TestServiceInstallTypeEmitsMirrorEvent(t *testing.T) {
 
 	row := adapter.TypeRow{
 		Type:               "xhs.publish",
-		HandlerActorID:     "tool:xhs-adapter",
+		HandlerActorID:     "tool:xhs",
 		HandlerBinding:     actor.BindingEmbedded,
 		MaxPendingMs:       60_000,
 		AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
@@ -64,7 +64,7 @@ func TestServiceInstallTypeEmitsMirrorEvent(t *testing.T) {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
 	if payload["type"] != "xhs.publish" ||
-		payload["handler_actor_id"] != "tool:xhs-adapter" ||
+		payload["handler_actor_id"] != "tool:xhs" ||
 		payload["handler_binding"] != "embedded" ||
 		payload["mutation_kind"] != "create" ||
 		payload["installed_at"].(float64) != 12345 ||
@@ -86,7 +86,7 @@ func TestServiceInstallTypeRejectsReservedNamespace(t *testing.T) {
 	} {
 		_, err := svc.InstallType(ctx, adapter.TypeRow{
 			Type:           typeName,
-			HandlerActorID: "tool:xhs-adapter",
+			HandlerActorID: "tool:xhs",
 			HandlerBinding: actor.BindingEmbedded,
 			MaxPendingMs:   60_000,
 			AllowedKinds:   []message.Kind{message.KindEvent},
@@ -430,7 +430,7 @@ func newTypeInstallStoresWithDB(t *testing.T, _ channel.ID, now int64) (*store.A
 	actors := store.NewActorRegistry(db)
 	for _, rec := range []actorreg.Record{
 		{ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: now},
-		{ID: "tool:xhs-adapter", Kind: actor.KindTool, Binding: actor.BindingEmbedded, CreatedAt: now},
+		{ID: "tool:xhs", Kind: actor.KindTool, Binding: actor.BindingEmbedded, CreatedAt: now},
 	} {
 		if err := actors.Insert(ctx, rec); err != nil {
 			t.Fatalf("insert actor %s: %v", rec.ID, err)
@@ -444,7 +444,7 @@ func newTypeInstallStoresWithDB(t *testing.T, _ channel.ID, now int64) (*store.A
 func typeInstallRow(typeName string) adapter.TypeRow {
 	return adapter.TypeRow{
 		Type:               typeName,
-		HandlerActorID:     "tool:xhs-adapter",
+		HandlerActorID:     "tool:xhs",
 		HandlerBinding:     actor.BindingEmbedded,
 		MaxPendingMs:       60_000,
 		AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},

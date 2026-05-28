@@ -12,19 +12,28 @@ import (
 // required.
 //
 // `Name` is kept always-present in JSON (no `omitempty`) so the canonical
-// 14-key hash input (L2 §1.4.10.2) sees a stable shape.
+// hash input (L2 §1.4.10.2) sees a stable shape.
 type Sender struct {
 	Kind actor.Kind    `json:"kind"`
 	ID   actor.ActorID `json:"id"`
 	Name string        `json:"name"`
 }
 
+// CrossChannelRef is a weak pointer to a message in another channel.
+// It is informative only: it does not route, grant ACLs, or create a
+// shared collaboration scope.
+type CrossChannelRef struct {
+	ChannelID channel.ID `json:"channel_id"`
+	MessageID ID         `json:"message_id"`
+	Note      *string    `json:"note"`
+}
+
 // Envelope is the v4 message envelope.
 //
 // It carries:
-//   - the 17 content fields from L0 §2.1 (with `sender.kind/id/name`
+//   - the content fields from L0 §2.1 (with `sender.kind/id/name`
 //     bundled into the nested Sender object)
-//   - the 4 delivery-metadata fields from L0 §2.5
+//   - the delivery-metadata fields from L0 §2.5
 //   - the 2 store-derived columns (`is_terminal`, `seq`) defined by L2
 //     §1.4.1 — these never travel inside an in-flight envelope but live
 //     alongside the row in the channel-local messages table
@@ -37,6 +46,8 @@ type Sender struct {
 //     (Go zero-value naturally serializes via `omitempty`).
 //   - DocRefs (`*[]string`): nil pointer means NULL; pointer to empty
 //     slice means explicit `[]` (L0 §2.1 "doc_refs 三态").
+//   - CrossChannelRefs (`*[]CrossChannelRef`): nil pointer means NULL;
+//     pointer to empty slice means explicit `[]`.
 //   - NotBefore / ExpiresAt: `*int64` — nil pointer means NULL; otherwise
 //     the timestamp value.
 //   - Payload (`json.RawMessage`): empty / null means absent; protocol
@@ -45,28 +56,33 @@ type Sender struct {
 type Envelope struct {
 	// --- 17 content fields (L0 §2.1) ----------------------------------
 
-	ID            ID              `json:"id"`
-	TS            int64           `json:"ts"`
-	TSReceived    int64           `json:"ts_received,omitempty"`
-	ChannelID     channel.ID      `json:"channel_id"`
-	Sender        Sender          `json:"sender"`
-	Kind          Kind            `json:"kind"`
-	Type          string          `json:"type"`
-	Payload       json.RawMessage `json:"payload"`
-	ParentID      ID              `json:"parent_id,omitempty"`
-	CorrelationID ID              `json:"correlation_id,omitempty"`
-	DocRefs       *[]string       `json:"doc_refs,omitempty"`
-	Visibility    Visibility      `json:"visibility"`
-	Audience      Audience        `json:"audience"`
-	NotBefore     *int64          `json:"not_before,omitempty"`
-	ExpiresAt     *int64          `json:"expires_at,omitempty"`
+	ID               ID                 `json:"id"`
+	TS               int64              `json:"ts"`
+	TSReceived       int64              `json:"ts_received,omitempty"`
+	ChannelID        channel.ID         `json:"channel_id"`
+	Sender           Sender             `json:"sender"`
+	Kind             Kind               `json:"kind"`
+	Type             string             `json:"type"`
+	Payload          json.RawMessage    `json:"payload"`
+	ParentID         ID                 `json:"parent_id,omitempty"`
+	CorrelationID    ID                 `json:"correlation_id,omitempty"`
+	DocRefs          *[]string          `json:"doc_refs,omitempty"`
+	CrossChannelRefs *[]CrossChannelRef `json:"cross_channel_refs,omitempty"`
+	Visibility       Visibility         `json:"visibility"`
+	Audience         Audience           `json:"audience"`
+	NotBefore        *int64             `json:"not_before,omitempty"`
+	ExpiresAt        *int64             `json:"expires_at,omitempty"`
 
-	// --- 4 delivery metadata (L0 §2.5) --------------------------------
+	// --- delivery metadata (L0 §2.5) ----------------------------------
 
-	DeliveredAt      *int64 `json:"delivered_at,omitempty"`
-	DeliveryFailedAt *int64 `json:"delivery_failed_at,omitempty"`
-	LastError        string `json:"last_error,omitempty"`
-	Attempts         int64  `json:"attempts,omitempty"`
+	DeliveredAt *int64 `json:"delivered_at,omitempty"`
+	LastError   string `json:"last_error,omitempty"`
+
+	// DeliveryFailedAt and Attempts are runtime/store scheduling
+	// diagnostics. They are intentionally excluded from the wire
+	// envelope so callers cannot depend on them as protocol fields.
+	DeliveryFailedAt *int64 `json:"-"`
+	Attempts         int64  `json:"-"`
 
 	// --- store-derived (L2 §1.4.1) ------------------------------------
 
@@ -83,7 +99,7 @@ type Envelope struct {
 	CanonicalHash string `json:"-"`
 }
 
-// HashInputFields lists the 14 top-level keys (in alphabetical order)
+// HashInputFields lists the top-level keys (in alphabetical order)
 // that feed CanonicalHash per L2 §1.4.10.2.
 //
 // Exported so tests + callers in T7 (harness step 0.5 / step 8) can
@@ -92,6 +108,7 @@ var HashInputFields = []string{
 	"audience",
 	"channel_id",
 	"correlation_id",
+	"cross_channel_refs",
 	"doc_refs",
 	"expires_at",
 	"id",
@@ -105,7 +122,7 @@ var HashInputFields = []string{
 	"visibility",
 }
 
-// ContentFields lists the 17 envelope content field names from L0 §2.1
+// ContentFields lists the envelope content field names from L0 §2.1
 // (with sender.{kind,id,name} flattened into 3 dotted keys).
 //
 // Used by the envelope_test.go field-set guard so the Go struct stays
@@ -124,19 +141,18 @@ var ContentFields = []string{
 	"parent_id",
 	"correlation_id",
 	"doc_refs",
+	"cross_channel_refs",
 	"visibility",
 	"audience",
 	"not_before",
 	"expires_at",
 }
 
-// DeliveryMetadataFields lists the 4 delivery-metadata field names from
-// L0 §2.5 — written by system, not part of envelope content.
+// DeliveryMetadataFields lists delivery-metadata field names from L0
+// §2.5 — written by runtime, not part of envelope content.
 var DeliveryMetadataFields = []string{
 	"delivered_at",
-	"delivery_failed_at",
 	"last_error",
-	"attempts",
 }
 
 // StoreDerivedFields lists the 2 store-derived column names from L2

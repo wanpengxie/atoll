@@ -116,7 +116,7 @@ type Deps struct {
 	// the envelope-shape step.
 	ChannelID channel.ID
 
-	// ActorRegistry resolves sender.id / audience[*] / handler_actor_id
+	// ActorRegistry resolves sender.id / audience entries / handler_actor_id
 	// to actorreg.Record (kind / binding / deregistration timestamp).
 	// Required.
 	ActorRegistry actorreg.Registry

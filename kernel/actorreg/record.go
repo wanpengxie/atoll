@@ -45,6 +45,13 @@ func (r Readiness) Normalize() Readiness {
 	}
 	if len(r.Detail) == 0 {
 		r.Detail = json.RawMessage(`{}`)
+	} else if json.Valid(r.Detail) {
+		var v any
+		if err := json.Unmarshal(r.Detail, &v); err == nil {
+			if raw, err := json.Marshal(v); err == nil {
+				r.Detail = raw
+			}
+		}
 	}
 	return r
 }

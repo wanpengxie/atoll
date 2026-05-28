@@ -28,8 +28,8 @@ type Registry interface {
 	Exists(ctx context.Context, id actor.ActorID) (bool, error)
 
 	// ListActive returns every active actor in the channel (filtered by
-	// `deregistered_at IS NULL`). Used by trigger gateway to expand
-	// `audience=['*']` per L1 §5.1.
+	// `deregistered_at IS NULL`). Used by channel-wide emit helpers when
+	// they need to enumerate explicit actor ids.
 	ListActive(ctx context.Context) ([]Record, error)
 
 	// Insert writes a new actor row. The row is active immediately
@@ -71,11 +71,10 @@ type ReadinessUpdater interface {
 }
 
 // ActiveAudienceExcept returns the list of active actor ids in the
-// channel, excluding the supplied ids. Helper for emit points that used
-// to use audience=["*"] for channel-wide broadcasts; after wildcard
-// removal, callers enumerate the receivers explicitly. Excludes the
-// sender itself by convention so a system event does not fanout-trigger
-// the emitter actor.
+// channel, excluding the supplied ids. Helper for emit points that need
+// channel-wide delivery after wildcard removal: callers enumerate the
+// receivers explicitly. Excludes the sender itself by convention so a
+// system event does not fanout-trigger the emitter actor.
 func ActiveAudienceExcept(ctx context.Context, reg Registry, exclude ...actor.ActorID) ([]actor.ActorID, error) {
 	rows, err := reg.ListActive(ctx)
 	if err != nil {

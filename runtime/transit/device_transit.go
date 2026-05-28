@@ -79,14 +79,37 @@ func (d *DeviceTransit) Ack(ctx context.Context, frame devicetransit.AckFrame) e
 func (d *DeviceTransit) DispatchIncoming(ctx context.Context, frame daemonbus.Frame) error {
 	switch frame.FrameKind {
 	case daemonbus.FrameTypeDeviceTransitSend:
-		if d.onRecvFn == nil {
-			return nil
-		}
 		var payload devicetransit.SendFrame
 		if err := DecodePayload(frame, &payload); err != nil {
 			return fmt.Errorf("transit: decode device_transit.send: %w", err)
 		}
-		return d.onRecvFn(ctx, payload)
+		ack := devicetransit.AckFrame{
+			CorrelationFrameID: devicetransit.FrameID(frame.FrameID),
+			Result:             devicetransit.AckAccepted,
+		}
+		if d.onRecvFn == nil {
+			ack.Result = devicetransit.AckRejectedRetryable
+			ack.Reason = "receiver_unavailable"
+			ack.Detail = "device transit receiver is not wired"
+			return d.Ack(ctx, ack)
+		}
+		if err := d.onRecvFn(ctx, payload); err != nil {
+			var ackErr *devicetransit.AckError
+			if errors.As(err, &ackErr) {
+				ack.Result = ackErr.Result
+				if ack.Result == "" {
+					ack.Result = devicetransit.AckRejectedRetryable
+				}
+				ack.Reason = ackErr.Reason
+				ack.Detail = ackErr.Detail
+			} else {
+				ack.Result = devicetransit.AckRejectedRetryable
+				ack.Reason = "receiver_error"
+				ack.Detail = err.Error()
+			}
+			return d.Ack(ctx, ack)
+		}
+		return d.Ack(ctx, ack)
 	case daemonbus.FrameTypeDeviceTransitAck:
 		if d.onAckFn == nil {
 			return nil

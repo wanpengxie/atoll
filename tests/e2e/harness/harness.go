@@ -152,11 +152,6 @@ type Options struct {
 	// test enable e.g. COAGENT_MOCK_SCRIPT=xhs-publish without forking
 	// the harness — entries replace any default in lower precedence.
 	ExtraDaemonEnv []string
-
-	// UseScaffoldXHS installs the in-process xhs scaffold instead of the
-	// production device-transit adapter. Tests that only need deterministic
-	// xhs.* request/response semantics can avoid pairing a mock extension.
-	UseScaffoldXHS bool
 }
 
 // Start launches a fresh stack with random ports + tmp data dir. The
@@ -386,9 +381,6 @@ func (s *Stack) spawnDaemon(daemonBin, workerBin, id, dataDir string, extraEnv [
 		"--worker-bin", workerBin,
 		"--worker-provider", "mock",
 		"--replay-window-ms", "300000",
-	}
-	if s.opts.UseScaffoldXHS {
-		args = append(args, "--use-scaffold-xhs")
 	}
 	cmd := exec.CommandContext(s.ctx, daemonBin, args...)
 	env := append(os.Environ(),

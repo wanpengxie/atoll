@@ -141,9 +141,9 @@ func (c *IPCClient) dispatch(frame ipc.Frame) {
 		return
 	}
 	// Unsolicited frame. KindTrigger is the only documented daemon-push
-	// kind today (M1.6-T1); route it to the trigger channel and answer
-	// with an explicit ack/nack. Anything else stays dropped per the
-	// original semantics.
+	// kind today (M1.6-T1); route it to the trigger channel. The bridge
+	// must answer with AckTrigger after it has actually handled the
+	// trigger. Anything else stays dropped per the original semantics.
 	if frame.Kind == ipc.KindTrigger {
 		var payload ipc.TriggerPayload
 		if err := json.Unmarshal(frame.Payload, &payload); err != nil {
@@ -153,12 +153,10 @@ func (c *IPCClient) dispatch(frame ipc.Frame) {
 			})
 			return
 		}
+		payload.AckID = frame.ID
 		select {
 		case c.triggerCh <- payload:
-			c.writeTriggerAckAsync(frame, ipc.TriggerAckPayload{
-				Accepted: true,
-				Cursor:   payload.Cursor,
-			})
+			return
 		default:
 			c.triggerDrop.Add(1)
 			c.writeTriggerAckAsync(frame, ipc.TriggerAckPayload{
@@ -168,6 +166,23 @@ func (c *IPCClient) dispatch(frame ipc.Frame) {
 			})
 		}
 	}
+}
+
+// AckTrigger completes a daemon-pushed KindTrigger after the bridge has
+// either handled the trigger or rejected it. This ACK is intentionally not
+// sent by dispatch(): queueing into triggerCh is not a delivery boundary.
+func (c *IPCClient) AckTrigger(ctx context.Context, payload ipc.TriggerPayload, accepted bool, reason string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if payload.AckID == "" {
+		return errors.New("worker: trigger ack_id required")
+	}
+	return c.writeTriggerAck(ipc.Frame{ID: payload.AckID}, ipc.TriggerAckPayload{
+		Accepted: accepted,
+		Cursor:   payload.Cursor,
+		Reason:   reason,
+	})
 }
 
 func (c *IPCClient) writeTriggerAckAsync(trigger ipc.Frame, ackPayload ipc.TriggerAckPayload) {

@@ -164,7 +164,7 @@ func (o *ViewSyncOutbox) MessagesByRange(
 	const q = `SELECT seq, id, ts, ts_received, channel_id,
 	                  sender_kind, sender_id, COALESCE(sender_name,''),
 	                  kind, type, payload,
-	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
 	                  not_before, expires_at,
 	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
@@ -186,14 +186,14 @@ func (o *ViewSyncOutbox) MessagesByRange(
 		var senderID actor.ActorID
 		var vis message.Visibility
 		var audJSON, payloadStr string
-		var docRefsStr sql.NullString
+		var docRefsStr, crossRefsStr sql.NullString
 		var notBefore, expiresAt, deliveredAt, deliveryFailedAt sql.NullInt64
 		var termInt int
 		if err := rows.Scan(
 			&env.Seq, &env.ID, &env.TS, &env.TSReceived, &env.ChannelID,
 			&sKind, &senderID, &env.Sender.Name,
 			&kind, &env.Type, &payloadStr,
-			&env.ParentID, &env.CorrelationID, &docRefsStr,
+			&env.ParentID, &env.CorrelationID, &docRefsStr, &crossRefsStr,
 			&vis, &audJSON,
 			&notBefore, &expiresAt,
 			&deliveredAt, &deliveryFailedAt, &env.LastError, &env.Attempts,
@@ -215,6 +215,13 @@ func (o *ViewSyncOutbox) MessagesByRange(
 				return nil, fmt.Errorf("store: resync doc_refs: %w", err)
 			}
 			env.DocRefs = &refs
+		}
+		if crossRefsStr.Valid {
+			var refs []message.CrossChannelRef
+			if err := json.Unmarshal([]byte(crossRefsStr.String), &refs); err != nil {
+				return nil, fmt.Errorf("store: resync cross_channel_refs: %w", err)
+			}
+			env.CrossChannelRefs = &refs
 		}
 		if notBefore.Valid {
 			v := notBefore.Int64

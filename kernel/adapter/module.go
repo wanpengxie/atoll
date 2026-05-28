@@ -262,3 +262,24 @@ type Module interface {
 	// invoked).
 	OnExternalCallback(ctx context.Context, payload []byte) error
 }
+
+// ExternalCallbackFrame is the framework-owned wrapper for inbound
+// runtime_inbound_via_relay callbacks. Payload remains adapter-domain
+// data; request/channel/correlation identity comes from the transport
+// wrapper stamped by the framework on the outbound leg and preserved by
+// the callback bridge on the inbound leg.
+type ExternalCallbackFrame struct {
+	ChannelID      channel.ID
+	AdapterActorID actor.ActorID
+	RequestID      message.ID
+	ParentID       message.ID
+	CorrelationID  message.ID
+	ExpiresAt      int64
+	Payload        json.RawMessage
+}
+
+// ExternalCallbackFrameAware lets adapters consume the framework-owned
+// callback wrapper without receiving raw transport capabilities.
+type ExternalCallbackFrameAware interface {
+	OnExternalCallbackFrame(ctx context.Context, frame ExternalCallbackFrame) error
+}

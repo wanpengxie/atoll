@@ -107,7 +107,7 @@ func (h *Host) Ready() <-chan struct{} { return h.ready }
 
 // PushTrigger emits a daemon → worker KindTrigger frame carrying the
 // post-harness envelope + propagation context. The worker must answer
-// with KindTriggerAck after it accepts or rejects the trigger; a nack
+// with KindTriggerAck after processing or rejecting the trigger; a nack
 // turns into a PushTrigger error so the caller can keep the delivery
 // retryable. Safe to call from any goroutine — the underlying ipc.Codec
 // serialises writes with an internal mutex.
@@ -117,11 +117,12 @@ func (h *Host) Ready() <-chan struct{} { return h.ready }
 // fence context it expects to stamp on its own outbound frames. The
 // frame ID correlates the trigger ack.
 func (h *Host) PushTrigger(ctx context.Context, payload ipc.TriggerPayload) error {
+	frameID := fmt.Sprintf("trig-%s-%d", payload.Envelope.ID, h.triggerSeq.Add(1))
+	payload.AckID = frameID
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("workerhost: encode trigger: %w", err)
 	}
-	frameID := fmt.Sprintf("trig-%s-%d", payload.Envelope.ID, h.triggerSeq.Add(1))
 	frame := ipc.Frame{
 		ID:           frameID,
 		Kind:         ipc.KindTrigger,

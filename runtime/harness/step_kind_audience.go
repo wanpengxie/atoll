@@ -90,8 +90,9 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (k
 		return khar.Outcome{}, nil
 	}
 
-	// request — audience exactly-one concrete receiver.
-	if len(env.Audience) != 1 || env.Audience[0] == "" || env.Audience[0] == "*" {
+	// request — audience exactly-one concrete receiver. Step 2 has
+	// already rejected wildcard audience entries.
+	if len(env.Audience) != 1 || env.Audience[0] == "" {
 		return khar.Outcome{
 			RejectReason: message.HarnessRequestAudienceInvalid,
 			Detail:       "kind=request requires audience=[<concrete-actor>]",

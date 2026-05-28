@@ -49,7 +49,7 @@ import (
 )
 
 // CanonicalHash returns SHA-256 (hex, lowercase) over the RFC 8785
-// canonicalization of the 14 hash-input fields of `e` (L2 §1.4.10.2).
+// canonicalization of the hash-input fields of `e` (L2 §1.4.10.2).
 //
 // Excluded by L1 §10.2.2: ts_received, is_terminal, the four delivery
 // metadata fields, and seq. Hash inputs are sender-provided content
@@ -104,7 +104,7 @@ func CanonicalizeJSON(raw []byte) ([]byte, error) {
 	return canonicalizeValue(nil, v)
 }
 
-// envelopeHashInput builds the 14-key map L2 §1.4.10.2 specifies as
+// envelopeHashInput builds the key map L2 §1.4.10.2 specifies as
 // the hash input domain.
 func envelopeHashInput(e Envelope) (map[string]any, error) {
 	// payload: parse raw JSON via UseNumber so integers retain precision.
@@ -139,6 +139,22 @@ func envelopeHashInput(e Envelope) (map[string]any, error) {
 		docRefs = refs
 	}
 
+	// cross_channel_refs: tri-state per L0 §1.1.2.
+	//   nil pointer → null
+	//   pointer to slice (even empty) → array
+	var crossChannelRefs any
+	if e.CrossChannelRefs != nil {
+		refs := make([]any, len(*e.CrossChannelRefs))
+		for i, r := range *e.CrossChannelRefs {
+			refs[i] = map[string]any{
+				"channel_id": string(r.ChannelID),
+				"message_id": string(r.MessageID),
+				"note":       nullableStringPtr(r.Note),
+			}
+		}
+		crossChannelRefs = refs
+	}
+
 	// sender.kind is excluded from the dedupe hash input per
 	// proto-layer1 §2.3: kind is runtime-derived (forced overwrite from
 	// actor_registry at Step 6 SenderConsistent) and not "sender-provided".
@@ -150,20 +166,21 @@ func envelopeHashInput(e Envelope) (map[string]any, error) {
 	}
 
 	return map[string]any{
-		"id":             string(e.ID),
-		"ts":             jsonNumberFromInt64(e.TS),
-		"channel_id":     string(e.ChannelID),
-		"sender":         sender,
-		"kind":           string(e.Kind),
-		"type":           e.Type,
-		"payload":        payload,
-		"parent_id":      nullableString(string(e.ParentID)),
-		"correlation_id": nullableString(string(e.CorrelationID)),
-		"doc_refs":       docRefs,
-		"visibility":     string(e.Visibility),
-		"audience":       audience,
-		"not_before":     nullableInt64Ptr(e.NotBefore),
-		"expires_at":     nullableInt64Ptr(e.ExpiresAt),
+		"id":                 string(e.ID),
+		"ts":                 jsonNumberFromInt64(e.TS),
+		"channel_id":         string(e.ChannelID),
+		"sender":             sender,
+		"kind":               string(e.Kind),
+		"type":               e.Type,
+		"payload":            payload,
+		"parent_id":          nullableString(string(e.ParentID)),
+		"correlation_id":     nullableString(string(e.CorrelationID)),
+		"doc_refs":           docRefs,
+		"cross_channel_refs": crossChannelRefs,
+		"visibility":         string(e.Visibility),
+		"audience":           audience,
+		"not_before":         nullableInt64Ptr(e.NotBefore),
+		"expires_at":         nullableInt64Ptr(e.ExpiresAt),
 	}, nil
 }
 
@@ -172,6 +189,13 @@ func nullableString(s string) any {
 		return nil
 	}
 	return s
+}
+
+func nullableStringPtr(s *string) any {
+	if s == nil {
+		return nil
+	}
+	return *s
 }
 
 func nullableInt64Ptr(p *int64) any {

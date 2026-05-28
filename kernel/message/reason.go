@@ -36,6 +36,7 @@ const (
 	HarnessVisibilityInvalid         HarnessRejectReason = "harness_visibility_invalid"
 	HarnessVisibilityAudienceInvalid HarnessRejectReason = "harness_visibility_audience_invalid"
 	HarnessEnvelopeUnknownField      HarnessRejectReason = "harness_envelope_unknown_field"
+	HarnessAudienceWildcardForbidden HarnessRejectReason = "harness_audience_wildcard_forbidden"
 
 	// Step 3 — Id Dedupe
 	HarnessIDDuplicateConflict HarnessRejectReason = "harness_id_duplicate_conflict"
@@ -92,6 +93,7 @@ var AllHarnessRejectReasons = []HarnessRejectReason{
 	HarnessVisibilityInvalid,
 	HarnessVisibilityAudienceInvalid,
 	HarnessEnvelopeUnknownField,
+	HarnessAudienceWildcardForbidden,
 	HarnessIDDuplicateConflict,
 	HarnessTimeInvalid,
 	HarnessTypeUnknown,
@@ -147,6 +149,7 @@ func (r HarnessRejectReason) HTTPStatus() int {
 		HarnessVisibilityInvalid,
 		HarnessVisibilityAudienceInvalid,
 		HarnessEnvelopeUnknownField,
+		HarnessAudienceWildcardForbidden,
 		HarnessAudienceEmpty,
 		HarnessSenderKindMismatch,
 		HarnessResponseAudienceInvalid,

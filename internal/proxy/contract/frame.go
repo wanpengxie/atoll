@@ -22,6 +22,11 @@ const (
 	// FrameTypeShutdown is the server-to-daemon notification used before the
 	// server closes a revoked daemon connection.
 	FrameTypeShutdown FrameType = "shutdown"
+
+	// FrameTypeAck acknowledges one envelope-carrying callback frame. The
+	// payload carries accepted/rejected status; senders keep retryable callback
+	// outbox entries until an ack arrives.
+	FrameTypeAck FrameType = "ack"
 )
 
 const (

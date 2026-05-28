@@ -37,7 +37,7 @@ func TestTypeRegistry_UpsertLookupRoundTrip(t *testing.T) {
 
 	in := adapter.TypeRow{
 		Type:               "xhs.publish",
-		HandlerActorID:     "tool:xhs-adapter",
+		HandlerActorID:     "tool:xhs",
 		HandlerBinding:     actor.BindingEmbedded,
 		MaxPendingMs:       60_000,
 		AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
@@ -74,7 +74,7 @@ func TestTypeRegistry_UpsertLookupRoundTrip(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("HarnessView ok=%v err=%v", ok, err)
 	}
-	if view.HandlerActorID != "tool:xhs-adapter" {
+	if view.HandlerActorID != "tool:xhs" {
 		t.Errorf("harness view handler_actor_id=%q", view.HandlerActorID)
 	}
 	if view.TerminalConvention != string(adapter.TerminalPayloadStatus) {
@@ -96,7 +96,7 @@ func TestTypeRegistry_UpsertReplaces(t *testing.T) {
 
 	if _, err := reg.Upsert(ctx, adapter.TypeRow{
 		Type:           "xhs.publish",
-		HandlerActorID: "tool:xhs-adapter",
+		HandlerActorID: "tool:xhs",
 		HandlerBinding: actor.BindingEmbedded,
 		MaxPendingMs:   60_000,
 		AllowedKinds:   []message.Kind{message.KindRequest},
@@ -106,7 +106,7 @@ func TestTypeRegistry_UpsertReplaces(t *testing.T) {
 	// Overwrite with different binding + max_pending_ms.
 	if _, err := reg.Upsert(ctx, adapter.TypeRow{
 		Type:           "xhs.publish",
-		HandlerActorID: "tool:xhs-adapter",
+		HandlerActorID: "tool:xhs",
 		HandlerBinding: actor.BindingRuntimeOutbound,
 		MaxPendingMs:   90_000,
 		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
@@ -134,7 +134,7 @@ func TestTypeRegistry_List(t *testing.T) {
 	for _, typ := range types {
 		if _, err := reg.Upsert(ctx, adapter.TypeRow{
 			Type:           typ,
-			HandlerActorID: "tool:xhs-adapter",
+			HandlerActorID: "tool:xhs",
 			HandlerBinding: actor.BindingEmbedded,
 			MaxPendingMs:   60_000,
 			AllowedKinds:   []message.Kind{message.KindRequest},
@@ -223,7 +223,7 @@ func TestTypeRegistry_DefaultTerminalConvention(t *testing.T) {
 	reg := openChannelDB(t)
 	if _, err := reg.Upsert(ctx, adapter.TypeRow{
 		Type:           "xhs.publish",
-		HandlerActorID: "tool:xhs-adapter",
+		HandlerActorID: "tool:xhs",
 		HandlerBinding: actor.BindingEmbedded,
 		MaxPendingMs:   60_000,
 		AllowedKinds:   []message.Kind{message.KindRequest},

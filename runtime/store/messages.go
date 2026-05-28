@@ -191,6 +191,10 @@ func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelo
 	if err != nil {
 		return klog.AppendResult{}, fmt.Errorf("store: append docrefs encode: %w", err)
 	}
+	crossRefsJSON, err := encodeCrossChannelRefs(env.CrossChannelRefs)
+	if err != nil {
+		return klog.AppendResult{}, fmt.Errorf("store: append cross_channel_refs encode: %w", err)
+	}
 	audJSON, err := json.Marshal(env.Audience)
 	if err != nil {
 		return klog.AppendResult{}, fmt.Errorf("store: append audience encode: %w", err)
@@ -200,11 +204,11 @@ func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelo
 	   id, ts, ts_received, channel_id,
 	   sender_kind, sender_id, sender_name,
 	   kind, type, payload,
-	   parent_id, correlation_id, doc_refs,
+	   parent_id, correlation_id, doc_refs, cross_channel_refs,
 	   visibility, audience, not_before, expires_at,
 	   delivered_at, delivery_failed_at, last_error, attempts,
 	   is_terminal, canonical_hash
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	terminalInt := 0
 	if env.IsTerminal {
@@ -214,7 +218,7 @@ func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelo
 		env.ID, env.TS, env.TSReceived, env.ChannelID,
 		string(env.Sender.Kind), string(env.Sender.ID), nullableString(env.Sender.Name),
 		string(env.Kind), env.Type, string(env.Payload),
-		nullableString(string(env.ParentID)), nullableString(string(env.CorrelationID)), nullableString(docRefsJSON),
+		nullableString(string(env.ParentID)), nullableString(string(env.CorrelationID)), nullableString(docRefsJSON), nullableString(crossRefsJSON),
 		env.Visibility, string(audJSON),
 		nullableInt(env.NotBefore), nullableInt(env.ExpiresAt),
 		nullableInt(env.DeliveredAt), nullableInt(env.DeliveryFailedAt),
@@ -259,7 +263,7 @@ func (m *Messages) PendingDue(ctx context.Context, nowMs int64, limit int) ([]me
 	const q = `SELECT id, ts, ts_received, channel_id,
 	                  sender_kind, sender_id, COALESCE(sender_name,''),
 	                  kind, type, payload,
-	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
 	                  not_before, expires_at,
 	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
@@ -328,7 +332,7 @@ func (m *Messages) LongPendingRequests(ctx context.Context, nowMs int64, limit i
 	const q = `SELECT id, ts, ts_received, channel_id,
 	                  sender_kind, sender_id, COALESCE(sender_name,''),
 	                  kind, type, payload,
-	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
 	                  not_before, expires_at,
 	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
@@ -378,7 +382,7 @@ func (m *Messages) ReceiverUnavailableRequests(ctx context.Context, limit int) (
 	const q = `SELECT id, ts, ts_received, channel_id,
 	                  sender_kind, sender_id, COALESCE(sender_name,''),
 	                  kind, type, payload,
-	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
 	                  not_before, expires_at,
 	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
@@ -476,7 +480,7 @@ func (m *Messages) FindByID(ctx context.Context, channelID channel.ID, id messag
 	const q = `SELECT id, ts, ts_received, channel_id,
 	                  sender_kind, sender_id, COALESCE(sender_name,''),
 	                  kind, type, payload,
-	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
 	                  not_before, expires_at,
 	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
@@ -517,14 +521,14 @@ func scanEnvelopeFrom(s rowScanner) (message.Envelope, error) {
 	var env message.Envelope
 	var kind, sKind, senderID, vis string
 	var audJSON, payloadStr string
-	var docRefsStr sql.NullString
+	var docRefsStr, crossRefsStr sql.NullString
 	var notBefore, expiresAt, deliveredAt, deliveryFailedAt sql.NullInt64
 	var termInt int
 	if err := s.Scan(
 		&env.ID, &env.TS, &env.TSReceived, &env.ChannelID,
 		&sKind, &senderID, &env.Sender.Name,
 		&kind, &env.Type, &payloadStr,
-		&env.ParentID, &env.CorrelationID, &docRefsStr,
+		&env.ParentID, &env.CorrelationID, &docRefsStr, &crossRefsStr,
 		&vis, &audJSON,
 		&notBefore, &expiresAt,
 		&deliveredAt, &deliveryFailedAt, &env.LastError, &env.Attempts,
@@ -546,6 +550,13 @@ func scanEnvelopeFrom(s rowScanner) (message.Envelope, error) {
 			return message.Envelope{}, fmt.Errorf("store: scan doc_refs: %w", err)
 		}
 		env.DocRefs = &refs
+	}
+	if crossRefsStr.Valid {
+		var refs []message.CrossChannelRef
+		if err := json.Unmarshal([]byte(crossRefsStr.String), &refs); err != nil {
+			return message.Envelope{}, fmt.Errorf("store: scan cross_channel_refs: %w", err)
+		}
+		env.CrossChannelRefs = &refs
 	}
 	if notBefore.Valid {
 		v := notBefore.Int64
@@ -575,6 +586,21 @@ func encodeDocRefs(d *[]string) (string, error) {
 		return "", nil
 	}
 	b, err := json.Marshal(*d)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// encodeCrossChannelRefs maps Envelope.CrossChannelRefs tri-state to JSON
+// storage:
+//   - nil pointer       → "" (column NULL)
+//   - non-nil pointer   → JSON of the slice (including "[]" for empty)
+func encodeCrossChannelRefs(refs *[]message.CrossChannelRef) (string, error) {
+	if refs == nil {
+		return "", nil
+	}
+	b, err := json.Marshal(*refs)
 	if err != nil {
 		return "", err
 	}

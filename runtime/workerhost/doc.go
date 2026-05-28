@@ -15,7 +15,7 @@
 //     ack, fence enforcement, write_message / reserve_ledger /
 //     commit_ledger handlers. Exposes Ready() + PushTrigger(ctx) so
 //     the Bridge can gate the first KindTrigger frame on the
-//     worker handshake completing, then wait for trigger ack/nack.
+//     worker handshake completing, then wait for processing ack/nack.
 //   - fence.go   — fencing_token + daemon_epoch enforcement on every
 //     IPC mutation. Mismatch → daemon rejects + sends fence_invalid
 //     reply (worker exits per fence_check).

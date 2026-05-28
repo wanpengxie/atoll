@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -53,18 +54,21 @@ func TestMessageAppend_OutboxRoundTrip(t *testing.T) {
 
 	msgs := store.NewMessages(db)
 	outbox := store.NewViewSyncOutbox(db, channel.ID("ch-1"))
+	note := "source thread"
+	crossRefs := []message.CrossChannelRef{{ChannelID: "ch-remote", MessageID: "msg-source", Note: &note}}
 
 	env := &message.Envelope{
-		ID:         "m-1",
-		TS:         1000,
-		TSReceived: 1100,
-		ChannelID:  "ch-1",
-		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:alpha"},
-		Kind:       message.KindEvent,
-		Type:       "channel.created",
-		Payload:    json.RawMessage(`{"ok":true}`),
-		Visibility: message.VisibilityPublic,
-		Audience:   message.Audience{"agent:channel-agent"},
+		ID:               "m-1",
+		TS:               1000,
+		TSReceived:       1100,
+		ChannelID:        "ch-1",
+		Sender:           message.Sender{Kind: actor.KindAgent, ID: "agent:alpha"},
+		Kind:             message.KindEvent,
+		Type:             "channel.created",
+		Payload:          json.RawMessage(`{"ok":true}`),
+		Visibility:       message.VisibilityPublic,
+		Audience:         message.Audience{"agent:channel-agent"},
+		CrossChannelRefs: &crossRefs,
 	}
 	res, err := msgs.Append(ctx, env, klog.FencingTuple{})
 	if err != nil {
@@ -93,6 +97,9 @@ func TestMessageAppend_OutboxRoundTrip(t *testing.T) {
 	}
 	if got.Sender.Kind != actor.KindAgent {
 		t.Errorf("sender.kind=%q want %q", got.Sender.Kind, actor.KindAgent)
+	}
+	if got.CrossChannelRefs == nil || !reflect.DeepEqual(*got.CrossChannelRefs, crossRefs) {
+		t.Errorf("cross_channel_refs=%+v want %+v", got.CrossChannelRefs, crossRefs)
 	}
 
 	// Append same envelope again → dedupe path, no new outbox row.
@@ -328,7 +335,7 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 			Type:       "xhs.publish",
 			Payload:    json.RawMessage(`{}`),
 			Visibility: message.VisibilityPublic,
-			Audience:   message.Audience{"tool:xhs-adapter"},
+			Audience:   message.Audience{"tool:xhs"},
 			ExpiresAt:  expiresAt,
 		}
 	}
@@ -353,7 +360,7 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 		TS:         950,
 		TSReceived: 950,
 		ChannelID:  "ch-1",
-		Sender:     message.Sender{Kind: actor.KindTool, ID: "tool:xhs-adapter"},
+		Sender:     message.Sender{Kind: actor.KindTool, ID: "tool:xhs"},
 		Kind:       message.KindResponse,
 		Type:       "xhs.publish",
 		Payload:    json.RawMessage(`{"status":"in_progress"}`),
@@ -386,7 +393,7 @@ func TestMessages_LongPendingRequests(t *testing.T) {
 		TS:         960,
 		TSReceived: 960,
 		ChannelID:  "ch-1",
-		Sender:     message.Sender{Kind: actor.KindTool, ID: "tool:xhs-adapter"},
+		Sender:     message.Sender{Kind: actor.KindTool, ID: "tool:xhs"},
 		Kind:       message.KindResponse,
 		Type:       "xhs.publish",
 		Payload:    json.RawMessage(`{"status":"completed"}`),
@@ -565,7 +572,7 @@ func TestMessages_ConcurrentTerminalDuplicateClassified(t *testing.T) {
 				TS:         int64(1000 + i),
 				TSReceived: int64(1000 + i),
 				ChannelID:  "ch-1",
-				Sender:     message.Sender{Kind: actor.KindTool, ID: "tool:xhs-adapter"},
+				Sender:     message.Sender{Kind: actor.KindTool, ID: "tool:xhs"},
 				Kind:       message.KindResponse,
 				Type:       "xhs.publish",
 				Payload:    json.RawMessage(`{"status":"completed"}`),

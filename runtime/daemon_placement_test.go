@@ -114,7 +114,7 @@ func assertCanonicalChannelCreatedEvent(
 		t.Errorf("created visibility=%q want system", ev.Visibility)
 	}
 	if len(ev.Audience) != 1 || ev.Audience[0] != string(actor.SystemActorID) {
-		t.Errorf("created audience=%v want [*]", ev.Audience)
+		t.Errorf("created audience=%v want [%s]", ev.Audience, actor.SystemActorID)
 	}
 	if ev.CorrelationID != "" {
 		t.Errorf("created correlation_id=%q want null", ev.CorrelationID)

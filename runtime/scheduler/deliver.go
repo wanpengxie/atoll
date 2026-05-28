@@ -3,11 +3,17 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
+
+// ErrHandlerNotFound reports that a concrete audience actor had no registered
+// scheduler handler. Callers must keep delivery retryable or emit a semantic
+// terminal; silently treating this as success loses the envelope.
+var ErrHandlerNotFound = errors.New("scheduler: handler not found")
 
 // HandlerFn processes one envelope addressed to actorID.
 type HandlerFn func(ctx context.Context, actorID actor.ActorID, env *message.Envelope) error
@@ -52,6 +58,7 @@ func (d *Deliverer) Deliver(ctx context.Context, audience []actor.ActorID, env *
 	for _, id := range audience {
 		fn, ok := d.handlers[id]
 		if !ok {
+			errs = append(errs, fmt.Errorf("%w for actor %s", ErrHandlerNotFound, id))
 			continue
 		}
 		if err := fn(ctx, id, env); err != nil {

@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS messages (
   parent_id            TEXT,
   correlation_id       TEXT,
   doc_refs             TEXT,
+  cross_channel_refs   TEXT,
   visibility           TEXT NOT NULL CHECK (visibility IN ('public','private','system')),
   audience             TEXT NOT NULL,
   not_before           INTEGER,

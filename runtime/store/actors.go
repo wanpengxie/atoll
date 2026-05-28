@@ -226,17 +226,22 @@ func (r *ActorRegistry) UpdateReadiness(ctx context.Context, id actor.ActorID, u
 	prev.Detail = json.RawMessage(prevDetail)
 	prev = prev.Normalize()
 
-	changed := prev.State != next.State || prev.Reason != next.Reason
+	stateReasonChanged := prev.State != next.State || prev.Reason != next.Reason
 	lastReadyAt := prev.LastReadyAt
 	if next.State == actorreg.ReadinessReady {
 		lastReadyAt = checkedAt
 	}
 	lastStateChangeAt := prev.LastStateChangeAt
-	if changed {
+	if stateReasonChanged {
 		lastStateChangeAt = checkedAt
 	}
 	next.LastReadyAt = lastReadyAt
 	next.LastStateChangeAt = lastStateChangeAt
+	changed := prev.State != next.State ||
+		prev.Reason != next.Reason ||
+		string(prev.Detail) != string(next.Detail) ||
+		prev.LastReadyAt != next.LastReadyAt ||
+		prev.LastStateChangeAt != next.LastStateChangeAt
 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE actor_registry

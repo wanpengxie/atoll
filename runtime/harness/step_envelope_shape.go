@@ -17,8 +17,8 @@ import (
 //  3. kind ∈ {event, request, response}
 //  4. visibility (when non-empty) ∈ {public, private} — Step Normalize
 //     fills the default when caller leaves it empty.
-//  5. audience cardinality + wildcard form (proto-layer0 §2.3)
-//  6. visibility=private + audience=['*'] semantic contradiction
+//  5. audience cardinality + wildcard ban (proto-layer0 §2.3)
+//  6. response.parent_id non-null
 //  7. unknown top-level field fail-closed reject (proto-layer0 §7.3) —
 //     only enforced when the caller supplies the original raw JSON via
 //     CtxWithRawEnvelope; in-process Go struct callers naturally
@@ -94,6 +94,14 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (kha
 			Detail:       "envelope.audience empty",
 		}, nil
 	}
+	for _, id := range env.Audience {
+		if string(id) == "*" {
+			return khar.Outcome{
+				RejectReason: message.HarnessAudienceWildcardForbidden,
+				Detail:       `envelope.audience wildcard "*" is not allowed; enumerate explicit actor ids`,
+			}, nil
+		}
+	}
 	if env.Kind == message.KindRequest {
 		if len(env.Audience) != 1 {
 			return khar.Outcome{
@@ -153,10 +161,10 @@ func allowedTopLevelEnvelopeKey(key string) bool {
 	// flatten into the same top-level "sender" key.
 	case "id", "ts", "ts_received", "channel_id", "sender", "kind", "type",
 		"payload", "parent_id", "correlation_id", "doc_refs",
-		"visibility", "audience", "not_before", "expires_at":
+		"cross_channel_refs", "visibility", "audience", "not_before", "expires_at":
 		return true
 	// L0 §1.2 delivery metadata.
-	case "delivered_at", "delivery_failed_at", "last_error", "attempts":
+	case "delivered_at", "last_error":
 		return true
 	// L0 §1.3 store-derived columns.
 	case "is_terminal", "seq":

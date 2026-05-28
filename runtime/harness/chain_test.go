@@ -310,7 +310,7 @@ func TestChain_Step5_RequestAudienceInvalid(t *testing.T) {
 		MaxPendingMs:   10_000,
 		HandlerActorID: "tool:feishu-adapter",
 	})
-	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "*", json.RawMessage(`{"title":"x"}`))
+	env := newRequest("req-1", "agent:alpha", "feishu.chat.send", "", json.RawMessage(`{"title":"x"}`))
 	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
 	if res.RejectReason != message.HarnessRequestAudienceInvalid {
 		t.Fatalf("expected harness_request_audience_invalid, got %s", res.RejectReason)
@@ -780,6 +780,19 @@ func TestChain_Step2_AudienceEmpty(t *testing.T) {
 	}
 }
 
+// TestChain_Step2_AudienceWildcardForbidden — wildcard addressing is no
+// longer in the audience closed set; callers must enumerate actor ids.
+func TestChain_Step2_AudienceWildcardForbidden(t *testing.T) {
+	c, _, _, _ := newTestChain(t)
+	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
+	env.Audience = message.Audience{"*"}
+	res, _ := c.Write(chainCallerCtx("agent:alpha"), env)
+	if res.RejectReason != message.HarnessAudienceWildcardForbidden {
+		t.Fatalf("expected harness_audience_wildcard_forbidden, got %s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+}
+
 // TestChain_Step2_RequestAudienceInvalid_TwoConcrete — kind=request with
 // two concrete recipients (no wildcard, len != 1).
 func TestChain_Step2_RequestAudienceInvalid_TwoConcrete(t *testing.T) {
@@ -820,7 +833,7 @@ func TestChain_Step2_EnvelopeUnknownField(t *testing.T) {
 	c, _, _, _ := newTestChain(t)
 	env := newEvent("agent:alpha", "agent.text", json.RawMessage(`{"text":"hi"}`))
 	raw := []byte(`{"id":"evt-x","channel_id":"ch-1","kind":"event","type":"agent.text",` +
-		`"sender":{"id":"agent:alpha"},"audience":["*"],"ts":1700000000000,` +
+		`"sender":{"id":"agent:alpha"},"audience":["agent:beta"],"ts":1700000000000,` +
 		`"payload":{"text":"hi"},"future_field":"future"}`)
 	ctx := CtxWithRawEnvelope(chainCallerCtx("agent:alpha"), raw)
 	res, _ := c.Write(ctx, env)

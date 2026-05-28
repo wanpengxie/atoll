@@ -73,6 +73,7 @@ func TestAllRejectReasons(t *testing.T) {
 		message.HarnessVisibilityInvalid,
 		message.HarnessVisibilityAudienceInvalid,
 		message.HarnessEnvelopeUnknownField,
+		message.HarnessAudienceWildcardForbidden,
 		message.HarnessIDDuplicateConflict,
 		message.HarnessTimeInvalid,
 		message.HarnessTypeUnknown,

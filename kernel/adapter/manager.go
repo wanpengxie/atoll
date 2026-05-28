@@ -43,6 +43,12 @@ type Manager interface {
 	// before invoking.
 	OnExternalCallback(ctx context.Context, adapterName string, payload []byte) error
 
+	// OnExternalCallbackFrame dispatches an inbound callback with the
+	// framework-owned transport wrapper identity preserved. New
+	// runtime_inbound_via_relay bridges MUST use this instead of passing
+	// payload bytes only.
+	OnExternalCallbackFrame(ctx context.Context, adapterName string, frame ExternalCallbackFrame) error
+
 	// OnRuntimeEvent fans a RuntimeEvent out to every installed Module
 	// that implements RuntimeEventAware AND matches the event's
 	// (ChannelID, AdapterActorID) routing key. Modules without the

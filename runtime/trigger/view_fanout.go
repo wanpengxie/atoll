@@ -37,8 +37,8 @@ import (
 //
 //   - System actor emit is NOT special-cased. visibility/audience on the
 //     envelope alone decides the result.
-//   - The visibility=private + audience=['*'] contradiction is already
-//     blocked by harness Step 2 (HarnessVisibilityAudienceInvalid).
+//   - Wildcard audience has been removed; harness Step 2 rejects any
+//     "*" entry before view fanout runs.
 func ViewFanout(
 	ctx context.Context,
 	env *message.Envelope,

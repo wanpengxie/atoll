@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -98,7 +99,7 @@ func TestAsk_HappyPath(t *testing.T) {
 		[]string{
 			"ask",
 			"--type", "xhs.publish",
-			"--audience", "tool:xhs-adapter",
+			"--audience", "tool:xhs",
 			"--payload", `{"title":"hi"}`,
 		})
 	if code != 0 {
@@ -132,7 +133,7 @@ func TestAsk_HappyPath(t *testing.T) {
 	if got.Type != "xhs.publish" || got.Kind != "request" {
 		t.Errorf("type/kind=%q/%q", got.Type, got.Kind)
 	}
-	if len(got.Audience) != 1 || got.Audience[0] != "tool:xhs-adapter" {
+	if len(got.Audience) != 1 || got.Audience[0] != "tool:xhs" {
 		t.Errorf("audience=%v", got.Audience)
 	}
 	if string(got.Payload) != `{"title":"hi"}` {
@@ -246,9 +247,9 @@ func TestAsk_HarnessReject(t *testing.T) {
 	}
 }
 
-// TestEmit_NoAudience: kind=event allows empty audience and pipes the
-// payload through. Verifies the body's `kind` key flips to "event".
-func TestEmit_NoAudience(t *testing.T) {
+// TestEmit_HappyPath: kind=event requires explicit audience and pipes
+// the payload through. Verifies the body's `kind` key flips to "event".
+func TestEmit_HappyPath(t *testing.T) {
 	t.Parallel()
 	bin := buildCLI(t)
 	srv, fg := newFakeGateway(t, http.StatusOK, `{"frame_id":"f1","daemon_ack_id":"a1","message_id":"e1","correlation_id":"e1","accepted":true}`)
@@ -259,7 +260,7 @@ func TestEmit_NoAudience(t *testing.T) {
 			"COAGENT_SESSION_TOKEN=t",
 			"COAGENT_CHANNEL_ID=ch-1",
 		},
-		[]string{"emit", "--type", "core.system_event", "--payload", `{"event":"foo"}`},
+		[]string{"emit", "--type", "core.system_event", "--audience", "agent:alpha", "--payload", `{"event":"foo"}`},
 	)
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr)
@@ -269,13 +270,25 @@ func TestEmit_NoAudience(t *testing.T) {
 	if got["kind"] != "event" {
 		t.Errorf("kind=%v want event", got["kind"])
 	}
-	if _, hasAud := got["audience"]; hasAud {
-		t.Errorf("emit should not stamp audience by default; body=%s", fg.lastBody)
+	if !reflect.DeepEqual(got["audience"], []any{"agent:alpha"}) {
+		t.Errorf("audience=%v want [agent:alpha]; body=%s", got["audience"], fg.lastBody)
 	}
 	var out map[string]any
 	_ = json.Unmarshal([]byte(stdout), &out)
 	if out["kind"] != "event" {
 		t.Errorf("stdout kind=%v", out["kind"])
+	}
+}
+
+func TestEmit_MissingAudience(t *testing.T) {
+	t.Parallel()
+	bin := buildCLI(t)
+	_, stderr, code := runCLI(t, bin,
+		[]string{"COAGENT_CHANNEL_ID=ch-1"},
+		[]string{"emit", "--type", "core.system_event", "--payload", `{"event":"foo"}`},
+	)
+	if code != 2 || !strings.Contains(stderr, "--audience is required") {
+		t.Errorf("exit=%d stderr=%q", code, stderr)
 	}
 }
 
@@ -285,7 +298,7 @@ func TestAnswer_RequiresParent(t *testing.T) {
 	bin := buildCLI(t)
 	_, stderr, code := runCLI(t, bin,
 		[]string{"COAGENT_CHANNEL_ID=ch-1"},
-		[]string{"answer", "--type", "x.y", "--payload", `{}`},
+		[]string{"answer", "--type", "x.y", "--audience", "agent:alpha", "--payload", `{}`},
 	)
 	if code != 2 || !strings.Contains(stderr, "parent-id") {
 		t.Errorf("exit=%d stderr=%q", code, stderr)
@@ -305,7 +318,7 @@ func TestAnswer_HappyPath(t *testing.T) {
 			"COAGENT_SESSION_TOKEN=t",
 			"COAGENT_CHANNEL_ID=ch-1",
 		},
-		[]string{"answer", "--type", "xhs.publish", "--parent-id", "req-1", "--payload", `{"status":"completed","note_id":"n-1"}`},
+		[]string{"answer", "--type", "xhs.publish", "--audience", "agent:alpha", "--parent-id", "req-1", "--payload", `{"status":"completed","note_id":"n-1"}`},
 	)
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr)

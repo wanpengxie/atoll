@@ -16,6 +16,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
+	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/daemonbus"
 	"github.com/wanpengxie/ActOS/kernel/devicetransit"
@@ -1284,10 +1285,10 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 			OnRecv: func(ctx context.Context, frame devicetransit.SendFrame) error {
 				cb, _ := cr.deviceCallback.Load().(func(context.Context, devicetransit.SendFrame) error)
 				if cb == nil {
-					// No adapter wired yet — drop. Production wiring is
-					// expected to call SetDeviceCallback during
-					// OnChannelBoot, well before the first inbound recv.
-					return nil
+					// No adapter wired yet. Returning an error makes the
+					// device_transit ack retryable instead of accepting a
+					// callback that no semantic owner handled.
+					return errors.New("runtime: channel device callback not wired")
 				}
 				return cb(ctx, frame)
 			},
@@ -1348,33 +1349,34 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 	// fall back to the P2 counter stub so tests don't pay the spawn cost.
 	if d.cfg.WorkerSpawner != nil {
 		leaseStore := workerhost.NewLeaseStore(cr.db)
-		// M1.6-T5 phase-3 + phase-4 — pack the per-channel domain
-		// prompt, channel type, channel id, and channel-sqlite path
-		// into the worker spawn env. Empty values are still passed so
-		// the worker can distinguish "no template" from "missing wire".
+		// M1.6-T5 phase-3 + A2 — pack the per-channel domain prompt,
+		// channel type, channel id, and a daemon-owned bootstrap display
+		// snapshot into the worker spawn env. Empty values are still
+		// passed so the worker can distinguish "no template" from
+		// "missing wire".
 		// Order is:
 		//   COAGENT_CHANNEL_TYPE=<type>     (may be "")
 		//   COAGENT_DOMAIN_PROMPT=<prompt>  (may be ""; omitted entirely if empty)
 		//   COAGENT_CHANNEL_ID=<id>         (always set for owned channels)
-		//   COAGENT_CHANNEL_DB=<abs-path>   (always set; xhs-cli dedupe reads it ro)
+		//   COAGENT_CHANNEL_CONTEXT_JSON=<json> (bootstrap display snapshot)
 		// mock_bridge / kimi_bridge read these directly via os.Getenv;
 		// no extra IPC frame is introduced (the prompt is base-prompt
-		// scaffolding, not a per-turn signal). coagent ask resolves
-		// COAGENT_CHANNEL_ID for the gateway URL path, and
-		// adapters/device/xhs/cli reads COAGENT_CHANNEL_DB to perform
-		// the duplicate-publish business-invariant check.
+		// scaffolding, not a per-turn signal). The worker never receives
+		// channel.sqlite; current state/metadata must be read through
+		// reserved envelope calls.
 		workerEnv := d.buildWorkerEnvForChannel(lockRow.ChannelType)
+		channelContextJSON, err := d.buildWorkerChannelContextJSON(ctx, cr, lockRow.ChannelType)
+		if err != nil {
+			d.log.Warn().Err(err).
+				Str("channel_id", string(cr.channelID)).
+				Str("event", "runtime.worker_channel_context_failed").
+				Msg("worker channel context unavailable; spawning with minimal context")
+			channelContextJSON = d.minimalWorkerChannelContextJSON(cr.channelID, lockRow.ChannelType)
+		}
 		workerEnv = append(workerEnv,
 			"COAGENT_CHANNEL_ID="+string(cr.channelID),
-			"COAGENT_CHANNEL_DB="+filepath.Join(d.cfg.ChannelsDir, string(cr.channelID), "channel.sqlite"),
+			"COAGENT_CHANNEL_CONTEXT_JSON="+channelContextJSON,
 		)
-		// worker spawn no longer needs a pre-spawn snapshot file —
-		// the channel-local sqlite is the live source of truth and the
-		// worker (kimi bridge) opens it via COAGENT_CHANNEL_DB. See the
-		// commit that introduced kimi.ChannelStore for the rationale:
-		// the prior worker-context.json froze type_registry / actor_registry
-		// state at worker spawn time, so any subsequent install / register
-		// event could not reach the LLM tool list without a respawn.
 		var preSpawn func(context.Context) ([]string, error)
 		bridge, err := workerhost.NewBridge(workerhost.BridgeConfig{
 			ChannelID:     cr.channelID,
@@ -1434,6 +1436,118 @@ func (d *Daemon) ChannelAgentTriggerCount(chID channel.ID) int64 {
 	return cr.channelAgentTriggers.Load()
 }
 
+type workerChannelContext struct {
+	ChannelID   string               `json:"channel_id,omitempty"`
+	ChannelType string               `json:"channel_type,omitempty"`
+	Actors      []workerChannelActor `json:"actors,omitempty"`
+	Types       []workerChannelType  `json:"types,omitempty"`
+}
+
+type workerChannelActor struct {
+	ActorID           string          `json:"actor_id"`
+	Kind              string          `json:"kind"`
+	Binding           string          `json:"binding,omitempty"`
+	DisplayName       string          `json:"display_name,omitempty"`
+	Ready             bool            `json:"ready"`
+	ReadyReason       string          `json:"ready_reason,omitempty"`
+	ReadyDetail       json.RawMessage `json:"ready_detail,omitempty"`
+	LastReadyAt       int64           `json:"last_ready_at,omitempty"`
+	LastStateChangeAt int64           `json:"last_state_change_at,omitempty"`
+}
+
+type workerChannelType struct {
+	Type           string   `json:"type"`
+	HandlerActorID string   `json:"handler_actor_id"`
+	HandlerBinding string   `json:"handler_binding,omitempty"`
+	AllowedKinds   []string `json:"allowed_kinds,omitempty"`
+	MaxPendingMs   int64    `json:"max_pending_ms,omitempty"`
+}
+
+func (d *Daemon) buildWorkerChannelContextJSON(ctx context.Context, cr *channelRuntime, channelType string) (string, error) {
+	if cr == nil {
+		return "", errors.New("runtime: nil channel runtime")
+	}
+	actors, err := cr.registry.ListActive(ctx)
+	if err != nil {
+		return "", fmt.Errorf("runtime: worker channel context list actors %s: %w", cr.channelID, err)
+	}
+	types, err := cr.typeRegistry.List(ctx)
+	if err != nil {
+		return "", fmt.Errorf("runtime: worker channel context list types %s: %w", cr.channelID, err)
+	}
+	raw, err := json.Marshal(workerChannelContext{
+		ChannelID:   string(cr.channelID),
+		ChannelType: channelType,
+		Actors:      workerChannelActors(actors),
+		Types:       workerChannelTypes(types),
+	})
+	if err != nil {
+		return "", fmt.Errorf("runtime: worker channel context marshal %s: %w", cr.channelID, err)
+	}
+	return string(raw), nil
+}
+
+func (d *Daemon) minimalWorkerChannelContextJSON(chID channel.ID, channelType string) string {
+	raw, err := json.Marshal(workerChannelContext{
+		ChannelID:   string(chID),
+		ChannelType: channelType,
+	})
+	if err != nil {
+		return "{}"
+	}
+	return string(raw)
+}
+
+func workerChannelActors(records []actorreg.Record) []workerChannelActor {
+	out := make([]workerChannelActor, 0, len(records))
+	for _, rec := range records {
+		readiness := rec.Readiness.Normalize()
+		out = append(out, workerChannelActor{
+			ActorID:           string(rec.ID),
+			Kind:              string(rec.Kind),
+			Binding:           string(rec.Binding),
+			DisplayName:       rec.DisplayName,
+			Ready:             readiness.IsReady(),
+			ReadyReason:       readiness.Reason,
+			ReadyDetail:       cloneJSONRawMessage(readiness.Detail),
+			LastReadyAt:       readiness.LastReadyAt,
+			LastStateChangeAt: readiness.LastStateChangeAt,
+		})
+	}
+	return out
+}
+
+func workerChannelTypes(rows []adapter.TypeRow) []workerChannelType {
+	out := make([]workerChannelType, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, workerChannelType{
+			Type:           row.Type,
+			HandlerActorID: string(row.HandlerActorID),
+			HandlerBinding: string(row.HandlerBinding),
+			AllowedKinds:   workerAllowedKinds(row.AllowedKinds),
+			MaxPendingMs:   row.MaxPendingMs,
+		})
+	}
+	return out
+}
+
+func workerAllowedKinds(kinds []message.Kind) []string {
+	out := make([]string, 0, len(kinds))
+	for _, k := range kinds {
+		out = append(out, string(k))
+	}
+	return out
+}
+
+func cloneJSONRawMessage(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(json.RawMessage, len(raw))
+	copy(out, raw)
+	return out
+}
+
 // buildWorkerEnvForChannel assembles the per-channel "KEY=VALUE" env
 // list BridgeConfig.WorkerEnv carries (M1.6-T5 phase-3). cmd/daemon
 // sets DaemonConfig.ChannelTemplates so resolveTemplate returns the L4
@@ -1491,9 +1605,9 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel, sta
 	d.setChannel(lc.ChannelID, cr)
 
 	// M1.6-T1 — register the per-channel agent target so trigger gateway
-	// fan-out has somewhere to route audience=['*']. Done before the
-	// pusher goroutine starts so a write that immediately follows boot
-	// still observes the handler.
+	// fan-out has a stable explicit actor id to route to. Done before
+	// the pusher goroutine starts so a write that immediately follows
+	// boot still observes the handler.
 	if err := d.ensureChannelAgent(ctx, cr); err != nil {
 		d.deleteChannel(lc.ChannelID)
 		return err
@@ -1504,9 +1618,9 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel, sta
 	// Run BEFORE starting the pusher goroutine so a failing hook unwinds
 	// cleanly (no orphan goroutine).
 	if d.cfg.OnChannelBoot != nil {
-		// M1.6-T5 phase-2 — surface the L4 channel-template key into
-		// hooks so cmd/daemon factories can gate themselves (e.g.
-		// XHSScaffoldFactory installs ONLY for type=="xhs-creator").
+		// Surface the channel-template key into hooks so composition-root
+		// boot code can apply template-scoped wiring without runtime
+		// importing adapter packages.
 		// The lock row is the single source of truth across both the
 		// hot OnCreateChannel path (lock just written from req) and
 		// the cold-start path (lock pre-existed on disk).
@@ -2531,15 +2645,14 @@ func (d *Daemon) handleDeviceTransitFrame(ctx context.Context, frame daemonbus.F
 		// per-channel DeviceTransit for adapter-side fan-out.
 		var payload devicetransit.SendFrame
 		if err := transit.DecodePayload(frame, &payload); err != nil {
-			return fmt.Errorf("runtime: decode device_transit %s: %w", frame.FrameKind, err)
+			return d.ackDeviceTransitFrame(ctx, frame, devicetransit.AckRejectedPermanent, "decode_failed", err.Error())
 		}
 		if d.channelFrozen(payload.ChannelID) {
-			return nil
+			return d.ackDeviceTransitFrame(ctx, frame, devicetransit.AckRejectedRetryable, "channel_frozen", "channel is frozen")
 		}
 		cr, ok := d.getChannel(payload.ChannelID)
 		if !ok || cr.deviceTransit == nil {
-			// Unknown channel or no device transit wired — drop.
-			return nil
+			return d.ackDeviceTransitFrame(ctx, frame, devicetransit.AckRejectedRetryable, "channel_unavailable", "channel device transit is not wired")
 		}
 		return cr.deviceTransit.DispatchIncoming(ctx, frame)
 	case daemonbus.FrameTypeDeviceTransitAck:
@@ -2559,6 +2672,18 @@ func (d *Daemon) handleDeviceTransitFrame(ctx context.Context, frame daemonbus.F
 		return firstErr
 	}
 	return nil
+}
+
+func (d *Daemon) ackDeviceTransitFrame(ctx context.Context, frame daemonbus.Frame, result devicetransit.AckResult, reason, detail string) error {
+	if d.transit == nil {
+		return nil
+	}
+	return d.transit.Send(ctx, d.cfg.FrameIDGen(), daemonbus.FrameTypeDeviceTransitAck, devicetransit.AckFrame{
+		CorrelationFrameID: devicetransit.FrameID(frame.FrameID),
+		Result:             result,
+		Reason:             reason,
+		Detail:             detail,
+	})
 }
 
 // handleDeviceLifecycleFrame routes a `device_transit.lifecycle` frame
@@ -2778,7 +2903,6 @@ func (d *Daemon) emitLongPendingFallback(
 	}
 	// M1.6 baseline: 1 channel ↔ 1 device, 1 receiver per request. The
 	// audience[0] entry is the canonical receiver for the SLA decision.
-	// Multi-receiver fan-out (audience=['*'] expansions) is M1.7 scope.
 	receiverID := req.Audience[0]
 
 	reason, emit, err := d.classifyLongPendingReason(ctx, cr, receiverID)

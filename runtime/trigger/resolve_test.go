@@ -176,7 +176,7 @@ func TestResolve_VisibilityIgnoredByTrigger(t *testing.T) {
 		vis  message.Visibility
 		aud  message.Audience
 	}{
-		{"public+wildcard", message.VisibilityPublic, message.Audience{"agent:beta"}},
+		{"public+concrete", message.VisibilityPublic, message.Audience{"agent:beta"}},
 		{"private+concrete", message.VisibilityPrivate, message.Audience{"agent:beta"}},
 	}
 	for _, tc := range cases {

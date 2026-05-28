@@ -49,7 +49,7 @@ const (
 	// bridge switches its react path to that script's emission
 	// sequence. Today the only known value is "xhs-publish": when the
 	// trigger payload.text contains the substring "publish", the bridge
-	// emits a `tool:xhs-adapter`-addressed kind=request envelope of
+	// emits a `tool:xhs`-addressed kind=request envelope of
 	// type=xhs.publish, lets the adapter framework respond, then emits
 	// the agent.text summary terminal. Any other trigger falls through
 	// to the default single-shot reply.
@@ -265,6 +265,7 @@ func (m *MockBridge) Run(ctx context.Context, client *IPCClient) error {
 				return nil
 			}
 			if err := m.react(ctx, client, payload); err != nil {
+				_ = client.AckTrigger(ctx, payload, false, err.Error())
 				return err
 			}
 			m.turns++
@@ -279,10 +280,17 @@ func (m *MockBridge) Run(ctx context.Context, client *IPCClient) error {
 					// Emit a terminal envelope marking next_action=done so
 					// the channel log carries an observable exit point.
 					if err := m.emitTerminal(ctx, client); err != nil {
+						_ = client.AckTrigger(ctx, payload, false, err.Error())
 						return err
 					}
 				}
+				if err := client.AckTrigger(ctx, payload, true, ""); err != nil {
+					return err
+				}
 				return nil
+			}
+			if err := client.AckTrigger(ctx, payload, true, ""); err != nil {
+				return err
 			}
 		}
 	}
@@ -364,7 +372,7 @@ func containsFold(haystack, needle string) bool {
 }
 
 // reactXHSPublish emits a kind=request envelope addressed to
-// tool:xhs-adapter (type=xhs.publish). The framework F1-F8 chain on
+// tool:xhs (type=xhs.publish). The framework F1-F8 chain on
 // the daemon side picks it up, dispatches via device transit, and the
 // adapter response surfaces as a separate envelope on the channel log.
 // Tests assert the request envelope alone — the response is
@@ -388,7 +396,7 @@ func (m *MockBridge) reactXHSPublish(ctx context.Context, client *IPCClient, in 
 		Kind:          message.KindRequest,
 		Sender:        message.Sender{Kind: actor.KindAgent, ID: client.WorkerActorID()},
 		Visibility:    message.VisibilityPublic,
-		Audience:      message.Audience{"tool:xhs-adapter"},
+		Audience:      message.Audience{"tool:xhs"},
 		Payload:       payload,
 		CorrelationID: in.CorrelationID,
 		ParentID:      in.Envelope.ID,

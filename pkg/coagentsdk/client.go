@@ -57,10 +57,12 @@ type CallActorError struct {
 }
 
 type ActorInfo struct {
-	ActorID           string          `json:"actor_id"`
-	Kind              string          `json:"kind,omitempty"`
-	Binding           string          `json:"binding,omitempty"`
-	DisplayName       string          `json:"display_name,omitempty"`
+	ActorID     string `json:"actor_id"`
+	Kind        string `json:"kind,omitempty"`
+	Binding     string `json:"binding,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	// Ready is a display projection from the server actor list. Use
+	// ActorStatus for authoritative current state of one actor.
 	Ready             bool            `json:"ready"`
 	ReadyReason       string          `json:"ready_reason,omitempty"`
 	ReadyDetail       json.RawMessage `json:"ready_detail,omitempty"`
@@ -186,6 +188,10 @@ func (c *Client) CallActor(ctx context.Context, req CallActorRequest) (*CallActo
 	return c.waitResponse(ctx, ws, req, matchIDs, timeout)
 }
 
+// ListActors returns the server's display projection for channel actors.
+// It is useful for catalogs and UI lists, but it is not authoritative
+// current truth. Use ActorStatus / DescribeActor for reserved envelope
+// reads against one actor.
 func (c *Client) ListActors(ctx context.Context, channelID string) ([]ActorInfo, error) {
 	if ctx == nil {
 		ctx = context.Background()

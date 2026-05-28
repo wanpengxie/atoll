@@ -185,6 +185,21 @@ func ensureChannelLocalSchema(ctx context.Context, db *sql.DB) error {
 	`); err != nil {
 		return fmt.Errorf("store: ensure type_registry_pending: %w", err)
 	}
+	messageAdds := map[string]string{
+		"cross_channel_refs": "cross_channel_refs TEXT",
+	}
+	for col, ddl := range messageAdds {
+		ok, err := columnExists(ctx, db, "messages", col)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, "ALTER TABLE messages ADD COLUMN "+ddl); err != nil {
+			return fmt.Errorf("store: add messages.%s: %w", col, err)
+		}
+	}
 	adds := map[string]string{
 		"install_status": "install_status TEXT NOT NULL DEFAULT 'installed' CHECK (install_status IN ('installing','installed','failed'))",
 		"install_error":  "install_error TEXT NOT NULL DEFAULT ''",

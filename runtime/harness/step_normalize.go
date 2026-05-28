@@ -31,6 +31,18 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (khar.Ou
 		return khar.Outcome{}, nil
 	}
 
+	// Sender-provided runtime fields are not protocol content. Dedupe has
+	// already compared sender-provided content, so normalize can clear
+	// these before StepResponsePairing / EngineAppend materialize the
+	// authoritative values.
+	env.TSReceived = 0
+	env.DeliveredAt = nil
+	env.DeliveryFailedAt = nil
+	env.LastError = ""
+	env.Attempts = 0
+	env.Seq = 0
+	env.IsTerminal = false
+
 	// audience is now caller-owned (post wildcard removal). nil ≠ empty
 	// for downstream step 5 audience cardinality check: nil treated as
 	// "empty" → harness_audience_empty.

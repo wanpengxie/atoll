@@ -410,8 +410,8 @@ func TestDaemon_FutureMessage_SchedulerDrains(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Seed the channel_lock (so phase 2 reclaim accepts the channel) +
-	// two actors so audience=['*'] expands to a non-empty set + the
-	// future-message row that the scheduler must drain.
+	// two actors so explicit audience resolution has a non-empty target
+	// set + the future-message row that the scheduler must drain.
 	lock := store.NewChannelLock(db)
 	if err := lock.Insert(ctx, store.ChannelLockRow{
 		ChannelID:    chID,
@@ -822,7 +822,7 @@ func TestDaemon_DeviceTransit_InboundRoutesToPerChannelCallback(t *testing.T) {
 		t.Helper()
 		body := devicetransit.SendFrame{
 			ChannelID:      targetCh,
-			AdapterActorID: "tool:xhs-adapter",
+			AdapterActorID: "tool:xhs",
 			Body:           []byte(payload),
 		}
 		frame, err := transit.Encode("frame-send-"+string(targetCh),
@@ -1140,8 +1140,8 @@ func TestDaemon_Phase3_HeartbeatSender(t *testing.T) {
 
 // TestDaemon_Phase3_ChannelAgent_Registered covers M1.6-T1 P2:
 //   - bootChannel inserts the well-known agent:channel-agent actor row
-//     into the per-channel registry (so trigger.Gateway audience expand
-//     resolves wildcard envelopes to the agent target).
+//     into the per-channel registry so explicit channel-agent audience
+//     messages can route to the agent target.
 //   - bootChannel registers a deliverer handler for that id, so a
 //     post-harness Dispatch reaches the agent layer. The P2 stub just
 //     counts arrivals; P4 swaps in WorkerBridge.OnTrigger via the same

@@ -11,7 +11,7 @@ import (
 func TestDeclarationCatalogFromDeclarationCopiesConventionFields(t *testing.T) {
 	decl := Declaration{
 		Name:         "xhs",
-		ActorID:      actor.ActorID("tool:xhs-adapter"),
+		ActorID:      actor.ActorID("tool:xhs"),
 		Types:        []string{"xhs.publish"},
 		Binding:      actor.BindingEmbedded,
 		MaxPendingMs: 300_000,

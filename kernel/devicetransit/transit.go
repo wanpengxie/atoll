@@ -5,6 +5,7 @@ package devicetransit
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -32,8 +33,11 @@ type SendFrame struct {
 type AckResult string
 
 const (
-	AckDelivered AckResult = "delivered"
-	AckDropped   AckResult = "dropped"
+	AckDelivered         AckResult = "delivered"
+	AckDropped           AckResult = "dropped"
+	AckAccepted          AckResult = "accepted"
+	AckRejectedPermanent AckResult = "rejected_permanent"
+	AckRejectedRetryable AckResult = "rejected_retryable"
 )
 
 // AckFrame is the `device_transit.ack` payload.
@@ -42,6 +46,45 @@ type AckFrame struct {
 	Result             AckResult `json:"result"`
 	Reason             string    `json:"reason,omitempty"`
 	Detail             string    `json:"detail,omitempty"`
+}
+
+// AckError lets semantic receivers return a device_transit ack disposition
+// without losing retryability/permanence across callback routing layers.
+type AckError struct {
+	Result AckResult
+	Reason string
+	Detail string
+	Err    error
+}
+
+func (e *AckError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Detail != "" {
+		return fmt.Sprintf("%s: %s", e.Reason, e.Detail)
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return e.Reason
+}
+
+func (e *AckError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func NewAckError(result AckResult, reason, detail string, err error) *AckError {
+	if reason == "" {
+		reason = string(result)
+	}
+	if detail == "" && err != nil {
+		detail = err.Error()
+	}
+	return &AckError{Result: result, Reason: reason, Detail: detail, Err: err}
 }
 
 // DeviceTransit is the kernel-level seam the runtime_inbound_via_relay binding uses
