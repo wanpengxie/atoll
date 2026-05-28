@@ -19,6 +19,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/viewsync"
 	"github.com/wanpengxie/ActOS/server/catalog"
 	"github.com/wanpengxie/ActOS/server/daemonbus"
 	"github.com/wanpengxie/ActOS/server/devicebus"
@@ -28,6 +30,32 @@ import (
 	"github.com/wanpengxie/ActOS/server/store"
 	"github.com/wanpengxie/ActOS/server/viewcache"
 )
+
+// viewcacheReplayer adapts *viewcache.Service to the pushhub.Replayer
+// interface: subscribe(since_seq=N) walks the persisted channel log via
+// the viewcache messages projection. We keep the adapter package-local
+// in gateway because pushhub deliberately does NOT import viewcache —
+// the dependency points one way (gateway wires the adapter at boot,
+// pushhub stays storage-agnostic so unit tests can fake the replay
+// source without touching sqlite).
+type viewcacheReplayer struct {
+	vc *viewcache.Service
+}
+
+func (a viewcacheReplayer) ReplayMessages(ctx context.Context, channelID channel.ID, afterSeq viewsync.Seq, limit int) ([]pushhub.ReplayMessage, error) {
+	if a.vc == nil {
+		return nil, nil
+	}
+	rows, err := a.vc.Messages(ctx, channelID, afterSeq, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]pushhub.ReplayMessage, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, pushhub.ReplayMessage{Seq: r.Seq, Envelope: r.Envelope})
+	}
+	return out, nil
+}
 
 // pkgLogger is the package-level zerolog handle used for boot-time
 // warnings (dev-sentinel use). Tests can swap it via SetLogger.
@@ -228,6 +256,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	app.viewcache.SetResyncCompletionNotifier(app)
 	app.viewcache.SetAccessAuthorizer(app)
 	app.pushhub.SetAccessAuthorizer(app)
+	app.pushhub.SetReplayer(viewcacheReplayer{vc: app.viewcache})
 	app.placements.SetAccessAuthorizer(app)
 	app.catalog.SetSubscriptionRevoker(app.pushhub)
 	app.catalog.SetPlacementHook(app)

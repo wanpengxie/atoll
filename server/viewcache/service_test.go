@@ -479,6 +479,109 @@ func TestMessagesPagination(t *testing.T) {
 	}
 }
 
+// TestApplyTransparentForProvisionalAndFinalResponse asserts the viewcache
+// path is envelope-agnostic across kind=response provisional + final
+// statuses introduced by the response multi-type refactor
+// (.dalek/pm/response-multitype-refactor.md §2.5 / §3.5 E). The server
+// MUST persist every envelope the daemon pushes without inspecting
+// payload.status or is_terminal: provisional Layer 2 (e.g. "received"),
+// Layer 3 namespaced ("xhs.queued"), and Layer 1 final ("completed" /
+// "failed") all flow through Apply → view_cache_messages → Messages
+// identically.
+func TestApplyTransparentForProvisionalAndFinalResponse(t *testing.T) {
+	t.Parallel()
+	svc := newSvc(t)
+	ctx := context.Background()
+
+	const channelID channel.ID = "ch-multi-resp"
+	reqID := message.ID("req-1")
+
+	mkFrame := func(seq viewsync.Seq, id string, payload string, isTerminal bool) viewsync.PushFrame {
+		return viewsync.PushFrame{
+			ChannelID: channelID,
+			Seq:       seq,
+			MessageID: message.ID(id),
+			Envelope: message.Envelope{
+				ID:         message.ID(id),
+				TS:         int64(seq) * 1000,
+				ChannelID:  channelID,
+				Sender:     message.Sender{Kind: actor.KindTool, ID: "tool:xhs"},
+				Kind:       message.KindResponse,
+				Type:       "xhs.publish",
+				Payload:    json.RawMessage(payload),
+				ParentID:   reqID,
+				Visibility: message.VisibilityPublic,
+				Audience:   message.Audience{"user:alice"},
+				Seq:        int64(seq),
+				IsTerminal: isTerminal,
+			},
+		}
+	}
+
+	// Stream: provisional Layer 2 received → Layer 3 xhs.queued →
+	// Layer 2 processing → Layer 1 final completed. The server applies
+	// every frame without inspecting payload.status.
+	frames := []viewsync.PushFrame{
+		mkFrame(1, "resp-1", `{"status":"received"}`, false),
+		mkFrame(2, "resp-2", `{"status":"xhs.queued","queue_position":3}`, false),
+		mkFrame(3, "resp-3", `{"status":"processing","progress_percent":42}`, false),
+		mkFrame(4, "resp-4", `{"status":"completed","note_id":"n-1"}`, true),
+	}
+	for _, f := range frames {
+		got, err := svc.Apply(ctx, f)
+		if err != nil {
+			t.Fatalf("Apply seq=%d: %v", f.Seq, err)
+		}
+		if got.Outcome != viewsync.ApplyOutcomeContiguous {
+			t.Errorf("seq=%d outcome=%q want contiguous", f.Seq, got.Outcome)
+		}
+	}
+
+	msgs, err := svc.Messages(ctx, channelID, 0, 100)
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	if len(msgs) != 4 {
+		t.Fatalf("len=%d want 4 (provisional + final all persisted)", len(msgs))
+	}
+
+	// Verify every envelope round-trips with kind=response and the
+	// original payload.status. is_terminal flag survives independently
+	// of the status the daemon stamped (server stores opaque envelope).
+	type wantRow struct {
+		id     string
+		status string
+		term   bool
+	}
+	wants := []wantRow{
+		{"resp-1", "received", false},
+		{"resp-2", "xhs.queued", false},
+		{"resp-3", "processing", false},
+		{"resp-4", "completed", true},
+	}
+	for i, w := range wants {
+		got := msgs[i]
+		if string(got.MessageID) != w.id {
+			t.Errorf("row %d: message_id=%q want %q", i, got.MessageID, w.id)
+		}
+		if got.Envelope.Kind != message.KindResponse {
+			t.Errorf("row %d: kind=%q want response", i, got.Envelope.Kind)
+		}
+		if got.Envelope.IsTerminal != w.term {
+			t.Errorf("row %d: is_terminal=%v want %v", i, got.Envelope.IsTerminal, w.term)
+		}
+		var p struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(got.Envelope.Payload, &p); err != nil {
+			t.Fatalf("row %d: unmarshal payload: %v", i, err)
+		}
+		if p.Status != w.status {
+			t.Errorf("row %d: payload.status=%q want %q", i, p.Status, w.status)
+		}
+	}
+}
+
 // fakeResyncer satisfies viewcache.Resyncer for tests.
 type fakeResyncer struct {
 	messages func(since, until viewsync.Seq) []viewsync.ResyncMessage

@@ -56,6 +56,13 @@ const pushhubIdleReadTimeout = 70 * time.Second
 // Larger frames are closed before JSON allocation/validation.
 const pushhubWSReadLimit int64 = 4 << 20
 
+// pushhubReplayBatchSize bounds the number of viewcache rows fetched per
+// replay round-trip on subscribe. Subscribe(since_seq=N) replays
+// (N, cursor] in batches of this size until exhausted; each batch is
+// enqueued in seq-ascending order before the next batch is fetched so
+// the subscriber's seq dedupe (lastEnqueued) stays monotonic.
+const pushhubReplayBatchSize = 500
+
 // pushhubPingWriteTimeout caps a single ping write; on failure the
 // subscriber is closed and pumpRead exits.
 const pushhubPingWriteTimeout = 5 * time.Second
@@ -87,6 +94,9 @@ type Service struct {
 	accessMu sync.RWMutex
 	access   channelaccess.Authorizer
 
+	replayMu sync.RWMutex
+	replayer Replayer
+
 	// keepalive parameters. Mutated only by SetKeepaliveForTest; read
 	// without lock at subscribe-time (zero = production default).
 	pingCadence      time.Duration
@@ -96,6 +106,23 @@ type Service struct {
 	allowedOrigins map[string]struct{}
 	log            *slog.Logger
 	metrics        *metrics.Registry
+}
+
+// ReplayMessage is one row returned by a Replayer (the gateway-side
+// viewcache projection of the channel log used to serve subscribe
+// since_seq replay).
+type ReplayMessage struct {
+	Seq      viewsync.Seq
+	Envelope message.Envelope
+}
+
+// Replayer surfaces the viewcache window query needed to satisfy a
+// subscribe(since_seq=N) request: return every persisted message whose
+// seq is strictly greater than afterSeq, in seq-ascending order,
+// bounded by limit. Implementations MUST be safe for concurrent
+// invocations across distinct channel ids.
+type Replayer interface {
+	ReplayMessages(ctx context.Context, channelID channel.ID, afterSeq viewsync.Seq, limit int) ([]ReplayMessage, error)
 }
 
 // PushedFrame is the in-memory shape delivered to test observers.
@@ -140,6 +167,21 @@ func (h *Service) SetAccessAuthorizer(a channelaccess.Authorizer) {
 	h.accessMu.Lock()
 	h.access = a
 	h.accessMu.Unlock()
+}
+
+// SetReplayer wires the viewcache-backed replay source consulted on
+// subscribe(since_seq=N). nil disables replay (subscribe behaves as
+// live-only, the pre-since_seq behaviour).
+func (h *Service) SetReplayer(r Replayer) {
+	h.replayMu.Lock()
+	h.replayer = r
+	h.replayMu.Unlock()
+}
+
+func (h *Service) currentReplayer() Replayer {
+	h.replayMu.RLock()
+	defer h.replayMu.RUnlock()
+	return h.replayer
 }
 
 // SetKeepaliveForTest overrides the ping cadence + idle read timeout
@@ -215,11 +257,28 @@ type subscriber struct {
 	// observed by PushMessage.
 	lastEnqueued map[channel.ID]viewsync.Seq
 
+	// replayPending is set for a channel between subscribe entry and
+	// replay completion. While set, enqueueMessage diverts live frames
+	// into replayBuffer instead of send so the subscriber observes
+	// (replay frames..., live frames...) in strict seq-ascending order
+	// without dropping any frame committed mid-subscribe.
+	replayPending map[channel.ID]bool
+	replayBuffer  map[channel.ID][]bufferedFrame
+
 	// keepalive parameters captured at construction (so test overrides
 	// don't race with production defaults).
 	pingCadence      time.Duration
 	idleReadTimeout  time.Duration
 	pingWriteTimeout time.Duration
+}
+
+// bufferedFrame is one live push captured while a channel subscribe was
+// still replaying its since_seq backlog. After replay completes the
+// subscriber drains these in seq-ascending order, dedup'd against
+// lastEnqueued so a replayed row already pushed live is not re-sent.
+type bufferedFrame struct {
+	seq viewsync.Seq
+	raw []byte
 }
 
 func newSubscriber(ws *websocket.Conn, userID string, pingCadence, idleReadTimeout, pingWriteTimeout time.Duration) *subscriber {
@@ -230,6 +289,8 @@ func newSubscriber(ws *websocket.Conn, userID string, pingCadence, idleReadTimeo
 		send:             make(chan []byte, 64),
 		done:             make(chan struct{}),
 		lastEnqueued:     map[channel.ID]viewsync.Seq{},
+		replayPending:    map[channel.ID]bool{},
+		replayBuffer:     map[channel.ID][]bufferedFrame{},
 		pingCadence:      pingCadence,
 		idleReadTimeout:  idleReadTimeout,
 		pingWriteTimeout: pingWriteTimeout,
@@ -263,6 +324,22 @@ func (s *subscriber) enqueueMessage(channelID channel.ID, seq viewsync.Seq, raw 
 		return subscriberEnqueueDuplicate
 	}
 
+	// Replay window: divert live frames into the per-channel buffer so
+	// they get reordered with the replayed backlog and flushed after.
+	// Bounded by the same byte cap as send to bound memory pressure on a
+	// slow subscriber stuck in replay.
+	if s.replayPending[channelID] {
+		buf := s.replayBuffer[channelID]
+		if len(buf) >= cap(s.send) {
+			// Buffer overflow during replay → treat as slow-closed so the
+			// client reconnects and resyncs explicitly.
+			s.Close()
+			return subscriberEnqueueSlowClosed
+		}
+		s.replayBuffer[channelID] = append(buf, bufferedFrame{seq: seq, raw: raw})
+		return subscriberEnqueueDelivered
+	}
+
 	select {
 	case s.send <- raw:
 		s.lastEnqueued[channelID] = seq
@@ -272,6 +349,69 @@ func (s *subscriber) enqueueMessage(channelID channel.ID, seq viewsync.Seq, raw 
 	default:
 		s.Close()
 		return subscriberEnqueueSlowClosed
+	}
+}
+
+// flushReplayBuffer drains the per-channel buffered live frames captured
+// during the subscribe replay window. Caller MUST hold s.mu. Frames are
+// emitted in seq-ascending order, dedup'd against lastEnqueued so a row
+// already delivered via replay is not re-sent. The replayPending flag is
+// cleared regardless of outcome so subsequent live pushes flow direct
+// even if a flush write blocks.
+func (s *subscriber) flushReplayBuffer(channelID channel.ID) {
+	buf := s.replayBuffer[channelID]
+	delete(s.replayBuffer, channelID)
+	delete(s.replayPending, channelID)
+	if len(buf) == 0 {
+		return
+	}
+	sortBufferedFramesBySeq(buf)
+	for _, f := range buf {
+		if last, ok := s.lastEnqueued[channelID]; ok && f.seq <= last {
+			continue
+		}
+		select {
+		case s.send <- f.raw:
+			s.lastEnqueued[channelID] = f.seq
+		case <-s.done:
+			return
+		default:
+			s.Close()
+			return
+		}
+	}
+}
+
+// directEnqueue is the replay-side enqueue used by Service.subscribe to
+// push replayed rows in strict ascending order. It bypasses the
+// replayPending gate (caller IS the replay) but still honours
+// lastEnqueued dedupe + send-channel backpressure semantics.
+func (s *subscriber) directEnqueue(channelID channel.ID, seq viewsync.Seq, raw []byte) subscriberEnqueueResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if last, ok := s.lastEnqueued[channelID]; ok && seq <= last {
+		return subscriberEnqueueDuplicate
+	}
+	select {
+	case s.send <- raw:
+		s.lastEnqueued[channelID] = seq
+		return subscriberEnqueueDelivered
+	case <-s.done:
+		return subscriberEnqueueClosed
+	default:
+		s.Close()
+		return subscriberEnqueueSlowClosed
+	}
+}
+
+func sortBufferedFramesBySeq(buf []bufferedFrame) {
+	// Inline insertion sort — buffers are tiny in practice (replay window
+	// is sub-millisecond for the common case) so allocation-free is
+	// preferable to sort.Slice.
+	for i := 1; i < len(buf); i++ {
+		for j := i; j > 0 && buf[j].seq < buf[j-1].seq; j-- {
+			buf[j], buf[j-1] = buf[j-1], buf[j]
+		}
 	}
 }
 
@@ -351,13 +491,14 @@ func (s *subscriber) pumpRead(ctx context.Context, hub *Service) {
 		var ctrl struct {
 			Type      string     `json:"type"`
 			ChannelID channel.ID `json:"channel_id"`
+			SinceSeq  int64      `json:"since_seq"`
 		}
 		if err := json.Unmarshal(raw, &ctrl); err != nil {
 			continue
 		}
 		switch ctrl.Type {
 		case "subscribe":
-			if err := hub.subscribe(ctx, s, ctrl.ChannelID); err != nil {
+			if err := hub.subscribe(ctx, s, ctrl.ChannelID, viewsync.Seq(ctrl.SinceSeq)); err != nil {
 				s.sendSubscribeRejected(ctrl.ChannelID)
 			}
 		case "unsubscribe":
@@ -534,12 +675,47 @@ func (h *Service) RegisterPushObserverForTest(channelID channel.ID, fn func(Push
 	}
 }
 
-func (h *Service) subscribe(ctx context.Context, sub *subscriber, channelID channel.ID) error {
+// subscribe registers sub for channelID and replays any persisted
+// envelope with seq > sinceSeq.
+//
+// Atomicity contract (the fix for the D18 / F27 race):
+//
+//  1. Mark the channel replayPending on sub BEFORE registering in
+//     h.subs. Any live PushMessage that races us is diverted into
+//     sub.replayBuffer instead of dropping (sub not registered yet) or
+//     interleaving (sub registered, replay still streaming).
+//  2. Register sub in h.subs so live pushes start landing in the buffer.
+//  3. Call Replayer.ReplayMessages(channelID, sinceSeq, ...) to fetch
+//     persisted rows (sinceSeq, current_cursor]. Push each via
+//     directEnqueue in seq-ascending order; subscriber's lastEnqueued
+//     advances monotonically.
+//  4. Flush the live buffer in seq order, dedup'd against lastEnqueued
+//     so a row that was both persisted (replayed) and pushed live
+//     (during step 2-3 race) is not re-sent.
+//
+// sinceSeq=0 means "live only — no replay, just register". sinceSeq>0
+// triggers replay. The replay/live boundary is invisible to the client:
+// it sees one ordered, dedup'd stream regardless.
+func (h *Service) subscribe(ctx context.Context, sub *subscriber, channelID channel.ID, sinceSeq viewsync.Seq) error {
 	if err := channelaccess.Require(ctx, h.accessAuthorizer(), string(channelID), sub.userID); err != nil {
 		return err
 	}
+	replayer := h.currentReplayer()
+	doReplay := sinceSeq >= 0 && replayer != nil
+
+	// Phase 1: arm replay buffer (if any), then register sub in h.subs.
+	// This is two locks (sub.mu, h.mu) acquired in disjoint critical
+	// sections so a slow PushMessage can't deadlock subscribe.
+	if doReplay {
+		sub.mu.Lock()
+		sub.replayPending[channelID] = true
+		if _, ok := sub.replayBuffer[channelID]; !ok {
+			sub.replayBuffer[channelID] = nil
+		}
+		sub.mu.Unlock()
+	}
+
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if _, ok := h.subs[channelID]; !ok {
 		h.subs[channelID] = map[string]map[*subscriber]struct{}{}
 	}
@@ -548,6 +724,65 @@ func (h *Service) subscribe(ctx context.Context, sub *subscriber, channelID chan
 	}
 	h.subs[channelID][sub.userID][sub] = struct{}{}
 	sub.chans[channelID] = struct{}{}
+	h.mu.Unlock()
+
+	if !doReplay {
+		return nil
+	}
+
+	// Phase 2: drive the replay loop. We page through the viewcache
+	// rows in pushhubReplayBatchSize chunks so a channel with a huge
+	// backlog doesn't load every row into memory at once.
+	cursor := sinceSeq
+	auth := h.accessAuthorizer()
+	memberActorID, memberErr := channelaccess.RequireMemberActor(ctx, auth, string(channelID), sub.userID)
+	for {
+		msgs, err := replayer.ReplayMessages(ctx, channelID, cursor, pushhubReplayBatchSize)
+		if err != nil {
+			h.log.Warn("pushhub.replay_failed",
+				"channel_id", string(channelID),
+				"since_seq", int64(cursor),
+				"user_id", sub.userID,
+				"error", err.Error())
+			break
+		}
+		if len(msgs) == 0 {
+			break
+		}
+		for _, m := range msgs {
+			cursor = m.Seq
+			if memberErr != nil || !channelaccess.VisibleToActor(m.Envelope, memberActorID) {
+				continue
+			}
+			payload := map[string]any{
+				"type":       "message",
+				"channel_id": string(channelID),
+				"seq":        int64(m.Seq),
+				"envelope":   m.Envelope,
+			}
+			raw, jerr := json.Marshal(payload)
+			if jerr != nil {
+				continue
+			}
+			result := sub.directEnqueue(channelID, m.Seq, raw)
+			h.recordFanoutResult(result)
+			if result == subscriberEnqueueClosed || result == subscriberEnqueueSlowClosed {
+				// Subscriber is dead — give up on replay.
+				sub.mu.Lock()
+				sub.flushReplayBuffer(channelID)
+				sub.mu.Unlock()
+				return nil
+			}
+		}
+		if len(msgs) < pushhubReplayBatchSize {
+			break
+		}
+	}
+
+	// Phase 3: flush any live frames captured during phases 1-2.
+	sub.mu.Lock()
+	sub.flushReplayBuffer(channelID)
+	sub.mu.Unlock()
 	return nil
 }
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -312,11 +313,13 @@ func TestPushMessageSlowSubscriberClosedOnFullQueue(t *testing.T) {
 
 func newPushhubTestSubscriber(userID string, sendCap int) *subscriber {
 	return &subscriber{
-		userID:       userID,
-		chans:        map[channel.ID]struct{}{},
-		send:         make(chan []byte, sendCap),
-		done:         make(chan struct{}),
-		lastEnqueued: map[channel.ID]viewsync.Seq{},
+		userID:        userID,
+		chans:         map[channel.ID]struct{}{},
+		send:          make(chan []byte, sendCap),
+		done:          make(chan struct{}),
+		lastEnqueued:  map[channel.ID]viewsync.Seq{},
+		replayPending: map[channel.ID]bool{},
+		replayBuffer:  map[channel.ID][]bufferedFrame{},
 	}
 }
 
@@ -331,6 +334,231 @@ func registerPushhubTestSubscriber(hub *Service, ch channel.ID, sub *subscriber)
 	}
 	hub.subs[ch][sub.userID][sub] = struct{}{}
 	sub.chans[ch] = struct{}{}
+}
+
+// fakeReplayer is a test-only pushhub.Replayer that returns a fixed
+// list of persisted messages for a single channel, sliced by afterSeq.
+type fakeReplayer struct {
+	mu       sync.Mutex
+	messages map[channel.ID][]ReplayMessage
+	calls    int
+}
+
+func (f *fakeReplayer) seed(ch channel.ID, msgs []ReplayMessage) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.messages == nil {
+		f.messages = map[channel.ID][]ReplayMessage{}
+	}
+	f.messages[ch] = msgs
+}
+
+func (f *fakeReplayer) ReplayMessages(_ context.Context, ch channel.ID, afterSeq viewsync.Seq, limit int) ([]ReplayMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	all := f.messages[ch]
+	out := make([]ReplayMessage, 0, len(all))
+	for _, m := range all {
+		if m.Seq > afterSeq {
+			out = append(out, m)
+		}
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// TestSubscribeReplay_DeliversPersistedFramesSinceSeq verifies the
+// since_seq=N subscribe contract: the subscriber receives every
+// persisted envelope with seq > N in seq-ascending order before any
+// live push, and live pushes after replay are delivered without
+// duplication or reordering.
+//
+// This is the D18 / F27 race-fix regression test: without server-side
+// replay, a "fast final" emitted before WS subscribe completes is lost.
+func TestSubscribeReplay_DeliversPersistedFramesSinceSeq(t *testing.T) {
+	t.Parallel()
+
+	hub := NewService()
+	hub.SetAccessAuthorizer(allowAllAuth{})
+	ch := channel.ID("ch-replay")
+
+	// Seed viewcache projection with seq=1,2,3 already persisted.
+	fr := &fakeReplayer{}
+	fr.seed(ch, []ReplayMessage{
+		{Seq: 1, Envelope: pushhubTestEnvelope(ch, "m-1")},
+		{Seq: 2, Envelope: pushhubTestEnvelope(ch, "m-2")},
+		{Seq: 3, Envelope: pushhubTestEnvelope(ch, "m-3")},
+	})
+	hub.SetReplayer(fr)
+
+	sub := newPushhubTestSubscriber("u1", 16)
+	// Subscribe with since_seq=0: replay [1, 3] then live.
+	if err := hub.subscribe(context.Background(), sub, ch, 0); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	// Now push live seq=4,5.
+	hub.PushMessage(ch, 4, pushhubTestEnvelope(ch, "m-4"))
+	hub.PushMessage(ch, 5, pushhubTestEnvelope(ch, "m-5"))
+
+	got := drainSeqs(sub, 5, 500*time.Millisecond)
+	want := []int64{1, 2, 3, 4, 5}
+	if !equalSeqs(got, want) {
+		t.Fatalf("delivered seqs=%v want=%v", got, want)
+	}
+}
+
+// TestSubscribeReplay_SinceSeqSkipsAlreadySeen verifies that
+// since_seq=N replays only seq>N — the seqs in (-∞, N] are already
+// known to the client and MUST NOT be re-delivered.
+func TestSubscribeReplay_SinceSeqSkipsAlreadySeen(t *testing.T) {
+	t.Parallel()
+
+	hub := NewService()
+	hub.SetAccessAuthorizer(allowAllAuth{})
+	ch := channel.ID("ch-replay-skip")
+
+	fr := &fakeReplayer{}
+	fr.seed(ch, []ReplayMessage{
+		{Seq: 1, Envelope: pushhubTestEnvelope(ch, "m-1")},
+		{Seq: 2, Envelope: pushhubTestEnvelope(ch, "m-2")},
+		{Seq: 3, Envelope: pushhubTestEnvelope(ch, "m-3")},
+	})
+	hub.SetReplayer(fr)
+
+	sub := newPushhubTestSubscriber("u1", 16)
+	if err := hub.subscribe(context.Background(), sub, ch, 2); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	got := drainSeqs(sub, 1, 200*time.Millisecond)
+	want := []int64{3}
+	if !equalSeqs(got, want) {
+		t.Fatalf("delivered seqs=%v want=%v", got, want)
+	}
+}
+
+// TestSubscribeReplay_LivePushDuringReplayIsReordered is the core race
+// regression: a live PushMessage that races the replay phase MUST be
+// buffered + reordered so the subscriber observes ASC seq with no gaps
+// or duplicates. We simulate the race by injecting a fixed replayer
+// that pushes a live seq mid-replay (the test drives PushMessage from a
+// goroutine concurrent with subscribe).
+func TestSubscribeReplay_LivePushDuringReplayIsReordered(t *testing.T) {
+	t.Parallel()
+
+	hub := NewService()
+	hub.SetAccessAuthorizer(allowAllAuth{})
+	ch := channel.ID("ch-replay-race")
+
+	// Replayer that stalls between the first and second batch so a live
+	// push lands in the middle of replay.
+	gate := make(chan struct{})
+	fr := &stallReplayer{
+		messages: []ReplayMessage{
+			{Seq: 1, Envelope: pushhubTestEnvelope(ch, "m-1")},
+			{Seq: 2, Envelope: pushhubTestEnvelope(ch, "m-2")},
+		},
+		gate: gate,
+	}
+	hub.SetReplayer(fr)
+
+	sub := newPushhubTestSubscriber("u1", 16)
+	subscribeDone := make(chan struct{})
+	go func() {
+		defer close(subscribeDone)
+		if err := hub.subscribe(context.Background(), sub, ch, 0); err != nil {
+			t.Errorf("subscribe: %v", err)
+		}
+	}()
+	// Wait until replayer has been invoked once (replay started, sub
+	// registered in h.subs).
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if hub.SubscriberCount(ch) == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if hub.SubscriberCount(ch) != 1 {
+		t.Fatalf("subscriber didn't register; count=%d", hub.SubscriberCount(ch))
+	}
+	// Inject live push at seq=3 while replay is still stalled.
+	hub.PushMessage(ch, 3, pushhubTestEnvelope(ch, "m-3"))
+	// Release the replayer.
+	close(gate)
+	<-subscribeDone
+
+	// Live push at seq=4 after replay completes.
+	hub.PushMessage(ch, 4, pushhubTestEnvelope(ch, "m-4"))
+
+	got := drainSeqs(sub, 4, 500*time.Millisecond)
+	want := []int64{1, 2, 3, 4}
+	if !equalSeqs(got, want) {
+		t.Fatalf("delivered seqs=%v want=%v (race: live push during replay must not be lost or reordered)", got, want)
+	}
+}
+
+// stallReplayer is a deterministic race-test helper: ReplayMessages
+// blocks until gate closes, so the test can fire a live PushMessage
+// while subscribe() is mid-replay and assert reordering.
+type stallReplayer struct {
+	messages []ReplayMessage
+	gate     chan struct{}
+	once     sync.Once
+}
+
+func (s *stallReplayer) ReplayMessages(_ context.Context, _ channel.ID, afterSeq viewsync.Seq, limit int) ([]ReplayMessage, error) {
+	// Block once so the live push has a guaranteed window.
+	s.once.Do(func() { <-s.gate })
+	out := make([]ReplayMessage, 0, len(s.messages))
+	for _, m := range s.messages {
+		if m.Seq > afterSeq {
+			out = append(out, m)
+		}
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// drainSeqs pulls up to n frames from sub.send within deadline and
+// returns their seq values in delivery order.
+func drainSeqs(sub *subscriber, n int, deadline time.Duration) []int64 {
+	out := make([]int64, 0, n)
+	timer := time.NewTimer(deadline)
+	defer timer.Stop()
+	for len(out) < n {
+		select {
+		case raw := <-sub.send:
+			var frame struct {
+				Seq int64 `json:"seq"`
+			}
+			if err := json.Unmarshal(raw, &frame); err != nil {
+				return out
+			}
+			out = append(out, frame.Seq)
+		case <-timer.C:
+			return out
+		}
+	}
+	return out
+}
+
+func equalSeqs(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func pushhubTestEnvelope(ch channel.ID, id message.ID) message.Envelope {
