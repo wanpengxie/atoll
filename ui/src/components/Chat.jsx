@@ -19,18 +19,36 @@ export default function Chat({ channelID, channel, me }) {
   const [sending, setSending] = useState(false);
   const socketRef = useRef(null);
   const listRef = useRef(null);
+  // Max seq observed in the HTTP initial load, used as the WS subscribe
+  // since_seq so the server backfills any envelope that landed between
+  // the HTTP query and the WS subscribe registering. null until the load
+  // resolves — the WS subscribe waits for it so the replay window is
+  // anchored to exactly what HTTP already returned.
+  const [loadCursor, setLoadCursor] = useState(null);
 
   // (Re)load messages on channel change.
   useEffect(() => {
     setError('');
     setMessages([]);
+    setLoadCursor(null);
     if (!channelID) return;
     let alive = true;
     (async () => {
       try {
         const res = await api.listMessages(channelID);
         if (!alive) return;
-        setMessages(res.messages || []);
+        const loaded = res.messages || [];
+        setMessages(loaded);
+        // Anchor the WS replay window to the highest seq we just loaded.
+        // 0 (empty channel / no seq) is a valid anchor — the server
+        // replays seq > 0, i.e. the whole contiguous prefix, which is
+        // exactly right when HTTP returned nothing.
+        let maxSeq = 0;
+        for (const m of loaded) {
+          const s = Number(m?.seq ?? m?.Seq ?? 0);
+          if (Number.isFinite(s) && s > maxSeq) maxSeq = s;
+        }
+        setLoadCursor(maxSeq);
       } catch (err) {
         if (alive) setError(err.message || String(err));
       }
@@ -40,18 +58,20 @@ export default function Chat({ channelID, channel, me }) {
     };
   }, [channelID]);
 
-  // WS subscribe per channel.
+  // WS subscribe per channel — deferred until the HTTP load resolves so
+  // we can subscribe with since_seq = the max loaded seq. The server then
+  // replays (since_seq, cursor], closing the post-load / pre-subscribe
+  // race window. Overlap with the HTTP load is deduped by envelope id
+  // below. (NF1 / W1)
   useEffect(() => {
-    if (!channelID) return;
+    if (!channelID || loadCursor === null) return;
     const socket = new ChannelSocket((chID, seq, envelope) => {
       if (chID !== channelID) return;
       setMessages((prev) => {
-        // Idempotent append keyed by envelope id. WS is live-only (the
-        // server does NOT replay history on a since_seq-less subscribe),
-        // so the HTTP initial load owns history. The only overlap is the
-        // narrow race where a message arrives between the HTTP query and
-        // the WS subscribe registering server-side — dedup by id keeps
-        // that from double-rendering. (NF1)
+        // Idempotent append keyed by envelope id. The WS stream may
+        // replay rows the HTTP load already has (overlap in the
+        // since_seq window) — dedup by id keeps those from
+        // double-rendering while still backfilling the gap.
         const id = envelope?.id || envelope?.ID;
         if (id) {
           for (const m of prev) {
@@ -63,13 +83,13 @@ export default function Chat({ channelID, channel, me }) {
     });
     socketRef.current = socket;
     socket.start();
-    socket.subscribe(channelID);
+    socket.subscribe(channelID, loadCursor);
     return () => {
       socket.unsubscribe(channelID);
       socket.stop?.();
       socketRef.current = null;
     };
-  }, [channelID]);
+  }, [channelID, loadCursor]);
 
   // Auto-scroll to bottom.
   useEffect(() => {

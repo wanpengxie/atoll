@@ -53,11 +53,22 @@ func (a viewcacheReplayer) ReplayMessages(ctx context.Context, channelID channel
 	// the replay window to last_received_seq so we only ever replay the
 	// contiguous prefix; the gap-buffered tail is delivered via live
 	// fanout once the missing seqs fill and the cursor advances.
-	cursor, err := a.vc.Cursor(ctx, channelID)
+	//
+	// W2: read Messages FIRST, then the cursor as the cap. The two reads
+	// are not a single snapshot, so order matters. With Messages-then-
+	// cursor: any row we hold at seq N is included iff N <= cursor; since
+	// the cursor only advances monotonically and is read after the rows,
+	// a row that became contiguous after our Messages read just gets a
+	// cap >= its seq (it's simply absent from our rows and arrives via
+	// live fanout — not dropped). The reverse order (cursor-then-Messages)
+	// risks a cursor that advanced between the two reads dropping a now-
+	// contiguous row that Messages did return — the very gap TriggerResync
+	// (Apply-only, no fanout) cannot backfill.
+	rows, err := a.vc.Messages(ctx, channelID, afterSeq, limit)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := a.vc.Messages(ctx, channelID, afterSeq, limit)
+	cursor, err := a.vc.Cursor(ctx, channelID)
 	if err != nil {
 		return nil, err
 	}

@@ -20,6 +20,12 @@ export class ChannelSocket {
     this.ws = null;
     this.subscribed = new Set();
     this.pendingSubscribe = new Set();
+    // channelID → since_seq for the subscribe frame. A value present here
+    // (including 0) makes the server replay every persisted envelope with
+    // seq > since_seq before streaming live — closing the narrow window
+    // where a message arrives between the HTTP initial load and the WS
+    // subscribe registering server-side. Absent (undefined) → live-only.
+    this.sinceSeq = new Map();
     this.reconnectAttempts = 0;
     this.shouldRun = false;
   }
@@ -37,8 +43,21 @@ export class ChannelSocket {
     this.pendingSubscribe.clear();
   }
 
-  subscribe(channelID) {
+  /**
+   * Subscribe to channelID. When sinceSeq is a number, the server replays
+   * persisted envelopes with seq > sinceSeq before streaming live; the
+   * caller passes the max seq it already loaded over HTTP so the
+   * post-load / pre-subscribe race window is backfilled (dedup is the
+   * caller's responsibility — overlap is expected). Omit sinceSeq for a
+   * live-only subscribe.
+   * @param {string} channelID
+   * @param {number} [sinceSeq]
+   */
+  subscribe(channelID, sinceSeq) {
     this.pendingSubscribe.add(channelID);
+    if (typeof sinceSeq === 'number') {
+      this.sinceSeq.set(channelID, sinceSeq);
+    }
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this._flushPending();
     }
@@ -47,6 +66,7 @@ export class ChannelSocket {
   unsubscribe(channelID) {
     this.pendingSubscribe.delete(channelID);
     this.subscribed.delete(channelID);
+    this.sinceSeq.delete(channelID);
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'unsubscribe', channel_id: channelID }));
     }
@@ -87,7 +107,10 @@ export class ChannelSocket {
 
   _flushPending() {
     for (const chID of this.pendingSubscribe) {
-      this.ws.send(JSON.stringify({ type: 'subscribe', channel_id: chID }));
+      const frame = { type: 'subscribe', channel_id: chID };
+      const since = this.sinceSeq.get(chID);
+      if (typeof since === 'number') frame.since_seq = since;
+      this.ws.send(JSON.stringify(frame));
       this.subscribed.add(chID);
     }
     this.pendingSubscribe.clear();
