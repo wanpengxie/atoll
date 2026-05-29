@@ -1737,9 +1737,14 @@ func TestDeviceTransitNoRouteProxyFacadePayloadSynthesizesTerminalEnvelope(t *te
 		UpdateReadiness: func(context.Context, actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
 			return actorreg.ReadinessTransition{}, nil
 		},
-		CompleteExternalResponse: func(_ context.Context, env *message.Envelope) (adapter.RespondResult, error) {
-			chain.env = env
-			return adapter.RespondResult{MessageID: env.ID}, nil
+		Provisional: func(context.Context, adapter.CorrelationKey, string, json.RawMessage, adapter.ProvisionalOptions) (adapter.RespondResult, error) {
+			return adapter.RespondResult{}, nil
+		},
+		Resolve: func(_ context.Context, id adapter.RequestID, r adapter.ResolveRequest) error {
+			chain.resolved = true
+			chain.resolveID = id
+			chain.resolveReq = r
+			return nil
 		},
 	}); err != nil {
 		t.Fatalf("proxy facade Init: %v", err)
@@ -1747,8 +1752,19 @@ func TestDeviceTransitNoRouteProxyFacadePayloadSynthesizesTerminalEnvelope(t *te
 	if err := mod.OnExternalCallback(ctx, outBody.Payload); err != nil {
 		t.Fatalf("proxy facade OnExternalCallback rejected synthetic envelope: %v", err)
 	}
-	if chain.env == nil || chain.env.ID != resp.ID || chain.env.ParentID != req.ID {
-		t.Fatalf("proxy facade wrote env=%+v want response=%s parent=%s", chain.env, resp.ID, req.ID)
+	// The framework sync/async refactor routes the final callback through
+	// ctx.Resolve keyed on the request id (= callback parent_id = req.ID).
+	if !chain.resolved {
+		t.Fatalf("proxy facade must route final callback through ctx.Resolve")
+	}
+	if chain.resolveID != req.ID {
+		t.Fatalf("proxy facade resolve id=%s want %s", chain.resolveID, req.ID)
+	}
+	if chain.resolveReq.Status != "failed" {
+		t.Fatalf("proxy facade resolve status=%s want failed", chain.resolveReq.Status)
+	}
+	if chain.resolveReq.Reason != string(message.TerminalReceiverUnavailable) {
+		t.Fatalf("proxy facade resolve reason=%s want %s", chain.resolveReq.Reason, message.TerminalReceiverUnavailable)
 	}
 }
 
@@ -3702,7 +3718,9 @@ func (p *pipeTransport) WriteFrame(ctx context.Context, f kerneldaemonbus.Frame)
 func (p *pipeTransport) Close() error { return nil }
 
 type proxyFacadeCaptureChain struct {
-	env *message.Envelope
+	resolved   bool
+	resolveID  adapter.RequestID
+	resolveReq adapter.ResolveRequest
 }
 
 // seqList extracts the seq field of every captured PushedFrame; used

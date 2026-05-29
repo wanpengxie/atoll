@@ -70,6 +70,9 @@ func (t *DescribeActorTool) Execute(ctx context.Context, params json.RawMessage)
 			HandlerActorID: p.ActorID,
 			Payload:        cloneRawJSON(json.RawMessage(`{}`)),
 			Timeout:        channelToolDefaultTimeout,
+			// describe_* are synchronous reserved-type lookups the agent
+			// always needs inline; wait the full timeout, no fast-path ack.
+			WaitMode: waitUnbounded,
 		}), nil
 	}
 
@@ -182,6 +185,9 @@ func (t *DescribeTypeTool) Execute(ctx context.Context, params json.RawMessage) 
 			HandlerActorID: p.ActorID,
 			Payload:        payload,
 			Timeout:        channelToolDefaultTimeout,
+			// describe_* are synchronous reserved-type lookups the agent
+			// always needs inline; wait the full timeout, no fast-path ack.
+			WaitMode: waitUnbounded,
 		}), nil
 	}
 

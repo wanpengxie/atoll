@@ -194,21 +194,20 @@ func TestRespondAcceptsFinalStatus(t *testing.T) {
 	}
 }
 
-// TestCompleteExternalResponseRejectsProvisionalPayloadStatus locks down
-// the same A7/E21 fix for the external-callback final-completion path:
-// CompleteExternalResponse must refuse envelopes whose payload.status is
-// not in the final set. Otherwise an upstream proxy_facade misroute would
+// TestResolveRejectsProvisionalStatus locks down the same A7/E21 fix for
+// the receiver-side ctx.Resolve path (the generalization that replaced
+// CompleteExternalResponse): Resolve must refuse a non-final status.
+// Otherwise a receiver that mis-routed a provisional through Resolve would
 // close the correlation on a provisional, breaking INVARIANT-11.
-func TestCompleteExternalResponseRejectsProvisionalPayloadStatus(t *testing.T) {
+func TestResolveRejectsProvisionalStatus(t *testing.T) {
 	cases := []struct {
 		name    string
+		status  string
 		payload string
 	}{
-		{name: "layer2_processing", payload: `{"status":"processing","progress_percent":0.4}`},
-		{name: "layer2_received", payload: `{"status":"received"}`},
-		{name: "layer3_xhs_namespace", payload: `{"status":"xhs.uploading"}`},
-		{name: "missing_status", payload: `{}`},
-		{name: "empty_status_string", payload: `{"status":""}`},
+		{name: "layer2_processing", status: "processing", payload: `{"progress_percent":0.4}`},
+		{name: "layer2_received", status: "received", payload: `{}`},
+		{name: "layer3_xhs_namespace", status: "xhs.uploading", payload: `{}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -232,25 +231,16 @@ func TestCompleteExternalResponseRejectsProvisionalPayloadStatus(t *testing.T) {
 				t.Fatalf("Dispatch: %v", err)
 			}
 
-			resp := &message.Envelope{
-				ID:            message.ID("resp-cer-" + tc.name),
-				ChannelID:     "channel:test",
-				Sender:        message.Sender{Kind: actor.KindTool, ID: "tool:kimi"},
-				Kind:          message.KindResponse,
-				Type:          "kimi.ask",
-				ParentID:      req.ID,
-				CorrelationID: req.CorrelationID,
-				Payload:       json.RawMessage(tc.payload),
-				Audience:      message.Audience{"agent:a"},
-			}
-
 			bm := mgr.byName["kimi"]
-			_, err := bm.mctx.CompleteExternalResponse(context.Background(), resp)
+			err := bm.mctx.Resolve(context.Background(), req.ID, adapter.ResolveRequest{
+				Status:  tc.status,
+				Payload: json.RawMessage(tc.payload),
+			})
 			if err == nil {
-				t.Fatalf("CompleteExternalResponse with provisional payload %q must error, got nil", tc.payload)
+				t.Fatalf("Resolve with provisional status %q must error, got nil", tc.status)
 			}
 			if !strings.Contains(err.Error(), "must be final") {
-				t.Fatalf("CompleteExternalResponse err=%v want substring \"must be final\"", err)
+				t.Fatalf("Resolve err=%v want substring \"must be final\"", err)
 			}
 			// Pre-write rejection: chain must be untouched.
 			if written := chain.Written(); len(written) != 0 {
@@ -268,16 +258,18 @@ func TestCompleteExternalResponseRejectsProvisionalPayloadStatus(t *testing.T) {
 	}
 }
 
-// TestCompleteExternalResponseAcceptsFinalPayloadStatus mirrors the
-// negative test: completed / failed proceed through the chain and close
-// the correlation. Guards against validator overfit.
-func TestCompleteExternalResponseAcceptsFinalPayloadStatus(t *testing.T) {
+// TestResolveAcceptsFinalStatus mirrors the negative test: completed /
+// failed proceed through the chain and close the correlation. Guards
+// against validator overfit.
+func TestResolveAcceptsFinalStatus(t *testing.T) {
 	cases := []struct {
 		name    string
+		status  string
+		reason  string
 		payload string
 	}{
-		{name: "completed", payload: `{"status":"completed","answer":"hi"}`},
-		{name: "failed", payload: `{"status":"failed","reason":"receiver_internal_error"}`},
+		{name: "completed", status: "completed", payload: `{"answer":"hi"}`},
+		{name: "failed", status: "failed", reason: "receiver_internal_error", payload: `{}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -301,21 +293,13 @@ func TestCompleteExternalResponseAcceptsFinalPayloadStatus(t *testing.T) {
 				t.Fatalf("Dispatch: %v", err)
 			}
 
-			resp := &message.Envelope{
-				ID:            message.ID("resp-cer-ok-" + tc.name),
-				ChannelID:     "channel:test",
-				Sender:        message.Sender{Kind: actor.KindTool, ID: "tool:kimi"},
-				Kind:          message.KindResponse,
-				Type:          "kimi.ask",
-				ParentID:      req.ID,
-				CorrelationID: req.CorrelationID,
-				Payload:       json.RawMessage(tc.payload),
-				Audience:      message.Audience{"agent:a"},
-			}
-
 			bm := mgr.byName["kimi"]
-			if _, err := bm.mctx.CompleteExternalResponse(context.Background(), resp); err != nil {
-				t.Fatalf("CompleteExternalResponse final %s: %v", tc.name, err)
+			if err := bm.mctx.Resolve(context.Background(), req.ID, adapter.ResolveRequest{
+				Status:  tc.status,
+				Reason:  tc.reason,
+				Payload: json.RawMessage(tc.payload),
+			}); err != nil {
+				t.Fatalf("Resolve final %s: %v", tc.name, err)
 			}
 			if written := chain.Written(); len(written) != 1 {
 				t.Fatalf("expected 1 chain write, got %d", len(written))

@@ -87,8 +87,11 @@ func (m *ProxyFacadeModule) Init(_ context.Context, mctx *adapter.ModuleContext)
 	if mctx.ForwardExternalRequest == nil {
 		return errors.New("proxy_facade: ForwardExternalRequest required")
 	}
-	if mctx.CompleteExternalResponse == nil {
-		return errors.New("proxy_facade: CompleteExternalResponse required")
+	if mctx.Resolve == nil {
+		return errors.New("proxy_facade: Resolve required; the framework sync/async refactor routes final callbacks through the receiver-side Resolve path")
+	}
+	if mctx.Provisional == nil {
+		return errors.New("proxy_facade: Provisional required; provisional callbacks route through the framework provisional emit helper")
 	}
 	if mctx.UpdateReadiness == nil {
 		return errors.New("proxy_facade: UpdateReadiness required")
@@ -134,22 +137,56 @@ func (m *ProxyFacadeModule) OnExternalCallback(ctx context.Context, payload []by
 	// Response envelopes are polymorphic per proto-foundation §1.6.3:
 	// payload.status ∈ {completed, failed} are final and close the
 	// correlation; any other status is provisional and must NOT touch
-	// the pending registry / F3 timer. Routing every response through
-	// CompleteExternalResponse would prematurely fire CorrelationDone on
-	// the first provisional and reject the trailing final as a
-	// terminal_duplicate — breaking provisional streams from proxy-hosted
-	// actors.
-	if env.Kind == message.KindResponse {
-		status, statusErr := extractPayloadStatus(env.Payload)
-		if statusErr != nil {
-			return fmt.Errorf("proxy_facade: decode callback payload.status: %w", statusErr)
-		}
-		if !message.IsFinalStatus(status) {
-			return m.handleProvisionalCallback(ctx, &env, status)
-		}
+	// the pending registry / F3 timer. The framework sync/async refactor
+	// (§5.3) makes the closed-loop decision a single router center: this
+	// adapter only classifies the inbound callback and routes it —
+	//   final       → ctx.Resolve (receiver-side terminal),
+	//   provisional  → ctx.Provisional (interim, no closure).
+	// It no longer judges/closes the correlation itself.
+	if env.Kind != message.KindResponse {
+		return fmt.Errorf("proxy_facade: callback kind=%s (must be response or actor.readiness.changed event)", env.Kind)
 	}
-	_, err := m.mctx.CompleteExternalResponse(ctx, &env)
-	return err
+	status, statusErr := extractPayloadStatus(env.Payload)
+	if statusErr != nil {
+		return fmt.Errorf("proxy_facade: decode callback payload.status: %w", statusErr)
+	}
+	if !message.IsFinalStatus(status) {
+		return m.handleProvisionalCallback(ctx, &env, status)
+	}
+	return m.handleFinalCallback(ctx, &env, status)
+}
+
+// handleFinalCallback routes a final response envelope from the proxy
+// daemon transport through ModuleContext.Resolve (framework sync/async
+// spec §5.3). The request envelope id (= callback parent_id) is the wait
+// anchor; ctx.Resolve constructs the adapter-signed final, writes it
+// through the harness, and closes the pending correlation + F3 timer via
+// the router's single lifecycle center. The adapter no longer constructs
+// the terminal envelope or judges closure — it supplies only the
+// receiver-side status / payload / reason.
+func (m *ProxyFacadeModule) handleFinalCallback(ctx context.Context, env *message.Envelope, status string) error {
+	if m.mctx.Resolve == nil {
+		return errors.New("proxy_facade: Resolve helper unavailable; final response callback cannot be routed")
+	}
+	if env.ParentID == "" {
+		return errors.New("proxy_facade: final callback parent_id required")
+	}
+	// Strip the protocol status/reason out of the inbound payload — the
+	// framework Resolve path re-injects them onto the canonical final
+	// envelope it constructs (mergeResponsePayload). Passing them through
+	// ResolveRequest keeps the typed status/reason as the single source.
+	body, reason, err := payloadWithoutStatusAndReason(env.Payload)
+	if err != nil {
+		return fmt.Errorf("proxy_facade: prepare final payload: %w", err)
+	}
+	if err := m.mctx.Resolve(ctx, env.ParentID, adapter.ResolveRequest{
+		Status:  status,
+		Payload: body,
+		Reason:  reason,
+	}); err != nil {
+		return fmt.Errorf("proxy_facade: resolve final callback: %w", err)
+	}
+	return nil
 }
 
 // handleProvisionalCallback routes a provisional response envelope from
@@ -236,6 +273,36 @@ func payloadWithoutStatus(payload json.RawMessage) (json.RawMessage, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// payloadWithoutStatusAndReason returns the payload object with the
+// top-level "status" and "reason" keys removed, plus the extracted
+// reason string. Used before handing the payload to ModuleContext.Resolve
+// which carries status/reason as typed ResolveRequest fields and
+// re-injects them onto the canonical final envelope it constructs.
+func payloadWithoutStatusAndReason(payload json.RawMessage) (json.RawMessage, string, error) {
+	if len(payload) == 0 || string(payload) == "null" {
+		return json.RawMessage(`{}`), "", nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return nil, "", fmt.Errorf("payload must be a JSON object: %w", err)
+	}
+	if fields == nil {
+		return json.RawMessage(`{}`), "", nil
+	}
+	var reason string
+	if raw, ok := fields["reason"]; ok {
+		// reason is optional; tolerate a non-string value by leaving it empty.
+		_ = json.Unmarshal(raw, &reason)
+	}
+	delete(fields, "status")
+	delete(fields, "reason")
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return nil, "", err
+	}
+	return out, reason, nil
 }
 
 func (m *ProxyFacadeModule) updateReadinessFromEvent(ctx context.Context, env *message.Envelope) error {

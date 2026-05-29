@@ -7,38 +7,24 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/adapter/futurereg"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-func TestDispatchToolResponseIgnoresNonResponseWithMatchingParent(t *testing.T) {
+// TestRouteTriggersDeliversFinalToActiveAwait asserts a final response whose
+// parent matches an in-flight Submit is consumed by the caller's futurereg
+// (DeliveredToAwait) and NOT forwarded to the LLM trigger stream.
+func TestRouteTriggersDeliversFinalToActiveAwait(t *testing.T) {
 	b := &Bridge{}
-	ch := b.registerPendingTool("tool-req-1")
-	defer b.unregisterPendingTool("tool-req-1")
+	caller := b.caller()
+	caller.futures.Register("tool-req-1")
 
-	if b.dispatchToolResponse(toolTrigger(message.KindEvent, "event-1", "tool-req-1")) {
-		t.Fatalf("event with matching parent stole pending tool slot")
-	}
-	if !b.dispatchToolResponse(toolTrigger(message.KindResponse, "response-1", "tool-req-1")) {
-		t.Fatalf("response with matching parent was not dispatched")
-	}
-	select {
-	case got := <-ch:
-		if got.trigger.Envelope.ID != "response-1" {
-			t.Fatalf("response id=%s", got.trigger.Envelope.ID)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("pending tool did not receive response")
-	}
-}
-
-func TestRouteTriggersQuarantinesLateToolResponse(t *testing.T) {
-	b := &Bridge{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	in := make(chan TriggerPayload, 2)
 	out := b.routeTriggers(ctx, nil, in)
 
-	in <- toolTrigger(message.KindResponse, "late-response", "tool-req-missing")
+	in <- toolTriggerWithStatus(message.KindResponse, "response-1", "tool-req-1", "completed")
 	in <- toolTrigger(message.KindRequest, "normal-trigger", "")
 	close(in)
 
@@ -47,74 +33,228 @@ func TestRouteTriggersQuarantinesLateToolResponse(t *testing.T) {
 		t.Fatal("routeTriggers closed before normal trigger")
 	}
 	if got.Envelope.ID != "normal-trigger" {
-		t.Fatalf("routed id=%s want normal-trigger", got.Envelope.ID)
+		t.Fatalf("routed id=%s want normal-trigger (final leaked into stream)", got.Envelope.ID)
 	}
 	if _, ok := <-out; ok {
-		t.Fatal("late response leaked into trigger stream")
+		t.Fatal("more than the normal trigger leaked into stream")
 	}
 }
 
-func TestDispatchToolResponseConcurrentPendingToolsIndependent(t *testing.T) {
+// TestRouteTriggersNoActiveWaiterFinalBecomesTrigger is the M4 case: a final
+// with no local waiter (worker restart / abandoned / await timed out) is
+// forwarded to the LLM as a new turn trigger, never quarantined.
+func TestRouteTriggersNoActiveWaiterFinalBecomesTrigger(t *testing.T) {
 	b := &Bridge{}
-	ch1 := b.registerPendingTool("tool-req-1")
-	ch2 := b.registerPendingTool("tool-req-2")
+	// No Register for tool-req-missing → simulates a worker restart with an
+	// empty registry.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	in := make(chan TriggerPayload, 1)
+	out := b.routeTriggers(ctx, nil, in)
 
+	in <- toolTriggerWithStatus(message.KindResponse, "orphan-final", "tool-req-missing", "completed")
+	close(in)
+
+	got, ok := <-out
+	if !ok {
+		t.Fatal("M4: no-waiter final was dropped instead of becoming a trigger")
+	}
+	if got.Envelope.ID != "orphan-final" {
+		t.Fatalf("M4: forwarded id=%s want orphan-final", got.Envelope.ID)
+	}
+}
+
+// TestRouteTriggersProvisionalSwallowedFuturePending asserts a provisional
+// response on an in-flight request is SWALLOWED (v1: ignore provisionals, wait
+// for the final) — not forwarded to the LLM — and the future stays in flight.
+func TestRouteTriggersProvisionalSwallowedFuturePending(t *testing.T) {
+	b := &Bridge{}
+	caller := b.caller()
+	caller.futures.Register("tool-req-prov")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	in := make(chan TriggerPayload, 2)
+	out := b.routeTriggers(ctx, nil, in)
+
+	in <- toolTriggerWithStatus(message.KindResponse, "prov-1", "tool-req-prov", "processing")
+	in <- toolTrigger(message.KindRequest, "normal-trigger", "")
+	close(in)
+
+	// Provisional is swallowed; only the normal trigger comes through.
+	got, ok := <-out
+	if !ok || got.Envelope.ID != "normal-trigger" {
+		t.Fatalf("provisional leaked: got=%v ok=%v", got.Envelope.ID, ok)
+	}
+	if _, ok := <-out; ok {
+		t.Fatal("more than the normal trigger leaked")
+	}
+	// The future MUST remain in flight (a provisional never resolves it).
+	if !caller.futures.Registered("tool-req-prov") {
+		t.Fatal("provisional erased the in-flight future")
+	}
+}
+
+// TestRouteTriggersOrphanProvisionalSwallowed asserts a provisional with no
+// registration at all (orphan progress) is swallowed, not forwarded.
+func TestRouteTriggersOrphanProvisionalSwallowed(t *testing.T) {
+	b := &Bridge{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	in := make(chan TriggerPayload, 2)
+	out := b.routeTriggers(ctx, nil, in)
+
+	in <- toolTriggerWithStatus(message.KindResponse, "orphan-prov", "tool-req-none", "processing")
+	in <- toolTrigger(message.KindRequest, "normal-trigger", "")
+	close(in)
+
+	got, ok := <-out
+	if !ok || got.Envelope.ID != "normal-trigger" {
+		t.Fatalf("orphan provisional leaked: got=%v ok=%v", got.Envelope.ID, ok)
+	}
+	if _, ok := <-out; ok {
+		t.Fatal("more than the normal trigger leaked")
+	}
+}
+
+// TestCallerSubmitAwaitFastPathInline drives Submit + a final delivered via
+// the trigger loop and asserts Await returns the final inline.
+func TestCallerSubmitAwaitFastPathInline(t *testing.T) {
+	b := &Bridge{}
+	ipc := newMetaFakeIPC()
+	caller := b.caller()
+
+	env := message.Envelope{ID: "req-fast", ChannelID: "ch-test", Kind: message.KindRequest}
+	res, err := caller.Submit(context.Background(), ipc, env, 30000)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if res.requestID != "req-fast" || !res.ack.accepted {
+		t.Fatalf("submit result=%+v", res)
+	}
+
+	// Drain the write and deliver a final.
+	<-ipc.writes
+	final := toolTriggerWithStatus(message.KindResponse, "resp-fast", "req-fast", "completed").Envelope
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		caller.Deliver(&final)
+	}()
+
+	got, ok, awaitErr := caller.Await(context.Background(), res.requestID, time.Second)
+	if awaitErr != nil {
+		t.Fatalf("Await err: %v", awaitErr)
+	}
+	if !ok {
+		t.Fatal("fast-path window elapsed without final")
+	}
+	if got.ID != "resp-fast" {
+		t.Fatalf("await final id=%s", got.ID)
+	}
+}
+
+// TestCallerAwaitWindowElapsesNoFinal asserts a window expiry with no final
+// returns ok=false, err=nil (degrade to ack) and leaves the future pending so
+// a later final still routes.
+func TestCallerAwaitWindowElapsesNoFinal(t *testing.T) {
+	b := &Bridge{}
+	caller := b.caller()
+	caller.futures.Register("req-slow")
+
+	got, ok, err := caller.Await(context.Background(), "req-slow", 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("window expiry should not be a hard error: %v", err)
+	}
+	if ok || got != nil {
+		t.Fatalf("expected ok=false got=%v", got)
+	}
+	if !caller.futures.Registered("req-slow") {
+		t.Fatal("future should remain registered after window expiry")
+	}
+}
+
+// TestCallerWaitNoneImmediateAck asserts window 0 returns immediately without
+// parking (fan-out), leaving the future in flight.
+func TestCallerWaitNoneImmediateAck(t *testing.T) {
+	b := &Bridge{}
+	caller := b.caller()
+	caller.futures.Register("req-fanout")
+
+	got, ok, err := caller.Await(context.Background(), "req-fanout", 0)
+	if err != nil || ok || got != nil {
+		t.Fatalf("waitNone: got=%v ok=%v err=%v", got, ok, err)
+	}
+	if !caller.futures.Registered("req-fanout") {
+		t.Fatal("fan-out future erased")
+	}
+}
+
+// TestCallerAbandonThenFinalNoActiveWaiter asserts that after Abandon, a final
+// routes through Deliver as NoActiveWaiter (would become a new turn trigger).
+func TestCallerAbandonThenFinalNoActiveWaiter(t *testing.T) {
+	b := &Bridge{}
+	caller := b.caller()
+	caller.futures.Register("req-aband")
+	caller.Abandon("req-aband")
+
+	final := toolTriggerWithStatus(message.KindResponse, "resp-aband", "req-aband", "completed").Envelope
+	if disp := caller.Deliver(&final); disp != futurereg.NoActiveWaiter {
+		t.Fatalf("after abandon disposition=%v want NoActiveWaiter", disp)
+	}
+}
+
+// TestCallerPendingListsInFlight asserts Pending returns the in-flight ids and
+// drops them after a final is delivered to an Await.
+func TestCallerPendingListsInFlight(t *testing.T) {
+	b := &Bridge{}
+	caller := b.caller()
+	caller.futures.Register("p1")
+	caller.futures.Register("p2")
+
+	pending := caller.Pending()
+	if len(pending) != 2 {
+		t.Fatalf("pending=%v want 2", pending)
+	}
+
+	// Resolve p1 via an Await + Deliver race.
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if !b.dispatchToolResponse(toolTrigger(message.KindResponse, "response-1", "tool-req-1")) {
-			t.Errorf("response-1 not dispatched")
-		}
+		_, _, _ = caller.Await(context.Background(), "p1", time.Second)
 	}()
-	go func() {
-		defer wg.Done()
-		if !b.dispatchToolResponse(toolTrigger(message.KindResponse, "response-2", "tool-req-2")) {
-			t.Errorf("response-2 not dispatched")
-		}
-	}()
+	time.Sleep(10 * time.Millisecond)
+	final := toolTriggerWithStatus(message.KindResponse, "resp-p1", "p1", "completed").Envelope
+	caller.Deliver(&final)
 	wg.Wait()
 
-	got1 := <-ch1
-	got2 := <-ch2
-	if got1.trigger.Envelope.ID != "response-1" {
-		t.Fatalf("ch1 got %s", got1.trigger.Envelope.ID)
+	if caller.futures.Registered("p1") {
+		t.Fatal("p1 still pending after final delivered to await")
 	}
-	if got2.trigger.Envelope.ID != "response-2" {
-		t.Fatalf("ch2 got %s", got2.trigger.Envelope.ID)
+	if !caller.futures.Registered("p2") {
+		t.Fatal("p2 wrongly dropped")
 	}
 }
 
-func TestDispatchToolResponseAfterUnregisterIsQuarantined(t *testing.T) {
+// TestCallerSubmitWriteFailureRollsBack asserts a write failure cancels the
+// registered future (no leak).
+func TestCallerSubmitWriteFailureRollsBack(t *testing.T) {
 	b := &Bridge{}
-	_ = b.registerPendingTool("tool-req-canceled")
-	b.unregisterPendingTool("tool-req-canceled")
-	if !b.dispatchToolResponse(toolTrigger(message.KindResponse, "late-response", "tool-req-canceled")) {
-		t.Fatal("late response after unregister should be quarantined")
+	caller := b.caller()
+	ipc := &failWriteIPC{}
+	env := message.Envelope{ID: "req-fail-write", Kind: message.KindRequest}
+	if _, err := caller.Submit(context.Background(), ipc, env, 1000); err == nil {
+		t.Fatal("Submit should fail on write error")
 	}
-	b.pendingMu.Lock()
-	_, stillPending := b.pendingTools["tool-req-canceled"]
-	b.pendingMu.Unlock()
-	if stillPending {
-		t.Fatal("pending tool entry leaked after unregister")
+	if caller.futures.Registered("req-fail-write") {
+		t.Fatal("future leaked after write failure")
 	}
 }
 
-func TestDispatchToolResponseDuplicateRedeliveryIsQuarantined(t *testing.T) {
-	b := &Bridge{}
-	ch := b.registerPendingTool("tool-req-redelivered")
+type failWriteIPC struct{ metaFakeIPC }
 
-	if !b.dispatchToolResponse(toolTrigger(message.KindResponse, "response-1", "tool-req-redelivered")) {
-		t.Fatal("first response was not dispatched")
-	}
-	select {
-	case <-ch:
-	case <-time.After(time.Second):
-		t.Fatal("pending tool did not receive first response")
-	}
-	if !b.dispatchToolResponse(toolTrigger(message.KindResponse, "response-1-redelivery", "tool-req-redelivered")) {
-		t.Fatal("duplicate terminal response should be quarantined")
-	}
+func (f *failWriteIPC) WriteEnvelope(context.Context, message.Envelope) error {
+	return context.DeadlineExceeded
 }
 
 func toolTrigger(kind message.Kind, id, parentID string) TriggerPayload {
@@ -133,147 +273,13 @@ func toolTrigger(kind message.Kind, id, parentID string) TriggerPayload {
 	}
 }
 
-// toolTriggerWithStatus is the provisional-aware variant of toolTrigger.
-// status is written verbatim into payload.status so tests can exercise
-// every position of the proto-layer0 §2.5.1 closed-set lattice: Layer 1
-// final (completed/failed), Layer 2 core provisional (processing,
-// queued, …), and Layer 3 business namespace (xhs.login_queued, …).
+// toolTriggerWithStatus is the status-aware variant of toolTrigger. status is
+// written verbatim into payload.status so tests can exercise every position of
+// the proto-layer0 §2.5.1 closed-set lattice: Layer 1 final (completed/
+// failed), Layer 2 core provisional (processing, queued, …), and Layer 3
+// business namespace (xhs.login_queued, …).
 func toolTriggerWithStatus(kind message.Kind, id, parentID, status string) TriggerPayload {
 	tp := toolTrigger(kind, id, parentID)
 	tp.Envelope.Payload = []byte(`{"status":"` + status + `"}`)
 	return tp
-}
-
-// TestDispatchToolResponseProvisionalDoesNotResolveFuture asserts that
-// kind=response envelopes carrying a Layer 2 provisional status
-// (`processing` in the closed core set per proto-layer0 §2.5.1) are
-// quarantined from the LLM trigger stream but DO NOT close the pending
-// tool entry. A subsequent final (`completed`) resolves the future as
-// usual. This is the v1 provisional behaviour from
-// response-multitype-refactor.md §3.4 D.
-func TestDispatchToolResponseProvisionalDoesNotResolveFuture(t *testing.T) {
-	b := &Bridge{}
-	ch := b.registerPendingTool("tool-req-1")
-	defer b.unregisterPendingTool("tool-req-1")
-
-	// Provisional `processing` — Layer 2 core. Should be quarantined
-	// (returns true) but neither push to ch nor close it.
-	if !b.dispatchToolResponse(toolTriggerWithStatus(message.KindResponse, "response-prov", "tool-req-1", "processing")) {
-		t.Fatal("provisional response was not quarantined")
-	}
-	select {
-	case got, ok := <-ch:
-		if !ok {
-			t.Fatal("pending tool channel closed by provisional response")
-		}
-		t.Fatalf("provisional response leaked into pending tool channel: %v", got.trigger.Envelope.ID)
-	case <-time.After(50 * time.Millisecond):
-		// expected — pending tool stays parked.
-	}
-	b.pendingMu.Lock()
-	_, stillPending := b.pendingTools["tool-req-1"]
-	b.pendingMu.Unlock()
-	if !stillPending {
-		t.Fatal("pending tool entry erased by provisional response (should persist until final)")
-	}
-
-	// Final `completed` — Layer 1. Should resolve the future and close
-	// the channel as the legacy single-response path did.
-	if !b.dispatchToolResponse(toolTriggerWithStatus(message.KindResponse, "response-final", "tool-req-1", "completed")) {
-		t.Fatal("final response was not dispatched")
-	}
-	select {
-	case got, ok := <-ch:
-		if !ok {
-			t.Fatal("final response closed channel before sending payload")
-		}
-		if got.trigger.Envelope.ID != "response-final" {
-			t.Fatalf("future resolved with id=%s want response-final", got.trigger.Envelope.ID)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("future did not resolve on final response")
-	}
-}
-
-// TestDispatchToolResponseLayer3ProvisionalNamespace asserts that the
-// Layer 3 business namespace provisional pattern (`<adapter>.<name>`,
-// e.g. `xhs.login_queued`) is treated identically to Layer 2 core
-// provisional — keeps the pending entry alive. proto-layer0 §2.5.1
-// places anything matching `<ns>.<name>` outside the Layer 1 final
-// closed set, so it must not resolve the LLM's future.
-func TestDispatchToolResponseLayer3ProvisionalNamespace(t *testing.T) {
-	b := &Bridge{}
-	ch := b.registerPendingTool("tool-req-l3")
-	defer b.unregisterPendingTool("tool-req-l3")
-
-	if !b.dispatchToolResponse(toolTriggerWithStatus(message.KindResponse, "response-l3", "tool-req-l3", "xhs.login_queued")) {
-		t.Fatal("Layer 3 provisional was not quarantined")
-	}
-	select {
-	case got := <-ch:
-		t.Fatalf("Layer 3 provisional leaked into pending channel: %s", got.trigger.Envelope.ID)
-	case <-time.After(50 * time.Millisecond):
-	}
-	b.pendingMu.Lock()
-	_, stillPending := b.pendingTools["tool-req-l3"]
-	b.pendingMu.Unlock()
-	if !stillPending {
-		t.Fatal("Layer 3 provisional erased pending entry")
-	}
-}
-
-// TestDispatchToolResponseProvisionalStatusVariants exercises every
-// Layer 2 core provisional status from proto-layer0 §2.5.1 closed set:
-// received / queued / processing / deferred / unavailable. All five
-// must quarantine without closing the pending future.
-func TestDispatchToolResponseProvisionalStatusVariants(t *testing.T) {
-	for _, status := range []string{"received", "queued", "processing", "deferred", "unavailable"} {
-		status := status
-		t.Run(status, func(t *testing.T) {
-			b := &Bridge{}
-			parent := message.ID("tool-req-" + status)
-			ch := b.registerPendingTool(parent)
-			defer b.unregisterPendingTool(parent)
-
-			if !b.dispatchToolResponse(toolTriggerWithStatus(message.KindResponse, "response-"+status, parent.String(), status)) {
-				t.Fatalf("provisional %q not quarantined", status)
-			}
-			select {
-			case got := <-ch:
-				t.Fatalf("provisional %q leaked into pending channel: %s", status, got.trigger.Envelope.ID)
-			case <-time.After(20 * time.Millisecond):
-			}
-			b.pendingMu.Lock()
-			_, ok := b.pendingTools[parent]
-			b.pendingMu.Unlock()
-			if !ok {
-				t.Fatalf("provisional %q erased pending entry", status)
-			}
-		})
-	}
-}
-
-// TestDispatchToolResponseFinalFailedResolvesFuture asserts the Layer 1
-// `failed` status (the other half of the closed final set alongside
-// `completed`) also resolves the pending future. Without this the LLM
-// would wait until F3 timeout on every error path.
-func TestDispatchToolResponseFinalFailedResolvesFuture(t *testing.T) {
-	b := &Bridge{}
-	ch := b.registerPendingTool("tool-req-fail")
-	defer b.unregisterPendingTool("tool-req-fail")
-
-	if !b.dispatchToolResponse(toolTriggerWithStatus(message.KindResponse, "response-fail", "tool-req-fail", "failed")) {
-		t.Fatal("failed final response not dispatched")
-	}
-	select {
-	case got, ok := <-ch:
-		if !ok {
-			t.Fatal("channel closed without payload")
-		}
-		if got.trigger.Envelope.ID != "response-fail" {
-			t.Fatalf("future resolved with id=%s", got.trigger.Envelope.ID)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("failed final did not resolve future")
-	}
 }

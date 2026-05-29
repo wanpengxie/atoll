@@ -11,6 +11,7 @@ import (
 	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/adapter/futurereg"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -29,9 +30,20 @@ type channelToolRuntime struct {
 	trigger TriggerPayload
 }
 
-type toolResponse struct {
-	trigger TriggerPayload
-}
+// waitMode selects the caller-side wait policy for one channel request
+// (§2.3.2). It is purely a caller-side mechanism; the receiver is unaware.
+type waitMode int
+
+const (
+	// waitFastPath is the default: Submit + Await(window~15s). Within the
+	// window a final returns inline; past it the call degrades to an ack.
+	waitFastPath waitMode = iota
+	// waitUnbounded is call_actor(wait=true): Await to the type timeout
+	// (sync opt-in, no degrade to ack short of the type deadline).
+	waitUnbounded
+	// waitNone is call_actor(wait=false): window 0, immediate ack (fan-out).
+	waitNone
+)
 
 // channelTools returns the meta-tool surface the LLM sees: a fixed
 // actor-CLI verb set that exploits the envelope
@@ -61,13 +73,39 @@ func (b *Bridge) channelTools() []gokimitools.Tool {
 		&ListActorsTool{bridge: b},
 		&DescribeActorTool{bridge: b},
 		&DescribeTypeTool{bridge: b},
+		&AwaitResultTool{bridge: b},
+		&AbandonTool{bridge: b},
+		&ListPendingTool{bridge: b},
 	}
 }
 
+// routeTriggers fans the daemon → worker trigger stream through the
+// worker-side caller helper. Every kind=response envelope is delivered to the
+// caller's futurereg (M2 single-lock atomic disposition); the disposition plus
+// the response's finality decide whether it was consumed, swallowed, or must
+// surface as a new turn trigger.
+//
+// Decision table for a kind=response (parent_id set):
+//
+//   - DeliveredToAwait / DeliveredToWatch → consumed by a fast-path Await (or
+//     await_result / Watch). Ack the trigger and DO NOT forward to the LLM.
+//   - NoActiveWaiter + the future is STILL registered → this is a PROVISIONAL
+//     on an in-flight call (no Watch attached). v1 swallows provisionals
+//     (response-multitype-refactor.md §3.4 D: "ignore provisional, wait
+//     final"); the fast-path Await stays parked on the final. Ack + swallow.
+//   - NoActiveWaiter + the future is GONE → either a FINAL whose Await already
+//     timed out (degraded to ack) / was abandoned, or a worker-restart orphan
+//     (M4). Surface it to the LLM as a NEW TURN TRIGGER (never quarantined,
+//     never dropped) so the agent sees the result. A provisional with no
+//     registration at all (truly orphan progress) is swallowed.
+//
+// Non-response envelopes (events / fresh requests addressed to the agent)
+// always forward to the LLM as turn triggers.
 func (b *Bridge) routeTriggers(ctx context.Context, ipc IPCFacade, in <-chan TriggerPayload) <-chan TriggerPayload {
 	out := make(chan TriggerPayload, 32)
 	go func() {
 		defer close(out)
+		caller := b.caller()
 		for {
 			select {
 			case <-ctx.Done():
@@ -76,11 +114,22 @@ func (b *Bridge) routeTriggers(ctx context.Context, ipc IPCFacade, in <-chan Tri
 				if !ok {
 					return
 				}
-				if b.dispatchToolResponse(payload) {
-					if err := ackTrigger(ctx, ipc, payload, true, ""); err != nil {
-						return
+				if payload.Envelope.Kind == message.KindResponse && payload.Envelope.ParentID != "" {
+					env := payload.Envelope
+					_, final := parseFinalStatus(env.Payload)
+					disp := caller.Deliver(&env)
+					surfaceAsTrigger := disp == futurereg.NoActiveWaiter &&
+						final && !caller.futures.Registered(env.ParentID)
+					if !surfaceAsTrigger {
+						// Consumed by an active waiter, or a swallowed
+						// provisional / orphan progress — ack + drop.
+						if err := ackTrigger(ctx, ipc, payload, true, ""); err != nil {
+							return
+						}
+						continue
 					}
-					continue
+					// M4: final with the future gone (timed-out-await /
+					// abandoned / worker-restart orphan) → new turn trigger.
 				}
 				select {
 				case out <- payload:
@@ -93,15 +142,23 @@ func (b *Bridge) routeTriggers(ctx context.Context, ipc IPCFacade, in <-chan Tri
 	return out
 }
 
-// executeChannelRequest is the generic envelope-dispatch path the
-// meta tools (call_actor) use. Builds the kind=request envelope,
-// registers a pending wait
-// keyed on envelope.id, ships through ipc.WriteEnvelope, and blocks
-// until the matching response arrives (or timeout / ctx cancel).
+// executeChannelRequest is the generic envelope-dispatch fast-path the meta
+// tools (call_actor) and the reserved-type tools (describe_*) share. It builds
+// the kind=request envelope, registers + writes via the worker-side caller
+// helper (subscribe-before-send, §3.2), then awaits per the spec's wait mode
+// (§2.3.2):
 //
-// All error / success result shapes go through channelToolResultFromResponse
-// and channelToolErrorResult — same wire as before so existing tests
-// + observability stay valid.
+//   - waitFastPath (default): Await(window = min(15s, type timeout)). A final
+//     within the window returns inline (short calls feel synchronous, no
+//     ack→await double hop). Past the window the call degrades to an ack
+//     descriptor (long calls go async; the agent decides await_result /
+//     abandon / let it return as a new trigger).
+//   - waitUnbounded (call_actor wait=true): Await(type timeout) — sync opt-in.
+//   - waitNone (call_actor wait=false): window 0, immediate ack (fan-out).
+//
+// The request stays persistently pending in the daemon regardless of the
+// caller window; a window expiry only hands control back to the agent — the
+// substrate pending + F3 are untouched (§2.3.2).
 func (b *Bridge) executeChannelRequest(
 	ctx context.Context,
 	ipc IPCFacade,
@@ -129,130 +186,56 @@ func (b *Bridge) executeChannelRequest(
 		TSReceived:    now,
 	}
 
-	responseCh := b.registerPendingTool(env.ID)
-	defer b.unregisterPendingTool(env.ID)
-	if err := ipc.WriteEnvelope(ctx, env); err != nil {
+	caller := b.caller()
+	est := int64(spec.Timeout / time.Millisecond)
+	res, err := caller.Submit(ctx, ipc, env, est)
+	if err != nil {
 		return channelToolErrorResult(spec.ToolName,
 			fmt.Sprintf("emit channel request %s: %v", spec.EnvelopeType, err))
 	}
 
-	timer := time.NewTimer(spec.Timeout)
-	defer timer.Stop()
-	select {
-	case response, ok := <-responseCh:
-		if !ok {
-			return channelToolErrorResult(spec.ToolName, "channel request response wait closed")
-		}
-		return channelToolResultFromResponse(spec.ToolName, response.trigger.Envelope)
-	case <-timer.C:
+	var window time.Duration
+	switch spec.WaitMode {
+	case waitNone:
+		window = 0
+	case waitUnbounded:
+		window = resolveFastPathWindow(spec.Timeout, true)
+	default: // waitFastPath
+		window = resolveFastPathWindow(spec.Timeout, false)
+	}
+
+	if window <= 0 {
+		// wait=false: immediate ack, future left in-flight for a later
+		// await_result / new turn trigger.
+		return ackResultToToolResult(ackToolResult(spec.ToolName, res.ack))
+	}
+
+	finalEnv, ok, awaitErr := caller.Await(ctx, res.requestID, window)
+	if awaitErr != nil {
+		// Hard wait failure (ctx cancel / closed). Abandon the local waiter;
+		// substrate pending + F3 stay intact.
+		caller.Abandon(res.requestID)
 		return channelToolErrorResult(spec.ToolName,
-			fmt.Sprintf("channel request %s timed out after %s", spec.EnvelopeType, spec.Timeout))
-	case <-ctx.Done():
-		return channelToolErrorResult(spec.ToolName,
-			fmt.Sprintf("channel request %s canceled: %v", spec.EnvelopeType, ctx.Err()))
+			fmt.Sprintf("channel request %s wait failed: %v", spec.EnvelopeType, awaitErr))
 	}
+	if ok {
+		return channelToolResultFromResponse(spec.ToolName, *finalEnv)
+	}
+	// Window elapsed without a final. Fast-path degrades to ack; the request
+	// stays in-flight. waitUnbounded reaching here means the type timeout
+	// itself elapsed — same degrade-to-ack (the F3 substrate fallback still
+	// guarantees eventual closure).
+	return ackResultToToolResult(ackToolResult(spec.ToolName, res.ack))
 }
 
-func (b *Bridge) registerPendingTool(id message.ID) chan toolResponse {
-	ch := make(chan toolResponse, 1)
-	b.pendingMu.Lock()
-	if b.pendingTools == nil {
-		b.pendingTools = map[message.ID]chan toolResponse{}
+// ackResultToToolResult materialises a toolResultValue (built by the
+// transport-neutral caller helper) into a go-kimi types.ToolResult. An ack is
+// NOT an error result — it is a normal "still running" outcome.
+func ackResultToToolResult(v toolResultValue) types.ToolResult {
+	return types.ToolResult{
+		Name:  v.name,
+		Value: types.ToolReturnValue{Value: v.value},
 	}
-	b.pendingTools[id] = ch
-	b.pendingMu.Unlock()
-	return ch
-}
-
-func (b *Bridge) unregisterPendingTool(id message.ID) {
-	b.pendingMu.Lock()
-	if b.pendingTools != nil {
-		delete(b.pendingTools, id)
-	}
-	b.pendingMu.Unlock()
-}
-
-// dispatchToolResponse intercepts kind=response envelopes whose
-// parent_id matches an in-flight executeChannelRequest pending entry.
-//
-// Returns true when the envelope belongs to the bridge's tool-response
-// machinery (the caller acks the trigger and stops forwarding it to the
-// LLM as a fresh turn input). Returns false to let routeTriggers forward
-// the envelope to the LLM as a new turn.
-//
-// Provisional vs final dispatch (response-multitype-refactor.md §3.4 D):
-//   - **Final** (payload.status ∈ {completed, failed} — Layer 1 closed
-//     set per proto-layer0 §2.5.1): close the pending tool slot so the
-//     blocked executeChannelRequest call returns the result to the LLM.
-//   - **Provisional** (Layer 2 core: received / queued / processing /
-//     deferred / unavailable; Layer 3 namespace: `<adapter>.<name>`):
-//     swallow the trigger (treat as bridge-internal progress) but leave
-//     pendingTools[parent] alive — the LLM stays parked on the final.
-//
-// v1 trade-off (deliberate, per spec §3.4 D notes): provisional payloads
-// are NOT surfaced back to the LLM as progress events yet. The substrate
-// for a progress channel + system-prompt nudge is future work
-// (response-multitype-refactor.md §3.4 D: "v1 阶段最简：忽略 provisional,
-// 仍等 final"). What matters here is that provisional traffic does NOT
-// resolve the future and does NOT leak into the LLM trigger stream where
-// it would surface as a spurious new turn.
-func (b *Bridge) dispatchToolResponse(trigger TriggerPayload) bool {
-	if trigger.Envelope.Kind != message.KindResponse {
-		return false
-	}
-	parentID := message.ID(strings.TrimSpace(trigger.Envelope.ParentID.String()))
-	if parentID == "" {
-		return false
-	}
-	status := parseResponseStatus(trigger.Envelope.Payload)
-	final := message.IsFinalStatus(status)
-
-	b.pendingMu.Lock()
-	ch, ok := b.pendingTools[parentID]
-	if ok && final {
-		delete(b.pendingTools, parentID)
-	}
-	b.pendingMu.Unlock()
-	if !ok {
-		// No pending tool entry: late / duplicate / orphan response.
-		// Quarantine identically for provisional + final — neither
-		// belongs in the LLM trigger stream.
-		return true
-	}
-	if !final {
-		// Provisional: keep the slot alive so the final response (or
-		// substrate F3 timeout) resolves executeChannelRequest. The
-		// payload is intentionally not pushed to ch — see godoc.
-		return true
-	}
-	select {
-	case ch <- toolResponse{trigger: trigger}:
-	default:
-	}
-	close(ch)
-	return true
-}
-
-// parseResponseStatus is a defensive `payload.status` extractor used on
-// the dispatchToolResponse hot path. An empty string return means
-// "status absent / payload unparseable" — the caller treats that as a
-// non-final response so a malformed status field cannot accidentally
-// resolve the LLM's future. Final status enforcement lives upstream in
-// the daemon harness (runtime/harness step_response_pairing) — by the
-// time an envelope reaches the kimi bridge the harness has already
-// validated `payload.status` is in the {Layer 1 final, Layer 2 core,
-// Layer 3 `<ns>.<name>`} closed sets.
-func parseResponseStatus(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var obj struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(obj.Status)
 }
 
 func typeAllowsKind(typ TypeInfo, kind string) bool {

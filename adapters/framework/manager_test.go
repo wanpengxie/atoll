@@ -1567,8 +1567,14 @@ func TestProxyFacadeCallbackCompletesAndCancelsTimer(t *testing.T) {
 	if err := mgr.OnExternalCallback(context.Background(), decl.Name, raw); err != nil {
 		t.Fatalf("OnExternalCallback: %v", err)
 	}
-	if written := chain.Written(); len(written) != 1 || written[0].ID != "resp-proxy-ok" {
-		t.Fatalf("written=%v want proxy response only", written)
+	// The framework sync/async refactor routes the final callback through
+	// ctx.Resolve, which constructs the canonical final envelope itself
+	// (sender = adapter actor, derived id, parent = request id). The
+	// receiver-supplied envelope id is intentionally discarded — only the
+	// status / payload / reason flow through. Assert exactly one terminal
+	// was written for this request.
+	if written := chain.Written(); len(written) != 1 || written[0].ParentID != req.ID || written[0].Sender.ID != "tool:kimi" {
+		t.Fatalf("written=%v want single proxy response (parent=%s sender=tool:kimi)", written, req.ID)
 	}
 	bm := mgr.byName[decl.Name]
 	entry, ok, err := bm.correlation.Get(context.Background(), "req-proxy-ok")
@@ -1586,7 +1592,15 @@ func TestProxyFacadeCallbackCompletesAndCancelsTimer(t *testing.T) {
 	}
 }
 
-func TestProxyFacadeForgedCallbackRejected(t *testing.T) {
+// TestProxyFacadeForgedCallbackSenderNeutralized verifies that the
+// framework sync/async refactor structurally removes the forged-sender
+// vector: proxy_facade routes the final callback through ctx.Resolve,
+// which constructs the canonical terminal envelope itself and stamps the
+// sender as the adapter actor (tool:kimi). A callback that tries to forge a
+// foreign sender (tool:xhs) is therefore neutralized — the inbound sender
+// is discarded and the written terminal carries the adapter actor's
+// identity, not the forged one.
+func TestProxyFacadeForgedCallbackSenderNeutralized(t *testing.T) {
 	decl, err := proxyfacade.DeclarationFromCapability("tool:kimi", json.RawMessage(`{
 		"name":"kimi",
 		"types":["kimi.ask"],
@@ -1622,68 +1636,50 @@ func TestProxyFacadeForgedCallbackRejected(t *testing.T) {
 		Audience:  message.Audience{"agent:a"},
 	}
 	raw, _ := json.Marshal(forged)
-	if err := mgr.OnExternalCallback(context.Background(), decl.Name, raw); err == nil {
-		t.Fatal("forged sender callback should be rejected")
+	if err := mgr.OnExternalCallback(context.Background(), decl.Name, raw); err != nil {
+		t.Fatalf("OnExternalCallback: %v", err)
 	}
-	if written := chain.Written(); len(written) != 0 {
-		t.Fatalf("forged callback must not write, got %d writes", len(written))
+	written := chain.Written()
+	if len(written) != 1 {
+		t.Fatalf("expected 1 terminal write, got %d", len(written))
+	}
+	// Forged sender must be neutralized: the framework stamps the adapter
+	// actor as the response sender, not the forged tool:xhs.
+	if written[0].Sender.ID != "tool:kimi" || written[0].Sender.Kind != actor.KindTool {
+		t.Fatalf("written sender=%+v want adapter actor (tool:kimi)", written[0].Sender)
+	}
+	if written[0].ParentID != req.ID {
+		t.Fatalf("written parent=%s want %s", written[0].ParentID, req.ID)
 	}
 	bm := mgr.byName[decl.Name]
 	entry, ok, err := bm.correlation.Get(context.Background(), "req-proxy-forged")
 	if err != nil || !ok {
 		t.Fatalf("correlation ok=%v err=%v", ok, err)
 	}
-	if entry.State != adapter.CorrelationPending {
-		t.Fatalf("correlation state=%s want pending", entry.State)
+	if entry.State != adapter.CorrelationDone {
+		t.Fatalf("correlation state=%s want done (neutralized callback still resolves)", entry.State)
 	}
 }
 
-func TestCompleteExternalResponseRejectsForgedFields(t *testing.T) {
+// TestResolveRejectsUnownedRequest locks the receiver-side authority
+// boundary that survived the CompleteExternalResponse → Resolve migration.
+// Resolve constructs the canonical final envelope itself (sender / audience
+// / correlation / type are derived from the pending request, not supplied
+// by the receiver), so the only forgery vector left is the request id: an
+// id that does not name a pending request this adapter owns must be
+// rejected before any chain write, leaving the real pending request intact.
+func TestResolveRejectsUnownedRequest(t *testing.T) {
 	cases := []struct {
-		name   string
-		mutate func(*message.Envelope)
+		name      string
+		resolveID func(reqID message.ID) message.ID
 	}{
 		{
-			name: "empty_channel",
-			mutate: func(env *message.Envelope) {
-				env.ChannelID = ""
-			},
+			name:      "unknown_request",
+			resolveID: func(message.ID) message.ID { return "req-missing" },
 		},
 		{
-			name: "wrong_channel",
-			mutate: func(env *message.Envelope) {
-				env.ChannelID = "channel:other"
-			},
-		},
-		{
-			name: "wrong_type",
-			mutate: func(env *message.Envelope) {
-				env.Type = "kimi.other"
-			},
-		},
-		{
-			name: "wrong_parent",
-			mutate: func(env *message.Envelope) {
-				env.ParentID = "req-missing"
-			},
-		},
-		{
-			name: "wrong_audience",
-			mutate: func(env *message.Envelope) {
-				env.Audience = message.Audience{"agent:other"}
-			},
-		},
-		{
-			name: "wrong_correlation",
-			mutate: func(env *message.Envelope) {
-				env.CorrelationID = "corr-other"
-			},
-		},
-		{
-			name: "empty_sender",
-			mutate: func(env *message.Envelope) {
-				env.Sender = message.Sender{}
-			},
+			name:      "empty_request",
+			resolveID: func(message.ID) message.ID { return "" },
 		},
 	}
 
@@ -1715,25 +1711,18 @@ func TestCompleteExternalResponseRejectsForgedFields(t *testing.T) {
 				t.Fatalf("Dispatch: %v", err)
 			}
 
-			resp := &message.Envelope{
-				ID:            message.ID("resp-proxy-" + tc.name),
-				ChannelID:     "channel:test",
-				Sender:        message.Sender{Kind: actor.KindTool, ID: "tool:kimi"},
-				Kind:          message.KindResponse,
-				Type:          "kimi.ask",
-				ParentID:      req.ID,
-				CorrelationID: req.CorrelationID,
-				Payload:       json.RawMessage(`{"status":"completed"}`),
-				Audience:      message.Audience{"agent:a"},
-			}
-			tc.mutate(resp)
 			bm := mgr.byName[decl.Name]
-			if _, err := bm.mctx.CompleteExternalResponse(context.Background(), resp); err == nil {
-				t.Fatalf("%s forged response should be rejected", tc.name)
+			err = bm.mctx.Resolve(context.Background(), tc.resolveID(req.ID), adapter.ResolveRequest{
+				Status:  "completed",
+				Payload: json.RawMessage(`{}`),
+			})
+			if err == nil {
+				t.Fatalf("%s: Resolve on un-owned request id should be rejected", tc.name)
 			}
 			if written := chain.Written(); len(written) != 0 {
-				t.Fatalf("%s forged response must not write, got %d writes", tc.name, len(written))
+				t.Fatalf("%s rejected Resolve must not write, got %d writes", tc.name, len(written))
 			}
+			// The real pending request must remain untouched.
 			entry, ok, err := bm.correlation.Get(context.Background(), adapter.CorrelationKey(req.ID))
 			if err != nil || !ok {
 				t.Fatalf("correlation ok=%v err=%v", ok, err)

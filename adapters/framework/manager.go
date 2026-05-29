@@ -174,6 +174,11 @@ type Manager struct {
 	readinessMu sync.Mutex
 
 	gcCancel context.CancelFunc
+
+	// router is the Manager-level single center for the framework sync/async
+	// mechanism: caller-side futures + receiver-side owner index + the single
+	// terminal-lifecycle center (§3.1 / §3.3).
+	router *responseRouter
 }
 
 // boundModule is the Manager-side bookkeeping for one installed Module.
@@ -204,6 +209,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		cfg:     cfg,
 		byActor: map[actor.ActorID]*boundModule{},
 		byName:  map[string]*boundModule{},
+		router:  newResponseRouter(cfg.Logger),
 	}, nil
 }
 
@@ -351,6 +357,7 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		m.cfg.ChannelID,
 		m.cfg.HarnessChain,
 	)
+	observe := m.router.ObserveResponse
 	respondCfg := respondConfig{
 		adapterName:    decl.Name,
 		adapterActorID: decl.ActorID,
@@ -363,6 +370,7 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		clock:          m.cfg.Clock,
 		logger:         m.cfg.Logger,
 		metrics:        m.cfg.Metrics,
+		observe:        observe,
 	}
 	respond, err := buildRespond(respondCfg)
 	if err != nil {
@@ -384,27 +392,25 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		clock:          m.cfg.Clock,
 		logger:         m.cfg.Logger,
 		metrics:        m.cfg.Metrics,
+		observe:        observe,
 	})
 	if err != nil {
 		return fmt.Errorf("framework: build synthesized fallback for %s: %w", decl.Name, err)
 	}
 	policy.bindFallback(fallback)
-	completeExternalResponse, err := buildCompleteExternalResponse(respondCfg, decl)
-	if err != nil {
-		return fmt.Errorf("framework: build external response completer for %s: %w", decl.Name, err)
-	}
 
+	fail := buildFail(respond)
 	mctx := &adapter.ModuleContext{
-		AdapterName:              decl.Name,
-		AdapterActorID:           decl.ActorID,
-		ChannelID:                m.cfg.ChannelID,
-		Respond:                  respond,
-		Provisional:              provisional,
-		Fail:                     buildFail(respond),
-		CompleteExternalResponse: completeExternalResponse,
-		EmitEvent:                buildEmitEvent(respondCfg, decl),
-		ReportOrphanCallback:     buildReportOrphanCallback(respondCfg, decl),
-		ForwardExternalRequest:   m.buildForwardExternalRequest(decl, corr),
+		AdapterName:            decl.Name,
+		AdapterActorID:         decl.ActorID,
+		ChannelID:              m.cfg.ChannelID,
+		Respond:                respond,
+		Provisional:            provisional,
+		Fail:                   fail,
+		Resolve:                buildResolve(respond, fail),
+		EmitEvent:              buildEmitEvent(respondCfg, decl),
+		ReportOrphanCallback:   buildReportOrphanCallback(respondCfg, decl),
+		ForwardExternalRequest: m.buildForwardExternalRequest(decl, corr),
 		UpdateReadiness: func(ctx context.Context, update actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
 			return m.updateReadinessForDeclaration(ctx, decl, update, true)
 		},
@@ -412,6 +418,7 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 			return corr.Get(ctx, requestID)
 		},
 	}
+	m.injectCallerContext(mctx, decl)
 
 	if err := mod.Init(ctx, mctx); err != nil {
 		return fmt.Errorf("framework: module %s init: %w", decl.Name, err)
@@ -903,6 +910,10 @@ func (m *Manager) recoverTimersForBoundModule(ctx context.Context, bm *boundModu
 				"request_id", e.RequestID,
 				"err", err.Error())
 		}
+		// Rebuild the router receiver-owner index alongside the F3 timer (same
+		// source — pending entries), so a final after daemon restart still
+		// resolves lifecycle through the single center (§3.1).
+		m.router.trackReceiver(message.ID(e.RequestID), bm)
 	}
 	return nil
 }
@@ -967,6 +978,14 @@ func (m *Manager) Dispatch(ctx context.Context, env *message.Envelope) error {
 		"adapter", bm.declaration.Name, "type", env.Type)
 
 	if err := m.runHandle(ctx, bm, env); err != nil {
+		// Deferred: the adapter will produce the terminal later via Resolve.
+		// Keep pending + F3 alive; do NOT finalize. Must be the exact sentinel
+		// (no %w-wrapped business error per §2.1 hardening).
+		if errors.Is(err, adapter.ErrHandleDeferred) {
+			m.cfg.Metrics.IncCounter("adapter.dispatch.handle_deferred",
+				"adapter", bm.declaration.Name, "type", env.Type)
+			return nil
+		}
 		m.cfg.Logger.Warn("framework.dispatch.handle.error",
 			"adapter", bm.declaration.Name,
 			"type", env.Type,
@@ -1021,6 +1040,10 @@ func (m *Manager) reservePendingRequest(ctx context.Context, bm *boundModule, en
 	if err := bm.policy.RegisterTimer(ctx, adapter.CorrelationKey(env.ID), deadline); err != nil {
 		return fmt.Errorf("framework: dispatch register timer: %w", err)
 	}
+	// Same point/same lock as correlation reserve: record the receiver-owner
+	// so the router can locate this module's correlation + F3 timer when the
+	// final arrives (§3.1).
+	m.router.trackReceiver(env.ID, bm)
 	return nil
 }
 

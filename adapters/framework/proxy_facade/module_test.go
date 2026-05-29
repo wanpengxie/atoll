@@ -14,10 +14,12 @@ import (
 )
 
 type captureExternal struct {
-	channelID channel.ID
-	actorID   actor.ActorID
-	payload   adapter.ExternalRequestPayload
-	env       *message.Envelope
+	channelID  channel.ID
+	actorID    actor.ActorID
+	payload    adapter.ExternalRequestPayload
+	resolved   bool
+	resolveID  adapter.RequestID
+	resolveReq adapter.ResolveRequest
 }
 
 func TestProxyFacadeHandleSendsEnvelopeViaDeviceTransit(t *testing.T) {
@@ -37,8 +39,8 @@ func TestProxyFacadeHandleSendsEnvelopeViaDeviceTransit(t *testing.T) {
 		AdapterName:    decl.Name,
 		AdapterActorID: decl.ActorID,
 		ChannelID:      "ch-1",
-		CompleteExternalResponse: func(context.Context, *message.Envelope) (adapter.RespondResult, error) {
-			return adapter.RespondResult{}, nil
+		Resolve: func(context.Context, adapter.RequestID, adapter.ResolveRequest) error {
+			return nil
 		},
 		Provisional: func(context.Context, adapter.CorrelationKey, string, json.RawMessage, adapter.ProvisionalOptions) (adapter.RespondResult, error) {
 			return adapter.RespondResult{}, nil
@@ -105,9 +107,11 @@ func TestProxyFacadeCallbackWritesEnvelope(t *testing.T) {
 		UpdateReadiness: func(context.Context, actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
 			return actorreg.ReadinessTransition{}, nil
 		},
-		CompleteExternalResponse: func(_ context.Context, env *message.Envelope) (adapter.RespondResult, error) {
-			capture.env = env
-			return adapter.RespondResult{MessageID: env.ID}, nil
+		Resolve: func(_ context.Context, id adapter.RequestID, r adapter.ResolveRequest) error {
+			capture.resolved = true
+			capture.resolveID = id
+			capture.resolveReq = r
+			return nil
 		},
 	}); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -120,14 +124,34 @@ func TestProxyFacadeCallbackWritesEnvelope(t *testing.T) {
 		Type:          "kimi.ask",
 		ParentID:      "req-1",
 		CorrelationID: "req-1",
-		Payload:       json.RawMessage(`{"status":"completed"}`),
+		Payload:       json.RawMessage(`{"status":"completed","echo":"pong"}`),
 		Audience:      message.Audience{"agent:author"},
 	})
 	if err := mod.OnExternalCallback(context.Background(), raw); err != nil {
 		t.Fatalf("OnExternalCallback: %v", err)
 	}
-	if capture.env == nil || capture.env.ID != "resp-1" || capture.env.Sender.ID != "tool:kimi" {
-		t.Fatalf("completed env=%+v", capture.env)
+	// The framework sync/async refactor routes finals through ctx.Resolve.
+	// The request envelope id (callback parent_id) is the wait anchor; the
+	// typed status carries the terminal status and the stripped payload
+	// retains user fields (status removed, re-injected by the framework).
+	if !capture.resolved {
+		t.Fatalf("final callback must route through ctx.Resolve")
+	}
+	if capture.resolveID != "req-1" {
+		t.Fatalf("resolve id=%s want req-1", capture.resolveID)
+	}
+	if capture.resolveReq.Status != "completed" {
+		t.Fatalf("resolve status=%s want completed", capture.resolveReq.Status)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(capture.resolveReq.Payload, &body); err != nil {
+		t.Fatalf("decode resolve payload: %v raw=%s", err, string(capture.resolveReq.Payload))
+	}
+	if _, hasStatus := body["status"]; hasStatus {
+		t.Fatalf("resolve payload must not carry status; got %v", body)
+	}
+	if body["echo"] != "pong" {
+		t.Fatalf("resolve payload missing user fields; got %v", body)
 	}
 }
 
@@ -150,8 +174,8 @@ func TestProxyFacadeReadinessRejectsForgedAuthority(t *testing.T) {
 		ForwardExternalRequest: func(context.Context, *message.Envelope, adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
 			return adapter.ExternalRequestResult{}, nil
 		},
-		CompleteExternalResponse: func(context.Context, *message.Envelope) (adapter.RespondResult, error) {
-			return adapter.RespondResult{}, nil
+		Resolve: func(context.Context, adapter.RequestID, adapter.ResolveRequest) error {
+			return nil
 		},
 		Provisional: func(context.Context, adapter.CorrelationKey, string, json.RawMessage, adapter.ProvisionalOptions) (adapter.RespondResult, error) {
 			return adapter.RespondResult{}, nil
@@ -231,11 +255,16 @@ func TestProxyFacadeReadinessRejectsForgedAuthority(t *testing.T) {
 	}
 }
 
-// captureCalls counts invocations on the Provisional / CompleteExternalResponse
-// paths so tests can assert proxy_facade routes provisional vs final correctly.
+// captureCalls counts invocations on the Provisional / Resolve paths so
+// tests can assert proxy_facade routes provisional vs final correctly.
 type captureCalls struct {
 	provisional []provisionalCall
-	finals      []*message.Envelope
+	finals      []resolveCall
+}
+
+type resolveCall struct {
+	id  adapter.RequestID
+	req adapter.ResolveRequest
 }
 
 type provisionalCall struct {
@@ -265,9 +294,9 @@ func newModuleWithCapture(t *testing.T) (*ProxyFacadeModule, *captureCalls) {
 		ForwardExternalRequest: func(context.Context, *message.Envelope, adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
 			return adapter.ExternalRequestResult{}, nil
 		},
-		CompleteExternalResponse: func(_ context.Context, env *message.Envelope) (adapter.RespondResult, error) {
-			calls.finals = append(calls.finals, env)
-			return adapter.RespondResult{MessageID: env.ID}, nil
+		Resolve: func(_ context.Context, id adapter.RequestID, r adapter.ResolveRequest) error {
+			calls.finals = append(calls.finals, resolveCall{id: id, req: r})
+			return nil
 		},
 		Provisional: func(_ context.Context, requestID adapter.CorrelationKey, status string, payload json.RawMessage, opts adapter.ProvisionalOptions) (adapter.RespondResult, error) {
 			calls.provisional = append(calls.provisional, provisionalCall{
@@ -332,7 +361,7 @@ func TestProxyFacadeCallbackRoutesProvisionalThroughProvisional(t *testing.T) {
 		t.Fatalf("OnExternalCallback provisional: %v", err)
 	}
 	if len(calls.finals) != 0 {
-		t.Fatalf("provisional must NOT call CompleteExternalResponse; got %d final calls", len(calls.finals))
+		t.Fatalf("provisional must NOT call Resolve; got %d final calls", len(calls.finals))
 	}
 	if len(calls.provisional) != 1 {
 		t.Fatalf("provisional must call Provisional exactly once; got %d", len(calls.provisional))
@@ -362,7 +391,7 @@ func TestProxyFacadeCallbackRoutesProvisionalThroughProvisional(t *testing.T) {
 	}
 }
 
-func TestProxyFacadeCallbackRoutesFinalThroughCompleteExternalResponse(t *testing.T) {
+func TestProxyFacadeCallbackRoutesFinalThroughResolve(t *testing.T) {
 	mod, calls := newModuleWithCapture(t)
 
 	for _, status := range []string{"completed", "failed"} {
@@ -377,12 +406,22 @@ func TestProxyFacadeCallbackRoutesFinalThroughCompleteExternalResponse(t *testin
 	if len(calls.finals) != 2 {
 		t.Fatalf("expected 2 final calls; got %d", len(calls.finals))
 	}
+	// Each final routes through ctx.Resolve keyed on the request id
+	// (callback parent_id) with the typed terminal status.
+	for i, want := range []string{"completed", "failed"} {
+		if calls.finals[i].id != "req-1" {
+			t.Fatalf("resolve[%d] id=%s want req-1", i, calls.finals[i].id)
+		}
+		if calls.finals[i].req.Status != want {
+			t.Fatalf("resolve[%d] status=%s want %s", i, calls.finals[i].req.Status, want)
+		}
+	}
 }
 
 func TestProxyFacadeCallbackProvisionalThenFinalLeavesCorrelationUntilFinal(t *testing.T) {
 	mod, calls := newModuleWithCapture(t)
 
-	// First: two provisionals must not touch CompleteExternalResponse,
+	// First: two provisionals must not touch Resolve,
 	// meaning correlation/F3 remain in place.
 	for i, status := range []string{"received", "processing"} {
 		raw := mustEncodeEnvelope(t, provisionalEnvelope(fmt.Sprintf("prov-%d", i), status))
@@ -396,7 +435,7 @@ func TestProxyFacadeCallbackProvisionalThenFinalLeavesCorrelationUntilFinal(t *t
 	if len(calls.provisional) != 2 {
 		t.Fatalf("expected 2 provisional calls; got %d", len(calls.provisional))
 	}
-	// Then: the final response closes the correlation (CompleteExternalResponse).
+	// Then: the final response closes the correlation (ctx.Resolve).
 	raw := mustEncodeEnvelope(t, finalEnvelope("final-1", "completed"))
 	if err := mod.OnExternalCallback(context.Background(), raw); err != nil {
 		t.Fatalf("OnExternalCallback final: %v", err)

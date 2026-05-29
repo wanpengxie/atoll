@@ -125,10 +125,10 @@ func itoaShort(i int) string {
 	return digits
 }
 
-// TestCallActorSkipsProvisionalAndResolvesOnFinal verifies that the
-// sync CallActor surface ignores provisional responses (Layer 2 core +
+// TestCallSkipsProvisionalAndResolvesOnFinal verifies that the
+// sync Call surface ignores provisional responses (Layer 2 core +
 // Layer 3 extension) and only returns when the final response arrives.
-func TestCallActorSkipsProvisionalAndResolvesOnFinal(t *testing.T) {
+func TestCallSkipsProvisionalAndResolvesOnFinal(t *testing.T) {
 	withNoSubscribeDelay(t)
 	srv := newStreamingSDKServer(t, streamConfig{
 		Stream: []json.RawMessage{
@@ -140,7 +140,7 @@ func TestCallActorSkipsProvisionalAndResolvesOnFinal(t *testing.T) {
 	})
 	defer srv.Close()
 
-	res, err := (&Client{BaseURL: srv.URL}).CallActor(context.Background(), CallActorRequest{
+	res, err := (&Client{BaseURL: srv.URL}).Call(context.Background(), CallRequest{
 		ChannelID: "ch-1",
 		ActorID:   "tool:xhs",
 		Type:      "xhs.publish",
@@ -148,7 +148,7 @@ func TestCallActorSkipsProvisionalAndResolvesOnFinal(t *testing.T) {
 		Timeout:   2 * time.Second,
 	})
 	if err != nil {
-		t.Fatalf("CallActor: %v", err)
+		t.Fatalf("Call: %v", err)
 	}
 	if !res.OK {
 		t.Fatalf("expected OK, got %+v", res.Error)
@@ -279,7 +279,7 @@ func TestAwaitResolvesOnFinalIgnoringProvisional(t *testing.T) {
 
 // TestAwaitTimesOutWhenOnlyProvisionalArrives — when no final
 // response arrives before the timeout, Await returns a timeout result
-// (substrate may still emit final later; this matches CallActor
+// (substrate may still emit final later; this matches Call
 // behaviour).
 func TestAwaitTimesOutWhenOnlyProvisionalArrives(t *testing.T) {
 	withNoSubscribeDelay(t)
