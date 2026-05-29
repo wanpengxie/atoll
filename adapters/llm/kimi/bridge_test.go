@@ -516,11 +516,13 @@ func TestBridge_CallActorToolEmitsRequestAndReturnsResponse(t *testing.T) {
 		// Substrate-native actor-CLI meta-tool surface.
 		// Direct per-type injection was retired in favour of the
 		// uniform envelope invocation primitive (see meta_tool.go +
-		// channel_tool.go::channelTools).
-		if len(ac.AdditionalTools) != 4 {
-			return nil, fmt.Errorf("AdditionalTools len=%d want 4 (actor-CLI verbs)", len(ac.AdditionalTools))
+		// channel_tool.go::channelTools). The async-decision trio
+		// (await_result / abandon / list_pending) joined the original
+		// four actor-CLI verbs for the fast-path mechanism.
+		if len(ac.AdditionalTools) != 7 {
+			return nil, fmt.Errorf("AdditionalTools len=%d want 7 (4 actor-CLI verbs + await_result/abandon/list_pending)", len(ac.AdditionalTools))
 		}
-		for _, name := range []string{"list_actors", "describe_actor", "describe_type"} {
+		for _, name := range []string{"list_actors", "describe_actor", "describe_type", "await_result", "abandon", "list_pending"} {
 			if pickToolByName(ac.AdditionalTools, name) == nil {
 				return nil, fmt.Errorf("%s tool missing from AdditionalTools", name)
 			}
@@ -612,7 +614,13 @@ func TestBridge_CallActorToolEmitsRequestAndReturnsResponse(t *testing.T) {
 	}
 }
 
-func TestBridge_CallActorToolTimeoutReturnsErrorResult(t *testing.T) {
+// TestBridge_CallActorToolSuperWindowReturnsAck asserts that when no response
+// arrives within the fast-path window (here the type's tiny max_pending_ms
+// clamps the window), call_actor degrades to an ACK rather than a timeout
+// error — the request stays in flight and the agent can await_result / let it
+// return as a new trigger (§2.3.2). This replaces the legacy timeout-error
+// expectation.
+func TestBridge_CallActorToolSuperWindowReturnsAck(t *testing.T) {
 	cfg := mustConfig(t)
 	cfg.ChannelContext = kimi.ChannelContext{
 		Actors: []kimi.ActorInfo{
@@ -661,11 +669,18 @@ func TestBridge_CallActorToolTimeoutReturnsErrorResult(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	result := <-resultCh
-	if !result.IsError {
-		t.Fatalf("ToolResult.IsError=false; value=%#v", result.Value.Value)
+	if result.IsError {
+		t.Fatalf("super-window should return an ack, not an error: %#v", result.Value.Value)
 	}
-	if !strings.Contains(fmt.Sprint(result.Value.Value), "timed out") {
-		t.Errorf("ToolResult value=%#v want timeout text", result.Value.Value)
+	root, ok := result.Value.Value.(map[string]any)
+	if !ok {
+		t.Fatalf("ack value type=%T", result.Value.Value)
+	}
+	if root["status"] != "accepted" {
+		t.Fatalf("ack status=%v want accepted", root["status"])
+	}
+	if root["request_id"] == nil || root["request_id"] == "" {
+		t.Fatalf("ack missing request_id: %#v", root)
 	}
 }
 
@@ -984,13 +999,12 @@ func TestBridge_CallActorToolProvisionalBeforeFinalDoesNotResolveEarly(t *testin
 	}
 }
 
-// TestBridge_CallActorToolProvisionalOnlyTimesOut asserts that when
-// only provisional responses arrive (no final), the bridge times out as
-// if no response was received at all — provisional traffic alone must
-// not satisfy max_pending_ms. Mirrors the existing
-// TestBridge_CallActorToolTimeoutReturnsErrorResult shape but with a
-// provisional response injected between the request and the timeout.
-func TestBridge_CallActorToolProvisionalOnlyTimesOut(t *testing.T) {
+// TestBridge_CallActorToolProvisionalOnlyDegradesToAck asserts that when only
+// provisional responses arrive (no final), provisional traffic alone does NOT
+// satisfy the fast-path Await — the window elapses and call_actor degrades to
+// an ack (the request stays in flight; §2.3.2). Provisionals are swallowed,
+// never resolving the future early.
+func TestBridge_CallActorToolProvisionalOnlyDegradesToAck(t *testing.T) {
 	cfg := mustConfig(t)
 	cfg.ChannelContext = kimi.ChannelContext{
 		Actors: []kimi.ActorInfo{
@@ -1059,14 +1073,18 @@ func TestBridge_CallActorToolProvisionalOnlyTimesOut(t *testing.T) {
 
 	select {
 	case result := <-resultCh:
-		if !result.IsError {
-			t.Fatalf("ToolResult.IsError=false; want timeout error; value=%#v", result.Value.Value)
+		if result.IsError {
+			t.Fatalf("provisional-only should degrade to an ack, not an error: %#v", result.Value.Value)
 		}
-		if !strings.Contains(fmt.Sprint(result.Value.Value), "timed out") {
-			t.Errorf("ToolResult value=%#v want timeout text", result.Value.Value)
+		root, ok := result.Value.Value.(map[string]any)
+		if !ok {
+			t.Fatalf("ack value type=%T", result.Value.Value)
+		}
+		if root["status"] != "accepted" {
+			t.Fatalf("ack status=%v want accepted (provisionals must not resolve the future)", root["status"])
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("call_actor did not time out on provisional-only stream")
+		t.Fatal("call_actor did not degrade to ack on provisional-only stream")
 	}
 	cancel()
 	// Drain Run; it may return ctx.Err or a clean nil — either is fine.

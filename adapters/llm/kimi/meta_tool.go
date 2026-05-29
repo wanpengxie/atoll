@@ -68,9 +68,25 @@ Workflow:
   2. Call describe_actor when you need the actor's workflows.
   3. Call describe_type when you need payload_example, payload_fields, notes, or
      adapter-specific error codes for the selected type.
-  4. Call call_actor — the response payload arrives in your tool result.
-     On failure the result is {ok:false,error:{code,message,recovery_hint,detail?}}
-     where code is the actor-CLI closed set.
+  4. Call call_actor.
+
+Result shapes (fast-path, default):
+  - Short calls (the downstream finishes within ~15s): the response payload
+    arrives INLINE in your tool result, exactly as if it were synchronous.
+    On failure the result is {ok:false,error:{code,message,recovery_hint,detail?}}
+    where code is the actor-CLI closed set.
+  - Long calls (still running after ~15s): you get an ACK instead —
+    {status:"accepted", request_id, est_wait_ms, guidance, to_wait, if_not_waiting}.
+    The call keeps running. To collect it, call await_result(request_id) to block,
+    or do other work — the result will return on its own as a NEW message
+    (parent_id = request_id) you can react to in a later turn. Use list_pending()
+    to see what is still in flight, and abandon(request_id) to stop waiting on one.
+
+wait parameter:
+  - omit / true (default behaviour above is bounded; pass wait=true for sync):
+    wait=true waits up to the type's full timeout before degrading to an ack.
+  - wait=false: returns the ack IMMEDIATELY without waiting at all. Use this to
+    FAN OUT several calls in parallel, then await_result / abandon each as needed.
 `)
 }
 
@@ -82,7 +98,8 @@ var callActorSchema = json.RawMessage(`{
   "properties": {
     "actor_id": {"type": "string", "description": "Target actor id, e.g. tool:xhs or agent:research-assistant. Look up via list_actors."},
     "type": {"type": "string", "description": "Envelope type to send, e.g. xhs.publish or kimi.command. MUST be a request-allowed type for the chosen actor."},
-    "payload": {"type": "object", "description": "Type-specific payload. Shape is per-adapter convention; consult list_actors output for hints."}
+    "payload": {"type": "object", "description": "Type-specific payload. Shape is per-adapter convention; consult list_actors output for hints."},
+    "wait": {"type": "boolean", "description": "Optional. Omit for bounded fast-path (final inline within ~15s, else ack). true = wait up to the type timeout (sync). false = return ack immediately without waiting (fan-out)."}
   },
   "required": ["actor_id", "type"]
 }`)
@@ -93,6 +110,9 @@ type callActorParams struct {
 	ActorID string          `json:"actor_id"`
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload,omitempty"`
+	// Wait is a tri-state: nil = bounded fast-path, true = sync (unbounded to
+	// type timeout), false = immediate ack (fan-out).
+	Wait *bool `json:"wait,omitempty"`
 }
 
 func (t *CallActorTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
@@ -140,12 +160,22 @@ func (t *CallActorTool) Execute(ctx context.Context, params json.RawMessage) (ty
 		return payloadInvalidError("call_actor", p.ActorID, p.Type, err.Error()), nil
 	}
 
+	mode := waitFastPath
+	if p.Wait != nil {
+		if *p.Wait {
+			mode = waitUnbounded
+		} else {
+			mode = waitNone
+		}
+	}
+
 	result := t.bridge.executeChannelRequest(ctx, runtime.ipc, runtime.trigger, channelRequestSpec{
 		ToolName:       "call_actor",
 		EnvelopeType:   p.Type,
 		HandlerActorID: p.ActorID,
 		Payload:        payload,
 		Timeout:        timeout,
+		WaitMode:       mode,
 	})
 	return normalizeCallActorError(result, p.ActorID, p.Type), nil
 }
@@ -320,4 +350,7 @@ type channelRequestSpec struct {
 	HandlerActorID string
 	Payload        json.RawMessage
 	Timeout        time.Duration
+	// WaitMode selects the caller-side wait policy (§2.3.2). Zero value
+	// (waitFastPath) is the default bounded fast-path.
+	WaitMode waitMode
 }
