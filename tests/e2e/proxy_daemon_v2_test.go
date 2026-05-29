@@ -172,10 +172,10 @@ func TestE2E_ProxyDaemonV2_FullRoundTrip(t *testing.T) {
 		t.Fatalf("DescribeActor types missing proxy.echo: %+v", describe.Types)
 	}
 
-	callDone := make(chan *coagentsdk.CallActorResult, 1)
+	callDone := make(chan *coagentsdk.CallResult, 1)
 	callErr := make(chan error, 1)
 	go func() {
-		res, err := client.CallActor(ctx, coagentsdk.CallActorRequest{
+		res, err := client.Call(ctx, coagentsdk.CallRequest{
 			ChannelID: channelID,
 			ActorID:   proxyEchoActorID,
 			Type:      "proxy.echo",
@@ -219,23 +219,23 @@ func TestE2E_ProxyDaemonV2_FullRoundTrip(t *testing.T) {
 
 	select {
 	case err := <-callErr:
-		t.Fatalf("CallActor: %v", err)
+		t.Fatalf("Call: %v", err)
 	case res := <-callDone:
 		if res == nil || !res.OK {
-			t.Fatalf("CallActor result=%+v", res)
+			t.Fatalf("Call result=%+v", res)
 		}
 		var data struct {
 			Echo string `json:"echo"`
 			Via  string `json:"via"`
 		}
 		if err := json.Unmarshal(res.Data, &data); err != nil {
-			t.Fatalf("decode CallActor data: %v raw=%s", err, string(res.Data))
+			t.Fatalf("decode Call data: %v raw=%s", err, string(res.Data))
 		}
 		if data.Echo != "ping" || data.Via != "devicebus.v2" {
-			t.Fatalf("CallActor data=%+v raw=%s", data, string(res.Data))
+			t.Fatalf("Call data=%+v raw=%s", data, string(res.Data))
 		}
 	case <-ctx.Done():
-		t.Fatalf("CallActor did not finish: %v", ctx.Err())
+		t.Fatalf("Call did not finish: %v", ctx.Err())
 	}
 }
 

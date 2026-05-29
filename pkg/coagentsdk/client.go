@@ -16,6 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/ActOS/kernel/adapter/futurereg"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -32,7 +33,7 @@ type Client struct {
 	HTTPClient   *http.Client
 }
 
-type CallActorRequest struct {
+type CallRequest struct {
 	ChannelID string          `json:"channel_id"`
 	ActorID   string          `json:"actor_id"`
 	Type      string          `json:"type"`
@@ -40,10 +41,10 @@ type CallActorRequest struct {
 	Timeout   time.Duration   `json:"-"`
 }
 
-type CallActorResult struct {
+type CallResult struct {
 	OK    bool            `json:"ok"`
 	Data  json.RawMessage `json:"data,omitempty"`
-	Error *CallActorError `json:"error,omitempty"`
+	Error *CallError      `json:"error,omitempty"`
 	Raw   json.RawMessage `json:"-"`
 }
 
@@ -62,12 +63,36 @@ type CallActorResult struct {
 type SubmitResult struct {
 	RequestID string
 	SinceSeq  int64
+	// Ack is the substrate-level acknowledgement captured at the moment the
+	// request write was accepted by the server (§2.3.3 machine kernel). Over
+	// the HTTP transport the SDK can only fill the machine-kernel fields the
+	// emit endpoint returns — the receiver's own NL semantics arrive later on
+	// the first provisional, observable via Watch.
+	Ack AckDescriptor
 }
 
-// SubmitRequest mirrors CallActorRequest but is intended for the
+// AckDescriptor mirrors kernel/adapter.AckDescriptor's machine-kernel surface
+// (§2.3.3). Submit returns it inside SubmitResult; over the SDK's HTTP
+// transport only the substrate-level fields the emit endpoint carries are
+// populated (Accepted + RequestID + Status). The receiver's NL guidance /
+// ToWait hint is template-synthesized framework-side and surfaces later on the
+// first provisional response, not on the immediate emit ack.
+type AckDescriptor struct {
+	// RequestID is the envelope id the request was written under.
+	RequestID string
+	// Accepted reports whether the harness accepted the write (substrate
+	// level, not business). A rejected write surfaces as a Submit error
+	// before SubmitResult is returned, so on a successful Submit this is true.
+	Accepted bool
+	// Status is the immediate substrate ack status — always "accepted" on a
+	// successful Submit. Business status arrives later on a provisional.
+	Status string
+}
+
+// SubmitRequest mirrors CallRequest but is intended for the
 // Submit + Watch / Await split surface: callers that need streaming
 // access to provisional responses, or fan-in across many in-flight
-// requests, use it instead of CallActor (which collapses everything
+// requests, use it instead of Call (which collapses everything
 // into one blocking final-response call).
 type SubmitRequest struct {
 	ChannelID string
@@ -125,7 +150,7 @@ func (w *WatchHandle) Close() {
 	}
 }
 
-type CallActorError struct {
+type CallError struct {
 	Code         string `json:"code"`
 	Message      string `json:"message"`
 	RecoveryHint string `json:"recovery_hint,omitempty"`
@@ -198,13 +223,13 @@ type wsPushFrame struct {
 	Envelope  json.RawMessage `json:"envelope"`
 }
 
-// CallActor emits a kind=request envelope to req.ActorID and waits for the
+// Call emits a kind=request envelope to req.ActorID and waits for the
 // matching kind=response envelope on the channel push WebSocket.
-func (c *Client) CallActor(ctx context.Context, req CallActorRequest) (*CallActorResult, error) {
+func (c *Client) Call(ctx context.Context, req CallRequest) (*CallResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := validateCallActorRequest(req); err != nil {
+	if err := validateCallRequest(req); err != nil {
 		return nil, err
 	}
 
@@ -312,16 +337,25 @@ func (c *Client) Submit(ctx context.Context, req SubmitRequest) (SubmitResult, e
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	callReq := CallActorRequest{
+	callReq := CallRequest{
 		ChannelID: req.ChannelID,
 		ActorID:   req.ActorID,
 		Type:      req.Type,
 		Payload:   req.Payload,
 	}
-	if _, err := c.emitRequest(ctx, hc, baseURL, callReq, requestID); err != nil {
+	ack, err := c.emitRequest(ctx, hc, baseURL, callReq, requestID)
+	if err != nil {
 		return SubmitResult{}, err
 	}
-	return SubmitResult{RequestID: requestID, SinceSeq: cursor}, nil
+	return SubmitResult{
+		RequestID: requestID,
+		SinceSeq:  cursor,
+		Ack: AckDescriptor{
+			RequestID: requestID,
+			Accepted:  ack.Accepted,
+			Status:    "accepted",
+		},
+	}, nil
 }
 
 // SubmitAndAwait is the one-call ergonomic form of Submit + Await: it
@@ -332,7 +366,7 @@ func (c *Client) Submit(ctx context.Context, req SubmitRequest) (SubmitResult, e
 // must remember WithSinceSeq(result.SinceSeq); this method removes that
 // requirement). Use Submit + Watch(WithSinceSeq(...)) directly only when
 // you need to observe provisional responses.
-func (c *Client) SubmitAndAwait(ctx context.Context, req SubmitRequest, timeout time.Duration) (*CallActorResult, error) {
+func (c *Client) SubmitAndAwait(ctx context.Context, req SubmitRequest, timeout time.Duration) (*CallResult, error) {
 	res, err := c.Submit(ctx, req)
 	if err != nil {
 		return nil, err
@@ -453,6 +487,20 @@ func (c *Client) Watch(ctx context.Context, channelID, requestID string, opts ..
 		return nil, fmt.Errorf("coagentsdk: websocket subscribe: %w", err)
 	}
 
+	// Matching / final-before-await buffering / disposition is delegated to
+	// the shared futurereg core (§3.0) so the SDK transport never re-derives
+	// parent_id matching or IsFinal classification — the same package backs
+	// the in-daemon router and the kimi worker helper, so semantics cannot
+	// drift. The SDK transport is purely "how envelopes arrive" (WS read).
+	reg := futurereg.New()
+	handle := reg.Register(message.ID(requestID))
+	fwatch, err := handle.Watch()
+	if err != nil {
+		_ = ws.Close()
+		cancel()
+		return nil, fmt.Errorf("coagentsdk: register watch: %w", err)
+	}
+
 	events := make(chan WatchEvent, 16)
 	done := make(chan struct{})
 	// closeWS guards the single Close call so the ctx-watcher and the
@@ -477,25 +525,68 @@ func (c *Client) Watch(ctx context.Context, channelID, requestID string, opts ..
 		}
 	}()
 
+	// readErr carries a transport read error from the reader goroutine to the
+	// forwarder, which is the SOLE writer of the SDK events channel. Splitting
+	// "read frames" (reader) from "emit WatchEvents" (forwarder) keeps a single
+	// owner of events so they never race on send-vs-close.
+	readErr := make(chan error, 1)
+
+	// Forwarder: drain futurereg's watcher stream (matched provisional +
+	// final, IsFinal already classified by the shared core) onto the SDK's
+	// WatchEvent channel, plus any transport read error from the reader.
+	// futurereg closes its stream after the final, which closes the SDK
+	// events channel; ctx-cancel also unwinds it. The forwarder owns the
+	// teardown (close events / ws / stopWatcher / handle).
 	go func() {
 		defer close(done)
 		defer close(events)
 		defer closeWS()
 		defer close(stopWatcher)
+		defer func() { _ = handle.Close() }()
+		for {
+			select {
+			case <-watchCtx.Done():
+				return
+			case err := <-readErr:
+				select {
+				case events <- WatchEvent{Err: err}:
+				case <-watchCtx.Done():
+				}
+				return
+			case fev, ok := <-fwatch.Events():
+				if !ok {
+					return
+				}
+				ev := WatchEvent{Envelope: fev.Envelope, IsFinal: fev.IsFinal, Err: fev.Err}
+				select {
+				case events <- ev:
+				case <-watchCtx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	// Reader: pull frames off the WS and hand each matching envelope to
+	// futurereg.Deliver, which performs parent_id matching, IsFinal
+	// classification, and watcher fan-out under its single lock. The reader
+	// NEVER writes to events — read errors go via readErr to the forwarder.
+	go func() {
 		// Defensive: if gorilla ever panics on a corrupted conn after
 		// ctx cancel, swallow it. The caller has already asked us to
 		// shut down via watchCtx; surfacing a panic into the SDK
-		// goroutine would kill the process.
+		// goroutine would kill the process. A panic while ctx is still
+		// alive is a real bug — re-raise it (matching the legacy reader).
 		defer func() {
 			if r := recover(); r != nil {
 				if watchCtx.Err() == nil {
-					// Unexpected panic outside ctx cancel — re-raise.
 					panic(r)
 				}
+				_ = handle.Close()
 			}
 		}()
 		for {
-			if err := watchCtx.Err(); err != nil {
+			if watchCtx.Err() != nil {
 				return
 			}
 			mt, raw, err := ws.ReadMessage()
@@ -503,8 +594,11 @@ func (c *Client) Watch(ctx context.Context, channelID, requestID string, opts ..
 				if watchCtx.Err() != nil {
 					return
 				}
+				// Hand the transport error to the forwarder (sole events
+				// writer). The forwarder delivers it, returns, and its
+				// deferred handle.Close releases the futurereg waiter.
 				select {
-				case events <- WatchEvent{Err: fmt.Errorf("coagentsdk: websocket read: %w", err)}:
+				case readErr <- fmt.Errorf("coagentsdk: websocket read: %w", err):
 				case <-watchCtx.Done():
 				}
 				return
@@ -523,30 +617,10 @@ func (c *Client) Watch(ctx context.Context, channelID, requestID string, opts ..
 			if err := json.Unmarshal(frame.Envelope, &env); err != nil {
 				continue
 			}
-			if env.ParentID.String() != requestID {
-				continue
-			}
-			ev := WatchEvent{Envelope: &env}
-			if env.Kind == message.KindResponse {
-				status, perr := parsePayloadStatus(env.Payload)
-				if perr != nil {
-					select {
-					case events <- WatchEvent{Err: perr}:
-					case <-watchCtx.Done():
-					}
-					return
-				}
-				ev.IsFinal = message.IsFinalStatus(status)
-			}
-			select {
-			case events <- ev:
-			case <-watchCtx.Done():
-				return
-			}
-			if ev.IsFinal {
-				// Final response closes the request — stop reading.
-				return
-			}
+			// futurereg.Deliver matches env.ParentID against the registered
+			// waiter; non-matching envelopes are no-ops. A final closes the
+			// watcher stream, which the forwarder observes and stops.
+			reg.Deliver(&env)
 		}
 	}()
 
@@ -559,13 +633,13 @@ func (c *Client) Watch(ctx context.Context, channelID, requestID string, opts ..
 // callers that need to observe them should use Watch instead.
 //
 // Await is sugar over Watch — internally it filters the watch stream to
-// the first IsFinal event and converts it to a CallActorResult. Timeout
+// the first IsFinal event and converts it to a CallResult. Timeout
 // failure does NOT cancel substrate state: the daemon may still emit a
 // final response later (Watch can observe it if the caller reconnects).
 //
 // opts forward to Watch — pass WithSinceSeq(SubmitResult.SinceSeq) when
 // awaiting a request that was Submit'd before this Await call.
-func (c *Client) Await(ctx context.Context, channelID, requestID string, timeout time.Duration, opts ...WatchOption) (*CallActorResult, error) {
+func (c *Client) Await(ctx context.Context, channelID, requestID string, timeout time.Duration, opts ...WatchOption) (*CallResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -582,10 +656,10 @@ func (c *Client) Await(ctx context.Context, channelID, requestID string, timeout
 	for {
 		select {
 		case <-awaitCtx.Done():
-			return timeoutResult(CallActorRequest{ChannelID: channelID, Type: requestID}, timeout), nil
+			return timeoutResult(CallRequest{ChannelID: channelID, Type: requestID}, timeout), nil
 		case ev, ok := <-watch.Events():
 			if !ok {
-				return timeoutResult(CallActorRequest{ChannelID: channelID, Type: requestID}, timeout), nil
+				return timeoutResult(CallRequest{ChannelID: channelID, Type: requestID}, timeout), nil
 			}
 			if ev.Err != nil {
 				return nil, ev.Err
@@ -596,6 +670,64 @@ func (c *Client) Await(ctx context.Context, channelID, requestID string, timeout
 			return resultFromResponse(*ev.Envelope)
 		}
 	}
+}
+
+// AwaitItem identifies one in-flight request to await as part of AwaitAll.
+// Each item carries its own channel + request id + optional submit-time
+// cursor, because a fan-in set is built from independent Submit calls — each
+// SubmitResult has its own SinceSeq (the cursor captured before that request's
+// emit), and threading it per-item avoids the fast-final race (NF3) for every
+// member of the set.
+type AwaitItem struct {
+	ChannelID string
+	RequestID string
+	// SinceSeq, when SinceSeqSet is true, is threaded into the per-item watch
+	// (equivalent to WithSinceSeq). Pass SubmitResult.SinceSeq here.
+	SinceSeq    int64
+	SinceSeqSet bool
+}
+
+// Outcome is one per-item result of AwaitAll (all-settled, §0②). Exactly one
+// of Result / Err is set: Result holds the final response (which may itself be
+// a business failure — res.OK=false — or a timeout result); Err holds a
+// transport / decode error that prevented producing a result.
+type Outcome struct {
+	RequestID string
+	Result    *CallResult
+	Err       error
+}
+
+// AwaitAll awaits every item to settlement and returns one Outcome per item,
+// in the input order. It is ALL-SETTLED (§0②): it launches one goroutine per
+// id and waits for ALL of them — it never returns early on the first failure.
+// There is no protocol-level cancel, so fail-fast could not actually stop the
+// sibling waiters; all-settled is the honest semantics. A per-item timeout
+// produces a timeout Result (not an Err), matching Await.
+//
+// AwaitAll is an optional combinator (§0.1), not a mandatory orchestration
+// path — callers can always compose Submit + Await/Watch themselves.
+func (c *Client) AwaitAll(ctx context.Context, items []AwaitItem, timeout time.Duration) ([]Outcome, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	out := make([]Outcome, len(items))
+	var wg sync.WaitGroup
+	for i, it := range items {
+		wg.Add(1)
+		go func(i int, it AwaitItem) {
+			defer wg.Done()
+			out[i].RequestID = it.RequestID
+			var opts []WatchOption
+			if it.SinceSeqSet {
+				opts = append(opts, WithSinceSeq(it.SinceSeq))
+			}
+			res, err := c.Await(ctx, it.ChannelID, it.RequestID, timeout, opts...)
+			out[i].Result = res
+			out[i].Err = err
+		}(i, it)
+	}
+	wg.Wait()
+	return out, nil
 }
 
 func validateSubmitRequest(req SubmitRequest) error {
@@ -636,7 +768,7 @@ func (c *Client) ListActors(ctx context.Context, channelID string) ([]ActorInfo,
 }
 
 func (c *Client) ActorStatus(ctx context.Context, channelID, actorID string) (*ActorStatusResult, error) {
-	res, err := c.CallActor(ctx, CallActorRequest{
+	res, err := c.Call(ctx, CallRequest{
 		ChannelID: channelID,
 		ActorID:   actorID,
 		Type:      "actor.status",
@@ -737,11 +869,11 @@ type DescribeTypeResult struct {
 
 // DescribeActor returns the actor's static Declaration projection
 // (description / skill_doc / per-type metadata). Implemented as sugar
-// over CallActor with the actor.describe reserved type — framework
+// over Call with the actor.describe reserved type — framework
 // intercepts at dispatch, daemon answers from Module.Declares() with
 // no server-side mirror.
 func (c *Client) DescribeActor(ctx context.Context, channelID, actorID string) (*DescribeActorResult, error) {
-	res, err := c.CallActor(ctx, CallActorRequest{
+	res, err := c.Call(ctx, CallRequest{
 		ChannelID: channelID,
 		ActorID:   actorID,
 		Type:      "actor.describe",
@@ -768,13 +900,13 @@ func (c *Client) DescribeActor(ctx context.Context, channelID, actorID string) (
 }
 
 // DescribeType returns one type's full metadata. Filter is passed via
-// payload so a single CallActor round-trip carries it.
+// payload so a single Call round-trip carries it.
 func (c *Client) DescribeType(ctx context.Context, channelID, actorID, typeName string) (*DescribeTypeResult, error) {
 	if strings.TrimSpace(typeName) == "" {
 		return nil, fmt.Errorf("coagentsdk: type is required")
 	}
 	body, _ := json.Marshal(map[string]string{"type": typeName})
-	res, err := c.CallActor(ctx, CallActorRequest{
+	res, err := c.Call(ctx, CallRequest{
 		ChannelID: channelID,
 		ActorID:   actorID,
 		Type:      "actor.describe",
@@ -800,7 +932,7 @@ func (c *Client) DescribeType(ctx context.Context, channelID, actorID, typeName 
 	return &out, nil
 }
 
-func validateCallActorRequest(req CallActorRequest) error {
+func validateCallRequest(req CallRequest) error {
 	switch {
 	case strings.TrimSpace(req.ChannelID) == "":
 		return fmt.Errorf("coagentsdk: channel_id is required")
@@ -848,7 +980,7 @@ func (c *Client) fetchCursor(ctx context.Context, hc *http.Client, baseURL, chan
 	return out.LastReceivedSeq, nil
 }
 
-func (c *Client) emitRequest(ctx context.Context, hc *http.Client, baseURL string, req CallActorRequest, requestID string) (emitAck, error) {
+func (c *Client) emitRequest(ctx context.Context, hc *http.Client, baseURL string, req CallRequest, requestID string) (emitAck, error) {
 	payload := req.Payload
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
@@ -948,7 +1080,7 @@ func (c *Client) dialWebSocket(ctx context.Context, wsURL string) (*websocket.Co
 	return dialer.DialContext(ctx, wsURL, header)
 }
 
-func (c *Client) waitResponse(ctx context.Context, ws *websocket.Conn, req CallActorRequest, matchIDs map[string]struct{}, timeout time.Duration) (result *CallActorResult, err error) {
+func (c *Client) waitResponse(ctx context.Context, ws *websocket.Conn, req CallRequest, matchIDs map[string]struct{}, timeout time.Duration) (result *CallResult, err error) {
 	// Same ctx-cancel-via-ws.Close pattern as Watch: gorilla's
 	// SetReadDeadline-based polling marks the conn corrupt after the
 	// first i/o timeout and risks the "repeated read on failed
@@ -1008,7 +1140,7 @@ func (c *Client) waitResponse(ctx context.Context, ws *websocket.Conn, req CallA
 		if _, ok := matchIDs[env.ParentID.String()]; !ok {
 			continue
 		}
-		// CallActor only resolves on a final response (proto-foundation
+		// Call only resolves on a final response (proto-foundation
 		// §1.6.3). Provisional responses (payload.status ∈ Layer 2/3) on
 		// the same parent_id are silently dropped here — callers that
 		// need to observe them must use Submit + Watch instead.
@@ -1039,7 +1171,7 @@ func parsePayloadStatus(raw json.RawMessage) (string, error) {
 	return obj.Status, nil
 }
 
-func resultFromResponse(env message.Envelope) (*CallActorResult, error) {
+func resultFromResponse(env message.Envelope) (*CallResult, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(env.Payload, &obj); err != nil {
 		return nil, fmt.Errorf("coagentsdk: response payload must be a JSON object: %w", err)
@@ -1048,7 +1180,7 @@ func resultFromResponse(env message.Envelope) (*CallActorResult, error) {
 	switch status {
 	case "completed":
 		data := removePayloadFields(obj, "status", "reason")
-		return &CallActorResult{
+		return &CallResult{
 			OK:   true,
 			Data: data,
 			Raw:  append(json.RawMessage(nil), env.Payload...),
@@ -1056,9 +1188,9 @@ func resultFromResponse(env message.Envelope) (*CallActorResult, error) {
 	case "failed":
 		code := firstNonEmpty(rawString(obj["error_code"]), rawString(obj["reason"]), "failed")
 		msg := firstNonEmpty(rawString(obj["detail"]), rawString(obj["message"]))
-		return &CallActorResult{
+		return &CallResult{
 			OK: false,
-			Error: &CallActorError{
+			Error: &CallError{
 				Code:         code,
 				Message:      msg,
 				RecoveryHint: rawString(obj["recovery_hint"]),
@@ -1096,10 +1228,10 @@ func rawString(raw json.RawMessage) string {
 	return ""
 }
 
-func timeoutResult(req CallActorRequest, timeout time.Duration) *CallActorResult {
-	return &CallActorResult{
+func timeoutResult(req CallRequest, timeout time.Duration) *CallResult {
+	return &CallResult{
 		OK: false,
-		Error: &CallActorError{
+		Error: &CallError{
 			Code:    "timeout",
 			Message: fmt.Sprintf("timed out waiting %s for response to %s on channel %s", timeout, req.Type, req.ChannelID),
 		},

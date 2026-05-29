@@ -17,14 +17,14 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-func TestCallActorHappyPath(t *testing.T) {
+func TestCallHappyPath(t *testing.T) {
 	withNoSubscribeDelay(t)
 	srv := newMockSDKServer(t, mockConfig{
 		ResponsePayload: json.RawMessage(`{"status":"completed","note_id":"n-1","url":"https://example.invalid/n-1"}`),
 	})
 	defer srv.Close()
 
-	res, err := (&Client{BaseURL: srv.URL, SessionToken: "tok"}).CallActor(context.Background(), CallActorRequest{
+	res, err := (&Client{BaseURL: srv.URL, SessionToken: "tok"}).Call(context.Background(), CallRequest{
 		ChannelID: "ch-1",
 		ActorID:   "tool:xhs",
 		Type:      "xhs.publish",
@@ -32,7 +32,7 @@ func TestCallActorHappyPath(t *testing.T) {
 		Timeout:   time.Second,
 	})
 	if err != nil {
-		t.Fatalf("CallActor: %v", err)
+		t.Fatalf("Call: %v", err)
 	}
 	if !res.OK {
 		t.Fatalf("OK=false: %+v", res.Error)
@@ -41,14 +41,14 @@ func TestCallActorHappyPath(t *testing.T) {
 	assertJSONEqual(t, res.Raw, `{"status":"completed","note_id":"n-1","url":"https://example.invalid/n-1"}`)
 }
 
-func TestCallActorFailedResponse(t *testing.T) {
+func TestCallFailedResponse(t *testing.T) {
 	withNoSubscribeDelay(t)
 	srv := newMockSDKServer(t, mockConfig{
 		ResponsePayload: json.RawMessage(`{"status":"failed","error_code":"boom","detail":"bad input","recovery_hint":"retry later"}`),
 	})
 	defer srv.Close()
 
-	res, err := (&Client{BaseURL: srv.URL}).CallActor(context.Background(), CallActorRequest{
+	res, err := (&Client{BaseURL: srv.URL}).Call(context.Background(), CallRequest{
 		ChannelID: "ch-1",
 		ActorID:   "tool:xhs",
 		Type:      "xhs.publish",
@@ -56,7 +56,7 @@ func TestCallActorFailedResponse(t *testing.T) {
 		Timeout:   time.Second,
 	})
 	if err != nil {
-		t.Fatalf("CallActor: %v", err)
+		t.Fatalf("Call: %v", err)
 	}
 	if res.OK || res.Error == nil {
 		t.Fatalf("expected failed result, got %+v", res)
@@ -66,12 +66,12 @@ func TestCallActorFailedResponse(t *testing.T) {
 	}
 }
 
-func TestCallActorTimeout(t *testing.T) {
+func TestCallTimeout(t *testing.T) {
 	withNoSubscribeDelay(t)
 	srv := newMockSDKServer(t, mockConfig{NoResponse: true})
 	defer srv.Close()
 
-	res, err := (&Client{BaseURL: srv.URL}).CallActor(context.Background(), CallActorRequest{
+	res, err := (&Client{BaseURL: srv.URL}).Call(context.Background(), CallRequest{
 		ChannelID: "ch-1",
 		ActorID:   "tool:xhs",
 		Type:      "xhs.publish",
@@ -79,19 +79,19 @@ func TestCallActorTimeout(t *testing.T) {
 		Timeout:   30 * time.Millisecond,
 	})
 	if err != nil {
-		t.Fatalf("CallActor: %v", err)
+		t.Fatalf("Call: %v", err)
 	}
 	if res.OK || res.Error == nil || res.Error.Code != "timeout" {
 		t.Fatalf("result=%+v want timeout", res)
 	}
 }
 
-func TestCallActorHTTPErrorOnEmit(t *testing.T) {
+func TestCallHTTPErrorOnEmit(t *testing.T) {
 	withNoSubscribeDelay(t)
 	srv := newMockSDKServer(t, mockConfig{EmitStatus: http.StatusInternalServerError})
 	defer srv.Close()
 
-	_, err := (&Client{BaseURL: srv.URL}).CallActor(context.Background(), CallActorRequest{
+	_, err := (&Client{BaseURL: srv.URL}).Call(context.Background(), CallRequest{
 		ChannelID: "ch-1",
 		ActorID:   "tool:xhs",
 		Type:      "xhs.publish",
@@ -183,12 +183,12 @@ func TestActorStatusUsesReservedActorStatusCall(t *testing.T) {
 	}
 }
 
-func TestCallActorWebSocketConnectError(t *testing.T) {
+func TestCallWebSocketConnectError(t *testing.T) {
 	withNoSubscribeDelay(t)
 	srv := newMockSDKServer(t, mockConfig{WSReject: true})
 	defer srv.Close()
 
-	_, err := (&Client{BaseURL: srv.URL}).CallActor(context.Background(), CallActorRequest{
+	_, err := (&Client{BaseURL: srv.URL}).Call(context.Background(), CallRequest{
 		ChannelID: "ch-1",
 		ActorID:   "tool:xhs",
 		Type:      "xhs.publish",
@@ -418,10 +418,10 @@ func TestWatchExplicitCloseExitsCleanly(t *testing.T) {
 	}
 }
 
-// TestCallActorContextCancelExits verifies CallActor's waitResponse
+// TestCallContextCancelExits verifies Call's waitResponse
 // path also unwinds cleanly when the parent ctx is cancelled
 // mid-flight (the same race lived in waitResponse via nextReadWindow).
-func TestCallActorContextCancelExits(t *testing.T) {
+func TestCallContextCancelExits(t *testing.T) {
 	withNoSubscribeDelay(t)
 	srv := newMockSDKServer(t, mockConfig{NoResponse: true})
 	defer srv.Close()
@@ -430,11 +430,11 @@ func TestCallActorContextCancelExits(t *testing.T) {
 	defer cancel()
 
 	done := make(chan struct {
-		res *CallActorResult
+		res *CallResult
 		err error
 	}, 1)
 	go func() {
-		res, err := (&Client{BaseURL: srv.URL}).CallActor(ctx, CallActorRequest{
+		res, err := (&Client{BaseURL: srv.URL}).Call(ctx, CallRequest{
 			ChannelID: "ch-1",
 			ActorID:   "tool:xhs",
 			Type:      "xhs.publish",
@@ -442,7 +442,7 @@ func TestCallActorContextCancelExits(t *testing.T) {
 			Timeout:   5 * time.Second, // larger than ctx timeout
 		})
 		done <- struct {
-			res *CallActorResult
+			res *CallResult
 			err error
 		}{res, err}
 	}()
@@ -450,19 +450,19 @@ func TestCallActorContextCancelExits(t *testing.T) {
 	select {
 	case got := <-done:
 		if got.err != nil {
-			t.Fatalf("CallActor err=%v", got.err)
+			t.Fatalf("Call err=%v", got.err)
 		}
 		if got.res == nil || got.res.OK || got.res.Error == nil || got.res.Error.Code != "timeout" {
 			t.Fatalf("expected timeout result, got %+v", got.res)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatalf("CallActor did not return within 3s after ctx cancel (150ms)")
+		t.Fatalf("Call did not return within 3s after ctx cancel (150ms)")
 	}
 }
 
 // newSilentSDKServer is a minimal mock server that handles cursor +
 // websocket subscribe but never sends a frame back. Used to exercise
-// the Watch/CallActor read-loop ctx-cancel exit path.
+// the Watch/Call read-loop ctx-cancel exit path.
 func newSilentSDKServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -759,6 +759,218 @@ func newReplayFakeServer(t *testing.T, cfg replayFakeConfig) *httptest.Server {
 			}
 		}
 		<-r.Context().Done()
+	})
+	return httptest.NewServer(mux)
+}
+
+// TestSubmitReturnsAckDescriptor verifies Submit returns a SubmitResult
+// carrying the substrate-level AckDescriptor (§2.3.3 machine kernel): the
+// request id, Accepted=true, and Status="accepted". This is the §0③ contract
+// that Submit returns id + ack, not a bare id.
+func TestSubmitReturnsAckDescriptor(t *testing.T) {
+	withNoSubscribeDelay(t)
+	srv := newStreamingSDKServer(t, streamConfig{})
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	client := &Client{BaseURL: srv.URL}
+	res, err := client.Submit(ctx, SubmitRequest{
+		ChannelID: "ch-1",
+		ActorID:   "tool:xhs",
+		Type:      "xhs.publish",
+		Payload:   json.RawMessage(`{"title":"hi"}`),
+		RequestID: "req-ack-1",
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if res.RequestID != "req-ack-1" {
+		t.Fatalf("RequestID=%q want req-ack-1", res.RequestID)
+	}
+	if !res.Ack.Accepted {
+		t.Fatalf("Ack.Accepted=false want true: %+v", res.Ack)
+	}
+	if res.Ack.Status != "accepted" {
+		t.Fatalf("Ack.Status=%q want accepted", res.Ack.Status)
+	}
+	if res.Ack.RequestID != "req-ack-1" {
+		t.Fatalf("Ack.RequestID=%q want req-ack-1", res.Ack.RequestID)
+	}
+}
+
+// TestAwaitAllSettlesEverythingIncludingFailure verifies AwaitAll is
+// all-settled (§0②): given 3 requests where one resolves to a business
+// failure, it returns 3 Outcomes (one per item, in input order) and does NOT
+// return early on the failing one. Each Outcome carries a Result; the failing
+// one has Result.OK=false.
+func TestAwaitAllSettlesEverythingIncludingFailure(t *testing.T) {
+	withNoSubscribeDelay(t)
+	srv := newFanInSDKServer(t, map[string]json.RawMessage{
+		"req-a": json.RawMessage(`{"status":"completed","note_id":"n-a"}`),
+		"req-b": json.RawMessage(`{"status":"failed","error_code":"boom","detail":"bad"}`),
+		"req-c": json.RawMessage(`{"status":"completed","note_id":"n-c"}`),
+	})
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	client := &Client{BaseURL: srv.URL}
+
+	// Submit all three first (fan-out), then AwaitAll fans in.
+	items := make([]AwaitItem, 0, 3)
+	for _, id := range []string{"req-a", "req-b", "req-c"} {
+		sub, err := client.Submit(ctx, SubmitRequest{
+			ChannelID: "ch-1",
+			ActorID:   "tool:xhs",
+			Type:      "xhs.publish",
+			Payload:   json.RawMessage(`{"title":"hi"}`),
+			RequestID: id,
+		})
+		if err != nil {
+			t.Fatalf("Submit %s: %v", id, err)
+		}
+		items = append(items, AwaitItem{
+			ChannelID:   "ch-1",
+			RequestID:   sub.RequestID,
+			SinceSeq:    sub.SinceSeq,
+			SinceSeqSet: true,
+		})
+	}
+
+	outcomes, err := client.AwaitAll(ctx, items, 2*time.Second)
+	if err != nil {
+		t.Fatalf("AwaitAll: %v", err)
+	}
+	if len(outcomes) != 3 {
+		t.Fatalf("AwaitAll returned %d outcomes want 3 (all-settled)", len(outcomes))
+	}
+	// Outcomes are in input order: a (ok), b (failed), c (ok).
+	wantIDs := []string{"req-a", "req-b", "req-c"}
+	for i, o := range outcomes {
+		if o.RequestID != wantIDs[i] {
+			t.Fatalf("outcomes[%d].RequestID=%q want %q", i, o.RequestID, wantIDs[i])
+		}
+		if o.Err != nil {
+			t.Fatalf("outcomes[%d] (%s) unexpected Err: %v", i, o.RequestID, o.Err)
+		}
+		if o.Result == nil {
+			t.Fatalf("outcomes[%d] (%s) nil Result", i, o.RequestID)
+		}
+	}
+	if !outcomes[0].Result.OK {
+		t.Fatalf("req-a should be OK: %+v", outcomes[0].Result.Error)
+	}
+	if outcomes[1].Result.OK {
+		t.Fatalf("req-b should be a failure, got OK")
+	}
+	if outcomes[1].Result.Error == nil || outcomes[1].Result.Error.Code != "boom" {
+		t.Fatalf("req-b error=%+v want code boom", outcomes[1].Result.Error)
+	}
+	if !outcomes[2].Result.OK {
+		t.Fatalf("req-c should be OK: %+v", outcomes[2].Result.Error)
+	}
+}
+
+// newFanInSDKServer is a mock that supports multiple distinct requests on
+// ch-1. Each emit POST persists a final response keyed by the request's
+// parent_id; every WS subscription replays the full persisted log (with
+// seq > since_seq), so each per-request Watch receives its own final (and
+// harmlessly sees the others, which futurereg filters out by parent_id).
+func newFanInSDKServer(t *testing.T, responses map[string]json.RawMessage) *httptest.Server {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+
+	type persisted struct {
+		seq int64
+		env message.Envelope
+	}
+	var (
+		mu  sync.Mutex
+		log []persisted
+		seq int64
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/channels/ch-1/cursor", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]int64{"last_received_seq": 0})
+	})
+	mux.HandleFunc("/api/channels/ch-1/messages", func(w http.ResponseWriter, r *http.Request) {
+		var body emitRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		payload, ok := responses[body.ID]
+		if !ok {
+			payload = json.RawMessage(`{"status":"completed"}`)
+		}
+		mu.Lock()
+		seq++
+		log = append(log, persisted{
+			seq: seq,
+			env: message.Envelope{
+				ID:        message.ID("resp-" + body.ID),
+				TS:        time.Now().UnixMilli(),
+				ChannelID: channel.ID("ch-1"),
+				Sender: message.Sender{
+					Kind: actor.KindTool,
+					ID:   actor.ActorID("tool:xhs"),
+				},
+				Kind:       message.KindResponse,
+				Type:       body.Type,
+				Payload:    payload,
+				ParentID:   message.ID(body.ID),
+				Visibility: message.VisibilityPublic,
+				Audience:   message.Audience{},
+			},
+		})
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(emitAck{MessageID: body.ID, Accepted: true})
+	})
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		ws, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = ws.Close() }()
+		var sub map[string]any
+		if err := ws.ReadJSON(&sub); err != nil {
+			return
+		}
+		sinceSeq := int64(0)
+		if v, ok := sub["since_seq"].(float64); ok {
+			sinceSeq = int64(v)
+		}
+		// Replay loop: keep streaming persisted envelopes with seq > the
+		// last one we sent until the connection closes. This covers both the
+		// already-persisted finals and any that land after the subscribe.
+		sent := sinceSeq
+		for {
+			if r.Context().Err() != nil {
+				return
+			}
+			mu.Lock()
+			snapshot := make([]persisted, len(log))
+			copy(snapshot, log)
+			mu.Unlock()
+			for _, p := range snapshot {
+				if p.seq <= sent {
+					continue
+				}
+				frame := wsPushFrame{
+					Type:      "message",
+					ChannelID: "ch-1",
+					Seq:       p.seq,
+					Envelope:  mustMarshal(t, p.env),
+				}
+				if err := ws.WriteJSON(frame); err != nil {
+					return
+				}
+				sent = p.seq
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 	})
 	return httptest.NewServer(mux)
 }

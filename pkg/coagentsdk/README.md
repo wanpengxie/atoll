@@ -8,7 +8,7 @@ client := &coagentsdk.Client{
 	SessionToken: "raw-coagent-session-cookie-value",
 }
 
-res, err := client.CallActor(ctx, coagentsdk.CallActorRequest{
+res, err := client.Call(ctx, coagentsdk.CallRequest{
 	ChannelID: "ch_123",
 	ActorID:   "tool:xhs",
 	Type:      "xhs.publish",
@@ -43,7 +43,7 @@ if err != nil {
 fmt.Printf("kimi proxy available=%v reason=%s\n", status.Available, status.Reason)
 ```
 
-Default `CallActor` timeout is 30s. Pass `CallActorRequest.Timeout` only when a
+Default `Call` timeout is 30s. Pass `CallRequest.Timeout` only when a
 specific type has an explicit longer `max_pending_ms` budget.
 
 `SessionToken` is the raw value of the `coagent_session` cookie. The SDK sends
@@ -51,7 +51,7 @@ it as a cookie on both HTTP and WebSocket requests.
 
 ## Streaming: `Submit` + `Watch` + `Await`
 
-`CallActor` is the convenience sync wrap. The first-class async surface is
+`Call` is the convenience sync wrap. The first-class async surface is
 `Submit` + `Watch` / `Await`, which exposes provisional responses
 (`payload.status` ∈ `received` / `queued` / `processing` / `deferred` /
 `unavailable` plus Layer 3 namespace extensions like `xhs.login_queued`)
@@ -95,7 +95,7 @@ for ev := range watch.Events() {
 ```
 
 `SubmitAndAwait(ctx, req, timeout)` is the blocking-on-final counterpart:
-it emits the request and returns the final `CallActorResult`, threading the
+it emits the request and returns the final `CallResult`, threading the
 submit-time cursor automatically. Provisional responses are silently
 dropped. Timeout failure does NOT cancel substrate state — the daemon may
 still emit the final response later; reconnect with `Watch` to observe it.
