@@ -26,6 +26,12 @@ type ModuleContext struct {
 	// (Declaration.ActorID).
 	AdapterActorID actor.ActorID
 
+	// AdapterActorKind is the actor_registry kind this adapter owns. Current
+	// adapter Declaration.ActorID rows are tool actors; exposing the kind lets
+	// callback decoders reject callbacks that spoof the same id under a different
+	// actor.kind.
+	AdapterActorKind actor.Kind
+
 	// ChannelID identifies the channel this adapter instance services
 	// (each channel gets its own adapter instance bound to its own
 	// channel sqlite — L1 §11.5 / L2 §8.6).

@@ -33,6 +33,10 @@ const (
 	// DeliveredToWatch — a provisional or final was pushed onto a Watch
 	// stream (and, if final, also resolved any Await).
 	DeliveredToWatch
+	// BufferedPendingAwait — a final arrived before an expected Await parked.
+	// The final is buffered for that Await and MUST NOT be surfaced as a new
+	// trigger.
+	BufferedPendingAwait
 	// NoActiveWaiter — no active waiter (includes an Await that already
 	// timed out and exited, or an abandoned request). The caller decides
 	// the follow-up (kimi worker: surface as a new trigger; in-daemon:
@@ -43,6 +47,15 @@ const (
 // ErrClosed is returned by Await when the registry entry was cancelled
 // (abandoned) or closed before a final arrived.
 var ErrClosed = errors.New("futurereg: waiter closed")
+
+// RegisterOpts controls the initial waiter mode for a request id.
+type RegisterOpts struct {
+	// ExpectsAwait means a final that arrives before an Await parks is a
+	// fast-final-before-await and should be buffered for that future Await.
+	// false means pure async / fan-out: an un-awaited final is a genuine
+	// no-waiter final and should surface through the caller transport.
+	ExpectsAwait bool
+}
 
 // FutureRegistry maps request_id → waiterSet. Pure in-memory, transport
 // agnostic, safe for concurrent use.
@@ -78,6 +91,13 @@ type waiterSet struct {
 
 	// closed marks the entry as cancelled/closed; no further delivery.
 	closed bool
+	// expectsAwait distinguishes fast-final-before-await from pure async
+	// fan-out. It is read only under FutureRegistry.mu.
+	expectsAwait bool
+	// abandoned means the current expected Await gave up (timeout / ctx cancel /
+	// explicit abandon path that keeps the set), so a later final should surface
+	// instead of being silently buffered forever.
+	abandoned bool
 }
 
 type awaitResult struct {
@@ -97,15 +117,27 @@ type Handle struct {
 func (h *Handle) ID() message.ID { return h.id }
 
 // Register creates a waiterSet (with the final-before-await buffer slot ready)
-// for id and returns its Handle. Calling Register twice for the same id
-// returns a fresh Handle bound to the same underlying set.
-func (r *FutureRegistry) Register(id message.ID) *Handle {
+// for id and returns its Handle. Calling Register twice for the same id returns
+// a fresh Handle bound to the same underlying set. With no opts, Register
+// defaults to ExpectsAwait=true: the normal Submit/Call fast-path expects a
+// future Await and must preserve fast-final-before-await.
+func (r *FutureRegistry) Register(id message.ID, opts ...RegisterOpts) *Handle {
+	ro := RegisterOpts{ExpectsAwait: true}
+	if len(opts) > 0 {
+		ro = opts[0]
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.waiters[id]; !ok {
+	if ws, ok := r.waiters[id]; ok {
+		ws.expectsAwait = ro.ExpectsAwait
+		if ro.ExpectsAwait {
+			ws.abandoned = false
+		}
+	} else {
 		r.waiters[id] = &waiterSet{
-			id:       id,
-			watchers: map[*watcher]struct{}{},
+			id:           id,
+			watchers:     map[*watcher]struct{}{},
+			expectsAwait: ro.ExpectsAwait,
 		}
 	}
 	return &Handle{reg: r, id: id}
@@ -173,7 +205,8 @@ func (r *FutureRegistry) Deliver(env *message.Envelope) Disposition {
 		return NoActiveWaiter
 	}
 
-	// Final: resolve an active Await, else buffer it.
+	// Final: resolve an active Await, else decide whether this is a
+	// fast-final-before-await (buffer) or a genuine no-waiter final (surface).
 	if ws.awaitCh != nil {
 		ws.awaitCh <- awaitResult{env: env}
 		ws.awaitCh = nil
@@ -184,20 +217,26 @@ func (r *FutureRegistry) Deliver(env *message.Envelope) Disposition {
 		return DeliveredToAwait
 	}
 
-	// No parked Await: buffer the final so a later Await does not miss it.
-	if !ws.finalConsumed {
-		ws.finalBuf = env
-	}
 	if watched {
 		// Watchers got the final; close their streams and drop the set.
 		r.closeWatchersLocked(ws)
-		// Keep the buffered final around for a possible Await only if no
-		// watcher consumed it; but since a Watch consumer is the active
-		// waiter here, treat as DeliveredToWatch and remove the set.
 		delete(r.waiters, env.ParentID)
 		return DeliveredToWatch
 	}
-	// Final buffered, no active waiter at all → caller decides follow-up.
+
+	if ws.expectsAwait && !ws.abandoned {
+		if !ws.finalConsumed {
+			ws.finalBuf = env
+		}
+		return BufferedPendingAwait
+	}
+
+	// Pure async / abandoned: this final is going to be surfaced by the caller
+	// transport. Clear the set while still under the Deliver lock so a racing
+	// await_result cannot also consume the same final.
+	ws.finalConsumed = true
+	r.closeWatchersLocked(ws)
+	delete(r.waiters, env.ParentID)
 	return NoActiveWaiter
 }
 

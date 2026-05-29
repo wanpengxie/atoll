@@ -72,9 +72,10 @@ func (c *bridgeCaller) Submit(
 	ipc IPCFacade,
 	env message.Envelope,
 	estWaitMs int64,
+	expectsAwait bool,
 ) (submitResult, error) {
 	// subscribe-before-send: register first.
-	c.futures.Register(env.ID)
+	c.futures.Register(env.ID, futurereg.RegisterOpts{ExpectsAwait: expectsAwait})
 	if err := ipc.WriteEnvelope(ctx, env); err != nil {
 		c.futures.Cancel(env.ID)
 		return submitResult{}, err

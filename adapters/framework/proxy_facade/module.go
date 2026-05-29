@@ -184,8 +184,11 @@ func (m *ProxyFacadeModule) handleFinalCallback(ctx context.Context, env *messag
 	if env.ChannelID != m.mctx.ChannelID {
 		return fmt.Errorf("proxy_facade: final channel mismatch: callback=%s manager=%s", env.ChannelID, m.mctx.ChannelID)
 	}
-	if env.Sender.ID != m.mctx.AdapterActorID {
-		return fmt.Errorf("proxy_facade: final sender mismatch: callback=%s adapter=%s", env.Sender.ID, m.mctx.AdapterActorID)
+	if err := m.validateCallbackSender("final", env); err != nil {
+		return err
+	}
+	if env.CorrelationID == "" {
+		return errors.New("proxy_facade: final correlation_id required")
 	}
 	if m.mctx.LookupPendingRequest != nil {
 		entry, ok, lookErr := m.mctx.LookupPendingRequest(ctx, adapter.CorrelationKey(env.ParentID))
@@ -196,14 +199,11 @@ func (m *ProxyFacadeModule) handleFinalCallback(ctx context.Context, env *messag
 			if entry.ChannelID != "" && env.ChannelID != entry.ChannelID {
 				return fmt.Errorf("proxy_facade: final channel mismatch vs pending: callback=%s pending=%s", env.ChannelID, entry.ChannelID)
 			}
-			// correlation_id, when both sides carry it, must agree with the
-			// pending request's correlation (the request id is the fallback
-			// correlation when the request did not set one).
 			expectedCorr := entry.CorrelationID
 			if expectedCorr == "" {
 				expectedCorr = entry.ParentID
 			}
-			if env.CorrelationID != "" && expectedCorr != "" && env.CorrelationID != expectedCorr {
+			if env.CorrelationID != expectedCorr {
 				return fmt.Errorf("proxy_facade: final correlation mismatch: callback=%s pending=%s", env.CorrelationID, expectedCorr)
 			}
 		}
@@ -246,8 +246,8 @@ func (m *ProxyFacadeModule) handleProvisionalCallback(ctx context.Context, env *
 	if env.ChannelID != m.mctx.ChannelID {
 		return fmt.Errorf("proxy_facade: provisional channel mismatch: callback=%s manager=%s", env.ChannelID, m.mctx.ChannelID)
 	}
-	if env.Sender.ID != m.mctx.AdapterActorID {
-		return fmt.Errorf("proxy_facade: provisional sender mismatch: callback=%s adapter=%s", env.Sender.ID, m.mctx.AdapterActorID)
+	if err := m.validateCallbackSender("provisional", env); err != nil {
+		return err
 	}
 	// The framework Provisional helper re-merges status onto the payload;
 	// strip it from the inbound copy so we don't pass duplicate fields.
@@ -267,6 +267,18 @@ func (m *ProxyFacadeModule) handleProvisionalCallback(ctx context.Context, env *
 	)
 	if err != nil {
 		return fmt.Errorf("proxy_facade: emit provisional: %w", err)
+	}
+	return nil
+}
+
+func (m *ProxyFacadeModule) validateCallbackSender(label string, env *message.Envelope) error {
+	expectedKind := m.mctx.AdapterActorKind
+	if expectedKind == "" {
+		expectedKind = actor.KindTool
+	}
+	if env.Sender.ID != m.mctx.AdapterActorID || env.Sender.Kind != expectedKind {
+		return fmt.Errorf("proxy_facade: %s sender mismatch: callback=(%s,%s) adapter=(%s,%s)",
+			label, env.Sender.Kind, env.Sender.ID, expectedKind, m.mctx.AdapterActorID)
 	}
 	return nil
 }

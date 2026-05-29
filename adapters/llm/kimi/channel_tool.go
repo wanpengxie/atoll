@@ -95,6 +95,9 @@ func (b *Bridge) channelTools() []gokimitools.Tool {
 //     await_result. Ack the trigger and DO NOT forward to the LLM.
 //   - DeliveredToWatch → consumed by a Watch stream (provisional or final).
 //     Ack + swallow.
+//   - BufferedPendingAwait → fast-final-before-await: the final arrived after
+//     Submit registered the future but before Await parked. Ack + swallow; the
+//     later Await consumes the buffered final.
 //   - NoActiveWaiter + provisional → an interim on an in-flight call with no
 //     Watch attached. v1 swallows provisionals (response-multitype-refactor.md
 //     §3.4 D: "ignore provisional, wait final"); the fast-path Await stays
@@ -104,8 +107,8 @@ func (b *Bridge) channelTools() []gokimitools.Tool {
 //     abandoned, or a worker-restart orphan (M4). This is exactly the
 //     "super-window final" case. Surface it to the LLM as a NEW TURN TRIGGER
 //     (never quarantined, never dropped) so the long-call result comes back,
-//     and clear the now-consumed future so a later await_result cannot
-//     double-consume the buffered final.
+//     Deliver has already cleared/marked the future under its own lock, so a
+//     later await_result cannot double-consume the same final.
 //
 // Non-response envelopes (events / fresh requests addressed to the agent)
 // always forward to the LLM as turn triggers.
@@ -136,10 +139,9 @@ func (b *Bridge) routeTriggers(ctx context.Context, ipc IPCFacade, in <-chan Tri
 						continue
 					}
 					// Super-window / M4: a FINAL with no active awaiter →
-					// surface as a new turn trigger and clear the consumed
-					// future (drop the buffered final so a later await_result
-					// does not re-deliver it).
-					caller.Abandon(env.ParentID)
+					// surface as a new turn trigger. Deliver already cleared
+					// the future under the futurereg lock, so there is no
+					// Deliver→Abandon window for await_result to double-consume.
 				}
 				select {
 				case out <- payload:
@@ -198,7 +200,8 @@ func (b *Bridge) executeChannelRequest(
 
 	caller := b.caller()
 	est := int64(spec.Timeout / time.Millisecond)
-	res, err := caller.Submit(ctx, ipc, env, est)
+	expectsAwait := spec.WaitMode != waitNone
+	res, err := caller.Submit(ctx, ipc, env, est, expectsAwait)
 	if err != nil {
 		return channelToolErrorResult(spec.ToolName,
 			fmt.Sprintf("emit channel request %s: %v", spec.EnvelopeType, err))

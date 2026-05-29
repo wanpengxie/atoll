@@ -138,14 +138,14 @@ func scenarioRegisterBeforeDeliver(t *testing.T, tr Transport) {
 }
 
 // final-before-await buffer: final arrives before anyone awaits and is not lost
-// — a subsequent Await returns it. Deliver with no parked waiter is
-// NoActiveWaiter (the buffered slot keeps the final).
+// — a subsequent Await returns it. Deliver returns BufferedPendingAwait so the
+// caller transport knows not to surface it as a trigger.
 func scenarioFinalBeforeAwait(t *testing.T, tr Transport) {
 	const id message.ID = "R-fba"
 	tr.Register(id)
 
-	if disp := tr.Deliver(Resp(id, "completed")); disp != futurereg.NoActiveWaiter {
-		t.Fatalf("disposition=%v want NoActiveWaiter (buffered, no waiter)", disp)
+	if disp := tr.Deliver(Resp(id, "completed")); disp != futurereg.BufferedPendingAwait {
+		t.Fatalf("disposition=%v want BufferedPendingAwait", disp)
 	}
 	got, ok, err := tr.Await(context.Background(), id, time.Second)
 	if err != nil {
@@ -242,7 +242,8 @@ func scenarioFinalResolvesAndClears(t *testing.T, tr Transport) {
 //     final (it cannot also report a timeout — that is the F2 double-loss the
 //     fix forbids).
 //   - If Deliver == NoActiveWaiter, the racing Await must NOT have returned the
-//     final, and the buffered final must be recoverable by a fresh Await.
+//     final, and the caller transport has claimed the final for trigger
+//     surfacing so no later Await can double-consume it.
 //
 // A final is never lost and never double-delivered. Both transports run this.
 func scenarioAtomicDisposition(t *testing.T, tr Transport) {
@@ -302,13 +303,12 @@ func scenarioAtomicDisposition(t *testing.T, tr Transport) {
 			}
 		} else {
 			// NoActiveWaiter: the Await must not have gotten the final, and the
-			// buffered final must be recoverable.
+			// future must be cleared for caller-side trigger surfacing.
 			if gotFinal {
 				t.Fatalf("trial %d: disp=NoActiveWaiter but Await also got the final (double-deliver)", trial)
 			}
-			env, ok, err := tr.Await(context.Background(), id, 300*time.Millisecond)
-			if err != nil || !ok || env == nil {
-				t.Fatalf("trial %d: final neither observed nor recoverable (lost): ok=%v err=%v", trial, ok, err)
+			if containsID(tr.Pending(), id) {
+				t.Fatalf("trial %d: surfaced final left id pending: pending=%v", trial, tr.Pending())
 			}
 		}
 	}
