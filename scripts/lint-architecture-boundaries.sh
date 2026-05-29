@@ -103,7 +103,7 @@ if ! rg -n "func \\(c \\*IPCClient\\) AckTrigger" runtime/worker/ipc_client.go >
   fail "worker IPC must expose explicit bridge-owned AckTrigger"
 fi
 
-if ! rg -nU "dispatchToolResponse\\(payload\\)[\\s\\S]{0,160}ackTrigger\\(ctx, ipc, payload, true" adapters/llm/kimi/channel_tool.go >/dev/null; then
+if ! rg -nU "caller\\.Deliver\\(&env\\)[\\s\\S]{0,400}ackTrigger\\(ctx, ipc, payload, true" adapters/llm/kimi/channel_tool.go >/dev/null; then
   fail "Kimi intercepted tool responses must explicitly ack their trigger"
 fi
 

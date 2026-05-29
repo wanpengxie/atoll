@@ -120,7 +120,8 @@ func TestCallActorClosedSetRuntimeErrors(t *testing.T) {
 			})
 			go func() {
 				req := <-ipc.writes
-				b.dispatchToolResponse(metaResponseForRequest(req, tc.responsePayload))
+				resp := metaResponseForRequest(req, tc.responsePayload).Envelope
+				b.caller().Deliver(&resp)
 			}()
 			result, err := (&CallActorTool{bridge: b}).Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{"title":"hello"}}`))
 			if err != nil {
@@ -130,7 +131,12 @@ func TestCallActorClosedSetRuntimeErrors(t *testing.T) {
 		})
 	}
 
-	t.Run("timeout", func(t *testing.T) {
+	// Fast-path super-window: with a tiny max_pending_ms and no responder the
+	// bounded Await window elapses, so call_actor degrades to an ACK (not an
+	// error) — the request stays in flight (§2.3.2). This replaces the old
+	// "timeout error" expectation: a slow call is no longer a failure, it is
+	// an async hand-back.
+	t.Run("super_window_ack", func(t *testing.T) {
 		b := metaToolBridge(t)
 		b.cfg.ChannelContext.Types[0].MaxPendingMs = 1
 		ipc := newMetaFakeIPC()
@@ -142,8 +148,81 @@ func TestCallActorClosedSetRuntimeErrors(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
-		assertActorCLIErrorCode(t, result, "timeout")
+		if result.IsError {
+			t.Fatalf("super-window should return an ack, not an error: %#v", result.Value.Value)
+		}
+		root, ok := result.Value.Value.(map[string]any)
+		if !ok {
+			t.Fatalf("ack value type=%T", result.Value.Value)
+		}
+		if root["status"] != "accepted" {
+			t.Fatalf("ack status=%v want accepted", root["status"])
+		}
+		if root["request_id"] == "" || root["request_id"] == nil {
+			t.Fatalf("ack missing request_id: %#v", root)
+		}
+		toWait, ok := root["to_wait"].(map[string]any)
+		if !ok || toWait["tool"] != "await_result" {
+			t.Fatalf("ack to_wait=%v", root["to_wait"])
+		}
 	})
+}
+
+// TestCallActorWaitTrueIsSync asserts wait=true awaits the final inline (sync
+// opt-in) when the response arrives within the type timeout.
+func TestCallActorWaitTrueIsSync(t *testing.T) {
+	b := metaToolBridge(t)
+	ipc := newMetaFakeIPC()
+	ctx := context.WithValue(context.Background(), channelToolRuntimeKey{}, channelToolRuntime{
+		ipc:     ipc,
+		trigger: metaTrigger(),
+	})
+	go func() {
+		req := <-ipc.writes
+		resp := metaResponseForRequest(req, json.RawMessage(`{"status":"completed","note":"ok"}`)).Envelope
+		b.caller().Deliver(&resp)
+	}()
+	result, err := (&CallActorTool{bridge: b}).Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{},"wait":true}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("wait=true sync call should return inline final: %#v", result.Value.Value)
+	}
+	value := result.Value.Value.(map[string]any)
+	if value["note"] != "ok" {
+		t.Fatalf("inline final value=%#v", value)
+	}
+}
+
+// TestCallActorWaitFalseImmediateAck asserts wait=false returns an ack
+// immediately without waiting for any response.
+func TestCallActorWaitFalseImmediateAck(t *testing.T) {
+	b := metaToolBridge(t)
+	ipc := newMetaFakeIPC()
+	ctx := context.WithValue(context.Background(), channelToolRuntimeKey{}, channelToolRuntime{
+		ipc:     ipc,
+		trigger: metaTrigger(),
+	})
+	result, err := (&CallActorTool{bridge: b}).Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{},"wait":false}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("wait=false should return an ack: %#v", result.Value.Value)
+	}
+	root := result.Value.Value.(map[string]any)
+	if root["status"] != "accepted" {
+		t.Fatalf("wait=false ack status=%v", root["status"])
+	}
+	reqID, _ := root["request_id"].(string)
+	if reqID == "" {
+		t.Fatal("wait=false ack missing request_id")
+	}
+	// The request must be in flight so a later await_result / trigger collects it.
+	if len(b.caller().Pending()) != 1 {
+		t.Fatalf("fan-out request not in flight: %v", b.caller().Pending())
+	}
 }
 
 func TestDescribeActorReturnsSkillDocAndTypes(t *testing.T) {

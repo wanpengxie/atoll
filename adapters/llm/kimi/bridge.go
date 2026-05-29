@@ -264,8 +264,20 @@ type Bridge struct {
 	testWireEmitter wire.Emitter                                // populated by Run; tests reach in via export_test.go
 	envelopeSeq     atomic.Uint64
 
-	pendingMu    sync.Mutex
-	pendingTools map[message.ID]chan toolResponse
+	// caller is the worker-side caller helper (owns its own
+	// futurereg.FutureRegistry). Lazily built via caller(); guarded by mu.
+	callerHelper *bridgeCaller
+}
+
+// caller returns the bridge's worker-side caller helper, building it lazily
+// on first use. One registry instance per Bridge process.
+func (b *Bridge) caller() *bridgeCaller {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.callerHelper == nil {
+		b.callerHelper = newBridgeCaller()
+	}
+	return b.callerHelper
 }
 
 // kimiAgent is the subset of go-kimi.Agent the bridge consumes. Carved
@@ -1193,7 +1205,7 @@ func renderChannelContext(c ChannelContext) string {
 		// twice (once in tools API, once in prompt) was the legacy
 		// inject-per-type fallback; the substrate-native path is one
 		// list_actors read per task.
-		fmt.Fprintf(&b, "\n## Tool invocation\nThis channel exposes %d request-callable type(s) spanning the actors listed above. Use `list_actors` for the bootstrap catalog, `describe_actor(actor_id)` to deep-dive one actor's skill doc and workflows, `describe_type(actor_id, type)` to fetch a specific type's payload example and error codes, then `call_actor` to invoke. The catalog is a bootstrap hint; live validation happens on each envelope call.\n", countRequestTypes(c.Types))
+		fmt.Fprintf(&b, "\n## Tool invocation\nThis channel exposes %d request-callable type(s) spanning the actors listed above. Use `list_actors` for the bootstrap catalog, `describe_actor(actor_id)` to deep-dive one actor's skill doc and workflows, `describe_type(actor_id, type)` to fetch a specific type's payload example and error codes, then `call_actor` to invoke. The catalog is a bootstrap hint; live validation happens on each envelope call.\n\n### Sync vs async (fast-path)\n`call_actor` is fast-path by default: a short call returns its result INLINE in the tool result (feels synchronous). A long call (still running after ~15s) returns an ACK `{status:\"accepted\", request_id, guidance, to_wait, …}` instead — the work keeps running. To get the result: call `await_result(request_id)` to block on it, or do other work and react when it returns on its own as a NEW message (parent_id = request_id). Use `list_pending()` to see in-flight request_ids and `abandon(request_id)` to stop waiting on one. To fan out several calls in parallel, pass `wait=false` (immediate ack) on each, then `await_result`/`abandon` as needed. Pass `wait=true` to force a synchronous wait up to the type timeout.\n", countRequestTypes(c.Types))
 	}
 
 	if len(c.Devices) > 0 {
@@ -1246,6 +1258,7 @@ Protocol contract (do not violate):
 - You reply by emitting one or more agent.text events. The runtime stamps sender/audience automatically.
 - Public events are visible to the channel's other participants; system events are operational telemetry only.
 - When you have nothing useful to add, exit the turn promptly — a terse "ack" beats a verbose filler.
-- Tool calls (xhs publish, search, get-note, etc.) flow through the channel's adapter actors. Reference them by their declared type; the daemon harness routes the request.
+- Tool calls (xhs publish, search, get-note, etc.) flow through the channel's adapter actors via call_actor. Reference them by their declared type; the daemon harness routes the request.
+- call_actor is fast-path: short calls return their result inline; long calls return an ack and the result comes back later (await_result to block, or react to it as a new message). Fan out with wait=false, then await_result/abandon. See "Tool invocation" in the channel context for the full pattern.
 
 Stay grounded in the trigger payload and the channel's domain template below.`
