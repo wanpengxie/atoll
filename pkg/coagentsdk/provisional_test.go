@@ -178,18 +178,22 @@ func TestSubmitAndWatchObserveProvisionalAndFinal(t *testing.T) {
 	// requests channel (Watch must subscribe before Submit completes).
 	// Use a known request id so Watch can filter without round-trip.
 	requestID := "req-watch-1"
+	// Submit error is returned via a buffered channel and checked in the
+	// main goroutine — calling t.Errorf from a background goroutine can
+	// fire after the test returns ("Fail in goroutine after test has
+	// completed" panic).
+	submitErr := make(chan error, 1)
 	go func() {
 		// Submit after a brief delay so Watch has time to subscribe.
 		time.Sleep(20 * time.Millisecond)
-		if _, err := client.Submit(ctx, SubmitRequest{
+		_, err := client.Submit(ctx, SubmitRequest{
 			ChannelID: "ch-1",
 			ActorID:   "tool:xhs",
 			Type:      "xhs.publish",
 			Payload:   json.RawMessage(`{"title":"hi"}`),
 			RequestID: requestID,
-		}); err != nil {
-			t.Errorf("Submit: %v", err)
-		}
+		})
+		submitErr <- err
 	}()
 
 	watch, err := client.Watch(ctx, "ch-1", requestID)
@@ -224,6 +228,9 @@ func TestSubmitAndWatchObserveProvisionalAndFinal(t *testing.T) {
 	if !equalStringSlices(statuses, want) {
 		t.Fatalf("statuses=%v want %v", statuses, want)
 	}
+	if err := <-submitErr; err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
 }
 
 // TestAwaitResolvesOnFinalIgnoringProvisional verifies that Await
@@ -244,17 +251,17 @@ func TestAwaitResolvesOnFinalIgnoringProvisional(t *testing.T) {
 	client := &Client{BaseURL: srv.URL}
 
 	requestID := "req-await-1"
+	submitErr := make(chan error, 1)
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		if _, err := client.Submit(ctx, SubmitRequest{
+		_, err := client.Submit(ctx, SubmitRequest{
 			ChannelID: "ch-1",
 			ActorID:   "tool:xhs",
 			Type:      "xhs.publish",
 			Payload:   json.RawMessage(`{"title":"hi"}`),
 			RequestID: requestID,
-		}); err != nil {
-			t.Errorf("Submit: %v", err)
-		}
+		})
+		submitErr <- err
 	}()
 
 	res, err := client.Await(ctx, "ch-1", requestID, time.Second)
@@ -265,6 +272,9 @@ func TestAwaitResolvesOnFinalIgnoringProvisional(t *testing.T) {
 		t.Fatalf("expected OK final result, got %+v", res.Error)
 	}
 	assertJSONEqual(t, res.Data, `{"note_id":"n-2"}`)
+	if err := <-submitErr; err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
 }
 
 // TestAwaitTimesOutWhenOnlyProvisionalArrives — when no final
