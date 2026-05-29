@@ -49,6 +49,8 @@ func (h *Handle) Await(ctx context.Context, timeout time.Duration) (*message.Env
 	}
 	ch := make(chan awaitResult, 1)
 	ws.awaitCh = ch
+	ws.expectsAwait = true
+	ws.abandoned = false
 	r.mu.Unlock()
 
 	var timer *time.Timer
@@ -105,10 +107,13 @@ func (h *Handle) resolveOnWake(ch chan awaitResult, wakeErr error) (*message.Env
 	}
 
 	// No result raced in: we won the lock first. Detach our awaitCh (if it is
-	// still the active one) and return the wake error. The waiterSet stays
-	// registered so a later final routes through Deliver as NoActiveWaiter.
+	// still the active one), mark the waiter abandoned, and return the wake
+	// error. The waiterSet stays registered so a later final routes through
+	// Deliver as NoActiveWaiter instead of being mistaken for
+	// fast-final-before-await.
 	if ws, ok := r.waiters[h.id]; ok && ws.awaitCh == ch {
 		ws.awaitCh = nil
+		ws.abandoned = true
 	}
 	return nil, wakeErr
 }

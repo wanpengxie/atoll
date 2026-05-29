@@ -53,8 +53,8 @@ func TestFinalBeforeAwaitNotLost(t *testing.T) {
 	r := New()
 	h := r.Register("R2")
 	disp := r.Deliver(resp("R2", "completed"))
-	if disp != NoActiveWaiter {
-		t.Fatalf("disposition = %v want NoActiveWaiter (buffered)", disp)
+	if disp != BufferedPendingAwait {
+		t.Fatalf("disposition = %v want BufferedPendingAwait", disp)
 	}
 	got, err := h.Await(context.Background(), time.Second)
 	if err != nil {
@@ -176,23 +176,20 @@ func TestAtomicDispositionRace(t *testing.T) {
 		if atomic.LoadInt32(&deliverToAwait) == 0 && atomic.LoadInt32(&noWaiter) == 0 {
 			t.Fatalf("trial %d: no disposition recorded (lost)", trial)
 		}
-		// Exactly-once invariant: the final is never lost. Either the racing
-		// Await observed it directly, or it must be recoverable by a fresh
-		// Await (re-buffered when Await timed out as the final landed — the
-		// detach path preserves it). In no case may the same final be
-		// observed twice.
+		// Exactly-once invariant: the final is either observed by the racing
+		// Await or classified as a no-waiter final for caller surfacing. In no
+		// case may the same final be observed twice.
 		if atomic.LoadInt32(&awaitGotFinal) == 1 {
 			// observed directly; a second await must not also see it
 			env, err := h.Await(context.Background(), 50*time.Millisecond)
 			if err == nil && env != nil {
 				t.Fatalf("trial %d: final observed twice (double-deliver)", trial)
 			}
-		} else {
-			// not observed by the racing Await → must be recoverable
-			env, err := h.Await(context.Background(), 200*time.Millisecond)
-			if err != nil || env == nil {
-				t.Fatalf("trial %d: final neither observed nor recoverable (lost): err=%v", trial, err)
-			}
+		} else if r.Registered("RX") {
+			// not observed by the racing Await → Deliver must have atomically
+			// classified it as NoActiveWaiter and cleared the future so a later
+			// await cannot double-consume the surfaced trigger.
+			t.Fatalf("trial %d: surfaced final left future registered", trial)
 		}
 	}
 }
@@ -208,7 +205,8 @@ func TestAtomicDispositionRace(t *testing.T) {
 //
 // Run many trials with the timer firing right as the final lands; assert that
 // whenever Deliver==DeliveredToAwait the Await returned the final, and whenever
-// the Await timed out Deliver==NoActiveWaiter and the final is recoverable.
+// the Await timed out Deliver==NoActiveWaiter and the future is cleared for
+// caller surfacing.
 func TestM2NoDoubleLossAwaitTimeoutVsFinal(t *testing.T) {
 	const trials = 400
 	for trial := 0; trial < trials; trial++ {
@@ -250,14 +248,14 @@ func TestM2NoDoubleLossAwaitTimeoutVsFinal(t *testing.T) {
 					trial, gotFinal, gotTimeout)
 			}
 		case NoActiveWaiter:
-			// Await won the lock first (timed out), Deliver then buffered. The
-			// awaiter must have timed out, and the buffered final is recoverable.
+			// Await won the lock first (timed out), so Deliver classifies the
+			// later final as a no-waiter trigger and clears the future. The
+			// awaiter must have timed out and no later Await may consume it.
 			if gotFinal {
 				t.Fatalf("trial %d: disp=NoActiveWaiter but Await also got the final (double-deliver)", trial)
 			}
-			env, err := h.Await(context.Background(), 200*time.Millisecond)
-			if err != nil || env == nil {
-				t.Fatalf("trial %d: NoActiveWaiter final not recoverable (lost): err=%v", trial, err)
+			if r.Registered("RM2") {
+				t.Fatalf("trial %d: NoActiveWaiter final left future registered", trial)
 			}
 		default:
 			t.Fatalf("trial %d: unexpected disposition %v", trial, disp)
