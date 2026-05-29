@@ -1369,10 +1369,17 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "audience_too_large"})
 		return
 	}
-	if len(req.Audience) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": string(message.HarnessAudienceEmpty)})
-		return
-	}
+	// An empty audience is NOT an error at this edge: it is an unresolved
+	// routing intent. Audience resolution (filling a human's empty
+	// audience with the channel's declared default route) and the
+	// subsequent named-audience validation both live in the daemon
+	// harness (StepAudienceResolve → StepKindAndAudience), which is the
+	// only layer that holds the channel-side truth (default_rule /
+	// roster). The server therefore stops pre-validating routing and
+	// thinly forwards. It keeps only channel-truth-independent,
+	// pre-resolution format checks: unknown field, payload JSON,
+	// audience_too_large, the wildcard ban, and resolveKind (a
+	// protocol-global CoreTypeTable lookup, not channel truth).
 	for _, id := range req.Audience {
 		if id == "*" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": string(message.HarnessAudienceWildcardForbidden)})
@@ -1388,27 +1395,18 @@ func (a *App) handleWriteMessage(c *gin.Context) {
 		return
 	}
 
-	// FIX-T8: server-side early kind normalize + request audience
-	// validation. Caller may supply `kind` explicitly; otherwise we
-	// apply the L1 §1.1 default. kind-locked core types (e.g.
-	// core.system_event) reject caller overrides. kind=request frames
-	// must carry exactly one concrete audience (L1 §10.2 step 5).
+	// FIX-T8 / audience-resolution-mechanism-fix: server-side early kind
+	// normalize only. Caller may supply `kind` explicitly; otherwise we
+	// apply the L1 §1.1 default via the protocol-global CoreTypeTable
+	// (resolveKind — not channel truth). kind-locked core types (e.g.
+	// core.system_event) reject caller overrides. Request / response
+	// audience cardinality is NOT validated here any more: it is a
+	// post-resolution invariant the daemon harness StepKindAndAudience
+	// enforces over the resolved audience.
 	kind, ok := resolveKind(req.Type, message.Kind(req.Kind))
 	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error": string(message.HarnessKindNotAllowedForType)})
 		return
-	}
-	if kind == message.KindRequest {
-		if len(req.Audience) != 1 || req.Audience[0] == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": string(message.HarnessRequestAudienceInvalid)})
-			return
-		}
-	}
-	if kind == message.KindResponse {
-		if len(req.Audience) != 1 || req.Audience[0] == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": string(message.HarnessResponseAudienceInvalid)})
-			return
-		}
 	}
 
 	conn, err := a.daemonbus.ConnectionForChannel(c.Request.Context(), channelID)

@@ -26,14 +26,24 @@ type StepID int
 // (pre-normalize). See proto-layer1 §2.3 for the rationale.
 const (
 	StepCallerAuth       StepID = 0 // proto-layer1 §2.0 step 0+1 — caller principal + fence + channel binding
-	StepEnvelopeShape    StepID = 1 // proto-layer1 §2.2 step 2  — required fields / closed sets / cardinality / unknown field fail-closed
+	StepEnvelopeShape    StepID = 1 // proto-layer1 §2.2 step 2  — required fields / closed sets / wildcard ban / unknown field fail-closed
 	StepDedupe           StepID = 2 // proto-layer1 §2.3 step 3  — id dedupe over sender-provided fields (pre-normalize)
 	StepNormalize        StepID = 3 // proto-layer1 §2.4 step 4  — default-fill (audience/visibility/kind/correlation_id/payload/ts) + time-relation guard
 	StepSenderConsistent StepID = 4 // proto-layer1 §2.6 step 6  — sender × caller match; sender.kind from registry
 	StepTypeRegistered   StepID = 5 // proto-layer1 §2.5 step 5a — type ∈ (core ∪ registry) + reserved namespace authority
-	StepKindAndAudience  StepID = 6 // proto-layer1 §2.5/§2.7    — kind ∈ allowed_kinds + audience members active + handler match
-	StepResponsePairing  StepID = 7 // proto-layer1 §2.8 Step 8  — terminal uniqueness + response parent valid + The One Law
-	StepEngineAppend     StepID = 8 // proto-layer1 §2.9 Step 9  — append + outbox (terminal step; emits row)
+	// StepAudienceResolve runs the resolve half of the audience
+	// resolve→validate pipeline: when sender.kind==human left audience
+	// empty, fill the channel's declared default_rule (a routing intent →
+	// concrete recipients). Resolve only — no validation. The validation
+	// half (cardinality / active-actor / handler match) stays in
+	// StepKindAndAudience so there is a single validation centre. Sits
+	// after SenderConsistent (sender.kind is settled) and before
+	// KindAndAudience (validation sees a resolved audience). See
+	// audience-resolution-mechanism-fix.md / proto-policy-plane.md.
+	StepAudienceResolve StepID = 6 // resolve channel default_rule for human empty audience (pre-validation)
+	StepKindAndAudience StepID = 7 // proto-layer1 §2.5/§2.7    — kind ∈ allowed_kinds + audience members active + handler match
+	StepResponsePairing StepID = 8 // proto-layer1 §2.8 Step 8  — terminal uniqueness + response parent valid + The One Law
+	StepEngineAppend    StepID = 9 // proto-layer1 §2.9 Step 9  — append + outbox (terminal step; emits row)
 )
 
 // AllStepIDs lists every step in physical execution order. The chain
@@ -46,6 +56,7 @@ var AllStepIDs = []StepID{
 	StepNormalize,
 	StepSenderConsistent,
 	StepTypeRegistered,
+	StepAudienceResolve,
 	StepKindAndAudience,
 	StepResponsePairing,
 	StepEngineAppend,

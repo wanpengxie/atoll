@@ -51,6 +51,7 @@ func New(deps Deps) (*Chain, error) {
 		newStepNormalize(deps),
 		newStepSenderConsistent(deps),
 		newStepTypeRegistered(deps),
+		newStepAudienceResolve(deps),
 		newStepKindAndAudience(deps),
 		newStepResponsePairing(deps),
 		// StepEngineAppend (step 9) is fused into Chain.Write so the Step
@@ -202,6 +203,8 @@ func stepName(step khar.StepID) string {
 		return "sender_consistent"
 	case khar.StepTypeRegistered:
 		return "type_registered"
+	case khar.StepAudienceResolve:
+		return "audience_resolve"
 	case khar.StepKindAndAudience:
 		return "kind_and_audience"
 	case khar.StepResponsePairing:

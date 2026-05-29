@@ -47,8 +47,6 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (kha
 		return rejectFieldMissing("envelope.type required"), nil
 	case env.Sender.ID == "":
 		return rejectFieldMissing("envelope.sender required"), nil
-	case env.Audience == nil:
-		return rejectFieldMissing("envelope.audience required"), nil
 	case env.TS == 0:
 		return rejectFieldMissing("envelope.ts required"), nil
 	}
@@ -84,37 +82,23 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (kha
 		}, nil
 	}
 
-	// (5) audience cardinality — proto-layer0 §2.3.
-	// Wildcard "*" was removed from the audience closed set (owner
-	// reframed addressing as Erlang-style explicit `pid ! msg`); every
-	// audience entry MUST be a literal actor_id.
-	if len(env.Audience) == 0 {
-		return khar.Outcome{
-			RejectReason: message.HarnessAudienceEmpty,
-			Detail:       "envelope.audience empty",
-		}, nil
-	}
+	// (5) audience wildcard ban — proto-layer0 §2.3 (pure format, no
+	// channel truth). Wildcard "*" was removed from the audience closed
+	// set (owner reframed addressing as Erlang-style explicit `pid !
+	// msg`); every audience entry MUST be a literal actor_id.
+	//
+	// Audience EMPTINESS and request/response cardinality are NOT
+	// validated here: an empty audience is an unresolved routing intent,
+	// not a shape error. StepAudienceResolve (which runs after
+	// SenderConsistent) fills the channel default for human senders; the
+	// cardinality / active-actor / empty-audience validation then runs in
+	// StepKindAndAudience over the resolved audience — a single
+	// validation centre, never duplicated upstream of resolution.
 	for _, id := range env.Audience {
 		if string(id) == "*" {
 			return khar.Outcome{
 				RejectReason: message.HarnessAudienceWildcardForbidden,
 				Detail:       `envelope.audience wildcard "*" is not allowed; enumerate explicit actor ids`,
-			}, nil
-		}
-	}
-	if env.Kind == message.KindRequest {
-		if len(env.Audience) != 1 {
-			return khar.Outcome{
-				RejectReason: message.HarnessRequestAudienceInvalid,
-				Detail:       "kind=request requires audience cardinality 1",
-			}, nil
-		}
-	}
-	if env.Kind == message.KindResponse {
-		if len(env.Audience) != 1 {
-			return khar.Outcome{
-				RejectReason: message.HarnessResponseAudienceInvalid,
-				Detail:       "kind=response requires audience cardinality 1",
 			}, nil
 		}
 	}

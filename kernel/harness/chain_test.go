@@ -16,8 +16,8 @@ import (
 // Step 8). The numbered step set is 9 steps total
 // (Step 0 entry gate + Step 1-9 main pipeline → 9 StepIDs in code).
 func TestAllStepIDs(t *testing.T) {
-	if len(harness.AllStepIDs) != 9 {
-		t.Fatalf("AllStepIDs len=%d, want 9 (proto-layer1 §2.0)", len(harness.AllStepIDs))
+	if len(harness.AllStepIDs) != 10 {
+		t.Fatalf("AllStepIDs len=%d, want 10 (proto-layer1 §2.0 + StepAudienceResolve)", len(harness.AllStepIDs))
 	}
 	want := []harness.StepID{
 		harness.StepCallerAuth,
@@ -26,6 +26,7 @@ func TestAllStepIDs(t *testing.T) {
 		harness.StepNormalize,
 		harness.StepSenderConsistent,
 		harness.StepTypeRegistered,
+		harness.StepAudienceResolve,
 		harness.StepKindAndAudience,
 		harness.StepResponsePairing,
 		harness.StepEngineAppend,

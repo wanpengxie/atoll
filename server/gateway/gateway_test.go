@@ -154,11 +154,16 @@ func TestEndToEndRegisterLoginCreateChannel(t *testing.T) {
 	}
 }
 
-// TestHandleWriteMessage_RequestAudienceRejected covers FIX-T8 phase-1:
-// the handler must early-reject a kind=request envelope whose audience
-// is not exactly one concrete receiver. The check fires before
-// daemonbus / placements are consulted, so this test only needs a
-// signed-in user + a channel they're a member of.
+// TestHandleWriteMessage_RequestAudienceRejected covers the remaining
+// server-edge format reject after audience-resolution-mechanism-fix: the
+// wildcard "*" ban (a pure, channel-truth-independent closed-set format
+// check). Empty and multi-audience are NO LONGER rejected at the server
+// edge — they are unresolved/post-resolution routing decisions the
+// daemon harness (StepAudienceResolve → StepKindAndAudience) owns, so
+// the server thinly forwards them (covered by the runtime/harness step
+// tests). The check fires before daemonbus / placements are consulted,
+// so this test only needs a signed-in user + a channel they're a member
+// of.
 func TestHandleWriteMessage_RequestAudienceRejected(t *testing.T) {
 	t.Parallel()
 	app := newTestApp(t)
@@ -174,8 +179,6 @@ func TestHandleWriteMessage_RequestAudienceRejected(t *testing.T) {
 		wantErr  string
 	}{
 		{"wildcard", []string{"*"}, string(message.HarnessAudienceWildcardForbidden)},
-		{"empty", []string{}, string(message.HarnessAudienceEmpty)},
-		{"multi", []string{"agent:a", "agent:b"}, string(message.HarnessRequestAudienceInvalid)},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -207,6 +210,58 @@ func TestHandleWriteMessage_RequestAudienceRejected(t *testing.T) {
 			_ = json.NewDecoder(resp.Body).Decode(&errBody)
 			if !strings.Contains(errBody.Error, tc.wantErr) {
 				t.Errorf("error=%q want %s", errBody.Error, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestHandleWriteMessage_EmptyAudienceForwarded covers
+// audience-resolution-mechanism-fix §3: an empty audience (and a
+// non-wildcard multi-audience) is no longer a server-edge 400. It is an
+// unresolved routing intent the daemon harness resolves+validates, so
+// the server thinly forwards it. With no daemon connection wired in this
+// test the forward fails downstream (503 ServiceUnavailable) rather than
+// being rejected at the edge (400) — proving the server stopped
+// pre-validating routing.
+func TestHandleWriteMessage_EmptyAudienceForwarded(t *testing.T) {
+	t.Parallel()
+	app := newTestApp(t)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+
+	client := &http.Client{}
+	sess := registerLoginAndCreateChannel(t, client, srv.URL, app, "alice-empty-aud@example.com")
+
+	cases := []struct {
+		name     string
+		audience []string
+	}{
+		{"empty", []string{}},
+		{"multi", []string{"agent:a", "agent:b"}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			payload := writeBody{
+				ID:       "msg-fwd-" + tc.name,
+				Type:     "human.text",
+				Kind:     "request",
+				Payload:  json.RawMessage(`{"text":"hi"}`),
+				Audience: tc.audience,
+			}
+			raw, _ := json.Marshal(payload)
+			req, _ := http.NewRequest(http.MethodPost,
+				srv.URL+"/api/channels/"+sess.channelID+"/messages",
+				strings.NewReader(string(raw)))
+			req.Header.Set("Content-Type", "application/json")
+			req.AddCookie(&http.Cookie{Name: identity.CookieName, Value: sess.session})
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("POST: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode == http.StatusBadRequest {
+				t.Fatalf("status=400: server still pre-validated routing; want forward (non-400)")
 			}
 		})
 	}

@@ -150,6 +150,18 @@ type Deps struct {
 
 	// Metrics receives per-reject counters. nil → NoopMetrics.
 	Metrics Metrics
+
+	// DefaultAudience is the resolve-half seam for StepAudienceResolve: it
+	// returns the channel's declared default routing rule for the given
+	// channel — the concrete actor(s) a human's empty-audience write
+	// resolves to. Today the daemon wires this to the channel template's
+	// HumanCallerDefaultAudience (per-channel seed); it can later be
+	// swapped for an event-sourced topology projection without touching
+	// the step. nil (or returning empty) means "no default" — the empty
+	// audience then falls through to StepKindAndAudience which rejects it
+	// (harness_audience_empty), unchanged. Only consulted when
+	// sender.kind==human and audience is empty.
+	DefaultAudience func(channel.ID) []actor.ActorID
 }
 
 // Validate returns nil when Deps is wired enough to assemble a Chain.

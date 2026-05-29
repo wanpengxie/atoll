@@ -228,11 +228,13 @@ type channelRuntime struct {
 	// package-level symbol. (M1.6-T1)
 	channelAgentID actor.ActorID
 
-	// humanCallerDefaultAudience is filled into HumanCaller-authored
-	// envelopes whose audience was left empty by the caller. Sourced
-	// from ChannelTemplate.HumanCallerDefaultAudience so each channel
-	// type owns its own routing convention (HTTP / SDK callers don't
-	// need to know channel-local actor ids).
+	// humanCallerDefaultAudience is the channel's declared default route
+	// for HumanCaller-authored envelopes whose audience was left empty.
+	// Sourced from ChannelTemplate.HumanCallerDefaultAudience so each
+	// channel type owns its own routing convention (HTTP / SDK callers
+	// don't need to know channel-local actor ids). It is fed to the
+	// harness via Deps.DefaultAudience (StepAudienceResolve performs the
+	// actual fill); retained on channelRuntime for observability.
 	humanCallerDefaultAudience []actor.ActorID
 
 	// channelAgentTriggers counts every envelope dispatched to the
@@ -855,16 +857,14 @@ func (d *Daemon) startPhase3(ctx context.Context) error {
 				}
 			}
 			defer d.endWrite()
-			// HumanCaller-authored envelopes inherit the channel
-			// template's default audience when the caller (UI / SDK)
-			// left it empty. The convention lives with the channel
-			// template (ChannelTemplate.HumanCallerDefaultAudience) so
-			// callers do not need to know channel-local actor ids.
-			if len(body.EnvelopePartial.Audience) == 0 {
-				if cr, ok := d.getChannel(body.ChannelID); ok && len(cr.humanCallerDefaultAudience) > 0 {
-					body.EnvelopePartial.Audience = append(message.Audience(nil), cr.humanCallerDefaultAudience...)
-				}
-			}
+			// Audience resolution (filling the channel template's default
+			// audience for HumanCaller-authored envelopes that left it
+			// empty) now lives in the harness StepAudienceResolve, fed by
+			// the per-channel Deps.DefaultAudience seam (see bootChannel).
+			// This keeps resolve→validate as a single ordered pipeline
+			// inside the harness — every ingress (HTTP / SDK / worker IPC)
+			// resolves identically, and validation can never precede
+			// resolution across the process boundary.
 			return handler.Handle(ctx, body)
 		}
 	}
@@ -1189,6 +1189,14 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 	typeRegistry := store.NewTypeRegistry(db, d.cfg.NowFn)
 	requestLookup := store.NewRequestLookup(messages, lc.ChannelID)
 
+	// Resolve half of the audience resolve→validate pipeline: the
+	// channel template's HumanCallerDefaultAudience is the declared
+	// default route a human's empty-audience write resolves to. The
+	// chain is per-channel, so this value is fixed for the chain; the
+	// DefaultAudience seam still takes the channel id to keep a swap to
+	// an event-sourced topology projection drop-in later.
+	humanCallerDefaultAudience := d.resolveTemplate(lc.Lock.ChannelType).HumanCallerDefaultAudience
+
 	chain, err := harness.New(harness.Deps{
 		ChannelID:     lc.ChannelID,
 		ActorRegistry: registry,
@@ -1200,6 +1208,9 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		},
 		NowMs:  d.cfg.NowFn,
 		Logger: daemonKVLogger{log: &d.log},
+		DefaultAudience: func(channel.ID) []actor.ActorID {
+			return humanCallerDefaultAudience
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("harness for %s: %w", lc.ChannelID, err)
@@ -1268,7 +1279,7 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		typeRegistry:               typeRegistry,
 		requestLookup:              requestLookup,
 		channelAgentID:             ChannelAgentID,
-		humanCallerDefaultAudience: d.resolveTemplate(lc.Lock.ChannelType).HumanCallerDefaultAudience,
+		humanCallerDefaultAudience: humanCallerDefaultAudience,
 	}
 
 	// T147 §A — per-channel devicetransit.DeviceTransit. The instance shares
