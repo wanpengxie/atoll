@@ -260,6 +260,7 @@ func TestProxyFacadeReadinessRejectsForgedAuthority(t *testing.T) {
 type captureCalls struct {
 	provisional []provisionalCall
 	finals      []resolveCall
+	pending     map[adapter.CorrelationKey]adapter.CorrelationEntry
 }
 
 type resolveCall struct {
@@ -286,11 +287,20 @@ func newModuleWithCapture(t *testing.T) (*ProxyFacadeModule, *captureCalls) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	calls := &captureCalls{}
+	calls := &captureCalls{
+		pending: map[adapter.CorrelationKey]adapter.CorrelationEntry{
+			"req-1": {
+				ParentID:      "req-1",
+				CorrelationID: "req-1",
+				ChannelID:     "ch-1",
+			},
+		},
+	}
 	if err := mod.Init(context.Background(), &adapter.ModuleContext{
-		AdapterName:    "proxy-echo",
-		AdapterActorID: "tool:proxy-echo",
-		ChannelID:      "ch-1",
+		AdapterName:      "proxy-echo",
+		AdapterActorID:   "tool:proxy-echo",
+		AdapterActorKind: actor.KindTool,
+		ChannelID:        "ch-1",
 		ForwardExternalRequest: func(context.Context, *message.Envelope, adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
 			return adapter.ExternalRequestResult{}, nil
 		},
@@ -309,6 +319,10 @@ func newModuleWithCapture(t *testing.T) (*ProxyFacadeModule, *captureCalls) {
 		},
 		UpdateReadiness: func(context.Context, actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
 			return actorreg.ReadinessTransition{}, nil
+		},
+		LookupPendingRequest: func(_ context.Context, requestID adapter.CorrelationKey) (adapter.CorrelationEntry, bool, error) {
+			entry, ok := calls.pending[requestID]
+			return entry, ok, nil
 		},
 	}); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -415,6 +429,48 @@ func TestProxyFacadeCallbackRoutesFinalThroughResolve(t *testing.T) {
 		if calls.finals[i].req.Status != want {
 			t.Fatalf("resolve[%d] status=%s want %s", i, calls.finals[i].req.Status, want)
 		}
+	}
+}
+
+func TestProxyFacadeCallbackFinalEmptyCorrelationRejected(t *testing.T) {
+	mod, calls := newModuleWithCapture(t)
+	env := finalEnvelope("final-empty-corr", "completed")
+	env.CorrelationID = ""
+
+	if err := mod.OnExternalCallback(context.Background(), mustEncodeEnvelope(t, env)); err == nil {
+		t.Fatal("final callback with empty correlation_id must be rejected")
+	}
+	if len(calls.finals) != 0 || len(calls.provisional) != 0 {
+		t.Fatalf("rejected final must not invoke helpers; got final=%d provisional=%d",
+			len(calls.finals), len(calls.provisional))
+	}
+}
+
+func TestProxyFacadeCallbackFinalCorrelationMismatchRejected(t *testing.T) {
+	mod, calls := newModuleWithCapture(t)
+	env := finalEnvelope("final-bad-corr", "completed")
+	env.CorrelationID = "corr-other"
+
+	if err := mod.OnExternalCallback(context.Background(), mustEncodeEnvelope(t, env)); err == nil {
+		t.Fatal("final callback with mismatched correlation_id must be rejected")
+	}
+	if len(calls.finals) != 0 || len(calls.provisional) != 0 {
+		t.Fatalf("rejected final must not invoke helpers; got final=%d provisional=%d",
+			len(calls.finals), len(calls.provisional))
+	}
+}
+
+func TestProxyFacadeCallbackFinalSenderKindMismatchRejected(t *testing.T) {
+	mod, calls := newModuleWithCapture(t)
+	env := finalEnvelope("final-bad-kind", "completed")
+	env.Sender = message.Sender{Kind: actor.KindAgent, ID: "tool:proxy-echo"}
+
+	if err := mod.OnExternalCallback(context.Background(), mustEncodeEnvelope(t, env)); err == nil {
+		t.Fatal("final callback with mismatched sender kind must be rejected")
+	}
+	if len(calls.finals) != 0 || len(calls.provisional) != 0 {
+		t.Fatalf("rejected final must not invoke helpers; got final=%d provisional=%d",
+			len(calls.finals), len(calls.provisional))
 	}
 }
 

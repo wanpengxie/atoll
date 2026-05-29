@@ -409,6 +409,7 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 	mctx := &adapter.ModuleContext{
 		AdapterName:            decl.Name,
 		AdapterActorID:         decl.ActorID,
+		AdapterActorKind:       actor.KindTool,
 		ChannelID:              m.cfg.ChannelID,
 		Respond:                respond,
 		Provisional:            provisional,
