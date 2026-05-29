@@ -300,6 +300,36 @@ func (h *fakeRespondHarness) FailFunc() adapter.FailFunc {
 	}
 }
 
+// ResolveFunc returns a closure satisfying adapter.ResolveFunc. It mirrors
+// the production framework.buildResolve: completed routes to Respond, failed
+// routes to Fail, and a non-final status is rejected. xhs's callback path
+// produces the deferred terminal through ctx.Resolve (framework sync/async
+// spec §5.1) so the test harness must wire it the same way the framework does.
+func (h *fakeRespondHarness) ResolveFunc() adapter.ResolveFunc {
+	respond := h.RespondFunc()
+	fail := h.FailFunc()
+	return func(ctx context.Context, id adapter.RequestID, r adapter.ResolveRequest) error {
+		requestID := adapter.CorrelationKey(id)
+		status := r.Status
+		if status == "" {
+			status = "completed"
+		}
+		if !message.IsFinalStatus(status) {
+			return fmt.Errorf("fakeRespondHarness.Resolve: status must be final (completed or failed); got %q", status)
+		}
+		if status == "failed" {
+			reason := message.TerminalFailureReason(r.Reason)
+			if reason == "" {
+				reason = message.TerminalReceiverInternalError
+			}
+			_, err := fail(ctx, requestID, r.Payload, adapter.FailOptions{Reason: reason})
+			return err
+		}
+		_, err := respond(ctx, requestID, r.Payload, adapter.RespondOptions{Status: status})
+		return err
+	}
+}
+
 // provisionalCall captures the arguments the framework would hand
 // ctx.Provisional through the wire. Unlike RespondFunc the provisional
 // path MUST NOT touch correlation / timer state (proto-foundation
@@ -467,6 +497,7 @@ func newHarness(t *testing.T) *harness {
 		ChannelID:      "channel-test",
 		Respond:        resp.RespondFunc(),
 		Fail:           resp.FailFunc(),
+		Resolve:        resp.ResolveFunc(),
 		ForwardExternalRequest: func(ctx context.Context, env *message.Envelope, payload adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
 			body := framework.DeviceTransitBody{
 				Direction:     framework.DirectionToDevice,
@@ -563,7 +594,18 @@ func (h *harness) dispatch(ctx context.Context, env *message.Envelope) error {
 	if err := h.policy.RegisterTimer(ctx, adapter.CorrelationKey(env.ID), time.UnixMilli(deadline)); err != nil {
 		return err
 	}
-	return h.module.Handle(ctx, env)
+	// The framework recognizes adapter.ErrHandleDeferred via errors.Is and
+	// does NOT treat it as a failure — it keeps the pending correlation + F3
+	// timer alive until the terminal arrives via ctx.Resolve (framework
+	// sync/async spec §3.5 / §5.1). Mirror that here so the deferred async
+	// receiver path is not mistaken for a Handle error. Synchronous failure
+	// paths (failNow) still write their terminal and return nil, and genuine
+	// errors still surface.
+	err = h.module.Handle(ctx, env)
+	if errors.Is(err, adapter.ErrHandleDeferred) {
+		return nil
+	}
+	return err
 }
 
 // ---- E2E tests ----------------------------------------------------------
@@ -1146,5 +1188,113 @@ func TestModuleInitRequiresProvisional(t *testing.T) {
 	}
 	if err := module.Init(context.Background(), mctx); err == nil || !strings.Contains(err.Error(), "Provisional") {
 		t.Errorf("Init must require Provisional; got %v", err)
+	}
+}
+
+// TestModuleInitRequiresResolve guards the framework sync/async wire-up:
+// the callback terminal is produced via ctx.Resolve (spec §5.1), so a
+// missing Resolve helper MUST fail loudly at Init rather than panic on the
+// first inbound callback.
+func TestModuleInitRequiresResolve(t *testing.T) {
+	module, err := xhs.New(xhs.Config{})
+	if err != nil {
+		t.Fatalf("xhs.New: %v", err)
+	}
+	mctx := &adapter.ModuleContext{
+		Respond: func(context.Context, adapter.CorrelationKey, json.RawMessage, adapter.RespondOptions) (adapter.RespondResult, error) {
+			return adapter.RespondResult{}, nil
+		},
+		Fail: func(context.Context, adapter.CorrelationKey, json.RawMessage, adapter.FailOptions) (adapter.RespondResult, error) {
+			return adapter.RespondResult{}, nil
+		},
+		ForwardExternalRequest: func(context.Context, *message.Envelope, adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
+			return adapter.ExternalRequestResult{}, nil
+		},
+		Provisional: func(context.Context, adapter.CorrelationKey, string, json.RawMessage, adapter.ProvisionalOptions) (adapter.RespondResult, error) {
+			return adapter.RespondResult{}, nil
+		},
+		LookupPendingRequest: func(context.Context, adapter.CorrelationKey) (adapter.CorrelationEntry, bool, error) {
+			return adapter.CorrelationEntry{}, false, nil
+		},
+		EmitEvent: func(context.Context, string, json.RawMessage, adapter.EmitEventOptions) (message.ID, error) {
+			return "", nil
+		},
+		ReportOrphanCallback: func(context.Context, adapter.OrphanCallbackReport) error { return nil },
+		ChannelID:            "c",
+		// Resolve intentionally nil.
+	}
+	if err := module.Init(context.Background(), mctx); err == nil || !strings.Contains(err.Error(), "Resolve") {
+		t.Errorf("Init must require Resolve; got %v", err)
+	}
+}
+
+// TestHandleReturnsDeferredOnForwardSuccess locks the framework sync/async
+// receiver contract (spec §5.1 / §3.5): after a successful forward, Handle
+// returns adapter.ErrHandleDeferred (via adapter.Deferred()) so the
+// framework keeps the pending correlation + F3 timer alive instead of
+// auto-finalizing. The terminal arrives later via OnExternalCallback →
+// ctx.Resolve. No terminal Respond/Fail is written at Handle time.
+func TestHandleReturnsDeferredOnForwardSuccess(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	env := h.request("env-deferred", xhs.TypePublish, `{"title":"hi"}`)
+
+	// Reserve correlation + arm timer the way dispatch does, but call Handle
+	// directly so we can inspect the raw return value.
+	deadline := env.TS + xhs.DefaultMaxPendingMs
+	exp := deadline
+	env.ExpiresAt = &exp
+	if _, err := h.cor.Reserve(ctx, adapter.CorrelationEntry{
+		RequestID:     adapter.CorrelationKey(env.ID),
+		CorrelationID: env.CorrelationID,
+		ChannelID:     env.ChannelID,
+		AudienceActor: testAdapterActor,
+		ParentID:      env.ID,
+		EnqueuedAt:    env.TS,
+		ExpiresAt:     deadline,
+		State:         adapter.CorrelationPending,
+	}); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if err := h.policy.RegisterTimer(ctx, adapter.CorrelationKey(env.ID), time.UnixMilli(deadline)); err != nil {
+		t.Fatalf("RegisterTimer: %v", err)
+	}
+
+	err := h.module.Handle(ctx, env)
+	if !errors.Is(err, adapter.ErrHandleDeferred) {
+		t.Fatalf("Handle on forward success = %v; want adapter.ErrHandleDeferred (deferred receiver path)", err)
+	}
+
+	// Deferred means no terminal yet — the correlation stays pending, the F3
+	// timer stays armed, and no Respond/Fail has been written.
+	if got := len(h.respond.calls); got != 0 {
+		t.Fatalf("deferred Handle must not write a terminal; got %d Respond/Fail calls", got)
+	}
+	if h.cor.done[adapter.CorrelationKey(env.ID)] {
+		t.Error("deferred Handle must leave correlation pending (not done)")
+	}
+	if h.policy.cancelled[adapter.CorrelationKey(env.ID)] {
+		t.Error("deferred Handle must leave F3 timer armed (not cancelled)")
+	}
+
+	// The terminal arrives later via the callback → ctx.Resolve path.
+	callback := xhs.Callback{
+		CorrelationID: env.ID.String(),
+		DeviceID:      "device-deferred",
+		Status:        "ok",
+		Result:        map[string]any{"note_id": "n-deferred"},
+	}
+	raw, _ := json.Marshal(callback)
+	if err := h.module.OnExternalCallback(ctx, raw); err != nil {
+		t.Fatalf("OnExternalCallback: %v", err)
+	}
+	if got := len(h.respond.calls); got != 1 {
+		t.Fatalf("Resolve must write exactly one terminal; got %d", got)
+	}
+	if h.respond.calls[0].opts.Status != "completed" {
+		t.Errorf("resolved terminal status=%q want completed", h.respond.calls[0].opts.Status)
+	}
+	if !h.cor.done[adapter.CorrelationKey(env.ID)] {
+		t.Error("Resolve(completed) must close the correlation")
 	}
 }
