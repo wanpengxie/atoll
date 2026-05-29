@@ -2101,3 +2101,126 @@ func TestManagerInstallStrictModeAcceptsCompleteDeclarations(t *testing.T) {
 		t.Fatalf("Install (complete declarations): %v", err)
 	}
 }
+
+// TestF4ReceiverOwnerRegisteredBeforeTimerArm is the F4 regression: the router
+// receiverOwner index must be written BEFORE the F3 timer is armed. With a
+// deadline that is already in the past, RegisterTimer fires the fallback
+// (near-)immediately; the fallback final's ObserveResponse must be able to
+// locate the receiverOwner to close lifecycle (MarkDone + CancelTimer) and drop
+// the owner entry. If the owner were recorded only AFTER the timer arm (the
+// bug), the fallback could fire first, find no owner, and leak corr + the owner
+// index. Here the fallback write SUCCEEDS, so we assert: correlation Done +
+// receiverOwner cleared.
+func TestF4ReceiverOwnerRegisteredBeforeTimerArm(t *testing.T) {
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:    "feishu",
+			ActorID: "tool:feishu-adapter",
+			Types:   []string{"feishu.chat.send"},
+			Binding: actor.BindingRuntimeOutbound,
+			// 1ms: the F3 timer fires almost immediately after reserve, racing
+			// the owner registration — owner-first ordering (F4) must hold so
+			// the fallback final can close lifecycle and not leak the owner.
+			MaxPendingMs: 1,
+		},
+		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {
+			// Deferred-style: do not respond inline; let F3 fire.
+			return nil
+		},
+	}
+	mgr, chain, lookup, _, _ := newTestManager(t, mod)
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
+
+	req := newTestRequest("channel:test", "agent:a", "feishu.chat.send", "req-f4-expired")
+	lookup.Put(req)
+	if err := mgr.Dispatch(context.Background(), req); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	// Wait for the fallback final to be written.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(chain.Written()) >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(chain.Written()) == 0 {
+		t.Fatal("F4: fallback final never written for an already-expired deadline")
+	}
+
+	// Correlation closed by the router's single-center ObserveResponse.
+	mgr.mu.RLock()
+	bm := mgr.byName["feishu"]
+	mgr.mu.RUnlock()
+	entry, ok, err := bm.correlation.Get(context.Background(), "req-f4-expired")
+	if err != nil || !ok {
+		t.Fatalf("correlation get ok=%v err=%v", ok, err)
+	}
+	if entry.State == adapter.CorrelationPending {
+		t.Fatalf("F4: correlation still pending — receiverOwner not found at final (owner armed after timer?)")
+	}
+	// receiverOwner must be cleared (no leak).
+	if owner := mgr.router.receiverOwnerOf("req-f4-expired"); owner != nil {
+		t.Fatal("F4: receiverOwner leaked after final closed lifecycle")
+	}
+}
+
+// TestF5ReceiverOwnerCleanedWhenFallbackWriteFails is the F5 regression: when
+// the F3 fallback exhausts its write retries (permanent write failure), the
+// final is NEVER written, so the router's ObserveResponse never runs and would
+// never drop the receiverOwner entry. The bindOnExpire hook must clean it up
+// directly so the reqID does not leak.
+func TestF5ReceiverOwnerCleanedWhenFallbackWriteFails(t *testing.T) {
+	mod := &stubModule{
+		decl: adapter.Declaration{
+			Name:         "feishu",
+			ActorID:      "tool:feishu-adapter",
+			Types:        []string{"feishu.chat.send"},
+			Binding:      actor.BindingRuntimeOutbound,
+			MaxPendingMs: 20,
+		},
+		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {
+			return nil
+		},
+	}
+	mgr, chain, lookup, _, _ := newTestManager(t, mod)
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
+	// All 3 fallback write attempts fail → MarkExpired / force-expire path.
+	chain.errs = []error{
+		errors.New("permanent write 1"),
+		errors.New("permanent write 2"),
+		errors.New("permanent write 3"),
+	}
+
+	req := newTestRequest("channel:test", "agent:a", "feishu.chat.send", "req-f5-leak")
+	lookup.Put(req)
+	if err := mgr.Dispatch(context.Background(), req); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	// receiverOwner is recorded at reserve time.
+	if owner := mgr.router.receiverOwnerOf("req-f5-leak"); owner == nil {
+		t.Fatal("setup: receiverOwner not recorded at reserve")
+	}
+
+	// Wait for the 3 failed write attempts + the system event (4 writes total).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(chain.Written()) >= 4 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Give the onExpire hook a beat to run after the failed writes.
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if mgr.router.receiverOwnerOf("req-f5-leak") == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if owner := mgr.router.receiverOwnerOf("req-f5-leak"); owner != nil {
+		t.Fatal("F5: receiverOwner leaked after fallback write permanently failed")
+	}
+}

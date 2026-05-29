@@ -39,6 +39,15 @@ type timerPolicy struct {
 	metrics     Metrics
 	clock       func() time.Time
 
+	// onExpire is called when a request is force-expired because the F3
+	// fallback could not write a final after bounded retries (the MarkExpired
+	// path). It lets the Manager drop the router's receiverOwner entry so the
+	// reqID does not leak (F5): the normal close path goes through the router's
+	// ObserveResponse on a successful fallback write, but a write that never
+	// succeeds never reaches the router, so the owner index must be cleaned
+	// here. nil = no hook (e.g. unit tests with no router).
+	onExpire func(adapter.CorrelationKey)
+
 	mu     sync.Mutex
 	timers map[adapter.CorrelationKey]*time.Timer
 }
@@ -76,6 +85,13 @@ func newTimerPolicy(
 // bindFallback wires the framework/runtime-owned terminal closure emitter.
 func (p *timerPolicy) bindFallback(fallback terminalFallbackFunc) {
 	p.fallback = fallback
+}
+
+// bindOnExpire wires the F5 hook: when a request is force-expired (the F3
+// fallback exhausted its write retries), this is called so the Manager can
+// drop the router's receiverOwner entry and avoid a leak.
+func (p *timerPolicy) bindOnExpire(onExpire func(adapter.CorrelationKey)) {
+	p.onExpire = onExpire
 }
 
 // RegisterTimer arms a timer that fires at deadline. Repeated calls for
@@ -206,6 +222,13 @@ func (p *timerPolicy) fire(requestID adapter.CorrelationKey) {
 			"adapter", p.adapterName, "request_id", requestID.String(), "attempt", attempt, "err", err.Error())
 	}
 	p.metrics.IncCounter("adapter.policy.timer_terminal_failed", "adapter", p.adapterName)
+	// F5: the fallback final was never written, so the router's ObserveResponse
+	// will not run and would never drop this reqID from receiverOwner. Force the
+	// cleanup here regardless of how the expire bookkeeping below resolves, so
+	// the owner index does not leak.
+	if p.onExpire != nil {
+		p.onExpire(requestID)
+	}
 	if err := emitTimerTerminalFailedEvent(ctx, timerTerminalFailedEvent{
 		AdapterName: p.adapterName,
 		ChannelID:   p.channelID,

@@ -398,6 +398,12 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		return fmt.Errorf("framework: build synthesized fallback for %s: %w", decl.Name, err)
 	}
 	policy.bindFallback(fallback)
+	// F5: when the F3 fallback exhausts its write retries and force-expires a
+	// request, drop the router's receiverOwner entry so the reqID does not leak
+	// (the successful-write close path runs through router.ObserveResponse).
+	policy.bindOnExpire(func(rid adapter.CorrelationKey) {
+		m.router.forgetReceiver(message.ID(rid))
+	})
 
 	fail := buildFail(respond)
 	mctx := &adapter.ModuleContext{
@@ -904,16 +910,18 @@ func (m *Manager) recoverTimersForBoundModule(ctx context.Context, bm *boundModu
 	}
 	for _, e := range pending {
 		deadline := time.UnixMilli(e.ExpiresAt)
+		// F4: rebuild the router receiver-owner index BEFORE re-arming the F3
+		// timer. A recovered entry whose deadline is already past makes
+		// RegisterTimer fire (near-)immediately; the fallback final must find
+		// the receiverOwner to close lifecycle through the single center
+		// (§3.1) — so owner-first, timer-second, matching reservePendingRequest.
+		m.router.trackReceiver(message.ID(e.RequestID), bm)
 		if err := bm.policy.RegisterTimer(ctx, e.RequestID, deadline); err != nil {
 			m.cfg.Logger.Warn("framework.recover.register_timer",
 				"adapter", bm.declaration.Name,
 				"request_id", e.RequestID,
 				"err", err.Error())
 		}
-		// Rebuild the router receiver-owner index alongside the F3 timer (same
-		// source — pending entries), so a final after daemon restart still
-		// resolves lifecycle through the single center (§3.1).
-		m.router.trackReceiver(message.ID(e.RequestID), bm)
 	}
 	return nil
 }
@@ -1037,13 +1045,17 @@ func (m *Manager) reservePendingRequest(ctx context.Context, bm *boundModule, en
 	if _, err := bm.correlation.Reserve(ctx, entry); err != nil {
 		return fmt.Errorf("framework: dispatch reserve: %w", err)
 	}
+	// F4: record the receiver-owner BEFORE arming the F3 timer. With a very
+	// short deadline the timer can fire (or fire-immediately) before
+	// RegisterTimer returns, and the F3 fallback writes a final that the
+	// router observes — if the receiverOwner is not yet recorded the router
+	// cannot locate this module's correlation to close it, leaking corr + F3.
+	// Same point/same lock as correlation reserve (§3.1).
+	m.router.trackReceiver(env.ID, bm)
 	if err := bm.policy.RegisterTimer(ctx, adapter.CorrelationKey(env.ID), deadline); err != nil {
+		m.router.forgetReceiver(env.ID)
 		return fmt.Errorf("framework: dispatch register timer: %w", err)
 	}
-	// Same point/same lock as correlation reserve: record the receiver-owner
-	// so the router can locate this module's correlation + F3 timer when the
-	// final arrives (§3.1).
-	m.router.trackReceiver(env.ID, bm)
 	return nil
 }
 
