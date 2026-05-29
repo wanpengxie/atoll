@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
@@ -65,6 +66,42 @@ type ModuleContext struct {
 	// LookupPendingRequest exposes read-only request lifecycle state to
 	// callback decoders. It does not grant mutation authority.
 	LookupPendingRequest PendingRequestLookupFunc
+
+	// ── caller side (framework sync/async mechanism, §2.2) ──
+	//
+	// Submit synchronously writes a request envelope through the harness and
+	// returns once accepted (§0③): the caller gets a durable RequestID + an
+	// ack descriptor. Awaiting the response is a subsequent Await / Watch.
+	Submit SubmitFunc
+
+	// Await blocks until the request's final response arrives, ctx is done,
+	// or timeout elapses (timeout 0 = the type default per R5).
+	Await AwaitFunc
+
+	// Watch returns a stream of every response (provisional + final) for the
+	// request.
+	Watch WatchFunc
+
+	// AwaitAll waits for every request's final, all-settled (§0②): it returns
+	// one Outcome per id and never returns early on a single failure.
+	AwaitAll AwaitAllFunc
+
+	// Call is sugar over Submit + Await — the synchronous one-shot path.
+	Call CallFunc
+
+	// Abandon drops the local waiter for a request (fan-out early-failure
+	// sibling drop). It does NOT touch the substrate; the daemon-side pending
+	// + F3 stay intact.
+	Abandon AbandonFunc
+
+	// ── receiver side (framework sync/async mechanism, §2.2) ──
+	//
+	// Resolve produces the final response for a pending request from a
+	// receiver-supplied ResolveRequest (status / payload / reason). It is the
+	// generalization of CompleteExternalResponse; on success it closes the
+	// pending correlation + cancels the F3 timer through the router's single
+	// lifecycle center.
+	Resolve ResolveFunc
 
 	// Provisional emits one non-terminal interim response (kind=response,
 	// payload.status ∈ provisional subset) for a pending request without
@@ -273,3 +310,27 @@ type PendingRequestLookupFunc func(
 	ctx context.Context,
 	requestID CorrelationKey,
 ) (CorrelationEntry, bool, error)
+
+// SubmitFunc is the caller-side ctx.Submit contract (§0③). It writes a
+// request envelope through the harness and returns once accepted.
+type SubmitFunc func(ctx context.Context, req CallRequest) (SubmitResult, error)
+
+// AwaitFunc is the caller-side ctx.Await contract.
+type AwaitFunc func(ctx context.Context, id RequestID, timeout time.Duration) (Terminal, error)
+
+// WatchFunc is the caller-side ctx.Watch contract.
+type WatchFunc func(ctx context.Context, id RequestID) (Watcher, error)
+
+// AwaitAllFunc is the caller-side ctx.AwaitAll contract (all-settled, §0②).
+type AwaitAllFunc func(ctx context.Context, ids []RequestID, timeout time.Duration) ([]Outcome, error)
+
+// CallFunc is the caller-side ctx.Call sugar (= Submit + Await).
+type CallFunc func(ctx context.Context, req CallRequest) (Terminal, error)
+
+// AbandonFunc is the caller-side ctx.Abandon contract — drop the local
+// waiter, leave the substrate untouched.
+type AbandonFunc func(id RequestID)
+
+// ResolveFunc is the receiver-side ctx.Resolve contract — produce the final
+// response from a ResolveRequest (generalizes CompleteExternalResponse).
+type ResolveFunc func(ctx context.Context, id RequestID, r ResolveRequest) error
