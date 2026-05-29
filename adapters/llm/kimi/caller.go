@@ -125,6 +125,15 @@ func (c *bridgeCaller) Await(ctx context.Context, id message.ID, window time.Dur
 	return env, true, nil
 }
 
+// Watch returns a provisional+final stream over the future for id (§2.2 Watch).
+// It is the worker-side projection of the shared futurereg Watch affordance —
+// the same mechanism the in-daemon router exposes — so the worker caller stays
+// feature-equivalent with the other transports. The future must already be
+// registered (via Submit); Watch on an unregistered/closed id returns an error.
+func (c *bridgeCaller) Watch(id message.ID) (futurereg.Watcher, error) {
+	return c.futures.Register(id).Watch()
+}
+
 // Abandon drops the local waiter for id (fan-out early failure / agent gives
 // up). It does NOT touch the substrate — the daemon-side pending + F3 remain,
 // so a later final still loops back and routes through Deliver as
