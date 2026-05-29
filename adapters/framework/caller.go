@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -128,7 +129,7 @@ func (m *Manager) injectCallerContext(mctx *adapter.ModuleContext, decl adapter.
 		if err != nil {
 			return nil, err
 		}
-		return &watcherAdapter{inner: w}, nil
+		return newWatcherAdapter(w), nil
 	}
 
 	awaitAll := func(ctx context.Context, ids []adapter.RequestID, timeout time.Duration) ([]adapter.Outcome, error) {
@@ -192,37 +193,44 @@ func terminalFromEnvelope(env *message.Envelope) adapter.Terminal {
 
 // watcherAdapter converts a futurereg.Watcher into an adapter.Watcher
 // (re-emitting events with the adapter.WatchEvent shape).
+//
+// events/done are created once, in newWatcherAdapter, and the single forwarder
+// goroutine is started there too. Eager construction (rather than a lazy init
+// inside Events()) makes concurrent first calls to Events() data-race-free: the
+// fields are never written after construction, so any number of callers can
+// read the same channel without a lock, and exactly one forwarder ever ranges
+// over the inner stream (no double-drain / lost-event split).
 type watcherAdapter struct {
-	inner  futurereg.Watcher
-	events chan adapter.WatchEvent
-	done   chan struct{}
+	inner     futurereg.Watcher
+	events    chan adapter.WatchEvent
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func newWatcherAdapter(inner futurereg.Watcher) *watcherAdapter {
+	w := &watcherAdapter{
+		inner:  inner,
+		events: make(chan adapter.WatchEvent, 16),
+		done:   make(chan struct{}),
+	}
+	go func() {
+		defer close(w.events)
+		for ev := range w.inner.Events() {
+			select {
+			case w.events <- adapter.WatchEvent{Envelope: ev.Envelope, IsFinal: ev.IsFinal, Err: ev.Err}:
+			case <-w.done:
+				return
+			}
+		}
+	}()
+	return w
 }
 
 func (w *watcherAdapter) Events() <-chan adapter.WatchEvent {
-	if w.events == nil {
-		w.events = make(chan adapter.WatchEvent, 16)
-		w.done = make(chan struct{})
-		go func() {
-			defer close(w.events)
-			for ev := range w.inner.Events() {
-				select {
-				case w.events <- adapter.WatchEvent{Envelope: ev.Envelope, IsFinal: ev.IsFinal, Err: ev.Err}:
-				case <-w.done:
-					return
-				}
-			}
-		}()
-	}
 	return w.events
 }
 
 func (w *watcherAdapter) Close() error {
-	if w.done != nil {
-		select {
-		case <-w.done:
-		default:
-			close(w.done)
-		}
-	}
+	w.closeOnce.Do(func() { close(w.done) })
 	return w.inner.Close()
 }
