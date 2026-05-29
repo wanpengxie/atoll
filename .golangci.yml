@@ -11,6 +11,7 @@ run:
 linters:
   default: none
   enable:
+    - depguard
     - errcheck
     - govet
     - ineffassign
@@ -18,6 +19,26 @@ linters:
     - unused
     - gocritic
     - misspell
+  settings:
+    depguard:
+      # INVARIANT-1 mechanical fence: the kernel must never link `testing`
+      # (or its `testing/*` helpers) into a production binary, and the
+      # transport-agnostic futurereg `contract` harness — which imports
+      # `testing` by design — must only ever be imported from test code.
+      # Both denials are scoped to non-`_test.go` files via the exclusions
+      # rule below, so the contract tests (kernel/adapter/futurereg +
+      # adapters/llm/kimi) keep importing it and run unchanged.
+      rules:
+        kernel-no-testing:
+          files:
+            - "**/kernel/**"
+          deny:
+            - pkg: "testing"
+              desc: "INVARIANT-1: kernel must not link `testing` into a production binary (test-only deps belong in *_test.go)."
+        no-contract-harness-in-production:
+          deny:
+            - pkg: "github.com/wanpengxie/ActOS/kernel/adapter/futurereg/contract"
+              desc: "INVARIANT-1: the futurereg contract harness imports `testing`; import it only from *_test.go (it must never reach a production binary)."
   exclusions:
     presets:
       - common-false-positives
@@ -27,6 +48,16 @@ linters:
         linters: [gocritic]
       - path: .*/doc\.go
         linters: [unused]
+      # The depguard `testing` / contract-harness denials are production-only
+      # fences; test files legitimately import both.
+      - path: _test\.go
+        linters: [depguard]
+      # The futurereg contract harness is the one sanctioned `testing`-importing
+      # non-test file in kernel (INVARIANT-1 documented exception); its own
+      # `testing` import is what the `no-contract-harness-in-production` rule
+      # then quarantines to test-only importers.
+      - path: kernel/adapter/futurereg/contract/contract\.go
+        linters: [depguard]
 
 formatters:
   enable:
