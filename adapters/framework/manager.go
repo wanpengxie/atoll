@@ -398,24 +398,19 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		return fmt.Errorf("framework: build synthesized fallback for %s: %w", decl.Name, err)
 	}
 	policy.bindFallback(fallback)
-	completeExternalResponse, err := buildCompleteExternalResponse(respondCfg, decl)
-	if err != nil {
-		return fmt.Errorf("framework: build external response completer for %s: %w", decl.Name, err)
-	}
 
 	fail := buildFail(respond)
 	mctx := &adapter.ModuleContext{
-		AdapterName:              decl.Name,
-		AdapterActorID:           decl.ActorID,
-		ChannelID:                m.cfg.ChannelID,
-		Respond:                  respond,
-		Provisional:              provisional,
-		Fail:                     fail,
-		CompleteExternalResponse: completeExternalResponse,
-		Resolve:                  buildResolve(respond, fail),
-		EmitEvent:                buildEmitEvent(respondCfg, decl),
-		ReportOrphanCallback:     buildReportOrphanCallback(respondCfg, decl),
-		ForwardExternalRequest:   m.buildForwardExternalRequest(decl, corr),
+		AdapterName:            decl.Name,
+		AdapterActorID:         decl.ActorID,
+		ChannelID:              m.cfg.ChannelID,
+		Respond:                respond,
+		Provisional:            provisional,
+		Fail:                   fail,
+		Resolve:                buildResolve(respond, fail),
+		EmitEvent:              buildEmitEvent(respondCfg, decl),
+		ReportOrphanCallback:   buildReportOrphanCallback(respondCfg, decl),
+		ForwardExternalRequest: m.buildForwardExternalRequest(decl, corr),
 		UpdateReadiness: func(ctx context.Context, update actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
 			return m.updateReadinessForDeclaration(ctx, decl, update, true)
 		},

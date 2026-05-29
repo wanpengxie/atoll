@@ -189,8 +189,8 @@ func TestOutboundHTTPBindingMCtxShape(t *testing.T) {
 	if mod.mctx.EmitEvent == nil {
 		t.Fatalf("EmitEvent not wired")
 	}
-	if mod.mctx.CompleteExternalResponse == nil {
-		t.Fatalf("CompleteExternalResponse not wired")
+	if mod.mctx.Resolve == nil {
+		t.Fatalf("Resolve not wired")
 	}
 	if mod.mctx.ForwardExternalRequest == nil {
 		t.Fatalf("ForwardExternalRequest not wired")

@@ -40,10 +40,6 @@ type ModuleContext struct {
 	// lifecycle path as Respond.
 	Fail FailFunc
 
-	// CompleteExternalResponse completes a pending request from an
-	// externally supplied response envelope after framework validation.
-	CompleteExternalResponse ExternalResponseFunc
-
 	// EmitEvent emits an adapter-owned event. It cannot emit responses.
 	EmitEvent EmitEventFunc
 
@@ -97,10 +93,11 @@ type ModuleContext struct {
 	// ── receiver side (framework sync/async mechanism, §2.2) ──
 	//
 	// Resolve produces the final response for a pending request from a
-	// receiver-supplied ResolveRequest (status / payload / reason). It is the
-	// generalization of CompleteExternalResponse; on success it closes the
-	// pending correlation + cancels the F3 timer through the router's single
-	// lifecycle center.
+	// receiver-supplied ResolveRequest (status / payload / reason). On
+	// success it closes the pending correlation + cancels the F3 timer
+	// through the router's single lifecycle center. It is the receiver-side
+	// terminal path for deferred requests (Handle → Deferred, resolved later
+	// via an external callback or async completion).
 	Resolve ResolveFunc
 
 	// Provisional emits one non-terminal interim response (kind=response,
@@ -227,14 +224,6 @@ type FailFunc func(
 	opts FailOptions,
 ) (RespondResult, error)
 
-// ExternalResponseFunc completes a request with a response envelope
-// produced outside the channel daemon. The framework validates the
-// envelope against the pending parent request before writing.
-type ExternalResponseFunc func(
-	ctx context.Context,
-	env *message.Envelope,
-) (RespondResult, error)
-
 // EmitEventOptions adjusts adapter event emission.
 type EmitEventOptions struct {
 	Visibility message.Visibility
@@ -332,5 +321,5 @@ type CallFunc func(ctx context.Context, req CallRequest) (Terminal, error)
 type AbandonFunc func(id RequestID)
 
 // ResolveFunc is the receiver-side ctx.Resolve contract — produce the final
-// response from a ResolveRequest (generalizes CompleteExternalResponse).
+// response for a pending request from a ResolveRequest (status/payload/reason).
 type ResolveFunc func(ctx context.Context, id RequestID, r ResolveRequest) error
