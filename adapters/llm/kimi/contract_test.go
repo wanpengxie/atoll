@@ -61,7 +61,7 @@ func (tr *kimiWorkerTransport) Register(id message.ID) {
 		Type:      "contract.ask",
 		Audience:  message.Audience{"tool:contract-target"},
 	}
-	if _, err := tr.caller.Submit(context.Background(), tr.ipc, req, 30_000); err != nil {
+	if _, err := tr.caller.Submit(context.Background(), tr.ipc, req, 30_000, true); err != nil {
 		panic("kimiWorkerTransport.Register: Submit failed: " + err.Error())
 	}
 }

@@ -108,6 +108,91 @@ func TestRouteTriggersSuperWindowFinalBecomesTrigger(t *testing.T) {
 	}
 }
 
+// TestRouteTriggersFastFinalBeforeAwaitBuffered covers the F1 fast path race:
+// Submit registered an expected Await, but the final loops back before Await has
+// parked. That final must be buffered for Await and must not become a new turn
+// trigger or be abandoned.
+func TestRouteTriggersFastFinalBeforeAwaitBuffered(t *testing.T) {
+	b := &Bridge{}
+	caller := b.caller()
+	caller.futures.Register("tool-req-fast-before-await")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	in := make(chan TriggerPayload, 2)
+	out := b.routeTriggers(ctx, nil, in)
+
+	in <- toolTriggerWithStatus(message.KindResponse, "fast-final", "tool-req-fast-before-await", "completed")
+	in <- toolTrigger(message.KindRequest, "normal-trigger", "")
+	close(in)
+
+	got, ok := <-out
+	if !ok || got.Envelope.ID != "normal-trigger" {
+		t.Fatalf("fast final leaked or normal trigger missing: got=%v ok=%v", got.Envelope.ID, ok)
+	}
+	if _, ok := <-out; ok {
+		t.Fatal("fast-final-before-await leaked into trigger stream")
+	}
+
+	final, okAwait, err := caller.Await(context.Background(), "tool-req-fast-before-await", time.Second)
+	if err != nil || !okAwait || final == nil {
+		t.Fatalf("buffered fast final was not consumable by Await: ok=%v err=%v env=%v", okAwait, err, final)
+	}
+	if final.ID != "fast-final" {
+		t.Fatalf("await final id=%s want fast-final", final.ID)
+	}
+}
+
+// TestRouteTriggersFinalNeverAwaitAndTriggerDoubleConsumed exercises the
+// production routeTriggers path under the Deliver vs await_result race. A final
+// is allowed to either resolve a racing Await or surface as a trigger, but never
+// both.
+func TestRouteTriggersFinalNeverAwaitAndTriggerDoubleConsumed(t *testing.T) {
+	for trial := 0; trial < 100; trial++ {
+		b := &Bridge{}
+		caller := b.caller()
+		id := message.ID("tool-req-race-" + time.Now().Format("150405.000000000"))
+		caller.futures.Register(id)
+		if env, ok, err := caller.Await(context.Background(), id, time.Nanosecond); err != nil || ok || env != nil {
+			t.Fatalf("trial %d setup: expected timed-out fast path, got env=%v ok=%v err=%v", trial, env, ok, err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		in := make(chan TriggerPayload, 1)
+		out := b.routeTriggers(ctx, nil, in)
+		start := make(chan struct{})
+		awaited := make(chan bool, 1)
+
+		go func() {
+			<-start
+			env, ok, err := caller.Await(context.Background(), id, 2*time.Millisecond)
+			awaited <- err == nil && ok && env != nil
+		}()
+		go func() {
+			<-start
+			in <- toolTriggerWithStatus(message.KindResponse, "race-final", string(id), "completed")
+			close(in)
+		}()
+		close(start)
+
+		gotTrigger := false
+		for payload := range out {
+			if payload.Envelope.ID == "race-final" {
+				gotTrigger = true
+			}
+		}
+		gotAwait := <-awaited
+		cancel()
+
+		if gotTrigger && gotAwait {
+			t.Fatalf("trial %d: final was both awaited and surfaced as trigger", trial)
+		}
+		if !gotTrigger && !gotAwait {
+			t.Fatalf("trial %d: final was neither awaited nor surfaced", trial)
+		}
+	}
+}
+
 // TestRouteTriggersNoActiveWaiterFinalBecomesTrigger is the M4 case: a final
 // with no local waiter (worker restart / abandoned / await timed out) is
 // forwarded to the LLM as a new turn trigger, never quarantined.
@@ -193,7 +278,7 @@ func TestCallerSubmitAwaitFastPathInline(t *testing.T) {
 	caller := b.caller()
 
 	env := message.Envelope{ID: "req-fast", ChannelID: "ch-test", Kind: message.KindRequest}
-	res, err := caller.Submit(context.Background(), ipc, env, 30000)
+	res, err := caller.Submit(context.Background(), ipc, env, 30000, true)
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -246,7 +331,7 @@ func TestCallerAwaitWindowElapsesNoFinal(t *testing.T) {
 func TestCallerWaitNoneImmediateAck(t *testing.T) {
 	b := &Bridge{}
 	caller := b.caller()
-	caller.futures.Register("req-fanout")
+	caller.futures.Register("req-fanout", futurereg.RegisterOpts{ExpectsAwait: false})
 
 	got, ok, err := caller.Await(context.Background(), "req-fanout", 0)
 	if err != nil || ok || got != nil {
@@ -254,6 +339,10 @@ func TestCallerWaitNoneImmediateAck(t *testing.T) {
 	}
 	if !caller.futures.Registered("req-fanout") {
 		t.Fatal("fan-out future erased")
+	}
+	final := toolTriggerWithStatus(message.KindResponse, "resp-fanout", "req-fanout", "completed").Envelope
+	if disp := caller.Deliver(&final); disp != futurereg.NoActiveWaiter {
+		t.Fatalf("wait=false final disp=%v want NoActiveWaiter", disp)
 	}
 }
 
@@ -311,7 +400,7 @@ func TestCallerSubmitWriteFailureRollsBack(t *testing.T) {
 	caller := b.caller()
 	ipc := &failWriteIPC{}
 	env := message.Envelope{ID: "req-fail-write", Kind: message.KindRequest}
-	if _, err := caller.Submit(context.Background(), ipc, env, 1000); err == nil {
+	if _, err := caller.Submit(context.Background(), ipc, env, 1000, true); err == nil {
 		t.Fatal("Submit should fail on write error")
 	}
 	if caller.futures.Registered("req-fail-write") {
