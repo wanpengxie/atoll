@@ -29,6 +29,12 @@ type respondConfig struct {
 	clock   func() time.Time
 	logger  Logger
 	metrics Metrics
+
+	// observe is the router feed-in hook. After a response write is accepted
+	// by the harness, the write helper calls observe(env) so the router can
+	// deliver to caller-side waiters AND run the single terminal-lifecycle
+	// center (MarkDone + CancelTimer). respond.go no longer finalizes itself.
+	observe func(ctx context.Context, env *message.Envelope)
 }
 
 type terminalWriteFailure struct {
@@ -198,6 +204,9 @@ func buildProvisional(cfg respondConfig) (adapter.ProvisionalFunc, error) {
 			// final as zombie chain rejections.
 			return result, fmt.Errorf("framework: provisional rejected: %s (%s)", res.RejectReason, res.RejectDetail)
 		}
+		// Feed the provisional to the router so caller-side Watch streams see
+		// it. Router does NOT touch lifecycle for non-final responses.
+		cfg.observeWrite(ctx, env, res)
 		cfg.metrics.IncCounter("adapter.provisional.ok",
 			"adapter", cfg.adapterName,
 			"status", status)
@@ -240,6 +249,34 @@ func buildFail(respond adapter.RespondFunc) adapter.FailFunc {
 			Visibility: opts.Visibility,
 			Audience:   opts.Audience,
 		})
+	}
+}
+
+// buildResolve returns the receiver-side ctx.Resolve closure (§2.2). Resolve
+// is the generalization of CompleteExternalResponse: it produces the final
+// response for a pending request from a ResolveRequest (status/payload/reason)
+// signed by the adapter actor, reusing the shared write helper so the router
+// (single lifecycle center) closes correlation + F3.
+func buildResolve(respond adapter.RespondFunc, fail adapter.FailFunc) adapter.ResolveFunc {
+	return func(ctx context.Context, id adapter.RequestID, r adapter.ResolveRequest) error {
+		requestID := adapter.CorrelationKey(id)
+		status := r.Status
+		if status == "" {
+			status = "completed"
+		}
+		if !message.IsFinalStatus(status) {
+			return fmt.Errorf("framework: Resolve status must be final (completed or failed); got %q — use ctx.Provisional for interim responses", status)
+		}
+		if status == "failed" {
+			reason := message.TerminalFailureReason(r.Reason)
+			if reason == "" {
+				reason = message.TerminalReceiverInternalError
+			}
+			_, err := fail(ctx, requestID, r.Payload, adapter.FailOptions{Reason: reason})
+			return err
+		}
+		_, err := respond(ctx, requestID, r.Payload, adapter.RespondOptions{Status: status})
+		return err
 	}
 }
 
@@ -330,7 +367,8 @@ func buildCompleteExternalResponse(cfg respondConfig, decl adapter.Declaration) 
 			return result, fmt.Errorf("framework: complete external response rejected: %s (%s)", res.RejectReason, res.RejectDetail)
 		}
 		if completed {
-			finishTerminalLifecycle(ctx, cfg, requestID)
+			// Single lifecycle center (§3.3): router runs MarkDone + CancelTimer.
+			cfg.observeWrite(ctx, env, res)
 			cfg.metrics.IncCounter("adapter.complete_external_response.ok",
 				"adapter", cfg.adapterName, "deduped", boolStr(result.Deduped))
 		}
@@ -395,8 +433,9 @@ func runRespondWithSender(
 	// statuses (Layer 2 core: received/queued/processing/deferred/unavailable;
 	// Layer 3: <adapter>.<name>) MUST go through ctx.Provisional — otherwise
 	// the closure side-effects below (chain write tagged is_terminal +
-	// finishTerminalLifecycle's MarkDone + CancelTimer) would resolve the
-	// request prematurely and break INVARIANT-11 (Closure). We reject before
+	// the router's single-center MarkDone + CancelTimer via observeWrite)
+	// would resolve the request prematurely and break INVARIANT-11
+	// (Closure). We reject before
 	// any side effect: pending/F3 stay untouched.
 	if !message.IsFinalStatus(status) {
 		return adapter.RespondResult{}, fmt.Errorf(
@@ -465,7 +504,10 @@ func runRespondWithSender(
 		return result, fmt.Errorf("framework: respond rejected: %s (%s)", res.RejectReason, res.RejectDetail)
 	}
 	if completed {
-		finishTerminalLifecycle(ctx, cfg, requestID)
+		// Single lifecycle center (§3.3): the router (fed via observe) runs
+		// MarkDone + CancelTimer. We feed the written envelope, not requestID,
+		// so the router keys off env.ParentID uniformly across all exits.
+		cfg.observeWrite(ctx, env, res)
 	}
 	cfg.metrics.IncCounter("adapter.respond.ok",
 		"adapter", cfg.adapterName,
@@ -563,16 +605,20 @@ func resultFromTerminalWrite(res harness.WriteResult) (adapter.RespondResult, bo
 	}
 }
 
-func finishTerminalLifecycle(ctx context.Context, cfg respondConfig, requestID adapter.CorrelationKey) {
-	if err := cfg.correlation.MarkDone(ctx, requestID); err != nil {
-		cfg.logger.Warn("framework.respond.mark_done.error",
-			"adapter", cfg.adapterName,
-			"request_id", requestID,
-			"err", err.Error())
+// observeWrite feeds an accepted response envelope to the router (the single
+// terminal-lifecycle center). When no observe hook is wired (defensive — all
+// production paths wire it), it is a no-op; correlation + timer would then
+// never close, so wiring is mandatory in Manager.
+func (c respondConfig) observeWrite(ctx context.Context, env *message.Envelope, res harness.WriteResult) {
+	if c.observe == nil {
+		return
 	}
-	if cfg.policy != nil {
-		_ = cfg.policy.CancelTimer(ctx, requestID)
+	// Use the canonical written id when the harness finalized one; ParentID
+	// (the requestID the router keys on) is unchanged either way.
+	if res.MessageID != "" {
+		env.ID = res.MessageID
 	}
+	c.observe(ctx, env)
 }
 
 // mergeResponsePayload returns a payload JSON object that contains the

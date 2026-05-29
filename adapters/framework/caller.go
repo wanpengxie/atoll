@@ -74,11 +74,11 @@ func (m *Manager) injectCallerContext(mctx *adapter.ModuleContext, decl adapter.
 
 		res, err := m.cfg.HarnessChain.Write(ctx, env)
 		if err != nil {
-			handle.Close()
+			_ = handle.Close()
 			return adapter.SubmitResult{}, fmt.Errorf("framework: Submit chain write: %w", err)
 		}
 		if !res.Accepted() {
-			handle.Close()
+			_ = handle.Close()
 			return adapter.SubmitResult{}, fmt.Errorf("framework: Submit rejected: %s (%s)", res.RejectReason, res.RejectDetail)
 		}
 
