@@ -1592,15 +1592,15 @@ func TestProxyFacadeCallbackCompletesAndCancelsTimer(t *testing.T) {
 	}
 }
 
-// TestProxyFacadeForgedCallbackSenderNeutralized verifies that the
-// framework sync/async refactor structurally removes the forged-sender
-// vector: proxy_facade routes the final callback through ctx.Resolve,
-// which constructs the canonical terminal envelope itself and stamps the
-// sender as the adapter actor (tool:kimi). A callback that tries to forge a
-// foreign sender (tool:xhs) is therefore neutralized — the inbound sender
-// is discarded and the written terminal carries the adapter actor's
-// identity, not the forged one.
-func TestProxyFacadeForgedCallbackSenderNeutralized(t *testing.T) {
+// TestProxyFacadeForgedCallbackSenderRejected verifies the F6 consistency
+// check: a final callback whose claimed sender does not match the adapter
+// actor that owns the pending request is REJECTED at the proxy_facade
+// boundary (the lightweight channel/sender/correlation checks the old
+// CompleteExternalResponse enforced, restored after the Resolve refactor
+// dropped them). A forged foreign sender (tool:xhs on tool:kimi's request)
+// is refused and the pending request is left unresolved — not silently
+// re-signed.
+func TestProxyFacadeForgedCallbackSenderRejected(t *testing.T) {
 	decl, err := proxyfacade.DeclarationFromCapability("tool:kimi", json.RawMessage(`{
 		"name":"kimi",
 		"types":["kimi.ask"],
@@ -1636,28 +1636,22 @@ func TestProxyFacadeForgedCallbackSenderNeutralized(t *testing.T) {
 		Audience:  message.Audience{"agent:a"},
 	}
 	raw, _ := json.Marshal(forged)
-	if err := mgr.OnExternalCallback(context.Background(), decl.Name, raw); err != nil {
-		t.Fatalf("OnExternalCallback: %v", err)
+	// F6: a final callback whose claimed sender does not match the adapter
+	// actor is REJECTED at the proxy_facade boundary. It must NOT resolve the
+	// pending request — the request stays pending until its genuine final / F3.
+	if err := mgr.OnExternalCallback(context.Background(), decl.Name, raw); err == nil {
+		t.Fatal("OnExternalCallback: forged-sender final callback must be rejected, got nil error")
 	}
-	written := chain.Written()
-	if len(written) != 1 {
-		t.Fatalf("expected 1 terminal write, got %d", len(written))
-	}
-	// Forged sender must be neutralized: the framework stamps the adapter
-	// actor as the response sender, not the forged tool:xhs.
-	if written[0].Sender.ID != "tool:kimi" || written[0].Sender.Kind != actor.KindTool {
-		t.Fatalf("written sender=%+v want adapter actor (tool:kimi)", written[0].Sender)
-	}
-	if written[0].ParentID != req.ID {
-		t.Fatalf("written parent=%s want %s", written[0].ParentID, req.ID)
+	if written := chain.Written(); len(written) != 0 {
+		t.Fatalf("forged callback must not write a terminal, got %d writes", len(written))
 	}
 	bm := mgr.byName[decl.Name]
 	entry, ok, err := bm.correlation.Get(context.Background(), "req-proxy-forged")
 	if err != nil || !ok {
 		t.Fatalf("correlation ok=%v err=%v", ok, err)
 	}
-	if entry.State != adapter.CorrelationDone {
-		t.Fatalf("correlation state=%s want done (neutralized callback still resolves)", entry.State)
+	if entry.State != adapter.CorrelationPending {
+		t.Fatalf("correlation state=%s want pending (forged callback rejected, request unresolved)", entry.State)
 	}
 }
 

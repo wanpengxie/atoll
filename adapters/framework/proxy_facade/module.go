@@ -171,6 +171,43 @@ func (m *ProxyFacadeModule) handleFinalCallback(ctx context.Context, env *messag
 	if env.ParentID == "" {
 		return errors.New("proxy_facade: final callback parent_id required")
 	}
+	// F6: restore the lightweight consistency checks the old
+	// CompleteExternalResponse enforced. An un-owned reqID is already rejected
+	// downstream (Resolve fails with no pending entry), but a callback that
+	// CLAIMS a channel / sender / correlation inconsistent with the pending
+	// request must be refused here — otherwise a misrouted or spoofed callback
+	// could resolve the wrong request. These are the few original checks, not a
+	// broader policy: channel, sender, and correlation against the pending entry.
+	if env.ChannelID == "" {
+		return errors.New("proxy_facade: final callback channel_id required")
+	}
+	if env.ChannelID != m.mctx.ChannelID {
+		return fmt.Errorf("proxy_facade: final channel mismatch: callback=%s manager=%s", env.ChannelID, m.mctx.ChannelID)
+	}
+	if env.Sender.ID != m.mctx.AdapterActorID {
+		return fmt.Errorf("proxy_facade: final sender mismatch: callback=%s adapter=%s", env.Sender.ID, m.mctx.AdapterActorID)
+	}
+	if m.mctx.LookupPendingRequest != nil {
+		entry, ok, lookErr := m.mctx.LookupPendingRequest(ctx, adapter.CorrelationKey(env.ParentID))
+		if lookErr != nil {
+			return fmt.Errorf("proxy_facade: final callback pending lookup: %w", lookErr)
+		}
+		if ok {
+			if entry.ChannelID != "" && env.ChannelID != entry.ChannelID {
+				return fmt.Errorf("proxy_facade: final channel mismatch vs pending: callback=%s pending=%s", env.ChannelID, entry.ChannelID)
+			}
+			// correlation_id, when both sides carry it, must agree with the
+			// pending request's correlation (the request id is the fallback
+			// correlation when the request did not set one).
+			expectedCorr := entry.CorrelationID
+			if expectedCorr == "" {
+				expectedCorr = entry.ParentID
+			}
+			if env.CorrelationID != "" && expectedCorr != "" && env.CorrelationID != expectedCorr {
+				return fmt.Errorf("proxy_facade: final correlation mismatch: callback=%s pending=%s", env.CorrelationID, expectedCorr)
+			}
+		}
+	}
 	// Strip the protocol status/reason out of the inbound payload — the
 	// framework Resolve path re-injects them onto the canonical final
 	// envelope it constructs (mergeResponsePayload). Passing them through

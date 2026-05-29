@@ -27,6 +27,19 @@ import (
 // new RequestID; parent/correlation linkage to a triggering envelope is the
 // concern of the leaf-migration callers (P3) — at this layer the request is
 // self-rooted (correlation_id = its own id) so Await/Resolve work end to end.
+//
+// F7 (v2 limitation, deliberately deferred): an embedded Submit cannot derive
+// parent_id / correlation_id from the triggering Handle's envelope here because
+// injectCallerContext is MODULE-scoped (called once at Install), not
+// INVOCATION-scoped — the triggering envelope only exists inside runHandle when
+// the per-invocation work happens, and is not threaded into these closures.
+// Wiring it in would mean either rebuilding the caller context per Handle call
+// or pushing the in-flight envelope through ModuleContext / context.Value,
+// i.e. a structural change to how the caller surface is assembled. That is out
+// of scope for this fix-forward (the bugs F1-F6 are the priority); the request
+// staying self-rooted does not break Await/Resolve closure — it only loses the
+// correlation lineage to the trigger. Revisit in v2 alongside the
+// invocation-scoped ModuleContext refactor.
 func (m *Manager) injectCallerContext(mctx *adapter.ModuleContext, decl adapter.Declaration) {
 	senderActor := decl.ActorID
 	maxPendingMs := decl.MaxPendingMs
