@@ -111,8 +111,19 @@ func buildRespond(cfg respondConfig) (adapter.RespondFunc, error) {
 // (proto-foundation §1.6 / proto-layer0 §2.5): the framework emits a
 // kind=response envelope with payload.status in the provisional subset
 // (Layer 2 core or Layer 3 namespace extension), then returns. The pending
-// correlation entry + F3 timer remain in place so the final Respond / Fail
-// or O3 fallback still resolves the request.
+// correlation entry remains in place so the final Respond / Fail or F3
+// fallback still resolves the request.
+//
+// Invariant (temporal-termination-consistency.md §6.1): a provisional MUST
+// NOT *resolve* closure — it does not touch correlation state, does not
+// mark done/expired, does not run the terminal-lifecycle center. But it DOES
+// act as a liveness heartbeat that *re-arms* the F3 timer to extend the
+// deadline: a live receiver that emits provisionals must not be force-failed
+// by the static max_pending_ms. The re-arm targets ONLY the framework's
+// in-memory F3 timer (timerPolicy.ReArm) — it never rewrites the request
+// envelope's expires_at (append-only log, INVARIANT-12). A ScheduleToClose
+// hard ceiling (§6.3) bounds how far heartbeats can push the deadline so a
+// stuck receiver still F3-fails.
 //
 // Harness Step 8 enforces both the payload.status closed/half-open set
 // and namespace ownership (sender local-name match for Layer 3); this
@@ -197,12 +208,29 @@ func buildProvisional(cfg respondConfig) (adapter.ProvisionalFunc, error) {
 		}
 		result := adapter.RespondResult{MessageID: res.MessageID}
 		if res.RejectReason != "" {
-			// Provisional MUST NOT touch pending registry / F3 timer
-			// regardless of outcome. terminal_duplicate is a final-only
-			// signal so we surface it as an error here; harness will
-			// also reject final-after-provisional and provisional-after-
-			// final as zombie chain rejections.
+			// Provisional MUST NOT *resolve* closure regardless of outcome
+			// (it never marks correlation done/expired). On reject we also
+			// skip the F3 re-arm — only an accepted heartbeat extends the
+			// deadline. terminal_duplicate is a final-only signal so we
+			// surface it as an error here; harness will also reject
+			// final-after-provisional and provisional-after-final as zombie
+			// chain rejections.
 			return result, fmt.Errorf("framework: provisional rejected: %s (%s)", res.RejectReason, res.RejectDetail)
+		}
+		// §6.2 heartbeat: an accepted provisional is a liveness signal —
+		// re-arm the F3 timer (in-memory only; the request envelope's
+		// expires_at is never rewritten). Same point as observeWrite (post
+		// harness-accept). ReArm clamps to the ScheduleToClose ceiling and
+		// no-ops if the request already closed, so this never resurrects a
+		// dead request and never resolves closure.
+		if cfg.policy != nil {
+			newDeadline := provisionalReArmDeadline(cfg.clock(), mergedPayload, cfg.declaration.MaxPendingMs)
+			if err := cfg.policy.ReArm(ctx, requestID, newDeadline); err != nil {
+				cfg.logger.Warn("framework.provisional.rearm_failed",
+					"adapter", cfg.adapterName,
+					"request_id", requestID.String(),
+					"err", err.Error())
+			}
 		}
 		// Feed the provisional to the router so caller-side Watch streams see
 		// it. Router does NOT touch lifecycle for non-final responses.
@@ -235,6 +263,52 @@ func mergeProvisionalPayload(userPayload json.RawMessage, status string) (json.R
 		return nil, fmt.Errorf("framework: marshal provisional payload: %w", err)
 	}
 	return out, nil
+}
+
+// provisionalReArmDeadline computes the F3 re-arm deadline for a provisional
+// heartbeat (temporal-termination-consistency.md §6.2):
+//
+//   - payload carries est_wait_ms > 0 → now + est_wait_ms (receiver's own
+//     estimate of remaining work).
+//   - otherwise → now + maxPendingMs (treat the provisional itself as "I am
+//     still alive", granting a fresh max_pending_ms budget).
+//
+// The ScheduleToClose ceiling clamp lives in timerPolicy.ReArm, not here, so
+// the budget logic stays independent of the zombie guard.
+func provisionalReArmDeadline(now time.Time, mergedPayload json.RawMessage, maxPendingMs int64) time.Time {
+	if est, ok := extractEstWaitMs(mergedPayload); ok && est > 0 {
+		return now.Add(time.Duration(est) * time.Millisecond)
+	}
+	return now.Add(time.Duration(maxPendingMs) * time.Millisecond)
+}
+
+// extractEstWaitMs reads the optional est_wait_ms field from a provisional
+// payload object. Returns ok=false when absent / null / not a number. JSON
+// numbers decode to float64 so a fractional ms truncates to an int64.
+func extractEstWaitMs(raw json.RawMessage) (int64, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, false
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return 0, false
+	}
+	v, ok := fields["est_wait_ms"]
+	if !ok {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case float64:
+		return int64(n), true
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return i, true
+	default:
+		return 0, false
+	}
 }
 
 func buildFail(respond adapter.RespondFunc) adapter.FailFunc {
