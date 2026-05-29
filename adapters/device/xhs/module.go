@@ -147,6 +147,9 @@ func (m *Module) Init(_ context.Context, mctx *adapter.ModuleContext) error {
 	if mctx.Provisional == nil {
 		return errors.New("xhs.Init: ModuleContext.Provisional is nil; phase 2 first-class async refactor requires the framework provisional emit helper")
 	}
+	if mctx.Resolve == nil {
+		return errors.New("xhs.Init: ModuleContext.Resolve is nil; the framework async refactor routes the callback terminal through the receiver-side Resolve (Deferred/Resolve) path")
+	}
 	if mctx.LookupPendingRequest == nil {
 		return errors.New("xhs.Init: ModuleContext.LookupPendingRequest is nil")
 	}
@@ -307,17 +310,24 @@ func (m *Module) Handle(ctx context.Context, env *message.Envelope) error {
 			adapter.ProvisionalOptions{},
 		)
 	}
-	return nil
+
+	// Async receiver path (framework sync/async spec §5.1): the request has
+	// been forwarded to the extension but the terminal response is not ready
+	// yet — it arrives later via OnExternalCallback → ctx.Resolve. Return
+	// Deferred() so the framework keeps the pending correlation + F3 timer
+	// alive instead of auto-finalizing on this Handle return. The request
+	// envelope's id is the wait anchor (request_id); the callback resolves it.
+	return adapter.Deferred()
 }
 
 // OnExternalCallback decodes a `device_transit.send` payload
-// (impl-layer2 §5.3.1 inbound — device → adapter) + emits the
-// terminal response via ctx.Respond.
+// (impl-layer2 §5.3.1 inbound — device → adapter) + resolves the
+// deferred request's terminal response via ctx.Resolve.
 //
 // The framework de-dupes orphan callbacks before invoking — when this
 // runs, the request_id is guaranteed unresolved. Even so, we re-check
 // correlation state so a duplicate inbound (e.g. extension retransmit
-// after a network hiccup) does not double-Respond.
+// after a network hiccup) does not double-resolve.
 func (m *Module) OnExternalCallback(ctx context.Context, raw []byte) error {
 	cb, err := m.parseExternalCallback(ctx, raw)
 	if err != nil {
@@ -373,7 +383,7 @@ func (m *Module) completeExternalCallback(ctx context.Context, cb Callback, requ
 		return nil
 	}
 	if entry.State != adapter.CorrelationPending {
-		// Duplicate / already-terminal. Drop silently — Respond's harness
+		// Duplicate / already-terminal. Drop silently — Resolve's harness
 		// dedupe would also catch this, but skipping the round trip is
 		// cheaper.
 		return nil
@@ -386,9 +396,17 @@ func (m *Module) completeExternalCallback(ctx context.Context, cb Callback, requ
 		return err
 	}
 
-	_, err = m.mctx.Respond(ctx, adapter.CorrelationKey(message.ID(requestID)), body, adapter.RespondOptions{
-		Status: status,
-		Reason: reason,
+	// Resolve produces the final terminal for the deferred request
+	// (framework sync/async spec §5.1). The request envelope id is the wait
+	// anchor; ctx.Resolve validates the status/reason, writes the
+	// adapter-signed final, and closes the pending correlation + F3 timer
+	// through the router's single lifecycle center. Resolve routes
+	// completed → Respond and failed → Fail internally, so the adapter no
+	// longer threads RespondOptions itself.
+	err = m.mctx.Resolve(ctx, message.ID(requestID), adapter.ResolveRequest{
+		Status:  status,
+		Payload: body,
+		Reason:  reason,
 	})
 	if err == nil {
 		m.clearPendingType(requestID)
