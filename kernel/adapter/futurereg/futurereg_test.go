@@ -197,6 +197,116 @@ func TestAtomicDispositionRace(t *testing.T) {
 	}
 }
 
+// TestM2NoDoubleLossAwaitTimeoutVsFinal is the F2-strict invariant: when
+// Deliver returns DeliveredToAwait, the awaiting Await MUST observe that final
+// (it cannot simultaneously report a timeout). The earlier state machine had a
+// window where the timer-fire select arm won while Deliver had already pushed
+// the final + returned DeliveredToAwait — yielding "Await timed out AND Deliver
+// said DeliveredToAwait", a double-loss. The single-lock resolveOnWake closes
+// that: whoever takes the lock second observes the first's effect, so the two
+// outcomes are mutually exclusive and consistent.
+//
+// Run many trials with the timer firing right as the final lands; assert that
+// whenever Deliver==DeliveredToAwait the Await returned the final, and whenever
+// the Await timed out Deliver==NoActiveWaiter and the final is recoverable.
+func TestM2NoDoubleLossAwaitTimeoutVsFinal(t *testing.T) {
+	const trials = 400
+	for trial := 0; trial < trials; trial++ {
+		r := New()
+		h := r.Register("RM2")
+
+		var awaitFinal int32 // 1 = Await returned the final
+		var awaitTimeout int32
+		var disp Disposition
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			env, err := h.Await(context.Background(), 3*time.Millisecond)
+			if err == nil && env != nil {
+				atomic.StoreInt32(&awaitFinal, 1)
+			} else {
+				atomic.StoreInt32(&awaitTimeout, 1)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			time.Sleep(3 * time.Millisecond)
+			disp = r.Deliver(resp("RM2", "completed"))
+		}()
+		wg.Wait()
+
+		gotFinal := atomic.LoadInt32(&awaitFinal) == 1
+		gotTimeout := atomic.LoadInt32(&awaitTimeout) == 1
+
+		switch disp {
+		case DeliveredToAwait:
+			// STRICT: Deliver claims it handed the final to the awaiter, so the
+			// awaiter MUST have returned the final (never a timeout). This is
+			// the exact double-loss the F2 fix forbids.
+			if !gotFinal || gotTimeout {
+				t.Fatalf("trial %d: disp=DeliveredToAwait but Await final=%v timeout=%v (double-loss)",
+					trial, gotFinal, gotTimeout)
+			}
+		case NoActiveWaiter:
+			// Await won the lock first (timed out), Deliver then buffered. The
+			// awaiter must have timed out, and the buffered final is recoverable.
+			if gotFinal {
+				t.Fatalf("trial %d: disp=NoActiveWaiter but Await also got the final (double-deliver)", trial)
+			}
+			env, err := h.Await(context.Background(), 200*time.Millisecond)
+			if err != nil || env == nil {
+				t.Fatalf("trial %d: NoActiveWaiter final not recoverable (lost): err=%v", trial, err)
+			}
+		default:
+			t.Fatalf("trial %d: unexpected disposition %v", trial, disp)
+		}
+	}
+}
+
+// TestWatchFinalNeverDroppedUnderProvisionalStorm is the F3 invariant: the
+// watch buffer (cap 16) fills with provisionals, then a final arrives. The
+// final must NOT be dropped — it must be delivered and be the last event
+// before the stream closes. The old push() dropped on a full buffer, which
+// could eat the final and make a downstream Await mis-report a timeout.
+func TestWatchFinalNeverDroppedUnderProvisionalStorm(t *testing.T) {
+	r := New()
+	h := r.Register("RF3")
+	w, err := h.Watch()
+	if err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+
+	// Flood far past the 16-slot buffer with provisionals (no consumer reading).
+	for i := 0; i < 100; i++ {
+		r.Deliver(resp("RF3", "processing"))
+	}
+	// Now the final — must be delivered despite the full buffer.
+	if disp := r.Deliver(resp("RF3", "completed")); disp != DeliveredToWatch {
+		t.Fatalf("final disp=%v want DeliveredToWatch", disp)
+	}
+
+	// Drain the stream; the LAST event MUST be the final.
+	var events []WatchEvent
+	for ev := range w.Events() {
+		events = append(events, ev)
+	}
+	if len(events) == 0 {
+		t.Fatal("F3: watch stream delivered nothing (final dropped)")
+	}
+	last := events[len(events)-1]
+	if !last.IsFinal {
+		t.Fatalf("F3: last watch event is not the final (final dropped); got IsFinal=%v", last.IsFinal)
+	}
+	// And no provisional was ever marked final.
+	for i := 0; i < len(events)-1; i++ {
+		if events[i].IsFinal {
+			t.Fatalf("F3: event %d wrongly marked final", i)
+		}
+	}
+}
+
 func TestParseStatus(t *testing.T) {
 	if s := parseStatus(json.RawMessage(`{"status":"completed"}`)); s != "completed" {
 		t.Fatalf("parseStatus = %q", s)

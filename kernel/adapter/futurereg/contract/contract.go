@@ -232,10 +232,19 @@ func scenarioFinalResolvesAndClears(t *testing.T, tr Transport) {
 	}
 }
 
-// M2 atomic disposition: many trials where an Await's timeout fires roughly
-// when the final lands. Deliver must return exactly one disposition (never both
-// DeliveredToAwait and NoActiveWaiter), and the final is never lost — either the
-// racing Await observed it, or a fresh Await recovers it.
+// M2 atomic disposition (F2-strict): many trials where an Await's timeout
+// fires roughly when the final lands. The single-lock state machine must make
+// the two outcomes MUTUALLY EXCLUSIVE AND CONSISTENT:
+//
+//   - Deliver returns exactly one disposition (never both DeliveredToAwait and
+//     NoActiveWaiter, never neither).
+//   - If Deliver == DeliveredToAwait, the racing Await MUST have returned the
+//     final (it cannot also report a timeout — that is the F2 double-loss the
+//     fix forbids).
+//   - If Deliver == NoActiveWaiter, the racing Await must NOT have returned the
+//     final, and the buffered final must be recoverable by a fresh Await.
+//
+// A final is never lost and never double-delivered. Both transports run this.
 func scenarioAtomicDisposition(t *testing.T, tr Transport) {
 	const trials = 120
 	for trial := 0; trial < trials; trial++ {
@@ -243,6 +252,7 @@ func scenarioAtomicDisposition(t *testing.T, tr Transport) {
 		tr.Register(id)
 
 		var awaitGotFinal int32
+		var awaitTimedOut int32
 		var toAwait int32
 		var noWaiter int32
 
@@ -253,6 +263,8 @@ func scenarioAtomicDisposition(t *testing.T, tr Transport) {
 			env, ok, err := tr.Await(context.Background(), id, 5*time.Millisecond)
 			if err == nil && ok && env != nil {
 				atomic.StoreInt32(&awaitGotFinal, 1)
+			} else if err == nil && !ok {
+				atomic.StoreInt32(&awaitTimedOut, 1)
 			}
 		}()
 		go func() {
@@ -267,18 +279,33 @@ func scenarioAtomicDisposition(t *testing.T, tr Transport) {
 		}()
 		wg.Wait()
 
+		gotFinal := atomic.LoadInt32(&awaitGotFinal) == 1
+		timedOut := atomic.LoadInt32(&awaitTimedOut) == 1
+
 		if atomic.LoadInt32(&toAwait) == 1 && atomic.LoadInt32(&noWaiter) == 1 {
 			t.Fatalf("trial %d: both DeliveredToAwait and NoActiveWaiter (double)", trial)
 		}
 		if atomic.LoadInt32(&toAwait) == 0 && atomic.LoadInt32(&noWaiter) == 0 {
 			t.Fatalf("trial %d: no disposition recorded (lost)", trial)
 		}
-		if atomic.LoadInt32(&awaitGotFinal) == 1 {
+
+		if atomic.LoadInt32(&toAwait) == 1 {
+			// STRICT: Deliver handed the final to the awaiter → the awaiter MUST
+			// have returned it, never timed out.
+			if !gotFinal || timedOut {
+				t.Fatalf("trial %d: disp=DeliveredToAwait but Await final=%v timedOut=%v (F2 double-loss)",
+					trial, gotFinal, timedOut)
+			}
 			env, ok, _ := tr.Await(context.Background(), id, 50*time.Millisecond)
 			if ok && env != nil {
 				t.Fatalf("trial %d: final observed twice (double-deliver)", trial)
 			}
 		} else {
+			// NoActiveWaiter: the Await must not have gotten the final, and the
+			// buffered final must be recoverable.
+			if gotFinal {
+				t.Fatalf("trial %d: disp=NoActiveWaiter but Await also got the final (double-deliver)", trial)
+			}
 			env, ok, err := tr.Await(context.Background(), id, 300*time.Millisecond)
 			if err != nil || !ok || env == nil {
 				t.Fatalf("trial %d: final neither observed nor recoverable (lost): ok=%v err=%v", trial, ok, err)

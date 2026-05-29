@@ -85,19 +85,27 @@ func (b *Bridge) channelTools() []gokimitools.Tool {
 // the response's finality decide whether it was consumed, swallowed, or must
 // surface as a new turn trigger.
 //
-// Decision table for a kind=response (parent_id set):
+// Decision table for a kind=response (parent_id set) — driven PURELY off the
+// futurereg Disposition that Deliver returns (single-lock atomic, M2). It must
+// NOT consult Registered(): a super-window fast-path Await leaves the
+// waiterSet registered, so "Registered()==true ⇒ swallow" would silently eat
+// the eventual final and the long-call result would never come back (F1).
 //
-//   - DeliveredToAwait / DeliveredToWatch → consumed by a fast-path Await (or
-//     await_result / Watch). Ack the trigger and DO NOT forward to the LLM.
-//   - NoActiveWaiter + the future is STILL registered → this is a PROVISIONAL
-//     on an in-flight call (no Watch attached). v1 swallows provisionals
-//     (response-multitype-refactor.md §3.4 D: "ignore provisional, wait
-//     final"); the fast-path Await stays parked on the final. Ack + swallow.
-//   - NoActiveWaiter + the future is GONE → either a FINAL whose Await already
-//     timed out (degraded to ack) / was abandoned, or a worker-restart orphan
-//     (M4). Surface it to the LLM as a NEW TURN TRIGGER (never quarantined,
-//     never dropped) so the agent sees the result. A provisional with no
-//     registration at all (truly orphan progress) is swallowed.
+//   - DeliveredToAwait → the final was handed to an active fast-path Await /
+//     await_result. Ack the trigger and DO NOT forward to the LLM.
+//   - DeliveredToWatch → consumed by a Watch stream (provisional or final).
+//     Ack + swallow.
+//   - NoActiveWaiter + provisional → an interim on an in-flight call with no
+//     Watch attached. v1 swallows provisionals (response-multitype-refactor.md
+//     §3.4 D: "ignore provisional, wait final"); the fast-path Await stays
+//     parked. Ack + swallow.
+//   - NoActiveWaiter + FINAL → a final with no active awaiter: the fast-path
+//     Await already timed out (super-window degrade-to-ack), or the call was
+//     abandoned, or a worker-restart orphan (M4). This is exactly the
+//     "super-window final" case. Surface it to the LLM as a NEW TURN TRIGGER
+//     (never quarantined, never dropped) so the long-call result comes back,
+//     and clear the now-consumed future so a later await_result cannot
+//     double-consume the buffered final.
 //
 // Non-response envelopes (events / fresh requests addressed to the agent)
 // always forward to the LLM as turn triggers.
@@ -118,18 +126,20 @@ func (b *Bridge) routeTriggers(ctx context.Context, ipc IPCFacade, in <-chan Tri
 					env := payload.Envelope
 					_, final := parseFinalStatus(env.Payload)
 					disp := caller.Deliver(&env)
-					surfaceAsTrigger := disp == futurereg.NoActiveWaiter &&
-						final && !caller.futures.Registered(env.ParentID)
+					surfaceAsTrigger := disp == futurereg.NoActiveWaiter && final
 					if !surfaceAsTrigger {
-						// Consumed by an active waiter, or a swallowed
-						// provisional / orphan progress — ack + drop.
+						// Consumed by an active waiter / Watch, or a swallowed
+						// provisional — ack + drop.
 						if err := ackTrigger(ctx, ipc, payload, true, ""); err != nil {
 							return
 						}
 						continue
 					}
-					// M4: final with the future gone (timed-out-await /
-					// abandoned / worker-restart orphan) → new turn trigger.
+					// Super-window / M4: a FINAL with no active awaiter →
+					// surface as a new turn trigger and clear the consumed
+					// future (drop the buffered final so a later await_result
+					// does not re-deliver it).
+					caller.Abandon(env.ParentID)
 				}
 				select {
 				case out <- payload:

@@ -21,12 +21,36 @@ func TestRouteTriggersDeliversFinalToActiveAwait(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Park a REAL Await on tool-req-1 so the inbound final has an active
+	// awaiter — only then is the disposition DeliveredToAwait and the final
+	// must be consumed (not forwarded). (Merely Register without Await leaves
+	// no active awaiter → NoActiveWaiter + final → surfaced as a trigger; that
+	// super-window path is covered by TestRouteTriggersSuperWindowFinalBecomesTrigger.)
+	awaitDone := make(chan *message.Envelope, 1)
+	go func() {
+		env, _, _ := caller.Await(context.Background(), "tool-req-1", 2*time.Second)
+		awaitDone <- env
+	}()
+	// let the Await goroutine park
+	time.Sleep(30 * time.Millisecond)
+
 	in := make(chan TriggerPayload, 2)
 	out := b.routeTriggers(ctx, nil, in)
 
 	in <- toolTriggerWithStatus(message.KindResponse, "response-1", "tool-req-1", "completed")
 	in <- toolTrigger(message.KindRequest, "normal-trigger", "")
 	close(in)
+
+	// The parked Await consumed the final.
+	select {
+	case env := <-awaitDone:
+		if env == nil || env.ParentID != "tool-req-1" {
+			t.Fatalf("active Await did not receive the final: %v", env)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active Await never resolved on final")
+	}
 
 	got, ok := <-out
 	if !ok {
@@ -37,6 +61,50 @@ func TestRouteTriggersDeliversFinalToActiveAwait(t *testing.T) {
 	}
 	if _, ok := <-out; ok {
 		t.Fatal("more than the normal trigger leaked into stream")
+	}
+}
+
+// TestRouteTriggersSuperWindowFinalBecomesTrigger is the F1 core regression:
+// a future registered by a fast-path Submit whose Await ALREADY TIMED OUT
+// (super-window degrade-to-ack) leaves the waiterSet registered. When the long
+// call's final finally arrives, Deliver finds no active awaiter → buffers →
+// NoActiveWaiter. The old code keyed on Registered()==true and SWALLOWED the
+// final forever (the long-call result never came back). The fix drives purely
+// off Disposition: NoActiveWaiter + final → surface as a new turn trigger, and
+// clear the future so a later await_result cannot double-consume it.
+func TestRouteTriggersSuperWindowFinalBecomesTrigger(t *testing.T) {
+	b := &Bridge{}
+	caller := b.caller()
+	// Simulate a fast-path Submit whose Await timed out: register, then run an
+	// Await with a tiny window that expires before any final.
+	caller.futures.Register("tool-req-superwin")
+	_, ok, err := caller.Await(context.Background(), "tool-req-superwin", 10*time.Millisecond)
+	if err != nil || ok {
+		t.Fatalf("setup: expected super-window timeout (ok=false,err=nil), got ok=%v err=%v", ok, err)
+	}
+	// The future is STILL registered after the timed-out Await.
+	if !caller.futures.Registered("tool-req-superwin") {
+		t.Fatal("setup: future should still be registered after a timed-out fast-path Await")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	in := make(chan TriggerPayload, 1)
+	out := b.routeTriggers(ctx, nil, in)
+
+	in <- toolTriggerWithStatus(message.KindResponse, "superwin-final", "tool-req-superwin", "completed")
+	close(in)
+
+	got, ok := <-out
+	if !ok {
+		t.Fatal("F1: super-window final was swallowed instead of surfacing as a trigger")
+	}
+	if got.Envelope.ID != "superwin-final" {
+		t.Fatalf("F1: forwarded id=%s want superwin-final", got.Envelope.ID)
+	}
+	// The future was cleared so a later await_result cannot re-consume it.
+	if caller.futures.Registered("tool-req-superwin") {
+		t.Fatal("F1: future should be cleared after surfacing the final as a trigger")
 	}
 }
 

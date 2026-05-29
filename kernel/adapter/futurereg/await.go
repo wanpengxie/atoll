@@ -63,50 +63,54 @@ func (h *Handle) Await(ctx context.Context, timeout time.Duration) (*message.Env
 	case res := <-ch:
 		return res.env, res.err
 	case <-ctx.Done():
-		h.detach(ch)
-		return nil, ctx.Err()
+		return h.resolveOnWake(ch, ctx.Err())
 	case <-timeoutCh:
-		h.detach(ch)
-		return nil, context.DeadlineExceeded
+		return h.resolveOnWake(ch, context.DeadlineExceeded)
 	}
 }
 
-// detach removes the parked await channel if it is still the active one,
-// leaving the waiterSet registered (so a later final routes through Deliver
-// as NoActiveWaiter). If a final was already pushed onto ch (raced with
-// timeout), it is preserved as the final-before-await buffer so it is not
-// lost.
-func (h *Handle) detach(ch chan awaitResult) {
+// resolveOnWake is the M2 timeout/cancel side of the single-lock disposition
+// state machine (§3.0). It is the EXACT mutual-exclusion counterpart of
+// Deliver(final): both take r.mu, so for any given final there is one and only
+// one outcome —
+//
+//   - If Deliver(final) already won the lock first, it pushed the final onto
+//     ch and returned DeliveredToAwait. resolveOnWake then takes the lock,
+//     drains ch, and returns the FINAL (not timeout). The disposition
+//     DeliveredToAwait is honoured: the awaiter consumed it.
+//   - If resolveOnWake wins the lock first (timer fired, Deliver not yet),
+//     it detaches awaitCh under the lock and returns the wakeErr (timeout /
+//     ctx cancel). A subsequent Deliver(final) then sees awaitCh==nil →
+//     buffers the final → returns NoActiveWaiter.
+//
+// There is NO window where Await times out AND Deliver also reports
+// DeliveredToAwait: the lock serialises the two, and the side that runs
+// second observes the first's effect (final-in-ch ⇒ consume; awaitCh-nil ⇒
+// buffer). A final is never lost: it is either consumed here or buffered by
+// Deliver.
+func (h *Handle) resolveOnWake(ch chan awaitResult, wakeErr error) (*message.Envelope, error) {
 	r := h.reg
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	ws, ok := r.waiters[h.id]
-	if ok && ws.awaitCh == ch {
-		// Still the active parked channel and no final raced in: just detach.
-		ws.awaitCh = nil
-		return
-	}
-	// Either Deliver detached/deleted the set after pushing a final onto ch
-	// (final won the race) — drain ch so the final is not lost.
+
+	// A final (or close) may have been pushed onto ch by Deliver/closeLocked
+	// before we took the lock. Draining ch under the lock makes the decision
+	// deterministic: if a result is present, that result wins over the wake.
 	select {
 	case res := <-ch:
-		if res.env == nil {
-			return
-		}
-		if ok {
-			ws.finalBuf = res.env
-			ws.finalConsumed = false
-			return
-		}
-		// Set was deleted by Deliver; re-create a minimal buffered set so a
-		// fresh Await still recovers the final.
-		r.waiters[h.id] = &waiterSet{
-			id:       h.id,
-			finalBuf: res.env,
-			watchers: map[*watcher]struct{}{},
-		}
+		// Deliver/Cancel already resolved this awaiter. Honour its result;
+		// the disposition it returned (DeliveredToAwait) is now consistent.
+		return res.env, res.err
 	default:
 	}
+
+	// No result raced in: we won the lock first. Detach our awaitCh (if it is
+	// still the active one) and return the wake error. The waiterSet stays
+	// registered so a later final routes through Deliver as NoActiveWaiter.
+	if ws, ok := r.waiters[h.id]; ok && ws.awaitCh == ch {
+		ws.awaitCh = nil
+	}
+	return nil, wakeErr
 }
 
 // Watch returns a stream of every response (provisional + final) for the
@@ -167,15 +171,57 @@ type watcher struct {
 
 func (w *watcher) Events() <-chan WatchEvent { return w.events }
 
-// push delivers an event to the watcher non-blockingly (drop on full buffer
-// to keep Deliver's single lock from blocking on a slow consumer).
+// push delivers an event to the watcher (called under r.mu).
+//
+// F3 invariant: a FINAL event is NEVER dropped. Under a provisional storm the
+// 16-slot buffer can fill; if we blindly dropped on full (the old behaviour)
+// the final could be lost, and after the stream closes the SDK/router Await
+// would mis-report a timeout. So:
+//
+//   - provisional: best-effort — push if there is room, else drop the OLDEST
+//     buffered provisional to make room (keep the buffer fresh; never block
+//     Deliver's single lock on a slow consumer).
+//   - final: MUST be delivered. Push if there is room; if full, evict buffered
+//     provisionals until the final fits. The final is the last event the
+//     stream carries before closeOnce(), so a guaranteed slot for it always
+//     exists once provisionals are evicted (buffer cap ≥ 1).
+//
+// Eviction stays non-blocking (only ever drains the channel we own), so this
+// cannot deadlock against the consumer while holding r.mu.
 func (w *watcher) push(ev WatchEvent) {
 	if w.closeFlag {
 		return
 	}
-	select {
-	case w.events <- ev:
-	default:
+	if !ev.IsFinal {
+		// provisional: try once, else drop oldest provisional and retry once.
+		select {
+		case w.events <- ev:
+			return
+		default:
+		}
+		select {
+		case <-w.events: // evict oldest buffered event to keep the stream fresh
+		default:
+		}
+		select {
+		case w.events <- ev:
+		default:
+		}
+		return
+	}
+	// final: guarantee delivery — evict buffered provisionals until it fits.
+	for {
+		select {
+		case w.events <- ev:
+			return
+		default:
+		}
+		select {
+		case <-w.events: // make room by dropping an older (provisional) event
+		default:
+			// Channel reports full but we could not drain it (a concurrent
+			// consumer just took one) — loop and retry the send.
+		}
 	}
 }
 
