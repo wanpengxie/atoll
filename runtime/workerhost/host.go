@@ -105,6 +105,16 @@ func NewHost(in io.Reader, out io.Writer, cfg HostConfig) (*Host, error) {
 // flushed. Used by WorkerBridge to gate the first KindTrigger push.
 func (h *Host) Ready() <-chan struct{} { return h.ready }
 
+// ErrAcceptTimeout is returned by PushTrigger when the trigger frame was
+// successfully written to the worker transport but the worker did not return
+// an accept ACK before the context deadline. It is distinct from a transport
+// write failure (which surfaces as the raw write/ctx error): an accept
+// timeout on a heartbeat-fresh worker means "live but not yet accepted", NOT
+// "dead transport", so the bridge must NOT kill the worker on this error —
+// it retries delivery under bounded attempts (§3 ack 三分 / §6 step3;
+// codex P1 bridge.go:255).
+var ErrAcceptTimeout = errors.New("workerhost: trigger accept timeout")
+
 // PushTrigger emits a daemon → worker KindTrigger frame carrying the
 // post-harness envelope + propagation context. The worker must answer
 // with KindTriggerAck after processing or rejecting the trigger; a nack
@@ -169,7 +179,11 @@ func (h *Host) PushTrigger(ctx context.Context, payload ipc.TriggerPayload) erro
 		return nil
 	case <-ctx.Done():
 		h.unregisterPendingTrigger(frame.ID, ackCh)
-		return ctx.Err()
+		// The frame already reached the wire (the write select above
+		// succeeded); only the accept ACK is missing. Surface this as the
+		// distinct ErrAcceptTimeout so the bridge can keep a heartbeat-fresh
+		// worker alive and retry, rather than treating it as dead transport.
+		return fmt.Errorf("%w: %v", ErrAcceptTimeout, ctx.Err())
 	}
 }
 

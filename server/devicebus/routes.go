@@ -19,6 +19,24 @@ import (
 // can apply the same limit.
 const DeviceJSONBodyLimit = 64 << 10
 
+// daemonLivenessTTL bounds how stale the persisted daemon liveness signal
+// (last_heartbeat) may be before the server stops treating the daemon — and
+// therefore the proxy-facade reachability it cached — as live.
+//
+// channel-lifecycle-reconcile-architecture.md §4/§6 step4: facade_state /
+// ready_state are persisted DISPLAY caches, never API authority. `callable`
+// is a realtime derivation: it requires the daemon to be freshly heartbeating
+// (within this TTL). Once the heartbeat lapses, the cached facade/ready
+// values are stale and callable collapses to false — the server stops
+// claiming an unreachable actor is callable even if no disconnect/reset frame
+// ever landed (crash, lost callback). Proxy heartbeat interval is 25s
+// (adapters/proxy/daemon DefaultHeartbeatInterval); ~3 missed beats.
+const daemonLivenessTTL = 90 * time.Second
+
+// daemonLivenessTTLMs is daemonLivenessTTL in milliseconds (last_heartbeat is
+// stored as unix-ms).
+const daemonLivenessTTLMs = int64(daemonLivenessTTL / time.Millisecond)
+
 func (s *Service) RegisterRoutes(g *gin.RouterGroup) {
 	// POST /channels/:chID/daemons (composite create + attach) is owned
 	// by gateway (handleCreateDaemonWithAutoBind) so it can auto-bind
@@ -135,6 +153,7 @@ func (s *Service) handleListOwnerDaemons(c *gin.Context) {
 		AttachedChannels []string          `json:"attached_channels"`
 		HostedActors     []hostedActorResp `json:"hosted_actors"`
 	}
+	now := s.nowMs()
 	out := make([]ownerDaemonResp, 0, len(rows))
 	for _, row := range rows {
 		attached, _ := s.ListDaemonAttachments(c.Request.Context(), row.ID)
@@ -153,7 +172,14 @@ func (s *Service) handleListOwnerDaemons(c *gin.Context) {
 			for _, chID := range h.ActiveChannels {
 				activeChannels = append(activeChannels, string(chID))
 			}
-			daemonOnline := row.Status == "online"
+			// channel-lifecycle-reconcile §4/§6 step4 — callable is a realtime
+			// derivation, not a read of persisted authority. facade_state /
+			// ready_state below are DISPLAY caches; they only contribute to
+			// callable while the daemon liveness signal is fresh (heartbeat
+			// within daemonLivenessTTL). A stale heartbeat collapses callable to
+			// false regardless of what the cached facade/ready columns still say
+			// — closing 现象2 (sticky "可调用" after the device is gone).
+			daemonLive := row.Status == "online" && (now-row.LastHeartbeat) <= daemonLivenessTTLMs
 			actorReady := h.ReadyState == "ready"
 			routeActive := len(activeChannels) > 0
 			facadeInstalled := h.FacadeState == "installed"
@@ -166,10 +192,10 @@ func (s *Service) handleListOwnerDaemons(c *gin.Context) {
 				FacadeState:          h.FacadeState,
 				FacadeDetail:         h.FacadeDetail,
 				FacadeUpdatedAt:      h.FacadeUpdatedAt,
-				DaemonOnline:         daemonOnline,
+				DaemonOnline:         daemonLive,
 				ActorReadinessReady:  actorReady,
 				ActorReadinessState:  h.ReadyState,
-				Callable:             daemonOnline && routeActive && facadeInstalled && actorReady,
+				Callable:             daemonLive && routeActive && facadeInstalled && actorReady,
 				Ready:                actorReady,
 				ReadyState:           h.ReadyState,
 				ReadyReason:          h.ReadyReason,
@@ -177,7 +203,7 @@ func (s *Service) handleListOwnerDaemons(c *gin.Context) {
 				ReadinessCheckedAt:   h.ReadinessCheckedAt,
 				LastReadyAt:          h.LastReadyAt,
 				LastStateChangeAt:    h.LastStateChangeAt,
-				OperationalStateNote: "display projection; actor.status is authoritative for a single actor",
+				OperationalStateNote: "display cache; callable is a realtime derivation (daemon heartbeat fresh ∧ route ∧ facade ∧ ready); actor.status is authoritative for a single actor",
 			})
 		}
 		out = append(out, ownerDaemonResp{

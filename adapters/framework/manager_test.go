@@ -749,8 +749,13 @@ func TestManagerDispatchActorStatusBypassesReadinessPrecheck(t *testing.T) {
 	if err := json.Unmarshal(written[0].Payload, &payload); err != nil {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
-	if payload["status"] != "completed" || payload["available"] != false || payload["reason"] != "upstream_unreachable" {
-		t.Fatalf("actor.status payload=%v", payload)
+	// channel-lifecycle-reconcile §5 护栏 3 — actor.status.available is realtime
+	// liveness, NOT the persisted readiness projection. The registry says
+	// not_ready/upstream_unreachable, yet the module (an in-process module with
+	// no StatusReporter) is reachable right now, so available=true. The sticky
+	// readiness column must NOT drive available anymore.
+	if payload["status"] != "completed" || payload["available"] != true {
+		t.Fatalf("actor.status payload=%v want completed + available=true (realtime liveness, not sticky readiness)", payload)
 	}
 }
 
@@ -830,10 +835,16 @@ func TestProxyFacadeReservedDescribeStatusUsesFrameworkState(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Lookup proxy actor ok=%v err=%v", ok, err)
 	}
+	// The readiness.changed event still drives the registry projection (②投影);
+	// that path is unchanged.
 	if rec.Readiness.State != actorreg.ReadinessNotReady || rec.Readiness.Reason != "local_unreachable" {
 		t.Fatalf("readiness=%+v", rec.Readiness)
 	}
 
+	// channel-lifecycle-reconcile §5 护栏 3 — before any device lifecycle frame
+	// the volatile liveness is unknown, so actor.status.available is false
+	// (realtime, NOT the persisted readiness). It is also NOT the not_ready
+	// readiness reason — it is the transport-liveness reason.
 	statusReq := newTestRequest("channel:test", "agent:author", "actor.status", "req-proxy-status")
 	statusReq.Audience = message.Audience{"tool:kimi"}
 	lookup.Put(statusReq)
@@ -848,12 +859,53 @@ func TestProxyFacadeReservedDescribeStatusUsesFrameworkState(t *testing.T) {
 	if err := json.Unmarshal(written[2].Payload, &status); err != nil {
 		t.Fatalf("status payload: %v", err)
 	}
-	if status["available"] != false || status["reason"] != "local_unreachable" {
-		t.Fatalf("status=%v", status)
+	if status["available"] != false || status["reason"] != "device_unreachable" {
+		t.Fatalf("status=%v want available=false reason=device_unreachable (volatile liveness, not sticky readiness)", status)
 	}
 	detail, ok := status["detail"].(map[string]any)
-	if !ok || detail["port"] != float64(10086) {
-		t.Fatalf("status detail=%T %v", status["detail"], status["detail"])
+	if !ok || detail["live_state"] != "unknown" {
+		t.Fatalf("status detail=%T %v want live_state=unknown", status["detail"], status["detail"])
+	}
+
+	// Now a device "connected" lifecycle frame arrives. Liveness flips online ⇒
+	// available=true, EVEN THOUGH the persisted readiness is still not_ready —
+	// the definitive proof that available follows realtime liveness, not the
+	// sticky readiness column.
+	if err := mgr.OnRuntimeEvent(context.Background(), adapter.RuntimeEvent{
+		Kind:           adapter.RuntimeEventDeviceLifecycle,
+		ChannelID:      "channel:test",
+		AdapterActorID: "tool:kimi",
+		DeviceLifecycle: &devicetransit.LifecycleFrame{
+			AdapterActorID: "tool:kimi",
+			ChannelID:      "channel:test",
+			Event:          devicetransit.LifecycleConnected,
+			Ts:             1_700_000_002_000,
+		},
+	}); err != nil {
+		t.Fatalf("OnRuntimeEvent connected: %v", err)
+	}
+	statusReq2 := newTestRequest("channel:test", "agent:author", "actor.status", "req-proxy-status-2")
+	statusReq2.Audience = message.Audience{"tool:kimi"}
+	lookup.Put(statusReq2)
+	if err := mgr.Dispatch(context.Background(), statusReq2); err != nil {
+		t.Fatalf("Dispatch actor.status 2: %v", err)
+	}
+	written = chain.Written()
+	var statusLive map[string]any
+	if err := json.Unmarshal(written[len(written)-1].Payload, &statusLive); err != nil {
+		t.Fatalf("status-live payload: %v", err)
+	}
+	if statusLive["available"] != true || statusLive["reason"] != "ok" {
+		t.Fatalf("status-live=%v want available=true reason=ok after connected lifecycle", statusLive)
+	}
+	// Registry readiness is still not_ready — liveness and readiness are
+	// genuinely decoupled.
+	rec, ok, err = registry.Lookup(context.Background(), "tool:kimi")
+	if err != nil || !ok {
+		t.Fatalf("Lookup proxy actor (2) ok=%v err=%v", ok, err)
+	}
+	if rec.Readiness.State != actorreg.ReadinessNotReady {
+		t.Fatalf("readiness must remain not_ready (decoupled from liveness), got %+v", rec.Readiness)
 	}
 }
 

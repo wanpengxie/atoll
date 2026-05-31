@@ -79,8 +79,34 @@ if rg -n "DefaultMaxPendingMs int64 = 30 \\* 1000" adapters/device/xhs/proto.go 
   fail "xhs adapter timeout must not drift below 300s budget"
 fi
 
-if rg -n "Callable:\\s*daemonOnline && routeActive && actorReady|Callable:\\s*daemonOnline && facadeInstalled && actorReady|Callable:\\s*routeActive && facadeInstalled && actorReady" server/devicebus/routes.go -S; then
-  fail "device callable projection must include daemonOnline && routeActive && facadeInstalled && actorReady"
+if rg -n "Callable:\\s*daemonLive && routeActive && actorReady|Callable:\\s*daemonLive && facadeInstalled && actorReady|Callable:\\s*routeActive && facadeInstalled && actorReady" server/devicebus/routes.go -S; then
+  fail "device callable projection must include daemonLive && routeActive && facadeInstalled && actorReady"
+fi
+
+# channel-lifecycle-reconcile §5 护栏 1 — liveness (online/ready/reachable/
+# callable) must never be a persisted, "written-and-trusted" authority column
+# on an actor / hosted-actor row. The runtime actor_registry and the server
+# daemon_hosted_actors tables keep readiness ONLY as a downgraded display
+# projection (ready_state/facade_state); they must not gain a column that
+# names current reachability as authority. Closes 现象2 復發.
+if rg -n "ADD COLUMN\\s+(online|reachable|callable)\\b|^\\s*(online|reachable|callable)\\s+(TEXT|INTEGER|BOOLEAN)" server/store/migrations runtime/store/schema.go -S; then
+  fail "actor/hosted-actor row schema must not persist online/reachable/callable as authority columns; callable is a realtime derivation (channel-lifecycle-reconcile §5 护栏 1)"
+fi
+
+# channel-lifecycle-reconcile §5 护栏 1 / §6 step4 — server callable derivation
+# must be gated on a realtime daemon liveness signal (heartbeat freshness), not
+# a bare persisted status read. The TTL gate (daemonLivenessTTL) collapses
+# callable once the heartbeat lapses even if facade/ready caches are stale.
+if ! rg -n "daemonLive\\s*:=\\s*row\\.Status == \"online\" && \\(now-row\\.LastHeartbeat\\) <= daemonLivenessTTLMs" server/devicebus/routes.go -S >/dev/null; then
+  fail "server callable must derive daemon liveness from a heartbeat-freshness TTL, not a bare persisted status column (channel-lifecycle-reconcile §6 step4)"
+fi
+
+# channel-lifecycle-reconcile §5 护栏 3 — actor.status.available must come from
+# realtime liveness/probe (StatusReporter), never directly from the persisted
+# readiness projection. The old `available: readiness.State == ReadinessReady`
+# read is forbidden.
+if rg -n '"available":\s*readiness\.State == actorreg\.ReadinessReady' adapters/framework/manager.go -S; then
+  fail "actor.status.available must be realtime liveness/probe (StatusReporter), not the persisted readiness column (channel-lifecycle-reconcile §5 护栏 3)"
 fi
 
 if rg -nU "fn, ok := d\\.handlers\\[id\\][\\s\\S]{0,160}if !ok \\{\\s*continue\\s*\\}" runtime/scheduler/deliver.go; then

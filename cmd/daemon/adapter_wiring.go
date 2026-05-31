@@ -14,7 +14,6 @@ import (
 
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	"github.com/wanpengxie/ActOS/adapters/framework"
-	proxyfacade "github.com/wanpengxie/ActOS/adapters/framework/proxy_facade"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -163,7 +162,7 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 		gcCtx, gcCancel := context.WithCancel(context.Background())
 		go mgr.RunGC(gcCtx)
 
-		deviceRouteMu := sync.RWMutex{}
+		deviceRouteMu := &sync.RWMutex{}
 		deviceAdapterByActor := map[actor.ActorID]string{}
 		for _, mod := range modules {
 			decl := mod.Declares()
@@ -172,56 +171,36 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 			}
 		}
 
-		proxyMu := sync.Mutex{}
-		proxyInstalled := map[actor.ActorID]struct{}{}
+		// channel-lifecycle-reconcile §3 / §6 step3 — the per-channel
+		// Reconciler is the SINGLE serial mutation entry for proxy facade
+		// wiring. The static compiled-in modules are recorded as its
+		// permanent set (never collapsed); every dynamic proxy facade is
+		// derived from facts (system.actor.registered) and reconciled in.
+		// This replaces the previous dual assembly (static factory Install +
+		// update_members one-shot Register).
+		staticActors := make([]actor.ActorID, 0, len(modules))
 		for _, mod := range modules {
-			proxyInstalled[mod.Declares().ActorID] = struct{}{}
+			staticActors = append(staticActors, mod.Declares().ActorID)
 		}
+		reconciler := newChannelReconciler(
+			h.ChannelID,
+			mgr,
+			h.Deliverer,
+			h.ActorRegistry,
+			h.Logger,
+			func(actorID actor.ActorID) scheduler.HandlerFn {
+				return deliverThroughManager(mgr, actorID, h.ChannelID, h.Logger)
+			},
+			deviceRouteMu,
+			deviceAdapterByActor,
+			staticActors,
+		)
 		if h.SetProxyActorCallback != nil {
-			h.SetProxyActorCallback(func(ctx context.Context, body kerneldaemonbus.UpdateMembersBody) error {
-				proxyMu.Lock()
-				defer proxyMu.Unlock()
-				for _, add := range body.Adds {
-					if add.Kind != actor.KindTool || add.Binding != actor.BindingRuntimeInboundViaRelay {
-						continue
-					}
-					if _, ok := proxyInstalled[add.MemberActorID]; ok {
-						continue
-					}
-					decl, installed := mgr.DeclarationForActor(add.MemberActorID)
-					if !installed {
-						var err error
-						decl, err = proxyfacade.DeclarationFromCapability(add.MemberActorID, add.CapabilitySet)
-						if err != nil {
-							return fmt.Errorf("cmd/daemon: proxy facade declaration %s: %w", add.MemberActorID, err)
-						}
-						mod, err := proxyfacade.New(decl)
-						if err != nil {
-							return fmt.Errorf("cmd/daemon: proxy facade module %s: %w", add.MemberActorID, err)
-						}
-						if err := mgr.Install(ctx, []adapter.Module{mod}); err != nil {
-							return fmt.Errorf("cmd/daemon: proxy facade install %s: %w", add.MemberActorID, err)
-						}
-					}
-					if err := mgr.RecoverTimersForActor(ctx, decl.ActorID); err != nil {
-						return fmt.Errorf("cmd/daemon: proxy facade recover timers %s: %w", add.MemberActorID, err)
-					}
-					h.Deliverer.Register(decl.ActorID,
-						deliverThroughManager(mgr, decl.ActorID, h.ChannelID, h.Logger))
-					deviceRouteMu.Lock()
-					deviceAdapterByActor[decl.ActorID] = decl.Name
-					deviceRouteMu.Unlock()
-					proxyInstalled[decl.ActorID] = struct{}{}
-					if h.Logger != nil {
-						h.Logger.Info().
-							Str("event", "daemon.proxy_facade_installed").
-							Str("channel_id", string(h.ChannelID)).
-							Str("actor_id", string(decl.ActorID)).
-							Int("type_count", len(decl.Types)).
-							Msg("proxy facade actor installed")
-					}
-				}
-				return nil
+			// update_members now only persists the actor_registry mutation +
+			// fact (runtime side); the wiring derivation is the Reconciler's
+			// job. The callback degenerates to "facts changed → reconcile".
+			h.SetProxyActorCallback(func(ctx context.Context, _ kerneldaemonbus.UpdateMembersBody) error {
+				return reconciler.Reconcile(ctx)
 			})
 		}
 
@@ -293,7 +272,27 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 				deliverThroughManager(mgr, decl.ActorID, h.ChannelID, h.Logger))
 		}
 
+		// Boot/reclaim durable trigger — rebuild fact-derived proxy facades
+		// from the channel log alone. On a fresh channel this is a no-op (no
+		// registered proxy facts yet); on cold-start / reclaim of a channel
+		// that previously had proxy facades it restores them WITHOUT waiting
+		// for a proxy reconnect (§9 DoD #1 / #4). The runtime backfills the
+		// registered facts before OnChannelBoot runs, so the facts are
+		// present here.
+		if err := reconciler.Reconcile(ctx); err != nil {
+			gcCancel()
+			_ = mgr.Shutdown(context.Background())
+			return nil, fmt.Errorf("cmd/daemon: initial reconcile %s: %w", h.ChannelID, err)
+		}
+
+		// Cheap per-channel durable fallback (§3 / §5) — low-frequency resync
+		// repairs any wiring whose follow-up reconcile was lost (commit ok,
+		// callback failed/crashed). Cancelled by teardown.
+		resyncCtx, resyncCancel := context.WithCancel(context.Background())
+		go reconciler.runResync(resyncCtx, reconcileResyncInterval)
+
 		return func(shutdownCtx context.Context) error {
+			resyncCancel()
 			gcCancel()
 			return mgr.Shutdown(shutdownCtx)
 		}, nil

@@ -8,18 +8,52 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 const DefaultMaxPendingMs int64 = 30_000
 
+// liveState is the proxy facade's volatile, in-memory view of whether the
+// user-machine device behind this relay is currently reachable. It is the
+// "实时态/③" of channel-lifecycle-reconcile-architecture.md §2 — a strong
+// over-expiring external signal, NEVER persisted, NEVER sticky. It is fed by
+// the inbound devicebus lifecycle frames (connected / disconnected /
+// token_expired) the framework routes through OnRuntimeEvent, and read by
+// the StatusReporter so actor.status.available is realtime liveness — not a
+// persisted readiness projection (§5 护栏 3).
+type liveState string
+
+const (
+	liveUnknown      liveState = "unknown"
+	liveOnline       liveState = "online"
+	liveOffline      liveState = "offline"
+	liveTokenExpired liveState = "token_expired"
+)
+
 type ProxyFacadeModule struct {
 	decl adapter.Declaration
 	mctx *adapter.ModuleContext
+
+	// live holds the current liveState. atomic so StatusReporter.Status can
+	// read it lock-free while OnRuntimeEvent writes the latest lifecycle
+	// transition. Volatile by construction: it lives only for this process /
+	// this installed module, reconstructed from live lifecycle frames after a
+	// restart — it is never written to actor_registry.
+	live atomic.Value // liveState
+
+	// liveCheckedAt is the unix-ms timestamp of the last lifecycle frame that
+	// moved `live`. Surfaced as actor.status `checked_at` so callers can see
+	// how fresh the realtime signal is.
+	liveCheckedAt atomic.Int64
+
+	now func() time.Time
 }
 
 type CapabilitySet struct {
@@ -48,7 +82,9 @@ func New(decl adapter.Declaration) (*ProxyFacadeModule, error) {
 	if err := validateDeclaration(decl); err != nil {
 		return nil, err
 	}
-	return &ProxyFacadeModule{decl: decl}, nil
+	m := &ProxyFacadeModule{decl: decl, now: time.Now}
+	m.live.Store(liveUnknown)
+	return m, nil
 }
 
 func DeclarationFromCapability(actorID actor.ActorID, capability json.RawMessage) (adapter.Declaration, error) {
@@ -101,6 +137,91 @@ func (m *ProxyFacadeModule) Init(_ context.Context, mctx *adapter.ModuleContext)
 }
 
 func (m *ProxyFacadeModule) Shutdown(context.Context) error { return nil }
+
+// liveStateNow reads the current volatile liveness without a lock.
+func (m *ProxyFacadeModule) liveStateNow() liveState {
+	v, _ := m.live.Load().(liveState)
+	if v == "" {
+		return liveUnknown
+	}
+	return v
+}
+
+// OnRuntimeEvent implements adapter.RuntimeEventAware. The framework routes
+// devicebus connection lifecycle frames (connected / disconnected /
+// token_expired) here for the (channel, adapter_actor_id) this facade owns.
+// We fold them into the volatile `live` signal so StatusReporter reports
+// realtime reachability. This is the ③实时态 input of the reconcile model —
+// it is intentionally NOT persisted and NOT pushed into actor_registry
+// readiness (that path remains driven by the relayed actor.readiness.changed
+// event so the daemon-side projection still reflects the upstream actor's
+// own readiness; liveness is a separate over-expiring transport signal).
+func (m *ProxyFacadeModule) OnRuntimeEvent(_ context.Context, evt adapter.RuntimeEvent) error {
+	if evt.Kind != adapter.RuntimeEventDeviceLifecycle || evt.DeviceLifecycle == nil {
+		return nil
+	}
+	next, ok := mapLifecycleToLive(evt.DeviceLifecycle.Event)
+	if !ok {
+		return nil
+	}
+	m.live.Store(next)
+	ts := evt.DeviceLifecycle.Ts
+	if ts == 0 {
+		ts = m.nowMs()
+	}
+	m.liveCheckedAt.Store(ts)
+	return nil
+}
+
+func mapLifecycleToLive(e devicetransit.LifecycleEvent) (liveState, bool) {
+	switch e {
+	case devicetransit.LifecycleConnected:
+		return liveOnline, true
+	case devicetransit.LifecycleDisconnected:
+		return liveOffline, true
+	case devicetransit.LifecycleTokenExpired:
+		return liveTokenExpired, true
+	}
+	return "", false
+}
+
+// Status implements adapter.StatusReporter. actor.status.available is the
+// realtime liveness of the relay transport (§5 护栏 3) — derived purely from
+// the volatile lifecycle signal, never from a persisted readiness column.
+// online ⇒ available; offline / token_expired / unknown ⇒ not available, with
+// a reason the UI can act on (re-bind vs reconnect).
+func (m *ProxyFacadeModule) Status(_ context.Context) (adapter.StatusReport, error) {
+	state := m.liveStateNow()
+	checkedAt := m.liveCheckedAt.Load()
+	if checkedAt == 0 {
+		checkedAt = m.nowMs()
+	}
+	report := adapter.StatusReport{
+		Available: state == liveOnline,
+		CheckedAt: time.UnixMilli(checkedAt),
+		Detail: map[string]any{
+			"live_state": string(state),
+		},
+	}
+	switch state {
+	case liveOnline:
+		report.Reason = "ok"
+	case liveTokenExpired:
+		report.Reason = "token_expired"
+	case liveOffline:
+		report.Reason = "device_offline"
+	default:
+		report.Reason = "device_unreachable"
+	}
+	return report, nil
+}
+
+func (m *ProxyFacadeModule) nowMs() int64 {
+	if m.now != nil {
+		return m.now().UnixMilli()
+	}
+	return time.Now().UnixMilli()
+}
 
 func (m *ProxyFacadeModule) Handle(ctx context.Context, env *message.Envelope) error {
 	if m.mctx == nil || m.mctx.ForwardExternalRequest == nil {
@@ -439,4 +560,8 @@ func validateDeclaration(decl adapter.Declaration) error {
 	return nil
 }
 
-var _ adapter.Module = (*ProxyFacadeModule)(nil)
+var (
+	_ adapter.Module            = (*ProxyFacadeModule)(nil)
+	_ adapter.RuntimeEventAware = (*ProxyFacadeModule)(nil)
+	_ adapter.StatusReporter    = (*ProxyFacadeModule)(nil)
+)

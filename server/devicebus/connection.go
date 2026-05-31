@@ -275,6 +275,26 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 			)
 			return
 		}
+		// Generation guard on the INITIAL ready projection (codex P1
+		// connection.go:278): a proxy reconnect may have registered a newer
+		// *DaemonConnection (superseding this one) between
+		// registerDaemonConnection above and reading this ready frame off the
+		// wire. Without the check, a stale connection would still
+		// ApplyDaemonReady / notify the cloud daemon / mark facade state,
+		// projecting active actors + facade wiring under the live
+		// connection's identity. Same guard the read-loop frames carry below;
+		// it MUST also gate the first ready frame and every server-state
+		// mutation (heartbeat included).
+		if !s.isCurrentConnection(conn) {
+			s.log.Warn("devicebus.daemon_ready_rejected",
+				"reason", "stale_connection_generation",
+				"daemon_id", string(daemon.ID),
+				"channel_id", string(daemon.ChannelID),
+				"daemon_session_id", conn.SessionID,
+				"generation", conn.Generation,
+			)
+			return
+		}
 		readyInput := readyInputFromFrame(first)
 		if err := s.ApplyDaemonReady(context.WithoutCancel(c.Request.Context()), daemon, readyInput); err != nil {
 			s.log.Warn("devicebus.daemon_ready_rejected",
@@ -329,6 +349,21 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 			}
 			switch frame.FrameType {
 			case proxycontract.FrameTypeHeartbeat:
+				// Generation guard before the heartbeat server-state mutation
+				// (codex P1: "any inbound frame that affects server state").
+				// A stale connection's heartbeat must not refresh liveness for
+				// a daemon row a newer connection now owns.
+				if !s.isCurrentConnection(conn) {
+					s.log.Warn("devicebus.daemon_frame_dropped",
+						"reason", "stale_connection_generation",
+						"daemon_id", string(daemon.ID),
+						"channel_id", string(daemon.ChannelID),
+						"daemon_session_id", conn.SessionID,
+						"generation", conn.Generation,
+						"frame_type", string(frame.FrameType),
+					)
+					return
+				}
 				if err := s.HeartbeatDaemon(context.WithoutCancel(c.Request.Context()), daemon.ID); err != nil {
 					s.log.Warn("devicebus.daemon_heartbeat_failed",
 						"daemon_id", string(daemon.ID),
@@ -351,6 +386,26 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 			case "":
 				if strings.TrimSpace(frame.ActorID) == "" {
 					continue
+				}
+				// Generation guard: a proxy reconnect may have already
+				// installed a newer *DaemonConnection (closing this one)
+				// while this read loop was mid-iteration on a frame it
+				// already pulled off the wire. Drop such stale frames so
+				// the superseded instance cannot project readiness or
+				// inject callbacks/calls under the live connection's
+				// identity. Routing (actorToDaemon) is keyed by daemon,
+				// not generation, so without this the orphan frame would
+				// otherwise be projected/forwarded as if current.
+				if !s.isCurrentConnection(conn) {
+					s.log.Warn("devicebus.daemon_frame_dropped",
+						"reason", "stale_connection_generation",
+						"daemon_id", string(daemon.ID),
+						"channel_id", string(frame.ChannelID),
+						"daemon_session_id", conn.SessionID,
+						"generation", conn.Generation,
+						"actor_id", frame.ActorID,
+					)
+					return
 				}
 				s.projectActorReadinessFrame(context.WithoutCancel(c.Request.Context()), daemon.ID, frame)
 				actorID := actor.ActorID(frame.ActorID)
@@ -661,6 +716,24 @@ func (s *Service) daemonOwnsActor(daemonID placement.DaemonID, channelID channel
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.actorToDaemon[routeKey(channelID, actorID)] == daemonID
+}
+
+// isCurrentConnection reports whether conn is still the registered
+// (live) connection for its daemon. A proxy reconnect installs a new
+// *DaemonConnection with a fresh generation and closes the old one, but
+// the old read loop can still be mid-iteration on a frame it already
+// pulled off the wire. Gating inbound projection/forwarding on this
+// check rejects those stale frames so a superseded instance cannot
+// mutate readiness projection or inject callbacks/calls under the new
+// connection's identity.
+func (s *Service) isCurrentConnection(conn *DaemonConnection) bool {
+	if conn == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.daemonConns[conn.Daemon.ID]
+	return current == conn && current.Generation == conn.Generation
 }
 
 // resolveDaemonActorChannel returns the unique channel id where this

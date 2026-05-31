@@ -420,6 +420,80 @@ func (m *Messages) ReceiverUnavailableRequests(ctx context.Context, limit int) (
 	return out, nil
 }
 
+// RetryableDeliveries returns request rows whose delivery was previously
+// recorded as failed (delivery_failed_at IS NOT NULL, delivered_at still
+// NULL) and whose per-attempt backoff window has elapsed
+// (delivery_failed_at + backoff(attempts) <= now). Used by the daemon's
+// bounded-retry pass (§3 ack 三分 / §6 step1) to re-drive accept of a
+// trigger whose previous push failed — instead of relying on the next
+// unrelated request to re-spawn the worker.
+//
+// The query DOES NOT filter on the attempts cap: the daemon applies the
+// cap so it can distinguish "retry once more" from "give up and emit a
+// terminal closure". Rows that already earned a terminal response are
+// excluded (the request is settled regardless of delivery bookkeeping).
+//
+// `backoffFn(attempts)` returns the minimum elapsed-ms since the last
+// failure before a row of that attempt count is eligible again — the
+// daemon owns the backoff curve so the store stays policy-free.
+func (m *Messages) RetryableDeliveries(
+	ctx context.Context,
+	nowMs int64,
+	limit int,
+	backoffFn func(attempts int64) int64,
+) ([]message.Envelope, error) {
+	if limit <= 0 {
+		limit = 64
+	}
+	if backoffFn == nil {
+		backoffFn = func(int64) int64 { return 0 }
+	}
+	const q = `SELECT id, ts, ts_received, channel_id,
+	                  sender_kind, sender_id, COALESCE(sender_name,''),
+	                  kind, type, payload,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
+	                  visibility, audience,
+	                  not_before, expires_at,
+	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
+	                  is_terminal, seq
+	             FROM messages m
+	             WHERE m.kind = 'request'
+	               AND m.delivered_at IS NULL
+	               AND m.delivery_failed_at IS NOT NULL
+	               AND m.is_terminal = 0
+	               AND NOT EXISTS (
+	                 SELECT 1 FROM messages r
+	                  WHERE r.parent_id = m.id
+	                    AND r.kind = 'response'
+	                    AND r.is_terminal = 1
+	               )
+	             ORDER BY m.seq ASC LIMIT ?`
+	rows, err := m.db.QueryContext(ctx, q, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: retryable deliveries: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []message.Envelope
+	for rows.Next() {
+		env, err := scanEnvelopeRows(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: retryable deliveries scan: %w", err)
+		}
+		// Backoff gate applied in Go so the curve stays daemon-owned.
+		if env.DeliveryFailedAt != nil {
+			if *env.DeliveryFailedAt+backoffFn(env.Attempts) > nowMs {
+				continue
+			}
+		}
+		out = append(out, env)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: retryable deliveries rows: %w", err)
+	}
+	return out, nil
+}
+
 // MarkDelivered stamps messages.delivered_at when it is still NULL and
 // clears any previous delivery error. The UPDATE is idempotent
 // (rowsAffected=0 when the row was already delivered or missing — caller

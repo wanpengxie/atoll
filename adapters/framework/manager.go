@@ -1076,16 +1076,35 @@ func (m *Manager) respondActorStatus(ctx context.Context, bm *boundModule, env *
 	detail := rawJSONObject(readiness.Detail)
 	checkedAt := m.cfg.Clock().UnixMilli()
 
+	// channel-lifecycle-reconcile §5 护栏 3 — actor.status.available is
+	// realtime liveness/probe, NEVER the persisted readiness projection. The
+	// registry readiness (ready_state/last_ready_at/…) is only baseline
+	// detail/diagnostics, not the answer to "is this actor callable right
+	// now". The realtime answer comes from the module's StatusReporter
+	// (connection liveness / probe). A module with no StatusReporter is an
+	// in-process embedded module: it is live exactly because it is installed
+	// and dispatchable here, so it reports available=true.
+	available := true
+	reason := readiness.Reason
 	if reporter, ok := bm.module.(adapter.StatusReporter); ok {
 		statusCtx, cancel := context.WithTimeout(ctx, m.cfg.StatusTimeout)
 		report, err := reporter.Status(statusCtx)
 		cancel()
 		if err != nil {
+			// Probe failed under deadline — treat as not-callable rather than
+			// falling back to the sticky readiness column (which the spec
+			// forbids as the available authority).
+			available = false
+			reason = "status_probe_error"
 			m.cfg.Logger.Warn("framework.actor_status.reporter_error",
 				"adapter", bm.declaration.Name,
 				"actor_id", string(bm.declaration.ActorID),
 				"err", err.Error())
 		} else {
+			available = report.Available
+			if report.Reason != "" {
+				reason = report.Reason
+			}
 			for k, v := range report.Detail {
 				detail[k] = v
 			}
@@ -1096,8 +1115,8 @@ func (m *Manager) respondActorStatus(ctx context.Context, bm *boundModule, env *
 	}
 
 	payload, err := json.Marshal(map[string]any{
-		"available":            readiness.State == actorreg.ReadinessReady,
-		"reason":               readiness.Reason,
+		"available":            available,
+		"reason":               reason,
 		"kind":                 string(rec.Kind),
 		"binding":              string(rec.Binding),
 		"last_ready_at":        readiness.LastReadyAt,

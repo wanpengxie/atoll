@@ -113,13 +113,36 @@ type BridgeConfig struct {
 	// this field was added.
 	PreSpawn func(ctx context.Context) (extraEnv []string, err error)
 
-	// PushTimeout caps one daemon → worker trigger processing ACK.
-	// Default 30s, aligned with the normal request pending budget.
+	// PushTimeout caps how long the daemon waits for the worker's
+	// ACCEPT acknowledgement of a pushed trigger (§3 ack 三分: accept is
+	// "received, will run", NOT "turn complete"). This is deliberately a
+	// short ms-seconds budget — the worker enqueues the turn and acks
+	// accepted immediately, then runs the turn asynchronously and reports
+	// completion through the channel log (envelope), so this timeout is
+	// fully DECOUPLED from turn duration. Default 10s. It is intentionally
+	// NOT clamped by the envelope's expires_at: a short request deadline
+	// must not abort a slow-but-live turn — that closure is the daemon's
+	// long-pending / F3 job, not the trigger push.
 	PushTimeout time.Duration
 
 	// OnPushDrop observes trigger pushes that failed or timed out. It is
 	// invoked after the bridge increments PushDropCount.
 	OnPushDrop func(PushDrop)
+
+	// HeartbeatTTL is the freshness window for a worker heartbeat. When an
+	// accept ACK times out (ErrAcceptTimeout) but the worker has heartbeat
+	// (or just spawned) within this window, the bridge treats the worker as
+	// "live but not yet accepted" and retries delivery under AcceptRetries
+	// instead of killing + respawning it. A worker whose heartbeat is stale
+	// past this window is treated as dead transport and recycled. Default
+	// 90s (three missed 30s worker heartbeats).
+	HeartbeatTTL time.Duration
+
+	// AcceptRetries bounds how many extra accept-timeout retries a single
+	// OnTrigger performs against a heartbeat-fresh worker before giving up
+	// (and recycling it). The bound is what keeps "don't kill a live worker"
+	// from becoming "retry forever". Default 2 (so up to 3 push attempts).
+	AcceptRetries int
 }
 
 // PushDrop describes one failed daemon → worker trigger push.
@@ -139,9 +162,34 @@ type workerSession struct {
 	proc      WorkerProc
 	host      *Host
 
+	// spawnedAt is the unix-ms the session was created. Until the first
+	// heartbeat arrives it doubles as the liveness baseline so a worker that
+	// just handshook (and has not yet had a chance to heartbeat) is still
+	// considered fresh during the accept-retry window.
+	spawnedAt int64
+	// lastHeartbeat is the unix-ms of the most recent worker heartbeat, set
+	// from HostConfig.OnHeartbeat. Read/written atomically — the serve
+	// goroutine writes it while OnTrigger reads it.
+	lastHeartbeat atomic.Int64
+
 	// done closes when Host.Serve returns (worker exit or fatal IPC
 	// error). Set under Bridge.mu via serve goroutine close-on-exit.
 	done chan struct{}
+}
+
+// fresh reports whether the worker is heartbeat-fresh as of now: either a
+// heartbeat (or the spawn baseline) landed within ttl. A fresh worker that
+// merely failed to accept a trigger in time is "live but not accepted", not
+// dead transport, so the bridge retries delivery instead of killing it.
+func (s *workerSession) fresh(now, ttl int64) bool {
+	if s == nil || ttl <= 0 {
+		return false
+	}
+	last := s.lastHeartbeat.Load()
+	if last == 0 {
+		last = s.spawnedAt
+	}
+	return now-last <= ttl
 }
 
 // dead reports whether the session's serve goroutine has returned.
@@ -189,7 +237,18 @@ func NewBridge(cfg BridgeConfig) (*Bridge, error) {
 		cfg.HandshakeTimeout = 5 * time.Second
 	}
 	if cfg.PushTimeout <= 0 {
-		cfg.PushTimeout = 30 * time.Second
+		// Accept budget, not turn budget — see BridgeConfig.PushTimeout.
+		cfg.PushTimeout = 10 * time.Second
+	}
+	if cfg.HeartbeatTTL <= 0 {
+		// Three missed worker heartbeats (worker default cadence 30s).
+		cfg.HeartbeatTTL = 90 * time.Second
+	}
+	if cfg.AcceptRetries < 0 {
+		cfg.AcceptRetries = 0
+	}
+	if cfg.AcceptRetries == 0 {
+		cfg.AcceptRetries = 2
 	}
 	if cfg.WorkerIDPrefix == "" {
 		cfg.WorkerIDPrefix = "w"
@@ -240,30 +299,43 @@ func (m *Bridge) OnTrigger(ctx context.Context, _ actor.ActorID, env *message.En
 	}
 	m.mu.Unlock()
 
-	pushCtx, cancel := context.WithTimeout(ctx, m.triggerPushTimeout(env))
-	err := sess.host.PushTrigger(pushCtx, payload)
-	cancel()
-	if err != nil {
-		// Push failure likely means the worker pipe is broken — drop
-		// the session so the next trigger re-spawns. Don't release the
-		// lease synchronously here; the serve goroutine will run that
-		// when Host.Serve returns.
-		m.onPushFailure(sess, string(env.ID), err)
-		return fmt.Errorf("workerhost: push trigger: %w", err)
+	// The push deadline is the ACCEPT budget only (§3 ack 三分). It is
+	// decoupled from the envelope's expires_at / turn duration: the worker
+	// acks accepted in ms-seconds and runs the turn asynchronously.
+	//
+	// Accept-timeout retry policy (codex P1 bridge.go:255): an accept
+	// timeout against a HEARTBEAT-FRESH worker means "live but busy / queue
+	// backpressure", NOT dead transport — killing it would recreate the 30s
+	// kill/respawn loop on the accept path. We retry delivery under a bounded
+	// AcceptRetries budget while the worker stays heartbeat-fresh; only a
+	// transport error, a rejection, or an accept timeout on a STALE worker
+	// (or budget exhaustion) recycles the session.
+	ttl := m.cfg.HeartbeatTTL.Milliseconds()
+	var err error
+	for attempt := 0; ; attempt++ {
+		pushCtx, cancel := context.WithTimeout(ctx, m.cfg.PushTimeout)
+		err = sess.host.PushTrigger(pushCtx, payload)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		// Only an accept timeout is retryable, and only while the worker is
+		// heartbeat-fresh and we have retry budget left. Everything else
+		// (write/transport failure, rejection, stale worker) recycles.
+		if errors.Is(err, ErrAcceptTimeout) &&
+			attempt < m.cfg.AcceptRetries &&
+			sess.fresh(m.cfg.NowFn(), ttl) &&
+			ctx.Err() == nil {
+			continue
+		}
+		break
 	}
-	return nil
-}
-
-func (m *Bridge) triggerPushTimeout(env *message.Envelope) time.Duration {
-	timeout := m.cfg.PushTimeout
-	if env == nil || env.ExpiresAt == nil {
-		return timeout
-	}
-	remainingMS := *env.ExpiresAt - m.cfg.NowFn()
-	if remainingMS <= 0 {
-		return time.Nanosecond
-	}
-	return time.Duration(remainingMS) * time.Millisecond
+	// Push failure (transport broken, or a heartbeat-stale / budget-exhausted
+	// accept timeout) — drop the session so the next trigger re-spawns. Don't
+	// release the lease synchronously here; the serve goroutine runs that when
+	// Host.Serve returns.
+	m.onPushFailure(sess, string(env.ID), err)
+	return fmt.Errorf("workerhost: push trigger: %w", err)
 }
 
 func (m *Bridge) onPushFailure(sess *workerSession, envelopeID string, err error) {
@@ -339,6 +411,15 @@ func (m *Bridge) spawnLocked(ctx context.Context) error {
 		return fmt.Errorf("spawn: %w", err)
 	}
 
+	sess := &workerSession{
+		leaseID:   leaseID,
+		lockLease: lease,
+		workerID:  workerID,
+		proc:      proc,
+		spawnedAt: m.cfg.NowFn(),
+		done:      make(chan struct{}),
+	}
+
 	host, err := NewHost(proc.Stdout, proc.Stdin, HostConfig{
 		ChannelID:     m.cfg.ChannelID,
 		WorkerID:      workerID,
@@ -349,21 +430,18 @@ func (m *Bridge) spawnLocked(ctx context.Context) error {
 		WorkerActorID: m.cfg.WorkerActorID,
 		Ledger:        m.cfg.Ledger,
 		NowFn:         m.cfg.NowFn,
+		// Track heartbeat freshness so OnTrigger can distinguish a
+		// live-but-not-accepted worker (retry) from dead transport (kill).
+		OnHeartbeat: func(workerNowMs int64) {
+			sess.lastHeartbeat.Store(m.cfg.NowFn())
+		},
 	})
 	if err != nil {
 		_ = proc.Kill()
 		_ = m.cfg.LeaseStore.Release(ctx, lease.ID)
 		return fmt.Errorf("host: %w", err)
 	}
-
-	sess := &workerSession{
-		leaseID:   leaseID,
-		lockLease: lease,
-		workerID:  workerID,
-		proc:      proc,
-		host:      host,
-		done:      make(chan struct{}),
-	}
+	sess.host = host
 	m.cur = sess
 
 	// Start the serve goroutine. When Serve returns (worker EOF or

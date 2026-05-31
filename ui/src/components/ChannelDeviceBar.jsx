@@ -65,11 +65,13 @@ function statusLabel(hostedActor, online, channelID) {
   const facadeReady = facadeInstalled(hostedActor);
   const facadeState = facadeStateOf(hostedActor);
   const facadeDetail = hostedActor.facade_detail || hostedActor.facadeDetail || hostedActor.FacadeDetail || '';
-  const callable =
-    (hostedActor.callable === true || hostedActor.Callable === true || (actorReady && routeActive && facadeReady)) &&
-    actorReady &&
-    routeActive &&
-    facadeReady;
+  // callable is the server-side realtime derivation (daemon heartbeat fresh ∧
+  // route ∧ facade ∧ ready), per channel-lifecycle-reconcile §4/§6 step4. The
+  // browser MUST NOT re-derive it from the persisted facade_state/ready_state
+  // display cache — those are stale-able and the server already collapses
+  // callable when the daemon heartbeat lapses. We only read the cached fields
+  // below to pick a human-readable reason for the *not*-callable case.
+  const callable = hostedActor.callable === true || hostedActor.Callable === true;
   if (callable) {
     return {
       state: 'ready',

@@ -60,6 +60,16 @@ func (w *triggerCountingWorker) workerFn(ctx context.Context, leaseID string, _ 
 					if !ok {
 						return nil
 					}
+					// ACK three-split (channel-lifecycle-reconcile-
+					// architecture.md §3): ACCEPT immediately on dequeue,
+					// decoupled from turn completion. Mirrors the real worker
+					// bridges (MockBridge / kimi) — the daemon-side PushTrigger
+					// resolves on this accept, not on the simulated turn work
+					// below, so a slow/blocked worker turn never reads back as
+					// a delivery failure that kills + respawns the worker.
+					if err := client.AckTrigger(bctx, payload, true, ""); err != nil {
+						return err
+					}
 					received++
 					select {
 					case w.receivedAll <- payload:

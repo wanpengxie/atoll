@@ -72,6 +72,22 @@ type DaemonConfig struct {
 	// Defaults to 1s (L2 §3.7).
 	SchedulerPeriod time.Duration
 
+	// TriggerMaxAttempts caps how many times a failed trigger delivery
+	// (accept-ack failure) is re-driven before the daemon stops retrying
+	// and emits a terminal receiver_internal_error closure (§3 ack 三分 /
+	// §6 step1: bounded retry + terminal closure, so the bridge cannot
+	// devolve into an infinite worker-respawn loop). Defaults to 5.
+	TriggerMaxAttempts int64
+
+	// TriggerRetryBaseBackoff is the base of the exponential per-attempt
+	// backoff between trigger re-deliveries (delay = base * 2^(attempts-1),
+	// capped at TriggerRetryMaxBackoff). Defaults to 1s.
+	TriggerRetryBaseBackoff time.Duration
+
+	// TriggerRetryMaxBackoff caps the per-attempt retry backoff. Defaults
+	// to 30s.
+	TriggerRetryMaxBackoff time.Duration
+
 	// HeartbeatPeriod overrides the daemon → server control.heartbeat
 	// cadence. Defaults to transit.DefaultHeartbeatPeriod (15s). Without
 	// the sender, server placements drift to `stale` 90s after boot even
@@ -557,6 +573,15 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 	}
 	if cfg.SchedulerPeriod <= 0 {
 		cfg.SchedulerPeriod = time.Second
+	}
+	if cfg.TriggerMaxAttempts <= 0 {
+		cfg.TriggerMaxAttempts = 5
+	}
+	if cfg.TriggerRetryBaseBackoff <= 0 {
+		cfg.TriggerRetryBaseBackoff = time.Second
+	}
+	if cfg.TriggerRetryMaxBackoff <= 0 {
+		cfg.TriggerRetryMaxBackoff = 30 * time.Second
 	}
 	if cfg.WorkerReadinessPeriod <= 0 {
 		cfg.WorkerReadinessPeriod = 30 * time.Second
@@ -1624,6 +1649,29 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel, sta
 		return err
 	}
 
+	// 推论5 / §4 事实完整性 — backfill system.actor.registered facts for
+	// any active actor_registry row born through a direct-write path
+	// (bootstrap saga seeds / initial members / channel-agent / channels
+	// created before facts carried full data) so membership is a
+	// projection-of-record replayable from the channel log alone. Runs
+	// after ensureChannelAgent (its row is now present) and after the
+	// seq-1 system.channel.created event the create path already wrote, so
+	// the backfilled facts never contend for seq 1. Idempotent: re-runs on
+	// cold-start / reclaim skip actors that already have a fact, giving the
+	// durable兜底 (§5) for commits whose follow-up reconcile was lost.
+	if lockRow, lockOK, lockErr := cr.lock.Get(ctx); lockErr != nil {
+		d.deleteChannel(lc.ChannelID)
+		return fmt.Errorf("runtime: backfill registered facts lock %s: %w", lc.ChannelID, lockErr)
+	} else if lockOK {
+		if err := cr.registry.BackfillRegisteredFacts(ctx, lc.ChannelID, khlog.FencingTuple{
+			Token: lockRow.FencingToken,
+			Epoch: lockRow.DaemonEpoch,
+		}); err != nil {
+			d.deleteChannel(lc.ChannelID)
+			return fmt.Errorf("runtime: backfill registered facts %s: %w", lc.ChannelID, err)
+		}
+	}
+
 	// M1.6-T2 — OnChannelBoot hook lets cmd/daemon wire the adapter
 	// framework Manager + register Dispatch handlers on the Deliverer.
 	// Run BEFORE starting the pusher goroutine so a failing hook unwinds
@@ -2411,6 +2459,12 @@ func (d *Daemon) handleUpdateMembers(
 			Role:        add.Role,
 			At:          now,
 			ProxyHost:   memberActorProxyHost(add.ProxyHost),
+			// 推论5: carry the capability_set into the durable
+			// system.actor.registered fact so a reconciler can rebuild
+			// proxy facade wiring from the channel log alone (the live
+			// proxy callback below uses the same blob, but the fact is
+			// the only thing that survives a daemon restart).
+			CapabilitySet: add.CapabilitySet,
 		})
 	}
 	removes := make([]store.MemberActorRemove, 0, len(body.Removes))
@@ -2839,6 +2893,76 @@ func (d *Daemon) scanLongPending(ctx context.Context, nowMs int64) error {
 			}
 		}
 
+		// Pass 1b — §3 ack 三分 / §6 step1 bounded trigger retry. A request
+		// whose previous accept-ack push failed (delivery_failed_at set,
+		// delivered_at NULL) is re-driven with exponential backoff. Once
+		// attempts blow the cap we STOP retrying and emit a terminal
+		// receiver_internal_error closure — without this, a worker that
+		// keeps failing to accept would be respawned forever (the failure
+		// mode §6 step1 explicitly warns about).
+		retryable, err := cr.messages.RetryableDeliveries(ctx, nowMs, 64, d.triggerRetryBackoffMs)
+		if err != nil {
+			d.log.Warn().Err(err).
+				Str("event", "runtime.scheduler_retry_scan_failed").
+				Str("channel_id", string(chID)).
+				Msg("scheduler failed to scan retryable trigger deliveries")
+		}
+		for i := range retryable {
+			req := retryable[i]
+			if req.Attempts >= d.cfg.TriggerMaxAttempts {
+				// Bounded retry exhausted — emit observable terminal failure
+				// (closure) and stop re-driving. MarkDelivered drops the row
+				// out of the retry scan; the terminal response also closes
+				// the request semantically (One Law).
+				if err := d.emitTriggerRetryExhausted(ctx, cr, &req, nowMs); err != nil {
+					d.log.Warn().Err(err).
+						Str("event", "runtime.scheduler_retry_exhausted_emit_failed").
+						Str("channel_id", string(chID)).
+						Str("message_id", string(req.ID)).
+						Int64("attempts", req.Attempts).
+						Msg("scheduler failed to emit trigger-retry-exhausted closure")
+					continue
+				}
+				if err := cr.messages.MarkDelivered(ctx, req.ID, nowMs); err != nil {
+					d.log.Warn().Err(err).
+						Str("event", "runtime.scheduler_mark_delivered_failed").
+						Str("channel_id", string(chID)).
+						Str("message_id", string(req.ID)).
+						Msg("scheduler failed to mark retry-exhausted request settled")
+				}
+				continue
+			}
+			if cr.gateway == nil {
+				continue
+			}
+			if _, derr := cr.gateway.Dispatch(ctx, &req, trigger.Options{}); derr != nil {
+				d.log.Warn().Err(derr).
+					Str("event", "runtime.scheduler_retry_dispatch_failed").
+					Str("channel_id", string(chID)).
+					Str("message_id", string(req.ID)).
+					Int64("attempts", req.Attempts).
+					Msg("scheduler trigger retry dispatch failed")
+				if err := cr.messages.MarkDeliveryError(ctx, req.ID, nowMs, derr.Error()); err != nil {
+					d.log.Warn().Err(err).
+						Str("event", "runtime.scheduler_mark_delivery_error_failed").
+						Str("channel_id", string(chID)).
+						Str("message_id", string(req.ID)).
+						Msg("scheduler failed to mark retry delivery error")
+				}
+				continue
+			}
+			// Accept succeeded on retry — stamp delivered so the row leaves
+			// the retry scan. The turn now runs async and closes via envelope
+			// / long-pending fallback like any freshly-delivered request.
+			if err := cr.messages.MarkDelivered(ctx, req.ID, nowMs); err != nil {
+				d.log.Warn().Err(err).
+					Str("event", "runtime.scheduler_mark_delivered_failed").
+					Str("channel_id", string(chID)).
+					Str("message_id", string(req.ID)).
+					Msg("scheduler failed to mark retried message delivered")
+			}
+		}
+
 		// Pass 2 — §6.4 receiver_unavailable immediate fallback emit.
 		unavailable, err := cr.messages.ReceiverUnavailableRequests(ctx, 64)
 		if err != nil {
@@ -2879,6 +3003,83 @@ func (d *Daemon) scanLongPending(ctx context.Context, nowMs int64) error {
 				continue
 			}
 		}
+	}
+	return nil
+}
+
+// triggerRetryBackoffMs returns the minimum elapsed-ms since the last
+// failed delivery before a trigger of `attempts` failures is eligible for
+// re-drive: base * 2^(attempts-1), capped at TriggerRetryMaxBackoff.
+// attempts<=0 yields 0 (eligible immediately).
+func (d *Daemon) triggerRetryBackoffMs(attempts int64) int64 {
+	if attempts <= 0 {
+		return 0
+	}
+	base := d.cfg.TriggerRetryBaseBackoff.Milliseconds()
+	maxB := d.cfg.TriggerRetryMaxBackoff.Milliseconds()
+	backoff := base
+	for i := int64(1); i < attempts; i++ {
+		backoff *= 2
+		if backoff >= maxB {
+			return maxB
+		}
+	}
+	if backoff > maxB {
+		return maxB
+	}
+	return backoff
+}
+
+// emitTriggerRetryExhausted synthesises the terminal receiver_internal_error
+// response for a request whose accept-ack push kept failing past
+// TriggerMaxAttempts (§3 ack 三分 / §6 step1 closure). It reuses the same
+// post-harness write + dedupe discipline as emitLongPendingFallback so the
+// One Law uniqueness + fan-out invariants hold.
+func (d *Daemon) emitTriggerRetryExhausted(
+	ctx context.Context,
+	cr *channelRuntime,
+	req *message.Envelope,
+	nowMs int64,
+) error {
+	if len(req.Audience) == 0 {
+		return fmt.Errorf("request %s has empty audience", req.ID)
+	}
+	reason := message.TerminalReceiverInternalError
+	body := longPendingPayload{Status: "failed", Reason: string(reason)}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+	// Deterministic id keeps the close idempotent across ticks.
+	envID := message.ID("response:" + string(req.ID) + ":sys-" + string(reason))
+	correlationID := req.CorrelationID
+	if correlationID == "" {
+		correlationID = req.ID
+	}
+	env := &message.Envelope{
+		ID:            envID,
+		TS:            nowMs,
+		ChannelID:     req.ChannelID,
+		Sender:        message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind:          message.KindResponse,
+		Type:          req.Type,
+		Payload:       payload,
+		ParentID:      req.ID,
+		CorrelationID: correlationID,
+		Visibility:    req.Visibility,
+		Audience:      message.Audience{req.Sender.ID},
+	}
+	chainCtx := harness.CtxWithCaller(ctx, harness.CallerContext{
+		ActorID:                 actor.SystemActorID,
+		ChannelID:               req.ChannelID,
+		AllowProvidedSenderKind: true,
+	})
+	res, err := cr.wrappedChain.Write(chainCtx, env)
+	if err != nil {
+		return fmt.Errorf("chain write: %w", err)
+	}
+	if res.RejectReason != "" && res.RejectReason != message.HarnessTerminalDuplicate {
+		return fmt.Errorf("rejected: %s (%s)", res.RejectReason, res.RejectDetail)
 	}
 	return nil
 }

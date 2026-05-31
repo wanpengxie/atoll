@@ -366,52 +366,124 @@ func (b *Bridge) Run(ctx context.Context, ipc IPCFacade) error {
 	runCtx, stopRouter := context.WithCancel(ctx)
 	defer stopRouter()
 
-	turns := 0
+	// §3 ack 三分 / §6 step1 — the trigger ACK is the ACCEPT signal only.
+	//
+	// The main loop reads each trigger, immediately ACKs "accepted", and
+	// hands the turn to a single background runner goroutine via an
+	// internal queue. The runner executes turns serially (go-kimi's Agent
+	// is not safe for concurrent Run and there is one session per process)
+	// and reports the result purely through envelope emits. Because accept
+	// is decoupled from turn completion, PushTrigger returns in ms-seconds
+	// and the daemon never times a long turn out on the trigger deadline.
+	//
+	//   accept   — this loop's ackTrigger(accepted) on dequeue.
+	//   complete — the agent.text envelope a turn emits (or the failed
+	//              terminal envelope on LLM error).
+	//   alive    — the heartbeat the IPC layer drives independently.
+	//
+	// Bounded retry + terminal closure for never-completing turns live in
+	// the daemon (scanLongPending); the bridge only guarantees accept is
+	// never blocked on the turn.
 	triggers := b.routeTriggers(runCtx, ipc, ipc.Triggers())
+	turnQueue := make(chan queuedTurn, 64)
+	turnErrCh := make(chan error, 1)
+
+	var runnerWG sync.WaitGroup
+	runnerWG.Add(1)
+	go func() {
+		defer runnerWG.Done()
+		for qt := range turnQueue {
+			if err := b.runTurn(ctx, ipc, agent, wireCh, qt.payload, qt.index); err != nil {
+				if !isTerminalEmittedError(err) {
+					// Lower-level write/consume failure. The trigger was
+					// already accepted, so it cannot be nacked; treat as
+					// fatal so the worker recycles. The daemon's bounded
+					// retry + long-pending closure drive the request to a
+					// terminal state.
+					select {
+					case turnErrCh <- err:
+					default:
+					}
+					return
+				}
+			}
+		}
+	}()
+
+	turns := 0
+	// stopAndDrain closes the queue, waits for the runner, and surfaces any
+	// fatal (non-terminal-emitted) turn error the runner recorded — so a
+	// worker-recycling failure is never lost to a racing triggers-close.
+	stopAndDrain := func() error {
+		close(turnQueue)
+		runnerWG.Wait()
+		select {
+		case err := <-turnErrCh:
+			return err
+		default:
+			return nil
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
+			if derr := stopAndDrain(); derr != nil {
+				return derr
+			}
 			return ctx.Err()
+		case err := <-turnErrCh:
+			// Drain the runner (already returned) and recycle the worker.
+			_ = stopAndDrain()
+			return err
 		case payload, ok := <-triggers:
 			if !ok {
-				return nil
+				return stopAndDrain()
 			}
 			turns++
-			if err := b.runTurn(ctx, ipc, agent, wireCh, payload, turns); err != nil {
-				// Terminal-emitted errors have already produced an
-				// observable failure envelope; lower-level write/consume
-				// failures are nacked so the daemon can retry delivery.
-				if isTerminalEmittedError(err) {
-					if ackErr := ackTrigger(ctx, ipc, payload, true, ""); ackErr != nil {
-						return ackErr
-					}
-				} else {
-					_ = ackTrigger(ctx, ipc, payload, false, err.Error())
-				}
+			turnIndex := turns
+
+			// ACCEPT immediately, then enqueue. The runner reports COMPLETE
+			// via envelope; accept latency stays independent of turn time.
+			if err := ackTrigger(ctx, ipc, payload, true, ""); err != nil {
+				_ = stopAndDrain()
 				return err
 			}
+			select {
+			case turnQueue <- queuedTurn{payload: payload, index: turnIndex}:
+			case <-ctx.Done():
+				_ = stopAndDrain()
+				return ctx.Err()
+			case err := <-turnErrCh:
+				_ = stopAndDrain()
+				return err
+			}
+
 			// MaxTurns > 0 enforces a cap (deterministic exit for tests).
-			// MaxTurns <= 0 (the production default) lets the LLM drive
-			// turn cadence — stop_reason=end_turn / stop on the wire is
-			// the natural exit. ctx.Done() / triggers close still terminate.
-			if b.cfg.MaxTurns > 0 && turns >= b.cfg.MaxTurns {
+			// MaxTurns <= 0 (production default) lets the LLM drive cadence.
+			// We accept + enqueue the capped turn first so its work still
+			// runs, then drain the runner and emit the canonical terminal.
+			if b.cfg.MaxTurns > 0 && turnIndex >= b.cfg.MaxTurns {
+				if derr := stopAndDrain(); derr != nil {
+					return derr
+				}
 				if err := b.emitTerminal(ctx, ipc, payload, "agent.text", map[string]any{
 					"text":        "kimi bridge reached max_turns",
 					"next_action": "done",
 				}); err != nil {
-					_ = ackTrigger(ctx, ipc, payload, false, err.Error())
-					return err
-				}
-				if err := ackTrigger(ctx, ipc, payload, true, ""); err != nil {
 					return err
 				}
 				return nil
 			}
-			if err := ackTrigger(ctx, ipc, payload, true, ""); err != nil {
-				return err
-			}
 		}
 	}
+}
+
+// queuedTurn is one accepted trigger awaiting serial execution by the
+// bridge's turn runner.
+type queuedTurn struct {
+	payload TriggerPayload
+	index   int
 }
 
 // buildAgent builds a fresh kimiAgent bound to (workDir, emitter,

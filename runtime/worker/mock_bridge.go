@@ -264,8 +264,26 @@ func (m *MockBridge) Run(ctx context.Context, client *IPCClient) error {
 			if !ok {
 				return nil
 			}
+			// ACK three-split (channel-lifecycle-reconcile-architecture.md
+			// §3 / §6 step1; codex P1 mock_bridge.go:267): ACCEPT
+			// immediately on dequeue, decoupled from turn completion. The
+			// trigger result is reported purely through envelopes —
+			// `complete` is the agent.text the react path writes; a react
+			// failure AFTER accept surfaces as a terminal failure envelope,
+			// never a delivery nack. This is what makes the system-wide ACK
+			// split real for the default (mock) provider, not just kimi, and
+			// is what lets workerhost stop treating a slow/blocked turn as a
+			// delivery failure that kills + respawns the worker.
+			if err := client.AckTrigger(ctx, payload, true, ""); err != nil {
+				return err
+			}
 			if err := m.react(ctx, client, payload); err != nil {
-				_ = client.AckTrigger(ctx, payload, false, err.Error())
+				// Already accepted: a post-accept failure cannot be nacked.
+				// Emit a terminal failure envelope so the turn still reaches
+				// closure on the channel log, then exit the bridge.
+				if termErr := m.emitTerminalFailure(ctx, client, payload, err); termErr != nil {
+					return errors.Join(err, termErr)
+				}
 				return err
 			}
 			m.turns++
@@ -279,18 +297,13 @@ func (m *MockBridge) Run(ctx context.Context, client *IPCClient) error {
 				if !m.SingleShot {
 					// Emit a terminal envelope marking next_action=done so
 					// the channel log carries an observable exit point.
+					// Complete-via-envelope: the trigger was already accepted
+					// above, so no second ACK is sent.
 					if err := m.emitTerminal(ctx, client); err != nil {
-						_ = client.AckTrigger(ctx, payload, false, err.Error())
 						return err
 					}
 				}
-				if err := client.AckTrigger(ctx, payload, true, ""); err != nil {
-					return err
-				}
 				return nil
-			}
-			if err := client.AckTrigger(ctx, payload, true, ""); err != nil {
-				return err
 			}
 		}
 	}
@@ -534,6 +547,40 @@ func (m *MockBridge) emitTerminal(ctx context.Context, client *IPCClient) error 
 		Payload:    payload,
 		TS:         m.NowFn(),
 		TSReceived: m.NowFn(),
+	}
+	if _, err := client.WriteMessage(ctx, env); err != nil {
+		return err
+	}
+	return nil
+}
+
+// emitTerminalFailure writes a terminal failure envelope (next_action=
+// failed) for a trigger that was already ACCEPTed but whose react path
+// failed afterwards. Mirrors the kimi bridge's emitTerminalLLMError: once a
+// trigger is accepted it can no longer be nacked, so the failure must reach
+// closure through an envelope on the channel log rather than a delivery
+// nack. Best-effort — a write error is returned to the caller (joined with
+// the original react error) so the bridge still exits.
+func (m *MockBridge) emitTerminalFailure(ctx context.Context, client *IPCClient, in ipc.TriggerPayload, cause error) error {
+	body := map[string]any{
+		"text":        fmt.Sprintf("mock bridge failed: %v", cause),
+		"next_action": "failed",
+		"reason":      "receiver_internal_error",
+	}
+	payload, _ := json.Marshal(body)
+	env := message.Envelope{
+		ID:            message.ID(m.EnvelopeIDFn(client.WorkerID(), m.turns+1) + "-failed"),
+		ChannelID:     client.ChannelID(),
+		Type:          "agent.text",
+		Kind:          message.KindEvent,
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: client.WorkerActorID()},
+		Visibility:    message.VisibilityPublic,
+		Audience:      mockReplyAudience(in.Envelope.Sender.ID),
+		Payload:       payload,
+		CorrelationID: in.CorrelationID,
+		ParentID:      in.Envelope.ID,
+		TS:            m.NowFn(),
+		TSReceived:    m.NowFn(),
 	}
 	if _, err := client.WriteMessage(ctx, env); err != nil {
 		return err

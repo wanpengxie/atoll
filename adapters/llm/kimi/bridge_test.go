@@ -755,6 +755,11 @@ func TestBridge_CallActorToolTerminalFailureReturnsErrorResult(t *testing.T) {
 // TestBridge_RunEmitsFailedTerminalOnLLMError — when go-kimi returns
 // an *LLMError with StatusCode 429, the bridge MUST emit a public
 // terminal envelope with payload.next_action=failed + reason=llm_rate_limit.
+//
+// §3 ack 三分: an LLM error is a COMPLETE outcome (observable failed
+// terminal envelope = closure), NOT a worker-fatal error. The trigger was
+// already ACKed accepted and the turn ran async, so Run does not propagate
+// the error — the worker survives and keeps serving subsequent triggers.
 func TestBridge_RunEmitsFailedTerminalOnLLMError(t *testing.T) {
 	b := mustBridge(t)
 	ipc := newFakeIPC()
@@ -773,9 +778,8 @@ func TestBridge_RunEmitsFailedTerminalOnLLMError(t *testing.T) {
 		close(ipc.triggers)
 	}()
 
-	err := b.Run(ctx, ipc)
-	if err == nil {
-		t.Fatal("Run should propagate the LLM error")
+	if err := b.Run(ctx, ipc); err != nil {
+		t.Fatalf("Run should survive a per-turn LLM error (closure via envelope): %v", err)
 	}
 	written := ipc.Written()
 	if len(written) == 0 {
