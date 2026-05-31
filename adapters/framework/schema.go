@@ -13,8 +13,7 @@ import (
 // Level A (proto-layer0 §1.4.1 / proto-layer1 §1.3): payload is opaque
 // to the protocol layer; the type_registry stores NO payload schema
 // fields and install does NOT validate payload schemas. The only
-// install-time closed-set checks are allowed_kinds membership +
-// terminal_convention enum.
+// install-time closed-set check is allowed_kinds membership.
 //
 // Returns nil on success. Returns an *InstallError wrapping
 // message.InstallTypeRegistryInvalid on failure — caller errors.As-es
@@ -37,13 +36,6 @@ func ValidateTypeDeclaration(typeName string, td adapter.TypeDeclaration) error 
 				asInstallError(message.InstallTypeRegistryInvalid), typeName, k)
 		}
 		seenKind[k] = true
-	}
-
-	if td.TerminalConvention != "" &&
-		td.TerminalConvention != string(TerminalPayloadStatus) &&
-		td.TerminalConvention != string(TerminalSingleResponse) {
-		return fmt.Errorf("%w: type=%s terminal_convention %q invalid",
-			asInstallError(message.InstallTypeRegistryInvalid), typeName, td.TerminalConvention)
 	}
 
 	return nil

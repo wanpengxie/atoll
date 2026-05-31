@@ -17,8 +17,7 @@ type AppendResult struct {
 	Seq Seq
 
 	// IsTerminal mirrors the row's `is_terminal` column (L2 §1.4.1) —
-	// computed from type_registry.terminal_convention + payload at
-	// insert time.
+	// computed from payload.status at insert time (proto-layer0 §2.5.1).
 	IsTerminal bool
 
 	// Deduped reports whether the append matched an existing row by

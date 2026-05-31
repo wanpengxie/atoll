@@ -89,7 +89,6 @@ func TestE2E_ProxyDaemonV2_FullRoundTrip(t *testing.T) {
 					"types":["proxy.echo"],
 					"type_declarations":{"proxy.echo":{
 						"AllowedKinds":["request","response"],
-						"TerminalConvention":"payload_status",
 						"Description":"Echo a payload through the proxy daemon transport"
 					}},
 					"max_pending_ms":30000

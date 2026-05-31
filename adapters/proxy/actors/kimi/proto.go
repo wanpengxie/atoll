@@ -76,9 +76,8 @@ func Declaration(actorID actor.ActorID, maxPendingMs int64) adapter.Declaration 
 func DeclarationTypeDeclarations() map[string]adapter.TypeDeclaration {
 	return map[string]adapter.TypeDeclaration{
 		TypeCommand: {
-			AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-			TerminalConvention: string(adapter.TerminalPayloadStatus),
-			Description:        "Forward a single Kimi WebBridge command to the user's chrome extension.",
+			AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
+			Description:  "Forward a single Kimi WebBridge command to the user's chrome extension.",
 			PayloadExample: json.RawMessage(
 				`{"action":"snapshot","args":{},"session":"kimi"}`,
 			),

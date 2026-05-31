@@ -19,10 +19,9 @@ func TestDeclarationCatalogFromDeclarationCopiesConventionFields(t *testing.T) {
 		SkillDoc:     "Use this actor to publish notes.",
 		TypeDeclarations: map[string]TypeDeclaration{
 			"xhs.publish": {
-				AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-				TerminalConvention: string(TerminalPayloadStatus),
-				Description:        "Publish a note",
-				PayloadExample:     json.RawMessage(`{"title":"hello"}`),
+				AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+				Description:    "Publish a note",
+				PayloadExample: json.RawMessage(`{"title":"hello"}`),
 				PayloadFields: []FieldDoc{{
 					Name:     "title",
 					Required: true,

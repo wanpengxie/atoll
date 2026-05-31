@@ -200,10 +200,9 @@ func TestManagerInstallPersistsDeclarationCatalog(t *testing.T) {
 			SkillDoc:     "Use this actor to send Feishu messages.",
 			TypeDeclarations: map[string]adapter.TypeDeclaration{
 				"feishu.chat.send": {
-					AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-					TerminalConvention: string(adapter.TerminalPayloadStatus),
-					Description:        "Send a chat message",
-					PayloadExample:     json.RawMessage(`{"text":"hello"}`),
+					AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+					Description:    "Send a chat message",
+					PayloadExample: json.RawMessage(`{"text":"hello"}`),
 					PayloadFields: []adapter.FieldDoc{{
 						Name:        "text",
 						Required:    true,
@@ -766,7 +765,6 @@ func TestProxyFacadeReservedDescribeStatusUsesFrameworkState(t *testing.T) {
 		"types":["kimi.ask"],
 		"type_declarations":{"kimi.ask":{
 			"AllowedKinds":["request","response"],
-			"TerminalConvention":"payload_status",
 			"Description":"Ask local Kimi"
 		}},
 		"max_pending_ms":12000
@@ -2059,7 +2057,7 @@ func TestManagerExternalCallbackPanicEmitsReceiverInternalError(t *testing.T) {
 //
 // Level A (proto-layer0 §1.4.1 / proto-layer1 §1.3): payload schema is
 // NOT declared at the protocol layer; TypeDeclaration carries only
-// allowed_kinds + terminal_convention.
+// allowed_kinds.
 func TestManagerInstallRejectsStrictModeGap(t *testing.T) {
 	registry := newMemoryActorRegistry()
 	_ = registry.Insert(context.Background(), actorreg.Record{

@@ -131,21 +131,14 @@ type ErrorDoc struct {
 //
 // TypeDeclaration is OPTIONAL: adapters that omit it for a Types entry
 // fall back to permissive defaults
-// (AllowedKinds={event,request,response}, payload_status terminal
-// convention). Adapters that provide it MUST cover every entry of
-// Declaration.Types — manager.Install fails closed with
-// InstallTypeRegistryInvalid on a partial map.
+// (AllowedKinds={event,request,response}). Adapters that provide it MUST
+// cover every entry of Declaration.Types — manager.Install fails closed
+// with InstallTypeRegistryInvalid on a partial map.
 type TypeDeclaration struct {
 	// AllowedKinds is the closed set of envelope.kind the harness will
 	// accept for this type. Subset of {event, request, response}. When
 	// empty, install uses {event, request, response}.
 	AllowedKinds []message.Kind
-
-	// TerminalConvention controls harness step 8 is_terminal computation
-	// (proto-layer1 §2.8). Either "payload_status" (default) or
-	// "single-response". Empty string is normalised to "payload_status"
-	// at install time.
-	TerminalConvention string
 
 	// Description is optional product-layer convention metadata used by
 	// list_actors / describe_actor / describe_type. Install validation
@@ -195,8 +188,8 @@ type Declaration struct {
 	Types []string
 
 	// TypeDeclarations optionally maps type → TypeDeclaration, supplying
-	// the allowed_kinds + terminal_convention rows the harness loads at
-	// write time. Non-nil opts the adapter into strict mode: every entry
+	// the allowed_kinds rows the harness loads at write time. Non-nil opts
+	// the adapter into strict mode: every entry
 	// of Types MUST have a matching row, otherwise install fails closed
 	// with InstallTypeRegistryInvalid. Nil → permissive defaults for
 	// every type (install logs a warning so the gap is observable).

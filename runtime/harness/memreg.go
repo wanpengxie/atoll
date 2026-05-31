@@ -21,7 +21,7 @@ func NewInMemoryTypeRegistry() *InMemoryTypeRegistry {
 }
 
 // Add upserts a TypeView. Tests use this to seed allowed_kinds /
-// schemas / handler_actor_id / terminal_convention.
+// handler_actor_id / max_pending_ms.
 func (r *InMemoryTypeRegistry) Add(v TypeView) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

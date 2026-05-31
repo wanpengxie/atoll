@@ -333,7 +333,7 @@ func IsResultPassThrough(requestType string) bool {
 }
 
 // ------------------------------------------------------------------
-// TypeDeclarations: per-type allowed_kinds + terminal_convention.
+// TypeDeclarations: per-type allowed_kinds.
 //
 // Source of truth: domain-xhs-spec §1.1–§1.6 ("xhs Adapter Type
 // Catalog"). The framework's Step 5 (kind ∈ allowed_kinds) consults
@@ -360,7 +360,6 @@ func DeclarationTypeDeclarations() map[string]adapter.TypeDeclaration {
 	out := make(map[string]adapter.TypeDeclaration, len(AllTypes))
 	for _, t := range AllTypes {
 		row := typeMeta[t]
-		row.TerminalConvention = string(adapter.TerminalPayloadStatus)
 		if isEventOnlyType(t) {
 			row.AllowedKinds = evKinds
 		} else {

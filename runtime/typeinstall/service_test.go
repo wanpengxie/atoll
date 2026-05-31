@@ -28,12 +28,11 @@ func TestServiceInstallTypeEmitsMirrorEvent(t *testing.T) {
 	svc, reg, msgs := newServiceFixture(t, chID, 12345)
 
 	row := adapter.TypeRow{
-		Type:               "xhs.publish",
-		HandlerActorID:     "tool:xhs",
-		HandlerBinding:     actor.BindingEmbedded,
-		MaxPendingMs:       60_000,
-		AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-		TerminalConvention: adapter.TerminalPayloadStatus,
+		Type:           "xhs.publish",
+		HandlerActorID: "tool:xhs",
+		HandlerBinding: actor.BindingEmbedded,
+		MaxPendingMs:   60_000,
+		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 	}
 	if _, err := svc.InstallType(ctx, row); err != nil {
 		t.Fatalf("InstallType: %v", err)
@@ -443,12 +442,11 @@ func newTypeInstallStoresWithDB(t *testing.T, _ channel.ID, now int64) (*store.A
 
 func typeInstallRow(typeName string) adapter.TypeRow {
 	return adapter.TypeRow{
-		Type:               typeName,
-		HandlerActorID:     "tool:xhs",
-		HandlerBinding:     actor.BindingEmbedded,
-		MaxPendingMs:       60_000,
-		AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-		TerminalConvention: adapter.TerminalPayloadStatus,
+		Type:           typeName,
+		HandlerActorID: "tool:xhs",
+		HandlerBinding: actor.BindingEmbedded,
+		MaxPendingMs:   60_000,
+		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 	}
 }
 

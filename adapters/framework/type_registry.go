@@ -10,19 +10,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// TerminalConvention re-exports kernel/adapter.TerminalConvention so
-// existing framework callers keep their import path. The canonical
-// definition lives in kernel/adapter so runtime/store can implement a
-// sqlite-backed TypeRegistry without taking a dependency on adapters/**.
-type TerminalConvention = adapter.TerminalConvention
-
-// TerminalPayloadStatus / TerminalSingleResponse re-export the kernel
-// closed-set values.
-const (
-	TerminalPayloadStatus  = adapter.TerminalPayloadStatus
-	TerminalSingleResponse = adapter.TerminalSingleResponse
-)
-
 // TypeRow re-exports kernel/adapter.TypeRow.
 type TypeRow = adapter.TypeRow
 

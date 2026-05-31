@@ -160,8 +160,7 @@ func (fakeModule) Declaration() adapter.Declaration {
 		MaxPendingMs: 30_000,
 		TypeDeclarations: map[string]adapter.TypeDeclaration{
 			"fake.echo": {
-				AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-				TerminalConvention: string(adapter.TerminalPayloadStatus),
+				AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
 			},
 		},
 	}

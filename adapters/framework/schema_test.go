@@ -10,17 +10,14 @@ import (
 )
 
 // TestValidateTypeDeclaration_HappyPath asserts the install-time check
-// accepts a TypeDeclaration with non-empty allowed_kinds + a known
-// terminal_convention.
+// accepts a TypeDeclaration with non-empty allowed_kinds.
 //
 // Level A (proto-layer0 §1.4.1 / proto-layer1 §1.3): payload schema is
 // NOT part of TypeDeclaration; install does not validate payload
-// schemas. The validator only enforces allowed_kinds membership +
-// terminal_convention enum.
+// schemas. The validator only enforces allowed_kinds membership.
 func TestValidateTypeDeclaration_HappyPath(t *testing.T) {
 	td := adapter.TypeDeclaration{
-		AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-		TerminalConvention: "payload_status",
+		AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
 	}
 	if err := ValidateTypeDeclaration("biz.x", td); err != nil {
 		t.Errorf("happy path: %v", err)
@@ -29,10 +26,9 @@ func TestValidateTypeDeclaration_HappyPath(t *testing.T) {
 
 func TestValidateTypeDeclaration_AcceptsOptionalConventionFields(t *testing.T) {
 	td := adapter.TypeDeclaration{
-		AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-		TerminalConvention: "payload_status",
-		Description:        "Publish a note",
-		PayloadExample:     json.RawMessage(`{"title":"hello"}`),
+		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		Description:    "Publish a note",
+		PayloadExample: json.RawMessage(`{"title":"hello"}`),
 		PayloadFields: []adapter.FieldDoc{{
 			Name:        "title",
 			Required:    true,
@@ -72,14 +68,6 @@ func TestValidateTypeDeclaration_RejectsBadCases(t *testing.T) {
 			adapter.TypeDeclaration{AllowedKinds: []message.Kind{
 				message.KindEvent, message.KindEvent,
 			}},
-			message.InstallTypeRegistryInvalid,
-		},
-		{
-			"bad-terminal-convention",
-			adapter.TypeDeclaration{
-				AllowedKinds:       []message.Kind{message.KindEvent},
-				TerminalConvention: "weird-mode",
-			},
 			message.InstallTypeRegistryInvalid,
 		},
 	}

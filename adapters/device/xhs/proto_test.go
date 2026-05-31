@@ -115,8 +115,7 @@ func TestCommandWireTypeStable(t *testing.T) {
 // the declaration with InstallTypeRegistryInvalid.
 //
 // Level A (proto-layer0 §1.4.1): TypeDeclaration carries only
-// allowed_kinds + terminal_convention — payload schemas are NOT part
-// of the protocol layer.
+// allowed_kinds — payload schemas are NOT part of the protocol layer.
 func TestDeclarationTypeDeclarationsCoversEveryType(t *testing.T) {
 	decls := DeclarationTypeDeclarations()
 	for _, ty := range AllTypes {
@@ -162,7 +161,7 @@ func TestTypeDeclarationsAllowedKindsSpec(t *testing.T) {
 // TestTypeDeclarationsInstallValidates exercises the framework's
 // install-time validation against the xhs DeclarationTypeDeclarations.
 // Any drift in the closed-set rules (allowed_kinds empty / unknown
-// kind / bad terminal_convention) trips here.
+// kind) trips here.
 func TestTypeDeclarationsInstallValidates(t *testing.T) {
 	decls := DeclarationTypeDeclarations()
 	for ty, td := range decls {

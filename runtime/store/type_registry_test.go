@@ -36,12 +36,11 @@ func TestTypeRegistry_UpsertLookupRoundTrip(t *testing.T) {
 	reg := openChannelDB(t)
 
 	in := adapter.TypeRow{
-		Type:               "xhs.publish",
-		HandlerActorID:     "tool:xhs",
-		HandlerBinding:     actor.BindingEmbedded,
-		MaxPendingMs:       60_000,
-		AllowedKinds:       []message.Kind{message.KindRequest, message.KindResponse},
-		TerminalConvention: adapter.TerminalPayloadStatus,
+		Type:           "xhs.publish",
+		HandlerActorID: "tool:xhs",
+		HandlerBinding: actor.BindingEmbedded,
+		MaxPendingMs:   60_000,
+		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 	}
 
 	persisted, err := reg.Upsert(ctx, in)
@@ -54,9 +53,6 @@ func TestTypeRegistry_UpsertLookupRoundTrip(t *testing.T) {
 	}
 	if persisted.MaxPendingMs != 60_000 {
 		t.Errorf("max_pending_ms=%d want 60000", persisted.MaxPendingMs)
-	}
-	if persisted.TerminalConvention != adapter.TerminalPayloadStatus {
-		t.Errorf("terminal_convention=%q", persisted.TerminalConvention)
 	}
 	if !reflect.DeepEqual(persisted.AllowedKinds, in.AllowedKinds) {
 		t.Errorf("allowed_kinds=%v want %v", persisted.AllowedKinds, in.AllowedKinds)
@@ -76,9 +72,6 @@ func TestTypeRegistry_UpsertLookupRoundTrip(t *testing.T) {
 	}
 	if view.HandlerActorID != "tool:xhs" {
 		t.Errorf("harness view handler_actor_id=%q", view.HandlerActorID)
-	}
-	if view.TerminalConvention != string(adapter.TerminalPayloadStatus) {
-		t.Errorf("harness view terminal=%q", view.TerminalConvention)
 	}
 	if view.MaxPendingMs != 60_000 {
 		t.Errorf("harness view max_pending_ms=%d want 60000", view.MaxPendingMs)
@@ -213,27 +206,5 @@ func TestTypeRegistry_UpsertRejectsReservedNamespace(t *testing.T) {
 		if _, ok, err := reg.Lookup(ctx, typ); err != nil || ok {
 			t.Fatalf("reserved row %s written ok=%v err=%v", typ, ok, err)
 		}
-	}
-}
-
-// TestTypeRegistry_DefaultTerminalConvention ensures empty
-// terminal_convention persists as payload_status (sqlite DEFAULT).
-func TestTypeRegistry_DefaultTerminalConvention(t *testing.T) {
-	ctx := context.Background()
-	reg := openChannelDB(t)
-	if _, err := reg.Upsert(ctx, adapter.TypeRow{
-		Type:           "xhs.publish",
-		HandlerActorID: "tool:xhs",
-		HandlerBinding: actor.BindingEmbedded,
-		MaxPendingMs:   60_000,
-		AllowedKinds:   []message.Kind{message.KindRequest},
-		// TerminalConvention deliberately left empty.
-	}); err != nil {
-		t.Fatalf("Upsert: %v", err)
-	}
-	row, _, _ := reg.Lookup(ctx, "xhs.publish")
-	if row.TerminalConvention != adapter.TerminalPayloadStatus {
-		t.Errorf("empty terminal_convention persisted as %q want payload_status",
-			row.TerminalConvention)
 	}
 }

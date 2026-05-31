@@ -69,8 +69,6 @@ CREATE TABLE IF NOT EXISTS type_registry (
   allowed_kinds            TEXT NOT NULL,
   handler_binding          TEXT NOT NULL
                            CHECK (handler_binding IN ('embedded','runtime_outbound','runtime_inbound_via_relay')),
-  terminal_convention      TEXT NOT NULL DEFAULT 'payload_status'
-                           CHECK (terminal_convention IN ('payload_status','single-response')),
   max_pending_ms           INTEGER,
 	  handler_actor_id         TEXT,
 	  domain                   TEXT,
@@ -86,8 +84,6 @@ CREATE TABLE IF NOT EXISTS type_registry (
 	  allowed_kinds           TEXT NOT NULL,
 	  handler_binding         TEXT NOT NULL
 	                          CHECK (handler_binding IN ('embedded','runtime_outbound','runtime_inbound_via_relay')),
-	  terminal_convention     TEXT NOT NULL DEFAULT 'payload_status'
-	                          CHECK (terminal_convention IN ('payload_status','single-response')),
 	  max_pending_ms          INTEGER,
 	  handler_actor_id        TEXT,
 	  install_status          TEXT NOT NULL DEFAULT 'installing'

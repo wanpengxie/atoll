@@ -13,10 +13,10 @@ import (
 
 // TypeView is the read-only projection of one type_registry row the
 // harness needs at write time. It mirrors the install-time fields the
-// adapter framework writes (allowed_kinds, terminal_convention,
-// handler_actor_id, max_pending_ms) — runtime/harness deliberately
-// keeps the contract minimal so multiple registry implementations
-// (in-memory, sqlite, federation) can fulfill it.
+// adapter framework writes (allowed_kinds, handler_actor_id,
+// max_pending_ms) — runtime/harness deliberately keeps the contract
+// minimal so multiple registry implementations (in-memory, sqlite,
+// federation) can fulfill it.
 //
 // Level A (proto-layer0 §1.4.1 / proto-layer1 §1.3): payload is opaque
 // to the protocol layer; the harness does NOT validate payload schemas
@@ -39,15 +39,6 @@ type TypeView struct {
 	// asserts the explicit audience equals this id
 	// (audience_handler_mismatch).
 	HandlerActorID actor.ActorID
-
-	// TerminalConvention is a legacy type_registry knob retained for
-	// storage compatibility. Since proto-layer0 §2.5.1 reframed
-	// is_terminal as a uniform `(kind == response && payload.status ∈
-	// {completed, failed})` derivation, the harness no longer consults
-	// this field. It survives in TypeView so the type_registry sqlite
-	// row schema stays stable; future cleanups may drop it once the
-	// registry column is retired.
-	TerminalConvention string
 }
 
 // TypeRegistry is the read seam the harness uses to fetch one type_view

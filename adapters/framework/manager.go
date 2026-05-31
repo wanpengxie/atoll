@@ -311,18 +311,12 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 			}
 		}
 
-		conv := td.TerminalConvention
-		if conv == "" {
-			conv = string(TerminalPayloadStatus)
-		}
-
 		row := TypeRow{
-			Type:               t,
-			HandlerActorID:     decl.ActorID,
-			HandlerBinding:     decl.Binding,
-			MaxPendingMs:       decl.MaxPendingMs,
-			AllowedKinds:       append([]message.Kind(nil), td.AllowedKinds...),
-			TerminalConvention: TerminalConvention(conv),
+			Type:           t,
+			HandlerActorID: decl.ActorID,
+			HandlerBinding: decl.Binding,
+			MaxPendingMs:   decl.MaxPendingMs,
+			AllowedKinds:   append([]message.Kind(nil), td.AllowedKinds...),
 		}
 		if row.MaxPendingMs <= 0 {
 			return fmt.Errorf("%w: adapter=%s type=%s",
@@ -331,12 +325,11 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		typeRows = append(typeRows, row)
 	}
 	typeRows = append(typeRows, TypeRow{
-		Type:               orphanCallbackType(decl.Name),
-		HandlerActorID:     decl.ActorID,
-		HandlerBinding:     decl.Binding,
-		MaxPendingMs:       decl.MaxPendingMs,
-		AllowedKinds:       []message.Kind{message.KindEvent},
-		TerminalConvention: TerminalPayloadStatus,
+		Type:           orphanCallbackType(decl.Name),
+		HandlerActorID: decl.ActorID,
+		HandlerBinding: decl.Binding,
+		MaxPendingMs:   decl.MaxPendingMs,
+		AllowedKinds:   []message.Kind{message.KindEvent},
 	})
 
 	// Build framework helpers.

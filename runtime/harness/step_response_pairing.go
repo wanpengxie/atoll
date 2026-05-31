@@ -58,9 +58,7 @@ import (
 //
 //   - is_terminal is computed from the payload.status classification:
 //     Layer 1 → true; Layer 2 / Layer 3 → false. proto-layer0 §2.5.1
-//     replaces the prior type_registry.terminal_convention dispatch —
-//     terminal_convention rows kept in the schema for backward storage
-//     compat but no longer drive harness classification.
+//     defines is_terminal as a uniform payload.status derivation.
 type stepResponsePairing struct {
 	deps Deps
 }
@@ -147,8 +145,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 		}, nil
 	}
 
-	// is_terminal derives purely from the Layer 1 final closed set.
-	// type_registry.terminal_convention rows are no longer consulted —
+	// is_terminal derives purely from the Layer 1 final closed set —
 	// the proto-layer0 §2.5.1 derivation is uniform across all types.
 	env.IsTerminal = statusCls.isFinal
 	return khar.Outcome{}, nil

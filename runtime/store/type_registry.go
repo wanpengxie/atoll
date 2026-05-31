@@ -254,11 +254,6 @@ func (r *TypeRegistry) upsertWithStatusTx(ctx context.Context, tx *sql.Tx, row a
 		return adapter.TypeRow{}, fmt.Errorf("store: type_registry upsert marshal allowed_kinds: %w", err)
 	}
 
-	terminal := row.TerminalConvention
-	if terminal == "" {
-		terminal = adapter.TerminalPayloadStatus
-	}
-
 	var maxPending any
 	if row.MaxPendingMs <= 0 {
 		maxPending = nil
@@ -274,13 +269,12 @@ func (r *TypeRegistry) upsertWithStatusTx(ctx context.Context, tx *sql.Tx, row a
 	}
 
 	const q = `INSERT INTO type_registry
-		(type, allowed_kinds, handler_binding, terminal_convention,
+		(type, allowed_kinds, handler_binding,
 		 max_pending_ms, handler_actor_id, install_status, install_error, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?)
 		ON CONFLICT(type) DO UPDATE SET
 			allowed_kinds            = excluded.allowed_kinds,
 			handler_binding          = excluded.handler_binding,
-			terminal_convention      = excluded.terminal_convention,
 			max_pending_ms           = excluded.max_pending_ms,
 			handler_actor_id         = excluded.handler_actor_id,
 			install_status          = excluded.install_status,
@@ -290,7 +284,6 @@ func (r *TypeRegistry) upsertWithStatusTx(ctx context.Context, tx *sql.Tx, row a
 		row.Type,
 		allowedKinds,
 		string(row.HandlerBinding),
-		string(terminal),
 		maxPending,
 		handler,
 		installStatus,
@@ -323,10 +316,6 @@ func (r *TypeRegistry) insertPendingInstallTx(ctx context.Context, tx *sql.Tx, a
 	if err != nil {
 		return adapter.TypeRow{}, fmt.Errorf("store: type_registry pending marshal allowed_kinds: %w", err)
 	}
-	terminal := row.TerminalConvention
-	if terminal == "" {
-		terminal = adapter.TerminalPayloadStatus
-	}
 	var maxPending any
 	if row.MaxPendingMs <= 0 {
 		maxPending = nil
@@ -342,15 +331,14 @@ func (r *TypeRegistry) insertPendingInstallTx(ctx context.Context, tx *sql.Tx, a
 
 	const q = `INSERT INTO type_registry_pending
 		(install_attempt_id, type, allowed_kinds, handler_binding,
-		 terminal_convention, max_pending_ms, handler_actor_id,
+		 max_pending_ms, handler_actor_id,
 		 install_status, install_error, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?)`
+		VALUES (?,?,?,?,?,?,?,?,?)`
 	if _, err := tx.ExecContext(ctx, q,
 		attemptID,
 		row.Type,
 		allowedKinds,
 		string(row.HandlerBinding),
-		string(terminal),
 		maxPending,
 		handler,
 		TypeInstallStatusInstalling,
@@ -379,7 +367,7 @@ func (r *TypeRegistry) Lookup(ctx context.Context, typeName string) (adapter.Typ
 // by type for deterministic test output.
 func (r *TypeRegistry) List(ctx context.Context) ([]adapter.TypeRow, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
-			                  terminal_convention, max_pending_ms, handler_actor_id
+			                  max_pending_ms, handler_actor_id
 			             FROM type_registry
 			            WHERE install_status='installed'`
 	rows, err := r.db.QueryContext(ctx, q)
@@ -413,11 +401,10 @@ func (r *TypeRegistry) LookupView(ctx context.Context, typeName string) (harness
 		return harness.TypeView{}, ok, err
 	}
 	return harness.TypeView{
-		Type:               row.Type,
-		AllowedKinds:       append([]message.Kind(nil), row.AllowedKinds...),
-		MaxPendingMs:       row.MaxPendingMs,
-		HandlerActorID:     row.HandlerActorID,
-		TerminalConvention: string(row.TerminalConvention),
+		Type:           row.Type,
+		AllowedKinds:   append([]message.Kind(nil), row.AllowedKinds...),
+		MaxPendingMs:   row.MaxPendingMs,
+		HandlerActorID: row.HandlerActorID,
 	}, true, nil
 }
 
@@ -438,7 +425,7 @@ func (a typeRegistryHarnessAdapter) Lookup(ctx context.Context, typeName string)
 
 func (r *TypeRegistry) lookup(ctx context.Context, typeName string) (adapter.TypeRow, bool, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
-		                  terminal_convention, max_pending_ms, handler_actor_id
+		                  max_pending_ms, handler_actor_id
 		             FROM type_registry
 		            WHERE type=? AND install_status='installed'`
 	return r.lookupQuery(ctx, q, typeName)
@@ -446,7 +433,7 @@ func (r *TypeRegistry) lookup(ctx context.Context, typeName string) (adapter.Typ
 
 func (r *TypeRegistry) lookupAnyTx(ctx context.Context, tx *sql.Tx, typeName string) (adapter.TypeRow, bool, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
-			                  terminal_convention, max_pending_ms, handler_actor_id
+			                  max_pending_ms, handler_actor_id
 			             FROM type_registry
 			            WHERE type=?`
 	row, err := scanTypeRowFrom(tx.QueryRowContext(ctx, q, typeName))
@@ -461,7 +448,7 @@ func (r *TypeRegistry) lookupAnyTx(ctx context.Context, tx *sql.Tx, typeName str
 
 func (r *TypeRegistry) lookupInstalledTx(ctx context.Context, tx *sql.Tx, typeName string) (adapter.TypeRow, bool, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
-			                  terminal_convention, max_pending_ms, handler_actor_id
+			                  max_pending_ms, handler_actor_id
 			             FROM type_registry
 			            WHERE type=? AND install_status='installed'`
 	row, err := scanTypeRowFrom(tx.QueryRowContext(ctx, q, typeName))
@@ -476,7 +463,7 @@ func (r *TypeRegistry) lookupInstalledTx(ctx context.Context, tx *sql.Tx, typeNa
 
 func (r *TypeRegistry) lookupPendingAttemptTx(ctx context.Context, tx *sql.Tx, typeName, attemptID, status string) (adapter.TypeRow, bool, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
-			                  terminal_convention, max_pending_ms, handler_actor_id
+			                  max_pending_ms, handler_actor_id
 			             FROM type_registry_pending
 			            WHERE type=? AND install_attempt_id=? AND install_status=?`
 	row, err := scanTypeRowFrom(tx.QueryRowContext(ctx, q, typeName, attemptID, status))
@@ -555,11 +542,11 @@ func scanTypeRowSingle(row *sql.Row) (adapter.TypeRow, error) { return scanTypeR
 
 func scanTypeRowFrom(s typeRowScanner) (adapter.TypeRow, error) {
 	var (
-		typ, allowedRaw, binding, terminal string
-		maxPending                         sql.NullInt64
-		handler                            sql.NullString
+		typ, allowedRaw, binding string
+		maxPending               sql.NullInt64
+		handler                  sql.NullString
 	)
-	if err := s.Scan(&typ, &allowedRaw, &binding, &terminal,
+	if err := s.Scan(&typ, &allowedRaw, &binding,
 		&maxPending, &handler); err != nil {
 		return adapter.TypeRow{}, err
 	}
@@ -568,10 +555,9 @@ func scanTypeRowFrom(s typeRowScanner) (adapter.TypeRow, error) {
 		return adapter.TypeRow{}, fmt.Errorf("store: type_registry scan allowed_kinds %q: %w", typ, err)
 	}
 	row := adapter.TypeRow{
-		Type:               typ,
-		HandlerBinding:     actor.Binding(binding),
-		TerminalConvention: adapter.TerminalConvention(terminal),
-		AllowedKinds:       allowed,
+		Type:           typ,
+		HandlerBinding: actor.Binding(binding),
+		AllowedKinds:   allowed,
 	}
 	if maxPending.Valid {
 		row.MaxPendingMs = maxPending.Int64

@@ -108,7 +108,6 @@ func sameTypeRow(a, b adapter.TypeRow) bool {
 		a.HandlerActorID != b.HandlerActorID ||
 		a.HandlerBinding != b.HandlerBinding ||
 		a.MaxPendingMs != b.MaxPendingMs ||
-		normalizeTerminal(a.TerminalConvention) != normalizeTerminal(b.TerminalConvention) ||
 		len(a.AllowedKinds) != len(b.AllowedKinds) {
 		return false
 	}
@@ -118,13 +117,6 @@ func sameTypeRow(a, b adapter.TypeRow) bool {
 		}
 	}
 	return true
-}
-
-func normalizeTerminal(in adapter.TerminalConvention) adapter.TerminalConvention {
-	if in == "" {
-		return adapter.TerminalPayloadStatus
-	}
-	return in
 }
 
 func (s *Service) RecoverInstalling(ctx context.Context, reason string) (int, error) {
@@ -180,11 +172,6 @@ func validateAllowedKinds(row adapter.TypeRow) error {
 			return &Error{Reason: message.InstallTypeRegistryInvalid, Err: fmt.Errorf("typeinstall: type %q duplicate kind %q", row.Type, k)}
 		}
 		seen[k] = struct{}{}
-	}
-	if row.TerminalConvention != "" &&
-		row.TerminalConvention != adapter.TerminalPayloadStatus &&
-		row.TerminalConvention != adapter.TerminalSingleResponse {
-		return &Error{Reason: message.InstallTypeRegistryInvalid, Err: fmt.Errorf("typeinstall: type %q invalid terminal_convention %q", row.Type, row.TerminalConvention)}
 	}
 	return nil
 }
