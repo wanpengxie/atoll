@@ -702,6 +702,7 @@ func AssembleDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 		resolveTemplate: resolveTemplate,
 	}
 	reconciler.SetEnsureSystemChannelCreatedEvent(d.ensureBootstrapChannelCreatedEvent)
+	reconciler.SetEnsureActorsSeeded(d.ensureBootstrapActorsSeeded)
 
 	if cfg.UseMockBus {
 		d.bus = transit.NewMockBus(64)
@@ -2251,6 +2252,51 @@ func (d *Daemon) ensureBootstrapChannelCreatedEvent(ctx context.Context, channel
 		return fmt.Errorf("channel_lock channel_id=%s want %s", row.ChannelID, channelID)
 	}
 	return d.ensureChannelCreatedEvent(ctx, sqlitePath, lockStore, row)
+}
+
+// ensureBootstrapActorsSeeded is the crash-recovery actor-seed repair hook
+// wired into the Reconciler. It runs when startup recovery finds an
+// in_progress bootstrap row whose channel_lock is already durable — i.e. the
+// daemon crashed somewhere between channel_lock insert and SeedActors in the
+// fresh-bootstrap path (daemon.go handleCreateChannel). Without this, the
+// reconciler would mark such a channel 'completed' with an empty
+// actor_registry, booting a channel that has no system actor.
+//
+// The channel_lock row is the only durable daemon-local record of the
+// channel's fencing tuple + ChannelType, so it is the recovery source of
+// truth. InitialMembers are not recoverable here (the create_channel request
+// is not persisted in bootstrap_registry); they are re-seeded when the server
+// resends create_channel through handleCreateChannel's idempotent replay
+// path. SeedActors with a ChannelType-only request restores the system actor
+// (unconditional) and the template adapter seeds (resolved from ChannelType)
+// — the rows the channel cannot function without. ApplyMemberTransitions is
+// idempotent, so re-running on an already-seeded channel is a no-op.
+func (d *Daemon) ensureBootstrapActorsSeeded(ctx context.Context, channelID channel.ID, workdirPath string) error {
+	sqlitePath := filepath.Join(workdirPath, "channel.sqlite")
+	lockStore, err := d.OpenChannelLock(ctx, sqlitePath)
+	if err != nil {
+		return err
+	}
+	row, ok, err := lockStore.Get(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("channel_lock missing for %s", channelID)
+	}
+	if row.ChannelID == "" {
+		row.ChannelID = channelID
+	}
+	if row.ChannelID != channelID {
+		return fmt.Errorf("channel_lock channel_id=%s want %s", row.ChannelID, channelID)
+	}
+	return d.saga.SeedActors(ctx, channelID, placement.CreateChannelRequest{
+		ChannelID:   channelID,
+		ChannelType: row.ChannelType,
+	}, khlog.FencingTuple{
+		Token: row.FencingToken,
+		Epoch: row.DaemonEpoch,
+	})
 }
 
 // lookupBootstrapRequestID returns the create_request_id that originally

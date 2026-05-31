@@ -30,6 +30,7 @@ type Reconciler struct {
 	daemonDB           *sql.DB
 	nowFn              func() int64
 	ensureCreatedEvent func(context.Context, channel.ID, string) error
+	ensureActorsSeeded func(context.Context, channel.ID, string) error
 
 	mu           sync.Mutex
 	heldAccepted map[channel.ID]int64  // channel_id -> confirmed_at
@@ -75,6 +76,29 @@ func (r *Reconciler) SetEnsureSystemChannelCreatedEvent(fn func(context.Context,
 		return
 	}
 	r.ensureCreatedEvent = fn
+}
+
+// SetEnsureActorsSeeded wires the idempotent actor-seed repair hook used when
+// crash recovery finds channel_lock already durable. A daemon can crash after
+// inserting channel_lock but before SeedActors (daemon.go fresh-bootstrap
+// path), leaving a channel that has its Layer 0 lock + created event yet no
+// system / template actor rows in actor_registry. Marking such a channel
+// 'completed' without this repair would boot a half-seeded channel as if it
+// were complete (the channel would have no system actor — breaking every
+// system-sender envelope, F3 timer, and member fan-out).
+//
+// The hook reconstructs the channel's fencing tuple + ChannelType from the
+// durable channel_lock row and re-runs SeedActors idempotently. Initial
+// members are not recoverable from daemon-local state (the server's
+// create_channel request is not persisted in bootstrap_registry); they are
+// re-seeded when the server resends create_channel through the idempotent
+// replay path. The system actor and template adapter seeds — the rows
+// required for the channel to function at all — are always restored here.
+func (r *Reconciler) SetEnsureActorsSeeded(fn func(context.Context, channel.ID, string) error) {
+	if r == nil {
+		return
+	}
+	r.ensureActorsSeeded = fn
 }
 
 // AcceptHeldChannel records that the server accepted ownership of channelID
@@ -187,6 +211,15 @@ func (r *Reconciler) Run(ctx context.Context) ([]RolledBack, error) {
 						}
 						continue
 					}
+					return nil, err
+				}
+			}
+			// Repair the initial-actor facts before marking completed: the
+			// daemon may have crashed after writing channel_lock but before
+			// SeedActors, leaving a channel with no system / template actor
+			// rows. Idempotent — already-active rows register no second fact.
+			if r.ensureActorsSeeded != nil {
+				if err := r.ensureActorsSeeded(ctx, rb.ChannelID, rb.WorkdirPath); err != nil {
 					return nil, err
 				}
 			}

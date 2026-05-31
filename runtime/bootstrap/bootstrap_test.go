@@ -421,6 +421,126 @@ func TestReconcile_IdempotentEmit_NoOpIfEventAlreadyEmitted(t *testing.T) {
 	}
 }
 
+// TestReconcile_LockWrittenButActorsMissing_SeedsBeforeCompleted covers the
+// crash window between channel_lock insert and SeedActors in the
+// fresh-bootstrap path: the channel has its lock (so it is recovery-kept, not
+// rolled back) but an empty actor_registry. Recovery must re-seed actors —
+// at minimum the system actor — before marking the bootstrap completed, or it
+// would boot a half-seeded channel with no system actor.
+func TestReconcile_LockWrittenButActorsMissing_SeedsBeforeCompleted(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	channelsDir := filepath.Join(root, "channels")
+	daemonDB, _ := store.OpenDaemon(ctx, filepath.Join(root, "daemon.sqlite"), store.OpenOptions{})
+	defer func() { _ = daemonDB.Close() }()
+
+	channelDir, chDB := createLockedChannel(t, ctx, root, "actors-missing")
+	// Layer 0 created event is present (event repair already ran / not the
+	// crash point under test); only the actor rows are missing.
+	if err := appendSystemChannelCreated(ctx, channelDir, "actors-missing"); err != nil {
+		t.Fatal(err)
+	}
+	// Precondition: the channel has its lock but NO system actor row yet.
+	if _, ok, _ := store.NewActorRegistry(chDB).Lookup(ctx, actor.SystemActorID); ok {
+		t.Fatal("precondition failed: system actor already present before recovery")
+	}
+	_ = chDB.Close()
+
+	if _, err := daemonDB.ExecContext(ctx, `INSERT INTO bootstrap_registry
+		(create_request_id, channel_id, status, phase, workdir_path, started_at)
+		VALUES (?, ?, 'in_progress', 'partial_takeover', ?, ?)`,
+		"req-actors-missing", "actors-missing", channelDir, now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wire the seed hook to a real Saga — the production wiring (daemon.go
+	// ensureBootstrapActorsSeeded delegates to Saga.SeedActors, reconstructing
+	// the fencing tuple + ChannelType from the durable channel_lock row).
+	saga, err := bootstrap.NewSaga(bootstrap.SagaConfig{
+		DaemonDB: daemonDB, ChannelsDir: channelsDir, NowFn: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := bootstrap.NewReconciler(daemonDB, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.SetEnsureSystemChannelCreatedEvent(func(ctx context.Context, channelID channel.ID, workdirPath string) error {
+		return appendSystemChannelCreated(ctx, workdirPath, channelID)
+	})
+	seedRanBeforeCompleted := false
+	rec.SetEnsureActorsSeeded(func(ctx context.Context, channelID channel.ID, workdirPath string) error {
+		var status string
+		if err := daemonDB.QueryRowContext(ctx, `SELECT status FROM bootstrap_registry WHERE create_request_id=?`,
+			"req-actors-missing").Scan(&status); err != nil {
+			return err
+		}
+		if status != "in_progress" {
+			t.Fatalf("seed hook ran after completion: status=%q", status)
+		}
+		seedRanBeforeCompleted = true
+		sqlitePath := filepath.Join(workdirPath, "channel.sqlite")
+		db, err := store.OpenChannel(ctx, sqlitePath, store.OpenOptions{SkipDDL: true})
+		if err != nil {
+			return err
+		}
+		defer func() { _ = db.Close() }()
+		row, ok, err := store.NewChannelLock(db).Get(ctx)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return os.ErrNotExist
+		}
+		return saga.SeedActors(ctx, channelID, placement.CreateChannelRequest{
+			ChannelID:   channelID,
+			ChannelType: row.ChannelType,
+		}, khlog.FencingTuple{Token: row.FencingToken, Epoch: row.DaemonEpoch})
+	})
+
+	rolled, err := rec.Run(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rolled) != 0 {
+		t.Fatalf("rolled=%+v want none (locked channel is recovery-kept)", rolled)
+	}
+	if !seedRanBeforeCompleted {
+		t.Fatal("seed hook was not called during recovery")
+	}
+
+	// Bootstrap is completed.
+	var status, phase string
+	if err := daemonDB.QueryRowContext(ctx, `SELECT status, phase FROM bootstrap_registry WHERE create_request_id=?`,
+		"req-actors-missing").Scan(&status, &phase); err != nil {
+		t.Fatal(err)
+	}
+	if status != "completed" || phase != "completed" {
+		t.Fatalf("registry status=%q phase=%q want completed/completed", status, phase)
+	}
+
+	// The system actor row now exists with exactly one registered fact.
+	reDB, err := store.OpenChannel(ctx, filepath.Join(channelDir, "channel.sqlite"), store.OpenOptions{SkipDDL: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reDB.Close() }()
+	if _, ok, _ := store.NewActorRegistry(reDB).Lookup(ctx, actor.SystemActorID); !ok {
+		t.Fatal("system actor missing after recovery — half-seeded channel booted as completed")
+	}
+	var n int
+	if err := reDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM messages WHERE type='system.actor.registered' AND id LIKE ?`,
+		"system.actor.registered:"+actor.SystemActorID+":%",
+	).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("system actor registered fact count=%d want 1", n)
+	}
+}
+
 func createLockedChannel(t *testing.T, ctx context.Context, root, id string) (string, *sql.DB) {
 	t.Helper()
 	channelDir := filepath.Join(root, "channels", id)
