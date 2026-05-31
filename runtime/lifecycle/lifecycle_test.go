@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -359,4 +361,27 @@ func TestUnloader(t *testing.T) {
 	if err := u.Unload(context.Background(), "ch-1", lifecycle.UnloadIdle); err != nil {
 		t.Errorf("idempotent unload err: %v", err)
 	}
+}
+
+// TestUnloaderConcurrent drives Register + Unload from many goroutines so the
+// race detector can flag unsynchronized closeFns access. Register (channel
+// load) and Unload (shutdown drain / stale / orphan handlers) genuinely run on
+// separate goroutines in the daemon.
+func TestUnloaderConcurrent(t *testing.T) {
+	u := lifecycle.NewUnloader()
+	const goroutines = 16
+	const iters = 200
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < iters; i++ {
+				chID := channel.ID(fmt.Sprintf("ch-%d", (g+i)%4))
+				u.Register(chID, func() error { return nil })
+				_ = u.Unload(context.Background(), chID, lifecycle.UnloadIdle)
+			}
+		}(g)
+	}
+	wg.Wait()
 }
