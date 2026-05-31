@@ -12,6 +12,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/store"
 )
@@ -142,66 +143,23 @@ func (s *Saga) Bootstrap(
 		return "", fmt.Errorf("bootstrap: mkdir %s: %w", channelDir, err)
 	}
 
-	// Step 3 — open channel sqlite (DDL runs on first open).
+	// Step 3 — open channel sqlite (DDL runs on first open). Actor rows
+	// (system / initial members / adapter seeds) are NOT inserted here:
+	// they are registered together with their system.actor.registered fact
+	// by SeedActors, which the daemon invokes once the channel_lock fencing
+	// tuple exists. Opening the DB here keeps DDL creation in Bootstrap so
+	// the lock store the daemon opens next finds the schema in place.
 	channelDB, err := store.OpenChannel(ctx, sqlitePath, store.OpenOptions{})
 	if err != nil {
 		return "", fmt.Errorf("bootstrap: open sqlite %s: %w", sqlitePath, err)
 	}
-	defer func() { _ = channelDB.Close() }()
-
-	// Step 4 — register system actor.
-	reg := store.NewActorRegistry(channelDB)
-	if err := s.insertActorIfMissing(ctx, reg, actorreg.Record{
-		ID:        actor.SystemActorID,
-		Kind:      actor.KindSystem,
-		Binding:   "",
-		CreatedAt: s.nowFn(),
-	}); err != nil {
-		return "", fmt.Errorf("bootstrap: insert system actor: %w", err)
-	}
-
-	// Step 5 — initial members.
-	for _, m := range req.InitialMembers {
-		if m.MemberActorID == "" {
-			continue
-		}
-		kind := actor.KindHuman
-		if m.Kind != "" {
-			kind = m.Kind
-		}
-		if err := s.insertActorIfMissing(ctx, reg, actorreg.Record{
-			ID:          m.MemberActorID,
-			Kind:        kind,
-			DisplayName: m.DisplayName,
-			CreatedAt:   s.nowFn(),
-		}); err != nil {
-			return "", fmt.Errorf("bootstrap: insert member %s: %w", m.MemberActorID, err)
-		}
-	}
+	_ = channelDB.Close()
 
 	// Resolve the per-channel template once. A nil resolver means generic
 	// channels with no extra actors or workdir subdirectories.
 	tpl := TemplateView{}
 	if s.resolveTemplate != nil {
 		tpl = s.resolveTemplate(req.ChannelType)
-	}
-
-	// Step 5b — adapter actor seeds (M1.6-T2 ChannelTemplate). The
-	// framework.Manager Install path will fail later if a declared
-	// adapter actor is missing from actor_registry; seeding here keeps
-	// channel bootstrap + adapter install atomic from the operator's
-	// point of view.
-	for _, seed := range tpl.AdapterActorSeeds {
-		if seed.ID == "" {
-			continue
-		}
-		rec := seed
-		if rec.CreatedAt == 0 {
-			rec.CreatedAt = s.nowFn()
-		}
-		if err := s.insertActorIfMissing(ctx, reg, rec); err != nil {
-			return "", fmt.Errorf("bootstrap: insert adapter seed %s: %w", seed.ID, err)
-		}
 	}
 
 	// Step 5c — template-declared workdir subdirectories (M1.6-T5
@@ -232,6 +190,84 @@ func (s *Saga) Bootstrap(
 	return sqlitePath, nil
 }
 
+// SeedActors registers the channel's initial actors (system actor, initial
+// members, template adapter seeds) AND appends their system.actor.registered
+// facts in one fenced, idempotent path (推论5 / §4 事实完整性). It runs after
+// the daemon has written channel_lock — the fencing tuple it requires — so the
+// fact append and the actor_registry row land in the same transaction via
+// ApplyMemberTransitions. There is no separate "write row, then backfill fact"
+// step: registration and fact are a single source of truth.
+//
+// Idempotent on every entry path: ApplyMemberTransitions treats an already-active
+// row as a no-op (no second fact), so a create retry / crash-replay that re-runs
+// SeedActors converges without duplicating facts.
+func (s *Saga) SeedActors(
+	ctx context.Context,
+	channelID channel.ID,
+	req placement.CreateChannelRequest,
+	fencing klog.FencingTuple,
+) error {
+	sqlitePath := filepath.Join(s.channelsDir, string(channelID), "channel.sqlite")
+	channelDB, err := store.OpenChannel(ctx, sqlitePath, store.OpenOptions{SkipDDL: true})
+	if err != nil {
+		return fmt.Errorf("bootstrap: seed actors open sqlite %s: %w", sqlitePath, err)
+	}
+	defer func() { _ = channelDB.Close() }()
+	reg := store.NewActorRegistry(channelDB)
+
+	now := s.nowFn()
+	adds := make([]store.MemberActorAdd, 0, len(req.InitialMembers)+4)
+
+	// System actor.
+	adds = append(adds, store.MemberActorAdd{
+		ID:   actor.SystemActorID,
+		Kind: actor.KindSystem,
+		At:   now,
+	})
+
+	// Initial members.
+	for _, m := range req.InitialMembers {
+		if m.MemberActorID == "" {
+			continue
+		}
+		kind := actor.KindHuman
+		if m.Kind != "" {
+			kind = m.Kind
+		}
+		adds = append(adds, store.MemberActorAdd{
+			ID:          m.MemberActorID,
+			Kind:        kind,
+			DisplayName: m.DisplayName,
+			At:          now,
+		})
+	}
+
+	// Template adapter actor seeds. framework.Manager.Install fails later if
+	// a declared adapter actor is missing from actor_registry; registering
+	// here keeps channel bootstrap + adapter install atomic.
+	tpl := TemplateView{}
+	if s.resolveTemplate != nil {
+		tpl = s.resolveTemplate(req.ChannelType)
+	}
+	for _, seed := range tpl.AdapterActorSeeds {
+		if seed.ID == "" {
+			continue
+		}
+		adds = append(adds, store.MemberActorAdd{
+			ID:          seed.ID,
+			Kind:        seed.Kind,
+			Binding:     seed.Binding,
+			DisplayName: seed.DisplayName,
+			At:          now,
+		})
+	}
+
+	if err := reg.ApplyMemberTransitions(ctx, channelID, adds, nil, fencing); err != nil {
+		return fmt.Errorf("bootstrap: seed actors %s: %w", channelID, err)
+	}
+	return nil
+}
+
 // Complete marks a create request completed after the caller has durably
 // inserted channel_lock. Keeping completion after lock insertion eliminates
 // the completed-without-lock crash window while preserving Saga's ownership
@@ -257,24 +293,6 @@ func (s *Saga) MarkPhase(ctx context.Context, createReq string, phase Phase) err
 		return fmt.Errorf("bootstrap: registry phase: %w", err)
 	}
 	return nil
-}
-
-func (s *Saga) insertActorIfMissing(ctx context.Context, reg *store.ActorRegistry, rec actorreg.Record) error {
-	if rec.ID == "" {
-		return nil
-	}
-	existing, ok, err := reg.Lookup(ctx, rec.ID)
-	if err != nil {
-		return err
-	}
-	if ok {
-		if existing.Kind != rec.Kind || existing.Binding != rec.Binding {
-			return fmt.Errorf("actor %s exists with kind=%s binding=%s, want kind=%s binding=%s",
-				rec.ID, existing.Kind, existing.Binding, rec.Kind, rec.Binding)
-		}
-		return nil
-	}
-	return reg.Insert(ctx, rec)
 }
 
 func (s *Saga) insertRegistry(ctx context.Context, createReq string, channelID channel.ID, workdir string) error {

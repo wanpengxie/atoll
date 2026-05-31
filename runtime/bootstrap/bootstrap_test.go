@@ -69,6 +69,47 @@ func TestSaga_Bootstrap(t *testing.T) {
 	if status != "in_progress" || phase != "sent" {
 		t.Errorf("bootstrap_registry status=%q phase=%q", status, phase)
 	}
+	// The caller writes channel_lock (the fencing tuple), then SeedActors
+	// registers the initial actors AND appends their system.actor.registered
+	// facts in one fenced, idempotent path — no separate backfill.
+	chDB, err := store.OpenChannel(ctx, path, store.OpenOptions{SkipDDL: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = chDB.Close() }()
+	lock := store.NewChannelLock(chDB)
+	if err := lock.Insert(ctx, store.ChannelLockRow{
+		ChannelID:    "ch-1",
+		FencingToken: "ft-1",
+		OwnerEpoch:   1,
+		DaemonID:     "daemon-1",
+		DaemonEpoch:  7,
+		AcquiredAt:   now(),
+		RefreshedAt:  now(),
+	}); err != nil {
+		t.Fatalf("lock insert: %v", err)
+	}
+	fencing := khlog.FencingTuple{Token: "ft-1", Epoch: 7}
+	if err := saga.SeedActors(ctx, channel.ID("ch-1"), placement.CreateChannelRequest{
+		ChannelID:       "ch-1",
+		CreateRequestID: "req-001",
+		InitialMembers: []placement.InitialMember{
+			{MemberActorID: "user:alice", Kind: "human", DisplayName: "Alice"},
+		},
+	}, fencing); err != nil {
+		t.Fatalf("SeedActors: %v", err)
+	}
+	// SeedActors is idempotent — a re-run (crash-replay) is a no-op.
+	if err := saga.SeedActors(ctx, channel.ID("ch-1"), placement.CreateChannelRequest{
+		ChannelID:       "ch-1",
+		CreateRequestID: "req-001",
+		InitialMembers: []placement.InitialMember{
+			{MemberActorID: "user:alice", Kind: "human", DisplayName: "Alice"},
+		},
+	}, fencing); err != nil {
+		t.Fatalf("SeedActors (idempotent re-run): %v", err)
+	}
+
 	if err := saga.Complete(ctx, "req-001"); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -83,17 +124,26 @@ func TestSaga_Bootstrap(t *testing.T) {
 	}
 
 	// Channel sqlite has system + alice in actor_registry.
-	chDB, err := store.OpenChannel(ctx, path, store.OpenOptions{SkipDDL: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = chDB.Close() }()
 	reg := store.NewActorRegistry(chDB)
 	if _, ok, _ := reg.Lookup(ctx, "system"); !ok {
 		t.Error("system actor missing")
 	}
 	if _, ok, _ := reg.Lookup(ctx, "user:alice"); !ok {
 		t.Error("alice actor missing")
+	}
+	// Each registration appended exactly one system.actor.registered fact
+	// (idempotent re-run did not duplicate).
+	for _, id := range []string{"system", "user:alice"} {
+		var n int
+		if err := chDB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM messages WHERE type='system.actor.registered' AND id LIKE ?`,
+			"system.actor.registered:"+id+":%",
+		).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Errorf("actor %q registered fact count=%d want 1", id, n)
+		}
 	}
 }
 

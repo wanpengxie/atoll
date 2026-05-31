@@ -122,6 +122,16 @@ type DaemonConfig struct {
 	// the channel is not added to the active map.
 	OnChannelBoot func(ctx context.Context, h ChannelHooks) (teardown func(context.Context) error, err error)
 
+	// ProxyCapabilityValidator fail-fast validates a proxy actor's
+	// capability_set BEFORE the update_members transaction commits. cmd/daemon
+	// wires it to a proxy_facade-backed check (DeclarationFromCapability + New)
+	// so an empty/incomplete capability_set is rejected at the source rather
+	// than committing an actor row + system.actor.registered fact that the
+	// Reconciler can only fail on after the fact. Returning an error rejects
+	// the whole update_members frame (no row, no fact). May be nil — runtime
+	// then skips the check (tests / channels with no adapter framework).
+	ProxyCapabilityValidator func(actorID actor.ActorID, capability json.RawMessage) error
+
 	// Logger receives daemon lifecycle + transport supervisor events.
 	// When nil a no-op zerolog.Nop() is used so legacy callers and tests
 	// keep compiling unchanged. Production wiring (cmd/daemon) supplies
@@ -1354,31 +1364,33 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 //     registers a handler that ticks the counter AND calls
 //     bridge.OnTrigger so the trigger envelope reaches a real worker.
 func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) error {
-	_, ok, err := cr.registry.Lookup(ctx, cr.channelAgentID)
-	if err != nil {
-		return fmt.Errorf("runtime: ensure channel-agent lookup %s: %w", cr.channelID, err)
-	}
-	if !ok {
-		if err := cr.registry.Insert(ctx, actorreg.Record{
-			ID:          cr.channelAgentID,
-			Kind:        actor.KindAgent,
-			DisplayName: channelAgentDisplayName,
-			CreatedAt:   d.cfg.NowFn(),
-		}); err != nil {
-			return fmt.Errorf("runtime: ensure channel-agent insert %s: %w", cr.channelID, err)
-		}
-	}
-
 	// Lock snapshot for fencing. Use the in-process channel lock row;
 	// bootChannel guarantees this row is current (cold-start phase 2
 	// already refreshed daemon_epoch; hot OnCreateChannel inserts the
-	// row in the same tx as the saga).
+	// row in the same tx as the saga). Fetched first so the channel-agent
+	// registration below can append its fact under the same tuple.
 	lockRow, lockOK, err := cr.lock.Get(ctx)
 	if err != nil {
 		return fmt.Errorf("runtime: ensure channel-agent lock get %s: %w", cr.channelID, err)
 	}
 	if !lockOK {
 		return fmt.Errorf("runtime: ensure channel-agent missing lock %s", cr.channelID)
+	}
+
+	// 推论5 / §4 事实完整性 — register the per-channel agent target AND append
+	// its system.actor.registered fact in one fenced, idempotent path. An
+	// already-active row registers no second fact, so re-running ensureChannelAgent
+	// on every cold-start / hot create converges without duplicating facts.
+	if err := cr.registry.ApplyMemberTransitions(ctx, cr.channelID, []store.MemberActorAdd{{
+		ID:          cr.channelAgentID,
+		Kind:        actor.KindAgent,
+		DisplayName: channelAgentDisplayName,
+		At:          d.cfg.NowFn(),
+	}}, nil, khlog.FencingTuple{
+		Token: lockRow.FencingToken,
+		Epoch: lockRow.DaemonEpoch,
+	}); err != nil {
+		return fmt.Errorf("runtime: ensure channel-agent register %s: %w", cr.channelID, err)
 	}
 
 	// P4 wire: build bridge when a spawner is configured. Otherwise
@@ -1647,29 +1659,6 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel, sta
 	if err := d.ensureChannelAgent(ctx, cr); err != nil {
 		d.deleteChannel(lc.ChannelID)
 		return err
-	}
-
-	// 推论5 / §4 事实完整性 — backfill system.actor.registered facts for
-	// any active actor_registry row born through a direct-write path
-	// (bootstrap saga seeds / initial members / channel-agent / channels
-	// created before facts carried full data) so membership is a
-	// projection-of-record replayable from the channel log alone. Runs
-	// after ensureChannelAgent (its row is now present) and after the
-	// seq-1 system.channel.created event the create path already wrote, so
-	// the backfilled facts never contend for seq 1. Idempotent: re-runs on
-	// cold-start / reclaim skip actors that already have a fact, giving the
-	// durable兜底 (§5) for commits whose follow-up reconcile was lost.
-	if lockRow, lockOK, lockErr := cr.lock.Get(ctx); lockErr != nil {
-		d.deleteChannel(lc.ChannelID)
-		return fmt.Errorf("runtime: backfill registered facts lock %s: %w", lc.ChannelID, lockErr)
-	} else if lockOK {
-		if err := cr.registry.BackfillRegisteredFacts(ctx, lc.ChannelID, khlog.FencingTuple{
-			Token: lockRow.FencingToken,
-			Epoch: lockRow.DaemonEpoch,
-		}); err != nil {
-			d.deleteChannel(lc.ChannelID)
-			return fmt.Errorf("runtime: backfill registered facts %s: %w", lc.ChannelID, err)
-		}
 	}
 
 	// M1.6-T2 — OnChannelBoot hook lets cmd/daemon wire the adapter
@@ -1975,6 +1964,15 @@ func (d *Daemon) handleCreateChannel(
 			if err := d.ensureChannelCreatedEvent(ctx, sqlitePath, existingLock, row); err != nil {
 				return reject(fmt.Sprintf("channel created event: %v", err))
 			}
+			// Repair the initial-actor facts if the daemon crashed after
+			// writing channel_lock but before SeedActors. Idempotent: rows
+			// already active register no second fact.
+			if err := d.saga.SeedActors(ctx, req.ChannelID, req, khlog.FencingTuple{
+				Token: row.FencingToken,
+				Epoch: row.DaemonEpoch,
+			}); err != nil {
+				return reject(fmt.Sprintf("seed actors: %v", err))
+			}
 			if err := d.saga.Complete(ctx, string(req.CreateRequestID)); err != nil {
 				return reject(fmt.Sprintf("bootstrap complete: %v", err))
 			}
@@ -2042,6 +2040,17 @@ func (d *Daemon) handleCreateChannel(
 		ChannelType:  req.ChannelType,
 	}); err != nil {
 		return reject(fmt.Sprintf("channel created event: %v", err))
+	}
+	// 推论5 / §4 事实完整性 — register the channel's initial actors (system /
+	// initial members / template adapter seeds) together with their
+	// system.actor.registered facts now that channel_lock (the fencing tuple)
+	// is durable. Single fenced+idempotent path: row + fact in one tx, no
+	// separate backfill. Crash-replay re-runs this no-op-on-active.
+	if err := d.saga.SeedActors(ctx, req.ChannelID, req, khlog.FencingTuple{
+		Token: fencingToken,
+		Epoch: placement.DaemonEpoch(d.cfg.DaemonEpoch),
+	}); err != nil {
+		return reject(fmt.Sprintf("seed actors: %v", err))
 	}
 	if err := d.saga.Complete(ctx, string(req.CreateRequestID)); err != nil {
 		return reject(fmt.Sprintf("bootstrap complete: %v", err))
@@ -2467,6 +2476,24 @@ func (d *Daemon) handleUpdateMembers(
 			CapabilitySet: add.CapabilitySet,
 		})
 	}
+	// Fail-fast: a runtime_inbound_via_relay proxy actor must carry a
+	// capability_set that constructs a valid facade BEFORE we commit its row +
+	// system.actor.registered fact. Otherwise the commit succeeds and only the
+	// Reconciler later fails — and a retry with a complete capability would be
+	// swallowed as an active duplicate, freezing the broken fact. Reject the
+	// whole frame at the source instead.
+	if d.cfg.ProxyCapabilityValidator != nil {
+		for _, add := range adds {
+			if add.Kind != actor.KindTool || add.Binding != actor.BindingRuntimeInboundViaRelay {
+				continue
+			}
+			if err := d.cfg.ProxyCapabilityValidator(add.ID, add.CapabilitySet); err != nil {
+				ack.RejectReason = "update_members_invalid_capability"
+				ack.RejectDetail = fmt.Sprintf("actor %s: %v", add.ID, err)
+				return ack
+			}
+		}
+	}
 	removes := make([]store.MemberActorRemove, 0, len(body.Removes))
 	for _, id := range body.Removes {
 		if id != "" {
@@ -2481,7 +2508,15 @@ func (d *Daemon) handleUpdateMembers(
 		ack.RejectDetail = err.Error()
 		return ack
 	}
-	if hasProxyActorUpdate(body) {
+	// Any membership change that can affect proxy facade wiring must trigger a
+	// reconcile. Adds matter only when they introduce a proxy actor, but a
+	// removal of ANY actor must reconcile too: NotifyProxyDaemonOffline sends a
+	// removes-only frame, and without a reconcile the live Deliverer handler /
+	// deviceRoute keeps a stale facade reachable until the 60s resync. The
+	// callback is body-agnostic (it derives desired wiring from facts and is
+	// idempotent), so triggering on any removal is cheap and collapses the
+	// stale facade immediately.
+	if hasProxyActorUpdate(body) || len(body.Removes) > 0 {
 		cb, _ := cr.proxyActorCallback.Load().(func(context.Context, daemonbus.UpdateMembersBody) error)
 		if cb != nil {
 			if err := cb(ctx, body); err != nil {

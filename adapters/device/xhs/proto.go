@@ -12,6 +12,33 @@ import (
 // to route Manager.OnExternalCallback to this Module.
 const AdapterName = "xhs"
 
+// ContractDeclaration builds the static adapter.Declaration from the xhs
+// domain contract (description / skill doc / type catalog / binding).
+// Production cloud daemon installs tool:xhs dynamically via the proxy
+// facade, so there is no in-daemon installable Module — the proxy daemon
+// composes its actorapi Declaration from this pure contract.
+//
+// actorID defaults to DefaultAdapterActorID when empty; maxPendingMs
+// defaults to DefaultMaxPendingMs when non-positive.
+func ContractDeclaration(actorID actor.ActorID, maxPendingMs int64) adapter.Declaration {
+	if actorID == "" {
+		actorID = DefaultAdapterActorID
+	}
+	if maxPendingMs <= 0 {
+		maxPendingMs = DefaultMaxPendingMs
+	}
+	return adapter.Declaration{
+		Description:      actorDescription,
+		SkillDoc:         actorSkillDoc,
+		Name:             AdapterName,
+		ActorID:          actorID,
+		Types:            append([]string{}, AllTypes...),
+		TypeDeclarations: DeclarationTypeDeclarations(),
+		Binding:          Binding,
+		MaxPendingMs:     maxPendingMs,
+	}
+}
+
 // DefaultAdapterActorID is the canonical actor_registry id exposed by the
 // proxy daemon for the xhs actor. Cloud daemon production installs this
 // actor through proxy facade, not through a static daemon-side xhs adapter.
@@ -155,8 +182,8 @@ var typeToWireCmd = map[string]string{
 
 // WireCmdFor returns the extension-facing `cmd` value for a given
 // adapter type. Returns the bare suffix as a fail-open default when the
-// type is unknown — buildCommand still emits a Command, and the
-// extension will surface `not_implemented` if the cmd is unregistered.
+// type is unknown — the proxy still emits a Command, and the extension
+// will surface `not_implemented` if the cmd is unregistered.
 func WireCmdFor(envelopeType string) string {
 	if v, ok := typeToWireCmd[envelopeType]; ok {
 		return v
@@ -298,8 +325,9 @@ var passThroughResultTypes = map[string]bool{
 	TypeGetTrendingTopics:  true,
 }
 
-// IsResultPassThrough reports whether buildRespondPayload should bypass
-// resultAllowListFor for this type and copy the whole result object.
+// IsResultPassThrough reports whether the callback→response mapping
+// should bypass resultAllowListFor for this type and copy the whole
+// result object.
 func IsResultPassThrough(requestType string) bool {
 	return passThroughResultTypes[requestType]
 }

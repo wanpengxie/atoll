@@ -54,25 +54,19 @@ function statusLabel(hostedActor, online, channelID) {
     hostedActor.ReadinessCheckedAt ||
     0
   );
-  const actorReady =
-    hostedActor.actor_readiness_ready === true ||
-    hostedActor.actorReadinessReady === true ||
-    hostedActor.ActorReadinessReady === true ||
-    hostedActor.ready === true ||
-    hostedActor.Ready === true ||
-    readyState === 'ready';
   const routeActive = routeActiveFor(hostedActor, channelID);
   const facadeReady = facadeInstalled(hostedActor);
   const facadeState = facadeStateOf(hostedActor);
   const facadeDetail = hostedActor.facade_detail || hostedActor.facadeDetail || hostedActor.FacadeDetail || '';
-  // callable is the server-side realtime derivation (daemon heartbeat fresh ∧
-  // route ∧ facade ∧ ready), per channel-lifecycle-reconcile §4/§6 step4. The
-  // browser MUST NOT re-derive it from the persisted facade_state/ready_state
-  // display cache — those are stale-able and the server already collapses
-  // callable when the daemon heartbeat lapses. We only read the cached fields
-  // below to pick a human-readable reason for the *not*-callable case.
-  const callable = hostedActor.callable === true || hostedActor.Callable === true;
-  if (callable) {
+  // A7 去双语义: display_callable_hint is a server display hint (heartbeat-fresh
+  // ∧ route ∧ facade ∧ ready projection), NOT the authoritative callable signal.
+  // The browser MUST NOT re-derive callability from the persisted
+  // facade_state/ready_state caches — it only reads the hint for the chip, and
+  // the cached fields below merely pick a human-readable reason for the
+  // not-hinted case. Authoritative callability is the realtime actor.status
+  // envelope, resolved at dispatch time, not in this list view.
+  const callableHint = hostedActor.display_callable_hint === true || hostedActor.displayCallableHint === true || hostedActor.DisplayCallableHint === true;
+  if (callableHint) {
     return {
       state: 'ready',
       label: '可调用',

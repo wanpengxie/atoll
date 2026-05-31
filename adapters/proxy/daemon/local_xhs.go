@@ -57,17 +57,7 @@ func (m *XHSLocalModule) ActorID() actor.ActorID {
 }
 
 func (m *XHSLocalModule) Declaration() adapter.Declaration {
-	mod, err := devicexhs.New(devicexhs.Config{AdapterActorID: m.ActorID()})
-	if err != nil {
-		return adapter.Declaration{
-			Name:         devicexhs.AdapterName,
-			ActorID:      m.ActorID(),
-			Types:        append([]string(nil), devicexhs.AllTypes...),
-			Binding:      actor.BindingRuntimeInboundViaRelay,
-			MaxPendingMs: devicexhs.DefaultMaxPendingMs,
-		}
-	}
-	return mod.Declares()
+	return devicexhs.ContractDeclaration(m.ActorID(), devicexhs.DefaultMaxPendingMs)
 }
 
 func (m *XHSLocalModule) Init(_ context.Context, cfg actorapi.ModuleConfig) error {

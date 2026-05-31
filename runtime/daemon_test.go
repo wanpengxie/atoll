@@ -341,14 +341,13 @@ func TestDaemon_Phase3_DispatchesWriteMessage(t *testing.T) {
 	if !ack.Accepted {
 		t.Fatalf("ack reject: reason=%s detail=%s", ack.RejectReason, ack.RejectDetail)
 	}
-	// Boot now writes the projection-of-record membership facts
-	// (BackfillRegisteredFacts — channel-lifecycle-reconcile-architecture.md
-	// 推论5 / §4) ahead of the first runtime write: the seq-1
-	// system.channel.created plus the backfilled system.actor.registered
-	// facts occupy the leading seqs, so the first human.text envelope lands
-	// after them. The assertion is just "persisted with a positive seq"; the
-	// exact ordinal is an artefact of how many active actor rows boot
-	// backfilled, not part of this test's contract.
+	// Channel create writes the projection-of-record membership facts
+	// (SeedActors + ensureChannelAgent — channel-lifecycle-reconcile-architecture.md
+	// 推论5 / §4) at registration time: the seq-1 system.channel.created plus
+	// the system.actor.registered facts occupy the leading seqs, so the first
+	// human.text envelope lands after them. The assertion is just "persisted
+	// with a positive seq"; the exact ordinal is an artefact of how many
+	// active actor rows were registered, not part of this test's contract.
 	if ack.Seq < 1 {
 		t.Errorf("ack.Seq=%d want >=1 (human write persisted after boot facts)", ack.Seq)
 	}

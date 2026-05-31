@@ -23,14 +23,14 @@ const DeviceJSONBodyLimit = 64 << 10
 // (last_heartbeat) may be before the server stops treating the daemon — and
 // therefore the proxy-facade reachability it cached — as live.
 //
-// channel-lifecycle-reconcile-architecture.md §4/§6 step4: facade_state /
-// ready_state are persisted DISPLAY caches, never API authority. `callable`
-// is a realtime derivation: it requires the daemon to be freshly heartbeating
-// (within this TTL). Once the heartbeat lapses, the cached facade/ready
-// values are stale and callable collapses to false — the server stops
-// claiming an unreachable actor is callable even if no disconnect/reset frame
-// ever landed (crash, lost callback). Proxy heartbeat interval is 25s
-// (adapters/proxy/daemon DefaultHeartbeatInterval); ~3 missed beats.
+// A7 去双语义: facade_state / ready_state are persisted DISPLAY caches only,
+// never the "callable" authority. The list endpoint emits display_callable_hint
+// — a best-effort UI chip computed from those caches gated on this TTL: once the
+// daemon heartbeat lapses the cached facade/ready values are stale and the hint
+// collapses to false. The hint is NOT a callable gate; the authoritative answer
+// to "is this actor callable right now" is the realtime actor.status envelope.
+// Proxy heartbeat interval is 25s (adapters/proxy/daemon
+// DefaultHeartbeatInterval); ~3 missed beats.
 const daemonLivenessTTL = 90 * time.Second
 
 // daemonLivenessTTLMs is daemonLivenessTTL in milliseconds (last_heartbeat is
@@ -138,7 +138,7 @@ func (s *Service) handleListOwnerDaemons(c *gin.Context) {
 		DaemonOnline         bool            `json:"daemon_online"`
 		ActorReadinessReady  bool            `json:"actor_readiness_ready"`
 		ActorReadinessState  string          `json:"actor_readiness_state"`
-		Callable             bool            `json:"callable"`
+		DisplayCallableHint  bool            `json:"display_callable_hint"`
 		Ready                bool            `json:"ready"`
 		ReadyState           string          `json:"ready_state"`
 		ReadyReason          string          `json:"ready_reason"`
@@ -172,13 +172,15 @@ func (s *Service) handleListOwnerDaemons(c *gin.Context) {
 			for _, chID := range h.ActiveChannels {
 				activeChannels = append(activeChannels, string(chID))
 			}
-			// channel-lifecycle-reconcile §4/§6 step4 — callable is a realtime
-			// derivation, not a read of persisted authority. facade_state /
-			// ready_state below are DISPLAY caches; they only contribute to
-			// callable while the daemon liveness signal is fresh (heartbeat
-			// within daemonLivenessTTL). A stale heartbeat collapses callable to
-			// false regardless of what the cached facade/ready columns still say
-			// — closing 现象2 (sticky "可调用" after the device is gone).
+			// A7 去双语义 — facade_state / ready_state are DISPLAY caches only;
+			// they do NOT decide "callable". The authoritative answer to "is this
+			// actor callable right now" is the realtime actor.status envelope
+			// (framework respondActorStatus → live StatusReporter probe), never a
+			// read of these persisted columns. display_callable_hint below is a
+			// best-effort UI chip: cached facade/ready projection gated on
+			// heartbeat freshness, so a stale heartbeat collapses the hint to
+			// false. It is explicitly a hint, not a gate — clients must call
+			// actor.status before treating an actor as callable.
 			daemonLive := row.Status == "online" && (now-row.LastHeartbeat) <= daemonLivenessTTLMs
 			actorReady := h.ReadyState == "ready"
 			routeActive := len(activeChannels) > 0
@@ -195,7 +197,7 @@ func (s *Service) handleListOwnerDaemons(c *gin.Context) {
 				DaemonOnline:         daemonLive,
 				ActorReadinessReady:  actorReady,
 				ActorReadinessState:  h.ReadyState,
-				Callable:             daemonLive && routeActive && facadeInstalled && actorReady,
+				DisplayCallableHint:  daemonLive && routeActive && facadeInstalled && actorReady,
 				Ready:                actorReady,
 				ReadyState:           h.ReadyState,
 				ReadyReason:          h.ReadyReason,
@@ -203,7 +205,7 @@ func (s *Service) handleListOwnerDaemons(c *gin.Context) {
 				ReadinessCheckedAt:   h.ReadinessCheckedAt,
 				LastReadyAt:          h.LastReadyAt,
 				LastStateChangeAt:    h.LastStateChangeAt,
-				OperationalStateNote: "display cache; callable is a realtime derivation (daemon heartbeat fresh ∧ route ∧ facade ∧ ready); actor.status is authoritative for a single actor",
+				OperationalStateNote: "display cache only; display_callable_hint is a UI hint (heartbeat-fresh ∧ route ∧ facade ∧ ready), NOT a callable gate — actor.status envelope is the authoritative callable signal",
 			})
 		}
 		out = append(out, ownerDaemonResp{

@@ -148,6 +148,7 @@ func main() {
 		AllowReplayWindowDisabled: *mockBus && *replayWindowMs <= 0,
 		ChannelTemplates:          buildChannelTemplates(),
 		OnChannelBoot:             adapterBootHook,
+		ProxyCapabilityValidator:  proxyCapabilityValidator,
 		Logger:                    daemonLogger,
 	}
 

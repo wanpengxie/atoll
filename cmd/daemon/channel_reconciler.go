@@ -63,13 +63,19 @@ type channelReconciler struct {
 	deviceRoute   map[actor.ActorID]string
 
 	mu sync.Mutex
-	// wired tracks proxy facade actors this reconciler has installed +
-	// registered. Static compiled-in modules are recorded here at
-	// construction so a later (impossible-but-defensive) desired collision
-	// does not re-install them.
+	// wired tracks every actor this reconciler has installed + registered —
+	// both the static compiled-in modules (wired on the first pass) and the
+	// fact-derived proxy facades.
 	wired map[actor.ActorID]struct{}
-	// static records the compiled-in modules' actor ids — never torn down
-	// by reconcile (they are part of the channel template, not fact-derived).
+	// staticModules are the channel-template compiled-in modules. They are
+	// part of the reconciler's desired set on every pass (never collapsed),
+	// installed + registered by the first Reconcile rather than by the
+	// composition root. This is what collapses the previous dual assembly
+	// (static factory Install at boot + fact-derived Register) into one
+	// level-triggered derivation.
+	staticModules []adapter.Module
+	// static records the compiled-in modules' actor ids — never torn down by
+	// reconcile (they are part of the channel template, not fact-derived).
 	static map[actor.ActorID]struct{}
 }
 
@@ -82,7 +88,7 @@ func newChannelReconciler(
 	handlerFor func(actorID actor.ActorID) scheduler.HandlerFn,
 	deviceRouteMu *sync.RWMutex,
 	deviceRoute map[actor.ActorID]string,
-	staticActors []actor.ActorID,
+	staticModules []adapter.Module,
 ) *channelReconciler {
 	r := &channelReconciler{
 		channelID:     channelID,
@@ -94,11 +100,11 @@ func newChannelReconciler(
 		deviceRouteMu: deviceRouteMu,
 		deviceRoute:   deviceRoute,
 		wired:         make(map[actor.ActorID]struct{}),
+		staticModules: staticModules,
 		static:        make(map[actor.ActorID]struct{}),
 	}
-	for _, id := range staticActors {
-		r.static[id] = struct{}{}
-		r.wired[id] = struct{}{}
+	for _, mod := range staticModules {
+		r.static[mod.Declares().ActorID] = struct{}{}
 	}
 	return r
 }
@@ -110,6 +116,16 @@ func newChannelReconciler(
 func (r *channelReconciler) Reconcile(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// Static-wire pass: the channel-template compiled-in modules are part of
+	// the desired set on every pass. The first Reconcile installs +
+	// registers them (the composition root no longer calls mgr.Install /
+	// Deliverer.Register directly); later passes short-circuit via r.wired.
+	for _, mod := range r.staticModules {
+		if err := r.wireStaticModule(ctx, mod); err != nil {
+			return err
+		}
+	}
 
 	desired, err := r.registry.ListDesiredProxyMembers(ctx)
 	if err != nil {
@@ -129,22 +145,14 @@ func (r *channelReconciler) Reconcile(ctx context.Context) error {
 			continue
 		}
 		if err := r.wireProxyFacade(ctx, dm); err != nil {
-			// A desired proxy member whose latest fact lacks a usable
-			// capability_set (legacy fact missing the blob, no proxy reconnect
-			// yet) cannot form a valid facade declaration. Skip it instead of
-			// failing the whole pass: the other facades stay wired, and the
-			// next reconcile re-tries once the reconnecting proxy repairs the
-			// fact (applyMemberAddTx capability repair). Hard failure here is
-			// the bug codex flagged — one incomplete legacy member must not
-			// take down reconcile for the channel.
-			if r.logger != nil {
-				r.logger.Warn().Err(err).
-					Str("event", "daemon.reconcile_facade_skipped").
-					Str("channel_id", string(r.channelID)).
-					Str("actor_id", string(dm.ID)).
-					Msg("reconciler skipped proxy facade with incomplete capability; awaiting proxy reconnect to repair fact")
-			}
-			continue
+			// A desired proxy member whose registered fact lacks a usable
+			// capability_set is an invariant violation: every proxy actor is
+			// registered together with its complete capability_set fact in one
+			// path (handleUpdateMembers → ApplyMemberTransitions), so a desired
+			// member that cannot form a valid facade declaration means the log
+			// is corrupt, not "incomplete pending repair". Fail the pass.
+			return fmt.Errorf("cmd/daemon: reconcile %s proxy facade %s: incomplete capability_set on registered fact: %w",
+				r.channelID, dm.ID, err)
 		}
 	}
 
@@ -162,6 +170,50 @@ func (r *channelReconciler) Reconcile(ctx context.Context) error {
 			continue
 		}
 		r.collapseProxyFacade(id)
+	}
+	return nil
+}
+
+// wireStaticModule installs + registers one channel-template compiled-in
+// module. Idempotent: short-circuits once the module's actor is in r.wired,
+// so the resync goroutine and update_members-triggered passes never re-install
+// it. The static modules are never collapsed (they are not fact-derived).
+//
+// Like wireProxyFacade, the install is gated on mgr.DeclarationForActor rather
+// than on r.wired alone: if r.wired was cleared (a forced re-Reconcile to
+// rebuild wiring) or a prior pass installed the module but failed before
+// marking it wired (e.g. RecoverTimersForActor errored), the Manager already
+// holds the module and a second mgr.Install would fail as a duplicate. Probing
+// the Manager makes "clear wiring + re-Reconcile" idempotently rebuildable:
+// already-installed → only recover timers + (re)register handler + (re)add
+// route; never re-Install.
+func (r *channelReconciler) wireStaticModule(ctx context.Context, mod adapter.Module) error {
+	decl := mod.Declares()
+	if _, ok := r.wired[decl.ActorID]; ok {
+		return nil
+	}
+	if _, installed := r.mgr.DeclarationForActor(decl.ActorID); !installed {
+		if err := r.mgr.Install(ctx, []adapter.Module{mod}); err != nil {
+			return fmt.Errorf("cmd/daemon: reconcile %s static install %s: %w", r.channelID, decl.ActorID, err)
+		}
+	}
+	if err := r.mgr.RecoverTimersForActor(ctx, decl.ActorID); err != nil {
+		return fmt.Errorf("cmd/daemon: reconcile %s static recover timers %s: %w", r.channelID, decl.ActorID, err)
+	}
+	r.deliverer.Register(decl.ActorID, r.handlerFor(decl.ActorID))
+	if decl.Binding == actor.BindingRuntimeInboundViaRelay {
+		r.deviceRouteMu.Lock()
+		r.deviceRoute[decl.ActorID] = decl.Name
+		r.deviceRouteMu.Unlock()
+	}
+	r.wired[decl.ActorID] = struct{}{}
+	if r.logger != nil {
+		r.logger.Info().
+			Str("event", "daemon.reconcile_static_wired").
+			Str("channel_id", string(r.channelID)).
+			Str("actor_id", string(decl.ActorID)).
+			Int("type_count", len(decl.Types)).
+			Msg("reconciler wired static module")
 	}
 	return nil
 }

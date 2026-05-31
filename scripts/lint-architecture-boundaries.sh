@@ -145,8 +145,16 @@ if rg -n "if \\(corr && entryCorr === corr\\) return false" adapters/device/xhs/
   fail "extension outbox must use request_id as primary key before correlation_id fallback"
 fi
 
-if rg -nU "OnExternalCallbackFrame[\\s\\S]{0,260}parseExternalCallback\\(ctx, frame\\.Payload\\)[\\s\\S]{0,80}return err" adapters/device/xhs/module.go; then
-  fail "xhs malformed callback frame must complete or typed-ack, not return generic retryable error"
+# channel-lifecycle-reconcile §5 护栏 2 — the per-channel channelReconciler is
+# the SINGLE entry for adapter facade wiring (framework Manager install +
+# scheduler.Deliverer handler registration). No other file in the daemon
+# composition root may call mgr.Install / *.Install(ctx, []adapter.Module / a
+# Deliverer.Register directly; both the static compiled-in modules and the
+# fact-derived proxy facades must flow through Reconcile so "clear wiring +
+# re-Reconcile" rebuilds every facade/handler. Matches real call sites only
+# (lines whose first non-space char is not `//`).
+if rg -n --pcre2 "^(?:(?!//).)*?(mgr\\.Install\\(|\\.Install\\(ctx, \\[\\]adapter\\.Module|(deliverer|Deliverer)\\.Register\\()" cmd/daemon -g'*.go' -g'!*_test.go' -g'!channel_reconciler.go' -S; then
+  fail "adapter facade install / Deliverer.Register outside channelReconciler is forbidden — route all wiring through Reconcile (channel-lifecycle-reconcile §5 护栏 2)"
 fi
 
 echo "✅ architecture boundary lint passed"

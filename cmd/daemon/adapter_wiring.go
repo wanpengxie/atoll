@@ -14,6 +14,7 @@ import (
 
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	"github.com/wanpengxie/ActOS/adapters/framework"
+	proxyfacade "github.com/wanpengxie/ActOS/adapters/framework/proxy_facade"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -151,37 +152,23 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 		if err != nil {
 			return nil, fmt.Errorf("framework.NewManager(%s): %w", h.ChannelID, err)
 		}
-		if len(modules) > 0 {
-			if err := mgr.Install(ctx, modules); err != nil {
-				return nil, fmt.Errorf("framework.Manager.Install(%s): %w", h.ChannelID, err)
-			}
-		}
-		if err := mgr.BootRecoverTimers(ctx); err != nil {
-			return nil, fmt.Errorf("framework.Manager.BootRecoverTimers(%s): %w", h.ChannelID, err)
-		}
 		gcCtx, gcCancel := context.WithCancel(context.Background())
 		go mgr.RunGC(gcCtx)
 
+		// channel-lifecycle-reconcile §3 / §6 step3 — the per-channel
+		// Reconciler is the SINGLE serial mutation entry for ALL channel
+		// wiring (framework facade install + scheduler.Deliverer handler
+		// registration + device route map). Both the static compiled-in
+		// modules AND every fact-derived proxy facade flow through it: the
+		// static modules are its permanent set (installed + registered by the
+		// first Reconcile, never collapsed); proxy facades are derived from
+		// facts (system.actor.registered) and reconciled in/out. This collapses
+		// the previous dual assembly (composition-root mgr.Install +
+		// Deliverer.Register loop, plus update_members one-shot Register) into
+		// one level-triggered derivation, so clearing all wiring and re-running
+		// Reconcile rebuilds every facade/handler from facts + the static set.
 		deviceRouteMu := &sync.RWMutex{}
 		deviceAdapterByActor := map[actor.ActorID]string{}
-		for _, mod := range modules {
-			decl := mod.Declares()
-			if decl.Binding == actor.BindingRuntimeInboundViaRelay {
-				deviceAdapterByActor[decl.ActorID] = decl.Name
-			}
-		}
-
-		// channel-lifecycle-reconcile §3 / §6 step3 — the per-channel
-		// Reconciler is the SINGLE serial mutation entry for proxy facade
-		// wiring. The static compiled-in modules are recorded as its
-		// permanent set (never collapsed); every dynamic proxy facade is
-		// derived from facts (system.actor.registered) and reconciled in.
-		// This replaces the previous dual assembly (static factory Install +
-		// update_members one-shot Register).
-		staticActors := make([]actor.ActorID, 0, len(modules))
-		for _, mod := range modules {
-			staticActors = append(staticActors, mod.Declares().ActorID)
-		}
 		reconciler := newChannelReconciler(
 			h.ChannelID,
 			mgr,
@@ -193,7 +180,7 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 			},
 			deviceRouteMu,
 			deviceAdapterByActor,
-			staticActors,
+			modules,
 		)
 		if h.SetProxyActorCallback != nil {
 			// update_members now only persists the actor_registry mutation +
@@ -258,27 +245,17 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 			}
 		}
 
-		// Register one scheduler.Deliverer handler per installed module so
-		// trigger.Gateway.Dispatch routes inbound request envelopes through
-		// the framework.Manager. Each handler re-stamps the ctx with the
-		// adapter actor as caller so framework.Respond's inner chain.Write
-		// (which produces an envelope with sender=adapter actor) passes the
-		// step-1/3 caller-vs-sender check — the inbound stamp was the
-		// request author (e.g. user:alice), which doesn't match the
-		// response sender.
-		for _, mod := range modules {
-			decl := mod.Declares()
-			h.Deliverer.Register(decl.ActorID,
-				deliverThroughManager(mgr, decl.ActorID, h.ChannelID, h.Logger))
-		}
-
-		// Boot/reclaim durable trigger — rebuild fact-derived proxy facades
-		// from the channel log alone. On a fresh channel this is a no-op (no
-		// registered proxy facts yet); on cold-start / reclaim of a channel
-		// that previously had proxy facades it restores them WITHOUT waiting
-		// for a proxy reconnect (§9 DoD #1 / #4). The runtime backfills the
+		// Boot/reclaim durable trigger — this first Reconcile both installs +
+		// registers the static compiled-in modules (the composition root no
+		// longer touches mgr.Install / Deliverer.Register) AND rebuilds the
+		// fact-derived proxy facades from the channel log alone. On a fresh
+		// channel the proxy half is a no-op (no registered proxy facts yet);
+		// on cold-start / reclaim it restores facades WITHOUT waiting for a
+		// proxy reconnect (§9 DoD #1 / #4). The runtime backfills the
 		// registered facts before OnChannelBoot runs, so the facts are
-		// present here.
+		// present here. Each static handler re-stamps the ctx with the adapter
+		// actor as caller so framework.Respond's inner chain.Write (sender=
+		// adapter actor) passes the harness step-1/3 caller-vs-sender check.
 		if err := reconciler.Reconcile(ctx); err != nil {
 			gcCancel()
 			_ = mgr.Shutdown(context.Background())
@@ -443,4 +420,23 @@ func (c *adapterCallerChain) Write(ctx context.Context, env *message.Envelope) (
 		})
 	}
 	return c.inner.Write(ctx, env)
+}
+
+// proxyCapabilityValidator is the runtime.DaemonConfig.ProxyCapabilityValidator
+// hook: it fail-fast validates a runtime_inbound_via_relay proxy actor's
+// capability_set BEFORE update_members commits, by attempting the exact facade
+// construction the Reconciler would later perform (DeclarationFromCapability +
+// New). An empty/incomplete capability_set is rejected at the source so no
+// actor row + system.actor.registered fact is committed for a facade that can
+// never be wired. Lives in cmd/daemon (the composition root) because runtime/
+// must not import adapters/** (INVARIANT-5).
+func proxyCapabilityValidator(actorID actor.ActorID, capability json.RawMessage) error {
+	decl, err := proxyfacade.DeclarationFromCapability(actorID, capability)
+	if err != nil {
+		return err
+	}
+	if _, err := proxyfacade.New(decl); err != nil {
+		return err
+	}
+	return nil
 }

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
@@ -376,125 +375,6 @@ func (r *ActorRegistry) ApplyMemberTransitions(
 	return nil
 }
 
-// BackfillRegisteredFacts appends a system.actor.registered fact for every
-// active actor_registry row that does not already have one in the channel
-// log, making membership a projection-of-record replayable from the log
-// alone (推论5 / §4 事实完整性). It exists because actors can be born
-// through paths that write actor_registry directly without an envelope:
-//   - bootstrap saga seeds (system actor / initial members / adapter seeds),
-//   - ensureChannelAgent (the per-channel agent target),
-//   - channels created before the fact carried full declaration data.
-//
-// The method is idempotent and replay-safe: it skips any actor that already
-// has a system.actor.registered:<id>:* fact and re-uses the row's created_at
-// as the deterministic event timestamp so a re-run produces the same id. It
-// does NOT carry capability_set — only the proxy-facade update_members path
-// (ApplyMemberTransitions) has that blob; backfilled rows are humans /
-// system / channel-agent / static-factory adapters whose facade (if any) is
-// rebuilt from compiled-in module factories, not from log data.
-//
-// Soft-deregistered rows are skipped: their lifecycle already produced (or
-// will produce) the registered+deregistered fact pair through the normal
-// transition path, and re-asserting a registered fact for a dead actor would
-// lie about current membership.
-func (r *ActorRegistry) BackfillRegisteredFacts(
-	ctx context.Context,
-	channelID channel.ID,
-	fencing klog.FencingTuple,
-) error {
-	if channelID == "" {
-		return errors.New("store: backfill registered facts: empty channel_id")
-	}
-	const q = `SELECT actor_id, actor_kind, COALESCE(actor_binding,''),
-	                  COALESCE(display_name,''), created_at
-	             FROM actor_registry
-	            WHERE deregistered_at IS NULL
-	            ORDER BY created_at ASC, actor_id ASC`
-	rows, err := r.db.QueryContext(ctx, q)
-	if err != nil {
-		return fmt.Errorf("store: backfill registered facts list: %w", err)
-	}
-	type rowT struct {
-		id          actor.ActorID
-		kind        actor.Kind
-		binding     actor.Binding
-		displayName string
-		createdAt   int64
-	}
-	var pending []rowT
-	for rows.Next() {
-		var rt rowT
-		var kind, binding, displayName string
-		if err := rows.Scan(&rt.id, &kind, &binding, &displayName, &rt.createdAt); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("store: backfill registered facts scan: %w", err)
-		}
-		rt.kind = actor.Kind(kind)
-		rt.binding = actor.Binding(binding)
-		rt.displayName = displayName
-		pending = append(pending, rt)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return fmt.Errorf("store: backfill registered facts rows: %w", err)
-	}
-	_ = rows.Close()
-	if len(pending) == 0 {
-		return nil
-	}
-
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("store: backfill registered facts begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	msgs := NewMessagesWithLock(r.db, NewChannelLock(r.db))
-	appended := 0
-	for _, rt := range pending {
-		// A registered fact already on the log (under any timestamp)
-		// means this actor is already projection-of-record complete.
-		var present int
-		err := tx.QueryRowContext(ctx,
-			`SELECT 1 FROM messages
-			  WHERE type='system.actor.registered'
-			    AND id LIKE ? ESCAPE '\'
-			  LIMIT 1`,
-			"system.actor.registered:"+escapeLike(string(rt.id))+":%").Scan(&present)
-		if err == nil {
-			continue
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("store: backfill registered facts presence %q: %w", rt.id, err)
-		}
-		at := rt.createdAt
-		if at == 0 {
-			at = 1
-		}
-		env, err := actorRegisteredEnvelope(channelID, MemberActorAdd{
-			ID:          rt.id,
-			Kind:        rt.kind,
-			Binding:     rt.binding,
-			DisplayName: rt.displayName,
-			At:          at,
-		})
-		if err != nil {
-			return err
-		}
-		if _, err := msgs.AppendTx(ctx, tx, env, fencing); err != nil {
-			return fmt.Errorf("store: backfill registered fact %q: %w", rt.id, err)
-		}
-		appended++
-	}
-	if appended == 0 {
-		return nil
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: backfill registered facts commit: %w", err)
-	}
-	return nil
-}
-
 // DesiredProxyMember is one runtime_inbound_via_relay tool actor derived
 // purely by replaying the channel log's system.actor.registered /
 // system.actor.deregistered facts (推论5 / §4 事实完整性). It is the
@@ -586,31 +466,30 @@ func (r *ActorRegistry) ListDesiredProxyMembers(ctx context.Context) ([]DesiredP
 	return out, nil
 }
 
-// escapeLike escapes the SQLite LIKE wildcards in an actor id so a
-// presence probe matches the literal id rather than treating embedded
-// %/_ as patterns. The probe uses ESCAPE '\'.
-func escapeLike(s string) string {
-	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
-	return replacer.Replace(s)
-}
-
 func (r *ActorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add MemberActorAdd) (bool, error) {
 	var deregistered sql.NullInt64
 	err := tx.QueryRowContext(ctx, `SELECT deregistered_at FROM actor_registry WHERE actor_id=?`, string(add.ID)).Scan(&deregistered)
 	switch {
 	case err == nil:
 		if !deregistered.Valid {
-			// Row is already active (reconnect / retried update_members).
-			// Normally a duplicate add is a no-op, but the channel log is the
-			// only durable source of capability_set: a proxy that reconnects
-			// carrying a (possibly newly-complete) capability_set must be able
-			// to REPAIR the log even though the registry row already exists
-			// (推论5 / §4 事实完整性; codex P1 actors.go:340). Re-emit the
-			// registered fact only when the incoming capability differs from
-			// the latest active fact, so retries stay idempotent and the later
-			// complete fact wins on replay (ListDesiredProxyMembers, seq ASC).
-			if r.shouldRepairProxyFact(ctx, tx, add) {
-				return true, nil
+			// Row is already active (reconnect / retried update_members /
+			// re-run of a boot-time seed). A duplicate add is normally an
+			// idempotent no-op, BUT only when the incoming fact matches the
+			// one already on the log. If a retry carries a DIFFERENT
+			// capability_set than the active registered fact, silently
+			// no-op'ing would freeze a stale/incomplete fact in place with no
+			// way to repair it (the reconciler rebuilds from the latest fact,
+			// not from this frame). Reject so the caller must remove+add to
+			// change capability. Identical capability stays a no-op (suppresses
+			// a duplicate system.actor.registered fact).
+			existing, err := latestRegisteredCapabilityTx(ctx, tx, add.ID)
+			if err != nil {
+				return false, err
+			}
+			if !sameCapabilityFact(existing, add.CapabilitySet) {
+				return false, fmt.Errorf(
+					"store: actor %q active duplicate add with conflicting capability_set; remove+add required to change capability",
+					add.ID)
 			}
 			return false, nil
 		}
@@ -652,107 +531,6 @@ func (r *ActorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add Me
 	}
 }
 
-// shouldRepairProxyFact reports whether an add for an already-active proxy
-// (kind=tool, binding=runtime_inbound_via_relay) actor must re-emit a
-// system.actor.registered fact to repair the log. It returns true when the
-// incoming add carries a capability_set that differs from the capability_set
-// on the actor's latest active registered fact (or when no usable capability
-// is on the log yet but the add now carries one). Non-proxy adds, and proxy
-// adds whose capability already matches the latest fact, return false so
-// retried/duplicate update_members frames stay idempotent.
-//
-// Replay note: ListDesiredProxyMembers reads facts in seq ASC and lets the
-// last registered fact win, so a re-emitted fact at a higher seq supersedes a
-// legacy fact that lacked capability_set (the design's "later complete fact
-// wins").
-func (r *ActorRegistry) shouldRepairProxyFact(ctx context.Context, tx *sql.Tx, add MemberActorAdd) bool {
-	if add.Kind != actor.KindTool || add.Binding != actor.BindingRuntimeInboundViaRelay {
-		return false
-	}
-	incoming := normalizedCapability(add.CapabilitySet)
-	if len(incoming) == 0 {
-		// Nothing to repair with — never re-emit an empty capability.
-		return false
-	}
-	latest, ok := r.latestActiveProxyCapability(ctx, tx, add.ID)
-	if !ok {
-		// No registered fact on the log yet for an active proxy row: the add
-		// carries capability, so emit to make the log projection-of-record.
-		return true
-	}
-	return !bytes.Equal(normalizedCapability(latest), incoming)
-}
-
-// latestActiveProxyCapability returns the capability_set on the actor's most
-// recent registered fact, or ok=false when its lifecycle's latest terminal
-// fact is a deregister (or no registered fact exists). It replays only this
-// actor's facts (seq ASC, last wins) so it observes the same effective state
-// ListDesiredProxyMembers does.
-func (r *ActorRegistry) latestActiveProxyCapability(ctx context.Context, tx *sql.Tx, id actor.ActorID) (json.RawMessage, bool) {
-	const q = `SELECT type, payload
-	             FROM messages
-	            WHERE type IN ('system.actor.registered','system.actor.deregistered')
-	              AND id LIKE ? ESCAPE '\'
-	            ORDER BY seq ASC`
-	rows, err := tx.QueryContext(ctx, q, "%:"+escapeLike(string(id))+":%")
-	if err != nil {
-		return nil, false
-	}
-	defer func() { _ = rows.Close() }()
-	type regPayload struct {
-		ActorID       actor.ActorID   `json:"actor_id"`
-		CapabilitySet json.RawMessage `json:"capability_set"`
-	}
-	var cap json.RawMessage
-	active := false
-	for rows.Next() {
-		var typ, payload string
-		if err := rows.Scan(&typ, &payload); err != nil {
-			return nil, false
-		}
-		switch typ {
-		case "system.actor.registered":
-			var p regPayload
-			if err := json.Unmarshal([]byte(payload), &p); err != nil {
-				return nil, false
-			}
-			if p.ActorID != id {
-				continue
-			}
-			cap = append(json.RawMessage(nil), p.CapabilitySet...)
-			active = true
-		case "system.actor.deregistered":
-			var p struct {
-				ActorID actor.ActorID `json:"actor_id"`
-			}
-			if err := json.Unmarshal([]byte(payload), &p); err != nil {
-				return nil, false
-			}
-			if p.ActorID != id {
-				continue
-			}
-			cap = nil
-			active = false
-		}
-	}
-	if rows.Err() != nil {
-		return nil, false
-	}
-	return cap, active
-}
-
-// normalizedCapability strips an absent/null capability_set down to a nil
-// slice so presence comparisons treat "missing" and "null" identically.
-func normalizedCapability(raw json.RawMessage) json.RawMessage {
-	if len(raw) == 0 {
-		return nil
-	}
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil
-	}
-	return raw
-}
-
 func (r *ActorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, remove MemberActorRemove) (bool, error) {
 	res, err := tx.ExecContext(ctx,
 		`UPDATE actor_registry SET deregistered_at=? WHERE actor_id=? AND deregistered_at IS NULL`,
@@ -766,6 +544,77 @@ func (r *ActorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, rem
 		return false, err
 	}
 	return n == 1, nil
+}
+
+// latestRegisteredCapabilityTx returns the capability_set blob carried on the
+// actor's most recent system.actor.registered fact (the projection-of-record
+// the reconciler rebuilds from). Returns nil when the actor has no registered
+// fact or the latest fact carried no capability_set. Read inside the same tx so
+// the duplicate-add consistency check sees a consistent snapshot.
+func latestRegisteredCapabilityTx(ctx context.Context, tx *sql.Tx, id actor.ActorID) (json.RawMessage, error) {
+	const q = `SELECT payload
+	             FROM messages
+	            WHERE type='system.actor.registered'
+	            ORDER BY seq DESC`
+	rows, err := tx.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("store: latest registered capability %q: %w", id, err)
+	}
+	defer func() { _ = rows.Close() }()
+	type regPayload struct {
+		ActorID       actor.ActorID   `json:"actor_id"`
+		CapabilitySet json.RawMessage `json:"capability_set"`
+	}
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return nil, fmt.Errorf("store: latest registered capability scan %q: %w", id, err)
+		}
+		var p regPayload
+		if err := json.Unmarshal([]byte(payload), &p); err != nil {
+			return nil, fmt.Errorf("store: decode registered fact for %q: %w", id, err)
+		}
+		if p.ActorID == id {
+			return p.CapabilitySet, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: latest registered capability rows %q: %w", id, err)
+	}
+	return nil, nil
+}
+
+// sameCapabilityFact reports whether two capability_set blobs are the same fact
+// for duplicate-add idempotency purposes. Both empty / null count as equal; a
+// non-empty blob is compared by canonical JSON (key-order-independent) so a
+// re-marshalled-but-semantically-identical retry stays a no-op.
+func sameCapabilityFact(a, b json.RawMessage) bool {
+	an := isEmptyCapability(a)
+	bn := isEmptyCapability(b)
+	if an || bn {
+		return an && bn
+	}
+	ca, errA := canonicalJSON(a)
+	cb, errB := canonicalJSON(b)
+	if errA != nil || errB != nil {
+		// Unparsable blob: fall back to raw byte equality rather than
+		// declaring a false match.
+		return bytes.Equal(a, b)
+	}
+	return bytes.Equal(ca, cb)
+}
+
+func isEmptyCapability(b json.RawMessage) bool {
+	t := bytes.TrimSpace(b)
+	return len(t) == 0 || bytes.Equal(t, []byte("null"))
+}
+
+func canonicalJSON(b json.RawMessage) ([]byte, error) {
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return nil, err
+	}
+	return json.Marshal(v)
 }
 
 func actorRegisteredEnvelope(channelID channel.ID, add MemberActorAdd) (*message.Envelope, error) {

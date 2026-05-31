@@ -80,13 +80,6 @@ function actorChipState(daemon, hostedActor) {
     hostedActor.ReadinessCheckedAt ||
     0
   );
-  const actorReady =
-    hostedActor.actor_readiness_ready === true ||
-    hostedActor.actorReadinessReady === true ||
-    hostedActor.ActorReadinessReady === true ||
-    hostedActor.ready === true ||
-    hostedActor.Ready === true ||
-    readyState === 'ready';
   const routeActive =
     hostedActor.route_active === true ||
     hostedActor.routeActive === true ||
@@ -95,14 +88,17 @@ function actorChipState(daemon, hostedActor) {
   const facadeReady = facadeInstalled(hostedActor);
   const facadeState = facadeStateOf(hostedActor);
   const facadeDetail = hostedActor.facade_detail || hostedActor.facadeDetail || hostedActor.FacadeDetail || '';
-  const callable =
-    (hostedActor.callable === true ||
-      hostedActor.Callable === true ||
-      (daemon.status === 'online' && routeActive && facadeReady && actorReady)) &&
-    daemon.status === 'online' &&
-    routeActive &&
-    facadeReady &&
-    actorReady;
+  // A7 去双语义: read the server display_callable_hint only. The browser MUST
+  // NOT re-derive callability from persisted facade_state/ready_state caches
+  // (daemon.status ∧ routeActive ∧ facadeReady ∧ actorReady) — those are stale-
+  // able display projections. Authoritative callability is the realtime
+  // actor.status envelope, resolved at dispatch, not in this list view. The
+  // cached fields below only pick a human-readable reason for the not-hinted
+  // case.
+  const callableHint =
+    hostedActor.display_callable_hint === true ||
+    hostedActor.displayCallableHint === true ||
+    hostedActor.DisplayCallableHint === true;
   if (daemon.status !== 'online') {
     return { actorID, state: 'offline', label: 'daemon 离线' };
   }
@@ -136,7 +132,7 @@ function actorChipState(daemon, hostedActor) {
       detail: facadeState,
     };
   }
-  if (callable) {
+  if (callableHint) {
     return {
       actorID,
       state: 'ready',
