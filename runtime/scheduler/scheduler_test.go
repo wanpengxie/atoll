@@ -88,6 +88,59 @@ func TestDeliverer_ConcurrentRegisterDeliver(t *testing.T) {
 	_ = hits.Load()
 }
 
+// TestDeliverer_ReentrantDeliver exercises the Y13 deadlock: a handler that
+// re-enters Deliver on the same goroutine while concurrent Register calls
+// contend for the write lock. With the lock held across invocation, the inner
+// RLock starves behind a queued writer that waits on the outer RLock. Snapshot-
+// then-invoke must keep this deadlock-free; a watchdog fails the test instead
+// of hanging the suite.
+func TestDeliverer_ReentrantDeliver(t *testing.T) {
+	d := scheduler.NewDeliverer()
+	env := &message.Envelope{ID: "m-reentrant", Payload: json.RawMessage(`{}`)}
+
+	var depth atomic.Int64
+	d.Register("agent:outer", func(ctx context.Context, _ actor.ActorID, e *message.Envelope) error {
+		// Re-enter on the same goroutine, simulating a synchronous
+		// framework response routed back through the deliverer.
+		if depth.Add(1) <= 3 {
+			return d.Deliver(ctx, []actor.ActorID{"agent:outer"}, e)
+		}
+		return nil
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var wg sync.WaitGroup
+		// Concurrent writers queue on the write lock while reentrant
+		// Deliver holds/releases read locks.
+		for i := 0; i < 50; i++ {
+			wg.Add(1)
+			go func(n int) {
+				defer wg.Done()
+				id := actor.ActorID("agent:w" + strconv.Itoa(n))
+				for j := 0; j < 100; j++ {
+					d.Register(id, func(context.Context, actor.ActorID, *message.Envelope) error { return nil })
+					d.Register(id, nil)
+				}
+			}(i)
+		}
+		for k := 0; k < 200; k++ {
+			depth.Store(0)
+			if err := d.Deliver(context.Background(), []actor.ActorID{"agent:outer"}, env); err != nil {
+				t.Errorf("Deliver: %v", err)
+			}
+		}
+		wg.Wait()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Deliver deadlocked (Y13)")
+	}
+}
+
 func TestTimer_Tick(t *testing.T) {
 	var count atomic.Int64
 	tm, err := scheduler.NewTimer(scheduler.TimerConfig{

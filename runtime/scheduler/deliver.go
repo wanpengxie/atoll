@@ -45,10 +45,21 @@ func (d *Deliverer) Deliver(ctx context.Context, audience []actor.ActorID, env *
 	if env == nil {
 		return errors.New("scheduler: deliver nil envelope")
 	}
-	d.mu.RLock()
-	defer d.mu.RUnlock()
 
-	var errs []error
+	// Snapshot the matched (id, handler) pairs under the read lock, then
+	// release before invoking. Handlers run arbitrary work — in particular a
+	// handler may respond synchronously through the framework and re-enter
+	// Deliver on the same goroutine. Holding the RLock across invocation makes
+	// that re-entrant RLock deadlock-prone: Go's sync.RWMutex starves new
+	// readers once a writer (a concurrent Register) is queued, so the inner
+	// RLock would block forever behind a Register that itself waits on the
+	// outer RLock. Invoking lock-free removes the hazard entirely.
+	type entry struct {
+		id actor.ActorID
+		fn HandlerFn
+	}
+	d.mu.RLock()
+	matched := make([]entry, 0, len(audience))
 	for _, id := range audience {
 		fn, ok := d.handlers[id]
 		if !ok {
@@ -62,7 +73,13 @@ func (d *Deliverer) Deliver(ctx context.Context, audience []actor.ActorID, env *
 			// errors for system/user observational audiences.
 			continue
 		}
-		if err := fn(ctx, id, env); err != nil {
+		matched = append(matched, entry{id: id, fn: fn})
+	}
+	d.mu.RUnlock()
+
+	var errs []error
+	for _, e := range matched {
+		if err := e.fn(ctx, e.id, env); err != nil {
 			errs = append(errs, err)
 		}
 	}
