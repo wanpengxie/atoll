@@ -592,9 +592,18 @@ func (m *Manager) updateReadinessForDeclaration(
 	if !ok {
 		return actorreg.ReadinessTransition{}, fmt.Errorf("framework: readiness updater missing")
 	}
+	// readinessMu serializes the projection-then-emit critical section so two
+	// concurrent updates for actors on this manager can't interleave a stale
+	// emit after a newer projection commit.
 	m.readinessMu.Lock()
 	defer m.readinessMu.Unlock()
-	tr, err := m.computeReadinessTransition(ctx, decl.ActorID, update)
+	// The store computes the transition authoritatively inside its own
+	// transaction and updates the projection atomically. Emit the durable
+	// changed fact ONLY after that projection commits, using the returned
+	// transition — never recompute it here (Y8: a second manager-side compute
+	// + emit-before-projection let the log carry a `changed` fact while the
+	// projection update failed, drifting log↔projection).
+	tr, err := updater.UpdateReadiness(ctx, decl.ActorID, update)
 	if err != nil {
 		return actorreg.ReadinessTransition{}, err
 	}
@@ -603,60 +612,7 @@ func (m *Manager) updateReadinessForDeclaration(
 			return tr, err
 		}
 	}
-	tr, err = updater.UpdateReadiness(ctx, decl.ActorID, update)
-	if err != nil {
-		return actorreg.ReadinessTransition{}, err
-	}
 	return tr, nil
-}
-
-func (m *Manager) computeReadinessTransition(
-	ctx context.Context,
-	actorID actor.ActorID,
-	update actorreg.ReadinessUpdate,
-) (actorreg.ReadinessTransition, error) {
-	rec, ok, err := m.cfg.ActorRegistry.Lookup(ctx, actorID)
-	if err != nil {
-		return actorreg.ReadinessTransition{}, err
-	}
-	if !ok {
-		return actorreg.ReadinessTransition{}, fmt.Errorf("framework: readiness actor %s not found", actorID)
-	}
-	prev := rec.Readiness.Normalize()
-	next := actorreg.Readiness{
-		State:  update.State,
-		Reason: update.Reason,
-		Detail: append(json.RawMessage(nil), update.Detail...),
-	}.Normalize()
-	switch next.State {
-	case actorreg.ReadinessReady, actorreg.ReadinessNotReady, actorreg.ReadinessUnknown:
-	default:
-		return actorreg.ReadinessTransition{}, fmt.Errorf("framework: readiness update %s invalid state %q", actorID, next.State)
-	}
-	if !json.Valid(next.Detail) {
-		return actorreg.ReadinessTransition{}, fmt.Errorf("framework: readiness update %s invalid detail JSON", actorID)
-	}
-	stateReasonChanged := prev.State != next.State || prev.Reason != next.Reason
-	next.LastReadyAt = prev.LastReadyAt
-	if next.State == actorreg.ReadinessReady {
-		next.LastReadyAt = update.CheckedAt
-	}
-	next.LastStateChangeAt = prev.LastStateChangeAt
-	if stateReasonChanged {
-		next.LastStateChangeAt = update.CheckedAt
-	}
-	changed := readinessProjectionChanged(prev, next)
-	return actorreg.ReadinessTransition{Previous: prev, Current: next, Changed: changed}, nil
-}
-
-func readinessProjectionChanged(prev, next actorreg.Readiness) bool {
-	prev = prev.Normalize()
-	next = next.Normalize()
-	return prev.State != next.State ||
-		prev.Reason != next.Reason ||
-		string(prev.Detail) != string(next.Detail) ||
-		prev.LastReadyAt != next.LastReadyAt ||
-		prev.LastStateChangeAt != next.LastStateChangeAt
 }
 
 func (m *Manager) emitReadinessChangedForDeclaration(ctx context.Context, decl adapter.Declaration, tr actorreg.ReadinessTransition, checkedAt int64) error {

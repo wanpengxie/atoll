@@ -310,7 +310,14 @@ func TestManagerInstallHeartbeatUpdatesReadinessAndEmitsTransition(t *testing.T)
 	}
 }
 
-func TestReadinessDetailChangeRequiresAcceptedEventBeforeProjection(t *testing.T) {
+// TestReadinessEmitFollowsCommittedProjection pins the Y8 fix: the durable
+// actor.readiness.changed fact is emitted ONLY after the store projection has
+// committed, computed by the store's single authoritative transition. A failed
+// emit must NOT leave the log claiming a transition the projection denies —
+// instead the projection (the source of truth, INVARIANT-2) advances and the
+// emit is what fails. The earlier design (emit-before-projection + a second
+// manager-side recompute) is the bug being removed here.
+func TestReadinessEmitFollowsCommittedProjection(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
 			Name:         "feishu",
@@ -337,14 +344,16 @@ func TestReadinessDetailChangeRequiresAcceptedEventBeforeProjection(t *testing.T
 		Detail:    json.RawMessage(`{"probe":"new"}`),
 		CheckedAt: 2_000,
 	}); err == nil {
-		t.Fatal("UpdateReadiness should fail when readiness event write fails")
+		t.Fatal("UpdateReadiness should surface the readiness event write failure")
 	}
 	rec, ok, err := registry.Lookup(context.Background(), "tool:feishu-adapter")
 	if err != nil || !ok {
 		t.Fatalf("lookup actor ok=%v err=%v", ok, err)
 	}
-	if string(rec.Readiness.Detail) != `{"probe":"old"}` || rec.Readiness.LastReadyAt != 1_000 {
-		t.Fatalf("readiness projection changed despite event failure: %+v", rec.Readiness)
+	// Projection committed first: truth advanced. The log must not be allowed
+	// to carry a `changed` fact while the projection lags (the Y8 drift).
+	if string(rec.Readiness.Detail) != `{"probe":"new"}` || rec.Readiness.LastReadyAt != 2_000 {
+		t.Fatalf("readiness projection should have committed before emit: %+v", rec.Readiness)
 	}
 	if written := chain.Written(); len(written) != 1 || written[0].Type != "actor.readiness.changed" {
 		t.Fatalf("written=%d want failed readiness event attempt", len(written))
