@@ -45,11 +45,30 @@ var version = "dev"
 
 const defaultReplayWindowMs int64 = 300_000
 
+// resolveDaemonEpoch returns the daemon process epoch. A non-zero explicit
+// value (from --daemon-epoch) is honored verbatim; otherwise it derives a
+// fresh epoch from the current wall clock.
+//
+// INVARIANT-4: (fencing_token, daemon_epoch) MUST be unique across daemon
+// restarts so stale worker IPC from a previous process fails fence_check.
+// fencing_token is per-channel ownership identity (rotated only on takeover,
+// NOT on restart), so daemon_epoch is the sole per-process discriminator.
+// Unix-second resolution lets a same-second fast restart reuse an epoch — the
+// previous process's leaked frames would then pass fence_check. Nanosecond
+// resolution makes any distinct restart yield a strictly larger (monotonic)
+// epoch. UnixNano fits int64 until year 2262.
+func resolveDaemonEpoch(explicit int64, now func() time.Time) int64 {
+	if explicit != 0 {
+		return explicit
+	}
+	return now().UnixNano()
+}
+
 func main() {
 	var (
 		dataDir     = flag.String("data-dir", defaultDataDir(), "daemon data directory")
 		daemonID    = flag.String("daemon-id", "daemon-local", "stable daemon identifier")
-		daemonEpoch = flag.Int64("daemon-epoch", 0, "daemon process epoch (0 = use unix-second)")
+		daemonEpoch = flag.Int64("daemon-epoch", 0, "daemon process epoch (0 = use unix-nanosecond)")
 		mockBus     = flag.Bool("mock-bus", false, "use in-process mock bus (dev only; production uses --server-url WS)")
 		serverURL   = flag.String("server-url", "", "daemonbus WS URL, e.g. ws://localhost:8832/api/daemonbus")
 		daemonKey   = flag.String("key", "", "shared key for daemonbus auth (must match server.daemonbus.SharedSecret)")
@@ -72,9 +91,7 @@ func main() {
 	)
 	flag.Parse()
 
-	if *daemonEpoch == 0 {
-		*daemonEpoch = time.Now().Unix()
-	}
+	*daemonEpoch = resolveDaemonEpoch(*daemonEpoch, time.Now)
 
 	// M1.6-T7 phase-2 — structured logger first so every subsequent
 	// failure path emits JSON instead of a bare stdlib log line.
