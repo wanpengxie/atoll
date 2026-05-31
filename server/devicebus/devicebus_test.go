@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 
 	proxycontract "github.com/wanpengxie/ActOS/internal/proxy/contract"
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/server/store"
 )
@@ -49,6 +52,46 @@ func (f failingNotifier) NotifyProxyDaemonReady(context.Context, Daemon, DaemonR
 
 func (f failingNotifier) NotifyProxyDaemonOffline(context.Context, Daemon, []actor.ActorID) error {
 	return nil
+}
+
+func (f failingNotifier) NotifyDeviceLifecycle(context.Context, channel.ID, actor.ActorID, devicetransit.LifecycleEvent, string, string) {
+}
+
+type lifecycleCall struct {
+	channelID channel.ID
+	actorID   actor.ActorID
+	event     devicetransit.LifecycleEvent
+}
+
+type recordingNotifier struct {
+	mu        sync.Mutex
+	lifecycle []lifecycleCall
+}
+
+func (n *recordingNotifier) NotifyProxyDaemonReady(context.Context, Daemon, DaemonReadyInput) error {
+	return nil
+}
+
+func (n *recordingNotifier) NotifyProxyDaemonOffline(context.Context, Daemon, []actor.ActorID) error {
+	return nil
+}
+
+func (n *recordingNotifier) NotifyDeviceLifecycle(_ context.Context, channelID channel.ID, actorID actor.ActorID, event devicetransit.LifecycleEvent, _ string, _ string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.lifecycle = append(n.lifecycle, lifecycleCall{channelID: channelID, actorID: actorID, event: event})
+}
+
+func (n *recordingNotifier) eventsFor(event devicetransit.LifecycleEvent) []lifecycleCall {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	out := make([]lifecycleCall, 0, len(n.lifecycle))
+	for _, c := range n.lifecycle {
+		if c.event == event {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func readNextNonAckFrame(t *testing.T, conn *websocket.Conn) DeviceFrame {
@@ -216,6 +259,76 @@ func TestDaemonV2HandshakeReadyHeartbeatAndDisconnect(t *testing.T) {
 		}
 		return status == "offline" && n == 0
 	})
+}
+
+// TestDaemonV2EmitsDeviceLifecycle pins the producer side of the
+// device-state machine's ③实时态 input: the devicebus ws connect must emit
+// LifecycleConnected and the ws disconnect must emit LifecycleDisconnected
+// for every (attached channel, ready/active actor) pair, so the
+// cloud-daemon proxy_facade can project realtime actor.status reachability.
+// Without this the facade is stuck on liveUnknown (device_unreachable).
+func TestDaemonV2EmitsDeviceLifecycle(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	svc := NewService(testDB(t), Config{})
+	notifier := &recordingNotifier{}
+	svc.SetProxyDaemonNotifier(notifier)
+	forwarder := &captureForwarder{ch: make(chan DeviceFrame, 1)}
+	daemon, apiKey, err := svc.CreateDaemon(ctx, CreateDaemonInput{OwnerID: "user-1", Name: "Laptop"})
+	if err != nil {
+		t.Fatalf("CreateDaemon: %v", err)
+	}
+	if err := svc.AttachDaemonToChannel(ctx, daemon.ID, "ch-proxy"); err != nil {
+		t.Fatalf("AttachDaemonToChannel: %v", err)
+	}
+
+	router := gin.New()
+	router.GET(proxycontract.WSPathV2, svc.HandleWSV2(forwarder))
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	conn := dialProxyDaemon(t, srv.URL, apiKey)
+	if err := conn.WriteJSON(DeviceFrame{
+		Direction: "from_device",
+		FrameType: proxycontract.FrameTypeReady,
+		Actors: []proxycontract.ReadyActorV2{
+			{ActorID: "tool:kimi"},
+			{ActorID: "tool:xhs"},
+		},
+	}); err != nil {
+		t.Fatalf("write ready: %v", err)
+	}
+
+	eventually(t, "connect lifecycle emitted", time.Second, func() bool {
+		return len(notifier.eventsFor(devicetransit.LifecycleConnected)) == 2
+	})
+	connected := notifier.eventsFor(devicetransit.LifecycleConnected)
+	gotConnected := map[actor.ActorID]bool{}
+	for _, c := range connected {
+		if c.channelID != "ch-proxy" {
+			t.Fatalf("connected channel=%s; want ch-proxy", c.channelID)
+		}
+		gotConnected[c.actorID] = true
+	}
+	if !gotConnected["tool:kimi"] || !gotConnected["tool:xhs"] {
+		t.Fatalf("connected actors=%v; want tool:kimi + tool:xhs", gotConnected)
+	}
+
+	_ = conn.Close()
+	eventually(t, "disconnect lifecycle emitted", time.Second, func() bool {
+		return len(notifier.eventsFor(devicetransit.LifecycleDisconnected)) == 2
+	})
+	disconnected := notifier.eventsFor(devicetransit.LifecycleDisconnected)
+	gotDisconnected := map[actor.ActorID]bool{}
+	for _, c := range disconnected {
+		if c.channelID != "ch-proxy" {
+			t.Fatalf("disconnected channel=%s; want ch-proxy", c.channelID)
+		}
+		gotDisconnected[c.actorID] = true
+	}
+	if !gotDisconnected["tool:kimi"] || !gotDisconnected["tool:xhs"] {
+		t.Fatalf("disconnected actors=%v; want tool:kimi + tool:xhs", gotDisconnected)
+	}
 }
 
 func TestDaemonV2KeepsConnectionWhenReadyNotifyFails(t *testing.T) {

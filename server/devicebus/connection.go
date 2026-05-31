@@ -334,6 +334,17 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 			"hostname", first.Hostname,
 			"proxy_version", first.ProxyVersion,
 		)
+		// Project transport liveness=online into each cloud-daemon facade
+		// for the (attached channel, ready actor) pairs this proxy serves.
+		// Runs alongside NotifyProxyDaemonReady (membership) but carries the
+		// orthogonal ③实时态 live signal that drives actor.status.available.
+		s.notifyDeviceLifecycleForActors(
+			context.WithoutCancel(c.Request.Context()),
+			daemon,
+			readyActorIDs(readyInput),
+			devicetransit.LifecycleConnected,
+			"",
+		)
 
 		for {
 			frame, err := conn.transport.ReadFrame(c.Request.Context())
@@ -625,6 +636,9 @@ func (s *Service) unregisterDaemonConnection(daemonID placement.DaemonID, conn *
 			)
 		}
 	}
+	// Project transport liveness=offline into each cloud-daemon facade for
+	// the (attached channel, active actor) pairs this proxy was serving.
+	s.notifyDeviceLifecycleForActors(ctx, conn.Daemon, actors, devicetransit.LifecycleDisconnected, "daemon websocket disconnected")
 	s.log.Info("devicebus.daemon_disconnected",
 		"daemon_id", string(daemonID),
 		"daemon_session_id", conn.SessionID,
@@ -677,6 +691,38 @@ func (s *Service) KickDaemonForReload(daemonID placement.DaemonID) bool {
 		)
 	}
 	return true
+}
+
+// notifyDeviceLifecycleForActors fans a single transport-liveness
+// transition out to the proxyDaemonNotifier, one frame per (attached
+// channel, actor) pair the proxy daemon serves. The notifier routes each
+// frame to the cloud daemon owning that channel, where the proxy_facade
+// Module folds it into its volatile `live` signal (actor.status). This is
+// the producer side that the device-state machine's ③实时态 input was
+// missing — best-effort, never closure-critical (mirrors the at-least-once
+// semantics of NotifyDeviceLifecycle itself).
+func (s *Service) notifyDeviceLifecycleForActors(
+	ctx context.Context,
+	daemon Daemon,
+	actors []actor.ActorID,
+	event devicetransit.LifecycleEvent,
+	detail string,
+) {
+	n := s.proxyDaemonNotifier()
+	if n == nil || len(actors) == 0 || len(daemon.AttachedChannels) == 0 {
+		return
+	}
+	for _, chID := range daemon.AttachedChannels {
+		if chID == "" {
+			continue
+		}
+		for _, actorID := range actors {
+			if actorID == "" {
+				continue
+			}
+			n.NotifyDeviceLifecycle(ctx, chID, actorID, event, string(daemon.ID), detail)
+		}
+	}
 }
 
 func (s *Service) clearDaemonActorRoutesLocked(daemonID placement.DaemonID) {

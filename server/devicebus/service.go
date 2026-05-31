@@ -16,6 +16,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
 )
@@ -38,6 +39,19 @@ type Config struct {
 type ProxyDaemonNotifier interface {
 	NotifyProxyDaemonReady(ctx context.Context, daemon Daemon, ready DaemonReadyInput) error
 	NotifyProxyDaemonOffline(ctx context.Context, daemon Daemon, actors []actor.ActorID) error
+	// NotifyDeviceLifecycle pushes a single device_transit.lifecycle frame
+	// for one (channel, adapter actor) pair so the cloud-daemon proxy_facade
+	// projects realtime reachability (the ③实时态 input of the reconcile
+	// model). Unlike Ready/Offline (which mutate channel membership), this
+	// carries only the transport liveness transition and is best-effort.
+	NotifyDeviceLifecycle(
+		ctx context.Context,
+		channelID channel.ID,
+		actorID actor.ActorID,
+		event devicetransit.LifecycleEvent,
+		deviceID string,
+		detail string,
+	)
 }
 
 type Service struct {

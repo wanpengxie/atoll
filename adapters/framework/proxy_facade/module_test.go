@@ -10,6 +10,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -543,5 +544,68 @@ func TestProxyFacadeCallbackProvisionalMissingParentRejected(t *testing.T) {
 	if len(calls.provisional) != 0 || len(calls.finals) != 0 {
 		t.Fatalf("rejected provisional must not invoke any path; got prov=%d final=%d",
 			len(calls.provisional), len(calls.finals))
+	}
+}
+
+// TestProxyFacadeStatusReflectsLifecycle pins the ③实时态 contract: the
+// devicebus connect / disconnect / token_expired signals routed through
+// OnRuntimeEvent must drive actor.status.available + reason. Before the
+// producer side existed the facade was stuck on liveUnknown forever
+// (available=false, device_unreachable) regardless of real reachability.
+func TestProxyFacadeStatusReflectsLifecycle(t *testing.T) {
+	mod, err := New(adapter.Declaration{
+		Name:    "kimi",
+		ActorID: "tool:kimi",
+		Types:   []string{"kimi.ask"},
+		Binding: actor.BindingRuntimeInboundViaRelay,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Fresh module: no lifecycle frame seen yet → unknown / not available.
+	if rep, err := mod.Status(context.Background()); err != nil {
+		t.Fatalf("Status(initial): %v", err)
+	} else if rep.Available || rep.Reason != "device_unreachable" {
+		t.Fatalf("initial status=%+v; want available=false reason=device_unreachable", rep)
+	}
+
+	apply := func(event devicetransit.LifecycleEvent) {
+		t.Helper()
+		if err := mod.OnRuntimeEvent(context.Background(), adapter.RuntimeEvent{
+			Kind:           adapter.RuntimeEventDeviceLifecycle,
+			ChannelID:      "ch-proxy",
+			AdapterActorID: "tool:kimi",
+			DeviceLifecycle: &devicetransit.LifecycleFrame{
+				AdapterActorID: "tool:kimi",
+				ChannelID:      "ch-proxy",
+				Event:          event,
+				Ts:             123,
+			},
+		}); err != nil {
+			t.Fatalf("OnRuntimeEvent(%s): %v", event, err)
+		}
+	}
+
+	cases := []struct {
+		event         devicetransit.LifecycleEvent
+		wantAvailable bool
+		wantReason    string
+	}{
+		{devicetransit.LifecycleConnected, true, "ok"},
+		{devicetransit.LifecycleDisconnected, false, "device_offline"},
+		{devicetransit.LifecycleTokenExpired, false, "token_expired"},
+		{devicetransit.LifecycleConnected, true, "ok"},
+	}
+	for _, tc := range cases {
+		apply(tc.event)
+		rep, err := mod.Status(context.Background())
+		if err != nil {
+			t.Fatalf("Status after %s: %v", tc.event, err)
+		}
+		if rep.Available != tc.wantAvailable || rep.Reason != tc.wantReason {
+			t.Fatalf("after %s: status=%+v; want available=%v reason=%s",
+				tc.event, rep, tc.wantAvailable, tc.wantReason)
+		}
 	}
 }
