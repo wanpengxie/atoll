@@ -254,9 +254,10 @@ func (r *channelReconciler) wireProxyFacade(ctx context.Context, dm runtimestore
 }
 
 func (r *channelReconciler) collapseProxyFacade(id actor.ActorID) {
-	// Register(nil) deletes the handler — inbound envelopes to id now
-	// resolve to scheduler.ErrHandlerNotFound (retryable / terminal),
-	// never a stale facade.
+	// Register(nil) deletes the handler — inbound envelopes to id are no
+	// longer routed to a (stale) facade; a request that reaches the now
+	// absent handler is closed by the §6.4 long-pending fallback
+	// (expires_at), not silently lost.
 	r.deliverer.Register(id, nil)
 	r.deviceRouteMu.Lock()
 	delete(r.deviceRoute, id)

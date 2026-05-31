@@ -3,17 +3,11 @@ package scheduler
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
-
-// ErrHandlerNotFound reports that a concrete audience actor had no registered
-// scheduler handler. Callers must keep delivery retryable or emit a semantic
-// terminal; silently treating this as success loses the envelope.
-var ErrHandlerNotFound = errors.New("scheduler: handler not found")
 
 // HandlerFn processes one envelope addressed to actorID.
 type HandlerFn func(ctx context.Context, actorID actor.ActorID, env *message.Envelope) error
@@ -58,7 +52,14 @@ func (d *Deliverer) Deliver(ctx context.Context, audience []actor.ActorID, env *
 	for _, id := range audience {
 		fn, ok := d.handlers[id]
 		if !ok {
-			errs = append(errs, fmt.Errorf("%w for actor %s", ErrHandlerNotFound, id))
+			// No local handler for an audience member is not a delivery
+			// error: an envelope's audience legitimately includes actors
+			// this deliverer does not host (system / user / remote /
+			// collapsed facades). Deliver to the handlers present; a
+			// request that reaches no handler is still closed by the
+			// §6.4 long-pending fallback (expires_at), so skipping here
+			// never loses closure — and it avoids spurious dispatch
+			// errors for system/user observational audiences.
 			continue
 		}
 		if err := fn(ctx, id, env); err != nil {
