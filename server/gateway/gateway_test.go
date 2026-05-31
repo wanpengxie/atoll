@@ -1751,8 +1751,14 @@ func TestDeviceTransitNoRouteProxyFacadePayloadSynthesizesTerminalEnvelope(t *te
 	if resp.CorrelationID != req.CorrelationID {
 		t.Fatalf("correlation_id=%q want %q", resp.CorrelationID, req.CorrelationID)
 	}
-	if resp.Sender.ID != actor.SystemActorID || resp.Sender.Kind != actor.KindSystem {
-		t.Fatalf("sender=%+v want system fallback", resp.Sender)
+	// device-unreachable is the proxy facade ACTOR's own callback (the
+	// adapter processes it via OnExternalCallback → ctx.Resolve), NOT a
+	// harness system-fallback — so the synthesized callback envelope's
+	// sender is the adapter tool actor (= the called tool), which is what
+	// proxy_facade.validateCallbackSender requires (asserted below at
+	// OnExternalCallback).
+	if len(req.Audience) != 1 || resp.Sender.ID != req.Audience[0] || resp.Sender.Kind != actor.KindTool {
+		t.Fatalf("sender=%+v want adapter tool actor %v", resp.Sender, req.Audience)
 	}
 	if len(resp.Audience) != 1 || resp.Audience[0] != req.Sender.ID {
 		t.Fatalf("audience=%v want %s", resp.Audience, req.Sender.ID)

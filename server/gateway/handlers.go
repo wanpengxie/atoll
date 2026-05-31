@@ -292,10 +292,15 @@ func synthesizeProxyFacadeUnreachableResponse(sf devicetransit.SendFrame, req me
 		channelID = sf.ChannelID
 	}
 	resp := message.Envelope{
-		ID:            message.ID("response:" + req.ID.String() + ":sys-" + string(message.TerminalReceiverUnavailable)),
+		// device-unreachable is the proxy facade ACTOR resolving its own
+		// callback (OnExternalCallback → ctx.Resolve), NOT a harness
+		// system-fallback. proxy_facade.validateCallbackSender requires the
+		// callback envelope's sender == the adapter actor, so stamp the
+		// tool actor (= sf.AdapterActorID), not the channel system actor.
+		ID:            message.ID("response:" + req.ID.String() + ":unreachable-" + string(message.TerminalReceiverUnavailable)),
 		TS:            time.Now().UnixMilli(),
 		ChannelID:     channelID,
-		Sender:        message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Sender:        message.Sender{Kind: actor.KindTool, ID: sf.AdapterActorID},
 		Kind:          message.KindResponse,
 		Type:          req.Type,
 		Payload:       payload,
