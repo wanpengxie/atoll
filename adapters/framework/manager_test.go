@@ -2268,3 +2268,163 @@ func TestF5ReceiverOwnerCleanedWhenFallbackWriteFails(t *testing.T) {
 		t.Fatal("F5: receiverOwner leaked after fallback write permanently failed")
 	}
 }
+
+// TestCallbackAfterReArmWithinLiveDeadlineAccepted is the N4:F3 temporal R1
+// extension: a callback that arrives AFTER the original request expires_at but
+// BEFORE the heartbeat-extended (re-armed) live deadline must be ACCEPTED, not
+// force-rejected as expired. frame.ExpiresAt is the original immutable anchor
+// the device echoes verbatim (it never learns about re-arm), so it must still
+// strictly equal entry.ExpiresAt (identity check) — but the temporal liveness
+// gate must judge against max(ExpiresAt, RearmedExpiresAt). Before the fix the
+// gate compared now > frame.ExpiresAt and permanently rejected every late
+// callback of a still-live, heartbeat-extended receiver.
+func TestCallbackAfterReArmWithinLiveDeadlineAccepted(t *testing.T) {
+	decl, err := proxyfacade.DeclarationFromCapability("tool:kimi", json.RawMessage(`{
+		"name":"kimi",
+		"types":["kimi.ask"],
+		"type_declarations":{"kimi.ask":{"AllowedKinds":["request","response"]}},
+		"max_pending_ms":30000
+	}`))
+	if err != nil {
+		t.Fatalf("DeclarationFromCapability: %v", err)
+	}
+	mod, err := proxyfacade.New(decl)
+	if err != nil {
+		t.Fatalf("proxyfacade.New: %v", err)
+	}
+	mgr, chain, lookup, _, clock := newTestManager(t, mod, func(cfg *ManagerConfig) {
+		cfg.DeviceTransit = &recordingTransit{}
+	})
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
+
+	req := newTestRequest("channel:test", "agent:a", "kimi.ask", "req-rearm-live")
+	req.Audience = message.Audience{"tool:kimi"}
+	req.CorrelationID = "corr-rearm-live"
+	lookup.Put(req)
+	if err := mgr.Dispatch(context.Background(), req); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	bm := mgr.byName[decl.Name]
+	entry, ok, err := bm.correlation.Get(context.Background(), "req-rearm-live")
+	if err != nil || !ok {
+		t.Fatalf("correlation after dispatch ok=%v err=%v", ok, err)
+	}
+	originalExpiresAt := entry.ExpiresAt // == frame.ExpiresAt the device echoes
+
+	// Heartbeat re-arms the F3 deadline far past the original. ReArm clamps to
+	// the ScheduleToClose ceiling and persists RearmedExpiresAt; the immutable
+	// ExpiresAt stays the original anchor.
+	rearmed := clock.Now().Add(5 * time.Minute)
+	if err := bm.policy.ReArm(context.Background(), "req-rearm-live", rearmed); err != nil {
+		t.Fatalf("ReArm: %v", err)
+	}
+	entry, _, _ = bm.correlation.Get(context.Background(), "req-rearm-live")
+	if entry.ExpiresAt != originalExpiresAt {
+		t.Fatalf("ReArm must not mutate immutable ExpiresAt: got %d want %d", entry.ExpiresAt, originalExpiresAt)
+	}
+	if entry.RearmedExpiresAt <= originalExpiresAt {
+		t.Fatalf("ReArm must extend RearmedExpiresAt past original: rearmed=%d original=%d", entry.RearmedExpiresAt, originalExpiresAt)
+	}
+
+	// Wall clock passes the original deadline but is still within the live
+	// (re-armed) deadline. The real AfterFunc was armed ~30s out and does not
+	// fire under the fake clock, so the entry stays pending.
+	clock.Set(time.UnixMilli(originalExpiresAt + 1000))
+	if clock.Now().UnixMilli() >= entry.RearmedExpiresAt {
+		t.Fatalf("test setup: clock must be before live deadline (now=%d rearmed=%d)", clock.Now().UnixMilli(), entry.RearmedExpiresAt)
+	}
+
+	// The device echoes the ORIGINAL expires_at it was sent, and carries a full
+	// response envelope whose parent_id == request_id.
+	respPayload, _ := json.Marshal(message.Envelope{
+		ID:            "resp-rearm-live",
+		ChannelID:     "channel:test",
+		Sender:        message.Sender{Kind: actor.KindTool, ID: "tool:kimi"},
+		Kind:          message.KindResponse,
+		Type:          "kimi.ask",
+		ParentID:      req.ID,
+		CorrelationID: req.CorrelationID,
+		Payload:       json.RawMessage(`{"status":"completed","answer":"ok"}`),
+		Audience:      message.Audience{"agent:a"},
+	})
+	frame := adapter.ExternalCallbackFrame{
+		ChannelID:      "channel:test",
+		AdapterActorID: decl.ActorID,
+		RequestID:      req.ID,
+		ParentID:       req.ID,
+		CorrelationID:  req.CorrelationID,
+		ExpiresAt:      originalExpiresAt,
+		Payload:        respPayload,
+	}
+	if err := mgr.OnExternalCallbackFrame(context.Background(), decl.Name, frame); err != nil {
+		t.Fatalf("late callback within live deadline must be accepted, got: %v", err)
+	}
+
+	// Accepted ⇒ proxy resolved a single terminal and the correlation is done.
+	if written := chain.Written(); len(written) != 1 || written[0].ParentID != req.ID {
+		t.Fatalf("written=%v want single terminal for %s", written, req.ID)
+	}
+	entry, _, _ = bm.correlation.Get(context.Background(), "req-rearm-live")
+	if entry.State != adapter.CorrelationDone {
+		t.Fatalf("correlation state=%s want done after accepted late callback", entry.State)
+	}
+}
+
+// TestCallbackAfterLiveDeadlineRejected is the negative companion: once wall
+// clock passes the re-armed live deadline too, a late callback is correctly
+// rejected as expired — the fix widens the acceptance window to the live
+// deadline, it does not disable expiry.
+func TestCallbackAfterLiveDeadlineRejected(t *testing.T) {
+	decl, err := proxyfacade.DeclarationFromCapability("tool:kimi", json.RawMessage(`{
+		"name":"kimi",
+		"types":["kimi.ask"],
+		"type_declarations":{"kimi.ask":{"AllowedKinds":["request","response"]}},
+		"max_pending_ms":30000
+	}`))
+	if err != nil {
+		t.Fatalf("DeclarationFromCapability: %v", err)
+	}
+	mod, err := proxyfacade.New(decl)
+	if err != nil {
+		t.Fatalf("proxyfacade.New: %v", err)
+	}
+	mgr, _, lookup, _, clock := newTestManager(t, mod, func(cfg *ManagerConfig) {
+		cfg.DeviceTransit = &recordingTransit{}
+	})
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
+
+	req := newTestRequest("channel:test", "agent:a", "kimi.ask", "req-rearm-dead")
+	req.Audience = message.Audience{"tool:kimi"}
+	req.CorrelationID = "corr-rearm-dead"
+	lookup.Put(req)
+	if err := mgr.Dispatch(context.Background(), req); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	bm := mgr.byName[decl.Name]
+	entry, _, _ := bm.correlation.Get(context.Background(), "req-rearm-dead")
+	originalExpiresAt := entry.ExpiresAt
+
+	rearmed := clock.Now().Add(2 * time.Minute)
+	if err := bm.policy.ReArm(context.Background(), "req-rearm-dead", rearmed); err != nil {
+		t.Fatalf("ReArm: %v", err)
+	}
+	entry, _, _ = bm.correlation.Get(context.Background(), "req-rearm-dead")
+
+	// Past the live deadline.
+	clock.Set(time.UnixMilli(entry.RearmedExpiresAt + 1000))
+
+	frame := adapter.ExternalCallbackFrame{
+		ChannelID:      "channel:test",
+		AdapterActorID: decl.ActorID,
+		RequestID:      req.ID,
+		ParentID:       req.ID,
+		CorrelationID:  req.CorrelationID,
+		ExpiresAt:      originalExpiresAt,
+		Payload:        json.RawMessage(`{"correlation_id":"req-rearm-dead","status":"completed","answer":"ok"}`),
+	}
+	err = mgr.OnExternalCallbackFrame(context.Background(), decl.Name, frame)
+	if err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("callback past live deadline must be rejected as expired, got: %v", err)
+	}
+}

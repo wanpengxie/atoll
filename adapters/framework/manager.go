@@ -894,6 +894,21 @@ func (m *Manager) DeclarationForActor(actorID actor.ActorID) (adapter.Declaratio
 	return bm.declaration, true
 }
 
+// liveDeadlineMs returns the entry's effective F3 deadline: the later of the
+// immutable original ExpiresAt and the latest provisional-heartbeat-extended
+// RearmedExpiresAt (0 = never re-armed). This is the single derivation of "how
+// long is this request actually still live" — every temporal liveness decision
+// (crash-recovery re-arm, late-callback acceptance) MUST go through it so a
+// receiver kept alive by heartbeats is judged against its live deadline, not
+// the stale original. The immutable ExpiresAt stays the identity/tamper anchor
+// asserted by strict-equality checks; only liveness uses this value.
+func liveDeadlineMs(e adapter.CorrelationEntry) int64 {
+	if e.RearmedExpiresAt > e.ExpiresAt {
+		return e.RearmedExpiresAt
+	}
+	return e.ExpiresAt
+}
+
 func (m *Manager) recoverTimersForBoundModule(ctx context.Context, bm *boundModule) error {
 	if err := bm.correlation.recoverFromStore(ctx); err != nil {
 		return fmt.Errorf("framework: recover %s: %w", bm.declaration.Name, err)
@@ -910,11 +925,7 @@ func (m *Manager) recoverTimersForBoundModule(ctx context.Context, bm *boundModu
 		// request that never heart-beat (RearmedExpiresAt==0) recovers against its
 		// original ExpiresAt and still F3-fails promptly if it elapsed during
 		// downtime.
-		deadlineMs := e.ExpiresAt
-		if e.RearmedExpiresAt > deadlineMs {
-			deadlineMs = e.RearmedExpiresAt
-		}
-		deadline := time.UnixMilli(deadlineMs)
+		deadline := time.UnixMilli(liveDeadlineMs(e))
 		// F4: rebuild the router receiver-owner index BEFORE re-arming the F3
 		// timer. A recovered entry whose deadline is already past makes
 		// RecoverTimer fire (near-)immediately; the fallback final must find the
@@ -1461,7 +1472,17 @@ func (m *Manager) OnExternalCallbackFrame(ctx context.Context, adapterName strin
 			frame.ExpiresAt, entry.ExpiresAt)
 		return devicetransit.NewAckError(devicetransit.AckRejectedPermanent, "expires_at_mismatch", "", err)
 	}
-	if m.cfg.Clock().UnixMilli() > frame.ExpiresAt {
+	// Temporal liveness uses the LIVE deadline, NOT frame.ExpiresAt. frame.ExpiresAt
+	// is the original request envelope.expires_at echoed verbatim by the device
+	// (the device never learns about re-arm), so it equals the immutable anchor
+	// asserted strictly just above. But provisional liveness heartbeats may have
+	// re-armed the F3 timer past that original deadline (RearmedExpiresAt); a
+	// callback that arrives within the live deadline must be ACCEPTED, not
+	// force-rejected against the stale original — temporal R1 / extends recovery's
+	// liveDeadlineMs to the callback ingress path so timer and callback agree on
+	// "still live".
+	liveDeadline := liveDeadlineMs(entry)
+	if m.cfg.Clock().UnixMilli() > liveDeadline {
 		m.cfg.Metrics.IncCounter("adapter.callback.expired", "adapter", adapterName)
 		ev := orphanCallbackEvent{
 			AdapterName:    adapterName,
@@ -1470,14 +1491,14 @@ func (m *Manager) OnExternalCallbackFrame(ctx context.Context, adapterName strin
 			Chain:          m.cfg.HarnessChain,
 			Clock:          m.cfg.Clock,
 			CorrelationID:  requestID.String(),
-			Detail:         "callback arrived after expires_at",
+			Detail:         "callback arrived after live deadline",
 			Payload:        payload,
 		}
 		if err := emitOrphanCallbackEvents(ctx, ev); err != nil {
 			return err
 		}
-		err := fmt.Errorf("framework: OnExternalCallbackFrame callback expired: now=%d expires_at=%d",
-			m.cfg.Clock().UnixMilli(), frame.ExpiresAt)
+		err := fmt.Errorf("framework: OnExternalCallbackFrame callback expired: now=%d live_deadline=%d (frame_expires_at=%d rearmed=%d)",
+			m.cfg.Clock().UnixMilli(), liveDeadline, frame.ExpiresAt, entry.RearmedExpiresAt)
 		return devicetransit.NewAckError(devicetransit.AckRejectedPermanent, "callback_expired", "", err)
 	}
 	return m.runExternalCallbackFrame(ctx, bm, adapterName, frame, requestID.String())

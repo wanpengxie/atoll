@@ -158,6 +158,15 @@ func (c *fixedClock) Now() time.Time {
 	return c.now
 }
 
+// Set jumps the fake clock to t. Used to simulate wall-clock passing the
+// original F3 deadline without waiting (the real AfterFunc is unaffected, so a
+// timer armed for seconds-out does not fire during the test).
+func (c *fixedClock) Set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = t
+}
+
 // recordingLogger captures every log line for assertion.
 type recordingLogger struct {
 	mu    sync.Mutex
