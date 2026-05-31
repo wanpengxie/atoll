@@ -112,9 +112,8 @@ export function isProvisionalStatus(status) {
  */
 export function isProvisionalResponse(envelope) {
   if (!envelope) return false;
-  const kind = envelope.kind || envelope.Kind;
-  if (kind !== KIND.RESPONSE) return false;
-  const status = envelope.payload?.status || envelope.payload?.Status || '';
+  if (envelope.kind !== KIND.RESPONSE) return false;
+  const status = envelope.payload?.status || '';
   return isProvisionalStatus(status);
 }
 
@@ -124,9 +123,8 @@ export function isProvisionalResponse(envelope) {
  */
 export function isFinalResponse(envelope) {
   if (!envelope) return false;
-  const kind = envelope.kind || envelope.Kind;
-  if (kind !== KIND.RESPONSE) return false;
-  const status = envelope.payload?.status || envelope.payload?.Status || '';
+  if (envelope.kind !== KIND.RESPONSE) return false;
+  const status = envelope.payload?.status || '';
   return isFinalStatus(status);
 }
 
@@ -189,7 +187,6 @@ export function provisionalDisplay(status) {
 // --- Core types we render specially (L3 §2.2 Core type 渲染) -------------
 export const CORE_TYPE = Object.freeze({
   HUMAN_TEXT: 'human.text',
-  CHAT_TEXT: 'chat.text',  // legacy / demo alias used by current UI composer
   AGENT_TEXT: 'agent.text',
   SYSTEM_EVENT: 'core.system_event',
   SYSTEM_HEARTBEAT: 'system.heartbeat',

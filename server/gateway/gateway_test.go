@@ -3180,10 +3180,10 @@ func TestNotifyProxyDaemonReadyCarriesProxyHostMetadata(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- app.NotifyProxyDaemonReady(ctx, devicebus.Daemon{
-			ID:        "daemon-proxy-host",
-			ChannelID: chID,
-			OwnerID:   "user-proxy-host",
-			Name:      "Proxy Host",
+			ID:               "daemon-proxy-host",
+			AttachedChannels: []channel.ID{chID},
+			OwnerID:          "user-proxy-host",
+			Name:             "Proxy Host",
 		}, devicebus.DaemonReadyInput{
 			Actors: []devicebus.ReadyActor{{
 				ActorID:       "tool:proxy-host",

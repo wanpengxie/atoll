@@ -147,7 +147,6 @@ func TestAsk_HappyPath(t *testing.T) {
 		ID            string `json:"id"`
 		CorrelationID string `json:"correlation_id"`
 		Kind          string `json:"kind"`
-		FrameID       string `json:"frame_id"`
 		Seq           int    `json:"seq"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
@@ -155,9 +154,6 @@ func TestAsk_HappyPath(t *testing.T) {
 	}
 	if out.ID != "msg-xyz" || out.CorrelationID != "msg-xyz" || out.Kind != "request" {
 		t.Errorf("stdout id/correlation_id/kind=%q/%q/%q", out.ID, out.CorrelationID, out.Kind)
-	}
-	if out.FrameID != "frame-abc" {
-		t.Errorf("stdout frame_id=%q", out.FrameID)
 	}
 	if out.Seq != 42 {
 		t.Errorf("stdout seq=%d", out.Seq)

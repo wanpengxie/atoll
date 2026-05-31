@@ -160,21 +160,21 @@ type CreateChannelRequest struct {
 	InitialMembers []InitialMember `json:"initial_members,omitempty"`
 	// ChannelType carries the business channel-template key
 	// (catalog.Channel.Type) the server resolved at reserve time —
-	// typically `"group"` (no template) or `"xhs-creator"` (domain-xhs
-	// template). The daemon uses it to look up the per-type
-	// ChannelTemplate (actor seeds / workdir subdirs / domain prompt) so
-	// the bootstrap saga can specialise the new channel without touching
-	// the envelope schema.
+	// `"group"` (no template) for ordinary group chats or `"xhs-creator"`
+	// (domain-xhs template) and similar domain keys. The daemon uses it
+	// to look up the per-type ChannelTemplate (actor seeds / workdir
+	// subdirs / domain prompt) so the bootstrap saga can specialise the
+	// new channel without touching the envelope schema.
 	//
-	// Empty string is treated as the legacy "no template" path — the
-	// saga only seeds system + initial members and OnChannelBoot does
-	// not install any domain adapters. This preserves backward
-	// compatibility for older daemons.
+	// channel_type is mandatory. An empty string is rejected fail-fast at
+	// OnCreateChannel — there is no legacy "no template" path. The catalog
+	// normalizes an unspecified type to "group" at channel-create time, so
+	// every reserve carries an explicit type.
 	//
 	// TODO: impl-layer2 §3.2.1 lists only initial_members/initial_types/
 	// initial_config/metadata as wire fields; channel_type should fold
 	// into one of those (likely initial_config) in a follow-up.
-	ChannelType string `json:"channel_type,omitempty"`
+	ChannelType string `json:"channel_type"`
 }
 
 // InitialMember mirrors one `initial_members[*]` entry per L2 §12.1.

@@ -24,14 +24,10 @@ var (
 )
 
 // Daemon is the owner-scoped proxy daemon row (one row per user-machine
-// install). T1-onwards `ChannelID` was the single channel this daemon
-// served; T7 (2026-05-27) moves attach to the daemon_channel_attachments
-// join table so one install can serve many channels. ChannelID stays for
-// legacy reads (always "" for daemons created post-T7) and is no longer
-// the routing key — AttachedChannels is.
+// install). Routing is driven entirely by the daemon_channel_attachments
+// join table (AttachedChannels) — one install can serve many channels.
 type Daemon struct {
 	ID               placement.DaemonID
-	ChannelID        channel.ID
 	OwnerID          string
 	Name             string
 	APIKey           string
@@ -63,8 +59,7 @@ type DaemonReadyInput struct {
 
 // CreateDaemon issues a new proxy daemon row scoped to an owner. The
 // daemon is "installed but unattached" until callers call
-// AttachDaemonToChannel (see UI flow). Legacy column `channel_id` is
-// left blank.
+// AttachDaemonToChannel (see UI flow).
 func (s *Service) CreateDaemon(ctx context.Context, in CreateDaemonInput) (Daemon, string, error) {
 	in.Name = strings.TrimSpace(in.Name)
 	if in.OwnerID == "" || in.Name == "" {
@@ -86,10 +81,10 @@ func (s *Service) CreateDaemon(ctx context.Context, in CreateDaemonInput) (Daemo
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO daemons (
-		  id, key_hash, channel_id, owner_id, name,
+		  id, key_hash, owner_id, name,
 		  api_key, api_key_prefix, status, created_at, last_heartbeat
 		)
-		VALUES (?, '', '', ?, ?, ?, ?, 'offline', ?, 0)`,
+		VALUES (?, '', ?, ?, ?, ?, 'offline', ?, 0)`,
 		string(row.ID), row.OwnerID, row.Name,
 		row.APIKey, row.APIKeyPrefix, row.CreatedAt,
 	); err != nil {
@@ -355,7 +350,7 @@ func (s *Service) ListDaemonAttachments(ctx context.Context, daemonID placement.
 // channel attachments. Drives the UI "我的设备" master list.
 func (s *Service) ListDaemonsByOwner(ctx context.Context, ownerID string) ([]Daemon, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, channel_id, owner_id, name, api_key_prefix, status,
+		SELECT id, owner_id, name, api_key_prefix, status,
 		       COALESCE(hostname,''), COALESCE(proxy_version,''),
 		       COALESCE(last_heartbeat,0), created_at
 		  FROM daemons
@@ -384,7 +379,7 @@ func (s *Service) ListDaemonsByOwner(ctx context.Context, ownerID string) ([]Dae
 // for the per-channel "attached devices" view.
 func (s *Service) ListDaemons(ctx context.Context, channelID channel.ID) ([]Daemon, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT d.id, d.channel_id, d.owner_id, d.name, d.api_key_prefix, d.status,
+		SELECT d.id, d.owner_id, d.name, d.api_key_prefix, d.status,
 		       COALESCE(d.hostname,''), COALESCE(d.proxy_version,''),
 		       COALESCE(d.last_heartbeat,0), d.created_at
 		  FROM daemons d
@@ -414,7 +409,7 @@ func (s *Service) ListDaemons(ctx context.Context, channelID channel.ID) ([]Daem
 // Used by attach/detach handlers for owner authorization.
 func (s *Service) GetDaemonByID(ctx context.Context, daemonID placement.DaemonID) (Daemon, error) {
 	return s.getDaemon(ctx, `
-		SELECT id, channel_id, owner_id, name, api_key, api_key_prefix, status,
+		SELECT id, owner_id, name, api_key, api_key_prefix, status,
 		       COALESCE(hostname,''), COALESCE(proxy_version,''),
 		       COALESCE(last_heartbeat,0), created_at
 		  FROM daemons
@@ -431,7 +426,7 @@ func (s *Service) GetDaemonByAPIKey(ctx context.Context, apiKey string) (Daemon,
 		return Daemon{}, ErrDaemonNotFound
 	}
 	row, err := s.getDaemon(ctx, `
-		SELECT id, channel_id, owner_id, name, api_key, api_key_prefix, status,
+		SELECT id, owner_id, name, api_key, api_key_prefix, status,
 		       COALESCE(hostname,''), COALESCE(proxy_version,''),
 		       COALESCE(last_heartbeat,0), created_at
 		  FROM daemons
@@ -474,13 +469,12 @@ func (s *Service) DeleteDaemon(ctx context.Context, daemonID placement.DaemonID)
 	_ = s.clearDaemonActiveActors(context.WithoutCancel(ctx), daemonID)
 	s.closeDaemonConnection(daemonID, true)
 	if notifier := s.proxyDaemonNotifier(); notifier != nil && row.ID != "" && len(actors) > 0 {
-		// Pre-T7 the offline notifier knew exactly one channel from
-		// row.ChannelID. Now we have N — fire one notification per
-		// attachment with the same actor list (each cloud daemon facade
-		// for that channel needs to retire its registration).
+		// Fire one notification per attachment with the same actor list —
+		// each cloud daemon facade for that channel needs to retire its
+		// registration.
 		for _, chID := range attached {
 			rowCopy := row
-			rowCopy.ChannelID = chID
+			rowCopy.AttachedChannels = []channel.ID{chID}
 			_ = notifier.NotifyProxyDaemonOffline(context.WithoutCancel(ctx), rowCopy, actors)
 		}
 	}
@@ -688,9 +682,9 @@ func (s *Service) ListDaemonActiveActorIDs(ctx context.Context, daemonID placeme
 
 func (s *Service) getDaemon(ctx context.Context, query string, args ...any) (Daemon, error) {
 	var row Daemon
-	var id, chID string
+	var id string
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(
-		&id, &chID, &row.OwnerID, &row.Name, &row.APIKey, &row.APIKeyPrefix,
+		&id, &row.OwnerID, &row.Name, &row.APIKey, &row.APIKeyPrefix,
 		&row.Status, &row.Hostname, &row.ProxyVersion, &row.LastHeartbeat,
 		&row.CreatedAt,
 	)
@@ -701,7 +695,6 @@ func (s *Service) getDaemon(ctx context.Context, query string, args ...any) (Dae
 		return Daemon{}, fmt.Errorf("devicebus: get daemon: %w", err)
 	}
 	row.ID = placement.DaemonID(id)
-	row.ChannelID = channel.ID(chID)
 	return row, nil
 }
 
@@ -711,9 +704,9 @@ type daemonScanner interface {
 
 func scanDaemonWithoutKey(rows daemonScanner) (Daemon, error) {
 	var row Daemon
-	var id, chID string
+	var id string
 	err := rows.Scan(
-		&id, &chID, &row.OwnerID, &row.Name, &row.APIKeyPrefix,
+		&id, &row.OwnerID, &row.Name, &row.APIKeyPrefix,
 		&row.Status, &row.Hostname, &row.ProxyVersion, &row.LastHeartbeat,
 		&row.CreatedAt,
 	)
@@ -721,7 +714,6 @@ func scanDaemonWithoutKey(rows daemonScanner) (Daemon, error) {
 		return Daemon{}, fmt.Errorf("devicebus: scan daemon: %w", err)
 	}
 	row.ID = placement.DaemonID(id)
-	row.ChannelID = channel.ID(chID)
 	return row, nil
 }
 

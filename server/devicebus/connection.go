@@ -243,7 +243,6 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 		if err := s.MarkDaemonOnline(context.WithoutCancel(c.Request.Context()), daemon.ID); err != nil {
 			s.log.Warn("devicebus.daemon_online_failed",
 				"daemon_id", string(daemon.ID),
-				"channel_id", string(daemon.ChannelID),
 				"daemon_session_id", conn.SessionID,
 				"err", err.Error(),
 			)
@@ -253,7 +252,6 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 		s.log.Info("devicebus.daemon_connected",
 			"daemon_id", string(daemon.ID),
 			"daemon_name", daemon.Name,
-			"channel_id", string(daemon.ChannelID),
 			"daemon_session_id", conn.SessionID,
 		)
 		defer func() {
@@ -269,7 +267,6 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 			s.log.Warn("devicebus.daemon_ready_rejected",
 				"reason", "first_frame_not_ready",
 				"daemon_id", string(daemon.ID),
-				"channel_id", string(daemon.ChannelID),
 				"daemon_session_id", conn.SessionID,
 				"frame_type", string(first.FrameType),
 			)
@@ -289,7 +286,6 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 			s.log.Warn("devicebus.daemon_ready_rejected",
 				"reason", "stale_connection_generation",
 				"daemon_id", string(daemon.ID),
-				"channel_id", string(daemon.ChannelID),
 				"daemon_session_id", conn.SessionID,
 				"generation", conn.Generation,
 			)
@@ -300,7 +296,6 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 			s.log.Warn("devicebus.daemon_ready_rejected",
 				"reason", "ready_apply_failed",
 				"daemon_id", string(daemon.ID),
-				"channel_id", string(daemon.ChannelID),
 				"daemon_session_id", conn.SessionID,
 				"err", err.Error(),
 			)
@@ -310,7 +305,6 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 			if err := n.NotifyProxyDaemonReady(context.WithoutCancel(c.Request.Context()), daemon, readyInput); err != nil {
 				s.log.Warn("devicebus.daemon_ready_notify_failed",
 					"daemon_id", string(daemon.ID),
-					"channel_id", string(daemon.ChannelID),
 					"daemon_session_id", conn.SessionID,
 					"err", err.Error(),
 				)
@@ -335,7 +329,6 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 		}
 		s.log.Info("devicebus.daemon_ready",
 			"daemon_id", string(daemon.ID),
-			"channel_id", string(daemon.ChannelID),
 			"daemon_session_id", conn.SessionID,
 			"actors", len(first.Actors),
 			"hostname", first.Hostname,
@@ -357,7 +350,6 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 					s.log.Warn("devicebus.daemon_frame_dropped",
 						"reason", "stale_connection_generation",
 						"daemon_id", string(daemon.ID),
-						"channel_id", string(daemon.ChannelID),
 						"daemon_session_id", conn.SessionID,
 						"generation", conn.Generation,
 						"frame_type", string(frame.FrameType),
@@ -367,7 +359,6 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 				if err := s.HeartbeatDaemon(context.WithoutCancel(c.Request.Context()), daemon.ID); err != nil {
 					s.log.Warn("devicebus.daemon_heartbeat_failed",
 						"daemon_id", string(daemon.ID),
-						"channel_id", string(daemon.ChannelID),
 						"daemon_session_id", conn.SessionID,
 						"err", err.Error(),
 					)
@@ -378,7 +369,6 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 				s.log.Warn("devicebus.daemon_frame_rejected",
 					"reason", "unexpected_reserved_frame",
 					"daemon_id", string(daemon.ID),
-					"channel_id", string(daemon.ChannelID),
 					"daemon_session_id", conn.SessionID,
 					"frame_type", string(frame.FrameType),
 				)
@@ -458,7 +448,6 @@ func (s *Service) HandleWSV2(forwarder TransitForwarder) gin.HandlerFunc {
 				s.log.Warn("devicebus.daemon_frame_rejected",
 					"reason", "unknown_frame_type",
 					"daemon_id", string(daemon.ID),
-					"channel_id", string(daemon.ChannelID),
 					"daemon_session_id", conn.SessionID,
 					"frame_type", string(frame.FrameType),
 				)
@@ -589,7 +578,6 @@ func (s *Service) registerDaemonConnection(d Daemon, conn *DaemonConnection) {
 	if previous != nil && previous != conn {
 		metrics.Default().IncCounter("devicebus.daemon.reconnect",
 			"daemon_id", string(d.ID),
-			"channel_id", string(d.ChannelID),
 		)
 		_ = previous.Close()
 	}
@@ -639,7 +627,6 @@ func (s *Service) unregisterDaemonConnection(daemonID placement.DaemonID, conn *
 	}
 	s.log.Info("devicebus.daemon_disconnected",
 		"daemon_id", string(daemonID),
-		"channel_id", string(conn.Daemon.ChannelID),
 		"daemon_session_id", conn.SessionID,
 	)
 	return true

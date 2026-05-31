@@ -152,13 +152,11 @@ type DaemonConfig struct {
 
 	// ChannelTemplates is the per-type template registry keyed by
 	// CreateChannelRequest.ChannelType (catalog channel.type — e.g.
-	// "group" / "xhs-creator"). Unknown types fall through to the entry
-	// keyed by "" if one exists, otherwise to a zero ChannelTemplate (no
-	// actor seeds / subdirs).
-	//
-	// The empty-string key is reserved for the "no template" legacy
-	// path (generic group channels) so cmd/daemon can register both
-	// `""` and `"xhs-creator"` in one map without losing the fallback.
+	// "group" / "xhs-creator"). Unknown types resolve to a zero
+	// ChannelTemplate (no actor seeds / subdirs). There is no ""
+	// key — channel_type is mandatory and an empty type is rejected
+	// fail-fast at OnCreateChannel; ordinary group chats register under
+	// the explicit "group" key.
 	ChannelTemplates map[string]ChannelTemplate
 
 	// ShutdownDrainTimeout bounds graceful shutdown's drain phase. During
@@ -466,9 +464,10 @@ type ChannelHooks struct {
 // buildTemplateResolver returns a closure that picks the ChannelTemplate
 // for a given CreateChannelRequest.ChannelType. M1.6-T5 phase-2 wiring:
 //
-//   - When templates is non-empty: prefer an exact-match entry; fall
-//     back to the entry keyed by "" if present; otherwise return the
-//     zero value (no template).
+//   - When templates is non-empty: return the exact-match entry, else the
+//     zero value (no template). channel_type is mandatory — empty types
+//     are rejected fail-fast at OnCreateChannel, so there is no ""
+//     fallback key here.
 func buildTemplateResolver(templates map[string]ChannelTemplate) func(channelType string) ChannelTemplate {
 	if len(templates) == 0 {
 		return func(string) ChannelTemplate { return ChannelTemplate{} }
@@ -481,9 +480,6 @@ func buildTemplateResolver(templates map[string]ChannelTemplate) func(channelTyp
 	}
 	return func(channelType string) ChannelTemplate {
 		if tpl, ok := snapshot[channelType]; ok {
-			return tpl
-		}
-		if tpl, ok := snapshot[""]; ok {
 			return tpl
 		}
 		return ChannelTemplate{}
@@ -1399,11 +1395,11 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 		leaseStore := workerhost.NewLeaseStore(cr.db)
 		// M1.6-T5 phase-3 + A2 — pack the per-channel domain prompt,
 		// channel type, channel id, and a daemon-owned bootstrap display
-		// snapshot into the worker spawn env. Empty values are still
-		// passed so the worker can distinguish "no template" from
-		// "missing wire".
+		// snapshot into the worker spawn env. The domain prompt may be
+		// empty (no template); channel_type is always non-empty because
+		// it is mandatory at channel create.
 		// Order is:
-		//   COAGENT_CHANNEL_TYPE=<type>     (may be "")
+		//   COAGENT_CHANNEL_TYPE=<type>     (always set; e.g. "group")
 		//   COAGENT_DOMAIN_PROMPT=<prompt>  (may be ""; omitted entirely if empty)
 		//   COAGENT_CHANNEL_ID=<id>         (always set for owned channels)
 		//   COAGENT_CHANNEL_CONTEXT_JSON=<json> (bootstrap display snapshot)
@@ -1914,6 +1910,14 @@ func (d *Daemon) handleCreateChannel(
 	}
 	if req.CreateRequestID == "" {
 		return reject("empty_create_request_id")
+	}
+	// channel_type is mandatory (B1): there is no "" / legacy no-template
+	// path. Ordinary group chats MUST carry an explicit "group" type
+	// (the catalog defaults "" -> "group" at create time). An empty type
+	// here means a caller bypassed that normalization — reject fail-fast
+	// instead of silently falling through to a generic projection.
+	if req.ChannelType == "" {
+		return reject("empty_channel_type")
 	}
 
 	sqlitePath := filepath.Join(d.cfg.ChannelsDir, string(req.ChannelID), "channel.sqlite")

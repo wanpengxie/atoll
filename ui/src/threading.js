@@ -143,8 +143,7 @@ export function groupTimeline(messages, opts) {
     // kind=event, non-system visibility: this is the public reply or a
     // standalone announcement (e.g. xhs.note.archived).
     if (msg.type === CORE_TYPE.AGENT_TEXT ||
-      msg.type === CORE_TYPE.HUMAN_TEXT ||
-      msg.type === CORE_TYPE.CHAT_TEXT) {
+      msg.type === CORE_TYPE.HUMAN_TEXT) {
       story.primary = msg;
     } else {
       story.events.push(msg);
@@ -179,13 +178,14 @@ function newThread(requestID) {
 //                   from request audience (tool / human / agent)
 //   completed     → response.payload.status === 'completed'
 //   failed        → response.payload.status === 'failed' (any reason)
-//   responded     → response present but payload.status absent (legacy)
+//   provisional   → response present with a non-final payload.status
+//                   (Layer-2 core / Layer-3 extension)
 export function computeThreadStatus(thread) {
   if (!thread.response) return 'pending';
   const status = readPayloadStatus(thread.response);
   if (status === 'completed') return 'completed';
   if (status === 'failed') return 'failed';
-  return 'responded';
+  return 'provisional';
 }
 
 function readPayloadStatus(msg) {

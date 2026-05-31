@@ -99,14 +99,8 @@ function SidebarSection({
   createPlaceholder,
   createExtra,
 }) {
-  // Normalize createExtra: string => legacy text input; object => typed field.
-  const extraSpec = (() => {
-    if (!createExtra) return null;
-    if (typeof createExtra === 'string') {
-      return { kind: 'text', placeholder: createExtra };
-    }
-    return createExtra;
-  })();
+  // createExtra is always a typed field spec (object) or null.
+  const extraSpec = createExtra || null;
   const extraInitial = extraSpec && extraSpec.kind === 'select' ? (extraSpec.default || '') : '';
 
   const [adding, setAdding] = useState(false);
@@ -134,7 +128,7 @@ function SidebarSection({
     try {
       const extraValue = extraSpec && extraSpec.kind === 'select'
         ? (extra || extraSpec.default || undefined)
-        : (extra.trim() || undefined);
+        : undefined;
       await onCreate(name.trim(), extraValue);
       setName('');
       setExtra(extraInitial);
@@ -185,13 +179,6 @@ function SidebarSection({
             onChange={(e) => setName(e.target.value)}
             required
           />
-          {extraSpec && extraSpec.kind === 'text' && (
-            <input
-              placeholder={extraSpec.placeholder}
-              value={extra}
-              onChange={(e) => setExtra(e.target.value)}
-            />
-          )}
           {extraSpec && extraSpec.kind === 'select' && (
             <select
               className="inline-select"

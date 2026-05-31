@@ -240,10 +240,11 @@ func (a *App) synthesizeDeviceUnreachableCallback(
 }
 
 func synthesizeDeviceUnreachablePayload(sf devicetransit.SendFrame, body deviceFrameBody) (json.RawMessage, error) {
-	if req, ok := decodeProxyFacadeRequestEnvelope(body.Payload); ok {
-		return synthesizeProxyFacadeUnreachableResponse(sf, req)
+	req, ok := decodeProxyFacadeRequestEnvelope(body.Payload)
+	if !ok {
+		return nil, fmt.Errorf("gateway: device_transit.recv body is not a proxy_facade request envelope")
 	}
-	return synthesizeLegacyDeviceUnreachableCallback(body)
+	return synthesizeProxyFacadeUnreachableResponse(sf, req)
 }
 
 func decodeProxyFacadeRequestEnvelope(raw json.RawMessage) (message.Envelope, bool) {
@@ -304,23 +305,6 @@ func synthesizeProxyFacadeUnreachableResponse(sf devicetransit.SendFrame, req me
 		Audience:      message.Audience{req.Sender.ID},
 	}
 	return json.Marshal(resp)
-}
-
-func synthesizeLegacyDeviceUnreachableCallback(body deviceFrameBody) (json.RawMessage, error) {
-	code := "device_not_bound"
-	msg := "no proxy daemon is registered for this channel + adapter actor"
-	return json.Marshal(map[string]any{
-		// Callback.correlation_id matches the envelope.id (carried as
-		// request_id on the device_transit wire), not the chain
-		// correlation_id. Adapter framework uses this to look up the
-		// pending request entry; mismatch falls through as orphan.
-		"correlation_id": body.RequestID,
-		"status":         "error",
-		"error": map[string]any{
-			"code":    code,
-			"message": msg,
-		},
-	})
 }
 
 // OnChannelCreated implements catalog.PlacementHook. Channel bind sends the
@@ -462,14 +446,7 @@ func (a *App) NotifyProxyDaemonReady(ctx context.Context, d devicebus.Daemon, re
 	if len(ready.Actors) == 0 {
 		return nil
 	}
-	channels := d.AttachedChannels
-	if len(channels) == 0 && d.ChannelID != "" {
-		// Legacy single-channel callers (pre-T7) supplied d.ChannelID
-		// directly; preserve that path so existing call sites keep
-		// working even before they're refactored to thread attachments.
-		channels = []channel.ID{d.ChannelID}
-	}
-	for _, chID := range channels {
+	for _, chID := range d.AttachedChannels {
 		body := kerneldaemonbus.UpdateMembersBody{
 			FrameID:   kerneldaemonbus.FrameID(uuid.NewString()),
 			ChannelID: chID,
@@ -505,17 +482,12 @@ func (a *App) NotifyProxyDaemonReady(ctx context.Context, d devicebus.Daemon, re
 
 // NotifyProxyDaemonOffline fires one update_members(removes=actors)
 // frame per channel currently attached to the daemon — same multi-
-// channel semantics as the ready notifier. Legacy single-channel call
-// sites still work via d.ChannelID when AttachedChannels is empty.
+// channel semantics as the ready notifier.
 func (a *App) NotifyProxyDaemonOffline(ctx context.Context, d devicebus.Daemon, actors []actor.ActorID) error {
 	if len(actors) == 0 {
 		return nil
 	}
-	channels := d.AttachedChannels
-	if len(channels) == 0 && d.ChannelID != "" {
-		channels = []channel.ID{d.ChannelID}
-	}
-	for _, chID := range channels {
+	for _, chID := range d.AttachedChannels {
 		body := kerneldaemonbus.UpdateMembersBody{
 			FrameID:   kerneldaemonbus.FrameID(uuid.NewString()),
 			ChannelID: chID,
@@ -1205,7 +1177,7 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 	}
 	if len(actors) > 0 {
 		clone := row
-		clone.ChannelID = chID
+		clone.AttachedChannels = []channel.ID{chID}
 		_ = a.NotifyProxyDaemonOffline(ctx, clone, actors)
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "detached"})

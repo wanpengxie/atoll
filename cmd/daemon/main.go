@@ -114,14 +114,6 @@ func main() {
 		}
 	}
 
-	// Register the generic "group" template and the xhs-creator template.
-	// xhs-creator keeps only workdir/prompt data locally; proxy-hosted actors
-	// and type rows arrive later through control.update_members.
-	if err := migrateLegacyDeviceMirrorFile(context.Background(), *dataDir, lg.Z()); err != nil {
-		lg.Z().Error().Err(err).Str("event", "daemon.fail_fast").
-			Msg("legacy device route mirror migration failed")
-		os.Exit(1)
-	}
 	// xhs business types are serviced only by the proxy facade installed
 	// dynamically via SetProxyActorCallback when the user proxy daemon
 	// connects with `tool:xhs` in its ready frame. The xhs-creator channel
@@ -269,31 +261,31 @@ func defaultDataDir() string {
 // buildChannelTemplates assembles the DaemonConfig.ChannelTemplates map
 // (M1.6-T5 phase-2). The map keys are catalog.Channel.Type values:
 //
-//   - ""          legacy / unspecified channels — no template seeds.
 //   - "group"     generic group chat — no template seeds.
 //   - "xhs-creator" domain-xhs xhs-creator template (§2): mkdirs
 //     published-notes/ / drafts/ / assets/ inside the channel workdir,
 //     and ships the domain prompt segment for the worker spawn env.
+//
+// channel_type is mandatory: there is no "" / unspecified key. A channel
+// reserved with an empty type is rejected fail-fast at OnCreateChannel.
 //
 // Actor/type rows for xhs are installed dynamically by proxy facade when
 // the proxy daemon advertises tool:xhs.
 const XHSCreatorChannelType = devicexhs.ChannelType
 
 func buildChannelTemplates() map[string]runtime.ChannelTemplate {
-	out := make(map[string]runtime.ChannelTemplate, 3)
+	out := make(map[string]runtime.ChannelTemplate, 2)
 	// Convention: HumanCaller (UI) message defaults route to the channel
 	// agent for handling. Templates that need different routing override
 	// HumanCallerDefaultAudience.
 	defaultHumanAudience := []actor.ActorID{runtime.ChannelAgentID}
 
-	// Empty + "group" share the generic no-template projection. We
-	// register both so the daemon resolver returns a stable zero-value
-	// for either key without falling through to the "" default twice.
-	generic := runtime.ChannelTemplate{
+	// "group" is the generic no-template projection for ordinary group
+	// chats. channel_type is mandatory — an empty type is never registered
+	// and is rejected fail-fast at OnCreateChannel.
+	out["group"] = runtime.ChannelTemplate{
 		HumanCallerDefaultAudience: defaultHumanAudience,
 	}
-	out[""] = generic
-	out["group"] = generic
 
 	// T4: drop daemon-side xhs adapter actor seed. xhs is now hosted in
 	// the user-machine proxy daemon and the cloud daemon facade installs

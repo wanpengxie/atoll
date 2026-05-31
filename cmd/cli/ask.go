@@ -21,13 +21,13 @@ package main
 // Auth / scope env (precedence — explicit flag → env → default):
 //
 //	--server-url  COAGENT_SERVER_URL  http://localhost:8832
-//	--token       COAGENT_SESSION_TOKEN | COAGENT_AUTH_TOKEN | DAEMON_URL-paired token
+//	--token       COAGENT_SESSION_TOKEN
 //	--channel     COAGENT_CHANNEL_ID
 //
 // Stdout (success):
 //
 //	{"id":"<envelope.id>", "correlation_id":"<envelope.id>", "kind":"request",
-//	 "frame_id":"<gateway frame_id>", "seq": <int?>, "dedupe": <bool?>}
+//	 "seq": <int?>, "dedupe": <bool?>}
 //
 // Exit codes (mirror archived daemon-go cmd/coagent + L4 §2.3.2):
 //
@@ -187,21 +187,15 @@ func runWriteMessageCmd(name, kind string, args []string) int {
 		return askExitFlagFormat
 	}
 
-	// Resolve token: --token > COAGENT_SESSION_TOKEN > COAGENT_AUTH_TOKEN > DAEMON_URL-paired fallback (legacy).
+	// Resolve token: --token > COAGENT_SESSION_TOKEN.
 	resolvedToken := *token
 	if resolvedToken == "" {
-		resolvedToken = firstNonEmpty(
-			os.Getenv("COAGENT_SESSION_TOKEN"),
-			os.Getenv("COAGENT_AUTH_TOKEN"),
-		)
+		resolvedToken = strings.TrimSpace(os.Getenv("COAGENT_SESSION_TOKEN"))
 	}
-	// Resolve server URL: --server-url > COAGENT_SERVER_URL > DAEMON_URL.
+	// Resolve server URL: --server-url > COAGENT_SERVER_URL.
 	resolvedURL := *serverURL
 	if resolvedURL == "" {
-		resolvedURL = firstNonEmpty(
-			os.Getenv("COAGENT_SERVER_URL"),
-			os.Getenv("DAEMON_URL"),
-		)
+		resolvedURL = strings.TrimSpace(os.Getenv("COAGENT_SERVER_URL"))
 	}
 
 	c, err := newHTTPClient(resolvedURL, resolvedToken)
@@ -264,26 +258,12 @@ func runWriteMessageCmd(name, kind string, args []string) int {
 	out := map[string]any{
 		"kind": kind,
 	}
-	// Preferred: real envelope.id from daemon ack. Fall back to
-	// frame_id when the gateway hasn't yet been upgraded (older daemons
-	// still in the field during rolling upgrades).
+	// Real envelope.id from the daemon ack.
 	if mid, ok := ack["message_id"].(string); ok && mid != "" {
 		out["id"] = mid
-	} else if fid, ok := ack["frame_id"].(string); ok && fid != "" {
-		out["id"] = fid
 	}
 	if corr, ok := ack["correlation_id"].(string); ok && corr != "" {
 		out["correlation_id"] = corr
-	} else if id, ok := out["id"].(string); ok {
-		// Legacy fallback: for kind=request/event the correlation_id
-		// equals envelope.id per L1 §1.5. Echo it so wrapper CLIs that
-		// expect a non-empty correlation_id don't panic.
-		if kind == "request" || kind == "event" {
-			out["correlation_id"] = id
-		}
-	}
-	if fid, ok := ack["frame_id"].(string); ok {
-		out["frame_id"] = fid
 	}
 	if seq, ok := ack["seq"]; ok {
 		out["seq"] = seq

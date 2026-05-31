@@ -258,6 +258,28 @@ func sendDaemonReclaim(
 	}
 }
 
+// TestDaemon_OnCreateChannel_EmptyChannelTypeRejected covers B1:
+// channel_type is mandatory. A control.create_channel with an empty
+// ChannelType is rejected fail-fast (reason=empty_channel_type) rather
+// than silently falling through to a generic no-template projection.
+func TestDaemon_OnCreateChannel_EmptyChannelTypeRejected(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	d, srv, _, _ := startDaemon(t, ctx, "daemon-A")
+	defer func() { _ = d.Close() }()
+
+	req := placement.CreateChannelRequest{
+		ChannelID:       "ch-no-type",
+		CreateRequestID: "req-no-type",
+		// ChannelType intentionally empty — must be rejected.
+	}
+	rej := sendCreateChannelReject(t, ctx, d, srv, req)
+	if rej.Reason != "empty_channel_type" {
+		t.Fatalf("reject reason=%q want empty_channel_type", rej.Reason)
+	}
+}
+
 // TestDaemon_OnCreateChannel_FreshBootstrap covers T0.1 happy path:
 // server pushes control.create_channel → daemon runs saga → writes
 // channel_lock → mounts runtime → emits CreateChannelAccepted with all 5 match
@@ -272,6 +294,7 @@ func TestDaemon_OnCreateChannel_FreshBootstrap(t *testing.T) {
 	req := placement.CreateChannelRequest{
 		ChannelID:       "ch-new",
 		CreateRequestID: "req-fresh-1",
+		ChannelType:     "group",
 		InitialMembers: []placement.InitialMember{
 			{MemberActorID: "user:alice", Kind: "human", DisplayName: "Alice"},
 		},
@@ -354,8 +377,8 @@ func TestDaemon_OnCreateChannel_FreshBootstrap(t *testing.T) {
 	}
 	created := loadChannelCreatedEvent(t, ctx, db, req.ChannelID)
 	assertCanonicalChannelCreatedEvent(t, created, req.ChannelID, "daemon-A", daemonOwnerEpoch)
-	if _, ok := created.Payload["channel_type"]; ok {
-		t.Errorf("payload.channel_type present for empty channel type: %v", created.Payload["channel_type"])
+	if got, ok := created.Payload["channel_type"]; !ok || got != "group" {
+		t.Errorf("payload.channel_type=%v ok=%v want %q (channel_type is mandatory)", got, ok, "group")
 	}
 
 	// bootstrap_registry row marked completed.
@@ -388,6 +411,7 @@ func TestDaemon_OnCreateChannel_CreateAckPrecedesFirstViewSyncPush(t *testing.T)
 	req := placement.CreateChannelRequest{
 		ChannelID:       "ch-create-ack-before-push",
 		CreateRequestID: "req-create-ack-before-push",
+		ChannelType:     "group",
 	}
 	frame, err := transit.Encode("frame-create-ack-before-push",
 		daemonbus.FrameTypeControlCreateChannel,
@@ -444,7 +468,7 @@ func TestDaemon_OnCreateChannel_IdempotentReplay(t *testing.T) {
 	defer func() { _ = d.Close() }()
 
 	req := placement.CreateChannelRequest{
-		ChannelID: "ch-idem", CreateRequestID: "req-idem",
+		ChannelID: "ch-idem", CreateRequestID: "req-idem", ChannelType: "group",
 	}
 	a1 := sendCreateChannel(t, ctx, d, srv, req)
 	if a1.Result != placement.CreateChannelAccepted {
@@ -488,7 +512,7 @@ func TestDaemon_OnCreateChannel_ReplayRepairsMissingCreatedEvent(t *testing.T) {
 	defer func() { _ = d.Close() }()
 
 	req := placement.CreateChannelRequest{
-		ChannelID: "ch-created-repair", CreateRequestID: "req-created-repair",
+		ChannelID: "ch-created-repair", CreateRequestID: "req-created-repair", ChannelType: "group",
 	}
 	sqlitePath, err := d.Saga().Bootstrap(ctx, req.ChannelID, req)
 	if err != nil {
@@ -539,7 +563,7 @@ func TestEnsureChannelCreatedEvent_CorruptLogQuarantine(t *testing.T) {
 	defer func() { _ = d.Close() }()
 
 	req := placement.CreateChannelRequest{
-		ChannelID: "ch-created-corrupt", CreateRequestID: "req-created-corrupt",
+		ChannelID: "ch-created-corrupt", CreateRequestID: "req-created-corrupt", ChannelType: "group",
 	}
 	sqlitePath, err := d.Saga().Bootstrap(ctx, req.ChannelID, req)
 	if err != nil {
@@ -618,7 +642,7 @@ func TestDaemon_OnCreateChannel_ConflictingRequestRejected(t *testing.T) {
 	defer func() { _ = d.Close() }()
 
 	bind := placement.CreateChannelRequest{
-		ChannelID: "ch-high", CreateRequestID: "req-A",
+		ChannelID: "ch-high", CreateRequestID: "req-A", ChannelType: "group",
 	}
 	if ack := sendCreateChannel(t, ctx, d, srv, bind); ack.Result != placement.CreateChannelAccepted {
 		t.Fatalf("first bind=%s", ack.Result)
@@ -644,7 +668,7 @@ func TestDaemon_OnUnbindChannel(t *testing.T) {
 
 	chID := channel.ID("ch-unbind")
 	req := placement.CreateChannelRequest{
-		ChannelID: chID, CreateRequestID: "req-unb",
+		ChannelID: chID, CreateRequestID: "req-unb", ChannelType: "group",
 	}
 	createAck := sendCreateChannel(t, ctx, d, srv, req)
 	if createAck.Result != placement.CreateChannelAccepted {
@@ -726,7 +750,7 @@ func TestDaemon_OnUnbindChannelOwnerEpochMismatchRejects(t *testing.T) {
 
 	chID := channel.ID("ch-unbind-mismatch")
 	req := placement.CreateChannelRequest{
-		ChannelID: chID, CreateRequestID: "req-unb-mismatch",
+		ChannelID: chID, CreateRequestID: "req-unb-mismatch", ChannelType: "group",
 	}
 	createAck := sendCreateChannel(t, ctx, d, srv, req)
 	if createAck.Result != placement.CreateChannelAccepted {
@@ -795,7 +819,7 @@ func TestDaemon_OnHeldChannelsAckRejected_UnloadsChannel(t *testing.T) {
 
 	chID := channel.ID("ch-recl-rej")
 	req := placement.CreateChannelRequest{
-		ChannelID: chID, CreateRequestID: "req-recl",
+		ChannelID: chID, CreateRequestID: "req-recl", ChannelType: "group",
 	}
 	if ack := sendCreateChannel(t, ctx, d, srv, req); ack.Result != placement.CreateChannelAccepted {
 		t.Fatalf("create=%s", ack.Result)
@@ -838,7 +862,7 @@ func TestDaemon_OnHeldChannelsAckAccepted_RecordsWatermark(t *testing.T) {
 
 	chID := channel.ID("ch-recl-ok")
 	req := placement.CreateChannelRequest{
-		ChannelID: chID, CreateRequestID: "req-recl-ok",
+		ChannelID: chID, CreateRequestID: "req-recl-ok", ChannelType: "group",
 	}
 	if ack := sendCreateChannel(t, ctx, d, srv, req); ack.Result != placement.CreateChannelAccepted {
 		t.Fatalf("create=%s", ack.Result)
@@ -880,7 +904,7 @@ func TestDaemon_OnDaemonReclaim_EmitsCanonicalReclaimedPayload(t *testing.T) {
 
 	chID := channel.ID("ch-reclaimed-payload")
 	createReq := placement.CreateChannelRequest{
-		ChannelID: chID, CreateRequestID: "req-reclaimed-create",
+		ChannelID: chID, CreateRequestID: "req-reclaimed-create", ChannelType: "group",
 	}
 	createAck := sendCreateChannel(t, ctx, d, srv, createReq)
 	if createAck.Result != placement.CreateChannelAccepted {

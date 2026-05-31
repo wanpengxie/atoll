@@ -57,7 +57,6 @@ func (s *Service) RegisterRoutes(g *gin.RouterGroup) {
 // reuse it without duplicating field names.
 type DaemonResp struct {
 	ID            string `json:"id"`
-	ChannelID     string `json:"channel_id"`
 	OwnerID       string `json:"owner_id"`
 	Name          string `json:"name"`
 	APIKeyPrefix  string `json:"api_key_prefix"`
@@ -75,7 +74,6 @@ type DaemonResp struct {
 func DaemonResponse(d Daemon, apiKey string) DaemonResp {
 	return DaemonResp{
 		ID:            string(d.ID),
-		ChannelID:     string(d.ChannelID),
 		OwnerID:       d.OwnerID,
 		Name:          d.Name,
 		APIKeyPrefix:  d.APIKeyPrefix,

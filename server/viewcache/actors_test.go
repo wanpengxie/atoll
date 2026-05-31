@@ -53,9 +53,8 @@ func TestActorSnapshotProjectsTypesAndReadiness(t *testing.T) {
 	}
 	if _, err := svc.db.ExecContext(ctx, `
 		INSERT INTO daemons
-		  (id, key_hash, channel_id, owner_id, name, api_key, api_key_prefix, status, created_at)
-		VALUES ('daemon-sql', '', ?, 'user-1', 'SQL Laptop', 'dk_test', 'dk_test...', 'online', 1000)`,
-		string(chID),
+		  (id, key_hash, owner_id, name, api_key, api_key_prefix, status, created_at)
+		VALUES ('daemon-sql', '', 'user-1', 'SQL Laptop', 'dk_test', 'dk_test...', 'online', 1000)`,
 	); err != nil {
 		t.Fatalf("insert daemon: %v", err)
 	}
@@ -112,9 +111,8 @@ func TestActorSnapshotDoesNotDeriveHostFromDaemonActiveActors(t *testing.T) {
 	}
 	if _, err := svc.db.ExecContext(ctx, `
 		INSERT INTO daemons
-		  (id, key_hash, channel_id, owner_id, name, api_key, api_key_prefix, status, created_at)
-		VALUES ('daemon-sql-only', '', ?, 'user-1', 'SQL Only', 'dk_test', 'dk_test...', 'online', 1000)`,
-		string(chID),
+		  (id, key_hash, owner_id, name, api_key, api_key_prefix, status, created_at)
+		VALUES ('daemon-sql-only', '', 'user-1', 'SQL Only', 'dk_test', 'dk_test...', 'online', 1000)`,
 	); err != nil {
 		t.Fatalf("insert daemon: %v", err)
 	}

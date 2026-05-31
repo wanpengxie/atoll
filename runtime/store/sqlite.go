@@ -41,17 +41,17 @@ func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions) (*sql.DB,
 	if err != nil {
 		return nil, err
 	}
-	// Schema migrations are idempotent (column-add guarded by columnExists)
-	// and MUST run on every writable open — including SkipDDL=true callers
-	// (runtime/daemon.go caches existing channel sqlites with SkipDDL=true
-	// to skip the CREATE TABLE baseline, but those caches need new columns
-	// like actor_registry.ready_state to materialise on old channels).
-	// Only ReadOnly skips, since migrations write DDL.
-	if !opts.ReadOnly {
-		if err := ensureChannelLocalSchema(ctx, db); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
+	// Single authoritative schema: ChannelLocalDDL (schema.go) is the only
+	// place the channel-local shape is defined. There is no in-code
+	// migration path. A fresh open (SkipDDL=false) installs the full
+	// baseline; an existing open (SkipDDL=true, used by the daemon channel
+	// cache) MUST already match the baseline. We never ALTER or drop —
+	// channel sqlite holds the append-only message-log truth (INVARIANT-2 /
+	// INVARIANT-12); a stale DB is recreated by a human, not silently
+	// migrated. Validate shape on every open and fail-fast on mismatch.
+	if err := verifyChannelLocalSchema(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 	return db, nil
 }
@@ -63,11 +63,12 @@ func OpenDaemon(ctx context.Context, dbPath string, opts OpenOptions) (*sql.DB, 
 	if err != nil {
 		return nil, err
 	}
-	if !opts.SkipDDL && !opts.ReadOnly {
-		if err := ensureDaemonLocalSchema(ctx, db); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
+	// Same single-authoritative-schema contract as OpenChannel: DaemonLocalDDL
+	// is the sole definition; no in-code migration. Validate shape on every
+	// open and fail-fast on mismatch (stale daemon DB is recreated by a human).
+	if err := verifyDaemonLocalSchema(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 	return db, nil
 }
@@ -138,112 +139,74 @@ func applyPragmas(ctx context.Context, db *sql.DB, opts OpenOptions) error {
 	return nil
 }
 
-func ensureDaemonLocalSchema(ctx context.Context, db *sql.DB) error {
-	adds := map[string]string{
-		"phase":                   "phase TEXT NOT NULL DEFAULT 'sent' CHECK (phase IN ('sent','awaiting_ack','partial_takeover','completed','abandoned'))",
-		"sent_at":                 "sent_at INTEGER NOT NULL DEFAULT 0",
-		"expected_ack_frame_kind": "expected_ack_frame_kind TEXT NOT NULL DEFAULT 'control.create_channel_ack'",
-		"terminal_status":         "terminal_status TEXT NOT NULL DEFAULT ''",
-		"abandonment_reason":      "abandonment_reason TEXT NOT NULL DEFAULT ''",
-		"attempt_count":           "attempt_count INTEGER NOT NULL DEFAULT 0",
-		"last_attempt_at":         "last_attempt_at INTEGER NOT NULL DEFAULT 0",
-	}
-	for col, ddl := range adds {
-		ok, err := columnExists(ctx, db, "bootstrap_registry", col)
+// channelLocalSchemaShape is the authoritative set of (table -> required
+// columns) that ChannelLocalDDL guarantees. verifyChannelLocalSchema checks
+// an opened DB against it. Keep in lockstep with schema.go ChannelLocalDDL —
+// the DDL is the single source of truth; this map is just the fail-fast
+// guard that an opened file actually carries that shape.
+var channelLocalSchemaShape = map[string][]string{
+	"messages":              {"seq", "id", "type", "kind", "cross_channel_refs", "canonical_hash"},
+	"type_registry":         {"type", "handler_binding", "install_status", "install_error"},
+	"type_registry_pending": {"install_attempt_id", "type", "install_status", "install_error"},
+	"actor_cursors":         {"actor_id", "last_consumed_seq"},
+	"actor_registry":        {"actor_id", "actor_kind", "ready_state", "ready_reason", "ready_detail", "last_ready_at", "last_state_change_at"},
+	"worker_locks":          {"agent_id", "worker_id", "fencing_token", "daemon_epoch"},
+	"action_ledger":         {"ledger_key", "turn_id", "status"},
+	"view_sync_outbox":      {"seq", "message_id", "status"},
+	"channel_lock":          {"channel_id", "fencing_token", "owner_epoch", "channel_type"},
+	"adapter_state":         {"key", "value"},
+	"adapter_credentials":   {"key", "value"},
+}
+
+// daemonLocalSchemaShape mirrors DaemonLocalDDL (schema.go).
+var daemonLocalSchemaShape = map[string][]string{
+	"bootstrap_registry": {
+		"create_request_id", "channel_id", "status", "phase", "workdir_path",
+		"sent_at", "expected_ack_frame_kind", "terminal_status",
+		"abandonment_reason", "attempt_count", "last_attempt_at",
+	},
+}
+
+func verifyChannelLocalSchema(ctx context.Context, db *sql.DB) error {
+	return verifySchema(ctx, db, "channel", channelLocalSchemaShape)
+}
+
+func verifyDaemonLocalSchema(ctx context.Context, db *sql.DB) error {
+	return verifySchema(ctx, db, "daemon", daemonLocalSchemaShape)
+}
+
+// verifySchema fail-fast-validates an opened sqlite against the authoritative
+// baseline shape (schema.go). On any missing table or column it returns a
+// clear "stale <kind> DB" error instructing recreation. It NEVER mutates the
+// DB — no ALTER, no DROP, no silent migration. Channel/daemon sqlite holds
+// append-only truth; a shape mismatch means a human must recreate the DB.
+func verifySchema(ctx context.Context, db *sql.DB, kind string, shape map[string][]string) error {
+	for table, cols := range shape {
+		present, err := tableColumns(ctx, db, table)
 		if err != nil {
 			return err
 		}
-		if ok {
-			continue
+		if len(present) == 0 {
+			return fmt.Errorf("store: stale %s DB, recreate: missing table %q (schema does not match baseline schema.go)", kind, table)
 		}
-		if _, err := db.ExecContext(ctx, "ALTER TABLE bootstrap_registry ADD COLUMN "+ddl); err != nil {
-			return fmt.Errorf("store: add bootstrap_registry.%s: %w", col, err)
+		for _, col := range cols {
+			if _, ok := present[col]; !ok {
+				return fmt.Errorf("store: stale %s DB, recreate: table %q missing column %q (schema does not match baseline schema.go)", kind, table, col)
+			}
 		}
 	}
 	return nil
 }
 
-func ensureChannelLocalSchema(ctx context.Context, db *sql.DB) error {
-	if _, err := db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS type_registry_pending (
-		  install_attempt_id      TEXT PRIMARY KEY,
-		  type                    TEXT NOT NULL UNIQUE,
-		  allowed_kinds           TEXT NOT NULL,
-		  handler_binding         TEXT NOT NULL
-		                          CHECK (handler_binding IN ('embedded','runtime_outbound','runtime_inbound_via_relay')),
-		  terminal_convention     TEXT NOT NULL DEFAULT 'payload_status'
-		                          CHECK (terminal_convention IN ('payload_status','single-response')),
-		  max_pending_ms          INTEGER,
-		  handler_actor_id        TEXT,
-		  install_status          TEXT NOT NULL DEFAULT 'installing'
-		                          CHECK (install_status IN ('installing','failed')),
-		  install_error           TEXT NOT NULL DEFAULT '',
-		  created_at              INTEGER NOT NULL
-		);
-		CREATE INDEX IF NOT EXISTS ix_type_registry_pending_type_status
-		  ON type_registry_pending(type, install_status);
-	`); err != nil {
-		return fmt.Errorf("store: ensure type_registry_pending: %w", err)
-	}
-	messageAdds := map[string]string{
-		"cross_channel_refs": "cross_channel_refs TEXT",
-	}
-	for col, ddl := range messageAdds {
-		ok, err := columnExists(ctx, db, "messages", col)
-		if err != nil {
-			return err
-		}
-		if ok {
-			continue
-		}
-		if _, err := db.ExecContext(ctx, "ALTER TABLE messages ADD COLUMN "+ddl); err != nil {
-			return fmt.Errorf("store: add messages.%s: %w", col, err)
-		}
-	}
-	adds := map[string]string{
-		"install_status": "install_status TEXT NOT NULL DEFAULT 'installed' CHECK (install_status IN ('installing','installed','failed'))",
-		"install_error":  "install_error TEXT NOT NULL DEFAULT ''",
-	}
-	for col, ddl := range adds {
-		ok, err := columnExists(ctx, db, "type_registry", col)
-		if err != nil {
-			return err
-		}
-		if ok {
-			continue
-		}
-		if _, err := db.ExecContext(ctx, "ALTER TABLE type_registry ADD COLUMN "+ddl); err != nil {
-			return fmt.Errorf("store: add type_registry.%s: %w", col, err)
-		}
-	}
-	actorAdds := map[string]string{
-		"ready_state":          "ready_state TEXT NOT NULL DEFAULT 'unknown' CHECK (ready_state IN ('ready','not_ready','unknown'))",
-		"ready_reason":         "ready_reason TEXT NOT NULL DEFAULT 'unknown'",
-		"ready_detail":         "ready_detail TEXT NOT NULL DEFAULT '{}'",
-		"last_ready_at":        "last_ready_at INTEGER NOT NULL DEFAULT 0",
-		"last_state_change_at": "last_state_change_at INTEGER NOT NULL DEFAULT 0",
-	}
-	for col, ddl := range actorAdds {
-		ok, err := columnExists(ctx, db, "actor_registry", col)
-		if err != nil {
-			return err
-		}
-		if ok {
-			continue
-		}
-		if _, err := db.ExecContext(ctx, "ALTER TABLE actor_registry ADD COLUMN "+ddl); err != nil {
-			return fmt.Errorf("store: add actor_registry.%s: %w", col, err)
-		}
-	}
-	return nil
-}
-
-func columnExists(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
+// tableColumns returns the set of column names for table. An empty result
+// (no rows) means the table does not exist.
+func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]struct{}, error) {
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
 	if err != nil {
-		return false, fmt.Errorf("store: pragma table_info(%s): %w", table, err)
+		return nil, fmt.Errorf("store: pragma table_info(%s): %w", table, err)
 	}
 	defer func() { _ = rows.Close() }()
+	cols := map[string]struct{}{}
 	for rows.Next() {
 		var cid int
 		var name, typ string
@@ -251,14 +214,12 @@ func columnExists(ctx context.Context, db *sql.DB, table, column string) (bool, 
 		var defaultValue any
 		var pk int
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			return false, fmt.Errorf("store: scan table_info(%s): %w", table, err)
+			return nil, fmt.Errorf("store: scan table_info(%s): %w", table, err)
 		}
-		if name == column {
-			return true, nil
-		}
+		cols[name] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("store: table_info(%s) rows: %w", table, err)
+		return nil, fmt.Errorf("store: table_info(%s) rows: %w", table, err)
 	}
-	return false, nil
+	return cols, nil
 }
