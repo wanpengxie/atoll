@@ -1,6 +1,6 @@
 package placements
 
-import "github.com/wanpengxie/ActOS/kernel/placement"
+import "github.com/wanpengxie/ActOS/framework/multiuser/placement"
 
 // parseState converts a wire-form string into placement.State. Any
 // unrecognised value returns an empty placement.State which

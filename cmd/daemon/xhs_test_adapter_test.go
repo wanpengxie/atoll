@@ -8,11 +8,11 @@ import (
 	"sync/atomic"
 
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
+	"github.com/wanpengxie/ActOS/framework/multiuser/runtime"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/runtime"
 )
 
 type testXHSConfig struct {

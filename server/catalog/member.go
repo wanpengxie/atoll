@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
 // ChannelMember is the join row from channel_members. ActorID is

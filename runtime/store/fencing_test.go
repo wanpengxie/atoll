@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
+	multistore "github.com/wanpengxie/ActOS/framework/multiuser/runtime/store"
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/fencing"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
 	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/store"
 )
 
@@ -22,14 +24,14 @@ import (
 // to present.
 type fencedFixture struct {
 	db    *sql.DB
-	lock  *store.ChannelLock
+	lock  *multistore.ChannelLock
 	msgs  *store.Messages
 	led   *store.Ledger
-	token placement.FencingToken
-	epoch placement.DaemonEpoch
+	token fencing.FencingToken
+	epoch fencing.DaemonEpoch
 }
 
-func newFencedFixture(t *testing.T, token placement.FencingToken, epoch placement.DaemonEpoch) *fencedFixture {
+func newFencedFixture(t *testing.T, token fencing.FencingToken, epoch fencing.DaemonEpoch) *fencedFixture {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -39,8 +41,8 @@ func newFencedFixture(t *testing.T, token placement.FencingToken, epoch placemen
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	lock := store.NewChannelLock(db)
-	if err := lock.Insert(ctx, store.ChannelLockRow{
+	lock := multistore.NewChannelLock(db)
+	if err := lock.Insert(ctx, multistore.ChannelLockRow{
 		ChannelID:    "ch-fence",
 		FencingToken: token,
 		OwnerEpoch:   placement.OwnerEpoch(1),
@@ -52,10 +54,11 @@ func newFencedFixture(t *testing.T, token placement.FencingToken, epoch placemen
 		t.Fatalf("seed channel_lock: %v", err)
 	}
 
+	outbox := multistore.NewViewSyncOutbox(db, "ch-fence")
 	return &fencedFixture{
 		db:    db,
 		lock:  lock,
-		msgs:  store.NewMessagesWithLock(db, lock),
+		msgs:  store.NewMessagesWithObservers(db, lock, outbox),
 		led:   store.NewLedgerWithLock(db, lock),
 		token: token,
 		epoch: epoch,
@@ -82,7 +85,7 @@ func TestChannelLockTakeoverRotatesTupleWithoutInsert(t *testing.T) {
 	fx := newFencedFixture(t, "tok-old", 1)
 	ctx := context.Background()
 
-	if err := fx.lock.Takeover(ctx, store.ChannelLockRow{
+	if err := fx.lock.Takeover(ctx, multistore.ChannelLockRow{
 		ChannelID:    "ch-fence",
 		FencingToken: "tok-new",
 		OwnerEpoch:   2,
@@ -146,46 +149,46 @@ func ledgerRowCount(t *testing.T, db *sql.DB) int {
 func TestMessages_FencingEnforced(t *testing.T) {
 	cases := []struct {
 		name       string
-		token      placement.FencingToken
-		epoch      placement.DaemonEpoch
+		token      fencing.FencingToken
+		epoch      fencing.DaemonEpoch
 		supply     bool
 		wantReject bool
 		wantReason message.HarnessRejectReason
 	}{
 		{
 			name:   "match — accept",
-			token:  placement.FencingToken("tok-7"),
-			epoch:  placement.DaemonEpoch(3),
+			token:  fencing.FencingToken("tok-7"),
+			epoch:  fencing.DaemonEpoch(3),
 			supply: true,
 		},
 		{
 			name:       "stale token — caller below lock",
-			token:      placement.FencingToken("tok-6"), // lock=7
-			epoch:      placement.DaemonEpoch(3),
+			token:      fencing.FencingToken("tok-6"), // lock=7
+			epoch:      fencing.DaemonEpoch(3),
 			supply:     true,
 			wantReject: true,
 			wantReason: message.HarnessWorkerFencingStale,
 		},
 		{
 			name:       "stale token — caller above lock (newer worker view)",
-			token:      placement.FencingToken("tok-8"),
-			epoch:      placement.DaemonEpoch(3),
+			token:      fencing.FencingToken("tok-8"),
+			epoch:      fencing.DaemonEpoch(3),
 			supply:     true,
 			wantReject: true,
 			wantReason: message.HarnessWorkerFencingStale,
 		},
 		{
 			name:       "daemon_epoch mismatch — stale daemon",
-			token:      placement.FencingToken("tok-7"),
-			epoch:      placement.DaemonEpoch(99),
+			token:      fencing.FencingToken("tok-7"),
+			epoch:      fencing.DaemonEpoch(99),
 			supply:     true,
 			wantReject: true,
 			wantReason: message.HarnessWorkerFencingStale,
 		},
 		{
 			name:       "missing fencing — bare append rejected",
-			token:      placement.FencingToken("tok-7"),
-			epoch:      placement.DaemonEpoch(3),
+			token:      fencing.FencingToken("tok-7"),
+			epoch:      fencing.DaemonEpoch(3),
 			supply:     false,
 			wantReject: true,
 			wantReason: message.HarnessWorkerFencingStale,
@@ -194,7 +197,7 @@ func TestMessages_FencingEnforced(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fx := newFencedFixture(t, placement.FencingToken("tok-7"), placement.DaemonEpoch(3))
+			fx := newFencedFixture(t, fencing.FencingToken("tok-7"), fencing.DaemonEpoch(3))
 			ctx := context.Background()
 			var fencing klog.FencingTuple
 			if tc.supply {
@@ -239,7 +242,7 @@ func TestMessages_FencingEnforced(t *testing.T) {
 // status.
 func TestLedger_FencingEnforced(t *testing.T) {
 	ctx := context.Background()
-	fx := newFencedFixture(t, placement.FencingToken("tok-7"), placement.DaemonEpoch(3))
+	fx := newFencedFixture(t, fencing.FencingToken("tok-7"), fencing.DaemonEpoch(3))
 
 	key, err := ledger.DeriveKey("turn-1", "act-1")
 	if err != nil {
@@ -255,7 +258,7 @@ func TestLedger_FencingEnforced(t *testing.T) {
 	}
 
 	// Reserve — stale fencing tuple → reject, no row.
-	staleCtx := store.CtxWithFencing(ctx, placement.FencingToken("tok-6"), placement.DaemonEpoch(3))
+	staleCtx := store.CtxWithFencing(ctx, fencing.FencingToken("tok-6"), fencing.DaemonEpoch(3))
 	if _, err := fx.led.Reserve(staleCtx, entry); err == nil {
 		t.Fatal("Reserve with stale token: expected error, got nil")
 	} else if !store.IsFencingStale(err) {
@@ -282,7 +285,7 @@ func TestLedger_FencingEnforced(t *testing.T) {
 	}
 
 	// Commit — stale daemon_epoch → reject.
-	staleEpochCtx := store.CtxWithFencing(ctx, fx.token, placement.DaemonEpoch(99))
+	staleEpochCtx := store.CtxWithFencing(ctx, fx.token, fencing.DaemonEpoch(99))
 	if err := fx.led.Commit(staleEpochCtx, key, 2000); err == nil {
 		t.Fatal("Commit stale epoch: expected error")
 	} else if !store.IsFencingStale(err) {
@@ -314,20 +317,20 @@ func TestChannelLock_ValidateWriteTx(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	lock := store.NewChannelLock(db)
-	if err := lock.Insert(ctx, store.ChannelLockRow{
+	lock := multistore.NewChannelLock(db)
+	if err := lock.Insert(ctx, multistore.ChannelLockRow{
 		ChannelID:    "ch-1",
-		FencingToken: placement.FencingToken("tok-5"),
+		FencingToken: fencing.FencingToken("tok-5"),
 		OwnerEpoch:   placement.OwnerEpoch(1),
 		DaemonID:     "daemon-A",
-		DaemonEpoch:  placement.DaemonEpoch(2),
+		DaemonEpoch:  fencing.DaemonEpoch(2),
 		AcquiredAt:   1000,
 		RefreshedAt:  1000,
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	runInTx := func(token placement.FencingToken, epoch placement.DaemonEpoch) error {
+	runInTx := func(token fencing.FencingToken, epoch fencing.DaemonEpoch) error {
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			t.Fatalf("begin: %v", err)
@@ -338,8 +341,8 @@ func TestChannelLock_ValidateWriteTx(t *testing.T) {
 
 	cases := []struct {
 		name    string
-		token   placement.FencingToken
-		epoch   placement.DaemonEpoch
+		token   fencing.FencingToken
+		epoch   fencing.DaemonEpoch
 		wantErr bool
 	}{
 		{"match", "tok-5", 2, false},
@@ -372,10 +375,10 @@ func TestChannelLock_ValidateWriteTx(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() { _ = db.Close() }()
-		emptyLock := store.NewChannelLock(db)
+		emptyLock := multistore.NewChannelLock(db)
 		tx, _ := db.BeginTx(ctx, nil)
 		defer func() { _ = tx.Rollback() }()
-		err = emptyLock.ValidateWriteTx(ctx, tx, placement.FencingToken("tok-5"), placement.DaemonEpoch(2))
+		err = emptyLock.ValidateWriteTx(ctx, tx, fencing.FencingToken("tok-5"), fencing.DaemonEpoch(2))
 		if !store.IsFencingStale(err) {
 			t.Errorf("missing row: want FencingStaleError, got %v", err)
 		}
@@ -383,7 +386,7 @@ func TestChannelLock_ValidateWriteTx(t *testing.T) {
 
 	// Nil tx → error path.
 	t.Run("nil tx", func(t *testing.T) {
-		if err := lock.ValidateWriteTx(ctx, nil, placement.FencingToken("tok-5"), placement.DaemonEpoch(2)); err == nil {
+		if err := lock.ValidateWriteTx(ctx, nil, fencing.FencingToken("tok-5"), fencing.DaemonEpoch(2)); err == nil {
 			t.Fatal("nil tx: expected error")
 		}
 	})
@@ -393,7 +396,7 @@ func TestChannelLock_ValidateWriteTx(t *testing.T) {
 // still works once fencing is enforced — a retry with the same envelope
 // id should return Deduped=true (not a fencing reject).
 func TestMessages_FencingDedupeUnchanged(t *testing.T) {
-	fx := newFencedFixture(t, placement.FencingToken("tok-7"), placement.DaemonEpoch(3))
+	fx := newFencedFixture(t, fencing.FencingToken("tok-7"), fencing.DaemonEpoch(3))
 	ctx := context.Background()
 	fencing := klog.FencingTuple{Token: fx.token, Epoch: fx.epoch}
 

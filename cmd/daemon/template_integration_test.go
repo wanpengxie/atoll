@@ -11,12 +11,13 @@ import (
 	"time"
 
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
+	"github.com/wanpengxie/ActOS/framework/multiuser/daemonbus"
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
+	"github.com/wanpengxie/ActOS/framework/multiuser/runtime"
+	multistore "github.com/wanpengxie/ActOS/framework/multiuser/runtime/store"
+	"github.com/wanpengxie/ActOS/framework/multiuser/runtime/transit"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/daemonbus"
-	"github.com/wanpengxie/ActOS/kernel/placement"
-	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/store"
-	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
 // TestIntegration_XHSCreatorTemplate_BootSeedsChannel verifies the current
@@ -75,7 +76,7 @@ func TestIntegration_XHSCreatorTemplate_BootSeedsChannel(t *testing.T) {
 
 	// B1.3 — channel_lock.channel_type persisted so cold-start resolves
 	// the same template without re-asking the server.
-	lock := store.NewChannelLock(xhsDB)
+	lock := multistore.NewChannelLock(xhsDB)
 	lockRow, ok, err := lock.Get(ctx)
 	if err != nil {
 		t.Fatalf("channel_lock get: %v", err)

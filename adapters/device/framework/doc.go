@@ -3,7 +3,7 @@
 // family — first concrete one is adapters/device/xhs) builds on top of.
 //
 // The core concern here is proxy.go: DeviceProxy bundles
-// kernel/devicetransit.DeviceTransit +
+// framework/devicetransit.DeviceTransit +
 //
 //	CorrelationTracker + ErrorPolicy so a Module.Handle
 //	body shrinks to "compose wire payload → proxy.Send".

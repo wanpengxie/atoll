@@ -4,8 +4,8 @@ import (
 	"context"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/fencing"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
 // AppendResult is what MessageLog.Append returns when the row write
@@ -31,8 +31,8 @@ type AppendResult struct {
 // it, but fenced stores reject it as stale rather than reading hidden state
 // from context.Context.
 type FencingTuple struct {
-	Token placement.FencingToken
-	Epoch placement.DaemonEpoch
+	Token fencing.FencingToken
+	Epoch fencing.DaemonEpoch
 }
 
 // AppendError is the typed error returned for protocol-level rejects

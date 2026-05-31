@@ -5,7 +5,7 @@
 // timeout).
 //
 // Authoritative spec: launch-ticket notes §T6 (placements) +
-// kernel/placement contract.
+// framework/multiuser/placement contract.
 //
 // Concurrency: every method is safe under concurrent use — sqlite
 // row-level locking + the CAS guard in CASActivate prevents lost
@@ -18,11 +18,11 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
-// SQLStore implements kernel/placement.Store on top of the
+// SQLStore implements placement.Store on top of the
 // channel_placements sqlite table (migration 0003).
 type SQLStore struct {
 	db *sql.DB

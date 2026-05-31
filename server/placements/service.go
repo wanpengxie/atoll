@@ -11,9 +11,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
+	kerneldaemonbus "github.com/wanpengxie/ActOS/framework/multiuser/daemonbus"
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/pkg/requestctx"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
 )

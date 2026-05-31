@@ -18,11 +18,24 @@ import (
 // ActorRegistry implements kernel/actorreg.Registry over a channel-local
 // sqlite. Each *ActorRegistry is bound to one channel database.
 type ActorRegistry struct {
-	db *sql.DB
+	db     *sql.DB
+	fence  WriteFence
+	outbox AppendObserver
 }
 
 // NewActorRegistry returns a registry over the given channel sqlite.
 func NewActorRegistry(db *sql.DB) *ActorRegistry { return &ActorRegistry{db: db} }
+
+// NewActorRegistryWithObservers wires optional same-transaction dependencies
+// used by framework-owned member transition projections.
+func NewActorRegistryWithObservers(db *sql.DB, fence WriteFence, outbox AppendObserver) *ActorRegistry {
+	return &ActorRegistry{db: db, fence: fence, outbox: outbox}
+}
+
+// NewActorRegistryWithFence wires only the pure fencing gate.
+func NewActorRegistryWithFence(db *sql.DB, fence WriteFence) *ActorRegistry {
+	return NewActorRegistryWithObservers(db, fence, nil)
+}
 
 // Lookup implements actorreg.Registry.
 func (r *ActorRegistry) Lookup(ctx context.Context, id actor.ActorID) (actorreg.Record, bool, error) {
@@ -321,7 +334,7 @@ func (r *ActorRegistry) ApplyMemberTransitions(
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	msgs := NewMessagesWithLock(r.db, NewChannelLock(r.db))
+	msgs := NewMessagesWithObservers(r.db, r.fence, r.outbox)
 	for _, add := range adds {
 		if add.ID == "" {
 			continue

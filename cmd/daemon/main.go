@@ -31,12 +31,12 @@ import (
 	"time"
 
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
+	"github.com/wanpengxie/ActOS/framework/multiuser/runtime"
+	"github.com/wanpengxie/ActOS/framework/multiuser/runtime/transit"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/pkg/logger"
 	"github.com/wanpengxie/ActOS/pkg/metrics"
 	"github.com/wanpengxie/ActOS/pkg/observability"
-	"github.com/wanpengxie/ActOS/runtime"
-	"github.com/wanpengxie/ActOS/runtime/transit"
 	"github.com/wanpengxie/ActOS/runtime/workerhost"
 )
 

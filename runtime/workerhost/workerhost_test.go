@@ -16,9 +16,9 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/fencing"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 	"github.com/wanpengxie/ActOS/runtime/store"
@@ -94,7 +94,7 @@ func TestLeaseAcquireRelease(t *testing.T) {
 
 	leases := workerhost.NewLeaseStore(db)
 	l, ok, err := leases.Acquire(ctx, "agent:a", "w-1",
-		placement.FencingToken("tok-1"), placement.DaemonEpoch(1), now())
+		fencing.FencingToken("tok-1"), fencing.DaemonEpoch(1), now())
 	if err != nil || !ok {
 		t.Fatalf("Acquire: ok=%v err=%v", ok, err)
 	}
@@ -105,7 +105,7 @@ func TestLeaseAcquireRelease(t *testing.T) {
 	// Re-Acquire by another worker with same fencing token — rejected
 	// while existing lease is fresh.
 	_, ok2, err := leases.Acquire(ctx, "agent:a", "w-2",
-		placement.FencingToken("tok-1"), placement.DaemonEpoch(1), now())
+		fencing.FencingToken("tok-1"), fencing.DaemonEpoch(1), now())
 	if err != nil || ok2 {
 		t.Errorf("conflicting Acquire should fail: ok=%v err=%v", ok2, err)
 	}
@@ -114,7 +114,7 @@ func TestLeaseAcquireRelease(t *testing.T) {
 	// is opaque random per proto-foundation §3.6.1; ordering uses
 	// daemon_epoch instead.
 	_, ok3, err := leases.Acquire(ctx, "agent:a", "w-3",
-		placement.FencingToken("tok-2"), placement.DaemonEpoch(2), now())
+		fencing.FencingToken("tok-2"), fencing.DaemonEpoch(2), now())
 	if err != nil || !ok3 {
 		t.Errorf("stronger Acquire should win: ok=%v err=%v", ok3, err)
 	}
@@ -123,7 +123,7 @@ func TestLeaseAcquireRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, ok4, _ := leases.Acquire(ctx, "agent:a", "w-4",
-		placement.FencingToken("tok-1"), placement.DaemonEpoch(1), now())
+		fencing.FencingToken("tok-1"), fencing.DaemonEpoch(1), now())
 	if !ok4 {
 		t.Errorf("Acquire after Release should succeed")
 	}
@@ -221,8 +221,8 @@ func TestWorker_LeaseE2E(t *testing.T) {
 		ChannelID:     "ch-1",
 		WorkerID:      "w-1",
 		LeaseID:       "lease-1",
-		FencingToken:  placement.FencingToken("tok-1"),
-		DaemonEpoch:   placement.DaemonEpoch(7),
+		FencingToken:  fencing.FencingToken("tok-1"),
+		DaemonEpoch:   fencing.DaemonEpoch(7),
 		Chain:         chain,
 		WorkerActorID: "agent:a",
 		Ledger:        led,

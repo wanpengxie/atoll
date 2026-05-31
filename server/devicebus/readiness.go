@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
 type actorReadinessPayload struct {

@@ -14,9 +14,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/ActOS/framework/multiuser/daemonbus"
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/daemonbus"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/pkg/requestctx"
 	"github.com/wanpengxie/ActOS/server/httperr"
 )

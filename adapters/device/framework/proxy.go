@@ -36,7 +36,7 @@ type DeviceProxyDeps struct {
 }
 
 // DeviceProxy translates one adapter-level request into the
-// kernel/devicetransit outbound frame body (carried on the wire as
+// framework/devicetransit outbound frame body (carried on the wire as
 // `device_transit.recv`, impl-layer2 §5.3.2). One instance per
 // Module per channel; constructed inside Module.Init after the
 // framework hands over a ModuleContext.

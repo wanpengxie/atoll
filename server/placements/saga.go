@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
 type SagaKind string

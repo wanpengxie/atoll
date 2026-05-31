@@ -11,11 +11,11 @@ import (
 	"time"
 
 	proxyfacade "github.com/wanpengxie/ActOS/adapters/framework/proxy_facade"
+	"github.com/wanpengxie/ActOS/framework/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -869,16 +869,20 @@ func TestProxyFacadeReservedDescribeStatusUsesFrameworkState(t *testing.T) {
 	// available=true, EVEN THOUGH the persisted readiness is still not_ready —
 	// the definitive proof that available follows realtime liveness, not the
 	// sticky readiness column.
+	lifecyclePayload, err := devicetransit.EncodeLifecycleRuntimeEventPayload(devicetransit.LifecycleFrame{
+		AdapterActorID: "tool:kimi",
+		ChannelID:      "channel:test",
+		Event:          devicetransit.LifecycleConnected,
+		Ts:             1_700_000_002_000,
+	})
+	if err != nil {
+		t.Fatalf("lifecycle payload: %v", err)
+	}
 	if err := mgr.OnRuntimeEvent(context.Background(), adapter.RuntimeEvent{
-		Kind:           adapter.RuntimeEventDeviceLifecycle,
+		Kind:           devicetransit.RuntimeEventKindDeviceLifecycle,
 		ChannelID:      "channel:test",
 		AdapterActorID: "tool:kimi",
-		DeviceLifecycle: &devicetransit.LifecycleFrame{
-			AdapterActorID: "tool:kimi",
-			ChannelID:      "channel:test",
-			Event:          devicetransit.LifecycleConnected,
-			Ts:             1_700_000_002_000,
-		},
+		Payload:        lifecyclePayload,
 	}); err != nil {
 		t.Fatalf("OnRuntimeEvent connected: %v", err)
 	}

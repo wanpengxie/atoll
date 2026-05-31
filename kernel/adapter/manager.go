@@ -37,8 +37,8 @@ type Manager interface {
 	Dispatch(ctx context.Context, env *message.Envelope) error
 
 	// OnExternalCallback dispatches an inbound external callback
-	// (webhook body / `device_transit.send` frame — impl-layer2 §5.3.1
-	// inbound / WS message) to the named Module.OnExternalCallback. The
+	// (webhook body / relay callback frame / WS message) to the named
+	// Module.OnExternalCallback. The
 	// framework de-dupes duplicate callbacks (terminal already exists)
 	// before invoking.
 	OnExternalCallback(ctx context.Context, adapterName string, payload []byte) error

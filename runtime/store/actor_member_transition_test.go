@@ -7,11 +7,12 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
+	multistore "github.com/wanpengxie/ActOS/framework/multiuser/runtime/store"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/store"
 )
 
@@ -19,7 +20,7 @@ func TestCatalogPostMember_DaemonActorRegistered_MirrorEventAppended(t *testing.
 	ctx := context.Background()
 	chID := channel.ID("ch-members")
 	db, lock, fencing := newMemberTransitionFixture(t, chID)
-	reg := store.NewActorRegistry(db)
+	reg := store.NewActorRegistryWithObservers(db, lock, multistore.NewViewSyncOutbox(db, chID))
 
 	err := reg.ApplyMemberTransitions(ctx, chID, []store.MemberActorAdd{{
 		ID:          "user:bob",
@@ -63,7 +64,7 @@ func TestProxyHostMetadataEmittedInActorRegisteredMirror(t *testing.T) {
 	ctx := context.Background()
 	chID := channel.ID("ch-proxy-host")
 	db, lock, fencing := newMemberTransitionFixture(t, chID)
-	reg := store.NewActorRegistry(db)
+	reg := store.NewActorRegistryWithObservers(db, lock, multistore.NewViewSyncOutbox(db, chID))
 
 	err := reg.ApplyMemberTransitions(ctx, chID, []store.MemberActorAdd{{
 		ID:          "tool:kimi",
@@ -105,7 +106,7 @@ func TestCatalogDeleteMember_DaemonActorDeregistered_MirrorEventAppended(t *test
 	ctx := context.Background()
 	chID := channel.ID("ch-members-delete")
 	db, lock, fencing := newMemberTransitionFixture(t, chID)
-	reg := store.NewActorRegistry(db)
+	reg := store.NewActorRegistryWithObservers(db, lock, multistore.NewViewSyncOutbox(db, chID))
 
 	if err := reg.ApplyMemberTransitions(ctx, chID, []store.MemberActorAdd{{
 		ID:     "user:bob",
@@ -136,7 +137,7 @@ func TestCatalogDeleteMember_DaemonActorDeregistered_MirrorEventAppended(t *test
 	}
 }
 
-func newMemberTransitionFixture(t *testing.T, chID channel.ID) (*sql.DB, *store.ChannelLock, klog.FencingTuple) {
+func newMemberTransitionFixture(t *testing.T, chID channel.ID) (*sql.DB, *multistore.ChannelLock, klog.FencingTuple) {
 	t.Helper()
 	ctx := context.Background()
 	db, err := store.OpenChannel(ctx, filepath.Join(t.TempDir(), "channel.sqlite"), store.OpenOptions{})
@@ -144,9 +145,9 @@ func newMemberTransitionFixture(t *testing.T, chID channel.ID) (*sql.DB, *store.
 		t.Fatalf("OpenChannel: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	lock := store.NewChannelLock(db)
+	lock := multistore.NewChannelLock(db)
 	token := placement.FencingToken("member-transition-token")
-	if err := lock.Insert(ctx, store.ChannelLockRow{
+	if err := lock.Insert(ctx, multistore.ChannelLockRow{
 		ChannelID:    chID,
 		FencingToken: token,
 		OwnerEpoch:   1,

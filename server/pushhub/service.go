@@ -24,9 +24,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/ActOS/framework/multiuser/viewsync"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/kernel/viewsync"
 	"github.com/wanpengxie/ActOS/pkg/metrics"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
 	"github.com/wanpengxie/ActOS/server/identity"

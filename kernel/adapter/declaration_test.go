@@ -12,13 +12,13 @@ func TestDeclarationCatalogFromDeclarationCopiesConventionFields(t *testing.T) {
 	decl := Declaration{
 		Name:         "xhs",
 		ActorID:      actor.ActorID("tool:xhs"),
-		Types:        []string{"xhs.publish"},
+		Types:        []string{"example.publish"},
 		Binding:      actor.BindingEmbedded,
 		MaxPendingMs: 300_000,
 		Description:  "XHS automation",
 		SkillDoc:     "Use this actor to publish notes.",
 		TypeDeclarations: map[string]TypeDeclaration{
-			"xhs.publish": {
+			"example.publish": {
 				AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
 				Description:    "Publish a note",
 				PayloadExample: json.RawMessage(`{"title":"hello"}`),
@@ -40,7 +40,7 @@ func TestDeclarationCatalogFromDeclarationCopiesConventionFields(t *testing.T) {
 	if catalog.Description != decl.Description || catalog.SkillDoc != decl.SkillDoc {
 		t.Fatalf("actor convention fields not copied: %+v", catalog)
 	}
-	doc := catalog.Types["xhs.publish"]
+	doc := catalog.Types["example.publish"]
 	if doc.Description != "Publish a note" || string(doc.PayloadExample) != `{"title":"hello"}` {
 		t.Fatalf("type convention fields not copied: %+v", doc)
 	}

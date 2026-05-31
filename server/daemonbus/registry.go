@@ -3,8 +3,8 @@
 // channel-to-daemon routing (L2 §9 + T6 spec).
 //
 // Authoritative spec: launch-ticket notes §T6 (daemonbus 子目录)
-// + kernel/daemonbus (Frame schema) + kernel/placement (placement
-// state machine).
+// + framework/multiuser/daemonbus (Frame schema) +
+// framework/multiuser/placement (placement state machine).
 //
 // Demo-period: single-instance, single-secret authentication (every
 // daemon shares one HMAC key carried in COAGENT_DAEMON_SECRET).
@@ -24,9 +24,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wanpengxie/ActOS/framework/multiuser/daemonbus"
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/daemonbus"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/server/placements"
 )
 

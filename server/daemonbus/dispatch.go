@@ -11,9 +11,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/wanpengxie/ActOS/kernel/daemonbus"
-	"github.com/wanpengxie/ActOS/kernel/placement"
-	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/framework/multiuser/daemonbus"
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
+	"github.com/wanpengxie/ActOS/framework/multiuser/viewsync"
 	"github.com/wanpengxie/ActOS/pkg/requestctx"
 )
 

@@ -10,15 +10,15 @@ import (
 
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	devicexhs "github.com/wanpengxie/ActOS/adapters/device/xhs"
+	"github.com/wanpengxie/ActOS/framework/devicetransit"
+	"github.com/wanpengxie/ActOS/framework/multiuser/daemonbus"
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
+	"github.com/wanpengxie/ActOS/framework/multiuser/runtime"
+	"github.com/wanpengxie/ActOS/framework/multiuser/runtime/transit"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/daemonbus"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/kernel/placement"
-	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/store"
-	"github.com/wanpengxie/ActOS/runtime/transit"
 )
 
 func TestBuildChannelTemplates_XHSCreatorHasNoAdapterSeeds(t *testing.T) {

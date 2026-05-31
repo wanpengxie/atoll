@@ -11,9 +11,9 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/fencing"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 )
 
@@ -47,8 +47,8 @@ type IPCClient struct {
 	channelID     channel.ID
 	workerID      ipc.WorkerID
 	workerActorID actor.ActorID
-	fencingToken  placement.FencingToken
-	daemonEpoch   placement.DaemonEpoch
+	fencingToken  fencing.FencingToken
+	daemonEpoch   fencing.DaemonEpoch
 }
 
 // triggerBufferSize bounds the IPCClient.triggerCh backlog. Sized big

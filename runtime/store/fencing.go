@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
 
-	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/fencing"
 )
 
 // FencingTuple bundles the (fencing_token, daemon_epoch) pair that
@@ -16,8 +19,54 @@ import (
 // Pure-store unit tests that do not exercise fencing pass an unstamped
 // context and use NewLedger without a lock so the validate step is skipped.
 type FencingTuple struct {
-	Token placement.FencingToken
-	Epoch placement.DaemonEpoch
+	Token fencing.FencingToken
+	Epoch fencing.DaemonEpoch
+}
+
+// WriteFence is the pure store-side fencing contract. Concrete channel
+// ownership schemes live outside runtime/store and inject an implementation.
+type WriteFence interface {
+	ValidateWriteTx(ctx context.Context, tx *sql.Tx, token fencing.FencingToken, epoch fencing.DaemonEpoch) error
+}
+
+// WriteFenceFunc adapts a function into WriteFence.
+type WriteFenceFunc func(ctx context.Context, tx *sql.Tx, token fencing.FencingToken, epoch fencing.DaemonEpoch) error
+
+// ValidateWriteTx implements WriteFence.
+func (f WriteFenceFunc) ValidateWriteTx(ctx context.Context, tx *sql.Tx, token fencing.FencingToken, epoch fencing.DaemonEpoch) error {
+	return f(ctx, tx, token, epoch)
+}
+
+// FencingStaleError is the typed error returned by WriteFence
+// implementations when the caller's (token, epoch) tuple does not match
+// the current channel owner. Callers map this to
+// message.HarnessWorkerFencingStale per L1 §10.3.1.
+type FencingStaleError struct {
+	HaveToken fencing.FencingToken
+	GotToken  fencing.FencingToken
+	HaveEpoch fencing.DaemonEpoch
+	GotEpoch  fencing.DaemonEpoch
+	Reason    string
+}
+
+// Error implements error.
+func (e *FencingStaleError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Reason != "" {
+		return "store: fencing stale: " + e.Reason
+	}
+	return fmt.Sprintf(
+		"store: fencing stale (have token=%q epoch=%d, got token=%q epoch=%d)",
+		e.HaveToken, e.HaveEpoch, e.GotToken, e.GotEpoch,
+	)
+}
+
+// IsFencingStale reports whether err is (or wraps) a FencingStaleError.
+func IsFencingStale(err error) bool {
+	var fse *FencingStaleError
+	return errors.As(err, &fse)
 }
 
 type ctxKeyFencing struct{}
@@ -25,7 +74,7 @@ type ctxKeyFencing struct{}
 // CtxWithFencing returns a child ctx carrying the fencing tuple. Call
 // this at the edge (workerhost.handle*, scheduler tick, lifecycle
 // channel-bound write) before invoking any channel-local mutation.
-func CtxWithFencing(ctx context.Context, token placement.FencingToken, epoch placement.DaemonEpoch) context.Context {
+func CtxWithFencing(ctx context.Context, token fencing.FencingToken, epoch fencing.DaemonEpoch) context.Context {
 	return context.WithValue(ctx, ctxKeyFencing{}, FencingTuple{Token: token, Epoch: epoch})
 }
 

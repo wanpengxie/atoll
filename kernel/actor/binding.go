@@ -13,8 +13,8 @@ package actor
 //     (transport choice — HTTP / gRPC / etc. — is
 //     implementation freedom).
 //   - runtime_inbound_via_relay — adapter runs in the channel runtime process,
-//     remote device connects via server relay
-//     (transport choice is implementation freedom).
+//     remote peer connects via server relay (transport choice is
+//     implementation freedom).
 type Binding string
 
 const (

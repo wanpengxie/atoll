@@ -1,6 +1,6 @@
 // Package channel defines the channel-id type and its forward-compatible
-// federation reference (ChannelRef). Channel-id is server-allocated and
-// globally unique within a server registry per L1 §3.1.
+// federation reference (ChannelRef). Allocation strategy belongs to the
+// embedding framework; the kernel treats IDs as opaque stable strings.
 package channel
 
 import (
@@ -8,9 +8,8 @@ import (
 	"fmt"
 )
 
-// ID is the channel identifier — server-allocated, globally unique
-// within the server registry per L1 §3.1. Equivalent to envelope
-// `channel_id` (L0 §2.1 — same namespace).
+// ID is the channel identifier. It is equivalent to envelope `channel_id`
+// and is opaque to the kernel.
 type ID string
 
 // String returns the wire form.

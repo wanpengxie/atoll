@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -26,11 +25,12 @@ import (
 // overwrite, type_registry / schema validation, and The One Law
 // uniqueness contract.
 //
-// Append performs three things in one transaction:
+// Append performs two things in one transaction:
 //  1. dedupe check by envelope.id (returns Deduped=true if existing row).
 //  2. INSERT the messages row (raises *AppendError on terminal-duplicate
 //     UNIQUE INDEX violation per L2 §1.4.1).
-//  3. INSERT the view_sync_outbox row keyed by seq (drives daemon push).
+//     Optional framework observers may enqueue same-transaction side rows
+//     after the message insert.
 //
 // IsTerminal computation is **simplified** for launch T3: response rows
 // with non-empty parent_id are treated terminal by default (L2 §1.4.1
@@ -46,33 +46,68 @@ import (
 // independent of type_registry semantics and keeps the harness as the
 // single source of truth for terminal classification.
 type Messages struct {
-	db   *sql.DB
-	lock *ChannelLock // optional — when non-nil, Append enforces fencing.
+	db     *sql.DB
+	fence  WriteFence     // optional — when non-nil, Append enforces fencing.
+	outbox AppendObserver // optional framework-owned same-tx append observer.
 }
 
-const (
-	viewSyncOutboxHighWatermark = 10000
-	viewSyncOutboxLowWatermark  = viewSyncOutboxHighWatermark / 2
-	viewSyncOutboxThrottleSleep = 50 * time.Millisecond
-)
+// AppendObserver is an optional same-transaction hook for frameworks that
+// need to project appended messages into framework-owned side tables.
+type AppendObserver interface {
+	WaitForAdmission(ctx context.Context) error
+	EnqueueAppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, seq int64) error
+}
+
+// AppendObserverFuncs adapts function hooks into AppendObserver.
+type AppendObserverFuncs struct {
+	Wait    func(context.Context) error
+	Enqueue func(context.Context, *sql.Tx, *message.Envelope, int64) error
+}
+
+// WaitForAdmission implements AppendObserver.
+func (f AppendObserverFuncs) WaitForAdmission(ctx context.Context) error {
+	if f.Wait == nil {
+		return nil
+	}
+	return f.Wait(ctx)
+}
+
+// EnqueueAppendTx implements AppendObserver.
+func (f AppendObserverFuncs) EnqueueAppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, seq int64) error {
+	if f.Enqueue == nil {
+		return nil
+	}
+	return f.Enqueue(ctx, tx, env, seq)
+}
 
 // NewMessages returns a *Messages bound to the channel sqlite WITHOUT
 // fencing enforcement. Use this constructor for store-level unit tests
 // (transit_test / store_test) and helper paths that seed rows before
 // the channel_lock row is even installed.
 //
-// Production daemon wiring MUST use NewMessagesWithLock so every
-// caller-driven mutation is guarded by the FIX-T6 fencing gate.
+// Production daemon wiring MUST use NewMessagesWithFence so every
+// caller-driven mutation is guarded by the active fencing gate.
 func NewMessages(db *sql.DB) *Messages { return &Messages{db: db} }
 
-// NewMessagesWithLock returns a *Messages whose Append validates the
-// explicit fencing tuple against the channel's channel_lock row INSIDE
+// NewMessagesWithFence returns a *Messages whose Append validates the
+// explicit fencing tuple against the injected fence INSIDE
 // the same transaction as the row INSERT. A stale daemon (or a forgotten
 // Append fencing argument) is rejected with
-// klog.AppendError{Reason: HarnessWorkerFencingStale} and neither the
-// messages row nor the view_sync_outbox row is written.
-func NewMessagesWithLock(db *sql.DB, lock *ChannelLock) *Messages {
-	return &Messages{db: db, lock: lock}
+// klog.AppendError{Reason: HarnessWorkerFencingStale}.
+func NewMessagesWithFence(db *sql.DB, fence WriteFence) *Messages {
+	return &Messages{db: db, fence: fence}
+}
+
+// NewMessagesWithLock is kept as compatibility sugar for existing callers;
+// the parameter is the pure WriteFence interface, not a concrete lock type.
+func NewMessagesWithLock(db *sql.DB, fence WriteFence) *Messages {
+	return NewMessagesWithFence(db, fence)
+}
+
+// NewMessagesWithObservers wires both the pure fencing gate and an optional
+// framework-owned append observer.
+func NewMessagesWithObservers(db *sql.DB, fence WriteFence, outbox AppendObserver) *Messages {
+	return &Messages{db: db, fence: fence, outbox: outbox}
 }
 
 // Append implements log.MessageLog.
@@ -93,8 +128,10 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kl
 	if env.Payload == nil {
 		return klog.AppendResult{}, errors.New("store: append nil payload (harness step 4 must materialize payload before reaching store)")
 	}
-	if err := m.waitForViewSyncOutboxAdmission(ctx); err != nil {
-		return klog.AppendResult{}, err
+	if m.outbox != nil {
+		if err := m.outbox.WaitForAdmission(ctx); err != nil {
+			return klog.AppendResult{}, err
+		}
 	}
 
 	tx, err := m.db.BeginTx(ctx, nil)
@@ -111,33 +148,6 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kl
 		return klog.AppendResult{}, fmt.Errorf("store: append commit: %w", err)
 	}
 	return res, nil
-}
-
-func (m *Messages) waitForViewSyncOutboxAdmission(ctx context.Context) error {
-	blocking := false
-	for {
-		var n int
-		if err := m.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM view_sync_outbox WHERE status IN ('pending','pushed')`,
-		).Scan(&n); err != nil {
-			return fmt.Errorf("store: view-sync outbox admission count: %w", err)
-		}
-		threshold := viewSyncOutboxHighWatermark
-		if blocking {
-			threshold = viewSyncOutboxLowWatermark
-		}
-		if n < threshold || (!blocking && n <= viewSyncOutboxHighWatermark) {
-			return nil
-		}
-		blocking = true
-		timer := time.NewTimer(viewSyncOutboxThrottleSleep)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
 }
 
 // AppendTx appends env using an existing transaction. It is used by internal
@@ -234,16 +244,10 @@ func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelo
 	}
 	env.Seq = seq
 
-	// 3) view_sync_outbox row (same transaction — L1 §8.6 at-least-once)
-	envJSON, err := json.Marshal(env)
-	if err != nil {
-		return klog.AppendResult{}, fmt.Errorf("store: outbox encode: %w", err)
-	}
-	const insOutbox = `INSERT INTO view_sync_outbox
-	   (seq, message_id, envelope_json, enqueued_at, status)
-	   VALUES (?, ?, ?, ?, 'pending')`
-	if _, err := tx.ExecContext(ctx, insOutbox, seq, env.ID, string(envJSON), env.TSReceived); err != nil {
-		return klog.AppendResult{}, fmt.Errorf("store: outbox insert: %w", err)
+	if m.outbox != nil {
+		if err := m.outbox.EnqueueAppendTx(ctx, tx, env, seq); err != nil {
+			return klog.AppendResult{}, err
+		}
 	}
 
 	return klog.AppendResult{Seq: klog.Seq(seq), IsTerminal: env.IsTerminal, Deduped: false}, nil
@@ -730,13 +734,13 @@ func nullableInt(p *int64) any {
 }
 
 // checkFencing is the FIX-T6 gate. Returns nil when this Messages was
-// constructed without a *ChannelLock (test-mode wire). Otherwise validates
+// constructed without a WriteFence (test-mode wire). Otherwise validates
 // the explicit (token, epoch) tuple inside the supplied tx; on any
 // mismatch returns a typed
 // *klog.AppendError{Reason: HarnessWorkerFencingStale} so the harness
 // chain can surface the canonical reject reason without parsing strings.
 func (m *Messages) checkFencing(ctx context.Context, tx *sql.Tx, envID string, fencing klog.FencingTuple) error {
-	if m.lock == nil {
+	if m.fence == nil {
 		return nil
 	}
 	if fencing == (klog.FencingTuple{}) {
@@ -746,7 +750,7 @@ func (m *Messages) checkFencing(ctx context.Context, tx *sql.Tx, envID string, f
 			PartialMessageID: message.ID(envID),
 		}
 	}
-	if err := m.lock.ValidateWriteTx(ctx, tx, fencing.Token, fencing.Epoch); err != nil {
+	if err := m.fence.ValidateWriteTx(ctx, tx, fencing.Token, fencing.Epoch); err != nil {
 		if IsFencingStale(err) {
 			return &klog.AppendError{
 				Reason:           message.HarnessWorkerFencingStale,
