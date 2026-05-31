@@ -1402,24 +1402,15 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 		//   COAGENT_CHANNEL_TYPE=<type>     (always set; e.g. "group")
 		//   COAGENT_DOMAIN_PROMPT=<prompt>  (may be ""; omitted entirely if empty)
 		//   COAGENT_CHANNEL_ID=<id>         (always set for owned channels)
-		//   COAGENT_CHANNEL_CONTEXT_JSON=<json> (bootstrap display snapshot)
 		// mock_bridge / kimi_bridge read these directly via os.Getenv;
 		// no extra IPC frame is introduced (the prompt is base-prompt
 		// scaffolding, not a per-turn signal). The worker never receives
-		// channel.sqlite; current state/metadata must be read through
-		// reserved envelope calls.
+		// channel.sqlite; current actor/type state is read live on demand
+		// through reserved envelope calls (actor.list / actor.describe),
+		// never baked into a frozen spawn-time snapshot.
 		workerEnv := d.buildWorkerEnvForChannel(lockRow.ChannelType)
-		channelContextJSON, err := d.buildWorkerChannelContextJSON(ctx, cr, lockRow.ChannelType)
-		if err != nil {
-			d.log.Warn().Err(err).
-				Str("channel_id", string(cr.channelID)).
-				Str("event", "runtime.worker_channel_context_failed").
-				Msg("worker channel context unavailable; spawning with minimal context")
-			channelContextJSON = d.minimalWorkerChannelContextJSON(cr.channelID, lockRow.ChannelType)
-		}
 		workerEnv = append(workerEnv,
 			"COAGENT_CHANNEL_ID="+string(cr.channelID),
-			"COAGENT_CHANNEL_CONTEXT_JSON="+channelContextJSON,
 		)
 		var preSpawn func(context.Context) ([]string, error)
 		bridge, err := workerhost.NewBridge(workerhost.BridgeConfig{
@@ -1480,14 +1471,25 @@ func (d *Daemon) ChannelAgentTriggerCount(chID channel.ID) int64 {
 	return cr.channelAgentTriggers.Load()
 }
 
-type workerChannelContext struct {
-	ChannelID   string               `json:"channel_id,omitempty"`
-	ChannelType string               `json:"channel_type,omitempty"`
-	Actors      []workerChannelActor `json:"actors,omitempty"`
-	Types       []workerChannelType  `json:"types,omitempty"`
+// actorListResponse is the payload shape of an actor.list reserved-type
+// response. It mirrors the live channel registry + type registry at the
+// moment the request is handled — it is NOT a frozen spawn-time snapshot.
+// An actor that registered after the worker spawned appears here on the
+// very next list_actors call.
+type actorListResponse struct {
+	// Status is the Layer 1 final status. The worker-side caller treats a
+	// kind=response as final only when payload.status ∈ {completed,failed}
+	// (kernel/message.IsFinalStatus); a catalog without it would hang the
+	// awaiting list_actors call. Mirrors the framework Respond path that
+	// merges status:completed into every reserved-type response payload.
+	Status      string           `json:"status"`
+	ChannelID   string           `json:"channel_id,omitempty"`
+	ChannelType string           `json:"channel_type,omitempty"`
+	Actors      []actorListActor `json:"actors,omitempty"`
+	Types       []actorListType  `json:"types,omitempty"`
 }
 
-type workerChannelActor struct {
+type actorListActor struct {
 	ActorID           string          `json:"actor_id"`
 	Kind              string          `json:"kind"`
 	Binding           string          `json:"binding,omitempty"`
@@ -1499,7 +1501,7 @@ type workerChannelActor struct {
 	LastStateChangeAt int64           `json:"last_state_change_at,omitempty"`
 }
 
-type workerChannelType struct {
+type actorListType struct {
 	Type           string   `json:"type"`
 	HandlerActorID string   `json:"handler_actor_id"`
 	HandlerBinding string   `json:"handler_binding,omitempty"`
@@ -1507,46 +1509,108 @@ type workerChannelType struct {
 	MaxPendingMs   int64    `json:"max_pending_ms,omitempty"`
 }
 
-func (d *Daemon) buildWorkerChannelContextJSON(ctx context.Context, cr *channelRuntime, channelType string) (string, error) {
-	if cr == nil {
-		return "", errors.New("runtime: nil channel runtime")
+// systemActorHandler returns the scheduler handler bound to the channel
+// system actor. Today it answers the actor.list reserved type with a live
+// channel-wide catalog; any other request addressed to the system actor is
+// ignored (no error) so the §6.4 long-pending fallback closes it.
+func (d *Daemon) systemActorHandler(cr *channelRuntime) scheduler.HandlerFn {
+	return func(ctx context.Context, _ actor.ActorID, env *message.Envelope) error {
+		if env == nil || env.Kind != message.KindRequest {
+			return nil
+		}
+		if env.Type != "actor.list" {
+			return nil
+		}
+		return d.respondActorList(ctx, cr, env)
+	}
+}
+
+// respondActorList builds the live channel-wide actor/type catalog and
+// writes it back as a kind=response from the channel system actor. The
+// catalog is read fresh from the registry + type registry on every call —
+// the daemon is the single source of truth (INVARIANT-2). No frozen
+// snapshot, no server mirror, no event emission.
+func (d *Daemon) respondActorList(ctx context.Context, cr *channelRuntime, req *message.Envelope) error {
+	body := actorListResponse{Status: "completed", ChannelID: string(cr.channelID)}
+	if lockRow, ok, err := cr.lock.Get(ctx); err == nil && ok {
+		body.ChannelType = lockRow.ChannelType
 	}
 	actors, err := cr.registry.ListActive(ctx)
 	if err != nil {
-		return "", fmt.Errorf("runtime: worker channel context list actors %s: %w", cr.channelID, err)
+		return d.respondActorListFailure(ctx, cr, req,
+			fmt.Sprintf("list active actors: %v", err))
 	}
+	body.Actors = actorListActors(actors)
 	types, err := cr.typeRegistry.List(ctx)
 	if err != nil {
-		return "", fmt.Errorf("runtime: worker channel context list types %s: %w", cr.channelID, err)
+		return d.respondActorListFailure(ctx, cr, req,
+			fmt.Sprintf("list types: %v", err))
 	}
-	raw, err := json.Marshal(workerChannelContext{
-		ChannelID:   string(cr.channelID),
-		ChannelType: channelType,
-		Actors:      workerChannelActors(actors),
-		Types:       workerChannelTypes(types),
-	})
+	body.Types = actorListTypes(types)
+
+	payload, err := json.Marshal(body)
 	if err != nil {
-		return "", fmt.Errorf("runtime: worker channel context marshal %s: %w", cr.channelID, err)
+		return d.respondActorListFailure(ctx, cr, req,
+			fmt.Sprintf("marshal catalog: %v", err))
 	}
-	return string(raw), nil
+	return d.writeSystemResponse(ctx, cr, req, payload)
 }
 
-func (d *Daemon) minimalWorkerChannelContextJSON(chID channel.ID, channelType string) string {
-	raw, err := json.Marshal(workerChannelContext{
-		ChannelID:   string(chID),
-		ChannelType: channelType,
+func (d *Daemon) respondActorListFailure(ctx context.Context, cr *channelRuntime, req *message.Envelope, detail string) error {
+	payload, err := json.Marshal(map[string]any{
+		"status": "failed",
+		"reason": string(message.TerminalReceiverInternalError),
+		"detail": detail,
 	})
 	if err != nil {
-		return "{}"
+		return fmt.Errorf("runtime: actor.list failure marshal: %w", err)
 	}
-	return string(raw)
+	return d.writeSystemResponse(ctx, cr, req, payload)
 }
 
-func workerChannelActors(records []actorreg.Record) []workerChannelActor {
-	out := make([]workerChannelActor, 0, len(records))
+// writeSystemResponse writes a kind=response from the channel system actor
+// to the request's sender through the post-harness chain, reusing the same
+// fenced + fan-out invariants as the §6.4 long-pending fallback path.
+func (d *Daemon) writeSystemResponse(ctx context.Context, cr *channelRuntime, req *message.Envelope, payload json.RawMessage) error {
+	now := d.cfg.NowFn()
+	correlationID := req.CorrelationID
+	if correlationID == "" {
+		correlationID = req.ID
+	}
+	env := &message.Envelope{
+		ID:            message.ID("response:" + string(req.ID) + ":actor.list"),
+		TS:            now,
+		TSReceived:    now,
+		ChannelID:     req.ChannelID,
+		Sender:        message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind:          message.KindResponse,
+		Type:          req.Type,
+		Payload:       payload,
+		ParentID:      req.ID,
+		CorrelationID: correlationID,
+		Visibility:    req.Visibility,
+		Audience:      message.Audience{req.Sender.ID},
+	}
+	chainCtx := harness.CtxWithCaller(ctx, harness.CallerContext{
+		ActorID:                 actor.SystemActorID,
+		ChannelID:               req.ChannelID,
+		AllowProvidedSenderKind: true,
+	})
+	res, err := cr.wrappedChain.Write(chainCtx, env)
+	if err != nil {
+		return fmt.Errorf("runtime: actor.list response write: %w", err)
+	}
+	if res.RejectReason != "" && res.RejectReason != message.HarnessTerminalDuplicate {
+		return fmt.Errorf("runtime: actor.list response rejected: %s (%s)", res.RejectReason, res.RejectDetail)
+	}
+	return nil
+}
+
+func actorListActors(records []actorreg.Record) []actorListActor {
+	out := make([]actorListActor, 0, len(records))
 	for _, rec := range records {
 		readiness := rec.Readiness.Normalize()
-		out = append(out, workerChannelActor{
+		out = append(out, actorListActor{
 			ActorID:           string(rec.ID),
 			Kind:              string(rec.Kind),
 			Binding:           string(rec.Binding),
@@ -1561,21 +1625,21 @@ func workerChannelActors(records []actorreg.Record) []workerChannelActor {
 	return out
 }
 
-func workerChannelTypes(rows []adapter.TypeRow) []workerChannelType {
-	out := make([]workerChannelType, 0, len(rows))
+func actorListTypes(rows []adapter.TypeRow) []actorListType {
+	out := make([]actorListType, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, workerChannelType{
+		out = append(out, actorListType{
 			Type:           row.Type,
 			HandlerActorID: string(row.HandlerActorID),
 			HandlerBinding: string(row.HandlerBinding),
-			AllowedKinds:   workerAllowedKinds(row.AllowedKinds),
+			AllowedKinds:   actorListAllowedKinds(row.AllowedKinds),
 			MaxPendingMs:   row.MaxPendingMs,
 		})
 	}
 	return out
 }
 
-func workerAllowedKinds(kinds []message.Kind) []string {
+func actorListAllowedKinds(kinds []message.Kind) []string {
 	out := make([]string, 0, len(kinds))
 	for _, k := range kinds {
 		out = append(out, string(k))
@@ -1656,6 +1720,15 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel, sta
 		d.deleteChannel(lc.ChannelID)
 		return err
 	}
+
+	// actor.list reserved-type handler — the channel system actor answers
+	// the live channel-wide actor/type catalog. Unlike actor.describe
+	// (per-tool-actor, framework-intercepted), actor.list is channel-scoped
+	// and owned by the daemon (INVARIANT-2 truth ownership): it reads the
+	// registry + type registry on EVERY call, so an actor that joined after
+	// the worker spawned is visible immediately. Registered before the
+	// pusher starts so a list_actors that races boot observes the handler.
+	cr.deliverer.Register(actor.SystemActorID, d.systemActorHandler(cr))
 
 	// M1.6-T2 — OnChannelBoot hook lets cmd/daemon wire the adapter
 	// framework Manager + register Dispatch handlers on the Deliverer.

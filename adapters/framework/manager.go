@@ -903,14 +903,28 @@ func (m *Manager) recoverTimersForBoundModule(ctx context.Context, bm *boundModu
 		return fmt.Errorf("framework: list pending %s: %w", bm.declaration.Name, err)
 	}
 	for _, e := range pending {
-		deadline := time.UnixMilli(e.ExpiresAt)
+		// temporal R1: recover against the LIVE deadline. RearmedExpiresAt holds
+		// the latest provisional-heartbeat-extended deadline (0 = never re-armed);
+		// when set it supersedes the stale original ExpiresAt so a still-alive
+		// long-running receiver is not force-failed at 1µs after restart. A
+		// request that never heart-beat (RearmedExpiresAt==0) recovers against its
+		// original ExpiresAt and still F3-fails promptly if it elapsed during
+		// downtime.
+		deadlineMs := e.ExpiresAt
+		if e.RearmedExpiresAt > deadlineMs {
+			deadlineMs = e.RearmedExpiresAt
+		}
+		deadline := time.UnixMilli(deadlineMs)
 		// F4: rebuild the router receiver-owner index BEFORE re-arming the F3
 		// timer. A recovered entry whose deadline is already past makes
-		// RegisterTimer fire (near-)immediately; the fallback final must find
-		// the receiverOwner to close lifecycle through the single center
-		// (§3.1) — so owner-first, timer-second, matching reservePendingRequest.
+		// RecoverTimer fire (near-)immediately; the fallback final must find the
+		// receiverOwner to close lifecycle through the single center (§3.1) — so
+		// owner-first, timer-second, matching reservePendingRequest.
 		m.router.trackReceiver(message.ID(e.RequestID), bm)
-		if err := bm.policy.RegisterTimer(ctx, e.RequestID, deadline); err != nil {
+		// Seed the ScheduleToClose anchor from EnqueuedAt (original creation), not
+		// recovery time, so the hard ceiling stays anchored at creation across
+		// restarts and heartbeats after recovery can't escape it.
+		if err := bm.policy.RecoverTimer(ctx, e.RequestID, deadline, e.EnqueuedAt); err != nil {
 			m.cfg.Logger.Warn("framework.recover.register_timer",
 				"adapter", bm.declaration.Name,
 				"request_id", e.RequestID,

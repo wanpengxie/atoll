@@ -40,6 +40,16 @@ var reservedActorTypeSet = map[string]reservedActorTypeRule{
 	"actor.describe": {
 		AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
 	},
+	// actor.list returns the channel's live active-actor + request-type
+	// catalog. Unlike actor.describe (per-actor, framework-intercepted on
+	// the target tool actor's dispatch path), actor.list is channel-wide:
+	// the daemon answers it directly from the channel registry + type
+	// registry (truth ownership, INVARIANT-2) when addressed to the
+	// channel system actor. Pull-based, live on every call — no frozen
+	// bootstrap snapshot, no server-side mirror.
+	"actor.list": {
+		AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
+	},
 	"actor.readiness.changed": {
 		AllowedKinds: []message.Kind{message.KindEvent},
 		SystemOnly:   true,

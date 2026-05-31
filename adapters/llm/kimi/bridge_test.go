@@ -160,7 +160,7 @@ func TestNewConfigFromEnv_ReadsAllFields(t *testing.T) {
 }
 
 func TestBuildBasePrompt_EmptyDomain(t *testing.T) {
-	got := kimi.BuildBasePrompt("group", "", kimi.ChannelContext{})
+	got := kimi.BuildBasePrompt("group", "")
 	if !strings.Contains(got, "coagent worker") {
 		t.Errorf("base prompt missing platform teaching: %q", got)
 	}
@@ -168,12 +168,12 @@ func TestBuildBasePrompt_EmptyDomain(t *testing.T) {
 		t.Errorf("base prompt should omit Channel template heading when domain empty")
 	}
 	if strings.Contains(got, "Channel context") {
-		t.Errorf("base prompt should omit Channel context when ChannelContext zero")
+		t.Errorf("base prompt must not carry a frozen channel-context appendix")
 	}
 }
 
 func TestBuildBasePrompt_WithDomain(t *testing.T) {
-	got := kimi.BuildBasePrompt("xhs-creator", "You handle xhs-creator workflow.", kimi.ChannelContext{})
+	got := kimi.BuildBasePrompt("xhs-creator", "You handle xhs-creator workflow.")
 	if !strings.Contains(got, "coagent worker") {
 		t.Error("missing platform teaching")
 	}
@@ -185,56 +185,24 @@ func TestBuildBasePrompt_WithDomain(t *testing.T) {
 	}
 }
 
-// TestBuildBasePrompt_WithChannelContext exercises the channel-context
-// appendix (M1.6 follow-up — agent self-awareness fix). Asserts that
-// actor catalog rows, type catalog rows, and optional device actor rows
-// render into the prompt as markdown so the LLM can answer "what
-// tools do I have / who else is in this channel" without exploring
-// host filesystem.
-func TestBuildBasePrompt_WithChannelContext(t *testing.T) {
-	ctx := kimi.ChannelContext{
-		ChannelID:   "f9831154-ch",
-		ChannelType: "xhs-creator",
-		Actors: []kimi.ActorInfo{
-			{ActorID: "system", Kind: "system"},
-			{ActorID: "agent:channel-agent", Kind: "agent", DisplayName: "channel agent"},
-			{ActorID: "tool:xhs", Kind: "tool", Binding: "runtime_inbound_via_relay"},
-			{ActorID: "user:2cc317ee", Kind: "human", DisplayName: "Wanpeng Xie"},
-		},
-		Types: []kimi.TypeInfo{
-			{Type: "xhs.publish", HandlerActorID: "tool:xhs", HandlerBinding: "runtime_inbound_via_relay", AllowedKinds: []string{"request", "response", "event"}, MaxPendingMs: 300_000},
-			{Type: "xhs.search", HandlerActorID: "tool:xhs", HandlerBinding: "runtime_inbound_via_relay", AllowedKinds: []string{"request", "response"}},
-			{Type: "xhs.note.fetch", HandlerActorID: "tool:xhs", HandlerBinding: "runtime_inbound_via_relay", AllowedKinds: []string{"request", "response"}},
-		},
-		Devices: []kimi.DeviceInfo{
-			{ActorID: "tool:xhs", DeviceID: "chrome-default", DeviceType: "xhs-chrome", Status: "connected"},
-		},
-	}
-	got := kimi.BuildBasePrompt("xhs-creator", "domain body", ctx)
-	// Substrate-native tool surface: the markdown table of every type
-	// was retired in favour of `call_actor` + `list_actors` meta tools
-	// (see meta_tool.go). Prompt now mentions the invocation pattern +
-	// the count of request-callable types; per-type names + schemas
-	// live in list_actors output, not the prompt.
-	for _, want := range []string{
-		"# Channel context (xhs-creator)",
-		"channel_id: f9831154-ch",
+// TestBuildBasePrompt_NoFrozenActorSnapshot pins the defrost contract: the
+// base prompt carries NO actor/type catalog. The concrete set of actors +
+// request-callable types is dynamic channel state discovered live via the
+// list_actors / describe_* meta tools, never baked into the cached prefix.
+func TestBuildBasePrompt_NoFrozenActorSnapshot(t *testing.T) {
+	got := kimi.BuildBasePrompt("xhs-creator", "domain body")
+	for _, banned := range []string{
+		"Channel context",
 		"## Actors in this channel",
-		"tool:xhs",
-		"binding=runtime_inbound_via_relay",
-		"## Tool invocation",
-		"list_actors",
-		"describe_actor",
-		"describe_type",
-		"call_actor",
 		"## Device actors",
 		"tool:xhs",
-		"status=connected",
-		"domain body",
 	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("base prompt missing %q\nfull prompt:\n%s", want, got)
+		if strings.Contains(got, banned) {
+			t.Errorf("base prompt must not contain frozen snapshot fragment %q\nfull prompt:\n%s", banned, got)
 		}
+	}
+	if !strings.Contains(got, "domain body") {
+		t.Error("missing domain prompt body")
 	}
 }
 
@@ -487,24 +455,6 @@ func TestBridge_RunEmitsProgressPerToolStep(t *testing.T) {
 
 func TestBridge_CallActorToolEmitsRequestAndReturnsResponse(t *testing.T) {
 	cfg := mustConfig(t)
-	cfg.ChannelContext = kimi.ChannelContext{
-		Actors: []kimi.ActorInfo{
-			{ActorID: "tool:xhs", Kind: "tool", Binding: "runtime_inbound_via_relay"},
-		},
-		Types: []kimi.TypeInfo{
-			{
-				Type:           "xhs.publish",
-				HandlerActorID: "tool:xhs",
-				AllowedKinds:   []string{"request", "response"},
-				MaxPendingMs:   1000,
-			},
-			{
-				Type:           "xhs.note.archived",
-				HandlerActorID: "tool:xhs",
-				AllowedKinds:   []string{"event"},
-			},
-		},
-	}
 	b, err := kimi.NewBridge(cfg)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
@@ -614,25 +564,14 @@ func TestBridge_CallActorToolEmitsRequestAndReturnsResponse(t *testing.T) {
 	}
 }
 
-// TestBridge_CallActorToolSuperWindowReturnsAck asserts that when no response
-// arrives within the fast-path window (here the type's tiny max_pending_ms
-// clamps the window), call_actor degrades to an ACK rather than a timeout
-// error — the request stays in flight and the agent can await_result / let it
-// return as a new trigger (§2.3.2). This replaces the legacy timeout-error
-// expectation.
+// TestBridge_CallActorToolSuperWindowReturnsAck asserts that an async
+// call_actor (wait=false, fan-out) returns an ACK rather than blocking — the
+// request stays in flight and the agent can await_result / let it return as a
+// new trigger (§2.3.2). Post-defrost the caller no longer knows a per-type
+// max_pending_ms client-side (the daemon owns it), so the deterministic
+// degrade-to-ack path is the explicit wait=false mode.
 func TestBridge_CallActorToolSuperWindowReturnsAck(t *testing.T) {
 	cfg := mustConfig(t)
-	cfg.ChannelContext = kimi.ChannelContext{
-		Actors: []kimi.ActorInfo{
-			{ActorID: "tool:xhs", Kind: "tool", Binding: "runtime_inbound_via_relay"},
-		},
-		Types: []kimi.TypeInfo{{
-			Type:           "xhs.publish",
-			HandlerActorID: "tool:xhs",
-			AllowedKinds:   []string{"request"},
-			MaxPendingMs:   20,
-		}},
-	}
 	b, err := kimi.NewBridge(cfg)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
@@ -646,7 +585,7 @@ func TestBridge_CallActorToolSuperWindowReturnsAck(t *testing.T) {
 		}
 		return &scriptedAgent{
 			emitFn: func(ctx context.Context, _ string) error {
-				result, err := callActor.Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{"title":"slow"}}`))
+				result, err := callActor.Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{"title":"slow"},"wait":false}`))
 				if err != nil {
 					return err
 				}
@@ -686,17 +625,6 @@ func TestBridge_CallActorToolSuperWindowReturnsAck(t *testing.T) {
 
 func TestBridge_CallActorToolTerminalFailureReturnsErrorResult(t *testing.T) {
 	cfg := mustConfig(t)
-	cfg.ChannelContext = kimi.ChannelContext{
-		Actors: []kimi.ActorInfo{
-			{ActorID: "tool:xhs", Kind: "tool", Binding: "runtime_inbound_via_relay"},
-		},
-		Types: []kimi.TypeInfo{{
-			Type:           "xhs.publish",
-			HandlerActorID: "tool:xhs",
-			AllowedKinds:   []string{"request"},
-			MaxPendingMs:   1000,
-		}},
-	}
 	b, err := kimi.NewBridge(cfg)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
@@ -898,17 +826,6 @@ func TestBridge_ClassifyLLMError_NetworkBuckets(t *testing.T) {
 // future either.
 func TestBridge_CallActorToolProvisionalBeforeFinalDoesNotResolveEarly(t *testing.T) {
 	cfg := mustConfig(t)
-	cfg.ChannelContext = kimi.ChannelContext{
-		Actors: []kimi.ActorInfo{
-			{ActorID: "tool:xhs", Kind: "tool", Binding: "runtime_inbound_via_relay"},
-		},
-		Types: []kimi.TypeInfo{{
-			Type:           "xhs.publish",
-			HandlerActorID: "tool:xhs",
-			AllowedKinds:   []string{"request", "response"},
-			MaxPendingMs:   2000,
-		}},
-	}
 	b, err := kimi.NewBridge(cfg)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
@@ -1005,22 +922,12 @@ func TestBridge_CallActorToolProvisionalBeforeFinalDoesNotResolveEarly(t *testin
 
 // TestBridge_CallActorToolProvisionalOnlyDegradesToAck asserts that when only
 // provisional responses arrive (no final), provisional traffic alone does NOT
-// satisfy the fast-path Await — the window elapses and call_actor degrades to
-// an ack (the request stays in flight; §2.3.2). Provisionals are swallowed,
-// never resolving the future early.
+// satisfy the caller — the agent gets an ack and the request stays in flight
+// (§2.3.2); provisionals are swallowed, never resolving the future early.
+// Post-defrost the caller no longer knows a per-type max_pending_ms (the
+// daemon owns it), so the deterministic non-blocking path is wait=false.
 func TestBridge_CallActorToolProvisionalOnlyDegradesToAck(t *testing.T) {
 	cfg := mustConfig(t)
-	cfg.ChannelContext = kimi.ChannelContext{
-		Actors: []kimi.ActorInfo{
-			{ActorID: "tool:xhs", Kind: "tool", Binding: "runtime_inbound_via_relay"},
-		},
-		Types: []kimi.TypeInfo{{
-			Type:           "xhs.publish",
-			HandlerActorID: "tool:xhs",
-			AllowedKinds:   []string{"request", "response"},
-			MaxPendingMs:   100,
-		}},
-	}
 	b, err := kimi.NewBridge(cfg)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
@@ -1035,7 +942,7 @@ func TestBridge_CallActorToolProvisionalOnlyDegradesToAck(t *testing.T) {
 		}
 		return &scriptedAgent{
 			emitFn: func(ctx context.Context, _ string) error {
-				result, err := callActor.Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{"title":"slow"}}`))
+				result, err := callActor.Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{"title":"slow"},"wait":false}`))
 				if err != nil {
 					return err
 				}

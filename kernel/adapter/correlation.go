@@ -26,8 +26,23 @@ type CorrelationEntry struct {
 	AudienceActor actor.ActorID // sender actor of the response (the adapter actor id)
 	ParentID      message.ID    // == RequestID (response.parent_id should equal RequestID)
 	EnqueuedAt    int64         // ms epoch
-	ExpiresAt     int64         // ms epoch (derived from MaxPendingMs)
-	State         CorrelationState
+	ExpiresAt     int64         // ms epoch (derived from MaxPendingMs). IMMUTABLE
+	// after Reserve: it mirrors the append-only request envelope.expires_at and
+	// is the tamper anchor several framework validation paths assert against, so
+	// it is NEVER rewritten by a heartbeat.
+	//
+	// RearmedExpiresAt is the latest provisional-heartbeat-extended F3 deadline
+	// (ms epoch), 0 when the request has never been re-armed. A provisional
+	// liveness heartbeat re-arms the in-memory F3 timer (which is lost on daemon
+	// restart); persisting the extended deadline here lets crash recovery re-arm
+	// against the LIVE deadline instead of the stale original ExpiresAt, so a
+	// still-alive long-running receiver is not force-failed at 1µs after a
+	// restart (temporal R1 / temporal-termination-consistency.md §6.2). Kept
+	// separate from ExpiresAt precisely so the immutable tamper anchor above
+	// stays untouched. Always clamped to EnqueuedAt + ScheduleToCloseCeiling by
+	// the writer, so it can never push total lifetime past the hard ceiling.
+	RearmedExpiresAt int64 // ms epoch; 0 = never re-armed
+	State            CorrelationState
 }
 
 // CorrelationState is the closed set tracking an in-flight request's

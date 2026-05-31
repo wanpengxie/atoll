@@ -28,7 +28,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -140,24 +139,17 @@ func buildBridge(provider string, maxTurns int) (worker.Bridge, error) {
 		// fork (M1.6-T5 phase-3) so the L4 template segment is
 		// available without an IPC round-trip.
 		//
-		// COAGENT_CHANNEL_CONTEXT_JSON is a daemon-built bootstrap
-		// display snapshot. The worker never opens channel.sqlite;
-		// current actor state/metadata must be queried through
-		// envelope calls such as actor.status / actor.describe.
-		channelCtx, ctxErr := parseKimiChannelContextEnv()
-		if ctxErr != nil {
-			fmt.Fprintf(os.Stderr, "worker: channel context parse failed (continuing with minimal context): %v\n", ctxErr)
-		}
+		// The worker never opens channel.sqlite and carries NO frozen
+		// actor/type snapshot. Current actor/type state is queried live
+		// through the list_actors / actor.describe reserved envelope calls.
 		basePrompt := kimi.BuildBasePrompt(
 			os.Getenv(kimi.EnvKeyChannelType),
 			os.Getenv(kimi.EnvKeyDomainPrompt),
-			channelCtx,
 		)
 		cfg, err := kimi.NewConfigFromEnv(basePrompt)
 		if err != nil {
 			return nil, err
 		}
-		cfg.ChannelContext = channelCtx
 		kb, err := kimi.NewBridge(cfg)
 		if err != nil {
 			return nil, fmt.Errorf("kimi bridge: %w", err)
@@ -169,27 +161,6 @@ func buildBridge(provider string, maxTurns int) (worker.Bridge, error) {
 	default:
 		return nil, fmt.Errorf("worker: unknown --provider %q (want mock|kimi)", provider)
 	}
-}
-
-func parseKimiChannelContextEnv() (kimi.ChannelContext, error) {
-	ctx := kimi.ChannelContext{
-		ChannelID:   os.Getenv(kimi.EnvKeyChannelID),
-		ChannelType: os.Getenv(kimi.EnvKeyChannelType),
-	}
-	raw := strings.TrimSpace(os.Getenv(kimi.EnvKeyChannelContext))
-	if raw == "" {
-		return ctx, nil
-	}
-	if err := json.Unmarshal([]byte(raw), &ctx); err != nil {
-		return ctx, err
-	}
-	if ctx.ChannelID == "" {
-		ctx.ChannelID = os.Getenv(kimi.EnvKeyChannelID)
-	}
-	if ctx.ChannelType == "" {
-		ctx.ChannelType = os.Getenv(kimi.EnvKeyChannelType)
-	}
-	return ctx, nil
 }
 
 // kimiIPCAdapter bridges runtime/worker.IPCClient → adapters/llm/kimi.

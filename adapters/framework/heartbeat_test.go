@@ -307,3 +307,257 @@ func TestProvisionalReArmsButDoesNotResolveClosure(t *testing.T) {
 		t.Fatal("F3 timer still armed after final close")
 	}
 }
+
+// newPersistentHeartbeatPolicy builds a timerPolicy wired to a correlation
+// tracker that mirrors writes to the given StateStore, so a simulated restart
+// (rebuild policy+tracker over the same store) recovers the persisted pending
+// entries. The policy uses the real wall clock so time.AfterFunc fire timing
+// matches the deadlines; the correlation tracker carries the persisted
+// EnqueuedAt / ExpiresAt / RearmedExpiresAt that recovery reads.
+func newPersistentHeartbeatPolicy(t *testing.T, store StateStore) (*timerPolicy, *memoryCorrelationTracker, *atomic.Int32) {
+	t.Helper()
+	var fires atomic.Int32
+	corr := newCorrelationTracker("xhs", store)
+	p := newTimerPolicy("xhs", corr, NoopLogger{}, NewMemoryMetrics(), time.Now, "channel:test", nil)
+	p.bindFallback(func(context.Context, adapter.CorrelationKey, json.RawMessage, adapter.RespondOptions) (adapter.RespondResult, error) {
+		fires.Add(1)
+		return adapter.RespondResult{MessageID: "fallback"}, nil
+	})
+	t.Cleanup(p.shutdown)
+	return p, corr, &fires
+}
+
+// recoverDeadlineMs mirrors recoverTimersForBoundModule's deadline choice: the
+// heartbeat-extended RearmedExpiresAt when set, else the original ExpiresAt.
+func recoverDeadlineMs(e adapter.CorrelationEntry) int64 {
+	if e.RearmedExpiresAt > e.ExpiresAt {
+		return e.RearmedExpiresAt
+	}
+	return e.ExpiresAt
+}
+
+// TestReArmPersistsExtendedDeadlineWithoutMutatingExpiresAt: a heartbeat re-arm
+// mirrors the (ceiling-clamped) extended deadline onto RearmedExpiresAt so it
+// survives a restart, while leaving the immutable ExpiresAt (the tamper anchor
+// mirroring the request envelope's expires_at) and EnqueuedAt untouched.
+func TestReArmPersistsExtendedDeadlineWithoutMutatingExpiresAt(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStateStore()
+	p, corr, _ := newPersistentHeartbeatPolicy(t, store)
+
+	id := adapter.CorrelationKey("req-persist")
+	now := time.Now()
+	origDeadlineMs := now.Add(30 * time.Second).UnixMilli()
+	if _, err := corr.Reserve(ctx, adapter.CorrelationEntry{
+		RequestID:  id,
+		ChannelID:  "channel:test",
+		EnqueuedAt: now.UnixMilli(),
+		ExpiresAt:  origDeadlineMs,
+		State:      adapter.CorrelationPending,
+	}); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if err := p.RegisterTimer(ctx, id, now.Add(30*time.Second)); err != nil {
+		t.Fatalf("RegisterTimer: %v", err)
+	}
+	// Heartbeat extends to now + 10min (well inside the 30m ceiling).
+	extended := now.Add(10 * time.Minute)
+	if err := p.ReArm(ctx, id, extended); err != nil {
+		t.Fatalf("ReArm: %v", err)
+	}
+
+	entry, ok, err := corr.Get(ctx, id)
+	if err != nil || !ok {
+		t.Fatalf("Get ok=%v err=%v", ok, err)
+	}
+	if entry.RearmedExpiresAt != extended.UnixMilli() {
+		t.Fatalf("RearmedExpiresAt=%d want extended %d (re-arm did not persist)",
+			entry.RearmedExpiresAt, extended.UnixMilli())
+	}
+	if entry.ExpiresAt != origDeadlineMs {
+		t.Fatalf("ExpiresAt=%d mutated by re-arm; must stay original %d (immutable tamper anchor)",
+			entry.ExpiresAt, origDeadlineMs)
+	}
+	if entry.EnqueuedAt != now.UnixMilli() {
+		t.Fatalf("EnqueuedAt mutated by re-arm: got %d want %d (anchor must be immutable)",
+			entry.EnqueuedAt, now.UnixMilli())
+	}
+}
+
+// TestRecoverDoesNotForceFailLiveHeartbeatReceiver is the production-side
+// assertion the temporal R1 bug was missing: a long-running tool kept alive by
+// provisional heartbeats must NOT be force-failed immediately when the daemon
+// restarts and recovers its timer.
+//
+// Scenario: a request whose ORIGINAL 30s max_pending deadline elapsed long ago
+// (it was created 20min back) but which has been heart-beating, so its persisted
+// RearmedExpiresAt is in the future — exactly how a 20-min-running xhs publish
+// looks after a restart. The buggy code re-armed against the stale past
+// ExpiresAt → delay<=0 → fired at 1µs → force-failed the live receiver. The fix
+// recovers against RearmedExpiresAt, so the F3 timer does NOT fire.
+func TestRecoverDoesNotForceFailLiveHeartbeatReceiver(t *testing.T) {
+	defer setCeiling(30 * time.Minute)()
+	ctx := context.Background()
+	store := NewMemoryStateStore()
+
+	// --- pre-restart: reserve (orig deadline long past) + several heartbeats ---
+	p1, corr1, _ := newPersistentHeartbeatPolicy(t, store)
+	id := adapter.CorrelationKey("req-live")
+	created := time.Now().Add(-20 * time.Minute) // created 20min ago, still alive
+	if _, err := corr1.Reserve(ctx, adapter.CorrelationEntry{
+		RequestID:  id,
+		ChannelID:  "channel:test",
+		EnqueuedAt: created.UnixMilli(),
+		ExpiresAt:  created.Add(30 * time.Second).UnixMilli(), // long-past original deadline
+		State:      adapter.CorrelationPending,
+	}); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	// Arm at the (already past) original deadline, then heartbeat-extend three
+	// times — the last grants a generous future window, just like a live tool.
+	if err := p1.RegisterTimer(ctx, id, created.Add(30*time.Second)); err != nil {
+		t.Fatalf("RegisterTimer: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := p1.ReArm(ctx, id, time.Now().Add(10*time.Minute)); err != nil {
+			t.Fatalf("ReArm[%d]: %v", i, err)
+		}
+	}
+	p1.shutdown() // daemon stops before recovery; in-memory timers gone.
+
+	// Persisted state: ExpiresAt stale-past, RearmedExpiresAt ~10min future.
+	persisted, _, _ := corr1.Get(ctx, id)
+	if persisted.RearmedExpiresAt <= time.Now().UnixMilli() {
+		t.Fatalf("precondition: RearmedExpiresAt=%d must be in the future", persisted.RearmedExpiresAt)
+	}
+
+	// --- post-restart: rebuild over the same store, recover ---
+	p2, corr2, fires := newPersistentHeartbeatPolicy(t, store)
+	if err := corr2.recoverFromStore(ctx); err != nil {
+		t.Fatalf("recoverFromStore: %v", err)
+	}
+	pending, err := corr2.ListPending(ctx)
+	if err != nil {
+		t.Fatalf("ListPending: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("ListPending len=%d want 1", len(pending))
+	}
+	e := pending[0]
+	// Mirror manager.recoverTimersForBoundModule: live deadline, EnqueuedAt anchor.
+	if err := p2.RecoverTimer(ctx, e.RequestID, time.UnixMilli(recoverDeadlineMs(e)), e.EnqueuedAt); err != nil {
+		t.Fatalf("RecoverTimer: %v", err)
+	}
+	if !p2.armedFor(id) {
+		t.Fatal("recovered timer not armed")
+	}
+	// The recovered deadline is ~10min out, so the timer must NOT fire. Wait past
+	// where the buggy 1µs fire would have landed.
+	time.Sleep(150 * time.Millisecond)
+	if got := fires.Load(); got != 0 {
+		t.Fatalf("F3 force-failed a LIVE heartbeat receiver after restart: fires=%d (temporal R1 regression)", got)
+	}
+	if !p2.armedFor(id) {
+		t.Fatal("recovered timer dropped — live request lost its F3 guard")
+	}
+}
+
+// TestRecoverForceFailsExpiredNonHeartbeatRequest: the counterpart guard — a
+// request that NEVER heart-beat (RearmedExpiresAt==0) and whose original
+// ExpiresAt elapsed during downtime must still F3-fail promptly on recovery.
+// The fix must not turn every recovered request into a survivor.
+func TestRecoverForceFailsExpiredNonHeartbeatRequest(t *testing.T) {
+	defer setCeiling(30 * time.Minute)()
+	ctx := context.Background()
+	store := NewMemoryStateStore()
+
+	p1, corr1, _ := newPersistentHeartbeatPolicy(t, store)
+	id := adapter.CorrelationKey("req-dead")
+	created := time.Now().Add(-2 * time.Minute) // created 2min ago
+	if _, err := corr1.Reserve(ctx, adapter.CorrelationEntry{
+		RequestID:  id,
+		ChannelID:  "channel:test",
+		EnqueuedAt: created.UnixMilli(),
+		ExpiresAt:  created.Add(30 * time.Second).UnixMilli(), // elapsed ~90s ago, never re-armed
+		State:      adapter.CorrelationPending,
+	}); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	p1.shutdown()
+
+	p2, corr2, fires := newPersistentHeartbeatPolicy(t, store)
+	if err := corr2.recoverFromStore(ctx); err != nil {
+		t.Fatalf("recoverFromStore: %v", err)
+	}
+	pending, _ := corr2.ListPending(ctx)
+	if len(pending) != 1 {
+		t.Fatalf("ListPending len=%d want 1", len(pending))
+	}
+	e := pending[0]
+	if e.RearmedExpiresAt != 0 {
+		t.Fatalf("precondition: RearmedExpiresAt=%d must be 0 (never re-armed)", e.RearmedExpiresAt)
+	}
+	if err := p2.RecoverTimer(ctx, e.RequestID, time.UnixMilli(recoverDeadlineMs(e)), e.EnqueuedAt); err != nil {
+		t.Fatalf("RecoverTimer: %v", err)
+	}
+	// Original deadline is in the past and there was no heartbeat → F3 fires.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if fires.Load() >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := fires.Load(); got != 1 {
+		t.Fatalf("F3 fires=%d want 1 — an expired non-heartbeat request must still force-fail on recovery", got)
+	}
+}
+
+// TestRecoverAnchorsCeilingAtOriginalCreation: recovery must anchor the
+// ScheduleToClose ceiling at the original creation time (EnqueuedAt), not the
+// restart instant — otherwise every restart hands a fresh ceiling window and a
+// stuck request that keeps heart-beating could outlive creation + ceiling
+// indefinitely (zombie escape).
+//
+// Here a heart-beating request's persisted RearmedExpiresAt is far in the future
+// (it would survive on its own), but its original ceiling has already elapsed by
+// recovery time. Recovery must therefore clamp to the ceiling anchored at the
+// ORIGINAL creation and fire (near-)immediately, and seed createdAt accordingly.
+func TestRecoverAnchorsCeilingAtOriginalCreation(t *testing.T) {
+	defer setCeiling(1 * time.Minute)()
+	ctx := context.Background()
+	p, _, fires := newPersistentHeartbeatPolicy(t, NewMemoryStateStore())
+
+	id := adapter.CorrelationKey("req-ceiling-restart")
+	// Created 5 minutes ago; ceiling=1min → hard deadline elapsed 4min ago.
+	created := time.Now().Add(-5 * time.Minute)
+	// Recovered (heartbeat-extended) deadline far in the future — would survive
+	// if the ceiling were misanchored at restart time.
+	futureDeadline := time.Now().Add(10 * time.Minute)
+	if err := p.RecoverTimer(ctx, id, futureDeadline, created.UnixMilli()); err != nil {
+		t.Fatalf("RecoverTimer: %v", err)
+	}
+
+	p.mu.Lock()
+	seeded, ok := p.createdAt[id]
+	p.mu.Unlock()
+	if !ok {
+		t.Fatal("createdAt not seeded on recovery")
+	}
+	if seeded.UnixMilli() != created.UnixMilli() {
+		t.Fatalf("ceiling anchor=%v want original creation %v (must seed from EnqueuedAt, not restart time)", seeded, created)
+	}
+
+	// Ceiling (created+1min) already past → clamp wins over the future deadline
+	// and the timer fires immediately.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if fires.Load() >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := fires.Load(); got != 1 {
+		t.Fatalf("F3 fires=%d want 1 — recovery must clamp the recovered deadline to the original ceiling", got)
+	}
+}

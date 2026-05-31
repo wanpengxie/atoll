@@ -12,14 +12,15 @@ import (
 type actorCLIErrorCode string
 
 const (
-	actorCLIUnknownActor      actorCLIErrorCode = "unknown_actor"
-	actorCLIUnknownType       actorCLIErrorCode = "unknown_type"
-	actorCLIActorTypeMismatch actorCLIErrorCode = "actor_type_mismatch"
-	actorCLIKindDisallowed    actorCLIErrorCode = "kind_disallowed"
-	actorCLIPayloadInvalid    actorCLIErrorCode = "payload_invalid"
-	actorCLIActorUnreachable  actorCLIErrorCode = "actor_unreachable"
-	actorCLITimeout           actorCLIErrorCode = "timeout"
-	actorCLIInternalError     actorCLIErrorCode = "internal_error"
+	// The unknown_actor / unknown_type / actor_type_mismatch / kind_disallowed
+	// members of the actor-CLI closed error set are no longer produced
+	// worker-side: existence + kind + handler binding are validated solely by
+	// the daemon harness (the single source of truth). They surface to the
+	// agent as the daemon's terminal/write rejection, normalized below.
+	actorCLIPayloadInvalid   actorCLIErrorCode = "payload_invalid"
+	actorCLIActorUnreachable actorCLIErrorCode = "actor_unreachable"
+	actorCLITimeout          actorCLIErrorCode = "timeout"
+	actorCLIInternalError    actorCLIErrorCode = "internal_error"
 )
 
 func actorCLIErrorResult(toolName string, code actorCLIErrorCode, msg, recoveryHint string, detail any) types.ToolResult {
@@ -41,46 +42,6 @@ func actorCLIErrorResult(toolName string, code actorCLIErrorCode, msg, recoveryH
 		}},
 		IsError: true,
 	}
-}
-
-func unknownActorError(toolName, actorID string) types.ToolResult {
-	return actorCLIErrorResult(
-		toolName,
-		actorCLIUnknownActor,
-		fmt.Sprintf("Actor %q not found in this channel", actorID),
-		"Call list_actors to see available actors",
-		nil,
-	)
-}
-
-func unknownTypeError(toolName, actorID, typeName string) types.ToolResult {
-	return actorCLIErrorResult(
-		toolName,
-		actorCLIUnknownType,
-		fmt.Sprintf("Type %q not found in this channel", typeName),
-		fmt.Sprintf("Call describe_actor(%q) to see its available types", actorID),
-		nil,
-	)
-}
-
-func actorTypeMismatchError(toolName, actorID, typeName, realHandler string) types.ToolResult {
-	return actorCLIErrorResult(
-		toolName,
-		actorCLIActorTypeMismatch,
-		fmt.Sprintf("Type %q is handled by %q, not %q", typeName, realHandler, actorID),
-		fmt.Sprintf("Type %q is handled by %q, not %q", typeName, realHandler, actorID),
-		nil,
-	)
-}
-
-func kindDisallowedError(toolName, typeName string, allowed []string) types.ToolResult {
-	return actorCLIErrorResult(
-		toolName,
-		actorCLIKindDisallowed,
-		fmt.Sprintf("Type %q is not request-callable (allowed_kinds=%v)", typeName, allowed),
-		fmt.Sprintf("Type %q allowed_kinds = %v; only request-callable types support call_actor", typeName, allowed),
-		nil,
-	)
 }
 
 func payloadInvalidError(toolName, actorID, typeName, msg string) types.ToolResult {

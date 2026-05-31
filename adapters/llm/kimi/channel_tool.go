@@ -15,12 +15,14 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// channelToolDefaultTimeout is the fallback Execute timeout when a
-// type's MaxPendingMs is absent. R5 invariant (actor-adapter.md §7.2):
-// "sane default timeout — SDK 30s / max_pending_ms 30s". Long-running
-// adapter types MUST declare an explicit MaxPendingMs override; the
-// default is deliberately tight so a misconfigured type fails fast
-// instead of blocking the agent loop for minutes.
+// channelToolDefaultTimeout is the caller-side default that bounds the
+// fast-path Await WINDOW (resolveFastPathWindow), NOT the persisted
+// closure deadline. R5 invariant (actor-adapter.md §7.2): "sane default
+// — SDK 30s". It is the SDK-default ceiling on how long the agent loop
+// blocks inline before degrading to an ack; the true per-type deadline
+// (max_pending_ms) is stamped by the daemon as expires_at. A long-running
+// type therefore stays pending in the daemon up to its own max_pending_ms
+// even though the caller stopped blocking after this window.
 const channelToolDefaultTimeout = 30 * time.Second
 
 type channelToolRuntimeKey struct{}
@@ -181,7 +183,15 @@ func (b *Bridge) executeChannelRequest(
 		spec.Timeout = channelToolDefaultTimeout
 	}
 	now := b.cfg.NowFn()
-	expiresAt := now + int64(spec.Timeout/time.Millisecond)
+	// expires_at (the persisted closure deadline) is DELIBERATELY left unset.
+	// The daemon harness is the single authority on the type's max_pending_ms
+	// (StepKindAndAudience stamps expires_at from the type registry only when
+	// ExpiresAt==nil). Stamping it here would pin every request to the caller's
+	// SDK-default ceiling and silently override a long-running type's declared
+	// max_pending_ms > 30s — the worker would falsely time it out. spec.Timeout
+	// drives only the caller-side fast-path Await WINDOW below (a UX concern),
+	// never the persisted deadline. Matches the SDK path (emitRequest leaves
+	// expires_at unset and lets the daemon own it).
 	env := message.Envelope{
 		ID:            b.envelopeID(ipc, now),
 		ChannelID:     ipc.ChannelID(),
@@ -193,7 +203,6 @@ func (b *Bridge) executeChannelRequest(
 		Payload:       spec.Payload,
 		ParentID:      trigger.Envelope.ID,
 		CorrelationID: channelToolCorrelationID(trigger),
-		ExpiresAt:     &expiresAt,
 		TS:            now,
 		TSReceived:    now,
 	}
@@ -241,6 +250,62 @@ func (b *Bridge) executeChannelRequest(
 	return ackResultToToolResult(ackToolResult(spec.ToolName, res.ack))
 }
 
+// executeReservedRequestRaw emits a reserved-type request (e.g. actor.list)
+// and returns the FINAL response payload as raw JSON for the caller to
+// reshape. Unlike executeChannelRequest it does not wrap the result in a
+// ToolResult — the caller (list_actors) reprojects the live catalog into
+// the LLM-facing grouped shape. Returns ok=false when the wait fails, the
+// window elapses without a final, or the response is a failure terminal —
+// reserved-type catalog lookups are synchronous (waitUnbounded), so a
+// non-final outcome is surfaced to the caller as "retry", never silently
+// converted to stale data.
+func (b *Bridge) executeReservedRequestRaw(
+	ctx context.Context,
+	ipc IPCFacade,
+	trigger TriggerPayload,
+	spec channelRequestSpec,
+) (json.RawMessage, bool) {
+	if spec.Timeout <= 0 {
+		spec.Timeout = channelToolDefaultTimeout
+	}
+	now := b.cfg.NowFn()
+	// expires_at left unset on purpose — the daemon stamps the per-type
+	// max_pending_ms (see executeChannelRequest for the full rationale).
+	env := message.Envelope{
+		ID:            b.envelopeID(ipc, now),
+		ChannelID:     ipc.ChannelID(),
+		Type:          strings.TrimSpace(spec.EnvelopeType),
+		Kind:          message.KindRequest,
+		Sender:        message.Sender{Kind: actor.KindAgent, ID: ipc.WorkerActorID()},
+		Visibility:    message.VisibilityPublic,
+		Audience:      message.Audience{actor.ActorID(spec.HandlerActorID)},
+		Payload:       spec.Payload,
+		ParentID:      trigger.Envelope.ID,
+		CorrelationID: channelToolCorrelationID(trigger),
+		TS:            now,
+		TSReceived:    now,
+	}
+	caller := b.caller()
+	est := int64(spec.Timeout / time.Millisecond)
+	res, err := caller.Submit(ctx, ipc, env, est, true)
+	if err != nil {
+		return nil, false
+	}
+	window := resolveFastPathWindow(spec.Timeout, true)
+	finalEnv, ok, awaitErr := caller.Await(ctx, res.requestID, window)
+	if awaitErr != nil {
+		caller.Abandon(res.requestID)
+		return nil, false
+	}
+	if !ok || finalEnv == nil || finalEnv.Kind != message.KindResponse {
+		return nil, false
+	}
+	if responseFailureReason(finalEnv.Payload) != "" {
+		return nil, false
+	}
+	return finalEnv.Payload, true
+}
+
 // ackResultToToolResult materialises a toolResultValue (built by the
 // transport-neutral caller helper) into a go-kimi types.ToolResult. An ack is
 // NOT an error result — it is a normal "still running" outcome.
@@ -249,22 +314,6 @@ func ackResultToToolResult(v toolResultValue) types.ToolResult {
 		Name:  v.name,
 		Value: types.ToolReturnValue{Value: v.value},
 	}
-}
-
-func typeAllowsKind(typ TypeInfo, kind string) bool {
-	for _, candidate := range typ.AllowedKinds {
-		if strings.EqualFold(strings.TrimSpace(candidate), kind) {
-			return true
-		}
-	}
-	return false
-}
-
-func channelToolTimeout(maxPendingMs int64) time.Duration {
-	if maxPendingMs <= 0 {
-		return channelToolDefaultTimeout
-	}
-	return time.Duration(maxPendingMs) * time.Millisecond
 }
 
 func channelToolCorrelationID(trigger TriggerPayload) message.ID {

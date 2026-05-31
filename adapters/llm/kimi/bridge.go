@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,43 +45,36 @@ const (
 	EnvKeyChannelType  = "COAGENT_CHANNEL_TYPE"
 	EnvKeyDomainPrompt = "COAGENT_DOMAIN_PROMPT"
 
-	// EnvKeyChannelID identifies the daemon-owned channel context for
-	// this worker. EnvKeyChannelContext carries a daemon-built bootstrap
-	// actor/type display snapshot; current actor state is still queried
-	// through envelope calls such as actor.status / actor.describe.
-	EnvKeyChannelID      = "COAGENT_CHANNEL_ID"
-	EnvKeyChannelContext = "COAGENT_CHANNEL_CONTEXT_JSON"
+	// EnvKeyChannelID identifies the daemon-owned channel for this worker.
+	// The worker never receives a frozen actor/type snapshot — current
+	// actor/type state is queried live through the actor.list / actor.describe
+	// reserved envelope calls.
+	EnvKeyChannelID = "COAGENT_CHANNEL_ID"
 )
 
-// ChannelContext is a daemon-built bootstrap display snapshot of the
-// channel's actor/type catalog. It is prompt context, not current actor
-// truth. Current metadata/status flows through actor.describe /
-// actor.status reserved envelope calls.
+// ChannelContext is the decoded payload of a LIVE actor.list response —
+// the channel's actor/type catalog at the moment the daemon answered. It
+// is a transient query result, NOT a frozen prompt snapshot: list_actors
+// decodes it on each call and reprojects it for the LLM via
+// formatActorRegistryForLLM.
 type ChannelContext struct {
-	// ChannelID is the channel this snapshot describes. Surfaces in the
-	// rendered prompt header so a debug operator can grep session logs.
+	// ChannelID is the channel this catalog describes.
 	ChannelID string `json:"channel_id,omitempty"`
 
 	// ChannelType is the L4 channel-template key (e.g. "xhs-creator").
 	// Empty for legacy / generic channels.
 	ChannelType string `json:"channel_type,omitempty"`
 
-	// Actors is the daemon-provided active actor catalog. Includes
-	// system / human members / agent self / tool adapters.
+	// Actors is the live active actor catalog. Includes system / human
+	// members / agent self / tool adapters.
 	Actors []ActorInfo `json:"actors,omitempty"`
 
-	// Types is the daemon-provided business type catalog plus handler
-	// actor binding and allowed kinds. The LLM uses this to pick which
-	// envelope.type to emit for a given user request.
+	// Types is the live business type catalog plus handler actor binding
+	// and allowed kinds.
 	Types []TypeInfo `json:"types,omitempty"`
-
-	// Devices is an optional active device actor projection. It is empty
-	// for normal bootstrap snapshots; tests and future diagnostics can use
-	// it to show which device actor route is available.
-	Devices []DeviceInfo `json:"devices,omitempty"`
 }
 
-// ActorInfo is one actor catalog row projected into the LLM prompt.
+// ActorInfo is one actor catalog row from an actor.list response.
 type ActorInfo struct {
 	ActorID           string          `json:"actor_id"`
 	Kind              string          `json:"kind"`                   // human | agent | tool | system
@@ -97,11 +89,7 @@ type ActorInfo struct {
 	LastStateChangeAt int64           `json:"last_state_change_at,omitempty"`
 }
 
-// TypeInfo is one request type projected into the LLM prompt.
-//
-// Level A (proto-layer0 §1.4.1): payload is opaque to the protocol
-// layer; the bootstrap type catalog stores no payload schema fields, so no
-// payload-schema projection appears here either.
+// TypeInfo is one request type from an actor.list response.
 type TypeInfo struct {
 	Type           string             `json:"type"`             // e.g. "xhs.publish"
 	HandlerActorID string             `json:"handler_actor_id"` // e.g. "tool:xhs"
@@ -113,14 +101,6 @@ type TypeInfo struct {
 	PayloadFields  []adapter.FieldDoc `json:"payload_fields,omitempty"`
 	ErrorCodes     []adapter.ErrorDoc `json:"error_codes,omitempty"`
 	Notes          string             `json:"notes,omitempty"`
-}
-
-// DeviceInfo is one device actor route projected into the LLM prompt.
-type DeviceInfo struct {
-	ActorID    string `json:"actor_id"`
-	DeviceID   string `json:"device_id,omitempty"`
-	DeviceType string `json:"device_type,omitempty"`
-	Status     string `json:"status,omitempty"`
 }
 
 // Config drives a Bridge. All fields optional unless documented; sane
@@ -148,10 +128,6 @@ type Config struct {
 	// injects via COAGENT_DOMAIN_PROMPT. Cached by the provider so
 	// long as it stays byte-stable across turns.
 	SystemPrompt string
-
-	// ChannelContext is the daemon-owned bootstrap snapshot folded into
-	// SystemPrompt at boot.
-	ChannelContext ChannelContext
 
 	// MaxTurns caps the bridge — same semantics as MockBridge. A
 	// non-positive value means UNLIMITED: the LLM itself decides when
@@ -1160,31 +1136,18 @@ func buildToolPreview(args json.RawMessage) string {
 // for the kimi system prompt. Layout:
 //
 //	[L0-L2 platform teaching]
-//	[Channel context appendix — actors + types + devices]
 //	[L4 domain prompt — from COAGENT_DOMAIN_PROMPT]
 //
-// channelType is purely informational (helps a debug operator grep
-// session logs). Empty COAGENT_DOMAIN_PROMPT (legacy channels) yields
-// the platform prompt alone. A zero ChannelContext is also accepted —
-// the appendix is omitted and the prompt is byte-identical to the
-// pre-channel-context behaviour, so legacy tests pass unchanged.
-//
-// The channel context section sits BETWEEN platform teaching and the
-// domain prompt so the LLM reads the L0-L2 envelope contract first
-// ("what is a coagent worker"), then sees the concrete actors / types
-// it can address inside this channel, then finally the L4 domain
-// playbook ("for an xhs publish do …"). That ordering makes the
-// domain prompt's tool references (xhs.publish, xhs.search …)
-// directly resolvable against the type list rendered immediately
-// above it.
-func BuildBasePrompt(channelType, domainPrompt string, channelCtx ChannelContext) string {
+// The prompt carries NO frozen actor/type snapshot. The concrete set of
+// actors and request-callable types is dynamic channel state, discovered
+// live at call time via the list_actors / describe_* meta tools — baking
+// it into the cached prefix would (a) go stale the instant an actor joins
+// after spawn and (b) churn the cache prefix. channelType is purely
+// informational (helps a debug operator grep session logs). Empty
+// COAGENT_DOMAIN_PROMPT (legacy channels) yields the platform prompt alone.
+func BuildBasePrompt(channelType, domainPrompt string) string {
 	var b strings.Builder
 	b.WriteString(platformTeachingPrompt)
-
-	if appendix := renderChannelContext(channelCtx); appendix != "" {
-		b.WriteString("\n\n")
-		b.WriteString(appendix)
-	}
 
 	domain := strings.TrimSpace(domainPrompt)
 	if domain != "" {
@@ -1197,126 +1160,6 @@ func BuildBasePrompt(channelType, domainPrompt string, channelCtx ChannelContext
 		b.WriteString(domain)
 	}
 	return b.String()
-}
-
-// renderChannelContext folds the registry snapshot into a markdown
-// section the LLM can parse. Returns "" when the snapshot is empty so
-// BuildBasePrompt skips the appendix entirely (legacy channels stay
-// byte-identical to pre-injection behaviour).
-//
-// Format choice — markdown, not yaml, because:
-//   - the rest of the system prompt is markdown
-//   - LLMs index tables ("| col | col |") + bullet lists particularly well
-//   - one read pass at spawn is cheap, and the result is cached
-//
-// Field order matches the struct definition above so the rendering
-// stays deterministic across builds (prompt cache hits depend on
-// byte-stable output).
-func renderChannelContext(c ChannelContext) string {
-	if len(c.Actors) == 0 && len(c.Types) == 0 && len(c.Devices) == 0 && c.ChannelID == "" {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("# Channel context")
-	if c.ChannelType != "" {
-		b.WriteString(" (")
-		b.WriteString(c.ChannelType)
-		b.WriteString(")")
-	}
-	b.WriteString("\n")
-	if c.ChannelID != "" {
-		b.WriteString("channel_id: ")
-		b.WriteString(c.ChannelID)
-		b.WriteString("\n")
-	}
-
-	if len(c.Actors) > 0 {
-		b.WriteString("\n## Actors in this channel\n")
-		for _, a := range c.Actors {
-			b.WriteString("- ")
-			b.WriteString(a.ActorID)
-			b.WriteString(" (kind=")
-			if a.Kind == "" {
-				b.WriteString("?")
-			} else {
-				b.WriteString(a.Kind)
-			}
-			if a.Binding != "" {
-				b.WriteString(", binding=")
-				b.WriteString(a.Binding)
-			}
-			if a.Kind == string(actor.KindTool) {
-				b.WriteString(", ready=")
-				b.WriteString(strconv.FormatBool(a.Ready))
-				if a.ReadyReason != "" {
-					b.WriteString(", reason=")
-					b.WriteString(a.ReadyReason)
-				}
-			}
-			b.WriteString(")")
-			if a.DisplayName != "" {
-				b.WriteString(" — ")
-				b.WriteString(a.DisplayName)
-			}
-			b.WriteString("\n")
-		}
-	}
-
-	if len(c.Types) > 0 {
-		// Tool surface (substrate-native invocation):
-		//
-		//   list_actors    — inspect the bootstrap actor + type catalog.
-		//   describe_actor — fetch one actor's skill doc.
-		//   describe_type  — fetch payload examples and error docs.
-		//   call_actor     — invoke any request-callable pair.
-		//
-		// We deliberately do NOT inline a markdown table of every
-		// type here — the Anthropic / OpenAI native tools API list
-		// (already bundled with this turn) lists the actor-CLI meta
-		// tools with full input_schema. Listing every type
-		// twice (once in tools API, once in prompt) was the legacy
-		// inject-per-type fallback; the substrate-native path is one
-		// list_actors read per task.
-		fmt.Fprintf(&b, "\n## Tool invocation\nThis channel exposes %d request-callable type(s) spanning the actors listed above. Use `list_actors` for the bootstrap catalog, `describe_actor(actor_id)` to deep-dive one actor's skill doc and workflows, `describe_type(actor_id, type)` to fetch a specific type's payload example and error codes, then `call_actor` to invoke. The catalog is a bootstrap hint; live validation happens on each envelope call.\n\n### Sync vs async (fast-path)\n`call_actor` is fast-path by default: a short call returns its result INLINE in the tool result (feels synchronous). A long call (still running after ~15s) returns an ACK `{status:\"accepted\", request_id, guidance, to_wait, …}` instead — the work keeps running. To get the result: call `await_result(request_id)` to block on it, or do other work and react when it returns on its own as a NEW message (parent_id = request_id). Use `list_pending()` to see in-flight request_ids and `abandon(request_id)` to stop waiting on one. To fan out several calls in parallel, pass `wait=false` (immediate ack) on each, then `await_result`/`abandon` as needed. Pass `wait=true` to force a synchronous wait up to the type timeout.\n", countRequestTypes(c.Types))
-	}
-
-	if len(c.Devices) > 0 {
-		b.WriteString("\n## Device actors\n")
-		for _, d := range c.Devices {
-			b.WriteString("- ")
-			b.WriteString(d.ActorID)
-			if d.DeviceType != "" {
-				b.WriteString(" (")
-				b.WriteString(d.DeviceType)
-				if d.DeviceID != "" {
-					b.WriteString("/")
-					b.WriteString(d.DeviceID)
-				}
-				b.WriteString(")")
-			}
-			if d.Status != "" {
-				b.WriteString(" status=")
-				b.WriteString(d.Status)
-			}
-			b.WriteString("\n")
-		}
-	}
-
-	return b.String()
-}
-
-// countRequestTypes counts TypeInfo rows whose allowed_kinds contains
-// "request" — these are the ones invokable via call_actor. Used by
-// the system prompt builder to give the LLM a numeric hint about how
-// many tools list_actors will return.
-func countRequestTypes(types []TypeInfo) int {
-	n := 0
-	for _, t := range types {
-		if typeAllowsKind(t, string(message.KindRequest)) {
-			n++
-		}
-	}
-	return n
 }
 
 // platformTeachingPrompt is the L0-L2 stable prefix every coagent

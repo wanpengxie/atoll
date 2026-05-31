@@ -4,13 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 
 	gokimitools "github.com/wanpengxie/go-kimi/pkg/kimi/tools"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
-
-	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // DescribeActorTool returns one actor's skill document and type summary.
@@ -63,60 +60,24 @@ func (t *DescribeActorTool) Execute(ctx context.Context, params json.RawMessage)
 		return payloadInvalidError("describe_actor", "", "", "actor_id is required (call list_actors to discover)"), nil
 	}
 
-	if runtime, ok := ctx.Value(channelToolRuntimeKey{}).(channelToolRuntime); ok && runtime.ipc != nil {
-		return t.bridge.executeChannelRequest(ctx, runtime.ipc, runtime.trigger, channelRequestSpec{
-			ToolName:       "describe_actor",
-			EnvelopeType:   "actor.describe",
-			HandlerActorID: p.ActorID,
-			Payload:        cloneRawJSON(json.RawMessage(`{}`)),
-			Timeout:        channelToolDefaultTimeout,
-			// describe_* are synchronous reserved-type lookups the agent
-			// always needs inline; wait the full timeout, no fast-path ack.
-			WaitMode: waitUnbounded,
-		}), nil
+	runtime, ok := ctx.Value(channelToolRuntimeKey{}).(channelToolRuntime)
+	if !ok || runtime.ipc == nil {
+		return actorCLIErrorResult("describe_actor", actorCLIInternalError, "describe_actor invoked outside a bridge turn", "Retry from inside an active bridge turn", nil), nil
 	}
-
-	snapshot := t.bridge.channelContext()
-	actorInfo, ok := findActor(snapshot, p.ActorID)
-	if !ok {
-		return unknownActorError("describe_actor", p.ActorID), nil
-	}
-
-	typeSummaries := make([]map[string]any, 0)
-	for _, ty := range snapshot.Types {
-		if strings.TrimSpace(ty.HandlerActorID) != p.ActorID {
-			continue
-		}
-		typeSummaries = append(typeSummaries, map[string]any{
-			"type":           ty.Type,
-			"description":    ty.Description,
-			"allowed_kinds":  ty.AllowedKinds,
-			"max_pending_ms": ty.MaxPendingMs,
-		})
-	}
-	sort.Slice(typeSummaries, func(i, j int) bool {
-		return fmt.Sprint(typeSummaries[i]["type"]) < fmt.Sprint(typeSummaries[j]["type"])
-	})
-
-	value := map[string]any{
-		"actor_id":             actorInfo.ActorID,
-		"description":          actorInfo.Description,
-		"kind":                 actorInfo.Kind,
-		"binding":              actorInfo.Binding,
-		"skill_doc":            actorInfo.SkillDoc,
-		"ready":                actorInfo.Ready,
-		"ready_reason":         actorInfo.ReadyReason,
-		"last_ready_at":        actorInfo.LastReadyAt,
-		"last_state_change_at": actorInfo.LastStateChangeAt,
-		"types":                typeSummaries,
-	}
-	if actorInfo.DisplayName != "" {
-		value["display_name"] = actorInfo.DisplayName
-	}
-	return types.ToolResult{
-		Name:  "describe_actor",
-		Value: types.ToolReturnValue{Value: value},
-	}, nil
+	// Live only: actor.describe is framework-intercepted on the target
+	// actor's dispatch path and answers from the actor's current
+	// declaration. There is no frozen fallback — a stale local copy would
+	// be worse than a clean error.
+	return t.bridge.executeChannelRequest(ctx, runtime.ipc, runtime.trigger, channelRequestSpec{
+		ToolName:       "describe_actor",
+		EnvelopeType:   "actor.describe",
+		HandlerActorID: p.ActorID,
+		Payload:        cloneRawJSON(json.RawMessage(`{}`)),
+		Timeout:        channelToolDefaultTimeout,
+		// describe_* are synchronous reserved-type lookups the agent
+		// always needs inline; wait the full timeout, no fast-path ack.
+		WaitMode: waitUnbounded,
+	}), nil
 }
 
 // DescribeTypeTool returns detailed product-layer guidance for one type.
@@ -177,48 +138,22 @@ func (t *DescribeTypeTool) Execute(ctx context.Context, params json.RawMessage) 
 		return payloadInvalidError("describe_type", p.ActorID, p.Type, "type is required (call describe_actor to discover)"), nil
 	}
 
-	if runtime, ok := ctx.Value(channelToolRuntimeKey{}).(channelToolRuntime); ok && runtime.ipc != nil {
-		payload, _ := json.Marshal(map[string]string{"type": p.Type})
-		return t.bridge.executeChannelRequest(ctx, runtime.ipc, runtime.trigger, channelRequestSpec{
-			ToolName:       "describe_type",
-			EnvelopeType:   "actor.describe",
-			HandlerActorID: p.ActorID,
-			Payload:        payload,
-			Timeout:        channelToolDefaultTimeout,
-			// describe_* are synchronous reserved-type lookups the agent
-			// always needs inline; wait the full timeout, no fast-path ack.
-			WaitMode: waitUnbounded,
-		}), nil
+	runtime, ok := ctx.Value(channelToolRuntimeKey{}).(channelToolRuntime)
+	if !ok || runtime.ipc == nil {
+		return actorCLIErrorResult("describe_type", actorCLIInternalError, "describe_type invoked outside a bridge turn", "Retry from inside an active bridge turn", nil), nil
 	}
-
-	snapshot := t.bridge.channelContext()
-	if _, ok := findActor(snapshot, p.ActorID); !ok {
-		return unknownActorError("describe_type", p.ActorID), nil
-	}
-	typeInfo, found := findType(snapshot, p.Type)
-	if !found {
-		return unknownTypeError("describe_type", p.ActorID, p.Type), nil
-	}
-	if strings.TrimSpace(typeInfo.HandlerActorID) != p.ActorID {
-		return actorTypeMismatchError("describe_type", p.ActorID, p.Type, typeInfo.HandlerActorID), nil
-	}
-	if !typeAllowsKind(typeInfo, string(message.KindRequest)) {
-		return kindDisallowedError("describe_type", p.Type, typeInfo.AllowedKinds), nil
-	}
-
-	value := map[string]any{
-		"actor_id":        p.ActorID,
-		"type":            typeInfo.Type,
-		"description":     typeInfo.Description,
-		"allowed_kinds":   typeInfo.AllowedKinds,
-		"max_pending_ms":  typeInfo.MaxPendingMs,
-		"payload_example": toolPayloadValue(typeInfo.PayloadExample),
-		"payload_fields":  typeInfo.PayloadFields,
-		"error_codes":     typeInfo.ErrorCodes,
-		"notes":           typeInfo.Notes,
-	}
-	return types.ToolResult{
-		Name:  "describe_type",
-		Value: types.ToolReturnValue{Value: value},
-	}, nil
+	// Live only: actor.describe with a {"type": ...} filter returns the
+	// target type's current declaration projection (payload example /
+	// fields / error codes). No frozen fallback.
+	payload, _ := json.Marshal(map[string]string{"type": p.Type})
+	return t.bridge.executeChannelRequest(ctx, runtime.ipc, runtime.trigger, channelRequestSpec{
+		ToolName:       "describe_type",
+		EnvelopeType:   "actor.describe",
+		HandlerActorID: p.ActorID,
+		Payload:        payload,
+		Timeout:        channelToolDefaultTimeout,
+		// describe_* are synchronous reserved-type lookups the agent
+		// always needs inline; wait the full timeout, no fast-path ack.
+		WaitMode: waitUnbounded,
+	}), nil
 }

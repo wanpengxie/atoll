@@ -11,7 +11,7 @@ import (
 	gokimitools "github.com/wanpengxie/go-kimi/pkg/kimi/tools"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
 
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/kernel/actor"
 )
 
 // Meta-tool strategy (substrate-native): instead of injecting one
@@ -134,26 +134,25 @@ func (t *CallActorTool) Execute(ctx context.Context, params json.RawMessage) (ty
 		return payloadInvalidError("call_actor", p.ActorID, p.Type, "type is required (call list_actors to discover)"), nil
 	}
 
-	snapshot := t.bridge.channelContext()
-	if _, ok := findActor(snapshot, p.ActorID); !ok {
-		return unknownActorError("call_actor", p.ActorID), nil
-	}
-	typeInfo, found := findType(snapshot, p.Type)
-	if !found {
-		return unknownTypeError("call_actor", p.ActorID, p.Type), nil
-	}
-	if strings.TrimSpace(typeInfo.HandlerActorID) != p.ActorID {
-		return actorTypeMismatchError("call_actor", p.ActorID, p.Type, typeInfo.HandlerActorID), nil
-	}
-	if !typeAllowsKind(typeInfo, string(message.KindRequest)) {
-		return kindDisallowedError("call_actor", p.Type, typeInfo.AllowedKinds), nil
-	}
-	timeout := channelToolTimeout(typeInfo.MaxPendingMs)
-
+	// No local validation gates. The daemon harness is the single
+	// authority on actor/type existence + kind + handler binding: it
+	// validates EVERY envelope on the way in and closure (harness Step 8 +
+	// framework F3) guarantees a terminal response even when the target is
+	// unknown / offline. A worker-side gate could only ever consult a
+	// stale local copy and reject an actor that joined the channel after
+	// spawn (the tool:xhs-after-spawn bug). We emit directly and let the
+	// daemon answer with the real result or a real terminal error.
 	runtime, ok := ctx.Value(channelToolRuntimeKey{}).(channelToolRuntime)
 	if !ok || runtime.ipc == nil {
 		return actorCLIErrorResult("call_actor", actorCLIInternalError, "call_actor invoked outside a bridge turn", "Retry from inside an active bridge turn", nil), nil
 	}
+	// The type's max_pending_ms is owned + enforced by the daemon: it stamps
+	// expires_at from the type registry when the request leaves it unset
+	// (which executeChannelRequest deliberately does). The caller-side wait
+	// window is a SEPARATE concern — this timeout feeds only the fast-path
+	// Await window (resolveFastPathWindow), so we use the SDK default ceiling
+	// and let the substrate pending + F3 govern the true persisted deadline.
+	timeout := channelToolDefaultTimeout
 
 	payload, err := normalizeToolPayload(p.Payload)
 	if err != nil {
@@ -180,10 +179,11 @@ func (t *CallActorTool) Execute(ctx context.Context, params json.RawMessage) (ty
 	return normalizeCallActorError(result, p.ActorID, p.Type), nil
 }
 
-// ListActorsTool returns the daemon-provided bootstrap actor + type
-// display snapshot as structured JSON. It is not current operational
-// truth; call_actor uses the envelope path and lets the daemon/harness
-// validate current actor/type state.
+// ListActorsTool returns the channel's LIVE actor + request-type catalog
+// by emitting an actor.list reserved-type request to the channel system
+// actor. The daemon reads its registry + type registry on every call, so
+// an actor that joined after the worker spawned is visible immediately —
+// there is no frozen bootstrap snapshot.
 type ListActorsTool struct {
 	bridge *Bridge
 }
@@ -195,14 +195,14 @@ func (t *ListActorsTool) Name() string { return "list_actors" }
 func (t *ListActorsTool) Description() string {
 	return strings.TrimSpace(`
 Discover what actors (tool adapters, agents, system actors) and request-callable types
-exist in this channel. Returns:
-  - actors: each with actor_id, kind, binding, and the types it handles
+exist in this channel RIGHT NOW. Returns:
+  - actors: each with actor_id, kind, binding, readiness, and the types it handles
   - types per actor: name, description, allowed_kinds, max_pending_ms hint
 
-Call this once at the start of a task. The response is a daemon-built bootstrap snapshot,
-stable enough to cache in your reasoning context across multiple turns. Use it as a hint
-for (actor_id, type) pairs; call_actor and describe_* use the envelope path for live
-validation.
+This is a LIVE query — the catalog reflects the channel's current membership at the moment
+you call. An actor that came online after this task started will appear here. Call it
+whenever you need the current set of (actor_id, type) pairs; call_actor and describe_* also
+go through the envelope path so the daemon always validates against live state.
 `)
 }
 
@@ -214,7 +214,29 @@ func (t *ListActorsTool) Execute(ctx context.Context, _ json.RawMessage) (types.
 	if t == nil || t.bridge == nil {
 		return channelToolErrorResult("list_actors", "list_actors tool not configured"), nil
 	}
-	snapshot := t.bridge.channelContext()
+	runtime, ok := ctx.Value(channelToolRuntimeKey{}).(channelToolRuntime)
+	if !ok || runtime.ipc == nil {
+		return channelToolErrorResult("list_actors", "list_actors invoked outside a bridge turn"), nil
+	}
+	// actor.list is a channel-wide reserved type answered by the channel
+	// system actor (the daemon, the registry truth owner). It is a
+	// synchronous catalog lookup the agent always needs inline, so wait the
+	// full timeout with no fast-path degrade-to-ack.
+	raw, ok := t.bridge.executeReservedRequestRaw(ctx, runtime.ipc, runtime.trigger, channelRequestSpec{
+		ToolName:       "list_actors",
+		EnvelopeType:   "actor.list",
+		HandlerActorID: string(actor.SystemActorID),
+		Payload:        cloneRawJSON(json.RawMessage(`{}`)),
+		Timeout:        channelToolDefaultTimeout,
+		WaitMode:       waitUnbounded,
+	})
+	if !ok {
+		return channelToolErrorResult("list_actors", "list_actors did not receive a live catalog (request still pending or failed); retry"), nil
+	}
+	var snapshot ChannelContext
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return channelToolErrorResult("list_actors", fmt.Sprintf("decode actor.list catalog: %v", err)), nil
+	}
 	return types.ToolResult{
 		Name:  "list_actors",
 		Value: types.ToolReturnValue{Value: formatActorRegistryForLLM(snapshot)},
@@ -303,41 +325,6 @@ func formatActorRegistryForLLM(snapshot ChannelContext) map[string]any {
 		result["orphan_types"] = orphan
 	}
 	return result
-}
-
-func (b *Bridge) channelContext() ChannelContext {
-	if b == nil {
-		return ChannelContext{}
-	}
-	return b.cfg.ChannelContext
-}
-
-// findActor returns the ActorInfo whose ActorID matches actorID.
-func findActor(snapshot ChannelContext, actorID string) (ActorInfo, bool) {
-	actorID = strings.TrimSpace(actorID)
-	if actorID == "" {
-		return ActorInfo{}, false
-	}
-	for _, a := range snapshot.Actors {
-		if strings.TrimSpace(a.ActorID) == actorID {
-			return a, true
-		}
-	}
-	return ActorInfo{}, false
-}
-
-// findType returns the TypeInfo whose Type matches name.
-func findType(snapshot ChannelContext, name string) (TypeInfo, bool) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return TypeInfo{}, false
-	}
-	for _, ty := range snapshot.Types {
-		if strings.TrimSpace(ty.Type) == name {
-			return ty, true
-		}
-	}
-	return TypeInfo{}, false
 }
 
 // channelRequestSpec is the bag of fields a single call_actor

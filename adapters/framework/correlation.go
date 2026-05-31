@@ -118,6 +118,42 @@ func (t *memoryCorrelationTracker) advance(ctx context.Context, requestID adapte
 	return t.persist(ctx, e)
 }
 
+// ExtendDeadline persists a re-armed F3 deadline onto a PENDING entry's
+// RearmedExpiresAt so a daemon restart recovers the live (heartbeat-extended)
+// deadline instead of the stale original. Without this a long-running receiver
+// kept alive by provisional heartbeats would, after a restart, be recovered
+// against its original ExpiresAt (already long past) and force-failed
+// immediately — the temporal R1 bug (temporal-termination-consistency.md §6.2:
+// a re-arm must survive recovery).
+//
+// It writes ONLY RearmedExpiresAt; the immutable ExpiresAt (the tamper anchor
+// mirroring the request envelope's expires_at) and EnqueuedAt (the
+// ScheduleToClose anchor) are left untouched. newExpiresAtMs is the
+// already-ceiling-clamped deadline — the caller (timerPolicy.ReArm) applies the
+// ScheduleToClose clamp before persisting, so the persisted value never exceeds
+// EnqueuedAt + ceiling. Only PENDING entries are extended; a done/expired/
+// rejected entry is never resurrected. Idempotent: a no-change write
+// short-circuits.
+func (t *memoryCorrelationTracker) ExtendDeadline(ctx context.Context, requestID adapter.CorrelationKey, newExpiresAtMs int64) error {
+	if requestID == "" {
+		return errors.New("framework: ExtendDeadline requestID required")
+	}
+	t.mu.Lock()
+	e, ok := t.entries[requestID]
+	if !ok || e.State != adapter.CorrelationPending {
+		t.mu.Unlock()
+		return nil // never reserved / already closed — do not resurrect
+	}
+	if e.RearmedExpiresAt == newExpiresAtMs {
+		t.mu.Unlock()
+		return nil
+	}
+	e.RearmedExpiresAt = newExpiresAtMs
+	t.entries[requestID] = e
+	t.mu.Unlock()
+	return t.persist(ctx, e)
+}
+
 // ListPending returns every entry currently in pending state. Order is
 // deterministic by RequestID so tests can assert exact output.
 func (t *memoryCorrelationTracker) ListPending(_ context.Context) ([]adapter.CorrelationEntry, error) {

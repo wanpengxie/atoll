@@ -134,6 +134,52 @@ func (p *timerPolicy) RegisterTimer(_ context.Context, requestID adapter.Correla
 	return nil
 }
 
+// RecoverTimer re-arms the F3 timer for a pending request rehydrated from the
+// persistent correlation store after a daemon restart (temporal R1).
+//
+// It differs from RegisterTimer in two ways:
+//
+//  1. The ScheduleToClose anchor (createdAt) is seeded from createdAtMs — the
+//     persisted EnqueuedAt (original creation time) — NOT p.clock(). On recovery
+//     "now" is the restart instant, not request creation; seeding from now would
+//     hand every restart a fresh ceiling window so a request could outlive its
+//     original creation + ceiling across restarts (zombie escape). Seeding from
+//     the original creation keeps the hard ceiling anchored no matter how many
+//     restarts happen.
+//
+//  2. The recovered deadline is the persisted LIVE deadline — RearmedExpiresAt
+//     when the request was heart-beating, else the original ExpiresAt — chosen by
+//     the caller (recoverTimersForBoundModule). It is re-clamped here defensively
+//     to createdAt + ceiling so a corrupt / pre-fix persisted value can never arm
+//     past the ceiling.
+//
+// armLocked still fires (near-)immediately for a genuinely past deadline — that
+// is correct: a request whose live deadline truly elapsed while the daemon was
+// down (or which never heart-beat past its original ExpiresAt) SHOULD F3-fail.
+// The bug this fixes is the opposite case: a still-live, heart-beating request
+// whose extended deadline is in the future must NOT be force-failed.
+func (p *timerPolicy) RecoverTimer(_ context.Context, requestID adapter.CorrelationKey, deadline time.Time, createdAtMs int64) error {
+	if requestID == "" {
+		return errors.New("framework: RecoverTimer requestID required")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if createdAtMs > 0 {
+		p.createdAt[requestID] = time.UnixMilli(createdAtMs)
+	} else if _, ok := p.createdAt[requestID]; !ok {
+		// No persisted anchor (legacy entry) — fall back to recovery time.
+		p.createdAt[requestID] = p.clock()
+	}
+	if created, ok := p.createdAt[requestID]; ok {
+		if ceiling := created.Add(ScheduleToCloseCeiling); deadline.After(ceiling) {
+			deadline = ceiling
+		}
+	}
+	p.armLocked(requestID, deadline)
+	p.metrics.IncCounter("adapter.timer.recovered", "adapter", p.adapterName)
+	return nil
+}
+
 // ReArm extends (re-arms) the F3 timer for an already-armed request in
 // response to a provisional liveness heartbeat
 // (temporal-termination-consistency.md §6.2). It re-arms ONLY — it does
@@ -152,15 +198,25 @@ func (p *timerPolicy) RegisterTimer(_ context.Context, requestID adapter.Correla
 //
 // RegisterTimer's "Stop existing before reset" semantics are reused via
 // armLocked, so re-arm never leaks a timer.
-func (p *timerPolicy) ReArm(_ context.Context, requestID adapter.CorrelationKey, newDeadline time.Time) error {
+//
+// Persistence (temporal R1): after clamping + arming the in-memory timer, the
+// (ceiling-clamped) deadline is mirrored onto the persistent CorrelationEntry's
+// RearmedExpiresAt via the correlation tracker. The in-memory timer alone is
+// lost on daemon restart and recovery would otherwise re-arm against the stale
+// original ExpiresAt and force-fail a still-live receiver at 1µs. The mirror
+// targets RearmedExpiresAt ONLY — the immutable ExpiresAt (tamper anchor /
+// envelope.expires_at) is never rewritten (append-only log, INVARIANT-12), and
+// the persisted value is the same ceiling-clamped deadline so the
+// ScheduleToClose ceiling is preserved across restarts.
+func (p *timerPolicy) ReArm(ctx context.Context, requestID adapter.CorrelationKey, newDeadline time.Time) error {
 	if requestID == "" {
 		return errors.New("framework: ReArm requestID required")
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if _, armed := p.timers[requestID]; !armed {
 		// Closed or never armed — a provisional heartbeat must not
 		// resurrect a dead request's timer.
+		p.mu.Unlock()
 		return nil
 	}
 	created, ok := p.createdAt[requestID]
@@ -172,6 +228,21 @@ func (p *timerPolicy) ReArm(_ context.Context, requestID adapter.CorrelationKey,
 	}
 	p.armLocked(requestID, newDeadline)
 	p.metrics.IncCounter("adapter.timer.heartbeat_rearm", "adapter", p.adapterName)
+	p.mu.Unlock()
+
+	// Mirror the clamped deadline so a restart recovers the live (extended)
+	// deadline, not the stale original. Done outside p.mu: the correlation
+	// tracker has its own lock and may hit the StateStore; holding the timer
+	// lock across a store write would widen the critical section and risk
+	// lock-order coupling with fire().
+	if p.correlation != nil {
+		if err := p.correlation.ExtendDeadline(ctx, requestID, newDeadline.UnixMilli()); err != nil {
+			p.logger.Warn("framework.policy.rearm_persist_failed",
+				"adapter", p.adapterName,
+				"request_id", requestID.String(),
+				"err", err.Error())
+		}
+	}
 	return nil
 }
 

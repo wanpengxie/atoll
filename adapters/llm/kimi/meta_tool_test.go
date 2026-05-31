@@ -15,9 +15,9 @@ import (
 
 func TestListActorsIncludesDescriptions(t *testing.T) {
 	b := metaToolBridge(t)
-	result, err := (&ListActorsTool{bridge: b}).Execute(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
+	result := runMetaToolWithResponse(t, b, &ListActorsTool{bridge: b}, nil, metaActorListPayload(t))
+	if result.IsError {
+		t.Fatalf("list_actors returned error: %#v", result.Value.Value)
 	}
 	value := result.Value.Value.(map[string]any)
 	actors := value["actors"].([]map[string]any)
@@ -46,7 +46,13 @@ func TestListActorsIncludesDescriptions(t *testing.T) {
 	}
 }
 
-func TestCallActorClosedSetPreflightErrors(t *testing.T) {
+// TestCallActorLocalPreflightErrors covers the ONLY preflight checks that
+// remain worker-side after the defrost: malformed params + missing required
+// fields. Existence / kind / handler-binding validation is the daemon's job
+// (the single source of truth) — call_actor no longer rejects an actor it
+// thinks is unknown from a stale local copy, it emits and lets the daemon
+// answer.
+func TestCallActorLocalPreflightErrors(t *testing.T) {
 	b := metaToolBridge(t)
 	tool := &CallActorTool{bridge: b}
 	cases := []struct {
@@ -55,27 +61,17 @@ func TestCallActorClosedSetPreflightErrors(t *testing.T) {
 		want   string
 	}{
 		{
-			name:   "unknown_actor",
-			params: `{"actor_id":"tool:missing","type":"xhs.publish","payload":{}}`,
-			want:   "unknown_actor",
+			name:   "missing_actor_id",
+			params: `{"type":"xhs.publish","payload":{}}`,
+			want:   "payload_invalid",
 		},
 		{
-			name:   "unknown_type",
-			params: `{"actor_id":"tool:xhs","type":"xhs.missing","payload":{}}`,
-			want:   "unknown_type",
+			name:   "missing_type",
+			params: `{"actor_id":"tool:xhs","payload":{}}`,
+			want:   "payload_invalid",
 		},
 		{
-			name:   "actor_type_mismatch",
-			params: `{"actor_id":"tool:other","type":"xhs.publish","payload":{}}`,
-			want:   "actor_type_mismatch",
-		},
-		{
-			name:   "kind_disallowed",
-			params: `{"actor_id":"tool:xhs","type":"xhs.note.archived","payload":{}}`,
-			want:   "kind_disallowed",
-		},
-		{
-			name:   "payload_invalid",
+			name:   "malformed_json",
 			params: `{"actor_id":"tool:xhs","type":"xhs.publish","payload":`,
 			want:   "payload_invalid",
 		},
@@ -89,6 +85,113 @@ func TestCallActorClosedSetPreflightErrors(t *testing.T) {
 			}
 			assertActorCLIErrorCode(t, result, tc.want)
 		})
+	}
+}
+
+// TestCallActorUnknownActorGoesToDaemon asserts that call_actor for an actor
+// the worker has no local record of is NOT rejected with a stale-cache
+// unknown_actor — it emits the envelope and surfaces the daemon's terminal.
+// This is the tool:xhs-after-spawn regression guard: an actor that joined the
+// channel after the worker spawned must be callable.
+func TestCallActorUnknownActorGoesToDaemon(t *testing.T) {
+	b := metaToolBridge(t)
+	ipc := newMetaFakeIPC()
+	ctx := context.WithValue(context.Background(), channelToolRuntimeKey{}, channelToolRuntime{
+		ipc:     ipc,
+		trigger: metaTrigger(),
+	})
+	emitted := make(chan message.Envelope, 1)
+	go func() {
+		req := <-ipc.writes
+		emitted <- req
+		resp := metaResponseForRequest(req, json.RawMessage(`{"status":"completed","ok":true}`)).Envelope
+		b.caller().Deliver(&resp)
+	}()
+	// tool:late joined after spawn; the worker has no frozen snapshot of it.
+	result, err := (&CallActorTool{bridge: b}).Execute(ctx, json.RawMessage(`{"actor_id":"tool:late","type":"late.do","payload":{}}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	req := <-emitted
+	if len(req.Audience) != 1 || req.Audience[0] != "tool:late" {
+		t.Fatalf("request audience=%v want [tool:late] (must emit, not locally reject)", req.Audience)
+	}
+	if req.Type != "late.do" {
+		t.Fatalf("request type=%q want late.do", req.Type)
+	}
+	if result.IsError {
+		t.Fatalf("call_actor surfaced an error for a live round-trip: %#v", result.Value.Value)
+	}
+}
+
+// TestCallActorLeavesExpiresAtUnset is the R2 regression guard: the worker
+// MUST NOT stamp expires_at on an outbound call_actor request. The daemon
+// harness (StepKindAndAudience) is the single authority on a type's
+// max_pending_ms and stamps expires_at from the type registry ONLY when
+// ExpiresAt==nil. If the worker pins expires_at=now+30s here, a long-running
+// type that declares max_pending_ms > 30s (e.g. xhs long publish) would be
+// falsely timed out by the worker's stamp instead of honoring its registered
+// deadline. The caller-side fast-path ack WINDOW is a separate concern and is
+// covered by the wait-mode tests above; this test only asserts the persisted
+// closure deadline is left for the daemon.
+func TestCallActorLeavesExpiresAtUnset(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		params string
+	}{
+		{name: "fast_path", params: `{"actor_id":"tool:xhs","type":"xhs.publish","payload":{"title":"hello"}}`},
+		{name: "wait_true", params: `{"actor_id":"tool:xhs","type":"xhs.publish","payload":{},"wait":true}`},
+		{name: "wait_false", params: `{"actor_id":"tool:xhs","type":"xhs.publish","payload":{},"wait":false}`},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			b := metaToolBridge(t)
+			ipc := newMetaFakeIPC()
+			ctx := context.WithValue(context.Background(), channelToolRuntimeKey{}, channelToolRuntime{
+				ipc:     ipc,
+				trigger: metaTrigger(),
+			})
+			emitted := make(chan message.Envelope, 1)
+			go func() {
+				req := <-ipc.writes
+				emitted <- req
+				resp := metaResponseForRequest(req, json.RawMessage(`{"status":"completed","ok":true}`)).Envelope
+				b.caller().Deliver(&resp)
+			}()
+			if _, err := (&CallActorTool{bridge: b}).Execute(ctx, json.RawMessage(tc.params)); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			req := <-emitted
+			if req.ExpiresAt != nil {
+				t.Fatalf("worker stamped expires_at=%d; must leave nil so daemon stamps per-type max_pending_ms", *req.ExpiresAt)
+			}
+		})
+	}
+}
+
+// TestExecuteReservedRequestLeavesExpiresAtUnset guards the reserved-type path
+// (list_actors / describe_*) which shares the same daemon-owns-expires_at rule.
+func TestExecuteReservedRequestLeavesExpiresAtUnset(t *testing.T) {
+	b := metaToolBridge(t)
+	ipc := newMetaFakeIPC()
+	emitted := make(chan message.Envelope, 1)
+	go func() {
+		req := <-ipc.writes
+		emitted <- req
+		resp := metaResponseForRequest(req, metaActorListPayload(t)).Envelope
+		b.caller().Deliver(&resp)
+	}()
+	go b.executeReservedRequestRaw(context.Background(), ipc, metaTrigger(), channelRequestSpec{
+		ToolName:       "list_actors",
+		EnvelopeType:   "actor.list",
+		HandlerActorID: string(actor.SystemActorID),
+		Payload:        json.RawMessage(`{}`),
+		Timeout:        channelToolDefaultTimeout,
+		WaitMode:       waitUnbounded,
+	})
+	req := <-emitted
+	if req.ExpiresAt != nil {
+		t.Fatalf("reserved request stamped expires_at=%d; must leave nil for daemon", *req.ExpiresAt)
 	}
 }
 
@@ -131,25 +234,24 @@ func TestCallActorClosedSetRuntimeErrors(t *testing.T) {
 		})
 	}
 
-	// Fast-path super-window: with a tiny max_pending_ms and no responder the
-	// bounded Await window elapses, so call_actor degrades to an ACK (not an
-	// error) — the request stays in flight (§2.3.2). This replaces the old
-	// "timeout error" expectation: a slow call is no longer a failure, it is
-	// an async hand-back.
-	t.Run("super_window_ack", func(t *testing.T) {
+	// Async fan-out (wait=false): the call returns an ACK immediately, not an
+	// error — the request stays in flight (§2.3.2). A slow call is an async
+	// hand-back, not a failure. Post-defrost the caller has no per-type
+	// max_pending_ms to clamp the window with, so wait=false is the
+	// deterministic ack path.
+	t.Run("async_ack", func(t *testing.T) {
 		b := metaToolBridge(t)
-		b.cfg.ChannelContext.Types[0].MaxPendingMs = 1
 		ipc := newMetaFakeIPC()
 		ctx := context.WithValue(context.Background(), channelToolRuntimeKey{}, channelToolRuntime{
 			ipc:     ipc,
 			trigger: metaTrigger(),
 		})
-		result, err := (&CallActorTool{bridge: b}).Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{}}`))
+		result, err := (&CallActorTool{bridge: b}).Execute(ctx, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish","payload":{},"wait":false}`))
 		if err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
 		if result.IsError {
-			t.Fatalf("super-window should return an ack, not an error: %#v", result.Value.Value)
+			t.Fatalf("async fan-out should return an ack, not an error: %#v", result.Value.Value)
 		}
 		root, ok := result.Value.Value.(map[string]any)
 		if !ok {
@@ -225,39 +327,52 @@ func TestCallActorWaitFalseImmediateAck(t *testing.T) {
 	}
 }
 
-func TestDescribeActorReturnsSkillDocAndTypes(t *testing.T) {
+// TestDescribeActorReturnsLiveProjection asserts describe_actor surfaces the
+// daemon's live actor.describe response verbatim (the framework intercept
+// answers from the actor's current declaration; no frozen fallback).
+func TestDescribeActorReturnsLiveProjection(t *testing.T) {
 	b := metaToolBridge(t)
-	result, err := (&DescribeActorTool{bridge: b}).Execute(context.Background(), json.RawMessage(`{"actor_id":"tool:xhs"}`))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
+	resp := json.RawMessage(`{"status":"completed","actor_id":"tool:xhs","description":"XHS automation","skill_doc":"Use this actor to publish notes.","types":[{"type":"xhs.publish"},{"type":"xhs.note.archived"}]}`)
+	result := runMetaToolWithResponse(t, b, &DescribeActorTool{bridge: b}, json.RawMessage(`{"actor_id":"tool:xhs"}`), resp)
+	if result.IsError {
+		t.Fatalf("describe_actor returned error: %#v", result.Value.Value)
 	}
 	value := result.Value.Value.(map[string]any)
 	if value["actor_id"] != "tool:xhs" || value["description"] != "XHS automation" || value["skill_doc"] == "" {
 		t.Fatalf("actor value=%+v", value)
 	}
-	if value["ready"] != true || value["ready_reason"] != "ok" {
-		t.Fatalf("actor readiness value=%+v", value)
-	}
-	types := value["types"].([]map[string]any)
-	if len(types) != 2 {
-		t.Fatalf("types len=%d want 2", len(types))
-	}
 }
 
-func TestDescribeActorUnknownActorReturnsClosedSetError(t *testing.T) {
+// TestDescribeActorMissingActorIsLocalPreflight asserts a missing actor_id is
+// still caught locally (payload_invalid) without an envelope round-trip.
+func TestDescribeActorMissingActorIsLocalPreflight(t *testing.T) {
 	b := metaToolBridge(t)
-	result, err := (&DescribeActorTool{bridge: b}).Execute(context.Background(), json.RawMessage(`{"actor_id":"tool:missing"}`))
+	result, err := (&DescribeActorTool{bridge: b}).Execute(context.Background(), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	assertActorCLIErrorCode(t, result, "unknown_actor")
+	assertActorCLIErrorCode(t, result, "payload_invalid")
 }
 
-func TestDescribeTypeReturnsFullConventionFields(t *testing.T) {
+// TestDescribeActorOutsideTurnIsInternalError asserts describe_actor with no
+// live IPC returns a clean internal error rather than stale snapshot data.
+func TestDescribeActorOutsideTurnIsInternalError(t *testing.T) {
 	b := metaToolBridge(t)
-	result, err := (&DescribeTypeTool{bridge: b}).Execute(context.Background(), json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish"}`))
+	result, err := (&DescribeActorTool{bridge: b}).Execute(context.Background(), json.RawMessage(`{"actor_id":"tool:xhs"}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
+	}
+	assertActorCLIErrorCode(t, result, "internal_error")
+}
+
+// TestDescribeTypeReturnsLiveProjection asserts describe_type surfaces the
+// daemon's live actor.describe(type-filtered) response.
+func TestDescribeTypeReturnsLiveProjection(t *testing.T) {
+	b := metaToolBridge(t)
+	resp := json.RawMessage(`{"status":"completed","actor_id":"tool:xhs","type":"xhs.publish","description":"Publish a note","payload_example":{"title":"hello"},"notes":"Requires logged-in browser."}`)
+	result := runMetaToolWithResponse(t, b, &DescribeTypeTool{bridge: b}, json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish"}`), resp)
+	if result.IsError {
+		t.Fatalf("describe_type returned error: %#v", result.Value.Value)
 	}
 	value := result.Value.Value.(map[string]any)
 	if value["actor_id"] != "tool:xhs" || value["type"] != "xhs.publish" || value["description"] != "Publish a note" {
@@ -267,63 +382,29 @@ func TestDescribeTypeReturnsFullConventionFields(t *testing.T) {
 	if example["title"] != "hello" {
 		t.Fatalf("payload_example=%+v", example)
 	}
-	fields := value["payload_fields"].([]adapter.FieldDoc)
-	if len(fields) != 1 || fields[0].Name != "title" {
-		t.Fatalf("payload_fields=%+v", fields)
-	}
-	errors := value["error_codes"].([]adapter.ErrorDoc)
-	if len(errors) != 1 || errors[0].Code != "publish_timeout" {
-		t.Fatalf("error_codes=%+v", errors)
-	}
 	if value["notes"] != "Requires logged-in browser." {
 		t.Fatalf("notes=%v", value["notes"])
 	}
 }
 
-func TestDescribeTypeClosedSetErrors(t *testing.T) {
+// TestDescribeTypeOutsideTurnIsInternalError mirrors describe_actor: no live
+// IPC means a clean internal error, never stale local data.
+func TestDescribeTypeOutsideTurnIsInternalError(t *testing.T) {
 	b := metaToolBridge(t)
-	tool := &DescribeTypeTool{bridge: b}
-	cases := []struct {
-		name   string
-		params string
-		want   string
-	}{
-		{
-			name:   "unknown_type",
-			params: `{"actor_id":"tool:xhs","type":"xhs.missing"}`,
-			want:   "unknown_type",
-		},
-		{
-			name:   "actor_type_mismatch",
-			params: `{"actor_id":"tool:other","type":"xhs.publish"}`,
-			want:   "actor_type_mismatch",
-		},
-		{
-			name:   "kind_disallowed",
-			params: `{"actor_id":"tool:xhs","type":"xhs.note.archived"}`,
-			want:   "kind_disallowed",
-		},
+	result, err := (&DescribeTypeTool{bridge: b}).Execute(context.Background(), json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.publish"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
 	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			result, err := tool.Execute(context.Background(), json.RawMessage(tc.params))
-			if err != nil {
-				t.Fatalf("Execute: %v", err)
-			}
-			assertActorCLIErrorCode(t, result, tc.want)
-		})
-	}
+	assertActorCLIErrorCode(t, result, "internal_error")
 }
 
 func metaToolBridge(t *testing.T) *Bridge {
 	t.Helper()
 	cfg := Config{
-		APIKey:         "fake-key",
-		Model:          "fake-model",
-		ProviderType:   "anthropic",
-		WorkDir:        t.TempDir(),
-		ChannelContext: metaChannelContext(),
+		APIKey:       "fake-key",
+		Model:        "fake-model",
+		ProviderType: "anthropic",
+		WorkDir:      t.TempDir(),
 		NowFn: func() int64 {
 			return 1_700_000_000_000
 		},
@@ -333,6 +414,51 @@ func metaToolBridge(t *testing.T) *Bridge {
 		t.Fatalf("NewBridge: %v", err)
 	}
 	return b
+}
+
+// runMetaToolWithResponse drives a meta tool whose Execute emits one envelope
+// and awaits a response, feeding back respPayload as the (live) daemon reply.
+// Models the actor.list / actor.describe round-trip now that no frozen
+// snapshot exists worker-side.
+func runMetaToolWithResponse(t *testing.T, b *Bridge, tool interface {
+	Execute(context.Context, json.RawMessage) (gokimitypes.ToolResult, error)
+}, params, respPayload json.RawMessage) gokimitypes.ToolResult {
+	t.Helper()
+	ipc := newMetaFakeIPC()
+	ctx := context.WithValue(context.Background(), channelToolRuntimeKey{}, channelToolRuntime{
+		ipc:     ipc,
+		trigger: metaTrigger(),
+	})
+	go func() {
+		req := <-ipc.writes
+		resp := metaResponseForRequest(req, respPayload).Envelope
+		b.caller().Deliver(&resp)
+	}()
+	result, err := tool.Execute(ctx, params)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	return result
+}
+
+// metaActorListPayload is the actor.list response body the daemon would
+// produce — the live channel catalog at call time, carrying the final
+// status:completed the worker-side caller requires to treat it as final.
+func metaActorListPayload(t *testing.T) json.RawMessage {
+	t.Helper()
+	cc := metaChannelContext()
+	envelope := map[string]any{
+		"status":       "completed",
+		"channel_id":   cc.ChannelID,
+		"channel_type": cc.ChannelType,
+		"actors":       cc.Actors,
+		"types":        cc.Types,
+	}
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal actor.list payload: %v", err)
+	}
+	return raw
 }
 
 func metaChannelContext() ChannelContext {
