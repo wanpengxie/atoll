@@ -11,6 +11,6 @@
 //     / worker_locks).
 //   - messages.go          — kernel/log.MessageLog impl.
 //   - cursors.go           — kernel/log.Cursors impl.
-//   - actors.go            — kernel/actorreg.Registry impl.
+//   - actors.go            — kernel/Registry impl.
 //   - ledger.go            — kernel/ledger.Ledger impl.
 package store

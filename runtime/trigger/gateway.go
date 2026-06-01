@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -25,14 +24,14 @@ type Deliverer interface {
 // envelope; the gateway runs Resolve and hands the result to the
 // scheduler Deliverer.
 type Gateway struct {
-	registry actorreg.Registry
+	registry actor.Registry
 	deliver  Deliverer
 	nowFn    func() int64
 }
 
 // Config wires a Gateway.
 type Config struct {
-	Registry  actorreg.Registry
+	Registry  actor.Registry
 	Deliverer Deliverer
 	// NowFn returns unix-ms. Defaults to time.Now when nil. Used by
 	// Dispatch to decide whether NotBefore has passed (L1 §5.3

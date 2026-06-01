@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -20,7 +19,7 @@ import (
 // by adapter install today and by worker type_install IPC in the future.
 type Config struct {
 	ChannelID     channel.ID
-	ActorRegistry actorreg.Registry
+	ActorRegistry actor.Registry
 	TypeRegistry  message.TypeRegistry
 	HarnessChain  khar.Chain
 	NowFn         func() int64

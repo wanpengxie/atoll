@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -296,8 +295,8 @@ type ExternalRequestFunc func(
 // ReadinessFunc updates readiness for this adapter actor only.
 type ReadinessFunc func(
 	ctx context.Context,
-	update actorreg.ReadinessUpdate,
-) (actorreg.ReadinessTransition, error)
+	update actor.ReadinessUpdate,
+) (actor.ReadinessTransition, error)
 
 // PendingRequestLookupFunc exposes a read-only snapshot of a pending
 // request lifecycle entry.

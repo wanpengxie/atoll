@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	khlog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -113,9 +112,9 @@ type Deps struct {
 	ChannelID channel.ID
 
 	// ActorRegistry resolves sender.id / audience entries / handler_actor_id
-	// to actorreg.Record (kind / binding / deregistration timestamp).
+	// to actor.Record (kind / binding / deregistration timestamp).
 	// Required.
-	ActorRegistry actorreg.Registry
+	ActorRegistry actor.Registry
 
 	// TypeRegistry resolves business types declared by adapters /
 	// channel template. Optional; when nil the chain assumes only core

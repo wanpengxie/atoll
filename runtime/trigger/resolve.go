@@ -6,7 +6,6 @@ import (
 	"sort"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -39,7 +38,7 @@ type Options struct{}
 func Resolve(
 	ctx context.Context,
 	env *message.Envelope,
-	reg actorreg.Registry,
+	reg actor.Registry,
 	_ Options,
 ) ([]actor.ActorID, error) {
 	if env == nil {
@@ -71,7 +70,7 @@ func Resolve(
 func expandAudience(
 	ctx context.Context,
 	env *message.Envelope,
-	reg actorreg.Registry,
+	reg actor.Registry,
 ) ([]actor.ActorID, error) {
 	if len(env.Audience) == 0 {
 		return nil, nil
