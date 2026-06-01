@@ -42,6 +42,22 @@
 // The kernel/adapter.Manager runtime面 is ALREADY removed (deleted in v2 kernel
 // purge); this package MUST NOT reintroduce a long-lived god-object.
 //
+// installOne flow to port (manager.go:231, read 2026-06-02) — runs ONCE per
+// adapter at install, NOT a runtime path:
+//  1. mod.Declares() → validateDeclaration.
+//  2. ActorRegistry.Lookup(decl.ActorID) → verify exists + binding matches.
+//  3. binding-specific dep check (relay→DeviceTransit, outbound→HTTPClient).
+//  4. build type rows (TypeDeclarations strict/permissive) — hold, don't publish.
+//  5. build ModuleContext (buildRespond/Fail/EmitEvent/Forward/Submit/Await/...
+//     from respond.go — the seams that write terminals through harness.Chain;
+//     this is the respond/correlation/policy impl that must move into
+//     lib/behavior first, see phase-3 §7 step 3).
+//  6. mod.Init(mctx) → on success publish type rows (TypeRegistry.Upsert).
+//  7. construct adapterActor{module, declaration, mctx, correlation:map{}, ...}
+//     → return for Cells.Spawn. (NO boundModule, NO Manager bookkeeping.)
+// Start() on the cell wires mctx + runs binding-specific resources; Stop() →
+// module.Shutdown on the cell goroutine.
+//
 // caller-side futures (Call/Await/Watch) stay a channel-level futureHub
 // (lib/behavior/futurereg), NOT folded into the sender mailbox (deadlock —
 // dismantle §2.5-B b).
