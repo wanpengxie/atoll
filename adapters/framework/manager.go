@@ -391,12 +391,10 @@ func (m *Manager) installOne(ctx context.Context, mod adapter.Module) error {
 		return fmt.Errorf("framework: build synthesized fallback for %s: %w", decl.Name, err)
 	}
 	policy.bindFallback(fallback)
-	// F5: when the F3 fallback exhausts its write retries and force-expires a
-	// request, drop the router's receiverOwner entry so the reqID does not leak
-	// (the successful-write close path runs through router.ObserveResponse).
-	policy.bindOnExpire(func(rid adapter.CorrelationKey) {
-		m.router.forgetReceiver(message.ID(rid))
-	})
+	// No F3 timer is armed (construction-spec §6: single daemon caller-scoped
+	// closure); the policy retains only the OnExternalError fallback path.
+	// The router receiver-owner entry is dropped on the observed terminal via
+	// router.ObserveResponse, not a timer-expiry hook.
 
 	fail := buildFail(respond)
 	mctx := &adapter.ModuleContext{
@@ -874,29 +872,13 @@ func (m *Manager) recoverTimersForBoundModule(ctx context.Context, bm *boundModu
 		return fmt.Errorf("framework: list pending %s: %w", bm.declaration.Name, err)
 	}
 	for _, e := range pending {
-		// temporal R1: recover against the LIVE deadline. RearmedExpiresAt holds
-		// the latest provisional-heartbeat-extended deadline (0 = never re-armed);
-		// when set it supersedes the stale original ExpiresAt so a still-alive
-		// long-running receiver is not force-failed at 1µs after restart. A
-		// request that never heart-beat (RearmedExpiresAt==0) recovers against its
-		// original ExpiresAt and still F3-fails promptly if it elapsed during
-		// downtime.
-		deadline := time.UnixMilli(liveDeadlineMs(e))
-		// F4: rebuild the router receiver-owner index BEFORE re-arming the F3
-		// timer. A recovered entry whose deadline is already past makes
-		// RecoverTimer fire (near-)immediately; the fallback final must find the
-		// receiverOwner to close lifecycle through the single center (§3.1) — so
-		// owner-first, timer-second, matching reservePendingRequest.
+		// Rebuild the router receiver-owner index for each pending request so a
+		// LATE device response (external callback) after restart still matches
+		// this module's correlation. NO F3 timer is re-armed — closure is the
+		// daemon's single caller-scoped scan (construction-spec §6 option A),
+		// which re-derives the deadline from the log's expires_at on every tick,
+		// so closure survives restart without any in-memory timer.
 		m.router.trackReceiver(message.ID(e.RequestID), bm)
-		// Seed the ScheduleToClose anchor from EnqueuedAt (original creation), not
-		// recovery time, so the hard ceiling stays anchored at creation across
-		// restarts and heartbeats after recovery can't escape it.
-		if err := bm.policy.RecoverTimer(ctx, e.RequestID, deadline, e.EnqueuedAt); err != nil {
-			m.cfg.Logger.Warn("framework.recover.register_timer",
-				"adapter", bm.declaration.Name,
-				"request_id", e.RequestID,
-				"err", err.Error())
-		}
 	}
 	return nil
 }
@@ -947,11 +929,12 @@ func (m *Manager) Dispatch(ctx context.Context, env *message.Envelope) error {
 		return err
 	}
 
-	if unavailable, err := m.respondIfNotReady(ctx, bm, env); err != nil {
-		return err
-	} else if unavailable {
-		return nil
-	}
+	// No sticky-readiness dispatch gate (construction-spec §2 / §3.3): the
+	// substrate never pre-checks a cached readiness copy to decide
+	// reachability. The request is dispatched straight to the adapter; an
+	// offline receiver fails through its own relay-send error
+	// (receiver_unavailable), and "callable" is the OUTCOME of the attempt,
+	// never a stored gate. Eliminates the two-gate / stale-cache disease.
 
 	span := m.cfg.Tracer.StartSpan("adapter.dispatch",
 		"adapter", bm.declaration.Name, "type", env.Type)
@@ -998,11 +981,9 @@ func (m *Manager) Dispatch(ctx context.Context, env *message.Envelope) error {
 
 func (m *Manager) reservePendingRequest(ctx context.Context, bm *boundModule, env *message.Envelope) error {
 	now := m.cfg.Clock()
-	deadline := now.Add(time.Duration(bm.declaration.MaxPendingMs) * time.Millisecond)
-	deadlineMs := deadline.UnixMilli()
+	deadlineMs := now.Add(time.Duration(bm.declaration.MaxPendingMs) * time.Millisecond).UnixMilli()
 	if env.ExpiresAt != nil && *env.ExpiresAt > 0 {
 		deadlineMs = *env.ExpiresAt
-		deadline = time.UnixMilli(deadlineMs)
 	} else {
 		exp := deadlineMs
 		env.ExpiresAt = &exp
@@ -1020,17 +1001,14 @@ func (m *Manager) reservePendingRequest(ctx context.Context, bm *boundModule, en
 	if _, err := bm.correlation.Reserve(ctx, entry); err != nil {
 		return fmt.Errorf("framework: dispatch reserve: %w", err)
 	}
-	// F4: record the receiver-owner BEFORE arming the F3 timer. With a very
-	// short deadline the timer can fire (or fire-immediately) before
-	// RegisterTimer returns, and the F3 fallback writes a final that the
-	// router observes — if the receiverOwner is not yet recorded the router
-	// cannot locate this module's correlation to close it, leaking corr + F3.
-	// Same point/same lock as correlation reserve (§3.1).
+	// Record the receiver-owner so the response router can locate this
+	// module's correlation when a response is observed (device callback, or a
+	// late device final after the caller-scoped close). NO per-request F3
+	// timer is armed: closure is the daemon's single caller-scoped scan
+	// (construction-spec §6 option A) — the caller's expires_at is the
+	// authoritative deadline; a timed-out request's correlation is reaped on
+	// the eventual device response or on channel teardown.
 	m.router.trackReceiver(env.ID, bm)
-	if err := bm.policy.RegisterTimer(ctx, adapter.CorrelationKey(env.ID), deadline); err != nil {
-		m.router.forgetReceiver(env.ID)
-		return fmt.Errorf("framework: dispatch register timer: %w", err)
-	}
 	return nil
 }
 
@@ -1208,55 +1186,6 @@ func (m *Manager) respondReservedWithAdapterActor(
 	}, terminalValidationMode{
 		allowReservedActorTypes: true,
 	})
-}
-
-func (m *Manager) respondIfNotReady(ctx context.Context, bm *boundModule, env *message.Envelope) (bool, error) {
-	rec, ok, err := m.cfg.ActorRegistry.Lookup(ctx, bm.declaration.ActorID)
-	if err != nil {
-		return false, fmt.Errorf("framework: readiness pre-check lookup %s: %w", bm.declaration.ActorID, err)
-	}
-	if !ok {
-		return false, nil
-	}
-	readiness := rec.Readiness.Normalize()
-	if readiness.State != actorreg.ReadinessNotReady {
-		return false, nil
-	}
-	detail := fmt.Sprintf("actor not ready (last state change at %d): %s",
-		readiness.LastStateChangeAt, string(readiness.Detail))
-	payload, err := json.Marshal(map[string]any{
-		"error_code":    readiness.Reason,
-		"detail":        detail,
-		"recovery_hint": recoveryHintForReadiness(bm.declaration.Name, readiness.Reason),
-	})
-	if err != nil {
-		return false, fmt.Errorf("framework: readiness pre-check marshal: %w", err)
-	}
-	_, err = bm.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), payload, adapter.RespondOptions{
-		Status: "failed",
-		Reason: string(message.TerminalReceiverUnavailable),
-	})
-	if err != nil {
-		return false, err
-	}
-	m.cfg.Metrics.IncCounter("adapter.dispatch.precheck_unavailable",
-		"adapter", bm.declaration.Name, "reason", readiness.Reason)
-	return true, nil
-}
-
-func recoveryHintForReadiness(adapterName, reason string) string {
-	switch reason {
-	case "device_offline":
-		return "Call list_actors to see current readiness; wait for xhs.device.online or actor.readiness.changed before retrying"
-	case "token_expired", "device_token_expired":
-		return "Re-bind the device, then wait for actor.readiness.changed before retrying"
-	case "extension_disconnected":
-		return "Reload the browser extension or page, then call list_actors before retrying"
-	case "daemon_unreachable", "upstream_unreachable":
-		return "Start the upstream daemon, then wait for actor.readiness.changed before retrying"
-	default:
-		return fmt.Sprintf("Call list_actors to see current readiness for %s before retrying", adapterName)
-	}
 }
 
 // runHandle wraps Module.Handle with a panic recover that emits a

@@ -8,20 +8,16 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/runtime/scheduler"
 )
 
 // Deliverer is the minimal Deliver(audience, env) surface the gateway
-// invokes. It is satisfied by *runtime/scheduler.Deliverer; we declare a
+// invokes. It is satisfied by *runtime/actorrt.Runtime (the per-channel
+// cell runtime that replaced the old scheduler.Deliverer); we declare a
 // local interface so unit tests can substitute a counting fake without
-// importing the scheduler timer machinery.
+// importing the runtime machinery.
 type Deliverer interface {
 	Deliver(ctx context.Context, audience []actor.ActorID, env *message.Envelope) error
 }
-
-// Compile-time check: the production Deliverer must satisfy our
-// interface.
-var _ Deliverer = (*scheduler.Deliverer)(nil)
 
 // Gateway is the post-harness fan-out seam wired into the daemon's
 // write path. After the harness chain returns Accepted=true, daemon /

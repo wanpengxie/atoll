@@ -242,6 +242,24 @@ func (r InstallReason) HTTPStatus() int {
 type TerminalFailureReason string
 
 // TerminalFailureReason closed set (per L1 §10.3.3).
+//
+// actor-runtime-redesign.md §0.5 Δ3 redefines the producer + semantics of
+// unanswered_timeout WITHOUT extending the closed set:
+//
+//   - unanswered_timeout is now CALLER-SCOPED. Producer is the request
+//     SENDER (its blessed-call timer fired), not a global/system scanner.
+//     Semantics = "I, the caller, am no longer waiting" — a voluntary
+//     abandonment, NOT an assertion that the receiver is objectively
+//     silent. A receiver's genuine late final is therefore not a
+//     contradiction (handled as response.late_final observability).
+//   - receiver_unavailable is written by the SUBSTRATE when it positively
+//     observes a receiver's death (cell-supervisor panic or relay
+//     disconnect). The substrate never guesses "slow"; it only materialises
+//     death it observed.
+//   - receiver_internal_error is the legacy in-handler-failure terminal;
+//     under the actor model a handler failure that the receiver itself
+//     reports stays its own response, and unreported death folds into
+//     receiver_unavailable.
 const (
 	TerminalUnansweredTimeout     TerminalFailureReason = "unanswered_timeout"
 	TerminalReceiverInternalError TerminalFailureReason = "receiver_internal_error"

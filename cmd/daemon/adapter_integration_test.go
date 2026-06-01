@@ -475,8 +475,14 @@ func TestIntegration_XhsPublish_TimerEmitsUnansweredTimeout(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	resp := pollResponse(t, db, ack.MessageID, 5*time.Second)
-	if resp.Sender.ID != actor.SystemActorID || resp.Sender.Kind != actor.KindSystem {
-		t.Fatalf("timer fallback sender=(%s,%s) want system actor", resp.Sender.Kind, resp.Sender.ID)
+	// New world (construction-spec §6 option A): there is NO adapter F3
+	// timer. The request is closed by the daemon's single caller-scoped scan
+	// at the caller's expires_at (= now+MaxPendingMs), and the unanswered_
+	// timeout terminal is authored by the CALLER (Step 8 author #2,
+	// substrateTerminalAuthor) — here the human originator user:alice — NOT
+	// the adapter actor. caller-scoped: "I, the caller, stopped waiting".
+	if resp.Sender.ID != "user:alice" || resp.Sender.Kind != actor.KindHuman {
+		t.Fatalf("caller-scoped timeout sender=(%s,%s) want (human,user:alice)", resp.Sender.Kind, resp.Sender.ID)
 	}
 	var payload map[string]any
 	_ = json.Unmarshal(resp.Payload, &payload)
@@ -550,19 +556,22 @@ func TestIntegration_LongPending_ToolReceiverSkippedByScheduler_F3Wins(t *testin
 	_, db := openChannelMessages(t, channelsDir, channelID)
 	defer func() { _ = db.Close() }()
 
-	// 1) Mid-flight check at 200ms: scheduler has scanned ~6 times (period=30ms).
-	//    envelope.expires_at not yet lapsed (1500ms), so scheduler's expires_at
-	//    gate already ignores the row. F3 (~400ms) also not yet fired.
-	//    There MUST be no response row.
+	// 1) Mid-flight check at 200ms: the daemon caller-scoped scan gates on
+	//    envelope.expires_at (1500ms), not yet lapsed, so it ignores the row.
+	//    There MUST be no response row yet.
 	time.Sleep(200 * time.Millisecond)
 	if c := countResponses(t, db, ack.MessageID); c != 0 {
-		t.Fatalf("scheduler emitted %d terminal(s) before F3 fired — tool-skip branch broken", c)
+		t.Fatalf("scan emitted %d terminal(s) before expires_at lapsed — caller-scoped deadline broken", c)
 	}
 
-	// 2) Adapter F3 timer eventually fires (~t=400ms). Poll up to 5s.
+	// 2) The daemon caller-scoped scan closes the request once expires_at
+	//    (~1500ms) lapses — the SINGLE closure mechanism (no adapter F3 timer;
+	//    construction-spec §6 option A). Poll up to 5s.
 	resp := pollResponse(t, db, ack.MessageID, 5*time.Second)
-	if resp.Sender.ID != actor.SystemActorID || resp.Sender.Kind != actor.KindSystem {
-		t.Fatalf("timer fallback sender=(%s,%s) want system actor", resp.Sender.Kind, resp.Sender.ID)
+	// caller-authored unanswered_timeout (Step 8 author #2): the human
+	// originator user:alice self-closes; NOT the adapter actor.
+	if resp.Sender.ID != "user:alice" || resp.Sender.Kind != actor.KindHuman {
+		t.Fatalf("caller-scoped timeout sender=(%s,%s) want (human,user:alice)", resp.Sender.Kind, resp.Sender.ID)
 	}
 	var payload map[string]any
 	_ = json.Unmarshal(resp.Payload, &payload)

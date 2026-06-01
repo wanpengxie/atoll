@@ -92,39 +92,6 @@ func emitCorrelationLostSystemEvent(ctx context.Context, chain harness.Chain, ev
 	return err
 }
 
-type timerTerminalFailedEvent struct {
-	AdapterName string
-	ChannelID   channel.ID
-	Chain       harness.Chain
-	Clock       func() time.Time
-	RequestID   adapter.CorrelationKey
-	Err         error
-}
-
-func emitTimerTerminalFailedEvent(ctx context.Context, ev timerTerminalFailedEvent) error {
-	if ev.Chain == nil {
-		return nil
-	}
-	detail := ""
-	if ev.Err != nil {
-		detail = ev.Err.Error()
-	}
-	_, err := writeEvent(ctx, ev.Chain, eventEnvelope{
-		Type:      "core.system_event",
-		ChannelID: ev.ChannelID,
-		Sender:    message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
-		Now:       eventNow(ev.Clock),
-		Payload: map[string]any{
-			"severity":   "error",
-			"kind":       systemEventTimerTerminalFailed,
-			"adapter":    ev.AdapterName,
-			"request_id": ev.RequestID,
-			"detail":     detail,
-		},
-	})
-	return err
-}
-
 type eventEnvelope struct {
 	Type       string
 	ChannelID  channel.ID

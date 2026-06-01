@@ -217,21 +217,12 @@ func buildProvisional(cfg respondConfig) (adapter.ProvisionalFunc, error) {
 			// chain rejections.
 			return result, fmt.Errorf("framework: provisional rejected: %s (%s)", res.RejectReason, res.RejectDetail)
 		}
-		// §6.2 heartbeat: an accepted provisional is a liveness signal —
-		// re-arm the F3 timer (in-memory only; the request envelope's
-		// expires_at is never rewritten). Same point as observeWrite (post
-		// harness-accept). ReArm clamps to the ScheduleToClose ceiling and
-		// no-ops if the request already closed, so this never resurrects a
-		// dead request and never resolves closure.
-		if cfg.policy != nil {
-			newDeadline := provisionalReArmDeadline(cfg.clock(), mergedPayload, cfg.declaration.MaxPendingMs)
-			if err := cfg.policy.ReArm(ctx, requestID, newDeadline); err != nil {
-				cfg.logger.Warn("framework.provisional.rearm_failed",
-					"adapter", cfg.adapterName,
-					"request_id", requestID.String(),
-					"err", err.Error())
-			}
-		}
+		// A provisional is a pure progress signal — it does NOT extend the
+		// closure deadline. The caller's expires_at is the single authoritative
+		// deadline (construction-spec §6 option A: caller-scoped closure, no
+		// receiver-side deadline extension); the daemon caller-scoped scan
+		// closes the request at expires_at regardless of heartbeats. (The
+		// former in-memory F3 ReArm is deleted along with the adapter timer.)
 		// Feed the provisional to the router so caller-side Watch streams see
 		// it. Router does NOT touch lifecycle for non-final responses.
 		cfg.observeWrite(ctx, env, res)
@@ -263,52 +254,6 @@ func mergeProvisionalPayload(userPayload json.RawMessage, status string) (json.R
 		return nil, fmt.Errorf("framework: marshal provisional payload: %w", err)
 	}
 	return out, nil
-}
-
-// provisionalReArmDeadline computes the F3 re-arm deadline for a provisional
-// heartbeat (temporal-termination-consistency.md §6.2):
-//
-//   - payload carries est_wait_ms > 0 → now + est_wait_ms (receiver's own
-//     estimate of remaining work).
-//   - otherwise → now + maxPendingMs (treat the provisional itself as "I am
-//     still alive", granting a fresh max_pending_ms budget).
-//
-// The ScheduleToClose ceiling clamp lives in timerPolicy.ReArm, not here, so
-// the budget logic stays independent of the zombie guard.
-func provisionalReArmDeadline(now time.Time, mergedPayload json.RawMessage, maxPendingMs int64) time.Time {
-	if est, ok := extractEstWaitMs(mergedPayload); ok && est > 0 {
-		return now.Add(time.Duration(est) * time.Millisecond)
-	}
-	return now.Add(time.Duration(maxPendingMs) * time.Millisecond)
-}
-
-// extractEstWaitMs reads the optional est_wait_ms field from a provisional
-// payload object. Returns ok=false when absent / null / not a number. JSON
-// numbers decode to float64 so a fractional ms truncates to an int64.
-func extractEstWaitMs(raw json.RawMessage) (int64, bool) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return 0, false
-	}
-	var fields map[string]any
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return 0, false
-	}
-	v, ok := fields["est_wait_ms"]
-	if !ok {
-		return 0, false
-	}
-	switch n := v.(type) {
-	case float64:
-		return int64(n), true
-	case json.Number:
-		i, err := n.Int64()
-		if err != nil {
-			return 0, false
-		}
-		return i, true
-	default:
-		return 0, false
-	}
 }
 
 func buildFail(respond adapter.RespondFunc) adapter.FailFunc {
@@ -362,18 +307,25 @@ type terminalFallbackFunc func(
 ) (adapter.RespondResult, error)
 
 // buildSynthesizedTerminalFallback returns the framework/runtime-owned
-// terminal closure path. It intentionally does not satisfy or expose
-// adapter.RespondFunc: adapter voluntary responses remain signed by the
-// adapter actor, while synthesized fallback terminals are signed by the
-// channel system actor.
+// terminal closure path (timer expiry + OnExternalError).
+//
+// New-world authorship (actor-runtime-redesign.md §0.5 Δ2): a synthesized
+// fallback terminal is signed by the ADAPTER ACTOR, not the channel system
+// actor. The adapter actor is the request's audience[0] (asserted by
+// validatePendingTerminalRequest), so it is an authorized voluntary
+// responder under Step 8 author #1. The old "system actor terminal
+// fallback" author is deleted from the harness, so signing as system would
+// now be rejected as harness_response_unauthorized_sender. Signing as the
+// adapter (the receiver materialising its own non-answer / failure) is the
+// receiver-author path and needs no special harness exception.
 func buildSynthesizedTerminalFallback(cfg respondConfig) (terminalFallbackFunc, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	return func(ctx context.Context, requestID adapter.CorrelationKey, payload json.RawMessage, opts adapter.RespondOptions) (adapter.RespondResult, error) {
 		return runRespondWithSender(ctx, cfg, requestID, payload, opts, message.Sender{
-			Kind: actor.KindSystem,
-			ID:   actor.SystemActorID,
+			Kind: actor.KindTool,
+			ID:   cfg.adapterActorID,
 		}, terminalValidationMode{
 			allowReservedActorTypes: true,
 		})

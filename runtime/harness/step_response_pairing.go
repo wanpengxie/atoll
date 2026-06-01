@@ -42,19 +42,24 @@ import (
 //     terminal_failure_reason closed set; otherwise →
 //     harness_response_reason_invalid.
 //
-//   - response.sender must be one of the parent request's audience actors,
-//     and response.audience must target the parent request sender exactly.
-//     Trusted system terminal-failure fallbacks are the only sender
-//     exception; they still must target the parent request sender.
+//   - response.sender authorization has THREE authors (actor-runtime-
+//     redesign.md §0.5 Δ2), and response.audience must target the parent
+//     request sender exactly:
+//     1. receiver voluntary — sender ∈ parent.audience;
+//     2. caller self-close — sender == parent.sender writing its own
+//     caller-scoped status=failed + reason=unanswered_timeout;
+//     3. substrate death — substrate materialises the dead receiver's
+//     receiver_unavailable (wire sender = dead receiver, folds into #1).
+//     The old generic "system actor terminal fallback" author is DELETED.
 //
-//   - Zombie chain defence (proto-layer1 §2.8 #8): when the log already
-//     contains a final response for the same parent, a new final →
-//     harness_terminal_duplicate; a new provisional →
-//     harness_provisional_after_final. The ux_terminal_response_per_request
-//     UNIQUE INDEX in store.schema is the authoritative defence for the
-//     former (catching concurrent racers that slip past this pre-check);
-//     this step surfaces the closed-set reject for both in the
-//     non-racing single-writer path.
+//   - Zombie chain defence redefined (Δ4 / D3): when the log already
+//     contains a final response for the same parent, a receiver's genuine
+//     LATE final (after the caller self-closed) is NOT a duplicate — it is
+//     rewritten to a response.late_final observability event and recorded
+//     as a non-error. Other post-final finals → harness_terminal_duplicate;
+//     provisionals after final → harness_provisional_after_final. The
+//     ux_terminal_response_per_request UNIQUE INDEX in store.schema remains
+//     the authoritative defence for concurrent racers.
 //
 //   - is_terminal is computed from the payload.status classification:
 //     Layer 1 → true; Layer 2 / Layer 3 → false. proto-layer0 §2.5.1
@@ -99,17 +104,53 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 		}, nil
 	}
 
-	systemFallback, reasonCheck := allowsSystemTerminalFallback(env)
+	reasonCheck := checkFailedResponseReason(env.Payload)
 	if reasonCheck.invalid {
 		return khar.Outcome{
 			RejectReason: message.HarnessResponseReasonInvalid,
 			Detail:       reasonCheck.detail,
 		}, nil
 	}
-	if !audienceContains(parent.Audience, env.Sender.ID) && !systemFallback {
+
+	// ── Step 8 authorization model (actor-runtime-redesign.md §0.5 Δ2) ──
+	//
+	// closure has exactly THREE authors, by "who holds the fact":
+	//
+	//   1. receiver voluntary — sender ∈ parent.audience answers
+	//      (completed / failed). audience must equal [parent.sender].
+	//   2. caller self-close   — parent.sender writes its OWN
+	//      caller-scoped unanswered_timeout (status=failed + reason=
+	//      unanswered_timeout). It is not in its own audience, so this is
+	//      a distinct authorization. audience==[parent.sender] (itself) is
+	//      naturally satisfied (#7 unchanged).
+	//   3. substrate death     — the substrate materialises a dead/gone
+	//      receiver's terminal with reason=receiver_unavailable. A dead or
+	//      deregistered receiver cannot sign for itself (StepSenderConsistent
+	//      would reject a deregistered/unknown sender BEFORE this step), so
+	//      the substrate signs as the channel system actor (exempt from the
+	//      deregistration check) under a NARROW gate: status=failed +
+	//      reason=receiver_unavailable ONLY.
+	//
+	// This narrow substrate author is NOT the old generic "system actor
+	// terminal fallback" (which authorized ANY terminal reason — including
+	// unanswered_timeout — for any parent, the global-guess author). That
+	// generic author is DELETED. The substrate never guesses "slow"; it
+	// only materialises death it positively observed, hence the reason is
+	// pinned to receiver_unavailable.
+	callerSelfClose := env.Sender.ID == parent.Sender.ID &&
+		reasonCheck.failed &&
+		reasonCheck.hasReason &&
+		reasonCheck.reason == string(message.TerminalUnansweredTimeout)
+
+	substrateDeath := env.Sender.ID == actor.SystemActorID &&
+		reasonCheck.failed &&
+		reasonCheck.hasReason &&
+		reasonCheck.reason == string(message.TerminalReceiverUnavailable)
+
+	if !audienceContains(parent.Audience, env.Sender.ID) && !callerSelfClose && !substrateDeath {
 		return khar.Outcome{
 			RejectReason: message.HarnessResponseUnauthorizedSender,
-			Detail:       "response sender is not in parent request audience: " + string(env.Sender.ID),
+			Detail:       "response sender is not an authorized closure author (receiver / caller-timeout / substrate-death): " + string(env.Sender.ID),
 		}, nil
 	}
 	if !audienceExactlySender(env.Audience, parent.Sender.ID) {
@@ -118,21 +159,38 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 			Detail:       "response audience must equal parent request sender: " + string(parent.Sender.ID),
 		}, nil
 	}
-	if reasonCheck = checkFailedResponseReason(env.Payload); reasonCheck.invalid {
-		return khar.Outcome{
-			RejectReason: message.HarnessResponseReasonInvalid,
-			Detail:       reasonCheck.detail,
-		}, nil
-	}
 
-	// Zombie chain defence (proto-layer1 §2.8 #8). A pre-existing final
-	// response for the same parent forbids any further row: another
-	// final is a duplicate; a provisional after final is a zombie.
+	// Zombie chain defence redefined (actor-runtime-redesign.md §0.5 Δ4 +
+	// D3). The timeout terminal is caller-scoped ("I, the caller, am no
+	// longer waiting") — it does NOT assert the receiver is silent. So a
+	// receiver's genuine LATE final after the caller has already
+	// self-closed is NOT a duplicate/zombie: it is converted to an
+	// observability event (response.late_final) and recorded as a
+	// non-error. Only NON-late collisions remain rejects.
 	hasFinal, err := s.deps.Log.HasFinalResponse(ctx, s.deps.ChannelID, env.ParentID)
 	if err != nil {
 		return khar.Outcome{}, err
 	}
 	if hasFinal {
+		// Late receiver final after caller self-close → observability event.
+		// The exception is narrow (Δ4 / D3): it applies ONLY when the
+		// existing final was the caller self-closing (sender == parent
+		// request sender). A second genuine receiver final after a receiver
+		// final remains a hard duplicate.
+		priorSender, ok, err := s.deps.Log.FinalResponseSender(ctx, s.deps.ChannelID, env.ParentID)
+		if err != nil {
+			return khar.Outcome{}, err
+		}
+		priorWasCallerSelfClose := ok && priorSender == parent.Sender.ID
+		isLateReceiverFinal := statusCls.isFinal &&
+			!callerSelfClose &&
+			priorWasCallerSelfClose &&
+			audienceContains(parent.Audience, env.Sender.ID)
+		if isLateReceiverFinal {
+			rewriteAsLateFinal(env, parent)
+			env.IsTerminal = false
+			return khar.Outcome{}, nil
+		}
 		if statusCls.isFinal {
 			return khar.Outcome{
 				RejectReason: message.HarnessTerminalDuplicate,
@@ -149,6 +207,26 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 	// the proto-layer0 §2.5.1 derivation is uniform across all types.
 	env.IsTerminal = statusCls.isFinal
 	return khar.Outcome{}, nil
+}
+
+// LateFinalType is the observability event type a receiver's genuine LATE
+// final is rewritten to once the caller has already self-closed the
+// request with a caller-scoped unanswered_timeout (Δ4 / D3). It is NOT a
+// kind=response final: it is recorded as an event so the receiver's reply
+// is preserved for audit without violating terminal uniqueness, and the
+// WriteResult returned to the receiver is success ("recorded, not an
+// error") rather than a reject.
+const LateFinalType = "response.late_final"
+
+// rewriteAsLateFinal mutates env from a (rejected) duplicate final into an
+// observability event addressed to the original request sender. kind is
+// changed to event; type to LateFinalType; parent_id stays the request id;
+// the receiver remains the sender (it is who actually answered).
+func rewriteAsLateFinal(env *message.Envelope, parent message.Envelope) {
+	env.Kind = message.KindEvent
+	env.Type = LateFinalType
+	// audience stays [parent.sender] (already validated above).
+	_ = parent
 }
 
 func audienceContains(audience message.Audience, want actor.ActorID) bool {
@@ -170,17 +248,6 @@ type failedResponseReasonCheck struct {
 	reason    string
 	invalid   bool
 	detail    string
-}
-
-func allowsSystemTerminalFallback(env *message.Envelope) (bool, failedResponseReasonCheck) {
-	if env.Sender.ID != actor.SystemActorID {
-		return false, failedResponseReasonCheck{}
-	}
-	check := checkFailedResponseReason(env.Payload)
-	if check.invalid {
-		return false, check
-	}
-	return check.failed && check.hasReason && terminalFailureReasonAllowed(check.reason), check
 }
 
 func checkFailedResponseReason(payload []byte) failedResponseReasonCheck {

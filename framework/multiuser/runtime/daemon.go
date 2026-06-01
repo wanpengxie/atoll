@@ -31,6 +31,7 @@ import (
 	khlog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/pkg/metrics"
+	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/scheduler"
 	"github.com/wanpengxie/ActOS/runtime/store"
@@ -243,7 +244,7 @@ type channelRuntime struct {
 	pusher        *transit.Pusher
 	pushMu        sync.Mutex
 	pausePush     func()
-	deliverer     *scheduler.Deliverer
+	cells         *actorrt.Runtime
 	gateway       *trigger.Gateway
 	typeRegistry  *store.TypeRegistry
 	requestLookup *store.RequestLookup
@@ -414,10 +415,11 @@ type ChannelHooks struct {
 	// point enforces.
 	HarnessChain khar.Chain
 
-	// Deliverer is the per-channel scheduler.Deliverer — the
-	// composition root registers a HandlerFn per adapter actor id that
-	// calls framework.Manager.Dispatch.
-	Deliverer *scheduler.Deliverer
+	// Cells is the per-channel actorrt.Runtime — the composition root
+	// spawns one cell per adapter actor id whose Receive calls
+	// framework.Manager.Dispatch (replacing the former Deliverer HandlerFn
+	// registry; delivery now enqueues into the cell's mailbox).
+	Cells *actorrt.Runtime
 
 	// NowFn returns unix-ms; same clock the daemon stamps writes with.
 	NowFn func() int64
@@ -1303,12 +1305,16 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 	}
 
 	// Trigger gateway — post-harness fan-out seam (FIX-T3 / L1 §5.1).
-	// Deliverer starts empty; OnChannelBoot wires per-adapter Dispatch
-	// handlers below.
-	deliverer := scheduler.NewDeliverer()
+	// actorrt.Runtime starts empty; OnChannelBoot spawns per-adapter cells
+	// below. It satisfies trigger.Deliverer (Deliver enqueues into each
+	// audience cell's mailbox rather than invoking a handler inline). The
+	// supervisor materialises receiver_unavailable on cell death; its cr is
+	// backfilled below (cells are created before the channelRuntime).
+	sup := &channelSupervisor{daemon: d}
+	cells := actorrt.New(actorrt.Config{Parent: d.runCtx, Supervisor: sup})
 	gw, err := trigger.New(trigger.Config{
 		Registry:  registry,
-		Deliverer: deliverer,
+		Deliverer: cells,
 		NowFn:     d.cfg.NowFn,
 	})
 	if err != nil {
@@ -1339,13 +1345,14 @@ func (d *Daemon) buildChannelRuntime(ctx context.Context, lc lifecycle.LocalChan
 		chain:                      chain,
 		wrappedChain:               wrappedChain,
 		pusher:                     pusher,
-		deliverer:                  deliverer,
+		cells:                      cells,
 		gateway:                    gw,
 		typeRegistry:               typeRegistry,
 		requestLookup:              requestLookup,
 		channelAgentID:             ChannelAgentID,
 		humanCallerDefaultAudience: humanCallerDefaultAudience,
 	}
+	sup.cr = cr
 
 	// T147 §A — per-channel devicetransit.DeviceTransit. The instance shares
 	// the daemon's *transit.Client (single WS connection to the server
@@ -1478,18 +1485,12 @@ func (d *Daemon) ensureChannelAgent(ctx context.Context, cr *channelRuntime) err
 			return fmt.Errorf("runtime: ensure channel-agent bridge %s: %w", cr.channelID, err)
 		}
 		cr.workerBridge = bridge
-		cr.deliverer.Register(cr.channelAgentID, func(ctx context.Context, id actor.ActorID, env *message.Envelope) error {
-			cr.channelAgentTriggers.Add(1)
-			return bridge.OnTrigger(ctx, id, env)
-		})
+		cr.cells.Spawn(cr.channelAgentID, &agentActor{cr: cr, bridge: bridge})
 		return nil
 	}
 
-	// P2 fallback — counter-only handler.
-	cr.deliverer.Register(cr.channelAgentID, func(_ context.Context, _ actor.ActorID, _ *message.Envelope) error {
-		cr.channelAgentTriggers.Add(1)
-		return nil
-	})
+	// P2 fallback — counter-only agent actor.
+	cr.cells.Spawn(cr.channelAgentID, &agentActor{cr: cr})
 	return nil
 }
 
@@ -1541,22 +1542,6 @@ type actorListType struct {
 	HandlerBinding string   `json:"handler_binding,omitempty"`
 	AllowedKinds   []string `json:"allowed_kinds,omitempty"`
 	MaxPendingMs   int64    `json:"max_pending_ms,omitempty"`
-}
-
-// systemActorHandler returns the scheduler handler bound to the channel
-// system actor. Today it answers the actor.list reserved type with a live
-// channel-wide catalog; any other request addressed to the system actor is
-// ignored (no error) so the §6.4 long-pending fallback closes it.
-func (d *Daemon) systemActorHandler(cr *channelRuntime) scheduler.HandlerFn {
-	return func(ctx context.Context, _ actor.ActorID, env *message.Envelope) error {
-		if env == nil || env.Kind != message.KindRequest {
-			return nil
-		}
-		if env.Type != "actor.list" {
-			return nil
-		}
-		return d.respondActorList(ctx, cr, env)
-	}
 }
 
 // respondActorList builds the live channel-wide actor/type catalog and
@@ -1638,6 +1623,68 @@ func (d *Daemon) writeSystemResponse(ctx context.Context, cr *channelRuntime, re
 		return fmt.Errorf("runtime: actor.list response rejected: %s (%s)", res.RejectReason, res.RejectDetail)
 	}
 	return nil
+}
+
+// writeSubstrateUnavailable writes a system-authored receiver_unavailable
+// final terminal for req — the substrate death-signal closure (construction-
+// spec §3.3). The wire sender is the channel system actor: a dead/deregistered
+// receiver cannot sign for itself (Step4 sender-consistent rejects it), and
+// Step8 admits the system actor as author #3 only for status=failed +
+// reason=receiver_unavailable. Duplicate is benign — the sender's caller
+// timer or a concurrent write may already have closed the request.
+func (d *Daemon) writeSubstrateUnavailable(ctx context.Context, cr *channelRuntime, req *message.Envelope, cause error) {
+	now := d.cfg.NowFn()
+	correlationID := req.CorrelationID
+	if correlationID == "" {
+		correlationID = req.ID
+	}
+	detail := "receiver actor terminated"
+	if cause != nil {
+		detail = cause.Error()
+	}
+	payload, err := json.Marshal(map[string]any{
+		"status": "failed",
+		"reason": string(message.TerminalReceiverUnavailable),
+		"detail": detail,
+	})
+	if err != nil {
+		return
+	}
+	env := &message.Envelope{
+		ID:            message.ID("death:" + string(req.ID) + ":receiver_unavailable"),
+		TS:            now,
+		TSReceived:    now,
+		ChannelID:     req.ChannelID,
+		Sender:        message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind:          message.KindResponse,
+		Type:          req.Type,
+		Payload:       payload,
+		ParentID:      req.ID,
+		CorrelationID: correlationID,
+		Visibility:    req.Visibility,
+		Audience:      message.Audience{req.Sender.ID},
+	}
+	chainCtx := harness.CtxWithCaller(ctx, harness.CallerContext{
+		ActorID:                 actor.SystemActorID,
+		ChannelID:               req.ChannelID,
+		AllowProvidedSenderKind: true,
+	})
+	res, werr := cr.wrappedChain.Write(chainCtx, env)
+	if werr != nil {
+		d.log.Warn().Err(werr).
+			Str("event", "runtime.death_terminal_write_failed").
+			Str("channel_id", string(req.ChannelID)).
+			Str("message_id", string(req.ID)).
+			Msg("death signal: receiver_unavailable write failed")
+		return
+	}
+	if res.RejectReason != "" && res.RejectReason != message.HarnessTerminalDuplicate {
+		d.log.Warn().
+			Str("event", "runtime.death_terminal_rejected").
+			Str("reject_reason", string(res.RejectReason)).
+			Str("message_id", string(req.ID)).
+			Msg("death signal: receiver_unavailable rejected")
+	}
 }
 
 func actorListActors(records []actorreg.Record) []actorListActor {
@@ -1762,7 +1809,7 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel, sta
 	// registry + type registry on EVERY call, so an actor that joined after
 	// the worker spawned is visible immediately. Registered before the
 	// pusher starts so a list_actors that races boot observes the handler.
-	cr.deliverer.Register(actor.SystemActorID, d.systemActorHandler(cr))
+	cr.cells.Spawn(actor.SystemActorID, &systemActor{daemon: d, cr: cr})
 
 	// M1.6-T2 — OnChannelBoot hook lets cmd/daemon wire the adapter
 	// framework Manager + register Dispatch handlers on the Deliverer.
@@ -1794,7 +1841,7 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel, sta
 			// timer-fired terminals flow through the same invariants the
 			// WriteMessage handler enforces.
 			HarnessChain: cr.wrappedChain,
-			Deliverer:    cr.deliverer,
+			Cells:        cr.cells,
 			NowFn:        d.cfg.NowFn,
 			Logger:       &d.log,
 		}
@@ -1861,6 +1908,13 @@ func (d *Daemon) bootChannel(ctx context.Context, lc lifecycle.LocalChannel, sta
 			cancel()
 		}
 		cr.cancelPusher()
+		// Stop every in-daemon actor cell (system / agent / adapter): closes
+		// each mailbox, waits for the in-flight Receive, runs Stop to release
+		// resources. The old Deliverer held no goroutines and needed no
+		// teardown; actorrt cells do.
+		if cr.cells != nil {
+			cr.cells.StopAll()
+		}
 		d.deleteChannel(chID)
 		d.booter.Unload(chID)
 		return nil
@@ -3242,8 +3296,13 @@ func (d *Daemon) emitTriggerRetryExhausted(
 	if len(req.Audience) == 0 {
 		return fmt.Errorf("request %s has empty audience", req.ID)
 	}
-	reason := message.TerminalReceiverInternalError
-	body := longPendingPayload{Status: "failed", Reason: string(reason)}
+	// Retry-exhausted = confirmed receiver failure (actor-runtime-
+	// construction-spec.md §3.4): the substrate materialises the dead
+	// receiver's terminal with reason=receiver_unavailable, authored by the
+	// substrate (system actor, Step 8 author #3) — the receiver is by
+	// definition unreachable, so it cannot sign for itself.
+	reason := message.TerminalReceiverUnavailable
+	body := longPendingPayload{Status: "failed", Reason: string(reason), MissingActorID: req.Audience[0].String()}
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
@@ -3341,11 +3400,18 @@ func (d *Daemon) emitLongPendingFallback(
 		correlationID = req.ID
 	}
 
+	// New-world authorship (actor-runtime-redesign.md §0.5 Δ2): the
+	// terminal sender is chosen by WHO holds the fact, not a generic
+	// system fallback.
+	//   - unanswered_timeout → CALLER self-close (sender = req.Sender.ID).
+	//   - receiver_unavailable (substrate death) → the dead RECEIVER
+	//     (sender = receiverID, which is in parent audience → author #1).
+	sender, callerID := substrateTerminalAuthor(req, receiverID, reason)
 	env := &message.Envelope{
 		ID:            envID,
 		TS:            nowMs,
 		ChannelID:     req.ChannelID,
-		Sender:        message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Sender:        sender,
 		Kind:          message.KindResponse,
 		Type:          req.Type,
 		Payload:       payload,
@@ -3355,11 +3421,8 @@ func (d *Daemon) emitLongPendingFallback(
 		Audience:      message.Audience{req.Sender.ID},
 	}
 
-	// The scheduler is a system caller; stamp the harness context with
-	// the system actor + permit kind pre-fill (we set Kind=actor.KindSystem
-	// above so the registry-truth overwrite path remains exact-match).
 	chainCtx := harness.CtxWithCaller(ctx, harness.CallerContext{
-		ActorID:                 actor.SystemActorID,
+		ActorID:                 callerID,
 		ChannelID:               req.ChannelID,
 		AllowProvidedSenderKind: true,
 	})
@@ -3375,6 +3438,25 @@ func (d *Daemon) emitLongPendingFallback(
 		return fmt.Errorf("rejected: %s (%s)", res.RejectReason, res.RejectDetail)
 	}
 	return nil
+}
+
+// substrateTerminalAuthor picks the new-world authorship for a
+// substrate-synthesised terminal (actor-runtime-redesign.md §0.5 Δ2):
+//   - a caller-scoped unanswered_timeout is authored by the CALLER (the
+//     request sender self-closing, Step 8 author #2);
+//   - a death-class terminal (receiver_unavailable for a gone/dead
+//     receiver) is authored by the SUBSTRATE, which signs as the channel
+//     system actor under the narrow Step 8 author #3 gate (a dead /
+//     deregistered receiver cannot sign for itself).
+//
+// Returns the wire Sender plus the caller-context actor id (they must be
+// the same actor so StepSenderConsistent's caller-vs-sender match holds).
+func substrateTerminalAuthor(req *message.Envelope, receiverID actor.ActorID, reason message.TerminalFailureReason) (message.Sender, actor.ActorID) {
+	_ = receiverID
+	if reason == message.TerminalUnansweredTimeout {
+		return message.Sender{Kind: req.Sender.Kind, ID: req.Sender.ID}, req.Sender.ID
+	}
+	return message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}, actor.SystemActorID
 }
 
 // classifyLongPendingReason inspects the receiver's actor_registry row
@@ -3398,13 +3480,16 @@ func (d *Daemon) classifyLongPendingReason(
 		return message.TerminalReceiverUnavailable, true, nil
 	}
 	switch rec.Kind {
-	case actor.KindTool:
-		// Adapter framework F3 timer owns this case — MUTUAL EXCLUSION.
-		return "", false, nil
 	case actor.KindHuman:
 		// Baseline: humans do not have an SLA in M1.6.
 		return "", false, nil
-	case actor.KindAgent, actor.KindSystem:
+	case actor.KindTool, actor.KindAgent, actor.KindSystem:
+		// Single caller-scoped closure (construction-spec §0.5 / §6 option A):
+		// a live receiver that hasn't answered by the caller's expires_at is
+		// closed with a caller-authored unanswered_timeout. The former KindTool
+		// MUTUAL EXCLUSION (adapter framework per-request F3 timer) is removed —
+		// the daemon caller-scoped scan is now the single closure mechanism for
+		// every kind; the adapter timer is deleted (no double-fire).
 		return message.TerminalUnansweredTimeout, true, nil
 	default:
 		// Unknown kind — defensive log + skip. The CHECK constraint on

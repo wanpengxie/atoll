@@ -530,8 +530,10 @@ func TestDaemon_FutureMessage_SchedulerDrains(t *testing.T) {
 // either synthesises a system-side failed terminal or skips, per the
 // receiver-kind dispatch matrix:
 //
-//   - audience=[agent] / [system]      → emit reason=unanswered_timeout
-//   - audience=[tool]                  → skip (adapter framework F3 timer)
+//   - audience=[agent] / [system] / [tool] → emit reason=unanswered_timeout
+//     (single caller-scoped closure; the former tool MUTUAL EXCLUSION with
+//     the adapter framework F3 timer is removed — daemon scan is the one
+//     closure mechanism for every kind, construction-spec §6 option A)
 //   - audience=[human]                 → skip (no baseline human SLA)
 //   - audience=[deregistered actor]    → emit reason=receiver_unavailable
 //   - audience=[never-registered actor]→ emit reason=receiver_unavailable
@@ -615,7 +617,7 @@ func TestDaemon_LongPending_Scheduler_EmitsFailedTerminal(t *testing.T) {
 	cases := []seedCase{
 		{id: "req-agent", audience: "agent:beta", expiresAt: &deadline, expectEmit: true, expectReason: message.TerminalUnansweredTimeout},
 		{id: "req-system", audience: string(actor.SystemActorID), expiresAt: &deadline, expectEmit: true, expectReason: message.TerminalUnansweredTimeout},
-		{id: "req-tool", audience: "tool:xhs", expiresAt: &deadline, expectEmit: false},
+		{id: "req-tool", audience: "tool:xhs", expiresAt: &deadline, expectEmit: true, expectReason: message.TerminalUnansweredTimeout},
 		{id: "req-human", audience: "user:alice", expiresAt: &deadline, expectEmit: false},
 		{id: "req-deregistered", audience: "agent:gone", expiresAt: &deadline, expectEmit: true, expectReason: message.TerminalReceiverUnavailable},
 		{id: "req-unknown", audience: "agent:ghost", expiresAt: &deadline, expectEmit: true, expectReason: message.TerminalReceiverUnavailable},

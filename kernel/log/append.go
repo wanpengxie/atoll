@@ -3,6 +3,7 @@ package log
 import (
 	"context"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/fencing"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -105,4 +106,14 @@ type MessageLog interface {
 	// only way to surface the latter, which the partial index cannot
 	// catch by definition.
 	HasFinalResponse(ctx context.Context, channelID channel.ID, parentID message.ID) (bool, error)
+
+	// FinalResponseSender returns the sender.id of the existing Layer 1
+	// final response for parentID, or ok=false when no final exists. Used
+	// by harness Step 8 to distinguish a caller self-close
+	// (unanswered_timeout, sender == parent request sender) from a genuine
+	// receiver final, so a receiver's LATE final after a caller self-close
+	// can be rewritten to a response.late_final observability event
+	// (actor-runtime-redesign.md §0.5 Δ4 / D3) rather than rejected as a
+	// duplicate.
+	FinalResponseSender(ctx context.Context, channelID channel.ID, parentID message.ID) (actor.ActorID, bool, error)
 }

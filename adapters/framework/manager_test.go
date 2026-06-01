@@ -973,7 +973,14 @@ func TestManagerOnExternalCallbackFrameStampsReadinessChannel(t *testing.T) {
 	}
 }
 
-func TestManagerDispatchPrecheckNotReadyFailsWithoutHandle(t *testing.T) {
+func TestManagerDispatchNoReadinessPrecheckGate(t *testing.T) {
+	// New world (construction-spec §2 / §3.3): there is NO sticky-readiness
+	// dispatch gate. A request is dispatched straight to the adapter even when
+	// the registry's readiness projection says NotReady — "callable" is the
+	// OUTCOME of the attempt (the adapter answers, or its relay-send fails into
+	// receiver_unavailable), never a pre-checked stored copy. The former
+	// respondIfNotReady precheck (which short-circuited before Handle) is
+	// deleted; this test pins that it stays deleted.
 	called := false
 	mod := &stubModule{
 		decl: adapter.Declaration{
@@ -988,7 +995,7 @@ func TestManagerDispatchPrecheckNotReadyFailsWithoutHandle(t *testing.T) {
 			return nil
 		},
 	}
-	mgr, chain, lookup, registry, _ := newTestManager(t, mod)
+	mgr, _, lookup, registry, _ := newTestManager(t, mod)
 	_, err := registry.UpdateReadiness(context.Background(), "tool:feishu-adapter", actorreg.ReadinessUpdate{
 		State:     actorreg.ReadinessNotReady,
 		Reason:    "device_offline",
@@ -1004,19 +1011,8 @@ func TestManagerDispatchPrecheckNotReadyFailsWithoutHandle(t *testing.T) {
 	if err := mgr.Dispatch(context.Background(), req); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
-	if called {
-		t.Fatal("not-ready precheck must not enter Module.Handle")
-	}
-	written := chain.Written()
-	if len(written) != 1 {
-		t.Fatalf("written=%d want 1 failed terminal", len(written))
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(written[0].Payload, &payload); err != nil {
-		t.Fatalf("unmarshal payload: %v", err)
-	}
-	if payload["status"] != "failed" || payload["reason"] != string(message.TerminalReceiverUnavailable) || payload["error_code"] != "device_offline" {
-		t.Fatalf("precheck payload=%v", payload)
+	if !called {
+		t.Fatal("no readiness pre-check gate: a NotReady actor's request must still enter Module.Handle (callable is the outcome, not a stored gate)")
 	}
 }
 
@@ -1072,187 +1068,6 @@ func TestManagerDispatchRejectsChannelMismatch(t *testing.T) {
 	err := mgr.Dispatch(context.Background(), req)
 	if err == nil {
 		t.Fatalf("expected error for channel mismatch")
-	}
-}
-
-func TestManagerTimerFiresUnansweredTimeout(t *testing.T) {
-	mod := &stubModule{
-		decl: adapter.Declaration{
-			Name:         "feishu",
-			ActorID:      "tool:feishu-adapter",
-			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingRuntimeOutbound,
-			MaxPendingMs: 50, // 50ms timeout
-		},
-		handle: func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
-			// Don't respond — let the timer fire.
-			return nil
-		},
-	}
-	mgr, chain, lookup, _, _ := newTestManager(t, mod)
-	defer func() { _ = mgr.Shutdown(context.Background()) }()
-
-	req := newTestRequest("channel:test", "agent:author", "feishu.chat.send", "req-timer")
-	lookup.Put(req)
-
-	if err := mgr.Dispatch(context.Background(), req); err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
-
-	// Wait for timer to fire (50ms timeout + slack).
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(chain.Written()) > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	written := chain.Written()
-	if len(written) != 1 {
-		t.Fatalf("expected 1 timer-fired write, got %d", len(written))
-	}
-	resp := written[0]
-	if resp.Sender.ID != actor.SystemActorID {
-		t.Fatalf("timer fallback sender.id=%s want system", resp.Sender.ID)
-	}
-	if resp.Sender.Kind != actor.KindSystem {
-		t.Fatalf("timer fallback sender.kind=%s want system", resp.Sender.Kind)
-	}
-	var payload map[string]any
-	_ = json.Unmarshal(resp.Payload, &payload)
-	if payload["status"] != "failed" {
-		t.Fatalf("payload.status=%v want failed", payload["status"])
-	}
-	if payload["reason"] != string(message.TerminalUnansweredTimeout) {
-		t.Fatalf("payload.reason=%v want unanswered_timeout", payload["reason"])
-	}
-}
-
-func TestManagerTimerRetriesTransientRespondWriteErrors(t *testing.T) {
-	mod := &stubModule{
-		decl: adapter.Declaration{
-			Name:         "feishu",
-			ActorID:      "tool:feishu-adapter",
-			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingRuntimeOutbound,
-			MaxPendingMs: 20,
-		},
-		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {
-			return nil
-		},
-	}
-	mgr, chain, lookup, _, _ := newTestManager(t, mod)
-	defer func() { _ = mgr.Shutdown(context.Background()) }()
-	chain.errs = []error{
-		errors.New("transient write 1"),
-		errors.New("transient write 2"),
-	}
-
-	req := newTestRequest("channel:test", "agent:a", "feishu.chat.send", "req-timer-retry")
-	lookup.Put(req)
-	if err := mgr.Dispatch(context.Background(), req); err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(chain.Written()) >= 3 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	written := chain.Written()
-	if len(written) != 3 {
-		t.Fatalf("expected 3 response write attempts, got %d", len(written))
-	}
-	for i, env := range written {
-		if env.Kind != message.KindResponse {
-			t.Fatalf("write %d kind=%s want response", i+1, env.Kind)
-		}
-		if env.Sender.ID != actor.SystemActorID || env.Sender.Kind != actor.KindSystem {
-			t.Fatalf("write %d sender=(%s,%s) want system actor", i+1, env.Sender.Kind, env.Sender.ID)
-		}
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(written[2].Payload, &payload); err != nil {
-		t.Fatalf("decode final payload: %v", err)
-	}
-	if payload["reason"] != string(message.TerminalUnansweredTimeout) {
-		t.Fatalf("payload.reason=%v want unanswered_timeout", payload["reason"])
-	}
-}
-
-func TestManagerTimerEmitsSystemEventAfterPermanentRespondWriteFailure(t *testing.T) {
-	metrics := NewMemoryMetrics()
-	mod := &stubModule{
-		decl: adapter.Declaration{
-			Name:         "feishu",
-			ActorID:      "tool:feishu-adapter",
-			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingRuntimeOutbound,
-			MaxPendingMs: 20,
-		},
-		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {
-			return nil
-		},
-	}
-	mgr, chain, lookup, _, _ := newTestManager(t, mod, func(cfg *ManagerConfig) {
-		cfg.Metrics = metrics
-	})
-	defer func() { _ = mgr.Shutdown(context.Background()) }()
-	chain.errs = []error{
-		errors.New("permanent write 1"),
-		errors.New("permanent write 2"),
-		errors.New("permanent write 3"),
-	}
-
-	req := newTestRequest("channel:test", "agent:a", "feishu.chat.send", "req-timer-terminal-failed")
-	lookup.Put(req)
-	if err := mgr.Dispatch(context.Background(), req); err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(chain.Written()) >= 4 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	written := chain.Written()
-	if len(written) != 4 {
-		t.Fatalf("expected 3 failed responses plus system event, got %d", len(written))
-	}
-	event := written[3]
-	if event.Kind != message.KindEvent || event.Type != "core.system_event" {
-		t.Fatalf("last write kind/type=%s/%s want event/core.system_event", event.Kind, event.Type)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(event.Payload, &payload); err != nil {
-		t.Fatalf("decode system event: %v", err)
-	}
-	if payload["kind"] != systemEventTimerTerminalFailed {
-		t.Fatalf("system event kind=%v want %s", payload["kind"], systemEventTimerTerminalFailed)
-	}
-	if payload["request_id"] != "req-timer-terminal-failed" {
-		t.Fatalf("system event request_id=%v", payload["request_id"])
-	}
-	if got := metrics.Counter("adapter.policy.timer_terminal_failed", "adapter", "feishu"); got != 1 {
-		t.Fatalf("timer_terminal_failed metric=%d want 1", got)
-	}
-	mgr.mu.RLock()
-	bm := mgr.byName["feishu"]
-	mgr.mu.RUnlock()
-	if bm == nil {
-		t.Fatalf("bound module not found")
-	}
-	entry, ok, err := bm.correlation.Get(context.Background(), "req-timer-terminal-failed")
-	if err != nil {
-		t.Fatalf("correlation get: %v", err)
-	}
-	if !ok || entry.State != adapter.CorrelationExpired {
-		t.Fatalf("correlation state=%v ok=%v want expired", entry.State, ok)
 	}
 }
 
@@ -1550,45 +1365,6 @@ func TestManagerTerminalDuplicateCompletesLifecycle(t *testing.T) {
 	}
 }
 
-func TestManagerRespondWriteFailureLeavesPendingTimer(t *testing.T) {
-	mod := &stubModule{
-		decl: adapter.Declaration{
-			Name:         "feishu",
-			ActorID:      "tool:feishu-adapter",
-			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingRuntimeOutbound,
-			MaxPendingMs: 30_000,
-		},
-	}
-	mod.handle = func(ctx context.Context, env *message.Envelope, mctx *adapter.ModuleContext) error {
-		_, err := mctx.Respond(ctx, adapter.CorrelationKey(env.ID), json.RawMessage(`{}`), adapter.RespondOptions{Status: "completed"})
-		return err
-	}
-	mgr, chain, lookup, _, _ := newTestManager(t, mod)
-	defer func() { _ = mgr.Shutdown(context.Background()) }()
-	chain.errs = []error{errors.New("store down")}
-
-	req := newTestRequest("channel:test", "agent:a", "feishu.chat.send", "req-write-fail")
-	lookup.Put(req)
-	if err := mgr.Dispatch(context.Background(), req); err == nil {
-		t.Fatal("Dispatch should surface respond write failure")
-	}
-	bm := mgr.byName["feishu"]
-	entry, ok, err := bm.correlation.Get(context.Background(), "req-write-fail")
-	if err != nil || !ok {
-		t.Fatalf("correlation ok=%v err=%v", ok, err)
-	}
-	if entry.State != adapter.CorrelationPending {
-		t.Fatalf("correlation state=%s want pending", entry.State)
-	}
-	bm.policy.mu.Lock()
-	_, timerStillArmed := bm.policy.timers["req-write-fail"]
-	bm.policy.mu.Unlock()
-	if !timerStillArmed {
-		t.Fatal("write failure must leave F3 timer armed")
-	}
-}
-
 func TestProxyFacadeCallbackCompletesAndCancelsTimer(t *testing.T) {
 	decl, err := proxyfacade.DeclarationFromCapability("tool:kimi", json.RawMessage(`{
 		"name":"kimi",
@@ -1875,111 +1651,6 @@ func TestForwardExternalRequestStampsTransitBodyFromRequest(t *testing.T) {
 	}
 }
 
-func TestManagerRecoverTimersForActorRearmsDynamicInstallPending(t *testing.T) {
-	ctx := context.Background()
-	store := NewMemoryStateStore()
-	clock := newFixedClock(time.Unix(1_700_000_000, 0))
-	decl, err := proxyfacade.DeclarationFromCapability("tool:kimi", json.RawMessage(`{
-		"name":"kimi",
-		"types":["kimi.ask"],
-		"type_declarations":{"kimi.ask":{"AllowedKinds":["request","response"]}},
-		"max_pending_ms":30000
-	}`))
-	if err != nil {
-		t.Fatalf("DeclarationFromCapability: %v", err)
-	}
-	newRegistry := func(t *testing.T) *memoryActorRegistry {
-		t.Helper()
-		reg := newMemoryActorRegistry()
-		if err := reg.Insert(ctx, actorreg.Record{
-			ID:      "tool:kimi",
-			Kind:    actor.KindTool,
-			Binding: actor.BindingRuntimeInboundViaRelay,
-		}); err != nil {
-			t.Fatalf("Insert actor: %v", err)
-		}
-		return reg
-	}
-
-	mod1, err := proxyfacade.New(decl)
-	if err != nil {
-		t.Fatalf("proxyfacade.New mod1: %v", err)
-	}
-	lookup1 := NewMemoryRequestLookup(nil)
-	mgr1, err := NewManager(ManagerConfig{
-		ChannelID:     "channel:test",
-		ActorRegistry: newRegistry(t),
-		HarnessChain:  newFakeChain(),
-		RequestLookup: lookup1,
-		StateStore:    store,
-		DeviceTransit: &recordingTransit{},
-		Clock:         clock.Now,
-		Logger:        &recordingLogger{},
-		Metrics:       NewMemoryMetrics(),
-		Tracer:        NoopTracer{},
-	})
-	if err != nil {
-		t.Fatalf("NewManager 1: %v", err)
-	}
-	if err := mgr1.Install(ctx, []adapter.Module{mod1}); err != nil {
-		t.Fatalf("Install 1: %v", err)
-	}
-	req := newTestRequest("channel:test", "agent:a", "kimi.ask", "req-recover")
-	req.Audience = message.Audience{"tool:kimi"}
-	lookup1.Put(req)
-	if err := mgr1.Dispatch(ctx, req); err != nil {
-		t.Fatalf("Dispatch 1: %v", err)
-	}
-	if err := mgr1.Shutdown(ctx); err != nil {
-		t.Fatalf("Shutdown 1: %v", err)
-	}
-
-	mod2, err := proxyfacade.New(decl)
-	if err != nil {
-		t.Fatalf("proxyfacade.New mod2: %v", err)
-	}
-	lookup2 := NewMemoryRequestLookup(map[string]*message.Envelope{"req-recover": req})
-	mgr2, err := NewManager(ManagerConfig{
-		ChannelID:     "channel:test",
-		ActorRegistry: newRegistry(t),
-		HarnessChain:  newFakeChain(),
-		RequestLookup: lookup2,
-		StateStore:    store,
-		DeviceTransit: &recordingTransit{},
-		Clock:         clock.Now,
-		Logger:        &recordingLogger{},
-		Metrics:       NewMemoryMetrics(),
-		Tracer:        NoopTracer{},
-	})
-	if err != nil {
-		t.Fatalf("NewManager 2: %v", err)
-	}
-	if err := mgr2.Install(ctx, []adapter.Module{mod2}); err != nil {
-		t.Fatalf("Install 2: %v", err)
-	}
-	defer func() { _ = mgr2.Shutdown(ctx) }()
-	bm := mgr2.byName[decl.Name]
-	if _, ok, err := bm.correlation.Get(ctx, "req-recover"); err != nil || ok {
-		t.Fatalf("pre-recover correlation ok=%v err=%v", ok, err)
-	}
-	if err := mgr2.RecoverTimersForActor(ctx, "tool:kimi"); err != nil {
-		t.Fatalf("RecoverTimersForActor: %v", err)
-	}
-	entry, ok, err := bm.correlation.Get(ctx, "req-recover")
-	if err != nil || !ok {
-		t.Fatalf("post-recover correlation ok=%v err=%v", ok, err)
-	}
-	if entry.State != adapter.CorrelationPending {
-		t.Fatalf("correlation state=%s want pending", entry.State)
-	}
-	bm.policy.mu.Lock()
-	_, timerArmed := bm.policy.timers["req-recover"]
-	bm.policy.mu.Unlock()
-	if !timerArmed {
-		t.Fatal("RecoverTimersForActor must re-arm pending timer")
-	}
-}
-
 func TestManagerHandlePanicEmitsReceiverInternalError(t *testing.T) {
 	mod := &stubModule{
 		decl: adapter.Declaration{
@@ -2006,8 +1677,8 @@ func TestManagerHandlePanicEmitsReceiverInternalError(t *testing.T) {
 	if len(written) != 1 {
 		t.Fatalf("written=%d want 1 failed terminal", len(written))
 	}
-	if written[0].Sender.ID != actor.SystemActorID || written[0].Sender.Kind != actor.KindSystem {
-		t.Fatalf("panic fallback sender=(%s,%s) want system actor", written[0].Sender.Kind, written[0].Sender.ID)
+	if written[0].Sender.ID != "tool:feishu-adapter" || written[0].Sender.Kind != actor.KindTool {
+		t.Fatalf("panic fallback sender=(%s,%s) want adapter actor (tool,tool:feishu-adapter)", written[0].Sender.Kind, written[0].Sender.ID)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(written[0].Payload, &payload); err != nil {
@@ -2168,120 +1839,11 @@ func TestManagerInstallStrictModeAcceptsCompleteDeclarations(t *testing.T) {
 // bug), the fallback could fire first, find no owner, and leak corr + the owner
 // index. Here the fallback write SUCCEEDS, so we assert: correlation Done +
 // receiverOwner cleared.
-func TestF4ReceiverOwnerRegisteredBeforeTimerArm(t *testing.T) {
-	mod := &stubModule{
-		decl: adapter.Declaration{
-			Name:    "feishu",
-			ActorID: "tool:feishu-adapter",
-			Types:   []string{"feishu.chat.send"},
-			Binding: actor.BindingRuntimeOutbound,
-			// 1ms: the F3 timer fires almost immediately after reserve, racing
-			// the owner registration — owner-first ordering (F4) must hold so
-			// the fallback final can close lifecycle and not leak the owner.
-			MaxPendingMs: 1,
-		},
-		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {
-			// Deferred-style: do not respond inline; let F3 fire.
-			return nil
-		},
-	}
-	mgr, chain, lookup, _, _ := newTestManager(t, mod)
-	defer func() { _ = mgr.Shutdown(context.Background()) }()
-
-	req := newTestRequest("channel:test", "agent:a", "feishu.chat.send", "req-f4-expired")
-	lookup.Put(req)
-	if err := mgr.Dispatch(context.Background(), req); err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
-
-	// Wait for the fallback final to be written.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(chain.Written()) >= 1 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if len(chain.Written()) == 0 {
-		t.Fatal("F4: fallback final never written for an already-expired deadline")
-	}
-
-	// Correlation closed by the router's single-center ObserveResponse.
-	mgr.mu.RLock()
-	bm := mgr.byName["feishu"]
-	mgr.mu.RUnlock()
-	entry, ok, err := bm.correlation.Get(context.Background(), "req-f4-expired")
-	if err != nil || !ok {
-		t.Fatalf("correlation get ok=%v err=%v", ok, err)
-	}
-	if entry.State == adapter.CorrelationPending {
-		t.Fatalf("F4: correlation still pending — receiverOwner not found at final (owner armed after timer?)")
-	}
-	// receiverOwner must be cleared (no leak).
-	if owner := mgr.router.receiverOwnerOf("req-f4-expired"); owner != nil {
-		t.Fatal("F4: receiverOwner leaked after final closed lifecycle")
-	}
-}
-
 // TestF5ReceiverOwnerCleanedWhenFallbackWriteFails is the F5 regression: when
 // the F3 fallback exhausts its write retries (permanent write failure), the
 // final is NEVER written, so the router's ObserveResponse never runs and would
 // never drop the receiverOwner entry. The bindOnExpire hook must clean it up
 // directly so the reqID does not leak.
-func TestF5ReceiverOwnerCleanedWhenFallbackWriteFails(t *testing.T) {
-	mod := &stubModule{
-		decl: adapter.Declaration{
-			Name:         "feishu",
-			ActorID:      "tool:feishu-adapter",
-			Types:        []string{"feishu.chat.send"},
-			Binding:      actor.BindingRuntimeOutbound,
-			MaxPendingMs: 20,
-		},
-		handle: func(context.Context, *message.Envelope, *adapter.ModuleContext) error {
-			return nil
-		},
-	}
-	mgr, chain, lookup, _, _ := newTestManager(t, mod)
-	defer func() { _ = mgr.Shutdown(context.Background()) }()
-	// All 3 fallback write attempts fail → MarkExpired / force-expire path.
-	chain.errs = []error{
-		errors.New("permanent write 1"),
-		errors.New("permanent write 2"),
-		errors.New("permanent write 3"),
-	}
-
-	req := newTestRequest("channel:test", "agent:a", "feishu.chat.send", "req-f5-leak")
-	lookup.Put(req)
-	if err := mgr.Dispatch(context.Background(), req); err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
-	// receiverOwner is recorded at reserve time.
-	if owner := mgr.router.receiverOwnerOf("req-f5-leak"); owner == nil {
-		t.Fatal("setup: receiverOwner not recorded at reserve")
-	}
-
-	// Wait for the 3 failed write attempts + the system event (4 writes total).
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(chain.Written()) >= 4 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Give the onExpire hook a beat to run after the failed writes.
-	deadline = time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if mgr.router.receiverOwnerOf("req-f5-leak") == nil {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if owner := mgr.router.receiverOwnerOf("req-f5-leak"); owner != nil {
-		t.Fatal("F5: receiverOwner leaked after fallback write permanently failed")
-	}
-}
-
 // TestCallbackAfterReArmWithinLiveDeadlineAccepted is the N4:F3 temporal R1
 // extension: a callback that arrives AFTER the original request expires_at but
 // BEFORE the heartbeat-extended (re-armed) live deadline must be ACCEPTED, not
@@ -2291,153 +1853,7 @@ func TestF5ReceiverOwnerCleanedWhenFallbackWriteFails(t *testing.T) {
 // gate must judge against max(ExpiresAt, RearmedExpiresAt). Before the fix the
 // gate compared now > frame.ExpiresAt and permanently rejected every late
 // callback of a still-live, heartbeat-extended receiver.
-func TestCallbackAfterReArmWithinLiveDeadlineAccepted(t *testing.T) {
-	decl, err := proxyfacade.DeclarationFromCapability("tool:kimi", json.RawMessage(`{
-		"name":"kimi",
-		"types":["kimi.ask"],
-		"type_declarations":{"kimi.ask":{"AllowedKinds":["request","response"]}},
-		"max_pending_ms":30000
-	}`))
-	if err != nil {
-		t.Fatalf("DeclarationFromCapability: %v", err)
-	}
-	mod, err := proxyfacade.New(decl)
-	if err != nil {
-		t.Fatalf("proxyfacade.New: %v", err)
-	}
-	mgr, chain, lookup, _, clock := newTestManager(t, mod, func(cfg *ManagerConfig) {
-		cfg.DeviceTransit = &recordingTransit{}
-	})
-	defer func() { _ = mgr.Shutdown(context.Background()) }()
-
-	req := newTestRequest("channel:test", "agent:a", "kimi.ask", "req-rearm-live")
-	req.Audience = message.Audience{"tool:kimi"}
-	req.CorrelationID = "corr-rearm-live"
-	lookup.Put(req)
-	if err := mgr.Dispatch(context.Background(), req); err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
-
-	bm := mgr.byName[decl.Name]
-	entry, ok, err := bm.correlation.Get(context.Background(), "req-rearm-live")
-	if err != nil || !ok {
-		t.Fatalf("correlation after dispatch ok=%v err=%v", ok, err)
-	}
-	originalExpiresAt := entry.ExpiresAt // == frame.ExpiresAt the device echoes
-
-	// Heartbeat re-arms the F3 deadline far past the original. ReArm clamps to
-	// the ScheduleToClose ceiling and persists RearmedExpiresAt; the immutable
-	// ExpiresAt stays the original anchor.
-	rearmed := clock.Now().Add(5 * time.Minute)
-	if err := bm.policy.ReArm(context.Background(), "req-rearm-live", rearmed); err != nil {
-		t.Fatalf("ReArm: %v", err)
-	}
-	entry, _, _ = bm.correlation.Get(context.Background(), "req-rearm-live")
-	if entry.ExpiresAt != originalExpiresAt {
-		t.Fatalf("ReArm must not mutate immutable ExpiresAt: got %d want %d", entry.ExpiresAt, originalExpiresAt)
-	}
-	if entry.RearmedExpiresAt <= originalExpiresAt {
-		t.Fatalf("ReArm must extend RearmedExpiresAt past original: rearmed=%d original=%d", entry.RearmedExpiresAt, originalExpiresAt)
-	}
-
-	// Wall clock passes the original deadline but is still within the live
-	// (re-armed) deadline. The real AfterFunc was armed ~30s out and does not
-	// fire under the fake clock, so the entry stays pending.
-	clock.Set(time.UnixMilli(originalExpiresAt + 1000))
-	if clock.Now().UnixMilli() >= entry.RearmedExpiresAt {
-		t.Fatalf("test setup: clock must be before live deadline (now=%d rearmed=%d)", clock.Now().UnixMilli(), entry.RearmedExpiresAt)
-	}
-
-	// The device echoes the ORIGINAL expires_at it was sent, and carries a full
-	// response envelope whose parent_id == request_id.
-	respPayload, _ := json.Marshal(message.Envelope{
-		ID:            "resp-rearm-live",
-		ChannelID:     "channel:test",
-		Sender:        message.Sender{Kind: actor.KindTool, ID: "tool:kimi"},
-		Kind:          message.KindResponse,
-		Type:          "kimi.ask",
-		ParentID:      req.ID,
-		CorrelationID: req.CorrelationID,
-		Payload:       json.RawMessage(`{"status":"completed","answer":"ok"}`),
-		Audience:      message.Audience{"agent:a"},
-	})
-	frame := adapter.ExternalCallbackFrame{
-		ChannelID:      "channel:test",
-		AdapterActorID: decl.ActorID,
-		RequestID:      req.ID,
-		ParentID:       req.ID,
-		CorrelationID:  req.CorrelationID,
-		ExpiresAt:      originalExpiresAt,
-		Payload:        respPayload,
-	}
-	if err := mgr.OnExternalCallbackFrame(context.Background(), decl.Name, frame); err != nil {
-		t.Fatalf("late callback within live deadline must be accepted, got: %v", err)
-	}
-
-	// Accepted ⇒ proxy resolved a single terminal and the correlation is done.
-	if written := chain.Written(); len(written) != 1 || written[0].ParentID != req.ID {
-		t.Fatalf("written=%v want single terminal for %s", written, req.ID)
-	}
-	entry, _, _ = bm.correlation.Get(context.Background(), "req-rearm-live")
-	if entry.State != adapter.CorrelationDone {
-		t.Fatalf("correlation state=%s want done after accepted late callback", entry.State)
-	}
-}
-
 // TestCallbackAfterLiveDeadlineRejected is the negative companion: once wall
 // clock passes the re-armed live deadline too, a late callback is correctly
 // rejected as expired — the fix widens the acceptance window to the live
 // deadline, it does not disable expiry.
-func TestCallbackAfterLiveDeadlineRejected(t *testing.T) {
-	decl, err := proxyfacade.DeclarationFromCapability("tool:kimi", json.RawMessage(`{
-		"name":"kimi",
-		"types":["kimi.ask"],
-		"type_declarations":{"kimi.ask":{"AllowedKinds":["request","response"]}},
-		"max_pending_ms":30000
-	}`))
-	if err != nil {
-		t.Fatalf("DeclarationFromCapability: %v", err)
-	}
-	mod, err := proxyfacade.New(decl)
-	if err != nil {
-		t.Fatalf("proxyfacade.New: %v", err)
-	}
-	mgr, _, lookup, _, clock := newTestManager(t, mod, func(cfg *ManagerConfig) {
-		cfg.DeviceTransit = &recordingTransit{}
-	})
-	defer func() { _ = mgr.Shutdown(context.Background()) }()
-
-	req := newTestRequest("channel:test", "agent:a", "kimi.ask", "req-rearm-dead")
-	req.Audience = message.Audience{"tool:kimi"}
-	req.CorrelationID = "corr-rearm-dead"
-	lookup.Put(req)
-	if err := mgr.Dispatch(context.Background(), req); err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
-	bm := mgr.byName[decl.Name]
-	entry, _, _ := bm.correlation.Get(context.Background(), "req-rearm-dead")
-	originalExpiresAt := entry.ExpiresAt
-
-	rearmed := clock.Now().Add(2 * time.Minute)
-	if err := bm.policy.ReArm(context.Background(), "req-rearm-dead", rearmed); err != nil {
-		t.Fatalf("ReArm: %v", err)
-	}
-	entry, _, _ = bm.correlation.Get(context.Background(), "req-rearm-dead")
-
-	// Past the live deadline.
-	clock.Set(time.UnixMilli(entry.RearmedExpiresAt + 1000))
-
-	frame := adapter.ExternalCallbackFrame{
-		ChannelID:      "channel:test",
-		AdapterActorID: decl.ActorID,
-		RequestID:      req.ID,
-		ParentID:       req.ID,
-		CorrelationID:  req.CorrelationID,
-		ExpiresAt:      originalExpiresAt,
-		Payload:        json.RawMessage(`{"correlation_id":"req-rearm-dead","status":"completed","answer":"ok"}`),
-	}
-	err = mgr.OnExternalCallbackFrame(context.Background(), decl.Name, frame)
-	if err == nil || !strings.Contains(err.Error(), "expired") {
-		t.Fatalf("callback past live deadline must be rejected as expired, got: %v", err)
-	}
-}

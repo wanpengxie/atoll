@@ -13,7 +13,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/runtime/scheduler"
+	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	runtimestore "github.com/wanpengxie/ActOS/runtime/store"
 )
 
@@ -47,14 +47,13 @@ import (
 type channelReconciler struct {
 	channelID channel.ID
 	mgr       *framework.Manager
-	deliverer *scheduler.Deliverer
+	cells     *actorrt.Runtime
 	registry  *runtimestore.ActorRegistry
 	logger    *zerolog.Logger
 
-	// adapterChain handler factory — captured so dynamically reconciled
-	// facades register the same Manager-dispatching handler the static
-	// modules use.
-	handlerFor func(actorID actor.ActorID) scheduler.HandlerFn
+	// adapter actor factory — captured so dynamically reconciled facades
+	// spawn the same Manager-dispatching cell the static modules use.
+	actorFor func(actorID actor.ActorID) actorrt.Actor
 
 	// deviceRoute lets proxy facades coexist with device-relay routing:
 	// (actor_id → adapter name) is consulted by the inbound device→daemon
@@ -82,10 +81,10 @@ type channelReconciler struct {
 func newChannelReconciler(
 	channelID channel.ID,
 	mgr *framework.Manager,
-	deliverer *scheduler.Deliverer,
+	cells *actorrt.Runtime,
 	registry *runtimestore.ActorRegistry,
 	logger *zerolog.Logger,
-	handlerFor func(actorID actor.ActorID) scheduler.HandlerFn,
+	actorFor func(actorID actor.ActorID) actorrt.Actor,
 	deviceRouteMu *sync.RWMutex,
 	deviceRoute map[actor.ActorID]string,
 	staticModules []adapter.Module,
@@ -93,10 +92,10 @@ func newChannelReconciler(
 	r := &channelReconciler{
 		channelID:     channelID,
 		mgr:           mgr,
-		deliverer:     deliverer,
+		cells:         cells,
 		registry:      registry,
 		logger:        logger,
-		handlerFor:    handlerFor,
+		actorFor:      actorFor,
 		deviceRouteMu: deviceRouteMu,
 		deviceRoute:   deviceRoute,
 		wired:         make(map[actor.ActorID]struct{}),
@@ -200,7 +199,7 @@ func (r *channelReconciler) wireStaticModule(ctx context.Context, mod adapter.Mo
 	if err := r.mgr.RecoverTimersForActor(ctx, decl.ActorID); err != nil {
 		return fmt.Errorf("cmd/daemon: reconcile %s static recover timers %s: %w", r.channelID, decl.ActorID, err)
 	}
-	r.deliverer.Register(decl.ActorID, r.handlerFor(decl.ActorID))
+	r.cells.Spawn(decl.ActorID, r.actorFor(decl.ActorID))
 	if decl.Binding == actor.BindingRuntimeInboundViaRelay {
 		r.deviceRouteMu.Lock()
 		r.deviceRoute[decl.ActorID] = decl.Name
@@ -237,7 +236,7 @@ func (r *channelReconciler) wireProxyFacade(ctx context.Context, dm runtimestore
 	if err := r.mgr.RecoverTimersForActor(ctx, decl.ActorID); err != nil {
 		return fmt.Errorf("cmd/daemon: reconcile %s facade recover timers %s: %w", r.channelID, dm.ID, err)
 	}
-	r.deliverer.Register(decl.ActorID, r.handlerFor(decl.ActorID))
+	r.cells.Spawn(decl.ActorID, r.actorFor(decl.ActorID))
 	r.deviceRouteMu.Lock()
 	r.deviceRoute[decl.ActorID] = decl.Name
 	r.deviceRouteMu.Unlock()
@@ -254,11 +253,11 @@ func (r *channelReconciler) wireProxyFacade(ctx context.Context, dm runtimestore
 }
 
 func (r *channelReconciler) collapseProxyFacade(id actor.ActorID) {
-	// Register(nil) deletes the handler — inbound envelopes to id are no
-	// longer routed to a (stale) facade; a request that reaches the now
-	// absent handler is closed by the §6.4 long-pending fallback
-	// (expires_at), not silently lost.
-	r.deliverer.Register(id, nil)
+	// Despawn stops + removes the facade's cell — inbound envelopes to id
+	// are no longer routed to a stale facade. A request in flight to the
+	// despawned actor is closed by the substrate death signal
+	// (receiver_unavailable), not a global fallback (construction-spec §3.4).
+	r.cells.Despawn(id)
 	r.deviceRouteMu.Lock()
 	delete(r.deviceRoute, id)
 	r.deviceRouteMu.Unlock()

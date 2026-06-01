@@ -131,6 +131,23 @@ func (l *memLog) HasFinalResponse(_ context.Context, _ channel.ID, parentID mess
 	return ok, nil
 }
 
+func (l *memLog) FinalResponseSender(_ context.Context, _ channel.ID, parentID message.ID) (actor.ActorID, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if parentID == "" {
+		return "", false, nil
+	}
+	respID, ok := l.terminal[parentID]
+	if !ok {
+		return "", false, nil
+	}
+	row, ok := l.rows[respID]
+	if !ok {
+		return "", false, nil
+	}
+	return row.Sender.ID, true, nil
+}
+
 func (l *memLog) LookupCanonicalHash(_ context.Context, _ channel.ID, id message.ID) (string, bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

@@ -80,11 +80,6 @@ func (t *memoryCorrelationTracker) MarkDone(ctx context.Context, requestID adapt
 	return t.advance(ctx, requestID, adapter.CorrelationDone)
 }
 
-// MarkExpired advances pending → expired. Idempotent.
-func (t *memoryCorrelationTracker) MarkExpired(ctx context.Context, requestID adapter.CorrelationKey) error {
-	return t.advance(ctx, requestID, adapter.CorrelationExpired)
-}
-
 // MarkRejected advances pending → rejected. Stores the reason on the
 // existing entry via the AudienceActor field's documentation contract
 // (we don't have a Reason slot in CorrelationEntry — log via state).
@@ -113,42 +108,6 @@ func (t *memoryCorrelationTracker) advance(ctx context.Context, requestID adapte
 		return nil
 	}
 	e.State = to
-	t.entries[requestID] = e
-	t.mu.Unlock()
-	return t.persist(ctx, e)
-}
-
-// ExtendDeadline persists a re-armed F3 deadline onto a PENDING entry's
-// RearmedExpiresAt so a daemon restart recovers the live (heartbeat-extended)
-// deadline instead of the stale original. Without this a long-running receiver
-// kept alive by provisional heartbeats would, after a restart, be recovered
-// against its original ExpiresAt (already long past) and force-failed
-// immediately — the temporal R1 bug (temporal-termination-consistency.md §6.2:
-// a re-arm must survive recovery).
-//
-// It writes ONLY RearmedExpiresAt; the immutable ExpiresAt (the tamper anchor
-// mirroring the request envelope's expires_at) and EnqueuedAt (the
-// ScheduleToClose anchor) are left untouched. newExpiresAtMs is the
-// already-ceiling-clamped deadline — the caller (timerPolicy.ReArm) applies the
-// ScheduleToClose clamp before persisting, so the persisted value never exceeds
-// EnqueuedAt + ceiling. Only PENDING entries are extended; a done/expired/
-// rejected entry is never resurrected. Idempotent: a no-change write
-// short-circuits.
-func (t *memoryCorrelationTracker) ExtendDeadline(ctx context.Context, requestID adapter.CorrelationKey, newExpiresAtMs int64) error {
-	if requestID == "" {
-		return errors.New("framework: ExtendDeadline requestID required")
-	}
-	t.mu.Lock()
-	e, ok := t.entries[requestID]
-	if !ok || e.State != adapter.CorrelationPending {
-		t.mu.Unlock()
-		return nil // never reserved / already closed — do not resurrect
-	}
-	if e.RearmedExpiresAt == newExpiresAtMs {
-		t.mu.Unlock()
-		return nil
-	}
-	e.RearmedExpiresAt = newExpiresAtMs
 	t.entries[requestID] = e
 	t.mu.Unlock()
 	return t.persist(ctx, e)

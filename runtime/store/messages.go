@@ -374,6 +374,54 @@ func (m *Messages) LongPendingRequests(ctx context.Context, nowMs int64, limit i
 	return out, nil
 }
 
+// OpenRequestsForActor returns pending request rows addressed to actorID
+// (first audience member) with no final response yet — regardless of
+// expires_at. Used by the actorrt death-signal supervisor: when a cell dies,
+// the substrate closes every in-flight request to the dead actor with
+// receiver_unavailable. The substrate never guesses "slow" — it only reports
+// death it positively observed (construction-spec §3.3).
+func (m *Messages) OpenRequestsForActor(ctx context.Context, actorID actor.ActorID, limit int) ([]message.Envelope, error) {
+	if limit <= 0 {
+		limit = 64
+	}
+	const q = `SELECT id, ts, ts_received, channel_id,
+	                  sender_kind, sender_id, COALESCE(sender_name,''),
+	                  kind, type, payload,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
+	                  visibility, audience,
+	                  not_before, expires_at,
+	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
+	                  is_terminal, seq
+	             FROM messages m
+	             WHERE m.kind = 'request'
+	               AND m.is_terminal = 0
+	               AND json_extract(m.audience, '$[0]') = ?
+	               AND NOT EXISTS (
+	                 SELECT 1 FROM messages r
+	                  WHERE r.parent_id = m.id
+	                    AND r.kind = 'response'
+	                    AND r.is_terminal = 1
+	               )
+	             ORDER BY m.seq ASC LIMIT ?`
+	rows, err := m.db.QueryContext(ctx, q, string(actorID), limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: open requests for actor: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []message.Envelope
+	for rows.Next() {
+		env, err := scanEnvelopeRows(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: open requests for actor scan: %w", err)
+		}
+		out = append(out, env)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: open requests for actor rows: %w", err)
+	}
+	return out, nil
+}
+
 // ReceiverUnavailableRequests returns pending request rows whose first
 // audience actor is missing from actor_registry or has been deregistered.
 // Unlike LongPendingRequests this scan has no expires_at gate: a receiver
@@ -566,6 +614,31 @@ func (m *Messages) HasFinalResponse(ctx context.Context, channelID channel.ID, p
 		return false, nil
 	default:
 		return false, fmt.Errorf("store: has final response: %w", err)
+	}
+}
+
+// FinalResponseSender implements log.MessageLog — returns the sender.id of
+// the existing Layer 1 final response for parentID (used by harness Step 8
+// to detect a caller self-close so a late receiver final can be rewritten
+// to observability rather than rejected).
+func (m *Messages) FinalResponseSender(ctx context.Context, channelID channel.ID, parentID message.ID) (actor.ActorID, bool, error) {
+	_ = channelID
+	if parentID == "" {
+		return "", false, nil
+	}
+	const q = `SELECT sender_id FROM messages
+	            WHERE parent_id = ?
+	              AND kind = 'response'
+	              AND is_terminal = 1
+	            LIMIT 1`
+	var sender string
+	switch err := m.db.QueryRowContext(ctx, q, parentID).Scan(&sender); {
+	case err == nil:
+		return actor.ActorID(sender), true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return "", false, nil
+	default:
+		return "", false, fmt.Errorf("store: final response sender: %w", err)
 	}
 }
 

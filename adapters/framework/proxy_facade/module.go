@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/wanpengxie/ActOS/framework/devicetransit"
@@ -41,17 +40,19 @@ type ProxyFacadeModule struct {
 	decl adapter.Declaration
 	mctx *adapter.ModuleContext
 
-	// live holds the current liveState. atomic so StatusReporter.Status can
-	// read it lock-free while OnRuntimeEvent writes the latest lifecycle
-	// transition. Volatile by construction: it lives only for this process /
-	// this installed module, reconstructed from live lifecycle frames after a
-	// restart — it is never written to actor_registry.
-	live atomic.Value // liveState
+	// live holds the current liveState. A PLAIN field, not atomic: every
+	// access — OnRuntimeEvent (write, folded onto the cell via Runtime.Post),
+	// Handle and Status (read, dispatched on the same cell) — runs on the
+	// adapter actor's single cell goroutine, so the mailbox IS the
+	// serialization (construction-spec §3 state-home). Volatile by
+	// construction: reconstructed from live lifecycle frames after a restart,
+	// never written to actor_registry.
+	live liveState
 
 	// liveCheckedAt is the unix-ms timestamp of the last lifecycle frame that
-	// moved `live`. Surfaced as actor.status `checked_at` so callers can see
-	// how fresh the realtime signal is.
-	liveCheckedAt atomic.Int64
+	// moved `live`. Surfaced as actor.status `checked_at`. Plain field, same
+	// cell-serial rationale as `live`.
+	liveCheckedAt int64
 
 	now func() time.Time
 }
@@ -82,8 +83,7 @@ func New(decl adapter.Declaration) (*ProxyFacadeModule, error) {
 	if err := validateDeclaration(decl); err != nil {
 		return nil, err
 	}
-	m := &ProxyFacadeModule{decl: decl, now: time.Now}
-	m.live.Store(liveUnknown)
+	m := &ProxyFacadeModule{decl: decl, now: time.Now, live: liveUnknown}
 	return m, nil
 }
 
@@ -138,13 +138,13 @@ func (m *ProxyFacadeModule) Init(_ context.Context, mctx *adapter.ModuleContext)
 
 func (m *ProxyFacadeModule) Shutdown(context.Context) error { return nil }
 
-// liveStateNow reads the current volatile liveness without a lock.
+// liveStateNow reads the current volatile liveness. Cell-serial: only the
+// adapter's own goroutine touches m.live.
 func (m *ProxyFacadeModule) liveStateNow() liveState {
-	v, _ := m.live.Load().(liveState)
-	if v == "" {
+	if m.live == "" {
 		return liveUnknown
 	}
-	return v
+	return m.live
 }
 
 // OnRuntimeEvent implements adapter.RuntimeEventAware. The framework routes
@@ -168,12 +168,12 @@ func (m *ProxyFacadeModule) OnRuntimeEvent(_ context.Context, evt adapter.Runtim
 	if !ok {
 		return nil
 	}
-	m.live.Store(next)
+	m.live = next
 	ts := lifecycle.Ts
 	if ts == 0 {
 		ts = m.nowMs()
 	}
-	m.liveCheckedAt.Store(ts)
+	m.liveCheckedAt = ts
 	return nil
 }
 
@@ -196,7 +196,7 @@ func mapLifecycleToLive(e devicetransit.LifecycleEvent) (liveState, bool) {
 // a reason the UI can act on (re-bind vs reconnect).
 func (m *ProxyFacadeModule) Status(_ context.Context) (adapter.StatusReport, error) {
 	state := m.liveStateNow()
-	checkedAt := m.liveCheckedAt.Load()
+	checkedAt := m.liveCheckedAt
 	if checkedAt == 0 {
 		checkedAt = m.nowMs()
 	}

@@ -24,8 +24,8 @@ import (
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/pkg/metrics"
+	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
-	"github.com/wanpengxie/ActOS/runtime/scheduler"
 	runtimestore "github.com/wanpengxie/ActOS/runtime/store"
 	"github.com/wanpengxie/ActOS/runtime/typeinstall"
 )
@@ -172,10 +172,10 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 		reconciler := newChannelReconciler(
 			h.ChannelID,
 			mgr,
-			h.Deliverer,
+			h.Cells,
 			h.ActorRegistry,
 			h.Logger,
-			func(actorID actor.ActorID) scheduler.HandlerFn {
+			func(actorID actor.ActorID) actorrt.Actor {
 				return deliverThroughManager(mgr, actorID, h.ChannelID, h.Logger)
 			},
 			deviceRouteMu,
@@ -239,12 +239,23 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 					if err != nil {
 						return err
 					}
-					return mgr.OnRuntimeEvent(ctx, adapter.RuntimeEvent{
+					re := adapter.RuntimeEvent{
 						Kind:           devicetransit.RuntimeEventKindDeviceLifecycle,
 						ChannelID:      channelID,
 						AdapterActorID: evt.AdapterActorID,
 						Payload:        payload,
+					}
+					// Fold the lifecycle event onto the adapter actor's own cell
+					// goroutine so the Module mutates its live-state serially —
+					// no atomic, the mailbox IS the serialization (construction-
+					// spec §3 state-home). If no cell is hosted the adapter is
+					// not active; drop the frame (live is volatile / over-
+					// expiring and is reconstructed from later frames) rather
+					// than write off-cell and reintroduce the race.
+					_ = h.Cells.Post(evt.AdapterActorID, func() {
+						_ = mgr.OnRuntimeEvent(context.Background(), re)
 					})
+					return nil
 				})
 			}
 		}
@@ -301,33 +312,48 @@ func deriveAdapterCredentialKey(secret []byte) [32]byte {
 // sender=adapter actor — passes the harness step-1/step-3 caller-vs-
 // sender check. AllowProvidedSenderKind=true lets the framework keep its
 // `Sender.Kind = actor.KindTool` value (the registry record agrees).
-func deliverThroughManager(mgr adapter.Manager, adapterID actor.ActorID, channelID channel.ID, logger *zerolog.Logger) scheduler.HandlerFn {
-	return func(ctx context.Context, _ actor.ActorID, env *message.Envelope) error {
-		if env == nil || env.Kind != message.KindRequest {
-			return nil
-		}
-		stamped := harness.CtxWithCaller(ctx, harness.CallerContext{
-			ActorID:                 adapterID,
-			ChannelID:               channelID,
-			AllowProvidedSenderKind: true,
-		})
-		if err := mgr.Dispatch(stamped, env); err != nil {
-			// Surface the error to trigger.Gateway so the origin row
-			// remains retryable. framework.Manager returns nil when it
-			// has accepted responsibility by reserving the request or
-			// writing a terminal failure.
-			if logger != nil {
-				logger.Warn().Err(err).
-					Str("event", "daemon.adapter_dispatch_failed").
-					Str("channel_id", string(channelID)).
-					Str("message_id", string(env.ID)).
-					Str("adapter_id", string(adapterID)).
-					Msg("adapter manager dispatch failed")
-			}
-			return err
-		}
+// managerDispatchActor is the in-daemon cell for an adapter actor: its
+// Receive forwards each request to the framework Manager.Dispatch. The
+// cell's single goroutine serialises delivery (the mailbox IS the
+// serialization) — replacing the lock-free Deliverer HandlerFn that the
+// Manager previously had to be concurrency-safe against.
+type managerDispatchActor struct {
+	mgr       adapter.Manager
+	adapterID actor.ActorID
+	channelID channel.ID
+	logger    *zerolog.Logger
+}
+
+// Receive implements actorrt.Actor.
+func (a *managerDispatchActor) Receive(ctx context.Context, env *message.Envelope) error {
+	if env == nil || env.Kind != message.KindRequest {
 		return nil
 	}
+	stamped := harness.CtxWithCaller(ctx, harness.CallerContext{
+		ActorID:                 a.adapterID,
+		ChannelID:               a.channelID,
+		AllowProvidedSenderKind: true,
+	})
+	if err := a.mgr.Dispatch(stamped, env); err != nil {
+		// Surface the error so the origin row remains retryable. The
+		// framework Manager returns nil when it has accepted responsibility
+		// by reserving the request or writing a terminal failure.
+		if a.logger != nil {
+			a.logger.Warn().Err(err).
+				Str("event", "daemon.adapter_dispatch_failed").
+				Str("channel_id", string(a.channelID)).
+				Str("message_id", string(env.ID)).
+				Str("adapter_id", string(a.adapterID)).
+				Msg("adapter manager dispatch failed")
+		}
+		return err
+	}
+	return nil
+}
+
+// deliverThroughManager builds the adapter actor cell for adapterID.
+func deliverThroughManager(mgr adapter.Manager, adapterID actor.ActorID, channelID channel.ID, logger *zerolog.Logger) actorrt.Actor {
+	return &managerDispatchActor{mgr: mgr, adapterID: adapterID, channelID: channelID, logger: logger}
 }
 
 type frameworkZerologLogger struct {

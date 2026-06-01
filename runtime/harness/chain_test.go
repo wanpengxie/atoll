@@ -542,8 +542,12 @@ func TestChain_Step8_ResponseUnauthorizedSender(t *testing.T) {
 		t.Fatalf("seed request: r=%+v err=%v", r, err)
 	}
 
+	// mallory is neither in the parent audience nor the parent sender, so
+	// no authorization author applies. Use a clean completed status so the
+	// reason-validity check (which now precedes authorization) passes and
+	// the write reaches the unauthorized-sender gate.
 	resp := newResponse("resp-mallory", "agent:mallory", "req-1", "feishu.chat.send",
-		json.RawMessage(`{"status":"failed","reason":"permission_denied"}`))
+		json.RawMessage(`{"status":"completed"}`))
 	resp.Audience = message.Audience{"agent:alpha"}
 	res, err := c.Write(chainCallerCtx("agent:mallory"), resp)
 	if err != nil {
@@ -555,7 +559,13 @@ func TestChain_Step8_ResponseUnauthorizedSender(t *testing.T) {
 	}
 }
 
-func TestChain_Step8_SystemTerminalFallbackRejectsInvalidReason(t *testing.T) {
+// TestChain_Step8_SystemGenericFallbackUnauthorized — new world: the old
+// generic "system actor may write a terminal for any parent" fallback
+// author is DELETED (actor-runtime-redesign.md §0.5 Δ2). The system actor,
+// when neither in the parent audience nor the parent sender, has no
+// authorization to close the request. A clean completed status (so the
+// reason-validity gate passes) reaches the unauthorized-sender gate.
+func TestChain_Step8_SystemGenericFallbackUnauthorized(t *testing.T) {
 	c, _, _, treg := newTestChain(t)
 	treg.Add(TypeView{
 		Type:           "feishu.chat.send",
@@ -570,17 +580,97 @@ func TestChain_Step8_SystemTerminalFallbackRejectsInvalidReason(t *testing.T) {
 		t.Fatalf("seed request: r=%+v err=%v", r, err)
 	}
 
-	legacyPanicReason := "adapter" + "_panic"
-	payload := json.RawMessage(`{"status":"failed","reason":"` + legacyPanicReason + `"}`)
-	resp := newResponse("resp-invalid-reason", actor.SystemActorID, "req-1", "feishu.chat.send", payload)
+	payload := json.RawMessage(`{"status":"completed"}`)
+	resp := newResponse("resp-system-generic", actor.SystemActorID, "req-1", "feishu.chat.send", payload)
 	resp.Audience = message.Audience{"agent:alpha"}
 	res, err := c.Write(chainCallerCtx(actor.SystemActorID), resp)
 	if err != nil {
-		t.Fatalf("Write invalid system fallback: %v", err)
+		t.Fatalf("Write system generic fallback: %v", err)
 	}
-	if res.RejectReason != message.HarnessResponseReasonInvalid {
-		t.Fatalf("expected harness_response_reason_invalid, got %s detail=%s",
+	if res.RejectReason != message.HarnessResponseUnauthorizedSender {
+		t.Fatalf("expected harness_response_unauthorized_sender (system generic fallback deleted), got %s detail=%s",
 			res.RejectReason, res.RejectDetail)
+	}
+}
+
+// TestChain_Step8_CallerSelfCloseUnansweredTimeout — new world author #2:
+// the parent SENDER may close its own request with a caller-scoped
+// unanswered_timeout (status=failed + reason=unanswered_timeout), even
+// though it is not in its own audience.
+func TestChain_Step8_CallerSelfCloseUnansweredTimeout(t *testing.T) {
+	c, _, _, treg := newTestChain(t)
+	treg.Add(TypeView{
+		Type:           "feishu.chat.send",
+		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		MaxPendingMs:   10_000,
+		HandlerActorID: "tool:feishu-adapter",
+	})
+
+	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu-adapter",
+		json.RawMessage(`{"title":"x"}`))
+	if r, err := c.Write(chainCallerCtx("agent:alpha"), req); err != nil || !r.Accepted() {
+		t.Fatalf("seed request: r=%+v err=%v", r, err)
+	}
+
+	payload := json.RawMessage(`{"status":"failed","reason":"unanswered_timeout"}`)
+	resp := newResponse("resp-self-close", "agent:alpha", "req-1", "feishu.chat.send", payload)
+	resp.Audience = message.Audience{"agent:alpha"}
+	res, err := c.Write(chainCallerCtx("agent:alpha"), resp)
+	if err != nil {
+		t.Fatalf("Write caller self-close: %v", err)
+	}
+	if !res.Accepted() {
+		t.Fatalf("expected caller self-close accepted, got reject=%s detail=%s", res.RejectReason, res.RejectDetail)
+	}
+}
+
+// TestChain_Step8_LateReceiverFinalToObservability — new world Δ4/D3:
+// after the caller self-closes with unanswered_timeout, the receiver's
+// genuine late final is NOT a duplicate — it is rewritten to a
+// response.late_final observability event and accepted.
+func TestChain_Step8_LateReceiverFinalToObservability(t *testing.T) {
+	c, _, log, treg := newTestChain(t)
+	treg.Add(TypeView{
+		Type:           "feishu.chat.send",
+		AllowedKinds:   []message.Kind{message.KindRequest, message.KindResponse},
+		MaxPendingMs:   10_000,
+		HandlerActorID: "tool:feishu-adapter",
+	})
+
+	req := newRequest("req-1", "agent:alpha", "feishu.chat.send", "tool:feishu-adapter",
+		json.RawMessage(`{"title":"x"}`))
+	if r, err := c.Write(chainCallerCtx("agent:alpha"), req); err != nil || !r.Accepted() {
+		t.Fatalf("seed request: r=%+v err=%v", r, err)
+	}
+	// Caller self-closes first.
+	selfClose := newResponse("resp-self-close", "agent:alpha", "req-1", "feishu.chat.send",
+		json.RawMessage(`{"status":"failed","reason":"unanswered_timeout"}`))
+	selfClose.Audience = message.Audience{"agent:alpha"}
+	if r, err := c.Write(chainCallerCtx("agent:alpha"), selfClose); err != nil || !r.Accepted() {
+		t.Fatalf("seed self-close: r=%+v err=%v", r, err)
+	}
+	// Receiver answers late.
+	late := newResponse("resp-late", "tool:feishu-adapter", "req-1", "feishu.chat.send",
+		json.RawMessage(`{"status":"completed"}`))
+	late.Audience = message.Audience{"agent:alpha"}
+	res, err := c.Write(chainCallerCtx("tool:feishu-adapter"), late)
+	if err != nil {
+		t.Fatalf("Write late receiver final: %v", err)
+	}
+	if !res.Accepted() {
+		t.Fatalf("expected late receiver final accepted as observability, got reject=%s detail=%s",
+			res.RejectReason, res.RejectDetail)
+	}
+	got, ok, err := log.FindByID(context.Background(), channel.ID("ch-1"), "resp-late")
+	if err != nil || !ok {
+		t.Fatalf("late row lookup: ok=%v err=%v", ok, err)
+	}
+	if got.Kind != message.KindEvent || got.Type != LateFinalType {
+		t.Fatalf("expected late row rewritten to event %s, got kind=%s type=%s",
+			LateFinalType, got.Kind, got.Type)
+	}
+	if got.IsTerminal {
+		t.Fatalf("late_final event must not be terminal")
 	}
 }
 
