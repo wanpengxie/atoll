@@ -9,7 +9,6 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -22,7 +21,7 @@ import (
 type Config struct {
 	ChannelID     channel.ID
 	ActorRegistry actorreg.Registry
-	TypeRegistry  adapter.TypeRegistry
+	TypeRegistry  message.TypeRegistry
 	HarnessChain  khar.Chain
 	NowFn         func() int64
 }
@@ -35,8 +34,8 @@ type Service struct {
 }
 
 type installRegistry interface {
-	adapter.TypeRegistry
-	BeginInstall(ctx context.Context, row adapter.TypeRow) (store.TypeInstallAttempt, error)
+	message.TypeRegistry
+	BeginInstall(ctx context.Context, row message.TypeRow) (store.TypeInstallAttempt, error)
 	MarkInstalled(ctx context.Context, typeName, attemptID string) error
 	MarkInstallFailed(ctx context.Context, typeName, attemptID, reason string) error
 	RecoverInstalling(ctx context.Context, reason string) (int, error)
@@ -68,19 +67,19 @@ func New(cfg Config) (*Service, error) {
 
 // InstallType validates row, upserts type_registry, and emits the
 // system.type.installed mirror event through the channel harness.
-func (s *Service) InstallType(ctx context.Context, row adapter.TypeRow) (adapter.TypeRow, error) {
+func (s *Service) InstallType(ctx context.Context, row message.TypeRow) (message.TypeRow, error) {
 	if err := s.validate(ctx, row); err != nil {
-		return adapter.TypeRow{}, err
+		return message.TypeRow{}, err
 	}
 	if existing, ok, err := s.registry.Lookup(ctx, row.Type); err != nil {
-		return adapter.TypeRow{}, fmt.Errorf("typeinstall: registry lookup %s: %w", row.Type, err)
+		return message.TypeRow{}, fmt.Errorf("typeinstall: registry lookup %s: %w", row.Type, err)
 	} else if ok && sameTypeRow(existing, row) {
 		return existing, nil
 	}
 
 	attempt, err := s.registry.BeginInstall(ctx, row)
 	if err != nil {
-		return adapter.TypeRow{}, &Error{
+		return message.TypeRow{}, &Error{
 			Reason: message.InstallTypeRegistryInvalid,
 			Err:    fmt.Errorf("typeinstall: registry begin install %s: %w", row.Type, err),
 		}
@@ -92,10 +91,10 @@ func (s *Service) InstallType(ctx context.Context, row adapter.TypeRow) (adapter
 
 	if err := s.emitInstalled(ctx, attempt.Row, attempt.AttemptID, mutationKind); err != nil {
 		_ = s.registry.MarkInstallFailed(context.WithoutCancel(ctx), attempt.Row.Type, attempt.AttemptID, err.Error())
-		return adapter.TypeRow{}, err
+		return message.TypeRow{}, err
 	}
 	if err := s.registry.MarkInstalled(ctx, attempt.Row.Type, attempt.AttemptID); err != nil {
-		return adapter.TypeRow{}, &Error{
+		return message.TypeRow{}, &Error{
 			Reason: message.InstallTypeRegistryInvalid,
 			Err:    fmt.Errorf("typeinstall: registry mark installed %s: %w", attempt.Row.Type, err),
 		}
@@ -103,7 +102,7 @@ func (s *Service) InstallType(ctx context.Context, row adapter.TypeRow) (adapter
 	return attempt.Row, nil
 }
 
-func sameTypeRow(a, b adapter.TypeRow) bool {
+func sameTypeRow(a, b message.TypeRow) bool {
 	if a.Type != b.Type ||
 		a.HandlerActorID != b.HandlerActorID ||
 		a.HandlerBinding != b.HandlerBinding ||
@@ -126,7 +125,7 @@ func (s *Service) RecoverInstalling(ctx context.Context, reason string) (int, er
 	return s.registry.RecoverInstalling(ctx, reason)
 }
 
-func (s *Service) validate(ctx context.Context, row adapter.TypeRow) error {
+func (s *Service) validate(ctx context.Context, row message.TypeRow) error {
 	if strings.HasPrefix(row.Type, "system.") || strings.HasPrefix(row.Type, "actor.") {
 		return &Error{Reason: message.InstallTypeRegistryReservedNamespace, Err: fmt.Errorf("typeinstall: reserved namespace type %q", row.Type)}
 	}
@@ -157,7 +156,7 @@ func (s *Service) validate(ctx context.Context, row adapter.TypeRow) error {
 	return nil
 }
 
-func validateAllowedKinds(row adapter.TypeRow) error {
+func validateAllowedKinds(row message.TypeRow) error {
 	if len(row.AllowedKinds) == 0 {
 		return &Error{Reason: message.InstallTypeRegistryInvalid, Err: fmt.Errorf("typeinstall: type %q allowed_kinds empty", row.Type)}
 	}
@@ -176,7 +175,7 @@ func validateAllowedKinds(row adapter.TypeRow) error {
 	return nil
 }
 
-func (s *Service) emitInstalled(ctx context.Context, row adapter.TypeRow, attemptID, mutationKind string) error {
+func (s *Service) emitInstalled(ctx context.Context, row message.TypeRow, attemptID, mutationKind string) error {
 	now := s.cfg.NowFn()
 	allowed := make([]string, len(row.AllowedKinds))
 	for i, k := range row.AllowedKinds {

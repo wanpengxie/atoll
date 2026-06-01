@@ -12,7 +12,6 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	klog "github.com/wanpengxie/ActOS/kernel/log"
@@ -27,7 +26,7 @@ func TestServiceInstallTypeEmitsMirrorEvent(t *testing.T) {
 	chID := channel.ID("ch-typeinstall")
 	svc, reg, msgs := newServiceFixture(t, chID, 12345)
 
-	row := adapter.TypeRow{
+	row := message.TypeRow{
 		Type:           "xhs.publish",
 		HandlerActorID: "tool:xhs",
 		HandlerBinding: actor.BindingEmbedded,
@@ -83,7 +82,7 @@ func TestServiceInstallTypeRejectsReservedNamespace(t *testing.T) {
 		"system.foo",
 		"system.type.installed",
 	} {
-		_, err := svc.InstallType(ctx, adapter.TypeRow{
+		_, err := svc.InstallType(ctx, message.TypeRow{
 			Type:           typeName,
 			HandlerActorID: "tool:xhs",
 			HandlerBinding: actor.BindingEmbedded,
@@ -440,8 +439,8 @@ func newTypeInstallStoresWithDB(t *testing.T, _ channel.ID, now int64) (*store.A
 	return actors, reg, msgs, db
 }
 
-func typeInstallRow(typeName string) adapter.TypeRow {
-	return adapter.TypeRow{
+func typeInstallRow(typeName string) message.TypeRow {
+	return message.TypeRow{
 		Type:           typeName,
 		HandlerActorID: "tool:xhs",
 		HandlerBinding: actor.BindingEmbedded,

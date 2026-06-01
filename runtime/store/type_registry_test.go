@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime/store"
 )
@@ -35,7 +34,7 @@ func TestTypeRegistry_UpsertLookupRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	reg := openChannelDB(t)
 
-	in := adapter.TypeRow{
+	in := message.TypeRow{
 		Type:           "xhs.publish",
 		HandlerActorID: "tool:xhs",
 		HandlerBinding: actor.BindingEmbedded,
@@ -87,7 +86,7 @@ func TestTypeRegistry_UpsertReplaces(t *testing.T) {
 	ctx := context.Background()
 	reg := openChannelDB(t)
 
-	if _, err := reg.Upsert(ctx, adapter.TypeRow{
+	if _, err := reg.Upsert(ctx, message.TypeRow{
 		Type:           "xhs.publish",
 		HandlerActorID: "tool:xhs",
 		HandlerBinding: actor.BindingEmbedded,
@@ -97,7 +96,7 @@ func TestTypeRegistry_UpsertReplaces(t *testing.T) {
 		t.Fatalf("Upsert 1: %v", err)
 	}
 	// Overwrite with different binding + max_pending_ms.
-	if _, err := reg.Upsert(ctx, adapter.TypeRow{
+	if _, err := reg.Upsert(ctx, message.TypeRow{
 		Type:           "xhs.publish",
 		HandlerActorID: "tool:xhs",
 		HandlerBinding: actor.BindingRuntimeOutbound,
@@ -125,7 +124,7 @@ func TestTypeRegistry_List(t *testing.T) {
 
 	types := []string{"xhs.search", "xhs.publish", "xhs.cookie.sync"}
 	for _, typ := range types {
-		if _, err := reg.Upsert(ctx, adapter.TypeRow{
+		if _, err := reg.Upsert(ctx, message.TypeRow{
 			Type:           typ,
 			HandlerActorID: "tool:xhs",
 			HandlerBinding: actor.BindingEmbedded,
@@ -174,12 +173,12 @@ func TestTypeRegistry_UpsertRejectsInvalid(t *testing.T) {
 
 	cases := []struct {
 		name string
-		row  adapter.TypeRow
+		row  message.TypeRow
 	}{
-		{"missing type", adapter.TypeRow{HandlerActorID: "tool:x", HandlerBinding: actor.BindingEmbedded, MaxPendingMs: 100}},
-		{"missing handler actor", adapter.TypeRow{Type: "t", HandlerBinding: actor.BindingEmbedded, MaxPendingMs: 100}},
-		{"invalid binding", adapter.TypeRow{Type: "t", HandlerActorID: "tool:x", HandlerBinding: "bogus", MaxPendingMs: 100}},
-		{"missing max_pending_ms", adapter.TypeRow{Type: "t", HandlerActorID: "tool:x", HandlerBinding: actor.BindingEmbedded}},
+		{"missing type", message.TypeRow{HandlerActorID: "tool:x", HandlerBinding: actor.BindingEmbedded, MaxPendingMs: 100}},
+		{"missing handler actor", message.TypeRow{Type: "t", HandlerBinding: actor.BindingEmbedded, MaxPendingMs: 100}},
+		{"invalid binding", message.TypeRow{Type: "t", HandlerActorID: "tool:x", HandlerBinding: "bogus", MaxPendingMs: 100}},
+		{"missing max_pending_ms", message.TypeRow{Type: "t", HandlerActorID: "tool:x", HandlerBinding: actor.BindingEmbedded}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,7 +193,7 @@ func TestTypeRegistry_UpsertRejectsReservedNamespace(t *testing.T) {
 	ctx := context.Background()
 	reg := openChannelDB(t)
 	for _, typ := range []string{"system.foo", "actor.custom"} {
-		if _, err := reg.Upsert(ctx, adapter.TypeRow{
+		if _, err := reg.Upsert(ctx, message.TypeRow{
 			Type:           typ,
 			HandlerActorID: "tool:x",
 			HandlerBinding: actor.BindingEmbedded,

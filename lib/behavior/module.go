@@ -1,4 +1,4 @@
-package adapter
+package behavior
 
 import (
 	"context"
@@ -45,10 +45,11 @@ type RuntimeEvent struct {
 type RuntimeEventKind string
 
 // RuntimeEventAware is the optional Module sub-interface. Modules that
-// want runtime lifecycle signals implement this method; the framework
-// type-asserts and skips delivery when absent. Method is invoked off the
-// main Handle goroutine; implementations MUST be concurrency-safe with
-// Handle / OnExternalCallback / Shutdown.
+// want runtime lifecycle signals implement this method; the host
+// type-asserts and skips delivery when absent. Per the serial contract
+// (see Module), OnRuntimeEvent is folded onto the adapter actor's cell
+// goroutine (host Post) and runs SERIALLY with Handle / OnExternalCallback /
+// Shutdown — implementations touch logical state with no locks.
 type RuntimeEventAware interface {
 	OnRuntimeEvent(ctx context.Context, evt RuntimeEvent) error
 }
@@ -203,13 +204,20 @@ type Declaration struct {
 	SkillDoc string
 }
 
-// Module is the contract every adapter implements (L2 §8.1 F1). The
-// framework calls Declares first, then Init, then Handle /
-// OnExternalCallback on demand, finally Shutdown.
+// Module is the gen_server callback contract every adapter implements
+// (lib/behavior = coagent's OTP behaviour). The host calls Declares first,
+// then Init, then Handle / OnExternalCallback on demand, finally Shutdown.
 //
-// All methods MUST be safe for concurrent invocation: the framework
-// may dispatch overlapping Handle calls (one per inbound request) and
-// an OnExternalCallback at the same time.
+// SERIAL CONTRACT (v2, dismantle-spec §3 — the abstraction returning home):
+// the adapterhost guarantees ALL Module callbacks (Handle / OnExternalCallback
+// / OnRuntimeEvent / Status / Shutdown) are invoked SERIALLY by this adapter
+// actor's single cell goroutine. A Module MUST NOT depend on concurrent
+// invocation, and MUST NOT read or write its own logical state from a
+// goroutine it spawned itself. External resources (HTTP client, watcher
+// goroutine) may carry their own synchronisation, but their results MUST be
+// folded back onto the actor via the mailbox (self-post / Ask) before they
+// touch the actor's logical state. Because the cell goroutine is the sole
+// owner, a Module holds logical state in plain fields — no mutex/atomic.
 type Module interface {
 	// Declares returns the static metadata. Called exactly once per
 	// Install. Result MUST be deterministic (same call → same value).

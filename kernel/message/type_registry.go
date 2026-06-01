@@ -1,4 +1,4 @@
-package adapter
+package message
 
 import (
 	"context"
@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // TypeRow is the per-row projection of one type_registry entry (L2
@@ -38,7 +37,7 @@ type TypeRow struct {
 	// AllowedKinds lists every envelope.kind the harness will accept for
 	// this type. Non-empty; subset of {event, request, response}.
 	// Step 5 reject reason: kind_not_allowed.
-	AllowedKinds []message.Kind
+	AllowedKinds []Kind
 }
 
 // Validate returns a friendly error when a field is missing or invalid.

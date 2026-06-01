@@ -1,11 +1,11 @@
-package adapter_test
+package behavior_test
 
 import (
 	"encoding/json"
 	"reflect"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 )
 
 func TestModuleContextDoesNotExposeRawCapabilities(t *testing.T) {

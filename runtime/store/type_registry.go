@@ -12,13 +12,12 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // TypeRegistry is the sqlite-backed implementation of
-// kernel/adapter.TypeRegistry (upsert + lookup + list at adapter install
+// kernel/message.TypeRegistry (upsert + lookup + list at adapter install
 // time) over the channel-local type_registry table (L2 §1.4.2). It also
 // exposes a runtime/harness.TypeRegistry projection via HarnessView so
 // the harness Chain reads the same row Manager.Install wrote.
@@ -39,7 +38,7 @@ const (
 )
 
 type TypeInstallAttempt struct {
-	Row       adapter.TypeRow
+	Row       message.TypeRow
 	AttemptID string
 	Existed   bool
 }
@@ -54,18 +53,18 @@ func NewTypeRegistry(db *sql.DB, nowFn func() int64) *TypeRegistry {
 	return &TypeRegistry{db: db, nowFn: nowFn}
 }
 
-// Upsert satisfies kernel/adapter.TypeRegistry. It validates row, then
+// Upsert satisfies kernel/message.TypeRegistry. It validates row, then
 // INSERTs (or replaces on PK conflict) into the type_registry table.
 // Returns the persisted row (round-tripped through JSON marshal so
 // callers observe canonicalised bytes).
-func (r *TypeRegistry) Upsert(ctx context.Context, row adapter.TypeRow) (adapter.TypeRow, error) {
+func (r *TypeRegistry) Upsert(ctx context.Context, row message.TypeRow) (message.TypeRow, error) {
 	return r.upsertWithStatus(ctx, row, TypeInstallStatusInstalled, "")
 }
 
 // BeginInstall stages an installing row outside the canonical installed row.
 // Lookup/List/HarnessView continue to see the prior installed row until the
 // matching install attempt is marked installed after mirror emit.
-func (r *TypeRegistry) BeginInstall(ctx context.Context, row adapter.TypeRow) (TypeInstallAttempt, error) {
+func (r *TypeRegistry) BeginInstall(ctx context.Context, row message.TypeRow) (TypeInstallAttempt, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return TypeInstallAttempt{}, err
@@ -224,34 +223,34 @@ func (r *TypeRegistry) InstallStatus(ctx context.Context, typeName string) (stat
 	return status, reason, true, nil
 }
 
-func (r *TypeRegistry) upsertWithStatus(ctx context.Context, row adapter.TypeRow, installStatus, installError string) (adapter.TypeRow, error) {
+func (r *TypeRegistry) upsertWithStatus(ctx context.Context, row message.TypeRow, installStatus, installError string) (message.TypeRow, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return adapter.TypeRow{}, fmt.Errorf("store: type_registry upsert begin %q: %w", row.Type, err)
+		return message.TypeRow{}, fmt.Errorf("store: type_registry upsert begin %q: %w", row.Type, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	persisted, err := r.upsertWithStatusTx(ctx, tx, row, installStatus, installError)
 	if err != nil {
-		return adapter.TypeRow{}, err
+		return message.TypeRow{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return adapter.TypeRow{}, fmt.Errorf("store: type_registry upsert commit %q: %w", row.Type, err)
+		return message.TypeRow{}, fmt.Errorf("store: type_registry upsert commit %q: %w", row.Type, err)
 	}
 	return persisted, nil
 }
 
-func (r *TypeRegistry) upsertWithStatusTx(ctx context.Context, tx *sql.Tx, row adapter.TypeRow, installStatus, installError string) (adapter.TypeRow, error) {
+func (r *TypeRegistry) upsertWithStatusTx(ctx context.Context, tx *sql.Tx, row message.TypeRow, installStatus, installError string) (message.TypeRow, error) {
 	if err := row.Validate(); err != nil {
-		return adapter.TypeRow{}, err
+		return message.TypeRow{}, err
 	}
 	if strings.HasPrefix(row.Type, "system.") || strings.HasPrefix(row.Type, "actor.") {
-		return adapter.TypeRow{}, fmt.Errorf("store: type_registry reserved namespace %q: %s",
+		return message.TypeRow{}, fmt.Errorf("store: type_registry reserved namespace %q: %s",
 			row.Type, message.InstallTypeRegistryReservedNamespace)
 	}
 
 	allowedKinds, err := marshalAllowedKinds(row.AllowedKinds)
 	if err != nil {
-		return adapter.TypeRow{}, fmt.Errorf("store: type_registry upsert marshal allowed_kinds: %w", err)
+		return message.TypeRow{}, fmt.Errorf("store: type_registry upsert marshal allowed_kinds: %w", err)
 	}
 
 	var maxPending any
@@ -290,31 +289,31 @@ func (r *TypeRegistry) upsertWithStatusTx(ctx context.Context, tx *sql.Tx, row a
 		installError,
 		r.nowFn(),
 	); err != nil {
-		return adapter.TypeRow{}, fmt.Errorf("store: type_registry upsert %q: %w", row.Type, err)
+		return message.TypeRow{}, fmt.Errorf("store: type_registry upsert %q: %w", row.Type, err)
 	}
 
 	persisted, ok, err := r.lookupAnyTx(ctx, tx, row.Type)
 	if err != nil {
-		return adapter.TypeRow{}, err
+		return message.TypeRow{}, err
 	}
 	if !ok {
-		return adapter.TypeRow{}, fmt.Errorf("store: type_registry upsert %q vanished post-insert", row.Type)
+		return message.TypeRow{}, fmt.Errorf("store: type_registry upsert %q vanished post-insert", row.Type)
 	}
 	return persisted, nil
 }
 
-func (r *TypeRegistry) insertPendingInstallTx(ctx context.Context, tx *sql.Tx, attemptID string, row adapter.TypeRow) (adapter.TypeRow, error) {
+func (r *TypeRegistry) insertPendingInstallTx(ctx context.Context, tx *sql.Tx, attemptID string, row message.TypeRow) (message.TypeRow, error) {
 	if err := row.Validate(); err != nil {
-		return adapter.TypeRow{}, err
+		return message.TypeRow{}, err
 	}
 	if strings.HasPrefix(row.Type, "system.") || strings.HasPrefix(row.Type, "actor.") {
-		return adapter.TypeRow{}, fmt.Errorf("store: type_registry reserved namespace %q: %s",
+		return message.TypeRow{}, fmt.Errorf("store: type_registry reserved namespace %q: %s",
 			row.Type, message.InstallTypeRegistryReservedNamespace)
 	}
 
 	allowedKinds, err := marshalAllowedKinds(row.AllowedKinds)
 	if err != nil {
-		return adapter.TypeRow{}, fmt.Errorf("store: type_registry pending marshal allowed_kinds: %w", err)
+		return message.TypeRow{}, fmt.Errorf("store: type_registry pending marshal allowed_kinds: %w", err)
 	}
 	var maxPending any
 	if row.MaxPendingMs <= 0 {
@@ -345,27 +344,27 @@ func (r *TypeRegistry) insertPendingInstallTx(ctx context.Context, tx *sql.Tx, a
 		"",
 		r.nowFn(),
 	); err != nil {
-		return adapter.TypeRow{}, fmt.Errorf("store: type_registry pending insert %q: %w", row.Type, err)
+		return message.TypeRow{}, fmt.Errorf("store: type_registry pending insert %q: %w", row.Type, err)
 	}
 	persisted, ok, err := r.lookupPendingAttemptTx(ctx, tx, row.Type, attemptID, TypeInstallStatusInstalling)
 	if err != nil {
-		return adapter.TypeRow{}, err
+		return message.TypeRow{}, err
 	}
 	if !ok {
-		return adapter.TypeRow{}, fmt.Errorf("store: type_registry pending %q vanished post-insert", row.Type)
+		return message.TypeRow{}, fmt.Errorf("store: type_registry pending %q vanished post-insert", row.Type)
 	}
 	return persisted, nil
 }
 
-// Lookup satisfies kernel/adapter.TypeRegistry — returns the framework
+// Lookup satisfies kernel/message.TypeRegistry — returns the framework
 // view of a registered type; ok=false when the row is missing.
-func (r *TypeRegistry) Lookup(ctx context.Context, typeName string) (adapter.TypeRow, bool, error) {
+func (r *TypeRegistry) Lookup(ctx context.Context, typeName string) (message.TypeRow, bool, error) {
 	return r.lookup(ctx, typeName)
 }
 
-// List satisfies kernel/adapter.TypeRegistry — returns every row sorted
+// List satisfies kernel/message.TypeRegistry — returns every row sorted
 // by type for deterministic test output.
-func (r *TypeRegistry) List(ctx context.Context) ([]adapter.TypeRow, error) {
+func (r *TypeRegistry) List(ctx context.Context) ([]message.TypeRow, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
 			                  max_pending_ms, handler_actor_id
 			             FROM type_registry
@@ -376,7 +375,7 @@ func (r *TypeRegistry) List(ctx context.Context) ([]adapter.TypeRow, error) {
 	}
 	defer func() { _ = rows.Close() }()
 
-	out := make([]adapter.TypeRow, 0)
+	out := make([]message.TypeRow, 0)
 	for rows.Next() {
 		row, err := scanTypeRow(rows)
 		if err != nil {
@@ -423,7 +422,7 @@ func (a typeRegistryHarnessAdapter) Lookup(ctx context.Context, typeName string)
 // internal helpers
 // ------------------------------------------------------------------
 
-func (r *TypeRegistry) lookup(ctx context.Context, typeName string) (adapter.TypeRow, bool, error) {
+func (r *TypeRegistry) lookup(ctx context.Context, typeName string) (message.TypeRow, bool, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
 		                  max_pending_ms, handler_actor_id
 		             FROM type_registry
@@ -431,47 +430,47 @@ func (r *TypeRegistry) lookup(ctx context.Context, typeName string) (adapter.Typ
 	return r.lookupQuery(ctx, q, typeName)
 }
 
-func (r *TypeRegistry) lookupAnyTx(ctx context.Context, tx *sql.Tx, typeName string) (adapter.TypeRow, bool, error) {
+func (r *TypeRegistry) lookupAnyTx(ctx context.Context, tx *sql.Tx, typeName string) (message.TypeRow, bool, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
 			                  max_pending_ms, handler_actor_id
 			             FROM type_registry
 			            WHERE type=?`
 	row, err := scanTypeRowFrom(tx.QueryRowContext(ctx, q, typeName))
 	if errors.Is(err, sql.ErrNoRows) {
-		return adapter.TypeRow{}, false, nil
+		return message.TypeRow{}, false, nil
 	}
 	if err != nil {
-		return adapter.TypeRow{}, false, err
+		return message.TypeRow{}, false, err
 	}
 	return row, true, nil
 }
 
-func (r *TypeRegistry) lookupInstalledTx(ctx context.Context, tx *sql.Tx, typeName string) (adapter.TypeRow, bool, error) {
+func (r *TypeRegistry) lookupInstalledTx(ctx context.Context, tx *sql.Tx, typeName string) (message.TypeRow, bool, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
 			                  max_pending_ms, handler_actor_id
 			             FROM type_registry
 			            WHERE type=? AND install_status='installed'`
 	row, err := scanTypeRowFrom(tx.QueryRowContext(ctx, q, typeName))
 	if errors.Is(err, sql.ErrNoRows) {
-		return adapter.TypeRow{}, false, nil
+		return message.TypeRow{}, false, nil
 	}
 	if err != nil {
-		return adapter.TypeRow{}, false, err
+		return message.TypeRow{}, false, err
 	}
 	return row, true, nil
 }
 
-func (r *TypeRegistry) lookupPendingAttemptTx(ctx context.Context, tx *sql.Tx, typeName, attemptID, status string) (adapter.TypeRow, bool, error) {
+func (r *TypeRegistry) lookupPendingAttemptTx(ctx context.Context, tx *sql.Tx, typeName, attemptID, status string) (message.TypeRow, bool, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
 			                  max_pending_ms, handler_actor_id
 			             FROM type_registry_pending
 			            WHERE type=? AND install_attempt_id=? AND install_status=?`
 	row, err := scanTypeRowFrom(tx.QueryRowContext(ctx, q, typeName, attemptID, status))
 	if errors.Is(err, sql.ErrNoRows) {
-		return adapter.TypeRow{}, false, nil
+		return message.TypeRow{}, false, nil
 	}
 	if err != nil {
-		return adapter.TypeRow{}, false, err
+		return message.TypeRow{}, false, err
 	}
 	return row, true, nil
 }
@@ -494,13 +493,13 @@ func (r *TypeRegistry) failIfInstallingPendingTx(ctx context.Context, tx *sql.Tx
 	return fmt.Errorf("store: type_registry install already in progress %q", typeName)
 }
 
-func (r *TypeRegistry) lookupQuery(ctx context.Context, q string, typeName string) (adapter.TypeRow, bool, error) {
+func (r *TypeRegistry) lookupQuery(ctx context.Context, q string, typeName string) (message.TypeRow, bool, error) {
 	row, err := scanTypeRowSingle(r.db.QueryRowContext(ctx, q, typeName))
 	if errors.Is(err, sql.ErrNoRows) {
-		return adapter.TypeRow{}, false, nil
+		return message.TypeRow{}, false, nil
 	}
 	if err != nil {
-		return adapter.TypeRow{}, false, err
+		return message.TypeRow{}, false, err
 	}
 	return row, true, nil
 }
@@ -537,10 +536,10 @@ type typeRowScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanTypeRow(rows *sql.Rows) (adapter.TypeRow, error)     { return scanTypeRowFrom(rows) }
-func scanTypeRowSingle(row *sql.Row) (adapter.TypeRow, error) { return scanTypeRowFrom(row) }
+func scanTypeRow(rows *sql.Rows) (message.TypeRow, error)     { return scanTypeRowFrom(rows) }
+func scanTypeRowSingle(row *sql.Row) (message.TypeRow, error) { return scanTypeRowFrom(row) }
 
-func scanTypeRowFrom(s typeRowScanner) (adapter.TypeRow, error) {
+func scanTypeRowFrom(s typeRowScanner) (message.TypeRow, error) {
 	var (
 		typ, allowedRaw, binding string
 		maxPending               sql.NullInt64
@@ -548,13 +547,13 @@ func scanTypeRowFrom(s typeRowScanner) (adapter.TypeRow, error) {
 	)
 	if err := s.Scan(&typ, &allowedRaw, &binding,
 		&maxPending, &handler); err != nil {
-		return adapter.TypeRow{}, err
+		return message.TypeRow{}, err
 	}
 	allowed, err := unmarshalAllowedKinds(allowedRaw)
 	if err != nil {
-		return adapter.TypeRow{}, fmt.Errorf("store: type_registry scan allowed_kinds %q: %w", typ, err)
+		return message.TypeRow{}, fmt.Errorf("store: type_registry scan allowed_kinds %q: %w", typ, err)
 	}
-	row := adapter.TypeRow{
+	row := message.TypeRow{
 		Type:           typ,
 		HandlerBinding: actor.Binding(binding),
 		AllowedKinds:   allowed,
@@ -600,6 +599,6 @@ func unmarshalAllowedKinds(raw string) ([]message.Kind, error) {
 
 // Compile-time interface checks — both contracts stay in sync with code.
 var (
-	_ adapter.TypeRegistry = (*TypeRegistry)(nil)
+	_ message.TypeRegistry = (*TypeRegistry)(nil)
 	_ harness.TypeRegistry = typeRegistryHarnessAdapter{}
 )

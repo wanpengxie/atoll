@@ -1,4 +1,4 @@
-package adapter_test
+package behavior_test
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 )
 
 // memCorrelation is a minimal in-process implementation of the F2
