@@ -62,6 +62,15 @@
 // (lib/behavior/futurereg), NOT folded into the sender mailbox (deadlock —
 // dismantle §2.5-B b).
 //
+// NOTE (仲裁-2, 2026-06-02): the respond seam (buildRespond/Fail/EmitEvent/
+// ForwardExternalRequest + ModuleContext construction) lives HERE in
+// adapterhost, NOT in lib/behavior — it writes terminals through
+// runtime/harness.Chain, and lib/behavior is pure-kernel (so adapters
+// depending on behavior don't transitively pull runtime). correlation is
+// INLINED into adapterActor (lock-free map, actor.go) — memoryCorrelation
+// Tracker is retired. timerPolicy F3 is deleted (closure → caller-scoped in
+// lib/behavior). Only caller-side futures (no harness write) stay in behavior.
+//
 // correlation reaper: runOneGCPass logic (manager.go:1564 RunGC) → cell
 // self-scheduled tick (actor-local bounded reaper); NO Manager.RunGC goroutine.
 //
