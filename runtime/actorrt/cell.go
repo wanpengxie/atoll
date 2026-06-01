@@ -20,14 +20,25 @@ var ErrMailboxFull = errors.New("actorrt: mailbox full")
 // ErrCellStopped is returned by Deliver after the cell has begun teardown.
 var ErrCellStopped = errors.New("actorrt: cell stopped")
 
-// job is one mailbox entry: either an envelope to Receive, or a closure to
-// run on the cell goroutine (fn != nil). The closure form lets the substrate
-// fold an out-of-band signal — e.g. a device lifecycle frame — onto the
-// actor's own goroutine so the actor touches its state serially, WITHOUT
-// encoding transport signals as protocol envelopes.
+// ErrNoCell is returned by Runtime.Do/Ask when no cell is hosted for the
+// target id (the substrate cannot run a closure on an actor it does not host).
+var ErrNoCell = errors.New("actorrt: no cell for actor")
+
+// job is one mailbox entry. Exactly one of {env, fn, ask} is set:
+//   - env: an envelope to Receive (the normal message path)
+//   - fn:  a closure to run on the cell goroutine, fire-and-forget (the
+//     out-of-band signal path — e.g. a device lifecycle frame — folded onto
+//     the actor's own goroutine so it touches state serially, WITHOUT
+//     encoding transport signals as protocol envelopes)
+//   - ask: a closure run on the cell goroutine whose error is returned
+//     SYNCHRONOUSLY to the caller via result (the device-callback ack path:
+//     bad/duplicate/expired frames must be rejected with a permanent/retryable
+//     error the transit layer hands back to the device — dismantle §2.5-A a).
 type job struct {
-	env *message.Envelope
-	fn  func()
+	env    *message.Envelope
+	fn     func()
+	ask    func(context.Context) error
+	result chan error
 }
 
 // DeathSignal is what a Supervisor receives when a cell's actor goroutine
@@ -148,9 +159,12 @@ func (c *cell) start() {
 			case <-c.ctx.Done():
 				return
 			case j := <-c.inbox:
-				if j.fn != nil {
+				switch {
+				case j.ask != nil:
+					j.result <- c.safeAsk(j.ask)
+				case j.fn != nil:
 					j.fn() // runs on the cell goroutine; a panic propagates to the outer recover → DeathSignal
-				} else {
+				default:
 					c.safeReceive(j)
 				}
 			}
@@ -175,6 +189,47 @@ func (c *cell) post(fn func()) error {
 	default:
 		return ErrMailboxFull
 	}
+}
+
+// ask enqueues a closure to run on the cell goroutine and blocks until it
+// returns, surfacing its error synchronously. This is the device-callback ack
+// path (dismantle §2.5-A a): the transit layer needs a permanent/retryable/ok
+// verdict computed serially on the actor's own goroutine. Never blocks on a
+// full mailbox (→ ErrMailboxFull); if the cell tears down while the ask is
+// queued, returns ErrCellStopped.
+func (c *cell) ask(fn func(context.Context) error) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ErrCellStopped
+	}
+	c.mu.Unlock()
+
+	res := make(chan error, 1)
+	select {
+	case c.inbox <- job{ask: fn, result: res}:
+	default:
+		return ErrMailboxFull
+	}
+	select {
+	case err := <-res:
+		return err
+	case <-c.ctx.Done():
+		return ErrCellStopped
+	}
+}
+
+// safeAsk runs an ask closure with panic recovery, converting a panic into a
+// returned error. Unlike Receive, an ask panic does NOT kill the cell: ask is
+// a controlled synchronous entry whose caller owns the verdict, so the panic
+// is reported back rather than turned into a DeathSignal.
+func (c *cell) safeAsk(fn func(context.Context) error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("actorrt: cell %s ask panicked: %v", c.id, r)
+		}
+	}()
+	return fn(c.ctx)
 }
 
 // safeReceive invokes impl.Receive with panic recovery. A panic is

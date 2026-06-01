@@ -137,6 +137,32 @@ func (r *Runtime) Post(id actor.ActorID, fn func()) bool {
 	return true
 }
 
+// Do runs fn on the cell goroutine for id and returns its error synchronously.
+// It is the device-callback ack seam (dismantle §2.5-A a): a callback frame is
+// validated and applied on the actor's own goroutine (so it serialises with
+// Receive), and the permanent/retryable/ok verdict is handed back to the
+// transit layer. Returns ErrNoCell if id is not hosted here, ErrMailboxFull if
+// the cell's mailbox is full, ErrCellStopped if it is tearing down.
+//
+// Deliberately minimal: no typed result, no cross-actor chaining. Do is for the
+// substrate edge (transit) calling INTO an actor, never for actor-to-actor
+// calls (that is behavior.Call over envelopes), and the caller MUST NOT be the
+// target cell's own goroutine (self-ask deadlocks).
+func (r *Runtime) Do(id actor.ActorID, fn func(context.Context) error) error {
+	r.mu.RLock()
+	c, ok := r.cells[id]
+	r.mu.RUnlock()
+	if !ok {
+		return ErrNoCell
+	}
+	return c.ask(fn)
+}
+
+// Ask is an alias for Do, named for the gen_server:call analogy.
+func (r *Runtime) Ask(id actor.ActorID, fn func(context.Context) error) error {
+	return r.Do(id, fn)
+}
+
 // StopAll stops every cell. Used at channel teardown.
 func (r *Runtime) StopAll() {
 	r.mu.Lock()
