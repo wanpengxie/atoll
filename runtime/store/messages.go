@@ -10,11 +10,12 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	kharness "github.com/wanpengxie/ActOS/runtime/harness"
 	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// Messages implements kernel/log.MessageLog over the messages table.
+// Messages implements kernel/harness.MessageLog over the messages table.
 //
 // Per L2 §1.4.5 engine-append ACL, Messages is a PURE PERSISTENCE SINK:
 // every caller MUST run the L1 §10.2 9-step Message-Write Harness chain
@@ -110,8 +111,8 @@ func NewMessagesWithObservers(db *sql.DB, fence WriteFence, outbox AppendObserve
 	return &Messages{db: db, fence: fence, outbox: outbox}
 }
 
-// Append implements log.MessageLog.
-func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing klog.FencingTuple) (klog.AppendResult, error) {
+// Append implements harness.MessageLog.
+func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kharness.FencingTuple) (klog.AppendResult, error) {
 	if env == nil {
 		return klog.AppendResult{}, errors.New("store: append nil envelope")
 	}
@@ -153,7 +154,7 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kl
 // AppendTx appends env using an existing transaction. It is used by internal
 // runtime lifecycle paths that must mutate a side table and append the mirror
 // event atomically.
-func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, fencing klog.FencingTuple) (klog.AppendResult, error) {
+func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, fencing kharness.FencingTuple) (klog.AppendResult, error) {
 	if tx == nil {
 		return klog.AppendResult{}, errors.New("store: append tx nil")
 	}
@@ -583,7 +584,7 @@ func (m *Messages) MarkDeliveryError(ctx context.Context, id message.ID, atMs in
 	return nil
 }
 
-// HasFinalResponse implements log.MessageLog. Returns true when at
+// HasFinalResponse implements harness.MessageLog. Returns true when at
 // least one kind=response row exists for parent_id=parentID with the
 // row's is_terminal column set — store layer has already materialised
 // the (kind==response && payload.status ∈ {completed, failed})
@@ -617,7 +618,7 @@ func (m *Messages) HasFinalResponse(ctx context.Context, channelID channel.ID, p
 	}
 }
 
-// FinalResponseSender implements log.MessageLog — returns the sender.id of
+// FinalResponseSender implements harness.MessageLog — returns the sender.id of
 // the existing Layer 1 final response for parentID (used by harness Step 8
 // to detect a caller self-close so a late receiver final can be rewritten
 // to observability rather than rejected).
@@ -642,7 +643,7 @@ func (m *Messages) FinalResponseSender(ctx context.Context, channelID channel.ID
 	}
 }
 
-// LookupCanonicalHash implements log.MessageLog — returns the row's
+// LookupCanonicalHash implements harness.MessageLog — returns the row's
 // stored canonical_hash for StepDedupe's pre-normalize comparison
 // (proto-layer1 §2.3).
 func (m *Messages) LookupCanonicalHash(ctx context.Context, channelID channel.ID, id message.ID) (string, bool, error) {
@@ -659,7 +660,7 @@ func (m *Messages) LookupCanonicalHash(ctx context.Context, channelID channel.ID
 	return hash, true, nil
 }
 
-// FindByID implements log.MessageLog.
+// FindByID implements harness.MessageLog.
 func (m *Messages) FindByID(ctx context.Context, channelID channel.ID, id message.ID) (message.Envelope, bool, error) {
 	_ = channelID // channel_id is enforced by the per-channel db file; query stays scoped.
 	const q = `SELECT id, ts, ts_received, channel_id,
@@ -812,11 +813,11 @@ func nullableInt(p *int64) any {
 // mismatch returns a typed
 // *klog.AppendError{Reason: HarnessWorkerFencingStale} so the harness
 // chain can surface the canonical reject reason without parsing strings.
-func (m *Messages) checkFencing(ctx context.Context, tx *sql.Tx, envID string, fencing klog.FencingTuple) error {
+func (m *Messages) checkFencing(ctx context.Context, tx *sql.Tx, envID string, fencing kharness.FencingTuple) error {
 	if m.fence == nil {
 		return nil
 	}
-	if fencing == (klog.FencingTuple{}) {
+	if fencing == (kharness.FencingTuple{}) {
 		return &klog.AppendError{
 			Reason:           message.HarnessWorkerFencingStale,
 			Detail:           "fencing tuple missing from Append parameter",

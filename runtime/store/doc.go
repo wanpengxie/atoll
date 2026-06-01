@@ -9,7 +9,7 @@
 //   - schema.go            — DDL constants (messages / actor_registry /
 //     actor_cursors / type_registry / action_ledger
 //     / worker_locks).
-//   - messages.go          — kernel/log.MessageLog impl.
+//   - messages.go          — kernel/harness.MessageLog impl.
 //   - cursors.go           — kernel/log.Cursors impl.
 //   - actors.go            — kernel/Registry impl.
 //   - ledger.go            — kernel/ledger.Ledger impl.

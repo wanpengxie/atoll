@@ -12,7 +12,7 @@ import (
 // FencingTuple bundles the (fencing_token, daemon_epoch) pair that
 // every channel-local mutation must present to the channel_lock fencing
 // gate. Ledger operations still receive this tuple through context.Context;
-// kernel/log.MessageLog.Append receives its tuple explicitly.
+// kernel/harness.MessageLog.Append receives its tuple explicitly.
 //
 // Production wiring (runtime/workerhost) stamps the tuple onto the
 // per-request context before calling Ledger.Reserve / Ledger.Commit.

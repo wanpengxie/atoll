@@ -6,7 +6,6 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	khlog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -124,12 +123,12 @@ type Deps struct {
 	// Log is the channel-local messages-table sink. Required — step 9
 	// engine append calls Log.Append; step 3 (and step 8 catch) calls
 	// Log.FindByID for dedupe / parent existence checks.
-	Log khlog.MessageLog
+	Log MessageLog
 
 	// Fencing is the explicit ownership tuple passed to Log.Append at
 	// step 9. Unfenced test logs ignore the zero value; production daemon
 	// wiring must populate it from the channel_lock row.
-	Fencing khlog.FencingTuple
+	Fencing FencingTuple
 
 	// NowMs returns unix-ms (engine ts_received write source). Defaults
 	// to time.Now when nil.

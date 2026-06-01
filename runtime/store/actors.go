@@ -10,7 +10,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	klog "github.com/wanpengxie/ActOS/kernel/log"
+	kharness "github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -322,7 +322,7 @@ func (r *ActorRegistry) ApplyMemberTransitions(
 	channelID channel.ID,
 	adds []MemberActorAdd,
 	removes []MemberActorRemove,
-	fencing klog.FencingTuple,
+	fencing kharness.FencingTuple,
 ) error {
 	if channelID == "" {
 		return errors.New("store: actor member transition: empty channel_id")
