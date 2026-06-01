@@ -4,7 +4,7 @@
 // messages tables defined by L1 §8 + T1.1 + T1.8.
 //
 // Authoritative spec: launch-ticket notes §T6 (viewcache) +
-// kernel/viewsync (Pusher / Receiver / Resyncer contracts).
+// framework/multiuser/viewsync (Pusher / Receiver / Resyncer contracts).
 //
 // Concurrency model:
 //   - Apply is safe for concurrent invocations across different
@@ -28,9 +28,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wanpengxie/ActOS/framework/multiuser/viewsync"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/kernel/viewsync"
 	"github.com/wanpengxie/ActOS/pkg/requestctx"
 	"github.com/wanpengxie/ActOS/server/channelaccess"
 )

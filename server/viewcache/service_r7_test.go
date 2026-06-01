@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/ActOS/framework/multiuser/viewsync"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/kernel/viewsync"
 	"github.com/wanpengxie/ActOS/server/store"
 )
 

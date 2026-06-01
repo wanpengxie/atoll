@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wanpengxie/ActOS/framework/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -157,15 +157,19 @@ func (m *ProxyFacadeModule) liveStateNow() liveState {
 // event so the daemon-side projection still reflects the upstream actor's
 // own readiness; liveness is a separate over-expiring transport signal).
 func (m *ProxyFacadeModule) OnRuntimeEvent(_ context.Context, evt adapter.RuntimeEvent) error {
-	if evt.Kind != adapter.RuntimeEventDeviceLifecycle || evt.DeviceLifecycle == nil {
+	if evt.Kind != devicetransit.RuntimeEventKindDeviceLifecycle {
 		return nil
 	}
-	next, ok := mapLifecycleToLive(evt.DeviceLifecycle.Event)
+	lifecycle, err := devicetransit.DecodeLifecycleRuntimeEventPayload(evt.Payload)
+	if err != nil {
+		return err
+	}
+	next, ok := mapLifecycleToLive(lifecycle.Event)
 	if !ok {
 		return nil
 	}
 	m.live.Store(next)
-	ts := evt.DeviceLifecycle.Ts
+	ts := lifecycle.Ts
 	if ts == 0 {
 		ts = m.nowMs()
 	}

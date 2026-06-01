@@ -15,15 +15,15 @@ import (
 	deviceframework "github.com/wanpengxie/ActOS/adapters/device/framework"
 	"github.com/wanpengxie/ActOS/adapters/framework"
 	proxyfacade "github.com/wanpengxie/ActOS/adapters/framework/proxy_facade"
+	"github.com/wanpengxie/ActOS/framework/devicetransit"
+	kerneldaemonbus "github.com/wanpengxie/ActOS/framework/multiuser/daemonbus"
+	"github.com/wanpengxie/ActOS/framework/multiuser/runtime"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	kerneldaemonbus "github.com/wanpengxie/ActOS/kernel/daemonbus"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/pkg/metrics"
-	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/scheduler"
 	runtimestore "github.com/wanpengxie/ActOS/runtime/store"
@@ -235,11 +235,15 @@ func wireAdapterFrameworkWithCredentialBox(box runtimestore.SecretBox, factories
 					if adapterName == "" {
 						return nil
 					}
+					payload, err := devicetransit.EncodeLifecycleRuntimeEventPayload(evt)
+					if err != nil {
+						return err
+					}
 					return mgr.OnRuntimeEvent(ctx, adapter.RuntimeEvent{
-						Kind:            adapter.RuntimeEventDeviceLifecycle,
-						ChannelID:       channelID,
-						AdapterActorID:  evt.AdapterActorID,
-						DeviceLifecycle: &evt,
+						Kind:           devicetransit.RuntimeEventKindDeviceLifecycle,
+						ChannelID:      channelID,
+						AdapterActorID: evt.AdapterActorID,
+						Payload:        payload,
 					})
 				})
 			}

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/server/store"
 )
 

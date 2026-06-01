@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wanpengxie/ActOS/framework/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -66,7 +66,8 @@ const (
 //	    Clock:          m.now,
 //	})
 //
-// Then OnRuntimeEvent → m.lifecycle.Apply(ctx, *evt.DeviceLifecycle)
+// Then OnRuntimeEvent decodes the devicetransit lifecycle payload and calls
+// m.lifecycle.Apply(ctx, evt)
 // and Handle gate → switch m.lifecycle.State() { … }.
 type LifecycleTracker struct {
 	state atomic.Value // DeviceState

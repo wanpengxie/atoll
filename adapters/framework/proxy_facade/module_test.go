@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/wanpengxie/ActOS/framework/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -572,16 +572,20 @@ func TestProxyFacadeStatusReflectsLifecycle(t *testing.T) {
 
 	apply := func(event devicetransit.LifecycleEvent) {
 		t.Helper()
+		payload, err := devicetransit.EncodeLifecycleRuntimeEventPayload(devicetransit.LifecycleFrame{
+			AdapterActorID: "tool:kimi",
+			ChannelID:      "ch-proxy",
+			Event:          event,
+			Ts:             123,
+		})
+		if err != nil {
+			t.Fatalf("EncodeLifecycleRuntimeEventPayload(%s): %v", event, err)
+		}
 		if err := mod.OnRuntimeEvent(context.Background(), adapter.RuntimeEvent{
-			Kind:           adapter.RuntimeEventDeviceLifecycle,
+			Kind:           devicetransit.RuntimeEventKindDeviceLifecycle,
 			ChannelID:      "ch-proxy",
 			AdapterActorID: "tool:kimi",
-			DeviceLifecycle: &devicetransit.LifecycleFrame{
-				AdapterActorID: "tool:kimi",
-				ChannelID:      "ch-proxy",
-				Event:          event,
-				Ts:             123,
-			},
+			Payload:        payload,
 		}); err != nil {
 			t.Fatalf("OnRuntimeEvent(%s): %v", event, err)
 		}

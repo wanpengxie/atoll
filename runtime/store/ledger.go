@@ -12,8 +12,8 @@ import (
 
 // Ledger implements kernel/ledger.Ledger over the action_ledger table.
 type Ledger struct {
-	db   *sql.DB
-	lock *ChannelLock // optional — when non-nil, Reserve/Commit enforce fencing.
+	db    *sql.DB
+	fence WriteFence // optional — when non-nil, Reserve/Commit enforce fencing.
 }
 
 // NewLedger returns a Ledger WITHOUT fencing enforcement. Used by
@@ -22,11 +22,17 @@ type Ledger struct {
 // ledger rows behind the placement fence.
 func NewLedger(db *sql.DB) *Ledger { return &Ledger{db: db} }
 
-// NewLedgerWithLock returns a Ledger that validates the FIX-T6 fencing
+// NewLedgerWithFence returns a Ledger that validates the FIX-T6 fencing
 // tuple (carried via store.CtxWithFencing) against the channel_lock row
 // INSIDE every Reserve / Commit transaction.
-func NewLedgerWithLock(db *sql.DB, lock *ChannelLock) *Ledger {
-	return &Ledger{db: db, lock: lock}
+func NewLedgerWithFence(db *sql.DB, fence WriteFence) *Ledger {
+	return &Ledger{db: db, fence: fence}
+}
+
+// NewLedgerWithLock is kept as compatibility sugar for existing callers;
+// the parameter is the pure WriteFence interface, not a concrete lock type.
+func NewLedgerWithLock(db *sql.DB, fence WriteFence) *Ledger {
+	return NewLedgerWithFence(db, fence)
 }
 
 // checkFencing mirrors Messages.checkFencing — same semantics, scoped
@@ -34,14 +40,14 @@ func NewLedgerWithLock(db *sql.DB, lock *ChannelLock) *Ledger {
 // the caller's defer; the typed error string ("ledger fencing stale:
 // ...") lets callers surface the closed-set reason at the daemon edge.
 func (l *Ledger) checkFencing(ctx context.Context, tx *sql.Tx) error {
-	if l.lock == nil {
+	if l.fence == nil {
 		return nil
 	}
 	tuple, ok := FencingFromCtx(ctx)
 	if !ok {
 		return &FencingStaleError{Reason: "fencing tuple missing from context"}
 	}
-	if err := l.lock.ValidateWriteTx(ctx, tx, tuple.Token, tuple.Epoch); err != nil {
+	if err := l.fence.ValidateWriteTx(ctx, tx, tuple.Token, tuple.Epoch); err != nil {
 		return err
 	}
 	return nil

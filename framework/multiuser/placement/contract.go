@@ -1,0 +1,514 @@
+// Package placement declares the channel-placement state machine, the
+// ACK-frame field set, the state transition matrix, and the kernel-side
+// interfaces server.placements / runtime.lifecycle implement.
+//
+// Authoritative spec: L2 §1.4.11 (channel placement 原子所有权协议 +
+// fencing token + ACK 完整字段匹配).
+package placement
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+
+	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/fencing"
+)
+
+// State is the channel placement state per L2 §1.4.11.2 state machine
+// (launch closed set: creating / active / orphan / stale).
+type State string
+
+const (
+	StateCreating State = "creating"
+	StateActive   State = "active"
+	StateOrphan   State = "orphan"
+	StateStale    State = "stale"
+)
+
+// AllStates lists every state in spec order — used by the
+// state_machine_test to assert closed-set coverage.
+var AllStates = []State{
+	StateCreating,
+	StateActive,
+	StateOrphan,
+	StateStale,
+}
+
+// String returns the wire form.
+func (s State) String() string { return string(s) }
+
+// OwnerEpoch is the monotonic ownership counter per channel — incremented
+// whenever placement is re-claimed (orphan → creating). Decoupled from
+// FencingToken: epoch is the monotonic ordering invariant used to detect
+// stale create/reclaim attempts; fencing token is the unguessable opaque
+// secret used to gate writes (proto-foundation §3.6.1 + proto-layer1
+// §6.2). The two values are generated together but carry independent
+// semantics.
+type OwnerEpoch int64
+
+// FencingToken is the SQL-layer guard value that gates daemon writes to
+// the channel store. Multiuser placement re-exports the kernel-level
+// fencing primitive for compatibility with placement call sites.
+type FencingToken = fencing.FencingToken
+
+// NewFencingToken generates a fresh opaque fencing token per
+// proto-foundation §3.6.1 + proto-layer1 §6.2. Uses crypto/rand to
+// produce 16 bytes of randomness, encoded as lowercase hex (32 chars).
+// MUST be called on every channel creation + reclaim; reusing a value
+// across reclaims violates F.fencing (the L1 fencing invariant).
+func NewFencingToken() (FencingToken, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return FencingToken(hex.EncodeToString(buf[:])), nil
+}
+
+// ConnectionEpoch is the daemonbus connection epoch. Placement rows store
+// the same value carried by daemonbus frame headers.
+type ConnectionEpoch int64
+
+// DaemonID is the stable daemon identifier (assigned at registration,
+// survives restarts).
+type DaemonID string
+
+// String returns the wire form.
+func (d DaemonID) String() string { return string(d) }
+
+// DaemonEpoch is the daemon process identifier (assigned at process
+// start, changes on every restart). Used for audit + cross-checking the
+// channel lock during phase-1 daemon startup.
+type DaemonEpoch = fencing.DaemonEpoch
+
+// CreateRequestID is the server-allocated UUID idempotency key for one
+// `control.create_channel` flow (L2 §1.4.11.3 step 1).
+type CreateRequestID string
+
+// String returns the wire form.
+func (c CreateRequestID) String() string { return string(c) }
+
+// UserID is the server identity user identifier carried in placement
+// bootstrap member payloads.
+type UserID string
+
+// String returns the wire form.
+func (u UserID) String() string { return string(u) }
+
+// TenantID is the multi-tenant scope identifier reserved per
+// launch-ticket notes §T10. launch demo uses TenantID("") /
+// TenantID("default") and treats placements as a single shared pool;
+// M2+ SaaS deployments will scope placement selection / quota by
+// TenantID without changing the placement state machine.
+type TenantID string
+
+// String returns the wire form.
+func (t TenantID) String() string { return string(t) }
+
+// Placement mirrors the channel_placements row from L2 §1.4.11.1 plus
+// the three federation / tenancy columns reserved by
+// launch-ticket notes §T10 ("placements 表预留 federation 字段").
+//
+// HostActorID / FederatedOrigin / TenantID are zero-value ("") in
+// launch demo deployments and stored as NULL in sqlite. Populating them
+// is M1.4 / federation / SaaS work and does NOT change the launch state
+// machine — the columns are skipped by every launch CAS / SELECT helper
+// that doesn't care about them.
+type Placement struct {
+	ChannelID             channel.ID
+	DaemonID              DaemonID
+	State                 State
+	OwnerEpoch            OwnerEpoch
+	FencingToken          FencingToken // opaque random; independent of OwnerEpoch
+	CreateRequestID       CreateRequestID
+	DaemonConnectionEpoch ConnectionEpoch // 0 until first connection
+	LastHeartbeatAt       int64           // 0 until first heartbeat
+	CreatedAt             int64
+	ActivatedAt           int64 // 0 until state advances to Active
+	EnteredStateAt        int64 // timestamp when State was last entered
+
+	// Federation / tenancy reservation columns per launch-ticket notes §T10.
+	// All three are "" / NULL in launch demo deployments.
+	HostActorID     string   // M1.4 channel-as-actor: which channel-local actor exposes this channel externally
+	FederatedOrigin string   // M2+ federation: remote origin this channel mirrors (empty for native channels)
+	TenantID        TenantID // M2+ multi-tenant scope; "" / "default" in demo
+}
+
+// CreateChannelRequest is the payload of `control.create_channel` frame
+// per proto-foundation §3.3.3 Phase 1 + impl-layer2 §3.2.1. The server
+// reserves the placement row in state='creating' with owner_epoch=0 and
+// an empty fencing_token, then pushes this frame to the candidate
+// daemon. The daemon is the trust root for fencing — it generates a
+// fresh unguessable fencing_token and sets owner_epoch=1 during Phase 2
+// bootstrap, and returns those values to the server in
+// CreateChannelAck (§3.2.2). This struct therefore MUST NOT carry
+// fencing_token / owner_epoch / connection_epoch_expected — those are
+// daemon-side obligations.
+type CreateChannelRequest struct {
+	ChannelID       channel.ID      `json:"channel_id"`
+	CreateRequestID CreateRequestID `json:"create_request_id"`
+	// InitialMembers carries the channel's bootstrap members so daemon
+	// can populate actor_registry in the same bootstrap saga (impl-layer2
+	// §3.2.1). Each entry is an opaque JSON object the daemon decodes
+	// against its own schema.
+	InitialMembers []InitialMember `json:"initial_members,omitempty"`
+	// ChannelType carries the business channel-template key
+	// (catalog.Channel.Type) the server resolved at reserve time —
+	// `"group"` (no template) for ordinary group chats or `"xhs-creator"`
+	// (domain-xhs template) and similar domain keys. The daemon uses it
+	// to look up the per-type ChannelTemplate (actor seeds / workdir
+	// subdirs / domain prompt) so the bootstrap saga can specialise the
+	// new channel without touching the envelope schema.
+	//
+	// channel_type is mandatory. An empty string is rejected fail-fast at
+	// OnCreateChannel — there is no legacy "no template" path. The catalog
+	// normalizes an unspecified type to "group" at channel-create time, so
+	// every reserve carries an explicit type.
+	//
+	// TODO: impl-layer2 §3.2.1 lists only initial_members/initial_types/
+	// initial_config/metadata as wire fields; channel_type should fold
+	// into one of those (likely initial_config) in a follow-up.
+	ChannelType string `json:"channel_type"`
+}
+
+// InitialMember mirrors one `initial_members[*]` entry per L2 §12.1.
+type InitialMember struct {
+	UserID        UserID        `json:"user_id"`
+	MemberActorID actor.ActorID `json:"member_actor_id"`
+	Kind          actor.Kind    `json:"kind"` // 'human' for L2 §12.1 channel.create flow
+	DisplayName   string        `json:"display_name"`
+	Role          string        `json:"role"` // 'owner' | 'member'
+}
+
+// CreateChannelAckResult is the closed success result set inside
+// CreateChannelAck. Rejects are carried by control.reject_channel.
+type CreateChannelAckResult string
+
+const (
+	CreateChannelAccepted CreateChannelAckResult = "accepted"
+)
+
+// CreateChannelAck is the payload of `control.create_channel_ack` frame
+// per proto-foundation §3.3.3 Phase 2 + impl-layer2 §3.2.2. The daemon
+// is the trust root for fencing: it generates a fresh OwnerEpoch=1 and
+// an unguessable FencingToken during bootstrap and returns them inside
+// this ack. The server's Phase 3 CAS reads OwnerEpoch / FencingToken /
+// DaemonID FROM the ack and writes them into the placement row using
+// `(channel_id, create_request_id, state='creating')` as the CAS
+// predicate.
+//
+// Pre-check (Match) only verifies the saga identifiers
+// (channel_id + create_request_id) plus the candidate daemon — the
+// fencing tuple is the daemon's authoritative output and not a
+// comparison input.
+type CreateChannelAck struct {
+	FrameID         string                 `json:"frame_id"`
+	ChannelID       channel.ID             `json:"channel_id"`
+	CreateRequestID CreateRequestID        `json:"create_request_id"`
+	OwnerEpoch      OwnerEpoch             `json:"owner_epoch"`
+	FencingToken    FencingToken           `json:"fencing_token"`
+	DaemonID        DaemonID               `json:"daemon_id"`
+	DaemonEpoch     DaemonEpoch            `json:"daemon_epoch"`
+	Result          CreateChannelAckResult `json:"result"`
+}
+
+// RejectChannel is the payload of `control.reject_channel` for
+// daemon-side bootstrap rejection.
+type RejectChannel struct {
+	FrameID         string          `json:"frame_id"`
+	ChannelID       channel.ID      `json:"channel_id"`
+	CreateRequestID CreateRequestID `json:"create_request_id"`
+	Reason          string          `json:"reason"`
+	Detail          string          `json:"detail,omitempty"`
+}
+
+// Match verifies the ACK targets the same saga the server reserved for
+// — channel_id + create_request_id + daemon_id must match the placement
+// candidate. OwnerEpoch / FencingToken are daemon-side outputs (the
+// daemon is the trust root for fencing — proto-foundation §3.3.3
+// Phase 2) and therefore MUST NOT be checked here; they are written
+// into the placement row by the Phase 3 CAS, not compared against a
+// pre-existing value.
+//
+// Used as a fast pre-check before hitting sqlite; tests use it to
+// assert the saga-identifier match rule.
+func (a CreateChannelAck) Match(p Placement) bool {
+	return a.ChannelID == p.ChannelID &&
+		a.CreateRequestID == p.CreateRequestID &&
+		a.DaemonID == p.DaemonID
+}
+
+// HeldChannelsReport mirrors `control.held_channels_report` payload —
+// daemon reports the channels it claims to still own after reconnecting.
+// server validates each row against the placement table.
+type HeldChannelsReport struct {
+	DaemonID    DaemonID      `json:"daemon_id"`
+	DaemonEpoch DaemonEpoch   `json:"daemon_epoch"`
+	Channels    []HeldChannel `json:"channels"`
+}
+
+// HeldChannel is one entry in HeldChannelsReport.Channels — the daemon
+// reports the (channel_id, fencing_token, owner_epoch) triple it has on
+// disk. Server validates against the placement record.
+type HeldChannel struct {
+	ChannelID    channel.ID   `json:"channel_id"`
+	FencingToken FencingToken `json:"fencing_token"`
+	OwnerEpoch   OwnerEpoch   `json:"owner_epoch"`
+}
+
+// HeldChannelsDecision is server's per-channel response to a held-channel
+// report.
+type HeldChannelsDecision struct {
+	ChannelID channel.ID `json:"channel_id"`
+	Accepted  bool       `json:"accepted"`
+	Reason    string     `json:"reason,omitempty"` // populated only when Accepted == false
+}
+
+const (
+	// HeldChannelStaleRequiresReclaim is returned when a daemon reports a
+	// locally-held stale placement. Stale is a trap state; ownership must be
+	// recovered through the server-initiated reclaim saga so owner_epoch and
+	// fencing_token rotate before writes resume.
+	HeldChannelStaleRequiresReclaim = "held_channel_stale_requires_reclaim"
+)
+
+// HeldChannelsAck is the server -> daemon control.held_channels_ack payload.
+type HeldChannelsAck struct {
+	DaemonID  DaemonID               `json:"daemon_id"`
+	Decisions []HeldChannelsDecision `json:"decisions"`
+}
+
+// ReclaimOriginState is the previous_state closed set in the
+// server-initiated control.daemon_reclaim payload.
+type ReclaimOriginState string
+
+const (
+	ReclaimOriginOrphan     ReclaimOriginState = "orphan"
+	ReclaimOriginStale      ReclaimOriginState = "stale"
+	ReclaimOriginActiveLost ReclaimOriginState = "active_lost"
+)
+
+// DaemonReclaimRequest is the server -> daemon control.daemon_reclaim
+// payload for the server-initiated reclaim saga. It is intentionally
+// distinct from HeldChannelsReport, which is the daemon cold-start
+// self-report wire.
+type DaemonReclaimRequest struct {
+	ChannelID           channel.ID         `json:"channel_id"`
+	CreateRequestID     CreateRequestID    `json:"create_request_id"`
+	NewOwnerEpoch       OwnerEpoch         `json:"new_owner_epoch"`
+	PreviousOwnerDaemon *DaemonID          `json:"previous_owner_daemon"`
+	PreviousState       ReclaimOriginState `json:"previous_state"`
+}
+
+// ReclaimRejectReason is the placement reclaim_* reject reason closed
+// set from impl-layer2 §3.7.
+type ReclaimRejectReason string
+
+const (
+	ReclaimRejectStoreMissing            ReclaimRejectReason = "reclaim_store_missing"
+	ReclaimRejectCompletenessCheckFailed ReclaimRejectReason = "reclaim_completeness_check_failed"
+	ReclaimRejectOwnerEpochInvalid       ReclaimRejectReason = "reclaim_owner_epoch_invalid"
+	ReclaimRejectInternalError           ReclaimRejectReason = "reclaim_internal_error"
+)
+
+// ReclaimAccepted is the daemon -> server control.reclaim_accepted
+// payload for a server-initiated reclaim.
+type ReclaimAccepted struct {
+	ChannelID       channel.ID      `json:"channel_id"`
+	CreateRequestID CreateRequestID `json:"create_request_id"`
+	NewOwnerEpoch   OwnerEpoch      `json:"new_owner_epoch"`
+	FencingToken    FencingToken    `json:"fencing_token"`
+}
+
+// ReclaimRejected is the daemon -> server control.reclaim_rejected
+// payload for a server-initiated reclaim.
+type ReclaimRejected struct {
+	ChannelID       channel.ID          `json:"channel_id"`
+	CreateRequestID CreateRequestID     `json:"create_request_id"`
+	Reason          ReclaimRejectReason `json:"reason"`
+}
+
+// HeartbeatHeldChannel is one daemon-held channel tuple inside
+// control.heartbeat.payload.
+type HeartbeatHeldChannel struct {
+	ChannelID    channel.ID   `json:"channel_id"`
+	OwnerEpoch   OwnerEpoch   `json:"owner_epoch"`
+	FencingToken FencingToken `json:"fencing_token"`
+}
+
+// HeartbeatPayload is the daemon -> server control.heartbeat.payload
+// shape from impl-layer2 §1.4.1.
+type HeartbeatPayload struct {
+	DaemonID     DaemonID               `json:"daemon_id"`
+	HeartbeatSeq int64                  `json:"heartbeat_seq"`
+	HeldChannels []HeartbeatHeldChannel `json:"held_channels"`
+	Capacity     map[string]interface{} `json:"capacity"`
+}
+
+// PlacementDiffState is the server_state closed set in
+// control.heartbeat_ack.payload. StateCreating is intentionally mapped
+// to PlacementDiffStateUnknown because the heartbeat schema exposes only
+// active/orphan/stale/unknown.
+type PlacementDiffState string
+
+const (
+	PlacementDiffStateActive  PlacementDiffState = "active"
+	PlacementDiffStateOrphan  PlacementDiffState = "orphan"
+	PlacementDiffStateStale   PlacementDiffState = "stale"
+	PlacementDiffStateUnknown PlacementDiffState = "unknown"
+)
+
+// PlacementDiffAction is the action closed set in
+// control.heartbeat_ack.payload.
+type PlacementDiffAction string
+
+const (
+	PlacementDiffActionOK               PlacementDiffAction = "ok"
+	PlacementDiffActionReclaimPending   PlacementDiffAction = "reclaim_pending"
+	PlacementDiffActionDirectoryMissing PlacementDiffAction = "directory_missing"
+)
+
+// AllPlacementDiffActions lists the v1 placement_diff action closed set in
+// wire order.
+var AllPlacementDiffActions = []PlacementDiffAction{
+	PlacementDiffActionOK,
+	PlacementDiffActionReclaimPending,
+	PlacementDiffActionDirectoryMissing,
+}
+
+// PlacementDiff is one server -> daemon heartbeat placement decision.
+type PlacementDiff struct {
+	ChannelID         channel.ID          `json:"channel_id"`
+	ServerState       PlacementDiffState  `json:"server_state"`
+	ServerOwnerEpoch  OwnerEpoch          `json:"server_owner_epoch"`
+	ServerOwnerDaemon *DaemonID           `json:"server_owner_daemon"`
+	Action            PlacementDiffAction `json:"action"`
+}
+
+// HeartbeatAckPayload is the server -> daemon control.heartbeat_ack.payload
+// shape from impl-layer2 §1.4.1.
+type HeartbeatAckPayload struct {
+	HeartbeatSeq  int64           `json:"heartbeat_seq"`
+	PlacementDiff []PlacementDiff `json:"placement_diff"`
+}
+
+// Store is the server-side placement store contract (L2 §1.4.11.1
+// channel_placements 表). server/placements implements it on top of
+// sqlite; tests can wire an in-memory implementation.
+type Store interface {
+	// Reserve performs the L2 §1.4.11.3 step 1 INSERT — INSERT a new
+	// placement row in StateCreating with caller-provided values.
+	// Returns the resulting Placement on success.
+	//
+	// Returns an error wrapping placement-already-exists when the
+	// channel_id PRIMARY KEY collides — caller may inspect via
+	// errors.Is(err, ErrPlacementExists).
+	Reserve(ctx context.Context, p Placement) (Placement, error)
+
+	// Get returns the placement row for channelID (ok=false when
+	// missing). Used by reclaim path + reconcile loop.
+	Get(ctx context.Context, channelID channel.ID) (Placement, bool, error)
+
+	// CASActivate runs the L2 §1.4.11.3 step 5 SQL — UPDATE state to
+	// Active iff every field in the WHERE clause matches the ACK.
+	// Returns ok=true when the CAS succeeded; ok=false (no error)
+	// when the CAS lost (caller should treat as "ACK rejected, leave
+	// reconcile loop to advance to orphan").
+	CASActivate(
+		ctx context.Context,
+		ack CreateChannelAck,
+		newConnectionEpoch ConnectionEpoch,
+		nowMs int64,
+	) (ok bool, err error)
+
+	// MarkStale transitions an active placement to Stale (used by
+	// reconcile loop on heartbeat timeout — L2 §11.5). Idempotent.
+	MarkStale(ctx context.Context, channelID channel.ID, nowMs int64) error
+
+	// MarkOrphan transitions a creating placement to Orphan on create
+	// timeout (L2 §11.5). Idempotent.
+	MarkOrphan(ctx context.Context, channelID channel.ID, nowMs int64) error
+
+	// ReserveReclaim starts the server-initiated reclaim saga by CASing
+	// orphan/stale -> creating, rotating create_request_id, and bumping
+	// owner_epoch by exactly +1 before the wire frame is emitted.
+	ReserveReclaim(
+		ctx context.Context,
+		channelID channel.ID,
+		candidate DaemonID,
+		connectionEpoch ConnectionEpoch,
+		createRequestID CreateRequestID,
+		nowMs int64,
+	) (Placement, bool, error)
+
+	// CASActivateReclaim completes a server-initiated reclaim after the
+	// daemon returns its fresh fencing_token.
+	CASActivateReclaim(
+		ctx context.Context,
+		ack ReclaimAccepted,
+		daemonID DaemonID,
+		newConnectionEpoch ConnectionEpoch,
+		nowMs int64,
+	) (ok bool, err error)
+
+	// AcceptHeldChannel updates daemon_connection_epoch + last_heartbeat_at
+	// when a daemon's held-channel report matches the authoritative
+	// placement tuple. Returns ok=false when validation fails (caller
+	// should reject the report and let stale/orphan reconcile advance
+	// the row).
+	//
+	// daemonID is the WS-authenticated owner identifier from
+	// Connection.DaemonID — the SQL CAS pins it into the WHERE clause
+	// alongside (channel_id, owner_epoch, fencing_token) so a different
+	// daemon presenting the same (epoch, token) tuple cannot hijack
+	// ownership (FIX-T4 / L2 §1.4.11.4 invariant — covers spec
+	// requirement T1.4 "AcceptHeldChannel matches daemon_id,
+	// fencing_token, owner_epoch").
+	AcceptHeldChannel(
+		ctx context.Context,
+		channelID channel.ID,
+		daemonID DaemonID,
+		req HeldChannel,
+		newConnectionEpoch ConnectionEpoch,
+		nowMs int64,
+	) (ok bool, rejectReason string, err error)
+}
+
+// ErrPlacementExists is returned by Store.Reserve when the channel_id
+// already has a placement row. Sentinel so callers can errors.Is on it
+// without string matching.
+type ErrPlacementExists struct {
+	ChannelID channel.ID
+}
+
+// Error implements the error interface.
+func (e *ErrPlacementExists) Error() string {
+	return "placement already exists for channel " + string(e.ChannelID)
+}
+
+// CanTransition reports whether a transition from `from` to `to` is
+// legal per the L2 §1.4.11.2 state machine. Used by tests to assert the
+// full transition matrix (see state_machine_test.go).
+func CanTransition(from, to State) bool {
+	switch from {
+	case "":
+		// Empty (∅) → creating only (server reserve).
+		return to == StateCreating
+	case StateCreating:
+		// creating → active (ACK match) | orphan (create_timeout).
+		return to == StateActive || to == StateOrphan
+	case StateActive:
+		// active → stale (heartbeat timeout) | ∅ (server unbind + ACK).
+		return to == StateStale || to == ""
+	case StateOrphan:
+		// orphan → creating (retry new daemon, owner_epoch+1).
+		return to == StateCreating
+	case StateStale:
+		// stale → creating (server-initiated reclaim, owner_epoch+1,
+		// fresh fencing_token) | orphan (stale_timeout — M2+ migration
+		// trigger). Bare stale → active is forbidden.
+		return to == StateCreating || to == StateOrphan
+	}
+	return false
+}

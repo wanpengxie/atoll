@@ -15,7 +15,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/wanpengxie/ActOS/runtime/transit"
+	"github.com/wanpengxie/ActOS/framework/multiuser/runtime/transit"
 )
 
 func withProductionOrigins(cfg Config) Config {

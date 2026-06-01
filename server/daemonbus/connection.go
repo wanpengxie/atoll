@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wanpengxie/ActOS/kernel/daemonbus"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
-	"github.com/wanpengxie/ActOS/kernel/placement"
-	"github.com/wanpengxie/ActOS/kernel/viewsync"
+	"github.com/wanpengxie/ActOS/framework/devicetransit"
+	"github.com/wanpengxie/ActOS/framework/multiuser/daemonbus"
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
+	"github.com/wanpengxie/ActOS/framework/multiuser/viewsync"
 	"github.com/wanpengxie/ActOS/pkg/metrics"
 	"github.com/wanpengxie/ActOS/pkg/requestctx"
 )
@@ -256,7 +256,7 @@ func buildFrame(ctx context.Context, ft daemonbus.FrameType, daemonID placement.
 	}, nil
 }
 
-// DecodeViewsyncPush turns a daemonbus.Frame into kernel/viewsync.PushFrame.
+// DecodeViewsyncPush turns a daemonbus.Frame into viewsync.PushFrame.
 func DecodeViewsyncPush(frame daemonbus.Frame) (viewsync.PushFrame, error) {
 	var out viewsync.PushFrame
 	if frame.FrameKind != daemonbus.FrameTypeViewsyncPush {

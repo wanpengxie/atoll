@@ -13,11 +13,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/ActOS/framework/devicetransit"
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
 	proxycontract "github.com/wanpengxie/ActOS/internal/proxy/contract"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/devicetransit"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/pkg/metrics"
 	"github.com/wanpengxie/ActOS/pkg/requestctx"
 )

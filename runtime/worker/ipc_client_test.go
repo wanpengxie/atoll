@@ -11,8 +11,8 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/fencing"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 	"github.com/wanpengxie/ActOS/runtime/worker"
 )
@@ -103,8 +103,8 @@ func TestIPCClient_HandshakeStampsOutboundFrames(t *testing.T) {
 	go daemon.loop(ctx, ipc.HandshakeAckPayload{
 		WorkerID:     "worker-XYZ",
 		ChannelID:    channel.ID("ch-1"),
-		FencingToken: placement.FencingToken("tok-11"),
-		DaemonEpoch:  placement.DaemonEpoch(7),
+		FencingToken: fencing.FencingToken("tok-11"),
+		DaemonEpoch:  fencing.DaemonEpoch(7),
 	})
 
 	client := worker.NewIPCClient(workerR, workerW)

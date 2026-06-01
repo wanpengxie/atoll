@@ -47,6 +47,29 @@ components:
   internal: { in: internal/** }
 
   # ─────────────────────────────────────────────────────────────────────
+  # devicetransit — release-agnostic device bridge payload contract.
+  # Device bridge is optional framework protocol, not kernel substrate.
+  # ─────────────────────────────────────────────────────────────────────
+  devicetransit: { in: framework/devicetransit/** }
+
+  # ─────────────────────────────────────────────────────────────────────
+  # multiuser — release-specific multi-daemon / multi-view framework.
+  # It may define placement, daemonbus and view-sync contracts, but kernel
+  # must not depend on it.
+  # ─────────────────────────────────────────────────────────────────────
+  multiuser:
+    in:
+      - framework/multiuser/daemonbus/**
+      - framework/multiuser/placement/**
+      - framework/multiuser/viewsync/**
+
+  # ─────────────────────────────────────────────────────────────────────
+  # multiuser_runtime — daemon-side assembly for the multiuser release.
+  # This is intentionally above the reusable runtime substrate.
+  # ─────────────────────────────────────────────────────────────────────
+  multiuser_runtime: { in: framework/multiuser/runtime/** }
+
+  # ─────────────────────────────────────────────────────────────────────
   # runtime_ipc — daemon ↔ worker IPC wire types (Frame, Codec, payloads).
   # Pure: imports only kernel + stdlib. Shared by runtime (daemon-side
   # workerhost) and runtime_worker (worker subprocess). Splitting it out
@@ -130,6 +153,21 @@ deps:
     # Repo-private contracts stay pure: kernel + stdlib only.
     mayDependOn: [kernel, internal]
 
+  devicetransit:
+    # Device bridge contracts may name actor/channel identities, but kernel
+    # must not know device bridge exists.
+    mayDependOn: [kernel]
+
+  multiuser:
+    # Multiuser framework contracts are layered above the pure kernel.
+    mayDependOn: [kernel, multiuser]
+
+  multiuser_runtime:
+    # Release-specific daemon assembly may wire reusable runtime substrate,
+    # adapter framework and multiuser contracts together.
+    mayDependOn: [kernel, devicetransit, multiuser, multiuser_runtime, runtime, runtime_ipc, runtime_worker, adapters, pkg]
+    anyVendorDeps: true
+
   runtime:
     mayDependOn: [kernel, runtime, runtime_ipc, runtime_worker, pkg]
     anyVendorDeps: true
@@ -149,7 +187,7 @@ deps:
     # Sub-packages within adapters/** MAY import each other (same pattern
     # as server/**). The boundary that matters is adapters → server and
     # adapters → runtime (both excluded by NOT listing them here).
-    mayDependOn: [kernel, adapters, pkg]
+    mayDependOn: [kernel, devicetransit, adapters, pkg]
     anyVendorDeps: true
 
   server:
@@ -160,7 +198,7 @@ deps:
     # other — that is the intra-component composition root pattern.
     # The boundary that matters is server → runtime/** + server →
     # adapters/**, both excluded by NOT listing them here.
-    mayDependOn: [kernel, internal, server, pkg]
+    mayDependOn: [kernel, devicetransit, multiuser, internal, server, pkg]
     canUse:
       - sqlite_driver
       - gin
@@ -171,7 +209,7 @@ deps:
       - zerolog
 
   cmd:
-    mayDependOn: [kernel, runtime, runtime_worker, adapters, server, pkg]
+    mayDependOn: [kernel, devicetransit, multiuser, multiuser_runtime, runtime, runtime_worker, adapters, server, pkg]
     anyVendorDeps: true
 
   pkg:
@@ -188,5 +226,5 @@ deps:
     # tests/** is end-to-end smoke infrastructure — composition-root
     # posture mirroring cmd/**. Freely imports every internal component
     # plus any vendor it needs (sqlite, gorilla websocket, etc.).
-    mayDependOn: [kernel, runtime, runtime_worker, runtime_ipc, adapters, server, pkg, tests]
+    mayDependOn: [kernel, devicetransit, multiuser, multiuser_runtime, runtime, runtime_worker, runtime_ipc, adapters, server, pkg, tests]
     anyVendorDeps: true

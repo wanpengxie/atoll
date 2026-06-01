@@ -14,7 +14,7 @@ func TestModuleContextDoesNotExposeRawCapabilities(t *testing.T) {
 		"HarnessChain",
 		"Correlation",
 		"ErrorPolicy",
-		"DeviceTransit",
+		"RelayTransit",
 		"ActorReadiness",
 	} {
 		if _, ok := typ.FieldByName(name); ok {

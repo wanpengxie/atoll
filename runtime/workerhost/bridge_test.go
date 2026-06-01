@@ -13,8 +13,8 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/fencing"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 	"github.com/wanpengxie/ActOS/runtime/store"
 	"github.com/wanpengxie/ActOS/runtime/worker"
@@ -159,8 +159,8 @@ func newBridgeFixture(t *testing.T, triggerLimit, crashAfter int) *bridgeFixture
 		Chain:            chain,
 		Ledger:           led,
 		NowFn:            now,
-		FencingToken:     placement.FencingToken("tok-1"),
-		DaemonEpoch:      placement.DaemonEpoch(7),
+		FencingToken:     fencing.FencingToken("tok-1"),
+		DaemonEpoch:      fencing.DaemonEpoch(7),
 		HandshakeTimeout: 2 * time.Second,
 		ServeCtx:         ctx,
 	})
@@ -435,8 +435,8 @@ func TestBridge_OnTriggerPushTimeoutDoesNotHoldLock(t *testing.T) {
 		Chain:            chain,
 		Ledger:           led,
 		NowFn:            now,
-		FencingToken:     placement.FencingToken("tok-1"),
-		DaemonEpoch:      placement.DaemonEpoch(7),
+		FencingToken:     fencing.FencingToken("tok-1"),
+		DaemonEpoch:      fencing.DaemonEpoch(7),
 		HandshakeTimeout: 2 * time.Second,
 		PushTimeout:      80 * time.Millisecond,
 		ServeCtx:         ctx,
@@ -565,8 +565,8 @@ func TestBridge_WorkerEnvPropagates(t *testing.T) {
 		Chain:            chain,
 		Ledger:           led,
 		NowFn:            now,
-		FencingToken:     placement.FencingToken("tok-1"),
-		DaemonEpoch:      placement.DaemonEpoch(7),
+		FencingToken:     fencing.FencingToken("tok-1"),
+		DaemonEpoch:      fencing.DaemonEpoch(7),
 		HandshakeTimeout: 2 * time.Second,
 		ServeCtx:         ctx,
 		WorkerEnv:        wantEnv,

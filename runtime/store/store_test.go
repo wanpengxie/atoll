@@ -9,14 +9,15 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
+	multistore "github.com/wanpengxie/ActOS/framework/multiuser/runtime/store"
+	"github.com/wanpengxie/ActOS/framework/multiuser/viewsync"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
 	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/kernel/placement"
-	"github.com/wanpengxie/ActOS/kernel/viewsync"
 	"github.com/wanpengxie/ActOS/runtime/store"
 )
 
@@ -52,8 +53,8 @@ func TestMessageAppend_OutboxRoundTrip(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	msgs := store.NewMessages(db)
-	outbox := store.NewViewSyncOutbox(db, channel.ID("ch-1"))
+	outbox := multistore.NewViewSyncOutbox(db, channel.ID("ch-1"))
+	msgs := store.NewMessagesWithObservers(db, nil, outbox)
 	note := "source thread"
 	crossRefs := []message.CrossChannelRef{{ChannelID: "ch-remote", MessageID: "msg-source", Note: &note}}
 
@@ -126,8 +127,8 @@ func TestOutbox_MarkPushedAndAck(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	msgs := store.NewMessages(db)
-	outbox := store.NewViewSyncOutbox(db, channel.ID("ch-1"))
+	outbox := multistore.NewViewSyncOutbox(db, channel.ID("ch-1"))
+	msgs := store.NewMessagesWithObservers(db, nil, outbox)
 
 	// Insert 3 messages.
 	for i := 0; i < 3; i++ {
@@ -846,9 +847,9 @@ func TestChannelLock(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	lock := store.NewChannelLock(db)
+	lock := multistore.NewChannelLock(db)
 
-	row := store.ChannelLockRow{
+	row := multistore.ChannelLockRow{
 		ChannelID:    "ch-1",
 		FencingToken: placement.FencingToken("tok-1"),
 		OwnerEpoch:   placement.OwnerEpoch(1),

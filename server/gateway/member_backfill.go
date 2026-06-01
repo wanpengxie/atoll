@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 )
 
 func (a *App) syncPlacementMembers(ctx context.Context, p placement.Placement) error {

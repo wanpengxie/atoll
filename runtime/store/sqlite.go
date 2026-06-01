@@ -152,8 +152,6 @@ var channelLocalSchemaShape = map[string][]string{
 	"actor_registry":        {"actor_id", "actor_kind", "ready_state", "ready_reason", "ready_detail", "last_ready_at", "last_state_change_at"},
 	"worker_locks":          {"agent_id", "worker_id", "fencing_token", "daemon_epoch"},
 	"action_ledger":         {"ledger_key", "turn_id", "status"},
-	"view_sync_outbox":      {"seq", "message_id", "status"},
-	"channel_lock":          {"channel_id", "fencing_token", "owner_epoch", "channel_type"},
 	"adapter_state":         {"key", "value"},
 	"adapter_credentials":   {"key", "value"},
 }

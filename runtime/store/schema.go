@@ -11,9 +11,6 @@ package store
 //   - L2 §1.4.6  actor_registry
 //   - L2 §1.4.9  worker_locks
 //   - L2 §1.4.10.1 action_ledger
-//   - L1 §8.6 / T3 view_sync_outbox  (launch new)
-//   - L2 §1.4.11 / T3 channel_lock   (launch new — daemon-side mirror
-//     of channel_placements fencing fields)
 //
 // The DDL string is split into multiple CREATE statements; the
 // modernc.org/sqlite driver accepts multi-statement input via Exec.
@@ -162,56 +159,8 @@ CREATE TABLE IF NOT EXISTS action_ledger (
 
 CREATE INDEX IF NOT EXISTS ix_action_ledger_turn ON action_ledger(turn_id);
 
--- =============================================================
--- 7) view_sync_outbox  (L1 §8.6 — daemon persistent outbox)
--- =============================================================
--- One row per messages.seq enqueued for view-sync push. Inserted in
--- the same transaction as messages append. Status transitions:
---   pending  -> pushed   (transit.client sent the frame)
---   pushed   -> acked    (server returned ack with last_received_seq
---                         >= this row's seq)  -- soft-state; rows
---                         are deleted on ack (no 'acked' row state
---                         is persisted; deletion = acked).
-CREATE TABLE IF NOT EXISTS view_sync_outbox (
-  seq                INTEGER PRIMARY KEY,
-  message_id         TEXT NOT NULL UNIQUE,
-  envelope_json      TEXT NOT NULL,
-  enqueued_at        INTEGER NOT NULL,
-  pushed_at          INTEGER,
-  status             TEXT NOT NULL DEFAULT 'pending'
-                     CHECK (status IN ('pending','pushed')),
-  FOREIGN KEY (seq) REFERENCES messages(seq) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS ix_view_sync_outbox_status_seq
-  ON view_sync_outbox(status, seq);
-
--- =============================================================
--- 8) channel_lock  (L2 §1.4.11 + T1.4 — daemon-side fencing mirror)
--- =============================================================
--- Single row (channel_id = 'self'). Holds the fencing fields the
--- daemon process must satisfy to write into this channel sqlite.
--- daemon_epoch is the daemon process counter — bumped on every
--- daemon restart so stale worker IPC after restart fails fence_check.
-	CREATE TABLE IF NOT EXISTS channel_lock (
-	  channel_id         TEXT PRIMARY KEY,
-	  -- fencing_token is an opaque unguessable string (proto-foundation
-	  -- §3.6.1). owner_epoch carries the monotonic ordering invariant.
-	  fencing_token      TEXT NOT NULL,
-	  owner_epoch        INTEGER NOT NULL,
-  daemon_id          TEXT NOT NULL,
-  daemon_epoch       INTEGER NOT NULL,
-  acquired_at        INTEGER NOT NULL,
-  refreshed_at       INTEGER NOT NULL,
-  -- M1.6-T5 phase-2: L4 channel-template key (e.g. "xhs-creator") so a
-  -- cold-start daemon can look the template up when re-mounting the
-  -- channel without round-tripping the server. NULL / empty == legacy
-  -- "no template" (generic group channel).
-	  channel_type       TEXT NOT NULL DEFAULT ''
-	);
-
 	-- =============================================================
-	-- 9) adapter_state  (L2 §8 F4 — framework StateStore)
+	-- 7) adapter_state  (L2 §8 F4 — framework StateStore)
 	-- =============================================================
 	CREATE TABLE IF NOT EXISTS adapter_state (
 	  key                TEXT PRIMARY KEY,
@@ -220,7 +169,7 @@ CREATE INDEX IF NOT EXISTS ix_view_sync_outbox_status_seq
 	);
 
 	-- =============================================================
-	-- 10) adapter_credentials  (L2 §8 F8 — framework CredentialStore)
+	-- 8) adapter_credentials  (L2 §8 F8 — framework CredentialStore)
 	-- =============================================================
 	CREATE TABLE IF NOT EXISTS adapter_credentials (
 	  key                TEXT PRIMARY KEY,
@@ -267,8 +216,6 @@ var ChannelLocalTables = []string{
 	"actor_registry",
 	"worker_locks",
 	"action_ledger",
-	"view_sync_outbox",
-	"channel_lock",
 	"adapter_state",
 	"adapter_credentials",
 }

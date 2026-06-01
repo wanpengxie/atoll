@@ -11,9 +11,9 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/fencing"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
-	"github.com/wanpengxie/ActOS/kernel/placement"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 	"github.com/wanpengxie/ActOS/runtime/store"
@@ -30,8 +30,8 @@ type HostConfig struct {
 	ChannelID    channel.ID
 	WorkerID     string
 	LeaseID      string
-	FencingToken placement.FencingToken
-	DaemonEpoch  placement.DaemonEpoch
+	FencingToken fencing.FencingToken
+	DaemonEpoch  fencing.DaemonEpoch
 
 	// Chain is the daemon-side Message-Write Harness entry point. Every
 	// worker IPC write_message frame is routed through Chain.Write so

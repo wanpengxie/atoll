@@ -19,28 +19,19 @@
 //   - kernel/ledger     — ActionLedger reserve/commit interface, ledger key
 //     derivation.
 //   - kernel/log        — append-only MessageLog interface, Seq/Cursor.
-//   - kernel/viewsync   — Pusher / Receiver / Resyncer contracts, frame
-//     types (PushFrame / AckFrame / ResyncRequest /
-//     ResyncResponse), cursor types — covers L1 §8.
-//   - kernel/placement  — channel placement state machine + ACK-frame
-//     field set + state transition matrix — covers
-//     L2 §1.4.11.
-//   - kernel/daemonbus  — daemonbus mux frame schema (control / viewsync
-//     / device_transit) + epoch-bearing header —
-//     covers L2 §9.
+//   - kernel/fencing    — minimal write-fence primitives shared by channel
+//     mutation paths.
 //   - kernel/adapter    — Module / Manager / CorrelationTracker /
-//     ErrorPolicy / AdapterCtx / DeviceTransit interfaces — covers
-//     L2 §8 framework contract. Binding lives in kernel/actor.
-//   - kernel/devicetransit — device_transit payloads and DeviceTransit
-//     interface shared by adapter, daemonbus and runtime transit.
+//     ErrorPolicy / AdapterCtx interfaces — covers L2 §8 framework
+//     contract. Binding lives in kernel/actor.
 //
 // Layering rule (enforced by go-arch-lint in T2):
 //
 //   - kernel/** MUST NOT import: database/sql, net/http, gorilla/**,
 //     gin-gonic/**, mattn/go-sqlite3, modernc.org/sqlite, go-kimi.
-//   - All concrete backends (sqlite store, daemon RPC HTTP server,
-//     daemonbus WS impl, etc.) live in runtime/ / server/ / adapters/
-//     and depend on kernel/, never the other way round.
+//   - All concrete backends and release-specific frameworks (sqlite store,
+//     daemon RPC HTTP server, multiuser daemonbus, etc.) live outside
+//     kernel/ and depend on kernel/, never the other way round.
 //
 // Spec cross-reference: launch-ticket notes §T1 (origin ticket
 // for the kernel layout) + §T2 (go-arch-lint enforce baseline).

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/kernel/placement"
+	"github.com/wanpengxie/ActOS/kernel/fencing"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 	"github.com/wanpengxie/ActOS/runtime/worker"
 )
@@ -17,10 +17,10 @@ import (
 func TestFenceInvalidErrorFormat(t *testing.T) {
 	err := &worker.FenceInvalidError{
 		FenceInvalidPayload: ipc.FenceInvalidPayload{
-			ExpectedToken: placement.FencingToken("tok-7"),
-			GotToken:      placement.FencingToken("tok-5"),
-			ExpectedEpoch: placement.DaemonEpoch(12),
-			GotEpoch:      placement.DaemonEpoch(10),
+			ExpectedToken: fencing.FencingToken("tok-7"),
+			GotToken:      fencing.FencingToken("tok-5"),
+			ExpectedEpoch: fencing.DaemonEpoch(12),
+			GotEpoch:      fencing.DaemonEpoch(10),
 			Reason:        "stale-daemon",
 		},
 	}
