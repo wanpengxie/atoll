@@ -1,4 +1,4 @@
-package framework
+package behavior
 
 import "sync"
 
@@ -14,7 +14,7 @@ type Logger interface {
 	Error(msg string, args ...any)
 }
 
-// NoopLogger is the zero-value Logger used when ManagerConfig.Logger is nil.
+// NoopLogger is the zero-value Logger used when behavior config Logger is nil.
 type NoopLogger struct{}
 
 // Debug satisfies Logger.
