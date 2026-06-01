@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
-	multistore "github.com/wanpengxie/ActOS/framework/multiuser/runtime/store"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/fencing"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
@@ -18,17 +16,19 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/store"
 )
 
-// fencedFixture spins up a fresh channel sqlite with a seeded
-// channel_lock row and the WithLock variants of Messages + Ledger. The
-// shared (token, epoch) tuple is the one a non-stale daemon is supposed
-// to present.
+// fencedFixture spins up a fresh channel sqlite and wires Messages + Ledger
+// with a PURE fake fence (accepts only the seeded tuple) + a recording
+// append observer. The framework-side ChannelLock / ViewSyncOutbox are
+// tested in framework/multiuser/runtime/store; here the subject is the
+// substrate fencing GATE: that Messages/Ledger consult the injected fence
+// and only invoke the observer on a committed append.
 type fencedFixture struct {
 	db    *sql.DB
-	lock  *multistore.ChannelLock
 	msgs  *store.Messages
 	led   *store.Ledger
 	token fencing.FencingToken
 	epoch fencing.DaemonEpoch
+	enq   *int // observer EnqueueAppendTx call count
 }
 
 func newFencedFixture(t *testing.T, token fencing.FencingToken, epoch fencing.DaemonEpoch) *fencedFixture {
@@ -41,27 +41,18 @@ func newFencedFixture(t *testing.T, token fencing.FencingToken, epoch fencing.Da
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	lock := multistore.NewChannelLock(db)
-	if err := lock.Insert(ctx, multistore.ChannelLockRow{
-		ChannelID:    "ch-fence",
-		FencingToken: token,
-		OwnerEpoch:   placement.OwnerEpoch(1),
-		DaemonID:     "daemon-A",
-		DaemonEpoch:  epoch,
-		AcquiredAt:   1000,
-		RefreshedAt:  1000,
-	}); err != nil {
-		t.Fatalf("seed channel_lock: %v", err)
+	fence := fakeFence(token, epoch)
+	enq := new(int)
+	obs := store.AppendObserverFuncs{
+		Enqueue: func(context.Context, *sql.Tx, *message.Envelope, int64) error { *enq++; return nil },
 	}
-
-	outbox := multistore.NewViewSyncOutbox(db, "ch-fence")
 	return &fencedFixture{
 		db:    db,
-		lock:  lock,
-		msgs:  store.NewMessagesWithObservers(db, lock, outbox),
-		led:   store.NewLedgerWithLock(db, lock),
+		msgs:  store.NewMessagesWithObservers(db, fence, obs),
+		led:   store.NewLedgerWithLock(db, fence),
 		token: token,
 		epoch: epoch,
+		enq:   enq,
 	}
 }
 
@@ -78,52 +69,6 @@ func newFencedEnvelope(id string) *message.Envelope {
 		Visibility: message.VisibilityPublic,
 		Audience:   message.Audience{"agent:channel-agent"},
 	}
-}
-
-func TestChannelLockTakeoverRotatesTupleWithoutInsert(t *testing.T) {
-	t.Parallel()
-	fx := newFencedFixture(t, "tok-old", 1)
-	ctx := context.Background()
-
-	if err := fx.lock.Takeover(ctx, multistore.ChannelLockRow{
-		ChannelID:    "ch-fence",
-		FencingToken: "tok-new",
-		OwnerEpoch:   2,
-		DaemonID:     "daemon-B",
-		DaemonEpoch:  9,
-		AcquiredAt:   2000,
-		RefreshedAt:  2000,
-	}, 1); err != nil {
-		t.Fatalf("Takeover: %v", err)
-	}
-	row, ok, err := fx.lock.Get(ctx)
-	if err != nil || !ok {
-		t.Fatalf("Get ok=%v err=%v", ok, err)
-	}
-	if row.FencingToken != "tok-new" || row.OwnerEpoch != 2 || row.DaemonID != "daemon-B" || row.DaemonEpoch != 9 {
-		t.Fatalf("row after takeover=%+v", row)
-	}
-	var count int
-	if err := fx.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_lock`).Scan(&count); err != nil {
-		t.Fatalf("count channel_lock: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("channel_lock rows=%d want 1", count)
-	}
-	if err := fx.lock.Takeover(ctx, row, 1); err == nil {
-		t.Fatalf("stale takeover CAS succeeded")
-	}
-}
-
-// outboxRowCount returns the number of view_sync_outbox rows — used to
-// prove the outbox is NOT polluted on a fencing-reject path (L1 §8.6).
-func outboxRowCount(t *testing.T, db *sql.DB) int {
-	t.Helper()
-	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM view_sync_outbox`).Scan(&n); err != nil {
-		t.Fatalf("count outbox: %v", err)
-	}
-	return n
 }
 
 func messagesRowCount(t *testing.T, db *sql.DB) int {
@@ -145,7 +90,8 @@ func ledgerRowCount(t *testing.T, db *sql.DB) int {
 }
 
 // TestMessages_FencingEnforced is the FIX-T6 reject table for Append.
-// Every row exercises one branch of the fencing gate.
+// Every row exercises one branch of the fencing gate. The append observer
+// must NOT be invoked on a rejected (un-committed) append.
 func TestMessages_FencingEnforced(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -218,8 +164,8 @@ func TestMessages_FencingEnforced(t *testing.T) {
 				if n := messagesRowCount(t, fx.db); n != 0 {
 					t.Errorf("messages row written despite reject: %d", n)
 				}
-				if n := outboxRowCount(t, fx.db); n != 0 {
-					t.Errorf("view_sync_outbox row written despite reject: %d", n)
+				if *fx.enq != 0 {
+					t.Errorf("append observer invoked despite reject: %d", *fx.enq)
 				}
 				return
 			}
@@ -230,8 +176,8 @@ func TestMessages_FencingEnforced(t *testing.T) {
 			if n := messagesRowCount(t, fx.db); n != 1 {
 				t.Errorf("messages rowcount = %d, want 1", n)
 			}
-			if n := outboxRowCount(t, fx.db); n != 1 {
-				t.Errorf("outbox rowcount = %d, want 1", n)
+			if *fx.enq != 1 {
+				t.Errorf("append observer call count = %d, want 1", *fx.enq)
 			}
 		})
 	}
@@ -305,103 +251,17 @@ func TestLedger_FencingEnforced(t *testing.T) {
 	}
 }
 
-// TestChannelLock_ValidateWriteTx covers the in-tx fencing gate in
-// isolation. Mirrors store_test.go TestChannelLock but exercises the
-// FIX-T6 tx-aware variant.
-func TestChannelLock_ValidateWriteTx(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := store.OpenChannel(ctx, filepath.Join(dir, "ch.sqlite"), store.OpenOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = db.Close() }()
-
-	lock := multistore.NewChannelLock(db)
-	if err := lock.Insert(ctx, multistore.ChannelLockRow{
-		ChannelID:    "ch-1",
-		FencingToken: fencing.FencingToken("tok-5"),
-		OwnerEpoch:   placement.OwnerEpoch(1),
-		DaemonID:     "daemon-A",
-		DaemonEpoch:  fencing.DaemonEpoch(2),
-		AcquiredAt:   1000,
-		RefreshedAt:  1000,
-	}); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	runInTx := func(token fencing.FencingToken, epoch fencing.DaemonEpoch) error {
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			t.Fatalf("begin: %v", err)
-		}
-		defer func() { _ = tx.Rollback() }()
-		return lock.ValidateWriteTx(ctx, tx, token, epoch)
-	}
-
-	cases := []struct {
-		name    string
-		token   fencing.FencingToken
-		epoch   fencing.DaemonEpoch
-		wantErr bool
-	}{
-		{"match", "tok-5", 2, false},
-		{"token mismatch (different value 'lower')", "tok-4", 2, true},
-		{"token mismatch (different value 'higher')", "tok-6", 2, true},
-		{"epoch lower", "tok-5", 1, true},
-		{"epoch higher", "tok-5", 3, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := runInTx(tc.token, tc.epoch)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error")
-				}
-				if !store.IsFencingStale(err) {
-					t.Errorf("expected FencingStaleError, got %v", err)
-				}
-			} else if err != nil {
-				t.Errorf("expected ok, got %v", err)
-			}
-		})
-	}
-
-	// Lock row missing → also stale.
-	t.Run("lock row missing", func(t *testing.T) {
-		dir := t.TempDir()
-		db, err := store.OpenChannel(ctx, filepath.Join(dir, "empty.sqlite"), store.OpenOptions{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = db.Close() }()
-		emptyLock := multistore.NewChannelLock(db)
-		tx, _ := db.BeginTx(ctx, nil)
-		defer func() { _ = tx.Rollback() }()
-		err = emptyLock.ValidateWriteTx(ctx, tx, fencing.FencingToken("tok-5"), fencing.DaemonEpoch(2))
-		if !store.IsFencingStale(err) {
-			t.Errorf("missing row: want FencingStaleError, got %v", err)
-		}
-	})
-
-	// Nil tx → error path.
-	t.Run("nil tx", func(t *testing.T) {
-		if err := lock.ValidateWriteTx(ctx, nil, fencing.FencingToken("tok-5"), fencing.DaemonEpoch(2)); err == nil {
-			t.Fatal("nil tx: expected error")
-		}
-	})
-}
-
 // TestMessages_FencingDedupeUnchanged guards that the dedupe branch
 // still works once fencing is enforced — a retry with the same envelope
-// id should return Deduped=true (not a fencing reject).
+// id should return Deduped=true (not a fencing reject) and must NOT
+// re-invoke the append observer.
 func TestMessages_FencingDedupeUnchanged(t *testing.T) {
 	fx := newFencedFixture(t, fencing.FencingToken("tok-7"), fencing.DaemonEpoch(3))
 	ctx := context.Background()
-	fencing := klog.FencingTuple{Token: fx.token, Epoch: fx.epoch}
+	tuple := klog.FencingTuple{Token: fx.token, Epoch: fx.epoch}
 
 	env := newFencedEnvelope("m-dedupe")
-	res1, err := fx.msgs.Append(ctx, env, fencing)
+	res1, err := fx.msgs.Append(ctx, env, tuple)
 	if err != nil {
 		t.Fatalf("append1: %v", err)
 	}
@@ -409,14 +269,14 @@ func TestMessages_FencingDedupeUnchanged(t *testing.T) {
 		t.Error("first append should not be deduped")
 	}
 
-	res2, err := fx.msgs.Append(ctx, env, fencing)
+	res2, err := fx.msgs.Append(ctx, env, tuple)
 	if err != nil {
 		t.Fatalf("append2: %v", err)
 	}
 	if !res2.Deduped {
 		t.Error("second append should be deduped")
 	}
-	if n := outboxRowCount(t, fx.db); n != 1 {
-		t.Errorf("dedupe must not add outbox row, got %d", n)
+	if *fx.enq != 1 {
+		t.Errorf("dedupe must not re-invoke observer, got %d calls", *fx.enq)
 	}
 }

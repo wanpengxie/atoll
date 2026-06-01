@@ -7,10 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/framework/multiuser/placement"
-	multistore "github.com/wanpengxie/ActOS/framework/multiuser/runtime/store"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/fencing"
 	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime/store"
@@ -19,8 +18,8 @@ import (
 func TestCatalogPostMember_DaemonActorRegistered_MirrorEventAppended(t *testing.T) {
 	ctx := context.Background()
 	chID := channel.ID("ch-members")
-	db, lock, fencing := newMemberTransitionFixture(t, chID)
-	reg := store.NewActorRegistryWithObservers(db, lock, multistore.NewViewSyncOutbox(db, chID))
+	db, fence, tuple := newMemberTransitionFixture(t, chID)
+	reg := store.NewActorRegistryWithObservers(db, fence, store.AppendObserverFuncs{})
 
 	err := reg.ApplyMemberTransitions(ctx, chID, []store.MemberActorAdd{{
 		ID:          "user:bob",
@@ -29,14 +28,14 @@ func TestCatalogPostMember_DaemonActorRegistered_MirrorEventAppended(t *testing.
 		UserID:      "u-bob",
 		Role:        "member",
 		At:          1000,
-	}}, nil, fencing)
+	}}, nil, tuple)
 	if err != nil {
 		t.Fatalf("ApplyMemberTransitions add: %v", err)
 	}
 	if rec, ok, err := reg.Lookup(ctx, "user:bob"); err != nil || !ok || !rec.IsActive() {
 		t.Fatalf("actor row ok=%v rec=%+v err=%v", ok, rec, err)
 	}
-	msgs := store.NewMessagesWithLock(db, lock)
+	msgs := store.NewMessagesWithLock(db, fence)
 	env, ok, err := msgs.FindByID(ctx, chID, "system.actor.registered:user:bob:1000")
 	if err != nil || !ok {
 		t.Fatalf("registered mirror ok=%v err=%v", ok, err)
@@ -51,7 +50,7 @@ func TestCatalogPostMember_DaemonActorRegistered_MirrorEventAppended(t *testing.
 		UserID: "u-stale",
 		Role:   "member",
 		At:     1001,
-	}}, nil, klog.FencingTuple{Token: "wrong", Epoch: fencing.Epoch})
+	}}, nil, klog.FencingTuple{Token: "wrong", Epoch: tuple.Epoch})
 	if err == nil {
 		t.Fatal("stale fencing add succeeded")
 	}
@@ -63,8 +62,8 @@ func TestCatalogPostMember_DaemonActorRegistered_MirrorEventAppended(t *testing.
 func TestProxyHostMetadataEmittedInActorRegisteredMirror(t *testing.T) {
 	ctx := context.Background()
 	chID := channel.ID("ch-proxy-host")
-	db, lock, fencing := newMemberTransitionFixture(t, chID)
-	reg := store.NewActorRegistryWithObservers(db, lock, multistore.NewViewSyncOutbox(db, chID))
+	db, fence, tuple := newMemberTransitionFixture(t, chID)
+	reg := store.NewActorRegistryWithObservers(db, fence, store.AppendObserverFuncs{})
 
 	err := reg.ApplyMemberTransitions(ctx, chID, []store.MemberActorAdd{{
 		ID:          "tool:kimi",
@@ -78,12 +77,12 @@ func TestProxyHostMetadataEmittedInActorRegisteredMirror(t *testing.T) {
 			DaemonID:   "daemon-proxy",
 			DaemonName: "Proxy Laptop",
 		},
-	}}, nil, fencing)
+	}}, nil, tuple)
 	if err != nil {
 		t.Fatalf("ApplyMemberTransitions add: %v", err)
 	}
 
-	msgs := store.NewMessagesWithLock(db, lock)
+	msgs := store.NewMessagesWithLock(db, fence)
 	env, ok, err := msgs.FindByID(ctx, chID, "system.actor.registered:tool:kimi:1000")
 	if err != nil || !ok {
 		t.Fatalf("registered mirror ok=%v err=%v", ok, err)
@@ -105,8 +104,8 @@ func TestProxyHostMetadataEmittedInActorRegisteredMirror(t *testing.T) {
 func TestCatalogDeleteMember_DaemonActorDeregistered_MirrorEventAppended(t *testing.T) {
 	ctx := context.Background()
 	chID := channel.ID("ch-members-delete")
-	db, lock, fencing := newMemberTransitionFixture(t, chID)
-	reg := store.NewActorRegistryWithObservers(db, lock, multistore.NewViewSyncOutbox(db, chID))
+	db, fence, tuple := newMemberTransitionFixture(t, chID)
+	reg := store.NewActorRegistryWithObservers(db, fence, store.AppendObserverFuncs{})
 
 	if err := reg.ApplyMemberTransitions(ctx, chID, []store.MemberActorAdd{{
 		ID:     "user:bob",
@@ -114,20 +113,20 @@ func TestCatalogDeleteMember_DaemonActorDeregistered_MirrorEventAppended(t *test
 		UserID: "u-bob",
 		Role:   "member",
 		At:     1000,
-	}}, nil, fencing); err != nil {
+	}}, nil, tuple); err != nil {
 		t.Fatalf("seed add: %v", err)
 	}
 	if err := reg.ApplyMemberTransitions(ctx, chID, nil, []store.MemberActorRemove{{
 		ID: "user:bob",
 		At: 2000,
-	}}, fencing); err != nil {
+	}}, tuple); err != nil {
 		t.Fatalf("ApplyMemberTransitions remove: %v", err)
 	}
 	rec, ok, err := reg.Lookup(ctx, "user:bob")
 	if err != nil || !ok || rec.DeregisteredAt != 2000 {
 		t.Fatalf("deregistered row ok=%v rec=%+v err=%v", ok, rec, err)
 	}
-	msgs := store.NewMessagesWithLock(db, lock)
+	msgs := store.NewMessagesWithLock(db, fence)
 	env, ok, err := msgs.FindByID(ctx, chID, message.ID("system.actor.deregistered:user:bob:2000"))
 	if err != nil || !ok {
 		t.Fatalf("deregistered mirror ok=%v err=%v", ok, err)
@@ -137,7 +136,11 @@ func TestCatalogDeleteMember_DaemonActorDeregistered_MirrorEventAppended(t *test
 	}
 }
 
-func newMemberTransitionFixture(t *testing.T, chID channel.ID) (*sql.DB, *multistore.ChannelLock, klog.FencingTuple) {
+// newMemberTransitionFixture seeds a fresh channel sqlite and a pure
+// fake fence accepting the returned tuple. No framework ChannelLock — the
+// subject under test is the substrate ActorRegistry, the fence is just the
+// gate it must consult.
+func newMemberTransitionFixture(t *testing.T, chID channel.ID) (*sql.DB, store.WriteFence, klog.FencingTuple) {
 	t.Helper()
 	ctx := context.Background()
 	db, err := store.OpenChannel(ctx, filepath.Join(t.TempDir(), "channel.sqlite"), store.OpenOptions{})
@@ -145,18 +148,7 @@ func newMemberTransitionFixture(t *testing.T, chID channel.ID) (*sql.DB, *multis
 		t.Fatalf("OpenChannel: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	lock := multistore.NewChannelLock(db)
-	token := placement.FencingToken("member-transition-token")
-	if err := lock.Insert(ctx, multistore.ChannelLockRow{
-		ChannelID:    chID,
-		FencingToken: token,
-		OwnerEpoch:   1,
-		DaemonID:     "daemon-test",
-		DaemonEpoch:  7,
-		AcquiredAt:   1,
-		RefreshedAt:  1,
-	}); err != nil {
-		t.Fatalf("lock insert: %v", err)
-	}
-	return db, lock, klog.FencingTuple{Token: token, Epoch: 7}
+	token := fencing.FencingToken("member-transition-token")
+	const epoch = fencing.DaemonEpoch(7)
+	return db, fakeFence(token, epoch), klog.FencingTuple{Token: token, Epoch: epoch}
 }
