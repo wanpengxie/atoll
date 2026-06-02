@@ -39,14 +39,13 @@ var ReservedActorTypeSet = []string{
 // frame `system.heartbeat` is intentionally NOT here (it is a transport
 // control frame, never a channel envelope — see core_types.go).
 const (
-	ReservedSystemChannelCreated     = "system.channel.created"
-	ReservedSystemActorRegistered    = "system.actor.registered"
-	ReservedSystemActorDeregistered  = "system.actor.deregistered"
-	ReservedSystemConfigUpdated      = "system.config.updated"
-	ReservedSystemTypeInstalled      = "system.type.installed"
-	ReservedSystemTypeDeprecated     = "system.type.deprecated"
-	ReservedSystemPlacementReclaimed = "system.placement.reclaimed"
-	ReservedActorReadinessChanged    = "actor.readiness.changed"
+	ReservedSystemChannelCreated    = "system.channel.created"
+	ReservedSystemActorRegistered   = "system.actor.registered"
+	ReservedSystemActorDeregistered = "system.actor.deregistered"
+	ReservedSystemConfigUpdated     = "system.config.updated"
+	ReservedSystemTypeInstalled     = "system.type.installed"
+	ReservedSystemTypeDeprecated    = "system.type.deprecated"
+	ReservedActorReadinessChanged   = "actor.readiness.changed"
 )
 
 // ReservedSystemEventTypeSet enumerates the reserved system event types.
@@ -57,6 +56,5 @@ var ReservedSystemEventTypeSet = []string{
 	ReservedSystemConfigUpdated,
 	ReservedSystemTypeInstalled,
 	ReservedSystemTypeDeprecated,
-	ReservedSystemPlacementReclaimed,
 	ReservedActorReadinessChanged,
 }

@@ -12,8 +12,6 @@ const (
 	InstallHandlerActorBindingMismatch   InstallReason = "handler_actor_binding_mismatch"
 	InstallTypeRegistryInvalid           InstallReason = "type_registry_invalid"
 	InstallTypeRegistryReservedNamespace InstallReason = "type_registry_reserved_namespace"
-	InstallWorkerLockHeld                InstallReason = "worker_lock_held"
-	InstallBootstrapInProgress           InstallReason = "bootstrap_in_progress"
 )
 
 // String returns the wire form.

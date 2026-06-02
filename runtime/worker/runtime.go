@@ -30,10 +30,10 @@ type Config struct {
 
 // Runtime is the worker subprocess main loop. It performs:
 //
-//  1. Handshake with the daemon (learn fencing_token + daemon_epoch).
+//  1. Handshake with the daemon (learn the worker-LEASE token).
 //  2. Start a heartbeat goroutine (30s cadence).
-//  3. Hand control to the Bridge (or test harness) which makes calls
-//     into IPCClient.WriteMessage / ReserveLedger / CommitLedger.
+//  3. Hand control to the Bridge (or test harness) which emits envelopes
+//     upward via IPCClient.EmitEnvelope (KindEmit) / EmitDown (KindDown).
 //  4. On Bridge return: Shutdown IPC.
 //  5. On *FenceInvalidError anywhere: exit immediately.
 type Runtime struct {

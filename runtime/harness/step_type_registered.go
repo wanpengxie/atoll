@@ -15,13 +15,12 @@ import (
 // Keys reference kernel/actor constants (the frozen closed set, §1.4) rather
 // than bare literals so a kernel rename can never silently diverge here.
 var reservedBootstrapTypeSet = map[string]struct{}{
-	actor.ReservedSystemChannelCreated:     {},
-	actor.ReservedSystemActorRegistered:    {},
-	actor.ReservedSystemActorDeregistered:  {},
-	actor.ReservedSystemTypeInstalled:      {},
-	actor.ReservedSystemTypeDeprecated:     {},
-	actor.ReservedSystemConfigUpdated:      {},
-	actor.ReservedSystemPlacementReclaimed: {},
+	actor.ReservedSystemChannelCreated:    {},
+	actor.ReservedSystemActorRegistered:   {},
+	actor.ReservedSystemActorDeregistered: {},
+	actor.ReservedSystemTypeInstalled:     {},
+	actor.ReservedSystemTypeDeprecated:    {},
+	actor.ReservedSystemConfigUpdated:     {},
 }
 
 type reservedActorTypeRule struct {
