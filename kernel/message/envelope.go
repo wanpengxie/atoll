@@ -29,10 +29,10 @@ type CrossChannelRef struct {
 
 // Envelope is the v4 message envelope (pure proto).
 //
-// It carries the content fields from L0 §2.1 (with `sender.kind/id/name`
+// It carries the content fields from L0 §2.1 (with `sender.kind/id`
 // bundled into the nested Sender object).
 //
-// Store-derived columns (`seq`, `is_terminal`, `canonical_hash`) are NOT
+// Store-derived columns (`seq`, `is_terminal`) are NOT
 // part of the envelope — they live on the runtime/store row that wraps it
 // (target-state §3.7). The substrate carries no delivery/scheduling
 // metadata on the message: delivery outcome is the closure terminal

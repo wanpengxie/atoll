@@ -129,7 +129,7 @@ func applyPragmas(ctx context.Context, db *sql.DB, opts OpenOptions) error {
 // the DDL is the single source of truth; this map is just the fail-fast
 // guard that an opened file actually carries that shape.
 var channelLocalSchemaShape = map[string][]string{
-	"messages":              {"seq", "id", "type", "kind", "cross_channel_refs", "canonical_hash"},
+	"messages":              {"seq", "id", "type", "kind", "cross_channel_refs"},
 	"type_registry":         {"type", "handler_binding", "install_status", "install_error"},
 	"type_registry_pending": {"install_attempt_id", "type", "install_status", "install_error"},
 	"actor_cursors":         {"actor_id", "last_consumed_seq"},

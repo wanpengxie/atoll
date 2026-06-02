@@ -27,7 +27,7 @@
 //   - Projections (actor membership Record/Registry, type_registry TypeRow)
 //     — projections are derived read caches, a
 //     runtime/server facility, never a kernel model (truth-vs-projection).
-//   - store-derived envelope columns (seq, is_terminal, canonical_hash) —
+//   - store-derived envelope columns (seq, is_terminal) —
 //     produced by the store, not part of the 17 protocol fields.
 //   - harness reject + install reason vocabularies — the write/install
 //     ENGINES' errno, co-evolving with their engines → runtime.
