@@ -38,9 +38,7 @@ CREATE TABLE IF NOT EXISTS messages (
   not_before           INTEGER,
   expires_at           INTEGER,
   delivered_at         INTEGER,
-  delivery_failed_at   INTEGER,
   last_error           TEXT,
-  attempts             INTEGER NOT NULL DEFAULT 0,
   is_terminal          INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0,1)),
   canonical_hash       TEXT NOT NULL DEFAULT ''
 );

@@ -22,11 +22,9 @@ type Seq int64
 type StoredRow struct {
 	Envelope message.Envelope
 
-	Seq              int64
-	IsTerminal       bool
-	CanonicalHash    string
-	Attempts         int64
-	DeliveryFailedAt *int64
+	Seq           int64
+	IsTerminal    bool
+	CanonicalHash string
 }
 
 // AppendResult is what MessageLog.Append returns on a successful row write
@@ -111,18 +109,6 @@ type MessageQuery interface {
 	LongPendingRequests(ctx context.Context, nowMs int64, limit int) ([]StoredRow, error)
 	// OpenRequestsForActor returns in-flight requests addressed to actorID.
 	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID, limit int) ([]StoredRow, error)
-	// RetryableDeliveries returns failed-delivery requests whose backoff elapsed.
-	RetryableDeliveries(ctx context.Context, nowMs int64, limit int, backoffFn func(attempts int64) int64) ([]StoredRow, error)
-}
-
-// DeliveryStore is the delivery-bookkeeping mutation role (scheduler/daemon
-// delivery loop): it stamps delivered_at / records delivery errors. Separated
-// from MessageLog (log append) and MessageQuery (reads) per role — these are
-// delivery-state commands, not channel-log appends, and the consumer is the
-// delivery loop, not the harness.
-type DeliveryStore interface {
-	MarkDelivered(ctx context.Context, id message.ID, atMs int64) error
-	MarkDeliveryError(ctx context.Context, id message.ID, atMs int64, errText string) error
 }
 
 // Cursor mirrors an actor_cursors row (L2 §1.4.3). Position metric is

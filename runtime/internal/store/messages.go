@@ -152,17 +152,14 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 	   kind, type, payload,
 	   parent_id, correlation_id, doc_refs, cross_channel_refs,
 	   visibility, audience, not_before, expires_at,
-	   delivered_at, delivery_failed_at, last_error, attempts,
+	   delivered_at, last_error,
 	   is_terminal, canonical_hash
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	terminalInt := 0
 	if isTerminal {
 		terminalInt = 1
 	}
-	// A freshly-appended row has never failed delivery: delivery_failed_at
-	// NULL, attempts 0. (These store-derived scheduling columns are no
-	// longer carried on the pure envelope.)
 	res, err := tx.ExecContext(ctx, ins,
 		env.ID, env.TS, env.TSReceived, env.ChannelID,
 		string(env.Sender.Kind), string(env.Sender.ID), nullableString(env.Sender.Name),
@@ -170,8 +167,8 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 		nullableString(string(env.ParentID)), nullableString(string(env.CorrelationID)), nullableString(docRefsJSON), nullableString(crossRefsJSON),
 		env.Visibility, string(audJSON),
 		nullableInt(env.NotBefore), nullableInt(env.ExpiresAt),
-		nullableInt(env.DeliveredAt), nil,
-		nullableString(env.LastError), 0,
+		nullableInt(env.DeliveredAt),
+		nullableString(env.LastError),
 		terminalInt, canonicalHash,
 	)
 	if err != nil {
@@ -202,7 +199,7 @@ func (m *messages) PendingDue(ctx context.Context, nowMs int64, limit int) ([]st
 	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
 	                  not_before, expires_at,
-	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
+	                  delivered_at, COALESCE(last_error,''),
 	                  is_terminal, seq
 	             FROM messages
 	             WHERE not_before IS NOT NULL
@@ -255,7 +252,7 @@ func (m *messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, after
 	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
 	                  not_before, expires_at,
-	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
+	                  delivered_at, COALESCE(last_error,''),
 	                  is_terminal, seq
 	             FROM messages
 	             WHERE channel_id = ? AND seq > ?
@@ -318,7 +315,7 @@ func (m *messages) LongPendingRequests(ctx context.Context, nowMs int64, limit i
 	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
 	                  not_before, expires_at,
-	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
+	                  delivered_at, COALESCE(last_error,''),
 	                  is_terminal, seq
 	             FROM messages m
 	             WHERE m.kind = 'request'
@@ -369,7 +366,7 @@ func (m *messages) OpenRequestsForActor(ctx context.Context, actorID actor.Actor
 	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
 	                  not_before, expires_at,
-	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
+	                  delivered_at, COALESCE(last_error,''),
 	                  is_terminal, seq
 	             FROM messages m
 	             WHERE m.kind = 'request'
@@ -399,117 +396,6 @@ func (m *messages) OpenRequestsForActor(ctx context.Context, actorID actor.Actor
 		return nil, fmt.Errorf("store: open requests for actor rows: %w", err)
 	}
 	return out, nil
-}
-
-// RetryableDeliveries returns request rows whose delivery was previously
-// recorded as failed (delivery_failed_at IS NOT NULL, delivered_at still
-// NULL) and whose per-attempt backoff window has elapsed
-// (delivery_failed_at + backoff(attempts) <= now). Used by the daemon's
-// bounded-retry pass (§3 ack 三分 / §6 step1) to re-drive accept of a
-// trigger whose previous push failed — instead of relying on the next
-// unrelated request to re-spawn the worker.
-//
-// The query DOES NOT filter on the attempts cap: the daemon applies the
-// cap so it can distinguish "retry once more" from "give up and emit a
-// terminal closure". Rows that already earned a terminal response are
-// excluded (the request is settled regardless of delivery bookkeeping).
-//
-// `backoffFn(attempts)` returns the minimum elapsed-ms since the last
-// failure before a row of that attempt count is eligible again — the
-// daemon owns the backoff curve so the store stays policy-free.
-func (m *messages) RetryableDeliveries(
-	ctx context.Context,
-	nowMs int64,
-	limit int,
-	backoffFn func(attempts int64) int64,
-) ([]storespec.StoredRow, error) {
-	if limit <= 0 {
-		limit = 64
-	}
-	if backoffFn == nil {
-		backoffFn = func(int64) int64 { return 0 }
-	}
-	const q = `SELECT id, ts, ts_received, channel_id,
-	                  sender_kind, sender_id, COALESCE(sender_name,''),
-	                  kind, type, payload,
-	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
-	                  visibility, audience,
-	                  not_before, expires_at,
-	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
-	                  is_terminal, seq
-	             FROM messages m
-	             WHERE m.kind = 'request'
-	               AND m.delivered_at IS NULL
-	               AND m.delivery_failed_at IS NOT NULL
-	               AND m.is_terminal = 0
-	               AND NOT EXISTS (
-	                 SELECT 1 FROM messages r
-	                  WHERE r.parent_id = m.id
-	                    AND r.kind = 'response'
-	                    AND r.is_terminal = 1
-	               )
-	             ORDER BY m.seq ASC LIMIT ?`
-	rows, err := m.db.QueryContext(ctx, q, limit)
-	if err != nil {
-		return nil, fmt.Errorf("store: retryable deliveries: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []storespec.StoredRow
-	for rows.Next() {
-		env, err := scanEnvelopeRows(rows)
-		if err != nil {
-			return nil, fmt.Errorf("store: retryable deliveries scan: %w", err)
-		}
-		// Backoff gate applied in Go so the curve stays daemon-owned.
-		if env.DeliveryFailedAt != nil {
-			if *env.DeliveryFailedAt+backoffFn(env.Attempts) > nowMs {
-				continue
-			}
-		}
-		out = append(out, env)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: retryable deliveries rows: %w", err)
-	}
-	return out, nil
-}
-
-// MarkDelivered stamps messages.delivered_at when it is still NULL and
-// clears any previous delivery error. The UPDATE is idempotent
-// (rowsAffected=0 when the row was already delivered or missing — caller
-// may treat as no-op). Used by the scheduler dispatch path AND the
-// harness post-write fan-out, so two concurrent callers cannot
-// double-stamp delivery time.
-func (m *messages) MarkDelivered(ctx context.Context, id message.ID, atMs int64) error {
-	if id == "" {
-		return errors.New("store: mark delivered empty id")
-	}
-	const q = `UPDATE messages
-	             SET delivered_at=?, delivery_failed_at=NULL, last_error=NULL
-	           WHERE id=? AND delivered_at IS NULL`
-	if _, err := m.db.ExecContext(ctx, q, atMs, id); err != nil {
-		return fmt.Errorf("store: mark delivered %q: %w", id, err)
-	}
-	return nil
-}
-
-// MarkDeliveryError records a failed delivery attempt while leaving
-// delivered_at NULL so the row remains retryable.
-func (m *messages) MarkDeliveryError(ctx context.Context, id message.ID, atMs int64, errText string) error {
-	if id == "" {
-		return errors.New("store: mark delivery error empty id")
-	}
-	if errText == "" {
-		errText = "delivery failed"
-	}
-	const q = `UPDATE messages
-	             SET delivery_failed_at=?, last_error=?, attempts=attempts+1
-	           WHERE id=? AND delivered_at IS NULL`
-	if _, err := m.db.ExecContext(ctx, q, atMs, errText, id); err != nil {
-		return fmt.Errorf("store: mark delivery error %q: %w", id, err)
-	}
-	return nil
 }
 
 // HasFinalResponse implements storespec.MessageLog. Returns true when at
@@ -597,7 +483,7 @@ func (m *messages) FindByID(ctx context.Context, channelID channel.ID, id messag
 	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
 	                  not_before, expires_at,
-	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
+	                  delivered_at, COALESCE(last_error,''),
 	                  is_terminal, seq
 	             FROM messages WHERE id=?`
 	row := m.db.QueryRowContext(ctx, q, id)
@@ -630,15 +516,14 @@ func scanEnvelopeRows(rows *sql.Rows) (storespec.StoredRow, error) {
 
 // scanEnvelopeFrom is the shared implementation. It returns a StoredRow:
 // the pure Envelope (17 fields + delivery metadata) plus the store-derived
-// columns (seq / is_terminal / attempts / delivery_failed_at) that kernel
-// keeps off the envelope.
+// columns (seq / is_terminal) that kernel keeps off the envelope.
 func scanEnvelopeFrom(s rowScanner) (storespec.StoredRow, error) {
 	var sr storespec.StoredRow
 	env := &sr.Envelope
 	var kind, sKind, senderID, vis string
 	var audJSON, payloadStr string
 	var docRefsStr, crossRefsStr sql.NullString
-	var notBefore, expiresAt, deliveredAt, deliveryFailedAt sql.NullInt64
+	var notBefore, expiresAt, deliveredAt sql.NullInt64
 	var termInt int
 	if err := s.Scan(
 		&env.ID, &env.TS, &env.TSReceived, &env.ChannelID,
@@ -647,7 +532,7 @@ func scanEnvelopeFrom(s rowScanner) (storespec.StoredRow, error) {
 		&env.ParentID, &env.CorrelationID, &docRefsStr, &crossRefsStr,
 		&vis, &audJSON,
 		&notBefore, &expiresAt,
-		&deliveredAt, &deliveryFailedAt, &env.LastError, &sr.Attempts,
+		&deliveredAt, &env.LastError,
 		&termInt, &sr.Seq,
 	); err != nil {
 		return storespec.StoredRow{}, err
@@ -685,10 +570,6 @@ func scanEnvelopeFrom(s rowScanner) (storespec.StoredRow, error) {
 	if deliveredAt.Valid {
 		v := deliveredAt.Int64
 		env.DeliveredAt = &v
-	}
-	if deliveryFailedAt.Valid {
-		v := deliveryFailedAt.Int64
-		sr.DeliveryFailedAt = &v
 	}
 	sr.IsTerminal = termInt == 1
 	return sr, nil

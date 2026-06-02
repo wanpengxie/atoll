@@ -24,15 +24,14 @@ type ChannelDeps struct {
 // §4.5 substrate confinement: it OWNS the *sql.DB in an unexported field — the
 // raw handle never crosses the store boundary (no OpenChannel returning
 // *sql.DB, no NewX taking *sql.DB). The message-log surface is handed out as
-// SEGREGATED storespec interfaces — Log (harness write port) / Query (reads) /
-// Delivery (delivery marks) — so no consumer can obtain the harness-bypass
-// Append capability through a read handle (ISP/CQRS role-split, §4.5).
+// SEGREGATED storespec interfaces — Log (harness write port) / Query (reads) —
+// so a reader can never obtain the harness-bypass Append (ISP/CQRS role-split,
+// §4.5).
 type ChannelStores struct {
 	db *sql.DB
 
 	Log      storespec.MessageLog   // harness write port (Append + dedup/terminal reads)
 	Query    storespec.MessageQuery // scheduler / tail reads (no Append)
-	Delivery storespec.DeliveryStore
 	Cursors  storespec.Cursors
 	Requests storespec.RequestLookup
 
@@ -65,7 +64,6 @@ func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions, deps Chan
 		db:           db,
 		Log:          msgs,
 		Query:        msgs,
-		Delivery:     msgs,
 		Cursors:      newCursors(db),
 		Requests:     newRequestLookup(msgs, deps.ChannelID),
 		Registry:     reg,
