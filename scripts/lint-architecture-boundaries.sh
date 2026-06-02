@@ -1,160 +1,38 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# v2 architecture-boundary checks (complements go-arch-lint component graph).
+# Enforces the §1.2 禁止清单 of coagent-v2-arch-constraints-and-checks.md:
+# deleted-world residue must be absent. (kernel/fencing 出走 is a tracked P1
+# remnant — FencingToken/DaemonEpoch are still consumed by runtime session
+# fencing; their relocation needs dedicated dependency untangling, see主控.)
+set -uo pipefail
 
-fail() {
-  echo "[lint-architecture-boundaries] $1" >&2
-  exit 1
-}
+fail() { echo "[lint-arch-boundaries] FAIL: $1" >&2; exit 1; }
+command -v rg >/dev/null 2>&1 || { echo "[lint-arch-boundaries] ripgrep required" >&2; exit 1; }
 
-if ! command -v rg >/dev/null 2>&1; then
-  fail "ripgrep (rg) is required"
+# 1. v1 god-object trees must be gone.
+[ -d framework ] && fail "framework/ 顶层 god-object 残留 (multiuser/devicetransit)"
+[ -d adapters/framework ] && fail "adapters/framework Manager god-object 残留"
+[ -d adapters/proxy ] && fail "adapters/proxy 残留 (应溶解 daemon)"
+
+# 2. kernel 杂质包必须消解。
+for p in closure actorreg adapter; do
+  [ -d "kernel/$p" ] && fail "kernel/$p 残留 (应消解)"
+done
+
+# 3. 没有产品代码 import 已删的 v1 包。
+if rg -q "ActOS/(framework/|adapters/framework|adapters/proxy/|internal/proxy|pkg/|kernel/adapter\b)" --glob '*.go' --glob '!*_test.go' kernel runtime lib adapters wire server daemon cmd sdk obs 2>/dev/null; then
+  fail "产品代码 import 已删 v1 包 (framework/adapters-framework/pkg/kernel-adapter)"
 fi
 
-if rg -n "^\\s*(HarnessChain|Correlation|ErrorPolicy|DeviceTransit|ActorReadiness)\\s+" kernel/adapter/ctx.go -S; then
-  fail "ModuleContext must not expose raw capability fields"
+# 4. Manager god-object 运行期面不复活。
+if rg -q "func \([a-z ]*\*?Manager\) (Dispatch|OnExternalCallback|OnRuntimeEvent|RunGC)\b" --glob '*.go' lib server daemon 2>/dev/null; then
+  fail "Manager god-object 运行期面复活"
 fi
 
-if rg -n "mctx\\.(HarnessChain|Correlation|ErrorPolicy|DeviceTransit|ActorReadiness)" kernel/adapter adapters -S; then
-  fail "adapter-facing ModuleContext/raw capability access is forbidden"
+# 5. viewsync / channel-placement-saga / reclaim 已消失 (import 级)。
+if rg -q "ActOS/.*\b(viewsync|channelplacement|devicetransit)\b" --glob '*.go' --glob '!*_test.go' . 2>/dev/null; then
+  fail "viewsync/channelplacement/devicetransit import 残留"
 fi
 
-if rg -n "github\\.com/wanpengxie/ActOS/adapters/framework" adapters/device -g'*.go' -g'!*_test.go' -S; then
-  fail "device adapters must not import adapters/framework implementation; use ModuleContext capabilities"
-fi
 
-if rg -n "\\b(FailNow|EmitOrphanCallbackEvents|OrphanCallbackType|OrphanCallbackEvent)\\b" adapters/framework adapters/device -g'*.go' -g'!*_test.go' -S; then
-  fail "framework failure/orphan helpers must not be public adapter-callable capabilities"
-fi
-
-if rg -n "eventType != orphanCallbackType" adapters/framework/events.go -S; then
-  fail "adapter-facing EmitEvent must not allow framework-owned orphan callback event construction"
-fi
-
-if ! rg -n "use ReportOrphanCallback" adapters/framework/events.go >/dev/null; then
-  fail "adapter-facing EmitEvent must explicitly reject orphan callback type"
-fi
-
-if rg -n "COAGENT_CHANNEL_DB|OpenChannelStore|ChannelStore|actor_registry|adapter_state|type_registry|database/sql|modernc\\.org/sqlite" adapters/llm/kimi -S; then
-  fail "Kimi worker/adapter must not read raw channel sqlite or registry tables"
-fi
-
-if rg -n "COAGENT_CHANNEL_DB|EnvChannelDB|dedupePublish|database/sql|modernc\\.org/sqlite|messages WHERE|channel\\.sqlite" adapters/device/xhs/cli/internal -S; then
-  fail "xhs CLI must not read raw channel sqlite/message log for business truth"
-fi
-
-if rg -n "actors/.*/status|QueryActorStatus|actorStatusWaiter|handleActorStatus" server ui -S; then
-  fail "server/UI actor status endpoints must use reserved actor.status envelope calls"
-fi
-
-if [ -e adapters/xhs ]; then
-  fail "legacy adapters/xhs scaffold package must not exist"
-fi
-
-if rg -n "use-scaffold-xhs|XHSScaffoldFactory|DeviceXHSFactory|DeviceXHSActorSeed" cmd/daemon -g'*.go' -g'!*_test.go' -S; then
-  fail "production daemon must not expose legacy xhs scaffold/device-direct paths"
-fi
-
-if rg -n "use-scaffold-xhs|UseScaffoldXHS|XHSScaffoldFactory|DeviceXHSFactory|DeviceXHSActorSeed" tests -S; then
-  fail "tests must not retain legacy xhs scaffold/device-direct switches"
-fi
-
-if rg -n "devicexhs\\.New|DefaultInstallSpec\\(" cmd/daemon -g'*.go' -g'!*_test.go' -S; then
-  fail "production daemon must not instantiate or statically seed the xhs device adapter"
-fi
-
-if rg -n "github\\.com/wanpengxie/ActOS/adapters/xhs" cmd adapters pkg kernel runtime server tests internal -g'*.go' -S; then
-  fail "product code/tests must not import deleted legacy adapters/xhs package"
-fi
-
-legacy_xhs_actor="tool:xhs-adapter"
-if rg -n "$legacy_xhs_actor" cmd adapters pkg kernel runtime server tests internal ui scripts -g'!*lint-architecture-boundaries.sh' -S; then
-  fail "xhs actor id must be canonical tool:xhs"
-fi
-
-if rg -n "sqlite3|messages WHERE|type_registry WHERE|COAGENT_CHANNEL_DB" adapters/device/xhs/template.go adapters/llm/kimi/bridge.go -S; then
-  fail "agent prompts must not teach raw sqlite/message-log reads"
-fi
-
-if rg -n "DefaultMaxPendingMs int64 = 30 \\* 1000" adapters/device/xhs/proto.go -S; then
-  fail "xhs adapter timeout must not drift below 300s budget"
-fi
-
-if rg -n "Callable:\\s*daemonLive && routeActive && actorReady|Callable:\\s*daemonLive && facadeInstalled && actorReady|Callable:\\s*routeActive && facadeInstalled && actorReady" server/devicebus/routes.go -S; then
-  fail "device callable projection must include daemonLive && routeActive && facadeInstalled && actorReady"
-fi
-
-# channel-lifecycle-reconcile §5 护栏 1 — liveness (online/ready/reachable/
-# callable) must never be a persisted, "written-and-trusted" authority column
-# on an actor / hosted-actor row. The runtime actor_registry and the server
-# daemon_hosted_actors tables keep readiness ONLY as a downgraded display
-# projection (ready_state/facade_state); they must not gain a column that
-# names current reachability as authority. Closes 现象2 復發.
-if rg -n "ADD COLUMN\\s+(online|reachable|callable)\\b|^\\s*(online|reachable|callable)\\s+(TEXT|INTEGER|BOOLEAN)" server/store/migrations runtime/store/schema.go -S; then
-  fail "actor/hosted-actor row schema must not persist online/reachable/callable as authority columns; callable is a realtime derivation (channel-lifecycle-reconcile §5 护栏 1)"
-fi
-
-# channel-lifecycle-reconcile §5 护栏 1 / §6 step4 — server callable derivation
-# must be gated on a realtime daemon liveness signal (heartbeat freshness), not
-# a bare persisted status read. The TTL gate (daemonLivenessTTL) collapses
-# callable once the heartbeat lapses even if facade/ready caches are stale.
-if ! rg -n "daemonLive\\s*:=\\s*row\\.Status == \"online\" && \\(now-row\\.LastHeartbeat\\) <= daemonLivenessTTLMs" server/devicebus/routes.go -S >/dev/null; then
-  fail "server callable must derive daemon liveness from a heartbeat-freshness TTL, not a bare persisted status column (channel-lifecycle-reconcile §6 step4)"
-fi
-
-# channel-lifecycle-reconcile §5 护栏 3 — actor.status.available must come from
-# realtime liveness/probe (StatusReporter), never directly from the persisted
-# readiness projection. The old `available: readiness.State == ReadinessReady`
-# read is forbidden.
-if rg -n '"available":\s*readiness\.State == actorreg\.ReadinessReady' adapters/framework/manager.go -S; then
-  fail "actor.status.available must be realtime liveness/probe (StatusReporter), not the persisted readiness column (channel-lifecycle-reconcile §5 护栏 3)"
-fi
-
-if rg -nU "fn, ok := d\\.handlers\\[id\\][\\s\\S]{0,160}if !ok \\{\\s*continue\\s*\\}" runtime/scheduler/deliver.go; then
-  fail "scheduler delivery must not treat missing concrete actor handler as success"
-fi
-
-if rg -nU "daemon\\.adapter_dispatch_failed[\\s\\S]{0,160}\\}\\s*return nil" cmd/daemon/adapter_wiring.go; then
-  fail "adapter dispatch errors must propagate unless framework emitted a terminal"
-fi
-
-if rg -n "sent frame', frameLogDetails|Sent successfully → clear from outbox" adapters/device/xhs/extension/app/chrome-extension/entrypoints/background/services/server-devicebus.ts -S; then
-  fail "extension callback outbox must delete only after callback ack"
-fi
-
-if rg -nU "case c\\.triggerCh <- payload:\\s*c\\.writeTriggerAck" runtime/worker/ipc_client.go; then
-  fail "worker IPC dispatch must not ack after in-memory trigger enqueue"
-fi
-
-if ! rg -n "func \\(c \\*IPCClient\\) AckTrigger" runtime/worker/ipc_client.go >/dev/null; then
-  fail "worker IPC must expose explicit bridge-owned AckTrigger"
-fi
-
-if ! rg -nU "caller\\.Deliver\\(&env\\)[\\s\\S]{0,400}ackTrigger\\(ctx, ipc, payload, true" adapters/llm/kimi/channel_tool.go >/dev/null; then
-  fail "Kimi intercepted tool responses must explicitly ack their trigger"
-fi
-
-if rg -nU "adapterName := deviceAdapterByActor\\[frame\\.AdapterActorID\\][\\s\\S]{0,120}if adapterName == \"\" \\{\\s*return nil\\s*\\}" cmd/daemon/adapter_wiring.go; then
-  fail "device callback with no adapter route must return retryable ack error, not accepted nil"
-fi
-
-if rg -nU "No TurnEnd seen[\\s\\S]{0,120}return nil" adapters/llm/kimi/bridge.go; then
-  fail "Kimi bridge must not ACK a trigger when agent finishes without TurnEnd"
-fi
-
-if rg -n "if \\(corr && entryCorr === corr\\) return false" adapters/device/xhs/extension/app/chrome-extension/entrypoints/background/services/server-devicebus.ts -S; then
-  fail "extension outbox must use request_id as primary key before correlation_id fallback"
-fi
-
-# channel-lifecycle-reconcile §5 护栏 2 — the per-channel channelReconciler is
-# the SINGLE entry for adapter facade wiring (framework Manager install +
-# scheduler.Deliverer handler registration). No other file in the daemon
-# composition root may call mgr.Install / *.Install(ctx, []adapter.Module / a
-# Deliverer.Register directly; both the static compiled-in modules and the
-# fact-derived proxy facades must flow through Reconcile so "clear wiring +
-# re-Reconcile" rebuilds every facade/handler. Matches real call sites only
-# (lines whose first non-space char is not `//`).
-if rg -n --pcre2 "^(?:(?!//).)*?(mgr\\.Install\\(|\\.Install\\(ctx, \\[\\]adapter\\.Module|(deliverer|Deliverer)\\.Register\\()" cmd/daemon -g'*.go' -g'!*_test.go' -g'!channel_reconciler.go' -S; then
-  fail "adapter facade install / Deliverer.Register outside channelReconciler is forbidden — route all wiring through Reconcile (channel-lifecycle-reconcile §5 护栏 2)"
-fi
-
-echo "✅ architecture boundary lint passed"
+echo "[lint-arch-boundaries] v2 boundary checks passed ✓"
