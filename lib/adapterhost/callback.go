@@ -68,8 +68,6 @@ func (a *adapterActor) RunHeartbeat(ctx context.Context) error {
 // self-schedules this on a slow tick — it runs on the cell goroutine so it
 // touches a.correlation with no lock. The terminal itself is the caller's
 // caller-scoped responsibility (lib/behavior); this only bounds memory.
-//
-//nolint:unused // retained (reaper/correlation will wire; xhs allowlist schema)
 func (a *adapterActor) reapExpired(nowMs int64) {
 	for k, e := range a.correlation {
 		if e.State != behavior.CorrelationPending {
