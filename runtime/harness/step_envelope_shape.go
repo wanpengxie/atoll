@@ -24,9 +24,8 @@ import (
 //     cannot drift on field set because the struct fixes the schema at
 //     compile time.
 //
-// The step runs after CallerAuth and before SenderConsistent/Dedupe/
-// Normalize, so downstream stages never see malformed envelopes and
-// dedupe never wastes a canonical_hash compute on a will-reject row.
+// The step runs after CallerAuth and before SenderConsistent/Normalize, so
+// downstream stages never see a malformed envelope.
 type stepEnvelopeShape struct{}
 
 func newStepEnvelopeShape(_ Deps) step { return &stepEnvelopeShape{} }
@@ -135,18 +134,20 @@ func rejectFieldMissing(detail string) outcome {
 	}
 }
 
-// allowedTopLevelEnvelopeKey reports whether key is in the union of
-// proto-layer0 §1.1 content fields ∪ §1.3 store-derived columns.
+// allowedTopLevelEnvelopeKey reports whether key is a proto-layer0 §1.1
+// content field — the ONLY fields a caller can legitimately put on a write
+// envelope. Store-derived columns (seq, is_terminal) are minted by the store
+// AFTER append and can never exist on a submitted envelope; they are NOT
+// whitelisted, so a caller that submits them is fail-closed rejected. The
+// write entry only admits fields a caller can produce; store-derived columns
+// belong to the read/StoredRow shape, not the write protocol.
 func allowedTopLevelEnvelopeKey(key string) bool {
 	switch key {
-	// L0 §1.1 content fields. sender is nested; sender.{kind,id,name}
+	// L0 §1.1 content fields. sender is nested; sender.{kind,id}
 	// flatten into the same top-level "sender" key.
 	case "id", "ts", "ts_received", "channel_id", "sender", "kind", "type",
 		"payload", "parent_id", "correlation_id", "doc_refs",
 		"cross_channel_refs", "visibility", "audience", "expires_at":
-		return true
-	// L0 §1.3 store-derived columns.
-	case "is_terminal", "seq":
 		return true
 	}
 	return false
