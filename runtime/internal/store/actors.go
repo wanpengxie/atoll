@@ -40,7 +40,11 @@ func (r *actorRegistry) Lookup(ctx context.Context, id actor.ActorID) (storespec
 	if err != nil {
 		return storespec.Record{}, false, fmt.Errorf("store: actor lookup %q: %w", id, err)
 	}
-	rec.Kind = actor.Kind(kind)
+	k, ok := actor.ParseKind(kind)
+	if !ok {
+		return storespec.Record{}, false, fmt.Errorf("store: actor %q invalid kind %q (out of closed set)", id, kind)
+	}
+	rec.Kind = k
 	rec.Binding = actor.Binding(binding)
 	return rec, true, nil
 }
@@ -79,7 +83,11 @@ func (r *actorRegistry) ListActive(ctx context.Context) ([]storespec.Record, err
 		if err := rows.Scan(&rec.ID, &kind, &binding, &rec.CreatedAt); err != nil {
 			return nil, fmt.Errorf("store: list active actors scan: %w", err)
 		}
-		rec.Kind = actor.Kind(kind)
+		k, ok := actor.ParseKind(kind)
+		if !ok {
+			return nil, fmt.Errorf("store: list active actors invalid kind %q (out of closed set)", kind)
+		}
+		rec.Kind = k
 		rec.Binding = actor.Binding(binding)
 		out = append(out, rec)
 	}

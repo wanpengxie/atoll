@@ -25,12 +25,11 @@ const (
 	ReservedActorList = "actor.list"
 )
 
-// ReservedActorTypeSet enumerates the reserved actor request types.
-var ReservedActorTypeSet = []string{
-	ReservedActorStatus,
-	ReservedActorDescribe,
-	ReservedActorList,
-}
+// (No exported enumeration slice: the reserved-type closed sets are the
+// constants above. A mutable []string of them is a redundant second
+// representation that invites range-and-mutate; any consumer needing the set
+// builds it from the constants, or a Parse predicate is added when a real
+// substrate validation use-case demands one.)
 
 // ReservedSystemEventTypeSet is the set of reserved `kind=event` types
 // the channel system actor emits to mirror control-plane mutations into
@@ -46,13 +45,3 @@ const (
 	ReservedSystemTypeInstalled     = "system.type.installed"
 	ReservedSystemTypeDeprecated    = "system.type.deprecated"
 )
-
-// ReservedSystemEventTypeSet enumerates the reserved system event types.
-var ReservedSystemEventTypeSet = []string{
-	ReservedSystemChannelCreated,
-	ReservedSystemActorRegistered,
-	ReservedSystemActorDeregistered,
-	ReservedSystemConfigUpdated,
-	ReservedSystemTypeInstalled,
-	ReservedSystemTypeDeprecated,
-}

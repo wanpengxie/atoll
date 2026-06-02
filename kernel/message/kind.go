@@ -30,11 +30,24 @@ const (
 	KindResponse Kind = "response"
 )
 
-// AllKinds enumerates every valid Kind value, in spec order.
-var AllKinds = []Kind{KindEvent, KindRequest, KindResponse}
+// allKinds backs ParseKind. UNEXPORTED: the closed-set contract is the
+// ParseKind predicate, not a mutable enumeration slice.
+var allKinds = []Kind{KindEvent, KindRequest, KindResponse}
 
 // String returns the wire form.
 func (k Kind) String() string { return string(k) }
+
+// ParseKind resolves a canonical wire-form message-kind string against the
+// closed set. Deserialization (wire / DB) MUST go through ParseKind rather than
+// a bare message.Kind(string) cast so an out-of-set value cannot enter the ADT.
+func ParseKind(raw string) (Kind, bool) {
+	for _, k := range allKinds {
+		if string(k) == raw {
+			return k, true
+		}
+	}
+	return "", false
+}
 
 // Visibility is the envelope `visibility` field — 3-value closed set
 // covering who in the channel can query-see this message.
@@ -58,8 +71,20 @@ const (
 	VisibilitySystem  Visibility = "system"
 )
 
-// AllVisibilities enumerates every valid Visibility value, in spec order.
-var AllVisibilities = []Visibility{VisibilityPublic, VisibilityPrivate, VisibilitySystem}
+// allVisibilities backs ParseVisibility. UNEXPORTED: the closed-set contract is
+// the predicate, not a mutable enumeration slice.
+var allVisibilities = []Visibility{VisibilityPublic, VisibilityPrivate, VisibilitySystem}
 
 // String returns the wire form.
 func (v Visibility) String() string { return string(v) }
+
+// ParseVisibility resolves a canonical wire-form visibility string against the
+// closed set. Deserialization MUST go through it rather than a bare cast.
+func ParseVisibility(raw string) (Visibility, bool) {
+	for _, v := range allVisibilities {
+		if string(v) == raw {
+			return v, true
+		}
+	}
+	return "", false
+}

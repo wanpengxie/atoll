@@ -40,8 +40,9 @@ const (
 	TerminalReceiverUnavailable   TerminalFailureReason = "receiver_unavailable"
 )
 
-// AllTerminalFailureReasons enumerates every value of the closed set.
-var AllTerminalFailureReasons = []TerminalFailureReason{
+// allTerminalFailureReasons backs IsValidTerminalFailureReason. UNEXPORTED:
+// the closed-set contract is the predicate, not a mutable enumeration.
+var allTerminalFailureReasons = []TerminalFailureReason{
 	TerminalUnansweredTimeout,
 	TerminalReceiverInternalError,
 	TerminalReceiverUnavailable,
@@ -49,3 +50,15 @@ var AllTerminalFailureReasons = []TerminalFailureReason{
 
 // String returns the wire form of r.
 func (r TerminalFailureReason) String() string { return string(r) }
+
+// IsValidTerminalFailureReason reports whether r is a member of the frozen
+// closed set. This is the enforcement predicate — closure validation MUST use
+// it rather than re-deriving membership from a borrowed enumeration slice.
+func IsValidTerminalFailureReason(r TerminalFailureReason) bool {
+	for _, x := range allTerminalFailureReasons {
+		if x == r {
+			return true
+		}
+	}
+	return false
+}

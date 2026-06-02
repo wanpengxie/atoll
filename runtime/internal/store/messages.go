@@ -369,10 +369,22 @@ func scanEnvelopeFrom(s rowScanner) (storespec.StoredRow, error) {
 	); err != nil {
 		return storespec.StoredRow{}, err
 	}
-	env.Sender.Kind = actor.Kind(sKind)
+	sk, ok := actor.ParseKind(sKind)
+	if !ok {
+		return storespec.StoredRow{}, fmt.Errorf("store: scan invalid sender kind %q (out of closed set)", sKind)
+	}
+	env.Sender.Kind = sk
 	env.Sender.ID = actor.ActorID(senderID)
-	env.Kind = message.Kind(kind)
-	env.Visibility = message.Visibility(vis)
+	mk, ok := message.ParseKind(kind)
+	if !ok {
+		return storespec.StoredRow{}, fmt.Errorf("store: scan invalid message kind %q (out of closed set)", kind)
+	}
+	env.Kind = mk
+	mv, ok := message.ParseVisibility(vis)
+	if !ok {
+		return storespec.StoredRow{}, fmt.Errorf("store: scan invalid visibility %q (out of closed set)", vis)
+	}
+	env.Visibility = mv
 	env.Payload = json.RawMessage(payloadStr)
 	if err := json.Unmarshal([]byte(audJSON), &env.Audience); err != nil {
 		return storespec.StoredRow{}, fmt.Errorf("store: scan audience: %w", err)

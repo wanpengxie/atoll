@@ -23,8 +23,9 @@ const (
 	BindingRuntimeInboundViaRelay Binding = "runtime_inbound_via_relay"
 )
 
-// AllBindings lists every supported binding value in spec order.
-var AllBindings = []Binding{
+// allBindings backs ParseBinding. UNEXPORTED: the public closed-set contract is
+// the ParseBinding predicate, not a mutable enumeration slice.
+var allBindings = []Binding{
 	BindingEmbedded,
 	BindingRuntimeOutbound,
 	BindingRuntimeInboundViaRelay,
@@ -35,7 +36,7 @@ func (b Binding) String() string { return string(b) }
 
 // ParseBinding resolves a canonical wire-form binding string.
 func ParseBinding(raw string) (Binding, bool) {
-	for _, b := range AllBindings {
+	for _, b := range allBindings {
 		if string(b) == raw {
 			return b, true
 		}

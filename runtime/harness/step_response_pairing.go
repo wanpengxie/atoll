@@ -284,12 +284,7 @@ func checkFailedResponseReason(payload []byte) failedResponseReasonCheck {
 }
 
 func terminalFailureReasonAllowed(reason string) bool {
-	for _, r := range message.AllTerminalFailureReasons {
-		if reason == string(r) {
-			return true
-		}
-	}
-	return false
+	return message.IsValidTerminalFailureReason(message.TerminalFailureReason(reason))
 }
 
 // layer2ProvisionalStatuses is the Layer 2 provisional core closed set

@@ -38,7 +38,7 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (o
 		isCore          bool
 		isReservedActor bool
 	)
-	if rule, ok := message.CoreTypeTable[env.Type]; ok {
+	if rule, ok := message.LookupCoreType(env.Type); ok {
 		isCore = true
 		if !rule.AllowOverride && env.Kind != rule.DefaultKind {
 			return outcome{

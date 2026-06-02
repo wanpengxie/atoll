@@ -31,8 +31,8 @@ type reservedActorTypeRule struct {
 // Keys reference kernel/actor constants (§1.4): the per-type kind/sender
 // metadata below is harness-internal validation policy, but the type NAMES
 // are the kernel's frozen vocabulary — keyed off the constants so they cannot
-// drift from kernel. (kernel taxonomy splits these across ReservedActorTypeSet
-// / ReservedSystemEventTypeSet; the grouping here is a separate axis — what
+// drift from kernel. (kernel taxonomy splits these across reserved actor-type constants
+// / system-event-type constants; the grouping here is a separate axis — what
 // validation rule applies — not a membership claim.)
 var reservedActorTypeSet = map[string]reservedActorTypeRule{
 	actor.ReservedActorStatus: {
@@ -108,7 +108,7 @@ func (s *stepTypeRegistered) Run(ctx context.Context, env *message.Envelope) (ou
 		return outcome{}, nil
 	}
 
-	if _, isCore := message.CoreTypeTable[env.Type]; isCore {
+	if _, isCore := message.LookupCoreType(env.Type); isCore {
 		return outcome{}, nil
 	}
 	if s.deps.TypeRegistry == nil {

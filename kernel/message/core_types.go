@@ -30,10 +30,21 @@ type CoreTypeRule struct {
 // collapses that into `agent.text` + `visibility=system`. Callers
 // (kimi bridge, mock bridge) emit progress as agent.text envelopes —
 // no separate type registration is needed.
-var CoreTypeTable = map[string]CoreTypeRule{
+// coreTypeTable is UNEXPORTED: an exported map is mutable (importers can add /
+// delete / rewrite core-type entries), which turns a protocol closed set into
+// runtime-writable config. The public contract is the LookupCoreType predicate.
+var coreTypeTable = map[string]CoreTypeRule{
 	"human.text":        {DefaultKind: KindEvent, AllowOverride: true},
 	"agent.text":        {DefaultKind: KindEvent, AllowOverride: true},
 	"core.system_event": {DefaultKind: KindEvent, AllowOverride: false},
 	"file.created":      {DefaultKind: KindEvent, AllowOverride: false},
 	"file.updated":      {DefaultKind: KindEvent, AllowOverride: false},
+}
+
+// LookupCoreType resolves a core message type to its rule. ok=false means the
+// type is not a core type (it must then resolve via type_registry). This is the
+// read-only contract over the frozen core-type closed set.
+func LookupCoreType(typeName string) (CoreTypeRule, bool) {
+	r, ok := coreTypeTable[typeName]
+	return r, ok
 }

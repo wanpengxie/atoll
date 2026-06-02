@@ -46,7 +46,7 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (outcome
 
 	// kind default (core types only — business types must declare).
 	if env.Kind == "" {
-		if rule, ok := message.CoreTypeTable[env.Type]; ok {
+		if rule, ok := message.LookupCoreType(env.Type); ok {
 			env.Kind = rule.DefaultKind
 		}
 	}
