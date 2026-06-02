@@ -215,13 +215,25 @@ func (f *Fleet) register(conn *computeConn, hosts []actor.ActorID) {
 
 func (f *Fleet) unregister(conn *computeConn, hosts []actor.ActorID) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.computes[conn.id] == conn {
 		delete(f.computes, conn.id)
 	}
+	dropped := make([]actor.ActorID, 0, len(hosts))
 	for _, a := range hosts {
 		if f.actorHost[a] == conn.id {
 			delete(f.actorHost, a)
+			dropped = append(dropped, a)
+		}
+	}
+	f.mu.Unlock()
+	// Compute disconnect is the SECOND death source (alongside cell panic): every
+	// actor it hosted is now gone, so close out their in-flight requests with
+	// receiver_unavailable (the home materialises it). Without this a request to a
+	// disappeared compute hangs until the caller-scoped timeout — death is the
+	// positive signal, the timer is the fallback.
+	if f.onDeath != nil {
+		for _, a := range dropped {
+			f.onDeath(context.Background(), a)
 		}
 	}
 }

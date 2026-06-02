@@ -288,7 +288,7 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 	})
 	chain.cells = ch.Cells() // back-fill the fanout target now the runtime exists
 
-	return &ChannelHome{
+	h := &ChannelHome{
 		channelID: cfg.ChannelID,
 		db:        db,
 		messages:  messages,
@@ -299,7 +299,28 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 		channel:   ch,
 		system:    system,
 		nowMs:     nowMs,
-	}, nil
+	}
+	// Mailbox-full / cell-stopped on a request → close it out (needs the built
+	// home for the seam bundle).
+	chain.onUndeliverable = h.materialiseUnavailableForRequest
+	return h, nil
+}
+
+// materialiseUnavailableForRequest writes a system-authored receiver_unavailable
+// terminal for a single request whose delivery to its target cell failed. The
+// request envelope is in hand (no lookup), and the fanout chain delivers the
+// terminal to the waiting caller.
+func (h *ChannelHome) materialiseUnavailableForRequest(ctx context.Context, req *message.Envelope) {
+	clock := func() time.Time { return time.UnixMilli(h.nowMs()) }
+	sys := message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
+	term, err := behavior.BuildResponseFromRequest(req, clock, sys,
+		behavior.CorrelationKey(req.ID),
+		behavior.ResponseSpec{Status: "failed", Reason: string(message.TerminalReceiverUnavailable)})
+	if err != nil {
+		return
+	}
+	cctx := harness.CtxWithCaller(ctx, harness.CallerContext{ActorID: actor.SystemActorID, ChannelID: h.channelID, AllowProvidedSenderKind: true})
+	_, _ = h.chain.Write(cctx, term)
 }
 
 // Chain exposes the fanout write path (the only way to mutate channel truth):

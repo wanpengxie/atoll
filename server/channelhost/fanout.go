@@ -25,6 +25,11 @@ type fanoutChain struct {
 	inner  khrn.Chain
 	cells  *actorrt.Runtime
 	remote func(actor.ActorID, *message.Envelope) bool
+	// onUndeliverable closes out a REQUEST whose delivery to its target cell
+	// failed (mailbox full / cell stopped) — the receiver structurally cannot
+	// accept it, so the home materialises receiver_unavailable rather than let the
+	// caller hang to the timeout (risk §7.2). nil → drop silently.
+	onUndeliverable func(context.Context, *message.Envelope)
 }
 
 // Write runs the real 9-step harness write, then — only on a committed envelope
@@ -40,7 +45,11 @@ func (f *fanoutChain) Write(ctx context.Context, env *message.Envelope) (khrn.Wr
 	for _, aid := range env.Audience {
 		switch {
 		case f.cells != nil && f.cells.Has(aid):
-			_ = f.cells.Deliver(ctx, []actor.ActorID{aid}, env)
+			if derr := f.cells.Deliver(ctx, []actor.ActorID{aid}, env); derr != nil && env.Kind == message.KindRequest && f.onUndeliverable != nil {
+				// Mailbox full / cell stopped — the receiver can't take this
+				// request; close it out instead of hanging the caller.
+				f.onUndeliverable(ctx, env)
+			}
 		case env.Kind == message.KindRequest && f.remote != nil:
 			f.remote(aid, env)
 		}
