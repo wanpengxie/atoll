@@ -12,14 +12,26 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
+// AttachDeclaration is the compact actor declaration a compute ships on attach
+// so the home can register the actor and publish its request types into truth
+// (the compute holds NO truth — registration + type publication are home-side).
+type AttachDeclaration struct {
+	ActorID      actor.ActorID
+	Kind         actor.Kind
+	Binding      actor.Binding
+	Types        []string
+	MaxPendingMs int64
+}
+
 // AttachRequest is sent by a compute to join a channel home (lightcone-style:
 // one api-key, one URL). The home authenticates the key and assigns actor-host
 // slots via placement.
 type AttachRequest struct {
 	APIKey    string
 	ComputeID string
-	// Hosts are the actor ids this compute offers to host.
-	Hosts []actor.ActorID
+	// Declarations are the actors this compute offers to host, with enough to
+	// register them + publish their types into home truth on attach.
+	Declarations []AttachDeclaration
 }
 
 // AttachReply confirms the attach and carries the assigned channel + epoch.

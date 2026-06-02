@@ -48,12 +48,22 @@ type Fleet struct {
 	// onDeath materialises receiver_unavailable at the home for a compute cell
 	// death (DeathFrame). server.Run injects home.MaterialiseComputeDeath.
 	onDeath func(context.Context, actor.ActorID)
+	// onAttach registers an attaching compute's actors + publishes their types
+	// into home truth. server.Run injects home.RegisterComputeActors.
+	onAttach func(context.Context, []computebus.AttachDeclaration) error
 }
 
 // SetOnDeath wires the home-side death收口 invoked when an attached compute
 // reports a cell death (DeathFrame). Without it a compute cell death cannot
 // close out the in-flight requests waiting on that actor at the home.
 func (f *Fleet) SetOnDeath(fn func(context.Context, actor.ActorID)) { f.onDeath = fn }
+
+// SetOnAttach wires the home-side registration invoked when a compute attaches,
+// so its hosted actors are registered + their request types published into truth
+// (without it the home rejects requests for the compute's types as unknown).
+func (f *Fleet) SetOnAttach(fn func(context.Context, []computebus.AttachDeclaration) error) {
+	f.onAttach = fn
+}
 
 // New constructs a fleet bound to the channel home's harness chain. apiKey
 // authenticates attaching computes (empty = accept any, dev only).
@@ -88,9 +98,18 @@ func (f *Fleet) ServeWS(w http.ResponseWriter, r *http.Request) {
 		_ = ws.WriteJSON(computebus.Frame{Type: computebus.FrameAttachReply, Reply: &computebus.AttachReply{Accepted: false, Reason: "bad api-key"}})
 		return
 	}
+	// Register the compute's actors + publish their types into home truth before
+	// accepting — otherwise requests for those types are rejected as unknown.
+	if f.onAttach != nil {
+		if err := f.onAttach(r.Context(), att.Declarations); err != nil {
+			_ = ws.WriteJSON(computebus.Frame{Type: computebus.FrameAttachReply, Reply: &computebus.AttachReply{Accepted: false, Reason: "register: " + err.Error()}})
+			return
+		}
+	}
 	conn := &computeConn{id: att.ComputeID, ws: ws}
-	f.register(conn, att.Hosts)
-	defer f.unregister(conn, att.Hosts)
+	hosts := declActorIDs(att.Declarations)
+	f.register(conn, hosts)
+	defer f.unregister(conn, hosts)
 	_ = conn.send(computebus.Frame{Type: computebus.FrameAttachReply, Reply: &computebus.AttachReply{Accepted: true}})
 
 	for {
@@ -140,6 +159,15 @@ func (f *Fleet) handleFrame(ctx context.Context, conn *computeConn, fr computebu
 			}
 		}
 	}
+}
+
+// declActorIDs extracts the actor ids from a compute's attach declarations.
+func declActorIDs(decls []computebus.AttachDeclaration) []actor.ActorID {
+	ids := make([]actor.ActorID, 0, len(decls))
+	for _, d := range decls {
+		ids = append(ids, d.ActorID)
+	}
+	return ids
 }
 
 func (f *Fleet) register(conn *computeConn, hosts []actor.ActorID) {

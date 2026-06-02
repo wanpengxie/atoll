@@ -41,6 +41,8 @@ func Run(ctx context.Context, cfg Config) error {
 	// Compute cell death (DeathFrame) materialises receiver_unavailable at the
 	// home (substrate closure author #3 across the wire).
 	flt.SetOnDeath(home.MaterialiseComputeDeath)
+	// On attach, register the compute's actors + publish their types into truth.
+	flt.SetOnAttach(home.RegisterComputeActors)
 	// Caller-scoped closure loop (author #2): expired pending requests get a
 	// caller-authored unanswered_timeout. Runs for the home's lifetime.
 	go home.RunClosureScan(ctx, time.Second)

@@ -16,6 +16,7 @@ import (
 	"github.com/wanpengxie/ActOS/lib/sysactor"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/store"
+	"github.com/wanpengxie/ActOS/wire/computebus"
 )
 
 // ChannelHome is one channel's truth-holding home (v2). It composes the
@@ -117,6 +118,28 @@ func (h *ChannelHome) InstallEmbeddedAdapter(ctx context.Context, mod behavior.M
 	}
 	h.channel.Cells().Spawn(res.ActorID, res.Actor)
 	return res.ActorID, nil
+}
+
+// RegisterComputeActors registers an attaching compute's actors into truth and
+// publishes their request types — the compute holds no truth, so the home does
+// this on its behalf at attach (the fleet calls it). After this, a request for
+// one of the compute's types passes the harness type check and the fanout routes
+// it down the wire to the hosting compute.
+func (h *ChannelHome) RegisterComputeActors(ctx context.Context, decls []computebus.AttachDeclaration) error {
+	for _, d := range decls {
+		if err := h.registry.Insert(ctx, actor.Record{ID: d.ActorID, Kind: d.Kind, Binding: d.Binding}); err != nil {
+			return fmt.Errorf("channelhost: register compute actor %s: %w", d.ActorID, err)
+		}
+		for _, t := range d.Types {
+			if _, err := h.typeReg.Upsert(ctx, message.TypeRow{
+				Type: t, HandlerActorID: d.ActorID, HandlerBinding: d.Binding, MaxPendingMs: d.MaxPendingMs,
+				AllowedKinds: []message.Kind{message.KindEvent, message.KindRequest, message.KindResponse},
+			}); err != nil {
+				return fmt.Errorf("channelhost: publish compute type %s: %w", t, err)
+			}
+		}
+	}
+	return nil
 }
 
 // MaterialiseComputeDeath is the home-side收口 for a death that happened on an

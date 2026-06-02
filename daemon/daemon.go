@@ -29,9 +29,13 @@ type Config struct {
 // cells. Dispatch frames from the home flow into host cells; their emits flow
 // up via homelink (blocking on the home's EmitAck). No local truth.
 func Run(ctx context.Context, cfg Config, modules []behavior.Module) error {
-	hosts := make([]actor.ActorID, 0, len(modules))
+	decls := make([]computebus.AttachDeclaration, 0, len(modules))
 	for _, mod := range modules {
-		hosts = append(hosts, mod.Declares().ActorID)
+		d := mod.Declares()
+		decls = append(decls, computebus.AttachDeclaration{
+			ActorID: d.ActorID, Kind: actor.KindTool, Binding: d.Binding,
+			Types: d.Types, MaxPendingMs: d.MaxPendingMs,
+		})
 	}
 	computeID := cfg.ComputeID
 	if computeID == "" {
@@ -39,7 +43,7 @@ func Run(ctx context.Context, cfg Config, modules []behavior.Module) error {
 	}
 
 	var h *host.Host
-	hl, err := homelink.Connect(ctx, cfg.ServerWS, cfg.APIKey, computeID, hosts,
+	hl, err := homelink.Connect(ctx, cfg.ServerWS, cfg.APIKey, computeID, decls,
 		func(df computebus.DispatchFrame) {
 			if h != nil {
 				_ = h.Dispatch(ctx, df)

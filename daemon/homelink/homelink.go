@@ -31,13 +31,13 @@ type Homelink struct {
 }
 
 // Connect dials the home, attaches, and starts the read loop.
-func Connect(ctx context.Context, serverURL, apiKey, computeID string, hosts []actor.ActorID, onDispatch DispatchHandler) (*Homelink, error) {
+func Connect(ctx context.Context, serverURL, apiKey, computeID string, decls []computebus.AttachDeclaration, onDispatch DispatchHandler) (*Homelink, error) {
 	ws, _, err := websocket.DefaultDialer.DialContext(ctx, serverURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	h := &Homelink{ws: ws, pending: map[string]chan computebus.EmitAck{}, onDispatch: onDispatch}
-	if err := h.send(computebus.Frame{Type: computebus.FrameAttach, Attach: &computebus.AttachRequest{APIKey: apiKey, ComputeID: computeID, Hosts: hosts}}); err != nil {
+	if err := h.send(computebus.Frame{Type: computebus.FrameAttach, Attach: &computebus.AttachRequest{APIKey: apiKey, ComputeID: computeID, Declarations: decls}}); err != nil {
 		_ = ws.Close()
 		return nil, err
 	}
