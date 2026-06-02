@@ -5,7 +5,9 @@ import (
 	"context"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/lib/adapterhost"
+	"github.com/wanpengxie/ActOS/lib/agentactor"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/wire/computebus"
@@ -66,6 +68,22 @@ func (h *Host) InstallAdapter(ctx context.Context, mod behavior.Module, base ada
 	}
 	h.cells.Spawn(res.ActorID, res.Actor)
 	return res.ActorID, nil
+}
+
+// SpawnAgent hosts a worker-session agent as a kind=agent actor cell on this
+// compute. Its chain is the uplink (no local truth), so the worker report the
+// trigger emits flows UP to the home harness as the response. trigger is the
+// worker-session backend seam (runtime/workerhost-driven); the cell just routes
+// each inbound request to it serially. This is the agent half of "compute hosts
+// cells" — the same hosting mechanism as InstallAdapter, for agents.
+func (h *Host) SpawnAgent(self actor.ActorID, channelID channel.ID, trigger agentactor.TriggerFunc) {
+	a := agentactor.New(agentactor.Deps{
+		Self:      self,
+		ChannelID: channelID,
+		Chain:     NewUplinkChain(self, h.emit),
+		Trigger:   trigger,
+	})
+	h.cells.Spawn(self, a)
 }
 
 // Dispatch routes an inbound envelope to the hosted cell's mailbox.
