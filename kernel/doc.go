@@ -1,36 +1,43 @@
 // Package kernel is the protocol contract layer for coagent (launch+).
 //
-// It contains pure types, interfaces and pure functions that mirror the
-// current protocol specs (.dalek/pm/proto-layer*.md and impl-layer*.md).
-// It owns no
-// state, performs no IO, and depends on **no** external runtime libs
-// (no sqlite, no HTTP, no LLM SDK, no go-kimi).
+// It is PURE proto: pure types, closed-set vocabularies and pure functions
+// that mirror the protocol specs (.dalek/pm/proto-*.md). It owns no state,
+// performs no IO, takes no context.Context, declares no engine interfaces,
+// and knows nothing about storage (no Scan/Value) or transport bindings
+// (no HTTP status). All concrete backends, engines and bindings live
+// outside kernel and depend on kernel — never the other way round.
 //
-// Subpackages:
+// Subpackages (4):
 //
-//   - kernel/message    — envelope schema, kind enum, reason closed sets,
-//     canonical JSON hash (RFC 8785 + SHA-256).
-//   - kernel/actor      — actor identity, sender struct, ActorRegistry
-//     interface (in-memory contract, not bound to
-//     sqlite).
-//   - kernel/channel    — ChannelID type, ChannelRef (org_id?, channel_id)
-//     for federation forward-compat.
-//   - kernel/harness    — 9-step Harness chain interface and Step contract.
-//   - kernel/ledger     — ActionLedger reserve/commit interface, ledger key
-//     derivation.
-//   - kernel/log        — append-only MessageLog interface, Seq/Cursor.
+//   - kernel/actor    — actor identity (ActorID), the actor Kind closed set,
+//     Binding closed set, ReadinessState vocabulary, and the reserved-type
+//     closed sets.
+//   - kernel/channel  — channel ID type + Ref (federation forward-compat).
+//   - kernel/message  — envelope schema (17 content+metadata fields), kind /
+//     visibility closed sets, core-type table, the terminal-failure reason
+//     closed set (INVARIANT-10), and the RFC 8785 canonical hash function.
+//   - kernel/ledger   — the idempotency Key type + DeriveKey (pure SHA-256
+//     over canonical JSON).
 //
-// (v2: fencing moved to runtime/fence; the adapter Module/behaviour contract
-// moved to lib/behavior — kernel no longer owns a framework subpackage.)
+// What is NOT in kernel (and why):
+//
+//   - Stateful engine seams (the harness Chain/Step, the store contracts
+//     Registry/Ledger/Cursors/TypeRegistry/RequestLookup/MessageLog) — they
+//     take context.Context and are implemented by runtime/store; they live
+//     with their consumers in runtime. (Go idiom: interface at the consumer.)
+//   - Projections (actor membership Record/Registry, readiness Readiness,
+//     type_registry TypeRow) — projections are derived read caches, a
+//     runtime/server facility, never a kernel model (truth-vs-projection).
+//   - store-derived envelope columns (seq, is_terminal, canonical_hash) —
+//     produced by the store, not part of the 17 protocol fields.
+//   - harness reject + install reason vocabularies — the write/install
+//     ENGINES' errno, co-evolving with their engines → runtime.
+//   - reason→HTTP-status mapping — strerror, a binding concern → server/gateway.
 //
 // Layering rule (enforced by go-arch-lint in T2):
 //
-//   - kernel/** MUST NOT import: database/sql, net/http, gorilla/**,
-//     gin-gonic/**, mattn/go-sqlite3, modernc.org/sqlite, go-kimi.
-//   - All concrete backends and release-specific frameworks (sqlite store,
-//     daemon RPC HTTP server, multiuser daemonbus, etc.) live outside
-//     kernel/ and depend on kernel/, never the other way round.
-//
-// Spec cross-reference: launch-ticket notes §T1 (origin ticket
-// for the kernel layout) + §T2 (go-arch-lint enforce baseline).
+//   - kernel/** MUST NOT import: context, database/sql, net/http, gorilla/**,
+//     gin-gonic/**, mattn/go-sqlite3, modernc.org/sqlite, go-kimi, or any
+//     other kernel-external module.
+//   - Acceptance red line: `git grep context.Context kernel/` → 0.
 package kernel

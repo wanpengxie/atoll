@@ -28,18 +28,18 @@ type CrossChannelRef struct {
 	Note      *string    `json:"note"`
 }
 
-// Envelope is the v4 message envelope.
+// Envelope is the v4 message envelope (pure proto).
 //
 // It carries:
 //   - the content fields from L0 §2.1 (with `sender.kind/id/name`
 //     bundled into the nested Sender object)
 //   - the delivery-metadata fields from L0 §2.5
-//   - the 2 store-derived columns (`is_terminal`, `seq`) defined by L2
-//     §1.4.1 — these never travel inside an in-flight envelope but live
-//     alongside the row in the channel-local messages table
 //
-// Only the content fields (minus `ts_received`) feed CanonicalHash;
-// store-derived fields are excluded by L1 §10.2.2.
+// Store-derived columns (`seq`, `is_terminal`, `canonical_hash`) and
+// runtime scheduling diagnostics (`delivery_failed_at`, `attempts`) are
+// NOT part of the envelope — they live on the runtime/store row that wraps
+// it (target-state §3.7). Only the content fields (minus `ts_received`)
+// feed CanonicalHash.
 //
 // **Tri-state semantics**:
 //   - ParentID / CorrelationID: empty string ("") means NULL on the wire
@@ -77,26 +77,6 @@ type Envelope struct {
 
 	DeliveredAt *int64 `json:"delivered_at,omitempty"`
 	LastError   string `json:"last_error,omitempty"`
-
-	// DeliveryFailedAt and Attempts are runtime/store scheduling
-	// diagnostics. They are intentionally excluded from the wire
-	// envelope so callers cannot depend on them as protocol fields.
-	DeliveryFailedAt *int64 `json:"-"`
-	Attempts         int64  `json:"-"`
-
-	// --- store-derived (L2 §1.4.1) ------------------------------------
-
-	IsTerminal bool  `json:"is_terminal,omitempty"`
-	Seq        int64 `json:"seq,omitempty"`
-
-	// CanonicalHash is the hash computed at StepDedupe over the
-	// sender-provided envelope (pre-normalize) per proto-layer1 §2.3.
-	// Stored alongside the row by the engine append step; subsequent
-	// retries read it back via MessageLog.LookupCanonicalHash for an O(1)
-	// dedupe comparison without recomputing from a post-normalize row.
-	// Transient on the wire: omitted from JSON and excluded from
-	// CanonicalHash itself.
-	CanonicalHash string `json:"-"`
 }
 
 // IsFinalStatus reports whether the given payload.status value belongs
@@ -171,11 +151,4 @@ var ContentFields = []string{
 var DeliveryMetadataFields = []string{
 	"delivered_at",
 	"last_error",
-}
-
-// StoreDerivedFields lists the 2 store-derived column names from L2
-// §1.4.1 — populated by the daemon store (harness step 8 / engine).
-var StoreDerivedFields = []string{
-	"is_terminal",
-	"seq",
 }

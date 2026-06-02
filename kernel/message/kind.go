@@ -1,22 +1,22 @@
 // Package message defines the v4 message envelope, message kind /
-// visibility enums, the three closed reason sets (harness reject /
-// install / terminal failure), and the RFC 8785 canonical hash function
-// used by the Message-Write Harness.
+// visibility enums, the core-type table, the terminal-failure reason
+// closed set, and the RFC 8785 canonical hash function used by the
+// Message-Write Harness.
 //
 // Authoritative spec:
 //
 //   - Envelope fields           — L0 §2.1 (.dalek/pm/proto-layer0.md)
 //   - Kind closed set           — L0 §3.1 invariant I7 + proto-layer0 §3
 //   - Visibility enum           — L0 §2.4
-//   - Reason closed sets        — L1 §10.3
+//   - Terminal-failure reason   — proto-layer0 §2.6 (INVARIANT-10)
 //   - Canonical hash            — L2 §1.4.10.2
 //
 // The package depends on kernel/actor for L0 sender identity primitives.
+// Pure proto: no context, no storage, no engine interfaces. Harness reject
+// reasons + install reasons are the write/install ENGINES' errno vocabulary
+// and live with those engines in runtime (not here); reason→HTTP mapping is
+// a binding concern and lives in server/gateway.
 package message
-
-import (
-	"fmt"
-)
 
 // Kind is the v4 message ADT classifier (event / request / response).
 //
@@ -35,23 +35,6 @@ var AllKinds = []Kind{KindEvent, KindRequest, KindResponse}
 
 // String returns the wire form.
 func (k Kind) String() string { return string(k) }
-
-// Scan implements sql.Scanner for SQL TEXT boundaries.
-func (k *Kind) Scan(src any) error {
-	switch v := src.(type) {
-	case nil:
-		*k = ""
-		return nil
-	case string:
-		*k = Kind(v)
-		return nil
-	case []byte:
-		*k = Kind(string(v))
-		return nil
-	default:
-		return fmt.Errorf("message.Kind: scan unsupported %T", src)
-	}
-}
 
 // Visibility is the envelope `visibility` field — 3-value closed set
 // covering who in the channel can query-see this message.
@@ -80,20 +63,3 @@ var AllVisibilities = []Visibility{VisibilityPublic, VisibilityPrivate, Visibili
 
 // String returns the wire form.
 func (v Visibility) String() string { return string(v) }
-
-// Scan implements sql.Scanner for SQL TEXT boundaries.
-func (v *Visibility) Scan(src any) error {
-	switch x := src.(type) {
-	case nil:
-		*v = ""
-		return nil
-	case string:
-		*v = Visibility(x)
-		return nil
-	case []byte:
-		*v = Visibility(string(x))
-		return nil
-	default:
-		return fmt.Errorf("message.Visibility: scan unsupported %T", src)
-	}
-}

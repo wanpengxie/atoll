@@ -1,9 +1,11 @@
-// Package ledger declares the action_ledger reserve/commit contract
-// that backs L2 §1.4.10.1 Turn Replay idempotency. The package owns the
-// kernel-level interface + the LedgerKey derivation (SHA-256 over
-// canonical JSON of {turn_id, semantic_action_key}).
+// Package ledger owns the idempotency Key type + the LedgerKey derivation
+// (SHA-256 over canonical JSON of {turn_id, semantic_action_key}) that
+// backs L2 §1.4.10.1 Turn Replay idempotency. Pure proto: just the key
+// type and a pure derivation function.
 //
-// Concrete sqlite implementation lives in runtime/store/ledger.go (T3).
+// The stateful action_ledger reserve/commit contract (the Ledger
+// interface + Entry/Status rows) is an engine seam and lives in runtime
+// (implemented over sqlite). kernel only owns the key derivation.
 package ledger
 
 import (
