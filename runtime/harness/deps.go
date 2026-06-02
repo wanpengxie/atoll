@@ -155,16 +155,20 @@ func callerFromCtx(ctx context.Context) CallerContext {
 type ctxKeyRawEnvelope struct{}
 
 // CtxWithRawEnvelope returns a child ctx carrying the original envelope
-// JSON bytes the caller decoded into *message.Envelope. Wire-level
-// callers (worker IPC, HTTP API) SHOULD plumb this so Step 2 can
-// fail-closed on unknown top-level fields. In-process Go callers MAY
-// omit it — the struct-typed Envelope already pins the field set.
-func ctxWithRawEnvelope(ctx context.Context, raw []byte) context.Context {
+// JSON bytes the caller decoded into *message.Envelope. This is a
+// binding→harness INJECTION SEAM (like CtxWithCaller): wire-level bindings
+// (worker IPC, HTTP API) MUST plumb the raw wire bytes through it so Step 2's
+// unknown-top-level-field fail-closed check (proto-layer0 §7.3) has the
+// original JSON — without this setter exported, that check is
+// dead-by-construction. In-process Go callers MAY omit it (the struct-typed
+// Envelope already pins the field set). The getter is harness-internal
+// plumbing and stays unexported.
+func CtxWithRawEnvelope(ctx context.Context, raw []byte) context.Context {
 	return context.WithValue(ctx, ctxKeyRawEnvelope{}, raw)
 }
 
-// RawEnvelopeFromCtx pulls the raw envelope JSON bytes set by
-// CtxWithRawEnvelope. Returns nil when absent.
+// rawEnvelopeFromCtx pulls the raw envelope JSON bytes set by
+// CtxWithRawEnvelope. Returns nil when absent. Internal harness read.
 func rawEnvelopeFromCtx(ctx context.Context) []byte {
 	if v, ok := ctx.Value(ctxKeyRawEnvelope{}).([]byte); ok {
 		return v

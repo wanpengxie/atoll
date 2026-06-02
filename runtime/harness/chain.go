@@ -245,7 +245,11 @@ func rejectFromOutcome(out outcome, env *message.Envelope) WriteResult {
 type ctxKeyRequestID struct{}
 
 // WithRequestID attaches a request-id to ctx for harness log correlation.
-func withRequestID(ctx context.Context, id string) context.Context {
+// Binding→harness INJECTION SEAM (like CtxWithCaller / CtxWithRawEnvelope):
+// wire-level bindings carry a request-id at the edge and plumb it in so the
+// harness's per-step diagnostics correlate to the originating request. The
+// getter (requestIDFromCtx) is harness-internal plumbing and stays unexported.
+func WithRequestID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, ctxKeyRequestID{}, id)
 }
 
