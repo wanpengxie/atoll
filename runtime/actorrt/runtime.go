@@ -3,35 +3,47 @@ package actorrt
 import (
 	"context"
 	"errors"
-
+	"io"
 	"sync"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// Runtime owns the live cells for one channel and is the addressing seam.
-// Identity is single-level: a stable ActorID names at most one live cell at a
-// time. Spawn replaces; death is terminal (no transparent same-id respawn).
-// Death and replacement are checked by POINTER IDENTITY (the map entry still
-// points to this very *cell), so a dying predecessor can never evict its
-// successor — no per-instance generation is needed.
+// presence is one live actor's substrate-side presence, regardless of where
+// the actor's code runs. Deliver enqueues an envelope into the actor's mailbox
+// (never blocking: ErrMailboxFull / ErrCellStopped); stop tears it down. Two
+// backends implement it, by transport distance:
+//   - cell  — in-process actor   (mailbox = Go channel)
+//   - port  — out-of-process actor (mailbox = byte-stream connection)
+//
+// Both report the same Outcome on Deliver and the same DeathSignal on death.
+type presence interface {
+	Deliver(env *message.Envelope) error
+	stop()
+}
+
+// Runtime owns the live presences for one channel and is the addressing seam.
+// Identity is single-level: a stable ActorID names at most one live presence at
+// a time. Spawn/Attach replaces; death is terminal (no transparent same-id
+// respawn). Death and replacement are checked by POINTER IDENTITY (the map
+// entry still points to this very presence), so a dying predecessor can never
+// evict its successor — no per-instance generation is needed.
 type Runtime struct {
 	parent context.Context
 	sup    Supervisor
 
-	mu    sync.RWMutex
-	cells map[actor.ActorID]*cell
-	// mailbox is the default bounded mailbox depth for newly spawned cells.
-	mailbox int
+	mu        sync.RWMutex
+	presences map[actor.ActorID]presence
+	mailbox   int
 }
 
 // Config configures a Runtime.
 type Config struct {
-	// Parent is the context all cells derive from; cancelling it tears the
+	// Parent is the context all presences derive from; cancelling it tears the
 	// whole channel down.
 	Parent context.Context
-	// Supervisor receives death signals from cells; may be nil.
+	// Supervisor receives death signals from presences; may be nil.
 	Supervisor Supervisor
 	// Mailbox is the default bounded mailbox depth (<=0 → 64).
 	Mailbox int
@@ -48,10 +60,10 @@ func New(cfg Config) *Runtime {
 		mb = 64
 	}
 	return &Runtime{
-		parent:  parent,
-		sup:     cfg.Supervisor,
-		cells:   make(map[actor.ActorID]*cell),
-		mailbox: mb,
+		parent:    parent,
+		sup:       cfg.Supervisor,
+		presences: make(map[actor.ActorID]presence),
+		mailbox:   mb,
 	}
 }
 
@@ -60,15 +72,15 @@ func New(cfg Config) *Runtime {
 type Outcome int
 
 const (
-	// Delivered: the envelope was enqueued into the cell's mailbox.
+	// Delivered: the envelope was enqueued into the actor's mailbox.
 	Delivered Outcome = iota
-	// NotHosted: this runtime hosts no cell for the actor (legitimately — the
-	// audience may include system/user/remote actors). The seam can fast-fail
-	// receiver_unavailable instead of waiting for a timeout.
+	// NotHosted: this runtime hosts no presence for the actor (legitimately —
+	// the audience may include system/user/remote-elsewhere actors). The seam
+	// can fast-fail receiver_unavailable instead of waiting for a timeout.
 	NotHosted
-	// MailboxFull: a cell is hosted but its bounded mailbox is full.
+	// MailboxFull: a presence is hosted but its bounded mailbox is full.
 	MailboxFull
-	// Stopped: a cell is hosted but tearing down.
+	// Stopped: a presence is hosted but tearing down.
 	Stopped
 )
 
@@ -82,15 +94,15 @@ type DeliverResult struct {
 	Per map[actor.ActorID]AudienceOutcome
 }
 
-// Spawn creates and starts a cell for id. If a cell already exists for id it is
-// stopped and replaced (one actor, one owner).
+// Spawn creates and starts an IN-PROCESS cell for id. If a presence already
+// exists for id it is stopped and replaced (one actor, one owner).
 func (r *Runtime) Spawn(id actor.ActorID, impl Actor) {
 	r.mu.Lock()
 	c := newCell(r.parent, id, impl, r.mailbox, r.sup, r.removeIf)
-	old, existed := r.cells[id]
-	r.cells[id] = c
+	old, existed := r.presences[id]
+	r.presences[id] = c
 	r.mu.Unlock()
-	// stop()/start() run OUTSIDE the lock: stop() joins the old cell goroutine,
+	// stop()/start() run OUTSIDE the lock: stop() joins the old goroutine,
 	// which may itself call back into the runtime.
 	if existed {
 		old.stop()
@@ -98,55 +110,78 @@ func (r *Runtime) Spawn(id actor.ActorID, impl Actor) {
 	c.start()
 }
 
-// removeIf is the pointer-identity-checked self-eviction hook handed to each cell.
-// It deletes the map entry IFF it still points to this very instance — so a
-// late-dying predecessor (already replaced by Spawn) cannot evict its successor.
-func (r *Runtime) removeIf(c *cell) {
+// Attach binds an out-of-process actor that CONNECTED IN over conn, registering
+// it as a `port` presence. The substrate does not spawn the remote (it connects
+// in, lightcone /daemon/connect style); Attach performs the handshake, resolves
+// the connection's credential to an ActorID via resolve, relays the remote's
+// emits through emit, and returns the bound id. If a presence already exists for
+// the resolved id it is stopped and replaced.
+func (r *Runtime) Attach(ctx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc) (actor.ActorID, error) {
+	p, err := newPort(r.parent, conn, emit, resolve, r.sup, r.removeIf)
+	if err != nil {
+		return "", err
+	}
 	r.mu.Lock()
-	if cur, ok := r.cells[c.id]; ok && cur == c {
-		delete(r.cells, c.id)
+	old, existed := r.presences[p.id]
+	r.presences[p.id] = p
+	r.mu.Unlock()
+	if existed {
+		old.stop()
+	}
+	p.start()
+	return p.id, nil
+}
+
+// removeIf is the pointer-identity-checked self-eviction hook handed to each
+// presence. It deletes the map entry IFF it still points to this very instance —
+// so a late-dying predecessor (already replaced) cannot evict its successor.
+func (r *Runtime) removeIf(id actor.ActorID, self presence) {
+	r.mu.Lock()
+	if cur, ok := r.presences[id]; ok && cur == self {
+		delete(r.presences, id)
 	}
 	r.mu.Unlock()
 }
 
-// Despawn stops and removes the current cell for id (no-op if absent). This is
-// the external deregister path; callers MUST ensure in-flight requests addressed
-// to id are collapsed (substrate writes receiver_unavailable) before despawn.
+// Despawn stops and removes the current presence for id (no-op if absent). This
+// is the external deregister path; callers MUST ensure in-flight requests
+// addressed to id are collapsed (substrate writes receiver_unavailable) before
+// despawn.
 func (r *Runtime) Despawn(id actor.ActorID) {
 	r.mu.Lock()
-	c, ok := r.cells[id]
+	p, ok := r.presences[id]
 	if ok {
-		delete(r.cells, id)
+		delete(r.presences, id)
 	}
 	r.mu.Unlock()
 	if ok {
-		c.stop()
+		p.stop()
 	}
 }
 
-// Deliver routes env to every audience cell hosted by this Runtime by enqueueing
-// into each cell's mailbox, returning the per-audience Outcome. An audience
-// member with no local cell is reported NotHosted (not silently skipped) — the
-// substrate reports truthfully what it did so the seam can fast-fail. error is
-// reserved for a true exception (nil envelope), not for delivery conditions.
+// Deliver routes env to every audience presence hosted by this Runtime by
+// enqueueing into each mailbox, returning the per-audience Outcome. An audience
+// member with no local presence is reported NotHosted (not silently skipped) —
+// the substrate reports truthfully what it did so the seam can fast-fail. error
+// is reserved for a true exception (nil envelope), not for delivery conditions.
 func (r *Runtime) Deliver(ctx context.Context, audience []actor.ActorID, env *message.Envelope) (DeliverResult, error) {
 	if env == nil {
 		return DeliverResult{}, errors.New("actorrt: deliver nil envelope")
 	}
 	res := DeliverResult{Per: make(map[actor.ActorID]AudienceOutcome, len(audience))}
 	r.mu.RLock()
-	matched := make(map[actor.ActorID]*cell, len(audience))
+	matched := make(map[actor.ActorID]presence, len(audience))
 	for _, id := range audience {
-		if c, ok := r.cells[id]; ok {
-			matched[id] = c
+		if p, ok := r.presences[id]; ok {
+			matched[id] = p
 		} else {
 			res.Per[id] = AudienceOutcome{Outcome: NotHosted}
 		}
 	}
 	r.mu.RUnlock()
 
-	for id, c := range matched {
-		switch err := c.Deliver(env); err {
+	for id, p := range matched {
+		switch err := p.Deliver(env); err {
 		case nil:
 			res.Per[id] = AudienceOutcome{Outcome: Delivered}
 		case ErrMailboxFull:
@@ -160,24 +195,24 @@ func (r *Runtime) Deliver(ctx context.Context, audience []actor.ActorID, env *me
 	return res, nil
 }
 
-// StopAll stops every cell. Used at channel teardown.
+// StopAll stops every presence. Used at channel teardown.
 func (r *Runtime) StopAll() {
 	r.mu.Lock()
-	cells := make([]*cell, 0, len(r.cells))
-	for _, c := range r.cells {
-		cells = append(cells, c)
+	ps := make([]presence, 0, len(r.presences))
+	for _, p := range r.presences {
+		ps = append(ps, p)
 	}
-	r.cells = make(map[actor.ActorID]*cell)
+	r.presences = make(map[actor.ActorID]presence)
 	r.mu.Unlock()
-	for _, c := range cells {
-		c.stop()
+	for _, p := range ps {
+		p.stop()
 	}
 }
 
-// Has reports whether a cell is hosted for id.
+// Has reports whether a presence is hosted for id.
 func (r *Runtime) Has(id actor.ActorID) bool {
 	r.mu.RLock()
-	_, ok := r.cells[id]
+	_, ok := r.presences[id]
 	r.mu.RUnlock()
 	return ok
 }

@@ -60,7 +60,7 @@ type cell struct {
 	// map IFF the map still points to this very instance. This is how death
 	// makes an instance unaddressable WITHOUT the cell trying to stop/join
 	// itself (a goroutine cannot join itself — that was the death deadlock).
-	onExit func(*cell)
+	onExit func(actor.ActorID, presence)
 
 	// done is closed when the cell goroutine has fully exited (after Stop).
 	done chan struct{}
@@ -73,7 +73,7 @@ type cell struct {
 
 // newCell constructs a cell. mailbox is the bounded inbox depth; onExit is the
 // self-eviction hook.
-func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, sup Supervisor, onExit func(*cell)) *cell {
+func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, sup Supervisor, onExit func(actor.ActorID, presence)) *cell {
 	if mailbox <= 0 {
 		mailbox = 64
 	}
@@ -129,7 +129,7 @@ func (c *cell) start() {
 			// self-eviction. Never self-stop()/join: a goroutine cannot wait on
 			// its own exit.
 			if c.onExit != nil {
-				c.onExit(c)
+				c.onExit(c.id, c)
 			}
 			// (b) On abnormal death, hand the supervisor the closure obligation.
 			// Guard it: a supervisor panic must not escape and crash the process
