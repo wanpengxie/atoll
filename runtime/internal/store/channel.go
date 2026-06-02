@@ -58,7 +58,7 @@ func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions, deps Chan
 		Log:        msgs,
 		Query:      msgs,
 		Cursors:    newCursors(db),
-		Requests:   newRequestLookup(msgs, deps.ChannelID),
+		Requests:   newRequestLookup(msgs),
 		Registry:   reg,
 		Membership: reg,
 		Types:      newTypeRegistry(db, deps.NowFn),

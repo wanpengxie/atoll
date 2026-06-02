@@ -57,9 +57,14 @@ func openSqlite(ctx context.Context, dbPath string, opts OpenOptions, ddl string
 	if dbPath == "" {
 		return nil, errors.New("store: dbPath empty")
 	}
-	if dir := filepath.Dir(dbPath); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("store: mkdir %q: %w", dir, err)
+	// A read-only open must have NO filesystem write side-effect: it never
+	// creates the directory. A missing path then surfaces as a clean open
+	// error (mode=ro on a non-existent file), not a silently-created dir.
+	if !opts.ReadOnly {
+		if dir := filepath.Dir(dbPath); dir != "" {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return nil, fmt.Errorf("store: mkdir %q: %w", dir, err)
+			}
 		}
 	}
 

@@ -263,8 +263,7 @@ func (m *messages) OpenRequestsForActor(ctx context.Context, actorID actor.Actor
 // final at INSERT time; this query is the pre-check that lets the
 // harness reject provisional-after-final with the correct closed-set
 // reason instead of silently appending a zombie row.
-func (m *messages) HasFinalResponse(ctx context.Context, channelID channel.ID, parentID message.ID) (bool, error) {
-	_ = channelID // per-channel sqlite already scopes the query
+func (m *messages) HasFinalResponse(ctx context.Context, parentID message.ID) (bool, error) {
 	if parentID == "" {
 		return false, nil
 	}
@@ -288,8 +287,7 @@ func (m *messages) HasFinalResponse(ctx context.Context, channelID channel.ID, p
 // the existing Layer 1 final response for parentID (used by harness Step 8
 // to detect a caller self-close so a late receiver final can be rewritten
 // to observability rather than rejected).
-func (m *messages) FinalResponseSender(ctx context.Context, channelID channel.ID, parentID message.ID) (actor.ActorID, bool, error) {
-	_ = channelID
+func (m *messages) FinalResponseSender(ctx context.Context, parentID message.ID) (actor.ActorID, bool, error) {
 	if parentID == "" {
 		return "", false, nil
 	}
@@ -310,8 +308,7 @@ func (m *messages) FinalResponseSender(ctx context.Context, channelID channel.ID
 }
 
 // FindByID implements storespec.MessageLog.
-func (m *messages) FindByID(ctx context.Context, channelID channel.ID, id message.ID) (*storespec.StoredRow, bool, error) {
-	_ = channelID // channel_id is enforced by the per-channel db file; query stays scoped.
+func (m *messages) FindByID(ctx context.Context, id message.ID) (*storespec.StoredRow, bool, error) {
 	const q = `SELECT id, ts, ts_received, channel_id,
 	                  sender_kind, sender_id,
 	                  kind, type, payload,

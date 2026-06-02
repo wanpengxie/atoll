@@ -77,7 +77,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 	}
 
 	// Parent existence + kind check.
-	parent, ok, err := s.deps.Log.FindByID(ctx, s.deps.ChannelID, env.ParentID)
+	parent, ok, err := s.deps.Log.FindByID(ctx, env.ParentID)
 	if err != nil {
 		return outcome{}, err
 	}
@@ -166,7 +166,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 	// self-closed is NOT a duplicate/zombie: it is converted to an
 	// observability event (response.late_final) and recorded as a
 	// non-error. Only NON-late collisions remain rejects.
-	hasFinal, err := s.deps.Log.HasFinalResponse(ctx, s.deps.ChannelID, env.ParentID)
+	hasFinal, err := s.deps.Log.HasFinalResponse(ctx, env.ParentID)
 	if err != nil {
 		return outcome{}, err
 	}
@@ -176,7 +176,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 		// existing final was the caller self-closing (sender == parent
 		// request sender). A second genuine receiver final after a receiver
 		// final remains a hard duplicate.
-		priorSender, ok, err := s.deps.Log.FinalResponseSender(ctx, s.deps.ChannelID, env.ParentID)
+		priorSender, ok, err := s.deps.Log.FinalResponseSender(ctx, env.ParentID)
 		if err != nil {
 			return outcome{}, err
 		}

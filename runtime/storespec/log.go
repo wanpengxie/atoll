@@ -71,15 +71,18 @@ type MessageLog interface {
 	Append(ctx context.Context, env *message.Envelope, isTerminal bool) (AppendResult, error)
 
 	// FindByID returns the stored row for id (seq / is_terminal / envelope).
-	FindByID(ctx context.Context, channelID channel.ID, id message.ID) (*StoredRow, bool, error)
+	// No channelID parameter: the store is bound to one channel at OpenChannel,
+	// so a per-call channel arg is a pseudo-parameter — it implied a scoping the
+	// query never performed (illegal-state-representable). The binding is the scope.
+	FindByID(ctx context.Context, id message.ID) (*StoredRow, bool, error)
 
 	// HasFinalResponse reports whether a final response already exists for
 	// parentID (harness step 8 terminal uniqueness).
-	HasFinalResponse(ctx context.Context, channelID channel.ID, parentID message.ID) (bool, error)
+	HasFinalResponse(ctx context.Context, parentID message.ID) (bool, error)
 
 	// FinalResponseSender returns the sender of the existing final response
 	// for parentID, if any (late-final detection).
-	FinalResponseSender(ctx context.Context, channelID channel.ID, parentID message.ID) (actor.ActorID, bool, error)
+	FinalResponseSender(ctx context.Context, parentID message.ID) (actor.ActorID, bool, error)
 }
 
 // MessageQuery is the channel-log READ role — segregated from MessageLog so a

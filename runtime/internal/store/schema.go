@@ -129,6 +129,7 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
 var ChannelLocalTables = []string{
 	"messages",
 	"type_registry",
+	"type_registry_pending",
 	"actor_cursors",
 	"actor_registry",
 }
