@@ -54,7 +54,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/wanpengxie/ActOS/pkg/coagentsdk"
+	"github.com/wanpengxie/ActOS/sdk"
 )
 
 // askExitCodes mirror the archived daemon-go cmd/coagent contract.

@@ -18,7 +18,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/pkg/metrics"
+	"github.com/wanpengxie/ActOS/obs/metrics"
 	"github.com/wanpengxie/ActOS/runtime/store"
 )
 

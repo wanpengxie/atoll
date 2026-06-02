@@ -155,10 +155,10 @@ func (m *ProxyFacadeModule) liveStateNow() liveState {
 // event so the daemon-side projection still reflects the upstream actor's
 // own readiness; liveness is a separate over-expiring transport signal).
 func (m *ProxyFacadeModule) OnRuntimeEvent(_ context.Context, evt behavior.RuntimeEvent) error {
-	if evt.Kind != devicetransit.RuntimeEventKindDeviceLifecycle {
+	if evt.Kind != runtimeEventKindDeviceLifecycle {
 		return nil
 	}
-	lifecycle, err := devicetransit.DecodeLifecycleRuntimeEventPayload(evt.Payload)
+	lifecycle, err := decodeLifecycle(evt.Payload)
 	if err != nil {
 		return err
 	}
@@ -175,13 +175,13 @@ func (m *ProxyFacadeModule) OnRuntimeEvent(_ context.Context, evt behavior.Runti
 	return nil
 }
 
-func mapLifecycleToLive(e devicetransit.LifecycleEvent) (liveState, bool) {
+func mapLifecycleToLive(e lifecycleEvent) (liveState, bool) {
 	switch e {
-	case devicetransit.LifecycleConnected:
+	case lifecycleConnected:
 		return liveOnline, true
-	case devicetransit.LifecycleDisconnected:
+	case lifecycleDisconnected:
 		return liveOffline, true
-	case devicetransit.LifecycleTokenExpired:
+	case lifecycleTokenExpired:
 		return liveTokenExpired, true
 	}
 	return "", false

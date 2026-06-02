@@ -39,7 +39,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/pkg/logger"
+	"github.com/wanpengxie/ActOS/obs/logger"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 	"github.com/wanpengxie/ActOS/runtime/worker"
 )
