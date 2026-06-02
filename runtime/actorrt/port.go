@@ -20,9 +20,10 @@ type EmitSink func(ctx context.Context, env *message.Envelope) error
 
 // ResolveFunc is the connect-in auth seam (lightcone /daemon/connect?key=
 // style): it maps a connecting actor's lease credential to the ActorID the
-// substrate binds the connection to, plus the fence token the host stamps for
-// this connection (a later frame bearing a different token is a zombie → fence).
-type ResolveFunc func(leaseID string) (id actor.ActorID, leaseToken string, err error)
+// substrate binds the connection to. This is the connection's ONE-TIME
+// authentication — there is no per-frame re-auth (the stream is trusted once
+// the handshake binds it).
+type ResolveFunc func(leaseID string) (actor.ActorID, error)
 
 // portSendQueue bounds a port's outbound mailbox — the buffer Deliver enqueues
 // into and writeLoop drains to the wire. A full queue is MailboxFull, exactly
@@ -35,7 +36,8 @@ const portSendQueue = 64
 //   - Deliver enqueues into a bounded send queue drained to the wire; a full
 //     queue returns ErrMailboxFull (non-blocking, like cell.Deliver).
 //   - the read loop relays the remote's EMIT frames to the harness (emit) and
-//     turns DOWN / EOF into the SAME self-eviction + DeathSignal a cell raises.
+//     turns DOWN / EOF / unknown-kind into the SAME self-eviction + DeathSignal
+//     a cell raises.
 //
 // Death never self-joins (a goroutine cannot wait on its own exit): die()
 // cancels + closes the conn to unblock the loops and self-evicts via onExit;
@@ -45,7 +47,6 @@ type port struct {
 	codec *ipc.Codec
 	conn  io.Closer
 	emit  EmitSink
-	lease string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -67,8 +68,9 @@ type port struct {
 }
 
 // newPort performs the connect-in handshake on conn (read KindHandshake →
-// resolve lease to an ActorID → reply KindHandshakeAck with the fence token)
-// and builds the port. The handshake is synchronous (runs inside Attach).
+// resolve lease to an ActorID → reply KindHandshakeAck) and builds the port.
+// The handshake is synchronous (runs inside Attach) and is the connection's
+// one-time authentication.
 func newPort(parent context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc, sup Supervisor, onExit func(actor.ActorID, presence)) (*port, error) {
 	if emit == nil {
 		return nil, errors.New("actorrt: port requires EmitSink")
@@ -88,18 +90,18 @@ func newPort(parent context.Context, conn io.ReadWriteCloser, emit EmitSink, res
 	if err := json.Unmarshal(hs.Payload, &hp); err != nil {
 		return nil, fmt.Errorf("actorrt: port handshake decode: %w", err)
 	}
-	id, token, err := resolve(hp.LeaseID)
+	id, err := resolve(hp.LeaseID)
 	if err != nil {
 		return nil, fmt.Errorf("actorrt: port resolve %q: %w", hp.LeaseID, err)
 	}
 	if id == "" {
 		return nil, errors.New("actorrt: port resolve returned empty actor id")
 	}
-	ackPayload, err := json.Marshal(ipc.HandshakeAckPayload{Actor: id, LeaseToken: token})
+	ackPayload, err := json.Marshal(ipc.HandshakeAckPayload{Actor: id})
 	if err != nil {
 		return nil, err
 	}
-	if err := codec.Write(ipc.Frame{ID: hs.ID, Kind: ipc.KindHandshakeAck, LeaseToken: token, Payload: ackPayload}); err != nil {
+	if err := codec.Write(ipc.Frame{Kind: ipc.KindHandshakeAck, Payload: ackPayload}); err != nil {
 		return nil, fmt.Errorf("actorrt: port handshake ack: %w", err)
 	}
 	ctx, cancel := context.WithCancel(parent)
@@ -108,7 +110,6 @@ func newPort(parent context.Context, conn io.ReadWriteCloser, emit EmitSink, res
 		codec:  codec,
 		conn:   conn,
 		emit:   emit,
-		lease:  token,
 		ctx:    ctx,
 		cancel: cancel,
 		sup:    sup,
@@ -119,8 +120,12 @@ func newPort(parent context.Context, conn io.ReadWriteCloser, emit EmitSink, res
 }
 
 // Deliver enqueues env into the port's bounded send queue. Never blocks: a full
-// queue returns ErrMailboxFull, a torn-down port ErrCellStopped.
+// queue returns ErrMailboxFull, a torn-down port ErrCellStopped. nil is not a
+// message and is rejected (a mailbox carries only envelopes).
 func (p *port) Deliver(env *message.Envelope) error {
+	if env == nil {
+		return errors.New("actorrt: port deliver nil envelope")
+	}
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -157,7 +162,7 @@ func (p *port) writeLoop() {
 				// the log is truth; closure belongs to the sender.
 				continue
 			}
-			if err := p.codec.Write(ipc.Frame{Kind: ipc.KindDeliver, LeaseToken: p.lease, Payload: payload}); err != nil {
+			if err := p.codec.Write(ipc.Frame{Kind: ipc.KindDeliver, Payload: payload}); err != nil {
 				p.die(fmt.Errorf("actorrt: port %s deliver write: %w", p.id, err))
 				return
 			}
@@ -166,7 +171,8 @@ func (p *port) writeLoop() {
 }
 
 // readLoop relays remote EMIT frames to the harness and turns DOWN / EOF /
-// stale-fence into death.
+// unknown-kind into death. The wire is a closed set: an unknown kind is a
+// protocol violation and fail-closes the port (never silently ignored).
 func (p *port) readLoop() {
 	defer p.wg.Done()
 	for {
@@ -175,15 +181,12 @@ func (p *port) readLoop() {
 			p.die(fmt.Errorf("actorrt: port %s read: %w", p.id, err))
 			return
 		}
-		if frame.LeaseToken != "" && frame.LeaseToken != p.lease {
-			p.die(fmt.Errorf("actorrt: port %s stale lease token", p.id))
-			return
-		}
 		switch frame.Kind {
 		case ipc.KindEmit:
 			var ep ipc.EmitPayload
 			if err := json.Unmarshal(frame.Payload, &ep); err != nil {
-				continue
+				p.die(fmt.Errorf("actorrt: port %s emit decode: %w", p.id, err))
+				return
 			}
 			env := ep.Envelope
 			_ = p.emit(p.ctx, &env)
@@ -196,10 +199,8 @@ func (p *port) readLoop() {
 			}
 			p.die(fmt.Errorf("actorrt: port %s down: %s", p.id, reason))
 			return
-		case ipc.KindHeartbeat:
-			// liveness: the frame's arrival IS the signal; nothing to record.
-		case ipc.KindShutdownAck:
-			p.die(nil)
+		default:
+			p.die(fmt.Errorf("actorrt: port %s unknown frame kind %q", p.id, frame.Kind))
 			return
 		}
 	}
