@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 
-	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -21,14 +20,14 @@ type stepNormalize struct {
 	deps Deps
 }
 
-func newStepNormalize(d Deps) khar.Step { return &stepNormalize{deps: d} }
+func newStepNormalize(d Deps) Step { return &stepNormalize{deps: d} }
 
-func (s *stepNormalize) ID() khar.StepID { return khar.StepNormalize }
+func (s *stepNormalize) ID() StepID { return StepNormalize }
 
-func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (khar.Outcome, error) {
+func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (Outcome, error) {
 	_ = ctx
 	if env == nil {
-		return khar.Outcome{}, nil
+		return Outcome{}, nil
 	}
 
 	// Sender-provided runtime fields are not protocol content. Dedupe has
@@ -99,25 +98,25 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (khar.Ou
 
 	// time-relation guard — proto-layer1 §2.4 / proto-layer0 §4.5.
 	if env.NotBefore != nil && *env.NotBefore < env.TS {
-		return khar.Outcome{
-			RejectReason: message.HarnessTimeInvalid,
+		return Outcome{
+			RejectReason: HarnessTimeInvalid,
 			Detail:       "envelope.not_before < envelope.ts",
 		}, nil
 	}
 	if env.ExpiresAt != nil {
 		if *env.ExpiresAt <= env.TS {
-			return khar.Outcome{
-				RejectReason: message.HarnessTimeInvalid,
+			return Outcome{
+				RejectReason: HarnessTimeInvalid,
 				Detail:       "envelope.expires_at <= envelope.ts",
 			}, nil
 		}
 		if env.NotBefore != nil && *env.ExpiresAt <= *env.NotBefore {
-			return khar.Outcome{
-				RejectReason: message.HarnessTimeInvalid,
+			return Outcome{
+				RejectReason: HarnessTimeInvalid,
 				Detail:       "envelope.expires_at <= envelope.not_before",
 			}, nil
 		}
 	}
 
-	return khar.Outcome{}, nil
+	return Outcome{}, nil
 }

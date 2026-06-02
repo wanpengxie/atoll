@@ -6,48 +6,12 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// TypeView is the read-only projection of one type_registry row the
-// harness needs at write time. It mirrors the install-time fields the
-// adapter framework writes (allowed_kinds, handler_actor_id,
-// max_pending_ms) — runtime/harness deliberately keeps the contract
-// minimal so multiple registry implementations (in-memory, sqlite,
-// federation) can fulfill it.
-//
-// Level A (proto-layer0 §1.4.1 / proto-layer1 §1.3): payload is opaque
-// to the protocol layer; the harness does NOT validate payload schemas
-// and the type_registry does NOT store payload schemas. Payload
-// consistency between caller and handler is a product-layer concern.
-type TypeView struct {
-	// Type is the envelope.type value, e.g. "feishu.chat.send".
-	Type string
-
-	// AllowedKinds is the closed set of envelope.kind the harness will
-	// accept for this type (step 5 reject reason: kind_not_allowed).
-	AllowedKinds []message.Kind
-
-	// MaxPendingMs is the per-type request timeout used when a request's
-	// receiver is a tool and the envelope omitted expires_at.
-	MaxPendingMs int64
-
-	// HandlerActorID is the type's default concrete receiver (L2
-	// §1.4.2). When non-empty AND envelope.kind==request, step 5
-	// asserts the explicit audience equals this id
-	// (audience_handler_mismatch).
-	HandlerActorID actor.ActorID
-}
-
-// TypeRegistry is the read seam the harness uses to fetch one type_view
-// row at write time. Implementations live in adapters/framework (memory
-// + sqlite) — runtime/harness consumes the interface only.
-type TypeRegistry interface {
-	// Lookup returns the registered view for typeName, or ok=false when
-	// the type is not registered. The harness step 4 / step 5 fan out
-	// from this — a not-found triggers unknown_type reject.
-	Lookup(ctx context.Context, typeName string) (TypeView, bool, error)
-}
+// (TypeView + the type-view read seam moved to runtime/storespec — they are
+// store contracts, not harness internals. The harness consumes
+// storespec.TypeViewLookup → storespec.TypeView.)
 
 // Logger is the minimal structured logger used by the harness hot path.
 // It mirrors the adapter framework's Logger shape without importing the
@@ -111,24 +75,18 @@ type Deps struct {
 	ChannelID channel.ID
 
 	// ActorRegistry resolves sender.id / audience entries / handler_actor_id
-	// to actor.Record (kind / binding / deregistration timestamp).
+	// to storespec.Record (kind / binding / deregistration timestamp).
 	// Required.
-	ActorRegistry actor.Registry
+	ActorRegistry storespec.Registry
 
 	// TypeRegistry resolves business types declared by adapters /
 	// channel template. Optional; when nil the chain assumes only core
 	// types are allowed (every business type fails step 4 unknown_type).
-	TypeRegistry TypeRegistry
+	TypeRegistry storespec.TypeViewLookup
 
 	// Log is the channel-local messages-table sink. Required — step 9
-	// engine append calls Log.Append; step 3 (and step 8 catch) calls
-	// Log.FindByID for dedupe / parent existence checks.
-	Log MessageLog
-
-	// Fencing is the explicit ownership tuple passed to Log.Append at
-	// step 9. Unfenced test logs ignore the zero value; production daemon
-	// wiring must populate it from the channel_lock row.
-	Fencing FencingTuple
+	// engine append calls Log.Append. (v2: no fencing — single writer.)
+	Log storespec.MessageLog
 
 	// NowMs returns unix-ms (engine ts_received write source). Defaults
 	// to time.Now when nil.

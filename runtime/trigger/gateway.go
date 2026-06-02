@@ -7,6 +7,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
 // Deliverer is the minimal Deliver(audience, env) surface the gateway
@@ -24,14 +25,14 @@ type Deliverer interface {
 // envelope; the gateway runs Resolve and hands the result to the
 // scheduler Deliverer.
 type Gateway struct {
-	registry actor.Registry
+	registry storespec.Registry
 	deliver  Deliverer
 	nowFn    func() int64
 }
 
 // Config wires a Gateway.
 type Config struct {
-	Registry  actor.Registry
+	Registry  storespec.Registry
 	Deliverer Deliverer
 	// NowFn returns unix-ms. Defaults to time.Now when nil. Used by
 	// Dispatch to decide whether NotBefore has passed (L1 §5.3

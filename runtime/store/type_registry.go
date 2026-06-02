@@ -19,7 +19,7 @@ import (
 // TypeRegistry is the sqlite-backed implementation of
 // kernel/message.TypeRegistry (upsert + lookup + list at adapter install
 // time) over the channel-local type_registry table (L2 §1.4.2). It also
-// exposes a runtime/harness.TypeRegistry projection via HarnessView so
+// exposes a runtime/storespec.TypeViewLookup projection via HarnessView so
 // the harness Chain reads the same row Manager.Install wrote.
 //
 // Level A (proto-layer0 §1.4.1 / proto-layer1 §1.3): payload is opaque
@@ -390,16 +390,16 @@ func (r *TypeRegistry) List(ctx context.Context) ([]message.TypeRow, error) {
 	return out, nil
 }
 
-// LookupView returns the runtime/harness.TypeRegistry view of one
+// LookupView returns the runtime/storespec.TypeViewLookup view of one
 // registered type. Implemented as a thin reshape over the framework row
 // so a single sqlite row backs both the adapter install path and the
 // harness write path.
-func (r *TypeRegistry) LookupView(ctx context.Context, typeName string) (harness.TypeView, bool, error) {
+func (r *TypeRegistry) LookupView(ctx context.Context, typeName string) (storespec.TypeView, bool, error) {
 	row, ok, err := r.lookup(ctx, typeName)
 	if err != nil || !ok {
-		return harness.TypeView{}, ok, err
+		return storespec.TypeView{}, ok, err
 	}
-	return harness.TypeView{
+	return storespec.TypeView{
 		Type:           row.Type,
 		AllowedKinds:   append([]message.Kind(nil), row.AllowedKinds...),
 		MaxPendingMs:   row.MaxPendingMs,
@@ -407,14 +407,14 @@ func (r *TypeRegistry) LookupView(ctx context.Context, typeName string) (harness
 	}, true, nil
 }
 
-// HarnessView returns a runtime/harness.TypeRegistry view that delegates
+// HarnessView returns a runtime/storespec.TypeViewLookup view that delegates
 // every Lookup back to LookupView. Used by daemon composition root so
 // the harness Chain shares storage with framework.Manager.Install.
-func (r *TypeRegistry) HarnessView() harness.TypeRegistry { return typeRegistryHarnessAdapter{r} }
+func (r *TypeRegistry) HarnessView() storespec.TypeViewLookup { return typeRegistryHarnessAdapter{r} }
 
 type typeRegistryHarnessAdapter struct{ inner *TypeRegistry }
 
-func (a typeRegistryHarnessAdapter) Lookup(ctx context.Context, typeName string) (harness.TypeView, bool, error) {
+func (a typeRegistryHarnessAdapter) Lookup(ctx context.Context, typeName string) (storespec.TypeView, bool, error) {
 	return a.inner.LookupView(ctx, typeName)
 }
 
@@ -600,5 +600,5 @@ func unmarshalAllowedKinds(raw string) ([]message.Kind, error) {
 // Compile-time interface checks — both contracts stay in sync with code.
 var (
 	_ message.TypeRegistry = (*TypeRegistry)(nil)
-	_ harness.TypeRegistry = typeRegistryHarnessAdapter{}
+	_ storespec.TypeViewLookup = typeRegistryHarnessAdapter{}
 )

@@ -15,7 +15,7 @@ import (
 	kharness "github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-// Messages implements kernel/harness.MessageLog over the messages table.
+// Messages implements kernel/storespec.MessageLog over the messages table.
 //
 // Per L2 §1.4.5 engine-append ACL, Messages is a PURE PERSISTENCE SINK:
 // every caller MUST run the L1 §10.2 9-step Message-Write Harness chain
@@ -94,7 +94,7 @@ func NewMessages(db *sql.DB) *Messages { return &Messages{db: db} }
 // explicit fencing tuple against the injected fence INSIDE
 // the same transaction as the row INSERT. A stale daemon (or a forgotten
 // Append fencing argument) is rejected with
-// klog.AppendError{Reason: HarnessWorkerFencingStale}.
+// storespec.AppendError{Reason: HarnessWorkerFencingStale}.
 func NewMessagesWithFence(db *sql.DB, fence WriteFence) *Messages {
 	return &Messages{db: db, fence: fence}
 }
@@ -111,13 +111,13 @@ func NewMessagesWithObservers(db *sql.DB, fence WriteFence, outbox AppendObserve
 	return &Messages{db: db, fence: fence, outbox: outbox}
 }
 
-// Append implements harness.MessageLog.
-func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kharness.FencingTuple) (klog.AppendResult, error) {
+// Append implements storespec.MessageLog.
+func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kharness.FencingTuple) (storespec.AppendResult, error) {
 	if env == nil {
-		return klog.AppendResult{}, errors.New("store: append nil envelope")
+		return storespec.AppendResult{}, errors.New("store: append nil envelope")
 	}
 	if env.ID == "" {
-		return klog.AppendResult{}, errors.New("store: append empty envelope.id")
+		return storespec.AppendResult{}, errors.New("store: append empty envelope.id")
 	}
 	// FIX-T10 protocol defense: Payload is a REQUIRED field per L0 §2.1
 	// (every envelope carries a payload object, even if the body is the
@@ -127,26 +127,26 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kh
 	// caller (harness chain) is forced to materialize the payload before
 	// reaching the persistence sink.
 	if env.Payload == nil {
-		return klog.AppendResult{}, errors.New("store: append nil payload (harness step 4 must materialize payload before reaching store)")
+		return storespec.AppendResult{}, errors.New("store: append nil payload (harness step 4 must materialize payload before reaching store)")
 	}
 	if m.outbox != nil {
 		if err := m.outbox.WaitForAdmission(ctx); err != nil {
-			return klog.AppendResult{}, err
+			return storespec.AppendResult{}, err
 		}
 	}
 
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
-		return klog.AppendResult{}, fmt.Errorf("store: append begin: %w", err)
+		return storespec.AppendResult{}, fmt.Errorf("store: append begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	res, err := m.AppendTx(ctx, tx, env, fencing)
 	if err != nil {
-		return klog.AppendResult{}, err
+		return storespec.AppendResult{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return klog.AppendResult{}, fmt.Errorf("store: append commit: %w", err)
+		return storespec.AppendResult{}, fmt.Errorf("store: append commit: %w", err)
 	}
 	return res, nil
 }
@@ -154,28 +154,28 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kh
 // AppendTx appends env using an existing transaction. It is used by internal
 // runtime lifecycle paths that must mutate a side table and append the mirror
 // event atomically.
-func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, fencing kharness.FencingTuple) (klog.AppendResult, error) {
+func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, fencing kharness.FencingTuple) (storespec.AppendResult, error) {
 	if tx == nil {
-		return klog.AppendResult{}, errors.New("store: append tx nil")
+		return storespec.AppendResult{}, errors.New("store: append tx nil")
 	}
 	if env == nil {
-		return klog.AppendResult{}, errors.New("store: append nil envelope")
+		return storespec.AppendResult{}, errors.New("store: append nil envelope")
 	}
 	if env.ID == "" {
-		return klog.AppendResult{}, errors.New("store: append empty envelope.id")
+		return storespec.AppendResult{}, errors.New("store: append empty envelope.id")
 	}
 	if env.Payload == nil {
-		return klog.AppendResult{}, errors.New("store: append nil payload (harness step 4 must materialize payload before reaching store)")
+		return storespec.AppendResult{}, errors.New("store: append nil payload (harness step 4 must materialize payload before reaching store)")
 	}
 	// 0) FIX-T6 fencing gate — when constructed with a *ChannelLock,
 	// every Append must present a matching (fencing_token, daemon_epoch)
 	// tuple via an explicit Append parameter. The check runs INSIDE
 	// the tx so a concurrent RefreshDaemon cannot slip between SELECT
-	// and INSERT. Failure path: typed *klog.AppendError so the harness
+	// and INSERT. Failure path: typed *storespec.AppendError so the harness
 	// chain maps it to message.HarnessWorkerFencingStale (closed-set
 	// reject). No outbox row is written.
 	if err := m.checkFencing(ctx, tx, string(env.ID), fencing); err != nil {
-		return klog.AppendResult{}, err
+		return storespec.AppendResult{}, err
 	}
 
 	// 1) dedupe by envelope.id
@@ -190,25 +190,25 @@ func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelo
 		// before short-circuiting.
 		env.Seq = existingSeq
 		env.IsTerminal = existingTerm == 1
-		return klog.AppendResult{Seq: klog.Seq(existingSeq), IsTerminal: existingTerm == 1, Deduped: true}, nil
+		return storespec.AppendResult{Seq: storespec.Seq(existingSeq), IsTerminal: existingTerm == 1, Deduped: true}, nil
 	case errors.Is(err, sql.ErrNoRows):
 		// fall through
 	default:
-		return klog.AppendResult{}, fmt.Errorf("store: append dedupe lookup: %w", err)
+		return storespec.AppendResult{}, fmt.Errorf("store: append dedupe lookup: %w", err)
 	}
 
 	// 2) INSERT row
 	docRefsJSON, err := encodeDocRefs(env.DocRefs)
 	if err != nil {
-		return klog.AppendResult{}, fmt.Errorf("store: append docrefs encode: %w", err)
+		return storespec.AppendResult{}, fmt.Errorf("store: append docrefs encode: %w", err)
 	}
 	crossRefsJSON, err := encodeCrossChannelRefs(env.CrossChannelRefs)
 	if err != nil {
-		return klog.AppendResult{}, fmt.Errorf("store: append cross_channel_refs encode: %w", err)
+		return storespec.AppendResult{}, fmt.Errorf("store: append cross_channel_refs encode: %w", err)
 	}
 	audJSON, err := json.Marshal(env.Audience)
 	if err != nil {
-		return klog.AppendResult{}, fmt.Errorf("store: append audience encode: %w", err)
+		return storespec.AppendResult{}, fmt.Errorf("store: append audience encode: %w", err)
 	}
 
 	const ins = `INSERT INTO messages (
@@ -237,21 +237,21 @@ func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelo
 		terminalInt, env.CanonicalHash,
 	)
 	if err != nil {
-		return klog.AppendResult{}, classifyAppendErr(err, string(env.ID))
+		return storespec.AppendResult{}, classifyAppendErr(err, string(env.ID))
 	}
 	seq, err := res.LastInsertId()
 	if err != nil {
-		return klog.AppendResult{}, fmt.Errorf("store: append last id: %w", err)
+		return storespec.AppendResult{}, fmt.Errorf("store: append last id: %w", err)
 	}
 	env.Seq = seq
 
 	if m.outbox != nil {
 		if err := m.outbox.EnqueueAppendTx(ctx, tx, env, seq); err != nil {
-			return klog.AppendResult{}, err
+			return storespec.AppendResult{}, err
 		}
 	}
 
-	return klog.AppendResult{Seq: klog.Seq(seq), IsTerminal: env.IsTerminal, Deduped: false}, nil
+	return storespec.AppendResult{Seq: storespec.Seq(seq), IsTerminal: env.IsTerminal, Deduped: false}, nil
 }
 
 // PendingDue returns up to `limit` future-message rows that are due for
@@ -581,7 +581,7 @@ func (m *Messages) MarkDeliveryError(ctx context.Context, id message.ID, atMs in
 	return nil
 }
 
-// HasFinalResponse implements harness.MessageLog. Returns true when at
+// HasFinalResponse implements storespec.MessageLog. Returns true when at
 // least one kind=response row exists for parent_id=parentID with the
 // row's is_terminal column set — store layer has already materialised
 // the (kind==response && payload.status ∈ {completed, failed})
@@ -615,7 +615,7 @@ func (m *Messages) HasFinalResponse(ctx context.Context, channelID channel.ID, p
 	}
 }
 
-// FinalResponseSender implements harness.MessageLog — returns the sender.id of
+// FinalResponseSender implements storespec.MessageLog — returns the sender.id of
 // the existing Layer 1 final response for parentID (used by harness Step 8
 // to detect a caller self-close so a late receiver final can be rewritten
 // to observability rather than rejected).
@@ -640,7 +640,7 @@ func (m *Messages) FinalResponseSender(ctx context.Context, channelID channel.ID
 	}
 }
 
-// LookupCanonicalHash implements harness.MessageLog — returns the row's
+// LookupCanonicalHash implements storespec.MessageLog — returns the row's
 // stored canonical_hash for StepDedupe's pre-normalize comparison
 // (proto-layer1 §2.3).
 func (m *Messages) LookupCanonicalHash(ctx context.Context, channelID channel.ID, id message.ID) (string, bool, error) {
@@ -657,7 +657,7 @@ func (m *Messages) LookupCanonicalHash(ctx context.Context, channelID channel.ID
 	return hash, true, nil
 }
 
-// FindByID implements harness.MessageLog.
+// FindByID implements storespec.MessageLog.
 func (m *Messages) FindByID(ctx context.Context, channelID channel.ID, id message.ID) (message.Envelope, bool, error) {
 	_ = channelID // channel_id is enforced by the per-channel db file; query stays scoped.
 	const q = `SELECT id, ts, ts_received, channel_id,
@@ -808,14 +808,14 @@ func nullableInt(p *int64) any {
 // constructed without a WriteFence (test-mode wire). Otherwise validates
 // the explicit (token, epoch) tuple inside the supplied tx; on any
 // mismatch returns a typed
-// *klog.AppendError{Reason: HarnessWorkerFencingStale} so the harness
+// *storespec.AppendError{Reason: HarnessWorkerFencingStale} so the harness
 // chain can surface the canonical reject reason without parsing strings.
 func (m *Messages) checkFencing(ctx context.Context, tx *sql.Tx, envID string, fencing kharness.FencingTuple) error {
 	if m.fence == nil {
 		return nil
 	}
 	if fencing == (kharness.FencingTuple{}) {
-		return &klog.AppendError{
+		return &storespec.AppendError{
 			Reason:           message.HarnessWorkerFencingStale,
 			Detail:           "fencing tuple missing from Append parameter",
 			PartialMessageID: message.ID(envID),
@@ -823,7 +823,7 @@ func (m *Messages) checkFencing(ctx context.Context, tx *sql.Tx, envID string, f
 	}
 	if err := m.fence.ValidateWriteTx(ctx, tx, fencing.Token, fencing.Epoch); err != nil {
 		if IsFencingStale(err) {
-			return &klog.AppendError{
+			return &storespec.AppendError{
 				Reason:           message.HarnessWorkerFencingStale,
 				Detail:           err.Error(),
 				PartialMessageID: message.ID(envID),
@@ -843,7 +843,7 @@ func classifyAppendErr(err error, envID string) error {
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "UNIQUE constraint failed: messages.id"):
-		return &klog.AppendError{
+		return &storespec.AppendError{
 			Reason:           message.HarnessIDDuplicateConflict,
 			Detail:           msg,
 			PartialMessageID: message.ID(envID),
@@ -851,7 +851,7 @@ func classifyAppendErr(err error, envID string) error {
 	case strings.Contains(msg, "ux_terminal_response_per_request") ||
 		strings.Contains(msg, "UNIQUE constraint failed: messages.parent_id") ||
 		strings.Contains(msg, "parent_id, kind, is_terminal"):
-		return &klog.AppendError{
+		return &storespec.AppendError{
 			Reason:           message.HarnessTerminalDuplicate,
 			Detail:           msg,
 			PartialMessageID: message.ID(envID),

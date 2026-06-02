@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 
-	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -30,11 +29,11 @@ import (
 // dedupe never wastes a canonical_hash compute on a will-reject row.
 type stepEnvelopeShape struct{}
 
-func newStepEnvelopeShape(_ Deps) khar.Step { return &stepEnvelopeShape{} }
+func newStepEnvelopeShape(_ Deps) Step { return &stepEnvelopeShape{} }
 
-func (s *stepEnvelopeShape) ID() khar.StepID { return khar.StepEnvelopeShape }
+func (s *stepEnvelopeShape) ID() StepID { return StepEnvelopeShape }
 
-func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (khar.Outcome, error) {
+func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (Outcome, error) {
 	// (1) content fields present — proto-layer0 §1.1.
 	switch {
 	case env.ID == "":
@@ -54,8 +53,8 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (kha
 	// (2) channel_id consistency vs caller context.
 	caller := CallerFromCtx(ctx)
 	if caller.ChannelID != "" && env.ChannelID != caller.ChannelID {
-		return khar.Outcome{
-			RejectReason: message.HarnessChannelMismatch,
+		return Outcome{
+			RejectReason: HarnessChannelMismatch,
 			Detail:       "envelope.channel_id does not match caller channel context",
 		}, nil
 	}
@@ -64,8 +63,8 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (kha
 	switch env.Kind {
 	case message.KindEvent, message.KindRequest, message.KindResponse:
 	default:
-		return khar.Outcome{
-			RejectReason: message.HarnessKindInvalid,
+		return Outcome{
+			RejectReason: HarnessKindInvalid,
 			Detail:       "envelope.kind not in {event, request, response}",
 		}, nil
 	}
@@ -76,8 +75,8 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (kha
 		env.Visibility != message.VisibilityPublic &&
 		env.Visibility != message.VisibilityPrivate &&
 		env.Visibility != message.VisibilitySystem {
-		return khar.Outcome{
-			RejectReason: message.HarnessVisibilityInvalid,
+		return Outcome{
+			RejectReason: HarnessVisibilityInvalid,
 			Detail:       "envelope.visibility not in {public, private, system}",
 		}, nil
 	}
@@ -96,8 +95,8 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (kha
 	// validation centre, never duplicated upstream of resolution.
 	for _, id := range env.Audience {
 		if string(id) == "*" {
-			return khar.Outcome{
-				RejectReason: message.HarnessAudienceWildcardForbidden,
+			return Outcome{
+				RejectReason: HarnessAudienceWildcardForbidden,
 				Detail:       `envelope.audience wildcard "*" is not allowed; enumerate explicit actor ids`,
 			}, nil
 		}
@@ -105,8 +104,8 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (kha
 
 	// (7) response.parent_id non-null — One Law extra-strong constraint.
 	if env.Kind == message.KindResponse && env.ParentID == "" {
-		return khar.Outcome{
-			RejectReason: message.HarnessResponseMissingParent,
+		return Outcome{
+			RejectReason: HarnessResponseMissingParent,
 			Detail:       "kind=response requires non-empty parent_id",
 		}, nil
 	}
@@ -118,20 +117,20 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (kha
 	// raw-JSON plumb is opt-in and skipped when absent.
 	if raw := RawEnvelopeFromCtx(ctx); len(raw) > 0 {
 		if out, err := checkUnknownTopLevelFields(raw); err != nil {
-			return khar.Outcome{}, err
+			return Outcome{}, err
 		} else if !out.Continue() {
 			return out, nil
 		}
 	}
 
-	return khar.Outcome{}, nil
+	return Outcome{}, nil
 }
 
 // rejectFieldMissing returns the proto-layer1 §2.2 reject for missing
 // content fields.
-func rejectFieldMissing(detail string) khar.Outcome {
-	return khar.Outcome{
-		RejectReason: message.HarnessEnvelopeFieldMissing,
+func rejectFieldMissing(detail string) Outcome {
+	return Outcome{
+		RejectReason: HarnessEnvelopeFieldMissing,
 		Detail:       detail,
 	}
 }
@@ -159,20 +158,20 @@ func allowedTopLevelEnvelopeKey(key string) bool {
 
 // checkUnknownTopLevelFields decodes raw JSON enough to enumerate
 // top-level keys and rejects when any unknown key is present.
-func checkUnknownTopLevelFields(raw []byte) (khar.Outcome, error) {
+func checkUnknownTopLevelFields(raw []byte) (Outcome, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &top); err != nil {
 		// Caller plumbed malformed JSON; this is a programming error
 		// rather than a protocol reject — surface as error.
-		return khar.Outcome{}, err
+		return Outcome{}, err
 	}
 	for k := range top {
 		if !allowedTopLevelEnvelopeKey(k) {
-			return khar.Outcome{
-				RejectReason: message.HarnessEnvelopeUnknownField,
+			return Outcome{
+				RejectReason: HarnessEnvelopeUnknownField,
 				Detail:       "envelope top-level field not in spec: " + k,
 			}, nil
 		}
 	}
-	return khar.Outcome{}, nil
+	return Outcome{}, nil
 }

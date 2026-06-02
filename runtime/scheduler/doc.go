@@ -6,11 +6,15 @@
 //
 // Files:
 //
-//   - deliver.go — Dispatch envelope to per-actor handlers.
-//   - timer.go   — Long-pending Step 1 / Step 2 / Step 3 fallback timer.
-//     1s scan period (per L2 §3.7).
-//   - recover.go — Daemon restart timer recovery: rescan pending request
-//     rows + arm in-memory timers.
+//   - timer.go   — ticker mechanism (caller-scoped closure sweep + future-
+//     message drain / delivery-retry startup re-scan). 1s scan period.
+//     (v2: the SCAN IMPLEMENTATION — caller-scoped timeout sweep + future
+//     drain — moves to server channelhost, where the truth lives; scheduler
+//     keeps only the timer mechanism. runtime-construction-spec §1.7.)
+//   - recover.go — startup re-scan of not_before-passed pending rows
+//     (future-drain / delivery-retry). NOTE: closure-pending persistent
+//     rebuild is parked (let-it-crash, closure §5); future-drain + retry
+//     startup re-scan must be preserved (moves to server with the sweep).
 //
 // Scheduler vs. cron — A7 axiom (no schedule entity):
 //

@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -36,31 +35,31 @@ type stepAudienceResolve struct {
 	deps Deps
 }
 
-func newStepAudienceResolve(d Deps) khar.Step { return &stepAudienceResolve{deps: d} }
+func newStepAudienceResolve(d Deps) Step { return &stepAudienceResolve{deps: d} }
 
-func (s *stepAudienceResolve) ID() khar.StepID { return khar.StepAudienceResolve }
+func (s *stepAudienceResolve) ID() StepID { return StepAudienceResolve }
 
-func (s *stepAudienceResolve) Run(_ context.Context, env *message.Envelope) (khar.Outcome, error) {
+func (s *stepAudienceResolve) Run(_ context.Context, env *message.Envelope) (Outcome, error) {
 	if env == nil {
-		return khar.Outcome{}, nil
+		return Outcome{}, nil
 	}
 	// Non-human senders and already-named audiences are passthrough.
 	if len(env.Audience) != 0 || env.Sender.Kind != actor.KindHuman {
-		return khar.Outcome{}, nil
+		return Outcome{}, nil
 	}
 	if s.deps.DefaultAudience == nil {
-		return khar.Outcome{}, nil
+		return Outcome{}, nil
 	}
 	def := s.deps.DefaultAudience(env.ChannelID)
 	if len(def) == 0 {
 		// No declared default → leave empty; StepKindAndAudience rejects
 		// it with harness_audience_empty (reason unchanged).
-		return khar.Outcome{}, nil
+		return Outcome{}, nil
 	}
 	resolved := make(message.Audience, 0, len(def))
 	for _, id := range def {
 		resolved = append(resolved, id)
 	}
 	env.Audience = resolved
-	return khar.Outcome{}, nil
+	return Outcome{}, nil
 }

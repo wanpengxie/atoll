@@ -3,7 +3,6 @@ package harness
 import (
 	"context"
 
-	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -26,23 +25,23 @@ type stepCallerAuth struct {
 	deps Deps
 }
 
-func newStepCallerAuth(d Deps) khar.Step { return &stepCallerAuth{deps: d} }
+func newStepCallerAuth(d Deps) Step { return &stepCallerAuth{deps: d} }
 
-func (s *stepCallerAuth) ID() khar.StepID { return khar.StepCallerAuth }
+func (s *stepCallerAuth) ID() StepID { return StepCallerAuth }
 
-func (s *stepCallerAuth) Run(ctx context.Context, env *message.Envelope) (khar.Outcome, error) {
+func (s *stepCallerAuth) Run(ctx context.Context, env *message.Envelope) (Outcome, error) {
 	caller := CallerFromCtx(ctx)
 	if caller.ActorID == "" {
-		return khar.Outcome{
-			RejectReason: message.HarnessEngineACLDenied,
+		return Outcome{
+			RejectReason: HarnessEngineACLDenied,
 			Detail:       "harness: missing caller context",
 		}, nil
 	}
 	if caller.ChannelID != "" && caller.ChannelID != s.deps.ChannelID {
-		return khar.Outcome{
-			RejectReason: message.HarnessEngineACLDenied,
+		return Outcome{
+			RejectReason: HarnessEngineACLDenied,
 			Detail:       "harness: caller bound to a different channel",
 		}, nil
 	}
-	return khar.Outcome{}, nil
+	return Outcome{}, nil
 }

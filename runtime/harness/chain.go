@@ -8,9 +8,8 @@ import (
 	"sort"
 	"time"
 
-	khar "github.com/wanpengxie/ActOS/kernel/harness"
-	khlog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
 // Chain is the concrete runtime implementation of kernel/harness.Chain.
@@ -24,7 +23,7 @@ import (
 // / actor registry satisfy this).
 type Chain struct {
 	deps  Deps
-	steps []khar.Step
+	steps []Step
 }
 
 // New assembles a Chain from Deps. Returns an error when Deps is
@@ -43,7 +42,7 @@ func New(deps Deps) (*Chain, error) {
 		deps.Metrics = NoopMetrics{}
 	}
 
-	steps := []khar.Step{
+	steps := []Step{
 		newStepCallerAuth(deps),
 		newStepEnvelopeShape(deps),
 		newStepDedupe(deps),
@@ -66,14 +65,14 @@ func New(deps Deps) (*Chain, error) {
 // Write runs the chain against env per proto-layer1 §2.0. The envelope
 // is mutated in place during StepNormalize so the caller observes
 // default-filled fields when the call returns.
-func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res khar.WriteResult, err error) {
+func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res WriteResult, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("harness: panic: %v\n%s", r, debug.Stack())
 		}
 	}()
 	if env == nil {
-		return khar.WriteResult{}, errors.New("harness: nil envelope")
+		return WriteResult{}, errors.New("harness: nil envelope")
 	}
 
 	// Single linear loop: steps run in strict ascending-ID order.
@@ -83,7 +82,7 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res khar.Writ
 		out, err := s.Run(ctx, env)
 		if err != nil {
 			c.observeError(ctx, env, s.ID(), err)
-			return khar.WriteResult{}, err
+			return WriteResult{}, err
 		}
 		if out.Deduped {
 			env.Seq = out.ExistingSeq
@@ -98,7 +97,7 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res khar.Writ
 				"request_id", requestIDFromCtx(ctx),
 				"seq", out.ExistingSeq,
 			)
-			return khar.WriteResult{
+			return WriteResult{
 				MessageID: env.ID,
 				Seq:       out.ExistingSeq,
 				Deduped:   true,
@@ -116,32 +115,35 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res khar.Writ
 	// every other field; the store implementation is responsible for
 	// outbox / sequence allocation per L1 §8.6 / L2 §1.4.1.
 	env.TSReceived = c.deps.NowMs()
-	appendRes, err := c.deps.Log.Append(ctx, env, c.deps.Fencing)
+	appendRes, err := c.deps.Log.Append(ctx, env)
 	if err != nil {
 		// Map the typed AppendError to a closed-set reject when possible.
-		var appErr *khlog.AppendError
+		// storespec.AppendError.Reason is the wire string (storespec must
+		// not import harness); convert back to the typed reject here.
+		var appErr *storespec.AppendError
 		if errors.As(err, &appErr) {
-			c.observeReject(ctx, env, khar.StepEngineAppend, appErr.Reason, appErr.Detail)
-			return khar.WriteResult{
+			reason := HarnessRejectReason(appErr.Reason)
+			c.observeReject(ctx, env, StepEngineAppend, reason, appErr.Detail)
+			return WriteResult{
 				MessageID:        appErr.PartialMessageID,
-				RejectReason:     appErr.Reason,
+				RejectReason:     reason,
 				RejectDetail:     appErr.Detail,
 				PartialMessageID: appErr.PartialMessageID,
 			}, nil
 		}
-		c.observeError(ctx, env, khar.StepEngineAppend, err)
-		return khar.WriteResult{}, fmt.Errorf("harness: engine append: %w", err)
+		c.observeError(ctx, env, StepEngineAppend, err)
+		return WriteResult{}, fmt.Errorf("harness: engine append: %w", err)
 	}
 
-	c.observePass(ctx, env, khar.StepEngineAppend)
-	return khar.WriteResult{
+	c.observePass(ctx, env, StepEngineAppend)
+	return WriteResult{
 		MessageID: env.ID,
 		Seq:       int64(appendRes.Seq),
 		Deduped:   appendRes.Deduped,
 	}, nil
 }
 
-func (c *Chain) observePass(ctx context.Context, env *message.Envelope, step khar.StepID) {
+func (c *Chain) observePass(ctx context.Context, env *message.Envelope, step StepID) {
 	c.deps.Logger.Debug("harness.write.step_ok",
 		"step", int(step),
 		"step_name", stepName(step),
@@ -154,7 +156,7 @@ func (c *Chain) observePass(ctx context.Context, env *message.Envelope, step kha
 	)
 }
 
-func (c *Chain) observeReject(ctx context.Context, env *message.Envelope, step khar.StepID, reason message.HarnessRejectReason, detail string) {
+func (c *Chain) observeReject(ctx context.Context, env *message.Envelope, step StepID, reason HarnessRejectReason, detail string) {
 	if reason == "" {
 		return
 	}
@@ -173,7 +175,7 @@ func (c *Chain) observeReject(ctx context.Context, env *message.Envelope, step k
 	)
 }
 
-func (c *Chain) observeError(ctx context.Context, env *message.Envelope, step khar.StepID, err error) {
+func (c *Chain) observeError(ctx context.Context, env *message.Envelope, step StepID, err error) {
 	c.deps.Metrics.IncCounter("harness.error", "step", stepName(step))
 	c.deps.Logger.Error("harness.write.error",
 		"step", int(step),
@@ -188,27 +190,27 @@ func (c *Chain) observeError(ctx context.Context, env *message.Envelope, step kh
 	)
 }
 
-func stepName(step khar.StepID) string {
+func stepName(step StepID) string {
 	switch step {
-	case khar.StepCallerAuth:
+	case StepCallerAuth:
 		return "caller_auth"
-	case khar.StepEnvelopeShape:
+	case StepEnvelopeShape:
 		return "envelope_shape"
-	case khar.StepDedupe:
+	case StepDedupe:
 		return "dedupe"
-	case khar.StepNormalize:
+	case StepNormalize:
 		return "normalize"
-	case khar.StepSenderConsistent:
+	case StepSenderConsistent:
 		return "sender_consistent"
-	case khar.StepTypeRegistered:
+	case StepTypeRegistered:
 		return "type_registered"
-	case khar.StepAudienceResolve:
+	case StepAudienceResolve:
 		return "audience_resolve"
-	case khar.StepKindAndAudience:
+	case StepKindAndAudience:
 		return "kind_and_audience"
-	case khar.StepResponsePairing:
+	case StepResponsePairing:
 		return "response_pairing"
-	case khar.StepEngineAppend:
+	case StepEngineAppend:
 		return "engine_append"
 	default:
 		return fmt.Sprintf("step_%d", step)
@@ -216,8 +218,8 @@ func stepName(step khar.StepID) string {
 }
 
 // rejectFromOutcome packages a step outcome into a WriteResult.
-func rejectFromOutcome(out khar.Outcome, env *message.Envelope) khar.WriteResult {
-	r := khar.WriteResult{
+func rejectFromOutcome(out Outcome, env *message.Envelope) WriteResult {
+	r := WriteResult{
 		RejectReason:     out.RejectReason,
 		RejectDetail:     out.Detail,
 		PartialMessageID: message.ID(out.PartialMessageID),

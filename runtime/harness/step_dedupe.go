@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -37,14 +36,14 @@ type stepDedupe struct {
 	deps Deps
 }
 
-func newStepDedupe(d Deps) khar.Step { return &stepDedupe{deps: d} }
+func newStepDedupe(d Deps) Step { return &stepDedupe{deps: d} }
 
-func (s *stepDedupe) ID() khar.StepID { return khar.StepDedupe }
+func (s *stepDedupe) ID() StepID { return StepDedupe }
 
-func (s *stepDedupe) Run(ctx context.Context, env *message.Envelope) (khar.Outcome, error) {
+func (s *stepDedupe) Run(ctx context.Context, env *message.Envelope) (Outcome, error) {
 	if env.ID == "" {
 		// StepEnvelopeShape already rejects empty id — defensive no-op.
-		return khar.Outcome{}, nil
+		return Outcome{}, nil
 	}
 
 	// Hash the sender-provided envelope. Stash on env so the engine
@@ -53,16 +52,16 @@ func (s *stepDedupe) Run(ctx context.Context, env *message.Envelope) (khar.Outco
 	// this step.
 	incomingHash, err := message.CanonicalHash(*env)
 	if err != nil {
-		return khar.Outcome{}, fmt.Errorf("harness: dedupe hash incoming: %w", err)
+		return Outcome{}, fmt.Errorf("harness: dedupe hash incoming: %w", err)
 	}
 	env.CanonicalHash = incomingHash
 
 	storedHash, found, err := s.deps.Log.LookupCanonicalHash(ctx, s.deps.ChannelID, env.ID)
 	if err != nil {
-		return khar.Outcome{}, fmt.Errorf("harness: dedupe lookup: %w", err)
+		return Outcome{}, fmt.Errorf("harness: dedupe lookup: %w", err)
 	}
 	if !found {
-		return khar.Outcome{}, nil
+		return Outcome{}, nil
 	}
 
 	if storedHash == incomingHash {
@@ -71,21 +70,21 @@ func (s *stepDedupe) Run(ctx context.Context, env *message.Envelope) (khar.Outco
 		// result.
 		existing, ok, err := s.deps.Log.FindByID(ctx, s.deps.ChannelID, env.ID)
 		if err != nil {
-			return khar.Outcome{}, fmt.Errorf("harness: dedupe find existing: %w", err)
+			return Outcome{}, fmt.Errorf("harness: dedupe find existing: %w", err)
 		}
 		if !ok {
 			// Race window: hash existed but row vanished. Treat as fresh.
-			return khar.Outcome{}, nil
+			return Outcome{}, nil
 		}
-		return khar.Outcome{
+		return Outcome{
 			Deduped:            true,
 			ExistingSeq:        existing.Seq,
 			ExistingIsTerminal: existing.IsTerminal,
 			ExistingTSReceived: existing.TSReceived,
 		}, nil
 	}
-	return khar.Outcome{
-		RejectReason:     message.HarnessIDDuplicateConflict,
+	return Outcome{
+		RejectReason:     HarnessIDDuplicateConflict,
 		Detail:           "envelope.id reused with different content",
 		PartialMessageID: env.ID,
 	}, nil

@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -68,29 +67,29 @@ type stepResponsePairing struct {
 	deps Deps
 }
 
-func newStepResponsePairing(d Deps) khar.Step { return &stepResponsePairing{deps: d} }
+func newStepResponsePairing(d Deps) Step { return &stepResponsePairing{deps: d} }
 
-func (s *stepResponsePairing) ID() khar.StepID { return khar.StepResponsePairing }
+func (s *stepResponsePairing) ID() StepID { return StepResponsePairing }
 
-func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (khar.Outcome, error) {
+func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (Outcome, error) {
 	if env.Kind != message.KindResponse {
-		return khar.Outcome{}, nil
+		return Outcome{}, nil
 	}
 
 	// Parent existence + kind check.
 	parent, ok, err := s.deps.Log.FindByID(ctx, s.deps.ChannelID, env.ParentID)
 	if err != nil {
-		return khar.Outcome{}, err
+		return Outcome{}, err
 	}
 	if !ok {
-		return khar.Outcome{
-			RejectReason: message.HarnessResponseParentNotFound,
+		return Outcome{
+			RejectReason: HarnessResponseParentNotFound,
 			Detail:       "parent_id not found: " + string(env.ParentID),
 		}, nil
 	}
 	if parent.Kind != message.KindRequest {
-		return khar.Outcome{
-			RejectReason: message.HarnessResponseParentNotRequest,
+		return Outcome{
+			RejectReason: HarnessResponseParentNotRequest,
 			Detail:       "parent_id is not kind=request: " + string(env.ParentID),
 		}, nil
 	}
@@ -98,7 +97,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 	// payload.status half-closed-set classification — proto-layer0 §2.5.
 	statusCls := classifyResponseStatus(env.Payload, env.Sender.ID)
 	if statusCls.reject != "" {
-		return khar.Outcome{
+		return Outcome{
 			RejectReason: statusCls.reject,
 			Detail:       statusCls.detail,
 		}, nil
@@ -106,8 +105,8 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 
 	reasonCheck := checkFailedResponseReason(env.Payload)
 	if reasonCheck.invalid {
-		return khar.Outcome{
-			RejectReason: message.HarnessResponseReasonInvalid,
+		return Outcome{
+			RejectReason: HarnessResponseReasonInvalid,
 			Detail:       reasonCheck.detail,
 		}, nil
 	}
@@ -148,14 +147,14 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 		reasonCheck.reason == string(message.TerminalReceiverUnavailable)
 
 	if !audienceContains(parent.Audience, env.Sender.ID) && !callerSelfClose && !substrateDeath {
-		return khar.Outcome{
-			RejectReason: message.HarnessResponseUnauthorizedSender,
+		return Outcome{
+			RejectReason: HarnessResponseUnauthorizedSender,
 			Detail:       "response sender is not an authorized closure author (receiver / caller-timeout / substrate-death): " + string(env.Sender.ID),
 		}, nil
 	}
 	if !audienceExactlySender(env.Audience, parent.Sender.ID) {
-		return khar.Outcome{
-			RejectReason: message.HarnessResponseAudienceMismatch,
+		return Outcome{
+			RejectReason: HarnessResponseAudienceMismatch,
 			Detail:       "response audience must equal parent request sender: " + string(parent.Sender.ID),
 		}, nil
 	}
@@ -169,7 +168,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 	// non-error. Only NON-late collisions remain rejects.
 	hasFinal, err := s.deps.Log.HasFinalResponse(ctx, s.deps.ChannelID, env.ParentID)
 	if err != nil {
-		return khar.Outcome{}, err
+		return Outcome{}, err
 	}
 	if hasFinal {
 		// Late receiver final after caller self-close → observability event.
@@ -179,7 +178,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 		// final remains a hard duplicate.
 		priorSender, ok, err := s.deps.Log.FinalResponseSender(ctx, s.deps.ChannelID, env.ParentID)
 		if err != nil {
-			return khar.Outcome{}, err
+			return Outcome{}, err
 		}
 		priorWasCallerSelfClose := ok && priorSender == parent.Sender.ID
 		isLateReceiverFinal := statusCls.isFinal &&
@@ -189,16 +188,16 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 		if isLateReceiverFinal {
 			rewriteAsLateFinal(env, parent)
 			env.IsTerminal = false
-			return khar.Outcome{}, nil
+			return Outcome{}, nil
 		}
 		if statusCls.isFinal {
-			return khar.Outcome{
-				RejectReason: message.HarnessTerminalDuplicate,
+			return Outcome{
+				RejectReason: HarnessTerminalDuplicate,
 				Detail:       "final response already exists for parent: " + string(env.ParentID),
 			}, nil
 		}
-		return khar.Outcome{
-			RejectReason: message.HarnessProvisionalAfterFinal,
+		return Outcome{
+			RejectReason: HarnessProvisionalAfterFinal,
 			Detail:       "provisional response after final is forbidden for parent: " + string(env.ParentID),
 		}, nil
 	}
@@ -206,7 +205,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (k
 	// is_terminal derives purely from the Layer 1 final closed set —
 	// the proto-layer0 §2.5.1 derivation is uniform across all types.
 	env.IsTerminal = statusCls.isFinal
-	return khar.Outcome{}, nil
+	return Outcome{}, nil
 }
 
 // LateFinalType is the observability event type a receiver's genuine LATE
@@ -324,7 +323,7 @@ type statusClassification struct {
 
 	// reject, when non-empty, names the closed-set reject reason the
 	// caller MUST return; detail is the human-readable explanation.
-	reject message.HarnessRejectReason
+	reject HarnessRejectReason
 	detail string
 }
 
@@ -335,7 +334,7 @@ func classifyResponseStatus(payload []byte, senderID actor.ActorID) statusClassi
 	status, ok := extractPayloadStatus(payload)
 	if !ok {
 		return statusClassification{
-			reject: message.HarnessResponseStatusInvalid,
+			reject: HarnessResponseStatusInvalid,
 			detail: "payload.status missing or non-string",
 		}
 	}
@@ -349,27 +348,27 @@ func classifyResponseStatus(payload []byte, senderID actor.ActorID) statusClassi
 		namespace := status[:strings.IndexByte(status, '.')]
 		if _, ok := layer2ProvisionalStatuses[namespace]; ok {
 			return statusClassification{
-				reject: message.HarnessResponseStatusInvalid,
+				reject: HarnessResponseStatusInvalid,
 				detail: fmt.Sprintf("payload.status namespace %q collides with Layer 2 provisional name", namespace),
 			}
 		}
 		if message.IsFinalStatus(namespace) {
 			return statusClassification{
-				reject: message.HarnessResponseStatusInvalid,
+				reject: HarnessResponseStatusInvalid,
 				detail: fmt.Sprintf("payload.status namespace %q collides with Layer 1 final name", namespace),
 			}
 		}
 		expected := senderLocalName(senderID)
 		if namespace != expected {
 			return statusClassification{
-				reject: message.HarnessResponseStatusNamespaceMismatch,
+				reject: HarnessResponseStatusNamespaceMismatch,
 				detail: fmt.Sprintf("payload.status namespace %q must equal sender local-name %q", namespace, expected),
 			}
 		}
 		return statusClassification{isFinal: false}
 	}
 	return statusClassification{
-		reject: message.HarnessResponseStatusInvalid,
+		reject: HarnessResponseStatusInvalid,
 		detail: fmt.Sprintf("payload.status %q not in any of {Layer 1 final, Layer 2 provisional, Layer 3 <ns>.<name>}", status),
 	}
 }
