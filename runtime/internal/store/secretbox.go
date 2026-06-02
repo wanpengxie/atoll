@@ -21,23 +21,23 @@ type SecretBox interface {
 	Open(envelope string, aad []byte) ([]byte, error)
 }
 
-// AESGCMSecretBox is the stdlib-only SecretBox used by adapter credentials.
-type AESGCMSecretBox struct {
+// aesGCMSecretBox is the stdlib-only SecretBox used by adapter credentials.
+type aesGCMSecretBox struct {
 	key [32]byte
 }
 
 // NewAESGCMSecretBox returns an AES-256-GCM box. The caller owns key
 // derivation and must pass exactly 32 bytes.
-func NewAESGCMSecretBox(key []byte) (*AESGCMSecretBox, error) {
+func NewAESGCMSecretBox(key []byte) (SecretBox, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("store: adapter credential key must be 32 bytes, got %d", len(key))
 	}
 	var fixed [32]byte
 	copy(fixed[:], key)
-	return &AESGCMSecretBox{key: fixed}, nil
+	return &aesGCMSecretBox{key: fixed}, nil
 }
 
-func (b *AESGCMSecretBox) Seal(plaintext, aad []byte) (string, error) {
+func (b *aesGCMSecretBox) Seal(plaintext, aad []byte) (string, error) {
 	gcm, err := b.gcm()
 	if err != nil {
 		return "", err
@@ -53,7 +53,7 @@ func (b *AESGCMSecretBox) Seal(plaintext, aad []byte) (string, error) {
 	return adapterCredentialEnvelopeV1 + base64.StdEncoding.EncodeToString(payload), nil
 }
 
-func (b *AESGCMSecretBox) Open(envelope string, aad []byte) ([]byte, error) {
+func (b *aesGCMSecretBox) Open(envelope string, aad []byte) ([]byte, error) {
 	if !strings.HasPrefix(envelope, adapterCredentialEnvelopeV1) {
 		return nil, errors.New("store: adapter credential envelope version unsupported")
 	}
@@ -78,7 +78,7 @@ func (b *AESGCMSecretBox) Open(envelope string, aad []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
-func (b *AESGCMSecretBox) gcm() (cipher.AEAD, error) {
+func (b *aesGCMSecretBox) gcm() (cipher.AEAD, error) {
 	block, err := aes.NewCipher(b.key[:])
 	if err != nil {
 		return nil, fmt.Errorf("store: adapter credential cipher: %w", err)
