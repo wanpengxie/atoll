@@ -189,12 +189,21 @@ func (h *Host) Serve(ctx context.Context) error {
 		}
 		frame, err := h.codec.Read()
 		if err != nil {
+			// The worker pipe closed (io.EOF) or a transport error: the worker
+			// process is gone WITHOUT a graceful shutdown. If it had finished
+			// handshake it was hosting WorkerActorID, so signal that actor's
+			// death UPWARD — the server materialises receiver_unavailable for
+			// its in-flight requests (closure §6 / proto-v2-closure-revision
+			// line 64: compute actor 崩 → DOWN → receiver_unavailable). A
+			// graceful KindShutdown returns below WITHOUT reaching here.
+			h.signalDeathIfHosting(ctx, "receiver_unavailable")
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
 			return err
 		}
 		if err := h.handle(ctx, frame); err != nil {
+			h.signalDeathIfHosting(ctx, "receiver_unavailable")
 			return err
 		}
 		if frame.Kind == ipc.KindShutdown {
@@ -204,8 +213,28 @@ func (h *Host) Serve(ctx context.Context) error {
 			if h.cfg.OnShutdown != nil {
 				h.cfg.OnShutdown()
 			}
-			return nil
+			return nil // graceful — the actor stopped cleanly, no DOWN
 		}
+	}
+}
+
+// signalDeathIfHosting emits a DOWN for the hosted actor when the worker exits
+// UNgracefully (crash / killed / transport error) — but only if it had finished
+// handshake (otherwise it never hosted the actor, so there are no in-flight
+// requests to collapse). Skipped when ctx is already done: that is substrate
+// teardown (the daemon is shutting down, not the actor dying). The DOWN uses a
+// background context so the death signal still propagates even if the serve ctx
+// is mid-cancel. The server decides the actual closure (it knows whether the
+// actor is still a member / re-attachable); runtime only reports the death.
+func (h *Host) signalDeathIfHosting(ctx context.Context, reason string) {
+	if ctx.Err() != nil {
+		return
+	}
+	select {
+	case <-h.ready:
+		_ = h.cfg.Emit.Down(context.Background(), h.cfg.WorkerActorID, reason)
+	default:
+		// never handshook → never hosted the actor → nothing to collapse.
 	}
 }
 
