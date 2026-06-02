@@ -80,6 +80,22 @@ func (a *adapterActor) buildModuleContext() *behavior.ModuleContext {
 		},
 		UpdateReadiness:        a.doUpdateReadiness,
 		ForwardExternalRequest: a.forward, // installer-injected (nil for non-relay)
+		// Resolve is the receiver-side terminal seam a relay adapter (proxyfacade)
+		// calls when an external callback carries the final response: it builds the
+		// adapter-signed final and writes it like doRespond. Runs on the cell
+		// goroutine (the callback enters via host.Do/Ask), so touching
+		// a.correlation is lock-free-safe.
+		Resolve: func(ctx context.Context, id message.ID, r behavior.ResolveRequest) error {
+			_, err := a.doRespond(ctx, behavior.CorrelationKey(id), r.Payload,
+				behavior.RespondOptions{Status: r.Status, Reason: r.Reason}, sender)
+			return err
+		},
+		// LookupPendingRequest exposes the pending correlation entry (read-only)
+		// for the relay callback consistency checks.
+		LookupPendingRequest: func(_ context.Context, id behavior.CorrelationKey) (behavior.CorrelationEntry, bool, error) {
+			e, ok := a.correlation[id]
+			return e, ok, nil
+		},
 	}
 }
 
