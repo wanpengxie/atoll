@@ -81,7 +81,7 @@ func (a *adapterActor) doRespond(ctx context.Context, requestID behavior.Correla
 	if !message.IsFinalStatus(status) {
 		return behavior.RespondResult{}, fmt.Errorf("adapterhost: Respond status must be final; got %q (use Provisional)", status)
 	}
-	env, err := behavior.BuildResponseEnvelope(ctx, a.lookup, a.clock, sender, requestID, behavior.ResponseSpec{
+	env, err := a.buildResponse(ctx, requestID, sender, behavior.ResponseSpec{
 		Status: status, Reason: opts.Reason, Payload: payload, Dedupe: opts.Dedupe,
 		Visibility: opts.Visibility, Audience: opts.Audience,
 	})
@@ -112,7 +112,7 @@ func (a *adapterActor) doProvisional(ctx context.Context, requestID behavior.Cor
 	if message.IsFinalStatus(status) {
 		return behavior.RespondResult{}, fmt.Errorf("adapterhost: Provisional status %q is final — use Respond/Fail", status)
 	}
-	env, err := behavior.BuildResponseEnvelope(ctx, a.lookup, a.clock, sender, requestID, behavior.ResponseSpec{
+	env, err := a.buildResponse(ctx, requestID, sender, behavior.ResponseSpec{
 		Status: status, Payload: payload, Visibility: opts.Visibility, Audience: opts.Audience,
 	})
 	if err != nil {

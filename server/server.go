@@ -1,14 +1,17 @@
-// Package server is the channel-home assembly (v2): it composes channelhost
-// (truth) + fleet (attached computes) + gateway (client/UI/SDK ingress) into a
-// runnable process. cmd/server selects concrete adapters and injects obs.
+// Package server is the channel-home assembly (v2): channelhost (truth) + fleet
+// (attached computes) + gateway ingress into a runnable process. cmd/server
+// selects concrete adapters and injects obs.
 package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/server/channelhost"
+	"github.com/wanpengxie/ActOS/server/fleet"
 )
 
 // Config configures the channel-home process.
@@ -16,11 +19,13 @@ type Config struct {
 	ChannelID  channel.ID
 	DBPath     string
 	ListenAddr string
+	APIKey     string // authenticates attaching computes
 }
 
-// Run assembles the channel home and serves the gateway. It holds channel truth
-// (v2 truth-flip). (Minimal gateway/fleet wiring for now; full client ingress +
-// compute fleet land incrementally — the truth-flip compose is the core.)
+// Run assembles the channel home, mounts the compute fleet (attached daemons)
+// and a client ingress, and serves. It holds channel truth (v2 truth-flip):
+// client requests write into truth then fan out to local固有 cells or down the
+// wire to the compute hosting the target actor.
 func Run(ctx context.Context, cfg Config) error {
 	home, err := channelhost.New(ctx, channelhost.Config{
 		ChannelID: cfg.ChannelID,
@@ -29,15 +34,33 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	_ = home // gateway/fleet handlers will close over the home's Chain/Registry.
+
+	flt := fleet.New(home.Chain(), cfg.APIKey)
+	home.SetRemoteDispatch(flt.Dispatch)
 
 	mux := http.NewServeMux()
+	// Attached computes (daemons) connect here (computebus WS).
+	mux.HandleFunc("/compute", flt.ServeWS)
+	// Client/SDK ingress: POST an envelope → written into truth + dispatched.
+	mux.HandleFunc("/ingress", func(w http.ResponseWriter, r *http.Request) {
+		var env message.Envelope
+		if err := json.NewDecoder(r.Body).Decode(&env); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		res, err := home.Dispatch(r.Context(), &env)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(res)
+	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	srv := &http.Server{Addr: cfg.ListenAddr, Handler: mux}
 
+	srv := &http.Server{Addr: cfg.ListenAddr, Handler: mux}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Close()

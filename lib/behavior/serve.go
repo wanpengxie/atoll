@@ -70,6 +70,23 @@ func BuildResponseEnvelope(
 	if !ok || request == nil {
 		return nil, fmt.Errorf("behavior: response request %s not found", requestID)
 	}
+	return BuildResponseFromRequest(request, clock, sender, requestID, spec)
+}
+
+// BuildResponseFromRequest is the lookup-free core: it builds the response
+// envelope directly from an in-hand request envelope. A compute cell (which has
+// NO local truth to look up) caches the dispatched request and uses this so its
+// Respond/Provisional work without a round-trip to the home harness.
+func BuildResponseFromRequest(
+	request *message.Envelope,
+	clock func() time.Time,
+	sender message.Sender,
+	requestID CorrelationKey,
+	spec ResponseSpec,
+) (*message.Envelope, error) {
+	if request == nil {
+		return nil, fmt.Errorf("behavior: response request %s not in hand", requestID)
+	}
 	merged, err := MergeResponsePayload(spec.Payload, spec.Status, spec.Reason, spec.Dedupe)
 	if err != nil {
 		return nil, err

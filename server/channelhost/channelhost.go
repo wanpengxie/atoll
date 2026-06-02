@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
+	khrn "github.com/wanpengxie/ActOS/kernel/harness"
+	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/channelkit"
 	"github.com/wanpengxie/ActOS/lib/sysactor"
 	"github.com/wanpengxie/ActOS/runtime/harness"
@@ -30,6 +33,37 @@ type ChannelHome struct {
 	chain   *harness.Chain
 	channel *channelkit.Channel
 	system  *sysactor.SystemActor
+
+	// remoteDispatch routes a request to an actor hosted on an attached compute
+	// (injected by server.Run with fleet.Dispatch). nil → no remote computes.
+	remoteDispatch func(target actor.ActorID, env *message.Envelope) bool
+}
+
+// SetRemoteDispatch wires the fleet's compute-dispatch seam so requests for
+// actors hosted on an attached compute are routed down the wire.
+func (h *ChannelHome) SetRemoteDispatch(fn func(actor.ActorID, *message.Envelope) bool) {
+	h.remoteDispatch = fn
+}
+
+// Dispatch writes env into channel truth (9-step harness) and, for requests,
+// fans it out to the audience — local固有 cells (channelkit) or, if the actor
+// is hosted on an attached compute, down the wire via remoteDispatch. This is
+// the home-side router that makes truth-flip + compute hosting work end to end.
+func (h *ChannelHome) Dispatch(ctx context.Context, env *message.Envelope) (khrn.WriteResult, error) {
+	res, err := h.chain.Write(ctx, env)
+	if err != nil || res.RejectReason != "" {
+		return res, err
+	}
+	if env.Kind == message.KindRequest {
+		for _, aid := range env.Audience {
+			if h.channel.Cells().Has(aid) {
+				_ = h.channel.Cells().Deliver(ctx, []actor.ActorID{aid}, env)
+			} else if h.remoteDispatch != nil {
+				h.remoteDispatch(aid, env)
+			}
+		}
+	}
+	return res, nil
 }
 
 // Config configures a channel home.
@@ -83,8 +117,11 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 	})
 
 	ch := channelkit.New(channelkit.Config{
-		ChannelID: cfg.ChannelID,
-		System:    system,
+		ChannelID:    cfg.ChannelID,
+		System:       system,
+		Chain:        chain,    // death-signal closure (author #3)
+		OpenRequests: messages, // store.Messages implements OpenRequestSource
+		Clock:        func() time.Time { return time.UnixMilli(nowMs()) },
 	})
 
 	return &ChannelHome{

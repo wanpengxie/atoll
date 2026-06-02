@@ -70,6 +70,12 @@ type adapterActor struct {
 	// injected by the installer. nil for pure receiver adapters.
 	futures callerFutures
 
+	// inflight caches the dispatched request envelope per pending correlation.
+	// A compute cell has NO local truth to look up, so it builds responses from
+	// this cached request (BuildResponseFromRequest) instead of lookup. Plain
+	// map — cell goroutine sole owner, no lock. Cleared on markDone.
+	inflight map[behavior.CorrelationKey]*message.Envelope
+
 	// mctx is the ModuleContext handed to module.Init (built in Start; its
 	// Respond/Fail/Provisional/EmitEvent seams close over THIS adapterActor so
 	// they touch a.correlation/a.chain on the cell goroutine — no god-object).
@@ -99,6 +105,15 @@ func (a *adapterActor) reserve(e behavior.CorrelationEntry) behavior.Correlation
 	return e
 }
 
+// remember caches the request envelope so a compute cell can build responses
+// without a truth lookup (cleared on markDone).
+func (a *adapterActor) remember(env *message.Envelope) {
+	if a.inflight == nil {
+		a.inflight = map[behavior.CorrelationKey]*message.Envelope{}
+	}
+	a.inflight[behavior.CorrelationKey(env.ID)] = env
+}
+
 //nolint:unused // retained (reaper/correlation will wire; xhs allowlist schema)
 func (a *adapterActor) correlationGet(id behavior.CorrelationKey) (behavior.CorrelationEntry, bool) {
 	e, ok := a.correlation[id]
@@ -110,6 +125,20 @@ func (a *adapterActor) markDone(id behavior.CorrelationKey) {
 		e.State = behavior.CorrelationDone
 		a.correlation[id] = e
 	}
+	delete(a.inflight, id)
+}
+
+// buildResponse builds a response envelope, preferring the cached in-flight
+// request (compute self-contained, no truth lookup) and falling back to the
+// lookup seam (server-side adapters that have local truth).
+func (a *adapterActor) buildResponse(ctx context.Context, requestID behavior.CorrelationKey, sender message.Sender, spec behavior.ResponseSpec) (*message.Envelope, error) {
+	if req, ok := a.inflight[requestID]; ok {
+		return behavior.BuildResponseFromRequest(req, a.clock, sender, requestID, spec)
+	}
+	if a.lookup != nil {
+		return behavior.BuildResponseEnvelope(ctx, a.lookup, a.clock, sender, requestID, spec)
+	}
+	return nil, fmt.Errorf("adapterhost: request %s neither cached nor lookupable", requestID)
 }
 
 // --- actorrt.Actor ---
@@ -126,6 +155,7 @@ func (a *adapterActor) Receive(ctx context.Context, env *message.Envelope) error
 		// not as protocol envelopes.
 		return nil
 	}
+	a.remember(env) // cache request so respond works without a truth lookup
 	switch env.Type {
 	case "actor.status":
 		return a.respondStatus(ctx, env)
