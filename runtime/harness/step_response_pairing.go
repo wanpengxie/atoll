@@ -87,7 +87,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (O
 			Detail:       "parent_id not found: " + string(env.ParentID),
 		}, nil
 	}
-	if parent.Kind != message.KindRequest {
+	if parent.Envelope.Kind != message.KindRequest {
 		return Outcome{
 			RejectReason: HarnessResponseParentNotRequest,
 			Detail:       "parent_id is not kind=request: " + string(env.ParentID),
@@ -136,7 +136,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (O
 	// generic author is DELETED. The substrate never guesses "slow"; it
 	// only materialises death it positively observed, hence the reason is
 	// pinned to receiver_unavailable.
-	callerSelfClose := env.Sender.ID == parent.Sender.ID &&
+	callerSelfClose := env.Sender.ID == parent.Envelope.Sender.ID &&
 		reasonCheck.failed &&
 		reasonCheck.hasReason &&
 		reasonCheck.reason == string(message.TerminalUnansweredTimeout)
@@ -146,16 +146,16 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (O
 		reasonCheck.hasReason &&
 		reasonCheck.reason == string(message.TerminalReceiverUnavailable)
 
-	if !audienceContains(parent.Audience, env.Sender.ID) && !callerSelfClose && !substrateDeath {
+	if !audienceContains(parent.Envelope.Audience, env.Sender.ID) && !callerSelfClose && !substrateDeath {
 		return Outcome{
 			RejectReason: HarnessResponseUnauthorizedSender,
 			Detail:       "response sender is not an authorized closure author (receiver / caller-timeout / substrate-death): " + string(env.Sender.ID),
 		}, nil
 	}
-	if !audienceExactlySender(env.Audience, parent.Sender.ID) {
+	if !audienceExactlySender(env.Audience, parent.Envelope.Sender.ID) {
 		return Outcome{
 			RejectReason: HarnessResponseAudienceMismatch,
-			Detail:       "response audience must equal parent request sender: " + string(parent.Sender.ID),
+			Detail:       "response audience must equal parent request sender: " + string(parent.Envelope.Sender.ID),
 		}, nil
 	}
 
@@ -180,13 +180,13 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (O
 		if err != nil {
 			return Outcome{}, err
 		}
-		priorWasCallerSelfClose := ok && priorSender == parent.Sender.ID
+		priorWasCallerSelfClose := ok && priorSender == parent.Envelope.Sender.ID
 		isLateReceiverFinal := statusCls.isFinal &&
 			!callerSelfClose &&
 			priorWasCallerSelfClose &&
-			audienceContains(parent.Audience, env.Sender.ID)
+			audienceContains(parent.Envelope.Audience, env.Sender.ID)
 		if isLateReceiverFinal {
-			rewriteAsLateFinal(env, parent)
+			rewriteAsLateFinal(env, parent.Envelope)
 
 			return Outcome{}, nil
 		}

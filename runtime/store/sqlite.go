@@ -150,7 +150,6 @@ var channelLocalSchemaShape = map[string][]string{
 	"type_registry_pending": {"install_attempt_id", "type", "install_status", "install_error"},
 	"actor_cursors":         {"actor_id", "last_consumed_seq"},
 	"actor_registry":        {"actor_id", "actor_kind", "ready_state", "ready_reason", "ready_detail", "last_ready_at", "last_state_change_at"},
-	"worker_locks":          {"agent_id", "worker_id", "fencing_token", "daemon_epoch"},
 	"action_ledger":         {"ledger_key", "turn_id", "status"},
 	"adapter_state":         {"key", "value"},
 	"adapter_credentials":   {"key", "value"},

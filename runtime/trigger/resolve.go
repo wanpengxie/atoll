@@ -7,6 +7,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
 // TypeSystemHeartbeat is the noise-filter type explicitly excluded from
@@ -38,7 +39,7 @@ type Options struct{}
 func Resolve(
 	ctx context.Context,
 	env *message.Envelope,
-	reg actor.Registry,
+	reg storespec.Registry,
 	_ Options,
 ) ([]actor.ActorID, error) {
 	if env == nil {
@@ -70,7 +71,7 @@ func Resolve(
 func expandAudience(
 	ctx context.Context,
 	env *message.Envelope,
-	reg actor.Registry,
+	reg storespec.Registry,
 ) ([]actor.ActorID, error) {
 	if len(env.Audience) == 0 {
 		return nil, nil

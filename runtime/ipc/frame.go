@@ -49,8 +49,8 @@ type Kind string
 const (
 	KindHandshake    Kind = "handshake"
 	KindHandshakeAck Kind = "handshake_ack"
-	KindEmit         Kind = "emit"     // worker → daemon: emit an envelope upward to server harness
-	KindDown         Kind = "down"     // worker → daemon: actor/worker death signal
+	KindEmit         Kind = "emit" // worker → daemon: emit an envelope upward to server harness
+	KindDown         Kind = "down" // worker → daemon: actor/worker death signal
 	KindHeartbeat    Kind = "heartbeat"
 	KindReply        Kind = "reply"
 	KindFenceInvalid Kind = "fence_invalid"
@@ -83,9 +83,9 @@ func (w WorkerID) String() string { return string(w) }
 // Frame is the IPC wire envelope. Length-prefixed JSON: a uint32 BE
 // length header followed by the JSON-marshalled Frame.
 type Frame struct {
-	ID        string          `json:"id"`
-	Kind      Kind            `json:"kind"`
-	ChannelID channel.ID      `json:"channel_id,omitempty"`
+	ID        string     `json:"id"`
+	Kind      Kind       `json:"kind"`
+	ChannelID channel.ID `json:"channel_id,omitempty"`
 	// LeaseToken is the opaque worker-LEASE token (instance fence) the host
 	// assigns at spawn. v2 replaces the v1 channel-write (fencing_token,
 	// daemon_epoch) pair: it guards against a zombie/reconnecting worker, not

@@ -8,50 +8,17 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// Ledger implements kernel/storespec.Ledger over the action_ledger table.
+// Ledger implements storespec.Ledger over the action_ledger table.
+// (v2: no fencing — single writer by construction.)
 type Ledger struct {
-	db    *sql.DB
-	fence WriteFence // optional — when non-nil, Reserve/Commit enforce fencing.
+	db *sql.DB
 }
 
-// NewLedger returns a Ledger WITHOUT fencing enforcement. Used by
-// store-level unit tests; production wiring should use
-// NewLedgerWithLock so a stale daemon cannot reserve / commit action
-// ledger rows behind the placement fence.
+// NewLedger returns a Ledger over the given channel sqlite.
 func NewLedger(db *sql.DB) *Ledger { return &Ledger{db: db} }
-
-// NewLedgerWithFence returns a Ledger that validates the FIX-T6 fencing
-// tuple (carried via store.CtxWithFencing) against the channel_lock row
-// INSIDE every Reserve / Commit transaction.
-func NewLedgerWithFence(db *sql.DB, fence WriteFence) *Ledger {
-	return &Ledger{db: db, fence: fence}
-}
-
-// NewLedgerWithLock is kept as compatibility sugar for existing callers;
-// the parameter is the pure WriteFence interface, not a concrete lock type.
-func NewLedgerWithLock(db *sql.DB, fence WriteFence) *Ledger {
-	return NewLedgerWithFence(db, fence)
-}
-
-// checkFencing mirrors Messages.checkFencing — same semantics, scoped
-// to action_ledger writes. On stale fencing the tx is rolled back via
-// the caller's defer; the typed error string ("ledger fencing stale:
-// ...") lets callers surface the closed-set reason at the daemon edge.
-func (l *Ledger) checkFencing(ctx context.Context, tx *sql.Tx) error {
-	if l.fence == nil {
-		return nil
-	}
-	tuple, ok := FencingFromCtx(ctx)
-	if !ok {
-		return &FencingStaleError{Reason: "fencing tuple missing from context"}
-	}
-	if err := l.fence.ValidateWriteTx(ctx, tx, tuple.Token, tuple.Epoch); err != nil {
-		return err
-	}
-	return nil
-}
 
 // Find implements storespec.Ledger.
 func (l *Ledger) Find(ctx context.Context, key ledger.Key) (storespec.Entry, bool, error) {
@@ -91,10 +58,6 @@ func (l *Ledger) Reserve(ctx context.Context, e storespec.Entry) (storespec.Entr
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if err := l.checkFencing(ctx, tx); err != nil {
-		return storespec.Entry{}, fmt.Errorf("store: ledger reserve: %w", err)
-	}
-
 	const ins = `INSERT OR IGNORE INTO action_ledger
 	   (ledger_key, turn_id, actor_id, envelope_id, status, reserved_at, committed_at)
 	   VALUES (?, ?, ?, ?, 'reserved', ?, NULL)`
@@ -131,10 +94,6 @@ func (l *Ledger) Commit(ctx context.Context, key ledger.Key, committedAt int64) 
 		return fmt.Errorf("store: ledger commit begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-
-	if err := l.checkFencing(ctx, tx); err != nil {
-		return fmt.Errorf("store: ledger commit: %w", err)
-	}
 
 	// Ensure the row exists; missing row → caller bug.
 	const sel = `SELECT status FROM action_ledger WHERE ledger_key=?`

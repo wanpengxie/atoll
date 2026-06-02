@@ -55,7 +55,6 @@ func (s *stepDedupe) Run(ctx context.Context, env *message.Envelope) (Outcome, e
 		return Outcome{}, fmt.Errorf("harness: dedupe hash incoming: %w", err)
 	}
 
-
 	storedHash, found, err := s.deps.Log.LookupCanonicalHash(ctx, s.deps.ChannelID, env.ID)
 	if err != nil {
 		return Outcome{}, fmt.Errorf("harness: dedupe lookup: %w", err)

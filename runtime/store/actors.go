@@ -11,7 +11,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	kharness "github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
 // ActorRegistry implements kernel/storespec.Registry over a channel-local
@@ -661,9 +661,7 @@ func actorRegisteredEnvelope(channelID channel.ID, add MemberActorAdd) (*message
 		Visibility: message.VisibilitySystem,
 		Audience:   message.Audience{actor.SystemActorID},
 	}
-	hash, err := message.CanonicalHash(*env)
-	env.CanonicalHash = hash
-	return env, err
+	return env, nil
 }
 
 func actorDeregisteredEnvelope(channelID channel.ID, remove MemberActorRemove) (*message.Envelope, error) {
@@ -686,7 +684,5 @@ func actorDeregisteredEnvelope(channelID channel.ID, remove MemberActorRemove) (
 		Visibility: message.VisibilitySystem,
 		Audience:   message.Audience{actor.SystemActorID},
 	}
-	hash, err := message.CanonicalHash(*env)
-	env.CanonicalHash = hash
-	return env, err
+	return env, nil
 }

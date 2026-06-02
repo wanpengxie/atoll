@@ -7,6 +7,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
 // ViewFanout resolves the set of channel members whose view cache receives
@@ -41,7 +42,7 @@ import (
 func ViewFanout(
 	ctx context.Context,
 	env *message.Envelope,
-	reg actor.Registry,
+	reg storespec.Registry,
 	members []actor.ActorID,
 ) ([]actor.ActorID, error) {
 	if env == nil {
@@ -85,7 +86,7 @@ func ViewFanout(
 }
 
 // listActiveSorted enumerates the registry's active members.
-func listActiveSorted(ctx context.Context, reg actor.Registry) ([]actor.ActorID, error) {
+func listActiveSorted(ctx context.Context, reg storespec.Registry) ([]actor.ActorID, error) {
 	rows, err := reg.ListActive(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("trigger: view fanout list active: %w", err)

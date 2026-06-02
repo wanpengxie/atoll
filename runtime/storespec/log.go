@@ -85,6 +85,14 @@ type MessageLog interface {
 
 	// FindByID returns the stored row for id (seq / is_terminal / envelope).
 	FindByID(ctx context.Context, channelID channel.ID, id message.ID) (*StoredRow, bool, error)
+
+	// HasFinalResponse reports whether a final response already exists for
+	// parentID (harness step 8 terminal uniqueness).
+	HasFinalResponse(ctx context.Context, channelID channel.ID, parentID message.ID) (bool, error)
+
+	// FinalResponseSender returns the sender of the existing final response
+	// for parentID, if any (late-final detection).
+	FinalResponseSender(ctx context.Context, channelID channel.ID, parentID message.ID) (actor.ActorID, bool, error)
 }
 
 // Cursor mirrors an actor_cursors row (L2 §1.4.3). Position metric is

@@ -266,7 +266,7 @@ func (m *Bridge) OnTrigger(ctx context.Context, _ actor.ActorID, env *message.En
 	payload := ipc.TriggerPayload{
 		Envelope:      *env,
 		CorrelationID: env.CorrelationID,
-		Cursor:        env.Seq,
+		Cursor:        0, // v2 TODO: thread StoredRow.Seq through OnTrigger
 	}
 	m.mu.Unlock()
 
@@ -407,10 +407,8 @@ func (m *Bridge) spawnLocked(ctx context.Context) error {
 		// then wait for the subprocess so we don't leak zombies.
 		_ = proc.Stdin.Close()
 		_ = proc.Wait()
-		// Release lease; ignore err — best-effort cleanup.
-		releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = m.cfg.LeaseStore.Release(releaseCtx, sess.lockLease.ID)
-		cancel()
+		// Release lease (best-effort, in-memory).
+		m.cfg.LeaseStore.Release(sess.lockLease.ID)
 		close(sess.done)
 	}()
 

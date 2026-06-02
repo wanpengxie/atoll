@@ -9,10 +9,10 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/store"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
 // Config wires the runtime-owned type install path. The service is shared
@@ -79,7 +79,7 @@ func (s *Service) InstallType(ctx context.Context, row storespec.TypeRow) (store
 	attempt, err := s.registry.BeginInstall(ctx, row)
 	if err != nil {
 		return storespec.TypeRow{}, &Error{
-			Reason: message.InstallTypeRegistryInvalid,
+			Reason: InstallTypeRegistryInvalid,
 			Err:    fmt.Errorf("typeinstall: registry begin install %s: %w", row.Type, err),
 		}
 	}
@@ -94,7 +94,7 @@ func (s *Service) InstallType(ctx context.Context, row storespec.TypeRow) (store
 	}
 	if err := s.registry.MarkInstalled(ctx, attempt.Row.Type, attempt.AttemptID); err != nil {
 		return storespec.TypeRow{}, &Error{
-			Reason: message.InstallTypeRegistryInvalid,
+			Reason: InstallTypeRegistryInvalid,
 			Err:    fmt.Errorf("typeinstall: registry mark installed %s: %w", attempt.Row.Type, err),
 		}
 	}
@@ -126,10 +126,10 @@ func (s *Service) RecoverInstalling(ctx context.Context, reason string) (int, er
 
 func (s *Service) validate(ctx context.Context, row storespec.TypeRow) error {
 	if strings.HasPrefix(row.Type, "system.") || strings.HasPrefix(row.Type, "actor.") {
-		return &Error{Reason: message.InstallTypeRegistryReservedNamespace, Err: fmt.Errorf("typeinstall: reserved namespace type %q", row.Type)}
+		return &Error{Reason: InstallTypeRegistryReservedNamespace, Err: fmt.Errorf("typeinstall: reserved namespace type %q", row.Type)}
 	}
 	if err := row.Validate(); err != nil {
-		return &Error{Reason: message.InstallTypeRegistryInvalid, Err: err}
+		return &Error{Reason: InstallTypeRegistryInvalid, Err: err}
 	}
 	if err := validateAllowedKinds(row); err != nil {
 		return err
@@ -140,34 +140,34 @@ func (s *Service) validate(ctx context.Context, row storespec.TypeRow) error {
 		return fmt.Errorf("typeinstall: actor lookup %s: %w", row.HandlerActorID, err)
 	}
 	if !ok || !rec.IsActive() {
-		return &Error{Reason: message.InstallHandlerActorNotRegistered, Err: fmt.Errorf("typeinstall: handler actor %q not active", row.HandlerActorID)}
+		return &Error{Reason: InstallHandlerActorNotRegistered, Err: fmt.Errorf("typeinstall: handler actor %q not active", row.HandlerActorID)}
 	}
 	if rec.Binding != row.HandlerBinding {
 		return &Error{
-			Reason: message.InstallHandlerActorBindingMismatch,
+			Reason: InstallHandlerActorBindingMismatch,
 			Err: fmt.Errorf("typeinstall: handler actor %q binding=%s row_binding=%s",
 				row.HandlerActorID, rec.Binding, row.HandlerBinding),
 		}
 	}
 	if rec.Kind == actor.KindTool && row.MaxPendingMs <= 0 {
-		return &Error{Reason: message.InstallAdapterTimeoutMissing, Err: fmt.Errorf("typeinstall: max_pending_ms required for tool handler %q", row.HandlerActorID)}
+		return &Error{Reason: InstallAdapterTimeoutMissing, Err: fmt.Errorf("typeinstall: max_pending_ms required for tool handler %q", row.HandlerActorID)}
 	}
 	return nil
 }
 
 func validateAllowedKinds(row storespec.TypeRow) error {
 	if len(row.AllowedKinds) == 0 {
-		return &Error{Reason: message.InstallTypeRegistryInvalid, Err: fmt.Errorf("typeinstall: type %q allowed_kinds empty", row.Type)}
+		return &Error{Reason: InstallTypeRegistryInvalid, Err: fmt.Errorf("typeinstall: type %q allowed_kinds empty", row.Type)}
 	}
 	seen := map[message.Kind]struct{}{}
 	for _, k := range row.AllowedKinds {
 		switch k {
 		case message.KindEvent, message.KindRequest, message.KindResponse:
 		default:
-			return &Error{Reason: message.InstallTypeRegistryInvalid, Err: fmt.Errorf("typeinstall: type %q invalid kind %q", row.Type, k)}
+			return &Error{Reason: InstallTypeRegistryInvalid, Err: fmt.Errorf("typeinstall: type %q invalid kind %q", row.Type, k)}
 		}
 		if _, dup := seen[k]; dup {
-			return &Error{Reason: message.InstallTypeRegistryInvalid, Err: fmt.Errorf("typeinstall: type %q duplicate kind %q", row.Type, k)}
+			return &Error{Reason: InstallTypeRegistryInvalid, Err: fmt.Errorf("typeinstall: type %q duplicate kind %q", row.Type, k)}
 		}
 		seen[k] = struct{}{}
 	}
@@ -221,7 +221,7 @@ func (s *Service) emitInstalled(ctx context.Context, row storespec.TypeRow, atte
 
 // Error carries the install_reason closed-set value across package seams.
 type Error struct {
-	Reason message.InstallReason
+	Reason InstallReason
 	Err    error
 }
 
@@ -234,4 +234,4 @@ func (e *Error) Error() string {
 
 func (e *Error) Unwrap() error { return e.Err }
 
-func (e *Error) InstallReason() message.InstallReason { return e.Reason }
+func (e *Error) InstallReason() InstallReason { return e.Reason }

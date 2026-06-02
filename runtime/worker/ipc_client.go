@@ -213,12 +213,12 @@ func (c *IPCClient) writeTriggerAck(trigger ipc.Frame, ackPayload ipc.TriggerAck
 		leaseToken = trigger.LeaseToken
 	}
 	frame := ipc.Frame{
-		ID:           trigger.ID,
-		Kind:         ipc.KindTriggerAck,
-		ChannelID:    channelID,
-		WorkerID:     workerID,
-		LeaseToken:   leaseToken,
-		Payload:      payload,
+		ID:         trigger.ID,
+		Kind:       ipc.KindTriggerAck,
+		ChannelID:  channelID,
+		WorkerID:   workerID,
+		LeaseToken: leaseToken,
+		Payload:    payload,
 	}
 	c.mu.Unlock()
 	return c.codec.Write(frame)
@@ -347,12 +347,12 @@ func (c *IPCClient) Shutdown(ctx context.Context) error {
 func (c *IPCClient) sendStamped(ctx context.Context, kind ipc.Kind, payload []byte) (ipc.Frame, error) {
 	c.mu.Lock()
 	frame := ipc.Frame{
-		ID:           c.nextID(),
-		Kind:         kind,
-		ChannelID:    c.channelID,
-		WorkerID:     c.workerID,
-		LeaseToken:   c.leaseToken,
-		Payload:      payload,
+		ID:         c.nextID(),
+		Kind:       kind,
+		ChannelID:  c.channelID,
+		WorkerID:   c.workerID,
+		LeaseToken: c.leaseToken,
+		Payload:    payload,
 	}
 	c.mu.Unlock()
 	return c.send(ctx, frame)
@@ -394,4 +394,3 @@ func (c *IPCClient) nextID() string {
 	i := c.idAlloc.Add(1)
 	return fmt.Sprintf("w-%d", i)
 }
-

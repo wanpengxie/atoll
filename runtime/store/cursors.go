@@ -7,11 +7,11 @@ import (
 	"fmt"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// Cursors implements kernel/log.Cursors over the actor_cursors table.
+// Cursors implements kernel/storespec.Cursors over the actor_cursors table.
 type Cursors struct {
 	db *sql.DB
 }
@@ -19,29 +19,29 @@ type Cursors struct {
 // NewCursors returns a Cursors bound to the channel sqlite.
 func NewCursors(db *sql.DB) *Cursors { return &Cursors{db: db} }
 
-// Get implements log.Cursors.
-func (c *Cursors) Get(ctx context.Context, actorID actor.ActorID) (log.Cursor, bool, error) {
+// Get implements storespec.Cursors.
+func (c *Cursors) Get(ctx context.Context, actorID actor.ActorID) (storespec.Cursor, bool, error) {
 	const q = `SELECT actor_id, last_consumed_seq, COALESCE(last_consumed_id,''), updated_at
 	            FROM actor_cursors WHERE actor_id=?`
-	var cur log.Cursor
+	var cur storespec.Cursor
 	err := c.db.QueryRowContext(ctx, q, string(actorID)).Scan(
 		&cur.ActorID, &cur.LastConsumedSeq, &cur.LastConsumedID, &cur.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return log.Cursor{}, false, nil
+		return storespec.Cursor{}, false, nil
 	}
 	if err != nil {
-		return log.Cursor{}, false, fmt.Errorf("store: cursor get %q: %w", actorID, err)
+		return storespec.Cursor{}, false, fmt.Errorf("store: cursor get %q: %w", actorID, err)
 	}
 	return cur, true, nil
 }
 
-// Advance implements log.Cursors. Monotonic CAS — silently no-op when
+// Advance implements storespec.Cursors. Monotonic CAS — silently no-op when
 // newSeq <= current last_consumed_seq (returns ok=false, err=nil).
 func (c *Cursors) Advance(
 	ctx context.Context,
 	actorID actor.ActorID,
-	newSeq log.Seq,
+	newSeq storespec.Seq,
 	newID message.ID,
 	nowMs int64,
 ) (bool, error) {

@@ -10,9 +10,8 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	klog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	kharness "github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
 // Messages implements kernel/storespec.MessageLog over the messages table.
@@ -189,7 +188,7 @@ func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelo
 //
 // `limit <= 0` is clamped to 64 — matches the outbox PendingPage
 // convention so the scheduler tick has a bounded per-channel cost.
-func (m *Messages) PendingDue(ctx context.Context, nowMs int64, limit int) ([]message.Envelope, error) {
+func (m *Messages) PendingDue(ctx context.Context, nowMs int64, limit int) ([]storespec.StoredRow, error) {
 	if limit <= 0 {
 		limit = 64
 	}
@@ -212,7 +211,7 @@ func (m *Messages) PendingDue(ctx context.Context, nowMs int64, limit int) ([]me
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []message.Envelope
+	var out []storespec.StoredRow
 	for rows.Next() {
 		env, err := scanEnvelopeRows(rows)
 		if err != nil {
@@ -242,7 +241,7 @@ func (m *Messages) MaxSeq(ctx context.Context, channelID channel.ID) (int64, err
 // channel, in seq order. It is the client-push tail: a subscribed WS reads
 // forward from its cursor, so no committed envelope is ever missed (the push
 // notification only signals "something new" — correctness is seq-based here).
-func (m *Messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, afterSeq int64, limit int) ([]message.Envelope, error) {
+func (m *Messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, afterSeq int64, limit int) ([]storespec.StoredRow, error) {
 	if limit <= 0 {
 		limit = 256
 	}
@@ -262,7 +261,7 @@ func (m *Messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, after
 		return nil, fmt.Errorf("store: read after seq: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	var out []message.Envelope
+	var out []storespec.StoredRow
 	for rows.Next() {
 		env, err := scanEnvelopeRows(rows)
 		if err != nil {
@@ -305,7 +304,7 @@ func (m *Messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, after
 // emit unanswered_timeout vs. deregistered emit receiver_unavailable)
 // requires the audience JSON parse and a registry lookup — pushing that
 // into SQL would couple the store to the receiver-policy table.
-func (m *Messages) LongPendingRequests(ctx context.Context, nowMs int64, limit int) ([]message.Envelope, error) {
+func (m *Messages) LongPendingRequests(ctx context.Context, nowMs int64, limit int) ([]storespec.StoredRow, error) {
 	if limit <= 0 {
 		limit = 64
 	}
@@ -336,7 +335,7 @@ func (m *Messages) LongPendingRequests(ctx context.Context, nowMs int64, limit i
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []message.Envelope
+	var out []storespec.StoredRow
 	for rows.Next() {
 		env, err := scanEnvelopeRows(rows)
 		if err != nil {
@@ -356,7 +355,7 @@ func (m *Messages) LongPendingRequests(ctx context.Context, nowMs int64, limit i
 // the substrate closes every in-flight request to the dead actor with
 // receiver_unavailable. The substrate never guesses "slow" — it only reports
 // death it positively observed (construction-spec §3.3).
-func (m *Messages) OpenRequestsForActor(ctx context.Context, actorID actor.ActorID, limit int) ([]message.Envelope, error) {
+func (m *Messages) OpenRequestsForActor(ctx context.Context, actorID actor.ActorID, limit int) ([]storespec.StoredRow, error) {
 	if limit <= 0 {
 		limit = 64
 	}
@@ -384,7 +383,7 @@ func (m *Messages) OpenRequestsForActor(ctx context.Context, actorID actor.Actor
 		return nil, fmt.Errorf("store: open requests for actor: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	var out []message.Envelope
+	var out []storespec.StoredRow
 	for rows.Next() {
 		env, err := scanEnvelopeRows(rows)
 		if err != nil {
@@ -419,7 +418,7 @@ func (m *Messages) RetryableDeliveries(
 	nowMs int64,
 	limit int,
 	backoffFn func(attempts int64) int64,
-) ([]message.Envelope, error) {
+) ([]storespec.StoredRow, error) {
 	if limit <= 0 {
 		limit = 64
 	}
@@ -452,7 +451,7 @@ func (m *Messages) RetryableDeliveries(
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []message.Envelope
+	var out []storespec.StoredRow
 	for rows.Next() {
 		env, err := scanEnvelopeRows(rows)
 		if err != nil {
@@ -586,7 +585,7 @@ func (m *Messages) LookupCanonicalHash(ctx context.Context, channelID channel.ID
 }
 
 // FindByID implements storespec.MessageLog.
-func (m *Messages) FindByID(ctx context.Context, channelID channel.ID, id message.ID) (message.Envelope, bool, error) {
+func (m *Messages) FindByID(ctx context.Context, channelID channel.ID, id message.ID) (*storespec.StoredRow, bool, error) {
 	_ = channelID // channel_id is enforced by the per-channel db file; query stays scoped.
 	const q = `SELECT id, ts, ts_received, channel_id,
 	                  sender_kind, sender_id, COALESCE(sender_name,''),
@@ -598,38 +597,40 @@ func (m *Messages) FindByID(ctx context.Context, channelID channel.ID, id messag
 	                  is_terminal, seq
 	             FROM messages WHERE id=?`
 	row := m.db.QueryRowContext(ctx, q, id)
-	env, err := scanEnvelope(row)
+	sr, err := scanEnvelope(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return message.Envelope{}, false, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return message.Envelope{}, false, err
+		return nil, false, err
 	}
-	return env, true, nil
+	return &sr, true, nil
 }
 
 // rowScanner abstracts *sql.Row / *sql.Rows for the Scan call so
-// PendingDue (multi-row) can share the envelope materialization code
-// with FindByID (single-row).
+// PendingDue (multi-row) can share the materialization code with FindByID.
 type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-// scanEnvelope materializes a row into an Envelope.
-func scanEnvelope(row *sql.Row) (message.Envelope, error) {
+// scanEnvelope materializes a row into a StoredRow.
+func scanEnvelope(row *sql.Row) (storespec.StoredRow, error) {
 	return scanEnvelopeFrom(row)
 }
 
-// scanEnvelopeRows materializes the current *sql.Rows position into an
-// Envelope. Caller is responsible for rows.Next() / rows.Close().
-func scanEnvelopeRows(rows *sql.Rows) (message.Envelope, error) {
+// scanEnvelopeRows materializes the current *sql.Rows position into a
+// StoredRow. Caller is responsible for rows.Next() / rows.Close().
+func scanEnvelopeRows(rows *sql.Rows) (storespec.StoredRow, error) {
 	return scanEnvelopeFrom(rows)
 }
 
-// scanEnvelopeFrom is the shared implementation used by scanEnvelope
-// (FindByID) and scanEnvelopeRows (PendingDue).
-func scanEnvelopeFrom(s rowScanner) (message.Envelope, error) {
-	var env message.Envelope
+// scanEnvelopeFrom is the shared implementation. It returns a StoredRow:
+// the pure Envelope (17 fields + delivery metadata) plus the store-derived
+// columns (seq / is_terminal / attempts / delivery_failed_at) that kernel
+// keeps off the envelope.
+func scanEnvelopeFrom(s rowScanner) (storespec.StoredRow, error) {
+	var sr storespec.StoredRow
+	env := &sr.Envelope
 	var kind, sKind, senderID, vis string
 	var audJSON, payloadStr string
 	var docRefsStr, crossRefsStr sql.NullString
@@ -642,10 +643,10 @@ func scanEnvelopeFrom(s rowScanner) (message.Envelope, error) {
 		&env.ParentID, &env.CorrelationID, &docRefsStr, &crossRefsStr,
 		&vis, &audJSON,
 		&notBefore, &expiresAt,
-		&deliveredAt, &deliveryFailedAt, &env.LastError, &env.Attempts,
-		&termInt, &env.Seq,
+		&deliveredAt, &deliveryFailedAt, &env.LastError, &sr.Attempts,
+		&termInt, &sr.Seq,
 	); err != nil {
-		return message.Envelope{}, err
+		return storespec.StoredRow{}, err
 	}
 	env.Sender.Kind = actor.Kind(sKind)
 	env.Sender.ID = actor.ActorID(senderID)
@@ -653,19 +654,19 @@ func scanEnvelopeFrom(s rowScanner) (message.Envelope, error) {
 	env.Visibility = message.Visibility(vis)
 	env.Payload = json.RawMessage(payloadStr)
 	if err := json.Unmarshal([]byte(audJSON), &env.Audience); err != nil {
-		return message.Envelope{}, fmt.Errorf("store: scan audience: %w", err)
+		return storespec.StoredRow{}, fmt.Errorf("store: scan audience: %w", err)
 	}
 	if docRefsStr.Valid {
 		var refs []string
 		if err := json.Unmarshal([]byte(docRefsStr.String), &refs); err != nil {
-			return message.Envelope{}, fmt.Errorf("store: scan doc_refs: %w", err)
+			return storespec.StoredRow{}, fmt.Errorf("store: scan doc_refs: %w", err)
 		}
 		env.DocRefs = &refs
 	}
 	if crossRefsStr.Valid {
 		var refs []message.CrossChannelRef
 		if err := json.Unmarshal([]byte(crossRefsStr.String), &refs); err != nil {
-			return message.Envelope{}, fmt.Errorf("store: scan cross_channel_refs: %w", err)
+			return storespec.StoredRow{}, fmt.Errorf("store: scan cross_channel_refs: %w", err)
 		}
 		env.CrossChannelRefs = &refs
 	}
@@ -683,10 +684,10 @@ func scanEnvelopeFrom(s rowScanner) (message.Envelope, error) {
 	}
 	if deliveryFailedAt.Valid {
 		v := deliveryFailedAt.Int64
-		env.DeliveryFailedAt = &v
+		sr.DeliveryFailedAt = &v
 	}
-	env.IsTerminal = termInt == 1
-	return env, nil
+	sr.IsTerminal = termInt == 1
+	return sr, nil
 }
 
 // encodeDocRefs maps Envelope.DocRefs tri-state to JSON storage:
@@ -732,7 +733,6 @@ func nullableInt(p *int64) any {
 	return *p
 }
 
-
 // classifyAppendErr maps sqlite UNIQUE constraint failures to typed
 // *AppendError so the harness chain can map them to HarnessRejectReason.
 func classifyAppendErr(err error, envID string) error {
@@ -743,7 +743,7 @@ func classifyAppendErr(err error, envID string) error {
 	switch {
 	case strings.Contains(msg, "UNIQUE constraint failed: messages.id"):
 		return &storespec.AppendError{
-			Reason:           message.HarnessIDDuplicateConflict,
+			Reason:           "harness_id_duplicate_conflict",
 			Detail:           msg,
 			PartialMessageID: message.ID(envID),
 		}
@@ -751,7 +751,7 @@ func classifyAppendErr(err error, envID string) error {
 		strings.Contains(msg, "UNIQUE constraint failed: messages.parent_id") ||
 		strings.Contains(msg, "parent_id, kind, is_terminal"):
 		return &storespec.AppendError{
-			Reason:           message.HarnessTerminalDuplicate,
+			Reason:           "harness_terminal_duplicate",
 			Detail:           msg,
 			PartialMessageID: message.ID(envID),
 		}
