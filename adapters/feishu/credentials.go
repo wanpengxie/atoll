@@ -6,10 +6,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wanpengxie/ActOS/adapters/framework"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 )
 
-// Credential store keys for the feishu adapter.
+// Credential store keys for the feishu behavior.
 const (
 	// CredKeyAppID stores the public app_id.
 	CredKeyAppID = "feishu.app_id"
@@ -32,22 +32,22 @@ type credentialBundle struct {
 }
 
 // loadCredentials pulls app_id + app_secret from store. Returns
-// framework.ErrCredentialMissing wrapped errors when either key is
+// behavior.ErrCredentialMissing wrapped errors when either key is
 // absent — daemons treat this as a fatal install error.
-func loadCredentials(ctx context.Context, store framework.CredentialStore) (credentialBundle, error) {
+func loadCredentials(ctx context.Context, store behavior.CredentialStore) (credentialBundle, error) {
 	appID, ok, err := store.Get(ctx, CredKeyAppID)
 	if err != nil {
 		return credentialBundle{}, fmt.Errorf("feishu: load app_id: %w", err)
 	}
 	if !ok || appID == "" {
-		return credentialBundle{}, framework.MissingCredentialError(CredKeyAppID)
+		return credentialBundle{}, behavior.MissingCredentialError(CredKeyAppID)
 	}
 	appSecret, ok, err := store.Get(ctx, CredKeyAppSecret)
 	if err != nil {
 		return credentialBundle{}, fmt.Errorf("feishu: load app_secret: %w", err)
 	}
 	if !ok || appSecret == "" {
-		return credentialBundle{}, framework.MissingCredentialError(CredKeyAppSecret)
+		return credentialBundle{}, behavior.MissingCredentialError(CredKeyAppSecret)
 	}
 	return credentialBundle{AppID: appID, AppSecret: appSecret}, nil
 }

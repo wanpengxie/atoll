@@ -6,9 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/wanpengxie/ActOS/adapters/framework"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -27,7 +26,7 @@ type Option func(*Module)
 
 // WithDeps copies the framework deps bundle onto the module. Required
 // before Init runs.
-func WithDeps(deps framework.Deps) Option {
+func WithDeps(deps behavior.Deps) Option {
 	return func(m *Module) {
 		m.httpClient = deps.HTTPClient
 		m.credStore = deps.CredentialStore
@@ -37,10 +36,10 @@ func WithDeps(deps framework.Deps) Option {
 	}
 }
 
-// SetCredentialStore is called by framework.Manager during Install with a
+// SetCredentialStore is called by behavior.Manager during Install with a
 // scoped credential view. Direct tests may still supply a store through
 // WithDeps before calling Init manually.
-func (m *Module) SetCredentialStore(store framework.CredentialStore) {
+func (m *Module) SetCredentialStore(store behavior.CredentialStore) {
 	m.credStore = store
 }
 
@@ -62,11 +61,11 @@ func WithMaxPendingMs(ms int64) Option {
 
 // WithHTTPClient overrides the HTTPClient injected by Deps. Test-only
 // hook for stubbing out the network without redefining Deps.
-func WithHTTPClient(c *framework.HTTPClient) Option {
+func WithHTTPClient(c *behavior.HTTPClient) Option {
 	return func(m *Module) { m.httpClient = c }
 }
 
-// Module is the kernel/adapter.Module implementation for feishu. One
+// Module is the kernel/behavior.Module implementation for feishu. One
 // instance per channel — the daemon creates a fresh Module for each
 // Manager.
 type Module struct {
@@ -74,13 +73,13 @@ type Module struct {
 	baseURL      string
 	maxPendingMs int64
 
-	httpClient *framework.HTTPClient
-	credStore  framework.CredentialStore
-	logger     framework.Logger
-	metrics    framework.Metrics
+	httpClient *behavior.HTTPClient
+	credStore  behavior.CredentialStore
+	logger     behavior.Logger
+	metrics    behavior.Metrics
 	clock      func() time.Time
 
-	mctx   *adapter.ModuleContext
+	mctx   *behavior.ModuleContext
 	creds  credentialBundle
 	tokens *tokenCache
 	client *client
@@ -99,10 +98,10 @@ func New(opts ...Option) *Module {
 		opt(m)
 	}
 	if m.logger == nil {
-		m.logger = framework.NoopLogger{}
+		m.logger = behavior.NoopLogger{}
 	}
 	if m.metrics == nil {
-		m.metrics = framework.NoopMetrics{}
+		m.metrics = behavior.NoopMetrics{}
 	}
 	if m.clock == nil {
 		m.clock = time.Now
@@ -112,8 +111,8 @@ func New(opts ...Option) *Module {
 
 // Declares returns the static metadata that satisfies §T4 install
 // rules: runtime_outbound binding, AllTypes, per-type timeout.
-func (m *Module) Declares() adapter.Declaration {
-	return adapter.Declaration{
+func (m *Module) Declares() behavior.Declaration {
+	return behavior.Declaration{
 		Name:         "feishu",
 		ActorID:      m.actorID,
 		Types:        append([]string(nil), AllTypes...),
@@ -124,9 +123,9 @@ func (m *Module) Declares() adapter.Declaration {
 }
 
 // Init loads credentials and assembles the HTTP client. Returns an
-// error wrapping framework.ErrCredentialMissing when app_id / app_secret
+// error wrapping behavior.ErrCredentialMissing when app_id / app_secret
 // are absent — the daemon treats this as an install failure.
-func (m *Module) Init(ctx context.Context, mctx *adapter.ModuleContext) error {
+func (m *Module) Init(ctx context.Context, mctx *behavior.ModuleContext) error {
 	if mctx == nil {
 		return errors.New("feishu: Init mctx nil")
 	}
@@ -138,7 +137,7 @@ func (m *Module) Init(ctx context.Context, mctx *adapter.ModuleContext) error {
 		return err
 	}
 	if m.httpClient == nil {
-		m.httpClient = framework.NewHTTPClient(framework.HTTPClientConfig{
+		m.httpClient = behavior.NewHTTPClient(behavior.HTTPClientConfig{
 			BaseURL: m.baseURL,
 			Logger:  m.logger,
 			Metrics: m.metrics,
@@ -153,7 +152,7 @@ func (m *Module) Init(ctx context.Context, mctx *adapter.ModuleContext) error {
 		"channel_id", string(mctx.ChannelID),
 		"actor_id", string(mctx.AdapterActorID),
 		"app_id", creds.AppID,
-		"app_secret", framework.Redact(creds.AppSecret),
+		"app_secret", behavior.Redact(creds.AppSecret),
 	)
 	return nil
 }
@@ -170,16 +169,16 @@ func (m *Module) Shutdown(_ context.Context) error {
 // Heartbeat reports the installed outbound adapter baseline. Feishu has
 // no persistent connection lifecycle; Init already validates the
 // credential bundle, and each Handle performs its own HTTP call.
-func (m *Module) Heartbeat(_ context.Context) (adapter.HeartbeatReport, error) {
+func (m *Module) Heartbeat(_ context.Context) (behavior.HeartbeatReport, error) {
 	checkedAt := m.clock()
 	if m.client == nil {
-		return adapter.HeartbeatReport{
+		return behavior.HeartbeatReport{
 			Available: false,
 			Reason:    "initializing",
 			CheckedAt: checkedAt,
 		}, nil
 	}
-	return adapter.HeartbeatReport{
+	return behavior.HeartbeatReport{
 		Available: true,
 		Reason:    "ok",
 		CheckedAt: checkedAt,
@@ -191,9 +190,9 @@ func (m *Module) Heartbeat(_ context.Context) (adapter.HeartbeatReport, error) {
 }
 
 // Status enriches actor.status with the same credential baseline.
-func (m *Module) Status(ctx context.Context) (adapter.StatusReport, error) {
+func (m *Module) Status(ctx context.Context) (behavior.StatusReport, error) {
 	hb, err := m.Heartbeat(ctx)
-	return adapter.StatusReport(hb), err
+	return behavior.StatusReport(hb), err
 }
 
 // Handle dispatches by env.Type. Unknown types are rejected with a

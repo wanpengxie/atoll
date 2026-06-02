@@ -13,10 +13,8 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/adapters/feishu"
-	"github.com/wanpengxie/ActOS/adapters/framework"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/actorreg"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -165,17 +163,17 @@ func (c *fakeChain) snapshot() []*message.Envelope {
 }
 
 type memoryActorRegistry struct {
-	rows map[actor.ActorID]actorreg.Record
+	rows map[actor.ActorID]actor.Record
 }
 
 func newMemoryActorRegistry() *memoryActorRegistry {
-	return &memoryActorRegistry{rows: map[actor.ActorID]actorreg.Record{}}
+	return &memoryActorRegistry{rows: map[actor.ActorID]actor.Record{}}
 }
-func (r *memoryActorRegistry) Insert(_ context.Context, rec actorreg.Record) error {
+func (r *memoryActorRegistry) Insert(_ context.Context, rec actor.Record) error {
 	r.rows[rec.ID] = rec
 	return nil
 }
-func (r *memoryActorRegistry) Lookup(_ context.Context, id actor.ActorID) (actorreg.Record, bool, error) {
+func (r *memoryActorRegistry) Lookup(_ context.Context, id actor.ActorID) (actor.Record, bool, error) {
 	rec, ok := r.rows[id]
 	return rec, ok, nil
 }
@@ -183,8 +181,8 @@ func (r *memoryActorRegistry) Exists(_ context.Context, id actor.ActorID) (bool,
 	_, ok := r.rows[id]
 	return ok, nil
 }
-func (r *memoryActorRegistry) ListActive(_ context.Context) ([]actorreg.Record, error) {
-	out := make([]actorreg.Record, 0, len(r.rows))
+func (r *memoryActorRegistry) ListActive(_ context.Context) ([]actor.Record, error) {
+	out := make([]actor.Record, 0, len(r.rows))
 	for _, rec := range r.rows {
 		out = append(out, rec)
 	}
@@ -231,13 +229,13 @@ func (l *recordingLogger) dump() string {
 // ----------------------------------------------------------------------
 
 type setupResult struct {
-	mgr    *framework.Manager
+	mgr    *behavior.Manager
 	chain  *fakeChain
-	lookup *framework.MemoryRequestLookup
+	lookup *behavior.MemoryRequestLookup
 	fake   *fakeFeishu
 	logger *recordingLogger
-	creds  framework.CredentialStore
-	tregs  *framework.InMemoryTypeRegistry
+	creds  behavior.CredentialStore
+	tregs  *behavior.InMemoryTypeRegistry
 }
 
 func setup(t *testing.T, mods ...func(*feishu.Module)) *setupResult {
@@ -246,18 +244,18 @@ func setup(t *testing.T, mods ...func(*feishu.Module)) *setupResult {
 	srv := fake.serve(t)
 
 	logger := &recordingLogger{}
-	credStore := framework.NewMemoryCredentialStore()
+	credStore := behavior.NewMemoryCredentialStore()
 
 	mod := feishu.New(
 		feishu.WithBaseURL(srv.URL),
-		feishu.WithDeps(framework.Deps{
+		feishu.WithDeps(behavior.Deps{
 			Logger:  logger,
-			Metrics: framework.NoopMetrics{},
+			Metrics: behavior.NoopMetrics{},
 			Clock:   time.Now,
 		}),
 		feishu.WithMaxPendingMs(2_000),
 	)
-	scopedCreds := framework.NewScopedCredentialStoreForDeclaration(credStore, mod.Declares())
+	scopedCreds := behavior.NewScopedCredentialStoreForDeclaration(credStore, mod.Declares())
 	_ = scopedCreds.Put(context.Background(), feishu.CredKeyAppID, "cli_app_001")
 	_ = scopedCreds.Put(context.Background(), feishu.CredKeyAppSecret, "SECRET-zxcvbn0987654321")
 	for _, m := range mods {
@@ -265,17 +263,17 @@ func setup(t *testing.T, mods ...func(*feishu.Module)) *setupResult {
 	}
 
 	registry := newMemoryActorRegistry()
-	_ = registry.Insert(context.Background(), actorreg.Record{
+	_ = registry.Insert(context.Background(), actor.Record{
 		ID:      "tool:feishu-adapter",
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeOutbound,
 	})
 
 	chain := &fakeChain{}
-	lookup := framework.NewMemoryRequestLookup(nil)
-	tregs := framework.NewInMemoryTypeRegistry()
+	lookup := behavior.NewMemoryRequestLookup(nil)
+	tregs := behavior.NewInMemoryTypeRegistry()
 
-	mgr, err := framework.NewManager(framework.ManagerConfig{
+	mgr, err := behavior.NewManager(behavior.ManagerConfig{
 		ChannelID:       "channel:test",
 		ActorRegistry:   registry,
 		TypeRegistry:    tregs,
@@ -287,7 +285,7 @@ func setup(t *testing.T, mods ...func(*feishu.Module)) *setupResult {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	if err := mgr.Install(context.Background(), []adapter.Module{mod}); err != nil {
+	if err := mgr.Install(context.Background(), []behavior.Module{mod}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 	t.Cleanup(func() { _ = mgr.Shutdown(context.Background()) })
@@ -334,33 +332,33 @@ func TestInstallRegistersTypesInTypeRegistry(t *testing.T) {
 
 func TestInstallRejectsMissingCredentials(t *testing.T) {
 	logger := &recordingLogger{}
-	credStore := framework.NewMemoryCredentialStore()
+	credStore := behavior.NewMemoryCredentialStore()
 
 	mod := feishu.New(
-		feishu.WithDeps(framework.Deps{
+		feishu.WithDeps(behavior.Deps{
 			Logger: logger,
 		}),
 	)
 	// only app_id, no app_secret
-	scopedCreds := framework.NewScopedCredentialStoreForDeclaration(credStore, mod.Declares())
+	scopedCreds := behavior.NewScopedCredentialStoreForDeclaration(credStore, mod.Declares())
 	_ = scopedCreds.Put(context.Background(), feishu.CredKeyAppID, "cli_app_001")
 	registry := newMemoryActorRegistry()
-	_ = registry.Insert(context.Background(), actorreg.Record{
+	_ = registry.Insert(context.Background(), actor.Record{
 		ID: "tool:feishu-adapter", Kind: actor.KindTool, Binding: actor.BindingRuntimeOutbound,
 	})
-	mgr, _ := framework.NewManager(framework.ManagerConfig{
+	mgr, _ := behavior.NewManager(behavior.ManagerConfig{
 		ChannelID:       "channel:test",
 		ActorRegistry:   registry,
 		HarnessChain:    &fakeChain{},
-		RequestLookup:   framework.NewMemoryRequestLookup(nil),
+		RequestLookup:   behavior.NewMemoryRequestLookup(nil),
 		CredentialStore: credStore,
 		Logger:          logger,
 	})
-	err := mgr.Install(context.Background(), []adapter.Module{mod})
+	err := mgr.Install(context.Background(), []behavior.Module{mod})
 	if err == nil {
 		t.Fatalf("expected install error for missing secret")
 	}
-	if !errors.Is(err, framework.ErrCredentialMissing) {
+	if !errors.Is(err, behavior.ErrCredentialMissing) {
 		t.Fatalf("expected ErrCredentialMissing, got %v", err)
 	}
 }
@@ -557,17 +555,17 @@ func TestUnknownTypeProducesTerminalFailure(t *testing.T) {
 	// type guard so we exercise the Module's own fallback.
 	mod := feishu.New(
 		feishu.WithBaseURL("http://localhost"),
-		feishu.WithDeps(framework.Deps{
+		feishu.WithDeps(behavior.Deps{
 			CredentialStore: s.creds,
 			Logger:          s.logger,
-			Metrics:         framework.NoopMetrics{},
+			Metrics:         behavior.NoopMetrics{},
 		}),
 	)
-	if err := mod.Init(context.Background(), &adapter.ModuleContext{
+	if err := mod.Init(context.Background(), &behavior.ModuleContext{
 		AdapterName:    "feishu",
 		AdapterActorID: "tool:feishu-adapter",
 		ChannelID:      "channel:test",
-		Respond: func(_ context.Context, _ adapter.CorrelationKey, payload json.RawMessage, opts adapter.RespondOptions) (adapter.RespondResult, error) {
+		Respond: func(_ context.Context, _ behavior.CorrelationKey, payload json.RawMessage, opts behavior.RespondOptions) (behavior.RespondResult, error) {
 			if opts.Status != "failed" {
 				t.Fatalf("expected failed status, got %q", opts.Status)
 			}
@@ -581,7 +579,7 @@ func TestUnknownTypeProducesTerminalFailure(t *testing.T) {
 			if body["error_code"] != "type_unsupported" {
 				t.Fatalf("expected error_code=type_unsupported, got %v", body["error_code"])
 			}
-			return adapter.RespondResult{MessageID: "x"}, nil
+			return behavior.RespondResult{MessageID: "x"}, nil
 		},
 	}); err != nil {
 		t.Fatalf("Init: %v", err)

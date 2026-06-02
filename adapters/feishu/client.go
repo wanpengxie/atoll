@@ -9,7 +9,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/wanpengxie/ActOS/adapters/framework"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 )
 
 // DefaultBaseURL is the public Feishu OpenAPI host.
@@ -64,23 +64,23 @@ type CreateChatResponse struct {
 }
 
 // client is the feishu OpenAPI wrapper sitting on top of
-// framework.HTTPClient. It owns the tenant_access_token cache so callers
+// behavior.HTTPClient. It owns the tenant_access_token cache so callers
 // (Handle goroutines) share one cached token even under concurrent
 // dispatch.
 type client struct {
-	http    *framework.HTTPClient
+	http    *behavior.HTTPClient
 	creds   credentialBundle
 	tokens  *tokenCache
-	logger  framework.Logger
-	metrics framework.Metrics
+	logger  behavior.Logger
+	metrics behavior.Metrics
 }
 
-func newClient(http *framework.HTTPClient, creds credentialBundle, tokens *tokenCache, logger framework.Logger, metrics framework.Metrics) *client {
+func newClient(http *behavior.HTTPClient, creds credentialBundle, tokens *tokenCache, logger behavior.Logger, metrics behavior.Metrics) *client {
 	if logger == nil {
-		logger = framework.NoopLogger{}
+		logger = behavior.NoopLogger{}
 	}
 	if metrics == nil {
-		logger = framework.NoopLogger{}
+		logger = behavior.NoopLogger{}
 	}
 	return &client{
 		http:    http,
@@ -130,11 +130,11 @@ func (c *client) ensureToken(ctx context.Context) (string, error) {
 		return "", errors.New("feishu: token api returned empty tenant_access_token")
 	}
 	c.tokens.set(tr.TenantAccessToken, tr.Expire)
-	c.metrics.IncCounter("adapter.feishu.token_refresh")
+	c.metrics.IncCounter("behavior.feishu.token_refresh")
 	c.logger.Info("feishu.token.refreshed",
 		"app_id", c.creds.AppID,
 		"ttl_seconds", tr.Expire,
-		"token", framework.Redact(tr.TenantAccessToken),
+		"token", behavior.Redact(tr.TenantAccessToken),
 	)
 	return tr.TenantAccessToken, nil
 }
@@ -226,7 +226,7 @@ func (c *client) redact(err error) error {
 	if tok, _ := c.tokens.snapshot(); tok != "" {
 		secrets = append(secrets, tok)
 	}
-	return framework.RedactError(err, secrets...)
+	return behavior.RedactError(err, secrets...)
 }
 
 // APIError is the Feishu envelope code != 0 surfaced as a typed error.

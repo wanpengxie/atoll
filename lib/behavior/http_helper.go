@@ -1,4 +1,4 @@
-package framework
+package behavior
 
 import (
 	"context"
@@ -68,7 +68,7 @@ type HTTPClientConfig struct {
 	// Metrics receives counters / histograms. nil → NoopMetrics.
 	Metrics Metrics
 
-	// MetricName is the prefix used for all HTTP metrics; empty → "adapter.http".
+	// MetricName is the prefix used for all HTTP metrics; empty → "http".
 	MetricName string
 }
 
@@ -127,7 +127,7 @@ func NewHTTPClient(cfg HTTPClientConfig) *HTTPClient {
 		cfg.Metrics = NoopMetrics{}
 	}
 	if cfg.MetricName == "" {
-		cfg.MetricName = "adapter.http"
+		cfg.MetricName = "http"
 	}
 	return &HTTPClient{cfg: cfg}
 }

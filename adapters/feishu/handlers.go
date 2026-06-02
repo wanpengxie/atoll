@@ -6,8 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/wanpengxie/ActOS/adapters/framework"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -90,14 +89,14 @@ func (m *Module) handleChatSend(ctx context.Context, env *message.Envelope) erro
 		ChatID:    data.ChatID,
 	}
 	raw, _ := json.Marshal(result)
-	_, err = m.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), raw, adapter.RespondOptions{Status: "completed"})
+	_, err = m.mctx.Respond(ctx, behavior.CorrelationKey(env.ID), raw, behavior.RespondOptions{Status: "completed"})
 	if err != nil {
 		m.logger.Warn("feishu.chat.send.respond.error",
 			"request_id", env.ID,
 			"err", err.Error())
 		return err
 	}
-	m.metrics.IncCounter("adapter.feishu.send.ok")
+	m.metrics.IncCounter("behavior.feishu.send.ok")
 	return nil
 }
 
@@ -145,14 +144,14 @@ func (m *Module) handleChatCreate(ctx context.Context, env *message.Envelope) er
 	}
 	result := ChatCreateResult{ChatID: data.ChatID}
 	raw, _ := json.Marshal(result)
-	_, err = m.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), raw, adapter.RespondOptions{Status: "completed"})
+	_, err = m.mctx.Respond(ctx, behavior.CorrelationKey(env.ID), raw, behavior.RespondOptions{Status: "completed"})
 	if err != nil {
 		m.logger.Warn("feishu.chat.create.respond.error",
 			"request_id", env.ID,
 			"err", err.Error())
 		return err
 	}
-	m.metrics.IncCounter("adapter.feishu.create.ok")
+	m.metrics.IncCounter("behavior.feishu.create.ok")
 	return nil
 }
 
@@ -169,7 +168,7 @@ func (m *Module) handleAPIError(ctx context.Context, env *message.Envelope, op s
 		errorCode = fmt.Sprintf("feishu_code_%d", apiErr.Code)
 		detail = fmt.Sprintf("%s: %s", op, apiErr.Msg)
 	}
-	m.metrics.IncCounter("adapter.feishu."+op+".error", "error_code", errorCode)
+	m.metrics.IncCounter("behavior.feishu."+op+".error", "error_code", errorCode)
 	return m.fail(ctx, env, errorCode, detail)
 }
 
@@ -185,7 +184,7 @@ func (m *Module) fail(ctx context.Context, env *message.Envelope, errorCode, det
 	if err != nil {
 		return fmt.Errorf("feishu: marshal fail payload: %w", err)
 	}
-	_, err = m.mctx.Respond(ctx, adapter.CorrelationKey(env.ID), payload, adapter.RespondOptions{
+	_, err = m.mctx.Respond(ctx, behavior.CorrelationKey(env.ID), payload, behavior.RespondOptions{
 		Status: "failed",
 		Reason: string(message.TerminalReceiverInternalError),
 	})
@@ -212,5 +211,5 @@ func (m *Module) redactString(msg string) string {
 	if tok, _ := m.tokens.snapshot(); tok != "" {
 		secrets = append(secrets, tok)
 	}
-	return framework.RedactSubstrings(msg, secrets...)
+	return behavior.RedactSubstrings(msg, secrets...)
 }

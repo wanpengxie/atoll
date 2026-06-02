@@ -1,4 +1,4 @@
-package framework
+package behavior
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/wanpengxie/ActOS/kernel/adapter"
 )
 
 // CredentialStore is the F8 contract every adapter uses to fetch
@@ -91,14 +90,14 @@ func NewScopedCredentialStore(inner CredentialStore, scope string) *ScopedCreden
 
 // NewScopedCredentialStoreForDeclaration derives the adapter credential
 // scope from framework-owned declaration metadata.
-func NewScopedCredentialStoreForDeclaration(inner CredentialStore, decl adapter.Declaration) *ScopedCredentialStore {
+func NewScopedCredentialStoreForDeclaration(inner CredentialStore, decl Declaration) *ScopedCredentialStore {
 	return NewScopedCredentialStore(inner, CredentialScopeForDeclaration(decl))
 }
 
 // CredentialScopeForDeclaration is the physical namespace Manager uses for
 // adapter credentials. It intentionally combines name and actor id so two
 // installed adapters cannot share credentials by colliding on logical keys.
-func CredentialScopeForDeclaration(decl adapter.Declaration) string {
+func CredentialScopeForDeclaration(decl Declaration) string {
 	if decl.Name == "" && decl.ActorID == "" {
 		return ""
 	}

@@ -1,4 +1,4 @@
-// Package feishu is the launch 飞书 (Lark) outbound adapter. It runs as
+// Package feishu is the launch 飞书 (Lark) outbound behavior. It runs as
 // an in-process daemon actor (tool:feishu-adapter) with
 // Binding=runtime_outbound and handles every feishu.* request type by
 // calling the public Feishu OpenAPI on https://open.feishu.cn.
@@ -11,7 +11,7 @@
 // Inbound (Feishu events → channel) is out of scope for launch per §T4
 // "不做"; the adapter is outbound-only.
 //
-// Credential surface (read from framework.CredentialStore at Init):
+// Credential surface (read from behavior.CredentialStore at Init):
 //
 //   - feishu.app_id      — app identifier (printed at INFO, NOT redacted)
 //   - feishu.app_secret  — secret key (NEVER printed; redacted on every log)
@@ -22,5 +22,5 @@
 //
 // The adapter registers itself into the framework registry from init()
 // so a daemon that blank-imports `adapters/feishu` automatically picks
-// it up via framework.BuildAllRegistered.
+// it up via behavior.BuildAllRegistered.
 package feishu
