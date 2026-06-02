@@ -29,11 +29,11 @@ import (
 // dedupe never wastes a canonical_hash compute on a will-reject row.
 type stepEnvelopeShape struct{}
 
-func newStepEnvelopeShape(_ Deps) Step { return &stepEnvelopeShape{} }
+func newStepEnvelopeShape(_ Deps) step { return &stepEnvelopeShape{} }
 
-func (s *stepEnvelopeShape) ID() StepID { return StepEnvelopeShape }
+func (s *stepEnvelopeShape) ID() stepID { return StepEnvelopeShape }
 
-func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (Outcome, error) {
+func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (outcome, error) {
 	// (1) content fields present — proto-layer0 §1.1.
 	switch {
 	case env.ID == "":
@@ -51,9 +51,9 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (Out
 	}
 
 	// (2) channel_id consistency vs caller context.
-	caller := CallerFromCtx(ctx)
+	caller := callerFromCtx(ctx)
 	if caller.ChannelID != "" && env.ChannelID != caller.ChannelID {
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessChannelMismatch,
 			Detail:       "envelope.channel_id does not match caller channel context",
 		}, nil
@@ -63,7 +63,7 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (Out
 	switch env.Kind {
 	case message.KindEvent, message.KindRequest, message.KindResponse:
 	default:
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessKindInvalid,
 			Detail:       "envelope.kind not in {event, request, response}",
 		}, nil
@@ -75,7 +75,7 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (Out
 		env.Visibility != message.VisibilityPublic &&
 		env.Visibility != message.VisibilityPrivate &&
 		env.Visibility != message.VisibilitySystem {
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessVisibilityInvalid,
 			Detail:       "envelope.visibility not in {public, private, system}",
 		}, nil
@@ -95,7 +95,7 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (Out
 	// validation centre, never duplicated upstream of resolution.
 	for _, id := range env.Audience {
 		if string(id) == "*" {
-			return Outcome{
+			return outcome{
 				RejectReason: HarnessAudienceWildcardForbidden,
 				Detail:       `envelope.audience wildcard "*" is not allowed; enumerate explicit actor ids`,
 			}, nil
@@ -104,7 +104,7 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (Out
 
 	// (7) response.parent_id non-null — One Law extra-strong constraint.
 	if env.Kind == message.KindResponse && env.ParentID == "" {
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessResponseMissingParent,
 			Detail:       "kind=response requires non-empty parent_id",
 		}, nil
@@ -115,21 +115,21 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (Out
 	// CtxWithRawEnvelope. Struct-based Go callers cannot drift on field
 	// set (the envelope struct fixes the schema at compile time) so the
 	// raw-JSON plumb is opt-in and skipped when absent.
-	if raw := RawEnvelopeFromCtx(ctx); len(raw) > 0 {
+	if raw := rawEnvelopeFromCtx(ctx); len(raw) > 0 {
 		if out, err := checkUnknownTopLevelFields(raw); err != nil {
-			return Outcome{}, err
+			return outcome{}, err
 		} else if !out.Continue() {
 			return out, nil
 		}
 	}
 
-	return Outcome{}, nil
+	return outcome{}, nil
 }
 
 // rejectFieldMissing returns the proto-layer1 §2.2 reject for missing
 // content fields.
-func rejectFieldMissing(detail string) Outcome {
-	return Outcome{
+func rejectFieldMissing(detail string) outcome {
+	return outcome{
 		RejectReason: HarnessEnvelopeFieldMissing,
 		Detail:       detail,
 	}
@@ -158,20 +158,20 @@ func allowedTopLevelEnvelopeKey(key string) bool {
 
 // checkUnknownTopLevelFields decodes raw JSON enough to enumerate
 // top-level keys and rejects when any unknown key is present.
-func checkUnknownTopLevelFields(raw []byte) (Outcome, error) {
+func checkUnknownTopLevelFields(raw []byte) (outcome, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &top); err != nil {
 		// Caller plumbed malformed JSON; this is a programming error
 		// rather than a protocol reject — surface as error.
-		return Outcome{}, err
+		return outcome{}, err
 	}
 	for k := range top {
 		if !allowedTopLevelEnvelopeKey(k) {
-			return Outcome{
+			return outcome{
 				RejectReason: HarnessEnvelopeUnknownField,
 				Detail:       "envelope top-level field not in spec: " + k,
 			}, nil
 		}
 	}
-	return Outcome{}, nil
+	return outcome{}, nil
 }

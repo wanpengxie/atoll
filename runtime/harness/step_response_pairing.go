@@ -67,28 +67,28 @@ type stepResponsePairing struct {
 	deps Deps
 }
 
-func newStepResponsePairing(d Deps) Step { return &stepResponsePairing{deps: d} }
+func newStepResponsePairing(d Deps) step { return &stepResponsePairing{deps: d} }
 
-func (s *stepResponsePairing) ID() StepID { return StepResponsePairing }
+func (s *stepResponsePairing) ID() stepID { return StepResponsePairing }
 
-func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (Outcome, error) {
+func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (outcome, error) {
 	if env.Kind != message.KindResponse {
-		return Outcome{}, nil
+		return outcome{}, nil
 	}
 
 	// Parent existence + kind check.
 	parent, ok, err := s.deps.Log.FindByID(ctx, s.deps.ChannelID, env.ParentID)
 	if err != nil {
-		return Outcome{}, err
+		return outcome{}, err
 	}
 	if !ok {
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessResponseParentNotFound,
 			Detail:       "parent_id not found: " + string(env.ParentID),
 		}, nil
 	}
 	if parent.Envelope.Kind != message.KindRequest {
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessResponseParentNotRequest,
 			Detail:       "parent_id is not kind=request: " + string(env.ParentID),
 		}, nil
@@ -97,7 +97,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (O
 	// payload.status half-closed-set classification — proto-layer0 §2.5.
 	statusCls := classifyResponseStatus(env.Payload, env.Sender.ID)
 	if statusCls.reject != "" {
-		return Outcome{
+		return outcome{
 			RejectReason: statusCls.reject,
 			Detail:       statusCls.detail,
 		}, nil
@@ -105,7 +105,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (O
 
 	reasonCheck := checkFailedResponseReason(env.Payload)
 	if reasonCheck.invalid {
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessResponseReasonInvalid,
 			Detail:       reasonCheck.detail,
 		}, nil
@@ -147,13 +147,13 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (O
 		reasonCheck.reason == string(message.TerminalReceiverUnavailable)
 
 	if !audienceContains(parent.Envelope.Audience, env.Sender.ID) && !callerSelfClose && !substrateDeath {
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessResponseUnauthorizedSender,
 			Detail:       "response sender is not an authorized closure author (receiver / caller-timeout / substrate-death): " + string(env.Sender.ID),
 		}, nil
 	}
 	if !audienceExactlySender(env.Audience, parent.Envelope.Sender.ID) {
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessResponseAudienceMismatch,
 			Detail:       "response audience must equal parent request sender: " + string(parent.Envelope.Sender.ID),
 		}, nil
@@ -168,7 +168,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (O
 	// non-error. Only NON-late collisions remain rejects.
 	hasFinal, err := s.deps.Log.HasFinalResponse(ctx, s.deps.ChannelID, env.ParentID)
 	if err != nil {
-		return Outcome{}, err
+		return outcome{}, err
 	}
 	if hasFinal {
 		// Late receiver final after caller self-close → observability event.
@@ -178,7 +178,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (O
 		// final remains a hard duplicate.
 		priorSender, ok, err := s.deps.Log.FinalResponseSender(ctx, s.deps.ChannelID, env.ParentID)
 		if err != nil {
-			return Outcome{}, err
+			return outcome{}, err
 		}
 		priorWasCallerSelfClose := ok && priorSender == parent.Envelope.Sender.ID
 		isLateReceiverFinal := statusCls.isFinal &&
@@ -188,15 +188,15 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (O
 		if isLateReceiverFinal {
 			rewriteAsLateFinal(env, parent.Envelope)
 
-			return Outcome{}, nil
+			return outcome{}, nil
 		}
 		if statusCls.isFinal {
-			return Outcome{
+			return outcome{
 				RejectReason: HarnessTerminalDuplicate,
 				Detail:       "final response already exists for parent: " + string(env.ParentID),
 			}, nil
 		}
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessProvisionalAfterFinal,
 			Detail:       "provisional response after final is forbidden for parent: " + string(env.ParentID),
 		}, nil
@@ -204,7 +204,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (O
 
 	// is_terminal derives purely from the Layer 1 final closed set —
 	// the proto-layer0 §2.5.1 derivation is uniform across all types.
-	return Outcome{IsTerminal: statusCls.isFinal}, nil
+	return outcome{IsTerminal: statusCls.isFinal}, nil
 }
 
 // LateFinalType is the observability event type a receiver's genuine LATE

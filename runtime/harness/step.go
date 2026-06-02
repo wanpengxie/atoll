@@ -6,29 +6,29 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// StepID is the ordinal index inside the harness chain (proto-layer1 §2.0).
+// stepID is the ordinal index inside the harness chain (proto-layer1 §2.0).
 // Lower ids run first. The chain runner executes steps strictly ascending.
 //
 // (Relocated from the deleted kernel/harness — these are the write ENGINE's
 // own contracts, runtime-construction-spec §1.4. Step numbers are impl-shaped
 // execution order, not protocol ADT.)
-type StepID int
+type stepID int
 
 const (
-	StepCallerAuth       StepID = 0
-	StepEnvelopeShape    StepID = 1
-	StepDedupe           StepID = 2
-	StepNormalize        StepID = 3
-	StepSenderConsistent StepID = 4
-	StepTypeRegistered   StepID = 5
-	StepAudienceResolve  StepID = 6
-	StepKindAndAudience  StepID = 7
-	StepResponsePairing  StepID = 8
-	StepEngineAppend     StepID = 9
+	StepCallerAuth       stepID = 0
+	StepEnvelopeShape    stepID = 1
+	StepDedupe           stepID = 2
+	StepNormalize        stepID = 3
+	StepSenderConsistent stepID = 4
+	StepTypeRegistered   stepID = 5
+	StepAudienceResolve  stepID = 6
+	StepKindAndAudience  stepID = 7
+	StepResponsePairing  stepID = 8
+	StepEngineAppend     stepID = 9
 )
 
-// AllStepIDs lists every step in physical execution order.
-var AllStepIDs = []StepID{
+// allStepIDs lists every step in physical execution order.
+var allStepIDs = []stepID{
 	StepCallerAuth,
 	StepEnvelopeShape,
 	StepDedupe,
@@ -41,9 +41,9 @@ var AllStepIDs = []StepID{
 	StepEngineAppend,
 }
 
-// Outcome describes the result of running one step against an envelope.
+// outcome describes the result of running one step against an envelope.
 // Continue / Reject are the only two terminal outcomes for a single step.
-type Outcome struct {
+type outcome struct {
 	RejectReason       HarnessRejectReason
 	Detail             string
 	PartialMessageID   message.ID
@@ -62,13 +62,13 @@ type Outcome struct {
 }
 
 // Continue is true when the step accepts the envelope and the next step runs.
-func (o Outcome) Continue() bool { return o.RejectReason == "" && !o.Deduped }
+func (o outcome) Continue() bool { return o.RejectReason == "" && !o.Deduped }
 
-// Step is one stage in the harness chain. Implementations live in this
+// step is one stage in the harness chain. Implementations live in this
 // package (the step_*.go files).
-type Step interface {
-	ID() StepID
-	Run(ctx context.Context, env *message.Envelope) (Outcome, error)
+type step interface {
+	ID() stepID
+	Run(ctx context.Context, env *message.Envelope) (outcome, error)
 }
 
 // WriteResult is the outcome of a full Chain.Write invocation (L1 §2).

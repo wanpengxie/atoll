@@ -23,7 +23,7 @@ import (
 // / actor registry satisfy this).
 type Chain struct {
 	deps  Deps
-	steps []Step
+	steps []step
 }
 
 // New assembles a Chain from Deps. Returns an error when Deps is
@@ -42,7 +42,7 @@ func New(deps Deps) (*Chain, error) {
 		deps.Metrics = NoopMetrics{}
 	}
 
-	steps := []Step{
+	steps := []step{
 		newStepCallerAuth(deps),
 		newStepEnvelopeShape(deps),
 		newStepDedupe(deps),
@@ -152,7 +152,7 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res WriteResu
 	}, nil
 }
 
-func (c *Chain) observePass(ctx context.Context, env *message.Envelope, step StepID) {
+func (c *Chain) observePass(ctx context.Context, env *message.Envelope, step stepID) {
 	c.deps.Logger.Debug("harness.write.step_ok",
 		"step", int(step),
 		"step_name", stepName(step),
@@ -165,7 +165,7 @@ func (c *Chain) observePass(ctx context.Context, env *message.Envelope, step Ste
 	)
 }
 
-func (c *Chain) observeReject(ctx context.Context, env *message.Envelope, step StepID, reason HarnessRejectReason, detail string) {
+func (c *Chain) observeReject(ctx context.Context, env *message.Envelope, step stepID, reason HarnessRejectReason, detail string) {
 	if reason == "" {
 		return
 	}
@@ -184,7 +184,7 @@ func (c *Chain) observeReject(ctx context.Context, env *message.Envelope, step S
 	)
 }
 
-func (c *Chain) observeError(ctx context.Context, env *message.Envelope, step StepID, err error) {
+func (c *Chain) observeError(ctx context.Context, env *message.Envelope, step stepID, err error) {
 	c.deps.Metrics.IncCounter("harness.error", "step", stepName(step))
 	c.deps.Logger.Error("harness.write.error",
 		"step", int(step),
@@ -199,7 +199,7 @@ func (c *Chain) observeError(ctx context.Context, env *message.Envelope, step St
 	)
 }
 
-func stepName(step StepID) string {
+func stepName(step stepID) string {
 	switch step {
 	case StepCallerAuth:
 		return "caller_auth"
@@ -227,7 +227,7 @@ func stepName(step StepID) string {
 }
 
 // rejectFromOutcome packages a step outcome into a WriteResult.
-func rejectFromOutcome(out Outcome, env *message.Envelope) WriteResult {
+func rejectFromOutcome(out outcome, env *message.Envelope) WriteResult {
 	r := WriteResult{
 		RejectReason:     out.RejectReason,
 		RejectDetail:     out.Detail,
@@ -245,7 +245,7 @@ func rejectFromOutcome(out Outcome, env *message.Envelope) WriteResult {
 type ctxKeyRequestID struct{}
 
 // WithRequestID attaches a request-id to ctx for harness log correlation.
-func WithRequestID(ctx context.Context, id string) context.Context {
+func withRequestID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, ctxKeyRequestID{}, id)
 }
 

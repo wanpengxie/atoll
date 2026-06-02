@@ -140,7 +140,7 @@ func CtxWithCaller(ctx context.Context, c CallerContext) context.Context {
 
 // CallerFromCtx pulls the CallerContext set by CtxWithCaller. Returns
 // the zero value when absent.
-func CallerFromCtx(ctx context.Context) CallerContext {
+func callerFromCtx(ctx context.Context) CallerContext {
 	if v, ok := ctx.Value(ctxKeyCaller{}).(CallerContext); ok {
 		return v
 	}
@@ -159,13 +159,13 @@ type ctxKeyRawEnvelope struct{}
 // callers (worker IPC, HTTP API) SHOULD plumb this so Step 2 can
 // fail-closed on unknown top-level fields. In-process Go callers MAY
 // omit it — the struct-typed Envelope already pins the field set.
-func CtxWithRawEnvelope(ctx context.Context, raw []byte) context.Context {
+func ctxWithRawEnvelope(ctx context.Context, raw []byte) context.Context {
 	return context.WithValue(ctx, ctxKeyRawEnvelope{}, raw)
 }
 
 // RawEnvelopeFromCtx pulls the raw envelope JSON bytes set by
 // CtxWithRawEnvelope. Returns nil when absent.
-func RawEnvelopeFromCtx(ctx context.Context) []byte {
+func rawEnvelopeFromCtx(ctx context.Context) []byte {
 	if v, ok := ctx.Value(ctxKeyRawEnvelope{}).([]byte); ok {
 		return v
 	}

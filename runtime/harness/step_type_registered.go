@@ -73,25 +73,25 @@ type stepTypeRegistered struct {
 	deps Deps
 }
 
-func newStepTypeRegistered(d Deps) Step { return &stepTypeRegistered{deps: d} }
+func newStepTypeRegistered(d Deps) step { return &stepTypeRegistered{deps: d} }
 
-func (s *stepTypeRegistered) ID() StepID { return StepTypeRegistered }
+func (s *stepTypeRegistered) ID() stepID { return StepTypeRegistered }
 
-func (s *stepTypeRegistered) Run(ctx context.Context, env *message.Envelope) (Outcome, error) {
+func (s *stepTypeRegistered) Run(ctx context.Context, env *message.Envelope) (outcome, error) {
 	// Reserved namespace authority — proto-layer1 §2.5 + §6.2.0. Even
 	// before checking registry membership, reject any non-system sender
 	// trying to forge a reserved system event.
 	if strings.HasPrefix(env.Type, "system.") {
 		if _, reserved := reservedBootstrapTypeSet[env.Type]; reserved {
 			if env.Sender.Kind != actor.KindSystem || env.Sender.ID != actor.SystemActorID {
-				return Outcome{
+				return outcome{
 					RejectReason: HarnessReservedTypeUnauthorizedSender,
 					Detail:       "reserved system type may only be emitted by channel system actor: " + env.Type,
 				}, nil
 			}
-			return Outcome{}, nil
+			return outcome{}, nil
 		}
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessTypeUnknown,
 			Detail:       "non-reserved system namespace type is not installable: " + env.Type,
 		}, nil
@@ -99,36 +99,36 @@ func (s *stepTypeRegistered) Run(ctx context.Context, env *message.Envelope) (Ou
 	if strings.HasPrefix(env.Type, "actor.") {
 		rule, reserved := reservedActorTypeSet[env.Type]
 		if !reserved {
-			return Outcome{
+			return outcome{
 				RejectReason: HarnessTypeUnknown,
 				Detail:       "non-reserved actor namespace type is not installable: " + env.Type,
 			}, nil
 		}
 		if rule.SystemOnly && (env.Sender.Kind != actor.KindSystem || env.Sender.ID != actor.SystemActorID) {
-			return Outcome{
+			return outcome{
 				RejectReason: HarnessReservedTypeUnauthorizedSender,
 				Detail:       "reserved actor type may only be emitted by channel system actor: " + env.Type,
 			}, nil
 		}
-		return Outcome{}, nil
+		return outcome{}, nil
 	}
 
 	if _, isCore := message.CoreTypeTable[env.Type]; isCore {
-		return Outcome{}, nil
+		return outcome{}, nil
 	}
 	if s.deps.TypeRegistry == nil {
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessTypeUnknown,
 			Detail:       "type registry not wired; only core types allowed",
 		}, nil
 	}
 	if _, ok, err := s.deps.TypeRegistry.Lookup(ctx, env.Type); err != nil {
-		return Outcome{}, err
+		return outcome{}, err
 	} else if !ok {
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessTypeUnknown,
 			Detail:       "type not registered: " + env.Type,
 		}, nil
 	}
-	return Outcome{}, nil
+	return outcome{}, nil
 }

@@ -25,23 +25,23 @@ type stepCallerAuth struct {
 	deps Deps
 }
 
-func newStepCallerAuth(d Deps) Step { return &stepCallerAuth{deps: d} }
+func newStepCallerAuth(d Deps) step { return &stepCallerAuth{deps: d} }
 
-func (s *stepCallerAuth) ID() StepID { return StepCallerAuth }
+func (s *stepCallerAuth) ID() stepID { return StepCallerAuth }
 
-func (s *stepCallerAuth) Run(ctx context.Context, env *message.Envelope) (Outcome, error) {
-	caller := CallerFromCtx(ctx)
+func (s *stepCallerAuth) Run(ctx context.Context, env *message.Envelope) (outcome, error) {
+	caller := callerFromCtx(ctx)
 	if caller.ActorID == "" {
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessEngineACLDenied,
 			Detail:       "harness: missing caller context",
 		}, nil
 	}
 	if caller.ChannelID != "" && caller.ChannelID != s.deps.ChannelID {
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessEngineACLDenied,
 			Detail:       "harness: caller bound to a different channel",
 		}, nil
 	}
-	return Outcome{}, nil
+	return outcome{}, nil
 }

@@ -20,14 +20,14 @@ type stepNormalize struct {
 	deps Deps
 }
 
-func newStepNormalize(d Deps) Step { return &stepNormalize{deps: d} }
+func newStepNormalize(d Deps) step { return &stepNormalize{deps: d} }
 
-func (s *stepNormalize) ID() StepID { return StepNormalize }
+func (s *stepNormalize) ID() stepID { return StepNormalize }
 
-func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (Outcome, error) {
+func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (outcome, error) {
 	_ = ctx
 	if env == nil {
-		return Outcome{}, nil
+		return outcome{}, nil
 	}
 
 	// Sender-provided runtime fields are not protocol content. Dedupe has
@@ -94,25 +94,25 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (Outcome
 
 	// time-relation guard — proto-layer1 §2.4 / proto-layer0 §4.5.
 	if env.NotBefore != nil && *env.NotBefore < env.TS {
-		return Outcome{
+		return outcome{
 			RejectReason: HarnessTimeInvalid,
 			Detail:       "envelope.not_before < envelope.ts",
 		}, nil
 	}
 	if env.ExpiresAt != nil {
 		if *env.ExpiresAt <= env.TS {
-			return Outcome{
+			return outcome{
 				RejectReason: HarnessTimeInvalid,
 				Detail:       "envelope.expires_at <= envelope.ts",
 			}, nil
 		}
 		if env.NotBefore != nil && *env.ExpiresAt <= *env.NotBefore {
-			return Outcome{
+			return outcome{
 				RejectReason: HarnessTimeInvalid,
 				Detail:       "envelope.expires_at <= envelope.not_before",
 			}, nil
 		}
 	}
 
-	return Outcome{}, nil
+	return outcome{}, nil
 }

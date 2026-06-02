@@ -35,31 +35,31 @@ type stepAudienceResolve struct {
 	deps Deps
 }
 
-func newStepAudienceResolve(d Deps) Step { return &stepAudienceResolve{deps: d} }
+func newStepAudienceResolve(d Deps) step { return &stepAudienceResolve{deps: d} }
 
-func (s *stepAudienceResolve) ID() StepID { return StepAudienceResolve }
+func (s *stepAudienceResolve) ID() stepID { return StepAudienceResolve }
 
-func (s *stepAudienceResolve) Run(_ context.Context, env *message.Envelope) (Outcome, error) {
+func (s *stepAudienceResolve) Run(_ context.Context, env *message.Envelope) (outcome, error) {
 	if env == nil {
-		return Outcome{}, nil
+		return outcome{}, nil
 	}
 	// Non-human senders and already-named audiences are passthrough.
 	if len(env.Audience) != 0 || env.Sender.Kind != actor.KindHuman {
-		return Outcome{}, nil
+		return outcome{}, nil
 	}
 	if s.deps.DefaultAudience == nil {
-		return Outcome{}, nil
+		return outcome{}, nil
 	}
 	def := s.deps.DefaultAudience(env.ChannelID)
 	if len(def) == 0 {
 		// No declared default → leave empty; StepKindAndAudience rejects
 		// it with harness_audience_empty (reason unchanged).
-		return Outcome{}, nil
+		return outcome{}, nil
 	}
 	resolved := make(message.Audience, 0, len(def))
 	for _, id := range def {
 		resolved = append(resolved, id)
 	}
 	env.Audience = resolved
-	return Outcome{}, nil
+	return outcome{}, nil
 }
