@@ -164,37 +164,14 @@ CREATE INDEX IF NOT EXISTS ix_action_ledger_turn ON action_ledger(turn_id);
 	);
 	`
 
-// DaemonLocalDDL builds the daemon-level sqlite tables. There is exactly
-// one bootstrap_registry row per channel-create attempt.
-const DaemonLocalDDL = `
--- =============================================================
--- bootstrap_registry  (L2 §1.4.7)
--- =============================================================
-CREATE TABLE IF NOT EXISTS bootstrap_registry (
-  create_request_id  TEXT PRIMARY KEY,
-	  channel_id         TEXT NOT NULL UNIQUE,
-	  status             TEXT NOT NULL
-	                     CHECK (status IN ('in_progress','completed','rolled_back')),
-	  phase              TEXT NOT NULL DEFAULT 'sent'
-	                     CHECK (phase IN ('sent','awaiting_ack','partial_takeover','completed','abandoned')),
-	  workdir_path       TEXT NOT NULL,
-	  sent_at            INTEGER NOT NULL DEFAULT 0,
-	  expected_ack_frame_kind TEXT NOT NULL DEFAULT 'control.create_channel_ack',
-	  terminal_status    TEXT NOT NULL DEFAULT '',
-	  abandonment_reason TEXT NOT NULL DEFAULT '',
-	  attempt_count      INTEGER NOT NULL DEFAULT 0,
-	  last_attempt_at    INTEGER NOT NULL DEFAULT 0,
-	  started_at         INTEGER NOT NULL,
-	  completed_at       INTEGER,
-	  rollback_reason    TEXT
-	);
-
-CREATE INDEX IF NOT EXISTS ix_bootstrap_status ON bootstrap_registry(status);
-`
-
 // ChannelLocalTables enumerates the channel-local table names in
 // initialization order. Tests assert that every name exists in
 // `sqlite_master` after OpenChannel.
+//
+// v2: there is NO daemon-level persistent store. The v1 daemon-local
+// bootstrap_registry contradicted the v2 topology (daemon = attached compute,
+// no truth — proto-v2-physical §4); channel-create + its crash-recovery state
+// is server-side truth, not a daemon-local sqlite. Removed.
 var ChannelLocalTables = []string{
 	"messages",
 	"type_registry",
@@ -204,6 +181,3 @@ var ChannelLocalTables = []string{
 	"adapter_state",
 	"adapter_credentials",
 }
-
-// DaemonLocalTables enumerates daemon-level table names.
-var DaemonLocalTables = []string{"bootstrap_registry"}

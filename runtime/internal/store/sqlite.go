@@ -58,23 +58,6 @@ func openChannelDB(ctx context.Context, dbPath string, opts OpenOptions) (*sql.D
 	return db, nil
 }
 
-// OpenDaemon opens (creating if absent) the daemon-level sqlite at
-// dbPath, runs DaemonLocalDDL, and returns *sql.DB.
-func OpenDaemon(ctx context.Context, dbPath string, opts OpenOptions) (*sql.DB, error) {
-	db, err := openSqlite(ctx, dbPath, opts, DaemonLocalDDL)
-	if err != nil {
-		return nil, err
-	}
-	// Same single-authoritative-schema contract as OpenChannel: DaemonLocalDDL
-	// is the sole definition; no in-code migration. Validate shape on every
-	// open and fail-fast on mismatch (stale daemon DB is recreated by a human).
-	if err := verifyDaemonLocalSchema(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return db, nil
-}
-
 func openSqlite(ctx context.Context, dbPath string, opts OpenOptions, ddl string) (*sql.DB, error) {
 	if dbPath == "" {
 		return nil, errors.New("store: dbPath empty")
@@ -95,9 +78,8 @@ func openSqlite(ctx context.Context, dbPath string, opts OpenOptions, ddl string
 		return nil, fmt.Errorf("store: open %q: %w", dbPath, err)
 	}
 
-	// modernc.org/sqlite is single-connection-safe; cap pool to 1 for
+	// modernc.org/sqlite is single-connection-safe; cap pool to 1 for the
 	// channel sqlite so WAL writers/readers don't fight pragma state.
-	// Daemon-level sqlite has the same property.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
@@ -157,21 +139,8 @@ var channelLocalSchemaShape = map[string][]string{
 	"adapter_credentials":   {"key", "value"},
 }
 
-// daemonLocalSchemaShape mirrors DaemonLocalDDL (schema.go).
-var daemonLocalSchemaShape = map[string][]string{
-	"bootstrap_registry": {
-		"create_request_id", "channel_id", "status", "phase", "workdir_path",
-		"sent_at", "expected_ack_frame_kind", "terminal_status",
-		"abandonment_reason", "attempt_count", "last_attempt_at",
-	},
-}
-
 func verifyChannelLocalSchema(ctx context.Context, db *sql.DB) error {
 	return verifySchema(ctx, db, "channel", channelLocalSchemaShape)
-}
-
-func verifyDaemonLocalSchema(ctx context.Context, db *sql.DB) error {
-	return verifySchema(ctx, db, "daemon", daemonLocalSchemaShape)
 }
 
 // verifySchema fail-fast-validates an opened sqlite against the authoritative
