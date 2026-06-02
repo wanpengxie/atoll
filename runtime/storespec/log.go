@@ -68,7 +68,7 @@ func (e *AppendError) Error() string {
 // §1.4.1). Append is the only mutation entry point; reads are not declared
 // here because agents / scheduler / trigger may query messages directly.
 //
-// Concrete sqlite impl lives in runtime/store/messages.go. v2 changes:
+// Concrete sqlite impl lives in runtime/internal/store/messages.go. v2 changes:
 //   - no fencing parameter — the channel has a single writer (server
 //     harness) by construction (proto-v2-physical §4).
 //   - is_terminal + canonical_hash are passed EXPLICITLY: kernel purified

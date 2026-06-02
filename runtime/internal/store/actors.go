@@ -335,7 +335,6 @@ func (r *ActorRegistry) ApplyMemberTransitions(
 	// cannot reach it, so "bypass the harness" is not an ambient capability —
 	// it is reachable solely through this named, runtime-internal control-plane
 	// op. A new bypass write means a new named op here, never an ad-hoc Append.
-	msgs := NewMessages(r.db)
 	for _, add := range adds {
 		if add.ID == "" {
 			continue
@@ -357,7 +356,7 @@ func (r *ActorRegistry) ApplyMemberTransitions(
 		if err != nil {
 			return err
 		}
-		if _, err := msgs.AppendTx(ctx, tx, env, false, ""); err != nil {
+		if _, err := appendTx(ctx, tx, env, false, ""); err != nil {
 			return fmt.Errorf("store: actor registered mirror %q: %w", add.ID, err)
 		}
 	}
@@ -379,7 +378,7 @@ func (r *ActorRegistry) ApplyMemberTransitions(
 		if err != nil {
 			return err
 		}
-		if _, err := msgs.AppendTx(ctx, tx, env, false, ""); err != nil {
+		if _, err := appendTx(ctx, tx, env, false, ""); err != nil {
 			return fmt.Errorf("store: actor deregistered mirror %q: %w", remove.ID, err)
 		}
 	}

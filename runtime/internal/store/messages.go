@@ -85,7 +85,7 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, isTerminal
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	res, err := m.AppendTx(ctx, tx, env, isTerminal, canonicalHash)
+	res, err := appendTx(ctx, tx, env, isTerminal, canonicalHash)
 	if err != nil {
 		return storespec.AppendResult{}, err
 	}
@@ -95,10 +95,14 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, isTerminal
 	return res, nil
 }
 
-// AppendTx appends env using an existing transaction. It is used by internal
-// runtime lifecycle paths that must mutate a side table and append the mirror
-// event atomically.
-func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal bool, canonicalHash string) (storespec.AppendResult, error) {
+// appendTx is the raw dedupe-check + INSERT of one envelope row within an
+// existing tx. It is an UNEXPORTED package func, NOT a method on an exported
+// type: there is deliberately no public "append into this tx" primitive. The
+// only callers are Append (which wraps it in its own tx) and the membership
+// control-plane op in actors.go (which needs the row + its mirror event in one
+// atomic tx). No receiver is taken — it touches only tx, so it can never be a
+// capability someone obtains by constructing a *Messages.
+func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal bool, canonicalHash string) (storespec.AppendResult, error) {
 	if tx == nil {
 		return storespec.AppendResult{}, errors.New("store: append tx nil")
 	}
