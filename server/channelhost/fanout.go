@@ -30,6 +30,9 @@ type fanoutChain struct {
 	// accept it, so the home materialises receiver_unavailable rather than let the
 	// caller hang to the timeout (risk §7.2). nil → drop silently.
 	onUndeliverable func(context.Context, *message.Envelope)
+	// onCommit wakes external client streams (pushHub) after a committed
+	// envelope, so SDK WS tails read forward. nil → no client push.
+	onCommit func()
 }
 
 // Write runs the real 9-step harness write, then — only on a committed envelope
@@ -41,6 +44,9 @@ func (f *fanoutChain) Write(ctx context.Context, env *message.Envelope) (khrn.Wr
 	res, err := f.inner.Write(ctx, env)
 	if err != nil || res.RejectReason != "" {
 		return res, err
+	}
+	if f.onCommit != nil {
+		f.onCommit() // wake external client streams (they read forward by seq)
 	}
 	for _, aid := range env.Audience {
 		switch {

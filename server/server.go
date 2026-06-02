@@ -5,12 +5,10 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/server/channelhost"
 	"github.com/wanpengxie/ActOS/server/fleet"
@@ -59,20 +57,9 @@ func Run(ctx context.Context, cfg Config) error {
 	mux := http.NewServeMux()
 	// Attached computes (daemons) connect here (computebus WS).
 	mux.HandleFunc("/compute", flt.ServeWS)
-	// Client/SDK ingress: POST an envelope → written into truth + dispatched.
-	mux.HandleFunc("/ingress", func(w http.ResponseWriter, r *http.Request) {
-		var env message.Envelope
-		if err := json.NewDecoder(r.Body).Decode(&env); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		res, err := home.Dispatch(r.Context(), &env)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(res)
-	})
+	// Client/SDK ingress: the coagentsdk routes (cursor / messages / actors / ws).
+	gw := &gateway{home: home, channelID: cfg.ChannelID}
+	gw.mount(mux)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))

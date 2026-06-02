@@ -298,6 +298,53 @@ func (m *Messages) PendingDue(ctx context.Context, nowMs int64, limit int) ([]me
 	return out, nil
 }
 
+// MaxSeq returns the highest seq written for the channel (0 when empty). It is
+// the client cursor anchor (last_received_seq): an SDK fetches it before
+// subscribing so the WS tail starts from "now".
+func (m *Messages) MaxSeq(ctx context.Context, channelID channel.ID) (int64, error) {
+	const q = `SELECT COALESCE(MAX(seq), 0) FROM messages WHERE channel_id = ?`
+	var seq int64
+	if err := m.db.QueryRowContext(ctx, q, channelID).Scan(&seq); err != nil {
+		return 0, fmt.Errorf("store: max seq: %w", err)
+	}
+	return seq, nil
+}
+
+// ReadAfterSeq returns up to `limit` envelopes with seq > afterSeq for the
+// channel, in seq order. It is the client-push tail: a subscribed WS reads
+// forward from its cursor, so no committed envelope is ever missed (the push
+// notification only signals "something new" — correctness is seq-based here).
+func (m *Messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, afterSeq int64, limit int) ([]message.Envelope, error) {
+	if limit <= 0 {
+		limit = 256
+	}
+	const q = `SELECT id, ts, ts_received, channel_id,
+	                  sender_kind, sender_id, COALESCE(sender_name,''),
+	                  kind, type, payload,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
+	                  visibility, audience,
+	                  not_before, expires_at,
+	                  delivered_at, delivery_failed_at, COALESCE(last_error,''), attempts,
+	                  is_terminal, seq
+	             FROM messages
+	             WHERE channel_id = ? AND seq > ?
+	             ORDER BY seq ASC LIMIT ?`
+	rows, err := m.db.QueryContext(ctx, q, channelID, afterSeq, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: read after seq: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []message.Envelope
+	for rows.Next() {
+		env, err := scanEnvelopeRows(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: read after seq scan: %w", err)
+		}
+		out = append(out, env)
+	}
+	return out, rows.Err()
+}
+
 // LongPendingRequests returns up to `limit` request rows that have
 // blown past their expires_at deadline without earning a terminal
 // response. Used by the long-pending scheduler (L1 §6.4) to synthesise

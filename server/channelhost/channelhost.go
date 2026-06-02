@@ -45,6 +45,8 @@ type ChannelHome struct {
 
 	logger  behavior.Logger
 	metrics behavior.Metrics
+
+	hub *pushHub // client-push fan-out signal
 }
 
 // RunClosureScan runs the caller-scoped closure loop (closure author #2): it
@@ -320,12 +322,29 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 		nowMs:     nowMs,
 		logger:    logger,
 		metrics:   metrics,
+		hub:       newPushHub(),
 	}
 	// Mailbox-full / cell-stopped on a request → close it out (needs the built
 	// home for the seam bundle).
 	chain.onUndeliverable = h.materialiseUnavailableForRequest
+	chain.onCommit = h.hub.notify // wake client streams on every commit
 	logger.Info("channelhost.ready", "channel", string(cfg.ChannelID))
 	return h, nil
+}
+
+// Subscribe registers a client stream and returns a wake signal + cancel. The
+// signal fires on every committed envelope; the caller reads forward from its
+// own seq cursor via ReadAfterSeq (lossy signal, seq-correct read).
+func (h *ChannelHome) Subscribe() (<-chan struct{}, func()) { return h.hub.subscribe() }
+
+// MaxSeq returns the channel's current head seq (client cursor anchor).
+func (h *ChannelHome) MaxSeq(ctx context.Context) (int64, error) {
+	return h.messages.MaxSeq(ctx, h.channelID)
+}
+
+// ReadAfterSeq returns committed envelopes with seq > afterSeq (client tail).
+func (h *ChannelHome) ReadAfterSeq(ctx context.Context, afterSeq int64, limit int) ([]message.Envelope, error) {
+	return h.messages.ReadAfterSeq(ctx, h.channelID, afterSeq, limit)
 }
 
 // materialiseUnavailableForRequest writes a system-authored receiver_unavailable
