@@ -27,9 +27,9 @@ import (
 	_ "github.com/wanpengxie/go-kimi/pkg/kimi/llm/anthropic"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 )
 
 // Env keys read at Config.NewFromEnv time. Kept exported so tests and
@@ -91,16 +91,16 @@ type ActorInfo struct {
 
 // TypeInfo is one request type from an actor.list response.
 type TypeInfo struct {
-	Type           string             `json:"type"`             // e.g. "xhs.publish"
-	HandlerActorID string             `json:"handler_actor_id"` // e.g. "tool:xhs"
-	HandlerBinding string             `json:"handler_binding,omitempty"`
-	AllowedKinds   []string           `json:"allowed_kinds,omitempty"` // subset of {event, request, response}
-	MaxPendingMs   int64              `json:"max_pending_ms,omitempty"`
-	Description    string             `json:"description,omitempty"`
-	PayloadExample json.RawMessage    `json:"payload_example,omitempty"`
+	Type           string              `json:"type"`             // e.g. "xhs.publish"
+	HandlerActorID string              `json:"handler_actor_id"` // e.g. "tool:xhs"
+	HandlerBinding string              `json:"handler_binding,omitempty"`
+	AllowedKinds   []string            `json:"allowed_kinds,omitempty"` // subset of {event, request, response}
+	MaxPendingMs   int64               `json:"max_pending_ms,omitempty"`
+	Description    string              `json:"description,omitempty"`
+	PayloadExample json.RawMessage     `json:"payload_example,omitempty"`
 	PayloadFields  []behavior.FieldDoc `json:"payload_fields,omitempty"`
 	ErrorCodes     []behavior.ErrorDoc `json:"error_codes,omitempty"`
-	Notes          string             `json:"notes,omitempty"`
+	Notes          string              `json:"notes,omitempty"`
 }
 
 // Config drives a Bridge. All fields optional unless documented; sane

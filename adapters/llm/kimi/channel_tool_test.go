@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/lib/behavior/futurereg"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/lib/behavior/futurereg"
 )
 
 // TestRouteTriggersDeliversFinalToActiveAwait asserts a final response whose

@@ -4,8 +4,8 @@ import (
 	"strings"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 )
 
 // AdapterName is the framework module name; lookup key the daemon uses

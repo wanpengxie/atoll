@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 )
 
 const DefaultMaxPendingMs int64 = 30_000
@@ -56,12 +56,12 @@ type ProxyFacadeModule struct {
 }
 
 type CapabilitySet struct {
-	Name             string                             `json:"name,omitempty"`
-	Description      string                             `json:"description,omitempty"`
-	SkillDoc         string                             `json:"skill_doc,omitempty"`
-	Types            []string                           `json:"types,omitempty"`
+	Name             string                              `json:"name,omitempty"`
+	Description      string                              `json:"description,omitempty"`
+	SkillDoc         string                              `json:"skill_doc,omitempty"`
+	Types            []string                            `json:"types,omitempty"`
 	TypeDeclarations map[string]behavior.TypeDeclaration `json:"type_declarations,omitempty"`
-	MaxPendingMs     int64                              `json:"max_pending_ms,omitempty"`
+	MaxPendingMs     int64                               `json:"max_pending_ms,omitempty"`
 }
 
 type readinessChangedPayload struct {

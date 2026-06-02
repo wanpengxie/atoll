@@ -8,9 +8,9 @@ import (
 	gokimitypes "github.com/wanpengxie/go-kimi/pkg/kimi/types"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 )
 
 func TestListActorsIncludesDescriptions(t *testing.T) {

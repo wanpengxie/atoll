@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 )
 
 // DefaultActorID is the actor_registry row this adapter binds to. The

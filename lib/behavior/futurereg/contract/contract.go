@@ -28,8 +28,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/lib/behavior/futurereg"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/lib/behavior/futurereg"
 )
 
 // Transport is the minimal caller-side surface every binding exposes over the

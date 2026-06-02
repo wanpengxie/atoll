@@ -24,6 +24,7 @@
 //   - daemon.go:1257  store.NewRequestLookup(messages, channelID)
 //   - daemon.go:1267  harness.New(harness.Deps{Log: messages, Registry, TypeReg, ...})
 //   - daemon.go:1812  cells.Spawn(actor.SystemActorID, systemActor)
+//
 // DROP the v1 cruft when porting: multistore.NewChannelLock / NewViewSyncOutbox
 // (viewsync deleted v2), the daemon-owner fence (v2 fencing is actor-host lease
 // in wire/placement), and the observer fanout that fed the view-cache.

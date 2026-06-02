@@ -21,11 +21,11 @@
 //   - kind=request, type=actor.status   → respondActorStatus (self-answer, read own readiness/live)
 //   - kind=request, type=actor.describe → respondActorDescribe (Declaration projection)
 //   - kind=request, type∈declared       → reservePendingRequest + runHandle → module.Handle
-//       * NO sticky-readiness gate (manager.go:932 — dispatch is dumb delivery;
-//         not-ready actor self-answers receiver_unavailable; reachability is the
-//         OUTCOME of send→terminal, never a stored gate). P15/P16.
-//       * Handle error: ErrHandleDeferred → keep pending; else → policy.OnExternalError
-//         emits receiver_internal_error terminal (manager.go:946-978).
+//   - NO sticky-readiness gate (manager.go:932 — dispatch is dumb delivery;
+//     not-ready actor self-answers receiver_unavailable; reachability is the
+//     OUTCOME of send→terminal, never a stored gate). P15/P16.
+//   - Handle error: ErrHandleDeferred → keep pending; else → policy.OnExternalError
+//     emits receiver_internal_error terminal (manager.go:946-978).
 //
 // Out-of-band entry points fold onto the SAME cell (no off-cell module touch):
 //   - device external callback (OnExternalCallbackFrame, manager.go:1255) →
@@ -55,6 +55,7 @@
 //  6. mod.Init(mctx) → on success publish type rows (TypeRegistry.Upsert).
 //  7. construct adapterActor{module, declaration, mctx, correlation:map{}, ...}
 //     → return for Cells.Spawn. (NO boundModule, NO Manager bookkeeping.)
+//
 // Start() on the cell wires mctx + runs binding-specific resources; Stop() →
 // module.Shutdown on the cell goroutine.
 //

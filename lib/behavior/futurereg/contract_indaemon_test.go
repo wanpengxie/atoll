@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior/futurereg"
 	"github.com/wanpengxie/ActOS/lib/behavior/futurereg/contract"
-	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // inDaemonTransport binds the shared contract scenarios to the in-daemon path:

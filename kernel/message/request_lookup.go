@@ -2,7 +2,6 @@ package message
 
 import (
 	"context"
-
 )
 
 // RequestLookup is the framework-private seam Respond uses to recover

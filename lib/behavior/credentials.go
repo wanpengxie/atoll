@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-
 )
 
 // CredentialStore is the F8 contract every adapter uses to fetch

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wanpengxie/ActOS/lib/behavior/futurereg"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/lib/behavior/futurereg"
 )
 
 // bridgeCaller is the worker-side caller helper that backs the kimi

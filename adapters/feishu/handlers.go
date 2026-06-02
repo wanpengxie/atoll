@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 )
 
 // Closed set of envelope.type values this adapter handles. Order is

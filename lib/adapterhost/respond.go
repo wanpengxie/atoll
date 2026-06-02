@@ -186,5 +186,3 @@ func (a *adapterActor) doUpdateReadiness(ctx context.Context, update actor.Readi
 	}
 	return actor.ReadinessTransition{Previous: prev, Current: next, Changed: changed}, nil
 }
-
-

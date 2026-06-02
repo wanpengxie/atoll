@@ -10,8 +10,8 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	kharness "github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	kharness "github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // ActorRegistry implements kernel/actor.Registry over a channel-local

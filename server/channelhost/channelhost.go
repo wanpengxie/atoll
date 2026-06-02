@@ -56,10 +56,10 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 		return nil, fmt.Errorf("channelhost: open channel store: %w", err)
 	}
 
-	messages := store.NewMessages(db)                          // harness.MessageLog
-	registry := store.NewActorRegistry(db)                     // actor.Registry
-	typeReg := store.NewTypeRegistry(db, nowMs)                // message.TypeRegistry + harness view
-	lookup := store.NewRequestLookup(messages, cfg.ChannelID)  // message.RequestLookup
+	messages := store.NewMessages(db)                         // harness.MessageLog
+	registry := store.NewActorRegistry(db)                    // actor.Registry
+	typeReg := store.NewTypeRegistry(db, nowMs)               // message.TypeRegistry + harness view
+	lookup := store.NewRequestLookup(messages, cfg.ChannelID) // message.RequestLookup
 
 	chain, err := harness.New(harness.Deps{
 		ChannelID:     cfg.ChannelID,
