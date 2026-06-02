@@ -81,7 +81,10 @@ func (a *adapterActor) doRespond(ctx context.Context, requestID behavior.Correla
 	if !message.IsFinalStatus(status) {
 		return behavior.RespondResult{}, fmt.Errorf("adapterhost: Respond status must be final; got %q (use Provisional)", status)
 	}
-	env, err := a.buildResponseEnvelope(ctx, requestID, status, opts.Reason, payload, opts.Dedupe, opts.Visibility, opts.Audience, sender)
+	env, err := behavior.BuildResponseEnvelope(ctx, a.lookup, a.clock, sender, requestID, behavior.ResponseSpec{
+		Status: status, Reason: opts.Reason, Payload: payload, Dedupe: opts.Dedupe,
+		Visibility: opts.Visibility, Audience: opts.Audience,
+	})
 	if err != nil {
 		return behavior.RespondResult{}, err
 	}
@@ -109,7 +112,9 @@ func (a *adapterActor) doProvisional(ctx context.Context, requestID behavior.Cor
 	if message.IsFinalStatus(status) {
 		return behavior.RespondResult{}, fmt.Errorf("adapterhost: Provisional status %q is final — use Respond/Fail", status)
 	}
-	env, err := a.buildResponseEnvelope(ctx, requestID, status, "", payload, false, opts.Visibility, opts.Audience, sender)
+	env, err := behavior.BuildResponseEnvelope(ctx, a.lookup, a.clock, sender, requestID, behavior.ResponseSpec{
+		Status: status, Payload: payload, Visibility: opts.Visibility, Audience: opts.Audience,
+	})
 	if err != nil {
 		return behavior.RespondResult{}, err
 	}
@@ -182,72 +187,4 @@ func (a *adapterActor) doUpdateReadiness(ctx context.Context, update actor.Readi
 	return actor.ReadinessTransition{Previous: prev, Current: next, Changed: changed}, nil
 }
 
-// buildResponseEnvelope assembles a kind=response envelope from the original
-// request (shared by Respond/Fail/Provisional). Audience defaults to the
-// request sender; visibility/correlation inherit from the request.
-func (a *adapterActor) buildResponseEnvelope(ctx context.Context, requestID behavior.CorrelationKey, status, reason string, payload json.RawMessage, dedupe bool, vis message.Visibility, aud message.Audience, sender message.Sender) (*message.Envelope, error) {
-	request, ok, err := a.lookup.FindByID(ctx, message.ID(requestID))
-	if err != nil {
-		return nil, fmt.Errorf("adapterhost: respond lookup %s: %w", requestID, err)
-	}
-	if !ok || request == nil {
-		return nil, fmt.Errorf("adapterhost: respond request %s not found", requestID)
-	}
-	merged, err := mergeResponsePayload(payload, status, reason, dedupe)
-	if err != nil {
-		return nil, err
-	}
-	hash, err := message.CanonicalHashPayload(merged)
-	if err != nil {
-		return nil, fmt.Errorf("adapterhost: respond hash: %w", err)
-	}
-	if vis == "" {
-		vis = request.Visibility
-	}
-	audience := message.Audience{request.Sender.ID}
-	if len(aud) > 0 {
-		if len(aud) != 1 || aud[0] != request.Sender.ID {
-			return nil, fmt.Errorf("adapterhost: respond audience %v must equal parent sender %s", aud, request.Sender.ID)
-		}
-		audience = aud
-	}
-	correlationID := request.CorrelationID
-	if correlationID == "" {
-		correlationID = request.ID
-	}
-	return &message.Envelope{
-		ID:            message.ID("response:" + requestID.String() + ":" + hash),
-		TS:            a.clock().UnixMilli(),
-		ChannelID:     request.ChannelID,
-		Sender:        sender,
-		Kind:          message.KindResponse,
-		Type:          request.Type,
-		Payload:       merged,
-		ParentID:      message.ID(requestID),
-		CorrelationID: correlationID,
-		Visibility:    vis,
-		Audience:      audience,
-	}, nil
-}
 
-// mergeResponsePayload merges the adapter's payload object with the
-// framework-owned {status, reason} fields (collapse of mergeResponsePayload
-// respond.go). payload must be a JSON object or empty.
-func mergeResponsePayload(payload json.RawMessage, status, reason string, dedupe bool) (json.RawMessage, error) {
-	m := map[string]json.RawMessage{}
-	if len(payload) > 0 {
-		if err := json.Unmarshal(payload, &m); err != nil {
-			return nil, fmt.Errorf("adapterhost: response payload must be a JSON object: %w", err)
-		}
-	}
-	sb, _ := json.Marshal(status)
-	m["status"] = sb
-	if reason != "" {
-		rb, _ := json.Marshal(reason)
-		m["reason"] = rb
-	}
-	if dedupe {
-		m["dedupe"] = json.RawMessage("true")
-	}
-	return json.Marshal(m)
-}
