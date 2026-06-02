@@ -240,6 +240,8 @@ type Callback struct {
 //   - xhs.note.fetch     -> note
 //   - xhs.recent.fetch   -> notes
 //   - xhs.cookie.sync    -> (none beyond status/reason)
+//
+//nolint:unused // retained (reaper/correlation will wire; xhs allowlist schema)
 var allowedResultKeysByType = map[string]map[string]struct{}{
 	TypePublish: {
 		"note_id":     {},
@@ -264,6 +266,8 @@ var allowedResultKeysByType = map[string]map[string]struct{}{
 // reason/code is preserved as payload.error_code. `retry_after` is
 // declared only on xhs.publish's failed schema; device_id is also only
 // on xhs.publish's response schema.
+//
+//nolint:unused // retained (reaper/correlation will wire; xhs allowlist schema)
 var allowedErrorKeysByType = map[string]map[string]struct{}{
 	TypePublish: {
 		"retry_after": {},
@@ -287,6 +291,8 @@ var allowedErrorKeysByType = map[string]map[string]struct{}{
 // resultAllowListFor returns the per-type result allow-list, or the
 // empty set when the type is unknown / blank (most-restrictive default,
 // so a future closed-set drift fails closed).
+//
+//nolint:unused // retained (reaper/correlation will wire; xhs allowlist schema)
 func resultAllowListFor(requestType string) map[string]struct{} {
 	if v, ok := allowedResultKeysByType[requestType]; ok {
 		return v
@@ -295,6 +301,8 @@ func resultAllowListFor(requestType string) map[string]struct{} {
 }
 
 // errorAllowListFor returns the per-type error allow-list.
+//
+//nolint:unused // retained (reaper/correlation will wire; xhs allowlist schema)
 func errorAllowListFor(requestType string) map[string]struct{} {
 	if v, ok := allowedErrorKeysByType[requestType]; ok {
 		return v

@@ -99,6 +99,7 @@ func (a *adapterActor) reserve(e behavior.CorrelationEntry) behavior.Correlation
 	return e
 }
 
+//nolint:unused // retained (reaper/correlation will wire; xhs allowlist schema)
 func (a *adapterActor) correlationGet(id behavior.CorrelationKey) (behavior.CorrelationEntry, bool) {
 	e, ok := a.correlation[id]
 	return e, ok

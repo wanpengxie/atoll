@@ -13,6 +13,8 @@ import (
 // mirrors the daemon-side ChannelLock gate WITHOUT importing the
 // release-specific framework layer, so runtime/store tests stay extractable
 // (substrate must compile its own test suite with kernel + store only).
+//
+//nolint:unused // retained (reaper/correlation will wire; xhs allowlist schema)
 func fakeFence(token fencing.FencingToken, epoch fencing.DaemonEpoch) store.WriteFence {
 	return store.WriteFenceFunc(func(_ context.Context, _ *sql.Tx, tok fencing.FencingToken, ep fencing.DaemonEpoch) error {
 		if tok != token || ep != epoch {
