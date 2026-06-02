@@ -10,21 +10,18 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// Runtime owns the live cells for one channel and is the addressing seam. Its
-// identity model is TWO-LEVEL: a stable ActorID names a sequence of distinct
-// cell instances over time (Spawn replaces), and each instance carries an
-// incarnation (its generation). The map keys by ActorID and always resolves to
-// the CURRENT incarnation; death and replacement are incarnation-checked so a
-// dying predecessor can never evict its successor.
+// Runtime owns the live cells for one channel and is the addressing seam.
+// Identity is single-level: a stable ActorID names at most one live cell at a
+// time. Spawn replaces; death is terminal (no transparent same-id respawn).
+// Death and replacement are checked by POINTER IDENTITY (the map entry still
+// points to this very *cell), so a dying predecessor can never evict its
+// successor — no per-instance generation is needed.
 type Runtime struct {
 	parent context.Context
 	sup    Supervisor
 
 	mu    sync.RWMutex
 	cells map[actor.ActorID]*cell
-	// gen tracks the next incarnation to mint per ActorID (monotonic; never
-	// reused, so a death signal unambiguously names one instance).
-	gen map[actor.ActorID]uint64
 	// mailbox is the default bounded mailbox depth for newly spawned cells.
 	mailbox int
 }
@@ -54,7 +51,6 @@ func New(cfg Config) *Runtime {
 		parent:  parent,
 		sup:     cfg.Supervisor,
 		cells:   make(map[actor.ActorID]*cell),
-		gen:     make(map[actor.ActorID]uint64),
 		mailbox: mb,
 	}
 }
@@ -64,7 +60,7 @@ func New(cfg Config) *Runtime {
 type Outcome int
 
 const (
-	// Delivered: the envelope was enqueued into the current incarnation's mailbox.
+	// Delivered: the envelope was enqueued into the cell's mailbox.
 	Delivered Outcome = iota
 	// NotHosted: this runtime hosts no cell for the actor (legitimately — the
 	// audience may include system/user/remote actors). The seam can fast-fail
@@ -79,9 +75,6 @@ const (
 // AudienceOutcome is the result for one audience member.
 type AudienceOutcome struct {
 	Outcome Outcome
-	// Incarnation is the generation the envelope was delivered to (set only
-	// when Outcome==Delivered).
-	Incarnation uint64
 }
 
 // DeliverResult is the structured, per-audience truth of a Deliver call.
@@ -89,13 +82,11 @@ type DeliverResult struct {
 	Per map[actor.ActorID]AudienceOutcome
 }
 
-// Spawn creates and starts a cell for id, minting a fresh incarnation. If a
-// cell already exists for id it is stopped and replaced (one actor, one owner).
+// Spawn creates and starts a cell for id. If a cell already exists for id it is
+// stopped and replaced (one actor, one owner).
 func (r *Runtime) Spawn(id actor.ActorID, impl Actor) {
 	r.mu.Lock()
-	r.gen[id]++
-	inc := r.gen[id]
-	c := newCell(r.parent, id, inc, impl, r.mailbox, r.sup, r.removeIf)
+	c := newCell(r.parent, id, impl, r.mailbox, r.sup, r.removeIf)
 	old, existed := r.cells[id]
 	r.cells[id] = c
 	r.mu.Unlock()
@@ -107,7 +98,7 @@ func (r *Runtime) Spawn(id actor.ActorID, impl Actor) {
 	c.start()
 }
 
-// removeIf is the incarnation-checked self-eviction hook handed to each cell.
+// removeIf is the pointer-identity-checked self-eviction hook handed to each cell.
 // It deletes the map entry IFF it still points to this very instance — so a
 // late-dying predecessor (already replaced by Spawn) cannot evict its successor.
 func (r *Runtime) removeIf(c *cell) {
@@ -157,13 +148,13 @@ func (r *Runtime) Deliver(ctx context.Context, audience []actor.ActorID, env *me
 	for id, c := range matched {
 		switch err := c.Deliver(env); err {
 		case nil:
-			res.Per[id] = AudienceOutcome{Outcome: Delivered, Incarnation: c.incarnation}
+			res.Per[id] = AudienceOutcome{Outcome: Delivered}
 		case ErrMailboxFull:
-			res.Per[id] = AudienceOutcome{Outcome: MailboxFull, Incarnation: c.incarnation}
+			res.Per[id] = AudienceOutcome{Outcome: MailboxFull}
 		case ErrCellStopped:
-			res.Per[id] = AudienceOutcome{Outcome: Stopped, Incarnation: c.incarnation}
+			res.Per[id] = AudienceOutcome{Outcome: Stopped}
 		default:
-			res.Per[id] = AudienceOutcome{Outcome: Stopped, Incarnation: c.incarnation}
+			res.Per[id] = AudienceOutcome{Outcome: Stopped}
 		}
 	}
 	return res, nil

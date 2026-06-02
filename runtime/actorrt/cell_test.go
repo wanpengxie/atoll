@@ -205,9 +205,6 @@ func TestCellPanicSurfacesDeathSignal(t *testing.T) {
 	if len(sup.deaths) != 1 || sup.deaths[0].Actor != "a" {
 		t.Fatalf("deaths = %+v, want one for actor a", sup.deaths)
 	}
-	if sup.deaths[0].Incarnation != 1 {
-		t.Fatalf("incarnation = %d, want 1", sup.deaths[0].Incarnation)
-	}
 	// Self-eviction: the dead instance is unaddressable WITHOUT the supervisor
 	// despawning it (OnDeath runs AFTER eviction). (B1)
 	if rt.Has("a") {
@@ -247,9 +244,11 @@ func TestPanicDeathWithDespawningSupervisorDoesNotDeadlock(t *testing.T) {
 	}
 }
 
-// TestIncarnationIncrementsAcrossRespawn: a respawn under the same ActorID is a
-// distinct instance; the death signal names which generation died. (B2)
-func TestIncarnationIncrementsAcrossRespawn(t *testing.T) {
+// TestRespawnSameIDEachDeathIsIndependent: re-Spawning the same ActorID after a
+// death is a fresh instance that, when it too dies, emits its own death signal
+// addressed by ActorID. Death is terminal per instance (no transparent respawn,
+// no generation) — the substrate just produces one death per dying cell.
+func TestRespawnSameIDEachDeathIsIndependent(t *testing.T) {
 	t.Parallel()
 	sup := &recordingSupervisor{notify: make(chan struct{}, 1)}
 	rt := New(Config{Parent: context.Background(), Supervisor: sup})
@@ -258,14 +257,14 @@ func TestIncarnationIncrementsAcrossRespawn(t *testing.T) {
 	select {
 	case <-sup.notify:
 	case <-time.After(2 * time.Second):
-		t.Fatal("no death signal for incarnation 1")
+		t.Fatal("no death signal for first instance")
 	}
 
 	rt.Spawn("a", startPanicActor{})
 	select {
 	case <-sup.notify:
 	case <-time.After(2 * time.Second):
-		t.Fatal("no death signal for incarnation 2")
+		t.Fatal("no death signal for second instance")
 	}
 
 	sup.mu.Lock()
@@ -273,8 +272,8 @@ func TestIncarnationIncrementsAcrossRespawn(t *testing.T) {
 	if len(sup.deaths) != 2 {
 		t.Fatalf("deaths = %d, want 2", len(sup.deaths))
 	}
-	if sup.deaths[0].Incarnation != 1 || sup.deaths[1].Incarnation != 2 {
-		t.Fatalf("incarnations = %d,%d, want 1,2", sup.deaths[0].Incarnation, sup.deaths[1].Incarnation)
+	if sup.deaths[0].Actor != "a" || sup.deaths[1].Actor != "a" {
+		t.Fatalf("deaths = %+v, want both for actor a", sup.deaths)
 	}
 }
 

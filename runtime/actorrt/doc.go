@@ -2,10 +2,10 @@
 // long-lived object identity (a cell with a private struct, a single goroutine,
 // and a bounded envelope mailbox) and four substrate guarantees:
 //
-//  1. identity + addressability — sending to an ActorID reaches its CURRENT
-//     incarnation. Identity is two-level: a stable ActorID names a sequence of
-//     distinct cell instances over time (Spawn replaces), each with its own
-//     incarnation (generation). Death and replacement are incarnation-checked,
+//  1. identity + addressability — sending to an ActorID reaches its current
+//     cell. Identity is single-level: a stable ActorID names at most one live
+//     cell at a time (Spawn replaces; death is terminal — no transparent
+//     same-id respawn). Death and replacement are checked by pointer identity,
 //     so a dying predecessor can never evict its successor.
 //  2. private sequential delivery — one actor's messages are processed
 //     one-at-a-time by its own goroutine, so the actor can hold mutable state

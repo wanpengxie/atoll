@@ -20,25 +20,20 @@ var ErrMailboxFull = errors.New("actorrt: mailbox full")
 var ErrCellStopped = errors.New("actorrt: cell stopped")
 
 // DeathSignal is what a Supervisor receives when a cell's actor goroutine
-// terminates abnormally (panic in Receive/Start). It identifies WHICH
-// INCARNATION died — a single ActorID names a sequence of distinct cell
-// instances over time (Spawn replaces), so the substrate's death signal carries
-// (Actor, Incarnation) or it under-specifies its own state space. Prior art:
-// Erlang DOWN carries the monitor ref (PID reused under a stable name); K8s Pod
-// carries a UID distinct from its name.
+// terminates abnormally (panic in Receive/Start). It names the dead actor by
+// its stable ActorID. Death is TERMINAL for that id — the substrate does no
+// transparent same-id respawn, so there is no successor a stale death could be
+// confused with and no per-instance generation is needed; a supervisor
+// collapses the dead actor's in-flight requests by ActorID.
 type DeathSignal struct {
 	Actor actor.ActorID
-	// Incarnation is the generation of the dead instance (the k-th life of
-	// Actor). A supervisor MUST use it to avoid collapsing a successor
-	// incarnation's in-flight work on a predecessor's death.
-	Incarnation uint64
 	// Cause is the recovered panic value (or error) that killed the cell.
 	Cause error
 }
 
 // Supervisor observes cell death. The runtime calls OnDeath exactly once per
 // cell that dies abnormally. It is the seam where the substrate materialises
-// receiver_unavailable for the dead instance's in-flight requests; the
+// receiver_unavailable for the dead actor's in-flight requests; the
 // substrate never guesses "slow" — it only reports death it positively
 // observed. The dead cell has ALREADY evicted itself from the runtime's
 // addressing map before OnDeath runs, so a supervisor MUST NOT despawn it.
@@ -46,22 +41,21 @@ type Supervisor interface {
 	OnDeath(ctx context.Context, sig DeathSignal)
 }
 
-// cell is one actor INSTANCE: its impl (private state), a single goroutine, a
-// bounded envelope mailbox, and an incarnation (which life of its ActorID this
-// is). The mailbox carries ONLY envelopes — the substrate's isolation guarantee
-// is that the sole way to affect an actor is to send it a message; there is no
-// path to run caller-supplied code on the cell goroutine.
+// cell is one actor INSTANCE: its impl (private state), a single goroutine, and
+// a bounded envelope mailbox. The mailbox carries ONLY envelopes — the
+// substrate's isolation guarantee is that the sole way to affect an actor is to
+// send it a message; there is no path to run caller-supplied code on the cell
+// goroutine.
 type cell struct {
-	id          actor.ActorID
-	incarnation uint64
-	impl        Actor
-	inbox       chan *message.Envelope
+	id    actor.ActorID
+	impl  Actor
+	inbox chan *message.Envelope
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	sup Supervisor
-	// onExit is the incarnation-checked self-eviction hook the Runtime injects:
+	// onExit is the pointer-identity-checked self-eviction hook the Runtime injects:
 	// on ANY exit (clean or panic) the cell removes itself from the addressing
 	// map IFF the map still points to this very instance. This is how death
 	// makes an instance unaddressable WITHOUT the cell trying to stop/join
@@ -77,23 +71,22 @@ type cell struct {
 	closed bool
 }
 
-// newCell constructs a cell. mailbox is the bounded inbox depth; incarnation is
-// the generation assigned by the Runtime; onExit is the self-eviction hook.
-func newCell(parent context.Context, id actor.ActorID, incarnation uint64, impl Actor, mailbox int, sup Supervisor, onExit func(*cell)) *cell {
+// newCell constructs a cell. mailbox is the bounded inbox depth; onExit is the
+// self-eviction hook.
+func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, sup Supervisor, onExit func(*cell)) *cell {
 	if mailbox <= 0 {
 		mailbox = 64
 	}
 	ctx, cancel := context.WithCancel(parent)
 	return &cell{
-		id:          id,
-		incarnation: incarnation,
-		impl:        impl,
-		inbox:       make(chan *message.Envelope, mailbox),
-		ctx:         ctx,
-		cancel:      cancel,
-		sup:         sup,
-		onExit:      onExit,
-		done:        make(chan struct{}),
+		id:     id,
+		impl:   impl,
+		inbox:  make(chan *message.Envelope, mailbox),
+		ctx:    ctx,
+		cancel: cancel,
+		sup:    sup,
+		onExit: onExit,
+		done:   make(chan struct{}),
 	}
 }
 
@@ -130,9 +123,9 @@ func (c *cell) start() {
 		var deathCause error
 		defer func() {
 			if r := recover(); r != nil {
-				deathCause = fmt.Errorf("actorrt: cell %s#%d panicked: %v", c.id, c.incarnation, r)
+				deathCause = fmt.Errorf("actorrt: cell %s panicked: %v", c.id, r)
 			}
-			// (a) Make this instance unaddressable FIRST — incarnation-checked
+			// (a) Make this instance unaddressable FIRST — pointer-identity
 			// self-eviction. Never self-stop()/join: a goroutine cannot wait on
 			// its own exit.
 			if c.onExit != nil {
@@ -146,9 +139,8 @@ func (c *cell) start() {
 				func() {
 					defer func() { _ = recover() }()
 					c.sup.OnDeath(context.Background(), DeathSignal{
-						Actor:       c.id,
-						Incarnation: c.incarnation,
-						Cause:       deathCause,
+						Actor: c.id,
+						Cause: deathCause,
 					})
 				}()
 			}
@@ -160,7 +152,7 @@ func (c *cell) start() {
 
 		if starter, ok := c.impl.(Starter); ok {
 			if err := starter.Start(c.ctx, c); err != nil {
-				deathCause = fmt.Errorf("actorrt: cell %s#%d Start failed: %w", c.id, c.incarnation, err)
+				deathCause = fmt.Errorf("actorrt: cell %s Start failed: %w", c.id, err)
 				return
 			}
 		}
