@@ -322,9 +322,12 @@ func (r *ActorRegistry) ApplyMemberTransitions(
 	defer func() { _ = tx.Rollback() }()
 
 	// v2: no fencing — single writer by construction. These system.actor.*
-	// mirror events bypass the harness chain (the store mirrors control-plane
-	// mutations directly), so the store computes their canonical_hash here;
-	// events are never terminal.
+	// mirror events are written with is_terminal=false and an empty
+	// canonical_hash (events are never terminal, and id-dedupe alone guards
+	// them — the registered/deregistered envelope IDs are deterministic).
+	// NOTE: this path currently writes the mirror event directly rather than
+	// through the harness chain — whether membership projections must pass
+	// the harness (INVARIANT-13) is an open decision, not settled here.
 	msgs := NewMessages(r.db)
 	for _, add := range adds {
 		if add.ID == "" {

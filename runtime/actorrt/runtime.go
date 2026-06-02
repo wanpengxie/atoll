@@ -60,16 +60,21 @@ func New(cfg Config) *Runtime {
 // equivalent of Deliverer.Register replacing a handler), under the
 // single-critical-section discipline of INVARIANT-5 (one actor, one owner).
 func (r *Runtime) Spawn(id actor.ActorID, impl Actor) {
-	r.mu.Lock()
-	if existing, ok := r.cells[id]; ok {
-		delete(r.cells, id)
-		r.mu.Unlock()
-		existing.stop()
-		r.mu.Lock()
-	}
 	c := newCell(r.parent, id, impl, r.mailbox, r.sup)
+	// Replace under ONE critical section: the map swap is atomic, so no
+	// concurrent Spawn can observe id absent and create a rival cell. The old
+	// code released the lock around existing.stop() and re-acquired it — that
+	// window let another Spawn(id)/Despawn slip a cell in, which this Spawn
+	// then overwrote without stopping, orphaning a live goroutine (TOCTOU).
+	// stop()/start() run OUTSIDE the lock because stop() blocks on the cell
+	// goroutine, which may itself call back into the runtime (Deliver/Post).
+	r.mu.Lock()
+	old, existed := r.cells[id]
 	r.cells[id] = c
 	r.mu.Unlock()
+	if existed {
+		old.stop()
+	}
 	c.start()
 }
 

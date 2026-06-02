@@ -20,8 +20,9 @@ import (
 // Mechanics:
 //
 //   - Compute the canonical hash on the incoming (pre-normalize) envelope
-//     and stash it on env.CanonicalHash so StepEngineAppend can persist
-//     it alongside the row.
+//     and return it on Outcome.CanonicalHash (the envelope itself no longer
+//     carries the field — kernel purified it) so the chain captures it and
+//     hands it to MessageLog.Append for StepEngineAppend to persist.
 //   - On an id collision, fetch the stored hash via
 //     MessageLog.LookupCanonicalHash and compare.
 //
@@ -78,7 +79,6 @@ func (s *stepDedupe) Run(ctx context.Context, env *message.Envelope) (Outcome, e
 		return Outcome{
 			Deduped:            true,
 			ExistingSeq:        existing.Seq,
-			ExistingIsTerminal: existing.IsTerminal,
 			ExistingTSReceived: existing.Envelope.TSReceived,
 		}, nil
 	}

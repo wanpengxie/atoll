@@ -225,7 +225,7 @@ func (c *IPCClient) writeTriggerAck(trigger ipc.Frame, ackPayload ipc.TriggerAck
 }
 
 // Handshake performs the initial handshake. On success the client
-// remembers the daemon-supplied fencing_token + daemon_epoch + worker_id.
+// remembers the daemon-supplied worker-LEASE token + worker_id.
 func (c *IPCClient) Handshake(ctx context.Context, leaseID string) (ipc.HandshakeAckPayload, error) {
 	payload, err := json.Marshal(ipc.HandshakePayload{LeaseID: leaseID})
 	if err != nil {
@@ -314,8 +314,17 @@ func (c *IPCClient) EmitDown(ctx context.Context, dead actor.ActorID, reason str
 	if err != nil {
 		return err
 	}
-	_, err = c.sendStamped(ctx, ipc.KindDown, payload)
-	return err
+	reply, err := c.sendStamped(ctx, ipc.KindDown, payload)
+	if err != nil {
+		return err
+	}
+	// A stale worker-LEASE invalidates every uplink frame, Down included:
+	// surface it as a FenceInvalidError so the caller exits, same as
+	// EmitEnvelope / Heartbeat (otherwise a zombie keeps reporting Down).
+	if reply.Kind == ipc.KindFenceInvalid {
+		return FenceFromFrame(reply)
+	}
+	return nil
 }
 
 // Heartbeat sends a heartbeat IPC.

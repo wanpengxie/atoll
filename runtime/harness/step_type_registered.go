@@ -11,14 +11,17 @@ import (
 // reservedBootstrapTypeSet is the proto-layer1 §6.2.0 Reserved Bootstrap
 // Type Set. Only the channel system actor may emit these envelope.type
 // values; any other sender is rejected per §2.5.
+//
+// Keys reference kernel/actor constants (the frozen closed set, §1.4) rather
+// than bare literals so a kernel rename can never silently diverge here.
 var reservedBootstrapTypeSet = map[string]struct{}{
-	"system.channel.created":     {},
-	"system.actor.registered":    {},
-	"system.actor.deregistered":  {},
-	"system.type.installed":      {},
-	"system.type.deprecated":     {},
-	"system.config.updated":      {},
-	"system.placement.reclaimed": {},
+	actor.ReservedSystemChannelCreated:     {},
+	actor.ReservedSystemActorRegistered:    {},
+	actor.ReservedSystemActorDeregistered:  {},
+	actor.ReservedSystemTypeInstalled:      {},
+	actor.ReservedSystemTypeDeprecated:     {},
+	actor.ReservedSystemConfigUpdated:      {},
+	actor.ReservedSystemPlacementReclaimed: {},
 }
 
 type reservedActorTypeRule struct {
@@ -26,8 +29,14 @@ type reservedActorTypeRule struct {
 	SystemOnly   bool
 }
 
+// Keys reference kernel/actor constants (§1.4): the per-type kind/sender
+// metadata below is harness-internal validation policy, but the type NAMES
+// are the kernel's frozen vocabulary — keyed off the constants so they cannot
+// drift from kernel. (kernel taxonomy splits these across ReservedActorTypeSet
+// / ReservedSystemEventTypeSet; the grouping here is a separate axis — what
+// validation rule applies — not a membership claim.)
 var reservedActorTypeSet = map[string]reservedActorTypeRule{
-	"actor.status": {
+	actor.ReservedActorStatus: {
 		AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
 	},
 	// actor.describe returns the actor's static Declaration projection
@@ -36,7 +45,7 @@ var reservedActorTypeSet = map[string]reservedActorTypeRule{
 	// adapter dispatch path; never reaches Module.Handle. Pull-based:
 	// no server-side mirror, no event emission — daemon is the single
 	// source of truth, SDK reads via CallActor.
-	"actor.describe": {
+	actor.ReservedActorDescribe: {
 		AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
 	},
 	// actor.list returns the channel's live active-actor + request-type
@@ -46,18 +55,10 @@ var reservedActorTypeSet = map[string]reservedActorTypeRule{
 	// registry (truth ownership, INVARIANT-2) when addressed to the
 	// channel system actor. Pull-based, live on every call — no frozen
 	// bootstrap snapshot, no server-side mirror.
-	"actor.list": {
+	actor.ReservedActorList: {
 		AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
 	},
-	"actor.readiness.changed": {
-		AllowedKinds: []message.Kind{message.KindEvent},
-		SystemOnly:   true,
-	},
-	// actor.presence.changed carries the channel system actor's ephemeral
-	// physical-presence projection (compute lease attach/heartbeat/detach). Like
-	// readiness.changed it is SystemOnly — only the channel system author (the
-	// home, on behalf of the fleet) emits it; the sysactor cell folds it in.
-	"actor.presence.changed": {
+	actor.ReservedActorReadinessChanged: {
 		AllowedKinds: []message.Kind{message.KindEvent},
 		SystemOnly:   true,
 	},

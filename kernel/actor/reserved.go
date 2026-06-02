@@ -47,7 +47,6 @@ const (
 	ReservedSystemTypeDeprecated     = "system.type.deprecated"
 	ReservedSystemPlacementReclaimed = "system.placement.reclaimed"
 	ReservedActorReadinessChanged    = "actor.readiness.changed"
-	ReservedActorPresenceChanged     = "actor.presence.changed"
 )
 
 // ReservedSystemEventTypeSet enumerates the reserved system event types.
@@ -60,5 +59,4 @@ var ReservedSystemEventTypeSet = []string{
 	ReservedSystemTypeDeprecated,
 	ReservedSystemPlacementReclaimed,
 	ReservedActorReadinessChanged,
-	ReservedActorPresenceChanged,
 }

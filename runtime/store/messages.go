@@ -186,8 +186,8 @@ func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelo
 // delivered_at IS NULL`. Ordered by seq ASC so the scheduler ticks the
 // oldest backlog first (matches L1 §5.3 + §6.4 monotonic processing).
 //
-// `limit <= 0` is clamped to 64 — matches the outbox PendingPage
-// convention so the scheduler tick has a bounded per-channel cost.
+// `limit <= 0` is clamped to 64 — a bounded per-channel page so the
+// scheduler tick has a bounded cost.
 func (m *Messages) PendingDue(ctx context.Context, nowMs int64, limit int) ([]storespec.StoredRow, error) {
 	if limit <= 0 {
 		limit = 64
@@ -293,8 +293,8 @@ func (m *Messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, after
 //     request. If one is already on disk we
 //     skip this row.
 //
-// `limit <= 0` clamps to 64 — matches PendingDue + the outbox PendingPage
-// convention so a single scheduler tick has bounded per-channel cost.
+// `limit <= 0` clamps to 64 — matches PendingDue's bounded page so a
+// single scheduler tick has bounded per-channel cost.
 // Ordered by seq ASC so the oldest backlog is drained first (matches L1
 // §6.4 monotonic processing semantics).
 //

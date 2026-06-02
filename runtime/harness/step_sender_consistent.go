@@ -9,7 +9,8 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// stepSenderConsistent implements L1 §10.2 step 3:
+// stepSenderConsistent implements the Sender Validate step (StepSenderConsistent
+// in the impl ordering; proto-layer1 §2.6 Sender Validate):
 //
 //   - envelope.sender.id == caller.actor_id (sender_mismatch otherwise)
 //   - actor_registry resolves sender.id (sender_deregistered when absent)
@@ -35,7 +36,7 @@ func (s *stepSenderConsistent) Run(ctx context.Context, env *message.Envelope) (
 		// stepCallerAuth should already have rejected; defensive.
 		return Outcome{
 			RejectReason: HarnessEngineACLDenied,
-			Detail:       "harness: caller missing at step 3",
+			Detail:       "harness: caller missing at sender-consistent step",
 		}, nil
 	}
 	if env.Sender.ID != caller.ActorID {

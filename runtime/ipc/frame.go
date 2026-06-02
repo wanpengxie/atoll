@@ -28,8 +28,8 @@ import (
 //
 // Direction conventions:
 //
-//	handshake / write_message / reserve_ledger / commit_ledger /
-//	heartbeat / shutdown                     — worker → daemon (request)
+//	handshake / emit / down / heartbeat /
+//	shutdown                                 — worker → daemon (request)
 //	handshake_ack / reply / fence_invalid /
 //	shutdown_ack                              — daemon → worker (response)
 //	trigger                                   — daemon → worker (push)
@@ -59,7 +59,7 @@ const (
 	// KindTrigger is the M1.6-T1 daemon → worker push of a post-harness
 	// envelope addressed to the channel-agent target. The worker's
 	// Bridge consumes these via IPCClient.Triggers(); it MAY call
-	// WriteMessage to emit a reaction envelope. The worker MUST answer
+	// EmitEnvelope (KindEmit) to emit a reaction envelope upward. The worker MUST answer
 	// each trigger with KindTriggerAck on the same frame ID once a bridge
 	// has either handled the payload or rejected it. IPCClient queueing is
 	// not an ACK boundary.

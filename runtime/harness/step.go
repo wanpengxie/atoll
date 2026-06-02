@@ -49,7 +49,6 @@ type Outcome struct {
 	PartialMessageID   message.ID
 	Deduped            bool
 	ExistingSeq        int64
-	ExistingIsTerminal bool
 	ExistingTSReceived int64
 
 	// IsTerminal / CanonicalHash carry the harness-computed store-derived

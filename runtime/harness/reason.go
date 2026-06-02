@@ -21,10 +21,15 @@ const (
 	HarnessEngineACLDenied HarnessRejectReason = "harness_engine_acl_denied"
 
 	// Step 2 — Envelope Shape Validate
-	HarnessEnvelopeFieldMissing      HarnessRejectReason = "harness_envelope_field_missing"
-	HarnessChannelMismatch           HarnessRejectReason = "harness_channel_mismatch"
-	HarnessKindInvalid               HarnessRejectReason = "harness_kind_invalid"
-	HarnessVisibilityInvalid         HarnessRejectReason = "harness_visibility_invalid"
+	HarnessEnvelopeFieldMissing HarnessRejectReason = "harness_envelope_field_missing"
+	HarnessChannelMismatch      HarnessRejectReason = "harness_channel_mismatch"
+	HarnessKindInvalid          HarnessRejectReason = "harness_kind_invalid"
+	HarnessVisibilityInvalid    HarnessRejectReason = "harness_visibility_invalid"
+	// HarnessVisibilityAudienceInvalid is intentionally unreachable: the
+	// visibility-scoped audience wildcard it guarded was removed (proto-layer1
+	// §738 "历史保留；当前 wildcard 已移除，正常不再产生"). Kept in the closed
+	// set as a tombstone for wire/log back-compat; emitted by no step. Whether
+	// to drop it (count 31→30) is a reason-set decision, deferred.
 	HarnessVisibilityAudienceInvalid HarnessRejectReason = "harness_visibility_audience_invalid"
 	HarnessEnvelopeUnknownField      HarnessRejectReason = "harness_envelope_unknown_field"
 	HarnessAudienceWildcardForbidden HarnessRejectReason = "harness_audience_wildcard_forbidden"

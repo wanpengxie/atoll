@@ -116,10 +116,9 @@ var ErrAcceptTimeout = errors.New("workerhost: trigger accept timeout")
 // retryable. Safe to call from any goroutine — the underlying ipc.Codec
 // serialises writes with an internal mutex.
 //
-// The frame is stamped with the host's (channel, fencing_token,
-// daemon_epoch) tuple so the worker's IPCClient observes the same
-// fence context it expects to stamp on its own outbound frames. The
-// frame ID correlates the trigger ack.
+// The frame is stamped with the host's (channel, worker-LEASE token) so the
+// worker's IPCClient observes the same fence context it expects to stamp on
+// its own outbound frames. The frame ID correlates the trigger ack.
 func (h *Host) PushTrigger(ctx context.Context, payload ipc.TriggerPayload) error {
 	frameID := fmt.Sprintf("trig-%s-%d", payload.Envelope.ID, h.triggerSeq.Add(1))
 	payload.AckID = frameID

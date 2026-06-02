@@ -16,7 +16,8 @@ const (
 	defaultActorMaxPendingMs  int64 = 30 * 1000
 )
 
-// stepKindAndAudience implements L1 §10.2 step 5:
+// stepKindAndAudience implements the Kind-and-Audience step (StepKindAndAudience
+// in the impl ordering; proto-layer1 §2.6 Type/Kind + Audience Validate):
 //
 //   - core types: kind must equal default_kind unless AllowOverride
 //   - business types: kind ∈ registry.types[type].allowed_kinds
@@ -65,7 +66,8 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (O
 		}
 	} else {
 		// business type — look up allowed_kinds. unknown_type was already
-		// caught at step 4, so we expect a hit here.
+		// caught at the type-registered step (StepTypeRegistered), so we
+		// expect a hit here.
 		var ok bool
 		var err error
 		view, ok, err = s.deps.TypeRegistry.Lookup(ctx, env.Type)
