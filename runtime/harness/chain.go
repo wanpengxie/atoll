@@ -11,7 +11,6 @@ import (
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	khlog "github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/pkg/requestctx"
 )
 
 // Chain is the concrete runtime implementation of kernel/harness.Chain.
@@ -96,7 +95,7 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res khar.Writ
 				"channel_id", string(env.ChannelID),
 				"message_id", string(env.ID),
 				"correlation_id", string(env.CorrelationID),
-				"request_id", requestctx.RequestID(ctx),
+				"request_id", requestIDFromCtx(ctx),
 				"seq", out.ExistingSeq,
 			)
 			return khar.WriteResult{
@@ -149,7 +148,7 @@ func (c *Chain) observePass(ctx context.Context, env *message.Envelope, step kha
 		"channel_id", string(env.ChannelID),
 		"message_id", string(env.ID),
 		"correlation_id", string(env.CorrelationID),
-		"request_id", requestctx.RequestID(ctx),
+		"request_id", requestIDFromCtx(ctx),
 		"type", env.Type,
 		"kind", string(env.Kind),
 	)
@@ -168,7 +167,7 @@ func (c *Chain) observeReject(ctx context.Context, env *message.Envelope, step k
 		"channel_id", string(env.ChannelID),
 		"message_id", string(env.ID),
 		"correlation_id", string(env.CorrelationID),
-		"request_id", requestctx.RequestID(ctx),
+		"request_id", requestIDFromCtx(ctx),
 		"type", env.Type,
 		"kind", string(env.Kind),
 	)
@@ -183,7 +182,7 @@ func (c *Chain) observeError(ctx context.Context, env *message.Envelope, step kh
 		"channel_id", string(env.ChannelID),
 		"message_id", string(env.ID),
 		"correlation_id", string(env.CorrelationID),
-		"request_id", requestctx.RequestID(ctx),
+		"request_id", requestIDFromCtx(ctx),
 		"type", env.Type,
 		"kind", string(env.Kind),
 	)
@@ -227,4 +226,19 @@ func rejectFromOutcome(out khar.Outcome, env *message.Envelope) khar.WriteResult
 		r.MessageID = env.ID
 	}
 	return r
+}
+
+// ctxKeyRequestID carries an optional request-id for per-step log correlation.
+// Replaces the deleted pkg/requestctx — the engine owns its own minimal ctx key
+// rather than importing an observability util (topology §1 法则).
+type ctxKeyRequestID struct{}
+
+// WithRequestID attaches a request-id to ctx for harness log correlation.
+func WithRequestID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, ctxKeyRequestID{}, id)
+}
+
+func requestIDFromCtx(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKeyRequestID{}).(string)
+	return v
 }

@@ -5,7 +5,7 @@ import (
 	"net/http/pprof"
 	"time"
 
-	"github.com/wanpengxie/ActOS/pkg/metrics"
+	"github.com/wanpengxie/ActOS/obs/metrics"
 )
 
 // NewMux exposes non-contract operator endpoints: /metrics plus stdlib pprof.

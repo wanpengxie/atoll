@@ -16,7 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/wanpengxie/ActOS/kernel/adapter/futurereg"
+	"github.com/wanpengxie/ActOS/lib/behavior/futurereg"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -71,7 +71,7 @@ type SubmitResult struct {
 	Ack AckDescriptor
 }
 
-// AckDescriptor mirrors kernel/adapter.AckDescriptor's machine-kernel surface
+// AckDescriptor mirrors kernel/behavior.AckDescriptor's machine-kernel surface
 // (§2.3.3). Submit returns it inside SubmitResult; over the SDK's HTTP
 // transport only the substrate-level fields the emit endpoint carries are
 // populated (Accepted + RequestID + Status). The receiver's NL guidance /
@@ -827,7 +827,7 @@ type DescribeActorResult struct {
 	Raw         json.RawMessage              `json:"-"`
 }
 
-// TypeConventionDoc mirrors kernel/adapter.TypeConventionDoc for the wire.
+// TypeConventionDoc mirrors kernel/behavior.TypeConventionDoc for the wire.
 type TypeConventionDoc struct {
 	Description    string          `json:"description,omitempty"`
 	PayloadExample json.RawMessage `json:"payload_example,omitempty"`
@@ -836,7 +836,7 @@ type TypeConventionDoc struct {
 	Notes          string          `json:"notes,omitempty"`
 }
 
-// FieldDoc mirrors kernel/adapter.FieldDoc.
+// FieldDoc mirrors kernel/behavior.FieldDoc.
 type FieldDoc struct {
 	Name        string `json:"name"`
 	Required    bool   `json:"required,omitempty"`
@@ -844,7 +844,7 @@ type FieldDoc struct {
 	Example     any    `json:"example,omitempty"`
 }
 
-// ErrorDoc mirrors kernel/adapter.ErrorDoc.
+// ErrorDoc mirrors kernel/behavior.ErrorDoc.
 type ErrorDoc struct {
 	Code        string `json:"code"`
 	Description string `json:"description,omitempty"`
