@@ -10,3 +10,6 @@
 //
 // Depends on runtime + lib + wire + adapters (concrete device modules via cmd).
 package localdevice
+
+// Port anchors: adapters/proxy/daemon/local_listen.go + local_xhs.go (local ws
+// listen + xhs browser bridge) + framework/devicetransit (v1 relay, collapse).
