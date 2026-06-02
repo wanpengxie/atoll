@@ -3,6 +3,7 @@ package channelhost
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -117,7 +118,40 @@ func (h *ChannelHome) InstallEmbeddedAdapter(ctx context.Context, mod behavior.M
 		return "", err
 	}
 	h.channel.Cells().Spawn(res.ActorID, res.Actor)
+	// An embedded cell is co-located with truth — always present (no lease to
+	// re-arm); a very long TTL keeps it present without a heartbeat.
+	h.MarkPresence(ctx, res.ActorID, true, embeddedPresenceTTLMs)
 	return res.ActorID, nil
+}
+
+// embeddedPresenceTTLMs is the (effectively non-expiring) presence lease for an
+// embedded cell — it lives with the home, so there is no compute heartbeat.
+const embeddedPresenceTTLMs int64 = 100 * 365 * 24 * 60 * 60 * 1000
+
+// MarkPresence emits a SYSTEM-authored actor.presence.changed event (fanned out
+// to the sysactor cell) recording an actor's physical presence — true on
+// attach/heartbeat (lease re-armed for leaseTTLMs), false on detach. This is the
+// compute→fleet→home→sysactor presence link (the gap: fleet was a no-op and the
+// sysactor presence projection stayed empty). Advisory only — never a dispatch
+// gate.
+func (h *ChannelHome) MarkPresence(ctx context.Context, id actor.ActorID, present bool, leaseTTLMs int64) {
+	now := h.nowMs()
+	payload, _ := json.Marshal(map[string]any{"actor": string(id), "present": present, "lease_ttl_ms": leaseTTLMs})
+	env := &message.Envelope{
+		// ts in the id keeps each heartbeat re-arm a distinct append-only event.
+		ID:        message.ID(fmt.Sprintf("event:actor.presence.changed:%s:%d", id, now)),
+		TS:        now,
+		ChannelID: h.channelID,
+		// SystemOnly type → sender MUST be the channel system actor; the subject
+		// actor travels in the payload ("actor").
+		Sender:   message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
+		Kind:     message.KindEvent,
+		Type:     "actor.presence.changed",
+		Payload:  payload,
+		Audience: message.Audience{actor.SystemActorID},
+	}
+	cctx := harness.CtxWithCaller(ctx, harness.CallerContext{ActorID: actor.SystemActorID, ChannelID: h.channelID, AllowProvidedSenderKind: true})
+	_, _ = h.chain.Write(cctx, env)
 }
 
 // RegisterComputeActors registers an attaching compute's actors into truth and

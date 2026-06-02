@@ -54,6 +54,14 @@ var reservedActorTypeSet = map[string]reservedActorTypeRule{
 		AllowedKinds: []message.Kind{message.KindEvent},
 		SystemOnly:   true,
 	},
+	// actor.presence.changed carries the channel system actor's ephemeral
+	// physical-presence projection (compute lease attach/heartbeat/detach). Like
+	// readiness.changed it is SystemOnly — only the channel system author (the
+	// home, on behalf of the fleet) emits it; the sysactor cell folds it in.
+	"actor.presence.changed": {
+		AllowedKinds: []message.Kind{message.KindEvent},
+		SystemOnly:   true,
+	},
 }
 
 // stepTypeRegistered implements proto-layer1 §2.5 step 5 — `type ∈ (core

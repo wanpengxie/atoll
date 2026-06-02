@@ -110,19 +110,32 @@ func TestSysactorReadinessLink_EndToEnd(t *testing.T) {
 			Actors []struct {
 				ID        string `json:"id"`
 				Readiness string `json:"readiness"`
+				Present   bool   `json:"present"`
 			} `json:"actors"`
 		}
 		if err := json.Unmarshal(env.Payload, &body); err != nil {
 			t.Fatalf("parse catalog: %v", err)
 		}
 		var found string
+		var present bool
+		var seen bool
 		for _, a := range body.Actors {
 			if a.ID == "ready-echo" {
 				found = a.Readiness
+				present = a.Present
+				seen = true
 			}
 		}
+		if !seen {
+			t.Fatal("ready-echo missing from catalog")
+		}
 		if found != string(actor.ReadinessReady) {
-			t.Fatalf("ready-echo readiness in catalog=%q, want ready — readiness.changed event never reached the sysactor cell (fanout→sysactor link dead)", found)
+			t.Fatalf("ready-echo readiness in catalog=%q, want ready — readiness link dead", found)
+		}
+		// presence: InstallEmbeddedAdapter MarkPresence(true) → applyPresence →
+		// catalog present=true (the presence link, previously a fleet no-op).
+		if !present {
+			t.Fatal("ready-echo present=false — presence link dead (MarkPresence→fanout→sysactor.applyPresence not wired)")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("actor.list response never delivered to the caller cell — fanout does not deliver responses to local cells (client-push foundation broken)")

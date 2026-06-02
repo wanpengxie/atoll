@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -19,6 +20,10 @@ import (
 // DispatchHandler is invoked for each envelope dispatched down from the home.
 type DispatchHandler func(computebus.DispatchFrame)
 
+// heartbeatEvery is the compute→home lease re-arm cadence (well within the
+// home-side presenceLeaseMs window).
+const heartbeatEvery = 10 * time.Second
+
 // Homelink is the compute-side connection to the channel home.
 type Homelink struct {
 	ws      *websocket.Conn
@@ -28,6 +33,8 @@ type Homelink struct {
 	pending map[string]chan computebus.EmitAck
 
 	onDispatch DispatchHandler
+	computeID  string
+	hostIDs    []actor.ActorID
 }
 
 // Connect dials the home, attaches, and starts the read loop.
@@ -36,7 +43,11 @@ func Connect(ctx context.Context, serverURL, apiKey, computeID string, decls []c
 	if err != nil {
 		return nil, err
 	}
-	h := &Homelink{ws: ws, pending: map[string]chan computebus.EmitAck{}, onDispatch: onDispatch}
+	hostIDs := make([]actor.ActorID, 0, len(decls))
+	for _, d := range decls {
+		hostIDs = append(hostIDs, d.ActorID)
+	}
+	h := &Homelink{ws: ws, pending: map[string]chan computebus.EmitAck{}, onDispatch: onDispatch, computeID: computeID, hostIDs: hostIDs}
 	if err := h.send(computebus.Frame{Type: computebus.FrameAttach, Attach: &computebus.AttachRequest{APIKey: apiKey, ComputeID: computeID, Declarations: decls}}); err != nil {
 		_ = ws.Close()
 		return nil, err
@@ -52,7 +63,23 @@ func Connect(ctx context.Context, serverURL, apiKey, computeID string, decls []c
 		return nil, errors.New("homelink: attach rejected")
 	}
 	go h.readLoop()
+	go h.heartbeatLoop()
 	return h, nil
+}
+
+// heartbeatLoop re-arms the home-side presence lease for this compute's hosted
+// actors. It exits when a send fails (the ws was closed) — no separate stop
+// channel needed.
+func (h *Homelink) heartbeatLoop() {
+	t := time.NewTicker(heartbeatEvery)
+	defer t.Stop()
+	for range t.C {
+		if err := h.send(computebus.Frame{Type: computebus.FrameHeartbeat, Beat: &computebus.Heartbeat{
+			ComputeID: h.computeID, Present: h.hostIDs,
+		}}); err != nil {
+			return
+		}
+	}
 }
 
 // Emit sends a cell's output up and blocks for the home's EmitAck (the

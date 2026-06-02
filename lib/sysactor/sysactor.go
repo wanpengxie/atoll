@@ -163,13 +163,16 @@ func (s *SystemActor) applyReadiness(env *message.Envelope) {
 // into the ephemeral physical view.
 func (s *SystemActor) applyPresence(env *message.Envelope) {
 	var body struct {
-		Present  bool  `json:"present"`
-		LeaseTTL int64 `json:"lease_ttl_ms"`
+		Actor    string `json:"actor"`
+		Present  bool   `json:"present"`
+		LeaseTTL int64  `json:"lease_ttl_ms"`
 	}
-	if err := json.Unmarshal(env.Payload, &body); err != nil {
+	if err := json.Unmarshal(env.Payload, &body); err != nil || body.Actor == "" {
 		return
 	}
-	s.presence[env.Sender.ID] = presenceEntry{
+	// SystemOnly event → sender is the system actor; the subject actor is in the
+	// payload (keyed there, not by sender).
+	s.presence[actor.ActorID(body.Actor)] = presenceEntry{
 		present:        body.Present,
 		leaseExpiresAt: s.clock().UnixMilli() + body.LeaseTTL,
 	}

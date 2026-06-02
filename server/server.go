@@ -43,6 +43,8 @@ func Run(ctx context.Context, cfg Config) error {
 	flt.SetOnDeath(home.MaterialiseComputeDeath)
 	// On attach, register the compute's actors + publish their types into truth.
 	flt.SetOnAttach(home.RegisterComputeActors)
+	// Presence projection: attach/heartbeat/detach → sysactor advisory view.
+	flt.SetOnPresence(home.MarkPresence)
 	// Caller-scoped closure loop (author #2): expired pending requests get a
 	// caller-authored unanswered_timeout. Runs for the home's lifetime.
 	go home.RunClosureScan(ctx, time.Second)

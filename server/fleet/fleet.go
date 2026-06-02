@@ -51,6 +51,20 @@ type Fleet struct {
 	// onAttach registers an attaching compute's actors + publishes their types
 	// into home truth. server.Run injects home.RegisterComputeActors.
 	onAttach func(context.Context, []computebus.AttachDeclaration) error
+	// onPresence records an actor's physical presence at the home (attach /
+	// heartbeat lease re-arm / detach). server.Run injects home.MarkPresence.
+	onPresence func(context.Context, actor.ActorID, bool, int64)
+}
+
+// presenceLeaseMs is the lease window a compute heartbeat re-arms; a compute
+// heartbeats well within it (homelink heartbeatEveryMs).
+const presenceLeaseMs int64 = 30_000
+
+// SetOnPresence wires the home-side presence projection invoked on
+// attach/heartbeat/detach so the sysactor's advisory presence view tracks
+// attached computes.
+func (f *Fleet) SetOnPresence(fn func(context.Context, actor.ActorID, bool, int64)) {
+	f.onPresence = fn
 }
 
 // SetOnDeath wires the home-side death收口 invoked when an attached compute
@@ -110,6 +124,8 @@ func (f *Fleet) ServeWS(w http.ResponseWriter, r *http.Request) {
 	hosts := declActorIDs(att.Declarations)
 	f.register(conn, hosts)
 	defer f.unregister(conn, hosts)
+	f.markPresence(r.Context(), hosts, true) // present on attach
+	defer f.markPresence(context.Background(), hosts, false)
 	_ = conn.send(computebus.Frame{Type: computebus.FrameAttachReply, Reply: &computebus.AttachReply{Accepted: true}})
 
 	for {
@@ -146,7 +162,10 @@ func (f *Fleet) handleFrame(ctx context.Context, conn *computeConn, fr computebu
 		}
 		_ = conn.send(computebus.Frame{Type: computebus.FrameEmitAck, Ack: &ack})
 	case computebus.FrameHeartbeat:
-		// Lease re-arm (presence is advisory; nothing to write here in v1).
+		// Lease re-arm: refresh presence for the actors the compute reports live.
+		if fr.Beat != nil {
+			f.markPresence(ctx, fr.Beat.Present, true)
+		}
 	case computebus.FrameDeath:
 		// A compute cell died. The compute has no local truth, so the home must
 		// materialise receiver_unavailable for every in-flight request addressed
@@ -158,6 +177,21 @@ func (f *Fleet) handleFrame(ctx context.Context, conn *computeConn, fr computebu
 				f.onDeath(ctx, fr.Death.Actor)
 			}
 		}
+	}
+}
+
+// markPresence projects presence for a set of actors through the home seam
+// (no-op if unwired). Lease TTL is presenceLeaseMs on present, 0 on absent.
+func (f *Fleet) markPresence(ctx context.Context, ids []actor.ActorID, present bool) {
+	if f.onPresence == nil {
+		return
+	}
+	ttl := presenceLeaseMs
+	if !present {
+		ttl = 0
+	}
+	for _, id := range ids {
+		f.onPresence(ctx, id, present, ttl)
 	}
 }
 
