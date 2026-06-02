@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/pkg/logger"
+	"github.com/wanpengxie/ActOS/obs/logger"
 )
 
 // TestLogger_JSONShape asserts the M1.6-T7 acceptance B contract:

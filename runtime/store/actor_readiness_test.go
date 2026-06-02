@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/runtime/store"
 )
 
@@ -20,7 +19,7 @@ func TestActorRegistry_UpdateReadinessTracksTransitions(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	reg := store.NewActorRegistry(db)
-	if err := reg.Insert(ctx, actorreg.Record{
+	if err := reg.Insert(ctx, actor.Record{
 		ID:        "tool:xhs",
 		Kind:      actor.KindTool,
 		Binding:   actor.BindingRuntimeInboundViaRelay,
@@ -29,8 +28,8 @@ func TestActorRegistry_UpdateReadinessTracksTransitions(t *testing.T) {
 		t.Fatalf("Insert: %v", err)
 	}
 
-	tr, err := reg.UpdateReadiness(ctx, "tool:xhs", actorreg.ReadinessUpdate{
-		State:     actorreg.ReadinessReady,
+	tr, err := reg.UpdateReadiness(ctx, "tool:xhs", actor.ReadinessUpdate{
+		State:     actor.ReadinessReady,
 		Reason:    "ok",
 		Detail:    json.RawMessage(`{"device_state":"online"}`),
 		CheckedAt: 2000,
@@ -38,15 +37,15 @@ func TestActorRegistry_UpdateReadinessTracksTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateReadiness ready: %v", err)
 	}
-	if !tr.Changed || tr.Previous.State != actorreg.ReadinessUnknown || tr.Current.State != actorreg.ReadinessReady {
+	if !tr.Changed || tr.Previous.State != actor.ReadinessUnknown || tr.Current.State != actor.ReadinessReady {
 		t.Fatalf("ready transition=%+v", tr)
 	}
 	if tr.Current.LastReadyAt != 2000 || tr.Current.LastStateChangeAt != 2000 {
 		t.Fatalf("ready timestamps=%+v", tr.Current)
 	}
 
-	tr, err = reg.UpdateReadiness(ctx, "tool:xhs", actorreg.ReadinessUpdate{
-		State:     actorreg.ReadinessReady,
+	tr, err = reg.UpdateReadiness(ctx, "tool:xhs", actor.ReadinessUpdate{
+		State:     actor.ReadinessReady,
 		Reason:    "ok",
 		Detail:    json.RawMessage(`{"device_state":"still_online"}`),
 		CheckedAt: 2500,
@@ -58,8 +57,8 @@ func TestActorRegistry_UpdateReadinessTracksTransitions(t *testing.T) {
 		t.Fatalf("steady ready transition=%+v", tr)
 	}
 
-	tr, err = reg.UpdateReadiness(ctx, "tool:xhs", actorreg.ReadinessUpdate{
-		State:     actorreg.ReadinessNotReady,
+	tr, err = reg.UpdateReadiness(ctx, "tool:xhs", actor.ReadinessUpdate{
+		State:     actor.ReadinessNotReady,
 		Reason:    "device_offline",
 		Detail:    json.RawMessage(`{"device_state":"offline"}`),
 		CheckedAt: 3000,
@@ -75,7 +74,7 @@ func TestActorRegistry_UpdateReadinessTracksTransitions(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Lookup ok=%v err=%v", ok, err)
 	}
-	if rec.Readiness.State != actorreg.ReadinessNotReady || rec.Readiness.Reason != "device_offline" {
+	if rec.Readiness.State != actor.ReadinessNotReady || rec.Readiness.Reason != "device_offline" {
 		t.Fatalf("lookup readiness=%+v", rec.Readiness)
 	}
 	if string(rec.Readiness.Detail) != `{"device_state":"offline"}` {
@@ -84,8 +83,8 @@ func TestActorRegistry_UpdateReadinessTracksTransitions(t *testing.T) {
 
 	// not_ready → ready recovery path (R6 invariant: LastReadyAt must
 	// move forward, LastStateChangeAt records the recovery moment).
-	tr, err = reg.UpdateReadiness(ctx, "tool:xhs", actorreg.ReadinessUpdate{
-		State:     actorreg.ReadinessReady,
+	tr, err = reg.UpdateReadiness(ctx, "tool:xhs", actor.ReadinessUpdate{
+		State:     actor.ReadinessReady,
 		Reason:    "ok",
 		Detail:    json.RawMessage(`{"device_state":"online"}`),
 		CheckedAt: 4000,
@@ -96,10 +95,10 @@ func TestActorRegistry_UpdateReadinessTracksTransitions(t *testing.T) {
 	if !tr.Changed {
 		t.Fatalf("recovery transition not flagged Changed: %+v", tr)
 	}
-	if tr.Previous.State != actorreg.ReadinessNotReady {
+	if tr.Previous.State != actor.ReadinessNotReady {
 		t.Fatalf("recovery previous=%s want not_ready", tr.Previous.State)
 	}
-	if tr.Current.State != actorreg.ReadinessReady {
+	if tr.Current.State != actor.ReadinessReady {
 		t.Fatalf("recovery current=%s want ready", tr.Current.State)
 	}
 	if tr.Current.LastReadyAt != 4000 {
@@ -112,8 +111,8 @@ func TestActorRegistry_UpdateReadinessTracksTransitions(t *testing.T) {
 	// Steady ready after recovery: LastStateChangeAt frozen, LastReadyAt
 	// advances, so Changed remains true because the persisted projection
 	// changed.
-	tr, err = reg.UpdateReadiness(ctx, "tool:xhs", actorreg.ReadinessUpdate{
-		State:     actorreg.ReadinessReady,
+	tr, err = reg.UpdateReadiness(ctx, "tool:xhs", actor.ReadinessUpdate{
+		State:     actor.ReadinessReady,
 		Reason:    "ok",
 		CheckedAt: 4500,
 	})

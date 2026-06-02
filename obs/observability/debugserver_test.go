@@ -6,14 +6,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/pkg/metrics"
+	"github.com/wanpengxie/ActOS/obs/metrics"
 )
 
 func TestNewMuxMountsMetricsAndPprof(t *testing.T) {
 	t.Parallel()
 
 	reg := metrics.NewRegistry()
-	reg.IncCounter("adapter.dispatch", "adapter", "xhs")
+	reg.IncCounter("behavior.dispatch", "adapter", "xhs")
 	mux := NewMux(reg)
 
 	metricsRec := httptest.NewRecorder()

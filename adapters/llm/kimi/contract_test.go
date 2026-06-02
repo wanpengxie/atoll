@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/adapter/futurereg"
-	"github.com/wanpengxie/ActOS/kernel/adapter/futurereg/contract"
+	"github.com/wanpengxie/ActOS/lib/behavior/futurereg"
+	"github.com/wanpengxie/ActOS/lib/behavior/futurereg/contract"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )

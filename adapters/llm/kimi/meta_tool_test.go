@@ -8,7 +8,7 @@ import (
 	gokimitypes "github.com/wanpengxie/go-kimi/pkg/kimi/types"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -494,13 +494,13 @@ func metaChannelContext() ChannelContext {
 				MaxPendingMs:   50,
 				Description:    "Publish a note",
 				PayloadExample: json.RawMessage(`{"title":"hello"}`),
-				PayloadFields: []adapter.FieldDoc{{
+				PayloadFields: []behavior.FieldDoc{{
 					Name:        "title",
 					Required:    true,
 					Description: "Note title",
 					Example:     "hello",
 				}},
-				ErrorCodes: []adapter.ErrorDoc{{
+				ErrorCodes: []behavior.ErrorDoc{{
 					Code:     "publish_timeout",
 					Recovery: "Retry after checking the browser",
 				}},

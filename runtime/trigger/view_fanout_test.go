@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/actorreg"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime/trigger"
 )
@@ -222,7 +221,7 @@ func TestViewFanout_ExplicitMembersOverrideRegistry(t *testing.T) {
 // arrive with visibility="" (Step Normalize defaults to public). View
 // fanout tolerates the pre-normalize shape per its doc.
 func TestViewFanout_EmptyVisibilityDefaultsPublic(t *testing.T) {
-	reg := newMemRegistry(actorreg.Record{ID: "agent:alpha", Kind: actor.KindAgent, CreatedAt: 1})
+	reg := newMemRegistry(actor.Record{ID: "agent:alpha", Kind: actor.KindAgent, CreatedAt: 1})
 	env := &message.Envelope{
 		ID:       "evt-empty-visibility",
 		Sender:   message.Sender{Kind: actor.KindAgent, ID: "agent:alpha"},
