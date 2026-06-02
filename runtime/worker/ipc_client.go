@@ -11,9 +11,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/ledger"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/runtime/fence"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 )
 
@@ -47,8 +45,7 @@ type IPCClient struct {
 	channelID     channel.ID
 	workerID      ipc.WorkerID
 	workerActorID actor.ActorID
-	fencingToken  fence.FencingToken
-	daemonEpoch   fence.DaemonEpoch
+	leaseToken    string
 }
 
 // triggerBufferSize bounds the IPCClient.triggerCh backlog. Sized big
@@ -211,21 +208,16 @@ func (c *IPCClient) writeTriggerAck(trigger ipc.Frame, ackPayload ipc.TriggerAck
 	if workerID == "" {
 		workerID = trigger.WorkerID
 	}
-	fencingToken := c.fencingToken
-	if fencingToken == "" {
-		fencingToken = trigger.FencingToken
-	}
-	daemonEpoch := c.daemonEpoch
-	if daemonEpoch == 0 {
-		daemonEpoch = trigger.DaemonEpoch
+	leaseToken := c.leaseToken
+	if leaseToken == "" {
+		leaseToken = trigger.LeaseToken
 	}
 	frame := ipc.Frame{
 		ID:           trigger.ID,
 		Kind:         ipc.KindTriggerAck,
 		ChannelID:    channelID,
 		WorkerID:     workerID,
-		FencingToken: fencingToken,
-		DaemonEpoch:  daemonEpoch,
+		LeaseToken:   leaseToken,
 		Payload:      payload,
 	}
 	c.mu.Unlock()
@@ -259,8 +251,7 @@ func (c *IPCClient) Handshake(ctx context.Context, leaseID string) (ipc.Handshak
 	c.channelID = ack.ChannelID
 	c.workerID = ack.WorkerID
 	c.workerActorID = ack.WorkerActorID
-	c.fencingToken = ack.FencingToken
-	c.daemonEpoch = ack.DaemonEpoch
+	c.leaseToken = ack.LeaseToken
 	c.mu.Unlock()
 	return ack, nil
 }
@@ -289,45 +280,16 @@ func (c *IPCClient) WorkerID() string {
 	return string(c.workerID)
 }
 
-// WriteMessage sends a write_message IPC.
-func (c *IPCClient) WriteMessage(ctx context.Context, env message.Envelope) (ipc.WriteMessageResult, error) {
-	payload, err := json.Marshal(ipc.WriteMessagePayload{Envelope: env})
-	if err != nil {
-		return ipc.WriteMessageResult{}, err
-	}
-	reply, err := c.sendStamped(ctx, ipc.KindWriteMessage, payload)
-	if err != nil {
-		return ipc.WriteMessageResult{}, err
-	}
-	if reply.Kind == ipc.KindFenceInvalid {
-		return ipc.WriteMessageResult{}, FenceFromFrame(reply)
-	}
-	return decodeWriteResult(reply)
-}
-
-// ReserveLedger sends a reserve_ledger IPC.
-func (c *IPCClient) ReserveLedger(ctx context.Context, entry ledger.Entry) (ipc.ReserveLedgerResult, error) {
-	payload, err := json.Marshal(ipc.ReserveLedgerPayload{Entry: entry})
-	if err != nil {
-		return ipc.ReserveLedgerResult{}, err
-	}
-	reply, err := c.sendStamped(ctx, ipc.KindReserveLedger, payload)
-	if err != nil {
-		return ipc.ReserveLedgerResult{}, err
-	}
-	if reply.Kind == ipc.KindFenceInvalid {
-		return ipc.ReserveLedgerResult{}, FenceFromFrame(reply)
-	}
-	return decodeReserveResult(reply)
-}
-
-// CommitLedger sends a commit_ledger IPC.
-func (c *IPCClient) CommitLedger(ctx context.Context, key ledger.Key, committedAt int64) error {
-	payload, err := json.Marshal(ipc.CommitLedgerPayload{Key: key, CommittedAt: committedAt})
+// EmitEnvelope emits one envelope UPWARD to the daemon host, which forwards
+// it to the server harness (the single channel writer). v2 replaces the v1
+// WriteMessage "worker writes channel log" path: the worker no longer writes
+// the channel sqlite; truth lives on server.
+func (c *IPCClient) EmitEnvelope(ctx context.Context, env message.Envelope) error {
+	payload, err := json.Marshal(ipc.EmitPayload{Envelope: env})
 	if err != nil {
 		return err
 	}
-	reply, err := c.sendStamped(ctx, ipc.KindCommitLedger, payload)
+	reply, err := c.sendStamped(ctx, ipc.KindEmit, payload)
 	if err != nil {
 		return err
 	}
@@ -342,6 +304,18 @@ func (c *IPCClient) CommitLedger(ctx context.Context, key ledger.Key, committedA
 		return errors.New(rp.Error)
 	}
 	return nil
+}
+
+// EmitDown reports an actor/worker death signal upward (closure §6 — the
+// server substrate materialises receiver_unavailable for the dead actor's
+// in-flight requests).
+func (c *IPCClient) EmitDown(ctx context.Context, dead actor.ActorID, reason string) error {
+	payload, err := json.Marshal(ipc.DownPayload{Actor: dead, Reason: reason})
+	if err != nil {
+		return err
+	}
+	_, err = c.sendStamped(ctx, ipc.KindDown, payload)
+	return err
 }
 
 // Heartbeat sends a heartbeat IPC.
@@ -377,8 +351,7 @@ func (c *IPCClient) sendStamped(ctx context.Context, kind ipc.Kind, payload []by
 		Kind:         kind,
 		ChannelID:    c.channelID,
 		WorkerID:     c.workerID,
-		FencingToken: c.fencingToken,
-		DaemonEpoch:  c.daemonEpoch,
+		LeaseToken:   c.leaseToken,
 		Payload:      payload,
 	}
 	c.mu.Unlock()
@@ -422,33 +395,3 @@ func (c *IPCClient) nextID() string {
 	return fmt.Sprintf("w-%d", i)
 }
 
-// decodeWriteResult is split out so callers (sendStamped) can reuse logic.
-func decodeWriteResult(reply ipc.Frame) (ipc.WriteMessageResult, error) {
-	var rp ipc.ReplyPayload
-	if err := json.Unmarshal(reply.Payload, &rp); err != nil {
-		return ipc.WriteMessageResult{}, err
-	}
-	if !rp.OK {
-		return ipc.WriteMessageResult{}, errors.New(rp.Error)
-	}
-	var res ipc.WriteMessageResult
-	if err := json.Unmarshal(rp.Result, &res); err != nil {
-		return ipc.WriteMessageResult{}, err
-	}
-	return res, nil
-}
-
-func decodeReserveResult(reply ipc.Frame) (ipc.ReserveLedgerResult, error) {
-	var rp ipc.ReplyPayload
-	if err := json.Unmarshal(reply.Payload, &rp); err != nil {
-		return ipc.ReserveLedgerResult{}, err
-	}
-	if !rp.OK {
-		return ipc.ReserveLedgerResult{}, errors.New(rp.Error)
-	}
-	var res ipc.ReserveLedgerResult
-	if err := json.Unmarshal(rp.Result, &res); err != nil {
-		return ipc.ReserveLedgerResult{}, err
-	}
-	return res, nil
-}

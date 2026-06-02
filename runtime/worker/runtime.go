@@ -7,7 +7,6 @@ import (
 	"io"
 	"time"
 
-	"github.com/wanpengxie/ActOS/kernel/ledger"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -122,5 +121,4 @@ func (r *Runtime) heartbeatLoop(ctx context.Context, cancelRun context.CancelFun
 // ledger entries without re-importing kernel themselves.
 var (
 	_ message.Envelope = message.Envelope{}
-	_ ledger.Entry     = ledger.Entry{}
 )

@@ -335,7 +335,7 @@ func (m *MockBridge) react(ctx context.Context, client *IPCClient, in ipc.Trigge
 		TS:            m.NowFn(),
 		TSReceived:    m.NowFn(),
 	}
-	if _, err := client.WriteMessage(ctx, env); err != nil {
+	if err := client.EmitEnvelope(ctx, env); err != nil {
 		return err
 	}
 	return nil
@@ -416,7 +416,7 @@ func (m *MockBridge) reactXHSPublish(ctx context.Context, client *IPCClient, in 
 		TS:            m.NowFn(),
 		TSReceived:    m.NowFn(),
 	}
-	if _, err := client.WriteMessage(ctx, env); err != nil {
+	if err := client.EmitEnvelope(ctx, env); err != nil {
 		return err
 	}
 	return nil
@@ -490,7 +490,7 @@ func (m *MockBridge) reactProgressMultiTurn(ctx context.Context, client *IPCClie
 			TS:            m.NowFn(),
 			TSReceived:    m.NowFn(),
 		}
-		if _, err := client.WriteMessage(ctx, env); err != nil {
+		if err := client.EmitEnvelope(ctx, env); err != nil {
 			return err
 		}
 	}
@@ -518,7 +518,7 @@ func (m *MockBridge) reactProgressMultiTurn(ctx context.Context, client *IPCClie
 		TS:            m.NowFn(),
 		TSReceived:    m.NowFn(),
 	}
-	if _, err := client.WriteMessage(ctx, env); err != nil {
+	if err := client.EmitEnvelope(ctx, env); err != nil {
 		return err
 	}
 	return nil
@@ -548,7 +548,7 @@ func (m *MockBridge) emitTerminal(ctx context.Context, client *IPCClient) error 
 		TS:         m.NowFn(),
 		TSReceived: m.NowFn(),
 	}
-	if _, err := client.WriteMessage(ctx, env); err != nil {
+	if err := client.EmitEnvelope(ctx, env); err != nil {
 		return err
 	}
 	return nil
@@ -582,7 +582,7 @@ func (m *MockBridge) emitTerminalFailure(ctx context.Context, client *IPCClient,
 		TS:            m.NowFn(),
 		TSReceived:    m.NowFn(),
 	}
-	if _, err := client.WriteMessage(ctx, env); err != nil {
+	if err := client.EmitEnvelope(ctx, env); err != nil {
 		return err
 	}
 	return nil

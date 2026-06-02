@@ -11,43 +11,40 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	khar "github.com/wanpengxie/ActOS/kernel/harness"
-	"github.com/wanpengxie/ActOS/kernel/ledger"
-	"github.com/wanpengxie/ActOS/runtime/fence"
-	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
-	"github.com/wanpengxie/ActOS/runtime/store"
 )
 
-// LedgerOps is the daemon-side ledger operations invoked by the host.
-type LedgerOps interface {
-	Reserve(ctx context.Context, e ledger.Entry) (ledger.Entry, error)
-	Commit(ctx context.Context, key ledger.Key, committedAt int64) error
+// EmitSink is the upward forwarding seam the host uses to hand a worker's
+// emitted envelope (and death signal) to the server. v2: the worker no longer
+// writes the channel log locally (truth is on server); the daemon host
+// forwards each emit UP to the server harness (the single writer) via this
+// injected sink. The concrete impl (computebus uplink) lives in the daemon
+// assembly layer — runtime stays pure (no wire/server import).
+type EmitSink interface {
+	// Emit forwards one worker-emitted envelope upward, stamping the worker's
+	// actor as caller principal. Returns the server's accept/reject.
+	Emit(ctx context.Context, caller actor.ActorID, env message.Envelope) error
+	// Down forwards an actor/worker death signal upward (closure §6).
+	Down(ctx context.Context, dead actor.ActorID, reason string) error
 }
 
 // HostConfig wires a Host.
 type HostConfig struct {
-	ChannelID    channel.ID
-	WorkerID     string
-	LeaseID      string
-	FencingToken fence.FencingToken
-	DaemonEpoch  fence.DaemonEpoch
+	ChannelID  channel.ID
+	WorkerID   string
+	LeaseID    string
+	LeaseToken string // opaque worker-lease instance token (v2; replaces channel fencing)
 
-	// Chain is the daemon-side Message-Write Harness entry point. Every
-	// worker IPC write_message frame is routed through Chain.Write so
-	// the 9-step validation chain (L1 §10.2) runs before the row
-	// reaches the messages-table sink. REQUIRED — host construction
-	// refuses nil to prevent the FIX-T1 regression where worker IPC
-	// bypassed harness.
-	Chain khar.Chain
+	// Emit is the upward forwarding sink (see EmitSink). REQUIRED — replaces
+	// the v1 local harness Chain.Write (worker no longer writes truth).
+	Emit EmitSink
 
 	// WorkerActorID identifies which actor the worker speaks as. Every
-	// inbound write_message frame is stamped with this actor as the
-	// caller principal (harness step 3 sender_mismatch enforces the
-	// envelope.sender.id match). REQUIRED.
+	// inbound emit frame is stamped with this actor as the caller principal
+	// (the server harness step 6 sender_mismatch enforces the match).
+	// REQUIRED.
 	WorkerActorID actor.ActorID
-
-	Ledger LedgerOps
 
 	// NowFn returns unix-ms; required.
 	NowFn func() int64
@@ -81,14 +78,11 @@ type Host struct {
 // NewHost wires a Host around an IPC stream (typically WorkerProc.Stdout
 // for input + WorkerProc.Stdin for output).
 func NewHost(in io.Reader, out io.Writer, cfg HostConfig) (*Host, error) {
-	if cfg.Chain == nil {
-		return nil, errors.New("workerhost: HostConfig.Chain nil")
+	if cfg.Emit == nil {
+		return nil, errors.New("workerhost: HostConfig.Emit nil")
 	}
 	if cfg.WorkerActorID == "" {
 		return nil, errors.New("workerhost: HostConfig.WorkerActorID nil")
-	}
-	if cfg.Ledger == nil {
-		return nil, errors.New("workerhost: HostConfig.Ledger nil")
 	}
 	if cfg.NowFn == nil {
 		return nil, errors.New("workerhost: HostConfig.NowFn nil")
@@ -134,13 +128,12 @@ func (h *Host) PushTrigger(ctx context.Context, payload ipc.TriggerPayload) erro
 		return fmt.Errorf("workerhost: encode trigger: %w", err)
 	}
 	frame := ipc.Frame{
-		ID:           frameID,
-		Kind:         ipc.KindTrigger,
-		ChannelID:    h.cfg.ChannelID,
-		WorkerID:     ipc.WorkerID(h.cfg.WorkerID),
-		FencingToken: h.cfg.FencingToken,
-		DaemonEpoch:  h.cfg.DaemonEpoch,
-		Payload:      raw,
+		ID:         frameID,
+		Kind:       ipc.KindTrigger,
+		ChannelID:  h.cfg.ChannelID,
+		WorkerID:   ipc.WorkerID(h.cfg.WorkerID),
+		LeaseToken: h.cfg.LeaseToken,
+		Payload:    raw,
 	}
 	ackCh := make(chan ipc.TriggerAckPayload, 1)
 	if err := h.registerPendingTrigger(frame.ID, ackCh); err != nil {
@@ -227,7 +220,7 @@ func (h *Host) handle(ctx context.Context, frame ipc.Frame) error {
 		return nil // ack handled in Serve after handle returns
 	}
 
-	if ok, fi := Fence(frame, h.cfg.FencingToken, h.cfg.DaemonEpoch); !ok {
+	if ok, fi := Fence(frame, h.cfg.LeaseToken); !ok {
 		fiPayload, _ := json.Marshal(fi)
 		return h.codec.Write(ipc.Frame{
 			ID:      frame.ID,
@@ -237,12 +230,10 @@ func (h *Host) handle(ctx context.Context, frame ipc.Frame) error {
 	}
 
 	switch frame.Kind {
-	case ipc.KindWriteMessage:
-		return h.handleWrite(ctx, frame)
-	case ipc.KindReserveLedger:
-		return h.handleReserve(ctx, frame)
-	case ipc.KindCommitLedger:
-		return h.handleCommit(ctx, frame)
+	case ipc.KindEmit:
+		return h.handleEmit(ctx, frame)
+	case ipc.KindDown:
+		return h.handleDown(ctx, frame)
 	case ipc.KindHeartbeat:
 		return h.handleHeartbeat(frame)
 	case ipc.KindTriggerAck:
@@ -258,8 +249,7 @@ func (h *Host) handleHandshake(frame ipc.Frame) error {
 		WorkerID:      ipc.WorkerID(h.cfg.WorkerID),
 		ChannelID:     h.cfg.ChannelID,
 		WorkerActorID: h.cfg.WorkerActorID,
-		FencingToken:  h.cfg.FencingToken,
-		DaemonEpoch:   h.cfg.DaemonEpoch,
+		LeaseToken:    h.cfg.LeaseToken,
 	}
 	payload, err := json.Marshal(ack)
 	if err != nil {
@@ -275,77 +265,32 @@ func (h *Host) handleHandshake(frame ipc.Frame) error {
 	return nil
 }
 
-func (h *Host) handleWrite(ctx context.Context, frame ipc.Frame) error {
-	var payload ipc.WriteMessagePayload
+// handleEmit forwards a worker-emitted envelope UP to the server harness via
+// the injected EmitSink (v2: the worker no longer writes the channel log; the
+// server is the single writer). The worker's actor is stamped as caller
+// principal so the server harness step 6 sender match holds.
+func (h *Host) handleEmit(ctx context.Context, frame ipc.Frame) error {
+	var payload ipc.EmitPayload
 	if err := json.Unmarshal(frame.Payload, &payload); err != nil {
 		reply, _ := ipc.EncodeResult(frame.ID, false, "decode: "+err.Error(), nil)
 		return h.codec.Write(reply)
 	}
-
-	// Stamp the caller principal onto ctx so harness step 1 / step 3
-	// can verify envelope.sender.id == WorkerActorID. Worker IPC is
-	// the daemon's authenticated edge; the caller cannot self-declare
-	// kind (AllowProvidedSenderKind=false enforces strict overwrite).
-	chainCtx := harness.CtxWithCaller(ctx, harness.CallerContext{
-		ActorID:                 h.cfg.WorkerActorID,
-		ChannelID:               h.cfg.ChannelID,
-		AllowProvidedSenderKind: false,
-	})
-	res, err := h.cfg.Chain.Write(chainCtx, &payload.Envelope)
-	if err != nil {
-		reply, _ := ipc.EncodeResult(frame.ID, false, err.Error(), ipc.WriteMessageResult{
-			Reason: err.Error(),
-		})
-		return h.codec.Write(reply)
-	}
-	if res.RejectReason != "" {
-		// Harness reject — surface the closed-set reason to the worker;
-		// caller maps to *RejectError on the worker side. OK=false so
-		// callers know the envelope did NOT persist.
-		reply, _ := ipc.EncodeResult(frame.ID, false,
-			fmt.Sprintf("%s: %s", res.RejectReason, res.RejectDetail),
-			ipc.WriteMessageResult{
-				Reason:  string(res.RejectReason),
-				Deduped: res.Deduped,
-			})
-		return h.codec.Write(reply)
-	}
-	reply, _ := ipc.EncodeResult(frame.ID, true, "", ipc.WriteMessageResult{
-		Seq:     res.Seq,
-		Deduped: res.Deduped,
-	})
-	return h.codec.Write(reply)
-}
-
-func (h *Host) handleReserve(ctx context.Context, frame ipc.Frame) error {
-	var payload ipc.ReserveLedgerPayload
-	if err := json.Unmarshal(frame.Payload, &payload); err != nil {
-		reply, _ := ipc.EncodeResult(frame.ID, false, "decode: "+err.Error(), nil)
-		return h.codec.Write(reply)
-	}
-	// FIX-T6 fencing: same rationale as handleWrite.
-	ctx = store.CtxWithFencing(ctx, h.cfg.FencingToken, h.cfg.DaemonEpoch)
-	got, err := h.cfg.Ledger.Reserve(ctx, payload.Entry)
-	if err != nil {
+	if err := h.cfg.Emit.Emit(ctx, h.cfg.WorkerActorID, payload.Envelope); err != nil {
 		reply, _ := ipc.EncodeResult(frame.ID, false, err.Error(), nil)
 		return h.codec.Write(reply)
 	}
-	replayed := got.EnvelopeID != payload.Entry.EnvelopeID
-	reply, _ := ipc.EncodeResult(frame.ID, true, "", ipc.ReserveLedgerResult{
-		Entry: got, Replayed: replayed,
-	})
+	reply, _ := ipc.EncodeResult(frame.ID, true, "", nil)
 	return h.codec.Write(reply)
 }
 
-func (h *Host) handleCommit(ctx context.Context, frame ipc.Frame) error {
-	var payload ipc.CommitLedgerPayload
+// handleDown forwards an actor/worker death signal UP (closure §6).
+func (h *Host) handleDown(ctx context.Context, frame ipc.Frame) error {
+	var payload ipc.DownPayload
 	if err := json.Unmarshal(frame.Payload, &payload); err != nil {
 		reply, _ := ipc.EncodeResult(frame.ID, false, "decode: "+err.Error(), nil)
 		return h.codec.Write(reply)
 	}
-	// FIX-T6 fencing: same rationale as handleWrite.
-	ctx = store.CtxWithFencing(ctx, h.cfg.FencingToken, h.cfg.DaemonEpoch)
-	if err := h.cfg.Ledger.Commit(ctx, payload.Key, payload.CommittedAt); err != nil {
+	if err := h.cfg.Emit.Down(ctx, payload.Actor, payload.Reason); err != nil {
 		reply, _ := ipc.EncodeResult(frame.ID, false, err.Error(), nil)
 		return h.codec.Write(reply)
 	}

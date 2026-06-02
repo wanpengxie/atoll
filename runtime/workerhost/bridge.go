@@ -10,9 +10,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/runtime/fence"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 )
 
@@ -52,16 +50,11 @@ type BridgeConfig struct {
 
 	Spawner    Spawner
 	LeaseStore *LeaseStore
-	Chain      khar.Chain
-	Ledger     LedgerOps
+	// Emit is the upward forwarding sink (v2: worker emits go up to the
+	// server harness, the single writer; worker no longer writes truth).
+	Emit EmitSink
 
 	NowFn func() int64
-
-	// Fencing snapshot at construction. Bridge assumes the channel
-	// lock doesn't change during its lifetime; daemon unloads + re-
-	// builds the bridge on placement reclaim, so this is safe.
-	FencingToken fence.FencingToken
-	DaemonEpoch  fence.DaemonEpoch
 
 	// HandshakeTimeout caps how long OnTrigger waits for the freshly
 	// spawned worker's handshake before giving up. Default 5s.
@@ -89,29 +82,10 @@ type BridgeConfig struct {
 	// worker with only os.Environ + the Spawner's static env list.
 	WorkerEnv []string
 
-	// PreSpawn is an optional hook invoked at the top of every
-	// Spawner.Spawn call (i.e. once per worker subprocess, NOT once
-	// per trigger — the bridge reuses a live worker across triggers
-	// and only re-spawns on crash / first trigger after boot). The
-	// hook returns an extra "KEY=VALUE" env slice that is appended
-	// AFTER WorkerEnv so PreSpawn-supplied values override defaults.
-	//
-	// Production wiring (M1.6 agent self-awareness fix): cmd/daemon
-	// implements PreSpawn to (1) snapshot the channel's actor_registry
-	// + type_registry, (2) write a JSON file into the channel workdir,
-	// (3) return ["COAGENT_CHANNEL_CONTEXT_FILE=
-	// <abs-path>"]. The worker bridge folds the file into its system
-	// prompt so the LLM knows what tools / actors / devices live in
-	// the channel — without it the agent is blind and falls back to
-	// host-filesystem exploration ("Chrome 145 / type_registry空"
-	// hallucinated reply class).
-	//
-	// Hook errors do NOT abort the spawn — the bridge logs (via the
-	// returned error path is currently best-effort) and proceeds with
-	// only WorkerEnv. Worker boots cleanly without the appendix, same
-	// as a legacy channel. Nil hook → behaviour identical to before
-	// this field was added.
-	PreSpawn func(ctx context.Context) (extraEnv []string, err error)
+	// (v2: PreSpawn frozen-snapshot env injection (COAGENT_CHANNEL_CONTEXT_FILE)
+	// removed — the frozen actor/type snapshot is the wrong model; the agent
+	// queries the live catalog via call_actor (graded prompt: meta-tools cache
+	// + catalog live query). See project_kill_frozen_channel_context.)
 
 	// PushTimeout caps how long the daemon waits for the worker's
 	// ACCEPT acknowledgement of a pushed trigger (§3 ack 三分: accept is
@@ -224,11 +198,8 @@ func NewBridge(cfg BridgeConfig) (*Bridge, error) {
 	if cfg.LeaseStore == nil {
 		return nil, errors.New("workerhost: BridgeConfig.LeaseStore nil")
 	}
-	if cfg.Chain == nil {
-		return nil, errors.New("workerhost: BridgeConfig.Chain nil")
-	}
-	if cfg.Ledger == nil {
-		return nil, errors.New("workerhost: BridgeConfig.Ledger nil")
+	if cfg.Emit == nil {
+		return nil, errors.New("workerhost: BridgeConfig.Emit nil")
 	}
 	if cfg.NowFn == nil {
 		return nil, errors.New("workerhost: BridgeConfig.NowFn nil")
@@ -282,7 +253,7 @@ func (m *Bridge) OnTrigger(ctx context.Context, _ actor.ActorID, env *message.En
 		// Best-effort cleanup of any tombstoned previous session so
 		// the lease row reflects the new worker.
 		if m.cur != nil {
-			_ = m.cfg.LeaseStore.Release(ctx, m.cur.lockLease.ID)
+			m.cfg.LeaseStore.Release(m.cur.lockLease.ID)
 			m.cur = nil
 		}
 		if err := m.spawnLocked(ctx); err != nil {
@@ -373,11 +344,8 @@ func (m *Bridge) spawnLocked(ctx context.Context) error {
 	workerID := fmt.Sprintf("%s-%s-%d", m.cfg.WorkerIDPrefix, m.cfg.ChannelID, m.spawnSeq.Add(1))
 
 	lease, ok, err := m.cfg.LeaseStore.Acquire(
-		ctx,
 		string(m.cfg.AgentID),
 		workerID,
-		m.cfg.FencingToken,
-		m.cfg.DaemonEpoch,
 		m.cfg.NowFn(),
 	)
 	if err != nil {
@@ -388,26 +356,13 @@ func (m *Bridge) spawnLocked(ctx context.Context) error {
 	}
 	lease.ChannelID = m.cfg.ChannelID
 
-	// PreSpawn: composition root may inject extra env (e.g.
-	// COAGENT_CHANNEL_CONTEXT_FILE pointing at a freshly-written
-	// channel context snapshot for the LLM system prompt). Errors are
-	// non-fatal — the bridge logs nothing today (no logger plumbed)
-	// and proceeds with only the static WorkerEnv. Worker boots
-	// cleanly without the appendix, matching the legacy behaviour.
+	// v2: no PreSpawn frozen-snapshot env injection (the agent queries the
+	// live catalog via call_actor; see project_kill_frozen_channel_context).
 	spawnEnv := m.cfg.WorkerEnv
-	if m.cfg.PreSpawn != nil {
-		extra, _ := m.cfg.PreSpawn(ctx)
-		if len(extra) > 0 {
-			combined := make([]string, 0, len(spawnEnv)+len(extra))
-			combined = append(combined, spawnEnv...)
-			combined = append(combined, extra...)
-			spawnEnv = combined
-		}
-	}
 
 	proc, err := m.cfg.Spawner.Spawn(m.cfg.ServeCtx, leaseID, spawnEnv)
 	if err != nil {
-		_ = m.cfg.LeaseStore.Release(ctx, lease.ID)
+		m.cfg.LeaseStore.Release(lease.ID)
 		return fmt.Errorf("spawn: %w", err)
 	}
 
@@ -424,11 +379,9 @@ func (m *Bridge) spawnLocked(ctx context.Context) error {
 		ChannelID:     m.cfg.ChannelID,
 		WorkerID:      workerID,
 		LeaseID:       leaseID,
-		FencingToken:  m.cfg.FencingToken,
-		DaemonEpoch:   m.cfg.DaemonEpoch,
-		Chain:         m.cfg.Chain,
+		LeaseToken:    lease.LeaseToken,
+		Emit:          m.cfg.Emit,
 		WorkerActorID: m.cfg.WorkerActorID,
-		Ledger:        m.cfg.Ledger,
 		NowFn:         m.cfg.NowFn,
 		// Track heartbeat freshness so OnTrigger can distinguish a
 		// live-but-not-accepted worker (retry) from dead transport (kill).
@@ -438,7 +391,7 @@ func (m *Bridge) spawnLocked(ctx context.Context) error {
 	})
 	if err != nil {
 		_ = proc.Kill()
-		_ = m.cfg.LeaseStore.Release(ctx, lease.ID)
+		m.cfg.LeaseStore.Release(lease.ID)
 		return fmt.Errorf("host: %w", err)
 	}
 	sess.host = host
