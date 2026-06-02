@@ -21,9 +21,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/ledger"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/runtime/fence"
 )
 
 // Kind is the closed set of IPC frame kinds exchanged daemon ↔ worker.
@@ -40,17 +38,24 @@ import (
 type Kind string
 
 // Kind closed set.
+//
+// v2: the v1 "worker writes channel log" frames (write_message /
+// reserve_ledger / commit_ledger) are REMOVED — truth lives on server, so a
+// business cell EMITS its envelope upward (KindEmit) and the server harness
+// is the single writer (runtime-construction-spec §4.4). KindDown carries a
+// worker/actor death signal up to the host (closure §6). fence_invalid is
+// re-anchored to the worker-LEASE (instance fence), not the channel-write
+// fence.
 const (
-	KindHandshake     Kind = "handshake"
-	KindHandshakeAck  Kind = "handshake_ack"
-	KindWriteMessage  Kind = "write_message"
-	KindReserveLedger Kind = "reserve_ledger"
-	KindCommitLedger  Kind = "commit_ledger"
-	KindHeartbeat     Kind = "heartbeat"
-	KindReply         Kind = "reply"
-	KindFenceInvalid  Kind = "fence_invalid"
-	KindShutdown      Kind = "shutdown"
-	KindShutdownAck   Kind = "shutdown_ack"
+	KindHandshake    Kind = "handshake"
+	KindHandshakeAck Kind = "handshake_ack"
+	KindEmit         Kind = "emit"     // worker → daemon: emit an envelope upward to server harness
+	KindDown         Kind = "down"     // worker → daemon: actor/worker death signal
+	KindHeartbeat    Kind = "heartbeat"
+	KindReply        Kind = "reply"
+	KindFenceInvalid Kind = "fence_invalid"
+	KindShutdown     Kind = "shutdown"
+	KindShutdownAck  Kind = "shutdown_ack"
 	// KindTrigger is the M1.6-T1 daemon → worker push of a post-harness
 	// envelope addressed to the channel-agent target. The worker's
 	// Bridge consumes these via IPCClient.Triggers(); it MAY call
@@ -78,13 +83,16 @@ func (w WorkerID) String() string { return string(w) }
 // Frame is the IPC wire envelope. Length-prefixed JSON: a uint32 BE
 // length header followed by the JSON-marshalled Frame.
 type Frame struct {
-	ID           string             `json:"id"`
-	Kind         Kind               `json:"kind"`
-	ChannelID    channel.ID         `json:"channel_id,omitempty"`
-	FencingToken fence.FencingToken `json:"fencing_token,omitempty"`
-	DaemonEpoch  fence.DaemonEpoch  `json:"daemon_epoch,omitempty"`
-	WorkerID     WorkerID           `json:"worker_id,omitempty"`
-	Payload      json.RawMessage    `json:"payload,omitempty"`
+	ID        string          `json:"id"`
+	Kind      Kind            `json:"kind"`
+	ChannelID channel.ID      `json:"channel_id,omitempty"`
+	// LeaseToken is the opaque worker-LEASE token (instance fence) the host
+	// assigns at spawn. v2 replaces the v1 channel-write (fencing_token,
+	// daemon_epoch) pair: it guards against a zombie/reconnecting worker, not
+	// against channel-log writers (the channel has one writer by construction).
+	LeaseToken string          `json:"lease_token,omitempty"`
+	WorkerID   WorkerID        `json:"worker_id,omitempty"`
+	Payload    json.RawMessage `json:"payload,omitempty"`
 }
 
 // HandshakePayload is sent worker → daemon on startup.
@@ -101,39 +109,25 @@ type HandshakeAckPayload struct {
 	// harness step 3 sender_mismatch will reject). Added in M1.6-T1
 	// so the MockBridge knows its own actor identity without
 	// out-of-band configuration.
-	WorkerActorID actor.ActorID      `json:"worker_actor_id,omitempty"`
-	FencingToken  fence.FencingToken `json:"fencing_token"`
-	DaemonEpoch   fence.DaemonEpoch  `json:"daemon_epoch"`
-	TurnDeadline  int64              `json:"turn_deadline_ms"`
+	WorkerActorID actor.ActorID `json:"worker_actor_id,omitempty"`
+	LeaseToken    string        `json:"lease_token"`
+	TurnDeadline  int64         `json:"turn_deadline_ms"`
 }
 
-// WriteMessagePayload asks daemon to append an envelope.
-type WriteMessagePayload struct {
+// EmitPayload is the worker → daemon emit of one envelope. The daemon host
+// forwards it upward to the server harness (the single channel writer); the
+// store-allocated seq comes back via the server, not the worker. (v2 replaces
+// the v1 WriteMessage "worker writes channel log" path.)
+type EmitPayload struct {
 	Envelope message.Envelope `json:"envelope"`
 }
 
-// WriteMessageResult is daemon's reply.
-type WriteMessageResult struct {
-	Seq     int64  `json:"seq"`
-	Deduped bool   `json:"deduped"`
-	Reason  string `json:"reason,omitempty"`
-}
-
-// ReserveLedgerPayload asks daemon to reserve a ledger key.
-type ReserveLedgerPayload struct {
-	Entry ledger.Entry `json:"entry"`
-}
-
-// ReserveLedgerResult is daemon's reply.
-type ReserveLedgerResult struct {
-	Entry    ledger.Entry `json:"entry"`
-	Replayed bool         `json:"replayed"`
-}
-
-// CommitLedgerPayload commits a previously reserved key.
-type CommitLedgerPayload struct {
-	Key         ledger.Key `json:"key"`
-	CommittedAt int64      `json:"committed_at"`
+// DownPayload is the worker → daemon death signal for an actor it hosts
+// (closure §6 — the substrate materialises receiver_unavailable for the
+// dead actor's in-flight requests, on the server side).
+type DownPayload struct {
+	Actor  actor.ActorID `json:"actor"`
+	Reason string        `json:"reason,omitempty"`
 }
 
 // HeartbeatPayload keeps the lease alive.
@@ -141,14 +135,14 @@ type HeartbeatPayload struct {
 	NowMs int64 `json:"now_ms"`
 }
 
-// FenceInvalidPayload is daemon's reply when fencing fails. Worker MUST
-// exit immediately.
+// FenceInvalidPayload is daemon's reply when the worker-LEASE token is stale
+// (a zombie / reconnecting worker). Worker MUST exit immediately. (v2: the
+// token is the opaque worker-lease instance token, not the v1 channel-write
+// fencing_token/daemon_epoch pair.)
 type FenceInvalidPayload struct {
-	ExpectedToken fence.FencingToken `json:"expected_token"`
-	GotToken      fence.FencingToken `json:"got_token"`
-	ExpectedEpoch fence.DaemonEpoch  `json:"expected_epoch"`
-	GotEpoch      fence.DaemonEpoch  `json:"got_epoch"`
-	Reason        string             `json:"reason"`
+	ExpectedToken string `json:"expected_token"`
+	GotToken      string `json:"got_token"`
+	Reason        string `json:"reason"`
 }
 
 // ReplyPayload carries a typed JSON result.
