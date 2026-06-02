@@ -1,7 +1,6 @@
 package message
 
 import (
-	"database/sql/driver"
 	"fmt"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
@@ -13,10 +12,9 @@ type ID string
 // String returns the wire form.
 func (id ID) String() string { return string(id) }
 
-// Value implements driver.Valuer for SQL TEXT boundaries.
-func (id ID) Value() (driver.Value, error) { return string(id), nil }
-
-// Scan implements sql.Scanner for SQL TEXT boundaries.
+// Scan reads a SQL TEXT value into the id. It uses only `any` (no database/sql
+// import) so kernel stays storage-free; runtime/store passes args by reflection
+// (string-kind → string), so no Valuer is needed for the write boundary.
 func (id *ID) Scan(src any) error {
 	switch v := src.(type) {
 	case nil:

@@ -4,7 +4,6 @@
 package channel
 
 import (
-	"database/sql/driver"
 	"fmt"
 )
 
@@ -14,9 +13,6 @@ type ID string
 
 // String returns the wire form.
 func (c ID) String() string { return string(c) }
-
-// Value implements driver.Valuer for SQL TEXT boundaries.
-func (c ID) Value() (driver.Value, error) { return string(c), nil }
 
 // Scan implements sql.Scanner for SQL TEXT boundaries.
 func (c *ID) Scan(src any) error {

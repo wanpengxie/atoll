@@ -15,7 +15,6 @@
 package message
 
 import (
-	"database/sql/driver"
 	"fmt"
 )
 
@@ -36,9 +35,6 @@ var AllKinds = []Kind{KindEvent, KindRequest, KindResponse}
 
 // String returns the wire form.
 func (k Kind) String() string { return string(k) }
-
-// Value implements driver.Valuer for SQL TEXT boundaries.
-func (k Kind) Value() (driver.Value, error) { return string(k), nil }
 
 // Scan implements sql.Scanner for SQL TEXT boundaries.
 func (k *Kind) Scan(src any) error {
@@ -84,9 +80,6 @@ var AllVisibilities = []Visibility{VisibilityPublic, VisibilityPrivate, Visibili
 
 // String returns the wire form.
 func (v Visibility) String() string { return string(v) }
-
-// Value implements driver.Valuer for SQL TEXT boundaries.
-func (v Visibility) Value() (driver.Value, error) { return string(v), nil }
 
 // Scan implements sql.Scanner for SQL TEXT boundaries.
 func (v *Visibility) Scan(src any) error {

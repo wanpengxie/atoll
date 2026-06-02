@@ -3,7 +3,6 @@
 package actor
 
 import (
-	"database/sql/driver"
 	"fmt"
 )
 
@@ -33,9 +32,6 @@ const (
 
 // String returns the wire form of the actor id.
 func (a ActorID) String() string { return string(a) }
-
-// Value implements driver.Valuer for SQL TEXT boundaries.
-func (a ActorID) Value() (driver.Value, error) { return string(a), nil }
 
 // Scan implements sql.Scanner for SQL TEXT boundaries.
 func (a *ActorID) Scan(src any) error {

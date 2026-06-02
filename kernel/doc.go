@@ -19,11 +19,9 @@
 //   - kernel/ledger     — ActionLedger reserve/commit interface, ledger key
 //     derivation.
 //   - kernel/log        — append-only MessageLog interface, Seq/Cursor.
-//   - kernel/fencing    — minimal write-fence primitives shared by channel
-//     mutation paths.
-//   - kernel/adapter    — Module / Manager / CorrelationTracker /
-//     ErrorPolicy / AdapterCtx interfaces — covers L2 §8 framework
-//     contract. Binding lives in kernel/actor.
+//
+// (v2: fencing moved to runtime/fence; the adapter Module/behaviour contract
+// moved to lib/behavior — kernel no longer owns a framework subpackage.)
 //
 // Layering rule (enforced by go-arch-lint in T2):
 //
