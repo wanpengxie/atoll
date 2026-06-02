@@ -43,7 +43,16 @@ type Fleet struct {
 	mu        sync.RWMutex
 	computes  map[string]*computeConn
 	actorHost map[actor.ActorID]string // actorID → computeID
+
+	// onDeath materialises receiver_unavailable at the home for a compute cell
+	// death (DeathFrame). server.Run injects home.MaterialiseComputeDeath.
+	onDeath func(context.Context, actor.ActorID)
 }
+
+// SetOnDeath wires the home-side death收口 invoked when an attached compute
+// reports a cell death (DeathFrame). Without it a compute cell death cannot
+// close out the in-flight requests waiting on that actor at the home.
+func (f *Fleet) SetOnDeath(fn func(context.Context, actor.ActorID)) { f.onDeath = fn }
 
 // New constructs a fleet bound to the channel home's harness chain. apiKey
 // authenticates attaching computes (empty = accept any, dev only).
@@ -113,9 +122,16 @@ func (f *Fleet) handleFrame(ctx context.Context, conn *computeConn, fr computebu
 	case computebus.FrameHeartbeat:
 		// Lease re-arm (presence is advisory; nothing to write here in v1).
 	case computebus.FrameDeath:
-		// A compute cell died; the caller-scoped closure on the waiting side
-		// collapses independently. (Death routing to home-side pending senders
-		// lands with the full caller-side futureHub.)
+		// A compute cell died. The compute has no local truth, so the home must
+		// materialise receiver_unavailable for every in-flight request addressed
+		// to the dead actor (substrate closure author #3, across the wire). The
+		// dead actor is also no longer hosted — drop its routing entry.
+		if fr.Death != nil {
+			f.dropActor(conn, fr.Death.Actor)
+			if f.onDeath != nil {
+				f.onDeath(ctx, fr.Death.Actor)
+			}
+		}
 	}
 }
 
@@ -138,6 +154,17 @@ func (f *Fleet) unregister(conn *computeConn, hosts []actor.ActorID) {
 		if f.actorHost[a] == conn.id {
 			delete(f.actorHost, a)
 		}
+	}
+}
+
+// dropActor removes a dead actor's routing entry (it is no longer hosted on the
+// compute). Guarded by conn ownership so a stale frame can't unhost a relocated
+// actor.
+func (f *Fleet) dropActor(conn *computeConn, a actor.ActorID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.actorHost[a] == conn.id {
+		delete(f.actorHost, a)
 	}
 }
 

@@ -92,23 +92,37 @@ func (c *Channel) Resolver() *policy.Resolver { return c.resolver }
 // "Despawn 不收口 / 死 cell 黑洞").
 func (c *Channel) OnDeath(ctx context.Context, sig actorrt.DeathSignal) {
 	if c.chain != nil && c.openReqs != nil {
-		if reqs, err := c.openReqs.OpenRequestsForActor(ctx, sig.Actor, 0); err == nil {
-			sys := message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
-			for i := range reqs {
-				req := reqs[i]
-				term, berr := behavior.BuildResponseFromRequest(&req, c.clock, sys,
-					behavior.CorrelationKey(req.ID),
-					behavior.ResponseSpec{
-						Status: "failed",
-						Reason: string(message.TerminalReceiverUnavailable),
-					})
-				if berr != nil {
-					continue
-				}
-				cctx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{ActorID: actor.SystemActorID, ChannelID: c.channelID, AllowProvidedSenderKind: true})
-				_, _ = c.chain.Write(cctx, term)
-			}
-		}
+		MaterialiseReceiverUnavailable(ctx, c.chain, c.openReqs, c.clock, c.channelID, sig.Actor)
 	}
 	c.cells.Despawn(sig.Actor)
+}
+
+// MaterialiseReceiverUnavailable is the substrate's closure obligation (author
+// #3), factored out so BOTH a local cell death (Channel.OnDeath) and a remote
+// compute cell death (the home's fleet, on a DeathFrame) materialise the same
+// terminal: for every in-flight request addressed to the dead actor, write a
+// SYSTEM-authored receiver_unavailable response into truth. harness Step 8
+// authorises sender==system + reason==receiver_unavailable as the substrate
+// author. Without this a dead cell — local or across the wire — is a black hole
+// that hangs every waiting caller (construction-spec §3.3).
+func MaterialiseReceiverUnavailable(ctx context.Context, chain harness.Chain, openReqs OpenRequestSource, clock func() time.Time, channelID channel.ID, dead actor.ActorID) {
+	reqs, err := openReqs.OpenRequestsForActor(ctx, dead, 0)
+	if err != nil {
+		return
+	}
+	sys := message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
+	for i := range reqs {
+		req := reqs[i]
+		term, berr := behavior.BuildResponseFromRequest(&req, clock, sys,
+			behavior.CorrelationKey(req.ID),
+			behavior.ResponseSpec{
+				Status: "failed",
+				Reason: string(message.TerminalReceiverUnavailable),
+			})
+		if berr != nil {
+			continue
+		}
+		cctx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{ActorID: actor.SystemActorID, ChannelID: channelID, AllowProvidedSenderKind: true})
+		_, _ = chain.Write(cctx, term)
+	}
 }

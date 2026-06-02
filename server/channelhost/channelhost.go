@@ -88,6 +88,18 @@ func (h *ChannelHome) ClosurePass(ctx context.Context) {
 	}
 }
 
+// MaterialiseComputeDeath is the home-side收口 for a death that happened on an
+// attached compute: the compute cell has NO local truth, so when its supervisor
+// observes death it sends a DeathFrame UP and the fleet calls this. The home —
+// which DOES own truth — materialises receiver_unavailable for the dead actor's
+// in-flight requests (same author #3 as a local cell death). server.Run wires
+// this into fleet.SetOnDeath. Without it a compute cell death is a black hole on
+// the home side (the P0 "死 cell 黑洞" extended across the wire).
+func (h *ChannelHome) MaterialiseComputeDeath(ctx context.Context, dead actor.ActorID) {
+	clock := func() time.Time { return time.UnixMilli(h.nowMs()) }
+	channelkit.MaterialiseReceiverUnavailable(ctx, h.chain, h.messages, clock, h.channelID, dead)
+}
+
 // SetRemoteDispatch wires the fleet's compute-dispatch seam so requests for
 // actors hosted on an attached compute are routed down the wire.
 func (h *ChannelHome) SetRemoteDispatch(fn func(actor.ActorID, *message.Envelope) bool) {

@@ -11,20 +11,45 @@ import (
 	"github.com/wanpengxie/ActOS/wire/computebus"
 )
 
+// DeathFunc reports a hosted cell's death UP to the home so the home can
+// materialise receiver_unavailable for its in-flight requests. homelink injects
+// a computebus DeathFrame sender.
+type DeathFunc func(actor.ActorID, string)
+
 // Host hosts business cells (tool/agent actors) on a compute. It maps a
 // DispatchFrame from the home to the cell mailbox, and each cell's output flows
-// UP via an UplinkChain (NO local truth — daemon is attached compute).
+// UP via an UplinkChain (NO local truth — daemon is attached compute). Host is
+// the actorrt.Supervisor for its cells: a compute cell death is observed here
+// and propagated UP via DeathFunc (the compute side has no truth to write).
 type Host struct {
-	cells *actorrt.Runtime
-	emit  EmitFunc
+	cells     *actorrt.Runtime
+	emit      EmitFunc
+	sendDeath DeathFunc
 }
 
-// New constructs a host. emit is the homelink-injected uplink to the home harness.
-func New(emit EmitFunc) *Host {
-	return &Host{
-		cells: actorrt.New(actorrt.Config{}),
-		emit:  emit,
+// New constructs a host. emit is the homelink-injected uplink to the home
+// harness; sendDeath propagates cell death UP the wire. Host installs itself as
+// the runtime supervisor so it observes every abnormal cell termination.
+func New(emit EmitFunc, sendDeath DeathFunc) *Host {
+	h := &Host{emit: emit, sendDeath: sendDeath}
+	h.cells = actorrt.New(actorrt.Config{Supervisor: h})
+	return h
+}
+
+// OnDeath implements actorrt.Supervisor. A hosted cell died abnormally — the
+// compute holds no truth, so it cannot write the receiver_unavailable terminal
+// itself. It reports the death UP via DeathFunc (FrameDeath); the home's fleet
+// calls channelhost.MaterialiseComputeDeath to close the in-flight requests. The
+// dead cell is then dropped locally.
+func (h *Host) OnDeath(ctx context.Context, sig actorrt.DeathSignal) {
+	if h.sendDeath != nil {
+		cause := ""
+		if sig.Cause != nil {
+			cause = sig.Cause.Error()
+		}
+		h.sendDeath(sig.Actor, cause)
 	}
+	h.cells.Despawn(sig.Actor)
 }
 
 // InstallAdapter installs a Module as an adapterActor cell, wiring its chain to

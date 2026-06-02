@@ -50,7 +50,7 @@ func Run(ctx context.Context, cfg Config, modules []behavior.Module) error {
 	}
 	defer func() { _ = hl.Close() }()
 
-	h = host.New(hl.Emit)
+	h = host.New(hl.Emit, hl.SendDeath)
 	defer h.Stop()
 	for _, mod := range modules {
 		if _, err := h.InstallAdapter(ctx, mod, adapterhost.InstallDeps{ChannelID: cfg.ChannelID}); err != nil {

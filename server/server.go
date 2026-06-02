@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -37,6 +38,12 @@ func Run(ctx context.Context, cfg Config) error {
 
 	flt := fleet.New(home.Chain(), cfg.APIKey)
 	home.SetRemoteDispatch(flt.Dispatch)
+	// Compute cell death (DeathFrame) materialises receiver_unavailable at the
+	// home (substrate closure author #3 across the wire).
+	flt.SetOnDeath(home.MaterialiseComputeDeath)
+	// Caller-scoped closure loop (author #2): expired pending requests get a
+	// caller-authored unanswered_timeout. Runs for the home's lifetime.
+	go home.RunClosureScan(ctx, time.Second)
 
 	mux := http.NewServeMux()
 	// Attached computes (daemons) connect here (computebus WS).

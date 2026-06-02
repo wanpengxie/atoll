@@ -74,6 +74,13 @@ func (h *Homelink) Emit(ctx context.Context, ef computebus.EmitFrame) (computebu
 	}
 }
 
+// SendDeath propagates a hosted cell's death UP to the home (FrameDeath) so the
+// home materialises receiver_unavailable for the dead actor's in-flight
+// requests. Fire-and-forget: the home owns the closure, the compute just reports.
+func (h *Homelink) SendDeath(a actor.ActorID, cause string) {
+	_ = h.send(computebus.Frame{Type: computebus.FrameDeath, Death: &computebus.DeathFrame{Actor: a, Cause: cause}})
+}
+
 func (h *Homelink) readLoop() {
 	for {
 		_, raw, err := h.ws.ReadMessage()
