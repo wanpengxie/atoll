@@ -9,10 +9,13 @@ package harness
 // Relocated from the deleted kernel/message (which held 32 values including
 // HarnessWorkerFencingStale). v2 drops HarnessWorkerFencingStale — the
 // channel-write fence is obsolete under single-server-harness-writer
-// (runtime-construction-spec §4.1) — and HarnessIDDuplicateConflict — the v1
+// (runtime-construction-spec §4.1) — HarnessIDDuplicateConflict — the v1
 // id-dedupe step was retired (message.id is now a random uuid; an id UNIQUE
 // collision is a pure integrity error surfaced via classifyAppendErr's wire
-// string) — leaving 30.
+// string) — and HarnessVisibilityAudienceInvalid, a tombstone reason no step
+// could emit (the visibility-scoped audience wildcard it guarded was removed):
+// an errno vocabulary is exactly the set of reasons a producer can stamp, so a
+// word with zero producers is not in it — leaving 29.
 //
 // No HTTPStatus() method: reason→HTTP-status (strerror) is a binding concern
 // that lives in server/gateway, not on this engine type. This type only
@@ -24,16 +27,10 @@ const (
 	HarnessEngineACLDenied HarnessRejectReason = "harness_engine_acl_denied"
 
 	// Step 2 — Envelope Shape Validate
-	HarnessEnvelopeFieldMissing HarnessRejectReason = "harness_envelope_field_missing"
-	HarnessChannelMismatch      HarnessRejectReason = "harness_channel_mismatch"
-	HarnessKindInvalid          HarnessRejectReason = "harness_kind_invalid"
-	HarnessVisibilityInvalid    HarnessRejectReason = "harness_visibility_invalid"
-	// HarnessVisibilityAudienceInvalid is intentionally unreachable: the
-	// visibility-scoped audience wildcard it guarded was removed (proto-layer1
-	// §738 "历史保留；当前 wildcard 已移除，正常不再产生"). Kept in the closed
-	// set as a tombstone for wire/log back-compat; emitted by no step. Whether
-	// to drop it (count 31→30) is a reason-set decision, deferred.
-	HarnessVisibilityAudienceInvalid HarnessRejectReason = "harness_visibility_audience_invalid"
+	HarnessEnvelopeFieldMissing      HarnessRejectReason = "harness_envelope_field_missing"
+	HarnessChannelMismatch           HarnessRejectReason = "harness_channel_mismatch"
+	HarnessKindInvalid               HarnessRejectReason = "harness_kind_invalid"
+	HarnessVisibilityInvalid         HarnessRejectReason = "harness_visibility_invalid"
 	HarnessEnvelopeUnknownField      HarnessRejectReason = "harness_envelope_unknown_field"
 	HarnessAudienceWildcardForbidden HarnessRejectReason = "harness_audience_wildcard_forbidden"
 
@@ -70,14 +67,14 @@ const (
 	HarnessProvisionalAfterFinal           HarnessRejectReason = "harness_provisional_after_final"
 )
 
-// AllHarnessRejectReasons enumerates every value (30 — v2, no fencing, no id-dedupe).
+// AllHarnessRejectReasons enumerates every value (29 — v2: no fencing, no
+// id-dedupe, no visibility-audience tombstone).
 var AllHarnessRejectReasons = []HarnessRejectReason{
 	HarnessEngineACLDenied,
 	HarnessEnvelopeFieldMissing,
 	HarnessChannelMismatch,
 	HarnessKindInvalid,
 	HarnessVisibilityInvalid,
-	HarnessVisibilityAudienceInvalid,
 	HarnessEnvelopeUnknownField,
 	HarnessAudienceWildcardForbidden,
 	HarnessTimeInvalid,

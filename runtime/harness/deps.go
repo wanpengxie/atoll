@@ -53,15 +53,6 @@ type CallerContext struct {
 	// Step 0/1 rejects (harness_engine_acl_denied) when it differs from the
 	// harness-bound channel.
 	ChannelID channel.ID
-
-	// AllowProvidedSenderKind reports whether the caller transport is
-	// allowed to ship a non-empty envelope.sender.kind value. Trusted
-	// in-process callers (e.g. adapter framework) set this true; daemon
-	// RPC / worker IPC set it false because the daemon writes the kind
-	// from actor_registry. Step 3 ENFORCES the registry value either
-	// way; the flag controls how mismatch is reported (silent overwrite
-	// vs sender_kind_mismatch).
-	AllowProvidedSenderKind bool
 }
 
 // Deps bundles every collaborator a runtime harness Chain needs. One

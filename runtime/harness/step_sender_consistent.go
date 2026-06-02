@@ -66,20 +66,14 @@ func (s *stepSenderConsistent) Run(ctx context.Context, env *message.Envelope) (
 
 	providedKind := env.Sender.Kind
 	if providedKind != "" && providedKind != rec.Kind {
-		if !caller.AllowProvidedSenderKind {
-			// Untrusted edge — caller fabricated a kind. Reject hard.
-			return outcome{
-				RejectReason: HarnessSenderKindMismatch,
-				Detail: fmt.Sprintf("envelope.sender.kind=%s does not match actor_registry=%s",
-					providedKind, rec.Kind),
-			}, nil
-		}
-		// Trusted edge but still tampered — reject hard. The "trusted"
-		// flag only means the harness will tolerate a CORRECT pre-fill,
-		// not a wrong one.
+		// A caller-provided kind that contradicts the registry is a
+		// misreport of identity (A3 真实). The registry is the single
+		// identity truth; reject hard. There is no "trusted transport may
+		// self-assert its kind" mode — that axis is a downstream transport
+		// distinction the registry-as-truth axiom collapses.
 		return outcome{
 			RejectReason: HarnessSenderKindMismatch,
-			Detail: fmt.Sprintf("envelope.sender.kind=%s mismatched registry=%s",
+			Detail: fmt.Sprintf("envelope.sender.kind=%s does not match actor_registry=%s",
 				providedKind, rec.Kind),
 		}, nil
 	}

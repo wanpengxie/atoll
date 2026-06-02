@@ -109,10 +109,9 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res WriteResu
 			reason := HarnessRejectReason(appErr.Reason)
 			c.observeReject(ctx, env, StepEngineAppend, reason, appErr.Detail)
 			return WriteResult{
-				MessageID:        appErr.PartialMessageID,
-				RejectReason:     reason,
-				RejectDetail:     appErr.Detail,
-				PartialMessageID: appErr.PartialMessageID,
+				MessageID:    appErr.PartialMessageID,
+				RejectReason: reason,
+				RejectDetail: appErr.Detail,
 			}, nil
 		}
 		c.observeError(ctx, env, StepEngineAppend, err)
@@ -201,9 +200,8 @@ func stepName(step stepID) string {
 // rejectFromOutcome packages a step outcome into a WriteResult.
 func rejectFromOutcome(out outcome, env *message.Envelope) WriteResult {
 	r := WriteResult{
-		RejectReason:     out.RejectReason,
-		RejectDetail:     out.Detail,
-		PartialMessageID: message.ID(out.PartialMessageID),
+		RejectReason: out.RejectReason,
+		RejectDetail: out.Detail,
 	}
 	if env != nil && env.ID != "" {
 		r.MessageID = env.ID

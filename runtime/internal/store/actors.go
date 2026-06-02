@@ -117,8 +117,8 @@ func (r *actorRegistry) Insert(ctx context.Context, rec storespec.Record) error 
 	}
 
 	const insCursor = `INSERT OR IGNORE INTO actor_cursors
-	   (actor_id, last_consumed_seq, last_consumed_id, updated_at)
-	   VALUES (?, 0, NULL, ?)`
+	   (actor_id, last_consumed_seq, updated_at)
+	   VALUES (?, 0, ?)`
 	if _, err := tx.ExecContext(ctx, insCursor, string(rec.ID), rec.CreatedAt); err != nil {
 		return fmt.Errorf("store: cursor seed %q: %w", rec.ID, err)
 	}
@@ -270,8 +270,8 @@ func (r *actorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add st
 		}
 		_, err = tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO actor_cursors
-			   (actor_id, last_consumed_seq, last_consumed_id, updated_at)
-			 VALUES (?, 0, NULL, ?)`,
+			   (actor_id, last_consumed_seq, updated_at)
+			 VALUES (?, 0, ?)`,
 			string(add.ID), add.At,
 		)
 		if err != nil {

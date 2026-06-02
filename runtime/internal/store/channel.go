@@ -38,8 +38,7 @@ type ChannelStores struct {
 	Registry   storespec.Registry               // membership READS only (Lookup/Exists/ListActive)
 	Membership storespec.MembershipControlPlane // membership WRITES: Insert/Deregister + ApplyMemberTransitions (log-emitting)
 
-	Ledger storespec.Ledger
-	Types  storespec.TypeStore // full type_registry contract (install state machine + reads)
+	Types storespec.TypeStore // full type_registry contract (install state machine + reads)
 }
 
 // OpenChannel opens the per-channel sqlite and assembles the channel stores.
@@ -62,7 +61,6 @@ func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions, deps Chan
 		Requests:   newRequestLookup(msgs, deps.ChannelID),
 		Registry:   reg,
 		Membership: reg,
-		Ledger:     newLedger(db),
 		Types:      newTypeRegistry(db, deps.NowFn),
 	}
 	return cs, nil

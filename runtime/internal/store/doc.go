@@ -18,11 +18,11 @@
 //
 //   - sqlite.go            — sql.DB factory (channel-local + daemon-local)
 //   - schema.go            — DDL constants (messages / actor_registry /
-//     actor_cursors / type_registry / action_ledger).
+//     actor_cursors / type_registry).
 //     v2: no worker_locks table — the worker lease is volatile, in compute
-//     memory (runtime/workerhost), not a sqlite row.
+//     memory (runtime/workerhost), not a sqlite row. No action_ledger — turn-
+//     replay idempotency is an application concern, not substrate truth.
 //   - messages.go          — storespec.MessageLog impl.
 //   - cursors.go           — storespec.Cursors impl.
 //   - actors.go            — storespec.Registry impl.
-//   - ledger.go            — storespec.Ledger impl.
 package store

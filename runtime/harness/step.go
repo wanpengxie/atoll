@@ -45,9 +45,8 @@ var allStepIDs = []stepID{
 // outcome describes the result of running one step against an envelope.
 // Continue / Reject are the only two terminal outcomes for a single step.
 type outcome struct {
-	RejectReason     HarnessRejectReason
-	Detail           string
-	PartialMessageID message.ID
+	RejectReason HarnessRejectReason
+	Detail       string
 
 	// IsTerminal carries the harness-computed store-derived value from the
 	// step that owns it (StepResponsePairing) up to the chain, which hands
@@ -67,12 +66,15 @@ type step interface {
 }
 
 // WriteResult is the outcome of a full Chain.Write invocation (L1 §2).
+// MessageID carries the envelope id on every path — durable on success,
+// the attempted id on reject (Accepted()/RejectReason says which). There is
+// no separate "partial" id field: the id is one value, the outcome flag tells
+// you whether it became a durable row.
 type WriteResult struct {
-	MessageID        message.ID
-	Seq              int64
-	RejectReason     HarnessRejectReason
-	RejectDetail     string
-	PartialMessageID message.ID
+	MessageID    message.ID
+	Seq          int64
+	RejectReason HarnessRejectReason
+	RejectDetail string
 }
 
 // Accepted reports whether the write produced a durable row.

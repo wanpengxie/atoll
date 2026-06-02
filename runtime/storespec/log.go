@@ -25,12 +25,13 @@ type StoredRow struct {
 }
 
 // AppendResult is what MessageLog.Append returns on a successful row write.
+// It carries only what the STORE authoritatively produces and the caller
+// could not already know: the store-allocated seq. (is_terminal is NOT echoed
+// back — the harness COMPUTES it and passes it INTO Append, so reflecting it
+// in the result would be a dead output mirroring the caller's own input.)
 type AppendResult struct {
 	// Seq is the store-allocated monotonic position (messages.seq).
 	Seq Seq
-	// IsTerminal mirrors the row's is_terminal column (computed from
-	// payload.status at insert time, proto-layer0 §2.5.1).
-	IsTerminal bool
 }
 
 // AppendError is the typed error returned for protocol-level rejects inside
@@ -95,12 +96,13 @@ type MessageQuery interface {
 	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID, limit int) ([]StoredRow, error)
 }
 
-// Cursor mirrors an actor_cursors row (L2 §1.4.3). Position metric is
-// LastConsumedSeq; LastConsumedID is informational only.
+// Cursor mirrors an actor_cursors row (L2 §1.4.3). The position metric is
+// LastConsumedSeq — the one monotonic truth of how far an actor has consumed.
+// (No last-consumed message id: it was never decision-read; seq is the
+// position and the id is a derivable label, not cursor truth.)
 type Cursor struct {
 	ActorID         actor.ActorID
 	LastConsumedSeq Seq
-	LastConsumedID  message.ID
 	UpdatedAt       int64
 }
 
@@ -108,7 +110,7 @@ type Cursor struct {
 // runtime/store/actors.go; Advance MUST honor the L1 §6.3.4.3 monotonic CAS.
 type Cursors interface {
 	Get(ctx context.Context, actorID actor.ActorID) (Cursor, bool, error)
-	Advance(ctx context.Context, actorID actor.ActorID, newSeq Seq, newID message.ID, nowMs int64) (ok bool, err error)
+	Advance(ctx context.Context, actorID actor.ActorID, newSeq Seq, nowMs int64) (ok bool, err error)
 }
 
 // RequestLookup recovers an original request envelope by id (L2 §8 F5).

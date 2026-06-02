@@ -57,7 +57,6 @@ CREATE TABLE IF NOT EXISTS type_registry (
                            CHECK (handler_binding IN ('embedded','runtime_outbound','runtime_inbound_via_relay')),
   max_pending_ms           INTEGER,
 	  handler_actor_id         TEXT,
-	  domain                   TEXT,
 	  install_status           TEXT NOT NULL DEFAULT 'installed'
 	                           CHECK (install_status IN ('installing','installed','failed')),
 		  install_error            TEXT NOT NULL DEFAULT '',
@@ -87,7 +86,6 @@ CREATE TABLE IF NOT EXISTS type_registry (
 CREATE TABLE IF NOT EXISTS actor_cursors (
   actor_id             TEXT PRIMARY KEY,
   last_consumed_seq    INTEGER NOT NULL DEFAULT 0,
-  last_consumed_id     TEXT,
   updated_at           INTEGER NOT NULL
 );
 
@@ -114,21 +112,12 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
 -- (proto-v2-physical §4); worker-instance fencing is a volatile compute-side
 -- lease, not a channel-sqlite row.)
 
--- =============================================================
--- 6) action_ledger  (L2 §1.4.10.1)
--- =============================================================
-CREATE TABLE IF NOT EXISTS action_ledger (
-  ledger_key         TEXT PRIMARY KEY,
-  turn_id            TEXT NOT NULL,
-  actor_id           TEXT NOT NULL,
-  envelope_id        TEXT NOT NULL,
-  status             TEXT NOT NULL
-                     CHECK (status IN ('reserved','committed')),
-  reserved_at        INTEGER NOT NULL,
-  committed_at       INTEGER
-);
-
-CREATE INDEX IF NOT EXISTS ix_action_ledger_turn ON action_ledger(turn_id);
+-- (v2: action_ledger table removed. Turn-replay idempotency (L2 §1.4.10.1) had
+-- no triggering scenario left — P-A1 retired at-least-once redelivery and the
+-- no-transparent-respawn收口 means substrate never replays a turn — and its key
+-- is derived from a domain-supplied semantic_action_key, so idempotency is an
+-- application/stdlib concern, not substrate truth. Additive re-add when a real
+-- exactly-once-external-effect use case demands it.)
 `
 
 // ChannelLocalTables enumerates the channel-local table names in
@@ -144,5 +133,4 @@ var ChannelLocalTables = []string{
 	"type_registry",
 	"actor_cursors",
 	"actor_registry",
-	"action_ledger",
 }

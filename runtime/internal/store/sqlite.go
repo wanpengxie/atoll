@@ -20,11 +20,6 @@ type OpenOptions struct {
 	// SkipDDL skips the schema bootstrap step. Useful for tests that
 	// install custom DDL or open an existing file.
 	SkipDDL bool
-
-	// ExtraPragmas appends additional `PRAGMA key=val` statements after
-	// the standard WAL + foreign_keys + busy_timeout block. Each entry is
-	// a full SQL statement WITHOUT a trailing semicolon. Order is preserved.
-	ExtraPragmas []string
 }
 
 // openChannelDB opens (creating if absent) the per-channel messages.sqlite at
@@ -112,10 +107,7 @@ func applyPragmas(ctx context.Context, db *sql.DB, opts OpenOptions) error {
 			"PRAGMA busy_timeout=5000",
 		}
 	}
-	all := make([]string, 0, len(base)+len(opts.ExtraPragmas))
-	all = append(all, base...)
-	all = append(all, opts.ExtraPragmas...)
-	for _, p := range all {
+	for _, p := range base {
 		if _, err := db.ExecContext(ctx, p); err != nil {
 			return fmt.Errorf("store: %s: %w", p, err)
 		}
@@ -134,7 +126,6 @@ var channelLocalSchemaShape = map[string][]string{
 	"type_registry_pending": {"install_attempt_id", "type", "install_status", "install_error"},
 	"actor_cursors":         {"actor_id", "last_consumed_seq"},
 	"actor_registry":        {"actor_id", "actor_kind", "deregistered_at"},
-	"action_ledger":         {"ledger_key", "turn_id", "status"},
 }
 
 func verifyChannelLocalSchema(ctx context.Context, db *sql.DB) error {

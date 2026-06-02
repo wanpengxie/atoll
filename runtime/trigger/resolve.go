@@ -14,11 +14,6 @@ import (
 // trigger fan-out per L1 §5.2 (system.heartbeat).
 const TypeSystemHeartbeat = "system.heartbeat"
 
-// Options is reserved for future per-call dispatch knobs. Empty today —
-// wildcard / self-trigger-ban / bypass machinery were removed after
-// owner reframed addressing as Erlang-style explicit `pid ! msg`.
-type Options struct{}
-
 // Resolve implements the L1 §5.1 decision matrix.
 //
 // Input is one already-validated, already-appended envelope (the chain
@@ -40,7 +35,6 @@ func Resolve(
 	ctx context.Context,
 	env *message.Envelope,
 	reg storespec.Registry,
-	_ Options,
 ) ([]actor.ActorID, error) {
 	if env == nil {
 		return nil, fmt.Errorf("trigger: nil envelope")

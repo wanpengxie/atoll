@@ -7,21 +7,19 @@
 // (no HTTP status). All concrete backends, engines and bindings live
 // outside kernel and depend on kernel — never the other way round.
 //
-// Subpackages (4):
+// Subpackages (3):
 //
 //   - kernel/actor    — actor identity (ActorID), the actor Kind closed set,
 //     Binding closed set, and the reserved-type closed sets.
 //   - kernel/channel  — channel ID type + Ref (federation forward-compat).
 //   - kernel/message  — envelope schema (17 content+metadata fields), kind /
-//     visibility closed sets, core-type table, the terminal-failure reason
-//     closed set (INVARIANT-10), and the RFC 8785 canonical hash function.
-//   - kernel/ledger   — the idempotency Key type + DeriveKey (pure SHA-256
-//     over canonical JSON).
+//     visibility closed sets, core-type table, and the terminal-failure reason
+//     closed set (INVARIANT-10).
 //
 // What is NOT in kernel (and why):
 //
 //   - Stateful engine seams (the harness Chain/Step, the store contracts
-//     Registry/Ledger/Cursors/TypeRegistry/RequestLookup/MessageLog) — they
+//     Registry/Cursors/TypeRegistry/RequestLookup/MessageLog) — they
 //     take context.Context and are implemented by runtime/store; they live
 //     with their consumers in runtime. (Go idiom: interface at the consumer.)
 //   - Projections (actor membership Record/Registry, type_registry TypeRow)

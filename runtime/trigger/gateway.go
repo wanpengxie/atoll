@@ -58,11 +58,11 @@ type DispatchResult struct {
 // envelope has been durably appended. It runs Resolve and hands the
 // resolved audience to the Deliverer for immediate fan-out. Deliver
 // errors are returned so callers can preserve retryability per L1 §6.1.
-func (g *Gateway) Dispatch(ctx context.Context, env *message.Envelope, opts Options) (DispatchResult, error) {
+func (g *Gateway) Dispatch(ctx context.Context, env *message.Envelope) (DispatchResult, error) {
 	if env == nil {
 		return DispatchResult{}, errors.New("trigger: dispatch nil envelope")
 	}
-	audience, err := Resolve(ctx, env, g.registry, opts)
+	audience, err := Resolve(ctx, env, g.registry)
 	if err != nil {
 		return DispatchResult{}, err
 	}

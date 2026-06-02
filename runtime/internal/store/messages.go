@@ -162,7 +162,7 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 		return storespec.AppendResult{}, fmt.Errorf("store: append last id: %w", err)
 	}
 
-	return storespec.AppendResult{Seq: storespec.Seq(seq), IsTerminal: isTerminal}, nil
+	return storespec.AppendResult{Seq: storespec.Seq(seq)}, nil
 }
 
 // MaxSeq returns the highest seq written for the channel (0 when empty). It is
