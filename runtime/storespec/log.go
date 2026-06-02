@@ -12,13 +12,11 @@ import (
 // sequence (L2 §1.4.1 PRIMARY KEY AUTOINCREMENT).
 type Seq int64
 
-// StoredRow wraps a protocol Envelope (17 content+metadata fields) with the
-// store-derived columns kernel deliberately keeps OUT of the pure Envelope
-// (they are store-derived, not protocol fields — kernel-construction-spec
-// §1.2). Read paths return StoredRow; write paths (Append) take the pure
-// envelope + the harness-computed is_terminal and the store allocates seq.
-// (DeliveredAt / LastError stay on the Envelope — L0 §2.5 delivery metadata,
-// part of the wire envelope.)
+// StoredRow wraps a protocol Envelope with the store-derived columns kernel
+// deliberately keeps OUT of the pure Envelope (they are store-derived, not
+// protocol fields — kernel-construction-spec §1.2). Read paths return
+// StoredRow; write paths (Append) take the pure envelope + the
+// harness-computed is_terminal and the store allocates seq.
 type StoredRow struct {
 	Envelope message.Envelope
 
@@ -93,8 +91,6 @@ type MessageQuery interface {
 	MaxSeq(ctx context.Context, channelID channel.ID) (int64, error)
 	// ReadAfterSeq is the client-push tail: envelopes with seq > afterSeq.
 	ReadAfterSeq(ctx context.Context, channelID channel.ID, afterSeq int64, limit int) ([]StoredRow, error)
-	// PendingDue returns future-message rows due for dispatch (not_before<=now).
-	PendingDue(ctx context.Context, nowMs int64, limit int) ([]StoredRow, error)
 	// LongPendingRequests returns requests past expires_at without a terminal.
 	LongPendingRequests(ctx context.Context, nowMs int64, limit int) ([]StoredRow, error)
 	// OpenRequestsForActor returns in-flight requests addressed to actorID.

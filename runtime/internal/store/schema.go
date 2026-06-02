@@ -34,17 +34,13 @@ CREATE TABLE IF NOT EXISTS messages (
   cross_channel_refs   TEXT,
   visibility           TEXT NOT NULL CHECK (visibility IN ('public','private','system')),
   audience             TEXT NOT NULL,
-  not_before           INTEGER,
   expires_at           INTEGER,
-  delivered_at         INTEGER,
-  last_error           TEXT,
   is_terminal          INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0,1))
 );
 
 CREATE INDEX IF NOT EXISTS ix_messages_correlation_ts ON messages(correlation_id, ts_received);
 CREATE INDEX IF NOT EXISTS ix_messages_parent         ON messages(parent_id);
 CREATE INDEX IF NOT EXISTS ix_messages_type_kind      ON messages(type, kind);
-CREATE INDEX IF NOT EXISTS ix_messages_not_before     ON messages(not_before) WHERE not_before IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_messages_expires        ON messages(expires_at) WHERE expires_at IS NOT NULL AND kind='request';
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_terminal_response_per_request

@@ -26,8 +26,8 @@ type Options struct{}
 // registry is the channel-local actor registry the daemon owns.
 //
 // The returned slice is the set of actor.ActorID values the daemon
-// should hand this envelope to via runtime/scheduler.Deliverer. It is
-// deduped + sorted by actor id so the caller observes a stable order.
+// should hand this envelope to via the Deliverer. It is deduped + sorted
+// by actor id so the caller observes a stable order.
 //
 // Addressing semantics (post wildcard removal):
 //

@@ -29,15 +29,16 @@ type CrossChannelRef struct {
 
 // Envelope is the v4 message envelope (pure proto).
 //
-// It carries:
-//   - the content fields from L0 §2.1 (with `sender.kind/id/name`
-//     bundled into the nested Sender object)
-//   - the delivery-metadata fields from L0 §2.5
+// It carries the content fields from L0 §2.1 (with `sender.kind/id/name`
+// bundled into the nested Sender object).
 //
-// Store-derived columns (`seq`, `is_terminal`, `canonical_hash`) and
-// runtime scheduling diagnostics (`delivery_failed_at`, `attempts`) are
-// NOT part of the envelope — they live on the runtime/store row that wraps
-// it (target-state §3.7).
+// Store-derived columns (`seq`, `is_terminal`, `canonical_hash`) are NOT
+// part of the envelope — they live on the runtime/store row that wraps it
+// (target-state §3.7). The substrate carries no delivery/scheduling
+// metadata on the message: delivery outcome is the closure terminal
+// response (three reasons), delivery observability is the recipient
+// cursor, and scheduling is an upstream actor concern — none of which
+// needs a mutable field on the envelope.
 //
 // **Tri-state semantics**:
 //   - ParentID / CorrelationID: empty string ("") means NULL on the wire
@@ -46,13 +47,13 @@ type CrossChannelRef struct {
 //     slice means explicit `[]` (L0 §2.1 "doc_refs 三态").
 //   - CrossChannelRefs (`*[]CrossChannelRef`): nil pointer means NULL;
 //     pointer to empty slice means explicit `[]`.
-//   - NotBefore / ExpiresAt: `*int64` — nil pointer means NULL; otherwise
-//     the timestamp value.
+//   - ExpiresAt: `*int64` — nil pointer means NULL; otherwise the
+//     timestamp value.
 //   - Payload (`json.RawMessage`): empty / null means absent; protocol
 //     baseline requires non-null (L0 §2.2 — `payload={}` legal,
 //     `payload=null` not).
 type Envelope struct {
-	// --- 17 content fields (L0 §2.1) ----------------------------------
+	// --- content fields (L0 §2.1) -------------------------------------
 
 	ID               ID                 `json:"id"`
 	TS               int64              `json:"ts"`
@@ -68,13 +69,7 @@ type Envelope struct {
 	CrossChannelRefs *[]CrossChannelRef `json:"cross_channel_refs,omitempty"`
 	Visibility       Visibility         `json:"visibility"`
 	Audience         Audience           `json:"audience"`
-	NotBefore        *int64             `json:"not_before,omitempty"`
 	ExpiresAt        *int64             `json:"expires_at,omitempty"`
-
-	// --- delivery metadata (L0 §2.5) ----------------------------------
-
-	DeliveredAt *int64 `json:"delivered_at,omitempty"`
-	LastError   string `json:"last_error,omitempty"`
 }
 
 // IsFinalStatus reports whether the given payload.status value belongs
@@ -116,13 +111,5 @@ var ContentFields = []string{
 	"cross_channel_refs",
 	"visibility",
 	"audience",
-	"not_before",
 	"expires_at",
-}
-
-// DeliveryMetadataFields lists delivery-metadata field names from L0
-// §2.5 — written by runtime, not part of envelope content.
-var DeliveryMetadataFields = []string{
-	"delivered_at",
-	"last_error",
 }

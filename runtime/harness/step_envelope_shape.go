@@ -136,18 +136,14 @@ func rejectFieldMissing(detail string) outcome {
 }
 
 // allowedTopLevelEnvelopeKey reports whether key is in the union of
-// proto-layer0 §1.1 content fields ∪ §1.2 delivery metadata ∪ §1.3
-// store-derived columns.
+// proto-layer0 §1.1 content fields ∪ §1.3 store-derived columns.
 func allowedTopLevelEnvelopeKey(key string) bool {
 	switch key {
 	// L0 §1.1 content fields. sender is nested; sender.{kind,id,name}
 	// flatten into the same top-level "sender" key.
 	case "id", "ts", "ts_received", "channel_id", "sender", "kind", "type",
 		"payload", "parent_id", "correlation_id", "doc_refs",
-		"cross_channel_refs", "visibility", "audience", "not_before", "expires_at":
-		return true
-	// L0 §1.2 delivery metadata.
-	case "delivered_at", "last_error":
+		"cross_channel_refs", "visibility", "audience", "expires_at":
 		return true
 	// L0 §1.3 store-derived columns.
 	case "is_terminal", "seq":

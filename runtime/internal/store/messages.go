@@ -137,10 +137,9 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 	   sender_kind, sender_id,
 	   kind, type, payload,
 	   parent_id, correlation_id, doc_refs, cross_channel_refs,
-	   visibility, audience, not_before, expires_at,
-	   delivered_at, last_error,
+	   visibility, audience, expires_at,
 	   is_terminal
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	terminalInt := 0
 	if isTerminal {
@@ -152,9 +151,7 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 		string(env.Kind), env.Type, string(env.Payload),
 		nullableString(string(env.ParentID)), nullableString(string(env.CorrelationID)), nullableString(docRefsJSON), nullableString(crossRefsJSON),
 		env.Visibility, string(audJSON),
-		nullableInt(env.NotBefore), nullableInt(env.ExpiresAt),
-		nullableInt(env.DeliveredAt),
-		nullableString(env.LastError),
+		nullableInt(env.ExpiresAt),
 		terminalInt,
 	)
 	if err != nil {
@@ -166,50 +163,6 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 	}
 
 	return storespec.AppendResult{Seq: storespec.Seq(seq), IsTerminal: isTerminal}, nil
-}
-
-// PendingDue returns up to `limit` future-message rows that are due for
-// dispatch: `not_before IS NOT NULL AND not_before <= ? AND
-// delivered_at IS NULL`. Ordered by seq ASC so the scheduler ticks the
-// oldest backlog first (matches L1 §5.3 + §6.4 monotonic processing).
-//
-// `limit <= 0` is clamped to 64 — a bounded per-channel page so the
-// scheduler tick has a bounded cost.
-func (m *messages) PendingDue(ctx context.Context, nowMs int64, limit int) ([]storespec.StoredRow, error) {
-	if limit <= 0 {
-		limit = 64
-	}
-	const q = `SELECT id, ts, ts_received, channel_id,
-	                  sender_kind, sender_id,
-	                  kind, type, payload,
-	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
-	                  visibility, audience,
-	                  not_before, expires_at,
-	                  delivered_at, COALESCE(last_error,''),
-	                  is_terminal, seq
-	             FROM messages
-	             WHERE not_before IS NOT NULL
-	               AND not_before <= ?
-	               AND delivered_at IS NULL
-	             ORDER BY seq ASC LIMIT ?`
-	rows, err := m.db.QueryContext(ctx, q, nowMs, limit)
-	if err != nil {
-		return nil, fmt.Errorf("store: pending due: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []storespec.StoredRow
-	for rows.Next() {
-		env, err := scanEnvelopeRows(rows)
-		if err != nil {
-			return nil, fmt.Errorf("store: pending due scan: %w", err)
-		}
-		out = append(out, env)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: pending due rows: %w", err)
-	}
-	return out, nil
 }
 
 // MaxSeq returns the highest seq written for the channel (0 when empty). It is
@@ -237,8 +190,7 @@ func (m *messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, after
 	                  kind, type, payload,
 	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
-	                  not_before, expires_at,
-	                  delivered_at, COALESCE(last_error,''),
+	                  expires_at,
 	                  is_terminal, seq
 	             FROM messages
 	             WHERE channel_id = ? AND seq > ?
@@ -280,8 +232,8 @@ func (m *messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, after
 //     request. If one is already on disk we
 //     skip this row.
 //
-// `limit <= 0` clamps to 64 — matches PendingDue's bounded page so a
-// single scheduler tick has bounded per-channel cost.
+// `limit <= 0` clamps to 64 — a bounded per-channel page so a single
+// scan tick has bounded cost.
 // Ordered by seq ASC so the oldest backlog is drained first (matches L1
 // §6.4 monotonic processing semantics).
 //
@@ -300,8 +252,7 @@ func (m *messages) LongPendingRequests(ctx context.Context, nowMs int64, limit i
 	                  kind, type, payload,
 	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
-	                  not_before, expires_at,
-	                  delivered_at, COALESCE(last_error,''),
+	                  expires_at,
 	                  is_terminal, seq
 	             FROM messages m
 	             WHERE m.kind = 'request'
@@ -351,8 +302,7 @@ func (m *messages) OpenRequestsForActor(ctx context.Context, actorID actor.Actor
 	                  kind, type, payload,
 	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
-	                  not_before, expires_at,
-	                  delivered_at, COALESCE(last_error,''),
+	                  expires_at,
 	                  is_terminal, seq
 	             FROM messages m
 	             WHERE m.kind = 'request'
@@ -451,8 +401,7 @@ func (m *messages) FindByID(ctx context.Context, channelID channel.ID, id messag
 	                  kind, type, payload,
 	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
-	                  not_before, expires_at,
-	                  delivered_at, COALESCE(last_error,''),
+	                  expires_at,
 	                  is_terminal, seq
 	             FROM messages WHERE id=?`
 	row := m.db.QueryRowContext(ctx, q, id)
@@ -466,8 +415,8 @@ func (m *messages) FindByID(ctx context.Context, channelID channel.ID, id messag
 	return &sr, true, nil
 }
 
-// rowScanner abstracts *sql.Row / *sql.Rows for the Scan call so
-// PendingDue (multi-row) can share the materialization code with FindByID.
+// rowScanner abstracts *sql.Row / *sql.Rows for the Scan call so the
+// multi-row read paths can share the materialization code with FindByID.
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -484,15 +433,15 @@ func scanEnvelopeRows(rows *sql.Rows) (storespec.StoredRow, error) {
 }
 
 // scanEnvelopeFrom is the shared implementation. It returns a StoredRow:
-// the pure Envelope (17 fields + delivery metadata) plus the store-derived
-// columns (seq / is_terminal) that kernel keeps off the envelope.
+// the pure Envelope plus the store-derived columns (seq / is_terminal)
+// that kernel keeps off the envelope.
 func scanEnvelopeFrom(s rowScanner) (storespec.StoredRow, error) {
 	var sr storespec.StoredRow
 	env := &sr.Envelope
 	var kind, sKind, senderID, vis string
 	var audJSON, payloadStr string
 	var docRefsStr, crossRefsStr sql.NullString
-	var notBefore, expiresAt, deliveredAt sql.NullInt64
+	var expiresAt sql.NullInt64
 	var termInt int
 	if err := s.Scan(
 		&env.ID, &env.TS, &env.TSReceived, &env.ChannelID,
@@ -500,8 +449,7 @@ func scanEnvelopeFrom(s rowScanner) (storespec.StoredRow, error) {
 		&kind, &env.Type, &payloadStr,
 		&env.ParentID, &env.CorrelationID, &docRefsStr, &crossRefsStr,
 		&vis, &audJSON,
-		&notBefore, &expiresAt,
-		&deliveredAt, &env.LastError,
+		&expiresAt,
 		&termInt, &sr.Seq,
 	); err != nil {
 		return storespec.StoredRow{}, err
@@ -528,17 +476,9 @@ func scanEnvelopeFrom(s rowScanner) (storespec.StoredRow, error) {
 		}
 		env.CrossChannelRefs = &refs
 	}
-	if notBefore.Valid {
-		v := notBefore.Int64
-		env.NotBefore = &v
-	}
 	if expiresAt.Valid {
 		v := expiresAt.Int64
 		env.ExpiresAt = &v
-	}
-	if deliveredAt.Valid {
-		v := deliveredAt.Int64
-		env.DeliveredAt = &v
 	}
 	sr.IsTerminal = termInt == 1
 	return sr, nil

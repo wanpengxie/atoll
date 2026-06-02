@@ -11,8 +11,7 @@ import (
 // audience / visibility / kind / correlation_id / payload baseline, plus
 // the §2.4 time-relation guard run AFTER the default-fill phase:
 //
-//   - not_before defaults to ts when absent; not_before >= ts is required.
-//   - expires_at, when present, must be > ts and > not_before.
+//   - expires_at, when present, must be > ts.
 //
 // Violations reject with harness_time_invalid. All other normalize
 // branches are pure data-fill and never reject.
@@ -35,8 +34,6 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (outcome
 	// these before StepResponsePairing / EngineAppend materialize the
 	// authoritative values.
 	env.TSReceived = 0
-	env.DeliveredAt = nil
-	env.LastError = ""
 
 	// audience is now caller-owned (post wildcard removal). nil ≠ empty
 	// for downstream step 5 audience cardinality check: nil treated as
@@ -86,32 +83,13 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (outcome
 		env.TS = s.deps.NowMs()
 	}
 
-	// not_before default — proto-layer0 §4.5: unset == ts.
-	if env.NotBefore == nil {
-		nb := env.TS
-		env.NotBefore = &nb
-	}
-
-	// time-relation guard — proto-layer1 §2.4 / proto-layer0 §4.5.
-	if env.NotBefore != nil && *env.NotBefore < env.TS {
+	// time-relation guard — proto-layer1 §2.4. expires_at, when present,
+	// must be strictly after ts.
+	if env.ExpiresAt != nil && *env.ExpiresAt <= env.TS {
 		return outcome{
 			RejectReason: HarnessTimeInvalid,
-			Detail:       "envelope.not_before < envelope.ts",
+			Detail:       "envelope.expires_at <= envelope.ts",
 		}, nil
-	}
-	if env.ExpiresAt != nil {
-		if *env.ExpiresAt <= env.TS {
-			return outcome{
-				RejectReason: HarnessTimeInvalid,
-				Detail:       "envelope.expires_at <= envelope.ts",
-			}, nil
-		}
-		if env.NotBefore != nil && *env.ExpiresAt <= *env.NotBefore {
-			return outcome{
-				RejectReason: HarnessTimeInvalid,
-				Detail:       "envelope.expires_at <= envelope.not_before",
-			}, nil
-		}
 	}
 
 	return outcome{}, nil
