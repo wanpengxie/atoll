@@ -14,6 +14,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/wire/computebus"
 )
 
@@ -112,8 +113,14 @@ func (f *Fleet) handleFrame(ctx context.Context, conn *computeConn, fr computebu
 			return
 		}
 		// Write the compute cell's output into channel truth via the home
-		// harness, then ack the WriteResult back so the cell observes it.
-		res, err := f.chain.Write(ctx, fr.Emit.Envelope)
+		// harness, then ack the WriteResult back so the cell observes it. Stamp
+		// the caller identity from EmitFrame.Source so the harness ACL
+		// authenticates the write (and a compute can't emit AS another actor —
+		// step 1/3 compare envelope.sender.id against this principal).
+		cctx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{
+			ActorID: fr.Emit.Source, ChannelID: fr.Emit.Envelope.ChannelID, AllowProvidedSenderKind: true,
+		})
+		res, err := f.chain.Write(cctx, fr.Emit.Envelope)
 		ack := computebus.EmitAck{EmitID: fr.EmitID, MessageID: res.MessageID, RejectReason: string(res.RejectReason)}
 		if err != nil {
 			ack.Err = err.Error()

@@ -10,6 +10,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	khrn "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/lib/adapterhost"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/lib/channelkit"
 	"github.com/wanpengxie/ActOS/lib/sysactor"
@@ -86,6 +87,35 @@ func (h *ChannelHome) ClosurePass(ctx context.Context) {
 		cctx := harness.CtxWithCaller(ctx, harness.CallerContext{ActorID: req.Sender.ID, ChannelID: h.channelID, AllowProvidedSenderKind: true})
 		_, _ = h.chain.Write(cctx, term)
 	}
+}
+
+// InstallEmbeddedAdapter hosts an embedded-binding adapter as a real cell ON THE
+// HOME (co-located with truth — binding=embedded means no relay/compute hop). It
+// wires every home-side InstallDeps seam DIRECTLY (Registry/TypeReg/Lookup/Chain
+// all point at home truth, no uplink), registers the actor, publishes its type
+// rows, and spawns the cell into channelkit. This is the P0 "hosts something"
+// path: a request dispatched here reaches the cell's Handle and its Respond
+// writes a real terminal back into truth — the full happy path, end to end.
+func (h *ChannelHome) InstallEmbeddedAdapter(ctx context.Context, mod behavior.Module) (actor.ActorID, error) {
+	decl := mod.Declares()
+	// The embedded actor must exist in truth before Install validates it (and so
+	// its responses sender-authenticate through the harness).
+	if err := h.registry.Insert(ctx, actor.Record{ID: decl.ActorID, Kind: actor.KindTool, Binding: decl.Binding}); err != nil {
+		return "", fmt.Errorf("channelhost: register embedded actor %s: %w", decl.ActorID, err)
+	}
+	res, err := adapterhost.Install(ctx, mod, adapterhost.InstallDeps{
+		ChannelID: h.channelID,
+		Chain:     h.chain,
+		Lookup:    h.lookup,
+		Registry:  h.registry,
+		TypeReg:   h.typeReg,
+		Clock:     func() time.Time { return time.UnixMilli(h.nowMs()) },
+	})
+	if err != nil {
+		return "", err
+	}
+	h.channel.Cells().Spawn(res.ActorID, res.Actor)
+	return res.ActorID, nil
 }
 
 // MaterialiseComputeDeath is the home-side收口 for a death that happened on an

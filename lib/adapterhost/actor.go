@@ -13,6 +13,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
+	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // tickType is the internal self-schedule signal an adapterActor delivers to
@@ -153,6 +154,19 @@ func (a *adapterActor) buildResponse(ctx context.Context, requestID behavior.Cor
 	return nil, fmt.Errorf("adapterhost: request %s neither cached nor lookupable", requestID)
 }
 
+// writeCtx stamps the adapter's OWN caller identity onto ctx so the home harness
+// ACL (steps 0/1/3) authenticates the write as this adapter actor. Every chain
+// write the cell makes (respond/provisional/event/internal-error) goes through
+// here — without it the harness rejects the write as harness_engine_acl_denied
+// "missing caller context" and the caller hangs forever. For a compute cell
+// whose chain is an UplinkChain this is harmless: ctx is not serialised over the
+// wire, so the home's fleet re-stamps from EmitFrame.Source on arrival.
+func (a *adapterActor) writeCtx(ctx context.Context) context.Context {
+	return rtharness.CtxWithCaller(ctx, rtharness.CallerContext{
+		ActorID: a.self, ChannelID: a.channelID, AllowProvidedSenderKind: true,
+	})
+}
+
 // --- actorrt.Actor ---
 
 // Receive dispatches one envelope SERIALLY on the cell goroutine (collapse of
@@ -231,7 +245,7 @@ func (a *adapterActor) collapseInternalError(ctx context.Context, key behavior.C
 	if berr != nil {
 		return berr
 	}
-	if _, werr := a.chain.Write(ctx, term); werr != nil {
+	if _, werr := a.chain.Write(a.writeCtx(ctx), term); werr != nil {
 		return werr
 	}
 	a.markDone(key)

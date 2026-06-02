@@ -106,7 +106,7 @@ func (a *adapterActor) doRespond(ctx context.Context, requestID behavior.Correla
 	if err != nil {
 		return behavior.RespondResult{}, err
 	}
-	res, err := a.chain.Write(ctx, env)
+	res, err := a.chain.Write(a.writeCtx(ctx), env)
 	if err != nil {
 		return behavior.RespondResult{}, fmt.Errorf("adapterhost: respond chain write: %w", err)
 	}
@@ -136,7 +136,7 @@ func (a *adapterActor) doProvisional(ctx context.Context, requestID behavior.Cor
 	if err != nil {
 		return behavior.RespondResult{}, err
 	}
-	res, err := a.chain.Write(ctx, env)
+	res, err := a.chain.Write(a.writeCtx(ctx), env)
 	if err != nil {
 		return behavior.RespondResult{}, fmt.Errorf("adapterhost: provisional chain write: %w", err)
 	}
@@ -166,7 +166,7 @@ func (a *adapterActor) doEmitEvent(ctx context.Context, eventType string, payloa
 		Visibility: opts.Visibility,
 		Audience:   opts.Audience,
 	}
-	res, err := a.chain.Write(ctx, env)
+	res, err := a.chain.Write(a.writeCtx(ctx), env)
 	if err != nil {
 		return "", fmt.Errorf("adapterhost: emit chain write: %w", err)
 	}
