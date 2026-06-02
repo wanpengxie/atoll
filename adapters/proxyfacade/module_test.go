@@ -1,4 +1,4 @@
-package proxy_facade
+package proxyfacade
 
 import (
 	"context"
@@ -6,9 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/framework/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/actorreg"
+	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/adapter"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -46,8 +45,8 @@ func TestProxyFacadeHandleSendsEnvelopeViaDeviceTransit(t *testing.T) {
 		Provisional: func(context.Context, adapter.CorrelationKey, string, json.RawMessage, adapter.ProvisionalOptions) (adapter.RespondResult, error) {
 			return adapter.RespondResult{}, nil
 		},
-		UpdateReadiness: func(context.Context, actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
-			return actorreg.ReadinessTransition{}, nil
+		UpdateReadiness: func(context.Context, actor.ReadinessUpdate) (actor.ReadinessTransition, error) {
+			return actor.ReadinessTransition{}, nil
 		},
 		ForwardExternalRequest: func(_ context.Context, env *message.Envelope, payload adapter.ExternalRequestPayload) (adapter.ExternalRequestResult, error) {
 			capture.channelID = env.ChannelID
@@ -105,8 +104,8 @@ func TestProxyFacadeCallbackWritesEnvelope(t *testing.T) {
 		Provisional: func(context.Context, adapter.CorrelationKey, string, json.RawMessage, adapter.ProvisionalOptions) (adapter.RespondResult, error) {
 			return adapter.RespondResult{}, nil
 		},
-		UpdateReadiness: func(context.Context, actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
-			return actorreg.ReadinessTransition{}, nil
+		UpdateReadiness: func(context.Context, actor.ReadinessUpdate) (actor.ReadinessTransition, error) {
+			return actor.ReadinessTransition{}, nil
 		},
 		Resolve: func(_ context.Context, id adapter.RequestID, r adapter.ResolveRequest) error {
 			capture.resolved = true
@@ -181,9 +180,9 @@ func TestProxyFacadeReadinessRejectsForgedAuthority(t *testing.T) {
 		Provisional: func(context.Context, adapter.CorrelationKey, string, json.RawMessage, adapter.ProvisionalOptions) (adapter.RespondResult, error) {
 			return adapter.RespondResult{}, nil
 		},
-		UpdateReadiness: func(context.Context, actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
+		UpdateReadiness: func(context.Context, actor.ReadinessUpdate) (actor.ReadinessTransition, error) {
 			updates++
-			return actorreg.ReadinessTransition{}, nil
+			return actor.ReadinessTransition{}, nil
 		},
 	}); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -318,8 +317,8 @@ func newModuleWithCapture(t *testing.T) (*ProxyFacadeModule, *captureCalls) {
 			})
 			return adapter.RespondResult{MessageID: "msg-prov"}, nil
 		},
-		UpdateReadiness: func(context.Context, actorreg.ReadinessUpdate) (actorreg.ReadinessTransition, error) {
-			return actorreg.ReadinessTransition{}, nil
+		UpdateReadiness: func(context.Context, actor.ReadinessUpdate) (actor.ReadinessTransition, error) {
+			return actor.ReadinessTransition{}, nil
 		},
 		LookupPendingRequest: func(_ context.Context, requestID adapter.CorrelationKey) (adapter.CorrelationEntry, bool, error) {
 			entry, ok := calls.pending[requestID]

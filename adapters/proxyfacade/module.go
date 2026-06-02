@@ -1,6 +1,6 @@
 // Package proxy_facade provides the cloud-daemon-side facade for actors
 // hosted behind the proxy daemon v2 transport.
-package proxy_facade
+package proxyfacade
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wanpengxie/ActOS/framework/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/kernel/message"
