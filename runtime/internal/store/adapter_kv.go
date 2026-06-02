@@ -13,24 +13,24 @@ var (
 	errAdapterCredentialKeyRequired = errors.New("store: adapter credential key required")
 )
 
-// AdapterStateStore is the channel-sqlite implementation of the adapter
+// adapterStateStore is the channel-sqlite implementation of the adapter
 // framework StateStore contract. It intentionally does not import
 // adapters/framework; cmd/daemon wires it by structural typing.
-type AdapterStateStore struct {
+type adapterStateStore struct {
 	db    *sql.DB
 	nowFn func() int64
 }
 
 // NewAdapterStateStore returns a persistent key/value store backed by the
 // channel-local adapter_state table.
-func newAdapterStateStore(db *sql.DB, nowFn func() int64) *AdapterStateStore {
+func newAdapterStateStore(db *sql.DB, nowFn func() int64) *adapterStateStore {
 	if nowFn == nil {
 		nowFn = func() int64 { return time.Now().UnixMilli() }
 	}
-	return &AdapterStateStore{db: db, nowFn: nowFn}
+	return &adapterStateStore{db: db, nowFn: nowFn}
 }
 
-func (s *AdapterStateStore) Get(ctx context.Context, key string) ([]byte, bool, error) {
+func (s *adapterStateStore) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	var value []byte
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM adapter_state WHERE key = ?`, key).Scan(&value)
 	if err != nil {
@@ -44,7 +44,7 @@ func (s *AdapterStateStore) Get(ctx context.Context, key string) ([]byte, bool, 
 	return out, true, nil
 }
 
-func (s *AdapterStateStore) Put(ctx context.Context, key string, value []byte) error {
+func (s *adapterStateStore) Put(ctx context.Context, key string, value []byte) error {
 	if key == "" {
 		return errAdapterStateKeyRequired
 	}
@@ -64,7 +64,7 @@ func (s *AdapterStateStore) Put(ctx context.Context, key string, value []byte) e
 	return nil
 }
 
-func (s *AdapterStateStore) Delete(ctx context.Context, key string) error {
+func (s *adapterStateStore) Delete(ctx context.Context, key string) error {
 	if key == "" {
 		return errAdapterStateKeyRequired
 	}
@@ -74,7 +74,7 @@ func (s *AdapterStateStore) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-func (s *AdapterStateStore) List(ctx context.Context, prefix string) ([]string, error) {
+func (s *adapterStateStore) List(ctx context.Context, prefix string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT key FROM adapter_state
 		  WHERE substr(key, 1, ?) = ?
@@ -99,26 +99,26 @@ func (s *AdapterStateStore) List(ctx context.Context, prefix string) ([]string, 
 	return out, nil
 }
 
-// AdapterCredentialStore persists adapter credentials in channel sqlite.
+// adapterCredentialStore persists adapter credentials in channel sqlite.
 // It satisfies adapters/framework.CredentialStore by structural typing.
-type AdapterCredentialStore struct {
+type adapterCredentialStore struct {
 	db    *sql.DB
 	nowFn func() int64
 	box   SecretBox
 }
 
 // NewAdapterCredentialStore returns a persistent credential key/value store.
-func newAdapterCredentialStore(db *sql.DB, nowFn func() int64, box SecretBox) (*AdapterCredentialStore, error) {
+func newAdapterCredentialStore(db *sql.DB, nowFn func() int64, box SecretBox) (*adapterCredentialStore, error) {
 	if box == nil {
 		return nil, errors.New("store: adapter credential SecretBox required")
 	}
 	if nowFn == nil {
 		nowFn = func() int64 { return time.Now().UnixMilli() }
 	}
-	return &AdapterCredentialStore{db: db, nowFn: nowFn, box: box}, nil
+	return &adapterCredentialStore{db: db, nowFn: nowFn, box: box}, nil
 }
 
-func (s *AdapterCredentialStore) Get(ctx context.Context, key string) (string, bool, error) {
+func (s *adapterCredentialStore) Get(ctx context.Context, key string) (string, bool, error) {
 	var value string
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM adapter_credentials WHERE key = ?`, key).Scan(&value)
 	if err != nil {
@@ -134,7 +134,7 @@ func (s *AdapterCredentialStore) Get(ctx context.Context, key string) (string, b
 	return string(plaintext), true, nil
 }
 
-func (s *AdapterCredentialStore) Put(ctx context.Context, key, value string) error {
+func (s *adapterCredentialStore) Put(ctx context.Context, key, value string) error {
 	if key == "" {
 		return errAdapterCredentialKeyRequired
 	}
@@ -156,7 +156,7 @@ func (s *AdapterCredentialStore) Put(ctx context.Context, key, value string) err
 	return nil
 }
 
-func (s *AdapterCredentialStore) Delete(ctx context.Context, key string) error {
+func (s *adapterCredentialStore) Delete(ctx context.Context, key string) error {
 	if key == "" {
 		return errAdapterCredentialKeyRequired
 	}

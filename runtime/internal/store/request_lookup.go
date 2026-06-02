@@ -8,31 +8,31 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// RequestLookup is the sqlite-backed implementation of
+// requestLookupStore is the sqlite-backed implementation of
 // kernel/storespec.RequestLookup over a channel's messages table. It is a
-// thin wrapper around store.Messages.FindByID that adapts the
+// thin wrapper around store.messages.FindByID that adapts the
 // value-typed Envelope return to the pointer-typed contract Manager
 // expects (so callers can mutate the envelope when constructing
 // response patches).
 //
-// One *RequestLookup per channel sqlite. Safe for concurrent use.
-type RequestLookup struct {
-	messages  *Messages
+// One *requestLookupStore per channel sqlite. Safe for concurrent use.
+type requestLookupStore struct {
+	messages  *messages
 	channelID channel.ID
 }
 
-// NewRequestLookup wraps a Messages store. channelID is plumbed for
-// safety even though Messages already scopes by per-channel sqlite —
+// NewRequestLookup wraps a messages store. channelID is plumbed for
+// safety even though messages already scopes by per-channel sqlite —
 // keeping the parameter makes the cross-channel invariant explicit and
-// future-proofs the wiring should the same Messages instance ever
+// future-proofs the wiring should the same messages instance ever
 // service multiple channels.
-func newRequestLookup(messages *Messages, channelID channel.ID) *RequestLookup {
-	return &RequestLookup{messages: messages, channelID: channelID}
+func newRequestLookup(messages *messages, channelID channel.ID) *requestLookupStore {
+	return &requestLookupStore{messages: messages, channelID: channelID}
 }
 
 // FindByID satisfies kernel/storespec.RequestLookup. Returns nil envelope
 // + ok=false when the row is missing.
-func (r *RequestLookup) FindByID(ctx context.Context, id message.ID) (*message.Envelope, bool, error) {
+func (r *requestLookupStore) FindByID(ctx context.Context, id message.ID) (*message.Envelope, bool, error) {
 	env, ok, err := r.messages.FindByID(ctx, r.channelID, id)
 	if err != nil {
 		return nil, false, err
@@ -44,4 +44,4 @@ func (r *RequestLookup) FindByID(ctx context.Context, id message.ID) (*message.E
 }
 
 // Compile-time interface check.
-var _ storespec.RequestLookup = (*RequestLookup)(nil)
+var _ storespec.RequestLookup = (*requestLookupStore)(nil)

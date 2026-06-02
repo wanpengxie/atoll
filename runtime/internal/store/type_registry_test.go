@@ -11,8 +11,8 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/internal/store"
 )
 
-// openChannelDB is the helper used by every TypeRegistry test.
-func openChannelDB(t *testing.T) *store.TypeRegistry {
+// openChannelDB is the helper used by every typeRegistryStore test.
+func openChannelDB(t *testing.T) *store.typeRegistryStore {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()

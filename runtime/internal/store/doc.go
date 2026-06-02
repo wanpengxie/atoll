@@ -3,7 +3,7 @@
 //
 // CONFINEMENT (Go internal/): this package lives under runtime/internal so the
 // compiler restricts it to runtime/... importers. The raw channel-log write
-// (Messages.Append — the only harness-bypassing INSERT into messages) is thus
+// (messages.Append — the only harness-bypassing INSERT into messages) is thus
 // physically unreachable from business code (lib/**, adapters/**) and from
 // downstream hosts (server/**, cmd/**). The outside world receives storespec
 // INTERFACES (read/append ports) + named control-plane ops, never the concrete

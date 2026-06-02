@@ -14,19 +14,19 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// ActorRegistry implements kernel/storespec.Registry over a channel-local
-// sqlite. Each *ActorRegistry is bound to one channel database.
-type ActorRegistry struct {
+// actorRegistry implements kernel/storespec.Registry over a channel-local
+// sqlite. Each *actorRegistry is bound to one channel database.
+type actorRegistry struct {
 	db *sql.DB
 }
 
 // NewActorRegistry returns a registry over the given channel sqlite.
 // (v2: no fence / outbox — single writer by construction; the v1
 // framework-owned same-tx projection is removed.)
-func newActorRegistry(db *sql.DB) *ActorRegistry { return &ActorRegistry{db: db} }
+func newActorRegistry(db *sql.DB) *actorRegistry { return &actorRegistry{db: db} }
 
 // Lookup implements storespec.Registry.
-func (r *ActorRegistry) Lookup(ctx context.Context, id actor.ActorID) (storespec.Record, bool, error) {
+func (r *actorRegistry) Lookup(ctx context.Context, id actor.ActorID) (storespec.Record, bool, error) {
 	const q = `SELECT actor_id, actor_kind, COALESCE(actor_binding,''),
 	                 COALESCE(display_name,''), created_at,
 	                 COALESCE(deregistered_at,0),
@@ -58,7 +58,7 @@ func (r *ActorRegistry) Lookup(ctx context.Context, id actor.ActorID) (storespec
 }
 
 // Exists implements storespec.Registry — returns true even for soft-deregistered.
-func (r *ActorRegistry) Exists(ctx context.Context, id actor.ActorID) (bool, error) {
+func (r *actorRegistry) Exists(ctx context.Context, id actor.ActorID) (bool, error) {
 	const q = `SELECT 1 FROM actor_registry WHERE actor_id=? LIMIT 1`
 	var one int
 	err := r.db.QueryRowContext(ctx, q, string(id)).Scan(&one)
@@ -72,7 +72,7 @@ func (r *ActorRegistry) Exists(ctx context.Context, id actor.ActorID) (bool, err
 }
 
 // ListActive implements storespec.Registry.
-func (r *ActorRegistry) ListActive(ctx context.Context) ([]storespec.Record, error) {
+func (r *actorRegistry) ListActive(ctx context.Context) ([]storespec.Record, error) {
 	const q = `SELECT actor_id, actor_kind, COALESCE(actor_binding,''),
 	                 COALESCE(display_name,''), created_at,
 	                 COALESCE(ready_state,'unknown'),
@@ -113,7 +113,7 @@ func (r *ActorRegistry) ListActive(ctx context.Context) ([]storespec.Record, err
 
 // Insert implements storespec.Registry. Per L2 §1.4.6 invariant, the
 // actor_cursors row is seeded in the same transaction.
-func (r *ActorRegistry) Insert(ctx context.Context, rec storespec.Record) error {
+func (r *actorRegistry) Insert(ctx context.Context, rec storespec.Record) error {
 	if rec.ID == "" {
 		return errors.New("store: actor insert: empty ID")
 	}
@@ -165,7 +165,7 @@ func (r *ActorRegistry) Insert(ctx context.Context, rec storespec.Record) error 
 }
 
 // Deregister implements storespec.Registry.
-func (r *ActorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int64) error {
+func (r *actorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int64) error {
 	const q = `UPDATE actor_registry SET deregistered_at=? WHERE actor_id=? AND deregistered_at IS NULL`
 	res, err := r.db.ExecContext(ctx, q, at, string(id))
 	if err != nil {
@@ -181,7 +181,7 @@ func (r *ActorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int
 
 // UpdateReadiness writes the actor_registry readiness projection and
 // reports whether the externally visible state/reason changed.
-func (r *ActorRegistry) UpdateReadiness(ctx context.Context, id actor.ActorID, update storespec.ReadinessUpdate) (storespec.ReadinessTransition, error) {
+func (r *actorRegistry) UpdateReadiness(ctx context.Context, id actor.ActorID, update storespec.ReadinessUpdate) (storespec.ReadinessTransition, error) {
 	if id == "" {
 		return storespec.ReadinessTransition{}, errors.New("store: actor readiness update: empty ID")
 	}
@@ -272,7 +272,7 @@ func (r *ActorRegistry) UpdateReadiness(ctx context.Context, id actor.ActorID, u
 // system.actor.* mirror events in one sqlite transaction. Duplicate retries
 // are idempotent: already-active adds and already-deregistered removes do not
 // append a second event.
-func (r *ActorRegistry) ApplyMemberTransitions(
+func (r *actorRegistry) ApplyMemberTransitions(
 	ctx context.Context,
 	channelID channel.ID,
 	adds []storespec.MemberActorAdd,
@@ -370,7 +370,7 @@ func (r *ActorRegistry) ApplyMemberTransitions(
 // actor_registry projection nor any live wiring, so a Reconciler that
 // rebuilds from this alone is replay-correct after a daemon restart or a
 // cleared in-process wiring table.
-func (r *ActorRegistry) ListDesiredProxyMembers(ctx context.Context) ([]storespec.DesiredProxyMember, error) {
+func (r *actorRegistry) ListDesiredProxyMembers(ctx context.Context) ([]storespec.DesiredProxyMember, error) {
 	const q = `SELECT type, payload
 	             FROM messages
 	            WHERE type IN ('system.actor.registered','system.actor.deregistered')
@@ -434,7 +434,7 @@ func (r *ActorRegistry) ListDesiredProxyMembers(ctx context.Context) ([]storespe
 	return out, nil
 }
 
-func (r *ActorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add storespec.MemberActorAdd) (bool, error) {
+func (r *actorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add storespec.MemberActorAdd) (bool, error) {
 	var deregistered sql.NullInt64
 	err := tx.QueryRowContext(ctx, `SELECT deregistered_at FROM actor_registry WHERE actor_id=?`, string(add.ID)).Scan(&deregistered)
 	switch {
@@ -499,7 +499,7 @@ func (r *ActorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add st
 	}
 }
 
-func (r *ActorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, remove storespec.MemberActorRemove) (bool, error) {
+func (r *actorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, remove storespec.MemberActorRemove) (bool, error) {
 	res, err := tx.ExecContext(ctx,
 		`UPDATE actor_registry SET deregistered_at=? WHERE actor_id=? AND deregistered_at IS NULL`,
 		remove.At, string(remove.ID),

@@ -11,16 +11,16 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// Cursors implements kernel/storespec.Cursors over the actor_cursors table.
-type Cursors struct {
+// cursorStore implements kernel/storespec.Cursors over the actor_cursors table.
+type cursorStore struct {
 	db *sql.DB
 }
 
-// NewCursors returns a Cursors bound to the channel sqlite.
-func newCursors(db *sql.DB) *Cursors { return &Cursors{db: db} }
+// NewCursors returns a cursorStore bound to the channel sqlite.
+func newCursors(db *sql.DB) *cursorStore { return &cursorStore{db: db} }
 
 // Get implements storespec.Cursors.
-func (c *Cursors) Get(ctx context.Context, actorID actor.ActorID) (storespec.Cursor, bool, error) {
+func (c *cursorStore) Get(ctx context.Context, actorID actor.ActorID) (storespec.Cursor, bool, error) {
 	const q = `SELECT actor_id, last_consumed_seq, COALESCE(last_consumed_id,''), updated_at
 	            FROM actor_cursors WHERE actor_id=?`
 	var cur storespec.Cursor
@@ -38,7 +38,7 @@ func (c *Cursors) Get(ctx context.Context, actorID actor.ActorID) (storespec.Cur
 
 // Advance implements storespec.Cursors. Monotonic CAS — silently no-op when
 // newSeq <= current last_consumed_seq (returns ok=false, err=nil).
-func (c *Cursors) Advance(
+func (c *cursorStore) Advance(
 	ctx context.Context,
 	actorID actor.ActorID,
 	newSeq storespec.Seq,

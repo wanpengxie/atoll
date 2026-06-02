@@ -120,7 +120,7 @@ func TestAdapterCredentialStoreEncryptsSQLiteValue(t *testing.T) {
 	}
 }
 
-func newTestAdapterCredentialStore(t *testing.T, db *sql.DB, nowFn func() int64) *store.AdapterCredentialStore {
+func newTestAdapterCredentialStore(t *testing.T, db *sql.DB, nowFn func() int64) *store.adapterCredentialStore {
 	t.Helper()
 	box, err := store.NewAESGCMSecretBox(bytes.Repeat([]byte{0x42}, 32))
 	if err != nil {

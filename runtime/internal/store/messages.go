@@ -14,9 +14,9 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// Messages implements kernel/storespec.MessageLog over the messages table.
+// messages implements kernel/storespec.MessageLog over the messages table.
 //
-// Per L2 §1.4.5 engine-append ACL, Messages is a PURE PERSISTENCE SINK:
+// Per L2 §1.4.5 engine-append ACL, messages is a PURE PERSISTENCE SINK:
 // every caller MUST run the L1 §10.2 9-step Message-Write Harness chain
 // FIRST (runtime/harness.Chain). The chain is the only legitimate
 // principal that may call Append; agent / worker / adapter / control
@@ -45,23 +45,23 @@ import (
 // neither validates nor recomputes the value. This keeps store layer-
 // independent of type_registry semantics and keeps the harness as the
 // single source of truth for terminal classification.
-type Messages struct {
+type messages struct {
 	db *sql.DB
 }
 
-// NewMessages returns a *Messages bound to the channel sqlite.
+// NewMessages returns a *messages bound to the channel sqlite.
 //
 // v2: no fencing — the channel has a SINGLE writer (server harness) by
 // construction (proto-v2-physical §4), so the channel-write fence is
 // obsolete. No outbox observer — the v1 framework-owned same-tx side-table
 // projection is removed (truth lives on server; client push is the gateway
 // seam).
-func newMessages(db *sql.DB) *Messages { return &Messages{db: db} }
+func newMessages(db *sql.DB) *messages { return &messages{db: db} }
 
 // Append implements storespec.MessageLog. The harness supplies the
 // pre-computed is_terminal (step 8) + canonical_hash (step dedupe) since the
 // pure envelope no longer carries those store-derived columns.
-func (m *Messages) Append(ctx context.Context, env *message.Envelope, isTerminal bool, canonicalHash string) (storespec.AppendResult, error) {
+func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal bool, canonicalHash string) (storespec.AppendResult, error) {
 	if env == nil {
 		return storespec.AppendResult{}, errors.New("store: append nil envelope")
 	}
@@ -101,7 +101,7 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, isTerminal
 // only callers are Append (which wraps it in its own tx) and the membership
 // control-plane op in actors.go (which needs the row + its mirror event in one
 // atomic tx). No receiver is taken — it touches only tx, so it can never be a
-// capability someone obtains by constructing a *Messages.
+// capability someone obtains by constructing a *messages.
 func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal bool, canonicalHash string) (storespec.AppendResult, error) {
 	if tx == nil {
 		return storespec.AppendResult{}, errors.New("store: append tx nil")
@@ -192,7 +192,7 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 //
 // `limit <= 0` is clamped to 64 — a bounded per-channel page so the
 // scheduler tick has a bounded cost.
-func (m *Messages) PendingDue(ctx context.Context, nowMs int64, limit int) ([]storespec.StoredRow, error) {
+func (m *messages) PendingDue(ctx context.Context, nowMs int64, limit int) ([]storespec.StoredRow, error) {
 	if limit <= 0 {
 		limit = 64
 	}
@@ -232,7 +232,7 @@ func (m *Messages) PendingDue(ctx context.Context, nowMs int64, limit int) ([]st
 // MaxSeq returns the highest seq written for the channel (0 when empty). It is
 // the client cursor anchor (last_received_seq): an SDK fetches it before
 // subscribing so the WS tail starts from "now".
-func (m *Messages) MaxSeq(ctx context.Context, channelID channel.ID) (int64, error) {
+func (m *messages) MaxSeq(ctx context.Context, channelID channel.ID) (int64, error) {
 	const q = `SELECT COALESCE(MAX(seq), 0) FROM messages WHERE channel_id = ?`
 	var seq int64
 	if err := m.db.QueryRowContext(ctx, q, channelID).Scan(&seq); err != nil {
@@ -245,7 +245,7 @@ func (m *Messages) MaxSeq(ctx context.Context, channelID channel.ID) (int64, err
 // channel, in seq order. It is the client-push tail: a subscribed WS reads
 // forward from its cursor, so no committed envelope is ever missed (the push
 // notification only signals "something new" — correctness is seq-based here).
-func (m *Messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, afterSeq int64, limit int) ([]storespec.StoredRow, error) {
+func (m *messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, afterSeq int64, limit int) ([]storespec.StoredRow, error) {
 	if limit <= 0 {
 		limit = 256
 	}
@@ -308,7 +308,7 @@ func (m *Messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, after
 // emit unanswered_timeout vs. deregistered emit receiver_unavailable)
 // requires the audience JSON parse and a registry lookup — pushing that
 // into SQL would couple the store to the receiver-policy table.
-func (m *Messages) LongPendingRequests(ctx context.Context, nowMs int64, limit int) ([]storespec.StoredRow, error) {
+func (m *messages) LongPendingRequests(ctx context.Context, nowMs int64, limit int) ([]storespec.StoredRow, error) {
 	if limit <= 0 {
 		limit = 64
 	}
@@ -359,7 +359,7 @@ func (m *Messages) LongPendingRequests(ctx context.Context, nowMs int64, limit i
 // the substrate closes every in-flight request to the dead actor with
 // receiver_unavailable. The substrate never guesses "slow" — it only reports
 // death it positively observed (construction-spec §3.3).
-func (m *Messages) OpenRequestsForActor(ctx context.Context, actorID actor.ActorID, limit int) ([]storespec.StoredRow, error) {
+func (m *messages) OpenRequestsForActor(ctx context.Context, actorID actor.ActorID, limit int) ([]storespec.StoredRow, error) {
 	if limit <= 0 {
 		limit = 64
 	}
@@ -417,7 +417,7 @@ func (m *Messages) OpenRequestsForActor(ctx context.Context, actorID actor.Actor
 // `backoffFn(attempts)` returns the minimum elapsed-ms since the last
 // failure before a row of that attempt count is eligible again — the
 // daemon owns the backoff curve so the store stays policy-free.
-func (m *Messages) RetryableDeliveries(
+func (m *messages) RetryableDeliveries(
 	ctx context.Context,
 	nowMs int64,
 	limit int,
@@ -481,7 +481,7 @@ func (m *Messages) RetryableDeliveries(
 // may treat as no-op). Used by the scheduler dispatch path AND the
 // harness post-write fan-out, so two concurrent callers cannot
 // double-stamp delivery time.
-func (m *Messages) MarkDelivered(ctx context.Context, id message.ID, atMs int64) error {
+func (m *messages) MarkDelivered(ctx context.Context, id message.ID, atMs int64) error {
 	if id == "" {
 		return errors.New("store: mark delivered empty id")
 	}
@@ -496,7 +496,7 @@ func (m *Messages) MarkDelivered(ctx context.Context, id message.ID, atMs int64)
 
 // MarkDeliveryError records a failed delivery attempt while leaving
 // delivered_at NULL so the row remains retryable.
-func (m *Messages) MarkDeliveryError(ctx context.Context, id message.ID, atMs int64, errText string) error {
+func (m *messages) MarkDeliveryError(ctx context.Context, id message.ID, atMs int64, errText string) error {
 	if id == "" {
 		return errors.New("store: mark delivery error empty id")
 	}
@@ -525,7 +525,7 @@ func (m *Messages) MarkDeliveryError(ctx context.Context, id message.ID, atMs in
 // final at INSERT time; this query is the pre-check that lets the
 // harness reject provisional-after-final with the correct closed-set
 // reason instead of silently appending a zombie row.
-func (m *Messages) HasFinalResponse(ctx context.Context, channelID channel.ID, parentID message.ID) (bool, error) {
+func (m *messages) HasFinalResponse(ctx context.Context, channelID channel.ID, parentID message.ID) (bool, error) {
 	_ = channelID // per-channel sqlite already scopes the query
 	if parentID == "" {
 		return false, nil
@@ -550,7 +550,7 @@ func (m *Messages) HasFinalResponse(ctx context.Context, channelID channel.ID, p
 // the existing Layer 1 final response for parentID (used by harness Step 8
 // to detect a caller self-close so a late receiver final can be rewritten
 // to observability rather than rejected).
-func (m *Messages) FinalResponseSender(ctx context.Context, channelID channel.ID, parentID message.ID) (actor.ActorID, bool, error) {
+func (m *messages) FinalResponseSender(ctx context.Context, channelID channel.ID, parentID message.ID) (actor.ActorID, bool, error) {
 	_ = channelID
 	if parentID == "" {
 		return "", false, nil
@@ -574,7 +574,7 @@ func (m *Messages) FinalResponseSender(ctx context.Context, channelID channel.ID
 // LookupCanonicalHash implements storespec.MessageLog — returns the row's
 // stored canonical_hash for StepDedupe's pre-normalize comparison
 // (proto-layer1 §2.3).
-func (m *Messages) LookupCanonicalHash(ctx context.Context, channelID channel.ID, id message.ID) (string, bool, error) {
+func (m *messages) LookupCanonicalHash(ctx context.Context, channelID channel.ID, id message.ID) (string, bool, error) {
 	_ = channelID
 	const q = `SELECT canonical_hash FROM messages WHERE id=?`
 	var hash string
@@ -589,7 +589,7 @@ func (m *Messages) LookupCanonicalHash(ctx context.Context, channelID channel.ID
 }
 
 // FindByID implements storespec.MessageLog.
-func (m *Messages) FindByID(ctx context.Context, channelID channel.ID, id message.ID) (*storespec.StoredRow, bool, error) {
+func (m *messages) FindByID(ctx context.Context, channelID channel.ID, id message.ID) (*storespec.StoredRow, bool, error) {
 	_ = channelID // channel_id is enforced by the per-channel db file; query stays scoped.
 	const q = `SELECT id, ts, ts_received, channel_id,
 	                  sender_kind, sender_id, COALESCE(sender_name,''),

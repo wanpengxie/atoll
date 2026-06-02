@@ -16,7 +16,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// TypeRegistry is the sqlite-backed implementation of
+// typeRegistryStore is the sqlite-backed implementation of
 // kernel/storespec.TypeRegistry (upsert + lookup + list at adapter install
 // time) over the channel-local type_registry table (L2 §1.4.2). It also
 // exposes a runtime/storespec.TypeViewLookup projection via HarnessView so
@@ -25,8 +25,8 @@ import (
 // Level A (proto-layer0 §1.4.1 / proto-layer1 §1.3): payload is opaque
 // to the protocol layer; this registry stores NO payload schema fields.
 //
-// One *TypeRegistry per channel sqlite. Safe for concurrent use.
-type TypeRegistry struct {
+// One *typeRegistryStore per channel sqlite. Safe for concurrent use.
+type typeRegistryStore struct {
 	db    *sql.DB
 	nowFn func() int64
 }
@@ -40,25 +40,25 @@ const (
 // NewTypeRegistry builds the registry over the given channel sqlite.
 // nowFn stamps the created_at column on Upsert; passing nil falls back
 // to a no-op zero (callers that need real timestamps MUST inject NowFn).
-func newTypeRegistry(db *sql.DB, nowFn func() int64) *TypeRegistry {
+func newTypeRegistry(db *sql.DB, nowFn func() int64) *typeRegistryStore {
 	if nowFn == nil {
 		nowFn = func() int64 { return 0 }
 	}
-	return &TypeRegistry{db: db, nowFn: nowFn}
+	return &typeRegistryStore{db: db, nowFn: nowFn}
 }
 
 // Upsert satisfies kernel/storespec.TypeRegistry. It validates row, then
 // INSERTs (or replaces on PK conflict) into the type_registry table.
 // Returns the persisted row (round-tripped through JSON marshal so
 // callers observe canonicalised bytes).
-func (r *TypeRegistry) Upsert(ctx context.Context, row storespec.TypeRow) (storespec.TypeRow, error) {
+func (r *typeRegistryStore) Upsert(ctx context.Context, row storespec.TypeRow) (storespec.TypeRow, error) {
 	return r.upsertWithStatus(ctx, row, TypeInstallStatusInstalled, "")
 }
 
 // BeginInstall stages an installing row outside the canonical installed row.
 // Lookup/List/HarnessView continue to see the prior installed row until the
 // matching install attempt is marked installed after mirror emit.
-func (r *TypeRegistry) BeginInstall(ctx context.Context, row storespec.TypeRow) (storespec.TypeInstallAttempt, error) {
+func (r *typeRegistryStore) BeginInstall(ctx context.Context, row storespec.TypeRow) (storespec.TypeInstallAttempt, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return storespec.TypeInstallAttempt{}, err
@@ -90,7 +90,7 @@ func (r *TypeRegistry) BeginInstall(ctx context.Context, row storespec.TypeRow) 
 	return storespec.TypeInstallAttempt{Row: persisted, AttemptID: attemptID, Existed: existed}, nil
 }
 
-func (r *TypeRegistry) MarkInstalled(ctx context.Context, typeName, attemptID string) error {
+func (r *typeRegistryStore) MarkInstalled(ctx context.Context, typeName, attemptID string) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: type_registry mark installed begin %q: %w", typeName, err)
@@ -128,7 +128,7 @@ func (r *TypeRegistry) MarkInstalled(ctx context.Context, typeName, attemptID st
 	return nil
 }
 
-func (r *TypeRegistry) MarkInstallFailed(ctx context.Context, typeName, attemptID, reason string) error {
+func (r *typeRegistryStore) MarkInstallFailed(ctx context.Context, typeName, attemptID, reason string) error {
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE type_registry_pending
 		    SET install_status='failed', install_error=?
@@ -148,7 +148,7 @@ func (r *TypeRegistry) MarkInstallFailed(ctx context.Context, typeName, attemptI
 	return nil
 }
 
-func (r *TypeRegistry) RecoverInstalling(ctx context.Context, reason string) (int, error) {
+func (r *typeRegistryStore) RecoverInstalling(ctx context.Context, reason string) (int, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT type, install_attempt_id FROM type_registry_pending WHERE install_status='installing'`)
 	if err != nil {
 		return 0, fmt.Errorf("store: type_registry recover installing: %w", err)
@@ -189,7 +189,7 @@ func (r *TypeRegistry) RecoverInstalling(ctx context.Context, reason string) (in
 	return recovered, nil
 }
 
-func (r *TypeRegistry) InstallStatus(ctx context.Context, typeName string) (status, reason string, ok bool, err error) {
+func (r *typeRegistryStore) InstallStatus(ctx context.Context, typeName string) (status, reason string, ok bool, err error) {
 	err = r.db.QueryRowContext(ctx,
 		`SELECT install_status, install_error
 		   FROM type_registry_pending
@@ -217,7 +217,7 @@ func (r *TypeRegistry) InstallStatus(ctx context.Context, typeName string) (stat
 	return status, reason, true, nil
 }
 
-func (r *TypeRegistry) upsertWithStatus(ctx context.Context, row storespec.TypeRow, installStatus, installError string) (storespec.TypeRow, error) {
+func (r *typeRegistryStore) upsertWithStatus(ctx context.Context, row storespec.TypeRow, installStatus, installError string) (storespec.TypeRow, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return storespec.TypeRow{}, fmt.Errorf("store: type_registry upsert begin %q: %w", row.Type, err)
@@ -233,7 +233,7 @@ func (r *TypeRegistry) upsertWithStatus(ctx context.Context, row storespec.TypeR
 	return persisted, nil
 }
 
-func (r *TypeRegistry) upsertWithStatusTx(ctx context.Context, tx *sql.Tx, row storespec.TypeRow, installStatus, installError string) (storespec.TypeRow, error) {
+func (r *typeRegistryStore) upsertWithStatusTx(ctx context.Context, tx *sql.Tx, row storespec.TypeRow, installStatus, installError string) (storespec.TypeRow, error) {
 	if err := row.Validate(); err != nil {
 		return storespec.TypeRow{}, err
 	}
@@ -296,7 +296,7 @@ func (r *TypeRegistry) upsertWithStatusTx(ctx context.Context, tx *sql.Tx, row s
 	return persisted, nil
 }
 
-func (r *TypeRegistry) insertPendingInstallTx(ctx context.Context, tx *sql.Tx, attemptID string, row storespec.TypeRow) (storespec.TypeRow, error) {
+func (r *typeRegistryStore) insertPendingInstallTx(ctx context.Context, tx *sql.Tx, attemptID string, row storespec.TypeRow) (storespec.TypeRow, error) {
 	if err := row.Validate(); err != nil {
 		return storespec.TypeRow{}, err
 	}
@@ -352,13 +352,13 @@ func (r *TypeRegistry) insertPendingInstallTx(ctx context.Context, tx *sql.Tx, a
 
 // Lookup satisfies kernel/storespec.TypeRegistry — returns the framework
 // view of a registered type; ok=false when the row is missing.
-func (r *TypeRegistry) Lookup(ctx context.Context, typeName string) (storespec.TypeRow, bool, error) {
+func (r *typeRegistryStore) Lookup(ctx context.Context, typeName string) (storespec.TypeRow, bool, error) {
 	return r.lookup(ctx, typeName)
 }
 
 // List satisfies kernel/storespec.TypeRegistry — returns every row sorted
 // by type for deterministic test output.
-func (r *TypeRegistry) List(ctx context.Context) ([]storespec.TypeRow, error) {
+func (r *typeRegistryStore) List(ctx context.Context) ([]storespec.TypeRow, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
 			                  max_pending_ms, handler_actor_id
 			             FROM type_registry
@@ -388,7 +388,7 @@ func (r *TypeRegistry) List(ctx context.Context) ([]storespec.TypeRow, error) {
 // registered type. Implemented as a thin reshape over the framework row
 // so a single sqlite row backs both the adapter install path and the
 // harness write path.
-func (r *TypeRegistry) LookupView(ctx context.Context, typeName string) (storespec.TypeView, bool, error) {
+func (r *typeRegistryStore) LookupView(ctx context.Context, typeName string) (storespec.TypeView, bool, error) {
 	row, ok, err := r.lookup(ctx, typeName)
 	if err != nil || !ok {
 		return storespec.TypeView{}, ok, err
@@ -404,9 +404,11 @@ func (r *TypeRegistry) LookupView(ctx context.Context, typeName string) (storesp
 // HarnessView returns a runtime/storespec.TypeViewLookup view that delegates
 // every Lookup back to LookupView. Used by daemon composition root so
 // the harness Chain shares storage with framework.Manager.Install.
-func (r *TypeRegistry) HarnessView() storespec.TypeViewLookup { return typeRegistryHarnessAdapter{r} }
+func (r *typeRegistryStore) HarnessView() storespec.TypeViewLookup {
+	return typeRegistryHarnessAdapter{r}
+}
 
-type typeRegistryHarnessAdapter struct{ inner *TypeRegistry }
+type typeRegistryHarnessAdapter struct{ inner *typeRegistryStore }
 
 func (a typeRegistryHarnessAdapter) Lookup(ctx context.Context, typeName string) (storespec.TypeView, bool, error) {
 	return a.inner.LookupView(ctx, typeName)
@@ -416,7 +418,7 @@ func (a typeRegistryHarnessAdapter) Lookup(ctx context.Context, typeName string)
 // internal helpers
 // ------------------------------------------------------------------
 
-func (r *TypeRegistry) lookup(ctx context.Context, typeName string) (storespec.TypeRow, bool, error) {
+func (r *typeRegistryStore) lookup(ctx context.Context, typeName string) (storespec.TypeRow, bool, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
 		                  max_pending_ms, handler_actor_id
 		             FROM type_registry
@@ -424,7 +426,7 @@ func (r *TypeRegistry) lookup(ctx context.Context, typeName string) (storespec.T
 	return r.lookupQuery(ctx, q, typeName)
 }
 
-func (r *TypeRegistry) lookupAnyTx(ctx context.Context, tx *sql.Tx, typeName string) (storespec.TypeRow, bool, error) {
+func (r *typeRegistryStore) lookupAnyTx(ctx context.Context, tx *sql.Tx, typeName string) (storespec.TypeRow, bool, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
 			                  max_pending_ms, handler_actor_id
 			             FROM type_registry
@@ -439,7 +441,7 @@ func (r *TypeRegistry) lookupAnyTx(ctx context.Context, tx *sql.Tx, typeName str
 	return row, true, nil
 }
 
-func (r *TypeRegistry) lookupInstalledTx(ctx context.Context, tx *sql.Tx, typeName string) (storespec.TypeRow, bool, error) {
+func (r *typeRegistryStore) lookupInstalledTx(ctx context.Context, tx *sql.Tx, typeName string) (storespec.TypeRow, bool, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
 			                  max_pending_ms, handler_actor_id
 			             FROM type_registry
@@ -454,7 +456,7 @@ func (r *TypeRegistry) lookupInstalledTx(ctx context.Context, tx *sql.Tx, typeNa
 	return row, true, nil
 }
 
-func (r *TypeRegistry) lookupPendingAttemptTx(ctx context.Context, tx *sql.Tx, typeName, attemptID, status string) (storespec.TypeRow, bool, error) {
+func (r *typeRegistryStore) lookupPendingAttemptTx(ctx context.Context, tx *sql.Tx, typeName, attemptID, status string) (storespec.TypeRow, bool, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
 			                  max_pending_ms, handler_actor_id
 			             FROM type_registry_pending
@@ -469,7 +471,7 @@ func (r *TypeRegistry) lookupPendingAttemptTx(ctx context.Context, tx *sql.Tx, t
 	return row, true, nil
 }
 
-func (r *TypeRegistry) failIfInstallingPendingTx(ctx context.Context, tx *sql.Tx, typeName string) error {
+func (r *typeRegistryStore) failIfInstallingPendingTx(ctx context.Context, tx *sql.Tx, typeName string) error {
 	var attemptID string
 	err := tx.QueryRowContext(ctx,
 		`SELECT install_attempt_id
@@ -487,7 +489,7 @@ func (r *TypeRegistry) failIfInstallingPendingTx(ctx context.Context, tx *sql.Tx
 	return fmt.Errorf("store: type_registry install already in progress %q", typeName)
 }
 
-func (r *TypeRegistry) lookupQuery(ctx context.Context, q string, typeName string) (storespec.TypeRow, bool, error) {
+func (r *typeRegistryStore) lookupQuery(ctx context.Context, q string, typeName string) (storespec.TypeRow, bool, error) {
 	row, err := scanTypeRowSingle(r.db.QueryRowContext(ctx, q, typeName))
 	if errors.Is(err, sql.ErrNoRows) {
 		return storespec.TypeRow{}, false, nil
@@ -498,7 +500,7 @@ func (r *TypeRegistry) lookupQuery(ctx context.Context, q string, typeName strin
 	return row, true, nil
 }
 
-func (r *TypeRegistry) typeInstalledMirrorExists(ctx context.Context, typeName, attemptID string) (bool, error) {
+func (r *typeRegistryStore) typeInstalledMirrorExists(ctx context.Context, typeName, attemptID string) (bool, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT payload FROM messages WHERE type='system.type.installed'`)
 	if err != nil {
 		return false, fmt.Errorf("store: type_registry recover scan mirrors: %w", err)
@@ -593,6 +595,6 @@ func unmarshalAllowedKinds(raw string) ([]message.Kind, error) {
 
 // Compile-time interface checks — both contracts stay in sync with code.
 var (
-	_ storespec.TypeRegistry   = (*TypeRegistry)(nil)
+	_ storespec.TypeRegistry   = (*typeRegistryStore)(nil)
 	_ storespec.TypeViewLookup = typeRegistryHarnessAdapter{}
 )

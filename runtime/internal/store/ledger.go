@@ -11,17 +11,17 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// Ledger implements storespec.Ledger over the action_ledger table.
+// ledgerStore implements storespec.Ledger over the action_ledger table.
 // (v2: no fencing — single writer by construction.)
-type Ledger struct {
+type ledgerStore struct {
 	db *sql.DB
 }
 
-// NewLedger returns a Ledger over the given channel sqlite.
-func newLedger(db *sql.DB) *Ledger { return &Ledger{db: db} }
+// NewLedger returns a ledgerStore over the given channel sqlite.
+func newLedger(db *sql.DB) *ledgerStore { return &ledgerStore{db: db} }
 
 // Find implements storespec.Ledger.
-func (l *Ledger) Find(ctx context.Context, key ledger.Key) (storespec.Entry, bool, error) {
+func (l *ledgerStore) Find(ctx context.Context, key ledger.Key) (storespec.Entry, bool, error) {
 	const q = `SELECT ledger_key, turn_id, actor_id, envelope_id, status,
 	                 reserved_at, COALESCE(committed_at,0)
 	            FROM action_ledger WHERE ledger_key=?`
@@ -45,7 +45,7 @@ func (l *Ledger) Find(ctx context.Context, key ledger.Key) (storespec.Entry, boo
 // Caller picks envelopeID; if a row already exists for the key the
 // existing entry is returned unchanged (envelope_id from first reserve
 // wins per L2 §1.4.10.1).
-func (l *Ledger) Reserve(ctx context.Context, e storespec.Entry) (storespec.Entry, error) {
+func (l *ledgerStore) Reserve(ctx context.Context, e storespec.Entry) (storespec.Entry, error) {
 	if e.Key == "" {
 		return storespec.Entry{}, errors.New("store: ledger reserve: empty key")
 	}
@@ -88,7 +88,7 @@ func (l *Ledger) Reserve(ctx context.Context, e storespec.Entry) (storespec.Entr
 }
 
 // Commit implements storespec.Ledger — idempotent CAS to committed.
-func (l *Ledger) Commit(ctx context.Context, key ledger.Key, committedAt int64) error {
+func (l *ledgerStore) Commit(ctx context.Context, key ledger.Key, committedAt int64) error {
 	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: ledger commit begin: %w", err)
