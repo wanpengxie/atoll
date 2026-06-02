@@ -161,8 +161,7 @@ func envelopeHashInput(e Envelope) (map[string]any, error) {
 	// Including it would make a sender retry that left kind empty hash
 	// differently from the stored row whose kind got force-filled.
 	sender := map[string]any{
-		"id":   string(e.Sender.ID),
-		"name": e.Sender.Name,
+		"id": string(e.Sender.ID),
 	}
 
 	return map[string]any{

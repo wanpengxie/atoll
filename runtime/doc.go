@@ -22,7 +22,7 @@
 //     confined here (Go internal/), exposed only as storespec interfaces via
 //     OpenChannel → ChannelStores.
 //   - runtime/workerhost    — worker subprocess pool + lease (5min, volatile)
-//     + IPC server (length-prefixed JSON over pipes) + worker-LEASE fence.
+//   - IPC server (length-prefixed JSON over pipes) + worker-LEASE fence.
 //   - runtime/worker        — worker subprocess main loop. STRICT IPC ONLY.
 //     No sqlite. Emits envelopes UPWARD to the server harness (truth on
 //     server). Enforced by .go-arch-lint.yml.

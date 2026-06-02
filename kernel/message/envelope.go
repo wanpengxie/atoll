@@ -7,16 +7,15 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 )
 
-// Sender is the nested `sender` object inside an envelope. `Name` is
-// optional per L0 §2.1 (`sender.name` ⬜); the other two fields are
-// required.
-//
-// `Name` is kept always-present in JSON (no `omitempty`) so the canonical
-// hash input (L2 §1.4.10.2) sees a stable shape.
+// Sender is the nested `sender` object inside an envelope. It is the stable
+// STRUCTURAL identity of the author: ID (stable entity reference) + Kind
+// (closed-set, drives closure policy / routing). Mutable / presentation
+// attributes (display name, user mapping, role) are domain — they live in the
+// domain layer keyed by ID, NOT in the substrate envelope (cf. Unix inode vs
+// filename; Slack user-id vs display-name; proto-v2-physical §6.1 二轴).
 type Sender struct {
 	Kind actor.Kind    `json:"kind"`
 	ID   actor.ActorID `json:"id"`
-	Name string        `json:"name"`
 }
 
 // CrossChannelRef is a weak pointer to a message in another channel.
@@ -132,7 +131,6 @@ var ContentFields = []string{
 	"channel_id",
 	"sender.kind",
 	"sender.id",
-	"sender.name",
 	"kind",
 	"type",
 	"payload",

@@ -25,7 +25,6 @@ CREATE TABLE IF NOT EXISTS messages (
   channel_id           TEXT NOT NULL,
   sender_kind          TEXT NOT NULL CHECK (sender_kind IN ('human','agent','system','tool')),
   sender_id            TEXT NOT NULL,
-  sender_name          TEXT,
   kind                 TEXT NOT NULL CHECK (kind IN ('event','request','response')),
   type                 TEXT NOT NULL,
   payload              TEXT NOT NULL,
@@ -107,7 +106,6 @@ CREATE TABLE IF NOT EXISTS actor_registry (
   actor_binding      TEXT
                      CHECK (actor_binding IS NULL
                             OR actor_binding IN ('embedded','runtime_outbound','runtime_inbound_via_relay')),
-  display_name       TEXT,
   created_at         INTEGER NOT NULL,
   deregistered_at    INTEGER
 );

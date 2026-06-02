@@ -28,13 +28,12 @@ func newActorRegistry(db *sql.DB) *actorRegistry { return &actorRegistry{db: db}
 // Lookup implements storespec.Registry.
 func (r *actorRegistry) Lookup(ctx context.Context, id actor.ActorID) (storespec.Record, bool, error) {
 	const q = `SELECT actor_id, actor_kind, COALESCE(actor_binding,''),
-	                 COALESCE(display_name,''), created_at,
-	                 COALESCE(deregistered_at,0)
+	                 created_at, COALESCE(deregistered_at,0)
 	            FROM actor_registry WHERE actor_id=?`
 	var rec storespec.Record
 	var kind, binding string
 	err := r.db.QueryRowContext(ctx, q, string(id)).Scan(
-		&rec.ID, &kind, &binding, &rec.DisplayName, &rec.CreatedAt, &rec.DeregisteredAt,
+		&rec.ID, &kind, &binding, &rec.CreatedAt, &rec.DeregisteredAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storespec.Record{}, false, nil
@@ -64,7 +63,7 @@ func (r *actorRegistry) Exists(ctx context.Context, id actor.ActorID) (bool, err
 // ListActive implements storespec.Registry.
 func (r *actorRegistry) ListActive(ctx context.Context) ([]storespec.Record, error) {
 	const q = `SELECT actor_id, actor_kind, COALESCE(actor_binding,''),
-	                 COALESCE(display_name,''), created_at
+	                 created_at
 	            FROM actor_registry
 	            WHERE deregistered_at IS NULL
 	            ORDER BY actor_id`
@@ -78,7 +77,7 @@ func (r *actorRegistry) ListActive(ctx context.Context) ([]storespec.Record, err
 	for rows.Next() {
 		var rec storespec.Record
 		var kind, binding string
-		if err := rows.Scan(&rec.ID, &kind, &binding, &rec.DisplayName, &rec.CreatedAt); err != nil {
+		if err := rows.Scan(&rec.ID, &kind, &binding, &rec.CreatedAt); err != nil {
 			return nil, fmt.Errorf("store: list active actors scan: %w", err)
 		}
 		rec.Kind = actor.Kind(kind)
@@ -104,22 +103,16 @@ func (r *actorRegistry) Insert(ctx context.Context, rec storespec.Record) error 
 	defer func() { _ = tx.Rollback() }()
 
 	const insActor = `INSERT INTO actor_registry
-	   (actor_id, actor_kind, actor_binding, display_name, created_at, deregistered_at)
-	   VALUES (?, ?, ?, ?, ?, NULL)`
+	   (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
+	   VALUES (?, ?, ?, ?, NULL)`
 	var binding any
 	if rec.Binding == "" {
 		binding = nil
 	} else {
 		binding = string(rec.Binding)
 	}
-	var displayName any
-	if rec.DisplayName == "" {
-		displayName = nil
-	} else {
-		displayName = rec.DisplayName
-	}
 	if _, err := tx.ExecContext(ctx, insActor,
-		string(rec.ID), string(rec.Kind), binding, displayName, rec.CreatedAt,
+		string(rec.ID), string(rec.Kind), binding, rec.CreatedAt,
 	); err != nil {
 		return fmt.Errorf("store: actor insert %q: %w", rec.ID, err)
 	}
@@ -352,9 +345,9 @@ func (r *actorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add st
 		}
 		_, err := tx.ExecContext(ctx,
 			`UPDATE actor_registry
-			    SET actor_kind=?, actor_binding=?, display_name=?, created_at=?, deregistered_at=NULL
+			    SET actor_kind=?, actor_binding=?, created_at=?, deregistered_at=NULL
 			  WHERE actor_id=?`,
-			string(add.Kind), nullableString(string(add.Binding)), nullableString(add.DisplayName), add.At, string(add.ID),
+			string(add.Kind), nullableString(string(add.Binding)), add.At, string(add.ID),
 		)
 		if err != nil {
 			return false, fmt.Errorf("store: actor reactivate %q: %w", add.ID, err)
@@ -363,9 +356,9 @@ func (r *actorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add st
 	case errors.Is(err, sql.ErrNoRows):
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO actor_registry
-			   (actor_id, actor_kind, actor_binding, display_name, created_at, deregistered_at)
-			 VALUES (?, ?, ?, ?, ?, NULL)`,
-			string(add.ID), string(add.Kind), nullableString(string(add.Binding)), nullableString(add.DisplayName), add.At,
+			   (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
+			 VALUES (?, ?, ?, ?, NULL)`,
+			string(add.ID), string(add.Kind), nullableString(string(add.Binding)), add.At,
 		)
 		if err != nil {
 			return false, fmt.Errorf("store: actor member insert %q: %w", add.ID, err)
@@ -476,15 +469,11 @@ func actorRegisteredEnvelope(channelID channel.ID, add storespec.MemberActorAdd)
 		"actor_id":      add.ID,
 		"actor_kind":    add.Kind,
 		"actor_binding": add.Binding,
-		"display_name":  add.DisplayName,
-		"user_id":       add.UserID,
-		"role":          add.Role,
 		"registered_at": add.At,
 	}
-	if add.ProxyHost.DaemonID != "" || add.ProxyHost.DaemonName != "" {
+	if add.ProxyHost.DaemonID != "" {
 		payloadMap["proxy_host"] = map[string]any{
-			"daemon_id":   add.ProxyHost.DaemonID,
-			"daemon_name": add.ProxyHost.DaemonName,
+			"daemon_id": add.ProxyHost.DaemonID,
 		}
 	}
 	// 推论5 / §4 事实完整性: carry the facade-rebuild declaration blob into

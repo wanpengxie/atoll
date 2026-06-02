@@ -12,14 +12,11 @@ import (
 // plane). Applying it mutates the actor_registry projection AND emits a
 // system.actor.registered mirror event into the channel log.
 type MemberActorAdd struct {
-	ID          actor.ActorID
-	Kind        actor.Kind
-	Binding     actor.Binding
-	DisplayName string
-	UserID      string
-	Role        string
-	At          int64
-	ProxyHost   MemberActorProxyHost
+	ID        actor.ActorID
+	Kind      actor.Kind
+	Binding   actor.Binding
+	At        int64
+	ProxyHost MemberActorProxyHost
 
 	// CapabilitySet is the opaque declaration blob echoed verbatim into the
 	// system.actor.registered fact so a reconciler can rebuild facade wiring
@@ -28,11 +25,11 @@ type MemberActorAdd struct {
 	CapabilitySet json.RawMessage
 }
 
-// MemberActorProxyHost is optional metadata for proxy-daemon-hosted actors,
-// emitted in system.actor.registered only.
+// MemberActorProxyHost identifies the proxy daemon hosting a relay actor.
+// DaemonID is the stable routing target; mutable/display attributes (daemon
+// name) are domain, not substrate.
 type MemberActorProxyHost struct {
-	DaemonID   string
-	DaemonName string
+	DaemonID string
 }
 
 // MemberActorRemove is one actor deregistration transition.

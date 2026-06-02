@@ -148,13 +148,13 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 
 	const ins = `INSERT INTO messages (
 	   id, ts, ts_received, channel_id,
-	   sender_kind, sender_id, sender_name,
+	   sender_kind, sender_id,
 	   kind, type, payload,
 	   parent_id, correlation_id, doc_refs, cross_channel_refs,
 	   visibility, audience, not_before, expires_at,
 	   delivered_at, last_error,
 	   is_terminal, canonical_hash
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	terminalInt := 0
 	if isTerminal {
@@ -162,7 +162,7 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 	}
 	res, err := tx.ExecContext(ctx, ins,
 		env.ID, env.TS, env.TSReceived, env.ChannelID,
-		string(env.Sender.Kind), string(env.Sender.ID), nullableString(env.Sender.Name),
+		string(env.Sender.Kind), string(env.Sender.ID),
 		string(env.Kind), env.Type, string(env.Payload),
 		nullableString(string(env.ParentID)), nullableString(string(env.CorrelationID)), nullableString(docRefsJSON), nullableString(crossRefsJSON),
 		env.Visibility, string(audJSON),
@@ -194,7 +194,7 @@ func (m *messages) PendingDue(ctx context.Context, nowMs int64, limit int) ([]st
 		limit = 64
 	}
 	const q = `SELECT id, ts, ts_received, channel_id,
-	                  sender_kind, sender_id, COALESCE(sender_name,''),
+	                  sender_kind, sender_id,
 	                  kind, type, payload,
 	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
@@ -247,7 +247,7 @@ func (m *messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, after
 		limit = 256
 	}
 	const q = `SELECT id, ts, ts_received, channel_id,
-	                  sender_kind, sender_id, COALESCE(sender_name,''),
+	                  sender_kind, sender_id,
 	                  kind, type, payload,
 	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
@@ -310,7 +310,7 @@ func (m *messages) LongPendingRequests(ctx context.Context, nowMs int64, limit i
 		limit = 64
 	}
 	const q = `SELECT id, ts, ts_received, channel_id,
-	                  sender_kind, sender_id, COALESCE(sender_name,''),
+	                  sender_kind, sender_id,
 	                  kind, type, payload,
 	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
@@ -361,7 +361,7 @@ func (m *messages) OpenRequestsForActor(ctx context.Context, actorID actor.Actor
 		limit = 64
 	}
 	const q = `SELECT id, ts, ts_received, channel_id,
-	                  sender_kind, sender_id, COALESCE(sender_name,''),
+	                  sender_kind, sender_id,
 	                  kind, type, payload,
 	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
@@ -478,7 +478,7 @@ func (m *messages) LookupCanonicalHash(ctx context.Context, channelID channel.ID
 func (m *messages) FindByID(ctx context.Context, channelID channel.ID, id message.ID) (*storespec.StoredRow, bool, error) {
 	_ = channelID // channel_id is enforced by the per-channel db file; query stays scoped.
 	const q = `SELECT id, ts, ts_received, channel_id,
-	                  sender_kind, sender_id, COALESCE(sender_name,''),
+	                  sender_kind, sender_id,
 	                  kind, type, payload,
 	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
 	                  visibility, audience,
@@ -527,7 +527,7 @@ func scanEnvelopeFrom(s rowScanner) (storespec.StoredRow, error) {
 	var termInt int
 	if err := s.Scan(
 		&env.ID, &env.TS, &env.TSReceived, &env.ChannelID,
-		&sKind, &senderID, &env.Sender.Name,
+		&sKind, &senderID,
 		&kind, &env.Type, &payloadStr,
 		&env.ParentID, &env.CorrelationID, &docRefsStr, &crossRefsStr,
 		&vis, &audJSON,
