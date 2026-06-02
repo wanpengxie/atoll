@@ -204,9 +204,8 @@ func (s *Service) emitInstalled(ctx context.Context, row storespec.TypeRow, atte
 		Audience:   message.Audience{actor.SystemActorID},
 	}
 	chainCtx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{
-		ActorID:                 actor.SystemActorID,
-		ChannelID:               s.cfg.ChannelID,
-		AllowProvidedSenderKind: true,
+		ActorID:   actor.SystemActorID,
+		ChannelID: s.cfg.ChannelID,
 	})
 	res, err := s.cfg.HarnessChain.Write(chainCtx, env)
 	if err != nil {
