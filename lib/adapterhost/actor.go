@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 )
@@ -43,10 +46,42 @@ type adapterActor struct {
 	// state is the adapter's persistent KV seam (was boundModule.state).
 	state behavior.StateStore
 
-	// mctx is the ModuleContext handed to module.Init (built by the installer;
-	// its Respond/Provisional/Resolve seams write terminals through the
-	// channel harness). Populated in Start.
+	// channelID is the channel this adapter services.
+	channelID channel.ID
+
+	// chain is the harness write path (kernel/harness.Chain INTERFACE — pure
+	// contract; the runtime/harness impl is injected by the installer). The
+	// adapter writes terminals/events through it.
+	chain harness.Chain
+
+	// lookup recovers the original request envelope by id (F5; kernel/message
+	// contract, impl in runtime/store).
+	lookup message.RequestLookup
+
+	// clock stamps response ts.
+	clock func() time.Time
+
+	// forward is the transport-backed external-request seam (relay adapters
+	// like proxyfacade), injected by the installer (daemon wires the device
+	// transit). nil for adapters that never forward.
+	forward behavior.ExternalRequestFunc
+
+	// futures is the channel-level caller-side future hub (Submit/Await/Watch),
+	// injected by the installer. nil for pure receiver adapters.
+	futures callerFutures
+
+	// mctx is the ModuleContext handed to module.Init (built in Start; its
+	// Respond/Fail/Provisional/EmitEvent seams close over THIS adapterActor so
+	// they touch a.correlation/a.chain on the cell goroutine — no god-object).
 	mctx *behavior.ModuleContext
+}
+
+// callerFutures is the minimal caller-side surface adapterActor needs from the
+// channel-level futureHub (lib/behavior/futurereg). Kept as a local interface
+// so the cell depends only on what it uses.
+type callerFutures interface {
+	Submit(ctx context.Context, env *message.Envelope) (message.ID, error)
+	Await(ctx context.Context, id message.ID, timeout time.Duration) (*message.Envelope, error)
 }
 
 // --- correlation (inlined, lock-free; cell goroutine is sole caller) ---
