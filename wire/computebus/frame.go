@@ -14,20 +14,20 @@ const (
 	FrameAttach      FrameType = "attach"
 	FrameAttachReply FrameType = "attach_reply"
 	FrameHeartbeat   FrameType = "heartbeat"
-	FrameDispatch    FrameType = "dispatch"   // home → compute
-	FrameEmit        FrameType = "emit"       // compute → home
-	FrameEmitAck     FrameType = "emit_ack"   // home → compute (write result)
-	FrameDeath       FrameType = "death"      // compute → home
+	FrameDispatch    FrameType = "dispatch" // home → compute
+	FrameEmit        FrameType = "emit"     // compute → home
+	FrameEmitAck     FrameType = "emit_ack" // home → compute (write result)
+	FrameDeath       FrameType = "death"    // compute → home
 )
 
 // EmitAck is the home harness's verdict for a compute EmitFrame: the truth was
 // written (or rejected), and the WriteResult flows back so the compute cell's
 // Respond/EmitEvent observes the authoritative outcome.
 type EmitAck struct {
-	EmitID       string `json:"emit_id"`       // correlates ack to the EmitFrame
+	EmitID       string     `json:"emit_id"` // correlates ack to the EmitFrame
 	MessageID    message.ID `json:"message_id"`
-	RejectReason string `json:"reject_reason,omitempty"`
-	Err          string `json:"err,omitempty"`
+	RejectReason string     `json:"reject_reason,omitempty"`
+	Err          string     `json:"err,omitempty"`
 }
 
 // Frame is the tagged WS envelope. Exactly one payload field is set per Type.

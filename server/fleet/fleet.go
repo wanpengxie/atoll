@@ -62,7 +62,7 @@ func (f *Fleet) ServeWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	// First frame must be attach.
 	_, raw, err := ws.ReadMessage()
