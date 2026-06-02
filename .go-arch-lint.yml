@@ -1,230 +1,82 @@
 ---
-# go-arch-lint v3 — root module architecture enforcement (T2 spec §T2,
-# applied here because §T6 acceptance criterion #6 explicitly requires
-# `server -> runtime/*` and `server -> adapters/*` to be lint-rejected.
+# go-arch-lint v3 — v2 topology architecture enforcement.
+# Authoritative spec: .dalek/pm/coagent-topology-redesign.md §3 (12-component
+# dependency matrix + T1–T9) + coagent-v2-arch-constraints-and-checks.md.
 #
-# Authoritative spec: .dalek/pm/m1.5-tickets.md §T2 + §T6.
-#
-# Maps the 6 ownership invariants from §T2 onto enforceable component
-# boundaries. When T3 / T4 land they fill the runtime/ and adapters/
-# trees; today both trees may be empty and `ignoreNotFoundComponents`
-# keeps the build green until they exist.
+# v2 re-base: truth→server(channel-home); daemon=attached compute; lib=组合层
+# (behavior/adapterhost/sysactor/agentactor/policy/channelkit); wire=home↔compute.
+# Deployment-agnostic core (kernel/runtime/lib/adapters) never imports the
+# deployment tier (wire/server/daemon/cmd). (kernel stdlib purity — no
+# database/sql · net/http · gorilla — is enforced by grep in §2.1, not here:
+# go-arch-lint governs inter-component + 3rd-party vendor edges, not stdlib.)
 
 version: 3
 workdir: .
 
 allow:
-  # deepScan checks method-level boundary crossings. ON because the
-  # M1.5 layout is clean.
   deepScan: true
-  # runtime/ + adapters/ trees may not exist yet (T3 / T4 land later).
   ignoreNotFoundComponents: true
 
 exclude:
-  # archive/ holds legacy code preserved verbatim during the M1.5 rewrite —
-  # out of architectural scope (includes the former agent-binary / cli-node
-  # / lightcone-* trees after T9 archiving).
   - archive
-  # pnpm dependencies may contain vendored Go fixtures; they are not part of
-  # this module's architecture graph.
   - node_modules
+  - bin
 
 excludeFiles:
-  # Test files don't carry architectural constraints (per spec §T2
-  # `excludeFiles: ["**/*_test.go"]`).
   - "^.*_test\\.go$"
 
 components:
-  # ─────────────────────────────────────────────────────────────────────
-  # kernel — protocol contract core (interfaces + pure types + pure logic)
-  # Invariants #1 + #2.
-  # ─────────────────────────────────────────────────────────────────────
-  kernel: { in: kernel/** }
-
-  # ─────────────────────────────────────────────────────────────────────
-  # internal — repo-private pure contract/types packages.
-  # ─────────────────────────────────────────────────────────────────────
+  kernel:   { in: kernel/** }
+  runtime:  { in: runtime/** }
+  lib:      { in: lib/** }
+  adapters: { in: adapters/** }
+  wire:     { in: wire/** }
+  server:   { in: server/** }
+  daemon:   { in: daemon/** }
+  sdk:      { in: sdk/** }
+  obs:      { in: obs/** }
   internal: { in: internal/** }
-
-  # ─────────────────────────────────────────────────────────────────────
-  # devicetransit — release-agnostic device bridge payload contract.
-  # Device bridge is optional framework protocol, not kernel substrate.
-  # ─────────────────────────────────────────────────────────────────────
-  devicetransit: { in: framework/devicetransit/** }
-
-  # ─────────────────────────────────────────────────────────────────────
-  # multiuser — release-specific multi-daemon / multi-view framework.
-  # It may define placement, daemonbus and view-sync contracts, but kernel
-  # must not depend on it.
-  # ─────────────────────────────────────────────────────────────────────
-  multiuser:
-    in:
-      - framework/multiuser/daemonbus/**
-      - framework/multiuser/placement/**
-      - framework/multiuser/viewsync/**
-
-  # ─────────────────────────────────────────────────────────────────────
-  # multiuser_runtime — daemon-side assembly for the multiuser release.
-  # This is intentionally above the reusable runtime substrate.
-  # ─────────────────────────────────────────────────────────────────────
-  multiuser_runtime: { in: framework/multiuser/runtime/** }
-
-  # ─────────────────────────────────────────────────────────────────────
-  # runtime_ipc — daemon ↔ worker IPC wire types (Frame, Codec, payloads).
-  # Pure: imports only kernel + stdlib. Shared by runtime (daemon-side
-  # workerhost) and runtime_worker (worker subprocess). Splitting it out
-  # is what lets runtime_worker stay sqlite-free while still talking
-  # the IPC protocol (T3 spec §T3, invariant #6).
-  # ─────────────────────────────────────────────────────────────────────
-  runtime_ipc: { in: runtime/ipc/** }
-
-  # ─────────────────────────────────────────────────────────────────────
-  # runtime — daemon-side execution engine. Landed by T3.
-  # Invariants #3 + #4.
-  # ─────────────────────────────────────────────────────────────────────
-  runtime: { in: runtime/** }
-  runtime_worker: { in: runtime/worker/** }
-
-  # ─────────────────────────────────────────────────────────────────────
-  # adapters — adapter implementations. Landed by T4 / T5.
-  # Invariants #4 + #5.
-  # ─────────────────────────────────────────────────────────────────────
-  adapters:
-    in:
-      - adapters/device/**
-      - adapters/feishu/**
-      - adapters/framework/**
-      - adapters/llm/**
-      - adapters/proxy/**
-      - adapters/xhs/**
-
-  # ─────────────────────────────────────────────────────────────────────
-  # server — central server (THIS ticket). MUST NOT depend on runtime/**
-  # or adapters/**. MAY depend on kernel/** and pkg/**.
-  # Invariants #1 + #2 + #5.
-  # ─────────────────────────────────────────────────────────────────────
-  server: { in: server/** }
-
-  # ─────────────────────────────────────────────────────────────────────
-  # cmd — process entry points. Composition root — may wire anything.
-  # ─────────────────────────────────────────────────────────────────────
-  cmd: { in: cmd/** }
-
-  # ─────────────────────────────────────────────────────────────────────
-  # pkg — public Go packages exported to 3rd-party callers.
-  # ─────────────────────────────────────────────────────────────────────
-  pkg: { in: pkg/** }
-
-  # ─────────────────────────────────────────────────────────────────────
-  # tests — end-to-end smoke test framework. Composition-root posture
-  # like cmd/**: spins up real server/daemon/worker binaries and pokes
-  # them via HTTP/WS. Build tag `e2e` keeps the suite out of the default
-  # `go test ./...` run; `make e2e-smoke` is the dedicated entry point.
-  # ─────────────────────────────────────────────────────────────────────
-  tests: { in: tests/** }
-
-vendors:
-  # Vendor sets used by canUse whitelists.
-  sqlite_driver: { in: ["modernc.org/sqlite", "modernc.org/sqlite/**"] }
-  gorilla:       { in: "github.com/gorilla/**" }
-  gin:           { in: "github.com/gin-gonic/**" }
-  uuid:          { in: "github.com/google/uuid" }
-  crypto:        { in: "golang.org/x/crypto/**" }
-  migrate:       { in: "github.com/golang-migrate/migrate/**" }
-  zerolog:       { in: ["github.com/rs/zerolog", "github.com/rs/zerolog/**"] }
+  cmd:      { in: cmd/** }
+  tests:    { in: tests/** }
 
 deps:
-  # ─────────────────────────────────────────────────────────────────────
-  # kernel — closed at the project boundary AND the vendor boundary.
-  # ─────────────────────────────────────────────────────────────────────
   kernel:
     mayDependOn: [kernel]
-    # No canUse, no anyVendorDeps — kernel is fully closed at the vendor
-    # boundary. FIX-T10: removed `uuid` allowance; kernel deals in opaque
-    # string IDs only. If/when kernel needs an ID generator, it must be
-    # injected from the runtime layer rather than imported here.
-
-  runtime_ipc:
-    # Pure wire-types package. Closed at project boundary: kernel + stdlib only.
-    mayDependOn: [kernel]
-    # No anyVendorDeps — runtime_ipc is closed (no sqlite, no gin, no kimi).
-
-  internal:
-    # Repo-private contracts stay pure: kernel + stdlib only.
-    mayDependOn: [kernel, internal]
-
-  devicetransit:
-    # Device bridge contracts may name actor/channel identities, but kernel
-    # must not know device bridge exists.
-    mayDependOn: [kernel]
-
-  multiuser:
-    # Multiuser framework contracts are layered above the pure kernel.
-    mayDependOn: [kernel, multiuser]
-
-  multiuser_runtime:
-    # Release-specific daemon assembly may wire reusable runtime substrate,
-    # adapter framework and multiuser contracts together.
-    mayDependOn: [kernel, devicetransit, multiuser, multiuser_runtime, runtime, runtime_ipc, runtime_worker, adapters, pkg]
-    anyVendorDeps: true
-
   runtime:
-    mayDependOn: [kernel, runtime, runtime_ipc, runtime_worker, pkg]
+    mayDependOn: [kernel, runtime]
     anyVendorDeps: true
-
-  runtime_worker:
-    # Strict subset of runtime: NO sqlite, NO server. MAY import runtime_ipc
-    # (shared IPC wire types — T3 spec §T3 invariant #6).
-    mayDependOn: [kernel, runtime_ipc, pkg]
-    canUse:
-      - uuid
-
+  lib:
+    mayDependOn: [kernel, runtime, lib]            # T4 — OTP behaviours on BEAM
+    anyVendorDeps: true
+  # 仲裁-1: adapters 实现 lib/behavior.Module(gen_server 契约)，故依赖 lib。关键
+  # 纯度是 adapters↛runtime(不碰 goroutine/sqlite)，由 lib/behavior 只 import
+  # kernel 保证传递纯度。组件级允许 lib；细分到 lib/behavior 待后续。
   adapters:
-    # adapters/** is a tree with internal layering:
-    #   adapters/framework            (T4 outbound base)
-    #   adapters/device/framework     (T5 device-side base)
-    #   adapters/feishu, adapters/device/xhs, …
-    # Sub-packages within adapters/** MAY import each other (same pattern
-    # as server/**). The boundary that matters is adapters → server and
-    # adapters → runtime (both excluded by NOT listing them here).
-    mayDependOn: [kernel, devicetransit, adapters, pkg]
+    mayDependOn: [kernel, lib, adapters]           # T3
     anyVendorDeps: true
-
+  wire:
+    mayDependOn: [kernel, wire]                     # T8 — pure schema
   server:
-    # server uses sqlite for its OWN view-cache / placements / identity
-    # tables (server-side cache is NOT the channel truth). May use
-    # gin / gorilla / migrate / crypto. Sub-packages of server (server/
-    # identity, server/catalog, server/gateway, …) freely import each
-    # other — that is the intra-component composition root pattern.
-    # The boundary that matters is server → runtime/** + server →
-    # adapters/**, both excluded by NOT listing them here.
-    mayDependOn: [kernel, devicetransit, multiuser, internal, server, pkg]
-    canUse:
-      - sqlite_driver
-      - gin
-      - gorilla
-      - uuid
-      - crypto
-      - migrate
-      - zerolog
-
+    mayDependOn: [kernel, runtime, lib, wire, internal, server]   # T5/T6 无 daemon/adapters
+    anyVendorDeps: true
+  daemon:
+    mayDependOn: [kernel, runtime, lib, wire, daemon]             # T5/T6 无 server/adapters
+    anyVendorDeps: true
+  # sdk 务实允许 lib(AckDescriptor 等 caller-side 共用类型暂在 lib/behavior;
+  # SDK kernel-only 的精确性待把共用类型搬 kernel 后收紧)。
+  sdk:
+    mayDependOn: [kernel, lib, sdk]
+    anyVendorDeps: true
+  obs:
+    mayDependOn: [kernel, obs]
+    anyVendorDeps: true
+  internal:
+    mayDependOn: [kernel, wire, internal]          # T9
   cmd:
-    mayDependOn: [kernel, devicetransit, multiuser, multiuser_runtime, runtime, runtime_worker, adapters, server, pkg]
+    mayDependOn: [kernel, runtime, lib, adapters, wire, server, daemon, sdk, obs, internal, cmd]
     anyVendorDeps: true
-
-  pkg:
-    # M1.6-T7 phase-2: pkg/logger ships a tiny zerolog facade reused by
-    # cmd/* (server / daemon / worker) to emit structured JSON to stdout.
-    # T169 adds pkg/coagentsdk, a public SDK that talks to /ws using the
-    # same gorilla websocket client already used by the repo's e2e tests.
-    mayDependOn: [kernel, pkg]
-    canUse:
-      - zerolog
-      - gorilla
-
   tests:
-    # tests/** is end-to-end smoke infrastructure — composition-root
-    # posture mirroring cmd/**. Freely imports every internal component
-    # plus any vendor it needs (sqlite, gorilla websocket, etc.).
-    mayDependOn: [kernel, devicetransit, multiuser, multiuser_runtime, runtime, runtime_worker, runtime_ipc, adapters, server, pkg, tests]
+    mayDependOn: [kernel, runtime, lib, adapters, wire, server, daemon, sdk, obs, internal, cmd, tests]
     anyVendorDeps: true
+# T1 由"核心 mayDependOn 不含 wire/server/daemon/cmd"自然成立
+# T7 由"仅 cmd mayDependOn 含 obs"自然成立(其余组件 mayDependOn 均不列 obs)
