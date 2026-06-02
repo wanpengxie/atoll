@@ -23,6 +23,9 @@ type Config struct {
 	APIKey    string
 	ComputeID string
 	ChannelID channel.ID
+	// Logger + Metrics are obs seams injected by cmd. nil → no-op.
+	Logger  behavior.Logger
+	Metrics behavior.Metrics
 }
 
 // Run connects to the channel home and hosts the supplied business adapters as
@@ -57,7 +60,9 @@ func Run(ctx context.Context, cfg Config, modules []behavior.Module) error {
 	h = host.New(hl.Emit, hl.SendDeath)
 	defer h.Stop()
 	for _, mod := range modules {
-		if _, err := h.InstallAdapter(ctx, mod, adapterhost.InstallDeps{ChannelID: cfg.ChannelID}); err != nil {
+		if _, err := h.InstallAdapter(ctx, mod, adapterhost.InstallDeps{
+			ChannelID: cfg.ChannelID, Logger: cfg.Logger, Metrics: cfg.Metrics,
+		}); err != nil {
 			return err
 		}
 	}

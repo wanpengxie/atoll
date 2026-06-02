@@ -42,6 +42,9 @@ type ChannelHome struct {
 	channel *channelkit.Channel
 	system  *sysactor.SystemActor
 	nowMs   func() int64
+
+	logger  behavior.Logger
+	metrics behavior.Metrics
 }
 
 // RunClosureScan runs the caller-scoped closure loop (closure author #2): it
@@ -112,6 +115,8 @@ func (h *ChannelHome) InstallEmbeddedAdapter(ctx context.Context, mod behavior.M
 		Registry:      h.registry,
 		TypeReg:       h.typeReg,
 		ReadinessSink: h.registry, // store.ActorRegistry implements ReadinessUpdater
+		Logger:        h.logger,
+		Metrics:       h.metrics,
 		Clock:         func() time.Time { return time.UnixMilli(h.nowMs()) },
 	})
 	if err != nil {
@@ -160,6 +165,8 @@ func (h *ChannelHome) MarkPresence(ctx context.Context, id actor.ActorID, presen
 // one of the compute's types passes the harness type check and the fanout routes
 // it down the wire to the hosting compute.
 func (h *ChannelHome) RegisterComputeActors(ctx context.Context, decls []computebus.AttachDeclaration) error {
+	h.logger.Info("fleet.attach", "actors", len(decls))
+	h.metrics.IncCounter("fleet.attach", "channel", string(h.channelID))
 	for _, d := range decls {
 		if err := h.registry.Insert(ctx, actor.Record{ID: d.ActorID, Kind: d.Kind, Binding: d.Binding}); err != nil {
 			return fmt.Errorf("channelhost: register compute actor %s: %w", d.ActorID, err)
@@ -226,6 +233,10 @@ type Config struct {
 	ChannelID channel.ID
 	DBPath    string
 	NowMs     func() int64
+	// Logger + Metrics are the obs seams; cmd injects concrete backends
+	// (slog + obs/metrics). nil → no-op (never panics).
+	Logger  behavior.Logger
+	Metrics behavior.Metrics
 }
 
 // New opens the channel's truth store and assembles the home (truth-flip: truth
@@ -238,6 +249,14 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 	nowMs := cfg.NowMs
 	if nowMs == nil {
 		nowMs = func() int64 { return time.Now().UnixMilli() }
+	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = behavior.NoopLogger{}
+	}
+	metrics := cfg.Metrics
+	if metrics == nil {
+		metrics = behavior.NoopMetrics{}
 	}
 
 	db, err := store.OpenChannel(ctx, cfg.DBPath, store.OpenOptions{})
@@ -299,10 +318,13 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 		channel:   ch,
 		system:    system,
 		nowMs:     nowMs,
+		logger:    logger,
+		metrics:   metrics,
 	}
 	// Mailbox-full / cell-stopped on a request → close it out (needs the built
 	// home for the seam bundle).
 	chain.onUndeliverable = h.materialiseUnavailableForRequest
+	logger.Info("channelhost.ready", "channel", string(cfg.ChannelID))
 	return h, nil
 }
 

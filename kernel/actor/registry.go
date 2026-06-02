@@ -53,25 +53,3 @@ type Registry interface {
 type ReadinessUpdater interface {
 	UpdateReadiness(ctx context.Context, id ActorID, update ReadinessUpdate) (ReadinessTransition, error)
 }
-
-// ActiveAudienceExcept returns active actor ids in the channel, excluding the
-// supplied ids. Helper for emit points needing channel-wide delivery after
-// wildcard removal.
-func ActiveAudienceExcept(ctx context.Context, reg Registry, exclude ...ActorID) ([]ActorID, error) {
-	rows, err := reg.ListActive(ctx)
-	if err != nil {
-		return nil, err
-	}
-	excludeSet := make(map[ActorID]struct{}, len(exclude))
-	for _, id := range exclude {
-		excludeSet[id] = struct{}{}
-	}
-	out := make([]ActorID, 0, len(rows))
-	for _, rec := range rows {
-		if _, drop := excludeSet[rec.ID]; drop {
-			continue
-		}
-		out = append(out, rec.ID)
-	}
-	return out, nil
-}

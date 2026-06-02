@@ -11,6 +11,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/server/channelhost"
 	"github.com/wanpengxie/ActOS/server/fleet"
 )
@@ -21,6 +22,10 @@ type Config struct {
 	DBPath     string
 	ListenAddr string
 	APIKey     string // authenticates attaching computes
+	// Logger + Metrics are obs seams injected by cmd (concrete backends live in
+	// obs, which server may not import). nil → no-op.
+	Logger  behavior.Logger
+	Metrics behavior.Metrics
 }
 
 // Run assembles the channel home, mounts the compute fleet (attached daemons)
@@ -31,6 +36,8 @@ func Run(ctx context.Context, cfg Config) error {
 	home, err := channelhost.New(ctx, channelhost.Config{
 		ChannelID: cfg.ChannelID,
 		DBPath:    cfg.DBPath,
+		Logger:    cfg.Logger,
+		Metrics:   cfg.Metrics,
 	})
 	if err != nil {
 		return err
