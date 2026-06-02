@@ -3,6 +3,7 @@ package adapterhost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -172,15 +173,49 @@ func (a *adapterActor) Receive(ctx context.Context, env *message.Envelope) error
 // caller-scoped closure — lib/behavior). A Handle error that is not the
 // deferred sentinel collapses to a receiver_internal_error terminal.
 func (a *adapterActor) handleRequest(ctx context.Context, env *message.Envelope) error {
+	key := behavior.CorrelationKey(env.ID)
 	if !declAllowsRequest(a.declaration, env.Type) {
-		return fmt.Errorf("adapterhost: type %s not request-capable for adapter %s",
-			env.Type, a.declaration.Name)
+		// Type the adapter does not handle → fail-fast terminal (don't leave
+		// the caller hanging on a request this actor structurally can't answer).
+		return a.collapseInternalError(ctx, key, fmt.Sprintf("type %s not request-capable for adapter %s", env.Type, a.declaration.Name))
 	}
-	a.reserve(behavior.CorrelationEntry{RequestID: behavior.CorrelationKey(env.ID)})
+	a.reserve(behavior.CorrelationEntry{RequestID: key})
 	if a.metrics != nil {
 		a.metrics.IncCounter("adapter.dispatch", "adapter", a.declaration.Name, "type", env.Type)
 	}
-	return a.module.Handle(ctx, env)
+	err := a.module.Handle(ctx, env)
+	if err == nil || errors.Is(err, behavior.ErrHandleDeferred) {
+		// Success (module already Responded) or deferred (terminal arrives later
+		// via callback/Resolve — keep pending, caller timer / death bounds it).
+		return nil
+	}
+	// Hard Handle error → collapse to a receiver_internal_error terminal
+	// (receiver-authored, author #1). The caller MUST NOT hang on a Handle that
+	// errored; correlation MUST NOT stay pending.
+	if a.logger != nil {
+		a.logger.Warn("adapterhost.handle.error", "adapter", a.declaration.Name, "type", env.Type, "request", string(env.ID), "err", err.Error())
+	}
+	return a.collapseInternalError(ctx, key, err.Error())
+}
+
+// collapseInternalError writes a receiver_internal_error final terminal for a
+// request the module could not handle, and marks the correlation done.
+func (a *adapterActor) collapseInternalError(ctx context.Context, key behavior.CorrelationKey, detail string) error {
+	sender := message.Sender{Kind: actor.KindTool, ID: a.self}
+	payload, _ := json.Marshal(map[string]any{"detail": detail})
+	term, berr := a.buildResponse(ctx, key, sender, behavior.ResponseSpec{
+		Status:  "failed",
+		Reason:  string(message.TerminalReceiverInternalError),
+		Payload: payload,
+	})
+	if berr != nil {
+		return berr
+	}
+	if _, werr := a.chain.Write(ctx, term); werr != nil {
+		return werr
+	}
+	a.markDone(key)
+	return nil
 }
 
 // respondStatus self-answers the reserved actor.status request (collapse of
