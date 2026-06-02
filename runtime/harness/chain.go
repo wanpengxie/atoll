@@ -78,6 +78,12 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res WriteResu
 	// Single linear loop: steps run in strict ascending-ID order.
 	// StepDedupe is a normal step that short-circuits via Outcome.Deduped
 	// when the incoming envelope is an idempotent retry.
+	//
+	// The store-derived is_terminal / canonical_hash no longer live on the
+	// envelope (kernel purified it); each is captured here from the step
+	// that owns it and handed to Append.
+	var isTerminal bool
+	var canonicalHash string
 	for _, s := range c.steps {
 		out, err := s.Run(ctx, env)
 		if err != nil {
@@ -85,8 +91,6 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res WriteResu
 			return WriteResult{}, err
 		}
 		if out.Deduped {
-			env.Seq = out.ExistingSeq
-			env.IsTerminal = out.ExistingIsTerminal
 			env.TSReceived = out.ExistingTSReceived
 			c.deps.Logger.Debug("harness.write.dedupe",
 				"step", int(s.ID()),
@@ -107,15 +111,20 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res WriteResu
 			c.observeReject(ctx, env, s.ID(), out.RejectReason, out.Detail)
 			return rejectFromOutcome(out, env), nil
 		}
+		if out.IsTerminal {
+			isTerminal = true
+		}
+		if out.CanonicalHash != "" {
+			canonicalHash = out.CanonicalHash
+		}
 		c.observePass(ctx, env, s.ID())
 	}
 
-	// StepEngineAppend — canonical sink. The chain has by this point
-	// set env.IsTerminal (StepResponsePairing for responses) and computed
-	// every other field; the store implementation is responsible for
-	// outbox / sequence allocation per L1 §8.6 / L2 §1.4.1.
+	// StepEngineAppend — canonical sink. is_terminal (StepResponsePairing)
+	// and canonical_hash (StepDedupe) were captured above; the store
+	// allocates seq per L2 §1.4.1.
 	env.TSReceived = c.deps.NowMs()
-	appendRes, err := c.deps.Log.Append(ctx, env)
+	appendRes, err := c.deps.Log.Append(ctx, env, isTerminal, canonicalHash)
 	if err != nil {
 		// Map the typed AppendError to a closed-set reject when possible.
 		// storespec.AppendError.Reason is the wire string (storespec must

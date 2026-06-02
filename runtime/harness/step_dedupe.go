@@ -54,14 +54,14 @@ func (s *stepDedupe) Run(ctx context.Context, env *message.Envelope) (Outcome, e
 	if err != nil {
 		return Outcome{}, fmt.Errorf("harness: dedupe hash incoming: %w", err)
 	}
-	env.CanonicalHash = incomingHash
+
 
 	storedHash, found, err := s.deps.Log.LookupCanonicalHash(ctx, s.deps.ChannelID, env.ID)
 	if err != nil {
 		return Outcome{}, fmt.Errorf("harness: dedupe lookup: %w", err)
 	}
 	if !found {
-		return Outcome{}, nil
+		return Outcome{CanonicalHash: incomingHash}, nil
 	}
 
 	if storedHash == incomingHash {
@@ -74,13 +74,13 @@ func (s *stepDedupe) Run(ctx context.Context, env *message.Envelope) (Outcome, e
 		}
 		if !ok {
 			// Race window: hash existed but row vanished. Treat as fresh.
-			return Outcome{}, nil
+			return Outcome{CanonicalHash: incomingHash}, nil
 		}
 		return Outcome{
 			Deduped:            true,
 			ExistingSeq:        existing.Seq,
 			ExistingIsTerminal: existing.IsTerminal,
-			ExistingTSReceived: existing.TSReceived,
+			ExistingTSReceived: existing.Envelope.TSReceived,
 		}, nil
 	}
 	return Outcome{

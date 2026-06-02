@@ -47,72 +47,22 @@ import (
 // independent of type_registry semantics and keeps the harness as the
 // single source of truth for terminal classification.
 type Messages struct {
-	db     *sql.DB
-	fence  WriteFence     // optional — when non-nil, Append enforces fencing.
-	outbox AppendObserver // optional framework-owned same-tx append observer.
+	db *sql.DB
 }
 
-// AppendObserver is an optional same-transaction hook for frameworks that
-// need to project appended messages into framework-owned side tables.
-type AppendObserver interface {
-	WaitForAdmission(ctx context.Context) error
-	EnqueueAppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, seq int64) error
-}
-
-// AppendObserverFuncs adapts function hooks into AppendObserver.
-type AppendObserverFuncs struct {
-	Wait    func(context.Context) error
-	Enqueue func(context.Context, *sql.Tx, *message.Envelope, int64) error
-}
-
-// WaitForAdmission implements AppendObserver.
-func (f AppendObserverFuncs) WaitForAdmission(ctx context.Context) error {
-	if f.Wait == nil {
-		return nil
-	}
-	return f.Wait(ctx)
-}
-
-// EnqueueAppendTx implements AppendObserver.
-func (f AppendObserverFuncs) EnqueueAppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, seq int64) error {
-	if f.Enqueue == nil {
-		return nil
-	}
-	return f.Enqueue(ctx, tx, env, seq)
-}
-
-// NewMessages returns a *Messages bound to the channel sqlite WITHOUT
-// fencing enforcement. Use this constructor for store-level unit tests
-// (transit_test / store_test) and helper paths that seed rows before
-// the channel_lock row is even installed.
+// NewMessages returns a *Messages bound to the channel sqlite.
 //
-// Production daemon wiring MUST use NewMessagesWithFence so every
-// caller-driven mutation is guarded by the active fencing gate.
+// v2: no fencing — the channel has a SINGLE writer (server harness) by
+// construction (proto-v2-physical §4), so the channel-write fence is
+// obsolete. No outbox observer — the v1 framework-owned same-tx side-table
+// projection is removed (truth lives on server; client push is the gateway
+// seam).
 func NewMessages(db *sql.DB) *Messages { return &Messages{db: db} }
 
-// NewMessagesWithFence returns a *Messages whose Append validates the
-// explicit fencing tuple against the injected fence INSIDE
-// the same transaction as the row INSERT. A stale daemon (or a forgotten
-// Append fencing argument) is rejected with
-// storespec.AppendError{Reason: HarnessWorkerFencingStale}.
-func NewMessagesWithFence(db *sql.DB, fence WriteFence) *Messages {
-	return &Messages{db: db, fence: fence}
-}
-
-// NewMessagesWithLock is kept as compatibility sugar for existing callers;
-// the parameter is the pure WriteFence interface, not a concrete lock type.
-func NewMessagesWithLock(db *sql.DB, fence WriteFence) *Messages {
-	return NewMessagesWithFence(db, fence)
-}
-
-// NewMessagesWithObservers wires both the pure fencing gate and an optional
-// framework-owned append observer.
-func NewMessagesWithObservers(db *sql.DB, fence WriteFence, outbox AppendObserver) *Messages {
-	return &Messages{db: db, fence: fence, outbox: outbox}
-}
-
-// Append implements storespec.MessageLog.
-func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kharness.FencingTuple) (storespec.AppendResult, error) {
+// Append implements storespec.MessageLog. The harness supplies the
+// pre-computed is_terminal (step 8) + canonical_hash (step dedupe) since the
+// pure envelope no longer carries those store-derived columns.
+func (m *Messages) Append(ctx context.Context, env *message.Envelope, isTerminal bool, canonicalHash string) (storespec.AppendResult, error) {
 	if env == nil {
 		return storespec.AppendResult{}, errors.New("store: append nil envelope")
 	}
@@ -129,11 +79,6 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kh
 	if env.Payload == nil {
 		return storespec.AppendResult{}, errors.New("store: append nil payload (harness step 4 must materialize payload before reaching store)")
 	}
-	if m.outbox != nil {
-		if err := m.outbox.WaitForAdmission(ctx); err != nil {
-			return storespec.AppendResult{}, err
-		}
-	}
 
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -141,7 +86,7 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kh
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	res, err := m.AppendTx(ctx, tx, env, fencing)
+	res, err := m.AppendTx(ctx, tx, env, isTerminal, canonicalHash)
 	if err != nil {
 		return storespec.AppendResult{}, err
 	}
@@ -154,7 +99,7 @@ func (m *Messages) Append(ctx context.Context, env *message.Envelope, fencing kh
 // AppendTx appends env using an existing transaction. It is used by internal
 // runtime lifecycle paths that must mutate a side table and append the mirror
 // event atomically.
-func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, fencing kharness.FencingTuple) (storespec.AppendResult, error) {
+func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal bool, canonicalHash string) (storespec.AppendResult, error) {
 	if tx == nil {
 		return storespec.AppendResult{}, errors.New("store: append tx nil")
 	}
@@ -167,16 +112,6 @@ func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelo
 	if env.Payload == nil {
 		return storespec.AppendResult{}, errors.New("store: append nil payload (harness step 4 must materialize payload before reaching store)")
 	}
-	// 0) FIX-T6 fencing gate — when constructed with a *ChannelLock,
-	// every Append must present a matching (fencing_token, daemon_epoch)
-	// tuple via an explicit Append parameter. The check runs INSIDE
-	// the tx so a concurrent RefreshDaemon cannot slip between SELECT
-	// and INSERT. Failure path: typed *storespec.AppendError so the harness
-	// chain maps it to message.HarnessWorkerFencingStale (closed-set
-	// reject). No outbox row is written.
-	if err := m.checkFencing(ctx, tx, string(env.ID), fencing); err != nil {
-		return storespec.AppendResult{}, err
-	}
 
 	// 1) dedupe by envelope.id
 	const selExist = `SELECT seq, is_terminal FROM messages WHERE id=?`
@@ -184,12 +119,9 @@ func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelo
 	var existingTerm int
 	switch err := tx.QueryRowContext(ctx, selExist, env.ID).Scan(&existingSeq, &existingTerm); {
 	case err == nil:
-		// Dedupe path — row already exists. Per L1 §10.2 dedupe semantics,
-		// we return Deduped=true with the existing seq. Caller (harness
-		// step 0.5) is responsible for verifying canonical-hash match
-		// before short-circuiting.
-		env.Seq = existingSeq
-		env.IsTerminal = existingTerm == 1
+		// Dedupe path — row already exists. Return Deduped=true with the
+		// existing seq/is_terminal (carried on AppendResult, not on the
+		// pure envelope which no longer holds store-derived columns).
 		return storespec.AppendResult{Seq: storespec.Seq(existingSeq), IsTerminal: existingTerm == 1, Deduped: true}, nil
 	case errors.Is(err, sql.ErrNoRows):
 		// fall through
@@ -222,9 +154,12 @@ func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelo
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	terminalInt := 0
-	if env.IsTerminal {
+	if isTerminal {
 		terminalInt = 1
 	}
+	// A freshly-appended row has never failed delivery: delivery_failed_at
+	// NULL, attempts 0. (These store-derived scheduling columns are no
+	// longer carried on the pure envelope.)
 	res, err := tx.ExecContext(ctx, ins,
 		env.ID, env.TS, env.TSReceived, env.ChannelID,
 		string(env.Sender.Kind), string(env.Sender.ID), nullableString(env.Sender.Name),
@@ -232,9 +167,9 @@ func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelo
 		nullableString(string(env.ParentID)), nullableString(string(env.CorrelationID)), nullableString(docRefsJSON), nullableString(crossRefsJSON),
 		env.Visibility, string(audJSON),
 		nullableInt(env.NotBefore), nullableInt(env.ExpiresAt),
-		nullableInt(env.DeliveredAt), nullableInt(env.DeliveryFailedAt),
-		nullableString(env.LastError), env.Attempts,
-		terminalInt, env.CanonicalHash,
+		nullableInt(env.DeliveredAt), nil,
+		nullableString(env.LastError), 0,
+		terminalInt, canonicalHash,
 	)
 	if err != nil {
 		return storespec.AppendResult{}, classifyAppendErr(err, string(env.ID))
@@ -243,15 +178,8 @@ func (m *Messages) AppendTx(ctx context.Context, tx *sql.Tx, env *message.Envelo
 	if err != nil {
 		return storespec.AppendResult{}, fmt.Errorf("store: append last id: %w", err)
 	}
-	env.Seq = seq
 
-	if m.outbox != nil {
-		if err := m.outbox.EnqueueAppendTx(ctx, tx, env, seq); err != nil {
-			return storespec.AppendResult{}, err
-		}
-	}
-
-	return storespec.AppendResult{Seq: storespec.Seq(seq), IsTerminal: env.IsTerminal, Deduped: false}, nil
+	return storespec.AppendResult{Seq: storespec.Seq(seq), IsTerminal: isTerminal, Deduped: false}, nil
 }
 
 // PendingDue returns up to `limit` future-message rows that are due for
@@ -804,35 +732,6 @@ func nullableInt(p *int64) any {
 	return *p
 }
 
-// checkFencing is the FIX-T6 gate. Returns nil when this Messages was
-// constructed without a WriteFence (test-mode wire). Otherwise validates
-// the explicit (token, epoch) tuple inside the supplied tx; on any
-// mismatch returns a typed
-// *storespec.AppendError{Reason: HarnessWorkerFencingStale} so the harness
-// chain can surface the canonical reject reason without parsing strings.
-func (m *Messages) checkFencing(ctx context.Context, tx *sql.Tx, envID string, fencing kharness.FencingTuple) error {
-	if m.fence == nil {
-		return nil
-	}
-	if fencing == (kharness.FencingTuple{}) {
-		return &storespec.AppendError{
-			Reason:           message.HarnessWorkerFencingStale,
-			Detail:           "fencing tuple missing from Append parameter",
-			PartialMessageID: message.ID(envID),
-		}
-	}
-	if err := m.fence.ValidateWriteTx(ctx, tx, fencing.Token, fencing.Epoch); err != nil {
-		if IsFencingStale(err) {
-			return &storespec.AppendError{
-				Reason:           message.HarnessWorkerFencingStale,
-				Detail:           err.Error(),
-				PartialMessageID: message.ID(envID),
-			}
-		}
-		return fmt.Errorf("store: append fencing check: %w", err)
-	}
-	return nil
-}
 
 // classifyAppendErr maps sqlite UNIQUE constraint failures to typed
 // *AppendError so the harness chain can map them to HarnessRejectReason.

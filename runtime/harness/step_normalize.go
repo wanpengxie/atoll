@@ -36,11 +36,7 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (Outcome
 	// authoritative values.
 	env.TSReceived = 0
 	env.DeliveredAt = nil
-	env.DeliveryFailedAt = nil
 	env.LastError = ""
-	env.Attempts = 0
-	env.Seq = 0
-	env.IsTerminal = false
 
 	// audience is now caller-owned (post wildcard removal). nil ≠ empty
 	// for downstream step 5 audience cardinality check: nil treated as

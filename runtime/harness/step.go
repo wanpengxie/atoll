@@ -51,6 +51,15 @@ type Outcome struct {
 	ExistingSeq        int64
 	ExistingIsTerminal bool
 	ExistingTSReceived int64
+
+	// IsTerminal / CanonicalHash carry the harness-computed store-derived
+	// values from the step that owns them (StepResponsePairing computes
+	// IsTerminal; StepDedupe computes CanonicalHash) up to the chain, which
+	// hands them to MessageLog.Append. They replace the deleted
+	// env.IsTerminal / env.CanonicalHash fields (kernel purified the
+	// envelope of store-derived columns).
+	IsTerminal    bool
+	CanonicalHash string
 }
 
 // Continue is true when the step accepts the envelope and the next step runs.

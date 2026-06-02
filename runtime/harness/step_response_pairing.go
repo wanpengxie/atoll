@@ -187,7 +187,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (O
 			audienceContains(parent.Audience, env.Sender.ID)
 		if isLateReceiverFinal {
 			rewriteAsLateFinal(env, parent)
-			env.IsTerminal = false
+
 			return Outcome{}, nil
 		}
 		if statusCls.isFinal {
@@ -204,8 +204,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (O
 
 	// is_terminal derives purely from the Layer 1 final closed set —
 	// the proto-layer0 §2.5.1 derivation is uniform across all types.
-	env.IsTerminal = statusCls.isFinal
-	return Outcome{}, nil
+	return Outcome{IsTerminal: statusCls.isFinal}, nil
 }
 
 // LateFinalType is the observability event type a receiver's genuine LATE

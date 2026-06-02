@@ -4,12 +4,30 @@ import (
 	"context"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // Seq is the messages.seq column — store-allocated monotonic per-channel
 // sequence (L2 §1.4.1 PRIMARY KEY AUTOINCREMENT).
 type Seq int64
+
+// StoredRow wraps a protocol Envelope (17 content+metadata fields) with the
+// store-derived columns kernel deliberately keeps OUT of the pure Envelope
+// (they are store-derived, not protocol fields — kernel-construction-spec
+// §1.2). Read paths return StoredRow; write paths (Append) take the pure
+// envelope + the harness-computed is_terminal / canonical_hash and the store
+// allocates seq. (DeliveredAt / LastError stay on the Envelope — L0 §2.5
+// delivery metadata, part of the wire envelope.)
+type StoredRow struct {
+	Envelope message.Envelope
+
+	Seq              int64
+	IsTerminal       bool
+	CanonicalHash    string
+	Attempts         int64
+	DeliveryFailedAt *int64
+}
 
 // AppendResult is what MessageLog.Append returns on a successful row write
 // (or a dedupe hit on an existing envelope.id).
@@ -50,11 +68,23 @@ func (e *AppendError) Error() string {
 // §1.4.1). Append is the only mutation entry point; reads are not declared
 // here because agents / scheduler / trigger may query messages directly.
 //
-// Concrete sqlite impl lives in runtime/store/messages.go. v2: no fencing
-// parameter — the channel has a single writer (server harness) by
-// construction (proto-v2-physical §4 / runtime-construction-spec §4.1).
+// Concrete sqlite impl lives in runtime/store/messages.go. v2 changes:
+//   - no fencing parameter — the channel has a single writer (server
+//     harness) by construction (proto-v2-physical §4).
+//   - is_terminal + canonical_hash are passed EXPLICITLY: kernel purified
+//     them off the Envelope (they are store-derived, not protocol fields),
+//     so the harness — which computes them in step 8 / step dedupe — hands
+//     them to Append. The store persists verbatim (it stays the dumb
+//     persister, FIX-T10).
 type MessageLog interface {
-	Append(ctx context.Context, env *message.Envelope) (AppendResult, error)
+	Append(ctx context.Context, env *message.Envelope, isTerminal bool, canonicalHash string) (AppendResult, error)
+
+	// LookupCanonicalHash returns the stored canonical_hash for id (used by
+	// harness step dedupe to verify an idempotent retry).
+	LookupCanonicalHash(ctx context.Context, channelID channel.ID, id message.ID) (string, bool, error)
+
+	// FindByID returns the stored row for id (seq / is_terminal / envelope).
+	FindByID(ctx context.Context, channelID channel.ID, id message.ID) (*StoredRow, bool, error)
 }
 
 // Cursor mirrors an actor_cursors row (L2 §1.4.3). Position metric is
