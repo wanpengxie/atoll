@@ -45,11 +45,8 @@ type ChannelStores struct {
 	Ledger storespec.Ledger
 	Types  storespec.TypeStore // full type_registry contract (install state machine + reads)
 
-	// Adapter kv/credential stores have no storespec interface yet (no consumer
-	// in v2 today); exposed concrete, db already confined. interface when a
-	// consumer is forward-derived.
-	AdapterState *AdapterStateStore
-	AdapterCreds *AdapterCredentialStore // nil when Deps.Secret is nil
+	AdapterState storespec.AdapterState       // channel-local adapter kv
+	AdapterCreds storespec.AdapterCredentials // sealed; nil when Deps.Secret is nil
 }
 
 // OpenChannel opens the per-channel sqlite and assembles the channel stores.
