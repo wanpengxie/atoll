@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/wanpengxie/ActOS/kernel/fencing"
+	"github.com/wanpengxie/ActOS/runtime/fence"
 )
 
 // FencingTuple bundles the (fencing_token, daemon_epoch) pair that
@@ -19,21 +19,21 @@ import (
 // Pure-store unit tests that do not exercise fencing pass an unstamped
 // context and use NewLedger without a lock so the validate step is skipped.
 type FencingTuple struct {
-	Token fencing.FencingToken
-	Epoch fencing.DaemonEpoch
+	Token fence.FencingToken
+	Epoch fence.DaemonEpoch
 }
 
 // WriteFence is the pure store-side fencing contract. Concrete channel
 // ownership schemes live outside runtime/store and inject an implementation.
 type WriteFence interface {
-	ValidateWriteTx(ctx context.Context, tx *sql.Tx, token fencing.FencingToken, epoch fencing.DaemonEpoch) error
+	ValidateWriteTx(ctx context.Context, tx *sql.Tx, token fence.FencingToken, epoch fence.DaemonEpoch) error
 }
 
 // WriteFenceFunc adapts a function into WriteFence.
-type WriteFenceFunc func(ctx context.Context, tx *sql.Tx, token fencing.FencingToken, epoch fencing.DaemonEpoch) error
+type WriteFenceFunc func(ctx context.Context, tx *sql.Tx, token fence.FencingToken, epoch fence.DaemonEpoch) error
 
 // ValidateWriteTx implements WriteFence.
-func (f WriteFenceFunc) ValidateWriteTx(ctx context.Context, tx *sql.Tx, token fencing.FencingToken, epoch fencing.DaemonEpoch) error {
+func (f WriteFenceFunc) ValidateWriteTx(ctx context.Context, tx *sql.Tx, token fence.FencingToken, epoch fence.DaemonEpoch) error {
 	return f(ctx, tx, token, epoch)
 }
 
@@ -42,10 +42,10 @@ func (f WriteFenceFunc) ValidateWriteTx(ctx context.Context, tx *sql.Tx, token f
 // the current channel owner. Callers map this to
 // message.HarnessWorkerFencingStale per L1 §10.3.1.
 type FencingStaleError struct {
-	HaveToken fencing.FencingToken
-	GotToken  fencing.FencingToken
-	HaveEpoch fencing.DaemonEpoch
-	GotEpoch  fencing.DaemonEpoch
+	HaveToken fence.FencingToken
+	GotToken  fence.FencingToken
+	HaveEpoch fence.DaemonEpoch
+	GotEpoch  fence.DaemonEpoch
 	Reason    string
 }
 
@@ -74,7 +74,7 @@ type ctxKeyFencing struct{}
 // CtxWithFencing returns a child ctx carrying the fencing tuple. Call
 // this at the edge (workerhost.handle*, scheduler tick, lifecycle
 // channel-bound write) before invoking any channel-local mutation.
-func CtxWithFencing(ctx context.Context, token fencing.FencingToken, epoch fencing.DaemonEpoch) context.Context {
+func CtxWithFencing(ctx context.Context, token fence.FencingToken, epoch fence.DaemonEpoch) context.Context {
 	return context.WithValue(ctx, ctxKeyFencing{}, FencingTuple{Token: token, Epoch: epoch})
 }
 

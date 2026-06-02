@@ -14,8 +14,8 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/fencing"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/fence"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 	"github.com/wanpengxie/ActOS/runtime/worker"
 )
@@ -141,8 +141,8 @@ func TestMockBridge_ReactAndExitOnMaxTurns(t *testing.T) {
 		WorkerID:      "worker-MB",
 		ChannelID:     channel.ID("ch-MB"),
 		WorkerActorID: "agent:channel-agent",
-		FencingToken:  fencing.FencingToken("tok-1"),
-		DaemonEpoch:   fencing.DaemonEpoch(1),
+		FencingToken:  fence.FencingToken("tok-1"),
+		DaemonEpoch:   fence.DaemonEpoch(1),
 	}
 	go daemon.loop(ctx, ack, 2)
 
@@ -258,8 +258,8 @@ func TestMockBridge_DomainPromptLog(t *testing.T) {
 		WorkerID:      "worker-PROMPT",
 		ChannelID:     channel.ID("ch-PROMPT"),
 		WorkerActorID: "agent:channel-agent",
-		FencingToken:  fencing.FencingToken("tok-1"),
-		DaemonEpoch:   fencing.DaemonEpoch(1),
+		FencingToken:  fence.FencingToken("tok-1"),
+		DaemonEpoch:   fence.DaemonEpoch(1),
 	}
 	// One trigger → bridge reacts, MaxTurns=1 fires terminal, Run exits.
 	go daemon.loop(ctx, ack, 1)
@@ -339,8 +339,8 @@ func TestMockBridge_NoDomainPromptLog(t *testing.T) {
 		WorkerID:      "worker-GROUP",
 		ChannelID:     channel.ID("ch-GROUP"),
 		WorkerActorID: "agent:channel-agent",
-		FencingToken:  fencing.FencingToken("tok-1"),
-		DaemonEpoch:   fencing.DaemonEpoch(1),
+		FencingToken:  fence.FencingToken("tok-1"),
+		DaemonEpoch:   fence.DaemonEpoch(1),
 	}
 	go daemon.loop(ctx, ack, 1)
 

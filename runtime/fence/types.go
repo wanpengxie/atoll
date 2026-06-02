@@ -1,6 +1,6 @@
 // Package fencing declares the minimal write-fence identity carried by
 // channel-local mutation paths.
-package fencing
+package fence
 
 // FencingToken is the opaque guard value that gates writes to a channel
 // store. Equality is the only protocol-level comparison.

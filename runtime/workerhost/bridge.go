@@ -10,9 +10,9 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/fencing"
 	khar "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/fence"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 )
 
@@ -60,8 +60,8 @@ type BridgeConfig struct {
 	// Fencing snapshot at construction. Bridge assumes the channel
 	// lock doesn't change during its lifetime; daemon unloads + re-
 	// builds the bridge on placement reclaim, so this is safe.
-	FencingToken fencing.FencingToken
-	DaemonEpoch  fencing.DaemonEpoch
+	FencingToken fence.FencingToken
+	DaemonEpoch  fence.DaemonEpoch
 
 	// HandshakeTimeout caps how long OnTrigger waits for the freshly
 	// spawned worker's handshake before giving up. Default 5s.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/wanpengxie/ActOS/kernel/fencing"
+	"github.com/wanpengxie/ActOS/runtime/fence"
 	"github.com/wanpengxie/ActOS/runtime/store"
 )
 
@@ -15,8 +15,8 @@ import (
 // (substrate must compile its own test suite with kernel + store only).
 //
 //nolint:unused // retained (reaper/correlation will wire; xhs allowlist schema)
-func fakeFence(token fencing.FencingToken, epoch fencing.DaemonEpoch) store.WriteFence {
-	return store.WriteFenceFunc(func(_ context.Context, _ *sql.Tx, tok fencing.FencingToken, ep fencing.DaemonEpoch) error {
+func fakeFence(token fence.FencingToken, epoch fence.DaemonEpoch) store.WriteFence {
+	return store.WriteFenceFunc(func(_ context.Context, _ *sql.Tx, tok fence.FencingToken, ep fence.DaemonEpoch) error {
 		if tok != token || ep != epoch {
 			return &store.FencingStaleError{HaveToken: token, GotToken: tok, HaveEpoch: epoch, GotEpoch: ep}
 		}

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/fencing"
+	"github.com/wanpengxie/ActOS/runtime/fence"
 )
 
 // Lease is one acquired worker slot for one channel.
@@ -17,8 +17,8 @@ type Lease struct {
 	ID           string
 	ChannelID    channel.ID
 	WorkerID     string
-	FencingToken fencing.FencingToken
-	DaemonEpoch  fencing.DaemonEpoch
+	FencingToken fence.FencingToken
+	DaemonEpoch  fence.DaemonEpoch
 	AcquiredAt   int64
 	ExpiresAt    int64
 }
@@ -45,8 +45,8 @@ func (s *LeaseStore) Acquire(
 	ctx context.Context,
 	agentID string,
 	workerID string,
-	fencing fencing.FencingToken,
-	daemonEpoch fencing.DaemonEpoch,
+	fencing fence.FencingToken,
+	daemonEpoch fence.DaemonEpoch,
 	now int64,
 ) (Lease, bool, error) {
 	if s.db == nil {

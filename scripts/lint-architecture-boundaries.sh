@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # v2 architecture-boundary checks (complements go-arch-lint component graph).
 # Enforces the §1.2 禁止清单 of coagent-v2-arch-constraints-and-checks.md:
-# deleted-world residue must be absent. (kernel/fencing 出走 is a tracked P1
-# remnant — FencingToken/DaemonEpoch are still consumed by runtime session
-# fencing; their relocation needs dedicated dependency untangling, see主控.)
 set -uo pipefail
 
 fail() { echo "[lint-arch-boundaries] FAIL: $1" >&2; exit 1; }
@@ -15,7 +12,7 @@ command -v rg >/dev/null 2>&1 || { echo "[lint-arch-boundaries] ripgrep required
 [ -d adapters/proxy ] && fail "adapters/proxy 残留 (应溶解 daemon)"
 
 # 2. kernel 杂质包必须消解。
-for p in closure actorreg adapter; do
+for p in closure actorreg adapter fencing; do
   [ -d "kernel/$p" ] && fail "kernel/$p 残留 (应消解)"
 done
 

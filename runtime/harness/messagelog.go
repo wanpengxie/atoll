@@ -5,13 +5,13 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/fencing"
 	"github.com/wanpengxie/ActOS/kernel/log"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/fence"
 )
 
 // FencingTuple is the explicit daemon ownership token a channel-local
-// MessageLog append must present when the concrete store enforces fencing.
+// MessageLog append must present when the concrete store enforces fence.
 // A zero tuple means "no fencing supplied"; unfenced test stores may ignore
 // it, but fenced stores reject it as stale rather than reading hidden state
 // from context.Context.
@@ -22,8 +22,8 @@ import (
 // import cycle (store implements harness.MessageLog; harness never imports
 // store).
 type FencingTuple struct {
-	Token fencing.FencingToken
-	Epoch fencing.DaemonEpoch
+	Token fence.FencingToken
+	Epoch fence.DaemonEpoch
 }
 
 // MessageLog is the channel-local messages-table append contract (L2 §1.4.1).

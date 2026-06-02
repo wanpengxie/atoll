@@ -21,9 +21,9 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/fencing"
 	"github.com/wanpengxie/ActOS/kernel/ledger"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/fence"
 )
 
 // Kind is the closed set of IPC frame kinds exchanged daemon ↔ worker.
@@ -78,13 +78,13 @@ func (w WorkerID) String() string { return string(w) }
 // Frame is the IPC wire envelope. Length-prefixed JSON: a uint32 BE
 // length header followed by the JSON-marshalled Frame.
 type Frame struct {
-	ID           string               `json:"id"`
-	Kind         Kind                 `json:"kind"`
-	ChannelID    channel.ID           `json:"channel_id,omitempty"`
-	FencingToken fencing.FencingToken `json:"fencing_token,omitempty"`
-	DaemonEpoch  fencing.DaemonEpoch  `json:"daemon_epoch,omitempty"`
-	WorkerID     WorkerID             `json:"worker_id,omitempty"`
-	Payload      json.RawMessage      `json:"payload,omitempty"`
+	ID           string             `json:"id"`
+	Kind         Kind               `json:"kind"`
+	ChannelID    channel.ID         `json:"channel_id,omitempty"`
+	FencingToken fence.FencingToken `json:"fencing_token,omitempty"`
+	DaemonEpoch  fence.DaemonEpoch  `json:"daemon_epoch,omitempty"`
+	WorkerID     WorkerID           `json:"worker_id,omitempty"`
+	Payload      json.RawMessage    `json:"payload,omitempty"`
 }
 
 // HandshakePayload is sent worker → daemon on startup.
@@ -101,10 +101,10 @@ type HandshakeAckPayload struct {
 	// harness step 3 sender_mismatch will reject). Added in M1.6-T1
 	// so the MockBridge knows its own actor identity without
 	// out-of-band configuration.
-	WorkerActorID actor.ActorID        `json:"worker_actor_id,omitempty"`
-	FencingToken  fencing.FencingToken `json:"fencing_token"`
-	DaemonEpoch   fencing.DaemonEpoch  `json:"daemon_epoch"`
-	TurnDeadline  int64                `json:"turn_deadline_ms"`
+	WorkerActorID actor.ActorID      `json:"worker_actor_id,omitempty"`
+	FencingToken  fence.FencingToken `json:"fencing_token"`
+	DaemonEpoch   fence.DaemonEpoch  `json:"daemon_epoch"`
+	TurnDeadline  int64              `json:"turn_deadline_ms"`
 }
 
 // WriteMessagePayload asks daemon to append an envelope.
@@ -144,11 +144,11 @@ type HeartbeatPayload struct {
 // FenceInvalidPayload is daemon's reply when fencing fails. Worker MUST
 // exit immediately.
 type FenceInvalidPayload struct {
-	ExpectedToken fencing.FencingToken `json:"expected_token"`
-	GotToken      fencing.FencingToken `json:"got_token"`
-	ExpectedEpoch fencing.DaemonEpoch  `json:"expected_epoch"`
-	GotEpoch      fencing.DaemonEpoch  `json:"got_epoch"`
-	Reason        string               `json:"reason"`
+	ExpectedToken fence.FencingToken `json:"expected_token"`
+	GotToken      fence.FencingToken `json:"got_token"`
+	ExpectedEpoch fence.DaemonEpoch  `json:"expected_epoch"`
+	GotEpoch      fence.DaemonEpoch  `json:"got_epoch"`
+	Reason        string             `json:"reason"`
 }
 
 // ReplyPayload carries a typed JSON result.

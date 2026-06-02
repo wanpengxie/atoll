@@ -1,7 +1,7 @@
 package workerhost
 
 import (
-	"github.com/wanpengxie/ActOS/kernel/fencing"
+	"github.com/wanpengxie/ActOS/runtime/fence"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 )
 
@@ -14,8 +14,8 @@ import (
 //     FenceInvalidPayload so the worker exits.
 func Fence(
 	frame ipc.Frame,
-	expectedToken fencing.FencingToken,
-	expectedEpoch fencing.DaemonEpoch,
+	expectedToken fence.FencingToken,
+	expectedEpoch fence.DaemonEpoch,
 ) (bool, ipc.FenceInvalidPayload) {
 	if frame.FencingToken == expectedToken && frame.DaemonEpoch == expectedEpoch {
 		return true, ipc.FenceInvalidPayload{}
