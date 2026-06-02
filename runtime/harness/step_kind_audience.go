@@ -88,14 +88,12 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (o
 		}
 	}
 
-	// Audience emptiness is the single validation centre for the
-	// resolve→validate pipeline. The pre-resolution reject was moved here
-	// from StepEnvelopeShape so it runs over the *resolved* audience:
-	// StepAudienceResolve (which ran just before this step) fills the
-	// channel default for human senders, so an empty audience reaching
-	// here means either a non-human sender (whose empty audience is a bug
-	// we surface, not paper over) or a channel with no declared default.
-	// Either way the reason is unchanged — harness_audience_empty.
+	// Audience emptiness is the single validation centre. The substrate write
+	// engine does NOT resolve a "default audience" — routing intent is an
+	// ingress / domain concern that must produce a NAMED audience BEFORE the
+	// harness (substrate validates named audiences, it does not author routing
+	// policy). An empty audience reaching here is therefore unresolved (or a
+	// non-human sender's bug) and is rejected — harness_audience_empty.
 	if len(env.Audience) == 0 {
 		return outcome{
 			RejectReason: HarnessAudienceEmpty,
@@ -124,8 +122,7 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (o
 	}
 
 	// request — audience exactly-one concrete receiver. Step 2 has
-	// already rejected wildcard audience entries; StepAudienceResolve has
-	// filled the channel default for human senders. len>1 is an explicit
+	// already rejected wildcard audience entries. len>1 is an explicit
 	// fan-out request → harness_request_audience_invalid.
 	if len(env.Audience) != 1 || env.Audience[0] == "" {
 		return outcome{

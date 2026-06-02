@@ -23,7 +23,6 @@ const (
 	StepNormalize        stepID = 3
 	StepSenderConsistent stepID = 4
 	StepTypeRegistered   stepID = 5
-	StepAudienceResolve  stepID = 6
 	StepKindAndAudience  stepID = 7
 	StepResponsePairing  stepID = 8
 	StepEngineAppend     stepID = 9
@@ -36,7 +35,6 @@ var allStepIDs = []stepID{
 	StepNormalize,
 	StepSenderConsistent,
 	StepTypeRegistered,
-	StepAudienceResolve,
 	StepKindAndAudience,
 	StepResponsePairing,
 	StepEngineAppend,

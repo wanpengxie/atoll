@@ -86,12 +86,10 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 	// msg`); every audience entry MUST be a literal actor_id.
 	//
 	// Audience EMPTINESS and request/response cardinality are NOT
-	// validated here: an empty audience is an unresolved routing intent,
-	// not a shape error. StepAudienceResolve (which runs after
-	// SenderConsistent) fills the channel default for human senders; the
-	// cardinality / active-actor / empty-audience validation then runs in
-	// StepKindAndAudience over the resolved audience — a single
-	// validation centre, never duplicated upstream of resolution.
+	// validated here: empty/cardinality checks all live in
+	// StepKindAndAudience (a single validation centre). The substrate does
+	// not resolve a default audience — a named audience must arrive from the
+	// ingress/domain layer; an empty one is rejected downstream.
 	for _, id := range env.Audience {
 		if string(id) == "*" {
 			return outcome{
@@ -145,7 +143,7 @@ func allowedTopLevelEnvelopeKey(key string) bool {
 	switch key {
 	// L0 §1.1 content fields. sender is nested; sender.{kind,id}
 	// flatten into the same top-level "sender" key.
-	case "id", "ts", "ts_received", "channel_id", "sender", "kind", "type",
+	case "id", "ts", "channel_id", "sender", "kind", "type",
 		"payload", "parent_id", "correlation_id",
 		"visibility", "audience", "expires_at":
 		return true
