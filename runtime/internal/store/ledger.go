@@ -18,7 +18,7 @@ type Ledger struct {
 }
 
 // NewLedger returns a Ledger over the given channel sqlite.
-func NewLedger(db *sql.DB) *Ledger { return &Ledger{db: db} }
+func newLedger(db *sql.DB) *Ledger { return &Ledger{db: db} }
 
 // Find implements storespec.Ledger.
 func (l *Ledger) Find(ctx context.Context, key ledger.Key) (storespec.Entry, bool, error) {

@@ -23,7 +23,7 @@ type ActorRegistry struct {
 // NewActorRegistry returns a registry over the given channel sqlite.
 // (v2: no fence / outbox — single writer by construction; the v1
 // framework-owned same-tx projection is removed.)
-func NewActorRegistry(db *sql.DB) *ActorRegistry { return &ActorRegistry{db: db} }
+func newActorRegistry(db *sql.DB) *ActorRegistry { return &ActorRegistry{db: db} }
 
 // Lookup implements storespec.Registry.
 func (r *ActorRegistry) Lookup(ctx context.Context, id actor.ActorID) (storespec.Record, bool, error) {

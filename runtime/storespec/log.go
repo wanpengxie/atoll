@@ -95,6 +95,36 @@ type MessageLog interface {
 	FinalResponseSender(ctx context.Context, channelID channel.ID, parentID message.ID) (actor.ActorID, bool, error)
 }
 
+// MessageQuery is the channel-log READ role — segregated from MessageLog so a
+// reader (scheduler / client tail / closure supervisor) is handed a surface
+// WITHOUT Append. Bundling reads with Append (one fat interface) would hand the
+// harness-bypass write capability to every reader — the exact leak §4.5 closes;
+// hence ISP/CQRS role-split, not one interface. The concrete satisfies both.
+type MessageQuery interface {
+	// MaxSeq is the channel's highest seq (client cursor anchor).
+	MaxSeq(ctx context.Context, channelID channel.ID) (int64, error)
+	// ReadAfterSeq is the client-push tail: envelopes with seq > afterSeq.
+	ReadAfterSeq(ctx context.Context, channelID channel.ID, afterSeq int64, limit int) ([]StoredRow, error)
+	// PendingDue returns future-message rows due for dispatch (not_before<=now).
+	PendingDue(ctx context.Context, nowMs int64, limit int) ([]StoredRow, error)
+	// LongPendingRequests returns requests past expires_at without a terminal.
+	LongPendingRequests(ctx context.Context, nowMs int64, limit int) ([]StoredRow, error)
+	// OpenRequestsForActor returns in-flight requests addressed to actorID.
+	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID, limit int) ([]StoredRow, error)
+	// RetryableDeliveries returns failed-delivery requests whose backoff elapsed.
+	RetryableDeliveries(ctx context.Context, nowMs int64, limit int, backoffFn func(attempts int64) int64) ([]StoredRow, error)
+}
+
+// DeliveryStore is the delivery-bookkeeping mutation role (scheduler/daemon
+// delivery loop): it stamps delivered_at / records delivery errors. Separated
+// from MessageLog (log append) and MessageQuery (reads) per role — these are
+// delivery-state commands, not channel-log appends, and the consumer is the
+// delivery loop, not the harness.
+type DeliveryStore interface {
+	MarkDelivered(ctx context.Context, id message.ID, atMs int64) error
+	MarkDeliveryError(ctx context.Context, id message.ID, atMs int64, errText string) error
+}
+
 // Cursor mirrors an actor_cursors row (L2 §1.4.3). Position metric is
 // LastConsumedSeq; LastConsumedID is informational only.
 type Cursor struct {

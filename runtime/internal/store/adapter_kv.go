@@ -23,7 +23,7 @@ type AdapterStateStore struct {
 
 // NewAdapterStateStore returns a persistent key/value store backed by the
 // channel-local adapter_state table.
-func NewAdapterStateStore(db *sql.DB, nowFn func() int64) *AdapterStateStore {
+func newAdapterStateStore(db *sql.DB, nowFn func() int64) *AdapterStateStore {
 	if nowFn == nil {
 		nowFn = func() int64 { return time.Now().UnixMilli() }
 	}
@@ -108,7 +108,7 @@ type AdapterCredentialStore struct {
 }
 
 // NewAdapterCredentialStore returns a persistent credential key/value store.
-func NewAdapterCredentialStore(db *sql.DB, nowFn func() int64, box SecretBox) (*AdapterCredentialStore, error) {
+func newAdapterCredentialStore(db *sql.DB, nowFn func() int64, box SecretBox) (*AdapterCredentialStore, error) {
 	if box == nil {
 		return nil, errors.New("store: adapter credential SecretBox required")
 	}

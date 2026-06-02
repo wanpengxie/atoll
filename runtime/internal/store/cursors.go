@@ -17,7 +17,7 @@ type Cursors struct {
 }
 
 // NewCursors returns a Cursors bound to the channel sqlite.
-func NewCursors(db *sql.DB) *Cursors { return &Cursors{db: db} }
+func newCursors(db *sql.DB) *Cursors { return &Cursors{db: db} }
 
 // Get implements storespec.Cursors.
 func (c *Cursors) Get(ctx context.Context, actorID actor.ActorID) (storespec.Cursor, bool, error) {

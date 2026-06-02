@@ -56,7 +56,7 @@ type Messages struct {
 // obsolete. No outbox observer — the v1 framework-owned same-tx side-table
 // projection is removed (truth lives on server; client push is the gateway
 // seam).
-func NewMessages(db *sql.DB) *Messages { return &Messages{db: db} }
+func newMessages(db *sql.DB) *Messages { return &Messages{db: db} }
 
 // Append implements storespec.MessageLog. The harness supplies the
 // pre-computed is_terminal (step 8) + canonical_hash (step dedupe) since the

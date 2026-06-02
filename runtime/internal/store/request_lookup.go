@@ -26,7 +26,7 @@ type RequestLookup struct {
 // keeping the parameter makes the cross-channel invariant explicit and
 // future-proofs the wiring should the same Messages instance ever
 // service multiple channels.
-func NewRequestLookup(messages *Messages, channelID channel.ID) *RequestLookup {
+func newRequestLookup(messages *Messages, channelID channel.ID) *RequestLookup {
 	return &RequestLookup{messages: messages, channelID: channelID}
 }
 

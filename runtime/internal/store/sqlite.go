@@ -27,8 +27,10 @@ type OpenOptions struct {
 	ExtraPragmas []string
 }
 
-// OpenChannel opens (creating if absent) the per-channel messages.sqlite
-// at dbPath, runs ChannelLocalDDL, and returns *sql.DB ready for use.
+// openChannelDB opens (creating if absent) the per-channel messages.sqlite at
+// dbPath, runs ChannelLocalDDL, and returns the raw *sql.DB. UNEXPORTED by
+// design (§4.5): the raw handle must never cross the store boundary — only the
+// OpenChannel assembly (channel.go) may hold it, exposing storespec interfaces.
 //
 // Pragmas applied (per L2 §1.4 sqlite tuning):
 //
@@ -36,7 +38,7 @@ type OpenOptions struct {
 //	PRAGMA synchronous=NORMAL
 //	PRAGMA foreign_keys=ON
 //	PRAGMA busy_timeout=5000
-func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions) (*sql.DB, error) {
+func openChannelDB(ctx context.Context, dbPath string, opts OpenOptions) (*sql.DB, error) {
 	db, err := openSqlite(ctx, dbPath, opts, ChannelLocalDDL)
 	if err != nil {
 		return nil, err

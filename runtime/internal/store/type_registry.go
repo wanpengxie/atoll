@@ -46,7 +46,7 @@ type TypeInstallAttempt struct {
 // NewTypeRegistry builds the registry over the given channel sqlite.
 // nowFn stamps the created_at column on Upsert; passing nil falls back
 // to a no-op zero (callers that need real timestamps MUST inject NowFn).
-func NewTypeRegistry(db *sql.DB, nowFn func() int64) *TypeRegistry {
+func newTypeRegistry(db *sql.DB, nowFn func() int64) *TypeRegistry {
 	if nowFn == nil {
 		nowFn = func() int64 { return 0 }
 	}
