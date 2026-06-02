@@ -18,6 +18,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
+	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // presenceEntry is the ephemeral physical-layer state for one actor, fed by a
@@ -105,12 +106,20 @@ func (s *SystemActor) respondList(ctx context.Context, env *message.Envelope) er
 	}
 	catalog := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
-		rd := s.readiness[r.ID]
+		// Readiness comes from the AUTHORITATIVE registry projection (write side:
+		// the adapter persists it via ReadinessUpdater). The actor.readiness.changed
+		// event is SystemOnly so the adapter can't push it here; the registry row
+		// is the truth. Fall back to the ingested event map for actors whose
+		// readiness arrives as a system-emitted event (none today).
+		rd := r.Readiness
+		if rd.State == "" {
+			rd = s.readiness[r.ID]
+		}
 		catalog = append(catalog, map[string]any{
 			"id":        string(r.ID),
 			"kind":      string(r.Kind),
 			"binding":   string(r.Binding),
-			"readiness": string(rd.State),
+			"readiness": string(rd.Normalize().State),
 			"present":   s.isPresent(r.ID),
 		})
 	}
@@ -125,7 +134,13 @@ func (s *SystemActor) respondList(ctx context.Context, env *message.Envelope) er
 	if err != nil {
 		return err
 	}
-	_, err = s.chain.Write(ctx, resp)
+	// Stamp the system actor's own caller identity so the harness ACL
+	// authenticates the write (without it the response is rejected as
+	// harness_engine_acl_denied and the caller never sees the catalog).
+	cctx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{
+		ActorID: s.self, ChannelID: s.channelID, AllowProvidedSenderKind: true,
+	})
+	_, err = s.chain.Write(cctx, resp)
 	return err
 }
 

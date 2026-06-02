@@ -33,6 +33,10 @@ type InstallDeps struct {
 	// Futures is the channel-level caller-side future hub; nil for pure
 	// receiver adapters.
 	Futures callerFutures
+	// ReadinessSink persists adapter readiness into the authoritative registry
+	// projection (the channel system actor reads it back). The composition root
+	// passes the registry (store.ActorRegistry implements ReadinessUpdater).
+	ReadinessSink actor.ReadinessUpdater
 }
 
 // InstallResult is the installer output for the host to Spawn (dismantle
@@ -99,19 +103,20 @@ func Install(ctx context.Context, mod behavior.Module, deps InstallDeps) (Instal
 	}
 
 	a := &adapterActor{
-		self:        decl.ActorID,
-		module:      mod,
-		declaration: decl,
-		correlation: map[behavior.CorrelationKey]behavior.CorrelationEntry{},
-		logger:      deps.Logger,
-		metrics:     deps.Metrics,
-		state:       deps.State,
-		channelID:   deps.ChannelID,
-		chain:       deps.Chain,
-		lookup:      deps.Lookup,
-		clock:       deps.Clock,
-		forward:     deps.Forward,
-		futures:     deps.Futures,
+		self:          decl.ActorID,
+		module:        mod,
+		declaration:   decl,
+		correlation:   map[behavior.CorrelationKey]behavior.CorrelationEntry{},
+		logger:        deps.Logger,
+		metrics:       deps.Metrics,
+		state:         deps.State,
+		channelID:     deps.ChannelID,
+		chain:         deps.Chain,
+		lookup:        deps.Lookup,
+		clock:         deps.Clock,
+		forward:       deps.Forward,
+		futures:       deps.Futures,
+		readinessSink: deps.ReadinessSink,
 	}
 	return InstallResult{ActorID: decl.ActorID, Declaration: decl, Actor: a}, nil
 }

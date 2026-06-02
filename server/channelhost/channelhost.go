@@ -32,14 +32,14 @@ type ChannelHome struct {
 	typeReg  *store.TypeRegistry
 	lookup   *store.RequestLookup
 
-	chain   *harness.Chain
+	// chain is the fanout-wrapping write path: every committed envelope fans out
+	// to its audience (local cells / remote computes). All cell-originated writes
+	// (responses, events, closure terminals) and ingress go through it, so a
+	// write reaching truth always reaches its audience.
+	chain   *fanoutChain
 	channel *channelkit.Channel
 	system  *sysactor.SystemActor
 	nowMs   func() int64
-
-	// remoteDispatch routes a request to an actor hosted on an attached compute
-	// (injected by server.Run with fleet.Dispatch). nil → no remote computes.
-	remoteDispatch func(target actor.ActorID, env *message.Envelope) bool
 }
 
 // RunClosureScan runs the caller-scoped closure loop (closure author #2): it
@@ -104,12 +104,13 @@ func (h *ChannelHome) InstallEmbeddedAdapter(ctx context.Context, mod behavior.M
 		return "", fmt.Errorf("channelhost: register embedded actor %s: %w", decl.ActorID, err)
 	}
 	res, err := adapterhost.Install(ctx, mod, adapterhost.InstallDeps{
-		ChannelID: h.channelID,
-		Chain:     h.chain,
-		Lookup:    h.lookup,
-		Registry:  h.registry,
-		TypeReg:   h.typeReg,
-		Clock:     func() time.Time { return time.UnixMilli(h.nowMs()) },
+		ChannelID:     h.channelID,
+		Chain:         h.chain,
+		Lookup:        h.lookup,
+		Registry:      h.registry,
+		TypeReg:       h.typeReg,
+		ReadinessSink: h.registry, // store.ActorRegistry implements ReadinessUpdater
+		Clock:         func() time.Time { return time.UnixMilli(h.nowMs()) },
 	})
 	if err != nil {
 		return "", err
@@ -126,35 +127,41 @@ func (h *ChannelHome) InstallEmbeddedAdapter(ctx context.Context, mod behavior.M
 // this into fleet.SetOnDeath. Without it a compute cell death is a black hole on
 // the home side (the P0 "死 cell 黑洞" extended across the wire).
 func (h *ChannelHome) MaterialiseComputeDeath(ctx context.Context, dead actor.ActorID) {
+	reqs, err := h.messages.OpenRequestsForActor(ctx, dead, 0)
+	if err != nil {
+		return
+	}
 	clock := func() time.Time { return time.UnixMilli(h.nowMs()) }
-	channelkit.MaterialiseReceiverUnavailable(ctx, h.chain, h.messages, clock, h.channelID, dead)
+	sys := message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
+	for i := range reqs {
+		req := reqs[i]
+		term, berr := behavior.BuildResponseFromRequest(&req, clock, sys,
+			behavior.CorrelationKey(req.ID),
+			behavior.ResponseSpec{Status: "failed", Reason: string(message.TerminalReceiverUnavailable)})
+		if berr != nil {
+			continue
+		}
+		// System-authored terminal (harness Step 8 substrateDeath author); the
+		// fanout chain delivers it to the waiting caller. Caller context = system.
+		cctx := harness.CtxWithCaller(ctx, harness.CallerContext{ActorID: actor.SystemActorID, ChannelID: h.channelID, AllowProvidedSenderKind: true})
+		_, _ = h.chain.Write(cctx, term)
+	}
 }
 
 // SetRemoteDispatch wires the fleet's compute-dispatch seam so requests for
-// actors hosted on an attached compute are routed down the wire.
+// actors hosted on an attached compute are routed down the wire. It feeds the
+// fanout chain's remote leg, so EVERY committed request (ingress or
+// cell-originated) reaches a remote actor — not just ingress.
 func (h *ChannelHome) SetRemoteDispatch(fn func(actor.ActorID, *message.Envelope) bool) {
-	h.remoteDispatch = fn
+	h.chain.remote = fn
 }
 
-// Dispatch writes env into channel truth (9-step harness) and, for requests,
-// fans it out to the audience — local固有 cells (channelkit) or, if the actor
-// is hosted on an attached compute, down the wire via remoteDispatch. This is
-// the home-side router that makes truth-flip + compute hosting work end to end.
+// Dispatch writes env into channel truth (9-step harness); the fanout chain then
+// delivers the committed envelope to its audience (local cells / remote compute).
+// This is the client/SDK ingress seam — a thin wrapper over the universal
+// write→fanout path that every cell write also takes.
 func (h *ChannelHome) Dispatch(ctx context.Context, env *message.Envelope) (khrn.WriteResult, error) {
-	res, err := h.chain.Write(ctx, env)
-	if err != nil || res.RejectReason != "" {
-		return res, err
-	}
-	if env.Kind == message.KindRequest {
-		for _, aid := range env.Audience {
-			if h.channel.Cells().Has(aid) {
-				_ = h.channel.Cells().Deliver(ctx, []actor.ActorID{aid}, env)
-			} else if h.remoteDispatch != nil {
-				h.remoteDispatch(aid, env)
-			}
-		}
-	}
-	return res, nil
+	return h.chain.Write(ctx, env)
 }
 
 // Config configures a channel home.
@@ -189,7 +196,7 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 	typeReg := store.NewTypeRegistry(db, nowMs)               // message.TypeRegistry + harness view
 	lookup := store.NewRequestLookup(messages, cfg.ChannelID) // message.RequestLookup
 
-	chain, err := harness.New(harness.Deps{
+	rawChain, err := harness.New(harness.Deps{
 		ChannelID:     cfg.ChannelID,
 		ActorRegistry: registry,
 		TypeRegistry:  typeReg.HarnessView(),
@@ -199,9 +206,14 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 	if err != nil {
 		return nil, fmt.Errorf("channelhost: assemble harness: %w", err)
 	}
+	// Wrap the harness in the fanout chain — the universal write→deliver path.
+	// Every cell + the death closure + ingress write through this, so a committed
+	// envelope always reaches its audience. cells is back-filled once channelkit
+	// builds the runtime (no write happens during construction).
+	chain := &fanoutChain{inner: rawChain}
 
 	// The channel system actor is a固有 cell on the home (advisory presence /
-	// readiness / catalog). It writes its own answers through the chain.
+	// readiness / catalog). It writes its own answers through the fanout chain.
 	system := sysactor.New(sysactor.Deps{
 		ChannelID: cfg.ChannelID,
 		Registry:  registry,
@@ -213,10 +225,11 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 	ch := channelkit.New(channelkit.Config{
 		ChannelID:    cfg.ChannelID,
 		System:       system,
-		Chain:        chain,    // death-signal closure (author #3)
+		Chain:        chain,    // death-signal closure (author #3) — terminals fan out
 		OpenRequests: messages, // store.Messages implements OpenRequestSource
 		Clock:        func() time.Time { return time.UnixMilli(nowMs()) },
 	})
+	chain.cells = ch.Cells() // back-fill the fanout target now the runtime exists
 
 	return &ChannelHome{
 		channelID: cfg.ChannelID,
@@ -232,8 +245,10 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 	}, nil
 }
 
-// Chain exposes the harness write path (the only way to mutate channel truth).
-func (h *ChannelHome) Chain() *harness.Chain { return h.chain }
+// Chain exposes the fanout write path (the only way to mutate channel truth):
+// every committed envelope fans out to its audience. The fleet writes compute
+// emits through it, so a compute cell's response reaches a local waiting caller.
+func (h *ChannelHome) Chain() khrn.Chain { return h.chain }
 
 // Registry exposes the actor registry projection.
 func (h *ChannelHome) Registry() *store.ActorRegistry { return h.registry }

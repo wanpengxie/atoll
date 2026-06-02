@@ -197,10 +197,12 @@ func (a *adapterActor) doUpdateReadiness(ctx context.Context, update actor.Readi
 	}
 	a.readiness = next
 	changed := prev.State != next.State
-	if changed {
-		payload, _ := json.Marshal(map[string]any{"state": string(next.State), "reason": next.Reason})
-		_, _ = a.doEmitEvent(ctx, "actor.readiness.changed", payload, behavior.EmitEventOptions{},
-			message.Sender{Kind: actor.KindTool, ID: a.self})
+	if changed && a.readinessSink != nil {
+		// Persist to the authoritative registry projection (write-side Go method).
+		// The adapter MUST NOT emit actor.readiness.changed — that type is
+		// SystemOnly (proto-layer1 §2.5); the channel system actor reads readiness
+		// back from the registry (INVARIANT-0 read side: actor.list projection).
+		_, _ = a.readinessSink.UpdateReadiness(ctx, a.self, update)
 	}
 	return actor.ReadinessTransition{Previous: prev, Current: next, Changed: changed}, nil
 }

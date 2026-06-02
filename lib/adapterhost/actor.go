@@ -78,6 +78,13 @@ type adapterActor struct {
 	// injected by the installer. nil for pure receiver adapters.
 	futures callerFutures
 
+	// readinessSink persists this adapter's readiness into the authoritative
+	// registry projection (write-side Go method — the adapter cannot emit the
+	// SystemOnly actor.readiness.changed event itself; the channel system actor
+	// reads readiness back from the registry, INVARIANT-0 read side). nil → the
+	// adapter only holds readiness in its own plain field.
+	readinessSink actor.ReadinessUpdater
+
 	// inflight caches the dispatched request envelope per pending correlation.
 	// A compute cell has NO local truth to look up, so it builds responses from
 	// this cached request (BuildResponseFromRequest) instead of lookup. Plain
