@@ -263,44 +263,10 @@ func (r *ActorRegistry) UpdateReadiness(ctx context.Context, id actor.ActorID, u
 	return storespec.ReadinessTransition{Previous: prev, Current: next, Changed: changed}, nil
 }
 
-// MemberActorAdd is one daemon-side actor registration transition derived
-// from catalog channel_members.
-type MemberActorAdd struct {
-	ID          actor.ActorID
-	Kind        actor.Kind
-	Binding     actor.Binding
-	DisplayName string
-	UserID      string
-	Role        string
-	At          int64
-	ProxyHost   MemberActorProxyHost
-
-	// CapabilitySet is the opaque declaration blob that lets a reconciler
-	// rebuild the actor's facade wiring from the channel log alone
-	// (推论5 / §4 事实完整性). For runtime_inbound_via_relay proxy actors it
-	// carries the proxy_facade.CapabilitySet (name / types / type
-	// declarations / max_pending_ms / binding hints) so that
-	// proxyfacade.DeclarationFromCapability can reconstruct the facade
-	// declaration without any live update_members frame. Empty for
-	// members that need no facade wiring (humans / channel-agent). It is
-	// echoed verbatim into the system.actor.registered fact and is never
-	// interpreted by the store.
-	CapabilitySet json.RawMessage
-}
-
-// MemberActorProxyHost is optional metadata for proxy-daemon-hosted actors.
-// It is emitted in system.actor.registered only; actor_registry remains the
-// daemon-local framework registry, not a host metadata store.
-type MemberActorProxyHost struct {
-	DaemonID   string
-	DaemonName string
-}
-
-// MemberActorRemove is one daemon-side actor deregistration transition.
-type MemberActorRemove struct {
-	ID actor.ActorID
-	At int64
-}
+// Membership transition DTOs (storespec.MemberActorAdd / storespec.MemberActorProxyHost /
+// storespec.MemberActorRemove / storespec.DesiredProxyMember) + the MembershipControlPlane contract
+// live in runtime/storespec (contract types, §4.5). This file is their sqlite
+// implementation.
 
 // ApplyMemberTransitions mutates actor_registry and appends the matching
 // system.actor.* mirror events in one sqlite transaction. Duplicate retries
@@ -309,8 +275,8 @@ type MemberActorRemove struct {
 func (r *ActorRegistry) ApplyMemberTransitions(
 	ctx context.Context,
 	channelID channel.ID,
-	adds []MemberActorAdd,
-	removes []MemberActorRemove,
+	adds []storespec.MemberActorAdd,
+	removes []storespec.MemberActorRemove,
 ) error {
 	if channelID == "" {
 		return errors.New("store: actor member transition: empty channel_id")
@@ -388,17 +354,6 @@ func (r *ActorRegistry) ApplyMemberTransitions(
 	return nil
 }
 
-// DesiredProxyMember is one runtime_inbound_via_relay tool actor derived
-// purely by replaying the channel log's system.actor.registered /
-// system.actor.deregistered facts (推论5 / §4 事实完整性). It is the
-// projection-of-record the per-channel Reconciler consumes to rebuild proxy
-// facade wiring without any live update_members frame — exactly the input
-// required by §9 DoD #4 ("仅靠 facts 能重建出全部 facade/handler").
-type DesiredProxyMember struct {
-	ID            actor.ActorID
-	CapabilitySet json.RawMessage
-}
-
 // ListDesiredProxyMembers replays the append-only log's actor registration
 // facts and returns the current set of active runtime_inbound_via_relay tool
 // actors together with the capability_set blob carried on their latest
@@ -415,7 +370,7 @@ type DesiredProxyMember struct {
 // actor_registry projection nor any live wiring, so a Reconciler that
 // rebuilds from this alone is replay-correct after a daemon restart or a
 // cleared in-process wiring table.
-func (r *ActorRegistry) ListDesiredProxyMembers(ctx context.Context) ([]DesiredProxyMember, error) {
+func (r *ActorRegistry) ListDesiredProxyMembers(ctx context.Context) ([]storespec.DesiredProxyMember, error) {
 	const q = `SELECT type, payload
 	             FROM messages
 	            WHERE type IN ('system.actor.registered','system.actor.deregistered')
@@ -468,18 +423,18 @@ func (r *ActorRegistry) ListDesiredProxyMembers(ctx context.Context) ([]DesiredP
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: list desired proxy members rows: %w", err)
 	}
-	out := make([]DesiredProxyMember, 0, len(current))
+	out := make([]storespec.DesiredProxyMember, 0, len(current))
 	for _, id := range order {
 		cap, ok := current[id]
 		if !ok {
 			continue
 		}
-		out = append(out, DesiredProxyMember{ID: id, CapabilitySet: cap})
+		out = append(out, storespec.DesiredProxyMember{ID: id, CapabilitySet: cap})
 	}
 	return out, nil
 }
 
-func (r *ActorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add MemberActorAdd) (bool, error) {
+func (r *ActorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add storespec.MemberActorAdd) (bool, error) {
 	var deregistered sql.NullInt64
 	err := tx.QueryRowContext(ctx, `SELECT deregistered_at FROM actor_registry WHERE actor_id=?`, string(add.ID)).Scan(&deregistered)
 	switch {
@@ -544,7 +499,7 @@ func (r *ActorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add Me
 	}
 }
 
-func (r *ActorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, remove MemberActorRemove) (bool, error) {
+func (r *ActorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, remove storespec.MemberActorRemove) (bool, error) {
 	res, err := tx.ExecContext(ctx,
 		`UPDATE actor_registry SET deregistered_at=? WHERE actor_id=? AND deregistered_at IS NULL`,
 		remove.At, string(remove.ID),
@@ -630,7 +585,7 @@ func canonicalJSON(b json.RawMessage) ([]byte, error) {
 	return json.Marshal(v)
 }
 
-func actorRegisteredEnvelope(channelID channel.ID, add MemberActorAdd) (*message.Envelope, error) {
+func actorRegisteredEnvelope(channelID channel.ID, add storespec.MemberActorAdd) (*message.Envelope, error) {
 	payloadMap := map[string]any{
 		"actor_id":      add.ID,
 		"actor_kind":    add.Kind,
@@ -673,7 +628,7 @@ func actorRegisteredEnvelope(channelID channel.ID, add MemberActorAdd) (*message
 	return env, nil
 }
 
-func actorDeregisteredEnvelope(channelID channel.ID, remove MemberActorRemove) (*message.Envelope, error) {
+func actorDeregisteredEnvelope(channelID channel.ID, remove storespec.MemberActorRemove) (*message.Envelope, error) {
 	payload, err := json.Marshal(map[string]any{
 		"actor_id":        remove.ID,
 		"deregistered_at": remove.At,

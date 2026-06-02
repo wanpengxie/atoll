@@ -11,7 +11,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
-	"github.com/wanpengxie/ActOS/runtime/internal/store"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
@@ -34,7 +33,7 @@ type Service struct {
 
 type installRegistry interface {
 	storespec.TypeRegistry
-	BeginInstall(ctx context.Context, row storespec.TypeRow) (store.TypeInstallAttempt, error)
+	BeginInstall(ctx context.Context, row storespec.TypeRow) (storespec.TypeInstallAttempt, error)
 	MarkInstalled(ctx context.Context, typeName, attemptID string) error
 	MarkInstallFailed(ctx context.Context, typeName, attemptID, reason string) error
 	RecoverInstalling(ctx context.Context, reason string) (int, error)

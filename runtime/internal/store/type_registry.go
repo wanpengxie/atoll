@@ -37,12 +37,6 @@ const (
 	TypeInstallStatusFailed     = "failed"
 )
 
-type TypeInstallAttempt struct {
-	Row       storespec.TypeRow
-	AttemptID string
-	Existed   bool
-}
-
 // NewTypeRegistry builds the registry over the given channel sqlite.
 // nowFn stamps the created_at column on Upsert; passing nil falls back
 // to a no-op zero (callers that need real timestamps MUST inject NowFn).
@@ -64,36 +58,36 @@ func (r *TypeRegistry) Upsert(ctx context.Context, row storespec.TypeRow) (store
 // BeginInstall stages an installing row outside the canonical installed row.
 // Lookup/List/HarnessView continue to see the prior installed row until the
 // matching install attempt is marked installed after mirror emit.
-func (r *TypeRegistry) BeginInstall(ctx context.Context, row storespec.TypeRow) (TypeInstallAttempt, error) {
+func (r *TypeRegistry) BeginInstall(ctx context.Context, row storespec.TypeRow) (storespec.TypeInstallAttempt, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return TypeInstallAttempt{}, err
+		return storespec.TypeInstallAttempt{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	if err := r.failIfInstallingPendingTx(ctx, tx, row.Type); err != nil {
-		return TypeInstallAttempt{}, err
+		return storespec.TypeInstallAttempt{}, err
 	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM type_registry_pending WHERE type=? AND install_status='failed'`,
 		row.Type,
 	); err != nil {
-		return TypeInstallAttempt{}, fmt.Errorf("store: type_registry clear failed pending %q: %w", row.Type, err)
+		return storespec.TypeInstallAttempt{}, fmt.Errorf("store: type_registry clear failed pending %q: %w", row.Type, err)
 	}
 
 	_, existed, err := r.lookupInstalledTx(ctx, tx, row.Type)
 	if err != nil {
-		return TypeInstallAttempt{}, err
+		return storespec.TypeInstallAttempt{}, err
 	}
 	attemptID := uuid.NewString()
 	persisted, err := r.insertPendingInstallTx(ctx, tx, attemptID, row)
 	if err != nil {
-		return TypeInstallAttempt{}, err
+		return storespec.TypeInstallAttempt{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return TypeInstallAttempt{}, fmt.Errorf("store: type_registry begin install commit %q: %w", row.Type, err)
+		return storespec.TypeInstallAttempt{}, fmt.Errorf("store: type_registry begin install commit %q: %w", row.Type, err)
 	}
-	return TypeInstallAttempt{Row: persisted, AttemptID: attemptID, Existed: existed}, nil
+	return storespec.TypeInstallAttempt{Row: persisted, AttemptID: attemptID, Existed: existed}, nil
 }
 
 func (r *TypeRegistry) MarkInstalled(ctx context.Context, typeName, attemptID string) error {

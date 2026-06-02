@@ -36,14 +36,18 @@ type ChannelStores struct {
 	Cursors  storespec.Cursors
 	Requests storespec.RequestLookup
 
-	// Control-plane / install surfaces carry semantic ops beyond their narrow
-	// storespec interface, so they are exposed as concretes (the db is already
-	// confined here; their full method set is available). Interface-ifying these
-	// is a follow-on tracked with their consumers' refactor (registry
-	// control-plane ops; type-install behaviour → lib/adapterhost per §1.11).
-	Registry     *ActorRegistry
-	Ledger       *Ledger
-	Types        *TypeRegistry
+	// Actor registry exposed via SEGREGATED interfaces (§4.5, forward-derived
+	// from role — a reader never receives the membership control-plane writes):
+	Registry   storespec.Registry               // membership reads + single-actor CRUD
+	Readiness  storespec.ReadinessUpdater       // readiness projection write
+	Membership storespec.MembershipControlPlane // ApplyMemberTransitions (log-emitting) + ListDesiredProxyMembers
+
+	Ledger storespec.Ledger
+	Types  storespec.TypeStore // full type_registry contract (install state machine + reads)
+
+	// Adapter kv/credential stores have no storespec interface yet (no consumer
+	// in v2 today); exposed concrete, db already confined. interface when a
+	// consumer is forward-derived.
 	AdapterState *AdapterStateStore
 	AdapterCreds *AdapterCredentialStore // nil when Deps.Secret is nil
 }
@@ -59,6 +63,7 @@ func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions, deps Chan
 		return nil, err
 	}
 	msgs := newMessages(db)
+	reg := newActorRegistry(db)
 	cs := &ChannelStores{
 		db:           db,
 		Log:          msgs,
@@ -66,7 +71,9 @@ func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions, deps Chan
 		Delivery:     msgs,
 		Cursors:      newCursors(db),
 		Requests:     newRequestLookup(msgs, deps.ChannelID),
-		Registry:     newActorRegistry(db),
+		Registry:     reg,
+		Readiness:    reg,
+		Membership:   reg,
 		Ledger:       newLedger(db),
 		Types:        newTypeRegistry(db, deps.NowFn),
 		AdapterState: newAdapterStateStore(db, deps.NowFn),

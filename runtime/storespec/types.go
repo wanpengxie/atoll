@@ -59,3 +59,30 @@ type TypeView struct {
 type TypeViewLookup interface {
 	Lookup(ctx context.Context, typeName string) (TypeView, bool, error)
 }
+
+// TypeInstallAttempt is the outcome of BeginInstall — the pending row plus
+// whether an installed row for the type already existed.
+type TypeInstallAttempt struct {
+	Row       TypeRow
+	AttemptID string
+	Existed   bool
+}
+
+// TypeStore is the FULL store-side type_registry contract: the install state
+// machine (BeginInstall → MarkInstalled / MarkInstallFailed, RecoverInstalling,
+// InstallStatus) plus row reads + view lookup. Forward-derived from the
+// type_registry table's role (§4.5) — the install-behaviour consumer
+// (lib/adapterhost installer, §1.11) ADAPTS to this contract; runtime does not
+// wait on it. The harness keeps the narrow TypeViewLookup (via HarnessView).
+type TypeStore interface {
+	Upsert(ctx context.Context, row TypeRow) (TypeRow, error)
+	Lookup(ctx context.Context, typeName string) (TypeRow, bool, error)
+	List(ctx context.Context) ([]TypeRow, error)
+	LookupView(ctx context.Context, typeName string) (TypeView, bool, error)
+	HarnessView() TypeViewLookup
+	BeginInstall(ctx context.Context, row TypeRow) (TypeInstallAttempt, error)
+	MarkInstalled(ctx context.Context, typeName, attemptID string) error
+	MarkInstallFailed(ctx context.Context, typeName, attemptID, reason string) error
+	RecoverInstalling(ctx context.Context, reason string) (int, error)
+	InstallStatus(ctx context.Context, typeName string) (status, reason string, ok bool, err error)
+}
