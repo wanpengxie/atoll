@@ -12,10 +12,8 @@ import (
 // ChannelDeps are the non-db dependencies the channel store assembly needs.
 type ChannelDeps struct {
 	ChannelID channel.ID
-	// NowFn is the TTL clock for type-install + adapter-state. Required.
+	// NowFn is the TTL clock for type-install. Required.
 	NowFn func() int64
-	// Secret seals adapter credentials. Optional: nil disables AdapterCreds.
-	Secret SecretBox
 }
 
 // ChannelStores is the channel-local store assembly and the SINGLE public
@@ -38,14 +36,10 @@ type ChannelStores struct {
 	// Actor registry exposed via SEGREGATED interfaces (§4.5, forward-derived
 	// from role — a reader never receives any membership write):
 	Registry   storespec.Registry               // membership READS only (Lookup/Exists/ListActive)
-	Readiness  storespec.ReadinessUpdater       // readiness projection write
 	Membership storespec.MembershipControlPlane // membership WRITES: Insert/Deregister + ApplyMemberTransitions (log-emitting) + ListDesiredProxyMembers
 
 	Ledger storespec.Ledger
 	Types  storespec.TypeStore // full type_registry contract (install state machine + reads)
-
-	AdapterState storespec.AdapterState       // channel-local adapter kv
-	AdapterCreds storespec.AdapterCredentials // sealed; nil when Deps.Secret is nil
 }
 
 // OpenChannel opens the per-channel sqlite and assembles the channel stores.
@@ -61,25 +55,15 @@ func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions, deps Chan
 	msgs := newMessages(db)
 	reg := newActorRegistry(db)
 	cs := &ChannelStores{
-		db:           db,
-		Log:          msgs,
-		Query:        msgs,
-		Cursors:      newCursors(db),
-		Requests:     newRequestLookup(msgs, deps.ChannelID),
-		Registry:     reg,
-		Readiness:    reg,
-		Membership:   reg,
-		Ledger:       newLedger(db),
-		Types:        newTypeRegistry(db, deps.NowFn),
-		AdapterState: newAdapterStateStore(db, deps.NowFn),
-	}
-	if deps.Secret != nil {
-		ac, err := newAdapterCredentialStore(db, deps.NowFn, deps.Secret)
-		if err != nil {
-			_ = db.Close()
-			return nil, err
-		}
-		cs.AdapterCreds = ac
+		db:         db,
+		Log:        msgs,
+		Query:      msgs,
+		Cursors:    newCursors(db),
+		Requests:   newRequestLookup(msgs, deps.ChannelID),
+		Registry:   reg,
+		Membership: reg,
+		Ledger:     newLedger(db),
+		Types:      newTypeRegistry(db, deps.NowFn),
 	}
 	return cs, nil
 }

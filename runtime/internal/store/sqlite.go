@@ -133,10 +133,8 @@ var channelLocalSchemaShape = map[string][]string{
 	"type_registry":         {"type", "handler_binding", "install_status", "install_error"},
 	"type_registry_pending": {"install_attempt_id", "type", "install_status", "install_error"},
 	"actor_cursors":         {"actor_id", "last_consumed_seq"},
-	"actor_registry":        {"actor_id", "actor_kind", "ready_state", "ready_reason", "ready_detail", "last_ready_at", "last_state_change_at"},
+	"actor_registry":        {"actor_id", "actor_kind", "deregistered_at"},
 	"action_ledger":         {"ledger_key", "turn_id", "status"},
-	"adapter_state":         {"key", "value"},
-	"adapter_credentials":   {"key", "value"},
 }
 
 func verifyChannelLocalSchema(ctx context.Context, db *sql.DB) error {

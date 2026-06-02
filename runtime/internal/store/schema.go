@@ -109,13 +109,7 @@ CREATE TABLE IF NOT EXISTS actor_registry (
                             OR actor_binding IN ('embedded','runtime_outbound','runtime_inbound_via_relay')),
   display_name       TEXT,
   created_at         INTEGER NOT NULL,
-  deregistered_at    INTEGER,
-  ready_state        TEXT NOT NULL DEFAULT 'unknown'
-                     CHECK (ready_state IN ('ready','not_ready','unknown')),
-  ready_reason       TEXT NOT NULL DEFAULT 'unknown',
-  ready_detail       TEXT NOT NULL DEFAULT '{}',
-  last_ready_at      INTEGER NOT NULL DEFAULT 0,
-  last_state_change_at INTEGER NOT NULL DEFAULT 0
+  deregistered_at    INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS ix_actor_registry_active
@@ -142,25 +136,7 @@ CREATE TABLE IF NOT EXISTS action_ledger (
 );
 
 CREATE INDEX IF NOT EXISTS ix_action_ledger_turn ON action_ledger(turn_id);
-
-	-- =============================================================
-	-- 7) adapter_state  (L2 §8 F4 — framework StateStore)
-	-- =============================================================
-	CREATE TABLE IF NOT EXISTS adapter_state (
-	  key                TEXT PRIMARY KEY,
-	  value              BLOB NOT NULL,
-	  updated_at         INTEGER NOT NULL
-	);
-
-	-- =============================================================
-	-- 8) adapter_credentials  (L2 §8 F8 — framework CredentialStore)
-	-- =============================================================
-	CREATE TABLE IF NOT EXISTS adapter_credentials (
-	  key                TEXT PRIMARY KEY,
-	  value              TEXT NOT NULL,
-	  updated_at         INTEGER NOT NULL
-	);
-	`
+`
 
 // ChannelLocalTables enumerates the channel-local table names in
 // initialization order. Tests assert that every name exists in
@@ -176,6 +152,4 @@ var ChannelLocalTables = []string{
 	"actor_cursors",
 	"actor_registry",
 	"action_ledger",
-	"adapter_state",
-	"adapter_credentials",
 }
