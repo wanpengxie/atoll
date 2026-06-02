@@ -9,7 +9,6 @@ package store
 //   - L2 §1.4.2  type_registry
 //   - L2 §1.4.3  actor_cursors
 //   - L2 §1.4.6  actor_registry
-//   - L2 §1.4.9  worker_locks
 //   - L2 §1.4.10.1 action_ledger
 //
 // The DDL string is split into multiple CREATE statements; the
@@ -42,8 +41,6 @@ CREATE TABLE IF NOT EXISTS messages (
   delivery_failed_at   INTEGER,
   last_error           TEXT,
   attempts             INTEGER NOT NULL DEFAULT 0,
-  claim_owner          TEXT,
-  claimed_at           INTEGER,
   is_terminal          INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0,1)),
   canonical_hash       TEXT NOT NULL DEFAULT ''
 );
@@ -127,21 +124,10 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
   ON actor_registry(actor_kind)
   WHERE deregistered_at IS NULL;
 
--- =============================================================
--- 5) worker_locks  (L2 §1.4.9 — daemon-side authoritative lease)
--- =============================================================
-CREATE TABLE IF NOT EXISTS worker_locks (
-  agent_id           TEXT PRIMARY KEY,
-  worker_id          TEXT NOT NULL,
-  -- fencing_token is an opaque unguessable string (proto-foundation
-  -- §3.6.1). Decoupled from owner_epoch / daemon_epoch.
-  fencing_token      TEXT NOT NULL,
-  daemon_epoch       INTEGER NOT NULL,
-  lease_expires_at   INTEGER NOT NULL,
-  acquired_at        INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS ix_worker_locks_expires ON worker_locks(lease_expires_at);
+-- (v2: worker_locks table removed. The v1 daemon-side channel-write lease is
+-- obsolete — the channel has a single writer, server harness, by construction
+-- (proto-v2-physical §4); worker-instance fencing is a volatile compute-side
+-- lease, not a channel-sqlite row.)
 
 -- =============================================================
 -- 6) action_ledger  (L2 §1.4.10.1)
@@ -214,7 +200,6 @@ var ChannelLocalTables = []string{
 	"type_registry",
 	"actor_cursors",
 	"actor_registry",
-	"worker_locks",
 	"action_ledger",
 	"adapter_state",
 	"adapter_credentials",

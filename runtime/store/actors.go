@@ -17,24 +17,13 @@ import (
 // ActorRegistry implements kernel/storespec.Registry over a channel-local
 // sqlite. Each *ActorRegistry is bound to one channel database.
 type ActorRegistry struct {
-	db     *sql.DB
-	fence  WriteFence
-	outbox AppendObserver
+	db *sql.DB
 }
 
 // NewActorRegistry returns a registry over the given channel sqlite.
+// (v2: no fence / outbox — single writer by construction; the v1
+// framework-owned same-tx projection is removed.)
 func NewActorRegistry(db *sql.DB) *ActorRegistry { return &ActorRegistry{db: db} }
-
-// NewActorRegistryWithObservers wires optional same-transaction dependencies
-// used by framework-owned member transition projections.
-func NewActorRegistryWithObservers(db *sql.DB, fence WriteFence, outbox AppendObserver) *ActorRegistry {
-	return &ActorRegistry{db: db, fence: fence, outbox: outbox}
-}
-
-// NewActorRegistryWithFence wires only the pure fencing gate.
-func NewActorRegistryWithFence(db *sql.DB, fence WriteFence) *ActorRegistry {
-	return NewActorRegistryWithObservers(db, fence, nil)
-}
 
 // Lookup implements storespec.Registry.
 func (r *ActorRegistry) Lookup(ctx context.Context, id actor.ActorID) (storespec.Record, bool, error) {
@@ -322,7 +311,6 @@ func (r *ActorRegistry) ApplyMemberTransitions(
 	channelID channel.ID,
 	adds []MemberActorAdd,
 	removes []MemberActorRemove,
-	fencing kharness.FencingTuple,
 ) error {
 	if channelID == "" {
 		return errors.New("store: actor member transition: empty channel_id")
@@ -333,7 +321,11 @@ func (r *ActorRegistry) ApplyMemberTransitions(
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	msgs := NewMessagesWithObservers(r.db, r.fence, r.outbox)
+	// v2: no fencing — single writer by construction. These system.actor.*
+	// mirror events bypass the harness chain (the store mirrors control-plane
+	// mutations directly), so the store computes their canonical_hash here;
+	// events are never terminal.
+	msgs := NewMessages(r.db)
 	for _, add := range adds {
 		if add.ID == "" {
 			continue
@@ -355,7 +347,7 @@ func (r *ActorRegistry) ApplyMemberTransitions(
 		if err != nil {
 			return err
 		}
-		if _, err := msgs.AppendTx(ctx, tx, env, fencing); err != nil {
+		if _, err := msgs.AppendTx(ctx, tx, env, false, ""); err != nil {
 			return fmt.Errorf("store: actor registered mirror %q: %w", add.ID, err)
 		}
 	}
@@ -377,7 +369,7 @@ func (r *ActorRegistry) ApplyMemberTransitions(
 		if err != nil {
 			return err
 		}
-		if _, err := msgs.AppendTx(ctx, tx, env, fencing); err != nil {
+		if _, err := msgs.AppendTx(ctx, tx, env, false, ""); err != nil {
 			return fmt.Errorf("store: actor deregistered mirror %q: %w", remove.ID, err)
 		}
 	}
