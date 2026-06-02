@@ -17,10 +17,15 @@ import (
 )
 
 // typeRegistryStore is the sqlite-backed implementation of
-// kernel/storespec.TypeRegistry (upsert + lookup + list at adapter install
-// time) over the channel-local type_registry table (L2 §1.4.2). It also
-// exposes a runtime/storespec.TypeViewLookup projection via HarnessView so
-// the harness Chain reads the same row Manager.Install wrote.
+// storespec.TypeStore (the install state machine + lookup + list) over the
+// channel-local type_registry table (L2 §1.4.2). It also exposes a
+// runtime/storespec.TypeViewLookup projection via HarnessView so the harness
+// Chain reads the same row the installer wrote.
+//
+// §4.5: the installed row is reachable ONLY through BeginInstall →
+// MarkInstalled (which pairs it with its system.type.installed mirror event).
+// There is no public Upsert bypass — the canonical write goes through
+// upsertWithStatusTx inside the state machine, never as a standalone op.
 //
 // Level A (proto-layer0 §1.4.1 / proto-layer1 §1.3): payload is opaque
 // to the protocol layer; this registry stores NO payload schema fields.
@@ -38,21 +43,13 @@ const (
 )
 
 // NewTypeRegistry builds the registry over the given channel sqlite.
-// nowFn stamps the created_at column on Upsert; passing nil falls back
+// nowFn stamps the created_at column on install writes; passing nil falls back
 // to a no-op zero (callers that need real timestamps MUST inject NowFn).
 func newTypeRegistry(db *sql.DB, nowFn func() int64) *typeRegistryStore {
 	if nowFn == nil {
 		nowFn = func() int64 { return 0 }
 	}
 	return &typeRegistryStore{db: db, nowFn: nowFn}
-}
-
-// Upsert satisfies kernel/storespec.TypeRegistry. It validates row, then
-// INSERTs (or replaces on PK conflict) into the type_registry table.
-// Returns the persisted row (round-tripped through JSON marshal so
-// callers observe canonicalised bytes).
-func (r *typeRegistryStore) Upsert(ctx context.Context, row storespec.TypeRow) (storespec.TypeRow, error) {
-	return r.upsertWithStatus(ctx, row, TypeInstallStatusInstalled, "")
 }
 
 // BeginInstall stages an installing row outside the canonical installed row.
@@ -217,22 +214,6 @@ func (r *typeRegistryStore) InstallStatus(ctx context.Context, typeName string) 
 	return status, reason, true, nil
 }
 
-func (r *typeRegistryStore) upsertWithStatus(ctx context.Context, row storespec.TypeRow, installStatus, installError string) (storespec.TypeRow, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return storespec.TypeRow{}, fmt.Errorf("store: type_registry upsert begin %q: %w", row.Type, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	persisted, err := r.upsertWithStatusTx(ctx, tx, row, installStatus, installError)
-	if err != nil {
-		return storespec.TypeRow{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return storespec.TypeRow{}, fmt.Errorf("store: type_registry upsert commit %q: %w", row.Type, err)
-	}
-	return persisted, nil
-}
-
 func (r *typeRegistryStore) upsertWithStatusTx(ctx context.Context, tx *sql.Tx, row storespec.TypeRow, installStatus, installError string) (storespec.TypeRow, error) {
 	if err := row.Validate(); err != nil {
 		return storespec.TypeRow{}, err
@@ -350,14 +331,14 @@ func (r *typeRegistryStore) insertPendingInstallTx(ctx context.Context, tx *sql.
 	return persisted, nil
 }
 
-// Lookup satisfies kernel/storespec.TypeRegistry — returns the framework
+// Lookup satisfies storespec.TypeStore — returns the installed-row
 // view of a registered type; ok=false when the row is missing.
 func (r *typeRegistryStore) Lookup(ctx context.Context, typeName string) (storespec.TypeRow, bool, error) {
 	return r.lookup(ctx, typeName)
 }
 
-// List satisfies kernel/storespec.TypeRegistry — returns every row sorted
-// by type for deterministic test output.
+// List satisfies storespec.TypeStore — returns every installed row sorted
+// by type for deterministic output.
 func (r *typeRegistryStore) List(ctx context.Context) ([]storespec.TypeRow, error) {
 	const q = `SELECT type, allowed_kinds, handler_binding,
 			                  max_pending_ms, handler_actor_id
@@ -594,7 +575,10 @@ func unmarshalAllowedKinds(raw string) ([]message.Kind, error) {
 }
 
 // Compile-time interface checks — both contracts stay in sync with code.
+// (*typeRegistryStore satisfies the FULL TypeStore — install state machine +
+// reads; TypeRegistry is the read-only subset of those reads, also satisfied.)
 var (
+	_ storespec.TypeStore      = (*typeRegistryStore)(nil)
 	_ storespec.TypeRegistry   = (*typeRegistryStore)(nil)
 	_ storespec.TypeViewLookup = typeRegistryHarnessAdapter{}
 )

@@ -10,7 +10,7 @@ import (
 )
 
 // TypeRow is the per-row projection of one type_registry entry (L2 §1.4.2),
-// the install-facing shape (Upsert/List). Payload is opaque (Level A).
+// the install-facing shape (Lookup/List). Payload is opaque (Level A).
 type TypeRow struct {
 	Type           string
 	HandlerActorID actor.ActorID
@@ -36,10 +36,14 @@ func (t TypeRow) Validate() error {
 	return nil
 }
 
-// TypeRegistry is the install-facing type_registry contract (Upsert/Lookup/
-// List over TypeRow). Impl in runtime/store/type_registry.go.
+// TypeRegistry is the install-facing type_registry READ contract (Lookup /
+// List over TypeRow). It is READ-ONLY by construction: the only legitimate way
+// to land an installed row is the BeginInstall → emit system.type.installed →
+// MarkInstalled state machine (on TypeStore), so a raw `Upsert(installed row)`
+// bypass is deliberately ABSENT from every public contract — a bare installed
+// write with no mirror event is the type-side analogue of the actor-registry
+// Insert/Deregister bypass (§4.5). Impl in runtime/store/type_registry.go.
 type TypeRegistry interface {
-	Upsert(ctx context.Context, row TypeRow) (TypeRow, error)
 	Lookup(ctx context.Context, typeName string) (TypeRow, bool, error)
 	List(ctx context.Context) ([]TypeRow, error)
 }
@@ -74,8 +78,12 @@ type TypeInstallAttempt struct {
 // type_registry table's role (§4.5) — the install-behaviour consumer
 // (lib/adapterhost installer, §1.11) ADAPTS to this contract; runtime does not
 // wait on it. The harness keeps the narrow TypeViewLookup (via HarnessView).
+//
+// NOTE: there is NO Upsert here. The installed row is reachable ONLY through
+// the BeginInstall → MarkInstalled state machine (which pairs the row with its
+// system.type.installed mirror event); a raw installed write would be an
+// unmirrored control-plane bypass and is structurally absent (§4.5).
 type TypeStore interface {
-	Upsert(ctx context.Context, row TypeRow) (TypeRow, error)
 	Lookup(ctx context.Context, typeName string) (TypeRow, bool, error)
 	List(ctx context.Context) ([]TypeRow, error)
 	LookupView(ctx context.Context, typeName string) (TypeView, bool, error)
