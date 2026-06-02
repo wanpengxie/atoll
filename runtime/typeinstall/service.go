@@ -11,7 +11,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
-	"github.com/wanpengxie/ActOS/runtime/store"
+	"github.com/wanpengxie/ActOS/runtime/internal/store"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/runtime/store"
+	"github.com/wanpengxie/ActOS/runtime/internal/store"
 )
 
 func TestAdapterStateStoreRoundTripListAndDelete(t *testing.T) {

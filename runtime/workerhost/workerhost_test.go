@@ -19,8 +19,8 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime/fence"
 	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/ActOS/runtime/internal/store"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
-	"github.com/wanpengxie/ActOS/runtime/store"
 	"github.com/wanpengxie/ActOS/runtime/worker"
 	"github.com/wanpengxie/ActOS/runtime/workerhost"
 )

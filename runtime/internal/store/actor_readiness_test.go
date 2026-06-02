@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/runtime/store"
+	"github.com/wanpengxie/ActOS/runtime/internal/store"
 )
 
 func TestActorRegistry_UpdateReadinessTracksTransitions(t *testing.T) {

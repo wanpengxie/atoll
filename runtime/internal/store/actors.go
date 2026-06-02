@@ -321,13 +321,20 @@ func (r *ActorRegistry) ApplyMemberTransitions(
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// v2: no fencing — single writer by construction. These system.actor.*
-	// mirror events are written with is_terminal=false and an empty
-	// canonical_hash (events are never terminal, and id-dedupe alone guards
-	// them — the registered/deregistered envelope IDs are deterministic).
-	// NOTE: this path currently writes the mirror event directly rather than
-	// through the harness chain — whether membership projections must pass
-	// the harness (INVARIANT-13) is an open decision, not settled here.
+	// v2: no fencing — the harness is the single REQUEST-PATH writer. These
+	// system.actor.* mirror events are written with is_terminal=false and an
+	// empty canonical_hash (events are never terminal, and id-dedupe alone
+	// guards them — the registered/deregistered envelope IDs are deterministic).
+	//
+	// CONTROL-PLANE WRITE (structurally confined, not a convention exception):
+	// membership is a control-plane mutation (cf. Slack admin API / Unix mount),
+	// and its mirror event MUST be atomic with the actor_registry row it records
+	// — they share this one tx, which the harness chain (a separate write path)
+	// cannot join. This direct write is safe to expose ONLY because the whole
+	// store sits under runtime/internal (see doc.go): business code physically
+	// cannot reach it, so "bypass the harness" is not an ambient capability —
+	// it is reachable solely through this named, runtime-internal control-plane
+	// op. A new bypass write means a new named op here, never an ad-hoc Append.
 	msgs := NewMessages(r.db)
 	for _, add := range adds {
 		if add.ID == "" {

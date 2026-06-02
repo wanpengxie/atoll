@@ -5,7 +5,7 @@ import (
 	"database/sql"
 
 	"github.com/wanpengxie/ActOS/runtime/fence"
-	"github.com/wanpengxie/ActOS/runtime/store"
+	"github.com/wanpengxie/ActOS/runtime/internal/store"
 )
 
 // fakeFence is a pure-substrate WriteFence that accepts ONLY the configured
