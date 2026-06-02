@@ -38,17 +38,17 @@ func Connect(ctx context.Context, serverURL, apiKey, computeID string, hosts []a
 	}
 	h := &Homelink{ws: ws, pending: map[string]chan computebus.EmitAck{}, onDispatch: onDispatch}
 	if err := h.send(computebus.Frame{Type: computebus.FrameAttach, Attach: &computebus.AttachRequest{APIKey: apiKey, ComputeID: computeID, Hosts: hosts}}); err != nil {
-		ws.Close()
+		_ = ws.Close()
 		return nil, err
 	}
 	_, raw, err := ws.ReadMessage()
 	if err != nil {
-		ws.Close()
+		_ = ws.Close()
 		return nil, err
 	}
 	reply, err := computebus.Decode(raw)
 	if err != nil || reply.Reply == nil || !reply.Reply.Accepted {
-		ws.Close()
+		_ = ws.Close()
 		return nil, errors.New("homelink: attach rejected")
 	}
 	go h.readLoop()

@@ -48,7 +48,7 @@ func Run(ctx context.Context, cfg Config, modules []behavior.Module) error {
 	if err != nil {
 		return err
 	}
-	defer hl.Close()
+	defer func() { _ = hl.Close() }()
 
 	h = host.New(hl.Emit)
 	defer h.Stop()
