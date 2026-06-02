@@ -10,6 +10,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/daemon/homelink"
 	"github.com/wanpengxie/ActOS/daemon/host"
+	"github.com/wanpengxie/ActOS/daemon/localdevice"
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/lib/adapterhost"
@@ -59,10 +60,15 @@ func Run(ctx context.Context, cfg Config, modules []behavior.Module) error {
 
 	h = host.New(hl.Emit, hl.SendDeath)
 	defer h.Stop()
+	// Device transit for relay (runtime_inbound_via_relay) adapters: the cell→
+	// device Forward seam + the device→cell callback routing (back onto the cell).
+	transit := localdevice.New(h)
 	for _, mod := range modules {
-		if _, err := h.InstallAdapter(ctx, mod, adapterhost.InstallDeps{
-			ChannelID: cfg.ChannelID, Logger: cfg.Logger, Metrics: cfg.Metrics,
-		}); err != nil {
+		deps := adapterhost.InstallDeps{ChannelID: cfg.ChannelID, Logger: cfg.Logger, Metrics: cfg.Metrics}
+		if mod.Declares().Binding == actor.BindingRuntimeInboundViaRelay {
+			deps.Forward = transit.ForwardFunc(mod.Declares().ActorID)
+		}
+		if _, err := h.InstallAdapter(ctx, mod, deps); err != nil {
 			return err
 		}
 	}

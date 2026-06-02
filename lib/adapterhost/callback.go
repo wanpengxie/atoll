@@ -7,6 +7,15 @@ import (
 	"github.com/wanpengxie/ActOS/lib/behavior"
 )
 
+// CallbackTarget is the device-transit seam an installed adapter cell exposes:
+// the host routes an inbound device callback to it via actorrt.Ask so it applies
+// on the cell goroutine (serial with Receive). adapterActor implements it; the
+// host holds the InstallResult.Actor as a CallbackTarget when it does.
+type CallbackTarget interface {
+	HandleExternalCallback(ctx context.Context, payload []byte) error
+	HandleExternalCallbackFrame(ctx context.Context, frame behavior.ExternalCallbackFrame) error
+}
+
 // HandleExternalCallback applies an inbound external callback ON THE CELL
 // GOROUTINE. The host invokes it via actorrt.Runtime.Ask so the
 // permanent/retryable/ok verdict is returned SYNCHRONOUSLY to the device

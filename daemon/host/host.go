@@ -27,13 +27,15 @@ type Host struct {
 	cells     *actorrt.Runtime
 	emit      EmitFunc
 	sendDeath DeathFunc
+	// callbacks routes a device-transit callback to the owning adapter cell.
+	callbacks map[actor.ActorID]adapterhost.CallbackTarget
 }
 
 // New constructs a host. emit is the homelink-injected uplink to the home
 // harness; sendDeath propagates cell death UP the wire. Host installs itself as
 // the runtime supervisor so it observes every abnormal cell termination.
 func New(emit EmitFunc, sendDeath DeathFunc) *Host {
-	h := &Host{emit: emit, sendDeath: sendDeath}
+	h := &Host{emit: emit, sendDeath: sendDeath, callbacks: map[actor.ActorID]adapterhost.CallbackTarget{}}
 	h.cells = actorrt.New(actorrt.Config{Supervisor: h})
 	return h
 }
@@ -67,8 +69,34 @@ func (h *Host) InstallAdapter(ctx context.Context, mod behavior.Module, base ada
 		return "", err
 	}
 	h.cells.Spawn(res.ActorID, res.Actor)
+	if cb, ok := res.Actor.(adapterhost.CallbackTarget); ok {
+		h.callbacks[res.ActorID] = cb // device callbacks route here
+	}
 	return res.ActorID, nil
 }
+
+// DeliverCallbackFrame routes a device-transit callback to the owning adapter
+// cell, applied ON the cell goroutine (via Ask) so it serialises with Receive
+// and the permanent/retryable verdict returns synchronously to the transit. This
+// is the device→cell half of the relay path (the Forward seam is the cell→device
+// half). Returns ErrNoCallbackTarget if no adapter owns the actor.
+func (h *Host) DeliverCallbackFrame(frame behavior.ExternalCallbackFrame) error {
+	cb, ok := h.callbacks[frame.AdapterActorID]
+	if !ok {
+		return ErrNoCallbackTarget
+	}
+	return h.cells.Ask(frame.AdapterActorID, func(ctx context.Context) error {
+		return cb.HandleExternalCallbackFrame(ctx, frame)
+	})
+}
+
+// ErrNoCallbackTarget is returned when a callback names an actor this host does
+// not own as an adapter.
+var ErrNoCallbackTarget = errNoCallbackTarget{}
+
+type errNoCallbackTarget struct{}
+
+func (errNoCallbackTarget) Error() string { return "host: no callback target for actor" }
 
 // SpawnAgent hosts a worker-session agent as a kind=agent actor cell on this
 // compute. Its chain is the uplink (no local truth), so the worker report the
