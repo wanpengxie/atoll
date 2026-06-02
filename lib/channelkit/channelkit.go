@@ -18,6 +18,7 @@ import (
 	"github.com/wanpengxie/ActOS/lib/policy"
 	"github.com/wanpengxie/ActOS/lib/sysactor"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
+	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // OpenRequestSource queries a dead actor's in-flight requests (those without a
@@ -104,9 +105,8 @@ func (c *Channel) OnDeath(ctx context.Context, sig actorrt.DeathSignal) {
 				if berr != nil {
 					continue
 				}
-				// Step 8 authorises this (substrate-death author). Best-effort:
-				// a concurrent receiver final / duplicate is absorbed by Step 8.
-				_, _ = c.chain.Write(ctx, term)
+				cctx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{ActorID: actor.SystemActorID, ChannelID: c.channelID, AllowProvidedSenderKind: true})
+				_, _ = c.chain.Write(cctx, term)
 			}
 		}
 	}

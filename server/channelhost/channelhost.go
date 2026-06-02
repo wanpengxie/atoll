@@ -10,6 +10,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	khrn "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/lib/channelkit"
 	"github.com/wanpengxie/ActOS/lib/sysactor"
 	"github.com/wanpengxie/ActOS/runtime/harness"
@@ -33,10 +34,58 @@ type ChannelHome struct {
 	chain   *harness.Chain
 	channel *channelkit.Channel
 	system  *sysactor.SystemActor
+	nowMs   func() int64
 
 	// remoteDispatch routes a request to an actor hosted on an attached compute
 	// (injected by server.Run with fleet.Dispatch). nil → no remote computes.
 	remoteDispatch func(target actor.ActorID, env *message.Envelope) bool
+}
+
+// RunClosureScan runs the caller-scoped closure loop (closure author #2): it
+// periodically scans for pending requests past their expires_at with no final
+// response and writes a caller-authored unanswered_timeout terminal for each
+// (sender = the request's own sender; harness Step 8 callerSelfClose authorises
+// it). This is the home-side materialisation of "caller 到点不等了" — the only
+// timeout author (no global-guess). Blocks until ctx is done.
+func (h *ChannelHome) RunClosureScan(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			h.ClosurePass(ctx)
+		}
+	}
+}
+
+// ClosurePass does one caller-scoped closure sweep (exposed for tests). For each
+// expired pending request it writes an unanswered_timeout terminal authored by
+// the request's own sender (caller-scoped).
+func (h *ChannelHome) ClosurePass(ctx context.Context) {
+	reqs, err := h.messages.LongPendingRequests(ctx, h.nowMs(), 0)
+	if err != nil {
+		return
+	}
+	clock := func() time.Time { return time.UnixMilli(h.nowMs()) }
+	for i := range reqs {
+		req := reqs[i]
+		term, berr := behavior.BuildResponseFromRequest(&req, clock, req.Sender,
+			behavior.CorrelationKey(req.ID),
+			behavior.ResponseSpec{
+				Status: "failed",
+				Reason: string(message.TerminalUnansweredTimeout),
+			})
+		if berr != nil {
+			continue
+		}
+		cctx := harness.CtxWithCaller(ctx, harness.CallerContext{ActorID: req.Sender.ID, ChannelID: h.channelID, AllowProvidedSenderKind: true})
+		_, _ = h.chain.Write(cctx, term)
+	}
 }
 
 // SetRemoteDispatch wires the fleet's compute-dispatch seam so requests for
@@ -90,8 +139,11 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 		return nil, fmt.Errorf("channelhost: open channel store: %w", err)
 	}
 
-	messages := store.NewMessages(db)                         // harness.MessageLog
-	registry := store.NewActorRegistry(db)                    // actor.Registry
+	messages := store.NewMessages(db)      // harness.MessageLog
+	registry := store.NewActorRegistry(db) // actor.Registry
+	// Bootstrap: the channel system actor is a固有 actor — register it so its
+	// substrate-death terminals (author#3) pass harness sender validation.
+	_ = registry.Insert(ctx, actor.Record{ID: actor.SystemActorID, Kind: actor.KindSystem})
 	typeReg := store.NewTypeRegistry(db, nowMs)               // message.TypeRegistry + harness view
 	lookup := store.NewRequestLookup(messages, cfg.ChannelID) // message.RequestLookup
 
@@ -134,6 +186,7 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 		chain:     chain,
 		channel:   ch,
 		system:    system,
+		nowMs:     nowMs,
 	}, nil
 }
 
@@ -151,3 +204,6 @@ func (h *ChannelHome) Lookup() *store.RequestLookup { return h.lookup }
 
 // Channel exposes the assembled channelkit (cells + policy + supervision).
 func (h *ChannelHome) Channel() *channelkit.Channel { return h.channel }
+
+// Messages exposes the messages store (truth read side; for tests + death scan).
+func (h *ChannelHome) Messages() *store.Messages { return h.messages }
