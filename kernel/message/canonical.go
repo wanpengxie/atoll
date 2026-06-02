@@ -1,19 +1,17 @@
 package message
 
 // canonical.go implements the RFC 8785 (JCS) canonical JSON
-// serialization + SHA-256 (hex, lowercase) hash mandated by L2
-// §1.4.10.2 for the v4 protocol baseline.
+// serialization mandated by L2 for the v4 protocol baseline.
 //
-// Three call sites share this hash function (L1 §10.2.2):
+// Sole remaining consumer: action_ledger.ledger_key — caller-side
+// idempotency key derivation (L2 §1.4.10.1). See kernel/ledger/key.go
+// for the derivation rule (CanonicalizeJSON over the ledger key domain).
 //
-//  1. Message-Write Harness step 0.5 / step 8 catch — content compare.
-//  2. action_ledger.ledger_key — caller-side idempotency key derivation
-//     (L2 §1.4.10.1). See kernel/ledger/key.go for the derivation rule.
-//  3. Adapter deterministic response id — `response:<request_id>:<hash>`
-//     (L2 §1.4.10.2 + L2 §8.5).
+// (The v1 message-dedupe hash + adapter deterministic response-id hash
+// were retired with the dedup machinery: message.id is now a random uuid
+// correlation anchor and seq is the store-allocated truth identity.)
 //
-// Algorithm choice rationale + spec text: L2 §1.4.10.2. RFC 8785
-// reference: https://www.rfc-editor.org/rfc/rfc8785
+// RFC 8785 reference: https://www.rfc-editor.org/rfc/rfc8785
 //
 // Implementation contract:
 //
@@ -34,8 +32,6 @@ package message
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,51 +44,6 @@ import (
 	"unicode/utf8"
 )
 
-// CanonicalHash returns SHA-256 (hex, lowercase) over the RFC 8785
-// canonicalization of the hash-input fields of `e` (L2 §1.4.10.2).
-//
-// Excluded by L1 §10.2.2: ts_received, is_terminal, the four delivery
-// metadata fields, and seq. Hash inputs are sender-provided content
-// fields per proto-layer1 §2.3 (pre-normalize) — the dedupe step uses
-// this hash BEFORE the normalize pass so a sender retry that omits
-// runtime-derived defaults still matches.
-//
-// For each optional field, the key is always present in the canonical
-// output (value `null` when absent) to avoid the "omit key" vs "null
-// key" canonicalization ambiguity. Empty/missing payload is canonicalized
-// as `null` — proto-layer0 §1.1 admits a missing payload for kind=event,
-// and the dedupe step must compare sender-provided payload as-is without
-// substituting normalize defaults.
-func CanonicalHash(e Envelope) (string, error) {
-	m, err := envelopeHashInput(e)
-	if err != nil {
-		return "", err
-	}
-	buf, err := canonicalizeValue(nil, m)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(buf)
-	return hex.EncodeToString(sum[:]), nil
-}
-
-// CanonicalHashPayload returns SHA-256 (hex, lowercase) over the RFC
-// 8785 canonicalization of `payload`. `payload` MUST be valid JSON
-// (object, array, or scalar). Used by adapter deterministic response id
-// derivation per L2 §1.4.10.2.
-func CanonicalHashPayload(payload []byte) (string, error) {
-	v, err := decodeJSON(payload)
-	if err != nil {
-		return "", fmt.Errorf("canonical: parse payload: %w", err)
-	}
-	buf, err := canonicalizeValue(nil, v)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(buf)
-	return hex.EncodeToString(sum[:]), nil
-}
-
 // CanonicalizeJSON returns the RFC 8785 canonical byte sequence for the
 // JSON value encoded in `raw`. Exported so tests and step 0.5 callers
 // can inspect the canonical form without re-hashing.
@@ -102,110 +53,6 @@ func CanonicalizeJSON(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("canonical: parse: %w", err)
 	}
 	return canonicalizeValue(nil, v)
-}
-
-// envelopeHashInput builds the key map L2 §1.4.10.2 specifies as
-// the hash input domain.
-func envelopeHashInput(e Envelope) (map[string]any, error) {
-	// payload: parse raw JSON via UseNumber so integers retain precision.
-	// proto-layer1 §2.3 / proto-layer0 §1.1 — payload may be absent for
-	// kind=event sender-provided envelopes; the dedupe step compares
-	// sender-provided fields verbatim and substitutes `null` for an
-	// empty payload (no normalize default fill at hash time).
-	var payload any
-	if len(e.Payload) > 0 {
-		decoded, err := decodeJSON(e.Payload)
-		if err != nil {
-			return nil, fmt.Errorf("canonical: parse envelope payload: %w", err)
-		}
-		payload = decoded
-	}
-
-	// audience: copy slice to []any (canonicalizeArray accepts []any only).
-	audience := make([]any, len(e.Audience))
-	for i, a := range e.Audience {
-		audience[i] = string(a)
-	}
-
-	// doc_refs: tri-state per L0 §2.1.
-	//   nil pointer → null
-	//   pointer to slice (even empty) → array
-	var docRefs any
-	if e.DocRefs != nil {
-		refs := make([]any, len(*e.DocRefs))
-		for i, r := range *e.DocRefs {
-			refs[i] = r
-		}
-		docRefs = refs
-	}
-
-	// cross_channel_refs: tri-state per L0 §1.1.2.
-	//   nil pointer → null
-	//   pointer to slice (even empty) → array
-	var crossChannelRefs any
-	if e.CrossChannelRefs != nil {
-		refs := make([]any, len(*e.CrossChannelRefs))
-		for i, r := range *e.CrossChannelRefs {
-			refs[i] = map[string]any{
-				"channel_id": string(r.ChannelID),
-				"message_id": string(r.MessageID),
-				"note":       nullableStringPtr(r.Note),
-			}
-		}
-		crossChannelRefs = refs
-	}
-
-	// sender.kind is excluded from the dedupe hash input per
-	// proto-layer1 §2.3: kind is runtime-derived (forced overwrite from
-	// actor_registry at Step 6 SenderConsistent) and not "sender-provided".
-	// Including it would make a sender retry that left kind empty hash
-	// differently from the stored row whose kind got force-filled.
-	sender := map[string]any{
-		"id": string(e.Sender.ID),
-	}
-
-	return map[string]any{
-		"id":                 string(e.ID),
-		"ts":                 jsonNumberFromInt64(e.TS),
-		"channel_id":         string(e.ChannelID),
-		"sender":             sender,
-		"kind":               string(e.Kind),
-		"type":               e.Type,
-		"payload":            payload,
-		"parent_id":          nullableString(string(e.ParentID)),
-		"correlation_id":     nullableString(string(e.CorrelationID)),
-		"doc_refs":           docRefs,
-		"cross_channel_refs": crossChannelRefs,
-		"visibility":         string(e.Visibility),
-		"audience":           audience,
-		"not_before":         nullableInt64Ptr(e.NotBefore),
-		"expires_at":         nullableInt64Ptr(e.ExpiresAt),
-	}, nil
-}
-
-func nullableString(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
-}
-
-func nullableStringPtr(s *string) any {
-	if s == nil {
-		return nil
-	}
-	return *s
-}
-
-func nullableInt64Ptr(p *int64) any {
-	if p == nil {
-		return nil
-	}
-	return jsonNumberFromInt64(*p)
-}
-
-func jsonNumberFromInt64(v int64) json.Number {
-	return json.Number(strconv.FormatInt(v, 10))
 }
 
 // decodeJSON wraps json.Decoder with UseNumber so numeric precision is

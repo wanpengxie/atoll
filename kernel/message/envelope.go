@@ -37,8 +37,7 @@ type CrossChannelRef struct {
 // Store-derived columns (`seq`, `is_terminal`, `canonical_hash`) and
 // runtime scheduling diagnostics (`delivery_failed_at`, `attempts`) are
 // NOT part of the envelope — they live on the runtime/store row that wraps
-// it (target-state §3.7). Only the content fields (minus `ts_received`)
-// feed CanonicalHash.
+// it (target-state §3.7).
 //
 // **Tri-state semantics**:
 //   - ParentID / CorrelationID: empty string ("") means NULL on the wire
@@ -94,29 +93,6 @@ type Envelope struct {
 // per proto-layer0 §2.5.1 and proto-foundation §1.6.3.
 func IsFinalStatus(status string) bool {
 	return status == "completed" || status == "failed"
-}
-
-// HashInputFields lists the top-level keys (in alphabetical order)
-// that feed CanonicalHash per L2 §1.4.10.2.
-//
-// Exported so tests + callers in T7 (harness step 0.5 / step 8) can
-// reference one source of truth instead of duplicating the list.
-var HashInputFields = []string{
-	"audience",
-	"channel_id",
-	"correlation_id",
-	"cross_channel_refs",
-	"doc_refs",
-	"expires_at",
-	"id",
-	"kind",
-	"not_before",
-	"parent_id",
-	"payload",
-	"sender",
-	"ts",
-	"type",
-	"visibility",
 }
 
 // ContentFields lists the envelope content field names from L0 §2.1

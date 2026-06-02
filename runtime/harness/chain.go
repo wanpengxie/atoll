@@ -45,7 +45,6 @@ func New(deps Deps) (*Chain, error) {
 	steps := []step{
 		newStepCallerAuth(deps),
 		newStepEnvelopeShape(deps),
-		newStepDedupe(deps),
 		newStepNormalize(deps),
 		newStepSenderConsistent(deps),
 		newStepTypeRegistered(deps),
@@ -76,36 +75,16 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res WriteResu
 	}
 
 	// Single linear loop: steps run in strict ascending-ID order.
-	// StepDedupe is a normal step that short-circuits via Outcome.Deduped
-	// when the incoming envelope is an idempotent retry.
 	//
-	// The store-derived is_terminal / canonical_hash no longer live on the
-	// envelope (kernel purified it); each is captured here from the step
-	// that owns it and handed to Append.
+	// The store-derived is_terminal no longer lives on the envelope (kernel
+	// purified it); it is captured here from the step that owns it
+	// (StepResponsePairing) and handed to Append.
 	var isTerminal bool
-	var canonicalHash string
 	for _, s := range c.steps {
 		out, err := s.Run(ctx, env)
 		if err != nil {
 			c.observeError(ctx, env, s.ID(), err)
 			return WriteResult{}, err
-		}
-		if out.Deduped {
-			env.TSReceived = out.ExistingTSReceived
-			c.deps.Logger.Debug("harness.write.dedupe",
-				"step", int(s.ID()),
-				"step_name", stepName(s.ID()),
-				"channel_id", string(env.ChannelID),
-				"message_id", string(env.ID),
-				"correlation_id", string(env.CorrelationID),
-				"request_id", requestIDFromCtx(ctx),
-				"seq", out.ExistingSeq,
-			)
-			return WriteResult{
-				MessageID: env.ID,
-				Seq:       out.ExistingSeq,
-				Deduped:   true,
-			}, nil
 		}
 		if !out.Continue() {
 			c.observeReject(ctx, env, s.ID(), out.RejectReason, out.Detail)
@@ -114,17 +93,13 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res WriteResu
 		if out.IsTerminal {
 			isTerminal = true
 		}
-		if out.CanonicalHash != "" {
-			canonicalHash = out.CanonicalHash
-		}
 		c.observePass(ctx, env, s.ID())
 	}
 
 	// StepEngineAppend — canonical sink. is_terminal (StepResponsePairing)
-	// and canonical_hash (StepDedupe) were captured above; the store
-	// allocates seq per L2 §1.4.1.
+	// was captured above; the store allocates seq per L2 §1.4.1.
 	env.TSReceived = c.deps.NowMs()
-	appendRes, err := c.deps.Log.Append(ctx, env, isTerminal, canonicalHash)
+	appendRes, err := c.deps.Log.Append(ctx, env, isTerminal)
 	if err != nil {
 		// Map the typed AppendError to a closed-set reject when possible.
 		// storespec.AppendError.Reason is the wire string (storespec must
@@ -148,7 +123,6 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res WriteResu
 	return WriteResult{
 		MessageID: env.ID,
 		Seq:       int64(appendRes.Seq),
-		Deduped:   appendRes.Deduped,
 	}, nil
 }
 
@@ -205,8 +179,6 @@ func stepName(step stepID) string {
 		return "caller_auth"
 	case StepEnvelopeShape:
 		return "envelope_shape"
-	case StepDedupe:
-		return "dedupe"
 	case StepNormalize:
 		return "normalize"
 	case StepSenderConsistent:

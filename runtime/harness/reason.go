@@ -9,7 +9,10 @@ package harness
 // Relocated from the deleted kernel/message (which held 32 values including
 // HarnessWorkerFencingStale). v2 drops HarnessWorkerFencingStale — the
 // channel-write fence is obsolete under single-server-harness-writer
-// (runtime-construction-spec §4.1) — leaving 31.
+// (runtime-construction-spec §4.1) — and HarnessIDDuplicateConflict — the v1
+// id-dedupe step was retired (message.id is now a random uuid; an id UNIQUE
+// collision is a pure integrity error surfaced via classifyAppendErr's wire
+// string) — leaving 30.
 //
 // No HTTPStatus() method: reason→HTTP-status (strerror) is a binding concern
 // that lives in server/gateway, not on this engine type. This type only
@@ -33,9 +36,6 @@ const (
 	HarnessVisibilityAudienceInvalid HarnessRejectReason = "harness_visibility_audience_invalid"
 	HarnessEnvelopeUnknownField      HarnessRejectReason = "harness_envelope_unknown_field"
 	HarnessAudienceWildcardForbidden HarnessRejectReason = "harness_audience_wildcard_forbidden"
-
-	// Step 3 — Id Dedupe
-	HarnessIDDuplicateConflict HarnessRejectReason = "harness_id_duplicate_conflict"
 
 	// Step 4 — Normalize (time-relation guard)
 	HarnessTimeInvalid HarnessRejectReason = "harness_time_invalid"
@@ -70,7 +70,7 @@ const (
 	HarnessProvisionalAfterFinal           HarnessRejectReason = "harness_provisional_after_final"
 )
 
-// AllHarnessRejectReasons enumerates every value (31 — v2, no fencing).
+// AllHarnessRejectReasons enumerates every value (30 — v2, no fencing, no id-dedupe).
 var AllHarnessRejectReasons = []HarnessRejectReason{
 	HarnessEngineACLDenied,
 	HarnessEnvelopeFieldMissing,
@@ -80,7 +80,6 @@ var AllHarnessRejectReasons = []HarnessRejectReason{
 	HarnessVisibilityAudienceInvalid,
 	HarnessEnvelopeUnknownField,
 	HarnessAudienceWildcardForbidden,
-	HarnessIDDuplicateConflict,
 	HarnessTimeInvalid,
 	HarnessTypeUnknown,
 	HarnessKindNotAllowedForType,

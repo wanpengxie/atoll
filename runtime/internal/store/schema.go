@@ -38,8 +38,7 @@ CREATE TABLE IF NOT EXISTS messages (
   expires_at           INTEGER,
   delivered_at         INTEGER,
   last_error           TEXT,
-  is_terminal          INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0,1)),
-  canonical_hash       TEXT NOT NULL DEFAULT ''
+  is_terminal          INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0,1))
 );
 
 CREATE INDEX IF NOT EXISTS ix_messages_correlation_ts ON messages(correlation_id, ts_received);

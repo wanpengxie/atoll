@@ -204,7 +204,7 @@ func (r *actorRegistry) ApplyMemberTransitions(
 		if err != nil {
 			return err
 		}
-		if _, err := appendTx(ctx, tx, env, false, ""); err != nil {
+		if _, err := appendTx(ctx, tx, env, false); err != nil {
 			return fmt.Errorf("store: actor registered mirror %q: %w", add.ID, err)
 		}
 	}
@@ -226,7 +226,7 @@ func (r *actorRegistry) ApplyMemberTransitions(
 		if err != nil {
 			return err
 		}
-		if _, err := appendTx(ctx, tx, env, false, ""); err != nil {
+		if _, err := appendTx(ctx, tx, env, false); err != nil {
 			return fmt.Errorf("store: actor deregistered mirror %q: %w", remove.ID, err)
 		}
 	}

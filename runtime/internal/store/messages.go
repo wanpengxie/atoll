@@ -25,12 +25,13 @@ import (
 // overwrite, type_registry / schema validation, and The One Law
 // uniqueness contract.
 //
-// Append performs two things in one transaction:
-//  1. dedupe check by envelope.id (returns Deduped=true if existing row).
-//  2. INSERT the messages row (raises *AppendError on terminal-duplicate
-//     UNIQUE INDEX violation per L2 §1.4.1).
-//     Optional framework observers may enqueue same-transaction side rows
-//     after the message insert.
+// Append INSERTs the messages row in one transaction (raises *AppendError
+// on the messages.id UNIQUE violation or the terminal-duplicate UNIQUE
+// INDEX violation per L2 §1.4.1). envelope.id is a caller-generated random
+// uuid correlation anchor — uniqueness is a pure integrity guarantee, NOT
+// a dedup/idempotency seam (the v1 at-least-once dedupe machinery was
+// retired under v2 caller-scoped closure). Optional framework observers
+// may enqueue same-transaction side rows after the message insert.
 //
 // IsTerminal computation is **simplified** for launch T3: response rows
 // with non-empty parent_id are treated terminal by default (L2 §1.4.1
@@ -59,9 +60,9 @@ type messages struct {
 func newMessages(db *sql.DB) *messages { return &messages{db: db} }
 
 // Append implements storespec.MessageLog. The harness supplies the
-// pre-computed is_terminal (step 8) + canonical_hash (step dedupe) since the
-// pure envelope no longer carries those store-derived columns.
-func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal bool, canonicalHash string) (storespec.AppendResult, error) {
+// pre-computed is_terminal (step 8) since the pure envelope no longer
+// carries that store-derived column.
+func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal bool) (storespec.AppendResult, error) {
 	if env == nil {
 		return storespec.AppendResult{}, errors.New("store: append nil envelope")
 	}
@@ -85,7 +86,7 @@ func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	res, err := appendTx(ctx, tx, env, isTerminal, canonicalHash)
+	res, err := appendTx(ctx, tx, env, isTerminal)
 	if err != nil {
 		return storespec.AppendResult{}, err
 	}
@@ -95,14 +96,14 @@ func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal
 	return res, nil
 }
 
-// appendTx is the raw dedupe-check + INSERT of one envelope row within an
-// existing tx. It is an UNEXPORTED package func, NOT a method on an exported
-// type: there is deliberately no public "append into this tx" primitive. The
-// only callers are Append (which wraps it in its own tx) and the membership
-// control-plane op in actors.go (which needs the row + its mirror event in one
-// atomic tx). No receiver is taken — it touches only tx, so it can never be a
-// capability someone obtains by constructing a *messages.
-func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal bool, canonicalHash string) (storespec.AppendResult, error) {
+// appendTx is the raw INSERT of one envelope row within an existing tx. It
+// is an UNEXPORTED package func, NOT a method on an exported type: there is
+// deliberately no public "append into this tx" primitive. The only callers
+// are Append (which wraps it in its own tx) and the membership control-plane
+// op in actors.go (which needs the row + its mirror event in one atomic tx).
+// No receiver is taken — it touches only tx, so it can never be a capability
+// someone obtains by constructing a *messages.
+func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal bool) (storespec.AppendResult, error) {
 	if tx == nil {
 		return storespec.AppendResult{}, errors.New("store: append tx nil")
 	}
@@ -116,23 +117,8 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 		return storespec.AppendResult{}, errors.New("store: append nil payload (harness step 4 must materialize payload before reaching store)")
 	}
 
-	// 1) dedupe by envelope.id
-	const selExist = `SELECT seq, is_terminal FROM messages WHERE id=?`
-	var existingSeq int64
-	var existingTerm int
-	switch err := tx.QueryRowContext(ctx, selExist, env.ID).Scan(&existingSeq, &existingTerm); {
-	case err == nil:
-		// Dedupe path — row already exists. Return Deduped=true with the
-		// existing seq/is_terminal (carried on AppendResult, not on the
-		// pure envelope which no longer holds store-derived columns).
-		return storespec.AppendResult{Seq: storespec.Seq(existingSeq), IsTerminal: existingTerm == 1, Deduped: true}, nil
-	case errors.Is(err, sql.ErrNoRows):
-		// fall through
-	default:
-		return storespec.AppendResult{}, fmt.Errorf("store: append dedupe lookup: %w", err)
-	}
-
-	// 2) INSERT row
+	// INSERT row. env.id is a caller-generated random uuid: uniqueness is a
+	// pure integrity constraint, so a collision is an error (no dedup path).
 	docRefsJSON, err := encodeDocRefs(env.DocRefs)
 	if err != nil {
 		return storespec.AppendResult{}, fmt.Errorf("store: append docrefs encode: %w", err)
@@ -153,8 +139,8 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 	   parent_id, correlation_id, doc_refs, cross_channel_refs,
 	   visibility, audience, not_before, expires_at,
 	   delivered_at, last_error,
-	   is_terminal, canonical_hash
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	   is_terminal
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	terminalInt := 0
 	if isTerminal {
@@ -169,7 +155,7 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 		nullableInt(env.NotBefore), nullableInt(env.ExpiresAt),
 		nullableInt(env.DeliveredAt),
 		nullableString(env.LastError),
-		terminalInt, canonicalHash,
+		terminalInt,
 	)
 	if err != nil {
 		return storespec.AppendResult{}, classifyAppendErr(err, string(env.ID))
@@ -179,7 +165,7 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 		return storespec.AppendResult{}, fmt.Errorf("store: append last id: %w", err)
 	}
 
-	return storespec.AppendResult{Seq: storespec.Seq(seq), IsTerminal: isTerminal, Deduped: false}, nil
+	return storespec.AppendResult{Seq: storespec.Seq(seq), IsTerminal: isTerminal}, nil
 }
 
 // PendingDue returns up to `limit` future-message rows that are due for
@@ -455,23 +441,6 @@ func (m *messages) FinalResponseSender(ctx context.Context, channelID channel.ID
 	default:
 		return "", false, fmt.Errorf("store: final response sender: %w", err)
 	}
-}
-
-// LookupCanonicalHash implements storespec.MessageLog — returns the row's
-// stored canonical_hash for StepDedupe's pre-normalize comparison
-// (proto-layer1 §2.3).
-func (m *messages) LookupCanonicalHash(ctx context.Context, channelID channel.ID, id message.ID) (string, bool, error) {
-	_ = channelID
-	const q = `SELECT canonical_hash FROM messages WHERE id=?`
-	var hash string
-	err := m.db.QueryRowContext(ctx, q, id).Scan(&hash)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("store: lookup canonical hash: %w", err)
-	}
-	return hash, true, nil
 }
 
 // FindByID implements storespec.MessageLog.

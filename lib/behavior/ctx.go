@@ -158,10 +158,9 @@ type RespondOptions struct {
 }
 
 // RespondResult is what RespondFunc returns when the harness write
-// succeeds (or dedupes against an existing terminal).
+// succeeds (or the terminal-duplicate path treats it as a benign no-op).
 type RespondResult struct {
 	MessageID message.ID
-	Deduped   bool // true when harness step 8 detected terminal_duplicate
 }
 
 // RespondFunc is the F5 contract — adapter calls it inside Handle /

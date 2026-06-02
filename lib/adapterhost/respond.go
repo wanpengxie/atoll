@@ -128,8 +128,8 @@ func (a *adapterActor) doRespond(ctx context.Context, requestID behavior.Correla
 	}
 	if res.RejectReason != "" {
 		if res.RejectReason == message.HarnessTerminalDuplicate {
-			a.markDone(requestID) // adapter sees dedupe as business success
-			return behavior.RespondResult{MessageID: res.MessageID, Deduped: true}, nil
+			a.markDone(requestID) // adapter sees terminal-duplicate as business success
+			return behavior.RespondResult{MessageID: res.MessageID}, nil
 		}
 		return behavior.RespondResult{}, fmt.Errorf("adapterhost: respond rejected: %s (%s)", res.RejectReason, res.RejectDetail)
 	}
@@ -167,12 +167,8 @@ func (a *adapterActor) doEmitEvent(ctx context.Context, eventType string, payloa
 	if eventType == "" {
 		return "", errors.New("adapterhost: EmitEvent type required")
 	}
-	hash, err := message.CanonicalHashPayload(payload)
-	if err != nil {
-		return "", fmt.Errorf("adapterhost: emit hash: %w", err)
-	}
 	env := &message.Envelope{
-		ID:         message.ID("event:" + eventType + ":" + hash),
+		ID:         message.ID(uuid.NewString()),
 		TS:         a.clock().UnixMilli(),
 		ChannelID:  a.channelID,
 		Sender:     sender,

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -50,8 +52,10 @@ type ResponseSpec struct {
 
 // BuildResponseEnvelope assembles a kind=response envelope from the original
 // request, looked up by id. Audience defaults to the request sender;
-// visibility/correlation inherit from the request. The deterministic id is
-// response:<request_id>:<canonical_hash>. Shared serve helper.
+// visibility/correlation inherit from the request. The response id is a random
+// uuid correlation anchor; parent_id (=request id) + the One-Law terminal
+// uniqueness index — not the id — guarantee "one terminal per request". Shared
+// serve helper.
 func BuildResponseEnvelope(
 	ctx context.Context,
 	lookup message.RequestLookup,
@@ -91,10 +95,6 @@ func BuildResponseFromRequest(
 	if err != nil {
 		return nil, err
 	}
-	hash, err := message.CanonicalHashPayload(merged)
-	if err != nil {
-		return nil, fmt.Errorf("behavior: response hash: %w", err)
-	}
 	vis := spec.Visibility
 	if vis == "" {
 		vis = request.Visibility
@@ -111,7 +111,7 @@ func BuildResponseFromRequest(
 		correlationID = request.ID
 	}
 	return &message.Envelope{
-		ID:            message.ID("response:" + requestID.String() + ":" + hash),
+		ID:            message.ID(uuid.NewString()),
 		TS:            clock().UnixMilli(),
 		ChannelID:     request.ChannelID,
 		Sender:        sender,
