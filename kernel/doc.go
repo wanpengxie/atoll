@@ -10,8 +10,7 @@
 // Subpackages (4):
 //
 //   - kernel/actor    — actor identity (ActorID), the actor Kind closed set,
-//     Binding closed set, ReadinessState vocabulary, and the reserved-type
-//     closed sets.
+//     Binding closed set, and the reserved-type closed sets.
 //   - kernel/channel  — channel ID type + Ref (federation forward-compat).
 //   - kernel/message  — envelope schema (17 content+metadata fields), kind /
 //     visibility closed sets, core-type table, the terminal-failure reason
@@ -25,8 +24,8 @@
 //     Registry/Ledger/Cursors/TypeRegistry/RequestLookup/MessageLog) — they
 //     take context.Context and are implemented by runtime/store; they live
 //     with their consumers in runtime. (Go idiom: interface at the consumer.)
-//   - Projections (actor membership Record/Registry, readiness Readiness,
-//     type_registry TypeRow) — projections are derived read caches, a
+//   - Projections (actor membership Record/Registry, type_registry TypeRow)
+//     — projections are derived read caches, a
 //     runtime/server facility, never a kernel model (truth-vs-projection).
 //   - store-derived envelope columns (seq, is_terminal, canonical_hash) —
 //     produced by the store, not part of the 17 protocol fields.

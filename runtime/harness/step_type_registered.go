@@ -57,10 +57,6 @@ var reservedActorTypeSet = map[string]reservedActorTypeRule{
 	actor.ReservedActorList: {
 		AllowedKinds: []message.Kind{message.KindRequest, message.KindResponse},
 	},
-	actor.ReservedActorReadinessChanged: {
-		AllowedKinds: []message.Kind{message.KindEvent},
-		SystemOnly:   true,
-	},
 }
 
 // stepTypeRegistered implements proto-layer1 §2.5 step 5 — `type ∈ (core

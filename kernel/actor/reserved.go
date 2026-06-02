@@ -45,7 +45,6 @@ const (
 	ReservedSystemConfigUpdated     = "system.config.updated"
 	ReservedSystemTypeInstalled     = "system.type.installed"
 	ReservedSystemTypeDeprecated    = "system.type.deprecated"
-	ReservedActorReadinessChanged   = "actor.readiness.changed"
 )
 
 // ReservedSystemEventTypeSet enumerates the reserved system event types.
@@ -56,5 +55,4 @@ var ReservedSystemEventTypeSet = []string{
 	ReservedSystemConfigUpdated,
 	ReservedSystemTypeInstalled,
 	ReservedSystemTypeDeprecated,
-	ReservedActorReadinessChanged,
 }
