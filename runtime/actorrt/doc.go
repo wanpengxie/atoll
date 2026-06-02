@@ -1,24 +1,31 @@
 // Package actorrt is the actor-runtime substrate: it gives each actor a
-// long-lived object identity (a cell with a private struct, a single
-// goroutine, and a bounded mailbox) and the four substrate guarantees of
-// actor-runtime-redesign.md §1.1:
+// long-lived object identity (a cell with a private struct, a single goroutine,
+// and a bounded envelope mailbox) and four substrate guarantees:
 //
-//  1. identity + addressability — sending to an ActorID reaches it;
+//  1. identity + addressability — sending to an ActorID reaches its CURRENT
+//     incarnation. Identity is two-level: a stable ActorID names a sequence of
+//     distinct cell instances over time (Spawn replaces), each with its own
+//     incarnation (generation). Death and replacement are incarnation-checked,
+//     so a dying predecessor can never evict its successor.
 //  2. private sequential delivery — one actor's messages are processed
-//     one-at-a-time by its own goroutine, so the actor can hold mutable
-//     state WITHOUT locks or atomics (the core "gift");
-//  3. lifecycle boundary — Start acquires resources, Stop releases them;
-//  4. isolation — nobody reaches into an actor's state; they only send
-//     messages.
+//     one-at-a-time by its own goroutine, so the actor can hold mutable state
+//     WITHOUT locks or atomics (the core "gift").
+//  3. lifecycle boundary — Start acquires resources, Stop releases them; on
+//     death a cell self-evicts from the addressing map (it never stops/joins
+//     itself) and signals the supervisor.
+//  4. isolation — nobody reaches into an actor's state. The mailbox carries
+//     ONLY envelopes; there is no path to run caller-supplied code on the cell
+//     goroutine. An out-of-band signal is a message an actor sends itself
+//     (ActorContext.Deliver); a synchronous request-reply is a message pair,
+//     not a closure.
 //
-// This package REPLACES runtime/scheduler.Deliverer's lock-free, stateless
-// "concurrent handler" model. An actor is no longer a HandlerFn registered
-// in a map; it is an object instance owned by exactly one cell goroutine.
+// Deliver reports a structured, per-audience Outcome (Delivered/NotHosted/
+// MailboxFull/Stopped): the substrate knows whether it hosts an addressed actor
+// and reports that truthfully so the seam can fast-fail rather than wait for a
+// timeout.
 //
-// closure is NOT in this package: per actor-runtime-redesign.md §0.5 the
-// closure timer/pending-set lives in the sender actor (caller-scoped), and
-// the only substrate obligation on closure is the death signal (a cell
-// supervisor observing its child panic — see Supervisor — or a relay
-// disconnect observed by the adapter actor), which materialises a
+// closure is NOT in this package: the closure timer/pending-set lives in the
+// sender actor (caller-scoped), and the only substrate obligation on closure is
+// the death signal (a Supervisor observing its child die), which materialises a
 // receiver_unavailable terminal. There is no global closure scanner here.
 package actorrt

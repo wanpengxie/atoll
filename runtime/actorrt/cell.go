@@ -11,100 +11,97 @@ import (
 )
 
 // ErrMailboxFull is returned by Deliver when the actor's bounded mailbox is
-// full. The caller MUST NOT block: per actor-runtime-redesign.md §7.2 a
-// full request mailbox is rejected at the seam and the sender's
-// caller-scoped closure (or the substrate death signal) collapses it. An
-// event whose mailbox is full may be dropped (the log is truth).
+// full. The caller MUST NOT block: a full request mailbox is rejected at the
+// seam and the sender's caller-scoped closure (or the substrate death signal)
+// collapses it. An event whose mailbox is full may be dropped (the log is truth).
 var ErrMailboxFull = errors.New("actorrt: mailbox full")
 
 // ErrCellStopped is returned by Deliver after the cell has begun teardown.
 var ErrCellStopped = errors.New("actorrt: cell stopped")
 
-// ErrNoCell is returned by Runtime.Do/Ask when no cell is hosted for the
-// target id (the substrate cannot run a closure on an actor it does not host).
-var ErrNoCell = errors.New("actorrt: no cell for actor")
-
-// job is one mailbox entry. Exactly one of {env, fn, ask} is set:
-//   - env: an envelope to Receive (the normal message path)
-//   - fn:  a closure to run on the cell goroutine, fire-and-forget (the
-//     out-of-band signal path — e.g. a device lifecycle frame — folded onto
-//     the actor's own goroutine so it touches state serially, WITHOUT
-//     encoding transport signals as protocol envelopes)
-//   - ask: a closure run on the cell goroutine whose error is returned
-//     SYNCHRONOUSLY to the caller via result (the device-callback ack path:
-//     bad/duplicate/expired frames must be rejected with a permanent/retryable
-//     error the transit layer hands back to the device — dismantle §2.5-A a).
-type job struct {
-	env    *message.Envelope
-	fn     func()
-	ask    func(context.Context) error
-	result chan error
-}
-
 // DeathSignal is what a Supervisor receives when a cell's actor goroutine
-// terminates abnormally (panic in Receive/Start/Stop). It carries enough to
-// let the supervisor materialise a receiver_unavailable terminal for every
-// in-flight request addressed to the dead actor (the substrate's only
-// closure obligation — actor-runtime-redesign.md §5).
+// terminates abnormally (panic in Receive/Start). It identifies WHICH
+// INCARNATION died — a single ActorID names a sequence of distinct cell
+// instances over time (Spawn replaces), so the substrate's death signal carries
+// (Actor, Incarnation) or it under-specifies its own state space. Prior art:
+// Erlang DOWN carries the monitor ref (PID reused under a stable name); K8s Pod
+// carries a UID distinct from its name.
 type DeathSignal struct {
 	Actor actor.ActorID
+	// Incarnation is the generation of the dead instance (the k-th life of
+	// Actor). A supervisor MUST use it to avoid collapsing a successor
+	// incarnation's in-flight work on a predecessor's death.
+	Incarnation uint64
 	// Cause is the recovered panic value (or error) that killed the cell.
 	Cause error
 }
 
-// Supervisor observes cell death. The runtime calls OnDeath exactly once
-// per cell that dies abnormally. It is the seam where the substrate
-// materialises receiver_unavailable for the dead actor's in-flight
-// requests; the substrate never guesses "slow" — it only reports death it
-// positively observed.
+// Supervisor observes cell death. The runtime calls OnDeath exactly once per
+// cell that dies abnormally. It is the seam where the substrate materialises
+// receiver_unavailable for the dead instance's in-flight requests; the
+// substrate never guesses "slow" — it only reports death it positively
+// observed. The dead cell has ALREADY evicted itself from the runtime's
+// addressing map before OnDeath runs, so a supervisor MUST NOT despawn it.
 type Supervisor interface {
 	OnDeath(ctx context.Context, sig DeathSignal)
 }
 
-// cell is one actor instance: its impl (private state), a single goroutine,
-// and a bounded inbox channel (the mailbox). It is the Go physical form of
-// actor-runtime-redesign.md §1.4.
+// cell is one actor INSTANCE: its impl (private state), a single goroutine, a
+// bounded envelope mailbox, and an incarnation (which life of its ActorID this
+// is). The mailbox carries ONLY envelopes — the substrate's isolation guarantee
+// is that the sole way to affect an actor is to send it a message; there is no
+// path to run caller-supplied code on the cell goroutine.
 type cell struct {
-	id    actor.ActorID
-	impl  Actor
-	inbox chan job
+	id          actor.ActorID
+	incarnation uint64
+	impl        Actor
+	inbox       chan *message.Envelope
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	sup Supervisor
+	// onExit is the incarnation-checked self-eviction hook the Runtime injects:
+	// on ANY exit (clean or panic) the cell removes itself from the addressing
+	// map IFF the map still points to this very instance. This is how death
+	// makes an instance unaddressable WITHOUT the cell trying to stop/join
+	// itself (a goroutine cannot join itself — that was the death deadlock).
+	onExit func(*cell)
 
 	// done is closed when the cell goroutine has fully exited (after Stop).
 	done chan struct{}
 
 	stopOnce sync.Once
-	// closed guards inbox-close so Deliver never sends on a closed channel.
+	// closed guards inbox-send so Deliver never enqueues into a torn-down cell.
 	mu     sync.Mutex
 	closed bool
 }
 
-// newCell constructs a cell. mailbox is the bounded inbox depth.
-func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, sup Supervisor) *cell {
+// newCell constructs a cell. mailbox is the bounded inbox depth; incarnation is
+// the generation assigned by the Runtime; onExit is the self-eviction hook.
+func newCell(parent context.Context, id actor.ActorID, incarnation uint64, impl Actor, mailbox int, sup Supervisor, onExit func(*cell)) *cell {
 	if mailbox <= 0 {
 		mailbox = 64
 	}
 	ctx, cancel := context.WithCancel(parent)
 	return &cell{
-		id:     id,
-		impl:   impl,
-		inbox:  make(chan job, mailbox),
-		ctx:    ctx,
-		cancel: cancel,
-		sup:    sup,
-		done:   make(chan struct{}),
+		id:          id,
+		incarnation: incarnation,
+		impl:        impl,
+		inbox:       make(chan *message.Envelope, mailbox),
+		ctx:         ctx,
+		cancel:      cancel,
+		sup:         sup,
+		onExit:      onExit,
+		done:        make(chan struct{}),
 	}
 }
 
 // Self implements ActorContext.
 func (c *cell) Self() actor.ActorID { return c.id }
 
-// Deliver implements ActorContext and is also the substrate enqueue path.
-// It never blocks: a full mailbox returns ErrMailboxFull, a stopped cell
+// Deliver implements ActorContext and is also the substrate enqueue path. It
+// never blocks: a full mailbox returns ErrMailboxFull, a stopped cell
 // ErrCellStopped.
 func (c *cell) Deliver(env *message.Envelope) error {
 	c.mu.Lock()
@@ -115,17 +112,17 @@ func (c *cell) Deliver(env *message.Envelope) error {
 	c.mu.Unlock()
 
 	select {
-	case c.inbox <- job{env: env}:
+	case c.inbox <- env:
 		return nil
 	default:
 		return ErrMailboxFull
 	}
 }
 
-// start spawns the cell goroutine. It calls Start (if implemented), then
-// loops over the mailbox invoking Receive serially, then drains and calls
-// Stop on teardown. A panic anywhere is recovered and surfaced as a
-// DeathSignal to the supervisor.
+// start spawns the cell goroutine. It calls Start (if implemented), then loops
+// over the mailbox invoking Receive serially, then on teardown self-evicts,
+// signals the supervisor (on abnormal death), and calls Stop. A panic anywhere
+// is recovered and surfaced as a DeathSignal.
 func (c *cell) start() {
 	go func() {
 		defer close(c.done)
@@ -133,15 +130,29 @@ func (c *cell) start() {
 		var deathCause error
 		defer func() {
 			if r := recover(); r != nil {
-				deathCause = fmt.Errorf("actorrt: cell %s panicked: %v", c.id, r)
+				deathCause = fmt.Errorf("actorrt: cell %s#%d panicked: %v", c.id, c.incarnation, r)
 			}
+			// (a) Make this instance unaddressable FIRST — incarnation-checked
+			// self-eviction. Never self-stop()/join: a goroutine cannot wait on
+			// its own exit.
+			if c.onExit != nil {
+				c.onExit(c)
+			}
+			// (b) On abnormal death, hand the supervisor the closure obligation.
+			// Guard it: a supervisor panic must not escape and crash the process
+			// through the death path. Use a background-derived ctx (the cell ctx
+			// may already be cancelled, but the terminal still needs writing).
 			if deathCause != nil && c.sup != nil {
-				// Use a background-derived ctx: the cell ctx may already be
-				// cancelled, but the supervisor still needs to write the
-				// death terminal.
-				c.sup.OnDeath(context.Background(), DeathSignal{Actor: c.id, Cause: deathCause})
+				func() {
+					defer func() { _ = recover() }()
+					c.sup.OnDeath(context.Background(), DeathSignal{
+						Actor:       c.id,
+						Incarnation: c.incarnation,
+						Cause:       deathCause,
+					})
+				}()
 			}
-			// Best-effort resource release.
+			// (c) Best-effort resource release.
 			if st, ok := c.impl.(Stopper); ok {
 				_ = st.Stop(context.Background())
 			}
@@ -149,7 +160,7 @@ func (c *cell) start() {
 
 		if starter, ok := c.impl.(Starter); ok {
 			if err := starter.Start(c.ctx, c); err != nil {
-				deathCause = fmt.Errorf("actorrt: cell %s Start failed: %w", c.id, err)
+				deathCause = fmt.Errorf("actorrt: cell %s#%d Start failed: %w", c.id, c.incarnation, err)
 				return
 			}
 		}
@@ -158,95 +169,29 @@ func (c *cell) start() {
 			select {
 			case <-c.ctx.Done():
 				return
-			case j := <-c.inbox:
-				switch {
-				case j.ask != nil:
-					j.result <- c.safeAsk(j.ask)
-				case j.fn != nil:
-					j.fn() // runs on the cell goroutine; a panic propagates to the outer recover → DeathSignal
-				default:
-					c.safeReceive(j)
-				}
+			case env := <-c.inbox:
+				c.safeReceive(env)
 			}
 		}
 	}()
 }
 
-// post enqueues a closure to run on the cell goroutine. It is the out-of-band
-// signal path (e.g. a device lifecycle frame folded onto the actor) so the
-// actor touches its state serially. Never blocks: full mailbox → ErrMailboxFull,
-// stopped cell → ErrCellStopped.
-func (c *cell) post(fn func()) error {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return ErrCellStopped
-	}
-	c.mu.Unlock()
-	select {
-	case c.inbox <- job{fn: fn}:
-		return nil
-	default:
-		return ErrMailboxFull
-	}
-}
-
-// ask enqueues a closure to run on the cell goroutine and blocks until it
-// returns, surfacing its error synchronously. This is the device-callback ack
-// path (dismantle §2.5-A a): the transit layer needs a permanent/retryable/ok
-// verdict computed serially on the actor's own goroutine. Never blocks on a
-// full mailbox (→ ErrMailboxFull); if the cell tears down while the ask is
-// queued, returns ErrCellStopped.
-func (c *cell) ask(fn func(context.Context) error) error {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return ErrCellStopped
-	}
-	c.mu.Unlock()
-
-	res := make(chan error, 1)
-	select {
-	case c.inbox <- job{ask: fn, result: res}:
-	default:
-		return ErrMailboxFull
-	}
-	select {
-	case err := <-res:
-		return err
-	case <-c.ctx.Done():
-		return ErrCellStopped
-	}
-}
-
-// safeAsk runs an ask closure with panic recovery, converting a panic into a
-// returned error. Unlike Receive, an ask panic does NOT kill the cell: ask is
-// a controlled synchronous entry whose caller owns the verdict, so the panic
-// is reported back rather than turned into a DeathSignal.
-func (c *cell) safeAsk(fn func(context.Context) error) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("actorrt: cell %s ask panicked: %v", c.id, r)
-		}
-	}()
-	return fn(c.ctx)
-}
-
-// safeReceive invokes impl.Receive with panic recovery. A panic is
-// re-raised as a goroutine-level panic so the cell's outer recover converts
-// it into a DeathSignal (one death per cell, not per message).
-func (c *cell) safeReceive(j job) {
-	if err := c.impl.Receive(c.ctx, j.env); err != nil {
-		// A returned (non-panic) error is not a death — closure belongs to
-		// the sender. We swallow it here; callers needing observability can
-		// have the actor itself emit. (Substrate never synthesises terminal
-		// from a mere handler error.)
+// safeReceive invokes impl.Receive with panic recovery. A panic is re-raised as
+// a goroutine-level panic so the cell's outer recover converts it into a
+// DeathSignal (one death per cell, not per message). A returned (non-panic)
+// error is NOT a death — closure belongs to the sender — so it is swallowed for
+// observability (the substrate never synthesises a terminal from a handler
+// error; an actor needing observability emits it itself).
+func (c *cell) safeReceive(env *message.Envelope) {
+	if err := c.impl.Receive(c.ctx, env); err != nil {
 		_ = err
 	}
 }
 
-// stop closes the mailbox, cancels the cell ctx, and waits for the
-// goroutine to exit. Safe to call multiple times.
+// stop closes the mailbox, cancels the cell ctx, and waits for the goroutine to
+// exit. Safe to call multiple times. It MUST be called only from a DIFFERENT
+// goroutine than the cell's own (it joins on c.done) — the death path never
+// calls stop(); it self-evicts via onExit instead.
 func (c *cell) stop() {
 	c.stopOnce.Do(func() {
 		c.mu.Lock()

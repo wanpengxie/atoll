@@ -11,13 +11,10 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// recordActor records the order and concurrency of Receive invocations
-// WITHOUT any internal lock on the per-message fields — proving the
-// substrate serializes for it. Lifecycle flags (started/stopped) are
-// surfaced via channels because they are read from the test goroutine.
+// recordActor records the order and concurrency of Receive invocations WITHOUT
+// any internal lock on the per-message fields — proving the substrate
+// serializes for it.
 type recordActor struct {
-	// no mutex on purpose: if the substrate is serial, these are race-free
-	// (only ever touched on the cell goroutine).
 	seen        []string
 	inFlight    int
 	maxParallel int
@@ -67,12 +64,23 @@ func env(id string) *message.Envelope {
 	return &message.Envelope{ID: message.ID(id)}
 }
 
+// mustDeliver delivers to a single actor and fails on a non-Delivered outcome.
+func mustDeliver(t *testing.T, rt *Runtime, id actor.ActorID, e *message.Envelope) {
+	t.Helper()
+	res, err := rt.Deliver(context.Background(), []actor.ActorID{id}, e)
+	if err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if got := res.Per[id].Outcome; got != Delivered {
+		t.Fatalf("deliver outcome = %v, want Delivered", got)
+	}
+}
+
 func TestCellSerialDelivery(t *testing.T) {
 	t.Parallel()
 	done := make(chan struct{}, 100)
 	a := newRecordActor()
 	a.receive = func() {
-		// Hold briefly so any concurrency would be observed by maxParallel.
 		time.Sleep(time.Millisecond)
 		done <- struct{}{}
 	}
@@ -81,15 +89,11 @@ func TestCellSerialDelivery(t *testing.T) {
 
 	const n = 50
 	for i := 0; i < n; i++ {
-		if err := rt.Deliver(context.Background(), []actor.ActorID{"a"}, env(string(rune('A'+i%26)))); err != nil {
-			t.Fatalf("deliver %d: %v", i, err)
-		}
+		mustDeliver(t, rt, "a", env(string(rune('A'+i%26))))
 	}
 	for i := 0; i < n; i++ {
 		<-done
 	}
-	// Stop establishes a happens-before edge (cell goroutine exit) so the
-	// test goroutine can read the per-message fields race-free.
 	rt.StopAll()
 	if a.maxParallel != 1 {
 		t.Fatalf("maxParallel = %d, want 1 (substrate must serialize)", a.maxParallel)
@@ -129,27 +133,46 @@ func TestCellMailboxFull(t *testing.T) {
 	defer func() { close(block); rt.StopAll() }()
 	rt.Spawn("a", a)
 
-	// First message occupies the goroutine (blocked in Receive). Subsequent
-	// ones fill the depth-1 mailbox then overflow.
 	var gotFull atomic.Bool
 	for i := 0; i < 50; i++ {
-		err := rt.Deliver(context.Background(), []actor.ActorID{"a"}, env("x"))
+		res, err := rt.Deliver(context.Background(), []actor.ActorID{"a"}, env("x"))
 		if err != nil {
+			t.Fatalf("deliver: %v", err)
+		}
+		if res.Per["a"].Outcome == MailboxFull {
 			gotFull.Store(true)
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
 	if !gotFull.Load() {
-		t.Fatal("expected ErrMailboxFull once mailbox saturated, never got it")
+		t.Fatal("expected MailboxFull once mailbox saturated, never got it")
+	}
+}
+
+// TestDeliverNotHosted: the substrate reports NotHosted (not a silent
+// nil-success) for an audience member it does not host, so the seam can
+// fast-fail receiver_unavailable. (B4)
+func TestDeliverNotHosted(t *testing.T) {
+	t.Parallel()
+	rt := New(Config{Parent: context.Background()})
+	res, err := rt.Deliver(context.Background(), []actor.ActorID{"ghost"}, env("x"))
+	if err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if got := res.Per["ghost"].Outcome; got != NotHosted {
+		t.Fatalf("outcome = %v, want NotHosted", got)
 	}
 }
 
 type panicActor struct{}
 
-func (panicActor) Receive(ctx context.Context, env *message.Envelope) error {
-	panic("boom")
-}
+func (panicActor) Receive(ctx context.Context, env *message.Envelope) error { panic("boom") }
+
+type startPanicActor struct{}
+
+func (startPanicActor) Receive(ctx context.Context, env *message.Envelope) error { return nil }
+func (startPanicActor) Start(ctx context.Context, self ActorContext) error       { panic("start boom") }
 
 type recordingSupervisor struct {
 	mu     sync.Mutex
@@ -171,9 +194,7 @@ func TestCellPanicSurfacesDeathSignal(t *testing.T) {
 	sup := &recordingSupervisor{notify: make(chan struct{}, 1)}
 	rt := New(Config{Parent: context.Background(), Supervisor: sup})
 	rt.Spawn("a", panicActor{})
-	if err := rt.Deliver(context.Background(), []actor.ActorID{"a"}, env("x")); err != nil {
-		t.Fatalf("deliver: %v", err)
-	}
+	mustDeliver(t, rt, "a", env("x"))
 	select {
 	case <-sup.notify:
 	case <-time.After(2 * time.Second):
@@ -183,6 +204,77 @@ func TestCellPanicSurfacesDeathSignal(t *testing.T) {
 	defer sup.mu.Unlock()
 	if len(sup.deaths) != 1 || sup.deaths[0].Actor != "a" {
 		t.Fatalf("deaths = %+v, want one for actor a", sup.deaths)
+	}
+	if sup.deaths[0].Incarnation != 1 {
+		t.Fatalf("incarnation = %d, want 1", sup.deaths[0].Incarnation)
+	}
+	// Self-eviction: the dead instance is unaddressable WITHOUT the supervisor
+	// despawning it (OnDeath runs AFTER eviction). (B1)
+	if rt.Has("a") {
+		t.Fatal("dead cell still addressable — did not self-evict")
+	}
+}
+
+// despawningSupervisor reproduces the DANGEROUS legacy pattern (despawn in
+// OnDeath). It must NOT deadlock: the cell self-evicts before OnDeath, so the
+// Despawn no-ops instead of self-joining the dying goroutine. (B1 regression)
+type despawningSupervisor struct {
+	rt     *Runtime
+	notify chan struct{}
+}
+
+func (s *despawningSupervisor) OnDeath(ctx context.Context, sig DeathSignal) {
+	s.rt.Despawn(sig.Actor)
+	select {
+	case s.notify <- struct{}{}:
+	default:
+	}
+}
+
+func TestPanicDeathWithDespawningSupervisorDoesNotDeadlock(t *testing.T) {
+	t.Parallel()
+	sup := &despawningSupervisor{notify: make(chan struct{}, 1)}
+	rt := New(Config{Parent: context.Background(), Supervisor: sup})
+	sup.rt = rt
+	rt.Spawn("a", startPanicActor{})
+	select {
+	case <-sup.notify:
+	case <-time.After(2 * time.Second):
+		t.Fatal("death path deadlocked (supervisor despawn self-joined the dying cell)")
+	}
+	if rt.Has("a") {
+		t.Fatal("cell still addressable after death")
+	}
+}
+
+// TestIncarnationIncrementsAcrossRespawn: a respawn under the same ActorID is a
+// distinct instance; the death signal names which generation died. (B2)
+func TestIncarnationIncrementsAcrossRespawn(t *testing.T) {
+	t.Parallel()
+	sup := &recordingSupervisor{notify: make(chan struct{}, 1)}
+	rt := New(Config{Parent: context.Background(), Supervisor: sup})
+
+	rt.Spawn("a", startPanicActor{})
+	select {
+	case <-sup.notify:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no death signal for incarnation 1")
+	}
+
+	rt.Spawn("a", startPanicActor{})
+	select {
+	case <-sup.notify:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no death signal for incarnation 2")
+	}
+
+	sup.mu.Lock()
+	defer sup.mu.Unlock()
+	if len(sup.deaths) != 2 {
+		t.Fatalf("deaths = %d, want 2", len(sup.deaths))
+	}
+	if sup.deaths[0].Incarnation != 1 || sup.deaths[1].Incarnation != 2 {
+		t.Fatalf("incarnations = %d,%d, want 1,2", sup.deaths[0].Incarnation, sup.deaths[1].Incarnation)
 	}
 }
 
@@ -197,9 +289,7 @@ func TestCellTeardownWaitsInFlight(t *testing.T) {
 	}
 	rt := New(Config{Parent: context.Background()})
 	rt.Spawn("a", a)
-	if err := rt.Deliver(context.Background(), []actor.ActorID{"a"}, env("x")); err != nil {
-		t.Fatalf("deliver: %v", err)
-	}
+	mustDeliver(t, rt, "a", env("x"))
 	time.Sleep(10 * time.Millisecond) // ensure Receive is in-flight
 	go func() {
 		time.Sleep(20 * time.Millisecond)
