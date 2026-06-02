@@ -91,8 +91,6 @@ type MessageQuery interface {
 	MaxSeq(ctx context.Context, channelID channel.ID) (int64, error)
 	// ReadAfterSeq is the client-push tail: envelopes with seq > afterSeq.
 	ReadAfterSeq(ctx context.Context, channelID channel.ID, afterSeq int64, limit int) ([]StoredRow, error)
-	// LongPendingRequests returns requests past expires_at without a terminal.
-	LongPendingRequests(ctx context.Context, nowMs int64, limit int) ([]StoredRow, error)
 	// OpenRequestsForActor returns in-flight requests addressed to actorID.
 	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID, limit int) ([]StoredRow, error)
 }
