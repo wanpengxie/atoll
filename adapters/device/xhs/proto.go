@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -12,7 +12,7 @@ import (
 // to route Manager.OnExternalCallback to this Module.
 const AdapterName = "xhs"
 
-// ContractDeclaration builds the static adapter.Declaration from the xhs
+// ContractDeclaration builds the static behavior.Declaration from the xhs
 // domain contract (description / skill doc / type catalog / binding).
 // Production cloud daemon installs tool:xhs dynamically via the proxy
 // facade, so there is no in-daemon installable Module — the proxy daemon
@@ -20,14 +20,14 @@ const AdapterName = "xhs"
 //
 // actorID defaults to DefaultAdapterActorID when empty; maxPendingMs
 // defaults to DefaultMaxPendingMs when non-positive.
-func ContractDeclaration(actorID actor.ActorID, maxPendingMs int64) adapter.Declaration {
+func ContractDeclaration(actorID actor.ActorID, maxPendingMs int64) behavior.Declaration {
 	if actorID == "" {
 		actorID = DefaultAdapterActorID
 	}
 	if maxPendingMs <= 0 {
 		maxPendingMs = DefaultMaxPendingMs
 	}
-	return adapter.Declaration{
+	return behavior.Declaration{
 		Description:      actorDescription,
 		SkillDoc:         actorSkillDoc,
 		Name:             AdapterName,
@@ -41,7 +41,7 @@ func ContractDeclaration(actorID actor.ActorID, maxPendingMs int64) adapter.Decl
 
 // DefaultAdapterActorID is the canonical actor_registry id exposed by the
 // proxy daemon for the xhs actor. Cloud daemon production installs this
-// actor through proxy facade, not through a static daemon-side xhs adapter.
+// actor through proxy facade, not through a static daemon-side xhs behavior.
 //
 // Concrete deployments MAY override the value via Config.AdapterActorID
 // if they run multiple xhs adapter instances in a channel (none today;
@@ -349,15 +349,15 @@ func IsResultPassThrough(requestType string) bool {
 // fields" guard.
 // ------------------------------------------------------------------
 
-// DeclarationTypeDeclarations returns the kernel/adapter.TypeDeclaration
+// DeclarationTypeDeclarations returns the kernel/behavior.TypeDeclaration
 // map the Module attaches to its Declaration. Every xhs type in
 // §1.1–§1.6 gets an entry — adapters/framework/manager.go fails install
 // closed when an adapter opts into strict mode (non-nil
 // TypeDeclarations) but leaves a Types entry without a row.
-func DeclarationTypeDeclarations() map[string]adapter.TypeDeclaration {
+func DeclarationTypeDeclarations() map[string]behavior.TypeDeclaration {
 	rrKinds := []message.Kind{message.KindRequest, message.KindResponse}
 	evKinds := []message.Kind{message.KindEvent}
-	out := make(map[string]adapter.TypeDeclaration, len(AllTypes))
+	out := make(map[string]behavior.TypeDeclaration, len(AllTypes))
 	for _, t := range AllTypes {
 		row := typeMeta[t]
 		if isEventOnlyType(t) {

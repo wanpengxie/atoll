@@ -3,7 +3,7 @@ package xhs
 import (
 	"encoding/json"
 
-	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 )
 
 // actorDescription is the one-line actor positioning returned by
@@ -70,19 +70,19 @@ const actorSkillDoc = "" +
 
 // typeMeta carries the actor-CLI describe_type convention metadata for
 // each xhs type. Source of truth: domain-xhs-spec §1.1–§1.6.
-var typeMeta = map[string]adapter.TypeDeclaration{
+var typeMeta = map[string]behavior.TypeDeclaration{
 	TypePublish: {
 		Description: "Publish a short note (image + text) to XHS. Returns the note id + URL on success.",
 		PayloadExample: json.RawMessage(
 			`{"title":"我的第一篇笔记","content":"今天试了一家咖啡店…","tags":["咖啡","探店"],"images":["assets/cover.png"]}`,
 		),
-		PayloadFields: []adapter.FieldDoc{
+		PayloadFields: []behavior.FieldDoc{
 			{Name: "title", Required: true, Description: "Note title; non-empty UTF-8.", Example: "我的第一篇笔记"},
 			{Name: "content", Required: true, Description: "Note body; non-empty UTF-8.", Example: "今天试了一家咖啡店…"},
 			{Name: "tags", Description: "Optional string array of tag labels.", Example: []string{"咖啡", "探店"}},
 			{Name: "images", Description: "Optional workdir-relative paths (typically under `assets/`). Adapter validates existence.", Example: []string{"assets/cover.png"}},
 		},
-		ErrorCodes: []adapter.ErrorDoc{
+		ErrorCodes: []behavior.ErrorDoc{
 			{Code: "publish_timeout", Description: "Extension submitted the note but xhs.com did not confirm in time.", Recovery: "Check `xhs.recent.fetch` — the note may have landed despite the timeout."},
 			{Code: "device_offline", Description: "Extension is not connected.", Recovery: "Wait for `xhs.device.online` event."},
 			{Code: "device_token_expired", Description: "Actor token expired.", Recovery: "Re-bind the device (UI-side flow)."},
@@ -95,11 +95,11 @@ var typeMeta = map[string]adapter.TypeDeclaration{
 		PayloadExample: json.RawMessage(
 			`{"query":"咖啡","limit":10}`,
 		),
-		PayloadFields: []adapter.FieldDoc{
+		PayloadFields: []behavior.FieldDoc{
 			{Name: "query", Required: true, Description: "Search keyword; non-empty UTF-8.", Example: "咖啡"},
 			{Name: "limit", Description: "Optional positive integer; implementation may cap the upper bound.", Example: 10},
 		},
-		ErrorCodes: []adapter.ErrorDoc{
+		ErrorCodes: []behavior.ErrorDoc{
 			{Code: "search_failed", Description: "xhs.com returned an error.", Recovery: "Retry; if persistent, narrow the query."},
 			{Code: "device_offline", Description: "Extension not connected.", Recovery: "Wait for `xhs.device.online` event."},
 		},
@@ -111,10 +111,10 @@ var typeMeta = map[string]adapter.TypeDeclaration{
 		PayloadExample: json.RawMessage(
 			`{"note_id":"6537abcdef012345"}`,
 		),
-		PayloadFields: []adapter.FieldDoc{
+		PayloadFields: []behavior.FieldDoc{
 			{Name: "note_id", Required: true, Description: "xhs.com-side note identifier.", Example: "6537abcdef012345"},
 		},
-		ErrorCodes: []adapter.ErrorDoc{
+		ErrorCodes: []behavior.ErrorDoc{
 			{Code: "note_not_found", Description: "xhs.com returned 404 / deleted.", Recovery: "Confirm note_id; check via xhs.search."},
 			{Code: "device_offline", Description: "Extension not connected.", Recovery: "Wait for `xhs.device.online`."},
 		},
@@ -126,10 +126,10 @@ var typeMeta = map[string]adapter.TypeDeclaration{
 		PayloadExample: json.RawMessage(
 			`{"limit":20}`,
 		),
-		PayloadFields: []adapter.FieldDoc{
+		PayloadFields: []behavior.FieldDoc{
 			{Name: "limit", Description: "Optional positive integer.", Example: 20},
 		},
-		ErrorCodes: []adapter.ErrorDoc{
+		ErrorCodes: []behavior.ErrorDoc{
 			{Code: "device_offline", Description: "Extension not connected.", Recovery: "Wait for `xhs.device.online`."},
 		},
 		Notes: "Returns `{notes: [...]}`.",
@@ -140,7 +140,7 @@ var typeMeta = map[string]adapter.TypeDeclaration{
 		PayloadExample: json.RawMessage(
 			`{"title":"长文标题","content":"…长文正文…","cover_image":"assets/cover.png"}`,
 		),
-		PayloadFields: []adapter.FieldDoc{
+		PayloadFields: []behavior.FieldDoc{
 			{Name: "title", Required: true, Description: "Note title.", Example: "长文标题"},
 			{Name: "content", Required: true, Description: "Long-form body.", Example: "…"},
 			{Name: "cover_image", Description: "Optional workdir-relative cover image.", Example: "assets/cover.png"},
@@ -153,7 +153,7 @@ var typeMeta = map[string]adapter.TypeDeclaration{
 		PayloadExample: json.RawMessage(
 			`{"note_id":"draft-1234"}`,
 		),
-		PayloadFields: []adapter.FieldDoc{
+		PayloadFields: []behavior.FieldDoc{
 			{Name: "note_id", Required: true, Description: "Identifier returned by the publish call.", Example: "draft-1234"},
 		},
 		Notes: "Pass-through result.",
@@ -170,7 +170,7 @@ var typeMeta = map[string]adapter.TypeDeclaration{
 		PayloadExample: json.RawMessage(
 			`{"script":"return document.title"}`,
 		),
-		PayloadFields: []adapter.FieldDoc{
+		PayloadFields: []behavior.FieldDoc{
 			{Name: "script", Required: true, Description: "JS source. Return value is JSON-serialised.", Example: "return document.title"},
 		},
 		Notes: "Pass-through result. Use sparingly; subject to xhs.com anti-bot detection.",
@@ -187,7 +187,7 @@ var typeMeta = map[string]adapter.TypeDeclaration{
 		PayloadExample: json.RawMessage(
 			`{"profile_url":"https://www.xiaohongshu.com/user/profile/xxx"}`,
 		),
-		PayloadFields: []adapter.FieldDoc{
+		PayloadFields: []behavior.FieldDoc{
 			{Name: "profile_url", Required: true, Description: "Public xhs.com profile URL.", Example: "https://www.xiaohongshu.com/user/profile/xxx"},
 		},
 		Notes: "Pass-through result.",
@@ -198,7 +198,7 @@ var typeMeta = map[string]adapter.TypeDeclaration{
 		PayloadExample: json.RawMessage(
 			`{"note_id":"6537abcdef012345"}`,
 		),
-		PayloadFields: []adapter.FieldDoc{
+		PayloadFields: []behavior.FieldDoc{
 			{Name: "note_id", Required: true, Description: "xhs.com note id.", Example: "6537abcdef012345"},
 		},
 		Notes: "Pass-through result.",
@@ -209,7 +209,7 @@ var typeMeta = map[string]adapter.TypeDeclaration{
 		PayloadExample: json.RawMessage(
 			`{"note_id":"6537abcdef012345"}`,
 		),
-		PayloadFields: []adapter.FieldDoc{
+		PayloadFields: []behavior.FieldDoc{
 			{Name: "note_id", Required: true, Description: "Note id (must belong to the logged-in account).", Example: "6537abcdef012345"},
 		},
 		Notes: "Pass-through. Requires creator-centre access.",
@@ -232,7 +232,7 @@ var typeMeta = map[string]adapter.TypeDeclaration{
 		PayloadExample: json.RawMessage(
 			`{"note_id":"6537abcdef012345","archive_path":"archive/6537abcdef012345.md"}`,
 		),
-		PayloadFields: []adapter.FieldDoc{
+		PayloadFields: []behavior.FieldDoc{
 			{Name: "note_id", Required: true, Description: "Archived note's xhs.com id.", Example: "6537abcdef012345"},
 			{Name: "archive_path", Required: true, Description: "Workdir-relative path the content lives at.", Example: "archive/6537abcdef012345.md"},
 			{Name: "archived_at", Description: "Optional; if present MUST equal envelope.ts.", Example: 1716643200},
@@ -245,7 +245,7 @@ var typeMeta = map[string]adapter.TypeDeclaration{
 		PayloadExample: json.RawMessage(
 			`{"device_state":"online","previous_state":"offline","lifecycle_event":"connected","device_id":"dev-abc"}`,
 		),
-		PayloadFields: []adapter.FieldDoc{
+		PayloadFields: []behavior.FieldDoc{
 			{Name: "device_state", Required: true, Description: "Closed set: online | offline | token_expired.", Example: "online"},
 			{Name: "previous_state", Description: "Prior state for state-machine clarity.", Example: "offline"},
 			{Name: "lifecycle_event", Description: "Closed set: connected | disconnected | token_expired.", Example: "connected"},
@@ -259,7 +259,7 @@ var typeMeta = map[string]adapter.TypeDeclaration{
 		PayloadExample: json.RawMessage(
 			`{"device_state":"offline","previous_state":"online","lifecycle_event":"disconnected"}`,
 		),
-		PayloadFields: []adapter.FieldDoc{
+		PayloadFields: []behavior.FieldDoc{
 			{Name: "device_state", Required: true, Description: "Closed set: online | offline | token_expired.", Example: "offline"},
 			{Name: "previous_state", Description: "Prior state.", Example: "online"},
 			{Name: "lifecycle_event", Description: "Closed set: connected | disconnected | token_expired.", Example: "disconnected"},

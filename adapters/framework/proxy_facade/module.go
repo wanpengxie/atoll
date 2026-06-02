@@ -12,8 +12,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/framework/devicetransit"
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/actorreg"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -37,8 +36,8 @@ const (
 )
 
 type ProxyFacadeModule struct {
-	decl adapter.Declaration
-	mctx *adapter.ModuleContext
+	decl behavior.Declaration
+	mctx *behavior.ModuleContext
 
 	// live holds the current liveState. A PLAIN field, not atomic: every
 	// access — OnRuntimeEvent (write, folded onto the cell via Runtime.Post),
@@ -62,7 +61,7 @@ type CapabilitySet struct {
 	Description      string                             `json:"description,omitempty"`
 	SkillDoc         string                             `json:"skill_doc,omitempty"`
 	Types            []string                           `json:"types,omitempty"`
-	TypeDeclarations map[string]adapter.TypeDeclaration `json:"type_declarations,omitempty"`
+	TypeDeclarations map[string]behavior.TypeDeclaration `json:"type_declarations,omitempty"`
 	MaxPendingMs     int64                              `json:"max_pending_ms,omitempty"`
 }
 
@@ -78,7 +77,7 @@ type readinessChangedPayload struct {
 	} `json:"current"`
 }
 
-func New(decl adapter.Declaration) (*ProxyFacadeModule, error) {
+func New(decl behavior.Declaration) (*ProxyFacadeModule, error) {
 	decl = normalizeDeclaration(decl)
 	if err := validateDeclaration(decl); err != nil {
 		return nil, err
@@ -87,18 +86,18 @@ func New(decl adapter.Declaration) (*ProxyFacadeModule, error) {
 	return m, nil
 }
 
-func DeclarationFromCapability(actorID actor.ActorID, capability json.RawMessage) (adapter.Declaration, error) {
+func DeclarationFromCapability(actorID actor.ActorID, capability json.RawMessage) (behavior.Declaration, error) {
 	var cap CapabilitySet
 	if len(capability) > 0 {
 		if err := json.Unmarshal(capability, &cap); err != nil {
-			return adapter.Declaration{}, fmt.Errorf("proxy_facade: decode capability_set: %w", err)
+			return behavior.Declaration{}, fmt.Errorf("proxy_facade: decode capability_set: %w", err)
 		}
 	}
 	name := cap.Name
 	if name == "" {
 		name = strings.TrimPrefix(string(actorID), "tool:")
 	}
-	return normalizeDeclaration(adapter.Declaration{
+	return normalizeDeclaration(behavior.Declaration{
 		Name:             name,
 		ActorID:          actorID,
 		Types:            cap.Types,
@@ -110,13 +109,13 @@ func DeclarationFromCapability(actorID actor.ActorID, capability json.RawMessage
 	}), nil
 }
 
-func (m *ProxyFacadeModule) Declares() adapter.Declaration {
+func (m *ProxyFacadeModule) Declares() behavior.Declaration {
 	return m.decl
 }
 
 func (m *ProxyFacadeModule) SuppressInitialReadiness() bool { return true }
 
-func (m *ProxyFacadeModule) Init(_ context.Context, mctx *adapter.ModuleContext) error {
+func (m *ProxyFacadeModule) Init(_ context.Context, mctx *behavior.ModuleContext) error {
 	if mctx == nil {
 		return errors.New("proxy_facade: ModuleContext required")
 	}
@@ -147,7 +146,7 @@ func (m *ProxyFacadeModule) liveStateNow() liveState {
 	return m.live
 }
 
-// OnRuntimeEvent implements adapter.RuntimeEventAware. The framework routes
+// OnRuntimeEvent implements behavior.RuntimeEventAware. The framework routes
 // devicebus connection lifecycle frames (connected / disconnected /
 // token_expired) here for the (channel, adapter_actor_id) this facade owns.
 // We fold them into the volatile `live` signal so StatusReporter reports
@@ -156,7 +155,7 @@ func (m *ProxyFacadeModule) liveStateNow() liveState {
 // readiness (that path remains driven by the relayed actor.readiness.changed
 // event so the daemon-side projection still reflects the upstream actor's
 // own readiness; liveness is a separate over-expiring transport signal).
-func (m *ProxyFacadeModule) OnRuntimeEvent(_ context.Context, evt adapter.RuntimeEvent) error {
+func (m *ProxyFacadeModule) OnRuntimeEvent(_ context.Context, evt behavior.RuntimeEvent) error {
 	if evt.Kind != devicetransit.RuntimeEventKindDeviceLifecycle {
 		return nil
 	}
@@ -189,18 +188,18 @@ func mapLifecycleToLive(e devicetransit.LifecycleEvent) (liveState, bool) {
 	return "", false
 }
 
-// Status implements adapter.StatusReporter. actor.status.available is the
+// Status implements behavior.StatusReporter. actor.status.available is the
 // realtime liveness of the relay transport (§5 护栏 3) — derived purely from
 // the volatile lifecycle signal, never from a persisted readiness column.
 // online ⇒ available; offline / token_expired / unknown ⇒ not available, with
 // a reason the UI can act on (re-bind vs reconnect).
-func (m *ProxyFacadeModule) Status(_ context.Context) (adapter.StatusReport, error) {
+func (m *ProxyFacadeModule) Status(_ context.Context) (behavior.StatusReport, error) {
 	state := m.liveStateNow()
 	checkedAt := m.liveCheckedAt
 	if checkedAt == 0 {
 		checkedAt = m.nowMs()
 	}
-	report := adapter.StatusReport{
+	report := behavior.StatusReport{
 		Available: state == liveOnline,
 		CheckedAt: time.UnixMilli(checkedAt),
 		Detail: map[string]any{
@@ -238,7 +237,7 @@ func (m *ProxyFacadeModule) Handle(ctx context.Context, env *message.Envelope) e
 	if err != nil {
 		return fmt.Errorf("proxy_facade: marshal envelope: %w", err)
 	}
-	_, err = m.mctx.ForwardExternalRequest(ctx, env, adapter.ExternalRequestPayload(raw))
+	_, err = m.mctx.ForwardExternalRequest(ctx, env, behavior.ExternalRequestPayload(raw))
 	if err != nil {
 		return fmt.Errorf("proxy_facade: send device transit: %w", err)
 	}
@@ -316,7 +315,7 @@ func (m *ProxyFacadeModule) handleFinalCallback(ctx context.Context, env *messag
 		return errors.New("proxy_facade: final correlation_id required")
 	}
 	if m.mctx.LookupPendingRequest != nil {
-		entry, ok, lookErr := m.mctx.LookupPendingRequest(ctx, adapter.CorrelationKey(env.ParentID))
+		entry, ok, lookErr := m.mctx.LookupPendingRequest(ctx, behavior.CorrelationKey(env.ParentID))
 		if lookErr != nil {
 			return fmt.Errorf("proxy_facade: final callback pending lookup: %w", lookErr)
 		}
@@ -341,7 +340,7 @@ func (m *ProxyFacadeModule) handleFinalCallback(ctx context.Context, env *messag
 	if err != nil {
 		return fmt.Errorf("proxy_facade: prepare final payload: %w", err)
 	}
-	if err := m.mctx.Resolve(ctx, env.ParentID, adapter.ResolveRequest{
+	if err := m.mctx.Resolve(ctx, env.ParentID, behavior.ResolveRequest{
 		Status:  status,
 		Payload: body,
 		Reason:  reason,
@@ -382,10 +381,10 @@ func (m *ProxyFacadeModule) handleProvisionalCallback(ctx context.Context, env *
 	}
 	_, err = m.mctx.Provisional(
 		ctx,
-		adapter.CorrelationKey(env.ParentID),
+		behavior.CorrelationKey(env.ParentID),
 		status,
 		userFields,
-		adapter.ProvisionalOptions{
+		behavior.ProvisionalOptions{
 			Visibility: env.Visibility,
 			Audience:   env.Audience,
 		},
@@ -506,15 +505,15 @@ func (m *ProxyFacadeModule) updateReadinessFromEvent(ctx context.Context, env *m
 	if actorID != m.decl.ActorID {
 		return fmt.Errorf("proxy_facade: readiness actor mismatch: payload=%s facade=%s", actorID, m.decl.ActorID)
 	}
-	state := actorreg.ReadinessNotReady
+	state := actor.ReadinessNotReady
 	if payload.Current.Ready {
-		state = actorreg.ReadinessReady
+		state = actor.ReadinessReady
 	}
 	checkedAt := payload.ChangedAt
 	if checkedAt == 0 {
 		checkedAt = payload.Current.LastStateChangeAt
 	}
-	if checkedAt == 0 && state == actorreg.ReadinessReady {
+	if checkedAt == 0 && state == actor.ReadinessReady {
 		checkedAt = payload.Current.LastReadyAt
 	}
 	if checkedAt == 0 {
@@ -523,7 +522,7 @@ func (m *ProxyFacadeModule) updateReadinessFromEvent(ctx context.Context, env *m
 	if len(payload.Current.Detail) == 0 {
 		payload.Current.Detail = json.RawMessage(`{}`)
 	}
-	if _, err := m.mctx.UpdateReadiness(ctx, actorreg.ReadinessUpdate{
+	if _, err := m.mctx.UpdateReadiness(ctx, actor.ReadinessUpdate{
 		State:     state,
 		Reason:    payload.Current.Reason,
 		Detail:    payload.Current.Detail,
@@ -534,7 +533,7 @@ func (m *ProxyFacadeModule) updateReadinessFromEvent(ctx context.Context, env *m
 	return nil
 }
 
-func normalizeDeclaration(decl adapter.Declaration) adapter.Declaration {
+func normalizeDeclaration(decl behavior.Declaration) behavior.Declaration {
 	decl.Name = strings.TrimSpace(decl.Name)
 	if decl.Name == "" && decl.ActorID != "" {
 		decl.Name = strings.TrimPrefix(string(decl.ActorID), "tool:")
@@ -548,7 +547,7 @@ func normalizeDeclaration(decl adapter.Declaration) adapter.Declaration {
 	return decl
 }
 
-func validateDeclaration(decl adapter.Declaration) error {
+func validateDeclaration(decl behavior.Declaration) error {
 	if decl.Name == "" {
 		return errors.New("proxy_facade: declaration name required")
 	}
@@ -565,7 +564,7 @@ func validateDeclaration(decl adapter.Declaration) error {
 }
 
 var (
-	_ adapter.Module            = (*ProxyFacadeModule)(nil)
-	_ adapter.RuntimeEventAware = (*ProxyFacadeModule)(nil)
-	_ adapter.StatusReporter    = (*ProxyFacadeModule)(nil)
+	_ behavior.Module            = (*ProxyFacadeModule)(nil)
+	_ behavior.RuntimeEventAware = (*ProxyFacadeModule)(nil)
+	_ behavior.StatusReporter    = (*ProxyFacadeModule)(nil)
 )

@@ -27,7 +27,7 @@ import (
 	_ "github.com/wanpengxie/go-kimi/pkg/kimi/llm/anthropic"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/adapter"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
@@ -98,8 +98,8 @@ type TypeInfo struct {
 	MaxPendingMs   int64              `json:"max_pending_ms,omitempty"`
 	Description    string             `json:"description,omitempty"`
 	PayloadExample json.RawMessage    `json:"payload_example,omitempty"`
-	PayloadFields  []adapter.FieldDoc `json:"payload_fields,omitempty"`
-	ErrorCodes     []adapter.ErrorDoc `json:"error_codes,omitempty"`
+	PayloadFields  []behavior.FieldDoc `json:"payload_fields,omitempty"`
+	ErrorCodes     []behavior.ErrorDoc `json:"error_codes,omitempty"`
 	Notes          string             `json:"notes,omitempty"`
 }
 

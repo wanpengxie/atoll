@@ -11,13 +11,13 @@ import (
 	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/adapter/futurereg"
+	"github.com/wanpengxie/ActOS/lib/behavior/futurereg"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
 // channelToolDefaultTimeout is the caller-side default that bounds the
 // fast-path Await WINDOW (resolveFastPathWindow), NOT the persisted
-// closure deadline. R5 invariant (actor-adapter.md §7.2): "sane default
+// closure deadline. R5 invariant (actor-behavior.md §7.2): "sane default
 // — SDK 30s". It is the SDK-default ceiling on how long the agent loop
 // blocks inline before degrading to an ack; the true per-type deadline
 // (max_pending_ms) is stamped by the daemon as expires_at. A long-running

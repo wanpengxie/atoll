@@ -13,7 +13,7 @@
 //     on top of proto.go. The R4-FIX-A per-type
 //     allow-list is preserved (T115 regression guard —
 //     the schema lesson of the M1.3 baseline).
-//   - module.go     Module struct implementing kernel/adapter.Module
+//   - module.go     Module struct implementing kernel/behavior.Module
 //     with BindingRuntimeInboundViaRelay; uses
 //     adapters/device/framework.DeviceProxy for the
 //     correlate + send + arm-timer trio.

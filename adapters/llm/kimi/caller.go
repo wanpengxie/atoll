@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wanpengxie/ActOS/kernel/adapter/futurereg"
+	"github.com/wanpengxie/ActOS/lib/behavior/futurereg"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -36,7 +36,7 @@ func newBridgeCaller() *bridgeCaller {
 	return &bridgeCaller{futures: futurereg.New()}
 }
 
-// submitResult is the worker-side analogue of adapter.SubmitResult: the
+// submitResult is the worker-side analogue of behavior.SubmitResult: the
 // request id plus the substrate-level ack descriptor synthesised at write
 // accept time. The ack guidance is a framework template (no receiver
 // semantics) — receiver-authored guidance arrives later as a provisional.
@@ -45,7 +45,7 @@ type submitResult struct {
 	ack       ackDescriptor
 }
 
-// ackDescriptor mirrors adapter.AckDescriptor's dual form (§2.3.3) in the
+// ackDescriptor mirrors behavior.AckDescriptor's dual form (§2.3.3) in the
 // worker-side shape the meta tools render into a tool result.
 type ackDescriptor struct {
 	requestID message.ID
