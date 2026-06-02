@@ -19,7 +19,10 @@ type TypeRow struct {
 	AllowedKinds   []message.Kind
 }
 
-// Validate covers surface-level non-empty + binding-format checks.
+// Validate is the TypeRow's complete self-invariant — it rejects every
+// illegal row so no store-boundary path can land one (illegal-state-
+// unrepresentable). Covers required fields, binding format, positive timeout,
+// and the AllowedKinds set.
 func (t TypeRow) Validate() error {
 	if t.Type == "" {
 		return errors.New("storespec: TypeRow.Type required")
@@ -32,6 +35,26 @@ func (t TypeRow) Validate() error {
 	}
 	if t.MaxPendingMs <= 0 {
 		return fmt.Errorf("storespec: TypeRow[%s].MaxPendingMs must be > 0", t.Type)
+	}
+	// AllowedKinds is part of the type's own invariant — a type that admits no
+	// kind (or admits a non-kind / duplicate) is an illegal row no message
+	// could ever satisfy. The self-validation owns this so NO store-boundary
+	// path (type_registry BeginInstall/MarkInstalled) can land an illegal row,
+	// not just the typeinstall input check.
+	if len(t.AllowedKinds) == 0 {
+		return fmt.Errorf("storespec: TypeRow[%s].AllowedKinds must be non-empty", t.Type)
+	}
+	seen := make(map[message.Kind]struct{}, len(t.AllowedKinds))
+	for _, k := range t.AllowedKinds {
+		switch k {
+		case message.KindEvent, message.KindRequest, message.KindResponse:
+		default:
+			return fmt.Errorf("storespec: TypeRow[%s].AllowedKinds has invalid kind %q", t.Type, k)
+		}
+		if _, dup := seen[k]; dup {
+			return fmt.Errorf("storespec: TypeRow[%s].AllowedKinds duplicate kind %q", t.Type, k)
+		}
+		seen[k] = struct{}{}
 	}
 	return nil
 }

@@ -18,15 +18,6 @@ type Sender struct {
 	ID   actor.ActorID `json:"id"`
 }
 
-// CrossChannelRef is a weak pointer to a message in another channel.
-// It is informative only: it does not route, grant ACLs, or create a
-// shared collaboration scope.
-type CrossChannelRef struct {
-	ChannelID channel.ID `json:"channel_id"`
-	MessageID ID         `json:"message_id"`
-	Note      *string    `json:"note"`
-}
-
 // Envelope is the v4 message envelope (pure proto).
 //
 // It carries the content fields from L0 §2.1 (with `sender.kind/id`
@@ -43,10 +34,6 @@ type CrossChannelRef struct {
 // **Tri-state semantics**:
 //   - ParentID / CorrelationID: empty string ("") means NULL on the wire
 //     (Go zero-value naturally serializes via `omitempty`).
-//   - DocRefs (`*[]string`): nil pointer means NULL; pointer to empty
-//     slice means explicit `[]` (L0 §2.1 "doc_refs 三态").
-//   - CrossChannelRefs (`*[]CrossChannelRef`): nil pointer means NULL;
-//     pointer to empty slice means explicit `[]`.
 //   - ExpiresAt: `*int64` — nil pointer means NULL; otherwise the
 //     timestamp value.
 //   - Payload (`json.RawMessage`): empty / null means absent; protocol
@@ -55,21 +42,19 @@ type CrossChannelRef struct {
 type Envelope struct {
 	// --- content fields (L0 §2.1) -------------------------------------
 
-	ID               ID                 `json:"id"`
-	TS               int64              `json:"ts"`
-	TSReceived       int64              `json:"ts_received,omitempty"`
-	ChannelID        channel.ID         `json:"channel_id"`
-	Sender           Sender             `json:"sender"`
-	Kind             Kind               `json:"kind"`
-	Type             string             `json:"type"`
-	Payload          json.RawMessage    `json:"payload"`
-	ParentID         ID                 `json:"parent_id,omitempty"`
-	CorrelationID    ID                 `json:"correlation_id,omitempty"`
-	DocRefs          *[]string          `json:"doc_refs,omitempty"`
-	CrossChannelRefs *[]CrossChannelRef `json:"cross_channel_refs,omitempty"`
-	Visibility       Visibility         `json:"visibility"`
-	Audience         Audience           `json:"audience"`
-	ExpiresAt        *int64             `json:"expires_at,omitempty"`
+	ID            ID              `json:"id"`
+	TS            int64           `json:"ts"`
+	TSReceived    int64           `json:"ts_received,omitempty"`
+	ChannelID     channel.ID      `json:"channel_id"`
+	Sender        Sender          `json:"sender"`
+	Kind          Kind            `json:"kind"`
+	Type          string          `json:"type"`
+	Payload       json.RawMessage `json:"payload"`
+	ParentID      ID              `json:"parent_id,omitempty"`
+	CorrelationID ID              `json:"correlation_id,omitempty"`
+	Visibility    Visibility      `json:"visibility"`
+	Audience      Audience        `json:"audience"`
+	ExpiresAt     *int64          `json:"expires_at,omitempty"`
 }
 
 // IsFinalStatus reports whether the given payload.status value belongs
@@ -107,8 +92,6 @@ var ContentFields = []string{
 	"payload",
 	"parent_id",
 	"correlation_id",
-	"doc_refs",
-	"cross_channel_refs",
 	"visibility",
 	"audience",
 	"expires_at",

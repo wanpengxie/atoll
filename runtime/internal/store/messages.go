@@ -119,14 +119,6 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 
 	// INSERT row. env.id is a caller-generated random uuid: uniqueness is a
 	// pure integrity constraint, so a collision is an error (no dedup path).
-	docRefsJSON, err := encodeDocRefs(env.DocRefs)
-	if err != nil {
-		return storespec.AppendResult{}, fmt.Errorf("store: append docrefs encode: %w", err)
-	}
-	crossRefsJSON, err := encodeCrossChannelRefs(env.CrossChannelRefs)
-	if err != nil {
-		return storespec.AppendResult{}, fmt.Errorf("store: append cross_channel_refs encode: %w", err)
-	}
 	audJSON, err := json.Marshal(env.Audience)
 	if err != nil {
 		return storespec.AppendResult{}, fmt.Errorf("store: append audience encode: %w", err)
@@ -136,10 +128,10 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 	   id, ts, ts_received, channel_id,
 	   sender_kind, sender_id,
 	   kind, type, payload,
-	   parent_id, correlation_id, doc_refs, cross_channel_refs,
+	   parent_id, correlation_id,
 	   visibility, audience, expires_at,
 	   is_terminal
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	terminalInt := 0
 	if isTerminal {
@@ -149,7 +141,7 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 		env.ID, env.TS, env.TSReceived, env.ChannelID,
 		string(env.Sender.Kind), string(env.Sender.ID),
 		string(env.Kind), env.Type, string(env.Payload),
-		nullableString(string(env.ParentID)), nullableString(string(env.CorrelationID)), nullableString(docRefsJSON), nullableString(crossRefsJSON),
+		nullableString(string(env.ParentID)), nullableString(string(env.CorrelationID)),
 		env.Visibility, string(audJSON),
 		nullableInt(env.ExpiresAt),
 		terminalInt,
@@ -188,7 +180,7 @@ func (m *messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, after
 	const q = `SELECT id, ts, ts_received, channel_id,
 	                  sender_kind, sender_id,
 	                  kind, type, payload,
-	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''),
 	                  visibility, audience,
 	                  expires_at,
 	                  is_terminal, seq
@@ -224,7 +216,7 @@ func (m *messages) OpenRequestsForActor(ctx context.Context, actorID actor.Actor
 	const q = `SELECT id, ts, ts_received, channel_id,
 	                  sender_kind, sender_id,
 	                  kind, type, payload,
-	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''),
 	                  visibility, audience,
 	                  expires_at,
 	                  is_terminal, seq
@@ -323,7 +315,7 @@ func (m *messages) FindByID(ctx context.Context, channelID channel.ID, id messag
 	const q = `SELECT id, ts, ts_received, channel_id,
 	                  sender_kind, sender_id,
 	                  kind, type, payload,
-	                  COALESCE(parent_id,''), COALESCE(correlation_id,''), doc_refs, cross_channel_refs,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''),
 	                  visibility, audience,
 	                  expires_at,
 	                  is_terminal, seq
@@ -364,14 +356,13 @@ func scanEnvelopeFrom(s rowScanner) (storespec.StoredRow, error) {
 	env := &sr.Envelope
 	var kind, sKind, senderID, vis string
 	var audJSON, payloadStr string
-	var docRefsStr, crossRefsStr sql.NullString
 	var expiresAt sql.NullInt64
 	var termInt int
 	if err := s.Scan(
 		&env.ID, &env.TS, &env.TSReceived, &env.ChannelID,
 		&sKind, &senderID,
 		&kind, &env.Type, &payloadStr,
-		&env.ParentID, &env.CorrelationID, &docRefsStr, &crossRefsStr,
+		&env.ParentID, &env.CorrelationID,
 		&vis, &audJSON,
 		&expiresAt,
 		&termInt, &sr.Seq,
@@ -386,55 +377,12 @@ func scanEnvelopeFrom(s rowScanner) (storespec.StoredRow, error) {
 	if err := json.Unmarshal([]byte(audJSON), &env.Audience); err != nil {
 		return storespec.StoredRow{}, fmt.Errorf("store: scan audience: %w", err)
 	}
-	if docRefsStr.Valid {
-		var refs []string
-		if err := json.Unmarshal([]byte(docRefsStr.String), &refs); err != nil {
-			return storespec.StoredRow{}, fmt.Errorf("store: scan doc_refs: %w", err)
-		}
-		env.DocRefs = &refs
-	}
-	if crossRefsStr.Valid {
-		var refs []message.CrossChannelRef
-		if err := json.Unmarshal([]byte(crossRefsStr.String), &refs); err != nil {
-			return storespec.StoredRow{}, fmt.Errorf("store: scan cross_channel_refs: %w", err)
-		}
-		env.CrossChannelRefs = &refs
-	}
 	if expiresAt.Valid {
 		v := expiresAt.Int64
 		env.ExpiresAt = &v
 	}
 	sr.IsTerminal = termInt == 1
 	return sr, nil
-}
-
-// encodeDocRefs maps Envelope.DocRefs tri-state to JSON storage:
-//   - nil pointer       → "" (column NULL)
-//   - non-nil pointer   → JSON of the slice (including "[]" for empty)
-func encodeDocRefs(d *[]string) (string, error) {
-	if d == nil {
-		return "", nil
-	}
-	b, err := json.Marshal(*d)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
-}
-
-// encodeCrossChannelRefs maps Envelope.CrossChannelRefs tri-state to JSON
-// storage:
-//   - nil pointer       → "" (column NULL)
-//   - non-nil pointer   → JSON of the slice (including "[]" for empty)
-func encodeCrossChannelRefs(refs *[]message.CrossChannelRef) (string, error) {
-	if refs == nil {
-		return "", nil
-	}
-	b, err := json.Marshal(*refs)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
 }
 
 func nullableString(s string) any {

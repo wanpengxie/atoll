@@ -146,8 +146,8 @@ func allowedTopLevelEnvelopeKey(key string) bool {
 	// L0 §1.1 content fields. sender is nested; sender.{kind,id}
 	// flatten into the same top-level "sender" key.
 	case "id", "ts", "ts_received", "channel_id", "sender", "kind", "type",
-		"payload", "parent_id", "correlation_id", "doc_refs",
-		"cross_channel_refs", "visibility", "audience", "expires_at":
+		"payload", "parent_id", "correlation_id",
+		"visibility", "audience", "expires_at":
 		return true
 	}
 	return false

@@ -30,8 +30,6 @@ CREATE TABLE IF NOT EXISTS messages (
   payload              TEXT NOT NULL,
   parent_id            TEXT,
   correlation_id       TEXT,
-  doc_refs             TEXT,
-  cross_channel_refs   TEXT,
   visibility           TEXT NOT NULL CHECK (visibility IN ('public','private','system')),
   audience             TEXT NOT NULL,
   expires_at           INTEGER,
