@@ -37,10 +37,10 @@ type ChannelStores struct {
 	Requests storespec.RequestLookup
 
 	// Actor registry exposed via SEGREGATED interfaces (§4.5, forward-derived
-	// from role — a reader never receives the membership control-plane writes):
-	Registry   storespec.Registry               // membership reads + single-actor CRUD
+	// from role — a reader never receives any membership write):
+	Registry   storespec.Registry               // membership READS only (Lookup/Exists/ListActive)
 	Readiness  storespec.ReadinessUpdater       // readiness projection write
-	Membership storespec.MembershipControlPlane // ApplyMemberTransitions (log-emitting) + ListDesiredProxyMembers
+	Membership storespec.MembershipControlPlane // membership WRITES: Insert/Deregister + ApplyMemberTransitions (log-emitting) + ListDesiredProxyMembers
 
 	Ledger storespec.Ledger
 	Types  storespec.TypeStore // full type_registry contract (install state machine + reads)

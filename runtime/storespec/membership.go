@@ -49,12 +49,15 @@ type DesiredProxyMember struct {
 	CapabilitySet json.RawMessage
 }
 
-// MembershipControlPlane is the membership-management contract — deliberately
-// SEGREGATED from the read-only Registry so a pure reader (harness audience
-// check, trigger) never receives ApplyMemberTransitions, which emits log mirror
-// events (a control-plane write, not a query). Forward-derived from the
+// MembershipControlPlane is the full membership-management contract —
+// deliberately SEGREGATED from the read-only Registry so a pure reader (harness
+// audience check, trigger) never receives any membership WRITE. It composes the
+// single-actor MembershipWriter (Insert/Deregister) with the batch + log-mirror
+// transitions and the desired-set replay. Every method here is a control-plane
+// write or a fact replay, never an ambient query. Forward-derived from the
 // component's role, not from any one downstream consumer.
 type MembershipControlPlane interface {
+	MembershipWriter
 	// ApplyMemberTransitions mutates actor_registry and appends the matching
 	// system.actor.* mirror events in one tx (idempotent on retry).
 	ApplyMemberTransitions(ctx context.Context, channelID channel.ID, adds []MemberActorAdd, removes []MemberActorRemove) error

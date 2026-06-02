@@ -29,12 +29,28 @@ type Record struct {
 // IsActive reports whether the actor is still active (L1 §12.2).
 func (r Record) IsActive() bool { return r.DeregisteredAt == 0 }
 
-// Registry is the channel-local actor membership query contract (L1 §12.1).
-// Concrete sqlite backend lives in runtime/store (ActorRegistry).
+// Registry is the channel-local actor membership READ contract (L1 §12.1) —
+// deliberately SEGREGATED from the membership-write surface so a pure reader
+// (harness audience check, trigger fanout) never receives Insert/Deregister.
+// Membership mutation lives on MembershipWriter / MembershipControlPlane (a
+// control-plane write that is NOT a query). Forward-derived from the reader's
+// role, not from any one downstream consumer. Concrete sqlite backend lives in
+// runtime/store (actorRegistry, which satisfies all three interfaces).
 type Registry interface {
 	Lookup(ctx context.Context, id actor.ActorID) (Record, bool, error)
 	Exists(ctx context.Context, id actor.ActorID) (bool, error)
 	ListActive(ctx context.Context) ([]Record, error)
+}
+
+// MembershipWriter is the single-actor membership-write surface (Insert /
+// Deregister). It is SEGREGATED from the read-only Registry: Insert seeds a
+// new membership row (+ its actor_cursors row, L2 §1.4.6) and Deregister
+// soft-removes one. These are control-plane writes, not queries, so a handle
+// that only needs reads (harness, trigger) cannot reach them. The
+// log-emitting batch transition lives on MembershipControlPlane; this is the
+// imperative single-actor seed/teardown path (bootstrap / install handler
+// registration). Concrete impl in runtime/store (actorRegistry).
+type MembershipWriter interface {
 	Insert(ctx context.Context, rec Record) error
 	Deregister(ctx context.Context, id actor.ActorID, at int64) error
 }
