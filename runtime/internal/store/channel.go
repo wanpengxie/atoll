@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
@@ -12,8 +11,6 @@ import (
 // ChannelDeps are the non-db dependencies the channel store assembly needs.
 type ChannelDeps struct {
 	ChannelID channel.ID
-	// NowFn is the TTL clock for type-install. Required.
-	NowFn func() int64
 }
 
 // ChannelStores is the channel-local store assembly and the SINGLE public
@@ -37,16 +34,11 @@ type ChannelStores struct {
 	// from role — a reader never receives any membership write):
 	Registry   storespec.Registry               // membership READS only (Lookup/Exists/ListActive)
 	Membership storespec.MembershipControlPlane // membership WRITES: Insert/Deregister + ApplyMemberTransitions (log-emitting)
-
-	Types storespec.TypeStore // full type_registry contract (install state machine + reads)
 }
 
 // OpenChannel opens the per-channel sqlite and assembles the channel stores.
 // The raw *sql.DB is owned by the returned ChannelStores and never exposed.
 func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions, deps ChannelDeps) (*ChannelStores, error) {
-	if deps.NowFn == nil {
-		return nil, errors.New("store: OpenChannel requires Deps.NowFn")
-	}
 	db, err := openChannelDB(ctx, dbPath, opts)
 	if err != nil {
 		return nil, err
@@ -61,7 +53,6 @@ func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions, deps Chan
 		Requests:   newRequestLookup(msgs),
 		Registry:   reg,
 		Membership: reg,
-		Types:      newTypeRegistry(db, deps.NowFn),
 	}
 	return cs, nil
 }

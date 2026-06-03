@@ -2,28 +2,33 @@ package harness
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-const (
-	defaultAgentMaxPendingMs  int64 = 24 * 60 * 60 * 1000
-	defaultSystemMaxPendingMs int64 = 60 * 60 * 1000
-	defaultActorMaxPendingMs  int64 = 30 * 1000
-)
+// defaultRequestTTLMs is the substrate-global fallback closure deadline applied
+// to a request whose caller did not stamp expires_at. The deadline is a
+// REQUEST-CONTRACT property the caller owns (it knows the receiver's latency
+// from its capability catalog); this uniform fallback only guarantees every
+// request has a bounded closure — it is NOT a per-receiver-kind or per-type
+// policy (that was a type_registry-era leak: deadline-by-actor.kind).
+const defaultRequestTTLMs int64 = 24 * 60 * 60 * 1000
 
-// stepKindAndAudience implements the Kind-and-Audience step (StepKindAndAudience
-// in the impl ordering; proto-layer1 §2.6 Type/Kind + Audience Validate):
+// stepKindAndAudience implements proto-layer1 §2.6 Kind+Audience Validate — the
+// substrate-essential STRUCTURE checks, with NO business-type vocabulary:
 //
-//   - core types: kind must equal default_kind unless AllowOverride
-//   - business types: kind ∈ registry.types[type].allowed_kinds
-//   - kind=request requires audience exactly-one concrete receiver
-//   - audience target must be a registered active actor
-//   - when registry has handler_actor_id, explicit audience must match
+//   - core / reserved-namespace types: kind must match their kernel-defined rule
+//   - kind=request / kind=response: audience cardinality exactly-one
+//   - audience target must be a registered ACTIVE actor (pure actor addressing)
+//   - a request without expires_at gets the global fallback closure deadline
+//
+// Business types carry NO substrate kind / handler constraint: their kind is a
+// kernel closed-set value (validated at envelope-shape), and which kind is
+// meaningful for "xhs.publish" — and which actor handles it — is the receiving
+// actor's contract + the caller's catalog, not the substrate's. There is no
+// type_registry lookup and no type→handler routing.
 type stepKindAndAudience struct {
 	deps Deps
 }
@@ -33,22 +38,15 @@ func newStepKindAndAudience(d Deps) step { return &stepKindAndAudience{deps: d} 
 func (s *stepKindAndAudience) ID() stepID { return StepKindAndAudience }
 
 func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (outcome, error) {
-	var (
-		view            storespec.TypeView
-		isCore          bool
-		isReservedActor bool
-	)
+	// (1) core / reserved-namespace type→kind rules — kernel's OWN vocabulary.
 	if rule, ok := message.LookupCoreType(env.Type); ok {
-		isCore = true
 		if !rule.AllowOverride && env.Kind != rule.DefaultKind {
 			return outcome{
 				RejectReason: HarnessKindNotAllowedForType,
-				Detail: fmt.Sprintf("core type %s allows only kind=%s",
-					env.Type, rule.DefaultKind),
+				Detail:       fmt.Sprintf("core type %s allows only kind=%s", env.Type, rule.DefaultKind),
 			}, nil
 		}
 	} else if _, reserved := reservedBootstrapTypeSet[env.Type]; reserved {
-		isCore = true
 		if env.Kind != message.KindEvent {
 			return outcome{
 				RejectReason: HarnessKindNotAllowedForType,
@@ -56,156 +54,53 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (o
 			}, nil
 		}
 	} else if rule, reserved := reservedActorTypeSet[env.Type]; reserved {
-		isCore = true
-		isReservedActor = true
 		if !kindAllowed(rule.AllowedKinds, env.Kind) {
 			return outcome{
 				RejectReason: HarnessKindNotAllowedForType,
 				Detail:       fmt.Sprintf("reserved actor type %s does not allow kind=%s", env.Type, env.Kind),
 			}, nil
 		}
-	} else {
-		// business type — look up allowed_kinds. unknown_type was already
-		// caught at the type-registered step (StepTypeRegistered), so we
-		// expect a hit here.
-		var ok bool
-		var err error
-		view, ok, err = s.deps.TypeRegistry.Lookup(ctx, env.Type)
-		if err != nil {
-			return outcome{}, err
-		}
-		if !ok {
-			return outcome{
-				RejectReason: HarnessTypeUnknown,
-				Detail:       "type lookup vanished between step 4 and 5: " + env.Type,
-			}, nil
-		}
-		if !kindAllowed(view.AllowedKinds, env.Kind) {
-			return outcome{
-				RejectReason: HarnessKindNotAllowedForType,
-				Detail:       fmt.Sprintf("kind=%s not allowed for type=%s", env.Kind, env.Type),
-			}, nil
-		}
 	}
+	// (business type: no substrate kind rule — falls through.)
 
-	// Audience emptiness is the single validation centre. The substrate write
-	// engine does NOT resolve a "default audience" — routing intent is an
-	// ingress / domain concern that must produce a NAMED audience BEFORE the
-	// harness (substrate validates named audiences, it does not author routing
-	// policy). An empty audience reaching here is therefore unresolved (or a
-	// non-human sender's bug) and is rejected — harness_audience_empty.
+	// (2) audience emptiness — single closure validation centre. The substrate
+	//     does not author routing; a named audience must arrive from ingress/domain.
 	if len(env.Audience) == 0 {
-		return outcome{
-			RejectReason: HarnessAudienceEmpty,
-			Detail:       "envelope.audience empty",
-		}, nil
+		return outcome{RejectReason: HarnessAudienceEmpty, Detail: "envelope.audience empty"}, nil
 	}
 
-	// response — audience exactly-one concrete receiver. This cardinality
-	// check moved here from StepEnvelopeShape so it runs over the
-	// resolved audience. Validation lives in one place.
+	// (3) response — exactly-one concrete receiver.
 	if env.Kind == message.KindResponse {
 		if len(env.Audience) != 1 || env.Audience[0] == "" {
-			return outcome{
-				RejectReason: HarnessResponseAudienceInvalid,
-				Detail:       "kind=response requires audience cardinality 1",
-			}, nil
+			return outcome{RejectReason: HarnessResponseAudienceInvalid, Detail: "kind=response requires audience cardinality 1"}, nil
 		}
 		return outcome{}, nil
 	}
 
+	// kind=event — no cardinality constraint beyond non-empty.
 	if env.Kind != message.KindRequest {
-		// kind=event — no audience cardinality constraint beyond the
-		// non-empty + wildcard ban already enforced above / in
-		// StepEnvelopeShape.
 		return outcome{}, nil
 	}
 
-	// request — audience exactly-one concrete receiver. Step 2 has
-	// already rejected wildcard audience entries. len>1 is an explicit
-	// fan-out request → harness_request_audience_invalid.
+	// (4) request — exactly-one concrete, ACTIVE receiver. Pure actor addressing:
+	//     the caller addressed the actor it resolved (no type→handler routing).
 	if len(env.Audience) != 1 || env.Audience[0] == "" {
-		return outcome{
-			RejectReason: HarnessRequestAudienceInvalid,
-			Detail:       "kind=request requires audience=[<concrete-actor>]",
-		}, nil
+		return outcome{RejectReason: HarnessRequestAudienceInvalid, Detail: "kind=request requires audience=[<concrete-actor>]"}, nil
 	}
 	target := actor.ActorID(env.Audience[0])
-
 	rec, ok, err := s.deps.ActorRegistry.Lookup(ctx, target)
 	if err != nil {
 		return outcome{}, err
 	}
 	if !ok || !rec.IsActive() {
-		return outcome{
-			RejectReason: HarnessAudienceMemberNotActive,
-			Detail:       fmt.Sprintf("audience actor %q not active in registry", target),
-		}, nil
+		return outcome{RejectReason: HarnessAudienceMemberNotActive, Detail: fmt.Sprintf("audience actor %q not active in registry", target)}, nil
 	}
 
-	// business type handler_actor_id check (core types have no handler).
-	if !isCore && view.HandlerActorID != "" && view.HandlerActorID != target {
-		return outcome{
-			RejectReason: HarnessAudienceHandlerMismatch,
-			Detail: fmt.Sprintf("audience=%q must equal handler_actor_id=%q",
-				target, view.HandlerActorID),
-		}, nil
-	}
+	// (5) request closure deadline — caller-supplied; uniform fallback when absent.
 	if env.ExpiresAt == nil {
-		if isReservedActor {
-			deadline := s.deps.NowMs() + defaultActorMaxPendingMs
-			env.ExpiresAt = &deadline
-			return outcome{}, nil
-		}
-		out, err := s.defaultExpiresAt(env, rec.Kind, view, !isCore)
-		if err != nil {
-			return outcome{}, err
-		}
-		if !out.Continue() {
-			return out, nil
-		}
+		deadline := s.deps.NowMs() + defaultRequestTTLMs
+		env.ExpiresAt = &deadline
 	}
-	return outcome{}, nil
-}
-
-// errTypeRegistryMaxPendingMissing is returned (as a non-protocol Go
-// error, NOT a closed-set harness reject) when the type_registry row
-// for a tool receiver is missing the max_pending_ms field. Install
-// already enforces this invariant (InstallAdapterTimeoutMissing); the
-// harness fails loudly via the runtime error path because the
-// condition reflects internal registry corruption, not a caller-visible
-// protocol violation.
-var errTypeRegistryMaxPendingMissing = errors.New("harness: type_registry row missing max_pending_ms for tool receiver (install invariant violated)")
-
-func (s *stepKindAndAudience) defaultExpiresAt(
-	env *message.Envelope,
-	receiverKind actor.Kind,
-	view storespec.TypeView,
-	hasTypeView bool,
-) (outcome, error) {
-	var maxPendingMs int64
-	switch receiverKind {
-	case actor.KindTool:
-		if !hasTypeView || view.MaxPendingMs <= 0 {
-			// Type registry installed the tool handler but omitted
-			// max_pending_ms — install validator should have caught this
-			// (InstallAdapterTimeoutMissing). Surface as a non-protocol
-			// runtime error so the failure is loud and the proto-layer1
-			// §2.11.1 closed reject set stays clean.
-			return outcome{}, fmt.Errorf("%w: type=%s", errTypeRegistryMaxPendingMissing, env.Type)
-		}
-		maxPendingMs = view.MaxPendingMs
-	case actor.KindAgent:
-		maxPendingMs = defaultAgentMaxPendingMs
-	case actor.KindSystem:
-		maxPendingMs = defaultSystemMaxPendingMs
-	case actor.KindHuman:
-		return outcome{}, nil
-	default:
-		return outcome{}, nil
-	}
-	deadline := s.deps.NowMs() + maxPendingMs
-	env.ExpiresAt = &deadline
 	return outcome{}, nil
 }
 

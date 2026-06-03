@@ -52,7 +52,6 @@ const (
 	HarnessAudienceMemberNotActive HarnessRejectReason = "harness_audience_member_not_active"
 	HarnessRequestAudienceInvalid  HarnessRejectReason = "harness_request_audience_invalid"
 	HarnessResponseAudienceInvalid HarnessRejectReason = "harness_response_audience_invalid"
-	HarnessAudienceHandlerMismatch HarnessRejectReason = "harness_audience_handler_mismatch"
 
 	// Step 8 — Terminal Uniqueness + Response Parent Validation
 	HarnessResponseMissingParent           HarnessRejectReason = "harness_response_missing_parent"
@@ -67,8 +66,9 @@ const (
 	HarnessProvisionalAfterFinal           HarnessRejectReason = "harness_provisional_after_final"
 )
 
-// AllHarnessRejectReasons enumerates every value (29 — v2: no fencing, no
-// id-dedupe, no visibility-audience tombstone).
+// AllHarnessRejectReasons enumerates every value (28 — v2: no fencing, no
+// id-dedupe, no visibility-audience tombstone, no audience-handler-mismatch
+// (substrate is type-agnostic — no type→handler routing to mismatch)).
 var AllHarnessRejectReasons = []HarnessRejectReason{
 	HarnessEngineACLDenied,
 	HarnessEnvelopeFieldMissing,
@@ -88,7 +88,6 @@ var AllHarnessRejectReasons = []HarnessRejectReason{
 	HarnessAudienceMemberNotActive,
 	HarnessRequestAudienceInvalid,
 	HarnessResponseAudienceInvalid,
-	HarnessAudienceHandlerMismatch,
 	HarnessResponseMissingParent,
 	HarnessResponseParentNotFound,
 	HarnessResponseParentNotRequest,

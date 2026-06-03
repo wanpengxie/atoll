@@ -9,9 +9,11 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// (TypeView + the type-view read seam moved to runtime/storespec — they are
-// store contracts, not harness internals. The harness consumes
-// storespec.TypeViewLookup → storespec.TypeView.)
+// (The harness holds NO type-registry seam: the substrate is type-agnostic —
+// business-type vocabulary / handler routing / discovery is a domain concern,
+// validated by the receiving actor + resolved by the caller's catalog, never a
+// substrate write-time check. The harness validates STRUCTURE: kind, addressing,
+// closure.)
 
 // Logger is the minimal structured logger used by the harness hot path.
 // It mirrors the adapter framework's Logger shape without importing the
@@ -65,15 +67,11 @@ type Deps struct {
 	// the envelope-shape step.
 	ChannelID channel.ID
 
-	// ActorRegistry resolves sender.id / audience entries / handler_actor_id
-	// to storespec.Record (kind / binding / deregistration timestamp).
-	// Required.
+	// ActorRegistry resolves sender.id / audience entries to storespec.Record
+	// (kind / binding / deregistration timestamp). Required. (The substrate is
+	// type-agnostic — there is no TypeRegistry dep: business-type vocabulary is
+	// a domain concern, not a substrate write-time check.)
 	ActorRegistry storespec.Registry
-
-	// TypeRegistry resolves business types declared by adapters /
-	// channel template. Optional; when nil the chain assumes only core
-	// types are allowed (every business type fails step 4 unknown_type).
-	TypeRegistry storespec.TypeViewLookup
 
 	// Log is the channel-local messages-table sink. Required — step 9
 	// engine append calls Log.Append. (v2: no fencing — single writer.)

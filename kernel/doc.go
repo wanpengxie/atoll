@@ -19,11 +19,10 @@
 // What is NOT in kernel (and why):
 //
 //   - Stateful engine seams (the harness Chain/Step, the store contracts
-//     Registry/Cursors/TypeRegistry/RequestLookup/MessageLog) — they
-//     take context.Context and are implemented by runtime/store; they live
-//     with their consumers in runtime. (Go idiom: interface at the consumer.)
-//   - Projections (actor membership Record/Registry, type_registry TypeRow)
-//     — projections are derived read caches, a
+//     Registry/Cursors/RequestLookup/MessageLog) — they take context.Context
+//     and are implemented by runtime/store; they live with their consumers in
+//     runtime. (Go idiom: interface at the consumer.)
+//   - Projections (actor membership Record/Registry) — derived read caches, a
 //     runtime/server facility, never a kernel model (truth-vs-projection).
 //   - store-derived envelope columns (seq, is_terminal) —
 //     produced by the store, not part of the 17 protocol fields.

@@ -59,16 +59,17 @@ var reservedActorTypeSet = map[string]reservedActorTypeRule{
 	},
 }
 
-// stepTypeRegistered implements proto-layer1 §2.5 step 5 — `type ∈ (core
-// ∪ type_registry)` plus the reserved-namespace authority check. Core
-// types pass through to the kind/audience step; business types require a
-// TypeRegistry lookup hit; system.* types in the §6.2.0 reserved set
-// must be emitted by the channel system actor only.
-type stepTypeRegistered struct {
-	deps Deps
-}
+// stepTypeRegistered enforces the substrate's RESERVED-NAMESPACE AUTHORITY:
+// the `system.*` reserved bootstrap types and `actor.*` reserved types may only
+// be emitted by the channel system actor (protecting the substrate's own mirror-
+// event + reserved-query vocabulary from forgery). Every OTHER type — core or
+// business — passes through: the substrate is type-AGNOSTIC about business
+// vocabulary (a type is an opaque label; whether "xhs.publish" is a known
+// capability is a domain agreement validated by the receiving actor + the
+// caller's catalog, NOT a substrate registry). There is no type_registry lookup.
+type stepTypeRegistered struct{}
 
-func newStepTypeRegistered(d Deps) step { return &stepTypeRegistered{deps: d} }
+func newStepTypeRegistered(Deps) step { return &stepTypeRegistered{} }
 
 func (s *stepTypeRegistered) ID() stepID { return StepTypeRegistered }
 
@@ -108,22 +109,9 @@ func (s *stepTypeRegistered) Run(ctx context.Context, env *message.Envelope) (ou
 		return outcome{}, nil
 	}
 
-	if _, isCore := message.LookupCoreType(env.Type); isCore {
-		return outcome{}, nil
-	}
-	if s.deps.TypeRegistry == nil {
-		return outcome{
-			RejectReason: HarnessTypeUnknown,
-			Detail:       "type registry not wired; only core types allowed",
-		}, nil
-	}
-	if _, ok, err := s.deps.TypeRegistry.Lookup(ctx, env.Type); err != nil {
-		return outcome{}, err
-	} else if !ok {
-		return outcome{
-			RejectReason: HarnessTypeUnknown,
-			Detail:       "type not registered: " + env.Type,
-		}, nil
-	}
+	// Any non-reserved type — core or business — passes. The substrate does
+	// not gatekeep business vocabulary (type-agnostic); an unknown/typo'd type
+	// is delivered to its addressed actor, which rejects it (closure then
+	// materialises a terminal) — the Erlang model, not a write-time registry.
 	return outcome{}, nil
 }
