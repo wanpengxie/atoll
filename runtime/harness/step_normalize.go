@@ -29,11 +29,9 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (outcome
 		return outcome{}, nil
 	}
 
-	// Sender-provided runtime fields are not protocol content. Dedupe has
-	// already compared sender-provided content, so normalize can clear
-	// these before StepResponsePairing / EngineAppend materialize the
-	// authoritative values.
-	env.TSReceived = 0
+	// (ts_received is engine-owned and set ONCE at the canonical append sink
+	// — Chain.Write right before Log.Append — so normalize does not touch it;
+	// any caller-supplied value is overwritten there per A3.)
 
 	// audience is now caller-owned (post wildcard removal). nil ≠ empty
 	// for downstream step 5 audience cardinality check: nil treated as

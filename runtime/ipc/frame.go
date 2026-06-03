@@ -99,11 +99,10 @@ type DownPayload struct {
 // Codec encodes / decodes port frames on length-prefixed buffered IO. It is
 // medium-agnostic (any io.Reader/io.Writer: local pipe or net.Conn).
 type Codec struct {
-	r    *bufio.Reader
-	w    io.Writer
-	wmu  sync.Mutex
-	hdr  [4]byte
-	rbuf []byte
+	r   *bufio.Reader
+	w   io.Writer
+	wmu sync.Mutex
+	hdr [4]byte // Write's length-prefix scratch, reused under wmu.
 }
 
 // NewCodec wraps r/w as a frame Codec.
@@ -142,16 +141,15 @@ func (c *Codec) Read() (Frame, error) {
 	if n > MaxFrameBytes {
 		return Frame{}, fmt.Errorf("ipc: frame too large: %d > %d", n, MaxFrameBytes)
 	}
-	if int(n) > cap(c.rbuf) {
-		c.rbuf = make([]byte, n)
-	} else {
-		c.rbuf = c.rbuf[:n]
-	}
-	if _, err := io.ReadFull(c.r, c.rbuf); err != nil {
+	// Read-local buffer: no shared Codec field, so concurrent readers (or a
+	// future second reader) cannot corrupt each other. Frames are infrequent
+	// control/deliver messages — a per-frame alloc is not a hot path.
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(c.r, buf); err != nil {
 		return Frame{}, err
 	}
 	var f Frame
-	if err := json.Unmarshal(c.rbuf, &f); err != nil {
+	if err := json.Unmarshal(buf, &f); err != nil {
 		return Frame{}, fmt.Errorf("ipc: unmarshal: %w", err)
 	}
 	return f, nil

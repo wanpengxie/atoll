@@ -13,12 +13,11 @@ func TestStepNormalize_Defaults(t *testing.T) {
 	deps := testDeps(t, cs)
 
 	e := &message.Envelope{
-		ID:         "m1",
-		TS:         fixedNowMs - 1000,
-		ChannelID:  testChannelID,
-		Kind:       message.KindEvent,
-		Type:       "agent.text",
-		TSReceived: 999, // must be cleared
+		ID:        "m1",
+		TS:        fixedNowMs - 1000,
+		ChannelID: testChannelID,
+		Kind:      message.KindEvent,
+		Type:      "agent.text",
 	}
 	out, err := runStep(t, newStepNormalize, deps, context.Background(), e)
 	if err != nil {
@@ -36,9 +35,8 @@ func TestStepNormalize_Defaults(t *testing.T) {
 	if string(e.Payload) != "{}" {
 		t.Fatalf("payload = %q, want {} baseline", e.Payload)
 	}
-	if e.TSReceived != 0 {
-		t.Fatalf("ts_received = %d, want cleared (engine fills it at append)", e.TSReceived)
-	}
+	// ts_received is engine-owned and filled at the append sink (Chain.Write),
+	// not by normalize — the full-Write contract is pinned in chain_test.go.
 }
 
 // kind default-fill applies only to core types (business types must declare).
