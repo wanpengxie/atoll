@@ -25,7 +25,11 @@
 //
 // **Not in scope of this package**:
 //
-//   - Trigger gateway dispatch (FIX-T3 / runtime/trigger).
+//   - Post-append delivery to actor mailboxes. The harness only validates +
+//     appends truth; delivering an appended envelope into the audience's
+//     mailboxes (and reporting per-audience Outcome / collapsing an
+//     undeliverable request to receiver_unavailable) is runtime/actorrt's
+//     Deliver — invoked by the server write-loop, not a separate package.
 //   - Long-pending scheduler tie-in (runtime/scheduler).
 //   - Adapter binding tri-class transport (kernel/adapter +
 //     adapters/framework).

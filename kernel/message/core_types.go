@@ -20,10 +20,10 @@ type CoreTypeRule struct {
 //
 // (**) `system.heartbeat` is wire-only — impl-vocabulary §2.7 +
 // proto-foundation §1.12 + proto-layer0 §3.1 specify it as a control
-// frame, NOT a channel envelope. It does not enter the message log,
-// is not registered in type_registry, and intentionally MUST NOT
-// appear in CoreTypeTable. The runtime/trigger noise-filter (see
-// trigger.TypeSystemHeartbeat) is defence-in-depth against bypass.
+// frame, NOT a channel envelope. It does not enter the message log and
+// intentionally MUST NOT appear in coreTypeTable — so it can never be a
+// substrate type at all (no envelope-side filter is needed or wanted: the
+// substrate is type-agnostic and owns no per-type-name special cases).
 //
 // Likewise `agent.progress` was historically a separate core type for
 // intermediate per-step progress bubbles. impl-vocabulary §2.3
