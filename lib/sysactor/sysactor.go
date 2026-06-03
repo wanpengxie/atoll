@@ -23,6 +23,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
+	"github.com/wanpengxie/ActOS/lib/introspect"
 	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
@@ -104,7 +105,7 @@ func (s *SystemActor) Receive(ctx context.Context, env *message.Envelope) error 
 		s.applyPresence(env)
 		return nil
 	}
-	if env.Kind == message.KindRequest && env.Type == actor.ReservedActorList {
+	if env.Kind == message.KindRequest && env.Type == introspect.QueryList {
 		return s.respondList(ctx, env)
 	}
 	// Anything else (other reserved requests, stray events): the system actor
@@ -123,16 +124,16 @@ func (s *SystemActor) respondList(ctx context.Context, env *message.Envelope) er
 	if err != nil {
 		return err
 	}
-	catalog := make([]map[string]any, 0, len(rows))
+	catalog := introspect.Catalog{Actors: make([]introspect.CatalogEntry, 0, len(rows))}
 	for _, r := range rows {
-		catalog = append(catalog, map[string]any{
-			"id":      string(r.ID),
-			"kind":    string(r.Kind),
-			"binding": string(r.Binding),
-			"present": s.isPresent(r.ID),
+		catalog.Actors = append(catalog.Actors, introspect.CatalogEntry{
+			ID:      string(r.ID),
+			Kind:    string(r.Kind),
+			Binding: string(r.Binding),
+			Present: s.isPresent(r.ID),
 		})
 	}
-	payload, err := json.Marshal(map[string]any{"actors": catalog})
+	payload, err := json.Marshal(catalog)
 	if err != nil {
 		return err
 	}

@@ -140,24 +140,11 @@ func TestActorIDStringRoundTrip(t *testing.T) {
 	}
 }
 
-// Reserved-type closed sets (reserved.go): these are protocol-frozen
-// envelope.type names. Pinning their exact wire strings makes any silent
-// rename a test failure — changing a value is a protocol revision, not an
-// impl edit. The actor.* set is the kind=request self-answer surface; the
-// system.* set is the kind=event control-plane mirror.
-
-func TestReservedActorTypeValues(t *testing.T) {
-	cases := map[string]string{
-		actor.ReservedActorStatus:   "actor.status",
-		actor.ReservedActorDescribe: "actor.describe",
-		actor.ReservedActorList:     "actor.list",
-	}
-	for got, want := range cases {
-		if got != want {
-			t.Errorf("reserved actor type = %q want %q", got, want)
-		}
-	}
-}
+// Reserved-type closed sets (reserved.go): protocol-frozen envelope.type names
+// the substrate enforces. Pinning their exact wire strings makes any silent
+// rename a test failure. Only the system.* control-plane mirror set lives in
+// kernel now — the actor.* introspection vocabulary is a stdlib convention
+// (lib/introspect), not a substrate-enforced reserved set.
 
 func TestReservedSystemEventTypeValues(t *testing.T) {
 	cases := map[string]string{
@@ -169,32 +156,6 @@ func TestReservedSystemEventTypeValues(t *testing.T) {
 	for got, want := range cases {
 		if got != want {
 			t.Errorf("reserved system event type = %q want %q", got, want)
-		}
-	}
-}
-
-// The reserved namespaces are disjoint: actor.* (request self-answer) and
-// system.* (event control-plane) must not collide, since they live on
-// different envelope kinds. A collision would be a protocol-design error.
-func TestReservedNamespacesDisjoint(t *testing.T) {
-	actorTypes := []string{
-		actor.ReservedActorStatus,
-		actor.ReservedActorDescribe,
-		actor.ReservedActorList,
-	}
-	systemTypes := []string{
-		actor.ReservedSystemChannelCreated,
-		actor.ReservedSystemActorRegistered,
-		actor.ReservedSystemActorDeregistered,
-		actor.ReservedSystemConfigUpdated,
-	}
-	seen := map[string]bool{}
-	for _, at := range actorTypes {
-		seen[at] = true
-	}
-	for _, st := range systemTypes {
-		if seen[st] {
-			t.Errorf("reserved type %q appears in both actor.* and system.* sets", st)
 		}
 	}
 }

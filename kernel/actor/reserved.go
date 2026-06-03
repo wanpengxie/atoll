@@ -2,34 +2,17 @@ package actor
 
 // Reserved-type vocabulary closed sets.
 //
-// These are protocol-reserved `envelope.type` names that the substrate
-// treats specially. They were previously scattered as string literals
-// across runtime/lib; consolidated here as frozen closed sets so callers
-// reference constants, not bare strings (target-state §3.7 / §4.2,
-// topology §8.7). Changing a value or adding/removing a member is a
-// protocol-level revision (proto-*), not an impl-layer edit.
-
-// ReservedActorTypeSet is the set of reserved `kind=request` types that
-// any actor self-answers about itself (the reserved-type self-answer
-// surface — observation of an actor's identity / capabilities / state
-// without a bespoke endpoint). INVARIANT-0 read side.
-const (
-	// ReservedActorStatus — query one actor's own live/readiness status
-	// ("ask the actor itself"; advisory).
-	ReservedActorStatus = "actor.status"
-	// ReservedActorDescribe — query one actor's static declaration /
-	// capability surface.
-	ReservedActorDescribe = "actor.describe"
-	// ReservedActorList — channel-wide actor catalog (composed view,
-	// answered by the channel system actor / sysactor).
-	ReservedActorList = "actor.list"
-)
-
-// (No exported enumeration slice: the reserved-type closed sets are the
-// constants above. A mutable []string of them is a redundant second
-// representation that invites range-and-mutate; any consumer needing the set
-// builds it from the constants, or a Parse predicate is added when a real
-// substrate validation use-case demands one.)
+// These are protocol-reserved `envelope.type` names the substrate
+// FUNCTIONALLY enforces (the system.* events below: per-name authority — only
+// the channel system actor may emit them, harness-gated to prevent forgery).
+// Changing a value or adding/removing a member is a protocol-level revision.
+//
+// NOTE: the actor.* introspection queries (actor.status/describe/list) are NOT
+// here. The substrate does not enforce them — the generic harness
+// sender-consistency step already prevents an actor from forging an answer
+// about another actor, and actor.* is otherwise a plain (type-agnostic) type.
+// They are a stdlib self-answer CONVENTION, owned by lib/introspect (the names,
+// the response shapes, and the answering behaviour), not kernel.
 
 // ReservedSystemEventTypeSet is the set of reserved `kind=event` types
 // the channel system actor emits to mirror control-plane mutations into

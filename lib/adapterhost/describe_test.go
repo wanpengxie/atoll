@@ -9,10 +9,11 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
+	"github.com/wanpengxie/ActOS/lib/introspect"
 )
 
-// describerModule answers actor.describe dynamically (implements behavior.Describer).
-type describerModule struct{ apis []behavior.APIDescriptor }
+// describerModule answers actor.describe dynamically (implements introspect.Describer).
+type describerModule struct{ apis []introspect.APIDescriptor }
 
 func (describerModule) Declares() behavior.Declaration {
 	return behavior.Declaration{Name: "d", ActorID: "tool1", Binding: actor.BindingEmbedded}
@@ -20,7 +21,7 @@ func (describerModule) Declares() behavior.Declaration {
 func (describerModule) Init(context.Context, *behavior.ModuleContext) error { return nil }
 func (describerModule) Shutdown(context.Context) error                      { return nil }
 func (describerModule) Handle(context.Context, *message.Envelope) error     { return nil }
-func (m describerModule) Describe(context.Context) ([]behavior.APIDescriptor, error) {
+func (m describerModule) Describe(context.Context) ([]introspect.APIDescriptor, error) {
 	return m.apis, nil
 }
 
@@ -42,12 +43,12 @@ func newDescribeActor(t *testing.T, mod behavior.Module) (*adapterActor, *[]*mes
 // it implements Describer — the capability surface is the actor's own answer,
 // not a predefined declaration field.
 func TestDescribe_DynamicSelfAnswer(t *testing.T) {
-	mod := describerModule{apis: []behavior.APIDescriptor{
+	mod := describerModule{apis: []introspect.APIDescriptor{
 		{Name: "xhs.publish", Desc: "publish a note", Schema: json.RawMessage(`{"type":"object"}`)},
 	}}
 	a, written := newDescribeActor(t, mod)
 
-	req := &message.Envelope{ID: "q1", ChannelID: "ch", Kind: message.KindRequest, Type: actor.ReservedActorDescribe,
+	req := &message.Envelope{ID: "q1", ChannelID: "ch", Kind: message.KindRequest, Type: introspect.QueryDescribe,
 		Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{"tool1"}}
 	if err := a.Receive(context.Background(), req); err != nil {
 		t.Fatalf("describe: %v", err)
@@ -56,8 +57,8 @@ func TestDescribe_DynamicSelfAnswer(t *testing.T) {
 		t.Fatalf("expected 1 describe response, got %d", len(*written))
 	}
 	var body struct {
-		Name string                   `json:"name"`
-		APIs []behavior.APIDescriptor `json:"apis"`
+		Name string                     `json:"name"`
+		APIs []introspect.APIDescriptor `json:"apis"`
 	}
 	if err := json.Unmarshal((*written)[0].Payload, &body); err != nil {
 		t.Fatalf("unmarshal describe: %v", err)
@@ -75,7 +76,7 @@ func TestDescribe_DynamicSelfAnswer(t *testing.T) {
 func TestDescribe_IdentityFallback(t *testing.T) {
 	a, written := newDescribeActor(t, errModule{}) // errModule has no Describe
 
-	req := &message.Envelope{ID: "q2", ChannelID: "ch", Kind: message.KindRequest, Type: actor.ReservedActorDescribe,
+	req := &message.Envelope{ID: "q2", ChannelID: "ch", Kind: message.KindRequest, Type: introspect.QueryDescribe,
 		Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{"tool1"}}
 	if err := a.Receive(context.Background(), req); err != nil {
 		t.Fatalf("describe: %v", err)

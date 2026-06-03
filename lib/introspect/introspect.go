@@ -1,0 +1,85 @@
+// Package introspect is the standard self-answer convention every actor exposes:
+// the reserved actor.* introspection queries plus their response shapes.
+//
+// It is NOT substrate. The substrate does not gate or enforce these — the
+// generic harness sender-consistency step already prevents an actor from forging
+// an answer about another actor (you can only emit envelopes as yourself), and
+// actor.* is otherwise a plain type. These are well-known CONVENTION names (like
+// HTTP "GET"): owned by the stdlib, frozen, imported by both the answering
+// actors (adapterhost / sysactor / agentactor) and the asking callers
+// (SDK / domain). Changing a name or response field is a protocol-level
+// convention revision.
+package introspect
+
+import (
+	"context"
+	"encoding/json"
+)
+
+// The reserved introspection queries — the standard questions any actor / the
+// channel answers about itself.
+const (
+	// QueryStatus — is this actor serviceable right now (advisory self-state).
+	QueryStatus = "actor.status"
+	// QueryDescribe — what can this actor do (its live API surface).
+	QueryDescribe = "actor.describe"
+	// QueryList — who is in this channel (membership ∧ presence).
+	QueryList = "actor.list"
+)
+
+// Status is the actor.status response: the actor's own advisory serviceable
+// state. NOT a dispatch gate — the actor self-answers; reachability is the
+// outcome of send→terminal.
+type Status struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+}
+
+// APIDescriptor describes one callable API, returned dynamically inside a
+// Describe response. The actor is the sole authority on its own capability; a
+// caller discovers it by asking the actor, live.
+type APIDescriptor struct {
+	// Name is the request envelope.type the API answers (e.g. "xhs.publish").
+	Name string `json:"name"`
+	// Schema is the parameter schema for the request payload — a caller uses it
+	// to construct a valid call. Concrete format is the actor's domain concern
+	// (opaque here).
+	Schema json.RawMessage `json:"schema,omitempty"`
+	// Desc is a one-line description of what the API does.
+	Desc string `json:"desc,omitempty"`
+	// Skill is optional longer usage guidance (markdown) for an LLM caller.
+	Skill string `json:"skill,omitempty"`
+}
+
+// Describe is the actor.describe response: the actor's identity plus its live
+// API surface. APIs is nil for actors that expose no callable surface.
+type Describe struct {
+	Name    string          `json:"name"`
+	Binding string          `json:"binding,omitempty"`
+	APIs    []APIDescriptor `json:"apis,omitempty"`
+}
+
+// CatalogEntry is one row of the actor.list channel directory: membership
+// (registry truth) ∧ presence (volatile lease). No readiness — readiness is the
+// actor's own actor.status, not a channel-wide axis.
+type CatalogEntry struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Binding string `json:"binding,omitempty"`
+	Present bool   `json:"present"`
+}
+
+// Catalog is the actor.list response: the channel-wide directory.
+type Catalog struct {
+	Actors []CatalogEntry `json:"actors"`
+}
+
+// Describer is the OPTIONAL capability an actor (Module) implements to answer
+// actor.describe with its live API surface. It is asked on the actor's own
+// goroutine, so it reports CURRENT capability (e.g. only what it can do while
+// logged in), never a predefined registry. Actors that don't implement it
+// answer describe with their identity only.
+type Describer interface {
+	Describe(ctx context.Context) ([]APIDescriptor, error)
+}

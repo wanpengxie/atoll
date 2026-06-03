@@ -9,7 +9,9 @@ import (
 )
 
 // StepTypeRegistered contract — substrate is TYPE-AGNOSTIC. It only guards the
-// reserved system.* / actor.* namespaces (anti-forgery); all other types pass.
+// reserved system.* namespace (anti-forgery: per-name authority). Everything
+// else — business, core, AND actor.* introspection — passes (actor.* is a
+// lib/introspect convention, not substrate-gated).
 func TestStepTypeRegistered(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -46,20 +48,20 @@ func TestStepTypeRegistered(t *testing.T) {
 			reason:     HarnessTypeUnknown,
 		},
 
-		// actor.* reserved types.
+		// actor.* introspection: NOT substrate-gated — passes like any type.
 		{
-			name:       "reserved actor type passes for ordinary sender (not SystemOnly)",
-			typ:        actor.ReservedActorStatus,
+			name:       "actor.status passes (type-agnostic; introspection is a lib convention)",
+			typ:        "actor.status",
 			senderID:   "agent:p",
 			senderKind: actor.KindAgent,
 			reason:     "",
 		},
 		{
-			name:       "non-reserved actor.* namespace not installable",
+			name:       "any actor.* passes (no substrate whitelist)",
 			typ:        "actor.made_up",
 			senderID:   "agent:p",
 			senderKind: actor.KindAgent,
-			reason:     HarnessTypeUnknown,
+			reason:     "",
 		},
 	}
 	for _, tc := range tests {

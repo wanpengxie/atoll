@@ -53,15 +53,10 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (o
 				Detail:       fmt.Sprintf("reserved system type %s allows only kind=event", env.Type),
 			}, nil
 		}
-	} else if rule, reserved := reservedActorTypeSet[env.Type]; reserved {
-		if !kindAllowed(rule.AllowedKinds, env.Kind) {
-			return outcome{
-				RejectReason: HarnessKindNotAllowedForType,
-				Detail:       fmt.Sprintf("reserved actor type %s does not allow kind=%s", env.Type, env.Kind),
-			}, nil
-		}
 	}
-	// (business type: no substrate kind rule — falls through.)
+	// (business type AND actor.* introspection: no substrate kind rule — falls
+	// through. actor.* is type-agnostic to the substrate; its req/resp shape is
+	// the lib/introspect convention, not a substrate gate.)
 
 	// (2) audience emptiness — single closure validation centre. The substrate
 	//     does not author routing; a named audience must arrive from ingress/domain.

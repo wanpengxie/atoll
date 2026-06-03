@@ -2,7 +2,6 @@ package behavior
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
@@ -43,37 +42,10 @@ type StatusReport struct {
 	CheckedAt time.Time
 }
 
-// APIDescriptor describes one callable API an actor exposes. It is returned
-// DYNAMICALLY by the actor's describe self-answer (see Describer) — never
-// predefined at install. The actor is the sole authority on its own capability
-// surface; a caller discovers it by asking the actor, live.
-type APIDescriptor struct {
-	// Name is the request envelope.type the API answers (e.g. "xhs.publish").
-	Name string `json:"name"`
-	// Schema is the parameter schema for the request payload — a caller uses it
-	// to construct a valid call. Its concrete format is the actor's domain
-	// concern (opaque to the framework here).
-	Schema json.RawMessage `json:"schema,omitempty"`
-	// Desc is a one-line description of what the API does.
-	Desc string `json:"desc,omitempty"`
-	// Skill is optional longer usage guidance (markdown) for an LLM caller.
-	Skill string `json:"skill,omitempty"`
-}
-
-// Describer is the OPTIONAL Module sub-interface for actors that expose a
-// capability surface. adapterhost routes the reserved actor.describe query to
-// Describe and relays the result — answered LIVE on the cell goroutine, so the
-// actor reports its CURRENT APIs (e.g. only what it can do while logged in),
-// never a stale predefined registry. Adapters that don't implement it answer
-// describe with their identity only.
-//
-// There is deliberately NO declared type list or per-type catalog on the
-// Declaration: "what can I do" is this dynamic self-answer; "what I dispatch"
-// is the Module's own Handle (the substrate is type-agnostic — it does not gate
-// on business types, so neither does lib).
-type Describer interface {
-	Describe(ctx context.Context) ([]APIDescriptor, error)
-}
+// The actor's capability surface (actor.describe) is NOT declared here: it is
+// the actor's dynamic self-answer via lib/introspect.Describer. Its request
+// dispatch is its Handle, not a declared type list (the substrate is
+// type-agnostic — it does not gate on business types, so neither does lib).
 
 // Declaration is the static IDENTITY an adapter Module exposes at install time
 // — purely what the framework needs to address and spawn the actor. The actor's

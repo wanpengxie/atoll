@@ -11,6 +11,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
+	"github.com/wanpengxie/ActOS/lib/introspect"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
 )
@@ -157,9 +158,9 @@ func (a *adapterActor) Receive(ctx context.Context, env *message.Envelope) error
 	}
 	a.remember(env) // cache request so respond works without a truth lookup
 	switch env.Type {
-	case actor.ReservedActorStatus:
+	case introspect.QueryStatus:
 		return a.respondStatus(ctx, env)
-	case actor.ReservedActorDescribe:
+	case introspect.QueryDescribe:
 		return a.respondDescribe(ctx, env)
 	default:
 		return a.handleRequest(ctx, env)
@@ -215,10 +216,10 @@ func (a *adapterActor) collapseInternalError(ctx context.Context, key behavior.C
 // actor's OWN serviceable-state (advisory, no registry round-trip, no dispatch
 // gate — "ask the actor itself"). Minimal projection for now.
 func (a *adapterActor) respondStatus(ctx context.Context, env *message.Envelope) error {
-	payload, err := json.Marshal(map[string]any{
-		"available": a.ready,
-		"reason":    a.readyReason,
-		"kind":      string(a.declaration.Binding),
+	payload, err := json.Marshal(introspect.Status{
+		Available: a.ready,
+		Reason:    a.readyReason,
+		Kind:      string(a.declaration.Binding),
 	})
 	if err != nil {
 		return fmt.Errorf("adapterhost: respondStatus marshal: %w", err)
@@ -228,21 +229,21 @@ func (a *adapterActor) respondStatus(ctx context.Context, env *message.Envelope)
 
 // respondDescribe self-answers the reserved actor.describe request. The
 // capability surface is the ACTOR's dynamic answer: if the module implements
-// behavior.Describer it is asked live (so it reports its CURRENT APIs); otherwise
+// introspect.Describer it is asked live (so it reports its CURRENT APIs); otherwise
 // the answer is identity only. No predefined type list / catalog.
 func (a *adapterActor) respondDescribe(ctx context.Context, env *message.Envelope) error {
-	body := map[string]any{
-		"name":    a.declaration.Name,
-		"binding": string(a.declaration.Binding),
+	resp := introspect.Describe{
+		Name:    a.declaration.Name,
+		Binding: string(a.declaration.Binding),
 	}
-	if d, ok := a.module.(behavior.Describer); ok {
+	if d, ok := a.module.(introspect.Describer); ok {
 		apis, err := d.Describe(ctx)
 		if err != nil {
 			return fmt.Errorf("adapterhost: module.Describe: %w", err)
 		}
-		body["apis"] = apis
+		resp.APIs = apis
 	}
-	payload, err := json.Marshal(body)
+	payload, err := json.Marshal(resp)
 	if err != nil {
 		return fmt.Errorf("adapterhost: respondDescribe marshal: %w", err)
 	}
