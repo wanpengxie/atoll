@@ -17,11 +17,11 @@
 // Files:
 //
 //   - sqlite.go            — sql.DB factory (channel-local)
-//   - schema.go            — DDL constants (messages / actor_registry /
-//     actor_cursors). v2: no worker_locks (single-writer server harness, no
-//     channel-write lease) and no action_ledger (turn-replay idempotency is an
-//     application concern, not substrate truth).
+//   - schema.go            — DDL constants (messages / actor_registry). v2: no
+//     worker_locks (single-writer server harness, no channel-write lease), no
+//     action_ledger (turn-replay idempotency is an application concern, not
+//     substrate truth), and no actor_cursors (a per-actor consumption offset is
+//     the consumer's own bookkeeping, not substrate truth).
 //   - messages.go          — storespec.MessageLog impl.
-//   - cursors.go           — storespec.Cursors impl.
 //   - actors.go            — storespec.Registry impl.
 package store

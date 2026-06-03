@@ -97,8 +97,7 @@ func (r *actorRegistry) ListActive(ctx context.Context) ([]storespec.Record, err
 	return out, nil
 }
 
-// Insert implements storespec.Registry. Per L2 §1.4.6 invariant, the
-// actor_cursors row is seeded in the same transaction.
+// Insert implements storespec.Registry: it adds one membership row.
 func (r *actorRegistry) Insert(ctx context.Context, rec storespec.Record) error {
 	if rec.ID == "" {
 		return errors.New("store: actor insert: empty ID")
@@ -122,13 +121,6 @@ func (r *actorRegistry) Insert(ctx context.Context, rec storespec.Record) error 
 		string(rec.ID), string(rec.Kind), binding, rec.CreatedAt,
 	); err != nil {
 		return fmt.Errorf("store: actor insert %q: %w", rec.ID, err)
-	}
-
-	const insCursor = `INSERT OR IGNORE INTO actor_cursors
-	   (actor_id, last_consumed_seq, updated_at)
-	   VALUES (?, 0, ?)`
-	if _, err := tx.ExecContext(ctx, insCursor, string(rec.ID), rec.CreatedAt); err != nil {
-		return fmt.Errorf("store: cursor seed %q: %w", rec.ID, err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -275,15 +267,6 @@ func (r *actorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add st
 		)
 		if err != nil {
 			return false, fmt.Errorf("store: actor member insert %q: %w", add.ID, err)
-		}
-		_, err = tx.ExecContext(ctx,
-			`INSERT OR IGNORE INTO actor_cursors
-			   (actor_id, last_consumed_seq, updated_at)
-			 VALUES (?, 0, ?)`,
-			string(add.ID), add.At,
-		)
-		if err != nil {
-			return false, fmt.Errorf("store: actor member cursor seed %q: %w", add.ID, err)
 		}
 		return true, nil
 	default:

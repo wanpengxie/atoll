@@ -128,7 +128,6 @@ func applyPragmas(ctx context.Context, db *sql.DB, opts OpenOptions) error {
 // guard that an opened file actually carries that shape.
 var channelLocalSchemaShape = map[string][]string{
 	"messages":       {"seq", "id", "type", "kind"},
-	"actor_cursors":  {"actor_id", "last_consumed_seq"},
 	"actor_registry": {"actor_id", "actor_kind", "deregistered_at"},
 }
 

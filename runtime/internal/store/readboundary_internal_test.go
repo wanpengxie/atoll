@@ -29,9 +29,6 @@ CREATE TABLE messages (
   parent_id TEXT, correlation_id TEXT, visibility TEXT NOT NULL,
   audience TEXT NOT NULL, expires_at INTEGER, is_terminal INTEGER NOT NULL DEFAULT 0
 );
-CREATE TABLE actor_cursors (
-  actor_id TEXT PRIMARY KEY, last_consumed_seq INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL
-);
 CREATE TABLE actor_registry (
   actor_id TEXT PRIMARY KEY, actor_kind TEXT NOT NULL, actor_binding TEXT,
   created_at INTEGER NOT NULL, deregistered_at INTEGER

@@ -283,7 +283,7 @@ func TestMaxSeq(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
 
-	if got, err := cs.Query.MaxSeq(ctx, testChannelID); err != nil || got != 0 {
+	if got, err := cs.Query.MaxSeq(ctx); err != nil || got != 0 {
 		t.Fatalf("empty MaxSeq=%d err=%v want 0", got, err)
 	}
 	var lastSeq storespec.Seq
@@ -294,7 +294,7 @@ func TestMaxSeq(t *testing.T) {
 		}
 		lastSeq = res.Seq
 	}
-	got, err := cs.Query.MaxSeq(ctx, testChannelID)
+	got, err := cs.Query.MaxSeq(ctx)
 	if err != nil {
 		t.Fatalf("MaxSeq: %v", err)
 	}
@@ -303,21 +303,10 @@ func TestMaxSeq(t *testing.T) {
 	}
 }
 
-// MaxSeq is channel-scoped: a foreign channel id sees nothing.
-func TestMaxSeq_ChannelScoped(t *testing.T) {
-	ctx := context.Background()
-	cs := openTestChannel(t)
-	if _, err := cs.Log.Append(ctx, newEnv("a", message.KindEvent, message.Audience{"x"}), false); err != nil {
-		t.Fatalf("Append: %v", err)
-	}
-	got, err := cs.Query.MaxSeq(ctx, "C-other")
-	if err != nil {
-		t.Fatalf("MaxSeq other: %v", err)
-	}
-	if got != 0 {
-		t.Errorf("foreign-channel MaxSeq=%d want 0", got)
-	}
-}
+// Channel scope is the sqlite file itself (one channel per file), so MaxSeq /
+// ReadAfterSeq take no channel id and there is no foreign-channel query to test:
+// the former TestMaxSeq_ChannelScoped exercised the now-removed WHERE channel_id
+// filter (a constant within a per-channel file).
 
 func TestReadAfterSeq_ForwardOrderedTail(t *testing.T) {
 	ctx := context.Background()
@@ -333,7 +322,7 @@ func TestReadAfterSeq_ForwardOrderedTail(t *testing.T) {
 	}
 
 	// Read everything after the first row's seq → exactly b,c,d in seq order.
-	rows, err := cs.Query.ReadAfterSeq(ctx, testChannelID, int64(seqs[0]), 100)
+	rows, err := cs.Query.ReadAfterSeq(ctx, int64(seqs[0]), 100)
 	if err != nil {
 		t.Fatalf("ReadAfterSeq: %v", err)
 	}
@@ -361,7 +350,7 @@ func TestReadAfterSeq_LimitHonored(t *testing.T) {
 			t.Fatalf("Append %s: %v", id, err)
 		}
 	}
-	rows, err := cs.Query.ReadAfterSeq(ctx, testChannelID, 0, 2)
+	rows, err := cs.Query.ReadAfterSeq(ctx, 0, 2)
 	if err != nil {
 		t.Fatalf("ReadAfterSeq: %v", err)
 	}

@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
@@ -156,10 +155,10 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 // MaxSeq returns the highest seq written for the channel (0 when empty). It is
 // the client cursor anchor (last_received_seq): an SDK fetches it before
 // subscribing so the WS tail starts from "now".
-func (m *messages) MaxSeq(ctx context.Context, channelID channel.ID) (int64, error) {
-	const q = `SELECT COALESCE(MAX(seq), 0) FROM messages WHERE channel_id = ?`
+func (m *messages) MaxSeq(ctx context.Context) (int64, error) {
+	const q = `SELECT COALESCE(MAX(seq), 0) FROM messages`
 	var seq int64
-	if err := m.db.QueryRowContext(ctx, q, channelID).Scan(&seq); err != nil {
+	if err := m.db.QueryRowContext(ctx, q).Scan(&seq); err != nil {
 		return 0, fmt.Errorf("store: max seq: %w", err)
 	}
 	return seq, nil
@@ -169,7 +168,7 @@ func (m *messages) MaxSeq(ctx context.Context, channelID channel.ID) (int64, err
 // channel, in seq order. It is the client-push tail: a subscribed WS reads
 // forward from its cursor, so no committed envelope is ever missed (the push
 // notification only signals "something new" — correctness is seq-based here).
-func (m *messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, afterSeq int64, limit int) ([]storespec.StoredRow, error) {
+func (m *messages) ReadAfterSeq(ctx context.Context, afterSeq int64, limit int) ([]storespec.StoredRow, error) {
 	if limit <= 0 {
 		limit = 256
 	}
@@ -181,9 +180,9 @@ func (m *messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, after
 	                  expires_at,
 	                  is_terminal, seq
 	             FROM messages
-	             WHERE channel_id = ? AND seq > ?
+	             WHERE seq > ?
 	             ORDER BY seq ASC LIMIT ?`
-	rows, err := m.db.QueryContext(ctx, q, channelID, afterSeq, limit)
+	rows, err := m.db.QueryContext(ctx, q, afterSeq, limit)
 	if err != nil {
 		return nil, fmt.Errorf("store: read after seq: %w", err)
 	}

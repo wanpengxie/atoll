@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
@@ -86,33 +85,19 @@ type MessageLog interface {
 // WITHOUT Append. Bundling reads with Append (one fat interface) would hand the
 // harness-bypass write capability to every reader — the exact leak §4.5 closes;
 // hence ISP/CQRS role-split, not one interface. The concrete satisfies both.
+// The channel scope is the store assembly itself (one sqlite per channel), so
+// no method re-takes a channel id — it would only re-specify what the file
+// already fixes (and within one channel's file every row shares the channel_id).
 type MessageQuery interface {
 	// MaxSeq is the channel's highest seq (client cursor anchor).
-	MaxSeq(ctx context.Context, channelID channel.ID) (int64, error)
+	MaxSeq(ctx context.Context) (int64, error)
 	// ReadAfterSeq is the client-push tail: envelopes with seq > afterSeq.
-	ReadAfterSeq(ctx context.Context, channelID channel.ID, afterSeq int64, limit int) ([]StoredRow, error)
+	ReadAfterSeq(ctx context.Context, afterSeq int64, limit int) ([]StoredRow, error)
 	// OpenRequestsForActor returns ALL in-flight requests addressed to actorID.
 	// It is the closure drain: the death-signal supervisor closes every one of a
 	// dead actor's pending requests, so this is unbounded by construction — a
 	// limit would silently leave the overflow callers hanging (no closure).
 	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID) ([]StoredRow, error)
-}
-
-// Cursor mirrors an actor_cursors row (L2 §1.4.3). The position metric is
-// LastConsumedSeq — the one monotonic truth of how far an actor has consumed.
-// (No last-consumed message id: it was never decision-read; seq is the
-// position and the id is a derivable label, not cursor truth.)
-type Cursor struct {
-	ActorID         actor.ActorID
-	LastConsumedSeq Seq
-	UpdatedAt       int64
-}
-
-// Cursors is the actor_cursors query / mutation contract. Concrete impl in
-// runtime/store/actors.go; Advance MUST honor the L1 §6.3.4.3 monotonic CAS.
-type Cursors interface {
-	Get(ctx context.Context, actorID actor.ActorID) (Cursor, bool, error)
-	Advance(ctx context.Context, actorID actor.ActorID, newSeq Seq, nowMs int64) (ok bool, err error)
 }
 
 // RequestLookup recovers an original request envelope by id (L2 §8 F5).

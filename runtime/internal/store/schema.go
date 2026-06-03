@@ -6,7 +6,6 @@ package store
 // Authoritative spec references:
 //
 //   - L2 §1.4.1  messages
-//   - L2 §1.4.3  actor_cursors
 //   - L2 §1.4.6  actor_registry
 //
 // The DDL string is split into multiple CREATE statements; the
@@ -43,17 +42,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_terminal_response_per_request
   ON messages(parent_id)
   WHERE kind = 'response' AND is_terminal = 1;
 
-	-- =============================================================
-	-- 3) actor_cursors  (L2 §1.4.3)
--- =============================================================
-CREATE TABLE IF NOT EXISTS actor_cursors (
-  actor_id             TEXT PRIMARY KEY,
-  last_consumed_seq    INTEGER NOT NULL DEFAULT 0,
-  updated_at           INTEGER NOT NULL
-);
+-- (v2: actor_cursors table removed. A per-actor durable consumption offset is
+-- NOT substrate truth: only a log-PULL consumer that must resume gap-free needs
+-- one, and that offset is the consumer's own bookkeeping (it knows where it left
+-- off), persisted in its own lib/domain state. The substrate's universal log
+-- primitive is the seq-ordered message log + ReadAfterSeq; v2 actors are
+-- push-mailbox consumers (death-closure, not replay), so no actor
+-- pulls-and-resumes. Additive re-add when a real durable-pull actor demands it.)
 
 -- =============================================================
--- 4) actor_registry  (L2 §1.4.6)
+-- 3) actor_registry  (L2 §1.4.6)
 -- =============================================================
 CREATE TABLE IF NOT EXISTS actor_registry (
   actor_id           TEXT PRIMARY KEY,
@@ -93,6 +91,5 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
 // is server-side truth, not a daemon-local sqlite. Removed.
 var ChannelLocalTables = []string{
 	"messages",
-	"actor_cursors",
 	"actor_registry",
 }

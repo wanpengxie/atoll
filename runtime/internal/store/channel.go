@@ -21,7 +21,6 @@ type ChannelStores struct {
 
 	Log      storespec.MessageLog   // harness write port (Append + terminal-uniqueness reads)
 	Query    storespec.MessageQuery // tail reads (no Append)
-	Cursors  storespec.Cursors
 	Requests storespec.RequestLookup
 
 	// Actor registry exposed via SEGREGATED interfaces (§4.5, forward-derived
@@ -45,7 +44,6 @@ func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions) (*Channel
 		db:         db,
 		Log:        msgs,
 		Query:      msgs,
-		Cursors:    newCursors(db),
 		Requests:   newRequestLookup(msgs),
 		Registry:   reg,
 		Membership: reg,

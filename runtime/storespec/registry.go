@@ -43,8 +43,8 @@ type Registry interface {
 
 // MembershipWriter is the single-actor membership-write surface (Insert /
 // Deregister). It is SEGREGATED from the read-only Registry: Insert seeds a
-// new membership row (+ its actor_cursors row, L2 §1.4.6) and Deregister
-// soft-removes one. These are control-plane writes, not queries, so a handle
+// new membership row (L2 §1.4.6) and Deregister soft-removes one. These are
+// control-plane writes, not queries, so a handle
 // that only needs reads (harness, the system actor) cannot reach them. The
 // log-emitting batch transition lives on MembershipControlPlane; this is the
 // imperative single-actor seed/teardown path (bootstrap / install handler

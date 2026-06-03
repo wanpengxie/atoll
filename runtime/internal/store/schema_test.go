@@ -13,8 +13,7 @@ import (
 )
 
 // OpenChannel installs exactly the channel-local tables — messages,
-// actor_cursors, actor_registry — and NOTHING from the retired type_registry
-// epoch.
+// actor_registry — and NOTHING from the retired type_registry epoch.
 func TestOpenChannel_InstallsExactlyChannelLocalTables(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "ch.sqlite")
@@ -59,10 +58,10 @@ func TestOpenChannel_InstallsExactlyChannelLocalTables(t *testing.T) {
 	}
 }
 
-// ChannelLocalTables enumerates exactly the three surviving channel-local
-// tables (the brief's contract: type_registry's two tables are deleted).
+// ChannelLocalTables enumerates exactly the surviving channel-local tables
+// (the brief's contract: type_registry's two tables + actor_cursors are deleted).
 func TestChannelLocalTables_Set(t *testing.T) {
-	want := map[string]bool{"messages": true, "actor_cursors": true, "actor_registry": true}
+	want := map[string]bool{"messages": true, "actor_registry": true}
 	if len(store.ChannelLocalTables) != len(want) {
 		t.Fatalf("ChannelLocalTables=%v want exactly %v", store.ChannelLocalTables, want)
 	}
