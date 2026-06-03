@@ -24,10 +24,9 @@ type ModuleContext struct {
 	// (Declaration.ActorID).
 	AdapterActorID actor.ActorID
 
-	// AdapterActorKind is the actor_registry kind this adapter owns. Current
-	// adapter Declaration.ActorID rows are tool actors; exposing the kind lets
-	// callback decoders reject callbacks that spoof the same id under a different
-	// actor.kind.
+	// AdapterActorKind is the registry kind of the actor this adapter owns —
+	// the kind half of the adapter's identity (AdapterActorID is the id half).
+	// Current adapter Declaration.ActorID rows are tool actors (KindTool).
 	AdapterActorKind actor.Kind
 
 	// ChannelID identifies the channel this adapter instance services

@@ -41,7 +41,9 @@ type HTTPClientConfig struct {
 
 	// MaxRetries is the maximum number of retry attempts on retryable
 	// errors (network failures + 5xx). Total attempts = MaxRetries + 1.
-	MaxRetries int
+	// A pointer so "unset" (nil → default 2) is distinct from an explicit 0
+	// (retries off, exactly 1 attempt) — a plain int cannot express "off".
+	MaxRetries *int
 
 	// InitialBackoff / MaxBackoff bound the exponential backoff between
 	// retries. The actual delay doubles each retry up to MaxBackoff.
@@ -97,11 +99,12 @@ func NewHTTPClient(cfg HTTPClientConfig) *HTTPClient {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
 	}
-	if cfg.MaxRetries < 0 {
-		cfg.MaxRetries = 0
-	}
-	if cfg.MaxRetries == 0 {
-		cfg.MaxRetries = 2
+	if cfg.MaxRetries == nil {
+		def := 2
+		cfg.MaxRetries = &def
+	} else if *cfg.MaxRetries < 0 {
+		zero := 0
+		cfg.MaxRetries = &zero
 	}
 	if cfg.InitialBackoff <= 0 {
 		cfg.InitialBackoff = 200 * time.Millisecond
@@ -212,7 +215,8 @@ func (c *HTTPClient) Do(ctx context.Context, method, path string, body io.Reader
 func (c *HTTPClient) DoWithRetry(ctx context.Context, method, path string, bodyFactory func() (io.Reader, error), headers http.Header) (*HTTPResponse, error) {
 	var lastErr error
 	delay := c.cfg.InitialBackoff
-	for attempt := 0; attempt <= c.cfg.MaxRetries; attempt++ {
+	maxRetries := *c.cfg.MaxRetries // non-nil after NewHTTPClient
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		var body io.Reader
 		if bodyFactory != nil {
 			b, err := bodyFactory()
@@ -233,7 +237,7 @@ func (c *HTTPClient) DoWithRetry(ctx context.Context, method, path string, bodyF
 		} else {
 			lastErr = fmt.Errorf("framework: http %s %s: status %d", method, path, resp.StatusCode)
 		}
-		if attempt == c.cfg.MaxRetries {
+		if attempt == maxRetries {
 			break
 		}
 		select {

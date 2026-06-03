@@ -105,8 +105,16 @@ func (s *SystemActor) Receive(ctx context.Context, env *message.Envelope) error 
 		s.applyPresence(env)
 		return nil
 	}
-	if env.Kind == message.KindRequest && env.Type == introspect.QueryList {
-		return s.respondList(ctx, env)
+	if env.Kind == message.KindRequest {
+		switch env.Type {
+		case introspect.QueryList:
+			return s.respondList(ctx, env)
+		case introspect.QueryDescribe:
+			// The system actor is itself an actor: it self-answers the reserved
+			// actor.describe so the reserved surface is complete (no actor times
+			// out on a self-query).
+			return s.respondDescribe(ctx, env)
+		}
 	}
 	// Anything else (other reserved requests, stray events): the system actor
 	// does not synthesize — a request is left for the caller's caller-scoped
@@ -137,6 +145,34 @@ func (s *SystemActor) respondList(ctx context.Context, env *message.Envelope) er
 	if err != nil {
 		return err
 	}
+	return s.respondReserved(ctx, env, payload)
+}
+
+// respondDescribe self-answers the reserved actor.describe for the system actor
+// itself: its identity plus the API it exposes (the channel directory query).
+// Like every actor, it must answer the reserved self-query rather than let the
+// caller hang.
+func (s *SystemActor) respondDescribe(ctx context.Context, env *message.Envelope) error {
+	desc := introspect.Describe{
+		Name: string(actor.SystemActorID),
+		APIs: []introspect.APIDescriptor{{
+			Name: introspect.QueryList,
+			Desc: "channel-wide actor directory: membership ∧ presence",
+		}},
+	}
+	payload, err := json.Marshal(desc)
+	if err != nil {
+		return err
+	}
+	return s.respondReserved(ctx, env, payload)
+}
+
+// respondReserved writes a system-authored completed response carrying payload
+// for a reserved self-query (actor.list / actor.describe). It stamps the system
+// actor's own caller identity so the harness ACL authenticates the write —
+// without it the response is rejected as harness_engine_acl_denied and the
+// caller never sees the answer.
+func (s *SystemActor) respondReserved(ctx context.Context, env *message.Envelope, payload []byte) error {
 	resp, err := behavior.BuildResponseEnvelope(ctx, s.lookup, s.clock,
 		message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
 		behavior.CorrelationKey(env.ID),
@@ -144,9 +180,6 @@ func (s *SystemActor) respondList(ctx context.Context, env *message.Envelope) er
 	if err != nil {
 		return err
 	}
-	// Stamp the system actor's own caller identity so the harness ACL
-	// authenticates the write (without it the response is rejected as
-	// harness_engine_acl_denied and the caller never sees the catalog).
 	cctx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{
 		ActorID: actor.SystemActorID, ChannelID: s.channelID,
 	})

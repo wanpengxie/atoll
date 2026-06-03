@@ -8,14 +8,17 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// Await blocks until the request's final arrives, ctx is done, or timeout
-// (when > 0) elapses. A final that arrived before this call (the final-
+// Await blocks until the request's final arrives, ctx is done, or the local
+// timeout (when > 0) elapses. A final that arrived before this call (the final-
 // before-await buffer set up at Register) is returned immediately.
 //
-// On ctx-cancel / timeout, Await detaches its parked channel but leaves the
-// waiterSet registered so a subsequent final still routes through Deliver
-// (becoming NoActiveWaiter → the caller's follow-up decision). On a final
-// already consumed by another Await, it returns ErrClosed.
+// The wake error distinguishes the two non-delivery exits: the local timeout
+// returns ErrLocalTimeout (the fast-path window closed — soft degradation), a
+// ctx cancel / ctx deadline returns ctx.Err() (the call was aborted). Either
+// way Await detaches its parked channel but leaves the waiterSet registered, so
+// a subsequent final still routes through Deliver (becoming NoActiveWaiter →
+// the caller's follow-up). On a final already consumed by another Await, it
+// returns ErrClosed.
 func (h *Handle) Await(ctx context.Context, timeout time.Duration) (*message.Envelope, error) {
 	r := h.reg
 	r.mu.Lock()
@@ -67,7 +70,7 @@ func (h *Handle) Await(ctx context.Context, timeout time.Duration) (*message.Env
 	case <-ctx.Done():
 		return h.resolveOnWake(ch, ctx.Err())
 	case <-timeoutCh:
-		return h.resolveOnWake(ch, context.DeadlineExceeded)
+		return h.resolveOnWake(ch, ErrLocalTimeout)
 	}
 }
 
@@ -151,12 +154,13 @@ func (h *Handle) Close() error {
 	return nil
 }
 
-// WatchEvent mirrors adapter.WatchEvent — kept local so the package does not
-// import adapter (which would create a cycle). The router/SDK convert.
+// WatchEvent is one item on a Watch stream: a response envelope and whether it
+// is the final one. The stream's end / cancellation is conveyed by closing the
+// Events() channel (closeOnce), not by an in-band error field — so there is no
+// Err here. Defined locally to keep the package free of any transport import.
 type WatchEvent struct {
 	Envelope *message.Envelope
 	IsFinal  bool
-	Err      error
 }
 
 // Watcher is the stream handle returned by Handle.Watch.

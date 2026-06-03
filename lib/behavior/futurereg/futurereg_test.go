@@ -185,7 +185,7 @@ func TestAtomicDispositionRace(t *testing.T) {
 			if err == nil && env != nil {
 				t.Fatalf("trial %d: final observed twice (double-deliver)", trial)
 			}
-		} else if r.Registered("RX") {
+		} else if registered(r, "RX") {
 			// not observed by the racing Await → Deliver must have atomically
 			// classified it as NoActiveWaiter and cleared the future so a later
 			// await cannot double-consume the surfaced trigger.
@@ -254,7 +254,7 @@ func TestM2NoDoubleLossAwaitTimeoutVsFinal(t *testing.T) {
 			if gotFinal {
 				t.Fatalf("trial %d: disp=NoActiveWaiter but Await also got the final (double-deliver)", trial)
 			}
-			if r.Registered("RM2") {
+			if registered(r, "RM2") {
 				t.Fatalf("trial %d: NoActiveWaiter final left future registered", trial)
 			}
 		default:
@@ -305,16 +305,60 @@ func TestWatchFinalNeverDroppedUnderProvisionalStorm(t *testing.T) {
 	}
 }
 
+// TestDeliver_InvalidInput pins the honesty of the Disposition vocabulary:
+// input that is not a routable response (nil / non-response Kind / unparseable
+// status) classifies as InvalidDisposition — a distinct fact from a valid
+// response that finds no waiter (NoActiveWaiter). The guard runs before any
+// waiter lookup, so registration state is irrelevant.
+func TestDeliver_InvalidInput(t *testing.T) {
+	r := New()
+	r.Register("R1") // a live waiter must not turn invalid input into a route
+
+	if disp := r.Deliver(nil); disp != InvalidDisposition {
+		t.Fatalf("nil envelope: disp=%v, want InvalidDisposition", disp)
+	}
+	nonResponse := &message.Envelope{ParentID: "R1", Kind: message.KindEvent,
+		Payload: json.RawMessage(`{"status":"completed"}`)}
+	if disp := r.Deliver(nonResponse); disp != InvalidDisposition {
+		t.Fatalf("non-response Kind: disp=%v, want InvalidDisposition", disp)
+	}
+	badPayload := &message.Envelope{ParentID: "R1", Kind: message.KindResponse,
+		Payload: json.RawMessage(`["not an object"]`)}
+	if disp := r.Deliver(badPayload); disp != InvalidDisposition {
+		t.Fatalf("unparseable status: disp=%v, want InvalidDisposition", disp)
+	}
+	// The live waiter survived — invalid input never touched it.
+	if !registered(r, "R1") {
+		t.Fatal("invalid input wrongly cleared a live waiter")
+	}
+}
+
 func TestParseStatus(t *testing.T) {
-	if s := parseStatus(json.RawMessage(`{"status":"completed"}`)); s != "completed" {
-		t.Fatalf("parseStatus = %q", s)
+	if s, err := parseStatusErr(json.RawMessage(`{"status":"completed"}`)); err != nil || s != "completed" {
+		t.Fatalf("parseStatusErr = %q, %v", s, err)
 	}
-	if s := parseStatus(json.RawMessage(`null`)); s != "" {
-		t.Fatalf("parseStatus(null) = %q", s)
+	if s, err := parseStatusErr(json.RawMessage(`null`)); err != nil || s != "" {
+		t.Fatalf("parseStatusErr(null) = %q, %v", s, err)
 	}
-	if s := parseStatus(nil); s != "" {
-		t.Fatalf("parseStatus(nil) = %q", s)
+	if s, err := parseStatusErr(nil); err != nil || s != "" {
+		t.Fatalf("parseStatusErr(nil) = %q, %v", s, err)
 	}
+	// Malformed payload surfaces an error (Deliver maps it to InvalidDisposition).
+	if _, err := parseStatusErr(json.RawMessage(`["not an object"]`)); err == nil {
+		t.Fatal("parseStatusErr on non-object payload: want error, got nil")
+	}
+}
+
+// registered reports whether id is still in the registry, asked through the
+// authoritative Pending() enumeration (membership is contains(Pending, id) —
+// there is no separate membership-test method).
+func registered(r *FutureRegistry, id message.ID) bool {
+	for _, p := range r.Pending() {
+		if p == id {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPendingLists(t *testing.T) {

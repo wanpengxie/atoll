@@ -37,16 +37,32 @@ const (
 	// The final is buffered for that Await and MUST NOT be surfaced as a new
 	// trigger.
 	BufferedPendingAwait
-	// NoActiveWaiter — no active waiter (includes an Await that already
-	// timed out and exited, or an abandoned request). The caller decides
-	// the follow-up (kimi worker: surface as a new trigger; in-daemon:
-	// quarantine if receiverOwner is also gone).
+	// NoActiveWaiter — a well-formed response that correctly routed to nobody:
+	// no active waiter (an Await that already timed out and exited, or an
+	// abandoned request). This is a genuine routing OUTCOME — the caller
+	// decides the follow-up for an unclaimed-but-valid response.
 	NoActiveWaiter
+	// InvalidDisposition — the envelope handed to Deliver is not a routable
+	// response: nil, a non-response Kind, or an unparseable status. This is NOT
+	// a routing outcome but a precondition failure surfaced as a total-function
+	// return, so the Disposition vocabulary stays honest — "input that does not
+	// classify" is a distinct fact from NoActiveWaiter ("a valid response that
+	// routed to nobody"). The caller MUST NOT treat it as a no-waiter final.
+	InvalidDisposition
 )
 
 // ErrClosed is returned by Await when the registry entry was cancelled
 // (abandoned) or closed before a final arrived.
 var ErrClosed = errors.New("futurereg: waiter closed")
+
+// ErrLocalTimeout is returned by Await when its local await window (the timeout
+// argument) elapsed before a final arrived. It is NORMAL fast-path degradation,
+// NOT a call abort: the waiterSet stays registered, so a later final still
+// routes through Deliver (as NoActiveWaiter for the caller's follow-up). It is
+// deliberately distinct from ctx cancel / ctx-deadline (which surface as
+// ctx.Err()), so a caller can tell "the fast-path await window closed" from
+// "the call itself was aborted / the process is shutting down".
+var ErrLocalTimeout = errors.New("futurereg: local await window elapsed")
 
 // RegisterOpts controls the initial waiter mode for a request id.
 type RegisterOpts struct {
@@ -117,10 +133,15 @@ type Handle struct {
 func (h *Handle) ID() message.ID { return h.id }
 
 // Register creates a waiterSet (with the final-before-await buffer slot ready)
-// for id and returns its Handle. Calling Register twice for the same id returns
-// a fresh Handle bound to the same underlying set. With no opts, Register
-// defaults to ExpectsAwait=true: the normal Submit/Call fast-path expects a
-// future Await and must preserve fast-final-before-await.
+// for id and returns its Handle. With no opts, Register defaults to
+// ExpectsAwait=true: the normal Submit/Call fast-path expects a future Await
+// and must preserve fast-final-before-await.
+//
+// Registration is idempotent: calling Register again for a still-live id
+// returns a fresh Handle bound to the EXISTING set WITHOUT mutating its
+// waiting-mode flags. An id already abandoned (its Await timed out) must not be
+// silently revived into buffering a later final — re-Register cannot resurrect
+// an abandoned waiter.
 func (r *FutureRegistry) Register(id message.ID, opts ...RegisterOpts) *Handle {
 	ro := RegisterOpts{ExpectsAwait: true}
 	if len(opts) > 0 {
@@ -128,12 +149,7 @@ func (r *FutureRegistry) Register(id message.ID, opts ...RegisterOpts) *Handle {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if ws, ok := r.waiters[id]; ok {
-		ws.expectsAwait = ro.ExpectsAwait
-		if ro.ExpectsAwait {
-			ws.abandoned = false
-		}
-	} else {
+	if _, ok := r.waiters[id]; !ok {
 		r.waiters[id] = &waiterSet{
 			id:           id,
 			watchers:     map[*watcher]struct{}{},
@@ -141,14 +157,6 @@ func (r *FutureRegistry) Register(id message.ID, opts ...RegisterOpts) *Handle {
 		}
 	}
 	return &Handle{reg: r, id: id}
-}
-
-// Registered reports whether id currently has a waiterSet.
-func (r *FutureRegistry) Registered(id message.ID) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	_, ok := r.waiters[id]
-	return ok
 }
 
 // Pending returns the ids of every currently registered (not yet
@@ -177,10 +185,19 @@ func (r *FutureRegistry) Pending() []message.ID {
 // window where a final is both delivered to an Await and surfaced as a
 // trigger.
 func (r *FutureRegistry) Deliver(env *message.Envelope) Disposition {
-	if env == nil {
-		return NoActiveWaiter
+	// Structural precondition: Deliver routes a well-formed RESPONSE envelope.
+	// A nil envelope, a non-response Kind, or an unparseable status does not
+	// classify as a routing outcome — it is invalid input, distinct from a
+	// valid response that finds no waiter. Keep Deliver total: return
+	// InvalidDisposition rather than silently collapsing garbage into
+	// NoActiveWaiter (which would assert "valid response, nobody waiting").
+	if env == nil || env.Kind != message.KindResponse {
+		return InvalidDisposition
 	}
-	status := parseStatus(env.Payload)
+	status, err := parseStatusErr(env.Payload)
+	if err != nil {
+		return InvalidDisposition
+	}
 	final := message.IsFinalStatus(status)
 
 	r.mu.Lock()
@@ -271,6 +288,11 @@ func (r *FutureRegistry) closeWatchersLocked(ws *waiterSet) {
 	}
 }
 
+// parseStatusErr extracts payload.status — the single source of truth for
+// status extraction across the three transports (§3.0). It surfaces a parse
+// error rather than swallowing it so Deliver can classify a malformed payload
+// as InvalidDisposition. Final-status classification stays in
+// message.IsFinalStatus (kernel single source).
 func parseStatusErr(raw json.RawMessage) (string, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return "", nil
@@ -288,13 +310,4 @@ func parseStatusErr(raw json.RawMessage) (string, error) {
 		return "", fmt.Errorf("futurereg: response payload.status must be a string, got %T", v)
 	}
 	return s, nil
-}
-
-// parseStatus extracts payload.status, returning "" on any parse trouble.
-// The single source of truth for status extraction across the three
-// transports (§3.0). Final-status classification stays in
-// message.IsFinalStatus (kernel single source).
-func parseStatus(raw json.RawMessage) string {
-	s, _ := parseStatusErr(raw)
-	return s
 }

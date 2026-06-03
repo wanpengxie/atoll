@@ -2,6 +2,7 @@ package futurereg_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -29,8 +30,9 @@ func (tr *inDaemonTransport) Await(ctx context.Context, id message.ID, timeout t
 	h := tr.reg.Register(id) // idempotent rebind to the existing set
 	env, err := h.Await(ctx, timeout)
 	if err != nil {
-		if err == context.DeadlineExceeded {
-			// window elapsed without a final — not a hard error
+		if errors.Is(err, futurereg.ErrLocalTimeout) {
+			// local await window elapsed without a final — soft degradation,
+			// not a hard error (a ctx cancel / ctx deadline still surfaces).
 			return nil, false, nil
 		}
 		return nil, false, err
