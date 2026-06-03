@@ -70,10 +70,10 @@ func TestIDValueEquality(t *testing.T) {
 		{"", "", true},
 		{"ch:文字", "ch:文字", true},
 		{"ch-1", "ch-2", false},
-		{"ch-1", "Ch-1", false},   // case-sensitive
-		{"ch-1", "ch-1 ", false},  // whitespace-sensitive
-		{"", " ", false},          // empty != whitespace
-		{"a/b", "a%2Fb", false},   // no escaping equivalence
+		{"ch-1", "Ch-1", false},  // case-sensitive
+		{"ch-1", "ch-1 ", false}, // whitespace-sensitive
+		{"", " ", false},         // empty != whitespace
+		{"a/b", "a%2Fb", false},  // no escaping equivalence
 	}
 	for _, c := range cases {
 		if got := channel.ID(c.a) == channel.ID(c.b); got != c.want {

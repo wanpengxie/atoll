@@ -1,7 +1,6 @@
 // Package message defines the v4 message envelope, message kind /
-// visibility enums, the core-type table, the terminal-failure reason
-// closed set, and the RFC 8785 canonical hash function used by the
-// Message-Write Harness.
+// visibility enums, the core-type table, and the terminal-failure reason
+// closed set.
 //
 // Authoritative spec:
 //
@@ -9,7 +8,6 @@
 //   - Kind closed set           — L0 §3.1 invariant I7 + proto-layer0 §3
 //   - Visibility enum           — L0 §2.4
 //   - Terminal-failure reason   — proto-layer0 §2.6 (INVARIANT-10)
-//   - Canonical hash            — L2 §1.4.10.2
 //
 // The package depends on kernel/actor for L0 sender identity primitives.
 // Pure proto: no context, no storage, no engine interfaces. Harness reject

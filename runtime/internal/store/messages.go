@@ -19,11 +19,10 @@ import (
 // Per L2 §1.4.5 engine-append ACL, messages is a PURE PERSISTENCE SINK:
 // every caller MUST run the L1 §10.2 9-step Message-Write Harness chain
 // FIRST (runtime/harness.Chain). The chain is the only legitimate
-// principal that may call Append; agent / worker / adapter / control
-// paths all flow through harness → store. Direct Append calls are a
-// debug-only escape hatch that bypasses normalize, sender_kind
-// overwrite, type_registry / schema validation, and The One Law
-// uniqueness contract.
+// principal that may call Append; every write path flows through
+// harness → store. Direct Append calls are a debug-only escape hatch that
+// bypasses normalize, sender_kind overwrite, type / schema validation, and
+// The One Law uniqueness contract.
 //
 // Append INSERTs the messages row in one transaction (raises *AppendError
 // on the messages.id UNIQUE violation or the terminal-duplicate UNIQUE
@@ -33,19 +32,16 @@ import (
 // retired under v2 caller-scoped closure). Optional framework observers
 // may enqueue same-transaction side rows after the message insert.
 //
-// IsTerminal computation is **simplified** for launch T3: response rows
-// with non-empty parent_id are treated terminal by default (L2 §1.4.1
-// `payload_status` convention) unless the row's type_registry entry
-// declares `single-response` — which the harness step 8 has already
-// resolved by the time Append is called.
+// IsTerminal is NOT computed here: the harness step 8 derives it from the
+// response's Layer-1 final status (proto-layer0 §2.5.1) and hands it to
+// Append.
 //
 // **Protocol contract (FIX-T10):** `env.IsTerminal` is NOT a caller-
-// settable knob. It must be resolved by the harness chain (step 8 +
-// type_registry semantics) BEFORE Append is reached. Store treats the
-// field as a pre-computed harness output and persists it verbatim; it
-// neither validates nor recomputes the value. This keeps store layer-
-// independent of type_registry semantics and keeps the harness as the
-// single source of truth for terminal classification.
+// settable knob. It must be resolved by the harness chain (step 8) BEFORE
+// Append is reached. Store treats the field as a pre-computed harness
+// output and persists it verbatim; it neither validates nor recomputes the
+// value, keeping the harness the single source of truth for terminal
+// classification.
 type messages struct {
 	db *sql.DB
 }

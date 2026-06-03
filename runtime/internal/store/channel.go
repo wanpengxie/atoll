@@ -25,8 +25,8 @@ type ChannelDeps struct {
 type ChannelStores struct {
 	db *sql.DB
 
-	Log      storespec.MessageLog   // harness write port (Append + dedup/terminal reads)
-	Query    storespec.MessageQuery // scheduler / tail reads (no Append)
+	Log      storespec.MessageLog   // harness write port (Append + terminal-uniqueness reads)
+	Query    storespec.MessageQuery // tail reads (no Append)
 	Cursors  storespec.Cursors
 	Requests storespec.RequestLookup
 

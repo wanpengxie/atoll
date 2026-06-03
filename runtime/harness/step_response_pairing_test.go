@@ -49,8 +49,8 @@ func seedEvent(t *testing.T, cs *store.ChannelStores, id message.ID) {
 func response(parentID message.ID, sender, caller actor.ActorID, payload string) *message.Envelope {
 	return &message.Envelope{
 		ID: "resp-" + parentID, TS: fixedNowMs, ChannelID: testChannelID,
-		Sender:   message.Sender{ID: sender, Kind: actor.KindTool},
-		Kind:       message.KindResponse, Type: "xhs.publish",
+		Sender: message.Sender{ID: sender, Kind: actor.KindTool},
+		Kind:   message.KindResponse, Type: "xhs.publish",
 		ParentID:   parentID,
 		Audience:   message.Audience{caller},
 		Visibility: message.VisibilityPublic,

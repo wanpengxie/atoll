@@ -58,7 +58,7 @@ func (e *AppendError) Error() string {
 
 // MessageLog is the channel-local messages-table append contract (L2
 // §1.4.1). Append is the only mutation entry point; reads are not declared
-// here because agents / scheduler / trigger may query messages directly.
+// here because readers query messages through the MessageQuery role below.
 //
 // Concrete sqlite impl lives in runtime/internal/store/messages.go. v2 changes:
 //   - no fencing parameter — the channel has a single writer (server
@@ -82,7 +82,7 @@ type MessageLog interface {
 }
 
 // MessageQuery is the channel-log READ role — segregated from MessageLog so a
-// reader (scheduler / client tail / closure supervisor) is handed a surface
+// reader (client tail / closure supervisor) is handed a surface
 // WITHOUT Append. Bundling reads with Append (one fat interface) would hand the
 // harness-bypass write capability to every reader — the exact leak §4.5 closes;
 // hence ISP/CQRS role-split, not one interface. The concrete satisfies both.

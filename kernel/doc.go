@@ -11,7 +11,7 @@
 //
 //   - kernel/actor    — actor identity (ActorID), the actor Kind closed set,
 //     Binding closed set, and the reserved-type closed sets.
-//   - kernel/channel  — channel ID type + Ref (federation forward-compat).
+//   - kernel/channel  — channel ID type (opaque stable string).
 //   - kernel/message  — envelope schema (17 content+metadata fields), kind /
 //     visibility closed sets, core-type table, and the terminal-failure reason
 //     closed set (INVARIANT-10).

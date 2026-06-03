@@ -6,10 +6,8 @@ package store
 // Authoritative spec references:
 //
 //   - L2 §1.4.1  messages
-//   - L2 §1.4.2  type_registry
 //   - L2 §1.4.3  actor_cursors
 //   - L2 §1.4.6  actor_registry
-//   - L2 §1.4.10.1 action_ledger
 //
 // The DDL string is split into multiple CREATE statements; the
 // modernc.org/sqlite driver accepts multi-statement input via Exec.

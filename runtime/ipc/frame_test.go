@@ -99,23 +99,23 @@ func TestWriteOmitsEmptyPayload(t *testing.T) {
 func TestRoundTripPerKind(t *testing.T) {
 	expires := int64(1717000000)
 	env := message.Envelope{
-		ID:        message.ID("msg-1"),
-		TS:        1717000000123,
-		ChannelID: "chan-A",
-		Sender:    message.Sender{Kind: actor.KindAgent, ID: actor.ActorID("agent:writer")},
-		Kind:      message.KindRequest,
-		Type:      "agent.text",
-		Payload:   json.RawMessage(`{"text":"hi"}`),
-		ParentID:  message.ID("msg-0"),
+		ID:         message.ID("msg-1"),
+		TS:         1717000000123,
+		ChannelID:  "chan-A",
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: actor.ActorID("agent:writer")},
+		Kind:       message.KindRequest,
+		Type:       "agent.text",
+		Payload:    json.RawMessage(`{"text":"hi"}`),
+		ParentID:   message.ID("msg-0"),
 		Visibility: message.VisibilityPublic,
-		Audience:  message.Audience{actor.ActorID("user:bob"), actor.ActorID("agent:writer")},
-		ExpiresAt: &expires,
+		Audience:   message.Audience{actor.ActorID("user:bob"), actor.ActorID("agent:writer")},
+		ExpiresAt:  &expires,
 	}
 
 	cases := []struct {
-		name    string
-		frame   Frame
-		check   func(t *testing.T, got Frame)
+		name  string
+		frame Frame
+		check func(t *testing.T, got Frame)
 	}{
 		{
 			name:  "handshake",

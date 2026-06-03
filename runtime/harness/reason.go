@@ -13,9 +13,11 @@ package harness
 // id-dedupe step was retired (message.id is now a random uuid; an id UNIQUE
 // collision is a pure integrity error surfaced via classifyAppendErr's wire
 // string) — and HarnessVisibilityAudienceInvalid, a tombstone reason no step
-// could emit (the visibility-scoped audience wildcard it guarded was removed):
-// an errno vocabulary is exactly the set of reasons a producer can stamp, so a
-// word with zero producers is not in it — leaving 29.
+// could emit (the visibility-scoped audience wildcard it guarded was removed)
+// — and HarnessAudienceHandlerMismatch (substrate went type-agnostic: no
+// type→handler routing left to mismatch): an errno vocabulary is exactly the
+// set of reasons a producer can stamp, so a word with zero producers is not in
+// it — leaving 28.
 //
 // No HTTPStatus() method: reason→HTTP-status (strerror) is a binding concern
 // that lives in server/gateway, not on this engine type. This type only
@@ -66,39 +68,11 @@ const (
 	HarnessProvisionalAfterFinal           HarnessRejectReason = "harness_provisional_after_final"
 )
 
-// AllHarnessRejectReasons enumerates every value (28 — v2: no fencing, no
-// id-dedupe, no visibility-audience tombstone, no audience-handler-mismatch
-// (substrate is type-agnostic — no type→handler routing to mismatch)).
-var AllHarnessRejectReasons = []HarnessRejectReason{
-	HarnessEngineACLDenied,
-	HarnessEnvelopeFieldMissing,
-	HarnessChannelMismatch,
-	HarnessKindInvalid,
-	HarnessVisibilityInvalid,
-	HarnessEnvelopeUnknownField,
-	HarnessAudienceWildcardForbidden,
-	HarnessTimeInvalid,
-	HarnessTypeUnknown,
-	HarnessKindNotAllowedForType,
-	HarnessReservedTypeUnauthorizedSender,
-	HarnessSenderMismatch,
-	HarnessSenderKindMismatch,
-	HarnessSenderDeregistered,
-	HarnessAudienceEmpty,
-	HarnessAudienceMemberNotActive,
-	HarnessRequestAudienceInvalid,
-	HarnessResponseAudienceInvalid,
-	HarnessResponseMissingParent,
-	HarnessResponseParentNotFound,
-	HarnessResponseParentNotRequest,
-	HarnessResponseStatusInvalid,
-	HarnessResponseStatusNamespaceMismatch,
-	HarnessResponseReasonInvalid,
-	HarnessResponseUnauthorizedSender,
-	HarnessResponseAudienceMismatch,
-	HarnessTerminalDuplicate,
-	HarnessProvisionalAfterFinal,
-}
+// (No exported AllHarnessRejectReasons enumeration: the const block above IS
+// the closed set. A duplicate exported slice is a second, mutable
+// representation of a protocol closed set — an importer could append/rewrite
+// it — with no substrate consumer. Iterate the wire strings at the boundary
+// that needs them, e.g. server/gateway's reason→HTTP-status map.)
 
 // String returns the wire form.
 func (r HarnessRejectReason) String() string { return string(r) }

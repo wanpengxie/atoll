@@ -14,7 +14,7 @@ import (
 // OpenOptions tunes DSN-level pragmas. Zero value is fine for production.
 type OpenOptions struct {
 	// ReadOnly opens the database in read-only mode (mode=ro). Used by
-	// scheduler / trigger gateways that only need to scan.
+	// read-only consumers (log tail / closure supervisor) that only scan.
 	ReadOnly bool
 
 	// SkipDDL skips the schema bootstrap step. Useful for tests that

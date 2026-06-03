@@ -75,12 +75,15 @@ func IsFinalStatus(status string) bool {
 	return status == "completed" || status == "failed"
 }
 
-// ContentFields lists the envelope content field names from L0 §2.1
-// (with sender.{kind,id,name} flattened into 3 dotted keys).
+// contentFields lists the envelope field names from L0 §2.1 (with sender
+// flattened into the 2 dotted keys sender.{kind,id} — sender carries
+// structural identity only).
 //
-// Used by the envelope_test.go field-set guard so the Go struct stays
-// 1:1 with the spec table; drift on either side trips the test.
-var ContentFields = []string{
+// Unexported: it is the in-package field-set guard's reference list (a
+// protocol closed set; an exported mutable slice would let an importer
+// rewrite it). The envelope_test.go drift guard keeps the Go struct 1:1
+// with it; drift on either side trips the test.
+var contentFields = []string{
 	"id",
 	"ts",
 	"ts_received",

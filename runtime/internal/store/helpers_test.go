@@ -59,8 +59,10 @@ func withSender(kind actor.Kind, id actor.ActorID) envOpt {
 func withParent(parent message.ID) envOpt {
 	return func(e *message.Envelope) { e.ParentID = parent }
 }
-func withType(typ string) envOpt    { return func(e *message.Envelope) { e.Type = typ } }
-func withPayload(p string) envOpt   { return func(e *message.Envelope) { e.Payload = json.RawMessage(p) } }
+func withType(typ string) envOpt { return func(e *message.Envelope) { e.Type = typ } }
+func withPayload(p string) envOpt {
+	return func(e *message.Envelope) { e.Payload = json.RawMessage(p) }
+}
 func withVisibility(v message.Visibility) envOpt {
 	return func(e *message.Envelope) { e.Visibility = v }
 }

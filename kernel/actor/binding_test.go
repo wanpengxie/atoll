@@ -99,17 +99,17 @@ func TestParseBindingAcceptsClosedSet(t *testing.T) {
 
 func TestParseBindingRejectsOutOfSet(t *testing.T) {
 	for _, raw := range []string{
-		"",                          // empty is not a member
-		"daemon_rpc",                // retired transport-axis vocabulary
-		"in_worker_bus",             //
-		"federated_actor",           //
-		"worker",                    //
-		"workerhost",                //
-		"in_process_x",              // plausible-but-fake
-		"Embedded",                  // casing is significant
-		"RUNTIME_OUTBOUND",          //
-		"runtime_inbound",           // truncated near-miss of via_relay member
-		"runtime_inbound_via_relay ",// surrounding whitespace not trimmed
+		"",                           // empty is not a member
+		"daemon_rpc",                 // retired transport-axis vocabulary
+		"in_worker_bus",              //
+		"federated_actor",            //
+		"worker",                     //
+		"workerhost",                 //
+		"in_process_x",               // plausible-but-fake
+		"Embedded",                   // casing is significant
+		"RUNTIME_OUTBOUND",           //
+		"runtime_inbound",            // truncated near-miss of via_relay member
+		"runtime_inbound_via_relay ", // surrounding whitespace not trimmed
 	} {
 		got, ok := actor.ParseBinding(raw)
 		if ok {

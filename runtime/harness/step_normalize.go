@@ -69,8 +69,8 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (outcome
 	// semantics — proto-layer0 §2.7 + §4.6: provisional response is not
 	// part of closure (no SLA) and final response is itself the terminal
 	// (no separate deadline). Normalize clears whatever the caller may
-	// have plumbed so the time-relation guard below + downstream
-	// scheduler scans never act on a meaningless response deadline.
+	// have plumbed so the time-relation guard below + any downstream
+	// closure reader never act on a meaningless response deadline.
 	if env.Kind == message.KindResponse {
 		env.ExpiresAt = nil
 	}

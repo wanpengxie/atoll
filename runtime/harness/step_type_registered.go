@@ -66,7 +66,7 @@ var reservedActorTypeSet = map[string]reservedActorTypeRule{
 // business — passes through: the substrate is type-AGNOSTIC about business
 // vocabulary (a type is an opaque label; whether "xhs.publish" is a known
 // capability is a domain agreement validated by the receiving actor + the
-// caller's catalog, NOT a substrate registry). There is no type_registry lookup.
+// caller's catalog, NOT a substrate registry). There is no per-type lookup.
 type stepTypeRegistered struct{}
 
 func newStepTypeRegistered(Deps) step { return &stepTypeRegistered{} }

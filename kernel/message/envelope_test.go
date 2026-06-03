@@ -183,7 +183,7 @@ func TestEnvelopeFieldSet1To1WithContentFields(t *testing.T) {
 		gotKeys = append(gotKeys, k)
 	}
 
-	wantKeys := append([]string{}, ContentFields...)
+	wantKeys := append([]string{}, contentFields...)
 	sort.Strings(gotKeys)
 	sort.Strings(wantKeys)
 	if !reflect.DeepEqual(gotKeys, wantKeys) {
@@ -197,10 +197,10 @@ func TestEnvelopeFieldSet1To1WithContentFields(t *testing.T) {
 // (no other nesting is part of the wire contract).
 func TestContentFieldsShape(t *testing.T) {
 	t.Parallel()
-	if len(ContentFields) == 0 {
-		t.Fatal("ContentFields is empty")
+	if len(contentFields) == 0 {
+		t.Fatal("contentFields is empty")
 	}
-	for _, f := range ContentFields {
+	for _, f := range contentFields {
 		if strings.Contains(f, ".") && !strings.HasPrefix(f, "sender.") {
 			t.Errorf("ContentFields entry %q has unexpected dotted shape", f)
 		}

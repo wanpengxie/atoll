@@ -109,8 +109,8 @@ func (d Deps) Validate() error {
 type ctxKeyCaller struct{}
 
 // CtxWithCaller returns a child ctx carrying caller. Use at the edge
-// (workerhost / control handler / adapter framework respond) before
-// invoking Chain.Write.
+// (the server write-loop / adapter framework respond) before invoking
+// Chain.Write.
 func CtxWithCaller(ctx context.Context, c CallerContext) context.Context {
 	return context.WithValue(ctx, ctxKeyCaller{}, c)
 }

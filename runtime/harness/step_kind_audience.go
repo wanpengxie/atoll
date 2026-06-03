@@ -13,7 +13,7 @@ import (
 // REQUEST-CONTRACT property the caller owns (it knows the receiver's latency
 // from its capability catalog); this uniform fallback only guarantees every
 // request has a bounded closure — it is NOT a per-receiver-kind or per-type
-// policy (that was a type_registry-era leak: deadline-by-actor.kind).
+// policy (deadline-by-actor.kind was a per-type-policy leak, now removed).
 const defaultRequestTTLMs int64 = 24 * 60 * 60 * 1000
 
 // stepKindAndAudience implements proto-layer1 §2.6 Kind+Audience Validate — the
@@ -28,7 +28,7 @@ const defaultRequestTTLMs int64 = 24 * 60 * 60 * 1000
 // kernel closed-set value (validated at envelope-shape), and which kind is
 // meaningful for "xhs.publish" — and which actor handles it — is the receiving
 // actor's contract + the caller's catalog, not the substrate's. There is no
-// type_registry lookup and no type→handler routing.
+// per-type registry lookup and no type→handler routing.
 type stepKindAndAudience struct {
 	deps Deps
 }

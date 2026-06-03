@@ -1,8 +1,8 @@
 package message
 
 // CoreTypeRule expresses the L1 §1.1 core-type table for one entry. Core
-// types are engine-built-in: they live outside type_registry and carry a
-// default kind plus whether callers may override that kind.
+// types are engine-built-in (kernel-authored, not domain-registered) and
+// carry a default kind plus whether callers may override that kind.
 type CoreTypeRule struct {
 	DefaultKind   Kind
 	AllowOverride bool
@@ -16,7 +16,7 @@ type CoreTypeRule struct {
 //
 // (*) `core.system_event` is the canonical v1 spelling for system events.
 // The pre-v1 dotted spelling is intentionally not accepted here:
-// this is a clean rename, not a type_registry alias.
+// this is a clean rename, not a back-compat alias.
 //
 // (**) `system.heartbeat` is wire-only — impl-vocabulary §2.7 +
 // proto-foundation §1.12 + proto-layer0 §3.1 specify it as a control
@@ -42,8 +42,10 @@ var coreTypeTable = map[string]CoreTypeRule{
 }
 
 // LookupCoreType resolves a core message type to its rule. ok=false means the
-// type is not a core type (it must then resolve via type_registry). This is the
-// read-only contract over the frozen core-type closed set.
+// type is not a core type — it is then ordinary domain-defined vocabulary the
+// substrate carries opaquely and does not resolve (the substrate is
+// type-agnostic outside this frozen core set). This is the read-only contract
+// over that frozen core-type closed set.
 func LookupCoreType(typeName string) (CoreTypeRule, bool) {
 	r, ok := coreTypeTable[typeName]
 	return r, ok
