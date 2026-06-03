@@ -15,8 +15,9 @@ package message
 //     scanner. Semantics = "I, the caller, am no longer waiting" (a
 //     voluntary, caller-scoped abandonment, NOT an assertion that the
 //     receiver is objectively silent). = Erlang gen_server:call `timeout`.
-//     A receiver's genuine late final is therefore not a contradiction
-//     (handled as response.late_final observability).
+//     A receiver's genuine late final therefore simply arrives after the
+//     request already closed and rejects as a terminal duplicate (surfacing
+//     late answers for monitoring is a domain observability concern).
 //   - receiver_unavailable    — author #3: the SUBSTRATE positively observed
 //     the receiver's death (cell-supervisor panic or relay/wire disconnect)
 //     and materialised a terminal. The substrate never guesses "slow"; it

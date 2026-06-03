@@ -51,14 +51,17 @@ import (
 //     receiver_unavailable (wire sender = dead receiver, folds into #1).
 //     The old generic "system actor terminal fallback" author is DELETED.
 //
-//   - Zombie chain defence redefined (Δ4 / D3): when the log already
-//     contains a final response for the same parent, a receiver's genuine
-//     LATE final (after the caller self-closed) is NOT a duplicate — it is
-//     rewritten to a response.late_final observability event and recorded
-//     as a non-error. Other post-final finals → harness_terminal_duplicate;
-//     provisionals after final → harness_provisional_after_final. The
-//     ux_terminal_response_per_request UNIQUE INDEX in store.schema remains
-//     the authoritative defence for concurrent racers.
+//   - Terminal uniqueness: once a final response exists for the parent the
+//     request is closed. A second final → harness_terminal_duplicate; a
+//     provisional → harness_provisional_after_final. A receiver's genuine
+//     LATE final (the caller already self-closed on a caller-scoped timeout)
+//     is just one more post-final final — the request has no open closure
+//     left for it to fill, so it rejects like any duplicate (gRPC/HTTP
+//     fail-the-late-send). Surfacing "the receiver answered late" (true
+//     latency, etc.) is a domain observability concern — the receiver's
+//     adapter emits a metric/event — never substrate truth. The
+//     ux_terminal_response_per_request UNIQUE INDEX in store.schema is the
+//     authoritative defence for concurrent racers.
 //
 //   - is_terminal is computed from the payload.status classification:
 //     Layer 1 → true; Layer 2 / Layer 3 → false. proto-layer0 §2.5.1
@@ -159,37 +162,19 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 		}, nil
 	}
 
-	// Zombie chain defence redefined (actor-runtime-redesign.md §0.5 Δ4 +
-	// D3). The timeout terminal is caller-scoped ("I, the caller, am no
-	// longer waiting") — it does NOT assert the receiver is silent. So a
-	// receiver's genuine LATE final after the caller has already
-	// self-closed is NOT a duplicate/zombie: it is converted to an
-	// observability event (response.late_final) and recorded as a
-	// non-error. Only NON-late collisions remain rejects.
+	// Terminal uniqueness. Once a final response exists for the parent the
+	// request is closed: a second final → harness_terminal_duplicate, a
+	// provisional → harness_provisional_after_final. A receiver's genuine
+	// LATE final (the caller already self-closed on a caller-scoped timeout)
+	// is just a duplicate here — the request has no open closure for it to
+	// fill, so it rejects like any post-final final. Preserving the late
+	// answer (true latency, audit) is a domain observability concern, not
+	// substrate truth.
 	hasFinal, err := s.deps.Log.HasFinalResponse(ctx, env.ParentID)
 	if err != nil {
 		return outcome{}, err
 	}
 	if hasFinal {
-		// Late receiver final after caller self-close → observability event.
-		// The exception is narrow (Δ4 / D3): it applies ONLY when the
-		// existing final was the caller self-closing (sender == parent
-		// request sender). A second genuine receiver final after a receiver
-		// final remains a hard duplicate.
-		priorSender, ok, err := s.deps.Log.FinalResponseSender(ctx, env.ParentID)
-		if err != nil {
-			return outcome{}, err
-		}
-		priorWasCallerSelfClose := ok && priorSender == parent.Envelope.Sender.ID
-		isLateReceiverFinal := statusCls.isFinal &&
-			!callerSelfClose &&
-			priorWasCallerSelfClose &&
-			audienceContains(parent.Envelope.Audience, env.Sender.ID)
-		if isLateReceiverFinal {
-			rewriteAsLateFinal(env, parent.Envelope)
-
-			return outcome{}, nil
-		}
 		if statusCls.isFinal {
 			return outcome{
 				RejectReason: HarnessTerminalDuplicate,
@@ -205,26 +190,6 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 	// is_terminal derives purely from the Layer 1 final closed set —
 	// the proto-layer0 §2.5.1 derivation is uniform across all types.
 	return outcome{IsTerminal: statusCls.isFinal}, nil
-}
-
-// LateFinalType is the observability event type a receiver's genuine LATE
-// final is rewritten to once the caller has already self-closed the
-// request with a caller-scoped unanswered_timeout (Δ4 / D3). It is NOT a
-// kind=response final: it is recorded as an event so the receiver's reply
-// is preserved for audit without violating terminal uniqueness, and the
-// WriteResult returned to the receiver is success ("recorded, not an
-// error") rather than a reject.
-const LateFinalType = "response.late_final"
-
-// rewriteAsLateFinal mutates env from a (rejected) duplicate final into an
-// observability event addressed to the original request sender. kind is
-// changed to event; type to LateFinalType; parent_id stays the request id;
-// the receiver remains the sender (it is who actually answered).
-func rewriteAsLateFinal(env *message.Envelope, parent message.Envelope) {
-	env.Kind = message.KindEvent
-	env.Type = LateFinalType
-	// audience stays [parent.sender] (already validated above).
-	_ = parent
 }
 
 func audienceContains(audience message.Audience, want actor.ActorID) bool {

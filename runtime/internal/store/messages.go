@@ -283,30 +283,6 @@ func (m *messages) HasFinalResponse(ctx context.Context, parentID message.ID) (b
 	}
 }
 
-// FinalResponseSender implements storespec.MessageLog — returns the sender.id of
-// the existing Layer 1 final response for parentID (used by harness Step 8
-// to detect a caller self-close so a late receiver final can be rewritten
-// to observability rather than rejected).
-func (m *messages) FinalResponseSender(ctx context.Context, parentID message.ID) (actor.ActorID, bool, error) {
-	if parentID == "" {
-		return "", false, nil
-	}
-	const q = `SELECT sender_id FROM messages
-	            WHERE parent_id = ?
-	              AND kind = 'response'
-	              AND is_terminal = 1
-	            LIMIT 1`
-	var sender string
-	switch err := m.db.QueryRowContext(ctx, q, parentID).Scan(&sender); {
-	case err == nil:
-		return actor.ActorID(sender), true, nil
-	case errors.Is(err, sql.ErrNoRows):
-		return "", false, nil
-	default:
-		return "", false, fmt.Errorf("store: final response sender: %w", err)
-	}
-}
-
 // FindByID implements storespec.MessageLog.
 func (m *messages) FindByID(ctx context.Context, id message.ID) (*storespec.StoredRow, bool, error) {
 	const q = `SELECT id, ts, ts_received, channel_id,

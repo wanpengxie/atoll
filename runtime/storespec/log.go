@@ -79,10 +79,6 @@ type MessageLog interface {
 	// HasFinalResponse reports whether a final response already exists for
 	// parentID (harness step 8 terminal uniqueness).
 	HasFinalResponse(ctx context.Context, parentID message.ID) (bool, error)
-
-	// FinalResponseSender returns the sender of the existing final response
-	// for parentID, if any (late-final detection).
-	FinalResponseSender(ctx context.Context, parentID message.ID) (actor.ActorID, bool, error)
 }
 
 // MessageQuery is the channel-log READ role — segregated from MessageLog so a
