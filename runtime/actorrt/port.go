@@ -13,14 +13,14 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 )
 
-// EmitSink relays an envelope a port's remote actor emitted upward into the
-// channel (the harness write seam). Injected so actorrt stays harness-agnostic:
-// the port owns the wire boundary, the caller owns where emits land.
+// EmitSink is the upward relay callback the substrate invokes when a port's
+// remote actor emits an envelope. Injected so the port owns only the wire
+// boundary: the caller owns where emits land.
 type EmitSink func(ctx context.Context, env *message.Envelope) error
 
-// ResolveFunc is the connect-in auth seam (lightcone /daemon/connect?key=
-// style): it maps a connecting actor's lease credential to the ActorID the
-// substrate binds the connection to. This is the connection's ONE-TIME
+// ResolveFunc is the connect-in auth seam: it maps a connecting actor's lease
+// credential to the ActorID the substrate binds the connection to. This is the
+// connection's ONE-TIME
 // authentication — there is no per-frame re-auth (the stream is trusted once
 // the handshake binds it).
 type ResolveFunc func(leaseID string) (actor.ActorID, error)
@@ -35,8 +35,8 @@ const portSendQueue = 64
 // IS the actor). It mirrors cell:
 //   - Deliver enqueues into a bounded send queue drained to the wire; a full
 //     queue returns ErrMailboxFull (non-blocking, like cell.Deliver).
-//   - the read loop relays the remote's EMIT frames to the harness (emit) and
-//     turns DOWN / EOF / unknown-kind into the SAME self-eviction + DeathSignal
+//   - the read loop relays the remote's EMIT frames to the injected emit
+//     callback and turns DOWN / EOF / unknown-kind into the SAME self-eviction + DeathSignal
 //     a cell raises.
 //
 // Death never self-joins (a goroutine cannot wait on its own exit): die()
@@ -170,8 +170,8 @@ func (p *port) writeLoop() {
 	}
 }
 
-// readLoop relays remote EMIT frames to the harness and turns DOWN / EOF /
-// unknown-kind into death. The wire is a closed set: an unknown kind is a
+// readLoop relays remote EMIT frames via the injected EmitSink and turns
+// DOWN / EOF / unknown-kind into death. The wire is a closed set: an unknown kind is a
 // protocol violation and fail-closes the port (never silently ignored).
 func (p *port) readLoop() {
 	defer p.wg.Done()

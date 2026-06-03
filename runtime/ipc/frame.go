@@ -3,7 +3,7 @@
 // runtime/actorrt as a `port` presence) and ONE out-of-process actor.
 //
 // Model: ONE connection == ONE actor (the Erlang `open_port` model). The
-// connection IS the actor's identity, so NO per-frame actor / worker /
+// connection IS the actor's identity, so NO per-frame actor id or
 // channel id. (Multiplexing many actors over one link = Erlang distribution;
 // an additive future, not pre-built here.)
 //
@@ -16,7 +16,7 @@
 //
 // The wire is medium-agnostic: the Codec wraps io.Reader / io.Writer, so the
 // same protocol runs over a local pipe (same-node out-of-proc actor) or a
-// net.Conn (cloud / proxy-imported out-of-proc actor).
+// net.Conn (a remote out-of-proc actor across a network boundary).
 package ipc
 
 import (
@@ -64,7 +64,7 @@ const MaxFrameBytes = 1 << 24
 // Frame is the port-wire envelope. Length-prefixed JSON: a uint32 BE length
 // header followed by the JSON-marshalled Frame. It carries only the kind + an
 // opaque payload — the connection identifies + authenticates the actor, so no
-// per-frame id, token, actor, worker, or channel rides along.
+// per-frame id, token, actor id, or channel id rides along.
 type Frame struct {
 	Kind    Kind            `json:"kind"`
 	Payload json.RawMessage `json:"payload,omitempty"`

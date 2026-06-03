@@ -13,8 +13,8 @@ import (
 
 // OpenOptions tunes DSN-level pragmas. Zero value is fine for production.
 type OpenOptions struct {
-	// ReadOnly opens the database in read-only mode (mode=ro). Used by
-	// read-only consumers (log tail / closure supervisor) that only scan.
+	// ReadOnly opens the database in read-only mode (mode=ro); no filesystem
+	// write side-effects.
 	ReadOnly bool
 
 	// SkipDDL skips the schema bootstrap step. Useful for tests that
@@ -138,7 +138,7 @@ func verifyChannelLocalSchema(ctx context.Context, db *sql.DB) error {
 // verifySchema fail-fast-validates an opened sqlite against the authoritative
 // baseline shape (schema.go). On any missing table or column it returns a
 // clear "stale <kind> DB" error instructing recreation. It NEVER mutates the
-// DB — no ALTER, no DROP, no silent migration. Channel/daemon sqlite holds
+// DB — no ALTER, no DROP, no silent migration. Channel sqlite holds
 // append-only truth; a shape mismatch means a human must recreate the DB.
 func verifySchema(ctx context.Context, db *sql.DB, kind string, shape map[string][]string) error {
 	for table, cols := range shape {

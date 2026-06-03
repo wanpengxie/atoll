@@ -14,21 +14,19 @@ import (
 // serve.go is the SERVE face of the behaviour base: shared helpers any actor
 // uses to answer a request by emitting a kind=response envelope. It depends
 // only on kernel envelope types plus the consumer-side RequestLookup interface
-// defined below, so it stays pure-kernel and is shared by adapterActor
-// (adapterhost) and the channel system actor (sysactor) — one respond
-// implementation, not two (C3).
+// defined below, so it stays pure-kernel — one respond implementation shared by
+// any actor that serves (C3).
 
-// RequestLookup recovers an original request envelope by id. Defined here on
-// the CONSUMER side (Go idiom) over kernel types only, so behaviour stays
-// pure-kernel and the adapters↛runtime transitive purity holds. The substrate's
-// runtime/storespec.RequestLookup structurally satisfies it; the composition
-// root injects the concrete store.
+// RequestLookup is the consumer-side seam for recovering an original request
+// envelope by id. Defined here on the CONSUMER side (Go idiom) over kernel
+// types only, so behaviour stays pure-kernel. A concrete store satisfies it
+// structurally; the composition root injects the implementation.
 type RequestLookup interface {
 	FindByID(ctx context.Context, id message.ID) (*message.Envelope, bool, error)
 }
 
-// MergeResponsePayload merges an adapter/system payload object with the
-// framework-owned {status, reason[, dedupe]} fields. payload must be a JSON
+// MergeResponsePayload merges a caller-supplied payload object with the
+// protocol-owned {status, reason[, dedupe]} fields. payload must be a JSON
 // object or empty.
 func MergeResponsePayload(payload json.RawMessage, status, reason string) (json.RawMessage, error) {
 	m := map[string]json.RawMessage{}
@@ -90,10 +88,9 @@ func BuildResponseEnvelope(
 	return BuildResponseFromRequest(request, clock, sender, requestID, spec)
 }
 
-// BuildResponseFromRequest is the lookup-free core: it builds the response
-// envelope directly from an in-hand request envelope. A compute cell (which has
-// NO local truth to look up) caches the dispatched request and uses this so its
-// Respond/Provisional work without a round-trip to the home harness.
+// BuildResponseFromRequest is the lookup-free core: given an already-retrieved
+// request envelope, it assembles the kind=response envelope directly. Use when
+// the caller already holds the request in hand and needs no store round-trip.
 func BuildResponseFromRequest(
 	request *message.Envelope,
 	clock func() time.Time,

@@ -6,22 +6,18 @@ package harness
 // it co-evolves with the harness steps, so it lives with the engine, not in
 // the kernel ADT layer.
 //
-// Relocated from the deleted kernel/message (which held 32 values including
-// HarnessWorkerFencingStale). v2 drops HarnessWorkerFencingStale — the
-// channel-write fence is obsolete under single-server-harness-writer
-// (runtime-construction-spec §4.1) — HarnessIDDuplicateConflict — the v1
-// id-dedupe step was retired (message.id is now a random uuid; an id UNIQUE
-// collision is a pure integrity error surfaced via classifyAppendErr's wire
-// string) — and HarnessVisibilityAudienceInvalid, a tombstone reason no step
-// could emit (the visibility-scoped audience wildcard it guarded was removed)
-// — and HarnessAudienceHandlerMismatch (substrate went type-agnostic: no
-// type→handler routing left to mismatch): an errno vocabulary is exactly the
-// set of reasons a producer can stamp, so a word with zero producers is not in
-// it — leaving 28.
+// v2 drops several v1 reasons because an errno vocabulary is exactly the set
+// of reasons a producer can stamp, so a word with zero producers is not in it:
+// the channel-write fence is obsolete under a single harness writer
+// (runtime-construction-spec §4.1); the v1 id-dedupe step was retired
+// (message.id is now a random uuid; an id UNIQUE collision is a pure integrity
+// error surfaced via classifyAppendErr's wire string); the visibility-scoped
+// audience wildcard was removed; and substrate went type-agnostic (no
+// type→handler routing left to mismatch) — leaving 28.
 //
-// No HTTPStatus() method: reason→HTTP-status (strerror) is a binding concern
-// that lives in server/gateway, not on this engine type. This type only
-// carries String() (the wire form).
+// No HTTPStatus() method: mapping a reason to an HTTP status code (strerror)
+// is a transport binding concern, not a substrate engine concern. This type
+// only carries String() (the wire form).
 type HarnessRejectReason string
 
 const (
@@ -71,8 +67,8 @@ const (
 // (No exported AllHarnessRejectReasons enumeration: the const block above IS
 // the closed set. A duplicate exported slice is a second, mutable
 // representation of a protocol closed set — an importer could append/rewrite
-// it — with no substrate consumer. Iterate the wire strings at the boundary
-// that needs them, e.g. server/gateway's reason→HTTP-status map.)
+// it — with no substrate consumer. Iterate the wire strings at the transport
+// binding boundary that needs them, e.g. a reason→HTTP-status map.)
 
 // String returns the wire form.
 func (r HarnessRejectReason) String() string { return string(r) }

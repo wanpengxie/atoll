@@ -19,11 +19,11 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// OpenRequestSource queries a dead actor's in-flight requests (those without a
-// final response). It is the consumer-side narrowing of the substrate's read
-// contract — its signature MATCHES runtime/storespec (returns StoredRow), so the
-// runtime store satisfies it directly with no adapter. The supervisor reads each
-// row's Envelope to materialise receiver_unavailable on cell death.
+// OpenRequestSource provides the set of in-flight requests addressed to a given
+// actor (those without a final response). The interface is narrow by design —
+// only what the supervisor needs to materialise receiver_unavailable on cell
+// death — and returns storespec.StoredRow so the supervisor can read each row's
+// Envelope.
 type OpenRequestSource interface {
 	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID) ([]storespec.StoredRow, error)
 }
@@ -36,8 +36,9 @@ type Channel struct {
 
 	// Death-signal closure (author #3): on cell death the supervisor writes
 	// receiver_unavailable for every in-flight request addressed to the dead
-	// actor. nil chain/openReqs (e.g. a pure compute host with no local truth)
-	// → OnDeath only despawns; death is materialised at the home via DeathFrame.
+	// actor. nil chain/openReqs → OnDeath only despawns the dead cell and writes
+	// no terminals locally; the caller is responsible for closing the
+	// death-signal elsewhere.
 	chain    rtharness.Writer
 	openReqs OpenRequestSource
 	clock    func() time.Time
@@ -50,9 +51,9 @@ type Channel struct {
 // Config assembles a channel.
 type Config struct {
 	ChannelID channel.ID
-	// System is the channel's固有 system cell (the assembler passes the concrete
-	// lib/sysactor instance as a plain actorrt.Actor — channelkit assembles cells,
-	// it does not know domain actor types).
+	// System is the channel's固有 system cell; pass any actorrt.Actor
+	// implementation. channelkit assembles cells and does not know domain actor
+	// types.
 	System actorrt.Actor
 	// Chain + OpenRequests wire the death-signal closure (author #3).
 	Chain        rtharness.Writer
@@ -87,7 +88,7 @@ func New(cfg Config) *Channel {
 	return c
 }
 
-// Cells exposes the runtime so the deployment layer spawns business cells.
+// Cells returns the runtime so callers can spawn additional cells into this channel.
 func (c *Channel) Cells() *actorrt.Runtime { return c.cells }
 
 // OnDeath implements actorrt.Supervisor: it materialises receiver_unavailable
@@ -105,9 +106,9 @@ func (c *Channel) OnDeath(ctx context.Context, sig actorrt.DeathSignal) {
 }
 
 // MaterialiseReceiverUnavailable is the substrate's closure obligation (author
-// #3), factored out so BOTH a local cell death (Channel.OnDeath) and a remote
-// compute cell death (the home's fleet, on a DeathFrame) materialise the same
-// terminal: for every in-flight request addressed to the dead actor, write a
+// #3), factored out so that both a local cell death (Channel.OnDeath) and any
+// remote death-signal path materialise the same terminal: for every in-flight
+// request addressed to the dead actor, write a
 // SYSTEM-authored receiver_unavailable response into truth. harness Step 8
 // authorises sender==system + reason==receiver_unavailable as the substrate
 // author. Without this a dead cell — local or across the wire — is a black hole

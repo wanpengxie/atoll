@@ -22,8 +22,8 @@ func TestAudienceStrings(t *testing.T) {
 	}{
 		{"empty", Audience{}, []string{}},
 		{"single", Audience{"agent:channel-agent"}, []string{"agent:channel-agent"}},
-		{"multi preserves order", Audience{"tool:xhs", "agent:bob", "human:alice"},
-			[]string{"tool:xhs", "agent:bob", "human:alice"}},
+		{"multi preserves order", Audience{"tool:example", "agent:bob", "human:alice"},
+			[]string{"tool:example", "agent:bob", "human:alice"}},
 	}
 	for _, c := range cases {
 		c := c
@@ -50,12 +50,12 @@ func TestAudienceStrings(t *testing.T) {
 // broadcast is an explicit enumeration (no "*" wildcard in the set).
 func TestAudienceRoundTrip(t *testing.T) {
 	t.Parallel()
-	src := Audience{"agent:a", "agent:a", "tool:xhs"} // duplicates allowed; arity preserved
+	src := Audience{"agent:a", "agent:a", "tool:example"} // duplicates allowed; arity preserved
 	raw, err := json.Marshal(src)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if string(raw) != `["agent:a","agent:a","tool:xhs"]` {
+	if string(raw) != `["agent:a","agent:a","tool:example"]` {
 		t.Errorf("Audience wire form = %s, want a bare actor-id string array", raw)
 	}
 	var got Audience

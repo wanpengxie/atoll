@@ -44,7 +44,7 @@ func newDescribeActor(t *testing.T, mod behavior.Module) (*adapterActor, *[]*mes
 // not a predefined declaration field.
 func TestDescribe_DynamicSelfAnswer(t *testing.T) {
 	mod := describerModule{apis: []introspect.APIDescriptor{
-		{Name: "xhs.publish", Desc: "publish a note", Schema: json.RawMessage(`{"type":"object"}`)},
+		{Name: "test.action", Desc: "perform an action", Schema: json.RawMessage(`{"type":"object"}`)},
 	}}
 	a, written := newDescribeActor(t, mod)
 
@@ -66,8 +66,8 @@ func TestDescribe_DynamicSelfAnswer(t *testing.T) {
 	if body.Name != "d" {
 		t.Fatalf("name=%s, want d", body.Name)
 	}
-	if len(body.APIs) != 1 || body.APIs[0].Name != "xhs.publish" {
-		t.Fatalf("apis=%+v, want [xhs.publish] from the live Describe answer", body.APIs)
+	if len(body.APIs) != 1 || body.APIs[0].Name != "test.action" {
+		t.Fatalf("apis=%+v, want [test.action] from the live Describe answer", body.APIs)
 	}
 }
 

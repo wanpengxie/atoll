@@ -12,8 +12,8 @@
 // The package depends on kernel/actor for L0 sender identity primitives.
 // Pure proto: no context, no storage, no engine interfaces. Harness reject
 // reasons + install reasons are the write/install ENGINES' errno vocabulary
-// and live with those engines in runtime (not here); reason→HTTP mapping is
-// a binding concern and lives in server/gateway.
+// and live with those engines outside this package; reason→HTTP mapping is
+// a binding concern, also outside this package.
 package message
 
 // Kind is the v4 message ADT classifier (event / request / response).

@@ -45,7 +45,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_terminal_response_per_request
 -- (v2: actor_cursors table removed. A per-actor durable consumption offset is
 -- NOT substrate truth: only a log-PULL consumer that must resume gap-free needs
 -- one, and that offset is the consumer's own bookkeeping (it knows where it left
--- off), persisted in its own lib/domain state. The substrate's universal log
+-- off), persisted by the consumer itself outside the substrate. The substrate's universal log
 -- primitive is the seq-ordered message log + ReadAfterSeq; v2 actors are
 -- push-mailbox consumers (death-closure, not replay), so no actor
 -- pulls-and-resumes. Additive re-add when a real durable-pull actor demands it.)
@@ -68,10 +68,9 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
   ON actor_registry(actor_kind)
   WHERE deregistered_at IS NULL;
 
--- (v2: worker_locks table removed. The v1 daemon-side channel-write lease is
--- obsolete — the channel has a single writer, server harness, by construction
--- (proto-v2-physical §4); worker-instance fencing is a volatile compute-side
--- lease, not a channel-sqlite row.)
+-- (v2: worker_locks table removed. channel-sqlite is append-only truth;
+-- write-path exclusivity is a structural invariant of the single write path
+-- (proto-v2-physical §4), not a per-row lease.)
 
 -- (v2: action_ledger table removed. Turn-replay idempotency (L2 §1.4.10.1) had
 -- no triggering scenario left — P-A1 retired at-least-once redelivery and the
@@ -85,10 +84,8 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
 // initialization order. Tests assert that every name exists in
 // `sqlite_master` after OpenChannel.
 //
-// v2: there is NO daemon-level persistent store. The v1 daemon-local
-// bootstrap_registry contradicted the v2 topology (daemon = attached compute,
-// no truth — proto-v2-physical §4); channel-create + its crash-recovery state
-// is server-side truth, not a daemon-local sqlite. Removed.
+// ChannelLocalTables contains only channel-local truth tables. The former
+// bootstrap_registry table was not channel-local truth and has been removed.
 var ChannelLocalTables = []string{
 	"messages",
 	"actor_registry",

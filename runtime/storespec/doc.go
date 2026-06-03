@@ -1,21 +1,19 @@
 // Package storespec is the kernel-only leaf that declares the channel
 // store's stateful seam contracts — the interfaces runtime/internal/store
-// implements over sqlite and the engine consumers (harness, server) depend on.
+// implements over sqlite.
 //
 // Why a dedicated leaf (runtime-construction-spec §1.3 / topology §8.3):
-// these contracts are MULTI-consumer (the harness writes the log + reads the
-// actor registry to validate audience; the server reads projections + tails
-// the log). Putting them in any one consumer (e.g. runtime/harness) would
-// force the others to import that consumer just for a contract, scrambling the
-// dependency graph. A kernel-only leaf breaks the store ↔ harness cycle
-// (store implements storespec; harness consumes storespec; neither imports
-// the other) — the Go-idiomatic ports pattern.
+// these contracts are MULTI-consumer. Putting the contract inside any one
+// consumer would force every other consumer to import that package just for
+// the contract, scrambling the dependency graph. A kernel-only leaf keeps the
+// contract independent of both the implementation (store) and the consumers —
+// the Go-idiomatic ports pattern: a consumer imports the seam, never the
+// implementation.
 //
-// storespec imports ONLY kernel (pure types). It declares NO fencing
-// (v2 channel single-writer = server harness by construction; channel-write
-// fence is obsolete — runtime-construction-spec §4.1). AppendError.Reason is
-// a plain string (the wire form of a harness reject reason) so storespec does
-// not import runtime/harness for the typed constant — that would re-introduce
-// the cycle (storespec → harness → storespec). The harness chain maps the
-// string back to its typed HarnessRejectReason at the boundary.
+// storespec imports ONLY kernel (pure types). It declares NO fencing (the
+// channel has a single write path by construction; the channel-write fence is
+// obsolete — runtime-construction-spec §4.1). AppendError.Reason is a plain
+// string diagnostic code defined by the store implementation, so storespec
+// imports nothing beyond kernel; the consumer maps the string into its own
+// error domain at the boundary.
 package storespec

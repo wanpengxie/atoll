@@ -8,8 +8,8 @@ import (
 
 // stepCallerAuth implements proto-layer1 §2.0 step 0+1 — caller principal
 // validation. The harness consumes the CallerContext attached via
-// CtxWithCaller (set by the binding edge: the server write-loop / adapter
-// framework). When no caller is attached we reject harness_engine_acl_denied
+// CtxWithCaller (set by the binding edge before the call). When no caller is
+// attached we reject harness_engine_acl_denied
 // (defensive — every legitimate edge wires it).
 //
 // Channel mismatch detection is split:

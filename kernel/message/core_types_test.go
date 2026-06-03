@@ -61,7 +61,7 @@ func TestLookupCoreTypeRejectsNonCore(t *testing.T) {
 		"agent.progress", // collapsed into agent.text + visibility=system
 		"system.event",   // pre-v1 spelling, intentionally not aliased
 		"system_event",   // not the canonical core.system_event spelling
-		"xhs.publish",    // Layer-3 business type
+		"example.action", // Layer-3 domain type (not a core type)
 		"Human.Text",     // wrong case
 		"human.text ",    // trailing space
 		"file.deleted",   // not in the v1 set

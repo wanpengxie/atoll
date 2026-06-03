@@ -56,10 +56,10 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (o
 	}
 	// (business type AND actor.* introspection: no substrate kind rule — falls
 	// through. actor.* is type-agnostic to the substrate; its req/resp shape is
-	// the lib/introspect convention, not a substrate gate.)
+	// an upper-layer convention, not a substrate gate.)
 
 	// (2) audience emptiness — single closure validation centre. The substrate
-	//     does not author routing; a named audience must arrive from ingress/domain.
+	//     does not author routing; a named audience must arrive from the caller.
 	if len(env.Audience) == 0 {
 		return outcome{RejectReason: HarnessAudienceEmpty, Detail: "envelope.audience empty"}, nil
 	}

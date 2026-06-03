@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// CredentialStore is the contract an adapter uses to fetch secrets (api
+// CredentialStore is the seam for fetching and managing secrets (api
 // keys, tokens, signing material). The composition root wires a concrete
 // backend.
 //
@@ -23,8 +23,8 @@ type CredentialStore interface {
 	Delete(ctx context.Context, key string) error
 }
 
-// ErrCredentialMissing is wrapped by adapters when a required credential
-// is absent. Distinct from infrastructure errors so callers can decide
+// ErrCredentialMissing is returned when a required credential key is
+// absent. Distinct from infrastructure errors so callers can decide
 // whether to retry vs fail-fast.
 var ErrCredentialMissing = errors.New("behavior: credential missing")
 

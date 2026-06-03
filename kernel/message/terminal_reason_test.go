@@ -82,7 +82,7 @@ func TestIsFinalStatus(t *testing.T) {
 		"processing",  // Layer-2 provisional
 		"deferred",    // Layer-2 provisional
 		"unavailable", // Layer-2 provisional
-		"xhs.posted",  // Layer-3 business extension
+		"example.custom_status", // a domain-defined Layer-3 status
 		"Completed",   // wrong case
 		"success",     // not in set
 		"done",        // not in set

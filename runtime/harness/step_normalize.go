@@ -55,9 +55,9 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (outcome
 		env.CorrelationID = env.ID
 	}
 
-	// payload baseline. proto-layer0 §1.1 admits a missing payload for
-	// kind=event; store and adapter handlers still expect a JSON object, so
-	// normalize substitutes `{}` on the wire before reaching them.
+	// payload baseline: proto-layer0 §1.1 defines the canonical wire form as a
+	// JSON object. normalize substitutes `{}` when the caller omits payload so
+	// every appended row carries a valid JSON value.
 	if len(env.Payload) == 0 {
 		env.Payload = json.RawMessage("{}")
 	}

@@ -9,12 +9,13 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// ModuleContext is the helper bundle the adapter host hands an adapter
-// Module at Init (L2 §8.1 ModuleContext).
+// ModuleContext is the helper bundle injected into a Module at Init — it
+// carries the respond/emit helpers plus the actor's addressing context
+// (L2 §8.1 ModuleContext).
 //
-// Adapter handlers grab the helpers off ModuleContext and call them —
-// they do NOT pull dependencies in directly. This is the kernel-level
-// seam that lets tests substitute every collaborator.
+// A Module grabs the helpers off ModuleContext and calls them — it does
+// NOT pull dependencies in directly. This is the kernel-level seam that
+// lets tests substitute every collaborator.
 type ModuleContext struct {
 	// AdapterActorID is the actor_registry id this adapter owns
 	// (Declaration.ActorID).
@@ -55,11 +56,11 @@ type ModuleContext struct {
 	//     (harness_response_status_namespace_mismatch /
 	//     harness_response_status_invalid).
 	//
-	// The framework reuses the Respond envelope shape (audience = parent
-	// request sender, parent_id = requestID, type = request.type, sender =
-	// adapter actor). Unlike Respond, it does NOT touch the pending
-	// correlation registry or F3 timer; the request remains in flight until
-	// the final Respond / Fail or O3 fallback.
+	// Reuses the Respond envelope shape (audience = parent request sender,
+	// parent_id = requestID, type = request.type, sender = the actor).
+	// Unlike Respond, it does NOT touch the pending correlation registry or
+	// F3 timer; the request remains in flight until the final Respond / Fail
+	// or O3 fallback.
 	Provisional ProvisionalFunc
 }
 
@@ -85,13 +86,12 @@ type RespondResult struct {
 	MessageID message.ID
 }
 
-// RespondFunc is the F5 contract — adapter calls it inside Handle (or later,
-// once its own async work completes) to emit the terminal response.
+// RespondFunc is the F5 contract — the caller invokes it inside Handle (or
+// later, once its own async work completes) to emit the terminal response.
 //
-// The framework constructs the envelope (sender = adapter actor,
-// kind = response, parent_id = requestID, payload = wrapped via
-// RespondOptions), runs it through the harness, and returns the
-// resulting RespondResult.
+// Constructs the envelope (sender = the actor, kind = response,
+// parent_id = requestID, payload = wrapped via RespondOptions), runs it
+// through the harness, and returns the resulting RespondResult.
 type RespondFunc func(
 	ctx context.Context,
 	requestID CorrelationKey,
@@ -107,10 +107,10 @@ type ProvisionalOptions struct {
 	Visibility message.Visibility
 }
 
-// ProvisionalFunc is the adapter-facing provisional response helper. The
-// framework constructs the envelope (kind=response, sender=adapter actor,
-// parent_id=requestID, payload includes status + user-supplied fields)
-// and writes it through the harness chain. Final closure state (pending
+// ProvisionalFunc is the provisional response helper. Constructs the
+// envelope (kind=response, sender=the actor, parent_id=requestID, payload
+// includes status + caller-supplied fields) and writes it through the
+// harness chain. Final closure state (pending
 // registry + F3 timer) is intentionally untouched — provisional response
 // does not resolve the request.
 type ProvisionalFunc func(
@@ -131,9 +131,8 @@ type FailOptions struct {
 	Visibility message.Visibility
 }
 
-// FailFunc is the adapter-facing failed terminal helper. The framework
-// writes first, then closes correlation/timer only after accepted or
-// terminal_duplicate.
+// FailFunc is the failed terminal helper. Writes first, then closes
+// correlation/timer only after accepted or terminal_duplicate.
 type FailFunc func(
 	ctx context.Context,
 	requestID CorrelationKey,

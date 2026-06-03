@@ -53,7 +53,7 @@ func TestEnvelopeRoundTripFullyPopulated(t *testing.T) {
 		ParentID:      "msg-parent",
 		CorrelationID: "corr-1",
 		Visibility:    VisibilityPrivate,
-		Audience:      Audience{"tool:xhs", "agent:bob"},
+		Audience:      Audience{"tool:example", "agent:bob"},
 		ExpiresAt:     &expiresAt,
 	}
 	got := roundTrip(t, src)
@@ -156,7 +156,7 @@ func TestEnvelopeFieldSet1To1WithContentFields(t *testing.T) {
 		ParentID:      "msg-parent",
 		CorrelationID: "corr-1",
 		Visibility:    VisibilityPublic,
-		Audience:      Audience{"tool:xhs"},
+		Audience:      Audience{"tool:example"},
 		ExpiresAt:     &expiresAt,
 	}
 	raw, err := json.Marshal(env)

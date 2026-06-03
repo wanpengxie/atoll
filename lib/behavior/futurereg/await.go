@@ -191,8 +191,8 @@ func (w *watcher) Events() <-chan WatchEvent { return w.events }
 //
 // F3 invariant: a FINAL event is NEVER dropped. Under a provisional storm the
 // 16-slot buffer can fill; if we blindly dropped on full (the old behaviour)
-// the final could be lost, and after the stream closes the SDK/router Await
-// would mis-report a timeout. So:
+// the final could be lost, and after the stream closes the caller's subsequent
+// Await would observe a spurious timeout instead of the final. So:
 //
 //   - provisional: best-effort — push if there is room, else drop the OLDEST
 //     buffered provisional to make room (keep the buffer fresh; never block

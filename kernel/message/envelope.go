@@ -24,8 +24,8 @@ type Sender struct {
 // bundled into the nested Sender object).
 //
 // Store-derived columns (`seq`, `is_terminal`) are NOT
-// part of the envelope — they live on the runtime/store row that wraps it
-// (target-state §3.7). The substrate carries no delivery/scheduling
+// part of the envelope — they are persistence-layer derived columns, not
+// wire proto fields (target-state §3.7). The substrate carries no delivery/scheduling
 // metadata on the message: delivery outcome is the closure terminal
 // response (three reasons), delivery observability is the recipient
 // cursor, and scheduling is an upstream actor concern — none of which
@@ -65,7 +65,7 @@ type Envelope struct {
 //
 // Provisional response statuses — both the Layer 2 core closed set
 // (received / queued / processing / deferred / unavailable) and Layer 3
-// business namespace extensions (`<adapter>.<name>`) — are NOT final
+// business namespace extensions (`<namespace>.<name>`) — are NOT final
 // and return false here. is_terminal derivation uses this helper:
 //
 //	is_terminal = (kind == "response" && IsFinalStatus(payload.status))

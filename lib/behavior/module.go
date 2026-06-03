@@ -20,14 +20,15 @@ import (
 // dispatch is its Handle, not a declared type list (the substrate is
 // type-agnostic — it does not gate on business types, so neither does lib).
 
-// Declaration is the static IDENTITY an adapter Module exposes at install time
-// — purely what the framework needs to address and spawn the actor. The actor's
+// Declaration is the static IDENTITY a Module exposes at install time
+// — purely what the host needs to address and spawn the actor. The actor's
 // capability surface is NOT declared here (it is the dynamic describe
 // self-answer, see Describer); its request dispatch is its Handle, not a
 // declared type list.
 type Declaration struct {
-	// Name is the adapter identifier (e.g. "xhs", "feishu"). Logging + the
-	// describe identity fallback. Non-empty + unique within a channel.
+	// Name is the actor's short, human-readable identifier. Non-empty,
+	// unique within a channel. Used in logging and as the describe identity
+	// fallback.
 	Name string
 
 	// ActorID is the membership row this adapter owns. Every request envelope
@@ -39,17 +40,17 @@ type Declaration struct {
 	Binding actor.Binding
 }
 
-// Module is the gen_server callback contract every adapter implements
-// (lib/behavior = coagent's OTP behaviour). The host calls Declares first,
-// then Init, then Handle on demand, finally Shutdown.
+// Module is the gen_server-style callback contract for an actor (coagent's
+// Erlang behaviour analogue). The host goroutine calls Declares first, then
+// Init, then Handle on demand, finally Shutdown.
 //
 // SERIAL CONTRACT (v2, dismantle-spec §3 — the abstraction returning home):
-// the adapterhost guarantees ALL Module callbacks (Declares / Init / Handle /
-// Shutdown) are invoked SERIALLY by this adapter actor's single cell
-// goroutine. Inbound external I/O (device/webhook results) is the adapter's own
+// the host guarantees ALL Module callbacks (Declares / Init / Handle /
+// Shutdown) are invoked SERIALLY by this actor's single cell
+// goroutine. Inbound external I/O (device/webhook results) is the Module's own
 // private business: its reader folds results back by self-delivering an envelope
 // onto its cell (ActorContext.Deliver), handled in the same serial Receive — NOT
-// a framework callback. A Module MUST NOT depend on concurrent
+// a host callback. A Module MUST NOT depend on concurrent
 // invocation, and MUST NOT read or write its own logical state from a
 // goroutine it spawned itself. External resources (HTTP client, watcher
 // goroutine) may carry their own synchronisation, but their results MUST be

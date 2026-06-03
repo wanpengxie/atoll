@@ -5,14 +5,14 @@ package actor
 //
 // Closed set semantics:
 //
-//   - embedded                  — adapter runs in the channel runtime process,
-//     no wire out of process (in-process tool calls).
-//   - runtime_outbound          — adapter runs in the channel runtime process,
-//     actively dials external services
+//   - embedded                  — the actor is co-located in the channel host
+//     process, no wire out of process (in-process calls).
+//   - runtime_outbound          — the actor is co-located in the channel host
+//     process and actively dials external services
 //     (transport choice — HTTP / gRPC / etc. — is
 //     implementation freedom).
-//   - runtime_inbound_via_relay — adapter runs in the channel runtime process,
-//     remote peer connects via server relay (transport choice is
+//   - runtime_inbound_via_relay — the actor is co-located in the channel host
+//     process; a remote peer connects in via a relay (transport choice is
 //     implementation freedom).
 type Binding string
 

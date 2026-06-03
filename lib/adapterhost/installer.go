@@ -16,8 +16,7 @@ import (
 )
 
 // InstallDeps bundles the channel-level services an adapter cell needs. The
-// composition root (server channelhost for embedded adapters, daemon host for
-// attached ones) supplies these and Spawns the returned actor.
+// composition root supplies these and Spawns the returned actor.
 type InstallDeps struct {
 	ChannelID channel.ID
 	Chain     rtharness.Writer
@@ -37,8 +36,8 @@ type InstallResult struct {
 	Actor       actorrt.Actor
 }
 
-// Install validates a module's declaration, publishes its type rows, and
-// constructs an adapterActor cell (collapse of Manager.installOne manager.go:231).
+// Install validates a module's declaration and constructs an adapterActor cell
+// for the caller to Spawn.
 func Install(ctx context.Context, mod behavior.Module, deps InstallDeps) (InstallResult, error) {
 	if mod == nil {
 		return InstallResult{}, errors.New("adapterhost: Install nil module")
@@ -68,7 +67,7 @@ func Install(ctx context.Context, mod behavior.Module, deps InstallDeps) (Instal
 
 	// NOTE: type vocabulary is NOT published from here. type_registry left the
 	// substrate (no type gate, no RPC dispatch); the type catalog is a domain
-	// concern whose home is deferred to daemon implementation (pain-driven).
+	// concern outside this package.
 
 	a := &adapterActor{
 		self:        decl.ActorID,

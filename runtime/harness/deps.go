@@ -99,9 +99,9 @@ func (d Deps) Validate() error {
 
 type ctxKeyCaller struct{}
 
-// CtxWithCaller returns a child ctx carrying caller. Use at the edge
-// (the server write-loop / adapter framework respond) before invoking
-// Chain.Write.
+// CtxWithCaller returns a child ctx carrying the caller identity. Must be set
+// by the binding edge before invoking Chain.Write; absence is rejected as
+// harness_engine_acl_denied.
 func CtxWithCaller(ctx context.Context, c CallerContext) context.Context {
 	return context.WithValue(ctx, ctxKeyCaller{}, c)
 }

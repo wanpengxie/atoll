@@ -4,11 +4,11 @@
 // (actor.list) as a composed view (membership ∧ presence). It is ADVISORY —
 // never a dispatch gate (P15/P16): reachability authority is send→terminal, and
 // the dispatch path never reads this actor's view. It runs as a channel固有
-// cell on the channel home (server, v2).
+// cell, spawned once per channel at channel creation time.
 //
-// Two-axis model (runtime/storespec.Record): membership is durable server truth
-// (the registry); PRESENCE is volatile and lives HERE, never in the truth log
-// (fleet Delivers lease reports straight to this cell's mailbox, bypassing the
+// Two-axis model (runtime/storespec.Record): membership is durable registry
+// truth; PRESENCE is volatile and lives HERE, never in the truth log (lease
+// reports are delivered straight to this cell's mailbox, bypassing the
 // harness). readiness is NOT a third axis — whether an actor can service a
 // request is the OUTCOME of send→terminal, not a state the system actor
 // projects or composes.
@@ -70,12 +70,12 @@ func New(deps Deps) *SystemActor {
 	}
 }
 
-// PresenceReport is one compute lease report about an actor's volatile physical
-// presence. The fleet (server-side, tracking compute leases) folds it onto the
-// channel system actor's cell via cells.Deliver(NewPresenceSignal(r)) — an
-// INTERNAL control signal that NEVER enters the truth log (presence is volatile,
-// not a channel event; the harness is never asked to write it). It travels
-// compute → server fleet → this cell, so the json tags are wire-stable.
+// PresenceReport is one compute-lease report about an actor's volatile physical
+// presence: whether the actor holds a live lease, and for how long. It is folded
+// onto this cell via cells.Deliver(NewPresenceSignal(r)) — an INTERNAL control
+// signal that NEVER enters the truth log (presence is volatile, not a channel
+// event; the harness is never asked to write it). The json tags are stable
+// because the report is marshalled to/from an envelope payload.
 type PresenceReport struct {
 	Actor      actor.ActorID `json:"actor"`
 	Present    bool          `json:"present"`
@@ -88,10 +88,10 @@ type PresenceReport struct {
 // cells.Deliver (the mailbox), folded serially by Receive.
 const presenceSignalType = "sysactor.__presence__"
 
-// NewPresenceSignal builds the internal control envelope the fleet delivers to
-// fold a presence report onto this channel's system actor cell. The subject
-// actor rides in the payload (not the sender — the report is delivered on the
-// subject's behalf).
+// NewPresenceSignal wraps a PresenceReport into the internal control envelope
+// for direct delivery to this cell's mailbox (bypassing the truth log). The
+// subject actor rides in the payload (not the sender — the report is delivered
+// on the subject's behalf).
 func NewPresenceSignal(r PresenceReport) *message.Envelope {
 	payload, _ := json.Marshal(r)
 	return &message.Envelope{Kind: message.KindEvent, Type: presenceSignalType, Payload: payload}
@@ -99,8 +99,8 @@ func NewPresenceSignal(r PresenceReport) *message.Envelope {
 
 // Receive handles one envelope serially (implements runtime/actorrt.Actor).
 func (s *SystemActor) Receive(ctx context.Context, env *message.Envelope) error {
-	// Internal presence control signal (fleet-delivered to the mailbox, never
-	// truth). Folded serially on the cell goroutine like any other message.
+	// Internal presence control signal (direct mailbox delivery, never written
+	// to truth). Folded serially on the cell goroutine like any other message.
 	if env.Type == presenceSignalType {
 		s.applyPresence(env)
 		return nil

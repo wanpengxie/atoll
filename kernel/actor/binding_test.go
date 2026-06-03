@@ -53,7 +53,7 @@ func TestParseKindRejectsOutOfSet(t *testing.T) {
 		" human",   // surrounding whitespace not trimmed
 		"human ",   //
 		"human\n",  //
-		"tool:xhs", // an ActorID, not a Kind
+		"tool:foo", // an ActorID, not a Kind
 	} {
 		got, ok := actor.ParseKind(raw)
 		if ok {
@@ -70,8 +70,8 @@ func TestParseKindRejectsOutOfSet(t *testing.T) {
 //
 // Contract under test (binding.go): same closed-set gate semantics as Kind.
 // The canonical strings are the wire/SQL forms; ParseBinding accepts exactly
-// those and rejects everything else, including the retired transport-axis
-// vocabulary (daemon_rpc / in_worker_bus / worker / federated).
+// those and rejects everything else, including any retired transport-axis
+// names.
 
 func TestParseBindingAcceptsClosedSet(t *testing.T) {
 	cases := []struct {
@@ -133,7 +133,7 @@ func TestSystemActorID(t *testing.T) {
 }
 
 func TestActorIDStringRoundTrip(t *testing.T) {
-	for _, raw := range []string{"system", "user:abc", "agent:planner", "tool:xhs", ""} {
+	for _, raw := range []string{"system", "user:abc", "agent:planner", "tool:search", ""} {
 		if got := actor.ActorID(raw).String(); got != raw {
 			t.Errorf("ActorID(%q).String()=%q want %q", raw, got, raw)
 		}

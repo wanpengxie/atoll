@@ -47,11 +47,10 @@ type messages struct {
 
 // NewMessages returns a *messages bound to the channel sqlite.
 //
-// v2: no fencing — the channel has a SINGLE writer (server harness) by
-// construction (proto-v2-physical §4), so the channel-write fence is
-// obsolete. No outbox observer — the v1 framework-owned same-tx side-table
-// projection is removed (truth lives on server; client push is the gateway
-// seam).
+// v2: no fencing — the channel has a SINGLE write path by construction
+// (proto-v2-physical §4), so the channel-write fence is obsolete. No outbox
+// observer — the store is a pure persistence sink; any fan-out to compute is a
+// concern above this layer, not a same-tx side-table projection here.
 func newMessages(db *sql.DB) *messages { return &messages{db: db} }
 
 // Append implements storespec.MessageLog. The harness supplies the
@@ -152,9 +151,8 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 	return storespec.AppendResult{Seq: storespec.Seq(seq)}, nil
 }
 
-// MaxSeq returns the highest seq written for the channel (0 when empty). It is
-// the client cursor anchor (last_received_seq): an SDK fetches it before
-// subscribing so the WS tail starts from "now".
+// MaxSeq returns the highest committed seq in this channel's message log
+// (0 when empty).
 func (m *messages) MaxSeq(ctx context.Context) (int64, error) {
 	const q = `SELECT COALESCE(MAX(seq), 0) FROM messages`
 	var seq int64
@@ -165,9 +163,8 @@ func (m *messages) MaxSeq(ctx context.Context) (int64, error) {
 }
 
 // ReadAfterSeq returns up to `limit` envelopes with seq > afterSeq for the
-// channel, in seq order. It is the client-push tail: a subscribed WS reads
-// forward from its cursor, so no committed envelope is ever missed (the push
-// notification only signals "something new" — correctness is seq-based here).
+// channel, in ascending seq order. seq is the monotonic ordering guarantee:
+// reading forward from a cursor never skips a committed row.
 func (m *messages) ReadAfterSeq(ctx context.Context, afterSeq int64, limit int) ([]storespec.StoredRow, error) {
 	if limit <= 0 {
 		limit = 256
@@ -198,14 +195,12 @@ func (m *messages) ReadAfterSeq(ctx context.Context, afterSeq int64, limit int) 
 	return out, rows.Err()
 }
 
-// OpenRequestsForActor returns ALL pending request rows addressed to actorID
-// (first audience member) with no final response yet — regardless of
-// expires_at. Used by the actorrt death-signal supervisor: when a cell dies,
-// the substrate closes EVERY in-flight request to the dead actor with
-// receiver_unavailable, so the drain is unbounded by construction (a limit
-// would leave the overflow callers hanging — broken closure). The substrate
-// never guesses "slow" — it only reports death it positively observed
-// (construction-spec §3.3).
+// OpenRequestsForActor returns ALL open request rows whose first audience
+// member is actorID and that have no terminal response yet — regardless of
+// expires_at. It is unbounded by construction: closing a dead actor's
+// in-flight requests must drain EVERY one of them (a limit would leave the
+// overflow callers hanging — broken closure). The store reports only the open
+// set it positively holds; it never guesses "slow" (construction-spec §3.3).
 func (m *messages) OpenRequestsForActor(ctx context.Context, actorID actor.ActorID) ([]storespec.StoredRow, error) {
 	const q = `SELECT id, ts, ts_received, channel_id,
 	                  sender_kind, sender_id,

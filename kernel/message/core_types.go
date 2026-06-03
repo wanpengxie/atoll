@@ -27,9 +27,9 @@ type CoreTypeRule struct {
 //
 // Likewise `agent.progress` was historically a separate core type for
 // intermediate per-step progress bubbles. impl-vocabulary §2.3
-// collapses that into `agent.text` + `visibility=system`. Callers
-// (kimi bridge, mock bridge) emit progress as agent.text envelopes —
-// no separate type registration is needed.
+// collapses that into `agent.text` + `visibility=system` — progress is
+// emitted as an agent.text envelope with visibility=system, so no
+// separate core-type registration is needed.
 // coreTypeTable is UNEXPORTED: an exported map is mutable (importers can add /
 // delete / rewrite core-type entries), which turns a protocol closed set into
 // runtime-writable config. The public contract is the LookupCoreType predicate.

@@ -28,10 +28,9 @@ package message
 //
 // NOTE: harness reject reasons (the write engine's errno) and install
 // reasons (the install engine's errno) are NOT here — they are layer-1
-// engine vocabulary that co-evolves with its engine and lives in runtime
-// (runtime/harness, runtime install). reason→HTTP-status mapping (strerror)
-// is a binding concern and lives in server/gateway. The kernel owns only
-// this frozen ADT closed set.
+// engine vocabulary that co-evolves with its engine and lives outside this
+// package. reason→HTTP-status mapping (strerror) is a binding concern, also
+// outside this package. The kernel owns only this frozen ADT closed set.
 type TerminalFailureReason string
 
 // TerminalFailureReason closed set (INVARIANT-10, frozen).

@@ -22,15 +22,12 @@ import (
 // it to run heartbeat + the in-flight reaper on the cell goroutine.
 const tickType = "adapterhost.__tick__"
 
-// adapterActor is one adapter hosted as a real serial actor cell. It is the
-// collapse of adapters/framework.{Manager per-adapter slice + boundModule +
-// memoryCorrelationTracker + timerPolicy + responseRouter receiver side} into
-// ONE object whose single cell goroutine is the sole owner of all logical
-// state — so every field below is a PLAIN field with NO mutex/atomic
-// (dismantle-spec §1; the mailbox IS the serialization).
+// adapterActor is one adapter hosted as a real serial actor cell. Its single
+// cell goroutine is the sole owner of all logical state — so every field below
+// is a PLAIN field with NO mutex/atomic (the mailbox IS the serialization).
 //
 // It implements runtime/actorrt.Actor (Receive) + Starter/Stopper. The host
-// (daemon/host in v2) spawns one cell per adapter via the installer.
+// spawns one cell per adapter via the installer.
 type adapterActor struct {
 	// Identity + static metadata (was boundModule.{module, declaration}).
 	self        actor.ActorID
@@ -46,9 +43,8 @@ type adapterActor struct {
 	channelID channel.ID
 
 	// chain is the harness write path (runtime/harness.Writer — the consumer-side
-	// write contract; the concrete *harness.Chain (server) or an UplinkChain
-	// (compute) is injected by the installer). The adapter writes
-	// terminals/events through it.
+	// write contract). The installer injects the appropriate implementation; the
+	// adapter writes terminals/events through it.
 	chain rtharness.Writer
 
 	// lookup recovers the original request envelope by id (F5; behaviour's
@@ -104,8 +100,8 @@ func (a *adapterActor) markDone(id behavior.CorrelationKey) {
 }
 
 // buildResponse builds a response envelope, preferring the cached in-flight
-// request (compute self-contained, no truth lookup) and falling back to the
-// lookup seam (server-side adapters that have local truth).
+// request (self-contained, no truth lookup) and falling back to the lookup
+// seam when the injected implementation provides local truth access.
 func (a *adapterActor) buildResponse(ctx context.Context, requestID behavior.CorrelationKey, sender message.Sender, spec behavior.ResponseSpec) (*message.Envelope, error) {
 	if req, ok := a.inflight[requestID]; ok {
 		return behavior.BuildResponseFromRequest(req, a.clock, sender, requestID, spec)
@@ -120,9 +116,9 @@ func (a *adapterActor) buildResponse(ctx context.Context, requestID behavior.Cor
 // ACL (steps 0/1/3) authenticates the write as this adapter actor. Every chain
 // write the cell makes (respond/provisional/event/internal-error) goes through
 // here — without it the harness rejects the write as harness_engine_acl_denied
-// "missing caller context" and the caller hangs forever. For a compute cell
-// whose chain is an UplinkChain this is harmless: ctx is not serialised over the
-// wire, so the home's fleet re-stamps from EmitFrame.Source on arrival.
+// "missing caller context" and the caller hangs forever. ctx is not serialised
+// over the wire, so it is harmless for implementations that forward the write
+// off-process and re-stamp the caller on arrival.
 func (a *adapterActor) writeCtx(ctx context.Context) context.Context {
 	return rtharness.CtxWithCaller(ctx, rtharness.CallerContext{
 		ActorID: a.self, ChannelID: a.channelID,
@@ -131,8 +127,8 @@ func (a *adapterActor) writeCtx(ctx context.Context) context.Context {
 
 // --- actorrt.Actor ---
 
-// Receive dispatches one envelope SERIALLY on the cell goroutine (collapse of
-// Manager.Dispatch manager.go:887). NO sticky-readiness gate: dispatch is dumb
+// Receive dispatches one envelope SERIALLY on the cell goroutine. NO
+// sticky-readiness gate: dispatch is dumb
 // delivery; a not-ready adapter self-answers receiver_unavailable; reachability
 // is the OUTCOME of send→terminal, never a stored gate (P15/P16).
 func (a *adapterActor) Receive(ctx context.Context, env *message.Envelope) error {
@@ -146,7 +142,7 @@ func (a *adapterActor) Receive(ctx context.Context, env *message.Envelope) error
 		// seam (the adapter is a request/reply driver). An adapter that drives an
 		// external resource folds inbound results back by self-delivering an
 		// envelope onto its own cell (ActorContext.Deliver) and routing it here —
-		// that is the adapter's own concern, not a framework callback.
+		// that is the adapter's own concern, not a host callback.
 		return nil
 	}
 	a.remember(env) // cache request so respond works without a truth lookup

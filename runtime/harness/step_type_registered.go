@@ -27,8 +27,8 @@ var reservedBootstrapTypeSet = map[string]struct{}{
 // OTHER type — core, business, OR the actor.* introspection convention — passes
 // through: the substrate is type-AGNOSTIC. (actor.* is NOT special-cased: the
 // generic sender-consistency step already prevents forging an answer about
-// another actor, so the introspection convention is owned by lib/introspect, not
-// gated here.)
+// another actor, so the actor.* convention is an upper-layer concern, not
+// gated here — only the system.* namespace is substrate-authoritative.)
 type stepTypeRegistered struct{}
 
 func newStepTypeRegistered(Deps) step { return &stepTypeRegistered{} }

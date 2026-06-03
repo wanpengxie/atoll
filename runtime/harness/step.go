@@ -66,10 +66,8 @@ type WriteResult struct {
 // Accepted reports whether the write produced a durable row.
 func (r WriteResult) Accepted() bool { return r.RejectReason == "" }
 
-// Writer is the harness write entry point as an interface, for callers that
-// inject the chain (lib install behaviour: adapterhost / sysactor / channelkit
-// closure). *Chain satisfies it. (Replaces the deleted kernel/harness.Chain
-// interface.)
+// Writer is the harness write entry point as an interface — the injectable
+// write seam for any binding edge that drives the chain. *Chain satisfies it.
 type Writer interface {
 	Write(ctx context.Context, env *message.Envelope) (WriteResult, error)
 }

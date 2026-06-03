@@ -22,18 +22,19 @@
 //     Registry/RequestLookup/MessageLog) — they take context.Context
 //     and are implemented by runtime/store; they live with their consumers in
 //     runtime. (Go idiom: interface at the consumer.)
-//   - Projections (actor membership Record/Registry) — derived read caches, a
-//     runtime/server facility, never a kernel model (truth-vs-projection).
+//   - Projections (actor membership Record/Registry) — derived read caches,
+//     never a kernel (truth) model (truth-vs-projection).
 //   - store-derived envelope columns (seq, is_terminal) —
 //     produced by the store, not part of the 17 protocol fields.
 //   - harness reject + install reason vocabularies — the write/install
 //     ENGINES' errno, co-evolving with their engines → runtime.
-//   - reason→HTTP-status mapping — strerror, a binding concern → server/gateway.
+//   - reason→HTTP-status mapping — strerror, a binding concern; lives outside kernel.
 //
 // Layering rule (enforced by go-arch-lint in T2):
 //
-//   - kernel/** MUST NOT import: context, database/sql, net/http, gorilla/**,
-//     gin-gonic/**, mattn/go-sqlite3, modernc.org/sqlite, go-kimi, or any
-//     other kernel-external module.
+//   - kernel/** MUST NOT import anything outside the Go standard library, and
+//     not even the stdlib seams that imply state/IO/transport: context,
+//     database/sql, net/http, or any SQL/driver/transport package. Concretely
+//     no module outside kernel may be imported.
 //   - Acceptance red line: `git grep context.Context kernel/` → 0.
 package kernel

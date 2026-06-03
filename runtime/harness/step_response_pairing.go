@@ -58,8 +58,8 @@ import (
 //     is just one more post-final final — the request has no open closure
 //     left for it to fill, so it rejects like any duplicate (gRPC/HTTP
 //     fail-the-late-send). Surfacing "the receiver answered late" (true
-//     latency, etc.) is a domain observability concern — the receiver's
-//     adapter emits a metric/event — never substrate truth. The
+//     latency, etc.) is a domain observability concern, never substrate
+//     truth. The
 //     ux_terminal_response_per_request UNIQUE INDEX in store.schema is the
 //     authoritative defence for concurrent racers.
 //

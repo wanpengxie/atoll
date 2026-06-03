@@ -11,9 +11,7 @@ package actor
 //	user:<short-id>      - human members
 //	system               - the channel-local system actor (fixed id)
 //	agent:<role-name>    - channel agents / sub-agents
-//	tool:<adapter-name>  - tool/adapter actors (embedded /
-//	                       runtime_outbound / runtime_inbound_via_relay per
-//	                       L1 §11.7)
+//	tool:<tool-name>     - tool actors
 //
 // Cross-channel uniqueness is NOT guaranteed; mapping a real-world user
 // to multiple channels is out of scope for the channel-local registry

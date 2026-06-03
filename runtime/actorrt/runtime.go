@@ -108,7 +108,7 @@ func (r *Runtime) Spawn(id actor.ActorID, impl Actor) {
 
 // Attach binds an out-of-process actor that CONNECTED IN over conn, registering
 // it as a `port` presence. The substrate does not spawn the remote (it connects
-// in, lightcone /daemon/connect style); Attach performs the handshake, resolves
+// in); Attach performs the handshake, resolves
 // the connection's credential to an ActorID via resolve, relays the remote's
 // emits through emit, and returns the bound id. If a presence already exists for
 // the resolved id it is stopped and replaced.

@@ -105,8 +105,8 @@ func TestOpenChannel_WriteCreatesParentDir(t *testing.T) {
 	}
 }
 
-// Reopening an existing valid channel DB with SkipDDL succeeds (the daemon
-// channel-cache path) and the schema verification passes.
+// Reopening an existing valid channel DB with SkipDDL=true succeeds and the
+// schema verification passes.
 func TestOpenChannel_SkipDDLReopenValid(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "ch.sqlite")

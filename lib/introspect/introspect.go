@@ -5,10 +5,9 @@
 // generic harness sender-consistency step already prevents an actor from forging
 // an answer about another actor (you can only emit envelopes as yourself), and
 // actor.* is otherwise a plain type. These are well-known CONVENTION names (like
-// HTTP "GET"): owned by the stdlib, frozen, imported by both the answering
-// actors (adapterhost / sysactor / agentactor) and the asking callers
-// (SDK / domain). Changing a name or response field is a protocol-level
-// convention revision.
+// HTTP "GET"): the set of names and response shapes for the actor.* self-answer
+// protocol, owned by the stdlib and frozen. Changing a name or response field is
+// a protocol-level convention revision.
 package introspect
 
 import (
@@ -31,14 +30,14 @@ const (
 // status query could only answer a trivial constant available=true, which
 // carries no truth — a half-built slice that misleads later readers. When a
 // concrete adapter has non-trivial domain state worth surfacing proactively
-// (e.g. feishu "not logged in"), an optional Statuser self-answer is added
+// (e.g. an adapter with non-trivial login state), an optional Statuser self-answer is added
 // additively (parallel to Describer below) — pain-driven, not pre-built.
 
 // APIDescriptor describes one callable API, returned dynamically inside a
 // Describe response. The actor is the sole authority on its own capability; a
 // caller discovers it by asking the actor, live.
 type APIDescriptor struct {
-	// Name is the request envelope.type the API answers (e.g. "xhs.publish").
+	// Name is the request envelope.type the API answers (e.g. "notes.publish").
 	Name string `json:"name"`
 	// Schema is the parameter schema for the request payload — a caller uses it
 	// to construct a valid call. Concrete format is the actor's domain concern

@@ -37,10 +37,10 @@ type AppendResult struct {
 // the engine append step (e.g. UNIQUE violation on terminal_response_per_
 // request → terminal_duplicate).
 //
-// Reason is the WIRE STRING of a harness reject reason, NOT the typed
-// harness.HarnessRejectReason — storespec must not import runtime/harness
-// (that re-introduces the store↔harness cycle). The harness chain maps the
-// string back to HarnessRejectReason at the boundary.
+// Reason is a plain-string diagnostic code for a protocol-level violation the
+// store detected at write time (e.g. terminal_duplicate). The concrete values
+// are defined by the store implementation per violation type; the consumer is
+// responsible for interpreting them / mapping into its own error domain.
 type AppendError struct {
 	Reason           string
 	Detail           string
@@ -60,12 +60,13 @@ func (e *AppendError) Error() string {
 // here because readers query messages through the MessageQuery role below.
 //
 // Concrete sqlite impl lives in runtime/internal/store/messages.go. v2 changes:
-//   - no fencing parameter — the channel has a single writer (server
-//     harness) by construction (proto-v2-physical §4).
+//   - no fencing parameter — the store is scoped to one channel at construction
+//     time, and that scope is the unique write path, so an extra fencing token
+//     would only re-assert what construction already fixes.
 //   - is_terminal is passed EXPLICITLY: kernel purified it off the Envelope
-//     (it is store-derived, not a protocol field), so the harness — which
-//     computes it in step 8 — hands it to Append. The store persists verbatim
-//     (it stays the dumb persister, FIX-T10).
+//     (it is store-derived, not a protocol field). It is computed by the caller
+//     because it depends on message-kind semantics the store does not interpret;
+//     the store persists it verbatim (it stays the dumb persister, FIX-T10).
 type MessageLog interface {
 	Append(ctx context.Context, env *message.Envelope, isTerminal bool) (AppendResult, error)
 
@@ -75,28 +76,29 @@ type MessageLog interface {
 	// query never performed (illegal-state-representable). The binding is the scope.
 	FindByID(ctx context.Context, id message.ID) (*StoredRow, bool, error)
 
-	// HasFinalResponse reports whether a final response already exists for
-	// parentID (harness step 8 terminal uniqueness).
+	// HasFinalResponse reports whether a terminal (final) response row already
+	// exists for parentID — the store-level pre-check for the
+	// one-terminal-response-per-request invariant.
 	HasFinalResponse(ctx context.Context, parentID message.ID) (bool, error)
 }
 
 // MessageQuery is the channel-log READ role — segregated from MessageLog so a
-// reader (client tail / closure supervisor) is handed a surface
-// WITHOUT Append. Bundling reads with Append (one fat interface) would hand the
-// harness-bypass write capability to every reader — the exact leak §4.5 closes;
-// hence ISP/CQRS role-split, not one interface. The concrete satisfies both.
-// The channel scope is the store assembly itself (one sqlite per channel), so
-// no method re-takes a channel id — it would only re-specify what the file
-// already fixes (and within one channel's file every row shares the channel_id).
+// read-only consumer receives only the read surface, WITHOUT Append. Bundling
+// reads with Append (one fat interface) would grant write capability to every
+// reader; the ISP/CQRS role-split keeps a reader unable to reach the write
+// path. The concrete satisfies both. The channel scope is the store assembly
+// itself (one sqlite per channel), so no method re-takes a channel id — it
+// would only re-specify what the file already fixes (and within one channel's
+// file every row shares the channel_id).
 type MessageQuery interface {
-	// MaxSeq is the channel's highest seq (client cursor anchor).
+	// MaxSeq is the channel's highest committed seq.
 	MaxSeq(ctx context.Context) (int64, error)
-	// ReadAfterSeq is the client-push tail: envelopes with seq > afterSeq.
+	// ReadAfterSeq returns envelopes with seq > afterSeq, in ascending seq order.
 	ReadAfterSeq(ctx context.Context, afterSeq int64, limit int) ([]StoredRow, error)
-	// OpenRequestsForActor returns ALL in-flight requests addressed to actorID.
-	// It is the closure drain: the death-signal supervisor closes every one of a
-	// dead actor's pending requests, so this is unbounded by construction — a
-	// limit would silently leave the overflow callers hanging (no closure).
+	// OpenRequestsForActor returns ALL open requests addressed to actorID.
+	// It is the closure drain: closing a dead actor's in-flight requests must
+	// drain every one of them, so this is unbounded by construction — a limit
+	// would silently leave the overflow callers hanging (no closure).
 	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID) ([]StoredRow, error)
 }
 

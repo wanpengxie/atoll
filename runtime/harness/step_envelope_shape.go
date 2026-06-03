@@ -94,8 +94,8 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 	// Audience EMPTINESS and request/response cardinality are NOT
 	// validated here: empty/cardinality checks all live in
 	// StepKindAndAudience (a single validation centre). The substrate does
-	// not resolve a default audience — a named audience must arrive from the
-	// ingress/domain layer; an empty one is rejected downstream.
+	// not resolve a default audience — the caller must supply a named
+	// audience; an empty one is rejected at the Kind+Audience step.
 	for _, id := range env.Audience {
 		if string(id) == "*" {
 			return outcome{

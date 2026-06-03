@@ -1,6 +1,7 @@
 // Package harness is the runtime-side implementation of the Message-Write
 // Harness — the validation chain every channel-truth write MUST go through. It
-// is the channel's single writer; the server write-loop drives it.
+// is the channel's single write path; every channel-truth write passes through
+// exactly this engine.
 //
 // Concrete steps each implement the Step contract; the Chain composes them in
 // stable StepID order with a short-circuit on the first reject. Implementations
@@ -18,8 +19,7 @@
 //   - Post-append delivery to actor mailboxes. The harness only validates +
 //     appends truth; delivering an appended envelope into the audience's
 //     mailboxes (and reporting per-audience Outcome / collapsing an
-//     undeliverable request to receiver_unavailable) is runtime/actorrt's
-//     Deliver — invoked by the server write-loop, not a separate package.
-//   - Actor hosting + transport (in-process cell / connect-in port) —
-//     runtime/actorrt and the daemon host, not the harness.
+//     undeliverable request to receiver_unavailable) is outside this package.
+//   - Actor hosting + transport (in-process cell / connect-in port) is outside
+//     this package.
 package harness

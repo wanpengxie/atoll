@@ -11,8 +11,8 @@ package actor
 // here. The substrate does not enforce them — the generic harness
 // sender-consistency step already prevents an actor from forging an answer
 // about another actor, and actor.* is otherwise a plain (type-agnostic) type.
-// They are a stdlib self-answer CONVENTION, owned by lib/introspect (the names,
-// the response shapes, and the answering behaviour), not kernel.
+// They are a self-answer CONVENTION owned by a higher layer (the names, the
+// response shapes, and the answering behaviour), not kernel.
 
 // ReservedSystemEventTypeSet is the set of reserved `kind=event` types
 // the channel system actor emits to mirror control-plane mutations into

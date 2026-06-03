@@ -1,12 +1,9 @@
-// Package futurereg is the transport-agnostic caller-side core for the
-// framework sync/async mechanism: register a request_id, match inbound
-// response envelopes against registered waiters, buffer a final that arrives
-// before anyone awaits, and atomically (single-lock) compute the delivery
-// disposition of each response.
-//
-// Three transports bind to it — the in-daemon response router, the kimi
-// worker-side caller helper, and the SDK — so the matching / buffering /
-// disposition semantics never drift between them.
+// Package futurereg is a transport-agnostic, in-memory future registry for
+// request/response matching: register a request_id, match inbound response
+// envelopes against registered waiters, buffer a final that arrives before
+// anyone awaits, and atomically (single-lock) compute the delivery disposition
+// of each response. The matching / buffering / disposition semantics are
+// defined once here so they cannot drift between callers.
 //
 // INVARIANT-1 hard constraint (§3.0): this package imports ONLY the standard
 // library + kernel/message. No clock / logger / backend / transport — kernel
@@ -23,7 +20,7 @@ import (
 )
 
 // Disposition is how Deliver, in one lock, decides where a response went
-// (§3.0, M2). The caller transport acts on the returned value.
+// (§3.0, M2). The caller acts on the returned value.
 type Disposition int
 
 const (
@@ -69,7 +66,7 @@ type RegisterOpts struct {
 	// ExpectsAwait means a final that arrives before an Await parks is a
 	// fast-final-before-await and should be buffered for that future Await.
 	// false means pure async / fan-out: an un-awaited final is a genuine
-	// no-waiter final and should surface through the caller transport.
+	// no-waiter final, classified as NoActiveWaiter for the caller to handle.
 	ExpectsAwait bool
 }
 
@@ -258,8 +255,9 @@ func (r *FutureRegistry) Deliver(env *message.Envelope) Disposition {
 }
 
 // Cancel abandons local waiting for id: it wakes any parked Await with
-// ErrClosed, closes watch streams, and removes the set. It does NOT touch the
-// substrate (the daemon-side pending + F3 stay intact).
+// ErrClosed, closes watch streams, and removes the set. It cancels only the
+// local in-memory waiter; any corresponding remote or persistent state is
+// unaffected.
 func (r *FutureRegistry) Cancel(id message.ID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

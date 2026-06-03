@@ -19,11 +19,10 @@ type MemberActorAdd struct {
 
 // NOTE: an actor's capability/service DECLARATION (name, handled types, skill
 // doc) is NOT a substrate membership field — substrate identity is {ID, Kind,
-// Binding}. The declaration is an application-level fact the adapter writes as
-// an ordinary event (skill-as-document) and reads back via cursor on restart
-// (a runtime concern, proto-transparent). The who-can-call-whom AUTHORISATION
-// (capability ②, kernel-roadmap §4.2) is a separate, not-yet-built substrate
-// concern (actorreg.Record + harness caller-auth), unrelated to this blob.
+// Binding}. The declaration is application-level self-description, carried as
+// an ordinary event (skill-as-document), outside the scope of membership. The
+// who-can-call-whom AUTHORISATION (capability ②, kernel-roadmap §4.2) is a
+// separate, not-yet-built substrate concern, unrelated to this blob.
 
 // MemberActorRemove is one actor deregistration transition.
 type MemberActorRemove struct {
@@ -32,13 +31,12 @@ type MemberActorRemove struct {
 }
 
 // MembershipControlPlane is the full membership-management contract —
-// deliberately SEGREGATED from the read-only Registry so a pure reader (the
-// harness audience check, the system actor's directory query) never receives
-// any membership WRITE. It composes the
-// single-actor MembershipWriter (Insert/Deregister) with the batch + log-mirror
-// transitions and the desired-set replay. Every method here is a control-plane
-// write or a fact replay, never an ambient query. Forward-derived from the
-// component's role, not from any one downstream consumer.
+// deliberately SEGREGATED from the read-only Registry so a read-only consumer
+// never receives any membership WRITE. It composes the single-actor
+// MembershipWriter (Insert/Deregister) with the batch + log-mirror transitions
+// and the desired-set replay. Every method here is a control-plane write or a
+// fact replay, never an ambient query. Forward-derived from the component's
+// role, not from any one consumer.
 type MembershipControlPlane interface {
 	MembershipWriter
 	// ApplyMemberTransitions mutates actor_registry and appends the matching
