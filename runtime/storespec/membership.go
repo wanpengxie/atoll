@@ -11,11 +11,10 @@ import (
 // plane). Applying it mutates the actor_registry projection AND emits a
 // system.actor.registered mirror event into the channel log.
 type MemberActorAdd struct {
-	ID        actor.ActorID
-	Kind      actor.Kind
-	Binding   actor.Binding
-	At        int64
-	ProxyHost MemberActorProxyHost
+	ID      actor.ActorID
+	Kind    actor.Kind
+	Binding actor.Binding
+	At      int64
 }
 
 // NOTE: an actor's capability/service DECLARATION (name, handled types, skill
@@ -25,13 +24,6 @@ type MemberActorAdd struct {
 // (a runtime concern, proto-transparent). The who-can-call-whom AUTHORISATION
 // (capability ②, kernel-roadmap §4.2) is a separate, not-yet-built substrate
 // concern (actorreg.Record + harness caller-auth), unrelated to this blob.
-
-// MemberActorProxyHost identifies the proxy daemon hosting a relay actor.
-// DaemonID is the stable routing target; mutable/display attributes (daemon
-// name) are domain, not substrate.
-type MemberActorProxyHost struct {
-	DaemonID string
-}
 
 // MemberActorRemove is one actor deregistration transition.
 type MemberActorRemove struct {

@@ -144,10 +144,9 @@ func (r *actorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int
 	return nil
 }
 
-// Membership transition DTOs (storespec.MemberActorAdd / storespec.MemberActorProxyHost /
-// storespec.MemberActorRemove) + the MembershipControlPlane contract live in
-// runtime/storespec (contract types, §4.5). This file is their sqlite
-// implementation.
+// Membership transition DTOs (storespec.MemberActorAdd / storespec.MemberActorRemove)
+// + the MembershipControlPlane contract live in runtime/storespec (contract
+// types, §4.5). This file is their sqlite implementation.
 
 // ApplyMemberTransitions mutates actor_registry and appends the matching
 // system.actor.* mirror events in one sqlite transaction. Duplicate retries
@@ -295,11 +294,6 @@ func actorRegisteredEnvelope(channelID channel.ID, add storespec.MemberActorAdd)
 		"actor_kind":    add.Kind,
 		"actor_binding": add.Binding,
 		"registered_at": add.At,
-	}
-	if add.ProxyHost.DaemonID != "" {
-		payloadMap["proxy_host"] = map[string]any{
-			"daemon_id": add.ProxyHost.DaemonID,
-		}
 	}
 	payload, err := json.Marshal(payloadMap)
 	if err != nil {

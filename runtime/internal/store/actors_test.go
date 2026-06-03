@@ -158,7 +158,6 @@ func TestApplyMemberTransitions_AddEmitsMirror(t *testing.T) {
 	adds := []storespec.MemberActorAdd{{
 		ID: "tool:xhs", Kind: actor.KindTool,
 		Binding: actor.BindingRuntimeInboundViaRelay, At: 7000,
-		ProxyHost: storespec.MemberActorProxyHost{DaemonID: "daemon-1"},
 	}}
 	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, adds, nil); err != nil {
 		t.Fatalf("ApplyMemberTransitions: %v", err)

@@ -19,7 +19,7 @@
 // What is NOT in kernel (and why):
 //
 //   - Stateful engine seams (the harness Chain/Step, the store contracts
-//     Registry/Cursors/RequestLookup/MessageLog) — they take context.Context
+//     Registry/RequestLookup/MessageLog) — they take context.Context
 //     and are implemented by runtime/store; they live with their consumers in
 //     runtime. (Go idiom: interface at the consumer.)
 //   - Projections (actor membership Record/Registry) — derived read caches, a
