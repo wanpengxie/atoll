@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -62,8 +63,8 @@ type HTTPClientConfig struct {
 	// falls back to time.Now.
 	Clock func() time.Time
 
-	// Logger receives non-fatal diagnostics. nil → NoopLogger.
-	Logger Logger
+	// Logger receives non-fatal diagnostics. nil → discard.
+	Logger *slog.Logger
 
 	// Metrics receives counters / histograms. nil → NoopMetrics.
 	Metrics Metrics
@@ -121,7 +122,7 @@ func NewHTTPClient(cfg HTTPClientConfig) *HTTPClient {
 		cfg.Clock = time.Now
 	}
 	if cfg.Logger == nil {
-		cfg.Logger = NoopLogger{}
+		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
 	if cfg.Metrics == nil {
 		cfg.Metrics = NoopMetrics{}

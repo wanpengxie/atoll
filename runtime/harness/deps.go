@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -15,21 +16,11 @@ import (
 // substrate write-time check. The harness validates STRUCTURE: kind, addressing,
 // closure.)
 
-// Logger is the minimal structured logger used by the harness hot path.
-// It mirrors the adapter framework's Logger shape without importing the
-// framework package into runtime/harness.
-type Logger interface {
-	Debug(msg string, args ...any)
-	Warn(msg string, args ...any)
-	Error(msg string, args ...any)
-}
-
-// NoopLogger drops every log call.
-type NoopLogger struct{}
-
-func (NoopLogger) Debug(string, ...any) {}
-func (NoopLogger) Warn(string, ...any)  {}
-func (NoopLogger) Error(string, ...any) {}
+// (Logging is *log/slog* — the Go-std structured-logging facade, the same role
+// K8s gives logr / Erlang gives the kernel logger: one facade the whole project
+// funnels through, backend chosen via slog.Handler, injected from the edge. The
+// substrate does not define its own Logger vocabulary — that was a reinvention
+// of slog. nil → caller defaults to slog.New(slog.DiscardHandler).)
 
 // Metrics is the minimal counter seam used for harness reject accounting.
 type Metrics interface {
@@ -81,8 +72,8 @@ type Deps struct {
 	// to time.Now when nil.
 	NowMs func() int64
 
-	// Logger receives per-step pass/reject diagnostics. nil → NoopLogger.
-	Logger Logger
+	// Logger receives per-step pass/reject diagnostics. nil → discard.
+	Logger *slog.Logger
 
 	// Metrics receives per-reject counters. nil → NoopMetrics.
 	Metrics Metrics

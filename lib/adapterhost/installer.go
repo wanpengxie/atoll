@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
@@ -23,7 +24,7 @@ type InstallDeps struct {
 	Lookup    behavior.RequestLookup
 	Registry  storespec.Registry
 	Clock     func() time.Time
-	Logger    behavior.Logger
+	Logger    *slog.Logger
 	Metrics   behavior.Metrics
 }
 

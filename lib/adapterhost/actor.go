@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
@@ -36,8 +37,9 @@ type adapterActor struct {
 	module      behavior.Module
 	declaration behavior.Declaration
 
-	// Observability (injected; behavior interfaces, impl from obs via cmd).
-	logger  behavior.Logger
+	// Observability (injected from the edge; logger is the std slog facade,
+	// metrics is the behavior.Metrics seam).
+	logger  *slog.Logger
 	metrics behavior.Metrics
 
 	// channelID is the channel this adapter services.

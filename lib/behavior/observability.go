@@ -2,32 +2,12 @@ package behavior
 
 import "sync"
 
-// Logger is the minimal slog-compatible interface adapters and the
-// framework use for structured logs. *slog.Logger satisfies it
-// directly (Info / Warn / Error / Debug variadic).
-//
-// Implementations MUST be safe for concurrent use.
-type Logger interface {
-	Debug(msg string, args ...any)
-	Info(msg string, args ...any)
-	Warn(msg string, args ...any)
-	Error(msg string, args ...any)
-}
-
-// NoopLogger is the zero-value Logger used when behavior config Logger is nil.
-type NoopLogger struct{}
-
-// Debug satisfies Logger.
-func (NoopLogger) Debug(string, ...any) {}
-
-// Info satisfies Logger.
-func (NoopLogger) Info(string, ...any) {}
-
-// Warn satisfies Logger.
-func (NoopLogger) Warn(string, ...any) {}
-
-// Error satisfies Logger.
-func (NoopLogger) Error(string, ...any) {}
+// Logging is *log/slog* — the Go-std structured-logging facade (the role K8s
+// gives logr / Erlang gives the kernel logger): one facade the whole project
+// funnels through, backend chosen via slog.Handler, configured once at the edge
+// and injected down. behavior does NOT define its own Logger interface — that
+// was a reinvention of slog. Seams take *slog.Logger; nil → the caller defaults
+// to slog.New(slog.DiscardHandler).
 
 // Metrics is the F7 metrics seam. Adapters and the framework increment
 // Counter values and record Histogram observations through this single

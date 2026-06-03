@@ -2,6 +2,8 @@ package channelkit_test
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -87,6 +89,41 @@ func TestOnDeath_MaterialisesReceiverUnavailable(t *testing.T) {
 	// payload must carry status=failed + reason=receiver_unavailable
 	if !contains(string(term.Payload), "receiver_unavailable") || !contains(string(term.Payload), "failed") {
 		t.Fatalf("terminal payload=%s, want status=failed reason=receiver_unavailable", term.Payload)
+	}
+}
+
+// errOpenReqs fails the drain query — the worst closure case (no request can be
+// closed → every caller is a black hole). The supervisor MUST NOT swallow it.
+type errOpenReqs struct{}
+
+func (errOpenReqs) OpenRequestsForActor(context.Context, actor.ActorID) ([]storespec.StoredRow, error) {
+	return nil, errors.New("store down")
+}
+
+// capHandler is a minimal slog.Handler capturing emitted record messages so a
+// test can assert a fault was surfaced through the std slog facade.
+type capHandler struct{ msgs []string }
+
+func (*capHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *capHandler) Handle(_ context.Context, r slog.Record) error {
+	h.msgs = append(h.msgs, r.Message)
+	return nil
+}
+func (h *capHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *capHandler) WithGroup(string) slog.Handler      { return h }
+
+// TestClosureDrainFailure_IsSurfaced proves a swallowed-drain regression cannot
+// return: when the drain query fails (cannot close anyone → black hole), the
+// supervisor logs a fault rather than returning silently.
+func TestClosureDrainFailure_IsSurfaced(t *testing.T) {
+	h := &capHandler{}
+	channelkit.MaterialiseReceiverUnavailable(context.Background(), slog.New(h),
+		&fakeChain{}, errOpenReqs{}, time.Now, "ch", "worker")
+	if len(h.msgs) == 0 {
+		t.Fatal("drain query failed but NO fault logged — silent black hole regression")
+	}
+	if h.msgs[0] != "channelkit.closure.drain_query_failed" {
+		t.Fatalf("fault msg=%q, want channelkit.closure.drain_query_failed", h.msgs[0])
 	}
 }
 

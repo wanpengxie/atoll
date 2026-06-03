@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime/debug"
 	"sort"
 	"time"
@@ -36,7 +37,7 @@ func New(deps Deps) (*Chain, error) {
 		deps.NowMs = func() int64 { return time.Now().UnixMilli() }
 	}
 	if deps.Logger == nil {
-		deps.Logger = NoopLogger{}
+		deps.Logger = slog.New(slog.DiscardHandler)
 	}
 	if deps.Metrics == nil {
 		deps.Metrics = NoopMetrics{}

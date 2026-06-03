@@ -1,6 +1,9 @@
 package behavior
 
-import "time"
+import (
+	"log/slog"
+	"time"
+)
 
 // Deps is the construction bundle a composition root injects into an adapter
 // Module constructor — only the seams a Module actually needs (HTTP client /
@@ -10,7 +13,7 @@ type Deps struct {
 	HTTPClient      *HTTPClient
 	CredentialStore CredentialStore
 	StateStore      StateStore
-	Logger          Logger
+	Logger          *slog.Logger
 	Metrics         Metrics
 	Tracer          Tracer
 	Clock           func() time.Time

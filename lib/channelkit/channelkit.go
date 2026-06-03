@@ -7,6 +7,7 @@ package channelkit
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
@@ -40,6 +41,10 @@ type Channel struct {
 	chain    rtharness.Writer
 	openReqs OpenRequestSource
 	clock    func() time.Time
+
+	// logger surfaces closure-drain FAULTS (a swallowed drain failure is a
+	// black hole — the loudest thing the supervisor can hit). nil → discard.
+	logger *slog.Logger
 }
 
 // Config assembles a channel.
@@ -53,6 +58,8 @@ type Config struct {
 	Chain        rtharness.Writer
 	OpenRequests OpenRequestSource
 	Clock        func() time.Time
+	// Logger surfaces closure-drain faults. nil → discard (silent).
+	Logger *slog.Logger
 }
 
 // New builds the channel, wires the supervision tree (the Channel is the
@@ -62,11 +69,16 @@ func New(cfg Config) *Channel {
 	if clock == nil {
 		clock = time.Now
 	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	c := &Channel{
 		channelID: cfg.ChannelID,
 		chain:     cfg.Chain,
 		openReqs:  cfg.OpenRequests,
 		clock:     clock,
+		logger:    logger,
 	}
 	c.cells = actorrt.New(actorrt.Config{Supervisor: c})
 	if cfg.System != nil {
@@ -87,7 +99,7 @@ func (c *Channel) Cells() *actorrt.Runtime { return c.cells }
 // "Despawn 不收口 / 死 cell 黑洞").
 func (c *Channel) OnDeath(ctx context.Context, sig actorrt.DeathSignal) {
 	if c.chain != nil && c.openReqs != nil {
-		MaterialiseReceiverUnavailable(ctx, c.chain, c.openReqs, c.clock, c.channelID, sig.Actor)
+		MaterialiseReceiverUnavailable(ctx, c.logger, c.chain, c.openReqs, c.clock, c.channelID, sig.Actor)
 	}
 	c.cells.Despawn(sig.Actor)
 }
@@ -100,9 +112,17 @@ func (c *Channel) OnDeath(ctx context.Context, sig actorrt.DeathSignal) {
 // authorises sender==system + reason==receiver_unavailable as the substrate
 // author. Without this a dead cell — local or across the wire — is a black hole
 // that hangs every waiting caller (construction-spec §3.3).
-func MaterialiseReceiverUnavailable(ctx context.Context, chain rtharness.Writer, openReqs OpenRequestSource, clock func() time.Time, channelID channel.ID, dead actor.ActorID) {
+func MaterialiseReceiverUnavailable(ctx context.Context, logger *slog.Logger, chain rtharness.Writer, openReqs OpenRequestSource, clock func() time.Time, channelID channel.ID, dead actor.ActorID) {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	reqs, err := openReqs.OpenRequestsForActor(ctx, dead)
 	if err != nil {
+		// The drain query failed → we cannot close ANY of the dead actor's
+		// in-flight requests → every one of its callers is now a black hole.
+		// This is the loudest fault the supervisor can hit.
+		logger.Error("channelkit.closure.drain_query_failed",
+			"channel", channelID, "dead_actor", dead, "err", err)
 		return
 	}
 	sys := message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
@@ -115,9 +135,22 @@ func MaterialiseReceiverUnavailable(ctx context.Context, chain rtharness.Writer,
 				Reason: string(message.TerminalReceiverUnavailable),
 			})
 		if berr != nil {
+			logger.Error("channelkit.closure.build_failed",
+				"channel", channelID, "dead_actor", dead, "request", req.ID, "err", berr)
 			continue
 		}
 		cctx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{ActorID: actor.SystemActorID, ChannelID: channelID})
-		_, _ = chain.Write(cctx, term)
+		res, werr := chain.Write(cctx, term)
+		if werr != nil {
+			logger.Error("channelkit.closure.write_failed",
+				"channel", channelID, "dead_actor", dead, "request", req.ID, "err", werr)
+			continue
+		}
+		if res.RejectReason != "" {
+			// The harness already logged the reject (harness.write.reject); we
+			// add the closure-level fault: this caller stays unclosed.
+			logger.Error("channelkit.closure.write_rejected",
+				"channel", channelID, "dead_actor", dead, "request", req.ID, "reason", res.RejectReason)
+		}
 	}
 }

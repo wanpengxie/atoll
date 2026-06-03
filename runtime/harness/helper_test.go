@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"log/slog"
 	"path/filepath"
 	"testing"
 
@@ -95,7 +96,7 @@ func runStep(t *testing.T, mk func(Deps) step, deps Deps, ctx context.Context, e
 		deps.NowMs = func() int64 { return fixedNowMs }
 	}
 	if deps.Logger == nil {
-		deps.Logger = NoopLogger{}
+		deps.Logger = slog.New(slog.DiscardHandler)
 	}
 	if deps.Metrics == nil {
 		deps.Metrics = NoopMetrics{}
