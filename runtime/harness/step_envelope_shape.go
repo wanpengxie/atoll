@@ -12,7 +12,7 @@ import (
 // cluster F insertion):
 //
 //  1. content fields present (proto-layer0 §1.1)
-//  2. envelope.channel_id == caller channel context
+//  2. envelope.channel_id == the harness-bound channel (unconditional)
 //  3. kind ∈ {event, request, response}
 //  4. visibility (when non-empty) ∈ {public, private} — Step Normalize
 //     fills the default when caller leaves it empty.
@@ -26,9 +26,9 @@ import (
 //
 // The step runs after CallerAuth and before SenderConsistent/Normalize, so
 // downstream stages never see a malformed envelope.
-type stepEnvelopeShape struct{}
+type stepEnvelopeShape struct{ deps Deps }
 
-func newStepEnvelopeShape(_ Deps) step { return &stepEnvelopeShape{} }
+func newStepEnvelopeShape(d Deps) step { return &stepEnvelopeShape{deps: d} }
 
 func (s *stepEnvelopeShape) ID() stepID { return StepEnvelopeShape }
 
@@ -49,12 +49,18 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 		return rejectFieldMissing("envelope.ts required"), nil
 	}
 
-	// (2) channel_id consistency vs caller context.
-	caller := callerFromCtx(ctx)
-	if caller.ChannelID != "" && env.ChannelID != caller.ChannelID {
+	// (2) channel_id pinned to the harness-bound channel — UNCONDITIONAL.
+	// This harness IS the single writer of deps.ChannelID's log, so a row
+	// whose channel_id names a different channel is truth corruption (a
+	// channel-A log holding a row that claims channel B). The guard is
+	// structural and must NOT depend on the caller plumbing a CallerContext —
+	// substrate truth integrity cannot be left to downstream behaviour.
+	// (StepCallerAuth separately checks the caller was authenticated for this
+	// channel — an ACL concern, distinct from this content-vs-binding guard.)
+	if env.ChannelID != s.deps.ChannelID {
 		return outcome{
 			RejectReason: HarnessChannelMismatch,
-			Detail:       "envelope.channel_id does not match caller channel context",
+			Detail:       "envelope.channel_id does not match the harness-bound channel",
 		}, nil
 	}
 
