@@ -27,7 +27,6 @@ func (errModule) Declares() behavior.Declaration {
 func (errModule) Init(context.Context, *behavior.ModuleContext) error { return nil }
 func (errModule) Shutdown(context.Context) error                      { return nil }
 func (m errModule) Handle(context.Context, *message.Envelope) error   { return m.err }
-func (errModule) OnExternalCallback(context.Context, []byte) error    { return nil }
 
 // TestHandleError_CollapsesReceiverInternalError proves a hard Handle error is
 // WIRED to a terminal: the cell writes receiver_internal_error (author #1) and

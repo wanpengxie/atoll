@@ -15,7 +15,7 @@ import "errors"
 // synchronous hard failure returns a plain error (collapsed to a
 // receiver_internal_error terminal); the deferred path returns Deferred() and
 // MUST later Respond/Fail.
-var ErrHandleDeferred = errors.New("adapter: handle deferred")
+var ErrHandleDeferred = errors.New("behavior: handle deferred")
 
 // Deferred is the semantic constructor for ErrHandleDeferred, for use as
 // `return behavior.Deferred()` from Handle.

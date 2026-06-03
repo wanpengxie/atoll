@@ -46,8 +46,6 @@ type APIDescriptor struct {
 	Schema json.RawMessage `json:"schema,omitempty"`
 	// Desc is a one-line description of what the API does.
 	Desc string `json:"desc,omitempty"`
-	// Skill is optional longer usage guidance (markdown) for an LLM caller.
-	Skill string `json:"skill,omitempty"`
 }
 
 // Describe is the actor.describe response: the actor's identity plus its live

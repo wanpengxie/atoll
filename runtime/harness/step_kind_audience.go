@@ -98,12 +98,3 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (o
 	}
 	return outcome{}, nil
 }
-
-func kindAllowed(allowed []message.Kind, want message.Kind) bool {
-	for _, k := range allowed {
-		if k == want {
-			return true
-		}
-	}
-	return false
-}

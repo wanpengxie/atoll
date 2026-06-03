@@ -145,7 +145,7 @@ type HTTPResponse struct {
 
 // ErrBreakerOpen is returned when the circuit breaker rejects a
 // request without contacting the transport.
-var ErrBreakerOpen = errors.New("framework: http breaker open")
+var ErrBreakerOpen = errors.New("behavior: http breaker open")
 
 // Do executes one request through the client and returns the buffered
 // response. The request body, if any, must be safely re-readable across
@@ -166,7 +166,7 @@ func (c *HTTPClient) Do(ctx context.Context, method, path string, body io.Reader
 
 	req, err := http.NewRequestWithContext(ctx, method, u, body)
 	if err != nil {
-		return nil, fmt.Errorf("framework: build request: %w", err)
+		return nil, fmt.Errorf("behavior: buildrequest: %w", err)
 	}
 	for k, vs := range headers {
 		for _, v := range vs {
@@ -183,14 +183,14 @@ func (c *HTTPClient) Do(ctx context.Context, method, path string, body io.Reader
 	if doErr != nil {
 		c.cfg.Metrics.IncCounter(c.cfg.MetricName+".error", "method", method, "path", path)
 		c.recordFailure()
-		return nil, fmt.Errorf("framework: http %s %s: %w", method, path, doErr)
+		return nil, fmt.Errorf("behavior: http %s %s: %w", method, path, doErr)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.recordFailure()
-		return nil, fmt.Errorf("framework: read response: %w", err)
+		return nil, fmt.Errorf("behavior: read response: %w", err)
 	}
 
 	c.cfg.Metrics.IncCounter(c.cfg.MetricName+".status",
@@ -221,7 +221,7 @@ func (c *HTTPClient) DoWithRetry(ctx context.Context, method, path string, bodyF
 		if bodyFactory != nil {
 			b, err := bodyFactory()
 			if err != nil {
-				return nil, fmt.Errorf("framework: build body attempt=%d: %w", attempt, err)
+				return nil, fmt.Errorf("behavior: buildbody attempt=%d: %w", attempt, err)
 			}
 			body = b
 		}
@@ -235,7 +235,7 @@ func (c *HTTPClient) DoWithRetry(ctx context.Context, method, path string, bodyF
 				return nil, err
 			}
 		} else {
-			lastErr = fmt.Errorf("framework: http %s %s: status %d", method, path, resp.StatusCode)
+			lastErr = fmt.Errorf("behavior: http %s %s: status %d", method, path, resp.StatusCode)
 		}
 		if attempt == maxRetries {
 			break
@@ -262,7 +262,7 @@ func (c *HTTPClient) resolve(path string) (string, error) {
 	if c.cfg.BaseURL == "" {
 		// allow absolute path-style calls
 		if _, err := url.Parse(path); err != nil {
-			return "", fmt.Errorf("framework: parse url: %w", err)
+			return "", fmt.Errorf("behavior: parse url: %w", err)
 		}
 		return path, nil
 	}
@@ -302,7 +302,7 @@ func (c *HTTPClient) recordFailure() {
 		c.breakerOpenedAt = c.cfg.Clock()
 		c.breakerHalfProbed = false
 		c.cfg.Metrics.IncCounter(c.cfg.MetricName + ".breaker_opened")
-		c.cfg.Logger.Warn("framework.http.breaker.opened",
+		c.cfg.Logger.Warn("behavior.http.breaker.opened",
 			"threshold", c.cfg.BreakerThreshold,
 			"cooldown_ms", c.cfg.BreakerCooldown.Milliseconds(),
 		)
@@ -322,7 +322,7 @@ func (c *HTTPClient) recordSuccess() {
 	defer c.mu.Unlock()
 	if c.consecutiveFails >= c.cfg.BreakerThreshold {
 		c.cfg.Metrics.IncCounter(c.cfg.MetricName + ".breaker_closed")
-		c.cfg.Logger.Info("framework.http.breaker.closed")
+		c.cfg.Logger.Info("behavior.http.breaker.closed")
 	}
 	c.consecutiveFails = 0
 	c.breakerHalfProbed = false
