@@ -199,16 +199,15 @@ func (m *messages) ReadAfterSeq(ctx context.Context, channelID channel.ID, after
 	return out, rows.Err()
 }
 
-// OpenRequestsForActor returns pending request rows addressed to actorID
+// OpenRequestsForActor returns ALL pending request rows addressed to actorID
 // (first audience member) with no final response yet — regardless of
 // expires_at. Used by the actorrt death-signal supervisor: when a cell dies,
-// the substrate closes every in-flight request to the dead actor with
-// receiver_unavailable. The substrate never guesses "slow" — it only reports
-// death it positively observed (construction-spec §3.3).
-func (m *messages) OpenRequestsForActor(ctx context.Context, actorID actor.ActorID, limit int) ([]storespec.StoredRow, error) {
-	if limit <= 0 {
-		limit = 64
-	}
+// the substrate closes EVERY in-flight request to the dead actor with
+// receiver_unavailable, so the drain is unbounded by construction (a limit
+// would leave the overflow callers hanging — broken closure). The substrate
+// never guesses "slow" — it only reports death it positively observed
+// (construction-spec §3.3).
+func (m *messages) OpenRequestsForActor(ctx context.Context, actorID actor.ActorID) ([]storespec.StoredRow, error) {
 	const q = `SELECT id, ts, ts_received, channel_id,
 	                  sender_kind, sender_id,
 	                  kind, type, payload,
@@ -226,8 +225,8 @@ func (m *messages) OpenRequestsForActor(ctx context.Context, actorID actor.Actor
 	                    AND r.kind = 'response'
 	                    AND r.is_terminal = 1
 	               )
-	             ORDER BY m.seq ASC LIMIT ?`
-	rows, err := m.db.QueryContext(ctx, q, string(actorID), limit)
+	             ORDER BY m.seq ASC`
+	rows, err := m.db.QueryContext(ctx, q, string(actorID))
 	if err != nil {
 		return nil, fmt.Errorf("store: open requests for actor: %w", err)
 	}

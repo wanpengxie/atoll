@@ -91,8 +91,11 @@ type MessageQuery interface {
 	MaxSeq(ctx context.Context, channelID channel.ID) (int64, error)
 	// ReadAfterSeq is the client-push tail: envelopes with seq > afterSeq.
 	ReadAfterSeq(ctx context.Context, channelID channel.ID, afterSeq int64, limit int) ([]StoredRow, error)
-	// OpenRequestsForActor returns in-flight requests addressed to actorID.
-	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID, limit int) ([]StoredRow, error)
+	// OpenRequestsForActor returns ALL in-flight requests addressed to actorID.
+	// It is the closure drain: the death-signal supervisor closes every one of a
+	// dead actor's pending requests, so this is unbounded by construction — a
+	// limit would silently leave the overflow callers hanging (no closure).
+	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID) ([]StoredRow, error)
 }
 
 // Cursor mirrors an actor_cursors row (L2 §1.4.3). The position metric is

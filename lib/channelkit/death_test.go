@@ -36,7 +36,7 @@ func (f *fakeChain) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f
 // the substrate storespec.StoredRow shape the real store returns).
 type fakeOpenReqs struct{ reqs []storespec.StoredRow }
 
-func (f fakeOpenReqs) OpenRequestsForActor(context.Context, actor.ActorID, int) ([]storespec.StoredRow, error) {
+func (f fakeOpenReqs) OpenRequestsForActor(context.Context, actor.ActorID) ([]storespec.StoredRow, error) {
 	return f.reqs, nil
 }
 

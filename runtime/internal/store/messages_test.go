@@ -406,7 +406,7 @@ func TestOpenRequestsForActor(t *testing.T) {
 	// r4: tool:xhs is NOT first member → A1 says it's not the addressee.
 	mkReq("r4", message.Audience{"other-actor", "tool:xhs"})
 
-	rows, err := cs.Query.OpenRequestsForActor(ctx, "tool:xhs", 100)
+	rows, err := cs.Query.OpenRequestsForActor(ctx, "tool:xhs")
 	if err != nil {
 		t.Fatalf("OpenRequestsForActor: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestOpenRequestsForActor_ProvisionalDoesNotClose(t *testing.T) {
 	if _, err := cs.Log.Append(ctx, prov, false); err != nil {
 		t.Fatalf("Append provisional: %v", err)
 	}
-	rows, err := cs.Query.OpenRequestsForActor(ctx, "tool:xhs", 100)
+	rows, err := cs.Query.OpenRequestsForActor(ctx, "tool:xhs")
 	if err != nil {
 		t.Fatalf("OpenRequestsForActor: %v", err)
 	}

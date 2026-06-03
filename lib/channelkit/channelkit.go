@@ -24,7 +24,7 @@ import (
 // runtime store satisfies it directly with no adapter. The supervisor reads each
 // row's Envelope to materialise receiver_unavailable on cell death.
 type OpenRequestSource interface {
-	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID, limit int) ([]storespec.StoredRow, error)
+	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID) ([]storespec.StoredRow, error)
 }
 
 // Channel is one assembled channel: actorrt runtime + system cell + the
@@ -101,7 +101,7 @@ func (c *Channel) OnDeath(ctx context.Context, sig actorrt.DeathSignal) {
 // author. Without this a dead cell — local or across the wire — is a black hole
 // that hangs every waiting caller (construction-spec §3.3).
 func MaterialiseReceiverUnavailable(ctx context.Context, chain rtharness.Writer, openReqs OpenRequestSource, clock func() time.Time, channelID channel.ID, dead actor.ActorID) {
-	reqs, err := openReqs.OpenRequestsForActor(ctx, dead, 0)
+	reqs, err := openReqs.OpenRequestsForActor(ctx, dead)
 	if err != nil {
 		return
 	}
