@@ -22,7 +22,7 @@ func (c *recChain) Write(_ context.Context, env *message.Envelope) (rtharness.Wr
 type errModule struct{ err error }
 
 func (errModule) Declares() behavior.Declaration {
-	return behavior.Declaration{Name: "t", ActorID: "tool1", Types: []string{"x.do"}}
+	return behavior.Declaration{Name: "t", ActorID: "tool1"}
 }
 func (errModule) Init(context.Context, *behavior.ModuleContext) error { return nil }
 func (errModule) Shutdown(context.Context) error                      { return nil }
@@ -37,7 +37,7 @@ func TestHandleError_CollapsesReceiverInternalError(t *testing.T) {
 	a := &adapterActor{
 		self:        "tool1",
 		module:      errModule{err: errors.New("boom")},
-		declaration: behavior.Declaration{Name: "t", ActorID: "tool1", Types: []string{"x.do"}},
+		declaration: behavior.Declaration{Name: "t", ActorID: "tool1"},
 		chain:       fc,
 		clock:       time.Now,
 		inflight:    map[behavior.CorrelationKey]*message.Envelope{},
@@ -71,7 +71,7 @@ func TestHandleDeferred_KeepsPending(t *testing.T) {
 	fc := &recChain{}
 	a := &adapterActor{
 		self: "tool1", module: errModule{err: behavior.ErrHandleDeferred},
-		declaration: behavior.Declaration{Name: "t", ActorID: "tool1", Types: []string{"x.do"}},
+		declaration: behavior.Declaration{Name: "t", ActorID: "tool1"},
 		chain:       fc, clock: time.Now,
 		inflight: map[behavior.CorrelationKey]*message.Envelope{},
 	}

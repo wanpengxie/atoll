@@ -43,114 +43,55 @@ type StatusReport struct {
 	CheckedAt time.Time
 }
 
-// FieldDoc describes one product-layer payload field for actor-CLI
-// describe_type output. It is convention metadata only: the protocol
-// layer still treats payloads as opaque JSON.
-type FieldDoc struct {
-	Name        string `json:"name"`
-	Required    bool   `json:"required,omitempty"`
-	Description string `json:"description,omitempty"`
-	Example     any    `json:"example,omitempty"`
+// APIDescriptor describes one callable API an actor exposes. It is returned
+// DYNAMICALLY by the actor's describe self-answer (see Describer) — never
+// predefined at install. The actor is the sole authority on its own capability
+// surface; a caller discovers it by asking the actor, live.
+type APIDescriptor struct {
+	// Name is the request envelope.type the API answers (e.g. "xhs.publish").
+	Name string `json:"name"`
+	// Schema is the parameter schema for the request payload — a caller uses it
+	// to construct a valid call. Its concrete format is the actor's domain
+	// concern (opaque to the framework here).
+	Schema json.RawMessage `json:"schema,omitempty"`
+	// Desc is a one-line description of what the API does.
+	Desc string `json:"desc,omitempty"`
+	// Skill is optional longer usage guidance (markdown) for an LLM caller.
+	Skill string `json:"skill,omitempty"`
 }
 
-// ErrorDoc documents one adapter-specific response payload error_code
-// for actor-CLI describe_type output. Meta-tool error codes remain a
-// separate closed set.
-type ErrorDoc struct {
-	Code        string `json:"code"`
-	Description string `json:"description,omitempty"`
-	Recovery    string `json:"recovery,omitempty"`
-}
-
-// TypeDeclaration is the per-type install metadata an adapter declares
-// for the Message-Write Harness install path (L2 §1.4.2). Payload
-// schema is intentionally absent: protocol Level A
-// (proto-layer0 §1.4.1 / proto-layer1 §1.3) leaves payload opaque, so
-// the harness does NOT validate payload schemas and the type_registry
-// does NOT store payload schemas.
+// Describer is the OPTIONAL Module sub-interface for actors that expose a
+// capability surface. adapterhost routes the reserved actor.describe query to
+// Describe and relays the result — answered LIVE on the cell goroutine, so the
+// actor reports its CURRENT APIs (e.g. only what it can do while logged in),
+// never a stale predefined registry. Adapters that don't implement it answer
+// describe with their identity only.
 //
-// TypeDeclaration is OPTIONAL: adapters that omit it for a Types entry
-// fall back to permissive defaults
-// (AllowedKinds={event,request,response}). Adapters that provide it MUST
-// cover every entry of Declaration.Types — manager.Install fails closed
-// with InstallTypeRegistryInvalid on a partial map.
-type TypeDeclaration struct {
-	// AllowedKinds is the closed set of envelope.kind the harness will
-	// accept for this type. Subset of {event, request, response}. When
-	// empty, install uses {event, request, response}.
-	AllowedKinds []message.Kind
-
-	// Description is optional product-layer convention metadata used by
-	// list_actors / describe_actor / describe_type. Install validation
-	// does not require it.
-	Description string
-
-	// PayloadExample is an optional product-layer example returned by
-	// describe_type. The protocol layer does not validate it.
-	PayloadExample json.RawMessage
-
-	// PayloadFields is optional field-by-field product-layer guidance
-	// returned by describe_type.
-	PayloadFields []FieldDoc
-
-	// ErrorCodes is the optional adapter-specific error catalog returned
-	// by describe_type. These codes are distinct from the meta-tool
-	// closed set.
-	ErrorCodes []ErrorDoc
-
-	// Notes is optional markdown guidance returned by describe_type.
-	Notes string
+// There is deliberately NO declared type list or per-type catalog on the
+// Declaration: "what can I do" is this dynamic self-answer; "what I dispatch"
+// is the Module's own Handle (the substrate is type-agnostic — it does not gate
+// on business types, so neither does lib).
+type Describer interface {
+	Describe(ctx context.Context) ([]APIDescriptor, error)
 }
 
-// Declaration is the static metadata an adapter Module exposes at
-// install time. Mirrors the L2 §8.1 framework Declaration with the
-// actor.Binding tri-class transport per L1 §11.7.
-//
-// Every field is read once during Manager.Install — Modules MUST keep
-// the value side-effect-free and identical across calls.
+// Declaration is the static IDENTITY an adapter Module exposes at install time
+// — purely what the framework needs to address and spawn the actor. The actor's
+// capability surface is NOT declared here (it is the dynamic describe
+// self-answer, see Describer); its request dispatch is its Handle, not a
+// declared type list.
 type Declaration struct {
-	// Name is the adapter identifier (e.g. "xhs", "feishu"). Used for
-	// logging + diagnostics. Non-empty + unique within a channel.
+	// Name is the adapter identifier (e.g. "xhs", "feishu"). Logging + the
+	// describe identity fallback. Non-empty + unique within a channel.
 	Name string
 
-	// ActorID is the actor_registry row this adapter owns. Every request
-	// envelope whose audience[0] equals ActorID dispatches to this
-	// Module.Handle. MUST refer to a pre-registered tool actor
-	// (actor_kind='tool').
+	// ActorID is the membership row this adapter owns. Every request envelope
+	// whose audience[0] equals ActorID dispatches to this Module.Handle. MUST
+	// refer to a pre-registered actor.
 	ActorID actor.ActorID
 
-	// Types lists the envelope.type strings the adapter accepts. Each
-	// entry MUST already exist in type_registry with handler_actor_id
-	// == ActorID and handler_binding == Binding (Manager.Install
-	// verifies).
-	Types []string
-
-	// TypeDeclarations optionally maps type → TypeDeclaration, supplying
-	// the allowed_kinds rows the harness loads at write time. Non-nil opts
-	// the adapter into strict mode: every entry
-	// of Types MUST have a matching row, otherwise install fails closed
-	// with InstallTypeRegistryInvalid. Nil → permissive defaults for
-	// every type (install logs a warning so the gap is observable).
-	TypeDeclarations map[string]TypeDeclaration
-
 	// Binding is the launch tri-class transport for this adapter (L1 §11.7).
-	// Determines which framework helpers run (in-process dispatch /
-	// outbound HTTP / runtime_inbound_via_relay).
 	Binding actor.Binding
-
-	// MaxPendingMs is the per-type request timeout (milliseconds). Used
-	// by Ad-2 framework timeout timer (L1 §11.1 + L2 §8.3). Each Types
-	// entry MUST have a positive value or type_registry install rejects
-	// with adapter_timeout_missing.
-	MaxPendingMs int64
-
-	// Description is optional actor-CLI convention metadata: one-line
-	// actor positioning for list_actors and describe_actor.
-	Description string
-
-	// SkillDoc is optional markdown usage guidance returned by
-	// describe_actor after the LLM has selected this actor.
-	SkillDoc string
 }
 
 // Module is the gen_server callback contract every adapter implements

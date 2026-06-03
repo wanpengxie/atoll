@@ -18,8 +18,6 @@ var reservedBootstrapTypeSet = map[string]struct{}{
 	actor.ReservedSystemChannelCreated:    {},
 	actor.ReservedSystemActorRegistered:   {},
 	actor.ReservedSystemActorDeregistered: {},
-	actor.ReservedSystemTypeInstalled:     {},
-	actor.ReservedSystemTypeDeprecated:    {},
 	actor.ReservedSystemConfigUpdated:     {},
 }
 

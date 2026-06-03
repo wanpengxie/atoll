@@ -165,8 +165,6 @@ func TestReservedSystemEventTypeValues(t *testing.T) {
 		actor.ReservedSystemActorRegistered:   "system.actor.registered",
 		actor.ReservedSystemActorDeregistered: "system.actor.deregistered",
 		actor.ReservedSystemConfigUpdated:     "system.config.updated",
-		actor.ReservedSystemTypeInstalled:     "system.type.installed",
-		actor.ReservedSystemTypeDeprecated:    "system.type.deprecated",
 	}
 	for got, want := range cases {
 		if got != want {
@@ -189,8 +187,6 @@ func TestReservedNamespacesDisjoint(t *testing.T) {
 		actor.ReservedSystemActorRegistered,
 		actor.ReservedSystemActorDeregistered,
 		actor.ReservedSystemConfigUpdated,
-		actor.ReservedSystemTypeInstalled,
-		actor.ReservedSystemTypeDeprecated,
 	}
 	seen := map[string]bool{}
 	for _, at := range actorTypes {

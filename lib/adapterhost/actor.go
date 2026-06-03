@@ -173,11 +173,6 @@ func (a *adapterActor) Receive(ctx context.Context, env *message.Envelope) error
 // deferred sentinel collapses to a receiver_internal_error terminal.
 func (a *adapterActor) handleRequest(ctx context.Context, env *message.Envelope) error {
 	key := behavior.CorrelationKey(env.ID)
-	if !declAllowsRequest(a.declaration, env.Type) {
-		// Type the adapter does not handle → fail-fast terminal (don't leave
-		// the caller hanging on a request this actor structurally can't answer).
-		return a.collapseInternalError(ctx, key, fmt.Sprintf("type %s not request-capable for adapter %s", env.Type, a.declaration.Name))
-	}
 	if a.metrics != nil {
 		a.metrics.IncCounter("adapter.dispatch", "adapter", a.declaration.Name, "type", env.Type)
 	}
@@ -231,14 +226,23 @@ func (a *adapterActor) respondStatus(ctx context.Context, env *message.Envelope)
 	return a.selfRespond(ctx, env, payload)
 }
 
-// respondDescribe self-answers the reserved actor.describe request. Minimal
-// Declaration projection for now.
+// respondDescribe self-answers the reserved actor.describe request. The
+// capability surface is the ACTOR's dynamic answer: if the module implements
+// behavior.Describer it is asked live (so it reports its CURRENT APIs); otherwise
+// the answer is identity only. No predefined type list / catalog.
 func (a *adapterActor) respondDescribe(ctx context.Context, env *message.Envelope) error {
-	payload, err := json.Marshal(map[string]any{
-		"name":        a.declaration.Name,
-		"description": a.declaration.Description,
-		"types":       a.declaration.Types,
-	})
+	body := map[string]any{
+		"name":    a.declaration.Name,
+		"binding": string(a.declaration.Binding),
+	}
+	if d, ok := a.module.(behavior.Describer); ok {
+		apis, err := d.Describe(ctx)
+		if err != nil {
+			return fmt.Errorf("adapterhost: module.Describe: %w", err)
+		}
+		body["apis"] = apis
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("adapterhost: respondDescribe marshal: %w", err)
 	}
@@ -258,16 +262,6 @@ func (a *adapterActor) selfRespond(ctx context.Context, env *message.Envelope, p
 	}
 	a.markDone(key)
 	return nil
-}
-
-// declAllowsRequest reports whether the declaration accepts type as a request.
-func declAllowsRequest(decl behavior.Declaration, typ string) bool {
-	for _, t := range decl.Types {
-		if t == typ {
-			return true
-		}
-	}
-	return false
 }
 
 // onTick runs the self-scheduled maintenance on the cell goroutine: poll the

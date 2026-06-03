@@ -38,7 +38,7 @@ func TestReapExpired_BoundsInflight(t *testing.T) {
 type hbModule struct{ called int64 }
 
 func (*hbModule) Declares() behavior.Declaration {
-	return behavior.Declaration{Name: "hb", ActorID: "t", Types: []string{"x"}}
+	return behavior.Declaration{Name: "hb", ActorID: "t"}
 }
 func (*hbModule) Init(context.Context, *behavior.ModuleContext) error { return nil }
 func (*hbModule) Shutdown(context.Context) error                      { return nil }

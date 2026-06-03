@@ -42,6 +42,11 @@ const (
 	ReservedSystemActorRegistered   = "system.actor.registered"
 	ReservedSystemActorDeregistered = "system.actor.deregistered"
 	ReservedSystemConfigUpdated     = "system.config.updated"
-	ReservedSystemTypeInstalled     = "system.type.installed"
-	ReservedSystemTypeDeprecated    = "system.type.deprecated"
 )
+
+// NOTE: there are NO system.type.installed/deprecated events. A "type" is not a
+// substrate/truth first-class entity — it is an actor's method, discovered live
+// via the actor's own actor.describe self-answer (capability is the actor's
+// volatile state, not truth). Membership (actor.registered/deregistered) is the
+// channel-level truth; capability-change history, if ever needed, is an
+// observability concern, not the truth log.
