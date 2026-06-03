@@ -9,25 +9,16 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// ModuleContext is the helper bundle injected into every adapter Module
-// by Manager.Init (L2 §8.1 ModuleContext).
+// ModuleContext is the helper bundle the adapter host hands an adapter
+// Module at Init (L2 §8.1 ModuleContext).
 //
 // Adapter handlers grab the helpers off ModuleContext and call them —
 // they do NOT pull dependencies in directly. This is the kernel-level
 // seam that lets tests substitute every collaborator.
 type ModuleContext struct {
-	// AdapterName mirrors Declaration.Name — convenience, so handlers
-	// don't have to thread the name through their own state.
-	AdapterName string
-
 	// AdapterActorID is the actor_registry id this adapter owns
 	// (Declaration.ActorID).
 	AdapterActorID actor.ActorID
-
-	// AdapterActorKind is the registry kind of the actor this adapter owns —
-	// the kind half of the adapter's identity (AdapterActorID is the id half).
-	// Current adapter Declaration.ActorID rows are tool actors (KindTool).
-	AdapterActorKind actor.Kind
 
 	// ChannelID identifies the channel this adapter instance services
 	// (each channel gets its own adapter instance bound to its own
@@ -86,11 +77,6 @@ type RespondOptions struct {
 	// Visibility overrides the default response visibility (which
 	// inherits from the request). Empty = inherit.
 	Visibility message.Visibility
-
-	// Dedupe signals to the framework that a duplicate inbound
-	// callback should be tagged with payload.dedupe=true (used by
-	// observability).
-	Dedupe bool
 }
 
 // RespondResult is what RespondFunc returns when the harness write

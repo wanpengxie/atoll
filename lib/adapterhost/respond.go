@@ -53,10 +53,8 @@ func (a *adapterActor) Stop(ctx context.Context) error {
 func (a *adapterActor) buildModuleContext() *behavior.ModuleContext {
 	sender := message.Sender{Kind: actor.KindTool, ID: a.self}
 	return &behavior.ModuleContext{
-		AdapterName:      a.declaration.Name,
-		AdapterActorID:   a.self,
-		AdapterActorKind: actor.KindTool,
-		ChannelID:        a.channelID,
+		AdapterActorID: a.self,
+		ChannelID:      a.channelID,
 		Respond: func(ctx context.Context, requestID behavior.CorrelationKey, payload json.RawMessage, opts behavior.RespondOptions) (behavior.RespondResult, error) {
 			return a.doRespond(ctx, requestID, payload, opts, sender)
 		},
@@ -97,7 +95,7 @@ func (a *adapterActor) doRespond(ctx context.Context, requestID behavior.Correla
 		return behavior.RespondResult{}, fmt.Errorf("adapterhost: Respond status must be final; got %q (use Provisional)", status)
 	}
 	env, err := a.buildResponse(ctx, requestID, sender, behavior.ResponseSpec{
-		Status: status, Reason: string(opts.Reason), Payload: payload, Dedupe: opts.Dedupe,
+		Status: status, Reason: string(opts.Reason), Payload: payload,
 		Visibility: opts.Visibility,
 	})
 	if err != nil {

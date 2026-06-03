@@ -30,7 +30,7 @@ type RequestLookup interface {
 // MergeResponsePayload merges an adapter/system payload object with the
 // framework-owned {status, reason[, dedupe]} fields. payload must be a JSON
 // object or empty.
-func MergeResponsePayload(payload json.RawMessage, status, reason string, dedupe bool) (json.RawMessage, error) {
+func MergeResponsePayload(payload json.RawMessage, status, reason string) (json.RawMessage, error) {
 	m := map[string]json.RawMessage{}
 	if len(payload) > 0 {
 		if err := json.Unmarshal(payload, &m); err != nil {
@@ -43,9 +43,6 @@ func MergeResponsePayload(payload json.RawMessage, status, reason string, dedupe
 		rb, _ := json.Marshal(reason)
 		m["reason"] = rb
 	}
-	if dedupe {
-		m["dedupe"] = json.RawMessage("true")
-	}
 	return json.Marshal(m)
 }
 
@@ -57,7 +54,6 @@ type ResponseSpec struct {
 	Status     string
 	Reason     string
 	Payload    json.RawMessage
-	Dedupe     bool
 	Visibility message.Visibility
 }
 
@@ -102,7 +98,7 @@ func BuildResponseFromRequest(
 	if request == nil {
 		return nil, fmt.Errorf("behavior: response request %s not in hand", requestID)
 	}
-	merged, err := MergeResponsePayload(spec.Payload, spec.Status, spec.Reason, spec.Dedupe)
+	merged, err := MergeResponsePayload(spec.Payload, spec.Status, spec.Reason)
 	if err != nil {
 		return nil, err
 	}
