@@ -28,18 +28,6 @@ const (
 	StepEngineAppend     stepID = 9
 )
 
-// allStepIDs lists every step in physical execution order.
-var allStepIDs = []stepID{
-	StepCallerAuth,
-	StepEnvelopeShape,
-	StepNormalize,
-	StepSenderConsistent,
-	StepTypeRegistered,
-	StepKindAndAudience,
-	StepResponsePairing,
-	StepEngineAppend,
-}
-
 // outcome describes the result of running one step against an envelope.
 // Continue / Reject are the only two terminal outcomes for a single step.
 type outcome struct {
@@ -79,8 +67,9 @@ type WriteResult struct {
 func (r WriteResult) Accepted() bool { return r.RejectReason == "" }
 
 // Writer is the harness write entry point as an interface, for callers that
-// inject the chain (typeinstall, lib install behaviour, control handlers).
-// *Chain satisfies it. (Replaces the deleted kernel/harness.Chain interface.)
+// inject the chain (lib install behaviour: adapterhost / sysactor / channelkit
+// closure). *Chain satisfies it. (Replaces the deleted kernel/harness.Chain
+// interface.)
 type Writer interface {
 	Write(ctx context.Context, env *message.Envelope) (WriteResult, error)
 }

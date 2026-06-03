@@ -67,11 +67,11 @@ func env(id string) *message.Envelope {
 // mustDeliver delivers to a single actor and fails on a non-Delivered outcome.
 func mustDeliver(t *testing.T, rt *Runtime, id actor.ActorID, e *message.Envelope) {
 	t.Helper()
-	res, err := rt.Deliver(context.Background(), []actor.ActorID{id}, e)
+	res, err := rt.Deliver([]actor.ActorID{id}, e)
 	if err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
-	if got := res.Per[id].Outcome; got != Delivered {
+	if got := res.Per[id]; got != Delivered {
 		t.Fatalf("deliver outcome = %v, want Delivered", got)
 	}
 }
@@ -135,11 +135,11 @@ func TestCellMailboxFull(t *testing.T) {
 
 	var gotFull atomic.Bool
 	for i := 0; i < 50; i++ {
-		res, err := rt.Deliver(context.Background(), []actor.ActorID{"a"}, env("x"))
+		res, err := rt.Deliver([]actor.ActorID{"a"}, env("x"))
 		if err != nil {
 			t.Fatalf("deliver: %v", err)
 		}
-		if res.Per["a"].Outcome == MailboxFull {
+		if res.Per["a"] == MailboxFull {
 			gotFull.Store(true)
 			break
 		}
@@ -156,11 +156,11 @@ func TestCellMailboxFull(t *testing.T) {
 func TestDeliverNotHosted(t *testing.T) {
 	t.Parallel()
 	rt := New(Config{Parent: context.Background()})
-	res, err := rt.Deliver(context.Background(), []actor.ActorID{"ghost"}, env("x"))
+	res, err := rt.Deliver([]actor.ActorID{"ghost"}, env("x"))
 	if err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
-	if got := res.Per["ghost"].Outcome; got != NotHosted {
+	if got := res.Per["ghost"]; got != NotHosted {
 		t.Fatalf("outcome = %v, want NotHosted", got)
 	}
 }

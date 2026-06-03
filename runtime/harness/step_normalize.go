@@ -49,9 +49,8 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (outcome
 		}
 	}
 
-	// correlation_id default — same self-rooted fallback the previous
-	// round used. Trigger-context branch belongs to FIX-T3 (trigger
-	// gateway) and is not affected by this step.
+	// correlation_id default: a self-rooted fallback — an envelope with no
+	// correlation_id roots a new correlation tree at its own id.
 	if env.CorrelationID == "" && env.ID != "" {
 		env.CorrelationID = env.ID
 	}

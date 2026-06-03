@@ -41,8 +41,9 @@ func openChannelDB(ctx context.Context, dbPath string, opts OpenOptions) (*sql.D
 	// Single authoritative schema: ChannelLocalDDL (schema.go) is the only
 	// place the channel-local shape is defined. There is no in-code
 	// migration path. A fresh open (SkipDDL=false) installs the full
-	// baseline; an existing open (SkipDDL=true, used by the daemon channel
-	// cache) MUST already match the baseline. We never ALTER or drop —
+	// baseline; an existing open (SkipDDL=true, used when re-opening an
+	// already-initialised channel file, e.g. tests) MUST already match the
+	// baseline. We never ALTER or drop —
 	// channel sqlite holds the append-only message-log truth (INVARIANT-2 /
 	// INVARIANT-12); a stale DB is recreated by a human, not silently
 	// migrated. Validate shape on every open and fail-fast on mismatch.

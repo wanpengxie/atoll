@@ -64,7 +64,7 @@ func TestOnDeath_MaterialisesReceiverUnavailable(t *testing.T) {
 	ch.Cells().Spawn("worker", panicActor{})
 
 	// Deliver a request → Receive panics → cell death → OnDeath.
-	_, _ = ch.Cells().Deliver(context.Background(), []actor.ActorID{"worker"},
+	_, _ = ch.Cells().Deliver([]actor.ActorID{"worker"},
 		&message.Envelope{ID: "trigger", ChannelID: "ch", Kind: message.KindRequest, Type: "x.do",
 			Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{"worker"}})
 

@@ -18,7 +18,7 @@ func TestDeliverNilEnvelopeIsError(t *testing.T) {
 	defer rt.StopAll()
 	rt.Spawn("a", newRecordActor())
 
-	res, err := rt.Deliver(context.Background(), []actor.ActorID{"a"}, nil)
+	res, err := rt.Deliver([]actor.ActorID{"a"}, nil)
 	if err == nil {
 		t.Fatal("Deliver(nil) returned nil error")
 	}
@@ -45,7 +45,7 @@ func TestDeliverPerAudienceTruth(t *testing.T) {
 	rt.Despawn("gone")
 
 	audience := []actor.ActorID{"live", "ghost", "gone"}
-	res, err := rt.Deliver(context.Background(), audience, env("m"))
+	res, err := rt.Deliver(audience, env("m"))
 	if err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestDeliverPerAudienceTruth(t *testing.T) {
 		"gone":  NotHosted,
 	}
 	for id, w := range want {
-		if got := res.Per[id].Outcome; got != w {
+		if got := res.Per[id]; got != w {
 			t.Fatalf("audience %q outcome = %v, want %v", id, got, w)
 		}
 	}
@@ -75,14 +75,14 @@ func TestDeliverDuplicateAudienceMember(t *testing.T) {
 	defer rt.StopAll()
 	rt.Spawn("a", newRecordActor())
 
-	res, err := rt.Deliver(context.Background(), []actor.ActorID{"a", "a"}, env("m"))
+	res, err := rt.Deliver([]actor.ActorID{"a", "a"}, env("m"))
 	if err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 	if len(res.Per) != 1 {
 		t.Fatalf("per map size = %d, want 1 (keyed by id)", len(res.Per))
 	}
-	if got := res.Per["a"].Outcome; got != Delivered {
+	if got := res.Per["a"]; got != Delivered {
 		t.Fatalf("outcome = %v, want Delivered", got)
 	}
 }

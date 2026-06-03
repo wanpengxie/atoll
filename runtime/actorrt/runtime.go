@@ -84,14 +84,10 @@ const (
 	Stopped
 )
 
-// AudienceOutcome is the result for one audience member.
-type AudienceOutcome struct {
-	Outcome Outcome
-}
-
-// DeliverResult is the structured, per-audience truth of a Deliver call.
+// DeliverResult is the structured, per-audience truth of a Deliver call: the
+// Outcome for each addressed actor.
 type DeliverResult struct {
-	Per map[actor.ActorID]AudienceOutcome
+	Per map[actor.ActorID]Outcome
 }
 
 // Spawn creates and starts an IN-PROCESS cell for id. If a presence already
@@ -116,7 +112,11 @@ func (r *Runtime) Spawn(id actor.ActorID, impl Actor) {
 // the connection's credential to an ActorID via resolve, relays the remote's
 // emits through emit, and returns the bound id. If a presence already exists for
 // the resolved id it is stopped and replaced.
-func (r *Runtime) Attach(ctx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc) (actor.ActorID, error) {
+//
+// No ctx: the bound port's lifetime is the runtime's (r.parent), NOT this call —
+// a per-call ctx would wrongly scope the port to the Attach invocation. Attach
+// itself does no cancelable wait (the handshake is bounded by conn deadlines).
+func (r *Runtime) Attach(conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc) (actor.ActorID, error) {
 	p, err := newPort(r.parent, conn, emit, resolve, r.sup, r.removeIf)
 	if err != nil {
 		return "", err
@@ -164,18 +164,22 @@ func (r *Runtime) Despawn(id actor.ActorID) {
 // member with no local presence is reported NotHosted (not silently skipped) —
 // the substrate reports truthfully what it did so the seam can fast-fail. error
 // is reserved for a true exception (nil envelope), not for delivery conditions.
-func (r *Runtime) Deliver(ctx context.Context, audience []actor.ActorID, env *message.Envelope) (DeliverResult, error) {
+//
+// No ctx: the enqueue is a non-blocking mailbox post (cell.Deliver never blocks
+// — a full mailbox returns MailboxFull at once), so there is no cancelable wait
+// for a ctx to act on. A per-call ctx would be pure decoration.
+func (r *Runtime) Deliver(audience []actor.ActorID, env *message.Envelope) (DeliverResult, error) {
 	if env == nil {
 		return DeliverResult{}, errors.New("actorrt: deliver nil envelope")
 	}
-	res := DeliverResult{Per: make(map[actor.ActorID]AudienceOutcome, len(audience))}
+	res := DeliverResult{Per: make(map[actor.ActorID]Outcome, len(audience))}
 	r.mu.RLock()
 	matched := make(map[actor.ActorID]presence, len(audience))
 	for _, id := range audience {
 		if p, ok := r.presences[id]; ok {
 			matched[id] = p
 		} else {
-			res.Per[id] = AudienceOutcome{Outcome: NotHosted}
+			res.Per[id] = NotHosted
 		}
 	}
 	r.mu.RUnlock()
@@ -183,13 +187,13 @@ func (r *Runtime) Deliver(ctx context.Context, audience []actor.ActorID, env *me
 	for id, p := range matched {
 		switch err := p.Deliver(env); err {
 		case nil:
-			res.Per[id] = AudienceOutcome{Outcome: Delivered}
+			res.Per[id] = Delivered
 		case ErrMailboxFull:
-			res.Per[id] = AudienceOutcome{Outcome: MailboxFull}
+			res.Per[id] = MailboxFull
 		case ErrCellStopped:
-			res.Per[id] = AudienceOutcome{Outcome: Stopped}
+			res.Per[id] = Stopped
 		default:
-			res.Per[id] = AudienceOutcome{Outcome: Stopped}
+			res.Per[id] = Stopped
 		}
 	}
 	return res, nil

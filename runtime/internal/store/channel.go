@@ -4,14 +4,8 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
-
-// ChannelDeps are the non-db dependencies the channel store assembly needs.
-type ChannelDeps struct {
-	ChannelID channel.ID
-}
 
 // ChannelStores is the channel-local store assembly and the SINGLE public
 // construction entry point for the per-channel sqlite.
@@ -37,8 +31,10 @@ type ChannelStores struct {
 }
 
 // OpenChannel opens the per-channel sqlite and assembles the channel stores.
-// The raw *sql.DB is owned by the returned ChannelStores and never exposed.
-func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions, deps ChannelDeps) (*ChannelStores, error) {
+// The raw *sql.DB is owned by the returned ChannelStores and never exposed. The
+// channel scope is the sqlite file itself (dbPath) — there is no separate
+// channel-id dependency to thread in.
+func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions) (*ChannelStores, error) {
 	db, err := openChannelDB(ctx, dbPath, opts)
 	if err != nil {
 		return nil, err

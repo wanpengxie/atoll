@@ -1,5 +1,6 @@
 // Package channel defines the channel-id type. Allocation strategy belongs to
-// the embedding framework; the kernel treats IDs as opaque stable strings.
+// the layer above the kernel (the server / SDK); the kernel treats IDs as
+// opaque stable strings.
 package channel
 
 // ID is the channel identifier. It is equivalent to envelope `channel_id`

@@ -1,8 +1,7 @@
 package actor
 
-// Binding is the actor transport descriptor carried by actor_registry rows.
-// Its string values are the canonical wire/SQL forms from
-// proto-foundation §2.5.1.
+// Binding is the actor transport descriptor — how an actor is reached. Its
+// string values are the canonical wire forms from proto-foundation §2.5.1.
 //
 // Closed set semantics:
 //

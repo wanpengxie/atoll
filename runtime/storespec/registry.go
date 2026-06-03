@@ -29,7 +29,8 @@ func (r Record) IsActive() bool { return r.DeregisteredAt == 0 }
 
 // Registry is the channel-local actor membership READ contract (L1 §12.1) —
 // deliberately SEGREGATED from the membership-write surface so a pure reader
-// (harness audience check, trigger fanout) never receives Insert/Deregister.
+// (the harness audience check, the system actor's directory query) never
+// receives Insert/Deregister.
 // Membership mutation lives on MembershipWriter / MembershipControlPlane (a
 // control-plane write that is NOT a query). Forward-derived from the reader's
 // role, not from any one downstream consumer. Concrete sqlite backend lives in
@@ -44,7 +45,7 @@ type Registry interface {
 // Deregister). It is SEGREGATED from the read-only Registry: Insert seeds a
 // new membership row (+ its actor_cursors row, L2 §1.4.6) and Deregister
 // soft-removes one. These are control-plane writes, not queries, so a handle
-// that only needs reads (harness, trigger) cannot reach them. The
+// that only needs reads (harness, the system actor) cannot reach them. The
 // log-emitting batch transition lives on MembershipControlPlane; this is the
 // imperative single-actor seed/teardown path (bootstrap / install handler
 // registration). Concrete impl in runtime/store (actorRegistry).

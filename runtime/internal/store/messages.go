@@ -29,8 +29,8 @@ import (
 // INDEX violation per L2 §1.4.1). envelope.id is a caller-generated random
 // uuid correlation anchor — uniqueness is a pure integrity guarantee, NOT
 // a dedup/idempotency seam (the v1 at-least-once dedupe machinery was
-// retired under v2 caller-scoped closure). Optional framework observers
-// may enqueue same-transaction side rows after the message insert.
+// retired under v2 caller-scoped closure). There are no same-transaction
+// side-row observers (the v1 outbox projection is removed — see newMessages).
 //
 // IsTerminal is NOT computed here: the harness step 8 derives it from the
 // response's Layer-1 final status (proto-layer0 §2.5.1) and hands it to

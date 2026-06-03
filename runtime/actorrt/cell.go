@@ -168,12 +168,13 @@ func (c *cell) start() {
 	}()
 }
 
-// safeReceive invokes impl.Receive with panic recovery. A panic is re-raised as
-// a goroutine-level panic so the cell's outer recover converts it into a
-// DeathSignal (one death per cell, not per message). A returned (non-panic)
-// error is NOT a death — closure belongs to the sender — so it is swallowed for
-// observability (the substrate never synthesises a terminal from a handler
-// error; an actor needing observability emits it itself).
+// safeReceive invokes impl.Receive. A panic propagates naturally up the cell
+// goroutine stack to the deferred recover in start(), which converts it into a
+// single DeathSignal (one death per cell, not per message) — safeReceive itself
+// does not recover. A returned (non-panic) error is NOT a death — closure
+// belongs to the sender — so it is swallowed for observability (the substrate
+// never synthesises a terminal from a handler error; an actor needing
+// observability emits it itself).
 func (c *cell) safeReceive(env *message.Envelope) {
 	if err := c.impl.Receive(c.ctx, env); err != nil {
 		_ = err

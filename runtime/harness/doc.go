@@ -20,5 +20,6 @@
 //     mailboxes (and reporting per-audience Outcome / collapsing an
 //     undeliverable request to receiver_unavailable) is runtime/actorrt's
 //     Deliver — invoked by the server write-loop, not a separate package.
-//   - Adapter binding tri-class transport (kernel/adapter + adapters/framework).
+//   - Actor hosting + transport (in-process cell / connect-in port) —
+//     runtime/actorrt and the daemon host, not the harness.
 package harness

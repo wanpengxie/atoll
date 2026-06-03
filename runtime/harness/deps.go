@@ -125,7 +125,7 @@ type ctxKeyRawEnvelope struct{}
 // CtxWithRawEnvelope returns a child ctx carrying the original envelope
 // JSON bytes the caller decoded into *message.Envelope. This is a
 // binding→harness INJECTION SEAM (like CtxWithCaller): wire-level bindings
-// (worker IPC, HTTP API) MUST plumb the raw wire bytes through it so Step 2's
+// (a connect-in port, the HTTP API) MUST plumb the raw wire bytes through it so Step 2's
 // unknown-top-level-field fail-closed check (proto-layer0 §7.3) has the
 // original JSON — without this setter exported, that check is
 // dead-by-construction. In-process Go callers MAY omit it (the struct-typed

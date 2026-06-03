@@ -28,7 +28,7 @@ const (
 	// Step 0 — Caller Principal Validation
 	HarnessEngineACLDenied HarnessRejectReason = "harness_engine_acl_denied"
 
-	// Step 2 — Envelope Shape Validate
+	// Step 1 — Envelope Shape Validate
 	HarnessEnvelopeFieldMissing      HarnessRejectReason = "harness_envelope_field_missing"
 	HarnessChannelMismatch           HarnessRejectReason = "harness_channel_mismatch"
 	HarnessKindInvalid               HarnessRejectReason = "harness_kind_invalid"
@@ -36,20 +36,20 @@ const (
 	HarnessEnvelopeUnknownField      HarnessRejectReason = "harness_envelope_unknown_field"
 	HarnessAudienceWildcardForbidden HarnessRejectReason = "harness_audience_wildcard_forbidden"
 
-	// Step 4 — Normalize (time-relation guard)
+	// Step 3 — Normalize (time-relation guard)
 	HarnessTimeInvalid HarnessRejectReason = "harness_time_invalid"
+
+	// Step 4 — Sender Validate
+	HarnessSenderMismatch     HarnessRejectReason = "harness_sender_mismatch"
+	HarnessSenderKindMismatch HarnessRejectReason = "harness_sender_kind_mismatch"
+	HarnessSenderDeregistered HarnessRejectReason = "harness_sender_deregistered"
 
 	// Step 5 — Type / Kind Validate
 	HarnessTypeUnknown                    HarnessRejectReason = "harness_type_unknown"
 	HarnessKindNotAllowedForType          HarnessRejectReason = "harness_kind_not_allowed_for_type"
 	HarnessReservedTypeUnauthorizedSender HarnessRejectReason = "harness_reserved_type_unauthorized_sender"
 
-	// Step 6 — Sender Validate
-	HarnessSenderMismatch     HarnessRejectReason = "harness_sender_mismatch"
-	HarnessSenderKindMismatch HarnessRejectReason = "harness_sender_kind_mismatch"
-	HarnessSenderDeregistered HarnessRejectReason = "harness_sender_deregistered"
-
-	// Step 7 — Audience Validate
+	// Step 7 — Kind + Audience Validate
 	HarnessAudienceEmpty           HarnessRejectReason = "harness_audience_empty"
 	HarnessAudienceMemberNotActive HarnessRejectReason = "harness_audience_member_not_active"
 	HarnessRequestAudienceInvalid  HarnessRejectReason = "harness_request_audience_invalid"

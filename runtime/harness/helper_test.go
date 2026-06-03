@@ -27,7 +27,7 @@ const fixedNowMs int64 = 1_700_000_000_000
 func newTestStore(t *testing.T) *store.ChannelStores {
 	t.Helper()
 	ctx := context.Background()
-	cs, err := store.OpenChannel(ctx, filepath.Join(t.TempDir(), "ch.sqlite"), store.OpenOptions{}, store.ChannelDeps{ChannelID: testChannelID})
+	cs, err := store.OpenChannel(ctx, filepath.Join(t.TempDir(), "ch.sqlite"), store.OpenOptions{})
 	if err != nil {
 		t.Fatalf("OpenChannel: %v", err)
 	}

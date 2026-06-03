@@ -323,13 +323,13 @@ func actorRegisteredEnvelope(channelID channel.ID, add storespec.MemberActorAdd)
 		return nil, err
 	}
 	env := &message.Envelope{
-		ID:         message.ID(fmt.Sprintf("system.actor.registered:%s:%d", add.ID, add.At)),
+		ID:         message.ID(fmt.Sprintf("%s:%s:%d", actor.ReservedSystemActorRegistered, add.ID, add.At)),
 		TS:         add.At,
 		TSReceived: add.At,
 		ChannelID:  channelID,
 		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
 		Kind:       message.KindEvent,
-		Type:       "system.actor.registered",
+		Type:       actor.ReservedSystemActorRegistered,
 		Payload:    payload,
 		Visibility: message.VisibilitySystem,
 		Audience:   message.Audience{actor.SystemActorID},
@@ -346,13 +346,13 @@ func actorDeregisteredEnvelope(channelID channel.ID, remove storespec.MemberActo
 		return nil, err
 	}
 	env := &message.Envelope{
-		ID:         message.ID(fmt.Sprintf("system.actor.deregistered:%s:%d", remove.ID, remove.At)),
+		ID:         message.ID(fmt.Sprintf("%s:%s:%d", actor.ReservedSystemActorDeregistered, remove.ID, remove.At)),
 		TS:         remove.At,
 		TSReceived: remove.At,
 		ChannelID:  channelID,
 		Sender:     message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
 		Kind:       message.KindEvent,
-		Type:       "system.actor.deregistered",
+		Type:       actor.ReservedSystemActorDeregistered,
 		Payload:    payload,
 		Visibility: message.VisibilitySystem,
 		Audience:   message.Audience{actor.SystemActorID},

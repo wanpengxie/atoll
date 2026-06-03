@@ -40,8 +40,9 @@ type MemberActorRemove struct {
 }
 
 // MembershipControlPlane is the full membership-management contract —
-// deliberately SEGREGATED from the read-only Registry so a pure reader (harness
-// audience check, trigger) never receives any membership WRITE. It composes the
+// deliberately SEGREGATED from the read-only Registry so a pure reader (the
+// harness audience check, the system actor's directory query) never receives
+// any membership WRITE. It composes the
 // single-actor MembershipWriter (Insert/Deregister) with the batch + log-mirror
 // transitions and the desired-set replay. Every method here is a control-plane
 // write or a fact replay, never an ambient query. Forward-derived from the
