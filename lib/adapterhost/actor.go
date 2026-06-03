@@ -9,7 +9,6 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
@@ -18,7 +17,7 @@ import (
 
 // tickType is the internal self-schedule signal an adapterActor delivers to
 // itself (NOT a protocol type — it never leaves the cell). Receive intercepts
-// it to run heartbeat + correlation reaper on the cell goroutine.
+// it to run heartbeat + the in-flight reaper on the cell goroutine.
 const tickType = "adapterhost.__tick__"
 
 // adapterActor is one adapter hosted as a real serial actor cell. It is the
@@ -36,54 +35,34 @@ type adapterActor struct {
 	module      behavior.Module
 	declaration behavior.Declaration
 
-	// Receiver-side correlation — INLINED as a plain map, NO lock (was
-	// memoryCorrelationTracker.{mu, entries}; the cell goroutine serialises
-	// all access). request_id → entry.
-	correlation map[behavior.CorrelationKey]behavior.CorrelationEntry
-
-	// Readiness — plain field (was actor_registry.ready_state + Manager.
-	// readinessMu; the actor owns its readiness and emits
-	// actor.readiness.changed itself). Projection in the registry is a
-	// downstream consumer, never read back as a dispatch gate.
-	readiness actor.Readiness
+	// Readiness — pure domain self-state (two-axis model: readiness is NOT a
+	// substrate axis; it is the adapter's own serviceable-state, surfaced ONLY
+	// via the advisory actor.status self-answer, never a dispatch gate and never
+	// projected to the membership registry). Folded from the module's
+	// Heartbeater on the self-scheduled tick. Plain fields, cell goroutine sole
+	// owner, no lock.
+	ready       bool
+	readyReason string
 
 	// Observability (injected; behavior interfaces, impl from obs via cmd).
 	logger  behavior.Logger
 	metrics behavior.Metrics
 
-	// state is the adapter's persistent KV seam (was boundModule.state).
-	state behavior.StateStore
-
 	// channelID is the channel this adapter services.
 	channelID channel.ID
 
-	// chain is the harness write path (kernel/harness.Chain INTERFACE — pure
-	// contract; the runtime/harness impl is injected by the installer). The
-	// adapter writes terminals/events through it.
-	chain harness.Chain
+	// chain is the harness write path (runtime/harness.Writer — the consumer-side
+	// write contract; the concrete *harness.Chain (server) or an UplinkChain
+	// (compute) is injected by the installer). The adapter writes
+	// terminals/events through it.
+	chain rtharness.Writer
 
-	// lookup recovers the original request envelope by id (F5; kernel/message
-	// contract, impl in runtime/store).
-	lookup message.RequestLookup
+	// lookup recovers the original request envelope by id (F5; behaviour's
+	// consumer-side RequestLookup, satisfied by the runtime store).
+	lookup behavior.RequestLookup
 
 	// clock stamps response ts.
 	clock func() time.Time
-
-	// forward is the transport-backed external-request seam (relay adapters
-	// like proxyfacade), injected by the installer (daemon wires the device
-	// transit). nil for adapters that never forward.
-	forward behavior.ExternalRequestFunc
-
-	// futures is the channel-level caller-side future hub (Submit/Await/Watch),
-	// injected by the installer. nil for pure receiver adapters.
-	futures callerFutures
-
-	// readinessSink persists this adapter's readiness into the authoritative
-	// registry projection (write-side Go method — the adapter cannot emit the
-	// SystemOnly actor.readiness.changed event itself; the channel system actor
-	// reads readiness back from the registry, INVARIANT-0 read side). nil → the
-	// adapter only holds readiness in its own plain field.
-	readinessSink actor.ReadinessUpdater
 
 	// inflight caches the dispatched request envelope per pending correlation.
 	// A compute cell has NO local truth to look up, so it builds responses from
@@ -104,35 +83,19 @@ type adapterActor struct {
 
 	// mctx is the ModuleContext handed to module.Init (built in Start; its
 	// Respond/Fail/Provisional/EmitEvent seams close over THIS adapterActor so
-	// they touch a.correlation/a.chain on the cell goroutine — no god-object).
+	// they touch a.inflight/a.chain on the cell goroutine — no god-object).
 	mctx *behavior.ModuleContext
 }
 
-// callerFutures is the minimal caller-side surface adapterActor needs from the
-// channel-level futureHub (lib/behavior/futurereg). Kept as a local interface
-// so the cell depends only on what it uses.
-type callerFutures interface {
-	Submit(ctx context.Context, env *message.Envelope) (message.ID, error)
-	Await(ctx context.Context, id message.ID, timeout time.Duration) (*message.Envelope, error)
-}
+// --- in-flight request tracking (lock-free; cell goroutine is sole caller) ---
+// The cached request envelope IS the pending tracker — no parallel correlation
+// structure. No mutex: every call arrives on the cell goroutine via Receive, so
+// access is already serial.
 
-// --- correlation (inlined, lock-free; cell goroutine is sole caller) ---
-// These replace memoryCorrelationTracker. No mutex: every call arrives on the
-// cell goroutine via Receive/Ask, so access is already serial.
-
-func (a *adapterActor) reserve(e behavior.CorrelationEntry) behavior.CorrelationEntry {
-	if existing, ok := a.correlation[e.RequestID]; ok {
-		return existing // idempotent
-	}
-	if e.State == "" {
-		e.State = behavior.CorrelationPending
-	}
-	a.correlation[e.RequestID] = e
-	return e
-}
-
-// remember caches the request envelope so a compute cell can build responses
-// without a truth lookup (cleared on markDone).
+// remember caches the request envelope, registering it as in-flight: the cached
+// envelope is the cell's single source of truth for the pending request (id /
+// expires_at / sender), used to build responses without a truth lookup and
+// iterated by the reaper. markDone removes it on the terminal write.
 func (a *adapterActor) remember(env *message.Envelope) {
 	if a.inflight == nil {
 		a.inflight = map[behavior.CorrelationKey]*message.Envelope{}
@@ -140,11 +103,9 @@ func (a *adapterActor) remember(env *message.Envelope) {
 	a.inflight[behavior.CorrelationKey(env.ID)] = env
 }
 
+// markDone drops the in-flight request once its terminal is written. Absence
+// from a.inflight IS the "done" state — no parallel entry to flip.
 func (a *adapterActor) markDone(id behavior.CorrelationKey) {
-	if e, ok := a.correlation[id]; ok {
-		e.State = behavior.CorrelationDone
-		a.correlation[id] = e
-	}
 	delete(a.inflight, id)
 }
 
@@ -170,7 +131,7 @@ func (a *adapterActor) buildResponse(ctx context.Context, requestID behavior.Cor
 // wire, so the home's fleet re-stamps from EmitFrame.Source on arrival.
 func (a *adapterActor) writeCtx(ctx context.Context) context.Context {
 	return rtharness.CtxWithCaller(ctx, rtharness.CallerContext{
-		ActorID: a.self, ChannelID: a.channelID, AllowProvidedSenderKind: true,
+		ActorID: a.self, ChannelID: a.channelID,
 	})
 }
 
@@ -188,25 +149,26 @@ func (a *adapterActor) Receive(ctx context.Context, env *message.Envelope) error
 	}
 	if env.Kind != message.KindRequest {
 		// Non-request envelopes addressed to an adapter are ignored at this
-		// seam (the adapter is a request/reply driver). Out-of-band signals
-		// (device callback/lifecycle/heartbeat) arrive via Post/Ask closures,
-		// not as protocol envelopes.
+		// seam (the adapter is a request/reply driver). An adapter that drives an
+		// external resource folds inbound results back by self-delivering an
+		// envelope onto its own cell (ActorContext.Deliver) and routing it here —
+		// that is the adapter's own concern, not a framework callback.
 		return nil
 	}
 	a.remember(env) // cache request so respond works without a truth lookup
 	switch env.Type {
-	case "actor.status":
+	case actor.ReservedActorStatus:
 		return a.respondStatus(ctx, env)
-	case "actor.describe":
+	case actor.ReservedActorDescribe:
 		return a.respondDescribe(ctx, env)
 	default:
 		return a.handleRequest(ctx, env)
 	}
 }
 
-// handleRequest is the declared-type path: reserve the pending correlation then
-// hand the envelope to module.Handle. The terminal is produced later by the
-// module via mctx.Respond/Resolve (or, on a caller timeout, by the caller's
+// handleRequest is the declared-type path: hand the envelope to module.Handle
+// (the request is already cached in-flight by Receive). The terminal is produced
+// later by the module via mctx.Respond (or, on a caller timeout, by the caller's
 // caller-scoped closure — lib/behavior). A Handle error that is not the
 // deferred sentinel collapses to a receiver_internal_error terminal.
 func (a *adapterActor) handleRequest(ctx context.Context, env *message.Envelope) error {
@@ -216,11 +178,6 @@ func (a *adapterActor) handleRequest(ctx context.Context, env *message.Envelope)
 		// the caller hanging on a request this actor structurally can't answer).
 		return a.collapseInternalError(ctx, key, fmt.Sprintf("type %s not request-capable for adapter %s", env.Type, a.declaration.Name))
 	}
-	var exp int64
-	if env.ExpiresAt != nil {
-		exp = *env.ExpiresAt
-	}
-	a.reserve(behavior.CorrelationEntry{RequestID: key, ExpiresAt: exp})
 	if a.metrics != nil {
 		a.metrics.IncCounter("adapter.dispatch", "adapter", a.declaration.Name, "type", env.Type)
 	}
@@ -259,17 +216,13 @@ func (a *adapterActor) collapseInternalError(ctx context.Context, key behavior.C
 	return nil
 }
 
-// respondStatus self-answers the reserved actor.status request (collapse of
-// Manager.respondActorStatus manager.go:1015). Reads the actor's OWN readiness
-// (no registry round-trip, no dispatch gate). Minimal projection for now;
-// TODO(next): StatusReporter live enrichment (manager.go:1041) +
-// last_ready_at/last_state_change_at/detail/checked_at fields.
+// respondStatus self-answers the reserved actor.status request. Reads the
+// actor's OWN serviceable-state (advisory, no registry round-trip, no dispatch
+// gate — "ask the actor itself"). Minimal projection for now.
 func (a *adapterActor) respondStatus(ctx context.Context, env *message.Envelope) error {
-	a.reserve(behavior.CorrelationEntry{RequestID: behavior.CorrelationKey(env.ID)})
-	r := a.readiness.Normalize()
 	payload, err := json.Marshal(map[string]any{
-		"available": r.IsReady(),
-		"reason":    r.Reason,
+		"available": a.ready,
+		"reason":    a.readyReason,
 		"kind":      string(a.declaration.Binding),
 	})
 	if err != nil {
@@ -278,12 +231,9 @@ func (a *adapterActor) respondStatus(ctx context.Context, env *message.Envelope)
 	return a.selfRespond(ctx, env, payload)
 }
 
-// respondDescribe self-answers the reserved actor.describe request (collapse of
-// Manager.respondActorDescribe manager.go:1095). Minimal Declaration projection
-// for now; TODO(next): DeclarationCatalog type_declarations + skill_doc +
-// per-type filter.
+// respondDescribe self-answers the reserved actor.describe request. Minimal
+// Declaration projection for now.
 func (a *adapterActor) respondDescribe(ctx context.Context, env *message.Envelope) error {
-	a.reserve(behavior.CorrelationEntry{RequestID: behavior.CorrelationKey(env.ID)})
 	payload, err := json.Marshal(map[string]any{
 		"name":        a.declaration.Name,
 		"description": a.declaration.Description,

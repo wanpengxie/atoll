@@ -12,22 +12,25 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 )
 
-// TestReapExpired_BoundsCorrelation proves the reaper really clears expired
-// pending + done correlation (止泄漏 — was //nolint:unused dead code).
-func TestReapExpired_BoundsCorrelation(t *testing.T) {
-	a := &adapterActor{correlation: map[behavior.CorrelationKey]behavior.CorrelationEntry{}}
-	a.correlation["exp"] = behavior.CorrelationEntry{RequestID: "exp", State: behavior.CorrelationPending, ExpiresAt: 100}
-	a.correlation["live"] = behavior.CorrelationEntry{RequestID: "live", State: behavior.CorrelationPending, ExpiresAt: 10000}
-	a.correlation["done"] = behavior.CorrelationEntry{RequestID: "done", State: behavior.CorrelationDone}
+// TestReapExpired_BoundsInflight proves the reaper clears in-flight requests
+// past their deadline, keeps live ones, and leaves no-deadline ones alone
+// (止泄漏). The in-flight cache IS the pending tracker (env.expires_at is the
+// deadline; no parallel correlation entry).
+func TestReapExpired_BoundsInflight(t *testing.T) {
+	ms := func(v int64) *int64 { return &v }
+	a := &adapterActor{inflight: map[behavior.CorrelationKey]*message.Envelope{}}
+	a.inflight["exp"] = &message.Envelope{ID: "exp", ExpiresAt: ms(100)}
+	a.inflight["live"] = &message.Envelope{ID: "live", ExpiresAt: ms(10000)}
+	a.inflight["nodeadline"] = &message.Envelope{ID: "nodeadline"} // ExpiresAt nil
 	a.reapExpired(500)
-	if _, ok := a.correlation["exp"]; ok {
-		t.Error("expired pending correlation NOT reaped (leak)")
+	if _, ok := a.inflight["exp"]; ok {
+		t.Error("expired in-flight request NOT reaped (leak)")
 	}
-	if _, ok := a.correlation["done"]; ok {
-		t.Error("done correlation NOT reaped (leak)")
+	if _, ok := a.inflight["live"]; !ok {
+		t.Error("live in-flight request wrongly reaped")
 	}
-	if _, ok := a.correlation["live"]; !ok {
-		t.Error("live pending correlation wrongly reaped")
+	if _, ok := a.inflight["nodeadline"]; !ok {
+		t.Error("no-deadline request wrongly reaped (must stay until terminal)")
 	}
 }
 
@@ -54,9 +57,8 @@ func TestSelfSchedule_TickerDrivesHeartbeat(t *testing.T) {
 	a := &adapterActor{
 		self: "t", module: mod, declaration: behavior.Declaration{ActorID: "t"},
 		clock: time.Now, channelID: "ch", tickEvery: 5 * time.Millisecond,
-		chain:       &recChain{},
-		correlation: map[behavior.CorrelationKey]behavior.CorrelationEntry{},
-		inflight:    map[behavior.CorrelationKey]*message.Envelope{},
+		chain:    &recChain{},
+		inflight: map[behavior.CorrelationKey]*message.Envelope{},
 	}
 	rt := actorrt.New(actorrt.Config{})
 	rt.Spawn("t", a)

@@ -13,9 +13,19 @@ import (
 
 // serve.go is the SERVE face of the behaviour base: shared helpers any actor
 // uses to answer a request by emitting a kind=response envelope. It depends
-// only on kernel contracts (message.RequestLookup + the envelope types), so it
-// stays pure-kernel and is shared by adapterActor (adapterhost) and the channel
-// system actor (sysactor) — one respond implementation, not two (C3).
+// only on kernel envelope types plus the consumer-side RequestLookup interface
+// defined below, so it stays pure-kernel and is shared by adapterActor
+// (adapterhost) and the channel system actor (sysactor) — one respond
+// implementation, not two (C3).
+
+// RequestLookup recovers an original request envelope by id. Defined here on
+// the CONSUMER side (Go idiom) over kernel types only, so behaviour stays
+// pure-kernel and the adapters↛runtime transitive purity holds. The substrate's
+// runtime/storespec.RequestLookup structurally satisfies it; the composition
+// root injects the concrete store.
+type RequestLookup interface {
+	FindByID(ctx context.Context, id message.ID) (*message.Envelope, bool, error)
+}
 
 // MergeResponsePayload merges an adapter/system payload object with the
 // framework-owned {status, reason[, dedupe]} fields. payload must be a JSON
@@ -40,14 +50,15 @@ func MergeResponsePayload(payload json.RawMessage, status, reason string, dedupe
 }
 
 // ResponseSpec is the caller-supplied shape of a response (status/reason +
-// optional visibility/audience override + the raw payload).
+// optional visibility override + the raw payload). The response audience is NOT
+// caller-adjustable: a response always goes to the request's sender (harness
+// Step 8 enforces audience == parent sender), so there is no audience field.
 type ResponseSpec struct {
 	Status     string
 	Reason     string
 	Payload    json.RawMessage
 	Dedupe     bool
 	Visibility message.Visibility
-	Audience   message.Audience
 }
 
 // BuildResponseEnvelope assembles a kind=response envelope from the original
@@ -58,7 +69,7 @@ type ResponseSpec struct {
 // serve helper.
 func BuildResponseEnvelope(
 	ctx context.Context,
-	lookup message.RequestLookup,
+	lookup RequestLookup,
 	clock func() time.Time,
 	sender message.Sender,
 	requestID CorrelationKey,
@@ -100,12 +111,6 @@ func BuildResponseFromRequest(
 		vis = request.Visibility
 	}
 	audience := message.Audience{request.Sender.ID}
-	if len(spec.Audience) > 0 {
-		if len(spec.Audience) != 1 || spec.Audience[0] != request.Sender.ID {
-			return nil, fmt.Errorf("behavior: response audience %v must equal parent sender %s", spec.Audience, request.Sender.ID)
-		}
-		audience = spec.Audience
-	}
 	correlationID := request.CorrelationID
 	if correlationID == "" {
 		correlationID = request.ID

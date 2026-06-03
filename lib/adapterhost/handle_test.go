@@ -7,16 +7,16 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	khrn "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
+	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 type recChain struct{ written []*message.Envelope }
 
-func (c *recChain) Write(_ context.Context, env *message.Envelope) (khrn.WriteResult, error) {
+func (c *recChain) Write(_ context.Context, env *message.Envelope) (rtharness.WriteResult, error) {
 	c.written = append(c.written, env)
-	return khrn.WriteResult{MessageID: env.ID}, nil
+	return rtharness.WriteResult{MessageID: env.ID}, nil
 }
 
 type errModule struct{ err error }
@@ -40,7 +40,6 @@ func TestHandleError_CollapsesReceiverInternalError(t *testing.T) {
 		declaration: behavior.Declaration{Name: "t", ActorID: "tool1", Types: []string{"x.do"}},
 		chain:       fc,
 		clock:       time.Now,
-		correlation: map[behavior.CorrelationKey]behavior.CorrelationEntry{},
 		inflight:    map[behavior.CorrelationKey]*message.Envelope{},
 	}
 	req := &message.Envelope{
@@ -60,9 +59,9 @@ func TestHandleError_CollapsesReceiverInternalError(t *testing.T) {
 	if !contains(string(term.Payload), "receiver_internal_error") || !contains(string(term.Payload), "failed") {
 		t.Fatalf("payload=%s, want failed+receiver_internal_error", term.Payload)
 	}
-	// correlation must be cleared (not pending)
-	if e, ok := a.correlation["r1"]; ok && e.State == behavior.CorrelationPending {
-		t.Fatal("correlation still pending after Handle error (leak)")
+	// in-flight entry must be cleared (markDone dropped it) — no pending leak
+	if _, ok := a.inflight["r1"]; ok {
+		t.Fatal("request still in-flight after Handle error collapsed (leak)")
 	}
 }
 
@@ -74,8 +73,7 @@ func TestHandleDeferred_KeepsPending(t *testing.T) {
 		self: "tool1", module: errModule{err: behavior.ErrHandleDeferred},
 		declaration: behavior.Declaration{Name: "t", ActorID: "tool1", Types: []string{"x.do"}},
 		chain:       fc, clock: time.Now,
-		correlation: map[behavior.CorrelationKey]behavior.CorrelationEntry{},
-		inflight:    map[behavior.CorrelationKey]*message.Envelope{},
+		inflight: map[behavior.CorrelationKey]*message.Envelope{},
 	}
 	req := &message.Envelope{ID: "r2", ChannelID: "ch", Kind: message.KindRequest, Type: "x.do",
 		Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{"tool1"}}

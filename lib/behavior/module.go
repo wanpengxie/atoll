@@ -6,53 +6,8 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
-
-// RuntimeEvent is a lifecycle signal pushed from the channel runtime
-// into a Module so the adapter can own its own state machine without
-// reading transport-layer plumbing.
-//
-// Modules opt in by implementing RuntimeEventAware; modules that don't
-// implement it never see RuntimeEvents and the framework drops them
-// silently.
-type RuntimeEvent struct {
-	// Kind is the event source / closed set.
-	Kind RuntimeEventKind
-
-	// ChannelID is the channel this signal belongs to. Always non-empty.
-	// A Module instance is bound to exactly one channel so this MUST equal
-	// ModuleContext.ChannelID; the framework rejects mismatches before
-	// invoking the hook.
-	ChannelID channel.ID
-
-	// AdapterActorID echoes the adapter actor identity the runtime event
-	// applies to. For runtime_inbound_via_relay this is always the
-	// Module's own actor id; included so future multi-actor-per-module
-	// implementations stay possible.
-	AdapterActorID actor.ActorID
-
-	// Payload is an opaque framework-owned runtime event body. Kernel does
-	// not know the source-specific schema; framework packages define the
-	// kind strings and payload contracts they emit.
-	Payload json.RawMessage
-}
-
-// RuntimeEventKind identifies the framework-owned runtime-event source.
-// Kernel treats values as opaque; framework packages own their kind
-// strings and payload schemas.
-type RuntimeEventKind string
-
-// RuntimeEventAware is the optional Module sub-interface. Modules that
-// want runtime lifecycle signals implement this method; the host
-// type-asserts and skips delivery when absent. Per the serial contract
-// (see Module), OnRuntimeEvent is folded onto the adapter actor's cell
-// goroutine (host Post) and runs SERIALLY with Handle / OnExternalCallback /
-// Shutdown — implementations touch logical state with no locks.
-type RuntimeEventAware interface {
-	OnRuntimeEvent(ctx context.Context, evt RuntimeEvent) error
-}
 
 // Heartbeater is the optional Module sub-interface for adapters that
 // can report live readiness to the framework. Implementations must
@@ -155,9 +110,7 @@ type TypeDeclaration struct {
 // the value side-effect-free and identical across calls.
 type Declaration struct {
 	// Name is the adapter identifier (e.g. "xhs", "feishu"). Used for
-	// logging, orphan-callback event payload, and routing
-	// OnExternalCallback by adapter name. Non-empty + unique within a
-	// Manager.
+	// logging + diagnostics. Non-empty + unique within a channel.
 	Name string
 
 	// ActorID is the actor_registry row this adapter owns. Every request
@@ -191,10 +144,6 @@ type Declaration struct {
 	// with adapter_timeout_missing.
 	MaxPendingMs int64
 
-	// Needs is the optional helper opt-in list (L2 §8.1 declares.needs).
-	// Currently informational — Manager wires every helper unconditionally.
-	Needs []string
-
 	// Description is optional actor-CLI convention metadata: one-line
 	// actor positioning for list_actors and describe_actor.
 	Description string
@@ -206,12 +155,15 @@ type Declaration struct {
 
 // Module is the gen_server callback contract every adapter implements
 // (lib/behavior = coagent's OTP behaviour). The host calls Declares first,
-// then Init, then Handle / OnExternalCallback on demand, finally Shutdown.
+// then Init, then Handle on demand, finally Shutdown.
 //
 // SERIAL CONTRACT (v2, dismantle-spec §3 — the abstraction returning home):
-// the adapterhost guarantees ALL Module callbacks (Handle / OnExternalCallback
-// / OnRuntimeEvent / Status / Shutdown) are invoked SERIALLY by this adapter
-// actor's single cell goroutine. A Module MUST NOT depend on concurrent
+// the adapterhost guarantees ALL Module callbacks (Handle / Heartbeat / Status
+// / Shutdown) are invoked SERIALLY by this adapter actor's single cell
+// goroutine. Inbound external I/O (device/webhook results) is the adapter's own
+// private business: its reader folds results back by self-delivering an envelope
+// onto its cell (ActorContext.Deliver), handled in the same serial Receive — NOT
+// a framework callback. A Module MUST NOT depend on concurrent
 // invocation, and MUST NOT read or write its own logical state from a
 // goroutine it spawned itself. External resources (HTTP client, watcher
 // goroutine) may carry their own synchronisation, but their results MUST be
@@ -223,48 +175,20 @@ type Module interface {
 	// Install. Result MUST be deterministic (same call → same value).
 	Declares() Declaration
 
-	// Init receives the framework-built ModuleContext. The adapter MUST
-	// persist the *ModuleContext if it intends to call helpers
-	// (Respond / ErrorPolicy / Correlation) from Handle /
-	// OnExternalCallback.
+	// Init receives the ModuleContext (respond/emit helpers + injected
+	// deps). The adapter MUST persist the *ModuleContext if it intends to
+	// call helpers from Handle.
 	Init(ctx context.Context, mctx *ModuleContext) error
 
-	// Shutdown cancels in-flight work + releases external connections.
-	// launch baseline: best-effort, invoked from Manager.Shutdown only.
+	// Shutdown cancels in-flight work + releases external connections
+	// (best-effort).
 	Shutdown(ctx context.Context) error
 
 	// Handle translates one inbound kind=request envelope into outbound
-	// protocol traffic. Returning an error leaves the request pending —
-	// the F3 timer eventually emits unanswered_timeout via the framework.
-	// Adapters typically return nil once the external call is launched +
-	// the correlation is tracked.
+	// protocol traffic. Returning nil with no terminal leaves the request
+	// pending — the adapter answers later (e.g. once its own external call
+	// completes and it self-delivers the result onto its cell), or the
+	// caller-scoped closure times it out. A hard error collapses to a
+	// receiver_internal_error terminal.
 	Handle(ctx context.Context, env *message.Envelope) error
-
-	// OnExternalCallback translates one inbound external callback (e.g.
-	// webhook body, WS message, relay callback frame) into a Respond call.
-	// Framework de-dupes
-	// the callback before invoking (terminal already exists → not
-	// invoked).
-	OnExternalCallback(ctx context.Context, payload []byte) error
-}
-
-// ExternalCallbackFrame is the framework-owned wrapper for inbound
-// runtime_inbound_via_relay callbacks. Payload remains adapter-domain
-// data; request/channel/correlation identity comes from the transport
-// wrapper stamped by the framework on the outbound leg and preserved by
-// the callback bridge on the inbound leg.
-type ExternalCallbackFrame struct {
-	ChannelID      channel.ID
-	AdapterActorID actor.ActorID
-	RequestID      message.ID
-	ParentID       message.ID
-	CorrelationID  message.ID
-	ExpiresAt      int64
-	Payload        json.RawMessage
-}
-
-// ExternalCallbackFrameAware lets adapters consume the framework-owned
-// callback wrapper without receiving raw transport capabilities.
-type ExternalCallbackFrameAware interface {
-	OnExternalCallbackFrame(ctx context.Context, frame ExternalCallbackFrame) error
 }

@@ -142,7 +142,7 @@ func metricKey(name string, tags []string) string {
 }
 
 // Tracer is the F7 tracing seam. The framework opens a span around each
-// Handle / OnExternalCallback invocation; production wires real OTel.
+// Handle invocation; production wires real OTel.
 type Tracer interface {
 	// StartSpan opens a span named `name` and returns a Span value the
 	// framework will Close when the operation finishes. Tags follow the

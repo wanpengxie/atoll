@@ -3,7 +3,6 @@ package behavior
 import (
 	"context"
 	"encoding/json"
-	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -48,63 +47,6 @@ type ModuleContext struct {
 	// EmitEvent emits an adapter-owned event. It cannot emit responses.
 	EmitEvent EmitEventFunc
 
-	// ReportOrphanCallback emits the framework-owned orphan callback
-	// observability event for this adapter actor. The adapter supplies only
-	// callback diagnostics; framework stamps adapter/channel identity and
-	// the event type.
-	ReportOrphanCallback OrphanCallbackFunc
-
-	// ForwardExternalRequest sends an already accepted request to an
-	// external transport without owning request lifecycle state. The
-	// adapter supplies only the domain payload; the framework stamps the
-	// transport wrapper identity from the accepted envelope.
-	ForwardExternalRequest ExternalRequestFunc
-
-	// UpdateReadiness updates this adapter actor's readiness through the
-	// framework-owned readiness path.
-	UpdateReadiness ReadinessFunc
-
-	// LookupPendingRequest exposes read-only request lifecycle state to
-	// callback decoders. It does not grant mutation authority.
-	LookupPendingRequest PendingRequestLookupFunc
-
-	// ── caller side (framework sync/async mechanism, §2.2) ──
-	//
-	// Submit synchronously writes a request envelope through the harness and
-	// returns once accepted (§0③): the caller gets a durable RequestID + an
-	// ack descriptor. Awaiting the response is a subsequent Await / Watch.
-	Submit SubmitFunc
-
-	// Await blocks until the request's final response arrives, ctx is done,
-	// or timeout elapses (timeout 0 = the type default per R5).
-	Await AwaitFunc
-
-	// Watch returns a stream of every response (provisional + final) for the
-	// request.
-	Watch WatchFunc
-
-	// AwaitAll waits for every request's final, all-settled (§0②): it returns
-	// one Outcome per id and never returns early on a single failure.
-	AwaitAll AwaitAllFunc
-
-	// Call is sugar over Submit + Await — the synchronous one-shot path.
-	Call CallFunc
-
-	// Abandon drops the local waiter for a request (fan-out early-failure
-	// sibling drop). It does NOT touch the substrate; the daemon-side pending
-	// + F3 stay intact.
-	Abandon AbandonFunc
-
-	// ── receiver side (framework sync/async mechanism, §2.2) ──
-	//
-	// Resolve produces the final response for a pending request from a
-	// receiver-supplied ResolveRequest (status / payload / reason). On
-	// success it closes the pending correlation + cancels the F3 timer
-	// through the router's single lifecycle center. It is the receiver-side
-	// terminal path for deferred requests (Handle → Deferred, resolved later
-	// via an external callback or async completion).
-	Resolve ResolveFunc
-
 	// Provisional emits one non-terminal interim response (kind=response,
 	// payload.status ∈ provisional subset) for a pending request without
 	// resolving its closure (proto-foundation §1.6.3 + proto-layer0 §2.5).
@@ -138,18 +80,13 @@ type RespondOptions struct {
 	// explicitly for failure terminals.
 	Status string
 
-	// Reason populates payload.reason on failure. When non-empty it MUST
-	// be a message.TerminalFailureReason wire value.
-	Reason string
+	// Reason populates payload.reason on failure (closed set; empty when
+	// completed).
+	Reason message.TerminalFailureReason
 
 	// Visibility overrides the default response visibility (which
 	// inherits from the request). Empty = inherit.
 	Visibility message.Visibility
-
-	// Audience overrides the response audience. Empty = use the
-	// request's sender as the single audience entry (the canonical
-	// "respond to caller" path).
-	Audience message.Audience
 
 	// Dedupe signals to the framework that a duplicate inbound
 	// callback should be tagged with payload.dedupe=true (used by
@@ -163,8 +100,8 @@ type RespondResult struct {
 	MessageID message.ID
 }
 
-// RespondFunc is the F5 contract — adapter calls it inside Handle /
-// OnExternalCallback to emit the terminal response.
+// RespondFunc is the F5 contract — adapter calls it inside Handle (or later,
+// once its own async work completes) to emit the terminal response.
 //
 // The framework constructs the envelope (sender = adapter actor,
 // kind = response, parent_id = requestID, payload = wrapped via
@@ -183,12 +120,6 @@ type ProvisionalOptions struct {
 	// Visibility overrides the default response visibility (which
 	// inherits from the request). Empty = inherit.
 	Visibility message.Visibility
-
-	// Audience overrides the response audience. Empty = use the request's
-	// sender as the single audience entry (the canonical "respond to
-	// caller" path; Layer 0 §2.5 keeps provisional audience cardinality
-	// at 1).
-	Audience message.Audience
 }
 
 // ProvisionalFunc is the adapter-facing provisional response helper. The
@@ -213,9 +144,6 @@ type FailOptions struct {
 
 	// Visibility overrides the default response visibility.
 	Visibility message.Visibility
-
-	// Audience overrides the response audience.
-	Audience message.Audience
 }
 
 // FailFunc is the adapter-facing failed terminal helper. The framework
@@ -242,88 +170,3 @@ type EmitEventFunc func(
 	payload json.RawMessage,
 	opts EmitEventOptions,
 ) (message.ID, error)
-
-// OrphanCallbackReport describes an inbound callback that could not be
-// parsed or correlated by an adapter. It intentionally carries no adapter
-// identity fields; framework derives those from the installed Declaration.
-type OrphanCallbackReport struct {
-	CorrelationID string
-	Detail        string
-	Payload       json.RawMessage
-}
-
-// OrphanCallbackFunc emits the canonical orphan-callback adapter event.
-// It cannot emit arbitrary events or responses.
-type OrphanCallbackFunc func(
-	ctx context.Context,
-	report OrphanCallbackReport,
-) error
-
-// ExternalRequestResult is returned after forwarding an external
-// request to transport.
-type ExternalRequestResult struct {
-	FrameID string
-}
-
-// ExternalRequestPayload is the adapter-owned domain payload carried
-// inside the framework-owned external transport wrapper.
-type ExternalRequestPayload json.RawMessage
-
-func (p ExternalRequestPayload) MarshalJSON() ([]byte, error) {
-	return json.RawMessage(p).MarshalJSON()
-}
-
-func (p *ExternalRequestPayload) UnmarshalJSON(data []byte) error {
-	if p == nil {
-		return nil
-	}
-	*p = append((*p)[:0], data...)
-	return nil
-}
-
-// ExternalRequestFunc forwards a request envelope and domain payload to
-// the runtime-owned external transport. It does not reserve or close
-// pending lifecycle state, and it does not accept caller-stamped transport
-// identity fields.
-type ExternalRequestFunc func(
-	ctx context.Context,
-	env *message.Envelope,
-	payload ExternalRequestPayload,
-) (ExternalRequestResult, error)
-
-// ReadinessFunc updates readiness for this adapter actor only.
-type ReadinessFunc func(
-	ctx context.Context,
-	update actor.ReadinessUpdate,
-) (actor.ReadinessTransition, error)
-
-// PendingRequestLookupFunc exposes a read-only snapshot of a pending
-// request lifecycle entry.
-type PendingRequestLookupFunc func(
-	ctx context.Context,
-	requestID CorrelationKey,
-) (CorrelationEntry, bool, error)
-
-// SubmitFunc is the caller-side ctx.Submit contract (§0③). It writes a
-// request envelope through the harness and returns once accepted.
-type SubmitFunc func(ctx context.Context, req CallRequest) (SubmitResult, error)
-
-// AwaitFunc is the caller-side ctx.Await contract.
-type AwaitFunc func(ctx context.Context, id RequestID, timeout time.Duration) (Terminal, error)
-
-// WatchFunc is the caller-side ctx.Watch contract.
-type WatchFunc func(ctx context.Context, id RequestID) (Watcher, error)
-
-// AwaitAllFunc is the caller-side ctx.AwaitAll contract (all-settled, §0②).
-type AwaitAllFunc func(ctx context.Context, ids []RequestID, timeout time.Duration) ([]Outcome, error)
-
-// CallFunc is the caller-side ctx.Call sugar (= Submit + Await).
-type CallFunc func(ctx context.Context, req CallRequest) (Terminal, error)
-
-// AbandonFunc is the caller-side ctx.Abandon contract — drop the local
-// waiter, leave the substrate untouched.
-type AbandonFunc func(id RequestID)
-
-// ResolveFunc is the receiver-side ctx.Resolve contract — produce the final
-// response for a pending request from a ResolveRequest (status/payload/reason).
-type ResolveFunc func(ctx context.Context, id RequestID, r ResolveRequest) error

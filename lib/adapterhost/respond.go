@@ -6,19 +6,19 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
+
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
+	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // Start builds the ModuleContext (closing over this cell) and runs module.Init
 // on the cell goroutine. After Start the adapter may call mctx seams from its
-// callbacks; all of them touch a.correlation/a.chain serially.
+// callbacks; all of them touch a.inflight/a.chain serially.
 func (a *adapterActor) Start(ctx context.Context, selfCtx actorrt.ActorContext) error {
-	if a.correlation == nil {
-		a.correlation = map[behavior.CorrelationKey]behavior.CorrelationEntry{}
-	}
 	if a.inflight == nil {
 		a.inflight = map[behavior.CorrelationKey]*message.Envelope{}
 	}
@@ -48,8 +48,8 @@ func (a *adapterActor) Stop(ctx context.Context) error {
 
 // buildModuleContext constructs the seam bundle handed to module.Init. Every
 // closure captures THIS adapterActor, so Respond/Fail/EmitEvent run on the cell
-// goroutine and mutate a.correlation with no lock (collapse of buildRespond et
-// al. — respond.go — into cell methods; the respondConfig god-bundle is gone).
+// goroutine and mutate a.inflight with no lock (collapse of buildRespond et al.
+// — respond.go — into cell methods; the respondConfig god-bundle is gone).
 func (a *adapterActor) buildModuleContext() *behavior.ModuleContext {
 	sender := message.Sender{Kind: actor.KindTool, ID: a.self}
 	return &behavior.ModuleContext{
@@ -67,9 +67,8 @@ func (a *adapterActor) buildModuleContext() *behavior.ModuleContext {
 			}
 			return a.doRespond(ctx, requestID, payload, behavior.RespondOptions{
 				Status:     "failed",
-				Reason:     string(reason),
+				Reason:     reason,
 				Visibility: opts.Visibility,
-				Audience:   opts.Audience,
 			}, sender)
 		},
 		Provisional: func(ctx context.Context, requestID behavior.CorrelationKey, status string, payload json.RawMessage, opts behavior.ProvisionalOptions) (behavior.RespondResult, error) {
@@ -77,24 +76,6 @@ func (a *adapterActor) buildModuleContext() *behavior.ModuleContext {
 		},
 		EmitEvent: func(ctx context.Context, eventType string, payload json.RawMessage, opts behavior.EmitEventOptions) (message.ID, error) {
 			return a.doEmitEvent(ctx, eventType, payload, opts, sender)
-		},
-		UpdateReadiness:        a.doUpdateReadiness,
-		ForwardExternalRequest: a.forward, // installer-injected (nil for non-relay)
-		// Resolve is the receiver-side terminal seam a relay adapter (proxyfacade)
-		// calls when an external callback carries the final response: it builds the
-		// adapter-signed final and writes it like doRespond. Runs on the cell
-		// goroutine (the callback enters via host.Do/Ask), so touching
-		// a.correlation is lock-free-safe.
-		Resolve: func(ctx context.Context, id message.ID, r behavior.ResolveRequest) error {
-			_, err := a.doRespond(ctx, behavior.CorrelationKey(id), r.Payload,
-				behavior.RespondOptions{Status: r.Status, Reason: r.Reason}, sender)
-			return err
-		},
-		// LookupPendingRequest exposes the pending correlation entry (read-only)
-		// for the relay callback consistency checks.
-		LookupPendingRequest: func(_ context.Context, id behavior.CorrelationKey) (behavior.CorrelationEntry, bool, error) {
-			e, ok := a.correlation[id]
-			return e, ok, nil
 		},
 	}
 }
@@ -116,8 +97,8 @@ func (a *adapterActor) doRespond(ctx context.Context, requestID behavior.Correla
 		return behavior.RespondResult{}, fmt.Errorf("adapterhost: Respond status must be final; got %q (use Provisional)", status)
 	}
 	env, err := a.buildResponse(ctx, requestID, sender, behavior.ResponseSpec{
-		Status: status, Reason: opts.Reason, Payload: payload, Dedupe: opts.Dedupe,
-		Visibility: opts.Visibility, Audience: opts.Audience,
+		Status: status, Reason: string(opts.Reason), Payload: payload, Dedupe: opts.Dedupe,
+		Visibility: opts.Visibility,
 	})
 	if err != nil {
 		return behavior.RespondResult{}, err
@@ -127,7 +108,7 @@ func (a *adapterActor) doRespond(ctx context.Context, requestID behavior.Correla
 		return behavior.RespondResult{}, fmt.Errorf("adapterhost: respond chain write: %w", err)
 	}
 	if res.RejectReason != "" {
-		if res.RejectReason == message.HarnessTerminalDuplicate {
+		if res.RejectReason == rtharness.HarnessTerminalDuplicate {
 			a.markDone(requestID) // adapter sees terminal-duplicate as business success
 			return behavior.RespondResult{MessageID: res.MessageID}, nil
 		}
@@ -147,7 +128,7 @@ func (a *adapterActor) doProvisional(ctx context.Context, requestID behavior.Cor
 		return behavior.RespondResult{}, fmt.Errorf("adapterhost: Provisional status %q is final — use Respond/Fail", status)
 	}
 	env, err := a.buildResponse(ctx, requestID, sender, behavior.ResponseSpec{
-		Status: status, Payload: payload, Visibility: opts.Visibility, Audience: opts.Audience,
+		Status: status, Payload: payload, Visibility: opts.Visibility,
 	})
 	if err != nil {
 		return behavior.RespondResult{}, err
@@ -188,33 +169,11 @@ func (a *adapterActor) doEmitEvent(ctx context.Context, eventType string, payloa
 	return res.MessageID, nil
 }
 
-// doUpdateReadiness updates this adapter's own readiness (plain field, cell
-// goroutine) and emits actor.readiness.changed so the registry projection
-// follows (INVARIANT-0: state changes are envelope-observable).
-func (a *adapterActor) doUpdateReadiness(ctx context.Context, update actor.ReadinessUpdate) (actor.ReadinessTransition, error) {
-	prev := a.readiness
-	next := actor.Readiness{
-		State:             update.State,
-		Reason:            update.Reason,
-		Detail:            update.Detail,
-		LastStateChangeAt: update.CheckedAt,
-	}.Normalize()
-	if next.State == prev.State {
-		next.LastStateChangeAt = prev.LastStateChangeAt
-	}
-	if next.State == actor.ReadinessReady {
-		next.LastReadyAt = update.CheckedAt
-	} else {
-		next.LastReadyAt = prev.LastReadyAt
-	}
-	a.readiness = next
-	changed := prev.State != next.State
-	if changed && a.readinessSink != nil {
-		// Persist to the authoritative registry projection (write-side Go method).
-		// The adapter MUST NOT emit actor.readiness.changed — that type is
-		// SystemOnly (proto-layer1 §2.5); the channel system actor reads readiness
-		// back from the registry (INVARIANT-0 read side: actor.list projection).
-		_, _ = a.readinessSink.UpdateReadiness(ctx, a.self, update)
-	}
-	return actor.ReadinessTransition{Previous: prev, Current: next, Changed: changed}, nil
+// setReadiness folds the latest serviceable-state into the adapter's own plain
+// fields on the cell goroutine. Pure domain self-state: no registry projection
+// and no actor.readiness.changed event (two-axis model — readiness is not a
+// substrate axis); it is surfaced only via the advisory actor.status self-answer.
+func (a *adapterActor) setReadiness(ready bool, reason string) {
+	a.ready = ready
+	a.readyReason = reason
 }

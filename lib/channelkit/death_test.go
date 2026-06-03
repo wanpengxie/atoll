@@ -7,9 +7,10 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	khrn "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/channelkit"
+	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
 // panicActor panics on Receive — simulates a cell dying abnormally.
@@ -17,24 +18,25 @@ type panicActor struct{}
 
 func (panicActor) Receive(context.Context, *message.Envelope) error { panic("boom") }
 
-// fakeChain records written terminals (implements kernel/harness.Chain).
+// fakeChain records written terminals (implements runtime/harness.Writer).
 type fakeChain struct {
 	mu      sync.Mutex
 	written []*message.Envelope
 }
 
-func (f *fakeChain) Write(_ context.Context, env *message.Envelope) (khrn.WriteResult, error) {
+func (f *fakeChain) Write(_ context.Context, env *message.Envelope) (rtharness.WriteResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.written = append(f.written, env)
-	return khrn.WriteResult{MessageID: env.ID}, nil
+	return rtharness.WriteResult{MessageID: env.ID}, nil
 }
 func (f *fakeChain) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.written) }
 
-// fakeOpenReqs returns canned in-flight requests for a dead actor.
-type fakeOpenReqs struct{ reqs []message.Envelope }
+// fakeOpenReqs returns canned in-flight request rows for a dead actor (matching
+// the substrate storespec.StoredRow shape the real store returns).
+type fakeOpenReqs struct{ reqs []storespec.StoredRow }
 
-func (f fakeOpenReqs) OpenRequestsForActor(context.Context, actor.ActorID, int) ([]message.Envelope, error) {
+func (f fakeOpenReqs) OpenRequestsForActor(context.Context, actor.ActorID, int) ([]storespec.StoredRow, error) {
 	return f.reqs, nil
 }
 
@@ -54,13 +56,13 @@ func TestOnDeath_MaterialisesReceiverUnavailable(t *testing.T) {
 	ch := channelkit.New(channelkit.Config{
 		ChannelID:    "ch",
 		Chain:        fc,
-		OpenRequests: fakeOpenReqs{reqs: []message.Envelope{req}},
+		OpenRequests: fakeOpenReqs{reqs: []storespec.StoredRow{{Envelope: req}}},
 		Clock:        time.Now,
 	})
 	ch.Cells().Spawn("worker", panicActor{})
 
 	// Deliver a request → Receive panics → cell death → OnDeath.
-	_ = ch.Cells().Deliver(context.Background(), []actor.ActorID{"worker"},
+	_, _ = ch.Cells().Deliver(context.Background(), []actor.ActorID{"worker"},
 		&message.Envelope{ID: "trigger", ChannelID: "ch", Kind: message.KindRequest, Type: "x.do",
 			Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{"worker"}})
 

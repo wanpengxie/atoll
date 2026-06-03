@@ -1,79 +1,53 @@
 // Package adapterhost is the driver增量 over lib/behavior: it hosts a
 // behavior.Module as a real serial actor cell (runtime/actorrt), folding every
 // entry point onto the cell's single goroutine so the Module's logical state
-// needs no locks. This is where the adapters/framework.Manager god-object
-// (~1763 LOC) collapses into one adapterActor per adapter (dismantle-spec §1).
+// needs no locks. One adapterActor per adapter — the collapse of the former
+// adapters/framework.Manager god-object into per-adapter cells (dismantle-spec
+// §1); there is NO long-lived god-object and this package must not reintroduce
+// one.
 //
-// # Collapse blueprint (the施工 map for actor.go — port from adapters/framework)
+// adapterActor (actorrt.Actor; all logical state in PLAIN fields, no
+// mutex/atomic — the cell goroutine is the sole owner):
+//   - module/declaration  — the hosted callback module + its static metadata
+//   - correlation         — receiver-side pending map (inlined, lock-free)
+//   - inflight            — cached request envelopes (a compute cell builds
+//     responses without a local truth lookup)
+//   - ready/readyReason   — the adapter's own serviceable-state (advisory
+//     domain self-state; two-axis model — NOT a substrate
+//     axis, surfaced only via the actor.status self-answer)
+//   - chain               — the harness write path (runtime/harness.Writer)
 //
-// adapterActor (= actorrt.Actor impl; private fields, NO mutex/atomic on
-// logical state — the cell goroutine is the sole owner):
+// Receive dispatches one envelope SERIALLY:
+//   - kind=request, type=actor.status   → self-answer (own serviceable-state)
+//   - kind=request, type=actor.describe → self-answer (Declaration projection)
+//   - kind=request, declared type       → reserve pending → module.Handle; a
+//     non-deferred Handle error collapses to a receiver_internal_error terminal
+//   - NO sticky-readiness gate: dispatch is dumb delivery; reachability is the
+//     OUTCOME of send→terminal, never a stored gate (P15/P16).
 //
-//	module       behavior.Module          // the hosted callback module
-//	declaration  behavior.Declaration     // static metadata (Declares())
-//	correlation  behavior.CorrelationTracker // receiver-side pending (was boundModule.correlation)
-//	readiness    actor.Readiness          // was actor_registry.ready_state + readinessMu — now plain field
-//	live         <module-owned>           // proxy_facade.live etc. already plain (cell-serial)
-//	chain        harness.Chain            // write path
-//	policy/timer <cell-private>           // F3 timer map (was timerPolicy.mu) → cell-private; closure → caller-scoped (lib/behavior)
+// Out-of-band entry points fold onto the SAME cell (the host drives them):
+//   - device external callback → actorrt.Ask (sync ack back to the transit)
+//   - device lifecycle event   → actorrt.Post (async)
+//   - heartbeat + correlation reaper → the cell self-schedules a ticker that
+//     delivers a tick to itself (RunHeartbeat folds serviceable-state; the
+//     reaper bounds correlation memory). No god-object GC goroutine.
 //
-// Receive(env) dispatches SERIALLY (port of Manager.Dispatch manager.go:887):
-//   - kind=request, type=actor.status   → respondActorStatus (self-answer, read own readiness/live)
-//   - kind=request, type=actor.describe → respondActorDescribe (Declaration projection)
-//   - kind=request, type∈declared       → reservePendingRequest + runHandle → module.Handle
-//   - NO sticky-readiness gate (manager.go:932 — dispatch is dumb delivery;
-//     not-ready actor self-answers receiver_unavailable; reachability is the
-//     OUTCOME of send→terminal, never a stored gate). P15/P16.
-//   - Handle error: ErrHandleDeferred → keep pending; else → policy.OnExternalError
-//     emits receiver_internal_error terminal (manager.go:946-978).
+// Install is a pure install-time factory (installer.go): validate the
+// declaration, verify the handler actor's membership/binding via the registry,
+// construct the adapterActor cell for the composition root to Spawn. type
+// vocabulary is NOT published here — type_registry left the substrate and the
+// type catalog is a domain concern deferred to daemon.
 //
-// Out-of-band entry points fold onto the SAME cell (no off-cell module touch):
-//   - device external callback (OnExternalCallbackFrame, manager.go:1255) →
-//     runtime/actorrt Ask (SYNC ack: bad/dup/expired frame rejected with
-//     permanent/retryable verdict handed back to transit — dismantle §2.5-A a)
-//   - device lifecycle (OnRuntimeEvent, manager.go:1461) → actorrt Post (async)
-//   - heartbeat tick → cell self-schedules a ticker → self.Deliver(tick) →
-//     runHeartbeatOnce writes own readiness (manager.go:523 binding intervals)
-//   - Stop() → module.Shutdown on the cell goroutine (manager.go:1617)
+// The respond seam (Respond/Fail/EmitEvent + ModuleContext construction) lives
+// HERE, not in lib/behavior: it writes terminals through runtime/harness,
+// whereas lib/behavior stays pure-kernel so adapters depending on it don't
+// transitively pull runtime (仲裁-2). The caller-side future hub
+// (lib/behavior/futurereg) is NOT an adapter-cell concern — it belongs to
+// non-actor callers (SDK clients, worker subprocesses) that block-await off the
+// cell goroutine; an adapter cell calling out emits a request + handles the
+// response in a later Receive (async continuation), never block-awaits (that
+// would deadlock its own goroutine).
 //
-// installer contract (port of Manager.Install/installOne manager.go:219/231 +
-// dismantle §2.5-A c): input module → output {actorID, declaration, actor impl,
-// route metadata}; composition root (daemon/host) does Spawn + device route.
-// The kernel/adapter.Manager runtime面 is ALREADY removed (deleted in v2 kernel
-// purge); this package MUST NOT reintroduce a long-lived god-object.
-//
-// installOne flow to port (manager.go:231, read 2026-06-02) — runs ONCE per
-// adapter at install, NOT a runtime path:
-//  1. mod.Declares() → validateDeclaration.
-//  2. ActorRegistry.Lookup(decl.ActorID) → verify exists + binding matches.
-//  3. binding-specific dep check (relay→DeviceTransit, outbound→HTTPClient).
-//  4. build type rows (TypeDeclarations strict/permissive) — hold, don't publish.
-//  5. build ModuleContext (buildRespond/Fail/EmitEvent/Forward/Submit/Await/...
-//     from respond.go — the seams that write terminals through harness.Chain;
-//     this is the respond/correlation/policy impl that must move into
-//     lib/behavior first, see phase-3 §7 step 3).
-//  6. mod.Init(mctx) → on success publish type rows (TypeRegistry.Upsert).
-//  7. construct adapterActor{module, declaration, mctx, correlation:map{}, ...}
-//     → return for Cells.Spawn. (NO boundModule, NO Manager bookkeeping.)
-//
-// Start() on the cell wires mctx + runs binding-specific resources; Stop() →
-// module.Shutdown on the cell goroutine.
-//
-// caller-side futures (Call/Await/Watch) stay a channel-level futureHub
-// (lib/behavior/futurereg), NOT folded into the sender mailbox (deadlock —
-// dismantle §2.5-B b).
-//
-// NOTE (仲裁-2, 2026-06-02): the respond seam (buildRespond/Fail/EmitEvent/
-// ForwardExternalRequest + ModuleContext construction) lives HERE in
-// adapterhost, NOT in lib/behavior — it writes terminals through
-// runtime/harness.Chain, and lib/behavior is pure-kernel (so adapters
-// depending on behavior don't transitively pull runtime). correlation is
-// INLINED into adapterActor (lock-free map, actor.go) — memoryCorrelation
-// Tracker is retired. timerPolicy F3 is deleted (closure → caller-scoped in
-// lib/behavior). Only caller-side futures (no harness write) stay in behavior.
-//
-// correlation reaper: runOneGCPass logic (manager.go:1564 RunGC) → cell
-// self-scheduled tick (actor-local bounded reaper); NO Manager.RunGC goroutine.
-//
-// Dependencies: kernel + runtime/actorrt + runtime/harness + lib/behavior.
+// Dependencies: kernel + runtime/actorrt + runtime/harness + runtime/storespec
+// + lib/behavior.
 package adapterhost

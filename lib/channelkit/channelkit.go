@@ -1,9 +1,8 @@
 // Package channelkit is the channel template — the OTP application+supervisor
 // analog sitting on top of runtime/actorrt. It ASSEMBLES a channel's固有 cells
-// (the system actor) + the audience policy resolver + the supervision tree.
-// The supervision tree is MECHANISM (manages goroutine life + materialises the
-// death-signal closure) — never an actor; domain coordination is the system
-// actor's job.
+// (the system actor) + the supervision tree. The supervision tree is MECHANISM
+// (manages goroutine life + materialises the death-signal closure) — never an
+// actor; domain coordination is the system actor's job.
 package channelkit
 
 import (
@@ -12,35 +11,33 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
-	"github.com/wanpengxie/ActOS/lib/policy"
-	"github.com/wanpengxie/ActOS/lib/sysactor"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
 // OpenRequestSource queries a dead actor's in-flight requests (those without a
-// final response). runtime/store.Messages implements it (OpenRequestsForActor),
-// so the supervisor can materialise receiver_unavailable for each on cell death.
+// final response). It is the consumer-side narrowing of the substrate's read
+// contract — its signature MATCHES runtime/storespec (returns StoredRow), so the
+// runtime store satisfies it directly with no adapter. The supervisor reads each
+// row's Envelope to materialise receiver_unavailable on cell death.
 type OpenRequestSource interface {
-	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID, limit int) ([]message.Envelope, error)
+	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID, limit int) ([]storespec.StoredRow, error)
 }
 
-// Channel is one assembled channel: actorrt runtime + system cell + policy +
-// the death-signal closure wiring (chain + open-request source).
+// Channel is one assembled channel: actorrt runtime + system cell + the
+// death-signal closure wiring (chain + open-request source).
 type Channel struct {
 	channelID channel.ID
 	cells     *actorrt.Runtime
-	system    *sysactor.SystemActor
-	resolver  *policy.Resolver
 
 	// Death-signal closure (author #3): on cell death the supervisor writes
 	// receiver_unavailable for every in-flight request addressed to the dead
 	// actor. nil chain/openReqs (e.g. a pure compute host with no local truth)
 	// → OnDeath only despawns; death is materialised at the home via DeathFrame.
-	chain    harness.Chain
+	chain    rtharness.Writer
 	openReqs OpenRequestSource
 	clock    func() time.Time
 }
@@ -48,9 +45,12 @@ type Channel struct {
 // Config assembles a channel.
 type Config struct {
 	ChannelID channel.ID
-	System    *sysactor.SystemActor
+	// System is the channel's固有 system cell (the assembler passes the concrete
+	// lib/sysactor instance as a plain actorrt.Actor — channelkit assembles cells,
+	// it does not know domain actor types).
+	System actorrt.Actor
 	// Chain + OpenRequests wire the death-signal closure (author #3).
-	Chain        harness.Chain
+	Chain        rtharness.Writer
 	OpenRequests OpenRequestSource
 	Clock        func() time.Time
 }
@@ -64,8 +64,6 @@ func New(cfg Config) *Channel {
 	}
 	c := &Channel{
 		channelID: cfg.ChannelID,
-		system:    cfg.System,
-		resolver:  policy.New(),
 		chain:     cfg.Chain,
 		openReqs:  cfg.OpenRequests,
 		clock:     clock,
@@ -79,9 +77,6 @@ func New(cfg Config) *Channel {
 
 // Cells exposes the runtime so the deployment layer spawns business cells.
 func (c *Channel) Cells() *actorrt.Runtime { return c.cells }
-
-// Resolver exposes the audience policy resolver.
-func (c *Channel) Resolver() *policy.Resolver { return c.resolver }
 
 // OnDeath implements actorrt.Supervisor: it materialises receiver_unavailable
 // (closure author #3) for every in-flight request addressed to the dead actor,
@@ -105,14 +100,14 @@ func (c *Channel) OnDeath(ctx context.Context, sig actorrt.DeathSignal) {
 // authorises sender==system + reason==receiver_unavailable as the substrate
 // author. Without this a dead cell — local or across the wire — is a black hole
 // that hangs every waiting caller (construction-spec §3.3).
-func MaterialiseReceiverUnavailable(ctx context.Context, chain harness.Chain, openReqs OpenRequestSource, clock func() time.Time, channelID channel.ID, dead actor.ActorID) {
+func MaterialiseReceiverUnavailable(ctx context.Context, chain rtharness.Writer, openReqs OpenRequestSource, clock func() time.Time, channelID channel.ID, dead actor.ActorID) {
 	reqs, err := openReqs.OpenRequestsForActor(ctx, dead, 0)
 	if err != nil {
 		return
 	}
 	sys := message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
 	for i := range reqs {
-		req := reqs[i]
+		req := reqs[i].Envelope
 		term, berr := behavior.BuildResponseFromRequest(&req, clock, sys,
 			behavior.CorrelationKey(req.ID),
 			behavior.ResponseSpec{
@@ -122,7 +117,7 @@ func MaterialiseReceiverUnavailable(ctx context.Context, chain harness.Chain, op
 		if berr != nil {
 			continue
 		}
-		cctx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{ActorID: actor.SystemActorID, ChannelID: channelID, AllowProvidedSenderKind: true})
+		cctx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{ActorID: actor.SystemActorID, ChannelID: channelID})
 		_, _ = chain.Write(cctx, term)
 	}
 }

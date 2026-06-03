@@ -8,10 +8,10 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/harness"
-	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
+	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
 // InstallDeps bundles the channel-level services an adapter cell needs. The
@@ -19,24 +19,12 @@ import (
 // attached ones) supplies these and Spawns the returned actor.
 type InstallDeps struct {
 	ChannelID channel.ID
-	Chain     harness.Chain
-	Lookup    message.RequestLookup
-	Registry  actor.Registry
-	TypeReg   message.TypeRegistry
+	Chain     rtharness.Writer
+	Lookup    behavior.RequestLookup
+	Registry  storespec.Registry
 	Clock     func() time.Time
 	Logger    behavior.Logger
 	Metrics   behavior.Metrics
-	State     behavior.StateStore
-	// Forward is the relay transport seam (daemon-injected for
-	// runtime_inbound_via_relay adapters); nil otherwise.
-	Forward behavior.ExternalRequestFunc
-	// Futures is the channel-level caller-side future hub; nil for pure
-	// receiver adapters.
-	Futures callerFutures
-	// ReadinessSink persists adapter readiness into the authoritative registry
-	// projection (the channel system actor reads it back). The composition root
-	// passes the registry (store.ActorRegistry implements ReadinessUpdater).
-	ReadinessSink actor.ReadinessUpdater
 }
 
 // InstallResult is the installer output for the host to Spawn (dismantle
@@ -77,46 +65,25 @@ func Install(ctx context.Context, mod behavior.Module, deps InstallDeps) (Instal
 		}
 	}
 
-	// Publish type rows (installOne step 4/6). Strict mode: a non-nil
-	// TypeDeclarations map MUST cover every Types entry.
-	strict := decl.TypeDeclarations != nil
-	if deps.TypeReg != nil {
-		for _, t := range decl.Types {
-			row := message.TypeRow{
-				Type:           t,
-				HandlerActorID: decl.ActorID,
-				HandlerBinding: decl.Binding,
-				MaxPendingMs:   decl.MaxPendingMs,
-				AllowedKinds:   []message.Kind{message.KindEvent, message.KindRequest, message.KindResponse},
-			}
-			if td, ok := decl.TypeDeclarations[t]; ok {
-				if len(td.AllowedKinds) > 0 {
-					row.AllowedKinds = td.AllowedKinds
-				}
-			} else if strict {
-				return InstallResult{}, fmt.Errorf("adapterhost: type %s missing TypeDeclaration (strict mode)", t)
-			}
-			if _, err := deps.TypeReg.Upsert(ctx, row); err != nil {
-				return InstallResult{}, fmt.Errorf("adapterhost: type_registry upsert %s: %w", t, err)
-			}
-		}
-	}
+	// NOTE: type vocabulary is NOT published from here. type_registry left the
+	// substrate (no type gate, no RPC dispatch); the type catalog is a domain
+	// concern whose home is deferred to daemon implementation (pain-driven).
 
 	a := &adapterActor{
-		self:          decl.ActorID,
-		module:        mod,
-		declaration:   decl,
-		correlation:   map[behavior.CorrelationKey]behavior.CorrelationEntry{},
-		logger:        deps.Logger,
-		metrics:       deps.Metrics,
-		state:         deps.State,
-		channelID:     deps.ChannelID,
-		chain:         deps.Chain,
-		lookup:        deps.Lookup,
-		clock:         deps.Clock,
-		forward:       deps.Forward,
-		futures:       deps.Futures,
-		readinessSink: deps.ReadinessSink,
+		self:        decl.ActorID,
+		module:      mod,
+		declaration: decl,
+		// available by default: an adapter can receive requests unless its own
+		// Heartbeater later reports otherwise. A no-Heartbeater adapter has no
+		// liveness signal, so reporting it unavailable would be a false negative
+		// (presence is advisory; reachability is the send→terminal outcome).
+		ready:     true,
+		logger:    deps.Logger,
+		metrics:   deps.Metrics,
+		channelID: deps.ChannelID,
+		chain:     deps.Chain,
+		lookup:    deps.Lookup,
+		clock:     deps.Clock,
 	}
 	return InstallResult{ActorID: decl.ActorID, Declaration: decl, Actor: a}, nil
 }
