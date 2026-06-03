@@ -73,17 +73,12 @@ func Install(ctx context.Context, mod behavior.Module, deps InstallDeps) (Instal
 		self:        decl.ActorID,
 		module:      mod,
 		declaration: decl,
-		// available by default: an adapter can receive requests unless its own
-		// Heartbeater later reports otherwise. A no-Heartbeater adapter has no
-		// liveness signal, so reporting it unavailable would be a false negative
-		// (presence is advisory; reachability is the send→terminal outcome).
-		ready:     true,
-		logger:    deps.Logger,
-		metrics:   deps.Metrics,
-		channelID: deps.ChannelID,
-		chain:     deps.Chain,
-		lookup:    deps.Lookup,
-		clock:     deps.Clock,
+		logger:      deps.Logger,
+		metrics:     deps.Metrics,
+		channelID:   deps.ChannelID,
+		chain:       deps.Chain,
+		lookup:      deps.Lookup,
+		clock:       deps.Clock,
 	}
 	return InstallResult{ActorID: decl.ActorID, Declaration: decl, Actor: a}, nil
 }

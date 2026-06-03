@@ -36,15 +36,6 @@ type adapterActor struct {
 	module      behavior.Module
 	declaration behavior.Declaration
 
-	// Readiness — pure domain self-state (two-axis model: readiness is NOT a
-	// substrate axis; it is the adapter's own serviceable-state, surfaced ONLY
-	// via the advisory actor.status self-answer, never a dispatch gate and never
-	// projected to the membership registry). Folded from the module's
-	// Heartbeater on the self-scheduled tick. Plain fields, cell goroutine sole
-	// owner, no lock.
-	ready       bool
-	readyReason string
-
 	// Observability (injected; behavior interfaces, impl from obs via cmd).
 	logger  behavior.Logger
 	metrics behavior.Metrics
@@ -145,7 +136,7 @@ func (a *adapterActor) writeCtx(ctx context.Context) context.Context {
 func (a *adapterActor) Receive(ctx context.Context, env *message.Envelope) error {
 	if env.Type == tickType {
 		// Internal self-tick (heartbeat + reaper), runs on the cell goroutine.
-		a.onTick(ctx)
+		a.onTick()
 		return nil
 	}
 	if env.Kind != message.KindRequest {
@@ -212,13 +203,15 @@ func (a *adapterActor) collapseInternalError(ctx context.Context, key behavior.C
 	return nil
 }
 
-// respondStatus self-answers the reserved actor.status request. Reads the
-// actor's OWN serviceable-state (advisory, no registry round-trip, no dispatch
-// gate — "ask the actor itself"). Minimal projection for now.
+// respondStatus self-answers the reserved actor.status request with a trivial
+// advisory baseline: an installed adapter is available. serviceable-state is
+// ADVISORY (reachability is the send→terminal outcome, not a polled gate), so
+// the framework does not proactively probe liveness. When a concrete adapter
+// needs to surface non-trivial domain state (e.g. "not logged in"), an optional
+// Statuser self-answer is added additively (parallel to introspect.Describer).
 func (a *adapterActor) respondStatus(ctx context.Context, env *message.Envelope) error {
 	payload, err := json.Marshal(introspect.Status{
-		Available: a.ready,
-		Reason:    a.readyReason,
+		Available: true,
 		Kind:      string(a.declaration.Binding),
 	})
 	if err != nil {
@@ -265,10 +258,9 @@ func (a *adapterActor) selfRespond(ctx context.Context, env *message.Envelope, p
 	return nil
 }
 
-// onTick runs the self-scheduled maintenance on the cell goroutine: poll the
-// module's Heartbeater (fold readiness) and reap expired correlation (bounded).
-func (a *adapterActor) onTick(ctx context.Context) {
-	_ = a.RunHeartbeat(ctx)
+// onTick runs the self-scheduled maintenance on the cell goroutine: reap
+// expired in-flight requests (bound memory). That is all the tick is for now.
+func (a *adapterActor) onTick() {
 	a.reapExpired(a.clock().UnixMilli())
 }
 
@@ -290,8 +282,8 @@ func (a *adapterActor) tickLoop(interval time.Duration, stop chan struct{}) {
 	}
 }
 
-// heartbeatInterval is the binding-specific self-schedule cadence.
-func (a *adapterActor) heartbeatInterval() time.Duration {
+// tickInterval is the binding-specific self-schedule cadence for the reaper.
+func (a *adapterActor) tickInterval() time.Duration {
 	switch a.declaration.Binding {
 	case actor.BindingRuntimeOutbound:
 		return 15 * time.Second

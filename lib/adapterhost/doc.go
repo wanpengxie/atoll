@@ -9,28 +9,27 @@
 // adapterActor (actorrt.Actor; all logical state in PLAIN fields, no
 // mutex/atomic — the cell goroutine is the sole owner):
 //   - module/declaration  — the hosted callback module + its static metadata
-//   - correlation         — receiver-side pending map (inlined, lock-free)
-//   - inflight            — cached request envelopes (a compute cell builds
-//     responses without a local truth lookup)
-//   - ready/readyReason   — the adapter's own serviceable-state (advisory
-//     domain self-state; two-axis model — NOT a substrate
-//     axis, surfaced only via the actor.status self-answer)
+//   - inflight            — cached request envelopes, doubling as the lock-free
+//     pending tracker (a compute cell builds responses without a local truth
+//     lookup; the reaper bounds this map)
 //   - chain               — the harness write path (runtime/harness.Writer)
 //
 // Receive dispatches one envelope SERIALLY:
-//   - kind=request, type=actor.status   → self-answer (own serviceable-state)
+//   - kind=request, type=actor.status   → self-answer (trivial available=true;
+//     status is advisory, a non-trivial domain Statuser is additive)
 //   - kind=request, type=actor.describe → self-answer (Declaration projection)
-//   - kind=request, declared type       → reserve pending → module.Handle; a
+//   - kind=request, other type          → reserve pending → module.Handle; a
 //     non-deferred Handle error collapses to a receiver_internal_error terminal
 //   - NO sticky-readiness gate: dispatch is dumb delivery; reachability is the
 //     OUTCOME of send→terminal, never a stored gate (P15/P16).
 //
-// Out-of-band entry points fold onto the SAME cell (the host drives them):
-//   - device external callback → actorrt.Ask (sync ack back to the transit)
-//   - device lifecycle event   → actorrt.Post (async)
-//   - heartbeat + correlation reaper → the cell self-schedules a ticker that
-//     delivers a tick to itself (RunHeartbeat folds serviceable-state; the
-//     reaper bounds correlation memory). No god-object GC goroutine.
+// Inbound external I/O (device/webhook results) is the adapter's OWN business,
+// not a framework callback: the adapter's reader folds results back by
+// self-delivering an envelope onto its cell (actorrt.ActorContext.Deliver),
+// handled in the same serial Receive. The only framework-driven out-of-band
+// entry is the self-scheduled tick: the cell delivers a tick to itself, and
+// Receive runs the in-flight reaper (bounds inflight memory) on the cell
+// goroutine. No god-object GC goroutine.
 //
 // Install is a pure install-time factory (installer.go): validate the
 // declaration, verify the handler actor's membership/binding via the registry,

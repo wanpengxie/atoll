@@ -2,45 +2,18 @@ package behavior
 
 import (
 	"context"
-	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// Heartbeater is the optional Module sub-interface for adapters that
-// can report live readiness to the framework. Implementations must
-// return promptly; the framework calls it with a short deadline.
-type Heartbeater interface {
-	Heartbeat(ctx context.Context) (HeartbeatReport, error)
-}
-
-// HeartbeatReport is the binding-specific readiness observation a
-// Heartbeater returns. Reason values are convention-level diagnostics
-// such as ok, initializing, upstream_unreachable, token_expired,
-// shutdown, extension_disconnected, and unknown.
-type HeartbeatReport struct {
-	Available bool
-	Reason    string
-	Detail    map[string]any
-	CheckedAt time.Time
-}
-
-// StatusReporter optionally enriches actor.status responses. The
-// framework always provides a registry-backed baseline; this hook only
-// adds binding-specific detail under a short deadline.
-type StatusReporter interface {
-	Status(ctx context.Context) (StatusReport, error)
-}
-
-// StatusReport carries optional detail for actor.status. Empty fields
-// leave the registry-backed baseline unchanged.
-type StatusReport struct {
-	Available bool
-	Reason    string
-	Detail    map[string]any
-	CheckedAt time.Time
-}
+// NOTE: there is no Heartbeater / StatusReporter / report types. An actor's
+// serviceable-state is advisory (reachability is the send→terminal outcome, not
+// a polled gate), so actor.status answers a trivial available=true baseline; the
+// framework does NOT proactively poll. When a concrete adapter needs to surface
+// non-trivial domain state (e.g. "not logged in"), an optional Statuser
+// self-answer (parallel to lib/introspect.Describer) is added additively — not
+// pre-built here.
 
 // The actor's capability surface (actor.describe) is NOT declared here: it is
 // the actor's dynamic self-answer via lib/introspect.Describer. Its request
@@ -71,8 +44,8 @@ type Declaration struct {
 // then Init, then Handle on demand, finally Shutdown.
 //
 // SERIAL CONTRACT (v2, dismantle-spec §3 — the abstraction returning home):
-// the adapterhost guarantees ALL Module callbacks (Handle / Heartbeat / Status
-// / Shutdown) are invoked SERIALLY by this adapter actor's single cell
+// the adapterhost guarantees ALL Module callbacks (Declares / Init / Handle /
+// Shutdown) are invoked SERIALLY by this adapter actor's single cell
 // goroutine. Inbound external I/O (device/webhook results) is the adapter's own
 // private business: its reader folds results back by self-delivering an envelope
 // onto its cell (ActorContext.Deliver), handled in the same serial Receive — NOT

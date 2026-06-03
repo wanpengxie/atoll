@@ -2,7 +2,6 @@ package adapterhost
 
 import (
 	"context"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,41 +33,37 @@ func TestReapExpired_BoundsInflight(t *testing.T) {
 	}
 }
 
-// hbModule records Heartbeat calls (proves the self-tick really drives it).
-type hbModule struct{ called int64 }
+// tickModule is a do-nothing module: the self-tick now drives ONLY the reaper
+// (there is no Heartbeater — status is advisory, not polled).
+type tickModule struct{}
 
-func (*hbModule) Declares() behavior.Declaration {
-	return behavior.Declaration{Name: "hb", ActorID: "t"}
+func (*tickModule) Declares() behavior.Declaration {
+	return behavior.Declaration{Name: "tk", ActorID: "t"}
 }
-func (*hbModule) Init(context.Context, *behavior.ModuleContext) error { return nil }
-func (*hbModule) Shutdown(context.Context) error                      { return nil }
-func (*hbModule) Handle(context.Context, *message.Envelope) error     { return nil }
-func (*hbModule) OnExternalCallback(context.Context, []byte) error    { return nil }
-func (m *hbModule) Heartbeat(context.Context) (behavior.HeartbeatReport, error) {
-	atomic.AddInt64(&m.called, 1)
-	return behavior.HeartbeatReport{Available: true}, nil
-}
+func (*tickModule) Init(context.Context, *behavior.ModuleContext) error { return nil }
+func (*tickModule) Shutdown(context.Context) error                      { return nil }
+func (*tickModule) Handle(context.Context, *message.Envelope) error     { return nil }
 
-// TestSelfSchedule_TickerDrivesHeartbeat proves the cell self-schedules: Start
-// arms a ticker → self.Deliver(tick) → Receive → onTick → module.Heartbeat,
-// all on the cell goroutine. Was dead code (Start dropped ActorContext).
-func TestSelfSchedule_TickerDrivesHeartbeat(t *testing.T) {
-	mod := &hbModule{}
+// TestSelfSchedule_TickerDrivesReaper proves the cell self-schedules: Start arms
+// a ticker → self.Deliver(tick) → Receive → onTick → reapExpired, all on the
+// cell goroutine. Seed an already-expired in-flight request; after the ticker
+// fires it must be gone. StopAll establishes happens-before so the post-stop map
+// read is race-free (the cell goroutine has drained).
+func TestSelfSchedule_TickerDrivesReaper(t *testing.T) {
 	a := &adapterActor{
-		self: "t", module: mod, declaration: behavior.Declaration{ActorID: "t"},
+		self: "t", module: &tickModule{}, declaration: behavior.Declaration{ActorID: "t"},
 		clock: time.Now, channelID: "ch", tickEvery: 5 * time.Millisecond,
 		chain:    &recChain{},
 		inflight: map[behavior.CorrelationKey]*message.Envelope{},
 	}
+	exp := int64(100) // far in the past vs clock().UnixMilli()
+	a.inflight["exp"] = &message.Envelope{ID: "exp", ExpiresAt: &exp}
 	rt := actorrt.New(actorrt.Config{})
 	rt.Spawn("t", a)
-	deadline := time.Now().Add(1 * time.Second)
-	for atomic.LoadInt64(&mod.called) == 0 && time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
-	}
+	time.Sleep(60 * time.Millisecond) // several tick periods
 	rt.StopAll()
-	if atomic.LoadInt64(&mod.called) == 0 {
-		t.Fatal("ticker never drove Heartbeat — cell self-schedule NOT wired (Start dropped ActorContext)")
+	if _, ok := a.inflight["exp"]; ok {
+		t.Fatal("ticker never drove the reaper — cell self-schedule NOT wired (Start dropped ActorContext)")
 	}
 	_ = actor.SystemActorID // keep actor import
 }

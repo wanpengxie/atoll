@@ -31,7 +31,7 @@ func (a *adapterActor) Start(ctx context.Context, selfCtx actorrt.ActorContext) 
 	a.stopTick = make(chan struct{})
 	iv := a.tickEvery
 	if iv <= 0 {
-		iv = a.heartbeatInterval()
+		iv = a.tickInterval()
 	}
 	go a.tickLoop(iv, a.stopTick)
 	return nil
@@ -167,13 +167,4 @@ func (a *adapterActor) doEmitEvent(ctx context.Context, eventType string, payloa
 		return "", fmt.Errorf("adapterhost: emit rejected: %s", res.RejectReason)
 	}
 	return res.MessageID, nil
-}
-
-// setReadiness folds the latest serviceable-state into the adapter's own plain
-// fields on the cell goroutine. Pure domain self-state: no registry projection
-// and no actor.readiness.changed event (two-axis model — readiness is not a
-// substrate axis); it is surfaced only via the advisory actor.status self-answer.
-func (a *adapterActor) setReadiness(ready bool, reason string) {
-	a.ready = ready
-	a.readyReason = reason
 }
