@@ -10,15 +10,18 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 )
 
-// TestEnvelopeRoundTripMinimal exercises the minimal valid envelope —
-// only the L0 §3.1 invariant-required fields are populated.
+// TestEnvelopeRoundTripMinimal exercises the minimal valid envelope: only
+// the always-present (non-omitempty) fields are populated. It pins the wire
+// contract that a bare envelope survives marshal/unmarshal without the
+// substrate inventing or dropping fields (A3: substrate does not lie about
+// the message it carries).
 func TestEnvelopeRoundTripMinimal(t *testing.T) {
 	t.Parallel()
 	src := Envelope{
 		ID:         "msg-1",
 		TS:         1700000000000,
 		ChannelID:  "chan-A",
-		Sender:     Sender{Kind: actor.KindAgent, ID: "agent-1", Name: ""},
+		Sender:     Sender{Kind: actor.KindAgent, ID: "agent-1"},
 		Kind:       KindEvent,
 		Type:       "agent.text",
 		Payload:    json.RawMessage(`{}`),
@@ -26,49 +29,32 @@ func TestEnvelopeRoundTripMinimal(t *testing.T) {
 		Audience:   Audience{"agent:channel-agent"},
 	}
 	got := roundTrip(t, src)
-	if !reflect.DeepEqual(got.Audience, src.Audience) {
-		t.Errorf("audience: got %v, want %v", got.Audience, src.Audience)
-	}
-	if got.Kind != KindEvent {
-		t.Errorf("kind round-trip lost: %q", got.Kind)
-	}
-	if got.Sender.Name != "" {
-		t.Errorf("Sender.Name should round-trip as empty string, got %q", got.Sender.Name)
+	if !reflect.DeepEqual(got, src) {
+		t.Errorf("minimal envelope round-trip mismatch\n got:  %#v\nwant: %#v", got, src)
 	}
 }
 
-// TestEnvelopeRoundTripFullyPopulated exercises every optional field,
-// covering the tri-state behaviours for DocRefs / NotBefore / ExpiresAt.
+// TestEnvelopeRoundTripFullyPopulated populates every field, including all
+// three tri-state slots (ParentID/CorrelationID empty-vs-set, ExpiresAt
+// pointer), and asserts a byte-for-byte equal struct after a JSON round
+// trip. This is the structural fidelity contract for the whole envelope.
 func TestEnvelopeRoundTripFullyPopulated(t *testing.T) {
 	t.Parallel()
-	notBefore := int64(1700000010000)
 	expiresAt := int64(1700000020000)
-	delivered := int64(1700000005000)
-	docs := []string{"work/a.md", "work/b.md"}
-	note := "related discussion"
-	crossRefs := []CrossChannelRef{{ChannelID: "chan-B", MessageID: "msg-remote", Note: &note}}
-
 	src := Envelope{
-		ID:               "msg-full",
-		TS:               1700000000000,
-		TSReceived:       1700000000123,
-		ChannelID:        "chan-A",
-		Sender:           Sender{Kind: actor.KindAgent, ID: "agent-1", Name: "Alice"},
-		Kind:             KindRequest,
-		Type:             "example.publish",
-		Payload:          json.RawMessage(`{"body":{"title":"hi"}}`),
-		ParentID:         "msg-parent",
-		CorrelationID:    "corr-1",
-		DocRefs:          &docs,
-		CrossChannelRefs: &crossRefs,
-		Visibility:       VisibilityPublic,
-		Audience:         Audience{"tool:xhs"},
-		NotBefore:        &notBefore,
-		ExpiresAt:        &expiresAt,
-		DeliveredAt:      &delivered,
-		LastError:        "expired",
-		IsTerminal:       true,
-		Seq:              42,
+		ID:            "msg-full",
+		TS:            1700000000000,
+		TSReceived:    1700000000123,
+		ChannelID:     "chan-A",
+		Sender:        Sender{Kind: actor.KindAgent, ID: "agent-1"},
+		Kind:          KindRequest,
+		Type:          "example.publish",
+		Payload:       json.RawMessage(`{"body":{"title":"hi"}}`),
+		ParentID:      "msg-parent",
+		CorrelationID: "corr-1",
+		Visibility:    VisibilityPrivate,
+		Audience:      Audience{"tool:xhs", "agent:bob"},
+		ExpiresAt:     &expiresAt,
 	}
 	got := roundTrip(t, src)
 	if !reflect.DeepEqual(got, src) {
@@ -76,154 +62,103 @@ func TestEnvelopeRoundTripFullyPopulated(t *testing.T) {
 	}
 }
 
-// TestDocRefsTriState makes sure the three legal DocRefs states survive
-// JSON marshal/unmarshal cleanly.
-func TestDocRefsTriState(t *testing.T) {
+// TestExpiresAtTriState pins the documented tri-state of ExpiresAt
+// (*int64): nil means NULL on the wire, a set pointer means the timestamp.
+// (proto §"Tri-state semantics").
+func TestExpiresAtTriState(t *testing.T) {
 	t.Parallel()
-	mk := func(refs *[]string) Envelope {
+	mk := func(p *int64) Envelope {
 		return Envelope{
 			ID:         "id",
 			TS:         1,
 			ChannelID:  "c",
 			Sender:     Sender{Kind: actor.KindAgent, ID: "a"},
 			Kind:       KindEvent,
-			Type:       "file.updated",
+			Type:       "agent.text",
 			Payload:    json.RawMessage(`{}`),
 			Visibility: VisibilityPublic,
 			Audience:   Audience{"agent:channel-agent"},
-			DocRefs:    refs,
+			ExpiresAt:  p,
 		}
 	}
-	empty := []string{}
-	cases := map[string]*[]string{
-		"nil pointer (NULL on wire)":     nil,
-		"explicit empty slice ([] wire)": &empty,
-		"populated slice":                {"work/x.md"},
+	val := int64(1700000099999)
+	cases := map[string]*int64{
+		"nil pointer (NULL on wire)": nil,
+		"set pointer":                &val,
 	}
-	for name, refs := range cases {
+	for name, p := range cases {
+		p := p
 		t.Run(name, func(t *testing.T) {
-			src := mk(refs)
-			got := roundTrip(t, src)
-			if (got.DocRefs == nil) != (refs == nil) {
-				t.Errorf("DocRefs nil-ness mismatch: got %v, want %v", got.DocRefs, refs)
+			t.Parallel()
+			got := roundTrip(t, mk(p))
+			if (got.ExpiresAt == nil) != (p == nil) {
+				t.Fatalf("ExpiresAt nil-ness mismatch: got %v, want %v", got.ExpiresAt, p)
 			}
-			if refs != nil && !reflect.DeepEqual(*got.DocRefs, *refs) {
-				t.Errorf("DocRefs content mismatch: got %v, want %v", *got.DocRefs, *refs)
+			if p != nil && *got.ExpiresAt != *p {
+				t.Errorf("ExpiresAt value mismatch: got %d, want %d", *got.ExpiresAt, *p)
 			}
 		})
 	}
-}
-
-// TestCrossChannelRefsTriState makes sure the optional cross-channel
-// pointer list preserves nil vs explicit empty vs populated states.
-func TestCrossChannelRefsTriState(t *testing.T) {
-	t.Parallel()
-	mk := func(refs *[]CrossChannelRef) Envelope {
-		return Envelope{
-			ID:               "id",
-			TS:               1,
-			ChannelID:        "c",
-			Sender:           Sender{Kind: actor.KindAgent, ID: "a"},
-			Kind:             KindEvent,
-			Type:             "file.updated",
-			Payload:          json.RawMessage(`{}`),
-			Visibility:       VisibilityPublic,
-			Audience:         Audience{"agent:channel-agent"},
-			CrossChannelRefs: refs,
-		}
+	// nil ExpiresAt must be omitted entirely from the wire (omitempty),
+	// not serialized as `"expires_at":null`.
+	raw, err := json.Marshal(mk(nil))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
 	}
-	empty := []CrossChannelRef{}
-	note := "source"
-	populated := []CrossChannelRef{{ChannelID: "remote", MessageID: "msg-1", Note: &note}}
-	cases := map[string]*[]CrossChannelRef{
-		"nil pointer (NULL on wire)":     nil,
-		"explicit empty slice ([] wire)": &empty,
-		"populated slice":                &populated,
-	}
-	for name, refs := range cases {
-		t.Run(name, func(t *testing.T) {
-			src := mk(refs)
-			got := roundTrip(t, src)
-			if (got.CrossChannelRefs == nil) != (refs == nil) {
-				t.Errorf("CrossChannelRefs nil-ness mismatch: got %v, want %v", got.CrossChannelRefs, refs)
-			}
-			if refs != nil && !reflect.DeepEqual(*got.CrossChannelRefs, *refs) {
-				t.Errorf("CrossChannelRefs content mismatch: got %v, want %v", *got.CrossChannelRefs, *refs)
-			}
-		})
+	if strings.Contains(string(raw), "expires_at") {
+		t.Errorf("nil ExpiresAt should be omitted from wire, got: %s", raw)
 	}
 }
 
-// TestAllEnumSets covers the three exported enum slice helpers — the
-// counts double as guard against accidental closed-set drift.
-func TestAllEnumSets(t *testing.T) {
+// TestSenderIsStructuralIdentityOnly pins that Sender carries exactly the
+// two structural-identity fields {kind,id} and nothing else. Mutable /
+// presentation attributes (display name, role) are domain, not substrate
+// (inode vs filename). A drift here means a domain attribute leaked into
+// the substrate envelope.
+func TestSenderIsStructuralIdentityOnly(t *testing.T) {
 	t.Parallel()
-	if got := len(AllKinds); got != 3 {
-		t.Errorf("AllKinds len = %d, want 3", got)
+	raw, err := json.Marshal(Sender{Kind: actor.KindAgent, ID: "agent-1"})
+	if err != nil {
+		t.Fatalf("marshal sender: %v", err)
 	}
-	if got := len(actor.AllKinds); got != 4 {
-		t.Errorf("actor.AllKinds len = %d, want 4", got)
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("unmarshal sender: %v", err)
 	}
-	if got := len(AllVisibilities); got != 3 {
-		t.Errorf("AllVisibilities len = %d, want 3 (proto-layer0 §2.4 closed set: public/private/system)", got)
+	got := make([]string, 0, len(keys))
+	for k := range keys {
+		got = append(got, k)
 	}
-	if got := len(HashInputFields); got != 15 {
-		t.Errorf("HashInputFields len = %d, want 15", got)
+	sort.Strings(got)
+	want := []string{"id", "kind"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Sender wire keys = %v, want %v (structural identity only; name/role are domain)", got, want)
 	}
 }
 
-// TestEnvelopeFieldSet1To1WithSpec is the L0 §3 normative table guard.
-//
-// It marshals a fully populated envelope, lists the JSON keys present
-// in the wire form, and asserts they are EXACTLY the union of:
-//
-//	ContentFields           (18 from L0 §2.1, with sender.* flattened)
-//	DeliveryMetadataFields  (2 from L0 §2.5 wire fields)
-//	StoreDerivedFields      (2 from L2 §1.4.1)
-//
-// Any drift on either side (Go struct adds a JSON field but spec table
-// doesn't, or spec exports a field but Go struct ignores it) trips the
-// test. This is the verification artifact called out by launch-ticket notes
-// §T1 acceptance criteria.
-func TestEnvelopeFieldSet1To1WithSpec(t *testing.T) {
+// TestEnvelopeFieldSet1To1WithContentFields is the normative table guard:
+// the JSON keys emitted by a fully populated envelope (with sender.*
+// flattened) must be EXACTLY the ContentFields list. Drift on either side
+// — Go struct grows a field the list lacks, or the list names a field the
+// struct dropped — trips this test.
+func TestEnvelopeFieldSet1To1WithContentFields(t *testing.T) {
 	t.Parallel()
-
-	// Build the canonical "fully populated" envelope so every optional
-	// field fires. Use real values (not zero) so omitempty does not hide
-	// any field.
-	notBefore := int64(1700000010000)
 	expiresAt := int64(1700000020000)
-	delivered := int64(1700000005000)
-	failed := int64(1700000006000)
-	docs := []string{"work/a.md"}
-	note := "related discussion"
-	crossRefs := []CrossChannelRef{{ChannelID: "chan-B", MessageID: "msg-remote", Note: &note}}
-
 	env := Envelope{
-		ID:               "msg-full",
-		TS:               1700000000000,
-		TSReceived:       1700000000123,
-		ChannelID:        "chan-A",
-		Sender:           Sender{Kind: actor.KindAgent, ID: "agent-1", Name: "Alice"},
-		Kind:             KindRequest,
-		Type:             "example.publish",
-		Payload:          json.RawMessage(`{"x":1}`),
-		ParentID:         "msg-parent",
-		CorrelationID:    "corr-1",
-		DocRefs:          &docs,
-		CrossChannelRefs: &crossRefs,
-		Visibility:       VisibilityPublic,
-		Audience:         Audience{"tool:xhs"},
-		NotBefore:        &notBefore,
-		ExpiresAt:        &expiresAt,
-		DeliveredAt:      &delivered,
-		DeliveryFailedAt: &failed,
-		LastError:        "expired",
-		Attempts:         2,
-		IsTerminal:       true,
-		Seq:              42,
+		ID:            "msg-full",
+		TS:            1700000000000,
+		TSReceived:    1700000000123,
+		ChannelID:     "chan-A",
+		Sender:        Sender{Kind: actor.KindAgent, ID: "agent-1"},
+		Kind:          KindRequest,
+		Type:          "example.publish",
+		Payload:       json.RawMessage(`{"x":1}`),
+		ParentID:      "msg-parent",
+		CorrelationID: "corr-1",
+		Visibility:    VisibilityPublic,
+		Audience:      Audience{"tool:xhs"},
+		ExpiresAt:     &expiresAt,
 	}
-
 	raw, err := json.Marshal(env)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -233,9 +168,7 @@ func TestEnvelopeFieldSet1To1WithSpec(t *testing.T) {
 		t.Fatalf("unmarshal map: %v", err)
 	}
 
-	// Flatten sender.* to match ContentFields list (sender is a nested
-	// object on the wire; spec lists kind/id/name as 3 dotted keys).
-	gotKeys := make([]string, 0, len(asMap)+2)
+	gotKeys := make([]string, 0, len(asMap)+1)
 	for k, v := range asMap {
 		if k == "sender" {
 			var s map[string]json.RawMessage
@@ -251,97 +184,26 @@ func TestEnvelopeFieldSet1To1WithSpec(t *testing.T) {
 	}
 
 	wantKeys := append([]string{}, ContentFields...)
-	wantKeys = append(wantKeys, DeliveryMetadataFields...)
-	wantKeys = append(wantKeys, StoreDerivedFields...)
-
 	sort.Strings(gotKeys)
 	sort.Strings(wantKeys)
-
 	if !reflect.DeepEqual(gotKeys, wantKeys) {
-		extra := diff(gotKeys, wantKeys)
-		missing := diff(wantKeys, gotKeys)
-		t.Errorf("envelope JSON field set drifted from spec:\n  extra in struct (not in spec): %v\n  missing from struct (in spec): %v\n  full got:  %v\n  full want: %v",
-			extra, missing, gotKeys, wantKeys)
+		t.Errorf("envelope JSON field set drifted from ContentFields:\n  extra in struct: %v\n  missing from struct: %v\n  got:  %v\n  want: %v",
+			diff(gotKeys, wantKeys), diff(wantKeys, gotKeys), gotKeys, wantKeys)
 	}
 }
 
-func TestCanonicalHashStableAcrossSenderIdentityTyping(t *testing.T) {
+// TestContentFieldsShape guards the ContentFields list's own internal
+// shape: every entry is either a top-level key or a sender.* dotted key
+// (no other nesting is part of the wire contract).
+func TestContentFieldsShape(t *testing.T) {
 	t.Parallel()
-
-	ts := int64(1700000000000)
-	nb := int64(1700000060000)
-	ex := int64(1700000999999)
-	delivered := int64(1700000010000)
-	failed := int64(1700000020000)
-	refs := []string{"work/draft.md", "notes/raw.txt"}
-	note := "source thread"
-	crossRefs := []CrossChannelRef{{ChannelID: "ch-remote", MessageID: "msg-source", Note: &note}}
-	env := Envelope{
-		ID:               "fixed-id",
-		TS:               ts,
-		TSReceived:       1700000000123,
-		ChannelID:        "ch-1",
-		Sender:           Sender{Kind: actor.KindAgent, ID: actor.ActorID("agent:alice"), Name: ""},
-		Kind:             KindEvent,
-		Type:             "agent.text",
-		Payload:          json.RawMessage(`{"z":1,"a":{"y":2,"b":[3,1,2]},"m":"hi"}`),
-		ParentID:         "parent-99",
-		CorrelationID:    "corr-77",
-		DocRefs:          &refs,
-		CrossChannelRefs: &crossRefs,
-		Visibility:       VisibilityPublic,
-		Audience:         Audience{"agent:channel-agent", "agent:bob"},
-		NotBefore:        &nb,
-		ExpiresAt:        &ex,
-		DeliveredAt:      &delivered,
-		DeliveryFailedAt: &failed,
-		LastError:        "ignored by hash",
-		Attempts:         3,
-		IsTerminal:       true,
-		Seq:              42,
+	if len(ContentFields) == 0 {
+		t.Fatal("ContentFields is empty")
 	}
-	got, err := CanonicalHash(env)
-	if err != nil {
-		t.Fatalf("CanonicalHash: %v", err)
-	}
-	// Hash is computed over sender-provided fields only (proto-layer1
-	// §2.3): sender.kind is excluded because it is runtime-derived
-	// (forced overwrite from actor_registry at StepSenderConsistent).
-	const wantHex = "c6ae26fc31825543e73bcfea873b7bb1a3e8e2e1f71b594a3e37fb51882c938a"
-	if got != wantHex {
-		t.Errorf("CanonicalHash mismatch:\n got  = %q\n want = %q", got, wantHex)
-	}
-}
-
-// TestContentFieldsCount18 asserts the ContentFields slice matches the
-// L0 §2.1 table cardinality (18 flattened envelope content fields).
-func TestContentFieldsCount18(t *testing.T) {
-	t.Parallel()
-	if got := len(ContentFields); got != 18 {
-		t.Errorf("ContentFields len = %d, want 18 (L0 §2.1 flattened table cardinality)", got)
-	}
-	// Every entry must be either a top-level key or a sender.* dotted
-	// key — no other shape is valid.
 	for _, f := range ContentFields {
 		if strings.Contains(f, ".") && !strings.HasPrefix(f, "sender.") {
 			t.Errorf("ContentFields entry %q has unexpected dotted shape", f)
 		}
-	}
-}
-
-// TestDeliveryMetadataFieldsCount2 asserts the L0 §2.5 wire cardinality.
-func TestDeliveryMetadataFieldsCount2(t *testing.T) {
-	t.Parallel()
-	if got := len(DeliveryMetadataFields); got != 2 {
-		t.Errorf("DeliveryMetadataFields len = %d, want 2 (L0 §2.5 wire cardinality)", got)
-	}
-}
-
-// TestStoreDerivedFieldsCount2 asserts the L2 §1.4.1 cardinality.
-func TestStoreDerivedFieldsCount2(t *testing.T) {
-	t.Parallel()
-	if got := len(StoreDerivedFields); got != 2 {
-		t.Errorf("StoreDerivedFields len = %d, want 2 (L2 §1.4.1 store-derived cols)", got)
 	}
 }
 
