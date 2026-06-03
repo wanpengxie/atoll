@@ -40,8 +40,8 @@ func (f fakeLookup) FindByID(_ context.Context, _ message.ID) (*message.Envelope
 
 // TestActorList_TwoAxisNoReadiness proves the composed actor.list directory is
 // membership (registry) ∧ presence (lease) and carries NO readiness column —
-// readiness is not a substrate axis; it is self-answered per actor via
-// actor.status, never projected into this channel-wide view.
+// readiness is not a substrate axis; whether an actor can service a request is
+// the OUTCOME of send→terminal, never projected into this channel-wide view.
 func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 	reg := fakeRegistry{rows: []storespec.Record{
 		{ID: "tool:a", Kind: actor.KindTool, Binding: actor.BindingEmbedded},

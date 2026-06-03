@@ -9,9 +9,9 @@
 // Two-axis model (runtime/storespec.Record): membership is durable server truth
 // (the registry); PRESENCE is volatile and lives HERE, never in the truth log
 // (fleet Delivers lease reports straight to this cell's mailbox, bypassing the
-// harness). readiness is NOT a third axis — an actor's business serviceable
-// state is self-managed and answered by that actor's own actor.status; the
-// system actor does not project or compose it.
+// harness). readiness is NOT a third axis — whether an actor can service a
+// request is the OUTCOME of send→terminal, not a state the system actor
+// projects or composes.
 package sysactor
 
 import (
@@ -117,8 +117,8 @@ func (s *SystemActor) Receive(ctx context.Context, env *message.Envelope) error 
 // respondList answers actor.list with a composed channel-wide directory
 // (membership from the registry ∧ presence — composed INSIDE the actor so the
 // channel only sees the result, never the raw副本). Readiness is deliberately
-// absent: it is not a substrate axis; ask an actor's own actor.status for its
-// serviceable state.
+// absent: it is not a substrate axis — whether an actor can service a request
+// is the OUTCOME of send→terminal, never a stored field here.
 func (s *SystemActor) respondList(ctx context.Context, env *message.Envelope) error {
 	rows, err := s.registry.ListActive(ctx)
 	if err != nil {

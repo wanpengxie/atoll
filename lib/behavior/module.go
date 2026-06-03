@@ -7,11 +7,11 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// NOTE: there is no Heartbeater / StatusReporter / report types. An actor's
-// serviceable-state is advisory (reachability is the send→terminal outcome, not
-// a polled gate), so actor.status answers a trivial available=true baseline; the
-// framework does NOT proactively poll. When a concrete adapter needs to surface
-// non-trivial domain state (e.g. "not logged in"), an optional Statuser
+// NOTE: there is no Heartbeater / StatusReporter / report types, and no
+// actor.status query at all. An actor's serviceable-state is the OUTCOME of
+// send→terminal (the substrate materialises receiver_unavailable when the actor
+// is gone), not a polled or queryable gate. When a concrete adapter needs to
+// surface non-trivial domain state (e.g. "not logged in"), an optional Statuser
 // self-answer (parallel to lib/introspect.Describer) is added additively — not
 // pre-built here.
 

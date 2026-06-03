@@ -50,8 +50,8 @@ func TestStepTypeRegistered(t *testing.T) {
 
 		// actor.* introspection: NOT substrate-gated — passes like any type.
 		{
-			name:       "actor.status passes (type-agnostic; introspection is a lib convention)",
-			typ:        "actor.status",
+			name:       "actor.describe passes (type-agnostic; introspection is a lib convention)",
+			typ:        "actor.describe",
 			senderID:   "agent:p",
 			senderKind: actor.KindAgent,
 			reason:     "",

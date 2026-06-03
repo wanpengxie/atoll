@@ -7,7 +7,7 @@ package actor
 // the channel system actor may emit them, harness-gated to prevent forgery).
 // Changing a value or adding/removing a member is a protocol-level revision.
 //
-// NOTE: the actor.* introspection queries (actor.status/describe/list) are NOT
+// NOTE: the actor.* introspection queries (actor.describe/list) are NOT
 // here. The substrate does not enforce them — the generic harness
 // sender-consistency step already prevents an actor from forging an answer
 // about another actor, and actor.* is otherwise a plain (type-agnostic) type.

@@ -149,8 +149,6 @@ func (a *adapterActor) Receive(ctx context.Context, env *message.Envelope) error
 	}
 	a.remember(env) // cache request so respond works without a truth lookup
 	switch env.Type {
-	case introspect.QueryStatus:
-		return a.respondStatus(ctx, env)
 	case introspect.QueryDescribe:
 		return a.respondDescribe(ctx, env)
 	default:
@@ -201,23 +199,6 @@ func (a *adapterActor) collapseInternalError(ctx context.Context, key behavior.C
 	}
 	a.markDone(key)
 	return nil
-}
-
-// respondStatus self-answers the reserved actor.status request with a trivial
-// advisory baseline: an installed adapter is available. serviceable-state is
-// ADVISORY (reachability is the send→terminal outcome, not a polled gate), so
-// the framework does not proactively probe liveness. When a concrete adapter
-// needs to surface non-trivial domain state (e.g. "not logged in"), an optional
-// Statuser self-answer is added additively (parallel to introspect.Describer).
-func (a *adapterActor) respondStatus(ctx context.Context, env *message.Envelope) error {
-	payload, err := json.Marshal(introspect.Status{
-		Available: true,
-		Kind:      string(a.declaration.Binding),
-	})
-	if err != nil {
-		return fmt.Errorf("adapterhost: respondStatus marshal: %w", err)
-	}
-	return a.selfRespond(ctx, env, payload)
 }
 
 // respondDescribe self-answers the reserved actor.describe request. The

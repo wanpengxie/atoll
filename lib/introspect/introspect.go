@@ -19,22 +19,20 @@ import (
 // The reserved introspection queries — the standard questions any actor / the
 // channel answers about itself.
 const (
-	// QueryStatus — is this actor serviceable right now (advisory self-state).
-	QueryStatus = "actor.status"
 	// QueryDescribe — what can this actor do (its live API surface).
 	QueryDescribe = "actor.describe"
 	// QueryList — who is in this channel (membership ∧ presence).
 	QueryList = "actor.list"
 )
 
-// Status is the actor.status response: the actor's own advisory serviceable
-// state. NOT a dispatch gate — the actor self-answers; reachability is the
-// outcome of send→terminal.
-type Status struct {
-	Available bool   `json:"available"`
-	Reason    string `json:"reason,omitempty"`
-	Kind      string `json:"kind,omitempty"`
-}
+// NOTE: there is no actor.status query. "Is this actor serviceable right now"
+// is not a queryable 存量 — it is the OUTCOME of send→terminal (the substrate
+// death-signal materialises receiver_unavailable when the actor is gone). A
+// status query could only answer a trivial constant available=true, which
+// carries no truth — a half-built slice that misleads later readers. When a
+// concrete adapter has non-trivial domain state worth surfacing proactively
+// (e.g. feishu "not logged in"), an optional Statuser self-answer is added
+// additively (parallel to Describer below) — pain-driven, not pre-built.
 
 // APIDescriptor describes one callable API, returned dynamically inside a
 // Describe response. The actor is the sole authority on its own capability; a
@@ -61,8 +59,8 @@ type Describe struct {
 }
 
 // CatalogEntry is one row of the actor.list channel directory: membership
-// (registry truth) ∧ presence (volatile lease). No readiness — readiness is the
-// actor's own actor.status, not a channel-wide axis.
+// (registry truth) ∧ presence (volatile lease). No readiness axis — whether an
+// actor can service a request is the OUTCOME of send→terminal, not a field here.
 type CatalogEntry struct {
 	ID      string `json:"id"`
 	Kind    string `json:"kind"`

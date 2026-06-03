@@ -15,13 +15,13 @@
 //   - chain               — the harness write path (runtime/harness.Writer)
 //
 // Receive dispatches one envelope SERIALLY:
-//   - kind=request, type=actor.status   → self-answer (trivial available=true;
-//     status is advisory, a non-trivial domain Statuser is additive)
-//   - kind=request, type=actor.describe → self-answer (Declaration projection)
+//   - kind=request, type=actor.describe → self-answer (identity + live API
+//     surface via the optional introspect.Describer)
 //   - kind=request, other type          → reserve pending → module.Handle; a
 //     non-deferred Handle error collapses to a receiver_internal_error terminal
-//   - NO sticky-readiness gate: dispatch is dumb delivery; reachability is the
-//     OUTCOME of send→terminal, never a stored gate (P15/P16).
+//   - NO actor.status self-answer: "serviceable right now" is the OUTCOME of
+//     send→terminal, not a queryable gate (P15/P16). A non-trivial domain
+//     Statuser is added additively when an adapter needs it.
 //
 // Inbound external I/O (device/webhook results) is the adapter's OWN business,
 // not a framework callback: the adapter's reader folds results back by
