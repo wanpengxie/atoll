@@ -36,6 +36,12 @@ func MergeResponsePayload(payload json.RawMessage, status, reason string) (json.
 		if err := json.Unmarshal(payload, &m); err != nil {
 			return nil, fmt.Errorf("behavior: response payload must be a JSON object: %w", err)
 		}
+		if m == nil {
+			// payload was the JSON literal `null` — unmarshal nils the map but
+			// reports no error; treat empty/null as an empty object so the
+			// {status,reason} merge below never assigns into a nil map.
+			m = map[string]json.RawMessage{}
+		}
 	}
 	sb, _ := json.Marshal(status)
 	m["status"] = sb

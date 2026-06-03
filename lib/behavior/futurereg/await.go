@@ -138,11 +138,18 @@ func (h *Handle) Watch() (Watcher, error) {
 		id:     h.id,
 	}
 	ws.watchers[w] = struct{}{}
-	// If a final was already buffered, emit it immediately and close.
+	// If a final was already buffered, emit it and SETTLE the whole set — the
+	// final is the closure terminal, so consuming it here must mirror Await's
+	// buffered-final path (await.go) and Deliver's watched-final path: clear the
+	// buffer, mark consumed, close every watcher, drop the waiter. Without this
+	// the buffered final lingers — a later Watch/Await re-consumes it and the
+	// waiter leaks in Pending().
 	if ws.finalBuf != nil {
 		w.push(WatchEvent{Envelope: ws.finalBuf, IsFinal: true})
-		w.closeOnce()
-		delete(ws.watchers, w)
+		ws.finalBuf = nil
+		ws.finalConsumed = true
+		r.closeWatchersLocked(ws)
+		delete(r.waiters, h.id)
 	}
 	return w, nil
 }

@@ -296,7 +296,9 @@ func (c *HTTPClient) recordFailure() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.consecutiveFails++
-	if c.consecutiveFails == c.cfg.BreakerThreshold {
+	switch {
+	case c.consecutiveFails == c.cfg.BreakerThreshold:
+		// Threshold crossing: open the breaker.
 		c.breakerOpenedAt = c.cfg.Clock()
 		c.breakerHalfProbed = false
 		c.cfg.Metrics.IncCounter(c.cfg.MetricName + ".breaker_opened")
@@ -304,6 +306,14 @@ func (c *HTTPClient) recordFailure() {
 			"threshold", c.cfg.BreakerThreshold,
 			"cooldown_ms", c.cfg.BreakerCooldown.Milliseconds(),
 		)
+	case c.breakerHalfProbed:
+		// A half-open probe failed: re-open with a FRESH cooldown window and
+		// disarm the probe, so the next cooldown re-allows exactly one probe.
+		// Without this the breaker stays open forever — consecutiveFails is now
+		// past the threshold so the crossing branch never fires again, and
+		// breakerHalfProbed stays true, so allowRequest never permits a probe.
+		c.breakerOpenedAt = c.cfg.Clock()
+		c.breakerHalfProbed = false
 	}
 }
 
