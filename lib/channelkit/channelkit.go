@@ -33,6 +33,11 @@ type OpenRequestSource interface {
 type Channel struct {
 	channelID channel.ID
 	cells     *actorrt.Runtime
+	// deliverer is the confined enqueue capability (actorrt hands it out once at
+	// New). It is routed to the post-harness fanout via Deliverer() — NOT exposed
+	// on the broadly-shared Cells() handle, so nothing can inject into a mailbox
+	// bypassing the harness.
+	deliverer actorrt.Deliverer
 
 	// Death-signal closure (author #3): on cell death the supervisor writes
 	// receiver_unavailable for every in-flight request addressed to the dead
@@ -81,15 +86,21 @@ func New(cfg Config) *Channel {
 		clock:     clock,
 		logger:    logger,
 	}
-	c.cells = actorrt.New(actorrt.Config{Supervisor: c})
+	c.cells, c.deliverer = actorrt.New(actorrt.Config{Supervisor: c})
 	if cfg.System != nil {
 		c.cells.Spawn(actor.SystemActorID, cfg.System)
 	}
 	return c
 }
 
-// Cells returns the runtime so callers can spawn additional cells into this channel.
+// Cells returns the runtime so callers can spawn/address cells in this channel.
+// It carries NO enqueue capability — feeding a mailbox is the Deliverer's job
+// (Deliverer()), held only by the post-harness fanout.
 func (c *Channel) Cells() *actorrt.Runtime { return c.cells }
+
+// Deliverer returns the confined enqueue capability — the composition root
+// routes it to the post-harness fanout (the sole legitimate mailbox feeder).
+func (c *Channel) Deliverer() actorrt.Deliverer { return c.deliverer }
 
 // OnDeath implements actorrt.Supervisor: it materialises receiver_unavailable
 // (closure author #3) for every in-flight request addressed to the dead actor,

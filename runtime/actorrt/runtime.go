@@ -49,8 +49,24 @@ type Config struct {
 	Mailbox int
 }
 
-// New constructs a Runtime.
-func New(cfg Config) *Runtime {
+// Deliverer is the privileged capability to enqueue an envelope into a hosted
+// cell's mailbox. It is the ONLY way to feed a mailbox, and New hands it out
+// EXACTLY ONCE — it is deliberately NOT a method on the broadly-shared *Runtime
+// handle. The composition root routes it to the single legitimate feeder: the
+// post-harness fanout (every envelope it enqueues has already committed to
+// truth) and that fanout's wire-dispatch arm. So code that merely holds a
+// *Runtime (to Spawn / address / query) CANNOT inject into a mailbox and thus
+// cannot bypass the harness — the mailbox is the harness pipeline's private
+// egress, structurally, not by convention.
+type Deliverer interface {
+	Deliver(audience []actor.ActorID, env *message.Envelope) (DeliverResult, error)
+}
+
+// New constructs a Runtime and its sole Deliverer. The *Runtime is the
+// broadly-shareable management/addressing handle (Spawn/Attach/Despawn/Has/
+// StopAll); the Deliverer is the confined enqueue capability — give it ONLY to
+// the post-harness fanout.
+func New(cfg Config) (*Runtime, Deliverer) {
 	parent := cfg.Parent
 	if parent == nil {
 		parent = context.Background()
@@ -59,12 +75,22 @@ func New(cfg Config) *Runtime {
 	if mb <= 0 {
 		mb = 64
 	}
-	return &Runtime{
+	r := &Runtime{
 		parent:    parent,
 		sup:       cfg.Supervisor,
 		presences: make(map[actor.ActorID]presence),
 		mailbox:   mb,
 	}
+	return r, deliverer{r}
+}
+
+// deliverer is the only holder-confined implementation of Deliverer; it wraps
+// the runtime and calls its unexported enqueue (unreachable from other packages
+// via the shared *Runtime).
+type deliverer struct{ r *Runtime }
+
+func (d deliverer) Deliver(audience []actor.ActorID, env *message.Envelope) (DeliverResult, error) {
+	return d.r.deliver(audience, env)
 }
 
 // Outcome is the per-audience truth Deliver reports about its own action — the
@@ -159,16 +185,20 @@ func (r *Runtime) Despawn(id actor.ActorID) {
 	}
 }
 
-// Deliver routes env to every audience presence hosted by this Runtime by
+// deliver routes env to every audience presence hosted by this Runtime by
 // enqueueing into each mailbox, returning the per-audience Outcome. An audience
 // member with no local presence is reported NotHosted (not silently skipped) —
 // the substrate reports truthfully what it did so the seam can fast-fail. error
 // is reserved for a true exception (nil envelope), not for delivery conditions.
 //
+// Unexported: the enqueue is reachable ONLY through the Deliverer capability New
+// hands out (a *Runtime holder cannot call it), so the mailbox stays the harness
+// pipeline's private egress.
+//
 // No ctx: the enqueue is a non-blocking mailbox post (cell.Deliver never blocks
 // — a full mailbox returns MailboxFull at once), so there is no cancelable wait
 // for a ctx to act on. A per-call ctx would be pure decoration.
-func (r *Runtime) Deliver(audience []actor.ActorID, env *message.Envelope) (DeliverResult, error) {
+func (r *Runtime) deliver(audience []actor.ActorID, env *message.Envelope) (DeliverResult, error) {
 	if env == nil {
 		return DeliverResult{}, errors.New("actorrt: deliver nil envelope")
 	}

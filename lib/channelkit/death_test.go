@@ -63,8 +63,10 @@ func TestOnDeath_MaterialisesReceiverUnavailable(t *testing.T) {
 	})
 	ch.Cells().Spawn("worker", panicActor{})
 
-	// Deliver a request → Receive panics → cell death → OnDeath.
-	_, _ = ch.Cells().Deliver([]actor.ActorID{"worker"},
+	// Deliver a request → Receive panics → cell death → OnDeath. Delivery goes
+	// through the confined Deliverer (the post-harness fanout's capability), not
+	// the broadly-shared Cells() handle.
+	_, _ = ch.Deliverer().Deliver([]actor.ActorID{"worker"},
 		&message.Envelope{ID: "trigger", ChannelID: "ch", Kind: message.KindRequest, Type: "x.do",
 			Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{"worker"}})
 

@@ -67,7 +67,7 @@ func env(id string) *message.Envelope {
 // mustDeliver delivers to a single actor and fails on a non-Delivered outcome.
 func mustDeliver(t *testing.T, rt *Runtime, id actor.ActorID, e *message.Envelope) {
 	t.Helper()
-	res, err := rt.Deliver([]actor.ActorID{id}, e)
+	res, err := rt.deliver([]actor.ActorID{id}, e)
 	if err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestCellSerialDelivery(t *testing.T) {
 		time.Sleep(time.Millisecond)
 		done <- struct{}{}
 	}
-	rt := New(Config{Parent: context.Background(), Mailbox: 200})
+	rt, _ := New(Config{Parent: context.Background(), Mailbox: 200})
 	rt.Spawn("a", a)
 
 	const n = 50
@@ -106,7 +106,7 @@ func TestCellSerialDelivery(t *testing.T) {
 func TestCellStartStop(t *testing.T) {
 	t.Parallel()
 	a := newRecordActor()
-	rt := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.Spawn("a", a)
 	select {
 	case <-a.startedCh:
@@ -129,13 +129,13 @@ func TestCellMailboxFull(t *testing.T) {
 	block := make(chan struct{})
 	a := newRecordActor()
 	a.receive = func() { <-block }
-	rt := New(Config{Parent: context.Background(), Mailbox: 1})
+	rt, _ := New(Config{Parent: context.Background(), Mailbox: 1})
 	defer func() { close(block); rt.StopAll() }()
 	rt.Spawn("a", a)
 
 	var gotFull atomic.Bool
 	for i := 0; i < 50; i++ {
-		res, err := rt.Deliver([]actor.ActorID{"a"}, env("x"))
+		res, err := rt.deliver([]actor.ActorID{"a"}, env("x"))
 		if err != nil {
 			t.Fatalf("deliver: %v", err)
 		}
@@ -155,8 +155,8 @@ func TestCellMailboxFull(t *testing.T) {
 // fast-fail receiver_unavailable. (B4)
 func TestDeliverNotHosted(t *testing.T) {
 	t.Parallel()
-	rt := New(Config{Parent: context.Background()})
-	res, err := rt.Deliver([]actor.ActorID{"ghost"}, env("x"))
+	rt, _ := New(Config{Parent: context.Background()})
+	res, err := rt.deliver([]actor.ActorID{"ghost"}, env("x"))
 	if err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
@@ -192,7 +192,7 @@ func (s *recordingSupervisor) OnDeath(ctx context.Context, sig DeathSignal) {
 func TestCellPanicSurfacesDeathSignal(t *testing.T) {
 	t.Parallel()
 	sup := &recordingSupervisor{notify: make(chan struct{}, 1)}
-	rt := New(Config{Parent: context.Background(), Supervisor: sup})
+	rt, _ := New(Config{Parent: context.Background(), Supervisor: sup})
 	rt.Spawn("a", panicActor{})
 	mustDeliver(t, rt, "a", env("x"))
 	select {
@@ -231,7 +231,7 @@ func (s *despawningSupervisor) OnDeath(ctx context.Context, sig DeathSignal) {
 func TestPanicDeathWithDespawningSupervisorDoesNotDeadlock(t *testing.T) {
 	t.Parallel()
 	sup := &despawningSupervisor{notify: make(chan struct{}, 1)}
-	rt := New(Config{Parent: context.Background(), Supervisor: sup})
+	rt, _ := New(Config{Parent: context.Background(), Supervisor: sup})
 	sup.rt = rt
 	rt.Spawn("a", startPanicActor{})
 	select {
@@ -251,7 +251,7 @@ func TestPanicDeathWithDespawningSupervisorDoesNotDeadlock(t *testing.T) {
 func TestRespawnSameIDEachDeathIsIndependent(t *testing.T) {
 	t.Parallel()
 	sup := &recordingSupervisor{notify: make(chan struct{}, 1)}
-	rt := New(Config{Parent: context.Background(), Supervisor: sup})
+	rt, _ := New(Config{Parent: context.Background(), Supervisor: sup})
 
 	rt.Spawn("a", startPanicActor{})
 	select {
@@ -286,7 +286,7 @@ func TestCellTeardownWaitsInFlight(t *testing.T) {
 		<-release
 		finished.Store(true)
 	}
-	rt := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.Spawn("a", a)
 	mustDeliver(t, rt, "a", env("x"))
 	time.Sleep(10 * time.Millisecond) // ensure Receive is in-flight
