@@ -162,6 +162,72 @@ func TestClosureDrainFailure_IsSurfaced(t *testing.T) {
 	}
 }
 
+// errWriter fails every Write — drives a per-request write fault so OnDown's
+// onFault callback fires (the channelkit.closure.write_failed path). The drain
+// query itself succeeds (one request returned), so the failure is per-request,
+// not drain-level.
+type errWriter struct{}
+
+func (errWriter) Write(context.Context, *message.Envelope) (behavior.WriteOutcome, error) {
+	return behavior.WriteOutcome{}, errors.New("write down")
+}
+
+// TestOnDown_PerRequestWriteFault_IsLogged proves that when the drain query
+// succeeds but writing a per-request terminal fails, OnDown surfaces the fault
+// via its onFault callback (channelkit.closure.write_failed) rather than
+// swallowing it. The drain itself does NOT fail, so the function returns nil and
+// only the per-request fault log is emitted.
+func TestOnDown_PerRequestWriteFault_IsLogged(t *testing.T) {
+	req := message.Envelope{
+		ID:        "req-1",
+		ChannelID: "ch",
+		Kind:      message.KindRequest,
+		Type:      "x.do",
+		Sender:    message.Sender{Kind: actor.KindAgent, ID: "caller"},
+		Audience:  message.Audience{"worker"},
+	}
+	h := &capHandler{}
+	ch := channelkit.New(channelkit.Config{
+		ChannelID:    "ch",
+		Writer:       errWriter{},
+		OpenRequests: fakeOpenReqs{reqs: []storespec.StoredRow{{Envelope: req}}},
+		Clock:        time.Now,
+		Logger:       slog.New(h),
+	})
+	ch.OnDown(context.Background(), "worker", nil)
+	if len(h.msgs) == 0 {
+		t.Fatal("per-request write failed but NO fault logged — silent black hole regression")
+	}
+	if h.msgs[0] != "channelkit.closure.write_failed" {
+		t.Fatalf("fault msg=%q, want channelkit.closure.write_failed", h.msgs[0])
+	}
+}
+
+// TestNew_DefaultClockAndSpawnsSystem covers the two New defaults the other
+// tests bypass: a nil Clock must fall back (the channel still builds and hosts
+// cells), and a non-nil System actor must be spawned at the SystemActorID so it
+// is immediately hosted/addressable.
+func TestNew_DefaultClockAndSpawnsSystem(t *testing.T) {
+	ch := channelkit.New(channelkit.Config{
+		ChannelID: "ch",
+		System:    liveActor{}, // intrinsic system cell — must be spawned by New
+		// Clock left nil → New must default it (time.Now) without panicking.
+	})
+	if _, ok := ch.Cells().Stat(actor.SystemActorID); !ok {
+		t.Fatal("New did not spawn the intrinsic System cell at SystemActorID")
+	}
+}
+
+// TestController_ReturnsConfinedCapability locks the Controller() accessor: it
+// hands out the confined control-enqueue capability actorrt minted at New (the
+// same one the runtime produced), distinct from the Deliverer.
+func TestController_ReturnsConfinedCapability(t *testing.T) {
+	ch := channelkit.New(channelkit.Config{ChannelID: "ch", Clock: time.Now})
+	if ch.Controller() == nil {
+		t.Fatal("Controller() returned nil — confined control capability not exposed")
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {
