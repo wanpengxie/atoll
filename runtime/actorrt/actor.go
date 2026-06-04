@@ -13,8 +13,10 @@ import (
 // implementation MUST NOT add locks/atomics to its own logical state — the
 // mailbox IS the serialization.
 //
-// There is deliberately no required call/cast/info/Tick: periodic behaviour
-// is an actor scheduling a message to itself, not a substrate-imposed hook.
+// There is deliberately no required call/cast/info/Tick and no self-send:
+// an actor receives ONLY collaboration envelopes (through the harness→fanout
+// path); any internal continuation is plain code on the cell goroutine, not a
+// substrate-imposed hook or a self-delivered message.
 type Actor interface {
 	// Receive processes exactly one envelope addressed to this actor.
 	// Returning an error does NOT itself synthesise a terminal — closure
