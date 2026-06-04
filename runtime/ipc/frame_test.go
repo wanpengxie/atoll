@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -410,6 +411,77 @@ func TestConcurrentWritesDoNotInterleave(t *testing.T) {
 		if f.Kind != KindEmit {
 			t.Fatalf("frame %d kind = %q, want emit", i, f.Kind)
 		}
+	}
+}
+
+// --- Write defensive branches ---------------------------------------------
+
+// Write surfaces a marshal error verbatim (wrapped "ipc: marshal") and emits
+// NOTHING: a Frame whose Payload is a json.RawMessage holding INVALID JSON
+// fails json.Marshal (RawMessage validates on marshal), so the header/body
+// write is never reached and the wire stays clean — no desync for the peer.
+func TestWriteMarshalError(t *testing.T) {
+	var buf bytes.Buffer
+	c := NewCodec(nil, &buf)
+	// json.RawMessage is marshalled by re-validating its bytes; "{bad" is not
+	// valid JSON, so json.Marshal(Frame{...}) fails before any write.
+	err := c.Write(Frame{Kind: KindEmit, Payload: json.RawMessage([]byte("{bad"))})
+	if err == nil {
+		t.Fatal("Write accepted frame with invalid RawMessage payload")
+	}
+	if !strings.Contains(err.Error(), "ipc: marshal") {
+		t.Fatalf("Write err = %q, want ipc: marshal", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("Write emitted %d bytes for un-marshallable frame, want 0", buf.Len())
+	}
+}
+
+// failWriter fails its Nth Write call (1-based), succeeding before then. It
+// lets a test target the length-prefix write (n=1) vs the body write (n=2)
+// independently — the two distinct error returns inside Codec.Write.
+type failWriter struct {
+	calls  int
+	failOn int
+	err    error
+}
+
+func (f *failWriter) Write(p []byte) (int, error) {
+	f.calls++
+	if f.calls == f.failOn {
+		return 0, f.err
+	}
+	return len(p), nil
+}
+
+// Write returns the writer error from the LENGTH-PREFIX write (the first of
+// the two w.Write calls). The error is propagated raw (no wrapping) so the
+// host can inspect the underlying transport failure (e.g. a broken pipe).
+func TestWriteHeaderWriteError(t *testing.T) {
+	boom := errors.New("header boom")
+	w := &failWriter{failOn: 1, err: boom}
+	c := NewCodec(nil, w)
+	err := c.Write(Frame{Kind: KindDown})
+	if err != boom {
+		t.Fatalf("Write header-fail err = %v, want %v", err, boom)
+	}
+	if w.calls != 1 {
+		t.Fatalf("expected to stop after the failed header write, saw %d writes", w.calls)
+	}
+}
+
+// Write returns the writer error from the BODY write (the second w.Write
+// call, after the header wrote fine). Propagated raw, same as the header path.
+func TestWriteBodyWriteError(t *testing.T) {
+	boom := errors.New("body boom")
+	w := &failWriter{failOn: 2, err: boom}
+	c := NewCodec(nil, w)
+	err := c.Write(Frame{Kind: KindDown})
+	if err != boom {
+		t.Fatalf("Write body-fail err = %v, want %v", err, boom)
+	}
+	if w.calls != 2 {
+		t.Fatalf("expected header write then failed body write (2 calls), saw %d", w.calls)
 	}
 }
 
