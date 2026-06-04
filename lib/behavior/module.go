@@ -46,17 +46,14 @@ type Declaration struct {
 //
 // SERIAL CONTRACT (v2, dismantle-spec §3 — the abstraction returning home):
 // the host guarantees ALL Module callbacks (Declares / Init / Handle /
-// Shutdown) are invoked SERIALLY by this actor's single cell
-// goroutine. Inbound external I/O (device/webhook results) is the Module's own
-// private business: its reader folds results back by self-delivering an envelope
-// onto its cell (ActorContext.Deliver), handled in the same serial Receive — NOT
-// a host callback. A Module MUST NOT depend on concurrent
-// invocation, and MUST NOT read or write its own logical state from a
-// goroutine it spawned itself. External resources (HTTP client, watcher
-// goroutine) may carry their own synchronisation, but their results MUST be
-// folded back onto the actor via the mailbox (self-post / Ask) before they
-// touch the actor's logical state. Because the cell goroutine is the sole
-// owner, a Module holds logical state in plain fields — no mutex/atomic.
+// Shutdown) are invoked SERIALLY by this actor's single cell goroutine. Because
+// that goroutine is the sole accessor, a Module holds its logical state in plain
+// fields — no mutex/atomic — and therefore MUST NOT read or write that state
+// from any goroutine it spawns itself. External resources (HTTP client, watcher
+// goroutine) may carry their own synchronisation, but a Module must not touch
+// its cell state off the cell goroutine. There is no substrate self-send: a
+// message reaches this actor only through the harness→fanout collaboration path
+// (Receive), never by the Module injecting into its own mailbox.
 type Module interface {
 	// Declares returns the static metadata. Called exactly once per
 	// Install. Result MUST be deterministic (same call → same value).
@@ -73,9 +70,8 @@ type Module interface {
 
 	// Handle translates one inbound kind=request envelope into outbound
 	// protocol traffic. Returning nil with no terminal leaves the request
-	// pending — the adapter answers later (e.g. once its own external call
-	// completes and it self-delivers the result onto its cell), or the
-	// caller-scoped closure times it out. A hard error collapses to a
-	// receiver_internal_error terminal.
+	// pending — the adapter answers later via the ModuleContext seams
+	// (Respond/Fail), or the caller-scoped closure times it out. A hard error
+	// collapses to a receiver_internal_error terminal.
 	Handle(ctx context.Context, env *message.Envelope) error
 }

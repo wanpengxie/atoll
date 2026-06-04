@@ -3,11 +3,10 @@ package behavior
 import "errors"
 
 // ErrHandleDeferred — Handle returns it to signal "no terminal yet". The
-// adapter answers later (e.g. once its own external/async work completes and it
-// self-delivers the result onto its cell, then calls Respond/Fail). Until then
-// the pending request stays open, bounded by the caller-scoped closure timeout
-// (substrate author #2) or the receiver-death signal (author #3) — never an
-// auto-finalize on Handle return.
+// adapter answers later (once its own external/async work completes, by calling
+// Respond/Fail). Until then the pending request stays open, bounded by the
+// caller-scoped closure timeout (substrate author #2) or the receiver-death
+// signal (author #3) — never an auto-finalize on Handle return.
 //
 // Sentinel hardening: the adapter identifies it via errors.Is(err,
 // ErrHandleDeferred). Adapters MUST NOT wrap it with fmt.Errorf("%w", ...) and

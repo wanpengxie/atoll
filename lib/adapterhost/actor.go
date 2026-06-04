@@ -13,14 +13,8 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/lib/introspect"
-	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
 )
-
-// tickType is the internal self-schedule signal an adapterActor delivers to
-// itself (NOT a protocol type — it never leaves the cell). Receive intercepts
-// it to run heartbeat + the in-flight reaper on the cell goroutine.
-const tickType = "adapterhost.__tick__"
 
 // adapterActor is one adapter hosted as a real serial actor cell. Its single
 // cell goroutine is the sole owner of all logical state — so every field below
@@ -60,17 +54,6 @@ type adapterActor struct {
 	// map — cell goroutine sole owner, no lock. Cleared on markDone.
 	inflight map[behavior.CorrelationKey]*message.Envelope
 
-	// selfCtx is the substrate handle for self-scheduling (heartbeat + reaper
-	// tick delivered via selfCtx.Deliver). Set in Start. The ticker goroutine
-	// only ENQUEUES the tick; the actual heartbeat/reaper work runs serially in
-	// Receive on the cell goroutine (no lock on logical state).
-	selfCtx actorrt.ActorContext
-	// stopTick stops the self-schedule loop on Stop.
-	stopTick chan struct{}
-	// tickEvery overrides the self-schedule cadence (0 → binding default). Set by
-	// the installer; tests use a short interval.
-	tickEvery time.Duration
-
 	// mctx is the ModuleContext handed to module.Init (built in Start; its
 	// Respond/Fail/Provisional/EmitEvent seams close over THIS adapterActor so
 	// they touch a.inflight/a.chain on the cell goroutine — no god-object).
@@ -90,6 +73,11 @@ func (a *adapterActor) remember(env *message.Envelope) {
 	if a.inflight == nil {
 		a.inflight = map[behavior.CorrelationKey]*message.Envelope{}
 	}
+	// Lazy GC (Redis-style): bounding this cache is pure memory hygiene — the
+	// timeout terminal is the caller's caller-scoped job, nothing must fire AT a
+	// deadline here. So sweep expired entries opportunistically on each new
+	// request, NOT on a self-scheduled timer (no ticker, no self-send).
+	a.reapExpired(a.clock().UnixMilli())
 	a.inflight[behavior.CorrelationKey(env.ID)] = env
 }
 
@@ -132,17 +120,12 @@ func (a *adapterActor) writeCtx(ctx context.Context) context.Context {
 // delivery; a not-ready adapter self-answers receiver_unavailable; reachability
 // is the OUTCOME of send→terminal, never a stored gate (P15/P16).
 func (a *adapterActor) Receive(ctx context.Context, env *message.Envelope) error {
-	if env.Type == tickType {
-		// Internal self-tick (heartbeat + reaper), runs on the cell goroutine.
-		a.onTick()
-		return nil
-	}
 	if env.Kind != message.KindRequest {
-		// Non-request envelopes addressed to an adapter are ignored at this
-		// seam (the adapter is a request/reply driver). An adapter that drives an
-		// external resource folds inbound results back by self-delivering an
-		// envelope onto its own cell (ActorContext.Deliver) and routing it here —
-		// that is the adapter's own concern, not a host callback.
+		// Non-request envelopes addressed to an adapter are ignored at this seam
+		// (the adapter is a request/reply driver). An adapter that drives an
+		// external resource handles its own async I/O on its own goroutines; any
+		// COLLABORATION result re-enters through the harness (Respond/Emit), never
+		// by self-injecting an envelope into this mailbox.
 		return nil
 	}
 	a.remember(env) // cache request so respond works without a truth lookup
@@ -235,40 +218,4 @@ func (a *adapterActor) selfRespond(ctx context.Context, env *message.Envelope, p
 	}
 	a.markDone(key)
 	return nil
-}
-
-// onTick runs the self-scheduled maintenance on the cell goroutine: reap
-// expired in-flight requests (bound memory). That is all the tick is for now.
-func (a *adapterActor) onTick() {
-	a.reapExpired(a.clock().UnixMilli())
-}
-
-// tickLoop is the adapter's self-schedule ticker (it owns its own ticker per
-// dismantle §2.5-A — the substrate does NOT add a timer primitive). The
-// goroutine only ENQUEUES a tick via Deliver; all state work runs serially in
-// Receive. Stops on stopTick.
-func (a *adapterActor) tickLoop(interval time.Duration, stop chan struct{}) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	tick := &message.Envelope{Kind: message.KindEvent, Type: tickType, ChannelID: a.channelID}
-	for {
-		select {
-		case <-stop:
-			return
-		case <-t.C:
-			_ = a.selfCtx.Deliver(tick) // full-mailbox tick is droppable
-		}
-	}
-}
-
-// tickInterval is the binding-specific self-schedule cadence for the reaper.
-func (a *adapterActor) tickInterval() time.Duration {
-	switch a.declaration.Binding {
-	case actor.BindingRuntimeOutbound:
-		return 15 * time.Second
-	case actor.BindingRuntimeInboundViaRelay:
-		return 30 * time.Second
-	default:
-		return 60 * time.Second
-	}
 }

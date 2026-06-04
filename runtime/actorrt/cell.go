@@ -93,9 +93,10 @@ func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, 
 // Self implements ActorContext.
 func (c *cell) Self() actor.ActorID { return c.id }
 
-// Deliver implements ActorContext and is also the substrate enqueue path. It
-// never blocks: a full mailbox returns ErrMailboxFull, a stopped cell
-// ErrCellStopped.
+// Deliver is the substrate enqueue path into this cell's mailbox — held only by
+// the post-harness fanout (and the wire-dispatch arm), never exposed to the
+// actor itself (ActorContext has no self-send). It never blocks: a full mailbox
+// returns ErrMailboxFull, a stopped cell ErrCellStopped.
 func (c *cell) Deliver(env *message.Envelope) error {
 	c.mu.Lock()
 	if c.closed {

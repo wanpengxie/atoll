@@ -14,10 +14,10 @@
 //     death a cell self-evicts from the addressing map (it never stops/joins
 //     itself) and signals the supervisor.
 //  4. isolation — nobody reaches into an actor's state. The mailbox carries
-//     ONLY envelopes; there is no path to run caller-supplied code on the cell
-//     goroutine. An out-of-band signal is a message an actor sends itself
-//     (ActorContext.Deliver); a synchronous request-reply is a message pair,
-//     not a closure.
+//     ONLY envelopes, fed ONLY by the harness→fanout collaboration path (and its
+//     wire-dispatch arm on compute): there is no self-send and no path to run
+//     caller-supplied code on the cell goroutine. ActorContext exposes the
+//     actor's own id (Self) and nothing else.
 //
 // Deliver reports a structured, per-audience Outcome (Delivered/NotHosted/
 // MailboxFull/Stopped): the substrate knows whether it hosts an addressed actor

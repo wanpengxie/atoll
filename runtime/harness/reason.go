@@ -31,6 +31,7 @@ const (
 	HarnessVisibilityInvalid         HarnessRejectReason = "harness_visibility_invalid"
 	HarnessEnvelopeUnknownField      HarnessRejectReason = "harness_envelope_unknown_field"
 	HarnessAudienceWildcardForbidden HarnessRejectReason = "harness_audience_wildcard_forbidden"
+	HarnessResponseMissingParent     HarnessRejectReason = "harness_response_missing_parent"
 
 	// Step 3 — Normalize (time-relation guard)
 	HarnessTimeInvalid HarnessRejectReason = "harness_time_invalid"
@@ -42,17 +43,16 @@ const (
 
 	// Step 5 — Type / Kind Validate
 	HarnessTypeUnknown                    HarnessRejectReason = "harness_type_unknown"
-	HarnessKindNotAllowedForType          HarnessRejectReason = "harness_kind_not_allowed_for_type"
 	HarnessReservedTypeUnauthorizedSender HarnessRejectReason = "harness_reserved_type_unauthorized_sender"
 
 	// Step 7 — Kind + Audience Validate
+	HarnessKindNotAllowedForType   HarnessRejectReason = "harness_kind_not_allowed_for_type"
 	HarnessAudienceEmpty           HarnessRejectReason = "harness_audience_empty"
 	HarnessAudienceMemberNotActive HarnessRejectReason = "harness_audience_member_not_active"
 	HarnessRequestAudienceInvalid  HarnessRejectReason = "harness_request_audience_invalid"
 	HarnessResponseAudienceInvalid HarnessRejectReason = "harness_response_audience_invalid"
 
 	// Step 8 — Terminal Uniqueness + Response Parent Validation
-	HarnessResponseMissingParent           HarnessRejectReason = "harness_response_missing_parent"
 	HarnessResponseParentNotFound          HarnessRejectReason = "harness_response_parent_not_found"
 	HarnessResponseParentNotRequest        HarnessRejectReason = "harness_response_parent_not_request"
 	HarnessResponseStatusInvalid           HarnessRejectReason = "harness_response_status_invalid"

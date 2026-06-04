@@ -18,31 +18,16 @@ import (
 // Start builds the ModuleContext (closing over this cell) and runs module.Init
 // on the cell goroutine. After Start the adapter may call mctx seams from its
 // callbacks; all of them touch a.inflight/a.chain serially.
-func (a *adapterActor) Start(ctx context.Context, selfCtx actorrt.ActorContext) error {
+func (a *adapterActor) Start(ctx context.Context, _ actorrt.ActorContext) error {
 	if a.inflight == nil {
 		a.inflight = map[behavior.CorrelationKey]*message.Envelope{}
 	}
-	a.selfCtx = selfCtx
 	a.mctx = a.buildModuleContext()
-	if err := a.module.Init(ctx, a.mctx); err != nil {
-		return err
-	}
-	// Self-schedule heartbeat + reaper (the adapter owns its ticker).
-	a.stopTick = make(chan struct{})
-	iv := a.tickEvery
-	if iv <= 0 {
-		iv = a.tickInterval()
-	}
-	go a.tickLoop(iv, a.stopTick)
-	return nil
+	return a.module.Init(ctx, a.mctx)
 }
 
 // Stop releases the module on the cell goroutine (serial with in-flight Handle).
 func (a *adapterActor) Stop(ctx context.Context) error {
-	if a.stopTick != nil {
-		close(a.stopTick)
-		a.stopTick = nil
-	}
 	return a.module.Shutdown(ctx)
 }
 

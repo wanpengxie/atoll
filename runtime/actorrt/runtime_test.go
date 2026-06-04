@@ -123,56 +123,31 @@ func TestSpawnReplaceStopsOld(t *testing.T) {
 	mustDeliver(t, rt, "a", env("x"))
 }
 
-// selfSendActor schedules one follow-up message to itself on first receipt,
-// exercising ActorContext.Deliver (the only substrate path for an actor to feed
-// its own mailbox — a self-timer fold-back).
-type selfSendActor struct {
-	self    ActorContext
-	seen    chan string
-	relayed bool
-}
+// selfIDActor captures the ActorContext.Self() handed at Start.
+type selfIDActor struct{ id chan actor.ActorID }
 
-func (a *selfSendActor) Start(_ context.Context, self ActorContext) error {
-	a.self = self
+func (a *selfIDActor) Start(_ context.Context, self ActorContext) error {
+	a.id <- self.Self()
 	return nil
 }
+func (a *selfIDActor) Receive(context.Context, *message.Envelope) error { return nil }
 
-func (a *selfSendActor) Receive(_ context.Context, env *message.Envelope) error {
-	a.seen <- string(env.ID)
-	if !a.relayed {
-		a.relayed = true
-		return a.self.Deliver(&message.Envelope{ID: "self-followup"})
-	}
-	return nil
-}
-
-// TestActorContextSelfDeliver: an actor can enqueue into its OWN mailbox via the
-// ActorContext handed at Start, and Self() reports its bound id. This is the
-// only isolation-preserving self-signal path (no closure runs on the cell
-// goroutine; it's a message the actor sends itself).
-func TestActorContextSelfDeliver(t *testing.T) {
+// TestActorContextSelf: the substrate hands an actor its own id at Start (Erlang
+// self()). ActorContext exposes identity ONLY — there is no self-send; a message
+// reaches an actor only through the harness→fanout collaboration path.
+func TestActorContextSelf(t *testing.T) {
 	t.Parallel()
-	a := &selfSendActor{seen: make(chan string, 4)}
+	a := &selfIDActor{id: make(chan actor.ActorID, 1)}
 	rt := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	rt.Spawn("a", a)
-
-	mustDeliver(t, rt, "a", env("external"))
-
-	got := map[string]bool{}
-	for i := 0; i < 2; i++ {
-		select {
-		case id := <-a.seen:
-			got[id] = true
-		case <-time.After(2 * time.Second):
-			t.Fatalf("only saw %v, expected external + self-followup", got)
+	select {
+	case got := <-a.id:
+		if got != actor.ActorID("a") {
+			t.Fatalf("Self() = %q, want a", got)
 		}
-	}
-	if !got["external"] || !got["self-followup"] {
-		t.Fatalf("seen = %v, want both external and self-followup", got)
-	}
-	if a.self.Self() != actor.ActorID("a") {
-		t.Fatalf("Self() = %q, want a", a.self.Self())
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start never ran / Self() not observed")
 	}
 }
 

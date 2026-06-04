@@ -22,12 +22,11 @@
 //     Statuser is added additively when an adapter needs it.
 //
 // Inbound external I/O (device/webhook results) is the adapter's OWN business,
-// not an inbound callback: the adapter's reader folds results back by
-// self-delivering an envelope onto its cell (actorrt.ActorContext.Deliver),
-// handled in the same serial Receive. The only host-managed out-of-band
-// entry is the self-scheduled tick: the cell delivers a tick to itself, and
-// Receive runs the in-flight reaper (bounds inflight memory) on the cell
-// goroutine. No god-object GC goroutine.
+// not an inbound callback: a Module keeps all logical-state access on the cell
+// goroutine (the serial Receive). There is no self-send and no self-tick. The
+// in-flight reaper that bounds inflight memory runs LAZILY — swept from remember
+// on each new request (Redis-style memory hygiene: nothing fires AT a deadline,
+// the timeout terminal is the caller's job), not on a ticker.
 //
 // Install is a pure install-time factory (installer.go): validate the
 // declaration, verify the handler actor's membership/binding via the registry,

@@ -39,16 +39,13 @@ type Stopper interface {
 	Stop(ctx context.Context) error
 }
 
-// ActorContext is the handle the substrate hands an actor at Start. It
-// exposes the actor's own identity and a self-send capability (so an actor
-// can schedule work to itself, e.g. a timer fire) WITHOUT exposing any
-// pointer into another actor's state.
+// ActorContext is the handle the substrate hands an actor at Start. It exposes
+// the actor's own identity (Erlang self()) and nothing else: there is no
+// self-send. A message reaches an actor ONLY through the harness→fanout
+// collaboration path — the cell mailbox is the private egress of that path, not
+// a channel an actor can inject into. Internal continuations are the actor's own
+// concern (plain code on the cell goroutine), not a substrate-delivered message.
 type ActorContext interface {
 	// Self returns this actor's id.
 	Self() actor.ActorID
-	// Deliver enqueues an envelope into this actor's own mailbox. It is the
-	// only substrate-provided way for an actor to feed itself a message
-	// (self-timer, relay lifecycle frame folded back in, etc.). It never
-	// blocks indefinitely: a full mailbox returns ErrMailboxFull.
-	Deliver(env *message.Envelope) error
 }
