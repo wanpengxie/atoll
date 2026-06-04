@@ -19,11 +19,13 @@ type CoreTypeRule struct {
 // this is a clean rename, not a back-compat alias.
 //
 // (**) `system.heartbeat` is wire-only — impl-vocabulary §2.7 +
-// proto-foundation §1.12 + proto-layer0 §3.1 specify it as a control
-// frame, NOT a channel envelope. It does not enter the message log and
-// intentionally MUST NOT appear in coreTypeTable — so it can never be a
-// substrate type at all (no envelope-side filter is needed or wanted: the
-// substrate is type-agnostic and owns no per-type-name special cases).
+// proto-foundation §1.12 + proto-layer0 §3.1 specify it as a transport
+// keepalive frame, NOT a channel envelope (and NOT the actor control channel —
+// it is neither work, control, nor obs at the actor level; it is pure transport
+// liveness). It does not enter the message log and intentionally MUST NOT appear
+// in coreTypeTable — so it can never be a substrate type at all (no envelope-side
+// filter is needed or wanted: the substrate is type-agnostic and owns no
+// per-type-name special cases).
 //
 // Likewise `agent.progress` was historically a separate core type for
 // intermediate per-step progress bubbles. impl-vocabulary §2.3

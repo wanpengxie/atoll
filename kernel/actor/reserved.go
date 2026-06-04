@@ -14,12 +14,24 @@ package actor
 // They are a self-answer CONVENTION owned by a higher layer (the names, the
 // response shapes, and the answering behaviour), not kernel.
 
-// ReservedSystemEventTypeSet is the set of reserved `kind=event` types
-// the channel system actor emits to mirror control-plane mutations into
-// the message log (INVARIANT-0 write side / observation-bounded truth).
-// These are channel envelopes (they enter the log); the wire-only control
-// frame `system.heartbeat` is intentionally NOT here (it is a transport
-// control frame, never a channel envelope — see core_types.go).
+// The reserved `kind=event` type names below are the frozen group the channel
+// system actor emits to mirror channel membership/config mutations into the
+// message log (INVARIANT-0 write side / observation-bounded truth). These are
+// WORK events (kind=event, they enter the log as truth) — NOT the actor control
+// channel (reload/quota/stop signals, which are non-truth). The wire-only
+// `system.heartbeat` keepalive is intentionally NOT here (it is a transport
+// keepalive frame, never a channel envelope — see core_types.go).
+//
+// Deliberately NO membership predicate (no IsReservedSystemEventType) and no
+// backing slice — UNLIKE the Kind/Binding/Visibility ADT closed sets. Those
+// gate a wire string AS IT deserializes into a narrowed Go type, so the Parse*
+// predicate is part of ADT integrity. `envelope.type` is the opposite: an OPEN
+// string the substrate stays type-AGNOSTIC about, never narrowed into an ADT —
+// there is no deserialization gate to own. kernel only OWNS these canonical
+// names (only the substrate can authoritatively define its own mirror-event
+// vocabulary); deciding whether a given type is reserved AND whether its sender
+// is authorized to emit it is the write engine's job (harness §6.2.0), never a
+// kernel concern. These are plain string consts by design, not a set type.
 const (
 	ReservedSystemChannelCreated    = "system.channel.created"
 	ReservedSystemActorRegistered   = "system.actor.registered"

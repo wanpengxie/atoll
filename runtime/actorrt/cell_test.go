@@ -84,7 +84,7 @@ func TestCellSerialDelivery(t *testing.T) {
 		time.Sleep(time.Millisecond)
 		done <- struct{}{}
 	}
-	rt, _ := New(Config{Parent: context.Background(), Mailbox: 200})
+	rt, _, _ := New(Config{Parent: context.Background(), Mailbox: 200})
 	rt.Spawn("a", a)
 
 	const n = 50
@@ -106,7 +106,7 @@ func TestCellSerialDelivery(t *testing.T) {
 func TestCellStartStop(t *testing.T) {
 	t.Parallel()
 	a := newRecordActor()
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 	rt.Spawn("a", a)
 	select {
 	case <-a.startedCh:
@@ -119,7 +119,7 @@ func TestCellStartStop(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Stop never ran after Despawn")
 	}
-	if rt.Has("a") {
+	if _, ok := rt.Stat("a"); ok {
 		t.Fatal("cell still present after Despawn")
 	}
 }
@@ -129,7 +129,7 @@ func TestCellMailboxFull(t *testing.T) {
 	block := make(chan struct{})
 	a := newRecordActor()
 	a.receive = func() { <-block }
-	rt, _ := New(Config{Parent: context.Background(), Mailbox: 1})
+	rt, _, _ := New(Config{Parent: context.Background(), Mailbox: 1})
 	defer func() { close(block); rt.StopAll() }()
 	rt.Spawn("a", a)
 
@@ -155,7 +155,7 @@ func TestCellMailboxFull(t *testing.T) {
 // fast-fail receiver_unavailable. (B4)
 func TestDeliverNotHosted(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 	res, err := rt.deliver([]actor.ActorID{"ghost"}, env("x"))
 	if err != nil {
 		t.Fatalf("deliver: %v", err)
@@ -174,106 +174,111 @@ type startPanicActor struct{}
 func (startPanicActor) Receive(ctx context.Context, env *message.Envelope) error { return nil }
 func (startPanicActor) Start(ctx context.Context, self ActorContext) error       { panic("start boom") }
 
-type recordingSupervisor struct {
+// recordingWatcher is the consumer end of the obs presence-push channel: it
+// records each death (DELETED edge) the runtime publishes.
+type recordingWatcher struct {
 	mu     sync.Mutex
-	deaths []DeathSignal
+	downs  []actor.ActorID
 	notify chan struct{}
 }
 
-func (s *recordingSupervisor) OnDeath(ctx context.Context, sig DeathSignal) {
-	s.mu.Lock()
-	s.deaths = append(s.deaths, sig)
-	s.mu.Unlock()
-	if s.notify != nil {
-		s.notify <- struct{}{}
+func (w *recordingWatcher) OnDown(ctx context.Context, id actor.ActorID, cause error) {
+	w.mu.Lock()
+	w.downs = append(w.downs, id)
+	w.mu.Unlock()
+	if w.notify != nil {
+		w.notify <- struct{}{}
 	}
 }
 
-func TestCellPanicSurfacesDeathSignal(t *testing.T) {
+func TestCellPanicPublishesPresenceDown(t *testing.T) {
 	t.Parallel()
-	sup := &recordingSupervisor{notify: make(chan struct{}, 1)}
-	rt, _ := New(Config{Parent: context.Background(), Supervisor: sup})
+	w := &recordingWatcher{notify: make(chan struct{}, 1)}
+	rt, _, _ := New(Config{Parent: context.Background()})
+	rt.WatchPresence(w) // register BEFORE spawn — no edge missed
 	rt.Spawn("a", panicActor{})
 	mustDeliver(t, rt, "a", env("x"))
 	select {
-	case <-sup.notify:
+	case <-w.notify:
 	case <-time.After(2 * time.Second):
-		t.Fatal("no death signal after actor panic")
+		t.Fatal("no presence-down edge after actor panic")
 	}
-	sup.mu.Lock()
-	defer sup.mu.Unlock()
-	if len(sup.deaths) != 1 || sup.deaths[0].Actor != "a" {
-		t.Fatalf("deaths = %+v, want one for actor a", sup.deaths)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.downs) != 1 || w.downs[0] != "a" {
+		t.Fatalf("downs = %+v, want one for actor a", w.downs)
 	}
-	// Self-eviction: the dead instance is unaddressable WITHOUT the supervisor
-	// despawning it (OnDeath runs AFTER eviction). (B1)
-	if rt.Has("a") {
+	// Self-eviction: the dead instance is unaddressable WITHOUT the watcher
+	// despawning it (OnDown runs AFTER eviction). (B1)
+	if _, ok := rt.Stat("a"); ok {
 		t.Fatal("dead cell still addressable — did not self-evict")
 	}
 }
 
-// despawningSupervisor reproduces the DANGEROUS legacy pattern (despawn in
-// OnDeath). It must NOT deadlock: the cell self-evicts before OnDeath, so the
+// despawningWatcher reproduces the DANGEROUS legacy pattern (despawn in the death
+// reaction). It must NOT deadlock: the cell self-evicts before OnDown, so the
 // Despawn no-ops instead of self-joining the dying goroutine. (B1 regression)
-type despawningSupervisor struct {
+type despawningWatcher struct {
 	rt     *Runtime
 	notify chan struct{}
 }
 
-func (s *despawningSupervisor) OnDeath(ctx context.Context, sig DeathSignal) {
-	s.rt.Despawn(sig.Actor)
+func (w *despawningWatcher) OnDown(ctx context.Context, id actor.ActorID, cause error) {
+	w.rt.Despawn(id)
 	select {
-	case s.notify <- struct{}{}:
+	case w.notify <- struct{}{}:
 	default:
 	}
 }
 
-func TestPanicDeathWithDespawningSupervisorDoesNotDeadlock(t *testing.T) {
+func TestPanicDeathWithDespawningWatcherDoesNotDeadlock(t *testing.T) {
 	t.Parallel()
-	sup := &despawningSupervisor{notify: make(chan struct{}, 1)}
-	rt, _ := New(Config{Parent: context.Background(), Supervisor: sup})
-	sup.rt = rt
+	w := &despawningWatcher{notify: make(chan struct{}, 1)}
+	rt, _, _ := New(Config{Parent: context.Background()})
+	w.rt = rt
+	rt.WatchPresence(w)
 	rt.Spawn("a", startPanicActor{})
 	select {
-	case <-sup.notify:
+	case <-w.notify:
 	case <-time.After(2 * time.Second):
-		t.Fatal("death path deadlocked (supervisor despawn self-joined the dying cell)")
+		t.Fatal("death path deadlocked (watcher despawn self-joined the dying cell)")
 	}
-	if rt.Has("a") {
+	if _, ok := rt.Stat("a"); ok {
 		t.Fatal("cell still addressable after death")
 	}
 }
 
 // TestRespawnSameIDEachDeathIsIndependent: re-Spawning the same ActorID after a
-// death is a fresh instance that, when it too dies, emits its own death signal
-// addressed by ActorID. Death is terminal per instance (no transparent respawn,
-// no generation) — the substrate just produces one death per dying cell.
+// death is a fresh instance that, when it too dies, publishes its own presence
+// down edge addressed by ActorID. Death is terminal per instance (no transparent
+// respawn, no generation) — the substrate just produces one down per dying cell.
 func TestRespawnSameIDEachDeathIsIndependent(t *testing.T) {
 	t.Parallel()
-	sup := &recordingSupervisor{notify: make(chan struct{}, 1)}
-	rt, _ := New(Config{Parent: context.Background(), Supervisor: sup})
+	w := &recordingWatcher{notify: make(chan struct{}, 1)}
+	rt, _, _ := New(Config{Parent: context.Background()})
+	rt.WatchPresence(w)
 
 	rt.Spawn("a", startPanicActor{})
 	select {
-	case <-sup.notify:
+	case <-w.notify:
 	case <-time.After(2 * time.Second):
-		t.Fatal("no death signal for first instance")
+		t.Fatal("no presence-down edge for first instance")
 	}
 
 	rt.Spawn("a", startPanicActor{})
 	select {
-	case <-sup.notify:
+	case <-w.notify:
 	case <-time.After(2 * time.Second):
-		t.Fatal("no death signal for second instance")
+		t.Fatal("no presence-down edge for second instance")
 	}
 
-	sup.mu.Lock()
-	defer sup.mu.Unlock()
-	if len(sup.deaths) != 2 {
-		t.Fatalf("deaths = %d, want 2", len(sup.deaths))
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.downs) != 2 {
+		t.Fatalf("downs = %d, want 2", len(w.downs))
 	}
-	if sup.deaths[0].Actor != "a" || sup.deaths[1].Actor != "a" {
-		t.Fatalf("deaths = %+v, want both for actor a", sup.deaths)
+	if w.downs[0] != "a" || w.downs[1] != "a" {
+		t.Fatalf("downs = %+v, want both for actor a", w.downs)
 	}
 }
 
@@ -286,7 +291,7 @@ func TestCellTeardownWaitsInFlight(t *testing.T) {
 		<-release
 		finished.Store(true)
 	}
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 	rt.Spawn("a", a)
 	mustDeliver(t, rt, "a", env("x"))
 	time.Sleep(10 * time.Millisecond) // ensure Receive is in-flight

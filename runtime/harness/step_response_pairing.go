@@ -47,9 +47,11 @@ import (
 //     1. receiver voluntary — sender ∈ parent.audience;
 //     2. caller self-close — sender == parent.sender writing its own
 //     caller-scoped status=failed + reason=unanswered_timeout;
-//     3. substrate death — substrate materialises the dead receiver's
-//     receiver_unavailable (wire sender = dead receiver, folds into #1).
-//     The old generic "system actor terminal fallback" author is DELETED.
+//     3. substrate death — on the obs presence-down edge a watcher
+//     materialises the dead receiver's receiver_unavailable, SYSTEM-authored
+//     (sender == SystemActorID; see substrateDeath gate below). This is a
+//     distinct author, NOT a forged dead-receiver sender. The old generic
+//     "system actor terminal fallback" author is DELETED.
 //
 //   - Terminal uniqueness: once a final response exists for the parent the
 //     request is closed. A second final → harness_terminal_duplicate; a

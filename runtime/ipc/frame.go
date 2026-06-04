@@ -48,13 +48,19 @@ const (
 	// (a full pipe/socket buffer surfaces as MailboxFull on the host's
 	// non-blocking enqueue).
 	KindDeliver Kind = "deliver"
+	// KindControl (host→remote): one control signal into the bound actor's
+	// CONTROL lane — out-of-band from KindDeliver work frames (the wire's analog
+	// of the cell's separate control lane). Non-truth, closed-set Kind. The host
+	// prioritizes control frames ahead of deliver frames.
+	KindControl Kind = "control"
 	// KindEmit (remote→host): the bound actor emitted an envelope upward. The
 	// host (port presence) relays it to the harness — the single channel-log
 	// writer.
 	KindEmit Kind = "emit"
-	// KindDown (remote→host): the bound actor died. The host materialises the
-	// DeathSignal (receiver_unavailable for in-flight requests). Connection EOF
-	// is the equivalent terminal signal.
+	// KindDown (remote→host): the bound actor died. The host publishes the
+	// presence DELETED edge (obs push); a subscriber materialises
+	// receiver_unavailable for in-flight requests. Connection EOF is the
+	// equivalent terminal signal.
 	KindDown Kind = "down"
 )
 
@@ -85,13 +91,24 @@ type DeliverPayload struct {
 	Envelope message.Envelope `json:"envelope"`
 }
 
+// ControlPayload carries one control signal to the bound actor's control lane.
+// The vocabulary is opaque to the wire: Kind is the substrate's closed-set
+// SignalKind as a string, Payload rides as raw bytes the actor interprets.
+// Payload is []byte (NOT json.RawMessage): it is arbitrary opaque bytes, so JSON
+// base64-encodes it — a non-JSON control payload must never break frame
+// marshalling.
+type ControlPayload struct {
+	Kind    string `json:"kind"`
+	Payload []byte `json:"payload,omitempty"`
+}
+
 // EmitPayload carries one envelope the bound actor emitted upward.
 type EmitPayload struct {
 	Envelope message.Envelope `json:"envelope"`
 }
 
-// DownPayload is the bound actor's death signal (the actor is implicit — the
-// connection IS that actor).
+// DownPayload is the bound actor's death notification — the host turns it into a
+// presence-down edge (the actor is implicit — the connection IS that actor).
 type DownPayload struct {
 	Reason string `json:"reason,omitempty"`
 }

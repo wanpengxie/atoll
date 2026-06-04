@@ -14,7 +14,7 @@ import (
 // the substrate never fabricates an Outcome for a non-message.
 func TestDeliverNilEnvelopeIsError(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	rt.Spawn("a", newRecordActor())
 
@@ -34,7 +34,7 @@ func TestDeliverNilEnvelopeIsError(t *testing.T) {
 // exactly one entry per audience id.
 func TestDeliverPerAudienceTruth(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background(), Mailbox: 16})
+	rt, _, _ := New(Config{Parent: context.Background(), Mailbox: 16})
 
 	live := newRecordActor()
 	rt.Spawn("live", live)
@@ -71,7 +71,7 @@ func TestDeliverPerAudienceTruth(t *testing.T) {
 // last write wins) — the runtime addresses by identity, not by list position.
 func TestDeliverDuplicateAudienceMember(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background(), Mailbox: 16})
+	rt, _, _ := New(Config{Parent: context.Background(), Mailbox: 16})
 	defer rt.StopAll()
 	rt.Spawn("a", newRecordActor())
 
@@ -92,7 +92,7 @@ func TestDeliverDuplicateAudienceMember(t *testing.T) {
 // id stays addressable as the new instance.
 func TestSpawnReplaceStopsOld(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
 	first := newRecordActor()
@@ -116,7 +116,7 @@ func TestSpawnReplaceStopsOld(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("second instance never started")
 	}
-	if !rt.Has("a") {
+	if _, ok := rt.Stat("a"); !ok {
 		t.Fatal("id not addressable after replace")
 	}
 	// The replacement actually receives — proving the live presence is the new one.
@@ -138,7 +138,7 @@ func (a *selfIDActor) Receive(context.Context, *message.Envelope) error { return
 func TestActorContextSelf(t *testing.T) {
 	t.Parallel()
 	a := &selfIDActor{id: make(chan actor.ActorID, 1)}
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	rt.Spawn("a", a)
 	select {
@@ -155,7 +155,7 @@ func TestActorContextSelf(t *testing.T) {
 // the addressing map (no id remains addressable, Stop hooks run).
 func TestStopAllClearsPresences(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 
 	actors := map[actor.ActorID]*recordActor{}
 	for _, id := range []actor.ActorID{"a", "b", "c"} {
@@ -172,7 +172,7 @@ func TestStopAllClearsPresences(t *testing.T) {
 	rt.StopAll()
 
 	for id, ra := range actors {
-		if rt.Has(id) {
+		if _, ok := rt.Stat(id); ok {
 			t.Fatalf("%s still addressable after StopAll", id)
 		}
 		select {
@@ -187,10 +187,34 @@ func TestStopAllClearsPresences(t *testing.T) {
 // (no panic, stays unaddressable).
 func TestDespawnAbsentIsNoop(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	rt.Despawn("never-existed")
-	if rt.Has("never-existed") {
+	if _, ok := rt.Stat("never-existed"); ok {
 		t.Fatal("absent id became addressable after Despawn")
+	}
+}
+
+// TestStatReportsClockStampedStartedAt: Stat is the substrate-owned obs pull —
+// present = the second return, and StartedAt is the bind instant the runtime
+// stamps from its injected Clock (uptime = now - StartedAt, derived by the
+// consumer). Only the substrate produces it; the actor never self-reports it.
+func TestStatReportsClockStampedStartedAt(t *testing.T) {
+	t.Parallel()
+	pinned := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	rt, _, _ := New(Config{Parent: context.Background(), Clock: func() time.Time { return pinned }})
+	defer rt.StopAll()
+
+	if _, ok := rt.Stat("a"); ok {
+		t.Fatal("Stat reported present for an unhosted id")
+	}
+	rt.Spawn("a", newRecordActor())
+
+	st, ok := rt.Stat("a")
+	if !ok {
+		t.Fatal("Stat reported absent for a hosted cell")
+	}
+	if !st.StartedAt.Equal(pinned) {
+		t.Fatalf("StartedAt = %v, want clock-stamped %v", st.StartedAt, pinned)
 	}
 }

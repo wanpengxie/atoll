@@ -76,7 +76,7 @@ func nopEmit(context.Context, *message.Envelope) error { return nil }
 // connection IS the actor, addressable by the resolved id).
 func TestPortHandshakeBindsResolvedID(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
 	gotLease := make(chan string, 1)
@@ -93,7 +93,7 @@ func TestPortHandshakeBindsResolvedID(t *testing.T) {
 	if got := <-gotLease; got != "lease-xyz" {
 		t.Fatalf("resolve got lease %q, want lease-xyz", got)
 	}
-	if !rt.Has("remote-1") {
+	if _, ok := rt.Stat("remote-1"); !ok {
 		t.Fatal("port not addressable after Attach")
 	}
 }
@@ -106,7 +106,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 
 	t.Run("wrong first frame kind", func(t *testing.T) {
 		t.Parallel()
-		rt, _ := New(Config{Parent: context.Background()})
+		rt, _, _ := New(Config{Parent: context.Background()})
 		hostConn, remoteConn := net.Pipe()
 		go func() {
 			c := ipc.NewCodec(remoteConn, remoteConn)
@@ -120,7 +120,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 
 	t.Run("resolve error", func(t *testing.T) {
 		t.Parallel()
-		rt, _ := New(Config{Parent: context.Background()})
+		rt, _, _ := New(Config{Parent: context.Background()})
 		hostConn, remoteConn := net.Pipe()
 		go func() {
 			c := ipc.NewCodec(remoteConn, remoteConn)
@@ -135,7 +135,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 
 	t.Run("empty resolved id", func(t *testing.T) {
 		t.Parallel()
-		rt, _ := New(Config{Parent: context.Background()})
+		rt, _, _ := New(Config{Parent: context.Background()})
 		hostConn, remoteConn := net.Pipe()
 		go func() {
 			c := ipc.NewCodec(remoteConn, remoteConn)
@@ -152,7 +152,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 // ResolveFunc (the relay seam and the auth seam are both mandatory).
 func TestPortRequiresSinks(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 	hostConn, _ := net.Pipe()
 	if _, err := rt.Attach(hostConn, nil, staticResolve("x")); err == nil {
 		t.Fatal("Attach accepted a nil EmitSink")
@@ -168,7 +168,7 @@ func TestPortRequiresSinks(t *testing.T) {
 // side of A1: a delivered message reaches the bound remote actor verbatim).
 func TestPortDeliverReachesWire(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
@@ -202,7 +202,7 @@ func TestPortDeliverReachesWire(t *testing.T) {
 // rejects nil rather than enqueueing it (and never reports it as Delivered).
 func TestPortDeliverRejectsNilEnvelope(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
@@ -222,7 +222,7 @@ func TestPortDeliverRejectsNilEnvelope(t *testing.T) {
 // into the channel log).
 func TestPortEmitRelayed(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
 	got := make(chan *message.Envelope, 1)
@@ -247,14 +247,15 @@ func TestPortEmitRelayed(t *testing.T) {
 	}
 }
 
-// TestPortDownSurfacesDeathSignal: a DOWN frame from the remote raises exactly
-// one DeathSignal addressed by the bound id and self-evicts the presence (A3 —
+// TestPortDownPublishesPresenceDown: a DOWN frame from the remote raises exactly
+// one presence-down edge addressed by the bound id and self-evicts the presence (A3 —
 // the substrate materialises receiver_unavailable from positively-observed
-// death; the dead port is unaddressable WITHOUT the supervisor despawning it).
-func TestPortDownSurfacesDeathSignal(t *testing.T) {
+// death; the dead port is unaddressable WITHOUT the runtime self-evicting it).
+func TestPortDownPublishesPresenceDown(t *testing.T) {
 	t.Parallel()
-	sup := &recordingSupervisor{notify: make(chan struct{}, 1)}
-	rt, _ := New(Config{Parent: context.Background(), Supervisor: sup})
+	w := &recordingWatcher{notify: make(chan struct{}, 1)}
+	rt, _, _ := New(Config{Parent: context.Background()})
+	rt.WatchPresence(w)
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 
 	dp, _ := json.Marshal(ipc.DownPayload{Reason: "actor exited"})
@@ -262,46 +263,48 @@ func TestPortDownSurfacesDeathSignal(t *testing.T) {
 		t.Fatalf("remote down write: %v", err)
 	}
 	select {
-	case <-sup.notify:
+	case <-w.notify:
 	case <-time.After(2 * time.Second):
-		t.Fatal("no death signal after remote DOWN")
+		t.Fatal("no presence-down edge after remote DOWN")
 	}
-	sup.mu.Lock()
-	defer sup.mu.Unlock()
-	if len(sup.deaths) != 1 || sup.deaths[0].Actor != id {
-		t.Fatalf("deaths = %+v, want one for %s", sup.deaths, id)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.downs) != 1 || w.downs[0] != id {
+		t.Fatalf("deaths = %+v, want one for %s", w.downs, id)
 	}
-	if rt.Has(id) {
+	if _, ok := rt.Stat(id); ok {
 		t.Fatal("dead port still addressable — did not self-evict")
 	}
 }
 
-// TestPortEOFSurfacesDeathSignal: connection EOF (remote closed the conn) is the
-// terminal-equivalent of DOWN — it surfaces a DeathSignal and self-evicts.
-func TestPortEOFSurfacesDeathSignal(t *testing.T) {
+// TestPortEOFPublishesPresenceDown: connection EOF (remote closed the conn) is the
+// terminal-equivalent of DOWN — it publishes a presence-down edge and self-evicts.
+func TestPortEOFPublishesPresenceDown(t *testing.T) {
 	t.Parallel()
-	sup := &recordingSupervisor{notify: make(chan struct{}, 1)}
-	rt, _ := New(Config{Parent: context.Background(), Supervisor: sup})
+	w := &recordingWatcher{notify: make(chan struct{}, 1)}
+	rt, _, _ := New(Config{Parent: context.Background()})
+	rt.WatchPresence(w)
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 
 	remote.conn.Close()
 	select {
-	case <-sup.notify:
+	case <-w.notify:
 	case <-time.After(2 * time.Second):
-		t.Fatal("no death signal after connection EOF")
+		t.Fatal("no presence-down edge after connection EOF")
 	}
-	if rt.Has(id) {
+	if _, ok := rt.Stat(id); ok {
 		t.Fatal("port still addressable after EOF")
 	}
 }
 
 // TestPortUnknownFrameKindFailsClosed: the wire is a CLOSED set — an unknown
 // frame kind is a protocol violation that kills the port (never silently
-// ignored), surfacing a DeathSignal.
+// ignored), publishing a presence-down edge.
 func TestPortUnknownFrameKindFailsClosed(t *testing.T) {
 	t.Parallel()
-	sup := &recordingSupervisor{notify: make(chan struct{}, 1)}
-	rt, _ := New(Config{Parent: context.Background(), Supervisor: sup})
+	w := &recordingWatcher{notify: make(chan struct{}, 1)}
+	rt, _, _ := New(Config{Parent: context.Background()})
+	rt.WatchPresence(w)
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
 
@@ -309,39 +312,40 @@ func TestPortUnknownFrameKindFailsClosed(t *testing.T) {
 		t.Fatalf("remote garbage write: %v", err)
 	}
 	select {
-	case <-sup.notify:
+	case <-w.notify:
 	case <-time.After(2 * time.Second):
 		t.Fatal("unknown frame kind was silently ignored — wire is not fail-closed")
 	}
-	if rt.Has(id) {
+	if _, ok := rt.Stat(id); ok {
 		t.Fatal("port still addressable after protocol violation")
 	}
 }
 
 // TestPortStopIsNotDeath: an external stop() (clean despawn) tears the port down
-// WITHOUT raising a DeathSignal — death is for positively-observed remote
+// WITHOUT publishing a presence-down edge — death is for positively-observed remote
 // failure, not for an orderly host-initiated teardown.
 func TestPortStopIsNotDeath(t *testing.T) {
 	t.Parallel()
-	sup := &recordingSupervisor{notify: make(chan struct{}, 4)}
-	rt, _ := New(Config{Parent: context.Background(), Supervisor: sup})
+	w := &recordingWatcher{notify: make(chan struct{}, 4)}
+	rt, _, _ := New(Config{Parent: context.Background()})
+	rt.WatchPresence(w)
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
 
 	rt.Despawn(id)
-	if rt.Has(id) {
+	if _, ok := rt.Stat(id); ok {
 		t.Fatal("port still addressable after Despawn")
 	}
 	// Give any erroneous death path a window to fire.
 	select {
-	case <-sup.notify:
-		t.Fatal("clean Despawn raised a DeathSignal — stop must be silent")
+	case <-w.notify:
+		t.Fatal("clean Despawn published a presence-down edge — stop must be silent")
 	case <-time.After(200 * time.Millisecond):
 	}
-	sup.mu.Lock()
-	defer sup.mu.Unlock()
-	if len(sup.deaths) != 0 {
-		t.Fatalf("deaths = %+v, want none after clean stop", sup.deaths)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.downs) != 0 {
+		t.Fatalf("deaths = %+v, want none after clean stop", w.downs)
 	}
 }
 
@@ -349,7 +353,7 @@ func TestPortStopIsNotDeath(t *testing.T) {
 // (a hosted-but-tearing-down presence is not Delivered, not NotHosted).
 func TestPortDeliverAfterStop(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
 
@@ -368,7 +372,7 @@ func TestPortDeliverAfterStop(t *testing.T) {
 // MailboxFull rather than blocking.
 func TestPortMailboxFull(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	// The remote NEVER reads, so the wire buffer + writeLoop's one in-flight
 	// frame + the bounded sendq all back up; past saturation Deliver is full.
@@ -403,7 +407,7 @@ func TestPortMailboxFull(t *testing.T) {
 // new one is the live presence. (connect-in REPLACE, the zombie-reconnect path.)
 func TestPortAttachReplaceStopsOld(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
 	id1, remote1 := dialPort(t, rt, "l", nopEmit, staticResolve("dup"))
@@ -426,7 +430,7 @@ func TestPortAttachReplaceStopsOld(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("old port was not torn down on replace")
 	}
-	if !rt.Has("dup") {
+	if _, ok := rt.Stat("dup"); !ok {
 		t.Fatal("no live presence after replace")
 	}
 }

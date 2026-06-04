@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -17,10 +19,35 @@ import (
 //   - cell  — in-process actor   (mailbox = Go channel)
 //   - port  — out-of-process actor (mailbox = byte-stream connection)
 //
-// Both report the same Outcome on Deliver and the same DeathSignal on death.
+// Both report the same Outcome on Deliver and the same presence-down edge on death.
+//
+// startedAt is the obs `uptime` source: the substrate-stamped bind instant. It is
+// substrate-authoritative (only the host knows when it bound the instance — the
+// actor never self-reports it), read out-of-band via Runtime.Stat.
 type presence interface {
 	Deliver(env *message.Envelope) error
+	signal(sig Signal) error
+	observe(ctx context.Context, kind ObsKind) (ObsValue, error)
+	startedAt() time.Time
 	stop()
+}
+
+// ErrNotHosted is returned by Controller.Raise when no presence is hosted for
+// the addressed id.
+var ErrNotHosted = errors.New("actorrt: actor not hosted")
+
+// PresenceWatcher is the consumer end of the obs presence-PUSH channel. The
+// runtime invokes OnDown exactly once for each hosted unit that dies abnormally
+// — death is the DELETED edge of presence (obs), NOT a control signal and NOT
+// truth. The watcher's reaction (e.g. materialise receiver_unavailable) is work
+// and lands in truth on its own. The dead unit has ALREADY self-evicted from the
+// addressing map before OnDown runs, so a watcher MUST NOT despawn it.
+//
+// Reliability (closure-critical path): register watchers BEFORE Spawn/Attach so
+// no death edge is missed; OnDown is invoked synchronously in the reap path and
+// is not droppable.
+type PresenceWatcher interface {
+	OnDown(ctx context.Context, id actor.ActorID, cause error)
 }
 
 // Runtime owns the live presences for one channel and is the addressing seam.
@@ -31,10 +58,13 @@ type presence interface {
 // evict its successor — no per-instance generation is needed.
 type Runtime struct {
 	parent context.Context
-	sup    Supervisor
+	clock  func() time.Time
+	logger *slog.Logger
 
 	mu        sync.RWMutex
 	presences map[actor.ActorID]presence
+	watchers  []PresenceWatcher
+	obsWatch  map[actor.ActorID][]ObsWatcher
 	mailbox   int
 }
 
@@ -43,10 +73,16 @@ type Config struct {
 	// Parent is the context all presences derive from; cancelling it tears the
 	// whole channel down.
 	Parent context.Context
-	// Supervisor receives death signals from presences; may be nil.
-	Supervisor Supervisor
 	// Mailbox is the default bounded mailbox depth (<=0 → 64).
 	Mailbox int
+	// Clock stamps each presence's bind instant (obs uptime source). nil →
+	// time.Now. Injectable so tests can pin uptime deterministically.
+	Clock func() time.Time
+	// Logger surfaces the control plane's edge-case observability (signal raised
+	// / dropped / default disposition) and presence-watch faults (a watcher
+	// panic on the closure-critical death path). The control plane is mostly
+	// boundary handling, so it is observable by design. nil → discard (no-op).
+	Logger *slog.Logger
 }
 
 // Deliverer is the privileged capability to enqueue an envelope into a hosted
@@ -62,11 +98,14 @@ type Deliverer interface {
 	Deliver(audience []actor.ActorID, env *message.Envelope) (DeliverResult, error)
 }
 
-// New constructs a Runtime and its sole Deliverer. The *Runtime is the
-// broadly-shareable management/addressing handle (Spawn/Attach/Despawn/Has/
-// StopAll); the Deliverer is the confined enqueue capability — give it ONLY to
-// the post-harness fanout.
-func New(cfg Config) (*Runtime, Deliverer) {
+// New constructs a Runtime and its two confined egress capabilities. The
+// *Runtime is the broadly-shareable management/addressing handle (Spawn/Attach/
+// Despawn/Stat/StopAll/WatchPresence); the Deliverer is the confined WORK enqueue
+// (give it ONLY to the post-harness fanout); the Controller is the confined
+// CONTROL enqueue (give it ONLY to substrate/composition root). A
+// *Runtime holder can address and observe but can inject NEITHER work NOR
+// control — both doors are the harness/substrate's private egress, structurally.
+func New(cfg Config) (*Runtime, Deliverer, Controller) {
 	parent := cfg.Parent
 	if parent == nil {
 		parent = context.Background()
@@ -75,13 +114,23 @@ func New(cfg Config) (*Runtime, Deliverer) {
 	if mb <= 0 {
 		mb = 64
 	}
+	clock := cfg.Clock
+	if clock == nil {
+		clock = time.Now
+	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	r := &Runtime{
 		parent:    parent,
-		sup:       cfg.Supervisor,
+		clock:     clock,
+		logger:    logger,
 		presences: make(map[actor.ActorID]presence),
+		obsWatch:  make(map[actor.ActorID][]ObsWatcher),
 		mailbox:   mb,
 	}
-	return r, deliverer{r}
+	return r, deliverer{r}, controller{r}
 }
 
 // deliverer is the only holder-confined implementation of Deliverer; it wraps
@@ -91,6 +140,123 @@ type deliverer struct{ r *Runtime }
 
 func (d deliverer) Deliver(audience []actor.ActorID, env *message.Envelope) (DeliverResult, error) {
 	return d.r.deliver(audience, env)
+}
+
+// controller is the only holder-confined implementation of Controller; it wraps
+// the runtime and calls its unexported control enqueue.
+type controller struct{ r *Runtime }
+
+func (c controller) Raise(id actor.ActorID, sig Signal) error {
+	return c.r.raise(id, sig)
+}
+
+// WatchPresence registers a watcher for the obs presence-PUSH channel (currently:
+// death = the DELETED edge). Register BEFORE Spawn/Attach so no edge is missed.
+func (r *Runtime) WatchPresence(w PresenceWatcher) {
+	if w == nil {
+		return
+	}
+	r.mu.Lock()
+	r.watchers = append(r.watchers, w)
+	r.mu.Unlock()
+}
+
+// publishDown fans the presence DELETED edge out to every watcher. Invoked once
+// per abnormal death, synchronously in the dying goroutine's reap path (the
+// edge is not droppable — closure depends on it). Each watcher is guarded: a
+// watcher panic must not escape and crash the process through the death path —
+// AND it is logged, because a swallowed fault on the closure-critical path is a
+// silent black hole (the caller stays unclosed). Watchers MUST be non-blocking;
+// a blocking watcher stalls the dying goroutine's reap.
+func (r *Runtime) publishDown(id actor.ActorID, cause error) {
+	r.mu.RLock()
+	ws := make([]PresenceWatcher, len(r.watchers))
+	copy(ws, r.watchers)
+	r.mu.RUnlock()
+	for _, w := range ws {
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					r.logger.Error("actorrt.presence.watcher_panic",
+						"actor", id, "cause", cause, "panic", rec)
+				}
+			}()
+			w.OnDown(context.Background(), id, cause)
+		}()
+	}
+}
+
+// WatchObs registers a watcher for an actor's PUSH obs (snapshots the actor
+// publishes via PublishObs). No-op fanout until the actor publishes. Part of the
+// obs push/actor skeleton — registered consumers are domain (e.g. a monitor).
+func (r *Runtime) WatchObs(id actor.ActorID, w ObsWatcher) {
+	if w == nil {
+		return
+	}
+	r.mu.Lock()
+	r.obsWatch[id] = append(r.obsWatch[id], w)
+	r.mu.Unlock()
+}
+
+// publishObs fans an actor-published obs snapshot to that actor's watchers
+// (obs push/actor). Invoked on the publishing cell's goroutine; guarded so a
+// watcher panic cannot escape. No watcher → no-op.
+func (r *Runtime) publishObs(id actor.ActorID, kind ObsKind, val ObsValue) {
+	r.mu.RLock()
+	ws := append([]ObsWatcher(nil), r.obsWatch[id]...)
+	r.mu.RUnlock()
+	for _, w := range ws {
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					r.logger.Error("actorrt.obs.watcher_panic", "actor", id, "kind", kind, "panic", rec)
+				}
+			}()
+			w.OnObs(context.Background(), id, kind, val)
+		}()
+	}
+}
+
+// Observe is the obs PULL resolver for ACTOR-source obs: it routes the opaque
+// kind to the hosted unit, which self-answers from its own operational state or
+// reports ErrObsUnsupported. Substrate-source facts (presence/uptime) do NOT
+// come here — they ride the typed Stat bundle. Read-only, non-truth, out-of-band
+// (never enqueued into the mailbox); the actor's Observer impl answers
+// concurrently and must be non-perturbing.
+func (r *Runtime) Observe(ctx context.Context, id actor.ActorID, kind ObsKind) (ObsValue, error) {
+	r.mu.RLock()
+	p, ok := r.presences[id]
+	r.mu.RUnlock()
+	if !ok {
+		return nil, ErrNotHosted
+	}
+	return p.observe(ctx, kind)
+}
+
+// raise routes sig to id's control lane (unexported: reachable ONLY through the
+// Controller capability New hands out). Non-blocking; reports per-condition
+// error. The closed SignalKind set is ENFORCED here — an unknown kind is
+// rejected (the substrate owns the control vocabulary, à la Unix signal.h
+// numbers; it is not a free string channel).
+func (r *Runtime) raise(id actor.ActorID, sig Signal) error {
+	if !validSignalKind(sig.Kind) {
+		r.logger.Warn("actorrt.control.unknown_kind", "actor", id, "kind", sig.Kind)
+		return ErrUnknownSignal
+	}
+	r.mu.RLock()
+	p, ok := r.presences[id]
+	r.mu.RUnlock()
+	if !ok {
+		r.logger.Info("actorrt.control.not_hosted", "actor", id, "kind", sig.Kind)
+		return ErrNotHosted
+	}
+	err := p.signal(sig)
+	if err != nil {
+		r.logger.Info("actorrt.control.dropped", "actor", id, "kind", sig.Kind, "err", err)
+		return err
+	}
+	r.logger.Debug("actorrt.control.raised", "actor", id, "kind", sig.Kind)
+	return nil
 }
 
 // Outcome is the per-audience truth Deliver reports about its own action — the
@@ -120,7 +286,7 @@ type DeliverResult struct {
 // exists for id it is stopped and replaced (one actor, one owner).
 func (r *Runtime) Spawn(id actor.ActorID, impl Actor) {
 	r.mu.Lock()
-	c := newCell(r.parent, id, impl, r.mailbox, r.sup, r.removeIf)
+	c := newCell(r.parent, id, impl, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
 	old, existed := r.presences[id]
 	r.presences[id] = c
 	r.mu.Unlock()
@@ -143,7 +309,7 @@ func (r *Runtime) Spawn(id actor.ActorID, impl Actor) {
 // a per-call ctx would wrongly scope the port to the Attach invocation. Attach
 // itself does no cancelable wait (the handshake is bounded by conn deadlines).
 func (r *Runtime) Attach(conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc) (actor.ActorID, error) {
-	p, err := newPort(r.parent, conn, emit, resolve, r.sup, r.removeIf)
+	p, err := newPort(r.parent, conn, emit, resolve, r.publishDown, r.removeIf, r.clock(), r.logger)
 	if err != nil {
 		return "", err
 	}
@@ -243,10 +409,29 @@ func (r *Runtime) StopAll() {
 	}
 }
 
-// Has reports whether a presence is hosted for id.
-func (r *Runtime) Has(id actor.ActorID) bool {
+// UnitStat is the substrate-owned obs facts about one hosted unit, read
+// out-of-band (side-effect-free, never through the mailbox, never truth). It
+// carries ONLY facts the substrate authoritatively owns; an actor's own
+// operational state (quota, queue depth, …) is NOT here — that is actor-owned
+// obs, answered by the actor. New substrate-owned facts are additive fields.
+type UnitStat struct {
+	// StartedAt is the bind instant. uptime = now - StartedAt, derived by the
+	// consumer (the substrate stores the instant, not the elapsed duration —
+	// registry-stores-membership / readiness-is-outcome model).
+	StartedAt time.Time
+}
+
+// Stat reads the substrate-owned obs facts for id. The bool reports presence
+// (is a live instance hosted here right now) — the `kill -0` / is_process_alive
+// authority: only the substrate can answer it, so it never asks the actor and
+// never blocks. It replaces the old boolean Has: present = the second return,
+// uptime = now - StartedAt.
+func (r *Runtime) Stat(id actor.ActorID) (UnitStat, bool) {
 	r.mu.RLock()
-	_, ok := r.presences[id]
+	p, ok := r.presences[id]
 	r.mu.RUnlock()
-	return ok
+	if !ok {
+		return UnitStat{}, false
+	}
+	return UnitStat{StartedAt: p.startedAt()}, true
 }

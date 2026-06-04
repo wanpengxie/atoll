@@ -20,6 +20,29 @@ type panicActor struct{}
 
 func (panicActor) Receive(context.Context, *message.Envelope) error { panic("boom") }
 
+// liveActor is a healthy no-op cell — stands in for a same-id successor.
+type liveActor struct{}
+
+func (liveActor) Receive(context.Context, *message.Envelope) error { return nil }
+
+// TestOnDown_DoesNotDespawnSuccessor locks the PresenceWatcher contract: a late
+// death edge for an id must NOT despawn whatever currently occupies that id. A
+// dead predecessor self-evicts via the runtime's pointer-identity removeIf; if
+// OnDown also despawned, a same-id successor would be wrongly killed (Despawn is
+// not pointer-checked).
+func TestOnDown_DoesNotDespawnSuccessor(t *testing.T) {
+	ch := channelkit.New(channelkit.Config{ChannelID: "ch", Clock: time.Now})
+	ch.Cells().Spawn("worker", liveActor{}) // the live successor
+	if _, ok := ch.Cells().Stat("worker"); !ok {
+		t.Fatal("successor not hosted after Spawn")
+	}
+	// A late presence-down edge for "worker" (e.g. from a replaced predecessor).
+	ch.OnDown(context.Background(), "worker", errors.New("late predecessor death"))
+	if _, ok := ch.Cells().Stat("worker"); !ok {
+		t.Fatal("OnDown despawned the live successor — PresenceWatcher contract violated")
+	}
+}
+
 // fakeChain records written terminals (implements runtime/harness.Writer).
 type fakeChain struct {
 	mu      sync.Mutex
@@ -42,10 +65,10 @@ func (f fakeOpenReqs) OpenRequestsForActor(context.Context, actor.ActorID) ([]st
 	return f.reqs, nil
 }
 
-// TestOnDeath_MaterialisesReceiverUnavailable proves closure author #3 is WIRED:
-// a cell dying → supervisor writes a system-authored receiver_unavailable
+// TestOnDown_MaterialisesReceiverUnavailable proves closure author #3 is WIRED:
+// a cell dying → watcher writes a system-authored receiver_unavailable
 // terminal for the dead actor's in-flight request (NOT just Despawn).
-func TestOnDeath_MaterialisesReceiverUnavailable(t *testing.T) {
+func TestOnDown_MaterialisesReceiverUnavailable(t *testing.T) {
 	req := message.Envelope{
 		ID:        "req-1",
 		ChannelID: "ch",
@@ -63,20 +86,20 @@ func TestOnDeath_MaterialisesReceiverUnavailable(t *testing.T) {
 	})
 	ch.Cells().Spawn("worker", panicActor{})
 
-	// Deliver a request → Receive panics → cell death → OnDeath. Delivery goes
+	// Deliver a request → Receive panics → cell death → OnDown. Delivery goes
 	// through the confined Deliverer (the post-harness fanout's capability), not
 	// the broadly-shared Cells() handle.
 	_, _ = ch.Deliverer().Deliver([]actor.ActorID{"worker"},
 		&message.Envelope{ID: "trigger", ChannelID: "ch", Kind: message.KindRequest, Type: "x.do",
 			Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{"worker"}})
 
-	// Wait for OnDeath to materialise the terminal.
+	// Wait for OnDown to materialise the terminal.
 	deadline := time.Now().Add(2 * time.Second)
 	for fc.count() == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if fc.count() == 0 {
-		t.Fatal("death signal NOT materialised — OnDeath wrote no terminal (black hole regression)")
+		t.Fatal("presence-down closure NOT materialised — OnDown wrote no terminal (black hole regression)")
 	}
 	term := fc.written[0]
 	if term.Kind != message.KindResponse {
@@ -95,7 +118,7 @@ func TestOnDeath_MaterialisesReceiverUnavailable(t *testing.T) {
 }
 
 // errOpenReqs fails the drain query — the worst closure case (no request can be
-// closed → every caller is a black hole). The supervisor MUST NOT swallow it.
+// closed → every caller is a black hole). The watcher MUST NOT swallow it.
 type errOpenReqs struct{}
 
 func (errOpenReqs) OpenRequestsForActor(context.Context, actor.ActorID) ([]storespec.StoredRow, error) {
@@ -116,7 +139,7 @@ func (h *capHandler) WithGroup(string) slog.Handler      { return h }
 
 // TestClosureDrainFailure_IsSurfaced proves a swallowed-drain regression cannot
 // return: when the drain query fails (cannot close anyone → black hole), the
-// supervisor logs a fault rather than returning silently.
+// watcher logs a fault rather than returning silently.
 func TestClosureDrainFailure_IsSurfaced(t *testing.T) {
 	h := &capHandler{}
 	channelkit.MaterialiseReceiverUnavailable(context.Background(), slog.New(h),

@@ -30,15 +30,19 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// Presence is the injected read seam for an actor's volatile physical presence
-// (does it hold a live compute lease right now). Presence is authority-owned —
-// the component that holds the compute connections/leases implements this; the
-// system actor only READS it when composing actor.list, just like it reads
-// membership from the Registry. Defined here on the CONSUMER side (Go idiom);
-// the composition root injects the implementation. A nil Presence (not yet
-// wired) reports everyone absent — advisory, never a dispatch gate.
-type Presence interface {
-	IsPresent(id actor.ActorID) bool
+// PresenceStat is the injected obs-read seam: the substrate's AUTHORITATIVE
+// presence + bind-instant for an actor (present = the bool, uptime = now -
+// startedAt). It is no longer a domain abstraction the system actor invents; it
+// reads the substrate obs authority. Defined consumer-side (Go idiom) as the
+// NARROW shape this actor needs — so the composition root supplies a thin
+// adapter over actorrt.Runtime.Stat (which returns a UnitStat bundle):
+//
+//	func(id) (time.Time, bool) { st, ok := rt.Stat(id); return st.StartedAt, ok }
+//
+// A nil seam (not yet wired) reports everyone absent — advisory, never a
+// dispatch gate.
+type PresenceStat interface {
+	Stat(id actor.ActorID) (startedAt time.Time, present bool)
 }
 
 // SystemActor answers channel-wide directory queries (actor.list) by composing
@@ -49,7 +53,7 @@ type SystemActor struct {
 	chain     rtharness.Writer
 	lookup    behavior.RequestLookup
 	clock     func() time.Time
-	presence  Presence
+	stat      PresenceStat
 }
 
 // Deps bundles the channel services the system actor needs.
@@ -59,9 +63,9 @@ type Deps struct {
 	Chain     rtharness.Writer
 	Lookup    behavior.RequestLookup
 	Clock     func() time.Time
-	// Presence is the volatile-presence read seam (authority-owned, injected by
-	// the composition root). Nil → actor.list reports everyone absent.
-	Presence Presence
+	// Stat is the obs-read seam backed by Runtime.Stat (substrate-authoritative
+	// presence + bind-instant). Nil → actor.list reports everyone absent.
+	Stat PresenceStat
 }
 
 // New constructs the channel system actor cell.
@@ -76,7 +80,7 @@ func New(deps Deps) *SystemActor {
 		chain:     deps.Chain,
 		lookup:    deps.Lookup,
 		clock:     clock,
-		presence:  deps.Presence,
+		stat:      deps.Stat,
 	}
 }
 
@@ -111,11 +115,13 @@ func (s *SystemActor) respondList(ctx context.Context, env *message.Envelope) er
 	}
 	catalog := introspect.Catalog{Actors: make([]introspect.CatalogEntry, 0, len(rows))}
 	for _, r := range rows {
+		present, uptimeMs := s.obs(r.ID)
 		catalog.Actors = append(catalog.Actors, introspect.CatalogEntry{
-			ID:      string(r.ID),
-			Kind:    string(r.Kind),
-			Binding: string(r.Binding),
-			Present: s.isPresent(r.ID),
+			ID:       string(r.ID),
+			Kind:     string(r.Kind),
+			Binding:  string(r.Binding),
+			Present:  present,
+			UptimeMs: uptimeMs,
 		})
 	}
 	payload, err := json.Marshal(catalog)
@@ -164,8 +170,19 @@ func (s *SystemActor) respondReserved(ctx context.Context, env *message.Envelope
 	return err
 }
 
-// isPresent reads the injected presence authority (advisory; NOT a dispatch
-// gate). A nil seam (not yet wired) reports absent.
-func (s *SystemActor) isPresent(id actor.ActorID) bool {
-	return s.presence != nil && s.presence.IsPresent(id)
+// obs reads the substrate's authoritative obs for id (advisory; NOT a dispatch
+// gate): present, and uptime derived as now - startedAt. A nil seam (not yet
+// wired) reports absent / zero uptime.
+func (s *SystemActor) obs(id actor.ActorID) (present bool, uptimeMs int64) {
+	if s.stat == nil {
+		return false, 0
+	}
+	startedAt, present := s.stat.Stat(id)
+	if !present {
+		return false, 0
+	}
+	if !startedAt.IsZero() {
+		uptimeMs = s.clock().Sub(startedAt).Milliseconds()
+	}
+	return true, uptimeMs
 }

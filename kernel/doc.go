@@ -12,7 +12,8 @@
 //   - kernel/actor    — actor identity (ActorID), the actor Kind closed set,
 //     Binding closed set, and the reserved-type closed sets.
 //   - kernel/channel  — channel ID type (opaque stable string).
-//   - kernel/message  — envelope schema (17 content+metadata fields), kind /
+//   - kernel/message  — envelope schema (14 wire content fields, L0 §2.1;
+//     sender flattened into sender.kind/sender.id), kind /
 //     visibility closed sets, core-type table, and the terminal-failure reason
 //     closed set (INVARIANT-10).
 //
@@ -24,8 +25,8 @@
 //     runtime. (Go idiom: interface at the consumer.)
 //   - Projections (actor membership Record/Registry) — derived read caches,
 //     never a kernel (truth) model (truth-vs-projection).
-//   - store-derived envelope columns (seq, is_terminal) —
-//     produced by the store, not part of the 17 protocol fields.
+//   - store-derived columns (seq, is_terminal) — derived/produced by the
+//     store (a message-log ROW concern), never wire envelope content fields.
 //   - harness reject + install reason vocabularies — the write/install
 //     ENGINES' errno, co-evolving with their engines → runtime.
 //   - reason→HTTP-status mapping — strerror, a binding concern; lives outside kernel.

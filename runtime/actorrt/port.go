@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -36,8 +38,8 @@ const portSendQueue = 64
 //   - Deliver enqueues into a bounded send queue drained to the wire; a full
 //     queue returns ErrMailboxFull (non-blocking, like cell.Deliver).
 //   - the read loop relays the remote's EMIT frames to the injected emit
-//     callback and turns DOWN / EOF / unknown-kind into the SAME self-eviction + DeathSignal
-//     a cell raises.
+//     callback and turns DOWN / EOF / unknown-kind into the SAME self-eviction +
+//     presence-down edge a cell publishes.
 //
 // Death never self-joins (a goroutine cannot wait on its own exit): die()
 // cancels + closes the conn to unblock the loops and self-evicts via onExit;
@@ -48,15 +50,21 @@ type port struct {
 	conn  io.Closer
 	emit  EmitSink
 
+	// started is the substrate-stamped bind instant (obs uptime source), set at
+	// Attach. Same authority model as cell.started.
+	started time.Time
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	sup    Supervisor
+	onDown func(actor.ActorID, error)
 	onExit func(actor.ActorID, presence)
+	logger *slog.Logger
 
-	sendq chan *message.Envelope
-	wg    sync.WaitGroup
-	done  chan struct{}
+	sendq    chan *message.Envelope
+	controlq chan Signal
+	wg       sync.WaitGroup
+	done     chan struct{}
 
 	dieOnce   sync.Once
 	stopOnce  sync.Once
@@ -71,7 +79,10 @@ type port struct {
 // resolve lease to an ActorID → reply KindHandshakeAck) and builds the port.
 // The handshake is synchronous (runs inside Attach) and is the connection's
 // one-time authentication.
-func newPort(parent context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc, sup Supervisor, onExit func(actor.ActorID, presence)) (*port, error) {
+func newPort(parent context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc, onDown func(actor.ActorID, error), onExit func(actor.ActorID, presence), started time.Time, logger *slog.Logger) (*port, error) {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	if emit == nil {
 		return nil, errors.New("actorrt: port requires EmitSink")
 	}
@@ -106,17 +117,32 @@ func newPort(parent context.Context, conn io.ReadWriteCloser, emit EmitSink, res
 	}
 	ctx, cancel := context.WithCancel(parent)
 	return &port{
-		id:     id,
-		codec:  codec,
-		conn:   conn,
-		emit:   emit,
-		ctx:    ctx,
-		cancel: cancel,
-		sup:    sup,
-		onExit: onExit,
-		sendq:  make(chan *message.Envelope, portSendQueue),
-		done:   make(chan struct{}),
+		id:       id,
+		codec:    codec,
+		conn:     conn,
+		emit:     emit,
+		started:  started,
+		ctx:      ctx,
+		cancel:   cancel,
+		onDown:   onDown,
+		onExit:   onExit,
+		logger:   logger,
+		sendq:    make(chan *message.Envelope, portSendQueue),
+		controlq: make(chan Signal, portSendQueue),
+		done:     make(chan struct{}),
 	}, nil
+}
+
+// startedAt implements presence: the substrate-stamped bind instant (obs uptime
+// source), set at Attach.
+func (p *port) startedAt() time.Time { return p.started }
+
+// observe implements presence for an out-of-process actor: obs PULL over the
+// wire is not yet wired (additive — a KindObs round-trip frame), so the port
+// reports ErrObsUnsupported. The 2×2 cell exists; the wire arm is a no-op until
+// a real consumer drives it.
+func (p *port) observe(ctx context.Context, kind ObsKind) (ObsValue, error) {
+	return nil, ErrObsUnsupported
 }
 
 // Deliver enqueues env into the port's bounded send queue. Never blocks: a full
@@ -140,6 +166,24 @@ func (p *port) Deliver(env *message.Envelope) error {
 	}
 }
 
+// signal enqueues a control Signal for the remote actor, drained by writeLoop as
+// a KindControl frame (prioritized ahead of work frames). Non-blocking, like
+// Deliver: a full lane returns ErrMailboxFull, a torn-down port ErrCellStopped.
+func (p *port) signal(sig Signal) error {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return ErrCellStopped
+	}
+	p.mu.Unlock()
+	select {
+	case p.controlq <- sig:
+		return nil
+	default:
+		return ErrMailboxFull
+	}
+}
+
 // start launches the write + read loops and closes done once both exit.
 func (p *port) start() {
 	p.wg.Add(2)
@@ -148,13 +192,29 @@ func (p *port) start() {
 	go func() { p.wg.Wait(); close(p.done) }()
 }
 
-// writeLoop drains the send queue onto the wire as KindDeliver frames.
+// writeLoop drains the control + send queues onto the wire — control frames are
+// PRIORITIZED ahead of work frames (same out-of-band discipline as a cell's
+// control lane), so a remote reload/quota/stop is not stuck behind a work
+// backlog.
 func (p *port) writeLoop() {
 	defer p.wg.Done()
 	for {
+		// Drain a pending control signal first.
+		select {
+		case sig := <-p.controlq:
+			if !p.writeControl(sig) {
+				return
+			}
+			continue
+		default:
+		}
 		select {
 		case <-p.ctx.Done():
 			return
+		case sig := <-p.controlq:
+			if !p.writeControl(sig) {
+				return
+			}
 		case env := <-p.sendq:
 			payload, err := json.Marshal(ipc.DeliverPayload{Envelope: *env})
 			if err != nil {
@@ -168,6 +228,21 @@ func (p *port) writeLoop() {
 			}
 		}
 	}
+}
+
+// writeControl marshals one Signal as a KindControl frame onto the wire. Returns
+// false (after die) if the write fails. The Signal's vocabulary stays opaque to
+// the wire: Kind is a string, Payload rides as raw bytes.
+func (p *port) writeControl(sig Signal) bool {
+	payload, err := json.Marshal(ipc.ControlPayload{Kind: string(sig.Kind), Payload: sig.Payload})
+	if err != nil {
+		return true // malformed control is dropped, not a transport death
+	}
+	if err := p.codec.Write(ipc.Frame{Kind: ipc.KindControl, Payload: payload}); err != nil {
+		p.die(fmt.Errorf("actorrt: port %s control write: %w", p.id, err))
+		return false
+	}
+	return true
 }
 
 // readLoop relays remote EMIT frames via the injected EmitSink and turns
@@ -206,9 +281,9 @@ func (p *port) readLoop() {
 	}
 }
 
-// die makes the port unaddressable (pointer-identity self-eviction) and raises
-// the DeathSignal exactly once — UNLESS this teardown is an external stop()
-// (clean despawn, no supervisor closure obligation). It cancels + closes the
+// die makes the port unaddressable (pointer-identity self-eviction) and
+// publishes the presence-down edge exactly once — UNLESS this teardown is an
+// external stop() (clean despawn, no closure obligation). It cancels + closes the
 // conn to unblock both loops; it NEVER joins them (stop() does that).
 func (p *port) die(cause error) {
 	p.dieOnce.Do(func() {
@@ -221,17 +296,14 @@ func (p *port) die(cause error) {
 		if p.onExit != nil {
 			p.onExit(p.id, p)
 		}
-		if !stopping && cause != nil && p.sup != nil {
-			func() {
-				defer func() { _ = recover() }()
-				p.sup.OnDeath(context.Background(), DeathSignal{Actor: p.id, Cause: cause})
-			}()
+		if !stopping && cause != nil && p.onDown != nil {
+			p.onDown(p.id, cause)
 		}
 	})
 }
 
-// stop is the external teardown: mark stopping (so the loops' die() raises NO
-// DeathSignal), cancel + close to unblock the loops, then join on done.
+// stop is the external teardown: mark stopping (so the loops' die() publishes NO
+// presence-down edge), cancel + close to unblock the loops, then join on done.
 func (p *port) stop() {
 	p.stopOnce.Do(func() {
 		p.mu.Lock()

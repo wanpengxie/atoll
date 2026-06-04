@@ -12,12 +12,12 @@
 //     WITHOUT locks or atomics (the core "gift").
 //  3. lifecycle boundary — Start acquires resources, Stop releases them; on
 //     death a cell self-evicts from the addressing map (it never stops/joins
-//     itself) and signals the supervisor.
+//     itself) and publishes the presence DELETED edge (death) for obs watchers.
 //  4. isolation — nobody reaches into an actor's state. The mailbox carries
 //     ONLY envelopes, fed ONLY by the harness→fanout collaboration path (and its
 //     wire-dispatch arm on compute): there is no self-send and no path to run
 //     caller-supplied code on the cell goroutine. ActorContext exposes the
-//     actor's own id (Self) and nothing else.
+//     actor's own id (Self) and the obs producer end (PublishObs), nothing else.
 //
 // Deliver reports a structured, per-audience Outcome (Delivered/NotHosted/
 // MailboxFull/Stopped): the substrate knows whether it hosts an addressed actor
@@ -26,6 +26,7 @@
 //
 // closure is NOT in this package: the closure timer/pending-set lives in the
 // sender actor (caller-scoped), and the only substrate obligation on closure is
-// the death signal (a Supervisor observing its child die), which materialises a
-// receiver_unavailable terminal. There is no global closure scanner here.
+// to publish the presence DELETED edge (death); an obs watcher reacts by
+// materialising a receiver_unavailable terminal. There is no global closure
+// scanner here, and no Supervisor concept — death is obs, the watcher is domain.
 package actorrt

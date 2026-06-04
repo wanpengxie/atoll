@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -38,11 +39,20 @@ func (f fakeLookup) FindByID(_ context.Context, _ message.ID) (*message.Envelope
 	return f.req, true, nil
 }
 
-// fakePresence is the injected presence authority (the read seam); it reports
-// the ids in its set as present. Stands in for the fleet's lease view.
-type fakePresence struct{ present map[actor.ActorID]bool }
+// fakeStat is the injected obs-read seam (Runtime.Stat stand-in); it reports the
+// ids in its set as present with a fixed bind-instant. Stands in for the
+// substrate's authoritative presence/uptime view.
+type fakeStat struct {
+	present map[actor.ActorID]bool
+	started time.Time
+}
 
-func (p fakePresence) IsPresent(id actor.ActorID) bool { return p.present[id] }
+func (p fakeStat) Stat(id actor.ActorID) (time.Time, bool) {
+	if !p.present[id] {
+		return time.Time{}, false
+	}
+	return p.started, true
+}
 
 // TestActorList_TwoAxisNoReadiness proves the composed actor.list directory is
 // membership (registry) ∧ presence (lease) and carries NO readiness column —
@@ -62,7 +72,7 @@ func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 	// injected seam when composing actor.list (never a message, never truth).
 	s := sysactor.New(sysactor.Deps{
 		ChannelID: "ch", Registry: reg, Chain: fc, Lookup: fakeLookup{req: listReq},
-		Presence: fakePresence{present: map[actor.ActorID]bool{"tool:a": true}},
+		Stat: fakeStat{present: map[actor.ActorID]bool{"tool:a": true}, started: time.Now()},
 	})
 
 	if err := s.Receive(context.Background(), listReq); err != nil {

@@ -26,7 +26,7 @@ const (
 
 // NOTE: there is no actor.status query. "Is this actor serviceable right now"
 // is not a queryable 存量 — it is the OUTCOME of send→terminal (the substrate
-// death-signal materialises receiver_unavailable when the actor is gone). A
+// presence-down edge materialises receiver_unavailable when the actor is gone). A
 // status query could only answer a trivial constant available=true, which
 // carries no truth — a half-built slice that misleads later readers. When a
 // concrete adapter has non-trivial domain state worth surfacing proactively
@@ -56,13 +56,18 @@ type Describe struct {
 }
 
 // CatalogEntry is one row of the actor.list channel directory: membership
-// (registry truth) ∧ presence (volatile lease). No readiness axis — whether an
-// actor can service a request is the OUTCOME of send→terminal, not a field here.
+// (registry truth) ⋈ obs (volatile presence + uptime, read via Runtime.Stat). No
+// readiness axis — whether an actor can service a request is the OUTCOME of
+// send→terminal, not a field here.
 type CatalogEntry struct {
 	ID      string `json:"id"`
 	Kind    string `json:"kind"`
 	Binding string `json:"binding,omitempty"`
 	Present bool   `json:"present"`
+	// UptimeMs is the elapsed time since the substrate bound the live instance
+	// (now - StartedAt), derived by the system actor from Runtime.Stat. 0 when
+	// not present. Substrate-owned obs (the actor never self-reports it).
+	UptimeMs int64 `json:"uptime_ms,omitempty"`
 }
 
 // Catalog is the actor.list response: the channel-wide directory.

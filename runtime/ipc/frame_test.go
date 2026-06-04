@@ -26,6 +26,7 @@ func TestKindClosedSet(t *testing.T) {
 		KindHandshake:    "handshake",
 		KindHandshakeAck: "handshake_ack",
 		KindDeliver:      "deliver",
+		KindControl:      "control",
 		KindEmit:         "emit",
 		KindDown:         "down",
 	}
@@ -34,8 +35,40 @@ func TestKindClosedSet(t *testing.T) {
 			t.Errorf("Kind %q wire form = %q, want %q", k, string(k), wire)
 		}
 	}
-	if len(want) != 5 {
-		t.Fatalf("expected exactly 5 kinds, guard lists %d", len(want))
+	if len(want) != 6 {
+		t.Fatalf("expected exactly 6 kinds, guard lists %d", len(want))
+	}
+}
+
+// TestControlFrameRoundTripNonJSON proves a control signal whose Payload is
+// ARBITRARY (non-JSON) bytes survives the wire intact: ControlPayload.Payload is
+// []byte, so JSON base64-encodes it — a raw payload must never break frame
+// marshalling (the bug that an earlier json.RawMessage typing would have caused).
+func TestControlFrameRoundTripNonJSON(t *testing.T) {
+	raw := []byte{0x00, 0xff, 0x7b, 0x6e, 0x6f, 0x74, 0x6a, 0x73, 0x6f, 0x6e} // 0x00 0xff "{notjson"
+	payload, err := json.Marshal(ControlPayload{Kind: "quota", Payload: raw})
+	if err != nil {
+		t.Fatalf("marshal control with non-JSON payload failed: %v", err)
+	}
+	var r, w bytes.Buffer
+	c := NewCodec(&r, &w)
+	if err := c.Write(Frame{Kind: KindControl, Payload: payload}); err != nil {
+		t.Fatalf("write control frame: %v", err)
+	}
+	dec := NewCodec(&w, io.Discard)
+	f, err := dec.Read()
+	if err != nil {
+		t.Fatalf("read control frame: %v", err)
+	}
+	if f.Kind != KindControl {
+		t.Fatalf("frame kind = %q, want control", f.Kind)
+	}
+	var cp ControlPayload
+	if err := json.Unmarshal(f.Payload, &cp); err != nil {
+		t.Fatalf("decode control payload: %v", err)
+	}
+	if cp.Kind != "quota" || !bytes.Equal(cp.Payload, raw) {
+		t.Fatalf("control round-trip = (%q,%v), want (quota,%v)", cp.Kind, cp.Payload, raw)
 	}
 }
 
