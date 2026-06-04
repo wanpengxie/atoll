@@ -13,10 +13,9 @@ import (
 )
 
 // respond.go is the SERVE WRITE primitive — closure author#1, ONE
-// implementation (P13). The serve-write logic that used to be duplicated across
-// the host glue and sysactor.respondReserved collapses here as a kind-neutral
-// primitive: the answering actor's identity is the `sender` argument, never a
-// hard-coded kind.
+// implementation (P13). Any serving actor authors its response through this one
+// kind-neutral primitive: the answering actor's identity is the `sender`
+// argument, never a hard-coded kind.
 //
 // These primitives are STATELESS: the request is supplied in-hand by the caller
 // (an in-flight cache is a host optimisation, not part of the base). A

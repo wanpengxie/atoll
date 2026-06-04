@@ -2,17 +2,16 @@ package behavior
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// closure.go holds substrate-death — closure author#3 — co-located with the
-// other two authors (P13: three authors, one base). The materialisation logic
-// moved here from channelkit; channelkit now only subscribes to the death edge
-// and delegates, injecting the seams.
+// death.go holds substrate-death — closure author#3 — alongside the other two
+// authors of the one behaviour base (author#1 in respond.go, author#2 in
+// call.go; P13: three authors, one base). channelkit subscribes to the death
+// edge and delegates here, injecting the seams.
 
 // MaterialiseReceiverUnavailable is the DEATH author (author#3). For every
 // in-flight request addressed to a dead actor it writes one
@@ -52,21 +51,4 @@ func MaterialiseReceiverUnavailable(
 		}
 	}
 	return nil
-}
-
-// isFinalResponse reports whether env is a final (terminal) response. It parses
-// env.payload.status and defers to message.IsFinalStatus. Internal helper used
-// by Caller.Match to decide closure. A non-response or unparseable payload is
-// not final.
-func isFinalResponse(env *message.Envelope) bool {
-	if env == nil || env.Kind != message.KindResponse {
-		return false
-	}
-	var p struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(env.Payload, &p); err != nil {
-		return false
-	}
-	return message.IsFinalStatus(p.Status)
 }

@@ -10,8 +10,8 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/lib/channelkit"
-	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
@@ -43,19 +43,20 @@ func TestOnDown_DoesNotDespawnSuccessor(t *testing.T) {
 	}
 }
 
-// fakeChain records written terminals (implements runtime/harness.Writer).
-type fakeChain struct {
+// fakeWriter records written terminals (the pure behavior.ResponseWriter seam
+// the composition root injects in production).
+type fakeWriter struct {
 	mu      sync.Mutex
 	written []*message.Envelope
 }
 
-func (f *fakeChain) Write(_ context.Context, env *message.Envelope) (rtharness.WriteResult, error) {
+func (f *fakeWriter) Write(_ context.Context, env *message.Envelope) (behavior.WriteOutcome, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.written = append(f.written, env)
-	return rtharness.WriteResult{MessageID: env.ID}, nil
+	return behavior.WriteOutcome{MessageID: env.ID}, nil
 }
-func (f *fakeChain) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.written) }
+func (f *fakeWriter) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.written) }
 
 // fakeOpenReqs returns canned in-flight request rows for a dead actor (matching
 // the substrate storespec.StoredRow shape the real store returns).
@@ -77,10 +78,10 @@ func TestOnDown_MaterialisesReceiverUnavailable(t *testing.T) {
 		Sender:    message.Sender{Kind: actor.KindAgent, ID: "caller"},
 		Audience:  message.Audience{"worker"},
 	}
-	fc := &fakeChain{}
+	fc := &fakeWriter{}
 	ch := channelkit.New(channelkit.Config{
 		ChannelID:    "ch",
-		Chain:        fc,
+		Writer:       fc,
 		OpenRequests: fakeOpenReqs{reqs: []storespec.StoredRow{{Envelope: req}}},
 		Clock:        time.Now,
 	})
@@ -147,7 +148,7 @@ func TestClosureDrainFailure_IsSurfaced(t *testing.T) {
 	h := &capHandler{}
 	ch := channelkit.New(channelkit.Config{
 		ChannelID:    "ch",
-		Chain:        &fakeChain{},
+		Writer:       &fakeWriter{},
 		OpenRequests: errOpenReqs{},
 		Clock:        time.Now,
 		Logger:       slog.New(h),

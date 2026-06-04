@@ -2,6 +2,7 @@ package behavior
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/message"
@@ -129,4 +130,21 @@ func (c *Caller) Stop() {
 		}
 		delete(c.pending, id)
 	}
+}
+
+// isFinalResponse reports whether env is a final (terminal) response. It parses
+// env.payload.status and defers to message.IsFinalStatus. Internal helper used
+// by Caller.Match to decide closure. A non-response or unparseable payload is
+// not final.
+func isFinalResponse(env *message.Envelope) bool {
+	if env == nil || env.Kind != message.KindResponse {
+		return false
+	}
+	var p struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		return false
+	}
+	return message.IsFinalStatus(p.Status)
 }

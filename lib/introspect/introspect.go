@@ -20,7 +20,10 @@ import (
 const (
 	// QueryDescribe — what can this actor do (its live API surface).
 	QueryDescribe = "actor.describe"
-	// QueryList — who is in this channel (membership ∧ presence).
+	// QueryList — who is in this channel: the membership ∧ presence directory.
+	// This is the AUTHORITATIVE definition of the formula (durable registry
+	// membership composed with volatile presence); other sites reference it
+	// rather than restating it.
 	QueryList = "actor.list"
 )
 
@@ -29,8 +32,8 @@ const (
 // presence-down edge materialises receiver_unavailable when the actor is gone). A
 // status query could only answer a trivial constant available=true, which
 // carries no truth — a half-built slice that misleads later readers. When a
-// concrete adapter has non-trivial domain state worth surfacing proactively
-// (e.g. an adapter with non-trivial login state), an optional Statuser self-answer is added
+// concrete actor has non-trivial domain state worth surfacing proactively
+// (e.g. an actor with non-trivial login state), an optional Statuser self-answer is added
 // additively (parallel to Describer below) — pain-driven, not pre-built.
 
 // APIDescriptor describes one callable API, returned dynamically inside a
@@ -56,17 +59,18 @@ type Describe struct {
 }
 
 // CatalogEntry is one row of the actor.list channel directory: membership
-// (registry truth) ⋈ obs (volatile presence + uptime, read via Runtime.Stat). No
-// readiness axis — whether an actor can service a request is the OUTCOME of
-// send→terminal, not a field here.
+// (registry truth) ∧ presence (volatile, read from the substrate's authoritative
+// obs). No readiness axis — whether an actor can service a request is the OUTCOME
+// of send→terminal, not a field here.
 type CatalogEntry struct {
 	ID      string `json:"id"`
 	Kind    string `json:"kind"`
 	Binding string `json:"binding,omitempty"`
 	Present bool   `json:"present"`
 	// UptimeMs is the elapsed time since the substrate bound the live instance
-	// (now - StartedAt), derived by the system actor from Runtime.Stat. 0 when
-	// not present. Substrate-owned obs (the actor never self-reports it).
+	// (now - StartedAt), derived by the system actor from the substrate's
+	// authoritative bind-instant. 0 when not present. Substrate-owned obs (the
+	// actor never self-reports it).
 	UptimeMs int64 `json:"uptime_ms,omitempty"`
 }
 

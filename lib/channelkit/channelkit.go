@@ -1,5 +1,5 @@
 // Package channelkit is the channel template sitting on top of runtime/actorrt.
-// It ASSEMBLES a channel's固有 cells (the system actor) and SUBSCRIBES to the
+// It ASSEMBLES a channel's intrinsic cells (the system actor) and SUBSCRIBES to the
 // substrate's obs presence-edge: on a unit's death (the presence DELETED edge)
 // it materialises the receiver_unavailable closure. It is a MECHANISM watcher,
 // not a Supervisor and not an actor — there is no supervision tree; death is
@@ -17,7 +17,6 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
@@ -34,33 +33,6 @@ type OpenRequestSource interface {
 // stamps it on every receiver_unavailable terminal; harness Step 8 authorises
 // sender==system + reason==receiver_unavailable as the substrate author.
 var sysSender = message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
-
-// harnessWriter wraps the runtime harness write chain into a
-// behavior.ResponseWriter: it stamps the system caller context (so the harness
-// ACL authenticates the death-author write) and maps harness_terminal_duplicate
-// into the pure WriteOutcome.Duplicate bool — the reject vocabulary stays in
-// runtime, behavior reads only the bool. This is the runtime-type → pure-seam
-// bridge; it lives in channelkit because channelkit already imports runtime.
-type harnessWriter struct {
-	chain     rtharness.Writer
-	channelID channel.ID
-}
-
-func (w harnessWriter) Write(ctx context.Context, env *message.Envelope) (behavior.WriteOutcome, error) {
-	cctx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{
-		ActorID: actor.SystemActorID, ChannelID: w.channelID,
-	})
-	res, err := w.chain.Write(cctx, env)
-	if err != nil {
-		return behavior.WriteOutcome{}, err
-	}
-	return behavior.WriteOutcome{
-		MessageID:    res.MessageID,
-		Duplicate:    res.RejectReason == rtharness.HarnessTerminalDuplicate,
-		RejectReason: string(res.RejectReason),
-		RejectDetail: res.RejectDetail,
-	}, nil
-}
 
 // openRequests adapts the channel's OpenRequestSource (storespec.StoredRow) into
 // behavior.OpenRequests (pure *message.Envelope) so author#3 stays pure-kernel.
@@ -80,7 +52,7 @@ func (o openRequests) OpenRequestsForActor(ctx context.Context, id actor.ActorID
 }
 
 // Channel is one assembled channel: actorrt runtime + system cell + the
-// presence-down closure wiring (chain + open-request source).
+// presence-down closure wiring (writer + open-request source).
 type Channel struct {
 	channelID channel.ID
 	cells     *actorrt.Runtime
@@ -95,10 +67,10 @@ type Channel struct {
 
 	// Presence-down closure (author #3): on a death edge the watcher writes
 	// receiver_unavailable for every in-flight request addressed to the dead
-	// actor. nil chain/openReqs → OnDown writes no terminals locally (the dead
+	// actor. nil writer/openReqs → OnDown writes no terminals locally (the dead
 	// cell already self-evicted); the caller is responsible for closing the
 	// in-flight requests elsewhere.
-	chain    rtharness.Writer
+	writer   behavior.ResponseWriter
 	openReqs OpenRequestSource
 	clock    func() time.Time
 
@@ -110,12 +82,15 @@ type Channel struct {
 // Config assembles a channel.
 type Config struct {
 	ChannelID channel.ID
-	// System is the channel's固有 system cell; pass any actorrt.Actor
+	// System is the channel's intrinsic system cell; pass any actorrt.Actor
 	// implementation. channelkit assembles cells and does not know domain actor
 	// types.
 	System actorrt.Actor
-	// Chain + OpenRequests wire the presence-down closure (author #3).
-	Chain        rtharness.Writer
+	// Writer + OpenRequests wire the presence-down closure (author #3). Writer is
+	// a harness-backed ResponseWriter the composition root injects already stamped
+	// with the system caller context — the runtime→pure-seam bridge is composition
+	// glue, never built here, so channelkit needs no runtime/harness import.
+	Writer       behavior.ResponseWriter
 	OpenRequests OpenRequestSource
 	Clock        func() time.Time
 	// Logger surfaces closure-drain faults. nil → discard (silent).
@@ -123,8 +98,8 @@ type Config struct {
 }
 
 // New builds the channel, subscribes to the substrate's presence-edge (the
-// Channel is the actorrt.PresenceWatcher — see OnDown) and spawns the固有 system
-// cell.
+// Channel is the actorrt.PresenceWatcher — see OnDown) and spawns the intrinsic
+// system cell.
 func New(cfg Config) *Channel {
 	clock := cfg.Clock
 	if clock == nil {
@@ -136,7 +111,7 @@ func New(cfg Config) *Channel {
 	}
 	c := &Channel{
 		channelID: cfg.ChannelID,
-		chain:     cfg.Chain,
+		writer:    cfg.Writer,
 		openReqs:  cfg.OpenRequests,
 		clock:     clock,
 		logger:    logger,
@@ -181,7 +156,7 @@ func (c *Channel) Controller() actorrt.Controller { return c.controller }
 // watcher Despawn(id) is not pointer-checked, so under same-id replacement it
 // would delete/stop the SUCCESSOR — the exact contract PresenceWatcher forbids.
 func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
-	if c.chain == nil || c.openReqs == nil {
+	if c.writer == nil || c.openReqs == nil {
 		return
 	}
 	// Delegate the closure materialisation to the behaviour base (author#3, ONE
@@ -193,7 +168,7 @@ func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
 			"channel", c.channelID, "dead_actor", id, "request", reqID, "err", err)
 	}
 	if err := behavior.MaterialiseReceiverUnavailable(ctx,
-		harnessWriter{chain: c.chain, channelID: c.channelID},
+		c.writer,
 		openRequests{src: c.openReqs},
 		c.clock, sysSender, id, onFault); err != nil {
 		// The drain query failed → no caller of the dead actor can be closed →

@@ -12,7 +12,7 @@ import (
 // dead actor's open requests — yet it stays pure-kernel (importing it must not
 // drag runtime into the importer, arbitration-2). Every such capability is
 // therefore expressed as a CONSUMER-side interface over kernel types only; the
-// real implementation (the harness write chain, the channel store) is injected
+// real implementation (the harness write path, the channel store) is injected
 // by the composition root.
 
 // WriteOutcome is the pure result of committing an envelope to truth.
@@ -21,7 +21,7 @@ import (
 // benign outcome (the request was already closed by another author / the caller
 // timeout). RejectReason is an OPAQUE diagnostic string the behaviour base does
 // NOT interpret: the reject vocabulary belongs to runtime (the write engine's
-// errno), and the composition adapter is what maps a runtime
+// errno), and the composition-injected writer is what maps a runtime
 // harness_terminal_duplicate into Duplicate=true. behaviour reads only the bool.
 type WriteOutcome struct {
 	MessageID    message.ID
@@ -44,6 +44,12 @@ type ResponseWriter interface {
 // envelope by id (the SERVE side — used by an actor that holds local truth).
 // Defined here over kernel types only so behaviour stays pure-kernel; a concrete
 // store satisfies it structurally and the composition root injects it.
+//
+// runtime/storespec declares a same-shaped RequestLookup. That is NOT a
+// coincidence to reconcile: both are the same semantic ("fetch a request
+// envelope by id") projected into two layers, and this one is the pure-kernel
+// projection behaviour is allowed to depend on. The storespec interface
+// structurally satisfies this seam — composition injects it directly.
 type RequestLookup interface {
 	FindByID(ctx context.Context, id message.ID) (*message.Envelope, bool, error)
 }

@@ -1,7 +1,6 @@
 package behavior
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -12,10 +11,9 @@ import (
 )
 
 // serve.go is the SERVE face of the behaviour base: the response-envelope
-// builders any actor uses to answer a request by emitting a kind=response
-// envelope. It depends only on kernel envelope types plus the consumer-side
-// RequestLookup seam (defined in seam.go), so it stays pure-kernel — one
-// envelope-build implementation shared by any actor that serves (C3).
+// builder any actor uses to answer a request by emitting a kind=response
+// envelope. It depends only on kernel envelope types, so it stays pure-kernel —
+// one envelope-build implementation shared by any actor that serves (C3).
 
 // MergeResponsePayload merges a caller-supplied payload object with the
 // protocol-owned {status, reason[, dedupe]} fields. payload must be a JSON
@@ -53,36 +51,14 @@ type ResponseSpec struct {
 	Visibility message.Visibility
 }
 
-// BuildResponseEnvelope assembles a kind=response envelope from the original
-// request, looked up by id. Audience defaults to the request sender;
+// BuildResponseFromRequest assembles a kind=response envelope from the request
+// envelope held in hand. Audience defaults to the request sender;
 // visibility/correlation inherit from the request. The response id is a random
 // uuid correlation anchor; parent_id (=request id) + the One-Law terminal
-// uniqueness index — not the id — guarantee "one terminal per request". Shared
-// serve helper.
-func BuildResponseEnvelope(
-	ctx context.Context,
-	lookup RequestLookup,
-	clock func() time.Time,
-	sender message.Sender,
-	requestID CorrelationKey,
-	spec ResponseSpec,
-) (*message.Envelope, error) {
-	if requestID == "" {
-		return nil, fmt.Errorf("behavior: response requestID required")
-	}
-	request, ok, err := lookup.FindByID(ctx, message.ID(requestID))
-	if err != nil {
-		return nil, fmt.Errorf("behavior: response lookup %s: %w", requestID, err)
-	}
-	if !ok || request == nil {
-		return nil, fmt.Errorf("behavior: response request %s not found", requestID)
-	}
-	return BuildResponseFromRequest(request, clock, sender, requestID, spec)
-}
-
-// BuildResponseFromRequest is the lookup-free core: given an already-retrieved
-// request envelope, it assembles the kind=response envelope directly. Use when
-// the caller already holds the request in hand and needs no store round-trip.
+// uniqueness index — not the id — guarantee "one terminal per request". The
+// request is supplied in-hand by the caller: recovering it from truth (when the
+// caller does not already hold it) is the actor's job via the RequestLookup
+// seam, not this builder's.
 func BuildResponseFromRequest(
 	request *message.Envelope,
 	clock func() time.Time,

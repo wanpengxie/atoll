@@ -1,10 +1,11 @@
 // Package sysactor is the channel's cross-cutting physical-state actor. It is
 // the single owner of the channel's ephemeral PRESENCE state (compute lease:
 // who is physically online) and answers the channel-wide directory query
-// (actor.list) as a composed view (membership ∧ presence). It is ADVISORY —
-// never a dispatch gate (P15/P16): reachability authority is send→terminal, and
-// the dispatch path never reads this actor's view. It runs as a channel固有
-// cell, spawned once per channel at channel creation time.
+// (actor.list) as a composed view (membership ∧ presence, the formula owned by
+// introspect.QueryList). It is ADVISORY — never a dispatch gate (P15/P16):
+// reachability authority is send→terminal, and the dispatch path never reads
+// this actor's view. It runs as a channel-intrinsic cell, spawned once per
+// channel at channel creation time.
 //
 // Two-axis model (runtime/storespec.Record): membership is durable registry
 // truth; PRESENCE is volatile and AUTHORITY-OWNED (the component holding the
@@ -23,82 +24,52 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/lib/introspect"
-	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// PresenceStat is the injected obs-read seam: the substrate's AUTHORITATIVE
-// presence + bind-instant for an actor (present = the bool, uptime = now -
-// startedAt). It is no longer a domain abstraction the system actor invents; it
-// reads the substrate obs authority. Defined consumer-side (Go idiom) as the
-// NARROW shape this actor needs — so the composition root supplies a thin
-// adapter over actorrt.Runtime.Stat (which returns a UnitStat bundle):
-//
-//	func(id) (time.Time, bool) { st, ok := rt.Stat(id); return st.StartedAt, ok }
-//
-// A nil seam (not yet wired) reports everyone absent — advisory, never a
-// dispatch gate.
+// PresenceStat is the injected obs-read seam: the consumer-side narrow read of
+// the substrate's AUTHORITATIVE presence + bind-instant for an actor (present =
+// the bool, uptime = now - startedAt). Defined consumer-side (Go idiom) as the
+// NARROW shape this actor needs, so the composition root supplies a thin reader
+// over the substrate's pull-stat obs seam. A nil seam (not yet wired) reports
+// everyone absent — advisory, never a dispatch gate.
 type PresenceStat interface {
 	Stat(id actor.ActorID) (startedAt time.Time, present bool)
 }
 
 // SystemActor answers channel-wide directory queries (actor.list) by composing
-// durable membership (Registry) with volatile presence (the injected seam).
+// durable membership (Registry) with volatile presence (the injected seam). It
+// is channel-agnostic at the base — the composition root injects channel-scoped
+// services (registry, writer, lookup), so this actor holds no channel id of its
+// own.
 type SystemActor struct {
-	channelID channel.ID
-	registry  storespec.Registry
-	writer    behavior.ResponseWriter
-	lookup    behavior.RequestLookup
-	clock     func() time.Time
-	stat      PresenceStat
+	registry storespec.Registry
+	writer   behavior.ResponseWriter
+	lookup   behavior.RequestLookup
+	clock    func() time.Time
+	stat     PresenceStat
 }
 
-// sender is the system actor's own identity — stamped on every serve write it
+// sysSender is the system actor's own identity — stamped on every serve write it
 // authors (P12: kind by identity, not hard-coded). behavior.Respond carries it
 // so the answer is kind-neutral at the base.
 var sysSender = message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
 
-// callerWriter wraps the runtime harness write chain into a behavior.ResponseWriter,
-// stamping the system actor's caller context so the harness ACL authenticates the
-// write (Step 0/1) and mapping harness_terminal_duplicate to the pure
-// WriteOutcome.Duplicate bool — the reject vocabulary stays in runtime, behavior
-// reads only the bool. This is the runtime-type → pure-seam bridge the system
-// actor needs to call behavior.Respond; it lives here because sysactor already
-// imports runtime/harness (§4 keeps the same adapter for channelkit's closure).
-type callerWriter struct {
-	chain     rtharness.Writer
-	channelID channel.ID
-}
-
-func (w callerWriter) Write(ctx context.Context, env *message.Envelope) (behavior.WriteOutcome, error) {
-	cctx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{
-		ActorID: actor.SystemActorID, ChannelID: w.channelID,
-	})
-	res, err := w.chain.Write(cctx, env)
-	if err != nil {
-		return behavior.WriteOutcome{}, err
-	}
-	return behavior.WriteOutcome{
-		MessageID:    res.MessageID,
-		Duplicate:    res.RejectReason == rtharness.HarnessTerminalDuplicate,
-		RejectReason: string(res.RejectReason),
-		RejectDetail: res.RejectDetail,
-	}, nil
-}
-
 // Deps bundles the channel services the system actor needs.
 type Deps struct {
-	ChannelID channel.ID
-	Registry  storespec.Registry
-	Chain     rtharness.Writer
-	Lookup    behavior.RequestLookup
-	Clock     func() time.Time
-	// Stat is the obs-read seam backed by Runtime.Stat (substrate-authoritative
-	// presence + bind-instant). Nil → actor.list reports everyone absent.
+	Registry storespec.Registry
+	// Writer commits the serve response into truth. The composition root injects a
+	// harness-backed ResponseWriter already stamped with the system caller context
+	// (so the harness ACL authenticates the write) — the runtime→pure-seam bridge
+	// is composition glue, never built here, keeping sysactor pure-behavior.
+	Writer behavior.ResponseWriter
+	Lookup behavior.RequestLookup
+	Clock  func() time.Time
+	// Stat is the obs-read seam over the substrate's authoritative presence +
+	// bind-instant. Nil → actor.list reports everyone absent.
 	Stat PresenceStat
 }
 
@@ -109,12 +80,11 @@ func New(deps Deps) *SystemActor {
 		clock = time.Now
 	}
 	return &SystemActor{
-		channelID: deps.ChannelID,
-		registry:  deps.Registry,
-		writer:    callerWriter{chain: deps.Chain, channelID: deps.ChannelID},
-		lookup:    deps.Lookup,
-		clock:     clock,
-		stat:      deps.Stat,
+		registry: deps.Registry,
+		writer:   deps.Writer,
+		lookup:   deps.Lookup,
+		clock:    clock,
+		stat:     deps.Stat,
 	}
 }
 
@@ -138,9 +108,9 @@ func (s *SystemActor) Receive(ctx context.Context, env *message.Envelope) error 
 }
 
 // respondList answers actor.list with a composed channel-wide directory
-// (membership from the registry ∧ presence — composed INSIDE the actor so the
-// channel only sees the result, never the raw副本). Readiness is deliberately
-// absent: it is not a substrate axis — whether an actor can service a request
+// (the membership ∧ presence formula owned by introspect.QueryList), composed
+// INSIDE the actor so the channel only sees the result, never the raw rows.
+// Readiness is deliberately absent: it is not a substrate axis — whether an actor can service a request
 // is the OUTCOME of send→terminal, never a stored field here.
 func (s *SystemActor) respondList(ctx context.Context, env *message.Envelope) error {
 	rows, err := s.registry.ListActive(ctx)

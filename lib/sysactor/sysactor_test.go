@@ -8,8 +8,8 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/lib/sysactor"
-	rtharness "github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
@@ -24,22 +24,23 @@ func (f fakeRegistry) ListActive(context.Context) ([]storespec.Record, error) {
 	return f.rows, nil
 }
 
-// fakeChain records the system actor's written response.
-type fakeChain struct{ written []*message.Envelope }
+// fakeWriter records the system actor's written response (the pure
+// behavior.ResponseWriter seam the composition root injects in production).
+type fakeWriter struct{ written []*message.Envelope }
 
-func (c *fakeChain) Write(_ context.Context, env *message.Envelope) (rtharness.WriteResult, error) {
-	c.written = append(c.written, env)
-	return rtharness.WriteResult{MessageID: env.ID}, nil
+func (w *fakeWriter) Write(_ context.Context, env *message.Envelope) (behavior.WriteOutcome, error) {
+	w.written = append(w.written, env)
+	return behavior.WriteOutcome{MessageID: env.ID}, nil
 }
 
-// fakeLookup returns the original request so BuildResponseEnvelope can anchor.
+// fakeLookup returns the original request so Respond can anchor the response to it.
 type fakeLookup struct{ req *message.Envelope }
 
 func (f fakeLookup) FindByID(_ context.Context, _ message.ID) (*message.Envelope, bool, error) {
 	return f.req, true, nil
 }
 
-// fakeStat is the injected obs-read seam (Runtime.Stat stand-in); it reports the
+// fakeStat is the injected obs-read seam (substrate pull-stat stand-in); it reports the
 // ids in its set as present with a fixed bind-instant. Stands in for the
 // substrate's authoritative presence/uptime view.
 type fakeStat struct {
@@ -63,7 +64,7 @@ func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 		{ID: "actor:a", Kind: actor.KindAgent, Binding: actor.BindingEmbedded},
 		{ID: "actor:b", Kind: actor.KindAgent, Binding: actor.BindingEmbedded},
 	}}
-	fc := &fakeChain{}
+	fc := &fakeWriter{}
 	listReq := &message.Envelope{
 		ID: "q1", ChannelID: "ch", Kind: message.KindRequest, Type: "actor.list",
 		Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{actor.SystemActorID},
@@ -71,7 +72,7 @@ func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 	// Presence authority reports actor:a present, actor:b absent — read via the
 	// injected seam when composing actor.list (never a message, never truth).
 	s := sysactor.New(sysactor.Deps{
-		ChannelID: "ch", Registry: reg, Chain: fc, Lookup: fakeLookup{req: listReq},
+		Registry: reg, Writer: fc, Lookup: fakeLookup{req: listReq},
 		Stat: fakeStat{present: map[actor.ActorID]bool{"actor:a": true}, started: time.Now()},
 	})
 
