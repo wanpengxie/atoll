@@ -38,6 +38,12 @@ func (f fakeLookup) FindByID(_ context.Context, _ message.ID) (*message.Envelope
 	return f.req, true, nil
 }
 
+// fakePresence is the injected presence authority (the read seam); it reports
+// the ids in its set as present. Stands in for the fleet's lease view.
+type fakePresence struct{ present map[actor.ActorID]bool }
+
+func (p fakePresence) IsPresent(id actor.ActorID) bool { return p.present[id] }
+
 // TestActorList_TwoAxisNoReadiness proves the composed actor.list directory is
 // membership (registry) ∧ presence (lease) and carries NO readiness column —
 // readiness is not a substrate axis; whether an actor can service a request is
@@ -52,17 +58,12 @@ func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 		ID: "q1", ChannelID: "ch", Kind: message.KindRequest, Type: "actor.list",
 		Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{actor.SystemActorID},
 	}
+	// Presence authority reports tool:a present, tool:b absent — read via the
+	// injected seam when composing actor.list (never a message, never truth).
 	s := sysactor.New(sysactor.Deps{
 		ChannelID: "ch", Registry: reg, Chain: fc, Lookup: fakeLookup{req: listReq},
+		Presence: fakePresence{present: map[actor.ActorID]bool{"tool:a": true}},
 	})
-
-	// Feed a presence lease report for tool:a only (Delivered to the cell, never
-	// through the truth log).
-	if err := s.Receive(context.Background(), sysactor.NewPresenceSignal(sysactor.PresenceReport{
-		Actor: "tool:a", Present: true, LeaseTTLMs: 60_000,
-	})); err != nil {
-		t.Fatalf("presence signal: %v", err)
-	}
 
 	if err := s.Receive(context.Background(), listReq); err != nil {
 		t.Fatalf("actor.list: %v", err)

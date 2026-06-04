@@ -7,11 +7,13 @@
 // cell, spawned once per channel at channel creation time.
 //
 // Two-axis model (runtime/storespec.Record): membership is durable registry
-// truth; PRESENCE is volatile and lives HERE, never in the truth log (lease
-// reports are delivered straight to this cell's mailbox, bypassing the
-// harness). readiness is NOT a third axis — whether an actor can service a
-// request is the OUTCOME of send→terminal, not a state the system actor
-// projects or composes.
+// truth; PRESENCE is volatile and AUTHORITY-OWNED (the component holding the
+// compute leases/connections). The system actor does NOT keep a presence copy —
+// it READS presence via an injected seam when composing actor.list, exactly as
+// it reads membership from the Registry. Presence is never a message and never
+// truth — a volatile state read. readiness is NOT a third axis — whether an
+// actor can service a request is the OUTCOME of send→terminal, not a stored
+// state the system actor projects or composes.
 package sysactor
 
 import (
@@ -28,21 +30,26 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// SystemActor answers channel-wide directory queries (actor.list) and ingests
-// presence lease reports to maintain its advisory physical view.
+// Presence is the injected read seam for an actor's volatile physical presence
+// (does it hold a live compute lease right now). Presence is authority-owned —
+// the component that holds the compute connections/leases implements this; the
+// system actor only READS it when composing actor.list, just like it reads
+// membership from the Registry. Defined here on the CONSUMER side (Go idiom);
+// the composition root injects the implementation. A nil Presence (not yet
+// wired) reports everyone absent — advisory, never a dispatch gate.
+type Presence interface {
+	IsPresent(id actor.ActorID) bool
+}
+
+// SystemActor answers channel-wide directory queries (actor.list) by composing
+// durable membership (Registry) with volatile presence (the injected seam).
 type SystemActor struct {
 	channelID channel.ID
 	registry  storespec.Registry
 	chain     rtharness.Writer
 	lookup    behavior.RequestLookup
 	clock     func() time.Time
-
-	// presence is ephemeral physical state: actorID → lease-expiry (ms epoch).
-	// Presence is a single fact — a fresh lease (k8s node-lease semantics).
-	// "Absent" is one representation: no entry (a not-present report deletes it,
-	// expiry is read as gone). Plain map — the cell goroutine is the sole owner
-	// (no lock).
-	presence map[actor.ActorID]int64
+	presence  Presence
 }
 
 // Deps bundles the channel services the system actor needs.
@@ -52,6 +59,9 @@ type Deps struct {
 	Chain     rtharness.Writer
 	Lookup    behavior.RequestLookup
 	Clock     func() time.Time
+	// Presence is the volatile-presence read seam (authority-owned, injected by
+	// the composition root). Nil → actor.list reports everyone absent.
+	Presence Presence
 }
 
 // New constructs the channel system actor cell.
@@ -66,45 +76,12 @@ func New(deps Deps) *SystemActor {
 		chain:     deps.Chain,
 		lookup:    deps.Lookup,
 		clock:     clock,
-		presence:  map[actor.ActorID]int64{},
+		presence:  deps.Presence,
 	}
-}
-
-// PresenceReport is one compute-lease report about an actor's volatile physical
-// presence: whether the actor holds a live lease, and for how long. It is folded
-// onto this cell via cells.Deliver(NewPresenceSignal(r)) — an INTERNAL control
-// signal that NEVER enters the truth log (presence is volatile, not a channel
-// event; the harness is never asked to write it). The json tags are stable
-// because the report is marshalled to/from an envelope payload.
-type PresenceReport struct {
-	Actor      actor.ActorID `json:"actor"`
-	Present    bool          `json:"present"`
-	LeaseTTLMs int64         `json:"lease_ttl_ms"`
-}
-
-// presenceSignalType is the internal control-signal envelope type carrying a
-// PresenceReport onto the cell goroutine. Deliberately OUTSIDE the reserved
-// actor.*/system.* namespace and never written to truth — it travels only via
-// cells.Deliver (the mailbox), folded serially by Receive.
-const presenceSignalType = "sysactor.__presence__"
-
-// NewPresenceSignal wraps a PresenceReport into the internal control envelope
-// for direct delivery to this cell's mailbox (bypassing the truth log). The
-// subject actor rides in the payload (not the sender — the report is delivered
-// on the subject's behalf).
-func NewPresenceSignal(r PresenceReport) *message.Envelope {
-	payload, _ := json.Marshal(r)
-	return &message.Envelope{Kind: message.KindEvent, Type: presenceSignalType, Payload: payload}
 }
 
 // Receive handles one envelope serially (implements runtime/actorrt.Actor).
 func (s *SystemActor) Receive(ctx context.Context, env *message.Envelope) error {
-	// Internal presence control signal (direct mailbox delivery, never written
-	// to truth). Folded serially on the cell goroutine like any other message.
-	if env.Type == presenceSignalType {
-		s.applyPresence(env)
-		return nil
-	}
 	if env.Kind == message.KindRequest {
 		switch env.Type {
 		case introspect.QueryList:
@@ -187,22 +164,8 @@ func (s *SystemActor) respondReserved(ctx context.Context, env *message.Envelope
 	return err
 }
 
-// applyPresence folds a delivered PresenceReport into the ephemeral physical
-// view (cell goroutine, no lock). The signal never enters the truth log.
-func (s *SystemActor) applyPresence(env *message.Envelope) {
-	var r PresenceReport
-	if err := json.Unmarshal(env.Payload, &r); err != nil || r.Actor == "" {
-		return
-	}
-	if !r.Present {
-		delete(s.presence, r.Actor) // absent = no entry
-		return
-	}
-	s.presence[r.Actor] = s.clock().UnixMilli() + r.LeaseTTLMs
-}
-
-// isPresent is the advisory presence read (lease-fresh). NOT a dispatch gate.
+// isPresent reads the injected presence authority (advisory; NOT a dispatch
+// gate). A nil seam (not yet wired) reports absent.
 func (s *SystemActor) isPresent(id actor.ActorID) bool {
-	exp, ok := s.presence[id]
-	return ok && s.clock().UnixMilli() < exp
+	return s.presence != nil && s.presence.IsPresent(id)
 }
