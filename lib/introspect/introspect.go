@@ -35,7 +35,7 @@ const (
 
 // APIDescriptor describes one callable API, returned dynamically inside a
 // Describe response. The actor is the sole authority on its own capability; a
-// caller discovers it by asking the actor, live.
+// caller discovers it by asking the actor, live (via the Describer hook).
 type APIDescriptor struct {
 	// Name is the request envelope.type the API answers (e.g. "notes.publish").
 	Name string `json:"name"`
@@ -75,11 +75,30 @@ type Catalog struct {
 	Actors []CatalogEntry `json:"actors"`
 }
 
-// Describer is the OPTIONAL capability an actor (Module) implements to answer
+// Describer is the OPTIONAL capability an actor implements to answer
 // actor.describe with its live API surface. It is asked on the actor's own
 // goroutine, so it reports CURRENT capability (e.g. only what it can do while
 // logged in), never a predefined registry. Actors that don't implement it
 // answer describe with their identity only.
 type Describer interface {
 	Describe(ctx context.Context) ([]APIDescriptor, error)
+}
+
+// BuildDescribe assembles the actor.describe answer for an actor identified by
+// name, honouring the Describer convention: if impl implements Describer its live
+// APIs are included; otherwise the answer is identity-only. This is the ONE
+// standard way to serve actor.describe — every actor, and any generic host
+// serving describe on behalf of arbitrary actors, routes through it, so the
+// answer shape never drifts from the convention. Binding (an optional addressing
+// attribute) is left for the caller to set when it has one.
+func BuildDescribe(ctx context.Context, name string, impl any) (Describe, error) {
+	d := Describe{Name: name}
+	if dr, ok := impl.(Describer); ok {
+		apis, err := dr.Describe(ctx)
+		if err != nil {
+			return Describe{}, err
+		}
+		d.APIs = apis
+	}
+	return d, nil
 }

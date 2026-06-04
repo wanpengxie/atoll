@@ -30,6 +30,55 @@ type OpenRequestSource interface {
 	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID) ([]storespec.StoredRow, error)
 }
 
+// sysSender is the channel system actor identity — author#3 (substrate death)
+// stamps it on every receiver_unavailable terminal; harness Step 8 authorises
+// sender==system + reason==receiver_unavailable as the substrate author.
+var sysSender = message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
+
+// harnessWriter wraps the runtime harness write chain into a
+// behavior.ResponseWriter: it stamps the system caller context (so the harness
+// ACL authenticates the death-author write) and maps harness_terminal_duplicate
+// into the pure WriteOutcome.Duplicate bool — the reject vocabulary stays in
+// runtime, behavior reads only the bool. This is the runtime-type → pure-seam
+// bridge; it lives in channelkit because channelkit already imports runtime.
+type harnessWriter struct {
+	chain     rtharness.Writer
+	channelID channel.ID
+}
+
+func (w harnessWriter) Write(ctx context.Context, env *message.Envelope) (behavior.WriteOutcome, error) {
+	cctx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{
+		ActorID: actor.SystemActorID, ChannelID: w.channelID,
+	})
+	res, err := w.chain.Write(cctx, env)
+	if err != nil {
+		return behavior.WriteOutcome{}, err
+	}
+	return behavior.WriteOutcome{
+		MessageID:    res.MessageID,
+		Duplicate:    res.RejectReason == rtharness.HarnessTerminalDuplicate,
+		RejectReason: string(res.RejectReason),
+		RejectDetail: res.RejectDetail,
+	}, nil
+}
+
+// openRequests adapts the channel's OpenRequestSource (storespec.StoredRow) into
+// behavior.OpenRequests (pure *message.Envelope) so author#3 stays pure-kernel.
+type openRequests struct{ src OpenRequestSource }
+
+func (o openRequests) OpenRequestsForActor(ctx context.Context, id actor.ActorID) ([]*message.Envelope, error) {
+	rows, err := o.src.OpenRequestsForActor(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	envs := make([]*message.Envelope, len(rows))
+	for i := range rows {
+		env := rows[i].Envelope
+		envs[i] = &env
+	}
+	return envs, nil
+}
+
 // Channel is one assembled channel: actorrt runtime + system cell + the
 // presence-down closure wiring (chain + open-request source).
 type Channel struct {
@@ -132,58 +181,24 @@ func (c *Channel) Controller() actorrt.Controller { return c.controller }
 // watcher Despawn(id) is not pointer-checked, so under same-id replacement it
 // would delete/stop the SUCCESSOR — the exact contract PresenceWatcher forbids.
 func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
-	if c.chain != nil && c.openReqs != nil {
-		MaterialiseReceiverUnavailable(ctx, c.logger, c.chain, c.openReqs, c.clock, c.channelID, id)
-	}
-}
-
-// MaterialiseReceiverUnavailable is the substrate's closure obligation (author
-// #3), factored out so that both a local cell death (Channel.OnDown) and any
-// remote death edge path materialise the same terminal: for every in-flight
-// request addressed to the dead actor, write a
-// SYSTEM-authored receiver_unavailable response into truth. harness Step 8
-// authorises sender==system + reason==receiver_unavailable as the substrate
-// author. Without this a dead cell — local or across the wire — is a black hole
-// that hangs every waiting caller (construction-spec §3.3).
-func MaterialiseReceiverUnavailable(ctx context.Context, logger *slog.Logger, chain rtharness.Writer, openReqs OpenRequestSource, clock func() time.Time, channelID channel.ID, dead actor.ActorID) {
-	if logger == nil {
-		logger = slog.New(slog.DiscardHandler)
-	}
-	reqs, err := openReqs.OpenRequestsForActor(ctx, dead)
-	if err != nil {
-		// The drain query failed → we cannot close ANY of the dead actor's
-		// in-flight requests → every one of its callers is now a black hole.
-		// This is the loudest fault the watcher can hit.
-		logger.Error("channelkit.closure.drain_query_failed",
-			"channel", channelID, "dead_actor", dead, "err", err)
+	if c.chain == nil || c.openReqs == nil {
 		return
 	}
-	sys := message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
-	for i := range reqs {
-		req := reqs[i].Envelope
-		term, berr := behavior.BuildResponseFromRequest(&req, clock, sys,
-			behavior.CorrelationKey(req.ID),
-			behavior.ResponseSpec{
-				Status: "failed",
-				Reason: string(message.TerminalReceiverUnavailable),
-			})
-		if berr != nil {
-			logger.Error("channelkit.closure.build_failed",
-				"channel", channelID, "dead_actor", dead, "request", req.ID, "err", berr)
-			continue
-		}
-		cctx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{ActorID: actor.SystemActorID, ChannelID: channelID})
-		res, werr := chain.Write(cctx, term)
-		if werr != nil {
-			logger.Error("channelkit.closure.write_failed",
-				"channel", channelID, "dead_actor", dead, "request", req.ID, "err", werr)
-			continue
-		}
-		if res.RejectReason != "" {
-			// The harness already logged the reject (harness.write.reject); we
-			// add the closure-level fault: this caller stays unclosed.
-			logger.Error("channelkit.closure.write_rejected",
-				"channel", channelID, "dead_actor", dead, "request", req.ID, "reason", res.RejectReason)
-		}
+	// Delegate the closure materialisation to the behaviour base (author#3, ONE
+	// implementation, co-located with the other two authors — P13). channelkit
+	// only injects the seams (runtime writer + store drain) and an onFault log
+	// callback; the base holds no logger.
+	onFault := func(reqID message.ID, err error) {
+		c.logger.Error("channelkit.closure.write_failed",
+			"channel", c.channelID, "dead_actor", id, "request", reqID, "err", err)
+	}
+	if err := behavior.MaterialiseReceiverUnavailable(ctx,
+		harnessWriter{chain: c.chain, channelID: c.channelID},
+		openRequests{src: c.openReqs},
+		c.clock, sysSender, id, onFault); err != nil {
+		// The drain query failed → no caller of the dead actor can be closed →
+		// every one is a black hole. The loudest fault the watcher can hit.
+		c.logger.Error("channelkit.closure.drain_query_failed",
+			"channel", c.channelID, "dead_actor", id, "err", err)
 	}
 }

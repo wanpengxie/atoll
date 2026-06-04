@@ -60,19 +60,19 @@ func (p fakeStat) Stat(id actor.ActorID) (time.Time, bool) {
 // the OUTCOME of send→terminal, never projected into this channel-wide view.
 func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 	reg := fakeRegistry{rows: []storespec.Record{
-		{ID: "tool:a", Kind: actor.KindTool, Binding: actor.BindingEmbedded},
-		{ID: "tool:b", Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+		{ID: "actor:a", Kind: actor.KindAgent, Binding: actor.BindingEmbedded},
+		{ID: "actor:b", Kind: actor.KindAgent, Binding: actor.BindingEmbedded},
 	}}
 	fc := &fakeChain{}
 	listReq := &message.Envelope{
 		ID: "q1", ChannelID: "ch", Kind: message.KindRequest, Type: "actor.list",
 		Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{actor.SystemActorID},
 	}
-	// Presence authority reports tool:a present, tool:b absent — read via the
+	// Presence authority reports actor:a present, actor:b absent — read via the
 	// injected seam when composing actor.list (never a message, never truth).
 	s := sysactor.New(sysactor.Deps{
 		ChannelID: "ch", Registry: reg, Chain: fc, Lookup: fakeLookup{req: listReq},
-		Stat: fakeStat{present: map[actor.ActorID]bool{"tool:a": true}, started: time.Now()},
+		Stat: fakeStat{present: map[actor.ActorID]bool{"actor:a": true}, started: time.Now()},
 	})
 
 	if err := s.Receive(context.Background(), listReq); err != nil {
@@ -97,11 +97,11 @@ func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 			t.Fatalf("actor.list row carries a readiness field — readiness is not a substrate axis: %+v", a)
 		}
 	}
-	// tool:a has a fresh presence lease → present; tool:b never reported → absent.
-	if byID["tool:a"]["present"] != true {
-		t.Fatalf("tool:a present=%v, want true (fresh lease)", byID["tool:a"]["present"])
+	// actor:a has a fresh presence lease → present; actor:b never reported → absent.
+	if byID["actor:a"]["present"] != true {
+		t.Fatalf("actor:a present=%v, want true (fresh lease)", byID["actor:a"]["present"])
 	}
-	if byID["tool:b"]["present"] != false {
-		t.Fatalf("tool:b present=%v, want false (no lease)", byID["tool:b"]["present"])
+	if byID["actor:b"]["present"] != false {
+		t.Fatalf("actor:b present=%v, want false (no lease)", byID["actor:b"]["present"])
 	}
 }

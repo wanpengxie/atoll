@@ -139,11 +139,20 @@ func (h *capHandler) WithGroup(string) slog.Handler      { return h }
 
 // TestClosureDrainFailure_IsSurfaced proves a swallowed-drain regression cannot
 // return: when the drain query fails (cannot close anyone → black hole), the
-// watcher logs a fault rather than returning silently.
+// watcher logs a fault rather than returning silently. The materialisation now
+// lives in the behaviour base (author#3); channelkit injects the seams and an
+// onFault callback, so this drives the invariant through OnDown — the only
+// surface left after the free function moved to behavior.
 func TestClosureDrainFailure_IsSurfaced(t *testing.T) {
 	h := &capHandler{}
-	channelkit.MaterialiseReceiverUnavailable(context.Background(), slog.New(h),
-		&fakeChain{}, errOpenReqs{}, time.Now, "ch", "worker")
+	ch := channelkit.New(channelkit.Config{
+		ChannelID:    "ch",
+		Chain:        &fakeChain{},
+		OpenRequests: errOpenReqs{},
+		Clock:        time.Now,
+		Logger:       slog.New(h),
+	})
+	ch.OnDown(context.Background(), "worker", nil)
 	if len(h.msgs) == 0 {
 		t.Fatal("drain query failed but NO fault logged — silent black hole regression")
 	}

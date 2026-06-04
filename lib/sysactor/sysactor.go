@@ -19,6 +19,7 @@ package sysactor
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
@@ -50,10 +51,43 @@ type PresenceStat interface {
 type SystemActor struct {
 	channelID channel.ID
 	registry  storespec.Registry
-	chain     rtharness.Writer
+	writer    behavior.ResponseWriter
 	lookup    behavior.RequestLookup
 	clock     func() time.Time
 	stat      PresenceStat
+}
+
+// sender is the system actor's own identity — stamped on every serve write it
+// authors (P12: kind by identity, not hard-coded). behavior.Respond carries it
+// so the answer is kind-neutral at the base.
+var sysSender = message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
+
+// callerWriter wraps the runtime harness write chain into a behavior.ResponseWriter,
+// stamping the system actor's caller context so the harness ACL authenticates the
+// write (Step 0/1) and mapping harness_terminal_duplicate to the pure
+// WriteOutcome.Duplicate bool — the reject vocabulary stays in runtime, behavior
+// reads only the bool. This is the runtime-type → pure-seam bridge the system
+// actor needs to call behavior.Respond; it lives here because sysactor already
+// imports runtime/harness (§4 keeps the same adapter for channelkit's closure).
+type callerWriter struct {
+	chain     rtharness.Writer
+	channelID channel.ID
+}
+
+func (w callerWriter) Write(ctx context.Context, env *message.Envelope) (behavior.WriteOutcome, error) {
+	cctx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{
+		ActorID: actor.SystemActorID, ChannelID: w.channelID,
+	})
+	res, err := w.chain.Write(cctx, env)
+	if err != nil {
+		return behavior.WriteOutcome{}, err
+	}
+	return behavior.WriteOutcome{
+		MessageID:    res.MessageID,
+		Duplicate:    res.RejectReason == rtharness.HarnessTerminalDuplicate,
+		RejectReason: string(res.RejectReason),
+		RejectDetail: res.RejectDetail,
+	}, nil
 }
 
 // Deps bundles the channel services the system actor needs.
@@ -77,7 +111,7 @@ func New(deps Deps) *SystemActor {
 	return &SystemActor{
 		channelID: deps.ChannelID,
 		registry:  deps.Registry,
-		chain:     deps.Chain,
+		writer:    callerWriter{chain: deps.Chain, channelID: deps.ChannelID},
 		lookup:    deps.Lookup,
 		clock:     clock,
 		stat:      deps.Stat,
@@ -131,17 +165,27 @@ func (s *SystemActor) respondList(ctx context.Context, env *message.Envelope) er
 	return s.respondReserved(ctx, env, payload)
 }
 
+// Describe implements introspect.Describer — the standard self-describe hook.
+// The system actor declares its live API surface (the channel directory query)
+// through the SAME convention every actor honours, rather than hand-rolling the
+// API list at the serve site; a generic host serving describe on behalf of
+// arbitrary actors consults this exact hook.
+func (s *SystemActor) Describe(ctx context.Context) ([]introspect.APIDescriptor, error) {
+	return []introspect.APIDescriptor{{
+		Name: introspect.QueryList,
+		Desc: "channel-wide actor directory: membership ∧ presence",
+	}}, nil
+}
+
 // respondDescribe self-answers the reserved actor.describe for the system actor
-// itself: its identity plus the API it exposes (the channel directory query).
-// Like every actor, it must answer the reserved self-query rather than let the
-// caller hang.
+// itself: identity + API surface, assembled through introspect.BuildDescribe
+// (which honours the Describer hook above) so the answer never drifts from the
+// convention. Like every actor, it must answer the reserved self-query rather
+// than let the caller hang.
 func (s *SystemActor) respondDescribe(ctx context.Context, env *message.Envelope) error {
-	desc := introspect.Describe{
-		Name: string(actor.SystemActorID),
-		APIs: []introspect.APIDescriptor{{
-			Name: introspect.QueryList,
-			Desc: "channel-wide actor directory: membership ∧ presence",
-		}},
+	desc, err := introspect.BuildDescribe(ctx, string(actor.SystemActorID), s)
+	if err != nil {
+		return err
 	}
 	payload, err := json.Marshal(desc)
 	if err != nil {
@@ -150,23 +194,23 @@ func (s *SystemActor) respondDescribe(ctx context.Context, env *message.Envelope
 	return s.respondReserved(ctx, env, payload)
 }
 
-// respondReserved writes a system-authored completed response carrying payload
-// for a reserved self-query (actor.list / actor.describe). It stamps the system
-// actor's own caller identity so the harness ACL authenticates the write —
-// without it the response is rejected as harness_engine_acl_denied and the
-// caller never sees the answer.
+// respondReserved answers a reserved self-query (actor.list / actor.describe)
+// with a system-authored completed response carrying payload. It recovers the
+// original request via the injected RequestLookup (the serve-side truth read)
+// and delegates the build+stamp+write to behavior.Respond (author#1, ONE
+// implementation — no hand-rolled serve write here). sender = the system actor's
+// own identity; the injected writer stamps the system caller context so the
+// harness ACL authenticates the write.
 func (s *SystemActor) respondReserved(ctx context.Context, env *message.Envelope, payload []byte) error {
-	resp, err := behavior.BuildResponseEnvelope(ctx, s.lookup, s.clock,
-		message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
-		behavior.CorrelationKey(env.ID),
-		behavior.ResponseSpec{Status: "completed", Payload: payload})
+	request, ok, err := s.lookup.FindByID(ctx, env.ID)
 	if err != nil {
 		return err
 	}
-	cctx := rtharness.CtxWithCaller(ctx, rtharness.CallerContext{
-		ActorID: actor.SystemActorID, ChannelID: s.channelID,
-	})
-	_, err = s.chain.Write(cctx, resp)
+	if !ok || request == nil {
+		return fmt.Errorf("sysactor: reserved request %s not found", env.ID)
+	}
+	_, err = behavior.Respond(ctx, s.writer, s.clock, request, sysSender,
+		behavior.ResponseSpec{Status: "completed", Payload: payload})
 	return err
 }
 
