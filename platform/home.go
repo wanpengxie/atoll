@@ -25,7 +25,7 @@ import (
 type HomeConfig struct {
 	ChannelID channel.ID
 	DBPath    string
-	APIKey    string // authenticates attaching computes
+	AuthFunc  func(apiKey string) (daemonID string, err error)
 	Logger    *slog.Logger
 }
 
@@ -122,12 +122,7 @@ func NewChannelHome(cfg HomeConfig) (*ChannelHome, error) {
 		Runtime:    home.Runtime(),
 		Membership: cs.Membership,
 		ChannelID:  cfg.ChannelID,
-		AuthFunc: func(apiKey string) (string, error) {
-			if cfg.APIKey != "" && apiKey != cfg.APIKey {
-				return "", fmt.Errorf("bad api-key")
-			}
-			return apiKey, nil
-		},
+		AuthFunc: cfg.AuthFunc,
 		Logger: logger,
 	})
 

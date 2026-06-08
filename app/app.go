@@ -707,11 +707,13 @@ func (a *App) handleSendMessage(c *gin.Context) {
 	}
 
 	var req struct {
-		ID       string          `json:"id"`
-		Type     string          `json:"type"`
-		Kind     string          `json:"kind"`
-		Payload  json.RawMessage `json:"payload"`
-		Audience []string        `json:"audience"`
+		ID         string          `json:"id"`
+		Type       string          `json:"type"`
+		Kind       string          `json:"kind"`
+		Payload    json.RawMessage `json:"payload"`
+		Audience   []string        `json:"audience"`
+		Visibility string          `json:"visibility"`
+		ParentID   string          `json:"parent_id"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
@@ -735,6 +737,12 @@ func (a *App) handleSendMessage(c *gin.Context) {
 		req.Payload,
 		audience,
 	)
+	if req.Visibility != "" {
+		env.Visibility = message.Visibility(req.Visibility)
+	}
+	if req.ParentID != "" {
+		env.ParentID = message.ID(req.ParentID)
+	}
 
 	ctx := harness.CtxWithCaller(c.Request.Context(), gw.CallerContext(senderID))
 	res, err := gw.SendMessage(ctx, env)
@@ -1024,8 +1032,17 @@ func (a *App) handleCompute(c *gin.Context) {
 	apiKey := c.Query("key")
 	chIDStr := c.Query("channel")
 
+	if apiKey == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "api key required"})
+		return
+	}
 	if chIDStr == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "channel query param required"})
+		return
+	}
+
+	if _, err := a.authFunc(apiKey); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid api key"})
 		return
 	}
 
@@ -1034,14 +1051,6 @@ func (a *App) handleCompute(c *gin.Context) {
 	if home == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not loaded"})
 		return
-	}
-
-	// Validate the api-key against our daemons table if provided.
-	if apiKey != "" {
-		if _, err := a.authFunc(apiKey); err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid api key"})
-			return
-		}
 	}
 
 	// Delegate to the channel home's fleet.
@@ -1078,6 +1087,7 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*platform.ChannelHome,
 	home, err := platform.NewChannelHome(platform.HomeConfig{
 		ChannelID: chID,
 		DBPath:    dbPath,
+		AuthFunc:  a.authFunc,
 		Logger:    a.logger,
 	})
 	if err != nil {
