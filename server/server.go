@@ -5,13 +5,15 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/lib/behavior"
+	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/server/channelhost"
 	"github.com/wanpengxie/ActOS/server/fleet"
+	"github.com/wanpengxie/ActOS/wire/placement"
 )
 
 // Config configures the channel-home process.
@@ -20,44 +22,62 @@ type Config struct {
 	DBPath     string
 	ListenAddr string
 	APIKey     string // authenticates attaching computes
-	// Logger + Metrics are obs seams injected by cmd (concrete backends live in
-	// obs, which server may not import). nil → no-op.
-	Logger  behavior.Logger
-	Metrics behavior.Metrics
+	Logger     *slog.Logger
 }
 
 // Run assembles the channel home, mounts the compute fleet (attached daemons)
 // and a client ingress, and serves. It holds channel truth (v2 truth-flip):
-// client requests write into truth then fan out to local固有 cells or down the
+// client requests write into truth then fan out to local cells or down the
 // wire to the compute hosting the target actor.
 func Run(ctx context.Context, cfg Config) error {
-	home, err := channelhost.New(ctx, channelhost.Config{
-		ChannelID: cfg.ChannelID,
-		DBPath:    cfg.DBPath,
-		Logger:    cfg.Logger,
-		Metrics:   cfg.Metrics,
-	})
-	if err != nil {
-		return err
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
 	}
 
-	flt := fleet.New(home.Chain(), cfg.APIKey)
+	// Open channel store via the public runtime facade.
+	cs, err := runtime.OpenChannel(ctx, cfg.DBPath, runtime.OpenChannelOptions{})
+	if err != nil {
+		return fmt.Errorf("server: open channel store: %w", err)
+	}
+
+	home, err := channelhost.New(ctx, channelhost.Config{
+		ChannelID: cfg.ChannelID,
+		Stores: channelhost.Stores{
+			Log:        cs.Log,
+			Query:      cs.Query,
+			Requests:   cs.Requests,
+			Registry:   cs.Registry,
+			Membership: cs.Membership,
+			Close:      cs.Close,
+		},
+		Logger: logger,
+	})
+	if err != nil {
+		_ = cs.Close()
+		return err
+	}
+	defer func() { _ = home.Close() }()
+
+	plc := placement.New()
+
+	flt := fleet.New(fleet.Config{
+		Writer:    home.Writer(),
+		ChannelID: cfg.ChannelID,
+		APIKey:    cfg.APIKey,
+		Placement: plc,
+		OnDeath:   home.MaterialiseComputeDeath,
+		OnAttach:  home.RegisterComputeActors,
+		Logger:    logger,
+	})
+
+	// Wire the fleet's dispatch as the fanout writer's remote arm.
 	home.SetRemoteDispatch(flt.Dispatch)
-	// Compute cell death (DeathFrame) materialises receiver_unavailable at the
-	// home (substrate closure author #3 across the wire).
-	flt.SetOnDeath(home.MaterialiseComputeDeath)
-	// On attach, register the compute's actors + publish their types into truth.
-	flt.SetOnAttach(home.RegisterComputeActors)
-	// Presence projection: attach/heartbeat/detach → sysactor advisory view.
-	flt.SetOnPresence(home.MarkPresence)
-	// Caller-scoped closure loop (author #2): expired pending requests get a
-	// caller-authored unanswered_timeout. Runs for the home's lifetime.
-	go home.RunClosureScan(ctx, time.Second)
 
 	mux := http.NewServeMux()
 	// Attached computes (daemons) connect here (computebus WS).
 	mux.HandleFunc("/compute", flt.ServeWS)
-	// Client/SDK ingress: the coagentsdk routes (cursor / messages / actors / ws).
+	// Client/SDK ingress: the SDK routes (cursor / messages / actors / ws).
 	gw := &gateway{home: home, channelID: cfg.ChannelID}
 	gw.mount(mux)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -70,6 +90,7 @@ func Run(ctx context.Context, cfg Config) error {
 		<-ctx.Done()
 		_ = srv.Close()
 	}()
+	logger.Info("server.listening", "addr", cfg.ListenAddr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}

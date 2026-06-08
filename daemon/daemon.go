@@ -1,6 +1,6 @@
-// Package daemon is the attached-compute assembly (v2): host (business cells) +
-// homelink (connect to server) + localdevice. cloud daemon and user/proxy
-// daemon are the same binary. cmd/daemon selects concrete adapters.
+// Package daemon is the attached-compute assembly (v2): homelink (connect to
+// server) + host (business cells) + localdevice. Cloud daemon and user-proxy
+// daemon are the same binary; cmd selects concrete adapters.
 package daemon
 
 import (
@@ -10,11 +10,8 @@ import (
 
 	"github.com/wanpengxie/ActOS/daemon/homelink"
 	"github.com/wanpengxie/ActOS/daemon/host"
-	"github.com/wanpengxie/ActOS/daemon/localdevice"
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/lib/adapterhost"
-	"github.com/wanpengxie/ActOS/lib/behavior"
+	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/wire/computebus"
 )
 
@@ -23,34 +20,45 @@ type Config struct {
 	ServerWS  string
 	APIKey    string
 	ComputeID string
-	ChannelID channel.ID
-	// Logger + Metrics are obs seams injected by cmd. nil → no-op.
-	Logger  behavior.Logger
-	Metrics behavior.Metrics
 }
 
-// Run connects to the channel home and hosts the supplied business adapters as
-// cells. Dispatch frames from the home flow into host cells; their emits flow
-// up via homelink (blocking on the home's EmitAck). No local truth.
-func Run(ctx context.Context, cfg Config, modules []behavior.Module) error {
-	decls := make([]computebus.AttachDeclaration, 0, len(modules))
-	for _, mod := range modules {
-		d := mod.Declares()
-		decls = append(decls, computebus.AttachDeclaration{
-			ActorID: d.ActorID, Kind: actor.KindTool, Binding: d.Binding,
-			Types: d.Types, MaxPendingMs: d.MaxPendingMs,
-		})
-	}
+// ActorDecl declares one actor the daemon will host.
+type ActorDecl struct {
+	ID      actor.ActorID
+	Kind    actor.Kind
+	Binding actor.Binding
+	// Impl is the actorrt.Actor implementation for this actor.
+	Impl actorrt.Actor
+}
+
+// Run connects to the channel home and hosts the supplied actors as cells.
+// DispatchFrames from the home flow into host cells; their emits flow UP via
+// homelink (blocking on the home's EmitAck). No local truth.
+//
+// Run blocks until ctx is cancelled or the homelink disconnects.
+func Run(ctx context.Context, cfg Config, actors []ActorDecl) error {
 	computeID := cfg.ComputeID
 	if computeID == "" {
 		computeID = uuid.NewString()
 	}
 
+	// Build attach declarations from the actor list.
+	decls := make([]computebus.AttachDeclaration, 0, len(actors))
+	for _, a := range actors {
+		decls = append(decls, computebus.AttachDeclaration{
+			ActorID: a.ID,
+			Kind:    a.Kind,
+			Binding: a.Binding,
+		})
+	}
+
+	// A mutable holder so the dispatch callback can reach the host after it is
+	// constructed.
 	var h *host.Host
 	hl, err := homelink.Connect(ctx, cfg.ServerWS, cfg.APIKey, computeID, decls,
 		func(df computebus.DispatchFrame) {
 			if h != nil {
-				_ = h.Dispatch(ctx, df)
+				_ = h.Dispatch(df)
 			}
 		})
 	if err != nil {
@@ -60,19 +68,17 @@ func Run(ctx context.Context, cfg Config, modules []behavior.Module) error {
 
 	h = host.New(hl.Emit, hl.SendDeath)
 	defer h.Stop()
-	// Device transit for relay (runtime_inbound_via_relay) adapters: the cell→
-	// device Forward seam + the device→cell callback routing (back onto the cell).
-	transit := localdevice.New(h)
-	for _, mod := range modules {
-		deps := adapterhost.InstallDeps{ChannelID: cfg.ChannelID, Logger: cfg.Logger, Metrics: cfg.Metrics}
-		if mod.Declares().Binding == actor.BindingRuntimeInboundViaRelay {
-			deps.Forward = transit.ForwardFunc(mod.Declares().ActorID)
-		}
-		if _, err := h.InstallAdapter(ctx, mod, deps); err != nil {
-			return err
-		}
+
+	// Install all declared actors as cells.
+	for _, a := range actors {
+		h.Install(a.ID, a.Impl)
 	}
 
-	<-ctx.Done()
-	return nil
+	// Block until context cancellation or homelink disconnect.
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-hl.Done():
+		return nil
+	}
 }

@@ -1,34 +1,77 @@
-// Package placement is the actor↔compute assignment + lease contract (v2). It
-// is where v2 fencing lives: each business actor has ≤1 host compute, arbitrated
-// by an actor-host lease (single-writer + fencing, Kleppmann/k8s node-lease —
-// NOT consensus). Pure schema (kernel only). Replaces v1 channel-level
-// placement-saga/reclaim (collapsed: the channel home is fixed at the server;
-// only per-actor host slots are leased).
+// Package placement is the actor→compute assignment registry. It tracks which
+// business actor is hosted by which attached compute. Zero fencing —排他由
+// substrate 结构保证（actorrt connect-in REPLACE + channel 单写路径）。
+// Pure schema + in-memory registry, kernel-only dependency.
 package placement
 
 import (
+	"sync"
+
 	"github.com/wanpengxie/ActOS/kernel/actor"
 )
 
-// HostToken is the opaque fencing guard for one actor-host slot. A stale token
-// (from a superseded compute) is rejected by the home when it stamps an emit.
-type HostToken string
-
-// Lease binds an actor to its current host compute for a bounded term. A fresh
-// Heartbeat re-arms ExpiresAtMs; expiry frees the slot for reassignment.
-type Lease struct {
-	Actor       actor.ActorID
-	ComputeID   string
-	Token       HostToken
-	ExpiresAtMs int64
+type Registry struct {
+	mu        sync.RWMutex
+	byActor   map[actor.ActorID]string
+	byCompute map[string]map[actor.ActorID]struct{}
 }
 
-// Assignment is the home's decision to place an actor on a compute.
-type Assignment struct {
-	Actor     actor.ActorID
-	ComputeID string
-	Token     HostToken
+func New() *Registry {
+	return &Registry{
+		byActor:   make(map[actor.ActorID]string),
+		byCompute: make(map[string]map[actor.ActorID]struct{}),
+	}
 }
 
-// IsFresh reports whether the lease is still valid at nowMs.
-func (l Lease) IsFresh(nowMs int64) bool { return nowMs < l.ExpiresAtMs }
+func (r *Registry) Assign(actorID actor.ActorID, computeID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if old, ok := r.byActor[actorID]; ok && old != computeID {
+		delete(r.byCompute[old], actorID)
+	}
+	r.byActor[actorID] = computeID
+	if r.byCompute[computeID] == nil {
+		r.byCompute[computeID] = make(map[actor.ActorID]struct{})
+	}
+	r.byCompute[computeID][actorID] = struct{}{}
+}
+
+func (r *Registry) Remove(actorID actor.ActorID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cid, ok := r.byActor[actorID]; ok {
+		delete(r.byCompute[cid], actorID)
+		delete(r.byActor, actorID)
+	}
+}
+
+func (r *Registry) Lookup(actorID actor.ActorID) (computeID string, ok bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	computeID, ok = r.byActor[actorID]
+	return
+}
+
+func (r *Registry) ByCompute(computeID string) []actor.ActorID {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	set := r.byCompute[computeID]
+	out := make([]actor.ActorID, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	return out
+}
+
+func (r *Registry) RemoveCompute(computeID string) []actor.ActorID {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	set := r.byCompute[computeID]
+	affected := make([]actor.ActorID, 0, len(set))
+	for id := range set {
+		affected = append(affected, id)
+		delete(r.byActor, id)
+	}
+	delete(r.byCompute, computeID)
+	return affected
+}

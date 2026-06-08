@@ -4,7 +4,7 @@ import "sync"
 
 // pushHub is the client-push fan-out signal: every committed envelope wakes all
 // subscribed client streams (SDK WS tails), which then read forward from their
-// own seq cursor (so the signal is lossy-by-design — correctness is the seq read,
+// own seq cursor (so the signal is lossy-by-design -- correctness is the seq read,
 // not the signal). This is the external-client half of the fanout (cells get the
 // envelope directly; remote clients get a "go read more" nudge).
 type pushHub struct {
@@ -16,7 +16,7 @@ type pushHub struct {
 func newPushHub() *pushHub { return &pushHub{subs: map[int]chan struct{}{}} }
 
 // notify wakes every subscriber (non-blocking: a subscriber already pending a
-// wake keeps its single buffered slot — it will read all new seqs on wake).
+// wake keeps its single buffered slot -- it will read all new seqs on wake).
 func (h *pushHub) notify() {
 	h.mu.Lock()
 	for _, ch := range h.subs {

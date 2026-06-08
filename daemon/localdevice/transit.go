@@ -1,9 +1,3 @@
-// Package localdevice is the v2 device transit on an attached compute: it bridges
-// a relay adapter cell (proxyfacade-class) to a local external device (e.g. an
-// xhs browser driven out-of-process, or a kimi local worker). The cell→device
-// half is the Forward seam (ExternalRequestFunc the adapter calls); the
-// device→cell half is Callback, which routes a device's final/lifecycle frame
-// back to the owning adapter cell on its goroutine (via the host). See doc.go.
 package localdevice
 
 import (
@@ -13,17 +7,11 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/lib/behavior"
+	"github.com/wanpengxie/ActOS/runtime/actorrt"
 )
 
-// CallbackDeliverer routes a device callback frame to the owning adapter cell
-// (daemon/host.Host.DeliverCallbackFrame implements it).
-type CallbackDeliverer interface {
-	DeliverCallbackFrame(frame behavior.ExternalCallbackFrame) error
-}
-
-// Forwarded is one request the relay adapter handed to the device, awaiting the
-// device's pickup + eventual callback.
+// Forwarded is one request the relay adapter handed to the local device,
+// awaiting the device's pickup and eventual callback.
 type Forwarded struct {
 	FrameID  string
 	Self     actor.ActorID
@@ -31,38 +19,42 @@ type Forwarded struct {
 	Payload  []byte
 }
 
-// Transit is the in-process device transit. The external device side (HTTP/ws on
-// 127.0.0.1, or an embedded driver) calls Take to pull forwarded requests and
-// Callback to return results; the relay adapter calls the Forward seam.
+// Transit is the in-process local device transit. The external device side
+// (HTTP/WS on 127.0.0.1) calls Take to pull forwarded requests and Callback to
+// return results; the relay adapter cell calls the Forward seam.
 type Transit struct {
-	deliver CallbackDeliverer
+	deliverer actorrt.Deliverer
 
 	mu      sync.Mutex
 	pending []Forwarded
 	nextID  int
 }
 
-// New constructs a transit that routes callbacks through deliver (the host).
-func New(deliver CallbackDeliverer) *Transit {
-	return &Transit{deliver: deliver}
+// New constructs a transit that routes dispatch through deliverer.
+func New(deliverer actorrt.Deliverer) *Transit {
+	return &Transit{deliverer: deliverer}
 }
 
-// ForwardFunc returns the ExternalRequestFunc the daemon injects into a relay
-// adapter's InstallDeps.Forward (self = the relay actor). It records the request
-// for the device and returns a FrameID — the cell→device half of the relay.
-func (t *Transit) ForwardFunc(self actor.ActorID) behavior.ExternalRequestFunc {
-	return func(_ context.Context, env *message.Envelope, payload behavior.ExternalRequestPayload) (behavior.ExternalRequestResult, error) {
+// ForwardFunc returns a function the daemon injects into a relay adapter so the
+// adapter can forward requests to the local device. It records the request for
+// the device and returns a frame ID.
+func (t *Transit) ForwardFunc(self actor.ActorID) func(ctx context.Context, env *message.Envelope, payload []byte) (string, error) {
+	return func(_ context.Context, env *message.Envelope, payload []byte) (string, error) {
 		t.mu.Lock()
 		t.nextID++
 		id := fmt.Sprintf("frame-%d", t.nextID)
-		t.pending = append(t.pending, Forwarded{FrameID: id, Self: self, Envelope: env, Payload: []byte(payload)})
+		t.pending = append(t.pending, Forwarded{
+			FrameID:  id,
+			Self:     self,
+			Envelope: env,
+			Payload:  payload,
+		})
 		t.mu.Unlock()
-		return behavior.ExternalRequestResult{FrameID: id}, nil
+		return id, nil
 	}
 }
 
-// Take drains and returns the forwarded requests awaiting the device (the device
-// polls this; a real 127.0.0.1 HTTP endpoint wraps it).
+// Take drains and returns the forwarded requests awaiting the device.
 func (t *Transit) Take() []Forwarded {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -71,12 +63,12 @@ func (t *Transit) Take() []Forwarded {
 	return out
 }
 
-// Callback routes a device's final/lifecycle frame back to the owning adapter
-// cell (device→cell half). The adapter applies it on its goroutine and (for a
-// final) calls ctx.Resolve to write the terminal. Returns the cell's verdict.
-func (t *Transit) Callback(frame behavior.ExternalCallbackFrame) error {
-	if t.deliver == nil {
-		return fmt.Errorf("localdevice: no callback deliverer wired")
+// Callback routes a device's result back to the owning actor cell by delivering
+// an envelope into its mailbox via the Deliverer.
+func (t *Transit) Callback(target actor.ActorID, env *message.Envelope) error {
+	if t.deliverer == nil {
+		return fmt.Errorf("localdevice: no deliverer wired")
 	}
-	return t.deliver.DeliverCallbackFrame(frame)
+	_, err := t.deliverer.Deliver([]actor.ActorID{target}, env)
+	return err
 }

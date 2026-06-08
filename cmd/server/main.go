@@ -44,7 +44,6 @@ func main() {
 		ListenAddr: *addr,
 		APIKey:     *key,
 		Logger:     logger,
-		Metrics:    reg,
 	}); err != nil {
 		log.Fatalf("server: %v", err)
 	}

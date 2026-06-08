@@ -1,12 +1,9 @@
 // Package fleet manages the attached computes (daemons) bound to this server. It
-// receives api-key attach (wire/computebus.AttachRequest), tracks actor→compute
-// assignment + lease (wire/placement), dispatches envelopes DOWN to the hosting
-// compute (computebus.DispatchFrame) and feeds EmitFrames UP into the channel
-// harness. Presence lease reports flow through here into the channel sysactor.
+// receives api-key attach (wire/computebus.AttachRequest), tracks actor->compute
+// assignment via wire/placement.Registry, dispatches envelopes DOWN to the hosting
+// compute (computebus.DispatchFrame), and feeds EmitFrames UP into the channel
+// harness (truth). Death frames and disconnect trigger receiver_unavailable
+// materialisation at the home.
 //
-// Port from: server/daemonbus + server/devicebus + server/catalog +
-// server/placements (v1 view-cache/directory split → one fleet manager over the
-// v2 home↔compute wire).
-//
-// Depends on runtime + lib + wire + internal. MUST NOT import daemon.
+// Depends on runtime + lib + wire. MUST NOT import daemon.
 package fleet

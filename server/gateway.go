@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/google/uuid"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
@@ -15,16 +16,14 @@ import (
 	"github.com/wanpengxie/ActOS/server/channelhost"
 )
 
-// gateway is the client/SDK ingress: it exposes the routes the coagentsdk
-// expects (cursor / messages / actors / ws) over the single-channel home. It is
-// the external-client half of the v2 truth-flip — a client POSTs a request into
-// truth and tails the committed envelopes (responses/events) over a WS push.
+// gateway is the client/SDK ingress: it exposes the routes the SDK expects
+// (cursor / messages / actors / ws) over the single-channel home.
 type gateway struct {
 	home      *channelhost.ChannelHome
 	channelID channel.ID
 }
 
-const clientRequestTTLMs int64 = 30_000 // SDK requests carry no expiry; R5 default.
+const clientRequestTTLMs int64 = 30_000
 
 var gwUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
@@ -77,9 +76,8 @@ func (g *gateway) handleMessages(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
 	sender := g.clientSender(r)
-	// The client is an actor too — register it so its request sender-authenticates.
-	_ = g.home.Registry().Insert(r.Context(), actor.Record{ID: sender, Kind: actor.KindAgent})
 
 	now := time.Now().UnixMilli()
 	exp := now + clientRequestTTLMs
@@ -87,44 +85,64 @@ func (g *gateway) handleMessages(w http.ResponseWriter, r *http.Request) {
 	for _, a := range body.Audience {
 		aud = append(aud, actor.ActorID(a))
 	}
-	env := &message.Envelope{
-		ID: message.ID(body.ID), TS: now, ChannelID: g.channelID,
-		Kind: message.Kind(body.Kind), Type: body.Type,
-		Sender: message.Sender{Kind: actor.KindAgent, ID: sender}, Audience: aud,
-		Payload: body.Payload, ExpiresAt: &exp,
+
+	envID := message.ID(body.ID)
+	if envID == "" {
+		envID = message.ID(uuid.NewString())
 	}
-	cctx := harness.CtxWithCaller(r.Context(), harness.CallerContext{ActorID: sender, ChannelID: g.channelID, AllowProvidedSenderKind: true})
+	kind := message.Kind(body.Kind)
+	if kind == "" {
+		kind = message.KindRequest
+	}
+
+	env := &message.Envelope{
+		ID:        envID,
+		TS:        now,
+		ChannelID: g.channelID,
+		Kind:      kind,
+		Type:      body.Type,
+		Sender:    message.Sender{Kind: actor.KindHuman, ID: sender},
+		Audience:  aud,
+		Payload:   body.Payload,
+		ExpiresAt: &exp,
+	}
+
+	cctx := harness.CtxWithCaller(r.Context(), harness.CallerContext{
+		ActorID:   sender,
+		ChannelID: g.channelID,
+	})
 	res, err := g.home.Dispatch(cctx, env)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]any{
-		"message_id": string(res.MessageID), "accepted": res.RejectReason == "",
-		"reject_reason": string(res.RejectReason), "reject_detail": res.RejectDetail,
+		"message_id":    string(res.MessageID),
+		"accepted":      res.RejectReason == "",
+		"reject_reason": string(res.RejectReason),
+		"reject_detail": res.RejectDetail,
 	})
 }
 
 func (g *gateway) handleActors(w http.ResponseWriter, r *http.Request) {
-	rows, err := g.home.Registry().ListActive(r.Context())
+	rows, err := g.home.ListActiveActors(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	actors := make([]map[string]any, 0, len(rows))
 	for _, rec := range rows {
-		rd := rec.Readiness.Normalize()
 		actors = append(actors, map[string]any{
-			"actor_id": string(rec.ID), "kind": string(rec.Kind), "binding": string(rec.Binding),
-			"ready": rd.IsReady(), "ready_reason": rd.Reason,
+			"actor_id": string(rec.ID),
+			"kind":     string(rec.Kind),
+			"binding":  string(rec.Binding),
 		})
 	}
 	writeJSON(w, map[string]any{"channel_id": string(g.channelID), "actors": actors})
 }
 
 // handleWS upgrades a client subscription and tails committed envelopes forward
-// from the client's cursor, pushing each as a wsPushFrame. The push hub signals
-// "new commits"; the tail reads by seq so nothing is missed.
+// from the client's cursor, pushing each as a wsPushFrame.
 func (g *gateway) handleWS(w http.ResponseWriter, r *http.Request) {
 	ws, err := gwUpgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -148,23 +166,25 @@ func (g *gateway) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer unsub()
 	last := sub.SinceSeq
 	for {
-		envs, err := g.home.ReadAfterSeq(ctx, last, 256)
+		rows, err := g.home.ReadAfterSeq(ctx, last, 256)
 		if err != nil {
 			return
 		}
-		for i := range envs {
-			env := envs[i]
-			raw, mErr := json.Marshal(env)
+		for _, row := range rows {
+			envRaw, mErr := json.Marshal(row.Envelope)
 			if mErr != nil {
 				continue
 			}
 			frame, _ := json.Marshal(map[string]any{
-				"type": "message", "channel_id": string(g.channelID), "seq": env.Seq, "envelope": json.RawMessage(raw),
+				"type":       "message",
+				"channel_id": string(g.channelID),
+				"seq":        row.Seq,
+				"envelope":   json.RawMessage(envRaw),
 			})
 			if err := ws.WriteMessage(websocket.TextMessage, frame); err != nil {
 				return
 			}
-			last = env.Seq
+			last = row.Seq
 		}
 		select {
 		case <-sig:
@@ -174,8 +194,8 @@ func (g *gateway) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// clientSender resolves the client's actor id from the session cookie (a single
-// api-key style identity); empty → a shared "web-client".
+// clientSender resolves the client's actor id from the session cookie;
+// empty -> a shared "web-client".
 func (g *gateway) clientSender(r *http.Request) actor.ActorID {
 	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
 		return actor.ActorID(c.Value)

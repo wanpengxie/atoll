@@ -12,36 +12,33 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 )
 
-// AttachDeclaration is the compact actor declaration a compute ships on attach
-// so the home can register the actor and publish its request types into truth
-// (the compute holds NO truth — registration + type publication are home-side).
+// AttachDeclaration is the actor identity a compute ships on attach so the home
+// can register the actor into membership (the compute holds NO truth —
+// registration is home-side). Type catalog is domain, not wire (type non-first-class).
 type AttachDeclaration struct {
-	ActorID      actor.ActorID
-	Kind         actor.Kind
-	Binding      actor.Binding
-	Types        []string
-	MaxPendingMs int64
+	ActorID actor.ActorID
+	Kind    actor.Kind
+	Binding actor.Binding
 }
 
 // AttachRequest is sent by a compute to join a channel home (lightcone-style:
-// one api-key, one URL). The home authenticates the key and assigns actor-host
-// slots via placement.
+// one api-key, one URL). The home authenticates the key and records the
+// actor→compute assignment.
 type AttachRequest struct {
-	APIKey    string
-	ComputeID string
-	// Declarations are the actors this compute offers to host, with enough to
-	// register them + publish their types into home truth on attach.
+	APIKey       string
+	ComputeID    string
 	Declarations []AttachDeclaration
 }
 
-// AttachReply confirms the attach and carries the assigned channel + epoch.
+// AttachReply confirms the attach and carries the assigned channel.
 type AttachReply struct {
 	ChannelID channel.ID
 	Accepted  bool
 	Reason    string
 }
 
-// Heartbeat keeps the compute's lease fresh (placement lease re-arm).
+// Heartbeat is a keepalive probe (not a fencing-lease). Missed heartbeats →
+// readLoop EOF → death (second source).
 type Heartbeat struct {
 	ComputeID string
 	// Present lists the actor ids whose cells are live on this compute.

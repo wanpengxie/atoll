@@ -1,7 +1,3 @@
-// Package homelink connects an attached compute to its channel home over the
-// computebus WS. See doc.go. It dials the home, attaches with the api-key,
-// receives DispatchFrames for hosted cells, and sends EmitFrames up — blocking
-// on the home's EmitAck so the cell observes the authoritative WriteResult.
 package homelink
 
 import (
@@ -20,9 +16,13 @@ import (
 // DispatchHandler is invoked for each envelope dispatched down from the home.
 type DispatchHandler func(computebus.DispatchFrame)
 
-// heartbeatEvery is the compute→home lease re-arm cadence (well within the
-// home-side presenceLeaseMs window).
+// heartbeatEvery is the compute-to-home keepalive cadence. Well within the
+// home-side presence lease window so the compute stays alive under normal jitter.
 const heartbeatEvery = 10 * time.Second
+
+// emitTimeout is the maximum time an Emit call blocks waiting for the home's
+// EmitAck before returning a timeout error to the UplinkWriter.
+const emitTimeout = 30 * time.Second
 
 // Homelink is the compute-side connection to the channel home.
 type Homelink struct {
@@ -35,9 +35,16 @@ type Homelink struct {
 	onDispatch DispatchHandler
 	computeID  string
 	hostIDs    []actor.ActorID
+
+	// channelID is the channel the home assigned on attach (from AttachReply).
+	channelID string
+
+	done chan struct{} // closed when readLoop exits
 }
 
-// Connect dials the home, attaches, and starts the read loop.
+// Connect dials the home, sends AttachRequest, waits for AttachReply, and
+// starts the readLoop + heartbeatLoop. onDispatch receives inbound
+// DispatchFrames from the home.
 func Connect(ctx context.Context, serverURL, apiKey, computeID string, decls []computebus.AttachDeclaration, onDispatch DispatchHandler) (*Homelink, error) {
 	ws, _, err := websocket.DefaultDialer.DialContext(ctx, serverURL, nil)
 	if err != nil {
@@ -47,11 +54,29 @@ func Connect(ctx context.Context, serverURL, apiKey, computeID string, decls []c
 	for _, d := range decls {
 		hostIDs = append(hostIDs, d.ActorID)
 	}
-	h := &Homelink{ws: ws, pending: map[string]chan computebus.EmitAck{}, onDispatch: onDispatch, computeID: computeID, hostIDs: hostIDs}
-	if err := h.send(computebus.Frame{Type: computebus.FrameAttach, Attach: &computebus.AttachRequest{APIKey: apiKey, ComputeID: computeID, Declarations: decls}}); err != nil {
+	h := &Homelink{
+		ws:         ws,
+		pending:    make(map[string]chan computebus.EmitAck),
+		onDispatch: onDispatch,
+		computeID:  computeID,
+		hostIDs:    hostIDs,
+		done:       make(chan struct{}),
+	}
+
+	// Send AttachRequest.
+	if err := h.send(computebus.Frame{
+		Type: computebus.FrameAttach,
+		Attach: &computebus.AttachRequest{
+			APIKey:       apiKey,
+			ComputeID:    computeID,
+			Declarations: decls,
+		},
+	}); err != nil {
 		_ = ws.Close()
 		return nil, err
 	}
+
+	// Read AttachReply.
 	_, raw, err := ws.ReadMessage()
 	if err != nil {
 		_ = ws.Close()
@@ -60,55 +85,74 @@ func Connect(ctx context.Context, serverURL, apiKey, computeID string, decls []c
 	reply, err := computebus.Decode(raw)
 	if err != nil || reply.Reply == nil || !reply.Reply.Accepted {
 		_ = ws.Close()
-		return nil, errors.New("homelink: attach rejected")
+		reason := "homelink: attach rejected"
+		if reply.Reply != nil && reply.Reply.Reason != "" {
+			reason = "homelink: " + reply.Reply.Reason
+		}
+		return nil, errors.New(reason)
 	}
+	h.channelID = string(reply.Reply.ChannelID)
+
 	go h.readLoop()
 	go h.heartbeatLoop()
 	return h, nil
 }
 
-// heartbeatLoop re-arms the home-side presence lease for this compute's hosted
-// actors. It exits when a send fails (the ws was closed) — no separate stop
-// channel needed.
-func (h *Homelink) heartbeatLoop() {
-	t := time.NewTicker(heartbeatEvery)
-	defer t.Stop()
-	for range t.C {
-		if err := h.send(computebus.Frame{Type: computebus.FrameHeartbeat, Beat: &computebus.Heartbeat{
-			ComputeID: h.computeID, Present: h.hostIDs,
-		}}); err != nil {
-			return
-		}
-	}
-}
+// ChannelID returns the channel assigned by the home on attach.
+func (h *Homelink) ChannelID() string { return h.channelID }
 
-// Emit sends a cell's output up and blocks for the home's EmitAck (the
-// authoritative WriteResult). This is the EmitFunc daemon/host injects.
+// Emit sends a cell's output UP and blocks for the home's EmitAck (the
+// authoritative WriteResult). This is the EmitFunc that daemon/host injects
+// into UplinkWriter. EmitID correlation and timeout are owned here.
 func (h *Homelink) Emit(ctx context.Context, ef computebus.EmitFrame) (computebus.EmitAck, error) {
 	id := uuid.NewString()
 	ch := make(chan computebus.EmitAck, 1)
+
 	h.mu.Lock()
 	h.pending[id] = ch
 	h.mu.Unlock()
+
 	if err := h.send(computebus.Frame{Type: computebus.FrameEmit, Emit: &ef, EmitID: id}); err != nil {
+		h.removePending(id)
 		return computebus.EmitAck{}, err
 	}
+
+	// Block until ack, context cancellation, or timeout.
+	timer := time.NewTimer(emitTimeout)
+	defer timer.Stop()
 	select {
 	case ack := <-ch:
 		return ack, nil
 	case <-ctx.Done():
+		h.removePending(id)
 		return computebus.EmitAck{}, ctx.Err()
+	case <-timer.C:
+		h.removePending(id)
+		return computebus.EmitAck{}, errors.New("homelink: emit timeout")
 	}
 }
 
 // SendDeath propagates a hosted cell's death UP to the home (FrameDeath) so the
 // home materialises receiver_unavailable for the dead actor's in-flight
-// requests. Fire-and-forget: the home owns the closure, the compute just reports.
+// requests. Fire-and-forget.
 func (h *Homelink) SendDeath(a actor.ActorID, cause string) {
-	_ = h.send(computebus.Frame{Type: computebus.FrameDeath, Death: &computebus.DeathFrame{Actor: a, Cause: cause}})
+	_ = h.send(computebus.Frame{
+		Type:  computebus.FrameDeath,
+		Death: &computebus.DeathFrame{Actor: a, Cause: cause},
+	})
 }
 
+// Close tears down the WebSocket connection. readLoop exits on the next
+// ReadMessage error.
+func (h *Homelink) Close() error { return h.ws.Close() }
+
+// Done returns a channel that is closed when the readLoop exits (WS closed or
+// read error). Callers can select on this to detect disconnection.
+func (h *Homelink) Done() <-chan struct{} { return h.done }
+
+// readLoop processes inbound frames from the home.
 func (h *Homelink) readLoop() {
+	defer close(h.done)
 	for {
 		_, raw, err := h.ws.ReadMessage()
 		if err != nil {
@@ -137,6 +181,24 @@ func (h *Homelink) readLoop() {
 	}
 }
 
+// heartbeatLoop sends periodic Heartbeat frames to keep the compute alive on
+// the home side. Exits when a send fails (WS closed).
+func (h *Homelink) heartbeatLoop() {
+	t := time.NewTicker(heartbeatEvery)
+	defer t.Stop()
+	for range t.C {
+		if err := h.send(computebus.Frame{
+			Type: computebus.FrameHeartbeat,
+			Beat: &computebus.Heartbeat{
+				ComputeID: h.computeID,
+				Present:   h.hostIDs,
+			},
+		}); err != nil {
+			return
+		}
+	}
+}
+
 func (h *Homelink) send(f computebus.Frame) error {
 	b, err := computebus.Encode(f)
 	if err != nil {
@@ -147,5 +209,8 @@ func (h *Homelink) send(f computebus.Frame) error {
 	return h.ws.WriteMessage(websocket.TextMessage, b)
 }
 
-// Close tears down the connection.
-func (h *Homelink) Close() error { return h.ws.Close() }
+func (h *Homelink) removePending(id string) {
+	h.mu.Lock()
+	delete(h.pending, id)
+	h.mu.Unlock()
+}

@@ -4,61 +4,57 @@ import (
 	"context"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
-	khrn "github.com/wanpengxie/ActOS/kernel/harness"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-// fanoutChain wraps the harness write chain so EVERY envelope committed to truth
-// is fanned out to its audience AFTER it lands — the single post-commit delivery
-// path. Local audience cells get it in their mailbox; a request addressed to a
-// compute-hosted actor goes down the wire. This is the root fix for "writes don't
-// reach anyone": a cell-originated write (an adapter's response/event, a closure
-// terminal, a compute emit) now fans out exactly like an ingress request, instead
-// of each call-site hand-rolling delivery (or — the bug — silently skipping it,
-// so readiness.changed never reached the sysactor cell and responses never
-// reached a waiting local caller).
+// fanoutWriter wraps harness.Writer (the harness *Chain) so EVERY envelope
+// committed to truth is fanned out to its audience AFTER it lands -- the single
+// post-commit delivery path. Local audience cells get it in their mailbox via
+// Deliverer; a request addressed to a compute-hosted actor goes down the wire
+// via remoteDispatch; and client WS tails are woken via pushHub.
 //
-// It implements kernel/harness.Chain, so it is injected wherever a chain is
-// needed (sysactor / adapters / channelkit death-closure / fleet emits / ingress).
-type fanoutChain struct {
-	inner  khrn.Chain
-	cells  *actorrt.Runtime
-	remote func(actor.ActorID, *message.Envelope) bool
-	// onUndeliverable closes out a REQUEST whose delivery to its target cell
-	// failed (mailbox full / cell stopped) — the receiver structurally cannot
-	// accept it, so the home materialises receiver_unavailable rather than let the
-	// caller hang to the timeout (risk §7.2). nil → drop silently.
-	onUndeliverable func(context.Context, *message.Envelope)
-	// onCommit wakes external client streams (pushHub) after a committed
-	// envelope, so SDK WS tails read forward. nil → no client push.
-	onCommit func()
+// It satisfies harness.Writer so it is injected wherever a writer is needed
+// (sysactor / channelkit death-closure / fleet emits / ingress).
+type fanoutWriter struct {
+	inner    harness.Writer
+	deliverer actorrt.Deliverer
+	// remoteDispatch routes an envelope DOWN to the compute hosting target.
+	// Returns true if dispatched. Nil = no remote computes.
+	remoteDispatch func(actor.ActorID, *message.Envelope) bool
+	// hub wakes external client streams after a committed envelope.
+	hub *pushHub
 }
 
-// Write runs the real 9-step harness write, then — only on a committed envelope
-// (no error, no reject) — delivers it to each audience member: a locally hosted
+// Write runs the real 9-step harness write, then -- only on a committed envelope
+// (no error, no reject) -- delivers it to each audience member: a locally hosted
 // cell receives it in its mailbox; otherwise, for a request, the compute hosting
 // the target is reached down the wire. Delivery is enqueue-only (never blocks the
 // writer), so a cell may Write from its own goroutine without deadlock.
-func (f *fanoutChain) Write(ctx context.Context, env *message.Envelope) (khrn.WriteResult, error) {
+func (f *fanoutWriter) Write(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
 	res, err := f.inner.Write(ctx, env)
 	if err != nil || res.RejectReason != "" {
 		return res, err
 	}
-	if f.onCommit != nil {
-		f.onCommit() // wake external client streams (they read forward by seq)
+
+	// Wake external client streams (they read forward by seq).
+	if f.hub != nil {
+		f.hub.notify()
 	}
-	for _, aid := range env.Audience {
-		switch {
-		case f.cells != nil && f.cells.Has(aid):
-			if derr := f.cells.Deliver(ctx, []actor.ActorID{aid}, env); derr != nil && env.Kind == message.KindRequest && f.onUndeliverable != nil {
-				// Mailbox full / cell stopped — the receiver can't take this
-				// request; close it out instead of hanging the caller.
-				f.onUndeliverable(ctx, env)
+
+	// Deliver to audience: local cells via Deliverer, remote via wire dispatch.
+	if f.deliverer != nil {
+		result, _ := f.deliverer.Deliver(env.Audience, env)
+		// For each audience member not hosted locally, try remote dispatch.
+		if f.remoteDispatch != nil {
+			for aid, outcome := range result.Per {
+				if outcome == actorrt.NotHosted {
+					f.remoteDispatch(aid, env)
+				}
 			}
-		case env.Kind == message.KindRequest && f.remote != nil:
-			f.remote(aid, env)
 		}
 	}
+
 	return res, nil
 }

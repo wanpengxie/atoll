@@ -1,15 +1,8 @@
-// Package localdevice is the local device host on an attached compute — it
-// collapses the v1 two-hop device relay into the compute's own process. It runs
-// the local transport (xhs browser ws listen / kimi 127.0.0.1 HTTP) and feeds
-// device frames into the hosting adapterActor cell via the host's Ask seam, and
-// provides the transport-backed behavior.ExternalRequestFunc injected into
-// relay adapters (proxyfacade) so ctx.ForwardExternalRequest reaches the device.
+// Package localdevice is the local device transit on an attached compute: it
+// bridges a relay adapter cell to a local external device (e.g. an xhs browser
+// or a kimi local worker). The cell-to-device half is the Forward seam; the
+// device-to-cell half is Callback, which routes the device's frame back to the
+// owning cell via the host's Deliver path.
 //
-// Port from: adapters/proxy/daemon/local_xhs.go + adapters/device/xhs edge +
-// framework/devicetransit (the v1 relay, collapsed to one local hop).
-//
-// Depends on runtime + lib + wire + adapters (concrete device modules via cmd).
+// Depends on kernel + runtime/actorrt. MUST NOT import server.
 package localdevice
-
-// Port anchors: adapters/proxy/daemon/local_listen.go + local_xhs.go (local ws
-// listen + xhs browser bridge) + framework/devicetransit (v1 relay, collapse).
