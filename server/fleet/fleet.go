@@ -70,8 +70,9 @@ type actorPipe struct {
 
 // computeState tracks one attached compute's resources.
 type computeState struct {
-	computeID string
-	pipes     []actorPipe
+	computeID    string
+	pipes        []actorPipe
+	teardownOnce sync.Once
 }
 
 // ServeWS upgrades an attaching compute connection and serves its frame loop.
@@ -166,6 +167,15 @@ func (f *Fleet) handleAttach(ctx context.Context, ws *websocket.Conn) (*computeS
 			for _, prev := range state.pipes {
 				prev.cancel()
 				_ = prev.fleetConn.Close()
+			}
+			// Roll back membership registration.
+			if f.membership != nil {
+				nowMs := time.Now().UnixMilli()
+				removes := make([]storespec.MemberActorRemove, len(att.Declarations))
+				for i, d := range att.Declarations {
+					removes[i] = storespec.MemberActorRemove{ID: d.ActorID, At: nowMs}
+				}
+				_ = f.membership.ApplyMemberTransitions(ctx, f.channelID, nil, removes)
 			}
 			_ = sendFrame(ws, computebus.Frame{
 				Type:  computebus.FrameAttachReply,
@@ -264,15 +274,16 @@ func (f *Fleet) attachActor(actorID actor.ActorID) (*actorPipe, error) {
 	}, nil
 }
 
+const wsWriteTimeout = 10 * time.Second
+
 // relayLoop reads ipc frames from the fleet side of a virtual pipe and
 // translates KindDeliver frames into computebus.DispatchFrame sent over WS. It
-// exits when the fleet conn is closed (pipe EOF).
+// exits when the fleet conn is closed (pipe EOF) or the WS write fails.
 func (f *Fleet) relayLoop(ap *actorPipe, ws *websocket.Conn, wsMu *sync.Mutex) {
 	codec := ipc.NewCodec(ap.fleetConn, ap.fleetConn)
 	for {
 		frame, err := codec.Read()
 		if err != nil {
-			// Pipe closed (EOF) or error — actor is gone.
 			return
 		}
 		switch frame.Kind {
@@ -291,6 +302,7 @@ func (f *Fleet) relayLoop(ap *actorPipe, ws *websocket.Conn, wsMu *sync.Mutex) {
 				},
 			}
 			wsMu.Lock()
+			_ = ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 			err = sendFrame(ws, wsFrame)
 			wsMu.Unlock()
 			if err != nil {
@@ -298,7 +310,6 @@ func (f *Fleet) relayLoop(ap *actorPipe, ws *websocket.Conn, wsMu *sync.Mutex) {
 				return
 			}
 		case ipc.KindControl:
-			// Control frames are relayed as-is; for now just log.
 			f.logger.Debug("fleet.relay.control", "actor", ap.actorID)
 		default:
 			f.logger.Warn("fleet.relay.unknown_kind", "actor", ap.actorID, "kind", frame.Kind)
@@ -349,6 +360,7 @@ func (f *Fleet) handleEmit(ctx context.Context, ws *websocket.Conn, wsMu *sync.M
 		ack.Err = err.Error()
 	}
 	wsMu.Lock()
+	_ = ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 	_ = sendFrame(ws, computebus.Frame{Type: computebus.FrameEmitAck, Ack: &ack})
 	wsMu.Unlock()
 }
@@ -373,16 +385,18 @@ func (f *Fleet) handleDeath(state *computeState, fr computebus.Frame) {
 }
 
 // teardownCompute closes all virtual pipes for a compute. Each pipe close
-// causes the actorrt port to see EOF and fire OnDown. Called on WS
-// disconnect (batch death) and on defer cleanup.
+// causes the actorrt port to see EOF and fire OnDown. Safe to call multiple
+// times (idempotent via sync.Once).
 func (f *Fleet) teardownCompute(state *computeState) {
 	if state == nil {
 		return
 	}
-	for i := range state.pipes {
-		state.pipes[i].cancel()
-		_ = state.pipes[i].fleetConn.Close()
-	}
+	state.teardownOnce.Do(func() {
+		for i := range state.pipes {
+			state.pipes[i].cancel()
+			_ = state.pipes[i].fleetConn.Close()
+		}
+	})
 }
 
 func sendFrame(ws *websocket.Conn, f computebus.Frame) error {
