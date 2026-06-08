@@ -17,39 +17,11 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// OpenRequestSource provides the set of in-flight requests addressed to a given
-// actor (those without a final response). The interface is narrow by design —
-// only what the closure-doer needs to materialise receiver_unavailable on a
-// presence-down edge — and returns storespec.StoredRow so it can read each row's
-// Envelope.
-type OpenRequestSource interface {
-	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID) ([]storespec.StoredRow, error)
-}
-
-// sysSender is the channel system actor identity — author#3 (substrate death)
-// stamps it on every receiver_unavailable terminal; harness Step 8 authorises
-// sender==system + reason==receiver_unavailable as the substrate author.
 var sysSender = message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
-
-// openRequests adapts the channel's OpenRequestSource (storespec.StoredRow) into
-// behavior.OpenRequests (pure *message.Envelope) so author#3 stays pure-kernel.
-type openRequests struct{ src OpenRequestSource }
-
-func (o openRequests) OpenRequestsForActor(ctx context.Context, id actor.ActorID) ([]*message.Envelope, error) {
-	rows, err := o.src.OpenRequestsForActor(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	envs := make([]*message.Envelope, len(rows))
-	for i := range rows {
-		env := rows[i].Envelope
-		envs[i] = &env
-	}
-	return envs, nil
-}
 
 // Channel is one assembled channel: actorrt runtime + system cell + the
 // presence-down closure wiring (writer + open-request source).
@@ -70,8 +42,8 @@ type Channel struct {
 	// actor. nil writer/openReqs → OnDown writes no terminals locally (the dead
 	// cell already self-evicted); the caller is responsible for closing the
 	// in-flight requests elsewhere.
-	writer   behavior.ResponseWriter
-	openReqs OpenRequestSource
+	writer   harness.Writer
+	openReqs storespec.MessageQuery
 	clock    func() time.Time
 
 	// logger surfaces closure-drain FAULTS (a swallowed drain failure is a
@@ -87,11 +59,10 @@ type Config struct {
 	// types.
 	System actorrt.Actor
 	// Writer + OpenRequests wire the presence-down closure (author #3). Writer is
-	// a harness-backed ResponseWriter the composition root injects already stamped
-	// with the system caller context — the runtime→pure-seam bridge is composition
-	// glue, never built here, so channelkit needs no runtime/harness import.
-	Writer       behavior.ResponseWriter
-	OpenRequests OpenRequestSource
+	// a harness.Writer the composition root injects already stamped with the
+	// system caller context.
+	Writer       harness.Writer
+	OpenRequests storespec.MessageQuery
 	Clock        func() time.Time
 	// Logger surfaces closure-drain faults. nil → discard (silent).
 	Logger *slog.Logger
@@ -168,8 +139,7 @@ func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
 			"channel", c.channelID, "dead_actor", id, "request", reqID, "err", err)
 	}
 	if err := behavior.MaterialiseReceiverUnavailable(ctx,
-		c.writer,
-		openRequests{src: c.openReqs},
+		c.writer, c.openReqs,
 		c.clock, sysSender, id, onFault); err != nil {
 		// The drain query failed → no caller of the dead actor can be closed →
 		// every one is a black hole. The loudest fault the watcher can hit.

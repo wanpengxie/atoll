@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // call.go is the CALL face — closure author#2, the half of gen_server:call the
@@ -28,20 +29,18 @@ import (
 // runs serially on the single cell goroutine. So `pending` needs no lock. A
 // timer's fireTimeout runs OFF the cell goroutine (the timer's own goroutine)
 // but NEVER touches `pending`: it holds only an immutable request snapshot, the
-// caller's sender, and the writer (the writer is concurrency-safe per the
-// ResponseWriter contract). The race between a timer fire and a late real
-// terminal from the receiver is resolved by the harness one-terminal-per-request
-// UNIQUE INDEX — the loser gets WriteOutcome.Duplicate=true, which is benign.
+// caller's sender, and the writer (concurrency-safe per harness.Writer contract).
+// The race between a timer fire and a late real terminal from the receiver is
+// resolved by the harness one-terminal-per-request UNIQUE INDEX — the loser gets
+// RejectReason=HarnessTerminalDuplicate, which is benign.
 type Caller struct {
 	sender  message.Sender
-	writer  ResponseWriter
+	writer  harness.Writer
 	clock   func() time.Time
-	pending map[message.ID]*time.Timer // key=request id; value=timer (nil = in-flight, no deadline)
+	pending map[message.ID]*time.Timer
 }
 
-// NewCaller constructs a Caller. sender = the owning actor's own identity (the
-// sender stamped on author#2 timeout terminals it produces).
-func NewCaller(sender message.Sender, writer ResponseWriter, clock func() time.Time) *Caller {
+func NewCaller(sender message.Sender, writer harness.Writer, clock func() time.Time) *Caller {
 	return &Caller{
 		sender:  sender,
 		writer:  writer,

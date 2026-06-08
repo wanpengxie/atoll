@@ -6,6 +6,8 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
 // death.go holds substrate-death — closure author#3 — alongside the other two
@@ -26,21 +28,19 @@ import (
 // bad request does not strand the rest.
 func MaterialiseReceiverUnavailable(
 	ctx context.Context,
-	writer ResponseWriter,
-	openReqs OpenRequests,
+	writer harness.Writer,
+	query storespec.MessageQuery,
 	clock func() time.Time,
 	sender message.Sender,
 	dead actor.ActorID,
 	onFault func(reqID message.ID, err error),
 ) error {
-	reqs, err := openReqs.OpenRequestsForActor(ctx, dead)
+	rows, err := query.OpenRequestsForActor(ctx, dead)
 	if err != nil {
 		return err
 	}
-	for _, req := range reqs {
-		if req == nil {
-			continue
-		}
+	for i := range rows {
+		req := &rows[i].Envelope
 		if _, werr := Respond(ctx, writer, clock, req, sender, ResponseSpec{
 			Status: "failed",
 			Reason: string(message.TerminalReceiverUnavailable),

@@ -27,6 +27,7 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/lib/introspect"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
@@ -47,8 +48,8 @@ type PresenceStat interface {
 // own.
 type SystemActor struct {
 	registry storespec.Registry
-	writer   behavior.ResponseWriter
-	lookup   behavior.RequestLookup
+	writer harness.Writer
+	lookup storespec.RequestLookup
 	clock    func() time.Time
 	stat     PresenceStat
 }
@@ -62,11 +63,10 @@ var sysSender = message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
 type Deps struct {
 	Registry storespec.Registry
 	// Writer commits the serve response into truth. The composition root injects a
-	// harness-backed ResponseWriter already stamped with the system caller context
-	// (so the harness ACL authenticates the write) — the runtime→pure-seam bridge
-	// is composition glue, never built here, keeping sysactor pure-behavior.
-	Writer behavior.ResponseWriter
-	Lookup behavior.RequestLookup
+	// harness.Writer already stamped with the system caller context (so the harness
+	// ACL authenticates the write).
+	Writer harness.Writer
+	Lookup storespec.RequestLookup
 	Clock  func() time.Time
 	// Stat is the obs-read seam over the substrate's authoritative presence +
 	// bind-instant. Nil → actor.list reports everyone absent.

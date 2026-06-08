@@ -10,6 +10,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // respond.go is the SERVE WRITE primitive — closure author#1, ONE
@@ -28,7 +29,7 @@ import (
 // sender = the answering actor's own identity. author#1.
 func Respond(
 	ctx context.Context,
-	writer ResponseWriter,
+	writer harness.Writer,
 	clock func() time.Time,
 	request *message.Envelope,
 	sender message.Sender,
@@ -51,7 +52,7 @@ func Respond(
 	if werr != nil {
 		return "", fmt.Errorf("behavior: respond write: %w", werr)
 	}
-	if out.Duplicate {
+	if out.RejectReason == harness.HarnessTerminalDuplicate {
 		return out.MessageID, nil
 	}
 	if out.RejectReason != "" {
@@ -65,7 +66,7 @@ func Respond(
 // payload reason context; it is opaque to the base.
 func CollapseInternalError(
 	ctx context.Context,
-	writer ResponseWriter,
+	writer harness.Writer,
 	clock func() time.Time,
 	request *message.Envelope,
 	sender message.Sender,
@@ -90,7 +91,7 @@ func CollapseInternalError(
 // kind-neutral: sender carries whatever actor authored the event.
 func EmitEvent(
 	ctx context.Context,
-	writer ResponseWriter,
+	writer harness.Writer,
 	clock func() time.Time,
 	channelID channel.ID,
 	sender message.Sender,
@@ -117,7 +118,7 @@ func EmitEvent(
 	if err != nil {
 		return "", fmt.Errorf("behavior: emit write: %w", err)
 	}
-	if out.RejectReason != "" {
+	if !out.Accepted() {
 		return "", fmt.Errorf("behavior: emit rejected: %s (%s)", out.RejectReason, out.RejectDetail)
 	}
 	return out.MessageID, nil

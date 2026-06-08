@@ -10,8 +10,8 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/lib/channelkit"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
@@ -43,26 +43,26 @@ func TestOnDown_DoesNotDespawnSuccessor(t *testing.T) {
 	}
 }
 
-// fakeWriter records written terminals (the pure behavior.ResponseWriter seam
-// the composition root injects in production).
+// fakeWriter records written terminals.
 type fakeWriter struct {
 	mu      sync.Mutex
 	written []*message.Envelope
 }
 
-func (f *fakeWriter) Write(_ context.Context, env *message.Envelope) (behavior.WriteOutcome, error) {
+func (f *fakeWriter) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.written = append(f.written, env)
-	return behavior.WriteOutcome{MessageID: env.ID}, nil
+	return harness.WriteResult{MessageID: env.ID}, nil
 }
 func (f *fakeWriter) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.written) }
 
-// fakeOpenReqs returns canned in-flight request rows for a dead actor (matching
-// the substrate storespec.StoredRow shape the real store returns).
-type fakeOpenReqs struct{ reqs []storespec.StoredRow }
+// fakeQuery satisfies storespec.MessageQuery for tests.
+type fakeQuery struct{ reqs []storespec.StoredRow }
 
-func (f fakeOpenReqs) OpenRequestsForActor(context.Context, actor.ActorID) ([]storespec.StoredRow, error) {
+func (f fakeQuery) MaxSeq(context.Context) (int64, error)                              { return 0, nil }
+func (f fakeQuery) ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error) { return nil, nil }
+func (f fakeQuery) OpenRequestsForActor(context.Context, actor.ActorID) ([]storespec.StoredRow, error) {
 	return f.reqs, nil
 }
 
@@ -82,7 +82,7 @@ func TestOnDown_MaterialisesReceiverUnavailable(t *testing.T) {
 	ch := channelkit.New(channelkit.Config{
 		ChannelID:    "ch",
 		Writer:       fc,
-		OpenRequests: fakeOpenReqs{reqs: []storespec.StoredRow{{Envelope: req}}},
+		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
 		Clock:        time.Now,
 	})
 	ch.Cells().Spawn("worker", panicActor{})
@@ -120,9 +120,11 @@ func TestOnDown_MaterialisesReceiverUnavailable(t *testing.T) {
 
 // errOpenReqs fails the drain query — the worst closure case (no request can be
 // closed → every caller is a black hole). The watcher MUST NOT swallow it.
-type errOpenReqs struct{}
+type errQuery struct{}
 
-func (errOpenReqs) OpenRequestsForActor(context.Context, actor.ActorID) ([]storespec.StoredRow, error) {
+func (errQuery) MaxSeq(context.Context) (int64, error)                              { return 0, nil }
+func (errQuery) ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error) { return nil, nil }
+func (errQuery) OpenRequestsForActor(context.Context, actor.ActorID) ([]storespec.StoredRow, error) {
 	return nil, errors.New("store down")
 }
 
@@ -149,7 +151,7 @@ func TestClosureDrainFailure_IsSurfaced(t *testing.T) {
 	ch := channelkit.New(channelkit.Config{
 		ChannelID:    "ch",
 		Writer:       &fakeWriter{},
-		OpenRequests: errOpenReqs{},
+		OpenRequests: errQuery{},
 		Clock:        time.Now,
 		Logger:       slog.New(h),
 	})
@@ -168,8 +170,8 @@ func TestClosureDrainFailure_IsSurfaced(t *testing.T) {
 // not drain-level.
 type errWriter struct{}
 
-func (errWriter) Write(context.Context, *message.Envelope) (behavior.WriteOutcome, error) {
-	return behavior.WriteOutcome{}, errors.New("write down")
+func (errWriter) Write(context.Context, *message.Envelope) (harness.WriteResult, error) {
+	return harness.WriteResult{}, errors.New("write down")
 }
 
 // TestOnDown_PerRequestWriteFault_IsLogged proves that when the drain query
@@ -190,7 +192,7 @@ func TestOnDown_PerRequestWriteFault_IsLogged(t *testing.T) {
 	ch := channelkit.New(channelkit.Config{
 		ChannelID:    "ch",
 		Writer:       errWriter{},
-		OpenRequests: fakeOpenReqs{reqs: []storespec.StoredRow{{Envelope: req}}},
+		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
 		Clock:        time.Now,
 		Logger:       slog.New(h),
 	})

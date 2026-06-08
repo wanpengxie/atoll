@@ -10,11 +10,10 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-// recordingWriter is a concurrency-safe ResponseWriter test double. It records
-// every committed envelope and can be configured to report Duplicate (the
-// benign one-terminal-per-request loss) or an error.
+// recordingWriter is a concurrency-safe harness.Writer test double.
 type recordingWriter struct {
 	mu        sync.Mutex
 	writes    []*message.Envelope
@@ -24,7 +23,7 @@ type recordingWriter struct {
 	once      sync.Once
 }
 
-func (w *recordingWriter) Write(_ context.Context, env *message.Envelope) (WriteOutcome, error) {
+func (w *recordingWriter) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
 	w.mu.Lock()
 	w.writes = append(w.writes, env)
 	dup := w.duplicate
@@ -34,9 +33,13 @@ func (w *recordingWriter) Write(_ context.Context, env *message.Envelope) (Write
 		w.once.Do(func() { close(w.signal) })
 	}
 	if err != nil {
-		return WriteOutcome{}, err
+		return harness.WriteResult{}, err
 	}
-	return WriteOutcome{MessageID: env.ID, Duplicate: dup}, nil
+	r := harness.WriteResult{MessageID: env.ID}
+	if dup {
+		r.RejectReason = harness.HarnessTerminalDuplicate
+	}
+	return r, nil
 }
 
 func (w *recordingWriter) count() int {
@@ -207,8 +210,7 @@ func TestCaller_FireTimeoutDoesNotTouchPending(t *testing.T) {
 }
 
 // A timer-fire write that loses the one-terminal-per-request race
-// (Duplicate=true) is benign: fireTimeout ignores the outcome and does not
-// panic / mutate state.
+// (HarnessTerminalDuplicate) is benign: fireTimeout ignores the outcome.
 func TestCaller_FireTimeoutDuplicateBenign(t *testing.T) {
 	sig := make(chan struct{})
 	w := &recordingWriter{signal: sig, duplicate: true}

@@ -8,8 +8,8 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/lib/sysactor"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
@@ -24,13 +24,12 @@ func (f fakeRegistry) ListActive(context.Context) ([]storespec.Record, error) {
 	return f.rows, nil
 }
 
-// fakeWriter records the system actor's written response (the pure
-// behavior.ResponseWriter seam the composition root injects in production).
+// fakeWriter records the system actor's written response.
 type fakeWriter struct{ written []*message.Envelope }
 
-func (w *fakeWriter) Write(_ context.Context, env *message.Envelope) (behavior.WriteOutcome, error) {
+func (w *fakeWriter) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
 	w.written = append(w.written, env)
-	return behavior.WriteOutcome{MessageID: env.ID}, nil
+	return harness.WriteResult{MessageID: env.ID}, nil
 }
 
 // fakeLookup returns the original request so Respond can anchor the response to it.

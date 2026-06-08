@@ -8,16 +8,32 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// openReqsStub is an OpenRequests double: returns a fixed set or an error.
-type openReqsStub struct {
-	reqs []*message.Envelope
+// queryStub satisfies storespec.MessageQuery for tests.
+type queryStub struct {
+	rows []storespec.StoredRow
 	err  error
 }
 
-func (o *openReqsStub) OpenRequestsForActor(_ context.Context, _ actor.ActorID) ([]*message.Envelope, error) {
-	return o.reqs, o.err
+func (q *queryStub) MaxSeq(context.Context) (int64, error) { return 0, nil }
+func (q *queryStub) ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error) {
+	return nil, nil
+}
+func (q *queryStub) OpenRequestsForActor(_ context.Context, _ actor.ActorID) ([]storespec.StoredRow, error) {
+	return q.rows, q.err
+}
+
+func envsToRows(envs []*message.Envelope) []storespec.StoredRow {
+	var rows []storespec.StoredRow
+	for _, e := range envs {
+		if e == nil {
+			continue
+		}
+		rows = append(rows, storespec.StoredRow{Envelope: *e})
+	}
+	return rows
 }
 
 func sysSender() message.Sender {
@@ -28,17 +44,16 @@ func sysSender() message.Sender {
 // each in-flight request to the dead actor, and skips nil entries.
 func TestMaterialise_WritesPerRequest(t *testing.T) {
 	w := &recordingWriter{}
-	or := &openReqsStub{reqs: []*message.Envelope{
+	q := &queryStub{rows: envsToRows([]*message.Envelope{
 		newRequest("a", nil),
-		nil, // must be skipped, not panic
 		newRequest("b", nil),
-	}}
-	err := MaterialiseReceiverUnavailable(context.Background(), w, or, fixedClock(1), sysSender(), actor.ActorID("dead"), nil)
+	})}
+	err := MaterialiseReceiverUnavailable(context.Background(), w, q, fixedClock(1), sysSender(), actor.ActorID("dead"), nil)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 	if w.count() != 2 {
-		t.Fatalf("want 2 terminals (nil skipped), got %d", w.count())
+		t.Fatalf("want 2 terminals, got %d", w.count())
 	}
 	for _, term := range w.writes {
 		if term.Kind != message.KindResponse {
@@ -61,8 +76,8 @@ func TestMaterialise_WritesPerRequest(t *testing.T) {
 // A drain-query failure is the loudest fault: returns the error, writes nothing.
 func TestMaterialise_DrainQueryFailureReturnsError(t *testing.T) {
 	w := &recordingWriter{}
-	or := &openReqsStub{err: errors.New("store down")}
-	err := MaterialiseReceiverUnavailable(context.Background(), w, or, fixedClock(1), sysSender(), actor.ActorID("dead"), nil)
+	q := &queryStub{err: errors.New("store down")}
+	err := MaterialiseReceiverUnavailable(context.Background(), w, q, fixedClock(1), sysSender(), actor.ActorID("dead"), nil)
 	if err == nil {
 		t.Fatal("a drain-query failure must return an error")
 	}
@@ -75,10 +90,10 @@ func TestMaterialise_DrainQueryFailureReturnsError(t *testing.T) {
 // bad request must not strand the others.
 func TestMaterialise_PerRequestWriteFaultContinues(t *testing.T) {
 	w := &recordingWriter{err: errors.New("write boom")}
-	or := &openReqsStub{reqs: []*message.Envelope{newRequest("a", nil), newRequest("b", nil)}}
+	q := &queryStub{rows: envsToRows([]*message.Envelope{newRequest("a", nil), newRequest("b", nil)})}
 
 	var faults []message.ID
-	err := MaterialiseReceiverUnavailable(context.Background(), w, or, fixedClock(1), sysSender(), actor.ActorID("dead"),
+	err := MaterialiseReceiverUnavailable(context.Background(), w, q, fixedClock(1), sysSender(), actor.ActorID("dead"),
 		func(reqID message.ID, ferr error) { faults = append(faults, reqID) })
 	if err != nil {
 		t.Fatalf("per-request faults must not return a top-level error: %v", err)
@@ -92,8 +107,8 @@ func TestMaterialise_PerRequestWriteFaultContinues(t *testing.T) {
 // and the loop still continues.
 func TestMaterialise_NilOnFaultIgnored(t *testing.T) {
 	w := &recordingWriter{err: errors.New("write boom")}
-	or := &openReqsStub{reqs: []*message.Envelope{newRequest("a", nil), newRequest("b", nil)}}
-	err := MaterialiseReceiverUnavailable(context.Background(), w, or, fixedClock(1), sysSender(), actor.ActorID("dead"), nil)
+	q := &queryStub{rows: envsToRows([]*message.Envelope{newRequest("a", nil), newRequest("b", nil)})}
+	err := MaterialiseReceiverUnavailable(context.Background(), w, q, fixedClock(1), sysSender(), actor.ActorID("dead"), nil)
 	if err != nil {
 		t.Fatalf("nil onFault must not surface an error: %v", err)
 	}

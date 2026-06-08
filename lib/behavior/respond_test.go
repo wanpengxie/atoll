@@ -9,17 +9,17 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-// rejectWriter is a ResponseWriter double that reports a reject reason on Write
-// (the runtime errno path projected to the base as an opaque diagnostic).
+// rejectWriter is a harness.Writer double that reports a reject reason.
 type rejectWriter struct {
 	reason string
 	detail string
 }
 
-func (w *rejectWriter) Write(_ context.Context, env *message.Envelope) (WriteOutcome, error) {
-	return WriteOutcome{MessageID: env.ID, RejectReason: w.reason, RejectDetail: w.detail}, nil
+func (w *rejectWriter) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
+	return harness.WriteResult{MessageID: env.ID, RejectReason: harness.HarnessRejectReason(w.reason), RejectDetail: w.detail}, nil
 }
 
 // svcSender is the answering actor's own identity.
@@ -127,8 +127,8 @@ func TestRespond_WriteErrorPropagates(t *testing.T) {
 	}
 }
 
-// A Duplicate outcome (lost one-terminal-per-request race) returns the message
-// id with no error — benign.
+// A terminal-duplicate reject (lost one-terminal-per-request race) returns the
+// message id with no error — benign.
 func TestRespond_DuplicateBenign(t *testing.T) {
 	w := &recordingWriter{duplicate: true}
 	id, err := Respond(context.Background(), w, fixedClock(1), newRequest("r1", nil), svcSender(), ResponseSpec{

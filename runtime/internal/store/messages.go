@@ -113,10 +113,7 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 
 	// INSERT row. env.id is a caller-generated random uuid: uniqueness is a
 	// pure integrity constraint, so a collision is an error (no dedup path).
-	audJSON, err := json.Marshal(env.Audience)
-	if err != nil {
-		return storespec.AppendResult{}, fmt.Errorf("store: append audience encode: %w", err)
-	}
+	audJSON, _ := json.Marshal(env.Audience)
 
 	const ins = `INSERT INTO messages (
 	   id, ts, ts_received, channel_id,
@@ -143,11 +140,7 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 	if err != nil {
 		return storespec.AppendResult{}, classifyAppendErr(err, string(env.ID))
 	}
-	seq, err := res.LastInsertId()
-	if err != nil {
-		return storespec.AppendResult{}, fmt.Errorf("store: append last id: %w", err)
-	}
-
+	seq, _ := res.LastInsertId()
 	return storespec.AppendResult{Seq: storespec.Seq(seq)}, nil
 }
 

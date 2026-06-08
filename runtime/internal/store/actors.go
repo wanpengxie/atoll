@@ -197,10 +197,7 @@ func (r *actorRegistry) ApplyMemberTransitions(
 		if !changed {
 			continue
 		}
-		env, err := actorRegisteredEnvelope(channelID, add)
-		if err != nil {
-			return err
-		}
+		env := actorRegisteredEnvelope(channelID, add)
 		if _, err := appendTx(ctx, tx, env, false); err != nil {
 			return fmt.Errorf("store: actor registered mirror %q: %w", add.ID, err)
 		}
@@ -219,10 +216,7 @@ func (r *actorRegistry) ApplyMemberTransitions(
 		if !changed {
 			continue
 		}
-		env, err := actorDeregisteredEnvelope(channelID, remove)
-		if err != nil {
-			return err
-		}
+		env := actorDeregisteredEnvelope(channelID, remove)
 		if _, err := appendTx(ctx, tx, env, false); err != nil {
 			return fmt.Errorf("store: actor deregistered mirror %q: %w", remove.ID, err)
 		}
@@ -281,25 +275,18 @@ func (r *actorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, rem
 	if err != nil {
 		return false, fmt.Errorf("store: actor member deregister %q: %w", remove.ID, err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
+	n, _ := res.RowsAffected()
 	return n == 1, nil
 }
 
-func actorRegisteredEnvelope(channelID channel.ID, add storespec.MemberActorAdd) (*message.Envelope, error) {
-	payloadMap := map[string]any{
+func actorRegisteredEnvelope(channelID channel.ID, add storespec.MemberActorAdd) *message.Envelope {
+	payload, _ := json.Marshal(map[string]any{
 		"actor_id":      add.ID,
 		"actor_kind":    add.Kind,
 		"actor_binding": add.Binding,
 		"registered_at": add.At,
-	}
-	payload, err := json.Marshal(payloadMap)
-	if err != nil {
-		return nil, err
-	}
-	env := &message.Envelope{
+	})
+	return &message.Envelope{
 		ID:         message.ID(fmt.Sprintf("%s:%s:%d", actor.ReservedSystemActorRegistered, add.ID, add.At)),
 		TS:         add.At,
 		TSReceived: add.At,
@@ -311,18 +298,14 @@ func actorRegisteredEnvelope(channelID channel.ID, add storespec.MemberActorAdd)
 		Visibility: message.VisibilitySystem,
 		Audience:   message.Audience{actor.SystemActorID},
 	}
-	return env, nil
 }
 
-func actorDeregisteredEnvelope(channelID channel.ID, remove storespec.MemberActorRemove) (*message.Envelope, error) {
-	payload, err := json.Marshal(map[string]any{
+func actorDeregisteredEnvelope(channelID channel.ID, remove storespec.MemberActorRemove) *message.Envelope {
+	payload, _ := json.Marshal(map[string]any{
 		"actor_id":        remove.ID,
 		"deregistered_at": remove.At,
 	})
-	if err != nil {
-		return nil, err
-	}
-	env := &message.Envelope{
+	return &message.Envelope{
 		ID:         message.ID(fmt.Sprintf("%s:%s:%d", actor.ReservedSystemActorDeregistered, remove.ID, remove.At)),
 		TS:         remove.At,
 		TSReceived: remove.At,
@@ -334,5 +317,4 @@ func actorDeregisteredEnvelope(channelID channel.ID, remove storespec.MemberActo
 		Visibility: message.VisibilitySystem,
 		Audience:   message.Audience{actor.SystemActorID},
 	}
-	return env, nil
 }
