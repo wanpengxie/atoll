@@ -5,6 +5,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/platform/computebus"
 )
 
@@ -68,6 +69,15 @@ func (h *Host) Install(id actor.ActorID, impl actorrt.Actor) *UplinkWriter {
 	w := NewUplinkWriter(id, h.emit)
 	h.rt.Spawn(id, impl)
 	return w
+}
+
+// InstallFunc spawns an actor constructed by a factory function. The factory
+// receives the UplinkWriter so it can wire the actor's output to the home
+// harness. This is useful when the actor needs the writer at construction time.
+func (h *Host) InstallFunc(id actor.ActorID, factory func(harness.Writer) actorrt.Actor) {
+	w := NewUplinkWriter(id, h.emit)
+	impl := factory(w)
+	h.rt.Spawn(id, impl)
 }
 
 // Dispatch routes an inbound DispatchFrame to the hosted cell's mailbox.

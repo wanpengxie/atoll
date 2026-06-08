@@ -30,18 +30,24 @@ type Config struct {
 	Runtime    *actorrt.Runtime
 	Membership storespec.MembershipControlPlane
 	ChannelID  channel.ID
-	APIKey     string
-	Logger     *slog.Logger
+
+	// AuthFunc authenticates an attaching compute's API key. It returns the
+	// daemon identifier on success, or an error to reject the attach. If nil,
+	// all attaches are accepted (dev mode) and the compute's self-declared ID
+	// is used.
+	AuthFunc func(apiKey string) (daemonID string, err error)
+
+	Logger *slog.Logger
 }
 
 // Fleet is a WS-to-virtual-pipe multiplexer: the physical layer of the channel
-// home. It owns no business logic — that lives in channelhost / actorrt.
+// home. It owns no business logic -- that lives in channelhost / actorrt.
 type Fleet struct {
 	writer     harness.Writer
 	runtime    *actorrt.Runtime
 	membership storespec.MembershipControlPlane
 	channelID  channel.ID
-	apiKey     string
+	authFunc   func(apiKey string) (string, error)
 	logger     *slog.Logger
 }
 
@@ -56,7 +62,7 @@ func New(cfg Config) *Fleet {
 		runtime:    cfg.Runtime,
 		membership: cfg.Membership,
 		channelID:  cfg.ChannelID,
-		apiKey:     cfg.APIKey,
+		authFunc:   cfg.AuthFunc,
 		logger:     logger,
 	}
 }
@@ -64,7 +70,7 @@ func New(cfg Config) *Fleet {
 // actorPipe tracks one daemon actor's virtual pipe.
 type actorPipe struct {
 	actorID   actor.ActorID
-	fleetConn net.Conn // fleet side of the pipe — relay reads from here
+	fleetConn net.Conn // fleet side of the pipe -- relay reads from here
 	cancel    context.CancelFunc
 }
 
@@ -107,15 +113,15 @@ func (f *Fleet) ServeWS(w http.ResponseWriter, r *http.Request) {
 	// WS read loop.
 	f.wsReadLoop(r.Context(), ws, &wsMu, state)
 
-	// WS closed or errored — tear down all pipes (defer teardownCompute), then
+	// WS closed or errored -- tear down all pipes (defer teardownCompute), then
 	// wait for relay goroutines to notice pipe closure and exit.
 	f.teardownCompute(state)
 	relayWG.Wait()
 }
 
-// handleAttach reads the AttachRequest, verifies the api-key, registers actors
-// in membership and sets up virtual pipes + actorrt.Attach for each declared
-// actor. Returns the compute state or an error.
+// handleAttach reads the AttachRequest, authenticates via authFunc, registers
+// actors in membership and sets up virtual pipes + actorrt.Attach for each
+// declared actor. Returns the compute state or an error.
 func (f *Fleet) handleAttach(ctx context.Context, ws *websocket.Conn) (*computeState, error) {
 	// First WS message must be AttachRequest.
 	_, raw, err := ws.ReadMessage()
@@ -128,13 +134,18 @@ func (f *Fleet) handleAttach(ctx context.Context, ws *websocket.Conn) (*computeS
 	}
 	att := first.Attach
 
-	// Verify api-key.
-	if f.apiKey != "" && att.APIKey != f.apiKey {
-		_ = sendFrame(ws, computebus.Frame{
-			Type:  computebus.FrameAttachReply,
-			Reply: &computebus.AttachReply{Accepted: false, Reason: "bad api-key"},
-		})
-		return nil, fmt.Errorf("bad api-key from compute %s", att.ComputeID)
+	// Authenticate via authFunc.
+	computeID := att.ComputeID
+	if f.authFunc != nil {
+		daemonID, authErr := f.authFunc(att.APIKey)
+		if authErr != nil {
+			_ = sendFrame(ws, computebus.Frame{
+				Type:  computebus.FrameAttachReply,
+				Reply: &computebus.AttachReply{Accepted: false, Reason: authErr.Error()},
+			})
+			return nil, fmt.Errorf("auth failed from compute %s: %w", att.ComputeID, authErr)
+		}
+		computeID = daemonID
 	}
 
 	// Register compute actors into membership store.
@@ -159,7 +170,7 @@ func (f *Fleet) handleAttach(ctx context.Context, ws *websocket.Conn) (*computeS
 	}
 
 	// Set up virtual pipes and actorrt.Attach for each declared actor.
-	state := &computeState{computeID: att.ComputeID}
+	state := &computeState{computeID: computeID}
 	for _, decl := range att.Declarations {
 		ap, err := f.attachActor(decl.ActorID)
 		if err != nil {
@@ -192,7 +203,7 @@ func (f *Fleet) handleAttach(ctx context.Context, ws *websocket.Conn) (*computeS
 		Reply: &computebus.AttachReply{ChannelID: f.channelID, Accepted: true},
 	})
 
-	f.logger.Info("fleet.attached", "compute", att.ComputeID,
+	f.logger.Info("fleet.attached", "compute", computeID,
 		"actors", len(att.Declarations))
 	return state, nil
 }
@@ -367,7 +378,7 @@ func (f *Fleet) handleEmit(ctx context.Context, ws *websocket.Conn, wsMu *sync.M
 
 // handleDeath closes the pipe for the dead actor. The pipe close causes the
 // port's readLoop to see EOF, triggering die() and the OnDown edge
-// automatically — no manual callback needed.
+// automatically -- no manual callback needed.
 func (f *Fleet) handleDeath(state *computeState, fr computebus.Frame) {
 	if fr.Death == nil {
 		return

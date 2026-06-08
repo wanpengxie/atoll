@@ -17,7 +17,6 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/lib/behavior/futurereg"
 )
 
 const (
@@ -487,19 +486,18 @@ func (c *Client) Watch(ctx context.Context, channelID, requestID string, opts ..
 		return nil, fmt.Errorf("coagentsdk: websocket subscribe: %w", err)
 	}
 
-	// Matching / final-before-await buffering / disposition is delegated to
-	// the shared futurereg core (§3.0) so the SDK transport never re-derives
-	// parent_id matching or IsFinal classification — the same package backs
-	// the in-daemon router and the kimi worker helper, so semantics cannot
-	// drift. The SDK transport is purely "how envelopes arrive" (WS read).
-	reg := futurereg.New()
-	handle := reg.Register(message.ID(requestID))
-	fwatch, err := handle.Watch()
-	if err != nil {
-		_ = ws.Close()
-		cancel()
-		return nil, fmt.Errorf("coagentsdk: register watch: %w", err)
+	// matched carries envelopes whose parent_id == requestID from the WS
+	// reader goroutine to the forwarder goroutine (the sole writer of the
+	// SDK events channel). Each item is a matchedEnvelope carrying the
+	// parsed envelope and whether it is a final response. The reader
+	// closes matched after a final or a transport error; the forwarder
+	// observes closure and tears down.
+	type matchedEnvelope struct {
+		env     *message.Envelope
+		isFinal bool
+		err     error
 	}
+	matched := make(chan matchedEnvelope, 16)
 
 	events := make(chan WatchEvent, 16)
 	done := make(chan struct{})
@@ -525,64 +523,57 @@ func (c *Client) Watch(ctx context.Context, channelID, requestID string, opts ..
 		}
 	}()
 
-	// readErr carries a transport read error from the reader goroutine to the
-	// forwarder, which is the SOLE writer of the SDK events channel. Splitting
-	// "read frames" (reader) from "emit WatchEvents" (forwarder) keeps a single
-	// owner of events so they never race on send-vs-close.
-	readErr := make(chan error, 1)
-
-	// Forwarder: drain futurereg's watcher stream (matched provisional +
-	// final, IsFinal already classified by the shared core) onto the SDK's
-	// WatchEvent channel, plus any transport read error from the reader.
-	// futurereg closes its stream after the final, which closes the SDK
-	// events channel; ctx-cancel also unwinds it. The forwarder owns the
-	// teardown (close events / ws / stopWatcher / handle).
+	// Forwarder: drain the matched channel onto the SDK's WatchEvent
+	// channel, and tear down when the matched channel closes (final
+	// delivered or reader exited) or watchCtx fires.
 	go func() {
 		defer close(done)
 		defer close(events)
 		defer closeWS()
 		defer close(stopWatcher)
-		defer func() { _ = handle.Close() }()
 		for {
 			select {
 			case <-watchCtx.Done():
 				return
-			case err := <-readErr:
-				select {
-				case events <- WatchEvent{Err: err}:
-				case <-watchCtx.Done():
-				}
-				return
-			case fev, ok := <-fwatch.Events():
+			case m, ok := <-matched:
 				if !ok {
 					return
 				}
-				ev := WatchEvent{Envelope: fev.Envelope, IsFinal: fev.IsFinal, Err: fev.Err}
+				var ev WatchEvent
+				if m.err != nil {
+					ev = WatchEvent{Err: m.err}
+				} else {
+					ev = WatchEvent{Envelope: m.env, IsFinal: m.isFinal}
+				}
 				select {
 				case events <- ev:
 				case <-watchCtx.Done():
+					return
+				}
+				if m.err != nil || m.isFinal {
 					return
 				}
 			}
 		}
 	}()
 
-	// Reader: pull frames off the WS and hand each matching envelope to
-	// futurereg.Deliver, which performs parent_id matching, IsFinal
-	// classification, and watcher fan-out under its single lock. The reader
-	// NEVER writes to events — read errors go via readErr to the forwarder.
+	// Reader: pull frames off the WS, match parent_id == requestID,
+	// classify IsFinal via message.IsFinalStatus, and push matched
+	// envelopes to the forwarder via the matched channel. The reader
+	// NEVER writes to events — it communicates solely through matched.
+	matchID := message.ID(requestID)
 	go func() {
+		defer close(matched)
 		// Defensive: if gorilla ever panics on a corrupted conn after
 		// ctx cancel, swallow it. The caller has already asked us to
 		// shut down via watchCtx; surfacing a panic into the SDK
 		// goroutine would kill the process. A panic while ctx is still
-		// alive is a real bug — re-raise it (matching the legacy reader).
+		// alive is a real bug — re-raise it.
 		defer func() {
 			if r := recover(); r != nil {
 				if watchCtx.Err() == nil {
 					panic(r)
 				}
-				_ = handle.Close()
 			}
 		}()
 		for {
@@ -594,11 +585,8 @@ func (c *Client) Watch(ctx context.Context, channelID, requestID string, opts ..
 				if watchCtx.Err() != nil {
 					return
 				}
-				// Hand the transport error to the forwarder (sole events
-				// writer). The forwarder delivers it, returns, and its
-				// deferred handle.Close releases the futurereg waiter.
 				select {
-				case readErr <- fmt.Errorf("coagentsdk: websocket read: %w", err):
+				case matched <- matchedEnvelope{err: fmt.Errorf("coagentsdk: websocket read: %w", err)}:
 				case <-watchCtx.Done():
 				}
 				return
@@ -617,10 +605,26 @@ func (c *Client) Watch(ctx context.Context, channelID, requestID string, opts ..
 			if err := json.Unmarshal(frame.Envelope, &env); err != nil {
 				continue
 			}
-			// futurereg.Deliver matches env.ParentID against the registered
-			// waiter; non-matching envelopes are no-ops. A final closes the
-			// watcher stream, which the forwarder observes and stops.
-			reg.Deliver(&env)
+			// Match by parent_id: only envelopes that are responses to
+			// requestID pass through. Non-matching envelopes are silently
+			// dropped (same semantics as the former futurereg.Deliver).
+			if env.ParentID != matchID {
+				continue
+			}
+			if env.Kind != message.KindResponse {
+				continue
+			}
+			status, _ := parsePayloadStatus(env.Payload)
+			isFinal := message.IsFinalStatus(status)
+			envCopy := env
+			select {
+			case matched <- matchedEnvelope{env: &envCopy, isFinal: isFinal}:
+			case <-watchCtx.Done():
+				return
+			}
+			if isFinal {
+				return
+			}
 		}
 	}()
 

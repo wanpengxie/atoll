@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/wanpengxie/ActOS/runtime/store"
+	_ "modernc.org/sqlite" // register sqlite driver
 )
 
 // runKernel dispatches the `coagent kernel <sub>` family. Today only
@@ -54,12 +54,25 @@ func runKernelEvents(args []string) int {
 	}
 
 	ctx := context.Background()
-	db, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{ReadOnly: true})
+
+	// Open sqlite read-only — the CLI only reads the message log.
+	// (store.OpenChannel moved to runtime/internal/store, not importable.)
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", dbPath)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open channel db: %v\n", err)
 		return 1
 	}
 	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	// Apply read-only pragmas.
+	for _, p := range []string{"PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"} {
+		if _, err := db.ExecContext(ctx, p); err != nil {
+			fmt.Fprintf(os.Stderr, "pragma: %v\n", err)
+			return 1
+		}
+	}
 
 	q := `SELECT seq, id, ts, ts_received, sender_kind, sender_id, sender_name,
 	             kind, type, payload, parent_id, correlation_id, audience, visibility

@@ -35,13 +35,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/wanpengxie/ActOS/adapters/llm/kimi"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/ActOS/actors/agent"
 	"github.com/wanpengxie/ActOS/obs/logger"
-	"github.com/wanpengxie/ActOS/runtime/ipc"
-	"github.com/wanpengxie/ActOS/runtime/worker"
 )
 
 // version is set via -ldflags at build time.
@@ -107,7 +102,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	rt, err := worker.New(worker.Config{
+	rt, err := newWorkerRuntime(workerConfig{
 		LeaseID: *leaseID,
 		In:      os.Stdin,
 		Out:     os.Stdout,
@@ -126,10 +121,10 @@ func main() {
 
 // buildBridge picks the Bridge implementation. The kimi path reads its
 // env contract at construction time so fail-fast is loud + immediate.
-func buildBridge(provider string, maxTurns int) (worker.Bridge, error) {
+func buildBridge(provider string, maxTurns int) (Bridge, error) {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case providerMock, "":
-		mock := worker.NewMockBridge()
+		mock := newMockBridge()
 		mock.MaxTurns = maxTurns
 		return mock, nil
 
@@ -142,75 +137,27 @@ func buildBridge(provider string, maxTurns int) (worker.Bridge, error) {
 		// The worker never opens channel.sqlite and carries NO frozen
 		// actor/type snapshot. Current actor/type state is queried live
 		// through the list_actors / actor.describe reserved envelope calls.
-		basePrompt := kimi.BuildBasePrompt(
-			os.Getenv(kimi.EnvKeyChannelType),
-			os.Getenv(kimi.EnvKeyDomainPrompt),
+		basePrompt := agent.BuildBasePrompt(
+			os.Getenv(agent.EnvKeyChannelType),
+			os.Getenv(agent.EnvKeyDomainPrompt),
 		)
-		cfg, err := kimi.NewConfigFromEnv(basePrompt)
+		cfg, err := agent.NewConfigFromEnv(basePrompt)
 		if err != nil {
 			return nil, err
 		}
-		kb, err := kimi.NewBridge(cfg)
+		kb, err := agent.NewBridge(cfg)
 		if err != nil {
 			return nil, fmt.Errorf("kimi bridge: %w", err)
 		}
-		return worker.BridgeFunc(func(ctx context.Context, client *worker.IPCClient) error {
-			return kb.Run(ctx, &kimiIPCAdapter{client: client})
+		// The agent bridge implements Run(ctx, agent.IPCFacade) directly.
+		// Wrap it as a local Bridge.
+		return BridgeFunc(func(ctx context.Context, facade agent.IPCFacade) error {
+			return kb.Run(ctx, facade)
 		}), nil
 
 	default:
 		return nil, fmt.Errorf("worker: unknown --provider %q (want mock|kimi)", provider)
 	}
-}
-
-// kimiIPCAdapter bridges runtime/worker.IPCClient → adapters/llm/kimi.
-// IPCFacade. The arch-lint boundary forbids adapters/** from importing
-// runtime/worker directly, so this thin adapter lives here in
-// cmd/worker (the composition root, allowed to touch both).
-type kimiIPCAdapter struct {
-	client *worker.IPCClient
-}
-
-func (a *kimiIPCAdapter) ChannelID() channel.ID { return a.client.ChannelID() }
-func (a *kimiIPCAdapter) WorkerID() string      { return a.client.WorkerID() }
-func (a *kimiIPCAdapter) WorkerActorID() actor.ActorID {
-	return a.client.WorkerActorID()
-}
-
-// Triggers wraps the worker.IPCClient trigger channel by spinning a
-// goroutine that translates each ipc.TriggerPayload into the
-// kimi.TriggerPayload shape (only field names + package origin differ).
-//
-// Cheap: triggers fire at human-message cadence (single-digit/min).
-func (a *kimiIPCAdapter) Triggers() <-chan kimi.TriggerPayload {
-	out := make(chan kimi.TriggerPayload, 4)
-	go func() {
-		defer close(out)
-		for p := range a.client.Triggers() {
-			out <- kimi.TriggerPayload{
-				Envelope:      p.Envelope,
-				CorrelationID: p.CorrelationID,
-				Cursor:        p.Cursor,
-				AckID:         p.AckID,
-			}
-		}
-	}()
-	return out
-}
-
-func (a *kimiIPCAdapter) AckTrigger(ctx context.Context, trigger kimi.TriggerPayload, accepted bool, reason string) error {
-	return a.client.AckTrigger(ctx, ipc.TriggerPayload{
-		Cursor: trigger.Cursor,
-		AckID:  trigger.AckID,
-	}, accepted, reason)
-}
-
-// WriteEnvelope forwards to IPCClient.WriteMessage and discards the
-// returned WriteMessageResult. The kimi bridge does not consult
-// dedup / sequence info today (parity with MockBridge).
-func (a *kimiIPCAdapter) WriteEnvelope(ctx context.Context, env message.Envelope) error {
-	_, err := a.client.WriteMessage(ctx, env)
-	return err
 }
 
 // envOr returns the env value or fallback. Inlined so the cmd binary
@@ -221,8 +168,3 @@ func envOr(key, fallback string) string {
 	}
 	return fallback
 }
-
-// Compile-time anchor so the runtime/ipc package stays in the dep
-// graph — keeps `go vet` happy when only the type-erased branch above
-// references it.
-var _ = ipc.KindTrigger

@@ -1,12 +1,9 @@
 package platform
 
 import (
-	"encoding/json"
-	"net/http"
-	"strings"
+	"context"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/ActOS/protocol/actor"
@@ -16,11 +13,12 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// gateway is the client/SDK ingress (v2): it receives independent substrate
-// interfaces + the assembly-root's writer and pushHub, NOT a *channelhost.ChannelHome.
-type gateway struct {
+// Gateway is the client/SDK ingress (v2): it receives independent substrate
+// interfaces + the assembly-root's writer and PushHub, NOT a *channelhost.ChannelHome.
+// It exposes pure Go methods; HTTP/WS transport is the app layer's concern.
+type Gateway struct {
 	writer    harness.Writer         // postCommitWriter from assembly root
-	hub       *pushHub               // client subscription signal
+	hub       *PushHub               // client subscription signal
 	channelID channel.ID
 	query     storespec.MessageQuery // read path
 	registry  storespec.Registry     // actor list
@@ -28,185 +26,69 @@ type gateway struct {
 
 const clientRequestTTLMs int64 = 30_000
 
-var gwUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-
-const sessionCookieName = "coagent_session"
-
-// mount registers the SDK routes on mux.
-func (g *gateway) mount(mux *http.ServeMux) {
-	mux.HandleFunc("/api/channels/", g.routeChannel)
-	mux.HandleFunc("/ws", g.handleWS)
+// SendMessage writes a client envelope through the harness pipeline.
+func (g *Gateway) SendMessage(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
+	return g.writer.Write(ctx, env)
 }
 
-// routeChannel dispatches /api/channels/{id}/{cursor|messages|actors}.
-func (g *gateway) routeChannel(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, "/api/channels/")
-	id, tail, ok := strings.Cut(rest, "/")
-	if !ok || channel.ID(id) != g.channelID {
-		http.Error(w, "unknown channel", http.StatusNotFound)
-		return
-	}
-	switch {
-	case tail == "cursor" && r.Method == http.MethodGet:
-		g.handleCursor(w, r)
-	case tail == "messages" && r.Method == http.MethodPost:
-		g.handleMessages(w, r)
-	case tail == "actors" && r.Method == http.MethodGet:
-		g.handleActors(w, r)
-	default:
-		http.Error(w, "not found", http.StatusNotFound)
-	}
+// ListMessages returns committed messages after the given sequence number.
+func (g *Gateway) ListMessages(ctx context.Context, after int64, limit int) ([]storespec.StoredRow, error) {
+	return g.query.ReadAfterSeq(ctx, after, limit)
 }
 
-func (g *gateway) handleCursor(w http.ResponseWriter, r *http.Request) {
-	seq, err := g.query.MaxSeq(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]any{"last_received_seq": seq})
+// ListActors returns all active actors in the channel.
+func (g *Gateway) ListActors(ctx context.Context) ([]storespec.Record, error) {
+	return g.registry.ListActive(ctx)
 }
 
-func (g *gateway) handleMessages(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		ID       string          `json:"id"`
-		Type     string          `json:"type"`
-		Kind     string          `json:"kind"`
-		Payload  json.RawMessage `json:"payload"`
-		Audience []string        `json:"audience"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+// MaxSeq returns the highest committed sequence number.
+func (g *Gateway) MaxSeq(ctx context.Context) (int64, error) {
+	return g.query.MaxSeq(ctx)
+}
 
-	sender := g.clientSender(r)
-
+// NewClientEnvelope is a helper that builds a message.Envelope from typical
+// client-provided fields, filling in defaults (ID, Kind, TTL). The caller is
+// responsible for passing the result to SendMessage with an appropriate context.
+func (g *Gateway) NewClientEnvelope(
+	senderID actor.ActorID,
+	msgID string,
+	msgType string,
+	kind message.Kind,
+	payload []byte,
+	audience []actor.ActorID,
+) *message.Envelope {
 	now := time.Now().UnixMilli()
 	exp := now + clientRequestTTLMs
-	aud := make(message.Audience, 0, len(body.Audience))
-	for _, a := range body.Audience {
-		aud = append(aud, actor.ActorID(a))
-	}
 
-	envID := message.ID(body.ID)
+	envID := message.ID(msgID)
 	if envID == "" {
 		envID = message.ID(uuid.NewString())
 	}
-	kind := message.Kind(body.Kind)
 	if kind == "" {
 		kind = message.KindRequest
 	}
 
-	env := &message.Envelope{
+	aud := make(message.Audience, 0, len(audience))
+	aud = append(aud, audience...)
+
+	return &message.Envelope{
 		ID:        envID,
 		TS:        now,
 		ChannelID: g.channelID,
 		Kind:      kind,
-		Type:      body.Type,
-		Sender:    message.Sender{Kind: actor.KindHuman, ID: sender},
+		Type:      msgType,
+		Sender:    message.Sender{Kind: actor.KindHuman, ID: senderID},
 		Audience:  aud,
-		Payload:   body.Payload,
+		Payload:   payload,
 		ExpiresAt: &exp,
 	}
+}
 
-	cctx := harness.CtxWithCaller(r.Context(), harness.CallerContext{
-		ActorID:   sender,
+// CallerContext returns a harness.CallerContext for the given actor, suitable
+// for use with harness.CtxWithCaller before calling SendMessage.
+func (g *Gateway) CallerContext(actorID actor.ActorID) harness.CallerContext {
+	return harness.CallerContext{
+		ActorID:   actorID,
 		ChannelID: g.channelID,
-	})
-	res, err := g.writer.Write(cctx, env)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
 	}
-	writeJSON(w, map[string]any{
-		"message_id":    string(res.MessageID),
-		"accepted":      res.RejectReason == "",
-		"reject_reason": string(res.RejectReason),
-		"reject_detail": res.RejectDetail,
-	})
-}
-
-func (g *gateway) handleActors(w http.ResponseWriter, r *http.Request) {
-	rows, err := g.registry.ListActive(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	actors := make([]map[string]any, 0, len(rows))
-	for _, rec := range rows {
-		actors = append(actors, map[string]any{
-			"actor_id": string(rec.ID),
-			"kind":     string(rec.Kind),
-			"binding":  string(rec.Binding),
-		})
-	}
-	writeJSON(w, map[string]any{"channel_id": string(g.channelID), "actors": actors})
-}
-
-// handleWS upgrades a client subscription and tails committed envelopes forward
-// from the client's cursor, pushing each as a wsPushFrame.
-func (g *gateway) handleWS(w http.ResponseWriter, r *http.Request) {
-	ws, err := gwUpgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	defer func() { _ = ws.Close() }()
-
-	var sub struct {
-		Type      string `json:"type"`
-		ChannelID string `json:"channel_id"`
-		SinceSeq  int64  `json:"since_seq"`
-	}
-	if _, raw, err := ws.ReadMessage(); err != nil {
-		return
-	} else if err := json.Unmarshal(raw, &sub); err != nil || sub.Type != "subscribe" || channel.ID(sub.ChannelID) != g.channelID {
-		return
-	}
-
-	ctx := r.Context()
-	sig, unsub := g.hub.subscribe()
-	defer unsub()
-	last := sub.SinceSeq
-	for {
-		rows, err := g.query.ReadAfterSeq(ctx, last, 256)
-		if err != nil {
-			return
-		}
-		for _, row := range rows {
-			envRaw, mErr := json.Marshal(row.Envelope)
-			if mErr != nil {
-				continue
-			}
-			frame, _ := json.Marshal(map[string]any{
-				"type":       "message",
-				"channel_id": string(g.channelID),
-				"seq":        row.Seq,
-				"envelope":   json.RawMessage(envRaw),
-			})
-			if err := ws.WriteMessage(websocket.TextMessage, frame); err != nil {
-				return
-			}
-			last = row.Seq
-		}
-		select {
-		case <-sig:
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-// clientSender resolves the client's actor id from the session cookie;
-// empty -> a shared "web-client".
-func (g *gateway) clientSender(r *http.Request) actor.ActorID {
-	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
-		return actor.ActorID(c.Value)
-	}
-	return "web-client"
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
 }

@@ -8,11 +8,12 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/ActOS/platform/computebus"
 	"github.com/wanpengxie/ActOS/platform/homelink"
 	"github.com/wanpengxie/ActOS/platform/host"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/platform/computebus"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // Config configures the attached compute.
@@ -27,8 +28,11 @@ type ActorDecl struct {
 	ID      actor.ActorID
 	Kind    actor.Kind
 	Binding actor.Binding
-	// Impl is the actorrt.Actor implementation for this actor.
+	// Impl is the actorrt.Actor implementation (mutually exclusive with Factory).
 	Impl actorrt.Actor
+	// Factory constructs an actorrt.Actor given the UplinkWriter. Use when the
+	// actor needs the writer at construction time.
+	Factory func(harness.Writer) actorrt.Actor
 }
 
 // Run connects to the channel home and hosts the supplied actors as cells.
@@ -71,7 +75,11 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 
 	// Install all declared actors as cells.
 	for _, a := range actors {
-		h.Install(a.ID, a.Impl)
+		if a.Factory != nil {
+			h.InstallFunc(a.ID, a.Factory)
+		} else {
+			h.Install(a.ID, a.Impl)
+		}
 	}
 
 	// Block until context cancellation or homelink disconnect.

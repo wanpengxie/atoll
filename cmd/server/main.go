@@ -1,50 +1,39 @@
-// Command server runs the v2 channel-home (holds truth; serves the compute fleet
-// + client ingress). This leaf injects the concrete obs backends (slog logger +
-// metrics registry + debug server), which the server tier may not import.
+// Command server runs the coagent application server.
 package main
 
 import (
-	"context"
 	"flag"
 	"log"
 	"log/slog"
-	"net/http"
 	"os"
 
-	"github.com/wanpengxie/ActOS/protocol/channel"
-	"github.com/wanpengxie/ActOS/obs/metrics"
-	"github.com/wanpengxie/ActOS/obs/observability"
-	"github.com/wanpengxie/ActOS/platform"
+	"github.com/wanpengxie/ActOS/app"
 )
 
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
-	debugAddr := flag.String("debug-addr", "", "obs debug/metrics listen address (empty = off)")
-	ch := flag.String("channel", "default", "channel id")
-	db := flag.String("db", "channel.db", "channel sqlite path")
-	key := flag.String("key", "", "api key for attaching computes")
+	dbPath := flag.String("db", "coagent.db", "app database path")
+	channelDBDir := flag.String("channel-db-dir", "/tmp/coagent-dev/channels", "directory for channel databases")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	reg := metrics.NewRegistry()
 
-	// Concrete obs debug/metrics endpoint (server tier can't import obs).
-	if *debugAddr != "" {
-		dbg := observability.NewServer(*debugAddr, reg)
-		go func() {
-			if err := dbg.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				logger.Error("obs.debug.serve", "err", err.Error())
-			}
-		}()
+	appDB, err := app.OpenDB(*dbPath)
+	if err != nil {
+		log.Fatalf("server: %v", err)
+	}
+	defer appDB.Close()
+
+	a, err := app.New(app.Config{
+		DB:           appDB,
+		Logger:       logger,
+		ChannelDBDir: *channelDBDir,
+	})
+	if err != nil {
+		log.Fatalf("server: %v", err)
 	}
 
-	if err := platform.RunHome(context.Background(), platform.HomeConfig{
-		ChannelID:  channel.ID(*ch),
-		DBPath:     *db,
-		ListenAddr: *addr,
-		APIKey:     *key,
-		Logger:     logger,
-	}); err != nil {
+	if err := a.Run(*addr); err != nil {
 		log.Fatalf("server: %v", err)
 	}
 }

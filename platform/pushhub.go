@@ -2,7 +2,7 @@ package platform
 
 import "sync"
 
-// pushHub is the client-push fan-out signal: every committed envelope wakes all
+// PushHub is the client-push fan-out signal: every committed envelope wakes all
 // subscribed client streams (SDK WS tails), which then read forward from their
 // own seq cursor (so the signal is lossy-by-design -- correctness is the seq read,
 // not the signal). This is the external-client half of the fanout (cells get the
@@ -10,17 +10,17 @@ import "sync"
 //
 // Moved from channelhost to the assembly root (server package) because the hub
 // is wired into postCommitWriter which the assembly root owns.
-type pushHub struct {
+type PushHub struct {
 	mu   sync.Mutex
 	subs map[int]chan struct{}
 	next int
 }
 
-func newPushHub() *pushHub { return &pushHub{subs: map[int]chan struct{}{}} }
+func NewPushHub() *PushHub { return &PushHub{subs: map[int]chan struct{}{}} }
 
-// notify wakes every subscriber (non-blocking: a subscriber already pending a
+// Notify wakes every subscriber (non-blocking: a subscriber already pending a
 // wake keeps its single buffered slot -- it will read all new seqs on wake).
-func (h *pushHub) notify() {
+func (h *PushHub) Notify() {
 	h.mu.Lock()
 	for _, ch := range h.subs {
 		select {
@@ -31,9 +31,9 @@ func (h *pushHub) notify() {
 	h.mu.Unlock()
 }
 
-// subscribe registers a client stream; the returned channel signals "new commits
+// Subscribe registers a client stream; the returned channel signals "new commits
 // available", and the cancel func unregisters it.
-func (h *pushHub) subscribe() (<-chan struct{}, func()) {
+func (h *PushHub) Subscribe() (<-chan struct{}, func()) {
 	ch := make(chan struct{}, 1)
 	h.mu.Lock()
 	id := h.next

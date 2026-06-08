@@ -1,22 +1,9 @@
-# pnpm workspace — M1.5 单栈 target layout
-#
-# spec: .dalek/pm/m1.5-tickets.md §T8
-#       .dalek/pm/m1.5-server-rewrite-and-restructure.md §15.1
-#
-# 加入：
-#   - ui                                (T7 落地：原生 Vite UI)
-#   - adapters/device/xhs/extension     (T5 已落地：xhs 浏览器扩展)
-#
-# 已归档（T9 完成；不再出现在 workspace 里）：
-#   - cli / agent-binary / lightcone/** / packages/payload-types / workspace-template
-#   - 各自的归档位置见 archive/<dir>/ARCHIVE.md
-#
-# 未匹配的 glob 不会让 pnpm install 失败。
+# pnpm workspace
 packages:
-  - 'ui'
-  - 'adapters/device/xhs/extension'
-  - 'adapters/device/xhs/extension/packages/*'
-  - 'adapters/device/xhs/extension/app/*'
+  - 'web/ui'
+  - 'web/extension/xhs'
+  - 'web/extension/xhs/packages/*'
+  - 'web/extension/xhs/app/*'
 
 allowBuilds:
   bcrypt: true

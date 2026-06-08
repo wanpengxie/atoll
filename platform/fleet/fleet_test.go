@@ -2,6 +2,7 @@ package fleet_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -109,12 +110,23 @@ func newTestRig(apiKey string) *testRig {
 		rig.mu.Unlock()
 	}))
 
+	var authFunc func(string) (string, error)
+	if apiKey != "" {
+		expected := apiKey
+		authFunc = func(key string) (string, error) {
+			if key != expected {
+				return "", fmt.Errorf("bad api-key")
+			}
+			return key, nil
+		}
+	}
+
 	rig.fleet = fleet.New(fleet.Config{
 		Writer:     w,
 		Runtime:    rt,
 		Membership: m,
 		ChannelID:  testChannelID,
-		APIKey:     apiKey,
+		AuthFunc:   authFunc,
 	})
 	return rig
 }
