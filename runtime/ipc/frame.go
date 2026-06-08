@@ -28,8 +28,8 @@ import (
 	"io"
 	"sync"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // Kind is the closed set of port-wire frame kinds. Every kind has a real

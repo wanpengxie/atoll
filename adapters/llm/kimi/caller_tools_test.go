@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // TestAwaitResultResolvesFinal asserts await_result blocks until the named

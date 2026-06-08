@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // FrameType tags one wire frame on the home↔compute WS connection.

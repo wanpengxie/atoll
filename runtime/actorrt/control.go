@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/protocol/actor"
 )
 
 // ErrUnknownSignal is returned by Controller.Raise for a SignalKind outside the

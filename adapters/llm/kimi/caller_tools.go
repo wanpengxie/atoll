@@ -10,7 +10,7 @@ import (
 	gokimitools "github.com/wanpengxie/go-kimi/pkg/kimi/tools"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
 
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // The three async-decision meta tools (§2.3.4) that complement call_actor's

@@ -10,7 +10,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/daemon/homelink"
 	"github.com/wanpengxie/ActOS/daemon/host"
-	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/wire/computebus"
 )

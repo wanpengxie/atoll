@@ -3,8 +3,8 @@ package message
 import (
 	"encoding/json"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/channel"
 )
 
 // Sender is the nested `sender` object inside an envelope. It is the stable

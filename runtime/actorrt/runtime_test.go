@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // TestDeliverNilEnvelopeIsError: a nil envelope is a true exception (not a

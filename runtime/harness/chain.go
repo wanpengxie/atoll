@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 

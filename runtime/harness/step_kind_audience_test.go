@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // StepKindAndAudience contract — structure-only addressing checks (proto-layer1 §2.6).

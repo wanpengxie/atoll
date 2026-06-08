@@ -3,7 +3,7 @@ package harness
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // stepID is the ordinal index inside the harness chain (proto-layer1 §2.0).

@@ -8,8 +8,8 @@ import (
 
 	"github.com/wanpengxie/ActOS/daemon/host"
 	"github.com/wanpengxie/ActOS/daemon/localdevice"
-	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/lib/adapterhost"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/wire/computebus"

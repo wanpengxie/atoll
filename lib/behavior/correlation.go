@@ -1,6 +1,6 @@
 package behavior
 
-import "github.com/wanpengxie/ActOS/kernel/message"
+import "github.com/wanpengxie/ActOS/protocol/message"
 
 // CorrelationKey is an alias for message.ID used as the in-flight
 // correlation anchor — it equals the request envelope.id (wire form:

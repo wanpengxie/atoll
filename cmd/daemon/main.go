@@ -14,7 +14,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/adapters/feishu"
 	"github.com/wanpengxie/ActOS/daemon"
-	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/obs/metrics"
 )

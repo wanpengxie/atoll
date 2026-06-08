@@ -7,7 +7,7 @@ package placement
 import (
 	"sync"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/protocol/actor"
 )
 
 type Registry struct {

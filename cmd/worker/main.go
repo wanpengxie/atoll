@@ -36,9 +36,9 @@ import (
 	"syscall"
 
 	"github.com/wanpengxie/ActOS/adapters/llm/kimi"
-	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/channel"
+	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/obs/logger"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 	"github.com/wanpengxie/ActOS/runtime/worker"

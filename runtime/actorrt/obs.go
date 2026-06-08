@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/protocol/actor"
 )
 
 // obs is the substrate's OBSERVATION channel: side-effect-free, non-truth,

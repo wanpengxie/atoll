@@ -4,7 +4,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/protocol/actor"
 )
 
 func TestAssignLookup(t *testing.T) {

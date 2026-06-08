@@ -3,7 +3,7 @@ package channel_test
 import (
 	"testing"
 
-	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/protocol/channel"
 )
 
 // channel.ID is an opaque stable-string newtype. The kernel treats it as

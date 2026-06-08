@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/lib/channelkit"
 	"github.com/wanpengxie/ActOS/lib/sysactor"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"

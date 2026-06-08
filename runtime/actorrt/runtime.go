@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // presence is one live actor's substrate-side presence, regardless of where

@@ -3,8 +3,8 @@ package storespec
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // Seq is the messages.seq column — store-allocated monotonic per-channel

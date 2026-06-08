@@ -11,7 +11,7 @@ import (
 	gokimitools "github.com/wanpengxie/go-kimi/pkg/kimi/tools"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/protocol/actor"
 )
 
 // Meta-tool strategy (substrate-native): instead of injecting one

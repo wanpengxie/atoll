@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // StepNormalize contract — default-fill + time-relation guard (proto-layer1 §2.4).

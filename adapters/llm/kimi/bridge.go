@@ -26,9 +26,9 @@ import (
 	// surfaces as "provider not found" at NewAgent time.
 	_ "github.com/wanpengxie/go-kimi/pkg/kimi/llm/anthropic"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/channel"
+	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 )
 

@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // StepSenderConsistent contract (A3 真实 — registry is the single identity truth).

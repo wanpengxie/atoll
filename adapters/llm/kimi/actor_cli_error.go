@@ -6,7 +6,7 @@ import (
 
 	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
 
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 type actorCLIErrorCode string

@@ -3,7 +3,7 @@ package harness
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // stepCallerAuth implements proto-layer1 §2.0 step 0+1 — caller principal

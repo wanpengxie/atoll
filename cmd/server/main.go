@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/obs/metrics"
 	"github.com/wanpengxie/ActOS/obs/observability"
 	"github.com/wanpengxie/ActOS/server"

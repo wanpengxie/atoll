@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/protocol/actor"
 )
 
 // TestEnvelopeRoundTripMinimal exercises the minimal valid envelope: only

@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
+	"github.com/wanpengxie/ActOS/protocol/actor"
 )
 
 // TestAudienceStrings pins that Strings() returns a faithful copy of the

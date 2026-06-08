@@ -3,8 +3,8 @@ package storespec
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/channel"
 )
 
 // MemberActorAdd is one actor registration transition (membership control

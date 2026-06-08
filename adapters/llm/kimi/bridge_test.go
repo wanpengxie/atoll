@@ -17,9 +17,9 @@ import (
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
 
 	"github.com/wanpengxie/ActOS/adapters/llm/kimi"
-	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/channel"
+	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // pickToolByName looks up an AdditionalTools entry by Name(). Returns

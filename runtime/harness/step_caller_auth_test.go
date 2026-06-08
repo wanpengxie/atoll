@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/channel"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/channel"
 )
 
 // StepCallerAuth contract (A1 寻址 / ACL entry gate):

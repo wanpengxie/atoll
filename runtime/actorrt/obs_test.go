@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/kernel/actor"
-	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // observerActor implements the actor-source obs PULL hook (Observer) and the
