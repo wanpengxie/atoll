@@ -225,6 +225,23 @@ func getUserID(c *gin.Context) string {
 	return s
 }
 
+func (a *App) isWorkspaceMember(ctx context.Context, wsID, userID string) bool {
+	var count int
+	err := a.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ? AND user_id = ?`,
+		wsID, userID,
+	).Scan(&count)
+	return err == nil && count > 0
+}
+
+func (a *App) channelWorkspaceID(ctx context.Context, chID string) (string, bool) {
+	var wsID string
+	err := a.db.QueryRowContext(ctx,
+		`SELECT workspace_id FROM channels WHERE id = ?`, chID,
+	).Scan(&wsID)
+	return wsID, err == nil
+}
+
 // ---------------------------------------------------------------------------
 // Identity handlers
 // ---------------------------------------------------------------------------
@@ -457,6 +474,11 @@ func (a *App) handleCreateWorkspace(c *gin.Context) {
 
 func (a *App) handleListChannels(c *gin.Context) {
 	wsID := c.Param("wsID")
+	userID := getUserID(c)
+	if !a.isWorkspaceMember(c.Request.Context(), wsID, userID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not a workspace member"})
+		return
+	}
 	rows, err := a.db.QueryContext(c.Request.Context(),
 		`SELECT id, workspace_id, name, type, created_at FROM channels WHERE workspace_id = ?`, wsID,
 	)
@@ -486,6 +508,11 @@ func (a *App) handleListChannels(c *gin.Context) {
 
 func (a *App) handleCreateChannel(c *gin.Context) {
 	wsID := c.Param("wsID")
+	userID := getUserID(c)
+	if !a.isWorkspaceMember(c.Request.Context(), wsID, userID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not a workspace member"})
+		return
+	}
 	var req struct {
 		Name string `json:"name"`
 		Type string `json:"type"`
@@ -520,7 +547,6 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 		return
 	}
 
-	userID := getUserID(c)
 	actorID := actor.ActorID("user:" + userID)
 	if mErr := home.Membership().Insert(c.Request.Context(), newRecord(actorID, actor.KindHuman)); mErr != nil {
 		a.logger.Warn("app: channel membership insert failed", "channel", chID, "err", mErr.Error())
@@ -553,8 +579,26 @@ func (a *App) handleBindChannel(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-func (a *App) handleGetChannel(c *gin.Context) {
+func (a *App) requireChannelAccess(c *gin.Context) (string, bool) {
 	chID := c.Param("chID")
+	userID := getUserID(c)
+	wsID, ok := a.channelWorkspaceID(c.Request.Context(), chID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+		return "", false
+	}
+	if !a.isWorkspaceMember(c.Request.Context(), wsID, userID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not a workspace member"})
+		return "", false
+	}
+	return chID, true
+}
+
+func (a *App) handleGetChannel(c *gin.Context) {
+	chID, ok := a.requireChannelAccess(c)
+	if !ok {
+		return
+	}
 	var id, workspaceID, name, chType string
 	var createdAt int64
 	err := a.db.QueryRowContext(c.Request.Context(),
@@ -571,16 +615,14 @@ func (a *App) handleGetChannel(c *gin.Context) {
 }
 
 func (a *App) handleListChannelMembers(c *gin.Context) {
-	chID := c.Param("chID")
-	// Get the workspace for this channel, then list workspace_members.
-	var wsID string
-	err := a.db.QueryRowContext(c.Request.Context(),
-		`SELECT workspace_id FROM channels WHERE id = ?`, chID,
-	).Scan(&wsID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+	chID, ok := a.requireChannelAccess(c)
+	if !ok {
 		return
 	}
+	var wsID string
+	_ = a.db.QueryRowContext(c.Request.Context(),
+		`SELECT workspace_id FROM channels WHERE id = ?`, chID,
+	).Scan(&wsID)
 
 	rows, err := a.db.QueryContext(c.Request.Context(),
 		`SELECT wm.user_id, wm.role, u.email, u.display_name
@@ -611,7 +653,10 @@ func (a *App) handleListChannelMembers(c *gin.Context) {
 }
 
 func (a *App) handleListActors(c *gin.Context) {
-	chID := c.Param("chID")
+	chID, ok := a.requireChannelAccess(c)
+	if !ok {
+		return
+	}
 	home := a.getHome(channel.ID(chID))
 	if home == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not loaded"})
@@ -642,7 +687,10 @@ func (a *App) handleListActors(c *gin.Context) {
 // ---------------------------------------------------------------------------
 
 func (a *App) handleCursor(c *gin.Context) {
-	chID := c.Param("chID")
+	chID, ok := a.requireChannelAccess(c)
+	if !ok {
+		return
+	}
 	home := a.getHome(channel.ID(chID))
 	if home == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not loaded"})
@@ -657,7 +705,10 @@ func (a *App) handleCursor(c *gin.Context) {
 }
 
 func (a *App) handleListMessages(c *gin.Context) {
-	chID := c.Param("chID")
+	chID, ok := a.requireChannelAccess(c)
+	if !ok {
+		return
+	}
 	home := a.getHome(channel.ID(chID))
 	if home == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not loaded"})
@@ -693,7 +744,10 @@ func (a *App) handleListMessages(c *gin.Context) {
 }
 
 func (a *App) handleSendMessage(c *gin.Context) {
-	chID := c.Param("chID")
+	chID, ok := a.requireChannelAccess(c)
+	if !ok {
+		return
+	}
 	home := a.getHome(channel.ID(chID))
 	if home == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not loaded"})
@@ -801,12 +855,34 @@ func (a *App) handleListDaemons(c *gin.Context) {
 		if lastHB.Valid {
 			d["last_heartbeat"] = lastHB.Int64
 		}
+		d["attached_channels"] = a.daemonAttachedChannels(c.Request.Context(), id)
 		result = append(result, d)
 	}
 	if result == nil {
 		result = []gin.H{}
 	}
 	c.JSON(http.StatusOK, gin.H{"daemons": result})
+}
+
+func (a *App) daemonAttachedChannels(ctx context.Context, daemonID string) []string {
+	rows, err := a.db.QueryContext(ctx,
+		`SELECT channel_id FROM daemon_channels WHERE daemon_id = ?`, daemonID,
+	)
+	if err != nil {
+		return []string{}
+	}
+	defer rows.Close()
+	var chans []string
+	for rows.Next() {
+		var chID string
+		if err := rows.Scan(&chID); err == nil {
+			chans = append(chans, chID)
+		}
+	}
+	if chans == nil {
+		chans = []string{}
+	}
+	return chans
 }
 
 func (a *App) handleCreateDaemon(c *gin.Context) {
@@ -860,7 +936,10 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 }
 
 func (a *App) handleListChannelDaemons(c *gin.Context) {
-	chID := c.Param("chID")
+	chID, ok := a.requireChannelAccess(c)
+	if !ok {
+		return
+	}
 	rows, err := a.db.QueryContext(c.Request.Context(),
 		`SELECT d.id, d.name, d.status, d.created_at
 		 FROM daemons d
@@ -891,7 +970,10 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 }
 
 func (a *App) handleAttachDaemons(c *gin.Context) {
-	chID := c.Param("chID")
+	chID, ok := a.requireChannelAccess(c)
+	if !ok {
+		return
+	}
 	var req struct {
 		DaemonIDs []string `json:"daemon_ids"`
 	}
@@ -910,7 +992,10 @@ func (a *App) handleAttachDaemons(c *gin.Context) {
 }
 
 func (a *App) handleDetachDaemon(c *gin.Context) {
-	chID := c.Param("chID")
+	chID, ok := a.requireChannelAccess(c)
+	if !ok {
+		return
+	}
 	daemonID := c.Param("id")
 
 	_, err := a.db.ExecContext(c.Request.Context(),
@@ -955,12 +1040,17 @@ func (a *App) handleWS(c *gin.Context) {
 	}
 	defer ws.Close()
 
-	// Read the subscribe message from client: {channel_id, after_seq}.
+	// Read the subscribe message from client (ws.js sends {type:"subscribe", channel_id, since_seq}).
 	var sub struct {
+		Type      string `json:"type"`
 		ChannelID string `json:"channel_id"`
-		AfterSeq  int64  `json:"after_seq"`
+		SinceSeq  int64  `json:"since_seq"`
 	}
 	if err := ws.ReadJSON(&sub); err != nil {
+		return
+	}
+	if sub.Type != "subscribe" {
+		_ = ws.WriteJSON(gin.H{"error": "expected subscribe frame"})
 		return
 	}
 
@@ -975,11 +1065,11 @@ func (a *App) handleWS(c *gin.Context) {
 	notify, cancel := home.PushHub().Subscribe()
 	defer cancel()
 
-	cursor := sub.AfterSeq
+	cursor := sub.SinceSeq
 	gw := home.Gateway()
 
 	// Initial backfill.
-	a.wsSendMessages(ws, gw, &cursor)
+	a.wsSendMessages(ws, gw, chID, &cursor)
 
 	// Tail loop.
 	ctx := c.Request.Context()
@@ -991,24 +1081,24 @@ func (a *App) handleWS(c *gin.Context) {
 			if !ok {
 				return
 			}
-			a.wsSendMessages(ws, gw, &cursor)
+			a.wsSendMessages(ws, gw, chID, &cursor)
 		}
 	}
 }
 
-func (a *App) wsSendMessages(ws *websocket.Conn, gw *platform.Gateway, cursor *int64) {
+func (a *App) wsSendMessages(ws *websocket.Conn, gw *platform.Gateway, chID channel.ID, cursor *int64) {
 	rows, err := gw.ListMessages(context.Background(), *cursor, 100)
 	if err != nil || len(rows) == 0 {
 		return
 	}
 	for _, r := range rows {
-		type wsMsg struct {
-			Seq        int64            `json:"seq"`
-			IsTerminal bool             `json:"is_terminal"`
-			Envelope   message.Envelope `json:"envelope"`
+		frame := gin.H{
+			"type":       "message",
+			"channel_id": string(chID),
+			"seq":        r.Seq,
+			"envelope":   r.Envelope,
 		}
-		msg := wsMsg{Seq: r.Seq, IsTerminal: r.IsTerminal, Envelope: r.Envelope}
-		if err := ws.WriteJSON(msg); err != nil {
+		if err := ws.WriteJSON(frame); err != nil {
 			return
 		}
 		if r.Seq > *cursor {

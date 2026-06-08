@@ -73,7 +73,6 @@ func newWorkerRuntime(cfg workerConfig) (*workerRuntime, error) {
 		client: &ipcClient{
 			codec:     codec,
 			triggerCh: make(chan agent.TriggerPayload, 32),
-			stopCh:    make(chan struct{}),
 		},
 	}, nil
 }
@@ -208,11 +207,9 @@ func (r *workerRuntime) sendDown(reason string) error {
 type ipcClient struct {
 	codec     *ipc.Codec
 	triggerCh chan agent.TriggerPayload
-	stopCh    chan struct{}
 
-	mu      sync.Mutex
-	actorID actor.ActorID
-	// channelID is extracted from the first delivered envelope.
+	mu        sync.Mutex
+	actorID   actor.ActorID
 	channelID channel.ID
 }
 
