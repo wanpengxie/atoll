@@ -2,89 +2,76 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
+	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/ActOS/runtime/ipc"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 	"github.com/wanpengxie/ActOS/wire/computebus"
-	"github.com/wanpengxie/ActOS/wire/placement"
 )
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
-// computeConn is one attached compute's WS connection.
-type computeConn struct {
-	id      string
-	ws      *websocket.Conn
-	writeMu sync.Mutex
-}
-
-func (c *computeConn) send(f computebus.Frame) error {
-	b, err := computebus.Encode(f)
-	if err != nil {
-		return err
-	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	return c.ws.WriteMessage(websocket.TextMessage, b)
-}
-
-// OnDeath is called when a compute cell dies or a compute disconnects. The home
-// materialises receiver_unavailable for the dead actor's in-flight requests.
-type OnDeath func(ctx context.Context, dead actor.ActorID)
-
-// OnAttach is called when a compute attaches, registering its actors into
-// membership.
-type OnAttach func(ctx context.Context, channelID channel.ID, decls []computebus.AttachDeclaration) error
-
-// Fleet is the home-side compute manager.
-type Fleet struct {
-	writer    harness.Writer
-	channelID channel.ID
-	apiKey    string
-	placement *placement.Registry
-	logger    *slog.Logger
-
-	mu       sync.RWMutex
-	computes map[string]*computeConn
-
-	onDeath  OnDeath
-	onAttach OnAttach
-}
-
 // Config configures a Fleet.
 type Config struct {
-	Writer    harness.Writer
-	ChannelID channel.ID
-	APIKey    string
-	Placement *placement.Registry
-	OnDeath   OnDeath
-	OnAttach  OnAttach
-	Logger    *slog.Logger
+	Writer     harness.Writer
+	Runtime    *actorrt.Runtime
+	Membership storespec.MembershipControlPlane
+	ChannelID  channel.ID
+	APIKey     string
+	Logger     *slog.Logger
 }
 
-// New constructs a fleet bound to the channel home.
+// Fleet is a WS-to-virtual-pipe multiplexer: the physical layer of the channel
+// home. It owns no business logic — that lives in channelhost / actorrt.
+type Fleet struct {
+	writer     harness.Writer
+	runtime    *actorrt.Runtime
+	membership storespec.MembershipControlPlane
+	channelID  channel.ID
+	apiKey     string
+	logger     *slog.Logger
+}
+
+// New constructs a Fleet.
 func New(cfg Config) *Fleet {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return &Fleet{
-		writer:    cfg.Writer,
-		channelID: cfg.ChannelID,
-		apiKey:    cfg.APIKey,
-		placement: cfg.Placement,
-		logger:    logger,
-		computes:  map[string]*computeConn{},
-		onDeath:   cfg.OnDeath,
-		onAttach:  cfg.OnAttach,
+		writer:     cfg.Writer,
+		runtime:    cfg.Runtime,
+		membership: cfg.Membership,
+		channelID:  cfg.ChannelID,
+		apiKey:     cfg.APIKey,
+		logger:     logger,
 	}
+}
+
+// actorPipe tracks one daemon actor's virtual pipe.
+type actorPipe struct {
+	actorID   actor.ActorID
+	fleetConn net.Conn // fleet side of the pipe — relay reads from here
+	cancel    context.CancelFunc
+}
+
+// computeState tracks one attached compute's resources.
+type computeState struct {
+	computeID string
+	pipes     []actorPipe
 }
 
 // ServeWS upgrades an attaching compute connection and serves its frame loop.
@@ -95,78 +82,259 @@ func (f *Fleet) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = ws.Close() }()
 
-	// First frame must be attach.
+	state, err := f.handleAttach(r.Context(), ws)
+	if err != nil {
+		f.logger.Info("fleet.attach_failed", "err", err)
+		return
+	}
+	defer f.teardownCompute(state)
+
+	// Start relay goroutines: one per actor pipe, reading ipc.KindDeliver
+	// frames from the fleet side and translating to computebus.DispatchFrame
+	// sent over WS.
+	var relayWG sync.WaitGroup
+	var wsMu sync.Mutex // guards ws.WriteMessage
+	for i := range state.pipes {
+		ap := &state.pipes[i]
+		relayWG.Add(1)
+		go func() {
+			defer relayWG.Done()
+			f.relayLoop(ap, ws, &wsMu)
+		}()
+	}
+
+	// WS read loop.
+	f.wsReadLoop(r.Context(), ws, &wsMu, state)
+
+	// WS closed or errored — tear down all pipes (defer teardownCompute), then
+	// wait for relay goroutines to notice pipe closure and exit.
+	f.teardownCompute(state)
+	relayWG.Wait()
+}
+
+// handleAttach reads the AttachRequest, verifies the api-key, registers actors
+// in membership and sets up virtual pipes + actorrt.Attach for each declared
+// actor. Returns the compute state or an error.
+func (f *Fleet) handleAttach(ctx context.Context, ws *websocket.Conn) (*computeState, error) {
+	// First WS message must be AttachRequest.
 	_, raw, err := ws.ReadMessage()
 	if err != nil {
-		return
+		return nil, fmt.Errorf("read attach: %w", err)
 	}
 	first, err := computebus.Decode(raw)
 	if err != nil || first.Type != computebus.FrameAttach || first.Attach == nil {
-		return
+		return nil, fmt.Errorf("expected attach frame")
 	}
 	att := first.Attach
+
+	// Verify api-key.
 	if f.apiKey != "" && att.APIKey != f.apiKey {
 		_ = sendFrame(ws, computebus.Frame{
 			Type:  computebus.FrameAttachReply,
 			Reply: &computebus.AttachReply{Accepted: false, Reason: "bad api-key"},
 		})
-		return
+		return nil, fmt.Errorf("bad api-key from compute %s", att.ComputeID)
 	}
 
-	// Register the compute's actors into membership before accepting.
-	if f.onAttach != nil {
-		if err := f.onAttach(r.Context(), f.channelID, att.Declarations); err != nil {
+	// Register compute actors into membership store.
+	if f.membership != nil {
+		nowMs := time.Now().UnixMilli()
+		adds := make([]storespec.MemberActorAdd, len(att.Declarations))
+		for i, d := range att.Declarations {
+			adds[i] = storespec.MemberActorAdd{
+				ID:      d.ActorID,
+				Kind:    d.Kind,
+				Binding: d.Binding,
+				At:      nowMs,
+			}
+		}
+		if err := f.membership.ApplyMemberTransitions(ctx, f.channelID, adds, nil); err != nil {
 			_ = sendFrame(ws, computebus.Frame{
 				Type:  computebus.FrameAttachReply,
 				Reply: &computebus.AttachReply{Accepted: false, Reason: "register: " + err.Error()},
 			})
-			return
+			return nil, fmt.Errorf("membership register: %w", err)
 		}
 	}
 
-	conn := &computeConn{id: att.ComputeID, ws: ws}
+	// Set up virtual pipes and actorrt.Attach for each declared actor.
+	state := &computeState{computeID: att.ComputeID}
+	for _, decl := range att.Declarations {
+		ap, err := f.attachActor(decl.ActorID)
+		if err != nil {
+			// Clean up already-attached pipes.
+			for _, prev := range state.pipes {
+				prev.cancel()
+				_ = prev.fleetConn.Close()
+			}
+			_ = sendFrame(ws, computebus.Frame{
+				Type:  computebus.FrameAttachReply,
+				Reply: &computebus.AttachReply{Accepted: false, Reason: "attach: " + err.Error()},
+			})
+			return nil, fmt.Errorf("attach actor %s: %w", decl.ActorID, err)
+		}
+		state.pipes = append(state.pipes, *ap)
+	}
 
-	// Register compute + assign actors in placement.
-	f.registerCompute(conn, att.Declarations)
-	defer f.disconnectCompute(conn)
-
-	_ = conn.send(computebus.Frame{
+	// Send accepted reply.
+	_ = sendFrame(ws, computebus.Frame{
 		Type:  computebus.FrameAttachReply,
 		Reply: &computebus.AttachReply{ChannelID: f.channelID, Accepted: true},
 	})
 
-	// Read loop.
+	f.logger.Info("fleet.attached", "compute", att.ComputeID,
+		"actors", len(att.Declarations))
+	return state, nil
+}
+
+// attachActor creates a net.Pipe, writes a synthetic ipc handshake on the fleet
+// side, and calls actorrt.Attach on the server side. net.Pipe is synchronous,
+// so the handshake write (fleet side) and Attach read (server side) must happen
+// concurrently. A goroutine writes KindHandshake + reads KindHandshakeAck on
+// the fleet side while the main goroutine calls Attach on the server side.
+func (f *Fleet) attachActor(actorID actor.ActorID) (*actorPipe, error) {
+	serverConn, fleetConn := net.Pipe()
+
+	_, cancel := context.WithCancel(context.Background())
+
+	hsPayload, err := json.Marshal(ipc.HandshakePayload{LeaseID: string(actorID)})
+	if err != nil {
+		cancel()
+		_ = serverConn.Close()
+		_ = fleetConn.Close()
+		return nil, err
+	}
+
+	// Fleet-side goroutine: write synthetic KindHandshake, then read
+	// KindHandshakeAck. Must run concurrently with Attach (which reads from
+	// serverConn and writes back the ack).
+	type hsResult struct{ err error }
+	hsDone := make(chan hsResult, 1)
+	fleetCodec := ipc.NewCodec(fleetConn, fleetConn)
+	go func() {
+		if writeErr := fleetCodec.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: hsPayload}); writeErr != nil {
+			hsDone <- hsResult{fmt.Errorf("write handshake: %w", writeErr)}
+			return
+		}
+		ackFrame, readErr := fleetCodec.Read()
+		if readErr != nil {
+			hsDone <- hsResult{fmt.Errorf("read handshake ack: %w", readErr)}
+			return
+		}
+		if ackFrame.Kind != ipc.KindHandshakeAck {
+			hsDone <- hsResult{fmt.Errorf("expected handshake_ack, got %s", ackFrame.Kind)}
+			return
+		}
+		hsDone <- hsResult{}
+	}()
+
+	// noopEmitSink: non-nil (port.go requires it) but never actually called.
+	// Emits flow via WS (FrameEmit), not through the pipe.
+	noopEmit := func(_ context.Context, _ *message.Envelope) error { return nil }
+
+	// resolveFunc: the fleet already knows the actorID (it assigned it).
+	resolve := func(leaseID string) (actor.ActorID, error) {
+		return actor.ActorID(leaseID), nil
+	}
+
+	// actorrt.Attach reads KindHandshake from serverConn (written by the
+	// goroutine above on fleetConn), resolves the actor, writes
+	// KindHandshakeAck, and registers the actor as a port presence.
+	_, err = f.runtime.Attach(serverConn, noopEmit, resolve)
+	if err != nil {
+		cancel()
+		_ = serverConn.Close()
+		_ = fleetConn.Close()
+		return nil, fmt.Errorf("actorrt.Attach: %w", err)
+	}
+
+	// Wait for the fleet-side handshake goroutine to complete.
+	res := <-hsDone
+	if res.err != nil {
+		cancel()
+		_ = serverConn.Close()
+		_ = fleetConn.Close()
+		return nil, res.err
+	}
+
+	return &actorPipe{
+		actorID:   actorID,
+		fleetConn: fleetConn,
+		cancel:    cancel,
+	}, nil
+}
+
+// relayLoop reads ipc frames from the fleet side of a virtual pipe and
+// translates KindDeliver frames into computebus.DispatchFrame sent over WS. It
+// exits when the fleet conn is closed (pipe EOF).
+func (f *Fleet) relayLoop(ap *actorPipe, ws *websocket.Conn, wsMu *sync.Mutex) {
+	codec := ipc.NewCodec(ap.fleetConn, ap.fleetConn)
+	for {
+		frame, err := codec.Read()
+		if err != nil {
+			// Pipe closed (EOF) or error — actor is gone.
+			return
+		}
+		switch frame.Kind {
+		case ipc.KindDeliver:
+			var dp ipc.DeliverPayload
+			if err := json.Unmarshal(frame.Payload, &dp); err != nil {
+				f.logger.Error("fleet.relay.decode", "actor", ap.actorID, "err", err)
+				continue
+			}
+			env := dp.Envelope
+			wsFrame := computebus.Frame{
+				Type: computebus.FrameDispatch,
+				Dispatch: &computebus.DispatchFrame{
+					Target:   ap.actorID,
+					Envelope: &env,
+				},
+			}
+			wsMu.Lock()
+			err = sendFrame(ws, wsFrame)
+			wsMu.Unlock()
+			if err != nil {
+				f.logger.Error("fleet.relay.send", "actor", ap.actorID, "err", err)
+				return
+			}
+		case ipc.KindControl:
+			// Control frames are relayed as-is; for now just log.
+			f.logger.Debug("fleet.relay.control", "actor", ap.actorID)
+		default:
+			f.logger.Warn("fleet.relay.unknown_kind", "actor", ap.actorID, "kind", frame.Kind)
+		}
+	}
+}
+
+// wsReadLoop reads WS frames from the compute and dispatches them.
+func (f *Fleet) wsReadLoop(ctx context.Context, ws *websocket.Conn, wsMu *sync.Mutex, state *computeState) {
 	for {
 		_, raw, err := ws.ReadMessage()
 		if err != nil {
-			return // disconnect -> defer disconnectCompute handles batch death
+			// WS closed or errored.
+			return
 		}
 		fr, err := computebus.Decode(raw)
 		if err != nil {
 			continue
 		}
-		f.handleFrame(r.Context(), conn, fr)
+		switch fr.Type {
+		case computebus.FrameEmit:
+			f.handleEmit(ctx, ws, wsMu, fr)
+		case computebus.FrameHeartbeat:
+			f.logger.Debug("fleet.heartbeat", "compute", state.computeID)
+		case computebus.FrameDeath:
+			f.handleDeath(state, fr)
+		}
 	}
 }
 
-func (f *Fleet) handleFrame(ctx context.Context, conn *computeConn, fr computebus.Frame) {
-	switch fr.Type {
-	case computebus.FrameEmit:
-		f.handleEmit(ctx, conn, fr)
-	case computebus.FrameHeartbeat:
-		// Heartbeat: keepalive, non-fencing. Log only.
-		f.logger.Debug("fleet.heartbeat", "compute", conn.id)
-	case computebus.FrameDeath:
-		f.handleDeath(ctx, conn, fr)
-	}
-}
-
-func (f *Fleet) handleEmit(ctx context.Context, conn *computeConn, fr computebus.Frame) {
+// handleEmit writes the emit to truth via the harness writer and sends an ack
+// back on the WS.
+func (f *Fleet) handleEmit(ctx context.Context, ws *websocket.Conn, wsMu *sync.Mutex, fr computebus.Frame) {
 	if fr.Emit == nil {
 		return
 	}
-	// Stamp the caller identity from EmitFrame.Source so the harness ACL
-	// authenticates the write.
 	cctx := harness.CtxWithCaller(ctx, harness.CallerContext{
 		ActorID:   fr.Emit.Source,
 		ChannelID: f.channelID,
@@ -180,64 +348,41 @@ func (f *Fleet) handleEmit(ctx context.Context, conn *computeConn, fr computebus
 	if err != nil {
 		ack.Err = err.Error()
 	}
-	_ = conn.send(computebus.Frame{Type: computebus.FrameEmitAck, Ack: &ack})
+	wsMu.Lock()
+	_ = sendFrame(ws, computebus.Frame{Type: computebus.FrameEmitAck, Ack: &ack})
+	wsMu.Unlock()
 }
 
-func (f *Fleet) handleDeath(ctx context.Context, conn *computeConn, fr computebus.Frame) {
+// handleDeath closes the pipe for the dead actor. The pipe close causes the
+// port's readLoop to see EOF, triggering die() and the OnDown edge
+// automatically — no manual callback needed.
+func (f *Fleet) handleDeath(state *computeState, fr computebus.Frame) {
 	if fr.Death == nil {
 		return
 	}
 	dead := fr.Death.Actor
-	f.placement.Remove(dead)
-	f.logger.Info("fleet.death", "actor", string(dead), "compute", conn.id)
-	if f.onDeath != nil {
-		f.onDeath(ctx, dead)
-	}
-}
-
-func (f *Fleet) registerCompute(conn *computeConn, decls []computebus.AttachDeclaration) {
-	f.mu.Lock()
-	f.computes[conn.id] = conn
-	f.mu.Unlock()
-	for _, d := range decls {
-		f.placement.Assign(d.ActorID, conn.id)
-	}
-}
-
-func (f *Fleet) disconnectCompute(conn *computeConn) {
-	f.mu.Lock()
-	if f.computes[conn.id] == conn {
-		delete(f.computes, conn.id)
-	}
-	f.mu.Unlock()
-	// RemoveCompute returns all actors that were assigned to this compute.
-	// Each is now dead -- materialise receiver_unavailable.
-	affected := f.placement.RemoveCompute(conn.id)
-	f.logger.Info("fleet.disconnect", "compute", conn.id, "affected", len(affected))
-	if f.onDeath != nil {
-		for _, a := range affected {
-			f.onDeath(context.Background(), a)
+	for i := range state.pipes {
+		if state.pipes[i].actorID == dead {
+			state.pipes[i].cancel()
+			_ = state.pipes[i].fleetConn.Close()
+			f.logger.Info("fleet.death", "actor", string(dead),
+				"compute", state.computeID)
+			return
 		}
 	}
 }
 
-// Dispatch sends an envelope DOWN to the compute hosting target. Returns false
-// if no compute hosts it.
-func (f *Fleet) Dispatch(target actor.ActorID, env *message.Envelope) bool {
-	computeID, ok := f.placement.Lookup(target)
-	if !ok {
-		return false
+// teardownCompute closes all virtual pipes for a compute. Each pipe close
+// causes the actorrt port to see EOF and fire OnDown. Called on WS
+// disconnect (batch death) and on defer cleanup.
+func (f *Fleet) teardownCompute(state *computeState) {
+	if state == nil {
+		return
 	}
-	f.mu.RLock()
-	conn := f.computes[computeID]
-	f.mu.RUnlock()
-	if conn == nil {
-		return false
+	for i := range state.pipes {
+		state.pipes[i].cancel()
+		_ = state.pipes[i].fleetConn.Close()
 	}
-	return conn.send(computebus.Frame{
-		Type:     computebus.FrameDispatch,
-		Dispatch: &computebus.DispatchFrame{Target: target, Envelope: env},
-	}) == nil
 }
 
 func sendFrame(ws *websocket.Conn, f computebus.Frame) error {

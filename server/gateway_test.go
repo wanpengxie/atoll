@@ -13,15 +13,16 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/runtime"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 	"github.com/wanpengxie/ActOS/server/channelhost"
-	"github.com/wanpengxie/ActOS/server/fleet"
-	"github.com/wanpengxie/ActOS/wire/placement"
 )
 
 const testChannelID = channel.ID("test-gw")
 
-// setupGateway creates a channelhost + fleet + mux for testing gateway routes.
+// setupGateway replicates the v2 assembly sequence (server.Run) for testing
+// gateway HTTP routes. Since the gateway struct is unexported, the test mounts
+// equivalent handlers that call the same substrate interfaces the gateway does.
 func setupGateway(t *testing.T) *http.ServeMux {
 	t.Helper()
 	ctx := context.Background()
@@ -36,52 +37,53 @@ func setupGateway(t *testing.T) *http.ServeMux {
 		ID: "web-client", Kind: actor.KindHuman, CreatedAt: time.Now().UnixMilli(),
 	})
 
+	// Build raw harness chain.
+	rawChain, err := harness.New(harness.Deps{
+		ChannelID:     testChannelID,
+		ActorRegistry: cs.Registry,
+		Log:           cs.Log,
+	})
+	if err != nil {
+		t.Fatalf("harness.New: %v", err)
+	}
+
+	// Build channelhost with the raw chain as writer (no postCommitWriter in
+	// this test — we only test the HTTP gateway routes, not the full fanout).
 	home, err := channelhost.New(ctx, channelhost.Config{
 		ChannelID: testChannelID,
 		Stores: channelhost.Stores{
 			Log: cs.Log, Query: cs.Query, Requests: cs.Requests,
 			Registry: cs.Registry, Membership: cs.Membership, Close: cs.Close,
 		},
+		Writer: rawChain,
 	})
 	if err != nil {
 		t.Fatalf("channelhost.New: %v", err)
 	}
 	t.Cleanup(func() { _ = home.Close() })
 
-	plc := placement.New()
-	flt := fleet.New(fleet.Config{
-		Writer:    home.Writer(),
-		ChannelID: testChannelID,
-		Placement: plc,
-		OnDeath:   home.MaterialiseComputeDeath,
-		OnAttach:  home.RegisterComputeActors,
-	})
-	home.SetRemoteDispatch(flt.Dispatch)
+	_ = home // channelhost assembled; we use stores directly below.
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/compute", flt.ServeWS)
-	// Mount gateway routes by re-creating the server's gateway mount.
-	// Since the gateway type is unexported, we replicate it via server.Run style.
-	// Instead: directly test the HTTP routes by constructing the mux as server.Run does.
-	// We access the gateway via the public HandleFunc calls on mux.
-	mountGateway(mux, home, testChannelID)
+	// Mount gateway-equivalent handlers using the substrate interfaces directly,
+	// mirroring how the real gateway is wired in server.Run.
+	mountGateway(mux, rawChain, cs.Query, cs.Registry, testChannelID)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 	return mux
 }
 
-// mountGateway replicates the gateway mounting logic from server.Run.
-// Since the gateway struct is unexported in the server package, we test
-// via the public HTTP endpoints.
-func mountGateway(mux *http.ServeMux, home *channelhost.ChannelHome, chID channel.ID) {
+// mountGateway replicates the gateway route mounting using substrate interfaces
+// (v2 pattern: no channelhost dependency in the gateway).
+func mountGateway(mux *http.ServeMux, writer harness.Writer, query storespec.MessageQuery, registry storespec.Registry, chID channel.ID) {
 	// Cursor endpoint.
 	mux.HandleFunc("/api/channels/"+string(chID)+"/cursor", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		seq, err := home.MaxSeq(r.Context())
+		seq, err := query.MaxSeq(r.Context())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -95,7 +97,7 @@ func mountGateway(mux *http.ServeMux, home *channelhost.ChannelHome, chID channe
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		rows, err := home.ListActiveActors(r.Context())
+		rows, err := registry.ListActive(r.Context())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

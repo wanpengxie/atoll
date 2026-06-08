@@ -13,14 +13,17 @@ import (
 	"github.com/wanpengxie/ActOS/kernel/channel"
 	"github.com/wanpengxie/ActOS/kernel/message"
 	"github.com/wanpengxie/ActOS/runtime/harness"
-	"github.com/wanpengxie/ActOS/server/channelhost"
+	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// gateway is the client/SDK ingress: it exposes the routes the SDK expects
-// (cursor / messages / actors / ws) over the single-channel home.
+// gateway is the client/SDK ingress (v2): it receives independent substrate
+// interfaces + the assembly-root's writer and pushHub, NOT a *channelhost.ChannelHome.
 type gateway struct {
-	home      *channelhost.ChannelHome
+	writer    harness.Writer         // postCommitWriter from assembly root
+	hub       *pushHub               // client subscription signal
 	channelID channel.ID
+	query     storespec.MessageQuery // read path
+	registry  storespec.Registry     // actor list
 }
 
 const clientRequestTTLMs int64 = 30_000
@@ -56,7 +59,7 @@ func (g *gateway) routeChannel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *gateway) handleCursor(w http.ResponseWriter, r *http.Request) {
-	seq, err := g.home.MaxSeq(r.Context())
+	seq, err := g.query.MaxSeq(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -111,7 +114,7 @@ func (g *gateway) handleMessages(w http.ResponseWriter, r *http.Request) {
 		ActorID:   sender,
 		ChannelID: g.channelID,
 	})
-	res, err := g.home.Dispatch(cctx, env)
+	res, err := g.writer.Write(cctx, env)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -125,7 +128,7 @@ func (g *gateway) handleMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *gateway) handleActors(w http.ResponseWriter, r *http.Request) {
-	rows, err := g.home.ListActiveActors(r.Context())
+	rows, err := g.registry.ListActive(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -162,11 +165,11 @@ func (g *gateway) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	sig, unsub := g.home.Subscribe()
+	sig, unsub := g.hub.subscribe()
 	defer unsub()
 	last := sub.SinceSeq
 	for {
-		rows, err := g.home.ReadAfterSeq(ctx, last, 256)
+		rows, err := g.query.ReadAfterSeq(ctx, last, 256)
 		if err != nil {
 			return
 		}

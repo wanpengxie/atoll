@@ -17,7 +17,7 @@ import (
 
 const testChannelID = channel.ID("test-channel")
 
-func openTestStores(t *testing.T) channelhost.Stores {
+func openTestStores(t *testing.T) (channelhost.Stores, *runtime.ChannelStores) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "ch.sqlite")
 	cs, err := runtime.OpenChannel(context.Background(), dbPath, runtime.OpenChannelOptions{})
@@ -32,27 +32,41 @@ func openTestStores(t *testing.T) channelhost.Stores {
 		Registry:   cs.Registry,
 		Membership: cs.Membership,
 		Close:      cs.Close,
-	}
+	}, cs
 }
 
-func newTestHome(t *testing.T) *channelhost.ChannelHome {
+// newTestHome creates a channelhost with a raw harness chain as writer (the
+// v2 assembly root would wrap this in a postCommitWriter, but for unit tests
+// the raw chain suffices).
+func newTestHome(t *testing.T) (*channelhost.ChannelHome, *harness.Chain) {
 	t.Helper()
 	ctx := context.Background()
-	stores := openTestStores(t)
+	stores, cs := openTestStores(t)
+
+	chain, err := harness.New(harness.Deps{
+		ChannelID:     testChannelID,
+		ActorRegistry: cs.Registry,
+		Log:           cs.Log,
+	})
+	if err != nil {
+		t.Fatalf("harness.New: %v", err)
+	}
+
 	home, err := channelhost.New(ctx, channelhost.Config{
 		ChannelID: testChannelID,
 		Stores:    stores,
+		Writer:    chain,
 	})
 	if err != nil {
 		t.Fatalf("channelhost.New: %v", err)
 	}
-	return home
+	return home, chain
 }
 
 // TestNew_GenesisRegistersSystemActor verifies that channelhost.New registers
 // the system actor into membership so its writes pass harness sender validation.
 func TestNew_GenesisRegistersSystemActor(t *testing.T) {
-	home := newTestHome(t)
+	home, _ := newTestHome(t)
 	defer func() { _ = home.Close() }()
 
 	actors, err := home.ListActiveActors(context.Background())
@@ -75,7 +89,7 @@ func TestNew_GenesisRegistersSystemActor(t *testing.T) {
 
 // TestMaxSeq_EmptyChannel verifies an empty channel has seq 0.
 func TestMaxSeq_EmptyChannel(t *testing.T) {
-	home := newTestHome(t)
+	home, _ := newTestHome(t)
 	defer func() { _ = home.Close() }()
 
 	seq, err := home.MaxSeq(context.Background())
@@ -87,45 +101,45 @@ func TestMaxSeq_EmptyChannel(t *testing.T) {
 	}
 }
 
-// TestFanoutWriter_WriteAndReadBack verifies that Dispatch commits an envelope
-// into truth and it can be read back via ReadAfterSeq.
-func TestFanoutWriter_WriteAndReadBack(t *testing.T) {
-	home := newTestHome(t)
-	defer func() { _ = home.Close() }()
-
+// TestWriteAndReadBack verifies that writing through the harness chain commits
+// an envelope into truth and it can be read back via ReadAfterSeq on channelhost.
+func TestWriteAndReadBack(t *testing.T) {
 	ctx := context.Background()
 
-	// Register a sender actor so the harness ACL passes.
-	senderID := actor.ActorID("user:test")
-	stores := openTestStores(t)
-	// Use the home's own stores -- we need to register the sender via membership.
-	// Instead, re-open to avoid double-close; use the home's dispatch which
-	// requires a registered sender.
-	// Simpler: register via ApplyMemberTransitions on a separate home.
-	// Actually, let's just write through the home after registering.
-
-	// Create a fresh home with a sender pre-registered.
+	// Open a fresh store with a pre-registered sender.
 	dbPath := filepath.Join(t.TempDir(), "ch2.sqlite")
 	cs, err := runtime.OpenChannel(ctx, dbPath, runtime.OpenChannelOptions{})
 	if err != nil {
 		t.Fatalf("OpenChannel: %v", err)
 	}
+
+	senderID := actor.ActorID("user:test")
 	_ = cs.Membership.Insert(ctx, storespec.Record{
 		ID: senderID, Kind: actor.KindHuman, CreatedAt: time.Now().UnixMilli(),
 	})
-	home2, err := channelhost.New(ctx, channelhost.Config{
+
+	chain, err := harness.New(harness.Deps{
+		ChannelID:     testChannelID,
+		ActorRegistry: cs.Registry,
+		Log:           cs.Log,
+	})
+	if err != nil {
+		t.Fatalf("harness.New: %v", err)
+	}
+
+	home, err := channelhost.New(ctx, channelhost.Config{
 		ChannelID: testChannelID,
 		Stores: channelhost.Stores{
 			Log: cs.Log, Query: cs.Query, Requests: cs.Requests,
 			Registry: cs.Registry, Membership: cs.Membership, Close: cs.Close,
 		},
+		Writer: chain,
 	})
 	if err != nil {
 		t.Fatalf("channelhost.New: %v", err)
 	}
-	defer func() { _ = home2.Close() }()
+	defer func() { _ = home.Close() }()
 
-	_ = stores // not used
 	env := &message.Envelope{
 		ID:         "msg-001",
 		TS:         time.Now().UnixMilli(),
@@ -142,23 +156,24 @@ func TestFanoutWriter_WriteAndReadBack(t *testing.T) {
 		ActorID:   senderID,
 		ChannelID: testChannelID,
 	})
-	res, err := home2.Dispatch(cctx, env)
+	// Write through the harness chain directly (v2: the assembly root's
+	// postCommitWriter would wrap this; channelhost doesn't own the write path).
+	res, err := chain.Write(cctx, env)
 	if err != nil {
-		t.Fatalf("Dispatch: %v", err)
+		t.Fatalf("Write: %v", err)
 	}
 	if !res.Accepted() {
-		t.Fatalf("Dispatch rejected: %s (%s)", res.RejectReason, res.RejectDetail)
+		t.Fatalf("Write rejected: %s (%s)", res.RejectReason, res.RejectDetail)
 	}
 	if res.MessageID != "msg-001" {
 		t.Errorf("MessageID = %q, want %q", res.MessageID, "msg-001")
 	}
 
-	// Read back.
-	rows, err := home2.ReadAfterSeq(ctx, 0, 100)
+	// Read back via channelhost's query accessor.
+	rows, err := home.ReadAfterSeq(ctx, 0, 100)
 	if err != nil {
 		t.Fatalf("ReadAfterSeq: %v", err)
 	}
-	// Should have at least the system.actor.registered events + our test event.
 	found := false
 	for _, row := range rows {
 		if row.Envelope.ID == "msg-001" {
@@ -170,64 +185,5 @@ func TestFanoutWriter_WriteAndReadBack(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("test event msg-001 not found in ReadAfterSeq (got %d rows)", len(rows))
-	}
-}
-
-// TestPushHub_NotifyWakesSubscribers verifies that pushHub wakes subscribers
-// when a write is committed.
-func TestPushHub_NotifyWakesSubscribers(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ch3.sqlite")
-	ctx := context.Background()
-	cs, err := runtime.OpenChannel(ctx, dbPath, runtime.OpenChannelOptions{})
-	if err != nil {
-		t.Fatalf("OpenChannel: %v", err)
-	}
-
-	senderID := actor.ActorID("user:push-test")
-	_ = cs.Membership.Insert(ctx, storespec.Record{
-		ID: senderID, Kind: actor.KindHuman, CreatedAt: time.Now().UnixMilli(),
-	})
-
-	home, err := channelhost.New(ctx, channelhost.Config{
-		ChannelID: testChannelID,
-		Stores: channelhost.Stores{
-			Log: cs.Log, Query: cs.Query, Requests: cs.Requests,
-			Registry: cs.Registry, Membership: cs.Membership, Close: cs.Close,
-		},
-	})
-	if err != nil {
-		t.Fatalf("channelhost.New: %v", err)
-	}
-	defer func() { _ = home.Close() }()
-
-	sig, unsub := home.Subscribe()
-	defer unsub()
-
-	env := &message.Envelope{
-		ID:         "msg-push-001",
-		TS:         time.Now().UnixMilli(),
-		ChannelID:  testChannelID,
-		Kind:       message.KindEvent,
-		Type:       "test.push",
-		Sender:     message.Sender{Kind: actor.KindHuman, ID: senderID},
-		Audience:   message.Audience{actor.SystemActorID},
-		Visibility: message.VisibilityPublic,
-		Payload:    []byte(`{}`),
-	}
-
-	cctx := harness.CtxWithCaller(ctx, harness.CallerContext{
-		ActorID:   senderID,
-		ChannelID: testChannelID,
-	})
-	_, err = home.Dispatch(cctx, env)
-	if err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
-
-	select {
-	case <-sig:
-		// OK -- subscriber was woken
-	case <-time.After(time.Second):
-		t.Fatal("subscriber not woken after Dispatch")
 	}
 }

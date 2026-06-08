@@ -8,46 +8,28 @@ import (
 
 	"github.com/wanpengxie/ActOS/kernel/actor"
 	"github.com/wanpengxie/ActOS/kernel/channel"
-	"github.com/wanpengxie/ActOS/kernel/message"
-	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/lib/channelkit"
 	"github.com/wanpengxie/ActOS/lib/sysactor"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
-	"github.com/wanpengxie/ActOS/wire/computebus"
 )
 
-// ChannelHome is one channel's truth-holding home (v2). It composes the
-// deployment-agnostic core -- storespec interfaces (append-only truth) +
-// runtime/harness (9-step write chain) + lib/channelkit (system cell + death
-// edge wiring) -- into a process that owns channel truth.
+// ChannelHome is one channel's business-layer assembly (v2). It composes
+// stores + channelkit (actorrt + sysactor + death edge wiring) into the
+// per-channel truth holder. It does NOT own the write-fanout path or client
+// push -- those live in the assembly root (server.go).
 type ChannelHome struct {
 	channelID channel.ID
-
-	log        storespec.MessageLog
-	query      storespec.MessageQuery
-	requests   storespec.RequestLookup
-	registry   storespec.Registry
-	membership storespec.MembershipControlPlane
-
-	// writer is the fanout-wrapping write path: every committed envelope fans
-	// out to its audience (local cells / remote computes / client push).
-	writer  *fanoutWriter
-	channel *channelkit.Channel
-
-	nowMs  func() int64
-	logger *slog.Logger
-
-	hub *pushHub // client-push fan-out signal
-
-	// closer is called by Close to release the underlying store resources.
-	closer func() error
+	stores    Stores
+	channel   *channelkit.Channel
+	logger    *slog.Logger
+	closer    func() error
 }
 
 // Stores bundles the pre-opened storespec interfaces the channelhost needs.
-// The caller (server.Run) opens the store via runtime/internal/store.OpenChannel
-// from a package that CAN import it, then passes the interfaces here.
+// The caller (server.Run) opens the store via runtime.OpenChannel from a
+// package that CAN import it, then passes the interfaces here.
 type Stores struct {
 	Log        storespec.MessageLog
 	Query      storespec.MessageQuery
@@ -62,15 +44,20 @@ type Stores struct {
 type Config struct {
 	ChannelID channel.ID
 	Stores    Stores
+	Writer    harness.Writer // injected by assembly root, not created here
 	NowMs     func() int64
 	Logger    *slog.Logger
 }
 
-// New assembles the channel home from pre-opened stores (truth-flip: truth
-// lives here at the server, not the daemon). Genesis is server-local.
+// New assembles the channel home from pre-opened stores and an injected
+// Writer. The Writer is the post-commit write chain owned by the assembly
+// root; channelhost only assembles the business-layer pieces around it.
 func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 	if cfg.ChannelID == "" {
 		return nil, fmt.Errorf("channelhost: ChannelID required")
+	}
+	if cfg.Writer == nil {
+		return nil, fmt.Errorf("channelhost: Writer required")
 	}
 	nowMs := cfg.NowMs
 	if nowMs == nil {
@@ -89,29 +76,6 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 		ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: nowMs(),
 	})
 
-	// Build harness chain.
-	rawChain, err := harness.New(harness.Deps{
-		ChannelID:     cfg.ChannelID,
-		ActorRegistry: st.Registry,
-		Log:           st.Log,
-		NowMs:         nowMs,
-		Logger:        logger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("channelhost: assemble harness: %w", err)
-	}
-
-	// pushHub for client WS push.
-	hub := newPushHub()
-
-	// fanoutWriter wraps chain: Write success -> Deliver(local) +
-	// remoteDispatch(wire) + hub.notify(client).
-	// Deliverer is back-filled once channelkit builds the runtime.
-	fw := &fanoutWriter{
-		inner: rawChain,
-		hub:   hub,
-	}
-
 	// Presence stat adapter: bridges actorrt.Runtime.Stat to sysactor.PresenceStat.
 	presenceAdapter := &runtimePresenceAdapter{}
 
@@ -119,7 +83,7 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 	clock := func() time.Time { return time.UnixMilli(nowMs()) }
 	sys := sysactor.New(sysactor.Deps{
 		Registry: st.Registry,
-		Writer:   fw,
+		Writer:   cfg.Writer,
 		Lookup:   st.Requests,
 		Clock:    clock,
 		Stat:     presenceAdapter,
@@ -129,30 +93,21 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 	ch := channelkit.New(channelkit.Config{
 		ChannelID:    cfg.ChannelID,
 		System:       sys,
-		Writer:       fw,
+		Writer:       cfg.Writer,
 		OpenRequests: st.Query,
 		Clock:        clock,
 		Logger:       logger,
 	})
 
-	// Back-fill the fanout deliverer now the runtime exists.
-	fw.deliverer = ch.Deliverer()
 	// Back-fill presence adapter with the runtime.
 	presenceAdapter.rt = ch.Cells()
 
 	h := &ChannelHome{
-		channelID:  cfg.ChannelID,
-		log:        st.Log,
-		query:      st.Query,
-		requests:   st.Requests,
-		registry:   st.Registry,
-		membership: st.Membership,
-		writer:     fw,
-		channel:    ch,
-		nowMs:      nowMs,
-		logger:     logger,
-		hub:        hub,
-		closer:     st.Close,
+		channelID: cfg.ChannelID,
+		stores:    st,
+		channel:   ch,
+		logger:    logger,
+		closer:    st.Close,
 	}
 
 	logger.Info("channelhost.ready", "channel", string(cfg.ChannelID))
@@ -175,15 +130,13 @@ func (a *runtimePresenceAdapter) Stat(id actor.ActorID) (startedAt time.Time, pr
 	return stat.StartedAt, true
 }
 
-// Writer returns the fanout writer (harness.Writer) -- the only way to mutate
-// channel truth. Every committed envelope fans out to its audience.
-func (h *ChannelHome) Writer() harness.Writer { return h.writer }
+// Runtime returns the actorrt runtime so the assembly root can pass it to
+// fleet for Attach (registering remote actors as ports).
+func (h *ChannelHome) Runtime() *actorrt.Runtime { return h.channel.Cells() }
 
-// SetRemoteDispatch wires the fleet's compute-dispatch seam so requests for
-// actors hosted on an attached compute are routed down the wire.
-func (h *ChannelHome) SetRemoteDispatch(fn func(actor.ActorID, *message.Envelope) bool) {
-	h.writer.remoteDispatch = fn
-}
+// Deliverer returns the confined enqueue capability so the assembly root can
+// build its postCommitWriter (write -> deliver -> notify).
+func (h *ChannelHome) Deliverer() actorrt.Deliverer { return h.channel.Deliverer() }
 
 // Channel exposes the assembled channelkit (cells + death wiring).
 func (h *ChannelHome) Channel() *channelkit.Channel { return h.channel }
@@ -191,67 +144,19 @@ func (h *ChannelHome) Channel() *channelkit.Channel { return h.channel }
 // ChannelID returns the channel's id.
 func (h *ChannelHome) ChannelID() channel.ID { return h.channelID }
 
-// Subscribe registers a client stream and returns a wake signal + cancel.
-func (h *ChannelHome) Subscribe() (<-chan struct{}, func()) { return h.hub.subscribe() }
-
 // MaxSeq returns the channel's current head seq (client cursor anchor).
 func (h *ChannelHome) MaxSeq(ctx context.Context) (int64, error) {
-	return h.query.MaxSeq(ctx)
+	return h.stores.Query.MaxSeq(ctx)
 }
 
 // ReadAfterSeq returns committed envelopes with seq > afterSeq (client tail).
 func (h *ChannelHome) ReadAfterSeq(ctx context.Context, afterSeq int64, limit int) ([]storespec.StoredRow, error) {
-	return h.query.ReadAfterSeq(ctx, afterSeq, limit)
+	return h.stores.Query.ReadAfterSeq(ctx, afterSeq, limit)
 }
 
 // ListActiveActors returns all active actors from the membership registry.
 func (h *ChannelHome) ListActiveActors(ctx context.Context) ([]storespec.Record, error) {
-	return h.registry.ListActive(ctx)
-}
-
-// RegisterComputeActors registers an attaching compute's actors into membership.
-// The compute holds no truth, so the home does this on its behalf at attach.
-func (h *ChannelHome) RegisterComputeActors(ctx context.Context, chID channel.ID, decls []computebus.AttachDeclaration) error {
-	adds := make([]storespec.MemberActorAdd, 0, len(decls))
-	now := h.nowMs()
-	for _, d := range decls {
-		adds = append(adds, storespec.MemberActorAdd{
-			ID:      d.ActorID,
-			Kind:    d.Kind,
-			Binding: d.Binding,
-			At:      now,
-		})
-	}
-	return h.membership.ApplyMemberTransitions(ctx, chID, adds, nil)
-}
-
-// MaterialiseComputeDeath is the home-side closure for a death that happened on
-// an attached compute: the compute cell has NO local truth, so the home
-// materialises receiver_unavailable for the dead actor's in-flight requests
-// (substrate closure author #3, across the wire).
-func (h *ChannelHome) MaterialiseComputeDeath(ctx context.Context, dead actor.ActorID) {
-	clock := func() time.Time { return time.UnixMilli(h.nowMs()) }
-	sys := message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
-	onFault := func(reqID message.ID, err error) {
-		h.logger.Error("channelhost.compute_death.write_failed",
-			"dead_actor", string(dead), "request", string(reqID), "err", err)
-	}
-	// Inject system caller context so the harness authenticates the write.
-	cctx := harness.CtxWithCaller(ctx, harness.CallerContext{
-		ActorID:   actor.SystemActorID,
-		ChannelID: h.channelID,
-	})
-	_ = behavior.MaterialiseReceiverUnavailable(
-		cctx, h.writer, h.query,
-		clock, sys, dead, onFault,
-	)
-}
-
-// Dispatch writes env into channel truth (9-step harness); the fanout writer
-// then delivers the committed envelope to its audience. This is the client/SDK
-// ingress seam.
-func (h *ChannelHome) Dispatch(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
-	return h.writer.Write(ctx, env)
+	return h.stores.Registry.ListActive(ctx)
 }
 
 // Close tears down the channel home, releasing the store.

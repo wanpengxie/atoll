@@ -1,4 +1,4 @@
-package channelhost
+package server
 
 import "sync"
 
@@ -7,6 +7,9 @@ import "sync"
 // own seq cursor (so the signal is lossy-by-design -- correctness is the seq read,
 // not the signal). This is the external-client half of the fanout (cells get the
 // envelope directly; remote clients get a "go read more" nudge).
+//
+// Moved from channelhost to the assembly root (server package) because the hub
+// is wired into postCommitWriter which the assembly root owns.
 type pushHub struct {
 	mu   sync.Mutex
 	subs map[int]chan struct{}
