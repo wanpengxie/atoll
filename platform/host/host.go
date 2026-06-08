@@ -5,7 +5,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/wire/computebus"
+	"github.com/wanpengxie/ActOS/platform/computebus"
 )
 
 // DeathFunc reports a hosted cell's death UP to the home so the home can

@@ -7,7 +7,7 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/harness"
-	"github.com/wanpengxie/ActOS/wire/computebus"
+	"github.com/wanpengxie/ActOS/platform/computebus"
 )
 
 // EmitFunc sends a cell's output UP to the channel home and returns the home

@@ -14,7 +14,7 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/obs/metrics"
 	"github.com/wanpengxie/ActOS/obs/observability"
-	"github.com/wanpengxie/ActOS/server"
+	"github.com/wanpengxie/ActOS/platform"
 )
 
 func main() {
@@ -38,7 +38,7 @@ func main() {
 		}()
 	}
 
-	if err := server.Run(context.Background(), server.Config{
+	if err := platform.RunHome(context.Background(), platform.HomeConfig{
 		ChannelID:  channel.ID(*ch),
 		DBPath:     *db,
 		ListenAddr: *addr,

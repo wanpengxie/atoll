@@ -9,7 +9,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/wire/computebus"
+	"github.com/wanpengxie/ActOS/platform/computebus"
 )
 
 // --- test helpers ---

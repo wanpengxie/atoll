@@ -13,7 +13,7 @@ import (
 	"strings"
 
 	"github.com/wanpengxie/ActOS/adapters/feishu"
-	"github.com/wanpengxie/ActOS/daemon"
+	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/obs/metrics"
@@ -50,7 +50,7 @@ func main() {
 	reg := metrics.NewRegistry()
 	modules := buildModules(strings.Split(*adapters, ","), logger, reg)
 
-	if err := daemon.Run(context.Background(), daemon.Config{
+	if err := platform.RunCompute(context.Background(), platform.ComputeConfig{
 		ServerWS:  *ws,
 		APIKey:    *key,
 		ChannelID: channel.ID(*ch),

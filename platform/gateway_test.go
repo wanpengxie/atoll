@@ -1,4 +1,4 @@
-package server_test
+package platform_test
 
 import (
 	"bytes"
@@ -15,7 +15,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
-	"github.com/wanpengxie/ActOS/server/channelhost"
+	"github.com/wanpengxie/ActOS/platform/channelhost"
 )
 
 const testChannelID = channel.ID("test-gw")

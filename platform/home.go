@@ -3,7 +3,7 @@
 // notification), and wires channelhost (business layer) + fleet (physical
 // layer) + gateway (client ingress) into a runnable process. cmd/server
 // selects concrete adapters and injects obs.
-package server
+package platform
 
 import (
 	"context"
@@ -17,12 +17,12 @@ import (
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
-	"github.com/wanpengxie/ActOS/server/channelhost"
-	"github.com/wanpengxie/ActOS/server/fleet"
+	"github.com/wanpengxie/ActOS/platform/channelhost"
+	"github.com/wanpengxie/ActOS/platform/fleet"
 )
 
 // Config configures the channel-home process.
-type Config struct {
+type HomeConfig struct {
 	ChannelID  channel.ID
 	DBPath     string
 	ListenAddr string
@@ -42,7 +42,7 @@ type Config struct {
 //  8. Build fleet with writer + home.Runtime() + membership
 //  9. Build gateway with writer + hub + query + registry
 //  10. Mount HTTP routes + serve
-func Run(ctx context.Context, cfg Config) error {
+func RunHome(ctx context.Context, cfg HomeConfig) error {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)

@@ -10,7 +10,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/wire/computebus"
+	"github.com/wanpengxie/ActOS/platform/computebus"
 )
 
 // DispatchHandler is invoked for each envelope dispatched down from the home.

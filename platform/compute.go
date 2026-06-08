@@ -1,22 +1,22 @@
 // Package daemon is the attached-compute assembly (v2): homelink (connect to
 // server) + host (business cells) + localdevice. Cloud daemon and user-proxy
 // daemon are the same binary; cmd selects concrete adapters.
-package daemon
+package platform
 
 import (
 	"context"
 
 	"github.com/google/uuid"
 
-	"github.com/wanpengxie/ActOS/daemon/homelink"
-	"github.com/wanpengxie/ActOS/daemon/host"
+	"github.com/wanpengxie/ActOS/platform/homelink"
+	"github.com/wanpengxie/ActOS/platform/host"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/wire/computebus"
+	"github.com/wanpengxie/ActOS/platform/computebus"
 )
 
 // Config configures the attached compute.
-type Config struct {
+type ComputeConfig struct {
 	ServerWS  string
 	APIKey    string
 	ComputeID string
@@ -36,7 +36,7 @@ type ActorDecl struct {
 // homelink (blocking on the home's EmitAck). No local truth.
 //
 // Run blocks until ctx is cancelled or the homelink disconnects.
-func Run(ctx context.Context, cfg Config, actors []ActorDecl) error {
+func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) error {
 	computeID := cfg.ComputeID
 	if computeID == "" {
 		computeID = uuid.NewString()

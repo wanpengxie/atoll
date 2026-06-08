@@ -12,7 +12,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/wire/computebus"
+	"github.com/wanpengxie/ActOS/platform/computebus"
 )
 
 // testServer is a minimal WS server that accepts attach, echoes EmitAck for

@@ -16,8 +16,8 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
-	"github.com/wanpengxie/ActOS/server/fleet"
-	"github.com/wanpengxie/ActOS/wire/computebus"
+	"github.com/wanpengxie/ActOS/platform/fleet"
+	"github.com/wanpengxie/ActOS/platform/computebus"
 )
 
 const testChannelID = channel.ID("test-channel")
