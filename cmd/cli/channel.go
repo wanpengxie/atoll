@@ -63,13 +63,11 @@ func runChannelLs(args []string) {
 		return
 	}
 
-	var rootResp struct {
-		Workspaces []wsRow `json:"workspaces"`
-	}
+	var rootResp []wsRow
 	if err := c.do("GET", "/api/workspaces", nil, &rootResp); err != nil {
 		fatal(err)
 	}
-	for _, w := range rootResp.Workspaces {
+	for _, w := range rootResp {
 		listForWorkspace(w.ID)
 	}
 }

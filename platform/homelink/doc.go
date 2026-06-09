@@ -7,5 +7,5 @@
 // owned here, not by UplinkWriter. UplinkWriter blocks on homelink.Emit and
 // receives the resolved EmitAck.
 //
-// Depends on wire/computebus + kernel/actor. MUST NOT import server.
+// Depends on platform/computebus + protocol/actor. MUST NOT import server.
 package homelink

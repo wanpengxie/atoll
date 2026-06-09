@@ -10,19 +10,12 @@ import (
 	gokimitools "github.com/wanpengxie/go-kimi/pkg/kimi/tools"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
 
+	"github.com/wanpengxie/ActOS/lib/behavior"
+	"github.com/wanpengxie/ActOS/lib/callkit"
+	"github.com/wanpengxie/ActOS/lib/metatool"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
-
-// channelToolDefaultTimeout is the caller-side default that bounds the
-// fast-path Await WINDOW (resolveFastPathWindow), NOT the persisted
-// closure deadline. R5 invariant (actor-behavior.md §7.2): "sane default
-// — SDK 30s". It is the SDK-default ceiling on how long the agent loop
-// blocks inline before degrading to an ack; the true per-type deadline
-// (max_pending_ms) is stamped by the daemon as expires_at. A long-running
-// type therefore stays pending in the daemon up to its own max_pending_ms
-// even though the caller stopped blocking after this window.
-const channelToolDefaultTimeout = 30 * time.Second
 
 type channelToolRuntimeKey struct{}
 
@@ -31,40 +24,13 @@ type channelToolRuntime struct {
 	trigger TriggerPayload
 }
 
-// waitMode selects the caller-side wait policy for one channel request
-// (§2.3.2). It is purely a caller-side mechanism; the receiver is unaware.
-type waitMode int
-
 const (
-	// waitFastPath is the default: Submit + Await(window~15s). Within the
-	// window a final returns inline; past it the call degrades to an ack.
-	waitFastPath waitMode = iota
-	// waitUnbounded is call_actor(wait=true): Await to the type timeout
-	// (sync opt-in, no degrade to ack short of the type deadline).
-	waitUnbounded
-	// waitNone is call_actor(wait=false): window 0, immediate ack (fan-out).
-	waitNone
+	waitFastPath  = callkit.WaitFastPath
+	waitUnbounded = callkit.WaitUnbounded
+	waitNone      = callkit.WaitNone
 )
 
-// channelTools returns the meta-tool surface the LLM sees: a fixed
-// actor-CLI verb set that exploits the envelope
-// protocol's uniformity instead of fanning out one tool per
-// channel-local type.
-//
-// Substrate rationale (vision §1.1 + proto-foundation §2.5):
-//   - Every adapter exposes the same wire shape (kind=request envelope
-//   - handler actor_id + payload). Direct per-type tool injection
-//     was a transitional shim borrowed from no-standardization worlds
-//     (legacy tool APIs / OpenAI function-calling) where each tool had
-//     a distinct RPC. Once standardization is in, a single invocation
-//     primitive carries them all.
-//   - Bootstrap discovery via list_actors keeps the LLM surface O(1)
-//     in the channel's type count. Live validation still happens in
-//     the daemon/harness/adapter path on each envelope call.
-//
-// Trade-off: LLMs trained on direct injection need a system-prompt
-// nudge ("call list_actors first") to use this pattern reliably. See
-// buildChannelContextSection in bridge.go for the prompt phrasing.
+// channelTools returns the meta-tool surface the LLM sees.
 func (b *Bridge) channelTools() []gokimitools.Tool {
 	if b == nil {
 		return nil
@@ -80,39 +46,218 @@ func (b *Bridge) channelTools() []gokimitools.Tool {
 	}
 }
 
-// routeTriggers fans the daemon → worker trigger stream through the
-// worker-side caller helper. Every kind=response envelope is delivered to the
-// caller's correlator (M2 single-lock atomic disposition); the disposition plus
-// the response's finality decide whether it was consumed, swallowed, or must
-// surface as a new turn trigger.
-//
-// Decision table for a kind=response (parent_id set) — driven PURELY off the
-// correlator Disposition that Deliver returns (single-lock atomic, M2). It must
-// NOT consult Registered(): a super-window fast-path Await leaves the
-// waiterSet registered, so "Registered()==true ⇒ swallow" would silently eat
-// the eventual final and the long-call result would never come back (F1).
-//
-//   - DeliveredToAwait → the final was handed to an active fast-path Await /
-//     await_result. Ack the trigger and DO NOT forward to the LLM.
-//   - DeliveredToWatch → consumed by a Watch stream (provisional or final).
-//     Ack + swallow.
-//   - BufferedPendingAwait → fast-final-before-await: the final arrived after
-//     Submit registered the future but before Await parked. Ack + swallow; the
-//     later Await consumes the buffered final.
-//   - NoActiveWaiter + provisional → an interim on an in-flight call with no
-//     Watch attached. v1 swallows provisionals (response-multitype-refactor.md
-//     §3.4 D: "ignore provisional, wait final"); the fast-path Await stays
-//     parked. Ack + swallow.
-//   - NoActiveWaiter + FINAL → a final with no active awaiter: the fast-path
-//     Await already timed out (super-window degrade-to-ack), or the call was
-//     abandoned, or a worker-restart orphan (M4). This is exactly the
-//     "super-window final" case. Surface it to the LLM as a NEW TURN TRIGGER
-//     (never quarantined, never dropped) so the long-call result comes back,
-//     Deliver has already cleared/marked the future under its own lock, so a
-//     later await_result cannot double-consume the same final.
-//
-// Non-response envelopes (events / fresh requests addressed to the agent)
-// always forward to the LLM as turn triggers.
+// --- metatool.Executor implementation on Bridge ---
+
+// extractRuntimeContext pulls IPC + Trigger from ctx for metatool Execute functions.
+func extractRuntimeContext(ctx context.Context) (metatool.RuntimeContext, bool) {
+	runtime, ok := ctx.Value(channelToolRuntimeKey{}).(channelToolRuntime)
+	if !ok || runtime.ipc == nil {
+		return metatool.RuntimeContext{}, false
+	}
+	return metatool.RuntimeContext{
+		IPC: runtime.ipc,
+		Trigger: metatool.Trigger{
+			Envelope:      runtime.trigger.Envelope,
+			CorrelationID: runtime.trigger.CorrelationID,
+		},
+	}, true
+}
+
+// ExecuteRequest implements metatool.Executor.
+func (b *Bridge) ExecuteRequest(ctx context.Context, rc metatool.RuntimeContext, spec callkit.RequestSpec) callkit.ResultValue {
+	ipc := rc.IPC.(IPCFacade)
+	trigger := TriggerPayload{
+		Envelope:      rc.Trigger.Envelope,
+		CorrelationID: rc.Trigger.CorrelationID,
+	}
+	tr := b.executeChannelRequest(ctx, ipc, trigger, spec)
+	return toResultValue(tr)
+}
+
+// ExecuteReservedRaw implements metatool.Executor.
+func (b *Bridge) ExecuteReservedRaw(ctx context.Context, rc metatool.RuntimeContext, spec callkit.RequestSpec) (json.RawMessage, bool) {
+	ipc := rc.IPC.(IPCFacade)
+	trigger := TriggerPayload{
+		Envelope:      rc.Trigger.Envelope,
+		CorrelationID: rc.Trigger.CorrelationID,
+	}
+	return b.executeReservedRequestRaw(ctx, ipc, trigger, spec)
+}
+
+// CallerInstance implements metatool.Executor.
+func (b *Bridge) CallerInstance() *callkit.Caller {
+	return b.caller()
+}
+
+// --- go-kimi thin wrappers ---
+
+// CallActorTool is the go-kimi wrapper for metatool.ExecuteCallActor.
+type CallActorTool struct{ bridge *Bridge }
+
+var _ gokimitools.Tool = (*CallActorTool)(nil)
+
+func (t *CallActorTool) Name() string                      { return metatool.CallActorSpec.Name }
+func (t *CallActorTool) Description() string               { return metatool.CallActorSpec.Description }
+func (t *CallActorTool) ParameterSchema() json.RawMessage  { return callkit.CloneRawJSON(metatool.CallActorSpec.Schema) }
+func (t *CallActorTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
+	rc, ok := extractRuntimeContext(ctx)
+	if !ok {
+		rc = metatool.RuntimeContext{} // IPC==nil triggers internal_error inside ExecuteCallActor
+	}
+	var exec metatool.Executor
+	if t != nil && t.bridge != nil {
+		exec = t.bridge
+	}
+	rv := metatool.ExecuteCallActor(ctx, params, exec, rc)
+	return toKimiToolResult(rv), nil
+}
+
+// ListActorsTool is the go-kimi wrapper for metatool.ExecuteListActors.
+type ListActorsTool struct{ bridge *Bridge }
+
+var _ gokimitools.Tool = (*ListActorsTool)(nil)
+
+func (t *ListActorsTool) Name() string                      { return metatool.ListActorsSpec.Name }
+func (t *ListActorsTool) Description() string               { return metatool.ListActorsSpec.Description }
+func (t *ListActorsTool) ParameterSchema() json.RawMessage  { return callkit.CloneRawJSON(metatool.ListActorsSpec.Schema) }
+func (t *ListActorsTool) Execute(ctx context.Context, _ json.RawMessage) (types.ToolResult, error) {
+	rc, ok := extractRuntimeContext(ctx)
+	if !ok {
+		rc = metatool.RuntimeContext{}
+	}
+	var exec metatool.Executor
+	if t != nil && t.bridge != nil {
+		exec = t.bridge
+	}
+	rv := metatool.ExecuteListActors(ctx, exec, rc)
+	return toKimiToolResult(rv), nil
+}
+
+// DescribeActorTool is the go-kimi wrapper for metatool.ExecuteDescribeActor.
+type DescribeActorTool struct{ bridge *Bridge }
+
+var _ gokimitools.Tool = (*DescribeActorTool)(nil)
+
+func (t *DescribeActorTool) Name() string                      { return metatool.DescribeActorSpec.Name }
+func (t *DescribeActorTool) Description() string               { return metatool.DescribeActorSpec.Description }
+func (t *DescribeActorTool) ParameterSchema() json.RawMessage  { return callkit.CloneRawJSON(metatool.DescribeActorSpec.Schema) }
+func (t *DescribeActorTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
+	rc, ok := extractRuntimeContext(ctx)
+	if !ok {
+		rc = metatool.RuntimeContext{}
+	}
+	var exec metatool.Executor
+	if t != nil && t.bridge != nil {
+		exec = t.bridge
+	}
+	rv := metatool.ExecuteDescribeActor(ctx, params, exec, rc)
+	return toKimiToolResult(rv), nil
+}
+
+// DescribeTypeTool is the go-kimi wrapper for metatool.ExecuteDescribeType.
+type DescribeTypeTool struct{ bridge *Bridge }
+
+var _ gokimitools.Tool = (*DescribeTypeTool)(nil)
+
+func (t *DescribeTypeTool) Name() string                      { return metatool.DescribeTypeSpec.Name }
+func (t *DescribeTypeTool) Description() string               { return metatool.DescribeTypeSpec.Description }
+func (t *DescribeTypeTool) ParameterSchema() json.RawMessage  { return callkit.CloneRawJSON(metatool.DescribeTypeSpec.Schema) }
+func (t *DescribeTypeTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
+	rc, ok := extractRuntimeContext(ctx)
+	if !ok {
+		rc = metatool.RuntimeContext{}
+	}
+	var exec metatool.Executor
+	if t != nil && t.bridge != nil {
+		exec = t.bridge
+	}
+	rv := metatool.ExecuteDescribeType(ctx, params, exec, rc)
+	return toKimiToolResult(rv), nil
+}
+
+// AwaitResultTool is the go-kimi wrapper for metatool.ExecuteAwaitResult.
+type AwaitResultTool struct{ bridge *Bridge }
+
+var _ gokimitools.Tool = (*AwaitResultTool)(nil)
+
+func (t *AwaitResultTool) Name() string                      { return metatool.AwaitResultSpec.Name }
+func (t *AwaitResultTool) Description() string               { return metatool.AwaitResultSpec.Description }
+func (t *AwaitResultTool) ParameterSchema() json.RawMessage  { return callkit.CloneRawJSON(metatool.AwaitResultSpec.Schema) }
+func (t *AwaitResultTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
+	var exec metatool.Executor
+	if t != nil && t.bridge != nil {
+		exec = t.bridge
+	}
+	rv := metatool.ExecuteAwaitResult(ctx, params, exec)
+	return toKimiToolResult(rv), nil
+}
+
+// AbandonTool is the go-kimi wrapper for metatool.ExecuteAbandon.
+type AbandonTool struct{ bridge *Bridge }
+
+var _ gokimitools.Tool = (*AbandonTool)(nil)
+
+func (t *AbandonTool) Name() string                      { return metatool.AbandonSpec.Name }
+func (t *AbandonTool) Description() string               { return metatool.AbandonSpec.Description }
+func (t *AbandonTool) ParameterSchema() json.RawMessage  { return callkit.CloneRawJSON(metatool.AbandonSpec.Schema) }
+func (t *AbandonTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
+	var exec metatool.Executor
+	if t != nil && t.bridge != nil {
+		exec = t.bridge
+	}
+	rv := metatool.ExecuteAbandon(ctx, params, exec)
+	return toKimiToolResult(rv), nil
+}
+
+// ListPendingTool is the go-kimi wrapper for metatool.ExecuteListPending.
+type ListPendingTool struct{ bridge *Bridge }
+
+var _ gokimitools.Tool = (*ListPendingTool)(nil)
+
+func (t *ListPendingTool) Name() string                      { return metatool.ListPendingSpec.Name }
+func (t *ListPendingTool) Description() string               { return metatool.ListPendingSpec.Description }
+func (t *ListPendingTool) ParameterSchema() json.RawMessage  { return callkit.CloneRawJSON(metatool.ListPendingSpec.Schema) }
+func (t *ListPendingTool) Execute(_ context.Context, _ json.RawMessage) (types.ToolResult, error) {
+	var exec metatool.Executor
+	if t != nil && t.bridge != nil {
+		exec = t.bridge
+	}
+	rv := metatool.ExecuteListPending(context.Background(), exec)
+	return toKimiToolResult(rv), nil
+}
+
+// --- go-kimi result converters ---
+
+// toKimiToolResult converts a callkit.ResultValue to a go-kimi types.ToolResult.
+func toKimiToolResult(rv callkit.ResultValue) types.ToolResult {
+	return types.ToolResult{
+		Name:    rv.Name,
+		Value:   types.ToolReturnValue{Value: rv.Value},
+		IsError: rv.IsError,
+	}
+}
+
+// toResultValue converts a go-kimi types.ToolResult to a callkit.ResultValue.
+func toResultValue(tr types.ToolResult) callkit.ResultValue {
+	var m map[string]any
+	if v, ok := tr.Value.Value.(map[string]any); ok {
+		m = v
+	} else {
+		// Wrap non-map values so ResultValue.Value stays map[string]any.
+		m = map[string]any{"result": tr.Value.Value}
+	}
+	return callkit.ResultValue{
+		Name:    tr.Name,
+		Value:   m,
+		IsError: tr.IsError,
+	}
+}
+
+// --- routeTriggers + executeChannelRequest / executeReservedRequestRaw ---
+// These stay on Bridge because they need Bridge internals (envelopeID, cfg.NowFn, caller).
+
+// routeTriggers fans the daemon->worker trigger stream through the
+// worker-side caller helper.
 func (b *Bridge) routeTriggers(ctx context.Context, ipc IPCFacade, in <-chan TriggerPayload) <-chan TriggerPayload {
 	out := make(chan TriggerPayload, 32)
 	go func() {
@@ -128,21 +273,15 @@ func (b *Bridge) routeTriggers(ctx context.Context, ipc IPCFacade, in <-chan Tri
 				}
 				if payload.Envelope.Kind == message.KindResponse && payload.Envelope.ParentID != "" {
 					env := payload.Envelope
-					_, final := parseFinalStatus(env.Payload)
+					_, final := behavior.ParseFinalStatus(env.Payload)
 					disp := caller.Deliver(&env)
-					surfaceAsTrigger := disp == noActiveWaiter && final
+					surfaceAsTrigger := disp == callkit.NoActiveWaiter && final
 					if !surfaceAsTrigger {
-						// Consumed by an active waiter / Watch, or a swallowed
-						// provisional — ack + drop.
 						if err := ackTrigger(ctx, ipc, payload, true, ""); err != nil {
 							return
 						}
 						continue
 					}
-					// Super-window / M4: a FINAL with no active awaiter →
-					// surface as a new turn trigger. Deliver already cleared
-					// the future under the correlator lock, so there is no
-					// Deliver→Abandon window for await_result to double-consume.
 				}
 				select {
 				case out <- payload:
@@ -155,42 +294,17 @@ func (b *Bridge) routeTriggers(ctx context.Context, ipc IPCFacade, in <-chan Tri
 	return out
 }
 
-// executeChannelRequest is the generic envelope-dispatch fast-path the meta
-// tools (call_actor) and the reserved-type tools (describe_*) share. It builds
-// the kind=request envelope, registers + writes via the worker-side caller
-// helper (subscribe-before-send, §3.2), then awaits per the spec's wait mode
-// (§2.3.2):
-//
-//   - waitFastPath (default): Await(window = min(15s, type timeout)). A final
-//     within the window returns inline (short calls feel synchronous, no
-//     ack→await double hop). Past the window the call degrades to an ack
-//     descriptor (long calls go async; the agent decides await_result /
-//     abandon / let it return as a new trigger).
-//   - waitUnbounded (call_actor wait=true): Await(type timeout) — sync opt-in.
-//   - waitNone (call_actor wait=false): window 0, immediate ack (fan-out).
-//
-// The request stays persistently pending in the daemon regardless of the
-// caller window; a window expiry only hands control back to the agent — the
-// substrate pending + F3 are untouched (§2.3.2).
+// executeChannelRequest is the generic envelope-dispatch fast-path.
 func (b *Bridge) executeChannelRequest(
 	ctx context.Context,
 	ipc IPCFacade,
 	trigger TriggerPayload,
-	spec channelRequestSpec,
+	spec callkit.RequestSpec,
 ) types.ToolResult {
 	if spec.Timeout <= 0 {
-		spec.Timeout = channelToolDefaultTimeout
+		spec.Timeout = callkit.DefaultTimeout
 	}
 	now := b.cfg.NowFn()
-	// expires_at (the persisted closure deadline) is DELIBERATELY left unset.
-	// The daemon harness is the single authority on the type's max_pending_ms
-	// (StepKindAndAudience stamps expires_at from the type registry only when
-	// ExpiresAt==nil). Stamping it here would pin every request to the caller's
-	// SDK-default ceiling and silently override a long-running type's declared
-	// max_pending_ms > 30s — the worker would falsely time it out. spec.Timeout
-	// drives only the caller-side fast-path Await WINDOW below (a UX concern),
-	// never the persisted deadline. Matches the SDK path (emitRequest leaves
-	// expires_at unset and lets the daemon own it).
 	env := message.Envelope{
 		ID:            b.envelopeID(ipc, now),
 		ChannelID:     ipc.ChannelID(),
@@ -220,56 +334,39 @@ func (b *Bridge) executeChannelRequest(
 	case waitNone:
 		window = 0
 	case waitUnbounded:
-		window = resolveFastPathWindow(spec.Timeout, true)
+		window = callkit.ResolveFastPathWindow(spec.Timeout, callkit.DefaultTimeout, true)
 	default: // waitFastPath
-		window = resolveFastPathWindow(spec.Timeout, false)
+		window = callkit.ResolveFastPathWindow(spec.Timeout, callkit.DefaultTimeout, false)
 	}
 
 	if window <= 0 {
-		// wait=false: immediate ack, future left in-flight for a later
-		// await_result / new turn trigger.
-		return ackResultToToolResult(ackToolResult(spec.ToolName, res.ack))
+		return ackToToolResult(spec.ToolName, res.Ack)
 	}
 
-	finalEnv, ok, awaitErr := caller.Await(ctx, res.requestID, window)
+	finalEnv, ok, awaitErr := caller.Await(ctx, res.RequestID, window)
 	if awaitErr != nil {
-		// Hard wait failure (ctx cancel / closed). Abandon the local waiter;
-		// substrate pending + F3 stay intact.
-		caller.Abandon(res.requestID)
+		caller.Abandon(res.RequestID)
 		return channelToolErrorResult(spec.ToolName,
 			fmt.Sprintf("channel request %s wait failed: %v", spec.EnvelopeType, awaitErr))
 	}
 	if ok {
 		return channelToolResultFromResponse(spec.ToolName, *finalEnv)
 	}
-	// Window elapsed without a final. Fast-path degrades to ack; the request
-	// stays in-flight. waitUnbounded reaching here means the type timeout
-	// itself elapsed — same degrade-to-ack (the F3 substrate fallback still
-	// guarantees eventual closure).
-	return ackResultToToolResult(ackToolResult(spec.ToolName, res.ack))
+	return ackToToolResult(spec.ToolName, res.Ack)
 }
 
-// executeReservedRequestRaw emits a reserved-type request (e.g. actor.list)
-// and returns the FINAL response payload as raw JSON for the caller to
-// reshape. Unlike executeChannelRequest it does not wrap the result in a
-// ToolResult — the caller (list_actors) reprojects the live catalog into
-// the LLM-facing grouped shape. Returns ok=false when the wait fails, the
-// window elapses without a final, or the response is a failure terminal —
-// reserved-type catalog lookups are synchronous (waitUnbounded), so a
-// non-final outcome is surfaced to the caller as "retry", never silently
-// converted to stale data.
+// executeReservedRequestRaw emits a reserved-type request and returns the
+// FINAL response payload as raw JSON.
 func (b *Bridge) executeReservedRequestRaw(
 	ctx context.Context,
 	ipc IPCFacade,
 	trigger TriggerPayload,
-	spec channelRequestSpec,
+	spec callkit.RequestSpec,
 ) (json.RawMessage, bool) {
 	if spec.Timeout <= 0 {
-		spec.Timeout = channelToolDefaultTimeout
+		spec.Timeout = callkit.DefaultTimeout
 	}
 	now := b.cfg.NowFn()
-	// expires_at left unset on purpose — the daemon stamps the per-type
-	// max_pending_ms (see executeChannelRequest for the full rationale).
 	env := message.Envelope{
 		ID:            b.envelopeID(ipc, now),
 		ChannelID:     ipc.ChannelID(),
@@ -290,76 +387,58 @@ func (b *Bridge) executeReservedRequestRaw(
 	if err != nil {
 		return nil, false
 	}
-	window := resolveFastPathWindow(spec.Timeout, true)
-	finalEnv, ok, awaitErr := caller.Await(ctx, res.requestID, window)
+	window := callkit.ResolveFastPathWindow(spec.Timeout, callkit.DefaultTimeout, true)
+	finalEnv, ok, awaitErr := caller.Await(ctx, res.RequestID, window)
 	if awaitErr != nil {
-		caller.Abandon(res.requestID)
+		caller.Abandon(res.RequestID)
 		return nil, false
 	}
 	if !ok || finalEnv == nil || finalEnv.Kind != message.KindResponse {
 		return nil, false
 	}
-	if responseFailureReason(finalEnv.Payload) != "" {
+	if callkit.ResponseFailureReason(finalEnv.Payload) != "" {
 		return nil, false
 	}
 	return finalEnv.Payload, true
 }
 
-// ackResultToToolResult materialises a toolResultValue (built by the
-// transport-neutral caller helper) into a go-kimi types.ToolResult. An ack is
-// NOT an error result — it is a normal "still running" outcome.
-func ackResultToToolResult(v toolResultValue) types.ToolResult {
+// --- helper functions ---
+
+// ackToToolResult converts a metatool AckDescriptor to a go-kimi ToolResult.
+func ackToToolResult(toolName string, ack callkit.AckDescriptor) types.ToolResult {
+	id := ack.RequestID.String()
+	ack.Guidance = "Accepted. To wait, call await_result(request_id=" + id +
+		"). If you do not wait, the result returns as a new message (parent_id=" + id + ")."
+	ack.ToWait = callkit.ToWaitHint{
+		Tool:   "await_result",
+		Params: map[string]any{"request_id": id},
+	}
+	ack.NotWaitng = "result returns as kind=response, parent_id=" + id + " new turn trigger"
+	rv := callkit.AckResult(toolName, ack)
 	return types.ToolResult{
-		Name:  v.name,
-		Value: types.ToolReturnValue{Value: v.value},
+		Name:  rv.Name,
+		Value: types.ToolReturnValue{Value: rv.Value},
 	}
 }
 
 func channelToolCorrelationID(trigger TriggerPayload) message.ID {
-	if trigger.CorrelationID != "" {
-		return trigger.CorrelationID
-	}
-	if trigger.Envelope.CorrelationID != "" {
-		return trigger.Envelope.CorrelationID
-	}
-	return trigger.Envelope.ID
+	return behavior.CorrelationID(trigger.CorrelationID, trigger.Envelope.CorrelationID, trigger.Envelope.ID)
 }
 
-func normalizeToolPayload(raw json.RawMessage) (json.RawMessage, error) {
-	text := strings.TrimSpace(string(raw))
-	if text == "" || text == "null" {
-		return cloneRawJSON(json.RawMessage(`{}`)), nil
-	}
-	if !json.Valid([]byte(text)) {
-		return nil, fmt.Errorf("channel tool payload is not valid JSON: %q", text)
-	}
-	return cloneRawJSON(json.RawMessage(text)), nil
-}
-
-func cloneRawJSON(raw json.RawMessage) json.RawMessage {
-	if len(raw) == 0 {
-		return nil
-	}
-	out := make(json.RawMessage, len(raw))
-	copy(out, raw)
-	return out
-}
 
 func channelToolResultFromResponse(toolName string, env message.Envelope) types.ToolResult {
-	if env.Kind != message.KindResponse {
-		return channelToolErrorResult(toolName, fmt.Sprintf("channel tool got %s envelope %s", env.Kind, env.ID))
-	}
-	value := toolPayloadValue(env.Payload)
-	if reason := responseFailureReason(env.Payload); reason != "" {
+	rv, isErr := callkit.ResultFromResponse(toolName, env)
+	if isErr {
 		return types.ToolResult{
-			Name: toolName,
-			Value: types.ToolReturnValue{Value: map[string]any{
-				"error":   reason,
-				"payload": value,
-			}},
+			Name:    rv.Name,
+			Value:   types.ToolReturnValue{Value: rv.Value},
 			IsError: true,
 		}
 	}
+	// Success: the original code returned `toolPayloadValue(env.Payload)` which
+	// could be any type (map, string, etc.) — not wrapped in a map. Preserve
+	// that behavior for go-kimi compatibility.
+	value := toolPayloadValue(env.Payload)
 	return types.ToolResult{
 		Name:  toolName,
 		Value: types.ToolReturnValue{Value: value},
@@ -387,34 +466,4 @@ func toolPayloadValue(raw json.RawMessage) any {
 		return map[string]any{}
 	}
 	return value
-}
-
-func responseFailureReason(raw json.RawMessage) string {
-	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return ""
-	}
-	if reason := stringValue(obj["terminal_failure_reason"]); reason != "" {
-		return reason
-	}
-	if status := stringValue(obj["status"]); strings.EqualFold(status, "failed") {
-		if reason := stringValue(obj["reason"]); reason != "" {
-			return reason
-		}
-		return "failed"
-	}
-	return ""
-}
-
-func stringValue(v any) string {
-	switch typed := v.(type) {
-	case nil:
-		return ""
-	case string:
-		return strings.TrimSpace(typed)
-	case fmt.Stringer:
-		return strings.TrimSpace(typed.String())
-	default:
-		return strings.TrimSpace(fmt.Sprint(v))
-	}
 }

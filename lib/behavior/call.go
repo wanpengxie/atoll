@@ -3,6 +3,7 @@ package behavior
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/wanpengxie/ActOS/protocol/message"
@@ -131,11 +132,10 @@ func (c *Caller) Stop() {
 	}
 }
 
-// isFinalResponse reports whether env is a final (terminal) response. It parses
-// env.payload.status and defers to message.IsFinalStatus. Internal helper used
-// by Caller.Match to decide closure. A non-response or unparseable payload is
-// not final.
-func isFinalResponse(env *message.Envelope) bool {
+// IsEnvFinal reports whether env is a final (terminal) response. It parses
+// env.payload.status and defers to message.IsFinalStatus. A non-response or
+// unparseable payload is not final.
+func IsEnvFinal(env *message.Envelope) bool {
 	if env == nil || env.Kind != message.KindResponse {
 		return false
 	}
@@ -146,4 +146,30 @@ func isFinalResponse(env *message.Envelope) bool {
 		return false
 	}
 	return message.IsFinalStatus(p.Status)
+}
+
+// isFinalResponse is the internal alias used by Caller.Match.
+func isFinalResponse(env *message.Envelope) bool {
+	return IsEnvFinal(env)
+}
+
+// ParseResponseStatus is a defensive payload.status extractor.
+func ParseResponseStatus(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var obj struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(obj.Status)
+}
+
+// ParseFinalStatus extracts payload.status and reports whether it is a
+// Layer 1 final (completed/failed).
+func ParseFinalStatus(raw []byte) (string, bool) {
+	status := ParseResponseStatus(raw)
+	return status, message.IsFinalStatus(strings.TrimSpace(status))
 }

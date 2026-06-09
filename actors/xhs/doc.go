@@ -7,29 +7,21 @@
 //
 // File layout (each file holds one concern):
 //
-//   - proto.go      wire schema (Command, Callback, type constants,
+//   - proto.go        wire schema (Command, Callback, type constants,
 //     per-type allow-list helpers).
-//   - handlers.go   per-type request encoder + callback decoder built
-//     on top of proto.go. The R4-FIX-A per-type
-//     allow-list is preserved (T115 regression guard —
-//     the schema lesson of the M1.3 baseline).
-//   - module.go     Module struct implementing kernel/behavior.Module
-//     with BindingRuntimeInboundViaRelay; uses
-//     adapters/device/framework.DeviceProxy for the
-//     correlate + send + arm-timer trio.
-//   - install.go    InstallSpec helper consumed by cmd/daemon (T7) to
-//     seed actor_registry (`tool:xhs`) +
-//     type_registry (5 R/R + 1 event row,
-//     handler_binding=runtime_inbound_via_relay).
+//   - device_type.go  per-type request encoder + callback decoder built
+//     on top of proto.go.
+//   - describe.go     TypeMeta / FieldDoc / ErrorDoc for actor describe
+//     responses (discovery = actor self-answer).
+//   - template.go     xhs-creator channel template (ChannelType +
+//     CreatorTemplate + domain prompt).
 //
 // Boundary discipline (go-arch-lint T2):
 //
-//   - adapters/device/xhs imports only kernel/* + pkg/* + standard
-//     library + the sibling adapters/device/framework.
-//   - The envelope sender on every emitted response equals
-//     adapters/device/xhs.DefaultAdapterActorID. Device connection identity
-//     stays in server/devicebus; payloads carry only business parameters
-//     (L4 §2.6 — device is NOT an actor).
+//   - actors/xhs imports only protocol/actor + lib/behavior + standard
+//     library. No server, no platform internals.
+//   - Device connection identity stays in platform/localdevice; payloads
+//     carry only business parameters (L4 §2.6 — device is NOT an actor).
 //
 // Authoritative spec references:
 //

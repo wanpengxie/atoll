@@ -9,5 +9,5 @@
 // for in-flight requests addressed to the dead actor.
 //
 // Depends on runtime/actorrt + runtime/harness (interface/types only) +
-// wire/computebus. MUST NOT import server or runtime/internal/store.
+// platform/computebus. MUST NOT import server or runtime/internal/store.
 package host

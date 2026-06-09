@@ -22,16 +22,11 @@ type DeathFunc func(actor.ActorID, string)
 // hosted cell dies the substrate publishes the death edge, and Host propagates
 // it UP via DeathFunc (the compute side has no truth to write).
 type Host struct {
-	rt        *Runtime
+	rt        *actorrt.Runtime
 	deliverer actorrt.Deliverer
 	emit      EmitFunc
 	sendDeath DeathFunc
 }
-
-// Runtime is the actorrt.Runtime exposed for callers that need to Spawn cells
-// directly (e.g. daemon.Run installing actors). It is deliberately a type alias
-// so Host does not re-export the full actorrt surface.
-type Runtime = actorrt.Runtime
 
 // New constructs a host. emit is the homelink-injected uplink to the home
 // harness; sendDeath propagates cell death UP the wire.
@@ -85,9 +80,6 @@ func (h *Host) Dispatch(frame computebus.DispatchFrame) error {
 	_, err := h.deliverer.Deliver([]actor.ActorID{frame.Target}, frame.Envelope)
 	return err
 }
-
-// Runtime exposes the underlying actorrt.Runtime for direct Spawn/Despawn.
-func (h *Host) Rt() *Runtime { return h.rt }
 
 // Stop tears down all hosted cells.
 func (h *Host) Stop() { h.rt.StopAll() }

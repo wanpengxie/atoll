@@ -1,19 +1,22 @@
-package agent
+package callkit
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 	"time"
 
+	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
-type disposition int
+// Disposition reports how the correlator handled a delivered envelope.
+type Disposition int
 
 const (
-	deliveredToWaiter disposition = iota
-	noActiveWaiter
+	// DeliveredToWaiter means the envelope was consumed by an active waiter.
+	DeliveredToWaiter Disposition = iota
+	// NoActiveWaiter means no waiter was active for this envelope.
+	NoActiveWaiter
 )
 
 type awaitState int
@@ -24,7 +27,9 @@ const (
 	awaitDone
 )
 
-type requestCorrelator struct {
+// RequestCorrelator tracks in-flight request futures and correlates
+// inbound response envelopes to their waiters.
+type RequestCorrelator struct {
 	mu      sync.Mutex
 	pending map[message.ID]*pendingReq
 }
@@ -35,11 +40,14 @@ type pendingReq struct {
 	state        awaitState
 }
 
-func newRequestCorrelator() *requestCorrelator {
-	return &requestCorrelator{pending: make(map[message.ID]*pendingReq)}
+// NewRequestCorrelator returns a ready-to-use correlator.
+func NewRequestCorrelator() *RequestCorrelator {
+	return &RequestCorrelator{pending: make(map[message.ID]*pendingReq)}
 }
 
-func (rc *requestCorrelator) Register(id message.ID, expectsAwait bool) {
+// Register records an in-flight request. If expectsAwait is true, a
+// final that arrives before Await parks will be buffered for it.
+func (rc *RequestCorrelator) Register(id message.ID, expectsAwait bool) {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	if _, ok := rc.pending[id]; ok {
@@ -52,24 +60,26 @@ func (rc *requestCorrelator) Register(id message.ID, expectsAwait bool) {
 	}
 }
 
-func (rc *requestCorrelator) Registered(id message.ID) bool {
+// Registered reports whether a future exists for id.
+func (rc *RequestCorrelator) Registered(id message.ID) bool {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	_, ok := rc.pending[id]
 	return ok
 }
 
-func (rc *requestCorrelator) Deliver(env *message.Envelope) disposition {
+// Deliver routes an inbound response envelope to its registered waiter.
+func (rc *RequestCorrelator) Deliver(env *message.Envelope) Disposition {
 	if env == nil {
-		return noActiveWaiter
+		return NoActiveWaiter
 	}
-	final := isEnvFinal(env)
+	final := behavior.IsEnvFinal(env)
 
 	rc.mu.Lock()
 	p, ok := rc.pending[env.ParentID]
 	if !ok {
 		rc.mu.Unlock()
-		return noActiveWaiter
+		return NoActiveWaiter
 	}
 
 	switch {
@@ -77,19 +87,19 @@ func (rc *requestCorrelator) Deliver(env *message.Envelope) disposition {
 		if !final {
 			// Provisional — swallow; don't wake the Await goroutine.
 			rc.mu.Unlock()
-			return deliveredToWaiter
+			return DeliveredToWaiter
 		}
 		rc.mu.Unlock()
 		select {
 		case p.ch <- env:
 		default:
 		}
-		return deliveredToWaiter
+		return DeliveredToWaiter
 
 	case p.state == awaitNotStarted && p.expectsAwait:
 		if !final {
 			rc.mu.Unlock()
-			return deliveredToWaiter
+			return DeliveredToWaiter
 		}
 		// Buffer the final for a future Await.
 		rc.mu.Unlock()
@@ -97,7 +107,7 @@ func (rc *requestCorrelator) Deliver(env *message.Envelope) disposition {
 		case p.ch <- env:
 		default:
 		}
-		return deliveredToWaiter
+		return DeliveredToWaiter
 
 	default:
 		// awaitDone (timed out/cancelled) OR !expectsAwait — no active waiter.
@@ -105,24 +115,14 @@ func (rc *requestCorrelator) Deliver(env *message.Envelope) disposition {
 			delete(rc.pending, env.ParentID)
 		}
 		rc.mu.Unlock()
-		return noActiveWaiter
+		return NoActiveWaiter
 	}
 }
 
-func isEnvFinal(env *message.Envelope) bool {
-	if env.Kind != message.KindResponse {
-		return false
-	}
-	var p struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(env.Payload, &p); err != nil {
-		return false
-	}
-	return message.IsFinalStatus(p.Status)
-}
 
-func (rc *requestCorrelator) Await(ctx context.Context, id message.ID, window time.Duration) (*message.Envelope, bool, error) {
+// Await blocks until the final for id arrives, the window elapses, or ctx is
+// done. window <= 0 means "do not wait at all".
+func (rc *RequestCorrelator) Await(ctx context.Context, id message.ID, window time.Duration) (*message.Envelope, bool, error) {
 	if window <= 0 {
 		return nil, false, nil
 	}
@@ -158,13 +158,15 @@ func (rc *requestCorrelator) Await(ctx context.Context, id message.ID, window ti
 	}
 }
 
-func (rc *requestCorrelator) Cancel(id message.ID) {
+// Cancel removes the future for id.
+func (rc *RequestCorrelator) Cancel(id message.ID) {
 	rc.mu.Lock()
 	delete(rc.pending, id)
 	rc.mu.Unlock()
 }
 
-func (rc *requestCorrelator) Pending() []message.ID {
+// Pending returns the in-flight request ids.
+func (rc *RequestCorrelator) Pending() []message.ID {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	ids := make([]message.ID, 0, len(rc.pending))

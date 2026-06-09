@@ -2,31 +2,13 @@ package xhs
 
 import (
 	"encoding/json"
+
+	"github.com/wanpengxie/ActOS/lib/introspect"
 )
 
-// TypeMeta holds per-type metadata for actor describe responses.
-type TypeMeta struct {
-	Description    string
-	PayloadExample json.RawMessage
-	PayloadFields  []FieldDoc
-	ErrorCodes     []ErrorDoc
-	Notes          string
-}
-
-// FieldDoc documents a single payload field.
-type FieldDoc struct {
-	Name        string
-	Required    bool
-	Description string
-	Example     any
-}
-
-// ErrorDoc documents a known error code.
-type ErrorDoc struct {
-	Code        string
-	Description string
-	Recovery    string
-}
+type TypeMeta = introspect.TypeMeta
+type FieldDoc = introspect.FieldDoc
+type ErrorDoc = introspect.ErrorDoc
 
 // actorDescription is the one-line actor positioning returned by
 // list_actors / describe_actor (actor-cli-pattern §9).

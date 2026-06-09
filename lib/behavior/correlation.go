@@ -15,3 +15,15 @@ func (k CorrelationKey) String() string { return string(k) }
 // correlation_id / parent_id all live on it). "pending" is presence in the
 // cache; "done" is removal on the terminal write. A parallel entry duplicating
 // those envelope fields would be redundant state.
+
+// CorrelationID derives the correlation id for a meta-tool request from
+// a trigger payload's fields.
+func CorrelationID(triggerCorrelationID, envelopeCorrelationID, envelopeID message.ID) message.ID {
+	if triggerCorrelationID != "" {
+		return triggerCorrelationID
+	}
+	if envelopeCorrelationID != "" {
+		return envelopeCorrelationID
+	}
+	return envelopeID
+}

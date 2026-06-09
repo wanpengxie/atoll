@@ -30,25 +30,29 @@ type Config struct {
 	Runtime    *actorrt.Runtime
 	Membership storespec.MembershipControlPlane
 	ChannelID  channel.ID
-
-	// AuthFunc authenticates an attaching compute's API key. It returns the
-	// daemon identifier on success, or an error to reject the attach. If nil,
-	// all attaches are accepted (dev mode) and the compute's self-declared ID
-	// is used.
-	AuthFunc func(apiKey string) (daemonID string, err error)
-
-	Logger *slog.Logger
+	Logger     *slog.Logger
 }
 
 // Fleet is a WS-to-virtual-pipe multiplexer: the physical layer of the channel
 // home. It owns no business logic -- that lives in channelhost / actorrt.
+// Auth is the app layer's responsibility; fleet accepts a pre-authenticated
+// daemonID via ServeWSWithDaemonID.
 type Fleet struct {
 	writer     harness.Writer
 	runtime    *actorrt.Runtime
 	membership storespec.MembershipControlPlane
 	channelID  channel.ID
-	authFunc   func(apiKey string) (string, error)
 	logger     *slog.Logger
+
+	// Lifecycle: cancel signals all active ServeWS goroutines to stop;
+	// wg tracks them so Close() can wait for clean exit.
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+
+	// mu guards activeComputes.
+	mu              sync.Mutex
+	activeComputes  []*computeState
 }
 
 // New constructs a Fleet.
@@ -57,13 +61,15 @@ func New(cfg Config) *Fleet {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Fleet{
 		writer:     cfg.Writer,
 		runtime:    cfg.Runtime,
 		membership: cfg.Membership,
 		channelID:  cfg.ChannelID,
-		authFunc:   cfg.AuthFunc,
 		logger:     logger,
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 }
 
@@ -82,18 +88,31 @@ type computeState struct {
 }
 
 // ServeWS upgrades an attaching compute connection and serves its frame loop.
-func (f *Fleet) ServeWS(w http.ResponseWriter, r *http.Request) {
+// The daemonID parameter is the pre-authenticated daemon identifier resolved by
+// the app layer. If empty, the compute's self-declared ID is used (dev mode).
+func (f *Fleet) ServeWS(w http.ResponseWriter, r *http.Request, daemonID string) {
+	// Reject new connections after Close().
+	if f.ctx.Err() != nil {
+		http.Error(w, "fleet closed", http.StatusServiceUnavailable)
+		return
+	}
+
+	f.wg.Add(1)
+	defer f.wg.Done()
+
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 	defer func() { _ = ws.Close() }()
 
-	state, err := f.handleAttach(r.Context(), ws)
+	state, err := f.handleAttach(r.Context(), ws, daemonID)
 	if err != nil {
 		f.logger.Info("fleet.attach_failed", "err", err)
 		return
 	}
+	f.trackCompute(state)
+	defer f.untrackCompute(state)
 	defer f.teardownCompute(state)
 
 	// Start relay goroutines: one per actor pipe, reading ipc.KindDeliver
@@ -110,6 +129,15 @@ func (f *Fleet) ServeWS(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
+	// Close the WS when fleet context is cancelled, causing wsReadLoop to exit.
+	go func() {
+		select {
+		case <-f.ctx.Done():
+			_ = ws.Close()
+		case <-r.Context().Done():
+		}
+	}()
+
 	// WS read loop.
 	f.wsReadLoop(r.Context(), ws, &wsMu, state)
 
@@ -119,10 +147,12 @@ func (f *Fleet) ServeWS(w http.ResponseWriter, r *http.Request) {
 	relayWG.Wait()
 }
 
-// handleAttach reads the AttachRequest, authenticates via authFunc, registers
-// actors in membership and sets up virtual pipes + actorrt.Attach for each
-// declared actor. Returns the compute state or an error.
-func (f *Fleet) handleAttach(ctx context.Context, ws *websocket.Conn) (*computeState, error) {
+// handleAttach reads the AttachRequest, uses the pre-authenticated daemonID
+// (provided by the app layer), registers actors in membership and sets up
+// virtual pipes + actorrt.Attach for each declared actor. Returns the compute
+// state or an error. If daemonID is empty, the compute's self-declared ID is
+// used (dev mode).
+func (f *Fleet) handleAttach(ctx context.Context, ws *websocket.Conn, daemonID string) (*computeState, error) {
 	// First WS message must be AttachRequest.
 	_, raw, err := ws.ReadMessage()
 	if err != nil {
@@ -134,17 +164,10 @@ func (f *Fleet) handleAttach(ctx context.Context, ws *websocket.Conn) (*computeS
 	}
 	att := first.Attach
 
-	// Authenticate via authFunc.
+	// Use pre-authenticated daemonID from app layer, fall back to
+	// compute's self-declared ID (dev mode).
 	computeID := att.ComputeID
-	if f.authFunc != nil {
-		daemonID, authErr := f.authFunc(att.APIKey)
-		if authErr != nil {
-			_ = sendFrame(ws, computebus.Frame{
-				Type:  computebus.FrameAttachReply,
-				Reply: &computebus.AttachReply{Accepted: false, Reason: authErr.Error()},
-			})
-			return nil, fmt.Errorf("auth failed from compute %s: %w", att.ComputeID, authErr)
-		}
+	if daemonID != "" {
 		computeID = daemonID
 	}
 
@@ -408,6 +431,47 @@ func (f *Fleet) teardownCompute(state *computeState) {
 			_ = state.pipes[i].fleetConn.Close()
 		}
 	})
+}
+
+// trackCompute adds a compute state to the active set.
+func (f *Fleet) trackCompute(state *computeState) {
+	f.mu.Lock()
+	f.activeComputes = append(f.activeComputes, state)
+	f.mu.Unlock()
+}
+
+// untrackCompute removes a compute state from the active set.
+func (f *Fleet) untrackCompute(state *computeState) {
+	f.mu.Lock()
+	for i, s := range f.activeComputes {
+		if s == state {
+			f.activeComputes = append(f.activeComputes[:i], f.activeComputes[i+1:]...)
+			break
+		}
+	}
+	f.mu.Unlock()
+}
+
+// Close tears down the fleet: cancels the fleet context (causing all active WS
+// connections to close), tears down all tracked compute states (closing virtual
+// pipes), and waits for all ServeWS goroutines to exit.
+func (f *Fleet) Close() error {
+	// Signal all active connections to stop.
+	f.cancel()
+
+	// Tear down all tracked computes to close pipes immediately rather than
+	// waiting for the WS close to propagate.
+	f.mu.Lock()
+	computes := append([]*computeState(nil), f.activeComputes...)
+	f.mu.Unlock()
+	for _, state := range computes {
+		f.teardownCompute(state)
+	}
+
+	// Wait for all ServeWS goroutines to finish.
+	f.wg.Wait()
+	f.logger.Info("fleet.closed")
+	return nil
 }
 
 func sendFrame(ws *websocket.Conn, f computebus.Frame) error {

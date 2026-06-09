@@ -25,7 +25,6 @@ import (
 type HomeConfig struct {
 	ChannelID channel.ID
 	DBPath    string
-	AuthFunc  func(apiKey string) (daemonID string, err error)
 	Logger    *slog.Logger
 }
 
@@ -122,8 +121,7 @@ func NewChannelHome(cfg HomeConfig) (*ChannelHome, error) {
 		Runtime:    home.Runtime(),
 		Membership: cs.Membership,
 		ChannelID:  cfg.ChannelID,
-		AuthFunc: cfg.AuthFunc,
-		Logger: logger,
+		Logger:     logger,
 	})
 
 	// 9. Build Gateway (client/SDK ingress).
@@ -145,20 +143,17 @@ func NewChannelHome(cfg HomeConfig) (*ChannelHome, error) {
 	}, nil
 }
 
-// Writer returns the postCommitWriter (harness -> deliver -> notify).
-func (ch *ChannelHome) Writer() harness.Writer { return ch.writer }
+// runtime returns the actorrt.Runtime from the channelhost.
+func (ch *ChannelHome) runtime() *actorrt.Runtime { return ch.home.Runtime() }
 
-// Runtime returns the actorrt.Runtime from the channelhost.
-func (ch *ChannelHome) Runtime() *actorrt.Runtime { return ch.home.Runtime() }
+// deliverer returns the actorrt.Deliverer from the channelhost.
+func (ch *ChannelHome) deliverer() actorrt.Deliverer { return ch.home.Deliverer() }
 
-// Deliverer returns the actorrt.Deliverer from the channelhost.
-func (ch *ChannelHome) Deliverer() actorrt.Deliverer { return ch.home.Deliverer() }
+// query returns the message query store.
+func (ch *ChannelHome) query() storespec.MessageQuery { return ch.cs.Query }
 
-// Query returns the message query store.
-func (ch *ChannelHome) Query() storespec.MessageQuery { return ch.cs.Query }
-
-// Registry returns the actor registry store.
-func (ch *ChannelHome) Registry() storespec.Registry { return ch.cs.Registry }
+// registry returns the actor registry store.
+func (ch *ChannelHome) registry() storespec.Registry { return ch.cs.Registry }
 
 // Membership returns the membership control plane store.
 func (ch *ChannelHome) Membership() storespec.MembershipControlPlane { return ch.cs.Membership }
@@ -172,12 +167,26 @@ func (ch *ChannelHome) PushHub() *PushHub { return ch.hub }
 // Gateway returns the client/SDK ingress gateway.
 func (ch *ChannelHome) Gateway() *Gateway { return ch.gw }
 
-// Close tears down the channel home: closes the channelhost and channel stores.
+// Close tears down the channel home in order: fleet (WS connections + relay
+// goroutines) -> channelhost (actors + business logic) -> channel stores (DB).
 func (ch *ChannelHome) Close() error {
-	err := ch.home.Close()
+	// 1. Fleet first: close all WS connections, tear down virtual pipes, wait
+	//    for relay goroutines. This stops all external compute traffic before
+	//    we shut down the runtime/stores underneath.
+	fltErr := ch.flt.Close()
+
+	// 2. Channelhost: stops actor cells, system actors.
+	homeErr := ch.home.Close()
+
+	// 3. Channel stores (DB) last.
 	csErr := ch.cs.Close()
-	if err != nil {
-		return err
+
+	// Return the first error encountered.
+	if fltErr != nil {
+		return fltErr
+	}
+	if homeErr != nil {
+		return homeErr
 	}
 	return csErr
 }

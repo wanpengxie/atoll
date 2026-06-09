@@ -49,6 +49,62 @@ func TestIsFinalResponse_StatusDriven(t *testing.T) {
 	}
 }
 
+// ParseResponseStatus extracts status from payload.
+func TestParseResponseStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  json.RawMessage
+		want string
+	}{
+		{"completed", json.RawMessage(`{"status":"completed"}`), "completed"},
+		{"failed", json.RawMessage(`{"status":"failed"}`), "failed"},
+		{"empty payload", nil, ""},
+		{"invalid json", json.RawMessage(`{bad`), ""},
+		{"no status", json.RawMessage(`{"foo":"bar"}`), ""},
+		{"whitespace status", json.RawMessage(`{"status":" processing "}`), "processing"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseResponseStatus(tt.raw)
+			if got != tt.want {
+				t.Fatalf("ParseResponseStatus = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// ParseFinalStatus reports whether the status is Layer 1 final.
+func TestParseFinalStatus(t *testing.T) {
+	tests := []struct {
+		raw       []byte
+		wantFinal bool
+	}{
+		{[]byte(`{"status":"completed"}`), true},
+		{[]byte(`{"status":"failed"}`), true},
+		{[]byte(`{"status":"processing"}`), false},
+		{nil, false},
+	}
+	for _, tt := range tests {
+		status, final := ParseFinalStatus(tt.raw)
+		if final != tt.wantFinal {
+			t.Fatalf("ParseFinalStatus(%s) = (%q, %v), want final=%v", tt.raw, status, final, tt.wantFinal)
+		}
+	}
+}
+
+// CorrelationID picks the first non-empty id in priority order.
+func TestCorrelationID(t *testing.T) {
+	if got := CorrelationID("a", "b", "c"); got != "a" {
+		t.Fatalf("want trigger corr id, got %q", got)
+	}
+	if got := CorrelationID("", "b", "c"); got != "b" {
+		t.Fatalf("want envelope corr id, got %q", got)
+	}
+	if got := CorrelationID("", "", "c"); got != "c" {
+		t.Fatalf("want envelope id, got %q", got)
+	}
+}
+
 // BuildResponseFromRequest rejects a nil request.
 func TestBuildResponseFromRequest_NilRequest(t *testing.T) {
 	_, err := BuildResponseFromRequest(nil, fixedClock(1), svcSender(), CorrelationKey("r1"), ResponseSpec{Status: "completed"})

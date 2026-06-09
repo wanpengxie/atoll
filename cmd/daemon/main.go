@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/wanpengxie/ActOS/actors/echo"
 	"github.com/wanpengxie/ActOS/actors/feishu"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
@@ -20,10 +21,10 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-// ActorFactory creates an actorrt.Actor given a harness.Writer.
-type ActorFactory func(w harness.Writer) actorrt.Actor
-
-var registry = map[string]ActorFactory{
+var registry = map[string]func(harness.Writer) actorrt.Actor{
+	"echo": func(w harness.Writer) actorrt.Actor {
+		return echo.NewActor(w)
+	},
 	"feishu": func(w harness.Writer) actorrt.Actor {
 		creds, err := feishu.LoadCredentialsFromEnv()
 		if err != nil {
@@ -66,7 +67,7 @@ func main() {
 			log.Fatalf("daemon: unknown actor %q", name)
 		}
 		decls = append(decls, platform.ActorDecl{
-			ID:      actor.ActorID("tool:" + name),
+			ID:      actor.ActorID(name),
 			Kind:    actor.KindTool,
 			Binding: actor.BindingRuntimeOutbound,
 			Factory: factory,

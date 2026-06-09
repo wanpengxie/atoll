@@ -1,6 +1,10 @@
 package kimi
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/wanpengxie/ActOS/lib/introspect"
+)
 
 const ActorDescription = "Drive the user's Kimi WebBridge chrome extension — browser navigation, screenshots, snapshots, clicks, fills, and JavaScript evaluation on the user's real browser session."
 
@@ -42,12 +46,7 @@ const ActorSkillDoc = "" +
 	"- `tool_failed` — extension ran the command but it failed; check detail\n" +
 	"- `payload_decode_failed` — malformed payload\n"
 
-type TypeMeta struct {
-	Description    string          `json:"description"`
-	PayloadExample json.RawMessage `json:"payload_example,omitempty"`
-}
-
-var TypeMetadata = map[string]TypeMeta{
+var TypeMetadata = map[string]introspect.TypeMeta{
 	TypeCommand: {
 		Description:    "Forward a single Kimi WebBridge command to the user's chrome extension.",
 		PayloadExample: json.RawMessage(`{"action":"snapshot","args":{},"session":"kimi"}`),

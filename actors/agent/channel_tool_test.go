@@ -6,9 +6,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/ActOS/lib/callkit"
 	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
+
+type metaFakeIPC struct {
+	writes chan message.Envelope
+}
+
+func newMetaFakeIPC() *metaFakeIPC {
+	return &metaFakeIPC{writes: make(chan message.Envelope, 1)}
+}
+
+func (f *metaFakeIPC) ChannelID() channel.ID           { return "ch-test" }
+func (f *metaFakeIPC) WorkerID() string                { return "worker-test" }
+func (f *metaFakeIPC) WorkerActorID() actor.ActorID    { return "agent:worker-test" }
+func (f *metaFakeIPC) Triggers() <-chan TriggerPayload  { return nil }
+func (f *metaFakeIPC) WriteEnvelope(_ context.Context, env message.Envelope) error {
+	f.writes <- env
+	return nil
+}
 
 // TestRouteTriggersDeliversFinalToActiveAwait asserts a final response whose
 // parent matches an in-flight Submit is consumed by the caller's correlator
@@ -16,7 +35,7 @@ import (
 func TestRouteTriggersDeliversFinalToActiveAwait(t *testing.T) {
 	b := &Bridge{}
 	caller := b.caller()
-	caller.futures.Register("tool-req-1", true)
+	caller.Futures.Register("tool-req-1", true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -76,13 +95,13 @@ func TestRouteTriggersSuperWindowFinalBecomesTrigger(t *testing.T) {
 	caller := b.caller()
 	// Simulate a fast-path Submit whose Await timed out: register, then run an
 	// Await with a tiny window that expires before any final.
-	caller.futures.Register("tool-req-superwin", true)
+	caller.Futures.Register("tool-req-superwin", true)
 	_, ok, err := caller.Await(context.Background(), "tool-req-superwin", 10*time.Millisecond)
 	if err != nil || ok {
 		t.Fatalf("setup: expected super-window timeout (ok=false,err=nil), got ok=%v err=%v", ok, err)
 	}
 	// The future is STILL registered after the timed-out Await.
-	if !caller.futures.Registered("tool-req-superwin") {
+	if !caller.Futures.Registered("tool-req-superwin") {
 		t.Fatal("setup: future should still be registered after a timed-out fast-path Await")
 	}
 
@@ -102,7 +121,7 @@ func TestRouteTriggersSuperWindowFinalBecomesTrigger(t *testing.T) {
 		t.Fatalf("F1: forwarded id=%s want superwin-final", got.Envelope.ID)
 	}
 	// The future was cleared so a later await_result cannot re-consume it.
-	if caller.futures.Registered("tool-req-superwin") {
+	if caller.Futures.Registered("tool-req-superwin") {
 		t.Fatal("F1: future should be cleared after surfacing the final as a trigger")
 	}
 }
@@ -114,7 +133,7 @@ func TestRouteTriggersSuperWindowFinalBecomesTrigger(t *testing.T) {
 func TestRouteTriggersFastFinalBeforeAwaitBuffered(t *testing.T) {
 	b := &Bridge{}
 	caller := b.caller()
-	caller.futures.Register("tool-req-fast-before-await", true)
+	caller.Futures.Register("tool-req-fast-before-await", true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -151,7 +170,7 @@ func TestRouteTriggersFinalNeverAwaitAndTriggerDoubleConsumed(t *testing.T) {
 		b := &Bridge{}
 		caller := b.caller()
 		id := message.ID("tool-req-race-" + time.Now().Format("150405.000000000"))
-		caller.futures.Register(id, true)
+		caller.Futures.Register(id, true)
 		if env, ok, err := caller.Await(context.Background(), id, time.Nanosecond); err != nil || ok || env != nil {
 			t.Fatalf("trial %d setup: expected timed-out fast path, got env=%v ok=%v err=%v", trial, env, ok, err)
 		}
@@ -222,7 +241,7 @@ func TestRouteTriggersNoActiveWaiterFinalBecomesTrigger(t *testing.T) {
 func TestRouteTriggersProvisionalSwallowedFuturePending(t *testing.T) {
 	b := &Bridge{}
 	caller := b.caller()
-	caller.futures.Register("tool-req-prov", true)
+	caller.Futures.Register("tool-req-prov", true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -242,7 +261,7 @@ func TestRouteTriggersProvisionalSwallowedFuturePending(t *testing.T) {
 		t.Fatal("more than the normal trigger leaked")
 	}
 	// The future MUST remain in flight (a provisional never resolves it).
-	if !caller.futures.Registered("tool-req-prov") {
+	if !caller.Futures.Registered("tool-req-prov") {
 		t.Fatal("provisional erased the in-flight future")
 	}
 }
@@ -281,7 +300,7 @@ func TestCallerSubmitAwaitFastPathInline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
-	if res.requestID != "req-fast" || !res.ack.accepted {
+	if res.RequestID != "req-fast" || !res.Ack.Accepted {
 		t.Fatalf("submit result=%+v", res)
 	}
 
@@ -293,7 +312,7 @@ func TestCallerSubmitAwaitFastPathInline(t *testing.T) {
 		caller.Deliver(&final)
 	}()
 
-	got, ok, awaitErr := caller.Await(context.Background(), res.requestID, time.Second)
+	got, ok, awaitErr := caller.Await(context.Background(), res.RequestID, time.Second)
 	if awaitErr != nil {
 		t.Fatalf("Await err: %v", awaitErr)
 	}
@@ -311,7 +330,7 @@ func TestCallerSubmitAwaitFastPathInline(t *testing.T) {
 func TestCallerAwaitWindowElapsesNoFinal(t *testing.T) {
 	b := &Bridge{}
 	caller := b.caller()
-	caller.futures.Register("req-slow", true)
+	caller.Futures.Register("req-slow", true)
 
 	got, ok, err := caller.Await(context.Background(), "req-slow", 10*time.Millisecond)
 	if err != nil {
@@ -320,7 +339,7 @@ func TestCallerAwaitWindowElapsesNoFinal(t *testing.T) {
 	if ok || got != nil {
 		t.Fatalf("expected ok=false got=%v", got)
 	}
-	if !caller.futures.Registered("req-slow") {
+	if !caller.Futures.Registered("req-slow") {
 		t.Fatal("future should remain registered after window expiry")
 	}
 }
@@ -330,17 +349,17 @@ func TestCallerAwaitWindowElapsesNoFinal(t *testing.T) {
 func TestCallerWaitNoneImmediateAck(t *testing.T) {
 	b := &Bridge{}
 	caller := b.caller()
-	caller.futures.Register("req-fanout", false)
+	caller.Futures.Register("req-fanout", false)
 
 	got, ok, err := caller.Await(context.Background(), "req-fanout", 0)
 	if err != nil || ok || got != nil {
 		t.Fatalf("waitNone: got=%v ok=%v err=%v", got, ok, err)
 	}
-	if !caller.futures.Registered("req-fanout") {
+	if !caller.Futures.Registered("req-fanout") {
 		t.Fatal("fan-out future erased")
 	}
 	final := toolTriggerWithStatus(message.KindResponse, "resp-fanout", "req-fanout", "completed").Envelope
-	if disp := caller.Deliver(&final); disp != noActiveWaiter {
+	if disp := caller.Deliver(&final); disp != callkit.NoActiveWaiter {
 		t.Fatalf("wait=false final disp=%v want NoActiveWaiter", disp)
 	}
 }
@@ -350,11 +369,11 @@ func TestCallerWaitNoneImmediateAck(t *testing.T) {
 func TestCallerAbandonThenFinalNoActiveWaiter(t *testing.T) {
 	b := &Bridge{}
 	caller := b.caller()
-	caller.futures.Register("req-aband", true)
+	caller.Futures.Register("req-aband", true)
 	caller.Abandon("req-aband")
 
 	final := toolTriggerWithStatus(message.KindResponse, "resp-aband", "req-aband", "completed").Envelope
-	if disp := caller.Deliver(&final); disp != noActiveWaiter {
+	if disp := caller.Deliver(&final); disp != callkit.NoActiveWaiter {
 		t.Fatalf("after abandon disposition=%v want NoActiveWaiter", disp)
 	}
 }
@@ -364,8 +383,8 @@ func TestCallerAbandonThenFinalNoActiveWaiter(t *testing.T) {
 func TestCallerPendingListsInFlight(t *testing.T) {
 	b := &Bridge{}
 	caller := b.caller()
-	caller.futures.Register("p1", true)
-	caller.futures.Register("p2", true)
+	caller.Futures.Register("p1", true)
+	caller.Futures.Register("p2", true)
 
 	pending := caller.Pending()
 	if len(pending) != 2 {
@@ -384,10 +403,10 @@ func TestCallerPendingListsInFlight(t *testing.T) {
 	caller.Deliver(&final)
 	wg.Wait()
 
-	if caller.futures.Registered("p1") {
+	if caller.Futures.Registered("p1") {
 		t.Fatal("p1 still pending after final delivered to await")
 	}
-	if !caller.futures.Registered("p2") {
+	if !caller.Futures.Registered("p2") {
 		t.Fatal("p2 wrongly dropped")
 	}
 }
@@ -402,7 +421,7 @@ func TestCallerSubmitWriteFailureRollsBack(t *testing.T) {
 	if _, err := caller.Submit(context.Background(), ipc, env, 1000, true); err == nil {
 		t.Fatal("Submit should fail on write error")
 	}
-	if caller.futures.Registered("req-fail-write") {
+	if caller.Futures.Registered("req-fail-write") {
 		t.Fatal("future leaked after write failure")
 	}
 }

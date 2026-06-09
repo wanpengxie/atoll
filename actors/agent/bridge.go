@@ -26,27 +26,11 @@ import (
 	// surfaces as "provider not found" at NewAgent time.
 	_ "github.com/wanpengxie/go-kimi/pkg/kimi/llm/anthropic"
 
+	"github.com/wanpengxie/ActOS/lib/callkit"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
-
-// FieldDoc is a local copy of the describe-protocol field documentation
-// shape, carried in actor.list / actor.describe response payloads.
-type FieldDoc struct {
-	Name        string `json:"name"`
-	Required    bool   `json:"required,omitempty"`
-	Description string `json:"description,omitempty"`
-	Example     any    `json:"example,omitempty"`
-}
-
-// ErrorDoc is a local copy of the describe-protocol error documentation
-// shape, carried in actor.list / actor.describe response payloads.
-type ErrorDoc struct {
-	Code        string `json:"code"`
-	Description string `json:"description,omitempty"`
-	Recovery    string `json:"recovery,omitempty"`
-}
 
 // Env keys read at Config.NewFromEnv time. Kept exported so tests and
 // cmd/worker share one source of truth for the env contract.
@@ -68,56 +52,8 @@ const (
 	EnvKeyChannelID = "COAGENT_CHANNEL_ID"
 )
 
-// ChannelContext is the decoded payload of a LIVE actor.list response —
-// the channel's actor/type catalog at the moment the daemon answered. It
-// is a transient query result, NOT a frozen prompt snapshot: list_actors
-// decodes it on each call and reprojects it for the LLM via
-// formatActorRegistryForLLM.
-type ChannelContext struct {
-	// ChannelID is the channel this catalog describes.
-	ChannelID string `json:"channel_id,omitempty"`
-
-	// ChannelType is the L4 channel-template key (e.g. "xhs-creator").
-	// Empty for legacy / generic channels.
-	ChannelType string `json:"channel_type,omitempty"`
-
-	// Actors is the live active actor catalog. Includes system / human
-	// members / agent self / tool adapters.
-	Actors []ActorInfo `json:"actors,omitempty"`
-
-	// Types is the live business type catalog plus handler actor binding
-	// and allowed kinds.
-	Types []TypeInfo `json:"types,omitempty"`
-}
-
-// ActorInfo is one actor catalog row from an actor.list response.
-type ActorInfo struct {
-	ActorID           string          `json:"actor_id"`
-	Kind              string          `json:"kind"`                   // human | agent | tool | system
-	Binding           string          `json:"binding,omitempty"`      // empty for human/system; embedded / runtime_inbound_via_relay / runtime_outbound for tools
-	DisplayName       string          `json:"display_name,omitempty"` // optional human-readable label
-	Description       string          `json:"description,omitempty"`  // optional actor-CLI one-line positioning
-	SkillDoc          string          `json:"skill_doc,omitempty"`    // optional actor-CLI markdown usage guide
-	Ready             bool            `json:"ready"`
-	ReadyReason       string          `json:"ready_reason,omitempty"`
-	ReadyDetail       json.RawMessage `json:"ready_detail,omitempty"`
-	LastReadyAt       int64           `json:"last_ready_at,omitempty"`
-	LastStateChangeAt int64           `json:"last_state_change_at,omitempty"`
-}
-
-// TypeInfo is one request type from an actor.list response.
-type TypeInfo struct {
-	Type           string              `json:"type"`             // e.g. "xhs.publish"
-	HandlerActorID string              `json:"handler_actor_id"` // e.g. "tool:xhs"
-	HandlerBinding string              `json:"handler_binding,omitempty"`
-	AllowedKinds   []string            `json:"allowed_kinds,omitempty"` // subset of {event, request, response}
-	MaxPendingMs   int64               `json:"max_pending_ms,omitempty"`
-	Description    string              `json:"description,omitempty"`
-	PayloadExample json.RawMessage     `json:"payload_example,omitempty"`
-	PayloadFields  []FieldDoc `json:"payload_fields,omitempty"`
-	ErrorCodes     []ErrorDoc `json:"error_codes,omitempty"`
-	Notes          string              `json:"notes,omitempty"`
-}
+// ChannelContext, ActorInfo, TypeInfo, FieldDoc, ErrorDoc are defined
+// in lib/introspect. Call workflow types are in lib/callkit.
 
 // Config drives a Bridge. All fields optional unless documented; sane
 // defaults come from NewConfigFromEnv.
@@ -258,16 +194,16 @@ type Bridge struct {
 
 	// caller is the worker-side caller helper (owns its own
 	// requestCorrelator). Lazily built via caller(); guarded by mu.
-	callerHelper *bridgeCaller
+	callerHelper *callkit.Caller
 }
 
 // caller returns the bridge's worker-side caller helper, building it lazily
 // on first use. One registry instance per Bridge process.
-func (b *Bridge) caller() *bridgeCaller {
+func (b *Bridge) caller() *callkit.Caller {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.callerHelper == nil {
-		b.callerHelper = newBridgeCaller()
+		b.callerHelper = callkit.NewCaller()
 	}
 	return b.callerHelper
 }
