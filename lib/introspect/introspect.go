@@ -8,17 +8,21 @@
 // HTTP "GET"): the set of names and response shapes for the actor.* self-answer
 // protocol, owned by the stdlib and frozen. Changing a name or response field is
 // a protocol-level convention revision.
+//
+// This package is the ONE home of the contract. Response shapes are defined
+// here and ONLY here: actors construct these types (never parallel local
+// structs — archtest enforces it), and lib/metatool binds them to the LLM tool
+// surface without restating fields.
 package introspect
 
-import (
-	"context"
-	"encoding/json"
-)
+import "encoding/json"
 
 // The reserved introspection queries — the standard questions any actor / the
 // channel answers about itself.
 const (
-	// QueryDescribe — what can this actor do (its live API surface).
+	// QueryDescribe — what can this actor do (its live API surface). The
+	// request payload is a DescribeRequest: empty for the full self-answer,
+	// or with Type set for a single-type answer.
 	QueryDescribe = "actor.describe"
 	// QueryList — who is in this channel: the membership ∧ presence directory.
 	// This is the AUTHORITATIVE definition of the formula (durable registry
@@ -33,35 +37,76 @@ const (
 // status query could only answer a trivial constant available=true, which
 // carries no truth — a half-built slice that misleads later readers. When a
 // concrete actor has non-trivial domain state worth surfacing proactively
-// (e.g. an actor with non-trivial login state), an optional Statuser self-answer is added
-// additively (parallel to Describer below) — pain-driven, not pre-built.
+// (e.g. an actor with non-trivial login state), an optional status self-answer
+// is added additively — pain-driven, not pre-built.
 
-// APIDescriptor describes one callable API, returned dynamically inside a
-// Describe response. The actor is the sole authority on its own capability; a
-// caller discovers it by asking the actor, live (via the Describer hook).
-type APIDescriptor struct {
-	// Name is the request envelope.type the API answers (e.g. "notes.publish").
-	Name string `json:"name"`
-	// Schema is the parameter schema for the request payload — a caller uses it
-	// to construct a valid call. Concrete format is the actor's domain concern
-	// (opaque here).
-	Schema json.RawMessage `json:"schema,omitempty"`
-	// Desc is a one-line description of what the API does.
-	Desc string `json:"desc,omitempty"`
+// DescribeRequest is the actor.describe request payload. Empty = the full
+// self-answer (Describe); Type set = the single-type answer (DescribeType).
+type DescribeRequest struct {
+	Type string `json:"type,omitempty"`
 }
 
-// Describe is the actor.describe response: the actor's identity plus its live
-// API surface. APIs is nil for actors that expose no callable surface.
+// Describe is the full actor.describe answer: the actor's identity plus its
+// live capability surface. The actor is the sole authority on its own
+// capability; a caller discovers it by asking the actor, live.
+//
+// Kind and binding are deliberately ABSENT: they are registry truth (see
+// CatalogEntry via actor.list), not capability — a self-answer restating
+// registry facts can only drift from them.
 type Describe struct {
-	Name    string          `json:"name"`
-	Binding string          `json:"binding,omitempty"`
-	APIs    []APIDescriptor `json:"apis,omitempty"`
+	// ActorID is the actor's registry id (e.g. "device:laptop").
+	ActorID string `json:"actor_id"`
+	// Description is the one-line actor positioning.
+	Description string `json:"description"`
+	// SkillDoc is the markdown usage guide (workflows, error handling).
+	SkillDoc string `json:"skill_doc,omitempty"`
+	// Types documents every request type the actor serves.
+	Types map[string]TypeMeta `json:"types,omitempty"`
+}
+
+// DescribeType is the single-type actor.describe answer (selector form):
+// one type's metadata, inlined alongside the identifying pair.
+type DescribeType struct {
+	ActorID string `json:"actor_id"`
+	Type    string `json:"type"`
+	TypeMeta
+}
+
+// AnswerDescribe resolves an actor.describe request against the actor's full
+// Describe. Empty selector → the full answer. A known type selector → the
+// single-type answer. An unknown type → ok=false (the actor fails the request
+// with its own error convention). This is the ONE standard dispatch every
+// actor routes through, so the answer shape never drifts from the convention.
+func AnswerDescribe(d Describe, req DescribeRequest) (any, bool) {
+	if req.Type == "" {
+		return d, true
+	}
+	meta, ok := d.Types[req.Type]
+	if !ok {
+		return nil, false
+	}
+	return DescribeType{ActorID: d.ActorID, Type: req.Type, TypeMeta: meta}, true
+}
+
+// ParseDescribeRequest decodes an actor.describe request payload. A nil/empty
+// payload is the full-answer request.
+func ParseDescribeRequest(payload []byte) (DescribeRequest, error) {
+	var req DescribeRequest
+	if len(payload) == 0 {
+		return req, nil
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return DescribeRequest{}, err
+	}
+	return req, nil
 }
 
 // CatalogEntry is one row of the actor.list channel directory: membership
 // (registry truth) ∧ presence (volatile, read from the substrate's authoritative
 // obs). No readiness axis — whether an actor can service a request is the OUTCOME
-// of send→terminal, not a field here.
+// of send→terminal, not a field here. No capability axis either — types and
+// payload docs are the actor's own self-answer (actor.describe), not directory
+// rows.
 type CatalogEntry struct {
 	ID      string `json:"id"`
 	Kind    string `json:"kind"`
@@ -77,32 +122,4 @@ type CatalogEntry struct {
 // Catalog is the actor.list response: the channel-wide directory.
 type Catalog struct {
 	Actors []CatalogEntry `json:"actors"`
-}
-
-// Describer is the OPTIONAL capability an actor implements to answer
-// actor.describe with its live API surface. It is asked on the actor's own
-// goroutine, so it reports CURRENT capability (e.g. only what it can do while
-// logged in), never a predefined registry. Actors that don't implement it
-// answer describe with their identity only.
-type Describer interface {
-	Describe(ctx context.Context) ([]APIDescriptor, error)
-}
-
-// BuildDescribe assembles the actor.describe answer for an actor identified by
-// name, honouring the Describer convention: if impl implements Describer its live
-// APIs are included; otherwise the answer is identity-only. This is the ONE
-// standard way to serve actor.describe — every actor, and any generic host
-// serving describe on behalf of arbitrary actors, routes through it, so the
-// answer shape never drifts from the convention. Binding (an optional addressing
-// attribute) is left for the caller to set when it has one.
-func BuildDescribe(ctx context.Context, name string, impl any) (Describe, error) {
-	d := Describe{Name: name}
-	if dr, ok := impl.(Describer); ok {
-		apis, err := dr.Describe(ctx)
-		if err != nil {
-			return Describe{}, err
-		}
-		d.APIs = apis
-	}
-	return d, nil
 }

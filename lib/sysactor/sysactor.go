@@ -135,29 +135,40 @@ func (s *SystemActor) respondList(ctx context.Context, env *message.Envelope) er
 	return s.respondReserved(ctx, env, payload)
 }
 
-// Describe implements introspect.Describer — the standard self-describe hook.
-// The system actor declares its live API surface (the channel directory query)
-// through the SAME convention every actor honours, rather than hand-rolling the
-// API list at the serve site; a generic host serving describe on behalf of
-// arbitrary actors consults this exact hook.
-func (s *SystemActor) Describe(ctx context.Context) ([]introspect.APIDescriptor, error) {
-	return []introspect.APIDescriptor{{
-		Name: introspect.QueryList,
-		Desc: "channel-wide actor directory: membership ∧ presence",
-	}}, nil
+// systemDescribe is the system actor's self-answer in the introspect contract
+// shape: identity + the reserved directory query it serves. Declared through
+// the SAME convention every actor honours, rather than hand-rolling the API
+// list at the serve site.
+func systemDescribe() introspect.Describe {
+	return introspect.Describe{
+		ActorID:     string(actor.SystemActorID),
+		Description: "Channel system actor: answers the reserved directory query actor.list (membership ∧ presence).",
+		SkillDoc: "# system\n\nReserved channel directory.\n\n## Tool surface\n\n" +
+			"- `actor.list` — channel-wide actor directory: durable membership composed with live presence.\n",
+		Types: map[string]introspect.TypeMeta{
+			introspect.QueryList: {
+				Description:  "channel-wide actor directory: membership ∧ presence",
+				AllowedKinds: []string{string(message.KindRequest)},
+			},
+		},
+	}
 }
 
 // respondDescribe self-answers the reserved actor.describe for the system actor
-// itself: identity + API surface, assembled through introspect.BuildDescribe
-// (which honours the Describer hook above) so the answer never drifts from the
-// convention. Like every actor, it must answer the reserved self-query rather
-// than let the caller hang.
+// itself through the standard introspect dispatch (full answer or single-type
+// selector). Like every actor, it must answer the reserved self-query rather
+// than let the caller hang. A malformed or unknown selector is NOT synthesized
+// (this actor's stated philosophy): the caller's closure reaps it.
 func (s *SystemActor) respondDescribe(ctx context.Context, env *message.Envelope) error {
-	desc, err := introspect.BuildDescribe(ctx, string(actor.SystemActorID), s)
+	req, err := introspect.ParseDescribeRequest(env.Payload)
 	if err != nil {
-		return err
+		return nil
 	}
-	payload, err := json.Marshal(desc)
+	answer, ok := introspect.AnswerDescribe(systemDescribe(), req)
+	if !ok {
+		return nil
+	}
+	payload, err := json.Marshal(answer)
 	if err != nil {
 		return err
 	}

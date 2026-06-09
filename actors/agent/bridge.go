@@ -26,6 +26,7 @@ import (
 	// surfaces as "provider not found" at NewAgent time.
 	_ "github.com/wanpengxie/go-kimi/pkg/kimi/llm/anthropic"
 
+	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/lib/callkit"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
@@ -194,16 +195,16 @@ type Bridge struct {
 
 	// caller is the worker-side caller helper (owns its own
 	// requestCorrelator). Lazily built via caller(); guarded by mu.
-	callerHelper *callkit.Caller
+	callerHelper *callkit.Client
 }
 
 // caller returns the bridge's worker-side caller helper, building it lazily
 // on first use. One registry instance per Bridge process.
-func (b *Bridge) caller() *callkit.Caller {
+func (b *Bridge) caller() *callkit.Client {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.callerHelper == nil {
-		b.callerHelper = callkit.NewCaller()
+		b.callerHelper = callkit.NewClient()
 	}
 	return b.callerHelper
 }
@@ -774,24 +775,14 @@ func (b *Bridge) emitEnvelope(
 	if err != nil {
 		return fmt.Errorf("kimi: marshal payload: %w", err)
 	}
-	now := b.cfg.NowFn()
 	// Reply audience derives from the trigger sender — Erlang-style
 	// `From` routing. The worker has no awareness of other actors and
 	// always emits back to whoever sent the trigger.
-	audience := workerReplyAudience(trigger.Envelope.Sender.ID)
-	env := message.Envelope{
-		ID:            b.envelopeID(ipc, now),
-		ChannelID:     ipc.ChannelID(),
-		Type:          envType,
-		Kind:          message.KindEvent,
-		Sender:        message.Sender{Kind: actor.KindAgent, ID: ipc.WorkerActorID()},
-		Visibility:    visibility,
-		Audience:      audience,
-		Payload:       body,
-		CorrelationID: trigger.CorrelationID,
-		ParentID:      trigger.Envelope.ID,
-		TS:            now,
-		TSReceived:    now,
+	env, err := b.buildWorkerEvent(ipc, envType, visibility,
+		workerReplyAudience(trigger.Envelope.Sender.ID), body,
+		trigger.Envelope.ID, trigger.CorrelationID)
+	if err != nil {
+		return err
 	}
 	return ipc.WriteEnvelope(ctx, env)
 }
@@ -838,23 +829,13 @@ func (b *Bridge) emitTerminalLLMError(
 		"reason":      reason,
 	}
 	body, _ := json.Marshal(payload)
-	now := b.cfg.NowFn()
-	env := message.Envelope{
-		ID:         b.envelopeID(ipc, now),
-		ChannelID:  ipc.ChannelID(),
-		Type:       "agent.text",
-		Kind:       message.KindEvent,
-		Sender:     message.Sender{Kind: actor.KindAgent, ID: ipc.WorkerActorID()},
-		Visibility: message.VisibilityPublic,
-		// LLM-error terminal: emit as observation-only addressed to
-		// system (no business actor fan-out). The originating trigger
-		// sender is not available on this path.
-		Audience:      message.Audience{actor.SystemActorID},
-		Payload:       body,
-		ParentID:      parentEnvID,
-		CorrelationID: correlationID,
-		TS:            now,
-		TSReceived:    now,
+	// LLM-error terminal: emit as observation-only addressed to
+	// system (no business actor fan-out). The originating trigger
+	// sender is not available on this path.
+	env, buildErr := b.buildWorkerEvent(ipc, "agent.text", message.VisibilityPublic,
+		message.Audience{actor.SystemActorID}, body, parentEnvID, correlationID)
+	if buildErr != nil {
+		return errors.Join(err, buildErr)
 	}
 	if writeErr := ipc.WriteEnvelope(ctx, env); writeErr != nil {
 		return errors.Join(err, writeErr)
@@ -1129,3 +1110,35 @@ Protocol contract (do not violate):
 - call_actor is fast-path: short calls return their result inline; long calls return an ack and the result comes back later (await_result to block, or react to it as a new message). Fan out with wait=false, then await_result/abandon. See "Tool invocation" in the channel context for the full pattern.
 
 Stay grounded in the trigger payload and the channel's domain template below.`
+
+// buildWorkerEvent assembles a kind=event envelope through the behavior
+// builder (ONE home for event defaults), then stamps the binding-edge fields
+// this IPC path owns (deterministic per-worker id, TSReceived).
+func (b *Bridge) buildWorkerEvent(
+	ipc IPCFacade,
+	envType string,
+	visibility message.Visibility,
+	audience message.Audience,
+	payload []byte,
+	parentID message.ID,
+	correlationID message.ID,
+) (message.Envelope, error) {
+	now := b.cfg.NowFn()
+	env, err := behavior.BuildEvent(ipc.ChannelID(),
+		message.Sender{Kind: actor.KindAgent, ID: ipc.WorkerActorID()},
+		func() time.Time { return time.UnixMilli(now) },
+		behavior.EventSpec{
+			ID:            b.envelopeID(ipc, now),
+			Type:          envType,
+			Payload:       payload,
+			Visibility:    visibility,
+			Audience:      audience,
+			ParentID:      parentID,
+			CorrelationID: correlationID,
+		})
+	if err != nil {
+		return message.Envelope{}, err
+	}
+	env.TSReceived = now
+	return *env, nil
+}

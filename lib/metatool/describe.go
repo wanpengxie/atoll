@@ -13,11 +13,12 @@ import (
 var DescribeActorSpec = ToolSpec{
 	Name: "describe_actor",
 	Description: strings.TrimSpace(`
-Returns full skill doc plus all types for one actor. Call this after list_actors
-when you have identified which actor matches your need. Returns:
-  - actor_id, description, kind, binding
-  - skill_doc: markdown with typical workflows and error handling
-  - types: full type list with one-line descriptions
+Returns the actor's live self-answer: its one-line description, a markdown
+skill_doc (typical workflows and error handling), and a types map documenting
+every request type it serves (payload docs, error codes, allowed kinds, wait
+budget). Call this after list_actors when you have identified which actor
+matches your need. Kind/binding/presence are directory facts — read them from
+list_actors, not from here.
 `),
 	Schema: json.RawMessage(`{
   "type": "object",
@@ -65,19 +66,18 @@ func ExecuteDescribeActor(ctx context.Context, params json.RawMessage, exec Exec
 var DescribeTypeSpec = ToolSpec{
 	Name: "describe_type",
 	Description: strings.TrimSpace(`
-Returns payload schema hints plus error codes and examples for one type. Call this
-before call_actor when you need to know payload shape. Returns:
-  - actor_id, type, description, allowed_kinds, max_pending_ms
-  - payload_example: a typical payload object you can adapt
-  - payload_fields: structured field-by-field documentation
-  - error_codes: type-specific error codes with recovery hints
-  - notes: additional markdown notes
+Returns one type's metadata from the actor's live self-answer: description,
+payload documentation (example + field-by-field docs), error codes with
+recovery hints, allowed envelope kinds, and the wait-budget hint
+(max_pending_ms). Call this before call_actor when you need the payload shape
+for a single type; describe_actor returns the same metadata for ALL types at
+once.
 `),
 	Schema: json.RawMessage(`{
   "type": "object",
   "properties": {
     "actor_id": {"type": "string", "description": "Actor id returned by list_actors."},
-    "type": {"type": "string", "description": "Envelope type returned by list_actors or describe_actor."}
+    "type": {"type": "string", "description": "Envelope type returned by describe_actor."}
   },
   "required": ["actor_id", "type"]
 }`),

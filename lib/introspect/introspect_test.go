@@ -1,125 +1,72 @@
 package introspect
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"reflect"
 	"testing"
 )
 
-// plainImpl does NOT implement Describer — exercises the identity-only branch.
-type plainImpl struct{}
-
-// describerImpl implements Describer, returning a fixed API list.
-type describerImpl struct {
-	apis []APIDescriptor
-	err  error
-}
-
-func (d describerImpl) Describe(ctx context.Context) ([]APIDescriptor, error) {
-	return d.apis, d.err
-}
-
-// ctxAwareDescriber asserts the context threads through to the hook.
-type ctxAwareDescriber struct {
-	seenCtx context.Context
-}
-
-func (c *ctxAwareDescriber) Describe(ctx context.Context) ([]APIDescriptor, error) {
-	c.seenCtx = ctx
-	return nil, nil
-}
-
-func TestBuildDescribe_IdentityOnly_NonDescriber(t *testing.T) {
-	got, err := BuildDescribe(context.Background(), "alice", plainImpl{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	want := Describe{Name: "alice"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %+v, want %+v", got, want)
-	}
-	if got.APIs != nil {
-		t.Fatalf("expected nil APIs for non-Describer, got %+v", got.APIs)
-	}
-}
-
-func TestBuildDescribe_IdentityOnly_NilImpl(t *testing.T) {
-	// A nil impl is not a Describer; answer must be identity-only.
-	got, err := BuildDescribe(context.Background(), "bob", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.Name != "bob" || got.APIs != nil || got.Binding != "" {
-		t.Fatalf("unexpected describe: %+v", got)
-	}
-}
-
-func TestBuildDescribe_WithDescriberAPIs(t *testing.T) {
-	apis := []APIDescriptor{
-		{
-			Name:   "notes.publish",
-			Schema: json.RawMessage(`{"type":"object"}`),
-			Desc:   "publish a note",
+func sampleDescribe() Describe {
+	return Describe{
+		ActorID:     "device:laptop",
+		Description: "one-liner",
+		SkillDoc:    "# doc",
+		Types: map[string]TypeMeta{
+			"device.exec": {
+				Description:  "run bash",
+				AllowedKinds: []string{"request"},
+				MaxPendingMs: 120_000,
+			},
 		},
-		{Name: "notes.delete"},
-	}
-	got, err := BuildDescribe(context.Background(), "notes", describerImpl{apis: apis})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.Name != "notes" {
-		t.Fatalf("name: got %q, want %q", got.Name, "notes")
-	}
-	if !reflect.DeepEqual(got.APIs, apis) {
-		t.Fatalf("APIs: got %+v, want %+v", got.APIs, apis)
 	}
 }
 
-func TestBuildDescribe_DescriberReturnsNilAPIs(t *testing.T) {
-	// A Describer may legitimately report no callable surface (nil slice).
-	got, err := BuildDescribe(context.Background(), "quiet", describerImpl{apis: nil})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestAnswerDescribe_Full(t *testing.T) {
+	d := sampleDescribe()
+	got, ok := AnswerDescribe(d, DescribeRequest{})
+	if !ok {
+		t.Fatal("full answer: ok=false")
 	}
-	if got.Name != "quiet" {
-		t.Fatalf("name: got %q, want %q", got.Name, "quiet")
-	}
-	if got.APIs != nil {
-		t.Fatalf("expected nil APIs, got %+v", got.APIs)
+	if !reflect.DeepEqual(got, d) {
+		t.Fatalf("full answer = %+v; want the Describe itself", got)
 	}
 }
 
-func TestBuildDescribe_DescriberError(t *testing.T) {
-	sentinel := errors.New("describe boom")
-	got, err := BuildDescribe(context.Background(), "broken", describerImpl{err: sentinel})
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("error: got %v, want %v", err, sentinel)
+func TestAnswerDescribe_TypeSelector(t *testing.T) {
+	d := sampleDescribe()
+	got, ok := AnswerDescribe(d, DescribeRequest{Type: "device.exec"})
+	if !ok {
+		t.Fatal("type answer: ok=false")
 	}
-	// On error the answer must be the zero Describe (no partial identity leak).
-	if !reflect.DeepEqual(got, Describe{}) {
-		t.Fatalf("expected zero Describe on error, got %+v", got)
+	dt, isDT := got.(DescribeType)
+	if !isDT {
+		t.Fatalf("type answer is %T; want DescribeType", got)
 	}
-}
-
-func TestBuildDescribe_ContextThreadsToHook(t *testing.T) {
-	type ctxKey struct{}
-	ctx := context.WithValue(context.Background(), ctxKey{}, "v")
-	impl := &ctxAwareDescriber{}
-	if _, err := BuildDescribe(ctx, "x", impl); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if impl.seenCtx == nil {
-		t.Fatal("Describe hook was not invoked")
-	}
-	if got := impl.seenCtx.Value(ctxKey{}); got != "v" {
-		t.Fatalf("context not threaded through: got %v", got)
+	if dt.ActorID != "device:laptop" || dt.Type != "device.exec" || dt.MaxPendingMs != 120_000 {
+		t.Fatalf("type answer = %+v", dt)
 	}
 }
 
-// Guard the frozen convention constants and response shapes so an accidental
-// rename/field change trips a test.
+func TestAnswerDescribe_UnknownType(t *testing.T) {
+	if _, ok := AnswerDescribe(sampleDescribe(), DescribeRequest{Type: "nope"}); ok {
+		t.Fatal("unknown type: ok=true; want false")
+	}
+}
+
+func TestParseDescribeRequest(t *testing.T) {
+	if req, err := ParseDescribeRequest(nil); err != nil || req.Type != "" {
+		t.Fatalf("nil payload: req=%+v err=%v", req, err)
+	}
+	req, err := ParseDescribeRequest([]byte(`{"type":"x.y"}`))
+	if err != nil || req.Type != "x.y" {
+		t.Fatalf("selector payload: req=%+v err=%v", req, err)
+	}
+	if _, err := ParseDescribeRequest([]byte(`{`)); err == nil {
+		t.Fatal("malformed payload: want error")
+	}
+}
+
+// Guard the frozen convention constants so an accidental rename trips a test.
 func TestReservedQueryNames(t *testing.T) {
 	if QueryDescribe != "actor.describe" {
 		t.Fatalf("QueryDescribe drifted: %q", QueryDescribe)
@@ -129,7 +76,31 @@ func TestReservedQueryNames(t *testing.T) {
 	}
 }
 
-func TestResponseShapesMarshal(t *testing.T) {
+// TestWireFieldNames pins the JSON contract — the exact keys the LLM-facing
+// tools (describe_actor / describe_type) and every actor self-answer rely on.
+// Changing a key here is a protocol-level convention revision.
+func TestWireFieldNames(t *testing.T) {
+	full, _ := json.Marshal(sampleDescribe())
+	var fullKeys map[string]json.RawMessage
+	_ = json.Unmarshal(full, &fullKeys)
+	for _, k := range []string{"actor_id", "description", "skill_doc", "types"} {
+		if _, ok := fullKeys[k]; !ok {
+			t.Fatalf("Describe wire shape missing %q: %s", k, full)
+		}
+	}
+
+	dt, _ := AnswerDescribe(sampleDescribe(), DescribeRequest{Type: "device.exec"})
+	single, _ := json.Marshal(dt)
+	var singleKeys map[string]json.RawMessage
+	_ = json.Unmarshal(single, &singleKeys)
+	for _, k := range []string{"actor_id", "type", "description", "allowed_kinds", "max_pending_ms"} {
+		if _, ok := singleKeys[k]; !ok {
+			t.Fatalf("DescribeType wire shape missing %q: %s", k, single)
+		}
+	}
+}
+
+func TestCatalogRoundTrip(t *testing.T) {
 	c := Catalog{Actors: []CatalogEntry{
 		{ID: "a1", Kind: "agent", Binding: "b", Present: true, UptimeMs: 1500},
 	}}

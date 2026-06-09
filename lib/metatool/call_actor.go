@@ -18,9 +18,8 @@ This is the universal invocation primitive — every adapter (browser automation
 device controllers) and every sub-agent is reached through this single tool.
 
 Workflow:
-  1. Call list_actors first to inspect the daemon-provided bootstrap actor/type
-     display snapshot.
-  2. Call describe_actor when you need the actor's workflows.
+  1. Call list_actors first to see who is in the channel (thin directory: no types).
+  2. Call describe_actor for the chosen actor's skill doc and full type list.
   3. Call describe_type when you need payload_example, payload_fields, notes, or
      adapter-specific error codes for the selected type.
   4. Call call_actor.

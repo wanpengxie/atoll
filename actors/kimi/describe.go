@@ -46,9 +46,12 @@ const ActorSkillDoc = "" +
 	"- `tool_failed` — extension ran the command but it failed; check detail\n" +
 	"- `payload_decode_failed` — malformed payload\n"
 
+// TypeMetadata documents the kimi types in the introspect contract shape.
 var TypeMetadata = map[string]introspect.TypeMeta{
 	TypeCommand: {
 		Description:    "Forward a single Kimi WebBridge command to the user's chrome extension.",
+		AllowedKinds:   []string{"request"},
+		MaxPendingMs:   DefaultMaxPendingMs,
 		PayloadExample: json.RawMessage(`{"action":"snapshot","args":{},"session":"kimi"}`),
 	},
 }

@@ -87,6 +87,89 @@ func CollapseInternalError(
 	})
 }
 
+// RespondJSON marshals result and commits a status=completed final for the
+// request held in hand. The serve-side happy-path one-liner: every actor's
+// "respond with this value" goes through here instead of hand-marshalling.
+func RespondJSON(
+	ctx context.Context,
+	writer harness.Writer,
+	clock func() time.Time,
+	request *message.Envelope,
+	sender message.Sender,
+	result any,
+) (message.ID, error) {
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return Fail(ctx, writer, clock, request, sender, "internal_error",
+			fmt.Sprintf("marshal result: %v", err))
+	}
+	return Respond(ctx, writer, clock, request, sender,
+		ResponseSpec{Status: "completed", Payload: raw})
+}
+
+// Fail commits a status=failed final carrying the conventional failure
+// payload {error_code, detail} — the ONE home of that shape. The terminal
+// reason is pinned to receiver_internal_error (the serve-side catch-all);
+// specificity rides in errorCode, which is the actor's own closed set.
+func Fail(
+	ctx context.Context,
+	writer harness.Writer,
+	clock func() time.Time,
+	request *message.Envelope,
+	sender message.Sender,
+	errorCode, detail string,
+) (message.ID, error) {
+	payload, _ := json.Marshal(map[string]string{"error_code": errorCode, "detail": detail})
+	return Respond(ctx, writer, clock, request, sender, ResponseSpec{
+		Status:  "failed",
+		Reason:  string(message.TerminalReceiverInternalError),
+		Payload: payload,
+	})
+}
+
+// EventSpec is the caller-supplied shape of a kind=event envelope.
+type EventSpec struct {
+	// ID is optional: empty = a fresh uuid.
+	ID            message.ID
+	Type          string // required
+	Payload       json.RawMessage
+	Visibility    message.Visibility
+	Audience      message.Audience
+	ParentID      message.ID
+	CorrelationID message.ID
+}
+
+// BuildEvent assembles a kind=event envelope — the ONE home for event
+// construction defaults. Bindings stamp transport-edge fields (TSReceived)
+// after build; this builder never writes.
+func BuildEvent(
+	chID channel.ID,
+	sender message.Sender,
+	clock func() time.Time,
+	spec EventSpec,
+) (*message.Envelope, error) {
+	if spec.Type == "" {
+		return nil, fmt.Errorf("behavior: event type required")
+	}
+	id := spec.ID
+	if id == "" {
+		id = message.ID(uuid.NewString())
+	}
+	return &message.Envelope{
+		ID:            id,
+		TS:            clock().UnixMilli(),
+		ChannelID:     chID,
+		Sender:        sender,
+		Kind:          message.KindEvent,
+		Type:          spec.Type,
+		Payload:       spec.Payload,
+		Visibility:    spec.Visibility,
+		Audience:      spec.Audience,
+		ParentID:      spec.ParentID,
+		CorrelationID: spec.CorrelationID,
+	}, nil
+}
+
 // EmitEvent emits one kind=event message under the given sender identity.
 // kind-neutral: sender carries whatever actor authored the event.
 func EmitEvent(
@@ -100,19 +183,11 @@ func EmitEvent(
 	vis message.Visibility,
 	audience message.Audience,
 ) (message.ID, error) {
-	if eventType == "" {
-		return "", fmt.Errorf("behavior: EmitEvent type required")
-	}
-	env := &message.Envelope{
-		ID:         message.ID(uuid.NewString()),
-		TS:         clock().UnixMilli(),
-		ChannelID:  channelID,
-		Sender:     sender,
-		Kind:       message.KindEvent,
-		Type:       eventType,
-		Payload:    payload,
-		Visibility: vis,
-		Audience:   audience,
+	env, err := BuildEvent(channelID, sender, clock, EventSpec{
+		Type: eventType, Payload: payload, Visibility: vis, Audience: audience,
+	})
+	if err != nil {
+		return "", err
 	}
 	out, err := writer.Write(ctx, env)
 	if err != nil {

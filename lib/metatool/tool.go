@@ -39,7 +39,7 @@ type Executor interface {
 
 	// CallerInstance returns the worker-side caller helper for direct
 	// future inspection (await_result / abandon / list_pending).
-	CallerInstance() *callkit.Caller
+	CallerInstance() *callkit.Client
 }
 
 // IPC is the minimal envelope-writing surface meta tools need. It is a
@@ -70,5 +70,5 @@ func payloadHint(actorID, typeName string) string {
 	if actorID != "" && typeName != "" {
 		return fmt.Sprintf("Call describe_type(%q, %q) to see payload_example", actorID, typeName)
 	}
-	return "Call list_actors to see available actors and types"
+	return "Call list_actors to see actors, then describe_actor for their types"
 }

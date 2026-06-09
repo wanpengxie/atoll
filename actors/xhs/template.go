@@ -35,7 +35,7 @@ const xhsCreatorDomainPrompt = `你是 xhs（小红书）内容创作 agent。
 - 配图引用必须存在：` + "`xhs.publish`" + ` payload 中 images 的路径必须是 ` + "`assets/`" + ` 内已存在文件
 - 发布失败 retry_after 字段：等待至少该时间再重试
 
-业务 type 全集 + 每个 type 的 allowed_kinds + schema 用 ` + "`list_actors`" + `、` + "`describe_actor`" + `、` + "`describe_type`" + ` 查询；不要读 sqlite 或 message log。
+业务 type 全集 + 每个 type 的 allowed_kinds + schema 用 ` + "`describe_actor`" + ` / ` + "`describe_type`" + ` 查询（` + "`list_actors`" + ` 只列 actor，不带 type）；不要读 sqlite 或 message log。
 `
 
 // WorkdirSubdirs returns the xhs channel workdir subdirectories.

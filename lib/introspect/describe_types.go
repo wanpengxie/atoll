@@ -7,7 +7,14 @@ import "encoding/json"
 // shape. Fields beyond Description are optional — an actor with minimal
 // documentation fills only what it has.
 type TypeMeta struct {
-	Description    string          `json:"description"`
+	Description string `json:"description"`
+	// AllowedKinds lists the envelope kinds the type accepts (e.g.
+	// ["request"], ["event"]). Empty = request-only by convention.
+	AllowedKinds []string `json:"allowed_kinds,omitempty"`
+	// MaxPendingMs is the type's wait-budget hint for callers: how long a
+	// request of this type may reasonably stay pending. 0 = no hint
+	// (event-only types, or the actor declines to advertise one).
+	MaxPendingMs   int64           `json:"max_pending_ms,omitempty"`
 	PayloadExample json.RawMessage `json:"payload_example,omitempty"`
 	PayloadFields  []FieldDoc      `json:"payload_fields,omitempty"`
 	ErrorCodes     []ErrorDoc      `json:"error_codes,omitempty"`

@@ -14,7 +14,7 @@ func TestPayloadHintWithActorAndType(t *testing.T) {
 
 func TestPayloadHintEmpty(t *testing.T) {
 	hint := payloadHint("", "")
-	expected := "Call list_actors to see available actors and types"
+	expected := "Call list_actors to see actors, then describe_actor for their types"
 	if hint != expected {
 		t.Fatalf("expected %q, got %q", expected, hint)
 	}
@@ -22,7 +22,7 @@ func TestPayloadHintEmpty(t *testing.T) {
 
 func TestPayloadHintPartialActorOnly(t *testing.T) {
 	hint := payloadHint("tool:xhs", "")
-	expected := "Call list_actors to see available actors and types"
+	expected := "Call list_actors to see actors, then describe_actor for their types"
 	if hint != expected {
 		t.Fatalf("expected %q, got %q", expected, hint)
 	}
@@ -30,7 +30,7 @@ func TestPayloadHintPartialActorOnly(t *testing.T) {
 
 func TestPayloadHintPartialTypeOnly(t *testing.T) {
 	hint := payloadHint("", "xhs.publish")
-	expected := "Call list_actors to see available actors and types"
+	expected := "Call list_actors to see actors, then describe_actor for their types"
 	if hint != expected {
 		t.Fatalf("expected %q, got %q", expected, hint)
 	}

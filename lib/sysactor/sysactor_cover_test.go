@@ -50,8 +50,8 @@ func newDescribeReq() *message.Envelope {
 }
 
 // TestRespondDescribe proves the system actor self-answers the reserved
-// actor.describe through introspect.BuildDescribe: the response carries its
-// identity and its single live API (actor.list), routed via the Describer hook.
+// actor.describe in the introspect contract shape: identity + the single
+// reserved query it serves (actor.list) documented in Types.
 func TestRespondDescribe(t *testing.T) {
 	req := newDescribeReq()
 	fc := &fakeWriter{}
@@ -69,27 +69,55 @@ func TestRespondDescribe(t *testing.T) {
 	if err := json.Unmarshal(fc.written[0].Payload, &d); err != nil {
 		t.Fatalf("unmarshal describe: %v", err)
 	}
-	if d.Name != string(actor.SystemActorID) {
-		t.Fatalf("describe name=%q, want %q", d.Name, actor.SystemActorID)
+	if d.ActorID != string(actor.SystemActorID) {
+		t.Fatalf("describe actor_id=%q, want %q", d.ActorID, actor.SystemActorID)
 	}
-	if len(d.APIs) != 1 || d.APIs[0].Name != introspect.QueryList {
-		t.Fatalf("describe APIs=%+v, want single %q", d.APIs, introspect.QueryList)
+	meta, ok := d.Types[introspect.QueryList]
+	if !ok || meta.Description == "" {
+		t.Fatalf("describe types=%+v, want documented %q", d.Types, introspect.QueryList)
 	}
 }
 
-// TestDescribe_Direct proves the Describer hook reports exactly the live
-// surface (actor.list) — the same convention BuildDescribe consults.
-func TestDescribe_Direct(t *testing.T) {
-	s := sysactor.New(sysactor.Deps{Registry: fakeRegistry{}})
-	apis, err := s.Describe(context.Background())
-	if err != nil {
-		t.Fatalf("Describe: %v", err)
+// TestRespondDescribe_TypeSelector proves the single-type selector form
+// answers with the introspect DescribeType shape.
+func TestRespondDescribe_TypeSelector(t *testing.T) {
+	req := newDescribeReq()
+	req.Payload = []byte(`{"type":"actor.list"}`)
+	fc := &fakeWriter{}
+	s := sysactor.New(sysactor.Deps{
+		Registry: fakeRegistry{}, Writer: fc, Lookup: fakeLookup{req: req},
+	})
+
+	if err := s.Receive(context.Background(), req); err != nil {
+		t.Fatalf("actor.describe selector: %v", err)
 	}
-	if len(apis) != 1 || apis[0].Name != introspect.QueryList {
-		t.Fatalf("Describe()=%+v, want single %q", apis, introspect.QueryList)
+	if len(fc.written) != 1 {
+		t.Fatalf("expected 1 response written, got %d", len(fc.written))
 	}
-	if apis[0].Desc == "" {
-		t.Fatalf("Describe API missing Desc")
+	var dt introspect.DescribeType
+	if err := json.Unmarshal(fc.written[0].Payload, &dt); err != nil {
+		t.Fatalf("unmarshal describe type: %v", err)
+	}
+	if dt.Type != introspect.QueryList || dt.Description == "" {
+		t.Fatalf("describe type answer=%+v", dt)
+	}
+}
+
+// TestRespondDescribe_UnknownSelector proves an unknown type selector is not
+// synthesized (no write): the caller closure reaps it.
+func TestRespondDescribe_UnknownSelector(t *testing.T) {
+	req := newDescribeReq()
+	req.Payload = []byte(`{"type":"nope"}`)
+	fc := &fakeWriter{}
+	s := sysactor.New(sysactor.Deps{
+		Registry: fakeRegistry{}, Writer: fc, Lookup: fakeLookup{req: req},
+	})
+
+	if err := s.Receive(context.Background(), req); err != nil {
+		t.Fatalf("actor.describe unknown selector: %v", err)
+	}
+	if len(fc.written) != 0 {
+		t.Fatalf("expected no response written, got %d", len(fc.written))
 	}
 }
 

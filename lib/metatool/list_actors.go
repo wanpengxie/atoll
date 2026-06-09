@@ -15,15 +15,14 @@ import (
 var ListActorsSpec = ToolSpec{
 	Name: "list_actors",
 	Description: strings.TrimSpace(`
-Discover what actors (tool adapters, agents, system actors) and request-callable types
-exist in this channel RIGHT NOW. Returns:
-  - actors: each with actor_id, kind, binding, readiness, and the types it handles
-  - types per actor: name, description, allowed_kinds, max_pending_ms hint
+Discover what actors (tool adapters, agents, system actors) exist in this
+channel RIGHT NOW. Returns a thin directory: per actor its actor_id, kind,
+binding, present (online now), and uptime_ms. Types and payload docs are NOT
+listed here — drill into one actor with describe_actor / describe_type.
 
-This is a LIVE query — the catalog reflects the channel's current membership at the moment
-you call. An actor that came online after this task started will appear here. Call it
-whenever you need the current set of (actor_id, type) pairs; call_actor and describe_* also
-go through the envelope path so the daemon always validates against live state.
+This is a LIVE query — the catalog reflects the channel's current membership at
+the moment you call. An actor that came online after this task started will
+appear here. Call it whenever you need the current actor set.
 `),
 	Schema: json.RawMessage(`{"type":"object","properties":{}}`),
 }

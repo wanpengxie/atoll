@@ -3,9 +3,13 @@ package behavior
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
@@ -21,6 +25,58 @@ import (
 // to truth (audience = caller) and flows BACK to the caller's mailbox; the
 // caller learns of its own timeout by RECEIVING that terminal, never by an
 // out-of-band callback. No runtime self-timer / Tick is needed.
+
+// RequestSpec is the caller-supplied shape of a kind=request envelope —
+// the call-face mirror of serve's ResponseSpec.
+type RequestSpec struct {
+	// ID is optional: empty = a fresh uuid. Callers with their own id scheme
+	// (e.g. deterministic per-worker ids) override it.
+	ID            message.ID
+	Type          string // required
+	Payload       json.RawMessage
+	Audience      message.Audience // required
+	Visibility    message.Visibility
+	ParentID      message.ID
+	CorrelationID message.ID
+	// ExpiresAt is the caller's deadline (drives the author#2 timer).
+	ExpiresAt *int64
+}
+
+// BuildRequest assembles a kind=request envelope — the ONE home for request
+// construction defaults, mirroring serve's BuildResponseFromRequest. Bindings
+// stamp transport-edge fields (TSReceived) after build; this builder never
+// writes.
+func BuildRequest(
+	chID channel.ID,
+	sender message.Sender,
+	clock func() time.Time,
+	spec RequestSpec,
+) (*message.Envelope, error) {
+	if strings.TrimSpace(spec.Type) == "" {
+		return nil, fmt.Errorf("behavior: BuildRequest type required")
+	}
+	if len(spec.Audience) == 0 {
+		return nil, fmt.Errorf("behavior: BuildRequest audience required")
+	}
+	id := spec.ID
+	if id == "" {
+		id = message.ID(uuid.NewString())
+	}
+	return &message.Envelope{
+		ID:            id,
+		TS:            clock().UnixMilli(),
+		ChannelID:     chID,
+		Kind:          message.KindRequest,
+		Type:          strings.TrimSpace(spec.Type),
+		Sender:        sender,
+		Audience:      spec.Audience,
+		Payload:       spec.Payload,
+		Visibility:    spec.Visibility,
+		ParentID:      spec.ParentID,
+		CorrelationID: spec.CorrelationID,
+		ExpiresAt:     spec.ExpiresAt,
+	}, nil
+}
 
 // Caller is an actor-private, caller-scoped closure manager (the timeout half
 // of gen_server:call). It is owned by one actor.

@@ -39,7 +39,7 @@ type mockExecutor struct {
 	executeRequestFn func(ctx context.Context, rc metatool.RuntimeContext, spec callkit.RequestSpec) callkit.ResultValue
 	// executeReservedRawFn is called by ExecuteReservedRaw. If nil, returns (nil, false).
 	executeReservedRawFn func(ctx context.Context, rc metatool.RuntimeContext, spec callkit.RequestSpec) (json.RawMessage, bool)
-	caller               *callkit.Caller
+	caller               *callkit.Client
 }
 
 func (m *mockExecutor) ExecuteRequest(ctx context.Context, rc metatool.RuntimeContext, spec callkit.RequestSpec) callkit.ResultValue {
@@ -56,13 +56,13 @@ func (m *mockExecutor) ExecuteReservedRaw(ctx context.Context, rc metatool.Runti
 	return nil, false
 }
 
-func (m *mockExecutor) CallerInstance() *callkit.Caller {
+func (m *mockExecutor) CallerInstance() *callkit.Client {
 	return m.caller
 }
 
 // newMockExec returns a mockExecutor with a real Caller.
 func newMockExec() *mockExecutor {
-	return &mockExecutor{caller: callkit.NewCaller()}
+	return &mockExecutor{caller: callkit.NewClient()}
 }
 
 // defaultRC returns a RuntimeContext with a working mockIPC.

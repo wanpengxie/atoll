@@ -3,8 +3,10 @@
 // list_pending) and their Execute functions.
 //
 // The call workflow primitives (correlator, caller, error codes, payload
-// normalisation) live in lib/callkit. Rich catalog metadata types
-// (ChannelContext, ActorInfo, TypeInfo) live in lib/introspect.
+// normalisation) live in lib/callkit. The actor.* self-answer contract —
+// Describe / DescribeType / TypeMeta / Catalog response shapes — lives in
+// lib/introspect, the ONE home of those shapes: this package only binds them
+// to the LLM tool surface and never restates their fields.
 //
 // This package is pure Go + protocol/message + callkit + introspect —
 // it never imports go-kimi or any LLM-binding types. The go-kimi

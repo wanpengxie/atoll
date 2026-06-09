@@ -7,24 +7,31 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
-// Caller is the worker-side caller helper that backs the fast-path. It
-// owns its own RequestCorrelator instance.
-type Caller struct {
+// Client is the client-edge call collector backing the LLM tool-loop
+// fast-path: subscribe-before-send futures plus a bounded blocking Await.
+// It is NOT an actor primitive and never belongs in lib/behavior — anything
+// that can block-await is by axiom not an actor (cell serial contract;
+// mailbox is the sole ingress). The actor-side call face is
+// behavior.BuildRequest + behavior.Caller (author#2). This collector exists
+// for the current sync-wrap agent loop and dissolves with the first-class
+// async refactor.
+type Client struct {
 	Futures *RequestCorrelator
 }
 
-// NewCaller returns a ready-to-use caller.
-func NewCaller() *Caller {
-	return &Caller{Futures: NewRequestCorrelator()}
+// NewClient returns a ready-to-use client-edge collector.
+func NewClient() *Client {
+	return &Client{Futures: NewRequestCorrelator()}
 }
 
-// SubmitResult is the worker-side analogue of behavior.SubmitResult.
+// SubmitResult is the submit outcome: the request id plus the immediate ack.
 type SubmitResult struct {
 	RequestID message.ID
 	Ack       AckDescriptor
 }
 
-// AckDescriptor mirrors behavior.AckDescriptor's dual form.
+// AckDescriptor is the immediate-ack shape handed back to the LLM when a
+// call outlives the fast-path window (accepted / est wait / how to collect).
 type AckDescriptor struct {
 	RequestID message.ID
 	Accepted  bool
@@ -49,7 +56,7 @@ type IPCWriter interface {
 // Submit registers the future BEFORE writing the envelope
 // (subscribe-before-send). Returns the request id + ack once the write
 // is accepted.
-func (c *Caller) Submit(
+func (c *Client) Submit(
 	ctx context.Context,
 	ipc IPCWriter,
 	env message.Envelope,
@@ -74,22 +81,22 @@ func (c *Caller) Submit(
 }
 
 // Await blocks until the final for id arrives, the window elapses, or ctx is done.
-func (c *Caller) Await(ctx context.Context, id message.ID, window time.Duration) (*message.Envelope, bool, error) {
+func (c *Client) Await(ctx context.Context, id message.ID, window time.Duration) (*message.Envelope, bool, error) {
 	return c.Futures.Await(ctx, id, window)
 }
 
 // Abandon drops the local waiter for id.
-func (c *Caller) Abandon(id message.ID) {
+func (c *Client) Abandon(id message.ID) {
 	c.Futures.Cancel(id)
 }
 
 // Pending returns the in-flight request ids.
-func (c *Caller) Pending() []message.ID {
+func (c *Client) Pending() []message.ID {
 	return c.Futures.Pending()
 }
 
 // Deliver feeds one inbound response envelope into the correlator.
-func (c *Caller) Deliver(env *message.Envelope) Disposition {
+func (c *Client) Deliver(env *message.Envelope) Disposition {
 	return c.Futures.Deliver(env)
 }
 
