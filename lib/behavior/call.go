@@ -94,7 +94,11 @@ func (c *Caller) fireTimeout(req *message.Envelope) {
 	if err != nil {
 		return
 	}
-	_, _ = c.writer.Write(context.Background(), term)
+	ctx := harness.CtxWithCaller(context.Background(), harness.CallerContext{
+		ActorID:   c.sender.ID,
+		ChannelID: req.ChannelID,
+	})
+	_, _ = c.writer.Write(ctx, term)
 }
 
 // Match reports whether env is a response to one of this caller's in-flight

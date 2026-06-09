@@ -239,14 +239,7 @@ func TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout(t *testing.
 	sa := &silentActor{
 		caller: behavior.NewCaller(
 			message.Sender{Kind: actor.KindHuman, ID: callerID},
-			// The Caller's fireTimeout writes through the gateway (which is
-			// the postCommitWriter -> harness chain). We need a writer that
-			// carries the CallerContext so the harness accepts the write.
-			&callerCtxWriter{
-				inner:     ch.Gateway(),
-				actorID:   callerID,
-				channelID: closureTestChannelID,
-			},
+			gatewayWriter(ch.Gateway()),
 			time.Now,
 		),
 	}
@@ -289,20 +282,12 @@ func TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout(t *testing.
 	}
 }
 
-// callerCtxWriter wraps Gateway.SendMessage with the CallerContext injection
-// the harness requires. behavior.Caller.fireTimeout calls Write without a
-// CallerContext on the context (it runs off the cell goroutine, on the timer's
-// goroutine), so this adapter injects it.
-type callerCtxWriter struct {
-	inner     *platform.Gateway
-	actorID   actor.ActorID
-	channelID channel.ID
+// gatewayWriter adapts *platform.Gateway (SendMessage) to harness.Writer.
+type gwWriter struct{ gw *platform.Gateway }
+
+func gatewayWriter(gw *platform.Gateway) harness.Writer { return &gwWriter{gw: gw} }
+
+func (w *gwWriter) Write(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
+	return w.gw.SendMessage(ctx, env)
 }
 
-func (w *callerCtxWriter) Write(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
-	ctx = harness.CtxWithCaller(ctx, harness.CallerContext{
-		ActorID:   w.actorID,
-		ChannelID: w.channelID,
-	})
-	return w.inner.SendMessage(ctx, env)
-}
