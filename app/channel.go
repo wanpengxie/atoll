@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -162,6 +163,42 @@ func (a *App) handleGetChannel(c *gin.Context) {
 		"id": id, "workspace_id": workspaceID, "name": name,
 		"type": chType, "created_at": createdAt,
 	})
+}
+
+func (a *App) handleDeleteChannel(c *gin.Context) {
+	chID, ok := a.requireChannelAccess(c)
+	if !ok {
+		return
+	}
+
+	var dbPath string
+	err := a.db.QueryRowContext(c.Request.Context(),
+		`SELECT db_path FROM channels WHERE id = ?`, string(chID),
+	).Scan(&dbPath)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+		return
+	}
+
+	// Close the in-memory ChannelHome (stops fleet, runtime, stores).
+	cID := channel.ID(chID)
+	a.mu.Lock()
+	if home, exists := a.homes[cID]; exists {
+		_ = home.Close()
+		delete(a.homes, cID)
+	}
+	a.mu.Unlock()
+
+	// Remove daemon bindings, then the channel row.
+	_, _ = a.db.ExecContext(c.Request.Context(),
+		`DELETE FROM daemon_channels WHERE channel_id = ?`, string(chID))
+	_, _ = a.db.ExecContext(c.Request.Context(),
+		`DELETE FROM channels WHERE id = ?`, string(chID))
+
+	// Remove the per-channel sqlite file.
+	_ = os.Remove(dbPath)
+
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (a *App) handleListChannelMembers(c *gin.Context) {

@@ -120,6 +120,12 @@ export default function App() {
             await api.createChannel(activeWorkspaceID, name, type);
             await refreshChannels();
           }}
+          onDeleteChannel={async (chID) => {
+            if (!confirm('确定删除这个 channel？消息将永久丢失。')) return;
+            await api.deleteChannel(chID);
+            if (activeChannelID === chID) setActiveChannelID(null);
+            await refreshChannels();
+          }}
           onLogout={handleLogout}
         />
         <main className="channel-main">

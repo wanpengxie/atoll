@@ -86,6 +86,7 @@ export const api = {
   // be written into the channel.
   bindChannel:      (wsID, chID, daemonID) => request('POST', `/api/workspaces/${wsID}/channels/${chID}/bind`, { daemon_id: daemonID }),
   getChannel:       (chID)                      => request('GET',  `/api/channels/${chID}`),
+  deleteChannel:    (chID)                      => request('DELETE', `/api/channels/${chID}`),
   listMembers:      (chID)                      => request('GET',  `/api/channels/${chID}/members`).then((r) => ({ members: r.members || [] })),
   listActors:       (chID)                      => request('GET',  `/api/channels/${chID}/actors`).then((r) => ({ ...r, actors: r?.actors || [] })),
 

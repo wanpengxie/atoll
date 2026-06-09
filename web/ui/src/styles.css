@@ -1832,6 +1832,9 @@ body::after {
 .sidebar-list-item { padding: 7px 10px; border-radius: 6px; color: rgba(245,240,232,0.78); font-size: 13.5px; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: background 0.1s; }
 .sidebar-list-item:hover { background: rgba(245,240,232,0.06); color: var(--text-light); }
 .sidebar-list-item.active { background: rgba(228,0,43,0.18); color: #fff; box-shadow: inset 2px 0 0 var(--accent); }
+.sidebar-delete-btn { display: none; background: none; border: none; color: rgba(245,240,232,0.4); cursor: pointer; font-size: 14px; padding: 0 4px; line-height: 1; margin-left: auto; }
+.sidebar-list-item:hover .sidebar-delete-btn { display: inline-block; }
+.sidebar-delete-btn:hover { color: #e4002b; }
 .sidebar-empty { padding: 6px 10px; color: rgba(245,240,232,0.35); font-size: 12px; }
 
 .inline-form { display: flex; gap: 4px; padding: 6px 0; flex-wrap: wrap; }

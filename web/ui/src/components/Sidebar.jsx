@@ -16,6 +16,7 @@ export default function Sidebar({
   onSelectView,
   onCreateWorkspace,
   onCreateChannel,
+  onDeleteChannel,
   onLogout,
 }) {
   return (
@@ -62,6 +63,7 @@ export default function Sidebar({
             ],
           }}
           onCreate={async (name, extra) => onCreateChannel(name, extra || 'group')}
+          onDelete={onDeleteChannel}
           items={channels}
           activeID={activeChannelID}
           onSelect={onSelectChannel}
@@ -94,6 +96,7 @@ function SidebarSection({
   items,
   activeID,
   onSelect,
+  onDelete,
   renderItem,
   onCreate,
   createPlaceholder,
@@ -166,6 +169,15 @@ function SidebarSection({
               onClick={() => onSelect(itemID)}
             >
               {renderItem(item)}
+              {onDelete && (
+                <button
+                  className="sidebar-delete-btn"
+                  title="删除"
+                  onClick={(e) => { e.stopPropagation(); onDelete(itemID); }}
+                >
+                  ×
+                </button>
+              )}
             </li>
           );
         })}

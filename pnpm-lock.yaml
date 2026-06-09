@@ -11,7 +11,7 @@ importers:
 
   .: {}
 
-  adapters/device/xhs/extension:
+  web/extension/xhs:
     devDependencies:
       '@commitlint/cli':
         specifier: ^19.8.1
@@ -59,7 +59,7 @@ importers:
         specifier: ^10.1.3
         version: 10.4.0(eslint@9.39.4(jiti@2.7.0))
 
-  adapters/device/xhs/extension/app/chrome-extension:
+  web/extension/xhs/app/chrome-extension:
     dependencies:
       '@element-plus/icons-vue':
         specifier: ^2.3.1
@@ -108,7 +108,7 @@ importers:
         specifier: ^0.20.0
         version: 0.20.26(@types/node@25.6.0)(eslint@9.39.4(jiti@2.7.0))(jiti@2.7.0)(rolldown@1.0.1)(rollup@4.60.3)(terser@5.47.1)(yaml@2.8.3)
 
-  adapters/device/xhs/extension/packages/shared:
+  web/extension/xhs/packages/shared:
     dependencies:
       zod:
         specifier: ^3.24.4
@@ -127,7 +127,7 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
-  ui:
+  web/ui:
     dependencies:
       '@vitejs/plugin-react':
         specifier: ^6.0.2
