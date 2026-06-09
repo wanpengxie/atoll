@@ -1,147 +1,82 @@
 # Coagent
 
-M1.5 单栈版本：4 个 Go binary（server / daemon / worker / cli）+ 原生 Vite UI +
-xhs Chrome 扩展（device 通道）。旧 Node 双栈（lightcone/）已在 T9 全归档到
-`archive/`，参考 `archive/<dir>/ARCHIVE.md`。
+多 actor 协作平台：actor 通过 envelope 协议在 channel 内互相发消息，server 持有 truth（per-channel sqlite），daemon 提供算力（host actor cell）。
+
+## 架构
+
+```
+protocol/    协议类型（envelope, actor, channel）
+runtime/     基座运行时（harness 9步管线, actorrt cell/port, sqlite store）
+lib/         stdlib（behavior, callkit, metatool, channelkit, sysactor, introspect）
+platform/    channel 运行平台（server 侧 ChannelHome + daemon 侧 RunCompute）
+app/         产品 HTTP API（gin, identity, workspace, channel, daemon, WS）
+actors/      actor 实现（echo, feishu, agent/kimi, xhs）
+cmd/         二进制入口（server, daemon, cli）
+sdk/         Go SDK
+web/         前端（React Vite UI + xhs Chrome 扩展）
+```
 
 ## Quickstart
 
 ```bash
-# 1. 装依赖（Go modules + pnpm workspace + lint / migrate 工具）
-make install
+# 1. 构建
+go build -o bin/coagent-server ./cmd/server
+go build -o bin/coagent-daemon ./cmd/daemon
+go build -o bin/coagent-cli    ./cmd/cli
 
-# 2. 构建（Go 4 binary + ui dist + chrome 扩展）
-make build
-ls bin/   # → coagent-server  coagent-daemon  coagent-worker  coagent-cli
+# 2. 起 server
+bin/coagent-server --db /tmp/coagent-dev/app.db --channel-db-dir /tmp/coagent-dev/channels
 
-# 3. 建 server 端 sqlite schema（demo 自用，无数据迁移；要重置直接
-#    rm data/server.db 再 make migrate）
-make migrate
+# 3. 起 daemon（echo actor，不需要外部凭证）
+#    先在 UI 或 CLI 创建 daemon 拿到 api-key，绑定到 channel
+bin/coagent-daemon --server ws://localhost:8080/compute?key=<api-key>&channel=<chID> \
+                   --key <api-key> --actors echo
 
-# 4. 起服务（前台 / 各开一个终端）
-./bin/coagent-server                                          # 监听 :8080（默认）
-./bin/coagent-daemon --server-url ws://localhost:8080 --key dev
+# 4. UI（开发模式）
+cd web/ui && pnpm dev   # http://localhost:5173
 
-# 5. 起 UI（开发模式）
-pnpm --filter ui dev                                          # http://localhost:5173
-
-# 6. 烟雾测试（手工）
-#    - 浏览器打开 UI，注册用户 / 建 workspace / 建 channel
-#    - 在 server 后台为 channel 创建 xhs device，复制 api-key
-#    - 加载 adapters/device/xhs/extension/app/chrome-extension/.output/chrome-mv3/
-#      到 chrome（开发者模式），popup 填 server URL + api-key 点连接
-#    - 在 UI 内发送 channel message，观察 worker 调度
-#    - feishu outbound：channel 配置 webhook 后由 worker 发起 outbound
+# 5. 测试
+go test ./...
 ```
 
-## 顶层 make targets
-
-```bash
-make install     # 装 Go modules + pnpm + golangci-lint + go-arch-lint + golang-migrate
-make build       # build-go + build-ui + build-ext（4 binary + ui dist + 扩展）
-make build-go    # 仅编 Go binary（cmd/{server,daemon,worker,cli}）
-make build-ui    # 仅编 ui/（vite build）
-make build-ext   # 仅编 chrome 扩展（adapters/device/xhs/extension）
-make test        # go test ./... + pnpm -r --if-present test
-make lint        # 5 类 lint：golangci-lint / go-arch-lint / banned-words / kernel-protocol / docs
-make migrate     # 给 server sqlite 跑 schema migration（server/store/migrations/*）
-make dev         # 起 server + daemon + ui dev（best-effort）
-make clean       # 删 bin/ dist/ ui/dist
-```
-
-## 二进制职责（M1.5）
+## 二进制
 
 | Binary | 作用 |
 |--------|------|
-| `bin/coagent-server` | 多 channel 协调中心：用户 / channel / device / push / placement / daemonbus / devicebus |
-| `bin/coagent-daemon` | 单机进程编排：channel actor host、xhs device 反连、feishu outbound、worker fork/supervise |
-| `bin/coagent-worker` | Agent runner 子进程；由 daemon fork（v4 envelope IPC） |
-| `bin/coagent-cli`    | 业务 + 运维 CLI：channel / message / xhs publish / admin |
+| `coagent-server` | HTTP API + WS 推送 + 所有 channel 的 truth 持有者 |
+| `coagent-daemon` | WS 连 server，host actor cell（echo/feishu/...） |
+| `coagent-cli`    | 管理 CLI（channel/daemon/message 操作） |
 
-## 目录结构（v5 单栈）
+## 核心设计
 
+- **Server IS truth**：所有消息写入只在 server 侧的 per-channel sqlite，daemon 不持有 truth
+- **Envelope 协议统一**：所有 actor 交互通过同一种 envelope 格式（kind=request/response/event）
+- **Cell/Port 对称**：in-process actor（cell）和 remote actor（port over WS）对 actorrt 来说一样
+- **Closure 三作者**：request 的终态由三条路径保证——actor 回复（author#1）、caller 超时（author#2）、actor 死亡（author#3）
+- **Harness 9 步管线**：每条消息写入 truth 前经过 9 步校验（caller auth → envelope shape → channel match → sender consistent → kind+audience → response pairing → dedupe → commit）
+
+## 接入新 actor
+
+实现一个 `Receive(ctx context.Context, env *message.Envelope) error`，注册到 daemon registry：
+
+```go
+// actors/hermes/hermes.go
+func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
+    // 处理请求，写回复
+    _, err := a.writer.Write(ctx, responseEnvelope)
+    return err
+}
 ```
-kernel/             # 协议合同 + 纯类型（actor identity L0 / message envelope / channel / actorreg L1 registry / placement / topology / addressing）
-runtime/            # daemon 侧：bootstrap / scheduler / supervisor / transit / ipc / workerhost / store
-adapters/           # device + messaging adapter（device/xhs/extension/、messaging/feishu/ 等）
-server/             # server 进程内部模块（gateway / daemonbus / devicebus / placements / catalog / identity / pushhub）
-cmd/{server,daemon,worker,cli}/  # 4 binary 入口（main.go）
-ui/                 # React (Vite) UI
-archive/            # 旧 Node 双栈归档（agent-binary / cli-node / lightcone-* / ops-node-scripts / 等）
-.dalek/pm/          # 工程权威 spec（v4-* / m1.5-* / m1.4-* / m1.3-*）
+
+```go
+// cmd/daemon/main.go
+var registry = map[string]func(harness.Writer) actorrt.Actor{
+    "echo":   func(w harness.Writer) actorrt.Actor { return echo.NewActor(w) },
+    "hermes": func(w harness.Writer) actorrt.Actor { return hermes.NewActor(w) },
+}
 ```
-
-## 路径与持久化
-
-Daemon 本地运行时数据在 `~/.coagent/{COAGENT_PROJECT_KEY}/`：
-
-- `daemon.sock`：daemon 本地 socket（除非 `COAGENT_DAEMON_SOCKET` 覆盖）
-- `channels/`：active channel workdir
-- `archived/`：archived channel workdir
-- `machine.key`：daemon 注册到 server 后写入的 machine api key（chmod 600）
-
-Server 本地 sqlite：`./data/server.db`（demo 自用，无数据迁移；销毁重建用
-`rm data/server.db && make migrate`）。
-
-项目级临时 scratch：`.coagent-local/`（git ignore）。
-
-工程规划文档：`.dalek/pm/` 顶层 spec 入仓；`.dalek/runtime/` + worker-local
-状态由 dalek 管理且 ignore。
 
 ## 项目名 vs module path
 
-- **项目名 / 产品名：coagent**（小写）。所有外部文档、内部讨论、binary 前缀
-  （`coagent-server` / `coagent-daemon` / ...）都用 `coagent`。
-- **Go module path：`github.com/wanpengxie/ActOS`** —— `ActOS` 是 module 别名
-  (= coagent kernel)，仅作为 import path 出现；它不是产品改名，也不是
-  目录别名。新代码请继续使用 `import "github.com/wanpengxie/ActOS/<pkg>"`，
-  但用户/PM/spec 文档里仍称项目为 coagent。
-
-## 协议合同
-
-- v4 envelope / kind / reason / actor 类型：`kernel/message/`（Go）
-- 6 大 ownership invariants：`.go-arch-lint.yml` 顶层配置 + `make lint-arch`
-- 禁用词约束（mcp / dogfood / 1studio / lightcone）：`scripts/lint-banned-words.sh`
-- 文档交叉引用校验：`scripts/lint-docs.sh`
-
-权威 spec：
-
-- v4 protocol：`.dalek/pm/v4-{layer0,layer1,layer2,layer3,layer4}-spec.md` +
-  `v4-message-definition.md`
-- m1.5 工程纪律：`.dalek/pm/m1.5-server-rewrite-and-restructure.md` +
-  `m1.5-tickets.md`
-
-## 编排（demo 期最简）
-
-demo 自用阶段不上 pm2 / systemd，直接前台/后台 `bin/coagent-*` 即可。生产化
-编排（systemd unit、日志轮转、健康检查 endpoint）M2.0 再补。
-
-## Troubleshooting
-
-- server 启动失败：检查 `./data/server.db` 是否存在；不存在则 `make migrate`
-- daemon 连不上 server：检查 `--server-url` 和端口；本地 `ws://localhost:8080`
-- ui 看不到 channel：检查 server 是否在监听、登录态是否丢失
-- chrome 扩展报 "Server 不可达"：popup 内 Server URL 改成真实 server 部署域名
-  （默认 `https://coagent-server` 是 placeholder）
-- 烟雾测试需要：本机 chrome + 已登录的 xhs 账号 + feishu webhook（如果走
-  feishu outbound）
-
-## 历史归档
-
-`archive/` 下保存 M1.0~M1.2 的 Node 双栈实现，仅做参考、不参与构建。每个
-子目录有 `ARCHIVE.md` 写明归档原因 / 取代物 / 安全删除时间窗：
-
-- `archive/agent-binary/`            — 旧 Node agent runner
-- `archive/cli-node/`                — 旧 Node CLI
-- `archive/lightcone-node-server/`   — 旧 Node lightcone server
-- `archive/lightcone-node-daemon/`   — 旧 Node lightcone daemon
-- `archive/lightcone-daemon-go/`     — M1.3 过渡 Go daemon 模块
-- `archive/lightcone-feishu-bridge/` — 旧 Node feishu bridge
-- `archive/lightcone-demo-design/`   — M1.0~M1.2 demo 设计稿
-- `archive/lightcone-docs/`          — 旧 lightcone 子项目文档
-- `archive/lightcone-misc/`          — lightcone/ 顶层杂项 + 历史 .dalek/pm 笔记
-- `archive/packages-payload-types/`  — 旧 TS 共享 payload 类型包
-- `archive/workspace-template/`      — 旧 channel workspace 文件骨架
-- `archive/ops-node-scripts/`        — 旧 ops Node 脚本（doctor / register-machine / 等）
-
-M2.0 启动前可按需进一步清理。
+- **项目名：coagent**（小写）
+- **Go module：`github.com/wanpengxie/ActOS`** — import path 用 ActOS，项目文档用 coagent
