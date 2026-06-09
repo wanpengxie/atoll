@@ -117,17 +117,7 @@ export default function App() {
             await refreshWorkspaces();
           }}
           onCreateChannel={async (name, type) => {
-            const res = await api.createChannel(activeWorkspaceID, name, type);
-            const ch = res.channel || res;
-            // M1.6 — newly created channel has no placement yet; bind it
-            // to the dev daemon so message writes can flow. Production
-            // would let the user pick a daemon; in single-daemon dev mode
-            // we just hardcode "daemon-dev" (matches cmd/daemon -daemon-id).
-            try {
-              await api.bindChannel(activeWorkspaceID, ch.id || ch.ID, 'daemon-dev');
-            } catch (err) {
-              console.warn('bindChannel failed', err);
-            }
+            await api.createChannel(activeWorkspaceID, name, type);
             await refreshChannels();
           }}
           onLogout={handleLogout}

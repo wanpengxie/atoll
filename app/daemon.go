@@ -179,7 +179,16 @@ func (a *App) handleAttachDaemons(c *gin.Context) {
 		return
 	}
 
+	userID := getUserID(c)
 	for _, did := range req.DaemonIDs {
+		var ownerID string
+		err := a.db.QueryRowContext(c.Request.Context(),
+			`SELECT owner_id FROM daemons WHERE id = ?`, did,
+		).Scan(&ownerID)
+		if err != nil || ownerID != userID {
+			c.JSON(http.StatusForbidden, gin.H{"error": "daemon not found or not owned by you"})
+			return
+		}
 		_, _ = a.db.ExecContext(c.Request.Context(),
 			`INSERT OR IGNORE INTO daemon_channels (daemon_id, channel_id) VALUES (?,?)`,
 			did, chID,

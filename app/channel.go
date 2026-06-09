@@ -123,7 +123,17 @@ func (a *App) handleBindChannel(c *gin.Context) {
 		return
 	}
 
-	_, err := a.db.ExecContext(c.Request.Context(),
+	userID := getUserID(c)
+	var ownerID string
+	err := a.db.QueryRowContext(c.Request.Context(),
+		`SELECT owner_id FROM daemons WHERE id = ?`, req.DaemonID,
+	).Scan(&ownerID)
+	if err != nil || ownerID != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "daemon not found or not owned by you"})
+		return
+	}
+
+	_, err = a.db.ExecContext(c.Request.Context(),
 		`INSERT OR IGNORE INTO daemon_channels (daemon_id, channel_id) VALUES (?,?)`,
 		req.DaemonID, chID,
 	)
