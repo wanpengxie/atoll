@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: install build build-go build-ui test dev dev-ui dev-server clean
+.PHONY: install build build-go build-release build-ui test lint dev dev-ui dev-server clean
 
 GO_BINARIES := server daemon
 
@@ -16,6 +16,8 @@ install:
 # ----------------------------------------------------------------------------
 build: build-go build-ui
 
+LDFLAGS_RELEASE := -s -w
+
 build-go:
 	@mkdir -p bin
 	@for b in $(GO_BINARIES); do \
@@ -23,14 +25,26 @@ build-go:
 	  go build -o bin/coagent-$$b ./cmd/$$b || exit 1; \
 	done
 
+build-release:
+	@mkdir -p bin
+	@for b in $(GO_BINARIES); do \
+	  echo "[build-release] cmd/$$b -> bin/coagent-$$b (stripped)"; \
+	  go build -ldflags="$(LDFLAGS_RELEASE)" -o bin/coagent-$$b ./cmd/$$b || exit 1; \
+	done
+
 build-ui:
 	cd web/ui && pnpm build
 
 # ----------------------------------------------------------------------------
-# test
+# test / lint
 # ----------------------------------------------------------------------------
 test:
 	go test ./...
+
+# lint — go vet + 架构约束（archtest：契约形状只许住 lib/introspect）
+lint:
+	go vet ./...
+	go test ./archtest/
 
 # ----------------------------------------------------------------------------
 # dev — 一键起全栈: server + UI dev server

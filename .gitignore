@@ -6,6 +6,10 @@ dist/
 /coagent-xhs
 # root cli build artifact (go build -o cli ./cmd/cli)
 /cli
+# go build output binaries
+/server
+/daemon
+/worker
 /bin/
 .dalek/*
 !.dalek/pm/
