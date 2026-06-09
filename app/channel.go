@@ -53,7 +53,7 @@ func (a *App) handleListChannels(c *gin.Context) {
 	if result == nil {
 		result = []gin.H{}
 	}
-	c.JSON(http.StatusOK, result)
+	c.JSON(http.StatusOK, gin.H{"channels": result})
 }
 
 func (a *App) handleCreateChannel(c *gin.Context) {
@@ -317,6 +317,12 @@ func (a *App) handleSendMessage(c *gin.Context) {
 	audience := make([]actor.ActorID, 0, len(req.Audience))
 	for _, a := range req.Audience {
 		audience = append(audience, actor.ActorID(a))
+	}
+	if len(audience) == 0 {
+		actors, _ := home.Gateway().ListActors(c.Request.Context())
+		for _, a := range actors {
+			audience = append(audience, a.ID)
+		}
 	}
 
 	gw := home.Gateway()

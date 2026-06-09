@@ -141,6 +141,7 @@ func (a *App) registerRoutes() {
 		api.DELETE("/daemons/:id", a.handleDeleteDaemon)
 
 		api.GET("/channels/:chID/daemons", a.handleListChannelDaemons)
+		api.POST("/channels/:chID/daemons", a.handleCreateAndAttachDaemon)
 		api.POST("/channels/:chID/daemons/attach", a.handleAttachDaemons)
 		api.DELETE("/channels/:chID/daemons/:id/attach", a.handleDetachDaemon)
 	}

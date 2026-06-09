@@ -236,6 +236,45 @@ func (a *App) authAndResolve(apiKey string, chID channel.ID) (string, error) {
 	return daemonID, nil
 }
 
+func (a *App) handleCreateAndAttachDaemon(c *gin.Context) {
+	chID, ok := a.requireChannelAccess(c)
+	if !ok {
+		return
+	}
+	userID := getUserID(c)
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
+		return
+	}
+
+	daemonID := uuid.NewString()
+	apiKey := uuid.NewString()
+	keyHash := hashAPIKey(apiKey)
+	now := time.Now().UnixMilli()
+
+	_, err := a.db.ExecContext(c.Request.Context(),
+		`INSERT INTO daemons (id, owner_id, name, api_key_hash, created_at) VALUES (?,?,?,?,?)`,
+		daemonID, userID, req.Name, keyHash, now,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "create daemon failed"})
+		return
+	}
+	_, _ = a.db.ExecContext(c.Request.Context(),
+		`INSERT OR IGNORE INTO daemon_channels (daemon_id, channel_id) VALUES (?,?)`,
+		daemonID, string(chID),
+	)
+
+	c.JSON(http.StatusCreated, gin.H{
+		"id":      daemonID,
+		"name":    req.Name,
+		"api_key": apiKey,
+	})
+}
+
 func hashAPIKey(key string) string {
 	h := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(h[:])

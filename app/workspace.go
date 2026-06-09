@@ -40,7 +40,7 @@ func (a *App) handleListWorkspaces(c *gin.Context) {
 	if result == nil {
 		result = []gin.H{}
 	}
-	c.JSON(http.StatusOK, result)
+	c.JSON(http.StatusOK, gin.H{"workspaces": result})
 }
 
 func (a *App) handleCreateWorkspace(c *gin.Context) {
