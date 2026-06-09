@@ -143,17 +143,17 @@ func NewChannelHome(cfg HomeConfig) (*ChannelHome, error) {
 	}, nil
 }
 
-// runtime returns the actorrt.Runtime from the channelhost.
-func (ch *ChannelHome) runtime() *actorrt.Runtime { return ch.home.Runtime() }
+// Runtime returns the actorrt.Runtime from the channelhost.
+func (ch *ChannelHome) Runtime() *actorrt.Runtime { return ch.home.Runtime() }
 
-// deliverer returns the actorrt.Deliverer from the channelhost.
-func (ch *ChannelHome) deliverer() actorrt.Deliverer { return ch.home.Deliverer() }
+// Deliverer returns the actorrt.Deliverer from the channelhost.
+func (ch *ChannelHome) Deliverer() actorrt.Deliverer { return ch.home.Deliverer() }
 
-// query returns the message query store.
-func (ch *ChannelHome) query() storespec.MessageQuery { return ch.cs.Query }
+// Query returns the message query store.
+func (ch *ChannelHome) Query() storespec.MessageQuery { return ch.cs.Query }
 
-// registry returns the actor registry store.
-func (ch *ChannelHome) registry() storespec.Registry { return ch.cs.Registry }
+// Registry returns the actor registry store.
+func (ch *ChannelHome) Registry() storespec.Registry { return ch.cs.Registry }
 
 // Membership returns the membership control plane store.
 func (ch *ChannelHome) Membership() storespec.MembershipControlPlane { return ch.cs.Membership }

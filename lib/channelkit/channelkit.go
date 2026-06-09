@@ -12,10 +12,10 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
@@ -130,6 +130,14 @@ func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
 	if c.writer == nil || c.openReqs == nil {
 		return
 	}
+	// Inject CallerContext for the system-authored write: the harness requires
+	// a CallerContext on every write (step 0 rejects without one). The death
+	// closure is system-authored (sender == SystemActorID), so the caller
+	// principal is the system actor.
+	ctx = harness.CtxWithCaller(ctx, harness.CallerContext{
+		ActorID:   actor.SystemActorID,
+		ChannelID: c.channelID,
+	})
 	// Delegate the closure materialisation to the behaviour base (author#3, ONE
 	// implementation, co-located with the other two authors — P13). channelkit
 	// only injects the seams (runtime writer + store drain) and an onFault log
