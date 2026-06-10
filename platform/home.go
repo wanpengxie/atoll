@@ -11,14 +11,15 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/wanpengxie/ActOS/platform/channelhost"
+	"github.com/wanpengxie/ActOS/platform/fleet"
+	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
-	"github.com/wanpengxie/ActOS/platform/channelhost"
-	"github.com/wanpengxie/ActOS/platform/fleet"
 )
 
 // HomeConfig configures the channel-home assembly.
@@ -33,12 +34,12 @@ type HomeConfig struct {
 // via accessor methods. The app layer owns HTTP/transport; ChannelHome is
 // pure Go.
 type ChannelHome struct {
-	writer     *postCommitWriter
-	home       *channelhost.ChannelHome
-	cs         *runtime.ChannelStores
-	hub        *PushHub
-	flt        *fleet.Fleet
-	gw         *Gateway
+	writer *postCommitWriter
+	home   *channelhost.ChannelHome
+	cs     *runtime.ChannelStores
+	hub    *PushHub
+	flt    *fleet.Fleet
+	gw     *Gateway
 }
 
 // NewChannelHome assembles the channel home. Assembly sequence per v2.4:
@@ -145,6 +146,16 @@ func NewChannelHome(cfg HomeConfig) (*ChannelHome, error) {
 
 // Runtime returns the actorrt.Runtime from the channelhost.
 func (ch *ChannelHome) Runtime() *actorrt.Runtime { return ch.home.Runtime() }
+
+// Writer is the post-commit write chain (harness -> deliver -> notify) —
+// the pen an in-process cell writes truth with.
+func (ch *ChannelHome) Writer() harness.Writer { return ch.writer }
+
+// SpawnCell registers + spawns one in-process actor cell (binding=embedded).
+// The impl is opaque to platform; the app layer decides what to spawn.
+func (ch *ChannelHome) SpawnCell(ctx context.Context, id actor.ActorID, kind actor.Kind, impl actorrt.Actor) error {
+	return ch.home.SpawnCell(ctx, id, kind, impl)
+}
 
 // Deliverer returns the actorrt.Deliverer from the channelhost.
 func (ch *ChannelHome) Deliverer() actorrt.Deliverer { return ch.home.Deliverer() }

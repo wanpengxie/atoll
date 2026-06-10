@@ -4,6 +4,7 @@
 package app
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -14,7 +15,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/wanpengxie/ActOS/actors/agent"
 	"github.com/wanpengxie/ActOS/platform"
+	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 )
 
@@ -212,7 +215,34 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*platform.ChannelHome,
 	a.homes[chID] = home
 	a.mu.Unlock()
 
+	// Built-in agent (the channel's bundled brain): spawned as a server cell
+	// when the server carries LLM credentials. Guarded — a server without
+	// KIMI_API_KEY simply has no built-in agent (dev/e2e unaffected).
+	a.spawnBuiltinAgent(chID, home)
+
 	return home, nil
+}
+
+// builtinAgentID is the bundled server-cell agent's channel-scoped id.
+const builtinAgentID = actor.ActorID("agent:main")
+
+// spawnBuiltinAgent best-effort spawns the bundled agent cell. Failure is
+// logged, never fatal: a channel without its brain still serves path-1
+// (explicit audience) traffic.
+func (a *App) spawnBuiltinAgent(chID channel.ID, home *platform.ChannelHome) {
+	cfg, err := agent.NewConfigFromEnv(agent.BuildBasePrompt(
+		os.Getenv(agent.EnvKeyChannelType), os.Getenv(agent.EnvKeyDomainPrompt)))
+	if err != nil {
+		return // no LLM credentials on this server — no built-in agent
+	}
+	bridge, err := agent.NewBridge(cfg, builtinAgentID, chID, home.Writer())
+	if err != nil {
+		a.logger.Warn("app: builtin agent build failed", "channel", string(chID), "err", err.Error())
+		return
+	}
+	if err := home.SpawnCell(context.Background(), builtinAgentID, actor.KindAgent, bridge); err != nil {
+		a.logger.Warn("app: builtin agent spawn failed", "channel", string(chID), "err", err.Error())
+	}
 }
 
 func (a *App) loadChannels() error {

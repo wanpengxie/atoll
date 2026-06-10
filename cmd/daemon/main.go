@@ -8,16 +8,19 @@ import (
 	"flag"
 	"log"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
 
+	agentactor "github.com/wanpengxie/ActOS/actors/agent"
 	"github.com/wanpengxie/ActOS/actors/device"
 	"github.com/wanpengxie/ActOS/actors/echo"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
@@ -26,6 +29,35 @@ var registry = map[string]func(harness.Writer) actorrt.Actor{
 	"echo": func(w harness.Writer) actorrt.Actor {
 		return echo.NewActor(w)
 	},
+}
+
+// hasName / removeName are tiny slice helpers for the --actors flag.
+func hasName(names []string, want string) bool {
+	for _, n := range names {
+		if n == want {
+			return true
+		}
+	}
+	return false
+}
+
+func removeName(names []string, drop string) []string {
+	out := names[:0]
+	for _, n := range names {
+		if n != drop {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// channelFromServerURL extracts the ?channel= query from the server WS URL.
+func channelFromServerURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Query().Get("channel")
 }
 
 func main() {
@@ -63,6 +95,36 @@ func main() {
 			Kind:    actor.KindTool,
 			Binding: actor.BindingRuntimeOutbound,
 			Factory: factory,
+		})
+	}
+
+	// The agent brain is opt-in (--actors=agent,...): the fat daemon hosts
+	// the same Bridge the server spawns as the built-in fallback — one
+	// prototype, host decided by where this binary runs. It needs the channel
+	// id (from the --server URL query) because a cell is channel-scoped.
+	if hasName(actorNames, "agent") {
+		actorNames = removeName(actorNames, "agent")
+		chID := channelFromServerURL(*ws)
+		if chID == "" {
+			log.Fatalf("daemon: --actors=agent requires the --server URL to carry ?channel=<id>")
+		}
+		cfg, err := agentactor.NewConfigFromEnv(agentactor.BuildBasePrompt(
+			os.Getenv(agentactor.EnvKeyChannelType), os.Getenv(agentactor.EnvKeyDomainPrompt)))
+		if err != nil {
+			log.Fatalf("daemon: agent config: %v", err)
+		}
+		agentID := actor.ActorID("agent:main")
+		decls = append(decls, platform.ActorDecl{
+			ID:      agentID,
+			Kind:    actor.KindAgent,
+			Binding: actor.BindingRuntimeOutbound,
+			Factory: func(w harness.Writer) actorrt.Actor {
+				b, err := agentactor.NewBridge(cfg, agentID, channel.ID(chID), w)
+				if err != nil {
+					log.Fatalf("daemon: agent bridge: %v", err)
+				}
+				return b
+			},
 		})
 	}
 

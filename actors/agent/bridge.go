@@ -44,6 +44,7 @@ import (
 	_ "github.com/wanpengxie/go-kimi/pkg/kimi/llm/anthropic"
 
 	"github.com/wanpengxie/ActOS/lib/behavior"
+	"github.com/wanpengxie/ActOS/lib/introspect"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
@@ -354,7 +355,7 @@ func (b *Bridge) Stop(_ context.Context) error {
 //     private futures; a final nobody waits for becomes a new turn (the
 //     async result feeding the next reasoning step).
 //   - everything else (requests, events): a new turn.
-func (b *Bridge) Receive(_ context.Context, env *message.Envelope) error {
+func (b *Bridge) Receive(ctx context.Context, env *message.Envelope) error {
 	b.fatalMu.Lock()
 	fatal := b.fatal
 	b.fatalMu.Unlock()
@@ -366,6 +367,11 @@ func (b *Bridge) Receive(_ context.Context, env *message.Envelope) error {
 	}
 	if env == nil {
 		return nil
+	}
+
+	// Mechanical self-answers (actor citizenship) — never fed to the LLM.
+	if env.Kind == message.KindRequest && env.Type == introspect.QueryDescribe {
+		return b.handleDescribe(ctx, env)
 	}
 
 	if env.Kind == message.KindResponse && env.ParentID != "" {
@@ -800,6 +806,41 @@ func (b *Bridge) write(ctx context.Context, env message.Envelope) error {
 		return fmt.Errorf("kimi: emit rejected: %s (%s)", res.RejectReason, res.RejectDetail)
 	}
 	return nil
+}
+
+// agentDescription / agentSkillDoc are the agent's actor.describe
+// self-answer. The agent serves no request-type closed set — its surface is
+// conversational (any request becomes an LLM turn), so Types stays empty and
+// discovery guidance lives in the skill doc.
+const agentDescription = "LLM agent: the channel's conversational brain. Send it any request — it reasons over the channel context and orchestrates the channel's tool actors via call_actor."
+
+const agentSkillDoc = "# agent\n\n" +
+	"Conversational actor backed by an LLM. It accepts any kind=request as a " +
+	"turn trigger (no closed type set), replies with agent.text events " +
+	"(public terminal + system progress), and calls other actors through the " +
+	"channel's meta tools.\n"
+
+// handleDescribe serves the actor.describe self-answer through the standard
+// introspect dispatch (mechanical — the LLM never sees reserved queries).
+func (b *Bridge) handleDescribe(ctx context.Context, env *message.Envelope) error {
+	req, err := introspect.ParseDescribeRequest(env.Payload)
+	if err != nil {
+		_, ferr := behavior.Fail(ctx, b.writer, b.clock, env, b.sender(),
+			"payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
+		return ferr
+	}
+	answer, ok := introspect.AnswerDescribe(introspect.Describe{
+		ActorID:     string(b.self),
+		Description: agentDescription,
+		SkillDoc:    agentSkillDoc,
+	}, req)
+	if !ok {
+		_, ferr := behavior.Fail(ctx, b.writer, b.clock, env, b.sender(),
+			"type_unsupported", fmt.Sprintf("agent has no type %s", req.Type))
+		return ferr
+	}
+	_, rerr := behavior.RespondJSON(ctx, b.writer, b.clock, env, b.sender(), answer)
+	return rerr
 }
 
 // replyAudience returns the audience for an agent reply. Falls back to

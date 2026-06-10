@@ -24,6 +24,7 @@ type ChannelHome struct {
 	stores    Stores
 	channel   *channelkit.Channel
 	logger    *slog.Logger
+	nowMs     func() int64
 	closer    func() error
 }
 
@@ -107,11 +108,37 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 		stores:    st,
 		channel:   ch,
 		logger:    logger,
+		nowMs:     nowMs,
 		closer:    st.Close,
 	}
 
 	logger.Info("channelhost.ready", "channel", string(cfg.ChannelID))
 	return h, nil
+}
+
+// SpawnCell registers (idempotently) and spawns one in-process actor cell —
+// the server-side host surface (binding=embedded). Membership is durable
+// registry truth: a pre-existing row (server restart) is reused, the live
+// instance rebinds. The impl is opaque to platform (the assembly above this
+// layer decides WHAT to spawn; channelhost only knows HOW).
+func (h *ChannelHome) SpawnCell(ctx context.Context, id actor.ActorID, kind actor.Kind, impl actorrt.Actor) error {
+	if id == "" || impl == nil {
+		return fmt.Errorf("channelhost: SpawnCell id and impl required")
+	}
+	exists, err := h.stores.Registry.Exists(ctx, id)
+	if err != nil {
+		return fmt.Errorf("channelhost: SpawnCell registry check: %w", err)
+	}
+	if !exists {
+		if err := h.stores.Membership.Insert(ctx, storespec.Record{
+			ID: id, Kind: kind, Binding: actor.BindingEmbedded, CreatedAt: h.nowMs(),
+		}); err != nil {
+			return fmt.Errorf("channelhost: SpawnCell membership: %w", err)
+		}
+	}
+	h.channel.Cells().Spawn(id, impl)
+	h.logger.Info("channelhost.cell.spawned", "channel", string(h.channelID), "actor", string(id), "kind", string(kind))
+	return nil
 }
 
 // runtimePresenceAdapter bridges actorrt.Runtime.Stat -> sysactor.PresenceStat.
