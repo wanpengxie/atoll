@@ -177,6 +177,26 @@ func assertAgentBehavior(t *testing.T, h agentHost) {
 	if _, ok := d["skill_doc"]; !ok {
 		t.Fatalf("describe payload missing skill_doc: %s", descReply.Payload)
 	}
+
+	// 3. An unawaited FINAL response becomes a continuation turn (the
+	//    async-result-feeds-next-reasoning path — pure mailbox routing,
+	//    therefore host-coupled and parity-critical).
+	finalPayload, _ := json.Marshal(map[string]any{"status": "completed", "url": "https://x"})
+	asyncFinal := message.Envelope{
+		ID: "parity-async-final", ChannelID: testChannelID, Kind: message.KindResponse,
+		Type: "xhs.publish.response", ParentID: "parity-req-long-gone",
+		Sender:  message.Sender{Kind: actor.KindTool, ID: "tool:xhs"},
+		Payload: finalPayload,
+	}
+	h.deliver(t, &asyncFinal)
+	got = waitEmitted(t, h, 3, 2*time.Second)
+	if len(got) < 3 {
+		t.Fatal("unawaited final did not produce a continuation turn")
+	}
+	cont := got[2]
+	if cont.Type != "agent.text" || cont.ParentID != "parity-async-final" {
+		t.Fatalf("continuation shape: %+v", cont)
+	}
 }
 
 func TestHostParity_ServerCell(t *testing.T) {

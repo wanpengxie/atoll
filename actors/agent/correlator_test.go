@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"testing"
 	"time"
@@ -286,5 +287,29 @@ func TestDeliverFinalBufferedBeforeAwait(t *testing.T) {
 	}
 	if gotEnv == nil || gotEnv.ID != env.ID {
 		t.Fatalf("expected buffered envelope, got %v", gotEnv)
+	}
+}
+
+// TestAwait_BufferedFinalNotStrandedByTimeout pins the timeout-vs-buffered-
+// final race: when both the timer and a buffered final are ready, Await must
+// ALWAYS return the final — never strand it as a ghost in-flight entry.
+// 100 iterations make the pre-fix 50/50 select flake deterministic.
+func TestAwait_BufferedFinalNotStrandedByTimeout(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		rc := newRequestCorrelator()
+		id := message.ID(fmt.Sprintf("req-race-%d", i))
+		rc.Register(id, true)
+		rc.Deliver(finalEnvelope(id)) // buffered before Await parks
+
+		env, ok, err := rc.Await(context.Background(), id, time.Nanosecond)
+		if err != nil {
+			t.Fatalf("iter %d: err %v", i, err)
+		}
+		if !ok || env == nil {
+			t.Fatalf("iter %d: buffered final stranded by timeout", i)
+		}
+		if rc.Registered(id) {
+			t.Fatalf("iter %d: ghost in-flight entry survived", i)
+		}
 	}
 }

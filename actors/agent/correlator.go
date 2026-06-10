@@ -141,19 +141,37 @@ func (rc *requestCorrelator) Await(ctx context.Context, id message.ID, window ti
 		rc.Cancel(id)
 		return env, true, nil
 	case <-timer.C:
-		rc.mu.Lock()
-		if pp, ok := rc.pending[id]; ok {
-			pp.state = awaitDone
+		if env, ok := rc.reconcileAfterWait(id); ok {
+			return env, true, nil
 		}
-		rc.mu.Unlock()
 		return nil, false, nil
 	case <-ctx.Done():
-		rc.mu.Lock()
-		if pp, ok := rc.pending[id]; ok {
-			pp.state = awaitDone
+		if env, ok := rc.reconcileAfterWait(id); ok {
+			return env, true, nil
 		}
-		rc.mu.Unlock()
 		return nil, false, ctx.Err()
+	}
+}
+
+// reconcileAfterWait resolves the timeout/cancel vs buffered-final race: a
+// final that landed in the buffer just before the timer fired must not be
+// stranded (a ghost in-flight entry that list_pending reports forever). If a
+// final is buffered, consume it and close the future; otherwise mark the
+// await done (a later retry re-arms it).
+func (rc *requestCorrelator) reconcileAfterWait(id message.ID) (*message.Envelope, bool) {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	p, ok := rc.pending[id]
+	if !ok {
+		return nil, false
+	}
+	select {
+	case env := <-p.ch:
+		delete(rc.pending, id)
+		return env, true
+	default:
+		p.state = awaitDone
+		return nil, false
 	}
 }
 

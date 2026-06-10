@@ -125,16 +125,13 @@ func (h *ChannelHome) SpawnCell(ctx context.Context, id actor.ActorID, kind acto
 	if id == "" || impl == nil {
 		return fmt.Errorf("channelhost: SpawnCell id and impl required")
 	}
-	exists, err := h.stores.Registry.Exists(ctx, id)
-	if err != nil {
-		return fmt.Errorf("channelhost: SpawnCell registry check: %w", err)
-	}
-	if !exists {
-		if err := h.stores.Membership.Insert(ctx, storespec.Record{
-			ID: id, Kind: kind, Binding: actor.BindingEmbedded, CreatedAt: h.nowMs(),
-		}); err != nil {
-			return fmt.Errorf("channelhost: SpawnCell membership: %w", err)
-		}
+	// Control-plane membership transition (the same op fleet attach uses):
+	// absent -> insert, soft-deregistered -> reactivate, active -> no-op —
+	// each with its system.actor.* mirror event in the same tx.
+	if err := h.stores.Membership.ApplyMemberTransitions(ctx, h.channelID, []storespec.MemberActorAdd{{
+		ID: id, Kind: kind, Binding: actor.BindingEmbedded, At: h.nowMs(),
+	}}, nil); err != nil {
+		return fmt.Errorf("channelhost: SpawnCell membership: %w", err)
 	}
 	h.channel.Cells().Spawn(id, impl)
 	h.logger.Info("channelhost.cell.spawned", "channel", string(h.channelID), "actor", string(id), "kind", string(kind))
