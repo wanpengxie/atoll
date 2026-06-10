@@ -230,7 +230,8 @@ const builtinAgentID = actor.ActorID("agent:main")
 // logged, never fatal: a channel without its brain still serves path-1
 // (explicit audience) traffic.
 func (a *App) spawnBuiltinAgent(chID channel.ID, home *platform.ChannelHome) {
-	cfg, err := agent.NewConfigFromEnv(agent.BuildBasePrompt(
+	cfg, err := agent.NewConfigFromEnv(agent.BuildSystemPrompt(
+		agent.Situation{Host: "server"},
 		os.Getenv(agent.EnvKeyChannelType), os.Getenv(agent.EnvKeyDomainPrompt)))
 	if err != nil {
 		return // no LLM credentials on this server — no built-in agent

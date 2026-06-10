@@ -175,8 +175,8 @@ func TestNewConfigFromEnv_ReadsAllFields(t *testing.T) {
 	}
 }
 
-func TestBuildBasePrompt_EmptyDomain(t *testing.T) {
-	p := agent.BuildBasePrompt("", "")
+func TestBuildSystemPrompt_EmptyDomain(t *testing.T) {
+	p := agent.BuildSystemPrompt(agent.Situation{Host: "server"}, "", "")
 	if !strings.Contains(p, "coagent agent") {
 		t.Fatalf("platform teaching missing: %q", p[:80])
 	}
@@ -185,8 +185,8 @@ func TestBuildBasePrompt_EmptyDomain(t *testing.T) {
 	}
 }
 
-func TestBuildBasePrompt_WithDomain(t *testing.T) {
-	p := agent.BuildBasePrompt("xhs-creator", "domain rules here")
+func TestBuildSystemPrompt_WithDomain(t *testing.T) {
+	p := agent.BuildSystemPrompt(agent.Situation{Host: "daemon"}, "xhs-creator", "domain rules here")
 	if !strings.Contains(p, "# Channel template: xhs-creator") {
 		t.Fatal("template header missing")
 	}
@@ -195,8 +195,36 @@ func TestBuildBasePrompt_WithDomain(t *testing.T) {
 	}
 }
 
-func TestBuildBasePrompt_NoFrozenActorSnapshot(t *testing.T) {
-	p := agent.BuildBasePrompt("group", "d")
+// TestBuildSystemPrompt_SituationDrivesBehaviour pins the two-roles-one-
+// skeleton design: facts in, behaviour out — and NO role labels anywhere.
+func TestBuildSystemPrompt_SituationDrivesBehaviour(t *testing.T) {
+	noWS := agent.BuildSystemPrompt(agent.Situation{Host: "server"}, "", "")
+	if !strings.Contains(noWS, "NO private workspace") {
+		t.Fatal("no-workspace fact missing")
+	}
+	if !strings.Contains(noWS, "guide them to attach") {
+		t.Fatal("bootstrap-guide behaviour not derived from the no-workspace fact")
+	}
+
+	withWS := agent.BuildSystemPrompt(agent.Situation{Host: "daemon", HasWorkspace: true, WorkspaceDir: "/ws/ch-1"}, "", "")
+	if !strings.Contains(withWS, "/ws/ch-1") {
+		t.Fatal("workspace dir missing")
+	}
+	if !strings.Contains(withWS, "Persist durable working rules") {
+		t.Fatal("principal discipline not derived from the workspace fact")
+	}
+
+	for _, p := range []string{noWS, withWS} {
+		for _, label := range []string{"bootloader", "work agent", "role:"} {
+			if strings.Contains(strings.ToLower(p), label) {
+				t.Fatalf("prompt carries a role label %q — roles derive from facts, never labels", label)
+			}
+		}
+	}
+}
+
+func TestBuildSystemPrompt_NoFrozenActorSnapshot(t *testing.T) {
+	p := agent.BuildSystemPrompt(agent.Situation{}, "group", "d")
 	for _, banned := range []string{"actor_id\":", "frozen", "COAGENT_CHANNEL_CONTEXT_JSON"} {
 		if strings.Contains(p, banned) {
 			t.Fatalf("prompt carries frozen snapshot marker %q", banned)

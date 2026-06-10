@@ -98,6 +98,25 @@ func main() {
 		})
 	}
 
+	// Device identity + workspace root resolve first — both the device
+	// actor and the agent's situation facts derive from them.
+	deviceName := *name
+	if deviceName == "" {
+		host, err := os.Hostname()
+		if err != nil {
+			log.Fatalf("daemon: hostname: %v", err)
+		}
+		deviceName = host
+	}
+	wsRoot := *workspace
+	if wsRoot == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			log.Fatalf("daemon: home dir: %v", err)
+		}
+		wsRoot = filepath.Join(home, ".coagent", "workspace")
+	}
+
 	// The agent brain is opt-in (--actors=agent,...): the fat daemon hosts
 	// the same Bridge the server spawns as the built-in fallback — one
 	// prototype, host decided by where this binary runs. It needs the channel
@@ -108,7 +127,8 @@ func main() {
 		if chID == "" {
 			log.Fatalf("daemon: --actors=agent requires the --server URL to carry ?channel=<id>")
 		}
-		cfg, err := agentactor.NewConfigFromEnv(agentactor.BuildBasePrompt(
+		cfg, err := agentactor.NewConfigFromEnv(agentactor.BuildSystemPrompt(
+			agentactor.Situation{Host: "daemon", HasWorkspace: true, WorkspaceDir: wsRoot},
 			os.Getenv(agentactor.EnvKeyChannelType), os.Getenv(agentactor.EnvKeyDomainPrompt)))
 		if err != nil {
 			log.Fatalf("daemon: agent config: %v", err)
@@ -130,22 +150,6 @@ func main() {
 
 	// The generic device actor is always hosted — attaching a daemon means
 	// attaching a device. Its id carries the device identity.
-	deviceName := *name
-	if deviceName == "" {
-		host, err := os.Hostname()
-		if err != nil {
-			log.Fatalf("daemon: hostname: %v", err)
-		}
-		deviceName = host
-	}
-	wsRoot := *workspace
-	if wsRoot == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			log.Fatalf("daemon: home dir: %v", err)
-		}
-		wsRoot = filepath.Join(home, ".coagent", "workspace")
-	}
 	deviceID := actor.ActorID("device:" + deviceName)
 	decls = append(decls, platform.ActorDecl{
 		ID:      deviceID,
