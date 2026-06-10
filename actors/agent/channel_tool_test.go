@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/lib/callkit"
+	"github.com/wanpengxie/ActOS/lib/metatool"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
@@ -358,7 +358,7 @@ func TestCallerWaitNoneImmediateAck(t *testing.T) {
 		t.Fatal("fan-out future erased")
 	}
 	final := toolTriggerWithStatus(message.KindResponse, "resp-fanout", "req-fanout", "completed").Envelope
-	if disp := caller.Deliver(&final); disp != callkit.NoActiveWaiter {
+	if disp := caller.Deliver(&final); disp != metatool.NoActiveWaiter {
 		t.Fatalf("wait=false final disp=%v want NoActiveWaiter", disp)
 	}
 }
@@ -372,7 +372,7 @@ func TestCallerAbandonThenFinalNoActiveWaiter(t *testing.T) {
 	caller.Abandon("req-aband")
 
 	final := toolTriggerWithStatus(message.KindResponse, "resp-aband", "req-aband", "completed").Envelope
-	if disp := caller.Deliver(&final); disp != callkit.NoActiveWaiter {
+	if disp := caller.Deliver(&final); disp != metatool.NoActiveWaiter {
 		t.Fatalf("after abandon disposition=%v want NoActiveWaiter", disp)
 	}
 }

@@ -1,4 +1,4 @@
-package callkit_test
+package metatool
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/lib/callkit"
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
@@ -35,7 +34,7 @@ func provisionalEnvelope(parentID message.ID) *message.Envelope {
 }
 
 func TestRegisterAndDeliverFinal(t *testing.T) {
-	rc := callkit.NewRequestCorrelator()
+	rc := NewRequestCorrelator()
 	id := message.ID("req-1")
 	rc.Register(id, false)
 
@@ -43,25 +42,25 @@ func TestRegisterAndDeliverFinal(t *testing.T) {
 	disp := rc.Deliver(env)
 	// expectsAwait=false and state=awaitNotStarted → default branch → NoActiveWaiter
 	// because nobody is actually awaiting (expectsAwait=false).
-	if disp != callkit.NoActiveWaiter {
+	if disp != NoActiveWaiter {
 		t.Fatalf("expected NoActiveWaiter for !expectsAwait with no Await, got %v", disp)
 	}
 }
 
 func TestRegisterWithExpectsAwaitAndDeliverFinal(t *testing.T) {
-	rc := callkit.NewRequestCorrelator()
+	rc := NewRequestCorrelator()
 	id := message.ID("req-2")
 	rc.Register(id, true) // expectsAwait=true → buffer for future Await
 
 	env := finalEnvelope(id)
 	disp := rc.Deliver(env)
-	if disp != callkit.DeliveredToWaiter {
+	if disp != DeliveredToWaiter {
 		t.Fatalf("expected DeliveredToWaiter, got %v", disp)
 	}
 }
 
 func TestDeliverProvisionalToActiveAwaiter(t *testing.T) {
-	rc := callkit.NewRequestCorrelator()
+	rc := NewRequestCorrelator()
 	id := message.ID("req-3")
 	rc.Register(id, true)
 
@@ -77,7 +76,7 @@ func TestDeliverProvisionalToActiveAwaiter(t *testing.T) {
 
 	provEnv := provisionalEnvelope(id)
 	disp := rc.Deliver(provEnv)
-	if disp != callkit.DeliveredToWaiter {
+	if disp != DeliveredToWaiter {
 		t.Fatalf("expected DeliveredToWaiter for provisional to active awaiter, got %v", disp)
 	}
 
@@ -85,31 +84,31 @@ func TestDeliverProvisionalToActiveAwaiter(t *testing.T) {
 	// Deliver a final to unblock it.
 	finalEnv := finalEnvelope(id)
 	disp = rc.Deliver(finalEnv)
-	if disp != callkit.DeliveredToWaiter {
+	if disp != DeliveredToWaiter {
 		t.Fatalf("expected DeliveredToWaiter for final to active awaiter, got %v", disp)
 	}
 	<-done
 }
 
 func TestDeliverWithoutRegister(t *testing.T) {
-	rc := callkit.NewRequestCorrelator()
+	rc := NewRequestCorrelator()
 	env := finalEnvelope(message.ID("unknown"))
 	disp := rc.Deliver(env)
-	if disp != callkit.NoActiveWaiter {
+	if disp != NoActiveWaiter {
 		t.Fatalf("expected NoActiveWaiter, got %v", disp)
 	}
 }
 
 func TestDeliverNilEnvelope(t *testing.T) {
-	rc := callkit.NewRequestCorrelator()
+	rc := NewRequestCorrelator()
 	disp := rc.Deliver(nil)
-	if disp != callkit.NoActiveWaiter {
+	if disp != NoActiveWaiter {
 		t.Fatalf("expected NoActiveWaiter for nil envelope, got %v", disp)
 	}
 }
 
 func TestRegisterAwaitDeliverFinal(t *testing.T) {
-	rc := callkit.NewRequestCorrelator()
+	rc := NewRequestCorrelator()
 	id := message.ID("req-4")
 	rc.Register(id, true)
 
@@ -144,7 +143,7 @@ func TestRegisterAwaitDeliverFinal(t *testing.T) {
 }
 
 func TestAwaitTimeout(t *testing.T) {
-	rc := callkit.NewRequestCorrelator()
+	rc := NewRequestCorrelator()
 	id := message.ID("req-5")
 	rc.Register(id, true)
 
@@ -161,7 +160,7 @@ func TestAwaitTimeout(t *testing.T) {
 }
 
 func TestAwaitContextCancelled(t *testing.T) {
-	rc := callkit.NewRequestCorrelator()
+	rc := NewRequestCorrelator()
 	id := message.ID("req-ctx")
 	rc.Register(id, true)
 
@@ -184,7 +183,7 @@ func TestAwaitContextCancelled(t *testing.T) {
 }
 
 func TestAwaitZeroWindow(t *testing.T) {
-	rc := callkit.NewRequestCorrelator()
+	rc := NewRequestCorrelator()
 	id := message.ID("req-zero")
 	rc.Register(id, true)
 
@@ -201,7 +200,7 @@ func TestAwaitZeroWindow(t *testing.T) {
 }
 
 func TestAwaitUnregistered(t *testing.T) {
-	rc := callkit.NewRequestCorrelator()
+	rc := NewRequestCorrelator()
 	env, ok, err := rc.Await(context.Background(), message.ID("nope"), time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -215,7 +214,7 @@ func TestAwaitUnregistered(t *testing.T) {
 }
 
 func TestCancelRemovesFuture(t *testing.T) {
-	rc := callkit.NewRequestCorrelator()
+	rc := NewRequestCorrelator()
 	id := message.ID("req-6")
 	rc.Register(id, true)
 	if !rc.Registered(id) {
@@ -228,7 +227,7 @@ func TestCancelRemovesFuture(t *testing.T) {
 }
 
 func TestPendingReturnsRegisteredIDs(t *testing.T) {
-	rc := callkit.NewRequestCorrelator()
+	rc := NewRequestCorrelator()
 	ids := []message.ID{"a", "b", "c"}
 	for _, id := range ids {
 		rc.Register(id, false)
@@ -248,14 +247,14 @@ func TestPendingReturnsRegisteredIDs(t *testing.T) {
 }
 
 func TestPendingEmptyByDefault(t *testing.T) {
-	rc := callkit.NewRequestCorrelator()
+	rc := NewRequestCorrelator()
 	if len(rc.Pending()) != 0 {
 		t.Fatal("expected empty pending list")
 	}
 }
 
 func TestRegisterDuplicateIsNoop(t *testing.T) {
-	rc := callkit.NewRequestCorrelator()
+	rc := NewRequestCorrelator()
 	id := message.ID("dup")
 	rc.Register(id, true)
 	rc.Register(id, false) // should not overwrite
@@ -267,13 +266,13 @@ func TestRegisterDuplicateIsNoop(t *testing.T) {
 func TestDeliverFinalBufferedBeforeAwait(t *testing.T) {
 	// Register with expectsAwait=true, deliver the final BEFORE Await starts.
 	// The final should be buffered in the channel and returned when Await is called.
-	rc := callkit.NewRequestCorrelator()
+	rc := NewRequestCorrelator()
 	id := message.ID("req-buf")
 	rc.Register(id, true)
 
 	env := finalEnvelope(id)
 	disp := rc.Deliver(env)
-	if disp != callkit.DeliveredToWaiter {
+	if disp != DeliveredToWaiter {
 		t.Fatalf("expected DeliveredToWaiter, got %v", disp)
 	}
 

@@ -1,4 +1,4 @@
-package callkit_test
+package metatool
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/lib/callkit"
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
@@ -26,7 +25,7 @@ func (s *stubWriter) WriteEnvelope(_ context.Context, env message.Envelope) erro
 }
 
 func TestSubmitRegistersFutureAndWritesEnvelope(t *testing.T) {
-	c := callkit.NewClient()
+	c := NewClient()
 	w := &stubWriter{}
 	env := message.Envelope{
 		ID:   "req-submit-1",
@@ -48,7 +47,7 @@ func TestSubmitRegistersFutureAndWritesEnvelope(t *testing.T) {
 }
 
 func TestSubmitWriteErrorCancelsFuture(t *testing.T) {
-	c := callkit.NewClient()
+	c := NewClient()
 	writeErr := errors.New("write failed")
 	w := &stubWriter{err: writeErr}
 	env := message.Envelope{
@@ -65,7 +64,7 @@ func TestSubmitWriteErrorCancelsFuture(t *testing.T) {
 }
 
 func TestCallerAwaitReturnsFinal(t *testing.T) {
-	c := callkit.NewClient()
+	c := NewClient()
 	w := &stubWriter{}
 	env := message.Envelope{
 		ID:   "req-await-1",
@@ -105,7 +104,7 @@ func TestCallerAwaitReturnsFinal(t *testing.T) {
 }
 
 func TestCallerAbandonRemovesFuture(t *testing.T) {
-	c := callkit.NewClient()
+	c := NewClient()
 	w := &stubWriter{}
 	env := message.Envelope{
 		ID:   "req-abandon",
@@ -122,7 +121,7 @@ func TestCallerAbandonRemovesFuture(t *testing.T) {
 }
 
 func TestCallerPending(t *testing.T) {
-	c := callkit.NewClient()
+	c := NewClient()
 	w := &stubWriter{}
 	for _, id := range []message.ID{"a", "b"} {
 		if err := c.Submit(context.Background(), w, message.Envelope{ID: id, Kind: message.KindRequest}, false); err != nil {

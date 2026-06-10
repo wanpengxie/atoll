@@ -40,7 +40,7 @@ func NewError(toolName string, code ErrorCode, msg, recoveryHint string, detail 
 }
 
 // PayloadInvalidError builds a payload_invalid error ResultValue. The hint
-// parameter is the recovery guidance for the caller — callkit does not
+// parameter is the recovery guidance for the caller — this layer does not
 // hardcode tool names (those belong to the metatool layer above).
 func PayloadInvalidError(toolName, msg, hint string) ResultValue {
 	return NewError(toolName, PayloadInvalid, msg, hint, nil)

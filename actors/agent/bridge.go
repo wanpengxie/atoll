@@ -27,7 +27,7 @@ import (
 	_ "github.com/wanpengxie/go-kimi/pkg/kimi/llm/anthropic"
 
 	"github.com/wanpengxie/ActOS/lib/behavior"
-	"github.com/wanpengxie/ActOS/lib/callkit"
+	"github.com/wanpengxie/ActOS/lib/metatool"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
@@ -54,7 +54,7 @@ const (
 )
 
 // ChannelContext, ActorInfo, TypeInfo, FieldDoc, ErrorDoc are defined
-// in lib/introspect. Call workflow types are in lib/callkit.
+// in lib/introspect. Call workflow types are in lib/metatool.
 
 // Config drives a Bridge. All fields optional unless documented; sane
 // defaults come from NewConfigFromEnv.
@@ -195,16 +195,16 @@ type Bridge struct {
 
 	// caller is the worker-side caller helper (owns its own
 	// requestCorrelator). Lazily built via caller(); guarded by mu.
-	callerHelper *callkit.Client
+	callerHelper *metatool.Client
 }
 
 // caller returns the bridge's worker-side caller helper, building it lazily
 // on first use. One registry instance per Bridge process.
-func (b *Bridge) caller() *callkit.Client {
+func (b *Bridge) caller() *metatool.Client {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.callerHelper == nil {
-		b.callerHelper = callkit.NewClient()
+		b.callerHelper = metatool.NewClient()
 	}
 	return b.callerHelper
 }

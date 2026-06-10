@@ -11,7 +11,6 @@ import (
 	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
 
 	"github.com/wanpengxie/ActOS/lib/behavior"
-	"github.com/wanpengxie/ActOS/lib/callkit"
 	"github.com/wanpengxie/ActOS/lib/metatool"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
@@ -85,7 +84,7 @@ func (b *Bridge) ExecuteReservedRaw(ctx context.Context, rc metatool.RuntimeCont
 }
 
 // CallerInstance implements metatool.Executor.
-func (b *Bridge) CallerInstance() *callkit.Client {
+func (b *Bridge) CallerInstance() *metatool.Client {
 	return b.caller()
 }
 
@@ -289,7 +288,7 @@ func (b *Bridge) routeTriggers(ctx context.Context, ipc IPCFacade, in <-chan Tri
 					env := payload.Envelope
 					_, final := behavior.ParseFinalStatus(env.Payload)
 					disp := caller.Deliver(&env)
-					surfaceAsTrigger := disp == callkit.NoActiveWaiter && final
+					surfaceAsTrigger := disp == metatool.NoActiveWaiter && final
 					if !surfaceAsTrigger {
 						if err := ackTrigger(ctx, ipc, payload, true, ""); err != nil {
 							return

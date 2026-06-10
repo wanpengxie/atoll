@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/wanpengxie/ActOS/lib/callkit"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
@@ -39,7 +38,7 @@ type Executor interface {
 
 	// CallerInstance returns the worker-side caller helper for direct
 	// future inspection (await_result / abandon / list_pending).
-	CallerInstance() *callkit.Client
+	CallerInstance() *Client
 }
 
 // IPC is the minimal envelope-writing surface meta tools need. It is a
@@ -65,7 +64,7 @@ type RuntimeContext struct {
 }
 
 // payloadHint builds the recovery hint for a payload_invalid error.
-// Tool names (list_actors, describe_type) live here in metatool, not in callkit.
+// Tool names (list_actors, describe_type) live here in metatool, not in
 func payloadHint(actorID, typeName string) string {
 	if actorID != "" && typeName != "" {
 		return fmt.Sprintf("Call describe_type(%q, %q) to see payload_example", actorID, typeName)
