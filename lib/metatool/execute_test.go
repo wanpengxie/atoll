@@ -30,26 +30,26 @@ func (m *mockIPC) WriteEnvelope(_ context.Context, env message.Envelope) error {
 	return m.writeErr
 }
 
-func (m *mockIPC) ChannelID() channel.ID       { return m.channelID }
+func (m *mockIPC) ChannelID() channel.ID        { return m.channelID }
 func (m *mockIPC) WorkerActorID() actor.ActorID { return m.actorID }
 
 // mockExecutor implements metatool.Executor.
 type mockExecutor struct {
 	// executeRequestFn is called by ExecuteRequest. If nil, returns a default success.
-	executeRequestFn func(ctx context.Context, rc metatool.RuntimeContext, spec callkit.RequestSpec) callkit.ResultValue
+	executeRequestFn func(ctx context.Context, rc metatool.RuntimeContext, spec metatool.RequestSpec) metatool.ResultValue
 	// executeReservedRawFn is called by ExecuteReservedRaw. If nil, returns (nil, false).
-	executeReservedRawFn func(ctx context.Context, rc metatool.RuntimeContext, spec callkit.RequestSpec) (json.RawMessage, bool)
+	executeReservedRawFn func(ctx context.Context, rc metatool.RuntimeContext, spec metatool.RequestSpec) (json.RawMessage, bool)
 	caller               *callkit.Client
 }
 
-func (m *mockExecutor) ExecuteRequest(ctx context.Context, rc metatool.RuntimeContext, spec callkit.RequestSpec) callkit.ResultValue {
+func (m *mockExecutor) ExecuteRequest(ctx context.Context, rc metatool.RuntimeContext, spec metatool.RequestSpec) metatool.ResultValue {
 	if m.executeRequestFn != nil {
 		return m.executeRequestFn(ctx, rc, spec)
 	}
-	return callkit.ResultValue{Name: spec.ToolName, Value: map[string]any{"ok": true}}
+	return metatool.ResultValue{Name: spec.ToolName, Value: map[string]any{"ok": true}}
 }
 
-func (m *mockExecutor) ExecuteReservedRaw(ctx context.Context, rc metatool.RuntimeContext, spec callkit.RequestSpec) (json.RawMessage, bool) {
+func (m *mockExecutor) ExecuteReservedRaw(ctx context.Context, rc metatool.RuntimeContext, spec metatool.RequestSpec) (json.RawMessage, bool) {
 	if m.executeReservedRawFn != nil {
 		return m.executeReservedRawFn(ctx, rc, spec)
 	}
@@ -79,7 +79,7 @@ func defaultRC() metatool.RuntimeContext {
 }
 
 // assertIsError checks that rv.IsError is true and the error value contains code.
-func assertIsError(t *testing.T, rv callkit.ResultValue, code string) {
+func assertIsError(t *testing.T, rv metatool.ResultValue, code string) {
 	t.Helper()
 	if !rv.IsError {
 		t.Fatalf("expected IsError=true, got false; value=%v", rv.Value)
@@ -100,7 +100,7 @@ func assertIsError(t *testing.T, rv callkit.ResultValue, code string) {
 }
 
 // assertNotError checks that rv.IsError is false.
-func assertNotError(t *testing.T, rv callkit.ResultValue) {
+func assertNotError(t *testing.T, rv metatool.ResultValue) {
 	t.Helper()
 	if rv.IsError {
 		t.Fatalf("expected IsError=false, got true; value=%v", rv.Value)
@@ -148,7 +148,7 @@ func TestExecuteCallActor_InvalidPayloadJSON(t *testing.T) {
 	exec := newMockExec()
 	params := json.RawMessage(`{"actor_id":"tool:x","type":"x.do","payload":"not-json-object"}`)
 	rv := metatool.ExecuteCallActor(context.Background(), params, exec, defaultRC())
-	// "not-json-object" is valid JSON (a string), NormalizePayload accepts it.
+	// "not-json-object" is valid JSON (a string), metatool.NormalizePayload accepts it.
 	// Use truly invalid JSON in payload to trigger the error.
 	_ = rv
 
@@ -162,10 +162,10 @@ func TestExecuteCallActor_InvalidPayloadJSON(t *testing.T) {
 
 func TestExecuteCallActor_SuccessDefaultWait(t *testing.T) {
 	exec := newMockExec()
-	var captured callkit.RequestSpec
-	exec.executeRequestFn = func(_ context.Context, _ metatool.RuntimeContext, spec callkit.RequestSpec) callkit.ResultValue {
+	var captured metatool.RequestSpec
+	exec.executeRequestFn = func(_ context.Context, _ metatool.RuntimeContext, spec metatool.RequestSpec) metatool.ResultValue {
 		captured = spec
-		return callkit.ResultValue{Name: "call_actor", Value: map[string]any{"ok": true}}
+		return metatool.ResultValue{Name: "call_actor", Value: map[string]any{"ok": true}}
 	}
 	params, _ := json.Marshal(map[string]any{
 		"actor_id": "tool:xhs",
@@ -183,17 +183,17 @@ func TestExecuteCallActor_SuccessDefaultWait(t *testing.T) {
 	if captured.HandlerActorID != "tool:xhs" {
 		t.Fatalf("expected HandlerActorID=tool:xhs, got %q", captured.HandlerActorID)
 	}
-	if captured.WaitMode != callkit.WaitFastPath {
-		t.Fatalf("expected WaitFastPath, got %d", captured.WaitMode)
+	if captured.WaitMode != metatool.WaitFastPath {
+		t.Fatalf("expected metatool.WaitFastPath, got %d", captured.WaitMode)
 	}
 }
 
 func TestExecuteCallActor_WaitTrue(t *testing.T) {
 	exec := newMockExec()
-	var captured callkit.RequestSpec
-	exec.executeRequestFn = func(_ context.Context, _ metatool.RuntimeContext, spec callkit.RequestSpec) callkit.ResultValue {
+	var captured metatool.RequestSpec
+	exec.executeRequestFn = func(_ context.Context, _ metatool.RuntimeContext, spec metatool.RequestSpec) metatool.ResultValue {
 		captured = spec
-		return callkit.ResultValue{Name: "call_actor", Value: map[string]any{"ok": true}}
+		return metatool.ResultValue{Name: "call_actor", Value: map[string]any{"ok": true}}
 	}
 	params, _ := json.Marshal(map[string]any{
 		"actor_id": "tool:xhs",
@@ -202,17 +202,17 @@ func TestExecuteCallActor_WaitTrue(t *testing.T) {
 	})
 	rv := metatool.ExecuteCallActor(context.Background(), params, exec, defaultRC())
 	assertNotError(t, rv)
-	if captured.WaitMode != callkit.WaitUnbounded {
-		t.Fatalf("expected WaitUnbounded, got %d", captured.WaitMode)
+	if captured.WaitMode != metatool.WaitUnbounded {
+		t.Fatalf("expected metatool.WaitUnbounded, got %d", captured.WaitMode)
 	}
 }
 
 func TestExecuteCallActor_WaitFalse(t *testing.T) {
 	exec := newMockExec()
-	var captured callkit.RequestSpec
-	exec.executeRequestFn = func(_ context.Context, _ metatool.RuntimeContext, spec callkit.RequestSpec) callkit.ResultValue {
+	var captured metatool.RequestSpec
+	exec.executeRequestFn = func(_ context.Context, _ metatool.RuntimeContext, spec metatool.RequestSpec) metatool.ResultValue {
 		captured = spec
-		return callkit.ResultValue{Name: "call_actor", Value: map[string]any{"ok": true}}
+		return metatool.ResultValue{Name: "call_actor", Value: map[string]any{"ok": true}}
 	}
 	params, _ := json.Marshal(map[string]any{
 		"actor_id": "tool:xhs",
@@ -221,8 +221,8 @@ func TestExecuteCallActor_WaitFalse(t *testing.T) {
 	})
 	rv := metatool.ExecuteCallActor(context.Background(), params, exec, defaultRC())
 	assertNotError(t, rv)
-	if captured.WaitMode != callkit.WaitNone {
-		t.Fatalf("expected WaitNone, got %d", captured.WaitMode)
+	if captured.WaitMode != metatool.WaitNone {
+		t.Fatalf("expected metatool.WaitNone, got %d", captured.WaitMode)
 	}
 }
 
@@ -241,10 +241,10 @@ func TestExecuteCallActor_WhitespaceActorID(t *testing.T) {
 
 func TestExecuteCallActor_NilPayloadNormalizes(t *testing.T) {
 	exec := newMockExec()
-	var captured callkit.RequestSpec
-	exec.executeRequestFn = func(_ context.Context, _ metatool.RuntimeContext, spec callkit.RequestSpec) callkit.ResultValue {
+	var captured metatool.RequestSpec
+	exec.executeRequestFn = func(_ context.Context, _ metatool.RuntimeContext, spec metatool.RequestSpec) metatool.ResultValue {
 		captured = spec
-		return callkit.ResultValue{Name: "call_actor", Value: map[string]any{"ok": true}}
+		return metatool.ResultValue{Name: "call_actor", Value: map[string]any{"ok": true}}
 	}
 	params, _ := json.Marshal(map[string]any{"actor_id": "tool:x", "type": "x.do"})
 	rv := metatool.ExecuteCallActor(context.Background(), params, exec, defaultRC())
@@ -273,7 +273,7 @@ func TestExecuteListActors_NilIPC(t *testing.T) {
 
 func TestExecuteListActors_RequestFails(t *testing.T) {
 	exec := newMockExec()
-	exec.executeReservedRawFn = func(_ context.Context, _ metatool.RuntimeContext, _ callkit.RequestSpec) (json.RawMessage, bool) {
+	exec.executeReservedRawFn = func(_ context.Context, _ metatool.RuntimeContext, _ metatool.RequestSpec) (json.RawMessage, bool) {
 		return nil, false
 	}
 	rv := metatool.ExecuteListActors(context.Background(), exec, defaultRC())
@@ -282,7 +282,7 @@ func TestExecuteListActors_RequestFails(t *testing.T) {
 
 func TestExecuteListActors_DecodeError(t *testing.T) {
 	exec := newMockExec()
-	exec.executeReservedRawFn = func(_ context.Context, _ metatool.RuntimeContext, _ callkit.RequestSpec) (json.RawMessage, bool) {
+	exec.executeReservedRawFn = func(_ context.Context, _ metatool.RuntimeContext, _ metatool.RequestSpec) (json.RawMessage, bool) {
 		return json.RawMessage(`{not-valid-json`), true
 	}
 	rv := metatool.ExecuteListActors(context.Background(), exec, defaultRC())
@@ -297,7 +297,7 @@ func TestExecuteListActors_Success(t *testing.T) {
 			{"id": "agent:research", "kind": "agent", "present": false},
 		},
 	})
-	exec.executeReservedRawFn = func(_ context.Context, _ metatool.RuntimeContext, spec callkit.RequestSpec) (json.RawMessage, bool) {
+	exec.executeReservedRawFn = func(_ context.Context, _ metatool.RuntimeContext, spec metatool.RequestSpec) (json.RawMessage, bool) {
 		if spec.EnvelopeType != "actor.list" {
 			t.Fatalf("expected EnvelopeType=actor.list, got %q", spec.EnvelopeType)
 		}
@@ -317,7 +317,7 @@ func TestExecuteListActors_Success(t *testing.T) {
 func TestExecuteListActors_EmptyCatalog(t *testing.T) {
 	exec := newMockExec()
 	catalogJSON, _ := json.Marshal(map[string]any{"actors": []map[string]any{}})
-	exec.executeReservedRawFn = func(_ context.Context, _ metatool.RuntimeContext, _ callkit.RequestSpec) (json.RawMessage, bool) {
+	exec.executeReservedRawFn = func(_ context.Context, _ metatool.RuntimeContext, _ metatool.RequestSpec) (json.RawMessage, bool) {
 		return catalogJSON, true
 	}
 	rv := metatool.ExecuteListActors(context.Background(), exec, defaultRC())
@@ -363,10 +363,10 @@ func TestExecuteDescribeActor_NilIPC(t *testing.T) {
 
 func TestExecuteDescribeActor_Success(t *testing.T) {
 	exec := newMockExec()
-	var captured callkit.RequestSpec
-	exec.executeRequestFn = func(_ context.Context, _ metatool.RuntimeContext, spec callkit.RequestSpec) callkit.ResultValue {
+	var captured metatool.RequestSpec
+	exec.executeRequestFn = func(_ context.Context, _ metatool.RuntimeContext, spec metatool.RequestSpec) metatool.ResultValue {
 		captured = spec
-		return callkit.ResultValue{
+		return metatool.ResultValue{
 			Name:  "describe_actor",
 			Value: map[string]any{"name": "xhs", "apis": []any{}},
 		}
@@ -437,10 +437,10 @@ func TestExecuteDescribeType_NilIPC(t *testing.T) {
 
 func TestExecuteDescribeType_Success(t *testing.T) {
 	exec := newMockExec()
-	var captured callkit.RequestSpec
-	exec.executeRequestFn = func(_ context.Context, _ metatool.RuntimeContext, spec callkit.RequestSpec) callkit.ResultValue {
+	var captured metatool.RequestSpec
+	exec.executeRequestFn = func(_ context.Context, _ metatool.RuntimeContext, spec metatool.RequestSpec) metatool.ResultValue {
 		captured = spec
-		return callkit.ResultValue{
+		return metatool.ResultValue{
 			Name:  "describe_type",
 			Value: map[string]any{"type": "xhs.publish", "payload_example": map[string]any{}},
 		}
@@ -529,7 +529,7 @@ func TestExecuteAwaitResult_SuccessFinalDelivered(t *testing.T) {
 	params, _ := json.Marshal(map[string]any{"request_id": "req-42"})
 	rv := metatool.ExecuteAwaitResult(context.Background(), params, exec)
 
-	// The result should come from ResultFromResponse on the final envelope.
+	// The result should come from metatool.ResultFromResponse on the final envelope.
 	if rv.Name != "await_result" {
 		t.Fatalf("expected Name=await_result, got %q", rv.Name)
 	}
@@ -744,13 +744,13 @@ func TestExecuteListPending_AfterAbandon(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ExecuteCallActor — NormalizeCallActorResult integration
+// ExecuteCallActor — metatool.NormalizeCallActorResult integration
 // ---------------------------------------------------------------------------
 
 func TestExecuteCallActor_ErrorResultNormalized(t *testing.T) {
 	exec := newMockExec()
-	exec.executeRequestFn = func(_ context.Context, _ metatool.RuntimeContext, _ callkit.RequestSpec) callkit.ResultValue {
-		return callkit.ResultValue{
+	exec.executeRequestFn = func(_ context.Context, _ metatool.RuntimeContext, _ metatool.RequestSpec) metatool.ResultValue {
+		return metatool.ResultValue{
 			Name: "call_actor",
 			Value: map[string]any{
 				"error": "receiver_unavailable",

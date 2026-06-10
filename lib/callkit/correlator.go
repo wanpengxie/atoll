@@ -119,7 +119,6 @@ func (rc *RequestCorrelator) Deliver(env *message.Envelope) Disposition {
 	}
 }
 
-
 // Await blocks until the final for id arrives, the window elapses, or ctx is
 // done. window <= 0 means "do not wait at all".
 func (rc *RequestCorrelator) Await(ctx context.Context, id message.ID, window time.Duration) (*message.Envelope, bool, error) {

@@ -25,9 +25,9 @@ type channelToolRuntime struct {
 }
 
 const (
-	waitFastPath  = callkit.WaitFastPath
-	waitUnbounded = callkit.WaitUnbounded
-	waitNone      = callkit.WaitNone
+	waitFastPath  = metatool.WaitFastPath
+	waitUnbounded = metatool.WaitUnbounded
+	waitNone      = metatool.WaitNone
 )
 
 // channelTools returns the meta-tool surface the LLM sees.
@@ -64,7 +64,7 @@ func extractRuntimeContext(ctx context.Context) (metatool.RuntimeContext, bool) 
 }
 
 // ExecuteRequest implements metatool.Executor.
-func (b *Bridge) ExecuteRequest(ctx context.Context, rc metatool.RuntimeContext, spec callkit.RequestSpec) callkit.ResultValue {
+func (b *Bridge) ExecuteRequest(ctx context.Context, rc metatool.RuntimeContext, spec metatool.RequestSpec) metatool.ResultValue {
 	ipc := rc.IPC.(IPCFacade)
 	trigger := TriggerPayload{
 		Envelope:      rc.Trigger.Envelope,
@@ -75,7 +75,7 @@ func (b *Bridge) ExecuteRequest(ctx context.Context, rc metatool.RuntimeContext,
 }
 
 // ExecuteReservedRaw implements metatool.Executor.
-func (b *Bridge) ExecuteReservedRaw(ctx context.Context, rc metatool.RuntimeContext, spec callkit.RequestSpec) (json.RawMessage, bool) {
+func (b *Bridge) ExecuteReservedRaw(ctx context.Context, rc metatool.RuntimeContext, spec metatool.RequestSpec) (json.RawMessage, bool) {
 	ipc := rc.IPC.(IPCFacade)
 	trigger := TriggerPayload{
 		Envelope:      rc.Trigger.Envelope,
@@ -99,7 +99,7 @@ var _ gokimitools.Tool = (*CallActorTool)(nil)
 func (t *CallActorTool) Name() string        { return metatool.CallActorSpec.Name }
 func (t *CallActorTool) Description() string { return metatool.CallActorSpec.Description }
 func (t *CallActorTool) ParameterSchema() json.RawMessage {
-	return callkit.CloneRawJSON(metatool.CallActorSpec.Schema)
+	return metatool.CloneRawJSON(metatool.CallActorSpec.Schema)
 }
 func (t *CallActorTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
 	rc, ok := extractRuntimeContext(ctx)
@@ -122,7 +122,7 @@ var _ gokimitools.Tool = (*ListActorsTool)(nil)
 func (t *ListActorsTool) Name() string        { return metatool.ListActorsSpec.Name }
 func (t *ListActorsTool) Description() string { return metatool.ListActorsSpec.Description }
 func (t *ListActorsTool) ParameterSchema() json.RawMessage {
-	return callkit.CloneRawJSON(metatool.ListActorsSpec.Schema)
+	return metatool.CloneRawJSON(metatool.ListActorsSpec.Schema)
 }
 func (t *ListActorsTool) Execute(ctx context.Context, _ json.RawMessage) (types.ToolResult, error) {
 	rc, ok := extractRuntimeContext(ctx)
@@ -145,7 +145,7 @@ var _ gokimitools.Tool = (*DescribeActorTool)(nil)
 func (t *DescribeActorTool) Name() string        { return metatool.DescribeActorSpec.Name }
 func (t *DescribeActorTool) Description() string { return metatool.DescribeActorSpec.Description }
 func (t *DescribeActorTool) ParameterSchema() json.RawMessage {
-	return callkit.CloneRawJSON(metatool.DescribeActorSpec.Schema)
+	return metatool.CloneRawJSON(metatool.DescribeActorSpec.Schema)
 }
 func (t *DescribeActorTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
 	rc, ok := extractRuntimeContext(ctx)
@@ -168,7 +168,7 @@ var _ gokimitools.Tool = (*DescribeTypeTool)(nil)
 func (t *DescribeTypeTool) Name() string        { return metatool.DescribeTypeSpec.Name }
 func (t *DescribeTypeTool) Description() string { return metatool.DescribeTypeSpec.Description }
 func (t *DescribeTypeTool) ParameterSchema() json.RawMessage {
-	return callkit.CloneRawJSON(metatool.DescribeTypeSpec.Schema)
+	return metatool.CloneRawJSON(metatool.DescribeTypeSpec.Schema)
 }
 func (t *DescribeTypeTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
 	rc, ok := extractRuntimeContext(ctx)
@@ -191,7 +191,7 @@ var _ gokimitools.Tool = (*AwaitResultTool)(nil)
 func (t *AwaitResultTool) Name() string        { return metatool.AwaitResultSpec.Name }
 func (t *AwaitResultTool) Description() string { return metatool.AwaitResultSpec.Description }
 func (t *AwaitResultTool) ParameterSchema() json.RawMessage {
-	return callkit.CloneRawJSON(metatool.AwaitResultSpec.Schema)
+	return metatool.CloneRawJSON(metatool.AwaitResultSpec.Schema)
 }
 func (t *AwaitResultTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
 	var exec metatool.Executor
@@ -210,7 +210,7 @@ var _ gokimitools.Tool = (*AbandonTool)(nil)
 func (t *AbandonTool) Name() string        { return metatool.AbandonSpec.Name }
 func (t *AbandonTool) Description() string { return metatool.AbandonSpec.Description }
 func (t *AbandonTool) ParameterSchema() json.RawMessage {
-	return callkit.CloneRawJSON(metatool.AbandonSpec.Schema)
+	return metatool.CloneRawJSON(metatool.AbandonSpec.Schema)
 }
 func (t *AbandonTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
 	var exec metatool.Executor
@@ -229,7 +229,7 @@ var _ gokimitools.Tool = (*ListPendingTool)(nil)
 func (t *ListPendingTool) Name() string        { return metatool.ListPendingSpec.Name }
 func (t *ListPendingTool) Description() string { return metatool.ListPendingSpec.Description }
 func (t *ListPendingTool) ParameterSchema() json.RawMessage {
-	return callkit.CloneRawJSON(metatool.ListPendingSpec.Schema)
+	return metatool.CloneRawJSON(metatool.ListPendingSpec.Schema)
 }
 func (t *ListPendingTool) Execute(_ context.Context, _ json.RawMessage) (types.ToolResult, error) {
 	var exec metatool.Executor
@@ -242,8 +242,8 @@ func (t *ListPendingTool) Execute(_ context.Context, _ json.RawMessage) (types.T
 
 // --- go-kimi result converters ---
 
-// toKimiToolResult converts a callkit.ResultValue to a go-kimi types.ToolResult.
-func toKimiToolResult(rv callkit.ResultValue) types.ToolResult {
+// toKimiToolResult converts a metatool.ResultValue to a go-kimi types.ToolResult.
+func toKimiToolResult(rv metatool.ResultValue) types.ToolResult {
 	return types.ToolResult{
 		Name:    rv.Name,
 		Value:   types.ToolReturnValue{Value: rv.Value},
@@ -251,8 +251,8 @@ func toKimiToolResult(rv callkit.ResultValue) types.ToolResult {
 	}
 }
 
-// toResultValue converts a go-kimi types.ToolResult to a callkit.ResultValue.
-func toResultValue(tr types.ToolResult) callkit.ResultValue {
+// toResultValue converts a go-kimi types.ToolResult to a metatool.ResultValue.
+func toResultValue(tr types.ToolResult) metatool.ResultValue {
 	var m map[string]any
 	if v, ok := tr.Value.Value.(map[string]any); ok {
 		m = v
@@ -260,7 +260,7 @@ func toResultValue(tr types.ToolResult) callkit.ResultValue {
 		// Wrap non-map values so ResultValue.Value stays map[string]any.
 		m = map[string]any{"result": tr.Value.Value}
 	}
-	return callkit.ResultValue{
+	return metatool.ResultValue{
 		Name:    tr.Name,
 		Value:   m,
 		IsError: tr.IsError,
@@ -313,10 +313,10 @@ func (b *Bridge) executeChannelRequest(
 	ctx context.Context,
 	ipc IPCFacade,
 	trigger TriggerPayload,
-	spec callkit.RequestSpec,
+	spec metatool.RequestSpec,
 ) types.ToolResult {
 	if spec.Timeout <= 0 {
-		spec.Timeout = callkit.DefaultTimeout
+		spec.Timeout = metatool.DefaultTimeout
 	}
 	env, buildErr := b.buildChannelRequest(ipc, trigger, spec)
 	if buildErr != nil {
@@ -325,12 +325,16 @@ func (b *Bridge) executeChannelRequest(
 	}
 
 	caller := b.caller()
-	est := int64(spec.Timeout / time.Millisecond)
 	expectsAwait := spec.WaitMode != waitNone
-	res, err := caller.Submit(ctx, ipc, env, est, expectsAwait)
-	if err != nil {
+	if err := caller.Submit(ctx, ipc, env, expectsAwait); err != nil {
 		return channelToolErrorResult(spec.ToolName,
 			fmt.Sprintf("emit channel request %s: %v", spec.EnvelopeType, err))
+	}
+	ack := metatool.AckDescriptor{
+		RequestID: env.ID,
+		Accepted:  true,
+		Status:    "accepted",
+		EstWaitMs: int64(spec.Timeout / time.Millisecond),
 	}
 
 	var window time.Duration
@@ -338,25 +342,25 @@ func (b *Bridge) executeChannelRequest(
 	case waitNone:
 		window = 0
 	case waitUnbounded:
-		window = callkit.ResolveFastPathWindow(spec.Timeout, callkit.DefaultTimeout, true)
+		window = metatool.ResolveFastPathWindow(spec.Timeout, metatool.DefaultTimeout, true)
 	default: // waitFastPath
-		window = callkit.ResolveFastPathWindow(spec.Timeout, callkit.DefaultTimeout, false)
+		window = metatool.ResolveFastPathWindow(spec.Timeout, metatool.DefaultTimeout, false)
 	}
 
 	if window <= 0 {
-		return ackToToolResult(spec.ToolName, res.Ack)
+		return ackToToolResult(spec.ToolName, ack)
 	}
 
-	finalEnv, ok, awaitErr := caller.Await(ctx, res.RequestID, window)
+	finalEnv, ok, awaitErr := caller.Await(ctx, env.ID, window)
 	if awaitErr != nil {
-		caller.Abandon(res.RequestID)
+		caller.Abandon(env.ID)
 		return channelToolErrorResult(spec.ToolName,
 			fmt.Sprintf("channel request %s wait failed: %v", spec.EnvelopeType, awaitErr))
 	}
 	if ok {
 		return channelToolResultFromResponse(spec.ToolName, *finalEnv)
 	}
-	return ackToToolResult(spec.ToolName, res.Ack)
+	return ackToToolResult(spec.ToolName, ack)
 }
 
 // executeReservedRequestRaw emits a reserved-type request and returns the
@@ -365,31 +369,29 @@ func (b *Bridge) executeReservedRequestRaw(
 	ctx context.Context,
 	ipc IPCFacade,
 	trigger TriggerPayload,
-	spec callkit.RequestSpec,
+	spec metatool.RequestSpec,
 ) (json.RawMessage, bool) {
 	if spec.Timeout <= 0 {
-		spec.Timeout = callkit.DefaultTimeout
+		spec.Timeout = metatool.DefaultTimeout
 	}
 	env, buildErr := b.buildChannelRequest(ipc, trigger, spec)
 	if buildErr != nil {
 		return nil, false
 	}
 	caller := b.caller()
-	est := int64(spec.Timeout / time.Millisecond)
-	res, err := caller.Submit(ctx, ipc, env, est, true)
-	if err != nil {
+	if err := caller.Submit(ctx, ipc, env, true); err != nil {
 		return nil, false
 	}
-	window := callkit.ResolveFastPathWindow(spec.Timeout, callkit.DefaultTimeout, true)
-	finalEnv, ok, awaitErr := caller.Await(ctx, res.RequestID, window)
+	window := metatool.ResolveFastPathWindow(spec.Timeout, metatool.DefaultTimeout, true)
+	finalEnv, ok, awaitErr := caller.Await(ctx, env.ID, window)
 	if awaitErr != nil {
-		caller.Abandon(res.RequestID)
+		caller.Abandon(env.ID)
 		return nil, false
 	}
 	if !ok || finalEnv == nil || finalEnv.Kind != message.KindResponse {
 		return nil, false
 	}
-	if callkit.ResponseFailureReason(finalEnv.Payload) != "" {
+	if metatool.ResponseFailureReason(finalEnv.Payload) != "" {
 		return nil, false
 	}
 	return finalEnv.Payload, true
@@ -398,16 +400,16 @@ func (b *Bridge) executeReservedRequestRaw(
 // --- helper functions ---
 
 // ackToToolResult converts a metatool AckDescriptor to a go-kimi ToolResult.
-func ackToToolResult(toolName string, ack callkit.AckDescriptor) types.ToolResult {
+func ackToToolResult(toolName string, ack metatool.AckDescriptor) types.ToolResult {
 	id := ack.RequestID.String()
 	ack.Guidance = "Accepted. To wait, call await_result(request_id=" + id +
 		"). If you do not wait, the result returns as a new message (parent_id=" + id + ")."
-	ack.ToWait = callkit.ToWaitHint{
+	ack.ToWait = metatool.ToWaitHint{
 		Tool:   "await_result",
 		Params: map[string]any{"request_id": id},
 	}
 	ack.NotWaitng = "result returns as kind=response, parent_id=" + id + " new turn trigger"
-	rv := callkit.AckResult(toolName, ack)
+	rv := metatool.AckResult(toolName, ack)
 	return types.ToolResult{
 		Name:  rv.Name,
 		Value: types.ToolReturnValue{Value: rv.Value},
@@ -419,7 +421,7 @@ func channelToolCorrelationID(trigger TriggerPayload) message.ID {
 }
 
 func channelToolResultFromResponse(toolName string, env message.Envelope) types.ToolResult {
-	rv, isErr := callkit.ResultFromResponse(toolName, env)
+	rv, isErr := metatool.ResultFromResponse(toolName, env)
 	if isErr {
 		return types.ToolResult{
 			Name:    rv.Name,
@@ -467,7 +469,7 @@ func toolPayloadValue(raw json.RawMessage) any {
 func (b *Bridge) buildChannelRequest(
 	ipc IPCFacade,
 	trigger TriggerPayload,
-	spec callkit.RequestSpec,
+	spec metatool.RequestSpec,
 ) (message.Envelope, error) {
 	now := b.cfg.NowFn()
 	env, err := behavior.BuildRequest(ipc.ChannelID(),

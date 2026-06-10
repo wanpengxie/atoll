@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-
-	"github.com/wanpengxie/ActOS/lib/callkit"
 )
 
 // DescribeActorSpec is the protocol-layer definition of describe_actor.
@@ -34,31 +32,31 @@ type describeActorParams struct {
 }
 
 // ExecuteDescribeActor is the protocol-layer execute function for describe_actor.
-func ExecuteDescribeActor(ctx context.Context, params json.RawMessage, exec Executor, rc RuntimeContext) callkit.ResultValue {
+func ExecuteDescribeActor(ctx context.Context, params json.RawMessage, exec Executor, rc RuntimeContext) ResultValue {
 	if exec == nil {
-		return callkit.NewError("describe_actor", callkit.InternalError, "describe_actor tool not configured", "Retry after the bridge is configured", nil)
+		return NewError("describe_actor", InternalError, "describe_actor tool not configured", "Retry after the bridge is configured", nil)
 	}
 	var p describeActorParams
 	if len(params) > 0 {
 		if err := json.Unmarshal(params, &p); err != nil {
-			return callkit.PayloadInvalidError("describe_actor", fmt.Sprintf("invalid params: %v", err), "")
+			return PayloadInvalidError("describe_actor", fmt.Sprintf("invalid params: %v", err), "")
 		}
 	}
 	p.ActorID = strings.TrimSpace(p.ActorID)
 	if p.ActorID == "" {
-		return callkit.PayloadInvalidError("describe_actor", "actor_id is required (call list_actors to discover)", "")
+		return PayloadInvalidError("describe_actor", "actor_id is required (call list_actors to discover)", "")
 	}
 
 	if rc.IPC == nil {
-		return callkit.NewError("describe_actor", callkit.InternalError, "describe_actor invoked outside a bridge turn", "Retry from inside an active bridge turn", nil)
+		return NewError("describe_actor", InternalError, "describe_actor invoked outside a bridge turn", "Retry from inside an active bridge turn", nil)
 	}
-	return exec.ExecuteRequest(ctx, rc, callkit.RequestSpec{
+	return exec.ExecuteRequest(ctx, rc, RequestSpec{
 		ToolName:       "describe_actor",
 		EnvelopeType:   "actor.describe",
 		HandlerActorID: p.ActorID,
-		Payload:        callkit.CloneRawJSON(json.RawMessage(`{}`)),
-		Timeout:        callkit.DefaultTimeout,
-		WaitMode:       callkit.WaitUnbounded,
+		Payload:        CloneRawJSON(json.RawMessage(`{}`)),
+		Timeout:        DefaultTimeout,
+		WaitMode:       WaitUnbounded,
 	})
 }
 
@@ -89,35 +87,35 @@ type describeTypeParams struct {
 }
 
 // ExecuteDescribeType is the protocol-layer execute function for describe_type.
-func ExecuteDescribeType(ctx context.Context, params json.RawMessage, exec Executor, rc RuntimeContext) callkit.ResultValue {
+func ExecuteDescribeType(ctx context.Context, params json.RawMessage, exec Executor, rc RuntimeContext) ResultValue {
 	if exec == nil {
-		return callkit.NewError("describe_type", callkit.InternalError, "describe_type tool not configured", "Retry after the bridge is configured", nil)
+		return NewError("describe_type", InternalError, "describe_type tool not configured", "Retry after the bridge is configured", nil)
 	}
 	var p describeTypeParams
 	if len(params) > 0 {
 		if err := json.Unmarshal(params, &p); err != nil {
-			return callkit.PayloadInvalidError("describe_type", fmt.Sprintf("invalid params: %v", err), "")
+			return PayloadInvalidError("describe_type", fmt.Sprintf("invalid params: %v", err), "")
 		}
 	}
 	p.ActorID = strings.TrimSpace(p.ActorID)
 	p.Type = strings.TrimSpace(p.Type)
 	if p.ActorID == "" {
-		return callkit.PayloadInvalidError("describe_type", "actor_id is required (call list_actors to discover)", payloadHint(p.ActorID, p.Type))
+		return PayloadInvalidError("describe_type", "actor_id is required (call list_actors to discover)", payloadHint(p.ActorID, p.Type))
 	}
 	if p.Type == "" {
-		return callkit.PayloadInvalidError("describe_type", "type is required (call describe_actor to discover)", payloadHint(p.ActorID, p.Type))
+		return PayloadInvalidError("describe_type", "type is required (call describe_actor to discover)", payloadHint(p.ActorID, p.Type))
 	}
 
 	if rc.IPC == nil {
-		return callkit.NewError("describe_type", callkit.InternalError, "describe_type invoked outside a bridge turn", "Retry from inside an active bridge turn", nil)
+		return NewError("describe_type", InternalError, "describe_type invoked outside a bridge turn", "Retry from inside an active bridge turn", nil)
 	}
 	payload, _ := json.Marshal(map[string]string{"type": p.Type})
-	return exec.ExecuteRequest(ctx, rc, callkit.RequestSpec{
+	return exec.ExecuteRequest(ctx, rc, RequestSpec{
 		ToolName:       "describe_type",
 		EnvelopeType:   "actor.describe",
 		HandlerActorID: p.ActorID,
 		Payload:        payload,
-		Timeout:        callkit.DefaultTimeout,
-		WaitMode:       callkit.WaitUnbounded,
+		Timeout:        DefaultTimeout,
+		WaitMode:       WaitUnbounded,
 	})
 }

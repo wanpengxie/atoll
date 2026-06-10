@@ -1,15 +1,14 @@
-package callkit_test
+package metatool
 
 import (
 	"encoding/json"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/lib/callkit"
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 func TestNormalizePayloadEmpty(t *testing.T) {
-	result, err := callkit.NormalizePayload(nil)
+	result, err := NormalizePayload(nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -19,7 +18,7 @@ func TestNormalizePayloadEmpty(t *testing.T) {
 }
 
 func TestNormalizePayloadEmptyString(t *testing.T) {
-	result, err := callkit.NormalizePayload(json.RawMessage(""))
+	result, err := NormalizePayload(json.RawMessage(""))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -29,7 +28,7 @@ func TestNormalizePayloadEmptyString(t *testing.T) {
 }
 
 func TestNormalizePayloadNull(t *testing.T) {
-	result, err := callkit.NormalizePayload(json.RawMessage("null"))
+	result, err := NormalizePayload(json.RawMessage("null"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -40,7 +39,7 @@ func TestNormalizePayloadNull(t *testing.T) {
 
 func TestNormalizePayloadValidJSON(t *testing.T) {
 	input := json.RawMessage(`{"key":"value"}`)
-	result, err := callkit.NormalizePayload(input)
+	result, err := NormalizePayload(input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -55,14 +54,14 @@ func TestNormalizePayloadValidJSON(t *testing.T) {
 }
 
 func TestNormalizePayloadInvalidJSON(t *testing.T) {
-	_, err := callkit.NormalizePayload(json.RawMessage(`{broken`))
+	_, err := NormalizePayload(json.RawMessage(`{broken`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
 }
 
 func TestNormalizePayloadWhitespace(t *testing.T) {
-	result, err := callkit.NormalizePayload(json.RawMessage("   "))
+	result, err := NormalizePayload(json.RawMessage("   "))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -73,7 +72,7 @@ func TestNormalizePayloadWhitespace(t *testing.T) {
 
 func TestCloneRawJSONDoesNotAlias(t *testing.T) {
 	original := json.RawMessage(`{"a":1}`)
-	cloned := callkit.CloneRawJSON(original)
+	cloned := CloneRawJSON(original)
 	if string(cloned) != string(original) {
 		t.Fatalf("expected same content, got %q vs %q", string(cloned), string(original))
 	}
@@ -85,11 +84,11 @@ func TestCloneRawJSONDoesNotAlias(t *testing.T) {
 }
 
 func TestCloneRawJSONEmpty(t *testing.T) {
-	result := callkit.CloneRawJSON(nil)
+	result := CloneRawJSON(nil)
 	if result != nil {
 		t.Fatalf("expected nil for empty input, got %q", string(result))
 	}
-	result = callkit.CloneRawJSON(json.RawMessage{})
+	result = CloneRawJSON(json.RawMessage{})
 	if result != nil {
 		t.Fatalf("expected nil for zero-length input, got %q", string(result))
 	}
@@ -97,7 +96,7 @@ func TestCloneRawJSONEmpty(t *testing.T) {
 
 func TestResponseFailureReasonTerminalFailure(t *testing.T) {
 	raw := json.RawMessage(`{"terminal_failure_reason":"receiver_unavailable"}`)
-	reason := callkit.ResponseFailureReason(raw)
+	reason := ResponseFailureReason(raw)
 	if reason != "receiver_unavailable" {
 		t.Fatalf("expected receiver_unavailable, got %q", reason)
 	}
@@ -105,7 +104,7 @@ func TestResponseFailureReasonTerminalFailure(t *testing.T) {
 
 func TestResponseFailureReasonStatusFailed(t *testing.T) {
 	raw := json.RawMessage(`{"status":"failed","reason":"something_broke"}`)
-	reason := callkit.ResponseFailureReason(raw)
+	reason := ResponseFailureReason(raw)
 	if reason != "something_broke" {
 		t.Fatalf("expected something_broke, got %q", reason)
 	}
@@ -113,7 +112,7 @@ func TestResponseFailureReasonStatusFailed(t *testing.T) {
 
 func TestResponseFailureReasonStatusFailedNoReason(t *testing.T) {
 	raw := json.RawMessage(`{"status":"failed"}`)
-	reason := callkit.ResponseFailureReason(raw)
+	reason := ResponseFailureReason(raw)
 	if reason != "failed" {
 		t.Fatalf("expected failed, got %q", reason)
 	}
@@ -121,7 +120,7 @@ func TestResponseFailureReasonStatusFailedNoReason(t *testing.T) {
 
 func TestResponseFailureReasonSuccess(t *testing.T) {
 	raw := json.RawMessage(`{"status":"completed","data":"ok"}`)
-	reason := callkit.ResponseFailureReason(raw)
+	reason := ResponseFailureReason(raw)
 	if reason != "" {
 		t.Fatalf("expected empty reason for success, got %q", reason)
 	}
@@ -129,7 +128,7 @@ func TestResponseFailureReasonSuccess(t *testing.T) {
 
 func TestResponseFailureReasonInvalidJSON(t *testing.T) {
 	raw := json.RawMessage(`not json`)
-	reason := callkit.ResponseFailureReason(raw)
+	reason := ResponseFailureReason(raw)
 	if reason != "" {
 		t.Fatalf("expected empty reason for invalid JSON, got %q", reason)
 	}
@@ -148,7 +147,7 @@ func TestStringValue(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := callkit.StringValue(tt.in)
+			got := StringValue(tt.in)
 			if got != tt.want {
 				t.Fatalf("StringValue(%v) = %q, want %q", tt.in, got, tt.want)
 			}
@@ -163,7 +162,7 @@ func TestResultFromResponseSuccess(t *testing.T) {
 		Kind:    message.KindResponse,
 		Payload: payload,
 	}
-	rv, isFailure := callkit.ResultFromResponse("call_actor", env)
+	rv, isFailure := ResultFromResponse("call_actor", env)
 	if isFailure {
 		t.Fatal("expected isFailure=false for success")
 	}
@@ -185,7 +184,7 @@ func TestResultFromResponseFailure(t *testing.T) {
 		Kind:    message.KindResponse,
 		Payload: payload,
 	}
-	rv, isFailure := callkit.ResultFromResponse("call_actor", env)
+	rv, isFailure := ResultFromResponse("call_actor", env)
 	if !isFailure {
 		t.Fatal("expected isFailure=true for failed response")
 	}
@@ -202,7 +201,7 @@ func TestResultFromResponseNonResponse(t *testing.T) {
 		ID:   "evt-1",
 		Kind: message.KindEvent,
 	}
-	rv, isFailure := callkit.ResultFromResponse("call_actor", env)
+	rv, isFailure := ResultFromResponse("call_actor", env)
 	if !isFailure {
 		t.Fatal("expected isFailure=true for non-response envelope")
 	}

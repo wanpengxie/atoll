@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wanpengxie/ActOS/lib/callkit"
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
@@ -43,33 +42,33 @@ type awaitResultParams struct {
 }
 
 // ExecuteAwaitResult is the protocol-layer execute function for await_result.
-func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, exec Executor) callkit.ResultValue {
+func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, exec Executor) ResultValue {
 	if exec == nil {
-		return callkit.NewError("await_result", callkit.InternalError, "await_result tool not configured", "Retry after the bridge is configured", nil)
+		return NewError("await_result", InternalError, "await_result tool not configured", "Retry after the bridge is configured", nil)
 	}
 	var p awaitResultParams
 	if len(params) > 0 {
 		if err := json.Unmarshal(params, &p); err != nil {
-			return callkit.PayloadInvalidError("await_result", fmt.Sprintf("invalid params: %v", err), "")
+			return PayloadInvalidError("await_result", fmt.Sprintf("invalid params: %v", err), "")
 		}
 	}
 	reqID := message.ID(strings.TrimSpace(p.RequestID))
 	if reqID == "" {
-		return callkit.PayloadInvalidError("await_result", "request_id is required (from a prior call_actor ack)", "")
+		return PayloadInvalidError("await_result", "request_id is required (from a prior call_actor ack)", "")
 	}
 
 	caller := exec.CallerInstance()
 	if !caller.Futures.Registered(reqID) {
-		return callkit.NewError(
+		return NewError(
 			"await_result",
-			callkit.InternalError,
+			InternalError,
 			fmt.Sprintf("request_id %q is not in flight (already collected, abandoned, or lost to a worker restart)", reqID),
 			"Call list_pending() to see in-flight request ids; resubmit the call if needed",
 			nil,
 		)
 	}
 
-	timeout := callkit.DefaultTimeout
+	timeout := DefaultTimeout
 	if p.TimeoutMs > 0 {
 		timeout = time.Duration(p.TimeoutMs) * time.Millisecond
 	}
@@ -77,24 +76,24 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, exec Execut
 	finalEnv, ok, err := caller.Await(ctx, reqID, timeout)
 	if err != nil {
 		caller.Abandon(reqID)
-		return callkit.NewError("await_result", callkit.InternalError,
+		return NewError("await_result", InternalError,
 			fmt.Sprintf("await_result %q failed: %v", reqID, err),
 			"Inspect adapter logs; the request may have been abandoned", nil)
 	}
 	if !ok {
 		// Still pending after the window — hand control back with an ack.
-		return callkit.AckResult("await_result", callkit.AckDescriptor{
+		return AckResult("await_result", AckDescriptor{
 			RequestID: reqID,
 			Accepted:  true,
 			Status:    "accepted",
 			EstWaitMs: int64(timeout / time.Millisecond),
 			Guidance: "Still running after the wait window. The call keeps running; try await_result again, " +
 				"or do other work and react to the result when it returns as a new message.",
-			ToWait:    callkit.ToWaitHint{Tool: "await_result", Params: map[string]any{"request_id": reqID.String()}},
+			ToWait:    ToWaitHint{Tool: "await_result", Params: map[string]any{"request_id": reqID.String()}},
 			NotWaitng: "result returns as kind=response, parent_id=" + reqID.String() + " new turn trigger",
 		})
 	}
-	rv, _ := callkit.ResultFromResponse("await_result", *finalEnv)
+	rv, _ := ResultFromResponse("await_result", *finalEnv)
 	return rv
 }
 
@@ -126,22 +125,22 @@ type abandonParams struct {
 }
 
 // ExecuteAbandon is the protocol-layer execute function for abandon.
-func ExecuteAbandon(_ context.Context, params json.RawMessage, exec Executor) callkit.ResultValue {
+func ExecuteAbandon(_ context.Context, params json.RawMessage, exec Executor) ResultValue {
 	if exec == nil {
-		return callkit.NewError("abandon", callkit.InternalError, "abandon tool not configured", "Retry after the bridge is configured", nil)
+		return NewError("abandon", InternalError, "abandon tool not configured", "Retry after the bridge is configured", nil)
 	}
 	var p abandonParams
 	if len(params) > 0 {
 		if err := json.Unmarshal(params, &p); err != nil {
-			return callkit.PayloadInvalidError("abandon", fmt.Sprintf("invalid params: %v", err), "")
+			return PayloadInvalidError("abandon", fmt.Sprintf("invalid params: %v", err), "")
 		}
 	}
 	reqID := message.ID(strings.TrimSpace(p.RequestID))
 	if reqID == "" {
-		return callkit.PayloadInvalidError("abandon", "request_id is required", "")
+		return PayloadInvalidError("abandon", "request_id is required", "")
 	}
 	exec.CallerInstance().Abandon(reqID)
-	return callkit.ResultValue{
+	return ResultValue{
 		Name: "abandon",
 		Value: map[string]any{
 			"abandoned":  reqID.String(),
@@ -167,16 +166,16 @@ as new messages.
 }
 
 // ExecuteListPending is the protocol-layer execute function for list_pending.
-func ExecuteListPending(_ context.Context, exec Executor) callkit.ResultValue {
+func ExecuteListPending(_ context.Context, exec Executor) ResultValue {
 	if exec == nil {
-		return callkit.NewError("list_pending", callkit.InternalError, "list_pending tool not configured", "Retry after the bridge is configured", nil)
+		return NewError("list_pending", InternalError, "list_pending tool not configured", "Retry after the bridge is configured", nil)
 	}
 	ids := exec.CallerInstance().Pending()
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, id.String())
 	}
-	return callkit.ResultValue{
+	return ResultValue{
 		Name: "list_pending",
 		Value: map[string]any{
 			"pending": out,

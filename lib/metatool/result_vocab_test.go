@@ -1,13 +1,11 @@
-package callkit_test
+package metatool
 
 import (
 	"testing"
-
-	"github.com/wanpengxie/ActOS/lib/callkit"
 )
 
 func TestNewError(t *testing.T) {
-	rv := callkit.NewError("test_tool", callkit.PayloadInvalid, "bad payload", "fix it", map[string]string{"key": "val"})
+	rv := NewError("test_tool", PayloadInvalid, "bad payload", "fix it", map[string]string{"key": "val"})
 	if rv.Name != "test_tool" {
 		t.Fatalf("expected name=test_tool, got %q", rv.Name)
 	}
@@ -36,7 +34,7 @@ func TestNewError(t *testing.T) {
 }
 
 func TestNewErrorOmitsEmptyHintAndNilDetail(t *testing.T) {
-	rv := callkit.NewError("t", callkit.InternalError, "oops", "", nil)
+	rv := NewError("t", InternalError, "oops", "", nil)
 	errObj := rv.Value["error"].(map[string]any)
 	if _, ok := errObj["recovery_hint"]; ok {
 		t.Fatal("expected recovery_hint to be omitted when empty")
@@ -47,7 +45,7 @@ func TestNewErrorOmitsEmptyHintAndNilDetail(t *testing.T) {
 }
 
 func TestPayloadInvalidError(t *testing.T) {
-	rv := callkit.PayloadInvalidError("call_actor", "missing field", "check schema")
+	rv := PayloadInvalidError("call_actor", "missing field", "check schema")
 	if rv.Name != "call_actor" {
 		t.Fatalf("expected name=call_actor, got %q", rv.Name)
 	}
@@ -61,11 +59,11 @@ func TestPayloadInvalidError(t *testing.T) {
 }
 
 func TestNormalizeCallActorResultPassesThrough(t *testing.T) {
-	original := callkit.ResultValue{
+	original := ResultValue{
 		Name:  "call_actor",
 		Value: map[string]any{"data": "hello"},
 	}
-	result := callkit.NormalizeCallActorResult(original, "tool:xhs", "xhs.publish")
+	result := NormalizeCallActorResult(original, "tool:xhs", "xhs.publish")
 	if result.IsError {
 		t.Fatal("expected IsError=false for non-error result")
 	}
@@ -75,14 +73,14 @@ func TestNormalizeCallActorResultPassesThrough(t *testing.T) {
 }
 
 func TestNormalizeCallActorResultNormalizesError(t *testing.T) {
-	original := callkit.ResultValue{
+	original := ResultValue{
 		Name: "call_actor",
 		Value: map[string]any{
 			"error":   "receiver_unavailable",
 			"payload": map[string]any{"detail": "gone"},
 		},
 	}
-	result := callkit.NormalizeCallActorResult(original, "tool:xhs", "xhs.publish")
+	result := NormalizeCallActorResult(original, "tool:xhs", "xhs.publish")
 	if !result.IsError {
 		t.Fatal("expected IsError=true for error result")
 	}
@@ -96,18 +94,18 @@ func TestNormalizeCallActorResultNormalizesError(t *testing.T) {
 }
 
 func TestNormalizeCallActorResultNilValue(t *testing.T) {
-	original := callkit.ResultValue{
+	original := ResultValue{
 		Name:  "call_actor",
 		Value: nil,
 	}
-	result := callkit.NormalizeCallActorResult(original, "a", "t")
+	result := NormalizeCallActorResult(original, "a", "t")
 	if result.Value != nil {
 		t.Fatal("expected nil value to pass through")
 	}
 }
 
 func TestNormalizeCallActorErrorNonError(t *testing.T) {
-	isErr, val := callkit.NormalizeCallActorError("call_actor", false, map[string]any{"ok": true}, "a", "t")
+	isErr, val := NormalizeCallActorError("call_actor", false, map[string]any{"ok": true}, "a", "t")
 	if isErr {
 		t.Fatal("expected isErr=false for non-error")
 	}
@@ -122,7 +120,7 @@ func TestNormalizeCallActorErrorWithReason(t *testing.T) {
 		"error":   "unanswered_timeout",
 		"payload": nil,
 	}
-	isErr, result := callkit.NormalizeCallActorError("call_actor", true, val, "tool:a", "a.do")
+	isErr, result := NormalizeCallActorError("call_actor", true, val, "tool:a", "a.do")
 	if !isErr {
 		t.Fatal("expected isErr=true")
 	}
@@ -137,7 +135,7 @@ func TestNormalizeCallActorErrorWithReason(t *testing.T) {
 }
 
 func TestNormalizeCallActorErrorGenericString(t *testing.T) {
-	isErr, result := callkit.NormalizeCallActorError("call_actor", true, "something broke", "a", "t")
+	isErr, result := NormalizeCallActorError("call_actor", true, "something broke", "a", "t")
 	if !isErr {
 		t.Fatal("expected isErr=true")
 	}
@@ -149,7 +147,7 @@ func TestNormalizeCallActorErrorGenericString(t *testing.T) {
 }
 
 func TestNormalizeCallActorErrorTimedOut(t *testing.T) {
-	isErr, result := callkit.NormalizeCallActorError("call_actor", true, "request timed out", "a", "t")
+	isErr, result := NormalizeCallActorError("call_actor", true, "request timed out", "a", "t")
 	if !isErr {
 		t.Fatal("expected isErr=true")
 	}
@@ -172,7 +170,7 @@ func TestTerminalFailureToActorCLI(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.reason, func(t *testing.T) {
-			rv := callkit.TerminalFailureToActorCLI("tool", "actor:a", "a.do", tt.reason, nil)
+			rv := TerminalFailureToActorCLI("tool", "actor:a", "a.do", tt.reason, nil)
 			if !rv.IsError {
 				t.Fatal("expected IsError=true")
 			}

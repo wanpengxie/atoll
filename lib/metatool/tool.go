@@ -30,12 +30,12 @@ type ToolSpec struct {
 type Executor interface {
 	// ExecuteRequest emits an envelope request through the fast-path and
 	// returns the result (inline final, ack, or error).
-	ExecuteRequest(ctx context.Context, rc RuntimeContext, spec callkit.RequestSpec) callkit.ResultValue
+	ExecuteRequest(ctx context.Context, rc RuntimeContext, spec RequestSpec) ResultValue
 
 	// ExecuteReservedRaw emits a reserved-type request and returns the
 	// raw JSON of the final response payload. Returns (nil, false) on
 	// failure or timeout.
-	ExecuteReservedRaw(ctx context.Context, rc RuntimeContext, spec callkit.RequestSpec) (json.RawMessage, bool)
+	ExecuteReservedRaw(ctx context.Context, rc RuntimeContext, spec RequestSpec) (json.RawMessage, bool)
 
 	// CallerInstance returns the worker-side caller helper for direct
 	// future inspection (await_result / abandon / list_pending).

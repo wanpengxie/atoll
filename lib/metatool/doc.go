@@ -2,8 +2,10 @@
 // list_actors, describe_actor, describe_type, await_result, abandon,
 // list_pending) and their Execute functions.
 //
-// The call workflow primitives (correlator, caller, error codes, payload
-// normalisation) live in lib/callkit. The actor.* self-answer contract —
+// This package also owns the full LLM tool-result VOCABULARY: ResultValue,
+// the ErrorCode closed set, ack shapes (AckDescriptor/AckResult), the
+// tool-call spec (RequestSpec/WaitMode), and payload normalisation. The
+// blocking call MECHANISM (futures + bounded Await) lives in lib/callkit. The actor.* self-answer contract —
 // Describe / DescribeType / TypeMeta / Catalog response shapes — lives in
 // lib/introspect, the ONE home of those shapes: this package only binds them
 // to the LLM tool surface and never restates their fields.

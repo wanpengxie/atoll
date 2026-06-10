@@ -23,7 +23,7 @@ func newMetaFakeIPC() *metaFakeIPC {
 func (f *metaFakeIPC) ChannelID() channel.ID           { return "ch-test" }
 func (f *metaFakeIPC) WorkerID() string                { return "worker-test" }
 func (f *metaFakeIPC) WorkerActorID() actor.ActorID    { return "agent:worker-test" }
-func (f *metaFakeIPC) Triggers() <-chan TriggerPayload  { return nil }
+func (f *metaFakeIPC) Triggers() <-chan TriggerPayload { return nil }
 func (f *metaFakeIPC) WriteEnvelope(_ context.Context, env message.Envelope) error {
 	f.writes <- env
 	return nil
@@ -296,12 +296,11 @@ func TestCallerSubmitAwaitFastPathInline(t *testing.T) {
 	caller := b.caller()
 
 	env := message.Envelope{ID: "req-fast", ChannelID: "ch-test", Kind: message.KindRequest}
-	res, err := caller.Submit(context.Background(), ipc, env, 30000, true)
-	if err != nil {
+	if err := caller.Submit(context.Background(), ipc, env, true); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
-	if res.RequestID != "req-fast" || !res.Ack.Accepted {
-		t.Fatalf("submit result=%+v", res)
+	if !caller.Futures.Registered("req-fast") {
+		t.Fatal("future not registered after Submit")
 	}
 
 	// Drain the write and deliver a final.
@@ -312,7 +311,7 @@ func TestCallerSubmitAwaitFastPathInline(t *testing.T) {
 		caller.Deliver(&final)
 	}()
 
-	got, ok, awaitErr := caller.Await(context.Background(), res.RequestID, time.Second)
+	got, ok, awaitErr := caller.Await(context.Background(), env.ID, time.Second)
 	if awaitErr != nil {
 		t.Fatalf("Await err: %v", awaitErr)
 	}
@@ -418,7 +417,7 @@ func TestCallerSubmitWriteFailureRollsBack(t *testing.T) {
 	caller := b.caller()
 	ipc := &failWriteIPC{}
 	env := message.Envelope{ID: "req-fail-write", Kind: message.KindRequest}
-	if _, err := caller.Submit(context.Background(), ipc, env, 1000, true); err == nil {
+	if err := caller.Submit(context.Background(), ipc, env, true); err == nil {
 		t.Fatal("Submit should fail on write error")
 	}
 	if caller.Futures.Registered("req-fail-write") {

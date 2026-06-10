@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/wanpengxie/ActOS/lib/callkit"
 	"github.com/wanpengxie/ActOS/lib/introspect"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 )
@@ -28,20 +27,20 @@ appear here. Call it whenever you need the current actor set.
 }
 
 // ExecuteListActors is the protocol-layer execute function for list_actors.
-func ExecuteListActors(ctx context.Context, exec Executor, rc RuntimeContext) callkit.ResultValue {
+func ExecuteListActors(ctx context.Context, exec Executor, rc RuntimeContext) ResultValue {
 	if exec == nil {
 		return errorResultValue("list_actors", "list_actors tool not configured")
 	}
 	if rc.IPC == nil {
 		return errorResultValue("list_actors", "list_actors invoked outside a bridge turn")
 	}
-	raw, ok := exec.ExecuteReservedRaw(ctx, rc, callkit.RequestSpec{
+	raw, ok := exec.ExecuteReservedRaw(ctx, rc, RequestSpec{
 		ToolName:       "list_actors",
 		EnvelopeType:   "actor.list",
 		HandlerActorID: string(actor.SystemActorID),
-		Payload:        callkit.CloneRawJSON(json.RawMessage(`{}`)),
-		Timeout:        callkit.DefaultTimeout,
-		WaitMode:       callkit.WaitUnbounded,
+		Payload:        CloneRawJSON(json.RawMessage(`{}`)),
+		Timeout:        DefaultTimeout,
+		WaitMode:       WaitUnbounded,
 	})
 	if !ok {
 		return errorResultValue("list_actors", "list_actors did not receive a live catalog (request still pending or failed); retry")
@@ -50,7 +49,7 @@ func ExecuteListActors(ctx context.Context, exec Executor, rc RuntimeContext) ca
 	if err := json.Unmarshal(raw, &catalog); err != nil {
 		return errorResultValue("list_actors", fmt.Sprintf("decode actor.list catalog: %v", err))
 	}
-	return callkit.ResultValue{
+	return ResultValue{
 		Name:  "list_actors",
 		Value: FormatCatalog(catalog),
 	}
@@ -58,8 +57,8 @@ func ExecuteListActors(ctx context.Context, exec Executor, rc RuntimeContext) ca
 
 // errorResultValue builds a simple error ResultValue (not the actor-CLI
 // closed set — just a plain error string for framework-level failures).
-func errorResultValue(toolName, msg string) callkit.ResultValue {
-	return callkit.ResultValue{
+func errorResultValue(toolName, msg string) ResultValue {
+	return ResultValue{
 		Name:    toolName,
 		Value:   map[string]any{"error": strings.TrimSpace(msg)},
 		IsError: true,

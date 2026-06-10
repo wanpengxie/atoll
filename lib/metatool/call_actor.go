@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-
-	"github.com/wanpengxie/ActOS/lib/callkit"
 )
 
 // CallActorSpec is the protocol-layer definition of call_actor.
@@ -64,50 +62,50 @@ type callActorParams struct {
 // ExecuteCallActor is the protocol-layer execute function for call_actor.
 // It validates params, normalises the payload, and delegates to the
 // Executor for envelope dispatch.
-func ExecuteCallActor(ctx context.Context, params json.RawMessage, exec Executor, rc RuntimeContext) callkit.ResultValue {
+func ExecuteCallActor(ctx context.Context, params json.RawMessage, exec Executor, rc RuntimeContext) ResultValue {
 	if exec == nil {
-		return callkit.NewError("call_actor", callkit.InternalError, "call_actor tool not configured", "Retry after the bridge is configured", nil)
+		return NewError("call_actor", InternalError, "call_actor tool not configured", "Retry after the bridge is configured", nil)
 	}
 	var p callActorParams
 	if len(params) > 0 {
 		if err := json.Unmarshal(params, &p); err != nil {
-			return callkit.PayloadInvalidError("call_actor", fmt.Sprintf("invalid params: %v", err), "")
+			return PayloadInvalidError("call_actor", fmt.Sprintf("invalid params: %v", err), "")
 		}
 	}
 	p.ActorID = strings.TrimSpace(p.ActorID)
 	p.Type = strings.TrimSpace(p.Type)
 	if p.ActorID == "" {
-		return callkit.PayloadInvalidError("call_actor", "actor_id is required (call list_actors to discover)", payloadHint(p.ActorID, p.Type))
+		return PayloadInvalidError("call_actor", "actor_id is required (call list_actors to discover)", payloadHint(p.ActorID, p.Type))
 	}
 	if p.Type == "" {
-		return callkit.PayloadInvalidError("call_actor", "type is required (call list_actors to discover)", payloadHint(p.ActorID, p.Type))
+		return PayloadInvalidError("call_actor", "type is required (call list_actors to discover)", payloadHint(p.ActorID, p.Type))
 	}
 
 	if rc.IPC == nil {
-		return callkit.NewError("call_actor", callkit.InternalError, "call_actor invoked outside a bridge turn", "Retry from inside an active bridge turn", nil)
+		return NewError("call_actor", InternalError, "call_actor invoked outside a bridge turn", "Retry from inside an active bridge turn", nil)
 	}
 
-	payload, err := callkit.NormalizePayload(p.Payload)
+	payload, err := NormalizePayload(p.Payload)
 	if err != nil {
-		return callkit.PayloadInvalidError("call_actor", err.Error(), payloadHint(p.ActorID, p.Type))
+		return PayloadInvalidError("call_actor", err.Error(), payloadHint(p.ActorID, p.Type))
 	}
 
-	mode := callkit.WaitFastPath
+	mode := WaitFastPath
 	if p.Wait != nil {
 		if *p.Wait {
-			mode = callkit.WaitUnbounded
+			mode = WaitUnbounded
 		} else {
-			mode = callkit.WaitNone
+			mode = WaitNone
 		}
 	}
 
-	result := exec.ExecuteRequest(ctx, rc, callkit.RequestSpec{
+	result := exec.ExecuteRequest(ctx, rc, RequestSpec{
 		ToolName:       "call_actor",
 		EnvelopeType:   p.Type,
 		HandlerActorID: p.ActorID,
 		Payload:        payload,
-		Timeout:        callkit.DefaultTimeout,
+		Timeout:        DefaultTimeout,
 		WaitMode:       mode,
 	})
-	return callkit.NormalizeCallActorResult(result, p.ActorID, p.Type)
+	return NormalizeCallActorResult(result, p.ActorID, p.Type)
 }

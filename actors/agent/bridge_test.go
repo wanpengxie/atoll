@@ -59,9 +59,9 @@ func newFakeIPC() *fakeIPC {
 	}
 }
 
-func (f *fakeIPC) ChannelID() channel.ID                { return f.channelID }
-func (f *fakeIPC) WorkerID() string                     { return f.workerID }
-func (f *fakeIPC) WorkerActorID() actor.ActorID         { return f.actorID }
+func (f *fakeIPC) ChannelID() channel.ID                 { return f.channelID }
+func (f *fakeIPC) WorkerID() string                      { return f.workerID }
+func (f *fakeIPC) WorkerActorID() actor.ActorID          { return f.actorID }
 func (f *fakeIPC) Triggers() <-chan agent.TriggerPayload { return f.triggers }
 
 func (f *fakeIPC) WriteEnvelope(_ context.Context, env message.Envelope) error {
