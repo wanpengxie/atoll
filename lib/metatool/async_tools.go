@@ -57,8 +57,7 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, exec Execut
 		return PayloadInvalidError("await_result", "request_id is required (from a prior call_actor ack)", "")
 	}
 
-	caller := exec.CallerInstance()
-	if !caller.Futures.Registered(reqID) {
+	if !exec.RequestInFlight(reqID) {
 		return NewError(
 			"await_result",
 			InternalError,
@@ -73,9 +72,9 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, exec Execut
 		timeout = time.Duration(p.TimeoutMs) * time.Millisecond
 	}
 
-	finalEnv, ok, err := caller.Await(ctx, reqID, timeout)
+	finalEnv, ok, err := exec.AwaitRequest(ctx, reqID, timeout)
 	if err != nil {
-		caller.Abandon(reqID)
+		exec.AbandonRequest(reqID)
 		return NewError("await_result", InternalError,
 			fmt.Sprintf("await_result %q failed: %v", reqID, err),
 			"Inspect adapter logs; the request may have been abandoned", nil)
@@ -139,7 +138,7 @@ func ExecuteAbandon(_ context.Context, params json.RawMessage, exec Executor) Re
 	if reqID == "" {
 		return PayloadInvalidError("abandon", "request_id is required", "")
 	}
-	exec.CallerInstance().Abandon(reqID)
+	exec.AbandonRequest(reqID)
 	return ResultValue{
 		Name: "abandon",
 		Value: map[string]any{
@@ -170,7 +169,7 @@ func ExecuteListPending(_ context.Context, exec Executor) ResultValue {
 	if exec == nil {
 		return NewError("list_pending", InternalError, "list_pending tool not configured", "Retry after the bridge is configured", nil)
 	}
-	ids := exec.CallerInstance().Pending()
+	ids := exec.PendingRequests()
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, id.String())

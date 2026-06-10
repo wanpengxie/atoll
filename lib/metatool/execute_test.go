@@ -3,12 +3,11 @@ package metatool_test
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/wanpengxie/ActOS/lib/metatool"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
@@ -16,29 +15,15 @@ import (
 // mock types
 // ---------------------------------------------------------------------------
 
-// mockIPC implements metatool.IPC.
-type mockIPC struct {
-	channelID channel.ID
-	actorID   actor.ActorID
-	written   []message.Envelope
-	writeErr  error
-}
-
-func (m *mockIPC) WriteEnvelope(_ context.Context, env message.Envelope) error {
-	m.written = append(m.written, env)
-	return m.writeErr
-}
-
-func (m *mockIPC) ChannelID() channel.ID        { return m.channelID }
-func (m *mockIPC) WorkerActorID() actor.ActorID { return m.actorID }
-
-// mockExecutor implements metatool.Executor.
+// mockExecutor implements metatool.Executor with an in-memory futures map.
 type mockExecutor struct {
 	// executeRequestFn is called by ExecuteRequest. If nil, returns a default success.
 	executeRequestFn func(ctx context.Context, rc metatool.RuntimeContext, spec metatool.RequestSpec) metatool.ResultValue
 	// executeReservedRawFn is called by ExecuteReservedRaw. If nil, returns (nil, false).
 	executeReservedRawFn func(ctx context.Context, rc metatool.RuntimeContext, spec metatool.RequestSpec) (json.RawMessage, bool)
-	caller               *metatool.Client
+
+	mu      sync.Mutex
+	pending map[message.ID]chan *message.Envelope
 }
 
 func (m *mockExecutor) ExecuteRequest(ctx context.Context, rc metatool.RuntimeContext, spec metatool.RequestSpec) metatool.ResultValue {
@@ -55,23 +40,81 @@ func (m *mockExecutor) ExecuteReservedRaw(ctx context.Context, rc metatool.Runti
 	return nil, false
 }
 
-func (m *mockExecutor) CallerInstance() *metatool.Client {
-	return m.caller
+// register tracks an in-flight request id (test-side seeding).
+func (m *mockExecutor) register(id message.ID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pending == nil {
+		m.pending = make(map[message.ID]chan *message.Envelope)
+	}
+	m.pending[id] = make(chan *message.Envelope, 1)
 }
 
-// newMockExec returns a mockExecutor with a real Caller.
+// deliver resolves a pending future (test-side seeding).
+func (m *mockExecutor) deliver(id message.ID, env *message.Envelope) {
+	m.mu.Lock()
+	ch := m.pending[id]
+	m.mu.Unlock()
+	if ch != nil {
+		ch <- env
+	}
+}
+
+func (m *mockExecutor) AwaitRequest(ctx context.Context, id message.ID, window time.Duration) (*message.Envelope, bool, error) {
+	m.mu.Lock()
+	ch := m.pending[id]
+	m.mu.Unlock()
+	if ch == nil {
+		return nil, false, nil
+	}
+	timer := time.NewTimer(window)
+	defer timer.Stop()
+	select {
+	case env := <-ch:
+		m.mu.Lock()
+		delete(m.pending, id)
+		m.mu.Unlock()
+		return env, true, nil
+	case <-timer.C:
+		return nil, false, nil
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
+	}
+}
+
+func (m *mockExecutor) AbandonRequest(id message.ID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.pending, id)
+}
+
+func (m *mockExecutor) PendingRequests() []message.ID {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]message.ID, 0, len(m.pending))
+	for id := range m.pending {
+		out = append(out, id)
+	}
+	return out
+}
+
+func (m *mockExecutor) RequestInFlight(id message.ID) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.pending[id]
+	return ok
+}
+
+// newMockExec returns a ready mockExecutor.
 func newMockExec() *mockExecutor {
-	return &mockExecutor{caller: metatool.NewClient()}
+	return &mockExecutor{pending: make(map[message.ID]chan *message.Envelope)}
 }
 
-// defaultRC returns a RuntimeContext with a working mockIPC.
+// defaultRC returns a RuntimeContext marking a live turn.
 func defaultRC() metatool.RuntimeContext {
 	return metatool.RuntimeContext{
-		IPC: &mockIPC{
-			channelID: "ch-test",
-			actorID:   "agent:test",
-		},
 		Trigger: metatool.Trigger{
+			Envelope:      message.Envelope{ID: "trig-1", ChannelID: "ch-test"},
 			CorrelationID: "corr-1",
 		},
 	}
@@ -115,10 +158,10 @@ func TestExecuteCallActor_NilExecutor(t *testing.T) {
 	assertIsError(t, rv, "internal_error")
 }
 
-func TestExecuteCallActor_NilIPC(t *testing.T) {
+func TestExecuteCallActor_OutsideTurn(t *testing.T) {
 	exec := newMockExec()
 	params, _ := json.Marshal(map[string]any{"actor_id": "tool:x", "type": "x.do"})
-	rc := metatool.RuntimeContext{IPC: nil}
+	rc := metatool.RuntimeContext{} // zero trigger = outside a turn
 	rv := metatool.ExecuteCallActor(context.Background(), params, exec, rc)
 	assertIsError(t, rv, "internal_error")
 }
@@ -263,9 +306,9 @@ func TestExecuteListActors_NilExecutor(t *testing.T) {
 	assertIsError(t, rv, "")
 }
 
-func TestExecuteListActors_NilIPC(t *testing.T) {
+func TestExecuteListActors_OutsideTurn(t *testing.T) {
 	exec := newMockExec()
-	rc := metatool.RuntimeContext{IPC: nil}
+	rc := metatool.RuntimeContext{} // zero trigger = outside a turn
 	rv := metatool.ExecuteListActors(context.Background(), exec, rc)
 	assertIsError(t, rv, "")
 }
@@ -352,10 +395,10 @@ func TestExecuteDescribeActor_InvalidJSON(t *testing.T) {
 	assertIsError(t, rv, "payload_invalid")
 }
 
-func TestExecuteDescribeActor_NilIPC(t *testing.T) {
+func TestExecuteDescribeActor_OutsideTurn(t *testing.T) {
 	exec := newMockExec()
 	params, _ := json.Marshal(map[string]any{"actor_id": "tool:xhs"})
-	rc := metatool.RuntimeContext{IPC: nil}
+	rc := metatool.RuntimeContext{} // zero trigger = outside a turn
 	rv := metatool.ExecuteDescribeActor(context.Background(), params, exec, rc)
 	assertIsError(t, rv, "internal_error")
 }
@@ -426,10 +469,10 @@ func TestExecuteDescribeType_InvalidJSON(t *testing.T) {
 	assertIsError(t, rv, "payload_invalid")
 }
 
-func TestExecuteDescribeType_NilIPC(t *testing.T) {
+func TestExecuteDescribeType_OutsideTurn(t *testing.T) {
 	exec := newMockExec()
 	params, _ := json.Marshal(map[string]any{"actor_id": "tool:xhs", "type": "xhs.publish"})
-	rc := metatool.RuntimeContext{IPC: nil}
+	rc := metatool.RuntimeContext{} // zero trigger = outside a turn
 	rv := metatool.ExecuteDescribeType(context.Background(), params, exec, rc)
 	assertIsError(t, rv, "internal_error")
 }
@@ -514,7 +557,7 @@ func TestExecuteAwaitResult_SuccessFinalDelivered(t *testing.T) {
 	reqID := message.ID("req-42")
 
 	// Register a future that expects await.
-	exec.caller.Futures.Register(reqID, true)
+	exec.register(reqID)
 
 	// Deliver a final response before Await is called (buffered for expectsAwait=true).
 	finalEnv := &message.Envelope{
@@ -523,7 +566,7 @@ func TestExecuteAwaitResult_SuccessFinalDelivered(t *testing.T) {
 		Kind:     message.KindResponse,
 		Payload:  json.RawMessage(`{"status":"completed","data":"hello"}`),
 	}
-	exec.caller.Deliver(finalEnv)
+	exec.deliver(reqID, finalEnv)
 
 	params, _ := json.Marshal(map[string]any{"request_id": "req-42"})
 	rv := metatool.ExecuteAwaitResult(context.Background(), params, exec)
@@ -544,7 +587,7 @@ func TestExecuteAwaitResult_Timeout(t *testing.T) {
 	reqID := message.ID("req-timeout")
 
 	// Register a future but don't deliver anything.
-	exec.caller.Futures.Register(reqID, true)
+	exec.register(reqID)
 
 	params, _ := json.Marshal(map[string]any{
 		"request_id": "req-timeout",
@@ -567,7 +610,7 @@ func TestExecuteAwaitResult_ContextCancelled(t *testing.T) {
 	exec := newMockExec()
 	reqID := message.ID("req-cancel")
 
-	exec.caller.Futures.Register(reqID, true)
+	exec.register(reqID)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	// Cancel immediately.
@@ -590,7 +633,7 @@ func TestExecuteAwaitResult_WhitespaceRequestID(t *testing.T) {
 func TestExecuteAwaitResult_CustomTimeout(t *testing.T) {
 	exec := newMockExec()
 	reqID := message.ID("req-custom-to")
-	exec.caller.Futures.Register(reqID, true)
+	exec.register(reqID)
 
 	// Deliver the final quickly via a goroutine.
 	go func() {
@@ -601,7 +644,7 @@ func TestExecuteAwaitResult_CustomTimeout(t *testing.T) {
 			Kind:     message.KindResponse,
 			Payload:  json.RawMessage(`{"status":"completed","result":"done"}`),
 		}
-		exec.caller.Deliver(finalEnv)
+		exec.deliver(reqID, finalEnv)
 	}()
 
 	params, _ := json.Marshal(map[string]any{
@@ -639,7 +682,7 @@ func TestExecuteAbandon_Success(t *testing.T) {
 	reqID := message.ID("req-abn")
 
 	// Register a future so there is something to abandon.
-	exec.caller.Futures.Register(reqID, false)
+	exec.register(reqID)
 
 	params, _ := json.Marshal(map[string]any{"request_id": "req-abn"})
 	rv := metatool.ExecuteAbandon(context.Background(), params, exec)
@@ -653,7 +696,7 @@ func TestExecuteAbandon_Success(t *testing.T) {
 	}
 
 	// Verify the future is gone.
-	if exec.caller.Futures.Registered(reqID) {
+	if exec.RequestInFlight(reqID) {
 		t.Fatal("expected future to be cancelled after abandon")
 	}
 }
@@ -701,8 +744,8 @@ func TestExecuteListPending_EmptyList(t *testing.T) {
 
 func TestExecuteListPending_WithPending(t *testing.T) {
 	exec := newMockExec()
-	exec.caller.Futures.Register("req-1", false)
-	exec.caller.Futures.Register("req-2", true)
+	exec.register("req-1")
+	exec.register("req-2")
 
 	rv := metatool.ExecuteListPending(context.Background(), exec)
 	assertNotError(t, rv)
@@ -729,10 +772,10 @@ func TestExecuteListPending_WithPending(t *testing.T) {
 
 func TestExecuteListPending_AfterAbandon(t *testing.T) {
 	exec := newMockExec()
-	exec.caller.Futures.Register("req-x", false)
+	exec.register("req-x")
 
 	// Abandon it.
-	exec.caller.Abandon("req-x")
+	exec.AbandonRequest("req-x")
 
 	rv := metatool.ExecuteListPending(context.Background(), exec)
 	assertNotError(t, rv)
@@ -772,7 +815,7 @@ func TestExecuteCallActor_ErrorResultNormalized(t *testing.T) {
 func TestExecuteAwaitResult_FailedResponse(t *testing.T) {
 	exec := newMockExec()
 	reqID := message.ID("req-fail")
-	exec.caller.Futures.Register(reqID, true)
+	exec.register(reqID)
 
 	finalEnv := &message.Envelope{
 		ID:       "resp-fail",
@@ -780,7 +823,7 @@ func TestExecuteAwaitResult_FailedResponse(t *testing.T) {
 		Kind:     message.KindResponse,
 		Payload:  json.RawMessage(`{"status":"failed","reason":"adapter_error"}`),
 	}
-	exec.caller.Deliver(finalEnv)
+	exec.deliver(reqID, finalEnv)
 
 	params, _ := json.Marshal(map[string]any{"request_id": "req-fail"})
 	rv := metatool.ExecuteAwaitResult(context.Background(), params, exec)

@@ -81,7 +81,7 @@ func ExecuteCallActor(ctx context.Context, params json.RawMessage, exec Executor
 		return PayloadInvalidError("call_actor", "type is required (call list_actors to discover)", payloadHint(p.ActorID, p.Type))
 	}
 
-	if rc.IPC == nil {
+	if !rc.InTurn() {
 		return NewError("call_actor", InternalError, "call_actor invoked outside a bridge turn", "Retry from inside an active bridge turn", nil)
 	}
 

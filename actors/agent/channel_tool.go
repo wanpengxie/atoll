@@ -16,12 +16,9 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
+// channelToolRuntimeKey carries the current turn's trigger item through the
+// tool-execution context so meta tools can thread parent/correlation.
 type channelToolRuntimeKey struct{}
-
-type channelToolRuntime struct {
-	ipc     IPCFacade
-	trigger TriggerPayload
-}
 
 const (
 	waitFastPath  = metatool.WaitFastPath
@@ -47,45 +44,51 @@ func (b *Bridge) channelTools() []gokimitools.Tool {
 
 // --- metatool.Executor implementation on Bridge ---
 
-// extractRuntimeContext pulls IPC + Trigger from ctx for metatool Execute functions.
-func extractRuntimeContext(ctx context.Context) (metatool.RuntimeContext, bool) {
-	runtime, ok := ctx.Value(channelToolRuntimeKey{}).(channelToolRuntime)
-	if !ok || runtime.ipc == nil {
-		return metatool.RuntimeContext{}, false
+// extractRuntimeContext pulls the trigger item from ctx for metatool
+// Execute functions. A missing item yields a zero RuntimeContext, which
+// the Execute functions reject as "outside a turn".
+func extractRuntimeContext(ctx context.Context) metatool.RuntimeContext {
+	item, ok := ctx.Value(channelToolRuntimeKey{}).(turnItem)
+	if !ok {
+		return metatool.RuntimeContext{}
 	}
 	return metatool.RuntimeContext{
-		IPC: runtime.ipc,
 		Trigger: metatool.Trigger{
-			Envelope:      runtime.trigger.Envelope,
-			CorrelationID: runtime.trigger.CorrelationID,
+			Envelope:      item.env,
+			CorrelationID: item.env.CorrelationID,
 		},
-	}, true
+	}
 }
 
 // ExecuteRequest implements metatool.Executor.
 func (b *Bridge) ExecuteRequest(ctx context.Context, rc metatool.RuntimeContext, spec metatool.RequestSpec) metatool.ResultValue {
-	ipc := rc.IPC.(IPCFacade)
-	trigger := TriggerPayload{
-		Envelope:      rc.Trigger.Envelope,
-		CorrelationID: rc.Trigger.CorrelationID,
-	}
-	tr := b.executeChannelRequest(ctx, ipc, trigger, spec)
+	tr := b.executeChannelRequest(ctx, turnItem{env: rc.Trigger.Envelope}, spec)
 	return toResultValue(tr)
 }
 
 // ExecuteReservedRaw implements metatool.Executor.
 func (b *Bridge) ExecuteReservedRaw(ctx context.Context, rc metatool.RuntimeContext, spec metatool.RequestSpec) (json.RawMessage, bool) {
-	ipc := rc.IPC.(IPCFacade)
-	trigger := TriggerPayload{
-		Envelope:      rc.Trigger.Envelope,
-		CorrelationID: rc.Trigger.CorrelationID,
-	}
-	return b.executeReservedRequestRaw(ctx, ipc, trigger, spec)
+	return b.executeReservedRequestRaw(ctx, turnItem{env: rc.Trigger.Envelope}, spec)
 }
 
-// CallerInstance implements metatool.Executor.
-func (b *Bridge) CallerInstance() *metatool.Client {
-	return b.caller()
+// AwaitRequest implements metatool.Executor (await_result semantics).
+func (b *Bridge) AwaitRequest(ctx context.Context, id message.ID, window time.Duration) (*message.Envelope, bool, error) {
+	return b.futures.Await(ctx, id, window)
+}
+
+// AbandonRequest implements metatool.Executor (abandon semantics).
+func (b *Bridge) AbandonRequest(id message.ID) {
+	b.futures.Cancel(id)
+}
+
+// PendingRequests implements metatool.Executor (list_pending semantics).
+func (b *Bridge) PendingRequests() []message.ID {
+	return b.futures.Pending()
+}
+
+// RequestInFlight implements metatool.Executor.
+func (b *Bridge) RequestInFlight(id message.ID) bool {
+	return b.futures.Registered(id)
 }
 
 // --- go-kimi thin wrappers ---
@@ -101,10 +104,7 @@ func (t *CallActorTool) ParameterSchema() json.RawMessage {
 	return metatool.CloneRawJSON(metatool.CallActorSpec.Schema)
 }
 func (t *CallActorTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
-	rc, ok := extractRuntimeContext(ctx)
-	if !ok {
-		rc = metatool.RuntimeContext{} // IPC==nil triggers internal_error inside ExecuteCallActor
-	}
+	rc := extractRuntimeContext(ctx)
 	var exec metatool.Executor
 	if t != nil && t.bridge != nil {
 		exec = t.bridge
@@ -124,10 +124,7 @@ func (t *ListActorsTool) ParameterSchema() json.RawMessage {
 	return metatool.CloneRawJSON(metatool.ListActorsSpec.Schema)
 }
 func (t *ListActorsTool) Execute(ctx context.Context, _ json.RawMessage) (types.ToolResult, error) {
-	rc, ok := extractRuntimeContext(ctx)
-	if !ok {
-		rc = metatool.RuntimeContext{}
-	}
+	rc := extractRuntimeContext(ctx)
 	var exec metatool.Executor
 	if t != nil && t.bridge != nil {
 		exec = t.bridge
@@ -147,10 +144,7 @@ func (t *DescribeActorTool) ParameterSchema() json.RawMessage {
 	return metatool.CloneRawJSON(metatool.DescribeActorSpec.Schema)
 }
 func (t *DescribeActorTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
-	rc, ok := extractRuntimeContext(ctx)
-	if !ok {
-		rc = metatool.RuntimeContext{}
-	}
+	rc := extractRuntimeContext(ctx)
 	var exec metatool.Executor
 	if t != nil && t.bridge != nil {
 		exec = t.bridge
@@ -170,10 +164,7 @@ func (t *DescribeTypeTool) ParameterSchema() json.RawMessage {
 	return metatool.CloneRawJSON(metatool.DescribeTypeSpec.Schema)
 }
 func (t *DescribeTypeTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
-	rc, ok := extractRuntimeContext(ctx)
-	if !ok {
-		rc = metatool.RuntimeContext{}
-	}
+	rc := extractRuntimeContext(ctx)
 	var exec metatool.Executor
 	if t != nil && t.bridge != nil {
 		exec = t.bridge
@@ -266,66 +257,38 @@ func toResultValue(tr types.ToolResult) metatool.ResultValue {
 	}
 }
 
-// --- routeTriggers + executeChannelRequest / executeReservedRequestRaw ---
-// These stay on Bridge because they need Bridge internals (envelopeID, cfg.NowFn, caller).
+// --- channel request execution (the call face in action) ---
 
-// routeTriggers fans the daemon->worker trigger stream through the
-// worker-side caller helper.
-func (b *Bridge) routeTriggers(ctx context.Context, ipc IPCFacade, in <-chan TriggerPayload) <-chan TriggerPayload {
-	out := make(chan TriggerPayload, 32)
-	go func() {
-		defer close(out)
-		caller := b.caller()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case payload, ok := <-in:
-				if !ok {
-					return
-				}
-				if payload.Envelope.Kind == message.KindResponse && payload.Envelope.ParentID != "" {
-					env := payload.Envelope
-					_, final := behavior.ParseFinalStatus(env.Payload)
-					disp := caller.Deliver(&env)
-					surfaceAsTrigger := disp == metatool.NoActiveWaiter && final
-					if !surfaceAsTrigger {
-						if err := ackTrigger(ctx, ipc, payload, true, ""); err != nil {
-							return
-						}
-						continue
-					}
-				}
-				select {
-				case out <- payload:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
-	}()
-	return out
+// submitChannelRequest is the three-step call: register the future
+// (subscribe-before-send), commit the request through the harness, and
+// Arm closure author#2. Any failure unwinds the future registration.
+func (b *Bridge) submitChannelRequest(ctx context.Context, env message.Envelope, expectsAwait bool) error {
+	b.futures.Register(env.ID, expectsAwait)
+	if err := b.write(ctx, env); err != nil {
+		b.futures.Cancel(env.ID)
+		return err
+	}
+	b.armCaller(&env)
+	return nil
 }
 
 // executeChannelRequest is the generic envelope-dispatch fast-path.
 func (b *Bridge) executeChannelRequest(
 	ctx context.Context,
-	ipc IPCFacade,
-	trigger TriggerPayload,
+	item turnItem,
 	spec metatool.RequestSpec,
 ) types.ToolResult {
 	if spec.Timeout <= 0 {
 		spec.Timeout = metatool.DefaultTimeout
 	}
-	env, buildErr := b.buildChannelRequest(ipc, trigger, spec)
+	env, buildErr := b.buildChannelRequest(item, spec)
 	if buildErr != nil {
 		return channelToolErrorResult(spec.ToolName,
 			fmt.Sprintf("build channel request %s: %v", spec.EnvelopeType, buildErr))
 	}
 
-	caller := b.caller()
 	expectsAwait := spec.WaitMode != waitNone
-	if err := caller.Submit(ctx, ipc, env, expectsAwait); err != nil {
+	if err := b.submitChannelRequest(ctx, env, expectsAwait); err != nil {
 		return channelToolErrorResult(spec.ToolName,
 			fmt.Sprintf("emit channel request %s: %v", spec.EnvelopeType, err))
 	}
@@ -345,14 +308,17 @@ func (b *Bridge) executeChannelRequest(
 	default: // waitFastPath
 		window = metatool.ResolveFastPathWindow(spec.Timeout, metatool.DefaultTimeout, false)
 	}
+	if window > b.cfg.FastPathWindow && spec.WaitMode == waitFastPath {
+		window = b.cfg.FastPathWindow
+	}
 
 	if window <= 0 {
 		return ackToToolResult(spec.ToolName, ack)
 	}
 
-	finalEnv, ok, awaitErr := caller.Await(ctx, env.ID, window)
+	finalEnv, ok, awaitErr := b.futures.Await(ctx, env.ID, window)
 	if awaitErr != nil {
-		caller.Abandon(env.ID)
+		b.futures.Cancel(env.ID)
 		return channelToolErrorResult(spec.ToolName,
 			fmt.Sprintf("channel request %s wait failed: %v", spec.EnvelopeType, awaitErr))
 	}
@@ -366,25 +332,23 @@ func (b *Bridge) executeChannelRequest(
 // FINAL response payload as raw JSON.
 func (b *Bridge) executeReservedRequestRaw(
 	ctx context.Context,
-	ipc IPCFacade,
-	trigger TriggerPayload,
+	item turnItem,
 	spec metatool.RequestSpec,
 ) (json.RawMessage, bool) {
 	if spec.Timeout <= 0 {
 		spec.Timeout = metatool.DefaultTimeout
 	}
-	env, buildErr := b.buildChannelRequest(ipc, trigger, spec)
+	env, buildErr := b.buildChannelRequest(item, spec)
 	if buildErr != nil {
 		return nil, false
 	}
-	caller := b.caller()
-	if err := caller.Submit(ctx, ipc, env, true); err != nil {
+	if err := b.submitChannelRequest(ctx, env, true); err != nil {
 		return nil, false
 	}
 	window := metatool.ResolveFastPathWindow(spec.Timeout, metatool.DefaultTimeout, true)
-	finalEnv, ok, awaitErr := caller.Await(ctx, env.ID, window)
+	finalEnv, ok, awaitErr := b.futures.Await(ctx, env.ID, window)
 	if awaitErr != nil {
-		caller.Abandon(env.ID)
+		b.futures.Cancel(env.ID)
 		return nil, false
 	}
 	if !ok || finalEnv == nil || finalEnv.Kind != message.KindResponse {
@@ -415,10 +379,6 @@ func ackToToolResult(toolName string, ack metatool.AckDescriptor) types.ToolResu
 	}
 }
 
-func channelToolCorrelationID(trigger TriggerPayload) message.ID {
-	return behavior.CorrelationID(trigger.CorrelationID, trigger.Envelope.CorrelationID, trigger.Envelope.ID)
-}
-
 func channelToolResultFromResponse(toolName string, env message.Envelope) types.ToolResult {
 	rv, isErr := metatool.ResultFromResponse(toolName, env)
 	if isErr {
@@ -428,9 +388,8 @@ func channelToolResultFromResponse(toolName string, env message.Envelope) types.
 			IsError: true,
 		}
 	}
-	// Success: the original code returned `toolPayloadValue(env.Payload)` which
-	// could be any type (map, string, etc.) — not wrapped in a map. Preserve
-	// that behavior for go-kimi compatibility.
+	// Success: return the raw payload value (map, string, etc.) — not
+	// wrapped in a map — for go-kimi compatibility.
 	value := toolPayloadValue(env.Payload)
 	return types.ToolResult{
 		Name:  toolName,
@@ -462,26 +421,27 @@ func toolPayloadValue(raw json.RawMessage) any {
 }
 
 // buildChannelRequest assembles the kind=request envelope for a channel tool
-// call through the behavior call-face builder (ONE home for request defaults),
-// then stamps the binding-edge fields this IPC path owns (deterministic
-// per-worker id, TSReceived).
+// call through the behavior call-face builder (ONE home for request
+// defaults), then stamps the binding-edge fields this path owns
+// (deterministic per-actor id, TSReceived). ExpiresAt carries the caller's
+// deadline so author#2's Arm has a timer to set.
 func (b *Bridge) buildChannelRequest(
-	ipc IPCFacade,
-	trigger TriggerPayload,
+	item turnItem,
 	spec metatool.RequestSpec,
 ) (message.Envelope, error) {
 	now := b.cfg.NowFn()
-	env, err := behavior.BuildRequest(ipc.ChannelID(),
-		message.Sender{Kind: actor.KindAgent, ID: ipc.WorkerActorID()},
+	expiresAt := now + int64(spec.Timeout/time.Millisecond)
+	env, err := behavior.BuildRequest(b.chID, b.sender(),
 		func() time.Time { return time.UnixMilli(now) },
 		behavior.RequestSpec{
-			ID:            b.envelopeID(ipc, now),
+			ID:            b.envelopeID(now),
 			Type:          spec.EnvelopeType,
 			Payload:       spec.Payload,
 			Audience:      message.Audience{actor.ActorID(spec.HandlerActorID)},
 			Visibility:    message.VisibilityPublic,
-			ParentID:      trigger.Envelope.ID,
-			CorrelationID: channelToolCorrelationID(trigger),
+			ParentID:      item.env.ID,
+			CorrelationID: item.correlationID(),
+			ExpiresAt:     &expiresAt,
 		})
 	if err != nil {
 		return message.Envelope{}, err

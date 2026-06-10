@@ -4,9 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
@@ -25,7 +24,9 @@ type ToolSpec struct {
 // runtimes implement it too.
 //
 // The interface is derived from what the meta-tool protocol requires, not
-// from any downstream Bridge shape.
+// from any downstream Bridge shape. The futures mechanism behind the async
+// methods is the executor's PRIVATE internals (an agent-side collector
+// behind a non-blocking Receive) — metatool only names the semantics.
 type Executor interface {
 	// ExecuteRequest emits an envelope request through the fast-path and
 	// returns the result (inline final, ack, or error).
@@ -36,17 +37,19 @@ type Executor interface {
 	// failure or timeout.
 	ExecuteReservedRaw(ctx context.Context, rc RuntimeContext, spec RequestSpec) (json.RawMessage, bool)
 
-	// CallerInstance returns the worker-side caller helper for direct
-	// future inspection (await_result / abandon / list_pending).
-	CallerInstance() *Client
-}
+	// AwaitRequest blocks up to window for the final response of an
+	// in-flight request (await_result semantics).
+	AwaitRequest(ctx context.Context, id message.ID, window time.Duration) (final *message.Envelope, ok bool, err error)
 
-// IPC is the minimal envelope-writing surface meta tools need. It is a
-// subset of the worker IPC facade.
-type IPC interface {
-	WriteEnvelope(ctx context.Context, env message.Envelope) error
-	ChannelID() channel.ID
-	WorkerActorID() actor.ActorID
+	// AbandonRequest drops the local waiter for id (abandon semantics —
+	// no downstream cancel; the result still returns as a new message).
+	AbandonRequest(id message.ID)
+
+	// PendingRequests returns the in-flight request ids (list_pending).
+	PendingRequests() []message.ID
+
+	// RequestInFlight reports whether id is currently tracked.
+	RequestInFlight(id message.ID) bool
 }
 
 // Trigger carries the envelope + correlation id that triggered the
@@ -57,11 +60,14 @@ type Trigger struct {
 }
 
 // RuntimeContext is the per-turn context passed into every meta tool
-// Execute function.
+// Execute function. A zero Trigger (empty envelope id) marks an
+// invocation outside a live turn.
 type RuntimeContext struct {
-	IPC     IPC
 	Trigger Trigger
 }
+
+// InTurn reports whether this context belongs to a live turn.
+func (rc RuntimeContext) InTurn() bool { return rc.Trigger.Envelope.ID != "" }
 
 // payloadHint builds the recovery hint for a payload_invalid error.
 // Tool names (list_actors, describe_type) live here in metatool, not in

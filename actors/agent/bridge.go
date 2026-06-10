@@ -1,3 +1,20 @@
+// Package agent is the LLM agent actor: the go-kimi cognitive engine bound
+// to the one actor face (lib/behavior). The Bridge is a host-agnostic
+// actorrt.Actor implementation — the same package is spawned as a server
+// cell (built-in fallback agent) or installed by a daemon registry (fat
+// daemon plugin); cell/port is the channel runtime's link attribute, never
+// this implementation's concern.
+//
+// Structure (async is the STRUCTURE, sync is an EXPERIENCE):
+//   - Receive (cell goroutine) never blocks: requests/events enqueue a turn;
+//     responses Match the author#2 caller (disarm the timeout timer) and
+//     Deliver to the private futures (wake a bounded-window waiter), falling
+//     through as a new turn when nobody waits.
+//   - A private LLM loop goroutine (the CLIENT EDGE — blocking is legal
+//     here, §2.7) runs go-kimi turns serially; tool calls build requests via
+//     behavior.BuildRequest, Arm author#2, and wait a bounded fast-path
+//     window for the sync experience the model's training distribution
+//     expects.
 package agent
 
 import (
@@ -27,34 +44,30 @@ import (
 	_ "github.com/wanpengxie/go-kimi/pkg/kimi/llm/anthropic"
 
 	"github.com/wanpengxie/ActOS/lib/behavior"
-	"github.com/wanpengxie/ActOS/lib/metatool"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/ActOS/runtime/actorrt"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-// Env keys read at Config.NewFromEnv time. Kept exported so tests and
-// cmd/worker share one source of truth for the env contract.
+// Env keys read at NewConfigFromEnv time. Kept exported so tests and the
+// daemon/server assembly share one source of truth for the env contract.
 const (
 	EnvKeyAPIKey  = "KIMI_API_KEY"
 	EnvKeyBaseURL = "KIMI_BASE_URL"
 	EnvKeyModel   = "KIMI_MODEL"
 
-	// EnvKeyChannelType / EnvKeyDomainPrompt are inherited from the
-	// worker spawn env (M1.6-T5 phase-3). They feed the prompt-cache
+	// EnvKeyChannelType / EnvKeyDomainPrompt feed the prompt-cache
 	// friendly base prompt (L4 §2.4 + L0-L2 platform teaching).
 	EnvKeyChannelType  = "COAGENT_CHANNEL_TYPE"
 	EnvKeyDomainPrompt = "COAGENT_DOMAIN_PROMPT"
-
-	// EnvKeyChannelID identifies the daemon-owned channel for this worker.
-	// The worker never receives a frozen actor/type snapshot — current
-	// actor/type state is queried live through the actor.list / actor.describe
-	// reserved envelope calls.
-	EnvKeyChannelID = "COAGENT_CHANNEL_ID"
 )
 
-// ChannelContext, ActorInfo, TypeInfo, FieldDoc, ErrorDoc are defined
-// in lib/introspect. Call workflow types are in lib/metatool.
+// turnQueueCap bounds the turn backlog. On overflow the OLDEST queued turn
+// is evicted (newest input wins) and a system-visibility note records the
+// drop — Receive never blocks (cell serial contract).
+const turnQueueCap = 64
 
 // Config drives a Bridge. All fields optional unless documented; sane
 // defaults come from NewConfigFromEnv.
@@ -76,22 +89,19 @@ type Config struct {
 	ProviderType string
 
 	// SystemPrompt is the stable prefix written to the kimi agent
-	// SystemPrompt override. cmd/worker assembles this from
-	// L0-L2 platform teaching + the L4 domain prompt the daemon
-	// injects via COAGENT_DOMAIN_PROMPT. Cached by the provider so
-	// long as it stays byte-stable across turns.
+	// SystemPrompt override. The host assembles this from the platform
+	// teaching prompt + the channel's domain prompt. Cached by the
+	// provider so long as it stays byte-stable across turns.
 	SystemPrompt string
-
-	// MaxTurns caps the bridge — same semantics as MockBridge. A
-	// non-positive value means UNLIMITED: the LLM itself decides when
-	// to stop via stop_reason=end_turn / stop, and external cancellation
-	// (ctx done, IPC EOF) is the only hard-stop signal. Tests can set
-	// a positive cap to bound runs deterministically.
-	MaxTurns int
 
 	// WorkDir is the directory go-kimi uses for sessions / wire log /
 	// approvals. Defaults to a per-process tmp dir.
 	WorkDir string
+
+	// FastPathWindow bounds the inline wait of one tool call before it
+	// degrades to an ack (the sync EXPERIENCE for the model). Defaults
+	// to metatool's 15s fast-path.
+	FastPathWindow time.Duration
 
 	// NowFn returns unix-ms. Defaults to time.Now.UnixMilli.
 	NowFn func() int64
@@ -99,7 +109,7 @@ type Config struct {
 
 // NewConfigFromEnv populates a Config from the documented env vars.
 // Returns an error when a required field (KIMI_API_KEY) is missing,
-// so cmd/worker can surface a clean fail-fast at flag-parse time.
+// so the host can surface a clean fail-fast at assembly time.
 func NewConfigFromEnv(systemPrompt string) (Config, error) {
 	cfg := Config{
 		APIKey:       strings.TrimSpace(os.Getenv(EnvKeyAPIKey)),
@@ -115,52 +125,6 @@ func NewConfigFromEnv(systemPrompt string) (Config, error) {
 		return Config{}, fmt.Errorf("kimi: %s env required (pick a deepseek model id from your provider)", EnvKeyModel)
 	}
 	return cfg, nil
-}
-
-// IPCFacade is the worker-side IPC surface the Bridge depends on. It
-// matches the M1.6-T1 runtime/worker.IPCClient shape closely enough
-// that cmd/worker can plug one into the other without a deeper
-// abstraction layer. Keeping it here (rather than importing
-// runtime/worker.IPCClient directly) means adapters/llm/kimi stays
-// inside the .go-arch-lint adapters→{kernel, adapters, pkg} envelope.
-type IPCFacade interface {
-	// ChannelID returns the post-handshake channel id snapshot.
-	ChannelID() channel.ID
-	// WorkerID returns the worker process id snapshot.
-	WorkerID() string
-	// WorkerActorID returns the agent sender id stamped on every emitted
-	// envelope.
-	WorkerActorID() actor.ActorID
-	// Triggers returns the daemon → worker push channel. Bridge ranges
-	// over it; the channel closes when the IPC link tears down.
-	Triggers() <-chan TriggerPayload
-	// WriteEnvelope writes one envelope through the daemon harness chain.
-	// Bridge does not consult the WriteMessageResult (M1.6 mock bridge
-	// also discards it) so a single error return is sufficient.
-	WriteEnvelope(ctx context.Context, env message.Envelope) error
-}
-
-type triggerAcker interface {
-	AckTrigger(ctx context.Context, trigger TriggerPayload, accepted bool, reason string) error
-}
-
-// TriggerPayload is the local mirror of runtime/ipc.TriggerPayload —
-// duplicated here so adapters/llm/kimi avoids pulling runtime/** in.
-// cmd/worker writes a one-liner converter that fan-outs the IPCClient
-// trigger stream into this shape.
-type TriggerPayload struct {
-	Envelope      message.Envelope
-	CorrelationID message.ID
-	Cursor        int64
-	AckID         string
-}
-
-func ackTrigger(ctx context.Context, ipc IPCFacade, trigger TriggerPayload, accepted bool, reason string) error {
-	acker, ok := ipc.(triggerAcker)
-	if !ok {
-		return nil
-	}
-	return acker.AckTrigger(ctx, trigger, accepted, reason)
 }
 
 type terminalEmittedError struct {
@@ -181,32 +145,60 @@ func isTerminalEmittedError(err error) bool {
 	return errors.As(err, &handled)
 }
 
-// Bridge drives one go-kimi Agent per worker process. Run blocks until
-// MaxTurns, the trigger channel closes, ctx is cancelled, or the LLM
-// returns a fatal error. Errors are emitted as a terminal failed-state
-// envelope (see classifyLLMError) before Run returns.
+// turnItem is one mailbox envelope awaiting serial execution by the
+// private LLM loop.
+type turnItem struct {
+	env message.Envelope
+}
+
+// correlationOf resolves the correlation anchor for a turn: the trigger
+// envelope's correlation id, falling back to its own id.
+func (t turnItem) correlationID() message.ID {
+	return behavior.CorrelationID("", t.env.CorrelationID, t.env.ID)
+}
+
+// Bridge drives one go-kimi Agent as an actor cell. It implements
+// actorrt.Actor (Receive) plus the Starter/Stopper lifecycle hooks; the
+// runtime guarantees all three run serially on the cell goroutine.
 type Bridge struct {
-	cfg Config
+	cfg    Config
+	self   actor.ActorID
+	chID   channel.ID
+	writer harness.Writer
 
 	mu              sync.Mutex
 	agentNew        func(gokimi.AgentConfig) (kimiAgent, error) // test hook
-	testWireEmitter wire.Emitter                                // populated by Run; tests reach in via export_test.go
+	testWireEmitter wire.Emitter                                // populated by Start; tests reach in via export_test.go
 	envelopeSeq     atomic.Uint64
 
-	// caller is the worker-side caller helper (owns its own
-	// requestCorrelator). Lazily built via caller(); guarded by mu.
-	callerHelper *metatool.Client
-}
+	// futures is the agent-PRIVATE collector for the bounded fast-path
+	// wait (the client-edge half; never exposed outside this package).
+	futures *requestCorrelator
+	// caller is closure author#2: arms a timeout terminal per outbound
+	// request, disarmed by Receive's Match on the response.
+	//
+	// behavior.Caller is lock-free by contract (all touches on one cell
+	// goroutine). This agent crosses two goroutines — Arm fires on the
+	// private LLM loop, Match on the cell goroutine — so the agent guards
+	// every caller touch with callerMu (downstream adapts; the base stays
+	// lock-free for single-goroutine actors).
+	callerMu sync.Mutex
+	caller   *behavior.Caller
 
-// caller returns the bridge's worker-side caller helper, building it lazily
-// on first use. One registry instance per Bridge process.
-func (b *Bridge) caller() *metatool.Client {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.callerHelper == nil {
-		b.callerHelper = metatool.NewClient()
-	}
-	return b.callerHelper
+	// Private LLM loop plumbing — created in Start, torn down in Stop.
+	turnQ    chan turnItem
+	stopOnce sync.Once
+	loopStop context.CancelFunc
+	loopWG   sync.WaitGroup
+	kagent   kimiAgent
+	wireCh   chan wire.WireMessage
+
+	// fatal records an unrecoverable loop failure. The next Receive
+	// panics with it so the cell dies POSITIVELY (death edge → author#3
+	// reaps, presence drops, fallback routing takes over) instead of
+	// silently wedging.
+	fatalMu sync.Mutex
+	fatal   error
 }
 
 // kimiAgent is the subset of go-kimi.Agent the bridge consumes. Carved
@@ -216,22 +208,33 @@ type kimiAgent interface {
 	Close() error
 }
 
-// NewBridge builds a Bridge. Returns an error when cfg.APIKey is empty.
-func NewBridge(cfg Config) (*Bridge, error) {
+// NewBridge builds a Bridge bound to its identity and writing seam. The
+// host closes over (self, chID, writer) at assembly time — the factory
+// shape is func(w harness.Writer) actorrt.Actor.
+func NewBridge(cfg Config, self actor.ActorID, chID channel.ID, w harness.Writer) (*Bridge, error) {
 	if cfg.APIKey == "" {
 		return nil, errors.New("kimi: Config.APIKey empty")
 	}
 	if cfg.Model == "" {
 		return nil, errors.New("kimi: Config.Model empty")
 	}
+	if self == "" {
+		return nil, errors.New("kimi: actor id empty")
+	}
+	if chID == "" {
+		return nil, errors.New("kimi: channel id empty")
+	}
+	if w == nil {
+		return nil, errors.New("kimi: writer nil")
+	}
 	if cfg.ProviderType == "" {
 		cfg.ProviderType = "anthropic"
 	}
-	// MaxTurns <= 0 means UNLIMITED. The Run loop checks `> 0` before
-	// enforcing the cap so daemon-spawned bridges never get prematurely
-	// truncated.
 	if cfg.NowFn == nil {
 		cfg.NowFn = func() int64 { return time.Now().UnixMilli() }
+	}
+	if cfg.FastPathWindow <= 0 {
+		cfg.FastPathWindow = 15 * time.Second
 	}
 	if cfg.WorkDir == "" {
 		tmp, err := os.MkdirTemp("", "coagent-kimi-")
@@ -241,39 +244,57 @@ func NewBridge(cfg Config) (*Bridge, error) {
 		cfg.WorkDir = tmp
 	}
 
-	b := &Bridge{cfg: cfg}
+	b := &Bridge{
+		cfg:     cfg,
+		self:    self,
+		chID:    chID,
+		writer:  w,
+		futures: newRequestCorrelator(),
+	}
 	b.agentNew = b.defaultAgentFactory
 	return b, nil
 }
+
+var _ actorrt.Actor = (*Bridge)(nil)
+var _ actorrt.Starter = (*Bridge)(nil)
+var _ actorrt.Stopper = (*Bridge)(nil)
 
 // defaultAgentFactory wraps gokimi.NewAgent + the kimiAgent shim.
 func (b *Bridge) defaultAgentFactory(ac gokimi.AgentConfig) (kimiAgent, error) {
 	return gokimi.NewAgent(ac)
 }
 
-// Run executes one worker reaction loop. Returns nil on graceful exit
-// (max turns reached, trigger channel closed, terminal failed envelope
-// emitted) and propagates ctx.Err on cancellation.
-//
-// Run is single-shot per worker process. A single go-kimi Agent is built
-// once and reused across all turns; go-kimi's SoulContext.Append already
-// preserves history correctly now that adjacent TextPart runs are
-// collapsed upstream (go-kimi commit 5336deb removed the chunked-content
-// self-perpetuation bug at every layer that touches ContentParts —
-// streaming accumulation, wire merger, anthropic encoder, and the
-// normalizeHistory read defense). The bridge no longer needs to rebuild
-// the agent or sanitize context.jsonl between turns.
-func (b *Bridge) Run(ctx context.Context, ipc IPCFacade) error {
-	if ipc == nil {
-		return errors.New("kimi: Run nil ipc facade")
-	}
-	if ipc.WorkerActorID() == "" {
-		return errors.New("kimi: Run actor id empty (handshake?)")
-	}
+func (b *Bridge) sender() message.Sender {
+	return message.Sender{Kind: actor.KindAgent, ID: b.self}
+}
 
+func (b *Bridge) clock() time.Time { return time.UnixMilli(b.cfg.NowFn()) }
+
+// armCaller / matchCaller serialize author#2 touches across the cell
+// goroutine (Match in Receive) and the private loop (Arm in tool calls).
+func (b *Bridge) armCaller(env *message.Envelope) {
+	b.callerMu.Lock()
+	defer b.callerMu.Unlock()
+	if b.caller != nil {
+		b.caller.Arm(env)
+	}
+}
+
+func (b *Bridge) matchCaller(env *message.Envelope) {
+	b.callerMu.Lock()
+	defer b.callerMu.Unlock()
+	if b.caller != nil {
+		b.caller.Match(env)
+	}
+}
+
+// Start boots the cognitive engine and the private LLM loop. A boot
+// failure returns the error so the cell dies fast (positive death) —
+// no half-alive agent ever registers as serviceable.
+func (b *Bridge) Start(ctx context.Context, _ actorrt.ActorContext) error {
 	provider, err := b.buildProvider()
 	if err != nil {
-		return b.emitTerminalLLMError(ctx, ipc, err, "", "")
+		return err
 	}
 
 	wireCh := make(chan wire.WireMessage, 128)
@@ -282,137 +303,197 @@ func (b *Bridge) Run(ctx context.Context, ipc IPCFacade) error {
 	b.testWireEmitter = emitter
 	b.mu.Unlock()
 
-	agent, err := b.buildAgent(provider, emitter)
+	kagent, err := b.buildAgent(provider, emitter)
 	if err != nil {
-		return b.emitTerminalLLMError(ctx, ipc, err, "", "")
+		return err
 	}
-	defer func() {
-		if agent != nil {
-			_ = agent.Close()
+
+	// author#2: every outbound request arms a caller-scoped timeout
+	// terminal; Receive's Match disarms it when the response lands.
+	b.caller = behavior.NewCaller(b.sender(), b.writer, b.clock)
+
+	loopCtx, cancel := context.WithCancel(ctx)
+	b.loopStop = cancel
+	b.kagent = kagent
+	b.wireCh = wireCh
+	b.turnQ = make(chan turnItem, turnQueueCap)
+
+	b.loopWG.Add(1)
+	go b.runLoop(loopCtx)
+	return nil
+}
+
+// Stop tears the private loop down: cancel the in-flight turn, close the
+// queue, join the loop, disarm all author#2 timers, close the engine.
+// The runtime guarantees no Receive is in flight or will follow.
+func (b *Bridge) Stop(_ context.Context) error {
+	var closeErr error
+	b.stopOnce.Do(func() {
+		if b.loopStop != nil {
+			b.loopStop()
 		}
-	}()
-
-	runCtx, stopRouter := context.WithCancel(ctx)
-	defer stopRouter()
-
-	// §3 ack 三分 / §6 step1 — the trigger ACK is the ACCEPT signal only.
-	//
-	// The main loop reads each trigger, immediately ACKs "accepted", and
-	// hands the turn to a single background runner goroutine via an
-	// internal queue. The runner executes turns serially (go-kimi's Agent
-	// is not safe for concurrent Run and there is one session per process)
-	// and reports the result purely through envelope emits. Because accept
-	// is decoupled from turn completion, PushTrigger returns in ms-seconds
-	// and the daemon never times a long turn out on the trigger deadline.
-	//
-	//   accept   — this loop's ackTrigger(accepted) on dequeue.
-	//   complete — the agent.text envelope a turn emits (or the failed
-	//              terminal envelope on LLM error).
-	//   alive    — the heartbeat the IPC layer drives independently.
-	//
-	// Bounded retry + terminal closure for never-completing turns live in
-	// the daemon (scanLongPending); the bridge only guarantees accept is
-	// never blocked on the turn.
-	triggers := b.routeTriggers(runCtx, ipc, ipc.Triggers())
-	turnQueue := make(chan queuedTurn, 64)
-	turnErrCh := make(chan error, 1)
-
-	var runnerWG sync.WaitGroup
-	runnerWG.Add(1)
-	go func() {
-		defer runnerWG.Done()
-		for qt := range turnQueue {
-			if err := b.runTurn(ctx, ipc, agent, wireCh, qt.payload, qt.index); err != nil {
-				if !isTerminalEmittedError(err) {
-					// Lower-level write/consume failure. The trigger was
-					// already accepted, so it cannot be nacked; treat as
-					// fatal so the worker recycles. The daemon's bounded
-					// retry + long-pending closure drive the request to a
-					// terminal state.
-					select {
-					case turnErrCh <- err:
-					default:
-					}
-					return
-				}
-			}
+		if b.turnQ != nil {
+			close(b.turnQ)
 		}
-	}()
+		b.loopWG.Wait()
+		b.callerMu.Lock()
+		if b.caller != nil {
+			b.caller.Stop()
+		}
+		b.callerMu.Unlock()
+		if b.kagent != nil {
+			closeErr = b.kagent.Close()
+		}
+	})
+	return closeErr
+}
 
+// Receive is the mailbox entry — it NEVER blocks (cell serial contract).
+//
+//   - response envelopes: Match (author#2 disarm) then Deliver to the
+//     private futures; a final nobody waits for becomes a new turn (the
+//     async result feeding the next reasoning step).
+//   - everything else (requests, events): a new turn.
+func (b *Bridge) Receive(_ context.Context, env *message.Envelope) error {
+	b.fatalMu.Lock()
+	fatal := b.fatal
+	b.fatalMu.Unlock()
+	if fatal != nil {
+		// Positive death: the LLM loop is gone; a silent wedge would leave
+		// callers hanging until their own timeouts. Panic is recovered by
+		// the cell and published as the death edge (author#3 reaps).
+		panic(fmt.Sprintf("agent %s: llm loop dead: %v", b.self, fatal))
+	}
+	if env == nil {
+		return nil
+	}
+
+	if env.Kind == message.KindResponse && env.ParentID != "" {
+		b.matchCaller(env)
+		_, final := behavior.ParseFinalStatus(env.Payload)
+		disp := b.futures.Deliver(env)
+		if disp == noActiveWaiter && final {
+			b.enqueueTurn(*env)
+		}
+		return nil
+	}
+
+	b.enqueueTurn(*env)
+	return nil
+}
+
+// enqueueTurn pushes a turn without ever blocking: on overflow the oldest
+// queued turn is evicted (newest input wins) and a system-visibility note
+// records the drop.
+func (b *Bridge) enqueueTurn(env message.Envelope) {
+	item := turnItem{env: env}
+	select {
+	case b.turnQ <- item:
+		return
+	default:
+	}
+	// Queue full: evict the oldest, then push (both non-blocking — the
+	// private loop is the only consumer and Receive the only producer).
+	var dropped turnItem
+	select {
+	case dropped = <-b.turnQ:
+	default:
+	}
+	select {
+	case b.turnQ <- item:
+	default:
+	}
+	if dropped.env.ID != "" {
+		payload := map[string]any{
+			"text":        fmt.Sprintf("turn queue overflow: dropped oldest trigger %s (%s)", dropped.env.ID, dropped.env.Type),
+			"next_action": "dropped",
+		}
+		// Best-effort note; the write seam is concurrency-safe.
+		_ = b.emitEnvelope(context.Background(), turnItem{env: dropped.env}, "agent.text", message.VisibilitySystem, payload)
+	}
+}
+
+// runLoop is the private LLM loop — the client edge where blocking is
+// legal. Turns run strictly serially (go-kimi's Agent is not safe for
+// concurrent Run; one session per actor).
+func (b *Bridge) runLoop(ctx context.Context) {
+	defer b.loopWG.Done()
 	turns := 0
-	// stopAndDrain closes the queue, waits for the runner, and surfaces any
-	// fatal (non-terminal-emitted) turn error the runner recorded — so a
-	// worker-recycling failure is never lost to a racing triggers-close.
-	stopAndDrain := func() error {
-		close(turnQueue)
-		runnerWG.Wait()
-		select {
-		case err := <-turnErrCh:
-			return err
-		default:
-			return nil
-		}
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
-			if derr := stopAndDrain(); derr != nil {
-				return derr
-			}
-			return ctx.Err()
-		case err := <-turnErrCh:
-			// Drain the runner (already returned) and recycle the worker.
-			_ = stopAndDrain()
-			return err
-		case payload, ok := <-triggers:
+			return
+		case item, ok := <-b.turnQ:
 			if !ok {
-				return stopAndDrain()
+				return
 			}
 			turns++
-			turnIndex := turns
-
-			// ACCEPT immediately, then enqueue. The runner reports COMPLETE
-			// via envelope; accept latency stays independent of turn time.
-			if err := ackTrigger(ctx, ipc, payload, true, ""); err != nil {
-				_ = stopAndDrain()
-				return err
-			}
-			select {
-			case turnQueue <- queuedTurn{payload: payload, index: turnIndex}:
-			case <-ctx.Done():
-				_ = stopAndDrain()
-				return ctx.Err()
-			case err := <-turnErrCh:
-				_ = stopAndDrain()
-				return err
-			}
-
-			// MaxTurns > 0 enforces a cap (deterministic exit for tests).
-			// MaxTurns <= 0 (production default) lets the LLM drive cadence.
-			// We accept + enqueue the capped turn first so its work still
-			// runs, then drain the runner and emit the canonical terminal.
-			if b.cfg.MaxTurns > 0 && turnIndex >= b.cfg.MaxTurns {
-				if derr := stopAndDrain(); derr != nil {
-					return derr
+			if err := b.runTurn(ctx, item, turns); err != nil {
+				if isTerminalEmittedError(err) {
+					continue // failure already surfaced as a terminal envelope
 				}
-				if err := b.emitTerminal(ctx, ipc, payload, "agent.text", map[string]any{
-					"text":        "kimi bridge reached max_turns",
-					"next_action": "done",
-				}); err != nil {
-					return err
+				if errors.Is(err, context.Canceled) {
+					return
 				}
-				return nil
+				// Unrecoverable plumbing failure: record + die positively on
+				// the next contact.
+				b.fatalMu.Lock()
+				b.fatal = err
+				b.fatalMu.Unlock()
+				return
 			}
 		}
 	}
 }
 
-// queuedTurn is one accepted trigger awaiting serial execution by the
-// bridge's turn runner.
-type queuedTurn struct {
-	payload TriggerPayload
-	index   int
+// runTurn drives one Agent.Run call: it composes the user input from
+// the trigger envelope, kicks the agent in a goroutine, and consumes
+// wire events until the turn completes or the agent errors out.
+//
+// turnIndex is 1-based; it is stamped on every envelope this turn emits
+// so the UI / observability layer can order progress vs. text events.
+func (b *Bridge) runTurn(ctx context.Context, item turnItem, turnIndex int) error {
+	input := composeUserInput(item.env)
+
+	turnCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	turnCtx = context.WithValue(turnCtx, channelToolRuntimeKey{}, item)
+
+	// agent.Run drives wire events into wireCh; consumeWire collates
+	// them into envelopes. We signal turn completion via an explicit
+	// `agentDone` channel rather than closing wireCh — closing wireCh
+	// would prevent the next runTurn call from reusing the same agent.
+	agentDone := make(chan struct{})
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- b.kagent.Run(turnCtx, input)
+		close(agentDone)
+	}()
+
+	consumeErr := b.consumeWire(turnCtx, agentDone, item, turnIndex)
+	if consumeErr != nil {
+		cancel()
+		select {
+		case runErr := <-runErrCh:
+			if runErr != nil && !errors.Is(runErr, context.Canceled) {
+				// Agent.Run failed (e.g. provider 429 / 500 / auth) and
+				// consumeWire reported a missing TurnEnd. The provider
+				// error is the meaningful signal — emit a public failed
+				// terminal envelope so the LLM error surfaces in the
+				// channel log instead of being swallowed by the
+				// no-TurnEnd consumeErr.
+				return b.emitTerminalLLMError(ctx, runErr, item.env.ID, item.correlationID())
+			}
+			return consumeErr
+		case <-ctx.Done():
+			return errors.Join(consumeErr, ctx.Err())
+		}
+	}
+	runErr := <-runErrCh
+	if runErr != nil {
+		return b.emitTerminalLLMError(ctx, runErr, item.env.ID, item.correlationID())
+	}
+	return nil
 }
 
 // buildAgent builds a fresh kimiAgent bound to (workDir, emitter,
@@ -433,7 +514,7 @@ func (b *Bridge) buildAgent(provider llm.ChatProvider, emitter wire.Emitter) (ki
 		WireEmitter:     emitter,
 		AdditionalTools: b.channelTools(),
 		// SkillRoots: empty non-nil slice = hermetic skill discovery.
-		// coagent's worker MUST NOT pick up arbitrary SKILL.md files from
+		// coagent's agent MUST NOT pick up arbitrary SKILL.md files from
 		// the user's $HOME/.kimi/skills (those belong to other tools like
 		// Claude Code's skill catalog). go-kimi's DefaultSkillRoots would
 		// otherwise scan there and either inject unrelated skills into
@@ -445,69 +526,6 @@ func (b *Bridge) buildAgent(provider llm.ChatProvider, emitter wire.Emitter) (ki
 			Model:        b.cfg.Model,
 		},
 	})
-}
-
-// runTurn drives one Agent.Run call: it composes the user input from
-// the trigger envelope, kicks the agent in a goroutine, and consumes
-// wire events until the turn completes or the agent errors out.
-//
-// turnIndex is 1-based; it is stamped on every envelope this turn emits
-// so the UI / observability layer can order progress vs. text events.
-func (b *Bridge) runTurn(
-	ctx context.Context,
-	ipc IPCFacade,
-	agent kimiAgent,
-	wireCh chan wire.WireMessage,
-	trigger TriggerPayload,
-	turnIndex int,
-) error {
-	input, err := composeUserInput(trigger)
-	if err != nil {
-		return b.emitTerminalLLMError(ctx, ipc, err, trigger.Envelope.ID, terminalErrorCorrelationID(trigger))
-	}
-
-	turnCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	turnCtx = context.WithValue(turnCtx, channelToolRuntimeKey{}, channelToolRuntime{
-		ipc:     ipc,
-		trigger: trigger,
-	})
-
-	// agent.Run drives wire events into wireCh; consumeWire collates
-	// them into envelopes. We signal turn completion via an explicit
-	// `agentDone` channel rather than closing wireCh — closing wireCh
-	// would prevent the next runTurn call from reusing the same agent.
-	agentDone := make(chan struct{})
-	runErrCh := make(chan error, 1)
-	go func() {
-		runErrCh <- agent.Run(turnCtx, input)
-		close(agentDone)
-	}()
-
-	consumeErr := b.consumeWire(turnCtx, ipc, wireCh, agentDone, trigger, turnIndex)
-	if consumeErr != nil {
-		cancel()
-		select {
-		case runErr := <-runErrCh:
-			if runErr != nil && !errors.Is(runErr, context.Canceled) {
-				// Agent.Run failed (e.g. provider 429 / 500 / auth) and
-				// consumeWire reported a missing TurnEnd. The provider
-				// error is the meaningful signal — emit a public failed
-				// terminal envelope so the LLM error surfaces in the
-				// channel log instead of being swallowed by the
-				// no-TurnEnd consumeErr.
-				return b.emitTerminalLLMError(ctx, ipc, runErr, trigger.Envelope.ID, terminalErrorCorrelationID(trigger))
-			}
-			return consumeErr
-		case <-ctx.Done():
-			return errors.Join(consumeErr, ctx.Err())
-		}
-	}
-	runErr := <-runErrCh
-	if runErr != nil {
-		return b.emitTerminalLLMError(ctx, ipc, runErr, trigger.Envelope.ID, terminalErrorCorrelationID(trigger))
-	}
-	return nil
 }
 
 // turnState tracks the in-flight signals the bridge observes inside a
@@ -544,17 +562,13 @@ type turnState struct {
 // into the protocol envelope layer (the One Law: business change = new
 // message; a chunk is not a business change). Per proto-layer0
 // single-response semantics a request gets one final response envelope;
-// intermediate progress is the same `agent.text`
-// type carrying `visibility=system` per impl-vocabulary §2.3 (the
-// historical standalone `agent.progress` type was collapsed during
-// m1.3 freeze). Owner decision (M1.6): per-step progress + one
-// terminal agent.text per turn.
+// intermediate progress is the same `agent.text` type carrying
+// `visibility=system` per impl-vocabulary §2.3. Owner decision (M1.6):
+// per-step progress + one terminal agent.text per turn.
 func (b *Bridge) consumeWire(
 	ctx context.Context,
-	ipc IPCFacade,
-	wireCh chan wire.WireMessage,
 	agentDone <-chan struct{},
-	trigger TriggerPayload,
+	item turnItem,
 	turnIndex int,
 ) error {
 	state := &turnState{}
@@ -570,12 +584,12 @@ func (b *Bridge) consumeWire(
 			// anything the agent emitted is already in the buffer.
 			for drained := true; drained; {
 				select {
-				case msg, ok := <-wireCh:
+				case msg, ok := <-b.wireCh:
 					if !ok {
 						drained = false
 						break
 					}
-					done, err := b.handleWireMsg(ctx, ipc, msg, state, trigger, turnIndex)
+					done, err := b.handleWireMsg(ctx, msg, state, item, turnIndex)
 					if err != nil {
 						return err
 					}
@@ -587,13 +601,13 @@ func (b *Bridge) consumeWire(
 				}
 			}
 			// No TurnEnd means no terminal agent.text was emitted. Treat it
-			// as delivery failure so the trigger is not ACKed as handled.
+			// as turn failure so the trigger is not silently swallowed.
 			return errors.New("kimi: agent completed without TurnEnd")
-		case msg, ok := <-wireCh:
+		case msg, ok := <-b.wireCh:
 			if !ok {
 				return errors.New("kimi: wire channel closed before TurnEnd")
 			}
-			done, err := b.handleWireMsg(ctx, ipc, msg, state, trigger, turnIndex)
+			done, err := b.handleWireMsg(ctx, msg, state, item, turnIndex)
 			if err != nil {
 				return err
 			}
@@ -611,10 +625,9 @@ func (b *Bridge) consumeWire(
 // consumeWire godoc.
 func (b *Bridge) handleWireMsg(
 	ctx context.Context,
-	ipc IPCFacade,
 	msg wire.WireMessage,
 	state *turnState,
-	trigger TriggerPayload,
+	item turnItem,
 	turnIndex int,
 ) (bool, error) {
 	switch m := msg.(type) {
@@ -636,7 +649,7 @@ func (b *Bridge) handleWireMsg(
 			return false, nil
 		}
 		state.stepIndex++
-		if err := b.emitTurnProgress(ctx, ipc, trigger, turnIndex, state.stepIndex, state.pendingTools); err != nil {
+		if err := b.emitTurnProgress(ctx, item, turnIndex, state.stepIndex, state.pendingTools); err != nil {
 			return false, err
 		}
 		state.pendingTools = state.pendingTools[:0]
@@ -649,13 +662,13 @@ func (b *Bridge) handleWireMsg(
 		// attempted before the final text.
 		if len(state.pendingTools) > 0 {
 			state.stepIndex++
-			if err := b.emitTurnProgress(ctx, ipc, trigger, turnIndex, state.stepIndex, state.pendingTools); err != nil {
+			if err := b.emitTurnProgress(ctx, item, turnIndex, state.stepIndex, state.pendingTools); err != nil {
 				return false, err
 			}
 			state.pendingTools = state.pendingTools[:0]
 			state.progressEmits++
 		}
-		return true, b.emitTurnEnd(ctx, ipc, trigger, m, state.textBuf.String(), turnIndex)
+		return true, b.emitTurnEnd(ctx, item, m, state.textBuf.String(), turnIndex)
 	default:
 		return false, nil
 	}
@@ -679,9 +692,7 @@ func toolCallArgumentsJSON(args any) json.RawMessage {
 // emitTurnProgress writes one progress envelope summarising a completed
 // step. Per impl-vocabulary §2.3 progress is `agent.text` carrying
 // `visibility=system` (intermediate output / not delivered to view by
-// default) — the old standalone `agent.progress` type was collapsed
-// into agent.text + visibility=system during the m1.3 freeze and is no
-// longer a registered core type. Payload shape:
+// default). Payload shape:
 //
 //	{
 //	  "turn_index":  <1-based bridge turn>,
@@ -694,8 +705,7 @@ func toolCallArgumentsJSON(args any) json.RawMessage {
 // correlation_id, so harness ordering keeps them grouped.
 func (b *Bridge) emitTurnProgress(
 	ctx context.Context,
-	ipc IPCFacade,
-	trigger TriggerPayload,
+	item turnItem,
 	turnIndex int,
 	stepIndex int,
 	tools []wireToolCall,
@@ -707,7 +717,7 @@ func (b *Bridge) emitTurnProgress(
 	if summary := summariseToolCalls(tools, 240); len(summary) > 0 {
 		payload["tool_calls"] = summary
 	}
-	return b.emitEnvelope(ctx, ipc, trigger, "agent.text", message.VisibilitySystem, payload)
+	return b.emitEnvelope(ctx, item, "agent.text", message.VisibilitySystem, payload)
 }
 
 // emitTurnEnd writes the single terminal agent.text envelope for one
@@ -718,13 +728,9 @@ func (b *Bridge) emitTurnProgress(
 // `accumulated` is the full TextDelta-buffered string; the TurnEnd's
 // own Output ContentParts (text + think) are preferred, falling back to
 // the buffered stream when Output is empty (providers vary).
-//
-// turnIndex is 1-based and stamps `payload.turn_index` so the UI can
-// thread the envelope to the user's trigger.
 func (b *Bridge) emitTurnEnd(
 	ctx context.Context,
-	ipc IPCFacade,
-	trigger TriggerPayload,
+	item turnItem,
 	end wire.TurnEnd,
 	accumulated string,
 	turnIndex int,
@@ -757,16 +763,15 @@ func (b *Bridge) emitTurnEnd(
 		"stop_reason": end.StopReason,
 		"turn_index":  turnIndex,
 	}
-	return b.emitEnvelope(ctx, ipc, trigger, "agent.text", message.VisibilityPublic, payload)
+	return b.emitEnvelope(ctx, item, "agent.text", message.VisibilityPublic, payload)
 }
 
-// emitEnvelope assembles + writes one envelope. Audience is derived
-// from the trigger sender so the daemon routes it to the conversation
-// participant without wildcard fanout.
+// emitEnvelope assembles + writes one event envelope. Audience is derived
+// from the trigger sender — Erlang-style `From` routing: the agent always
+// replies to whoever triggered it.
 func (b *Bridge) emitEnvelope(
 	ctx context.Context,
-	ipc IPCFacade,
-	trigger TriggerPayload,
+	item turnItem,
 	envType string,
 	visibility message.Visibility,
 	payload map[string]any,
@@ -775,46 +780,44 @@ func (b *Bridge) emitEnvelope(
 	if err != nil {
 		return fmt.Errorf("kimi: marshal payload: %w", err)
 	}
-	// Reply audience derives from the trigger sender — Erlang-style
-	// `From` routing. The worker has no awareness of other actors and
-	// always emits back to whoever sent the trigger.
-	env, err := b.buildWorkerEvent(ipc, envType, visibility,
-		workerReplyAudience(trigger.Envelope.Sender.ID), body,
-		trigger.Envelope.ID, trigger.CorrelationID)
+	env, err := b.buildAgentEvent(envType, visibility,
+		replyAudience(item.env.Sender.ID), body,
+		item.env.ID, item.correlationID())
 	if err != nil {
 		return err
 	}
-	return ipc.WriteEnvelope(ctx, env)
+	return b.write(ctx, env)
 }
 
-// workerReplyAudience returns the audience for a worker reply. Falls
-// back to the system actor when the trigger sender id is empty (boot
-// path / boot-failed terminal error).
-func workerReplyAudience(triggerSender actor.ActorID) message.Audience {
+// write commits one envelope through the harness chain; a reject is an
+// error (the agent must know its emit did not land).
+func (b *Bridge) write(ctx context.Context, env message.Envelope) error {
+	res, err := b.writer.Write(ctx, &env)
+	if err != nil {
+		return err
+	}
+	if !res.Accepted() {
+		return fmt.Errorf("kimi: emit rejected: %s (%s)", res.RejectReason, res.RejectDetail)
+	}
+	return nil
+}
+
+// replyAudience returns the audience for an agent reply. Falls back to
+// the system actor when the trigger sender id is empty (boot path /
+// boot-failed terminal error).
+func replyAudience(triggerSender actor.ActorID) message.Audience {
 	if triggerSender == "" {
 		return message.Audience{actor.SystemActorID}
 	}
 	return message.Audience{triggerSender}
 }
 
-// emitTerminal is a helper for the max-turns / explicit-done envelope.
-func (b *Bridge) emitTerminal(
-	ctx context.Context,
-	ipc IPCFacade,
-	trigger TriggerPayload,
-	envType string,
-	payload map[string]any,
-) error {
-	return b.emitEnvelope(ctx, ipc, trigger, envType, message.VisibilityPublic, payload)
-}
-
 // emitTerminalLLMError classifies the error, emits a failed terminal
-// envelope, then returns the underlying error unchanged so the caller
-// (cmd/worker) can decide on the process exit code. err == nil short-
-// circuits to a no-op for convenience.
+// envelope, then wraps the underlying error as terminalEmittedError so
+// the loop knows the failure already surfaced in the channel log.
+// err == nil short-circuits to a no-op for convenience.
 func (b *Bridge) emitTerminalLLMError(
 	ctx context.Context,
-	ipc IPCFacade,
 	err error,
 	parentEnvID message.ID,
 	correlationID message.ID,
@@ -832,38 +835,31 @@ func (b *Bridge) emitTerminalLLMError(
 	// LLM-error terminal: emit as observation-only addressed to
 	// system (no business actor fan-out). The originating trigger
 	// sender is not available on this path.
-	env, buildErr := b.buildWorkerEvent(ipc, "agent.text", message.VisibilityPublic,
+	env, buildErr := b.buildAgentEvent("agent.text", message.VisibilityPublic,
 		message.Audience{actor.SystemActorID}, body, parentEnvID, correlationID)
 	if buildErr != nil {
 		return errors.Join(err, buildErr)
 	}
-	if writeErr := ipc.WriteEnvelope(ctx, env); writeErr != nil {
+	if writeErr := b.write(ctx, env); writeErr != nil {
 		return errors.Join(err, writeErr)
 	}
 	return terminalEmittedError{cause: err}
 }
 
-func terminalErrorCorrelationID(trigger TriggerPayload) message.ID {
-	if trigger.CorrelationID != "" {
-		return trigger.CorrelationID
-	}
-	return trigger.Envelope.CorrelationID
-}
-
 // envelopeID generates a deterministic-shape id for emitted envelopes.
 // The per-bridge sequence keeps multiple emits in the same millisecond
-// unique while preserving the worker/time prefix for debugging.
-func (b *Bridge) envelopeID(ipc IPCFacade, nowMs int64) message.ID {
-	workerID := ipc.WorkerID()
-	if workerID == "" {
-		workerID = "anon"
+// unique while preserving the actor/time prefix for debugging.
+func (b *Bridge) envelopeID(nowMs int64) message.ID {
+	short := strings.TrimPrefix(string(b.self), "agent:")
+	if short == "" {
+		short = "anon"
 	}
-	return message.ID(fmt.Sprintf("kimi-%s-%d-%d", workerID, nowMs, b.envelopeSeq.Add(1)))
+	return message.ID(fmt.Sprintf("kimi-%s-%d-%d", short, nowMs, b.envelopeSeq.Add(1)))
 }
 
 // buildProvider hands a fully-configured llm.ChatProvider to
 // gokimi.NewAgent. We bypass the kimi config.Provider lookup because
-// the cvmax deploy uses one fixed env-driven provider, not the
+// the deploy uses one fixed env-driven provider, not the
 // multi-provider config file shape.
 func (b *Bridge) buildProvider() (llm.ChatProvider, error) {
 	p, err := llm.NewProvider(llm.ProviderConfig{
@@ -882,12 +878,11 @@ func (b *Bridge) buildProvider() (llm.ChatProvider, error) {
 }
 
 // composeUserInput turns the trigger envelope into the string passed
-// to Agent.Run. Heuristic for M1.6:
+// to Agent.Run. Heuristic:
 //   - if payload has a top-level "text" string, use it verbatim.
 //   - else encode payload as compact JSON.
 //   - prepend a 1-line sender label so the LLM knows who triggered it.
-func composeUserInput(trigger TriggerPayload) (string, error) {
-	env := trigger.Envelope
+func composeUserInput(env message.Envelope) string {
 	var bodyText string
 	if len(env.Payload) > 0 {
 		var asMap map[string]any
@@ -904,13 +899,13 @@ func composeUserInput(trigger TriggerPayload) (string, error) {
 		bodyText = "(empty trigger payload)"
 	}
 	senderLabel := fmt.Sprintf("[trigger sender=%s id=%s type=%s]", env.Sender.ID, env.ID, env.Type)
-	return senderLabel + "\n" + bodyText, nil
+	return senderLabel + "\n" + bodyText
 }
 
 // classifyLLMError maps a go-kimi error into one of 5 reason buckets
-// the worker emits as payload.reason on the failed terminal envelope.
-// The mapping is deliberately coarse — UI handlers + cvmax operators
-// care about retryable vs fatal, not provider-specific quirks.
+// the agent emits as payload.reason on the failed terminal envelope.
+// The mapping is deliberately coarse — UI handlers + operators care
+// about retryable vs fatal, not provider-specific quirks.
 func classifyLLMError(err error) string {
 	if err == nil {
 		return ""
@@ -1096,26 +1091,25 @@ func BuildBasePrompt(channelType, domainPrompt string) string {
 }
 
 // platformTeachingPrompt is the L0-L2 stable prefix every coagent
-// worker carries. Intentionally short — the goal is to anchor the
+// agent carries. Intentionally short — the goal is to anchor the
 // agent on the coagent envelope protocol without exploding the cache
 // surface. Future ticket can extend with concrete examples.
-const platformTeachingPrompt = `You are a coagent worker — an LLM-backed actor inside a channel-scoped runtime.
+const platformTeachingPrompt = `You are a coagent agent — an LLM-backed actor inside a channel-scoped runtime.
 
 Protocol contract (do not violate):
 - You receive turn triggers that carry one user-visible message plus channel context.
 - You reply by emitting one or more agent.text events. The runtime stamps sender/audience automatically.
 - Public events are visible to the channel's other participants; system events are operational telemetry only.
 - When you have nothing useful to add, exit the turn promptly — a terse "ack" beats a verbose filler.
-- Tool calls (xhs publish, search, get-note, etc.) flow through the channel's adapter actors via call_actor. Reference them by their declared type; the daemon harness routes the request.
+- Tool calls (xhs publish, search, get-note, etc.) flow through the channel's adapter actors via call_actor. Reference them by their declared type; the harness routes the request.
 - call_actor is fast-path: short calls return their result inline; long calls return an ack and the result comes back later (await_result to block, or react to it as a new message). Fan out with wait=false, then await_result/abandon. See "Tool invocation" in the channel context for the full pattern.
 
 Stay grounded in the trigger payload and the channel's domain template below.`
 
-// buildWorkerEvent assembles a kind=event envelope through the behavior
-// builder (ONE home for event defaults), then stamps the binding-edge fields
-// this IPC path owns (deterministic per-worker id, TSReceived).
-func (b *Bridge) buildWorkerEvent(
-	ipc IPCFacade,
+// buildAgentEvent assembles a kind=event envelope through the behavior
+// builder (ONE home for event defaults), then stamps the binding-edge
+// fields this path owns (deterministic per-actor id, TSReceived).
+func (b *Bridge) buildAgentEvent(
 	envType string,
 	visibility message.Visibility,
 	audience message.Audience,
@@ -1124,11 +1118,10 @@ func (b *Bridge) buildWorkerEvent(
 	correlationID message.ID,
 ) (message.Envelope, error) {
 	now := b.cfg.NowFn()
-	env, err := behavior.BuildEvent(ipc.ChannelID(),
-		message.Sender{Kind: actor.KindAgent, ID: ipc.WorkerActorID()},
+	env, err := behavior.BuildEvent(b.chID, b.sender(),
 		func() time.Time { return time.UnixMilli(now) },
 		behavior.EventSpec{
-			ID:            b.envelopeID(ipc, now),
+			ID:            b.envelopeID(now),
 			Type:          envType,
 			Payload:       payload,
 			Visibility:    visibility,

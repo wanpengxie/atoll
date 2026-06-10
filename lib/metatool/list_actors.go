@@ -31,7 +31,7 @@ func ExecuteListActors(ctx context.Context, exec Executor, rc RuntimeContext) Re
 	if exec == nil {
 		return errorResultValue("list_actors", "list_actors tool not configured")
 	}
-	if rc.IPC == nil {
+	if !rc.InTurn() {
 		return errorResultValue("list_actors", "list_actors invoked outside a bridge turn")
 	}
 	raw, ok := exec.ExecuteReservedRaw(ctx, rc, RequestSpec{

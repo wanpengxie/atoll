@@ -47,7 +47,7 @@ func ExecuteDescribeActor(ctx context.Context, params json.RawMessage, exec Exec
 		return PayloadInvalidError("describe_actor", "actor_id is required (call list_actors to discover)", "")
 	}
 
-	if rc.IPC == nil {
+	if !rc.InTurn() {
 		return NewError("describe_actor", InternalError, "describe_actor invoked outside a bridge turn", "Retry from inside an active bridge turn", nil)
 	}
 	return exec.ExecuteRequest(ctx, rc, RequestSpec{
@@ -106,7 +106,7 @@ func ExecuteDescribeType(ctx context.Context, params json.RawMessage, exec Execu
 		return PayloadInvalidError("describe_type", "type is required (call describe_actor to discover)", payloadHint(p.ActorID, p.Type))
 	}
 
-	if rc.IPC == nil {
+	if !rc.InTurn() {
 		return NewError("describe_type", InternalError, "describe_type invoked outside a bridge turn", "Retry from inside an active bridge turn", nil)
 	}
 	payload, _ := json.Marshal(map[string]string{"type": p.Type})
