@@ -6,7 +6,7 @@ require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/wanpengxie/go-kimi v0.0.0-00010101000000-000000000000
+	github.com/wanpengxie/go-kimi v1.0.1-0.20260526075941-a6d962d17cbe
 	golang.org/x/crypto v0.51.0
 	modernc.org/sqlite v1.50.1
 )
@@ -52,5 +52,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/wanpengxie/go-kimi => /home/xiewanpeng/tardis/go-kimi
