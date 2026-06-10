@@ -113,3 +113,65 @@ func TestContractShapesLiveOnlyInIntrospect(t *testing.T) {
 			allowedDir, strings.Join(violations, "\n  "))
 	}
 }
+
+// TestEnvelopeConstructionLivesOnlyInBehavior enforces the no-parallel-
+// primitives law: lib/behavior is the ONE home of envelope construction
+// (BuildRequest / BuildResponseFromRequest / BuildEvent). Adapters (metatool,
+// actors) compose those builders; a hand-rolled non-empty message.Envelope{…}
+// literal anywhere else in lib/ or actors/ is a parallel primitive — exactly
+// the split (callkit / hand-rolled agent envelopes) this repo just removed.
+// Zero-value returns (message.Envelope{}) are allowed. runtime/ is exempt
+// (the substrate itself is the authority); app/ joins the scan once
+// handleSendMessage migrates to BuildRequest in default_agent v0.
+func TestEnvelopeConstructionLivesOnlyInBehavior(t *testing.T) {
+	fset := token.NewFileSet()
+	var violations []string
+
+	for _, root := range []string{"../lib", "../actors"} {
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				if skipDirs[d.Name()] {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			if strings.Contains(filepath.ToSlash(path), "lib/behavior/") {
+				return nil
+			}
+			file, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+			if perr != nil {
+				return fmt.Errorf("parse %s: %w", path, perr)
+			}
+			ast.Inspect(file, func(n ast.Node) bool {
+				cl, ok := n.(*ast.CompositeLit)
+				if !ok || len(cl.Elts) == 0 {
+					return true
+				}
+				sel, ok := cl.Type.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "Envelope" {
+					return true
+				}
+				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "message" {
+					violations = append(violations,
+						fmt.Sprintf("%s: hand-rolled message.Envelope literal", fset.Position(cl.Pos())))
+				}
+				return true
+			})
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+
+	if len(violations) > 0 {
+		t.Fatalf("envelope construction lives ONLY in lib/behavior (BuildRequest/BuildResponseFromRequest/BuildEvent) — compose the builders instead:\n  %s",
+			strings.Join(violations, "\n  "))
+	}
+}

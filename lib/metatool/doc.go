@@ -1,6 +1,10 @@
-// Package metatool is the COMPLETE LLM call face. All tools are actors and
-// call_actor is the single entrance, so everything behind that entrance lives
-// here — one package, one purpose:
+// Package metatool is the LLM ADAPTER onto the one actor face. A channel has
+// exactly one way to participate — as an actor, through lib/behavior — and
+// this package translates the LLM's tool-call idiom onto it (down: tool call
+// → envelope; up: terminal/response → model-consumable result), exactly as
+// the UI/gateway adapts a human brain onto the same face. All tools are
+// actors and call_actor is the single entrance, so everything behind that
+// entrance lives here — one package, one purpose:
 //
 //   - the 7 LLM-facing meta tool specs (call_actor, list_actors,
 //     describe_actor, describe_type, await_result, abandon, list_pending)
