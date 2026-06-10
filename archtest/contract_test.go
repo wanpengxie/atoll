@@ -1,6 +1,13 @@
 // Package archtest enforces repo-level structure constraints that the type
 // system alone cannot: it runs as a normal test package, so `go test ./...`
 // (and `make lint`) trips on violations.
+//
+// Scope note: these are TRIPWIRES for accidental drift, not defenses against
+// adversarial evasion. Computed strings, consts, or field-by-field mutation
+// of a zero-value struct can bypass the AST checks — deliberately dodging a
+// lint is a review-layer offence, not something worth a go/types-grade
+// analyzer pre-launch. The realistic accident (hand-rolled composite literal,
+// redeclared json tag) is exactly what these catch.
 package archtest
 
 import (
