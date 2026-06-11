@@ -111,6 +111,31 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 		return storespec.AppendResult{}, errors.New("store: append nil payload (harness step 4 must materialize payload before reaching store)")
 	}
 
+	// terminal-uniqueness, provisional facet (proto-layer1 §2.8). The final
+	// facet is geometry — the ux_terminal_response_per_request UNIQUE INDEX
+	// rejects a second final at INSERT. The provisional facet (no provisional
+	// after a final) had only a harness pre-check (HasFinalResponse) running in
+	// a DIFFERENT tx than this INSERT, so a final committing in the TOCTOU window
+	// let a zombie provisional land — same conservation law, one facet geometric
+	// and one racy. A provisional INSERT collides with no index, so the only
+	// atomic guard is an in-tx re-check on the SAME serialized connection (pool=1
+	// pins one conn, so this read sees every committed row). Scoped to a
+	// provisional response: terminals are caught by the index, events/requests
+	// carry no parent terminal to violate.
+	if env.Kind == message.KindResponse && !isTerminal && env.ParentID != "" {
+		final, err := finalExistsTx(ctx, tx, env.ParentID)
+		if err != nil {
+			return storespec.AppendResult{}, err
+		}
+		if final {
+			return storespec.AppendResult{}, &storespec.AppendError{
+				Reason:           "harness_provisional_after_final",
+				Detail:           "provisional response after final is forbidden for parent: " + string(env.ParentID),
+				PartialMessageID: env.ID,
+			}
+		}
+	}
+
 	// INSERT row. env.id is a caller-generated random uuid: uniqueness is a
 	// pure integrity constraint, so a collision is an error (no dedup path).
 	audJSON, _ := json.Marshal(env.Audience)
@@ -286,13 +311,27 @@ func (m *messages) HasFinalResponse(ctx context.Context, parentID message.ID) (b
 	if parentID == "" {
 		return false, nil
 	}
-	const q = `SELECT 1 FROM messages
+	return finalExistsQuery(ctx, m.db, parentID)
+}
+
+// finalQuery is the single "a final response exists for parentID" predicate,
+// shared by the harness pre-check (HasFinalResponse, off-tx) and the in-tx
+// re-check inside appendTx. One SQL string, two run contexts, so the pre-check
+// and the authoritative atomic guard can never drift apart.
+const finalQuery = `SELECT 1 FROM messages
 	            WHERE parent_id = ?
 	              AND kind = 'response'
 	              AND is_terminal = 1
 	            LIMIT 1`
+
+// rowQuerier abstracts *sql.DB / *sql.Tx for the shared final-existence query.
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func finalExistsQuery(ctx context.Context, q rowQuerier, parentID message.ID) (bool, error) {
 	var one int
-	switch err := m.db.QueryRowContext(ctx, q, parentID).Scan(&one); {
+	switch err := q.QueryRowContext(ctx, finalQuery, parentID).Scan(&one); {
 	case err == nil:
 		return true, nil
 	case errors.Is(err, sql.ErrNoRows):
@@ -300,6 +339,12 @@ func (m *messages) HasFinalResponse(ctx context.Context, parentID message.ID) (b
 	default:
 		return false, fmt.Errorf("store: has final response: %w", err)
 	}
+}
+
+// finalExistsTx runs the final-existence predicate on an open tx — the atomic
+// guard appendTx uses to close the provisional-after-final TOCTOU window.
+func finalExistsTx(ctx context.Context, tx *sql.Tx, parentID message.ID) (bool, error) {
+	return finalExistsQuery(ctx, tx, parentID)
 }
 
 // FindByID implements storespec.MessageLog.

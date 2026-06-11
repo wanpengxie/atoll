@@ -263,6 +263,58 @@ func TestHasFinalResponse(t *testing.T) {
 	}
 }
 
+// --- F2: provisional-after-final is rejected geometrically in-tx -------------
+
+// A provisional response whose parent already has a final MUST be rejected at
+// Append (in-tx re-check), not silently appended as a zombie. This is the
+// atomic guard that closes the harness pre-check TOCTOU window: even if the
+// caller's HasFinalResponse pre-check raced and saw no final, the in-tx
+// re-check on the same serialized connection catches the final that committed
+// in the window.
+func TestAppend_ProvisionalAfterFinal_Rejected(t *testing.T) {
+	ctx := context.Background()
+	cs := openTestChannel(t)
+
+	// A final terminal lands first.
+	fin := newEnv("fin", message.KindResponse, message.Audience{"caller"},
+		withSender(actor.KindAgent, "p"), withParent("req-1"), withType("agent.text"))
+	if _, err := cs.Log.Append(ctx, fin, true); err != nil {
+		t.Fatalf("Append final: %v", err)
+	}
+
+	// A provisional for the same parent must be rejected — and leave no row.
+	prov := newEnv("zombie", message.KindResponse, message.Audience{"caller"},
+		withSender(actor.KindAgent, "p"), withParent("req-1"), withType("agent.text"))
+	_, err := cs.Log.Append(ctx, prov, false)
+	var appErr *storespec.AppendError
+	if !errors.As(err, &appErr) {
+		t.Fatalf("Append provisional-after-final err=%v, want *AppendError", err)
+	}
+	if appErr.Reason != "harness_provisional_after_final" {
+		t.Fatalf("reject reason=%q want harness_provisional_after_final", appErr.Reason)
+	}
+	// The zombie must NOT have landed (tx rolled back).
+	if row, ok, err := cs.Log.FindByID(ctx, "zombie"); err != nil || ok || row != nil {
+		t.Fatalf("zombie provisional landed: ok=%v row=%v err=%v", ok, row, err)
+	}
+}
+
+// A provisional response with NO final yet is appended normally — the in-tx
+// guard only fires once a final exists.
+func TestAppend_ProvisionalBeforeFinal_Allowed(t *testing.T) {
+	ctx := context.Background()
+	cs := openTestChannel(t)
+
+	prov := newEnv("prov", message.KindResponse, message.Audience{"caller"},
+		withSender(actor.KindAgent, "p"), withParent("req-1"), withType("agent.text"))
+	if _, err := cs.Log.Append(ctx, prov, false); err != nil {
+		t.Fatalf("Append provisional-before-final: %v", err)
+	}
+	if _, ok, err := cs.Log.FindByID(ctx, "prov"); err != nil || !ok {
+		t.Fatalf("provisional did not land: ok=%v err=%v", ok, err)
+	}
+}
+
 // --- FindByID miss ------------------------------------------------------------
 
 func TestFindByID_Missing(t *testing.T) {

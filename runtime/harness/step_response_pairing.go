@@ -172,6 +172,15 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 	// fill, so it rejects like any post-final final. Preserving the late
 	// answer (true latency, audit) is a domain observability concern, not
 	// substrate truth.
+	//
+	// This HasFinalResponse is a FAST-PATH pre-check, NOT the authoritative
+	// guard: it runs in a different tx than the eventual INSERT, so a final
+	// committing in the window between here and append would slip a provisional
+	// past it. The authoritative defense for BOTH facets lives at append: the
+	// final facet on the ux_terminal_response_per_request UNIQUE INDEX, the
+	// provisional facet on an in-tx re-check inside appendTx (same serialized
+	// connection → atomic). The pre-check just rejects the common non-racing
+	// case cleanly without spending a tx.
 	hasFinal, err := s.deps.Log.HasFinalResponse(ctx, env.ParentID)
 	if err != nil {
 		return outcome{}, err
