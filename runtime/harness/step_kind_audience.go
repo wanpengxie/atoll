@@ -39,6 +39,11 @@ func (s *stepKindAndAudience) ID() stepID { return StepKindAndAudience }
 
 func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (outcome, error) {
 	// (1) core / reserved-namespace type→kind rules — kernel's OWN vocabulary.
+	// NB (C7, 2026-06-11): this AllowOverride=false branch is the LIVE enforcer of
+	// CoreTypeRule.DefaultKind as a constraint (not a fill). It currently has NO
+	// subject — both live core types are AllowOverride=true — but is kept as
+	// additive-ready machinery (C7 decision = 甲): a future non-overridable core
+	// type reactivates it. The reserved-bootstrap branch below is its live sibling.
 	if rule, ok := message.LookupCoreType(env.Type); ok {
 		if !rule.AllowOverride && env.Kind != rule.DefaultKind {
 			return outcome{

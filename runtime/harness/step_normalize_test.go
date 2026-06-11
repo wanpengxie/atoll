@@ -39,30 +39,28 @@ func TestStepNormalize_Defaults(t *testing.T) {
 	// not by normalize — the full-Write contract is pinned in chain_test.go.
 }
 
-// kind default-fill applies only to core types (business types must declare).
-func TestStepNormalize_KindDefaultCoreOnly(t *testing.T) {
+// TestStepNormalize_DoesNotFillKind pins the C7 (2026-06-11) invariant: normalize
+// NEVER fills kind — not for core types, not for business types. kind is
+// sender-required and enforced upstream by stepEnvelopeShape (empty kind →
+// field_missing, short-circuit), so a kind-fill in normalize is dead code. The
+// former "core type fills default kind" behaviour was removed; the core-type
+// table's kind field is now a constraint in stepKindAndAudience, not a fill.
+func TestStepNormalize_DoesNotFillKind(t *testing.T) {
 	cs := newTestStore(t)
 	deps := testDeps(t, cs)
 
-	t.Run("core type fills default kind", func(t *testing.T) {
-		e := &message.Envelope{ID: "m1", TS: 1, ChannelID: testChannelID, Type: "agent.text"}
-		if _, err := runStep(t, newStepNormalize, deps, context.Background(), e); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if e.Kind != message.KindEvent {
-			t.Fatalf("kind = %q, want event (core default)", e.Kind)
-		}
-	})
-
-	t.Run("business type kind left empty", func(t *testing.T) {
-		e := &message.Envelope{ID: "m1", TS: 1, ChannelID: testChannelID, Type: "xhs.publish"}
-		if _, err := runStep(t, newStepNormalize, deps, context.Background(), e); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if e.Kind != "" {
-			t.Fatalf("kind = %q, want empty (substrate doesn't author business kind)", e.Kind)
-		}
-	})
+	for _, typ := range []string{"agent.text", "human.text", "xhs.publish"} {
+		typ := typ
+		t.Run(typ, func(t *testing.T) {
+			e := &message.Envelope{ID: "m1", TS: 1, ChannelID: testChannelID, Type: typ}
+			if _, err := runStep(t, newStepNormalize, deps, context.Background(), e); err != nil {
+				t.Fatalf("err: %v", err)
+			}
+			if e.Kind != "" {
+				t.Fatalf("kind = %q, want empty (normalize must not author kind for any type)", e.Kind)
+			}
+		})
+	}
 }
 
 // ts default-fill uses the engine clock when caller omits ts.

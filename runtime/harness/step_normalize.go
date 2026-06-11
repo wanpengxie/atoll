@@ -42,12 +42,13 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (outcome
 		env.Visibility = message.VisibilityPublic
 	}
 
-	// kind default (core types only — business types must declare).
-	if env.Kind == "" {
-		if rule, ok := message.LookupCoreType(env.Type); ok {
-			env.Kind = rule.DefaultKind
-		}
-	}
+	// NB (C7, 2026-06-11): there is deliberately NO "default kind" fill here.
+	// stepEnvelopeShape (runs BEFORE normalize, chain.go) rejects env.Kind == ""
+	// with field_missing and short-circuits, so any kind-fill branch is dead code
+	// — the former one (LookupCoreType → DefaultKind) was removed. kind is
+	// sender-required; the core-type table's kind field is NOT a fill-default but
+	// a CONSTRAINT enforced in stepKindAndAudience (a non-overridable core type's
+	// kind must equal its canonical kind). See CoreTypeRule + stepKindAndAudience.
 
 	// correlation_id default: a self-rooted fallback — an envelope with no
 	// correlation_id roots a new correlation tree at its own id.

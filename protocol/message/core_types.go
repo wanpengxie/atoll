@@ -1,8 +1,21 @@
 package message
 
-// CoreTypeRule expresses the L1 §1.1 core-type table for one entry. Core
-// types are engine-built-in (kernel-authored, not domain-registered) and
-// carry a default kind plus whether callers may override that kind.
+// CoreTypeRule expresses the L1 §1.1 core-type table for one entry. Core types
+// are engine-built-in (kernel-authored, not domain-registered).
+//
+// DefaultKind is the type's CANONICAL kind. NB (C7, 2026-06-11): it is NOT a
+// fill-default — kind is sender-required (stepEnvelopeShape rejects an empty
+// kind before normalize), so nothing ever "defaults" to it. Its live role is a
+// CONSTRAINT: when AllowOverride is false, stepKindAndAudience rejects any
+// envelope of this type whose kind != DefaultKind. The name is kept (rather than
+// renamed to CanonicalKind) only to bound this cleanup's blast radius.
+//
+// C7 decision = 甲 (keep the constraint machinery): the AllowOverride=false
+// enforcement branch currently has NO subject — both live core types
+// (human.text, agent.text) are AllowOverride=true — but it is additive-ready,
+// not a separate slice (a few lines in an existing validation step). The first
+// real AllowOverride=false core type (e.g. a system/file event with a pinned
+// kind) reactivates it for free. NOT ripped.
 type CoreTypeRule struct {
 	DefaultKind   Kind
 	AllowOverride bool
