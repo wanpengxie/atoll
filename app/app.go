@@ -19,6 +19,9 @@ import (
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
+	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/ActOS/runtime/actorrt"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // App is the product application server.
@@ -31,13 +34,25 @@ type App struct {
 	homes map[channel.ID]*platform.Home
 
 	channelDBDir string
+	agentFactory AgentFactory
 }
+
+// AgentFactory builds a channel's bundled default-agent cell. The returned Actor
+// is spawned as an embedded server cell (kind=agent, binding=embedded); w is its
+// pen — a caller-stamped harness.Writer so the agent's emits authenticate as
+// itself (the app composition root stamps, exactly as channelkit does for the
+// system cell). A nil factory falls back to the env-based go-kimi built-in (no
+// KIMI creds → no built-in agent, dev/e2e unaffected). Tests inject a stub here.
+type AgentFactory func(chID channel.ID, agentID actor.ActorID, w harness.Writer) (actorrt.Actor, error)
 
 // Config configures the App.
 type Config struct {
 	DB           *sql.DB
 	Logger       *slog.Logger
 	ChannelDBDir string // e.g. "/tmp/coagent-dev/channels"
+	// AgentFactory overrides how the bundled default agent is built (tests inject
+	// a stub; production leaves it nil for the env-based go-kimi built-in).
+	AgentFactory AgentFactory
 }
 
 // New assembles the App: gin engine, routes, and loads existing channels.
@@ -56,6 +71,7 @@ func New(cfg Config) (*App, error) {
 		logger:       logger,
 		homes:        make(map[channel.ID]*platform.Home),
 		channelDBDir: cfg.ChannelDBDir,
+		agentFactory: cfg.AgentFactory,
 	}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -228,22 +244,54 @@ const builtinAgentID = actor.ActorID("agent:main")
 
 // spawnBuiltinAgent best-effort spawns the bundled agent cell. Failure is
 // logged, never fatal: a channel without its brain still serves path-1
-// (explicit audience) traffic.
+// (explicit audience) traffic. The agent's pen is caller-stamped with its own
+// identity (embedded cells emit through the raw home gate, which the substrate
+// requires a CallerContext on — the app stamps here, as channelkit does for the
+// system cell).
 func (a *App) spawnBuiltinAgent(chID channel.ID, home *platform.Home) {
-	cfg, err := agent.NewConfigFromEnv(agent.BuildSystemPrompt(
-		agent.Situation{Host: "server"},
-		os.Getenv(agent.EnvKeyChannelType), os.Getenv(agent.EnvKeyDomainPrompt)))
-	if err != nil {
-		return // no LLM credentials on this server — no built-in agent
+	pen := &callerStampedWriter{inner: home.Gate(), caller: harness.CallerContext{
+		ActorID: builtinAgentID, ChannelID: chID,
+	}}
+
+	var impl actorrt.Actor
+	if a.agentFactory != nil {
+		built, err := a.agentFactory(chID, builtinAgentID, pen)
+		if err != nil {
+			a.logger.Warn("app: agent factory failed", "channel", string(chID), "err", err.Error())
+			return
+		}
+		impl = built
+	} else {
+		cfg, err := agent.NewConfigFromEnv(agent.BuildSystemPrompt(
+			agent.Situation{Host: "server"},
+			os.Getenv(agent.EnvKeyChannelType), os.Getenv(agent.EnvKeyDomainPrompt)))
+		if err != nil {
+			return // no LLM credentials on this server — no built-in agent
+		}
+		bridge, err := agent.NewBridge(cfg, builtinAgentID, chID, pen)
+		if err != nil {
+			a.logger.Warn("app: builtin agent build failed", "channel", string(chID), "err", err.Error())
+			return
+		}
+		impl = bridge
 	}
-	bridge, err := agent.NewBridge(cfg, builtinAgentID, chID, home.Gate())
-	if err != nil {
-		a.logger.Warn("app: builtin agent build failed", "channel", string(chID), "err", err.Error())
-		return
-	}
-	if err := home.Spawn(context.Background(), builtinAgentID, actor.KindAgent, bridge); err != nil {
+
+	if err := home.Spawn(context.Background(), builtinAgentID, actor.KindAgent, impl); err != nil {
 		a.logger.Warn("app: builtin agent spawn failed", "channel", string(chID), "err", err.Error())
 	}
+}
+
+// callerStampedWriter wraps the home write gate with a fixed CallerContext so an
+// embedded cell's emits authenticate as that cell. (A daemon cell gets this from
+// the link's emit-sink; an embedded cell's pen is stamped here at the app
+// composition root.)
+type callerStampedWriter struct {
+	inner  harness.Writer
+	caller harness.CallerContext
+}
+
+func (w *callerStampedWriter) Write(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
+	return w.inner.Write(harness.CtxWithCaller(ctx, w.caller), env)
 }
 
 func (a *App) loadChannels() error {

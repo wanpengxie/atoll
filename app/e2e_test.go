@@ -39,6 +39,7 @@ func setupTestApp(t *testing.T) *testEnv {
 	a, err := app.New(app.Config{
 		DB:           db,
 		ChannelDBDir: chDBDir,
+		AgentFactory: stubAgentFactory,
 	})
 	if err != nil {
 		db.Close()
